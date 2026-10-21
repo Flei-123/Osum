@@ -12,7 +12,7 @@
 #   3. the manifest row (row 15): `explorer: ctx ext start 4096` (EXT_BASE) -- an app registered itself WITHOUT a change of shell code
 #   4. right click, Escape: the menu closes without a further pick
 #   5. right click, row 13 (Properties): `explorer: props` -- a built-in action still runs through ctx_wahl
-# COUNTER-PROOF: the tree before (BASE, default origin/main) has no registry menu: no `ctxreg n=`, the menu is one row (28 px) shorter,
+# COUNTER-PROOF: the tree before (BASE, default 8760f1af = main before r1352) has no registry menu: no `ctxreg n=`, the menu is one row (28 px) shorter,
 # and clicking where the probe row would be starts nothing.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -69,7 +69,7 @@ run_tree() { # <tree> <out>
       DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" accel=kvm progs="$PROGS" \
         drehbuch="$TMPD/dreh.txt" > "$2/o.log" 2>&1 )
 }
-diffpix() { # <a.ppm> <b.ppm> <x> <y> <w> <h>
+diffpix() { # <a.ppm> <b.ppm> <x> <y> <w> <h> [<bx> <by>]  (b read at its own origin when given)
     python3 -I - "$@" <<'PY'
 import sys
 def load(p):
@@ -82,19 +82,22 @@ def load(p):
     return f[0], d[at+1:]
 W, a = load(sys.argv[1]); _, b = load(sys.argv[2])
 x0, y0, w, h = (int(v) for v in sys.argv[3:7])
+bx, by = (int(sys.argv[7]), int(sys.argv[8])) if len(sys.argv) > 8 else (x0, y0)
 n = 0
-for y in range(y0, y0 + h):
-    o = (y * W + x0) * 3
-    if a[o:o + w * 3] != b[o:o + w * 3]:
+for y in range(h):
+    o = ((y0 + y) * W + x0) * 3
+    q = ((by + y) * W + bx) * 3
+    ra = a[o:o + w * 3]; rb = b[q:q + w * 3]
+    if ra != rb:
         for x in range(w):
-            if a[o + x*3:o + x*3 + 3] != b[o + x*3:o + x*3 + 3]:
+            if ra[x*3:x*3+3] != rb[x*3:x*3+3]:
                 n += 1
 print(n)
 PY
 }
 
 mkdir -p "$TMPD/new" "$TMPD/old"
-git worktree add --detach "$BT" "${BASE:-origin/main}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
+git worktree add --detach "$BT" "${BASE:-8760f1af}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
 # the old tree needs this tree's drive.py / eh6.sh (EH_ETC_EXTRA); the pictures and trace lines are what differ
 cp -f tools/design/drive.py "$BT/tools/design/drive.py"; cp -f tools/design/eh6.sh "$BT/tools/design/eh6.sh"
 run_tree "$ROOT" "$TMPD/new" &
@@ -111,8 +114,8 @@ if [ -n "${EXPLCTX_OUT:-}" ]; then
 fi
 
 grep -aq 'explorer: ctxreg n=16' "$S" && ok "item menu has 16 rows (15 built-in + the manifest entry)" || bad "no 'explorer: ctxreg n=16' ($(grep -a 'explorer: ctxreg' "$S" | head -1))"
-ml=$(grep -a 'explorer: menurect wx=' "$S" | head -1 | grep -a -o 'wx=[0-9]* wy=[0-9]* wh=[0-9]*')
-ho=$(grep -a 'explorer: menurect wx=' "$SO" | head -1 | grep -a -o 'wh=[0-9]*' | cut -d= -f2)
+ml=$(grep -a '^explorer: menurect wx=' "$S" | head -1 | grep -a -o 'wx=[0-9]* wy=[0-9]* wh=[0-9]*')
+ho=$(grep -a '^explorer: menurect wx=' "$SO" | head -1 | grep -a -o 'wh=[0-9]*' | cut -d= -f2)
 if [ -z "$ml" ]; then
     bad "no 'explorer: menurect' in the new tree"; mx=0; my=0; mh=0
 else
@@ -125,15 +128,19 @@ if [ -n "$ho" ] && [ "$mh" -gt "$ho" ]; then
 else
     bad "heights not comparable (new $mh, old ${ho:-none})"
 fi
-# BEHAVIOUR UNCHANGED: the first 15 rows are pixel-equal to the old tree (menu starts at wx/wy; width from the labels). Only the part
-# above the last old row's end is compared: old height minus its bottom border.
-if [ -s "$TMPD/old/o/01-menu.ppm" ] && [ -n "$ho" ] && [ "$ho" -gt 20 ]; then
-    d=$(diffpix "$TMPD/new/o/01-menu.ppm" "$TMPD/old/o/01-menu.ppm" "$mx" "$my" 150 $((ho - 8)))
-    [ "$d" -le 300 ] && ok "the 15 old rows look as before ($d of $((150 * (ho - 8))) pixels differ)" \
+# BEHAVIOUR UNCHANGED: the 15 old rows look as before. The longer menu is pushed up by the screen edge (new wy < old wy), so each picture is
+# read at its own menu origin; what may differ is the pointer sprite and the hover row (a few hundred pixels), not the labels.
+oml=$(grep -a '^explorer: menurect wx=' "$SO" | head -1 | grep -a -o 'wx=[0-9]* wy=[0-9]*')
+if [ -s "$TMPD/old/o/01-menu.ppm" ] && [ -n "$oml" ] && [ -n "$ho" ] && [ "$ho" -gt 20 ]; then
+    ox=$(echo "$oml" | sed -E 's/wx=([0-9]+).*/\1/'); oy=$(echo "$oml" | sed -E 's/.*wy=([0-9]+)/\1/')
+    d=$(diffpix "$TMPD/new/o/01-menu.ppm" "$TMPD/old/o/01-menu.ppm" "$mx" "$my" 150 $((ho - 8)) "$ox" "$oy")
+    [ "$d" -le 700 ] && ok "the 15 old rows look as before ($d of $((150 * (ho - 8))) pixels differ: pointer + hover only)" \
         || bad "the old rows changed: $d pixels differ"
+else
+    bad "no old menu picture/rectangle to compare"
 fi
 grep -aq 'explorer: ctx ext start 4096' "$S" && ok "row 15 (manifest entry) picked: action EXT_BASE" || bad "no 'explorer: ctx ext start 4096'"
-n=$(grep -ac 'explorer: ctx ext start' "$S")
+n=$(grep -ac '^explorer: ctx ext start' "$S")
 [ "$n" = 1 ] && ok "Escape closed the second menu without a pick (1 ext pick)" || bad "expected 1 ext pick, found $n"
 d=$(diffpix "$TMPD/new/o/02-menu2.ppm" "$TMPD/new/o/03-esc.ppm" "$mx" "$my" 150 "$mh")
 [ "$d" -gt $((150 * mh / 3)) ] && ok "the second menu is gone after Escape ($d pixels changed)" || bad "the menu survived Escape ($d pixels changed)"
