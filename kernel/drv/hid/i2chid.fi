@@ -304,6 +304,34 @@ fn find_ctrl(state: u64) -> bool {
     return true
 }
 
+// SPEC ONLY on hardware (HP-6, r1514). Intel LPSS functions (Sunrise Point / Kaby Lake-U, e.g. 8086:9d60..9d65)
+// may sit in D3 and keep the DesignWare core in reset until the driver releases it (Linux intel-lpss:
+// private registers at BAR0+0x200, RESETS at +0x204, value 3 = both resets released). Without this the
+// IC_COMP_TYPE read below can return 0 or all-ones and the controller looks absent. Safe elsewhere: only
+// Intel functions with a BAR of at least 4 KiB are touched, and the reset write is the documented value.
+const LPSS_PRIV_RESETS: u64 = 0x204
+const LPSS_RESETS_RELEASE: u64 = 3
+const PCI_CAP_PM: u64 = 0x01
+
+fn lpss_wake(state: u64, i: u64, mm: u64) {
+    if pci.get(state, i, pci.E_VENDOR) != 0x8086 {
+        return
+    }
+    if pci.bar_size(state, i, 0) < 0x1000 {
+        return
+    }
+    let bdf: u64 = pci.get(state, i, pci.E_BDF)
+    pci.enable_master(bdf)
+    let pm: u64 = pci.cap_find(bdf, PCI_CAP_PM)
+    if pm != 0 {
+        let pmcsr: u64 = pci.cfg_read16(bdf, pm + 4)
+        if (pmcsr & 3) != 0 {
+            pci.cfg_write16(bdf, pm + 4, pmcsr & 0xFFFC) // back to D0
+        }
+    }
+    __mmio_write32((mm + LPSS_PRIV_RESETS) as *mut u32, LPSS_RESETS_RELEASE as u32)
+}
+
 fn suche_klasse(state: u64, cls: u64, sub: u64) -> bool {
     let n: u64 = pci.count(state)
     var i: u64 = 0
@@ -312,6 +340,7 @@ fn suche_klasse(state: u64, cls: u64, sub: u64) -> bool {
             let bar: u64 = pci.bar(state, i, 0)
             if bar != 0 && !pci.bar_is_io(state, i, 0) {
                 let mm: u64 = bar & 0xFFFFFFFFFFFFFFF0
+                lpss_wake(state, i, mm)
                 // NUR SPEZIFIKATION AB HIER: das Lesen der Blende.
                 if kstate.get32(mm + IC_COMP_TYPE) == DW_MAGIC {
                     s(state, S_FOUND, 1)
