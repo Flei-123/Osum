@@ -25,6 +25,7 @@ PAGES = [  # (id, R_ const, function, category)
     ("updates", "R_UPDATE", "page_update", "Update"), ("mouse", "R_MAUS", "page_maus", "System"),
     ("power", "R_ENERGIE", "page_energie", "System"), ("about", "R_INFO", "page_info", "About"),
     ("apps", "R_APPS", "page_apps", "System"),
+    ("password", "R_PASSW", "page_passw", "Accounts"), ("pin", "R_PIN", "page_pin", "Accounts"),
 ]
 INTERACTIVE = ("button", "button_main", "toggle", "choice", "entry", "slider", "table_list")  # entry_secret only marks an entry
 
