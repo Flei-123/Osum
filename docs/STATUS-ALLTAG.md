@@ -23,7 +23,7 @@ Es wurde für dieses Dokument **nichts neu gemessen**. Jede Zahl trägt ihr Datu
 | Installer/Update | GELB | M | Installer + OTA gated; Installer 7 min (Ziel < 3), Boss-VM-Update nie ausgeführt |
 | Stabilität | GELB | M | QEMU: 0 Abstürze in Serien; VBox: Hänger/99-%-Burn, Gate-Rot auf altem main |
 | Performance vs. Mint | GELB | M | RAM/Image/Latenz deutlich besser; Boot und VBox-Idle-CPU nicht |
-| Linux-Apps (Firefox) | ROT | L | Unterbau 655/669 PASS, aber **kein echtes Firefox je gestartet** |
+| Linux-Apps (Firefox) | ROT | L | Unterbau 710/717 PASS, foot 12/0, GTK4 16/3; **Firefox baut nicht ins Abbild** (libxul 148 MiB > OFS-Grenze 130 MiB) |
 
 ---
 
@@ -152,43 +152,56 @@ Fazit: Speicher und Größe gewinnen klar; Boot ist nur wegen 20-s-Menü schlech
 
 ## 3. Linux app compatibility (Firefox path)
 
-> **Messlage:** Die Berichte `reports/20261021-M1-unterbau.md` und `reports/20261021-M2-linuxapps.md` lagen beim Schreiben dieses Abschnitts **nicht** vor. Alles unten stammt aus vorhandenen Berichten/Metriken. Neumessungen der anderen Worker sind **nicht** eingearbeitet (siehe Ende dieses Abschnitts, falls nachgezogen).
+Messlage: gemessen am 21.10. auf main 280e1fa6 (QEMU/KVM) von den Workern M1 (`reports/20261021-M1-unterbau.md`) und M2 (`reports/20261021-M2-linuxapps.md`). Nichts davon auf echter Hardware.
 
-### 3.1 Stand (belegt)
+### 3.1 Stand (gemessen)
 
 | Baustein | Messwert | Quelle | Ampel |
 |---|---|---|---|
-| ELF dynamisch + `dlopen` fremder `.so` | dynlader 36/0, `t_dl` 18/0 | Metriken | GRÜN |
-| Unterbau gesamt (26 `t_*`-Tests) | **655 PASS / 5 FAIL / 9 GAP von 669** (main bea3ffb1; GPU/DRM ausgenommen) | Metrik | GELB |
-| POSIX | posix 150/0 | Metrik | GRÜN |
-| Firefox-Grenzen (`t_limits`) | fds ≥ 256, Fäden ≥ 64, anon ≥ 256 MiB, Reserve ≥ 4 GiB: alle PASS | Metrik | GRÜN |
-| Dateischreiben nach /tmp | 3115 KiB/s (Ziel ≥ 10000; vorher 880) | Metrik | GELB |
-| busybox / python / curl / git | busybox 56/0; python3 11/11; curl http+https ok; git init/add/commit ok | `LINUX-COMPAT.md` §5 (13.10.) | GRÜN |
-| Wayland | wayd 52/0, Eingabe 66/0, `foot` 12/0, `weston-simple-shm` läuft | Metriken | GRÜN |
-| Events/IPC | epoll, eventfd, timerfd, signalfd, inotify (teils), AF_UNIX+SCM_RIGHTS, socketpair | `LINUX-COMPAT.md` §1 | GRÜN |
-| Offen (laut `LINUX-COMPAT-OPEN.md`, 14.10.) | `MAP_SHARED`-Datei max. 1 MiB je Mapping (#5), `/proc/self/maps` ohne Dateinamen (#6), kein DRM (#7, nur Software-Renderer) | Doku | GELB |
-| Offen (Roadmap) | `/dev/shm` nur 16 paged Objekte (r947), `*at` mit echtem dirfd (r754), fehlende Aufrufe wie `statx` (r780), RT-Signale (r666), linux-dmabuf (r670) | Roadmap | GELB |
-| **Echtes Firefox** | nie gestartet — **unmeasured**; Startzeit `libxul`, Netz-Sandbox, viele Fäden, `fork` großer Prozesse laut Bericht „nicht gemessen“ | `RUNDE-UNTERBAU-FIREFOX.md` §5.4 | ROT |
-| GTK/Qt | GTK4-Stein begonnen (r729), nicht fertig | Roadmap | ROT |
-| Vulkan/GL | kein DRM/GPU; Software-Raster, SPIR-V-Abnahme 36/0, SWR 10/0; **Mesa/Vulkan-ICD fehlt** | Metriken | ROT (für Firefox nicht nötig, wenn Software-Rendering) |
+| Unterbau (27 `t_*`-Programme + libub) | **710 PASS / 3 FAIL / 4 GAP von 717** (vorher 655/5/9 von 669) | M1 | GRÜN |
+| busybox-Prüfstein | 55 ok / 1 offen (`top`: `/proc/stat` nicht im Linux-Format) | M1 | GELB |
+| python3 / curl / git inkl. TLS | 31 ok / 0 offen; statische Fremdprogramme 4/4 | M1 | GRÜN |
+| dynlader | 35 bestanden / 1 gescheitert (**Gate-Regel veraltet**, alle 35 funktionalen Checks grün) | M1 | GRÜN |
+| Wayland | wayd 52/0, Eingabe 73/0, `foot` 12/0 (kein Compose-Table, kein primary selection, kein xdg-activation / fractional-scale / cursor-shape) | M1, M2 | GRÜN |
+| GTK4-Hello | Fenster 448x249 sichtbar, 555 Farben; Gate **16 ok / 3 FAIL** (glib-Hauptschleife: Ticks 2 statt 6, SIGUSR1-Quelle, **Sprung auf Nicht-Code-Seite** nach `g_spawn`/inotify-Faden, r796) | M2 | GELB |
+| Qt | nicht versucht — **unmeasured** | M2 | — |
+| **Firefox 151 in OrientOS** | **0 Läufe**: `libxul.so` 155 673 104 B > OFS-v3-Dateigrenze 136 351 744 B → Abbild lässt sich nicht bauen | M2 | ROT |
+| Firefox unter Linux (Referenz, strace) | `--headless --screenshot about:blank`: 77 verschiedene Syscalls, ~6000 Aufrufe, 17 `clone` (15 Fäden), 6 `execve` (contentproc, glxtest), 18 memfd + `F_ADD_SEALS`, AF_UNIX + `socketpair` + `sendmsg`, `mremap` 80×, `madvise` 88× | M2 | Referenz |
+| Syscall-Nummern | fast vollständig; ohne Treffer nur `readahead`, `fadvise64`, `rseq` (harmlos) | M2 (Heuristik) | GRÜN |
+| GPU/DRM | kein `/dev/dri`, kein `/sys/class/drm`, kein dmabuf; Firefox fällt auf Software-WebRender zurück (kein Blocker). GTK4-GL/Qt Quick/Vulkan nur mit Software-Renderer (`GSK_RENDERER=cairo`) | M1 | GELB |
+| Dateischreiben nach /tmp | 3115 KiB/s (Ziel ≥ 10000) | Metrik | GELB |
 
-Alte Doku-Zahlen (z. B. „28 Fäden“, „30 offen“) sind **überholt** gegenüber den Metriken oben; Quelle der Wahrheit = Metriken.
+**Widerspruch, offen:** M2 nennt `MAX_TASKS=32` (28 Fäden) und „fd-Tabelle je Faden kopiert“ als Blocker (aus älteren Docs). M1 misst `t_limits` und `t_threads` **ohne FAIL**, die Kennzahl sagt Fäden ≥ 64. Vor Arbeit an LA-2 (r1367) per `t_limits` neu nachmessen.
 
-### 3.2 Meilensteine und Schätzung
+### 3.2 Blocker für Firefox, nach Reihenfolge (M2) mit Roadmap
 
-| # | Meilenstein | Abnahme (Vorschlag) | Status | Aufwand (Schätzung) |
+| # | Blocker | Aufwand | Roadmap |
+|---|---|---|---|
+| 1 | OFS-v3 max. Dateigröße 130 MiB < `libxul` 148 MiB (4. Indirektionsstufe oder Extents; fs.fi + mkfs.py + fsck + Gate) | L | r1366 |
+| 2 | Aufgabentafel 32 (Firefox: 15 Fäden + contentproc + glxtest) — Messwert widerspricht, siehe oben | L (falls bestätigt) | r1367 |
+| 3 | glib-Hauptschleife (inotify EBADF nach `g_spawn`, SIGUSR1, Sprung auf Nicht-Code-Seite) — GTK3 ist Firefox-UI | M | r796 |
+| 4 | Speicher: `libxul` privat kopiert (155 MB), kein Demand-Paging für Dateimappings, `MAP_NORESERVE`/`PROT_NONE`-Reserven — **ungemessen** | M | — |
+| 5 | procfs: `/proc/self/mountinfo`, `cgroup`, `maps` mit Namen, `/proc/stat` im Linux-Format | S–M | r1370, r1372, r934 |
+| 6 | IPC im Verbund: memfd-Seals, SCM_RIGHTS über stream, `mremap`-Last — einzeln ok, im Verbund ungetestet | M | r1368 |
+| 7 | Stubs `readahead`/`fadvise64`, `fallocate(PUNCH_HOLE)`; wayd-Protokolle (primary selection, xdg-activation, fractional-scale, cursor-shape) | S je | r1370 |
+| 8 | Trace-Lücke: `fremdtrace` meldet nur ENOSYS + 6 Speicheraufrufe, nicht alle fehlschlagenden Aufrufe | S | r1369 |
+| 9 | `system()`/`popen()` im Test-Abbild (Artefakt; im Persönlich-Abbild gelöst, Gate `bbsh` 7/0; BBSH-Gegenlauf im unterbau-Gate bootet nicht) | S | r1373 |
+
+### 3.3 Meilensteine und Schätzung
+
+| # | Meilenstein | Abnahme | Status | Aufwand (Schätzung) |
 |---|---|---|---|---|
-| F0 | Prüfsteine busybox/python/curl/git/foot | s. 3.1 | erledigt | — |
-| F1 | Restlücken Unterbau auf 0 FAIL/GAP (5 FAIL, 9 GAP) | `tools/unterbau/run.sh` alle PASS | offen | M (je Lücke S–M; `MAP_SHARED`-Größe und `/proc/maps` sind L) |
-| F2 | GTK4/Qt-Stein (glib, cairo, fontconfig) mit Software-Renderer über `wl_shm` | Hello-Fenster sichtbar (r729, r676) | offen | M–L |
-| F3 | **Firefox startet**: Fenster mit `about:blank`, Software-WebRender, Content-Sandbox aus (Annahme: abschaltbar, ungeprüft) | Screenshot-Gate | offen | L, **Risiko hoch**: viele unbekannte Aufrufe tauchen erst jetzt auf |
-| F4 | Firefox lädt eine HTTPS-Seite (Netz, TLS, `/etc/ssl`, Schriften) | Gate gegen lokalen HTTPS-Server | offen | M nach F3 |
-| F5 | Alltagstauglich: Tempo, Absturzfestigkeit, Audio | Messwerte vs Mint-Firefox | offen | L |
-| F6 | GPU-Beschleunigung (DRM/KMS, Vulkan-Teilmenge) | — | offen | XL (optional) |
+| F0 | Prüfsteine busybox/python/curl/git/foot | s. 3.1 | erledigt (busybox 55/56) | — |
+| F1 | Unterbau 0 FAIL/GAP (heute 3 FAIL, 4 GAP, großteils Test-Artefakte) | `tools/unterbau/run.sh` | fast | S–M |
+| F2 | OFS-Dateigröße ≥ 256 MiB, Firefox-Abbild baut | `prep-firefox.sh` ohne mkfs-Fehler | offen | L |
+| F3 | `firefox --version` im Gast | `guest-fx1-version.sh` | offen | M nach F2 |
+| F4 | `--headless --screenshot about:blank` | Screenshot-Datei im Gast | offen | L (Fäden, glib, Speicher) |
+| F5 | Firefox-Fenster über Wayland (Software-WebRender), HTTPS-Seite | Screenshot-Gate | offen | L |
+| F6 | GTK4/Qt-Hello grün (glib-Schleife, Qt-Stein) | gtk/run.sh 19/0 | GTK 16/3 | M |
+| F7 | Alltag: Tempo, Absturzfestigkeit, Audio | Messung vs Mint | offen | L |
+| F8 | GPU-Beschleunigung (DRM/KMS minimal → Vulkan-Teilmenge) | — | offen | XL, optional |
 
-**Gesamtschätzung:** F1–F4 zusammen ca. **15–40 Arbeitstage** (reine Schätzung des Schreibers, nicht gemessen). Der KB-Eintrag r572 nennt für den Weg „Firefox-Unterbau“ **30–80+ Tage**, für **Certus** (eigener Browser, ins Abbild + TLS 1.2) **5–10 Tage**. TLS 1.2 ist inzwischen erledigt (58/0); Certus ist aber blockiert (r935–r938). Die Entscheidung Certus vs Firefox liegt beim Boss (r572).
-
-Ehrliche Reihenfolge: **F1 → F3 mit Messung statt Raten**. Erst ein echter Firefox-Start liefert die echte Lückenliste.
+**Gesamtschätzung (Schreiber, nicht gemessen):** F2–F5 zusammen **ca. 20–45 Arbeitstage**, Risiko hoch, weil erst ein echter Lauf die nächste Lücke zeigt (Methode: Runde je Lauf, erster fehlschlagender Syscall, r1368). Zum Vergleich r572 (KB): „Firefox-Unterbau 30–80+ Tage“, Certus (eigener Browser) 5–10 Tage — Certus ist aber blockiert (r935–r938). Entscheidung Certus vs Firefox: Boss (r572). TLS 1.2 ist inzwischen da (58/0).
 
 ---
 
@@ -198,6 +211,6 @@ Ehrliche Reihenfolge: **F1 → F3 mit Messung statt Raten**. Erst ein echter Fir
 2. VBox-Hänger/Idle (r1133, r1134, r1308) — gleicher Test-Weg, Laptop nötig.
 3. Echte Hardware für S3, Audio, Installer-Dauer (r304, r571, r585) — Gerät nötig.
 4. Boss-VM-Update ausführen (r1269/r1310) und Mint-VBox-Vergleich (r1332).
-5. Entscheidung Certus vs Firefox (r572).
+5. Entscheidung Certus vs Firefox (r572); danach OFS-Dateigröße (r1366) als erster Firefox-Schritt.
 
 Pflege: diese Datei nach jeder größeren Runde nachziehen; Zahlen immer mit Gate-Namen und Datum.
