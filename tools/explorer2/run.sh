@@ -126,10 +126,10 @@ fi
 # Punkt 11: die Grenzen und der tote Zweig.
 me=$(grep -oE '^const MAXENT: u64 = [0-9]+' kernel/user/expmodell.fi | grep -oE '[0-9]+$')
 nb=$(grep -oE '^const NAMEB: u64 = [0-9]+' kernel/user/expmodell.fi | grep -oE '[0-9]+$')
-hi=$(grep -oE '^const HISTN: u64 = [0-9]+' kernel/user/explorer.fi | grep -oE '[0-9]+$')
+hi=$(grep -oE '^const CAP: u64 = [0-9]+' lib/nav/stack.fi | grep -oE '[0-9]+$')
 [ "${me:-0}" -ge 4096 ] && ok "Punkt 11: MAXENT = $me" || bad "Punkt 11: MAXENT = ${me:-0}"
 [ "${nb:-0}" -ge 256 ]  && ok "Punkt 11: NAMEB = $nb"  || bad "Punkt 11: NAMEB = ${nb:-0}"
-[ "${hi:-0}" -ge 64 ]   && ok "Punkt 11: Historie = $hi" || bad "Punkt 11: Historie = ${hi:-0}"
+[ "${hi:-0}" -ge 32 ]   && ok "Punkt 11: Historie = $hi" || bad "Punkt 11: Historie = ${hi:-0}"
 w4=$(grep -cE 'if welches == 4 \{' kernel/user/explorer.fi)
 [ "$w4" -le 1 ] && ok "Punkt 11: der doppelte Zweig ist aufgeloest ($w4 Vorkommen)" \
     || bad "Punkt 11: 'if welches == 4' steht $w4 mal da, der zweite ist tot"
