@@ -1,0 +1,197 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/link.fi -- the connection path: one object that owns the session, the group key state and the
+// per-network capability summary, and routes every received frame to the right handler (LW-2 wiring).
+//
+//   link_beacon  beacon / probe response -> connect.beacon_aufnehmen + caps.caps_parse (rate, width, standard)
+//   link_eapol   EAPOL-Key frame -> pairwise message 1, pairwise message 3 (+ note_pairwise, remember the GTK
+//                of message 3 so the first rekey with the same key is not installed twice), group message 1
+//
+// Rules: the order of checks lives in the modules below; this file only classifies and wires. A frame that
+// no handler wants returns LK_BAD and changes nothing. Group message 1 before the connection is up is
+// answered by groupkey with GK_STATE (a stranger's frame).
+
+import wlan.device
+import wlan.connect
+import wlan.state
+import wlan.wpa
+import wlan.frame
+import wlan.beacon
+import wlan.groupkey
+import wlan.caps
+
+export {
+    Link, link_new, link_reset, link_beacon, link_eapol, link_last_kind,
+    link_rate_kbps, link_width_mhz, link_standard,
+    LK_NONE, LK_M1, LK_M3, LK_GROUP, LK_BAD,
+    STD_LEGACY, STD_HT, STD_VHT, STD_HE
+}
+
+const LK_NONE: u64 = 0
+const LK_M1: u64 = 1
+const LK_M3: u64 = 3
+const LK_GROUP: u64 = 5
+const LK_BAD: u64 = 9
+
+const STD_LEGACY: u64 = 0
+const STD_HT: u64 = 1
+const STD_VHT: u64 = 2
+const STD_HE: u64 = 3
+
+const NETS: usize = 8
+const IE_AFTER_HEADER: usize = 12
+
+struct Link {
+    s: connect.Session,
+    gs: groupkey.GroupState,
+    rate: [u64; 8],       // best PHY rate in kbit/s for the width below, 0 = unknown
+    width: [u64; 8],      // MHz the AP operates at (20/40/80/160)
+    std: [u64; 8],        // STD_*
+    last_kind: u64
+}
+
+fn link_new() -> Link {
+    return Link { s: connect.session_new(), gs: groupkey.group_new(),
+        rate: [0; 8], width: [0; 8], std: [0; 8], last_kind: LK_NONE }
+}
+
+// A new connection attempt: forget the group key state (replay counter, installed GTK).
+fn link_reset(l: *mut Link) {
+    (*l).gs = groupkey.group_new()
+    (*l).last_kind = LK_NONE
+}
+
+fn link_last_kind(l: *mut Link) -> u64 { return (*l).last_kind }
+
+fn link_rate_kbps(l: *mut Link, k: usize) -> u64 {
+    if k >= NETS { return 0 }
+    return (*l).rate[k]
+}
+
+fn link_width_mhz(l: *mut Link, k: usize) -> u64 {
+    if k >= NETS { return 0 }
+    return (*l).width[k]
+}
+
+fn link_standard(l: *mut Link, k: usize) -> u64 {
+    if k >= NETS { return 0 }
+    return (*l).std[k]
+}
+
+fn ssid_index(s: *mut connect.Session, b: *mut beacon.Netz) -> i64 {
+    var k: usize = 0
+    while k < connect.net_count(s) {
+        if connect.net_ssid_len(s, k) == (*b).ssid_len {
+            var same: bool = true
+            var i: usize = 0
+            var nm: [u8; 33] = [0; 33]
+            let _g: bool = connect.net_ssid_get(s, k, (&nm[0]) as u64)
+            while i < (*b).ssid_len {
+                if nm[i] != (*b).ssid[i] { same = false }
+                i = i + 1
+            }
+            if same { return k as i64 }
+        }
+        k = k + 1
+    }
+    return -1
+}
+
+// The widest channel the AP really operates at: VHT operation first, then HT operation.
+fn width_of(c: *mut caps.Caps) -> u64 {
+    if (*c).vht_op {
+        if (*c).vht_op_width == 1 { return 80 }
+        if (*c).vht_op_width >= 2 { return 160 }
+    }
+    if (*c).ht_op && (*c).ht_op_width40 { return 40 }
+    return 20
+}
+
+fn standard_of(c: *mut caps.Caps) -> u64 {
+    if (*c).he { return STD_HE }
+    if (*c).vht { return STD_VHT }
+    if (*c).ht { return STD_HT }
+    return STD_LEGACY
+}
+
+// Take one beacon / probe response. The capability summary of a network is refreshed by the measurement
+// that wins the entry (same rule as the RSSI in connect.beacon_aufnehmen: the stronger one).
+fn link_beacon(l: *mut Link, p: u64, n: usize, rssi: i64) -> bool {
+    if !connect.beacon_aufnehmen(&(*l).s, p, n, rssi) { return false }
+    var b: beacon.Netz = beacon.netz_new()
+    if !beacon.zerlege(&b, p, n) { return false }
+    let k: i64 = ssid_index(&(*l).s, &b)
+    if k < 0 { return false }
+    let ki: usize = k as usize
+    if connect.net_rssi_of(&(*l).s, ki) != rssi { return true }
+    let hl: i64 = frame.header_len(p, n)
+    if hl < 0 { return true }
+    let at: usize = (hl as usize) + IE_AFTER_HEADER
+    if at > n { return true }
+    var c: caps.Caps = caps.caps_new()
+    let rc: i64 = caps.caps_parse(p + at as u64, n - at, &c)
+    if rc < 0 {
+        (*l).rate[ki] = 0
+        (*l).width[ki] = 0
+        (*l).std[ki] = STD_LEGACY
+        return true
+    }
+    let w: u64 = width_of(&c)
+    (*l).width[ki] = w
+    (*l).std[ki] = standard_of(&c)
+    (*l).rate[ki] = caps.best_rate_kbps(&c, w)
+    return true
+}
+
+// After message 3 was accepted: remember the GTK it installed, so a rekey carrying the same key is answered but
+// not installed again, and count the message 3 replay counter.
+fn after_m3(l: *mut Link, eapol: u64, elen: usize) {
+    groupkey.note_pairwise(&(*l).gs, eapol, elen)
+    var e: wpa.Eapol = wpa.eapol_new()
+    if !wpa.eapol_zerlege(&e, eapol, elen) { return }
+    var data: [u8; 512] = [0; 512]
+    let dn: i64 = wpa.schluesseldaten_auspacken((&(*l).s.ptk[16]) as u64, 16, e.daten, e.daten_len,
+        (&data[0]) as u64, 512)
+    if dn < 0 { return }
+    var gtk: [u8; 16] = [0; 16]
+    var idx: u64 = 0
+    if wpa.gtk_find((&data[0]) as u64, dn as usize, (&gtk[0]) as u64, 16, &idx) != 16 { return }
+    var i: usize = 0
+    while i < 16 {
+        (*l).gs.gtk[i] = gtk[i]
+        i = i + 1
+    }
+    (*l).gs.have_gtk = true
+    (*l).gs.key_idx = idx
+}
+
+// One EAPOL-Key frame from the access point. Returns:
+//   LK_M1    >= 0: PTK length (48), the caller builds message 2
+//   LK_M3    >= 0: 1, keys installed (message 4 is the caller's)
+//   LK_GROUP > 0:  length of group message 2 written to `out`
+//   < 0 on any refusal (the kind is LK_BAD for a frame no handler takes; for a group frame the negative
+//   value is -GK_* from groupkey). In every refusal the session is unchanged.
+// The kind is readable with link_last_kind.
+fn link_eapol(l: *mut Link, g: *mut device.Geraet, eapol: u64, elen: usize, snonce: u64,
+    out: u64, outmax: usize) -> i64 {
+    var e: wpa.Eapol = wpa.eapol_new()
+    (*l).last_kind = LK_BAD
+    if !wpa.eapol_zerlege(&e, eapol, elen) { return -1 }
+    if e.paarweise {
+        if e.nachricht == 1 {
+            (*l).last_kind = LK_M1
+            return connect.nachricht1_behandeln(&(*l).s, g, eapol, elen, snonce, out, outmax)
+        }
+        if e.nachricht == 3 {
+            (*l).last_kind = LK_M3
+            if !connect.nachricht3_behandeln(&(*l).s, g, eapol, elen) { return -1 }
+            after_m3(l, eapol, elen)
+            return 1
+        }
+        return -1
+    }
+    if e.ack && e.hat_mic {
+        (*l).last_kind = LK_GROUP
+        return groupkey.rekey_handle(&(*l).s, g, &(*l).gs, eapol, elen, out, outmax)
+    }
+    return -1
+}

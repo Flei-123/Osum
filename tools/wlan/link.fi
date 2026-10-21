@@ -1,0 +1,246 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/wlan/link.fi -- host oracle for lib/wlan/link.fi (LW-2 wiring: EAPOL dispatch + capability summary).
+// stdin script, one command per line (hex fields lower case, "-" = empty):
+//   S <pmk 32> <aa 6> <spa 6> <akm>     new link; drives scan/found/auth/assoc so message 1 is allowed
+//   B <rssi> <frame>                    link_beacon; prints "B ok=<0|1> n=<nets> r0=.. w0=.. s0=.. r1=.. w1=.. s1=.."
+//   E <snonce 32> <eapol>               link_eapol; prints "E rc=<n> kind=<k> st=<state> inst=<installs>
+//                                         skeys=<keys in device> kid=<key id> haveg=<0|1> gtk=<hex> out=<hex|->"
+//   X                                   link_reset (new attempt): group state forgotten
+import std.rt
+import std.io
+import wlan.device
+import wlan.testdevice
+import wlan.connect
+import wlan.state
+import wlan.groupkey
+import wlan.link
+import wlan.caps
+
+const CAP: usize = 2048
+
+static mut b0: [u8; 4096] = [0; 4096]
+static mut pois: [u8; 600] = [0; 600]
+static mut outb: [u8; 2048] = [0; 2048]
+static mut txtb: [u8; 4600] = [0; 4600]
+static mut tlen: usize = 0
+
+fn tch(c: u64) {
+    if tlen < 4590 {
+        txtb[tlen] = (c & 255) as u8
+        tlen = tlen + 1
+    }
+}
+fn tlit(w: str) {
+    var i: usize = 0
+    while i < w.n {
+        tch(rt.ld8(w.p as u64, i) as u64)
+        i = i + 1
+    }
+}
+fn tnum(v: u64) {
+    if v >= 10 { tnum(v / 10) }
+    tch(48 + (v % 10))
+}
+fn tsigned(v: i64) {
+    if v < 0 {
+        tch(45)
+        tnum((0 - v) as u64)
+    } else {
+        tnum(v as u64)
+    }
+}
+fn thex(p: u64, n: usize) {
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        tch(d[(v >> 4) as usize] as u64)
+        tch(d[(v & 15) as usize] as u64)
+        i = i + 1
+    }
+}
+fn temit() {
+    io.print_line_bytes((&txtb[0]) as u64, tlen)
+    tlen = 0
+}
+
+fn hexval(c: u64) -> i64 {
+    if c >= 48 && c <= 57 { return (c - 48) as i64 }
+    if c >= 97 && c <= 102 { return (c - 87) as i64 }
+    if c >= 65 && c <= 70 { return (c - 55) as i64 }
+    return -1
+}
+
+fn field_hex(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 { i = i + 1 }
+    *at = i
+    let n: usize = i - start
+    if n == 0 { return -1 }
+    if n == 1 && rt.ld8(line, start) == 45 as u8 { return 0 }
+    if n % 2 != 0 { return -1 }
+    if n / 2 > CAP { return -1 }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hexval(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hexval(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 { return -1 }
+        rt.st8(dst, o, ((hi * 16 + lo) & 255) as u8)
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+fn field_num(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    var v: i64 = 0
+    while i < len && rt.ld8(line, i) >= 48 as u8 && rt.ld8(line, i) <= 57 as u8 {
+        v = v * 10 + ((rt.ld8(line, i) as i64) - 48)
+        i = i + 1
+    }
+    if i == start { return -1 }
+    *at = i
+    return v
+}
+
+static mut ctx_link: u64 = 0
+static mut ctx_pr: u64 = 0
+static mut ctx_gg: u64 = 0
+
+fn new_link(line: u64, len: usize) {
+    let lp: *mut link.Link = ctx_link as *mut link.Link
+    let prp: *mut testdevice.Check = ctx_pr as *mut testdevice.Check
+    let ggp: *mut device.Geraet = ctx_gg as *mut device.Geraet
+    var at: usize = 1
+    let pl: i64 = field_hex(line, len, &at, (&b0[0]) as u64)
+    let al: i64 = field_hex(line, len, &at, (&b0[64]) as u64)
+    let sl: i64 = field_hex(line, len, &at, (&b0[80]) as u64)
+    let akm: i64 = field_num(line, len, &at)
+    *lp = link.link_new()
+    *prp = testdevice.check_new()
+    *ggp = device.geraet_new()
+    testdevice.anhaengen(ggp, prp, false)
+    if pl != 32 || al != 6 || sl != 6 || akm < 0 { tlit("S bad"); temit(); return }
+    connect.identity_set(&(*lp).s, (&b0[80]) as u64, (&b0[64]) as u64)
+    connect.pmk_set(&(*lp).s, (&b0[0]) as u64)
+    connect.akm_set(&(*lp).s, akm as u64)
+    state.ereignis(&(*lp).s.lauf, 115)
+    state.ereignis(&(*lp).s.lauf, 98)
+    state.ereignis(&(*lp).s.lauf, 97)
+    state.ereignis(&(*lp).s.lauf, 99)
+    tlit("S ok state=")
+    tnum(connect.state_of(&(*lp).s))
+    temit()
+}
+
+fn beacon_cmd(line: u64, len: usize) {
+    let lp: *mut link.Link = ctx_link as *mut link.Link
+    var at: usize = 1
+    let neg: bool = len > 2 && rt.ld8(line, 2) == 45 as u8
+    if neg { at = 3 }
+    let rv: i64 = field_num(line, len, &at)
+    let fl: i64 = field_hex(line, len, &at, (&b0[0]) as u64)
+    if rv < 0 || fl < 0 { tlit("bad args"); temit(); return }
+    let rssi: i64 = if neg { 0 - rv } else { rv }
+    let okb: bool = link.link_beacon(lp, (&b0[0]) as u64, fl as usize, rssi)
+    tlit("B ok=")
+    tnum(if okb { 1 } else { 0 })
+    tlit(" n=")
+    tnum(connect.net_count(&(*lp).s) as u64)
+    var k: usize = 0
+    while k < 2 {
+        tlit(" r")
+        tnum(k as u64)
+        tch(61)
+        tnum(link.link_rate_kbps(lp, k))
+        tlit(" w")
+        tnum(k as u64)
+        tch(61)
+        tnum(link.link_width_mhz(lp, k))
+        tlit(" s")
+        tnum(k as u64)
+        tch(61)
+        tnum(link.link_standard(lp, k))
+        k = k + 1
+    }
+    temit()
+}
+
+fn eapol_cmd(line: u64, len: usize) {
+    let lp: *mut link.Link = ctx_link as *mut link.Link
+    let prp: *mut testdevice.Check = ctx_pr as *mut testdevice.Check
+    let ggp: *mut device.Geraet = ctx_gg as *mut device.Geraet
+    var at: usize = 1
+    let nl: i64 = field_hex(line, len, &at, (&b0[1024]) as u64)
+    let el: i64 = field_hex(line, len, &at, (&b0[0]) as u64)
+    if nl != 32 || el < 0 { tlit("bad args"); temit(); return }
+    let rc: i64 = link.link_eapol(lp, ggp, (&b0[0]) as u64, el as usize, (&b0[1024]) as u64,
+        (&outb[0]) as u64, 2048)
+    tlit("E rc=")
+    tsigned(rc)
+    tlit(" kind=")
+    tnum(link.link_last_kind(lp))
+    tlit(" st=")
+    tnum(connect.state_of(&(*lp).s))
+    tlit(" inst=")
+    tnum((*lp).gs.installs)
+    tlit(" skeys=")
+    tnum(testdevice.schluessel_anzahl(prp) as u64)
+    tlit(" kid=")
+    tnum((*lp).gs.key_idx)
+    tlit(" haveg=")
+    tnum(if (*lp).gs.have_gtk { 1 } else { 0 })
+    tlit(" gtk=")
+    thex((&(*lp).s.gtk[0]) as u64, 16)
+    tlit(" out=")
+    if rc > 0 && link.link_last_kind(lp) != link.LK_M3 {
+        thex((&outb[0]) as u64, rc as usize)
+    } else {
+        tch(45)
+    }
+    temit()
+}
+
+fn run_line(line: u64, len: usize) {
+    let c: u8 = rt.ld8(line, 0)
+    if c == 83 as u8 { new_link(line, len); return }
+    if c == 66 as u8 { beacon_cmd(line, len); return }
+    if c == 69 as u8 { eapol_cmd(line, len); return }
+    if c == 88 as u8 {
+        link.link_reset(ctx_link as *mut link.Link)
+        tlit("X ok")
+        temit()
+        return
+    }
+    tlit("unknown command")
+    temit()
+}
+
+#[allow_escape]
+fn main() -> i32 {
+    var lk: link.Link = link.link_new()
+    var pr: testdevice.Check = testdevice.check_new()
+    var gg: device.Geraet = device.geraet_new()
+    ctx_link = (&lk) as u64
+    ctx_pr = (&pr) as u64
+    ctx_gg = (&gg) as u64
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) { return 1 }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var at: usize = 0
+    while at < n {
+        var e: usize = at
+        while e < n && rt.ld8(p, e) != 10 as u8 { e = e + 1 }
+        var len: usize = e - at
+        while len > 0 && rt.ld8(p, at + len - 1) == 13 as u8 { len = len - 1 }
+        if len > 0 { run_line(p + at as u64, len) }
+        at = e + 1
+    }
+    rt.buf_free(&inp)
+    return 0
+}
