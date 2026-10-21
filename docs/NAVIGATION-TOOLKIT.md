@@ -68,7 +68,9 @@ Per window (instances 0..3): `push(h,uri,len)`, `back(h)`, `forward(h)`, `up(h)`
 * Further lint: depth <= 4, every non-root route has a parent, sidebar entries (depth 1, not advanced/hidden) <= 12, titles unique among siblings, `order` unique among siblings, related targets exist.
 * Host runner `bash tools/nav/run.sh` (seconds, no VM) with counter-proofs: golden cases for URI / registry / stack / crumbs / search, "search finds every route" over the real Settings route table in `en` and `de`, and N parser/stack/search mutations that must turn it red.
 
-## 8. View and scene-tree integration (`lib/nav/view.fi`)
+## 8. View and scene-tree integration (`kernel/user/navview.fi`)
+
+Built (21.10.2026): `navview.toolbar` (nav.back / nav.forward / nav.up buttons), `navview.crumbs_row` (crumb buttons over `lib/nav/crumbs`, last crumb is a label, at most 5 shown), `navview.action_of(key)` / `crumb_target_len(key)`. The builders live in `kernel/user` because they import `fuiscene` (layer rule: `lib` does not import `kernel/user`). Settings glue: `kernel/user/setroute.fi` (route table + `settings.d/settings.pagemap` page map, stack instance 0, search feed, sidebar order). NOT built yet: `related` rows, `results` list (search filters the sidebar and Enter opens the best hit), Alt+Left/Right keys. Original plan below.
 
 * Three reusable builders over `fuiscene`: `view.sidebar(parent, h)` (children of the app root, symbol + title, active entry accent, one tab stop per entry), `view.crumbs(parent, h)` (buttons `nav.crumb.<i>`), `view.related(parent, id)` (rows `nav.rel.<i>`), `view.results(parent)` (search results).
 * Stable scene names (used by gates and the a11y tree): `nav.side.<route-id>`, `nav.crumb.<i>`, `nav.back`, `nav.forward`, `nav.up`, `nav.search`, `nav.result.<i>`, `nav.rel.<i>`. The a11y role of the sidebar is `list`, entries `listitem`, crumbs `navigation`/`button`.
