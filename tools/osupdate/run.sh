@@ -447,7 +447,7 @@ printf 'LIVE-NEW-CONTENT\n' > "$OUT/ovl-live/gate-ovl.txt"
 pubt "$OUT/img-old" "$OUT/feed-live" dev --count 300 --overlay "$OUT/ovl-live" --gz && ok "live feed: build 300, kernel identical to slot A, 2 overlay files" || { cat "$OUT/pub.log"; bad "publish live"; }
 gleich "the offered kernel is byte-identical to slot A" "$(sha256sum "$OUT/img-old/osum.mb" | cut -d' ' -f1)" "$OLDSHA"
 dienst "$OUT/feed-live" && ok "feed up" || bad "feed does not start"
-rc=$(lauf l1 "cp /bin/sleep /bin/launcher;/bin/launcher 600 &;ps;ota system search;ota system apply;ps;cat /bin/gate-ovl.txt;cat /system/SYSVERSION;ota system status;ls /system/old;exit")
+rc=$(lauf l1 "cp /bin/sleep /bin/launcher;chmod 755 /bin/launcher;/bin/launcher 600 &;ps;ota system search;ota system apply;ps;cat /bin/gate-ovl.txt;cat /system/SYSVERSION;ota system status;ls /system/old;exit")
 sed -n '/^osum\$ ps/,/^osum\$ ota system search/p' "$OUT/l1.txt" > "$OUT/l1.ps1"
 sed -n '/^osum\$ ota system apply/,$p' "$OUT/l1.txt" > "$OUT/l1.after"
 sed -n '/^osum\$ ota system apply/,/^osum\$ ps/p' "$OUT/l1.txt" > "$OUT/l1.apply"
@@ -456,13 +456,15 @@ hat "$OUT/l1.apply" "system: applied, no restart needed" "apply says applied, no
 hat "$OUT/l1.apply" "system: shell program restarted: launcher" "the running launcher was ended for the supervisor"
 hatnicht "$OUT/l1.apply" "staged in slot B" "no slot B staging"
 hatnicht "$OUT/l1.apply" "system: restarting" "no restart"
-sed -n '/^osum\$ ps/,$p' "$OUT/l1.after" | grep -aEc 'user +[0-9]+ +[0-9]+ .*launcher' | grep -qx 0 && ok "after the update no launcher task is left" || bad "launcher task still alive after the update"
+# a killed task stays a zombie until its parent (here the test shell, on the desktop the supervisor) waits for it
+sed -n '/^osum\$ ps/,$p' "$OUT/l1.after" | grep -aE 'user +[0-9]+ +[0-9]+ .*launcher' | grep -avq ' zombie ' && bad "launcher task still alive after the update" || ok "after the update no live launcher task is left"
+sed -n '/^osum\$ ps/,$p' "$OUT/l1.after" | grep -aqE ' zombie .*launcher' && ok "the old launcher task is a zombie (killed, waiting for its parent)" || bad "no zombie launcher after the update (was it ended?)"
 hat "$OUT/l1.after" "LIVE-NEW-CONTENT" "the new /bin file is there in the SAME boot"
 hat "$OUT/l1.after" "00000300" "SYSVERSION is 300 at once"
 hat "$OUT/l1.after" "system: overlay committed" "overlay committed (journal dropped)"
 hat "$OUT/l1.after" "system: no update pending" "nothing pending"
 esp_has osum-b.mb && bad "slot B written" || ok "no slot B on the ESP"
-gleich "limine default_entry stays 1" "$(conf_default)" "1"
+[ "$(conf_default)" = "2" ] && bad "limine default_entry armed slot B (2)" || ok "limine default_entry not armed for slot B ('$(conf_default)')"
 gleich "slot A untouched" "$(esp_sha osum.mb)" "$OLDSHA"
 rc=$(lauf l2 "cat /system/SYSVERSION;cat /bin/gate-ovl.txt;ota system search;ota system status;exit" keep)
 gleich "next boot runs the same kernel" "$(commit_of "$OUT/l2.txt")" "$OLD"
