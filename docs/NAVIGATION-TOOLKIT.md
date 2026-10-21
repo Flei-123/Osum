@@ -42,12 +42,12 @@ route explorer://folder explorer.folder.title symbol-folder 10 dynamic
 * `route <uri> <title-key> <symbol> <order> [flag...]`; flags: `advanced` (collapsed / not in the sidebar), `hidden` (not in sidebar and crumbs only), `dynamic`, `home` (opened by an empty URI).
 * `kw`, `controls`, `related` bind to the `route` line directly before them (any order, at most one `kw` and one `controls`, up to 4 `related`).
 * Rules (as `settingsman`): a KNOWN line with wrong words, bad name, duplicate URI, scheme != `app`, parent route not registered earlier, depth > 4, table full -> the WHOLE file is rejected and the registry is exactly as before (`err_code()` / `err_line()`). Unknown lines are skipped and counted (`warn_count()`).
-* Limits: 8 apps, 192 routes, 96 related links, 12 KiB text pool. A package may register only its own scheme (`E_MISMATCH` like `add_pkg`).
+* Limits: 8 apps, 192 routes, 96 related links, 20 KiB text pool. A package may register only its own scheme (`E_MISMATCH` like `add_pkg`).
 * Settings **Manifest v2** (`page ... parent ...`) is converted to routes at load time (SET-2): `page <id>` becomes `settings://<category>/<id>`; the route table is the one source for sidebar, breadcrumb and search.
 
 ## 4. Registry API (`lib/nav/reg.fi`)
 
-`load(buf,len)`, `add(buf,len)`, `add_pkg(buf,len,dir)`, `reset()`, `count()`, `find(uri,len) -> id|NONE`, `resolve(uri,len) -> id|NONE` (longest registered prefix, dynamic routes accept a rest path; `rest_off()`), `parent(id)`, `child_count(id)`, `child_at(id,i)` (ordered by `order`, then registration), `depth(id)`, `uri(id)`, `title_key(id)`, `symbol(id)`, `flags(id)`, `controls(id)`, `kw_key(id)`, `related_count(id)`, `related_to(id,i)`, `related_key(id,i)`, `lint(limit_override) -> violations` (checks section 7).
+`load(buf,len)`, `add(buf,len)`, `add_pkg(buf,len,dir)`, `reset()`, `count()`, `find(uri,len) -> id|NONE`, `resolve(uri,len) -> id|NONE` (longest registered prefix, dynamic routes accept a rest path; `rest_off()`), `parent(id)`, `child_count(id)`, `child_at(id,i)` (ordered by `order`, then registration), `depth(id)`, `uri(id)`, `title_key(id)`, `icon_name(id)`, `flags(id)`, `controls(id)`, `kw_key(id)`, `related_count(id)`, `related_to(id,i)`, `related_key(id,i)`, `lint(limit_override) -> violations` (checks section 7).
 
 ## 5. Stack (`lib/nav/stack.fi`)
 

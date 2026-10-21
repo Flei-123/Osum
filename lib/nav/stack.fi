@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: MPL-2.0
+import nav.route
+
+export {
+    CAP, INSTANCES, reset, push, replace, back, forward, up, current, current_len, can_back, can_forward,
+    can_up, position, size, entry, entry_len, aux_set, aux_get,
+}
+
+const CAP: u64 = 32
+const INSTANCES: u64 = 4
+const SLOT: u64 = 256
+
+static mut buf: [u8; 32768] = [0 as u8; 32768]
+static mut blen: [u64; 128] = [0 as u64; 128]
+static mut aux: [u64; 128] = [0 as u64; 128]
+static mut cnt: [u64; 4] = [0 as u64; 4]
+static mut pos: [u64; 4] = [0 as u64; 4]
+
+fn slot(h: u64, i: u64) -> u64 {
+    return h * CAP + i
+}
+
+fn slot_ptr(h: u64, i: u64) -> u64 {
+    return ((&buf[0]) as u64) + slot(h, i) * SLOT
+}
+
+fn reset(h: u64) {
+    cnt[(h) as usize] = 0
+    pos[(h) as usize] = 0
+}
+
+fn store(h: u64, i: u64, p: u64, n: u64) {
+    let d: u64 = slot_ptr(h, i)
+    var k: u64 = 0
+    while k < n {
+        route.wr(d, k, route.rd(p, k))
+        k = k + 1
+    }
+    route.wr(d, n, 0)
+    blen[(slot(h, i)) as usize] = n
+    aux[(slot(h, i)) as usize] = 0
+}
+
+fn size(h: u64) -> u64 {
+    return cnt[(h) as usize]
+}
+
+fn position(h: u64) -> u64 {
+    return pos[(h) as usize]
+}
+
+fn entry(h: u64, i: u64) -> u64 {
+    return slot_ptr(h, i)
+}
+
+fn entry_len(h: u64, i: u64) -> u64 {
+    return blen[(slot(h, i)) as usize]
+}
+
+fn current(h: u64) -> u64 {
+    if cnt[(h) as usize] == 0 {
+        return 0
+    }
+    return slot_ptr(h, pos[(h) as usize])
+}
+
+fn current_len(h: u64) -> u64 {
+    if cnt[(h) as usize] == 0 {
+        return 0
+    }
+    return blen[(slot(h, pos[(h) as usize])) as usize]
+}
+
+fn replace(h: u64, p: u64, n: u64) -> bool {
+    if n == 0 || n >= SLOT || !route.valid(p, n) {
+        return false
+    }
+    if cnt[(h) as usize] == 0 {
+        store(h, 0, p, n)
+        cnt[(h) as usize] = 1
+        pos[(h) as usize] = 0
+        return true
+    }
+    store(h, pos[(h) as usize], p, n)
+    return true
+}
+
+fn push(h: u64, p: u64, n: u64) -> bool {
+    if n == 0 || n >= SLOT || !route.valid(p, n) {
+        return false
+    }
+    if cnt[(h) as usize] == 0 {
+        return replace(h, p, n)
+    }
+    if route.same_path(current(h), current_len(h), p, n) {
+        store(h, pos[(h) as usize], p, n)
+        return false
+    }
+    var at: u64 = pos[(h) as usize] + 1
+    if at >= CAP {
+        var k: u64 = 1
+        while k < CAP {
+            let s: u64 = slot_ptr(h, k)
+            store(h, k - 1, s, blen[(slot(h, k)) as usize])
+            aux[(slot(h, k - 1)) as usize] = aux[(slot(h, k)) as usize]
+            k = k + 1
+        }
+        at = CAP - 1
+    }
+    store(h, at, p, n)
+    cnt[(h) as usize] = at + 1
+    pos[(h) as usize] = at
+    return true
+}
+
+fn can_back(h: u64) -> bool {
+    return cnt[(h) as usize] > 0 && pos[(h) as usize] > 0
+}
+
+fn can_forward(h: u64) -> bool {
+    return cnt[(h) as usize] > 0 && pos[(h) as usize] + 1 < cnt[(h) as usize]
+}
+
+fn back(h: u64) -> bool {
+    if !can_back(h) {
+        return false
+    }
+    pos[(h) as usize] = pos[(h) as usize] - 1
+    return true
+}
+
+fn forward(h: u64) -> bool {
+    if !can_forward(h) {
+        return false
+    }
+    pos[(h) as usize] = pos[(h) as usize] + 1
+    return true
+}
+
+fn can_up(h: u64) -> bool {
+    if cnt[(h) as usize] == 0 {
+        return false
+    }
+    return route.parent_len(current(h), current_len(h)) != route.NONE
+}
+
+fn up(h: u64) -> bool {
+    if !can_up(h) {
+        return false
+    }
+    let n: u64 = route.parent_len(current(h), current_len(h))
+    return push(h, current(h), n)
+}
+
+fn aux_set(h: u64, v: u64) {
+    if cnt[(h) as usize] > 0 {
+        aux[(slot(h, pos[(h) as usize])) as usize] = v
+    }
+}
+
+fn aux_get(h: u64) -> u64 {
+    if cnt[(h) as usize] == 0 {
+        return 0
+    }
+    return aux[(slot(h, pos[(h) as usize])) as usize]
+}

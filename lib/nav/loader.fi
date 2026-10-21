@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: MPL-2.0
+import nav.route
+import nav.reg
+
+export { ERR, load, add, add_pkg, warn_count }
+
+const ERR: u64 = 4294967295
+
+static mut kw_routes: [u8; 6] = "routes"
+static mut kw_app: [u8; 3] = "app"
+static mut kw_limit: [u8; 5] = "limit"
+static mut kw_route: [u8; 5] = "route"
+static mut kw_kw: [u8; 2] = "kw"
+static mut kw_controls: [u8; 8] = "controls"
+static mut kw_related: [u8; 7] = "related"
+static mut kw_one: [u8; 1] = "1"
+static mut fl_advanced: [u8; 8] = "advanced"
+static mut fl_hidden: [u8; 6] = "hidden"
+static mut fl_dynamic: [u8; 7] = "dynamic"
+static mut fl_home: [u8; 4] = "home"
+
+static mut wpos: [u64; 12] = [0 as u64; 12]
+static mut wlen: [u64; 12] = [0 as u64; 12]
+static mut cur: u64 = 0
+static mut warns: u64 = 0
+static mut st: u64 = 0
+static mut last: u64 = 0
+static mut want_dir: u64 = 0
+
+fn warn_count() -> u64 {
+    return warns
+}
+
+fn word_is(w: u64, lit: u64, n: u64) -> bool {
+    if wlen[(w) as usize] != n {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if route.rd(cur, wpos[(w) as usize] + i) != route.rd(lit, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn wp(w: u64) -> u64 {
+    return cur + wpos[(w) as usize]
+}
+
+fn num(w: u64) -> u64 {
+    let n: u64 = wlen[(w) as usize]
+    if n == 0 || n > 5 {
+        return reg.NONE
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = route.rd(cur, wpos[(w) as usize] + i)
+        if c < 48 || c > 57 {
+            return reg.NONE
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn flag_of(w: u64) -> u64 {
+    if word_is(w, (&fl_advanced[0]) as u64, 8) {
+        return reg.F_ADVANCED
+    }
+    if word_is(w, (&fl_hidden[0]) as u64, 6) {
+        return reg.F_HIDDEN
+    }
+    if word_is(w, (&fl_dynamic[0]) as u64, 7) {
+        return reg.F_DYNAMIC
+    }
+    if word_is(w, (&fl_home[0]) as u64, 4) {
+        return reg.F_HOME
+    }
+    return 0
+}
+
+fn fail(code: u64, line: u64) -> u64 {
+    return reg.set_err(code, line)
+}
+
+fn dir_matches(w: u64) -> bool {
+    if want_dir == 0 {
+        return true
+    }
+    let n: u64 = reg.text_len(want_dir)
+    if n != wlen[(w) as usize] {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if route.rd(want_dir, i) != route.rd(cur, wpos[(w) as usize] + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn do_line(nw: u64, line: u64) -> u64 {
+    if nw == 0 {
+        return 1
+    }
+    if st == 0 {
+        if nw == 2 && word_is(0, (&kw_routes[0]) as u64, 6) && word_is(1, (&kw_one[0]) as u64, 1) {
+            st = 1
+            return 1
+        }
+        return fail(reg.E_HEADER, line)
+    }
+    if st == 1 {
+        if !word_is(0, (&kw_app[0]) as u64, 3) || nw != 4 {
+            return fail(reg.E_APP, line)
+        }
+        if !dir_matches(1) {
+            return fail(reg.E_MISMATCH, line)
+        }
+        if reg.app_add(wp(1), wlen[1], wp(2), wlen[2], wp(3), wlen[3]) == 0 {
+            return fail(reg.err_code(), line)
+        }
+        st = 2
+        last = reg.NONE
+        return 1
+    }
+    if word_is(0, (&kw_app[0]) as u64, 3) || word_is(0, (&kw_routes[0]) as u64, 6) {
+        return fail(reg.E_APP, line)
+    }
+    if word_is(0, (&kw_limit[0]) as u64, 5) {
+        let v: u64 = num(1)
+        if nw != 2 || v == reg.NONE || v == 0 || v > 64 {
+            return fail(reg.E_LIMIT, line)
+        }
+        reg.app_limit_set(reg.app_count() - 1, v)
+        return 1
+    }
+    if word_is(0, (&kw_route[0]) as u64, 5) {
+        let ord: u64 = num(4)
+        if nw < 5 || nw > 9 || ord == reg.NONE {
+            return fail(reg.E_ROUTE, line)
+        }
+        var fl: u64 = 0
+        var w: u64 = 5
+        while w < nw {
+            let f: u64 = flag_of(w)
+            if f == 0 {
+                return fail(reg.E_ITEM, line)
+            }
+            fl = fl + f
+            w = w + 1
+        }
+        let id: u64 = reg.route_add(wp(1), wlen[1], wp(2), wlen[2], wp(3), wlen[3], ord, fl)
+        if id == reg.NONE {
+            return fail(reg.err_code(), line)
+        }
+        last = id
+        return 1
+    }
+    if word_is(0, (&kw_kw[0]) as u64, 2) {
+        if nw != 2 || last == reg.NONE {
+            return fail(reg.E_NO_ROUTE, line)
+        }
+        if reg.route_kw(last, wp(1), wlen[1]) == 0 {
+            return fail(reg.err_code(), line)
+        }
+        return 1
+    }
+    if word_is(0, (&kw_controls[0]) as u64, 8) {
+        let v: u64 = num(1)
+        if nw != 2 || last == reg.NONE {
+            return fail(reg.E_NO_ROUTE, line)
+        }
+        if v == reg.NONE || reg.route_controls(last, v) == 0 {
+            return fail(reg.E_ITEM, line)
+        }
+        return 1
+    }
+    if word_is(0, (&kw_related[0]) as u64, 7) {
+        if nw != 3 || last == reg.NONE {
+            return fail(reg.E_NO_ROUTE, line)
+        }
+        if reg.related_add(last, wp(1), wlen[1], wp(2), wlen[2]) == 0 {
+            return fail(reg.err_code(), line)
+        }
+        return 1
+    }
+    warns = warns + 1
+    last = reg.NONE
+    return 1
+}
+
+fn parse(buf: u64, len: u64) -> u64 {
+    cur = buf
+    st = 0
+    last = reg.NONE
+    warns = 0
+    reg.txn_begin()
+    let before: u64 = reg.count()
+    var line: u64 = 1
+    var i: u64 = 0
+    var nw: u64 = 0
+    var in_word: bool = false
+    var skip: bool = false
+    var ok: u64 = 1
+    while i <= len && ok == 1 {
+        var c: u64 = 10
+        if i < len {
+            c = route.rd(buf, i)
+        }
+        if c == 10 {
+            if ok == 1 {
+                ok = do_line(nw, line)
+            }
+            nw = 0
+            in_word = false
+            skip = false
+            line = line + 1
+        } else {
+            if !skip {
+                let blank: bool = c == 32 || c == 9 || c == 13
+                if blank {
+                    in_word = false
+                } else {
+                    if !in_word && c == 35 {
+                        skip = true
+                    } else {
+                        if !in_word {
+                            if nw >= 12 {
+                                ok = fail(reg.E_ITEM, line)
+                            } else {
+                                wpos[(nw) as usize] = i
+                                wlen[(nw) as usize] = 0
+                                nw = nw + 1
+                                in_word = true
+                            }
+                        }
+                        if in_word {
+                            wlen[(nw - 1) as usize] = wlen[(nw - 1) as usize] + 1
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if ok == 1 && st < 2 {
+        ok = fail(reg.E_APP, line)
+    }
+    if ok == 0 {
+        reg.txn_rollback()
+        return ERR
+    }
+    return reg.count() - before
+}
+
+fn load(buf: u64, len: u64) -> u64 {
+    reg.reset()
+    want_dir = 0
+    let r: u64 = parse(buf, len)
+    if r == ERR {
+        let code: u64 = reg.err_code()
+        let ln: u64 = reg.err_line()
+        reg.reset()
+        reg.set_err(code, ln)
+    }
+    return r
+}
+
+fn add(buf: u64, len: u64) -> u64 {
+    want_dir = 0
+    return parse(buf, len)
+}
+
+fn add_pkg(buf: u64, len: u64, dir: u64) -> u64 {
+    want_dir = dir
+    let r: u64 = parse(buf, len)
+    want_dir = 0
+    return r
+}

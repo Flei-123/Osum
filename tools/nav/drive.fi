@@ -1,0 +1,604 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import nav.route
+import nav.reg
+import nav.loader
+import nav.stack
+import nav.crumbs
+import nav.search
+
+static mut dirbuf: [u8; 64] = [0 as u8; 64]
+static mut cpos: [u64; 16] = [0 as u64; 16]
+static mut clen: [u64; 16] = [0 as u64; 16]
+static mut cn: u64 = 0
+static mut line: u64 = 0
+static mut out: [u8; 512] = [0 as u8; 512]
+static mut hits: [u64; 64] = [0 as u64; 64]
+static mut widths: [u64; 24] = [0 as u64; 24]
+
+fn rd(p: u64, i: u64) -> u64 {
+    let c: u8 = *((p + i) as *mut u8)
+    return c as u64
+}
+
+fn pb(p: u64, n: u64) {
+    io.print_bytes(p, n as usize)
+}
+
+fn wp(i: u64) -> u64 {
+    return line + cpos[(i) as usize]
+}
+
+fn wl(i: u64) -> u64 {
+    if i >= cn {
+        return 0
+    }
+    return clen[(i) as usize]
+}
+
+fn eqw(i: u64, lit: u64, n: u64) -> bool {
+    if i >= cn || clen[(i) as usize] != n {
+        return false
+    }
+    var k: u64 = 0
+    while k < n {
+        if rd(line, cpos[(i) as usize] + k) != rd(lit, k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn num(i: u64) -> u64 {
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < wl(i) {
+        v = v * 10 + (rd(wp(i), k) - 48)
+        k = k + 1
+    }
+    return v
+}
+
+fn split(p: u64, n: u64) {
+    line = p
+    cn = 0
+    var i: u64 = 0
+    var in_w: bool = false
+    while i < n {
+        let c: u64 = rd(p, i)
+        if c == 32 || c == 9 {
+            in_w = false
+        } else {
+            if !in_w && cn < 16 {
+                cpos[(cn) as usize] = i
+                clen[(cn) as usize] = 0
+                cn = cn + 1
+                in_w = true
+            }
+            if in_w {
+                clen[(cn - 1) as usize] = clen[(cn - 1) as usize] + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn pr_uri(id: u64) {
+    pb(reg.uri(id), reg.uri_len(id))
+}
+
+fn show_id(id: u64) {
+    if id == reg.NONE {
+        io.print("-")
+    } else {
+        pr_uri(id)
+    }
+}
+
+fn find_bar(from: u64) -> u64 {
+    var i: u64 = from
+    while i < cn {
+        if wl(i) == 1 && rd(wp(i), 0) == 124 {
+            return i
+        }
+        i = i + 1
+    }
+    return cn
+}
+
+fn join(from: u64, to: u64, dst: u64) -> u64 {
+    var o: u64 = 0
+    var i: u64 = from
+    while i < to {
+        if o > 0 {
+            route.wr(dst, o, 32)
+            o = o + 1
+        }
+        var k: u64 = 0
+        while k < wl(i) {
+            route.wr(dst, o, rd(wp(i), k))
+            o = o + 1
+            k = k + 1
+        }
+        i = i + 1
+    }
+    route.wr(dst, o, 0)
+    return o
+}
+
+static mut tb: [u8; 256] = [0 as u8; 256]
+static mut kb: [u8; 256] = [0 as u8; 256]
+static mut ub: [u8; 320] = [0 as u8; 320]
+
+fn canon_of(i: u64) -> u64 {
+    return route.canon((&ub[0]) as u64, 320, wp(i), wl(i))
+}
+
+fn cmd_stack(h: u64, ok: bool, name: u64) {
+    io.fmt_print(f"h{h} ")
+    if ok {
+        io.print("ok ")
+    } else {
+        io.print("no ")
+    }
+    pb(stack.current(h), stack.current_len(h))
+    io.fmt_print_line(f" pos={stack.position(h)}/{stack.size(h)}")
+}
+
+static mut s_valid: [u8; 5] = "valid"
+static mut s_canon: [u8; 5] = "canon"
+static mut s_depth: [u8; 5] = "depth"
+static mut s_parent: [u8; 6] = "parent"
+static mut s_seg: [u8; 3] = "seg"
+static mut s_query: [u8; 5] = "query"
+static mut s_enc: [u8; 3] = "enc"
+static mut s_dec: [u8; 3] = "dec"
+static mut s_prefix: [u8; 6] = "prefix"
+static mut s_resolve: [u8; 7] = "resolve"
+static mut s_children: [u8; 8] = "children"
+static mut s_sidebar: [u8; 7] = "sidebar"
+static mut s_lint: [u8; 4] = "lint"
+static mut s_crumbs: [u8; 6] = "crumbs"
+static mut s_fit: [u8; 3] = "fit"
+static mut s_push: [u8; 4] = "push"
+static mut s_back: [u8; 4] = "back"
+static mut s_forward: [u8; 7] = "forward"
+static mut s_up: [u8; 2] = "up"
+static mut s_aux: [u8; 3] = "aux"
+static mut s_index: [u8; 5] = "index"
+static mut s_row: [u8; 3] = "row"
+static mut s_search: [u8; 6] = "search"
+static mut s_find: [u8; 4] = "find"
+static mut s_rel: [u8; 7] = "related"
+static mut s_info: [u8; 4] = "info"
+static mut s_limit: [u8; 5] = "limit"
+static mut s_clear: [u8; 5] = "clear"
+
+fn run_cmd(p: u64, n: u64) {
+    split(p, n)
+    if cn == 0 || rd(p, 0) == 35 {
+        return
+    }
+    if eqw(0, (&s_valid[0]) as u64, 5) {
+        var v: u64 = 0
+        if route.valid(wp(1), wl(1)) {
+            v = 1
+        }
+        io.print("valid ")
+        pb(wp(1), wl(1))
+        io.fmt_print_line(f" {v}")
+        return
+    }
+    if eqw(0, (&s_canon[0]) as u64, 5) {
+        io.print("canon ")
+        pb(wp(1), wl(1))
+        let c: u64 = canon_of(1)
+        if c == 0 {
+            io.print_line(" -> invalid")
+        } else {
+            io.print(" -> ")
+            pb((&ub[0]) as u64, c)
+            io.new_line()
+        }
+        return
+    }
+    if eqw(0, (&s_depth[0]) as u64, 5) {
+        let d: u64 = route.depth(wp(1), wl(1))
+        io.fmt_print_line(f"depth {d}")
+        return
+    }
+    if eqw(0, (&s_parent[0]) as u64, 6) {
+        let pl: u64 = route.parent_len(wp(1), wl(1))
+        io.print("parent ")
+        if pl == route.NONE {
+            io.print_line("-")
+        } else {
+            pb(wp(1), pl)
+            io.new_line()
+        }
+        return
+    }
+    if eqw(0, (&s_seg[0]) as u64, 3) {
+        let i: u64 = num(2)
+        let o: u64 = route.seg_off(wp(1), wl(1), i)
+        io.print("seg ")
+        if o == route.NONE {
+            io.print_line("-")
+        } else {
+            pb(wp(1) + o, route.seg_len(wp(1), wl(1), i))
+            io.new_line()
+        }
+        return
+    }
+    if eqw(0, (&s_query[0]) as u64, 5) {
+        let o: u64 = route.query_get(wp(1), wl(1), wp(2), wl(2))
+        io.print("query ")
+        if o == route.NONE {
+            io.print_line("-")
+        } else {
+            var e: u64 = o
+            while e < wl(1) && rd(wp(1), e) != 38 {
+                e = e + 1
+            }
+            pb(wp(1) + o, e - o)
+            io.new_line()
+        }
+        return
+    }
+    if eqw(0, (&s_enc[0]) as u64, 3) {
+        let r: u64 = route.enc_seg((&ub[0]) as u64, 320, wp(1), wl(1))
+        io.print("enc ")
+        pb((&ub[0]) as u64, r)
+        io.new_line()
+        return
+    }
+    if eqw(0, (&s_dec[0]) as u64, 3) {
+        let r: u64 = route.dec_seg((&ub[0]) as u64, 320, wp(1), wl(1))
+        io.print("dec ")
+        if r == route.NONE {
+            io.print_line("invalid")
+        } else {
+            pb((&ub[0]) as u64, r)
+            io.new_line()
+        }
+        return
+    }
+    if eqw(0, (&s_prefix[0]) as u64, 6) {
+        var v: u64 = 0
+        if route.is_prefix(wp(1), wl(1), wp(2), wl(2)) {
+            v = 1
+        }
+        io.fmt_print_line(f"prefix {v}")
+        return
+    }
+    if eqw(0, (&s_resolve[0]) as u64, 7) {
+        let id: u64 = reg.resolve(wp(1), wl(1))
+        io.print("resolve ")
+        pb(wp(1), wl(1))
+        io.print(" -> ")
+        show_id(id)
+        let ro: u64 = reg.rest_off()
+        if id != reg.NONE && ro != reg.NONE {
+            io.print(" rest=")
+            pb(wp(1) + ro, wl(1) - ro)
+        }
+        io.new_line()
+        return
+    }
+    if eqw(0, (&s_children[0]) as u64, 8) {
+        let id: u64 = reg.find(wp(1), wl(1))
+        io.print("children ")
+        pb(wp(1), wl(1))
+        io.fmt_print_line(f" {reg.child_count(id)}")
+        var i: u64 = 0
+        while i < reg.child_count(id) {
+            io.print("  ")
+            pr_uri(reg.child_at(id, i))
+            io.new_line()
+            i = i + 1
+        }
+        return
+    }
+    if eqw(0, (&s_sidebar[0]) as u64, 7) {
+        let a: u64 = reg.app_find(wp(1), wl(1))
+        io.print("sidebar ")
+        pb(wp(1), wl(1))
+        if a == reg.NONE {
+            io.print_line(" none")
+            return
+        }
+        io.fmt_print_line(f" {reg.sidebar_count(a)}")
+        var i: u64 = 0
+        while i < reg.sidebar_count(a) {
+            io.print("  ")
+            pr_uri(reg.sidebar_at(a, i))
+            io.new_line()
+            i = i + 1
+        }
+        return
+    }
+    if eqw(0, (&s_lint[0]) as u64, 4) {
+        var over: u64 = 0
+        if cn > 1 {
+            over = num(1)
+        }
+        let c: u64 = reg.lint(over)
+        io.fmt_print_line(f"lint {c}")
+        var i: u64 = 0
+        while i < c {
+            io.fmt_print(f"  kind={reg.lint_kind(i)} ")
+            pr_uri(reg.lint_route(i))
+            io.new_line()
+            i = i + 1
+        }
+        return
+    }
+    if eqw(0, (&s_crumbs[0]) as u64, 6) {
+        let c: u64 = crumbs.build(wp(1), wl(1))
+        io.fmt_print_line(f"crumbs {c}")
+        var i: u64 = 0
+        while i < c {
+            io.fmt_print(f"  {i} ")
+            if crumbs.crumb_dynamic(i) {
+                io.print("seg=")
+                pb(wp(1) + crumbs.crumb_seg_off(i), crumbs.crumb_seg_len(i))
+            } else {
+                io.print("key=")
+                io.print_c(reg.title_key(crumbs.crumb_route(i)))
+            }
+            io.print(" uri=")
+            pb(wp(1), crumbs.crumb_len(i))
+            io.new_line()
+            i = i + 1
+        }
+        return
+    }
+    if eqw(0, (&s_fit[0]) as u64, 3) {
+        var i: u64 = 3
+        var k: u64 = 0
+        while i < cn {
+            widths[(k) as usize] = num(i)
+            k = k + 1
+            i = i + 1
+        }
+        let f: u64 = crumbs.fit((&widths[0]) as u64, k, num(1), num(2))
+        io.fmt_print_line(f"fit {f}")
+        return
+    }
+    if eqw(0, (&s_push[0]) as u64, 4) {
+        let h: u64 = num(1)
+        let ok: bool = stack.push(h, wp(2), wl(2))
+        cmd_stack(h, ok, 0)
+        return
+    }
+    if eqw(0, (&s_back[0]) as u64, 4) {
+        let h: u64 = num(1)
+        cmd_stack(h, stack.back(h), 0)
+        return
+    }
+    if eqw(0, (&s_forward[0]) as u64, 7) {
+        let h: u64 = num(1)
+        cmd_stack(h, stack.forward(h), 0)
+        return
+    }
+    if eqw(0, (&s_up[0]) as u64, 2) {
+        let h: u64 = num(1)
+        cmd_stack(h, stack.up(h), 0)
+        return
+    }
+    if eqw(0, (&s_aux[0]) as u64, 3) {
+        let h: u64 = num(1)
+        if cn > 2 {
+            stack.aux_set(h, num(2))
+        }
+        let a: u64 = stack.aux_get(h)
+        io.fmt_print_line(f"aux h{h} {a}")
+        return
+    }
+    if eqw(0, (&s_index[0]) as u64, 5) {
+        let id: u64 = reg.find(wp(1), wl(1))
+        let bar: u64 = find_bar(2)
+        let tl: u64 = join(2, bar, (&tb[0]) as u64)
+        var kl: u64 = 0
+        if bar < cn {
+            kl = join(bar + 1, cn, (&kb[0]) as u64)
+        }
+        var ok: u64 = 0
+        if id != reg.NONE && search.set(id, (&tb[0]) as u64, tl, (&kb[0]) as u64, kl) {
+            ok = 1
+        }
+        io.fmt_print_line(f"index {ok}")
+        return
+    }
+    if eqw(0, (&s_row[0]) as u64, 3) {
+        let id: u64 = reg.find(wp(1), wl(1))
+        let bar: u64 = find_bar(2)
+        let tl: u64 = join(2, bar, (&tb[0]) as u64)
+        var hl: u64 = 0
+        if bar < cn {
+            hl = join(bar + 1, cn, (&kb[0]) as u64)
+        }
+        let r: u64 = search.row_set(id, (&tb[0]) as u64, tl, (&kb[0]) as u64, hl)
+        io.fmt_print_line(f"row {r}")
+        return
+    }
+    if eqw(0, (&s_clear[0]) as u64, 5) {
+        search.clear()
+        io.print_line("clear")
+        return
+    }
+    if eqw(0, (&s_search[0]) as u64, 6) {
+        let ql: u64 = join(1, cn, (&tb[0]) as u64)
+        let c: u64 = search.query((&tb[0]) as u64, ql, (&hits[0]) as u64, 64)
+        io.print("search ")
+        pb((&tb[0]) as u64, ql)
+        io.fmt_print_line(f" {c}")
+        var i: u64 = 0
+        while i < c {
+            let h: u64 = hits[(i) as usize]
+            io.print("  ")
+            if h >= search.ROW_BASE {
+                io.print("row ")
+                pr_uri(search.row_route(h - search.ROW_BASE))
+                io.print(" hint=")
+                pb(search.row_hint(h - search.ROW_BASE), search.row_hint_len(h - search.ROW_BASE))
+            } else {
+                pr_uri(h)
+            }
+            io.new_line()
+            i = i + 1
+        }
+        return
+    }
+    if eqw(0, (&s_find[0]) as u64, 4) {
+        let id: u64 = reg.find(wp(1), wl(1))
+        let ql: u64 = join(2, cn, (&tb[0]) as u64)
+        let c: u64 = search.query((&tb[0]) as u64, ql, (&hits[0]) as u64, 64)
+        var found: u64 = 0
+        var i: u64 = 0
+        while i < c {
+            if hits[(i) as usize] == id {
+                found = 1
+            }
+            i = i + 1
+        }
+        io.print("find ")
+        pb(wp(1), wl(1))
+        if found == 1 {
+            io.print_line(" hit")
+        } else {
+            io.print_line(" miss")
+        }
+        return
+    }
+    if eqw(0, (&s_rel[0]) as u64, 7) {
+        let id: u64 = reg.find(wp(1), wl(1))
+        io.print("related ")
+        pb(wp(1), wl(1))
+        io.fmt_print_line(f" {reg.related_count(id)}")
+        var i: u64 = 0
+        while i < reg.related_count(id) {
+            io.print("  ")
+            io.print_c(reg.related_to(id, i))
+            io.print(" ")
+            io.print_c(reg.related_key(id, i))
+            io.new_line()
+            i = i + 1
+        }
+        return
+    }
+    if eqw(0, (&s_info[0]) as u64, 4) {
+        let id: u64 = reg.find(wp(1), wl(1))
+        io.print("info ")
+        pb(wp(1), wl(1))
+        if id == reg.NONE {
+            io.print_line(" none")
+            return
+        }
+        io.fmt_print(f" order={reg.order(id)} flags={reg.flags(id)} controls={reg.controls(id)} depth={reg.depth(id)} title=")
+        io.print_c(reg.title_key(id))
+        io.print(" sym=")
+        io.print_c(reg.icon_name(id))
+        io.print(" kw=")
+        if reg.kw_key(id) == 0 {
+            io.print("-")
+        } else {
+            io.print_c(reg.kw_key(id))
+        }
+        io.new_line()
+        return
+    }
+    if eqw(0, (&s_limit[0]) as u64, 5) {
+        reg.limit_set(num(1))
+        io.fmt_print_line(f"limit {reg.app_limit(0)}")
+        return
+    }
+    io.print("unknown ")
+    pb(p, n)
+    io.new_line()
+}
+
+fn load_section(buf: u64, at: u64, e: u64, mode: u64, num: u64) {
+    var n: u64 = 0
+    if mode == 1 {
+        n = loader.add_pkg(buf + at, e - at, (&dirbuf[0]) as u64)
+    } else {
+        if mode == 2 {
+            n = loader.load(buf + at, e - at)
+        } else {
+            n = loader.add(buf + at, e - at)
+        }
+    }
+    if n == loader.ERR {
+        let code: u64 = reg.err_code()
+        let ln: u64 = reg.err_line()
+        io.fmt_print_line(f"section {num} error {code} line {ln} routes={reg.count()} apps={reg.app_count()}")
+        return
+    }
+    let w: u64 = loader.warn_count()
+    io.fmt_print_line(f"section {num} ok routes={n} warns={w} total={reg.count()} apps={reg.app_count()}")
+}
+
+fn main() -> i32 {
+    var b: rt.Buf = rt.buf_new()
+    io.read_stdin(&b)
+    let buf: u64 = b.ptr as u64
+    let len: u64 = b.len as u64
+    reg.reset()
+    search.clear()
+    var at: u64 = 0
+    var sec_at: u64 = 0
+    var in_sec: bool = false
+    var mode: u64 = 0
+    var sn: u64 = 0
+    while at < len {
+        var e: u64 = at
+        while e < len && rd(buf, e) != 10 {
+            e = e + 1
+        }
+        if rd(buf, at) == 37 && at + 1 < len && rd(buf, at + 1) == 37 {
+            if in_sec && mode != 3 {
+                load_section(buf, sec_at, at, mode, sn)
+            }
+            mode = 0
+            sn = sn + 1
+            if e - at > 7 && rd(buf, at + 3) == 112 && rd(buf, at + 4) == 107 && rd(buf, at + 5) == 103 {
+                mode = 1
+                var k: u64 = 0
+                var q: u64 = at + 7
+                while q < e && k < 63 && rd(buf, q) != 32 && rd(buf, q) != 13 {
+                    dirbuf[(k) as usize] = (rd(buf, q) & 255) as u8
+                    k = k + 1
+                    q = q + 1
+                }
+                dirbuf[(k) as usize] = 0 as u8
+            }
+            if e - at >= 7 && rd(buf, at + 3) == 108 && rd(buf, at + 4) == 111 && rd(buf, at + 5) == 97 && rd(buf, at + 6) == 100 {
+                mode = 2
+            }
+            if e - at >= 6 && rd(buf, at + 3) == 114 && rd(buf, at + 4) == 117 && rd(buf, at + 5) == 110 {
+                mode = 3
+            }
+            in_sec = true
+            sec_at = e + 1
+            if sec_at > len {
+                sec_at = len
+            }
+        } else {
+            if in_sec && mode == 3 {
+                var le: u64 = e
+                if le > at && rd(buf, le - 1) == 13 {
+                    le = le - 1
+                }
+                run_cmd(buf + at, le - at)
+            }
+        }
+        at = e + 1
+    }
+    if in_sec && mode != 3 {
+        load_section(buf, sec_at, len, mode, sn)
+    }
+    return 0
+}
