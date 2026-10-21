@@ -1,6 +1,6 @@
 # PLAN-8000-LOADER (HP-9) -- Intel family 8000 (8260/8265) firmware loader
 
-Status 21.10.2026: HP-9a done (host model + gate `tools/wlan/fh8000.sh`, library `lib/wlan/iwl_fh8000.fi`); HP-9b/c open. Boot code (`iwlboot`) prints `iwl: boot unsupported (family 8000 loader: HP-9)` and writes nothing.
+Status 21.10.2026: HP-9a done (host model + gate `tools/wlan/fh8000.sh`, library `lib/wlan/iwl_fh8000.fi`); HP-9b done (kernel glue `kernel/drv/net/iwl.fi` `fh8000_boot`/`fh8000_fake`, fake CSR window `kernel/drv/net/iwl_fake.fi`, gate `tools/iwlfh/run.sh` 23/0); HP-9c open (real HP only). `iwlboot` on a family-8000 device now powers up, runs `fh_load` and waits for ALIVE (`iwl: fh RC/STAT`, `iwl: boot rc=`); NOT MEASURED on silicon. QEMU: word `iwlfhtest` (+ `iwlfhlost`, `iwlfhbad` controls).
 Facts below are from the Linux iwlwifi source (read as specification, raw.githubusercontent.com/torvalds/linux/master, 21.10.2026). OrientOS code is an own implementation; nothing is copied.
 
 ## 1. Device IDs and firmware names (verified)
