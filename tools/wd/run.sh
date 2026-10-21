@@ -26,6 +26,8 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 echo "== A. corner radius 8 (r1001) =="
 is "osum.shape radius_window" "$(val x radius_window < assets/shapes/osum.shape)" 8
 is "osum.shape radius_panel"  "$(val x radius_panel  < assets/shapes/osum.shape)" 8
+is "modern.shape radius_window" "$(val x radius_window < assets/shapes/modern.shape)" 8
+is "COUNTER-PROOF old modern.shape radius_window was" "$(old assets/shapes/modern.shape | val x radius_window)" 10
 is "tageslicht preset radius" "$(val x radius < assets/themes/tageslicht.preset)" 8
 if bash tools/tokens/run.sh > "$T/tok.txt" 2>&1; then ok "tokens gate (R_LARGE = 8 = osum radius_window, order small < medium <= large) $(tail -1 "$T/tok.txt")"; else bad "tokens gate"; tail -5 "$T/tok.txt"; fi
 # counter-proof: the OLD tree says 12 -> the same assertion must be red
