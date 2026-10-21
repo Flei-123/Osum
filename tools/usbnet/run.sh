@@ -42,7 +42,7 @@ if [ -x "$T/oracle" ]; then
     sed -n 's/^FAIL /  FAIL  oracle: /p' "$T/out.txt"
     [ "$rc" = 0 ] && ok "oracle exits 0 (no panic)" || bad "oracle exit code $rc"
     [ "$nbad" = 0 ] && ok "oracle: no FAIL line" || bad "oracle: $nbad FAIL lines"
-    [ "$nok" -ge 35 ] && ok "oracle: $nok promises OK (>= 35)" || bad "oracle: only $nok OK (< 35)"
+    [ "$nok" -ge 50 ] && ok "oracle: $nok promises OK (>= 50)" || bad "oracle: only $nok OK (< 50)"
     pass=$((pass+nok))
 fi
 
@@ -78,6 +78,10 @@ mutate runt          's/if dl < 14 || dl > 9216 { return false }//'
 mutate hdr_offset    's/if off < PACKET_HDR_LEN { return false }//'
 mutate offset_trap   's/put32(dst, 8, PACKET_HDR_LEN - 8)/put32(dst, 8, PACKET_HDR_LEN)/'
 mutate status        's/return le32(p, 12) == STATUS_SUCCESS/return true/'
+mutate keepalive_id 's/return build_keepalive_c(dst, msg_id(p, n))/return build_keepalive_c(dst, 0)/'
+mutate keepalive_len 's/    return msg_len(p, n) == 12/    return true/'
+mutate indicate_disc 's/if st == STATUS_MEDIA_DISCONNECT { return LINK_DOWN }//'
+mutate link_off 's/if off + 4 > msg_len(p, n) { return LINK_NONE }//'
 mutate mac_ascii     's/hi_hi != 0 || lo_hi != 0/false/'
 
 # test-bed facts

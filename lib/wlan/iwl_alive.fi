@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_probe
+import wlan.iwl_pwr
+
+export {
+    alive_wait, boot_fw,
+    E_ALIVE_TIMEOUT, E_ALIVE_HW, E_ALIVE_SW,
+    INT_ALIVE_BIT, INT_SW_ERR, INT_HW_ERR
+}
+
+const INT_ALIVE_BIT: u64 = 0x1
+const INT_SW_ERR: u64 = 0x02000000
+const INT_HW_ERR: u64 = 0x20000000
+
+const E_ALIVE_TIMEOUT: i64 = -30
+const E_ALIVE_HW: i64 = -31
+const E_ALIVE_SW: i64 = -32
+
+fn rd_int(p: *mut iwl_probe.Probe) -> u64 {
+    let m: iwl_probe.Mmio = (*p).m
+    (*p).reads = (*p).reads + 1
+    return m.rd32((*p).ctx, iwl_probe.CSR_INT) & 0xFFFFFFFF
+}
+
+fn ack_int(p: *mut iwl_probe.Probe, bits: u64) {
+    let m: iwl_probe.Mmio = (*p).m
+    (*p).writes = (*p).writes + 1
+    m.wr32((*p).ctx, iwl_probe.CSR_INT, bits)
+}
+
+fn alive_wait(p: *mut iwl_probe.Probe) -> i64 {
+    var i: u64 = 0
+    while i < iwl_pwr.POLL_MAX {
+        let v: u64 = rd_int(p)
+        if v == 0xFFFFFFFF { return E_ALIVE_HW }
+        if v & INT_HW_ERR != 0 {
+            ack_int(p, INT_HW_ERR)
+            return E_ALIVE_HW
+        }
+        if v & INT_SW_ERR != 0 {
+            ack_int(p, INT_SW_ERR)
+            return E_ALIVE_SW
+        }
+        if v & INT_ALIVE_BIT != 0 {
+            ack_int(p, INT_ALIVE_BIT)
+            return 0
+        }
+        i = i + 1
+    }
+    return E_ALIVE_TIMEOUT
+}
+
+fn boot_fw(p: *mut iwl_probe.Probe, ba: u64) -> i64 {
+    var r: i64 = iwl_pwr.power_up(p)
+    if r != 0 { return r }
+    r = iwl_pwr.fw_kick(p, ba)
+    if r != 0 { return r }
+    r = alive_wait(p)
+    if r != 0 {
+        iwl_pwr.int_disable(p)
+    }
+    return r
+}
