@@ -2557,15 +2557,24 @@ fn sleep_tot(state: u64, ticks: u64) {
         n = 2
     }
     let t0: u64 = kstate.get(state, kstate.TICKS)
-    let slice: u64 = hz / 1000
     let next: u64 = tot_last[me as usize] + n * per
     tot_waits = tot_waits + 1
-    while apic.tsc() < next && kstate.get(state, kstate.TICKS) == t0 {
-        let end: u64 = apic.tsc() + slice
-        while apic.tsc() < end && apic.tsc() < next {
-            asm("pause")
-        }
+    // r1321 (boss VM freeze after a click, 20.10.2026): the old wait spun on `pause` for the whole span with
+    // interrupts OFF (a syscall sleeper, e.g. nanosleep). Dump of the frozen boss VM: vCPU2 sat in this
+    // loop for 22 minutes without a single exit, vCPU0/1 halted, VirtSync "catchup" lag 1310 s and growing,
+    // all TM counters frozen -- only Pause/Resume woke it. VirtualBox catches its virtual-sync clock up while
+    // vCPUs are IDLE (HLT), never while one burns exit-free: so the wait now HALTS (interrupts on for the
+    // halt only) and wakes with the next interrupt (BSP tick 10 ms, AP tick 100 ms, IPIs, input), after a
+    // `yield_now` that lets other ready tasks of the core run first. Never more than two tick lengths.
+    var guard: u64 = 0
+    while apic.tsc() < next && kstate.get(state, kstate.TICKS) == t0 && guard < 4 {
         yield_now(state)
+        if apic.tsc() < next && kstate.get(state, kstate.TICKS) == t0 {
+            let fl: u64 = irq_save()
+            asm("sti\nhlt")
+            irq_restore(fl)
+        }
+        guard = guard + 1
     }
     tot_last[me as usize] = apic.tsc()
 }
