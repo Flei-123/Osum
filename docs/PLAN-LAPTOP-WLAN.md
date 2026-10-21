@@ -92,3 +92,9 @@ Build-Reihenfolge dieser Runde: LW-1 und LW-2 parallel (Unterworker, disjunkte D
 - Firmware-Redistribution: Intel-Lizenz erlaubt unveraenderte Weitergabe; wir checken nichts ein (SHA-256-Pin), Datei vom Nutzer/Installer. Lizenztext vor einem Paket im Store neu lesen.
 - Secure Boot und Surface-Tastatur koennen den ersten Test blockieren (siehe 4.4).
 - RNDIS-Handys: manche brauchen Keepalive und Konfigurationswechsel; ohne echtes Handy nur gegen QEMU geprueft.
+
+## Nachtrag 21.10.: Ziel-Laptop HP X3U19AV hat Intel 8265, nicht AX201
+
+- Zielgerät laut HP-Datenblatt: Intel Dual Band Wireless-AC 8265 (PCI 8086:24fd, Familie „8000“). Details und Quellen: `docs/PLAN-HP-LAPTOP.md`.
+- Unterschied zu AX201 (Qu): kein CNVi, kein Context-Info; Firmware (`iwlwifi-8265-*.ucode`) wird über das ältere Chunk-Verfahren (FH-Kanäle, Sektionen einzeln) geladen. `lib/wlan/iwl_probe.fi` kennt 8265 nicht (`family_of` = FAM_NONE) — die Inventur (`hwinv`) meldet `wlan=8086:24fd intel-8265 driver=none`.
+- Folge: LW-1a/3a/2a (AX201) helfen dem HP nicht direkt; wiederverwendbar sind 802.11/WPA-Teile in `lib/wlan`. Für den HP zuerst USB-Ethernet/Tethering (LW-USB), 8265-Treiber als eigener Punkt (HP-9).

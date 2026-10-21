@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import hwinv.report
+import hwinv.buf
+
+export { u_start }
+
+const BUF: u64 = 4096
+const PASS_MS: u64 = 15000
+
+static mut b_pci: [u8; 4096] = [0 as u8; 4096]
+static mut b_usb: [u8; 4096] = [0 as u8; 4096]
+static mut b_fw: [u8; 1024] = [0 as u8; 1024]
+
+fn slurp(path: u64, dst: u64, cap: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var at: u64 = 0
+    var going: bool = true
+    while going && at < cap - 1 {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, dst + at, cap - 1 - at)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            at = at + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return at
+}
+
+fn collect() -> u64 {
+    var p_pci: [u8; 10] = "/proc/pci\0"
+    var p_usb: [u8; 10] = "/proc/usb\0"
+    var p_fw: [u8; 15] = "/proc/firmware\0"
+    let n_pci: u64 = slurp((&p_pci[0]) as u64, (&b_pci[0]) as u64, BUF)
+    let n_usb: u64 = slurp((&p_usb[0]) as u64, (&b_usb[0]) as u64, BUF)
+    let n_fw: u64 = slurp((&p_fw[0]) as u64, (&b_fw[0]) as u64, 1024)
+    return report.build((&b_pci[0]) as u64, n_pci, (&b_usb[0]) as u64, n_usb, (&b_fw[0]) as u64, n_fw)
+}
+
+fn store(path: u64, len: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        return 2
+    }
+    ulib.sys(ulib.SYS_WRITE, fd, buf.out_ptr(), len)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var f_d: [u8; 3] = "-d\0"
+    var e_w: [u8; 25] = "hwinv: cannot write file\0"
+    var ok_w: [u8; 14] = "hwinv: wrote \0"
+    var argi: u64 = 1
+    var delayed: bool = false
+    if ulib.arg_count(args) >= 2 && ulib.streq(ulib.arg_at(args, 1), (&f_d[0]) as u64) {
+        delayed = true
+        argi = 2
+    }
+    var path: u64 = 0
+    if ulib.arg_count(args) > argi {
+        path = ulib.arg_at(args, argi)
+    }
+    if delayed {
+        ulib.sleep_ms(PASS_MS)
+    }
+    var len: u64 = collect()
+    if path == 0 {
+        ulib.put(buf.out_ptr(), len)
+        return 0
+    }
+    if store(path, len) != 0 {
+        ulib.say((&e_w[0]) as u64)
+        ulib.nl()
+        return 2
+    }
+    ulib.say((&ok_w[0]) as u64)
+    ulib.sayu(len)
+    ulib.nl()
+    if delayed {
+        ulib.sleep_ms(PASS_MS * 2)
+        len = collect()
+        store(path, len)
+    }
+    return 0
+}

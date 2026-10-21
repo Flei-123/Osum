@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import hwinv.report
+import hwinv.buf
+
+static mut bufs: [u8; 6144] = [0 as u8; 6144]
+static mut bufn: u64 = 0
+
+fn lit(s: str) -> u64 {
+    if bufn + (s.n as u64) + 1 > 6144 {
+        bufn = 0
+    }
+    let at: u64 = (&bufs[0 as usize]) as u64 + bufn
+    var i: usize = 0
+    while i < s.n {
+        *((at + i as u64) as *mut u8) = rt.ld8(s.p as u64, i) as u8
+        i = i + 1
+    }
+    *((at + s.n as u64) as *mut u8) = 0 as u8
+    bufn = bufn + (s.n as u64) + 1
+    return at
+}
+
+fn len(p: u64) -> u64 {
+    var n: u64 = 0
+    while *((p + n) as *mut u8) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn run(pci: str, usb: str, fw: str) {
+    let a: u64 = lit(pci)
+    let b: u64 = lit(usb)
+    let c: u64 = lit(fw)
+    report.build(a, len(a), b, len(b), c, len(c))
+}
+
+fn has(s: str) -> bool {
+    let p: u64 = buf.out_ptr()
+    let w: u64 = lit(s)
+    return buf.contains(p, buf.out_len(), w)
+}
+
+fn main() -> i32 {
+    run("00:00.0 0600 8086:5904 irq=0\n00:02.0 0300 8086:5916 irq=11\n00:14.0 0c03 8086:9d2f irq=11\n00:15.0 1180 8086:9d60 irq=16\n00:15.1 1180 8086:9d61 irq=17\n00:16.0 0780 8086:9d3a irq=11\n00:1f.3 0403 8086:9d71 irq=11\n02:00.0 0280 8086:24fd irq=17\n03:00.0 0108 144d:a804 irq=16\n",
+        "8087:0a2b port=1 hub=0 speed=full class=e0/01/01 if=e0/01/01 driver=none hc=xhci kind=x\n04f2:b5ab port=3 hub=0 speed=high class=ef/02/01 if=0e/01/00 driver=none hc=xhci kind=x\n",
+        "boot_mode: UEFI\nsecure_boot: unknown\nframebuffer: 1920x1080 bpp=32\n")
+    chk("hp profile: firmware UEFI", has("hwinv: firmware=UEFI\n"))
+    chk("hp profile: nvme storage", has("hwinv: storage=nvme\n"))
+    chk("hp profile: storage ok", has("hwinv: storage_verdict=ok\n"))
+    chk("hp profile: gpu hd620", has("hwinv: gpu=8086:5916 intel-hd620\n"))
+    chk("hp profile: wlan 8265 without driver", has("hwinv: wlan=8086:24fd intel-8265 driver=none\n"))
+    chk("hp profile: audio hda id", has("hwinv: audio=8086:9d71 \n"))
+    chk("hp profile: two serial io i2c", has("hwinv: serialio_i2c=2\n"))
+    chk("hp profile: pointing i2c possible", has("hwinv: pointing=i2c-possible\n"))
+    chk("hp profile: xhci 1", has("hwinv: xhci=1\n"))
+    chk("hp profile: me 1", has("hwinv: me=1\n"))
+    chk("hp profile: usb bt", has("hwinv: usb_bt=1\n"))
+    chk("hp profile: usb camera", has("hwinv: usb_camera=1\n"))
+    chk("hp profile: ethernet none", has("hwinv: ethernet=none\n"))
+    chk("hp profile: raw pci copied", has("== pci ==\n00:00.0 0600 8086:5904"))
+
+    run("00:1f.2 0104 8086:282a irq=11\n00:02.0 0300 8086:5916 irq=11\n",
+        "", "boot_mode: UEFI\n")
+    chk("rst raid: storage raid", has("hwinv: storage=raid\n"))
+    chk("rst raid: verdict names the BIOS fix", has("storage_verdict=raid-rst-nvme-hidden (BIOS: set SATA mode to AHCI"))
+    chk("rst raid: not ok", !has("storage_verdict=ok"))
+
+    run("00:1f.2 0106 8086:9d03 irq=11\n03:00.0 0108 144d:a804 irq=16\n", "", "boot_mode: UEFI\n")
+    chk("ahci+nvme: both kinds", has("hwinv: storage=ahci+nvme\n"))
+
+    run("00:00.0 0600 8086:1237 irq=0\n00:02.0 0300 1234:1111 irq=11\n00:03.0 0200 8086:100e irq=11\n",
+        "0627:0001 port=1 hub=0 speed=full class=00/00/00 if=03/01/01 driver=keyboard hc=xhci kind=x\n",
+        "boot_mode: BIOS\n")
+    chk("qemu: firmware BIOS", has("hwinv: firmware=BIOS\n"))
+    chk("qemu: no disk", has("hwinv: storage=none\n"))
+    chk("qemu: verdict no-disk", has("storage_verdict=no-disk"))
+    chk("qemu: gpu is qemu", has("hwinv: gpu=1234:1111 qemu\n"))
+    chk("qemu: wlan none", has("hwinv: wlan=none\n"))
+    chk("qemu: ethernet listed", has("hwinv: ethernet=8086:100e \n"))
+    chk("qemu: pointing not i2c", has("hwinv: pointing=ps2-or-unlisted\n"))
+    chk("qemu: usb kbd 1", has("hwinv: usb_kbd=1\n"))
+    run("", "", "")
+    chk("empty input: no crash, no disk", has("hwinv: storage=none\n"))
+    chk("empty input: firmware unknown", has("hwinv: firmware=unknown\n"))
+    return 0
+}
