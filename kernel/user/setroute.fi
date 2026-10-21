@@ -6,11 +6,12 @@ import nav.stack
 import nav.search
 import nav.crumbs
 import nav.route
+import nav.fromman
 
 export {
     NONE, init, ready, page_route, route_page, page_title, note_page, resolve_page, current_uri, current_uri_len,
     go_back, go_forward, go_up, can_back, can_forward, can_up, flat_count, flat_route, flat_depth, flat_page,
-    flat_title, group_shown, query_pages, page_shown, top_page, hit_count, state_line, load_error, open_uri,
+    flat_title, group_shown, queue_package, query_pages, page_shown, top_page, hit_count, state_line, load_error, open_uri,
 }
 
 const NONE: u64 = 4294967295
@@ -34,6 +35,14 @@ static mut hit_ids: [u64; 64] = [0 as u64; 64]
 static mut line: [u8; 160] = [0 as u8; 160]
 static mut uri_buf: [u8; 256] = [0 as u8; 256]
 static mut query_on: u64 = 0
+const PK_MAX: u64 = 8
+const PK_CAP: u64 = 768
+const PK_NAME: u64 = 48
+static mut pk_buf: [u8; 6144] = [0 as u8; 6144]
+static mut pk_len: [u64; 8] = [0 as u64; 8]
+static mut pk_tab: [u64; 8] = [0 as u64; 8]
+static mut pk_name: [u8; 384] = [0 as u8; 384]
+static mut pk_n: u64 = 0
 
 fn rd(p: u64, i: u64) -> u64 {
     return route.rd(p, i)
@@ -117,9 +126,53 @@ fn flat_add(rt: u64, dep: u64) {
     n_flat = n_flat + 1
 }
 
-fn build_flat() {
-    n_flat = 0
-    let root: u64 = reg.app_root(0)
+fn queue_package(src: u64, len: u64, name: u64, tab0: u64, want: u64) -> u64 {
+    if is_ready == 1 || pk_n >= PK_MAX {
+        return 0
+    }
+    let nl: u64 = reg.text_len(name)
+    if nl == 0 || nl >= PK_NAME {
+        return 0
+    }
+    let out: u64 = ((&pk_buf[0]) as u64) + pk_n * PK_CAP
+    let n: u64 = fromman.convert(src, len, out, PK_CAP)
+    if n == fromman.NONE || fromman.pages() != want {
+        return 0
+    }
+    let dst: u64 = ((&pk_name[0]) as u64) + pk_n * PK_NAME
+    var i: u64 = 0
+    while i < nl {
+        route.wr(dst, i, route.rd(name, i))
+        i = i + 1
+    }
+    route.wr(dst, nl, 0)
+    pk_len[(pk_n) as usize] = n
+    pk_tab[(pk_n) as usize] = tab0
+    pk_n = pk_n + 1
+    return 1
+}
+
+fn apply_packages() {
+    var k: u64 = 0
+    while k < pk_n {
+        let before: u64 = reg.count()
+        let out: u64 = ((&pk_buf[0]) as u64) + k * PK_CAP
+        let nm: u64 = ((&pk_name[0]) as u64) + k * PK_NAME
+        if loader.add_pkg(out, pk_len[(k) as usize], nm) != loader.ERR {
+            var id: u64 = before
+            var t: u64 = pk_tab[(k) as usize]
+            while id < reg.count() && id < 192 && t < MAXP {
+                page_rt[(t) as usize] = id
+                rt_page[(id) as usize] = t
+                id = id + 1
+                t = t + 1
+            }
+        }
+        k = k + 1
+    }
+}
+
+fn flat_app(root: u64) {
     var i: u64 = 0
     while i < reg.child_count(root) {
         let top: u64 = reg.child_at(root, i)
@@ -136,6 +189,11 @@ fn build_flat() {
         }
         i = i + 1
     }
+}
+
+fn build_flat() {
+    n_flat = 0
+    flat_app(reg.app_root(0))
 }
 
 fn init() -> bool {
@@ -159,6 +217,7 @@ fn init() -> bool {
         return false
     }
     parse_map()
+    apply_packages()
     build_flat()
     stack.reset(H)
     is_ready = 1
