@@ -1,60 +1,60 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// lib/crypto/aes.fi -- AES (FIPS 197) und die vier Betriebsarten, die
-// 802.11 braucht.
+// lib/crypto/aes.fi -- AES (FIPS 197) and the four modes of operation that
+// 802.11 needs.
 //
 // ==================================================================
-// WARUM ES DIESE DATEI GIBT, obwohl im Baum schon ein AES liegt
+// WHY THIS FILE EXISTS although the tree already contains an AES
 // ==================================================================
 //
-// `vendor/firn/lib/std/crypto/aes.fi` sagt in seinem eigenen Kopf, was
-// es ist: AES-128 mit CBC und CFB8. Das ist fuer den Zweck, fuer den es
-// geschrieben wurde, richtig, und fuer WLAN reicht es an vier Stellen
-// nicht:
+// `vendor/firn/lib/std/crypto/aes.fi` says in its own header what
+// it is: AES-128 with CBC and CFB8. That is right for the purpose it was
+// written for, and for WLAN it falls short in four places:
 //
-//   * KEIN CCM. CCMP -- die Verschluesselung, die WPA2 und WPA3 fuer
-//     jeden einzelnen Rahmen benutzen -- ist AES im CCM-Modus. Ohne CCM
-//     gibt es kein WPA2.
-//   * KEIN CMAC. Der Pruefwert (MIC) der EAPOL-Key-Rahmen ist bei den
-//     SHA-256-Verfahren und bei WPA3 AES-CMAC und nicht HMAC.
-//   * KEIN KEY WRAP. Der Gruppenschluessel GTK kommt in Nachricht 3
-//     des Handschlags eingepackt nach RFC 3394 an. Ohne Auspacken gibt
-//     es keinen Rundruf-Empfang.
-//   * NUR 128 BIT. Fuer CCMP-128 reicht das; fuer die
-//     256-Bit-Verfahren nicht.
 //
-// Und `kernel/user/key.fi` sagt an seiner Zeile 16 dasselbe ueber
-// dieselbe Datei. Diese hier ist deshalb eine eigene, nach denselben
-// Regeln wie `sha256.fi` und `sha1.fi`: KEINE `profile`-Zeile, KEIN
-// `import`, kein Allokator, kein Systemaufruf, aller Zustand beim
-// Aufrufer.
+//   * NO CCM. CCMP -- the encryption that WPA2 and WPA3 use for
+//     every single frame -- is AES in CCM mode. Without CCM
+//     there is no WPA2.
+//   * NO CMAC. The check value (MIC) of the EAPOL key frames is AES-CMAC,
+//     not HMAC, for the SHA-256 methods and for WPA3.
+//   * NO KEY WRAP. The group key GTK arrives in message 3
+//     of the handshake wrapped according to RFC 3394. Without unwrapping
+//     there is no broadcast reception.
+//   * ONLY 128 BIT. That is enough for CCMP-128; not for the
+//     256-bit methods.
 //
-// ==================================================================
-// WIE AES HIER GERECHNET WIRD, und warum ohne die grossen Tabellen
-// ==================================================================
-//
-// Die uebliche schnelle Umsetzung faltet SubBytes, ShiftRows und
-// MixColumns in vier Tabellen zu je 1 KiB (T0..T3). Das ist schnell und
-// hat zwei Nachteile, die hier beide zaehlen:
-//
-//   1. 4 KiB Tabellen in einem statisch gelinkten Kern (Roadmap A9),
-//      fuer eine Rechnung, die pro Rahmen einmal laeuft.
-//   2. Tabellenzugriffe, deren INDEX vom Schluessel abhaengt, sind der
-//      klassische Weg fuer Zwischenspeicher-Angriffe.
-//
-// Diese Datei rechnet deshalb Oktett fuer Oktett: eine S-Box von 256
-// Eintraegen, ihre Umkehrung, und die Multiplikation im Koerper ueber
-// Verdopplung. Das ist langsamer und fuer eine WLAN-Verbindung, die
-// ueber die Firmware laeuft, vollkommen ausreichend.
-//
-// EHRLICH DAZU: das ist NICHT konstantzeitig. Die S-Box ist eine
-// Tabelle, und `sbox[x]` mit geheimem x hat auf einem Rechner mit
-// Zwischenspeicher eine Laufzeit, die vom Wert abhaengt. Wer das
-// wirklich braucht, braucht AES-NI (die Befehle AESENC/AESENCLAST), und
-// die stehen auf jedem x86-64 seit 2010 zur Verfuegung. Das waere eine
-// eigene Runde und steht in `docs/WLAN-BEFUND.md` NICHT als erledigt.
+// And `kernel/user/key.fi` says the same about the same file on its
+// line 16. This one is therefore a separate file, built by the same
+// rules as `sha256.fi` and `sha1.fi`: NO `profile` line, NO
+// `import`, no allocator, no system call, all state with the
+// caller.
 //
 // ==================================================================
-// WAS DRIN IST
+// HOW AES IS COMPUTED HERE, and why without the big tables
+// ==================================================================
+//
+// The usual fast implementation folds SubBytes, ShiftRows and
+// MixColumns into four tables of 1 KiB each (T0..T3). That is fast and
+// has two drawbacks, and both count here:
+//
+//   1. 4 KiB of tables in a statically linked kernel (roadmap A9),
+//      for a computation that runs once per frame.
+//   2. Table accesses whose INDEX depends on the key are the
+//      classic route for cache attacks.
+//
+// This file therefore computes octet by octet: an S-box of 256
+// entries, its inverse, and the multiplication in the field via
+// doubling. That is slower and entirely sufficient for a WLAN link
+// that runs through the firmware.
+//
+// TO BE HONEST: this is NOT constant-time. The S-box is a
+// table, and `sbox[x]` with a secret x has, on a machine with a
+// cache, a run time that depends on the value. Whoever really
+// needs that needs AES-NI (the instructions AESENC/AESENCLAST), and
+// those exist on every x86-64 since 2010. That would be a round of
+// its own and is NOT listed as done in `docs/WLAN-BEFUND.md`.
+//
+// ==================================================================
+// WHAT IS IN HERE
 // ==================================================================
 //
 //   key_set / encrypt_block / decrypt_block    FIPS 197
@@ -62,21 +62,21 @@
 //   key_wrap / key_unwrap                       RFC 3394
 //   ccm_encrypt / ccm_decrypt                   RFC 3610
 //
-// Gemessen (tools/wlan/vektoren.py) gegen die Vektoren aus FIPS 197
-// Anhang C, RFC 4493, RFC 3394 Abschnitt 4 und gegen OpenSSL ueber
-// Pythons `cryptography` fuer CCM.
+// Measured (tools/wlan/vektoren.py) against the vectors from FIPS 197
+// appendix C, RFC 4493, RFC 3394 section 4 and against OpenSSL via
+// Python's `cryptography` for CCM.
 
 export { Key, key_new, key_set, encrypt_block, decrypt_block,
     cmac, key_wrap, key_unwrap, ccm_encrypt, ccm_decrypt,
     BLOCK, MAX_RK }
 
 const BLOCK: usize = 16
-// 4 * (14 + 1) * 4 = 240 Oktette Rundenschluessel bei AES-256.
+// 4 * (14 + 1) * 4 = 240 octets of round keys for AES-256.
 const MAX_RK: usize = 240
 
 struct Key {
     rk: [u8; 240],
-    nr: usize, // Zahl der Runden: 10, 12 oder 14
+    nr: usize, // number of rounds: 10, 12 or 14
     gesetzt: bool,
 }
 
@@ -90,8 +90,8 @@ fn st8(p: u64, i: usize, v: u8) {
 
 // ------------------------------------------------------------ S-Box
 //
-// FIPS 197, Abbildung 7. Das ist die einzige Tabelle in dieser Datei,
-// die man nicht rechnen kann, ohne den Koerper zu invertieren.
+// FIPS 197, figure 7. This is the only table in this file that
+// cannot be computed without inverting the field.
 fn sbox(i: u64) -> u8 {
     let t: [u8; 256] = [
     0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
@@ -134,7 +134,7 @@ fn rsbox(i: u64) -> u8 {
     return t[i as usize]
 }
 
-// Verdopplung im Koerper GF(2^8) mit dem Modulpolynom x^8+x^4+x^3+x+1
+// Doubling in the field GF(2^8) with the modulus polynomial x^8+x^4+x^3+x+1
 // (0x11B). FIPS 197 4.2.1.
 fn xtime(a: u64) -> u64 {
     let s: u64 = (a << 1) & 255
@@ -144,7 +144,7 @@ fn xtime(a: u64) -> u64 {
     return s
 }
 
-// Multiplikation im Koerper, russische Bauernmultiplikation.
+// Multiplication in the field, Russian peasant multiplication.
 fn gmul(a: u64, b: u64) -> u64 {
     var x: u64 = a & 255
     var y: u64 = b & 255
@@ -165,8 +165,8 @@ fn key_new() -> Key {
     return Key { rk: [0 as u8; 240], nr: 0, gesetzt: false }
 }
 
-// FIPS 197 5.2, Schluesselplan. `klen` in Oktetten: 16, 24 oder 32.
-// Alles andere wird ABGELEHNT und nicht etwa aufgefuellt.
+// FIPS 197 5.2, key schedule. `klen` in octets: 16, 24 or 32.
+// Anything else is REJECTED, not padded.
 fn key_set(k: *mut Key, key: u64, klen: usize) -> bool {
     (*k).gesetzt = false
     if klen != 16 && klen != 24 && klen != 32 {
@@ -180,7 +180,7 @@ fn key_set(k: *mut Key, key: u64, klen: usize) -> bool {
         (*k).rk[i] = ld8(key, i)
         i = i + 1
     }
-    // Rcon: 1, 2, 4, 8, ... im Koerper verdoppelt.
+    // Rcon: 1, 2, 4, 8, ... doubled in the field.
     var rcon: u64 = 1
     var w: usize = nk
     let gesamt: usize = 4 * (nr + 1)
@@ -192,7 +192,7 @@ fn key_set(k: *mut Key, key: u64, klen: usize) -> bool {
             j = j + 1
         }
         if w % nk == 0 {
-            // RotWord, dann SubWord, dann Rcon auf das erste Oktett.
+            // RotWord, then SubWord, then Rcon on the first octet.
             let tmp: u8 = t[0]
             t[0] = sbox(t[1] as u64)
             t[1] = sbox(t[2] as u64)
@@ -201,7 +201,7 @@ fn key_set(k: *mut Key, key: u64, klen: usize) -> bool {
             t[0] = (t[0] as u64 ^ rcon) as u8
             rcon = xtime(rcon)
         } else {
-            // Nur bei AES-256 gibt es die zweite Ausnahme.
+            // Only AES-256 has the second exception.
             if nk > 6 && w % nk == 4 {
                 j = 0
                 while j < 4 {
@@ -229,8 +229,8 @@ fn add_round_key(s: *mut [u8; 16], k: *mut Key, r: usize) {
     }
 }
 
-// Der Zustand liegt spaltenweise: s[r + 4c]. ShiftRows verschiebt Zeile
-// r um r Stellen nach LINKS.
+// The state is stored column by column: s[r + 4c]. ShiftRows shifts row
+// r by r places to the LEFT.
 fn shift_rows(s: *mut [u8; 16]) {
     let t1: u8 = (*s)[1]
     (*s)[1] = (*s)[5]
@@ -276,12 +276,12 @@ fn mix_columns(s: *mut [u8; 16]) {
         let a1: u64 = (*s)[c * 4 + 1] as u64
         let a2: u64 = (*s)[c * 4 + 2] as u64
         let a3: u64 = (*s)[c * 4 + 3] as u64
-        // RUNDE KRYPTO: `gmul(x, 2)` und `gmul(x, 3)` statt ueber die
-        // allgemeine Bauernmultiplikation (eine Schleife ueber acht
-        // Bits) direkt ueber `xtime`. Bei MixColumns sind die
-        // Faktoren IMMER 2 und 3, und `gmul(x,3)` ist `xtime(x) ^ x`.
-        // GEMESSEN: der Schritt allein bringt die Verschluesselung
-        // eines Sektors von 3,7 auf 2,4 ms.
+        // ROUND KRYPTO: `gmul(x, 2)` and `gmul(x, 3)` directly via `xtime`
+        // instead of via the general peasant multiplication (a loop over
+        // eight bits). In MixColumns the factors
+        // are ALWAYS 2 and 3, and `gmul(x,3)` is `xtime(x) ^ x`.
+        // MEASURED: this step alone brings the encryption
+        // of one sector from 3.7 down to 2.4 ms.
         let d0: u64 = xtime(a0)
         let d1: u64 = xtime(a1)
         let d2: u64 = xtime(a2)
@@ -313,7 +313,7 @@ fn inv_mix_columns(s: *mut [u8; 16]) {
     }
 }
 
-// FIPS 197 5.1. `in` und `out` duerfen dieselbe Stelle sein.
+// FIPS 197 5.1. `in` and `out` may be the same location.
 fn encrypt_block(k: *mut Key, inp: u64, out: u64) {
     var s: [u8; 16] = [0 as u8; 16]
     var i: usize = 0
@@ -348,9 +348,9 @@ fn encrypt_block(k: *mut Key, inp: u64, out: u64) {
     }
 }
 
-// FIPS 197 5.3, die geradlinige Umkehrung (nicht die aequivalente
-// Form). CCM und CMAC brauchen sie nicht -- CCM benutzt AES
-// ausschliesslich vorwaerts --, das Auspacken nach RFC 3394 schon.
+// FIPS 197 5.3, the straightforward inverse (not the equivalent
+// form). CCM and CMAC do not need it -- CCM uses AES
+// only in the forward direction --, but unwrapping per RFC 3394 does.
 fn decrypt_block(k: *mut Key, inp: u64, out: u64) {
     var s: [u8; 16] = [0 as u8; 16]
     var i: usize = 0
@@ -387,8 +387,8 @@ fn decrypt_block(k: *mut Key, inp: u64, out: u64) {
 
 // ------------------------------------------------- CMAC, RFC 4493
 //
-// Die Verschiebung um ein Bit nach links mit 0x87 als Ruecknahme ist
-// die Multiplikation mit x im Koerper GF(2^128). RFC 4493 3.2.
+// The shift left by one bit with 0x87 as the reduction is
+// the multiplication by x in the field GF(2^128). RFC 4493 3.2.
 fn shift_left_1(b: *mut [u8; 16]) {
     var uebertrag: u64 = 0
     var i: usize = 16
@@ -426,14 +426,14 @@ fn subkey(k: *mut Key, k1: *mut [u8; 16], k2: *mut [u8; 16]) {
     }
 }
 
-// AES-CMAC ueber eine Nachricht. `out` bekommt 16 Oktette.
+// AES-CMAC over a message. `out` receives 16 octets.
 //
-// DIE ZWEI FAELLE, und sie sind der ganze Unterschied: eine Nachricht,
-// deren Laenge ein Vielfaches von 16 ist UND groesser als null, nimmt
-// K1 und wird NICHT aufgefuellt. Alles andere -- auch die LEERE
-// Nachricht -- nimmt K2 und bekommt ein 0x80 und Nullen. Die leere
-// Nachricht dem ersten Fall zuzuschlagen ist der haeufigste Fehler und
-// faellt nur mit dem ersten Vektor aus RFC 4493 auf.
+// THE TWO CASES, and they are the whole difference: a message
+// whose length is a multiple of 16 AND greater than zero takes
+// K1 and is NOT padded. Everything else -- the EMPTY
+// message too -- takes K2 and gets a 0x80 and zeros. Assigning the empty
+// message to the first case is the most common mistake and
+// is only caught by the first vector from RFC 4493.
 fn cmac(key: u64, klen: usize, msg: u64, mlen: usize, out: u64) -> bool {
     var k: Key = key_new()
     if !key_set(&k, key, klen) {
@@ -459,7 +459,7 @@ fn cmac(key: u64, klen: usize, msg: u64, mlen: usize, out: u64) -> bool {
         encrypt_block(&k, (&b[0]) as u64, (&x[0]) as u64)
         n = n + 1
     }
-    // Der letzte Block.
+    // The last block.
     var rest: usize = mlen - full * 16
     var last: [u8; 16] = [0 as u8; 16]
     if mlen > 0 && rest == 16 {
@@ -497,18 +497,18 @@ fn cmac(key: u64, klen: usize, msg: u64, mlen: usize, out: u64) -> bool {
 
 // --------------------------------------------- Key Wrap, RFC 3394
 //
-// Der Anfangswert A6A6A6A6A6A6A6A6 ist die ganze Pruefung: beim
-// Auspacken muss er wieder herauskommen. Das ist kein MAC, aber es ist
-// genug, um einen falschen Schluessel und ein verdrehtes Paket zu
-// erkennen -- und genau dafuer benutzt der 4-Wege-Handschlag es.
+// The initial value A6A6A6A6A6A6A6A6 is the whole check: when
+// unwrapping it has to come out again. That is no MAC, but it is
+// enough to detect a wrong key and a scrambled packet
+// -- and that is exactly what the 4-way handshake uses it for.
 //
-// GRENZE: bis zu 256 Oktette Klartext. Die erste Fassung stand auf 64
-// -- mit der Begruendung "das reicht fuer jeden GTK". Das war falsch
-// und der Test hat es sofort gefunden: die Schluesseldaten einer echten
-// Nachricht 3 (wpa-Induction.pcap) sind 80 Oktette eingepackt, weil
-// darin nicht nur der Gruppenschluessel steht, sondern auch noch
-// einmal das ganze RSN-Element. 256 ist die Obergrenze fuer alles, was
-// in einen EAPOL-Key-Rahmen passt, und kostet 256 Oktette Stapel.
+// LIMIT: up to 256 octets of plaintext. The first version was set to 64
+// -- with the reasoning "that is enough for any GTK". That was wrong
+// and the test found it at once: the key data of a real
+// message 3 (wpa-Induction.pcap) are 80 octets wrapped, because
+// it holds not only the group key but also
+// the whole RSN element once more. 256 is the upper bound for anything that
+// fits into an EAPOL key frame, and costs 256 octets of stack.
 const WRAP_MAX: usize = 256
 
 fn key_wrap(kek: u64, keklen: usize, plain: u64, plen: usize,
@@ -541,19 +541,19 @@ fn key_wrap(kek: u64, keklen: usize, plain: u64, plen: usize,
                 i = i + 1
             }
             encrypt_block(&k, (&b[0]) as u64, (&c[0]) as u64)
-            let zaehler: u64 = (n * j + t) as u64
+            let counter: u64 = (n * j + t) as u64
             i = 0
             while i < 8 {
                 a[i] = c[i]
                 i = i + 1
             }
-            // Der Zaehler wird auf die UNTEREN Oktette von A gelegt,
-            // hoechstwertiges zuerst; bei n <= 8 beruehrt er nur das
-            // letzte. Trotzdem alle acht, damit es auch fuer grosse n
-            // stimmt.
+            // The counter is placed on the LOWER octets of A,
+            // most significant first; for n <= 8 it only touches the
+            // last one. All eight anyway, so that it is also right for large n.
+            //
             i = 0
             while i < 8 {
-                a[7 - i] = a[7 - i] ^ (((zaehler >> (i as u64 * 8))
+                a[7 - i] = a[7 - i] ^ (((counter >> (i as u64 * 8))
                     & 255) as u8)
                 i = i + 1
             }
@@ -608,7 +608,7 @@ fn key_unwrap(kek: u64, keklen: usize, cipher: u64, clen: usize,
         j = j - 1
         var t: usize = n
         while t >= 1 {
-            let zaehler: u64 = (n * j + t) as u64
+            let counter: u64 = (n * j + t) as u64
             i = 0
             while i < 8 {
                 b[i] = a[i]
@@ -616,7 +616,7 @@ fn key_unwrap(kek: u64, keklen: usize, cipher: u64, clen: usize,
             }
             i = 0
             while i < 8 {
-                b[7 - i] = b[7 - i] ^ (((zaehler >> (i as u64 * 8))
+                b[7 - i] = b[7 - i] ^ (((counter >> (i as u64 * 8))
                     & 255) as u8)
                 i = i + 1
             }
@@ -635,7 +635,7 @@ fn key_unwrap(kek: u64, keklen: usize, cipher: u64, clen: usize,
             t = t - 1
         }
     }
-    // DIE PRUEFUNG. Ohne sie ist das Auspacken wertlos.
+    // THE CHECK. Without it unwrapping is worthless.
     var gut: bool = true
     i = 0
     while i < 8 {
@@ -657,21 +657,21 @@ fn key_unwrap(kek: u64, keklen: usize, cipher: u64, clen: usize,
 
 // ------------------------------------------------------ CCM, RFC 3610
 //
-// CCM ist Zaehlermodus zur Verschluesselung plus CBC-MAC zur Sicherung,
-// mit DEMSELBEN Schluessel. Das ist normalerweise ein Fehler; hier ist
-// es bewiesen sicher, weil die beiden Rechnungen durch die Kennzeichen
-// im ersten Block streng getrennte Eingaberaeume haben.
+// CCM is counter mode for encryption plus CBC-MAC for integrity,
+// with the SAME key. That is normally a mistake; here it is
+// proven safe, because the two computations have strictly separate input spaces
+// through the flags in the first block.
 //
-// DIE DREI ZAHLEN, die alles bestimmen:
-//   L   Groesse des Laengenfeldes, 2..8. Ergibt sich aus der Nonce:
-//       L = 15 - Noncelaenge.
-//   M   Groesse des Pruefwerts, gerade, 4..16.
-//   n   Laenge der Nachricht, muss in L Oktette passen.
+// THE THREE NUMBERS that determine everything:
+//   L   size of the length field, 2..8. Follows from the nonce:
+//       L = 15 - nonce length.
+//   M   size of the check value, even, 4..16.
+//   n   length of the message, must fit into L octets.
 //
-// CCMP setzt L = 2 (Nonce 13 Oktette) und M = 8. Diese Funktion kann
-// mehr, damit sie gegen die allgemeinen Vektoren messbar ist.
+// CCMP sets L = 2 (13-octet nonce) and M = 8. This function can do
+// more, so that it can be measured against the general vectors.
 
-fn ccm_pruefe(nlen: usize, mlen: usize, m: usize) -> bool {
+fn ccm_check(nlen: usize, mlen: usize, m: usize) -> bool {
     if nlen < 7 || nlen > 13 {
         return false
     }
@@ -679,15 +679,15 @@ fn ccm_pruefe(nlen: usize, mlen: usize, m: usize) -> bool {
         return false
     }
     let l: usize = 15 - nlen
-    // Passt die Laenge in L Oktette? Bei L >= 8 immer.
+    // Does the length fit into L octets? Always, for L >= 8.
     if l < 8 {
-        var grenze: u64 = 1
+        var limit: u64 = 1
         var i: usize = 0
         while i < l {
-            grenze = grenze * 256
+            limit = limit * 256
             i = i + 1
         }
-        if (mlen as u64) >= grenze {
+        if (mlen as u64) >= limit {
             return false
         }
     }
@@ -705,16 +705,16 @@ fn cbc_schritt(k: *mut Key, x: *mut [u8; 16], blk: *mut [u8; 16]) {
     encrypt_block(k, (&t[0]) as u64, (&(*x)[0]) as u64)
 }
 
-// Der Pruefwert T ueber B0, die zusaetzlichen Daten und die Nachricht.
-// `msg` ist immer der KLARTEXT -- auch beim Entschluesseln, deshalb
-// wird dort erst entschluesselt und dann gerechnet.
+// The check value T over B0, the additional data and the message.
+// `msg` is always the PLAINTEXT -- also when decrypting, which is why
+// decryption happens first and the computation after it.
 fn ccm_mac(k: *mut Key, nonce: u64, nlen: usize, aad: u64, alen: usize,
     msg: u64, mlen: usize, m: usize, t: u64) {
     let l: usize = 15 - nlen
     var x: [u8; 16] = [0 as u8; 16]
     var b: [u8; 16] = [0 as u8; 16]
 
-    // B0: Kennzeichen, Nonce, Laenge.
+    // B0: flags, nonce, length.
     var flags: u64 = ((m as u64 - 2) / 2) * 8 + (l as u64 - 1)
     if alen > 0 {
         flags = flags + 64
@@ -732,11 +732,11 @@ fn ccm_mac(k: *mut Key, nonce: u64, nlen: usize, aad: u64, alen: usize,
     }
     cbc_schritt(k, &x, &b)
 
-    // Die zusaetzlichen Daten, mit vorangestellter Laenge.
-    // RFC 3610 zaehlt drei Faelle; hier ist nur der erste umgesetzt
-    // (0 < a < 2^16 - 2^8), weil 802.11 nie mehr als ein paar Dutzend
-    // Oktette an AAD hat. Groesseres wird nicht falsch gerechnet,
-    // sondern von `ccm_encrypt` abgelehnt.
+    // The additional data, with the length in front.
+    // RFC 3610 lists three cases; only the first one is implemented here
+    // (0 < a < 2^16 - 2^8), because 802.11 never has more than a few dozen
+    // octets of AAD. Larger input is not computed wrongly,
+    // but rejected by `ccm_encrypt`.
     if alen > 0 {
         i = 0
         while i < 16 {
@@ -771,7 +771,7 @@ fn ccm_mac(k: *mut Key, nonce: u64, nlen: usize, aad: u64, alen: usize,
         }
     }
 
-    // Die Nachricht, mit Nullen aufgefuellt.
+    // The message, padded with zeros.
     if mlen > 0 {
         var im_block: usize = 0
         var gelesen: usize = 0
@@ -810,7 +810,7 @@ fn ccm_mac(k: *mut Key, nonce: u64, nlen: usize, aad: u64, alen: usize,
     }
 }
 
-// Der Zaehlerblock A_i.
+// The counter block A_i.
 fn ccm_a(nonce: u64, nlen: usize, i: u64, a: *mut [u8; 16]) {
     let l: usize = 15 - nlen
     var j: usize = 0
@@ -831,9 +831,9 @@ fn ccm_a(nonce: u64, nlen: usize, i: u64, a: *mut [u8; 16]) {
     }
 }
 
-// Zaehlermodus ueber `n` Oktette ab `src` nach `dst`, beginnend bei
-// Block `start`. Fuer S_0 (den Schleier des Pruefwerts) wird `start`
-// auf 0 gesetzt und genau ein Block gebraucht.
+// Counter mode over `n` octets from `src` to `dst`, starting at
+// block `start`. For S_0 (the veil of the check value) `start`
+// is set to 0 and exactly one block is needed.
 fn ccm_ctr(k: *mut Key, nonce: u64, nlen: usize, start: u64,
     src: u64, dst: u64, n: usize) {
     var a: [u8; 16] = [0 as u8; 16]
@@ -855,13 +855,13 @@ fn ccm_ctr(k: *mut Key, nonce: u64, nlen: usize, start: u64,
 
 const AAD_MAX: usize = 65280
 
-// Ausgabe: `mlen` Oktette Schluesseltext, dann `m` Oktette Pruefwert.
+// Output: `mlen` octets of ciphertext, then `m` octets of check value.
 fn ccm_encrypt(k: *mut Key, nonce: u64, nlen: usize, aad: u64,
     alen: usize, msg: u64, mlen: usize, m: usize, out: u64) -> bool {
     if !(*k).gesetzt {
         return false
     }
-    if !ccm_pruefe(nlen, mlen, m) {
+    if !ccm_check(nlen, mlen, m) {
         return false
     }
     if alen > AAD_MAX {
@@ -869,7 +869,7 @@ fn ccm_encrypt(k: *mut Key, nonce: u64, nlen: usize, aad: u64,
     }
     var t: [u8; 16] = [0 as u8; 16]
     ccm_mac(k, nonce, nlen, aad, alen, msg, mlen, m, (&t[0]) as u64)
-    // Der Pruefwert wird mit S_0 verschleiert, die Nachricht ab S_1.
+    // The check value is veiled with S_0, the message from S_1 on.
     var s0: [u8; 16] = [0 as u8; 16]
     var null: [u8; 16] = [0 as u8; 16]
     ccm_ctr(k, nonce, nlen, 0, (&null[0]) as u64, (&s0[0]) as u64, 16)
@@ -882,10 +882,10 @@ fn ccm_encrypt(k: *mut Key, nonce: u64, nlen: usize, aad: u64,
     return true
 }
 
-// `clen` schliesst den Pruefwert EIN. Ausgabe: `clen - m` Oktette.
-// Rueckgabe false heisst: der Pruefwert stimmt nicht. Dann steht in
-// `out` zwar schon entschluesselter Unsinn -- der Aufrufer darf ihn
-// NICHT benutzen, und `ccmp.fi` tut das auch nicht.
+// `clen` INCLUDES the check value. Output: `clen - m` octets.
+// Returning false means: the check value does not match. Then `out`
+// already holds decrypted nonsense -- the caller must
+// NOT use it, and `ccmp.fi` does not either.
 fn ccm_decrypt(k: *mut Key, nonce: u64, nlen: usize, aad: u64,
     alen: usize, ct: u64, clen: usize, m: usize, out: u64) -> bool {
     if !(*k).gesetzt {
@@ -895,7 +895,7 @@ fn ccm_decrypt(k: *mut Key, nonce: u64, nlen: usize, aad: u64,
         return false
     }
     let mlen: usize = clen - m
-    if !ccm_pruefe(nlen, mlen, m) {
+    if !ccm_check(nlen, mlen, m) {
         return false
     }
     if alen > AAD_MAX {
@@ -907,8 +907,8 @@ fn ccm_decrypt(k: *mut Key, nonce: u64, nlen: usize, aad: u64,
     var s0: [u8; 16] = [0 as u8; 16]
     var null: [u8; 16] = [0 as u8; 16]
     ccm_ctr(k, nonce, nlen, 0, (&null[0]) as u64, (&s0[0]) as u64, 16)
-    // Vergleich OHNE fruehen Ausstieg: die Laufzeit darf nicht sagen,
-    // wieviele Oktette gestimmt haben.
+    // Comparison WITHOUT early exit: the run time must not reveal
+    // how many octets matched.
     var diff: u64 = 0
     var i: usize = 0
     while i < m {

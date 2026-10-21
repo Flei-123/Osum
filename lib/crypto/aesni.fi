@@ -1,123 +1,123 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// lib/crypto/aesni.fi -- AES auf den Befehlen der Maschine, Runde AESNI
+// lib/crypto/aesni.fi -- AES on the machine's own instructions, round AESNI
 // (K-020).
 //
 // ==================================================================
-// WARUM ES DIESE DATEI GIBT
+// WHY THIS FILE EXISTS
 // ==================================================================
 //
-// `lib/crypto/aes.fi` rechnet Oktett fuer Oktett ueber eine S-Box.
-// Das ist richtig -- gegen FIPS 197, RFC 4493, RFC 3394 und OpenSSL
-// gemessen -- und fuer den Zweck, fuer den es geschrieben wurde (WLAN,
-// einmal AES je Rahmen), vollkommen ausreichend. Fuer eine PLATTE ist
-// es das nicht:
+// `lib/crypto/aes.fi` computes octet by octet through an S-box.
+// That is correct -- measured against FIPS 197, RFC 4493, RFC 3394 and OpenSSL
+// -- and entirely sufficient for the purpose it was written for (WLAN,
+// one AES per frame). For a DISK it is
+// not:
 //
-//     XTS, ein Sektor (512 Oktette)      897,87 us      0,544 MiB/s
-//     ein AES-256-Block (16 Oktette)      25,37 us
+//     XTS, one sector (512 octets)       897.87 us      0.544 MiB/s
+//     one AES-256 block (16 octets)       25.37 us
 //
-// Ein Megaoktett kostet damit rund zwei Sekunden. Die Ursache liegt
-// nicht in `xts.fi`: von den 898 us eines Sektors sind 32 * 25,37 =
-// 812 us die Chiffre selbst. Gemessen mit `aesbench` im Orakel, nicht
-// geschaetzt.
+// One megaoctet therefore costs about two seconds. The cause is
+// not in `xts.fi`: of the 898 us of one sector, 32 * 25.37 =
+// 812 us are the cipher itself. Measured with `aesbench` in the oracle, not
+// estimated.
 //
-// Seit 2010 hat jeder x86-64 die Befehle AESENC/AESENCLAST/AESDEC/
-// AESDECLAST/AESKEYGENASSIST. Eine Runde AES ist damit EIN Befehl
-// statt sechzehn S-Box-Zugriffen, vier ShiftRows-Vertauschungen und
-// vier MixColumns-Spalten.
-//
-// ==================================================================
-// WAS DIESE DATEI NICHT TUT: SIE ERSETZT `aes.fi` NICHT
-// ==================================================================
-//
-// `aes.fi` bleibt Zeile fuer Zeile stehen, und zwar aus drei Gruenden:
-//
-//   1. NICHT JEDE MASCHINE HAT DIE BEFEHLE. Ein Kern, der AESENC ohne
-//      Pruefung ausfuehrt, stirbt auf aelterer Hardware mit #UD. Der
-//      Rueckfallweg ist kein Zugestaendnis, er ist der Normalfall auf
-//      allem vor Westmere.
-//   2. WLAN UND SSH HAENGEN AN DERSELBEN DATEI. `aes.fi` traegt CCM,
-//      CMAC und Key Wrap; die WLAN-Abnahme sind 171 Zusagen mit einem
-//      echten WPA2-Mitschnitt darin. Diese Runde fasst davon nichts an.
-//   3. DIE TABELLENFASSUNG IST DIE GEGENPROBE. Zwei unabhaengige Wege,
-//      die Oktett fuer Oktett dasselbe liefern muessen, sind mehr wert
-//      als einer, dem man glauben muss. `tools/aesni/run.sh` faehrt
-//      genau das nach (Kreisprobe, alle drei Schluessellaengen).
-//
-// Die Wahl faellt deshalb NICHT in dieser Datei, sondern beim Aufrufer:
-// `aesni.usable()` fragt `cpuid`, und wer sie nicht bekommt, rechnet
-// weiter wie bisher.
+// Since 2010 every x86-64 has the instructions AESENC/AESENCLAST/AESDEC/
+// AESDECLAST/AESKEYGENASSIST. One round of AES is thereby ONE instruction
+// instead of sixteen S-box lookups, four ShiftRows permutations and
+// four MixColumns columns.
 //
 // ==================================================================
-// WARUM `asm` UND KEINE ASSEMBLERDATEI, KEINE HAND-KODIERUNG
+// WHAT THIS FILE DOES NOT DO: IT DOES NOT REPLACE `aes.fi`
 // ==================================================================
 //
-// Der Auftrag nennt drei Wege in dieser Reihenfolge: Firn direkt, sonst
-// eine `.s`-Datei nach dem Vorbild von `boot.s`, sonst die Oktette von
-// Hand. Gemessen wurde, BEVOR gebaut wurde, und der erste Weg traegt:
-// firnc uebersetzt `asm("aesenc xmm0,xmm1")` und `asm("pclmulqdq ...")`
-// ohne weiteres, und die Ergebnisse stimmen byteweise gegen eine
-// unabhaengige Nachbildung (siehe docs/RUNDE-AESNI.md Abschnitt 1).
-// Damit gibt es keinen Grund fuer den Umweg -- und der billigste Weg
-// ist der, den man nicht baut.
+// `aes.fi` stays exactly as it is, for three reasons:
+//
+//   1. NOT EVERY MACHINE HAS THE INSTRUCTIONS. A kernel that executes AESENC without
+//      checking dies with #UD on older hardware. The
+//      fallback path is no concession, it is the normal case on
+//      everything before Westmere.
+//   2. WLAN AND SSH DEPEND ON THE SAME FILE. `aes.fi` carries CCM,
+//      CMAC and key wrap; the WLAN acceptance is 171 assertions with a
+//      real WPA2 capture in it. This round touches none of it.
+//   3. THE TABLE VERSION IS THE COUNTER-PROOF. Two independent paths
+//      that must deliver the same octet for octet are worth more
+//      than one that has to be believed. `tools/aesni/run.sh` runs
+//      exactly that (round trip, all three key lengths).
+//
+// The choice is therefore NOT made in this file but by the caller:
+// `aesni.usable()` asks `cpuid`, and whoever does not get it keeps
+// computing as before.
 //
 // ==================================================================
-// DIE REGELN FUER `asm` IN DIESER SPRACHE, teuer gelernt
+// WHY `asm` AND NO ASSEMBLER FILE, NO HAND ENCODING
 // ==================================================================
 //
-//   * `rbx` IST NICHT ZU HABEN. Firn traegt darin den Rahmen. Jedes
-//     `cpuid` rettet es selbst (`push rbx` / `pop rbx`) -- dasselbe tun
-//     `rand.has_rdseed` und `fpu.cpuid_*`.
-//   * DIE SCHLEIFE GEHOERT IN DEN BLOCK. `kernel/fb.fi` hat das
-//     gemessen: ein `asm` je Bloeckchen, mit der Schleife in Firn
-//     darum, brachte Faktor 1,9 statt der erwarteten 4 bis 8 -- der
-//     Rahmen um den Block herum kostete mehr als die Rechnung darin.
-//     Deshalb steht hier `dec rcx / jnz` INNERHALB des Blocks.
-//   * KEIN xmm OHNE FREISCHALTUNG. In Ring 0 ist das erste `movdqu`
-//     ein #UD, wenn CR4.OSFXSR fehlt. Der Riegel heisst
-//     `fpu.enabled(state)` und gehoert dem Aufrufer im Kern; diese
-//     Datei kennt `kstate` nicht (sie soll auch auf dem Wirt laufen).
+// The task names three ways in this order: Firn directly, else
+// a `.s` file modelled on `boot.s`, else the octets by
+// hand. It was measured BEFORE building, and the first way holds:
+// firnc translates `asm("aesenc xmm0,xmm1")` and `asm("pclmulqdq ...")`
+// without further ado, and the results match byte for byte against an
+// independent re-implementation (see docs/RUNDE-AESNI.md section 1).
+// So there is no reason for the detour -- and the cheapest way
+// is the one you do not build.
 //
 // ==================================================================
-// WIE DER SCHLUESSELPLAN ENTSTEHT
+// THE RULES FOR `asm` IN THIS LANGUAGE, learned the hard way
 // ==================================================================
 //
-// AESKEYGENASSIST liefert SubWord(RotWord(x)) xor Rcon in den oberen
-// 32 Bit -- den Rest (die drei XOR-Ketten) rechnet diese Datei mit
-// `pshufd` und `pslldq` daneben. Das ist das uebliche Verfahren aus
-// Intels Anwendungsschrift AP-931.
-//
-// AES-192 IST DER UNANGENEHME FALL: sein Schluessel ist 24 Oktette, und
-// ein xmm fasst 16. Der Plan entsteht deshalb in Sechser-Woertern ueber
-// zwei Register, und genau dort verrechnet man sich. DIESE DATEI RECHNET
-// DEN PLAN DESHALB NICHT SELBST: sie nimmt den Plan, den `aes.key_set`
-// schon gebaut hat -- dieselben 240 Oktette, gegen FIPS 197 gemessen --
-// und laedt ihn nur in die Register. Damit ist der Schluesselplan
-// per Konstruktion derselbe wie in der Tabellenfassung, fuer alle drei
-// Laengen, und die Kreisprobe kann sich auf die RECHNUNG beschraenken.
-//
-// FUER DAS ENTSCHLUESSELN gilt eine Eigenheit der Befehle: AESDEC will
-// die Rundenschluessel in der Form, die AESIMC (InvMixColumns) daraus
-// macht -- alle ausser dem ersten und dem letzten. `dec_prepare`
-// erzeugt diesen zweiten Plan einmal je Schluessel.
+//   * `rbx` IS NOT AVAILABLE. Firn keeps the frame in it. Every
+//     `cpuid` saves it itself (`push rbx` / `pop rbx`) -- `rand.has_rdseed` and
+//     `fpu.cpuid_*` do the same.
+//   * THE LOOP BELONGS INSIDE THE BLOCK. `kernel/fb.fi` measured
+//     it: one `asm` per small block, with the loop in Firn
+//     around it, gave a factor of 1.9 instead of the expected 4 to 8 -- the
+//     frame around the block cost more than the computation inside.
+//     That is why `dec rcx / jnz` sits INSIDE the block here.
+//   * NO xmm WITHOUT ENABLING IT. In ring 0 the first `movdqu`
+//     is a #UD if CR4.OSFXSR is missing. The latch is called
+//     `fpu.enabled(state)` and belongs to the caller in the kernel; this
+//     file does not know `kstate` (it is meant to run on the host as well).
 //
 // ==================================================================
-// EHRLICH
+// HOW THE KEY SCHEDULE COMES ABOUT
 // ==================================================================
 //
-// E1 KONSTANTZEITIG. Anders als die Tabellenfassung ist dieser Weg es:
-//    AESENC ist ein Befehl mit fester Laufzeit, es gibt keinen
-//    Tabellenzugriff, dessen Adresse vom Schluessel abhaengt. Das ist
-//    ein Nebengewinn dieser Runde und behebt den roten Punkt 2 aus
-//    docs/RUNDE-KRYPTO.md -- allerdings nur auf dem AES-NI-Weg; wer
-//    zurueckfaellt, rechnet weiter ueber die Tabelle.
-// E2 KEIN CCM, KEIN CMAC, KEIN KEY WRAP hier. Diese Datei kann
-//    Bloecke, sonst nichts. Die Betriebsarten bleiben in `aes.fi`.
-//    Sie koennten diese Bloecke benutzen; das ist eine eigene Runde
-//    und wird hier nicht behauptet.
-// E3 DIE 8-BLOCK-SCHLEIFE IST NUR VORWAERTS GEBAUT (`ctr`-artig nicht
-//    noetig). XTS braucht das Verketten ueber den Tweak, und der haengt
-//    vom vorigen Block ab -- verschraenkt wird deshalb in `xts_enc8`,
-//    wo die acht Tweaks VORHER feststehen.
+// AESKEYGENASSIST delivers SubWord(RotWord(x)) xor Rcon in the upper
+// 32 bits -- the rest (the three XOR chains) this file computes with
+// `pshufd` and `pslldq` on the side. That is the usual method from
+// Intel's application note AP-931.
+//
+// AES-192 IS THE UNPLEASANT CASE: its key is 24 octets, and
+// an xmm holds 16. The schedule therefore comes about in words of six over
+// two registers, and that is exactly where one miscalculates. THIS FILE DOES NOT
+// COMPUTE THE SCHEDULE ITSELF: it takes the schedule that `aes.key_set`
+// has already built -- the same 240 octets, measured against FIPS 197 --
+// and only loads it into the registers. That makes the key schedule
+// the same by construction as in the table version, for all three
+// lengths, and the round trip can restrict itself to the COMPUTATION.
+//
+// FOR DECRYPTION an oddity of the instructions applies: AESDEC wants
+// the round keys in the form that AESIMC (InvMixColumns) makes of them
+// -- all except the first and the last. `dec_prepare`
+// builds this second schedule once per key.
+//
+// ==================================================================
+// HONESTLY
+// ==================================================================
+//
+// E1 CONSTANT TIME. Unlike the table version this path is:
+//    AESENC is an instruction with a fixed run time, there is no
+//    table access whose address depends on the key. That is
+//    a side benefit of this round and fixes red item 2 of
+//    docs/RUNDE-KRYPTO.md -- but only on the AES-NI path; whoever
+//    falls back keeps computing through the table.
+// E2 NO CCM, NO CMAC, NO KEY WRAP here. This file can do
+//    blocks, nothing else. The modes of operation stay in `aes.fi`.
+//    They could use these blocks; that is a round of its own
+//    and is not claimed here.
+// E3 THE 8-BLOCK LOOP IS BUILT FORWARD ONLY (`ctr`-style is not
+//    needed). XTS needs the chaining through the tweak, and that depends
+//    on the previous block -- so interleaving happens in `xts_enc8`,
+//    where the eight tweaks are known BEFOREHAND.
 
 export {
     usable, pclmul_usable,
@@ -127,10 +127,10 @@ export {
     RK_BYTES
 }
 
-// 15 Rundenschluessel zu 16 Oktetten, ausgerichtet gehalten vom
-// Aufrufer (ein Feld in einer Struktur reicht -- `movdqu` verlangt
-// keine Ausrichtung, und die paar Prozent, die `movdqa` braechte,
-// sind den Absturz bei krummer Lage nicht wert).
+// 15 round keys of 16 octets each, kept aligned by the
+// caller (a field in a struct is enough -- `movdqu` demands
+// no alignment, and the few percent that `movdqa` would bring
+// are not worth the crash on a misaligned address).
 const RK_BYTES: usize = 240
 
 struct Enc {
@@ -155,9 +155,9 @@ fn st8(p: u64, i: usize, v: u8) {
 
 // ---------------------------------------------------------- `cpuid`
 //
-// Blatt 1, ECX: Bit 25 ist AES-NI, Bit 1 ist PCLMULQDQ. `rbx` traegt
-// den Rahmen und wird gerettet -- derselbe Griff wie in
-// `kernel/rand.fi` und `kernel/arch/x86_64/fpu.fi`.
+// Leaf 1, ECX: bit 25 is AES-NI, bit 1 is PCLMULQDQ. `rbx` carries
+// the frame and is saved -- the same move as in
+// `kernel/rand.fi` and `kernel/arch/x86_64/fpu.fi`.
 
 fn cpuid_c(leaf: u64, sub: u64) -> u64 {
     return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\nmov eax, ecx\npop rbx",
@@ -170,15 +170,15 @@ fn cpuid_max() -> u64 {
         out("rax"), clobber("rcx"), clobber("rdx"))
 }
 
-// OB DIE MASCHINE DIE BEFEHLE HAT. Das ist die eine Frage, die VOR
-// jedem `aesenc` beantwortet sein muss; ein `aesenc` auf einer Maschine
-// ohne AES-NI ist ein #UD, und in Ring 0 ist das der Tod des Kerns.
+// WHETHER THE MACHINE HAS THE INSTRUCTIONS. This is the one question that must be
+// answered BEFORE any `aesenc`; an `aesenc` on a machine
+// without AES-NI is a #UD, and in ring 0 that is the death of the kernel.
 //
-// Die Freischaltung der Vektoreinheit (CR4.OSFXSR) ist DAMIT NICHT
-// GEPRUEFT -- sie gehoert dem Kern und steht in `fpu.enabled`. Diese
-// Datei kann sie nicht sehen, weil sie `kstate` nicht kennt (sie laeuft
-// auch auf dem Wirt, wo CR4 dem Betriebssystem gehoert). WER SIE IM
-// KERN BENUTZT, MUSS BEIDES FRAGEN.
+// Enabling the vector unit (CR4.OSFXSR) is NOT CHECKED BY THIS --
+// it belongs to the kernel and lives in `fpu.enabled`. This
+// file cannot see it because it does not know `kstate` (it also runs
+// on the host, where CR4 belongs to the operating system). WHOEVER USES IT IN
+// THE KERNEL MUST ASK BOTH.
 // cpuid is a VM exit under a hypervisor: answer once per question (0 = not asked, 1 = yes, 2 = no).
 static mut usable_memo: u64 = 0
 static mut pclmul_memo: u64 = 0
@@ -215,11 +215,11 @@ fn pclmul_usable() -> bool {
     return yes
 }
 
-// ------------------------------------------------- die Schluesselplaene
+// ------------------------------------------------- the key schedules
 //
-// `rk` sind die 240 Oktette aus `aes.key_set`, `nr` die Rundenzahl
-// (10, 12, 14). Kopiert wird, damit der Aufrufer seinen Schluessel
-// wegwerfen darf, ohne dass diese Struktur ins Leere zeigt.
+// `rk` are the 240 octets from `aes.key_set`, `nr` the number of rounds
+// (10, 12, 14). It is copied so that the caller may throw its key
+// away without this structure pointing into the void.
 
 fn enc_from(rk: u64, nr: usize) -> Enc {
     var e: Enc = Enc { rk: [0 as u8; 240], nr: 0, ok: false }
@@ -236,25 +236,25 @@ fn enc_from(rk: u64, nr: usize) -> Enc {
     return e
 }
 
-// AESDEC will die Rundenschluessel in UMGEKEHRTER Reihenfolge und --
-// ausser dem ersten und dem letzten -- durch AESIMC gedreht. Genau das
-// baut diese Funktion, einmal je Schluessel statt einmal je Block.
+// AESDEC wants the round keys in REVERSED order and --
+// except for the first and the last -- passed through AESIMC. Exactly that
+// is what this function builds, once per key instead of once per block.
 //
-// Ohne das AESIMC rechnet AESDEC etwas, das stabil ist, zufaellig
-// aussieht und mit AES nichts zu tun hat -- die Kreisprobe in
-// `tools/aesni/run.sh` faellt genau darauf.
+// Without the AESIMC, AESDEC computes something that is stable, looks random
+// and has nothing to do with AES -- the round trip in
+// `tools/aesni/run.sh` catches exactly that.
 fn dec_from(rk: u64, nr: usize) -> Dec {
     var d: Dec = Dec { rk: [0 as u8; 240], nr: 0, ok: false }
     if nr != 10 && nr != 12 && nr != 14 {
         return d
     }
-    // Der letzte Rundenschluessel wird der erste, ungedreht.
+    // The last round key becomes the first, unrotated.
     var i: usize = 0
     while i < 16 {
         d.rk[i] = ld8(rk, nr * 16 + i)
         i = i + 1
     }
-    // Die mittleren, rueckwaerts, jeder durch AESIMC.
+    // The middle ones, backwards, each through AESIMC.
     var r: usize = 1
     while r < nr {
         let src: u64 = rk + ((nr - r) * 16) as u64
@@ -263,7 +263,7 @@ fn dec_from(rk: u64, nr: usize) -> Dec {
             in("rdi") src, in("rsi") dst, clobber("memory"))
         r = r + 1
     }
-    // Der erste wird der letzte, ungedreht.
+    // The first becomes the last, unrotated.
     i = 0
     while i < 16 {
         d.rk[nr * 16 + i] = ld8(rk, i)
@@ -274,12 +274,12 @@ fn dec_from(rk: u64, nr: usize) -> Dec {
     return d
 }
 
-// ------------------------------------------------------- ein Block
+// ------------------------------------------------------- one block
 //
-// Die Rundenzahl steht fest, sobald der Schluessel steht, also gibt es
-// drei Bloecke statt einer Schleife mit veraenderlicher Zahl. Ein
-// `aesenc` mehr oder weniger ist der Unterschied zwischen AES-128 und
-// AES-256, und eine Schleife darum haette je Runde einen Sprung.
+// The number of rounds is fixed as soon as the key is set, so there are
+// three blocks instead of a loop with a variable count. One
+// `aesenc` more or less is the difference between AES-128 and
+// AES-256, and a loop around it would cost a jump per round.
 
 fn enc1_10(rk: u64, inp: u64, out: u64) {
     asm("movdqu xmm0,[rsi]\nmovdqu xmm1,[rdi]\npxor xmm0,xmm1\nmovdqu xmm1,[rdi+16]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+32]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+48]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+64]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+80]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+96]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+112]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+128]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+144]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+160]\naesenclast xmm0,xmm1\nmovdqu [rdx],xmm0",
@@ -347,28 +347,28 @@ fn decrypt_block(d: *mut Dec, inp: u64, out: u64) -> bool {
 
 // =============================================================== XTS
 //
-// Der Tweak wandert von Block zu Block (T = T * alpha im Koerper
-// GF(2^128), little endian). Das ist eine Kette -- Block j+1 braucht
-// den Tweak von Block j --, und eine Kette laesst sich nicht
-// verschraenken.
+// The tweak travels from block to block (T = T * alpha in the field
+// GF(2^128), little endian). That is a chain -- block j+1 needs
+// the tweak of block j --, and a chain cannot be
+// interleaved.
 //
-// DESHALB WERDEN DIE TWEAKS VORHER AUSGERECHNET. `xts_sector_encrypt`
-// legt acht Tweaks in ein Feld, und der asm-Block rechnet dann ACHT
-// AES-Bloecke NEBENEINANDER. Das ist der eigentliche Gewinn: AESENC hat
-// auf heutigen Maschinen eine Latenz von vier Takten, aber einen
-// Durchsatz von einem je Takt. Acht unabhaengige Ketten fuellen die
-// Rechenwerke; eine einzelne laesst sie zu drei Vierteln leer stehen.
+// THAT IS WHY THE TWEAKS ARE COMPUTED BEFOREHAND. `xts_sector_encrypt`
+// puts eight tweaks into an array, and the asm block then computes EIGHT
+// AES blocks SIDE BY SIDE. That is the actual gain: AESENC has
+// a latency of four cycles on today's machines, but a
+// throughput of one per cycle. Eight independent chains fill the
+// execution units; a single one leaves them three quarters idle.
 //
-// Die Tweak-Rechnung selbst bleibt skalar. PCLMULQDQ koennte sie auch
-// -- die Multiplikation mit x ist aber eine Verschiebung um EIN Bit,
-// und die kostet skalar so wenig, dass die Messung (Abschnitt 4 des
-// Berichts) keinen Unterschied zeigte. PCLMULQDQ ist deshalb GEPRUEFT
-// (`pclmul_usable`) und NICHT BENUTZT; der Grund steht hier, damit
-// niemand es fuer ein Versehen haelt.
+// The tweak computation itself stays scalar. PCLMULQDQ could do it too
+// -- but the multiplication by x is a shift by ONE bit,
+// and that costs so little in scalar code that the measurement (section 4 of the
+// report) showed no difference. PCLMULQDQ is therefore CHECKED
+// (`pclmul_usable`) and NOT USED; the reason is written here so that
+// nobody takes it for an oversight.
 
-// Die Verschiebung um ein Bit nach links ueber 16 Oktette, little
-// endian, mit 0x87 als Ruecknahme -- Wort fuer Wort dasselbe wie
-// `xts.gf_mul_alpha`, nur ueber zwei u64 statt sechzehn u8.
+// The shift left by one bit across 16 octets, little
+// endian, with 0x87 as the reduction -- word for word the same as
+// `xts.gf_mul_alpha`, only over two u64 instead of sixteen u8.
 fn tweak_next(t: *mut [u8; 16]) {
     var lo: u64 = 0
     var hi: u64 = 0
@@ -404,14 +404,14 @@ fn sector_tweak(sector: u64, t: *mut [u8; 16]) {
     }
 }
 
-// ACHT BLOECKE NEBENEINANDER, verschluesselt.
+// EIGHT BLOCKS SIDE BY SIDE, encrypted.
 //
-// rdi = Rundenschluessel, rsi = Klartext (128 Oktette), rdx = Ziel,
-// rcx = acht Tweaks (128 Oktette), r8 = Zahl der aesenc-Runden.
+// rdi = round keys, rsi = plaintext (128 octets), rdx = destination,
+// rcx = eight tweaks (128 octets), r8 = number of aesenc rounds.
 //
-// xmm8..xmm15 tragen die acht Tweaks, xmm0..xmm7 die acht Bloecke.
-// Der Ablauf ist derselbe wie bei einem Block, nur achtfach: P xor T,
-// dann die Runden, dann xor T.
+// xmm8..xmm15 carry the eight tweaks, xmm0..xmm7 the eight blocks.
+// The sequence is the same as for one block, only eightfold: P xor T,
+// then the rounds, then xor T.
 fn xts_enc8(rk: u64, inp: u64, out: u64, tw: u64, nr: usize) {
     asm("movdqu xmm8,[rcx]\nmovdqu xmm9,[rcx+16]\nmovdqu xmm10,[rcx+32]\nmovdqu xmm11,[rcx+48]\nmovdqu xmm12,[rcx+64]\nmovdqu xmm13,[rcx+80]\nmovdqu xmm14,[rcx+96]\nmovdqu xmm15,[rcx+112]\nmovdqu xmm0,[rsi]\nmovdqu xmm1,[rsi+16]\nmovdqu xmm2,[rsi+32]\nmovdqu xmm3,[rsi+48]\nmovdqu xmm4,[rsi+64]\nmovdqu xmm5,[rsi+80]\nmovdqu xmm6,[rsi+96]\nmovdqu xmm7,[rsi+112]\npxor xmm0,xmm8\npxor xmm1,xmm9\npxor xmm2,xmm10\npxor xmm3,xmm11\npxor xmm4,xmm12\npxor xmm5,xmm13\npxor xmm6,xmm14\npxor xmm7,xmm15\nmovdqu xmm8,[rdi]\npxor xmm0,xmm8\npxor xmm1,xmm8\npxor xmm2,xmm8\npxor xmm3,xmm8\npxor xmm4,xmm8\npxor xmm5,xmm8\npxor xmm6,xmm8\npxor xmm7,xmm8\nmov rax,rdi\nadd rax,16\n1:\nmovdqu xmm8,[rax]\naesenc xmm0,xmm8\naesenc xmm1,xmm8\naesenc xmm2,xmm8\naesenc xmm3,xmm8\naesenc xmm4,xmm8\naesenc xmm5,xmm8\naesenc xmm6,xmm8\naesenc xmm7,xmm8\nadd rax,16\ndec r8\njnz 1b\nmovdqu xmm8,[rax]\naesenclast xmm0,xmm8\naesenclast xmm1,xmm8\naesenclast xmm2,xmm8\naesenclast xmm3,xmm8\naesenclast xmm4,xmm8\naesenclast xmm5,xmm8\naesenclast xmm6,xmm8\naesenclast xmm7,xmm8\nmovdqu xmm8,[rcx]\npxor xmm0,xmm8\nmovdqu xmm8,[rcx+16]\npxor xmm1,xmm8\nmovdqu xmm8,[rcx+32]\npxor xmm2,xmm8\nmovdqu xmm8,[rcx+48]\npxor xmm3,xmm8\nmovdqu xmm8,[rcx+64]\npxor xmm4,xmm8\nmovdqu xmm8,[rcx+80]\npxor xmm5,xmm8\nmovdqu xmm8,[rcx+96]\npxor xmm6,xmm8\nmovdqu xmm8,[rcx+112]\npxor xmm7,xmm8\nmovdqu [rdx],xmm0\nmovdqu [rdx+16],xmm1\nmovdqu [rdx+32],xmm2\nmovdqu [rdx+48],xmm3\nmovdqu [rdx+64],xmm4\nmovdqu [rdx+80],xmm5\nmovdqu [rdx+96],xmm6\nmovdqu [rdx+112],xmm7",
         in("rdi") rk, in("rsi") inp, in("rdx") out, in("rcx") tw,
@@ -419,7 +419,7 @@ fn xts_enc8(rk: u64, inp: u64, out: u64, tw: u64, nr: usize) {
         clobber("rax"), clobber("r8"), clobber("memory"))
 }
 
-// Dasselbe rueckwaerts. `rk` ist hier der Plan aus `dec_from`.
+// The same backwards. `rk` here is the schedule from `dec_from`.
 fn xts_dec8(rk: u64, inp: u64, out: u64, tw: u64, nr: usize) {
     asm("movdqu xmm8,[rcx]\nmovdqu xmm9,[rcx+16]\nmovdqu xmm10,[rcx+32]\nmovdqu xmm11,[rcx+48]\nmovdqu xmm12,[rcx+64]\nmovdqu xmm13,[rcx+80]\nmovdqu xmm14,[rcx+96]\nmovdqu xmm15,[rcx+112]\nmovdqu xmm0,[rsi]\nmovdqu xmm1,[rsi+16]\nmovdqu xmm2,[rsi+32]\nmovdqu xmm3,[rsi+48]\nmovdqu xmm4,[rsi+64]\nmovdqu xmm5,[rsi+80]\nmovdqu xmm6,[rsi+96]\nmovdqu xmm7,[rsi+112]\npxor xmm0,xmm8\npxor xmm1,xmm9\npxor xmm2,xmm10\npxor xmm3,xmm11\npxor xmm4,xmm12\npxor xmm5,xmm13\npxor xmm6,xmm14\npxor xmm7,xmm15\nmovdqu xmm8,[rdi]\npxor xmm0,xmm8\npxor xmm1,xmm8\npxor xmm2,xmm8\npxor xmm3,xmm8\npxor xmm4,xmm8\npxor xmm5,xmm8\npxor xmm6,xmm8\npxor xmm7,xmm8\nmov rax,rdi\nadd rax,16\n1:\nmovdqu xmm8,[rax]\naesdec xmm0,xmm8\naesdec xmm1,xmm8\naesdec xmm2,xmm8\naesdec xmm3,xmm8\naesdec xmm4,xmm8\naesdec xmm5,xmm8\naesdec xmm6,xmm8\naesdec xmm7,xmm8\nadd rax,16\ndec r8\njnz 1b\nmovdqu xmm8,[rax]\naesdeclast xmm0,xmm8\naesdeclast xmm1,xmm8\naesdeclast xmm2,xmm8\naesdeclast xmm3,xmm8\naesdeclast xmm4,xmm8\naesdeclast xmm5,xmm8\naesdeclast xmm6,xmm8\naesdeclast xmm7,xmm8\nmovdqu xmm8,[rcx]\npxor xmm0,xmm8\nmovdqu xmm8,[rcx+16]\npxor xmm1,xmm8\nmovdqu xmm8,[rcx+32]\npxor xmm2,xmm8\nmovdqu xmm8,[rcx+48]\npxor xmm3,xmm8\nmovdqu xmm8,[rcx+64]\npxor xmm4,xmm8\nmovdqu xmm8,[rcx+80]\npxor xmm5,xmm8\nmovdqu xmm8,[rcx+96]\npxor xmm6,xmm8\nmovdqu xmm8,[rcx+112]\npxor xmm7,xmm8\nmovdqu [rdx],xmm0\nmovdqu [rdx+16],xmm1\nmovdqu [rdx+32],xmm2\nmovdqu [rdx+48],xmm3\nmovdqu [rdx+64],xmm4\nmovdqu [rdx+80],xmm5\nmovdqu [rdx+96],xmm6\nmovdqu [rdx+112],xmm7",
         in("rdi") rk, in("rsi") inp, in("rdx") out, in("rcx") tw,
@@ -427,17 +427,17 @@ fn xts_dec8(rk: u64, inp: u64, out: u64, tw: u64, nr: usize) {
         clobber("rax"), clobber("r8"), clobber("memory"))
 }
 
-// EIN SEKTOR, verschluesselt.
+// ONE SECTOR, encrypted.
 //
-// `e` ist der Plan fuer die Daten (k1), `t0` der schon fertige Tweak
-// (T = AES-k2(Sektornummer), vom Aufrufer gerechnet -- diese Datei
-// weiss nicht, wie der Aufrufer an k2 kommt).
+// `e` is the schedule for the data (k1), `t0` the already finished tweak
+// (T = AES-k2(sector number), computed by the caller -- this file
+// does not know how the caller gets to k2).
 //
-// `n` MUSS ein Vielfaches von 16 sein. Ciphertext stealing gibt es
-// hier NICHT: ein Sektor ist immer ein Vielfaches von 16, und der
-// krumme Fall bleibt in `xts.fi` bei der Tabellenfassung. Wer mit
-// krummer Laenge kommt, bekommt `false` und nicht etwa stillschweigend
-// etwas Falsches.
+// `n` MUST be a multiple of 16. There is NO ciphertext stealing
+// here: a sector is always a multiple of 16, and the
+// odd case stays in `xts.fi` with the table version. Whoever comes with
+// an odd length gets `false` and not silently
+// something wrong.
 fn xts_run(rk: u64, nr: usize, t0: *mut [u8; 16], inp: u64, out: u64,
     n: usize, enc: bool) -> bool {
     if n < 16 || n % 16 != 0 {
@@ -452,7 +452,7 @@ fn xts_run(rk: u64, nr: usize, t0: *mut [u8; 16], inp: u64, out: u64,
     }
     let bloecke: usize = n / 16
     var j: usize = 0
-    // Acht auf einmal, solange acht da sind.
+    // Eight at a time, as long as eight are left.
     while j + 8 <= bloecke {
         var b: usize = 0
         while b < 8 {
@@ -473,9 +473,9 @@ fn xts_run(rk: u64, nr: usize, t0: *mut [u8; 16], inp: u64, out: u64,
         }
         j = j + 8
     }
-    // Der Rest einzeln. Ein Sektor von 512 Oktetten hat 32 Bloecke und
-    // geht glatt auf; 4096 auch. Diese Schleife traegt die Laengen, die
-    // es nicht tun.
+    // The rest one by one. A sector of 512 octets has 32 blocks and
+    // divides evenly; so does 4096. This loop carries the lengths that
+    // do not.
     while j < bloecke {
         var x: [u8; 16] = [0 as u8; 16]
         var y: [u8; 16] = [0 as u8; 16]

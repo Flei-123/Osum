@@ -23,6 +23,7 @@ Modes:
   count.py --check               compare with tools/english/baseline.json: a file may only get LESS German
                                  (a new file starts at zero); exit 1 and a list when something grew
   count.py --update              write the baseline (only ever lower than before unless --force)
+  count.py --where <file>...     list the German names / comment lines / texts of files (first use of each name)
   count.py --diff <base>         the NEW code guard: scan only the lines added since <base>
                                  (`git diff <base>`); exit 1 if an added line is German
 """
@@ -137,6 +138,28 @@ def scan_fi(text, names=None):
             if " " in body and german_text(body) and not catalog_like(body):
                 logtext += 1
     return ident, comment, logtext
+
+
+def where_fi(text):
+    rows = []
+    line_of = lambda pos: text.count("\n", 0, pos) + 1
+    for kind, a, b in spans(text):
+        seg = text[a:b]
+        if kind == "code":
+            for m in IDENT.finditer(seg):
+                if german_ident(m.group(0)):
+                    rows.append((line_of(a + m.start()), "name", m.group(0)))
+        elif kind == "cmt":
+            off = 0
+            for ln in seg.splitlines(True):
+                if german_text(ln.strip().lstrip("/* ").strip()):
+                    rows.append((line_of(a + off), "comment", ln.strip()[:100]))
+                off += len(ln)
+        elif kind == "str":
+            body = seg[1:-1]
+            if " " in body and german_text(body) and not catalog_like(body):
+                rows.append((line_of(a), "logtext", body[:100]))
+    return rows
 
 
 def scan_script(text, ext):
@@ -299,6 +322,17 @@ def diff_guard(base):
 
 def main():
     a = sys.argv[1:]
+    if a and a[0] == "--where":
+        for path in a[1:]:
+            text = open(os.path.join(ROOT, path), encoding="utf-8").read()
+            seen = set()
+            for ln, kind, what in where_fi(text):
+                if kind == "name":
+                    if what in seen:
+                        continue
+                    seen.add(what)
+                print("%s:%d: %s: %s" % (path, ln, kind, what))
+        return 0
     if a and a[0] == "--diff":
         return diff_guard(a[1] if len(a) > 1 else "origin/main")
     res = scan_all()
