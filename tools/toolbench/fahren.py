@@ -95,6 +95,19 @@ class Monitor:
         self.cmd("mouse_button 0", 0.15)
         time.sleep(0.6)
 
+    def rklick(self, x, y):
+        self.zeiger(x, y)
+        time.sleep(0.4)
+        self.cmd("mouse_button 2", 0.15)
+        self.cmd("mouse_button 0", 0.15)
+        time.sleep(0.6)
+
+    def tippe(self, text):
+        keys = {" ": "spc", ".": "dot", "-": "minus"}
+        for ch in text:
+            self.cmd("sendkey %s" % keys.get(ch, ch), 0.15)
+        time.sleep(0.6)
+
     def foto(self, ziel, frist=25.0):
         if os.path.exists(ziel):
             os.unlink(ziel)
@@ -159,6 +172,26 @@ def main(argv):
                 x, y = (int(v) for v in p.split(","))
                 m.klick(x, y)
                 print("plan: ziel %s -> %d,%d" % (" ".join(teile[1:]), x, y))
+        elif was == "rklick":
+            x, y = (int(v) for v in teile[1].split(","))
+            m.rklick(x, y)
+            print("plan: rklick %d,%d" % (x, y))
+        elif was == "rziel":
+            p, fehler = ziel_holen(serial, teile[1:])
+            if p is None:
+                print("plan: ZIEL NICHT GEFUNDEN: %s -- %s"
+                      % (" ".join(teile[1:]), fehler))
+            else:
+                x, y = (int(v) for v in p.split(","))
+                m.rklick(x, y)
+                print("plan: rziel %s -> %d,%d" % (" ".join(teile[1:]), x, y))
+        elif was == "tippe":
+            m.tippe(teile[1])
+            print("plan: tippe %s" % teile[1])
+        elif was == "taste":
+            m.cmd("sendkey %s" % teile[1], 0.2)
+            time.sleep(0.5)
+            print("plan: taste %s" % teile[1])
         elif was == "foto":
             n = m.foto(os.path.join(out, teile[1] + ".ppm"))
             print("plan: foto %s (%d Oktette)" % (teile[1], n))

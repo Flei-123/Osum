@@ -30,6 +30,7 @@ WIN = re.compile(r"wlib: win id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) "
                  r"cx=(\d+) cy=(\d+)")
 RECT = re.compile(r"taskmgr: rect id=(\d+) kind=(\d+) x=(\d+) y=(\d+) "
                   r"w=(\d+) h=(\d+)")
+CTXRECT = re.compile(r"taskmgr: ctxrect x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TAB = re.compile(r"taskmgr: tabelle x=(\d+) y=(\d+) kopf=(\d+) zh=(\d+)")
 SPALTE = re.compile(r"taskmgr: spalte c=(\d+) x=(\d+) w=(\d+)")
 ZEILE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
@@ -198,6 +199,45 @@ def main(argv):
             raise SystemExit("klickplan: kein Ja-Knopf im Mitschnitt")
         dx, dy, dw, dh = (int(v) for v in d.groups())
         print("%d,%d" % (cx + dx + dw // 2, cy + dy + dh // 2))
+        return 0
+
+    if was == "suche":
+        r = None
+        for z in zeilen:
+            m = RECT.search(z)
+            if m and m.group(1) == "7":
+                r = m
+        if r is None:
+            raise SystemExit("klickplan: no search entry in the capture")
+        bx = int(r.group(3)) + int(r.group(5)) // 2
+        by = int(r.group(4)) + int(r.group(6)) // 2
+        print("%d,%d" % (cx + bx, cy + by))
+        return 0
+
+    if was == "ctxbox":
+        c = None
+        for z in zeilen:
+            m = CTXRECT.search(z)
+            if m:
+                c = m
+        if c is None:
+            raise SystemExit("klickplan: no context menu in the capture")
+        mx, my, mw, mh = (int(v) for v in c.groups())
+        print("%d,%d,%d,%d" % (cx + mx, cy + my, mw, mh))
+        return 0
+
+    if was == "ctxzeile":
+        c = None
+        for z in zeilen:
+            m = CTXRECT.search(z)
+            if m:
+                c = m
+        if c is None:
+            raise SystemExit("klickplan: no context menu in the capture")
+        n = int(argv[3])
+        mx, my, mw, mh = (int(v) for v in c.groups())
+        rows = max(1, (mh - 8) // 28)
+        print("%d,%d" % (cx + mx + mw // 2, cy + my + 4 + 28 * (n - 1) + 14))
         return 0
 
     if was == "knopf":
