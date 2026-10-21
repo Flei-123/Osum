@@ -4,7 +4,7 @@
 #
 #   [BASE=<rev>] bash tools/deskctx/run.sh
 #
-# Four rows (catalogue key `desktop.context`): display settings, change background, settings, refresh.
+# Four rows (registry context CTX_DESKTOP, keys ctx.display ctx.desk_background ctx.settings ctx.desk_refresh): display settings, change background, settings, refresh.
 # Measured on the machine of the stick (tools/design/eh6.sh, uitrace is always on there):
 #   1. rklick on the empty desktop (900,250; the terminal window of the machine covers 500,250): `desktop: context open`, the picture differs from the one before inside the menu rectangle
 #   2. click on row 3 (refresh): `desktop: context pick=3`, the menu is gone again (rectangle as before)

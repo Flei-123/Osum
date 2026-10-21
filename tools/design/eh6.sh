@@ -233,6 +233,8 @@ ARGS+=(/etc/
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/uitrace=$OUT/uitrace@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+# EH_ETC_EXTRA: more files for /etc, space separated `/etc/<name>=<host path>@0644` (e.g. tools/barctx/run.sh: /etc/ctxmenu.conf)
+for e in ${EH_ETC_EXTRA:-}; do ARGS+=("$e"); done
 # like tools/usbimg/build.sh (AB-016): with the broker `orientbus` built, the image carries its rules, the
 # settings schema and the action manifests -- without them every app that asks the bus says "no bus"
 case " $GEBAUT " in

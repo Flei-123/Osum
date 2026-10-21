@@ -834,6 +834,15 @@ class Fahrer:
                 return None
             zh = (int(m.group(4)) - 4) // 4
             return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
+        if name.startswith("bmenue"):
+            # Row <N> of the task bar's menu on the EMPTY bar (right click): the bar reports the menu window itself in
+            # `taskbar: kontext leer x= y= w= h= n=`; no title bar, rows are (h - 4) / n high.
+            n = int(name[6:])
+            m = letzte(r"taskbar: kontext leer x=(\d+) y=(\d+) w=(\d+) h=(\d+) n=(\d+)")
+            if m is None:
+                return None
+            zh = (int(m.group(4)) - 4) // int(m.group(5))
+            return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
         if name.startswith("emenue"):
             # Die Zeile <N> des offenen Kontextmenues des Dateimanagers.
             # Es meldet Ecke und Hoehe des MENUEFENSTERS
