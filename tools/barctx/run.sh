@@ -11,7 +11,7 @@
 #   2. row 0 (task manager): `kontext leer w=10`; row 2 (settings): `kontext leer w=11` and `settings: ready`
 #   3. row 3 (the manifest entry): `kontext leer w=4096` (EXT_BASE) -- an app registered itself WITHOUT a change of shell code
 #   4. rklick, Escape: the menu closes without a `w=` line
-# COUNTER-PROOF: the tree before the feature (BASE, default origin/main) has no menu on the empty bar: no `kontext leer`, the
+# COUNTER-PROOF: the tree before the feature (BASE, default fc893814~1 = before the registry) has no menu on the empty bar: no `kontext leer`, the
 # picture after the right click equals the one before.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -84,7 +84,7 @@ PY
 }
 
 mkdir -p "$TMPD/new" "$TMPD/old"
-git worktree add --detach "$BT" "${BASE:-origin/main}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
+git worktree add --detach "$BT" "${BASE:-fc893814~1}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
 # the old tree needs this tree's drive.py (the `bmenue` name) and eh6.sh (EH_ETC_EXTRA); the pictures and trace lines are what differ
 cp -f tools/design/drive.py "$BT/tools/design/drive.py"; cp -f tools/design/eh6.sh "$BT/tools/design/eh6.sh"
 run_tree "$ROOT" "$TMPD/new" &
