@@ -4,7 +4,7 @@ import os, re, sys
 
 serial, outdir = sys.argv[1:3]
 raw = open(serial, "rb").read().decode("latin1")
-NAV = re.compile(r"^settings: nav route=(\S+) page=(\d+) crumbs=(\d+) back=(\d) fwd=(\d) up=(\d) depth=(\d+) side=(\d+) hits=(\d+) rawkeys=(\d+)$")
+NAV = re.compile(r"^settings: nav route=(\S+) page=(\d+) crumbs=(\d+) back=(\d) fwd=(\d) up=(\d) depth=(\d+) side=(\d+) hits=(\d+) rawkeys=(\d+)")
 CTL = re.compile(r"^settings: controls page=(\d+) n=(\d+)$", re.M)
 BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "controls.base")
 LIMIT = 8
