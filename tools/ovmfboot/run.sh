@@ -4,6 +4,7 @@
 # there must be no exception. Counter-proofs: word `acpiold` (old scan) must crash with
 # #PF cr2=0x806000 under OVMF; SeaBIOS boots in both variants.
 #
+# Variants: usb-ehci, qemu-xhci + usb-storage, NVMe (all under OVMF q35).
 # Env: STICK_IMG = existing stick image (default: build one with tools/usbimg/build.sh, ~9 min),
 #      KERNEL    = prebuilt osum.mb (default: build with tools/build-kernel.sh --stufe 0).
 #      KEEP=1 keeps the work directory, ONLY_OLD=1 runs only the counter-proof.
@@ -37,7 +38,13 @@ sed '0,/cmdline: /s//cmdline: acpiold /' "$D/l_norm.conf" > "$D/l_old.conf"
 
 # boot name machine firmware(uefi|bios) conf
 boot() {
-    local name=$1 mach=$2 fw=$3 conf=$4 secs=${5:-45}
+    local name=$1 mach=$2 fw=$3 conf=$4 secs=${5:-45} bus=${6:-ehci}
+    local busargs
+    case "$bus" in
+        ehci) busargs=(-device usb-ehci -device usb-storage,drive=stick) ;;
+        xhci) busargs=(-device qemu-xhci -device usb-storage,drive=stick) ;;
+        nvme) busargs=(-device nvme,drive=stick,serial=hpstick,bootindex=0) ;;
+    esac
     cp "$D/stick.img" "$D/$name.img"
     mcopy -i "$D/$name.img@@$OFF" -o "$conf" ::limine.conf
     local fwargs=()
@@ -46,7 +53,7 @@ boot() {
         fwargs=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE" -drive "if=pflash,format=raw,unit=1,file=$D/$name.vars")
     fi
     timeout $((secs+15)) qemu-system-x86_64 "${KVM[@]}" -machine "$mach" -m 2048 -smp 2 \
-        -drive "file=$D/$name.img,format=raw,if=none,id=stick" -device usb-ehci -device usb-storage,drive=stick \
+        -drive "file=$D/$name.img,format=raw,if=none,id=stick" "${busargs[@]}" \
         "${fwargs[@]}" -serial "file:$D/$name.txt" -display none -no-reboot -pidfile "$D/$name.pid" &
     local i=0
     while [ $i -lt $((secs*5)) ]; do
@@ -67,6 +74,10 @@ echo "== OVMF q35 =="
 boot uq35 q35 uefi "$D/l_norm.conf"; check_good uq35 "OVMF q35"
 echo "== OVMF i440fx =="
 boot ui440 pc uefi "$D/l_norm.conf"; check_good ui440 "OVMF i440fx"
+echo "== OVMF q35 + xHCI usb-storage =="
+boot uxhci q35 uefi "$D/l_norm.conf" 60 xhci; check_good uxhci "OVMF q35 xHCI"
+echo "== OVMF q35 + NVMe =="
+boot unvme q35 uefi "$D/l_norm.conf" 60 nvme; check_good unvme "OVMF q35 NVMe"
 echo "== SeaBIOS control =="
 boot bq35 q35 bios "$D/l_norm.conf"; check_good bq35 "SeaBIOS q35"
 }
