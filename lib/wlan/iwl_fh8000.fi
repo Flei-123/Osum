@@ -1,0 +1,313 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/iwl_fh8000.fi -- Intel family 8000 (8260/8265) firmware chunk loader through the FH service
+// channel (HP-9a, docs/PLAN-8000-LOADER.md). Own implementation; the register map and the sequence
+// were read as a specification from the Linux iwlwifi sources (iwl-fh.h, iwl-prph.h, iwl-csr.h,
+// pcie/gen1_2/trans.c, 21.10.2026). Family 8000 has no context-info block: the driver pushes every
+// section of CPU1, then CPU2, through FH channel 9 in chunks, and tells the boot ROM how far it got
+// in FH_UCODE_LOAD_STATUS (one bit per loaded section, CPU2 in the upper half word).
+//
+// Every register access goes through the Mmio table of iwl_probe.fi, so the host gate runs the REAL
+// sequence against a model of the flow handler that moves bytes (tools/wlan/fh8000.fi). The model
+// proves ORDER, chunk plan and status bits of the library; it cannot prove the silicon (needs the HP).
+// Polling is bounded by a read count (iwl_pwr.POLL_MAX); the kernel glue's rd32 hook adds the real
+// delay (Linux waits up to 5 s per chunk).
+//
+// Differences from Linux, on purpose: sections come from FwInfo (iwl_fw.fi), which already dropped the
+// separator markers and tagged each section LMAC (CPU1) / UMAC (CPU2) / PAGING (not loaded here);
+// a zero-length section or more than 16 sections per CPU is refused (Linux IWL_UCODE_SECTION_MAX).
+
+import wlan.iwl_probe
+import wlan.iwl_fw
+import wlan.iwl_pwr
+
+export {
+    FhStat, fhstat_new, fh_load, fh_chunk_size, fh_nchunks, fh_is_ext, fh_status_bits, fh_sec_of,
+    fh_hi_addr, fh_ctrl1,
+    FH_MAX_CHUNK, FH_CPU_MAX, FH_EXT_START, FH_EXT_END,
+    FH_TCSR_CONFIG9, FH_TCSR_BUFSTS9, FH_SRAM_ADDR9, FH_TFDIB_CTRL0_9, FH_TFDIB_CTRL1_9,
+    FH_UCODE_LOAD_STATUS, WFPM_GP2, RELEASE_CPU_RESET, LMPM_CHICK,
+    CFG_PAUSE, CFG_RUN, BUFSTS_VALID,
+    E_FH_BOUNCE, E_FH_NOCPU, E_FH_TOOMANY, E_FH_EMPTY, E_FH_ACCESS, E_FH_TIMEOUT
+}
+
+// ---- registers (verified against the Linux headers) ----
+const FH_UCODE_LOAD_STATUS: u64 = 0x1AF0      // direct (BAR) access
+const FH_TCSR_CONFIG9: u64 = 0x1E20           // FH_TCSR_LOWER_BOUND 0x1D00 + 0x20 * 9
+const FH_TCSR_BUFSTS9: u64 = 0x1E28           // ... + 0x8
+const FH_SRAM_ADDR9: u64 = 0x19C8             // FH_SRVC_LOWER_BOUND + (9 - 9) * 4
+const FH_TFDIB_CTRL0_9: u64 = 0x1948          // FH_TFDIB_LOWER_BOUND 0x1900 + 8 * 9
+const FH_TFDIB_CTRL1_9: u64 = 0x194C
+const WFPM_GP2: u64 = 0xA030B4                // PRPH
+const RELEASE_CPU_RESET: u64 = 0x300C         // PRPH, bit 24
+const LMPM_CHICK: u64 = 0xA01FF8              // PRPH, bit 0 = extended address space
+
+const CFG_PAUSE: u64 = 0x00000000             // DMA_CHNL_PAUSE
+const CFG_RUN: u64 = 0x80100000               // DMA_CHNL_ENABLE | DMA_CREDIT_DISABLE | CIRQ_HOST_ENDTFD
+const BUFSTS_VALID: u64 = 0x00101003          // BIT(20) TB_NUM | BIT(12) TB_IDX | TFDB_VALID
+
+const CSR_UCODE_DRV_GP1_CLR: u64 = 0x05C
+const SW_BIT_RFKILL: u64 = 0x2
+const INT_FH_TX: u64 = 0x08000000             // CSR_INT_BIT_FH_TX
+const FH_INT_TX_MASK: u64 = 0x3
+const INT_INI_SET_MASK: u64 = 0xBA00008F        // CSR_INI_SET_MASK: RX|HW_ERR|RX_PERIODIC|FH_TX|SW_ERR (high) + RF_KILL|SW_RX|RESET_DONE|WAKEUP|ALIVE (low)
+
+const FH_MAX_CHUNK: u64 = 0x20000
+const FH_CPU_MAX: u64 = 16
+const FH_EXT_START: u64 = 0x40000
+const FH_EXT_END: u64 = 0x57FFF
+
+const E_FH_BOUNCE: i64 = -40    // bounce buffer smaller than one page
+const E_FH_NOCPU: i64 = -41     // image has no CPU1 section
+const E_FH_TOOMANY: i64 = -42   // more than 16 sections for one CPU
+const E_FH_EMPTY: i64 = -43     // zero-length section
+const E_FH_ACCESS: i64 = -44    // MAC access not granted
+const E_FH_TIMEOUT: i64 = -45   // end-of-TFD interrupt never came
+
+struct FhStat {
+    chunks: u64,        // chunks pushed through channel 9
+    bytes: u64,
+    ext_chunks: u64,    // chunks sent with LMPM_CHICK bit 0 set
+    secs: [u64; 2],     // sections loaded per CPU
+    fail_sec: u64       // image index of the section that failed (valid when the result is < 0)
+}
+
+fn fhstat_new() -> FhStat {
+    var s: FhStat = FhStat { chunks: 0, bytes: 0, ext_chunks: 0, secs: [0; 2], fail_sec: 0 }
+    return s
+}
+
+// ---------------- pure plan helpers (the Python reference computes the same) ----------------
+
+// Chunk size for a section of `len` octets and a bounce buffer of `bsize` octets.
+fn fh_chunk_size(len: u64, bsize: u64) -> u64 {
+    var c: u64 = len
+    if c > FH_MAX_CHUNK { c = FH_MAX_CHUNK }
+    if c > bsize { c = bsize }
+    return c
+}
+
+fn fh_nchunks(len: u64, bsize: u64) -> u64 {
+    let c: u64 = fh_chunk_size(len, bsize)
+    if c == 0 { return 0 }
+    return (len + c - 1) / c
+}
+
+// Extended SRAM range test, applied to the first address of each chunk (as Linux does).
+fn fh_is_ext(dst: u64) -> bool {
+    return dst >= FH_EXT_START && dst <= FH_EXT_END
+}
+
+// FH_UCODE_LOAD_STATUS bits after `k` sections (k >= 0) of CPU `cpu` (1 or 2): CPU1 low half, CPU2 high half.
+fn fh_status_bits(k: u64, cpu: u64) -> u64 {
+    if k == 0 { return 0 }
+    var v: u64 = (1 << k) - 1
+    if cpu == 2 { v = v << 16 }
+    return v & 0xFFFFFFFF
+}
+
+// High 4 bits of a 36-bit DMA address and the CTRL1 word (hi << 28 | byte count).
+fn fh_hi_addr(phys: u64) -> u64 { return (phys >> 32) & 0xF }
+fn fh_ctrl1(phys: u64, cnt: u64) -> u64 { return (fh_hi_addr(phys) << 28) | (cnt & 0x0FFFFFFF) }
+
+// Index (into the FwInfo image) of the k-th section of CPU `cpu`, or -1.
+fn fh_sec_of(f: *mut iwl_fw.FwInfo, img: usize, cpu: u64, k: u64) -> i64 {
+    var want: u64 = iwl_fw.KIND_LMAC
+    if cpu == 2 { want = iwl_fw.KIND_UMAC }
+    let n: usize = iwl_fw.fw_sec_count(f, img)
+    var i: usize = 0
+    var seen: u64 = 0
+    while i < n {
+        if iwl_fw.fw_sec_kind(f, img, i) == want {
+            if seen == k { return i as i64 }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// ---------------- register access ----------------
+
+fn rd(p: *mut iwl_probe.Probe, off: u64) -> u64 {
+    let m: iwl_probe.Mmio = (*p).m
+    (*p).reads = (*p).reads + 1
+    return m.rd32((*p).ctx, off) & 0xFFFFFFFF
+}
+
+fn wr(p: *mut iwl_probe.Probe, off: u64, v: u64) {
+    let m: iwl_probe.Mmio = (*p).m
+    (*p).writes = (*p).writes + 1
+    m.wr32((*p).ctx, off, v & 0xFFFFFFFF)
+}
+
+fn poll_int_tx(p: *mut iwl_probe.Probe) -> bool {
+    var i: u64 = 0
+    while i < iwl_pwr.POLL_MAX {
+        if rd(p, iwl_probe.CSR_INT) & INT_FH_TX != 0 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fn st8(p: u64, o: usize, v: u64) {
+    *((p + o as u64) as *mut u8) = (v & 0xFF) as u8
+}
+
+fn ld8(p: u64, o: usize) -> u64 {
+    let b: u8 = *((p + o as u64) as *mut u8)
+    return b as u64
+}
+
+// PRPH write with its own MAC access window (iwl_write_prph).
+fn prph_w(p: *mut iwl_probe.Probe, addr: u64, v: u64) -> i64 {
+    if iwl_pwr.mac_access_get(p) != 0 {
+        iwl_pwr.mac_access_put(p)
+        return E_FH_ACCESS
+    }
+    iwl_pwr.prph_wr(p, addr, v)
+    iwl_pwr.mac_access_put(p)
+    return 0
+}
+
+// PRPH read-modify-write: set (set != 0) or clear the bits.
+fn prph_bits(p: *mut iwl_probe.Probe, addr: u64, bits: u64, set: bool) -> i64 {
+    if iwl_pwr.mac_access_get(p) != 0 {
+        iwl_pwr.mac_access_put(p)
+        return E_FH_ACCESS
+    }
+    let cur: u64 = iwl_pwr.prph_rd(p, addr)
+    if set { iwl_pwr.prph_wr(p, addr, cur | bits) } else { iwl_pwr.prph_wr(p, addr, cur & (0xFFFFFFFF ^ bits)) }
+    iwl_pwr.mac_access_put(p)
+    return 0
+}
+
+// Direct (BAR) register access inside a MAC access window, like iwl_read/write_direct32.
+fn direct_wr(p: *mut iwl_probe.Probe, off: u64, v: u64) -> i64 {
+    if iwl_pwr.mac_access_get(p) != 0 {
+        iwl_pwr.mac_access_put(p)
+        return E_FH_ACCESS
+    }
+    wr(p, off, v)
+    iwl_pwr.mac_access_put(p)
+    return 0
+}
+
+fn direct_or(p: *mut iwl_probe.Probe, off: u64, bits: u64) -> i64 {
+    if iwl_pwr.mac_access_get(p) != 0 {
+        iwl_pwr.mac_access_put(p)
+        return E_FH_ACCESS
+    }
+    let cur: u64 = rd(p, off)
+    wr(p, off, cur | bits)
+    iwl_pwr.mac_access_put(p)
+    return 0
+}
+
+// One chunk through FH channel 9: pause, SRAM address, DRAM address, length, buffer valid, run, wait.
+fn push_chunk(p: *mut iwl_probe.Probe, dst: u64, phys: u64, cnt: u64) -> i64 {
+    wr(p, iwl_probe.CSR_INT, INT_FH_TX)                 // drop a stale completion
+    if iwl_pwr.mac_access_get(p) != 0 {
+        iwl_pwr.mac_access_put(p)
+        return E_FH_ACCESS
+    }
+    wr(p, FH_TCSR_CONFIG9, CFG_PAUSE)
+    wr(p, FH_SRAM_ADDR9, dst)
+    wr(p, FH_TFDIB_CTRL0_9, phys & 0xFFFFFFFF)
+    wr(p, FH_TFDIB_CTRL1_9, fh_ctrl1(phys, cnt))
+    wr(p, FH_TCSR_BUFSTS9, BUFSTS_VALID)
+    wr(p, FH_TCSR_CONFIG9, CFG_RUN)
+    iwl_pwr.mac_access_put(p)
+    if !poll_int_tx(p) { return E_FH_TIMEOUT }
+    wr(p, iwl_pwr.CSR_FH_INT_STATUS, FH_INT_TX_MASK)    // what the Linux ISR does
+    wr(p, iwl_probe.CSR_INT, INT_FH_TX)
+    return 0
+}
+
+fn load_section(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, idx: usize,
+                bounce: u64, bphys: u64, bsize: u64, st: *mut FhStat) -> i64 {
+    let len: u64 = iwl_fw.fw_sec_len(f, img, idx)
+    let base: u64 = iwl_fw.fw_sec_addr(f, img, idx)
+    let src: u64 = blob + iwl_fw.fw_sec_off(f, img, idx)
+    let csz: u64 = fh_chunk_size(len, bsize)
+    var off: u64 = 0
+    while off < len {
+        var n: u64 = len - off
+        if n > csz { n = csz }
+        let dst: u64 = base + off
+        let ext: bool = fh_is_ext(dst)
+        if ext {
+            let r0: i64 = prph_bits(p, LMPM_CHICK, 1, true)
+            if r0 != 0 { return r0 }
+            (*st).ext_chunks = (*st).ext_chunks + 1
+        }
+        var i: usize = 0
+        while i < n as usize {
+            st8(bounce, i, ld8(src, (off as usize) + i))
+            i = i + 1
+        }
+        let r: i64 = push_chunk(p, dst, bphys, n)
+        if ext {
+            let r1: i64 = prph_bits(p, LMPM_CHICK, 1, false)
+            if r == 0 && r1 != 0 { return r1 }
+        }
+        if r != 0 { return r }
+        (*st).chunks = (*st).chunks + 1
+        (*st).bytes = (*st).bytes + n
+        off = off + n
+    }
+    return 0
+}
+
+// All sections of one CPU, then the "this CPU is complete" word and the full interrupt mask.
+fn load_cpu(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, cpu: u64,
+            bounce: u64, bphys: u64, bsize: u64, st: *mut FhStat) -> i64 {
+    var k: u64 = 0
+    while true {
+        let ix: i64 = fh_sec_of(f, img, cpu, k)
+        if ix < 0 { break }
+        let r: i64 = load_section(p, f, blob, img, ix as usize, bounce, bphys, bsize, st)
+        if r != 0 {
+            (*st).fail_sec = ix as u64
+            return r
+        }
+        k = k + 1
+        // tell the ROM how many sections it may use now (iwl_read/write_direct32: own MAC access window)
+        let r2: i64 = direct_or(p, FH_UCODE_LOAD_STATUS, fh_status_bits(k, cpu))
+        if r2 != 0 { return r2 }
+        (*st).secs[(cpu - 1) as usize] = k
+    }
+    wr(p, iwl_pwr.CSR_INT_MASK, INT_INI_SET_MASK)
+    if cpu == 1 { return direct_wr(p, FH_UCODE_LOAD_STATUS, 0xFFFF) }
+    return direct_wr(p, FH_UCODE_LOAD_STATUS, 0xFFFFFFFF)
+}
+
+// Load image `img` (iwl_fw.IMG_RT / IMG_INIT) of a parsed ucode blob. The device must be powered
+// (iwl_pwr.power_up). `bounce` is a DMA-able buffer (virtual address), `bphys` its bus address,
+// `bsize` its size (>= 4096; 0x20000 gives the fewest chunks). Returns 0 or E_FH_* / E_PWR_*.
+fn fh_load(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize,
+           bounce: u64, bphys: u64, bsize: u64, st: *mut FhStat) -> i64 {
+    *st = fhstat_new()
+    if bsize < 4096 { return E_FH_BOUNCE }
+    if iwl_fw.fw_kind_count(f, img, iwl_fw.KIND_LMAC) == 0 { return E_FH_NOCPU }
+    if iwl_fw.fw_kind_count(f, img, iwl_fw.KIND_LMAC) > FH_CPU_MAX { return E_FH_TOOMANY }
+    if iwl_fw.fw_kind_count(f, img, iwl_fw.KIND_UMAC) > FH_CPU_MAX { return E_FH_TOOMANY }
+    var i: usize = 0
+    let n: usize = iwl_fw.fw_sec_count(f, img)
+    while i < n {
+        if iwl_fw.fw_sec_kind(f, img, i) != iwl_fw.KIND_PAGING && iwl_fw.fw_sec_len(f, img, i) == 0 {
+            (*st).fail_sec = i as u64
+            return E_FH_EMPTY
+        }
+        i = i + 1
+    }
+    wr(p, iwl_pwr.CSR_INT_MASK, INT_FH_TX)            // only the load-complete interrupt
+    wr(p, CSR_UCODE_DRV_GP1_CLR, SW_BIT_RFKILL)
+    wr(p, CSR_UCODE_DRV_GP1_CLR, SW_BIT_RFKILL)
+    var r: i64 = prph_w(p, WFPM_GP2, 0x01010101)
+    if r != 0 { return r }
+    r = prph_w(p, RELEASE_CPU_RESET, 0x01000000)
+    if r != 0 { return r }
+    r = load_cpu(p, f, blob, img, 1, bounce, bphys, bsize, st)
+    if r != 0 { return r }
+    return load_cpu(p, f, blob, img, 2, bounce, bphys, bsize, st)
+}

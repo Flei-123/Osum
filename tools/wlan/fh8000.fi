@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/wlan/fh8000.fi -- host test for lib/wlan/iwl_fh8000.fi against a MODEL of the Intel flow handler.
+// stdin = case file (u32 bounce size, u32 mode, u64 bus address, then a synthetic ucode, see
+// fh8000_ref.py). Output = register-write trace + summary; the gate compares it with the Python
+// reference byte for byte.
+// The model encodes my reading of the Linux sequence (docs/PLAN-8000-LOADER.md): channel 9 registers
+// only reachable inside a MAC access window, a chunk run needs pause/SRAM/DRAM/length/valid before
+// the enable write, the DMA moves bytes from the host window into SRAM, and bytes land correctly only
+// when LMPM_CHICK bit 0 matches the "extended range" of the chunk start address. It proves ORDER and
+// data movement of the library, not Intel's silicon (needs the HP laptop).
+import std.rt
+import std.io
+import wlan.iwl_probe
+import wlan.iwl_fw
+import wlan.iwl_pwr
+import wlan.iwl_fh8000
+
+static mut txtb: [u8; 200] = [0; 200]
+static mut tlen: usize = 0
+
+fn tch(c: u64) {
+    if tlen < 190 {
+        txtb[tlen] = (c & 255) as u8
+        tlen = tlen + 1
+    }
+}
+fn tlit(w: str) {
+    var i: usize = 0
+    while i < w.n {
+        tch(rt.ld8(w.p as u64, i) as u64)
+        i = i + 1
+    }
+}
+fn tnum(v: u64) {
+    if v >= 10 { tnum(v / 10) }
+    tch(48 + (v % 10))
+}
+fn tsig(v: i64) {
+    if v < 0 {
+        tch(45)
+        tnum((0 - v) as u64)
+    } else { tnum(v as u64) }
+}
+fn thex(v: u64) {
+    tlit("0x")
+    var started: bool = false
+    var s: u64 = 60
+    while true {
+        let d: u64 = (v >> s) & 15
+        if d != 0 || started || s == 0 {
+            started = true
+            if d < 10 { tch(48 + d) } else { tch(87 + d) }
+        }
+        if s == 0 { break }
+        s = s - 4
+    }
+}
+fn temit() {
+    io.print_line_bytes((&txtb[0]) as u64, tlen)
+    tlen = 0
+}
+
+// ---------------- flow handler model ----------------
+static mut regs: [u64; 2048] = [0; 2048]       // direct window 0x000..0x1FFC
+static mut sram: [u8; 1048576] = [0; 1048576]
+static mut bnc: [u8; 262144] = [0; 262144]     // the host bounce buffer
+static mut pkey: [u64; 16] = [0; 16]
+static mut pval: [u64; 16] = [0; 16]
+static mut np: u64 = 0
+static mut access: u64 = 0
+static mut waddr: u64 = 0
+static mut raddr: u64 = 0
+static mut viol: u64 = 0
+static mut lost: u64 = 0
+static mut mode: u64 = 0
+static mut int_arm: u64 = 0
+static mut f_sram: u64 = 0
+static mut f_c0: u64 = 0
+static mut f_c1: u64 = 0
+static mut f_bs: u64 = 0
+static mut bus_base: u64 = 0
+static mut bus_size: u64 = 0
+
+fn prph_find(a: u64) -> i64 {
+    var i: u64 = 0
+    while i < np {
+        if pkey[i as usize] == a { return i as i64 }
+        i = i + 1
+    }
+    return -1
+}
+
+fn trace_w(off: u64, v: u64) {
+    tlit("W ")
+    thex(off)
+    tch(32)
+    thex(v & 0xFFFFFFFF)
+    temit()
+}
+
+// the DMA engine: copy cnt octets from the host window to SRAM[dst]
+fn dma_run() {
+    if f_sram == 0 || f_c0 == 0 || f_c1 == 0 || f_bs == 0 { viol = viol + 1 }
+    let c0: u64 = regs[0x1948 / 4]
+    let c1: u64 = regs[0x194C / 4]
+    let dst: u64 = regs[0x19C8 / 4]
+    let src: u64 = ((c1 >> 28) << 32) | c0
+    let cnt: u64 = c1 & 0x0FFFFFFF
+    var good: bool = true
+    if src < bus_base || src + cnt > bus_base + bus_size { good = false }
+    if dst + cnt > 1048576 { good = false }
+    var ext: u64 = 0
+    if dst >= 0x40000 && dst <= 0x57FFF { ext = 1 }
+    var chick: u64 = 0
+    let k: i64 = prph_find(0x01FF8)
+    if k >= 0 { chick = pval[k as usize] & 1 }
+    if chick != ext { good = false }
+    var i: u64 = 0
+    if good {
+        while i < cnt {
+            sram[(dst + i) as usize] = bnc[(src - bus_base + i) as usize]
+            i = i + 1
+        }
+    } else {
+        lost = lost + cnt
+    }
+    if mode != 1 { int_arm = 3 }
+}
+
+fn m_wr(ctx: u64, off: u64, v: u64) {
+    if off >= 0x2000 { return }
+    let t: bool = off == 0x00C || off == 0x05C || off == 0x008 || off == 0x010 || (off >= 0x1000 && off < 0x2000)
+    if off >= 0x1000 && off < 0x2000 && access == 0 { viol = viol + 1 }
+    if t { trace_w(off, v) }
+    if off == 0x008 {
+        regs[2] = regs[2] & (v ^ 0xFFFFFFFF)
+    } else if off == 0x010 {
+        regs[4] = regs[4] & (v ^ 0xFFFFFFFF)
+    } else if off == 0x024 {
+        regs[0x024 / 4] = v
+        if v & 8 != 0 { access = 1 } else { access = 0 }
+    } else if off == 0x444 {
+        waddr = v
+    } else if off == 0x448 {
+        raddr = v
+    } else if off == 0x44C {
+        if access == 0 || (waddr >> 24) != 3 { viol = viol + 1 } else {
+            let a: u64 = waddr & 0xFFFFF
+            var k: i64 = prph_find(a)
+            if k < 0 && np < 16 {
+                pkey[np as usize] = a
+                k = np as i64
+                np = np + 1
+            }
+            if k >= 0 { pval[k as usize] = v & 0xFFFFFFFF }
+            tlit("P ")
+            thex(a)
+            tch(32)
+            thex(v & 0xFFFFFFFF)
+            temit()
+        }
+    } else {
+        regs[(off / 4) as usize] = v
+        if off == 0x1E20 {
+            if v == 0 {
+                f_sram = 0; f_c0 = 0; f_c1 = 0; f_bs = 0
+            } else if v & 0x80000000 != 0 {
+                dma_run()
+            }
+        } else if off == 0x19C8 { f_sram = 1
+        } else if off == 0x1948 { f_c0 = 1
+        } else if off == 0x194C { f_c1 = 1
+        } else if off == 0x1E28 { if v == 0x00101003 { f_bs = 1 } }
+    }
+}
+
+fn m_rd(ctx: u64, off: u64) -> u64 {
+    if off >= 0x2000 { return 0xFFFFFFFF }
+    if off == 0x008 {
+        if int_arm > 0 {
+            int_arm = int_arm - 1
+            if int_arm == 0 { regs[2] = regs[2] | 0x08000000 }
+        }
+        return regs[2]
+    } else if off == 0x024 {
+        var g: u64 = regs[0x024 / 4]
+        if g & 8 != 0 { g = g | 1 }
+        return g
+    } else if off == 0x450 {
+        if access == 0 {
+            viol = viol + 1
+            return 0xA5A5A5A1
+        }
+        let k: i64 = prph_find(raddr & 0xFFFFF)
+        if k < 0 { return 0 }
+        return pval[k as usize]
+    }
+    if off >= 0x1000 && access == 0 {
+        viol = viol + 1
+        return 0xA5A5A5A1
+    }
+    return regs[(off / 4) as usize]
+}
+
+fn rd32(a: u64, o: usize) -> u64 {
+    return (rt.ld8(a, o) as u64) | ((rt.ld8(a, o + 1) as u64) << 8) | ((rt.ld8(a, o + 2) as u64) << 16) | ((rt.ld8(a, o + 3) as u64) << 24)
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    rt.read_stdin(&inp)
+    let all: u64 = rt.buf_ptr(&inp)
+    let alen: usize = rt.buf_len(&inp)
+    if alen < 100 {
+        tlit("BAD case file")
+        temit()
+        return 1
+    }
+    let bsize: u64 = rd32(all, 0)
+    mode = rd32(all, 4)
+    let phys: u64 = rd32(all, 8) | (rd32(all, 12) << 32)
+    let blob: u64 = all + 16
+    let blen: usize = alen - 16
+    bus_base = phys
+    bus_size = bsize
+    if bus_size > 262144 { bus_size = 262144 }
+
+    var p: iwl_probe.Probe = iwl_probe.probe_new()
+    iwl_probe.mmio_set(&p, 0, m_rd, m_wr)
+    var f: iwl_fw.FwInfo = iwl_fw.fwinfo_new()
+    let pr: i64 = iwl_fw.fw_parse(blob, blen, &f)
+    if pr != 0 {
+        tlit("PARSE ")
+        tsig(pr)
+        temit()
+        return 1
+    }
+    var st: iwl_fh8000.FhStat = iwl_fh8000.fhstat_new()
+    let r: i64 = iwl_fh8000.fh_load(&p, &f, blob, iwl_fw.IMG_RT, (&bnc[0]) as u64, phys, bsize, &st)
+
+    var nz: u64 = 0
+    var dig: u64 = 0
+    var i: usize = 0
+    while i < 1048576 {
+        let b: u64 = sram[i] as u64
+        if b != 0 {
+            nz = nz + 1
+            dig = (dig + b * ((i as u64 % 251) + 1)) & 0xFFFFFFFF
+        }
+        i = i + 1
+    }
+    var chick: u64 = 0
+    let k: i64 = prph_find(0x01FF8)
+    if k >= 0 { chick = pval[k as usize] }
+    tlit("RC ")
+    tsig(r)
+    tlit(" FAILSEC ")
+    tnum(st.fail_sec)
+    temit()
+    tlit("STAT chunks=")
+    tnum(st.chunks)
+    tlit(" bytes=")
+    tnum(st.bytes)
+    tlit(" ext=")
+    tnum(st.ext_chunks)
+    tlit(" cpu1=")
+    tnum(st.secs[0])
+    tlit(" cpu2=")
+    tnum(st.secs[1])
+    temit()
+    tlit("LOADSTAT ")
+    thex(regs[0x1AF0 / 4] & 0xFFFFFFFF)
+    temit()
+    tlit("CHICK ")
+    thex(chick)
+    temit()
+    tlit("VIOL ")
+    tnum(viol)
+    tlit(" LOST ")
+    tnum(lost)
+    tlit(" NONZERO ")
+    tnum(nz)
+    tlit(" DIGEST ")
+    thex(dig)
+    temit()
+    return 0
+}
