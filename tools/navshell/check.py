@@ -14,6 +14,8 @@ THEMES = "settings://personalization/themes"
 POWER = "settings://system/power"
 DISPLAY = "settings://display"
 DISPADV = "settings://display/advanced"
+TASKBAR = "settings://personalization/taskbar"
+EFFECTS = "settings://personalization/effects"
 
 
 def parse(txt):
@@ -66,6 +68,8 @@ def judge(txt, quiet=False):
     ok(subseq(navs, [lambda n: n[8] >= 1, lambda n: n[0] == POWER and n[1] == 16]), "Enter opens the best hit: %s on page 16" % POWER)
     ok(subseq(navs, [lambda n: n[0] == DISPLAY and n[1] == 1, lambda n: n[0] == DISPADV and n[1] == 19, lambda n: n[0] == POWER]),
        "sidebar: Display (page 1) and Advanced display (page 19, SET-7) open their own pages")
+    ok(subseq(navs, [lambda n: n[0] == TASKBAR and n[1] == 20, lambda n: n[0] == EFFECTS and n[1] == 21]),
+       "sidebar: Taskbar (page 20) and Window effects (page 21, SET-6) open their own pages")
     for want in ("navback", "navfwd", "navup", "navcrumba", "navcrumbb"):
         ok(want in names, "rect %s reported" % want)
     tabs = [n for n in names if re.fullmatch(r"tab[a-z]", n)]
