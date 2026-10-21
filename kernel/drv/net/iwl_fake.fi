@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/net/iwl_fake.fi -- HP-9b QEMU test bed: a FAKE Intel family-8000 CSR window in plain RAM.
+//
+// QEMU has no Intel WLAN device, so the kernel loader glue (iwl.fi `fh8000_stage`) runs the REAL
+// lib/wlan/iwl_fh8000.fi against this model instead of a BAR: the same flow-handler rules as the host
+// model tools/wlan/fh8000.fi (MAC access window for everything above 0x1000 and for PRPH, channel-9
+// register order, DMA from the host bounce window into a fake SRAM, LMPM_CHICK bit 0 must match the
+// extended range of the chunk start). It proves the kernel wiring (bounce frames, bus address, firmware
+// file from the VFS, error lines) -- NOT Intel's silicon (that needs the HP laptop, HP-9c).
+//
+// Layout of the fake window (one DMA region, FAKE_PAGES frames): bytes 0x0000..0x1FFF = register file
+// (u32 each), 0x2000.. = u64 model slots (access flag, PRPH address latches, counters, PRPH table).
+// `ctx` of the Mmio hooks is the base address of the region.
+//
+// Modes: FAKE_NORMAL; FAKE_LOST (the end-of-TFD interrupt never comes: loader must time out);
+// FAKE_BADWIN (the model believes the bounce buffer is somewhere else: every DMA is refused, nothing
+// lands in SRAM -- proves the gate sees misdirected data).
+
+profile kernel
+
+export {
+    FAKE_PAGES, FAKE_NORMAL, FAKE_LOST, FAKE_BADWIN, SRAM_SIZE,
+    fake_init, fake_rd, fake_wr, fake_viol, fake_lost, fake_sum, fake_chick, fake_loadstat
+}
+
+const FAKE_PAGES: u64 = 3
+const FAKE_NORMAL: u64 = 0
+const FAKE_LOST: u64 = 1
+const FAKE_BADWIN: u64 = 2
+const SRAM_SIZE: u64 = 1048576
+
+const S_ACCESS: u64 = 0x2000
+const S_WADDR: u64 = 0x2008
+const S_RADDR: u64 = 0x2010
+const S_VIOL: u64 = 0x2018
+const S_LOST: u64 = 0x2020
+const S_ARM: u64 = 0x2028
+const S_MODE: u64 = 0x2030
+const S_FLAGS: u64 = 0x2038
+const S_NP: u64 = 0x2040
+const S_BUSBASE: u64 = 0x2048
+const S_BUSSIZE: u64 = 0x2050
+const S_SRAM: u64 = 0x2058
+const S_PKEY: u64 = 0x2100      // 16 x u64
+const S_PVAL: u64 = 0x2200      // 16 x u64
+const NPRPH: u64 = 16
+
+const F_SRAM: u64 = 1
+const F_C0: u64 = 2
+const F_C1: u64 = 4
+const F_BS: u64 = 8
+
+fn g(ctx: u64, o: u64) -> u64 {
+    let q: *mut u64 = (ctx + o) as *mut u64
+    return *q
+}
+
+fn s(ctx: u64, o: u64, v: u64) {
+    let q: *mut u64 = (ctx + o) as *mut u64
+    *q = v
+}
+
+fn r32(ctx: u64, off: u64) -> u64 {
+    let q: *mut u32 = (ctx + off) as *mut u32
+    let v: u32 = *q
+    return v as u64
+}
+
+fn w32(ctx: u64, off: u64, v: u64) {
+    let q: *mut u32 = (ctx + off) as *mut u32
+    *q = (v & 0xFFFFFFFF) as u32
+}
+
+// `region` = FAKE_PAGES zeroed frames, `sram` = SRAM_SIZE zeroed octets, the bounce window the model accepts
+// DMA from is [bus_base, bus_base + bus_size).
+fn fake_init(region: u64, sram: u64, mode: u64, bus_base: u64, bus_size: u64) {
+    s(region, S_MODE, mode)
+    s(region, S_SRAM, sram)
+    s(region, S_BUSBASE, bus_base)
+    s(region, S_BUSSIZE, bus_size)
+}
+
+fn fake_viol(ctx: u64) -> u64 { return g(ctx, S_VIOL) }
+fn fake_lost(ctx: u64) -> u64 { return g(ctx, S_LOST) }
+
+fn prph_find(ctx: u64, a: u64) -> i64 {
+    let n: u64 = g(ctx, S_NP)
+    var i: u64 = 0
+    while i < n {
+        if g(ctx, S_PKEY + i * 8) == a { return i as i64 }
+        i = i + 1
+    }
+    return -1
+}
+
+fn fake_chick(ctx: u64) -> u64 {
+    let k: i64 = prph_find(ctx, 0x01FF8)
+    if k < 0 { return 0 }
+    return g(ctx, S_PVAL + (k as u64) * 8)
+}
+
+fn fake_loadstat(ctx: u64) -> u64 {
+    return r32(ctx, 0x1AF0)
+}
+
+// number of non-zero SRAM octets (out[0]) and the position-weighted digest (out[1]) -- the same
+// formula as tools/wlan/fh8000_ref.py (sum of byte * (index % 251 + 1), 32 bit).
+fn fake_sum(ctx: u64, out: *mut u64) {
+    let sr: u64 = g(ctx, S_SRAM)
+    var nz: u64 = 0
+    var dig: u64 = 0
+    var i: u64 = 0
+    while i < SRAM_SIZE {
+        let q: *mut u8 = (sr + i) as *mut u8
+        let b: u64 = (*q) as u64
+        if b != 0 {
+            nz = nz + 1
+            dig = (dig + b * ((i % 251) + 1)) & 0xFFFFFFFF
+        }
+        i = i + 1
+    }
+    *out = nz
+    let q1: *mut u64 = ((out as u64) + 8) as *mut u64
+    *q1 = dig
+}
+
+fn viol(ctx: u64) {
+    s(ctx, S_VIOL, g(ctx, S_VIOL) + 1)
+}
+
+// the DMA engine: copy cnt octets from the host window to SRAM[dst]
+fn dma_run(ctx: u64) {
+    let fl: u64 = g(ctx, S_FLAGS)
+    if fl != (F_SRAM | F_C0 | F_C1 | F_BS) { viol(ctx) }
+    let c0: u64 = r32(ctx, 0x1948)
+    let c1: u64 = r32(ctx, 0x194C)
+    let dst: u64 = r32(ctx, 0x19C8)
+    let src: u64 = ((c1 >> 28) << 32) | c0
+    let cnt: u64 = c1 & 0x0FFFFFFF
+    let bb: u64 = g(ctx, S_BUSBASE)
+    var good: bool = true
+    if src < bb || src + cnt > bb + g(ctx, S_BUSSIZE) { good = false }
+    if dst + cnt > SRAM_SIZE { good = false }
+    var ext: u64 = 0
+    if dst >= 0x40000 && dst <= 0x57FFF { ext = 1 }
+    if (fake_chick(ctx) & 1) != ext { good = false }
+    if good {
+        let sr: u64 = g(ctx, S_SRAM)
+        var i: u64 = 0
+        while i < cnt {
+            let d: *mut u8 = (sr + dst + i) as *mut u8
+            let t: *mut u8 = (src + i) as *mut u8
+            *d = *t
+            i = i + 1
+        }
+    } else {
+        s(ctx, S_LOST, g(ctx, S_LOST) + cnt)
+    }
+    if g(ctx, S_MODE) != FAKE_LOST { s(ctx, S_ARM, 3) }
+}
+
+fn fake_wr(ctx: u64, off: u64, v: u64) {
+    if off >= 0x2000 { return }
+    if off >= 0x1000 && g(ctx, S_ACCESS) == 0 { viol(ctx) }
+    if off == 0x008 {
+        w32(ctx, 0x008, r32(ctx, 0x008) & (v ^ 0xFFFFFFFF))
+    } else if off == 0x010 {
+        w32(ctx, 0x010, r32(ctx, 0x010) & (v ^ 0xFFFFFFFF))
+    } else if off == 0x024 {
+        w32(ctx, 0x024, v)
+        if (v & 8) != 0 { s(ctx, S_ACCESS, 1) } else { s(ctx, S_ACCESS, 0) }
+    } else if off == 0x444 {
+        s(ctx, S_WADDR, v)
+    } else if off == 0x448 {
+        s(ctx, S_RADDR, v)
+    } else if off == 0x44C {
+        if g(ctx, S_ACCESS) == 0 || (g(ctx, S_WADDR) >> 24) != 3 {
+            viol(ctx)
+        } else {
+            let a: u64 = g(ctx, S_WADDR) & 0xFFFFF
+            var k: i64 = prph_find(ctx, a)
+            if k < 0 && g(ctx, S_NP) < NPRPH {
+                k = g(ctx, S_NP) as i64
+                s(ctx, S_PKEY + (k as u64) * 8, a)
+                s(ctx, S_NP, g(ctx, S_NP) + 1)
+            }
+            if k >= 0 { s(ctx, S_PVAL + (k as u64) * 8, v & 0xFFFFFFFF) }
+        }
+    } else {
+        w32(ctx, off, v)
+        if off == 0x1E20 {
+            if v == 0 {
+                s(ctx, S_FLAGS, 0)
+            } else if (v & 0x80000000) != 0 {
+                dma_run(ctx)
+            }
+        } else if off == 0x19C8 { s(ctx, S_FLAGS, g(ctx, S_FLAGS) | F_SRAM)
+        } else if off == 0x1948 { s(ctx, S_FLAGS, g(ctx, S_FLAGS) | F_C0)
+        } else if off == 0x194C { s(ctx, S_FLAGS, g(ctx, S_FLAGS) | F_C1)
+        } else if off == 0x1E28 {
+            if v == 0x00101003 { s(ctx, S_FLAGS, g(ctx, S_FLAGS) | F_BS) }
+        }
+    }
+}
+
+fn fake_rd(ctx: u64, off: u64) -> u64 {
+    if off >= 0x2000 { return 0xFFFFFFFF }
+    if off == 0x008 {
+        let arm: u64 = g(ctx, S_ARM)
+        if arm > 0 {
+            s(ctx, S_ARM, arm - 1)
+            if arm == 1 { w32(ctx, 0x008, r32(ctx, 0x008) | 0x08000000) }
+        }
+        return r32(ctx, 0x008)
+    } else if off == 0x020 {
+        var rv: u64 = r32(ctx, 0x020) & 0xFFFFFF7F        // software reset bit self-clears
+        if (rv & 0x200) != 0 { rv = rv | 0x100 }           // stop master -> master disabled
+        return rv
+    } else if off == 0x024 {
+        var gp: u64 = r32(ctx, 0x024)
+        if (gp & 12) != 0 { gp = gp | 1 }                  // INIT_DONE / ACCESS_REQ -> clock ready
+        return gp
+    } else if off == 0x450 {
+        if g(ctx, S_ACCESS) == 0 {
+            viol(ctx)
+            return 0xA5A5A5A1
+        }
+        let k: i64 = prph_find(ctx, g(ctx, S_RADDR) & 0xFFFFF)
+        if k < 0 { return 0 }
+        return g(ctx, S_PVAL + (k as u64) * 8)
+    }
+    if off >= 0x1000 && g(ctx, S_ACCESS) == 0 {
+        viol(ctx)
+        return 0xA5A5A5A1
+    }
+    return r32(ctx, off)
+}
