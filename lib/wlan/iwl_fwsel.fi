@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import wlan.iwl_probe
 
-export { candidate_count, candidate_name, candidate_path, MAX_CAND, NAME_MAX, PATH_MAX }
+export {
+    candidate_count, candidate_name, candidate_path, MAX_CAND, NAME_MAX, PATH_MAX,
+    dev_count, dev_name, dev_path, fam8000_count, fam8000_name
+}
 
 const MAX_CAND: u64 = 3
 const NAME_MAX: usize = 48
@@ -57,6 +60,63 @@ fn candidate_path(rev: u64, rf: u64, i: u64, out: u64) -> usize {
     let pre: [u8; 29] = "/lib/firmware/intel/iwlwifi/\0"
     let n0: usize = put(out, (&pre[0]) as *u8)
     let n1: usize = candidate_name(rev, rf, i, out + n0 as u64)
+    if n1 == 0 {
+        *(out as *mut u8) = 0 as u8
+        return 0
+    }
+    return n0 + n1
+}
+
+// ---- family 8000 (Intel AC 8260/8265, PCI 24f3/24f4/24fd): file names depend on the PCI device id, not on hw_rev ----
+// Newest API first. The names are from memory of linux-firmware (iwlwifi-8265-{36,34,31,...}.ucode,
+// iwlwifi-8000C-{36,34,31,...}.ucode, cfg/8000.c IWL8265_FW_PRE / IWL8000_FW_PRE); NOT checked against a file here.
+const V8000_0: u64 = 36
+const V8000_1: u64 = 34
+const V8000_2: u64 = 31
+
+fn fam8000_count(dev: u64) -> u64 {
+    if iwl_probe.is_8265(iwl_probe.VENDOR_INTEL, dev) { return 3 }
+    if iwl_probe.is_8260(iwl_probe.VENDOR_INTEL, dev) { return 3 }
+    return 0
+}
+
+fn put_ver(out: u64, pre: *u8, ver: u64) -> usize {
+    let n0: usize = put(out, pre)
+    *((out + n0 as u64) as *mut u8) = (48 + (ver / 10)) as u8
+    *((out + n0 as u64 + 1) as *mut u8) = (48 + (ver % 10)) as u8
+    let suf: [u8; 8] = ".ucode\0\0"
+    let n1: usize = put(out + n0 as u64 + 2, (&suf[0]) as *u8)
+    return n0 + 2 + n1
+}
+
+fn fam8000_name(dev: u64, i: u64, out: u64) -> usize {
+    if i >= fam8000_count(dev) { return 0 }
+    var v: u64 = V8000_0
+    if i == 1 { v = V8000_1 }
+    if i == 2 { v = V8000_2 }
+    if iwl_probe.is_8265(iwl_probe.VENDOR_INTEL, dev) {
+        let pre: [u8; 14] = "iwlwifi-8265-\0"
+        return put_ver(out, (&pre[0]) as *u8, v)
+    }
+    let pre: [u8; 15] = "iwlwifi-8000C-\0"
+    return put_ver(out, (&pre[0]) as *u8, v)
+}
+
+// Device-aware entry points (the kernel glue uses these): family 8000 by PCI id, Qu/QuZ by hw_rev + radio id.
+fn dev_count(dev: u64, rev: u64, rf: u64) -> u64 {
+    if iwl_probe.family_of(iwl_probe.VENDOR_INTEL, dev) == iwl_probe.FAM_8000 { return fam8000_count(dev) }
+    return candidate_count(rev, rf)
+}
+
+fn dev_name(dev: u64, rev: u64, rf: u64, i: u64, out: u64) -> usize {
+    if iwl_probe.family_of(iwl_probe.VENDOR_INTEL, dev) == iwl_probe.FAM_8000 { return fam8000_name(dev, i, out) }
+    return candidate_name(rev, rf, i, out)
+}
+
+fn dev_path(dev: u64, rev: u64, rf: u64, i: u64, out: u64) -> usize {
+    let pre: [u8; 29] = "/lib/firmware/intel/iwlwifi/\0"
+    let n0: usize = put(out, (&pre[0]) as *u8)
+    let n1: usize = dev_name(dev, rev, rf, i, out + n0 as u64)
     if n1 == 0 {
         *(out as *mut u8) = 0 as u8
         return 0

@@ -1,0 +1,194 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/groupkey.fi -- WPA2/WPA3 group key handshake (GTK rekey), LW-2.
+//
+// The 4-way handshake (wpa.fi, connect.fi) installs the first GTK in message 3. The access point
+// replaces the group key later (a client left, or its rekey timer ran out) with a 2-message
+// exchange (IEEE 802.11-2016 12.7.7):
+//
+//   1  AP -> STA  Key Info: group, ACK, MIC, Secure, Encrypted key data; Key Data = AES-wrapped GTK KDE
+//   2  STA -> AP  Key Info: group, MIC, Secure; same replay counter; no key data
+//
+// Rules this file enforces (every one has a negative test in tools/wlan/lw2.fi):
+//   * only while connected and with a PTK (a frame before the handshake is a stranger's);
+//   * the MIC is checked FIRST with the KCK; nothing is unwrapped or installed from an unverified frame;
+//   * the 64 bit replay counter must be strictly greater than the last accepted one (the counter of
+//     pairwise message 3 counts too, see `note_pairwise`) -- a replayed rekey would roll the group key back;
+//   * a GTK that is already installed (same key id, same octets) is NOT installed again (reinstalling resets
+//     the receive replay counter of the group key, the group-key variant of KRACK); message 2 is still answered;
+//   * a frame that fails any check changes NOTHING: no key, no counter, no session field;
+//   * this module never calls `state.ereignis` (every event in state "connected" aborts the run).
+//
+// Only CCMP-128 (16 octet GTK) is handled, like connect.fi.
+
+import wlan.device
+import wlan.connect
+import wlan.wpa
+import wlan.state
+
+export {
+    GroupState, group_new, note_pairwise, rekey_handle, rekey_error_of,
+    GK_OK, GK_STATE, GK_SHORT, GK_NOT_GROUP, GK_REPLAY, GK_MIC, GK_UNWRAP, GK_NO_GTK, GK_KEY, GK_OUT,
+    MSG2_LEN
+}
+
+const GK_OK: u64 = 0
+const GK_STATE: u64 = 1      // not connected / no PTK
+const GK_SHORT: u64 = 2      // not a parsable EAPOL-Key frame
+const GK_NOT_GROUP: u64 = 3  // key info bits do not describe group message 1
+const GK_REPLAY: u64 = 4     // replay counter not greater than the last accepted one
+const GK_MIC: u64 = 5
+const GK_UNWRAP: u64 = 6     // key data does not unwrap (wrong KEK / damaged)
+const GK_NO_GTK: u64 = 7     // no (usable) GTK KDE in the key data
+const GK_KEY: u64 = 8        // the device refused the key
+const GK_OUT: u64 = 9        // output buffer too small
+
+// EAPOL header (4) + commit part (95) with empty key data.
+const MSG2_LEN: usize = 99
+
+struct GroupState {
+    have_counter: bool,
+    last_counter: u64,
+    have_gtk: bool,
+    key_idx: u64,
+    gtk: [u8; 16],
+    installs: u64,
+    rejects: u64,
+    last_error: u64
+}
+
+fn group_new() -> GroupState {
+    return GroupState { have_counter: false, last_counter: 0, have_gtk: false, key_idx: 0,
+        gtk: [0; 16], installs: 0, rejects: 0, last_error: GK_OK }
+}
+
+fn ld8(p: u64, i: usize) -> u8 { return *((p + i as u64) as *mut u8) }
+fn st8(p: u64, i: usize, v: u8) { *((p + i as u64) as *mut u8) = v }
+
+fn be64(p: u64, at: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < 8 {
+        v = (v << 8) | (ld8(p, at + i) as u64)
+        i = i + 1
+    }
+    return v
+}
+
+// Replay counter of an EAPOL-Key frame: octets 9..16 (header 4 + descriptor 1 + key info 2 + key length 2).
+fn counter_of(eapol: u64) -> u64 { return be64(eapol, 9) }
+
+// Call once after pairwise message 3 was accepted: later group frames must have a larger counter.
+fn note_pairwise(gs: *mut GroupState, eapol: u64, elen: usize) {
+    if elen < 17 { return }
+    let c: u64 = counter_of(eapol)
+    if !(*gs).have_counter || c > (*gs).last_counter {
+        (*gs).have_counter = true
+        (*gs).last_counter = c
+    }
+}
+
+fn fail(gs: *mut GroupState, code: u64) -> i64 {
+    (*gs).rejects = (*gs).rejects + 1
+    (*gs).last_error = code
+    return 0 - (code as i64)
+}
+
+fn rekey_error_of(gs: *mut GroupState) -> u64 { return (*gs).last_error }
+
+// Handle group message 1. Returns the length of message 2 written to `out` (>= MSG2_LEN capacity needed),
+// or a negative GK_* code. On a negative return nothing was changed.
+fn rekey_handle(s: *mut connect.Session, g: *mut device.Geraet, gs: *mut GroupState,
+    eapol: u64, elen: usize, out: u64, outmax: usize) -> i64 {
+    if !state.verbunden(&(*s).lauf) || !(*s).hat_ptk {
+        return fail(gs, GK_STATE)
+    }
+    if outmax < MSG2_LEN {
+        return fail(gs, GK_OUT)
+    }
+    var e: wpa.Eapol = wpa.eapol_new()
+    if !wpa.eapol_zerlege(&e, eapol, elen) {
+        return fail(gs, GK_SHORT)
+    }
+    if e.paarweise || e.installieren || !e.ack || !e.hat_mic || !e.sicher || !e.daten_verschluesselt
+        || e.fehler || e.anforderung {
+        return fail(gs, GK_NOT_GROUP)
+    }
+    // MIC first: KCK = PTK octets 0..15.
+    if !wpa.mic_check((&(*s).ptk[0]) as u64, 16, eapol, elen, (*s).akm) {
+        return fail(gs, GK_MIC)
+    }
+    let counter: u64 = counter_of(eapol)
+    if (*gs).have_counter && counter <= (*gs).last_counter {
+        return fail(gs, GK_REPLAY)
+    }
+    var data: [u8; 288] = [0 as u8; 288]
+    let dn: i64 = wpa.schluesseldaten_auspacken((&(*s).ptk[16]) as u64, 16, e.daten, e.daten_len,
+        (&data[0]) as u64, 288)
+    if dn < 0 {
+        return fail(gs, GK_UNWRAP)
+    }
+    var gtk: [u8; 16] = [0 as u8; 16]
+    var idx: u64 = 0
+    let gl: i64 = wpa.gtk_find((&data[0]) as u64, dn as usize, (&gtk[0]) as u64, 16, &idx)
+    if gl != 16 {
+        return fail(gs, GK_NO_GTK)
+    }
+    var same: bool = (*gs).have_gtk && (*gs).key_idx == idx
+    if same {
+        var diff: u64 = 0
+        var i: usize = 0
+        while i < 16 {
+            diff = diff | ((gtk[i] ^ (*gs).gtk[i]) as u64)
+            i = i + 1
+        }
+        same = diff == 0
+    }
+    if !same {
+        if device.key_set(g, device.SCHLUESSEL_GTK, idx, (&gtk[0]) as u64, 16) < 0 {
+            return fail(gs, GK_KEY)
+        }
+        var j: usize = 0
+        while j < 16 {
+            (*gs).gtk[j] = gtk[j]
+            (*s).gtk[j] = gtk[j]
+            j = j + 1
+        }
+        (*s).gtk_len = 16
+        (*gs).have_gtk = true
+        (*gs).key_idx = idx
+        (*gs).installs = (*gs).installs + 1
+    }
+    (*gs).have_counter = true
+    (*gs).last_counter = counter
+
+    // Message 2: group, MIC, Secure; same replay counter; empty key data.
+    var i: usize = 0
+    while i < MSG2_LEN {
+        st8(out, i, 0 as u8)
+        i = i + 1
+    }
+    st8(out, 0, e.version as u8)
+    st8(out, 1, 3 as u8)
+    st8(out, 2, 0 as u8)
+    st8(out, 3, 95 as u8)
+    st8(out, 4, e.deskriptor as u8)
+    let ki: u64 = (e.key_info & 7) | 0x100 | 0x200
+    st8(out, 5, (ki >> 8) as u8)
+    st8(out, 6, (ki & 255) as u8)
+    i = 0
+    while i < 8 {
+        st8(out, 9 + i, ld8(eapol, 9 + i))
+        i = i + 1
+    }
+    var mic: [u8; 16] = [0 as u8; 16]
+    if !wpa.mic_compute((&(*s).ptk[0]) as u64, 16, out, MSG2_LEN, (*s).akm, (&mic[0]) as u64) {
+        return fail(gs, GK_MIC)
+    }
+    i = 0
+    while i < 16 {
+        st8(out, 81 + i, mic[i])
+        i = i + 1
+    }
+    (*gs).last_error = GK_OK
+    return MSG2_LEN as i64
+}

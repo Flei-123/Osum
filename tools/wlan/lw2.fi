@@ -1,0 +1,309 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/wlan/lw2.fi -- host oracle for lib/wlan/groupkey.fi (LW-2: group key rekey).
+// stdin script, one command per line (hex fields are lower case, "-" = empty):
+//   S <ptk 48 octets> <akm> <connected 0|1>     new session (connected = drive the state machine to "connected")
+//   N <eapol>                                  note_pairwise (counter of pairwise message 3)
+//   R <eapol>                                  rekey_handle; prints one result line
+// result: R rc=<n> inst=<installs> skeys=<keys in the device> kid=<last key id> err=<code> gtk=<hex> m2=<hex|->
+import std.rt
+import std.io
+import wlan.device
+import wlan.testdevice
+import wlan.connect
+import wlan.state
+import wlan.groupkey
+import wlan.caps
+
+const CAP: usize = 2048
+
+static mut b0: [u8; 2048] = [0; 2048]
+static mut pois: [u8; 600] = [0; 600]
+static mut outb: [u8; 2048] = [0; 2048]
+static mut txtb: [u8; 4600] = [0; 4600]
+static mut tlen: usize = 0
+static mut ctx_sess: u64 = 0
+static mut ctx_gst: u64 = 0
+static mut ctx_pr: u64 = 0
+static mut ctx_gg: u64 = 0
+
+fn tch(c: u64) {
+    if tlen < 4590 {
+        txtb[tlen] = (c & 255) as u8
+        tlen = tlen + 1
+    }
+}
+fn tlit(w: str) {
+    var i: usize = 0
+    while i < w.n {
+        tch(rt.ld8(w.p as u64, i) as u64)
+        i = i + 1
+    }
+}
+fn tnum(v: u64) {
+    if v >= 10 { tnum(v / 10) }
+    tch(48 + (v % 10))
+}
+fn tsigned(v: i64) {
+    if v < 0 {
+        tch(45)
+        tnum((0 - v) as u64)
+    } else {
+        tnum(v as u64)
+    }
+}
+fn thex(p: u64, n: usize) {
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        tch(d[(v >> 4) as usize] as u64)
+        tch(d[(v & 15) as usize] as u64)
+        i = i + 1
+    }
+}
+fn temit() {
+    io.print_line_bytes((&txtb[0]) as u64, tlen)
+    tlen = 0
+}
+
+fn hexval(c: u64) -> i64 {
+    if c >= 48 && c <= 57 { return (c - 48) as i64 }
+    if c >= 97 && c <= 102 { return (c - 87) as i64 }
+    if c >= 65 && c <= 70 { return (c - 55) as i64 }
+    return -1
+}
+
+fn field_hex(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 { i = i + 1 }
+    *at = i
+    let n: usize = i - start
+    if n == 0 { return -1 }
+    if n == 1 && rt.ld8(line, start) == 45 as u8 { return 0 }
+    if n % 2 != 0 { return -1 }
+    if n / 2 > CAP { return -1 }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hexval(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hexval(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 { return -1 }
+        rt.st8(dst, o, ((hi * 16 + lo) & 255) as u8)
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+fn field_num(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    var v: i64 = 0
+    while i < len && rt.ld8(line, i) >= 48 as u8 && rt.ld8(line, i) <= 57 as u8 {
+        v = v * 10 + ((rt.ld8(line, i) as i64) - 48)
+        i = i + 1
+    }
+    if i == start { return -1 }
+    *at = i
+    return v
+}
+
+fn new_session(line: u64, len: usize) {
+    let sp: *mut connect.Session = ctx_sess as *mut connect.Session
+    let gsp: *mut groupkey.GroupState = ctx_gst as *mut groupkey.GroupState
+    let prp: *mut testdevice.Check = ctx_pr as *mut testdevice.Check
+    let ggp: *mut device.Geraet = ctx_gg as *mut device.Geraet
+    var at: usize = 1
+    let kl: i64 = field_hex(line, len, &at, (&b0[0]) as u64)
+    let akm: i64 = field_num(line, len, &at)
+    let conn: i64 = field_num(line, len, &at)
+    *sp = connect.session_new()
+    *gsp = groupkey.group_new()
+    *prp = testdevice.check_new()
+    *ggp = device.geraet_new()
+    testdevice.anhaengen(ggp, prp, false)
+    if kl != 48 || akm < 0 { tlit("S bad"); temit(); return }
+    var i: usize = 0
+    while i < 48 {
+        (*sp).ptk[i] = b0[i]
+        i = i + 1
+    }
+    (*sp).hat_ptk = true
+    (*sp).akm = akm as u64
+    if conn == 1 {
+        // s b a c 1 2 3 4: scan, found, auth, assoc, M1..M4 -> connected
+        state.ereignis(&(*sp).lauf, 115)
+        state.ereignis(&(*sp).lauf, 98)
+        state.ereignis(&(*sp).lauf, 97)
+        state.ereignis(&(*sp).lauf, 99)
+        state.ereignis(&(*sp).lauf, 49)
+        state.ereignis(&(*sp).lauf, 50)
+        state.ereignis(&(*sp).lauf, 51)
+        state.ereignis(&(*sp).lauf, 52)
+    }
+    tlit("S ok connected=")
+    tnum(if state.verbunden(&(*sp).lauf) { 1 } else { 0 })
+    temit()
+}
+
+fn b01(v: bool) {
+    if v { tch(49) } else { tch(48) }
+}
+fn kv(k: str, v: u64) {
+    tch(32)
+    tlit(k)
+    tnum(v)
+}
+fn kb(k: str, v: bool) {
+    tch(32)
+    tlit(k)
+    b01(v)
+}
+
+fn print_caps(c: *mut caps.Caps, rc: i64) {
+    tlit("C rc=")
+    tsigned(rc)
+    kv("seen=", (*c).seen)
+    kv("bad=", (*c).bad)
+    kb("ht=", (*c).ht)
+    kb("w40=", (*c).ht_width40)
+    kb("sgi20=", (*c).ht_sgi20)
+    kb("sgi40=", (*c).ht_sgi40)
+    kb("ldpc=", (*c).ht_ldpc)
+    kv("stbc=", (*c).ht_rx_stbc)
+    kv("ampdu=", (*c).ht_ampdu_exp)
+    kv("nss=", (*c).ht_nss)
+    kv("rx=", (*c).ht_rx_rate_mbps)
+    kb("op=", (*c).ht_op)
+    kv("prim=", (*c).ht_primary)
+    kv("off=", (*c).ht_sec_offset)
+    kb("opw40=", (*c).ht_op_width40)
+    kb("vht=", (*c).vht)
+    kv("mpdu=", (*c).vht_max_mpdu)
+    kb("w160=", (*c).vht_width160)
+    kb("p80=", (*c).vht_80p80)
+    kb("sgi80=", (*c).vht_sgi80)
+    kb("sgi160=", (*c).vht_sgi160)
+    kb("subf=", (*c).vht_su_bfee)
+    kb("mubf=", (*c).vht_mu_bfee)
+    kv("vnss=", (*c).vht_nss)
+    tlit(" mcs=")
+    var s: usize = 0
+    while s < 8 {
+        tnum((*c).vht_mcs[s] as u64)
+        s = s + 1
+    }
+    kb("vop=", (*c).vht_op)
+    kv("vw=", (*c).vht_op_width)
+    kv("seg0=", (*c).vht_seg0)
+    kv("seg1=", (*c).vht_seg1)
+    kb("he=", (*c).he)
+    kb("he160=", (*c).he_160)
+    kv("ht20=", caps.ht_rate_kbps(c, 20, true))
+    kv("ht20l=", caps.ht_rate_kbps(c, 20, false))
+    kv("ht40=", caps.ht_rate_kbps(c, 40, true))
+    kv("v20=", caps.vht_rate_kbps(c, 20, true))
+    kv("v40=", caps.vht_rate_kbps(c, 40, true))
+    kv("v80=", caps.vht_rate_kbps(c, 80, true))
+    kv("v80l=", caps.vht_rate_kbps(c, 80, false))
+    kv("v160=", caps.vht_rate_kbps(c, 160, true))
+    kv("b20=", caps.best_rate_kbps(c, 20))
+    kv("b40=", caps.best_rate_kbps(c, 40))
+    kv("b80=", caps.best_rate_kbps(c, 80))
+    kv("b160=", caps.best_rate_kbps(c, 160))
+    temit()
+}
+
+fn caps_cmd(line: u64, len: usize, poison: bool) {
+    var at: usize = 1
+    // copy to a poisoned buffer so a read past the end changes the result
+    let el: i64 = field_hex(line, len, &at, (&b0[0]) as u64)
+    if el < 0 { tlit("bad hex"); temit(); return }
+    var i: usize = 0
+    while i < 600 {
+        pois[i] = if poison { 0xA5 as u8 } else { 0x5A as u8 }
+        i = i + 1
+    }
+    i = 0
+    while i < (el as usize) && i < 600 {
+        pois[i] = b0[i]
+        i = i + 1
+    }
+    var cc: caps.Caps = caps.caps_new()
+    let rc: i64 = caps.caps_parse((&pois[0]) as u64, el as usize, &cc)
+    print_caps(&cc, rc)
+}
+
+fn run_line(line: u64, len: usize) {
+    let sp: *mut connect.Session = ctx_sess as *mut connect.Session
+    let gsp: *mut groupkey.GroupState = ctx_gst as *mut groupkey.GroupState
+    let prp: *mut testdevice.Check = ctx_pr as *mut testdevice.Check
+    let ggp: *mut device.Geraet = ctx_gg as *mut device.Geraet
+    let c: u8 = rt.ld8(line, 0)
+    if c == 83 as u8 { new_session(line, len); return }
+    if c == 67 as u8 { caps_cmd(line, len, true); return }
+    if c == 80 as u8 { caps_cmd(line, len, false); return }
+    var at: usize = 1
+    let el: i64 = field_hex(line, len, &at, (&b0[0]) as u64)
+    if el < 0 { tlit("bad hex"); temit(); return }
+    if c == 78 as u8 {
+        groupkey.note_pairwise(gsp, (&b0[0]) as u64, el as usize)
+        tlit("N ok")
+        temit()
+        return
+    }
+    if c == 82 as u8 {
+        let rc: i64 = groupkey.rekey_handle(sp, ggp, gsp, (&b0[0]) as u64, el as usize,
+            (&outb[0]) as u64, 2048)
+        tlit("R rc=")
+        tsigned(rc)
+        tlit(" inst=")
+        tnum((*gsp).installs)
+        tlit(" skeys=")
+        tnum(testdevice.schluessel_anzahl(prp) as u64)
+        tlit(" kid=")
+        tnum((*gsp).key_idx)
+        tlit(" err=")
+        tnum((*gsp).last_error)
+        tlit(" gtk=")
+        thex((&(*sp).gtk[0]) as u64, 16)
+        tlit(" m2=")
+        if rc > 0 {
+            thex((&outb[0]) as u64, rc as usize)
+        } else {
+            tch(45)
+        }
+        temit()
+        return
+    }
+    tlit("unknown command")
+    temit()
+}
+
+#[allow_escape]
+fn main() -> i32 {
+    var sess: connect.Session = connect.session_new()
+    var gst: groupkey.GroupState = groupkey.group_new()
+    var pr: testdevice.Check = testdevice.check_new()
+    var gg: device.Geraet = device.geraet_new()
+    ctx_sess = (&sess) as u64
+    ctx_gst = (&gst) as u64
+    ctx_pr = (&pr) as u64
+    ctx_gg = (&gg) as u64
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) { return 1 }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var at: usize = 0
+    while at < n {
+        var e: usize = at
+        while e < n && rt.ld8(p, e) != 10 as u8 { e = e + 1 }
+        var len: usize = e - at
+        while len > 0 && rt.ld8(p, at + len - 1) == 13 as u8 { len = len - 1 }
+        if len > 0 { run_line(p + at as u64, len) }
+        at = e + 1
+    }
+    rt.buf_free(&inp)
+    return 0
+}

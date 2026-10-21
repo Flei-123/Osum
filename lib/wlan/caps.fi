@@ -1,0 +1,278 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/caps.fi -- 802.11n/ac/ax capability elements of a beacon / probe response / association response (LW-2).
+//
+// Input: the information-element blob (id, length, body ...) of a management frame. Output: what the AP
+// can do (channel width, short guard interval, spatial streams, MCS ceiling) and the best PHY rate the
+// combination allows. Read only: this file never writes into the frame and never reads past `n`.
+//
+// Elements (IEEE 802.11-2016 9.4.2.56 HT Capabilities, 9.4.2.57 HT Operation, 9.4.2.158 VHT Capabilities,
+// 9.4.2.159 VHT Operation, 9.4.2.237 HE Capabilities = element 255 with extension id 35):
+//   45  HT Capabilities  26 octets   61  HT Operation  22 octets
+//   191 VHT Capabilities 12 octets   192 VHT Operation  5 octets
+//   255/35 HE Capabilities: only the presence and the channel-width bits of PHY capabilities octet 0.
+// A known element with the wrong length is counted in `bad` and ignored (never half-parsed).
+
+export {
+    Caps, caps_new, caps_parse, ht_rate_kbps, vht_rate_kbps, best_rate_kbps,
+    HT_CAP_LEN, HT_OP_LEN, VHT_CAP_LEN, VHT_OP_LEN
+}
+
+const HT_CAP_LEN: usize = 26
+const HT_OP_LEN: usize = 22
+const VHT_CAP_LEN: usize = 12
+const VHT_OP_LEN: usize = 5
+
+struct Caps {
+    // HT Capabilities
+    ht: bool,
+    ht_width40: bool,
+    ht_sgi20: bool,
+    ht_sgi40: bool,
+    ht_ldpc: bool,
+    ht_rx_stbc: u64,
+    ht_ampdu_exp: u64,      // max A-MPDU length = 2^(13+exp) - 1
+    ht_nss: u64,            // spatial streams the AP receives (non-zero RX MCS mask octets 0..3)
+    ht_rx_rate_mbps: u64,   // "highest supported data rate" field
+    // HT Operation
+    ht_op: bool,
+    ht_primary: u64,
+    ht_sec_offset: u64,     // 0 none, 1 above, 3 below
+    ht_op_width40: bool,
+    // VHT Capabilities
+    vht: bool,
+    vht_max_mpdu: u64,      // 3895 / 7991 / 11454
+    vht_width160: bool,
+    vht_80p80: bool,
+    vht_sgi80: bool,
+    vht_sgi160: bool,
+    vht_su_bfee: bool,
+    vht_mu_bfee: bool,
+    vht_nss: u64,           // streams with an RX MCS map entry != 3
+    vht_mcs: [u8; 8],       // per stream: 0 = MCS 0-7, 1 = 0-8, 2 = 0-9, 3 = not supported
+    // VHT Operation
+    vht_op: bool,
+    vht_op_width: u64,      // 0 = 20/40, 1 = 80, 2 = 160, 3 = 80+80
+    vht_seg0: u64,
+    vht_seg1: u64,
+    // HE
+    he: bool,
+    he_160: bool,
+    // bookkeeping
+    seen: u64,              // recognised elements
+    bad: u64                // recognised ids with a wrong length
+}
+
+fn caps_new() -> Caps {
+    return Caps { ht: false, ht_width40: false, ht_sgi20: false, ht_sgi40: false, ht_ldpc: false,
+        ht_rx_stbc: 0, ht_ampdu_exp: 0, ht_nss: 0, ht_rx_rate_mbps: 0,
+        ht_op: false, ht_primary: 0, ht_sec_offset: 0, ht_op_width40: false,
+        vht: false, vht_max_mpdu: 0, vht_width160: false, vht_80p80: false, vht_sgi80: false,
+        vht_sgi160: false, vht_su_bfee: false, vht_mu_bfee: false, vht_nss: 0, vht_mcs: [3; 8],
+        vht_op: false, vht_op_width: 0, vht_seg0: 0, vht_seg1: 0,
+        he: false, he_160: false, seen: 0, bad: 0 }
+}
+
+fn ld8(p: u64, i: usize) -> u64 {
+    let b: u8 = *((p + i as u64) as *mut u8)
+    return b as u64
+}
+fn le16(p: u64, i: usize) -> u64 { return ld8(p, i) | (ld8(p, i + 1) << 8) }
+fn le32(p: u64, i: usize) -> u64 { return le16(p, i) | (le16(p, i + 2) << 16) }
+fn bit(v: u64, b: u64) -> bool { return ((v >> b) & 1) != 0 }
+
+fn parse_ht_cap(c: *mut Caps, b: u64) {
+    let ci: u64 = le16(b, 0)
+    (*c).ht = true
+    (*c).ht_ldpc = bit(ci, 0)
+    (*c).ht_width40 = bit(ci, 1)
+    (*c).ht_sgi20 = bit(ci, 5)
+    (*c).ht_sgi40 = bit(ci, 6)
+    (*c).ht_rx_stbc = (ci >> 8) & 3
+    (*c).ht_ampdu_exp = ld8(b, 2) & 3
+    var n: u64 = 0
+    var i: usize = 0
+    while i < 4 {
+        if ld8(b, 3 + i) != 0 { n = n + 1 }
+        i = i + 1
+    }
+    (*c).ht_nss = n
+    (*c).ht_rx_rate_mbps = le16(b, 13) & 0x3FF
+}
+
+fn parse_ht_op(c: *mut Caps, b: u64) {
+    (*c).ht_op = true
+    (*c).ht_primary = ld8(b, 0)
+    (*c).ht_sec_offset = ld8(b, 1) & 3
+    (*c).ht_op_width40 = bit(ld8(b, 1), 2)
+}
+
+fn parse_vht_cap(c: *mut Caps, b: u64) {
+    let ci: u64 = le32(b, 0)
+    (*c).vht = true
+    let ml: u64 = ci & 3
+    (*c).vht_max_mpdu = 3895
+    if ml == 1 { (*c).vht_max_mpdu = 7991 }
+    if ml == 2 { (*c).vht_max_mpdu = 11454 }
+    let cw: u64 = (ci >> 2) & 3
+    (*c).vht_width160 = cw == 1 || cw == 2
+    (*c).vht_80p80 = cw == 2
+    (*c).vht_sgi80 = bit(ci, 5)
+    (*c).vht_sgi160 = bit(ci, 6)
+    (*c).vht_su_bfee = bit(ci, 12)
+    (*c).vht_mu_bfee = bit(ci, 20)
+    let map: u64 = le16(b, 4)
+    var n: u64 = 0
+    var s: usize = 0
+    while s < 8 {
+        let v: u64 = (map >> (2 * s as u64)) & 3
+        (*c).vht_mcs[s] = v as u8
+        if v != 3 { n = n + 1 }
+        s = s + 1
+    }
+    (*c).vht_nss = n
+}
+
+fn parse_vht_op(c: *mut Caps, b: u64) {
+    (*c).vht_op = true
+    (*c).vht_op_width = ld8(b, 0)
+    (*c).vht_seg0 = ld8(b, 1)
+    (*c).vht_seg1 = ld8(b, 2)
+}
+
+// Walk the elements. Returns the number of recognised elements, or -1 when an element length points past `n`
+// (the walk stops there; everything parsed before stays valid).
+fn caps_parse(ies: u64, n: usize, c: *mut Caps) -> i64 {
+    var at: usize = 0
+    while at + 2 <= n {
+        let id: u64 = ld8(ies, at)
+        let l: usize = ld8(ies, at + 1) as usize
+        if at + 2 + l > n { return -1 }
+        let b: u64 = ies + (at as u64) + 2
+        if id == 45 {
+            if l == HT_CAP_LEN { parse_ht_cap(c, b); (*c).seen = (*c).seen + 1 } else { (*c).bad = (*c).bad + 1 }
+        }
+        if id == 61 {
+            if l == HT_OP_LEN { parse_ht_op(c, b); (*c).seen = (*c).seen + 1 } else { (*c).bad = (*c).bad + 1 }
+        }
+        if id == 191 {
+            if l == VHT_CAP_LEN { parse_vht_cap(c, b); (*c).seen = (*c).seen + 1 } else { (*c).bad = (*c).bad + 1 }
+        }
+        if id == 192 {
+            if l == VHT_OP_LEN { parse_vht_op(c, b); (*c).seen = (*c).seen + 1 } else { (*c).bad = (*c).bad + 1 }
+        }
+        if id == 255 && l >= 1 && ld8(b, 0) == 35 {
+            // ext id 35 = HE Capabilities: ext id (1) + MAC caps (6) + PHY caps (11) at least
+            if l >= 18 {
+                (*c).he = true
+                let w: u64 = ld8(b, 7)  // PHY capabilities octet 0
+                (*c).he_160 = bit(w, 3) || bit(w, 4)
+                (*c).seen = (*c).seen + 1
+            } else {
+                (*c).bad = (*c).bad + 1
+            }
+        }
+        at = at + 2 + l
+    }
+    return (*c).seen as i64
+}
+
+// ---- rates -------------------------------------------------------------------------------------------------------
+// kbps = N_SD * N_BPSCS * R * streams / T_sym, T_sym = 4.0 us (long GI) or 3.6 us (short GI).
+// N_SD (data subcarriers): 20 MHz 52, 40 MHz 108, 80 MHz 234, 160 MHz 468 (HT and VHT).
+
+fn nsd_of(width: u64) -> u64 {
+    if width == 20 { return 52 }
+    if width == 40 { return 108 }
+    if width == 80 { return 234 }
+    if width == 160 { return 468 }
+    return 0
+}
+
+// MCS index within one stream (0..9) -> bits per subcarrier and code rate num/den.
+fn bpscs_of(m: u64) -> u64 {
+    if m == 0 { return 1 }
+    if m == 1 || m == 2 { return 2 }
+    if m == 3 || m == 4 { return 4 }
+    if m == 5 || m == 6 || m == 7 { return 6 }
+    return 8
+}
+fn rate_num(m: u64) -> u64 {
+    if m == 0 || m == 1 || m == 3 { return 1 }
+    if m == 2 || m == 4 || m == 6 || m == 8 { return 3 }
+    if m == 5 { return 2 }
+    return 5   // 7 and 9
+}
+fn rate_den(m: u64) -> u64 {
+    if m == 0 || m == 1 || m == 3 { return 2 }
+    if m == 2 || m == 4 || m == 6 || m == 8 { return 4 }
+    if m == 5 { return 3 }
+    return 6
+}
+
+// One stream at MCS `m` (0..9) in `width`, in kbps (0 for an invalid combination).
+fn stream_kbps(m: u64, width: u64, sgi: bool) -> u64 {
+    let nsd: u64 = nsd_of(width)
+    if nsd == 0 || m > 9 { return 0 }
+    let bits: u64 = nsd * bpscs_of(m) * rate_num(m)
+    if sgi { return bits * 2500 / (9 * rate_den(m)) }
+    return bits * 250 / rate_den(m)
+}
+
+// Best HT rate (MCS 0-7 per stream, `ht_nss` streams): width 20 or 40 (40 only when the AP supports it).
+fn ht_rate_kbps(c: *mut Caps, width: u64, sgi: bool) -> u64 {
+    if !(*c).ht { return 0 }
+    if width != 20 && width != 40 { return 0 }
+    if width == 40 && !(*c).ht_width40 { return 0 }
+    var use_sgi: bool = false
+    if sgi {
+        if width == 20 { use_sgi = (*c).ht_sgi20 } else { use_sgi = (*c).ht_sgi40 }
+    }
+    return stream_kbps(7, width, use_sgi) * (*c).ht_nss
+}
+
+// Best VHT rate: per stream the highest MCS of its map entry (7 / 8 / 9). MCS 9 is invalid at 20 MHz for 1, 2, 4
+// and 5 .. 8 streams in the standard's tables (valid for 3 and 6); this function drops to MCS 8 there.
+fn vht_rate_kbps(c: *mut Caps, width: u64, sgi: bool) -> u64 {
+    if !(*c).vht { return 0 }
+    if width == 160 && !(*c).vht_width160 { return 0 }
+    var use_sgi: bool = false
+    if sgi {
+        if width == 160 { use_sgi = (*c).vht_sgi160 } else { use_sgi = (*c).vht_sgi80 }
+    }
+    var total: u64 = 0
+    var s: usize = 0
+    while s < 8 {
+        let e: u64 = (*c).vht_mcs[s] as u64
+        if e != 3 {
+            var m: u64 = 7 + e
+            if m == 9 && width == 20 && (*c).vht_nss != 3 && (*c).vht_nss != 6 { m = 8 }
+            total = total + stream_kbps(m, width, use_sgi)
+        }
+        s = s + 1
+    }
+    return total
+}
+
+// Best rate over HT and VHT up to `width` MHz (the width the link actually uses). Short GI is assumed available
+// when the AP advertises it for that width.
+fn best_rate_kbps(c: *mut Caps, width: u64) -> u64 {
+    var best: u64 = 0
+    if width >= 20 {
+        let r: u64 = ht_rate_kbps(c, 20, true)
+        if r > best { best = r }
+    }
+    if width >= 40 {
+        let r: u64 = ht_rate_kbps(c, 40, true)
+        if r > best { best = r }
+    }
+    let ws: [u64; 4] = [20, 40, 80, 160]
+    var i: usize = 0
+    while i < 4 {
+        if ws[i] <= width {
+            let r: u64 = vht_rate_kbps(c, ws[i], true)
+            if r > best { best = r }
+        }
+        i = i + 1
+    }
+    return best
+}
