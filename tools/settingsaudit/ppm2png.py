@@ -9,7 +9,7 @@ import os, sys
 from PIL import Image
 
 PAGE_IDS = ["appearance", "screen", "time", "network", "users", "netview", "language", "presets", "accounts", "sync",
-            "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects", "wifi", "usbnet", "scheme", "accent"]
+            "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects", "wifi", "usbnet", "scheme", "accent", "password", "pin"]
 
 def main():
     indir, outdir = sys.argv[1], sys.argv[2]
@@ -20,7 +20,7 @@ def main():
             continue
         stem = f[:-4]
         if stem.startswith("page-") and len(stem) == 6:
-            idx = ord(stem[5]) - ord("a")
+            idx = ord(stem[5]) - ord("a") if stem[5].islower() else 26 + ord(stem[5]) - ord("A")
             if 0 <= idx < len(PAGE_IDS):
                 stem = "page-%02d-%s" % (idx, PAGE_IDS[idx])
         im = Image.open(os.path.join(indir, f)).convert("RGB")

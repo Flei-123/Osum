@@ -30,6 +30,8 @@ for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
   for p in a b c d e f g h i j k l m n o p q r s t u v w x y z; do
     echo "klickauf srecttab$p"; echo "warte 2"; echo "foto page-$p"
   done
+  echo "klickauf srecttab26"; echo "warte 2"; echo "foto page-A"
+  echo "klickauf srecttab27"; echo "warte 2"; echo "foto page-B"
   echo "taste ctrl-f"; echo "tippe zzzz"; echo "warte 2"; echo "foto search-empty"
 } > "$DREH"
 bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=900 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
