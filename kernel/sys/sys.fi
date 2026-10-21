@@ -7950,6 +7950,56 @@ fn big_hole(state: u64, me: u64, top: u64, pages: u64, prot: u64) -> u64 {
     return neg(errno.E_NOMEM)
 }
 
+fn lazy_bottom(state: u64, me: u64) -> u64 {
+    let b: u64 = sched.tget(state, mem_owner(state, me), sched.T_LAZY)
+    if b == 0 {
+        return proc.LAZY_TOP
+    }
+    return b
+}
+
+fn lazy_undo(state: u64, me: u64, base: u64, upto: u64) {
+    var k: u64 = 0
+    while k < upto {
+        let _d: bool = proc.page_drop(state, me, base + k * PAGE)
+        k = k + 1
+    }
+}
+
+fn lazy_run(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> bool {
+    let rd: bool = (prot & PROT_READ) != 0
+    let wr: bool = (prot & PROT_WRITE) != 0
+    let ex: bool = (prot & PROT_EXEC) != 0
+    var k: u64 = 0
+    while k < pages {
+        if !proc.lazy_mark(state, me, base + k * PAGE, rd, wr, ex) {
+            lazy_undo(state, me, base, k)
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn lazy_alloc(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
+    let top: u64 = lazy_bottom(state, me)
+    if pages * PAGE <= top - proc.LAZY_BASE {
+        let base: u64 = top - pages * PAGE
+        if lazy_run(state, me, base, pages, prot) {
+            sched.tset(state, mem_owner(state, me), sched.T_LAZY, base)
+            return base
+        }
+    }
+    let h: u64 = proc.lazy_find(state, me, pages)
+    if h == 0 {
+        return neg(errno.E_NOMEM)
+    }
+    if !lazy_run(state, me, h, pages, prot) {
+        return neg(errno.E_NOMEM)
+    }
+    return h
+}
+
 fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
     if kstate.mode_on(state, kstate.M_NOBIG) {
         return neg(errno.E_NOMEM)
@@ -8037,13 +8087,31 @@ fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> 
     }
     // RUNDE LIMITS3: a big PROT_NONE | MAP_NORESERVE mapping is a RESERVATION (JS engines, allocators): address space only, no frame.
     if prot == 0 && (flags & MAP_NORESERVE) != 0 && (flags & MAP_FIXED) == 0 && len >= RES_MIN && len <= RES_MAX {
+        if pages <= LAZY_RESERVE_PAGES {
+            let lr: u64 = lazy_alloc(state, me, pages, prot)
+            if lr < 0xFFFFFFFFFFFFF000 {
+                return lr
+            }
+        }
         return res_add(state, mem_owner(state, me), page_up(len))
+    }
+    if (flags & MAP_FIXED) == 0 && pages >= LAZY_MIN_PAGES && !kstate.mode_on(state, kstate.M_NOLAZY) {
+        let lz: u64 = lazy_alloc(state, me, pages, prot)
+        if lz < 0xFFFFFFFFFFFFF000 {
+            return lz
+        }
     }
     var base: u64 = 0
     if (flags & MAP_FIXED) != 0 {
         base = map_fixed(state, me, addr, pages, prot)
     } else {
         base = map_alloc(state, me, pages, prot)
+        if base >= 0xFFFFFFFFFFFFF000 {
+            let lf: u64 = lazy_alloc(state, me, pages, prot)
+            if lf < 0xFFFFFFFFFFFFF000 {
+                return lf
+            }
+        }
     }
     if base >= 0xFFFFFFFFFFFFF000 {
         return base
@@ -8085,7 +8153,8 @@ fn map_fixed(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
     let end: u64 = addr + pages * PAGE
     let in_alt: bool = addr >= map_bottom(state, me) && end <= MMAP_TOP
     let in_gross: bool = addr >= big_bottom(state, me) && end <= proc.BIG_TOP
-    if !in_alt && !in_gross {
+    let in_lazy: bool = addr >= proc.LAZY_BASE && end <= proc.LAZY_TOP
+    if !in_alt && !in_gross && !in_lazy {
         return neg(errno.E_NOMEM)
     }
     file_shm_flush_maps(state, me, addr, pages * PAGE, true)
@@ -8093,7 +8162,11 @@ fn map_fixed(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
     var p: u64 = addr
     while p < end {
         let _d: bool = proc.page_drop(state, me, p)
-        if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+        if in_lazy {
+            if !proc.lazy_mark(state, me, p, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0) {
+                return neg(errno.E_NOMEM)
+            }
+        } else if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
             return neg(errno.E_NOMEM)
         }
         kstate.add(state, kstate.MAPS, 1)
@@ -8646,7 +8719,9 @@ const RES_BASE: u64 = 0x100000000
 const RES_TOP: u64 = 0x700000000000
 const RES_MIN: u64 = 0x4000000 // 64 MiB: smaller ones stay ordinary (eager) mappings
 const RES_MAX: u64 = 0x400000000 // 16 GiB per call
-const RES_SLOTS: u64 = 15
+const RES_SLOTS: u64 = 14
+const LAZY_MIN_PAGES: u64 = 256
+const LAZY_RESERVE_PAGES: u64 = 131072
 
 fn res_start(state: u64, owner: u64, k: u64) -> u64 {
     return sched.tget(state, owner, sched.T_RESV + k * 16)
@@ -8668,6 +8743,7 @@ fn res_clear(state: u64, owner: u64) {
         k = k + 1
     }
     sched.tset(state, owner, sched.T_RESNEXT, 0)
+    sched.tset(state, owner, sched.T_LAZY, 0)
 }
 
 fn res_add(state: u64, owner: u64, len: u64) -> u64 {
@@ -8784,7 +8860,8 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     let in_alt: bool = addr >= map_bottom(state, me) && addr < MMAP_TOP
     let in_gross: bool = addr >= big_bottom(state, me) && addr < proc.BIG_TOP
     let in_arena: bool = addr >= proc.SHM_ARENA_BASE && addr < proc.SHM_ARENA_TOP
-    if !in_alt && !in_gross && !in_arena {
+    let in_lazy: bool = addr >= proc.LAZY_BASE && addr < proc.LAZY_TOP
+    if !in_alt && !in_gross && !in_arena && !in_lazy {
         return neg(errno.E_INVAL)
     }
     // COMPOSITOR S3: a mapping of a shared object gives its reference back (LCSH: a file mapping writes back first)
@@ -8793,10 +8870,17 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     var p: u64 = addr
     let end: u64 = addr + page_up(len)
     while p < end {
-        if p < MMAP_TOP || p < proc.BIG_TOP || (p >= proc.SHM_ARENA_BASE && p < proc.SHM_ARENA_TOP) {
+        if p < MMAP_TOP || p < proc.BIG_TOP || (p >= proc.SHM_ARENA_BASE && p < proc.SHM_ARENA_TOP) || (p >= proc.LAZY_BASE && p < proc.LAZY_TOP) {
             proc.page_drop(state, me, p)
         }
         p = p + PAGE
+    }
+    if in_lazy && addr == lazy_bottom(state, me) {
+        var nb: u64 = end
+        if nb >= proc.LAZY_TOP {
+            nb = 0
+        }
+        sched.tset(state, mem_owner(state, me), sched.T_LAZY, nb)
     }
     return 0
 }
@@ -9767,6 +9851,7 @@ fn do_fork(state: u64, me: u64, frame: u64, stapel: u64) -> u64 {
     sched.tset(state, child, sched.T_BRK, brk_of(state, me))
     sched.tset(state, child, sched.T_MMAP, map_bottom(state, me))
     sched.tset(state, child, sched.T_BIG, sched.tget(state, mem_owner(state, me), sched.T_BIG))
+    sched.tset(state, child, sched.T_LAZY, sched.tget(state, mem_owner(state, me), sched.T_LAZY))
     // RUNDE NETVIEW: das Kind sieht das Netz seines Elternteils, samt
     // dessen Liste erlaubter Ziele. Anders herum waere es ein Loch:
     // `fork` waere dann der Weg aus jeder Sicht heraus.
