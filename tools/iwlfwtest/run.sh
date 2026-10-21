@@ -54,7 +54,7 @@ image() { # name [blob]
     local n=$1 blob=${2:-}
     local extra=()
     [ -n "$blob" ] && extra=("/lib/firmware/intel/iwlwifi/iwlwifi-QuZ-a0-hr-b0-77.ucode=$blob")
-    python3 tools/osum/mkfs.py build "$T/$n.img" 20000 /bin/ /t/ /etc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+    python3 tools/osum/mkfs.py build "$T/$n.img" 20000 --v3 /bin/ /t/ /etc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
         /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" "/t/s.sh=$T/s.sh" "${extra[@]}" > "$T/$n.mkfs" 2>&1 \
         || { tail -3 "$T/$n.mkfs"; return 1; }
 }
