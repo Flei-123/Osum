@@ -89,6 +89,8 @@ import template
 // time talk to orient-bus (AB-005b, AB-006)
 import actcli
 import fui.lockidle
+import setroute
+import navview
 
 export { u_start }
 
@@ -3306,6 +3308,7 @@ fn melde_stand() {
         say((&s_z[0 as usize]) as u64)
     }
     nl()
+    nav_state_say()
 }
 
 // ==================================== ROUND THEMESTORE: reading in
@@ -4464,6 +4467,7 @@ fn zeige_reiter(r: u64) {
         fuiscene.pane_top(0)
     }
     reiter = r
+    setroute.note_page(r)
     if r >= R_ANZ {
         pkg_enter(r - R_ANZ)
     }
@@ -4474,7 +4478,24 @@ fn zeige_reiter(r: u64) {
 // ROUND ACTION-BUS-3: the controls of the two bus pages under names that
 // do not move when a widget is added elsewhere (tools/actionbus/gui.sh
 // clicks them)
+fn nav_rects() {
+    var n_b: [u8; 8] = "navback\0"
+    var n_f: [u8; 7] = "navfwd\0"
+    var n_u: [u8; 6] = "navup\0"
+    var n_c: [u8; 10] = "navcrumb?\0"
+    rect_say((&n_b[0 as usize]) as u64, K_NAVBACK)
+    rect_say((&n_f[0 as usize]) as u64, K_NAVFWD)
+    rect_say((&n_u[0 as usize]) as u64, K_NAVUP)
+    var ci: u64 = 0
+    while ci < navview.shown_count() {
+        n_c[(8) as usize] = (97 + ci) as u8
+        rect_say((&n_c[0 as usize]) as u64, K_CRUMB0 + ci)
+        ci = ci + 1
+    }
+}
+
 fn bus_rects() {
+    nav_rects()
     // every tab as a rectangle too ("taba", "tabb", ...): a runner then
     // switches pages by clicking the tab, like a person, in ONE window
     var k: u64 = 0
@@ -8884,6 +8905,11 @@ const K_SEG0: u64 = 180 // 180 .. 182: light, dark, auto
 const K_SW0: u64 = 183 // 183 .. 190: the eight accent swatches
 const K_WP0: u64 = 191 // the wallpaper thumbnail
 const K_HDR: u64 = 199 // the header canvas
+const K_NAVBACK: u64 = 940
+const K_NAVFWD: u64 = 941
+const K_NAVUP: u64 = 942
+const K_CRUMB0: u64 = 944
+static mut nav_crumbs: u64 = 0
 const K_BACK: u64 = 197 // narrow mode: back from a page to the list
 const SIDE_W: u64 = 232
 const NCAT: u64 = 8
@@ -9079,6 +9105,9 @@ fn page_matches(p: u64) -> bool {
     if rb(q, 0) == 0 {
         return true
     }
+    if p < R_ANZ && setroute.ready() {
+        return setroute.page_shown(p)
+    }
     // the key "settings.kwNN"
     let kb: u64 = (&kwkey[0 as usize]) as u64
     if p >= 10 {
@@ -9118,6 +9147,7 @@ fn page_matches(p: u64) -> bool {
 
 fn nav_compute() {
     nav_n = 0
+    let _qp: u64 = setroute.query_pages((&e_srch[0 as usize]) as u64)
     var i: u64 = 0
     while i < pages_all() {
         if page_matches(i) {
@@ -9135,11 +9165,20 @@ fn nav_compute() {
 fn nav_step(cur: u64, down: bool) -> u64 {
     var order: [u64; 32] = [0 as u64; 32]
     var n: u64 = 0
+    var fo: u64 = 0
+    while setroute.ready() && fo < setroute.flat_count() {
+        let fp: u64 = setroute.flat_page(fo)
+        if fp != setroute.NONE && nav_vis[(fp) as usize] != 0 && n < 32 {
+            order[(n) as usize] = fp
+            n = n + 1
+        }
+        fo = fo + 1
+    }
     var c: u64 = 0
     while c < NCAT + 1 {
         var p: u64 = 0
         while p < pages_all() {
-            if cat_of(p) == c && nav_vis[(p) as usize] != 0 {
+            if cat_of(p) == c && nav_vis[(p) as usize] != 0 && (p >= R_ANZ || !setroute.ready()) && n < 32 {
                 order[(n) as usize] = p
                 n = n + 1
             }
@@ -9193,7 +9232,13 @@ fn tile_cb(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
     let s: u64 = fuiscene.sp(1)
     if kind == 1 {
         // a page in the sidebar
-        let sel: bool = arg == reiter
+        let pgn: u64 = arg % 64
+        let subx: u64 = (arg / 64) * 14
+        let sel: bool = pgn == reiter
+        var tname: u64 = setroute.page_title(pgn)
+        if tname == 0 {
+            tname = page_name(pgn)
+        }
         if sel {
             fuiscene.cv_round(x, y, w, h, 6 * s, fuiscene.R_FIELD)
             fuiscene.cv_ring(x, y, w, h, 6 * s, fuiscene.R_BORDER)
@@ -9202,7 +9247,7 @@ fn tile_cb(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
         if (st & SF_FOCUS) != 0 {
             fuiscene.cv_ring(x, y, w, h, 6 * s, fuiscene.R_ACCENT)
         }
-        fuiscene.text_role(x + 18 * s, y + h / 2 + 5 * s, w - 24 * s, page_name(arg), 14 * s, sel, fuiscene.R_TEXT)
+        fuiscene.text_role(x + (18 + subx) * s, y + h / 2 + 5 * s, w - (24 + subx) * s, tname, 14 * s, sel, fuiscene.R_TEXT)
     } else if kind == 3 {
         // an accent swatch
         let d: u64 = w
@@ -9462,7 +9507,7 @@ fn side_fit(item_h: u64, compact: bool) -> u64 {
         var p: u64 = 0
         var any: bool = false
         while p < pages_all() {
-            if cat_of(p) == c && nav_vis[(p) as usize] != 0 {
+            if cat_of(p) == c && nav_vis[(p) as usize] != 0 && (p >= R_ANZ || !setroute.ready()) {
                 any = true
             }
             p = p + 1
@@ -9471,6 +9516,13 @@ fn side_fit(item_h: u64, compact: bool) -> u64 {
             heads = heads + 1
         }
         c = c + 1
+    }
+    var fg: u64 = 0
+    while setroute.ready() && fg < setroute.flat_count() {
+        if setroute.flat_page(fg) == setroute.NONE && setroute.group_shown(fg) {
+            heads = heads + 1
+        }
+        fg = fg + 1
     }
     if nav_n == 0 {
         return item_h
@@ -9502,6 +9554,61 @@ fn pane_h(used: u64) -> u64 {
         return 0
     }
     return h - used
+}
+
+fn side_routes(lst: usize, item_h: u64) {
+    if !setroute.ready() {
+        return
+    }
+    var fi: u64 = 0
+    while fi < setroute.flat_count() {
+        let pg: u64 = setroute.flat_page(fi)
+        if pg == setroute.NONE {
+            if setroute.group_shown(fi) {
+                let _g: usize = fuiscene.label_muted(lst, setroute.flat_title(fi))
+            }
+        } else if nav_vis[(pg) as usize] != 0 {
+            let sub: u64 = setroute.flat_depth(fi)
+            let _t: usize = fuiscene.ftile_left(lst, tab_key(pg), setroute.flat_title(fi), 0, item_h, 256 + pg + 64 * sub, tile_cb)
+        }
+        fi = fi + 1
+    }
+}
+
+fn nav_header(main: usize) {
+    let hr: usize = fuiscene.row(main)
+    fuiscene.set_gap(hr, 12)
+    fuiscene.set_size(hr, 0, 52)
+    let _tb: usize = navview.toolbar(hr)
+    nav_crumbs = navview.crumbs_row(hr, setroute.current_uri(), setroute.current_uri_len())
+}
+
+fn nav_act(act: u64, key: u64) {
+    var pg: u64 = setroute.NONE
+    if act == navview.ACT_BACK {
+        pg = setroute.go_back()
+    } else if act == navview.ACT_FORWARD {
+        pg = setroute.go_forward()
+    } else if act == navview.ACT_UP {
+        pg = setroute.go_up()
+    } else if act == navview.ACT_CRUMB {
+        pg = setroute.open_uri(setroute.current_uri(), navview.crumb_target_len(key))
+    }
+    if pg != setroute.NONE && pg != reiter {
+        bus_page(pg)
+        zeige_reiter(pg)
+    } else {
+        fuiscene.refresh()
+    }
+    rep_due = 1
+}
+
+fn nav_state_say() {
+    if !setroute.ready() {
+        return
+    }
+    say(setroute.state_line(nav_crumbs))
+    nl()
 }
 
 fn build() {
@@ -9563,12 +9670,13 @@ fn build() {
             fuiscene.set_gap(lst, 2)
         }
     }
+    side_routes(lst, item_h)
     var c: u64 = 0
     while c < NCAT + 1 {
         var any: bool = false
         var p0: u64 = 0
         while p0 < pages_all() {
-            if cat_of(p0) == c && nav_vis[(p0) as usize] != 0 {
+            if cat_of(p0) == c && nav_vis[(p0) as usize] != 0 && (p0 >= R_ANZ || !setroute.ready()) {
                 any = true
             }
             p0 = p0 + 1
@@ -9577,7 +9685,7 @@ fn build() {
             let _ch: usize = fuiscene.label_muted(lst, cat_name(c))
             var p: u64 = 0
             while p < pages_all() {
-                if cat_of(p) == c && nav_vis[(p) as usize] != 0 {
+                if cat_of(p) == c && nav_vis[(p) as usize] != 0 && (p >= R_ANZ || !setroute.ready()) {
                     let _t: usize = fuiscene.ftile_left(lst, tab_key(p), page_name(p), 0, item_h, 256 + p, tile_cb)
                 }
                 p = p + 1
@@ -9598,6 +9706,8 @@ fn build() {
         fuiscene.set_size(bk, 84, 40)
         let hv: usize = fuiscene.canvas(hr, K_HDR, 0, 52, hdr_cb)
         fuiscene.set_grow(hv, 1)
+    } else if setroute.ready() && nav_n > 0 && !nav_mode() {
+        nav_header(main)
     } else {
         let _hd: usize = fuiscene.canvas(main, K_HDR, 0, 52, hdr_cb)
     }
@@ -9858,6 +9968,8 @@ fn u_start(args: u64) -> u64 {
     var s_lgs: [u8; 8] = " src=\0\0\0"
     var s_lgk: [u8; 8] = " keys=\0\0"
     let mk: u64 = msg.init()
+    let _sr: bool = setroute.init()
+    navview.set_keys(K_NAVBACK, K_NAVFWD, K_NAVUP, K_CRUMB0)
     say((&s_lg[0 as usize]) as u64)
     say(msg.lang())
     say((&s_lgs[0 as usize]) as u64)
@@ -9975,6 +10087,7 @@ fn u_start(args: u64) -> u64 {
     }
     fuiscene.set_dense(true)
     reiter = start_page
+    setroute.note_page(reiter)
     // narrow window: a program asked to open on a page shows that page, not the list
     if start_page != R_DARST {
         nav_detail = true
@@ -10205,9 +10318,15 @@ fn u_start(args: u64) -> u64 {
             fuiscene.refresh()
             rep_due = 1
             key = 0
+        } else if navview.action_of(key) != navview.ACT_NONE {
+            nav_act(navview.action_of(key), key)
+            key = 0
         } else if key == K_SRCH {
             if nav_n > 0 {
-                let first: u64 = nav_step(99, true)
+                var first: u64 = nav_step(99, true)
+                if setroute.top_page() != setroute.NONE {
+                    first = setroute.top_page()
+                }
                 goto_page(first)
             }
             key = 0

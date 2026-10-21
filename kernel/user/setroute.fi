@@ -1,0 +1,471 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import msg
+import nav.reg
+import nav.loader
+import nav.stack
+import nav.search
+import nav.route
+
+export {
+    NONE, init, ready, page_route, route_page, page_title, note_page, resolve_page, current_uri, current_uri_len,
+    go_back, go_forward, go_up, can_back, can_forward, can_up, flat_count, flat_route, flat_depth, flat_page,
+    flat_title, group_shown, query_pages, page_shown, top_page, hit_count, state_line, load_error, open_uri,
+}
+
+const NONE: u64 = 4294967295
+const MAXP: u64 = 32
+const MAXF: u64 = 48
+const H: u64 = 0
+const ROUTES_TXT: str = __include_str("settings.d/settings.routes")
+const MAP_TXT: str = __include_str("settings.d/settings.pagemap")
+
+static mut page_rt: [u64; 32] = [4294967295 as u64; 32]
+static mut rt_page: [u64; 192] = [4294967295 as u64; 192]
+static mut fl_rt: [u64; 48] = [0 as u64; 48]
+static mut fl_dep: [u64; 48] = [0 as u64; 48]
+static mut n_flat: u64 = 0
+static mut is_ready: u64 = 0
+static mut load_err: u64 = 0
+static mut hit_mask: u64 = 0
+static mut hit_n: u64 = 0
+static mut hit_top: u64 = 4294967295
+static mut hit_ids: [u64; 64] = [0 as u64; 64]
+static mut line: [u8; 160] = [0 as u8; 160]
+static mut uri_buf: [u8; 256] = [0 as u8; 256]
+static mut query_on: u64 = 0
+
+fn rd(p: u64, i: u64) -> u64 {
+    return route.rd(p, i)
+}
+
+fn ready() -> bool {
+    return is_ready == 1
+}
+
+fn load_error() -> u64 {
+    return load_err
+}
+
+fn map_line(l: u64, n: u64) {
+    if n < 9 {
+        return
+    }
+    if rd(l, 0) != 112 || rd(l, 1) != 97 || rd(l, 2) != 103 || rd(l, 3) != 101 || rd(l, 4) != 32 {
+        return
+    }
+    var i: u64 = 5
+    var num: u64 = 0
+    while i < n && rd(l, i) >= 48 && rd(l, i) <= 57 {
+        num = num * 10 + rd(l, i) - 48
+        i = i + 1
+    }
+    if i >= n || rd(l, i) != 32 || num >= MAXP {
+        return
+    }
+    i = i + 1
+    var e: u64 = i
+    while e < n && rd(l, e) > 32 && rd(l, e) != 35 {
+        e = e + 1
+    }
+    let id: u64 = reg.find(l + i, e - i)
+    if id == reg.NONE {
+        return
+    }
+    page_rt[(num) as usize] = id
+    rt_page[(id) as usize] = num
+}
+
+fn parse_map() {
+    let m: str = MAP_TXT
+    let p: u64 = m.p as u64
+    let n: u64 = m.n as u64
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && rd(p, e) != 10 {
+            e = e + 1
+        }
+        map_line(p + i, e - i)
+        i = e + 1
+    }
+}
+
+fn has_mapped(rt: u64, depth: u64) -> bool {
+    if rt_page[(rt) as usize] != NONE {
+        return true
+    }
+    if depth >= 4 {
+        return false
+    }
+    var j: u64 = 0
+    while j < reg.child_count(rt) {
+        if has_mapped(reg.child_at(rt, j), depth + 1) {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
+fn flat_add(rt: u64, dep: u64) {
+    if n_flat >= MAXF {
+        return
+    }
+    fl_rt[(n_flat) as usize] = rt
+    fl_dep[(n_flat) as usize] = dep
+    n_flat = n_flat + 1
+}
+
+fn build_flat() {
+    n_flat = 0
+    let root: u64 = reg.app_root(0)
+    var i: u64 = 0
+    while i < reg.child_count(root) {
+        let top: u64 = reg.child_at(root, i)
+        if has_mapped(top, 1) {
+            flat_add(top, 0)
+            var j: u64 = 0
+            while j < reg.child_count(top) {
+                let c: u64 = reg.child_at(top, j)
+                if rt_page[(c) as usize] != NONE {
+                    flat_add(c, 1)
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn init() -> bool {
+    if is_ready == 1 {
+        return true
+    }
+    var k: u64 = 0
+    while k < MAXP {
+        page_rt[(k) as usize] = NONE
+        k = k + 1
+    }
+    k = 0
+    while k < 192 {
+        rt_page[(k) as usize] = NONE
+        k = k + 1
+    }
+    let r: str = ROUTES_TXT
+    let res: u64 = loader.load(r.p as u64, r.n as u64)
+    if res == loader.ERR {
+        load_err = reg.err_code() + 1
+        return false
+    }
+    parse_map()
+    build_flat()
+    stack.reset(H)
+    is_ready = 1
+    return true
+}
+
+fn page_route(p: u64) -> u64 {
+    if p >= MAXP {
+        return NONE
+    }
+    return page_rt[(p) as usize]
+}
+
+fn route_page(rt: u64) -> u64 {
+    if rt >= 192 {
+        return NONE
+    }
+    return rt_page[(rt) as usize]
+}
+
+fn first_mapped(rt: u64, depth: u64) -> u64 {
+    if rt_page[(rt) as usize] != NONE {
+        return rt_page[(rt) as usize]
+    }
+    if depth >= 4 {
+        return NONE
+    }
+    var j: u64 = 0
+    while j < reg.child_count(rt) {
+        let p: u64 = first_mapped(reg.child_at(rt, j), depth + 1)
+        if p != NONE {
+            return p
+        }
+        j = j + 1
+    }
+    return NONE
+}
+
+fn resolve_page(u: u64, n: u64) -> u64 {
+    let id: u64 = reg.resolve(u, n)
+    if id == reg.NONE {
+        return NONE
+    }
+    var r: u64 = id
+    while r != reg.NONE {
+        let p: u64 = first_mapped(r, 0)
+        if p != NONE {
+            return p
+        }
+        r = reg.parent(r)
+    }
+    return NONE
+}
+
+fn page_title(p: u64) -> u64 {
+    let rt: u64 = page_route(p)
+    if rt == NONE {
+        return 0
+    }
+    return msg.get(reg.title_key(rt))
+}
+
+fn current_uri() -> u64 {
+    return stack.current(H)
+}
+
+fn current_uri_len() -> u64 {
+    return stack.current_len(H)
+}
+
+fn open_uri(u: u64, n: u64) -> u64 {
+    let p: u64 = resolve_page(u, n)
+    if p == NONE {
+        return NONE
+    }
+    let _s: bool = stack.push(H, u, n)
+    return p
+}
+
+fn note_page(p: u64) {
+    if !ready() {
+        return
+    }
+    let rt: u64 = page_route(p)
+    if rt == NONE {
+        return
+    }
+    let cu: u64 = stack.current(H)
+    if cu != 0 && resolve_page(cu, stack.current_len(H)) == p {
+        return
+    }
+    let _s: bool = stack.push(H, reg.uri(rt), reg.uri_len(rt))
+}
+
+fn page_of_current() -> u64 {
+    return resolve_page(stack.current(H), stack.current_len(H))
+}
+
+fn go_back() -> u64 {
+    if !stack.back(H) {
+        return NONE
+    }
+    return page_of_current()
+}
+
+fn go_forward() -> u64 {
+    if !stack.forward(H) {
+        return NONE
+    }
+    return page_of_current()
+}
+
+fn go_up() -> u64 {
+    if !stack.up(H) {
+        return NONE
+    }
+    return page_of_current()
+}
+
+fn can_back() -> bool {
+    return stack.can_back(H)
+}
+
+fn can_forward() -> bool {
+    return stack.can_forward(H)
+}
+
+fn can_up() -> bool {
+    return stack.can_up(H)
+}
+
+fn flat_count() -> u64 {
+    return n_flat
+}
+
+fn flat_route(i: u64) -> u64 {
+    return fl_rt[(i) as usize]
+}
+
+fn flat_depth(i: u64) -> u64 {
+    return fl_dep[(i) as usize]
+}
+
+fn flat_page(i: u64) -> u64 {
+    return route_page(fl_rt[(i) as usize])
+}
+
+fn flat_title(i: u64) -> u64 {
+    return msg.get(reg.title_key(fl_rt[(i) as usize]))
+}
+
+fn page_shown(p: u64) -> bool {
+    if query_on == 0 {
+        return true
+    }
+    if p >= 63 {
+        return false
+    }
+    return (hit_mask / (1 << p)) % 2 == 1
+}
+
+fn group_shown(i: u64) -> bool {
+    var j: u64 = i + 1
+    while j < n_flat && fl_dep[(j) as usize] > 0 {
+        if page_shown(route_page(fl_rt[(j) as usize])) {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
+fn text_len(p: u64) -> u64 {
+    var n: u64 = 0
+    while rd(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn feed() {
+    search.clear()
+    var p: u64 = 0
+    while p < MAXP {
+        let rt: u64 = page_rt[(p) as usize]
+        if rt != NONE {
+            let t: u64 = msg.get(reg.title_key(rt))
+            var kw: u64 = 0
+            var kl: u64 = 0
+            if reg.kw_key(rt) != 0 {
+                kw = msg.get(reg.kw_key(rt))
+                kl = text_len(kw)
+            }
+            let _o: bool = search.set(rt, t, text_len(t), kw, kl)
+        }
+        p = p + 1
+    }
+}
+
+fn query_pages(q: u64) -> u64 {
+    hit_mask = 0
+    hit_n = 0
+    hit_top = NONE
+    if !ready() || rd(q, 0) == 0 {
+        query_on = 0
+        return 0
+    }
+    query_on = 1
+    feed()
+    let n: u64 = search.query(q, text_len(q), (&hit_ids[0 as usize]) as u64, 64)
+    var i: u64 = 0
+    while i < n {
+        let p: u64 = route_page(hit_ids[(i) as usize])
+        if p != NONE && p < 63 {
+            if hit_top == NONE {
+                hit_top = p
+            }
+            hit_mask = hit_mask + (1 << p) * (1 - (hit_mask / (1 << p)) % 2)
+            hit_n = hit_n + 1
+        }
+        i = i + 1
+    }
+    return hit_n
+}
+
+fn hit_count() -> u64 {
+    return hit_n
+}
+
+fn top_page() -> u64 {
+    return hit_top
+}
+
+fn put(at: u64, p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = at
+    while i < n && o < 150 {
+        line[(o) as usize] = rd(p, i) as u8
+        o = o + 1
+        i = i + 1
+    }
+    return o
+}
+
+fn put_num(at: u64, v: u64) -> u64 {
+    var d: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        d[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        d[(n) as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var o: u64 = at
+    while n > 0 && o < 150 {
+        n = n - 1
+        line[(o) as usize] = d[(n) as usize]
+        o = o + 1
+    }
+    return o
+}
+
+fn put_str(at: u64, s: str) -> u64 {
+    return put(at, s.p as u64, s.n as u64)
+}
+
+fn raw_titles() -> u64 {
+    var n: u64 = 0
+    var p: u64 = 0
+    while p < MAXP {
+        let rt: u64 = page_rt[(p) as usize]
+        if rt != NONE && msg.get(reg.title_key(rt)) == reg.title_key(rt) {
+            n = n + 1
+        }
+        p = p + 1
+    }
+    return n
+}
+
+fn state_line(crumb_n: u64) -> u64 {
+    var at: u64 = put_str(0, "settings: nav route=")
+    at = put(at, stack.current(H), stack.current_len(H))
+    at = put_str(at, " page=")
+    var pg: u64 = page_of_current()
+    if pg == NONE {
+        pg = 99
+    }
+    at = put_num(at, pg)
+    at = put_str(at, " crumbs=")
+    at = put_num(at, crumb_n)
+    at = put_str(at, " back=")
+    at = put_num(at, stack.can_back(H) as u64)
+    at = put_str(at, " fwd=")
+    at = put_num(at, stack.can_forward(H) as u64)
+    at = put_str(at, " up=")
+    at = put_num(at, stack.can_up(H) as u64)
+    at = put_str(at, " depth=")
+    at = put_num(at, stack.size(H))
+    at = put_str(at, " side=")
+    at = put_num(at, n_flat)
+    at = put_str(at, " hits=")
+    at = put_num(at, hit_n)
+    at = put_str(at, " rawkeys=")
+    at = put_num(at, raw_titles())
+    line[(at) as usize] = 0 as u8
+    return (&line[0 as usize]) as u64
+}
