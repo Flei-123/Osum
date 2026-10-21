@@ -1,0 +1,113 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import mm.mem
+import sched.time
+
+export { note, field, reset, page, total, rec, SLOTS, F_COUNT, F_LAST, F_SUM, F_GAPS, F_MAX, F_GAP, GAP_CAP_US }
+
+const SLOTS: u64 = 32
+const REC_WORDS: u64 = 15
+const HDR_AT: u64 = 3840
+const F_COUNT: u64 = 0
+const F_LAST: u64 = 1
+const F_SUM: u64 = 2
+const F_GAPS: u64 = 3
+const F_MAX: u64 = 4
+const F_GAP: u64 = 5
+const GAP_CAP_US: u64 = 1000000
+
+static mut pg: u64 = 0
+static mut seen: u64 = 0
+
+fn rd(a: u64) -> u64 {
+    return __mmio_read64(a as *mut u64)
+}
+
+fn wr(a: u64, v: u64) {
+    __mmio_write64(a as *mut u64, v)
+}
+
+fn field(r: u64, k: u64) -> u64 {
+    return rd(r + k * 8)
+}
+
+fn page() -> u64 {
+    return pg
+}
+
+fn total() -> u64 {
+    return seen
+}
+
+fn ensure(state: u64) -> u64 {
+    if pg != 0 {
+        return pg
+    }
+    let f: u64 = mem.frame_alloc(state)
+    if f == 0 {
+        return 0
+    }
+    var o: u64 = 0
+    while o < mem.FRAME_SIZE / 8 {
+        wr(f + o * 8, 0)
+        o = o + 1
+    }
+    pg = f
+    return f
+}
+
+fn rec(i: u64) -> u64 {
+    if pg == 0 || i >= SLOTS {
+        return 0
+    }
+    return pg + i * REC_WORDS * 8
+}
+
+fn reset(i: u64) {
+    let r: u64 = rec(i)
+    if r == 0 {
+        return
+    }
+    var k: u64 = 0
+    while k < REC_WORDS {
+        wr(r + k * 8, 0)
+        k = k + 1
+    }
+}
+
+fn us_of(state: u64, d: u64) -> u64 {
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        return 0
+    }
+    return d / (kh / 1000)
+}
+
+fn note(state: u64, i: u64) {
+    if i >= SLOTS {
+        return
+    }
+    if ensure(state) == 0 {
+        return
+    }
+    let r: u64 = rec(i)
+    let now: u64 = time.tsc()
+    let n: u64 = rd(r + F_COUNT * 8)
+    let last: u64 = rd(r + F_LAST * 8)
+    if n > 0 && now > last {
+        let gap: u64 = us_of(state, now - last)
+        if gap < GAP_CAP_US {
+            wr(r + F_SUM * 8, rd(r + F_SUM * 8) + gap)
+            wr(r + F_GAPS * 8, rd(r + F_GAPS * 8) + 1)
+            if gap > rd(r + F_MAX * 8) {
+                wr(r + F_MAX * 8, gap)
+            }
+        }
+        wr(r + F_GAP * 8, gap)
+    }
+    wr(r + F_COUNT * 8, n + 1)
+    wr(r + F_LAST * 8, now)
+    seen = seen + 1
+}

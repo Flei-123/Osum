@@ -90,6 +90,7 @@ import diag.hwdiag
 import gfx.gfx
 import arch.x86_64.fpu
 import mm.mem
+import ui.frameprof
 
 export { ops, node_root, sfs_root }
 
@@ -188,7 +189,8 @@ const G_APPS: u64 = 16
 const G_ODB: u64 = 17
 // ROUND BENCH-A: /proc/bench, `key value` lines for the in-OS `bench` tool: boot milestones (ms since kernel entry), kernel heap, trap count.
 const G_BENCH: u64 = 18
-const G_LAST: u64 = 18
+const G_FRAMES: u64 = 19
+const G_LAST: u64 = 19
 
 // Die Dateien je Prozess.
 const F_STATUS: u64 = 1
@@ -1680,6 +1682,47 @@ fn make_bench(state: u64) -> u64 {
     return p
 }
 
+fn frames_line(state: u64, p0: u64, i: u64, suffix: u64, v: u64) -> u64 {
+    var l_win: [u8; 5] = "win.\0"
+    var p: u64 = w_str(state, p0, (&l_win[0]) as u64)
+    p = w_num(state, p, i)
+    p = w_str(state, p, suffix)
+    p = w_num(state, p, v)
+    return w_nl(state, p)
+}
+
+fn make_frames(state: u64) -> u64 {
+    var l_slots: [u8; 14] = "frames.slots \0"
+    var l_total: [u8; 17] = "frames.presents \0"
+    var s_pres: [u8; 11] = ".presents \0"
+    var s_avg: [u8; 13] = ".gap_avg_us \0"
+    var s_max: [u8; 13] = ".gap_max_us \0"
+    var s_last: [u8; 14] = ".gap_last_us \0"
+    var p: u64 = w_str(state, 0, (&l_slots[0]) as u64)
+    p = w_num(state, p, frameprof.SLOTS)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_total[0]) as u64)
+    p = w_num(state, p, frameprof.total())
+    p = w_nl(state, p)
+    var i: u64 = 0
+    while i < frameprof.SLOTS {
+        let r: u64 = frameprof.rec(i)
+        if r != 0 && frameprof.field(r, frameprof.F_COUNT) != 0 {
+            let gaps: u64 = frameprof.field(r, frameprof.F_GAPS)
+            var avg: u64 = 0
+            if gaps != 0 {
+                avg = frameprof.field(r, frameprof.F_SUM) / gaps
+            }
+            p = frames_line(state, p, i, (&s_pres[0]) as u64, frameprof.field(r, frameprof.F_COUNT))
+            p = frames_line(state, p, i, (&s_avg[0]) as u64, avg)
+            p = frames_line(state, p, i, (&s_max[0]) as u64, frameprof.field(r, frameprof.F_MAX))
+            p = frames_line(state, p, i, (&s_last[0]) as u64, frameprof.field(r, frameprof.F_GAP))
+        }
+        i = i + 1
+    }
+    return p
+}
+
 fn make_apps(state: u64) -> u64 {
     var l_head: [u8; 42] = "# app cpu_ticks wakeups tx_bytes rx_bytes\0"
     var p: u64 = w_str(state, 0, (&l_head[0]) as u64)
@@ -1989,6 +2032,9 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_BENCH {
             return make_bench(state)
         }
+        if sub == G_FRAMES {
+            return make_frames(state)
+        }
         return 0
     }
     if art == K_SYS {
@@ -2099,6 +2145,10 @@ fn global_of(name: u64) -> u64 {
     var ga: [u8; 5] = "apps\0"
     var go: [u8; 4] = "odb\0"
     var gb: [u8; 6] = "bench\0"
+    var gfr: [u8; 7] = "frames\0"
+    if streq(name, (&gfr[0]) as u64) {
+        return G_FRAMES
+    }
     if streq(name, (&gb[0]) as u64) {
         return G_BENCH
     }
@@ -2345,8 +2395,11 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var ap2: [u8; 5] = "apps\0"
     var od2: [u8; 4] = "odb\0"
     var bn2: [u8; 6] = "bench\0"
+    var fr2: [u8; 7] = "frames\0"
     var src: u64 = (&a[0]) as u64
-    if sub == G_BENCH {
+    if sub == G_FRAMES {
+        src = (&fr2[0]) as u64
+    } else if sub == G_BENCH {
         src = (&bn2[0]) as u64
     } else if sub == G_ODB {
         src = (&od2[0]) as u64
