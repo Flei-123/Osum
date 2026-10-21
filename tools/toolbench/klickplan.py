@@ -214,6 +214,20 @@ def main(argv):
         print("%d,%d" % (cx + bx, cy + by))
         return 0
 
+    if was == "restile":
+        want = str(20 + int(argv[3]))
+        r = None
+        for z in zeilen:
+            m = RECT.search(z)
+            if m and m.group(1) == want:
+                r = m
+        if r is None:
+            raise SystemExit("klickplan: resource tile %s not in the capture" % argv[3])
+        bx = int(r.group(3)) + int(r.group(5)) // 2
+        by = int(r.group(4)) + int(r.group(6)) // 2
+        print("%d,%d" % (cx + bx, cy + by))
+        return 0
+
     if was == "ctxbox":
         c = None
         for z in zeilen:

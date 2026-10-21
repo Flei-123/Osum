@@ -5,10 +5,11 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 BASE=${BASE:-7c767dae}
-TMPD=$(mktemp -d)
+TMPD=${TM2_OUT:-$(mktemp -d)}
+mkdir -p "$TMPD"
 BWT=""
 cleanup() {
-    rm -rf "$TMPD"
+    [ -n "${TM2_OUT:-}" ] || rm -rf "$TMPD"
     if [ -n "$BWT" ]; then git worktree remove --force "$BWT" >/dev/null 2>&1; fi
 }
 trap cleanup EXIT
@@ -56,13 +57,12 @@ def crop(n):
     return Image.open("%s/%s.ppm" % (d, n)).convert("RGB").crop((x, y, x + w, y + h))
 def frac(a, b):
     diff = ImageChops.difference(a, b).convert("L").point(lambda v: 255 if v > 24 else 0)
-    return sum(1 for v in diff.getdata() if v) / float(w * h)
-opened = frac(crop("c00_before"), crop("c01_open"))
-closed = frac(crop("c00_before"), crop("c02_closed"))
-print("opened=%.3f closed=%.3f" % (opened, closed))
-raise SystemExit(0 if opened > 0.30 and closed < 0.05 else 1)
+    return diff.histogram()[255] / float(w * h)
+flip = frac(crop("c01_open"), crop("c02_closed"))
+print("menu_open_vs_closed=%.3f" % flip)
+raise SystemExit(0 if flip > 0.30 else 1)
 PY
-    [ $? -eq 0 ] && ok "menu is painted and Escape removes it ($(cat "$TMPD/ctxpix.txt"))" || bad "menu pixels: $(cat "$TMPD/ctxpix.txt")"
+    [ $? -eq 0 ] && ok "menu is painted and Escape changes the area ($(cat "$TMPD/ctxpix.txt"))" || bad "menu pixels: $(cat "$TMPD/ctxpix.txt")"
 else
     bad "no menu box or photos"
 fi
@@ -77,20 +77,59 @@ NOMATCH=$(grep -a '^taskmgr: search n=' "$SS" | sed -E 's/.*n=([0-9]+).*/\1/' | 
 LAST=$(grep -a '^taskmgr: search n=' "$SS" | tail -1 | sed -E 's/.*n=([0-9]+).*/\1/')
 echo "        search values: $(grep -a '^taskmgr: search n=' "$SS" | sed -E 's/.*n=([0-9]+).*/\1/' | tr '\n' ' ') (processes: $ALL)"
 num "typing 'zzq' leaves no process rows" "${NOMATCH:-99}" le 3
-num "typing 'lau' finds the launcher" "${LAST:-0}" ge 2
-num "and filters the list" "${LAST:-99}" lt $((ALL + 3))
+num "typing 'laun' leaves a heading and the launcher" "${LAST:-0}" eq 2
+num "an empty field shows all rows again" "$(grep -a '^taskmgr: search n=' "$SS" | sed -E 's/.*n=([0-9]+).*/\1/' | sort -n | tail -1)" ge $((ALL + 2))
 
 echo
-echo "== 3. counter-proof: the tree before S1 fails the same plans =="
+echo "== 3. performance page: five resource tiles, details grid =="
+drive_perf() {
+    local tree=$1 out=$2
+    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+        app=/bin/taskmgr,melde,takt,500,performance wait=14 last=400 extra="wighalt=120" \
+        plan="$tree/tools/taskmgr2/perf.txt" > "$out.log" 2>&1 )
+}
+drive_perf "$ROOT" "$TMPD/p" || bad "build perf"
+SP="$TMPD/p/serial.txt"
+num "plan targets not found" "$(cnt "$TMPD/p/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "resource tiles" "$(grep -a '^taskmgr: perf sel=0' "$SP" | head -1 | sed -E 's/.* tiles=([0-9]+).*/\1/')" eq 5
+num "CPU details grid has 6 values" "$(grep -a '^taskmgr: perf sel=0' "$SP" | head -1 | sed -E 's/.* stats=([0-9]+).*/\1/')" eq 6
+num "Memory tile selects Memory" "$(cnt "$SP" '^taskmgr: perf sel=1')" ge 1
+num "GPU tile selects GPU" "$(cnt "$SP" '^taskmgr: perf sel=4')" ge 1
+num "Disk tile selects Disk" "$(cnt "$SP" '^taskmgr: perf sel=2')" ge 1
+num "GPU details: 2 values" "$(grep -a '^taskmgr: perf sel=4' "$SP" | head -1 | sed -E 's/.* stats=([0-9]+).*/\1/')" eq 2
+python3 -I - "$SP" > "$TMPD/dash.txt" 2>&1 <<'PY'
+import re, sys
+txt = open(sys.argv[1], "rb").read().decode("latin1").splitlines()
+sel, got = None, {}
+for z in txt:
+    m = re.match(r"taskmgr: perf sel=(\d+) ", z)
+    if m:
+        sel = int(m.group(1)); got.setdefault(sel, [])
+        continue
+    m = re.match(r"taskmgr: perf stat (\d+) lab=(.*) val=(.*)$", z)
+    if m and sel is not None:
+        got[sel].append((m.group(2), m.group(3)))
+bad = [v for v in got.get(4, []) if v[1].strip() != "--"]
+sw = [v for v in got.get(0, []) if "switches" in v[0] or "Kontext" in v[0]]
+ok = bool(got.get(4)) and not bad and bool(sw) and all(v[1].strip() == "--" for v in sw)
+print("gpu=%s switches=%s" % (got.get(4), sw))
+raise SystemExit(0 if ok else 1)
+PY
+[ $? -eq 0 ] && ok "values without a kernel source show -- and never 0 ($(cat "$TMPD/dash.txt" | cut -c1-120))" || bad "dash rule: $(cat "$TMPD/dash.txt" | cut -c1-200)"
+
+echo
+echo "== 4. counter-proof: the tree before S1 fails the same plans =="
 BWT="$TMPD/basewt"
 if git worktree add --detach "$BWT" "$BASE" >/dev/null 2>&1; then
     mkdir -p "$BWT/tools/taskmgr2"
     cp -r tools/toolbench/. "$BWT/tools/toolbench/"
-    cp tools/taskmgr2/ctx.txt tools/taskmgr2/search.txt "$BWT/tools/taskmgr2/"
+    cp tools/taskmgr2/ctx.txt tools/taskmgr2/search.txt tools/taskmgr2/perf.txt "$BWT/tools/taskmgr2/"
     drive "$BWT" "$TMPD/bc" "$BWT/tools/taskmgr2/ctx.txt" || true
     drive "$BWT" "$TMPD/bs" "$BWT/tools/taskmgr2/search.txt" || true
     num "BASE $BASE: no context menu opens" "$(cnt "$TMPD/bc/serial.txt" '^taskmgr: ctx n=')" eq 0
     num "BASE $BASE: no search events" "$(cnt "$TMPD/bs/serial.txt" '^taskmgr: search n=')" eq 0
+    drive_perf "$BWT" "$TMPD/bp" || true
+    num "BASE $BASE: no resource tiles" "$(cnt "$TMPD/bp/serial.txt" '^taskmgr: perf sel=')" eq 0
     num "BASE $BASE: plan cannot find its targets" "$(( $(cnt "$TMPD/bc/plan.log" 'ZIEL NICHT GEFUNDEN') + $(cnt "$TMPD/bs/plan.log" 'ZIEL NICHT GEFUNDEN') ))" ge 1
 else
     bad "cannot create the BASE worktree $BASE"

@@ -163,28 +163,22 @@ def main(argv):
             x, y = (int(v) for v in teile[1].split(","))
             m.klick(x, y)
             print("plan: klick %d,%d" % (x, y))
-        elif was == "ziel":
+        elif was in ("ziel", "rziel"):
             p, fehler = ziel_holen(serial, teile[1:])
             if p is None:
                 print("plan: ZIEL NICHT GEFUNDEN: %s -- %s"
                       % (" ".join(teile[1:]), fehler))
             else:
                 x, y = (int(v) for v in p.split(","))
-                m.klick(x, y)
-                print("plan: ziel %s -> %d,%d" % (" ".join(teile[1:]), x, y))
+                if was == "rziel":
+                    m.rklick(x, y)
+                else:
+                    m.klick(x, y)
+                print("plan: %s %s -> %d,%d" % (was, " ".join(teile[1:]), x, y))
         elif was == "rklick":
             x, y = (int(v) for v in teile[1].split(","))
             m.rklick(x, y)
             print("plan: rklick %d,%d" % (x, y))
-        elif was == "rziel":
-            p, fehler = ziel_holen(serial, teile[1:])
-            if p is None:
-                print("plan: ZIEL NICHT GEFUNDEN: %s -- %s"
-                      % (" ".join(teile[1:]), fehler))
-            else:
-                x, y = (int(v) for v in p.split(","))
-                m.rklick(x, y)
-                print("plan: rziel %s -> %d,%d" % (" ".join(teile[1:]), x, y))
         elif was == "tippe":
             m.tippe(teile[1])
             print("plan: tippe %s" % teile[1])
