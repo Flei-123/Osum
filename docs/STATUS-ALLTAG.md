@@ -2,7 +2,7 @@
 
 Ziel des Boss: OrientOS **täglich benutzen**. Diese Liste ist eine Bestandsaufnahme, keine Werbung.
 Quellen: Projekt-Kennzahlen + Roadmap (project_get), `reports/*` (KB), `docs/DAILY-DRIVER.md`, `docs/LINUX-COMPAT*.md`, `docs/RUNDE-UNTERBAU-FIREFOX.md`.
-Es wurde für dieses Dokument **nichts neu gemessen**. Jede Zahl trägt ihr Datum/ihren Gate-Namen; was nirgends gemessen ist, steht als **unmeasured**.
+Abschnitte 1–2 sind aus vorhandenen Messungen zusammengetragen (**nichts neu gemessen**); Abschnitt 3 stützt sich auf die frischen Läufe M1/M2 vom 21.10. Jede Zahl trägt ihr Datum/ihren Gate-Namen; was nirgends gemessen ist, steht als **unmeasured**.
 
 **Ampel:** GRÜN = Gate belegt und nichts Offenes im Alltag · GELB = Gate grün, aber Alltag-Lücke oder nur in QEMU belegt · ROT = fehlt oder bekannt kaputt.
 **Aufwand:** S = Stunden · M = ca. 1 Tag · L = mehrere Tage / Umbau. (Schätzung des Schreibers, außer wo eine Quelle genannt ist.)
