@@ -73,7 +73,7 @@ mkdir -p "$SHOTS"
 echo "== 1. bauen: Kern, Programme, Platte =="
 cat > "$TMPD/plan1.txt" <<'EOF'
 marke ---- Liste, Sortierung, Auswahl, Beenden ----
-ziel spalte 1
+ziel spalte 0
 warte 2
 foto v01_liste
 ziel zeile launcher
@@ -213,7 +213,7 @@ fi
 # ================================================= 5. sortieren und waehlen
 echo
 echo "== 5. sortieren und waehlen mit der Maus =="
-has "$S1" "taskmgr: sortiert spalte=1" "ein Klick in die Kopfzeile sortiert nach Namen"
+has "$S1" "taskmgr: sortiert spalte=0" "ein Klick in die Kopfzeile sortiert nach Namen"
 has "$S1" "taskmgr: wahl pid=" "ein Klick auf eine Zeile waehlt einen Prozess"
 # GEGENPROBE ZUR SORTIERUNG: nach dem Klick stehen die Namen wirklich in
 # der Reihenfolge, die der Sortierschluessel verlangt.
@@ -221,22 +221,23 @@ python3 - "$S1" > "$TMPD/sortcheck.txt" 2>&1 <<'PY'
 import re, sys
 txt = open(sys.argv[1], "rb").read().decode("latin1").splitlines()
 n = max((i for i, z in enumerate(txt)
-         if z.startswith("taskmgr: sortiert spalte=1")), default=-1)
+         if z.startswith("taskmgr: sortiert spalte=0")), default=-1)
 if n < 0:
     print("keine Sortiermeldung"); raise SystemExit(1)
-namen, r = [], -1
+groups, r = {}, -1
 for z in txt[n:]:
-    m = re.search(r"taskmgr: zeile r=(\d+) .* name=(.*)$", z)
+    m = re.search(r"taskmgr: zeile r=(\d+) .* grp=(\d+) .* name=(.*)$", z)
     if not m:
         continue
     if int(m.group(1)) <= r:
         break
     r = int(m.group(1))
-    namen.append(m.group(2).strip())
+    groups.setdefault(m.group(2), []).append(m.group(3).strip())
+namen = [x for g in groups.values() for x in g]
 if len(namen) < 3:
     print("zu wenige Zeilen"); raise SystemExit(1)
-sortiert = namen == sorted(namen, reverse=True)
-print("zeilen=%d absteigend=%s %s" % (len(namen), sortiert, namen))
+sortiert = all(g == sorted(g, reverse=True) for g in groups.values())
+print("zeilen=%d gruppen=%d absteigend=%s %s" % (len(namen), len(groups), sortiert, namen))
 raise SystemExit(0 if sortiert else 1)
 PY
 if [ $? -eq 0 ]; then ok "und die Zeilen stehen danach wirklich nach Namen ($(cat "$TMPD/sortcheck.txt"))"

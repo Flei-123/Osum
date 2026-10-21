@@ -33,7 +33,8 @@ RECT = re.compile(r"taskmgr: rect id=(\d+) kind=(\d+) x=(\d+) y=(\d+) "
 TAB = re.compile(r"taskmgr: tabelle x=(\d+) y=(\d+) kopf=(\d+) zh=(\d+)")
 SPALTE = re.compile(r"taskmgr: spalte c=(\d+) x=(\d+) w=(\d+)")
 ZEILE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
-                   r"pm=(\d+) kib=(\d+) kern=(\d+) ticks=(\d+) y=(\d+) "
+                   r"pm=(\d+) kib=(\d+) kern=(\d+) ticks=(\d+) grp=(\d+) "
+                   r"disk=(\S+) net=(\S+) gpu=(\S+) y=(\d+) "
                    r"name=(.*)$")
 # Die Spur der Bibliothek traegt seit Runde SOFTUI zwei Felder mehr
 # (`ax=`, `ay=`, der Ursprung der Arbeitsflaeche). Wer sie nicht
@@ -241,7 +242,7 @@ def main(argv):
                 continue
             if was == "pid" and m.group(2) == ziel:
                 treffer = m
-            if was in ("zeile", "pidvon") and m.group(10).strip() == ziel:
+            if was in ("zeile", "pidvon") and m.group(14).strip() == ziel:
                 treffer = m
         if treffer is None:
             raise SystemExit("klickplan: '%s' steht nicht in der Liste" % ziel)
@@ -254,7 +255,7 @@ def main(argv):
             if m:
                 t = m
         zh = int(t.group(4))
-        ry = int(treffer.group(9)) + zh // 2
+        ry = int(treffer.group(13)) + zh // 2
         rx = int(t.group(1)) + 40
         print("%d,%d" % (cx + rx, cy + ry))
         return 0

@@ -121,6 +121,10 @@ import icons
 import msg
 import fuiscene
 import fui.navnum
+import ctxreg
+import tmsearch
+import tmview
+import tmcols
 
 export { u_start }
 
@@ -128,7 +132,7 @@ export { u_start }
 
 const SLOTS: u64 = 128 // kstate.MAX_TASKS
 const MAXCPU: u64 = 8 // kstate.MAX_CPUS
-const NCOL: u64 = 6
+const NCOL: u64 = 7
 const HIST: u64 = 60 // Messpunkte des Graphen
 const NAMEW: u64 = 24 // pmon.NAME_MAX
 
@@ -154,21 +158,16 @@ const NAMEW: u64 = 24 // pmon.NAME_MAX
 // Kommentar steht, haelt genau bis zur naechsten Runde -- das ist die
 // Lehre aus BLECHKERN, eine Etage hoeher.
 // r443 (D-013): a sidebar of pages on the left (Processes, Performance, Startup, Details), the content right of it
-const BW: u64 = 880
+const BW: u64 = 960
 const BH: u64 = 580
 const NAVW: u64 = 176 // the sidebar
-const CW: u64 = 680 // BW - 16 - NAVW - 8: the width of a page
+const CW: u64 = 760 // BW - 16 - NAVW - 8: the width of a page
 const GH: u64 = 250 // the history graph of the performance page
 const KH: u64 = 92 // r402: Hoehe der vier Karten
 
 // Die Spalten, die keinen Text tragen, der wachsen kann. Der Name
 // bekommt, was uebrig bleibt -- so passt die Tabelle auch, wenn die
 // Design-Runde die Abstaende aendert.
-const CW_PID: u64 = 64
-const CW_STATE: u64 = 104
-const CW_CPU: u64 = 104
-const CW_MEM: u64 = 128
-const CW_CORE: u64 = 64
 
 // ------------------------------------------------------------ Zustand
 
@@ -208,7 +207,7 @@ static mut perf_sel: u64 = 0
 static mut nav_blob: [u8; 160] = [0 as u8; 160]
 static mut nav_icons: [u64; 5] = [0 as u64; 5]
 static mut psel_blob: [u8; 640] = [0 as u8; 640]
-static mut row_icons: [u64; 128] = [0 as u64; 128]
+static mut row_icons: [u64; 132] = [0 as u64; 132]
 static mut st_blob: [u8; 3072] = [0 as u8; 3072]
 static mut st_n: u64 = 0
 // r1214: the Bench page: the lines of /proc/bench as a two-column table (name, value), read-only
@@ -244,15 +243,15 @@ static mut net_ltx: u64 = 0
 static mut net_lrx: u64 = 0
 static mut net_ok: u64 = 0
 
-static mut sort_col: u64 = 3 // die Auslastung, absteigend
+static mut sort_col: u64 = 2 // die Auslastung, absteigend
 static mut sort_ab: u64 = 1
 static mut sel_pid: u64 = 0
 static mut ask_pid: u64 = 0
 static mut melde: u64 = 0
 static mut blocknr: u64 = 0
 
-static mut blob: [u8; 4096] = [0 as u8; 4096]
-static mut cols: [u64; 6] = [0 as u64; 6]
+static mut blob: [u8; 8192] = [0 as u8; 8192]
+static mut cols: [u64; 7] = [0 as u64; 7]
 static mut l_sys: [u8; 160] = [0 as u8; 160]
 // r402 (D-011): the four cards of the summary: title, big number, small line (32 + 40 + 64 octets each)
 static mut kp_big: [u8; 160] = [0 as u8; 160]
@@ -445,6 +444,22 @@ static mut m_net: [u8; 18] = "taskmgr: netz tx=\0"
 static mut m_nrx: [u8; 5] = " rx=\0"
 static mut m_non: [u8; 5] = " on=\0"
 
+static mut search_buf: [u8; 64] = [0 as u8; 64]
+static mut search_last: [u8; 64] = [0 as u8; 64]
+static mut cx_open: u64 = 0
+static mut k_search: [u8; 15] = "taskmgr.search\0"
+static mut k_g_apps: [u8; 19] = "taskmgr.group.apps\0"
+static mut k_g_bg: [u8; 17] = "taskmgr.group.bg\0"
+static mut k_g_sys: [u8; 18] = "taskmgr.group.sys\0"
+static mut k_cx_end: [u8; 16] = "taskmgr.ctx.end\0"
+static mut k_cx_det: [u8; 20] = "taskmgr.ctx.details\0"
+static mut m_grp: [u8; 6] = " grp=\0"
+static mut m_dng: [u8; 20] = " disk=- net=- gpu=-\0"
+static mut m_grpline: [u8; 18] = "taskmgr: group r=\0"
+static mut m_g: [u8; 4] = " g=\0"
+static mut m_findline: [u8; 19] = "taskmgr: search n=\0"
+static mut m_ctx: [u8; 16] = "taskmgr: ctx n=\0"
+static mut m_ctxa: [u8; 23] = "taskmgr: ctx wahl act=\0"
 static mut a_takt: [u8; 5] = "takt\0"
 static mut a_runden: [u8; 7] = "runden\0"
 static mut a_melde: [u8; 6] = "melde\0"
@@ -769,20 +784,14 @@ fn sample(first: bool) {
 // als Nutzen.
 
 fn schluessel(s: u64) -> u64 {
-    if sort_col == 0 {
-        return p_pid[(s) as usize]
-    }
-    if sort_col == 2 {
+    if sort_col == tmcols.C_STATE {
         return p_state[(s) as usize]
     }
-    if sort_col == 3 {
+    if sort_col == tmcols.C_CPU {
         return p_pm[(s) as usize]
     }
-    if sort_col == 4 {
+    if sort_col == tmcols.C_MEM {
         return p_pages[(s) as usize]
-    }
-    if sort_col == 5 {
-        return p_core[(s) as usize]
     }
     return 0
 }
@@ -792,7 +801,7 @@ fn schluessel(s: u64) -> u64 {
 // Prozessnummer, damit die Reihenfolge zwischen zwei Messungen nicht
 // springt.
 fn before(a: u64, b: u64) -> bool {
-    if sort_col == 1 {
+    if sort_col == tmcols.C_NAME {
         let pa: u64 = name_of(a)
         let pb: u64 = name_of(b)
         var i: u64 = 0
@@ -958,11 +967,11 @@ fn build_kpi() {
 // task manager: the column you sort by says how much of the machine it adds up to.
 fn head_sum(d: u64, at: u64, col: u64) -> u64 {
     var a: u64 = at
-    if col == 3 {
+    if col == tmcols.C_CPU {
         a = put_str(d, a, ptr((&u_sp[0]) as u64))
         a = put_num(d, a, cpu_pm / 10)
         a = put_str(d, a, ptr((&u_pct[0]) as u64))
-    } else if col == 4 {
+    } else if col == tmcols.C_MEM {
         a = put_str(d, a, ptr((&u_sp[0]) as u64))
         a = put_num(d, a, mem_pm / 10)
         a = put_str(d, a, ptr((&u_pct[0]) as u64))
@@ -1010,44 +1019,92 @@ fn build_rows() {
     }
     a = put_str(d, a, ptr((&u_nl[0]) as u64))
 
+    view_build()
     var r: u64 = 0
-    while r < nlive {
-        let s: u64 = ord[(r) as usize]
-        row_icons[(r) as usize] = kind_icon(p_kind[(s) as usize])
-        a = put_num(d, a, p_pid[(s) as usize])
-        a = put_str(d, a, ptr((&u_tab[0]) as u64))
-        a = put_str(d, a, name_of(s))
-        a = put_str(d, a, ptr((&u_tab[0]) as u64))
-        a = put_str(d, a, state_word(p_state[(s) as usize]))
-        a = put_str(d, a, ptr((&u_tab[0]) as u64))
-        a = put_pm(d, a, p_pm[(s) as usize])
-        a = put_str(d, a, ptr((&u_pct[0]) as u64))
-        a = put_str(d, a, ptr((&u_tab[0]) as u64))
-        // KEIN EIGENER ADRESSRAUM, KEINE ZAHL. Die Bootaufgabe und die
-        // Leerlaufaufgaben laufen im Adressraum des Kernels; eine 0 KiB
-        // waere eine Messung, ein Strich ist die Wahrheit.
-        if p_pages[(s) as usize] == 0 {
-            a = put_str(d, a, ptr((&u_dash[0]) as u64))
+    let nr: u64 = tmview.rows()
+    while r < nr {
+        let s: u64 = tmview.slot_at(r)
+        if s == tmview.NONE {
+            let g: u64 = tmview.group_at(r)
+            row_icons[(r) as usize] = 0
+            a = put_str(d, a, msg.get(group_key(g)))
+            a = put_str(d, a, ptr((&u_op[0]) as u64))
+            a = put_num(d, a, tmview.group_size(g))
+            a = put_str(d, a, ptr((&u_cl[0]) as u64))
+            var t: u64 = 1
+            while t < NCOL {
+                a = put_str(d, a, ptr((&u_tab[0]) as u64))
+                t = t + 1
+            }
+            a = put_str(d, a, ptr((&u_nl[0]) as u64))
+            fuiscene.heat_set(r, 0, 0)
+            fuiscene.heat_set(r, 1, 0)
         } else {
-            a = put_size(d, a, p_pages[(s) as usize] * 4)
-        }
-        a = put_str(d, a, ptr((&u_tab[0]) as u64))
-        if p_core[(s) as usize] >= MAXCPU {
+            row_icons[(r) as usize] = kind_icon(p_kind[(s) as usize])
+            a = put_str(d, a, name_of(s))
+            a = put_str(d, a, ptr((&u_tab[0]) as u64))
+            a = put_str(d, a, state_word(p_state[(s) as usize]))
+            a = put_str(d, a, ptr((&u_tab[0]) as u64))
+            a = put_pm(d, a, p_pm[(s) as usize])
+            a = put_str(d, a, ptr((&u_pct[0]) as u64))
+            a = put_str(d, a, ptr((&u_tab[0]) as u64))
+            if p_pages[(s) as usize] == 0 {
+                a = put_str(d, a, ptr((&u_dash[0]) as u64))
+            } else {
+                a = put_size(d, a, p_pages[(s) as usize] * 4)
+            }
+            a = put_str(d, a, ptr((&u_tab[0]) as u64))
             a = put_str(d, a, ptr((&u_dash[0]) as u64))
-        } else {
-            a = put_num(d, a, p_core[(s) as usize])
+            a = put_str(d, a, ptr((&u_tab[0]) as u64))
+            a = put_str(d, a, ptr((&u_dash[0]) as u64))
+            a = put_str(d, a, ptr((&u_tab[0]) as u64))
+            a = put_str(d, a, ptr((&u_dash[0]) as u64))
+            a = put_str(d, a, ptr((&u_nl[0]) as u64))
+            fuiscene.heat_set(r, 0, p_pm[(s) as usize] * 4)
+            var mh: u64 = 0
+            if mem_all > 0 {
+                mh = p_pages[(s) as usize] * 4000 / mem_all
+            }
+            fuiscene.heat_set(r, 1, mh * 8)
         }
-        a = put_str(d, a, ptr((&u_nl[0]) as u64))
-        // r402: the heat of the CPU and memory cells (row r of the table is row r of `ord`)
-        fuiscene.heat_set(r, 0, p_pm[(s) as usize] * 4)
-        var mh: u64 = 0
-        if mem_all > 0 {
-            mh = p_pages[(s) as usize] * 4000 / mem_all
-        }
-        fuiscene.heat_set(r, 1, mh * 8)
         r = r + 1
     }
     __mmio_write8((d + a) as *mut u8, 0 as u8)
+}
+
+fn group_key(g: u64) -> u64 {
+    if g == 0 {
+        return ptr((&k_g_apps[0]) as u64)
+    }
+    if g == 1 {
+        return ptr((&k_g_bg[0]) as u64)
+    }
+    return ptr((&k_g_sys[0]) as u64)
+}
+
+fn view_build() {
+    tmview.begin()
+    let needle: u64 = (&search_buf[0]) as u64
+    var i: u64 = 0
+    while i < nlive {
+        let sl: u64 = ord[(i) as usize]
+        if tmsearch.matches(name_of(sl), p_pid[(sl) as usize], needle) {
+            tmview.add(sl, tmview.group_of_kind(p_kind[(sl) as usize]))
+        }
+        i = i + 1
+    }
+    tmview.finish()
+}
+
+fn slot_of_pid(pid: u64) -> u64 {
+    var r: u64 = 0
+    while r < nlive {
+        if p_pid[(ord[(r) as usize]) as usize] == pid {
+            return ord[(r) as usize]
+        }
+        r = r + 1
+    }
+    return SLOTS
 }
 
 fn pfeil() -> u64 {
@@ -1058,14 +1115,15 @@ fn pfeil() -> u64 {
 }
 
 fn row_of_pid(pid: u64) -> u64 {
-    var r: u64 = 0
-    while r < nlive {
-        if p_pid[(ord[(r) as usize]) as usize] == pid {
-            return r
-        }
-        r = r + 1
+    let sl: u64 = slot_of_pid(pid)
+    if sl >= SLOTS {
+        return SLOTS
     }
-    return SLOTS
+    let r: u64 = tmview.row_of_slot(sl)
+    if r == tmview.NONE {
+        return SLOTS
+    }
+    return r
 }
 
 fn build_sel() {
@@ -1077,9 +1135,9 @@ fn build_sel() {
     }
     a = put_str(d, a, msg.get(ptr((&k_sel[0]) as u64)))
     a = put_str(d, a, ptr((&u_colon[0]) as u64))
-    let r: u64 = row_of_pid(sel_pid)
-    if r < SLOTS {
-        a = put_str(d, a, name_of(ord[(r) as usize]))
+    let sl: u64 = slot_of_pid(sel_pid)
+    if sl < SLOTS {
+        a = put_str(d, a, name_of(sl))
         a = put_str(d, a, ptr((&u_sp[0]) as u64))
     }
     a = put_str(d, a, ptr((&u_op[0]) as u64))
@@ -1364,8 +1422,19 @@ fn bericht() {
         i = i + 1
     }
     var r: u64 = 0
-    while r < nlive {
-        let s: u64 = ord[(r) as usize]
+    let nr: u64 = tmview.rows()
+    while r < nr {
+        let s: u64 = tmview.slot_at(r)
+        if s == tmview.NONE {
+            z_new(ptr((&m_grpline[0]) as u64))
+            z_num(r)
+            z_kv(ptr((&m_g[0]) as u64), tmview.group_at(r))
+            z_kv(ptr((&m_n[0]) as u64), tmview.group_size(tmview.group_at(r)))
+            z_kv(ptr((&m_y[0]) as u64), tab_y(r))
+            z_end()
+            r = r + 1
+            continue
+        }
         z_new(ptr((&m_row[0]) as u64))
         z_num(r)
         z_kv(ptr((&m_pid[0]) as u64), p_pid[(s) as usize])
@@ -1375,10 +1444,8 @@ fn bericht() {
         z_kv(ptr((&m_kib[0]) as u64), p_pages[(s) as usize] * 4)
         z_kv(ptr((&m_kern[0]) as u64), p_core[(s) as usize])
         z_kv(ptr((&m_ct[0]) as u64), p_ticks[(s) as usize])
-        // WO DIE ZEILE STEHT, in Fensterkoordinaten. Ein Testlaeufer,
-        // der das ausrechnen muesste, rechnete die Anordnung nach --
-        // und pruefte damit seinen eigenen Nachbau. `tab_y` ist
-        // dieselbe Formel, mit der die Tabelle die Zeile hinmalt.
+        z_kv(ptr((&m_grp[0]) as u64), tmview.group_of_kind(p_kind[(s) as usize]))
+        z_str(ptr((&m_dng[0]) as u64))
         z_kv(ptr((&m_y[0]) as u64), tab_y(r))
         z_str(ptr((&m_name[0]) as u64))
         z_str(name_of(s))
@@ -1430,6 +1497,7 @@ fn arg_hat(args: u64, wort: u64) -> bool {
 // navigation kit (icons, accent bar on the chosen row); the pages are described again at every `refresh`.
 
 const K_NAV: u64 = 3
+const K_SEARCH: u64 = 12
 const K_PSEL: u64 = 4
 const K_START: u64 = 5
 const K_BENCH: u64 = 11
@@ -1983,7 +2051,8 @@ fn build_proc(cc: usize) {
     command_row(cc)
     n_tab = fuiscene.table_blob(cc, K_TAB, CW, BH - 16 - KH - 32 - 16, NCOL, ptr((&blob[0]) as u64))
     fuiscene.table_icons(K_TAB, ptr((&row_icons[0]) as u64))
-    fuiscene.heat_key(K_TAB, 3, 4)
+    fuiscene.table_heads(K_TAB, tmview.heads())
+    fuiscene.heat_key(K_TAB, tmcols.C_CPU, tmcols.C_MEM)
 }
 
 // The command bar of the pages that end a process: "End task" as an icon, and at its right the sentence about the selection.
@@ -1994,6 +2063,10 @@ fn command_row(cc: usize) {
     fuiscene.cmd_item(icons.CMD_END_TASK, K_KILL, msg.get(ptr((&k_end[0]) as u64)), 0, 0)
     let _vis: u64 = fuiscene.cmd_end(bar, 120, K_OVF)
     n_kill = fuiscene.node_of_key(K_KILL)
+    if page == 0 {
+        let _se: usize = fuiscene.entry(bar, K_SEARCH, 220, (&search_buf[0]) as u64)
+        fuiscene.entry_hint(K_SEARCH, msg.get(ptr((&k_search[0]) as u64)))
+    }
     n_sel = fuiscene.label(bar, ptr((&l_sel[0]) as u64))
 }
 
@@ -2147,19 +2220,12 @@ fn u_start(args: u64) -> u64 {
     }
     bn_load()
 
-    // The column widths: the fixed ones from the numbers above, the name
-    // gets what is left (the table is BW - 16 wide, on the 4-point grid).
-    let fix: u64 = CW_PID + CW_STATE + CW_CPU + CW_MEM + CW_CORE
-    var namew: u64 = 160
-    if CW > fix + 2 + 160 {
-        namew = (CW - fix - 2) / 4 * 4
+    tmcols.layout(CW)
+    var wc: u64 = 0
+    while wc < NCOL {
+        cols[(wc) as usize] = tmcols.width(wc)
+        wc = wc + 1
     }
-    cols[(0) as usize] = CW_PID
-    cols[(1) as usize] = namew
-    cols[(2) as usize] = CW_STATE
-    cols[(3) as usize] = CW_CPU
-    cols[(4) as usize] = CW_MEM
-    cols[(5) as usize] = CW_CORE
 
     if !fuiscene.open(20, 16, BW, BH,
         msg.get(ptr((&k_title[0]) as u64)), build) {
@@ -2191,6 +2257,9 @@ fn u_start(args: u64) -> u64 {
             var ci: u64 = 0
             while ci < NCOL {
                 fuiscene.table_colw(K_TAB, ci, cols[(ci) as usize])
+                if tmcols.numeric(ci) {
+                    fuiscene.table_align_right(K_TAB, ci, true)
+                }
                 ci = ci + 1
             }
             fuiscene.table_single(K_TAB, true)
@@ -2288,8 +2357,9 @@ fn u_start(args: u64) -> u64 {
                 // einen anderen Prozess, und der Knopf daneben beendet
                 // ihn.
                 let z: u64 = fuiscene.table_sel(K_TAB)
-                if z < nlive {
-                    sel_pid = p_pid[(ord[(z) as usize]) as usize]
+                let zs: u64 = tmview.slot_at(z)
+                if zs != tmview.NONE {
+                    sel_pid = p_pid[(zs) as usize]
                     build_sel()
                     z_new(ptr((&m_wahl[0]) as u64))
                     z_num(sel_pid)
@@ -2299,6 +2369,10 @@ fn u_start(args: u64) -> u64 {
             }
         } else if key == K_KILL {
             ask()
+        } else if key == fuiscene.KEY_RCLICK {
+            ctx_open()
+        } else if key == fuiscene.KEY_POPUP {
+            ctx_pick()
         } else if key == fuiscene.KEY_DIALOG {
             let res: u64 = fuiscene.dialog_result()
             if ask_pid != 0 {
@@ -2310,6 +2384,9 @@ fn u_start(args: u64) -> u64 {
                 show_sel()
                 fuiscene.refresh()
             }
+        }
+        if page == 0 {
+            search_poll()
         }
         let jetzt: u64 = info(ulib.I_TICKS)
         if jetzt >= last + takt / 10 {
@@ -2329,7 +2406,7 @@ fn u_start(args: u64) -> u64 {
                 bn_load()
                 fuiscene.table_set_blob(K_BENCH, ptr((&bn_blob[0]) as u64))
             }
-            if sel_pid != 0 && row_of_pid(sel_pid) >= SLOTS {
+            if sel_pid != 0 && slot_of_pid(sel_pid) >= SLOTS {
                 sel_pid = 0
             }
             build_sel()
@@ -2367,6 +2444,79 @@ fn u_start(args: u64) -> u64 {
     return 0
 }
 
+fn search_poll() {
+    let t: u64 = fuiscene.entry_text(K_SEARCH)
+    if t == 0 || ulib.streq(t, (&search_last[0]) as u64) {
+        return
+    }
+    ulib.strncpy((&search_last[0]) as u64, t, 60)
+    ulib.strncpy((&search_buf[0]) as u64, t, 60)
+    build_rows()
+    fuiscene.table_set_blob(K_TAB, ptr((&blob[0]) as u64))
+    show_sel()
+    z_new(ptr((&m_findline[0]) as u64))
+    z_num(tmview.rows())
+    z_end()
+    fuiscene.refresh()
+}
+
+fn ctx_rows() -> u64 {
+    ctxreg.add(ctxreg.CTX_TASKMGR_ITEM, ptr((&k_cx_end[0]) as u64), 1, 0)
+    ctxreg.add(ctxreg.CTX_TASKMGR_ITEM, ptr((&k_cx_det[0]) as u64), 2, 0)
+    return ctxreg.build(ctxreg.CTX_TASKMGR_ITEM, 0)
+}
+
+fn ctx_open() {
+    if page != 0 {
+        return
+    }
+    let rx: u64 = fuiscene.right_x()
+    let ry: u64 = fuiscene.right_y()
+    if fuiscene.key_at(rx, ry) != K_TAB {
+        return
+    }
+    let row: u64 = fuiscene.table_row_at(K_TAB, rx, ry)
+    if row == fuiscene.HEAD_ROW {
+        return
+    }
+    let sl: u64 = tmview.slot_at(row)
+    if sl == tmview.NONE {
+        return
+    }
+    sel_pid = p_pid[(sl) as usize]
+    fuiscene.table_set_sel(K_TAB, row)
+    build_sel()
+    let n: u64 = ctx_rows()
+    fuiscene.menu_open(rx, ry, 200, ctxreg.text_nul(), n)
+    cx_open = 1
+    z_new(ptr((&m_ctx[0]) as u64))
+    z_num(n)
+    z_kv(ptr((&m_pid[0]) as u64), sel_pid)
+    z_end()
+    fuiscene.refresh()
+}
+
+fn ctx_pick() {
+    let pick: u64 = fuiscene.menu_pick()
+    if cx_open == 0 || pick < 1 {
+        cx_open = 0
+        return
+    }
+    cx_open = 0
+    let act: u64 = ctxreg.act_at(pick - 1)
+    z_new(ptr((&m_ctxa[0]) as u64))
+    z_num(act)
+    z_end()
+    if ctxreg.is_ext(act) {
+        let _p: u64 = ctxreg.run_ext(act)
+    } else if act == 1 {
+        ask()
+    } else if act == 2 {
+        page = 3
+        fuiscene.refresh()
+    }
+}
+
 fn ask() {
     if sel_pid == 0 || ask_pid != 0 {
         return
@@ -2375,9 +2525,9 @@ fn ask() {
     var a: u64 = 0
     a = put_str(d, a, msg.get(ptr((&k_asktext[0]) as u64)))
     a = put_str(d, a, ptr((&u_sp[0]) as u64))
-    let r: u64 = row_of_pid(sel_pid)
-    if r < SLOTS {
-        a = put_str(d, a, name_of(ord[(r) as usize]))
+    let sl: u64 = slot_of_pid(sel_pid)
+    if sl < SLOTS {
+        a = put_str(d, a, name_of(sl))
         a = put_str(d, a, ptr((&u_sp[0]) as u64))
     }
     a = put_str(d, a, ptr((&u_op[0]) as u64))
