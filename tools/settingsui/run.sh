@@ -26,12 +26,12 @@ for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
   echo "klick 24,$((YRES-20))"; echo "warte 3"
   echo "klickauf start_Settings"; echo "warte 12"
   echo "foto 00-start"
-  for p in a b c d e f g h i j k l m n o p q r s t u v w x; do
+  for p in a b c d e f g h i j k l m n o p q r s t u v w x y z; do
     echo "klickauf srecttab$p"; echo "warte 2"; echo "foto page-$p"
   done
   echo "taste ctrl-f"; echo "tippe zzzz"; echo "warte 2"; echo "foto search-empty"
 } > "$DREH"
-bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=800 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
+bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=900 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
