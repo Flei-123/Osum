@@ -263,12 +263,65 @@ grep -q 'edge=' kernel/user/taskbar.fi && grep -q 'edge=' kernel/user/settings.f
     && ok "both writers of /etc/taskbar.conf spell the key 'edge'" \
     || bad "the two writers of /etc/taskbar.conf disagree about the key"
 
+echo "== 2b. the serial parser: damage is dropped, a wrong value is not (r1350) =="
+# The checks below read a CLEANED serial log (tools/desktop/serial.py). That only means something
+# if the cleaning cannot hide a real defect: doctored logs prove both sides here -- nested and
+# cut records vanish, an intact record with a wrong value reaches the checks unchanged.
+n_st=0
+while IFS= read -r z; do
+    n_st=$((n_st + 1))
+    case "$z" in OK\ *) ok "serial.py: ${z#OK }" ;; *) bad "serial.py: ${z#FAIL }" ;; esac
+done < <(python3 -I tools/desktop/serial.py selftest 2>&1)
+[ "$n_st" -ge 10 ] || bad "serial.py selftest printed only $n_st result lines"
+
+need_edge() { # cleaned-log edge thick
+    need_log "$1" "taskbar: geom " "taskbar: work " "taskbar: conf " "wm: selftest " "wm: work " \
+        "taskbar: text start " "taskbar: text clock " "taskbar: text battery " "taskbar: text button " \
+        "taskbar: field net " "taskbar: field battery " "taskbar: field clock " \
+        && python3 tools/desktop/rects.py "$1" "$2" "$3" >/dev/null 2>&1
+}
 RC=0
+# r1350: THE SERIAL LINE IS SHARED. Programs write their records to one port and under load a
+# record is cut by another program's record (tools/desktop/serial.py shows real examples). The
+# guest writes the RAW log ($name.raw); the checks read the CLEANED one ($name.txt) that holds
+# only intact records -- a cut record is never half-believed, it is dropped. Nothing is
+# loosened: a record the product does not print is still missing afterwards.
+#
+# RUN_NEED is a command (evaluated with $CLEAN = the cleaned log) that says "everything this
+# section needs is in the log". Only when the serial line was damaged (torn > 0) AND RUN_NEED
+# fails the boot is repeated, at most 3 times: damage hit a record this run needed, which says
+# nothing about the product. Without damage a missing record is a real failure at once, and
+# after 3 damaged runs in a row the last one is judged as it is (red).
+RUN_NEED=""
+RUN_TRIES=3
+TORN_TOTAL=0
+RETRIES=0
+need_log() { # file pattern...
+    local f=$1 p; shift
+    for p in "$@"; do grep -qaF -- "$p" "$f" || return 1; done
+    return 0
+}
 run() { # name conf-file cmdline-extra [monitor-file] [reuse-image]
+    local try=1 torn
+    while :; do
+        run_once "$@" || { RUN_NEED=""; return 1; }
+        CLEAN="$TMPD/$1.txt"
+        torn=$(grep -ac . "$CLEAN.torn" 2>/dev/null || true); torn=${torn:-0}
+        TORN_TOTAL=$((TORN_TOTAL + torn))
+        [ -z "$RUN_NEED" ] && break
+        eval "$RUN_NEED" && break
+        [ "$torn" -gt 0 ] && [ "$try" -lt "$RUN_TRIES" ] || break
+        try=$((try + 1)); RETRIES=$((RETRIES + 1))
+        echo "        (run '$1': $torn serial record(s) torn and a needed one is missing -- boot $try of $RUN_TRIES)"
+    done
+    RUN_NEED=""
+    return 0
+}
+run_once() { # name conf-file cmdline-extra [monitor-file] [reuse-image]
     local name=$1 cf=$2 extra=$3 mon=${4:-} reuse=${5:-}
     local sock="$TMPD/mon-$name.sock"
-    local out="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
-    rm -f "$out" "$ppm" "$sock"
+    local out="$TMPD/$name.raw" ppm="$TMPD/$name.ppm"
+    rm -f "$out" "$ppm" "$sock" "$TMPD/$name.txt" "$TMPD/$name.txt.torn"
     if [ -n "$reuse" ]; then
         cp -f "$reuse" "$TMPD/live-$name.img"
     else
@@ -284,7 +337,7 @@ run() { # name conf-file cmdline-extra [monitor-file] [reuse-image]
     local pid=$!
     local i=0
     while [ $i -lt 1400 ]; do
-        grep -qaE '^wm: hold' "$out" 2>/dev/null && break
+        grep -qaF 'wm: hold' "$out" 2>/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.15
         i=$((i + 1))
@@ -296,6 +349,8 @@ run() { # name conf-file cmdline-extra [monitor-file] [reuse-image]
     wait "$pid"
     RC=$?
     rm -f "$sock"
+    python3 -I tools/desktop/serial.py clean "$out" "$TMPD/$name.txt" 2> "$TMPD/$name.serial" \
+        || { bad "serial.py failed on $name"; cp "$out" "$TMPD/$name.txt"; : > "$TMPD/$name.txt.torn"; }
     return 0
 }
 
@@ -363,6 +418,8 @@ for e in bottom top left right; do
     THICK=28
     case $e in left|right) THICK=104 ;; esac
     conf "$e" 28 104 0 1 > "$TMPD/conf-$e"
+    EDGE_NOW=$e; EDGE_THICK=$THICK
+    RUN_NEED='need_edge "$CLEAN" "$EDGE_NOW" "$EDGE_THICK"'
     run "$e" "$TMPD/conf-$e" "wmax" || continue
     L="$TMPD/$e.txt"; P="$TMPD/$e.ppm"
     num "[$e] the kernel exits cleanly" "$RC" eq 21
@@ -399,6 +456,7 @@ done
 
 echo "== 4. the counter-test: without the strut the bar is covered =="
 conf bottom 28 104 0 1 > "$TMPD/conf-ns"
+RUN_NEED='need_log "$CLEAN" "wm: win " "wm: work " "taskbar: work "'
 run nostrut "$TMPD/conf-ns" "wmax nostrut"
 aus=$(python3 tools/desktop/rects.py "$TMPD/nostrut.txt" bottom 28 --nostrut 2>&1)
 if [ $? -eq 0 ]; then ok "with 'nostrut' the work area is the whole screen and the bar is under the window: $aus"
@@ -432,6 +490,7 @@ L += ["mouse_button 0", "warte 2"]
 print("\n".join(L))
 PYEOF
 conf bottom 28 104 0 1 > "$TMPD/conf-drag"
+RUN_NEED='need_log "$CLEAN" "taskbar: drag start" "taskbar: drag edge=" "taskbar: drag done edge=2 written=1" "taskbar: geom " "taskbar: work "'
 run drag "$TMPD/conf-drag" "" "$TMPD/mon-drag"
 L="$TMPD/drag.txt"
 has "$L" "taskbar: drag start" "the press on an empty part of the bar starts a drag"
@@ -461,6 +520,7 @@ fi
 png "$TMPD/drag.ppm" "after-drag"
 
 echo "== 6. the setting survives a restart =="
+RUN_NEED='need_edge "$CLEAN" left 104'
 run reboot "" "wmax" "" "$TMPD/live-drag.img"
 L="$TMPD/reboot.txt"
 ename=$(grep -a 'taskbar: conf ' "$L" | tail -1 | grep -oE 'ename=[a-z]+' | sed 's/.*=//')
@@ -477,6 +537,7 @@ L += ["warte 3"]
 print("\n".join(L))
 PYEOF
 conf bottom 28 104 1 1 > "$TMPD/conf-hide"
+RUN_NEED='need_log "$CLEAN" "taskbar: hide" "taskbar: show " "taskbar: strut " "taskbar: work "'
 run hide "$TMPD/conf-hide" "" "$TMPD/mon-hide"
 L="$TMPD/hide.txt"
 has "$L" "taskbar: hide" "the pointer left the bar and the bar slid out"
@@ -522,6 +583,7 @@ echo "== 8. the settings write the same file, and the bar follows =="
 # clamped into a corner reports its OUTER position.
 conf bottom 28 104 0 1 > "$TMPD/conf-set"
 : > "$TMPD/mon-probe"
+RUN_NEED='need_log "$CLEAN" "settings: rect name=win x=" "settings: rect name=edge x=" "settings: rect name=apply x="'
 run set-probe "$TMPD/conf-set" "einst" "$TMPD/mon-probe" || true
 P="$TMPD/set-probe.txt"
 rect() { # name field -> value
@@ -610,6 +672,7 @@ L += go(a[4], a[5]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 3"]
 print("\n".join(L))
 PYEOF
     echo "        clicks: chooser $CX,$CY   row3 $RX,$RY   apply $BX,$BY   (rh=$RH)"
+    RUN_NEED='need_log "$CLEAN" "settings: menu open" "settings: menu took " "settings: taskbar edge=right" "taskbar: conf " "taskbar: geom "'
     run settings "$TMPD/conf-set" "einst" "$TMPD/mon-set"
     L="$TMPD/settings.txt"
     has "$L" "settings: menu open" "the click opened the drop-down"
@@ -644,5 +707,6 @@ done
 
 echo
 echo "screenshots: $SHOTS"
+echo "serial: $TORN_TOTAL torn record(s) dropped over all boots, $RETRIES boot(s) repeated"
 echo "TASKBAR: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
