@@ -589,8 +589,8 @@ echo "== 8. the settings write the same file, and the bar follows =="
 # clamped into a corner reports its OUTER position.
 conf bottom 28 104 0 1 > "$TMPD/conf-set"
 : > "$TMPD/mon-probe"
-RUN_NEED='need_log "$CLEAN" "settings: rect name=win x=" "settings: rect name=edge x=" "settings: rect name=apply x="'
-run set-probe "$TMPD/conf-set" "einst" "$TMPD/mon-probe" || true
+RUN_NEED='need_log "$CLEAN" "settings: rect name=win x=" "settings: rect name=edge x="'
+run set-probe "$TMPD/conf-set" "wigapp=/bin/settings,page=20" "$TMPD/mon-probe" || true
 P="$TMPD/set-probe.txt"
 rect() { # name field -> value
     # ONE RECORD OR NOTHING, and the record carries `ax`/`ay`: where the
@@ -616,12 +616,11 @@ WH=$(rect win h)
 [ -n "$WH" ] || WH=$(grep -aoE 'wlib: win id=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$P" \
     | sed -E 's/.* w=([0-9]+) h=([0-9]+)/\1 \2/' | sort -n | tail -1 | cut -d' ' -f2)
 EAX=$(rect edge ax); EAY=$(rect edge ay); EW=$(rect edge w); EH=$(rect edge h)
-BAX=$(rect apply ax); BAY=$(rect apply ay); AW=$(rect apply w); AH=$(rect apply h)
-if [ -z "$WH" ] || [ -z "$EAX" ] || [ -z "$BAX" ]; then
+if [ -z "$WH" ] || [ -z "$EAX" ]; then
     bad "the settings did not report their geometry -- no clicks can be computed"
     grep -a 'settings: rect' "$P" | sed 's/^/        /' | head -8
 else
-    ok "the settings report where their taskbar widgets are (edge $EAX,$EAY  apply $BAX,$BAY)"
+    ok "the settings report where their taskbar widgets are (edge $EAX,$EAY)"
     # A WIDGET OUTSIDE ITS WINDOW IS DRAWN NOWHERE, NOT DRAWN WRONG.
     #
     # `wlib` lays a widget out at the position the box gives it and does
@@ -659,8 +658,7 @@ else
     RH=28
     # row 3 is "right": bottom, top, left, right
     RX=$((MX + 20)); RY=$((MY + 2 + 4 + 3 * RH + RH / 2))
-    BX=$((BAX + AW / 2)); BY=$((BAY + AH / 2))
-    python3 - "$CX" "$CY" "$RX" "$RY" "$BX" "$BY" > "$TMPD/mon-set" <<'PYEOF'
+    python3 - "$CX" "$CY" "$RX" "$RY" > "$TMPD/mon-set" <<'PYEOF'
 import sys
 def go(x, y):
     out = ["mouse_move -120 -120"] * 6
@@ -671,15 +669,14 @@ def go(x, y):
         dx -= sx
         dy -= sy
     return out
-a = [int(v) for v in sys.argv[1:7]]
+a = [int(v) for v in sys.argv[1:5]]
 L = go(a[0], a[1]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
-L += go(a[2], a[3]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
-L += go(a[4], a[5]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 3"]
+L += go(a[2], a[3]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 3"]
 print("\n".join(L))
 PYEOF
-    echo "        clicks: chooser $CX,$CY   row3 $RX,$RY   apply $BX,$BY   (rh=$RH)"
+    echo "        clicks: chooser $CX,$CY   row3 $RX,$RY   (rh=$RH)"
     RUN_NEED='need_log "$CLEAN" "settings: menu open" "settings: menu took " "settings: taskbar edge=right" "taskbar: conf " "taskbar: geom "'
-    run settings "$TMPD/conf-set" "einst" "$TMPD/mon-set"
+    run settings "$TMPD/conf-set" "wigapp=/bin/settings,page=20" "$TMPD/mon-set"
     L="$TMPD/settings.txt"
     has "$L" "settings: menu open" "the click opened the drop-down"
     r=$(grep -a 'settings: menu took ' "$L" | tail -1 | grep -oE 'row=[0-9]+' | sed 's/.*=//')
