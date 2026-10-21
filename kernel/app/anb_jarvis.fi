@@ -74,14 +74,14 @@ static mut h_status: [u8; 21] = "konto.hint.badstatus\0"
 static mut nm: [u8; 7] = "jarvis\0"
 
 fn push() -> anbieter.Push {
-    return anbieter.Push { name: (&nm[0]) as u64, anmelden: anmelden,
-        erneuern: erneuern, abmelden: abmelden,
+    return anbieter.Push { name: (&nm[0]) as u64, sign_in: anmelden,
+        erneuern: erneuern, sign_out: abmelden,
         // RUNDE ROTABSCHNITTE: das FELD heisst `pruefen`
         // (anbieter.fi:131), die Funktion hier heisst `check`.
         // Eine Umbenennung hat den Feldnamen im Literal
         // mitgenommen; seitdem: "struct anbieter__Push has no
         // field check" und "is missing the field pruefen".
-        pruefen: check, hand_over: hand_over }
+        validate: check, hand_over: hand_over }
 }
 
 fn fail_bool(b: *mut bool) -> bool {
@@ -89,17 +89,17 @@ fn fail_bool(b: *mut bool) -> bool {
     return false
 }
 
-fn target_from(z: *mut anbieter.Zugang, zl: *mut knetz.Target) -> bool {
+fn target_from(z: *mut anbieter.Access, zl: *mut knetz.Target) -> bool {
     return knetz.target_read((*z).endpoint, rt.c_length((*z).endpoint),
         (*z).zielname, (*z).wurzeln, zl)
 }
 
-fn hinweis(s: *mut anbieter.Sitzung, k: u64) {
+fn hinweis(s: *mut anbieter.Session, k: u64) {
     rt.buf_clear(&(*s).hinweis)
     rt.buf_push_bytes(&(*s).hinweis, k, rt.c_length(k))
 }
 
-fn netz_stand(a: *mut knetz.Antw) -> u32 {
+fn netz_stand(a: *mut knetz.Reply) -> u32 {
     if (*a).fail_code == knetz.F_TLS {
         return anbieter.S_TLS
     }
@@ -113,7 +113,7 @@ fn netz_stand(a: *mut knetz.Antw) -> u32 {
 // Der Rumpf des JWT: `uid`, `name`, `exp`. Ohne Signaturpruefung, aus
 // demselben Grund wie beim anderen Ruecken -- das Geheimnis liegt beim
 // Server. Genommen wird daraus nur, was ein KONTO ausmacht.
-fn body_read(tok: u64, tl: usize, s: *mut anbieter.Sitzung) {
+fn body_read(tok: u64, tl: usize, s: *mut anbieter.Session) {
     var p1: usize = 0
     while p1 < tl && rt.ld8(tok, p1) != 46 as u8 {
         p1 = p1 + 1
@@ -161,8 +161,8 @@ fn body_read(tok: u64, tl: usize, s: *mut anbieter.Sitzung) {
     rt.buf_free(&roh)
 }
 
-fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
-    anbieter.sitzung_leeren(s)
+fn anmelden(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
+    anbieter.clear_session(s)
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
         (*s).stand = anbieter.S_ERROR
@@ -176,7 +176,7 @@ fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     kjson.field(&w, (&f_password[0]) as u64, (*z).geheim,
         rt.c_length((*z).geheim))
     kjson.field_free(&w)
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
         (&p_login[0]) as u64, 10, koerper.ptr, koerper.len, 0, 0, 0, 0, &a)
     rt.mem_set(koerper.ptr, 0 as u8, koerper.len)
@@ -238,7 +238,7 @@ fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     return (*s).stand
 }
 
-fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn erneuern(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     // J2: es gibt keinen Weg. Eine Erfindung waere hier schlimmer als
     // die Wahrheit -- der Nutzer meldet sich neu an, und er erfaehrt
     // warum.
@@ -247,12 +247,12 @@ fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     return (*s).stand
 }
 
-fn keks_bauen(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
+fn keks_bauen(z: *mut anbieter.Access, aus: *mut rt.Buf) {
     rt.buf_push_bytes(aus, (&k_keks[0]) as u64, 16)
     rt.buf_push_bytes(aus, (*z).zugriff, rt.c_length((*z).zugriff))
 }
 
-fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn abmelden(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
         (*s).stand = anbieter.S_ERROR
@@ -260,7 +260,7 @@ fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     }
     var keks: rt.Buf = rt.buf_new()
     keks_bauen(z, &keks)
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
         (&p_logout[0]) as u64, 11, 0, 0, (*z).zugriff,
         rt.c_length((*z).zugriff), keks.ptr, keks.len, &a)
@@ -277,11 +277,11 @@ fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
 }
 
 // no hand-over for this back end (konto --exchange)
-fn hand_over(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn hand_over(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     return anbieter.S_ERROR
 }
 
-fn check(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn check(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
         (*s).stand = anbieter.S_ERROR
@@ -289,7 +289,7 @@ fn check(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     }
     var keks: rt.Buf = rt.buf_new()
     keks_bauen(z, &keks)
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_get[0]) as u64, 3,
         (&p_me[0]) as u64, 7, 0, 0, (*z).zugriff,
         rt.c_length((*z).zugriff), keks.ptr, keks.len, &a)
