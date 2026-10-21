@@ -235,10 +235,17 @@ def lit(m):
     return 'var %s: [u8; %d] = "%s\\0"' % (name, n, text)
 
 
+def slit(m):
+    # a module-level literal (static): for kind gui, where nodes are built in functions
+    name, text = m.group(1), m.group(2)
+    return 'static mut %s: [u8; %d] = "%s\\0"' % (name, len(text.encode()) + 1, text)
+
+
 def expand(text, subst):
     # a literal may contain a placeholder: expand those first
     for k, v in subst.items():
         text = text.replace("{{%s}}" % k, v)
+    text = re.sub(r"\{\{SLIT:([a-z_0-9]+):(.*?)\}\}", slit, text)
     return re.sub(r"\{\{LIT:([a-z_0-9]+):(.*?)\}\}", lit, text)
 
 
@@ -277,6 +284,22 @@ def run(cmd, cwd=None, env=None):
     return r.returncode, (r.stdout + r.stderr)
 
 
+def import_closure(roots):
+    """Modules of kernel/user that `roots` import, transitively (names without a dot)."""
+    seen, todo = [], list(roots)
+    while todo:
+        m = todo.pop()
+        if m in seen:
+            continue
+        f = os.path.join(ROOT, "kernel", "user", m + ".fi")
+        if not os.path.isfile(f):
+            continue    # library module (lib/, vendor) -- FIRNLIB finds it
+        seen.append(m)
+        for imp in re.findall(rb"^import ([a-z_0-9.]+)", open(f, "rb").read(), re.M):
+            todo.append(imp.decode())
+    return sorted(seen)
+
+
 def cmd_build(args):
     proj = os.path.abspath(args.path)
     rep, f = lint(os.path.join(proj, "INFO"), proj)
@@ -301,26 +324,40 @@ def cmd_build(args):
     try:
         # SDK modules + project sources side by side: a program finds its
         # `import ulib` only next to itself (tools/sync/build.sh)
-        for m in SDK_MODULES:
+        # kind gui (`profile app`): the scene tree modules too -- the closure of the local imports
+        gui = bool(re.search(r"^profile app\b", open(main_src).read(), re.M))
+        mods = list(SDK_MODULES)
+        if gui:
+            mods = import_closure(["ulib", "wlib", "fuiapp", "fuiscene"])
+        for m in mods:
             shutil.copyfile(os.path.join(ROOT, "kernel", "user", m + ".fi"), os.path.join(work, m + ".fi"))
         for n in os.listdir(os.path.join(proj, "src")):
             if n.endswith(".fi"):
-                if n[:-3] in SDK_MODULES:
+                if n[:-3] in mods:
                     print("osdk: src/%s shadows an SDK module" % n)
                     return 1
                 shutil.copyfile(os.path.join(proj, "src", n), os.path.join(work, n))
         env = dict(os.environ, FIRNLIB=os.environ.get("FIRNLIB", os.path.join(ROOT, "lib")))
-        rc, o = run(["as", "--64", "-o", os.path.join(work, "crt.o"), os.path.join(ROOT, "kernel", "user", "crt.s")])
-        if rc:
-            print(o)
-            return 1
-        rc, o = run([firnc, "-c", os.path.join(work, "main.fi"), "-o", os.path.join(work, "main.o")], env=env)
+        gcs, optl = [], []
+        if gui:         # same flags as the image build (tools/sync/gc.sh): drop unused scene-host code
+            env["FIRN_FUNCTION_SECTIONS"] = "1"
+            gcs = ["--gc-sections"]
+            optl = ["--opt-level=release-fast", "--no-pass=inline"]
+        crt = []
+        if not gui:     # a `profile app` program brings its own start (tools/sync/build.sh)
+            rc, o = run(["as", "--64", "-o", os.path.join(work, "crt.o"), os.path.join(ROOT, "kernel", "user", "crt.s")])
+            if rc:
+                print(o)
+                return 1
+            crt = [os.path.join(work, "crt.o")]
+        rc, o = run([firnc] + (["--profile=app"] + optl if gui else []) +
+                    ["-c", os.path.join(work, "main.fi"), "-o", os.path.join(work, "main.o")], env=env)
         if rc:
             print("osdk: compile failed\n" + o)
             return 1
         elf = os.path.join(work, "app.elf")
-        rc, o = run(["ld", "-T", os.path.join(ROOT, "kernel", "user", "user.ld"), "--defsym=USER_ENTRY=_F0.u_start",
-                     "-o", elf, os.path.join(work, "crt.o"), os.path.join(work, "main.o")])
+        rc, o = run(["ld"] + gcs + ["-T", os.path.join(ROOT, "kernel", "user", "user.ld"), "--defsym=USER_ENTRY=_F0.u_start",
+                     "-o", elf] + crt + [os.path.join(work, "main.o")])
         if rc:
             print("osdk: link failed\n" + o)
             return 1
@@ -371,7 +408,7 @@ def main(argv):
     sp = ap.add_subparsers(dest="cmd", required=True)
     a = sp.add_parser("new")
     a.add_argument("id")
-    a.add_argument("--kind", choices=["app", "service"], default="app")
+    a.add_argument("--kind", choices=["app", "service", "gui"], default="app")
     a.add_argument("--dir")
     a.add_argument("--name")
     a.add_argument("--perm")

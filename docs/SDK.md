@@ -5,13 +5,15 @@ permissions: see "Permissions" below (AR-2).
 
 ## Tool
 
-    python3 tools/sdk/osdk.py new org.example.hello [--kind app|service] [--perm net,notify]
+    python3 tools/sdk/osdk.py new org.example.hello [--kind app|service|gui] [--perm net,notify]
     python3 tools/sdk/osdk.py check <project>        # lint manifest v2
     python3 tools/sdk/osdk.py build <project> --out DIR
     python3 tools/sdk/osdk.py perms
 
 `new` creates `INFO`, `src/main.fi`, `symbol.txt`, `README.md` from tools/sdk/template
-(kind `service` = a bus service on rpc.fi). `build` compiles `src/*.fi` with the SDK modules
+(kind `service` = a bus service on rpc.fi; kind `gui` = a window on fUi's scene tree: `profile app`, label + text field +
+main button that counts; `build` then copies the import closure of `wlib/fuiapp/fuiscene` and links with `--gc-sections`, ~0.9 MB;
+gate `tools/sdk/gui.sh`; see the window without a VM: docs/HOST-PREVIEW.md). `build` compiles `src/*.fi` with the SDK modules
 (`ulib`, `actwire`, `rpc` from kernel/user) next to them, writes `DIR/bin/<short>.elf`,
 `DIR/apps/<short>.osp/{INFO,symbol,data/}` and `DIR/mkfs.lines` (arguments for tools/osum/mkfs.py).
 No SYSTEM marker: a third-party app is labelled by the kernel.

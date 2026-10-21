@@ -1,6 +1,6 @@
 # HOST-PREVIEW — see a fUi window without booting a guest (TOOLKIT-PLAN T3, r1326)
 
-Slice 1 (21.10.2026). Gate: `bash tools/preview/run.sh` (19 checks, ~10 s, no VM, no kernel change).
+Slice 1 (21.10.2026). SDK gui template gate: tools/sdk/gui.sh 18/0. Gate: `bash tools/preview/run.sh` (19 checks, ~10 s, no VM, no kernel change).
 
 ## What it is
 - `tools/preview/axpng.py` renders an **a11y.tree dump** (`act call a11y.tree window=<title>`, axd.fi `line()`)
