@@ -9,7 +9,7 @@ import os, sys
 from PIL import Image
 
 PAGE_IDS = ["appearance", "screen", "time", "network", "users", "netview", "language", "presets", "accounts", "sync",
-            "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects"]
+            "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects", "wifi", "usbnet"]
 
 def main():
     indir, outdir = sys.argv[1], sys.argv[2]
