@@ -104,7 +104,8 @@ start3() { # name script plan  (usbhold: the kernel services USB hot plug for 90
         -device qemu-xhci,id=x0 -netdev user,id=n0 -device usb-net,id=devn1,netdev=n0,mac=$MAC \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
 }
-gen 2 "$T/s_short.sh"
+# the script only proves shell + kernel are alive after the unplug (dhcp/ping would wait for the vanished NIC)
+printf 'echo ==START==\nsleep 1\necho ==ALIVE==\n' > "$T/s_short.sh"
 python3 tools/osum/mkfs.py build "$T/d3.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" \
