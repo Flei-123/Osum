@@ -447,7 +447,7 @@ printf 'LIVE-NEW-CONTENT\n' > "$OUT/ovl-live/gate-ovl.txt"
 pubt "$OUT/img-old" "$OUT/feed-live" dev --count 300 --overlay "$OUT/ovl-live" --gz && ok "live feed: build 300, kernel identical to slot A, 2 overlay files" || { cat "$OUT/pub.log"; bad "publish live"; }
 gleich "the offered kernel is byte-identical to slot A" "$(sha256sum "$OUT/img-old/osum.mb" | cut -d' ' -f1)" "$OLDSHA"
 dienst "$OUT/feed-live" && ok "feed up" || bad "feed does not start"
-rc=$(lauf l1 "cp /bin/sleep /bin/launcher;chmod 755 /bin/launcher;/bin/launcher 600 &;ps;ota system search;ota system apply;ps;cat /bin/gate-ovl.txt;cat /system/SYSVERSION;ota system status;ls /system/old;exit")
+rc=$(lauf l1 "cp /bin/sleep /bin/launcher;chmod 755 /bin/launcher;/bin/launcher 600 &;ps;ota system search;ota system apply;ps;cat /bin/gate-ovl.txt;cat /system/SYSVERSION;cat /system/sys.stand;ota system status;ls /system/old;exit")
 sed -n '/^osum\$ ps/,/^osum\$ ota system search/p' "$OUT/l1.txt" > "$OUT/l1.ps1"
 sed -n '/^osum\$ ota system apply/,$p' "$OUT/l1.txt" > "$OUT/l1.after"
 sed -n '/^osum\$ ota system apply/,/^osum\$ ps/p' "$OUT/l1.txt" > "$OUT/l1.apply"
@@ -461,6 +461,7 @@ sed -n '/^osum\$ ps/,$p' "$OUT/l1.after" | grep -aE 'user +[0-9]+ +[0-9]+ .*laun
 sed -n '/^osum\$ ps/,$p' "$OUT/l1.after" | grep -aqE ' zombie .*launcher' && ok "the old launcher task is a zombie (killed, waiting for its parent)" || bad "no zombie launcher after the update (was it ended?)"
 hat "$OUT/l1.after" "LIVE-NEW-CONTENT" "the new /bin file is there in the SAME boot"
 hat "$OUT/l1.after" "00000300" "SYSVERSION is 300 at once"
+hat "$OUT/l1.after" "phase=applied" "sys.stand says phase applied (Settings shows: no restart needed)"
 hat "$OUT/l1.after" "system: overlay committed" "overlay committed (journal dropped)"
 hat "$OUT/l1.after" "system: no update pending" "nothing pending"
 esp_has osum-b.mb && bad "slot B written" || ok "no slot B on the ESP"
