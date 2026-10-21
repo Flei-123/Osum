@@ -28,3 +28,13 @@ graph, bar) is written in Firn (`lib/fui/navkit.fi`, test `tests/1930_fui_navkit
 `$FIRNLIB` is searched before the pinned library, so `import fui.navkit` finds this copy. The copy
 must stay byte-identical to Firn's (`tools/fui/navkit-sync.sh` checks it when the Firn repository is
 there); delete it when the pin has moved past the commit that holds the file.
+
+## `lib/fui/nav_{route,layout,rail,palette}.fi` (MIRROR, 21.10.2026)
+
+The navigation toolkit (route model, adaptive layout, app rail, command palette; Firn `5a2070df4`,
+`docs/fui-nav.md`) is mirrored here because the pin (`vendor/firn/COMMIT`) does not contain it yet.
+`$FIRNLIB` is searched before the pinned library. The four files must stay byte-identical to Firn's;
+the pin already has `fui.cmdbar`, `fui.action` and `text.fuzzy`, which the toolkit imports.
+Gate: `bash tools/navlibs/run.sh` (byte comparison when the Firn repository is there, plus Firn's tests
+1933-1936 in `tests/navlibs/` built against `lib/` and run). Delete the mirror when the pin has moved
+past that commit.
