@@ -43,9 +43,9 @@ def main():
                 if A[1] < B[1] + B[3] and B[1] < A[1] + A[3] and A[2] < B[2] + B[4] and B[2] < A[2] + A[4]:
                     ov += 1
         rows.append((i, len(page), ov))
-    # build 0 = initial window, builds 1..19 = sidebar clicks a..s (PAGE_IDS), the rest = search typing (empty result)
+    # build 0 = initial window, builds 1..20 = sidebar clicks a..t (PAGE_IDS), the rest = search typing (empty result)
     ids = ["appearance", "screen", "time", "network", "users", "netview", "language", "presets", "accounts", "sync",
-           "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps"]
+           "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2"]
     bad = 0
     for i, n, ov in rows:
         name = "(initial)" if i == 0 else (ids[i - 1] if i - 1 < len(ids) else "(search)")

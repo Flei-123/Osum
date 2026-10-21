@@ -12,6 +12,8 @@ RECT = re.compile(r"settings: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 PERS = "settings://personalization"
 THEMES = "settings://personalization/themes"
 POWER = "settings://system/power"
+DISPLAY = "settings://display"
+DISPADV = "settings://display/advanced"
 
 
 def parse(txt):
@@ -62,6 +64,8 @@ def judge(txt, quiet=False):
     ok(any(n[0] == THEMES and n[6] == 3 for n in navs), "stack depth 3 after pers, themes, up")
     ok(any(n[8] >= 1 for n in navs), "search for 'power' finds a route (hits>=1)")
     ok(subseq(navs, [lambda n: n[8] >= 1, lambda n: n[0] == POWER and n[1] == 16]), "Enter opens the best hit: %s on page 16" % POWER)
+    ok(subseq(navs, [lambda n: n[0] == POWER, lambda n: n[0] == DISPLAY and n[1] == 1, lambda n: n[0] == DISPADV and n[1] == 19]),
+       "sidebar: Display (page 1) and Advanced display (page 19, SET-7) open their own pages")
     for want in ("navback", "navfwd", "navup", "navcrumba", "navcrumbb"):
         ok(want in names, "rect %s reported" % want)
     tabs = [n for n in names if re.fullmatch(r"tab[a-z]", n)]
