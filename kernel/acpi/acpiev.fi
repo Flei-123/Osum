@@ -90,6 +90,7 @@ import serial
 import lib.kstate
 import mm.mem
 import acpi.acpi
+import pwr.power
 import acpi.amlns
 import acpi.amlobj
 import acpi.amlev
@@ -99,7 +100,7 @@ import arch.arch
 import arch.x86_64.apic
 
 export {
-    stage, pump, irq, ready, why, sci_gsi, gpe_armed, events, wakeups,
+    stage, pump, irq, shared, ready, why, sci_gsi, gpe_armed, events, wakeups,
     lid_state, lid_present, batt_percent, batt_state, batt_present,
     ac_online, button_pending, button_take, take_change, changed,
     EV_NONE, EV_BUTTON, EV_LID, EV_BATT, EV_AC,
@@ -163,6 +164,17 @@ const E_ARENA: u64 = 240 // 0 = keiner (dann ist alles hier tot)
 const E_BTNSAID: u64 = 248 // schon gemeldet? (damit es EINMAL kommt)
 const E_EVLEN: u64 = 1104 // PM1_EVT_LEN aus der FADT
 const E_MODE: u64 = 320 // was acpi_mode_on gemeldet hat
+const E_BONLY: u64 = 1152 // 1 = button-only mode (namespace failed, the fixed power button still works)
+const E_BEMPTY: u64 = 1160 // button-only: consecutive SCI entries that found no PM1 event
+const E_BMASKED: u64 = 1168 // button-only: 1 = the SCI line was masked by the storm guard
+const E_BSEEN: u64 = 1176 // button-only: irq count at the last diagnostic line
+const E_SHARED: u64 = 1184 // SCI deliveries that arrived on a device vector (shared line)
+const E_COK: u64 = 1192 // shutdown values cached at boot for power.acpi_off (mirrors power.C_*)
+const E_CPM1A: u64 = 1200
+const E_CPM1B: u64 = 1208
+const E_CTYPA: u64 = 1216
+const E_CTYPB: u64 = 1224
+const BONLY_STORM: u64 = 64 // empty SCI entries in a row before the line is masked
 const E_BTNN: u64 = 1144 // wie oft die Taste gedrueckt wurde (unabholbar)
 const E_STSOR: u64 = 1136 // ODER ueber alle je gelesenen sts
 const E_PUMPN: u64 = 1128 // wie oft `pump` gelaufen ist
@@ -647,9 +659,71 @@ fn gpe_armed_bit(state: u64, bit: u64) -> bool {
 // loescht, was er gefunden hat, merkt es vor und ist fertig. Alles
 // Weitere macht `pump`.
 
+// Button-only SCI handler: PM1 only, no GPE table walk, no pump work, no namespace. Every status bit that is set is
+// cleared (RW1C), and a line that keeps firing without any PM1 status is masked so a wrong level or polarity cannot
+// freeze the machine.
+fn irq_button_only(state: u64, guard: bool) {
+    let pa: u64 = g(state, E_PM1A)
+    let pb: u64 = g(state, E_PM1B)
+    var sts: u64 = 0
+    if pa != 0 {
+        sts = sts | in16(pa)
+    }
+    if pb != 0 {
+        sts = sts | in16(pb)
+    }
+    s(state, E_LASTSTS, sts)
+    s(state, E_STSOR, g(state, E_STSOR) | sts)
+    if sts == 0 {
+        let e: u64 = g(state, E_BEMPTY) + 1
+        s(state, E_BEMPTY, e)
+        if guard && e >= BONLY_STORM && g(state, E_BMASKED) == 0 {
+            apic.mask_gsi(state, g(state, E_SCI))
+            s(state, E_BMASKED, 1)
+        }
+        return
+    }
+    s(state, E_BEMPTY, 0)
+    if pa != 0 {
+        out16(pa, sts)
+    }
+    if pb != 0 {
+        out16(pb, sts)
+    }
+    if (sts & PM1_PWRBTN) != 0 {
+        s(state, E_BTN, 1)
+        s(state, E_BTNN, g(state, E_BTNN) + 1)
+        mark(state, EV_BUTTON)
+        s(state, E_WAKE, g(state, E_WAKE) + 1)
+    }
+}
+
+// The SCI shares its line with PCI devices on some machines (VirtualBox: the network card sits on GSI 9 and its driver
+// rewrites the redirection entry to its own vector). The SCI then arrives on a device vector, and a device handler that
+// never reads PM1 leaves the level line asserted forever. Called on every device vector: if that vector now owns the
+// SCI line, run the PM1 handler too (no storm guard here, the device legitimately fires on the same line).
+fn shared(state: u64, vector: u64) {
+    let ready: u64 = g(state, E_READY)
+    if ready != 1 && g(state, E_BONLY) != 1 {
+        return
+    }
+    if (apic.gsi_entry(state, g(state, E_SCI)) & 0xFF) != vector {
+        return
+    }
+    s(state, E_SHARED, g(state, E_SHARED) + 1)
+    if ready == 1 {
+        irq(state)
+    } else {
+        irq_button_only(state, false)
+    }
+}
+
 fn irq(state: u64) {
     s(state, E_IRQN, g(state, E_IRQN) + 1)
     if g(state, E_READY) != 1 {
+        if g(state, E_BONLY) == 1 {
+            irq_button_only(state, true)
+        }
         return
     }
     var etwas: bool = false
@@ -737,6 +811,48 @@ fn irq(state: u64) {
 // Sie fuehrt die vorgemerkten GPE-Methoden aus, liest den Notify-Ring
 // und fragt danach das Geraet ab, das sich gemeldet hat.
 
+// Button-only diagnostics from task context (never from the handler): a line every 5 s and one on every change of the
+// entry count, so the counters are on the serial line BEFORE a press as well as after it.
+fn bonly_diag(state: u64) {
+    let n: u64 = g(state, E_IRQN) + g(state, E_SHARED)
+    let tick: u64 = g(state, E_PUMPN)
+    if n == g(state, E_BSEEN) && (tick % 500) != 0 {
+        return
+    }
+    if n != g(state, E_BSEEN) && (tick % 10) != 0 {
+        return
+    }
+    s(state, E_BSEEN, n)
+    var s_a: [u8; 20] = "acpiev: bonly irqs=\0"
+    var s_b: [u8; 8] = " btnn=\0\0"
+    var s_c: [u8; 9] = " empty=\0\0"
+    var s_d: [u8; 9] = " masked=\0"
+    var s_e: [u8; 6] = " sts=\0"
+    var s_f: [u8; 7] = " sci=\0\0"
+    var s_g: [u8; 9] = " ioapic=\0"
+    var s_h: [u8; 7] = " pm1s=\0"
+    var s_sh: [u8; 9] = " shared=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(g(state, E_BTNN))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(g(state, E_BEMPTY))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(g(state, E_BMASKED))
+    serial.puts((&s_e[0]) as u64)
+    serial.hex_width(g(state, E_LASTSTS), 4)
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(g(state, E_SCI))
+    serial.puts((&s_g[0]) as u64)
+    serial.hex_width(apic.gsi_entry(state, g(state, E_SCI)), 8)
+    serial.puts((&s_h[0]) as u64)
+    serial.hex_width(in16(g(state, E_PM1A)), 4)
+    serial.puts((&s_sh[0]) as u64)
+    serial.dec(g(state, E_SHARED))
+    serial.nl()
+}
+
 fn pump(state: u64) {
     // GANZ OBEN, VOR JEDER BEDINGUNG. Ein Zaehler hinter der ersten
     // Wache misst nicht, ob die Funktion gerufen wird, sondern ob sie
@@ -744,6 +860,9 @@ fn pump(state: u64) {
     // zwischen "pumpn=0" und "die Zeilen stehen doch da".
     s(state, E_PUMPN, g(state, E_PUMPN) + 1)
     if g(state, E_READY) != 1 {
+        if g(state, E_BONLY) == 1 {
+            bonly_diag(state)
+        }
         return
     }
     // DIE TASTE. Sie ist ein FESTES Ereignis und haengt an keinem
@@ -1209,6 +1328,44 @@ fn acpi_mode_on(state: u64, facp: u64) -> u64 {
     return 4 // geschrieben, aber das Bit kam nicht
 }
 
+// The namespace could not be built (VirtualBox: unknown AML opcode), but the power button is a FIXED event and needs no
+// AML: arm PM1 PWRBTN and route the SCI so that `button_take` works. READY stays 0, so pump and every AML user stay off.
+fn arm_button_only(state: u64) {
+    let pa: u64 = g(state, E_PM1A)
+    let pb: u64 = g(state, E_PM1B)
+    let halb: u64 = g(state, E_EVLEN) / 2
+    if (pa == 0 && pb == 0) || halb == 0 {
+        return
+    }
+    if pa != 0 {
+        out16(pa, PM1_PWRBTN | PM1_SLPBTN)
+        out16(pa + halb, in16(pa + halb) | PM1_PWRBTN)
+    }
+    if pb != 0 {
+        out16(pb, PM1_PWRBTN | PM1_SLPBTN)
+        out16(pb + halb, in16(pb + halb) | PM1_PWRBTN)
+    }
+    s(state, E_BONLY, 1)
+    apic.route(state, g(state, E_SCI), VEC_SCI, apic.id(state), true, true)
+}
+
+// Cache what power.acpi_off needs while the tables are still reachable.
+fn cache_off(state: u64, facp: u64) {
+    var vals: [u64; 2] = [0 as u64; 2]
+    let pa: u64 = kstate.get32(facp + F_PM1A_CNT)
+    if pa == 0 {
+        return
+    }
+    if !power.s5_values(kstate.get32(facp + 40), (&vals[0]) as u64) {
+        return
+    }
+    s(state, E_CPM1A, pa)
+    s(state, E_CPM1B, kstate.get32(facp + F_PM1B_CNT))
+    s(state, E_CTYPA, vals[0 as usize])
+    s(state, E_CTYPB, vals[1 as usize])
+    s(state, E_COK, 1)
+}
+
 fn stage(state: u64) {
     var w_facp: [u8; 5] = "FACP\0"
     var w_lid: [u8; 5] = "_LID\0"
@@ -1240,6 +1397,8 @@ fn stage(state: u64) {
         report(state)
         return
     }
+
+    cache_off(state, facp)
 
     // Die Register aus der FADT. PM1x_EVT ist zweigeteilt: die erste
     // Haelfte Status, die zweite Freigabe.
@@ -1275,6 +1434,9 @@ fn stage(state: u64) {
     }
     if arena == 0 {
         s(state, E_WHY, WHY_NONS)
+        if !kstate.mode_on(state, kstate.M_EVNOHOLD) {
+            arm_button_only(state)
+        }
         report(state)
         return
     }

@@ -25,7 +25,7 @@ import acpi.acpi
 import serial
 
 export { shutdown, halt_forever, acpi_off, acpi_reset, off_reason,
-         reset_reason, EXIT_OK, EXIT_TRAP }
+         reset_reason, s5_values, EXIT_OK, EXIT_TRAP }
 
 // QEMU makes 21 out of this: (10 << 1) | 1.
 const EXIT_OK: u8 = 10
@@ -140,36 +140,58 @@ fn s5_values(dsdt: u64, out: u64) -> bool {
     return false
 }
 
+// The shutdown values cached at boot by acpiev.stage (offsets inside the acpiev page): from process context the
+// firmware tables above the first mapped GiB are out of reach (VirtualBox keeps them near 4 GiB), so the live lookup
+// below fails there and the cached copy is the only way to the registers.
+const C_OK: u64 = 1192
+const C_PM1A: u64 = 1200
+const C_PM1B: u64 = 1208
+const C_TYPA: u64 = 1216
+const C_TYPB: u64 = 1224
+
 // DIE ABSCHALTUNG. Kehrt NUR zurueck, wenn sie nicht gegriffen hat.
 fn acpi_off(state: u64) -> bool {
     var w_facp: [u8; 5] = "FACP\0"
     var s_try: [u8; 22] = "power: acpi pm1a=0x\0\0\0"
     var s_typ: [u8; 8] = " s5typ=\0"
     var s_no: [u8; 20] = "power: acpi off no \0"
+    var s_ca: [u8; 22] = "power: acpi cached \0\0\0"
     kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 0)
+    var pm1a: u64 = 0
+    var pm1b: u64 = 0
+    var vals: [u64; 2] = [0 as u64; 2]
+    var why: u64 = 0
     let fadt: u64 = acpi.table(state, (&w_facp[0]) as u64)
     if fadt == 0 {
-        kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 2)
-        serial.puts((&s_no[0]) as u64)
-        serial.dec(2)
-        serial.nl()
-        return false
+        why = 2
+    } else {
+        pm1a = kstate.get32(fadt + F_PM1A_CNT)
+        pm1b = kstate.get32(fadt + F_PM1B_CNT)
+        if pm1a == 0 {
+            why = 4
+        }
+        if why == 0 && !s5_values(kstate.get32(fadt + F_DSDT), (&vals[0]) as u64) {
+            why = 3
+        }
     }
-    let pm1a: u64 = kstate.get32(fadt + F_PM1A_CNT)
-    let pm1b: u64 = kstate.get32(fadt + F_PM1B_CNT)
-    if pm1a == 0 {
-        kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 4)
-        serial.puts((&s_no[0]) as u64)
-        serial.dec(4)
-        serial.nl()
-        return false
+    if why != 0 {
+        let cok: u64 = kstate.get(state, kstate.ACPIEV_OFF + C_OK)
+        let cpa: u64 = kstate.get(state, kstate.ACPIEV_OFF + C_PM1A)
+        if cok == 1 && cpa != 0 {
+            pm1a = cpa
+            pm1b = kstate.get(state, kstate.ACPIEV_OFF + C_PM1B)
+            vals[0 as usize] = kstate.get(state, kstate.ACPIEV_OFF + C_TYPA)
+            vals[1 as usize] = kstate.get(state, kstate.ACPIEV_OFF + C_TYPB)
+            serial.puts((&s_ca[0]) as u64)
+            serial.dec(why)
+            serial.nl()
+            why = 0
+        }
     }
-    var vals: [u64; 2] = [0 as u64; 2]
-    let dsdt: u64 = kstate.get32(fadt + F_DSDT)
-    if !s5_values(dsdt, (&vals[0]) as u64) {
-        kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 3)
+    if why != 0 {
+        kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, why)
         serial.puts((&s_no[0]) as u64)
-        serial.dec(3)
+        serial.dec(why)
         serial.nl()
         return false
     }
