@@ -409,6 +409,12 @@ shot() { # <name>: a PPM for the checks, a PNG for the eyes
 }
 tap() { python3 tools/themestore/click.py "$1,$2" > "$TMPD/k.txt" 2>/dev/null; python3 tools/wm/monitor.py "$SOCK" "$TMPD/k.txt" > /dev/null 2>&1; sleep 1.5; }
 key() { local k; for k in "$@"; do echo "sendkey $k" > "$TMPD/t.txt"; python3 tools/wm/monitor.py "$SOCK" "$TMPD/t.txt" 0.15 > /dev/null 2>&1; sleep 0.6; done; sleep 1; }
+# the critical call of the window is answered in the SYSTEM dialog (SETBROKER2): wait for it, say yes with J
+dlgn() { wclean | grep -ac 'wm: trusted dialog up no='; }
+dlgyes() { # <dialogs shown before the question>
+    local i=0; while [ $i -lt 20 ]; do [ "$(dlgn)" -gt "$1" ] && break; sleep 1; i=$((i + 1)); done
+    sleep 1; key j
+}
 typetext() { local c; for c in $(echo "$1" | sed 's/./& /g'); do key "$c"; done; }
 mark() { MARK=$(wclean | wc -l); }
 # a text the window painted AFTER the mark (the trace: `wlib: text ... t=<text>`)
@@ -466,7 +472,7 @@ if waitfor "==S-WAIT==" 150; then
     key esc; sleep 3
     sawt "Arbeitet ... bitte warten" && bad "Abbrechen started a job" || ok "the question answered with Abbrechen: no job"
     echo "  -- install gruss"
-    mark; tapt "Installieren"; sleep 1; key ret
+    mark; D0=$(dlgn); tapt "Installieren"; sleep 1; key ret; dlgyes "$D0"
     waitt "Arbeitet ... bitte warten" 30 && ok "Installieren, then yes: the window says it is working" || bad "no 'Arbeitet' after yes"
     shot s5-busy
     waitt "Fertig: installiert" 150 && ok "... and 'Fertig: installiert'" || bad "no 'Fertig: installiert'"
@@ -480,19 +486,19 @@ if waitfor "==S-WAIT==" 150; then
     mark; tapt "Updates" || bad "no 'Updates' in the navigation"
     sleep 2; shot s7-updates
     sawt "Alle aktualisieren" && ok "the updates page offers 'Alle aktualisieren'" || bad "no 'Alle aktualisieren'"
-    mark; tapt "Alle aktualisieren"; sleep 1.5; shot s7b-askall
+    mark; D0=$(dlgn); tapt "Alle aktualisieren"; sleep 1.5; shot s7b-askall
     differs s7-updates s7b-askall && ok "one question for all opens (picture differs)" || bad "no question for all"
-    key ret
+    key ret; dlgyes "$D0"
     waitt "Fertig: installiert" 150 && ok "yes: hallo is updated ('Fertig: installiert')" || bad "hallo was not updated"
     sleep 2; shot s8-uptodate
     differs s7-updates s8-uptodate && ok "afterwards the updates page looks different (the list is empty)" || bad "updates page unchanged"
     echo "  -- remove gruss from its detail page"
     mark; tapt "Alle" || bad "no 'Alle' in the navigation"; sleep 2
     key ctrl-f down ret; sleep 2
-    mark; tapt "Entfernen" || bad "no Entfernen button"
+    mark; D0=$(dlgn); tapt "Entfernen" || bad "no Entfernen button"
     sleep 1.5; shot s8b-askremove
     differs s6-installed s8b-askremove && ok "Entfernen asks first: a question window opens (picture differs)" || bad "no remove question"
-    key ret
+    key ret; dlgyes "$D0"
     waitt "Fertig: entfernt" 150 && ok "yes: 'Fertig: entfernt'" || bad "gruss was not removed"
     shot s9-end
     N=$(wclean | grep -ac "==S-SNAP==")
