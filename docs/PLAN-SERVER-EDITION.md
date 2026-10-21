@@ -100,7 +100,8 @@ Rating: OK = works and measured, PART = exists with holes, NONE = missing.
 
 ## 4. Verification runs of this plan (21.10.2026)
 - `tools/server/build.sh`: ok 34 s. `tools/container/run.sh`: 52/0, 40 s. 3x headless boot: 1.34/1.38/1.45 s. Idle RAM at 3 memory sizes. Network ping, `svc`, `ctr create/set/start/exec` on an extended image.
-- `tools/hv/run.sh` and `tools/server/run.sh` (22 checks) results: see the report of this worker (`reports/20261021-140345_orientos-w-srv-plan-server-edition-n.md`).
+- `tools/hv/run.sh`: **162 passed, 0 failed** (matches HV3 doc).
+- `tools/server/run.sh` (22 checks) on main bbbd022b: **20 passed, 2 failed** (round doc: 22/0). Symbols: GUI kernel 1736 GUI symbols, server kernel **0**; kernel 8 700 740 vs 6 146 300 B. Red 1: 36 graphics places outside `gfx.fi` (`drv/gpu/vmsvga.fi` 17, `app/ipprint.fi` 11, `app/jmlink.fi` 6, `user/social.fi` 2). Red 2: the word `focus` stands in the server kernel data. Both are drift since the round, not caused by this plan -> r1479 (SRV-1b).
 
 ## 5. Milestones
 IDs below are new roadmap items (group "SRV"); existing items they cover are named so nothing is counted twice.
