@@ -15,7 +15,7 @@ $FIRNC tools/hwinv/check.fi -o "$T/c" 2> "$T/c.err" && ok "check builds" || { ba
 "$T/c" > "$T/c.txt" 2>&1
 n1=$(grep -c '^OK' "$T/c.txt"); n2=$(grep -c '^FAIL' "$T/c.txt")
 sed -n 's/^FAIL /  FAIL  check: /p' "$T/c.txt"
-[ "$n2" = 0 ] && [ "$n1" -ge 25 ] && ok "classifier: $n1 checks OK, 0 FAIL" || bad "classifier ($n1 ok, $n2 fail)"
+[ "$n2" = 0 ] && [ "$n1" -ge 35 ] && ok "classifier: $n1 checks OK, 0 FAIL" || bad "classifier ($n1 ok, $n2 fail)"
 pass=$((pass+n1))
 mut() {
     rm -rf "$T/lib-mut"; mkdir -p "$T/lib-mut"
@@ -33,5 +33,7 @@ mut "raid class not recognised" scan.fi 's/cls == 0x0104/cls == 0x0105/'
 mut "nvme class not recognised" scan.fi 's/cls == 0x0108/cls == 0x0109/'
 mut "serial io i2c range shifted" scan.fi 's/dev >= 0x9d60 \&\& dev <= 0x9d65/dev >= 0x9e60 \&\& dev <= 0x9e65/'
 mut "uefi never reported" scan.fi 's/bump(FW_UEFI)/bump(FW_SEEN)/'
+mut "i2c-hid id not recognised" scan.fi 's/"PNP0C50\\0"/"PNP0C51\\0"/'
+mut "ns flag never set" scan.fi 's/bump(ACPI_NS)/bump(ACPI_SEEN)/'
 echo "HWINV: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

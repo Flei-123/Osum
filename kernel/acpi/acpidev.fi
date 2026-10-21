@@ -1,0 +1,366 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import acpi.acpi
+import acpi.amlns
+import acpi.amlobj
+import acpi.aml
+
+export { render }
+
+const SLOTS: u64 = 96
+const TXT: u64 = 16
+const K_STR: u64 = 0
+const K_INT: u64 = 0x8000000000000000
+
+fn put(out: u64, at: u64, cap: u64, c: u64) -> u64 {
+    if at >= cap {
+        return at
+    }
+    kstate.set8(out + at, (c & 0xFF) as u8)
+    return at + 1
+}
+
+fn put_cstr(out: u64, at: u64, cap: u64, s: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 0
+    while i < 64 {
+        let c: u64 = kstate.get8(s + i)
+        if c == 0 {
+            break
+        }
+        p = put(out, p, cap, c)
+        i = i + 1
+    }
+    return p
+}
+
+fn put_num(out: u64, at: u64, cap: u64, v: u64) -> u64 {
+    var digits: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        digits[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        digits[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var p: u64 = at
+    while n > 0 {
+        n = n - 1
+        p = put(out, p, cap, digits[n as usize] as u64)
+    }
+    return p
+}
+
+fn put_seg(out: u64, at: u64, cap: u64, v: u64) -> u64 {
+    var n: u64 = 4
+    while n > 1 {
+        if ((v >> ((n - 1) * 8)) & 0xFF) != 95 {
+            break
+        }
+        n = n - 1
+    }
+    var p: u64 = at
+    var i: u64 = 0
+    while i < n {
+        p = put(out, p, cap, (v >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+    return p
+}
+
+fn put_path(out: u64, at: u64, cap: u64, state: u64, node: u64) -> u64 {
+    if node == 0 {
+        return put(out, at, cap, 92)
+    }
+    let par: u64 = amlns.node_parent(state, node)
+    var p: u64 = put_path(out, at, cap, state, par)
+    if par != 0 {
+        p = put(out, p, cap, 46)
+    }
+    return put_seg(out, p, cap, amlns.node_name(state, node))
+}
+
+fn hexc(v: u64) -> u64 {
+    if v < 10 {
+        return 48 + v
+    }
+    return 55 + v
+}
+
+fn eisa_text(v: u64, dst: u64) {
+    let b0: u64 = v & 0xFF
+    let b1: u64 = (v >> 8) & 0xFF
+    let b2: u64 = (v >> 16) & 0xFF
+    let b3: u64 = (v >> 24) & 0xFF
+    let w: u64 = (b0 << 8) | b1
+    kstate.set8(dst, (((w >> 10) & 31) + 64) as u8)
+    kstate.set8(dst + 1, (((w >> 5) & 31) + 64) as u8)
+    kstate.set8(dst + 2, ((w & 31) + 64) as u8)
+    kstate.set8(dst + 3, hexc(b2 >> 4) as u8)
+    kstate.set8(dst + 4, hexc(b2 & 15) as u8)
+    kstate.set8(dst + 5, hexc(b3 >> 4) as u8)
+    kstate.set8(dst + 6, hexc(b3 & 15) as u8)
+    kstate.set8(dst + 7, 0 as u8)
+}
+
+fn str_text(s: u64, dst: u64) {
+    var i: u64 = 0
+    while i < TXT - 1 {
+        let c: u64 = kstate.get8(s + i)
+        kstate.set8(dst + i, c as u8)
+        if c == 0 {
+            return
+        }
+        i = i + 1
+    }
+    kstate.set8(dst + i, 0 as u8)
+}
+
+fn obj_text(o: u64, dst: u64) -> bool {
+    kstate.set8(dst, 0 as u8)
+    let t: u64 = amlobj.otype(o)
+    if t == amlobj.OT_INT {
+        eisa_text(amlobj.ov1(o), dst)
+        return true
+    }
+    if t == amlobj.OT_STR {
+        str_text(amlobj.ov1(o), dst)
+        return kstate.get8(dst) != 0
+    }
+    if t == amlobj.OT_PKG {
+        if amlobj.ov2(o) == 0 {
+            return false
+        }
+        return obj_text(amlobj.pkg_at(o, 0), dst)
+    }
+    return false
+}
+
+fn obj_key(o: u64) -> u64 {
+    let t: u64 = amlobj.otype(o)
+    if t == amlobj.OT_INT {
+        return amlobj.ov1(o) | K_INT
+    }
+    if t == amlobj.OT_STR {
+        var k: u64 = 0
+        var i: u64 = 0
+        let s: u64 = amlobj.ov1(o)
+        while i < 8 {
+            k = k | (kstate.get8(s + i) << (i * 8))
+            i = i + 1
+        }
+        return k
+    }
+    return 0
+}
+
+fn node_text(state: u64, node: u64, dst: u64) -> bool {
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, node, (&r[0]) as u64) {
+        return false
+    }
+    return obj_text((&r[0]) as u64, dst)
+}
+
+fn starts(t: u64, w: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(w + i) != 0 {
+        if kstate.get8(t + i) != kstate.get8(w + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn same(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < TXT {
+        let x: u64 = kstate.get8(a + i)
+        if x != kstate.get8(b + i) {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn wanted(t: u64) -> bool {
+    var p0: [u8; 8] = "PNP0C50\0"
+    var p1: [u8; 9] = "ACPI0C50\0"
+    var p2: [u8; 6] = "PNP03\0"
+    var p3: [u8; 6] = "PNP0F\0"
+    var p4: [u8; 8] = "PNP0C09\0"
+    var p5: [u8; 8] = "PNP0C0D\0"
+    var p6: [u8; 8] = "PNP0C0A\0"
+    var p7: [u8; 9] = "ACPI0003\0"
+    var p8: [u8; 5] = "ELAN\0"
+    var p9: [u8; 5] = "SYNA\0"
+    var pa: [u8; 5] = "ALPS\0"
+    var pb: [u8; 4] = "HPQ\0"
+    var pc: [u8; 5] = "MSFT\0"
+    var pd: [u8; 5] = "WCOM\0"
+    var pe: [u8; 5] = "ATML\0"
+    var pf: [u8; 5] = "CYAP\0"
+    return starts(t, (&p0[0]) as u64) || starts(t, (&p1[0]) as u64)
+        || starts(t, (&p2[0]) as u64) || starts(t, (&p3[0]) as u64)
+        || starts(t, (&p4[0]) as u64) || starts(t, (&p5[0]) as u64)
+        || starts(t, (&p6[0]) as u64) || starts(t, (&p7[0]) as u64)
+        || starts(t, (&p8[0]) as u64) || starts(t, (&p9[0]) as u64)
+        || starts(t, (&pa[0]) as u64) || starts(t, (&pb[0]) as u64)
+        || starts(t, (&pc[0]) as u64) || starts(t, (&pd[0]) as u64)
+        || starts(t, (&pe[0]) as u64) || starts(t, (&pf[0]) as u64)
+}
+
+fn tables_line(state: u64, out: u64, at: u64, cap: u64) -> u64 {
+    var l: [u8; 9] = "tables: \0"
+    var p: u64 = put_cstr(out, at, cap, (&l[0]) as u64)
+    let n: u64 = acpi.table_count(state)
+    var i: u64 = 0
+    while i < n {
+        let t: u64 = acpi.table_at(state, i)
+        if t != 0 {
+            var j: u64 = 0
+            while j < 4 {
+                p = put(out, p, cap, kstate.get8(t + j))
+                j = j + 1
+            }
+            p = put(out, p, cap, 32)
+        }
+        i = i + 1
+    }
+    return put(out, p, cap, 10)
+}
+
+fn find_child(state: u64, parent: u64, seg: u64, from: u64) -> u64 {
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = from
+    while i < n {
+        if amlns.node_parent(state, i) == parent && amlns.node_name(state, i) == seg {
+            return i
+        }
+        i = i + 1
+    }
+    return amlns.NONE
+}
+
+fn entry_line(state: u64, out: u64, at: u64, cap: u64, hidn: u64, count: u64,
+        seg_cid: u64) -> u64 {
+    var tx: [u8; 16] = [0 as u8; 16]
+    var l_cid: [u8; 6] = " cid=\0"
+    var l_x: [u8; 3] = " x\0"
+    let tp: u64 = (&tx[0]) as u64
+    var p: u64 = at
+    node_text(state, hidn, tp)
+    p = put_cstr(out, p, cap, tp)
+    let cidn: u64 = find_child(state, amlns.node_parent(state, hidn), seg_cid, 1)
+    if cidn != amlns.NONE {
+        if node_text(state, cidn, tp) {
+            p = put_cstr(out, p, cap, (&l_cid[0]) as u64)
+            p = put_cstr(out, p, cap, tp)
+        }
+    }
+    p = put_cstr(out, p, cap, (&l_x[0]) as u64)
+    p = put_num(out, p, cap, count)
+    p = put(out, p, cap, 32)
+    p = put_path(out, p, cap, state, amlns.node_parent(state, hidn))
+    return put(out, p, cap, 10)
+}
+
+fn entry_wanted(state: u64, hidn: u64, seg_cid: u64) -> bool {
+    var tx: [u8; 16] = [0 as u8; 16]
+    let tp: u64 = (&tx[0]) as u64
+    if node_text(state, hidn, tp) && wanted(tp) {
+        return true
+    }
+    let cidn: u64 = find_child(state, amlns.node_parent(state, hidn), seg_cid, 1)
+    if cidn != amlns.NONE {
+        if node_text(state, cidn, tp) && wanted(tp) {
+            return true
+        }
+    }
+    return false
+}
+
+fn devices(state: u64, out: u64, at: u64, cap: u64) -> u64 {
+    var w_hid: [u8; 5] = "_HID\0"
+    var w_cid: [u8; 5] = "_CID\0"
+    var l_none: [u8; 12] = "acpi_ns: no\0"
+    var l_head: [u8; 13] = "acpi_ns: yes\0"
+    var l_more: [u8; 7] = "more: \0"
+    var keys: [u64; 96] = [0 as u64; 96]
+    var cnt: [u64; 96] = [0 as u64; 96]
+    var first: [u64; 96] = [0 as u64; 96]
+    var r: [u64; 3] = [0 as u64; 3]
+    var p: u64 = at
+    if aml.ns_arena(state) == 0 {
+        p = put_cstr(out, p, cap, (&l_none[0]) as u64)
+        return put(out, p, cap, 10)
+    }
+    p = put_cstr(out, p, cap, (&l_head[0]) as u64)
+    p = put(out, p, cap, 10)
+    let seg_hid: u64 = amlns.seg_of((&w_hid[0]) as u64)
+    let seg_cid: u64 = amlns.seg_of((&w_cid[0]) as u64)
+    let n: u64 = amlns.nodes(state)
+    var used: u64 = 0
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_name(state, i) == seg_hid
+            && amlns.node_kind(state, amlns.node_parent(state, i)) == amlns.NK_DEVICE {
+            if aml.eval_node(state, i, (&r[0]) as u64) {
+                let k: u64 = obj_key((&r[0]) as u64)
+                if k != 0 {
+                    var j: u64 = 0
+                    while j < used && keys[j as usize] != k {
+                        j = j + 1
+                    }
+                    if j < used {
+                        cnt[j as usize] = cnt[j as usize] + 1
+                    } else if used < SLOTS {
+                        keys[used as usize] = k
+                        cnt[used as usize] = 1
+                        first[used as usize] = i
+                        used = used + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    var pass: u64 = 0
+    var left: u64 = 0
+    while pass < 2 {
+        var j: u64 = 0
+        while j < used {
+            let w: bool = entry_wanted(state, first[j as usize], seg_cid)
+            if (pass == 0) == w {
+                if p + 100 < cap {
+                    p = entry_line(state, out, p, cap, first[j as usize], cnt[j as usize], seg_cid)
+                } else if pass == 1 {
+                    left = left + 1
+                }
+            }
+            j = j + 1
+        }
+        pass = pass + 1
+    }
+    if left > 0 {
+        p = put_cstr(out, p, cap, (&l_more[0]) as u64)
+        p = put_num(out, p, cap, left)
+        p = put(out, p, cap, 10)
+    }
+    return p
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    var p: u64 = tables_line(state, out, 0, cap)
+    p = devices(state, out, p, cap)
+    return p
+}
