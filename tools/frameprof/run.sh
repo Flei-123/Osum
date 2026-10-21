@@ -7,7 +7,7 @@
 # Run A (`framesdump=500`): the kernel prints `frames: win=<i> presents= avg_us= max_us=` per window and
 #   `frames: total= note_cyc=` every 500 ticks.
 #   - at least two dump rounds, the totals only grow
-#   - at least one window row with presents > 0 and avg_us > 0
+#   - at least one window row with presents > 0 and avg_us > 0, and one with the owner pid= > 0 (T1-S6 key: /proc/frames win.<i>.pid)
 #   - the measured cost of one counter update (note_cyc, TSC cycles) stays under 2000 (overhead budget)
 #   - no panic on the serial line
 # Run B (no word): counter-proof, no `frames:` line at all.
@@ -53,6 +53,8 @@ last=$(field "$lastl" total)
 [ -n "$first" ] && [ -n "$last" ] && [ "$last" -gt "$first" ] && ok "A: presents grow ($first -> $last)" || bad "A: presents do not grow ($first -> $last)"
 rows=$(grep -a '^frames: win=' "$SA" | awk '{split($3,p,"="); split($4,a,"="); if (p[2]+0>0 && a[2]+0>0) n++} END{print n+0}')
 [ "$rows" -ge 1 ] && ok "A: $rows window rows with presents > 0 and avg_us > 0" || bad "A: no usable window row"
+pidrows=$(grep -a '^frames: win=' "$SA" | awk '{for(i=1;i<=NF;i++){if($i ~ /^pid=/){split($i,q,"="); if(q[2]+0>0) n++}}} END{print n+0}')
+[ "$pidrows" -ge 1 ] && ok "A: $pidrows window rows name their owner pid (pid= > 0; taskmgr FPS column key)" || bad "A: no row with pid= > 0"
 cyc=$(field "$lastl" note_cyc)
 [ -n "$cyc" ] && [ "$cyc" -gt 0 ] && [ "$cyc" -le "$MAXCYC" ] && ok "A: counter update costs $cyc TSC cycles (<= $MAXCYC)" || bad "A: note_cyc '$cyc' missing, zero or > $MAXCYC"
 echo "  INFO  presents=$last note_cyc=$cyc"

@@ -3,10 +3,11 @@ profile kernel
 
 import lib.kstate
 import mm.mem
+import sched.sched
 import sched.time
 import serial
 
-export { parse, tick, note, field, reset, page, total, cost, rec, SLOTS, F_COUNT, F_LAST, F_SUM, F_GAPS, F_MAX, F_GAP, GAP_CAP_US }
+export { parse, tick, note, field, reset, page, total, cost, rec, pid_of, SLOTS, F_COUNT, F_LAST, F_SUM, F_GAPS, F_MAX, F_GAP, F_OWNER, GAP_CAP_US }
 
 const SLOTS: u64 = 32
 const REC_WORDS: u64 = 15
@@ -17,6 +18,7 @@ const F_SUM: u64 = 2
 const F_GAPS: u64 = 3
 const F_MAX: u64 = 4
 const F_GAP: u64 = 5
+const F_OWNER: u64 = 6 // owner task slot + 1 of the window (0 = unknown); pid_of() turns it into the pid
 const GAP_CAP_US: u64 = 1000000
 
 static mut pg: u64 = 0
@@ -32,6 +34,7 @@ static mut t_avg: [u8; 9] = " avg_us=\0"
 static mut t_max: [u8; 9] = " max_us=\0"
 static mut t_tot: [u8; 15] = "frames: total=\0"
 static mut t_cyc: [u8; 11] = " note_cyc=\0"
+static mut t_pid: [u8; 6] = " pid=\0"
 
 fn rd(a: u64) -> u64 {
     return __mmio_read64(a as *mut u64)
@@ -101,7 +104,8 @@ fn us_of(state: u64, d: u64) -> u64 {
     return d / (kh / 1000)
 }
 
-fn note(state: u64, i: u64) {
+// `owner` = the task slot that owns window i (wm W_OWNER); stored so /proc/frames and the dump can name the pid.
+fn note(state: u64, i: u64, owner: u64) {
     if i >= SLOTS {
         return
     }
@@ -125,6 +129,7 @@ fn note(state: u64, i: u64) {
         wr(r + F_GAP * 8, gap)
     }
     wr(r + F_COUNT * 8, n + 1)
+    wr(r + F_OWNER * 8, owner + 1)
     wr(r + F_LAST * 8, now)
     seen = seen + 1
     let t1: u64 = time.tsc()
@@ -160,6 +165,18 @@ fn parse(cmd: u64) {
     }
 }
 
+// The pid (as Ring 3 sees it) of the task that owns the window of record `r`; 0 = unknown or gone.
+fn pid_of(state: u64, r: u64) -> u64 {
+    let o: u64 = field(r, F_OWNER)
+    if o == 0 || o - 1 >= kstate.MAX_TASKS {
+        return 0
+    }
+    if sched.tget(state, o - 1, sched.T_STATE) == sched.S_FREE {
+        return 0
+    }
+    return sched.tget(state, o - 1, sched.T_PID)
+}
+
 fn say(label: u64, v: u64) {
     serial.puts(label)
     serial.dec(v)
@@ -186,6 +203,7 @@ fn tick(state: u64) {
             say((&t_pres[0]) as u64, field(r, F_COUNT))
             say((&t_avg[0]) as u64, avg)
             say((&t_max[0]) as u64, field(r, F_MAX))
+            say((&t_pid[0]) as u64, pid_of(state, r))
             serial.nl()
         }
         i = i + 1
