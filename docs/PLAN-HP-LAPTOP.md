@@ -26,9 +26,9 @@ Ampel: GRÜN = Code da und in QEMU gated, aber am HP **ungemessen**; GELB = Teil
 | Intel RST (RAID-Modus) | ROT | M | NVMe verschwindet hinter RAID-Controller (Klasse 0104). Kein Treiber. Workaround: BIOS auf AHCI. Inventur erkennt und meldet das (`storage_verdict=raid-rst-nvme-hidden`) |
 | Display HD 620 | GELB | M | nur UEFI-GOP-Framebuffer, kein Mode-Set, keine Helligkeit (r32/r33/r36); Panel läuft in nativer GOP-Auflösung |
 | Tastatur | GELB | S–M | USB-HID und PS/2 da; interne Tastatur ist PS/2 (i8042) — ACPI/EC-Weg ungemessen |
-| Touchpad | GELB | M | `i2chid.fi` gegen simulierten DesignWare-Controller 18/0; ECHT fehlt: LPSS-I2C-Controller aus PCI (8086:9d60..) ansprechen + ACPI-Gerät (_HID, I2C-Adresse, GPIO-IRQ). AML-Interpreter existiert (kernel/acpi/aml*.fi) |
+| Touchpad | GELB | M | `i2chid.fi` gegen simulierten DesignWare-Controller 18/0; ECHT fehlt: LPSS-I2C-Controller aus PCI (8086:9d60..) ansprechen + ACPI-Gerät (_HID, I2C-Adresse, GPIO-IRQ). AML-Interpreter existiert (kernel/acpi/aml*.fi). HP-6 Stand: Regler-Suche wacht LPSS-Funktion auf (D0, MEM, DesignWare-Reset bei +0x204), nur Quelltext, ungemessen (ACPI-Modus ohne PCI-Funktion wuerde nicht gefunden) |
 | Touchscreen | ROT | M | wie Touchpad (I2C-HID) oder USB-HID; Multitouch-Auswertung fehlt |
-| Netz per USB-Dongle/Tethering | GELB | M | usbnet ECM da; RNDIS/NCM-Treiber fehlt (Nachrichten fertig, Gate usbnet 71/0); Realtek-/ASIX-Dongles je ein Treiber |
+| Netz per USB-Dongle/Tethering | GELB | S | ECM, RNDIS (Android-Tethering), NCM in usbnet.fi verdrahtet; QEMU-Gates usbecm/usbrndis, NCM nur host-/Verdrahtungstest. Echte Dongles (Realtek/ASIX) ohne Treiber, nichts am echten Geraet gemessen |
 | WLAN Intel 8265 | ROT | L | iwl.fi/lib/wlan zielen auf AX200/AX201 (CNVi, Context-Info). 8265 = Familie 8000 (altes FH-Chunk-Laden, ucode `iwlwifi-8265-*`) = **anderer** Ladeweg. Praktisch zuerst USB-Netz |
 | Bluetooth (Intel 8265 BT, USB) | ROT | L | r6; HCI + Firmware-Blob |
 | Audio HDA | GELB | M | hda.fi Ausgabe+Mikro gated; Codec des HP unbekannt (Pin-Konfig/Verbs), Jack-Erkennung r624 |
