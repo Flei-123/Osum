@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-import re, sys
+import os, re, sys
 
 serial, outdir = sys.argv[1:3]
 raw = open(serial, "rb").read().decode("latin1")
 NAV = re.compile(r"^settings: nav route=(\S+) page=(\d+) crumbs=(\d+) back=(\d) fwd=(\d) up=(\d) depth=(\d+) side=(\d+) hits=(\d+) rawkeys=(\d+)$")
+CTL = re.compile(r"^settings: controls page=(\d+) n=(\d+)$", re.M)
+BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "controls.base")
+LIMIT = 8
 RECT = re.compile(r"settings: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 PERS = "settings://personalization"
 THEMES = "settings://personalization/themes"
@@ -63,6 +66,25 @@ def judge(txt, quiet=False):
         ok(want in names, "rect %s reported" % want)
     tabs = [n for n in names if re.fullmatch(r"tab[a-z]", n)]
     ok(len(tabs) >= 18, "sidebar tabs reported (%d)" % len(tabs))
+    ctl = {}
+    for m in CTL.finditer(txt):
+        ctl[int(m.group(1))] = max(ctl.get(int(m.group(1)), 0), int(m.group(2)))
+    ok(len(ctl) >= 2, "controls per page reported (%d pages)" % len(ctl))
+    base = {}
+    if os.path.exists(BASE):
+        for ln in open(BASE):
+            w = ln.split()
+            if len(w) == 2 and w[0].isdigit():
+                base[int(w[0])] = int(w[1])
+    for p in sorted(ctl):
+        cap = base.get(p, LIMIT)
+        ok(ctl[p] <= cap, "page %d: %d controls <= %d (%s)" % (p, ctl[p], cap, "ratchet baseline" if p in base else "limit"))
+    if os.environ.get("NAVSHELL_CONTROLS_UPDATE") and not quiet:
+        merged = dict(base)
+        for p, n in ctl.items():
+            if p not in merged or n < merged[p]:
+                merged[p] = n if p in merged else max(n, 0)
+        open(BASE, "w").write("".join("%d %d\n" % (p, merged[p]) for p in sorted(merged)))
     ok(not re.search(r"ABSTURZ|EXCEPTION|panic", txt), "no crash lines")
     return results
 
@@ -84,10 +106,12 @@ mut = {
     "raw keys": raw.replace("rawkeys=0", "rawkeys=2"),
     "no crumbs": raw.replace("crumbs=3", "crumbs=1"),
     "no search": re.sub(r"hits=[1-9]", "hits=0", raw),
+    "no controls": "\n".join(l for l in raw.splitlines() if not l.startswith("settings: controls ")),
+    "more controls": re.sub(r"(settings: controls page=\d+ n=)\d+", r"\g<1>99", raw),
 }
 red = 0
 for k, t in mut.items():
-    if any(not c for c, _ in judge(t)):
+    if any(not c for c, _ in judge(t, True)):
         red += 1
     else:
         print("  FAIL  counter-proof '%s' stayed green" % k)
