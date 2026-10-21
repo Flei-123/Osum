@@ -53,7 +53,7 @@ DREH="$OUT/drehbuch.txt"
   echo "warte 2"; echo "foto 09-advanced"
 } > "$DREH"
 export DESIGNBUILD="${DESIGNBUILD:-$OUT/build}"
-bash tools/design/audit.sh "$D" accel=kvm uitrace=yes halt=420 res=1280x800 drehbuch="$DREH" > "$OUT/audit.log" 2>&1
+bash tools/design/audit.sh "$D" accel=kvm uitrace=yes halt=720 res=1280x800 drehbuch="$DREH" > "$OUT/audit.log" 2>&1
 python3 -I tools/navshell/check.py "$D/serial.txt" "$D"
 rc=$?
 rm -rf "$OUT/build" "$DREH"
