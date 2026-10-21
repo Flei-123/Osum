@@ -52,6 +52,7 @@ DREH="$OUT/drehbuch.txt"
   echo "taste ret"; echo "warteneu settings: nav route=settings://system/power page=16 || 30"
   echo "warte 2"; echo "foto 07-result"
 } > "$DREH"
+export AUDIT_TIMEOUT="${AUDIT_TIMEOUT:-1700}"
 export DESIGNBUILD="${DESIGNBUILD:-$OUT/build}"
 bash tools/design/audit.sh "$D" accel=kvm uitrace=yes halt=720 res=1280x800 drehbuch="$DREH" > "$OUT/audit.log" 2>&1
 python3 -I tools/navshell/check.py "$D/serial.txt" "$D"

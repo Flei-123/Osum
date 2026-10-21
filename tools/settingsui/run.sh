@@ -16,6 +16,7 @@ cd "$(dirname "$0")/../.."
 OUT=${1:-}
 if [ -z "$OUT" ]; then OUT=$(mktemp -d); trap 'rm -rf "$OUT" "$OUT-build"' EXIT; fi
 shift || true
+export AUDIT_TIMEOUT="${AUDIT_TIMEOUT:-1700}"
 export DESIGNBUILD="${DESIGNBUILD:-$OUT-build}"
 DREH="$OUT-drehbuch.txt"
 # the start button sits 20 px above the bottom edge of the screen (default 1280x800)
