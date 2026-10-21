@@ -376,6 +376,12 @@ check_text() { # log ppm mark
     # gets when comparing a glyph against a piece of desktop.
     local gline gx gy
     gline=$(grep -a "^taskbar: geom " "$log" | tail -1)
+    if [ -z "$gline" ]; then
+        # r1350: no intact `taskbar: geom` record -> the text cannot be placed; saying so is
+        # better than comparing every glyph against the wrong piece of the picture (offset 0,0)
+        bad "the taskbar reported no intact 'taskbar: geom' record -- '$mark' cannot be placed"
+        return
+    fi
     gx=$(printf '%s' "$gline" | grep -oE ' x=[0-9]+' | head -1 | sed 's/.*=//')
     gy=$(printf '%s' "$gline" | grep -oE ' y=[0-9]+' | head -1 | sed 's/.*=//')
     gx=${gx:-0}; gy=${gy:-0}
