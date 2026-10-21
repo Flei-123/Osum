@@ -6,24 +6,25 @@ Abschnitte 1–2 sind aus vorhandenen Messungen zusammengetragen (**nichts neu g
 
 **Ampel:** GRÜN = Gate belegt und nichts Offenes im Alltag · GELB = Gate grün, aber Alltag-Lücke oder nur in QEMU belegt · ROT = fehlt oder bekannt kaputt.
 **Aufwand:** S = Stunden · M = ca. 1 Tag · L = mehrere Tage / Umbau. (Schätzung des Schreibers, außer wo eine Quelle genannt ist.)
+**Plan-IDs:** Arbeitspakete stehen in `docs/PLAN-DESKTOP-2026Q4.md` (ID-Karte Abschnitt 15), GPU in `docs/GPU-PLAN.md` (GPU-1..6 = r1374–r1379), Einstellungen in `docs/SETTINGS-REDESIGN.md` (SET-1..13 = r1434–r1446; ersetzt SET-1..4 = r1395–r1398 des Masterplans). Diese Datei dupliziert keine Roadmap-Punkte, sie bewertet nur den Ist-Zustand.
 **Wichtig:** fast alle Gates laufen in **QEMU/KVM**. Echte Hardware: nur ein Dell 9020 (B-005 „nur eine Maschine gemessen“), der Laptop ist offline.
 
 ---
 
 ## 1. Übersicht nach Bereich
 
-| Bereich | Ampel | Aufwand bis grün | Kurzbegründung |
-|---|---|---|---|
-| Desktop/Shell | GELB | M–L | Gates grün, aber **PRIO0: Taskleiste in der Boss-VM leer** (Ursache offen) |
-| Apps | GELB | L | Kern-Apps gated; **kein Video, kein Office**; Explorer-Popups offen |
-| Netz (Kabel) | GELB | M | TLS 1.2 + DHCP-Erneuerung grün; kein IPv6, Boss-VM-DNS ungeklärt |
-| WLAN | ROT | L | kein Funktreiber; nur Vorarbeit ohne Hardware |
-| Audio | GELB | M | HDA Ausgabe+Mikrofon gated; HDMI-Ton, USB-Audio, Ton-Einstellungen fehlen |
-| Suspend (S3) | GELB | M | in QEMU grün; am echten Gerät **unmeasured**; Deckel/Taste fehlt |
-| Installer/Update | GELB | M | Installer + OTA gated; Installer 7 min (Ziel < 3), Boss-VM-Update nie ausgeführt |
-| Stabilität | GELB | M | QEMU: 0 Abstürze in Serien; VBox: Hänger/99-%-Burn, Gate-Rot auf altem main |
-| Performance vs. Mint | GELB | M | RAM/Image/Latenz deutlich besser; Boot und VBox-Idle-CPU nicht |
-| Linux-Apps (Firefox) | ROT | L | Unterbau 710/717 PASS, foot 12/0, GTK4 16/3; **Firefox baut nicht ins Abbild** (libxul 148 MiB > OFS-Grenze 130 MiB) |
+| Bereich | Ampel | Aufwand bis grün | Kurzbegründung | Plan-IDs |
+|---|---|---|---|---|
+| Desktop/Shell | GELB | M–L | Gates grün, aber **PRIO0: Taskleiste in der Boss-VM leer** (Ursache offen) | STAB-1..5, SHELL-1..4 |
+| Apps | GELB | L | Kern-Apps gated; **kein Video, kein Office**; Explorer-Popups offen | TM T1-S0..S6, TK-1..2 |
+| Netz (Kabel) | GELB | M | TLS 1.2 + DHCP-Erneuerung grün; kein IPv6, Boss-VM-DNS ungeklärt | — |
+| WLAN | ROT | L | kein Funktreiber; nur Vorarbeit ohne Hardware | — |
+| Audio | GELB | M | HDA Ausgabe+Mikrofon gated; HDMI-Ton, USB-Audio, Ton-Einstellungen fehlen | — |
+| Suspend (S3) | GELB | M | in QEMU grün; am echten Gerät **unmeasured**; Deckel/Taste fehlt | — |
+| Installer/Update | GELB | M | Installer + OTA gated; Installer 7 min (Ziel < 3), Boss-VM-Update nie ausgeführt | UPD-1..5 |
+| Stabilität | GELB | M | QEMU: 0 Abstürze in Serien; VBox: Hänger/99-%-Burn, Gate-Rot auf altem main | STAB-1..5, ENG-1..8 |
+| Performance vs. Mint | GELB | M | RAM/Image/Latenz deutlich besser; Boot und VBox-Idle-CPU nicht | BENCH-1..2, MON-1..5 |
+| Linux-Apps (Firefox) | ROT | L | Unterbau 710/717 PASS, foot 12/0, GTK4 16/3; **Firefox baut nicht ins Abbild** (libxul 148 MiB (155 673 104 B) > OFS-Grenze 130 MiB) | LA-1..9, GPU-1..6 |
 
 ---
 
@@ -171,7 +172,7 @@ Messlage: gemessen am 21.10. auf main 280e1fa6 (QEMU/KVM) von den Workern M1 (`r
 | GPU/DRM | kein `/dev/dri`, kein `/sys/class/drm`, kein dmabuf; Firefox fällt auf Software-WebRender zurück (kein Blocker). GTK4-GL/Qt Quick/Vulkan nur mit Software-Renderer (`GSK_RENDERER=cairo`) | M1 | GELB |
 | Dateischreiben nach /tmp | 3115 KiB/s (Ziel ≥ 10000) | Metrik | GELB |
 
-**Widerspruch, offen:** M2 nennt `MAX_TASKS=32` (28 Fäden) und „fd-Tabelle je Faden kopiert“ als Blocker (aus älteren Docs). M1 misst `t_limits` und `t_threads` **ohne FAIL**, die Kennzahl sagt Fäden ≥ 64. Vor Arbeit an LA-2 (r1367) per `t_limits` neu nachmessen.
+**Widerspruch, offen:** M2 nennt `MAX_TASKS=32` (28 Fäden) und „fd-Tabelle je Faden kopiert“ als Blocker (aus älteren Docs). M1 misst `t_limits` und `t_threads` **ohne FAIL**, die Kennzahl sagt Fäden ≥ 64. Widerspruch M1/M2 ist als LA-7 (r1416) im Masterplan erfasst. Vor Arbeit an LA-2 (r1367) per `t_limits` neu nachmessen.
 
 ### 3.2 Blocker für Firefox, nach Reihenfolge (M2) mit Roadmap
 
@@ -179,6 +180,7 @@ Messlage: gemessen am 21.10. auf main 280e1fa6 (QEMU/KVM) von den Workern M1 (`r
 |---|---|---|---|
 | 1 | OFS-v3 max. Dateigröße 130 MiB < `libxul` 148 MiB (4. Indirektionsstufe oder Extents; fs.fi + mkfs.py + fsck + Gate) | L | r1366 |
 | 2 | Aufgabentafel 32 (Firefox: 15 Fäden + contentproc + glxtest) — Messwert widerspricht, siehe oben | L (falls bestätigt) | r1367 |
+| 2b | `CLONE_FILES`: fd-Tabelle je Faden kopiert statt geteilt (Firefox/glib öffnen in einem Faden, benutzen im anderen); M2 stuft L ein, laut M1 `t_threads` ohne FAIL → nachmessen | M–L (falls bestätigt) | LINUX-COMPAT-OPEN #1, LA-7 (r1416) |
 | 3 | glib-Hauptschleife (inotify EBADF nach `g_spawn`, SIGUSR1, Sprung auf Nicht-Code-Seite) — GTK3 ist Firefox-UI | M | r796 |
 | 4 | Speicher: `libxul` privat kopiert (155 MB), kein Demand-Paging für Dateimappings, `MAP_NORESERVE`/`PROT_NONE`-Reserven — **ungemessen** | M | — |
 | 5 | procfs: `/proc/self/mountinfo`, `cgroup`, `maps` mit Namen, `/proc/stat` im Linux-Format | S–M | r1370, r1372, r934 |
