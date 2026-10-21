@@ -1,0 +1,337 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/netui/netui.fi -- the logic behind the Wi-Fi / USB network pages (LW-5). Pure data and arithmetic,
+// no hardware, no drawing: the Settings pages (settings://network/wifi, settings://network/usb) only feed
+// it and draw what it answers.
+//
+//   bars          signal strength (dBm) -> 0..4 bars
+//   sec_*         beacon security kind -> label class, "needs a password", "weak"
+//   conn_class    connection machine state (wlan.state Z_*) -> what the page shows
+//   list_*        scan results: add, drop duplicates, sort by signal (known first on ties, hidden last)
+//   pw_*          password entry machine: 8..63 printable ASCII, backspace, enter, escape
+//
+// HONEST LIMIT: nothing in the kernel calls this yet (there is no Wi-Fi driver on the target laptop yet, see
+// docs/PLAN-LAPTOP-WLAN.md). It is measured on the host by tools/netui/run.sh.
+
+import wlan.state
+import wlan.beacon
+
+export {
+    bars, sec_class, sec_weak, sec_needs_password, conn_class,
+    list_clear, list_add, list_count, list_sort, list_src, list_rssi, list_bars, list_sec,
+    list_ssid_len, list_ssid_byte, list_known, list_hidden,
+    pw_clear, pw_key, pw_len, pw_byte, pw_state, pw_can_submit, pw_missing,
+    BARS_MAX, MAXN, PW_MIN, PW_MAX,
+    SC_OPEN, SC_WEP, SC_WPA, SC_WPA2, SC_MIXED, SC_WPA3, SC_OWE, SC_UNKNOWN,
+    CS_OFF, CS_SCANNING, CS_CONNECTING, CS_KEYS, CS_CONNECTED, CS_FAILED,
+    PW_EMPTY, PW_SHORT, PW_OK,
+    PK_NONE, PK_ADDED, PK_DELETED, PK_SUBMIT, PK_REJECT, PK_CANCEL, PK_FULL
+}
+
+const BARS_MAX: u64 = 4
+const MAXN: u64 = 16
+const PW_MIN: u64 = 8
+const PW_MAX: u64 = 63
+
+// security classes (same numbers as the beacon's SELF_*)
+const SC_OPEN: u64 = 0
+const SC_WEP: u64 = 1
+const SC_WPA: u64 = 2
+const SC_WPA2: u64 = 3
+const SC_MIXED: u64 = 4
+const SC_WPA3: u64 = 5
+const SC_OWE: u64 = 6
+const SC_UNKNOWN: u64 = 7
+
+// what the connection row shows
+const CS_OFF: u64 = 0
+const CS_SCANNING: u64 = 1
+const CS_CONNECTING: u64 = 2   // found / authenticating / associating
+const CS_KEYS: u64 = 3         // key exchange (messages 1..3)
+const CS_CONNECTED: u64 = 4
+const CS_FAILED: u64 = 5
+
+const PW_EMPTY: u64 = 0
+const PW_SHORT: u64 = 1
+const PW_OK: u64 = 2
+
+const PK_NONE: u64 = 0      // ignored (control byte, unknown)
+const PK_ADDED: u64 = 1
+const PK_DELETED: u64 = 2
+const PK_SUBMIT: u64 = 3    // Enter with a valid password
+const PK_REJECT: u64 = 4    // Enter while the password is too short
+const PK_CANCEL: u64 = 5    // Escape: entry cleared
+const PK_FULL: u64 = 6      // already PW_MAX characters, the new one was refused
+
+const UNKNOWN_DBM: i64 = 0 - 127
+
+// ---------------------------------------------------------------------------
+// signal -> bars
+// ---------------------------------------------------------------------------
+
+// rssi 0 (or anything above 0) is "no measurement": the beacon parser leaves it 0 until a driver sets it.
+fn bars(rssi: i64) -> u64 {
+    if rssi >= 0 { return 0 }
+    if rssi >= 0 - 55 { return 4 }
+    if rssi >= 0 - 65 { return 3 }
+    if rssi >= 0 - 75 { return 2 }
+    if rssi >= 0 - 85 { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// security
+// ---------------------------------------------------------------------------
+
+fn sec_class(kind: u64) -> u64 {
+    if kind == beacon.SELF_OPEN { return SC_OPEN }
+    if kind == beacon.SELF_WEP { return SC_WEP }
+    if kind == beacon.SELF_WPA { return SC_WPA }
+    if kind == beacon.SELF_WPA2 { return SC_WPA2 }
+    if kind == beacon.SELF_UEBERGANG { return SC_MIXED }
+    if kind == beacon.SELF_WPA3 { return SC_WPA3 }
+    if kind == beacon.SELF_OWE { return SC_OWE }
+    return SC_UNKNOWN
+}
+
+// Networks the page warns about (and the scan already refuses to join): open, WEP, WPA1. OWE is encrypted.
+// An unknown kind is treated as weak: never claim what we do not know.
+fn sec_weak(cls: u64) -> bool {
+    return cls == SC_OPEN || cls == SC_WEP || cls == SC_WPA || cls == SC_UNKNOWN
+}
+
+fn sec_needs_password(cls: u64) -> bool {
+    return cls == SC_WEP || cls == SC_WPA || cls == SC_WPA2 || cls == SC_MIXED || cls == SC_WPA3
+}
+
+// ---------------------------------------------------------------------------
+// connection state
+// ---------------------------------------------------------------------------
+
+fn conn_class(z: u64) -> u64 {
+    if z == state.Z_OFF { return CS_OFF }
+    if z == state.Z_SUCHT { return CS_SCANNING }
+    if z == state.Z_GEFUNDEN || z == state.Z_AUTH || z == state.Z_ASSOZ { return CS_CONNECTING }
+    if z == state.Z_M1 || z == state.Z_M2 || z == state.Z_M3 { return CS_KEYS }
+    if z == state.Z_VERBUNDEN { return CS_CONNECTED }
+    return CS_FAILED
+}
+
+// ---------------------------------------------------------------------------
+// scan list
+// ---------------------------------------------------------------------------
+
+static mut l_ssid: [u8; 512] = [0 as u8; 512]   // 16 x 32
+static mut l_slen: [u64; 16] = [0 as u64; 16]
+static mut l_rssi: [i64; 16] = [0 as i64; 16]
+static mut l_sec: [u64; 16] = [0 as u64; 16]
+static mut l_known: [u64; 16] = [0 as u64; 16]
+static mut l_ord: [u64; 16] = [0 as u64; 16]
+static mut l_n: u64 = 0
+static mut l_sorted: u64 = 1
+
+fn list_clear() {
+    l_n = 0
+    l_sorted = 1
+}
+
+fn ssid_at(i: u64, k: u64) -> u8 {
+    return l_ssid[(i * 32 + k) as usize]
+}
+
+fn is_hidden_idx(i: u64) -> bool {
+    let n: u64 = l_slen[(i) as usize]
+    if n == 0 { return true }
+    var k: u64 = 0
+    while k < n {
+        if ssid_at(i, k) != 0 as u8 { return false }
+        k = k + 1
+    }
+    return true
+}
+
+fn same_ssid(i: u64, p: u64, n: u64) -> bool {
+    if l_slen[(i) as usize] != n { return false }
+    var k: u64 = 0
+    while k < n {
+        if ssid_at(i, k) != __mmio_read8((p + k) as *mut u8) { return false }
+        k = k + 1
+    }
+    return true
+}
+
+fn rssi_eff(r: i64) -> i64 {
+    if r >= 0 { return UNKNOWN_DBM }
+    return r
+}
+
+// One scan result. The same visible name with the same security kind is one network: the stronger signal
+// wins (one name often has several access points). Returns false when the list is full or the name is too long.
+fn list_add(ssid: u64, slen: u64, rssi: i64, sec_kind: u64, known: u64) -> bool {
+    if slen > 32 { return false }
+    let cls: u64 = sec_class(sec_kind)
+    var i: u64 = 0
+    while i < l_n {
+        if slen > 0 && l_sec[(i) as usize] == cls && same_ssid(i, ssid, slen) {
+            let a: i64 = rssi_eff(rssi)
+            let b: i64 = rssi_eff(l_rssi[(i) as usize])
+            if a > b { l_rssi[(i) as usize] = rssi }
+            if known != 0 { l_known[(i) as usize] = 1 }
+            l_sorted = 0
+            return true
+        }
+        i = i + 1
+    }
+    if l_n >= MAXN { return false }
+    var k: u64 = 0
+    while k < slen {
+        l_ssid[(l_n * 32 + k) as usize] = __mmio_read8((ssid + k) as *mut u8)
+        k = k + 1
+    }
+    l_slen[(l_n) as usize] = slen
+    l_rssi[(l_n) as usize] = rssi
+    l_sec[(l_n) as usize] = cls
+    l_known[(l_n) as usize] = 0
+    if known != 0 { l_known[(l_n) as usize] = 1 }
+    l_n = l_n + 1
+    l_sorted = 0
+    return true
+}
+
+// Does entry a come strictly before entry b? Visible before hidden, stronger signal first (no
+// measurement counts as the weakest), known networks first on a tie. Equal entries keep their arrival order.
+fn before(a: u64, b: u64) -> bool {
+    let ha: bool = is_hidden_idx(a)
+    let hb: bool = is_hidden_idx(b)
+    if ha != hb { return hb }
+    let ra: i64 = rssi_eff(l_rssi[(a) as usize])
+    let rb: i64 = rssi_eff(l_rssi[(b) as usize])
+    if ra != rb { return ra > rb }
+    let ka: u64 = l_known[(a) as usize]
+    let kb: u64 = l_known[(b) as usize]
+    if ka != kb { return ka > kb }
+    return false
+}
+
+fn list_sort() {
+    var i: u64 = 0
+    while i < l_n {
+        l_ord[(i) as usize] = i
+        i = i + 1
+    }
+    i = 1
+    while i < l_n {
+        let v: u64 = l_ord[(i) as usize]
+        var j: u64 = i
+        while j > 0 && before(v, l_ord[(j - 1) as usize]) {
+            l_ord[(j) as usize] = l_ord[(j - 1) as usize]
+            j = j - 1
+        }
+        l_ord[(j) as usize] = v
+        i = i + 1
+    }
+    l_sorted = 1
+}
+
+fn ensure_sorted() {
+    if l_sorted == 0 { list_sort() }
+}
+
+fn list_count() -> u64 { return l_n }
+
+// Accessors take the DISPLAY rank (0 = strongest). An out-of-range rank answers 0 / false.
+fn list_src(rank: u64) -> u64 {
+    ensure_sorted()
+    if rank >= l_n { return 0 }
+    return l_ord[(rank) as usize]
+}
+fn list_rssi(rank: u64) -> i64 {
+    if rank >= l_n { return 0 }
+    return l_rssi[(list_src(rank)) as usize]
+}
+fn list_bars(rank: u64) -> u64 {
+    if rank >= l_n { return 0 }
+    return bars(l_rssi[(list_src(rank)) as usize])
+}
+fn list_sec(rank: u64) -> u64 {
+    if rank >= l_n { return SC_UNKNOWN }
+    return l_sec[(list_src(rank)) as usize]
+}
+fn list_ssid_len(rank: u64) -> u64 {
+    if rank >= l_n { return 0 }
+    return l_slen[(list_src(rank)) as usize]
+}
+fn list_ssid_byte(rank: u64, k: u64) -> u8 {
+    if rank >= l_n || k >= 32 { return 0 as u8 }
+    return ssid_at(list_src(rank), k)
+}
+fn list_known(rank: u64) -> bool {
+    if rank >= l_n { return false }
+    return l_known[(list_src(rank)) as usize] == 1
+}
+fn list_hidden(rank: u64) -> bool {
+    if rank >= l_n { return false }
+    return is_hidden_idx(list_src(rank))
+}
+
+// ---------------------------------------------------------------------------
+// password entry
+// ---------------------------------------------------------------------------
+
+static mut p_buf: [u8; 64] = [0 as u8; 64]
+static mut p_n: u64 = 0
+
+fn pw_clear() {
+    var i: u64 = 0
+    while i < 64 {
+        p_buf[(i) as usize] = 0 as u8
+        i = i + 1
+    }
+    p_n = 0
+}
+
+fn pw_len() -> u64 { return p_n }
+
+fn pw_byte(i: u64) -> u8 {
+    if i >= p_n { return 0 as u8 }
+    return p_buf[(i) as usize]
+}
+
+fn pw_state() -> u64 {
+    if p_n == 0 { return PW_EMPTY }
+    if p_n < PW_MIN { return PW_SHORT }
+    return PW_OK
+}
+
+fn pw_can_submit() -> bool { return pw_state() == PW_OK }
+
+// how many more characters until the password is long enough (0 once it is)
+fn pw_missing() -> u64 {
+    if p_n >= PW_MIN { return 0 }
+    return PW_MIN - p_n
+}
+
+// One key event. Printable ASCII 32..126 is a character (WPA passphrases are ASCII), 8 and 127 delete,
+// 10 and 13 submit, 27 cancels. The entry never grows past PW_MAX and a submit needs PW_MIN..PW_MAX.
+fn pw_key(ch: u64) -> u64 {
+    if ch >= 32 && ch <= 126 {
+        if p_n >= PW_MAX { return PK_FULL }
+        p_buf[(p_n) as usize] = ch as u8
+        p_n = p_n + 1
+        return PK_ADDED
+    }
+    if ch == 8 || ch == 127 {
+        if p_n == 0 { return PK_NONE }
+        p_n = p_n - 1
+        p_buf[(p_n) as usize] = 0 as u8
+        return PK_DELETED
+    }
+    if ch == 10 || ch == 13 {
+        if pw_can_submit() { return PK_SUBMIT }
+        return PK_REJECT
+    }
+    if ch == 27 {
+        pw_clear()
+        return PK_CANCEL
+    }
+    return PK_NONE
+}

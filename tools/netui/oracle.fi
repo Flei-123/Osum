@@ -1,0 +1,227 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/netui/oracle.fi -- host oracle for lib/netui/netui.fi (LW-5). stdin script, one command per line:
+//   b <rssi>                      -> "b <bars>"
+//   s <kind>                      -> "s cls=<c> weak=<0|1> pw=<0|1>"
+//   c <state>                     -> "c <connection class>"
+//   L                             clear the scan list (prints "L ok")
+//   A <ssid hex|-> <rssi> <kind> <known 0|1>   add a result (prints "A ok" or "A full")
+//   P                             sorted list: "P <n>" then "r <rank> <ssid hex|-> <rssi> <bars> <cls> <known> <hidden> <src>"
+//   W                             clear the password entry ("W ok")
+//   K <char code>                 key event -> "K pk=<k> n=<len> st=<state> miss=<m> submit=<0|1>"
+//   Q                             -> "Q <password hex|->"
+import std.rt
+import std.io
+import netui.netui
+
+static mut txtb: [u8; 4096] = [0; 4096]
+static mut tlen: usize = 0
+static mut sb: [u8; 64] = [0; 64]
+
+fn tch(c: u64) {
+    if tlen < 4000 {
+        txtb[tlen] = (c & 255) as u8
+        tlen = tlen + 1
+    }
+}
+fn tlit(w: str) {
+    var i: usize = 0
+    while i < w.n {
+        tch(rt.ld8(w.p as u64, i) as u64)
+        i = i + 1
+    }
+}
+fn tnum(v: u64) {
+    if v >= 10 { tnum(v / 10) }
+    tch(48 + (v % 10))
+}
+fn tsigned(v: i64) {
+    if v < 0 {
+        tch(45)
+        tnum((0 - v) as u64)
+    } else {
+        tnum(v as u64)
+    }
+}
+fn temit() {
+    io.print_line_bytes((&txtb[0]) as u64, tlen)
+    tlen = 0
+}
+
+fn hexval(c: u64) -> i64 {
+    if c >= 48 && c <= 57 { return (c - 48) as i64 }
+    if c >= 97 && c <= 102 { return (c - 87) as i64 }
+    return -1
+}
+
+// hex field into sb; "-" = empty. Returns the byte count or -1.
+fn field_hex(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 { i = i + 1 }
+    *at = i
+    let n: usize = i - start
+    if n == 0 { return -1 }
+    if n == 1 && rt.ld8(line, start) == 45 as u8 { return 0 }
+    if n % 2 != 0 || n / 2 > 40 { return -1 }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hexval(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hexval(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 { return -1 }
+        sb[o] = ((hi * 16 + lo) & 255) as u8
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+// signed decimal; returns -99999 when malformed
+fn field_num(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    var neg: bool = false
+    if i < len && rt.ld8(line, i) == 45 as u8 {
+        neg = true
+        i = i + 1
+    }
+    let start: usize = i
+    var v: i64 = 0
+    while i < len && rt.ld8(line, i) >= 48 as u8 && rt.ld8(line, i) <= 57 as u8 {
+        v = v * 10 + ((rt.ld8(line, i) as i64) - 48)
+        i = i + 1
+    }
+    if i == start { return -99999 }
+    *at = i
+    if neg { return 0 - v }
+    return v
+}
+
+fn thex_byte(v: u64) {
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102]
+    tch(d[((v >> 4) & 15) as usize] as u64)
+    tch(d[(v & 15) as usize] as u64)
+}
+
+fn run_line(line: u64, len: usize) {
+    let c: u8 = rt.ld8(line, 0)
+    var at: usize = 1
+    if c == 98 as u8 {            // b
+        let r: i64 = field_num(line, len, &at)
+        tlit("b ")
+        tnum(netui.bars(r))
+        temit()
+    } else if c == 115 as u8 {    // s
+        let k: i64 = field_num(line, len, &at)
+        let cls: u64 = netui.sec_class(k as u64)
+        tlit("s cls=")
+        tnum(cls)
+        tlit(" weak=")
+        if netui.sec_weak(cls) { tch(49) } else { tch(48) }
+        tlit(" pw=")
+        if netui.sec_needs_password(cls) { tch(49) } else { tch(48) }
+        temit()
+    } else if c == 99 as u8 {     // c
+        let z: i64 = field_num(line, len, &at)
+        tlit("c ")
+        tnum(netui.conn_class(z as u64))
+        temit()
+    } else if c == 76 as u8 {     // L
+        netui.list_clear()
+        tlit("L ok")
+        temit()
+    } else if c == 65 as u8 {     // A
+        let n: i64 = field_hex(line, len, &at)
+        let rssi: i64 = field_num(line, len, &at)
+        let kind: i64 = field_num(line, len, &at)
+        let known: i64 = field_num(line, len, &at)
+        if n < 0 || rssi == -99999 || kind < 0 || known < 0 {
+            tlit("A bad")
+        } else if netui.list_add((&sb[0]) as u64, n as u64, rssi, kind as u64, known as u64) {
+            tlit("A ok")
+        } else {
+            tlit("A full")
+        }
+        temit()
+    } else if c == 80 as u8 {     // P
+        netui.list_sort()
+        let n: u64 = netui.list_count()
+        tlit("P ")
+        tnum(n)
+        temit()
+        var i: u64 = 0
+        while i < n {
+            tlit("r ")
+            tnum(i)
+            tch(32)
+            let sl: u64 = netui.list_ssid_len(i)
+            if sl == 0 { tch(45) }
+            var k: u64 = 0
+            while k < sl {
+                thex_byte(netui.list_ssid_byte(i, k) as u64)
+                k = k + 1
+            }
+            tch(32)
+            tsigned(netui.list_rssi(i))
+            tch(32)
+            tnum(netui.list_bars(i))
+            tch(32)
+            tnum(netui.list_sec(i))
+            tch(32)
+            if netui.list_known(i) { tch(49) } else { tch(48) }
+            tch(32)
+            if netui.list_hidden(i) { tch(49) } else { tch(48) }
+            tch(32)
+            tnum(netui.list_src(i))
+            temit()
+            i = i + 1
+        }
+    } else if c == 87 as u8 {     // W
+        netui.pw_clear()
+        tlit("W ok")
+        temit()
+    } else if c == 75 as u8 {     // K
+        let ch: i64 = field_num(line, len, &at)
+        let pk: u64 = netui.pw_key(ch as u64)
+        tlit("K pk=")
+        tnum(pk)
+        tlit(" n=")
+        tnum(netui.pw_len())
+        tlit(" st=")
+        tnum(netui.pw_state())
+        tlit(" miss=")
+        tnum(netui.pw_missing())
+        tlit(" submit=")
+        if netui.pw_can_submit() { tch(49) } else { tch(48) }
+        temit()
+    } else if c == 81 as u8 {     // Q
+        tlit("Q ")
+        if netui.pw_len() == 0 { tch(45) }
+        var i: u64 = 0
+        while i < netui.pw_len() {
+            thex_byte(netui.pw_byte(i) as u64)
+            i = i + 1
+        }
+        temit()
+    } else {
+        tlit("? bad command")
+        temit()
+    }
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) { return 1 }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var at: usize = 0
+    while at < n {
+        var e: usize = at
+        while e < n && rt.ld8(p, e) != 10 as u8 { e = e + 1 }
+        var len: usize = e - at
+        while len > 0 && rt.ld8(p, at + len - 1) == 13 as u8 { len = len - 1 }
+        if len > 0 { run_line(p + at as u64, len) }
+        at = e + 1
+    }
+    rt.buf_free(&inp)
+    return 0
+}

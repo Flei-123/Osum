@@ -136,7 +136,8 @@ def main():
         E(grp(3, 2, gB, corrupt=True)),         # 13 bad MIC group frame
         S,
         E(m1),
-        E(m3(2, 1, gA, corrupt=True)),          # 14 message 3, bad MIC (separate session: connect.fi aborts the run)
+        E(m3(2, 1, gA, corrupt=True)),          # 14 message 3, bad MIC: dropped, handshake must survive
+        E(m3(2, 1, gA)),                        # 15 the real message 3 afterwards
     ]
     out = run(binpath, script)
     check("oracle printed one line per command", len(out) == len(script))
@@ -146,7 +147,11 @@ def main():
           r[1].get("rc") == "-1" and r[1].get("kind") == "5" and r[1].get("skeys") == "0")
     check("message 1 -> PTK length 48, kind 1", r[2].get("rc") == "48" and r[2].get("kind") == "1")
     check("message 3 with bad MIC refused, no key installed, no GTK remembered",
-          r[-1].get("rc") == "-1" and r[-1].get("kind") == "3" and r[-1].get("skeys") == "0" and r[-1].get("haveg") == "0")
+          r[-2].get("rc") == "-1" and r[-2].get("kind") == "3" and r[-2].get("skeys") == "0" and r[-2].get("haveg") == "0")
+    check("forged message 3 does NOT abort the handshake (state stays 6 = message 2 sent, not 9 = error)",
+          r[-2].get("st") == "6")
+    check("the real message 3 after the forged one completes the handshake (rc 1, 2 keys, state 8, GTK remembered)",
+          r[-1].get("rc") == "1" and r[-1].get("skeys") == "2" and r[-1].get("st") == "8" and r[-1].get("haveg") == "1")
     check("message 3 accepted (PTK model == library PTK): rc 1, 2 keys, connected (state 8)",
           r[3].get("rc") == "1" and r[3].get("skeys") == "2" and r[3].get("st") == "8")
     check("message 3 GTK remembered for the rekey logic (id 1, octets)",
