@@ -163,7 +163,7 @@ has "$TMPD/m3.txt" "version=3 bmblocks=32 isize=256 dirent=264 namelen=256" \
 mf2=$(grep -oa 'maxfile=[0-9]*' "$TMPD/m2.txt" | cut -d= -f2)
 mf3=$(grep -oa 'maxfile=[0-9]*' "$TMPD/m3.txt" | cut -d= -f2)
 num "groesste Datei in Fassung 2 (Oktette)" "$mf2" eq 2134016
-num "groesste Datei in Fassung 3 (Oktette)" "$mf3" eq 136351744
+num "groesste Datei in Fassung 3 (Oktette)" "$mf3" eq 8726286336
 # Zwei gleiche Laeufe geben dasselbe Abbild -- die Zusage aus K15, und
 # sie gilt fuer die neue Fassung genauso.
 python3 tools/osum/mkfs.py build "$TMPD/v3b.img" 131072 --v3 --inodes=1024 \

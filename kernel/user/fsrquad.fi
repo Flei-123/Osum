@@ -1,0 +1,160 @@
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+
+export { u_start }
+
+static mut buf: [u8; 512] = [0 as u8; 512];
+static mut idx: [u64; 8] = [0 as u64; 8];
+
+fn report(name: u64, value: u64) {
+    var head: [u8; 10] = "fsrquad: \0";
+    var eq: [u8; 4] = " = \0";
+    ulib.say((&head[0 as usize]) as u64);
+    ulib.say(name);
+    ulib.say((&eq[0 as usize]) as u64);
+    ulib.sayu(value);
+    ulib.nl();
+}
+
+fn free_blocks() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_BFREE, 0, 0);
+}
+
+fn put_byte(fd: u64, index: u64, value: u64) -> u64 {
+    if errno.failed(io.seek(fd, index * 512, 0)) {
+        return 0;
+    }
+    buf[(0) as usize] = value as u8;
+    let n: u64 = io.write(fd, (&buf[0 as usize]) as u64, 1);
+    if errno.failed(n) || n != 1 {
+        return 0;
+    }
+    return 1;
+}
+
+fn get_byte(fd: u64, index: u64) -> u64 {
+    if errno.failed(io.seek(fd, index * 512, 0)) {
+        return 0;
+    }
+    buf[(0) as usize] = 0 as u8;
+    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 1);
+    if errno.failed(n) || n != 1 {
+        return 0;
+    }
+    return buf[(0) as usize] as u64;
+}
+
+fn fill_indices() {
+    idx[(0) as usize] = 266311;
+    idx[(1) as usize] = 266312;
+    idx[(2) as usize] = 266375;
+    idx[(3) as usize] = 266376;
+    idx[(4) as usize] = 270408;
+    idx[(5) as usize] = 528456;
+    idx[(6) as usize] = 5000000;
+    idx[(7) as usize] = 17043527;
+}
+
+fn read_num(p: u64) -> u64 {
+    var v: u64 = 0;
+    var i: u64 = 0;
+    var c: u64 = __mmio_read8((p + i) as *mut u8) as u64;
+    while c >= 48 && c <= 57 {
+        v = v * 10 + (c - 48);
+        i = i + 1;
+        c = __mmio_read8((p + i) as *mut u8) as u64;
+    }
+    return v;
+}
+
+fn expected(block: u64) -> u64 {
+    return (block * 31 + (block >> 8)) & 255;
+}
+
+fn sample(path: u64, blocks: u64) {
+    var n_samples: [u8; 8] = "samples\0";
+    var n_bad: [u8; 4] = "bad\0";
+    var n_open: [u8; 5] = "open\0";
+    let fd: u64 = io.open(path, 0);
+    var samples: u64 = 0;
+    var bad: u64 = 0;
+    if errno.failed(fd) {
+        report((&n_open[0 as usize]) as u64, 0);
+        return;
+    }
+    var b: u64 = 0;
+    while b < blocks {
+        if get_byte(fd, b) != expected(b) {
+            bad = bad + 1;
+        }
+        samples = samples + 1;
+        b = b + 8;
+    }
+    if get_byte(fd, blocks - 1) != expected(blocks - 1) {
+        bad = bad + 1;
+    }
+    samples = samples + 1;
+    io.close(fd);
+    report((&n_open[0 as usize]) as u64, 1);
+    report((&n_samples[0 as usize]) as u64, samples);
+    report((&n_bad[0 as usize]) as u64, bad);
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_sample: [u8; 7] = "sample\0";
+    let argc: u64 = ulib.arg_count(args);
+    if argc >= 4 && ulib.streq(ulib.arg_at(args, 1), (&w_sample[0 as usize]) as u64) {
+        sample(ulib.arg_at(args, 2), read_num(ulib.arg_at(args, 3)));
+        return 0;
+    }
+    return write_test();
+}
+
+fn write_test() -> u64 {
+    var n_before: [u8; 8] = "before\0\0";
+    var n_during: [u8; 8] = "during\0\0";
+    var n_after: [u8; 7] = "after\0\0";
+    var n_wrote: [u8; 6] = "wrote\0";
+    var n_match: [u8; 6] = "match\0";
+    var n_over: [u8; 5] = "over\0";
+    var n_end: [u8; 4] = "end\0";
+    var path: [u8; 12] = "/tmp/quad.d\0";
+    fill_indices();
+    let before: u64 = free_blocks();
+    report((&n_before[0 as usize]) as u64, before);
+    let fd: u64 = io.create((&path[0 as usize]) as u64);
+    var wrote: u64 = 0;
+    var matched: u64 = 0;
+    var over: u64 = 0;
+    if !errno.failed(fd) {
+        var i: u64 = 0;
+        while i < 8 {
+            wrote = wrote + put_byte(fd, idx[(i) as usize], 65 + i);
+            i = i + 1;
+        }
+        over = put_byte(fd, 17043528, 90);
+        io.close(fd);
+        let rd: u64 = io.open((&path[0 as usize]) as u64, 0);
+        if !errno.failed(rd) {
+            i = 0;
+            while i < 8 {
+                if get_byte(rd, idx[(i) as usize]) == 65 + i {
+                    matched = matched + 1;
+                }
+                i = i + 1;
+            }
+            io.close(rd);
+        }
+        report((&n_during[0 as usize]) as u64, free_blocks());
+        io.unlink((&path[0 as usize]) as u64);
+    }
+    report((&n_wrote[0 as usize]) as u64, wrote);
+    report((&n_match[0 as usize]) as u64, matched);
+    report((&n_over[0 as usize]) as u64, over);
+    report((&n_after[0 as usize]) as u64, free_blocks());
+    report((&n_end[0 as usize]) as u64, 1);
+    return 0;
+}

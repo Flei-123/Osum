@@ -22,7 +22,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
 LIMIT=2134016
-LIMIT3=136351744
+LIMIT3=8726286336
 KEEP=256
 OUT=$(mktemp -d); trap 'rm -rf "$OUT"' EXIT
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1

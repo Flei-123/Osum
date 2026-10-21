@@ -138,8 +138,8 @@ lauf "$TMPD/lim-live.img" "script=fsrlim datei;exit" "$TMPD/lim.txt" 900
 rc=$?
 [ "$rc" -eq 21 ] && ok "der Kern hat selbst abgeschaltet (exit 21)" \
                  || bad "QEMU exit $rc, erwartet 21"
-num "groesster Blockindex einer Datei" "$(val "$TMPD/lim.txt" fsrlim maxidx)" eq 266311
-num "groesste Datei in Oktetten" "$(val "$TMPD/lim.txt" fsrlim maxfile)" eq 136351744
+num "groesster Blockindex einer Datei" "$(val "$TMPD/lim.txt" fsrlim maxidx)" eq 17043527
+num "groesste Datei in Oktetten" "$(val "$TMPD/lim.txt" fsrlim maxfile)" eq 8726286336
 # DIE GEGENPROBE ZUR SUCHE. Ohne sie waere die Zahl oben nur der letzte
 # Erfolg und keine Grenze.
 num "EIN Block weiter geht es NICHT" "$(val "$TMPD/lim.txt" fsrlim ueber)" eq 0

@@ -435,6 +435,7 @@ fn max_file(state: u64) -> u64 {
     var n: u64 = directs(state) + PER_BLOCK + PER_BLOCK * PER_BLOCK
     if version(state) >= OFS_V3 {
         n = n + PER_BLOCK * PER_BLOCK * PER_BLOCK
+        n = n + PER_BLOCK * PER_BLOCK * PER_BLOCK * PER_BLOCK
     }
     return n * BS
 }
@@ -460,10 +461,8 @@ const I_TINDIRECT: u64 = 128 // dreifach indirekt: 64 * 64 * 64 Bloecke
 const I_CTIME: u64 = 136 // erzeugt, Sekunden seit 1970
 const I_MTIME: u64 = 144 // zuletzt geschrieben
 const I_ATIME: u64 = 152 // zuletzt gelesen
-// 160..255 bleiben Vorrat: zwoelf Woerter, genullt, fuer die Runde, die
-// als naechste etwas im Inode braucht. Dass sie da sind, ist der
-// eigentliche Unterschied zu Fassung 2 -- die war VOLL, und genau
-// deshalb gab es keine Zeitstempel.
+const I_QINDIRECT: u64 = 160 // quad indirect: 64^4 blocks, OFS 3 only
+// 168..255 stay reserved (zeroed).
 // RUNDE K13: die drei Woerter, die aus den Blockzeigern 8, 9 und 10
 // wurden. Sie haben in einem Abbild der Fassung 1 KEINE Bedeutung -- die
 // Zugriffe unten geben dort Standardwerte zurueck, statt Blocknummern als
@@ -1335,10 +1334,77 @@ fn file_block(state: u64, ino: u64, index: u64, grow: bool) -> u64 {
         return 0
     }
     let t: u64 = d - PER_BLOCK * PER_BLOCK
-    if t >= PER_BLOCK * PER_BLOCK * PER_BLOCK {
+    if t < PER_BLOCK * PER_BLOCK * PER_BLOCK {
+        return triple_block(state, ino, t, grow)
+    }
+    let q: u64 = t - PER_BLOCK * PER_BLOCK * PER_BLOCK
+    if q >= PER_BLOCK * PER_BLOCK * PER_BLOCK * PER_BLOCK {
         return 0
     }
-    return triple_block(state, ino, t, grow)
+    return quad_block(state, ino, q, grow)
+}
+
+fn quad_block(state: u64, ino: u64, q: u64, grow: bool) -> u64 {
+    var l1: u64 = inode_get(state, ino, I_QINDIRECT)
+    if l1 == 0 {
+        if !grow {
+            return 0
+        }
+        l1 = block_alloc(state)
+        if l1 == 0 {
+            return 0
+        }
+        inode_set(state, ino, I_QINDIRECT, l1)
+    }
+    let l2: u64 = stufe(state, l1, q / (PER_BLOCK * PER_BLOCK * PER_BLOCK), grow)
+    if l2 == 0 {
+        return 0
+    }
+    let l3: u64 = stufe(state, l2, (q / (PER_BLOCK * PER_BLOCK)) % PER_BLOCK, grow)
+    if l3 == 0 {
+        return 0
+    }
+    let l4: u64 = stufe(state, l3, (q / PER_BLOCK) % PER_BLOCK, grow)
+    if l4 == 0 {
+        return 0
+    }
+    return stufe(state, l4, q % PER_BLOCK, grow)
+}
+
+fn ptr_at(state: u64, block: u64, k: u64) -> u64 {
+    if !ofsj.read(state, block, buf_ib(state)) {
+        return 0
+    }
+    return get64(buf_ib(state) + k * 8)
+}
+
+fn free_quad(state: u64, q1: u64) {
+    var k1: u64 = 0
+    while k1 < PER_BLOCK {
+        let q2: u64 = ptr_at(state, q1, k1)
+        if q2 != 0 {
+            var k2: u64 = 0
+            while k2 < PER_BLOCK {
+                let q3: u64 = ptr_at(state, q2, k2)
+                if q3 != 0 {
+                    var k3: u64 = 0
+                    while k3 < PER_BLOCK {
+                        let q4: u64 = ptr_at(state, q3, k3)
+                        if q4 != 0 {
+                            free_dt(state, q4)
+                            block_free(state, q4)
+                        }
+                        k3 = k3 + 1
+                    }
+                    block_free(state, q3)
+                }
+                k2 = k2 + 1
+            }
+            block_free(state, q2)
+        }
+        k1 = k1 + 1
+    }
+    block_free(state, q1)
 }
 
 // The block behind the ONE indirect pointer of the inode: 64 of them.
@@ -1582,6 +1648,11 @@ fn file_truncate(state: u64, ino: u64) {
             }
             block_free(state, t1)
             inode_set(state, ino, I_TINDIRECT, 0)
+        }
+        let qr: u64 = inode_get(state, ino, I_QINDIRECT)
+        if qr != 0 {
+            free_quad(state, qr)
+            inode_set(state, ino, I_QINDIRECT, 0)
         }
     }
     // RUNDE SPEICHER: ueber `size_write` und nicht ueber `inode_set`,

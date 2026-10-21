@@ -157,6 +157,7 @@ class Bild:
         stufe(g(mkfs.I_DINDIRECT), 2)
         if self.version >= 3:
             stufe(g(mkfs.I_TINDIRECT), 3)
+            stufe(g(mkfs.I_QINDIRECT), 4)
         return aus
 
     def datenblock(self, ino, idx):
@@ -186,11 +187,17 @@ class Bild:
         if self.version < 3:
             return 0
         k -= PER_BLOCK ** 2
-        if k >= PER_BLOCK ** 3:
+        if k < PER_BLOCK ** 3:
+            a = zeig(im(g(mkfs.I_TINDIRECT)), k // (PER_BLOCK ** 2))
+            b = zeig(a, (k // PER_BLOCK) % PER_BLOCK)
+            return zeig(b, k % PER_BLOCK)
+        k -= PER_BLOCK ** 3
+        if k >= PER_BLOCK ** 4:
             return 0
-        a = zeig(im(g(mkfs.I_TINDIRECT)), k // (PER_BLOCK ** 2))
-        b = zeig(a, (k // PER_BLOCK) % PER_BLOCK)
-        return zeig(b, k % PER_BLOCK)
+        a = zeig(im(g(mkfs.I_QINDIRECT)), k // (PER_BLOCK ** 3))
+        b = zeig(a, (k // (PER_BLOCK ** 2)) % PER_BLOCK)
+        c = zeig(b, (k // PER_BLOCK) % PER_BLOCK)
+        return zeig(c, k % PER_BLOCK)
 
     def lies(self, ino, off, n):
         aus = bytearray()

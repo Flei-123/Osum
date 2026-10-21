@@ -172,17 +172,17 @@ Messlage: gemessen am 21.10. auf main 280e1fa6 (QEMU/KVM) von den Workern M1 (`r
 | GPU/DRM | kein `/dev/dri`, kein `/sys/class/drm`, kein dmabuf; Firefox fällt auf Software-WebRender zurück (kein Blocker). GTK4-GL/Qt Quick/Vulkan nur mit Software-Renderer (`GSK_RENDERER=cairo`) | M1 | GELB |
 | Dateischreiben nach /tmp | 3115 KiB/s (Ziel ≥ 10000) | Metrik | GELB |
 
-**Widerspruch, offen:** M2 nennt `MAX_TASKS=32` (28 Fäden) und „fd-Tabelle je Faden kopiert“ als Blocker (aus älteren Docs). M1 misst `t_limits` und `t_threads` **ohne FAIL**, die Kennzahl sagt Fäden ≥ 64. Widerspruch M1/M2 ist als LA-7 (r1416) im Masterplan erfasst. Vor Arbeit an LA-2 (r1367) per `t_limits` neu nachmessen.
+**Widerspruch GELÖST (LA-7, r1416, 21.10. gemessen, `tools/unterbau/run.sh` ONLY="t_limits t_threads", main 7c767dae): `MAX_TASKS` ist 128 (seit Runde LIMITS2, 13.10.); 124 Fäden gleichzeitig, 100 Prozesse gleichzeitig, 509 fds je Prozess, `threads.fd_table_shared_between_threads` PASS (fd-Tabelle ist geteilt), t_limits 8/8 und t_threads 25/25 PASS.** M2 war veraltet (r1367/LA-2 und Punkt 2b sind erledigt). Alter Text: M2 nennt `MAX_TASKS=32` (28 Fäden) und „fd-Tabelle je Faden kopiert“ als Blocker (aus älteren Docs). M1 misst `t_limits` und `t_threads` **ohne FAIL**, die Kennzahl sagt Fäden ≥ 64. Widerspruch M1/M2 ist als LA-7 (r1416) im Masterplan erfasst. Vor Arbeit an LA-2 (r1367) per `t_limits` neu nachmessen.
 
 ### 3.2 Blocker für Firefox, nach Reihenfolge (M2) mit Roadmap
 
 | # | Blocker | Aufwand | Roadmap |
 |---|---|---|---|
-| 1 | OFS-v3 max. Dateigröße 130 MiB < `libxul` 148 MiB (4. Indirektionsstufe oder Extents; fs.fi + mkfs.py + fsck + Gate) | L | r1366 |
-| 2 | Aufgabentafel 32 (Firefox: 15 Fäden + contentproc + glxtest) — Messwert widerspricht, siehe oben | L (falls bestätigt) | r1367 |
-| 2b | `CLONE_FILES`: fd-Tabelle je Faden kopiert statt geteilt (Firefox/glib öffnen in einem Faden, benutzen im anderen); M2 stuft L ein, laut M1 `t_threads` ohne FAIL → nachmessen | M–L (falls bestätigt) | LINUX-COMPAT-OPEN #1, LA-7 (r1416) |
+| 1 | ~~OFS-v3 max. Dateigröße 130 MiB < `libxul` 148 MiB~~ **ERLEDIGT (r1366, 21.10.)**: 4. Indirektionsstufe `I_QINDIRECT` (Offset 160 im Inode, nur OFS 3), max. Datei 8 726 286 336 B (8,1 GiB); fs.fi + mkfs.py + fsck.fi + check.py + Gate `tools/ofsbig` 15/0; das Firefox-Abbild (321 MiB, `libxul` 155 673 104 B) baut und bootet. | L | r1366 |
+| 2 | ~~Aufgabentafel 32~~ **widerlegt (LA-7)**: MAX_TASKS 128, 124 Fäden/100 Prozesse gemessen | erledigt | r1367 |
+| 2b | ~~`CLONE_FILES`~~ **widerlegt (LA-7)**: `t_threads.fd_table_shared_between_threads` PASS | erledigt | LA-7 (r1416) |
 | 3 | glib-Hauptschleife (inotify EBADF nach `g_spawn`, SIGUSR1, Sprung auf Nicht-Code-Seite) — GTK3 ist Firefox-UI | M | r796 |
-| 4 | Speicher: `libxul` privat kopiert (155 MB), kein Demand-Paging für Dateimappings, `MAP_NORESERVE`/`PROT_NONE`-Reserven — **ungemessen** | M | — |
+| 4 | Speicher: `libxul` privat kopiert (155 MB), kein Demand-Paging für Dateimappings, `MAP_NORESERVE`/`PROT_NONE`-Reserven. **Erster gemessener Stopper (21.10., Firefox 151.0.3, 3 GiB RAM): `firefox --version` → "Error loading shared library libcairo.so.2: Out of memory"; `mmap` ENOMEM (nr9, len 970752, MAP_PRIVATE, fd 7) nach 5 großen Mappings (7,4 MB, 3,8 MB, ...); ENOSYS nr187 (readahead) 5x.** LA-9 (r1418) | M | r1418 |
 | 5 | procfs: `/proc/self/mountinfo`, `cgroup`, `maps` mit Namen, `/proc/stat` im Linux-Format | S–M | r1370, r1372, r934 |
 | 6 | IPC im Verbund: memfd-Seals, SCM_RIGHTS über stream, `mremap`-Last — einzeln ok, im Verbund ungetestet | M | r1368 |
 | 7 | Stubs `readahead`/`fadvise64`, `fallocate(PUNCH_HOLE)`; wayd-Protokolle (primary selection, xdg-activation, fractional-scale, cursor-shape) | S je | r1370 |
@@ -195,7 +195,7 @@ Messlage: gemessen am 21.10. auf main 280e1fa6 (QEMU/KVM) von den Workern M1 (`r
 |---|---|---|---|---|
 | F0 | Prüfsteine busybox/python/curl/git/foot | s. 3.1 | erledigt (busybox 55/56) | — |
 | F1 | Unterbau 0 FAIL/GAP (heute 3 FAIL, 4 GAP, großteils Test-Artefakte) | `tools/unterbau/run.sh` | fast | S–M |
-| F2 | OFS-Dateigröße ≥ 256 MiB, Firefox-Abbild baut | `prep-firefox.sh` ohne mkfs-Fehler | offen | L |
+| F2 | OFS-Dateigröße ≥ 256 MiB, Firefox-Abbild baut | `prep-firefox.sh` ohne mkfs-Fehler | **grün (21.10., tools/ofsbig 15/0, Abbild 512 MB gebaut)** | L |
 | F3 | `firefox --version` im Gast | `guest-fx1-version.sh` | offen | M nach F2 |
 | F4 | `--headless --screenshot about:blank` | Screenshot-Datei im Gast | offen | L (Fäden, glib, Speicher) |
 | F5 | Firefox-Fenster über Wayland (Software-WebRender), HTTPS-Seite | Screenshot-Gate | offen | L |

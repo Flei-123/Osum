@@ -127,6 +127,7 @@ NAME_V3 = 256
 BITS_PER_BLOCK = BS * 8  # 4096
 T_LINK = 3
 I_TINDIRECT, I_CTIME, I_MTIME, I_ATIME = 128, 136, 144, 152
+I_QINDIRECT = 160
 # ROUND K4: the twelfth direct slot became the double indirect pointer --
 # 11 + 64 + 64 * 64 blocks instead of 12 + 64. `kernel/fs.fi` has the
 # same three constants and the same two levels; the two must agree octet
@@ -385,6 +386,9 @@ class Fs:
             t = d - (BS // 8) ** 2
             if t < (BS // 8) ** 3:
                 return self.triple_block(ino, t, grow)
+            q = t - (BS // 8) ** 3
+            if q < (BS // 8) ** 4:
+                return self.quad_block(ino, q, grow)
         raise SystemExit(
             "mkfs: a file may hold %d octets in this format (%d direct "
             "blocks, %d through the indirect one and %d through the "
@@ -394,7 +398,7 @@ class Fs:
     def max_file(self):
         n = self.directs + BS // 8 + (BS // 8) ** 2
         if self.version >= OFS_V3:
-            n += (BS // 8) ** 3
+            n += (BS // 8) ** 3 + (BS // 8) ** 4
         return n * BS
 
     # Dieselbe Bewegung wie `fs.stufe` im Kernel: der k-te Zeiger AUS
@@ -422,6 +426,25 @@ class Fs:
         if not l3:
             return 0
         return self.stufe(l3, t % per, grow)
+
+    def quad_block(self, ino, q, grow):
+        l1 = self.iget(ino, I_QINDIRECT)
+        if not l1:
+            if not grow:
+                return 0
+            l1 = self.block_alloc()
+            self.iset(ino, I_QINDIRECT, l1)
+        per = BS // 8
+        l2 = self.stufe(l1, q // per ** 3, grow)
+        if not l2:
+            return 0
+        l3 = self.stufe(l2, (q // per ** 2) % per, grow)
+        if not l3:
+            return 0
+        l4 = self.stufe(l3, (q // per) % per, grow)
+        if not l4:
+            return 0
+        return self.stufe(l4, q % per, grow)
 
     def single_block(self, ino, k, grow):
         ib = self.iget(ino, I_INDIRECT)
