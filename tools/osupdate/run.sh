@@ -23,6 +23,9 @@
 #   9. stage 2 negative: overlay file with a wrong hash in a signed list -> refused, /bin untouched
 #  10. stage 2 negative: gz with a flipped bit but a matching transport hash -> gunzip CRC refuses
 #  11. stage 2 power cut: journal + half-moved files without a pending note -> restored on next confirm
+#  12. UPD-3/UPD-2 live apply: the offered kernel is byte-identical to slot A -> `ota system apply` swaps the
+#      overlay in WITHOUT a trial, restart or slot B; version grows at once, a running `launcher` is ended
+#      (shell supervisor restarts it), old backups gone; counter-proof: section 2 (other kernel = slot B)
 # Sections 2 and 5 run with the gzip feed (kernel + overlay files as .gz, streaming gunzip on the
 # device): the trial boot sees the new /bin files, confirm drops the backups, a lost trial restores them.
 # OSU_SECS="8 9" runs only the listed sections (1 always runs); OSU_ONLY7=1 = "7".
@@ -431,6 +434,41 @@ dienst "$OUT/feed-old" || bad "feed does not start"
 rc=$(lauf p2 "ota set auto ja;ota service 1 system;cat /system/sys.stand;cat /system/sys.notified;exit")
 hat "$OUT/p2.txt" "phase=current" "service check on a not-newer feed: phase current"
 hatnicht "$OUT/p2.txt" "00000100" "... and no notification marker (no build number written)"
+dienst_aus
+
+fi
+
+if want 12; then
+echo "== 12. live apply (same kernel): overlay swapped in at once, no slot B, no restart, running launcher ended =="
+fresh_disk
+mkdir -p "$OUT/ovl-live"
+printf 'LIVE-NEW-CONTENT\n' > "$OUT/ovl-live/gate-ovl.txt"
+[ -f "$OUT/bin/sleep" ] && cp "$OUT/bin/sleep" "$OUT/ovl-live/launcher" || bad "no built sleep for the launcher stand-in"
+pubt "$OUT/img-old" "$OUT/feed-live" dev --count 300 --overlay "$OUT/ovl-live" --gz && ok "live feed: build 300, kernel identical to slot A, 2 overlay files" || { cat "$OUT/pub.log"; bad "publish live"; }
+gleich "the offered kernel is byte-identical to slot A" "$(sha256sum "$OUT/img-old/osum.mb" | cut -d' ' -f1)" "$OLDSHA"
+dienst "$OUT/feed-live" && ok "feed up" || bad "feed does not start"
+rc=$(lauf l1 "cp /bin/sleep /bin/launcher;/bin/launcher 600 &;ps;ota system search;ota system apply;ps;cat /bin/gate-ovl.txt;cat /system/SYSVERSION;ota system status;ls /system/old;exit")
+sed -n '/^osum\$ ps/,/^osum\$ ota system search/p' "$OUT/l1.txt" > "$OUT/l1.ps1"
+sed -n '/^osum\$ ota system apply/,$p' "$OUT/l1.txt" > "$OUT/l1.after"
+sed -n '/^osum\$ ota system apply/,/^osum\$ ps/p' "$OUT/l1.txt" > "$OUT/l1.apply"
+[ "$(grep -aEc 'user +[0-9]+ +[0-9]+ .*launcher' "$OUT/l1.ps1")" -ge 1 ] && ok "before the update a task named launcher runs" || bad "the launcher stand-in is not running before the update"
+hat "$OUT/l1.apply" "system: applied, no restart needed" "apply says applied, no restart needed"
+hat "$OUT/l1.apply" "system: shell program restarted: launcher" "the running launcher was ended for the supervisor"
+hatnicht "$OUT/l1.apply" "staged in slot B" "no slot B staging"
+hatnicht "$OUT/l1.apply" "system: restarting" "no restart"
+sed -n '/^osum\$ ps/,$p' "$OUT/l1.after" | grep -aEc 'user +[0-9]+ +[0-9]+ .*launcher' | grep -qx 0 && ok "after the update no launcher task is left" || bad "launcher task still alive after the update"
+hat "$OUT/l1.after" "LIVE-NEW-CONTENT" "the new /bin file is there in the SAME boot"
+hat "$OUT/l1.after" "00000300" "SYSVERSION is 300 at once"
+hat "$OUT/l1.after" "system: overlay committed" "overlay committed (journal dropped)"
+hat "$OUT/l1.after" "system: no update pending" "nothing pending"
+esp_has osum-b.mb && bad "slot B written" || ok "no slot B on the ESP"
+gleich "limine default_entry stays 1" "$(conf_default)" "1"
+gleich "slot A untouched" "$(esp_sha osum.mb)" "$OLDSHA"
+rc=$(lauf l2 "cat /system/SYSVERSION;cat /bin/gate-ovl.txt;ota system search;ota system status;exit" keep)
+gleich "next boot runs the same kernel" "$(commit_of "$OUT/l2.txt")" "$OLD"
+hat "$OUT/l2.txt" "00000300" "SYSVERSION 300 survives the reboot"
+hat "$OUT/l2.txt" "LIVE-NEW-CONTENT" "the new file survives the reboot"
+hat "$OUT/l2.txt" "system: up to date" "search now says up to date"
 dienst_aus
 
 fi

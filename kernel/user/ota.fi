@@ -2600,6 +2600,10 @@ static mut S_SU_NONE: [u8; 19] = "system: up to date\0"
 static mut S_SU_NOTES: [u8; 17] = "system: changes:\0"
 static mut S_SU_STAGED: [u8; 45] = "system: staged in slot B, restart to install\0"
 static mut S_SU_PROMO: [u8; 52] = "system: new kernel confirmed and promoted to slot A\0"
+static mut S_SU_LIVE: [u8; 49] = "system: applied, no restart needed (same kernel)\0"
+static mut S_SU_SHREST: [u8; 34] = "system: shell program restarted: \0"
+static mut N_SH_TASKBAR: [u8; 8] = "taskbar\0"
+static mut N_SH_LAUNCHER: [u8; 9] = "launcher\0"
 static mut S_SU_FAILED: [u8; 53] = "system: trial kernel was rolled back, update dropped\0"
 static mut S_SU_ROOTN: [u8; 65] = "system: root image entry ignored (module-root layout is stage 2)\0"
 static mut S_SU_PEND: [u8; 32] = "system: pending trial of build \0"
@@ -3508,6 +3512,96 @@ fn su_kernel_get() -> bool {
         su_klen, (&SU_KHEX[0 as usize]) as u64, (&P_SU_KB[0 as usize]) as u64)
 }
 
+// ------------------------------------------------ live apply (UPD-3) + shell restart (UPD-2)
+// Is the kernel the signed list offers byte-identical to the one in slot A (length + SHA-256)?
+fn su_kernel_same() -> bool {
+    if size((&P_SU_KA[0 as usize]) as u64) != su_klen {
+        return false
+    }
+    if !hash_file((&P_SU_KA[0 as usize]) as u64, (&HASH[0 as usize]) as u64) {
+        return false
+    }
+    sha.hex_out((&HASH[0 as usize]) as u64, 32, (&HEX[0 as usize]) as u64)
+    return ulib.strneq((&HEX[0 as usize]) as u64, (&SU_KHEX[0 as usize]) as u64, 64)
+}
+
+// End every running task whose program name is `nm`; the shell supervisor starts a fresh one from
+// the new file. Returns how many were ended.
+fn su_kill_named(nm: u64) -> u64 {
+    var ended: u64 = 0
+    var i: u64 = 0
+    while i < 128 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 && st != 5 {
+            let n0: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME0, 0)
+            let n1: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME1, 0)
+            if !ulib.bad(n0) {
+                var tn: [u8; 17] = [0 as u8; 17]
+                var k: u64 = 0
+                while k < 8 {
+                    tn[k as usize] = ((n0 >> (k * 8)) & 255) as u8
+                    tn[(k + 8) as usize] = ((n1 >> (k * 8)) & 255) as u8
+                    k = k + 1
+                }
+                if ulib.streq((&tn[0 as usize]) as u64, nm) {
+                    let pid: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0)
+                    if !ulib.bad(ulib.sys(ulib.SYS_KILL, pid, 137, 0)) {
+                        ended = ended + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return ended
+}
+
+// After a live overlay: every swapped file that is a supervised shell program (taskbar, launcher)
+// has its running instance ended. Other programs keep running from the old file (their ELF was
+// copied at start) and the next start takes the new one.
+fn su_ovl_restart_shell() {
+    var k: u64 = 0
+    while su_ovl_line(k) != 0 {
+        var hit: u64 = 0
+        if ulib.streq((&SU_ONAME[0 as usize]) as u64, (&N_SH_TASKBAR[0 as usize]) as u64) {
+            hit = su_kill_named((&N_SH_TASKBAR[0 as usize]) as u64)
+            if hit > 0 {
+                sagt((&S_SU_SHREST[0 as usize]) as u64, (&N_SH_TASKBAR[0 as usize]) as u64)
+            }
+        } else if ulib.streq((&SU_ONAME[0 as usize]) as u64, (&N_SH_LAUNCHER[0 as usize]) as u64) {
+            hit = su_kill_named((&N_SH_LAUNCHER[0 as usize]) as u64)
+            if hit > 0 {
+                sagt((&S_SU_SHREST[0 as usize]) as u64, (&N_SH_LAUNCHER[0 as usize]) as u64)
+            }
+        }
+        k = k + 1
+    }
+}
+
+// Same kernel: swap the overlay in, restart the changed shell programs, bump the version. No
+// trial, no ESP change, no reboot. A power cut before the journal is dropped leaves the journal
+// without a pending note: the next `ota system confirm` puts the old files back (su_finish).
+fn su_apply_live() -> u64 {
+    su_esp_close()
+    if su_nfiles > 0 {
+        if !su_ovl_stage() {
+            return 1
+        }
+        sagn((&S_SU_OVLN[0 as usize]) as u64, su_nfiles)
+        if !su_ovl_swap() {
+            su_ovl_restore()
+            return err((&E_SU_OVLSW[0 as usize]) as u64, 0)
+        }
+        su_ovl_restart_shell()
+        su_ovl_drop()
+    }
+    num9_write((&P_SU_VER[0 as usize]) as u64, su_count)
+    su_stand_write((&W_SU_CUR[0 as usize]) as u64)
+    ulib.say((&S_SU_LIVE[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
 // ------------------------------------------------ apply
 fn cmd_sys_apply(restart: bool) -> u64 {
     if in_erprobung() || su_pending() {
@@ -3524,6 +3618,10 @@ fn cmd_sys_apply(restart: bool) -> u64 {
     su_notes_show()
     if !su_esp_open() {
         return err((&E_SU_ESP[0 as usize]) as u64, 0)
+    }
+    // UPD-3: the offered kernel is the one in slot A already -> overlay only, no restart
+    if su_kernel_same() {
+        return su_apply_live()
     }
     // /bin overlay first (small, staged under /system/new; nothing on the system changes yet)
     if su_nfiles > 0 {
