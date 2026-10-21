@@ -8,7 +8,7 @@ Tools (all `python3 -I`, run from the repo root):
 | script | what |
 |---|---|
 | `tools/arch/deps.py` | import graph, cycles (`--cycles`), fan-in (`--fanin`), closure (`--closure taskbar`), regions of one file (`--regions wlib`), cloned function bodies (`--clones`), shared /etc paths (`--coupling`), dot/json |
-| `tools/arch/layers.py` | layer table + rules L1/A1/P1/S1; report only; `--baseline-check` fails only on NEW violations (`layers.baseline.json`) |
+| `tools/arch/layers.py` | layer table + rules L1/A1/P1/S1; `--strict` fails on any violation; `tools/arch/run.sh` = gate with counter-proofs (baseline is empty) |
 | `tools/arch/migrate.py` | `--plan/--apply/--check`: move `kernel/user/*.fi` into layer folders and leave flat symlinks (section 2) |
 
 ## 1. Ist-Analyse
@@ -130,13 +130,16 @@ Rules (the lint checks 1-4; 5-8 are review rules):
 7. A config file format has ONE reader module in `base` (`conf_taskbar`, `conf_theme` ...); consumers call it.
 8. Names: layer folder = lower case, file = `<area>_<part>.fi` (`taskbar_paint.fi`, `settings_page_mouse.fi`); one prefix per module; no two modules share a last component (firnc use-name).
 
-Result today (`python3 -I tools/arch/layers.py`): L1 = 6 violations, A1 = 0, P1 = 0. All 6 are REAL smells with a fix:
-| violation | cause | fix |
-|---|---|---|
-| `wmd`, `presence` -> `wlibc` (services imports toolkit) | `wlibc` mixes the window-server client (`win_*`, shm, screen) with painting | split `wlibc` into `wmclient` (base) + paint core (toolkit) |
-| `template`, `certus` -> `wlib`/`wlibc`/`fuiscene` (base imports toolkit) | preset store and Certus placeholder carry UI code | move UI part to apps/theme; Certus to apps |
-| `disks` -> `diskscan` (apps imports services) | scan engine is a program | make `diskscan` a base module + thin CLI |
-Baseline: `tools/arch/layers.baseline.json` (6 entries). Gate: `python3 -I tools/arch/layers.py --baseline-check` exits 1 on any NEW violation. Add to `tools/qa/gates.tsv` (tier quick) when the Gates2 branch is merged.
+Result (21.10.2026, r1342): `python3 -I tools/arch/layers.py` = **L1 0, A1 0, P1 0**. The 6 former L1 violations were fixed without behaviour change:
+| was | fix |
+|---|---|
+| `presence` -> `wlibc` (services imports toolkit) | it only used 6 bus wrappers: now local wrappers over `ulib.bus5` (same syscall, base); binary 144 KB -> 33 KB |
+| `wmd` -> `wlibc` (services imports toolkit) | `wmd` is the window manager / compositor (composes chrome with the paint core): classified **shell**, not a service |
+| `template` -> `wlibc` (base imports toolkit) | it is the theme preset store on the theme engine in `wlibc`: classified **toolkit** (importers qs, settings, theme are shell/apps) |
+| `certus` -> `wlib`/`fuiscene` (base imports toolkit) | it is a GUI program: classified **apps** |
+| `disks` -> `diskscan` (apps imports services) | `diskscan` is a pure library (ulib, libc.io, disks.table): classified **base** |
+Still open (not required by the lint): `wlibc` mixes the window-server client with the paint core (a `wmclient` split would let `wmd` return to services).
+Gate: `bash tools/arch/run.sh` (tier quick, `tools/qa/gates.tsv` row `arch`): `layers.py --strict` must be 0, baseline file is empty, and 4 planted violations (base->toolkit, service->toolkit, app->shell, import of a program) in a scratch copy of kernel/user must turn it red.
 
 ## 4. Registries (extension points)
 Principle: **the shell asks a registry, the registry reads manifests, the click becomes an action-bus call.** No app name or app action appears in shell code; rights, audit and undo come from the bus for free. Reuse the existing manifest style (line based, `manifest 1`, unknown line = skipped + counted, whole file refused on a malformed KNOWN line, fixed tables) — same as `lib/settingsman/manifest.fi` and ACTIONS.
