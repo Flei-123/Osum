@@ -57,7 +57,7 @@ cyc=$(field "$lastl" note_cyc)
 [ -n "$cyc" ] && [ "$cyc" -gt 0 ] && [ "$cyc" -le "$MAXCYC" ] && ok "A: counter update costs $cyc TSC cycles (<= $MAXCYC)" || bad "A: note_cyc '$cyc' missing, zero or > $MAXCYC"
 echo "  INFO  presents=$last note_cyc=$cyc"
 grep -aiqE 'panic|kernel fault|exception' "$SA" && bad "A: panic/fault on the serial line" || ok "A: 0 panics"
-nb=$(grep -ac '^frames: ' "$SB")
+nb=$(grep -acE '^frames: (win|total)=' "$SB")
 [ "$nb" = 0 ] && ok "B: no frames line without the word (counter-proof)" || bad "B: $nb frames lines without the word"
 echo "FRAMEPROF: $pass passed, $fail failed"
 [ "$fail" = 0 ]
