@@ -7,7 +7,7 @@
 # It boots the design-audit machine (tools/design/audit.sh), opens Settings,
 # clicks every sidebar page (rect names taba..tas), types into the search field
 # (Ctrl+F), and takes a picture each time. Checks (serial log):
-#   1. the sidebar tiles are reported (19 `tab?` rects);
+#   1. the sidebar tiles are reported (20 `tab?` rects);
 #   2. the search field is reported and the window is up;
 #   3. a search that matches nothing leaves the sidebar empty ("Keine Treffer");
 #   4. no crash lines.
@@ -26,18 +26,18 @@ for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
   echo "klick 24,$((YRES-20))"; echo "warte 3"
   echo "klickauf start_Settings"; echo "warte 12"
   echo "foto 00-start"
-  for p in a b c d e f g h i j k l m n o; do
+  for p in a b c d e f g h i j k l m n o p q r s t; do
     echo "klickauf srecttab$p"; echo "warte 2"; echo "foto page-$p"
   done
   echo "taste ctrl-f"; echo "tippe zzzz"; echo "warte 2"; echo "foto search-empty"
 } > "$DREH"
-bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=420 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
+bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=600 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
 S="$OUT/serial.txt"
 n=$(grep -ac 'settings: rect name=tab' "$S" 2>/dev/null; true)
-[ "$n" -ge 19 ] && ok "sidebar pages reported ($n)" || bad "sidebar pages reported ($n)"
+[ "$n" -ge 20 ] && ok "sidebar pages reported ($n)" || bad "sidebar pages reported ($n)"
 grep -aq 'settings: ready' "$S" && ok "window up" || bad "window up"
 # the segmented control (K_SEG0 = 180..182 -> wgy wgz wha) and the eight swatches (183..190) are real nodes
 for r in wgy wgz wha; do
