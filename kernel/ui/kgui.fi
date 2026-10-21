@@ -71,6 +71,8 @@ import gfx.vmode
 import ui.wig
 import bus.bus
 import ui.wm
+import ui.shellsup
+import diag.stall
 import lib.version
 // RUNDE MARKE: der Produktname kommt aus EINER Quelle.
 import lib.brand
@@ -81,7 +83,7 @@ import klog
 import lib.ksymtab
 
 export {
-    stage_graphics, stage_surface, stage_hold, tafel_tick, beat_tick,
+    stage_graphics, stage_surface, stage_hold, tafel_tick, beat_tick, stall_tick,
     leser_tick, dnd_pump, termclip_pump,
     // RUNDE BLECHFUENF: die Absturzanzeige. `trap.report` ruft sie.
     absturz,
@@ -4573,6 +4575,8 @@ fn parse(state: u64, cmd: u64) {
     }
     svc_parse(cmd)
     sv2_parse(cmd)
+    shellsup.parse(cmd)
+    stall.parse(cmd)
     var w: [u8; 10] = "mausflut=\0"
     var i: u64 = 0
     while i < 4096 && kstate.get8(cmd + i) != 0 {
@@ -5226,6 +5230,7 @@ fn desk_start(state: u64) -> u64 {
     }
     let _l: u64 = desk_spawn(state, (&p_task[0]) as u64,
         (&a_task[0]) as u64, 8)
+    shellsup.arm(state, shellsup.W_TASKBAR, _l)
     runden = 0
     while runden < 250 {
         wm.poll(state)
@@ -5242,6 +5247,7 @@ fn desk_start(state: u64) -> u64 {
             pid = desk_spawn_n(state, (&p_star[0]) as u64,
                 (&a_star[0]) as u64, 18, 2)
         }
+        shellsup.arm(state, shellsup.W_LAUNCHER, pid)
     }
     // RUNDE WERKZEUGE: `wigapp=` GILT AUCH AUF DEM SCHREIBTISCH.
     //
@@ -6410,6 +6416,38 @@ fn sv2_watch(state: u64) {
     sv2_watch_one(state, 1)
 }
 
+fn shell_respawn(state: u64, w: u64) -> u64 {
+    var p_task: [u8; 13] = "/bin/taskbar\0"
+    var a_task: [u8; 8] = "taskbar\0"
+    var p_star: [u8; 14] = "/bin/launcher\0"
+    var a_star: [u8; 18] = "starter\0versteckt\0"
+    var a_vis: [u8; 8] = "starter\0"
+    if w == shellsup.W_TASKBAR {
+        return desk_spawn(state, (&p_task[0]) as u64, (&a_task[0]) as u64, 8)
+    }
+    if kstate.mode_on(state, kstate.M_LAUNCHERVIS) {
+        return desk_spawn_n(state, (&p_star[0]) as u64, (&a_vis[0]) as u64, 8, 1)
+    }
+    return desk_spawn_n(state, (&p_star[0]) as u64, (&a_star[0]) as u64, 18, 2)
+}
+
+fn shell_watch_one(state: u64, w: u64) {
+    if shellsup.watch(state, w) == 0 {
+        return
+    }
+    let slot: u64 = shell_respawn(state, w)
+    if slot == 0 {
+        shellsup.spawn_failed(state, w)
+        return
+    }
+    shellsup.arm(state, w, slot)
+}
+
+fn shell_watch(state: u64) {
+    shell_watch_one(state, shellsup.W_TASKBAR)
+    shell_watch_one(state, shellsup.W_LAUNCHER)
+}
+
 fn jarvis_watch(state: u64) {
     if jv_armed == 0 {
         return
@@ -6606,6 +6644,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     while dauer || rounds < 20000 {
         st(31)
         wmrunden = rounds
+        stall_spin(state)
         // ==================================== RUNDE ACPI-EREIGNISSE
         //
         // HIER LAEUFT AML IM SCHREIBTISCHBETRIEB, und diese Zeile ist
@@ -6628,6 +6667,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         sub(2)
         jarvis_watch(state)
         sv2_watch(state)
+        shell_watch(state)
         sub(3)
         svc_flush(state)
         sub(4)
@@ -9417,6 +9457,26 @@ fn beat_tick(state: u64) {
     if (herz_sek & 1) == 0 {
         herz_led = 1 - herz_led
         usb.beat_leds(state, herz_led)
+    }
+}
+
+fn stall_inputs(state: u64) -> u64 {
+    return kstate.get(state, kstate.KEYS) + ps2m.packets(state) + ps2m.clicks(state)
+}
+
+fn stall_tick(state: u64) {
+    let _s: bool = stall.check(state, stall_inputs(state), wmrunden, wm.frames_total(state))
+}
+
+fn stall_spin(state: u64) {
+    let n: u64 = stall.spin_due(state, stall_inputs(state))
+    if n == 0 {
+        return
+    }
+    let end: u64 = kstate.get(state, kstate.TICKS) + n
+    var spun: u64 = 0
+    while kstate.get(state, kstate.TICKS) < end {
+        spun = spun + 1
     }
 }
 

@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import sched.sched
+import sched.proc
+import serial
+
+export { parse, arm, armed, watch, spawn_failed, respawns, W_TASKBAR, W_LAUNCHER }
+
+const W_TASKBAR: u64 = 0
+const W_LAUNCHER: u64 = 1
+const BASE_WAIT: u64 = 20
+const MAX_WAIT: u64 = 3000
+const STABLE: u64 = 1500
+
+static mut s_slot: [u64; 2] = [0 as u64; 2]
+static mut s_pid: [u64; 2] = [0 as u64; 2]
+static mut s_born: [u64; 2] = [0 as u64; 2]
+static mut s_next: [u64; 2] = [0 as u64; 2]
+static mut s_wait: [u64; 2] = [0 as u64; 2]
+static mut s_gen: [u64; 2] = [0 as u64; 2]
+static mut s_armed: [u64; 2] = [0 as u64; 2]
+static mut s_died: [u64; 2] = [0 as u64; 2]
+static mut hook_kill: u64 = 0
+static mut hook_done: u64 = 0
+static mut disabled: u64 = 0
+
+static mut n_task: [u8; 8] = "taskbar\0"
+static mut n_lnch: [u8; 9] = "launcher\0"
+static mut t_pre: [u8; 13] = "desk: shell \0"
+static mut t_end: [u8; 12] = " ended slot\0"
+static mut t_kill: [u8; 16] = " killed by hook\0"
+static mut t_start: [u8; 12] = " start pid=\0"
+static mut t_back: [u8; 14] = " respawn pid=\0"
+static mut t_gen: [u8; 6] = " gen=\0"
+static mut t_gap: [u8; 6] = " gap=\0"
+static mut t_t: [u8; 4] = " t=\0"
+static mut w_kill: [u8; 8] = "tbkill=\0"
+static mut w_off: [u8; 6] = "nosup\0"
+
+fn respawns(w: u64) -> u64 {
+    if s_gen[w as usize] == 0 {
+        return 0
+    }
+    return s_gen[w as usize] - 1
+}
+
+fn armed(w: u64) -> bool {
+    return s_armed[w as usize] != 0
+}
+
+fn match_at(cmd: u64, i: u64, w: u64, n: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if kstate.get8(cmd + i + k) != kstate.get8(w + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn word_edge(cmd: u64, i: u64) -> bool {
+    if i == 0 {
+        return true
+    }
+    return kstate.get8(cmd + i - 1) == 32
+}
+
+fn find(cmd: u64, w: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < 4096 && kstate.get8(cmd + i) != 0 {
+        if word_edge(cmd, i) && match_at(cmd, i, w, n) {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn number_at(cmd: u64, i: u64) -> u64 {
+    var v: u64 = 0
+    var n: u64 = 0
+    while n < 7 && kstate.get8(cmd + i + n) >= 48 && kstate.get8(cmd + i + n) <= 57 {
+        v = v * 10 + (kstate.get8(cmd + i + n) - 48)
+        n = n + 1
+    }
+    return v
+}
+
+fn parse(cmd: u64) {
+    let k: u64 = find(cmd, (&w_kill[0]) as u64, 7)
+    if k != 0 {
+        hook_kill = number_at(cmd, k - 1 + 7)
+    }
+    let o: u64 = find(cmd, (&w_off[0]) as u64, 5)
+    if o != 0 {
+        let e: u64 = kstate.get8(cmd + o - 1 + 5)
+        if e == 0 || e == 32 {
+            disabled = 1
+        }
+    }
+}
+
+fn name_of(w: u64) -> u64 {
+    if w == W_TASKBAR {
+        return (&n_task[0]) as u64
+    }
+    return (&n_lnch[0]) as u64
+}
+
+fn say_head(w: u64) {
+    serial.puts((&t_pre[0]) as u64)
+    serial.puts(name_of(w))
+}
+
+fn say_num(label: u64, v: u64) {
+    serial.puts(label)
+    serial.dec(v)
+}
+
+fn say_end_line() {
+    serial.nl()
+}
+
+fn arm(state: u64, w: u64, slot: u64) {
+    let wi: usize = w as usize
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    s_slot[wi] = slot
+    s_pid[wi] = 0
+    if slot != 0 && slot < kstate.MAX_TASKS {
+        s_pid[wi] = sched.tget(state, slot, sched.T_PID)
+    }
+    s_born[wi] = now
+    if s_wait[wi] == 0 {
+        s_wait[wi] = BASE_WAIT
+    }
+    let again: bool = s_gen[wi] != 0
+    s_gen[wi] = s_gen[wi] + 1
+    s_armed[wi] = 1
+    let z: u64 = serial.line_at(sched.hier(state))
+    say_head(w)
+    if again {
+        serial.puts((&t_back[0]) as u64)
+    } else {
+        serial.puts((&t_start[0]) as u64)
+    }
+    serial.dec(s_pid[wi])
+    say_num((&t_gen[0]) as u64, s_gen[wi])
+    if again {
+        say_num((&t_gap[0]) as u64, now - s_died[wi])
+    }
+    say_num((&t_t[0]) as u64, now)
+    say_end_line()
+    serial.line_clear(z)
+}
+
+fn spawn_failed(state: u64, w: u64) {
+    let wi: usize = w as usize
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    s_next[wi] = now + s_wait[wi]
+    s_wait[wi] = s_wait[wi] * 2
+    if s_wait[wi] > MAX_WAIT {
+        s_wait[wi] = MAX_WAIT
+    }
+}
+
+fn is_gone(state: u64, w: u64, sl: u64, now: u64) -> bool {
+    let wi: usize = w as usize
+    if sl >= kstate.MAX_TASKS {
+        return true
+    }
+    let stt: u64 = sched.tget(state, sl, sched.T_STATE)
+    let stamp: u64 = sched.tget(state, sl, sched.T_PID)
+    if w == W_TASKBAR && hook_kill != 0 && hook_done == 0 && stt != sched.S_ZOMBIE
+        && stt != sched.S_FREE && stamp == s_pid[wi] && now - s_born[wi] >= hook_kill {
+        hook_done = 1
+        let _k: u64 = sched.kill_other(state, sl, s_pid[wi], 9)
+        say_head(w)
+        serial.puts((&t_kill[0]) as u64)
+        say_num((&t_t[0]) as u64, now)
+        say_end_line()
+        return false
+    }
+    if stt != sched.S_FREE && stamp != s_pid[wi] {
+        return true
+    }
+    if stt == sched.S_ZOMBIE {
+        let _r: bool = proc.reap(state, sl)
+        return true
+    }
+    return stt == sched.S_FREE
+}
+
+fn watch(state: u64, w: u64) -> u64 {
+    let wi: usize = w as usize
+    if s_armed[wi] == 0 {
+        return 0
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    let sl: u64 = s_slot[wi]
+    if sl != 0 {
+        if !is_gone(state, w, sl, now) {
+            return 0
+        }
+        let z: u64 = serial.line_at(sched.hier(state))
+        say_head(w)
+        serial.puts((&t_end[0]) as u64)
+        serial.put(61 as u8)
+        serial.dec(sl)
+        say_num((&t_t[0]) as u64, now)
+        say_end_line()
+        serial.line_clear(z)
+        s_slot[wi] = 0
+        s_died[wi] = now
+        if disabled != 0 {
+            s_armed[wi] = 0
+            return 0
+        }
+        if now - s_born[wi] >= STABLE {
+            s_wait[wi] = BASE_WAIT
+        }
+        s_next[wi] = now + s_wait[wi]
+        s_wait[wi] = s_wait[wi] * 2
+        if s_wait[wi] > MAX_WAIT {
+            s_wait[wi] = MAX_WAIT
+        }
+        return 0
+    }
+    if now < s_next[wi] {
+        return 0
+    }
+    return 1
+}

@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import sched.sched
+import serial
+
+export { parse, sys_note, check, stalls, spin_due, RING }
+
+const RING: u64 = 32
+const LIMIT_TICKS: u64 = 100
+const SHOW: u64 = 24
+
+static mut r_num: [u64; 32] = [0 as u64; 32]
+static mut r_slot: [u64; 32] = [0 as u64; 32]
+static mut r_head: u64 = 0
+static mut last_inputs: u64 = 0
+static mut last_rounds: u64 = 0
+static mut last_frames: u64 = 0
+static mut pending_since: u64 = 0
+static mut fired: u64 = 0
+static mut n_stalls: u64 = 0
+static mut spin_ticks: u64 = 0
+static mut spin_base: u64 = 0
+static mut seen_loop: u64 = 0
+
+static mut t_hdr: [u8; 36] = "stall: input without desktop round \0"
+static mut t_rounds: [u8; 9] = " rounds=\0"
+static mut t_frames: [u8; 9] = " frames=\0"
+static mut t_inputs: [u8; 9] = " inputs=\0"
+static mut t_n: [u8; 4] = " n=\0"
+static mut t_t: [u8; 4] = " t=\0"
+static mut t_sys: [u8; 16] = "stall: syscalls\0"
+static mut t_sep: [u8; 2] = ":\0"
+static mut w_spin: [u8; 11] = "stallspin=\0"
+
+fn stalls() -> u64 {
+    return n_stalls
+}
+
+fn sys_note(number: u64, slot: u64) {
+    let h: u64 = r_head
+    r_num[(h & 31) as usize] = number
+    r_slot[(h & 31) as usize] = slot
+    r_head = h + 1
+}
+
+fn match_at(cmd: u64, i: u64, w: u64, n: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if kstate.get8(cmd + i + k) != kstate.get8(w + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn parse(cmd: u64) {
+    var i: u64 = 0
+    while i < 4096 && kstate.get8(cmd + i) != 0 {
+        if (i == 0 || kstate.get8(cmd + i - 1) == 32) && match_at(cmd, i, (&w_spin[0]) as u64, 10) {
+            var v: u64 = 0
+            var n: u64 = 0
+            while n < 7 && kstate.get8(cmd + i + 10 + n) >= 48 && kstate.get8(cmd + i + 10 + n) <= 57 {
+                v = v * 10 + (kstate.get8(cmd + i + 10 + n) - 48)
+                n = n + 1
+            }
+            spin_ticks = v
+            return
+        }
+        i = i + 1
+    }
+}
+
+fn spin_due(state: u64, inputs: u64) -> u64 {
+    if spin_ticks == 0 {
+        return 0
+    }
+    if seen_loop == 0 {
+        spin_base = inputs
+        seen_loop = 1
+        return 0
+    }
+    if inputs == spin_base {
+        return 0
+    }
+    let v: u64 = spin_ticks
+    spin_ticks = 0
+    return v
+}
+
+fn say_kv(label: u64, v: u64) {
+    serial.puts(label)
+    serial.dec(v)
+}
+
+fn dump(state: u64, now: u64, inputs: u64, rounds: u64, frames: u64) {
+    serial.puts((&t_hdr[0]) as u64)
+    serial.dec(now - pending_since)
+    say_kv((&t_rounds[0]) as u64, rounds)
+    say_kv((&t_frames[0]) as u64, frames)
+    say_kv((&t_inputs[0]) as u64, inputs)
+    say_kv((&t_n[0]) as u64, n_stalls)
+    say_kv((&t_t[0]) as u64, now)
+    serial.nl()
+    sched.dump_tasks(state)
+    serial.puts((&t_sys[0]) as u64)
+    var h: u64 = r_head
+    var shown: u64 = 0
+    while shown < SHOW && shown < h {
+        h = h - 1
+        serial.put(32 as u8)
+        serial.dec(r_slot[(h & 31) as usize])
+        serial.puts((&t_sep[0]) as u64)
+        serial.dec(r_num[(h & 31) as usize])
+        shown = shown + 1
+    }
+    serial.nl()
+}
+
+fn check(state: u64, inputs: u64, rounds: u64, frames: u64) -> bool {
+    if rounds == 0 {
+        return false
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if rounds != last_rounds {
+        last_rounds = rounds
+        last_frames = frames
+        last_inputs = inputs
+        pending_since = 0
+        fired = 0
+        return false
+    }
+    if inputs != last_inputs {
+        last_inputs = inputs
+        if pending_since == 0 {
+            pending_since = now
+        }
+    }
+    if pending_since == 0 || fired != 0 || now - pending_since <= LIMIT_TICKS {
+        return false
+    }
+    fired = 1
+    n_stalls = n_stalls + 1
+    dump(state, now, inputs, rounds, frames)
+    return true
+}
