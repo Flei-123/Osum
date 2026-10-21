@@ -506,7 +506,7 @@ fn graphics(state: u64, mbi: u64) {
         let ds: u64 = vmode.dpi_scale(state, fb.width(state))
         if ds != 0 {
             let _sc: bool = fb.set_uiscale(state, ds)
-        } else if vgpu.bereit(state) && vgpu.head_edid_ok(state, 0) {
+        } else if vgpu.usable(state) && vgpu.head_edid_ok(state, 0) {
             // r815: no table EDID (vmode) but the virtual GPU gave one for head 0: its suggested percent
             // (100/125/150/175/200/250/300) rounded to the integer UI scale this kernel has (150 -> 2).
             let vs: u64 = (vgpu.head_scale(state, 0) + 50) / 100
@@ -672,7 +672,7 @@ fn host_boot_fit(state: u64) {
     var s_sc: [u8; 9] = " scale=\0\0"
     var s_x: [u8; 2] = "x\0"
     var hv: u64 = 0
-    if vmsvga.bereit(state) && vmode.ready(state) {
+    if vmsvga.is_ready(state) && vmode.ready(state) {
         hv = vmsvga.boot_hint(state)
         if hv == 0 && kstate.mode_on(state, kstate.M_VMSVGABOOT) {
             hv = (2400 << 16) | 1400
@@ -1712,16 +1712,16 @@ fn vgpuhw_run(state: u64) {
     var s_x: [u8; 2] = "x\0"
     var s_en: [u8; 12] = "vgpuhw: end\0"
     var s_no: [u8; 15] = "vgpuhw: novgpu\0"
-    if !vgpu.bereit(state) {
+    if !vgpu.usable(state) {
         serial.puts((&s_no[0]) as u64)
         serial.nl()
         return
     }
-    let hw: bool = vgpu.cursor_bereit(state) && !kstate.mode_on(state, kstate.M_NOHWCUR)
+    let hw: bool = vgpu.cursor_usable(state) && !kstate.mode_on(state, kstate.M_NOHWCUR)
     let y0: u64 = 300
     let x0: u64 = 300
     if hw {
-        let _z: bool = vgpu.cursor_zeigen(state, 0, 32, x0, y0, 0, 0, 0)
+        let _z: bool = vgpu.cursor_displayed(state, 0, 32, x0, y0, 0, 0, 0)
     }
     let white: u64 = fb.rgb(state, 0xFF, 0xFF, 0xFF)
     // phase 1: moves only
@@ -1787,7 +1787,7 @@ fn vgpuhw_run(state: u64) {
     var lw: u64 = fb.panel_w(state)
     var lh: u64 = fb.panel_h(state)
     while apic.tsc() < until {
-        let _e: bool = gfx.gpu_ereignis(state)
+        let _e: bool = gfx.gpu_event(state)
         let pw: u64 = fb.panel_w(state)
         let ph: u64 = fb.panel_h(state)
         if pw != lw || ph != lh {
@@ -2049,7 +2049,7 @@ fn vmsvga_pause(state: u64, secs: u64) {
     }
     let until: u64 = apic.tsc() + hz * secs
     while apic.tsc() < until {
-        let _e: bool = gfx.gpu_ereignis(state)
+        let _e: bool = gfx.gpu_event(state)
         gfx.bild_fertig(state) // a frame boundary without drawing (the wm does the same every tick)
     }
 }
@@ -2071,13 +2071,13 @@ fn vmsvga_run(state: u64) {
     var s_ip: [u8; 6] = " pio=\0"
     var s_ma: [u8; 8] = " maxat=\0"
     var hw: bool = false
-    let on: bool = vmsvga.bereit(state)
+    let on: bool = vmsvga.is_ready(state)
     let y0: u64 = 300
     let x0: u64 = 300
     if on {
-        hw = vmsvga.cursor_bereit(state)
+        hw = vmsvga.cursor_ready(state)
         if hw {
-            let _z: bool = vmsvga.cursor_zeigen(state, 0, 32, x0, y0, 0, 0, 0)
+            let _z: bool = vmsvga.cursor_show(state, 0, 32, x0, y0, 0, 0, 0)
         }
         let o1: u64 = vmsvga.update_octets(state)
         let m1: u64 = vmsvga.cursor_moves(state)
@@ -6784,7 +6784,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // r1297/r1299: EVERY round, not every 64th. On the VirtualBox VM a round is long and rounds run only when something happens, so
         // 64 rounds were up to ~60 s of wall time until a resize hint was even looked at (measured 66 s, hint 1280x720 -> mode switch);
         // the guest then sat on the old picture and, after the switch, on the dark compositor background until the next repaint.
-        if vmsvga.bereit(state) && !vgpu.bereit(state) {
+        if vmsvga.is_ready(state) && !vgpu.usable(state) {
             let hp: u64 = vmsvga.host_pending(state)
             if hp != 0 {
                 let _hf: u64 = vmode.follow_host(state, hp / 65536, hp % 65536)
@@ -6817,7 +6817,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // once TRACES=0 stopped the host from watching the VRAM. One call per round, on this one core: with nothing painted it costs a
         // time read and compares (no port I/O). tools/vmsvga/desktop.sh is the gate.
         sub(12)
-        wm.cadence_note(state, vmsvga.bereit(state) && vmsvga.pending(state))
+        wm.cadence_note(state, vmsvga.is_ready(state) && vmsvga.pending(state))
         gfx.bild_fertig(state)
         wm.lj_done(state)
         sub(13)
@@ -6859,7 +6859,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
             // verglichen: hat sich seither keine einzige Marke bewegt,
             // steht die Uhr wirklich, und nur dann redet er.
             var feuern: bool = false
-            if jetzt >= naechster + puls_extra() {
+            if jetzt >= naechster + pulse_extra() {
                 naechster = jetzt + PULS_MARKEN
                 naechste_runde = rounds + PULS_RUNDEN
                 letzte_marke = jetzt
@@ -6981,7 +6981,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
                     busy_q = true
                     quiet_why[1] = quiet_why[1] + 1
                 }
-                if vmsvga.bereit(state) && vmsvga.pending(state) {
+                if vmsvga.is_ready(state) && vmsvga.pending(state) {
                     busy_q = true
                     quiet_why[2] = quiet_why[2] + 1
                 }
@@ -7030,7 +7030,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
 // 110-140 ms, every 5 s = ~4-5 % of a core on an idle desktop (measured with sub marks 20-25, QUIET_PULS_EXTRA). On a quiet desktop (see
 // `quiet_seq`, board_quiet != 0) the pulse and the board lines come every 30 s instead of every 5 s; input or a frame ends the quiet state
 // and the next round pulses at once if due. Word `noquiet` = old behaviour.
-const QUIET_PULS_EXTRA: u64 = 2500
+const QUIET_PULSE_EXTRA: u64 = 2500
 
 // W-X3: periodic serial reports go through the non-blocking ring (serial.defer_on) -- except with the profiling word `phases`:
 // its dumps are many KB, the ring would overflow, and gates that count stalls (latency) see the old blocking timing.
@@ -7046,9 +7046,9 @@ fn ser_defer_off(state: u64) {
     }
 }
 
-fn puls_extra() -> u64 {
+fn pulse_extra() -> u64 {
     if board_quiet != 0 {
-        return QUIET_PULS_EXTRA
+        return QUIET_PULSE_EXTRA
     }
     return 0
 }
@@ -7219,12 +7219,12 @@ const TAFEL_MARKEN: u64 = 10 // Zeitmarken zwischen zwei Anstrichen
 // W-X1 (18.10.2026): on a quiet desktop (see `quiet_seq`) the board repaints once per second instead of 10x per second. The board was the
 // whole idle cost of the `boot` task: ~1.2 ms per desktop round (changed lines: tick / IRQ / paint counters + a host flush each) = 9-10 %
 // of a core on QEMU, ~25 % on VirtualBox. Input or a painted frame ends the quiet state within one tick.
-const TAFEL_RUHIG_MARKEN: u64 = 1000
+const BOARD_QUIET_MARKS: u64 = 1000
 static mut board_quiet: u64 = 0
 
-fn tafel_iv() -> u64 {
+fn board_iv() -> u64 {
     if board_quiet != 0 {
-        return TAFEL_RUHIG_MARKEN
+        return BOARD_QUIET_MARKS
     }
     return TAFEL_MARKEN
 }
@@ -8277,7 +8277,7 @@ fn tafel_streichen(state: u64) {
     let nhc: u64 = xhci.count_hc(state)
     tn = puls_text(state, tp, 0, (&t14[0]) as u64)
     tn = puls_text(state, tp, tn, (&w_hc[0]) as u64)
-    tn = pulse_num(state, tp, tn, usb.wahl(state))
+    tn = pulse_num(state, tp, tn, usb.choice(state))
     tn = puls_text(state, tp, tn, (&w_vo[0]) as u64)
     tn = pulse_num(state, tp, tn, nhc)
     tn = puls_text(state, tp, tn, (&w_pk[0]) as u64)
@@ -9495,7 +9495,7 @@ fn tafel_tick(state: u64) {
     // ZWEI UHREN, WIE IN DER SCHLEIFE. Steht der Zeitgeber, zaehlt die
     // Zahl der Rufe -- kommt gar kein Ruf mehr, ist das die Aussage.
     var faellig: bool = false
-    if jetzt >= tafel_irqm + tafel_iv() {
+    if jetzt >= tafel_irqm + board_iv() {
         tafel_irqm = jetzt
         faellig = true
     }
@@ -9505,7 +9505,7 @@ fn tafel_tick(state: u64) {
     // DIE LEITUNG, UNABHAENGIG VON DER SCHLEIFE. Bisher setzte nur der
     // Puls in `wait_wm` die Marke -- laeuft die Schleife nicht, kam auch
     // seriell nichts. Alle fuenf Sekunden, damit es kein Rauschen wird.
-    if jetzt >= tafel_serm + TAFEL_SERMARKEN + puls_extra() {
+    if jetzt >= tafel_serm + TAFEL_SERMARKEN + pulse_extra() {
         tafel_serm = jetzt
         tafel_seriell = 1
         kopf_seriell = 1
@@ -9617,7 +9617,7 @@ fn header_paint(state: u64) {
     let jetzt: u64 = kstate.get(state, kstate.TICKS)
     tafel_runde = tafel_runde + 1
     if jetzt != tafel_marke {
-        if jetzt < tafel_marke + tafel_iv() {
+        if jetzt < tafel_marke + board_iv() {
             return
         }
         tafel_marke = jetzt
@@ -9673,7 +9673,7 @@ fn header_paint(state: u64) {
     n = tz_text(state, b, 0, (&t1[0]) as u64)
     n = pulse_num(state, b, n, ber)
     n = tz_text(state, b, n, (&t_w[0]) as u64)
-    n = pulse_num(state, b, n, usb.wahl(state))
+    n = pulse_num(state, b, n, usb.choice(state))
     board_remember(1, b, n, wm.mess_ampel(state, ber))
     header_line_say(state, b, n)
 
@@ -9887,7 +9887,7 @@ fn input_pulse(state: u64, tw: u64, neustarts: u64) {
     var m_wahl: [u8; 7] = " wahl=\0"
     n = puls_text(state, (&buf[0]) as u64, n, version.text())
     n = puls_text(state, (&buf[0]) as u64, n, (&m_wahl[0]) as u64)
-    n = pulse_num(state, (&buf[0]) as u64, n, usb.wahl(state))
+    n = pulse_num(state, (&buf[0]) as u64, n, usb.choice(state))
     kstate.set8((&buf[0]) as u64 + n, 32)
     n = n + 1
     n = puls_text(state, (&buf[0]) as u64, n, (&m_ber[0]) as u64)

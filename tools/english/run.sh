@@ -29,7 +29,7 @@ printf '%s\n' "$out" | sed 's/^/        /' | head -30
 [ $rc -eq 0 ] && ok "the German in the tree did not grow" || bad "the German in the tree grew"
 
 echo "== 3. the lines added since the merge base are English =="
-base=$(git merge-base HEAD main 2>/dev/null || true)
+base=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main 2>/dev/null || true)
 if [ -z "$base" ] || [ "$base" = "$(git rev-parse HEAD)" ]; then
     ok "nothing added since main (merge base = HEAD)"
 else
@@ -37,5 +37,21 @@ else
     printf '%s\n' "$out" | sed 's/^/        /' | head -40
     [ $rc -eq 0 ] && ok "new lines are English" || bad "German in new lines"
 fi
+echo "== 4. planted German in a scratch repo is caught by --diff =="
+plant=$(mktemp -d)
+trap 'rm -rf "$plant"' EXIT
+mkdir -p "$plant/tools" "$plant/kernel"
+cp -r tools/english "$plant/tools/english"
+rm -rf "$plant/tools/english/__pycache__"
+printf '%s\n' 'fn set_width(x: u64) -> u64 {' '    return x' '}' > "$plant/kernel/probe.fi"
+( cd "$plant" && git init -q . && git add -A && git commit -q -m base ) >/dev/null 2>&1
+printf '%s\n' 'fn breite_setzen(x: u64) -> u64 {' '    // das ist nicht gut, weil die Zeile fehlt' '    return x' '}' >> "$plant/kernel/probe.fi"
+out=$(cd "$plant" && python3 -I tools/english/count.py --diff HEAD 2>&1); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q "new German name" && echo "$out" | grep -q "comment" \
+    && ok "a planted German name and comment line are rejected" || bad "planted German not caught: $out"
+( cd "$plant" && git checkout -q -- kernel/probe.fi ) >/dev/null 2>&1
+printf '%s\n' 'fn set_height(x: u64) -> u64 {' '    // this is fine because the row is there' '    return x' '}' >> "$plant/kernel/probe.fi"
+out=$(cd "$plant" && python3 -I tools/english/count.py --diff HEAD 2>&1); rc=$?
+[ $rc -eq 0 ] && ok "English lines pass" || bad "English lines rejected: $out"
 echo "ENGLISH: $pass passed, $fail failed"
 [ $fail -eq 0 ]

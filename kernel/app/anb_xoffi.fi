@@ -119,24 +119,24 @@ static mut h_mehr: [u8; 22] = "konto.hint.many_orgs\0\0"
 static mut nm: [u8; 6] = "xoffi\0"
 
 fn push() -> anbieter.Push {
-    return anbieter.Push { name: (&nm[0]) as u64, anmelden: anmelden,
-        erneuern: erneuern, abmelden: abmelden,
+    return anbieter.Push { name: (&nm[0]) as u64, sign_in: sign_in,
+        erneuern: erneuern, sign_out: sign_out,
         // RUNDE ROTABSCHNITTE: das FELD heisst `pruefen`
         // (anbieter.fi:131), die Funktion hier heisst `check`.
         // Eine Umbenennung hat den Feldnamen im Literal
         // mitgenommen; seitdem: "struct anbieter__Push has no
         // field check" und "is missing the field pruefen".
-        pruefen: check, hand_over: hand_over }
+        validate: check, hand_over: hand_over }
 }
 
 // ------------------------------------------------------------- Werkzeug
 
-fn target_from(z: *mut anbieter.Zugang, zl: *mut knetz.Target) -> bool {
-    return knetz.target_read((*z).ziel, rt.c_length((*z).ziel),
+fn target_from(z: *mut anbieter.Access, zl: *mut knetz.Target) -> bool {
+    return knetz.target_read((*z).endpoint, rt.c_length((*z).endpoint),
         (*z).zielname, (*z).wurzeln, zl)
 }
 
-fn hinweis(s: *mut anbieter.Sitzung, k: u64) {
+fn hinweis(s: *mut anbieter.Session, k: u64) {
     rt.buf_clear(&(*s).hinweis)
     rt.buf_push_bytes(&(*s).hinweis, k, rt.c_length(k))
 }
@@ -221,7 +221,7 @@ fn fail_bool(b: *mut bool) -> bool {
 
 // ------------------------------------------------------------- anmelden
 
-fn koerper_login(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
+fn koerper_login(z: *mut anbieter.Access, aus: *mut rt.Buf) {
     var s: kjson.Schreiber = kjson.writer_new(aus)
     kjson.field(&s, (&f_login[0]) as u64, (*z).kennung,
         rt.c_length((*z).kennung))
@@ -234,7 +234,7 @@ fn koerper_login(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
     kjson.field_free(&s)
 }
 
-fn koerper_mfa(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
+fn koerper_mfa(z: *mut anbieter.Access, aus: *mut rt.Buf) {
     var s: kjson.Schreiber = kjson.writer_new(aus)
     kjson.field(&s, (&f_temp[0]) as u64, (*z).temp, rt.c_length((*z).temp))
     kjson.field(&s, (&f_code[0]) as u64, (*z).code, rt.c_length((*z).code))
@@ -243,7 +243,7 @@ fn koerper_mfa(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
 
 // Der Keks, den es NICHT geben darf. Er entsteht nur in der kaputten
 // Fassung, damit Abschnitt 5 etwas zu finden hat.
-fn cookie_if_broken(z: *mut anbieter.Zugang, aus: *mut rt.Buf) -> u64 {
+fn cookie_if_broken(z: *mut anbieter.Access, aus: *mut rt.Buf) -> u64 {
     if !kgegen.an(kgegen.G_KEKS) {
         return 0
     }
@@ -252,8 +252,8 @@ fn cookie_if_broken(z: *mut anbieter.Zugang, aus: *mut rt.Buf) -> u64 {
     return aus as u64
 }
 
-fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
-    anbieter.sitzung_leeren(s)
+fn sign_in(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
+    anbieter.clear_session(s)
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
         (*s).stand = anbieter.S_ERROR
@@ -261,11 +261,11 @@ fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
         return (*s).stand
     }
     var koerper: rt.Buf = rt.buf_new()
-    var pfad: u64 = (&p_login[0]) as u64
+    var req_path: u64 = (&p_login[0]) as u64
     var pl: usize = 15
     if (*z).temp != 0 && rt.c_length((*z).temp) > 0 {
         koerper_mfa(z, &koerper)
-        pfad = (&p_mfa[0]) as u64
+        req_path = (&p_mfa[0]) as u64
         pl = 20
     } else {
         koerper_login(z, &koerper)
@@ -276,8 +276,8 @@ fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     if keks != 0 {
         kekslen = keksbuf.len
     }
-    var a: knetz.Antw = knetz.reply_new()
-    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4, pfad, pl,
+    var a: knetz.Reply = knetz.reply_new()
+    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4, req_path, pl,
         koerper.ptr, koerper.len, 0, 0, keksbuf.ptr, kekslen, &a)
     // Das Geheimnis war im Koerper. Es wird ueberschrieben, sobald es
     // auf der Leitung war -- nicht erst, wenn der Puffer freigegeben wird.
@@ -285,7 +285,7 @@ fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     rt.buf_free(&koerper)
     rt.buf_free(&keksbuf)
     if !da {
-        (*s).stand = netz_stand(&a)
+        (*s).stand = net_state(&a)
         knetz.reply_free(&a)
         return (*s).stand
     }
@@ -294,19 +294,19 @@ fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     return r
 }
 
-fn netz_stand(a: *mut knetz.Antw) -> u32 {
-    if (*a).fehler == knetz.F_TLS {
+fn net_state(a: *mut knetz.Reply) -> u32 {
+    if (*a).fail_code == knetz.F_TLS {
         return anbieter.S_TLS
     }
-    if (*a).fehler == knetz.F_KEINNETZ || (*a).fehler == knetz.F_READ
-        || (*a).fehler == knetz.F_DNS {
+    if (*a).fail_code == knetz.F_KEINNETZ || (*a).fail_code == knetz.F_READ
+        || (*a).fail_code == knetz.F_DNS {
         return anbieter.S_KEINNETZ
     }
     return anbieter.S_ERROR
 }
 
-fn reply_read(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung,
-    a: *mut knetz.Antw) -> u32 {
+fn reply_read(z: *mut anbieter.Access, s: *mut anbieter.Session,
+    a: *mut knetz.Reply) -> u32 {
     if (*a).code == 429 as u32 {
         (*s).stand = anbieter.S_GEBREMST
         return (*s).stand
@@ -445,14 +445,14 @@ fn reply_read(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung,
     // das Ziel selbst, und der Mandant trennt sie darin. Mehr sagt
     // dieser Ruecken nicht -- welchen Pfad die Runde SYNC daran haengt,
     // ist deren Sache (docs/KONTO-SYNC.md).
-    rt.buf_push_bytes(&(*s).datenort, (*z).ziel, rt.c_length((*z).ziel))
+    rt.buf_push_bytes(&(*s).datenort, (*z).endpoint, rt.c_length((*z).endpoint))
     kjson.json_free(&d)
 
     var ablauf: u64 = 0
     let cl: u32 = claims_check((*s).zugriff.ptr, (*s).zugriff.len,
         &ablauf)
     if cl != anbieter.S_OK {
-        anbieter.sitzung_leeren(s)
+        anbieter.clear_session(s)
         (*s).stand = cl
         hinweis(s, (&h_master[0]) as u64)
         return (*s).stand
@@ -467,7 +467,7 @@ fn reply_read(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung,
 // DER MOBILE WEG: das Erneuerungstoken steht im KOERPER. Der Web-Weg
 // (gleitend, mit dem Zugriffstoken als Bearer) haengt an einer Sitzung,
 // die ein Geraet nicht hat.
-fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn erneuern(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
         (*s).stand = anbieter.S_ERROR
@@ -478,14 +478,14 @@ fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     kjson.field(&w, (&f_refresh[0]) as u64, (*z).erneuerung,
         rt.c_length((*z).erneuerung))
     kjson.field_free(&w)
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
         (&p_refresh[0]) as u64, 17, koerper.ptr, koerper.len, 0, 0, 0, 0,
         &a)
     rt.mem_set(koerper.ptr, 0 as u8, koerper.len)
     rt.buf_free(&koerper)
     if !da {
-        (*s).stand = netz_stand(&a)
+        (*s).stand = net_state(&a)
         knetz.reply_free(&a)
         return (*s).stand
     }
@@ -543,7 +543,7 @@ fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
 
 // ------------------------------------------------------------- abmelden
 
-fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn sign_out(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     if kgegen.an(kgegen.G_NURLOKAL) {
         (*s).stand = anbieter.S_OK
         return (*s).stand
@@ -553,13 +553,13 @@ fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
         (*s).stand = anbieter.S_ERROR
         return (*s).stand
     }
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
         (&p_logout[0]) as u64, 16, 0, 0, (*z).zugriff,
         rt.c_length((*z).zugriff), 0, 0, &a)
     var stand: u32 = anbieter.S_OK
     if !da {
-        stand = netz_stand(&a)
+        stand = net_state(&a)
     } else if a.code != 200 as u32 {
         stand = anbieter.S_ERROR
     }
@@ -569,23 +569,23 @@ fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
 }
 
 // no hand-over for this back end (konto --exchange)
-fn hand_over(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn hand_over(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     return anbieter.S_ERROR
 }
 
-fn check(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn check(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
         (*s).stand = anbieter.S_ERROR
         return (*s).stand
     }
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_get[0]) as u64, 3,
         (&p_health[0]) as u64, 16, 0, 0, (*z).zugriff,
         rt.c_length((*z).zugriff), 0, 0, &a)
     var stand: u32 = anbieter.S_OK
     if !da {
-        stand = netz_stand(&a)
+        stand = net_state(&a)
     } else if a.code == 401 as u32 || a.code == 403 as u32 {
         stand = anbieter.S_ABGELAUFEN
     } else if a.code != 200 as u32 {

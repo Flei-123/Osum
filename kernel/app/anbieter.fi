@@ -62,10 +62,10 @@ import std.rt
 import std.crypto.sha256
 
 export {
-    Zugang, Sitzung, Push,
-    access_new, session_new, session_free, sitzung_leeren,
+    Access, Session, Push,
+    access_new, session_new, session_free, clear_session,
     eintragen, anzahl, waehle, name_von, board_set, empty_push,
-    tu_anmelden, tu_erneuern, do_hand_over, tu_abmelden, do_check,
+    do_sign_in, tu_erneuern, do_hand_over, do_sign_out, do_check,
     kennung,
     S_OK, S_WRONG, S_ZWEITFAKTOR, S_MEHRDEUTIG, S_KEINNETZ, S_TLS,
     S_ABGELEHNT, S_ABGELAUFEN, S_ERROR, S_GEBREMST, S_DEVICE,
@@ -91,20 +91,20 @@ const S_GEBREMST: u32 = 8        // der Server bremst (zu viele Versuche)
 // beides gleich meldet, schickt den Nutzer WLAN suchen, waehrend in
 // Wahrheit jemand dazwischensitzt.
 const S_TLS: u32 = 9             // der Handschlag/das Zertifikat war faul
-// GERAETEANMELDUNG (RFC 8628): die Anmeldung laeuft auf einem ANDEREN
-// Geraet (Telefon, Rechner). Dieses Geraet zeigt einen Code und eine
-// Adresse (`dev_code`, `dev_url`, `dev_url_full`), haelt den Geraetecode in `temp` und
-// fragt in `interval` Sekunden wieder -- derselbe Aufruf von `anmelden`
-// mit gesetztem `Zugang.temp`. `S_DEVICE` heisst "noch nicht entschieden,
-// frag spaeter nochmal"; `S_GEBREMST` beim Nachfragen heisst "langsamer"
-// (der Aufrufer addiert 5 s, wie RFC 8628 3.5 es verlangt).
+// DEVICE SIGN-IN (RFC 8628): the sign-in runs on ANOTHER
+// device (phone, computer). This device shows a code and an
+// address (`dev_code`, `dev_url`, `dev_url_full`), keeps the device code in `temp` and
+// asks again every `interval` seconds -- the same call of `sign_in`
+// with `Access.temp` set. `S_DEVICE` means "not decided yet,
+// ask again later"; `S_GEBREMST` while polling means "slower"
+// (the caller adds 5 s, as RFC 8628 3.5 requires).
 const S_DEVICE: u32 = 10
 
 // Was ein Ruecken zum Anmelden bekommt. Alles Zeiger auf Text, der den
 // Aufruf ueberlebt; `geheim` zeigt in einen Puffer, den der Aufrufer
 // hinterher ueberschreibt.
-struct Zugang {
-    ziel: u64,
+struct Access {
+    endpoint: u64,
     zielname: u64,
     wurzeln: u64,
     kennung: u64,
@@ -114,17 +114,17 @@ struct Zugang {
     temp: u64,
     zugriff: u64,
     erneuerung: u64,
-    // Geraeteanmeldung: `modus` 1 = ohne Geheimnis, der Ruecken startet
-    // (temp == 0) oder fragt nach (temp = Geraetecode). `klient` und
-    // `zielgruppe` ueberschreiben die Voreinstellungen des Ruecken
-    // (Client-Kennung, erwartetes `aud`); 0 = Voreinstellung.
+    // Device sign-in: `modus` 1 = without secret, the back end starts
+    // (temp == 0) or polls (temp = device code). `klient` and
+    // `zielgruppe` override the back end's defaults
+    // (client id, expected `aud`); 0 = default.
     modus: u64,
     klient: u64,
     zielgruppe: u64,
 }
 
 // Was ein Ruecken zurueckgibt.
-struct Sitzung {
+struct Session {
     stand: u32,
     subjekt: rt.Buf,
     anzeige: rt.Buf,
@@ -136,8 +136,8 @@ struct Sitzung {
     auswahl: rt.Buf,
     hinweis: rt.Buf,
     ablauf: u64,
-    // Nur bei S_DEVICE: Code zum Abtippen, Adresse, Adresse mit Code,
-    // Sekunden zwischen zwei Nachfragen, Gueltigkeit des Geraetecodes.
+    // Only with S_DEVICE: code to type in, address, address with code,
+    // seconds between two polls, validity of the device code.
     dev_code: rt.Buf,
     dev_url: rt.Buf,
     dev_url_full: rt.Buf,
@@ -147,23 +147,23 @@ struct Sitzung {
 
 struct Push {
     name: u64,
-    anmelden: fn(*mut Zugang, *mut Sitzung) -> u32,
-    erneuern: fn(*mut Zugang, *mut Sitzung) -> u32,
-    abmelden: fn(*mut Zugang, *mut Sitzung) -> u32,
-    pruefen: fn(*mut Zugang, *mut Sitzung) -> u32,
+    sign_in: fn(*mut Access, *mut Session) -> u32,
+    erneuern: fn(*mut Access, *mut Session) -> u32,
+    sign_out: fn(*mut Access, *mut Session) -> u32,
+    validate: fn(*mut Access, *mut Session) -> u32,
     // hand the signed-in session's access token on (konto --exchange);
     // S_OK, S_KEINNETZ, S_ABGELEHNT (hint says why) or S_ERROR
-    hand_over: fn(*mut Zugang, *mut Sitzung) -> u32,
+    hand_over: fn(*mut Access, *mut Session) -> u32,
 }
 
-fn access_new() -> Zugang {
-    return Zugang { ziel: 0, zielname: 0, wurzeln: 0, kennung: 0,
+fn access_new() -> Access {
+    return Access { endpoint: 0, zielname: 0, wurzeln: 0, kennung: 0,
         geheim: 0, bereich: 0, code: 0, temp: 0, zugriff: 0,
         erneuerung: 0, modus: 0, klient: 0, zielgruppe: 0 }
 }
 
-fn session_new() -> Sitzung {
-    return Sitzung { stand: S_ERROR, subjekt: rt.buf_new(),
+fn session_new() -> Session {
+    return Session { stand: S_ERROR, subjekt: rt.buf_new(),
         anzeige: rt.buf_new(), bereich: rt.buf_new(),
         datenort: rt.buf_new(), zugriff: rt.buf_new(),
         erneuerung: rt.buf_new(), temp: rt.buf_new(),
@@ -172,7 +172,7 @@ fn session_new() -> Sitzung {
         interval: 0, expires_in: 0 }
 }
 
-fn sitzung_leeren(s: *mut Sitzung) {
+fn clear_session(s: *mut Session) {
     (*s).stand = S_ERROR
     (*s).ablauf = 0
     rt.buf_clear(&(*s).subjekt)
@@ -191,7 +191,7 @@ fn sitzung_leeren(s: *mut Sitzung) {
     (*s).expires_in = 0
 }
 
-fn session_free(s: *mut Sitzung) {
+fn session_free(s: *mut Session) {
     rt.buf_free(&(*s).subjekt)
     rt.buf_free(&(*s).anzeige)
     rt.buf_free(&(*s).bereich)
@@ -208,13 +208,13 @@ fn session_free(s: *mut Sitzung) {
 
 // ------------------------------------------------------------ die Tafel
 
-fn empty(z: *mut Zugang, s: *mut Sitzung) -> u32 {
+fn empty(z: *mut Access, s: *mut Session) -> u32 {
     return S_ERROR
 }
 
 fn empty_push() -> Push {
-    return Push { name: 0, anmelden: empty, erneuern: empty,
-        abmelden: empty, pruefen: empty, hand_over: empty }
+    return Push { name: 0, sign_in: empty, erneuern: empty,
+        sign_out: empty, validate: empty, hand_over: empty }
 }
 
 // SPRACHGRENZE, und sie steht hier, weil sie die Bauform bestimmt hat:
@@ -297,43 +297,43 @@ fn name_von(i: usize) -> u64 {
     return (*space(i)).name
 }
 
-fn tu_anmelden(i: usize, z: *mut Zugang, s: *mut Sitzung) -> u32 {
+fn do_sign_in(i: usize, z: *mut Access, s: *mut Session) -> u32 {
     if i >= n_ruecken {
         return S_ERROR
     }
-    let f: fn(*mut Zugang, *mut Sitzung) -> u32 = (*space(i)).anmelden
+    let f: fn(*mut Access, *mut Session) -> u32 = (*space(i)).sign_in
     return f(z, s)
 }
 
-fn do_hand_over(i: usize, z: *mut Zugang, s: *mut Sitzung) -> u32 {
+fn do_hand_over(i: usize, z: *mut Access, s: *mut Session) -> u32 {
     if i >= n_ruecken {
         return S_ERROR
     }
-    let f: fn(*mut Zugang, *mut Sitzung) -> u32 = (*space(i)).hand_over
+    let f: fn(*mut Access, *mut Session) -> u32 = (*space(i)).hand_over
     return f(z, s)
 }
 
-fn tu_erneuern(i: usize, z: *mut Zugang, s: *mut Sitzung) -> u32 {
+fn tu_erneuern(i: usize, z: *mut Access, s: *mut Session) -> u32 {
     if i >= n_ruecken {
         return S_ERROR
     }
-    let f: fn(*mut Zugang, *mut Sitzung) -> u32 = (*space(i)).erneuern
+    let f: fn(*mut Access, *mut Session) -> u32 = (*space(i)).erneuern
     return f(z, s)
 }
 
-fn tu_abmelden(i: usize, z: *mut Zugang, s: *mut Sitzung) -> u32 {
+fn do_sign_out(i: usize, z: *mut Access, s: *mut Session) -> u32 {
     if i >= n_ruecken {
         return S_ERROR
     }
-    let f: fn(*mut Zugang, *mut Sitzung) -> u32 = (*space(i)).abmelden
+    let f: fn(*mut Access, *mut Session) -> u32 = (*space(i)).sign_out
     return f(z, s)
 }
 
-fn do_check(i: usize, z: *mut Zugang, s: *mut Sitzung) -> u32 {
+fn do_check(i: usize, z: *mut Access, s: *mut Session) -> u32 {
     if i >= n_ruecken {
         return S_ERROR
     }
-    let f: fn(*mut Zugang, *mut Sitzung) -> u32 = (*space(i)).pruefen
+    let f: fn(*mut Access, *mut Session) -> u32 = (*space(i)).validate
     return f(z, s)
 }
 

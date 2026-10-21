@@ -122,28 +122,28 @@ const LEEWAY: i64 = 30
 const DEFAULT_INTERVAL: u64 = 5
 
 fn push() -> anbieter.Push {
-    return anbieter.Push { name: (&nm[0]) as u64, anmelden: anmelden,
-        erneuern: erneuern, abmelden: abmelden, pruefen: check, hand_over: hand_over }
+    return anbieter.Push { name: (&nm[0]) as u64, sign_in: sign_in,
+        erneuern: erneuern, sign_out: sign_out, validate: check, hand_over: hand_over }
 }
 
 // ------------------------------------------------------------------ tools
 
-fn target_from(z: *mut anbieter.Zugang, zl: *mut knetz.Target) -> bool {
-    return knetz.target_read((*z).ziel, rt.c_length((*z).ziel),
+fn target_from(z: *mut anbieter.Access, zl: *mut knetz.Target) -> bool {
+    return knetz.target_read((*z).endpoint, rt.c_length((*z).endpoint),
         (*z).zielname, (*z).wurzeln, zl)
 }
 
-fn hint(s: *mut anbieter.Sitzung, k: u64) {
+fn hint(s: *mut anbieter.Session, k: u64) {
     rt.buf_clear(&(*s).hinweis)
     rt.buf_push_bytes(&(*s).hinweis, k, rt.c_length(k))
 }
 
-fn net_state(a: *mut knetz.Antw) -> u32 {
-    if (*a).fehler == knetz.F_TLS {
+fn net_state(a: *mut knetz.Reply) -> u32 {
+    if (*a).fail_code == knetz.F_TLS {
         return anbieter.S_TLS
     }
-    if (*a).fehler == knetz.F_KEINNETZ || (*a).fehler == knetz.F_READ
-        || (*a).fehler == knetz.F_DNS {
+    if (*a).fail_code == knetz.F_KEINNETZ || (*a).fail_code == knetz.F_READ
+        || (*a).fail_code == knetz.F_DNS {
         return anbieter.S_KEINNETZ
     }
     return anbieter.S_ERROR
@@ -182,14 +182,14 @@ fn form_add_c(b: *mut rt.Buf, key: u64, val: u64) {
     form_add(b, key, val, rt.c_length(val))
 }
 
-fn client_of(z: *mut anbieter.Zugang) -> u64 {
+fn client_of(z: *mut anbieter.Access) -> u64 {
     if (*z).klient != 0 {
         return (*z).klient
     }
     return (&d_client[0]) as u64
 }
 
-fn aud_of(z: *mut anbieter.Zugang) -> u64 {
+fn aud_of(z: *mut anbieter.Access) -> u64 {
     if (*z).zielgruppe != 0 {
         return (*z).zielgruppe
     }
@@ -197,12 +197,12 @@ fn aud_of(z: *mut anbieter.Zugang) -> u64 {
 }
 
 // The expected issuer as a C string: the target without trailing slashes.
-fn issuer_of(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
-    var n: usize = rt.c_length((*z).ziel)
-    while n > 0 && rt.ld8((*z).ziel, n - 1) == 47 as u8 {
+fn issuer_of(z: *mut anbieter.Access, aus: *mut rt.Buf) {
+    var n: usize = rt.c_length((*z).endpoint)
+    while n > 0 && rt.ld8((*z).endpoint, n - 1) == 47 as u8 {
         n = n - 1
     }
-    rt.buf_push_bytes(aus, (*z).ziel, n)
+    rt.buf_push_bytes(aus, (*z).endpoint, n)
     rt.buf_push(aus, 0 as u8)
 }
 
@@ -213,17 +213,17 @@ fn now_secs() -> i64 {
 }
 
 // POST a form body (secrets in it are wiped right after the call).
-fn post_form(zl: *mut knetz.Target, pfad: u64, body: *mut rt.Buf,
-    a: *mut knetz.Antw) -> bool {
-    let da: bool = knetz.sende_form(zl, (&m_post[0]) as u64, 4, pfad,
-        rt.c_length(pfad), (*body).ptr, (*body).len, 0, 0, a)
+fn post_form(zl: *mut knetz.Target, req_path: u64, body: *mut rt.Buf,
+    a: *mut knetz.Reply) -> bool {
+    let da: bool = knetz.sende_form(zl, (&m_post[0]) as u64, 4, req_path,
+        rt.c_length(req_path), (*body).ptr, (*body).len, 0, 0, a)
     rt.mem_set((*body).ptr, 0 as u8, (*body).len)
     rt.buf_free(body)
     return da
 }
 
 // error field of an OAuth error answer ("" when there is none)
-fn error_of(a: *mut knetz.Antw, aus: *mut rt.Buf) {
+fn error_of(a: *mut knetz.Reply, aus: *mut rt.Buf) {
     var d: kjson.Json = kjson.json_new()
     if kjson.json_parse(&d, (*a).koerper.ptr, (*a).koerper.len)
         && kjson.json_valid(&d) {
@@ -254,8 +254,8 @@ fn jwt_hint(r: u32) -> u64 {
 //
 // A 200 answer of the token endpoint -> a session. Every refusal sets the
 // state and a hint and leaves `s` without tokens.
-fn tokens_take(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
-    a: *mut knetz.Antw, s: *mut anbieter.Sitzung, subject_known: bool) -> u32 {
+fn tokens_take(z: *mut anbieter.Access, zl: *mut knetz.Target,
+    a: *mut knetz.Reply, s: *mut anbieter.Session, subject_known: bool) -> u32 {
     var d: kjson.Json = kjson.json_new()
     var accb: rt.Buf = rt.buf_new()
     var idb: rt.Buf = rt.buf_new()
@@ -307,9 +307,9 @@ fn tokens_take(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
 }
 
 // JWKS fetch + the checks. S_OK fills subject/display/datenort/ablauf.
-fn verify_into(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
-    s: *mut anbieter.Sitzung, accb: *mut rt.Buf, idb: *mut rt.Buf) -> u32 {
-    var ja: knetz.Antw = knetz.reply_new()
+fn verify_into(z: *mut anbieter.Access, zl: *mut knetz.Target,
+    s: *mut anbieter.Session, accb: *mut rt.Buf, idb: *mut rt.Buf) -> u32 {
+    var ja: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(zl, (&m_get[0]) as u64, 3,
         (&p_jwks[0]) as u64, rt.c_length((&p_jwks[0]) as u64), 0, 0, 0, 0, 0,
         0, &ja)
@@ -360,7 +360,7 @@ fn verify_into(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
             rt.buf_push_bytes(&(*s).anzeige, cl.sub.ptr, cl.sub.len)
         }
         rt.buf_clear(&(*s).datenort)
-        rt.buf_push_bytes(&(*s).datenort, (*z).ziel, rt.c_length((*z).ziel))
+        rt.buf_push_bytes(&(*s).datenort, (*z).endpoint, rt.c_length((*z).endpoint))
         (*s).ablauf = cl.exp
     }
     kjwt.claims_free(&cl)
@@ -372,12 +372,12 @@ fn verify_into(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
 // ------------------------------------------------------------------ steps
 
 // Step 1: ask the service for a device code.
-fn start(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
-    s: *mut anbieter.Sitzung) -> u32 {
+fn start(z: *mut anbieter.Access, zl: *mut knetz.Target,
+    s: *mut anbieter.Session) -> u32 {
     var body: rt.Buf = rt.buf_new()
     form_add_c(&body, (&k_clientid[0]) as u64, client_of(z))
     form_add_c(&body, (&k_scope[0]) as u64, (&v_scope[0]) as u64)
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = post_form(zl, (&p_dev[0]) as u64, &body, &a)
     if !da {
         (*s).stand = net_state(&a)
@@ -435,13 +435,13 @@ fn start(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
 }
 
 // Step 2: ask once whether the human has decided.
-fn poll(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
-    s: *mut anbieter.Sitzung) -> u32 {
+fn poll(z: *mut anbieter.Access, zl: *mut knetz.Target,
+    s: *mut anbieter.Session) -> u32 {
     var body: rt.Buf = rt.buf_new()
     form_add_c(&body, (&k_grant[0]) as u64, (&v_gdev[0]) as u64)
     form_add_c(&body, (&k_devcode[0]) as u64, (*z).temp)
     form_add_c(&body, (&k_clientid[0]) as u64, client_of(z))
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = post_form(zl, (&p_tok[0]) as u64, &body, &a)
     if !da {
         (*s).stand = net_state(&a)
@@ -478,8 +478,8 @@ fn poll(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
     return st
 }
 
-fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
-    anbieter.sitzung_leeren(s)
+fn sign_in(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
+    anbieter.clear_session(s)
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
         (*s).stand = anbieter.S_ERROR
@@ -492,8 +492,8 @@ fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     return poll(z, &zl, s)
 }
 
-fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
-    anbieter.sitzung_leeren(s)
+fn erneuern(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
+    anbieter.clear_session(s)
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
         (*s).stand = anbieter.S_ERROR
@@ -509,7 +509,7 @@ fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     form_add_c(&body, (&k_grant[0]) as u64, (&v_gref[0]) as u64)
     form_add_c(&body, (&k_refresh[0]) as u64, (*z).erneuerung)
     form_add_c(&body, (&k_clientid[0]) as u64, client_of(z))
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = post_form(&zl, (&p_tok[0]) as u64, &body, &a)
     if !da {
         (*s).stand = net_state(&a)
@@ -533,7 +533,7 @@ fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     return st
 }
 
-fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn sign_out(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
         (*s).stand = anbieter.S_ERROR
@@ -547,7 +547,7 @@ fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     form_add_c(&body, (&k_token[0]) as u64, (*z).erneuerung)
     form_add_c(&body, (&k_hint[0]) as u64, (&v_hintref[0]) as u64)
     form_add_c(&body, (&k_clientid[0]) as u64, client_of(z))
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = post_form(&zl, (&p_rev[0]) as u64, &body, &a)
     var st: u32 = anbieter.S_OK
     if !da {
@@ -560,13 +560,13 @@ fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     return st
 }
 
-fn check(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn check(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
         (*s).stand = anbieter.S_ERROR
         return (*s).stand
     }
-    var a: knetz.Antw = knetz.reply_new()
+    var a: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_get[0]) as u64, 3,
         (&p_me[0]) as u64, rt.c_length((&p_me[0]) as u64), 0, 0, (*z).zugriff,
         rt.c_length((*z).zugriff), 0, 0, &a)
@@ -648,7 +648,7 @@ fn fd_at(b: u64, at: usize) -> i64 {
         | ((rt.ld8(b, at + 2) as i64) << 16) | ((rt.ld8(b, at + 3) as i64) << 24)
 }
 
-fn hand_over(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+fn hand_over(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     let tok: u64 = (*s).zugriff.ptr
     let tl: usize = (*s).zugriff.len
     if tl == 0 || !token_has_uid(tok, tl) {
@@ -676,13 +676,13 @@ fn hand_over(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
         var a2: [u8; 6] = "login\0"
         var a3: [u8; 7] = "broker\0"
         var a4: [u8; 3] = "-s\0"
-        var zeiger: [u64; 6] = [0; 6]
-        zeiger[0] = (&p0[0]) as u64
-        zeiger[1] = (&a1[0]) as u64
-        zeiger[2] = (&a2[0]) as u64
-        zeiger[3] = (&a3[0]) as u64
-        zeiger[4] = (&a4[0]) as u64
-        syscall(SC_EXECVE, zeiger[0] as i64, (&zeiger[0]) as i64, 0, 0, 0, 0)
+        var pointer: [u64; 6] = [0; 6]
+        pointer[0] = (&p0[0]) as u64
+        pointer[1] = (&a1[0]) as u64
+        pointer[2] = (&a2[0]) as u64
+        pointer[3] = (&a3[0]) as u64
+        pointer[4] = (&a4[0]) as u64
+        syscall(SC_EXECVE, pointer[0] as i64, (&pointer[0]) as i64, 0, 0, 0, 0)
         rt.finish(127)
     }
     syscall(SC_CLOSE, rfd, 0, 0, 0, 0, 0)

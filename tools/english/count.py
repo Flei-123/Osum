@@ -71,7 +71,7 @@ SKIP_PREFIX = ("locale/", "vendor/", "tools/english/", "docs/shots/", "docs/bele
                "assets/", "pkg/", "pakete/", "LICENSES/", "THIRD_PARTY", "0x")
 SKIP_NAMES = {"LICENSE", "LICENSE.MIT", "LICENSE.MIT.old", "COPYING"}
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-DECL = re.compile(r"\b(fn|let|var|const|struct|enum|mut)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)")
+DECL = re.compile(r"(?<!\*)\b(fn|let|var|const|struct|enum|mut)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)")
 WORD = re.compile(r"[A-Za-zÄÖÜäöüß]+")
 
 

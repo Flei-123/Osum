@@ -90,10 +90,10 @@ const LINE_STALE: u64 = 300000000
 
 static mut zeile_wer: [u64; 1] = [0 as u64; 1]
 static mut zeile_daneben: [u64; 1] = [0 as u64; 1]
-static mut zeile_stamp: [u64; 1] = [0 as u64; 1] // arch.cycles() of the owner's last octet
-static mut zeile_auto: [u64; 1] = [0 as u64; 1] // 1 = a newline gives the lock back
-static mut zeile_offen: [u64; 1] = [0 as u64; 1] // 1 = the last octet was not a newline
-static mut zeile_stolen: [u64; 1] = [0 as u64; 1] // takeovers from a stale owner
+static mut entry_stamp: [u64; 1] = [0 as u64; 1] // arch.cycles() of the owner's last octet
+static mut entry_auto: [u64; 1] = [0 as u64; 1] // 1 = a newline gives the lock back
+static mut entry_open: [u64; 1] = [0 as u64; 1] // 1 = the last octet was not a newline
+static mut entry_stolen: [u64; 1] = [0 as u64; 1] // takeovers from a stale owner
 
 // Rueckgabe: 0 = nothing to give back (nested over an explicit holder, or
 // timed out), 1 = I took it, 2 = I was the owner through an open line and
@@ -101,8 +101,8 @@ static mut zeile_stolen: [u64; 1] = [0 as u64; 1] // takeovers from a stale owne
 fn line_at(me: u64) -> u64 {
     let a: u64 = (&zeile_wer[0]) as u64
     if __mmio_read64(a as *mut u64) == me + 1 {
-        if __mmio_read64((&zeile_auto[0]) as u64 as *mut u64) != 0 as u64 {
-            zeile_auto[0] = 0
+        if __mmio_read64((&entry_auto[0]) as u64 as *mut u64) != 0 as u64 {
+            entry_auto[0] = 0
             return 2
         }
         return 0 // schon meine -- eingeschachtelt, nichts tun
@@ -112,12 +112,12 @@ fn line_at(me: u64) -> u64 {
         // stale owner? (it has written nothing for LINE_STALE cycles)
         let o: u64 = __mmio_read64(a as *mut u64)
         let now: u64 = arch.cycles()
-        let st: u64 = __mmio_read64((&zeile_stamp[0]) as u64 as *mut u64)
+        let st: u64 = __mmio_read64((&entry_stamp[0]) as u64 as *mut u64)
         if o != 0 as u64 && now > st && now - st > LINE_STALE {
             if __atomic_swap(a as *mut u64, o, me + 1) == o {
-                zeile_stolen[0] = zeile_stolen[0] + 1
-                zeile_auto[0] = 0
-                zeile_stamp[0] = now
+                entry_stolen[0] = entry_stolen[0] + 1
+                entry_auto[0] = 0
+                entry_stamp[0] = now
                 return 1
             }
         }
@@ -128,7 +128,7 @@ fn line_at(me: u64) -> u64 {
             return 0
         }
     }
-    zeile_stamp[0] = arch.cycles()
+    entry_stamp[0] = arch.cycles()
     return 1
 }
 
@@ -143,11 +143,11 @@ fn line_clear(hat: u64) {
     if __mmio_read64(a as *mut u64) != me + 1 {
         return
     }
-    if __mmio_read64((&zeile_offen[0]) as u64 as *mut u64) != 0 as u64 {
-        zeile_auto[0] = 1
+    if __mmio_read64((&entry_open[0]) as u64 as *mut u64) != 0 as u64 {
+        entry_auto[0] = 1
         return
     }
-    zeile_auto[0] = 0
+    entry_auto[0] = 0
     arch.atomic_store(a, 0)
 }
 
@@ -156,7 +156,7 @@ fn line_lost() -> u64 {
 }
 
 fn line_stolen() -> u64 {
-    return zeile_stolen[0]
+    return entry_stolen[0]
 }
 
 // 0x3F8 = COM1 on every PC that has ever existed
@@ -565,21 +565,21 @@ fn put(c: u8) {
     let me: u64 = cpu.here(st)
     let z: u64 = line_at(me)
     if z != 0 {
-        zeile_auto[0] = 1
+        entry_auto[0] = 1
     }
     let a: u64 = (&zeile_wer[0]) as u64
     if __mmio_read64(a as *mut u64) == me + 1 {
-        zeile_stamp[0] = arch.cycles()
+        entry_stamp[0] = arch.cycles()
     }
     put_raw(c)
     if c == 10 as u8 {
-        zeile_offen[0] = 0
-        if __mmio_read64((&zeile_auto[0]) as u64 as *mut u64) != 0 as u64 && __mmio_read64(a as *mut u64) == me + 1 {
-            zeile_auto[0] = 0
+        entry_open[0] = 0
+        if __mmio_read64((&entry_auto[0]) as u64 as *mut u64) != 0 as u64 && __mmio_read64(a as *mut u64) == me + 1 {
+            entry_auto[0] = 0
             arch.atomic_store(a, 0)
         }
     } else {
-        zeile_offen[0] = 1
+        entry_open[0] = 1
     }
 }
 

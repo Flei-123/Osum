@@ -30,13 +30,13 @@
 //
 // ================================================== WAS ES NICHT KANN
 //
-// N1 (r34: ueberholt) Ein Ziel darf jetzt auch einen NAMEN tragen
-//    (`https://id.example:8443`). Er wird beim ersten `sende`/`send_raw`
-//    ueber `libc.dns` (A-Satz, IPv4) aufgeloest, mit Zeitgrenze aus
-//    /etc/resolv.conf und einem kleinen Zwischenspeicher (60 s). Der NAME
-//    bleibt Zertifikatsname, SNI und Host-Kopf -- die Aufloesung aendert
-//    nur, WOHIN verbunden wird, nie, wogegen geprueft wird. Ein IPv4-
-//    Literal geht wie bisher. Kein IPv6 (nur A-Saetze).
+// N1 (r34: superseded) A target may now also carry a NAME
+//    (`https://id.example:8443`). It is resolved on the first `sende`/`send_raw`
+//    through `libc.dns` (A record, IPv4), with a time limit from
+//    /etc/resolv.conf and a small cache (60 s). The NAME
+//    stays certificate name, SNI and Host header -- the resolution only changes
+//    WHERE the connection goes, never what is verified against. An IPv4
+//    literal works as before. No IPv6 (A records only).
 // N2 KEINE UMLEITUNG. Eine Anmeldung, die umgeleitet wird, ist eine
 //    Anmeldung an einem anderen Ort als dem, den der Nutzer eingetragen
 //    hat. Das ist keine Bequemlichkeit, das ist ein Angriff.
@@ -53,8 +53,8 @@ import tls.x509
 import libc.dns
 
 export {
-    Target, Antw,
-    target_new, target_read, target_resolve, reply_new, reply_free, antw_leeren,
+    Target, Reply,
+    target_new, target_read, target_resolve, reply_new, reply_free, reply_clear,
     sende, sende_form, send_raw, header_find,
     F_OK, F_KEINNETZ, F_TLS, F_FORM, F_ADRESSE, F_SENDEN, F_READ, F_DNS,
     last_check,
@@ -93,9 +93,9 @@ struct Target {
     hostlen: usize,
 }
 
-struct Antw {
+struct Reply {
     code: u32,
-    fehler: u32,
+    fail_code: u32,
     kopf: rt.Buf,
     koerper: rt.Buf,
 }
@@ -105,19 +105,19 @@ fn target_new() -> Target {
         namelen: 0, wurzeln: 0, host: 0, hostlen: 0 }
 }
 
-fn reply_new() -> Antw {
-    return Antw { code: 0 as u32, fehler: F_OK, kopf: rt.buf_new(),
+fn reply_new() -> Reply {
+    return Reply { code: 0 as u32, fail_code: F_OK, kopf: rt.buf_new(),
         koerper: rt.buf_new() }
 }
 
-fn reply_free(a: *mut Antw) {
+fn reply_free(a: *mut Reply) {
     rt.buf_free(&(*a).kopf)
     rt.buf_free(&(*a).koerper)
 }
 
-fn antw_leeren(a: *mut Antw) {
+fn reply_clear(a: *mut Reply) {
     (*a).code = 0 as u32
-    (*a).fehler = F_OK
+    (*a).fail_code = F_OK
     rt.buf_clear(&(*a).kopf)
     rt.buf_clear(&(*a).koerper)
 }
@@ -398,16 +398,16 @@ fn target_resolve(z: *mut Target) -> bool {
 }
 
 // Shared first step of `sende` / `send_raw`: an address, or the reason why not.
-fn target_ready(z: *mut Target, a: *mut Antw) -> bool {
+fn target_ready(z: *mut Target, a: *mut Reply) -> bool {
     if (*z).adr != 0 as u32 {
         return true
     }
     if (*z).host == 0 {
-        (*a).fehler = F_ADRESSE
+        (*a).fail_code = F_ADRESSE
         return false
     }
     if !target_resolve(z) {
-        (*a).fehler = F_DNS
+        (*a).fail_code = F_DNS
         return false
     }
     return true
@@ -418,7 +418,7 @@ fn target_ready(z: *mut Target, a: *mut Antw) -> bool {
 // JEDE Kopfzeile steht hier, und es gibt genau eine Stelle, an der eine
 // entsteht. Wer eine sucht, die nicht hier steht, findet keine.
 fn anfrage(req: *mut rt.Buf, z: *mut Target, methode: u64, ml: usize,
-    pfad: u64, pl: usize, koerper: u64, kl: usize, traeger: u64,
+    req_path: u64, pl: usize, koerper: u64, kl: usize, traeger: u64,
     tl: usize, keks: u64, kkl: usize) {
     var sp: [u8; 2] = " \0"
     var ver: [u8; 11] = " HTTP/1.1\r\0"
@@ -435,7 +435,7 @@ fn anfrage(req: *mut rt.Buf, z: *mut Target, methode: u64, ml: usize,
 
     rt.buf_push_bytes(req, methode, ml)
     rt.buf_push_bytes(req, (&sp[0]) as u64, 1)
-    rt.buf_push_bytes(req, pfad, pl)
+    rt.buf_push_bytes(req, req_path, pl)
     rt.buf_push_bytes(req, (&ver[0]) as u64, 10)
     rt.buf_push(req, 10 as u8)
 
@@ -614,7 +614,7 @@ fn entstuecken(q: u64, n: usize, aus: *mut rt.Buf) -> bool {
 }
 
 // Rohes HTTP in Kopf und Koerper zerlegen und den Zahlencode holen.
-fn zerlegen(roh: *mut rt.Buf, a: *mut Antw) -> bool {
+fn zerlegen(roh: *mut rt.Buf, a: *mut Reply) -> bool {
     let p: u64 = (*roh).ptr
     let n: usize = (*roh).len
     if n < 12 {
@@ -681,10 +681,10 @@ fn now_secs() -> u64 {
 // ONE request that `sende_form` makes (reset right after it).
 static mut form_body: bool = false
 
-fn sende_form(z: *mut Target, methode: u64, ml: usize, pfad: u64, pl: usize,
-    koerper: u64, kl: usize, traeger: u64, tl: usize, a: *mut Antw) -> bool {
+fn sende_form(z: *mut Target, methode: u64, ml: usize, req_path: u64, pl: usize,
+    koerper: u64, kl: usize, traeger: u64, tl: usize, a: *mut Reply) -> bool {
     form_body = true
-    let r: bool = sende(z, methode, ml, pfad, pl, koerper, kl, traeger, tl,
+    let r: bool = sende(z, methode, ml, req_path, pl, koerper, kl, traeger, tl,
         0, 0, a)
     form_body = false
     return r
@@ -692,10 +692,10 @@ fn sende_form(z: *mut Target, methode: u64, ml: usize, pfad: u64, pl: usize,
 
 // Die eine Anfrage. `true` heisst: eine HTTP-Antwort ist angekommen --
 // NICHT, dass ihr Code 200 war. Das entscheidet der Aufrufer.
-fn sende(z: *mut Target, methode: u64, ml: usize, pfad: u64, pl: usize,
+fn sende(z: *mut Target, methode: u64, ml: usize, req_path: u64, pl: usize,
     koerper: u64, kl: usize, traeger: u64, tl: usize, keks: u64,
-    kkl: usize, a: *mut Antw) -> bool {
-    antw_leeren(a)
+    kkl: usize, a: *mut Reply) -> bool {
+    reply_clear(a)
     pruefung = 0
     if !target_ready(z, a) {
         return false
@@ -704,13 +704,13 @@ fn sende(z: *mut Target, methode: u64, ml: usize, pfad: u64, pl: usize,
     var c: net.Conn = net.connect_tcp((*z).adr, (*z).port)
     catch | e | bad_conn(&schlecht)
     if schlecht {
-        (*a).fehler = F_KEINNETZ
+        (*a).fail_code = F_KEINNETZ
         return false
     }
     let _z: bool = net.set_timeout(&c, 20000 as u64) catch false
 
     var req: rt.Buf = rt.buf_new()
-    anfrage(&req, z, methode, ml, pfad, pl, koerper, kl, traeger, tl,
+    anfrage(&req, z, methode, ml, req_path, pl, koerper, kl, traeger, tl,
         keks, kkl)
     var roh: rt.Buf = rt.buf_new()
     var ok: bool = false
@@ -726,7 +726,7 @@ fn sende(z: *mut Target, methode: u64, ml: usize, pfad: u64, pl: usize,
         return false
     }
     if !zerlegen(&roh, a) {
-        (*a).fehler = F_FORM
+        (*a).fail_code = F_FORM
         rt.buf_free(&roh)
         return false
     }
@@ -740,8 +740,8 @@ fn sende(z: *mut Target, methode: u64, ml: usize, pfad: u64, pl: usize,
 // binary body, so `kernel/app/drucke.fi` builds the request itself and
 // hands it over here. Connection, TLS, reading and parsing are the same
 // code as in `sende` -- no second HTTP client.
-fn send_raw(z: *mut Target, req: *mut rt.Buf, a: *mut Antw) -> bool {
-    antw_leeren(a)
+fn send_raw(z: *mut Target, req: *mut rt.Buf, a: *mut Reply) -> bool {
+    reply_clear(a)
     pruefung = 0
     if !target_ready(z, a) {
         return false
@@ -750,7 +750,7 @@ fn send_raw(z: *mut Target, req: *mut rt.Buf, a: *mut Antw) -> bool {
     var c: net.Conn = net.connect_tcp((*z).adr, (*z).port)
     catch | e | bad_conn(&schlecht)
     if schlecht {
-        (*a).fehler = F_KEINNETZ
+        (*a).fail_code = F_KEINNETZ
         return false
     }
     let _z: bool = net.set_timeout(&c, 20000 as u64) catch false
@@ -767,7 +767,7 @@ fn send_raw(z: *mut Target, req: *mut rt.Buf, a: *mut Antw) -> bool {
         return false
     }
     if !zerlegen(&roh, a) {
-        (*a).fehler = F_FORM
+        (*a).fail_code = F_FORM
         rt.buf_free(&roh)
         return false
     }
@@ -776,7 +776,7 @@ fn send_raw(z: *mut Target, req: *mut rt.Buf, a: *mut Antw) -> bool {
 }
 
 fn over_tls(c: *mut net.Conn, z: *mut Target, req: *mut rt.Buf,
-    roh: *mut rt.Buf, a: *mut Antw) -> bool {
+    roh: *mut rt.Buf, a: *mut Reply) -> bool {
     var speicher: rt.Buf = rt.buf_new()
     var laden: x509.Store = x509.store_new()
     var vorgabe: [u8; 20] = "/etc/ssl/roots.pem\0\0"
@@ -805,7 +805,7 @@ fn over_tls(c: *mut net.Conn, z: *mut Target, req: *mut rt.Buf,
     catch | e | tls.tls_fail_into(&berichte, e, &mist)
     pruefung = tls.tls_verify_reason(&t)
     if mist {
-        (*a).fehler = F_TLS
+        (*a).fail_code = F_TLS
         rt.buf_free(&berichte)
         rt.buf_free(&speicher)
         return false
@@ -814,7 +814,7 @@ fn over_tls(c: *mut net.Conn, z: *mut Target, req: *mut rt.Buf,
     let _w: bool = tls.tls_write(&t, (*req).ptr, (*req).len)
     catch | e | tls.tls_fail_into(&berichte, e, &wfehl)
     if wfehl {
-        (*a).fehler = F_SENDEN
+        (*a).fail_code = F_SENDEN
         tls.tls_close(&t)
         tls.tls_free(&t)
         rt.buf_free(&berichte)
@@ -839,7 +839,7 @@ fn over_tls(c: *mut net.Conn, z: *mut Target, req: *mut rt.Buf,
     rt.buf_free(&berichte)
     rt.buf_free(&speicher)
     if (*roh).len == 0 {
-        (*a).fehler = F_READ
+        (*a).fail_code = F_READ
         return false
     }
     return true
@@ -891,12 +891,12 @@ fn complete(roh: *mut rt.Buf) -> bool {
 }
 
 fn open(c: *mut net.Conn, req: *mut rt.Buf, roh: *mut rt.Buf,
-    a: *mut Antw) -> bool {
+    a: *mut Reply) -> bool {
     var wfehl: bool = false
     let _w: usize = net.write_all(c, (*req).ptr, (*req).len)
     catch bad_len(&wfehl)
     if wfehl {
-        (*a).fehler = F_SENDEN
+        (*a).fail_code = F_SENDEN
         return false
     }
     var happen: [u8; 4096] = [0; 4096]
@@ -913,7 +913,7 @@ fn open(c: *mut net.Conn, req: *mut rt.Buf, roh: *mut rt.Buf,
         }
     }
     if (*roh).len == 0 {
-        (*a).fehler = F_READ
+        (*a).fail_code = F_READ
         return false
     }
     return true

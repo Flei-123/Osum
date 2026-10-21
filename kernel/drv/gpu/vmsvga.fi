@@ -26,10 +26,10 @@ import arch.x86_64.apic
 import arch.arch
 
 export {
-    probe, boot_mbi, init, bereit, present, panic_present, say, shut_down,
+    probe, boot_mbi, init, is_ready, present, panic_present, say, shut_down,
     set_mode, resize, host_pending, boot_hint, boot_handled, vmm_init, vmm_say, vmm_fake, vmm_up, resizes, resize_errors,
-    cursor_bereit, cursor_zeigen, cursor_bewegen, cursor_aus, cursor_an,
-    cursor_defs, cursor_moves, cursor_fehler,
+    cursor_ready, cursor_show, cursor_bewegen, cursor_aus, cursor_an,
+    cursor_defs, cursor_moves, cursor_failed,
     updates, update_octets, verify_bad, width, height, fifo_full,
     safety_updates, pio_count, heal_count, present_calls, present_frames, pending, pulse_say, fb_phys, vram_bytes, size_ok, pitch, resized, host_resizes,
     VMSVGA_OFF, VMSVGA_MAX
@@ -199,7 +199,7 @@ fn wr32(b: u64, off: u64, v: u64) {
     __mmio_write32((b + off) as *mut u32, v as u32)
 }
 
-fn bereit(state: u64) -> bool {
+fn is_ready(state: u64) -> bool {
     return kstate.get(state, s(S_READY)) != 0
 }
 
@@ -739,7 +739,7 @@ fn verify_frame(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
 }
 
 fn present(state: u64) -> bool {
-    if !bereit(state) {
+    if !is_ready(state) {
         return false
     }
     kstate.add(state, s(S_PCALLS), 1)
@@ -862,7 +862,7 @@ fn send_full(state: u64) -> bool {
 // them), let the stop NMI land first, then send ONE whole-picture UPDATE with the SYNC/BUSY handshake. Never waits for another core.
 fn panic_present(state: u64) {
     var s_p: [u8; 31] = "vmsvga: panic picture sent ok=\0"
-    if !bereit(state) {
+    if !is_ready(state) {
         return
     }
     var hz: u64 = apic.tsc_hz(state)
@@ -895,8 +895,8 @@ fn cursor_hw(state: u64) -> bool {
         && has_cap(state, CAP_EXTENDED_FIFO)
 }
 
-fn cursor_bereit(state: u64) -> bool {
-    return bereit(state) && cursor_hw(state)
+fn cursor_ready(state: u64) -> bool {
+    return is_ready(state) && cursor_hw(state)
 }
 
 // ARGB of one pointer pixel from the coverage word `cursor.deck` returns (same maths as vgpu.cursor_bild_fuellen).
@@ -930,7 +930,7 @@ fn cursor_define(state: u64, form: u64, g: u64, hx0: u64, hy0: u64, rq: u64) -> 
     if g == 0 || g > CUR_W {
         return false
     }
-    cursor.karte_bauen(form, g)
+    cursor.build_map(form, g)
     let hx: u64 = cursor.rot_hot_x(g, rq, hx0, hy0)
     let hy: u64 = cursor.rot_hot_y(g, rq, hx0, hy0)
     if has_cap(state, CAP_ALPHA_CURSOR) {
@@ -1023,8 +1023,8 @@ fn cursor_pos(state: u64, x: u64, y: u64, on: u64) {
     reg_w(state, R_CURSOR_ON, on)
 }
 
-fn cursor_zeigen(state: u64, form: u64, g: u64, x: u64, y: u64, hx: u64, hy: u64, rq: u64) -> bool {
-    if !cursor_bereit(state) {
+fn cursor_show(state: u64, form: u64, g: u64, x: u64, y: u64, hx: u64, hy: u64, rq: u64) -> bool {
+    if !cursor_ready(state) {
         return false
     }
     let key: u64 = form + 1 + (rq << 16)
@@ -1045,7 +1045,7 @@ fn cursor_zeigen(state: u64, form: u64, g: u64, x: u64, y: u64, hx: u64, hy: u64
 }
 
 fn cursor_bewegen(state: u64, x: u64, y: u64) -> bool {
-    if !cursor_bereit(state) || kstate.get(state, s(S_CURON)) == 0 {
+    if !cursor_ready(state) || kstate.get(state, s(S_CURON)) == 0 {
         return false
     }
     if kstate.get(state, s(S_CURX)) == x && kstate.get(state, s(S_CURY)) == y {
@@ -1059,7 +1059,7 @@ fn cursor_bewegen(state: u64, x: u64, y: u64) -> bool {
 }
 
 fn cursor_aus(state: u64) -> bool {
-    if !cursor_bereit(state) || kstate.get(state, s(S_CURON)) == 0 {
+    if !cursor_ready(state) || kstate.get(state, s(S_CURON)) == 0 {
         return false
     }
     cursor_pos(state, kstate.get(state, s(S_CURX)), kstate.get(state, s(S_CURY)), 0)
@@ -1073,7 +1073,7 @@ fn cursor_an(state: u64) -> bool {
 
 fn cursor_defs(state: u64) -> u64 { return kstate.get(state, s(S_CURDEF)) }
 fn cursor_moves(state: u64) -> u64 { return kstate.get(state, s(S_CURMOVE)) }
-fn cursor_fehler(state: u64) -> u64 { return kstate.get(state, s(S_CURERR)) }
+fn cursor_failed(state: u64) -> u64 { return kstate.get(state, s(S_CURERR)) }
 
 // ------------------------------------------------------------ resize
 
@@ -1083,7 +1083,7 @@ fn cursor_fehler(state: u64) -> u64 { return kstate.get(state, s(S_CURERR)) }
 // polls in a row and was not tried before counts. Polled at most every POLL_MS (1 s). Returns w << 16 | h, 0 = none.
 fn host_pending(state: u64) -> u64 {
     let vmm: bool = kstate.get(state, s(S_VMM_UP)) != 0
-    if !bereit(state) || (!vmm && !has_cap(state, CAP_DISPLAY_TOPOLOGY)) {
+    if !is_ready(state) || (!vmm && !has_cap(state, CAP_DISPLAY_TOPOLOGY)) {
         return 0
     }
     if kstate.get(state, s(S_VMM_FAKE)) == 0 {
@@ -1153,7 +1153,7 @@ fn boot_handled(state: u64, v: u64) {
 }
 
 fn boot_hint(state: u64) -> u64 {
-    if !bereit(state) || kstate.get(state, s(S_VMM_UP)) == 0 {
+    if !is_ready(state) || kstate.get(state, s(S_VMM_UP)) == 0 {
         return 0
     }
     var n: u64 = 0
@@ -1431,7 +1431,7 @@ fn fb_phys(state: u64) -> u64 { return kstate.get(state, s(S_VRAM)) + kstate.get
 
 // Change the mode on a running system. The caller (vmode) re-points `fb` afterwards.
 fn resize(state: u64, w: u64, h: u64) -> bool {
-    if !bereit(state) {
+    if !is_ready(state) {
         return false
     }
     if !set_mode(state, w, h) {
@@ -1444,7 +1444,7 @@ fn resize(state: u64, w: u64, h: u64) -> bool {
 
 // After vmode re-pointed `fb` at the new mode: forget the old dirty box, rebuild the verify copy, tell the host the whole picture.
 fn resized(state: u64) {
-    if !bereit(state) {
+    if !is_ready(state) {
         return
     }
     let pres: u64 = kstate.get(state, s(S_PRES))
