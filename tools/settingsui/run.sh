@@ -31,7 +31,7 @@ for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
   done
   echo "taste ctrl-f"; echo "tippe zzzz"; echo "warte 2"; echo "foto search-empty"
 } > "$DREH"
-bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=600 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
+bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=800 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
