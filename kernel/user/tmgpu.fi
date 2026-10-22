@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+
+export { NA, refresh, adapters, util_pm, vram_used, vram_total, frames, known, name }
+
+const NA: u64 = 0xFFFFFFFFFFFFFFFF
+const BUF: u64 = 1024
+
+static mut raw: [u8; 1024] = [0 as u8; 1024]
+static mut raw_len: u64 = 0
+static mut n_adapters: u64 = 0
+static mut v_util: u64 = 0xFFFFFFFFFFFFFFFF
+static mut v_vused: u64 = 0xFFFFFFFFFFFFFFFF
+static mut v_vtotal: u64 = 0xFFFFFFFFFFFFFFFF
+static mut v_frames: u64 = 0xFFFFFFFFFFFFFFFF
+static mut v_name: [u8; 32] = [0 as u8; 32]
+
+fn known(v: u64) -> bool {
+    return v != NA
+}
+
+fn adapters() -> u64 {
+    return n_adapters
+}
+
+fn util_pm() -> u64 {
+    return v_util
+}
+
+fn vram_used() -> u64 {
+    return v_vused
+}
+
+fn vram_total() -> u64 {
+    return v_vtotal
+}
+
+fn frames() -> u64 {
+    return v_frames
+}
+
+fn name() -> u64 {
+    return (&v_name[0]) as u64
+}
+
+fn slurp() {
+    var p_gpu: [u8; 10] = "/proc/gpu\0"
+    raw_len = 0
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_gpu[0]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    var going: bool = true
+    while going && raw_len < BUF - 1 {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&raw[0]) as u64 + raw_len, BUF - 1 - raw_len)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            raw_len = raw_len + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
+fn matches(at: u64, key: u64) -> bool {
+    let klen: u64 = ulib.length(key)
+    var i: u64 = 0
+    while i < klen {
+        if at + i >= raw_len {
+            return false
+        }
+        if raw[(at + i) as usize] != *((key + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn find(key: u64) -> u64 {
+    let klen: u64 = ulib.length(key)
+    var at: u64 = 0
+    while at < raw_len {
+        if matches(at, key) {
+            return at + klen
+        }
+        while at < raw_len && raw[at as usize] != 10 as u8 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+    return BUF
+}
+
+fn number(key: u64) -> u64 {
+    var v: u64 = find(key)
+    if v >= raw_len {
+        return NA
+    }
+    if raw[v as usize] == 45 as u8 {
+        return NA
+    }
+    var n: u64 = 0
+    var any: bool = false
+    while v < raw_len && raw[v as usize] >= 48 as u8 && raw[v as usize] <= 57 as u8 {
+        n = n * 10 + (raw[v as usize] as u64 - 48)
+        any = true
+        v = v + 1
+    }
+    if !any {
+        return NA
+    }
+    return n
+}
+
+fn text(key: u64) {
+    var v: u64 = find(key)
+    var m: u64 = 0
+    if v < raw_len {
+        while v < raw_len && raw[v as usize] != 10 as u8 && m < 31 {
+            v_name[m as usize] = raw[v as usize]
+            m = m + 1
+            v = v + 1
+        }
+    }
+    v_name[m as usize] = 0 as u8
+}
+
+fn refresh() {
+    var k_count: [u8; 11] = "gpu.count \0"
+    var k_util: [u8; 14] = "gpu0.util_pm \0"
+    var k_vt: [u8; 23] = "gpu0.vram_total_bytes \0"
+    var k_vu: [u8; 22] = "gpu0.vram_used_bytes \0"
+    var k_fr: [u8; 13] = "gpu0.frames \0"
+    var k_nm: [u8; 11] = "gpu0.name \0"
+    slurp()
+    n_adapters = 0
+    v_util = NA
+    v_vused = NA
+    v_vtotal = NA
+    v_frames = NA
+    v_name[0] = 0 as u8
+    if raw_len == 0 {
+        return
+    }
+    let c: u64 = number((&k_count[0]) as u64)
+    if c == NA || c == 0 {
+        return
+    }
+    n_adapters = c
+    v_util = number((&k_util[0]) as u64)
+    v_vtotal = number((&k_vt[0]) as u64)
+    v_vused = number((&k_vu[0]) as u64)
+    v_frames = number((&k_fr[0]) as u64)
+    text((&k_nm[0]) as u64)
+}

@@ -96,7 +96,7 @@ num "CPU details grid has 6 values" "$(grep -a '^taskmgr: perf sel=0' "$SP" | he
 num "Memory tile selects Memory" "$(cnt "$SP" '^taskmgr: perf sel=1')" ge 1
 num "GPU tile selects GPU" "$(cnt "$SP" '^taskmgr: perf sel=4')" ge 1
 num "Disk tile selects Disk" "$(cnt "$SP" '^taskmgr: perf sel=2')" ge 1
-num "GPU details: 2 values" "$(grep -a '^taskmgr: perf sel=4' "$SP" | head -1 | sed -E 's/.* stats=([0-9]+).*/\1/')" eq 2
+num "GPU details: 4 values (utilization, memory, frames, adapter)" "$(grep -a '^taskmgr: perf sel=4' "$SP" | head -1 | sed -E 's/.* stats=([0-9]+).*/\1/')" eq 4
 python3 -I - "$SP" > "$TMPD/dash.txt" 2>&1 <<'PY'
 import re, sys
 txt = open(sys.argv[1], "rb").read().decode("latin1").splitlines()
@@ -109,13 +109,17 @@ for z in txt:
     m = re.match(r"taskmgr: perf stat (\d+) lab=(.*) val=(.*)$", z)
     if m and sel is not None:
         got[sel].append((m.group(2), m.group(3)))
-bad = [v for v in got.get(4, []) if v[1].strip() != "--"]
+g = got.get(4, [])
+zero = [v for v in g if v[1].strip() in ("0", "0 B", "0%", "0,0 %")]
+util = g[0][1].strip() if g else ""
+vram = g[1][1].strip() if len(g) > 1 else ""
+vram_ok = vram == "--" or ("/" in vram and not vram.startswith("0 "))
 sw = [v for v in got.get(0, []) if "switches" in v[0] or "Kontext" in v[0]]
-ok = bool(got.get(4)) and not bad and bool(sw) and all(v[1].strip() == "--" for v in sw)
-print("gpu=%s switches=%s" % (got.get(4), sw))
+ok = len(g) == 4 and not zero and util == "--" and vram_ok and bool(sw) and all(v[1].strip() == "--" for v in sw)
+print("gpu=%s switches=%s" % (g, sw))
 raise SystemExit(0 if ok else 1)
 PY
-[ $? -eq 0 ] && ok "values without a kernel source show -- and never 0 ($(cat "$TMPD/dash.txt" | cut -c1-120))" || bad "dash rule: $(cat "$TMPD/dash.txt" | cut -c1-200)"
+[ $? -eq 0 ] && ok "no kernel source = --, GPU memory from /proc/gpu, never 0 ($(cat "$TMPD/dash.txt" | cut -c1-120))" || bad "dash rule: $(cat "$TMPD/dash.txt" | cut -c1-200)"
 
 echo
 echo "== 4. counter-proof: the tree before S1 fails the same plans =="

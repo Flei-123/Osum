@@ -127,6 +127,7 @@ import tmview
 import tmcols
 import tmperf
 import tmio
+import tmgpu
 
 export { u_start }
 
@@ -327,6 +328,8 @@ static mut k_s_sw: [u8; 14] = "taskmgr.s.sw\0\0"
 static mut k_s_sys: [u8; 15] = "taskmgr.s.sys\0\0"
 static mut k_s_act: [u8; 15] = "taskmgr.s.act\0\0"
 static mut k_s_vram: [u8; 16] = "taskmgr.s.vram\0\0"
+static mut k_s_frames: [u8; 17] = "taskmgr.s.frames\0"
+static mut k_s_adapter: [u8; 18] = "taskmgr.s.adapter\0"
 static mut u_full: [u8; 6] = "100 %\0"
 static mut k_s_used: [u8; 17] = "taskmgr.s.used\0\0\0"
 static mut k_s_free: [u8; 17] = "taskmgr.s.free\0\0\0"
@@ -811,6 +814,8 @@ fn sample(first: bool) {
     }
     up_ms = now_ms
 
+    tmgpu.refresh()
+
     // Das Netz: dieselben zwei Zaehler, die `/bin/netmon` liest.
     net_ok = netmon(ulib.NM_ON)
     let tx: u64 = netmon(ulib.NM_SYSTX)
@@ -1048,8 +1053,17 @@ fn build_kpi() {
         }
         kp_pm[3 as usize] = np
     }
-    a = put_str(b + 160, 0, ptr((&u_dash[0]) as u64))
-    z = put_str(q + 256, 0, msg.get(ptr((&k_gpu_none[0]) as u64)))
+    if tmgpu.adapters() == 0 {
+        a = put_str(b + 160, 0, ptr((&u_dash[0]) as u64))
+        z = put_str(q + 256, 0, msg.get(ptr((&k_gpu_none[0]) as u64)))
+    } else if tmgpu.known(tmgpu.util_pm()) {
+        a = put_pm(b + 160, 0, tmgpu.util_pm())
+        a = put_str(b + 160, a, ptr((&u_pct[0]) as u64))
+        z = put_str(q + 256, 0, tmgpu.name())
+    } else {
+        a = put_str(b + 160, 0, ptr((&u_dash[0]) as u64))
+        z = put_str(q + 256, 0, tmgpu.name())
+    }
 }
 
 // Die Kopfzeile der Tabelle ist Zeile 0 des Blocks -- so steht die
@@ -1699,9 +1713,33 @@ fn stats_make() {
         let _s2: u64 = put_str(tp, 0, ptr((&u_dash[0]) as u64))
         stat_add(msg.get(ptr((&k_s_act[0]) as u64)), tp)
     } else if perf_sel == 4 {
-        let _g: u64 = put_str(tp, 0, ptr((&u_dash[0]) as u64))
+        if tmgpu.known(tmgpu.util_pm()) {
+            var ga: u64 = put_pm(tp, 0, tmgpu.util_pm())
+            ga = put_str(tp, ga, ptr((&u_pct[0]) as u64))
+        } else {
+            let _g: u64 = put_str(tp, 0, ptr((&u_dash[0]) as u64))
+        }
         stat_add(msg.get(ptr((&k_s_util[0]) as u64)), tp)
+        if tmgpu.known(tmgpu.vram_used()) && tmgpu.known(tmgpu.vram_total()) {
+            var gb: u64 = put_bytes(tp, 0, tmgpu.vram_used())
+            gb = put_str(tp, gb, ptr((&u_slash[0]) as u64))
+            gb = put_bytes(tp, gb, tmgpu.vram_total())
+        } else {
+            let _g2: u64 = put_str(tp, 0, ptr((&u_dash[0]) as u64))
+        }
         stat_add(msg.get(ptr((&k_s_vram[0]) as u64)), tp)
+        if tmgpu.known(tmgpu.frames()) {
+            let _g3: u64 = put_num(tp, 0, tmgpu.frames())
+        } else {
+            let _g4: u64 = put_str(tp, 0, ptr((&u_dash[0]) as u64))
+        }
+        stat_add(msg.get(ptr((&k_s_frames[0]) as u64)), tp)
+        if tmgpu.adapters() == 0 {
+            let _g5: u64 = put_str(tp, 0, ptr((&u_dash[0]) as u64))
+        } else {
+            let _g6: u64 = put_str(tp, 0, tmgpu.name())
+        }
+        stat_add(msg.get(ptr((&k_s_adapter[0]) as u64)), tp)
     } else {
         if net_ok == 0 {
             let _d: u64 = put_str(tp, 0, ptr((&u_dash[0]) as u64))
@@ -1879,8 +1917,17 @@ fn cores_draw(cx: u64, cy: u64, cw: u64, ch: u64) {
         meter(cx + 14, cy + 10, sub(cw, 28), msg.get(ptr((&k_s_used[0]) as u64)), disk_pm,
             (&nb[0]) as u64, fuiscene.R_WARN)
     } else if perf_sel == 4 {
-        fuiscene.text_role(cx + 16, cy + 36, sub(cw, 32), msg.get(ptr((&k_gpu_none[0]) as u64)), 14, false,
-            fuiscene.R_MUTED)
+        if tmgpu.adapters() != 0 && tmgpu.known(tmgpu.vram_used()) && tmgpu.known(tmgpu.vram_total()) && tmgpu.vram_total() > 0 {
+            var gn: [u8; 48] = [0 as u8; 48]
+            var gb: u64 = put_bytes((&gn[0]) as u64, 0, tmgpu.vram_used())
+            gb = put_str((&gn[0]) as u64, gb, ptr((&u_slash[0]) as u64))
+            gb = put_bytes((&gn[0]) as u64, gb, tmgpu.vram_total())
+            meter(cx + 14, cy + 10, sub(cw, 28), msg.get(ptr((&k_s_vram[0]) as u64)),
+                tmgpu.vram_used() * 1000 / tmgpu.vram_total(), (&gn[0]) as u64, fuiscene.R_ACCENT)
+        } else if tmgpu.adapters() == 0 {
+            fuiscene.text_role(cx + 16, cy + 36, sub(cw, 32), msg.get(ptr((&k_gpu_none[0]) as u64)), 14, false,
+                fuiscene.R_MUTED)
+        }
     } else {
         if net_ok != 0 {
             var nb: [u8; 24] = [0 as u8; 24]
