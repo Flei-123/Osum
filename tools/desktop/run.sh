@@ -686,7 +686,7 @@ PYEOF
     num "and it really wrote a file" "$wr" ge 1
     ename=$(grep -a 'taskbar: conf ' "$L" | tail -1 | grep -oE 'ename=[a-z]+' | sed 's/.*=//')
     same "the taskbar -- a different process -- re-read the file and moved to" "right" "$ename"
-    g=$(grep -a 'taskbar: geom ' "$L" | tail -1 | grep -oE 'x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+')
+    g=$(grep -aE 'taskbar: geom edge=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ vertical=[0-9]+ thick=[0-9]+ shown=[0-9]+' "$L" | tail -1 | grep -oE ' x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' | sed 's/^ //')
     same "to exactly the right edge" "x=696 y=0 w=104 h=600" "$g"
     png "$TMPD/settings.ppm" "settings"
 fi
