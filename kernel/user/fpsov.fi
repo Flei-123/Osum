@@ -1,0 +1,485 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+import fuiscene
+
+export { init, step, is_on }
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const OV_W: u64 = 200
+const OV_H: u64 = 84
+const PAD: u64 = 8
+const SAMPLES: u64 = 60
+const SAMPLE_TICKS: u64 = 25
+const OFF_POLL_TICKS: u64 = 50
+const RAW_MAX: u64 = 6144
+const SERIAL_AFTER: u64 = 8
+
+static mut ov_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut ov_h: u64 = 0
+static mut on_: u64 = 0
+static mut last_poll: u64 = 0
+static mut last_sample: u64 = 0
+static mut n_samples: u64 = 0
+static mut prev_pres: u64 = 0
+static mut have_prev: u64 = 0
+static mut spark: [u64; 60] = [0 as u64; 60]
+static mut spark_at: u64 = 0
+static mut v_fps: u64 = 0
+static mut v_peak: u64 = 0
+static mut v_cpu: u64 = 0
+static mut v_used_mb: u64 = 0
+static mut v_total_mb: u64 = 0
+static mut raw: [u8; 6144] = [0 as u8; 6144]
+static mut tx1: [u8; 48] = [0 as u8; 48]
+static mut tx2: [u8; 48] = [0 as u8; 48]
+static mut ox: u64 = 0
+static mut oy: u64 = 0
+static mut ow: u64 = 0
+static mut oh: u64 = 0
+
+static mut t_title: [u8; 6] = "fpsov\0"
+static mut p_frames: [u8; 13] = "/proc/frames\0"
+static mut p_sysmon: [u8; 13] = "/proc/sysmon\0"
+static mut p_meminfo: [u8; 14] = "/proc/meminfo\0"
+static mut k_presents: [u8; 17] = "frames.presents \0"
+static mut k_overlay: [u8; 16] = "frames.overlay \0"
+static mut k_memtotal: [u8; 10] = "MemTotal:\0"
+static mut k_framesfree: [u8; 13] = "FramesFree: \0"
+static mut s_fps: [u8; 5] = "FPS \0"
+static mut s_ms: [u8; 4] = " ms\0"
+static mut s_idle: [u8; 5] = "idle\0"
+static mut s_cpu: [u8; 5] = "CPU \0"
+static mut s_pct: [u8; 5] = " %  \0"
+static mut s_ram: [u8; 5] = "RAM \0"
+static mut s_slash: [u8; 2] = "/\0"
+static mut s_mb: [u8; 3] = " M\0"
+static mut s_shown: [u8; 16] = "fpsov: shown x=\0"
+static mut s_y: [u8; 4] = " y=\0"
+static mut s_w: [u8; 4] = " w=\0"
+static mut s_h: [u8; 4] = " h=\0"
+static mut s_hidden: [u8; 14] = "fpsov: hidden\0"
+static mut s_stat: [u8; 18] = "fpsov: stat peak=\0"
+static mut s_cpu2: [u8; 6] = " cpu=\0"
+static mut s_used: [u8; 7] = " used=\0"
+static mut s_tot: [u8; 6] = " tot=\0"
+static mut s_n: [u8; 4] = " n=\0"
+static mut s_sep: [u8; 3] = "  \0"
+
+fn sk() -> u64 {
+    return wlibc.ui_scale()
+}
+
+fn say(p: u64) {
+    let _s: u64 = ulib.say(p)
+}
+
+fn sayn(v: u64) {
+    ulib.sayn(v)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+fn is_on() -> bool {
+    return on_ != 0
+}
+
+fn slurp(path: u64) -> u64 {
+    var n: u64 = 0
+    __mmio_write8((&raw[0 as usize]) as u64 as *mut u8, 0 as u8)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var going: bool = true
+    while going && n < RAW_MAX - 1 {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, ((&raw[0 as usize]) as u64) + n, RAW_MAX - 1 - n)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            n = n + got
+        }
+    }
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    __mmio_write8((((&raw[0 as usize]) as u64) + n) as *mut u8, 0 as u8)
+    return n
+}
+
+fn rawp() -> u64 {
+    return (&raw[0 as usize]) as u64
+}
+
+fn val_after(key: u64) -> u64 {
+    let at: u64 = ulib.find(rawp(), key)
+    if at == ulib.EOF {
+        return 0
+    }
+    var p: u64 = rawp() + at + ulib.length(key)
+    while __mmio_read8(p as *mut u8) == 32 as u8 {
+        p = p + 1
+    }
+    return ulib.to_num(p)
+}
+
+fn win_key(i: u64, tail: u64, dst: u64) {
+    var d: [u8; 26] = [0 as u8; 26]
+    var at: u64 = 0
+    var pre: [u8; 5] = "win.\0"
+    ulib.copy(dst, (&pre[0]) as u64, 4)
+    at = 4
+    let n: u64 = ulib.digits(i, (&d[0]) as u64)
+    ulib.copy(dst + at, (&d[0]) as u64, n)
+    at = at + n
+    let tl: u64 = ulib.length(tail)
+    ulib.copy(dst + at, tail, tl)
+    __mmio_write8((dst + at + tl) as *mut u8, 0 as u8)
+}
+
+fn read_flag() -> u64 {
+    let n: u64 = slurp((&p_frames[0 as usize]) as u64)
+    if n == 0 {
+        return 0
+    }
+    return val_after((&k_overlay[0 as usize]) as u64)
+}
+
+fn read_presents() -> u64 {
+    var t_pid: [u8; 6] = ".pid \0"
+    var t_pre: [u8; 11] = ".presents \0"
+    var key: [u8; 40] = [0 as u8; 40]
+    let n: u64 = slurp((&p_frames[0 as usize]) as u64)
+    if n == 0 {
+        return 0
+    }
+    var total: u64 = val_after((&k_presents[0 as usize]) as u64)
+    let me: u64 = ulib.sys(ulib.SYS_GETPID, 0, 0, 0)
+    var mine: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        win_key(i, (&t_pid[0]) as u64, (&key[0]) as u64)
+        let at: u64 = ulib.find(rawp(), (&key[0]) as u64)
+        if at != ulib.EOF {
+            let pid: u64 = ulib.to_num(rawp() + at + ulib.length((&key[0]) as u64))
+            if pid == me {
+                win_key(i, (&t_pre[0]) as u64, (&key[0]) as u64)
+                mine = mine + val_after((&key[0]) as u64)
+            }
+        }
+        i = i + 1
+    }
+    if mine > total {
+        return 0
+    }
+    return total - mine
+}
+
+fn read_cpu() {
+    let n: u64 = slurp((&p_sysmon[0 as usize]) as u64)
+    if n == 0 {
+        return
+    }
+    var last: u64 = 0
+    var i: u64 = 0
+    var line: bool = true
+    while i < n {
+        let ch: u8 = __mmio_read8((rawp() + i) as *mut u8)
+        if line && ch >= 48 as u8 && ch <= 57 as u8 {
+            last = i + 1
+        }
+        line = ch == 10 as u8
+        i = i + 1
+    }
+    if last == 0 {
+        return
+    }
+    var p: u64 = rawp() + last - 1
+    while __mmio_read8(p as *mut u8) != 32 as u8 && __mmio_read8(p as *mut u8) != 0 as u8 {
+        p = p + 1
+    }
+    while __mmio_read8(p as *mut u8) == 32 as u8 {
+        p = p + 1
+    }
+    var c: u64 = ulib.to_num(p)
+    if c > 100 {
+        c = 100
+    }
+    v_cpu = c
+}
+
+fn read_mem() {
+    let n: u64 = slurp((&p_meminfo[0 as usize]) as u64)
+    if n == 0 {
+        return
+    }
+    let tot_kb: u64 = val_after((&k_memtotal[0 as usize]) as u64)
+    let free_kb: u64 = val_after((&k_framesfree[0 as usize]) as u64) * 4
+    v_total_mb = tot_kb / 1024
+    if tot_kb > free_kb {
+        v_used_mb = (tot_kb - free_kb) / 1024
+    } else {
+        v_used_mb = 0
+    }
+}
+
+fn app_str(buf: u64, at: u64, s: u64) -> u64 {
+    let n: u64 = ulib.length(s)
+    ulib.copy(buf + at, s, n)
+    return at + n
+}
+
+fn app_num(buf: u64, at: u64, v: u64) -> u64 {
+    var d: [u8; 26] = [0 as u8; 26]
+    let n: u64 = ulib.digits(v, (&d[0]) as u64)
+    ulib.copy(buf + at, (&d[0]) as u64, n)
+    return at + n
+}
+
+fn build_text() {
+    let b1: u64 = (&tx1[0 as usize]) as u64
+    let b2: u64 = (&tx2[0 as usize]) as u64
+    var a: u64 = app_str(b1, 0, (&s_fps[0 as usize]) as u64)
+    a = app_num(b1, a, v_fps)
+    if v_fps > 0 {
+        a = app_str(b1, a, (&s_sep[0 as usize]) as u64)
+        let ms10: u64 = 10000 / v_fps
+        a = app_num(b1, a, ms10 / 10)
+        __mmio_write8((b1 + a) as *mut u8, 46 as u8)
+        a = a + 1
+        a = app_num(b1, a, ms10 % 10)
+        a = app_str(b1, a, (&s_ms[0 as usize]) as u64)
+    } else {
+        __mmio_write8((b1 + a) as *mut u8, 32 as u8)
+        a = a + 1
+        a = app_str(b1, a, (&s_idle[0 as usize]) as u64)
+    }
+    __mmio_write8((b1 + a) as *mut u8, 0 as u8)
+    var c: u64 = app_str(b2, 0, (&s_cpu[0 as usize]) as u64)
+    c = app_num(b2, c, v_cpu)
+    c = app_str(b2, c, (&s_pct[0 as usize]) as u64)
+    c = app_str(b2, c, (&s_ram[0 as usize]) as u64)
+    c = app_num(b2, c, v_used_mb)
+    c = app_str(b2, c, (&s_slash[0 as usize]) as u64)
+    c = app_num(b2, c, v_total_mb)
+    c = app_str(b2, c, (&s_mb[0 as usize]) as u64)
+    __mmio_write8((b2 + c) as *mut u8, 0 as u8)
+}
+
+fn spark_max() -> u64 {
+    var m: u64 = 60
+    var i: u64 = 0
+    while i < SAMPLES {
+        if spark[i as usize] > m {
+            m = spark[i as usize]
+        }
+        i = i + 1
+    }
+    return m
+}
+
+fn ov_draw(x: u64, y: u64, w: u64, h: u64) {
+    let r: u64 = wlibc.win_round(w, h)
+    var ri: u64 = 0
+    if r > 1 {
+        ri = r - 1
+    }
+    fuiscene.cv_round_rgb(x, y, w, h, 0, wlibc.theme(wlibc.T_LINE))
+    fuiscene.cv_round_rgb(x + 1, y + 1, w - 2, h - 2, ri, wlibc.theme(wlibc.T_MENU))
+    let pad: u64 = PAD * sk()
+    let asc: u64 = wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
+    let rowh: u64 = wlibc.px_ui() + 5 * sk()
+    var tw: u64 = 0
+    if w > 2 * pad {
+        tw = w - 2 * pad
+    }
+    fuiscene.cv_text_rgb(x + pad, y + pad + asc, tw, (&tx1[0 as usize]) as u64,
+        wlibc.px_ui(), true, wlibc.theme(wlibc.T_FG))
+    fuiscene.cv_text_rgb(x + pad, y + pad + rowh + asc, tw, (&tx2[0 as usize]) as u64,
+        wlibc.px_ui(), false, wlibc.theme(wlibc.T_FG))
+    let top: u64 = y + pad + 2 * rowh + 2 * sk()
+    var bot: u64 = 0
+    if y + h > pad + 1 {
+        bot = y + h - pad
+    }
+    if bot <= top + 4 {
+        return
+    }
+    let ph: u64 = bot - top
+    let bw: u64 = 2 * sk()
+    let step: u64 = 3 * sk()
+    let mx: u64 = spark_max()
+    var i: u64 = 0
+    while i < SAMPLES {
+        let at: u64 = (spark_at + i) % SAMPLES
+        let v: u64 = spark[at as usize]
+        var bh: u64 = v * ph / mx
+        if v > 0 && bh == 0 {
+            bh = 1
+        }
+        if bh > 0 && x + pad + i * step + bw <= x + w - pad {
+            fuiscene.cv_round_rgb(x + pad + i * step, bot - bh, bw, bh, 0, wlibc.theme(wlibc.T_ACCENT))
+        }
+        i = i + 1
+    }
+}
+
+fn build_ov() {
+    let root: usize = fuiscene.root()
+    fuiscene.set_pad(root, 0)
+    fuiscene.set_gap(root, 0)
+    let _c: usize = fuiscene.canvas(root, 0, OV_W, OV_H, ov_draw)
+}
+
+fn paint() {
+    let _s: bool = fuiscene.win_select(ov_win)
+    fuiscene.refresh()
+    fuiscene.touch()
+    let _u: bool = fuiscene.win_select(0)
+    var n: u64 = 0
+    while n < 3 {
+        let _k: u64 = fuiscene.pump_aux(ov_win)
+        n = n + 1
+    }
+}
+
+fn init() -> bool {
+    ov_win = fuiscene.win_open_plain(0, 0, OV_W * sk(), OV_H * sk(),
+        (&t_title[0 as usize]) as u64, wlibc.L_TIP, build_ov)
+    if ov_win == fuiscene.BADWIN {
+        ov_win = NONE
+        return false
+    }
+    let _s: bool = fuiscene.win_select(ov_win)
+    ov_h = fuiscene.handle()
+    let _v: u64 = wlibc.win_state(ov_h, wlibc.WS_HIDDEN, 1)
+    let _u: bool = fuiscene.win_select(0)
+    return true
+}
+
+fn spark_push(v: u64) {
+    if v > v_peak {
+        v_peak = v
+    }
+    spark[spark_at as usize] = v
+    spark_at = (spark_at + 1) % SAMPLES
+}
+
+fn spark_clear() {
+    var i: u64 = 0
+    while i < SAMPLES {
+        spark[i as usize] = 0
+        i = i + 1
+    }
+    spark_at = 0
+    v_peak = 0
+}
+
+fn show() {
+    ow = OV_W * sk()
+    oh = OV_H * sk()
+    let right: u64 = wlibc.head_bx() + wlibc.head_bw()
+    ox = right
+    if right > ow + 8 * sk() {
+        ox = right - ow - 8 * sk()
+    }
+    oy = 8 * sk()
+    spark_clear()
+    n_samples = 0
+    have_prev = 0
+    v_fps = 0
+    read_cpu()
+    read_mem()
+    build_text()
+    paint()
+    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, ov_h, (ox << 16) | oy, 0)
+    let _v: u64 = wlibc.win_state(ov_h, wlibc.WS_HIDDEN, 0)
+    on_ = 1
+    say((&s_shown[0 as usize]) as u64)
+    sayn(ox)
+    say((&s_y[0 as usize]) as u64)
+    sayn(oy)
+    say((&s_w[0 as usize]) as u64)
+    sayn(ow)
+    say((&s_h[0 as usize]) as u64)
+    sayn(oh)
+    nl()
+}
+
+fn hide() {
+    let _v: u64 = wlibc.win_state(ov_h, wlibc.WS_HIDDEN, 1)
+    on_ = 0
+    say((&s_hidden[0 as usize]) as u64)
+    nl()
+}
+
+fn sample() {
+    let cur: u64 = read_presents()
+    if have_prev != 0 && cur >= prev_pres {
+        spark_push((cur - prev_pres) * 4)
+    } else {
+        spark_push(0)
+    }
+    prev_pres = cur
+    have_prev = 1
+    var s: u64 = 0
+    var i: u64 = 0
+    while i < 4 {
+        s = s + spark[((spark_at + SAMPLES - 1 - i) % SAMPLES) as usize]
+        i = i + 1
+    }
+    v_fps = s / 4
+    n_samples = n_samples + 1
+    if n_samples % 4 == 0 {
+        read_cpu()
+        read_mem()
+    }
+    build_text()
+    paint()
+    if n_samples == SERIAL_AFTER {
+        say((&s_stat[0 as usize]) as u64)
+        sayn(v_peak)
+        say((&s_cpu2[0 as usize]) as u64)
+        sayn(v_cpu)
+        say((&s_used[0 as usize]) as u64)
+        sayn(v_used_mb)
+        say((&s_tot[0 as usize]) as u64)
+        sayn(v_total_mb)
+        say((&s_n[0 as usize]) as u64)
+        sayn(n_samples)
+        nl()
+    }
+}
+
+fn step() -> bool {
+    if ov_win == NONE {
+        return false
+    }
+    let t: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    if on_ == 0 {
+        if last_poll != 0 && t >= last_poll && t - last_poll < OFF_POLL_TICKS {
+            return false
+        }
+        last_poll = t
+        if read_flag() != 0 {
+            show()
+            last_sample = t
+            return true
+        }
+        return false
+    }
+    if t >= last_sample && t - last_sample < SAMPLE_TICKS {
+        return false
+    }
+    last_sample = t
+    if read_flag() == 0 {
+        hide()
+        return true
+    }
+    sample()
+    return true
+}
