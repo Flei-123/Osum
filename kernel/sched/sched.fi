@@ -79,7 +79,7 @@ export {
     // ---- RUNDE LAUFZEIT ----
     T_FSBASE, T_GSBASE, fsbase_apply,
     // ---- DELL STABILITY ----
-    state_cas, schedule_locked, KILL_SET, kill_requested, stop_sleep, kill_other, KILL_DONE, KILL_LATER, KILL_GONE, group_of, group_live, kill_group,
+    state_cas, schedule_locked, KILL_SET, KILL_PLAIN, kill_requested, stop_sleep, kill_other, KILL_DONE, KILL_LATER, KILL_GONE, group_of, group_live, kill_group,
     // ---- RUNDE O-CONTAINER ----
     T_CTR,
     // ---- RUNDE SPEICHERDRUCK (K-002) ----
@@ -702,6 +702,9 @@ fn state_cas(state: u64, i: u64, from: u64, to: u64) -> bool {
 // another core: the request is carried in T_KILLCODE (KILL_SET + exit code)
 // and the task ends itself at its next trap / system call return.
 const KILL_SET: u64 = 0x4000000000000000
+
+// An exit_group() status is a plain exit code, never "died of a signal": a status in 129..191 must not turn into WTERMSIG.
+const KILL_PLAIN: u64 = 0x2000000000000000
 
 fn kill_requested(state: u64, i: u64) -> bool {
     return (tget(state, i, T_KILLCODE) & KILL_SET) != 0
@@ -2866,10 +2869,12 @@ fn kill_other(state: u64, i: u64, pid: u64, code: u64) -> u64 {
         return KILL_LATER
     }
     tset(state, i, T_KILLCODE, 0)
-    tset(state, i, T_EXIT, code)
+    let plain: bool = (code & KILL_PLAIN) != 0
+    let ecode: u64 = code & (0xFFFFFFFFFFFFFFFF -% KILL_PLAIN)
+    tset(state, i, T_EXIT, ecode)
     // RUNDE UNTERBAU: a kill code 128 + n is "died of signal n" (bit 8 of T_SIGLAST, read by `wait4`)
-    if code > 128 && code < 192 {
-        tset(state, i, T_SIGLAST, ((code - 128) & 127) | 256)
+    if !plain && ecode > 128 && ecode < 192 {
+        tset(state, i, T_SIGLAST, ((ecode - 128) & 127) | 256)
     }
     tset(state, i, T_END, kstate.get(state, kstate.TICKS))
     lock_gone(state, i)

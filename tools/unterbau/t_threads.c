@@ -17,9 +17,10 @@ static int gp_fd[2];
 static void settle(int ms) { struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a); do { usleep(20000); clock_gettime(CLOCK_MONOTONIC, &b); } while ((b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000 < ms); }
 static void *park_thr(void *a) { (void)a; long tid = syscall(SYS_gettid); (void)!write(gp_fd[1], &tid, sizeof tid); for (;;) settle(1000); return 0; }
 static void *xg_thr(void *a) { (void)a; settle(300); syscall(SYS_exit_group, 7); return 0; }
+static void *xg150_thr(void *a) { (void)a; settle(300); syscall(SYS_exit_group, 150); return 0; }
 static void *segv_thr(void *a) { (void)a; settle(300); *(volatile int *)0 = 1; return 0; }
 
-/* mode 0: main calls exit(5); 1: main writes NULL; 2: a thread calls exit_group(7); 3: a thread writes NULL.
+/* mode 0: main calls exit(5); 1: main writes NULL; 2: a thread calls exit_group(7); 3: a thread writes NULL; 4: a thread calls exit_group(150) (a plain exit, not a signal death).
    Three more threads sleep. Afterwards the whole group must be gone, not running on a freed address space. */
 static void group_case(const char *name, int mode, int want_sig, int want_code)
 {
@@ -30,6 +31,7 @@ static void group_case(const char *name, int mode, int want_sig, int want_code)
         for (int i = 0; i < 3; i++) pthread_create(&t[i], 0, park_thr, 0);
         if (mode == 2) pthread_create(&t[3], 0, xg_thr, 0);
         if (mode == 3) pthread_create(&t[3], 0, segv_thr, 0);
+        if (mode == 4) pthread_create(&t[3], 0, xg150_thr, 0);
         settle(800);
         if (mode == 0) exit(5);
         if (mode == 1) *(volatile int *)0 = 1;
@@ -232,6 +234,7 @@ int main(void)
     group_case("group_segv_main_kills_threads", 1, SIGSEGV, 0);
     group_case("group_exit_group_thread_kills_all", 2, 0, 7);
     group_case("group_segv_thread_kills_all", 3, SIGSEGV, 0);
+    group_case("group_exit_group_150_is_exit", 4, 0, 150);
     CHECK("pthread_self_equal", pthread_equal(pthread_self(), pthread_self()), "");
     return 0;
 }
