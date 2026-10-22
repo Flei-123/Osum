@@ -9,6 +9,19 @@ RECT = re.compile(r"settings: rect name=(\w+) ")
 NET = 3
 ENTRY_RECTS = ("wcp", "wcq", "wcr")
 EXTRA = 3
+LAST_TAB = "tab28"
+WIN = re.compile(r"settings: rect name=win x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+TABRECT = re.compile(r"settings: rect name=(tab\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+BACK = "settings: rect name=navback "
+PAGES = 29
+
+
+def last_build_tabs(txt):
+    at = txt.rfind(BACK)
+    if at < 0:
+        return {}
+    block = txt[at:]
+    return {m.group(1): tuple(int(g) for g in m.groups()[1:]) for m in TABRECT.finditer(block)}
 
 
 def runs(txt):
@@ -33,6 +46,19 @@ def judge(txt):
         ok(m == a + EXTRA, "fixed address shows %d more controls than automatic (%d vs %d)" % (EXTRA, m, a))
         ok(b == m, "fixed address again returns to %d controls (%d)" % (m, b))
         ok(a <= 8 and m <= 8, "both states within the limit of 8 (%d, %d)" % (a, m))
+    wins = WIN.findall(txt)
+    tabs = last_build_tabs(txt)
+    ok(bool(wins), "window rect reported")
+    if wins and tabs:
+        wh = int(wins[0][3])
+        ok(LAST_TAB in tabs, "selected last tab is reported after the page switch (sidebar scrolled it into view)")
+        if LAST_TAB in tabs:
+            y, h = tabs[LAST_TAB][1], tabs[LAST_TAB][3]
+            ok(y >= 0 and y + h <= wh, "last tab lies inside the window (y=%d h=%d window h=%d)" % (y, h, wh))
+        ok(len(tabs) < PAGES, "the narrow sidebar hides tabs it cannot show (%d of %d reported)" % (len(tabs), PAGES))
+        ok(all(v[1] + v[3] <= wh for v in tabs.values()), "every reported tab fits the window")
+    else:
+        ok(False, "tab rects reported after the last build")
     names = set(RECT.findall(txt))
     ok(all(n in names for n in ENTRY_RECTS), "address entry rects reported with the fixed address")
     ok(not re.search(r"ABSTURZ|EXCEPTION", txt), "no crash lines")
@@ -48,6 +74,7 @@ def main():
     doctored = {
         "same count every state": CTL.sub(lambda m: "settings: controls page=%s n=6" % m.group(1), raw),
         "no controls": "\n".join(l for l in raw.splitlines() if not l.startswith("settings: controls ")),
+        "last tab hidden": re.sub(r"settings: rect name=tab28 ", "settings: rect name=zzz ", raw),
         "no entry rects": re.sub(r"settings: rect name=wc[pqr] ", "settings: rect name=zzz ", raw),
     }
     for name, d in doctored.items():
