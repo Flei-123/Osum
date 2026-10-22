@@ -357,8 +357,10 @@ ARGS+=(/etc/
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
 # W-E: fps=on puts the debug.fps switch (config key fps=true in /etc/mouse.conf) on the image
-if [ "${fps:-off}" = on ]; then
-    printf '# /etc/mouse.conf\nfps=true\n' > "$OUT/mouse.conf"
+if [ "${fps:-off}" = on ] || [ "${mon:-off}" = on ]; then
+    printf '# /etc/mouse.conf\n' > "$OUT/mouse.conf"
+    [ "${fps:-off}" = on ] && printf 'fps=true\n' >> "$OUT/mouse.conf"
+    [ "${mon:-off}" = on ] && printf 'mon=true\n' >> "$OUT/mouse.conf"
     ARGS+=("/etc/mouse.conf=$OUT/mouse.conf@0644")
 fi
 if [ "$startstyle" = list ]; then
