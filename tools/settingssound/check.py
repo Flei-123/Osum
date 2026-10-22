@@ -4,6 +4,7 @@ import re, sys
 
 serial = sys.argv[1]
 raw = open(serial, "rb").read().decode("latin1")
+raw2 = open(sys.argv[3], "rb").read().decode("latin1") if len(sys.argv) > 3 else None
 CTL = re.compile(r"^settings: controls page=(\d+) n=(\d+)$", re.M)
 SND = re.compile(r"^settings: sound (\d) v=(\d+) rc=(\d+)", re.M)
 RES = re.compile(r"^settings: results n=(\d+) top=(\d+)((?: r\d+=\d+)*)", re.M)
@@ -40,6 +41,21 @@ def judge(txt):
         ok(" r0=%d" % SOUND_PAGE in rest, "first row of the result list is the Sound page (%s)" % rest.strip())
         ok(n <= 12, "result list within its cap (%d)" % n)
     ok(not re.search(r"ABSTURZ|EXCEPTION", txt), "no crash lines")
+    ok("settings: sound none" not in txt, "no info bar message when the sound card is present")
+    return res
+
+
+def judge_nodev(txt):
+    res = []
+
+    def ok(c, m):
+        res.append((bool(c), m))
+
+    ctl = [int(m.group(2)) for m in CTL.finditer(txt) if int(m.group(1)) == SOUND_PAGE]
+    ok(ctl, "Sound page built without a card (page=29)")
+    ok(ctl and max(ctl) == 0, "no controls without a card, only the info bar (%s)" % ctl)
+    ok(re.search(r"^settings: sound none$", txt, re.M), "info bar branch taken (settings: sound none)")
+    ok(not re.search(r"ABSTURZ|EXCEPTION", txt), "no crash lines without a card")
     return res
 
 
@@ -47,6 +63,12 @@ def main():
     res = judge(raw)
     for c, m in res:
         print("  %s  %s" % ("OK  " if c else "FAIL", m))
+    if raw2 is not None:
+        print("  -- no sound card")
+        res2 = judge_nodev(raw2)
+        for c, m in res2:
+            print("  %s  %s" % ("OK  " if c else "FAIL", m))
+        res += res2
     bad = sum(1 for c, _ in res if not c)
     ok_n = len(res) - bad
     doctored = {
@@ -56,6 +78,18 @@ def main():
         "other top": re.sub(r"(settings: results n=\d+) top=\d+", r"\1 top=3", raw),
         "no volume rect": re.sub(r"settings: rect name=svol ", "settings: rect name=zzz ", raw),
     }
+    if raw2 is not None:
+        doctored2 = {
+            "info bar line missing": "\n".join(l for l in raw2.splitlines() if l != "settings: sound none"),
+            "controls with no card": CTL.sub(lambda m: "settings: controls page=%s n=3" % m.group(1), raw2),
+        }
+        for name, d in doctored2.items():
+            if all(c for c, _ in judge_nodev(d)):
+                print("  FAIL  counter-proof not red: %s" % name)
+                bad += 1
+            else:
+                print("  OK    counter-proof red: %s" % name)
+                ok_n += 1
     for name, d in doctored.items():
         if all(c for c, _ in judge(d)):
             print("  FAIL  counter-proof not red: %s" % name)

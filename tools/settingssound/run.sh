@@ -4,10 +4,10 @@
 #
 #   /root/jarvis/bin/heavy bash tools/settingssound/run.sh [<outdir>]
 #
-# One QEMU boot with a sound card (tools/design/audit.sh ton=ja): open Settings, open the Sound page (tab 29), click the volume
+# Boot 1 with a sound card (tools/design/audit.sh ton=ja): open Settings, open the Sound page (tab 29), click the volume
 # slider, the speaker mute toggle and the microphone mute toggle, then search "sound" (Ctrl+F) and look at the result list.
 # Settings prints `settings: sound <what> v=<value> rc=<syscall result>` after every change and `settings: results n=<k> top=<page> r0=<page>..`
-# after every build. tools/settingssound/check.py judges and proves itself red on doctored copies of the log.
+# after every build. Boot 2 without a sound card: the page shows the info bar (`settings: sound none`, no controls). tools/settingssound/check.py judges and proves itself red on doctored copies of the log.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 OUT=${1:-}
@@ -32,7 +32,18 @@ YRES=800
 export AUDIT_TIMEOUT="${AUDIT_TIMEOUT:-1700}"
 export DESIGNBUILD="${DESIGNBUILD:-$OUT/build}"
 bash tools/design/audit.sh "$D" accel=kvm uitrace=yes ton=ja halt=420 drehbuch="$DREH" > "$OUT/audit.log" 2>&1
-python3 -I tools/settingssound/check.py "$D/serial.txt" "$D"
+D2="$OUT/run2"
+mkdir -p "$D2"
+DREH2="$OUT/drehbuch2.txt"
+{
+  echo "warte 12"
+  echo "klick 24,$((YRES-20))"; echo "warte 3"
+  echo "klickauf start_Settings"; echo "warte 12"
+  echo "warteauf settings: nav route=settings://personalization page=0 || 90"
+  echo "klickauf srecttab29"; echo "warte 3"; echo "foto 01-sound-nodev"
+} > "$DREH2"
+bash tools/design/audit.sh "$D2" accel=kvm uitrace=yes halt=300 drehbuch="$DREH2" > "$OUT/audit2.log" 2>&1
+python3 -I tools/settingssound/check.py "$D/serial.txt" "$D" "$D2/serial.txt"
 rc=$?
-rm -rf "$OUT/build" "$DREH"
+rm -rf "$OUT/build" "$DREH" "$DREH2"
 exit $rc
