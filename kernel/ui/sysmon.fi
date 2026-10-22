@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import mm.mem
+import arch.cpu
+import net.inet
+import block.blk
+import sched.time
+import serial
+
+export { parse, tick, count, raw, delta, busy_pct, cost, taken, CAP, F_TICK, F_CPU, F_IDLE, F_FREE, F_RD, F_WR, F_RX, F_TX }
+
+const CAP: u64 = 60
+const WORDS: u64 = 8
+const HEAD_AT: u64 = 480
+const COUNT_AT: u64 = 481
+const F_TICK: u64 = 0
+const F_CPU: u64 = 1
+const F_IDLE: u64 = 2
+const F_FREE: u64 = 3
+const F_RD: u64 = 4
+const F_WR: u64 = 5
+const F_RX: u64 = 6
+const F_TX: u64 = 7
+
+static mut pg: u64 = 0
+static mut due: u64 = 0
+static mut spent: u64 = 0
+static mut taken_n: u64 = 0
+static mut every: u64 = 0
+static mut dump_due: u64 = 0
+
+static mut w_dump: [u8; 12] = "sysmondump=\0"
+static mut t_head: [u8; 11] = "sysmon: n=\0"
+static mut t_cpu: [u8; 6] = " cpu=\0"
+static mut t_free: [u8; 7] = " free=\0"
+static mut t_rd: [u8; 5] = " rd=\0"
+static mut t_wr: [u8; 5] = " wr=\0"
+static mut t_rx: [u8; 5] = " rx=\0"
+static mut t_tx: [u8; 5] = " tx=\0"
+static mut t_cyc: [u8; 6] = " cyc=\0"
+static mut t_tot: [u8; 8] = " taken=\0"
+
+fn rd64(a: u64) -> u64 {
+    return __mmio_read64(a as *mut u64)
+}
+
+fn wr64(a: u64, v: u64) {
+    __mmio_write64(a as *mut u64, v)
+}
+
+fn ensure(state: u64) -> u64 {
+    if pg != 0 {
+        return pg
+    }
+    let f: u64 = mem.frame_alloc(state)
+    if f == 0 {
+        return 0
+    }
+    var o: u64 = 0
+    while o < mem.FRAME_SIZE / 8 {
+        wr64(f + o * 8, 0)
+        o = o + 1
+    }
+    pg = f
+    return f
+}
+
+fn count() -> u64 {
+    if pg == 0 {
+        return 0
+    }
+    return rd64(pg + COUNT_AT * 8)
+}
+
+fn taken() -> u64 {
+    return taken_n
+}
+
+fn cost() -> u64 {
+    if taken_n == 0 {
+        return 0
+    }
+    return spent / taken_n
+}
+
+fn raw(age: u64, f: u64) -> u64 {
+    if pg == 0 || age >= count() || f >= WORDS {
+        return 0
+    }
+    let head: u64 = rd64(pg + HEAD_AT * 8)
+    let slot: u64 = (head + CAP - 1 - age) % CAP
+    return rd64(pg + (slot * WORDS + f) * 8)
+}
+
+fn delta(age: u64, f: u64) -> u64 {
+    if age + 1 >= count() {
+        return 0
+    }
+    let a: u64 = raw(age, f)
+    let b: u64 = raw(age + 1, f)
+    if a < b {
+        return 0
+    }
+    return a - b
+}
+
+fn busy_pct(age: u64) -> u64 {
+    let t: u64 = delta(age, F_CPU)
+    if t == 0 {
+        return 0
+    }
+    let i: u64 = delta(age, F_IDLE)
+    if i >= t {
+        return 0
+    }
+    return (t - i) * 100 / t
+}
+
+fn store(state: u64) {
+    let t0: u64 = time.tsc()
+    let head: u64 = rd64(pg + HEAD_AT * 8)
+    let base: u64 = pg + head * WORDS * 8
+    var cpus: u64 = cpu.count(state)
+    var tot: u64 = 0
+    var idle: u64 = 0
+    var c: u64 = 0
+    while c < cpus && c < 8 {
+        tot = tot + cpu.get(state, c, cpu.C_TICKS)
+        idle = idle + cpu.get(state, c, cpu.C_IDLETICKS)
+        c = c + 1
+    }
+    var rx: u64 = 0
+    var tx: u64 = 0
+    if inet.ready(state) {
+        rx = inet.card_octets(state, 1)
+        tx = inet.card_octets(state, 0)
+    }
+    wr64(base + F_TICK * 8, kstate.get(state, kstate.TICKS))
+    wr64(base + F_CPU * 8, tot)
+    wr64(base + F_IDLE * 8, idle)
+    wr64(base + F_FREE * 8, mem.frames_free(state))
+    wr64(base + F_RD * 8, blk.reads())
+    wr64(base + F_WR * 8, blk.writes())
+    wr64(base + F_RX * 8, rx)
+    wr64(base + F_TX * 8, tx)
+    wr64(pg + HEAD_AT * 8, (head + 1) % CAP)
+    let n: u64 = rd64(pg + COUNT_AT * 8)
+    if n < CAP {
+        wr64(pg + COUNT_AT * 8, n + 1)
+    }
+    taken_n = taken_n + 1
+    let t1: u64 = time.tsc()
+    if t1 > t0 {
+        spent = spent + (t1 - t0)
+    }
+}
+
+fn word_at(cmd: u64, i: u64) -> bool {
+    var k: u64 = 0
+    while k < 11 {
+        if kstate.get8(cmd + i + k) != kstate.get8((&w_dump[0]) as u64 + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return i == 0 || kstate.get8(cmd + i - 1) == 32
+}
+
+fn parse(cmd: u64) {
+    var i: u64 = 0
+    while i < 4096 && kstate.get8(cmd + i) != 0 {
+        if word_at(cmd, i) {
+            var v: u64 = 0
+            var n: u64 = 0
+            while n < 7 && kstate.get8(cmd + i + 11 + n) >= 48 && kstate.get8(cmd + i + 11 + n) <= 57 {
+                v = v * 10 + (kstate.get8(cmd + i + 11 + n) - 48)
+                n = n + 1
+            }
+            every = v
+        }
+        i = i + 1
+    }
+}
+
+fn say(label: u64, v: u64) {
+    serial.puts(label)
+    serial.dec(v)
+}
+
+fn dump() {
+    say((&t_head[0]) as u64, count())
+    say((&t_cpu[0]) as u64, busy_pct(0))
+    say((&t_free[0]) as u64, raw(0, F_FREE))
+    say((&t_rd[0]) as u64, raw(0, F_RD))
+    say((&t_wr[0]) as u64, raw(0, F_WR))
+    say((&t_rx[0]) as u64, raw(0, F_RX))
+    say((&t_tx[0]) as u64, raw(0, F_TX))
+    say((&t_cyc[0]) as u64, cost())
+    say((&t_tot[0]) as u64, taken_n)
+    serial.nl()
+}
+
+fn tick(state: u64) {
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if now < due {
+        return
+    }
+    due = now + time.TICK_HZ
+    if ensure(state) == 0 {
+        return
+    }
+    store(state)
+    if every != 0 && now >= dump_due {
+        dump_due = now + every
+        dump()
+    }
+}
