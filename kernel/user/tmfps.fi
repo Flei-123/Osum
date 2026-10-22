@@ -1,0 +1,117 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+
+export { NA, refresh, known, fps_x10 }
+
+const NA: u64 = 0xFFFFFFFFFFFFFFFF
+const SLOTS: u64 = 32
+const BUF: u64 = 6144
+
+static mut raw: [u8; 6144] = [0 as u8; 6144]
+static mut raw_len: u64 = 0
+static mut w_avg: [u64; 32] = [0 as u64; 32]
+static mut w_pid: [u64; 32] = [0 as u64; 32]
+
+fn known(v: u64) -> bool {
+    return v != NA
+}
+
+fn slurp() {
+    var p_frames: [u8; 13] = "/proc/frames\0"
+    raw_len = 0
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_frames[0]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    var going: bool = true
+    while going && raw_len < BUF - 1 {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&raw[0]) as u64 + raw_len, BUF - 1 - raw_len)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            raw_len = raw_len + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
+fn at_is(at: u64, key: u64) -> bool {
+    let klen: u64 = ulib.length(key)
+    var i: u64 = 0
+    while i < klen {
+        if at + i >= raw_len {
+            return false
+        }
+        if raw[(at + i) as usize] != *((key + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn digits_at(at: u64) -> u64 {
+    var v: u64 = at
+    var n: u64 = 0
+    while v < raw_len && raw[v as usize] >= 48 as u8 && raw[v as usize] <= 57 as u8 {
+        n = n * 10 + (raw[v as usize] as u64 - 48)
+        v = v + 1
+    }
+    return n
+}
+
+fn skip_digits(at: u64) -> u64 {
+    var v: u64 = at
+    while v < raw_len && raw[v as usize] >= 48 as u8 && raw[v as usize] <= 57 as u8 {
+        v = v + 1
+    }
+    return v
+}
+
+fn refresh() {
+    var k_win: [u8; 5] = "win.\0"
+    var k_avg: [u8; 13] = ".gap_avg_us \0"
+    var k_pid: [u8; 6] = ".pid \0"
+    var i: u64 = 0
+    while i < SLOTS {
+        w_avg[i as usize] = 0
+        w_pid[i as usize] = 0
+        i = i + 1
+    }
+    slurp()
+    var at: u64 = 0
+    while at < raw_len {
+        if at_is(at, (&k_win[0]) as u64) {
+            let idx: u64 = digits_at(at + 4)
+            let rest: u64 = skip_digits(at + 4)
+            if idx < SLOTS {
+                if at_is(rest, (&k_avg[0]) as u64) {
+                    w_avg[idx as usize] = digits_at(rest + 13)
+                } else if at_is(rest, (&k_pid[0]) as u64) {
+                    w_pid[idx as usize] = digits_at(rest + 5)
+                }
+            }
+        }
+        while at < raw_len && raw[at as usize] != 10 as u8 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+}
+
+fn fps_x10(pid: u64) -> u64 {
+    var best: u64 = NA
+    var i: u64 = 0
+    while i < SLOTS {
+        if w_pid[i as usize] == pid && pid != 0 && w_avg[i as usize] > 0 {
+            let f: u64 = 10000000 / w_avg[i as usize]
+            if best == NA || f > best {
+                best = f
+            }
+        }
+        i = i + 1
+    }
+    return best
+}

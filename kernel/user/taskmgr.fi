@@ -128,6 +128,7 @@ import tmcols
 import tmperf
 import tmio
 import tmgpu
+import tmfps
 
 export { u_start }
 
@@ -207,8 +208,14 @@ static mut h_n: u64 = 0
 // performance page shows (0 CPU, 1 memory, 2 disk, 3 network).
 static mut page: u64 = 0
 static mut perf_sel: u64 = 0
-static mut nav_blob: [u8; 160] = [0 as u8; 160]
-static mut nav_icons: [u64; 5] = [0 as u64; 5]
+static mut nav_blob: [u8; 200] = [0 as u8; 200]
+static mut nav_icons: [u64; 6] = [0 as u64; 6]
+static mut us_blob: [u8; 1024] = [0 as u8; 1024]
+static mut us_n: u64 = 0
+static mut us_uid: [u64; 16] = [0 as u64; 16]
+static mut us_cnt: [u64; 16] = [0 as u64; 16]
+static mut us_pm: [u64; 16] = [0 as u64; 16]
+static mut us_pg: [u64; 16] = [0 as u64; 16]
 static mut row_icons: [u64; 132] = [0 as u64; 132]
 static mut st_blob: [u8; 3072] = [0 as u8; 3072]
 static mut st_n: u64 = 0
@@ -305,11 +312,18 @@ static mut k_pg_perf: [u8; 19] = "taskmgr.page.perf\0\0"
 static mut k_pg_start: [u8; 20] = "taskmgr.page.start\0\0"
 static mut k_pg_det: [u8; 18] = "taskmgr.page.det\0\0"
 static mut k_pg_bench: [u8; 19] = "taskmgr.page.bench\0"
+static mut k_pg_users: [u8; 19] = "taskmgr.page.users\0"
+static mut k_ucols: [u8; 15] = "taskmgr.ucols\0\0"
+static mut k_unone: [u8; 15] = "taskmgr.unone\0\0"
+static mut m_us: [u8; 15] = "taskmgr: users\0"
+static mut a_page_users: [u8; 6] = "users\0"
 static mut k_bcols: [u8; 14] = "taskmgr.bcols\0"
 static mut k_bnone: [u8; 15] = "taskmgr.b.none\0"
 static mut a_page_bench: [u8; 6] = "bench\0"
 static mut p_bench: [u8; 12] = "/proc/bench\0"
 static mut m_n: [u8; 4] = " n=\0"
+static mut m_us_u: [u8; 6] = " uid=\0"
+static mut m_us_c: [u8; 6] = " cnt=\0"
 static mut m_bnz: [u8; 14] = "taskmgr: bnz \0"
 static mut m_bn: [u8; 15] = "taskmgr: bench\0"
 static mut k_scols: [u8; 15] = "taskmgr.scols\0\0"
@@ -351,6 +365,7 @@ static mut k_d_prio: [u8; 17] = "taskmgr.d.prio\0\0\0"
 static mut k_d_dr: [u8; 18] = "taskmgr.d.diskr\0\0\0"
 static mut k_d_dw: [u8; 18] = "taskmgr.d.diskw\0\0\0"
 static mut k_d_net: [u8; 16] = "taskmgr.d.net\0\0\0"
+static mut k_d_fps: [u8; 16] = "taskmgr.d.fps\0\0\0"
 static mut k_cx_eff: [u8; 16] = "taskmgr.ctx.eff\0"
 static mut k_cx_norm: [u8; 17] = "taskmgr.ctx.norm\0"
 static mut m_prio: [u8; 19] = "taskmgr: prio pid=\0"
@@ -361,6 +376,7 @@ static mut m_thr: [u8; 6] = " thr=\0"
 static mut m_pr: [u8; 7] = " prio=\0"
 static mut m_dr: [u8; 5] = " dr=\0"
 static mut m_dw: [u8; 5] = " dw=\0"
+static mut m_fps: [u8; 6] = " fps=\0"
 static mut m_drate: [u8; 8] = " drate=\0"
 static mut m_ntx: [u8; 6] = " ntx=\0"
 static mut m_nrxv: [u8; 6] = " nrx=\0"
@@ -815,6 +831,7 @@ fn sample(first: bool) {
     up_ms = now_ms
 
     tmgpu.refresh()
+    tmfps.refresh()
 
     // Das Netz: dieselben zwei Zaehler, die `/bin/netmon` liest.
     net_ok = netmon(ulib.NM_ON)
@@ -1563,6 +1580,9 @@ fn bericht() {
         z_kv(ptr((&m_pr[0]) as u64), tmio.prio(s))
         z_kv(ptr((&m_dr[0]) as u64), tmio.disk_read(s))
         z_kv(ptr((&m_dw[0]) as u64), tmio.disk_write(s))
+        if tmfps.known(tmfps.fps_x10(p_pid[(s) as usize])) {
+            z_kv(ptr((&m_fps[0]) as u64), tmfps.fps_x10(p_pid[(s) as usize]))
+        }
         z_kv(ptr((&m_drate[0]) as u64), tmio.disk_rate(s))
         if tmio.net_known(s) {
             z_kv(ptr((&m_ntx[0]) as u64), tmio.net_tx(s))
@@ -1579,6 +1599,9 @@ fn bericht() {
     }
     if page == 4 {
         bn_report()
+    }
+    if page == 5 {
+        us_report()
     }
     z_new(ptr((&m_blockend[0]) as u64))
     z_num(blocknr)
@@ -1625,6 +1648,7 @@ const K_NAV: u64 = 3
 const K_SEARCH: u64 = 12
 const K_START: u64 = 5
 const K_BENCH: u64 = 11
+const K_USERS: u64 = 13
 const STATSH: u64 = 120
 const TILEH: u64 = 70
 const TILEGAP: u64 = 6
@@ -1641,11 +1665,14 @@ fn nav_make() {
     a = put_str(d, a, ptr((&u_nl[0]) as u64))
     a = put_str(d, a, msg.get(ptr((&k_pg_bench[0]) as u64)))
     a = put_str(d, a, ptr((&u_nl[0]) as u64))
+    a = put_str(d, a, msg.get(ptr((&k_pg_users[0]) as u64)))
+    a = put_str(d, a, ptr((&u_nl[0]) as u64))
     nav_icons[0 as usize] = wlib.icon_id(icons.PAGE_LIST)
     nav_icons[1 as usize] = wlib.icon_id(icons.PAGE_ACTIVITY)
     nav_icons[2 as usize] = wlib.icon_id(icons.PAGE_STARTUP)
     nav_icons[3 as usize] = wlib.icon_id(icons.PAGE_DETAILS)
     nav_icons[4 as usize] = wlib.icon_id(icons.PAGE_GAUGE)
+    nav_icons[5 as usize] = wlib.icon_id(icons.PAGE_CPU)
 }
 
 fn perf_bind() {
@@ -1959,7 +1986,7 @@ fn det_draw(dx: u64, dy: u64, dw: u64, dh: u64) {
     var t: [u8; 64] = [0 as u8; 64]
     let tp: u64 = (&t[0]) as u64
     var line: u64 = 0
-    while line < 14 {
+    while line < 15 {
         var lab: u64 = ptr((&k_d_pid[0]) as u64)
         var a: u64 = 0
         if line == 0 {
@@ -2022,12 +2049,19 @@ fn det_draw(dx: u64, dy: u64, dw: u64, dh: u64) {
         } else if line == 12 {
             lab = ptr((&k_d_dw[0]) as u64)
             a = put_bytes(tp, 0, tmio.disk_write(sl))
-        } else {
+        } else if line == 13 {
             lab = ptr((&k_d_net[0]) as u64)
             if tmio.net_known(sl) {
                 a = put_bytes(tp, 0, tmio.net_tx(sl))
                 a = put_str(tp, a, ptr((&u_slash[0]) as u64))
                 a = put_bytes(tp, a, tmio.net_rx(sl))
+            } else {
+                a = put_str(tp, 0, ptr((&u_dash[0]) as u64))
+            }
+        } else {
+            lab = ptr((&k_d_fps[0]) as u64)
+            if tmfps.known(tmfps.fps_x10(p_pid[(sl) as usize])) {
+                a = put_pm(tp, 0, tmfps.fps_x10(p_pid[(sl) as usize]))
             } else {
                 a = put_str(tp, 0, ptr((&u_dash[0]) as u64))
             }
@@ -2208,6 +2242,69 @@ fn bn_load() {
     __mmio_write8((d + a) as *mut u8, 0 as u8)
 }
 
+fn us_load() {
+    let d: u64 = (&us_blob[0]) as u64
+    var a: u64 = put_str(d, 0, msg.get(ptr((&k_ucols[0]) as u64)))
+    a = put_str(d, a, ptr((&u_nl[0]) as u64))
+    us_n = 0
+    var i: u64 = 0
+    while i < nlive {
+        let sl: u64 = ord[(i) as usize]
+        let u: u64 = tmio.uid(sl)
+        var j: u64 = 0
+        while j < us_n && us_uid[(j) as usize] != u {
+            j = j + 1
+        }
+        if j == us_n && us_n < 16 {
+            us_uid[(j) as usize] = u
+            us_cnt[(j) as usize] = 0
+            us_pm[(j) as usize] = 0
+            us_pg[(j) as usize] = 0
+            us_n = us_n + 1
+        }
+        if j < us_n {
+            us_cnt[(j) as usize] = us_cnt[(j) as usize] + 1
+            us_pm[(j) as usize] = us_pm[(j) as usize] + p_pm[(sl) as usize]
+            us_pg[(j) as usize] = us_pg[(j) as usize] + p_pages[(sl) as usize]
+        }
+        i = i + 1
+    }
+    var r: u64 = 0
+    while r < us_n && a < 960 {
+        a = put_num(d, a, us_uid[(r) as usize])
+        a = put_str(d, a, ptr((&u_tab[0]) as u64))
+        a = put_num(d, a, us_cnt[(r) as usize])
+        a = put_str(d, a, ptr((&u_tab[0]) as u64))
+        a = put_pm(d, a, us_pm[(r) as usize])
+        a = put_str(d, a, ptr((&u_pct[0]) as u64))
+        a = put_str(d, a, ptr((&u_tab[0]) as u64))
+        a = put_size(d, a, us_pg[(r) as usize] * 4)
+        a = put_str(d, a, ptr((&u_nl[0]) as u64))
+        r = r + 1
+    }
+}
+
+fn build_users(cc: usize) {
+    var h: u64 = BH - 16
+    if us_n == 0 {
+        let _m: usize = fuiscene.label_muted(cc, msg.get(ptr((&k_unone[0]) as u64)))
+        h = BH - 16 - 32
+    }
+    let _t: usize = fuiscene.table_blob(cc, K_USERS, CW, h, 4, ptr((&us_blob[0]) as u64))
+}
+
+fn us_report() {
+    z_new(ptr((&m_us[0]) as u64))
+    z_kv(ptr((&m_n[0]) as u64), us_n)
+    var r: u64 = 0
+    while r < us_n {
+        z_kv(ptr((&m_us_u[0]) as u64), us_uid[(r) as usize])
+        z_kv(ptr((&m_us_c[0]) as u64), us_cnt[(r) as usize])
+        r = r + 1
+    }
+    z_end()
+}
+
 fn build_bench(cc: usize) {
     var h: u64 = BH - 16
     if bn_n == 0 {
@@ -2369,6 +2466,8 @@ fn build() {
         build_start(cc)
     } else if page == 4 {
         build_bench(cc)
+    } else if page == 5 {
+        build_users(cc)
     } else {
         build_details(cc)
     }
@@ -2436,6 +2535,8 @@ fn u_start(args: u64) -> u64 {
         page = 3
     } else if arg_hat(args, ptr((&a_page_bench[0]) as u64)) {
         page = 4
+    } else if arg_hat(args, ptr((&a_page_users[0]) as u64)) {
+        page = 5
     }
 
     // DER KATALOG ZUERST, vor jedem Bedienelement: ein Knoten behaelt den
@@ -2459,6 +2560,9 @@ fn u_start(args: u64) -> u64 {
         st_load()
     }
     bn_load()
+    if page == 5 {
+        us_load()
+    }
 
     tmcols.layout(CW)
     var wc: u64 = 0
@@ -2512,6 +2616,11 @@ fn u_start(args: u64) -> u64 {
             fuiscene.table_colw(K_START, 1, 300)
             fuiscene.table_colw(K_START, 2, 96)
             fuiscene.table_colw(K_START, 3, 120)
+            fuiscene.table_colw(K_USERS, 0, 160)
+            fuiscene.table_colw(K_USERS, 1, 160)
+            fuiscene.table_colw(K_USERS, 2, 160)
+            fuiscene.table_colw(K_USERS, 3, 200)
+            fuiscene.table_hover(K_USERS, true)
             fuiscene.table_colw(K_BENCH, 0, 360)
             fuiscene.table_colw(K_BENCH, 1, 200)
             show_sel()
@@ -2544,10 +2653,13 @@ fn u_start(args: u64) -> u64 {
         if key == K_NAV {
             // a page of the sidebar was chosen
             let np: u64 = fuiscene.table_sel(K_NAV)
-            if np < 5 && np != page {
+            if np < 6 && np != page {
                 page = np
                 if page == 2 {
                     st_load()
+                }
+                if page == 5 {
+                    us_load()
                 }
                 if page == 4 {
                     bn_load()
@@ -2622,6 +2734,10 @@ fn u_start(args: u64) -> u64 {
                 fuiscene.refresh()
             }
         }
+        let lk: u64 = fuiscene.last_key()
+        if lk == wlib.KEY_DEL && page == 0 && sel_pid != 0 && ask_pid == 0 {
+            ask()
+        }
         if page == 0 {
             search_poll()
         }
@@ -2641,6 +2757,10 @@ fn u_start(args: u64) -> u64 {
             if page == 4 {
                 bn_load()
                 fuiscene.table_set_blob(K_BENCH, ptr((&bn_blob[0]) as u64))
+            }
+            if page == 5 {
+                us_load()
+                fuiscene.table_set_blob(K_USERS, ptr((&us_blob[0]) as u64))
             }
             if sel_pid != 0 && slot_of_pid(sel_pid) >= SLOTS {
                 sel_pid = 0

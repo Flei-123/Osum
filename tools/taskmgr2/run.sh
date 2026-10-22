@@ -127,7 +127,7 @@ BWT="$TMPD/basewt"
 if git worktree add --detach "$BWT" "$BASE" >/dev/null 2>&1; then
     mkdir -p "$BWT/tools/taskmgr2"
     cp -r tools/toolbench/. "$BWT/tools/toolbench/"
-    cp tools/taskmgr2/ctx.txt tools/taskmgr2/search.txt tools/taskmgr2/perf.txt tools/taskmgr2/eff.txt "$BWT/tools/taskmgr2/"
+    cp tools/taskmgr2/ctx.txt tools/taskmgr2/search.txt tools/taskmgr2/perf.txt tools/taskmgr2/eff.txt tools/taskmgr2/users.txt tools/taskmgr2/del.txt "$BWT/tools/taskmgr2/"
     drive "$BWT" "$TMPD/bc" "$BWT/tools/taskmgr2/ctx.txt" || true
     drive "$BWT" "$TMPD/bs" "$BWT/tools/taskmgr2/search.txt" || true
     num "BASE $BASE: no context menu opens" "$(cnt "$TMPD/bc/serial.txt" '^taskmgr: ctx n=')" eq 0
@@ -168,6 +168,41 @@ if [ -n "$BWT" ] && [ -d "$BWT" ]; then
     drive_eff "$BWT" "$TMPD/be" || true
     num "BASE $BASE: rows carry no thr=" "$(grep -a '^taskmgr: zeile' "$TMPD/be/serial.txt" | grep -c ' thr=')" eq 0
     num "BASE $BASE: no priority change" "$(cnt "$TMPD/be/serial.txt" '^taskmgr: prio pid=')" eq 0
+fi
+
+echo
+echo "== 6. S3/S6: Users page, Delete = End task, FPS only from /proc/frames =="
+drive_users() {
+    local tree=$1 out=$2
+    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+        app=/bin/taskmgr,melde,takt,500,users wait=14 last=400 extra="wighalt=120" \
+        plan="$tree/tools/taskmgr2/users.txt" > "$out.log" 2>&1 )
+}
+drive_del() {
+    local tree=$1 out=$2
+    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+        app=/bin/taskmgr,melde,takt,500 wait=14 last=400 extra="wighalt=120" \
+        plan="$tree/tools/taskmgr2/del.txt" > "$out.log" 2>&1 )
+}
+drive_users "$ROOT" "$TMPD/u" || bad "build users"
+SU="$TMPD/u/serial.txt"
+num "plan targets not found" "$(cnt "$TMPD/u/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "users page reports at least one owner" "$(grep -a '^taskmgr: users n=' "$SU" | head -1 | sed -E 's/.*users n=([0-9]+).*/\1/')" ge 1
+num "the owner list names uid 0 (system tasks)" "$(grep -a '^taskmgr: users n=' "$SU" | head -1 | grep -c ' uid=0 ')" eq 1
+num "owner rows add up to the live tasks (cnt sum >= 5)" "$(grep -a '^taskmgr: users n=' "$SU" | head -1 | grep -oE ' cnt=[0-9]+' | sed 's/.*=//' | awk '{s+=$1} END{print s+0}')" ge 5
+num "no row report carries fps= without /proc/frames (shown as --)" "$(grep -a '^taskmgr: zeile' "$SU" | grep -c ' fps=')" eq 0
+drive_del "$ROOT" "$TMPD/d" || bad "build del"
+SD="$TMPD/d/serial.txt"
+num "plan targets not found" "$(cnt "$TMPD/d/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+DPID=$(grep -a '^taskmgr: wahl' "$SD" | tail -1 | sed -E 's/.*wahl pid=([0-9]+).*/\1/')
+APID=$(grep -a '^taskmgr: frage pid=' "$SD" | head -1 | sed -E 's/.*frage pid=([0-9]+).*/\1/')
+num "Delete on the chosen row asks once" "$(cnt "$SD" '^taskmgr: frage pid=')" eq 1
+[ -n "${APID:-}" ] && [ "${APID:-x}" = "${DPID:-y}" ] && ok "the question is about the chosen row (pid $APID)" || bad "question pid ${APID:-?}, chosen pid ${DPID:-?}"
+if [ -n "$BWT" ] && [ -d "$BWT" ]; then
+    drive_del "$BWT" "$TMPD/bd" || true
+    num "BASE $BASE: Delete asks nothing" "$(cnt "$TMPD/bd/serial.txt" '^taskmgr: frage pid=')" eq 0
+    drive_users "$BWT" "$TMPD/bu" || true
+    num "BASE $BASE: no users page report" "$(cnt "$TMPD/bu/serial.txt" '^taskmgr: users n=')" eq 0
 fi
 
 echo
