@@ -18,6 +18,7 @@
 # Levels (cumulative): quick = fast/representative gates of the touched areas
 # (aim: minutes), full = + all other gates of the touched areas (before a merge),
 # nightly = ALL gates, ignores the paths (cron on main).
+# --run first runs the English new-code guard (tools/english/count.py --diff BASE, ENG-3): German in an added line stops everything (exit 1).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -68,6 +69,11 @@ if [[ -n $ONLY ]]; then SEL=(); else mapfile -t SEL < <(python3 -I $QA/gates-sel
 echo "base=$BASE level=$LEVEL changed_files=$NCH gates=${#SEL[@]}"
 printf '  %s\n' "${SEL[@]}"
 [[ $RUN -eq 1 ]] || { echo "(dry run -- add --run to execute through heavy)"; exit 0; }
+if ! python3 -I tools/english/count.py --diff "$BASE" > "$CH.eng" 2>&1; then
+    echo "== english new-code guard (count.py --diff $BASE) FAILED =="; head -30 "$CH.eng"; rm -f "$CH.eng"
+    echo "gates: not run, German in new lines blocks the merge"; exit 1
+fi
+rm -f "$CH.eng"
 [[ ${#SEL[@]} -gt 0 ]] || { echo "nothing to run"; exit 0; }
 
 OUT=$(mktemp -d); mkdir -p "$(dirname "$TIMES")"

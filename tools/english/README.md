@@ -48,6 +48,7 @@ messages. German lives in the catalogs (`locale/`) only. New code is English fro
   tools/english/count.py --update   lower the baseline (it only ever goes down, `--force` to raise)
   tools/english/count.py --diff B   fail when a line ADDED since commit B is German (new code guard)
   tools/english/run.sh              the three checks as one acceptance section (test.sh section 58)
+  (the second scanner, Firn no_german.py via shared_guard.sh and test.sh 58b, was retired on 22.10.2026: count.py is the only metric)
   tools/english/allow.txt           path prefixes where German is allowed, every entry with its reason
 
 Stages (each a small merge, nothing stored is broken -- formats, files on disk and the wire keep their names or
