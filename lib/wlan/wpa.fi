@@ -78,7 +78,7 @@ import crypto.aes
 export {
     Eapol, eapol_new, eapol_zerlege, eapol_mic_versatz,
     pmk_off_password, ptk_ableiten, mic_compute, mic_check,
-    schluesseldaten_auspacken, gtk_find,
+    key_data_unwrap, gtk_find,
     KCK_LEN, KEK_LEN, TK_LEN, PTK_LEN, NONCE_LEN, MIC_LEN,
     EAPOL_HEADER, EAPOL_COMMIT,
     MIC_HMAC_SHA1, MIC_AES_CMAC, MIC_UNBEKANNT
@@ -162,16 +162,16 @@ struct Eapol {
     nonce: u64,      // Zeiger IN den Rahmen, 32 Oktette
     rsc: u64,        // Zeiger IN den Rahmen, 8 Oktette
     mic: u64,        // Zeiger IN den Rahmen, 16 Oktette
-    daten: u64,      // Zeiger IN den Rahmen
-    daten_len: usize,
+    data: u64,      // Zeiger IN den Rahmen
+    data_len: usize,
     paarweise: bool,
     installieren: bool,
     ack: bool,
     hat_mic: bool,
-    sicher: bool,
-    fehler: bool,
+    secure: bool,
+    failed: bool,
     anforderung: bool,
-    daten_verschluesselt: bool,
+    data_encrypted: bool,
     nachricht: u64, // 1..4, 0 = keine der vier
     gesamt: usize,  // Laenge des ganzen Rahmens, wie er gerechnet wird
 }
@@ -179,10 +179,10 @@ struct Eapol {
 fn eapol_new() -> Eapol {
     return Eapol { version: 0, typ: 0, rumpf_len: 0, deskriptor: 0,
         key_info: 0, desc_version: 0, key_len: 0, zaehler_lo: 0,
-        nonce: 0, rsc: 0, mic: 0, daten: 0, daten_len: 0,
+        nonce: 0, rsc: 0, mic: 0, data: 0, data_len: 0,
         paarweise: false, installieren: false, ack: false,
-        hat_mic: false, sicher: false, fehler: false,
-        anforderung: false, daten_verschluesselt: false,
+        hat_mic: false, secure: false, failed: false,
+        anforderung: false, data_encrypted: false,
         nachricht: 0, gesamt: 0 }
 }
 
@@ -246,11 +246,11 @@ fn eapol_zerlege(e: *mut Eapol, p: u64, n: usize) -> bool {
     if EAPOL_HEADER + EAPOL_COMMIT + dl > n {
         return false
     }
-    (*e).daten_len = dl
+    (*e).data_len = dl
     if dl > 0 {
-        (*e).daten = p + (EAPOL_HEADER as u64) + (EAPOL_COMMIT as u64)
+        (*e).data = p + (EAPOL_HEADER as u64) + (EAPOL_COMMIT as u64)
     } else {
-        (*e).daten = 0
+        (*e).data = 0
     }
     (*e).gesamt = EAPOL_HEADER + EAPOL_COMMIT + dl
 
@@ -258,10 +258,10 @@ fn eapol_zerlege(e: *mut Eapol, p: u64, n: usize) -> bool {
     (*e).installieren = (ki & 64) != 0
     (*e).ack = (ki & 128) != 0
     (*e).hat_mic = (ki & 256) != 0
-    (*e).sicher = (ki & 512) != 0
-    (*e).fehler = (ki & 1024) != 0
+    (*e).secure = (ki & 512) != 0
+    (*e).failed = (ki & 1024) != 0
     (*e).anforderung = (ki & 2048) != 0
-    (*e).daten_verschluesselt = (ki & 4096) != 0
+    (*e).data_encrypted = (ki & 4096) != 0
 
     // Welche der vier Nachrichten das ist. Es gibt in 802.11 kein Feld
     // dafuer -- man erkennt sie an der Kombination der Bits, und das
@@ -273,13 +273,13 @@ fn eapol_zerlege(e: *mut Eapol, p: u64, n: usize) -> bool {
         if (*e).ack && !(*e).hat_mic {
             (*e).nachricht = 1
         }
-        if !(*e).ack && (*e).hat_mic && !(*e).sicher {
+        if !(*e).ack && (*e).hat_mic && !(*e).secure {
             (*e).nachricht = 2
         }
         if (*e).ack && (*e).hat_mic {
             (*e).nachricht = 3
         }
-        if !(*e).ack && (*e).hat_mic && (*e).sicher {
+        if !(*e).ack && (*e).hat_mic && (*e).secure {
             (*e).nachricht = 4
         }
     }
@@ -574,7 +574,7 @@ fn mic_check(kck: u64, kcklen: usize, eapol: u64, elen: usize,
 // wirklich "der Pruefwert des Einpackens stimmt nicht" -- also
 // falscher KEK oder verdrehtes Paket -- und darf NIE als "dann eben
 // unverschluesselt" gelesen werden.
-fn schluesseldaten_auspacken(kek: u64, keklen: usize, daten: u64,
+fn key_data_unwrap(kek: u64, keklen: usize, daten: u64,
     dlen: usize, out: u64, outmax: usize) -> i64 {
     if dlen < 24 || dlen % 8 != 0 || dlen > 264 {
         return -1

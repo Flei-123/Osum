@@ -22,6 +22,6 @@ mutate() { # name, sed expression, [file in lib/wlan, default link.fi]
 mutate nogtk 's/^            after_m3(l, eapol, elen)$//'
 mutate nowidth 's/caps.best_rate_kbps(&c, w)/0 as u64/'
 # control: the old behaviour (a bad-MIC message 3 aborts the run with event 'x') must be caught
-mutate m3abort 's/^        (\*s).fehler = F_MIC$/&\n        state.ereignis(\&(*s).lauf, 120)/' connect.fi
+mutate m3abort 's/^        (\*s).fehler = F_MIC$/&\n        state.event(\&(*s).lauf, 120)/' connect.fi
 echo "RESULT ok=$ok bad=$bad"
 [ "$bad" -eq 0 ]
