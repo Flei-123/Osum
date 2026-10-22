@@ -31,6 +31,7 @@ for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
   echo "klickauf srecttab26"; echo "warte 2"; echo "foto page-A"
   echo "klickauf srecttab27"; echo "warte 2"; echo "foto page-B"
   echo "klickauf srecttab28"; echo "warte 2"; echo "foto page-C"
+  echo "klickauf srecttab29"; echo "warte 2"; echo "foto page-D"
   echo "taste ctrl-f"; echo "tippe zzzz"; echo "warte 2"; echo "foto search-empty"
 } > "$DREH"
 bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=420 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1

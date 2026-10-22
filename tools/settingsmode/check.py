@@ -13,7 +13,7 @@ LAST_TAB = "tab28"
 WIN = re.compile(r"settings: rect name=win x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TABRECT = re.compile(r"settings: rect name=(tab\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 BACK = "settings: rect name=navback "
-PAGES = 29
+PAGES = 30
 
 
 def last_build_tabs(txt):
