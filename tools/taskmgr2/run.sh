@@ -39,7 +39,7 @@ drive "$ROOT" "$TMPD/c" "$ROOT/tools/taskmgr2/ctx.txt" || bad "build ctx"
 SC="$TMPD/c/serial.txt"
 num "plan targets not found" "$(cnt "$TMPD/c/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
 num "menu opened (2 row clicks, 1 header miss)" "$(cnt "$SC" '^taskmgr: ctx n=')" eq 2
-num "menu on a system row has exactly 2 rows (no Efficiency mode)" "$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 2
+num "menu on the launcher (an app) has exactly 3 rows" "$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 3
 LPID=$(grep -a '^taskmgr: zeile' "$SC" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
 CPID=$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.* pid=([0-9]+).*/\1/')
 [ -n "${LPID:-}" ] && [ "${LPID:-x}" = "${CPID:-y}" ] && ok "menu belongs to the clicked row (pid $CPID)" || bad "menu pid ${CPID:-?}, row pid ${LPID:-?}"
@@ -150,6 +150,7 @@ num "row reports carry thr= (rows)" "$(grep -a '^taskmgr: zeile' "$SE" | grep -c
 num "row reports with thr=0 for live user rows" "$(grep -a '^taskmgr: zeile' "$SE" | grep -a 'name=taskmgr' | grep -c ' thr=0 ')" eq 0
 num "taskmgr reads its image: dr > 0" "$(grep -a '^taskmgr: zeile' "$SE" | grep -a 'name=taskmgr' | sed -E 's/.* dr=([0-9]+) .*/\1/' | sort -n | tail -1)" gt 0
 num "menu on an app row has 3 rows" "$(grep -a '^taskmgr: ctx n=' "$SE" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 3
+num "menu on a system row has exactly 2 rows (no Efficiency mode)" "$(grep -a '^taskmgr: ctx n=' "$SE" | sed -n 2p | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 2
 num "exactly one Efficiency pick (act 3)" "$(cnt "$SE" '^taskmgr: ctx wahl act=3')" eq 1
 EPID=$(grep -a '^taskmgr: prio pid=' "$SE" | head -1 | sed -E 's/.*pid=([0-9]+).*/\1/')
 CPID=$(grep -a '^taskmgr: ctx n=' "$SE" | head -1 | sed -E 's/.* pid=([0-9]+).*/\1/')
