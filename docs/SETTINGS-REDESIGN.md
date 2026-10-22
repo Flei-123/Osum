@@ -307,3 +307,9 @@ Examples:
 
 ![Narrow](img/settings/narrow-03-page.png)
 
+
+## Status 22.10.2026 (SET-11 rest, SET-2/3 bookkeeping)
+* Baseline settingsaudit halt=1100 on main 78cc4d57: 29 pages, max 8 controls, 0 overlaps, 0 over the limit (Accounts with an account stays at 8, a87f43bc). SET-11 "9 controls" is closed.
+* `settings.routes` `controls N` is now the measured maximum for display (8), network (8), connections (7), cloud (8), updates (8), taskbar (8); `tools/settingsaudit/declared.py --check` (called by `run.sh`) fails when a page measures more than it declares or more than 8.
+* Sidebar scroll gate: `tools/settingsmode/check.py` judges the 800x480 run: the last tab (tab28) is reported inside the window after the page switch, the narrow sidebar hides tabs (11 of 29 reported), every reported tab fits the window, counter-proof when tab28 is missing.
+* Not done: Display / Sound / Network are still hand-built pages (`page_screen`, `page_netz`); migrating them to manifest-rendered pages needs the generic renderer to draw mode lists, sliders and dropdowns (SET-2 registry core), which is the next real step.
