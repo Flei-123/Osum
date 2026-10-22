@@ -107,7 +107,7 @@ start_qemu() { # kernel image comlog extra-args...
     shift 3
     rm -f "$SOCK"
     timeout 300 qemu-system-x86_64 $ACCEL -kernel "$k" -m 512 -smp 2 \
-        -append "osum vfs nokbd" -display none "$@" \
+        -append "osum vfs nokbd gfx disp ${GWORDS:-}" -display none "$@" \
         -drive "file=$img,format=raw,if=ide,index=0" \
         -serial "file:$log" \
         -chardev "socket,id=odb,path=$SOCK,server=on,wait=off" -serial chardev:odb \
@@ -168,7 +168,7 @@ if grab "$B/k0.mb" vio -device virtio-gpu-pci; then
 fi
 
 echo "== 4. VMSVGA =="
-if grab "$B/k0.mb" vmw -vga vmware; then
+if GWORDS=vmsvgahw grab "$B/k0.mb" vmw -vga vmware; then
     sed 's/^/        /' "$TMPD/vmw.gpu"
     [ "$(val vmw gpu0.name)" = vmsvga ] && ok "vmsvga: name vmsvga" || bad "vmsvga: name '$(val vmw gpu0.name)'"
     [ "$(val vmw gpu0.kind)" = 1 ] && ok "vmsvga: kind 1" || bad "vmsvga: kind"
