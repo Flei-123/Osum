@@ -9518,9 +9518,111 @@ fn page_matches(p: u64) -> bool {
     return true
 }
 
+// SET-12 (r1575): the ranked search result list. Rows are `title - parent` (the crumb path of the route), in rank order.
+const RES_MAX: u64 = 12
+static mut res_n: u64 = 0
+static mut res_pg: [u64; 12] = [0 as u64; 12]
+static mut res_buf: [u8; 768] = [0 as u8; 768]
+static mut k_nav_empty: [u8; 17] = "nav.search.empty\0"
+
+fn res_group(pg: u64) -> u64 {
+    var fi: u64 = 0
+    while fi < setroute.flat_count() {
+        if setroute.flat_page(fi) == pg {
+            if setroute.flat_depth(fi) == 0 {
+                return 0
+            }
+            var j: u64 = fi
+            while j > 0 {
+                j = j - 1
+                if setroute.flat_depth(j) == 0 {
+                    return setroute.flat_title(j)
+                }
+            }
+            return 0
+        }
+        fi = fi + 1
+    }
+    return 0
+}
+
+fn res_put(dst: u64, at: u64, src: u64) -> u64 {
+    var o: u64 = at
+    var i: u64 = 0
+    while rb(src, i) != 0 && o < 62 {
+        __mmio_write8((dst + o) as *mut u8, rb(src, i) as u8)
+        o = o + 1
+        i = i + 1
+    }
+    __mmio_write8((dst + o) as *mut u8, 0 as u8)
+    return o
+}
+
+fn res_has(pg: u64) -> bool {
+    var i: u64 = 0
+    while i < res_n {
+        if res_pg[(i) as usize] == pg {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn res_build() {
+    res_n = 0
+    if !setroute.ready() || rb((&e_srch[0 as usize]) as u64, 0) == 0 {
+        return
+    }
+    var sep: [u8; 4] = " - \0"
+    var i: u64 = 0
+    while i < setroute.hit_raw() && res_n < RES_MAX {
+        let pg: u64 = setroute.hit_page(i)
+        if pg != setroute.NONE && pg < R_ANZ && !res_has(pg) {
+            res_pg[(res_n) as usize] = pg
+            let dst: u64 = ((&res_buf[0 as usize]) as u64) + res_n * 64
+            var o: u64 = res_put(dst, 0, setroute.page_title(pg))
+            let g: u64 = res_group(pg)
+            if g != 0 {
+                o = res_put(dst, o, (&sep[0 as usize]) as u64)
+                let _o2: u64 = res_put(dst, o, g)
+            }
+            res_n = res_n + 1
+        }
+        i = i + 1
+    }
+    var s_r: [u8; 21] = "settings: results n=\0"
+    var s_t: [u8; 6] = " top=\0"
+    var s_p: [u8; 3] = " r\0"
+    var s_e: [u8; 2] = "=\0"
+    say((&s_r[0 as usize]) as u64)
+    sayn(res_n)
+    say((&s_t[0 as usize]) as u64)
+    sayn(setroute.top_page())
+    var k: u64 = 0
+    while k < res_n && k < 4 {
+        say((&s_p[0 as usize]) as u64)
+        sayn(k)
+        say((&s_e[0 as usize]) as u64)
+        sayn(res_pg[(k) as usize])
+        k = k + 1
+    }
+    nl()
+}
+
+fn side_results(lst: usize, item_h: u64) {
+    var i: u64 = 0
+    while i < res_n {
+        let ln: u64 = ((&res_buf[0 as usize]) as u64) + i * 64
+        let _t: usize = navview.side_item(lst, tab_key(res_pg[(i) as usize]), ln, item_h, 512 + i, tile_cb)
+        i = i + 1
+    }
+}
+
 fn nav_compute() {
     nav_n = 0
     let _qp: u64 = setroute.query_pages((&e_srch[0 as usize]) as u64)
+    res_build()
     var i: u64 = 0
     while i < pages_all() {
         if page_matches(i) {
@@ -9625,6 +9727,10 @@ fn tile_cb(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
         if (st & SF_HOT) != 0 && sw_sel != arg {
             fuiscene.cv_ring(x + 2 * s, y + 2 * s, d - 4 * s, d - 4 * s, d / 2, fuiscene.R_BORDER)
         }
+    } else if kind == 2 {
+        // a search result row (SET-12)
+        let rp: u64 = res_pg[(arg % 12) as usize]
+        navview.item_paint(x, y, w, h, st, ((&res_buf[0 as usize]) as u64) + (arg % 12) * 64, rp == reiter, 0)
     } else if kind == 4 {
         // the wallpaper thumbnail: the system's current picture (a sea)
         fuiscene.cv_round_rgb(x, y, w, h, 8 * s, 797789)
@@ -10059,7 +10165,14 @@ fn build() {
             fuiscene.set_gap(lst, 2)
         }
     }
-    side_routes(lst, item_h)
+    if res_n > 0 {
+        side_results(lst, item_h)
+    } else {
+        side_routes(lst, item_h)
+    }
+    if nav_n == 0 && rb((&e_srch[0 as usize]) as u64, 0) != 0 {
+        let _ne: usize = fuiscene.label_muted(lst, msg.get((&k_nav_empty[0 as usize]) as u64))
+    }
     var c: u64 = 0
     while c < NCAT + 1 {
         var any: bool = false
