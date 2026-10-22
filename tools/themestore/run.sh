@@ -472,7 +472,7 @@ txt = open(sys.argv[1], 'rb').read().decode('latin1')
 soll = []
 for raw in open(sys.argv[2], 'rb').read().decode('utf-8').splitlines():
     if raw.startswith('settings.tabs'):
-        soll = raw.split('=', 1)[1].strip().split('\\n')
+        soll = soll + raw.split('=', 1)[1].strip().split('\\n')
 ziel = soll.index('Vorlagen') if 'Vorlagen' in soll else 7
 for m in re.finditer(r'wlib: tab i=(\d+) x=\d+ y=\d+ w=(\d+) h=(\d+) '
                      r'ax=(\d+) ay=(\d+)', txt):
@@ -652,10 +652,10 @@ num "und kein Reiter wird ausserhalb der Leiste gemalt" "$TABOUT" eq 0
 TABNAME=$(python3 - "$SE" locale/de/messages <<'PY'
 import re, sys
 txt = open(sys.argv[1], 'rb').read().decode('latin1')
-soll = None
+soll = []
 for raw in open(sys.argv[2], 'rb').read().decode('utf-8').splitlines():
     if raw.startswith('settings.tabs'):
-        soll = raw.split('=', 1)[1].strip().split('\\n')
+        soll = soll + raw.split('=', 1)[1].strip().split('\\n')
 if not soll:
     print('KEINE SPRACHDATEI'); raise SystemExit
 ist = {}
@@ -794,22 +794,20 @@ import re, sys
 txt = open(sys.argv[1], 'rb').read().decode('latin1')
 cut = txt.rfind('settings: rect name=waa ')
 tail = txt[cut:] if cut >= 0 else txt
-grp = {}
-for m in re.finditer(r'settings: rect name=w\w\w x=\d+ y=\d+ w=(\d+) h=(\d+)'
-                     r' ax=(\d+) ay=(\d+)', tail):
-    w, h, ax, ay = (int(v) for v in m.groups())
-    if h > 40:
-        continue
-    grp.setdefault((ax, w, h), []).append(ay)
-if not grp:
-    raise SystemExit
-k, ys = max(grp.items(), key=lambda kv: len(kv[1]))
-for ay in sorted(ys):
-    print(k[0], ay, k[1], k[2])
+win = re.findall(r'settings: rect name=win x=(\d+) y=(\d+)', txt)
+ox, oy = (int(win[-1][0]) + 2, int(win[-1][1]) + 22) if win else (22, 25)
+seen = set()
+for m in re.finditer(r'wlib: kachelbalken x=\d+ y=\d+ w=\d+ h=\d+'
+                     r' kx=(\d+) ky=(\d+) kw=(\d+) kh=(\d+)', tail):
+    k = tuple(int(v) for v in m.groups())
+    if k not in seen:
+        seen.add(k)
+        print(k[0] + ox, k[1] + oy, k[2], k[3])
 PY
 )
 KN=$(printf '%s\n' "$KACHELN" | grep -c .)
-num "die zehn Vorschaukacheln melden ihr Rechteck" "$KN" ge 10
+# r1588: the Vorlagen page shows ONE preview tile (chooser + `wlib: kachelbalken` lines carry its rectangle); it was ten tiles before
+num "die Vorschaukachel meldet ihr Rechteck" "$KN" ge 1
 KBAD=0; KTIEF=0
 [ -s "$SHOTS/settings-vorlagen.png" ] || { KBAD=99; KTIEF=99; }
 while read -r kx ky kw kh; do
@@ -866,8 +864,8 @@ PYB
 )
 printf '%s\n' "$BALK" | grep -a 'schneidet' || true
 BALKZ=$(printf '%s\n' "$BALK" | tail -1)
-num "die Vorschaukacheln melden ihre Balkenrechtecke" \
-    "${BALKZ%% *}" ge 20
+num "die Vorschaukachel meldet ihre Balkenrechtecke" \
+    "${BALKZ%% *}" ge 2
 num "und kein Balken schneidet den Rahmen seiner Kachel" \
     "${BALKZ##* }" eq 0
 # GEGENPROBE: dieselbe Rechnung mit einer von Hand gebauten Zeile, in
@@ -946,11 +944,11 @@ done
 # stille Kuerzung von einem kurzen Namen zu unterscheiden.
 TABNV=$(python3 - locale/de/messages "$SE" <<'PY'
 import re, sys
-want = None
+want = []
 for zeile in open(sys.argv[1], 'rb').read().decode('utf-8').splitlines():
     if zeile.startswith('settings.tabs'):
-        want = zeile.split('=', 1)[1].strip().split('\\n')
-if want is None:
+        want = want + zeile.split('=', 1)[1].strip().split('\\n')
+if not want:
     print(99)
     raise SystemExit
 txt = open(sys.argv[2], 'rb').read().decode('utf-8', 'replace')
@@ -3113,7 +3111,7 @@ while read -r kx ky kw kh; do
 done <<EOF
 $KACHELN
 EOF
-num "gemessene Kacheln" "$KZAHL" ge 10
+num "gemessene Kacheln (eine Vorschaukachel seit der Seitenumstellung)" "$KZAHL" ge 1
 num "Bildpunkte, die in der Flaeche einer Kachel fehlen (Loecher)" \
     "$KINNEN" eq 0
 # GEGENPROBE, und ohne sie waere die 0 oben geschenkt: dasselbe Bild
@@ -3142,10 +3140,13 @@ num "GEGENPROBE: ein gestanztes Loch wird gefunden" \
 NC=$(python3 tools/themestore/namecheck.py "$TMPD/setv/desktop.png" \
      "$TMPD/setv/serial.txt" assets/themes "$TMPD/namenloch.png" 2>&1)
 printf '%s\n' "$NC" | sed 's/^/        /'
-num "gemalte Kachelnamen" \
+num "gemalte Kachelnamen (genau die gewaehlte Vorlage)" \
     "$(printf '%s' "$NC" | grep -oE 'gemalt=[0-9]+' | cut -d= -f2)" \
-    eq "$NPRESET"
-for z in fehlt gekuerzt ohnetinte; do
+    eq 1
+num "Kachelnamen, die fehlen (alle anderen Vorlagen stehen nur im Auswahlfeld)" \
+    "$(printf '%s' "$NC" | grep -oE "fehlt=[0-9]+" | cut -d= -f2)" \
+    eq "$((NPRESET - 1))"
+for z in gekuerzt ohnetinte; do
     num "Kachelnamen, die $z sind" \
         "$(printf '%s' "$NC" | grep -oE "$z=[0-9]+" | cut -d= -f2)" eq 0
 done

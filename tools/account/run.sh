@@ -208,7 +208,7 @@ if grep -aE '^konto\.' locale/de/messages | grep -q 'ä\|ö\|ü\|ß'; then
 else
     bad "die deutschen Konto-Texte haben keinen einzigen Umlaut"
 fi
-TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | tr '\\' '\n' | grep -c '^n')
+TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | sed 's/^[^=]*=//' | grep -o '\\n' | wc -l)
 # RUNDE PRAESENZ: ZEHN STATT NEUN. Auf dem Zweig `konto` allein war
 # "Konten" der neunte Reiter. Runde PRAESENZ hat `konto` UND `sync` auf
 # einen Zweig geholt, und `sync` bringt "Abgleich" als zehnten mit
@@ -224,7 +224,9 @@ TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | tr '\\' '\n' | grep -c '
 # DAILY-DRIVER: FUENFZEHN -- "Updates" ist der 15. Reiter.
 # r149: NEUNZEHN -- Maus (16), Energie (17), Info (18) und Apps (19) kamen dazu; die Zahl stand auf 15 (Altlast).
 # Seiten von Paketen (/apps/<app>.prog/SETTINGS) stehen NICHT in settings.tabs, sie kommen aus dem Katalog.
-num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 19
+# r1588: 30 -- two catalogue lines (settings.tabs, settings.tabs2) because one value holds at most 191 octets (msg VALW 192)
+TABS_LINES=$(grep -ac '^settings.tabs' locale/de/messages)
+num "Reiter in settings.tabs + settings.tabs2 (deutsch)" "$((TABS_DE + TABS_LINES))" eq 30
 
 # ======================================================================
 echo "== 3. der Aufbau: Kern, Userland, Zertifikat, Attrappe =="
