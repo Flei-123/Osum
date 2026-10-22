@@ -277,12 +277,15 @@ if waitfor "==G-WAIT==" 120; then
         klick $E; tippe 30; klick $S
         sleep 2
         # --- a critical one: net.wifi.enabled is row 8 (display 4, sound 2,
-        # lock 1, locale 1); the row height comes from the table itself
+        # lock 1, locale 1); the table shows 8 rows, so the row is reached with Down keys from row 0
         read tx ty tw th <<< "$(rect stab)"
         rh=$(tr -cd '\11\12\15\40-\176' < "$TMPD/ser.txt" | grep -ao 'settings: rowh=[0-9]*' | tail -1 | tr -dc '0-9')
         rh=${rh:-20}
         # the head is one row + 4, then row 8, in its middle
-        klick $(( tx + 40 )) $(( ty + rh + 4 + 8 * rh + rh / 2 ))
+        klick $(( tx + 40 )) $(( ty + rh + 4 + rh / 2 ))
+        for i in 1 2 3 4 5 6 7 8; do echo "sendkey down"; done > "$TMPD/dn.txt"
+        python3 tools/wm/monitor.py "$SOCK" "$TMPD/dn.txt" 0.15 > /dev/null 2>&1
+        sleep 1
         klick $E
         for i in 1 2 3 4 5 6; do echo "sendkey backspace" ; done > "$TMPD/bs.txt"
         python3 tools/wm/monitor.py "$SOCK" "$TMPD/bs.txt" 0.1 > /dev/null 2>&1
@@ -330,6 +333,8 @@ if waitfor "==G-NET==" 60; then
         # the choice opens its list below itself; item 0 is "über DHCP"
         read mx my mw mh <<< "$(rect nmode)"
         klick $M; klick $(( mx + 40 )) $(( my + mh + 12 )); sleep 1
+        # the choice rebuilds the page (conditional fields): the buttons move, read their places again
+        sleep 2; N=$(mid napply) || N="$N"; C=$(mid nconf) || C="$C"
         D1=$(dlg_n)
         klick $N; sleep 2
         shot "$TMPD/6-netask.ppm"

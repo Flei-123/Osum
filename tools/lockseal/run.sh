@@ -161,6 +161,8 @@ if waitfor "==LOCKED-DONE==" 120; then
     # the window behind the lock sat at 60,60 (a11ydemo): click into it
     klick 200 72
     klick 200 300
+    klick 800 100
+    klick 800 300
     shot "$TMPD/c.ppm"
 else
     bad "the guest did not finish the locked probe"
@@ -205,8 +207,8 @@ for P in "$TMPD/p_l1.txt" "$TMPD/p_l2.txt"; do
     grep -qaE 'events seen=[0-9]+ leaked=0' "$P" && ok "$W: no a11y event about a node behind the lock" || bad "$W: events: $(grep -a 'events seen' "$P" | head -1)"
     hasnot "$P" "title=A11Y controls" "$W: the window table does not list the window behind the lock"
     if [ -n "$VID" ]; then
-        if grep -qaE " id=$VID " "$P"; then
-            bad "$W: the table has the id $VID"; grep -aE " id=$VID " "$P" | head -3 | sed 's/^/        /'
+        if grep -aE " id=$VID " "$P" | grep -qav '^wm: fen'; then
+            bad "$W: the table has the id $VID"; grep -aE " id=$VID " "$P" | grep -av '^wm: fen' | head -3 | sed 's/^/        /'
         else
             ok "$W: ... nor its id"
         fi
@@ -235,7 +237,9 @@ n=$(printf '%s\n' "$LK" | grep -ac 'wm: hot getan=1')
 [ "$n" = 0 ] && ok "no shortcut did anything while locked (getan=1: $n)" || bad "shortcuts that DID something while locked: $n"
 
 echo "== 7. the photo =="
-python3 - "$TMPD" <<'PY' > "$TMPD/shot.txt" 2>&1
+WF=$(grep -aE "^wm: fen i=[0-9]+ id=${VID:-0} " "$G" | head -1 | sed -E 's/.* x=(-?[0-9]+) y=(-?[0-9]+) w=([0-9]+) h=([0-9]+) .*/\1 \2 \3 \4/')
+case "$WF" in *[!0-9\ ]*|"") WF="";; esac
+python3 - "$TMPD" $WF <<'PY' > "$TMPD/shot.txt" 2>&1
 import sys
 from PIL import Image
 from collections import Counter
@@ -247,6 +251,9 @@ a, b, c = load("pre"), load("b"), load("c")
 if not (a and b and c):
     print("PHOTO missing", bool(a), bool(b), bool(c)); sys.exit(0)
 box = (80, 100, 460, 330)   # the middle of the window at 60,60 (420x300)
+if len(sys.argv) > 2:
+    wx, wy, ww, wh = [int(v) for v in sys.argv[2:6]]
+    box = (wx + 20, wy + 40, wx + ww - 20, wy + wh - 40)   # the tiling table moves the window: take its place from the wm table
 def dominant(x, box):
     raw = x.crop(box).tobytes()
     px = [raw[i:i+3] for i in range(0, len(raw), 3)]
