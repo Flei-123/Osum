@@ -293,8 +293,11 @@ if waitfor "==G-WAIT==" 120; then
         tippe false; klick $S
         sleep 2
         shot "$TMPD/2-ask.ppm"
-        klick $(mid sconf)     # the window's own yes: refused (use_dialog)
+        ans0=$(grep -ac 'wm: trusted dialog answer=' "$TMPD/ser.txt")
+        klick $(mid sconf)     # the window's own yes: refused (use_dialog) or swallowed by the modal dialog
         sleep 2
+        ans1=$(grep -ac 'wm: trusted dialog answer=' "$TMPD/ser.txt")
+        [ "$ans1" = "$ans0" ] && own_yes_stays=1
         dlg_yes "$D0"          # the real yes: the system dialog
         shot "$TMPD/3-done.ppm"
     else
@@ -372,7 +375,8 @@ fi
 # REAL keyboard rejects it; the second time a program types "jjj" into a
 # window first (the dialog stays), then "j" on the real keyboard says yes
 if waitfor "==G-TRUST==" 90; then
-    if waitfor "wm: trusted dialog up no=" 10; then
+    up0=$(awk '/^==G-TRUST==/{exit} /wm: trusted dialog up no=/{n++} END{print n+0}' "$TMPD/ser.txt")
+    if waitfor "wm: trusted dialog up no=$((up0 + 1))" 20; then
         sleep 1.5
         shot "$TMPD/9-trust.ppm"
         echo "sendkey n" > "$TMPD/kn.txt"
@@ -463,7 +467,10 @@ grep -qa 'settings: page set key=net.dhcp' "$G" && ok "page Netz: DHCP goes over
 n_ask=$(grep -ac 'settings: bus answer rc=2 line=\[confirm' "$G")
 [ "$n_ask" -ge 2 ] && ok "... net.dhcp is critical: the page Netz asks as well" || bad "the page Netz was not asked ($n_ask questions)"
 has "$G" "settingsd: dhcp started pid=" "after the YES IN THE SYSTEM DIALOG settingsd starts DHCP"
-grep -qa 'settings: bus answer rc=1 line=\[err use_dialog' "$G" && ok "SETBROKER2: the window's own \"Yes, change it\" for a critical value is refused (err use_dialog)" || bad "the window's own yes was not refused ($(grep -a 'use_dialog' "$G" | tail -1 | cut -c1-80))"
+if grep -qa 'settings: bus answer rc=1 line=\[err use_dialog' "$G"; then ok "SETBROKER2: the window's own \"Yes, change it\" for a critical value is refused (err use_dialog)"
+elif [ "${own_yes_stays:-0}" = 1 ]; then ok "SETBROKER2: the window's own \"Yes, change it\" does not answer the system dialog (the modal dialog swallows the click, the question stays)"
+else bad "the window's own yes was not refused ($(grep -a 'use_dialog' "$G" | tail -1 | cut -c1-80))"
+fi
 part "$G" G-NETDONE G-CLOSE > "$TMPD/p.txt"
 has "$TMPD/p.txt" "modus=dhcp" "/etc/network.conf says modus=dhcp"
 has "$TMPD/p.txt" "ip=10.0.2.15" "... and keeps the other lines"

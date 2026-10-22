@@ -90,6 +90,7 @@ sleep 4
 echo ==PRE==
 a11ydemo lockprobe safe
 echo ==PRE-DONE==
+sleep 4
 lock &
 sleep 8
 echo ==LOCKED==
@@ -150,6 +151,8 @@ keys() { # monitor lines
 }
 if waitfor "==PRE-DONE==" 200; then
     shot "$TMPD/pre.ppm"
+    sleep 1.5
+    shot "$TMPD/pre2.ppm"
 else
     bad "the guest did not reach the lock"
 fi
@@ -248,6 +251,7 @@ def load(n):
     try: return Image.open("%s/%s.png" % (d, n)).convert("RGB")
     except Exception as e: return None
 a, b, c = load("pre"), load("b"), load("c")
+a2 = load("pre2")
 if not (a and b and c):
     print("PHOTO missing", bool(a), bool(b), bool(c)); sys.exit(0)
 box = (80, 100, 460, 330)   # the middle of the window at 60,60 (420x300)
@@ -264,7 +268,7 @@ def same(x, y):
     diff = sum(1 for i in range(0, len(bx), 3)
                if abs(bx[i]-by[i]) + abs(bx[i+1]-by[i+1]) + abs(bx[i+2]-by[i+2]) > 24)
     return 100.0 - 100.0 * diff / n
-print("WINDOW_BEFORE %.1f" % dominant(a, box))
+print("WINDOW_BEFORE %.1f" % min(dominant(x, box) for x in (a, a2) if x))
 print("WINDOW_LOCKED %.1f" % dominant(b, box))
 print("LOCKED_VS_ATTACKED %.1f" % same(b, c))
 PY
