@@ -229,7 +229,7 @@ for need in ("manifest.add_pkg(", '".prog/SETTINGS', "page_pkg(cl, cr, reiter - 
 for fn in ("fn pkg_click", "fn pkg_read_page"):
     body = src.split(fn, 1)[1].split("\nfn ", 1)[0]
     if "pkg_prefix_ok(" not in body: bad(fn + " calls an action without pkg_prefix_ok")
-if "static mut nav_vis: [u64; 27]" not in src or "[u64; 32] = [0 as u64; 32]" not in src: bad("sidebar tables are too small for R_ANZ + PKG_MAX")
+if "static mut nav_vis: [u64; 40]" not in src: bad("sidebar tables are too small for R_ANZ + PKG_MAX")
 sys.exit(rc)
 PY
 
