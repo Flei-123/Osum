@@ -35,4 +35,5 @@ for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
 } > "$DREH"
 bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=420 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
 echo "serial: $OUT/serial.txt"; python3 -I tools/settingsaudit/runtime.py "$OUT/serial.txt"
+python3 -I tools/settingsaudit/declared.py "$OUT/serial.txt" kernel/user/settings.d/settings.routes kernel/user/settings.d/settings.pagemap --check
 exit 0
