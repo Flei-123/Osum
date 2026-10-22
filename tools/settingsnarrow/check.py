@@ -48,7 +48,7 @@ if nav:
     ok(len(lst) > 0 and lst[0][0] == 1, "list view shown first")
     ok(any(l[3] > l[4] > 0 for l in lst), "list is longer than the window (content > view) and scrolls")
     ok(any(l[5] > 0 for l in lst), "wheel over the list scrolled it (off > 0)")
-    ok(len(pg) > 0, "picking 'Darstellung' opened the page (detail=1)")
+    ok(len(pg) > 0, "picking 'Netz' opened the page (detail=1)")
     ok(any(l[3] > 0 and l[4] > 0 for l in pg), "page reports content and view sizes")
     long_page = any(l[3] > l[4] for l in pg)
     ok(long_page, "page is longer than the window (content > view)")

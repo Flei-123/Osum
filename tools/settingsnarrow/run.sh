@@ -9,7 +9,7 @@
 #   low   800x480, scale 1 -> two-column squeeze + scrolling page area (no navigation mode)
 #
 # `rad -N` = N notches DOWN (the guest sees wheel up for a positive QEMU dz).
-# Per boot (tools/design/audit.sh): open Settings, wheel over the list (to the end, then 3 notches back), open "Darstellung", wheel over the page, Back.
+# Per boot (tools/design/audit.sh): open Settings, wheel over the list (to the end, then 3 notches back), open "Netz", wheel over the page, Back.
 # The window reports `settings: layout nav= detail= scroll= content= view= off=` (content/view/off of the page or list area,
 # pixels) after every change; tools/settingsnarrow/check.py reads them and the pictures.
 set -uo pipefail
@@ -41,7 +41,7 @@ for cfg in $CFGS; do
     echo "rad -6"; echo "warte 2"; echo "foto 01-wheel1"
     echo "rad -10"; echo "warte 2"; echo "foto 02-wheel2"
     echo "rad 3"; echo "warte 2"
-    echo "klickauf srecttaba"; echo "warte 3"; echo "foto 03-page"
+    echo "klickauf srecttabd"; echo "warte 3"; echo "foto 03-page"
     # the page wheel goes over the page margin: a list box under the pointer (Colour scheme) would take the notches itself
     case "$cfg" in nav*) PGX=$((XRES/45)) ;; *) PGX=$((XRES/2)) ;; esac
     echo "fahre $PGX,$((YRES/2))"; echo "warte 1"
