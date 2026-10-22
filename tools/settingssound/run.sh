@@ -7,7 +7,7 @@
 # Boot 1 with a sound card (tools/design/audit.sh ton=ja): open Settings, open the Sound page (tab 29), click the volume
 # slider, the speaker mute toggle and the microphone mute toggle, then search "sound" (Ctrl+F) and look at the result list.
 # Settings prints `settings: sound <what> v=<value> rc=<syscall result>` after every change and `settings: results n=<k> top=<page> r0=<page>..`
-# after every build. Boot 2 without a sound card: the page shows the info bar (`settings: sound none`, no controls). tools/settingssound/check.py judges and proves itself red on doctored copies of the log.
+# after every build. Boot 2 without a sound card: the page shows the info bar (`settings: sound none`, one control = the bar). tools/settingssound/check.py judges and proves itself red on doctored copies of the log.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 OUT=${1:-}

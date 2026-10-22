@@ -53,7 +53,7 @@ def judge_nodev(txt):
 
     ctl = [int(m.group(2)) for m in CTL.finditer(txt) if int(m.group(1)) == SOUND_PAGE]
     ok(ctl, "Sound page built without a card (page=29)")
-    ok(ctl and max(ctl) == 0, "no controls without a card, only the info bar (%s)" % ctl)
+    ok(ctl and max(ctl) == 1, "only the info bar without a card, no volume/mute controls (%s)" % ctl)
     ok(re.search(r"^settings: sound none$", txt, re.M), "info bar branch taken (settings: sound none)")
     ok(not re.search(r"ABSTURZ|EXCEPTION", txt), "no crash lines without a card")
     return res
