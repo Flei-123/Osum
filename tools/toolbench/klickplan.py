@@ -35,7 +35,8 @@ TAB = re.compile(r"taskmgr: tabelle x=(\d+) y=(\d+) kopf=(\d+) zh=(\d+)")
 SPALTE = re.compile(r"taskmgr: spalte c=(\d+) x=(\d+) w=(\d+)")
 ZEILE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
                    r"pm=(\d+) kib=(\d+) kern=(\d+) ticks=(\d+) grp=(\d+) "
-                   r"disk=(\S+) net=(\S+) gpu=(\S+) y=(\d+) "
+                   r"(uid=\d+ thr=\d+ prio=\d+ dr=\d+ dw=\d+ drate=\d+) "
+                   r"(ntx=\d+ nrx=\d+|net=-) gpu=(\S+) y=(\d+) "
                    r"name=(.*)$")
 # Die Spur der Bibliothek traegt seit Runde SOFTUI zwei Felder mehr
 # (`ax=`, `ay=`, der Ursprung der Arbeitsflaeche). Wer sie nicht

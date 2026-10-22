@@ -18,6 +18,7 @@ static void settle(int ms) { struct timespec a, b; clock_gettime(CLOCK_MONOTONIC
 static void *park_thr(void *a) { (void)a; long tid = syscall(SYS_gettid); (void)!write(gp_fd[1], &tid, sizeof tid); for (;;) settle(1000); return 0; }
 static void *xg_thr(void *a) { (void)a; settle(300); syscall(SYS_exit_group, 7); return 0; }
 static void *xg150_thr(void *a) { (void)a; settle(300); syscall(SYS_exit_group, 150); return 0; }
+static void *idle_thr(void *a) { (void)a; for (;;) settle(1000); return 0; }
 static void *segv_thr(void *a) { (void)a; settle(300); *(volatile int *)0 = 1; return 0; }
 
 /* mode 0: main calls exit(5); 1: main writes NULL; 2: a thread calls exit_group(7); 3: a thread writes NULL; 4: a thread calls exit_group(150) (a plain exit, not a signal death).
@@ -235,6 +236,15 @@ int main(void)
     group_case("group_exit_group_thread_kills_all", 2, 0, 7);
     group_case("group_segv_thread_kills_all", 3, SIGSEGV, 0);
     group_case("group_exit_group_150_is_exit", 4, 0, 150);
+    {
+        long me = getpid(), slot = -1;
+        for (long i = 0; i < 256 && slot < 0; i++) if (syscall(1003, i, 1L) == me) slot = i;
+        pthread_t th[2]; int made = 0;
+        for (int i = 0; i < 2; i++) if (pthread_create(&th[i], 0, idle_thr, 0) == 0) made++;
+        settle(200);
+        long n = slot >= 0 ? syscall(1003, slot, 14L) : -1;
+        CHECK("pstat_threads_counts_group", made == 2 && n == 3, "made %d, P_THREADS %ld (want 3)", made, n);
+    }
     CHECK("pthread_self_equal", pthread_equal(pthread_self(), pthread_self()), "");
     return 0;
 }

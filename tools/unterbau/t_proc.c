@@ -8,6 +8,13 @@
 #include <sys/wait.h>
 #include <time.h>
 
+
+#include <sys/syscall.h>
+#define OSUM_PSTAT 1003
+#define OSUM_SETPRIO 1995
+static long self_slot(void) { long me = getpid(); for (long i = 0; i < 256; i++) if (syscall(OSUM_PSTAT, i, 1L) == me) return i; return -1; }
+static long pst(long slot, long field) { return syscall(OSUM_PSTAT, slot, field); }
+
 extern char **environ;
 static int read_all(int fd, char *b, int n) { int t = 0, r; while (t < n - 1 && (r = read(fd, b + t, n - 1 - t)) > 0) t += r; b[t] = 0; return t; }
 
@@ -113,5 +120,55 @@ int main(void)
     /* 16 fork/wait rounds: no leak of process slots */
     int churn = 1; for (int i = 0; i < 16; i++) { k = fork(); if (k == 0) _exit(0); if (k < 0 || waitpid(k, &st, 0) != k) { churn = 0; break; } }
     CHECK("fork_churn_16", churn, "fork/wait churn failed at round (errno %d)", errno);
+
+    /* W-TM S5: process counters and the priority call */
+    long sl = self_slot();
+    CHECK("pstat_self_slot", sl >= 0, "no pstat slot carries pid %d", (int)getpid());
+    if (sl >= 0) {
+        CHECK("pstat_uid_matches_getuid", pst(sl, 13) == (long)getuid(), "P_UID %ld, getuid %ld", pst(sl, 13), (long)getuid());
+        CHECK("pstat_threads_single", pst(sl, 14) == 1, "P_THREADS %ld", pst(sl, 14));
+        long w0 = pst(sl, 49), r0 = pst(sl, 48);
+        int dfd = open("/tmp/pstat_io", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        char blk[4096]; memset(blk, 'x', sizeof blk);
+        long wrote = 0; for (int i = 0; dfd >= 0 && i < 8; i++) { long n = write(dfd, blk, sizeof blk); if (n > 0) wrote += n; }
+        if (dfd >= 0) close(dfd);
+        long w1 = pst(sl, 49);
+        CHECK("pstat_disk_write_counts", wrote > 0 && w1 - w0 >= wrote, "wrote %ld, P_DISKW grew by %ld", wrote, w1 - w0);
+        dfd = open("/tmp/pstat_io", O_RDONLY);
+        long got = 0; while (dfd >= 0) { long n = read(dfd, blk, sizeof blk); if (n <= 0) break; got += n; }
+        if (dfd >= 0) close(dfd);
+        long r1 = pst(sl, 48);
+        CHECK("pstat_disk_read_counts", got > 0 && r1 - r0 >= got, "read %ld, P_DISKR grew by %ld", got, r1 - r0);
+        unlink("/tmp/pstat_io");
+        CHECK("pstat_free_slot_zero", pst(255, 13) == 0 || pst(255, 1) != 0, "free slot reports a uid");
+    }
+    errno = 0; long pr = syscall(OSUM_SETPRIO, (long)getpid(), 0L);
+    CHECKC("setprio_zero_einval", pr == -1 && errno == EINVAL);
+    errno = 0; pr = syscall(OSUM_SETPRIO, (long)getpid(), 4L);
+    CHECKC("setprio_four_einval", pr == -1 && errno == EINVAL);
+    errno = 0; pr = syscall(OSUM_SETPRIO, 99999L, 2L);
+    CHECKC("setprio_missing_pid_esrch", pr == -1 && errno == ESRCH);
+    errno = 0; pr = syscall(OSUM_SETPRIO, (long)getpid(), 1L);
+    CHECKC("setprio_self_ok", pr == 0);
+    if (sl >= 0) CHECK("setprio_self_visible", pst(sl, 4) == 1, "P_PRIO %ld after setting 1", pst(sl, 4));
+    syscall(OSUM_SETPRIO, (long)getpid(), 2L);
+    if (sl >= 0) CHECK("setprio_self_restored", pst(sl, 4) == 2, "P_PRIO %ld after setting 2", pst(sl, 4));
+    {
+        int pp[2]; if (pipe(pp) == 0) {
+            pid_t par = getpid();
+            pid_t kid = fork();
+            if (kid == 0) {
+                char res = 'g';
+                if (setuid(1000) != 0) res = 'n';
+                else { errno = 0; long q = syscall(OSUM_SETPRIO, (long)par, 2L); res = (q == -1 && errno == EPERM) ? 'p' : 'f'; }
+                (void)!write(pp[1], &res, 1); _exit(0);
+            }
+            char res = '?'; close(pp[1]); (void)!read(pp[0], &res, 1); close(pp[0]);
+            if (kid > 0) waitpid(kid, &st, 0);
+            if (res == 'p') PASS("setprio_foreign_eperm");
+            else if (res == 'n') GAP("setprio_foreign_eperm", "setuid(1000) refused, cannot drop privilege");
+            else FAIL("setprio_foreign_eperm", "child result '%c'", res);
+        }
+    }
     return 0;
 }

@@ -39,7 +39,7 @@ drive "$ROOT" "$TMPD/c" "$ROOT/tools/taskmgr2/ctx.txt" || bad "build ctx"
 SC="$TMPD/c/serial.txt"
 num "plan targets not found" "$(cnt "$TMPD/c/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
 num "menu opened (2 row clicks, 1 header miss)" "$(cnt "$SC" '^taskmgr: ctx n=')" eq 2
-num "menu has 2 or 3 rows (3 with Efficiency mode on an app)" "$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" ge 2
+num "menu on a system row has exactly 2 rows (no Efficiency mode)" "$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 2
 LPID=$(grep -a '^taskmgr: zeile' "$SC" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
 CPID=$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.* pid=([0-9]+).*/\1/')
 [ -n "${LPID:-}" ] && [ "${LPID:-x}" = "${CPID:-y}" ] && ok "menu belongs to the clicked row (pid $CPID)" || bad "menu pid ${CPID:-?}, row pid ${LPID:-?}"
@@ -123,7 +123,7 @@ BWT="$TMPD/basewt"
 if git worktree add --detach "$BWT" "$BASE" >/dev/null 2>&1; then
     mkdir -p "$BWT/tools/taskmgr2"
     cp -r tools/toolbench/. "$BWT/tools/toolbench/"
-    cp tools/taskmgr2/ctx.txt tools/taskmgr2/search.txt tools/taskmgr2/perf.txt "$BWT/tools/taskmgr2/"
+    cp tools/taskmgr2/ctx.txt tools/taskmgr2/search.txt tools/taskmgr2/perf.txt tools/taskmgr2/eff.txt "$BWT/tools/taskmgr2/"
     drive "$BWT" "$TMPD/bc" "$BWT/tools/taskmgr2/ctx.txt" || true
     drive "$BWT" "$TMPD/bs" "$BWT/tools/taskmgr2/search.txt" || true
     num "BASE $BASE: no context menu opens" "$(cnt "$TMPD/bc/serial.txt" '^taskmgr: ctx n=')" eq 0
@@ -133,6 +133,36 @@ if git worktree add --detach "$BWT" "$BASE" >/dev/null 2>&1; then
     num "BASE $BASE: plan cannot find its targets" "$(( $(cnt "$TMPD/bc/plan.log" 'ZIEL NICHT GEFUNDEN') + $(cnt "$TMPD/bs/plan.log" 'ZIEL NICHT GEFUNDEN') ))" ge 1
 else
     bad "cannot create the BASE worktree $BASE"
+fi
+
+echo
+echo "== 5. S5: thread/disk counters, Efficiency mode =="
+drive_eff() {
+    local tree=$1 out=$2
+    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+        app=/bin/taskmgr,melde,takt,500 wait=14 last=400 extra="wighalt=120" \
+        plan="$tree/tools/taskmgr2/eff.txt" > "$out.log" 2>&1 )
+}
+drive_eff "$ROOT" "$TMPD/e" || bad "build eff"
+SE="$TMPD/e/serial.txt"
+num "plan targets not found" "$(cnt "$TMPD/e/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "row reports carry thr= (rows)" "$(grep -a '^taskmgr: zeile' "$SE" | grep -c ' thr=[1-9]')" ge 1
+num "row reports with thr=0 for live user rows" "$(grep -a '^taskmgr: zeile' "$SE" | grep -a 'name=taskmgr' | grep -c ' thr=0 ')" eq 0
+num "taskmgr reads its image: dr > 0" "$(grep -a '^taskmgr: zeile' "$SE" | grep -a 'name=taskmgr' | sed -E 's/.* dr=([0-9]+) .*/\1/' | sort -n | tail -1)" gt 0
+num "menu on an app row has 3 rows" "$(grep -a '^taskmgr: ctx n=' "$SE" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 3
+num "exactly one Efficiency pick (act 3)" "$(cnt "$SE" '^taskmgr: ctx wahl act=3')" eq 1
+EPID=$(grep -a '^taskmgr: prio pid=' "$SE" | head -1 | sed -E 's/.*pid=([0-9]+).*/\1/')
+CPID=$(grep -a '^taskmgr: ctx n=' "$SE" | head -1 | sed -E 's/.* pid=([0-9]+).*/\1/')
+[ -n "${EPID:-}" ] && [ "$EPID" = "$CPID" ] && ok "priority change targets the clicked row (pid $EPID)" || bad "prio pid ${EPID:-?}, clicked pid ${CPID:-?}"
+num "SETPRIO accepted (rc 0)" "$(grep -a '^taskmgr: prio pid=' "$SE" | head -1 | sed -E 's/.* rc=([0-9]+).*/\1/')" eq 0
+num "priority went normal -> efficiency (new=1)" "$(grep -a '^taskmgr: prio pid=' "$SE" | head -1 | sed -E 's/.* new=([0-9]+).*/\1/')" eq 1
+num "old priority was normal (2)" "$(grep -a '^taskmgr: prio pid=' "$SE" | head -1 | sed -E 's/.* old=([0-9]+).*/\1/')" eq 2
+num "the row reports prio=1 after the pick" "$(grep -a '^taskmgr: zeile' "$SE" | grep -a " pid=$EPID " | grep -c ' prio=1 ')" ge 1
+num "the row reported prio=2 before the pick" "$(grep -a '^taskmgr: zeile' "$SE" | grep -a " pid=$EPID " | grep -c ' prio=2 ')" ge 1
+if [ -n "$BWT" ] && [ -d "$BWT" ]; then
+    drive_eff "$BWT" "$TMPD/be" || true
+    num "BASE $BASE: rows carry no thr=" "$(grep -a '^taskmgr: zeile' "$TMPD/be/serial.txt" | grep -c ' thr=')" eq 0
+    num "BASE $BASE: no priority change" "$(cnt "$TMPD/be/serial.txt" '^taskmgr: prio pid=')" eq 0
 fi
 
 echo
