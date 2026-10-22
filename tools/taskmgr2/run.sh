@@ -39,7 +39,7 @@ drive "$ROOT" "$TMPD/c" "$ROOT/tools/taskmgr2/ctx.txt" || bad "build ctx"
 SC="$TMPD/c/serial.txt"
 num "plan targets not found" "$(cnt "$TMPD/c/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
 num "menu opened (2 row clicks, 1 header miss)" "$(cnt "$SC" '^taskmgr: ctx n=')" eq 2
-num "menu has 2 rows" "$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 2
+num "menu has 2 or 3 rows (3 with Efficiency mode on an app)" "$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" ge 2
 LPID=$(grep -a '^taskmgr: zeile' "$SC" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
 CPID=$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.* pid=([0-9]+).*/\1/')
 [ -n "${LPID:-}" ] && [ "${LPID:-x}" = "${CPID:-y}" ] && ok "menu belongs to the clicked row (pid $CPID)" || bad "menu pid ${CPID:-?}, row pid ${LPID:-?}"
