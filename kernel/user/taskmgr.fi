@@ -126,6 +126,7 @@ import tmsearch
 import tmview
 import tmcols
 import tmperf
+import tmio
 
 export { u_start }
 
@@ -236,6 +237,7 @@ static mut disk_pm: u64 = 0
 static mut disk_used: u64 = 0
 static mut disk_all: u64 = 0
 static mut up_ms: u64 = 0
+static mut io_dt: u64 = 0
 static mut net_tx: u64 = 0
 static mut net_rx: u64 = 0
 static mut net_ltx: u64 = 0
@@ -340,6 +342,28 @@ static mut k_d_kind: [u8; 17] = "taskmgr.d.kind\0\0\0"
 static mut k_d_core: [u8; 17] = "taskmgr.d.core\0\0\0"
 static mut k_d_cpu: [u8; 16] = "taskmgr.d.cpu\0\0\0"
 static mut k_d_ticks: [u8; 18] = "taskmgr.d.ticks\0\0\0"
+static mut k_d_user: [u8; 17] = "taskmgr.d.user\0\0\0"
+static mut k_d_thr: [u8; 20] = "taskmgr.d.threads\0\0\0"
+static mut k_d_prio: [u8; 17] = "taskmgr.d.prio\0\0\0"
+static mut k_d_dr: [u8; 18] = "taskmgr.d.diskr\0\0\0"
+static mut k_d_dw: [u8; 18] = "taskmgr.d.diskw\0\0\0"
+static mut k_d_net: [u8; 16] = "taskmgr.d.net\0\0\0"
+static mut k_cx_eff: [u8; 16] = "taskmgr.ctx.eff\0"
+static mut k_cx_norm: [u8; 17] = "taskmgr.ctx.norm\0"
+static mut m_prio: [u8; 19] = "taskmgr: prio pid=\0"
+static mut m_old: [u8; 6] = " old=\0"
+static mut m_new: [u8; 6] = " new=\0"
+static mut m_uid: [u8; 6] = " uid=\0"
+static mut m_thr: [u8; 6] = " thr=\0"
+static mut m_pr: [u8; 7] = " prio=\0"
+static mut m_dr: [u8; 5] = " dr=\0"
+static mut m_dw: [u8; 5] = " dw=\0"
+static mut m_drate: [u8; 8] = " drate=\0"
+static mut m_ntx: [u8; 6] = " ntx=\0"
+static mut m_nrxv: [u8; 6] = " nrx=\0"
+static mut m_gpu: [u8; 7] = " gpu=-\0"
+static mut u_bps: [u8; 5] = " B/s\0"
+static mut u_byte: [u8; 3] = " B\0"
 static mut k_st_none: [u8; 17] = "taskmgr.st.none\0\0"
 static mut k_d_none: [u8; 18] = "taskmgr.d.none\0\0\0\0"
 static mut a_page_perf: [u8; 12] = "performance\0"
@@ -461,7 +485,7 @@ static mut k_g_sys: [u8; 18] = "taskmgr.group.sys\0"
 static mut k_cx_end: [u8; 16] = "taskmgr.ctx.end\0"
 static mut k_cx_det: [u8; 20] = "taskmgr.ctx.details\0"
 static mut m_grp: [u8; 6] = " grp=\0"
-static mut m_dng: [u8; 20] = " disk=- net=- gpu=-\0"
+static mut m_dnet: [u8; 7] = " net=-\0"
 static mut m_grpline: [u8; 18] = "taskmgr: group r=\0"
 static mut m_g: [u8; 4] = " g=\0"
 static mut m_findline: [u8; 19] = "taskmgr: search n=\0"
@@ -536,6 +560,25 @@ fn put_size(d: u64, at: u64, kib: u64) -> u64 {
     a = put_str(d, a, ptr((&u_comma[0]) as u64))
     a = put_num(d, a, zehntel)
     return put_str(d, a, ptr((&u_mib[0]) as u64))
+}
+
+fn put_rate(d: u64, at: u64, bps: u64) -> u64 {
+    var a: u64 = at
+    if bps < 1024 {
+        a = put_num(d, a, bps)
+        return put_str(d, a, ptr((&u_bps[0]) as u64))
+    }
+    a = put_size(d, a, bps / 1024)
+    return put_str(d, a, ptr((&u_ps[0]) as u64))
+}
+
+fn put_bytes(d: u64, at: u64, n: u64) -> u64 {
+    var a: u64 = at
+    if n < 1024 {
+        a = put_num(d, a, n)
+        return put_str(d, a, ptr((&u_byte[0]) as u64))
+    }
+    return put_size(d, a, n / 1024)
 }
 
 fn put_time(d: u64, at: u64, ms: u64) -> u64 {
@@ -698,6 +741,27 @@ fn state_word(st: u64) -> u64 {
 
 // EINE MESSUNG. `erste` heisst: nur den Stand holen, keine Differenz
 // bilden -- ohne einen Vorher-Wert ist jeder Prozentsatz erfunden.
+fn nt(slot: u64, f: u64) -> u64 {
+    return ulib.sys(ulib.SYS_NETMON, 1, slot, f)
+}
+
+fn io_sample(s: u64, pid: u64) {
+    var nok: u64 = 0
+    var tx: u64 = 0
+    var rx: u64 = 0
+    if net_ok != 0 && nt(s, ulib.NT_PID) == pid {
+        let a: u64 = nt(s, 0)
+        let b: u64 = nt(s, 1)
+        if !ulib.bad(a) && !ulib.bad(b) {
+            nok = 1
+            tx = a
+            rx = b
+        }
+    }
+    tmio.update(s, pid, pstat(s, ulib.P_DISKR), pstat(s, ulib.P_DISKW), tx, rx, nok, pstat(s, ulib.P_THREADS),
+        pstat(s, ulib.P_UID), pstat(s, ulib.P_PRIO), io_dt)
+}
+
 fn sample(first: bool) {
     var n: u64 = cpustat(0, ulib.CS_COUNT)
     if n == 0 || n > MAXCPU {
@@ -740,7 +804,12 @@ fn sample(first: bool) {
     if disk_all > 0 {
         disk_pm = disk_used * 1000 / disk_all
     }
-    up_ms = info(ulib.I_UPTIME)
+    let now_ms: u64 = info(ulib.I_UPTIME)
+    io_dt = 0
+    if !first {
+        io_dt = sub(now_ms, up_ms)
+    }
+    up_ms = now_ms
 
     // Das Netz: dieselben zwei Zaehler, die `/bin/netmon` liest.
     net_ok = netmon(ulib.NM_ON)
@@ -761,6 +830,7 @@ fn sample(first: bool) {
         if ulib.bad(st) || st == 0 {
             p_last[(s) as usize] = 0
             p_lastpid[(s) as usize] = 0
+            tmio.clear(s)
         } else {
             let pid: u64 = pstat(s, ulib.P_PID)
             let tk: u64 = pstat(s, ulib.P_TICKS)
@@ -777,6 +847,7 @@ fn sample(first: bool) {
             p_pages[(s) as usize] = pstat(s, ulib.P_PAGES)
             p_core[(s) as usize] = pstat(s, ulib.P_CPU)
             p_ticks[(s) as usize] = tk
+            io_sample(s, pid)
             if first || d_all == 0 {
                 p_pm[(s) as usize] = 0
             } else {
@@ -806,6 +877,12 @@ fn schluessel(s: u64) -> u64 {
     }
     if sort_col == tmcols.C_MEM {
         return p_pages[(s) as usize]
+    }
+    if sort_col == tmcols.C_DISK {
+        return tmio.disk_rate(s)
+    }
+    if sort_col == tmcols.C_NET {
+        return tmio.net_rate(s)
     }
     return 0
 }
@@ -1070,9 +1147,13 @@ fn build_rows() {
                 a = put_size(d, a, p_pages[(s) as usize] * 4)
             }
             a = put_str(d, a, ptr((&u_tab[0]) as u64))
-            a = put_str(d, a, ptr((&u_dash[0]) as u64))
+            a = put_rate(d, a, tmio.disk_rate(s))
             a = put_str(d, a, ptr((&u_tab[0]) as u64))
-            a = put_str(d, a, ptr((&u_dash[0]) as u64))
+            if tmio.net_known(s) {
+                a = put_rate(d, a, tmio.net_rate(s))
+            } else {
+                a = put_str(d, a, ptr((&u_dash[0]) as u64))
+            }
             a = put_str(d, a, ptr((&u_tab[0]) as u64))
             a = put_str(d, a, ptr((&u_dash[0]) as u64))
             a = put_str(d, a, ptr((&u_nl[0]) as u64))
@@ -1463,7 +1544,19 @@ fn bericht() {
         z_kv(ptr((&m_kern[0]) as u64), p_core[(s) as usize])
         z_kv(ptr((&m_ct[0]) as u64), p_ticks[(s) as usize])
         z_kv(ptr((&m_grp[0]) as u64), tmview.group_of_kind(p_kind[(s) as usize]))
-        z_str(ptr((&m_dng[0]) as u64))
+        z_kv(ptr((&m_uid[0]) as u64), tmio.uid(s))
+        z_kv(ptr((&m_thr[0]) as u64), tmio.threads(s))
+        z_kv(ptr((&m_pr[0]) as u64), tmio.prio(s))
+        z_kv(ptr((&m_dr[0]) as u64), tmio.disk_read(s))
+        z_kv(ptr((&m_dw[0]) as u64), tmio.disk_write(s))
+        z_kv(ptr((&m_drate[0]) as u64), tmio.disk_rate(s))
+        if tmio.net_known(s) {
+            z_kv(ptr((&m_ntx[0]) as u64), tmio.net_tx(s))
+            z_kv(ptr((&m_nrxv[0]) as u64), tmio.net_rx(s))
+        } else {
+            z_str(ptr((&m_dnet[0]) as u64))
+        }
+        z_str(ptr((&m_gpu[0]) as u64))
         z_kv(ptr((&m_y[0]) as u64), tab_y(r))
         z_str(ptr((&m_name[0]) as u64))
         z_str(name_of(s))
@@ -1819,7 +1912,7 @@ fn det_draw(dx: u64, dy: u64, dw: u64, dh: u64) {
     var t: [u8; 64] = [0 as u8; 64]
     let tp: u64 = (&t[0]) as u64
     var line: u64 = 0
-    while line < 8 {
+    while line < 14 {
         var lab: u64 = ptr((&k_d_pid[0]) as u64)
         var a: u64 = 0
         if line == 0 {
@@ -1860,11 +1953,39 @@ fn det_draw(dx: u64, dy: u64, dw: u64, dh: u64) {
             } else {
                 a = put_num(tp, 0, p_core[(sl) as usize])
             }
-        } else {
+        } else if line == 7 {
             lab = ptr((&k_d_ticks[0]) as u64)
             a = put_num(tp, 0, p_ticks[(sl) as usize])
+        } else if line == 8 {
+            lab = ptr((&k_d_user[0]) as u64)
+            a = put_num(tp, 0, tmio.uid(sl))
+        } else if line == 9 {
+            lab = ptr((&k_d_thr[0]) as u64)
+            if tmio.threads(sl) == 0 {
+                a = put_str(tp, 0, ptr((&u_dash[0]) as u64))
+            } else {
+                a = put_num(tp, 0, tmio.threads(sl))
+            }
+        } else if line == 10 {
+            lab = ptr((&k_d_prio[0]) as u64)
+            a = put_num(tp, 0, tmio.prio(sl))
+        } else if line == 11 {
+            lab = ptr((&k_d_dr[0]) as u64)
+            a = put_bytes(tp, 0, tmio.disk_read(sl))
+        } else if line == 12 {
+            lab = ptr((&k_d_dw[0]) as u64)
+            a = put_bytes(tp, 0, tmio.disk_write(sl))
+        } else {
+            lab = ptr((&k_d_net[0]) as u64)
+            if tmio.net_known(sl) {
+                a = put_bytes(tp, 0, tmio.net_tx(sl))
+                a = put_str(tp, a, ptr((&u_slash[0]) as u64))
+                a = put_bytes(tp, a, tmio.net_rx(sl))
+            } else {
+                a = put_str(tp, 0, ptr((&u_dash[0]) as u64))
+            }
         }
-        let y: u64 = dy + 84 + line * 32
+        let y: u64 = dy + 84 + line * 28
         fuiscene.text_role(dx + 16, y, 200, msg.get(lab), 13, false, fuiscene.R_MUTED)
         fuiscene.text_role(dx + 232, y, sub(dw, 248), tp, 14, false, fuiscene.R_TEXT)
         line = line + 1
@@ -2531,6 +2652,14 @@ fn search_poll() {
 fn ctx_rows() -> u64 {
     ctxreg.add(ctxreg.CTX_TASKMGR_ITEM, ptr((&k_cx_end[0]) as u64), 1, 0)
     ctxreg.add(ctxreg.CTX_TASKMGR_ITEM, ptr((&k_cx_det[0]) as u64), 2, 0)
+    let sl: u64 = slot_of_pid(sel_pid)
+    if sl < SLOTS && p_kind[(sl) as usize] == 3 {
+        if tmio.prio(sl) == 1 {
+            ctxreg.add(ctxreg.CTX_TASKMGR_ITEM, ptr((&k_cx_norm[0]) as u64), 3, 0)
+        } else {
+            ctxreg.add(ctxreg.CTX_TASKMGR_ITEM, ptr((&k_cx_eff[0]) as u64), 3, 0)
+        }
+    }
     return ctxreg.build(ctxreg.CTX_TASKMGR_ITEM, 0)
 }
 
@@ -2588,7 +2717,28 @@ fn ctx_pick() {
     } else if act == 2 {
         page = 3
         fuiscene.refresh()
+    } else if act == 3 {
+        toggle_prio()
     }
+}
+
+fn toggle_prio() {
+    let sl: u64 = slot_of_pid(sel_pid)
+    if sl >= SLOTS {
+        return
+    }
+    let old: u64 = tmio.prio(sl)
+    var want: u64 = 1
+    if old == 1 {
+        want = 2
+    }
+    let rc: u64 = ulib.sys(ulib.SYS_SETPRIO, sel_pid, want, 0)
+    z_new(ptr((&m_prio[0]) as u64))
+    z_num(sel_pid)
+    z_kv(ptr((&m_old[0]) as u64), old)
+    z_kv(ptr((&m_new[0]) as u64), want)
+    z_kv(ptr((&m_rc[0]) as u64), rc)
+    z_end()
 }
 
 fn ask() {

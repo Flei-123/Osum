@@ -991,6 +991,7 @@ const SYS_OSUM_CTRGET: u64 = 1330
 // Rules in kernel/sched/origin.fi. 1990: the first free number above the
 // 1980..1985 block of RUNDE ASYNC.
 const SYS_OSUM_ORIGIN: u64 = 1990
+const SYS_OSUM_SETPRIO: u64 = 1995
 const OG_GET: u64 = 0
 const OG_SET: u64 = 1
 // W-APPRIGHTS stage 1 (docs/APP-RECHTE-ENERGIE.md): per-app grants.
@@ -3394,6 +3395,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // in `net_call`: a number that lands in a block function without a
     // window above it is -ENOSYS (the trap the two comments above describe;
     // the first test run of AB-003 fell into it -- every caller was "gone").
+    if number == SYS_OSUM_SETPRIO {
+        return do_setprio(state, me, a0, a1)
+    }
     if number == SYS_OSUM_ORIGIN {
         return do_origin(state, me, a0, a1, a2)
     }
@@ -4188,6 +4192,7 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
             return neg(errno.E_NOSPC)
         }
     }
+    io_count(state, me, sched.T_DISKW, n)
     file.open_set_off(state, of, off + n)
     return n
 }
@@ -4261,6 +4266,7 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if !copy_out(state, me, buf, bounce, n) {
         return neg(errno.E_FAULT)
     }
+    io_count(state, me, sched.T_DISKR, n)
     file.open_set_off(state, of, off + n)
     return n
 }
@@ -5799,6 +5805,7 @@ fn vfs_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if !copy_out(state, me, buf, bounce, n) {
         return neg(errno.E_FAULT)
     }
+    io_count(state, me, sched.T_DISKR, n)
     file.open_set_off(state, of, off + n)
     return n
 }
@@ -5831,6 +5838,7 @@ fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if n == 0 && want != 0 {
         return neg(errno.E_NOSPC)
     }
+    io_count(state, me, sched.T_DISKW, n)
     file.open_set_off(state, of, off + n)
     return n
 }
@@ -11230,6 +11238,9 @@ fn do_pstat(state: u64, me: u64, index: u64, field: u64) -> u64 {
         }
         return (now - born) * 1000 / time.TICK_HZ
     }
+    if field == uio.P_UID || field == uio.P_THREADS || field == uio.P_DISKR || field == uio.P_DISKW {
+        return pstat_count(state, index, field)
+    }
     if field >= uio.P_CMD0 && field < uio.P_CMD0 + uio.P_CMD_WORDS {
         if sched.tget(state, index, sched.T_STATE) == sched.S_FREE
             || sched.tget(state, index, sched.T_KIND) != sched.K_USER {
@@ -11238,6 +11249,68 @@ fn do_pstat(state: u64, me: u64, index: u64, field: u64) -> u64 {
         return pstat_cmd(state, index, field - uio.P_CMD0)
     }
     return uio.pstat(state, index, field)
+}
+
+fn pstat_count(state: u64, index: u64, field: u64) -> u64 {
+    if sched.tget(state, index, sched.T_STATE) == sched.S_FREE {
+        return 0
+    }
+    if field == uio.P_UID {
+        return sched.tget(state, index, sched.T_UID)
+    }
+    if field == uio.P_DISKR {
+        return sched.tget(state, index, sched.T_DISKR)
+    }
+    if field == uio.P_DISKW {
+        return sched.tget(state, index, sched.T_DISKW)
+    }
+    var group: u64 = sched.tget(state, index, sched.T_TGID)
+    if group == 0 {
+        group = sched.tget(state, index, sched.T_PID)
+    }
+    var n: u64 = 0
+    var j: u64 = 0
+    let top: u64 = kstate.get(state, kstate.TASKS)
+    while j < top && j < kstate.MAX_TASKS {
+        let st: u64 = sched.tget(state, j, sched.T_STATE)
+        if st != sched.S_FREE && st != sched.S_ZOMBIE && st != sched.S_NEW {
+            var g: u64 = sched.tget(state, j, sched.T_TGID)
+            if g == 0 {
+                g = sched.tget(state, j, sched.T_PID)
+            }
+            if g == group {
+                n = n + 1
+            }
+        }
+        j = j + 1
+    }
+    return n
+}
+
+fn io_count(state: u64, me: u64, field: u64, n: u64) {
+    if n == 0 || (n >> 63) != 0 {
+        return
+    }
+    sched.tset(state, me, field, sched.tget(state, me, field) + n)
+}
+
+fn do_setprio(state: u64, me: u64, pid: u64, prio: u64) -> u64 {
+    if prio < 1 || prio > 3 {
+        return neg(errno.E_INVAL)
+    }
+    let t: u64 = sched.find_pid(state, pid)
+    if t >= kstate.MAX_TASKS {
+        return neg(errno.E_SRCH)
+    }
+    let st: u64 = sched.tget(state, t, sched.T_STATE)
+    if st == sched.S_FREE || st == sched.S_ZOMBIE || sched.tget(state, t, sched.T_KIND) != sched.K_USER {
+        return neg(errno.E_SRCH)
+    }
+    if !perm.may_signal(state, me, t) {
+        return neg(errno.E_PERM)
+    }
+    sched.tset(state, t, sched.T_PRIO, prio)
+    return 0
 }
 
 // r146: eight octets of the command line, `word` = 0.. (octets 8*word .. 8*word+7). The command line is
