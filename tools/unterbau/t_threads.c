@@ -10,6 +10,43 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <signal.h>
+#include <sys/wait.h>
+
+static int gp_fd[2];
+static void settle(int ms) { struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a); do { usleep(20000); clock_gettime(CLOCK_MONOTONIC, &b); } while ((b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000 < ms); }
+static void *park_thr(void *a) { (void)a; long tid = syscall(SYS_gettid); (void)!write(gp_fd[1], &tid, sizeof tid); for (;;) settle(1000); return 0; }
+static void *xg_thr(void *a) { (void)a; settle(300); syscall(SYS_exit_group, 7); return 0; }
+static void *segv_thr(void *a) { (void)a; settle(300); *(volatile int *)0 = 1; return 0; }
+
+/* mode 0: main calls exit(5); 1: main writes NULL; 2: a thread calls exit_group(7); 3: a thread writes NULL.
+   Three more threads sleep. Afterwards the whole group must be gone, not running on a freed address space. */
+static void group_case(const char *name, int mode, int want_sig, int want_code)
+{
+    if (pipe(gp_fd) != 0) { FAIL(name, "pipe"); return; }
+    pid_t p = fork();
+    if (p == 0) {
+        pthread_t t[4];
+        for (int i = 0; i < 3; i++) pthread_create(&t[i], 0, park_thr, 0);
+        if (mode == 2) pthread_create(&t[3], 0, xg_thr, 0);
+        if (mode == 3) pthread_create(&t[3], 0, segv_thr, 0);
+        settle(800);
+        if (mode == 0) exit(5);
+        if (mode == 1) *(volatile int *)0 = 1;
+        for (;;) settle(1000);
+    }
+    long tids[3] = {0, 0, 0};
+    for (int i = 0; i < 3; i++) if (read(gp_fd[0], &tids[i], sizeof tids[i]) != (ssize_t)sizeof tids[i]) tids[i] = 0;
+    int st = 0;
+    pid_t w = waitpid(p, &st, 0);
+    int alive = 0;
+    for (int i = 0; i < 3; i++) if (tids[i] && kill((pid_t)tids[i], 0) == 0) alive++;
+    int ok = w == p && alive == 0;
+    if (want_sig) ok = ok && WIFSIGNALED(st) && WTERMSIG(st) == want_sig;
+    else ok = ok && WIFEXITED(st) && WEXITSTATUS(st) == want_code;
+    CHECK(name, ok, "waitpid %d status 0x%x, %d of 3 sleeping threads still alive", (int)w, st, alive);
+    close(gp_fd[0]); close(gp_fd[1]);
+}
 
 static void *ret_arg(void *a) { return (void *)((long)a * 2); }
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -191,6 +228,10 @@ int main(void)
         CHECK("mmap_threads_disjoint", overlap == 0, "%d overlapping mappings between threads and creator", overlap);
         CHECK("mmap_threads_content_intact", damaged == 0, "%d mappings were overwritten by another thread", damaged);
     }
+    group_case("group_exit_main_kills_threads", 0, 0, 5);
+    group_case("group_segv_main_kills_threads", 1, SIGSEGV, 0);
+    group_case("group_exit_group_thread_kills_all", 2, 0, 7);
+    group_case("group_segv_thread_kills_all", 3, SIGSEGV, 0);
     CHECK("pthread_self_equal", pthread_equal(pthread_self(), pthread_self()), "");
     return 0;
 }

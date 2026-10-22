@@ -858,12 +858,33 @@ fn map_restored(state: u64, i: u64, addr: u64, frame: u64) -> bool {
     return true
 }
 
+// The finished threads of a leader that is being reaped: their slots go with the process.
+fn reap_group_corpses(state: u64, leader: u64) {
+    let g: u64 = sched.group_of(state, leader)
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var j: u64 = 0
+    while j < n {
+        if j != leader && sched.tget(state, j, sched.T_KIND) == sched.K_USER
+            && sched.tget(state, j, sched.T_TGID) == g
+            && sched.tget(state, j, sched.T_STATE) == sched.S_ZOMBIE {
+            let _r: bool = reap(state, j)
+        }
+        j = j + 1
+    }
+}
+
 // Corpse to memory: first the address space, then the kernel stack.
 fn reap(state: u64, i: u64) -> bool {
+    if sched.tget(state, i, sched.T_SHARED) == 0 && sched.group_live(state, i) {
+        return false
+    }
     // Claim first: two reapers on two cores must not both free the address
     // space (see sched.S_REAPING, 27.09.2026).
     if !sched.claim_zombie(state, i) {
         return false
+    }
+    if sched.tget(state, i, sched.T_SHARED) == 0 {
+        reap_group_corpses(state, i)
     }
     // DELL STABILITY: the descriptors are closed by the ONE caller that won the
     // claim. They used to be closed by every caller BEFORE the claim (wait4, the

@@ -185,11 +185,10 @@ isr_common:
      * Damit ist `%gs:CPU_KSTACK` auf jedem Kern etwas anderes -- und
      * genau das ist der ganze Unterschied zu vorher.
      *
-     * Kein `swapgs`. Ring 3 benutzt GS in diesem System nicht, also
-     * bleibt die Basis stehen; sie ist eine Eigenschaft des KERNS und
-     * nicht der Aufgabe, und sie ueberlebt deshalb auch, wenn eine
-     * Aufgabe mitten im Systemaufruf auf einen anderen Kern wandert.
-     * Mit `swapgs` waere genau das ein Fehler gewesen. */
+     * Ring 3 may own GS (arch_prctl ARCH_SET_GS, T_GSBASE), so every
+     * ring-3 entry and exit pairs a `swapgs`: inside the kernel GS base is
+     * this core's `cpu` record, and the task's user GS base waits in
+     * KERNEL_GS_BASE (switched per task by fsbase_apply). */
     .set CPU_SYSRSP, 136            /* cpu.C_SYSRSP -- kernel/cpu.fi */
     .set CPU_KSTACK, 144            /* cpu.C_KSTACK -- kernel/cpu.fi */
     .set CPU_SYSCALLS, 160          /* cpu.C_SYSCALLS -- kernel/cpu.fi */

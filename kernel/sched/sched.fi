@@ -79,7 +79,7 @@ export {
     // ---- RUNDE LAUFZEIT ----
     T_FSBASE, T_GSBASE, fsbase_apply,
     // ---- DELL STABILITY ----
-    state_cas, schedule_locked, KILL_SET, kill_requested, stop_sleep, kill_other, KILL_DONE, KILL_LATER, KILL_GONE,
+    state_cas, schedule_locked, KILL_SET, kill_requested, stop_sleep, kill_other, KILL_DONE, KILL_LATER, KILL_GONE, group_of, group_live, kill_group,
     // ---- RUNDE O-CONTAINER ----
     T_CTR,
     // ---- RUNDE SPEICHERDRUCK (K-002) ----
@@ -2618,7 +2618,7 @@ fn wait_sleep(state: u64, want: u64) {
     var i: u64 = 0
     while i < n {
         if tget(state, i, T_STATE) == S_ZOMBIE && tget(state, i, T_PARENT) == cur
-            && (want == 0 || tget(state, i, T_PID) == want) {
+            && (want == 0 || tget(state, i, T_PID) == want) && !group_live(state, i) {
             atomic.lock_give(state, atomic.L_SCHED)
             irq_restore(flags)
             return
@@ -2811,6 +2811,7 @@ fn exit_task(state: u64, code: u64) {
     tset(state, cur, T_STATE, S_ZOMBIE)
     reparent(state, cur)
     wake_pid(state, tget(state, cur, T_PID))
+    wake_pid(state, group_of(state, cur))
     schedule_locked(state)
     irq_restore(flags)
     // The scheduler never comes back to a corpse. If it does, something
@@ -2875,9 +2876,51 @@ fn kill_other(state: u64, i: u64, pid: u64, code: u64) -> u64 {
     tset(state, i, T_STATE, S_ZOMBIE)
     reparent(state, i)
     wake_pid(state, pid)
+    wake_pid(state, group_of(state, i))
     atomic.lock_give(state, atomic.L_SCHED)
     irq_restore(flags)
     return KILL_DONE
+}
+
+fn group_of(state: u64, i: u64) -> u64 {
+    let g: u64 = tget(state, i, T_TGID)
+    if g == 0 {
+        return tget(state, i, T_PID)
+    }
+    return g
+}
+
+fn is_group_member(state: u64, i: u64, j: u64, g: u64) -> bool {
+    if j == i || tget(state, j, T_KIND) != K_USER || tget(state, j, T_TGID) != g {
+        return false
+    }
+    let st: u64 = tget(state, j, T_STATE)
+    return st != S_FREE && st != S_ZOMBIE && st != S_REAPING
+}
+
+fn group_live(state: u64, i: u64) -> bool {
+    let g: u64 = group_of(state, i)
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var j: u64 = 0
+    while j < n {
+        if is_group_member(state, i, j, g) {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
+fn kill_group(state: u64, i: u64, code: u64) {
+    let g: u64 = group_of(state, i)
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var j: u64 = 0
+    while j < n {
+        if is_group_member(state, i, j, g) {
+            let _r: u64 = kill_other(state, j, tget(state, j, T_PID), code)
+        }
+        j = j + 1
+    }
 }
 
 // RUNDE K13: DIE WAISEN. Stirbt ein Prozess, der noch Kinder hat, so
