@@ -136,7 +136,7 @@ def main():
     old = read_old()
     if "--check" in sys.argv:
         miss = [g for g in cur if g not in old]
-        gone = [g for g in old if g not in cur]
+        gone = [g for g in old if g not in cur and old[g][4] != "manual"]
         for g in miss:
             print(f"gates.tsv: no row for tools/{g}/run.sh -- run tools/qa/gen-manifest.py")
         for g in gone:
