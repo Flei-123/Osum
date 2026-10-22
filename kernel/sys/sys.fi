@@ -2436,6 +2436,21 @@ fn fset(frame: u64, off: u64, v: u64) {
 // Aufruf in den Rahmen; `check_sys` fasst rax nicht an, sondern nur rip,
 // rsp und die drei Argumentregister der Behandlungsroutine.
 fn entry(number: u64, frame: u64, state: u64) -> u64 {
+    if (number == 60 || number == 231 || number == 62 || number == 234) && kstate.mode_on(state, kstate.M_FREMDTRACE) {
+        var s_xk: [u8; 14] = "sys: EXITK nr\0"
+        serial.puts((&s_xk[0]) as u64)
+        serial.dec(number)
+        var s_xp: [u8; 6] = " pid \0"
+        serial.puts((&s_xp[0]) as u64)
+        serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
+        var s_x0: [u8; 5] = " a0 \0"
+        serial.puts((&s_x0[0]) as u64)
+        serial.dec(fget(frame, F_RDI))
+        var s_x1: [u8; 5] = " a1 \0"
+        serial.puts((&s_x1[0]) as u64)
+        serial.dec(fget(frame, F_RSI))
+        serial.nl()
+    }
     let r: u64 = dispatch(number, frame, state)
     // RUNDE LAUFZEIT: welche Nummer kennt dieser Kern NICHT? Ein fremdes
     // Programm legt seine Nummer in rax und bekommt -ENOSYS zurueck --
@@ -2482,6 +2497,41 @@ fn entry(number: u64, frame: u64, state: u64) -> u64 {
             serial.dec(r)
             serial.nl()
         }
+        if number == 7 && fget(frame, F_RSI) == 1 {
+            var s_po: [u8; 14] = "sys: POLL pid\0"
+            serial.puts((&s_po[0]) as u64)
+            var s_pp: [u8; 2] = " \0"
+            serial.puts((&s_pp[0]) as u64)
+            serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
+            var s_pt: [u8; 6] = " tmo \0"
+            serial.puts((&s_pt[0]) as u64)
+            serial.dec(fget(frame, F_RDX))
+            var s_pr: [u8; 4] = " r \0"
+            serial.puts((&s_pr[0]) as u64)
+            serial.dec(r)
+            var s_pk: [u8; 7] = " tick \0"
+            serial.puts((&s_pk[0]) as u64)
+            serial.dec(kstate.get(state, kstate.TICKS))
+            serial.nl()
+        }
+        if r >= 0xFFFFFFFFFFFFF000 && (4096 - (r & 0xFFF)) == 22 && number != 9 && number != 10 && number != 12 && number != 25 && number != 28 && number != 56 {
+            var s_ei: [u8; 15] = "sys: EINVAL nr\0"
+            serial.puts((&s_ei[0]) as u64)
+            serial.dec(number)
+            var s_ep2: [u8; 6] = " pid \0"
+            serial.puts((&s_ep2[0]) as u64)
+            serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
+            var s_e0: [u8; 5] = " a0 \0"
+            serial.puts((&s_e0[0]) as u64)
+            serial.dec(fget(frame, F_RDI))
+            var s_e1: [u8; 5] = " a1 \0"
+            serial.puts((&s_e1[0]) as u64)
+            serial.dec(fget(frame, F_RSI))
+            var s_e2: [u8; 5] = " a2 \0"
+            serial.puts((&s_e2[0]) as u64)
+            serial.dec(fget(frame, F_RDX))
+            serial.nl()
+        }
         if r >= 0xFFFFFFFFFFFFF000 {
             if number == 9 || number == 10 || number == 12 || number == 25 || number == 28 || number == 56 {
                 var s_er: [u8; 12] = "sys: ERR nr\0"
@@ -2502,6 +2552,14 @@ fn entry(number: u64, frame: u64, state: u64) -> u64 {
                 var s_ec: [u8; 5] = " fd \0"
                 serial.puts((&s_ec[0]) as u64)
                 serial.dec(fget(frame, F_R8) & 0xFFFFFFFF)
+                var s_ep: [u8; 6] = " pid \0"
+                serial.puts((&s_ep[0]) as u64)
+                serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
+                if number == 25 {
+                    var s_en: [u8; 5] = " nl \0"
+                    serial.puts((&s_en[0]) as u64)
+                    serial.dec(fget(frame, F_RDX))
+                }
                 serial.nl()
             }
         }
@@ -18726,14 +18784,21 @@ fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, fla
     let oldp: u64 = page_up(old_len) / PAGE
     let newp: u64 = page_up(new_len) / PAGE
     var k: u64 = 0
+    var virtual_only: bool = false
     while k < oldp {
         if !proc.page_mapped(state, me, old_addr + k * PAGE) {
-            return neg(errno.E_FAULT)
+            if !proc.stack_zone_has(state, me, old_addr + k * PAGE) {
+                return neg(errno.E_FAULT)
+            }
+            virtual_only = true
         }
         k = k + 1
     }
     if newp == oldp {
         return old_addr
+    }
+    if virtual_only {
+        return neg(errno.E_NOMEM)
     }
     if newp < oldp {
         let _u: u64 = do_unmap(state, me, old_addr + newp * PAGE, (oldp - newp) * PAGE)

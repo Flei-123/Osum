@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
@@ -342,5 +343,25 @@ int main(void)
     char *bb = mmap(0, 8 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (bb == MAP_FAILED) GAP("commit_8M", "errno=%d", errno);
     else { memset(bb, 1, 8 << 20); PASS("commit_8M"); munmap(bb, 8 << 20); }
+    {
+        volatile char here = 0;
+        uintptr_t lo = ((uintptr_t)&here & ~(uintptr_t)(PG - 1)) - PG;
+        size_t pages = 0;
+        errno = 0;
+        while (pages < 4096 && mremap((void *)(lo - pages * PG), PG, 2 * PG, 0) == MAP_FAILED && errno == ENOMEM)
+            pages++;
+        CHECK("stack_probe_extent", pages * PG >= (8UL << 20) - (256UL << 10) && pages < 4096, "stack probe walked %zu KiB", pages * PG / 1024);
+        pthread_attr_t at;
+        void *sa = 0;
+        size_t ss = 0;
+        if (pthread_getattr_np(pthread_self(), &at) == 0) {
+            pthread_attr_getstack(&at, &sa, &ss);
+            pthread_attr_destroy(&at);
+            CHECK("stack_getattr_size", ss >= (8UL << 20) - (256UL << 10), "main thread stack size %zu KiB", ss / 1024);
+        } else GAP("stack_getattr_size", "errno=%d", errno);
+        errno = 0;
+        void *nm = mremap((void *)(lo - 3 * PG), PG, 2 * PG, 0);
+        CHECK("stack_probe_enomem", nm == MAP_FAILED && errno == ENOMEM, "errno %d", errno);
+    }
     return 0;
 }
