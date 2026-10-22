@@ -6,8 +6,7 @@ set -uo pipefail
 WD=${1:?workdir}; HERE=$(cd "$(dirname "$0")" && pwd); mkdir -p "$WD/fx-root" "$WD/fxrun"; cd "$WD"
 tar -xzf /root/fremdquellen/alpine-minirootfs-3.24.2-x86_64.tar.gz -C fx-root && cp /etc/resolv.conf fx-root/etc/resolv.conf
 timeout 900 chroot fx-root /sbin/apk add --no-cache firefox font-dejavu > apk-fx.log 2>&1 || { tail -3 apk-fx.log; exit 1; }
-if [ -z "${FX_KEEP_SCUDO:-}" ]; then
-    # scudo's static arena spans 256 MiB; the 288 MiB mmap arena of Osum cannot hold it plus libxul, so the guest root gets an empty libscudo.so (musl malloc is used) until mmap is lazy and the window larger
+if [ -n "${FX_STUB_SCUDO:-}" ]; then
     mkdir -p scudo-stub && echo 'int scudo_stub_marker = 1;' > scudo-stub/s.c
     cp fx-root/usr/lib/libscudo.so scudo-stub/libscudo.so.orig
     gcc -shared -nostdlib -fPIC -o fx-root/usr/lib/libscudo.so scudo-stub/s.c -Wl,-soname,libscudo.so || { echo "prep: stub build failed"; exit 1; }
