@@ -3869,6 +3869,13 @@ fn copy_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
         // kopierten Wert, und ein Fenster, das eine Seite lang offen
         // ist, ist immer noch ein Fenster.
         guard.stac(state)
+        // LA-9: whole words while source and destination are 8-aligned
+        if (((phys + k) | (src + n + k)) & 7) == 0 {
+            while k + 8 <= room {
+                __mmio_write64((phys + k) as *mut u64, __mmio_read64((src + n + k) as *mut u64))
+                k = k + 8
+            }
+        }
         while k < room {
             kstate.set8(phys + k, kstate.get8(src + n + k) as u8)
             k = k + 1
@@ -4199,7 +4206,49 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
 
 // -------------------------------------------------------------- read
 
+// LA-9: a regular file is read in up to MAX_FREAD per call, in MAX_IO steps inside the call (one trap instead of 16)
+const MAX_FREAD: u64 = 65536
+
 fn do_read(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
+    var len: u64 = want
+    if len > MAX_FREAD {
+        len = MAX_FREAD
+    }
+    if len > MAX_IO {
+        if !proc.user_ok(state, me, buf, len) {
+            return neg(errno.E_FAULT)
+        }
+        let of2: u64 = file.fd_check(state, me, fd, handle.R_READ)
+        if of2 >= file.MAX_OPEN {
+            return neg(errno.E_BADF)
+        }
+        if file.open_kind(state, of2) != file.K_FILE {
+            return do_read_one(state, me, fd, buf, MAX_IO)
+        }
+        var got: u64 = 0
+        while got < len {
+            var step: u64 = len - got
+            if step > MAX_IO {
+                step = MAX_IO
+            }
+            let r: u64 = read_of(state, me, of2, buf + got, step)
+            if r >= 0xFFFFFFFFFFFFF000 {
+                if got == 0 {
+                    return r
+                }
+                return got
+            }
+            got = got + r
+            if r < step {
+                return got
+            }
+        }
+        return got
+    }
+    return do_read_one(state, me, fd, buf, len)
+}
+
+fn do_read_one(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     var len: u64 = want
     if len > MAX_IO {
         len = MAX_IO

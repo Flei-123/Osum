@@ -657,6 +657,14 @@ fn zero(p: u64, n: u64) {
 
 fn copy(from: u64, to: u64, n: u64) {
     var i: u64 = 0
+    // LA-9: whole words when source, destination and length are 8-aligned (a byte loop cost ~5 ns per byte in the read path)
+    if ((from | to | n) & 7) == 0 {
+        while i < n {
+            __mmio_write64((to + i) as *mut u64, __mmio_read64((from + i) as *mut u64))
+            i = i + 8
+        }
+        return
+    }
     while i < n {
         kstate.set8(to + i, kstate.get8(from + i) as u8)
         i = i + 1
@@ -1701,6 +1709,54 @@ fn free_pointers(state: u64, block: u64) {
 // Both take KERNEL addresses. What comes out of ring 3 is copied into the
 // data area by `sys.fi` beforehand and checked there -- a file system
 // that followed a pointer of a process would be a hole.
+// LA-9: the lowest-level pointer block that covers file block `index` (index >= directs), 0 for a hole. Mirrors `file_block`, grow = false; clobbers `buf_ib`.
+fn leaf_of(state: u64, ino: u64, index: u64, dn: u64) -> u64 {
+    let k: u64 = index - dn
+    if k < PER_BLOCK {
+        return inode_get(state, ino, I_INDIRECT)
+    }
+    let d: u64 = k - PER_BLOCK
+    if d < PER_BLOCK * PER_BLOCK {
+        let l1: u64 = inode_get(state, ino, I_DINDIRECT)
+        if l1 == 0 {
+            return 0
+        }
+        return stufe(state, l1, d / PER_BLOCK, false)
+    }
+    if version(state) < OFS_V3 {
+        return 0
+    }
+    let t: u64 = d - PER_BLOCK * PER_BLOCK
+    if t < PER_BLOCK * PER_BLOCK * PER_BLOCK {
+        let t1: u64 = inode_get(state, ino, I_TINDIRECT)
+        if t1 == 0 {
+            return 0
+        }
+        let t2: u64 = stufe(state, t1, t / (PER_BLOCK * PER_BLOCK), false)
+        if t2 == 0 {
+            return 0
+        }
+        return stufe(state, t2, (t / PER_BLOCK) % PER_BLOCK, false)
+    }
+    let q: u64 = t - PER_BLOCK * PER_BLOCK * PER_BLOCK
+    if q >= PER_BLOCK * PER_BLOCK * PER_BLOCK * PER_BLOCK {
+        return 0
+    }
+    let q1: u64 = inode_get(state, ino, I_QINDIRECT)
+    if q1 == 0 {
+        return 0
+    }
+    let q2: u64 = stufe(state, q1, q / (PER_BLOCK * PER_BLOCK * PER_BLOCK), false)
+    if q2 == 0 {
+        return 0
+    }
+    let q3: u64 = stufe(state, q2, (q / (PER_BLOCK * PER_BLOCK)) % PER_BLOCK, false)
+    if q3 == 0 {
+        return 0
+    }
+    return stufe(state, q3, (q / PER_BLOCK) % PER_BLOCK, false)
+}
+
 fn read_at(state: u64, ino: u64, off: u64, dst: u64, len: u64) -> u64 {
     let flags: u64 = enter(state)
     let size: u64 = inode_get(state, ino, I_SIZE)
@@ -1712,6 +1768,10 @@ fn read_at(state: u64, ino: u64, off: u64, dst: u64, len: u64) -> u64 {
             want = size - off
         }
     }
+    let dn: u64 = directs(state)
+    // LA-9: the pointer block of the current group of 64 file blocks is read ONCE into `buf_i2` (was: inode + two pointer blocks per 512-byte block)
+    var grp: u64 = 0xFFFFFFFFFFFFFFFF
+    var leaf: u64 = 0
     var n: u64 = 0
     while n < want {
         let pos: u64 = off + n
@@ -1720,15 +1780,40 @@ fn read_at(state: u64, ino: u64, off: u64, dst: u64, len: u64) -> u64 {
         if chunk > want - n {
             chunk = want - n
         }
-        let b: u64 = file_block(state, ino, pos / BS, false)
+        let index: u64 = pos / BS
+        var b: u64 = 0
+        if index < dn {
+            b = file_block(state, ino, index, false)
+        } else {
+            let g: u64 = (index - dn) / PER_BLOCK
+            if g != grp {
+                grp = g
+                leaf = leaf_of(state, ino, index, dn)
+                if leaf != 0 {
+                    if !ofsj.read(state, leaf, buf_i2(state)) {
+                        leaf = 0
+                    }
+                }
+            }
+            if leaf != 0 {
+                b = get64(buf_i2(state) + ((index - dn) % PER_BLOCK) * 8)
+            }
+        }
         if b == 0 {
             zero(dst + n, chunk) // a hole reads as zeros
         } else {
-            if !ofsj.read(state, b, buf_dt(state)) {
-                leave(state, flags)
-                return n
+            if inb == 0 && chunk == BS {
+                if !ofsj.read_stream(state, b, dst + n) {
+                    leave(state, flags)
+                    return n
+                }
+            } else {
+                if !ofsj.read(state, b, buf_dt(state)) {
+                    leave(state, flags)
+                    return n
+                }
+                copy(buf_dt(state) + inb, dst + n, chunk)
             }
-            copy(buf_dt(state) + inb, dst + n, chunk)
         }
         n = n + chunk
     }

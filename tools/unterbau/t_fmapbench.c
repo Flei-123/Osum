@@ -36,7 +36,8 @@ int main(void)
     while ((n = read(fd, chunk, 65536)) > 0) total += n;
     long long t1 = now_ms();
     CHECK("read_all", total == SIZE, "read %ld of %d", total, SIZE);
-    PASS("read_speed", "ms=%lld MiB_per_s=%lld", t1 - t0, (t1 - t0) > 0 ? (long long)(SIZE / MIB) * 1000 / (t1 - t0) : -1);
+    long long mbs = (t1 - t0) > 0 ? (long long)(SIZE / MIB) * 1000 / (t1 - t0) : 1000;
+    CHECK("read_speed", mbs >= 12, "ms=%lld MiB_per_s=%lld (need >= 12)", t1 - t0, mbs);
 
     t0 = now_ms();
     char *m = mmap(0, SIZE, PROT_READ, MAP_PRIVATE, fd, 0);

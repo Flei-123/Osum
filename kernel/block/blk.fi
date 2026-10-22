@@ -43,7 +43,7 @@ import bus.pci
 export {
     ram_init, use_ata, use_nvme, read, write, blocks, present,
     // ---- RUNDE KRYPTO: der rohe Weg, fuer den Kopfsatz und die Abnahme
-    read_raw, write_raw, write_run, wb_begin, wb_end, wb_flush,
+    read_raw, read_stream, write_raw, write_run, wb_begin, wb_end, wb_flush,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     removable,
     // ---- Runde K14 ----
@@ -1255,7 +1255,75 @@ fn ways(state: u64) -> u64 {
     return kstate.BLKC_WAYS
 }
 
+// LA-9: STREAM BUFFER. File data read by `fs.read_at` goes through ONE read-ahead buffer of S_SECTORS sectors (one DMA command per 16 KiB instead of one
+// per 4 KiB way). Allocated lazily; any write drops it (`cache_drop`/`cache_invalidate`). ATA and AHCI only, everything else reads as before.
+const S_DATA: u64 = 0x268 // address of the buffer, 0 = not (yet) there
+const S_TRIED: u64 = 0x270
+const S_VALID: u64 = 0x278
+const S_LBA: u64 = 0x280
+const S_N: u64 = 0x288
+const S_DEV: u64 = 0x290
+const S_SECTORS: u64 = 32
+
+fn stream_grow(state: u64) {
+    if cg(state, S_TRIED) != 0 || kstate.get(state, kstate.BITMAP) == 0 {
+        return
+    }
+    cs(state, S_TRIED, 1)
+    let b: u64 = mem.frame_run(state, S_SECTORS * BLOCK_SIZE / 4096)
+    if b != 0 {
+        cs(state, S_DATA, b)
+    }
+}
+
+fn read_stream(state: u64, lba: u64, dst: u64) -> bool {
+    let dv: u64 = kstate.get(state, kstate.DISK_DEV)
+    if krypto.active(state) || (dv != DEV_ATA && dv != DEV_ATA1 && dv != DEV_AHCI) || lba >= blocks(state) {
+        return read(state, lba, dst)
+    }
+    let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
+    if cg(state, S_VALID) == 1 && cg(state, S_DEV) == dv {
+        let c0: u64 = cg(state, S_LBA)
+        if abs >= c0 && abs < c0 + cg(state, S_N) {
+            copy(cg(state, S_DATA) + (abs - c0) * BLOCK_SIZE, dst)
+            return true
+        }
+    }
+    stream_grow(state)
+    let buf: u64 = cg(state, S_DATA)
+    if buf == 0 {
+        return read(state, lba, dst)
+    }
+    dma_up(state)
+    // dirty write-behind sectors in the dirty table win: take the normal path for them
+    if cg(state, W_DIRTY) != 0 {
+        return read(state, lba, dst)
+    }
+    let ende: u64 = kstate.get(state, kstate.DISK_FIRST) + blocks(state)
+    var n: u64 = S_SECTORS
+    if ende > abs && ende - abs < n {
+        n = ende - abs
+    }
+    cs(state, S_VALID, 0)
+    var ok: bool = false
+    if dv == DEV_AHCI {
+        ok = ahci.read_many(state, abs, n, buf)
+    } else {
+        ok = ata_read_run(abs, buf, n, dv == DEV_ATA1)
+    }
+    if !ok {
+        return read(state, lba, dst)
+    }
+    cs(state, S_LBA, abs)
+    cs(state, S_N, n)
+    cs(state, S_DEV, dv)
+    cs(state, S_VALID, 1)
+    copy(buf, dst)
+    return true
+}
+
 fn cache_grow(state: u64) {
+    stream_grow(state) // allocated with the cache, early, so the frame count is stable afterwards
     if cg(state, C_XTRIED) != 0 || kstate.get(state, kstate.BITMAP) == 0 {
         return
     }
@@ -1280,6 +1348,7 @@ fn cache_grow(state: u64) {
 // zweites Geraet, `install`, `bootmod`), und ein Puffer, der in
 // EINEM dieser Faelle danebenliegt, ist wertlos.
 fn cache_invalidate(state: u64) {
+    cs(state, S_VALID, 0)
     var w: u64 = 0
     while w < ways(state) {
         ws(state, w, C_VALID, 0)
@@ -1295,6 +1364,7 @@ fn cache_invalidate(state: u64) {
 // blocks the next operation needed again (measured: 115 disk reads per
 // created file instead of ~50).
 fn cache_drop(state: u64, dev: u64, lba: u64) {
+    cs(state, S_VALID, 0)
     var w: u64 = 0
     while w < ways(state) {
         if wg(state, w, C_VALID) == 1 {
