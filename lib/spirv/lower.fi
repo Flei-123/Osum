@@ -60,10 +60,12 @@ struct LowerInfo {
     peak_reg: u32, // highest register used + 1
     nsample: u32,
     nsel: u32, // SEL instructions emitted (cost of if-conversion)
+    nkill: u32, // OpKill instructions: the caller must set Frame.kills (late depth write)
+    ntex: u32, // highest texture slot used + 1 (slot = Binding, 0..3)
 }
 
 fn info_zero() -> LowerInfo {
-    var i: LowerInfo = LowerInfo { ninstr: 0, err_pos: 0, peak_reg: 0, nsample: 0, nsel: 0 }
+    var i: LowerInfo = LowerInfo { ninstr: 0, err_pos: 0, peak_reg: 0, nsample: 0, nsel: 0, nkill: 0, ntex: 0 }
     return i
 }
 
@@ -110,6 +112,8 @@ struct Lw {
     peak: u32,
     nsample: u32,
     nsel: u32,
+    nkill: u32,
+    ntex: u32,
 }
 
 fn fail(l: *mut Lw, e: u32, pos: usize) {
@@ -738,7 +742,11 @@ fn lower_load(l: *mut Lw, pos: usize) {
     let ptr: u32 = parse.w32(m, pos + 3)
     if !ensure_var(l, ptr, pos) { return }
     if tab((*l).vk, ptr) == VK_TEXVAR {
+        var slot: u32 = parse.binding_of(m, ptr)
+        if slot != 0 { slot = slot - 1 }
+        if slot >= 4 { fail(l, L_IO, pos); return }
         tset((*l).vk, id, VK_HANDLE)
+        tset((*l).vreg, id * 4, slot)
         return
     }
     let n: u32 = result_n(l, pos)
@@ -851,6 +859,13 @@ fn lower_composite(l: *mut Lw, pos: usize, op: u32, wc: usize) {
     }
 }
 
+fn lower_kill(l: *mut Lw) {
+    var r: u32 = (*l).cpred
+    if r == NONE { r = tmp_const(l, 1.0f) }
+    emit(l, shader.OP_KILL, 0, r, 0, 0)
+    (*l).nkill = (*l).nkill + 1
+}
+
 fn lower_sample(l: *mut Lw, pos: usize) {
     let m: *mut parse.Module = (*l).m
     let id: u32 = parse.w32(m, pos + 2)
@@ -858,7 +873,9 @@ fn lower_sample(l: *mut Lw, pos: usize) {
     let coord: u32 = parse.w32(m, pos + 4)
     if tab((*l).vk, h) != VK_HANDLE { fail(l, L_INTERNAL, pos); return }
     let d: u32 = allocn(l, 4)
-    emit(l, shader.OP_SAMPLE, d, get(l, coord, 0), get(l, coord, 1), 0)
+    let slot: u32 = tab((*l).vreg, h * 4)
+    emit(l, shader.OP_SAMPLE, d, get(l, coord, 0), get(l, coord, 1), slot)
+    if slot + 1 > (*l).ntex { (*l).ntex = slot + 1 }
     (*l).nsample = (*l).nsample + 1
     define_seq(l, id, d, 4)
 }
@@ -1053,7 +1070,7 @@ fn lower_inst(l: *mut Lw, pos: usize, op: u32, wc: usize, ii: usize) {
     }
     else if op == spv.OP_LOOPMERGE { fail(l, L_LOOP, pos) }
     else if op == spv.OP_SWITCH { fail(l, L_SWITCH, pos) }
-    else if op == spv.OP_KILL { fail(l, L_KILL, pos) }
+    else if op == spv.OP_KILL { lower_kill(l) }
     else if op == spv.OP_FUNCTIONCALL { fail(l, L_CALL, pos) }
     else if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL { lower_branch(l, pos, op) }
     else if op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE { }
@@ -1063,7 +1080,11 @@ fn lower_inst(l: *mut Lw, pos: usize, op: u32, wc: usize, ii: usize) {
     else if op == spv.OP_STORE { lower_store(l, pos) }
     else if op == spv.OP_ACCESSCHAIN || op == spv.OP_INBOUNDSACCESSCHAIN { lower_access(l, pos, wc) }
     else if op == spv.OP_COMPOSITECONSTRUCT || op == spv.OP_COMPOSITEEXTRACT || op == spv.OP_VECTORSHUFFLE { lower_composite(l, pos, op, wc) }
-    else if op == spv.OP_SAMPLEDIMAGE { tset((*l).vk, parse.w32(m, pos + 2), VK_HANDLE) }
+    else if op == spv.OP_SAMPLEDIMAGE {
+        let sid: u32 = parse.w32(m, pos + 2)
+        tset((*l).vk, sid, VK_HANDLE)
+        tset((*l).vreg, sid * 4, tab((*l).vreg, parse.w32(m, pos + 3) * 4))
+    }
     else if op == spv.OP_IMAGESAMPLEIMPLICITLOD || op == spv.OP_IMAGESAMPLEEXPLICITLOD { lower_sample(l, pos) }
     else if op == spv.OP_EXTINST { lower_glsl(l, pos, wc) }
     else if op == spv.OP_DOT { lower_dot(l, pos) }
@@ -1086,7 +1107,7 @@ fn lower(m: *mut parse.Module, prog: u64, maxpc: usize, info: *mut LowerInfo) ->
     if ep == 0 { return L_STAGE }
     let nb: usize = (*m).bound as usize
     var lw: Lw = Lw { m: m, prog: prog, pc: 0, maxpc: maxpc, err: 0, err_pos: 0, rrefs: 0, vreg: 0, vn: 0, vk: 0, uses: 0, bpred: 0,
-        mpred: 0, tmp: 0, ntmp: 0, ef: 0, et: 0, ep: 0, ed: 0, ne: 0, cur: 0, cpred: NONE, skip: false, peak: 12, nsample: 0, nsel: 0 }
+        mpred: 0, tmp: 0, ntmp: 0, ef: 0, et: 0, ep: 0, ed: 0, ne: 0, cur: 0, cpred: NONE, skip: false, peak: 12, nsample: 0, nsel: 0, nkill: 0, ntex: 0 }
     let l: *mut Lw = &lw
     (*l).rrefs = rt.heap_alloc(64 * 4)
     (*l).vreg = rt.heap_alloc(nb * 16)
@@ -1169,12 +1190,12 @@ fn lower(m: *mut parse.Module, prog: u64, maxpc: usize, info: *mut LowerInfo) ->
                     if tab((*l).uses, rid) == 0 { release(l, rid) }
                 }
             }
-            if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE {
+            if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE || op == spv.OP_KILL {
                 end_block(l)
                 in_block = false
             }
         }
-        else if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE {
+        else if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE || op == spv.OP_KILL {
             end_block(l)
         }
         i = i + 1
@@ -1186,6 +1207,8 @@ fn lower(m: *mut parse.Module, prog: u64, maxpc: usize, info: *mut LowerInfo) ->
     (*info).peak_reg = (*l).peak
     (*info).nsample = (*l).nsample
     (*info).nsel = (*l).nsel
+    (*info).nkill = (*l).nkill
+    (*info).ntex = (*l).ntex
     rt.heap_free((*l).rrefs, 64 * 4)
     rt.heap_free((*l).vreg, nb * 16)
     rt.heap_free((*l).vn, nb * 4)

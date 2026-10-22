@@ -24,7 +24,7 @@ import jobs.jobs
 
 export {
     Frame, frame_new, frame_free, frame_clear, frame_setup, frame_draw, frame_hash, frame_pixel,
-    frame_stat_pixels, frame_set_program, frame_set_texture, vtx_put,
+    frame_stat_pixels, frame_set_program, frame_set_texture, frame_set_texture_slot, frame_set_kills, vtx_put,
     MODE_NATIVE0, MODE_VM, MODE_NATIVE1, MODE_COUNT, LANES, VSTRIDE, BAND,
     ld_f32, st_f32,
 }
@@ -38,6 +38,10 @@ const MODE_NATIVE1: i32 = 2
 const MODE_COUNT: i32 = 3
 const NREG: usize = 64 // 32 before the SPIR-V lowering (lib/spirv/lower.fi needs room)
 const REC: usize = 48 // words per triangle record
+const KF_OFF: usize = NREG * LANES * 4 + LANES * 4 + 256 // per lane discard flags (u32)
+const ZS_OFF: usize = KF_OFF + LANES * 4 // per lane depth waiting for the late write (f32)
+const WORK: usize = ZS_OFF + LANES * 4
+const NSLOT: usize = 4 // texture slots; slot 0 is Frame.tex
 
 struct Frame {
     w: i32,
@@ -57,6 +61,8 @@ struct Frame {
     stats: u64, // u64 [bands] shaded pixels
     nbands: i32,
     jobs: u64, // *mut jobs.Jobs or 0 (single thread)
+    kills: bool, // the program may discard: depth is written after shading, only for the lanes that survived
+    xtex: u64, // slots 1..3: u64 triples (pixels, w, h)
 }
 
 fn ld_f32(p: u64, i: usize) -> f32 {
@@ -95,6 +101,9 @@ fn frame_new(w: i32, h: i32, max_tri: i32) -> *mut Frame {
     (*f).nbands = (h + BAND - 1) / BAND
     (*f).stats = rt.heap_alloc(((*f).nbands as usize) * 8)
     (*f).jobs = 0 as u64
+    (*f).kills = false
+    (*f).xtex = rt.heap_alloc((NSLOT - 1) * 24)
+    rt.mem_set((*f).xtex, 0 as u8, (NSLOT - 1) * 24)
     return f
 }
 
@@ -102,6 +111,7 @@ fn frame_free(f: *mut Frame) {
     rt.heap_free((*f).color, ((*f).w as usize) * ((*f).h as usize) * 4)
     rt.heap_free((*f).depth, ((*f).w as usize) * ((*f).h as usize) * 4)
     rt.heap_free((*f).stats, ((*f).nbands as usize) * 8)
+    rt.heap_free((*f).xtex, (NSLOT - 1) * 24)
 }
 
 fn frame_set_texture(f: *mut Frame, tex: u64, tw: i32, th: i32) {
@@ -112,6 +122,22 @@ fn frame_set_texture(f: *mut Frame, tex: u64, tw: i32, th: i32) {
 
 fn frame_set_program(f: *mut Frame, prog: u64) {
     (*f).prog = prog
+}
+
+fn frame_set_kills(f: *mut Frame, on: bool) {
+    (*f).kills = on
+}
+
+fn frame_set_texture_slot(f: *mut Frame, slot: usize, tex: u64, tw: i32, th: i32) {
+    if slot == 0 {
+        frame_set_texture(f, tex, tw, th)
+        return
+    }
+    if slot >= NSLOT { return }
+    let b: usize = (slot - 1) * 3
+    rt.st64((*f).xtex, b, tex)
+    rt.st64((*f).xtex, b + 1, tw as u64)
+    rt.st64((*f).xtex, b + 2, th as u64)
 }
 
 fn frame_pixel(f: *mut Frame, x: i32, y: i32) -> u32 {
@@ -345,6 +371,18 @@ fn texel(f: *mut Frame, u: f32, v: f32) -> u32 {
     return rt.ld32((*f).tex, (ty as usize) * ((*f).tw as usize) + (tx as usize))
 }
 
+fn texel_slot(f: *mut Frame, slot: usize, u: f32, v: f32) -> u32 {
+    if slot == 0 { return texel(f, u, v) }
+    let b: usize = (slot - 1) * 3
+    let tp: u64 = rt.ld64((*f).xtex, b)
+    if tp == 0 as u64 { return 0 as u32 }
+    let tw: i32 = rt.ld64((*f).xtex, b + 1) as i32
+    let th: i32 = rt.ld64((*f).xtex, b + 2) as i32
+    let tx: i32 = floor_i32(u * (tw as f32)) & (tw - 1)
+    let ty: i32 = floor_i32(v * (th as f32)) & (th - 1)
+    return rt.ld32(tp, (ty as usize) * (tw as usize) + (tx as usize))
+}
+
 // lane l of register r
 fn rg(base: u64, r: usize, l: usize) -> u64 {
     return base + ((r * LANES + l) as u64) * (4 as u64)
@@ -450,14 +488,14 @@ fn op_rcp(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(p
 #[no_inline]
 fn op_sqrt(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.sqrt32(ld_f32(pa, l))); l = l + 1 } }
 #[no_inline]
-fn op_sample(f: *mut Frame, pd: u64, pa: u64, pb: u64, n: usize) {
+fn op_sample(f: *mut Frame, pd: u64, pa: u64, pb: u64, slot: usize, n: usize) {
     let k: f32 = 1.0f / 255.0f
     let p1: u64 = pd + ((LANES * 4) as u64)
     let p2: u64 = p1 + ((LANES * 4) as u64)
     let p3: u64 = p2 + ((LANES * 4) as u64)
     var l: usize = 0
     while l < n {
-        let tp: u32 = texel(f, ld_f32(pa, l), ld_f32(pb, l))
+        let tp: u32 = texel_slot(f, slot, ld_f32(pa, l), ld_f32(pb, l))
         st_f32(pd, l, ((tp & 255 as u32) as f32) * k)
         st_f32(p1, l, (((tp >> 8 as u32) & 255 as u32) as f32) * k)
         st_f32(p2, l, (((tp >> 16 as u32) & 255 as u32) as f32) * k)
@@ -505,6 +543,11 @@ fn op_log2(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(
 fn op_sin(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.sin(ld_f32(pa, l) as f64) as f32); l = l + 1 } }
 #[no_inline]
 fn op_cos(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.cos(ld_f32(pa, l) as f64) as f32); l = l + 1 } }
+#[no_inline]
+fn op_kill(kf: u64, pa: u64, n: usize) {
+    var l: usize = 0
+    while l < n { if ld_f32(pa, l) != 0.0f { rt.st32(kf, l, 1 as u32) }; l = l + 1 }
+}
 // FragCoord.xy -> r6, r7 (pixel centre)
 #[no_inline]
 fn fill_frag(base: u64, xs: u64, y: i32, n: usize) {
@@ -520,7 +563,10 @@ fn fill_frag(base: u64, xs: u64, y: i32, n: usize) {
 #[no_inline]
 fn out_pack(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
     var l: usize = 0
+    let kf: u64 = base + (KF_OFF as u64)
+    let kills: bool = (*f).kills
     while l < n {
+        if kills && rt.ld32(kf, l) != 0 as u32 { l = l + 1; continue }
         let x: usize = rt.ld32(xs, l) as usize
         rt.st32((*f).color, (y as usize) * ((*f).w as usize) + x,
             pack_unit(ld_f32(rg(base, 8, l), 0)) | (pack_unit(ld_f32(rg(base, 9, l), 0)) << 8 as u32)
@@ -530,6 +576,7 @@ fn out_pack(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
 }
 
 // instruction = 5 u32 (op, d, a, b, c); every op runs over n lanes (dispatch cost / n)
+// 26 KILL(a = lane predicate; killed lanes write no colour, and no depth when Frame.kills)  SAMPLE slot = operand c
 // ops: 0 END 1 MOV 2 ADD 3 SUB 4 MUL 5 MAD 6 MIN 7 MAX 8 SAT 9 LDC(d, bits in a) 10 RCP 11 SQRT 12 SAMPLE(d..d+3 = tex(a, b))
 // 13 DIV 14 ABS 15 FLOOR 16 RSQ 17 CLT 18 CLE 19 CEQ (1.0/0.0) 20 SEL(d = c!=0 ? a : b) 21 NEG 22 EXP2 23 LOG2 24 SIN 25 COS
 // inputs: r0 u, r1 v, r2..r5 colour, r6 x+0.5, r7 y+0.5
@@ -562,7 +609,7 @@ fn shade_vm(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
         else if op == 9 as u32 { op_ldc(pd, a, n) }
         else if op == 10 as u32 { op_rcp(pd, pa, n) }
         else if op == 11 as u32 { op_sqrt(pd, pa, n) }
-        else if op == 12 as u32 { op_sample(f, pd, pa, pb, n) }
+        else if op == 12 as u32 { op_sample(f, pd, pa, pb, c as usize, n) }
         else if op == 13 as u32 { op_div(pd, pa, pb, n) }
         else if op == 14 as u32 { op_abs(pd, pa, n) }
         else if op == 15 as u32 { op_floor(pd, pa, n) }
@@ -576,6 +623,7 @@ fn shade_vm(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
         else if op == 23 as u32 { op_log2(pd, pa, n) }
         else if op == 24 as u32 { op_sin(pd, pa, n) }
         else if op == 25 as u32 { op_cos(pd, pa, n) }
+        else if op == 26 as u32 { op_kill(base + (KF_OFF as u64), pa, n) }
         else { run = false }
     }
     out_pack(f, base, xs, y, n)
@@ -601,6 +649,30 @@ fn flush(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
             rt.st32((*f).color, idx, rt.ld32((*f).color, idx) + 1 as u32)
             l = l + 1
         }
+    }
+}
+
+// shade the batch, then (programs that may discard) write the depth of the surviving lanes
+#[no_inline]
+fn commit(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
+    if n == 0 { return }
+    if !(*f).kills {
+        flush(f, base, xs, y, n)
+        return
+    }
+    let kf: u64 = base + (KF_OFF as u64)
+    let zs: u64 = base + (ZS_OFF as u64)
+    var l: usize = 0
+    while l < n { rt.st32(kf, l, 0 as u32); l = l + 1 }
+    flush(f, base, xs, y, n)
+    if !(*f).depth_test { return }
+    l = 0
+    while l < n {
+        if rt.ld32(kf, l) == 0 as u32 {
+            let idx: usize = (y as usize) * ((*f).w as usize) + (rt.ld32(xs, l) as usize)
+            st_f32((*f).depth, idx, ld_f32(zs, l))
+        }
+        l = l + 1
     }
 }
 
@@ -696,6 +768,8 @@ fn band_tri(f: *mut Frame, r: u64, y0: i32, y1: i32, base: u64, xs: u64, rowc: u
                 j = j + 1
             }
             let dt: bool = (*f).depth_test
+            let late: bool = dt && (*f).kills
+            let zs: u64 = base + (ZS_OFF as u64)
             let cnt: bool = (*f).mode == 3
             var x: i64 = lo
             var nl: usize = 0
@@ -704,23 +778,26 @@ fn band_tri(f: *mut Frame, r: u64, y0: i32, y1: i32, base: u64, xs: u64, rowc: u
                 let z: f32 = (zb + zd * xf) as f32
                 let idx: usize = (y as usize) * wi + (x as usize)
                 var pass: bool = true
-                if dt {
+                if late {
+                    if z >= ld_f32((*f).depth, idx) { pass = false }
+                } else if dt {
                     if z < ld_f32((*f).depth, idx) { st_f32((*f).depth, idx, z) } else { pass = false }
                 }
                 if pass {
                     rt.st32(xs, nl, x as u32)
+                    if late { st_f32(zs, nl, z) }
                     nl = nl + 1
                     count = count + 1 as u64
                     if nl == LANES {
                         if !cnt { fill_attrs(base, xs, rowc, nl) }
-                        flush(f, base, xs, y as i32, nl)
+                        commit(f, base, xs, y as i32, nl)
                         nl = 0
                     }
                 }
                 x = x + 1 as i64
             }
             if !cnt { fill_attrs(base, xs, rowc, nl) }
-            flush(f, base, xs, y as i32, nl)
+            commit(f, base, xs, y as i32, nl)
         }
         y = y + 1 as i64
     }
@@ -730,7 +807,7 @@ fn band_tri(f: *mut Frame, r: u64, y0: i32, y1: i32, base: u64, xs: u64, rowc: u
 // job body: bands [lo, hi)
 fn band_job(ctx: u64, lo: u64, hi: u64) {
     let f: *mut Frame = ctx as *mut Frame
-    let base: u64 = rt.heap_alloc(NREG * LANES * 4 + LANES * 4 + 256)
+    let base: u64 = rt.heap_alloc(WORK)
     let xs: u64 = base + ((NREG * LANES * 4) as u64)
     let rowc: u64 = xs + ((LANES * 4) as u64)
     var b: u64 = lo
@@ -750,7 +827,7 @@ fn band_job(ctx: u64, lo: u64, hi: u64) {
         rt.st64((*f).stats, b as usize, shaded)
         b = b + 1 as u64
     }
-    rt.heap_free(base, NREG * LANES * 4 + LANES * 4 + 256)
+    rt.heap_free(base, WORK)
 }
 
 // draw all triangles of the vertex buffer; jobs_ptr = *mut jobs.Jobs as u64 (0 = this thread only)
