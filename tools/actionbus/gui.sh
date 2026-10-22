@@ -162,7 +162,7 @@ echo ==G-TRUST==
 act call settings.set key=lock.idle value=600 --as helper
 # 16 s and not 8: the 'n' comes from the host (after its waits and a photo);
 # on a loaded host it must still arrive before the question is asked again
-sleep 16
+sleep 30
 act call settings.get key=lock.idle
 echo ==G-TRUST2==
 act call settings.set key=lock.idle value=600 --as helper
@@ -378,18 +378,18 @@ if waitfor "==G-TRUST==" 90; then
     up0=$(awk '/^==G-TRUST==/{exit} /wm: trusted dialog up no=/{n++} END{print n+0}' "$TMPD/ser.txt")
     if waitfor "wm: trusted dialog up no=$((up0 + 1))" 20; then
         sleep 1.5
-        shot "$TMPD/9-trust.ppm"
         echo "sendkey n" > "$TMPD/kn.txt"
         python3 tools/wm/monitor.py "$SOCK" "$TMPD/kn.txt" > /dev/null 2>&1
+        shot "$TMPD/9-trust.ppm"
     else
         bad "no trusted dialog came up for the helper's change"
     fi
 fi
 if waitfor "==G-TRUST3==" 60; then
     sleep 1
-    shot "$TMPD/10-trust-still.ppm"
     echo "sendkey j" > "$TMPD/kj.txt"
     python3 tools/wm/monitor.py "$SOCK" "$TMPD/kj.txt" > /dev/null 2>&1
+    shot "$TMPD/10-trust-still.ppm"
     sleep 2
     shot "$TMPD/11-trust-done.ppm"
 fi
