@@ -5524,6 +5524,36 @@ fn is_devfb(state: u64, buf: u64, len: u64) -> bool {
     return true
 }
 
+// open("/proc/self/fd/N") of a memfd: Linux re-opens the same object (Firefox makes its read-only IPC shared memory this way:
+// memfd_create, open(/proc/self/fd/N, O_RDONLY), map). Returns the object index, or USHM_MAX when the path is anything else.
+fn procfd_shm(state: u64, me: u64, buf: u64, len: u64) -> u64 {
+    var pre: [u8; 16] = "/proc/self/fd/\0\0"
+    if len < 15 || len > 24 {
+        return unixsock.USHM_MAX
+    }
+    var i: u64 = 0
+    while i < 14 {
+        if kstate.get8(buf + i) != (pre[i as usize] as u64) {
+            return unixsock.USHM_MAX
+        }
+        i = i + 1
+    }
+    var n: u64 = 0
+    while i < len {
+        let c: u64 = kstate.get8(buf + i)
+        if c < 48 || c > 57 {
+            return unixsock.USHM_MAX
+        }
+        n = n * 10 + (c - 48)
+        i = i + 1
+    }
+    let of: u64 = of_of(state, me, n)
+    if of >= file.MAX_OPEN || file.open_kind(state, of) != file.K_SHM {
+        return unixsock.USHM_MAX
+    }
+    return file.open_ino(state, of)
+}
+
 fn open_devfb(state: u64, me: u64, flags: u64) -> u64 {
     if !gfx.fb_ready(state) {
         return neg(errno.E_NODEV)
@@ -6002,6 +6032,10 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64) -> u64 {
     // genau einer Stelle.
     if is_devfb(state, buf, len) {
         return open_devfb(state, me, flags)
+    }
+    let psh: u64 = procfd_shm(state, me, buf, len)
+    if psh < unixsock.USHM_MAX {
+        return open_devshm(state, me, psh, flags)
     }
     // ============ RUNDE MULTIUSER: DAS BETRETUNGSRECHT, VOR DER WEICHE
     //
@@ -7956,7 +7990,7 @@ fn big_hole(state: u64, me: u64, top: u64, pages: u64, prot: u64) -> u64 {
 fn lazy_bottom(state: u64, me: u64) -> u64 {
     let b: u64 = sched.tget(state, mem_owner(state, me), sched.T_LAZY)
     if b == 0 {
-        return proc.LAZY_TOP
+        return proc.LAZY_ATOP
     }
     return b
 }
@@ -8089,7 +8123,7 @@ fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> 
         return neg(errno.E_INVAL)
     }
     // RUNDE LIMITS3: a big PROT_NONE | MAP_NORESERVE mapping is a RESERVATION (JS engines, allocators): address space only, no frame.
-    if prot == 0 && (flags & MAP_NORESERVE) != 0 && (flags & MAP_FIXED) == 0 && len >= RES_MIN && len <= RES_MAX {
+    if prot == 0 && (flags & MAP_FIXED) == 0 && len >= RES_MIN && len <= RES_MAX {
         if pages <= LAZY_RESERVE_PAGES {
             let lr: u64 = lazy_alloc(state, me, pages, prot)
             if lr < 0xFFFFFFFFFFFFF000 {
@@ -8158,6 +8192,9 @@ fn map_fixed(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
     let in_gross: bool = addr >= big_bottom(state, me) && end <= proc.BIG_TOP
     let in_lazy: bool = addr >= proc.LAZY_BASE && end <= proc.LAZY_TOP
     if !in_alt && !in_gross && !in_lazy {
+        return neg(errno.E_NOMEM)
+    }
+    if addr >= RES_BASE && !res_covers(state, mem_owner(state, me), addr, pages * PAGE) {
         return neg(errno.E_NOMEM)
     }
     file_shm_flush_maps(state, me, addr, pages * PAGE, true)
@@ -8718,13 +8755,13 @@ fn map_fd(state: u64, me: u64, fd: u64, len: u64, prot: u64,
 // is a no-op, and `mprotect` to anything readable/writable inside a reservation is -ENOMEM: committing needs page tables above 4 GiB
 // (open, roadmap). The table lives in the task record of the memory owner: T_RESV (768) holds RES_SLOTS pairs (start, length),
 // T_RESNEXT (1008) the bump pointer. Adjacent new ranges are merged.
-const RES_BASE: u64 = 0x100000000
+const RES_BASE: u64 = 0x200000000
 const RES_TOP: u64 = 0x700000000000
 const RES_MIN: u64 = 0x4000000 // 64 MiB: smaller ones stay ordinary (eager) mappings
 const RES_MAX: u64 = 0x400000000 // 16 GiB per call
 const RES_SLOTS: u64 = 14
 const LAZY_MIN_PAGES: u64 = 256
-const LAZY_RESERVE_PAGES: u64 = 131072
+const LAZY_RESERVE_PAGES: u64 = 524288
 
 fn res_start(state: u64, owner: u64, k: u64) -> u64 {
     return sched.tget(state, owner, sched.T_RESV + k * 16)
@@ -8857,7 +8894,14 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
         return neg(errno.E_INVAL)
     }
     if addr >= RES_BASE {
-        return res_remove(state, mem_owner(state, me), addr, page_up(len))
+        let rl: u64 = page_up(len)
+        proc.range_drop(state, me, addr, addr + rl)
+        let owner: u64 = mem_owner(state, me)
+        let rr: u64 = res_remove(state, owner, addr, rl)
+        if addr + rl == sched.tget(state, owner, sched.T_RESNEXT) {
+            sched.tset(state, owner, sched.T_RESNEXT, addr)
+        }
+        return rr
     }
     // RUNDE K16: zwei Fenster statt einem.
     let in_alt: bool = addr >= map_bottom(state, me) && addr < MMAP_TOP
@@ -8880,7 +8924,7 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     }
     if in_lazy && addr == lazy_bottom(state, me) {
         var nb: u64 = end
-        if nb >= proc.LAZY_TOP {
+        if nb >= proc.LAZY_ATOP {
             nb = 0
         }
         sched.tset(state, mem_owner(state, me), sched.T_LAZY, nb)
@@ -9778,6 +9822,30 @@ fn user_word32(state: u64, me: u64, addr: u64) -> u64 {
 // rights afterwards"), so a PROT_NONE guard page could be read and a PROT_READ page written. Now the rights go into the page table:
 // read-write, read-only, none (the page stays, the user bit goes), execute. Linux answers -ENOMEM when a page of the range is not mapped,
 // and so does this (nothing is changed then). A page of a shared object that is read-only is not made writable (-EACCES).
+// mprotect inside a reservation: a page with an entry changes its rights, a page without one becomes a demand-zero page of that right
+// (PROT_NONE on a page without entry stays as it is).
+fn res_protect(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
+    var k: u64 = 0
+    while k < pages {
+        let a: u64 = addr + k * PAGE
+        if proc.page_mapped(state, me, a) {
+            let r: u64 = set_range_prot(state, me, a, 1, prot)
+            if r == 2 {
+                return neg(errno.E_ACCES)
+            }
+            if r != 0 {
+                return neg(errno.E_NOMEM)
+            }
+        } else if prot != 0 {
+            if !proc.lazy_mark(state, me, a, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0) {
+                return neg(errno.E_NOMEM)
+            }
+        }
+        k = k + 1
+    }
+    return 0
+}
+
 fn do_mprotect(state: u64, me: u64, addr: u64, len: u64, prot: u64) -> u64 {
     if (addr & 4095) != 0 {
         return neg(errno.E_INVAL)
@@ -9793,10 +9861,7 @@ fn do_mprotect(state: u64, me: u64, addr: u64, len: u64, prot: u64) -> u64 {
         if !res_covers(state, mem_owner(state, me), addr, page_up(len)) {
             return neg(errno.E_NOMEM)
         }
-        if prot == 0 {
-            return 0
-        }
-        return neg(errno.E_NOMEM)
+        return res_protect(state, me, addr, page_up(len) / PAGE, prot)
     }
     if len > 0x400000000 {
         return neg(errno.E_NOMEM)
@@ -18578,7 +18643,7 @@ fn mremap_lazy_grow(state: u64, me: u64, old_addr: u64, oldp: u64, newp: u64, ri
     let prot: u64 = rights_prot(rights)
     let old_end: u64 = old_addr + oldp * PAGE
     let extra: u64 = newp - oldp
-    var free_after: bool = old_end + extra * PAGE <= proc.LAZY_TOP
+    var free_after: bool = old_end + extra * PAGE <= proc.LAZY_ATOP
     var k: u64 = 0
     while free_after && k < extra {
         if proc.page_mapped(state, me, old_end + k * PAGE) {
@@ -18633,7 +18698,7 @@ fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, fla
         return old_addr
     }
     let rights: u64 = proc.page_rights(state, me, old_addr)
-    if old_addr >= proc.LAZY_BASE && old_addr + oldp * PAGE <= proc.LAZY_TOP {
+    if old_addr >= proc.LAZY_BASE && old_addr + oldp * PAGE <= proc.LAZY_ATOP {
         return mremap_lazy_grow(state, me, old_addr, oldp, newp, rights, (flags & 1) != 0)
     }
     if (flags & 1) == 0 {

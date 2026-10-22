@@ -64,7 +64,7 @@ export {
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
     IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS, STACK_FLOOR, grow_stack,
-    PRIV_SLOTS, MAIN_SLOTS, LAZY_BASE, LAZY_TOP, lazy_mark, lazy_fault, lazy_find, page_taken, BIG_TOP, BIG_FLOOR, SHM_ARENA_BASE, SHM_ARENA_TOP, demand_fault, pd_slot, pt_for, page_free,
+    PRIV_SLOTS, MAIN_SLOTS, LAZY_BASE, LAZY_TOP, LAZY_ATOP, range_drop, lazy_mark, lazy_fault, lazy_find, page_taken, BIG_TOP, BIG_FLOOR, SHM_ARENA_BASE, SHM_ARENA_TOP, demand_fault, pd_slot, pt_for, page_free,
     // ---- RUNDE SCHLAF (K-018, zweite Haelfte) ----
     frame_count, frame_at,
     // ---- RUNDE WACH (K-018, Abschluss: der Wiederanlauf) ----
@@ -200,8 +200,9 @@ const IMAGE_END: u64 = 0x40C00000 // CERTUS: war 0x40400000 (K16)
 // touched get a frame. The ordinary arena and the stack are unchanged. Base = 0x40000000 + 2 MiB * 155 (the main tiles).
 const MAIN_SLOTS: u64 = 475
 const LAZY_BASE: u64 = 0x80000000
-const LAZY_TOP: u64 = 0x100000000
-const PRIV_SLOTS: u64 = 1536
+const LAZY_ATOP: u64 = 0x200000000 // top of the bump arena; above it up to LAZY_TOP lie the reservations (RES_BASE) whose parts can be committed
+const LAZY_TOP: u64 = 0x1000000000
+const PRIV_SLOTS: u64 = 32256
 const PAGE_LAZY: u64 = 0x400
 const PAGE_LAZYX: u64 = 0x800
 const SHM_ARENA_BASE: u64 = 0x53600000
@@ -475,7 +476,7 @@ fn free_space(state: u64, i: u64) -> u64 {
     let pdpt: u64 = sched.tget(state, i, sched.T_PDPT)
     if pdpt != 0 {
         var j: u64 = 2
-        while j <= 3 {
+        while j <= 63 {
             let e2: u64 = read_entry(pdpt, j)
             if (e2 & PAGE_PRESENT) != 0 {
                 let pdx: u64 = e2 & ADDR_MASK
@@ -1095,11 +1096,41 @@ fn lazy_mark(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runn
     return true
 }
 
+// Drops every page of [start, end) that has an entry (a frame or a lazy marker); absent tables are skipped a tile or a GiB at a time.
+fn range_drop(state: u64, i: u64, start: u64, end: u64) {
+    var a: u64 = start
+    while a < end {
+        let k: u64 = pd_slot(a)
+        if k >= PRIV_SLOTS {
+            return
+        }
+        if k >= 512 {
+            let pdpt: u64 = sched.tget(state, i, sched.T_PDPT)
+            if pdpt == 0 || (read_entry(pdpt, 1 + (k >> 9)) & PAGE_PRESENT) == 0 {
+                a = ((a >> 30) + 1) << 30
+                continue
+            }
+        }
+        let tile_end: u64 = ((a >> 21) + 1) << 21
+        let pt: u64 = pt_for(state, i, a, false)
+        if pt != 0 {
+            var p: u64 = a
+            while p < tile_end && p < end {
+                if read_entry(pt, pt_slot(p)) != 0 {
+                    let _d: bool = page_drop(state, i, p)
+                }
+                p = p + 4096
+            }
+        }
+        a = tile_end
+    }
+}
+
 fn lazy_find(state: u64, i: u64, pages: u64) -> u64 {
     var run: u64 = 0
     var start: u64 = 0
     var tile: u64 = pd_slot(LAZY_BASE)
-    let last: u64 = pd_slot(LAZY_TOP - 1)
+    let last: u64 = pd_slot(LAZY_ATOP - 1)
     while tile <= last {
         let ta: u64 = USER_DATA + tile * USER_SPAN
         let pt: u64 = pt_for(state, i, ta, false)
@@ -2037,6 +2068,13 @@ fn copy_space(state: u64, from: u64, to: u64) -> u64 {
     // und dann ist diese Schleife genau die von damals.
     var kachel: u64 = 0
     while kachel < PRIV_SLOTS {
+        if kachel >= 512 && (kachel & 511) == 0 {
+            let pdpt_from: u64 = sched.tget(state, from, sched.T_PDPT)
+            if pdpt_from == 0 || (read_entry(pdpt_from, 1 + (kachel >> 9)) & PAGE_PRESENT) == 0 {
+                kachel = kachel + 512
+                continue
+            }
+        }
         let a: u64 = USER_DATA + kachel * USER_SPAN
         let s2: u64 = pt_for(state, from, a, false)
         if s2 != 0 {

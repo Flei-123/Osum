@@ -6,6 +6,8 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <stdint.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 
 #define PG 4096
@@ -215,6 +217,84 @@ int main(void)
         errno = 0;
         void *big = mmap(0, sizes[i], PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (big == MAP_FAILED) GAP(names[i], "mmap failed errno=%d", errno); else { PASS(names[i]); munmap(big, sizes[i]); }
+    }
+    /* ---- Firefox style: a 2 GiB reservation, a fixed commit inside it, mprotect on a second piece, release */
+    {
+        size_t rs = (size_t)2143289344u;
+        errno = 0;
+        char *rv = mmap(0, rs, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        CHECKC("reserve_2G", rv != MAP_FAILED);
+        if (rv != MAP_FAILED) {
+            errno = 0;
+            char *c = mmap(rv + 0x10000, 0x10000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+            CHECKC("reserve_fixed_commit", c == rv + 0x10000);
+            if (c == rv + 0x10000) {
+                c[0] = 5; c[0xFFFF] = 6;
+                CHECK("reserve_fixed_usable", c[0] == 5 && c[0xFFFF] == 6, "committed piece not usable");
+            }
+            errno = 0;
+            int rp = mprotect(rv + 0x40000, 0x20000, PROT_READ | PROT_WRITE);
+            CHECKC("reserve_mprotect_commit", rp == 0);
+            if (rp == 0) { rv[0x40000] = 7; rv[0x5FFFF] = 8; CHECK("reserve_mprotect_usable", rv[0x40000] == 7 && rv[0x5FFFF] == 8, "mprotect piece not usable"); }
+            CHECKC("reserve_unmap", munmap(rv, rs) == 0);
+        }
+    }
+    /* ---- Firefox IPC shared memory: memfd, then open(/proc/self/fd/N, O_RDONLY) and map that descriptor read-only */
+    {
+        errno = 0;
+        int mf = (int)syscall(319, "ub-ipc", 3u);
+        CHECKC("memfd_create", mf >= 0);
+        if (mf >= 0) {
+            CHECKC("memfd_ftruncate", ftruncate(mf, 3 * PG) == 0);
+            char *w = mmap(0, 3 * PG, PROT_READ | PROT_WRITE, MAP_SHARED, mf, 0);
+            CHECKC("memfd_map_rw", w != MAP_FAILED);
+            if (w != MAP_FAILED) w[2 * PG + 5] = 77;
+            char path[40];
+            snprintf(path, sizeof path, "/proc/self/fd/%d", mf);
+            errno = 0;
+            int ro = open(path, O_RDONLY | O_CLOEXEC);
+            CHECKC("procfd_reopen", ro >= 0);
+            if (w != MAP_FAILED) munmap(w, 3 * PG);
+            close(mf);
+            if (ro >= 0) {
+                errno = 0;
+                char *r = mmap(0, 3 * PG, PROT_READ, MAP_SHARED, ro, 0);
+                CHECKC("procfd_map_ro", r != MAP_FAILED);
+                if (r != MAP_FAILED) {
+                    CHECK("procfd_same_object", r[2 * PG + 5] == 77, "reopened descriptor sees other data (%d)", r[2 * PG + 5]);
+                    munmap(r, 3 * PG);
+                }
+                close(ro);
+            }
+        }
+    }
+    /* ---- Firefox rlbox/wasm2c style: 16 GiB PROT_NONE (no NORESERVE), trim to an 8 GiB aligned block, commit its start, release */
+    {
+        size_t big16 = (size_t)16 << 30, g8 = (size_t)8 << 30;
+        errno = 0;
+        char *a16 = mmap(0, big16, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECKC("reserve_16G", a16 != MAP_FAILED);
+        if (a16 != MAP_FAILED) {
+            uintptr_t al = ((uintptr_t)a16 + g8 - 1) & ~(uintptr_t)(g8 - 1);
+            if (al > (uintptr_t)a16) munmap(a16, al - (uintptr_t)a16);
+            size_t tail = (uintptr_t)a16 + big16 - (al + g8);
+            if (tail) munmap((void *)(al + g8), tail);
+            char *wb = (char *)al;
+            errno = 0;
+            int rp = mprotect(wb, 0x50000, PROT_READ | PROT_WRITE);
+            CHECKC("reserve_16G_commit", rp == 0);
+            if (rp == 0) {
+                wb[0] = 1; wb[0x4FFFF] = 2;
+                CHECK("reserve_16G_usable", wb[0] == 1 && wb[0x4FFFF] == 2 && wb[0x10000] == 0, "committed block not usable or not zero");
+                CHECK("reserve_16G_guard", faults_write(wb + 0x50000), "page behind the commit is writable");
+                CHECKC("reserve_16G_none", mprotect(wb, 0x10000, PROT_NONE) == 0 && faults_read(wb));
+            }
+            CHECKC("reserve_16G_unmap", munmap(wb, g8) == 0);
+            errno = 0;
+            char *again = mmap(0, big16, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            CHECKC("reserve_16G_again", again != MAP_FAILED);
+            if (again != MAP_FAILED) munmap(again, big16);
+        }
     }
     /* a committed 8 MiB buffer (a real frame, memory must exist) */
     errno = 0;
