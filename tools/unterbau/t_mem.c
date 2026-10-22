@@ -175,6 +175,39 @@ int main(void)
     errno = 0; r = mlock(a, PG);
     CHECKC("mlock_call", r == 0);
 
+    /* ---- lazy arena (1 MiB anonymous): mremap growth keeps touched pages, mprotect on untouched pages */
+    {
+        size_t lz = 256 * PG;
+        char *l = mmap(0, lz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECKC("lazy_mmap", l != MAP_FAILED);
+        if (l != MAP_FAILED) {
+            l[0] = 11; l[lz - 1] = 22;
+            errno = 0; r = mprotect(l + 10 * PG, 4 * PG, PROT_READ);
+            CHECKC("lazy_mprotect_ro", r == 0);
+            errno = 0; r = mprotect(l + 10 * PG, 4 * PG, PROT_READ | PROT_WRITE);
+            CHECKC("lazy_mprotect_rw", r == 0);
+            if (r == 0) { l[11 * PG] = 33; CHECK("lazy_mprotect_usable", l[11 * PG] == 33, "page not usable after mprotect"); }
+            errno = 0;
+            char *m = mremap(l, lz, 2 * lz, MREMAP_MAYMOVE);
+            CHECKC("lazy_mremap_grow", m != MAP_FAILED);
+            if (m != MAP_FAILED) {
+                CHECK("lazy_mremap_keeps", m[0] == 11 && m[lz - 1] == 22 && m[11 * PG] == 33, "touched pages lost (%d %d %d)", m[0], m[lz - 1], m[11 * PG]);
+                CHECK("lazy_mremap_zero", m[lz] == 0 && m[2 * lz - 1] == 0 && m[lz + 77 * PG] == 0, "grown area not zero");
+                m[2 * lz - 1] = 44;
+                CHECK("lazy_mremap_usable", m[2 * lz - 1] == 44, "grown area not writable");
+                errno = 0;
+                char *n = mremap(m, 2 * lz, 3 * lz, MREMAP_MAYMOVE);
+                CHECKC("lazy_mremap_grow2", n != MAP_FAILED);
+                if (n != MAP_FAILED) {
+                    CHECK("lazy_mremap_keeps2", n[0] == 11 && n[2 * lz - 1] == 44, "pages lost on second growth");
+                    errno = 0; r = mremap(n, 3 * lz, lz, 0) == (void *)n ? 0 : -1;
+                    CHECKC("lazy_mremap_shrink", r == 0);
+                    munmap(n, lz);
+                } else munmap(m, 2 * lz);
+            } else munmap(l, lz);
+        }
+    }
+
     /* ---- big reservations: how much address space can a process reserve (Firefox reserves GBs) */
     size_t sizes[] = { 64u << 20, 256u << 20, 1024u << 20 };
     const char *names[] = { "reserve_64M", "reserve_256M", "reserve_1G" };

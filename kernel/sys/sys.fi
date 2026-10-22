@@ -2818,6 +2818,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == UB_MADVISE {
         return do_madvise(state, me, a0, a1, a2)
     }
+    if number == UB_READAHEAD {
+        return 0
+    }
     if number == UB_MREMAP {
         unixsock.vm_lock(state, me)
         let mrr: u64 = do_mremap(state, me, a0, a1, a2, a3)
@@ -18234,6 +18237,7 @@ const UB_PPOLL: u64 = 271
 const UB_MREMAP: u64 = 25
 const UB_MSYNC: u64 = 26
 const UB_MADVISE: u64 = 28
+const UB_READAHEAD: u64 = 187
 const UB_MLOCK: u64 = 149
 const UB_MUNLOCK: u64 = 150
 const UB_MLOCKALL: u64 = 151
@@ -18553,6 +18557,59 @@ fn do_madvise(state: u64, me: u64, addr: u64, len: u64, advice: u64) -> u64 {
     return 0
 }
 
+// Rights bits of proc.page_rights (2 read, 4 write, 8 execute) as PROT_* bits.
+fn rights_prot(rights: u64) -> u64 {
+    var prot: u64 = 0
+    if (rights & 2) != 0 {
+        prot = PROT_READ
+    }
+    if (rights & 4) != 0 {
+        prot = prot | PROT_WRITE
+    }
+    if (rights & 8) != 0 {
+        prot = prot | PROT_EXEC
+    }
+    return prot
+}
+
+// mremap growth of a mapping in the lazy arena: first in place (the pages behind the mapping are free), else, with MREMAP_MAYMOVE, a
+// new lazy run; only pages that were touched are copied, the rest stays demand-zero.
+fn mremap_lazy_grow(state: u64, me: u64, old_addr: u64, oldp: u64, newp: u64, rights: u64, may_move: bool) -> u64 {
+    let prot: u64 = rights_prot(rights)
+    let old_end: u64 = old_addr + oldp * PAGE
+    let extra: u64 = newp - oldp
+    var free_after: bool = old_end + extra * PAGE <= proc.LAZY_TOP
+    var k: u64 = 0
+    while free_after && k < extra {
+        if proc.page_mapped(state, me, old_end + k * PAGE) {
+            free_after = false
+        }
+        k = k + 1
+    }
+    if free_after {
+        if lazy_run(state, me, old_end, extra, prot) {
+            return old_addr
+        }
+    }
+    if !may_move {
+        return neg(errno.E_NOMEM)
+    }
+    let base: u64 = lazy_alloc(state, me, newp, PROT_READ | PROT_WRITE)
+    if base >= 0xFFFFFFFFFFFFF000 {
+        return base
+    }
+    k = 0
+    while k < oldp {
+        let _c: bool = proc.page_copy(state, me, old_addr + k * PAGE, base + k * PAGE)
+        k = k + 1
+    }
+    if (prot & 3) != 3 {
+        let _r: u64 = set_range_prot(state, me, base, newp, prot)
+    }
+    let _d: u64 = do_unmap(state, me, old_addr, oldp * PAGE)
+    return base
+}
+
 // mremap: shrinking unmaps the tail; growing needs a new place (MREMAP_MAYMOVE): a new mapping is made, the pages are copied and the old
 // ones are given back. The rights of the first page carry over. MREMAP_FIXED / DONTUNMAP and growing in place are not supported (-EINVAL / -ENOMEM).
 fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, flags: u64) -> u64 {
@@ -18575,10 +18632,13 @@ fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, fla
         let _u: u64 = do_unmap(state, me, old_addr + newp * PAGE, (oldp - newp) * PAGE)
         return old_addr
     }
+    let rights: u64 = proc.page_rights(state, me, old_addr)
+    if old_addr >= proc.LAZY_BASE && old_addr + oldp * PAGE <= proc.LAZY_TOP {
+        return mremap_lazy_grow(state, me, old_addr, oldp, newp, rights, (flags & 1) != 0)
+    }
     if (flags & 1) == 0 {
         return neg(errno.E_NOMEM)
     }
-    let rights: u64 = proc.page_rights(state, me, old_addr)
     let base: u64 = map_alloc(state, me, newp, PROT_READ | PROT_WRITE)
     if base >= 0xFFFFFFFFFFFFF000 {
         return base
@@ -18588,16 +18648,7 @@ fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, fla
         let _c: bool = proc.page_copy(state, me, old_addr + k * PAGE, base + k * PAGE)
         k = k + 1
     }
-    var prot: u64 = 0
-    if (rights & 2) != 0 {
-        prot = PROT_READ
-    }
-    if (rights & 4) != 0 {
-        prot = prot | PROT_WRITE
-    }
-    if (rights & 8) != 0 {
-        prot = prot | PROT_EXEC
-    }
+    let prot: u64 = rights_prot(rights)
     if (prot & 3) != 3 {
         let _r: u64 = set_range_prot(state, me, base, newp, prot)
     }
