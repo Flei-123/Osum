@@ -102,6 +102,10 @@ isr\num:
     isr_plain 47
 
 isr_common:
+    testb $3, 24(%rsp)
+    jz 1f
+    swapgs
+1:
     pushq %rax
     pushq %rcx
     pushq %rdx
@@ -141,6 +145,10 @@ isr_common:
     popq %rcx
     popq %rax
     addq $16, %rsp                  /* vector number and error code */
+    testb $3, 8(%rsp)
+    jz 1f
+    swapgs
+1:
     iretq
 
 /* ------------------------------------------------------ system call ---
@@ -226,6 +234,7 @@ syscall_entry:
      * Handed to Firn: rdi = the number, rsi = the frame, rdx = the kernel
      * data area.
      */
+    swapgs
     movq %rsp, %gs:CPU_SYSRSP       /* the user stack -- no register is free */
     movq %gs:CPU_KSTACK, %rsp
     /* RUNDE VIELKERN 3: EIN BEFEHL, DER DEN BEWEIS FUEHRT.
@@ -290,6 +299,7 @@ user_return:
     popq %rcx                       /* the rip `sysret` returns to */
     popq %r11                       /* the flags it puts back */
     popq %rsp                       /* the user stack */
+    swapgs
     sysretq
 
 /* ------------------------------------------------- ring 3 and back ---
@@ -314,6 +324,7 @@ enter_user:
     movq %rdi, %rcx                 /* sysret takes the rip out of rcx */
     movq $0x202, %r11               /* rflags: reserved bit + IF */
     movq %rsi, %rsp                 /* the user stack */
+    swapgs
     sysretq
 
     .globl leave_user
@@ -419,6 +430,10 @@ user_iret:
     popq %rcx
     popq %rax
     addq $16, %rsp                  /* vector number and error code */
+    testb $3, 8(%rsp)
+    jz 1f
+    swapgs
+1:
     iretq
 
 /* --------------------------------- rdmsr/wrmsr MIT FAENGERPFAD ---

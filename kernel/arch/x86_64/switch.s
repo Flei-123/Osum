@@ -114,4 +114,5 @@ enter_user_task:
     xorl %r13d, %r13d
     xorl %r14d, %r14d
     xorl %r15d, %r15d
+    swapgs
     sysretq

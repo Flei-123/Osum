@@ -464,6 +464,8 @@ const L_PID: u64 = 32
 const L_MNT: u64 = 40
 const ARCH_SET_FS: u64 = 0x1002
 const ARCH_GET_FS: u64 = 0x1003
+const ARCH_SET_GS: u64 = 0x1001
+const ARCH_GET_GS: u64 = 0x1004
 
 // Und die drei, die Linux nicht hat, im Hunderterblock dieser Runde:
 //   1100 openpty(aus)   -> legt ein Paar aus Steuer- und Nutzerseite an
@@ -7883,6 +7885,21 @@ fn do_arch_prctl(state: u64, me: u64, code: u64, addr: u64) -> u64 {
         put64(state, me, addr, sched.tget(state, me, sched.T_FSBASE))
         return 0
     }
+    if code == ARCH_SET_GS {
+        if (addr >> 47) != 0 {
+            return neg(errno.E_INVAL)
+        }
+        sched.tset(state, me, sched.T_GSBASE, addr)
+        sched.fsbase_apply(state, me)
+        return 0
+    }
+    if code == ARCH_GET_GS {
+        if !proc.user_ok(state, me, addr, 8) {
+            return neg(errno.E_FAULT)
+        }
+        put64(state, me, addr, sched.tget(state, me, sched.T_GSBASE))
+        return 0
+    }
     return neg(errno.E_INVAL)
 }
 
@@ -9741,6 +9758,7 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
     // DER FADENZEIGER. Ohne ihn liest der neue Faden `%fs:0` des alten
     // -- und das ist der Fehler, den diese Runde bei `fork` schon einmal
     // gefunden hat.
+    sched.tset(state, faden, sched.T_GSBASE, sched.tget(state, me, sched.T_GSBASE))
     if (flags & CLONE_SETTLS) != 0 {
         sched.tset(state, faden, sched.T_FSBASE, tls)
     }
@@ -9954,6 +9972,8 @@ fn do_fork(state: u64, me: u64, frame: u64, stapel: u64) -> u64 {
     // zweite starb -- er las durch den Zeiger, bevor er ihn setzte.
     sched.tset(state, child, sched.T_FSBASE,
         sched.tget(state, me, sched.T_FSBASE))
+    sched.tset(state, child, sched.T_GSBASE,
+        sched.tget(state, me, sched.T_GSBASE))
     // The context the child comes back on. `proc.resume_start` hands this
     // copy to `user_resume` in isr.s.
     let ctx: u64 = state + kstate.CTX_OFF + child * F_BYTES
@@ -10151,6 +10171,8 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
     // Osum-eigene) %fs nie anfasst, im Fehlerfall durch einen Zeiger
     // auf fremde Seiten.
     sched.tset(state, me, sched.T_FSBASE, 0)
+    sched.tset(state, me, sched.T_GSBASE, 0)
+    sched.fsbase_apply(state, me)
     sched.tset(state, me, sched.T_BRK, 0)
     sched.tset(state, me, sched.T_MMAP, 0)
     sched.tset(state, me, sched.T_BIG, 0)

@@ -2,6 +2,9 @@
 #define TNAME "mem"
 #include "t.h"
 #include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <time.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -295,6 +298,44 @@ int main(void)
             CHECKC("reserve_16G_again", again != MAP_FAILED);
             if (again != MAP_FAILED) munmap(again, big16);
         }
+    }
+    {
+        char *gp = mmap(0, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECKC("gsbase_page", gp != MAP_FAILED);
+        if (gp != MAP_FAILED) {
+            *(volatile unsigned long *)gp = 0x5A5AA5A512345678UL;
+            long rs = syscall(SYS_arch_prctl, 0x1001, (unsigned long)gp);
+            CHECKC("gsbase_set", rs == 0);
+            if (rs == 0) {
+                unsigned long v = 0, back = 0;
+                __asm__ volatile("movq %%gs:0, %0" : "=r"(v));
+                CHECK("gsbase_read", v == 0x5A5AA5A512345678UL, "gs:0 = %lx", v);
+                int ok = 1;
+                for (int i = 0; i < 40; i++) {
+                    struct timespec ts = {0, 1000000};
+                    nanosleep(&ts, 0);
+                    __asm__ volatile("movq %%gs:0, %0" : "=r"(v));
+                    if (v != 0x5A5AA5A512345678UL) ok = 0;
+                }
+                CHECKC("gsbase_survives_syscalls_and_ticks", ok);
+                long rg = syscall(SYS_arch_prctl, 0x1004, (unsigned long)&back);
+                CHECK("gsbase_get", rg == 0 && back == (unsigned long)gp, "got %lx", back);
+                pid_t pid = fork();
+                if (pid == 0) {
+                    unsigned long cv = 0;
+                    __asm__ volatile("movq %%gs:0, %0" : "=r"(cv));
+                    _exit(cv == 0x5A5AA5A512345678UL ? 0 : 1);
+                }
+                int st = -1;
+                if (pid > 0) waitpid(pid, &st, 0);
+                CHECK("gsbase_inherited_by_fork", pid > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0, "status %d", st);
+                syscall(SYS_arch_prctl, 0x1001, 0UL);
+            }
+            munmap(gp, PG);
+        }
+        errno = 0;
+        long bad = syscall(SYS_arch_prctl, 0x1001, 0xFFFF800000000000UL);
+        CHECK("gsbase_noncanonical_einval", bad == -1 && errno == EINVAL, "ret %ld errno %d", bad, errno);
     }
     /* a committed 8 MiB buffer (a real frame, memory must exist) */
     errno = 0;
