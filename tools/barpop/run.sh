@@ -143,7 +143,8 @@ else
     [ "$d2" -le 40 ] && ok "after the pointer left the rectangle is as before ($d2 pixels differ; the clock may tick)" \
         || bad "the bubble is still there: $d2 pixels differ from the picture without it"
 fi
-grep -aq '^wlib: tip zu' "$S" && ok "the bubble was closed (\`wlib: tip zu\`)" || bad "no 'wlib: tip zu'"
+# not anchored: the wm's own serial line ("wm: termzei") can end right in front of it
+grep -aq 'wlib: tip zu' "$S" && ok "the bubble was closed (\`wlib: tip zu\`)" || bad "no 'wlib: tip zu'"
 # 3. the toast
 # not anchored at the line start: the shell's prompt ("osum$ ") shares the serial line and
 # lands in front of the bar's line when the two write at the same moment

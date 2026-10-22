@@ -1,0 +1,300 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import fuiscene
+import wlib
+
+export {
+    SLOTS, NONE, set_text, open, count, set_count, top, sel, set_sel, built, visible,
+    pick, key, wheel_poll, row_cb, scroll_to, key_of_row,
+}
+
+const SLOTS: u64 = 4
+const MAXV: u64 = 64
+const NONE: u64 = 4294967295
+const WHEEL_STEP: u64 = 3
+
+static mut v_n: [u64; 4] = [0 as u64; 4]
+static mut v_top: [u64; 4] = [0 as u64; 4]
+static mut v_sel: [u64; 4] = [4294967295 as u64; 4]
+static mut v_rowh: [u64; 4] = [24 as u64; 4]
+static mut v_view: [u64; 4] = [0 as u64; 4]
+static mut v_built: [u64; 4] = [0 as u64; 4]
+static mut v_key0: [u64; 4] = [0 as u64; 4]
+static mut v_open: [u64; 4] = [0 as u64; 4]
+static mut text_mem: [u8; 8] = [0 as u8; 8]
+static mut wheel_seen: u64 = 0
+
+fn text_slot() -> *mut fn(u64, u64) -> u64 {
+    return ((&text_mem[0 as usize]) as u64) as *mut fn(u64, u64) -> u64
+}
+
+fn set_text(f: fn(u64, u64) -> u64) {
+    *text_slot() = f
+}
+
+fn text_of(slot: u64, row: u64) -> u64 {
+    let f: fn(u64, u64) -> u64 = *text_slot()
+    return f(slot, row)
+}
+
+fn max_top(slot: u64) -> u64 {
+    if v_n[(slot) as usize] > v_view[(slot) as usize] {
+        return v_n[(slot) as usize] - v_view[(slot) as usize]
+    }
+    return 0
+}
+
+fn clamp(slot: u64) {
+    let mt: u64 = max_top(slot)
+    if v_top[(slot) as usize] > mt {
+        v_top[(slot) as usize] = mt
+    }
+    if v_sel[(slot) as usize] != NONE && v_sel[(slot) as usize] >= v_n[(slot) as usize] {
+        v_sel[(slot) as usize] = NONE
+    }
+}
+
+fn open(parent: usize, slot: u64, key0: u64, w: u64, h: u64, row_h: u64) -> usize {
+    if slot >= SLOTS || row_h == 0 {
+        return fuiscene.NONE
+    }
+    var view: u64 = h / row_h
+    if view > MAXV {
+        view = MAXV
+    }
+    if view == 0 {
+        view = 1
+    }
+    v_view[(slot) as usize] = view
+    v_rowh[(slot) as usize] = row_h
+    v_key0[(slot) as usize] = key0
+    v_open[(slot) as usize] = 1
+    clamp(slot)
+    let col: usize = fuiscene.column(parent)
+    fuiscene.set_gap(col, 0)
+    fuiscene.set_size(col, w, view * row_h)
+    var built_n: u64 = 0
+    while built_n < view && v_top[(slot) as usize] + built_n < v_n[(slot) as usize] {
+        let row: u64 = v_top[(slot) as usize] + built_n
+        let _t: usize = fuiscene.ftile_left(col, key0 + built_n, text_of(slot, row), 0, row_h,
+            (slot << 32) | row, row_cb)
+        built_n = built_n + 1
+    }
+    v_built[(slot) as usize] = built_n
+    return col
+}
+
+fn count(slot: u64) -> u64 {
+    return v_n[(slot) as usize]
+}
+
+fn set_count(slot: u64, n: u64) {
+    v_n[(slot) as usize] = n
+    clamp(slot)
+    fuiscene.refresh()
+}
+
+fn top(slot: u64) -> u64 {
+    return v_top[(slot) as usize]
+}
+
+fn sel(slot: u64) -> u64 {
+    return v_sel[(slot) as usize]
+}
+
+fn built(slot: u64) -> u64 {
+    return v_built[(slot) as usize]
+}
+
+fn visible(slot: u64) -> u64 {
+    return v_view[(slot) as usize]
+}
+
+fn key_of_row(slot: u64, row: u64) -> u64 {
+    if row < v_top[(slot) as usize] || row >= v_top[(slot) as usize] + v_built[(slot) as usize] {
+        return 0
+    }
+    return v_key0[(slot) as usize] + (row - v_top[(slot) as usize])
+}
+
+fn scroll_to(slot: u64, t: u64) {
+    var nt: u64 = t
+    let mt: u64 = max_top(slot)
+    if nt > mt {
+        nt = mt
+    }
+    if nt != v_top[(slot) as usize] {
+        v_top[(slot) as usize] = nt
+        fuiscene.refresh()
+    }
+}
+
+fn reveal(slot: u64, row: u64) {
+    let view: u64 = v_view[(slot) as usize]
+    if row < v_top[(slot) as usize] {
+        scroll_to(slot, row)
+    } else if row >= v_top[(slot) as usize] + view {
+        scroll_to(slot, row + 1 - view)
+    }
+}
+
+fn set_sel(slot: u64, row: u64) {
+    if row >= v_n[(slot) as usize] {
+        return
+    }
+    v_sel[(slot) as usize] = row
+    reveal(slot, row)
+    fuiscene.refresh()
+}
+
+fn pick(slot: u64, k: u64) -> u64 {
+    if slot >= SLOTS || v_open[(slot) as usize] == 0 {
+        return NONE
+    }
+    let k0: u64 = v_key0[(slot) as usize]
+    if k < k0 || k >= k0 + v_built[(slot) as usize] {
+        return NONE
+    }
+    let row: u64 = v_top[(slot) as usize] + (k - k0)
+    v_sel[(slot) as usize] = row
+    fuiscene.refresh()
+    return row
+}
+
+fn in_list(slot: u64, k: u64) -> bool {
+    let k0: u64 = v_key0[(slot) as usize]
+    return k >= k0 && k < k0 + v_built[(slot) as usize]
+}
+
+fn key(slot: u64, k: u64) -> bool {
+    if slot >= SLOTS || v_open[(slot) as usize] == 0 || v_n[(slot) as usize] == 0 {
+        return false
+    }
+    if k != wlib.KEY_UP && k != wlib.KEY_DOWN && k != wlib.KEY_PGUP && k != wlib.KEY_PGDN
+        && k != wlib.KEY_HOME && k != wlib.KEY_END {
+        return false
+    }
+    if !in_list(slot, fuiscene.focus_key()) {
+        return false
+    }
+    let n: u64 = v_n[(slot) as usize]
+    let view: u64 = v_view[(slot) as usize]
+    var cur: u64 = v_sel[(slot) as usize]
+    if cur == NONE {
+        cur = v_top[(slot) as usize]
+    }
+    var nx: u64 = cur
+    if k == wlib.KEY_UP {
+        if cur > 0 {
+            nx = cur - 1
+        }
+    } else if k == wlib.KEY_DOWN {
+        if cur + 1 < n {
+            nx = cur + 1
+        }
+    } else if k == wlib.KEY_PGUP {
+        if cur > view {
+            nx = cur - view
+        } else {
+            nx = 0
+        }
+    } else if k == wlib.KEY_PGDN {
+        nx = cur + view
+        if nx >= n {
+            nx = n - 1
+        }
+    } else if k == wlib.KEY_HOME {
+        nx = 0
+    } else {
+        nx = n - 1
+    }
+    v_sel[(slot) as usize] = nx
+    reveal(slot, nx)
+    fuiscene.refresh()
+    return true
+}
+
+fn wheel_poll(slot: u64) -> bool {
+    if slot >= SLOTS || v_open[(slot) as usize] == 0 || v_built[(slot) as usize] == 0 {
+        return false
+    }
+    let sq: u64 = fuiscene.wheel_seq()
+    if sq == wheel_seen {
+        return false
+    }
+    let first: usize = fuiscene.node_of_key(v_key0[(slot) as usize])
+    if first == fuiscene.NONE {
+        return false
+    }
+    let x: u64 = fuiscene.wheel_x()
+    let y: u64 = fuiscene.wheel_y()
+    let lx: u64 = fuiscene.node_x(first)
+    let ly: u64 = fuiscene.node_y(first)
+    let lw: u64 = fuiscene.node_w(first)
+    let lh: u64 = fuiscene.node_h(first) * v_built[(slot) as usize]
+    if x < lx || x >= lx + lw || y < ly || y >= ly + lh {
+        return false
+    }
+    wheel_seen = sq
+    let d: i64 = fuiscene.wheel_n()
+    var step: u64 = 0
+    if d > 0 {
+        step = (d as u64) * WHEEL_STEP
+        if step > v_top[(slot) as usize] {
+            scroll_to(slot, 0)
+        } else {
+            scroll_to(slot, v_top[(slot) as usize] - step)
+        }
+    } else if d < 0 {
+        step = ((0 - d) as u64) * WHEEL_STEP
+        scroll_to(slot, v_top[(slot) as usize] + step)
+    }
+    return true
+}
+
+fn row_cb(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
+    let slot: u64 = ud >> 32
+    let row: u64 = ud & 4294967295
+    let s: u64 = fuiscene.sp(1)
+    let selected: bool = v_sel[(slot) as usize] == row
+    if selected {
+        fuiscene.cv_round(x, y, w, h, 4 * s, fuiscene.R_FIELD)
+        fuiscene.cv_round(x + 2 * s, y + h / 2 - 7 * s, 3 * s, 14 * s, 2 * s, fuiscene.R_ACCENT)
+    }
+    if (st & fuiscene.TS_FOCUS) != 0 {
+        fuiscene.cv_ring(x, y, w, h, 4 * s, fuiscene.R_ACCENT)
+    }
+    var room: u64 = 0
+    if w > 28 * s {
+        room = w - 28 * s
+    }
+    fuiscene.text_role(x + 12 * s, y + h / 2 + 5 * s, room, text_of(slot, row), 13 * s, selected, fuiscene.R_TEXT)
+    thumb_paint(slot, row, x, y, w, h)
+}
+
+fn thumb_paint(slot: u64, row: u64, x: u64, y: u64, w: u64, h: u64) {
+    let n: u64 = v_n[(slot) as usize]
+    let view: u64 = v_view[(slot) as usize]
+    if n <= view {
+        return
+    }
+    let s: u64 = fuiscene.sp(1)
+    let track: u64 = view * h
+    var th: u64 = track * view / n
+    if th < 16 * s {
+        th = 16 * s
+    }
+    let ty: u64 = v_top[(slot) as usize] * (track - th) / (n - view)
+    let r0: u64 = (row - v_top[(slot) as usize]) * h
+    let r1: u64 = r0 + h
+    var a: u64 = ty
+    if a < r0 {
+        a = r0
+    }
+    var b: u64 = ty + th
+    if b > r1 {
+        b = r1
+    }
+    if a < b {
+        fuiscene.cv_round(x + w - 6 * s, y + (a - r0), 3 * s, b - a, s, fuiscene.R_MUTED)
+    }
+}
