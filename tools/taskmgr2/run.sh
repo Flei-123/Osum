@@ -241,6 +241,21 @@ if [ -n "$BWT" ] && [ -d "$BWT" ]; then
 fi
 
 echo
+echo "== 8. r1618: Alt+Left / Alt+Right walk the visited pages =="
+drive_nav() {
+    local tree=$1 out=$2 plan=$3
+    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+        app=/bin/taskmgr,melde,takt,500 wait=14 last=400 extra="wighalt=120" \
+        plan="$plan" > "$out.log" 2>&1 )
+}
+pages() { grep -a '^taskmgr: seite=' "$1" | sed -E 's/^taskmgr: seite=([0-9]+).*/\1/' | tr '\n' ' '; }
+drive_nav "$ROOT" "$TMPD/n" "$ROOT/tools/taskmgr2/nav.txt" || bad "build nav"
+SN="$TMPD/n/serial.txt"
+num "nav plan targets not found" "$(cnt "$TMPD/n/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+[ "$(pages "$SN")" = "1 4 1 0 1 4 " ] && ok "page sequence click 1, click 4, Alt+Left x3, Alt+Right x3 = 1 4 1 0 1 4" || bad "page sequence '$(pages "$SN")', expected '1 4 1 0 1 4 '"
+drive_nav "$ROOT" "$TMPD/n0" "$ROOT/tools/taskmgr2/nav0.txt" || true
+[ "$(pages "$TMPD/n0/serial.txt")" = "1 4 " ] && ok "counter-proof: plain Left/Right keys change no page (1 4)" || bad "counter-proof: pages '$(pages "$TMPD/n0/serial.txt")', expected '1 4 '"
+echo
 if [ "$fail" -eq 0 ]; then echo "TASKMGR2: $pass passed, 0 failed"; exit 0; fi
 echo "TASKMGR2: $pass passed, $fail FAILED"
 exit 1

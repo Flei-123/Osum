@@ -9,6 +9,7 @@
     klickplan.py <serial.txt> knopf             Mitte des Knopfes "beenden"
     klickplan.py <serial.txt> ja                Mitte des Ja-Knopfes des Dialogs
     klickplan.py <serial.txt> pidvon <name>     nur die PID ausgeben
+    klickplan.py <serial.txt> navpage <n>       Mitte der Zeile n der Seitenleiste
 
 Es gibt hier KEINE Anordnung. Jede Zahl steht im Mitschnitt, weil das
 Programm sie gemeldet hat:
@@ -32,6 +33,7 @@ RECT = re.compile(r"taskmgr: rect id=(\d+) kind=(\d+) x=(\d+) y=(\d+) "
                   r"w=(\d+) h=(\d+)")
 CTXRECT = re.compile(r"taskmgr: ctxrect x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TAB = re.compile(r"taskmgr: tabelle x=(\d+) y=(\d+) kopf=(\d+) zh=(\d+)")
+NAV = re.compile(r"taskmgr: nav x=(\d+) y=(\d+) w=(\d+)")
 SPALTE = re.compile(r"taskmgr: spalte c=(\d+) x=(\d+) w=(\d+)")
 ZEILE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
                    r"pm=(\d+) kib=(\d+) kern=(\d+) ticks=(\d+) grp=(\d+) "
@@ -212,6 +214,19 @@ def main(argv):
             raise SystemExit("klickplan: no search entry in the capture")
         bx = int(r.group(3)) + int(r.group(5)) // 2
         by = int(r.group(4)) + int(r.group(6)) // 2
+        print("%d,%d" % (cx + bx, cy + by))
+        return 0
+
+    if was == "navpage":
+        r = None
+        for z in zeilen:
+            m = NAV.search(z)
+            if m and r is None:
+                r = m
+        if r is None:
+            raise SystemExit("klickplan: no navigation line in the capture")
+        bx = int(r.group(1)) + int(r.group(3)) // 2
+        by = int(r.group(2)) + 40 * int(argv[3]) + 20
         print("%d,%d" % (cx + bx, cy + by))
         return 0
 
