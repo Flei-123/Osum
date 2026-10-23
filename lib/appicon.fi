@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/appicon.fi -- the ONE fallback icon of a program that has no symbol of its own.
+//
+// A program without /apps/<name>.osp/symbol used to show nothing in the bar and a bare coloured
+// square in the start menu.  Now every place asks this module: the same letters, the same colour,
+// the same rounded tile, so a program looks the same in the bar, the start menu, Alt+Tab and the
+// task manager.  The module is pure (pointers in, pointers out, no drawing, no globals): the caller
+// supplies the glyph pictures, because Ring 3 rasterises through wlibc and the compositor through ttf.
+//
+//   hash_of(name)        stable 32-bit hash of the lower-cased name
+//   color_of(name)       0xRRGGBB out of a fixed palette; white text on it has contrast >= 4.5
+//   letter_cp(name, k)   code point of letter k (0 = first word, 1 = first letter of the second word, else 0)
+//   init_tile(out, rgb)  writes an OSYM picture, 32x32, rounded tile with real anti-aliased alpha
+//   blend_cover(...)     lays a coverage picture (8 bit) in white over the tile
+//
+// The tile is an OSYM picture like every program symbol (size 32 = true alpha), so every consumer
+// that draws a bundle symbol draws this one with the same code.
+profile kernel
+
+import utf8
+
+export {
+    SIZE, BYTES, PAL_N, MAX_NAME,
+    hash_of, pal, color_of, letter_cp, init_tile, blend_cover, mask_alpha
+}
+
+const SIZE: u64 = 32
+const BYTES: u64 = 4108 // 12 + 32 * 32 * 4, the same number as appdir.SYMBYTES and taskbar.SYM_BYTES
+const PAL_N: u64 = 12
+const MAX_NAME: u64 = 23
+const INSET: u64 = 2
+const RADIUS: u64 = 6
+
+fn rd(p: u64, i: u64) -> u64 {
+    return (__mmio_read8((p +% i) as *mut u8)) as u64
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn name_len(name: u64) -> u64 {
+    var n: u64 = 0
+    while n < MAX_NAME && rd(name, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn hash_of(name: u64) -> u64 {
+    var h: u64 = 2166136261
+    var i: u64 = 0
+    let n: u64 = name_len(name)
+    while i < n {
+        h = ((h ^ lower(rd(name, i))) *% 16777619) & 0xFFFFFFFF
+        i = i + 1
+    }
+    return h
+}
+
+fn pal(i: u64) -> u64 {
+    if i == 0 {
+        return 0xB91C1C
+    }
+    if i == 1 {
+        return 0xC2410C
+    }
+    if i == 2 {
+        return 0xA16207
+    }
+    if i == 3 {
+        return 0x15803D
+    }
+    if i == 4 {
+        return 0x0F766E
+    }
+    if i == 5 {
+        return 0x0369A1
+    }
+    if i == 6 {
+        return 0x1D4ED8
+    }
+    if i == 7 {
+        return 0x4338CA
+    }
+    if i == 8 {
+        return 0x7E22CE
+    }
+    if i == 9 {
+        return 0xA21CAF
+    }
+    if i == 10 {
+        return 0xBE185D
+    }
+    return 0x475569
+}
+
+fn color_of(name: u64) -> u64 {
+    return pal(hash_of(name) % PAL_N)
+}
+
+fn is_sep(c: u64) -> bool {
+    return c == 32 || c == 45 || c == 95 || c == 46 || c == 47
+}
+
+fn upper_cp(c: u64) -> u64 {
+    if c >= 97 && c <= 122 {
+        return c - 32
+    }
+    return c
+}
+
+// The k-th letter of the tile: 0 = first character of the name, 1 = first character of the next
+// word (words are split at blank - _ . /).  0 when there is none.
+fn letter_cp(name: u64, k: u64) -> u64 {
+    let n: u64 = name_len(name)
+    var i: u64 = 0
+    while i < n && is_sep(rd(name, i)) {
+        i = i + 1
+    }
+    if i >= n {
+        return 0
+    }
+    if k == 0 {
+        return upper_cp(utf8.cp_of(utf8.next(name, n, i)))
+    }
+    while i < n && !is_sep(rd(name, i)) {
+        i = i + 1
+    }
+    while i < n && is_sep(rd(name, i)) {
+        i = i + 1
+    }
+    if i >= n {
+        return 0
+    }
+    return upper_cp(utf8.cp_of(utf8.next(name, n, i)))
+}
+
+// Coverage 0..255 of the pixel (x, y) of the rounded tile: 255 inside, 0 outside, a 4x4 sample
+// count on the four corner arcs.
+fn mask_alpha(x: u64, y: u64) -> u64 {
+    if x < INSET || y < INSET || x >= SIZE - INSET || y >= SIZE - INSET {
+        return 0
+    }
+    let lx: u64 = x - INSET
+    let ly: u64 = y - INSET
+    let box: u64 = SIZE - 2 * INSET
+    var cx: u64 = RADIUS
+    var cy: u64 = RADIUS
+    var corner: bool = false
+    if lx < RADIUS {
+        corner = true
+    } else if lx >= box - RADIUS {
+        corner = true
+        cx = box - RADIUS
+    }
+    var corner_y: bool = false
+    if ly < RADIUS {
+        corner_y = true
+    } else if ly >= box - RADIUS {
+        corner_y = true
+        cy = box - RADIUS
+    }
+    if !(corner && corner_y) {
+        return 255
+    }
+    var inside: u64 = 0
+    var sy: u64 = 0
+    while sy < 4 {
+        var sx: u64 = 0
+        while sx < 4 {
+            let px8: u64 = lx * 8 + sx * 2 + 1
+            let py8: u64 = ly * 8 + sy * 2 + 1
+            var dx: u64 = 0
+            if px8 > cx * 8 {
+                dx = px8 - cx * 8
+            } else {
+                dx = cx * 8 - px8
+            }
+            var dy: u64 = 0
+            if py8 > cy * 8 {
+                dy = py8 - cy * 8
+            } else {
+                dy = cy * 8 - py8
+            }
+            if dx * dx + dy * dy <= RADIUS * 8 * RADIUS * 8 {
+                inside = inside + 1
+            }
+            sx = sx + 1
+        }
+        sy = sy + 1
+    }
+    return inside * 255 / 16
+}
+
+// OSYM header + the rounded tile in `rgb`.  `out` must hold BYTES octets.
+fn init_tile(out: u64, rgb: u64) {
+    __mmio_write8((out) as *mut u8, 79 as u8)
+    __mmio_write8((out + 1) as *mut u8, 83 as u8)
+    __mmio_write8((out + 2) as *mut u8, 89 as u8)
+    __mmio_write8((out + 3) as *mut u8, 77 as u8)
+    __mmio_write32((out + 4) as *mut u32, SIZE as u32)
+    __mmio_write32((out + 8) as *mut u32, SIZE as u32)
+    var y: u64 = 0
+    while y < SIZE {
+        var x: u64 = 0
+        while x < SIZE {
+            let a: u64 = mask_alpha(x, y)
+            __mmio_write32((out + 12 + (y * SIZE + x) * 4) as *mut u32, ((a << 24) | (rgb & 0xFFFFFF)) as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// White over the tile where `data` (gw x gh coverage octets) says so, with its top-left corner at (gx, gy).
+fn blend_cover(out: u64, gx: u64, gy: u64, gw: u64, gh: u64, data: u64) {
+    var r: u64 = 0
+    while r < gh {
+        var c: u64 = 0
+        while c < gw {
+            let x: u64 = gx + c
+            let y: u64 = gy + r
+            if x < SIZE && y < SIZE {
+                let cov: u64 = rd(data, r * gw + c)
+                if cov != 0 {
+                    let at: u64 = out + 12 + (y * SIZE + x) * 4
+                    let v: u64 = (__mmio_read32((at) as *mut u32)) as u64
+                    if (v >> 24) != 0 {
+                        let pr: u64 = (v >> 16) & 255
+                        let pg: u64 = (v >> 8) & 255
+                        let pb: u64 = v & 255
+                        let nr: u64 = (pr * (255 - cov) + 255 * cov) / 255
+                        let ng: u64 = (pg * (255 - cov) + 255 * cov) / 255
+                        let nb: u64 = (pb * (255 - cov) + 255 * cov) / 255
+                        __mmio_write32((at) as *mut u32, (((v >> 24) << 24) | (nr << 16) | (ng << 8) | nb) as u32)
+                    }
+                }
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
