@@ -119,7 +119,7 @@ export {
     hd_vid, hd_pid, say, selftest, SELFTEST_MAX,
     DW_MAGIC, MAX_SLAVES, HDESC_DEFAULT, HDESC_OLD,
     poll_tick, simrun, simrun2, SIM_MM, SIM_MM2,
-    nctrl, ndev, find_ctrls, dev_ctrl, dev_adr, dev_slot
+    nctrl, ndev, find_ctrls, dev_ctrl, dev_adr, dev_slot, render
 }
 
 // Zwei Seiten aus dem Rest, den `kstate.fi` nach Merge 2 ausweist.
@@ -1086,6 +1086,212 @@ fn say_devs(state: u64) {
     }
 }
 
+// ======================================================================
+// W-TOUCH4: /proc/inputdevs -- what the input stack found, as text.
+// Head line (keys for hwinv): i2c_ctrls= i2c_devs= i2c_hung= i2c_aml= i2c_tables= hid_devs=
+// then one line per controller and per device, then one line per HID slot with a kind (USB and I2C).
+// A photo of `cat /proc/inputdevs` answers "why has the touch screen no events".
+static mut r_at: u64 = 0
+static mut r_cap: u64 = 0
+static mut r_out: u64 = 0
+
+fn r_c(c: u64) {
+    if r_at + 1 < r_cap {
+        kstate.set8(r_out + r_at, c as u8)
+        r_at = r_at + 1
+    }
+}
+
+fn r_s(p: u64) {
+    var i: u64 = 0
+    while kstate.get8(p + i) != 0 {
+        r_c(kstate.get8(p + i))
+        i = i + 1
+    }
+}
+
+fn r_dec(v: u64) {
+    var tmp: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        r_c(tmp[n as usize] as u64)
+    }
+}
+
+fn r_hex(v: u64, digits: u64) {
+    var i: u64 = digits
+    r_c(48)
+    r_c(120)
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            r_c(48 + d)
+        } else {
+            r_c(87 + d)
+        }
+    }
+}
+
+fn r_key(k: u64) {
+    r_c(32)
+    r_s(k)
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    var k_c: [u8; 11] = "i2c_ctrls=\0"
+    var k_d: [u8; 10] = "i2c_devs=\0"
+    var k_h: [u8; 10] = "i2c_hung=\0"
+    var k_a: [u8; 9] = "i2c_aml=\0"
+    var k_t: [u8; 12] = "i2c_tables=\0"
+    var k_g: [u8; 10] = "hid_devs=\0"
+    var k_ct: [u8; 5] = "ctrl\0"
+    var k_bdf: [u8; 5] = "bdf=\0"
+    var k_id: [u8; 4] = "id=\0"
+    var k_mm: [u8; 6] = "mmio=\0"
+    var k_st: [u8; 7] = "state=\0"
+    var k_to: [u8; 9] = "timeout=\0"
+    var k_ab: [u8; 7] = "abort=\0"
+    var k_pr: [u8; 8] = "probes=\0"
+    var k_dv: [u8; 4] = "dev\0"
+    var k_cr: [u8; 6] = "ctrl=\0"
+    var k_ad: [u8; 5] = "adr=\0"
+    var k_kd: [u8; 6] = "kind=\0"
+    var k_sl: [u8; 6] = "slot=\0"
+    var k_vi: [u8; 5] = "vid=\0"
+    var k_pi: [u8; 5] = "pid=\0"
+    var k_vv: [u8; 5] = "via=\0"
+    var k_fa: [u8; 7] = "fails=\0"
+    var k_rp: [u8; 6] = "reps=\0"
+    var k_hs: [u8; 4] = "hid\0"
+    var v_ok: [u8; 3] = "ok\0"
+    var v_hung: [u8; 5] = "hung\0"
+    var v_lost: [u8; 5] = "lost\0"
+    var v_none: [u8; 5] = "none\0"
+    var v_scan: [u8; 7] = "search\0"
+    var v_aml: [u8; 4] = "aml\0"
+    r_out = out
+    r_cap = cap
+    r_at = 0
+    var hung: u64 = 0
+    var c: u64 = 0
+    while c < nctrl() {
+        if ctg(c, CT_STATE) != 0 {
+            hung = hung + 1
+        }
+        c = c + 1
+    }
+    var hid_n: u64 = 0
+    var sl: u64 = 0
+    while sl < hidrep.MAX_DEV {
+        if hidrep.kind(state, sl) != 0 {
+            hid_n = hid_n + 1
+        }
+        sl = sl + 1
+    }
+    r_s((&k_c[0]) as u64)
+    r_dec(nctrl())
+    r_key((&k_d[0]) as u64)
+    r_dec(ndev())
+    r_key((&k_h[0]) as u64)
+    r_dec(hung)
+    r_key((&k_a[0]) as u64)
+    r_dec(tg(X_AML))
+    r_key((&k_t[0]) as u64)
+    r_dec(g(state, S_TABLES))
+    r_key((&k_g[0]) as u64)
+    r_dec(hid_n)
+    r_c(10)
+    c = 0
+    while c < nctrl() {
+        r_s((&k_ct[0]) as u64)
+        r_dec(c)
+        r_key((&k_bdf[0]) as u64)
+        r_hex(ctg(c, CT_BDF), 6)
+        r_key((&k_id[0]) as u64)
+        r_hex(ctg(c, CT_IDS), 8)
+        r_key((&k_mm[0]) as u64)
+        r_hex(ctg(c, CT_MMIO), 8)
+        r_key((&k_st[0]) as u64)
+        if ctg(c, CT_STATE) != 0 {
+            r_s((&v_hung[0]) as u64)
+        } else {
+            r_s((&v_ok[0]) as u64)
+        }
+        r_key((&k_to[0]) as u64)
+        r_dec(ctg(c, CT_TMO))
+        r_key((&k_ab[0]) as u64)
+        r_dec(ctg(c, CT_ABRT))
+        r_key((&k_pr[0]) as u64)
+        r_dec(ctg(c, CT_PROBES))
+        r_c(10)
+        c = c + 1
+    }
+    var j: u64 = 0
+    while j < ndev() {
+        r_s((&k_dv[0]) as u64)
+        r_dec(j)
+        r_key((&k_cr[0]) as u64)
+        r_dec(dvg(j, DV_CTRL))
+        r_key((&k_ad[0]) as u64)
+        r_hex(dvg(j, DV_ADR), 2)
+        r_key((&k_kd[0]) as u64)
+        r_dec(dvg(j, DV_KIND))
+        r_key((&k_sl[0]) as u64)
+        r_dec(hidrep.I2C_DEV_FIRST + j)
+        r_key((&k_vi[0]) as u64)
+        r_hex(dvg(j, DV_VID), 4)
+        r_key((&k_pi[0]) as u64)
+        r_hex(dvg(j, DV_PID), 4)
+        r_key((&k_st[0]) as u64)
+        let ds: u64 = dvg(j, DV_STATE)
+        if ds == 1 {
+            r_s((&v_ok[0]) as u64)
+        } else if ds == 2 {
+            r_s((&v_lost[0]) as u64)
+        } else {
+            r_s((&v_none[0]) as u64)
+        }
+        r_key((&k_vv[0]) as u64)
+        if dvg(j, DV_VIA) == 1 {
+            r_s((&v_aml[0]) as u64)
+        } else {
+            r_s((&v_scan[0]) as u64)
+        }
+        r_key((&k_fa[0]) as u64)
+        r_dec(dvg(j, DV_FAILS))
+        r_key((&k_rp[0]) as u64)
+        r_dec(dvg(j, DV_REPS))
+        r_c(10)
+        j = j + 1
+    }
+    sl = 0
+    while sl < hidrep.MAX_DEV {
+        let kd: u64 = hidrep.kind(state, sl)
+        if kd != 0 {
+            r_s((&k_hs[0]) as u64)
+            r_dec(sl)
+            r_key((&k_kd[0]) as u64)
+            r_dec(kd)
+            r_c(10)
+        }
+        sl = sl + 1
+    }
+    return r_at
+}
+
+
 // DER ERSATZWEG AN EINER TABELLE, VON DER MAN WEISS, WAS DRINSTEHT.
 //
 // Ohne ein Brett mit LPSS-I2C ist das die einzige Art, den Sucher zu
@@ -2033,4 +2239,23 @@ fn simrun2(state: u64) {
     serial.puts((&s_h[0]) as u64)
     serial.dec(jp)
     serial.nl()
+    // W-TOUCH4: the /proc/inputdevs text, one serial line per text line (the tables are still filled here).
+    var s_p: [u8; 12] = "inputdevs: \0"
+    let rn: u64 = render(state, buf(state), 3000)
+    var ri: u64 = 0
+    var fresh: bool = true
+    while ri < rn {
+        if fresh {
+            serial.puts((&s_p[0]) as u64)
+            fresh = false
+        }
+        let ch: u64 = kstate.get8(buf(state) + ri)
+        if ch == 10 {
+            serial.nl()
+            fresh = true
+        } else {
+            serial.put(ch as u8)
+        }
+        ri = ri + 1
+    }
 }
