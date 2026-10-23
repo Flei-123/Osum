@@ -62,10 +62,10 @@ wait
 for p in $PROGS; do
     [ -f "$OUT/$p.fail" ] || continue
     if [ "$(cat "$OUT/$p.fail")" = compile ]; then
-        echo "FEHLER: firnc$STUFE uebersetzt $p.fi nicht"
+        echo "ERROR: firnc$STUFE does not compile $p.fi"
         sed 's/^/    /' "$OUT/$p.err" | head -12
     else
-        echo "FEHLER: ld scheitert an $p"
+        echo "ERROR: ld fails on $p"
         sed 's/^/    /' "$OUT/$p.lderr" | head -8
     fi
     rc=1
