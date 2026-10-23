@@ -200,7 +200,8 @@ IMG="$OUT/${MARKE_DATEI}-usb.img"
 # Verweis, der bei jeder Umbenennung mitwandert, waere kein Verweis.
 IMG_ALT="$OUT/${MARKE_KURZ}-usb.img"
 
-sagen() { printf '   %s\n' "$*"; }
+ph() { printf '%s\t%s\n' "$SECONDS" "$*" >> "$OUT/phases.log"; }
+sagen() { printf '   %s\n' "$*"; ph "$*"; }
 fehler() { printf '== %s\n' "$*" >&2; exit 1; }
 
 for w in sgdisk mkfs.vfat mmd mcopy python3; do
@@ -211,8 +212,10 @@ done
 [ -f "$LIMINE/limine-bios.sys" ] || fehler "limine-bios.sys fehlt in $LIMINE"
 
 # ============================================================ 1. Kern
+: > "$OUT/phases.log"; ph start
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 \
     || fehler "der Uebersetzer laesst sich nicht bauen"
+ph fetch-firnc
 bash tools/build-kernel.sh "$OUT/osum.mb" --stufe "$STUFE" > "$OUT/k.log" 2>&1 \
     || { tail -20 "$OUT/k.log" >&2; fehler "der Kern laesst sich nicht bauen"; }
 sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
@@ -390,32 +393,70 @@ rc=0
 # Genau diese Unterscheidung trifft `tools/look/shot.sh` seit Runde 31,
 # und sie wird auch hier GELESEN und nicht getippt -- sonst stimmt sie
 # nach der naechsten Umstellung nicht mehr.
-for p in $PROGS; do
-    [ -f "kernel/user/$p.fi" ] || continue
-    PROF=""
-    CRT="$OUT/crt.o"
+. tools/kernel/buildcache.sh
+FIRNQ=""
+# Fallback: without FIRN_REPO, take the PINNED firn commit (vendor/firn/COMMIT) from a
+# local firn clone via git archive -- NOT the moving ../firn HEAD, which firnc0 may not compile.
+if [ -z "${FIRN_REPO:-}" ] && [ -f vendor/firn/COMMIT ]; then
+    PINC=$(head -n1 vendor/firn/COMMIT | tr -dc '0-9a-f')
+    for g in /root/firn "$ROOT/../firn" "$ROOT/../../firn"; do
+        if [ -n "$PINC" ] && [ -d "$g/.git" ] && git -C "$g" cat-file -e "$PINC^{commit}" 2>/dev/null; then
+            FIRN_REPO="$OUT/firnpin"; mkdir -p "$FIRN_REPO"
+            git -C "$g" archive "$PINC" | tar -x -C "$FIRN_REPO" && break
+            FIRN_REPO=""
+        fi
+    done
+fi
+for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn"; do
+    [ -n "$k" ] && [ -f "$k/bin/firnc1.fi" ] && FIRNQ=$(cd "$k" && pwd) && break
+done
+firnc_osum_job() {
+    local cc_abs="$ROOT/$CC" rootp
+    rootp=$(cd "$FIRNQ" && pwd -P)
+    rm -f "$OUT/firnc-osum.fail"
+    if ( cd "$rootp" && ROOT="$rootp" BC_GEBAUT="$ROOT/vendor/firn/.gebaut" BC_LIST_HASH="" FIRNLIB="$rootp/lib" \
+            bc_cc "$OUT/firnc-osum.o" bin/firnc1.fi "$cc_abs" ) > "$OUT/firnc-osum.err" 2>&1 \
+       && ld $GCS -T kernel/user/user.ld -o "$OUT/firnc.elf" "$OUT/firnc-osum.o" \
+            2>> "$OUT/firnc-osum.err"; then
+        strip --strip-all "$OUT/firnc.elf"
+    else
+        echo fail > "$OUT/firnc-osum.fail"
+    fi
+}
+ph progs-start
+BUILD_JOBS=$(bc_jobs)
+export BC_STATS="$OUT/bcache.log"; : > "$BC_STATS"
+bc_prepare "$CC"
+JOB_PIDS=()
+FIRNC_PID=""
+if [ -n "$FIRNQ" ]; then firnc_osum_job & FIRNC_PID=$!; fi
+# W-BUILD: the programs compile in parallel (OSUM_BUILD_JOBS, default 6) inside THIS ONE heavy slot, and each
+# object goes through the shared cache (tools/kernel/buildcache.sh bc_cc; OSUM_BUILD_CACHE=off = plain compile).
+build_prog() {
+    local p=$1 PROF="" CRT="$OUT/crt.o"
     if grep -qa '^profile app' "kernel/user/$p.fi"; then
         PROF="--profile=app"
         CRT=""
     fi
-    # `-c` NUR UEBERSETZEN, NICHT BINDEN. Ohne das versucht firnc im
-    # Profil `app` gleich zu binden und sagt dann "input file is the
-    # same as output file" -- im Profil `kernel` faellt das nicht auf,
-    # weil dort ohnehin nur ein Objekt entsteht.
-    if ! "$CC" $PROF $OPTL -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
-        echo "== $p: der Uebersetzer sagt nein" >&2; head -20 "$OUT/$p.err" >&2
-        rc=1; continue
+    # `-c` only translates, never links (see bc_cc): in profile `app` firnc would otherwise try to link.
+    if ! bc_cc "$OUT/$p.o" "kernel/user/$p.fi" "$CC" $PROF $OPTL > "$OUT/$p.err" 2>&1; then
+        echo "compile" > "$OUT/$p.fail"; return
     fi
     if ! ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY="_F$STUFE.u_start" \
             -o "$OUT/$p.elf" $CRT "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
-        echo "== $p: der Binder sagt nein" >&2; head -12 "$OUT/$p.lderr" >&2
-        rc=1; continue
+        echo "link" > "$OUT/$p.fail"; return
     fi
     strip --strip-all "$OUT/$p.elf"
-    gebaut="$gebaut $p"
+}
+built_list=""
+for p in $PROGS; do
+    [ -f "kernel/user/$p.fi" ] || continue
+    rm -f "$OUT/$p.fail"
+    while [ "$(jobs -rp | wc -l)" -ge "$((BUILD_JOBS + 1))" ]; do wait -n; done
+    build_prog "$p" &
+    JOB_PIDS+=($!)
+    built_list="$built_list $p"
 done
-[ "$rc" = 0 ] || fehler "die Programme lassen sich nicht bauen"
-sagen "programme   $(echo $gebaut | wc -w) Stueck"
 
 # ------------------------------------------------ 2b. die zwei Apps
 #
@@ -433,21 +474,51 @@ sagen "programme   $(echo $gebaut | wc -w) Stueck"
 # so aus:
 #     error: cannot read 'kernel/app/libc/dns.fi'  --> fetch.fi:88
 gebaut_app=""
-for p in $APPS; do
-    [ -f "kernel/app/$p.fi" ] || continue
-    if ! FIRNLIB="$ROOT/lib" "$CC" $OPTL -c --profile=app \
-            -o "$OUT/app-$p.o" "kernel/app/$p.fi" > "$OUT/app-$p.err" 2>&1; then
-        echo "== $p (app): der Uebersetzer sagt nein" >&2
-        head -20 "$OUT/app-$p.err" >&2
-        fehler "die Apps lassen sich nicht bauen"
+build_app() {
+    local p=$1
+    if ! FIRNLIB="$ROOT/lib" bc_cc "$OUT/app-$p.o" "kernel/app/$p.fi" "$CC" $OPTL --profile=app \
+            > "$OUT/app-$p.err" 2>&1; then
+        echo compile > "$OUT/app-$p.fail"; return
     fi
     if ! ld $GCS -T kernel/user/user.ld -o "$OUT/$p.elf" "$OUT/app-$p.o" \
             2> "$OUT/app-$p.lderr"; then
-        echo "== $p (app): der Binder sagt nein" >&2
-        head -12 "$OUT/app-$p.lderr" >&2
-        fehler "die Apps lassen sich nicht binden"
+        echo link > "$OUT/app-$p.fail"; return
     fi
     strip --strip-all "$OUT/$p.elf"
+}
+for p in $APPS; do
+    [ -f "kernel/app/$p.fi" ] || continue
+    rm -f "$OUT/app-$p.fail"
+    while [ "$(jobs -rp | wc -l)" -ge "$((BUILD_JOBS + 1))" ]; do wait -n; done
+    build_app "$p" &
+    apps_list="${apps_list:-} $p"
+    JOB_PIDS+=($!)
+done
+wait "${JOB_PIDS[@]}"
+for p in $built_list; do
+    if [ -f "$OUT/$p.fail" ]; then
+        if [ "$(cat "$OUT/$p.fail")" = compile ]; then
+            echo "== $p: der Uebersetzer sagt nein" >&2; head -20 "$OUT/$p.err" >&2
+        else
+            echo "== $p: der Binder sagt nein" >&2; head -12 "$OUT/$p.lderr" >&2
+        fi
+        rc=1; continue
+    fi
+    gebaut="$gebaut $p"
+done
+ph progs-done
+[ "$rc" = 0 ] || fehler "die Programme lassen sich nicht bauen"
+sagen "programme   $(echo $gebaut | wc -w) Stueck"
+for p in ${apps_list:-}; do
+    if [ -f "$OUT/app-$p.fail" ]; then
+        if [ "$(cat "$OUT/app-$p.fail")" = compile ]; then
+            echo "== $p (app): der Uebersetzer sagt nein" >&2; head -20 "$OUT/app-$p.err" >&2
+            fehler "die Apps lassen sich nicht bauen"
+        else
+            echo "== $p (app): der Binder sagt nein" >&2; head -12 "$OUT/app-$p.lderr" >&2
+            fehler "die Apps lassen sich nicht binden"
+        fi
+    fi
     gebaut="$gebaut $p"
     gebaut_app="$gebaut_app $p"
 done
@@ -485,28 +556,9 @@ export FIRNLIB="$ROOT/lib"
 # WENN DIE QUELLE FEHLT, ist das kein Abbruch: der Stick ist ohne
 # Uebersetzer schlechter, aber nicht kaputt. Dann sagt diese Stelle,
 # dass er fehlt, und der Rest laeuft weiter.
-FIRNQ=""
-# Fallback: without FIRN_REPO, take the PINNED firn commit (vendor/firn/COMMIT) from a
-# local firn clone via git archive -- NOT the moving ../firn HEAD, which firnc0 may not compile.
-if [ -z "${FIRN_REPO:-}" ] && [ -f vendor/firn/COMMIT ]; then
-    PINC=$(head -n1 vendor/firn/COMMIT | tr -dc '0-9a-f')
-    for g in /root/firn "$ROOT/../firn" "$ROOT/../../firn"; do
-        if [ -n "$PINC" ] && [ -d "$g/.git" ] && git -C "$g" cat-file -e "$PINC^{commit}" 2>/dev/null; then
-            FIRN_REPO="$OUT/firnpin"; mkdir -p "$FIRN_REPO"
-            git -C "$g" archive "$PINC" | tar -x -C "$FIRN_REPO" && break
-            FIRN_REPO=""
-        fi
-    done
-fi
-for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn"; do
-    [ -n "$k" ] && [ -f "$k/bin/firnc1.fi" ] && FIRNQ=$(cd "$k" && pwd) && break
-done
 if [ -n "$FIRNQ" ]; then
-    if ( cd "$FIRNQ" && FIRNLIB="$FIRNQ/lib" "$ROOT/$CC" -c \
-            -o "$OUT/firnc-osum.o" bin/firnc1.fi ) > "$OUT/firnc-osum.err" 2>&1 \
-       && ld $GCS -T kernel/user/user.ld -o "$OUT/firnc.elf" "$OUT/firnc-osum.o" \
-            2>> "$OUT/firnc-osum.err"; then
-        strip --strip-all "$OUT/firnc.elf"
+    wait "$FIRNC_PID"   # the background firnc compile (started with the programs) is done
+    if [ ! -f "$OUT/firnc-osum.fail" ]; then
         gebaut="$gebaut firnc"
         sagen "uebersetzer $(stat -c%s "$OUT/firnc.elf") Oktette (firnc aus $FIRNQ)"
     else
@@ -519,6 +571,7 @@ else
 fi
 
 # ================================================ 3. was sonst auf die Platte
+ph firnc-osum-done
 python3 tools/netview/icons.py bauen "$OUT/icons" > "$OUT/icons.log" 2>&1 \
     || { tail -10 "$OUT/icons.log" >&2; fehler "die Symbole lassen sich nicht bauen"; }
 SYMBOLE="state-nocarrier state-noip state-noroute state-online \
@@ -1445,6 +1498,7 @@ fi
 # LCSH: extra mkfs specs for gates (`<path>=<host file>` words, no blanks inside) -- e.g. tools/usbimg/bbsh.sh puts a musl test program on the stick
 # shellcheck disable=SC2206
 [ -n "${USBIMG_EXTRA:-}" ] && ARGS+=($USBIMG_EXTRA)
+ph pre-mkfs
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { tail -20 "$OUT/mkfs.log" >&2; fehler "mkfs.py fehlgeschlagen"; }
 sagen "wurzel      $(stat -c%s "$OUT/root.img") Oktette OFS v3"
