@@ -28,7 +28,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 MODES=${TRAYPOP_MODES:-"light dark"}
 PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc find du chmod id whoami touch true false sleep kill sort uniq rmdir theme locate dhcp host ping netstat notify"
 
-printf 'backup|7|Backup is running\nchat|8|Chat: 2 unread\nmic|1|0\n' > "$TMPD/tray.items"
+printf 'backup|7|Backup is running\nchat|8|Chat: 2 unread\nsync|9|Sync paused\nmic|1|0\n' > "$TMPD/tray.items"
 cat > "$TMPD/dreh.txt" <<'EOF'
 warteauf 'taskbar: steht|taskbar: geom' || 120
 warte 6
