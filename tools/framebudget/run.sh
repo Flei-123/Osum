@@ -16,7 +16,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 python3 -I tools/framebudget/judge.py --selftest && ok "judge selftest" || bad "judge selftest"
 export DESIGNBUILD="${DESIGNBUILD:-$OUT-build}"
-bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes extra="phases" halt="${HALT:-900}" drehbuch="$(pwd)/tools/framebudget/scenes.txt" > "$OUT.log" 2>&1
+bash tools/design/audit.sh "$OUT" accel=kvm uitrace="${FB_UITRACE:-yes}" extra="phases" halt="${HALT:-900}" drehbuch="$(pwd)/tools/framebudget/scenes.txt" > "$OUT.log" 2>&1
 S="$OUT/serial.txt"
 if [ ! -s "$S" ]; then bad "no serial output: $(tail -n 3 "$OUT.log" | tr '\n' ' ')"; echo "FRAMEBUDGET: $pass passed, $fail failed"; exit 1; fi
 python3 -I tools/framebudget/judge.py "$S" | tee "$OUT.verdict"

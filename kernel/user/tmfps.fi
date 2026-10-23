@@ -11,8 +11,18 @@ const BUF: u64 = 6144
 
 static mut raw: [u8; 6144] = [0 as u8; 6144]
 static mut raw_len: u64 = 0
-static mut w_avg: [u64; 32] = [0 as u64; 32]
+static mut w_pres: [u64; 32] = [0 as u64; 32]
 static mut w_pid: [u64; 32] = [0 as u64; 32]
+static mut w_rate: [u64; 32] = [0 as u64; 32]
+const RING: u64 = 4
+const WINDOW_MS: u64 = 1000
+const MIN_MS: u64 = 400
+const PUSH_MS: u64 = 500
+static mut s_t: [u64; 4] = [0 as u64; 4]
+static mut s_ok: [u64; 4] = [0 as u64; 4]
+static mut s_pres: [u64; 128] = [0 as u64; 128]
+static mut s_pid: [u64; 128] = [0 as u64; 128]
+static mut s_newest: u64 = 0
 
 fn known(v: u64) -> bool {
     return v != NA
@@ -70,13 +80,13 @@ fn skip_digits(at: u64) -> u64 {
     return v
 }
 
-fn refresh() {
+fn parse() {
     var k_win: [u8; 5] = "win.\0"
-    var k_avg: [u8; 13] = ".gap_avg_us \0"
+    var k_pres: [u8; 11] = ".presents \0"
     var k_pid: [u8; 6] = ".pid \0"
     var i: u64 = 0
     while i < SLOTS {
-        w_avg[i as usize] = 0
+        w_pres[i as usize] = 0
         w_pid[i as usize] = 0
         i = i + 1
     }
@@ -87,8 +97,8 @@ fn refresh() {
             let idx: u64 = digits_at(at + 4)
             let rest: u64 = skip_digits(at + 4)
             if idx < SLOTS {
-                if at_is(rest, (&k_avg[0]) as u64) {
-                    w_avg[idx as usize] = digits_at(rest + 13)
+                if at_is(rest, (&k_pres[0]) as u64) {
+                    w_pres[idx as usize] = digits_at(rest + 10)
                 } else if at_is(rest, (&k_pid[0]) as u64) {
                     w_pid[idx as usize] = digits_at(rest + 5)
                 }
@@ -101,14 +111,76 @@ fn refresh() {
     }
 }
 
+fn age_of(now_ms: u64, k: u64) -> u64 {
+    if s_ok[k as usize] == 0 || now_ms < s_t[k as usize] {
+        return 0
+    }
+    return now_ms - s_t[k as usize]
+}
+
+fn pick(now_ms: u64) -> u64 {
+    var best: u64 = NA
+    var best_age: u64 = 0
+    var j: u64 = 0
+    while j < RING {
+        let age: u64 = age_of(now_ms, j)
+        if age >= MIN_MS {
+            if best == NA {
+                best = j
+                best_age = age
+            } else if best_age < WINDOW_MS && age > best_age {
+                best = j
+                best_age = age
+            } else if age >= WINDOW_MS && age < best_age {
+                best = j
+                best_age = age
+            }
+        }
+        j = j + 1
+    }
+    return best
+}
+
+fn push(now_ms: u64) {
+    let k: u64 = (s_newest + 1) % RING
+    s_t[k as usize] = now_ms
+    s_ok[k as usize] = 1
+    var i: u64 = 0
+    while i < SLOTS {
+        s_pres[(k * SLOTS + i) as usize] = w_pres[i as usize]
+        s_pid[(k * SLOTS + i) as usize] = w_pid[i as usize]
+        i = i + 1
+    }
+    s_newest = k
+}
+
+fn refresh(now_ms: u64) {
+    parse()
+    let base: u64 = pick(now_ms)
+    var i: u64 = 0
+    while i < SLOTS {
+        w_rate[i as usize] = NA
+        if base != NA && w_pid[i as usize] != 0 {
+            let at: u64 = (base * SLOTS + i) as u64
+            let dt: u64 = now_ms - s_t[base as usize]
+            if s_pid[at as usize] == w_pid[i as usize] && w_pres[i as usize] >= s_pres[at as usize] && dt > 0 {
+                w_rate[i as usize] = (w_pres[i as usize] - s_pres[at as usize]) * 10000 / dt
+            }
+        }
+        i = i + 1
+    }
+    if s_ok[s_newest as usize] == 0 || age_of(now_ms, s_newest) >= PUSH_MS {
+        push(now_ms)
+    }
+}
+
 fn fps_x10(pid: u64) -> u64 {
     var best: u64 = NA
     var i: u64 = 0
     while i < SLOTS {
-        if w_pid[i as usize] == pid && pid != 0 && w_avg[i as usize] > 0 {
-            let f: u64 = 10000000 / w_avg[i as usize]
-            if best == NA || f > best {
-                best = f
+        if pid != 0 && w_pid[i as usize] == pid && w_rate[i as usize] != NA {
+            if best == NA || w_rate[i as usize] > best {
+                best = w_rate[i as usize]
             }
         }
         i = i + 1
