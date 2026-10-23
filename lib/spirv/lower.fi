@@ -376,6 +376,79 @@ fn is_notequal(op: u32) -> bool {
     return op == spv.OP_INOTEQUAL || op == spv.OP_FORDNOTEQUAL || op == spv.OP_FUNORDNOTEQUAL || op == spv.OP_LOGICALNOTEQUAL
 }
 
+fn bits_f32(b: u32) -> f32 {
+    var x: u32 = b
+    return *((&x) as *mut f32)
+}
+
+fn pow2_bits(k: i32) -> u32 {
+    if k < 0 || k > 30 { return 0 }
+    return fbits((1 << (k as u32)) as f32)
+}
+
+// shift by a count register: exp2(count) is exact for small counts; right shifts floor (operands are non-negative here)
+fn lower_shift(l: *mut Lw, pos: usize, op: u32) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let a: u32 = parse.w32(m, pos + 3)
+    let b: u32 = parse.w32(m, pos + 4)
+    let n: u32 = result_n(l, pos)
+    let base: u32 = allocn(l, n)
+    var c: u32 = 0
+    while c < n {
+        let ra: u32 = get(l, a, c)
+        let d: u32 = base + c
+        let sc: u32 = tmp_reg(l)
+        if is_const(l, b) {
+            let k: i32 = bits_f32(const_bits(l, b, c)) as i32
+            if k < 0 || k > 30 { fail(l, L_UNSUPPORTED, pos); return }
+            if op == spv.OP_SHIFTLEFTLOGICAL { ldc(l, sc, fbits((1 << (k as u32)) as f32)) }
+            else { ldc(l, sc, fbits(1.0f / ((1 << (k as u32)) as f32))) }
+        }
+        else {
+            let rb: u32 = get(l, b, c)
+            if op != spv.OP_SHIFTLEFTLOGICAL { emit(l, shader.OP_NEG, sc, rb, 0, 0); emit(l, shader.OP_EXP2, sc, sc, 0, 0) }
+            else { emit(l, shader.OP_EXP2, sc, rb, 0, 0) }
+        }
+        emit(l, shader.OP_MUL, d, ra, sc, 0)
+        if op != spv.OP_SHIFTLEFTLOGICAL { emit(l, shader.OP_FLOOR, d, d, 0, 0) }
+        free_tmps(l)
+        c = c + 1
+    }
+    define_seq(l, id, base, n)
+}
+
+// a & (2^k - 1) = a - 2^k floor(a / 2^k) for a >= 0 (the only mask shape the fUi shaders use)
+fn lower_and(l: *mut Lw, pos: usize) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    var a: u32 = parse.w32(m, pos + 3)
+    var b: u32 = parse.w32(m, pos + 4)
+    if is_const(l, a) { let t: u32 = a; a = b; b = t }
+    if !is_const(l, b) { fail(l, L_UNSUPPORTED, pos); return }
+    let n: u32 = result_n(l, pos)
+    let base: u32 = allocn(l, n)
+    var c: u32 = 0
+    while c < n {
+        let mask: i32 = bits_f32(const_bits(l, b, c)) as i32
+        var k: i32 = 0
+        while k < 24 && ((1 << (k as u32)) - 1) != mask { k = k + 1 }
+        if k >= 24 { fail(l, L_UNSUPPORTED, pos); return }
+        let ra: u32 = get(l, a, c)
+        let d: u32 = base + c
+        let sc: u32 = tmp_const(l, (1 << (k as u32)) as f32)
+        let inv: u32 = tmp_const(l, 1.0f / ((1 << (k as u32)) as f32))
+        let q: u32 = tmp_reg(l)
+        emit(l, shader.OP_MUL, q, ra, inv, 0)
+        emit(l, shader.OP_FLOOR, q, q, 0, 0)
+        emit(l, shader.OP_MUL, q, q, sc, 0)
+        emit(l, shader.OP_SUB, d, ra, q, 0)
+        free_tmps(l)
+        c = c + 1
+    }
+    define_seq(l, id, base, n)
+}
+
 fn lower_bin(l: *mut Lw, pos: usize, op: u32) {
     let m: *mut parse.Module = (*l).m
     let id: u32 = parse.w32(m, pos + 2)
@@ -956,6 +1029,18 @@ fn lower_composite(l: *mut Lw, pos: usize, op: u32, wc: usize) {
         set_reg(l, id, 0, own(l, parse.w32(m, pos + 3), parse.w32(m, pos + 4)))
         return
     }
+    if op == spv.OP_COMPOSITEINSERT {
+        if wc != 6 { fail(l, L_UNSUPPORTED, pos); return }
+        let ins: u32 = parse.w32(m, pos + 5)
+        define(l, id, n)
+        var c: u32 = 0
+        while c < n {
+            if c == ins { set_reg(l, id, c, own(l, parse.w32(m, pos + 3), 0)) }
+            else { set_reg(l, id, c, own(l, parse.w32(m, pos + 4), c)) }
+            c = c + 1
+        }
+        return
+    }
     define(l, id, n)
     if op == spv.OP_COMPOSITECONSTRUCT {
         var k: usize = 3
@@ -1004,6 +1089,21 @@ fn lower_sample(l: *mut Lw, pos: usize) {
     emit(l, shader.OP_SAMPLE, d, get(l, coord, 0), get(l, coord, 1), slot)
     if slot + 1 > (*l).ntex { (*l).ntex = slot + 1 }
     (*l).nsample = (*l).nsample + 1
+    define_seq(l, id, d, 4)
+}
+
+fn lower_fetch(l: *mut Lw, pos: usize, wc: usize) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let h: u32 = parse.w32(m, pos + 3)
+    let coord: u32 = parse.w32(m, pos + 4)
+    if tab((*l).vk, h) != VK_HANDLE { fail(l, L_INTERNAL, pos); return }
+    if wc != 5 && wc != 7 { fail(l, L_UNSUPPORTED, pos); return }
+    if wc == 7 && (parse.w32(m, pos + 5) != 2 || !is_const(l, parse.w32(m, pos + 6)) || const_bits(l, parse.w32(m, pos + 6), 0) != 0) { fail(l, L_UNSUPPORTED, pos); return }
+    let d: u32 = allocn(l, 4)
+    let slot: u32 = tab((*l).vreg, h * 4)
+    emit(l, shader.OP_FETCH, d, get(l, coord, 0), get(l, coord, 1), slot)
+    if slot + 1 > (*l).ntex { (*l).ntex = slot + 1 }
     define_seq(l, id, d, 4)
 }
 
@@ -1196,7 +1296,10 @@ fn lower_inst(l: *mut Lw, pos: usize, op: u32, wc: usize, ii: usize) {
         }
     }
     else if op == spv.OP_LOOPMERGE { fail(l, L_LOOP, pos) }
-    else if op == spv.OP_SWITCH { fail(l, L_SWITCH, pos) }
+    else if op == spv.OP_SWITCH {
+        if wc == 3 { add_edge(l, (*l).cur, parse.w32(m, pos + 2), (*l).cpred) }
+        else { fail(l, L_SWITCH, pos) }
+    }
     else if op == spv.OP_KILL { lower_kill(l) }
     else if op == spv.OP_FUNCTIONCALL { fail(l, L_CALL, pos) }
     else if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL { lower_branch(l, pos, op) }
@@ -1206,15 +1309,23 @@ fn lower_inst(l: *mut Lw, pos: usize, op: u32, wc: usize, ii: usize) {
     else if op == spv.OP_LOAD { lower_load(l, pos) }
     else if op == spv.OP_STORE { lower_store(l, pos) }
     else if op == spv.OP_ACCESSCHAIN || op == spv.OP_INBOUNDSACCESSCHAIN { lower_access(l, pos, wc) }
-    else if op == spv.OP_COMPOSITECONSTRUCT || op == spv.OP_COMPOSITEEXTRACT || op == spv.OP_VECTORSHUFFLE { lower_composite(l, pos, op, wc) }
+    else if op == spv.OP_COMPOSITECONSTRUCT || op == spv.OP_COMPOSITEEXTRACT || op == spv.OP_COMPOSITEINSERT || op == spv.OP_VECTORSHUFFLE { lower_composite(l, pos, op, wc) }
     else if op == spv.OP_SAMPLEDIMAGE {
         let sid: u32 = parse.w32(m, pos + 2)
         tset((*l).vk, sid, VK_HANDLE)
         tset((*l).vreg, sid * 4, tab((*l).vreg, parse.w32(m, pos + 3) * 4))
     }
+    else if op == spv.OP_IMAGE {
+        let sid: u32 = parse.w32(m, pos + 2)
+        tset((*l).vk, sid, VK_HANDLE)
+        tset((*l).vreg, sid * 4, tab((*l).vreg, parse.w32(m, pos + 3) * 4))
+    }
+    else if op == spv.OP_IMAGEFETCH { lower_fetch(l, pos, wc) }
     else if op == spv.OP_IMAGESAMPLEIMPLICITLOD || op == spv.OP_IMAGESAMPLEEXPLICITLOD { lower_sample(l, pos) }
     else if op == spv.OP_EXTINST { lower_glsl(l, pos, wc) }
     else if op == spv.OP_DOT { lower_dot(l, pos) }
+    else if op == spv.OP_SHIFTRIGHTLOGICAL || op == spv.OP_SHIFTRIGHTARITHMETIC || op == spv.OP_SHIFTLEFTLOGICAL { lower_shift(l, pos, op) }
+    else if op == spv.OP_BITWISEAND { lower_and(l, pos) }
     else if op == spv.OP_ANY || op == spv.OP_ALL { lower_anyall(l, pos, op) }
     else if op == spv.OP_SELECT { lower_select(l, pos) }
     else if op == spv.OP_UNDEF { }
@@ -1342,12 +1453,12 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
                     if tab((*l).uses, rid) == 0 { release(l, rid) }
                 }
             }
-            if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE || op == spv.OP_KILL {
+            if op == spv.OP_SWITCH || op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE || op == spv.OP_KILL {
                 end_block(l)
                 in_block = false
             }
         }
-        else if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE || op == spv.OP_KILL {
+        else if op == spv.OP_SWITCH || op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE || op == spv.OP_KILL {
             end_block(l)
         }
         i = i + 1
