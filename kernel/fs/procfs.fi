@@ -88,6 +88,7 @@ import apprights.policy
 import usb.usb
 import drv.usb.xhci
 import diag.hwdiag
+import acpi.acpi
 import acpi.acpidev
 import acpi.dmar
 import pwr.blchain
@@ -203,7 +204,8 @@ const G_SAFE: u64 = 23
 const G_DMAR: u64 = 24
 const G_DRIVERS: u64 = 25
 const G_BACKLIGHT: u64 = 26
-const G_LAST: u64 = 26
+const G_CPUS: u64 = 27 // W-SMP2: /proc/cpus
+const G_LAST: u64 = 27
 const GPU_NA: u64 = 0xFFFFFFFFFFFFFFFF
 
 // Die Dateien je Prozess.
@@ -470,6 +472,142 @@ fn make_cpuinfo(state: u64) -> u64 {
     return p
 }
 
+// W-SMP2: /proc/cpus -- one head line, one line per core. A photo of `cat /proc/cpus` answers "are the other cores there, and why not".
+//   cpus_online=N cpus_madt=M failed=K kick=on|off kicks=T
+//   cpuN apic=A online=0|1 why=ok|nomem|nosipi|noonline|nosmp|- esr=0xE ticks=T idle=I busy=P% switches=S picks=K cur_pid=P
+//        cyc=C idlecyc=D halted=H kicktx=X kickrx=Y
+// `busy` is TIME-weighted (TSC cycles between ticks, booked to the state at the tick); `ticks`/`idle` are raw tick counts (an idle
+// application core ticks at 10 Hz, a busy one at 100 Hz, so tick counts of different cores are not comparable).
+fn w_why(state: u64, at: u64, code: u64) -> u64 {
+    var p: u64 = at
+    var v: u64 = cpu.why_word(code)
+    var i: u64 = 0
+    while v != 0 && i < 8 {
+        p = w_ch(state, p, v & 0xFF)
+        v = v >> 8
+        i = i + 1
+    }
+    return p
+}
+
+fn make_cpus(state: u64) -> u64 {
+    var h1: [u8; 13] = "cpus_online=\0"
+    var h2: [u8; 12] = " cpus_madt=\0"
+    var h3: [u8; 9] = " failed=\0"
+    var h4: [u8; 7] = " kick=\0"
+    var h5: [u8; 8] = " kicks=\0"
+    var on: [u8; 3] = "on\0"
+    var off: [u8; 4] = "off\0"
+    var l1: [u8; 4] = "cpu\0"
+    var l2: [u8; 7] = " apic=\0"
+    var l3: [u8; 9] = " online=\0"
+    var l4: [u8; 6] = " why=\0"
+    var l5: [u8; 8] = " esr=0x\0"
+    var l6: [u8; 8] = " ticks=\0"
+    var l7: [u8; 7] = " idle=\0"
+    var l8: [u8; 7] = " busy=\0"
+    var l9: [u8; 11] = " switches=\0"
+    var l10: [u8; 8] = " picks=\0"
+    var l11: [u8; 10] = " cur_pid=\0"
+    var l12: [u8; 6] = " cyc=\0"
+    var l13: [u8; 10] = " idlecyc=\0"
+    var l14: [u8; 9] = " halted=\0"
+    var l15: [u8; 9] = " kicktx=\0"
+    var l16: [u8; 9] = " kickrx=\0"
+    var pc: [u8; 3] = "%\0\0"
+    var p: u64 = 0
+    var n: u64 = cpu.count(state)
+    if n > kstate.MAX_CPUS {
+        n = kstate.MAX_CPUS
+    }
+    var madt: u64 = acpi.total(state)
+    if madt == 0 {
+        madt = n
+    }
+    var failed: u64 = 0
+    var tx: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if cpu.get(state, i, cpu.C_ONLINE) == 0 {
+            failed = failed + 1
+        }
+        tx = tx + cpu.x_get(state, i, cpu.X_KICKTX)
+        i = i + 1
+    }
+    if madt > n {
+        failed = failed + (madt - n)
+    }
+    p = w_str(state, p, (&h1[0]) as u64)
+    p = w_num(state, p, cpu.online_count(state))
+    p = w_str(state, p, (&h2[0]) as u64)
+    p = w_num(state, p, madt)
+    p = w_str(state, p, (&h3[0]) as u64)
+    p = w_num(state, p, failed)
+    p = w_str(state, p, (&h4[0]) as u64)
+    if kstate.mode_on(state, kstate.M_NOKICK) {
+        p = w_str(state, p, (&off[0]) as u64)
+    } else {
+        p = w_str(state, p, (&on[0]) as u64)
+    }
+    p = w_str(state, p, (&h5[0]) as u64)
+    p = w_num(state, p, tx)
+    p = w_nl(state, p)
+    i = 0
+    while i < n {
+        let ticks: u64 = cpu.get(state, i, cpu.C_TICKS)
+        let idle: u64 = cpu.get(state, i, cpu.C_IDLETICKS)
+        let cyc: u64 = cpu.x_get(state, i, cpu.X_TOTCYC)
+        let icyc: u64 = cpu.x_get(state, i, cpu.X_IDLECYC)
+        var busy: u64 = 0
+        if cyc > 0 {
+            busy = (cyc - icyc) * 100 / cyc
+        } else if ticks > 0 && idle <= ticks {
+            busy = (ticks - idle) * 100 / ticks
+        }
+        var cur_pid: u64 = 0
+        let ct: u64 = cpu.get(state, i, cpu.C_CUR)
+        if ct < kstate.MAX_TASKS {
+            cur_pid = sched.tget(state, ct, sched.T_PID)
+        }
+        p = w_str(state, p, (&l1[0]) as u64)
+        p = w_num(state, p, i)
+        p = w_str(state, p, (&l2[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_APICID))
+        p = w_str(state, p, (&l3[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_ONLINE))
+        p = w_str(state, p, (&l4[0]) as u64)
+        p = w_why(state, p, cpu.get(state, i, cpu.C_WHY))
+        p = w_str(state, p, (&l5[0]) as u64)
+        p = w_hexn(state, p, cpu.get(state, i, cpu.C_ESR), 8)
+        p = w_str(state, p, (&l6[0]) as u64)
+        p = w_num(state, p, ticks)
+        p = w_str(state, p, (&l7[0]) as u64)
+        p = w_num(state, p, idle)
+        p = w_str(state, p, (&l8[0]) as u64)
+        p = w_num(state, p, busy)
+        p = w_str(state, p, (&pc[0]) as u64)
+        p = w_str(state, p, (&l9[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_SWITCHES))
+        p = w_str(state, p, (&l10[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_PICKS))
+        p = w_str(state, p, (&l11[0]) as u64)
+        p = w_num(state, p, cur_pid)
+        p = w_str(state, p, (&l12[0]) as u64)
+        p = w_num(state, p, cyc)
+        p = w_str(state, p, (&l13[0]) as u64)
+        p = w_num(state, p, icyc)
+        p = w_str(state, p, (&l14[0]) as u64)
+        p = w_num(state, p, cpu.x_get(state, i, cpu.X_HALTED))
+        p = w_str(state, p, (&l15[0]) as u64)
+        p = w_num(state, p, cpu.x_get(state, i, cpu.X_KICKTX))
+        p = w_str(state, p, (&l16[0]) as u64)
+        p = w_num(state, p, cpu.x_get(state, i, cpu.X_KICKRX))
+        p = w_nl(state, p)
+        i = i + 1
+    }
+    return p
+}
+
 fn make_uptime(state: u64) -> u64 {
     // Der Zeitgeber laeuft mit 100 Hz (`idt.fi`), ein Tick ist also eine
     // Hundertstelsekunde. Linux schreibt hier zwei Zahlen mit zwei
@@ -597,6 +735,8 @@ fn make_stat(state: u64) -> u64 {
     var s7: [u8; 12] = "traps     \0\0"
     var s8: [u8; 12] = "opens     \0\0"
     var sc: [u8; 6] = "cpu  \0"
+    var scc: [u8; 4] = "cpu\0"
+    var sc0: [u8; 11] = " 0 0 0 0 0\0"
     var p: u64 = 0
     let total: u64 = kstate.get(state, kstate.TICKS)
     let idle_slot: u64 = kstate.get(state, kstate.IDLE)
@@ -622,6 +762,28 @@ fn make_stat(state: u64) -> u64 {
         z = z + 1
     }
     p = w_nl(state, p)
+    // W-SMP2: one line per core, Linux layout (user nice system idle ...); busy = ticks - idle ticks of THAT core.
+    var sn: u64 = cpu.count(state)
+    if sn > kstate.MAX_CPUS {
+        sn = kstate.MAX_CPUS
+    }
+    var sci: u64 = 0
+    while sn > 1 && sci < sn {
+        let ct: u64 = cpu.get(state, sci, cpu.C_TICKS)
+        var ci: u64 = cpu.get(state, sci, cpu.C_IDLETICKS)
+        if ci > ct {
+            ci = ct
+        }
+        p = w_str(state, p, (&scc[0]) as u64)
+        p = w_num(state, p, sci)
+        p = w_ch(state, p, 32)
+        p = w_num(state, p, ct - ci)
+        p = w_str(state, p, (&sc0[0]) as u64)
+        p = w_num(state, p, ci)
+        p = w_str(state, p, (&sc1[0]) as u64)
+        p = w_nl(state, p)
+        sci = sci + 1
+    }
     p = w_str(state, p, (&s1[0]) as u64)
     p = w_num(state, p, kstate.get(state, kstate.TICKS))
     p = w_nl(state, p)
@@ -2244,6 +2406,9 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_BACKLIGHT {
             return blchain.render(state, buf(state), BUF_MAX)
         }
+        if sub == G_CPUS {
+            return make_cpus(state)
+        }
         if sub == G_DRIVERS {
             return drvreg.render(state, buf(state), BUF_MAX)
         }
@@ -2374,6 +2539,10 @@ fn global_of(name: u64) -> u64 {
     var gdm: [u8; 5] = "dmar\0"
     var gdr: [u8; 8] = "drivers\0"
     var gbl: [u8; 10] = "backlight\0"
+    var gcp: [u8; 5] = "cpus\0"
+    if streq(name, (&gcp[0]) as u64) {
+        return G_CPUS
+    }
     if streq(name, (&gdm[0]) as u64) {
         return G_DMAR
     }
@@ -2655,8 +2824,11 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var dm2: [u8; 5] = "dmar\0"
     var dr2: [u8; 8] = "drivers\0"
     var bl2: [u8; 10] = "backlight\0"
+    var cp2: [u8; 5] = "cpus\0"
     var src: u64 = (&a[0]) as u64
-    if sub == G_DMAR {
+    if sub == G_CPUS {
+        src = (&cp2[0]) as u64
+    } else if sub == G_DMAR {
         src = (&dm2[0]) as u64
     } else if sub == G_BACKLIGHT {
         src = (&bl2[0]) as u64

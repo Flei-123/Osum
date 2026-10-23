@@ -104,6 +104,7 @@ BEREICHE = [
     ("AHCI_SC",    "ahci.fi",   "AHCI_SC_OFF",    "0x1000"),
     ("CPU",        "kstate.fi", "CPU_OFF",        "CPU_BYTES * MAX_CPUS"),
     ("LOCK",       "kstate.fi", "LOCK_OFF",       "LOCK_BYTES * LOCK_COUNT"),
+    ("CPUX",       "kstate.fi", "CPUX_OFF",       "CPUX_BYTES * MAX_CPUS"),
     ("TCPU",       "kstate.fi", "TCPU_OFF",       "TCPU_BYTES * MAX_TASKS"),
     ("CX",         "kstate.fi", "CX_OFF",         "CX_BYTES * MAX_TASKS"),
     ("SMP",        "kstate.fi", "SMP_OFF",        "SMP_MAX"),
