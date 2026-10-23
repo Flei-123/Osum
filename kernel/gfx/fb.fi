@@ -112,6 +112,7 @@ export {
     // RUNDE BLECHZWEI: nur ein Rechteck uebertragen, und die
     // Abbildungsart aus der Seitentafel selbst ablesen.
     flush_rect, pat_roh, pde_roh, stripe_slots,
+    cache_mode, mtrr_probe, perf_set, perf_get, PF_FBW, PF_COPY, PF_RAM, PF_MTRR, PF_DONE, PF_BYTES, PF_ROUNDS,
     // vboxlag: diff flush (shadow copy of what the card shows)
     set_shadow, shadow_inval, shadow_addr, shadow_bytes, diff_skipped, nodiff_an, nodiff_force, M_NODIFF, nohidskip_an, M_NOHIDSKIP,
     // RUNDE BLECHDREI: das reservierte Band am oberen Rand.
@@ -6069,4 +6070,82 @@ fn pat_roh(state: u64) -> u64 {
 // 19,8 MB, also zehn Kacheln. Zehn passen nicht in acht.
 fn stripe_slots(state: u64) -> u64 {
     return kstate.get(state, FB_OFF + S_HUGES)
+}
+
+const PF_BASE: u64 = 0x948
+const PF_FBW: u64 = 0
+const PF_COPY: u64 = 1
+const PF_RAM: u64 = 2
+const PF_MTRR: u64 = 3
+const PF_DONE: u64 = 4
+const PF_BYTES: u64 = 5
+const PF_ROUNDS: u64 = 6
+
+const MSR_MTRRCAP: u64 = 0xFE
+const MSR_MTRR_DEF: u64 = 0x2FF
+const MSR_MTRR_BASE0: u64 = 0x200
+
+fn perf_set(state: u64, i: u64, v: u64) {
+    if i < 8 {
+        kstate.set(state, FB_OFF + PF_BASE + i * 8, v)
+    }
+}
+
+fn perf_get(state: u64, i: u64) -> u64 {
+    if i >= 8 {
+        return 0
+    }
+    return kstate.get(state, FB_OFF + PF_BASE + i * 8)
+}
+
+fn cache_mode(state: u64) -> u64 {
+    let pde: u64 = pde_roh(state)
+    if pde == 0 {
+        return 3
+    }
+    if (pde & (PAGE_PWT | PAGE_PCD)) == (PAGE_PWT | PAGE_PCD) {
+        return 0
+    }
+    if (pde & PAGE_PAT_HUGE) != 0 && ((msr.rd0(state, IA32_PAT) >> 32) & 255) == PAT_WC {
+        return 1
+    }
+    return 2
+}
+
+fn mtrr_probe(state: u64) {
+    let phys: u64 = kstate.get(state, FB_OFF + S_PHYS)
+    let cap: u64 = msr.rd0(state, MSR_MTRRCAP)
+    let def: u64 = msr.rd0(state, MSR_MTRR_DEF)
+    let vcnt: u64 = cap & 255
+    var ty: u64 = 255
+    var hits: u64 = 0
+    var i: u64 = 0
+    while i < vcnt && i < 16 {
+        let base: u64 = msr.rd0(state, MSR_MTRR_BASE0 + i * 2)
+        let mask: u64 = msr.rd0(state, MSR_MTRR_BASE0 + i * 2 + 1)
+        if (mask & 0x800) != 0 {
+            let m: u64 = mask & ADDR_MASK
+            if (phys & m) == (base & m) {
+                let t: u64 = base & 255
+                hits = hits + 1
+                if ty == 255 {
+                    ty = t
+                } else if ty == 0 || t == 0 {
+                    ty = 0
+                } else if ty != t {
+                    ty = 0
+                }
+            }
+        }
+        i = i + 1
+    }
+    if ty == 255 {
+        ty = 0
+        if (def & 0x800) != 0 {
+            ty = def & 255
+        }
+    }
+    let wcbit: u64 = (cap >> 10) & 1
+    let en: u64 = (def >> 11) & 1
+    perf_set(state, PF_MTRR, ty | (hits << 8) | (vcnt << 16) | ((def & 255) << 24) | (en << 32) | (wcbit << 33))
 }
