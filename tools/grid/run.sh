@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/grid/run.sh -- the grid geometry (lib/fui/grid.fi) against an independent Python model.
+# tools/grid/run.sh -- the grid geometry (lib/fui/pagegrid.fi) against an independent Python model.
 #   bash tools/grid/run.sh        (seconds; no QEMU; builds tools/grid/host.fi for the build host)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
