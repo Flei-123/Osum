@@ -45,7 +45,7 @@ fi
 
 check_run() { # <tag> <serial> <expect cache_mode> <expect pat_wc> <expect cm>
     local t=$1 s=$2 ecm=$3 epat=$4 ecmn=$5
-    local fl; fl=$(grep -a 'fbperf: fb_write_mbs=' "$s" | head -1 | sed 's/^ *//; s/fbperf:/fbperf: /')
+    local fl; fl=$(grep -a 'fbperf: .*fb_write_mbs=' "$s" | head -1 | sed 's/^ *//')
     if [ -z "$fl" ]; then bad "$t: no 'fbperf:' line"; return; fi
     local w c r cmode pat
     w=$(num " $fl" fb_write_mbs); c=$(num " $fl" fb_copy_mbs); r=$(num " $fl" ram_write_mbs)
