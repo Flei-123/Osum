@@ -68,7 +68,13 @@ W, H, px = f[0], f[1], d[at+1:]
 def P(x, y):
     i = (y * W + x) * 3
     return (px[i], px[i+1], px[i+2])
+# the pin lines are in the coordinates of the bar window, which stands at `taskbar: geom x= y=`
+gm = None
+for gm in re.finditer(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+)", t):
+    pass
+ox, oy = (int(gm[1]), int(gm[2])) if gm else (0, 0)
 x, y, w, h, _ = pins["zzfb"]
+x += ox; y += oy
 bg = P(max(x - 6, 0), y + h // 2)
 cnt = {}; diff = 0; white = 0; tot = 0
 for yy in range(y + 2, y + h - 2):
@@ -85,7 +91,7 @@ print(("OK    " if (isTile == (expect == "fb")) else "FAIL  ") +
       % (w, h, x, y, solid, bg, one, white, "tile" if isTile else "no tile",
          "" if expect == "fb" else " (COUNTER: must NOT be a tile)"))
 # the real symbols are not the tile: explorer's rectangle differs from zzfb's
-ex = pins["explorer"]
+ex = tuple(pins["explorer"]); ex = (ex[0] + ox, ex[1] + oy) + ex[2:]
 a = [P(ex[0] + i, ex[1] + j) for j in range(0, ex[3], 3) for i in range(0, ex[2], 3)]
 b = [P(x + i, y + j) for j in range(0, h, 3) for i in range(0, w, 3)]
 n = min(len(a), len(b)); dd = sum(1 for i in range(n) if a[i] != b[i])
