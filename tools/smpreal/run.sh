@@ -59,7 +59,7 @@ for acc in $ACCELS; do
     has "$B" "why=ok" "$acc base: why=ok on the cores"
     has "$B" "kick=on" "$acc base: kick on"
     nb=$(busy_cores "$B"); [ "$nb" -ge 1 ] && ok "$acc base: $nb application core(s) took load (busy>=15%)" || bad "$acc base: no application core took load"
-    kb=$(awk '/==LOAD==/{s=1} s&&/^cpus_online/{for(i=1;i<=NF;i++)if($i~/^kicks=/){sub("kicks=","",$i);print $i}}' "$B"); [ "${kb:-0}" -ge 1 ] && ok "$acc base: $kb kick IPIs sent" || bad "$acc base: no kick sent"
+    kb=$(awk '/==LOAD==/{s=1} s&&/^cpus_online/{for(i=1;i<=NF;i++)if($i~/^kicks=/){sub("kicks=","",$i);print $i}}' "$B"); [ "${kb:-0}" -ge 1 ] && ok "$acc base: $kb kick IPIs sent" || { bad "$acc base: no kick sent"; awk '/==LOAD==/{s=1} /==END==/{s=0} s' "$B" | head -14 | cut -c1-200; }
     has "$K" "kick=off" "$acc nokick: kick off"
     kk=$(awk '/==LOAD==/{s=1} s&&/^cpus_online/{for(i=1;i<=NF;i++)if($i~/^kicks=/){sub("kicks=","",$i);print $i}}' "$K"); [ "${kk:-1}" = 0 ] && ok "$acc nokick: 0 kicks sent (counter-proof)" || bad "$acc nokick: kicks=$kk"
     nk=$(busy_cores "$K"); echo "  info  $acc busy application cores: with kick $nb, nokick $nk"
