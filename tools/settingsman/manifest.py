@@ -182,6 +182,13 @@ def parse(data, cat=None, expect=None):
                 lines_n = w[2][0] - 0x30
             add({"kind": "note", "label": put(w[1]), "num": lines_n})
             continue
+        if kw in (b"sep", b"row", b"endrow"):
+            if not pages:
+                raise Reject(E_NO_PAGE, line)
+            if len(w) != 1:
+                raise Reject(E_ITEM, line)
+            add({"kind": kw.decode()})
+            continue
         if kw == b"field":
             if not pages:
                 raise Reject(E_NO_PAGE, line)
@@ -240,6 +247,8 @@ def show_items(cat, p, out):
             out.append("  label %s %s" % (it["col"], it["label"]))
         elif it["kind"] == "note":
             out.append("  note %s %s %d" % (it["col"], it["label"], it["num"]))
+        elif it["kind"] in ("sep", "row", "endrow"):
+            out.append("  %s %s" % (it["kind"], it["col"]))
         else:
             out.append("  field %s %s %s %s %s%s%s" % (it["col"], it["key"], it["type"], it["label"] or "-", it["def"] or "-",
                        (" read=" + it["read"]) if it.get("read") else "", (" write=" + it["write"]) if it.get("write") else ""))
