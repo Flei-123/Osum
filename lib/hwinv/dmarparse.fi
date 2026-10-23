@@ -1,0 +1,422 @@
+// SPDX-License-Identifier: GPL-2.0-only
+export { ok, render, drhd_count, drhd_base, drhd_seg, drhd_all, flags, haw, intr_remap, rmrr_count }
+
+const H_LEN: u64 = 4
+const H_HAW: u64 = 36
+const H_FLAGS: u64 = 37
+const H_FIRST: u64 = 48
+const MAX_TBL: u64 = 65536
+const MAX_STRUCT: u64 = 128
+const T_DRHD: u64 = 0
+const T_RMRR: u64 = 1
+const T_ATSR: u64 = 2
+const T_RHSA: u64 = 3
+
+static mut o_p: u64 = 0
+static mut o_at: u64 = 0
+static mut o_cap: u64 = 0
+
+fn ld8(p: u64) -> u64 {
+    let b: u8 = *((p) as *mut u8)
+    return b as u64
+}
+
+fn ld16(p: u64) -> u64 {
+    return ld8(p) | (ld8(p + 1) << 8)
+}
+
+fn ld32(p: u64) -> u64 {
+    return ld16(p) | (ld16(p + 2) << 16)
+}
+
+fn ld64(p: u64) -> u64 {
+    return ld32(p) | (ld32(p + 4) << 32)
+}
+
+fn put_c(c: u64) {
+    if o_at + 1 < o_cap {
+        *((o_p + o_at) as *mut u8) = c as u8
+        o_at = o_at + 1
+    }
+}
+
+fn put_s(s: u64) {
+    var i: u64 = 0
+    while ld8(s + i) != 0 {
+        put_c(ld8(s + i))
+        i = i + 1
+    }
+}
+
+fn put_dec(v: u64) {
+    var tmp: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        put_c(tmp[n as usize] as u64)
+    }
+}
+
+fn put_hex(v: u64, digits: u64) {
+    var i: u64 = digits
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            put_c(48 + d)
+        } else {
+            put_c(87 + d)
+        }
+    }
+}
+
+fn put_0x(v: u64, digits: u64) {
+    put_c(48)
+    put_c(120)
+    put_hex(v, digits)
+}
+
+fn sig_ok(t: u64) -> bool {
+    return ld8(t) == 68 && ld8(t + 1) == 77 && ld8(t + 2) == 65 && ld8(t + 3) == 82
+}
+
+fn len_of(t: u64) -> u64 {
+    return ld32(t + H_LEN)
+}
+
+fn ok(t: u64) -> bool {
+    if t == 0 {
+        return false
+    }
+    if !sig_ok(t) {
+        return false
+    }
+    let n: u64 = len_of(t)
+    return n >= H_FIRST && n <= MAX_TBL
+}
+
+fn sum_ok(t: u64) -> bool {
+    let n: u64 = len_of(t)
+    var s: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        s = s + ld8(t + i)
+        i = i + 1
+    }
+    return (s & 255) == 0
+}
+
+fn flags(t: u64) -> u64 {
+    return ld8(t + H_FLAGS)
+}
+
+fn haw(t: u64) -> u64 {
+    return ld8(t + H_HAW) + 1
+}
+
+fn intr_remap(t: u64) -> bool {
+    return (flags(t) & 1) != 0
+}
+
+fn first(t: u64) -> u64 {
+    if len_of(t) >= H_FIRST + 4 {
+        return H_FIRST
+    }
+    return 0
+}
+
+fn struct_ok(t: u64, at: u64) -> bool {
+    let end: u64 = len_of(t)
+    if at + 4 > end {
+        return false
+    }
+    let l: u64 = ld16(t + at + 2)
+    return l >= 4 && at + l <= end
+}
+
+fn kind(t: u64, at: u64) -> u64 {
+    let ty: u64 = ld16(t + at)
+    let l: u64 = ld16(t + at + 2)
+    if ty == T_DRHD && l < 16 {
+        return 99
+    }
+    if ty == T_RMRR && l < 24 {
+        return 99
+    }
+    if ty == T_ATSR && l < 8 {
+        return 99
+    }
+    if ty == T_RHSA && l < 20 {
+        return 99
+    }
+    return ty
+}
+
+fn next_struct(t: u64, at: u64) -> u64 {
+    let end: u64 = len_of(t)
+    if at + 4 > end {
+        return 0
+    }
+    let l: u64 = ld16(t + at + 2)
+    if l < 4 || at + l > end {
+        return 0
+    }
+    if at + l == end {
+        return 0
+    }
+    return at + l
+}
+
+fn nth_of_type(t: u64, want: u64, idx: u64) -> u64 {
+    if !ok(t) {
+        return 0
+    }
+    var at: u64 = first(t)
+    var seen: u64 = 0
+    var guard: u64 = 0
+    while at != 0 && guard < MAX_STRUCT && struct_ok(t, at) {
+        let ty: u64 = kind(t, at)
+        if ty == want {
+            if seen == idx {
+                return t + at
+            }
+            seen = seen + 1
+        }
+        at = next_struct(t, at)
+        guard = guard + 1
+    }
+    return 0
+}
+
+fn count_of_type(t: u64, want: u64) -> u64 {
+    if !ok(t) {
+        return 0
+    }
+    var at: u64 = first(t)
+    var n: u64 = 0
+    var guard: u64 = 0
+    while at != 0 && guard < MAX_STRUCT && struct_ok(t, at) {
+        if kind(t, at) == want {
+            n = n + 1
+        }
+        at = next_struct(t, at)
+        guard = guard + 1
+    }
+    return n
+}
+
+fn drhd_count(t: u64) -> u64 {
+    return count_of_type(t, T_DRHD)
+}
+
+fn rmrr_count(t: u64) -> u64 {
+    return count_of_type(t, T_RMRR)
+}
+
+fn drhd_base(t: u64, idx: u64) -> u64 {
+    let s: u64 = nth_of_type(t, T_DRHD, idx)
+    if s == 0 {
+        return 0
+    }
+    return ld64(s + 8)
+}
+
+fn drhd_seg(t: u64, idx: u64) -> u64 {
+    let s: u64 = nth_of_type(t, T_DRHD, idx)
+    if s == 0 {
+        return 0
+    }
+    return ld16(s + 6)
+}
+
+fn drhd_all(t: u64, idx: u64) -> bool {
+    let s: u64 = nth_of_type(t, T_DRHD, idx)
+    if s == 0 {
+        return false
+    }
+    return (ld8(s + 4) & 1) != 0
+}
+
+fn scope_name(ty: u64) -> u64 {
+    var n_pci: [u8; 4] = "pci\0"
+    var n_sub: [u8; 4] = "sub\0"
+    var n_io: [u8; 7] = "ioapic\0"
+    var n_hpet: [u8; 5] = "hpet\0"
+    var n_acpi: [u8; 5] = "acpi\0"
+    var n_unk: [u8; 5] = "unk\0\0"
+    if ty == 1 {
+        put_s((&n_pci[0]) as u64)
+    } else if ty == 2 {
+        put_s((&n_sub[0]) as u64)
+    } else if ty == 3 {
+        put_s((&n_io[0]) as u64)
+    } else if ty == 4 {
+        put_s((&n_hpet[0]) as u64)
+    } else if ty == 5 {
+        put_s((&n_acpi[0]) as u64)
+    } else {
+        put_s((&n_unk[0]) as u64)
+    }
+    return 0
+}
+
+fn scope_list(t: u64, s: u64, from: u64) -> u64 {
+    var w_sc: [u8; 8] = " scope=\0"
+    let end: u64 = s + ld16(s + 2)
+    var p: u64 = s + from
+    var n: u64 = 0
+    while p + 6 <= end && n < 6 {
+        let l: u64 = ld8(p + 1)
+        if l < 6 || p + l > end {
+            break
+        }
+        let ty: u64 = ld8(p)
+        put_s((&w_sc[0]) as u64)
+        scope_name(ty)
+        put_c(58)
+        if ty == 3 || ty == 4 || ty == 5 {
+            put_dec(ld8(p + 4))
+        } else {
+            put_hex(ld8(p + 5), 2)
+            put_c(58)
+            if l >= 8 {
+                put_hex(ld8(p + 6), 2)
+                put_c(46)
+                put_dec(ld8(p + 7))
+            }
+        }
+        p = p + l
+        n = n + 1
+    }
+    return n
+}
+
+fn render(t: u64, out: u64, cap: u64) -> u64 {
+    var w_none: [u8; 12] = "dmar: none\n\0"
+    var w_head: [u8; 19] = "dmar: present haw=\0"
+    var w_fl: [u8; 8] = " flags=\0"
+    var w_ir: [u8; 13] = " intr_remap=\0"
+    var w_xo: [u8; 16] = " x2apic_optout=\0"
+    var w_po: [u8; 12] = " dma_optin=\0"
+    var w_cs: [u8; 11] = " checksum=\0"
+    var w_ok: [u8; 3] = "ok\0"
+    var w_bad: [u8; 4] = "bad\0"
+    var w_dr: [u8; 12] = "dmar: drhd \0"
+    var w_seg: [u8; 5] = "seg=\0"
+    var w_base: [u8; 7] = " base=\0"
+    var w_all: [u8; 14] = " include_all=\0"
+    var w_rm: [u8; 12] = "dmar: rmrr \0"
+    var w_lim: [u8; 8] = " limit=\0"
+    var w_at: [u8; 12] = "dmar: atsr \0"
+    var w_ap: [u8; 12] = " all_ports=\0"
+    var w_rh: [u8; 11] = "dmar: rhsa\0"
+    var w_dom: [u8; 9] = " domain=\0"
+    var w_cnt: [u8; 13] = "dmar: counts\0"
+    var w_cd: [u8; 7] = " drhd=\0"
+    var w_cr: [u8; 7] = " rmrr=\0"
+    var w_ca: [u8; 7] = " atsr=\0"
+    var w_ch: [u8; 7] = " rhsa=\0"
+    var w_co: [u8; 8] = " other=\0"
+    o_p = out
+    o_at = 0
+    o_cap = cap
+    if !ok(t) {
+        put_s((&w_none[0]) as u64)
+        return o_at
+    }
+    put_s((&w_head[0]) as u64)
+    put_dec(haw(t))
+    put_s((&w_fl[0]) as u64)
+    put_0x(flags(t), 2)
+    put_s((&w_ir[0]) as u64)
+    put_dec(flags(t) & 1)
+    put_s((&w_xo[0]) as u64)
+    put_dec((flags(t) >> 1) & 1)
+    put_s((&w_po[0]) as u64)
+    put_dec((flags(t) >> 2) & 1)
+    put_s((&w_cs[0]) as u64)
+    if sum_ok(t) {
+        put_s((&w_ok[0]) as u64)
+    } else {
+        put_s((&w_bad[0]) as u64)
+    }
+    put_c(10)
+    var at: u64 = first(t)
+    var guard: u64 = 0
+    var n_d: u64 = 0
+    var n_r: u64 = 0
+    var n_a: u64 = 0
+    var n_h: u64 = 0
+    var n_o: u64 = 0
+    while at != 0 && guard < MAX_STRUCT && struct_ok(t, at) {
+        let s: u64 = t + at
+        let ty: u64 = kind(t, at)
+        if ty == T_DRHD {
+            put_s((&w_dr[0]) as u64)
+            put_s((&w_seg[0]) as u64)
+            put_dec(ld16(s + 6))
+            put_s((&w_base[0]) as u64)
+            put_0x(ld64(s + 8), 8)
+            put_s((&w_all[0]) as u64)
+            put_dec(ld8(s + 4) & 1)
+            scope_list(t, s, 16)
+            put_c(10)
+            n_d = n_d + 1
+        } else if ty == T_RMRR {
+            put_s((&w_rm[0]) as u64)
+            put_s((&w_seg[0]) as u64)
+            put_dec(ld16(s + 6))
+            put_s((&w_base[0]) as u64)
+            put_0x(ld64(s + 8), 8)
+            put_s((&w_lim[0]) as u64)
+            put_0x(ld64(s + 16), 8)
+            scope_list(t, s, 24)
+            put_c(10)
+            n_r = n_r + 1
+        } else if ty == T_ATSR {
+            put_s((&w_at[0]) as u64)
+            put_s((&w_seg[0]) as u64)
+            put_dec(ld16(s + 6))
+            put_s((&w_ap[0]) as u64)
+            put_dec(ld8(s + 4) & 1)
+            scope_list(t, s, 8)
+            put_c(10)
+            n_a = n_a + 1
+        } else if ty == T_RHSA {
+            put_s((&w_rh[0]) as u64)
+            put_s((&w_base[0]) as u64)
+            put_0x(ld64(s + 8), 8)
+            put_s((&w_dom[0]) as u64)
+            put_dec(ld32(s + 16))
+            put_c(10)
+            n_h = n_h + 1
+        } else {
+            n_o = n_o + 1
+        }
+        at = next_struct(t, at)
+        guard = guard + 1
+    }
+    put_s((&w_cnt[0]) as u64)
+    put_s((&w_cd[0]) as u64)
+    put_dec(n_d)
+    put_s((&w_cr[0]) as u64)
+    put_dec(n_r)
+    put_s((&w_ca[0]) as u64)
+    put_dec(n_a)
+    put_s((&w_ch[0]) as u64)
+    put_dec(n_h)
+    put_s((&w_co[0]) as u64)
+    put_dec(n_o)
+    put_c(10)
+    return o_at
+}
