@@ -16,6 +16,14 @@ fn check(name: str, ok: bool) {
     else { failed = failed + 1; io.fmt_print(f"FAIL  {name}\n") }
 }
 
+fn set_alpha(f: *mut raster.Frame, nverts: usize, a: f32) {
+    var i: usize = 0
+    while i < nverts {
+        raster.st_f32((*f).vbuf, i * raster.VSTRIDE + 9, a)
+        i = i + 1
+    }
+}
+
 fn __thread_work(kind: u64, arg: u64) -> u64 {
     if kind == jobs.WORKER_KIND { return jobs.worker_main(arg) }
     return 0 as u64
@@ -153,6 +161,120 @@ fn main() -> i32 {
     raster.frame_draw(f, jp)
     check("4 threads == 1 thread (bit identical)", raster.frame_hash(f) == h1)
     check("shaded pixel statistic equal for 1 and 4 threads", raster.frame_stat_pixels(f) == p1 && p1 > 0 as u64)
+
+    // 7. scissor: only the rectangle is touched; the same scene without scissor touches everything
+    (*f).mode = raster.MODE_COUNT
+    (*f).depth_test = false
+    raster.frame_clear(f, 0 as u32, 1.0f)
+    (*f).ntri = 0
+    scene.scene_quads(f, 1, true)
+    raster.frame_set_scissor(f, 10, 20, 50, 60)
+    raster.frame_draw(f, 0 as u64)
+    var inside: i32 = 0
+    var outside: i32 = 0
+    y = 0
+    while y < H {
+        var x: i32 = 0
+        while x < W {
+            let v: u32 = raster.frame_pixel(f, x, y)
+            if x >= 10 && x < 50 && y >= 20 && y < 60 { if v == 1 as u32 { inside = inside + 1 } }
+            else if v != 0 as u32 { outside = outside + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    check("scissor: 40x40 rectangle covered exactly once, nothing outside", inside == 1600 && outside == 0)
+    raster.frame_set_scissor(f, -5, -5, 5000, 5000)
+    raster.frame_clear(f, 0 as u32, 1.0f)
+    raster.frame_draw(f, 0 as u64)
+    check("scissor: oversized rectangle is clamped to the frame (counter-proof: everything drawn)", raster.frame_stat_pixels(f) == (W * H) as u64)
+
+    // 8. blending: 50% red over opaque blue, exact integer result; off = source replaces
+    let f3: *mut raster.Frame = raster.frame_new(8, 8, 16)
+    let soli: u64 = rt.heap_alloc(16)
+    var q: usize = 0
+    while q < 4 { rt.st32(soli, q, 0xFFFFFFFF as u32); q = q + 1 }
+    raster.frame_set_texture(f3, soli, 2, 2)
+    (*f3).mode = raster.MODE_NATIVE0
+    scene.add_quad(f3, 0, -1.0f, -1.0f, 1.0f, 1.0f, 0.5f, 1.0f, 1.0f, 0.0f, 0.0f)
+    set_alpha(f3, 6, 0.5f)
+    (*f3).depth_test = false
+    raster.frame_clear(f3, 0xFFFF0000 as u32, 1.0f)
+    raster.frame_draw(f3, 0 as u64)
+    let off_px: u32 = raster.frame_pixel(f3, 3, 3)
+    raster.frame_set_blend(f3, true)
+    raster.frame_clear(f3, 0xFFFF0000 as u32, 1.0f)
+    raster.frame_draw(f3, 0 as u64)
+    check("blend: 50% red over blue == 0xFF7F0080", raster.frame_pixel(f3, 3, 3) == 0xFF7F0080 as u32)
+    check("blend off: source replaces the destination (counter-proof)", off_px == 0x800000FF as u32)
+    raster.frame_clear(f3, 0xFFFF0000 as u32, 1.0f)
+    set_alpha(f3, 6, 1.0f)
+    raster.frame_draw(f3, 0 as u64)
+    check("blend: alpha 1 equals replace", raster.frame_pixel(f3, 3, 3) == 0xFF0000FF as u32)
+    raster.frame_free(f3)
+
+    // 8b. blending is order dependent but thread independent: 300 translucent triangles, 1 thread == 4 threads, VM == native
+    (*f).ntri = 0
+    scene.scene_random(f, 300, 0.6f, 777 as u64)
+    set_alpha(f, 900, 0.5f)
+    raster.frame_set_scissor(f, 0, 0, W, H)
+    raster.frame_set_blend(f, true)
+    (*f).depth_test = false
+    (*f).mode = raster.MODE_NATIVE1
+    raster.frame_clear(f, 0xFF204080 as u32, 1.0f)
+    raster.frame_draw(f, 0 as u64)
+    let hb1: u64 = raster.frame_hash(f)
+    raster.frame_clear(f, 0xFF204080 as u32, 1.0f)
+    raster.frame_draw(f, jp)
+    check("blend: 4 threads == 1 thread (300 translucent triangles, submission order)", raster.frame_hash(f) == hb1)
+    (*f).mode = raster.MODE_VM
+    raster.frame_set_program(f, prog1)
+    raster.frame_clear(f, 0xFF204080 as u32, 1.0f)
+    raster.frame_draw(f, 0 as u64)
+    check("blend: VM == native", raster.frame_hash(f) == hb1)
+    raster.frame_set_blend(f, false)
+    (*f).mode = raster.MODE_NATIVE1
+    raster.frame_clear(f, 0xFF204080 as u32, 1.0f)
+    raster.frame_draw(f, 0 as u64)
+    check("blend: result differs from the replace result (counter-proof)", raster.frame_hash(f) != hb1)
+
+    // 9. bilinear: texel centres reproduce the texture bit exactly; between texels it interpolates
+    raster.frame_set_bilinear(f2, true)
+    raster.frame_clear(f2, 0 as u32, 1.0f)
+    raster.frame_draw(f2, 0 as u64)
+    bad = 0
+    y = 0
+    while y < 256 {
+        var x: i32 = 0
+        while x < 256 {
+            if raster.frame_pixel(f2, x, y) != rt.ld32(tex, (y as usize) * 256 + (x as usize)) { bad = bad + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    check("bilinear: 1:1 quad still reproduces the texture bit exactly", bad == 0)
+    let f4: *mut raster.Frame = raster.frame_new(4, 4, 16)
+    let t22: u64 = rt.heap_alloc(16)
+    rt.st32(t22, 0, 0xFF000000 as u32)
+    rt.st32(t22, 1, 0xFF0000C8 as u32)
+    rt.st32(t22, 2, 0xFF000064 as u32)
+    rt.st32(t22, 3, 0xFF000028 as u32)
+    raster.frame_set_texture(f4, t22, 2, 2)
+    (*f4).mode = raster.MODE_NATIVE0
+    (*f4).depth_test = false
+    scene.add_quad(f4, 0, -1.0f, -1.0f, 1.0f, 1.0f, 0.5f, 1.0f, 1.0f, 1.0f, 1.0f)
+    raster.frame_set_bilinear(f4, true)
+    raster.frame_clear(f4, 0 as u32, 1.0f)
+    raster.frame_draw(f4, 0 as u64)
+    let b11: i32 = (raster.frame_pixel(f4, 1, 1) & 255 as u32) as i32
+    let b22: i32 = (raster.frame_pixel(f4, 2, 2) & 255 as u32) as i32
+    check("bilinear: 2x2 texture magnified x2, weights 1/4 and 3/4 (59 and 79, +-1)", b11 >= 58 && b11 <= 60 && b22 >= 78 && b22 <= 80)
+    raster.frame_set_bilinear(f4, false)
+    raster.frame_clear(f4, 0 as u32, 1.0f)
+    raster.frame_draw(f4, 0 as u64)
+    let n11: i32 = (raster.frame_pixel(f4, 1, 1) & 255 as u32) as i32
+    check("bilinear off: nearest returns a texel value (counter-proof)", n11 == 0 || n11 == 200 || n11 == 100 || n11 == 40)
+    raster.frame_free(f4)
 
     jobs.destroy(&j)
     io.fmt_print(f"gfx: {passed} ok, {failed} fail\n")

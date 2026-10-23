@@ -16,15 +16,16 @@
 //                  mode 3 coverage counter (debug: colour += 1, used to prove the fill rule)
 //
 // NOT DONE (prototype limits, see docs/GFX-STACK.md 7): near/far clipping (triangles with w <= 0 are dropped),
-// scissor, blending, stencil, MSAA, mip maps, bilinear, discard (needs late z), index buffers, 16-bit/float targets.
+// stencil, MSAA, mip maps, index buffers, 16-bit/float targets. Done: scissor, source-over blending, bilinear (lib/gpu/swr/pixel.fi).
 
 import std.rt
 import std.math
 import jobs.jobs
+import gpu.swr.pixel
 
 export {
     Frame, frame_new, frame_free, frame_clear, frame_setup, frame_draw, frame_hash, frame_pixel,
-    frame_stat_pixels, frame_set_program, frame_set_texture, frame_set_texture_slot, frame_set_kills, vtx_put,
+    frame_stat_pixels, frame_set_scissor, frame_set_blend, frame_set_bilinear, frame_set_program, frame_set_texture, frame_set_texture_slot, frame_set_kills, vtx_put,
     MODE_NATIVE0, MODE_VM, MODE_NATIVE1, MODE_COUNT, LANES, VSTRIDE, BAND,
     ld_f32, st_f32,
 }
@@ -63,6 +64,12 @@ struct Frame {
     jobs: u64, // *mut jobs.Jobs or 0 (single thread)
     kills: bool, // the program may discard: depth is written after shading, only for the lanes that survived
     xtex: u64, // slots 1..3: u64 triples (pixels, w, h)
+    blend: bool, // source over (straight alpha) into the colour buffer, in submission order
+    bilinear: bool, // texture filter: 8-bit fixed point bilinear, texel centres at +0.5
+    sx0: i32, // scissor rectangle [sx0, sx1) x [sy0, sy1)
+    sy0: i32,
+    sx1: i32,
+    sy1: i32,
 }
 
 fn ld_f32(p: u64, i: usize) -> f32 {
@@ -102,6 +109,12 @@ fn frame_new(w: i32, h: i32, max_tri: i32) -> *mut Frame {
     (*f).stats = rt.heap_alloc(((*f).nbands as usize) * 8)
     (*f).jobs = 0 as u64
     (*f).kills = false
+    (*f).blend = false
+    (*f).bilinear = false
+    (*f).sx0 = 0
+    (*f).sy0 = 0
+    (*f).sx1 = w
+    (*f).sy1 = h
     (*f).xtex = rt.heap_alloc((NSLOT - 1) * 24)
     rt.mem_set((*f).xtex, 0 as u8, (NSLOT - 1) * 24)
     return f
@@ -126,6 +139,35 @@ fn frame_set_program(f: *mut Frame, prog: u64) {
 
 fn frame_set_kills(f: *mut Frame, on: bool) {
     (*f).kills = on
+}
+
+fn frame_set_blend(f: *mut Frame, on: bool) {
+    (*f).blend = on
+}
+
+fn frame_set_bilinear(f: *mut Frame, on: bool) {
+    (*f).bilinear = on
+}
+
+fn frame_set_scissor(f: *mut Frame, x0: i32, y0: i32, x1: i32, y1: i32) {
+    var a: i32 = x0
+    var b: i32 = y0
+    var c: i32 = x1
+    var d: i32 = y1
+    if a < 0 { a = 0 }
+    if b < 0 { b = 0 }
+    if c > (*f).w { c = (*f).w }
+    if d > (*f).h { d = (*f).h }
+    (*f).sx0 = a
+    (*f).sy0 = b
+    (*f).sx1 = c
+    (*f).sy1 = d
+}
+
+#[no_inline]
+fn put_px(f: *mut Frame, idx: usize, px: u32) {
+    if (*f).blend { rt.st32((*f).color, idx, pixel.blend_over(px, rt.ld32((*f).color, idx))) }
+    else { rt.st32((*f).color, idx, px) }
 }
 
 fn frame_set_texture_slot(f: *mut Frame, slot: usize, tex: u64, tw: i32, th: i32) {
@@ -366,6 +408,7 @@ fn floor_i32(x: f32) -> i32 {
 }
 
 fn texel(f: *mut Frame, u: f32, v: f32) -> u32 {
+    if (*f).bilinear { return pixel.bilinear((*f).tex, (*f).tw, (*f).th, u, v) }
     let tx: i32 = floor_i32(u * ((*f).tw as f32)) & ((*f).tw - 1)
     let ty: i32 = floor_i32(v * ((*f).th as f32)) & ((*f).th - 1)
     return rt.ld32((*f).tex, (ty as usize) * ((*f).tw as usize) + (tx as usize))
@@ -378,6 +421,7 @@ fn texel_slot(f: *mut Frame, slot: usize, u: f32, v: f32) -> u32 {
     if tp == 0 as u64 { return 0 as u32 }
     let tw: i32 = rt.ld64((*f).xtex, b + 1) as i32
     let th: i32 = rt.ld64((*f).xtex, b + 2) as i32
+    if (*f).bilinear { return pixel.bilinear(tp, tw, th, u, v) }
     let tx: i32 = floor_i32(u * (tw as f32)) & (tw - 1)
     let ty: i32 = floor_i32(v * (th as f32)) & (th - 1)
     return rt.ld32(tp, (ty as usize) * (tw as usize) + (tx as usize))
@@ -400,7 +444,7 @@ fn shade_native0(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
         let b: f32 = (((tp >> 16 as u32) & 255 as u32) as f32) * k * ld_f32(rg(base, 4, l), 0)
         let a: f32 = ((tp >> 24 as u32) as f32) * k * ld_f32(rg(base, 5, l), 0)
         let x: usize = rt.ld32(xs, l) as usize
-        rt.st32((*f).color, (y as usize) * ((*f).w as usize) + x,
+        put_px(f, (y as usize) * ((*f).w as usize) + x,
             pack_unit(r) | (pack_unit(g) << 8 as u32) | (pack_unit(b) << 16 as u32) | (pack_unit(a) << 24 as u32))
         l = l + 1
     }
@@ -425,7 +469,7 @@ fn shade_native1(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
         let b: f32 = tb * cg + cb * 0.1f
         let a: f32 = ((tp >> 24 as u32) as f32) * k * ld_f32(rg(base, 5, l), 0)
         let x: usize = rt.ld32(xs, l) as usize
-        rt.st32((*f).color, (y as usize) * ((*f).w as usize) + x,
+        put_px(f, (y as usize) * ((*f).w as usize) + x,
             pack_unit(r) | (pack_unit(g) << 8 as u32) | (pack_unit(b) << 16 as u32) | (pack_unit(a) << 24 as u32))
         l = l + 1
     }
@@ -568,7 +612,7 @@ fn out_pack(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
     while l < n {
         if kills && rt.ld32(kf, l) != 0 as u32 { l = l + 1; continue }
         let x: usize = rt.ld32(xs, l) as usize
-        rt.st32((*f).color, (y as usize) * ((*f).w as usize) + x,
+        put_px(f, (y as usize) * ((*f).w as usize) + x,
             pack_unit(ld_f32(rg(base, 8, l), 0)) | (pack_unit(ld_f32(rg(base, 9, l), 0)) << 8 as u32)
             | (pack_unit(ld_f32(rg(base, 10, l), 0)) << 16 as u32) | (pack_unit(ld_f32(rg(base, 11, l), 0)) << 24 as u32))
         l = l + 1
@@ -723,6 +767,8 @@ fn band_tri(f: *mut Frame, r: u64, y0: i32, y1: i32, base: u64, xs: u64, rowc: u
     var ye: i64 = ld_i64(r, 4)
     if ys < (y0 as i64) { ys = y0 as i64 }
     if ye > ((y1 - 1) as i64) { ye = (y1 - 1) as i64 }
+    if ys < ((*f).sy0 as i64) { ys = (*f).sy0 as i64 }
+    if ye > (((*f).sy1 - 1) as i64) { ye = ((*f).sy1 - 1) as i64 }
     if ys > ye { return count }
     let px0: i64 = ld_i64(r, 1)
     let px1: i64 = ld_i64(r, 2)
@@ -756,6 +802,8 @@ fn band_tri(f: *mut Frame, r: u64, y0: i32, y1: i32, base: u64, xs: u64, rowc: u
         if s2 > 0 as i64 { let q: i64 = floor_div(0 as i64 - n2, s2) + 1 as i64; if q > lo { lo = q } }
         else if s2 < 0 as i64 { let q: i64 = floor_div(n2 - 1 as i64, 0 as i64 - s2); if q < hi { hi = q } }
         else if n2 <= 0 as i64 { hi = lo - 1 as i64 }
+        if lo < ((*f).sx0 as i64) { lo = (*f).sx0 as i64 }
+        if hi > (((*f).sx1 - 1) as i64) { hi = ((*f).sx1 - 1) as i64 }
         if lo <= hi {
             let yf: f64 = y as f64
             // per row: base value at x = 0 and step per pixel
