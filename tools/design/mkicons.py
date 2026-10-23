@@ -47,7 +47,14 @@ APPS = {
     "run":       ("square-play",      "fb923c", "ea580c", True),
     "cliphist":  ("clipboard-list",   "2dd4bf", "0d9488", True),
     "charmap":   ("omega",            "a78bfa", "7c3aed", False),
+    # W-ICON: the programs that had no symbol (the bar showed the letter tile)
+    "disks":     ("hard-drive",       "94a3b8", "475569", True),
+    "snip":      ("scissors",         "f472b6", "be185d", False),
+    "viewer":    ("image",            "38bdf8", "0369a1", True),
+    "jarvismini": ("message-circle",  "60a5fa", "1d4ed8", True),
 }
+# bundles that do not live in assets/apps (the personal stick builds them from pakete/<name>)
+EXTRA_DIRS = {"jarvismini": "pakete/jarvismini"}
 
 
 def glyph_inner(svg_text):
@@ -89,6 +96,8 @@ def main(argv):
     src, dst = argv[0], argv[1]
     for app, (glyph, top, bot, tint) in APPS.items():
         d = os.path.join(dst, app + ".osp")
+        if not os.path.isdir(d) and app in EXTRA_DIRS:
+            d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(dst.rstrip("/")))), EXTRA_DIRS[app])
         if not os.path.isdir(d):
             print("skip", app)
             continue

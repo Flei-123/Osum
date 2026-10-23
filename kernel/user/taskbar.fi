@@ -704,6 +704,8 @@ static mut cf_year4: u64 = 0
 static mut cf_12h: u64 = 0
 // W-C1: the tray field under the pointer (F_* number, 255 = none); only that one gets a hover plate
 static mut hot_f: u64 = 255
+// W-TBHOVER: the button under the pointer (0 none, 1 start, 2 chevron, 3 task view, 100+i pin, 200+i window), times 2, plus 1 while the left button is down; only a change repaints
+static mut hot_b: u64 = 0
 // r387 (Windows 11 layout, rest): all four are OFF by default.
 static mut cf_tv: u64 = 0 // task view button after the start button
 static mut cf_chev: u64 = 0 // tray chevron: icons only <-> the texts
@@ -2252,6 +2254,7 @@ static mut h_sp2: [u8; 3] = "  \0"
 static mut h_msk: [u8; 9] = "  Maske \0"
 static mut h_gw: [u8; 6] = "  gw \0"
 static mut s_hv: [u8; 16] = "taskbar: hover \0"
+static mut s_hotb: [u8; 17] = "taskbar: hotbtn \0"
 
 fn hover_clear() {
     hover_on = 0
@@ -2347,6 +2350,40 @@ fn hot_field(lx: u64, ly: u64) -> u64 {
     return 255
 }
 
+fn in_rect(lx: u64, ly: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
+    return w != 0 && lx >= x && lx < x + w && ly >= y && ly < y + h
+}
+
+// W-TBHOVER: which bar button (start, chevron, task view, pin, window) the pointer is on
+fn hot_button(lx: u64, ly: u64) -> u64 {
+    if in_rect(lx, ly, st_x, st_y, st_w, st_h) {
+        return 1
+    }
+    if in_rect(lx, ly, chv_x, chv_y, chv_w, chv_h) {
+        return 2
+    }
+    if in_rect(lx, ly, tv_x, tv_y, tv_w, tv_h) {
+        return 3
+    }
+    var i: u64 = 0
+    while i < npin {
+        if in_rect(lx, ly, px_[(i) as usize], py_[(i) as usize],
+            pw_[(i) as usize], ph_[(i) as usize]) {
+            return 100 + i
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < nk {
+        if in_rect(lx, ly, kx[(i) as usize], ky[(i) as usize],
+            kw[(i) as usize], kh[(i) as usize]) {
+            return 200 + i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 // Which of the two displays the pointer is on. Called once per poll,
 // and it changes nothing but `hover_txt` -- the repaint is decided by
 // the caller, so that a pointer standing still costs no drawing.
@@ -2360,10 +2397,16 @@ fn hover_step() -> bool {
     hover_clear()
     let hot_was: u64 = hot_f
     hot_f = 255
+    let hb_was: u64 = hot_b
+    hot_b = 0
     if inside_bar(mx, my) {
         let lx: u64 = mx - bar_x
         let ly: u64 = my - bar_y
         hot_f = hot_field(lx, ly)
+        let hb: u64 = hot_button(lx, ly)
+        if hb != 0 {
+            hot_b = hb * 2 + (wlibc.mouse_btn() & 1)
+        }
         if lx >= f_x[(F_NET) as usize]
             && lx < f_x[(F_NET) as usize] + f_w[(F_NET) as usize]
             && ly >= f_y[(F_NET) as usize]
@@ -2391,7 +2434,12 @@ fn hover_step() -> bool {
             }
         }
     }
-    if was != hover_on || hot_was != hot_f {
+    if hb_was != hot_b {
+        say((&s_hotb[0 as usize]) as u64)
+        sayn(hot_b)
+        nl()
+    }
+    if was != hover_on || hot_was != hot_f || hb_was != hot_b {
         return true
     }
     return !ulib.streq((&old[0 as usize]) as u64,
@@ -4218,24 +4266,41 @@ fn sym_of(app: u64) -> u64 {
         k = k + 1
     }
     pfad[(n) as usize] = 0 as u8
+    let ziel: u64 = (&sym_data[0 as usize]) as u64 + platz * SYM_BYTES
     let fd: u64 = io.open((&pfad[0 as usize]) as u64, 0)
     if ulib.bad(fd) {
         sym_miss(app, 2)
-        return 0
+        return sym_fallback(platz, app, ziel)
     }
     sym_reads = sym_reads + 1
-    let ziel: u64 = (&sym_data[0 as usize]) as u64 + platz * SYM_BYTES
     let got: u64 = io.read(fd, ziel, SYM_BYTES)
     io.close(fd)
     if ulib.bad(got) || got < 12 {
         sym_miss(app, 3)
-        return 0
+        return sym_fallback(platz, app, ziel)
     }
     if !wlibc.icon_ok(ziel) {
         sym_miss(app, 4)
+        return sym_fallback(platz, app, ziel)
+    }
+    sym_ok[(platz) as usize] = 1
+    return ziel
+}
+
+// ROUND W-ICON: a program without a symbol of its own gets the shared letter tile
+// (lib/appicon.fi through wlibc.app_icon) -- the same picture the start menu, Alt+Tab and the task
+// manager show for it -- instead of an empty button.  Counted in sym_fb for the gate.
+static mut sym_fb: u64 = 0
+static mut s_fb: [u8; 19] = "taskbar: sym fb n=\0"
+fn sym_fallback(platz: u64, app: u64, ziel: u64) -> u64 {
+    if !wlibc.app_icon(app, ziel) {
         return 0
     }
     sym_ok[(platz) as usize] = 1
+    sym_fb = sym_fb + 1
+    say((&s_fb[0 as usize]) as u64)
+    sayn(sym_fb)
+    nl()
     return ziel
 }
 

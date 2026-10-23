@@ -697,6 +697,8 @@ fn state_cas(state: u64, i: u64, from: u64, to: u64) -> bool {
         if ap_wake != 0 {
             atomic.fetch_add(ap_wake, 1)
         }
+        // W-SMP3: a task became READY while THIS core is busy -> wake one sleeping application core now (not at core 0's next tick).
+        kick_one(state, i)
     }
     return won
 }
@@ -1884,6 +1886,7 @@ fn start(state: u64, i: u64) -> bool {
     tset(state, i, T_STATE, S_READY)
     atomic.lock_give(state, atomic.L_SCHED)
     irq_restore(flags)
+    kick_one(state, i)
     return true
 }
 
@@ -2350,6 +2353,83 @@ fn pat_here(state: u64, me: u64) {
     atomic.fetch_add(state + 0x3C000 + 0x940, bit)
 }
 
+// W-SMP2: THE KICK. Application cores that have nothing to do sleep in `hlt` with a 10 Hz tick (W-TSC); nothing woke them when a task
+// became READY, so core 0 took everything and the others stayed at 0 %. Called from the boot core's timer tick (scheduler lock held)
+// when core 0 itself is busy: for every READY task that a sleeping core may run, send ONE timer-vector IPI to such a core. The ISR is
+// the normal tick (harmless: counted in C_TICKS), the core leaves `hlt`, and its idle loop calls `yield_now` -> `pick` takes the task.
+// A core with a kick pending is not kicked again; `nokick` on the command line switches all of it off (counter-proof).
+// W-SMP3: the DIRECT kick -- the same IPI as `kick_idle_cores`, but for ONE task that just became READY (`state_cas` to READY, `start`).
+// Only when the calling core is busy with a real task: an idle core takes the new task itself, so a quiet desktop sends none (idle budget).
+fn kick_one(state: u64, i: u64) {
+    if kstate.mode_on(state, kstate.M_NOKICK) {
+        return
+    }
+    let nc: u64 = cpu.count(state)
+    if nc <= 1 {
+        return
+    }
+    let me: u64 = cpu.here(state)
+    if me < 8 && desk_hlt[me as usize] != 0 {
+        return
+    }
+    let cur: u64 = current(state)
+    if cur >= kstate.MAX_TASKS || tget(state, cur, T_KIND) == K_IDLE || cur == i {
+        return
+    }
+    var k: u64 = 1
+    while k < nc && k < 8 {
+        if k != me && cpu.get(state, k, cpu.C_ONLINE) != 0 && cpu.x_get(state, k, cpu.X_HALTED) != 0
+        && cpu.x_get(state, k, cpu.X_PEND) == 0 && may_run(state, i, k) && darf_ring3(state, i, k) {
+            cpu.x_set(state, k, cpu.X_PEND, 1)
+            cpu.x_add(state, k, cpu.X_KICKTX, 1)
+            apic.ipi(state, cpu.apic_id(state, k), apic.VEC_TIMER | 0x4000)
+            return
+        }
+        k = k + 1
+    }
+}
+
+fn kick_idle_cores(state: u64) {
+    if kstate.mode_on(state, kstate.M_NOKICK) {
+        return
+    }
+    let nc: u64 = cpu.count(state)
+    if nc <= 1 {
+        return
+    }
+    var sleeping: u64 = 0
+    var k: u64 = 1
+    while k < nc && k < 8 {
+        if cpu.get(state, k, cpu.C_ONLINE) != 0 && cpu.x_get(state, k, cpu.X_HALTED) != 0
+        && cpu.x_get(state, k, cpu.X_PEND) == 0 {
+            sleeping = sleeping | (1 << k)
+        }
+        k = k + 1
+    }
+    if sleeping == 0 {
+        return
+    }
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n && sleeping != 0 {
+        if tget(state, i, T_STATE) == S_READY && tget(state, i, T_KIND) != K_IDLE {
+            var j: u64 = 1
+            while j < nc && j < 8 {
+                if (sleeping & (1 << j)) != 0 && may_run(state, i, j) && darf_ring3(state, i, j) {
+                    cpu.x_set(state, j, cpu.X_PEND, 1)
+                    cpu.x_add(state, j, cpu.X_KICKTX, 1)
+                    apic.ipi(state, cpu.apic_id(state, j), apic.VEC_TIMER | 0x4000)
+                    sleeping = sleeping ^ (1 << j)
+                    j = 8
+                } else {
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
 fn on_tick(state: u64) {
     let me: u64 = cpu.here(state)
     cpu.add(state, me, cpu.C_TICKS, 1)
@@ -2400,8 +2480,26 @@ fn on_tick(state: u64) {
     // Differenz zweier Differenzen, und ohne diese Zeile fehlt die
     // Haelfte davon. Zwei Zeilen im Zeitgeber, kein Aufruf, keine
     // Sperre -- der Zaehler gehoert dem Kern, auf dem er hochgeht.
-    if tget(state, cur, T_KIND) == K_IDLE || in_wait {
+    let idle_now: bool = tget(state, cur, T_KIND) == K_IDLE || in_wait
+    if idle_now {
         cpu.add(state, me, cpu.C_IDLETICKS, 1)
+    }
+    // W-SMP2: TIME-weighted accounting. An idle application core ticks at 10 Hz and a busy one at 100 Hz, so tick counts of
+    // different cores must not be added up; the cycles since this core's previous tick are booked to what it was doing now.
+    let tsc_now: u64 = apic.tsc()
+    let tsc_last: u64 = cpu.x_get(state, me, cpu.X_LASTTSC)
+    if tsc_last != 0 && tsc_now > tsc_last {
+        cpu.x_add(state, me, cpu.X_TOTCYC, tsc_now - tsc_last)
+        if idle_now {
+            cpu.x_add(state, me, cpu.X_IDLECYC, tsc_now - tsc_last)
+        }
+    }
+    cpu.x_set(state, me, cpu.X_LASTTSC, tsc_now)
+    if me != 0 && cpu.x_get(state, me, cpu.X_PEND) != 0 {
+        cpu.x_add(state, me, cpu.X_KICKRX, 1)
+    }
+    if me == 0 && !idle_now {
+        kick_idle_cores(state)
     }
     // RUNDE LEISTE: zwei Lesezugriffe je Schlag. Der Preis dafuer,
     // dass ein Kernstapel, der unten herauslaeuft, nicht mehr still

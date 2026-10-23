@@ -800,6 +800,15 @@ class Fahrer:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        # W-MERGEB2: `traytile<N>` -- tile N of the tray flyout (traypop.fi reports `traypop: tile i=N x= y= w= h=` in the
+        # coordinates of the flyout window, which stands at the last `traypop: open ... x= y=`).
+        if name.startswith("traytile") and name[8:].isdigit():
+            o = letzte(r"traypop: open n=\d+ x=(\d+) y=(\d+)")
+            m = letzte(r"traypop: tile i=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % name[8:])
+            if o is None or m is None:
+                return None
+            return (int(o.group(1)) + int(m.group(1)), int(o.group(2)) + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
         if name == "glocke":
             m = letzte(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
