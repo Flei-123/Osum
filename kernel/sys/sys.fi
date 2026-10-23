@@ -2793,6 +2793,18 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_READV {
         return do_writev(state, me, a0, a1, a2, false)
     }
+    if number == 295 || number == 296 {
+        return do_pvec(state, me, a0, a1, a2, a3, number == 296)
+    }
+    if number == 327 || number == 328 {
+        if a3 == (0 -% 1) {
+            return do_writev(state, me, a0, a1, a2, number == 328)
+        }
+        return do_pvec(state, me, a0, a1, a2, a3, number == 328)
+    }
+    if number == 247 {
+        return do_waitid(state, me, a0, a1, a2, a3)
+    }
     // `set_tid_address` gibt nur die eigene Kennung zurueck. Dieser Kern
     // raeumt keine Futex-Adresse beim Fadenende auf, also wird die
     // Adresse NICHT gemerkt -- was hier gelogen waere, ist ein
@@ -8001,6 +8013,113 @@ fn do_writev(state: u64, me: u64, fd: u64, iov: u64, n: u64, schreiben: bool) ->
         i = i + 1
     }
     return total
+}
+
+fn do_pvec(state: u64, me: u64, fd: u64, iov: u64, n: u64, off: u64, writing: bool) -> u64 {
+    if n > 1024 {
+        return neg(errno.E_INVAL)
+    }
+    if n == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, iov, n * 16) {
+        return neg(errno.E_FAULT)
+    }
+    var total: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let base: u64 = get_user64(state, me, iov + i * 16)
+        let len: u64 = get_user64(state, me, iov + i * 16 + 8)
+        if len != 0 {
+            let r: u64 = do_pio(state, me, fd, base, len, off + total, writing)
+            if (r >> 63) != 0 {
+                if total == 0 {
+                    return r
+                }
+                return total
+            }
+            total = total + r
+            if r < len {
+                return total
+            }
+        }
+        i = i + 1
+    }
+    return total
+}
+
+fn do_waitid(state: u64, me: u64, idtype: u64, id: u64, info: u64, options: u64) -> u64 {
+    if (options & 4) == 0 {
+        return neg(errno.E_INVAL)
+    }
+    if info != 0 && !proc.user_ok(state, me, info, 128) {
+        return neg(errno.E_FAULT)
+    }
+    var want: u64 = 0
+    if idtype == 1 {
+        want = id
+    }
+    let child: u64 = find_zombie_child(state, me, want)
+    if child >= kstate.MAX_TASKS {
+        if find_child(state, me, want) >= kstate.MAX_TASKS {
+            return neg(errno.E_CHILD)
+        }
+        if info != 0 {
+            var z: u64 = 0
+            while z < 16 {
+                put64(state, me, info + z * 8, 0)
+                z = z + 1
+            }
+        }
+        if (options & 1) != 0 {
+            return 0
+        }
+        if info == 0 || (options & 0x1000000) != 0 {
+            return neg(errno.E_INVAL)
+        }
+        var anyw: u64 = want
+        if want == 0 {
+            anyw = 0 -% 1
+        }
+        let w: u64 = do_wait4(state, me, anyw, info + 96, 0)
+        if (w >> 63) != 0 {
+            return w
+        }
+        let st: u64 = get32(state, me, info + 96)
+        put32(state, me, info + 96, 0)
+        put32(state, me, info, 17)
+        if (st & 127) != 0 {
+            put32(state, me, info + 8, 2)
+            put32(state, me, info + 24, st & 127)
+        } else {
+            put32(state, me, info + 8, 1)
+            put32(state, me, info + 24, (st >> 8) & 255)
+        }
+        put32(state, me, info + 16, w)
+        return 0
+    }
+    if info != 0 {
+        let code: u64 = sched.tget(state, child, sched.T_EXIT)
+        let sl: u64 = sched.tget(state, child, sched.T_SIGLAST)
+        var z2: u64 = 0
+        while z2 < 16 {
+            put64(state, me, info + z2 * 8, 0)
+            z2 = z2 + 1
+        }
+        put32(state, me, info, 17)
+        if (sl & 256) != 0 {
+            put32(state, me, info + 8, 2)
+            put32(state, me, info + 24, sl & 127)
+        } else {
+            put32(state, me, info + 8, 1)
+            put32(state, me, info + 24, code & 255)
+        }
+        put32(state, me, info + 16, sched.tget(state, child, sched.T_PID))
+    }
+    if (options & 0x1000000) == 0 {
+        proc.reap(state, child)
+    }
+    return 0
 }
 
 fn do_arch_prctl(state: u64, me: u64, code: u64, addr: u64) -> u64 {
