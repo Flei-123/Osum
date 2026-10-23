@@ -33,7 +33,7 @@ t = open(ser, "rb").read().decode("latin1")
 def sg(v):
     v = int(v)
     return v - (1 << 64) if v >= (1 << 63) else v
-snaps = [(int(m[1]), int(m[2]), sg(m[3]), sg(m[4]), int(m[5]), int(m[6])) for m in
+snaps = [(int(m[0]), int(m[1]), sg(m[2]), sg(m[3]), int(m[4]), int(m[5])) for m in
          re.findall(r"wm: snap id=(\d+) zone=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t)]
 abg = [(sg(a[1]), sg(a[2]), int(a[3]), int(a[4])) for a in re.findall(r"wm: abgelegt id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t)]
 bar = 0

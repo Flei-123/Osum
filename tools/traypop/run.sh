@@ -13,6 +13,10 @@
 #   3. both item lines are reported (`traypop: item`), the bar did not say `no traypop`
 #   4. a second click on the chevron -> `traypop: shut`, the rectangle is as before again (COUNTER-PROOF)
 #   5. COUNTER-PROOF: the first picture (flyout closed) has no `traypop: open` before the click
+#   6. (W-MERGEB2) tile RASTER (tools/traypop/raster.py): one tile size, even pitch, inside the flyout; icon centre within 1 px of
+#      the tile centre; hover on tile 0 changes tile 0 and not tile 1; right click on tile 0 -> `traypop: menu id=` (item 0) + a
+#      menu in the picture; Esc leaves the menu (back to the list), a second Esc shuts (`traypop: shut esc`, rectangle as before).
+#      Counter-proofs inside raster.py (a moved tile / a shifted icon is caught).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)
@@ -33,8 +37,24 @@ klickauf chevron
 warteauf 'traypop: open' || 25
 warte 3
 foto 01-open
+fahreauf traytile0
+warte 2
+foto 03-hover
+rklickauf traytile0
+warteauf 'traypop: menu' || 15
+warte 2
+foto 04-menu
+taste esc
+warte 2
+foto 05-back
+taste esc
+warteauf 'traypop: shut esc' || 15
+warte 3
+foto 06-esc
 klickauf chevron
-warteauf 'traypop: shut' || 25
+warte 4
+klickauf chevron
+warteauf 'traypop: shut toggle' || 25
 warte 3
 foto 02-shut
 EOF
@@ -90,7 +110,7 @@ for MODE in $MODES; do
         tbextra="tray_chevron=1" drehbuch="$TMPD/dreh.txt" > "$TMPD/o-$MODE.log" 2>&1 < /dev/null
     S="$O/serial.txt"
     if [ -n "${TRAYPOP_OUT:-}" ]; then mkdir -p "$TRAYPOP_OUT/$MODE"; cp "$O"/*.ppm "$S" "$TRAYPOP_OUT/$MODE/" 2>/dev/null; fi
-    if [ ! -s "$O/02-shut.ppm" ]; then
+    if [ ! -s "$O/02-shut.ppm" ] || [ ! -s "$O/06-esc.ppm" ]; then
         bad "$MODE: no pictures: $(tail -n 3 "$TMPD/o-$MODE.log" | tr '\n' ' ')"
         continue
     fi
@@ -111,6 +131,14 @@ for MODE in $MODES; do
     grep -aq 'traypop: shut' "$S" && ok "$MODE: second click on the chevron shuts it" || bad "$MODE: no 'traypop: shut'"
     d2=$(diffpix "$O/00-before.ppm" "$O/02-shut.ppm" "$x" "$y" "$w" "$h")
     [ "$d2" -le 3000 ] && ok "$MODE: after the shut the rectangle is as before ($d2 px differ; the clock ticks)" || bad "$MODE: the flyout is still in the picture ($d2 px differ)"
+    # W-MERGEB2: the raster, hover, right click, Esc
+    while IFS= read -r l; do case "$l" in "OK "*) ok "${l#OK    }" ;; "FAIL "*) bad "${l#FAIL  }" ;; esac; done \
+        < <(python3 -I tools/traypop/raster.py "$S" "$O/01-open.ppm" "$O/03-hover.ppm" "$O/04-menu.ppm" "$MODE")
+    d3=$(diffpix "$O/04-menu.ppm" "$O/05-back.ppm" "$x" "$y" "$w" "$h")
+    [ "$d3" -ge 2000 ] && ok "$MODE: the first Esc leaves the item menu (the list is back, $d3 px differ)" || bad "$MODE: the first Esc changed only $d3 px"
+    grep -aq 'traypop: shut esc' "$S" && ok "$MODE: the second Esc shuts the flyout (traypop: shut esc)" || bad "$MODE: no 'traypop: shut esc'"
+    d4=$(diffpix "$O/00-before.ppm" "$O/06-esc.ppm" "$x" "$y" "$w" "$h")
+    [ "$d4" -le 3000 ] && ok "$MODE: after the Esc the rectangle is as before ($d4 px differ)" || bad "$MODE: the flyout stayed in the picture after Esc ($d4 px)"
     grep -aq 'taskbar: no traypop' "$S" && bad "$MODE: the bar has no traypop host" || ok "$MODE: the bar had a host"
 done
 echo; echo "TRAYPOP: $pass passed, $fail failed"
