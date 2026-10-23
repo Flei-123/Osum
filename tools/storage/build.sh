@@ -107,7 +107,7 @@ EOF
 # Runde INSTALL mehrblockig sein (mkfs.py, `bmblocks`), 8192 benutzen
 # k16, metal und hotplug schon. gross.img bleibt bei 4096: es braucht
 # nur `du`, und /bin/speicher steht dort gar nicht.
-INHALT_BLOCKS=${INHALT_BLOCKS:-8192}
+INHALT_BLOCKS=${INHALT_BLOCKS:-16384}
 ARGS=(build "$OUT/inhalt.img" "$INHALT_BLOCKS" /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf"
       "/lib/sans.ttf=assets/osum-sans.ttf"
