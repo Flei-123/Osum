@@ -419,7 +419,7 @@ hat_nicht "$TMPD/lesen.txt" "EINSEH~1" "und NICHT die 8+3-Kruecke"
 
 # 6b: SCHREIBEN. Was Osum schreibt, holt `mcopy` wieder heraus.
 rc=$(lauf schreiben "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
-    "osum nokbd vfs script=echo osum-war-hier > /mnt/neu.txt;cp /mnt/blob.bin /mnt/kopie.bin;mkdir /mnt/neuverz;echo tief > /mnt/neuverz/x.txt;rm /mnt/hello.txt;umount /mnt;mount")
+    "osum nokbd vfs script=echo \"unlock hdb\" > /dev/wlock;echo osum-war-hier > /mnt/neu.txt;cp /mnt/blob.bin /mnt/kopie.bin;mkdir /mnt/neuverz;echo tief > /mnt/neuverz/x.txt;rm /mnt/hello.txt;umount /mnt;mount")
 num "der Schreibfall beendet sich selbst" "$rc" eq 21
 Z="$TMPD/live2-schreiben.img"
 mdir -i "$Z@@1048576" :: > "$TMPD/mdir1.txt" 2>&1
@@ -450,7 +450,7 @@ if command -v fsck.fat >/dev/null 2>&1; then
     # "unbekannt" -- fsck sagt es dann, und genau daran sieht man, dass
     # `umount` wirklich etwas tut.
     rc=$(lauf ohnesync "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
-        "osum nokbd vfs script=echo x > /mnt/ohnesync.txt")
+        "osum nokbd vfs script=echo \"unlock hdb\" > /dev/wlock;echo x > /mnt/ohnesync.txt")
     dd if="$TMPD/live2-ohnesync.img" of="$TMPD/teil2.img" bs=512 skip=2048 status=none
     fsck.fat -n "$TMPD/teil2.img" > "$TMPD/fsck2.txt" 2>&1
     hat "$TMPD/fsck2.txt" "Free cluster summary" \
