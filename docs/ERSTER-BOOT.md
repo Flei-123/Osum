@@ -11,3 +11,10 @@
 8. **Panik-Bild:** immer FOTOGRAFIEREN (ganzer Schirm, scharf) -- dort steht der Fehlerort. Dazu `panic-N.txt` mitschicken.
 9. **Bridge:** mit Netz (Kabel; WLAN 8265 nur mit Firmware) meldet sich `jarvisd` am Server an. Ohne Netz (safe mode) laeuft alles lokal, keine Bridge.
 10. **Rueckmeldung:** Foto + `/var/jarvis/*` + Modell/BIOS-Version (HP: F10 BIOS-Setup) an den Chat, nichts selbst reparieren.
+
+## Fern-Test per USB-Tethering (Zwischenloesung bis WLAN laeuft)
+1. **Handy vorbereiten:** Android: Einstellungen > Netzwerk > Hotspot und Tethering > **USB-Tethering einschalten** (das Handy braucht dafuer Mobilfunk oder WLAN). Alternativ ein USB-Ethernet-Dongle (ASIX AX88772, CDC-ECM) mit LAN-Kabel zum Router.
+2. **Kabel einstecken:** Handy/Dongle in einen USB-Port des HP stecken. Beim Handy erst NACH dem Boot oder davor -- beides geht (Stecken im laufenden Betrieb ist eingebaut).
+3. **Warten:** bis zu 1 Minute. OrientOS holt sich selbst eine Adresse (DHCP) und `jarvisd` meldet sich an der Bruecke an (nichts eintippen). DHCP versucht es nach Fehlschlag mit 5/10/20/40/60 s Abstand erneut.
+4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
+5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
