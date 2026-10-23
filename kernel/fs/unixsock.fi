@@ -84,7 +84,7 @@ export {
     // der geteilte Speicher
     map_room, map_note, map_release, map_release_all, maps_live, map_rec_base, map_rec_word, shm_file_find, shm_file_mark, shm_file_key,
     map_arena_find, shm_demand, demand_lock, demand_unlock, mm_lock, mm_unlock, scratch_lock, scratch_unlock, vm_lock, vm_unlock, vm_held, vm_oom_note, vm_oom_take, shm_lazy, shm_frame_demand, shm_resident, UM_LAZY, UM_WRITE,
-    shm_new, shm_free, shm_used, shm_pages, shm_frame, shm_grow, shm_new_contig, shm_wrap, shm_contig, shm_base, shm_flags, shm_max_pages,
+    shm_new, shm_new_any, shm_free, shm_used, shm_pages, shm_frame, shm_grow, shm_new_contig, shm_wrap, shm_contig, shm_base, shm_flags, shm_max_pages,
     shm_ref, shm_unref, shm_refs, shm_size, shm_set_size,
     shm_seals, shm_add_seals, shm_wmaps, shm_wmap_take, shm_wmap_drop,
     // Zahlen fuer die Abnahme
@@ -286,11 +286,19 @@ fn pg_at(i: u64, p: u64) -> u64 {
 
 // r710: where the address of page `p` of paged object `i` is stored: the inline table for the first 256 pages, the out-of-line
 // table (SM_BASE) behind it. 0 = no such slot (table not grown that far yet).
+fn inline_cap(i: u64) -> u64 {
+    if i < USHM_PAGED {
+        return SHM_PAGES_MAX
+    }
+    return 0
+}
+
 fn pg_slot(state: u64, i: u64, p: u64) -> u64 {
-    if p < SHM_PAGES_MAX {
+    let cap: u64 = inline_cap(i)
+    if p < cap {
         return pg_at(i, p)
     }
-    let q: u64 = p - SHM_PAGES_MAX
+    let q: u64 = p - cap
     if q >= kstate.get(state, sm_at(i) + SM_TABN) * PG_PER_TAB {
         return 0
     }
@@ -1128,6 +1136,30 @@ fn shm_new(state: u64) -> u64 {
     return USHM_MAX
 }
 
+fn shm_init_paged(state: u64, i: u64) {
+    kstate.set(state, sm_at(i) + SM_USED, 1)
+    kstate.set(state, sm_at(i) + SM_REFS, 1)
+    kstate.set(state, sm_at(i) + SM_PAGES, 0)
+    kstate.set(state, sm_at(i) + SM_SIZE, 0)
+    kstate.set(state, sm_at(i) + SM_SEALS, 0)
+    kstate.set(state, sm_at(i) + SM_BASE, 0)
+    kstate.set(state, sm_at(i) + SM_TABN, 0)
+    kstate.set(state, sm_at(i) + SM_FLAGS, 0)
+    kstate.add(state, UCNT_OFF + C_SHMS, 1)
+}
+
+fn shm_new_any(state: u64) -> u64 {
+    var i: u64 = USHM_PAGED
+    while i < USHM_MAX {
+        if kstate.get(state, sm_at(i) + SM_USED) == 0 {
+            shm_init_paged(state, i)
+            return i
+        }
+        i = i + 1
+    }
+    return shm_new(state)
+}
+
 // COMPOSITOR S3: a CONTIGUOUS object (memfd_create with MFD_FRAMES). Its frames are one run, so the window server can use the
 // run as a window buffer and compose from what the client paints. High slots first (they have no page table and cannot be a
 // paged object), then the paged ones.
@@ -1520,7 +1552,7 @@ fn shm_frame(state: u64, i: u64, p: u64) -> u64 {
     if shm_contig(state, i) {
         return kstate.get(state, sm_at(i) + SM_BASE) + p * mem.FRAME_SIZE
     }
-    if p >= SHM_PAGES_LIMIT || i >= USHM_PAGED {
+    if p >= SHM_PAGES_LIMIT {
         return 0
     }
     let slot: u64 = pg_slot(state, i, p)
@@ -1532,10 +1564,11 @@ fn shm_frame(state: u64, i: u64, p: u64) -> u64 {
 
 // r710: make the out-of-line table big enough for `n` pages (copy the old one over, free it). 0 = ok, else an errno.
 fn shm_tab_for(state: u64, i: u64, n: u64) -> u64 {
-    if n <= SHM_PAGES_MAX {
+    let cap: u64 = inline_cap(i)
+    if n <= cap {
         return 0
     }
-    let want: u64 = (n - SHM_PAGES_MAX + PG_PER_TAB - 1) / PG_PER_TAB
+    let want: u64 = (n - cap + PG_PER_TAB - 1) / PG_PER_TAB
     let have: u64 = kstate.get(state, sm_at(i) + SM_TABN)
     if want <= have {
         return 0
