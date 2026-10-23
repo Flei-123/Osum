@@ -452,6 +452,12 @@ BERICHTE = [
     (3, ptp([(1, 1300, 1070), (2, 1800, 1070)]), "pad: rollen"),
     #     abheben
     (3, ptp([]), "pad: abheben"),
+    #     W-TPSET4 r1740: the legacy path (no gesture machine) maps a press with the finger in the bottom right
+    #     corner (3400/2000 of 3616/2184) to the RIGHT button, a press in the middle stays left
+    (3, ptp([(1, 3400, 2000)]), "pad: ecke aufsetzen"),
+    (3, ptp([(1, 3400, 2000)], knopf=1), "pad: ecke klick"),
+    (3, ptp([(1, 3400, 2000)], knopf=0), "pad: ecke los"),
+    (3, ptp([]), "pad: ecke abheben"),
     # --- L-002 r797: GESTURES. Played only with `hidgest` (gbase).
     #     Pad 3616 x 2184: slop = 56, edge strip x >= 3255, swipe >= 602.
     #     The replay clock runs 20 ms per report (tap limit 250 ms).
@@ -494,6 +500,53 @@ BERICHTE = [
     (3, ptp([(1, 1500, 1000, 0), (2, 2000, 1200)]), "gest: ballen+finger halten"),
     (3, ptp([]), "gest: ballen+finger ende"),           # ONE left click
     (3, ptp([]), "gest: ende"),
+    # --- W-TPSET4: multi-finger section (still part of the hidgest replay).
+    #     tap-and-drag: tap, then touch again quickly and move 300 units: left button held while moving
+    (3, ptp([(1, 1500, 1000)]), "mf: drag tap aufsetzen"),
+    (3, ptp([(1, 1500, 1000)]), "mf: drag tap halten"),
+    (3, ptp([]), "mf: drag tap ende"),
+    (3, ptp([(1, 1500, 1000)]), "mf: drag aufsetzen"),
+    (3, ptp([(1, 1800, 1000)]), "mf: drag ziehen"),
+    (3, ptp([(1, 2100, 1000)]), "mf: drag weiter"),
+    (3, ptp([]), "mf: drag ende"),
+    #     pinch closing: -200 units = one wheel step the other way, with a virtual Ctrl around it
+    (3, ptp([(1, 1000, 1000), (2, 1800, 1000)]), "mf: zu aufsetzen"),
+    (3, ptp([(1, 1100, 1000), (2, 1700, 1000)]), "mf: zu entscheiden"),
+    (3, ptp([(1, 1200, 1000), (2, 1600, 1000)]), "mf: zu weiter"),
+    (3, ptp([]), "mf: zu ende"),
+    #     three-finger swipes: right (dir 2), up (dir 3), down (dir 4)
+    (3, ptp([(1, 1500, 1000), (2, 1900, 1000), (3, 2300, 1000)]), "mf: rechts aufsetzen"),
+    (3, ptp([(1, 2200, 1000), (2, 2600, 1000), (3, 3000, 1000)]), "mf: rechts wisch"),
+    (3, ptp([]), "mf: rechts ende"),
+    (3, ptp([(1, 1500, 1500), (2, 1900, 1500), (3, 2300, 1500)]), "mf: hoch aufsetzen"),
+    (3, ptp([(1, 1500, 800), (2, 1900, 800), (3, 2300, 800)]), "mf: hoch wisch"),
+    (3, ptp([]), "mf: hoch ende"),
+    (3, ptp([(1, 1500, 800), (2, 1900, 800), (3, 2300, 800)]), "mf: runter aufsetzen"),
+    (3, ptp([(1, 1500, 1500), (2, 1900, 1500), (3, 2300, 1500)]), "mf: runter wisch"),
+    (3, ptp([]), "mf: runter ende"),
+    #     clickpad press: finger in the bottom right 25 % box = right button, elsewhere = left button
+    (3, ptp([(1, 3400, 2000)]), "mf: ecke aufsetzen"),
+    (3, ptp([(1, 3400, 2000)], knopf=1), "mf: ecke klick"),
+    (3, ptp([(1, 3400, 2000)], knopf=0), "mf: ecke los"),
+    (3, ptp([]), "mf: ecke ende"),
+    (3, ptp([(1, 1500, 1000)]), "mf: mitte aufsetzen"),
+    (3, ptp([(1, 1500, 1000)], knopf=1), "mf: mitte klick"),
+    (3, ptp([(1, 1500, 1000)], knopf=0), "mf: mitte los"),
+    (3, ptp([]), "mf: mitte ende"),
+    #     options changed in the middle of the script (corner, pinch, swipe3 off): the same moves do something else
+    (3, ptp([]), "mf: optionen aus"),
+    (3, ptp([(1, 3400, 2000)]), "mf: aus ecke aufsetzen"),
+    (3, ptp([(1, 3400, 2000)], knopf=1), "mf: aus ecke klick"),
+    (3, ptp([(1, 3400, 2000)], knopf=0), "mf: aus ecke los"),
+    (3, ptp([]), "mf: aus ecke ende"),
+    (3, ptp([(1, 1000, 1000), (2, 1800, 1000)]), "mf: aus zu aufsetzen"),
+    (3, ptp([(1, 1100, 1000), (2, 1700, 1000)]), "mf: aus zu entscheiden"),
+    (3, ptp([(1, 1200, 1000), (2, 1600, 1000)]), "mf: aus zu weiter"),
+    (3, ptp([]), "mf: aus zu ende"),
+    (3, ptp([(1, 2400, 1000), (2, 2800, 1000), (3, 3200, 1000)]), "mf: aus wisch aufsetzen"),
+    (3, ptp([(1, 1700, 1000), (2, 2100, 1000), (3, 2500, 1000)]), "mf: aus wisch links"),
+    (3, ptp([]), "mf: aus wisch ende"),
+    (3, ptp([]), "mf: ende"),
 ]
 
 
@@ -819,7 +872,7 @@ def firn():
     a("import lib.kstate")
     a("")
     a("export { count, len_of, name_of, load, GUTE,")
-    a("    bcount, bdesc, blen, bload, alen, aload, gbase }")
+    a("    bcount, bdesc, blen, bload, alen, aload, gbase, obase }")
     a("")
     a("const N: u64 = %d" % len(ALLE))
     a("// Die ersten GUTE Beschreibungen muessen durchgehen, die uebrigen")
@@ -917,6 +970,11 @@ def firn():
     a("// reports must stay exactly as it was measured.")
     a("fn gbase() -> u64 {")
     a("    return %d" % nr_von("gest: tap aufsetzen"))
+    a("}")
+    a("")
+    a("// W-TPSET4: the report where the replay switches corner / pinch / swipe3 off.")
+    a("fn obase() -> u64 {")
+    a("    return %d" % nr_von("mf: optionen aus"))
     a("}")
     a("")
     a("// Zu welcher Beschreibung dieser Bericht gehoert.")

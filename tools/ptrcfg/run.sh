@@ -45,7 +45,11 @@ echo "== 2. schema =="
 for k in mouse.speed mouse.accel mouse.natural mouse.gestures; do
     grep -q "^setting $k " etc/settings.schema && ok "$k in settings.schema" || bad "$k missing"
 done
-[ "$(grep -c 'store /etc/mouse.conf' etc/settings.schema)" = 4 ] \
+nk=0
+for k in speed accel natural gestures; do
+    grep -q "store /etc/mouse.conf $k\$" etc/settings.schema && nk=$((nk+1))
+done
+[ "$nk" = 4 ] \
     && ok "four keys stored in /etc/mouse.conf (speed accel natural gestures)" || bad "store lines wrong"
 
 echo "== 3. kernel =="

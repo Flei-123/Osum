@@ -302,11 +302,11 @@ gleich "zwei Finger rollen: genau eine Radrastung (nicht beim Entscheiden)" \
 gleich "zwei Finger seitwaerts: genau eine waagrechte Radrastung nach rechts, kein Zeigerpaket" \
     "hidev: geste seitwaerts dx=0xc8|hidev: hrad 0x1" \
     "$(seg "gest: seit aufsetzen" "gest: kneifen aufsetzen" | grep -v 'geste seitwaerts dx=0x0' | tr '\n' '|' | sed 's/|$//')"
-gleich "Kneifen: Abstand +200, kein Zeigerpaket" \
-    "hidev: geste zoom d=0xc8" \
+gleich "Kneifen: virtuelles Strg, EIN Radschritt (weg vom Nutzer = 0xf), Abstand +200, Strg los, kein Zeigerpaket" \
+    "hidev: strg 1|hidev: zoomrad 0xf|hidev: geste zoom d=0xc8|hidev: strg 0" \
     "$(seg "gest: kneifen aufsetzen" "gest: wisch aufsetzen" | tr '\n' '|' | sed 's/|$//')"
-gleich "Drei-Finger-Wisch nach links: EIN Wisch (Richtung 1, 3 Finger)" \
-    "hidev: geste wisch 1 n=3" \
+gleich "Drei-Finger-Wisch nach links: Aktion 1 (naechstes Fenster, wm.gest_action), EIN Wisch (Richtung 1, 3 Finger)" \
+    "hidev: aktion 0x1|hidev: geste wisch 1 n=3" \
     "$(seg "gest: wisch aufsetzen" "gest: handballen aufsetzen" | tr '\n' '|' | sed 's/|$//')"
 gleich "Handballen allein (Zuversicht 0): kein Klick, keine Bewegung" "0" \
     "$(seg "gest: handballen aufsetzen" "gest: ballen+finger aufsetzen" | wc -l)"
@@ -314,16 +314,61 @@ gleich "Handballen + Finger: der Finger tippt, der Ballen zaehlt nicht" \
     "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
     "$(seg "gest: ballen+finger aufsetzen" "gest: ende" | tr '\n' '|' | sed 's/|$//')"
 GL=$(grep -a '^hidin: geste an=1' "$G")
-gleich "Zaehler: 4 Tipps" "4" "$(echo "$GL" | sed 's/.* tipp=\([0-9]*\).*/\1/')"
+gleich "Zaehler: 5 Tipps (4 + der Tipp vor dem Ziehen)" "5" "$(echo "$GL" | sed 's/.* tipp=\([0-9]*\).*/\1/')"
 gleich "Zaehler: 2 Rollen" "2" "$(echo "$GL" | sed 's/.* rollen=\([0-9]*\).*/\1/')"
 gleich "Zaehler: 1 Seitwaerts-Rollen, 1 waagrechte Rastung" "1/1" \
     "$(echo "$GL" | sed 's/.* seit=\([0-9]*\).*/\1/')/$(echo "$GL" | sed 's/.* hrad=\([0-9]*\).*/\1/')"
-gleich "Zaehler: 1 Wisch, 1 Kneifen" "1/1" \
+gleich "Zaehler: 5 Wische, 2 Kneifen (links/rechts/hoch/runter + links bei ausgeschalteter Aktion; auf + zu)" "5/2" \
     "$(echo "$GL" | sed 's/.* wisch=\([0-9]*\).* zoom=\([0-9]*\).*/\1\/\2/')"
 gleich "Zaehler: letzter Wisch = Richtung 1, 3 Finger (259)" "259" \
     "$(echo "$GL" | sed 's/.* letzt=\([0-9]*\).*/\1/')"
 gleich "hidgest: kein Bericht ging verloren" "0" \
     "$(grep -a 'hidin: ta=' "$G" | sed 's/.*weg=\([0-9]*\).*/\1/')"
+
+# ----------------------------------------------------------------------
+echo
+echo "== 4c. Mehrfinger (W-TPSET4): Ziehen, Kneifen, Wisch, Ecke, Optionswechsel mitten im Lauf"
+# Same replay as 4b (the mf: reports follow "gest: ende"). Expected values are what lib/touchgest decides
+# (tools/touchgest/run.sh proves the machine itself); this proves the KERNEL glue: tap-and-drag holds the left
+# button, a pinch is a virtual Ctrl + one wheel step, a 3-finger swipe reaches wm.gest_action, the corner press is a
+# right click, and the option change in the middle of the script (corner / pinch / swipe3 off) changes all three.
+mseg() { seg "$1" "$2" | tr '\n' '|' | sed 's/|$//'; }
+gleich "Ziehen: Tipp = Linksklick" "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
+    "$(mseg "mf: drag tap aufsetzen" "mf: drag aufsetzen")"
+gleich "Ziehen: zweites Aufsetzen haelt die linke Taste, Bewegung bei gedrueckter Taste, Loslassen gibt sie frei" \
+    "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|hidev: maus 0x1 x=0x64 y=0x0 r=0x0|$CL0" \
+    "$(mseg "mf: drag aufsetzen" "mf: zu aufsetzen")"
+gleich "Zuziehen (-200): Strg runter, EIN Radschritt zur Gegenseite (0x1), Strg hoch beim Abheben" \
+    "hidev: strg 1|hidev: zoomrad 0x1|hidev: geste zoom d=0xffffffffffffff38|hidev: strg 0" \
+    "$(mseg "mf: zu aufsetzen" "mf: rechts aufsetzen")"
+gleich "Wisch rechts: Aktion 2 (vorheriges Fenster)" "hidev: aktion 0x2|hidev: geste wisch 2 n=3" \
+    "$(mseg "mf: rechts aufsetzen" "mf: hoch aufsetzen")"
+gleich "Wisch hoch: Aktion 3 (Aufgabenansicht)" "hidev: aktion 0x3|hidev: geste wisch 3 n=3" \
+    "$(mseg "mf: hoch aufsetzen" "mf: runter aufsetzen")"
+gleich "Wisch runter: Aktion 4 (Desktop zeigen)" "hidev: aktion 0x4|hidev: geste wisch 4 n=3" \
+    "$(mseg "mf: runter aufsetzen" "mf: ecke aufsetzen")"
+gleich "Druck mit dem Finger in der Ecke unten rechts: RECHTE Taste, Loslassen gibt sie frei" \
+    "hidev: maus 0x2 x=0x0 y=0x0 r=0x0|$CL0" "$(mseg "mf: ecke aufsetzen" "mf: mitte aufsetzen")"
+gleich "Druck in der Mitte: LINKE Taste" "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
+    "$(mseg "mf: mitte aufsetzen" "mf: optionen aus")"
+gleich "Optionswechsel (Ecke aus): derselbe Druck in der Ecke ist jetzt LINKS" \
+    "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" "$(mseg "mf: optionen aus" "mf: aus zu aufsetzen")"
+gleich "Optionswechsel (Kneifen aus): kein Strg, kein Rad, kein Zoomereignis" "0" \
+    "$(mseg "mf: aus zu aufsetzen" "mf: aus wisch aufsetzen" | tr '|' '\n' | grep -c .)"
+gleich "Optionswechsel (Wisch-Aktion aus): der Wisch wird gezaehlt, die Aktion ist 0" \
+    "hidev: aktion 0x0|hidev: geste wisch 1 n=3" "$(mseg "mf: aus wisch aufsetzen" "mf: ende")"
+MO=$(python3 tools/hid/descs.py nr "mf: optionen aus")
+gleich "Strg wird nach dem Optionswechsel nie mehr gedrueckt" "0" \
+    "$(sed -n "/^hidb: nr=$((MO-1)) /,\$p" "$G" | grep -ac '^hidev: strg 1')"
+# legacy path (no hidgest): the corner box also works without the gesture machine
+LC=$(python3 tools/hid/descs.py nr "pad: ecke aufsetzen"); LE=$(python3 tools/hid/descs.py nr "pad: ecke abheben")
+gleich "Altpfad (ohne hidgest): Druck in der Ecke = rechte Taste, Loslassen gibt sie frei" \
+    "hidev: maus 0x2 x=0x0 y=0x0 r=0x0|$CL0" \
+    "$(sed -n "/^hidb: nr=$((LC-1)) /,/^hidb: nr=$LE /p" "$B" | grep -a '^hidev: ' | tr '\n' '|' | sed 's/|$//')"
+MF0=$(python3 tools/hid/descs.py nr "mf: drag tap aufsetzen")
+# counter-proof: WITHOUT hidgest none of the gesture output exists
+gleich "Gegenprobe ohne hidgest: kein Strg, kein Zoomrad, keine Aktion, keine mf-Berichte" "0" \
+    "$(grep -ac "^hidev: \(strg\|zoomrad\|aktion\)\|^hidb: nr=$MF0 " "$B")"
 
 # ----------------------------------------------------------------------
 echo
