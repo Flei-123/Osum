@@ -80,7 +80,7 @@ export {
     bind_path, find_listener, listen_on, accept_from, connect_to, connect_pair,
     pending,
     send_bytes, recv_bytes, waiting, room, peer_gone, shutdown_sock,
-    push_fd, pop_fd, fd_waiting,
+    push_fd, pop_fd, fd_waiting, fd_room,
     // der geteilte Speicher
     map_room, map_note, map_release, map_release_all, maps_live, map_rec_base, map_rec_word, shm_file_find, shm_file_mark, shm_file_key,
     map_arena_find, shm_demand, demand_lock, demand_unlock, mm_lock, mm_unlock, scratch_lock, scratch_unlock, vm_lock, vm_unlock, vm_held, vm_oom_note, vm_oom_take, shm_lazy, shm_frame_demand, shm_resident, UM_LAZY, UM_WRITE,
@@ -180,7 +180,7 @@ const RING_CAP: u64 = 4096
 // Wieviele Deskriptoren gleichzeitig in der Warteschlange EINES Sockets
 // stehen duerfen. libwayland schiebt einen je `wl_shm_pool`; vier ist
 // grosszuegig und begrenzt, was ein boesartiger Client anhaeufen kann.
-const FDQ_MAX: u64 = 4
+const FDQ_MAX: u64 = 16
 
 // ---------------------------------------------------------- die Felder
 
@@ -199,10 +199,10 @@ const SK_NAME: u64 = 56 // Nummer des Namens, oder UNAME_MAX
 // Nutzlast. Das spart eine eigene Tabelle und haelt alles beieinander,
 // was zu einem Socket gehoert.
 const FQ_COUNT: u64 = 0 // wieviele Deskriptoren warten
-const FQ_SLOT: u64 = 8 // 4 Plaetze zu 8 Oktetten: die OFFENE-DATEI-Nummer
-const FQ_MARK: u64 = 40 // 4 Marken: an welcher Ringposition der fd haengt
-const RING_DATA: u64 = 64 // ab hier die Oktette
-const RING_USABLE: u64 = 4032 // RING_CAP - RING_DATA
+const FQ_SLOT: u64 = 8 // FDQ_MAX (16) slots of 8 bytes: the open-file number
+const FQ_MARK: u64 = 136 // FDQ_MAX marks: at which ring position the fd hangs
+const RING_DATA: u64 = 320 // payload starts here (8 + 16*8 + 16*8 = 264, rounded up)
+const RING_USABLE: u64 = 3776 // RING_CAP - RING_DATA
 
 const UK_FREE: u64 = 0
 const UK_STREAM: u64 = 1
@@ -1057,6 +1057,26 @@ fn push_fd(state: u64, i: u64, of: u64) -> u64 {
     wr64(r + FQ_COUNT, n + 1)
     kstate.add(state, UCNT_OFF + C_FDS, 1)
     return 0
+}
+
+// Free descriptor slots in the queue of the PEER of socket i (where push_fd puts them).
+fn fd_room(state: u64, i: u64) -> u64 {
+    if i >= USOCK_MAX {
+        return 0
+    }
+    let p: u64 = kstate.get(state, sk_at(i) + SK_PEER)
+    if p >= USOCK_MAX {
+        return 0
+    }
+    let r: u64 = kstate.get(state, sk_at(p) + SK_RING)
+    if r == 0 {
+        return 0
+    }
+    let n: u64 = rd64(r + FQ_COUNT)
+    if n >= FDQ_MAX {
+        return 0
+    }
+    return FDQ_MAX - n
 }
 
 fn fd_waiting(state: u64, i: u64) -> u64 {

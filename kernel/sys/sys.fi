@@ -18260,13 +18260,33 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
         if level == SOL_SOCKET && ctype == SCM_RIGHTS && clen >= 16
             && clen <= ctllen {
             let nfds: u64 = (clen - 16) / 4
+            if nfds > unixsock.FDQ_MAX {
+                return neg(errno.E_INVAL)
+            }
+            // All-or-nothing: validate every descriptor and wait for queue room BEFORE pushing the first
+            // (a half-pushed message retried by the caller would duplicate descriptors).
+            var chk: u64 = 0
+            while chk < nfds {
+                if of_of(state, me, get32(state, me, ctl + 16 + chk * 4)) >= file.MAX_OPEN {
+                    return neg(errno.E_BADF)
+                }
+                chk = chk + 1
+            }
+            var qwait: u64 = 0
+            while unixsock.fd_room(state, si) < nfds {
+                if unixsock.peer_gone(state, si) {
+                    return neg(errno.E_PIPE)
+                }
+                if (flags & MSG_DONTWAIT) != 0 || qwait >= NET_ROUNDS {
+                    return neg(errno.E_AGAIN)
+                }
+                qwait = qwait + 1
+                sched.sleep_ticks(state, 1)
+            }
             var k: u64 = 0
             while k < nfds {
                 let sfd: u64 = get32(state, me, ctl + 16 + k * 4)
                 let sof: u64 = of_of(state, me, sfd)
-                if sof >= file.MAX_OPEN {
-                    return neg(errno.E_BADF)
-                }
                 let pr: u64 = unixsock.push_fd(state, si, sof)
                 if pr != 0 {
                     return neg(pr)
@@ -18394,6 +18414,9 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
                     n = room
                 } else {
                     file.fd_set(state, me, nfd, sof)
+                    if (flags & MSG_CMSG_CLOEXEC) != 0 {
+                        cx_put(state, me, nfd, true)
+                    }
                     if !put32(state, me, ctl + 16 + n * 4, nfd) {
                         return neg(errno.E_FAULT)
                     }
@@ -18417,7 +18440,12 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     if !put64(state, me, mh + MH_CONTROLLEN, ctlout) {
         return neg(errno.E_FAULT)
     }
-    if !put32(state, me, mh + MH_FLAGS, 0) {
+    // MSG_CTRUNC (8): descriptors are still queued because the control buffer was too small.
+    var rflags: u64 = 0
+    if ctl != 0 && unixsock.fd_waiting(state, si) != 0 {
+        rflags = 8
+    }
+    if !put32(state, me, mh + MH_FLAGS, rflags) {
         return neg(errno.E_FAULT)
     }
     var got: u64 = 0
