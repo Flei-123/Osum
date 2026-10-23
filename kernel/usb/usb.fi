@@ -70,6 +70,8 @@ import wlan.usbchip
 import usbnet.rndis
 import usbnet.ncm
 import usbnet.ch397
+import usbnet.ax88772
+import usbnet.ax88772_drv
 import drv.net.usbnet
 import drv.usb.xhci
 import drv.hid.kbd
@@ -98,7 +100,7 @@ export {
     rangtest, rangtest_max,
     // RUNDE HIDPUNKTE: die Punktzahl je Regler und die getroffene Wahl.
     punkte, pkt_get, choice,
-    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM, DRV_RNDIS, DRV_NCM, DRV_CH336,
+    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM, DRV_RNDIS, DRV_NCM, DRV_CH336, DRV_AX88772,
     // ============================== RUNDE BLECHEINGABE
     // Was der Kern WIRKLICH sieht -- fuer den Bericht auf dem Schirm.
     // Justin kann nur fotografieren; eine Diagnose auf der seriellen
@@ -466,6 +468,9 @@ const DRV_NCM: u64 = 9
 // LW-1a: WCH CH336/CH339/CH396/CH397 USB Ethernet (vendor class FF/FF/FF, Justin's 1A86:5394 dongle). Taken only for
 // the vendor/product ids lib/usbnet/ch397.fi `supported` lists; framing unverified on silicon.
 const DRV_CH336: u64 = 10
+// r1607: ASIX AX88772/772B (0B95:7720/772A/772B/7E2B): vendor-class function taken by id, bring-up in `ax88772_start`; unverified on silicon.
+const DRV_AX88772: u64 = 11
+const S_AXOK: u64 = 0x1D0 // 1 = a vendor-class interface may be picked in `wanted` (ASIX dongle)
 // Scratch cells of the USB state page (inside the 0x200 bytes that `stage` clears).
 const S_RNDISOK: u64 = 0x1E0 // 1 = RNDIS control interfaces may be picked in `wanted`
 const S_NOECM: u64 = 0x1E8 // 1 = CDC-ECM is refused (word `rndisonly`)
@@ -1327,8 +1332,13 @@ fn drv_name(k: u64) {
     var s_i: [u8; 5] = "isoc\0"
     var s_c: [u8; 4] = "ncm\0"
     var s_w: [u8; 6] = "ch336\0"
+    var s_ax: [u8; 8] = "ax88772\0"
     if k == DRV_CH336 {
         serial.puts((&s_w[0]) as u64)
+        return
+    }
+    if k == DRV_AX88772 {
+        serial.puts((&s_ax[0]) as u64)
         return
     }
     if k == DRV_ISOTEST {
@@ -1534,13 +1544,21 @@ fn configure(state: u64, d: u64) -> bool {
     if ch397.supported(dg(state, d, D_VID), dg(state, d, D_PID)) {
         s(state, S_CHOK, 1)
     }
+    let ax: bool = ax88772.supported(dg(state, d, D_VID), dg(state, d, D_PID))
+    if ax {
+        s(state, S_AXOK, 1)
+    }
     var total: u64 = walk_configs(state, d, buf)
     s(state, S_CHOK, 0)
+    s(state, S_AXOK, 0)
     if total == 0 {
         return false
     }
     if dg(state, d, D_DRIVER) == DRV_CH336 {
         ds(state, d, D_INTDCI, 0)
+        if ax {
+            ds(state, d, D_DRIVER, DRV_AX88772)
+        }
     }
     if dg(state, d, D_DRIVER) == DRV_NONE && g(state, S_RNDISOK) == 0 {
         s(state, S_RNDISOK, 1)
@@ -1874,6 +1892,9 @@ fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
     if (cls == 0xE0 && sub == 1 && pro == 3) || (cls == 0xEF && sub == 4 && pro == 1) {
         return g(state, S_RNDISOK) != 0
     }
+    if cls == 0xFF && g(state, S_AXOK) != 0 {
+        return true
+    }
     if cls == 0xFF && sub == 0xFF && pro == 0xFF {
         return g(state, S_CHOK) != 0
     }
@@ -1909,7 +1930,7 @@ fn driver_for(cls: u64, sub: u64, pro: u64) -> u64 {
         || (cls == 0xEF && sub == 4 && pro == 1) {
         return DRV_RNDIS
     }
-    if cls == 0xFF && sub == 0xFF && pro == 0xFF {
+    if cls == 0xFF {
         return DRV_CH336
     }
     return DRV_NONE
@@ -2217,6 +2238,10 @@ fn bind(state: u64, d: u64) {
     }
     if k == DRV_CH336 {
         ch336_start(state, d)
+        return
+    }
+    if k == DRV_AX88772 {
+        ax88772_start(state, d)
         return
     }
     if k == DRV_ISOTEST {
@@ -2564,6 +2589,48 @@ fn ch336_start(state: u64, d: u64) {
     }
     if !ok {
         serial.puts((&s_bad[0]) as u64)
+        serial.puts((&s_step[0]) as u64)
+        serial.dec(step)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_mac[0]) as u64)
+    serial.put(32 as u8)
+    hex2(mac & 0xFF)
+    var q: u64 = 1
+    while q < 6 {
+        serial.put(58 as u8)
+        hex2((mac >> (q * 8)) & 0xFF)
+        q = q + 1
+    }
+    serial.nl()
+}
+
+fn ax_ctl(state: u64, slot: u64, bm: u64, req: u64, value: u64, index: u64, len: u64, buf: u64) -> i64 {
+    return xhci.control(state, slot, bm, req, value, index, len, buf, bm >= 0x80)
+}
+
+fn ax_delay(state: u64, us: u64) {
+    xhci.udelay(state, us)
+}
+
+// r1607: bring an ASIX AX88772/772B dongle up (lib/usbnet/ax88772_drv.fi sequence, host gate tools/ax88772drv with a fake device).
+// Serial lines: `usb: ax88772 <mac>` or `usb: ax88772 failed step=N` (1 phy .. 8 rx on, 9 MAC implausible, 10 attach).
+fn ax88772_start(state: u64, d: u64) {
+    var s_bad: [u8; 20] = "usb: ax88772 failed\0"
+    var s_step: [u8; 7] = "step=\0\0"
+    var s_mac: [u8; 13] = "usb: ax88772\0"
+    let slot: u64 = dg(state, d, D_SLOT)
+    var step: u64 = 0
+    let mac: u64 = ax88772_drv.bringup(state, slot, ax_ctl, ax_delay, state + DESC_OFF, &step)
+    var ok: bool = mac != 0
+    if ok {
+        step = 10
+        ok = usbnet.attach_ax88772(state, slot, dg(state, d, D_INDCI), dg(state, d, D_OUTDCI), dg(state, d, D_BULKMPS), mac)
+    }
+    if !ok {
+        serial.puts((&s_bad[0]) as u64)
+        serial.put(32 as u8)
         serial.puts((&s_step[0]) as u64)
         serial.dec(step)
         serial.nl()

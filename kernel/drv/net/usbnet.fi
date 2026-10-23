@@ -44,9 +44,10 @@ import drv.usb.xhci
 import usbnet.rndis
 import usbnet.ncm
 import usbnet.ch397
+import usbnet.ax88772
 
 export {
-    attach, attach_rndis, attach_ncm, attach_ch336, detach, unplug_slot, link_on, keepalives, exists, present_on, ready_on, up_on, mac_at_on,
+    attach, attach_rndis, attach_ncm, attach_ch336, attach_ax88772, detach, unplug_slot, link_on, keepalives, exists, present_on, ready_on, up_on, mac_at_on,
     rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
     rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
     errors, MAX_UNITS, FRAME_MAX
@@ -75,7 +76,7 @@ const C_RXB: u64 = 0x50
 const C_TXB: u64 = 0x58
 const C_DROP: u64 = 0x60
 const C_ERR: u64 = 0x68
-const C_MODE: u64 = 0x70 // 0 = CDC-ECM, 1 = RNDIS, 2 = CDC-NCM, 3 = WCH CH336
+const C_MODE: u64 = 0x70 // 0 = CDC-ECM, 1 = RNDIS, 2 = CDC-NCM, 4 = ASIX AX88772, 3 = WCH CH336
 const C_RXOFF: u64 = 0x78 // RNDIS: next packet inside the RX transfer
 const C_RXLEN: u64 = 0x80 // RNDIS: octets of the RX transfer still being unpacked (0 = none)
 const C_NDIV: u64 = 0x88 // NCM: device OUT divisor / remainder / alignment / max NTB size
@@ -158,6 +159,11 @@ fn attach_rndis(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u
 // LW-1a: WCH CH336/CH339/CH396/CH397 vendor-class function (lib/usbnet/ch397.fi framing, unverified on silicon).
 fn attach_ch336(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64) -> bool {
     return attach_mode(state, slot, indci, outdci, mps, mac, 3)
+}
+
+// r1607: ASIX AX88772/772B (lib/usbnet/ax88772.fi framing and ax88772_drv.fi bring-up, unverified on silicon).
+fn attach_ax88772(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64) -> bool {
+    return attach_mode(state, slot, indci, outdci, mps, mac, 4)
 }
 
 // r811: the NCM function (already configured by usb.fi): `div/rem/align/outmax` are the device's NTB OUT rules.
@@ -426,6 +432,9 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         if cg(state, C_MODE) == 3 {
             return ch_next(state, frame, slot)
         }
+        if cg(state, C_MODE) == 4 {
+            return ax_next(state, frame, slot)
+        }
         return rndis_next(state, frame, slot)
     }
     xhci.drain(state)
@@ -459,6 +468,11 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         cs(state, C_RXOFF, 0)
         cs(state, C_RXLEN, n)
         return ch_next(state, frame, slot)
+    }
+    if cg(state, C_MODE) == 4 {
+        cs(state, C_RXOFF, 0)
+        cs(state, C_RXLEN, n)
+        return ax_next(state, frame, slot)
     }
     if cg(state, C_MODE) == 2 {
         if !ncm.ntb_ok(blk(state) + RXA_OFF, n) {
@@ -595,6 +609,40 @@ fn ch_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     return fl
 }
 
+// r1607: next frame out of an AX88772 bulk transfer ([size|~size u32][frame][pad to 16 bit]...); same re-queue rules as ch_next.
+fn ax_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    let b: u64 = blk(state)
+    let p: u64 = b + RXA_OFF
+    let off: u64 = cg(state, C_RXOFF)
+    let len: u64 = cg(state, C_RXLEN)
+    if off + ax88772.HDR as u64 > len {
+        cs(state, C_RXLEN, 0)
+        requeue(state)
+        return 0
+    }
+    let fl: u64 = ax88772.rx_frame_len(p, len as usize, off as usize) as u64
+    if fl == 0 {
+        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        cs(state, C_RXLEN, 0)
+        requeue(state)
+        return 0
+    }
+    let fo: u64 = ax88772.rx_frame_off(off as usize) as u64
+    let nx: u64 = ax88772.rx_next(p, len as usize, off as usize) as u64
+    copy(b + HOLD_OFF, p + fo, fl)
+    cs(state, C_RXOFF, nx)
+    if nx == 0 || nx + ax88772.HDR as u64 > len {
+        cs(state, C_RXLEN, 0)
+        requeue(state)
+    }
+    cs(state, C_HOLD, 1)
+    cs(state, C_RXP, cg(state, C_RXP) + 1)
+    cs(state, C_RXB, cg(state, C_RXB) + fl)
+    *frame = b + HOLD_OFF
+    *slot = 0
+    return fl
+}
+
 fn rx_recycle_on(state: u64, u: u64, id: u64) {
     cs(state, C_HOLD, 0)
 }
@@ -616,6 +664,12 @@ fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
         tn = rndis.wrap_packet(b + TX_OFF, src, n)
     } else if cg(state, C_MODE) == 3 {
         tn = ch397.tx_wrap(src, n as usize, b + TX_OFF) as u64
+        if tn == 0 {
+            cs(state, C_DROP, cg(state, C_DROP) + 1)
+            return false
+        }
+    } else if cg(state, C_MODE) == 4 {
+        tn = ax88772.tx_wrap(src, n as usize, b + TX_OFF) as u64
         if tn == 0 {
             cs(state, C_DROP, cg(state, C_DROP) + 1)
             return false
