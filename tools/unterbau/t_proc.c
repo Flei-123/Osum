@@ -97,7 +97,8 @@ int main(void)
     CHECK("posix_spawn", se == 0 && sp > 0, "posix_spawn -> %d", se);
     if (se == 0) { waitpid(sp, &st, 0); CHECK("posix_spawn_exit_code", WIFEXITED(st) && WEXITSTATUS(st) == 7, "status 0x%x", st); }
 
-    /* system() and popen() need /bin/sh and fork */
+    /* system() and popen() need a Linux /bin/sh and fork: the image ships busybox, point /bin/sh at it (the boot shell is already running) */
+    if (self_slot() >= 0 && access("/bin/busybox", X_OK) == 0) { unlink("/bin/sh"); (void)!symlink("/bin/busybox", "/bin/sh"); }
     errno = 0; int sr = system("exit 5");
     CHECKC("system_exit_status", sr != -1 && WIFEXITED(sr) && WEXITSTATUS(sr) == 5);
     FILE *f = popen("echo popen-ok", "r");

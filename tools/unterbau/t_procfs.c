@@ -31,7 +31,14 @@ int main(void)
         n = slurp("/proc/self/maps", b, sizeof b);
         CHECK("self_maps_lists_new_mapping", n > 0 && strstr(b, addr), "a fresh mapping at %p is not listed", m);
         CHECK("self_maps_names_libc", strstr(b, "ld-musl") || strstr(b, "libc"), "libc not named in maps");
+        CHECK("self_maps_names_exe", strstr(b, "/bin/t_procfs"), "the program image is not named in maps");
         CHECK("self_maps_stack_or_heap_named", strstr(b, "[stack]") || strstr(b, "[heap]"), "no [stack]/[heap] marker");
+    }
+    errno = 0; n = slurp("/proc/stat", b, sizeof b);
+    CHECKC("stat_open", n > 0);
+    if (n > 0) {
+        unsigned long long cu = 0, cn = 0, cs = 0, ci = 0;
+        CHECK("stat_cpu_line", sscanf(b, "cpu %llu %llu %llu %llu", &cu, &cn, &cs, &ci) == 4, "first line is not a Linux cpu line: %.40s", b);
     }
     errno = 0; n = slurp("/proc/self/status", b, sizeof b);
     CHECKC("self_status_open", n > 0);

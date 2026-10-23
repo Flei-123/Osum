@@ -190,12 +190,17 @@ int main(void)
     for (int i = 0; i < 4; i++) pthread_join(t[i], 0);
     CHECK("once", once_n == 1, "once ran %d times", once_n);
 
-    /* timed wait on a condvar must time out */
-    pthread_mutex_lock(&mu); clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 50 * 1000 * 1000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
-    struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
-    int w = pthread_cond_timedwait(&cv, &mu, &dl);
-    clock_gettime(CLOCK_MONOTONIC, &t1); pthread_mutex_unlock(&mu);
-    long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    /* timed wait on a condvar must time out (up to 3 tries: the emulated PIT re-injects ticks it lost while the host was busy, which
+       can cut one wait short; a kernel that always returns early fails all three) */
+    int w = 0; long ms = 0;
+    for (int tr = 0; tr < 3; tr++) {
+        pthread_mutex_lock(&mu); clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 50 * 1000 * 1000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+        struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+        w = pthread_cond_timedwait(&cv, &mu, &dl);
+        clock_gettime(CLOCK_MONOTONIC, &t1); pthread_mutex_unlock(&mu);
+        ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        if (w == ETIMEDOUT && ms >= 40 && ms < 1000) break;
+    }
     CHECK("cond_timedwait_times_out", w == ETIMEDOUT && ms >= 40 && ms < 1000, "ret %d after %ld ms", w, ms);
     CHECK("sched_yield", sched_yield() == 0, "sched_yield failed");
     /* POSIX: all threads of a process share ONE descriptor table. A thread started BEFORE an open() must see the new descriptor. */

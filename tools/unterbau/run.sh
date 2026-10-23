@@ -85,12 +85,11 @@ build_image() { # build_image <srcdir> <outdir>   (user programs of the system +
         strip --strip-all "$O/p/$p.elf" 2>/dev/null
     done
     local spec="/lib/ /bin/ /tmp/ /etc/ /var/ /var/tmp/ /dev/ /proc/ /sys/ /mnt/ /root/ /run/ /w/"
-    for p in $progs; do [ -n "${BBSH:-}" ] && [ "$p" = sh ] && continue; spec="$spec /bin/$p=$O/p/$p.elf"; done
+    for p in $progs; do spec="$spec /bin/$p=$O/p/$p.elf"; done
     spec="$spec /lib/ld-musl-x86_64.so.1=$LDREAL"
-    # the proof stone busybox (dynamic, musl): as /bin/busybox, and with BBSH=1 ALSO as /bin/sh (system() and popen() call /bin/sh -c)
+    # the proof stone busybox (dynamic, musl): as /bin/busybox (t_proc points /bin/sh at it for system() and popen())
     if [ -r "${BBDYN:-/nonexistent}" ]; then
         spec="$spec /bin/busybox=$BBDYN /etc/bb.sh=$D/bb.sh /etc/pruef.txt=$D/pruef.txt"
-        [ -n "${BBSH:-}" ] && spec="$spec /bin/sh=$BBDYN"
     fi
     for f in "$D"/bin/*; do spec="$spec /bin/$(basename $f)=$f"; done
     for f in "$D"/lib/*.so; do spec="$spec /lib/$(basename $f)=$f"; done
@@ -114,7 +113,9 @@ boot() { # boot <kernel> <disk> <script> <serial-out>
 }
 run_all() { # run_all <kernel> <disk> <tag>
     for t in $TESTS; do
-        boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
+        local ka="" na=""
+        [ "$t" = t_events ] && { ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0 -device virtio-net-pci,netdev=n0"; }
+        KARGS="$ka" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
         grep -a '^T ' "$D/$3-$t.ser" 2>/dev/null | awk '!seen[$2]++' > "$D/$3-$t.res" || : > "$D/$3-$t.res"
         printf '        %-12s %3d checks   (qemu rc=%s)\n' "$t" "$(wc -l < "$D/$3-$t.res")" "$rc"
     done
@@ -229,16 +230,6 @@ if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox
     bbchk date-fmt 5; bbchk mktemp ok; bbchk realpath /etc/pruef.txt; bbchk ash-func 42; bbchk heredoc hd; bbchk sed-i y; bbchk sleep ok; bbchk bg-wait ok; bbchk kill done
     bbchk mounts ok; bbchk mount-cmd ok; bbchk ip-cmd ok; bbchk ip-addr 1; bbchk ip-link 1; bbchk ip-route 2; bbchk ifconfig-cmd ok; bbchk top-cmd ok; bbchk lsof-cmd ok
     grep -aq '^BB end' "$D/bb.res" && ok "busybox sh ran its script to the end" || bad "busybox sh did not reach the end of its script"
-    # with busybox as /bin/sh: system() and popen() of t_proc
-    case " $TESTS " in *" t_proc "*)
-        BBSH=1 build_image "$ROOT" "$D/bbsh" && {
-            boot "$KNEW" "$D/bbsh/disk.img" "/bin/t_proc" "$D/bbsh-t_proc.ser"
-            grep -a '^T ' "$D/bbsh-t_proc.ser" | awk '!seen[$2]++' > "$D/bbsh-t_proc.res"
-            for c in proc.system_exit_status proc.popen; do
-                grep -a "^T $c " "$D/bbsh-t_proc.res" | head -1 | sed 's/^T /        BB-SH   /'
-            done
-        } ;;
-    esac
     echo "        busybox probes: $BBOK ok / $BBBAD gap"
     # since r696 (AF_NETLINK, NETLINK_ROUTE): `ip` works too -> no known gap left
     [ "$BBBAD" -le "${BBGAP_MAX:-0}" ] && ok "busybox probes: $BBOK ok, $BBBAD gap (<= ${BBGAP_MAX:-0} known)" || bad "busybox probes: $BBBAD gaps (> ${BBGAP_MAX:-0} known)"

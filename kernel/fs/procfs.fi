@@ -588,7 +588,32 @@ fn make_stat(state: u64) -> u64 {
     var s6: [u8; 12] = "execs     \0\0"
     var s7: [u8; 12] = "traps     \0\0"
     var s8: [u8; 12] = "opens     \0\0"
+    var sc: [u8; 6] = "cpu  \0"
     var p: u64 = 0
+    let total: u64 = kstate.get(state, kstate.TICKS)
+    let idle_slot: u64 = kstate.get(state, kstate.IDLE)
+    var idle_ticks: u64 = 0
+    if idle_slot < kstate.MAX_TASKS {
+        idle_ticks = sched.tget(state, idle_slot, sched.T_TICKS)
+    }
+    if idle_ticks > total {
+        idle_ticks = total
+    }
+    p = w_str(state, p, (&sc[0]) as u64)
+    p = w_num(state, p, total - idle_ticks)
+    p = w_ch(state, p, 32)
+    p = w_ch(state, p, 48)
+    p = w_ch(state, p, 32)
+    p = w_ch(state, p, 48)
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, idle_ticks)
+    var z: u64 = 0
+    while z < 6 {
+        p = w_ch(state, p, 32)
+        p = w_ch(state, p, 48)
+        z = z + 1
+    }
+    p = w_nl(state, p)
     p = w_str(state, p, (&s1[0]) as u64)
     p = w_num(state, p, kstate.get(state, kstate.TICKS))
     p = w_nl(state, p)
@@ -1132,7 +1157,7 @@ fn make_maps(state: u64, t: u64) -> u64 {
         // a 2 MiB tile that has no table is skipped whole (most of the region is empty)
         if k != 0 && proc.pt_for(state, t, addr, false) == 0 {
             if in_run {
-                p = map_line(state, p, run_start, addr, run_r)
+                p = map_line(state, t, p, run_start, addr, run_r)
                 in_run = false
             }
             addr = (addr & 0xFFFFFFFFFFE00000) + 0x200000
@@ -1144,7 +1169,7 @@ fn make_maps(state: u64, t: u64) -> u64 {
                 run_r = r
             } else if in_run {
                 if r != run_r {
-                    p = map_line(state, p, run_start, addr, run_r)
+                    p = map_line(state, t, p, run_start, addr, run_r)
                     in_run = r != 0
                     run_start = addr
                     run_r = r
@@ -1152,18 +1177,18 @@ fn make_maps(state: u64, t: u64) -> u64 {
             }
             addr = addr + 4096
         }
-        if p > BUF_MAX - 120 {
+        if p > BUF_MAX - 300 {
             return p
         }
     }
     if in_run {
-        p = map_line(state, p, run_start, high, run_r)
+        p = map_line(state, t, p, run_start, high, run_r)
     }
     return p
 }
 
 // one line of /proc/<pid>/maps
-fn map_line(state: u64, at: u64, a: u64, b: u64, r: u64) -> u64 {
+fn map_line(state: u64, t: u64, at: u64, a: u64, b: u64, r: u64) -> u64 {
     var p: u64 = at
     p = w_hex16(state, p, a)
     p = w_ch(state, p, 45)
@@ -1193,8 +1218,36 @@ fn map_line(state: u64, at: u64, a: u64, b: u64, r: u64) -> u64 {
     } else if a == 0x40080000 {
         var nh: [u8; 8] = "[heap]\0\0"
         p = w_str(state, p, (&nh[0]) as u64)
+    } else if a >= MAPS_INTERP && a < proc.IMAGE_END {
+        p = w_interp_name(state, t, p)
+    } else if a >= proc.IMAGE_BASE && a < MAPS_INTERP {
+        p = w_exe_name(state, t, p)
     }
     p = w_nl(state, p)
+    return p
+}
+
+const MAPS_INTERP: u64 = 0x40A00000
+
+fn w_exe_name(state: u64, t: u64, at: u64) -> u64 {
+    var p: u64 = at
+    let n: u64 = uio.exe_len(state, t)
+    var i: u64 = 0
+    while i < n {
+        p = w_ch(state, p, uio.exe_at(state, t, i))
+        i = i + 1
+    }
+    return p
+}
+
+fn w_interp_name(state: u64, t: u64, at: u64) -> u64 {
+    var p: u64 = at
+    let n: u64 = uio.interp_len(state, t)
+    var i: u64 = 0
+    while i < n {
+        p = w_ch(state, p, uio.interp_at(state, t, i))
+        i = i + 1
+    }
     return p
 }
 
