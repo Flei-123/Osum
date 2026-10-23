@@ -2,8 +2,8 @@
 # ERSTER-BOOT -- die ersten 5 Minuten am HP EliteBook x360 1030 G2
 
 Abbild: `orientos-usb.img` (GPT + EFI-Partition, startet unter UEFI und BIOS).
-SHA256: `@SHA256@`
-Stand: `@COMMIT@` (main). Gleiche Schritte gelten fuer den Dell 9020 (dort F12 statt F9).
+SHA256: `df4aa8bfeec83eb48a0c3f02dcc3ee16a90ea590607400cee9f8120408db819c`
+Stand: `61fcf87e` (main). Gleiche Schritte gelten fuer den Dell 9020 (dort F12 statt F9).
 
 ## 0. Vorher (Rechner mit Linux/Windows, 2 Minuten)
 
