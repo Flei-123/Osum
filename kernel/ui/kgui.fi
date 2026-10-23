@@ -41,6 +41,7 @@ import lib.kstate
 import acpi.acpiev
 import mm.mem
 import net.netdev
+import net.netsvc
 import block.part
 import net.inet
 import pwr.pmon
@@ -605,6 +606,7 @@ fn graphics(state: u64, mbi: u64) {
     gfx_bench(state, back)
     paint_bench(state)
     durchsatz(state)
+    fbperf(state, back)
 
     // RUNDE DISPLAY: die Karte fragen, was sie kann. Hier und nicht
     // frueher, weil `probe` die Fensterplaetze zaehlt, die `fb.init`
@@ -1522,6 +1524,94 @@ fn durchsatz(state: u64) {
     serial.nl()
 }
 
+fn perf_rate(state: u64, bytes: u64, cyc: u64, rounds: u64) -> u64 {
+    let us: u64 = us_of(state, cyc)
+    if us == 0 {
+        return 0
+    }
+    return bytes * rounds / us
+}
+
+fn fbperf(state: u64, back: u64) {
+    var s_h: [u8; 16] = "        fbperf:\0"
+    var s_w: [u8; 16] = "  fb_write_mbs=\0"
+    var s_c: [u8; 16] = "  fb_copy_mbs=\0\0"
+    var s_r: [u8; 17] = "  ram_write_mbs=\0"
+    var s_m: [u8; 15] = "  cache_mode=\0\0"
+    var s_p: [u8; 11] = "  pat_wc=\0\0"
+    var s_t: [u8; 14] = "  mtrr_type=\0\0"
+    var s_n: [u8; 37] = "        fbperf: no time base\0\0\0\0\0\0\0\0\0"
+    if apic.tsc_hz(state) == 0 {
+        serial.puts((&s_n[0]) as u64)
+        serial.nl()
+        return
+    }
+    let w: u64 = fb.width(state)
+    let h: u64 = fb.height(state)
+    if w == 0 || h == 0 {
+        return
+    }
+    let bytes: u64 = fb.pitch(state) *% h
+    let farbe: u64 = fb.rgb(state, 0x10, 0x20, 0x30)
+    fb.mtrr_probe(state)
+    var ram: u64 = 0
+    var cpy: u64 = 0
+    var n: u64 = 0
+    var t: u64 = 0
+    var i: u64 = 0
+    if back != 0 {
+        fb.set_back(state, back)
+        t = apic.tsc()
+        i = 0
+        while i < GFX_RUNDEN {
+            fb.clear(state, farbe)
+            i = i + 1
+        }
+        ram = perf_rate(state, bytes, apic.tsc() -% t, GFX_RUNDEN)
+        t = apic.tsc()
+        n = 0
+        while n < GFX_RUNDEN && us_of(state, apic.tsc() -% t) < 400000 {
+            fb.dirty_all(state)
+            fb.flush(state)
+            n = n + 1
+        }
+        cpy = perf_rate(state, bytes, apic.tsc() -% t, n)
+    }
+    fb.set_back(state, 0)
+    t = apic.tsc()
+    n = 0
+    while n < GFX_RUNDEN && us_of(state, apic.tsc() -% t) < 400000 {
+        fb.clear(state, farbe)
+        n = n + 1
+    }
+    let fbw: u64 = perf_rate(state, bytes, apic.tsc() -% t, n)
+    if back != 0 {
+        fb.set_back(state, back)
+        fb.dirty_all(state)
+        fb.flush(state)
+    }
+    fb.perf_set(state, fb.PF_FBW, fbw)
+    fb.perf_set(state, fb.PF_COPY, cpy)
+    fb.perf_set(state, fb.PF_RAM, ram)
+    fb.perf_set(state, fb.PF_BYTES, bytes)
+    fb.perf_set(state, fb.PF_ROUNDS, n)
+    fb.perf_set(state, fb.PF_DONE, 1)
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(fbw)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(cpy)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(ram)
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(fb.cache_mode(state))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(fb.wc(state))
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(fb.perf_get(state, fb.PF_MTRR) & 255)
+    serial.nl()
+}
+
 // EINE TEXTZEILE, so wie die Konsole sie schreibt -- achtzig Zeichen und
 // ein Umbruch.
 //
@@ -1682,6 +1772,9 @@ fn gfx_hold(state: u64) {
             // in derselben Reihenfolge: erst aufzaehlen, dann
             // einhaengen.
             usb.hotplug_work(state)
+            if netdev.late_usb(state) {
+                netsvc.stage(state)
+            }
             wechsel_schritt(state)
         }
     }
@@ -3175,6 +3268,9 @@ fn surface(state: u64) {
             // `hotplugs=0`, und zwei Bildschirmfotos, die sich
             // Oktett fuer Oktett gleichen.
             usb.hotplug_work(state)
+            if netdev.late_usb(state) {
+                netsvc.stage(state)
+            }
             wechsel_schritt(state)
             // MERGE-8: ALLTAG (Sperrer-Wache) und VSYNC (Bildgrenze)
             // haengen beide in dieser Halteschleife, unabhaengig
@@ -6754,6 +6850,9 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // abgeschalteten Unterbrechungen.
         st(33)
         usb.hotplug_work(state)
+        if netdev.late_usb(state) {
+            netsvc.stage(state)
+        }
         // ================================== RUNDE HOTPLUG
         // AUFZAEHLEN UND EINHAENGEN SIND ZWEI SCHRITTE, UND SIE STEHEN
         // ABSICHTLICH HINTEREINANDER.

@@ -3965,6 +3965,12 @@ fn damage_all(state: u64) {
     ss(state, S_DY1, gs(state, S_SH))
     ss(state, S_DON, 1)
     rgn_all(state)
+    // REPAINT-1: a whole-screen change (wallpaper, theme, snap, resolution, Ctrl+Alt+R) spoils every cached blur, too
+    var bk: u64 = 0
+    while bk < BC_N {
+        ss(state, S_BC_GEN + bk * 8, gs(state, S_BC_GEN + bk * 8) + 1)
+        bk = bk + 1
+    }
 }
 
 // RUNDE PAINT: DER SCHATTEN GEHOERT ZUM SCHMUTZ.
@@ -6327,6 +6333,10 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     // Fenster ueberhaupt Schmuck traegt. Ein undekoriertes Fenster darf
     // bis auf 1x1 herunter; kleiner als ein Bildpunkt ist nichts, und
     // `w * h * 4` weiter unten bleibt damit wohldefiniert.
+    var keep_buf: u64 = 0
+    var keep_w: u64 = 0
+    var keep_h: u64 = 0
+    var keep_free: u64 = 0
     var min_w: u64 = 32
     var min_h: u64 = 16
     if !win_deco(state, i) {
@@ -6367,9 +6377,27 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     } else if wg(state, i, W_SHM) != 0 {
         // COMPOSITOR S3: a shared buffer has the row length of the old width. The window leaves it (the client keeps its mapping alive)
         // and gets a buffer of its own; the client takes the new size from E_RESIZE and attaches a new shared buffer (WM_SETBUF).
+        keep_buf = wg(state, i, W_BUF)
+        keep_w = wg(state, i, W_W)
+        keep_h = wg(state, i, W_H)
         if !detach_buf(state, i, w * h * 4) {
             return false
         }
+    } else if wg(state, i, W_KIND) != K_TERM && wg(state, i, W_BUF) != 0 && !resize_clear_an(state) {
+        // W-FLICKER: a window on a kernel-own buffer (the client has not re-attached yet, or never will) gets fresh frames at every size so
+        // that the old picture can be copied over with the new row length (the old way re-used the buffer and cleared it to the background)
+        let bytes: u64 = w * h * 4
+        let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+        let neu: u64 = mem.frame_run(state, rahmen)
+        if neu == 0 {
+            return false
+        }
+        keep_buf = wg(state, i, W_BUF)
+        keep_w = wg(state, i, W_W)
+        keep_h = wg(state, i, W_H)
+        keep_free = wg(state, i, W_BUFBYTES) / mem.FRAME_SIZE
+        wsv(state, i, W_BUF, neu)
+        wsv(state, i, W_BUFBYTES, rahmen * mem.FRAME_SIZE)
     } else if w * h * 4 > wg(state, i, W_BUFBYTES) {
         let bytes: u64 = w * h * 4
         let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
@@ -6389,12 +6417,59 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     }
     if wg(state, i, W_KIND) == K_TERM {
         term_setup(state, i)
+    } else if keep_buf != 0 && !resize_clear_an(state) {
+        keep_resized(state, i, keep_buf, keep_w, keep_h)
+        if keep_free != 0 {
+            mem.frame_free_run(state, keep_buf, keep_free)
+        }
     } else {
         fill(state, i, 0, 0, w, h, wg(state, i, W_BG))
     }
     ev_push(state, i, E_RESIZE, w, h, 0)
     damage_win(state, i)
     return true
+}
+
+// W-FLICKER (resize): THE OLD PICTURE STAYS UNTIL THE CLIENT HAS PAINTED THE NEW ONE.
+// Before: a resize filled the window's new kernel buffer with the background colour, the compositor showed that flat window until the client
+// had taken E_RESIZE, mapped a new shared buffer and painted (tens of ms on slow hardware = a visible flash on every step of a drag).
+// Now the overlap of the old and the new size is copied over (row by row, the row lengths differ), only the newly exposed strips get the
+// background colour. `old` is the buffer the window just left: the client still maps it, so it is alive.
+fn resize_clear_an(state: u64) -> bool {
+    return kstate.mode_on(state, kstate.M_RESCLEAR)
+}
+
+fn keep_resized(state: u64, i: u64, old: u64, ow: u64, oh: u64) {
+    let nw: u64 = wg(state, i, W_W)
+    let nh: u64 = wg(state, i, W_H)
+    let nb: u64 = wg(state, i, W_BUF)
+    if nb == 0 || old == 0 {
+        fill(state, i, 0, 0, nw, nh, wg(state, i, W_BG))
+        return
+    }
+    var cw: u64 = ow
+    if nw < cw {
+        cw = nw
+    }
+    var ch: u64 = oh
+    if nh < ch {
+        ch = nh
+    }
+    var y: u64 = 0
+    while y < ch {
+        copy_words(nb +% y *% nw *% 4, old +% y *% ow *% 4, cw / 2)
+        if (cw & 1) != 0 {
+            __mmio_write32((nb +% y *% nw *% 4 +% (cw - 1) *% 4) as *mut u32,
+                __mmio_read32((old +% y *% ow *% 4 +% (cw - 1) *% 4) as *mut u32))
+        }
+        y = y + 1
+    }
+    if nw > cw {
+        fill(state, i, cw, 0, nw - cw, ch, wg(state, i, W_BG))
+    }
+    if nh > ch {
+        fill(state, i, 0, ch, nw, nh - ch, wg(state, i, W_BG))
+    }
 }
 
 // ---------------------------------------------------- in ein Fenster
@@ -6718,6 +6793,20 @@ fn attach_buf(state: u64, i: u64, sbase: u64, sbytes: u64, sidx: u64) -> bool {
     }
     if wg(state, i, W_BUF) == sbase {
         return true
+    }
+    // W-FLICKER (resize): the new shared buffer starts out empty; the window keeps showing the picture it had (kept by `keep_resized`)
+    // until the client paints into the new buffer. Copy it over BEFORE the old frames go (a client that painted first is not asked: WM_SETBUF
+    // comes right after the buffer is made, in `win_reshare`).
+    if wg(state, i, W_SHM) == 0 && wg(state, i, W_BUF) != 0 && !resize_clear_an(state) {
+        let cb: u64 = wg(state, i, W_W) * wg(state, i, W_H) * 4
+        if cb <= wg(state, i, W_BUFBYTES) {
+            copy_words(sbase, wg(state, i, W_BUF), cb / 8)
+            var ci: u64 = (cb / 8) * 8
+            while ci < cb {
+                __mmio_write32((sbase +% ci) as *mut u32, __mmio_read32((wg(state, i, W_BUF) +% ci) as *mut u32))
+                ci = ci + 4
+            }
+        }
     }
     if wg(state, i, W_SHM) != 0 {
         unixsock.shm_unref(state, wg(state, i, W_SHM) - 1)
@@ -15122,6 +15211,32 @@ fn on_mouse(state: u64) {
     on_mouse_btn(state, now)
 }
 
+// A button went down: every popup menu (L_POPUP) the press did not land on is dismissed, like Esc. The owner reads E_CLOSE in
+// its wlib step, answers "dismissed" (0xFFFF) and closes the menu window itself (the window stays until then, so the event is never
+// lost); the press itself still goes to the window under the pointer.
+fn popup_outside(state: u64, hit_win: u64) {
+    var j: u64 = 0
+    var menue_offen: bool = false
+    while j < MAX_WIN {
+        if valid(state, j) && wg(state, j, W_LAYER) == L_MENUE && (wg(state, j, W_FLAGS) & F_HIDDEN) == 0 {
+            menue_offen = true
+        }
+        j = j + 1
+    }
+    // the start menu closes when it loses the focus; the bare desktop takes the focus only when a start menu stands (a press there is
+    // an outside press for it) -- otherwise typing into the window keeps working after a click on the wallpaper
+    if menue_offen && hit_win < MAX_WIN && valid(state, hit_win) && wg(state, hit_win, W_LAYER) == L_DESK {
+        set_focus(state, hit_win)
+    }
+    j = 0
+    while j < MAX_WIN {
+        if j != hit_win && valid(state, j) && wg(state, j, W_LAYER) == L_POPUP {
+            ev_push(state, j, E_CLOSE, 0, 0, 0)
+        }
+        j = j + 1
+    }
+}
+
 fn on_mouse_btn(state: u64, btn: u64) {
     let nx: u64 = ps2m.x(state)
     let ny: u64 = ps2m.y(state)
@@ -15407,6 +15522,9 @@ fn on_mouse_btn(state: u64, btn: u64) {
     }
     ss(state, S_MOVES, gs(state, S_MOVES) + 1)
     let i: u64 = hit(state, x, y)
+    if (btn & ~(gs(state, S_KEYS) & 7) & 7) != 0 {
+        popup_outside(state, i)
+    }
     // RUNDE SOFTUI: der Ueberfahr-Zustand der drei Schaltflaechen. Er
     // steht VOR dem Ausstieg fuer "kein Fenster getroffen", denn genau
     // dann muss er zurueckgesetzt werden -- sonst bleibt der rote
@@ -21112,6 +21230,10 @@ fn hotkeys(state: u64) -> u64 {
             if ((v & 0xFF) == 102 || (v & 0xFF) == 70) && ((v >> 8) & 0xFD) == 5 {
                 fps_hotkey(state)
             } else
+            // REPAINT-1: Ctrl+Alt+R recomposes the whole screen from the window buffers (reference picture of the stale-pixel gate)
+            if ((v & 0xFF) == 114 || (v & 0xFF) == 82) && ((v >> 8) & 0xFD) == 5 {
+                repaint_hotkey(state)
+            } else
             // W1 (hotkeys): WIN+ARROWS (mod 8) -- the focused window snaps / maximizes / restores, before any binding.
             if ((v >> 8) & 0xFF) == 8 {
                 let wa: bool = win_arrow(state, v & 0xFF)
@@ -22391,6 +22513,14 @@ fn fps_overlay_off(state: u64) {
     }
     fo_v[FO_RW as usize] = 0
     fo_v[FO_KEY as usize] = 0
+}
+
+// Ctrl+Alt+R
+fn repaint_hotkey(state: u64) {
+    var s_rp: [u8; 17] = "wm: fullrepaint\0\0"
+    damage_all(state)
+    serial.puts((&s_rp[0]) as u64)
+    serial.nl()
 }
 
 // Ctrl+Alt+F
