@@ -130,6 +130,24 @@ bc_deps_hash() {
       done < "$1"; } | sha256sum | cut -c1-64
 }
 
+# bc_deps_finish FILE: --deps-out list -> ROOT-relative, only real files (drops the pseudo path lib/gc/gc.fi), plus the files
+# pulled in by __include_str("...") (firnc does NOT list them; path is relative to the including file; settings.d/*).
+bc_deps_finish() {
+    local f inc q
+    bc_norm < "$1" > "$1.n"
+    {
+        while IFS= read -r f; do
+            [[ -f $f ]] || continue
+            printf '%s\n' "$f"
+            [[ $f == *.fi ]] || continue
+            grep -ao '__include_str("[^"]*")' "$f" 2>/dev/null | sed 's/^__include_str("//; s/")$//' | while IFS= read -r inc; do
+                q=$(realpath -m "$(dirname "$f")/$inc") && printf '%s\n' "$q" | bc_norm
+            done
+        done < "$1.n"
+    } | LC_ALL=C sort -u > "$1"
+    rm -f "$1.n"
+}
+
 # bc_cc OUT SRC FIRNC [FLAGS...]    (cwd = ROOT, FIRNLIB as the caller set it)
 #   runs: FIRNC FLAGS -c SRC -o OUT, cached.  Compiler output goes to stderr/stdout of the caller.
 bc_cc() {
@@ -167,7 +185,7 @@ bc_cc() {
     done
     dtmp=$(mktemp "$dir/.put.XXXXXX") || { "$firnc" "$@" -c "$src" -o "$out"; return; }
     "$firnc" "$@" --deps-out="$dtmp" -c "$src" -o "$out" || { rm -f "$dtmp"; return 1; }
-    bc_norm < "$dtmp" > "$dtmp.n" && mv -f "$dtmp.n" "$dtmp"
+    bc_deps_finish "$dtmp"
     if ch=$(bc_deps_hash "$dtmp") && [[ -s $dtmp ]]; then
         lh=$(sha256sum < "$dtmp" | cut -c1-64)
         tmpo=$(mktemp "$dir/.put.XXXXXX") && cp -f "$out" "$tmpo" \
