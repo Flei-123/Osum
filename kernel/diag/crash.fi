@@ -72,6 +72,7 @@ import arch.cpu
 import sched.sched
 import lib.version
 import mm.mem
+import diag.safe
 
 export {
     init, open, brand_delete, knall,
@@ -457,6 +458,67 @@ fn melden(state: u64, ok: bool, n: u64) {
     serial.nl()
 }
 
+static mut pc_name: [u8; 40] = [0 as u8; 40]
+static mut pc_extra: [u8; 128] = [0 as u8; 128]
+
+fn pc_build(n: u64) -> u64 {
+    var pre: [u8; 19] = "/var/jarvis/panic-\0"
+    var suf: [u8; 5] = ".txt\0"
+    let p: u64 = (&pc_name[0 as usize]) as u64
+    var k: u64 = 0
+    var i: u64 = 0
+    while kstate.get8((&pre[0 as usize]) as u64 + i) != 0 {
+        kstate.set8(p + k, kstate.get8((&pre[0 as usize]) as u64 + i) as u8)
+        k = k + 1
+        i = i + 1
+    }
+    if n >= 10 {
+        kstate.set8(p + k, (48 + n / 10) as u8)
+        k = k + 1
+    }
+    kstate.set8(p + k, (48 + n % 10) as u8)
+    k = k + 1
+    i = 0
+    while kstate.get8((&suf[0 as usize]) as u64 + i) != 0 {
+        kstate.set8(p + k, kstate.get8((&suf[0 as usize]) as u64 + i) as u8)
+        k = k + 1
+        i = i + 1
+    }
+    kstate.set8(p + k, 0 as u8)
+    return p
+}
+
+fn panic_copy(state: u64) {
+    var d1: [u8; 5] = "/var\0"
+    var d2: [u8; 12] = "/var/jarvis\0"
+    if fs.path(state, (&d1[0 as usize]) as u64) == 0 {
+        if fs.create_path(state, (&d1[0 as usize]) as u64, fs.T_DIR) == 0 {
+            return
+        }
+    }
+    if fs.path(state, (&d2[0 as usize]) as u64) == 0 {
+        if fs.create_path(state, (&d2[0 as usize]) as u64, fs.T_DIR) == 0 {
+            return
+        }
+    }
+    var n: u64 = 1
+    while n < 32 && fs.path(state, pc_build(n)) != 0 {
+        n = n + 1
+    }
+    let name: u64 = pc_build(n)
+    var ino: u64 = fs.path(state, name)
+    if ino == 0 {
+        ino = fs.create_path(state, name, fs.T_FILE)
+    }
+    if ino == 0 {
+        return
+    }
+    let w: u64 = fs.write_at(state, ino, 0, (&buf[0 as usize]) as u64, buf_n)
+    let x: u64 = safe.panic_extra((&pc_extra[0 as usize]) as u64)
+    let w2: u64 = fs.write_at(state, ino, w, (&pc_extra[0 as usize]) as u64, x)
+    let _z: bool = fs.set_size(state, ino, w + w2)
+}
+
 fn ablegen(state: u64) -> bool {
     var dir: [u8; 12] = "/var/crash\0\0"
     var var_: [u8; 5] = "/var\0"
@@ -495,6 +557,7 @@ fn ablegen(state: u64) -> bool {
         melden(state, false, n)
         return false
     }
+    panic_copy(state)
     // DIE MARKE ZULETZT. Sie sagt "es liegt ein vollstaendiger Bericht
     // da"; sie vor dem Bericht zu setzen hiesse, beim naechsten Start
     // einen Bericht anzubieten, den es nicht gibt.
