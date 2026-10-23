@@ -62,7 +62,8 @@ fn temit() {
 
 // ---------------- flow handler model ----------------
 static mut regs: [u64; 2048] = [0; 2048]       // direct window 0x000..0x1FFC
-static mut sram: [u8; 1048576] = [0; 1048576]
+static mut sram: [u8; 16777216] = [0; 16777216]   // 16 windows of 1 MiB, bound to address windows on first use
+static mut wkey: [u64; 16] = [0; 16]            // window key + 1 (0 = unused)
 static mut bnc: [u8; 262144] = [0; 262144]     // the host bounce buffer
 static mut pkey: [u64; 16] = [0; 16]
 static mut pval: [u64; 16] = [0; 16]
@@ -98,6 +99,21 @@ fn trace_w(off: u64, v: u64) {
     temit()
 }
 
+fn win_index(a: u64, alloc: bool) -> i64 {
+    let key: u64 = (a >> 20) + 1
+    var w: usize = 0
+    while w < 16 {
+        if wkey[w] == key { return w as i64 }
+        if wkey[w] == 0 {
+            if !alloc { return -1 }
+            wkey[w] = key
+            return w as i64
+        }
+        w = w + 1
+    }
+    return -1
+}
+
 // the DMA engine: copy cnt octets from the host window to SRAM[dst]
 fn dma_run() {
     if f_sram == 0 || f_c0 == 0 || f_c1 == 0 || f_bs == 0 { viol = viol + 1 }
@@ -108,7 +124,7 @@ fn dma_run() {
     let cnt: u64 = c1 & 0x0FFFFFFF
     var good: bool = true
     if src < bus_base || src + cnt > bus_base + bus_size { good = false }
-    if dst + cnt > 1048576 { good = false }
+    if win_index(dst, true) < 0 || win_index(dst + cnt - 1, true) < 0 { good = false }
     var ext: u64 = 0
     if dst >= 0x40000 && dst <= 0x57FFF { ext = 1 }
     var chick: u64 = 0
@@ -118,7 +134,8 @@ fn dma_run() {
     var i: u64 = 0
     if good {
         while i < cnt {
-            sram[(dst + i) as usize] = bnc[(src - bus_base + i) as usize]
+            let wi: i64 = win_index(dst + i, true)
+            sram[((wi as u64) * 1048576 + ((dst + i) & 0xFFFFF)) as usize] = bnc[(src - bus_base + i) as usize]
             i = i + 1
         }
     } else {
@@ -240,14 +257,21 @@ fn main() -> i32 {
 
     var nz: u64 = 0
     var dig: u64 = 0
-    var i: usize = 0
-    while i < 1048576 {
-        let b: u64 = sram[i] as u64
-        if b != 0 {
-            nz = nz + 1
-            dig = (dig + b * ((i as u64 % 251) + 1)) & 0xFFFFFFFF
+    var wn: usize = 0
+    while wn < 16 {
+        if wkey[wn] != 0 {
+            let wb: u64 = (wkey[wn] - 1) << 20
+            var i: usize = 0
+            while i < 1048576 {
+                let b: u64 = sram[wn * 1048576 + i] as u64
+                if b != 0 {
+                    nz = nz + 1
+                    dig = (dig + b * (((wb + i as u64) % 251) + 1)) & 0xFFFFFFFF
+                }
+                i = i + 1
+            }
         }
-        i = i + 1
+        wn = wn + 1
     }
     var chick: u64 = 0
     let k: i64 = prph_find(0x01FF8)

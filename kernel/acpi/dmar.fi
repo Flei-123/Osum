@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import acpi.acpi
+import arch.x86_64.apic
+import hwinv.dmarparse
+
+export { render }
+
+const MAX_UNITS: u64 = 8
+const R_VER: u64 = 0x00
+const R_CAP: u64 = 0x08
+const R_ECAP: u64 = 0x10
+const R_GSTS: u64 = 0x1C
+const GSTS_TES: u64 = 0x80000000
+const GSTS_IRES: u64 = 0x02000000
+const GSTS_QIES: u64 = 0x04000000
+
+static mut w_at: u64 = 0
+static mut w_cap: u64 = 0
+static mut w_out: u64 = 0
+
+fn put_c(c: u64) {
+    if w_at + 1 < w_cap {
+        kstate.set8(w_out + w_at, c as u8)
+        w_at = w_at + 1
+    }
+}
+
+fn put_s(s: u64) {
+    var i: u64 = 0
+    while kstate.get8(s + i) != 0 {
+        put_c(kstate.get8(s + i))
+        i = i + 1
+    }
+}
+
+fn put_dec(v: u64) {
+    var tmp: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        put_c(tmp[n as usize] as u64)
+    }
+}
+
+fn put_hex(v: u64, digits: u64) {
+    var i: u64 = digits
+    put_c(48)
+    put_c(120)
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            put_c(48 + d)
+        } else {
+            put_c(87 + d)
+        }
+    }
+}
+
+fn onoff(bit: bool) {
+    var s_on: [u8; 3] = "on\0"
+    var s_off: [u8; 4] = "off\0"
+    if bit {
+        put_s((&s_on[0]) as u64)
+    } else {
+        put_s((&s_off[0]) as u64)
+    }
+}
+
+fn unit_line(state: u64, i: u64, base: u64) {
+    var s_u: [u8; 12] = "dmar: unit \0"
+    var s_b: [u8; 7] = " base=\0"
+    var s_v: [u8; 6] = " ver=\0"
+    var s_c: [u8; 6] = " cap=\0"
+    var s_e: [u8; 7] = " ecap=\0"
+    var s_g: [u8; 7] = " gsts=\0"
+    var s_t: [u8; 14] = " translation=\0"
+    var s_i: [u8; 13] = " intr_remap=\0"
+    var s_q: [u8; 12] = " inv_queue=\0"
+    var s_un: [u8; 20] = " unmapped-or-absent\0"
+    put_s((&s_u[0]) as u64)
+    put_dec(i)
+    put_s((&s_b[0]) as u64)
+    put_hex(base, 8)
+    var v: u64 = 0
+    if base != 0 && (base & 0xFFF) == 0 {
+        v = apic.map_device(state, base)
+    }
+    if v == 0 {
+        put_s((&s_un[0]) as u64)
+        put_c(10)
+        return
+    }
+    let gsts: u64 = kstate.get32(v + R_GSTS)
+    put_s((&s_v[0]) as u64)
+    put_hex(kstate.get32(v + R_VER), 2)
+    put_s((&s_c[0]) as u64)
+    put_hex(__mmio_read64((v + R_CAP) as *mut u64), 16)
+    put_s((&s_e[0]) as u64)
+    put_hex(__mmio_read64((v + R_ECAP) as *mut u64), 16)
+    put_s((&s_g[0]) as u64)
+    put_hex(gsts, 8)
+    put_s((&s_t[0]) as u64)
+    onoff((gsts & GSTS_TES) != 0)
+    put_s((&s_i[0]) as u64)
+    onoff((gsts & GSTS_IRES) != 0)
+    put_s((&s_q[0]) as u64)
+    onoff((gsts & GSTS_QIES) != 0)
+    put_c(10)
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    var w_sig: [u8; 5] = "DMAR\0"
+    let t: u64 = acpi.table(state, (&w_sig[0]) as u64)
+    var n: u64 = dmarparse.render(t, out, cap)
+    if !dmarparse.ok(t) {
+        return n
+    }
+    w_out = out
+    w_cap = cap
+    w_at = n
+    var i: u64 = 0
+    let units: u64 = dmarparse.drhd_count(t)
+    while i < units && i < MAX_UNITS {
+        unit_line(state, i, dmarparse.drhd_base(t, i))
+        i = i + 1
+    }
+    return w_at
+}

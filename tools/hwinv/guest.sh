@@ -61,6 +61,7 @@ runvm ahci -device ich9-ahci,id=ahci -drive "file=$TMPD/extra.img,format=raw,if=
 runvm nvme -drive "file=$TMPD/extra.img,format=raw,if=none,id=n0" -device nvme,drive=n0,serial=hwinvtest
 runvm raid -device megasas,id=raid0
 WORDS=fakeraid runvm rst -device ich9-ahci,id=ahci -drive "file=$TMPD/extra.img,format=raw,if=none,id=x0" -device ide-hd,drive=x0,bus=ahci.0
+runvm iommu -machine q35,kernel-irqchip=split -device intel-iommu,intremap=on
 runvm ssdt -acpitable sig=SSDT,file="$TMPD/ssdt.aml"
 has "$TMPD/base.klar" "hwinv: version=1" "base: report printed"
 has "$TMPD/base.klar" "hwinv: firmware=BIOS" "base: multiboot kernel run is measured as BIOS"
@@ -94,6 +95,11 @@ hasnot "$TMPD/rst.klar" "EXCEPTION" "rst: no kernel exception with a RAID-class 
 has "$TMPD/ssdt.klar" "ELAN0000 cid=PNP0C50 x1 \\_SB.TPD0" "ssdt: /proc/acpi lists the touchpad with its CID and path"
 has "$TMPD/ssdt.klar" "hwinv: acpi_i2chid=1" "ssdt: one i2c-hid device counted"
 has "$TMPD/ssdt.klar" "hwinv: pointing=acpi-i2c-hid" "ssdt: pointing names acpi-i2c-hid"
+has "$TMPD/base.klar" "hwinv: iommu=none" "base: no DMAR -> iommu=none"
+hasnot "$TMPD/base.klar" "hwinv: iommu=intel-vtd" "counter-proof: base is not intel-vtd"
+has "$TMPD/iommu.klar" "hwinv: iommu=intel-vtd" "iommu: q35 intel-iommu reported"
+has "$TMPD/iommu.klar" "hwinv: iommu_translation=off" "iommu: translation off"
+has "$TMPD/iommu.klar" "== dmar ==" "iommu: raw dmar section"
 n=$(grep -c "^hwinv: " "$TMPD/base.klar"); [ "$n" -ge 28 ] && ok "base: $n hwinv lines (stdout + file copy)" || bad "base: only $n hwinv lines"
 echo "HWINV-GUEST: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

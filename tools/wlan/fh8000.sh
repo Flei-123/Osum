@@ -30,6 +30,43 @@ for c in $cases; do
     else bad "case $c differs from the reference"; diff "$D/$c.out" "$D/$c.exp" | head -6; fi
 done
 
+# ---- firmware pins (lib/wlan/iwl_pin.fi): the four linux-firmware files are recognised, anything else is not ----
+if $FIRNC tools/wlan/pin.fi -o "$D/pin" 2> "$D/perr"; then
+    ok "tools/wlan/pin.fi builds against lib/wlan/iwl_pin.fi"
+    pinchk() { # sha256-hex expected-api expected-family description
+        local got; got=$(printf '%s' "$1" | python3 -I -c 'import sys,binascii;sys.stdout.buffer.write(binascii.unhexlify(sys.stdin.read()))' | "$D/pin")
+        if [ "$got" = "$2 $3 $1" ]; then ok "pin: $4"; else bad "pin: $4 (got '$got')"; fi
+    }
+    pinchk 1336afcd028ed094d1fe33893c84c273bb5711be52970040344a75a12f276d56 36 8265 "iwlwifi-8265-36.ucode"
+    pinchk 85566f9473b0774209b8351c2daeea8d5c20116f880082b64af819ca54e3b9f7 34 8265 "iwlwifi-8265-34.ucode"
+    pinchk 479931721f5e168d69d67c297c11738acd75da390adb94f96030a1055f4cf57a 36 8000 "iwlwifi-8000C-36.ucode"
+    pinchk 5476ec3e48825739c4d19a0a690ee72f05717bca797214065037f2077c0249ce 34 8000 "iwlwifi-8000C-34.ucode"
+    pinchk 1336afcd028ed094d1fe33893c84c273bb5711be52970040344a75a12f276d57 0 0 "one digit off the 8265-36 pin is NOT accepted"
+    pinchk 0000000000000000000000000000000000000000000000000000000000000000 0 0 "zero digest is NOT accepted"
+else bad "pin.fi does not build"; head -10 "$D/perr"; fi
+
+# ---- optional: the REAL Intel blob (never committed; WLAN_8265_FW=<iwlwifi-8265-NN.ucode>, SHA-256 pinned) ----
+PIN36=1336afcd028ed094d1fe33893c84c273bb5711be52970040344a75a12f276d56
+PIN34=85566f9473b0774209b8351c2daeea8d5c20116f880082b64af819ca54e3b9f7
+if [ -n "${WLAN_8265_FW:-}" ] && [ -f "$WLAN_8265_FW" ]; then
+    sha=$(sha256sum "$WLAN_8265_FW" | cut -d' ' -f1)
+    if [ "$sha" = "$PIN36" ] || [ "$sha" = "$PIN34" ]; then
+        ok "real blob matches a pinned SHA-256 ($sha)"
+        mkdir -p "$D/real" && python3 -I tools/wlan/fh8000_ref.py real "$WLAN_8265_FW" "$D/real" || bad "real reference"
+        for c in real_128k real_4k; do
+            "$D/fh" < "$D/real/$c.case" > "$D/real/$c.out" 2>&1
+            if cmp -s "$D/real/$c.out" "$D/real/$c.exp"; then ok "REAL blob $c: trace + summary == Python reference ($(wc -l < "$D/real/$c.exp") lines)"
+            else bad "REAL blob $c differs from the reference"; diff "$D/real/$c.out" "$D/real/$c.exp" | head -4; fi
+        done
+        grep -q 'VIOL 0 LOST 0 NONZERO' "$D/real/real_128k.out" && ok "REAL blob: every byte of the RT image reached SRAM (no LOST)" || bad "REAL blob: bytes lost"
+        grep -q 'cpu1=4 cpu2=4' "$D/real/real_128k.out" && ok "REAL blob: 4 + 4 sections (CPU1 / CPU2), paging section not loaded" || bad "REAL blob: section split differs"
+    else
+        bad "WLAN_8265_FW has an unpinned SHA-256 ($sha): refusing to trust it"
+    fi
+else
+    echo "  (no WLAN_8265_FW: real-blob check skipped; tool: sha256sum on /lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode)"
+fi
+
 anchor() { # case grep-pattern description
     if grep -q -- "$2" "$D/$1.out"; then ok "anchor $1: $3"; else bad "anchor $1: $3 (no match for $2)"; fi
 }
@@ -88,6 +125,16 @@ mutate "RF-kill handshake bits not cleared"             's/wr(p, CSR_UCODE_DRV_G
 mutate "empty section accepted"                         's/return E_FH_EMPTY/let _x: u64 = 0/'
 mutate "CPU reset never released"                       's/r = prph_w(p, RELEASE_CPU_RESET, 0x01000000)/r = 0/'
 mutate "interrupt mask not restored after a CPU"        's/wr(p, iwl_pwr.CSR_INT_MASK, INT_INI_SET_MASK)//'
+
+# pin mutation: a pin with one wrong digit must make the pin check fail
+rm -rf "$D/m"; mkdir -p "$D/m/lib"
+for e in lib/*; do [ "$(basename "$e")" = wlan ] || ln -s "$PWD/$e" "$D/m/lib/$(basename "$e")"; done
+cp -r lib/wlan "$D/m/lib/wlan"
+sed -i '0,/1336afcd028ed094d1fe33893c84c273bb5711be52970040344a75a12f276d56/s//1336afcd028ed094d1fe33893c84c273bb5711be52970040344a75a12f276d57/' "$D/m/lib/wlan/iwl_pin.fi"
+if FIRNLIB="$D/m/lib" $FIRNC tools/wlan/pin.fi -o "$D/mpin" 2> "$D/merr"; then
+    got=$(printf '%s' 1336afcd028ed094d1fe33893c84c273bb5711be52970040344a75a12f276d56 | python3 -I -c 'import sys,binascii;sys.stdout.buffer.write(binascii.unhexlify(sys.stdin.read()))' | "$D/mpin")
+    case "$got" in "36 8265 "*) bad "mutation pin digest changed NOT caught" ;; *) ok "mutation pin digest changed caught" ;; esac
+else bad "mutation pin: mutant does not build"; fi
 
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
