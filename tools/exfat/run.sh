@@ -125,6 +125,7 @@ run_case() { # cluster_bytes
     # ---- OS script
     local S="$TMPD/s.sh"
     {
+        echo 'echo "unlock hdb" > /dev/wlock'
         echo 'echo @@mount'
         echo 'mount /dev/hdb1 /mnt exfat'
         echo 'echo "@@mount-rc=$?"'

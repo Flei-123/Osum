@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/block/wlock.fi -- write lock for every block device except the root device.
+
+import serial
+import lib.kstate
+
+export {
+    set_foreign_test, foreign, allowed, set_root, disable, unlock, lock, lock_all, is_open, denied_count, last_denied,
+    command, status, dev_by_name, NONE, ALL,
+    D_RAM, D_ATA, D_NVME, D_ATA1, D_USB0, D_AHCI, D_USB1, D_USB3
+}
+
+const D_RAM: u64 = 0
+const D_ATA: u64 = 1
+const D_NVME: u64 = 2
+const D_ATA1: u64 = 3
+const D_USB0: u64 = 4
+const D_AHCI: u64 = 5
+const D_USB1: u64 = 6
+const D_USB3: u64 = 8
+const MAXDEV: u64 = 16
+const NONE: u64 = 99
+const ALL: u64 = 98
+
+static mut open_mask: u64 = 0
+static mut denied: u64 = 0
+static mut last_dev: u64 = 99
+static mut seen_mask: u64 = 0
+static mut root_dev: u64 = 0
+static mut disabled: u64 = 0
+static mut foreign_test: u64 = 0
+
+fn denied_count() -> u64 {
+    return denied
+}
+
+fn last_denied() -> u64 {
+    return last_dev
+}
+
+fn is_open(dev: u64) -> bool {
+    if dev >= MAXDEV {
+        return false
+    }
+    return ((open_mask >> dev) & 1) == 1
+}
+
+fn say_dev(head: u64, dev: u64) {
+    serial.puts(head)
+    serial.dec(dev)
+    serial.nl()
+}
+
+fn note_denied(dev: u64) {
+    var s_den: [u8; 25] = "wlock: write denied dev=\0"
+    denied = denied + 1
+    last_dev = dev
+    if dev < MAXDEV && ((seen_mask >> dev) & 1) == 0 {
+        seen_mask = seen_mask | (1 << dev)
+        say_dev((&s_den[0]) as u64, dev)
+    }
+}
+
+fn set_root(dev: u64) {
+    if foreign_test == 1 {
+        return
+    }
+    root_dev = dev
+}
+
+fn set_foreign_test() {
+    foreign_test = 1
+}
+
+fn foreign() -> bool {
+    return foreign_test == 1
+}
+
+fn disable() {
+    disabled = 1
+}
+
+fn allowed(dev: u64) -> bool {
+    if disabled == 1 {
+        return true
+    }
+    if dev == root_dev {
+        return true
+    }
+    if is_open(dev) {
+        return true
+    }
+    note_denied(dev)
+    return false
+}
+
+fn unlock(dev: u64) {
+    var s_unl: [u8; 21] = "wlock: unlock dev=\0\0\0"
+    if dev < MAXDEV {
+        open_mask = open_mask | (1 << dev)
+        say_dev((&s_unl[0]) as u64, dev)
+    }
+}
+
+fn lock(dev: u64) {
+    var s_lck: [u8; 19] = "wlock: lock dev=\0\0\0"
+    if is_open(dev) {
+        open_mask = open_mask - (1 << dev)
+        say_dev((&s_lck[0]) as u64, dev)
+    }
+}
+
+fn lock_all() {
+    var s_all: [u8; 16] = "wlock: lock all\0"
+    open_mask = 0
+    serial.puts((&s_all[0]) as u64)
+    serial.nl()
+}
+
+fn word_is(buf: u64, at: u64, len: u64, lit: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(lit + i) != 0 {
+        if at + i >= len {
+            return false
+        }
+        if kstate.get8(buf + at + i) != kstate.get8(lit + i) {
+            return false
+        }
+        i = i + 1
+    }
+    var e: u64 = 0
+    if at + i < len {
+        e = kstate.get8(buf + at + i)
+    }
+    return e == 0 || e == 10 || e == 32 || e == 13
+}
+
+fn dev_by_name(buf: u64, at: u64, len: u64) -> u64 {
+    var n_hda: [u8; 4] = "hda\0"
+    var n_hdb: [u8; 4] = "hdb\0"
+    var n_nvme: [u8; 6] = "nvme0\0"
+    var n_sda: [u8; 4] = "sda\0"
+    var n_usb: [u8; 4] = "usb\0"
+    var n_ram: [u8; 5] = "ram0\0"
+    var n_all: [u8; 4] = "all\0"
+    if word_is(buf, at, len, (&n_hda[0]) as u64) {
+        return D_ATA
+    }
+    if word_is(buf, at, len, (&n_hdb[0]) as u64) {
+        return D_ATA1
+    }
+    if word_is(buf, at, len, (&n_nvme[0]) as u64) {
+        return D_NVME
+    }
+    if word_is(buf, at, len, (&n_sda[0]) as u64) {
+        return D_AHCI
+    }
+    if word_is(buf, at, len, (&n_usb[0]) as u64) {
+        return D_USB0
+    }
+    if word_is(buf, at, len, (&n_ram[0]) as u64) {
+        return D_RAM
+    }
+    if word_is(buf, at, len, (&n_all[0]) as u64) {
+        return ALL
+    }
+    return NONE
+}
+
+fn command(buf: u64, len: u64) -> bool {
+    var c_unl: [u8; 7] = "unlock\0"
+    var c_lck: [u8; 5] = "lock\0"
+    var at: u64 = 0
+    var do_unlock: bool = false
+    if word_is(buf, 0, len, (&c_unl[0]) as u64) {
+        do_unlock = true
+        at = 7
+    } else if word_is(buf, 0, len, (&c_lck[0]) as u64) {
+        at = 5
+    } else {
+        return false
+    }
+    let dev: u64 = dev_by_name(buf, at, len)
+    if dev == NONE {
+        return false
+    }
+    if dev == ALL {
+        if do_unlock {
+            return false
+        }
+        lock_all()
+        return true
+    }
+    if do_unlock {
+        unlock(dev)
+    } else {
+        lock(dev)
+    }
+    return true
+}
+
+fn put_dec(dst: u64, v: u64) -> u64 {
+    var tmp: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        kstate.set8(dst, 48 as u8)
+        return 1
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(dst + i, tmp[(n - 1 - i) as usize])
+        i = i + 1
+    }
+    return n
+}
+
+fn put_str(dst: u64, s: u64) -> u64 {
+    var i: u64 = 0
+    while kstate.get8(s + i) != 0 {
+        kstate.set8(dst + i, kstate.get8(s + i) as u8)
+        i = i + 1
+    }
+    return i
+}
+
+fn status(dst: u64) -> u64 {
+    var t_open: [u8; 12] = "wlock open=\0"
+    var t_den: [u8; 9] = " denied=\0"
+    var t_last: [u8; 7] = " last=\0"
+    var t_off: [u8; 6] = " off=\0"
+    var n: u64 = put_str(dst, (&t_open[0]) as u64)
+    n = n + put_dec(dst + n, open_mask)
+    n = n + put_str(dst + n, (&t_den[0]) as u64)
+    n = n + put_dec(dst + n, denied)
+    n = n + put_str(dst + n, (&t_last[0]) as u64)
+    n = n + put_dec(dst + n, last_dev)
+    n = n + put_str(dst + n, (&t_off[0]) as u64)
+    n = n + put_dec(dst + n, disabled)
+    kstate.set8(dst + n, 10 as u8)
+    return n + 1
+}

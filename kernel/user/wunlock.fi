@@ -1,0 +1,161 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wunlock.fi -- ask the kernel to open the write lock of one block device after the caller has confirmed.
+
+profile kernel
+
+import ulib
+import instkern
+
+export { unlock, relock, status_open, protected, confirm_unlock, refuse }
+
+static mut P_WLOCK: [u8; 12] = "/dev/wlock\0\0"
+static mut C_UNLOCK: [u8; 8] = "unlock \0"
+static mut C_LOCKALL: [u8; 10] = "lock all\0\0"
+static mut CMD: [u8; 40] = [0 as u8; 40]
+
+fn byte_at(p: u64, i: u64) -> u64 {
+    let c: u8 = *((p + i) as *mut u8)
+    return c as u64
+}
+
+fn put(at: u64, v: u64) {
+    *((((&CMD[0 as usize]) as u64) + at) as *mut u8) = v as u8
+}
+
+fn name_len(dev: u64, at: u64) -> u64 {
+    let c0: u64 = byte_at(dev, at)
+    let c1: u64 = byte_at(dev, at + 1)
+    if (c0 == 104 && c1 == 100) || (c0 == 115 && c1 == 100) {
+        return 3
+    }
+    if c0 == 110 && c1 == 118 {
+        return 5
+    }
+    if c0 == 117 && c1 == 115 {
+        return 3
+    }
+    if c0 == 114 && c1 == 97 {
+        return 4
+    }
+    return ulib.length(dev) - at
+}
+
+fn send(n: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_WLOCK[0 as usize]) as u64, ulib.O_RDWR, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, (&CMD[0 as usize]) as u64, n)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(w) {
+        return false
+    }
+    return w == n
+}
+
+fn unlock(dev: u64) -> bool {
+    var i: u64 = 0
+    while i < 7 {
+        put(i, byte_at((&C_UNLOCK[0 as usize]) as u64, i))
+        i = i + 1
+    }
+    let at: u64 = 5
+    let n: u64 = name_len(dev, at)
+    if n == 0 || n > 20 {
+        return false
+    }
+    var k: u64 = 0
+    while k < n {
+        put(7 + k, byte_at(dev, at + k))
+        k = k + 1
+    }
+    put(7 + n, 10)
+    return send(8 + n)
+}
+
+fn relock() -> bool {
+    var i: u64 = 0
+    while i < 8 {
+        put(i, byte_at((&C_LOCKALL[0 as usize]) as u64, i))
+        i = i + 1
+    }
+    return send(8)
+}
+
+fn status_open() -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_WLOCK[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    ulib.sys(ulib.SYS_READ, fd, (&CMD[0 as usize]) as u64, 39)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return (&CMD[0 as usize]) as u64
+}
+
+fn protected(dev: u64) -> bool {
+    let c0: u64 = byte_at(dev, 5)
+    let c1: u64 = byte_at(dev, 6)
+    if c0 == 114 && c1 == 97 {
+        return true
+    }
+    if c0 == 117 && c1 == 115 {
+        return true
+    }
+    return false
+}
+
+static mut SEC: [u8; 512] = [0 as u8; 512]
+static mut O_NAME: [u8; 8] = "--name\0\0"
+static mut M_REFUSE: [u8; 32] = "wipe: refused, boot/ram device\0\0"
+static mut M_NAME: [u8; 40] = "wipe: partitions exist, type --name \0\0\0\0"
+static mut M_DENIED: [u8; 28] = "wipe: kernel refused unlock\0"
+static mut M_OK: [u8; 20] = "wipe: unlocked\0\0\0\0\0\0"
+
+fn has_table(fd: u64) -> bool {
+    if instkern.lese(fd, 0, (&SEC[0 as usize]) as u64, 512) {
+        if SEC[510 as usize] == 85 as u8 && SEC[511 as usize] == 170 as u8 {
+            return true
+        }
+    }
+    if instkern.lese(fd, 1, (&SEC[0 as usize]) as u64, 512) {
+        if SEC[0 as usize] == 69 as u8 && SEC[1 as usize] == 70 as u8 && SEC[2 as usize] == 73 as u8 {
+            return true
+        }
+    }
+    return false
+}
+
+fn confirm_unlock(fd: u64, dev: u64, args: u64, argc: u64) -> bool {
+    if protected(dev) {
+        ulib.esay_line((&M_REFUSE[0 as usize]) as u64, dev)
+        return false
+    }
+    if has_table(fd) {
+        let want: u64 = ulib.base_name(dev)
+        var ok: bool = false
+        var i: u64 = 2
+        while i + 1 < argc {
+            if ulib.streq(ulib.arg_at(args, i), (&O_NAME[0 as usize]) as u64) {
+                if ulib.streq(ulib.arg_at(args, i + 1), want) {
+                    ok = true
+                }
+            }
+            i = i + 1
+        }
+        if !ok {
+            ulib.esay_line((&M_NAME[0 as usize]) as u64, want)
+            return false
+        }
+    }
+    if !unlock(dev) {
+        ulib.esay_line((&M_DENIED[0 as usize]) as u64, dev)
+        return false
+    }
+    ulib.say((&M_OK[0 as usize]) as u64)
+    ulib.nl()
+    return true
+}
+
+fn refuse(dev: u64) {
+    ulib.esay_line((&M_REFUSE[0 as usize]) as u64, dev)
+}

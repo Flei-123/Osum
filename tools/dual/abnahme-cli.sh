@@ -166,7 +166,7 @@ rm -f "$OUT/probe.img"
 # ==================================================================
 titel "3. wirklich installieren -- in den freien Platz"
 # ==================================================================
-lauf "$OUT/platte.img" "dualcli /dev/hdb --quelle /dev/hda --ja" "$OUT/ser.txt"
+lauf "$OUT/platte.img" "dualcli /dev/hdb --quelle /dev/hda --ja --name hdb" "$OUT/ser.txt"
 tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -a '^dual:' | head -20 | sed 's/^/        /'
 
 grep -qa 'dual: neu p3' "$OUT/ser.txt" \
@@ -262,7 +262,7 @@ sgdisk -n "2:$DAT_START:163806" -t 2:0700 -c 2:"Basic data partition" "$OUT/eng.
 ENG_VOR=$(sha256sum < "$OUT/eng.img" | cut -d' ' -f1)
 sgdisk -p "$OUT/eng.img" 2>&1 | tail -4 | sed 's/^/        /'
 
-lauf "$OUT/eng.img" "dualcli /dev/hdb --quelle /dev/hda --ja" "$OUT/ser-eng.txt"
+lauf "$OUT/eng.img" "dualcli /dev/hdb --quelle /dev/hda --ja --name hdb" "$OUT/ser-eng.txt"
 tr -d '\000' < "$OUT/ser-eng.txt" 2>/dev/null | grep -a '^dual:' | head -8 | sed 's/^/        /'
 
 if grep -qa 'dual: zu wenig' "$OUT/ser-eng.txt"; then

@@ -32,6 +32,7 @@
 
 import serial
 import lib.kstate
+import block.wlock
 import drv.blk.nvme
 import drv.blk.ahci
 import arch.arch
@@ -162,6 +163,7 @@ fn ram_init(state: u64, base: u64, blocks_n: u64) {
     kstate.set(state, kstate.DISK, base)
     kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
     kstate.set(state, kstate.DISK_DEV, DEV_RAM)
+    wlock.set_root(DEV_RAM)
     kstate.set(state, kstate.DISK_FIRST, 0)
 }
 
@@ -171,6 +173,7 @@ fn use_ata(state: u64, blocks_n: u64) {
     kstate.set(state, kstate.DISK, 0)
     kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
     kstate.set(state, kstate.DISK_DEV, DEV_ATA)
+    wlock.set_root(DEV_ATA)
     kstate.set(state, kstate.DISK_FIRST, 0)
 }
 
@@ -195,6 +198,7 @@ fn use_at(state: u64, dev: u64, first_n: u64, blocks_n: u64) {
     kstate.set(state, kstate.DISK, 0)
     kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
     kstate.set(state, kstate.DISK_DEV, dev)
+    wlock.set_root(dev)
     kstate.set(state, kstate.DISK_FIRST, first_n)
 }
 
@@ -208,6 +212,7 @@ fn use_nvme(state: u64, blocks_n: u64) {
     kstate.set(state, kstate.DISK, 0)
     kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
     kstate.set(state, kstate.DISK_DEV, DEV_NVME)
+    wlock.set_root(DEV_NVME)
     kstate.set(state, kstate.DISK_FIRST, 0)
 }
 
@@ -217,6 +222,7 @@ fn use_ahci(state: u64, blocks_n: u64) {
     kstate.set(state, kstate.DISK, 0)
     kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
     kstate.set(state, kstate.DISK_DEV, DEV_AHCI)
+    wlock.set_root(DEV_AHCI)
     kstate.set(state, kstate.DISK_FIRST, 0)
 }
 
@@ -539,7 +545,17 @@ fn ata_read_on(lba: u64, dst: u64, slave: bool) -> bool {
     return true
 }
 
+fn ata_dev(slave: bool) -> u64 {
+    if slave {
+        return wlock.D_ATA1
+    }
+    return wlock.D_ATA
+}
+
 fn ata_write_on(lba: u64, src: u64, slave: bool) -> bool {
+    if !wlock.allowed(ata_dev(slave)) {
+        return false
+    }
     ata_select_on(lba, slave)
     serial.out8(ATA_CMD, ATA_WRITE)
     if !ata_wait(true) {
@@ -919,6 +935,9 @@ fn dev_name(dev: u64) -> u64 {
 // EIN zweiter Versuch, und nur einer -- dieselbe Regel wie beim Lesen:
 // was zweimal nicht antwortet, antwortet nicht.
 fn ata_write_twice(lba: u64, src: u64, slave: bool) -> bool {
+    if !wlock.allowed(ata_dev(slave)) {
+        return false
+    }
     if ata_write_on(lba, src, slave) {
         return true
     }
@@ -1002,6 +1021,9 @@ fn dma_ready(addr: u64, n: u64) -> bool {
 // ONE DMA command for n sectors at lba. false = nothing trusted, caller
 // falls back to PIO (DMA is switched off after a failure).
 fn dma_run(lba: u64, addr: u64, n: u64, slave: bool, write: bool) -> bool {
+    if write && !wlock.allowed(ata_dev(slave)) {
+        return false
+    }
     let bm: u64 = DMA_BM
     let prd: u64 = DMA_PRD
     var k: u64 = 0
@@ -1080,6 +1102,9 @@ fn dma_run(lba: u64, addr: u64, n: u64, slave: bool, write: bool) -> bool {
 // it again, exactly like ata_read_run. The command latency (about 17 ms per
 // command in QEMU) is paid once per run instead of once per sector.
 fn ata_write_run(lba: u64, src: u64, n: u64, slave: bool) -> bool {
+    if !wlock.allowed(ata_dev(slave)) {
+        return false
+    }
     if dma_ready(src, n) && dma_run(lba, src, n, slave, true) {
         return true
     }
@@ -1132,6 +1157,9 @@ fn ata_write_run(lba: u64, src: u64, n: u64, slave: bool) -> bool {
 }
 
 fn ata_write_run_twice(lba: u64, src: u64, n: u64, slave: bool) -> bool {
+    if !wlock.allowed(ata_dev(slave)) {
+        return false
+    }
     if ata_write_run(lba, src, n, slave) {
         return true
     }
@@ -1690,6 +1718,9 @@ fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
 }
 
 fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
+    if !wlock.allowed(dev) {
+        return false
+    }
     if lba >= blocks_on(state, dev) {
         return false
     }
