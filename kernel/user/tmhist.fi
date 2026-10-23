@@ -1,0 +1,241 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import msg
+import tmfmt
+import tmio
+
+export { NA, begin, note, finish, count, rows, blob, load, name_at, ticks_at, procs_at, live_at, net_at, peak_at }
+
+const NA: u64 = 0xFFFFFFFFFFFFFFFF
+const APPS: u64 = 48
+const SLOTS: u64 = 128
+const NAMEW: u64 = 24
+const TICK_MS: u64 = 10
+const CAP: u64 = 4000
+
+static mut a_name: [u8; 1152] = [0 as u8; 1152]
+static mut a_used: [u64; 48] = [0 as u64; 48]
+static mut a_ticks: [u64; 48] = [0 as u64; 48]
+static mut a_procs: [u64; 48] = [0 as u64; 48]
+static mut a_live: [u64; 48] = [0 as u64; 48]
+static mut a_cur: [u64; 48] = [0 as u64; 48]
+static mut a_peak: [u64; 48] = [0 as u64; 48]
+static mut a_net: [u64; 48] = [0 as u64; 48]
+static mut a_netok: [u64; 48] = [0 as u64; 48]
+static mut s_pid: [u64; 128] = [0 as u64; 128]
+static mut s_tk: [u64; 128] = [0 as u64; 128]
+static mut s_net: [u64; 128] = [0 as u64; 128]
+static mut ord: [u64; 48] = [0 as u64; 48]
+static mut n_apps: u64 = 0
+static mut in_first: u64 = 0
+static mut out: [u8; 4096] = [0 as u8; 4096]
+static mut n_rows: u64 = 0
+static mut k_cols: [u8; 16] = "taskmgr.h.cols\0\0"
+static mut u_tab: [u8; 2] = "\t\0"
+static mut u_nl: [u8; 2] = "\n\0"
+static mut u_dash: [u8; 3] = "--\0"
+
+fn name_ptr(a: u64) -> u64 {
+    return (&a_name[0]) as u64 + a * NAMEW
+}
+
+fn find(name: u64) -> u64 {
+    var a: u64 = 0
+    while a < APPS {
+        if a_used[a as usize] != 0 && ulib.streq(name_ptr(a), name) {
+            return a
+        }
+        a = a + 1
+    }
+    return APPS
+}
+
+fn reset(a: u64, name: u64) {
+    ulib.strncpy(name_ptr(a), name, NAMEW)
+    a_used[a as usize] = 1
+    a_ticks[a as usize] = 0
+    a_procs[a as usize] = 0
+    a_live[a as usize] = 0
+    a_cur[a as usize] = 0
+    a_peak[a as usize] = 0
+    a_net[a as usize] = 0
+    a_netok[a as usize] = 0
+}
+
+fn slot_for(name: u64) -> u64 {
+    var a: u64 = find(name)
+    if a < APPS {
+        return a
+    }
+    var victim: u64 = APPS
+    var best: u64 = NA
+    var i: u64 = 0
+    while i < APPS {
+        if a_used[i as usize] == 0 {
+            reset(i, name)
+            return i
+        }
+        if a_live[i as usize] == 0 && a_ticks[i as usize] < best {
+            best = a_ticks[i as usize]
+            victim = i
+        }
+        i = i + 1
+    }
+    if victim < APPS {
+        reset(victim, name)
+    }
+    return victim
+}
+
+fn begin(first: bool) {
+    var a: u64 = 0
+    while a < APPS {
+        a_live[a as usize] = 0
+        a_cur[a as usize] = 0
+        a = a + 1
+    }
+    in_first = 0
+    if first {
+        in_first = 1
+    }
+}
+
+fn note(slot: u64, pid: u64, name: u64, tk: u64, pages: u64, tx: u64, rx: u64) {
+    if slot >= SLOTS {
+        return
+    }
+    let a: u64 = slot_for(name)
+    if a >= APPS {
+        return
+    }
+    let i: usize = slot as usize
+    let same: bool = s_pid[i] == pid
+    let known: bool = tx < tmio.UNKNOWN && rx < tmio.UNKNOWN
+    var net: u64 = 0
+    if known {
+        net = tx + rx
+    }
+    if !same {
+        if in_first == 0 {
+            a_ticks[a as usize] = a_ticks[a as usize] + tk
+            if known {
+                a_net[a as usize] = a_net[a as usize] + net
+            }
+        }
+        a_procs[a as usize] = a_procs[a as usize] + 1
+    } else {
+        if tk > s_tk[i] {
+            a_ticks[a as usize] = a_ticks[a as usize] + (tk - s_tk[i])
+        }
+        if known && net > s_net[i] {
+            a_net[a as usize] = a_net[a as usize] + (net - s_net[i])
+        }
+    }
+    if known {
+        a_netok[a as usize] = 1
+    }
+    s_pid[i] = pid
+    s_tk[i] = tk
+    s_net[i] = net
+    a_live[a as usize] = a_live[a as usize] + 1
+    a_cur[a as usize] = a_cur[a as usize] + pages
+}
+
+fn rank() {
+    var n: u64 = 0
+    var a: u64 = 0
+    while a < APPS {
+        if a_used[a as usize] != 0 {
+            var j: u64 = n
+            while j > 0 && a_ticks[ord[(j - 1) as usize] as usize] < a_ticks[a as usize] {
+                ord[j as usize] = ord[(j - 1) as usize]
+                j = j - 1
+            }
+            ord[j as usize] = a
+            n = n + 1
+        }
+        a = a + 1
+    }
+    n_apps = n
+}
+
+fn finish() {
+    var a: u64 = 0
+    while a < APPS {
+        if a_cur[a as usize] > a_peak[a as usize] {
+            a_peak[a as usize] = a_cur[a as usize]
+        }
+        a = a + 1
+    }
+    rank()
+}
+
+fn count() -> u64 {
+    return n_apps
+}
+
+fn rows() -> u64 {
+    return n_rows
+}
+
+fn blob() -> u64 {
+    return (&out[0]) as u64
+}
+
+fn name_at(r: u64) -> u64 {
+    return name_ptr(ord[r as usize])
+}
+
+fn ticks_at(r: u64) -> u64 {
+    return a_ticks[ord[r as usize] as usize]
+}
+
+fn procs_at(r: u64) -> u64 {
+    return a_procs[ord[r as usize] as usize]
+}
+
+fn live_at(r: u64) -> u64 {
+    return a_live[ord[r as usize] as usize]
+}
+
+fn peak_at(r: u64) -> u64 {
+    return a_peak[ord[r as usize] as usize]
+}
+
+fn net_at(r: u64) -> u64 {
+    let a: u64 = ord[r as usize]
+    if a_netok[a as usize] == 0 {
+        return NA
+    }
+    return a_net[a as usize]
+}
+
+fn load() {
+    let d: u64 = (&out[0]) as u64
+    var at: u64 = tmfmt.put_str(d, 0, msg.get((&k_cols[0]) as u64))
+    at = tmfmt.put_str(d, at, (&u_nl[0]) as u64)
+    n_rows = 0
+    var r: u64 = 0
+    while r < n_apps && at < CAP {
+        at = tmfmt.put_str(d, at, name_at(r))
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        at = tmfmt.put_time(d, at, ticks_at(r) * TICK_MS)
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        at = tmfmt.put_num(d, at, procs_at(r))
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        at = tmfmt.put_num(d, at, live_at(r))
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        at = tmfmt.put_size(d, at, peak_at(r) * 4)
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        if net_at(r) == NA {
+            at = tmfmt.put_str(d, at, (&u_dash[0]) as u64)
+        } else {
+            at = tmfmt.put_bytes(d, at, net_at(r))
+        }
+        at = tmfmt.put_str(d, at, (&u_nl[0]) as u64)
+        n_rows = n_rows + 1
+        r = r + 1
+    }
+}

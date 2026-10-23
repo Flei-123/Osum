@@ -127,7 +127,7 @@ BWT="$TMPD/basewt"
 if git worktree add --detach "$BWT" "$BASE" >/dev/null 2>&1; then
     mkdir -p "$BWT/tools/taskmgr2"
     cp -r tools/toolbench/. "$BWT/tools/toolbench/"
-    cp tools/taskmgr2/ctx.txt tools/taskmgr2/search.txt tools/taskmgr2/perf.txt tools/taskmgr2/eff.txt tools/taskmgr2/users.txt tools/taskmgr2/del.txt "$BWT/tools/taskmgr2/"
+    cp tools/taskmgr2/ctx.txt tools/taskmgr2/search.txt tools/taskmgr2/perf.txt tools/taskmgr2/eff.txt tools/taskmgr2/users.txt tools/taskmgr2/del.txt tools/taskmgr2/history.txt tools/taskmgr2/services.txt tools/taskmgr2/svc.state "$BWT/tools/taskmgr2/"
     drive "$BWT" "$TMPD/bc" "$BWT/tools/taskmgr2/ctx.txt" || true
     drive "$BWT" "$TMPD/bs" "$BWT/tools/taskmgr2/search.txt" || true
     num "BASE $BASE: no context menu opens" "$(cnt "$TMPD/bc/serial.txt" '^taskmgr: ctx n=')" eq 0
@@ -203,6 +203,41 @@ if [ -n "$BWT" ] && [ -d "$BWT" ]; then
     num "BASE $BASE: Delete asks nothing" "$(cnt "$TMPD/bd/serial.txt" '^taskmgr: frage pid=')" eq 0
     drive_users "$BWT" "$TMPD/bu" || true
     num "BASE $BASE: no users page report" "$(cnt "$TMPD/bu/serial.txt" '^taskmgr: users n=')" eq 0
+fi
+
+echo
+echo "== 7. r1600: App history + Services pages from real sources =="
+drive_hist() {
+    local tree=$1 out=$2
+    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+        app=/bin/taskmgr,melde,takt,500,history wait=14 last=400 extra="wighalt=120" \
+        plan="$tree/tools/taskmgr2/history.txt" > "$out.log" 2>&1 )
+}
+drive_svc() {
+    local tree=$1 out=$2
+    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes svcstate="$tree/tools/taskmgr2/svc.state" \
+        app=/bin/taskmgr,melde,takt,500,services wait=14 last=400 extra="wighalt=120" \
+        plan="$tree/tools/taskmgr2/services.txt" > "$out.log" 2>&1 )
+}
+drive_hist "$ROOT" "$TMPD/h" || bad "build history"
+SH="$TMPD/h/serial.txt"
+num "history plan targets not found" "$(cnt "$TMPD/h/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "history reports at least 3 apps" "$(grep -a '^taskmgr: history n=' "$SH" | tail -1 | sed -E 's/.*n=([0-9]+).*/\1/')" ge 3
+num "taskmgr itself is in the history and running (live=1)" "$(grep -a '^taskmgr: hist r=' "$SH" | tail -12 | grep -a 'name=taskmgr' | grep -c ' live=1 ')" ge 1
+num "taskmgr burned CPU ticks (ticks >= 1)" "$(grep -a '^taskmgr: hist r=' "$SH" | grep -a 'name=taskmgr' | sed -E 's/.* ticks=([0-9]+) .*/\1/' | sort -n | tail -1)" ge 1
+num "history rows are ranked by CPU (no later row has more ticks)" "$(grep -a '^taskmgr: hist r=' "$SH" | sed -E 's/^taskmgr: hist r=([0-9]+) .* ticks=([0-9]+) .*/\1 \2/' | awk '$1==0 {p=$2; next} $2>p {bad++} {p=$2} END{print bad+0}')" eq 0
+num "every history row says net=<bytes> or net=- (never a bare zero guess)" "$(grep -a '^taskmgr: hist r=' "$SH" | grep -avc ' net=[0-9-]')" eq 0
+drive_svc "$ROOT" "$TMPD/v" || bad "build services"
+SV="$TMPD/v/serial.txt"
+num "services plan targets not found" "$(cnt "$TMPD/v/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "services page lists the 3 rows of /run/svc.state" "$(grep -a '^taskmgr: services n=' "$SV" | tail -1 | sed -E 's/.*n=([0-9]+).*/\1/')" eq 3
+num "running service carries pid 7, 2 starts" "$(grep -a '^taskmgr: svc r=' "$SV" | grep -a 'name=blink' | grep -ac ' pid=7 starts=2 fails=0 state=running')" ge 1
+num "failed service carries 2 failures" "$(grep -a '^taskmgr: svc r=' "$SV" | grep -a 'name=sshd' | grep -ac ' fails=2 state=failed')" ge 1
+if [ -n "$BWT" ] && [ -d "$BWT" ]; then
+    drive_hist "$BWT" "$TMPD/bh" || true
+    num "BASE $BASE: no history report" "$(cnt "$TMPD/bh/serial.txt" '^taskmgr: history n=')" eq 0
+    drive_svc "$BWT" "$TMPD/bv" || true
+    num "BASE $BASE: no services report" "$(cnt "$TMPD/bv/serial.txt" '^taskmgr: services n=')" eq 0
 fi
 
 echo

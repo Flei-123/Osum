@@ -1,0 +1,185 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import msg
+import tmfmt
+
+export { count, rows, blob, load, name_at, state_at, pid_at, starts_at, fails_at }
+
+const MAXSVC: u64 = 16
+const NAMEW: u64 = 32
+const STATEW: u64 = 16
+const RAWCAP: u64 = 2040
+const CAP: u64 = 2300
+
+static mut raw: [u8; 2048] = [0 as u8; 2048]
+static mut out: [u8; 2560] = [0 as u8; 2560]
+static mut v_name: [u8; 512] = [0 as u8; 512]
+static mut v_state: [u8; 256] = [0 as u8; 256]
+static mut v_pid: [u64; 16] = [0 as u64; 16]
+static mut v_starts: [u64; 16] = [0 as u64; 16]
+static mut v_fails: [u64; 16] = [0 as u64; 16]
+static mut v_since: [u64; 16] = [0 as u64; 16]
+static mut v_target: [u8; 512] = [0 as u8; 512]
+static mut kbuf: [u8; 64] = [0 as u8; 64]
+static mut n_svc: u64 = 0
+static mut n_rows: u64 = 0
+static mut k_cols: [u8; 17] = "taskmgr.svc.cols\0"
+static mut p_state: [u8; 15] = "/run/svc.state\0"
+static mut k_state: [u8; 17] = "taskmgr.svc.s.\0\0\0"
+static mut k_target: [u8; 17] = "taskmgr.svc.t.\0\0\0"
+static mut k_running: [u8; 8] = "running\0"
+static mut u_tab: [u8; 2] = "\t\0"
+static mut u_nl: [u8; 2] = "\n\0"
+static mut u_dash: [u8; 3] = "--\0"
+
+fn count() -> u64 {
+    return n_svc
+}
+
+fn rows() -> u64 {
+    return n_rows
+}
+
+fn blob() -> u64 {
+    return (&out[0]) as u64
+}
+
+fn name_at(i: u64) -> u64 {
+    return (&v_name[0]) as u64 + i * NAMEW
+}
+
+fn state_at(i: u64) -> u64 {
+    return (&v_state[0]) as u64 + i * STATEW
+}
+
+fn pid_at(i: u64) -> u64 {
+    return v_pid[i as usize]
+}
+
+fn starts_at(i: u64) -> u64 {
+    return v_starts[i as usize]
+}
+
+fn fails_at(i: u64) -> u64 {
+    return v_fails[i as usize]
+}
+
+fn target_at(i: u64) -> u64 {
+    return (&v_target[0]) as u64 + i * NAMEW
+}
+
+fn slurp() -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_state[0]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var at: u64 = 0
+    var going: bool = true
+    while going && at < RAWCAP {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&raw[0]) as u64 + at, RAWCAP - at)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            at = at + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    __mmio_write8(((&raw[0]) as u64 + at) as *mut u8, 0 as u8)
+    return at
+}
+
+fn parse_line(line: u64) {
+    if n_svc >= MAXSVC {
+        return
+    }
+    var num: [u8; 24] = [0 as u8; 24]
+    let i: u64 = n_svc
+    var p: u64 = ulib.word(line, 0, name_at(i), NAMEW)
+    p = ulib.word(line, p, state_at(i), STATEW)
+    p = ulib.word(line, p, (&num[0]) as u64, 24)
+    v_pid[i as usize] = ulib.to_num((&num[0]) as u64)
+    p = ulib.word(line, p, (&num[0]) as u64, 24)
+    v_starts[i as usize] = ulib.to_num((&num[0]) as u64)
+    p = ulib.word(line, p, (&num[0]) as u64, 24)
+    v_fails[i as usize] = ulib.to_num((&num[0]) as u64)
+    p = ulib.word(line, p, (&num[0]) as u64, 24)
+    v_since[i as usize] = ulib.to_num((&num[0]) as u64)
+    ulib.word(line, p, target_at(i), NAMEW)
+    n_svc = n_svc + 1
+}
+
+fn parse(len: u64) {
+    n_svc = 0
+    var line: [u8; 256] = [0 as u8; 256]
+    var pos: u64 = 0
+    while pos < len {
+        var k: u64 = 0
+        while pos + k < len && raw[(pos + k) as usize] != 10 as u8 && k < 255 {
+            line[k as usize] = raw[(pos + k) as usize]
+            k = k + 1
+        }
+        line[k as usize] = 0 as u8
+        pos = pos + k + 1
+        if line[0 as usize] != 0 as u8 {
+            parse_line((&line[0]) as u64)
+        }
+    }
+}
+
+fn word_of(prefix: u64, token: u64) -> u64 {
+    ulib.strncpy((&kbuf[0]) as u64, prefix, 40)
+    let at: u64 = ulib.length((&kbuf[0]) as u64)
+    var i: u64 = 0
+    while i < 20 && *((token + i) as *mut u8) != 0 as u8 {
+        var c: u8 = *((token + i) as *mut u8)
+        if c == 44 as u8 {
+            c = 95 as u8
+        }
+        kbuf[(at + i) as usize] = c
+        i = i + 1
+    }
+    kbuf[(at + i) as usize] = 0 as u8
+    let w: u64 = msg.get((&kbuf[0]) as u64)
+    if ulib.streq(w, (&kbuf[0]) as u64) {
+        return token
+    }
+    return w
+}
+
+fn load(now_ms: u64) {
+    let d: u64 = (&out[0]) as u64
+    var at: u64 = tmfmt.put_str(d, 0, msg.get((&k_cols[0]) as u64))
+    at = tmfmt.put_str(d, at, (&u_nl[0]) as u64)
+    parse(slurp())
+    n_rows = 0
+    var i: u64 = 0
+    while i < n_svc && at < CAP {
+        let running: bool = ulib.streq(state_at(i), (&k_running[0]) as u64)
+        at = tmfmt.put_str(d, at, name_at(i))
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        at = tmfmt.put_str(d, at, word_of((&k_state[0]) as u64, state_at(i)))
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        if v_pid[i as usize] == 0 {
+            at = tmfmt.put_str(d, at, (&u_dash[0]) as u64)
+        } else {
+            at = tmfmt.put_num(d, at, v_pid[i as usize])
+        }
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        at = tmfmt.put_num(d, at, v_starts[i as usize])
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        at = tmfmt.put_num(d, at, v_fails[i as usize])
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        if running && v_since[i as usize] != 0 && now_ms >= v_since[i as usize] {
+            at = tmfmt.put_time(d, at, now_ms - v_since[i as usize])
+        } else {
+            at = tmfmt.put_str(d, at, (&u_dash[0]) as u64)
+        }
+        at = tmfmt.put_str(d, at, (&u_tab[0]) as u64)
+        at = tmfmt.put_str(d, at, word_of((&k_target[0]) as u64, target_at(i)))
+        at = tmfmt.put_str(d, at, (&u_nl[0]) as u64)
+        n_rows = n_rows + 1
+        i = i + 1
+    }
+}

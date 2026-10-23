@@ -21,6 +21,7 @@
 #     progs="..."       die Programmliste
 #     second=<img>      a second disk (hdb) from this image file
 #     flaky=<K>         /etc/themeflaky with the digit K: the first K reads of /etc/theme.conf per program fail (r1123 test hook)
+#     svcstate=<file>   plant the file as /run/svc.state (the table init writes)
 #     accel=tcg|kvm
 #     last=<sekunden>   wie lange die Maschine insgesamt laufen darf
 #
@@ -59,6 +60,7 @@ progs="desktop taskbar settings launcher theme explorer taskmgr sh echo ls cat s
 extra=""
 second=""
 flaky=""
+svcstate=""
 for a in "$@"; do
     case "$a" in
         app=*) app=${a#*=} ;;
@@ -78,6 +80,7 @@ for a in "$@"; do
         extra=*) extra=${a#*=} ;;
         second=*) second=${a#*=} ;;
         flaky=*) flaky=${a#*=} ;;
+        svcstate=*) svcstate=${a#*=} ;;
         *) echo "unbekannte Option: $a" >&2; exit 2 ;;
     esac
 done
@@ -173,6 +176,9 @@ ARGS+=(/etc/
 if [ -n "$flaky" ]; then
     printf '%s\n' "$flaky" > "$OUT/themeflaky"
     ARGS+=("/etc/themeflaky=$OUT/themeflaky@0644")
+fi
+if [ -n "$svcstate" ]; then
+    ARGS+=(/run/ "/run/svc.state=$svcstate@0644")
 fi
 ARGS+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do
