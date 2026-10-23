@@ -697,6 +697,8 @@ fn state_cas(state: u64, i: u64, from: u64, to: u64) -> bool {
         if ap_wake != 0 {
             atomic.fetch_add(ap_wake, 1)
         }
+        // W-SMP3: a task became READY while THIS core is busy -> wake one sleeping application core now (not at core 0's next tick).
+        kick_one(state, i)
     }
     return won
 }
@@ -1884,6 +1886,7 @@ fn start(state: u64, i: u64) -> bool {
     tset(state, i, T_STATE, S_READY)
     atomic.lock_give(state, atomic.L_SCHED)
     irq_restore(flags)
+    kick_one(state, i)
     return true
 }
 
@@ -2355,6 +2358,37 @@ fn pat_here(state: u64, me: u64) {
 // when core 0 itself is busy: for every READY task that a sleeping core may run, send ONE timer-vector IPI to such a core. The ISR is
 // the normal tick (harmless: counted in C_TICKS), the core leaves `hlt`, and its idle loop calls `yield_now` -> `pick` takes the task.
 // A core with a kick pending is not kicked again; `nokick` on the command line switches all of it off (counter-proof).
+// W-SMP3: the DIRECT kick -- the same IPI as `kick_idle_cores`, but for ONE task that just became READY (`state_cas` to READY, `start`).
+// Only when the calling core is busy with a real task: an idle core takes the new task itself, so a quiet desktop sends none (idle budget).
+fn kick_one(state: u64, i: u64) {
+    if kstate.mode_on(state, kstate.M_NOKICK) {
+        return
+    }
+    let nc: u64 = cpu.count(state)
+    if nc <= 1 {
+        return
+    }
+    let me: u64 = cpu.here(state)
+    if me < 8 && desk_hlt[me as usize] != 0 {
+        return
+    }
+    let cur: u64 = current(state)
+    if cur >= kstate.MAX_TASKS || tget(state, cur, T_KIND) == K_IDLE || cur == i {
+        return
+    }
+    var k: u64 = 1
+    while k < nc && k < 8 {
+        if k != me && cpu.get(state, k, cpu.C_ONLINE) != 0 && cpu.x_get(state, k, cpu.X_HALTED) != 0
+        && cpu.x_get(state, k, cpu.X_PEND) == 0 && may_run(state, i, k) && darf_ring3(state, i, k) {
+            cpu.x_set(state, k, cpu.X_PEND, 1)
+            cpu.x_add(state, k, cpu.X_KICKTX, 1)
+            apic.ipi(state, cpu.apic_id(state, k), apic.VEC_TIMER | 0x4000)
+            return
+        }
+        k = k + 1
+    }
+}
+
 fn kick_idle_cores(state: u64) {
     if kstate.mode_on(state, kstate.M_NOKICK) {
         return
