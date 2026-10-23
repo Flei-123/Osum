@@ -225,7 +225,7 @@ num "history plan targets not found" "$(cnt "$TMPD/h/plan.log" 'ZIEL NICHT GEFUN
 num "history reports at least 3 apps" "$(grep -a '^taskmgr: history n=' "$SH" | tail -1 | sed -E 's/.*n=([0-9]+).*/\1/')" ge 3
 num "taskmgr itself is in the history and running (live=1)" "$(grep -a '^taskmgr: hist r=' "$SH" | tail -12 | grep -a 'name=taskmgr' | grep -c ' live=1 ')" ge 1
 num "taskmgr burned CPU ticks (ticks >= 1)" "$(grep -a '^taskmgr: hist r=' "$SH" | grep -a 'name=taskmgr' | sed -E 's/.* ticks=([0-9]+) .*/\1/' | sort -n | tail -1)" ge 1
-num "history rows are ranked by CPU (no later row has more ticks)" "$(grep -a '^taskmgr: hist r=' "$SH" | sed -E 's/^taskmgr: hist r=([0-9]+) .* ticks=([0-9]+) .*/\1 \2/' | awk '$1==0 {p=$2; next} $2>p {bad++} {p=$2} END{print bad+0}')" eq 0
+num "history rows are ranked by CPU (no later row has more ticks)" "$(grep -a '^taskmgr: hist r=' "$SH" | sed -E 's/^taskmgr: hist r=([0-9]+) ticks=([0-9]+) .*/\1 \2/' | awk '$1==0 {p=$2; next} $2>p {bad++} {p=$2} END{print bad+0}')" eq 0
 num "every history row says net=<bytes> or net=- (never a bare zero guess)" "$(grep -a '^taskmgr: hist r=' "$SH" | grep -avc ' net=[0-9-]')" eq 0
 drive_svc "$ROOT" "$TMPD/v" || bad "build services"
 SV="$TMPD/v/serial.txt"
