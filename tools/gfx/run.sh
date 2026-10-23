@@ -9,7 +9,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 rc=0
-for p in test test_clip test_ops test_fui test_fuikind $( [ "${1:-}" = bench ] && echo bench ); do
+for p in test test_clip test_ops test_fui test_fuikind test_fuiloop $( [ "${1:-}" = bench ] && echo bench ); do
     OPT=""; [ "$p" = bench ] && OPT="--opt-level=release-fast"; FIRNLIB="$PWD/lib" vendor/firn/bin/firnc --profile=app $OPT tools/gfx/$p.fi -o "$T/$p" > "$T/$p.build" 2>&1 \
         || { echo "FAIL  build $p"; grep -v '^warning' "$T/$p.build" | head -30; rc=1; continue; }
     ARGS=()
@@ -22,6 +22,11 @@ for p in test test_clip test_ops test_fui test_fuikind $( [ "${1:-}" = bench ] &
         if command -v glslangValidator >/dev/null 2>&1 && command -v spirv-opt >/dev/null 2>&1; then
             for k in 0 1 5 7; do bash tools/gfx/fuiconv.sh "$T/k$k" "$k" > "$T/k$k.log" 2>&1 || { echo "FAIL  fuiconv kind $k"; head -5 "$T/k$k.log"; rc=1; }; ARGS+=("$T/k$k/gpu.frag.opt.spv"); done
         else echo "SKIP  glslangValidator/spirv-opt not installed (fui kind gate)"; fi
+    fi
+    if [ "$p" = test_fuiloop ]; then
+        if command -v glslangValidator >/dev/null 2>&1 && command -v spirv-opt >/dev/null 2>&1; then
+            for k in 6 11 12 13 14 15 2 3 4 8 9 10 16; do bash tools/gfx/fuiconv.sh "$T/k$k" "$k" > "$T/k$k.log" 2>&1 || { echo "FAIL  fuiconv kind $k"; head -5 "$T/k$k.log"; rc=1; }; ARGS+=("$T/k$k/gpu.frag.opt.spv"); done
+        else echo "SKIP  glslangValidator/spirv-opt not installed (fui loop kind gate)"; fi
     fi
     "$T/$p" ${ARGS[@]+"${ARGS[@]}"}; prc=$?
     [ "$prc" = 0 ] || rc=1

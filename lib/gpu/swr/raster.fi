@@ -26,7 +26,7 @@ import gpu.swr.clip
 
 export {
     Frame, frame_new, frame_free, frame_clear, frame_setup, frame_draw, frame_hash, frame_pixel,
-    frame_stat_pixels, frame_set_scissor, frame_set_blend, frame_set_bilinear, frame_set_program, frame_set_texture, frame_set_texture_slot, frame_set_kills, frame_set_ubo, frame_set_flat, FLAT0, FLATMAX, vtx_put, vm_run, rg, WORK, NREG,
+    frame_stat_pixels, frame_set_scissor, frame_set_blend, frame_set_blend_premul, frame_set_guard, frame_set_bilinear, frame_set_program, frame_set_texture, frame_set_texture_slot, frame_set_kills, frame_set_ubo, frame_set_flat, FLAT0, FLATMAX, vtx_put, vm_run, rg, WORK, NREG,
     MODE_NATIVE0, MODE_VM, MODE_NATIVE1, MODE_COUNT, LANES, VSTRIDE, BAND,
     ld_f32, st_f32,
 }
@@ -43,7 +43,7 @@ const MODE_NATIVE1: i32 = 2
 const MODE_COUNT: i32 = 3
 const NREG: usize = 128 // 32 before the SPIR-V lowering, 64 before the fUi shaders (lib/spirv/lower.fi NREGS)
 const REC: usize = 64 // words per triangle record
-const SUB: usize = 3 // records per submitted triangle: near plane clipping turns one triangle into up to three
+const SUB: usize = 7 // records per submitted triangle: near plane + guard band clipping turn one triangle into a polygon of up to nine vertices (seven triangles)
 const KF_OFF: usize = NREG * LANES * 4 + LANES * 4 + 256 // per lane discard flags (u32)
 const ZS_OFF: usize = KF_OFF + LANES * 4 // per lane depth waiting for the late write (f32)
 const WORK: usize = ZS_OFF + LANES * 4
@@ -71,6 +71,8 @@ struct Frame {
     kills: bool, // the program may discard: depth is written after shading, only for the lanes that survived
     xtex: u64, // slots 1..3: u64 triples (pixels, w, h)
     blend: bool, // source over (straight alpha) into the colour buffer, in submission order
+    premul: bool, // with blend: the source colour is premultiplied (ONE, 1 - alpha) instead of straight
+    guard: bool, // clip against the x/y guard band (default on)
     bilinear: bool, // texture filter: 8-bit fixed point bilinear, texel centres at +0.5
     sx0: i32, // scissor rectangle [sx0, sx1) x [sy0, sy1)
     sy0: i32,
@@ -118,6 +120,8 @@ fn frame_new(w: i32, h: i32, max_tri: i32) -> *mut Frame {
     (*f).jobs = 0 as u64
     (*f).kills = false
     (*f).blend = false
+    (*f).premul = false
+    (*f).guard = true
     (*f).bilinear = false
     (*f).sx0 = 0
     (*f).sy0 = 0
@@ -163,6 +167,14 @@ fn frame_set_blend(f: *mut Frame, on: bool) {
     (*f).blend = on
 }
 
+fn frame_set_blend_premul(f: *mut Frame, on: bool) {
+    (*f).premul = on
+}
+
+fn frame_set_guard(f: *mut Frame, on: bool) {
+    (*f).guard = on
+}
+
 fn frame_set_bilinear(f: *mut Frame, on: bool) {
     (*f).bilinear = on
 }
@@ -184,7 +196,10 @@ fn frame_set_scissor(f: *mut Frame, x0: i32, y0: i32, x1: i32, y1: i32) {
 
 #[no_inline]
 fn put_px(f: *mut Frame, idx: usize, px: u32) {
-    if (*f).blend { rt.st32((*f).color, idx, pixel.blend_over(px, rt.ld32((*f).color, idx))) }
+    if (*f).blend {
+        if (*f).premul { rt.st32((*f).color, idx, pixel.blend_premul(px, rt.ld32((*f).color, idx))) }
+        else { rt.st32((*f).color, idx, pixel.blend_over(px, rt.ld32((*f).color, idx))) }
+    }
     else { rt.st32((*f).color, idx, px) }
 }
 
@@ -279,8 +294,8 @@ fn setup_tri(f: *mut Frame, t: usize) {
         st_i64((*f).rec + ((t * SUB + s) as u64) * (REC as u64) * (8 as u64), 0, 0 as i64)
         s = s + 1
     }
-    var pa: [f64; 80] = [0.0; 80]
-    var pb: [f64; 80] = [0.0; 80]
+    var pa: [f64; 120] = [0.0; 120]
+    var pb: [f64; 120] = [0.0; 120]
     let a: u64 = (&pa[0]) as u64
     let b: u64 = (&pb[0]) as u64
     var k: usize = 0
@@ -292,7 +307,9 @@ fn setup_tri(f: *mut Frame, t: usize) {
         }
         k = k + 1
     }
-    let n: usize = clip.clip_poly(a, b, 3)
+    var planes: usize = clip.NPLANES_ALL
+    if !(*f).guard { planes = clip.NPLANES_NEAR }
+    let n: usize = clip.clip_poly(a, b, 3, planes)
     var i: usize = 2
     while i < n {
         let rr: u64 = (*f).rec + ((t * SUB + i - 2) as u64) * (REC as u64) * (8 as u64)

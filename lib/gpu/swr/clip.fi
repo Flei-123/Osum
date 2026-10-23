@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// lib/gpu/swr/clip.fi -- clip-space polygon clipping for the SWR rasterizer: near plane (z >= 0) and w >= 1e-6
+// lib/gpu/swr/clip.fi -- clip-space polygon clipping for the SWR rasterizer: near plane (z >= 0), w >= 1e-6 and the x/y guard band (|x|, |y| <= GUARD w)
 // vertices are STRIDE f64 each: x y z w u v r g b a; every attribute is linear in clip space, so lerping them is perspective correct
 import std.rt
 
-export { clip_poly, STRIDE, MAXV }
+export { clip_poly, STRIDE, MAXV, GUARD, NPLANES_NEAR, NPLANES_ALL }
 
 const STRIDE: usize = 10
-const MAXV: usize = 8
+const MAXV: usize = 12
+const GUARD: f64 = 16.0
+const NPLANES_NEAR: usize = 2
+const NPLANES_ALL: usize = 6
 
 fn ld(p: u64, i: usize) -> f64 {
     return *((p + (i as u64) * (8 as u64)) as *mut f64)
@@ -19,7 +22,12 @@ fn st(p: u64, i: usize, v: f64) {
 fn dist(p: u64, v: usize, plane: i32) -> f64 {
     let o: usize = v * STRIDE
     if plane == 0 { return ld(p, o + 2) }
-    return ld(p, o + 3) - 0.000001
+    if plane == 1 { return ld(p, o + 3) - 0.000001 }
+    let w: f64 = ld(p, o + 3) * GUARD
+    if plane == 2 { return w - ld(p, o) }
+    if plane == 3 { return w + ld(p, o) }
+    if plane == 4 { return w - ld(p, o + 1) }
+    return w + ld(p, o + 1)
 }
 
 fn copy_v(src: u64, s: usize, dst: u64, d: usize) {
@@ -64,17 +72,25 @@ fn clip_plane(src: u64, n: usize, dst: u64, plane: i32) -> usize {
     return m
 }
 
-// polygon of n vertices in a; scratch b (MAXV vertices); result (0 .. 5 vertices) is left in a
-fn clip_poly(a: u64, b: u64, n: usize) -> usize {
+// polygon of n vertices in a; scratch b (MAXV vertices); result (0 .. 9 vertices) is left in a; planes: NPLANES_NEAR or NPLANES_ALL (even)
+fn clip_poly(a: u64, b: u64, n: usize, planes: usize) -> usize {
     var all_in: bool = true
     var i: usize = 0
     while i < n {
-        if !(dist(a, i, 0) >= 0.0 && dist(a, i, 1) >= 0.0) { all_in = false }
+        var pl: usize = 0
+        while pl < planes {
+            if !(dist(a, i, pl as i32) >= 0.0) { all_in = false }
+            pl = pl + 1
+        }
         i = i + 1
     }
     if all_in { return n }
-    var m: usize = clip_plane(a, n, b, 0)
-    if m == 0 { return 0 }
-    m = clip_plane(b, m, a, 1)
+    var m: usize = n
+    var pl: usize = 0
+    while pl < planes {
+        if pl % 2 == 0 { m = clip_plane(a, m, b, pl as i32) } else { m = clip_plane(b, m, a, pl as i32) }
+        if m == 0 { return 0 }
+        pl = pl + 1
+    }
     return m
 }

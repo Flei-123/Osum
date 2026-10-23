@@ -24,10 +24,17 @@ conv() {
 conv vendor/firn/lib/fui/gpu_vs.glsl > "$OUT/gpu.vert"
 conv vendor/firn/lib/fui/gpu_fs.glsl > "$OUT/gpu.frag"
 if [ -n "$KIND" ]; then sed -i "s/int kind = int(v_k.x + 0.5);/int kind = $KIND;/" "$OUT/gpu.frag"; fi
+if [ "$KIND" = 6 ]; then
+    perl -0pi -e 's/(for \(int k = 0; k < 4; k\+\+\) \{)\n\s*if \(k >= u_nspot\) break;(.*?\n            \}\n)(\s*\}\n)/[[unroll]] $1\n            if (k < u_nspot) {$2            }\n$3/s' "$OUT/gpu.frag"
+fi
+if [ "$KIND" -ge 11 ] 2>/dev/null && [ "$KIND" -le 14 ]; then
+    perl -0pi -e 's/(for \(int j = -64; j <= 64; j\+\+\) \{)\n\s*if \(j < -r\) continue;\n\s*if \(j > r\) break;(.*?sum \+= src_at\(q\);\n)/[[unroll]] $1\n            if (j >= -r && j <= r) {$2            }\n/s' "$OUT/gpu.frag"
+fi
+if [ -n "$KIND" ]; then sed -i 's/^#version 450/#version 450\n#extension GL_EXT_control_flow_attributes : enable/' "$OUT/gpu.frag"; fi
 glslangValidator -V --target-env vulkan1.0 -o "$OUT/gpu.vert.spv" "$OUT/gpu.vert" > /dev/null
 glslangValidator -V --target-env vulkan1.0 -o "$OUT/gpu.frag.spv" "$OUT/gpu.frag" > /dev/null
 spirv-opt --merge-return --inline-entry-points-exhaustive --eliminate-dead-functions --eliminate-local-multi-store "$OUT/gpu.vert.spv" -o "$OUT/gpu.vert.opt.spv"
 OPT=(--merge-return --inline-entry-points-exhaustive --eliminate-dead-functions)
-if [ -n "$KIND" ]; then OPT+=(--ccp --eliminate-dead-branches --simplify-instructions -O); else OPT+=(-O); fi
+if [ -n "$KIND" ]; then OPT+=(--ccp --eliminate-dead-branches --simplify-instructions --loop-unroll -O --loop-unroll -O); else OPT+=(-O); fi
 spirv-opt "${OPT[@]}" "$OUT/gpu.frag.spv" -o "$OUT/gpu.frag.opt.spv"
 spirv-val "$OUT/gpu.vert.opt.spv" && spirv-val "$OUT/gpu.frag.opt.spv"

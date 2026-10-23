@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// tools/gfx/test_clip.fi -- host checks for near plane clipping in lib/gpu/swr (analytic coverage and depth, watertight shared edge, threads)
+// tools/gfx/test_clip.fi -- host checks for near plane and guard band clipping in lib/gpu/swr (analytic coverage and depth, watertight shared edge, huge triangles, threads)
 import std.rt
 import std.io
 import std.math
@@ -192,6 +192,67 @@ fn test_behind(f: *mut raster.Frame, W: i32, H: i32) {
     check("near clip: vertex with w < 0 gives no NaN or negative depth", bad == 0)
 }
 
+fn test_guard(f: *mut raster.Frame, W: i32, H: i32) {
+    (*f).mode = raster.MODE_COUNT
+    (*f).depth_test = true
+    (*f).ntri = 1
+    vtx(f, 0, -5000000.0f, -5000000.0f, 0.5f, 1.0f)
+    vtx(f, 1, 5000000.0f, -5000000.0f, 0.5f, 1.0f)
+    vtx(f, 2, 0.0f, 5000000.0f, 0.5f, 1.0f)
+    raster.frame_set_guard(f, true)
+    raster.frame_clear(f, 0 as u32, 1.0f)
+    raster.frame_draw(f, 0 as u64)
+    check("guard band: a triangle 5e6 units wide covers the whole target", raster.frame_stat_pixels(f) == ((W * H) as u64))
+    var bad: i32 = 0
+    var y: i32 = 0
+    while y < H {
+        var x: i32 = 0
+        while x < W {
+            let d: f32 = depth_at(f, x, y)
+            if !(d > 0.4999f && d < 0.5001f) { bad = bad + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    check("guard band: depth stays 0.5 over the whole target (attributes lerp correctly)", bad == 0)
+    raster.frame_set_guard(f, false)
+    raster.frame_clear(f, 0 as u32, 1.0f)
+    raster.frame_draw(f, 0 as u64)
+    check("counter-proof guard band: without it the huge triangle is dropped", raster.frame_stat_pixels(f) == 0 as u64)
+    raster.frame_set_guard(f, true)
+    (*f).ntri = 2
+    vtx(f, 0, -3000000.0f, -3000000.0f, 0.5f, 1.0f)
+    vtx(f, 1, 3000000.0f, -3000000.0f, 0.5f, 1.0f)
+    vtx(f, 2, 3000000.0f, 3000000.0f, 0.5f, 1.0f)
+    vtx(f, 3, -3000000.0f, -3000000.0f, 0.5f, 1.0f)
+    vtx(f, 4, 3000000.0f, 3000000.0f, 0.5f, 1.0f)
+    vtx(f, 5, -3000000.0f, 3000000.0f, 0.5f, 1.0f)
+    raster.frame_clear(f, 0 as u32, 1.0f)
+    raster.frame_draw(f, 0 as u64)
+    check("guard band: huge quad of two triangles hits every pixel exactly once", raster.frame_stat_pixels(f) == ((W * H) as u64))
+    vtx(f, 0, -0.5f, -0.5f, 0.5f, 1.0f)
+    vtx(f, 1, 40.0f, -0.5f, 0.5f, 1.0f)
+    vtx(f, 2, -0.5f, 40.0f, 0.5f, 1.0f)
+    (*f).ntri = 1
+    raster.frame_clear(f, 0 as u32, 1.0f)
+    raster.frame_draw(f, 0 as u64)
+    var cnt: i32 = 0
+    y = 0
+    while y < H {
+        var x: i32 = 0
+        while x < W {
+            let nx: f64 = ndc_x(x, W)
+            let ny: f64 = ndc_y(y, H)
+            let inside: bool = nx >= -0.5 && ny >= -0.5 && nx + ny <= 39.5
+            let d: f32 = depth_at(f, x, y)
+            if inside != (d < 0.9999f) { cnt = cnt + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    check("guard band: a triangle just beyond the band (40 units) matches the analytic coverage", cnt == 0)
+}
+
 // ground plane quad d in [0.2, 5], x in [-1, 1], clip (x, -0.2, 1.1 d - 0.55, d); visible for d >= 0.5; two triangles share a diagonal
 fn ground_vtx(f: *mut raster.Frame, n: usize, x: f32, d: f32) {
     vtx(f, n, x, -0.2f, 1.1f * d - 0.55f, d)
@@ -272,6 +333,7 @@ fn main() -> i32 {
     test_analytic(f, W, H)
     test_behind(f, W, H)
     test_edge(f, W, H)
+    test_guard(f, W, H)
     test_threads(f, (&j) as u64, prog0)
     jobs.destroy(&j)
     io.fmt_print(f"gfx clip: {passed} ok, {failed} fail\n")

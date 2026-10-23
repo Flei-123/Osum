@@ -56,6 +56,9 @@ const VK_FRAGCOORD: u32 = 6
 const VK_TEXVAR: u32 = 7
 const VK_UBLOCK: u32 = 8 // uniform block / push constant variable: loads go through OpAccessChain
 const VK_UPTR: u32 = 9 // pointer into a constant block: vreg[id*4] = byte offset, vreg[id*4+1] = pointee type
+const VK_CARR: u32 = 10 // Function / Private array with a constant initialiser, never stored: vreg[id*4] = initialiser, vn = length
+const VK_CPTR: u32 = 11 // element pointer into VK_CARR: vreg[id*4] = array variable, vreg[id*4+1] = register holding the index (kept)
+const MAX_CARR: u32 = 64
 
 const VS_POS: u32 = 36 // vertex stage: Position r36..r39, output location k = r(40 + 4k), inputs location k = r(4k)
 const VS_FIRST_TMP: u32 = 72
@@ -739,11 +742,28 @@ fn lower_glsl(l: *mut Lw, pos: usize, wc: usize) {
 
 // ---------------------------------------------------------------- variables and memory
 
+fn setup_const_array(l: *mut Lw, pos: usize, id: u32, ty: u32) {
+    let m: *mut parse.Module = (*l).m
+    let len: u32 = layout.array_length(m, ty)
+    let el: u32 = parse.w32(m, parse.def_pos(m, ty) + 2)
+    if len == 0 || len > MAX_CARR || parse.ncomp(m, el) != 1 || parse.scalar_kind(m, el) == 0 { fail(l, L_TYPE, pos); return }
+    var init: u32 = 0
+    if parse.wc_at(m, pos) == 5 { init = parse.w32(m, pos + 4) }
+    if init != 0 && parse.def_op(m, init) != spv.OP_CONSTANTCOMPOSITE { fail(l, L_TYPE, pos); return }
+    tset((*l).vk, id, VK_CARR)
+    tset((*l).vreg, id * 4, init)
+    tset((*l).vn, id, len)
+}
+
 // registers + initial value for a Function / Private variable
 fn setup_local_var(l: *mut Lw, pos: usize) {
     let m: *mut parse.Module = (*l).m
     let id: u32 = parse.w32(m, pos + 2)
     let pointee: u32 = parse.ptr_pointee(m, parse.w32(m, pos + 1))
+    if parse.def_op(m, pointee) == spv.OP_TYPEARRAY {
+        setup_const_array(l, pos, id, pointee)
+        return
+    }
     let n: u32 = parse.ncomp(m, pointee)
     if n == 0 || n > 4 || parse.scalar_kind(m, pointee) == 0 {
         fail(l, L_TYPE, pos)
@@ -852,7 +872,7 @@ fn ensure_var(l: *mut Lw, id: u32, pos: usize) -> bool {
     let m: *mut parse.Module = (*l).m
     if id == 0 || id >= bound_of(l) { fail(l, L_INTERNAL, pos); return false }
     let k: u32 = tab((*l).vk, id)
-    if k == VK_VAR || k == VK_PTR || k == VK_TEXVAR || k == VK_UBLOCK || k == VK_UPTR { return true }
+    if k == VK_VAR || k == VK_PTR || k == VK_CARR || k == VK_CPTR || k == VK_TEXVAR || k == VK_UBLOCK || k == VK_UPTR { return true }
     if parse.def_op(m, id) != spv.OP_VARIABLE { fail(l, L_INTERNAL, pos); return false }
     let dp: usize = parse.def_pos(m, id)
     let sc: u32 = parse.w32(m, dp + 3)
@@ -868,7 +888,8 @@ fn lower_load_ubo(l: *mut Lw, pos: usize, id: u32, ptr: u32) {
     let off: u32 = tab((*l).vreg, ptr * 4)
     let ty: u32 = tab((*l).vreg, ptr * 4 + 1)
     let n: u32 = parse.ncomp(m, ty)
-    if n == 0 || parse.scalar_kind(m, ty) != parse.K_FLOAT || (off & 3) != 0 { fail(l, L_UNSUPPORTED, pos); return }
+    let sk: u32 = parse.scalar_kind(m, ty)
+    if n == 0 || (sk != parse.K_FLOAT && sk != parse.K_SINT && sk != parse.K_UINT) || (off & 3) != 0 { fail(l, L_UNSUPPORTED, pos); return }
     define(l, id, n)
     var c: u32 = 0
     while c < n {
@@ -878,6 +899,31 @@ fn lower_load_ubo(l: *mut Lw, pos: usize, id: u32, ptr: u32) {
         set_reg(l, id, c, d)
         c = c + 1
     }
+}
+
+fn lower_load_carr(l: *mut Lw, pos: usize, id: u32, ptr: u32) {
+    let arr: u32 = tab((*l).vreg, ptr * 4)
+    let init: u32 = tab((*l).vreg, arr * 4)
+    let len: u32 = tab((*l).vn, arr)
+    let idx: u32 = tab((*l).vreg, ptr * 4 + 1)
+    let acc: u32 = alloc1(l)
+    let key: u32 = alloc1(l)
+    let hit: u32 = alloc1(l)
+    let val: u32 = alloc1(l)
+    ldc(l, acc, const_bits(l, init, len - 1))
+    var i: u32 = len - 1
+    while i > 0 {
+        i = i - 1
+        ldc(l, key, fbits(i as f32))
+        emit(l, shader.OP_CEQ, hit, idx, key, 0)
+        ldc(l, val, const_bits(l, init, i))
+        emit(l, shader.OP_SEL, acc, val, acc, hit)
+    }
+    unref_reg(l, key)
+    unref_reg(l, hit)
+    unref_reg(l, val)
+    define(l, id, 1)
+    set_reg(l, id, 0, acc)
 }
 
 fn lower_load(l: *mut Lw, pos: usize) {
@@ -894,6 +940,7 @@ fn lower_load(l: *mut Lw, pos: usize) {
         return
     }
     if tab((*l).vk, ptr) == VK_UPTR { lower_load_ubo(l, pos, id, ptr); return }
+    if tab((*l).vk, ptr) == VK_CPTR { lower_load_carr(l, pos, id, ptr); return }
     let n: u32 = result_n(l, pos)
     var vid: u32 = ptr
     var off: u32 = 0
@@ -922,6 +969,11 @@ fn lower_store(l: *mut Lw, pos: usize) {
     let ptr: u32 = parse.w32(m, pos + 1)
     let obj: u32 = parse.w32(m, pos + 2)
     if !ensure_var(l, ptr, pos) { return }
+    if tab((*l).vk, ptr) == VK_CARR {
+        if tab((*l).vreg, ptr * 4) != 0 || parse.def_op(m, obj) != spv.OP_CONSTANTCOMPOSITE { fail(l, L_UNSUPPORTED, pos); return }
+        tset((*l).vreg, ptr * 4, obj)
+        return
+    }
     var vid: u32 = ptr
     var off: u32 = 0
     var n: u32 = tab((*l).vn, ptr)
@@ -1002,6 +1054,13 @@ fn lower_access(l: *mut Lw, pos: usize, wc: usize) {
         tset((*l).vk, id, VK_PTR)
         tset((*l).vreg, id * 4, base)
         tset((*l).vreg, id * 4 + 1, 0)
+        tset((*l).vn, id, 1)
+        return
+    }
+    if tab((*l).vk, base) == VK_CARR && wc == 5 {
+        tset((*l).vk, id, VK_CPTR)
+        tset((*l).vreg, id * 4, base)
+        tset((*l).vreg, id * 4 + 1, own(l, parse.w32(m, pos + 4), 0))
         tset((*l).vn, id, 1)
         return
     }
