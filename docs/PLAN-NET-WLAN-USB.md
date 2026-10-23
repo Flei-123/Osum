@@ -10,7 +10,7 @@ Detail: `docs/PLAN-LAPTOP-WLAN.md` (milestones LW-1..LW-9), `docs/PLAN-8000-LOAD
 - Nothing has talked to a real radio yet.
 
 ## Gaps
-- USB: RNDIS keepalive/indications, hot unplug in the real loop, link notification, only one NIC, vendor chips (CH336 1A86:5394, ASIX AX88772/179, RTL8153, ipheth) (r1486, r1495).
+- USB: RNDIS keepalive/indication/dead-link counting and unplug are wired in `usbnet.fi` (`house`, `unplug_slot`); open: only one NIC, vendor chips: ASIX AX88772 protocol half done (`lib/usbnet/ax88772.fi`, `tools/usbvendor` 6/0), driver glue + QEMU/fake-device gate missing; CH336 1A86:5394, RTL8153, ipheth still open (r1486, r1495).
 - WLAN host: group-key rekey wiring, HT/VHT/HE capability parsing, WPA3-SAE, 802.11w (r1487, r1497, r1525, r1493).
 - 8265: ALIVE wait, NVM read, command queue, RX queue, scan/assoc/TX on real HP (r1527, HP-9c).
 - AX201: firmware lookup/load glue, command ring, station setup (r1488, r1489, r1492).

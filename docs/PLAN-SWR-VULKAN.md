@@ -9,7 +9,7 @@ Detail: `docs/GPU-PLAN.md` (options, risks), `docs/GFX-STACK.md` (measurements, 
 - ICD loading: a 10-function Firn `.so` named `libvulkan.so.1` loads in the Osum loader (`tools/gpu3` 9/0, r1376).
 
 ## Gaps
-- Rasteriser: no clipping, blending, bilinear/mip, MSAA, stencil, scissor, tile binning (r683).
+- Rasteriser: no clipping, mip, MSAA, stencil, tile binning (r683). Done 23.10.: scissor, source-over blending (submission order, thread independent), 8-bit bilinear (`lib/gpu/swr/pixel.fi`, `tools/gfx` 21/0).
 - Lowering: loops, UBO/push constants, derivatives (2x2 quads) missing (r732, r733); transcendental ops slow (r738).
 - No Vulkan API layer (83 functions needed by the Daidalos RHI, GFX-STACK ch. 6), no WSI into `wl_shm` (r1375, r737).
 - No guest client has rendered through the ICD yet (r1412).

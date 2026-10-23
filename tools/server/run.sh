@@ -168,7 +168,7 @@ fi
 
 echo "== 3. das Serverabbild bootet bis zur Shell auf der Leitung =="
 
-bash tools/server/build.sh "$TMPD/s" > "$TMPD/build.txt" 2>&1 \
+SERVER_INIT=off bash tools/server/build.sh "$TMPD/s" > "$TMPD/build.txt" 2>&1 \
     && ok "tools/server/build.sh: Kern, Userland und Platte" \
     || { bad "tools/server/build.sh"; sed 's/^/        /' "$TMPD/build.txt" | head -20; }
 sed 's/^/        /' "$TMPD/build.txt"

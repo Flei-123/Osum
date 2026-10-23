@@ -28,7 +28,7 @@ Ampel: GRÜN = Code da und in QEMU gated, aber am HP **ungemessen**; GELB = Teil
 | Tastatur | GELB | S–M | USB-HID und PS/2 da; interne Tastatur ist PS/2 (i8042) — ACPI/EC-Weg ungemessen |
 | Touchpad | GELB | M | `i2chid.fi` gegen simulierten DesignWare-Controller 18/0; ECHT fehlt: LPSS-I2C-Controller aus PCI (8086:9d60..) ansprechen + ACPI-Gerät (_HID, I2C-Adresse, GPIO-IRQ). AML-Interpreter existiert (kernel/acpi/aml*.fi). HP-6 Stand: Regler-Suche wacht LPSS-Funktion auf (D0, MEM, DesignWare-Reset bei +0x204), nur Quelltext, ungemessen (ACPI-Modus ohne PCI-Funktion wuerde nicht gefunden) |
 | Touchscreen | ROT | M | wie Touchpad (I2C-HID) oder USB-HID; Multitouch-Auswertung fehlt |
-| Netz per USB-Dongle/Tethering | GELB | S | ECM, RNDIS (Android-Tethering), NCM in usbnet.fi verdrahtet; QEMU-Gates usbecm/usbrndis, NCM nur host-/Verdrahtungstest. Echte Dongles (Realtek/ASIX) ohne Treiber, nichts am echten Geraet gemessen |
+| Netz per USB-Dongle/Tethering | GELB | S | ECM, RNDIS (Android-Tethering), NCM in usbnet.fi verdrahtet; QEMU-Gates usbecm/usbrndis, NCM nur host-/Verdrahtungstest. ASIX AX88772/772B: Protokollhaelfte `lib/usbnet/ax88772.fi` (Rahmen, Setup-Pakete, `tools/usbvendor` 6/0 mit 4 Gegenproben), Treiber-Glue offen. Realtek RTL8153/CH336 ohne bzw. nur Protokoll, nichts am echten Geraet gemessen (Stand 23.10.) |
 | WLAN Intel 8265 | ROT | L | iwl.fi/lib/wlan zielen auf AX200/AX201 (CNVi, Context-Info). 8265 = Familie 8000 (altes FH-Chunk-Laden, ucode `iwlwifi-8265-*`) = **anderer** Ladeweg. Praktisch zuerst USB-Netz |
 | Bluetooth (Intel 8265 BT, USB) | ROT | L | r6; HCI + Firmware-Blob |
 | Audio HDA | GELB | M | hda.fi Ausgabe+Mikro gated; Codec des HP unbekannt (Pin-Konfig/Verbs), Jack-Erkennung r624 |

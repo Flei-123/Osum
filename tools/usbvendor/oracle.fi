@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import usbnet.ax88772
+
+static mut fr: [u8; 2048] = [0; 2048]
+static mut wr: [u8; 4096] = [0; 4096]
+
+fn chk(name: str, cond: bool) {
+    if cond { io.print("OK   ") } else { io.print("FAIL ") }
+    io.print_line(name)
+}
+
+fn pf() -> u64 { return (&fr[0]) as u64 }
+fn pw() -> u64 { return (&wr[0]) as u64 }
+
+fn b(i: usize) -> u64 { return (wr[i]) as u64 }
+
+fn fill(n: usize) {
+    var i: usize = 0
+    while i < n { fr[i] = ((i * 7 + 3) & 255) as u8; i = i + 1 }
+}
+
+fn put_hdr(pos: usize, size: u64, inv: u64) {
+    let h: u64 = (size & 0x7FF) | ((inv & 0x7FF) << 16)
+    wr[pos] = (h & 255) as u8
+    wr[pos + 1] = ((h >> 8) & 255) as u8
+    wr[pos + 2] = ((h >> 16) & 255) as u8
+    wr[pos + 3] = ((h >> 24) & 255) as u8
+}
+
+fn main() -> i32 {
+    chk("supported: AX88772 0B95:7720", ax88772.supported(0x0B95, 0x7720))
+    chk("supported: AX88772B 0B95:772B", ax88772.supported(0x0B95, 0x772B))
+    chk("supported: other vendor refused", !ax88772.supported(0x1A86, 0x7720))
+    chk("supported: other product refused", !ax88772.supported(0x0B95, 0x1234))
+
+    fill(100)
+    let t: usize = ax88772.tx_wrap(pf(), 100, pw())
+    chk("tx: total = 4 + 100", t == 104)
+    chk("tx: header LE 0x64 0x00 and complement 0x9B 0x07", b(0) == 0x64 && b(1) == 0 && b(2) == 0x9B && b(3) == 0x07)
+    chk("tx: payload copied at offset 4", b(4) == 3 && b(5) == 10 && b(103) == ((99 * 7 + 3) & 255) as u64)
+
+    fill(508)
+    let t2: usize = ax88772.tx_wrap(pf(), 508, pw())
+    chk("tx: 4 + 508 = 512 gets the 4 octet pad word", t2 == 516)
+    chk("tx: pad word is 00 00 FF FF", b(512) == 0 && b(513) == 0 && b(514) == 0xFF && b(515) == 0xFF)
+    fill(507)
+    chk("tx: 4 + 507 = 511 gets no pad", ax88772.tx_wrap(pf(), 507, pw()) == 511)
+    chk("tx: empty frame refused", ax88772.tx_wrap(pf(), 0, pw()) == 0)
+    chk("tx: 1519 octets refused", ax88772.tx_wrap(pf(), 1519, pw()) == 0)
+    chk("tx: 1518 octets accepted", ax88772.tx_wrap(pf(), 1518, pw()) == 1522)
+
+    fill(100)
+    var tl: usize = ax88772.tx_wrap(pf(), 100, pw())
+    chk("rx: own tx output parses as one frame of 100", ax88772.rx_frame_len(pw(), tl, 0) == 100)
+    chk("rx: frame payload offset is 4", ax88772.rx_frame_off(0) == 4)
+    chk("rx: next header after an even frame = 104", ax88772.rx_next(pw(), tl, 0) == 104)
+
+    put_hdr(0, 61, ~61)
+    chk("rx: odd length 61 -> next header 66 (padded to 16 bit)", ax88772.rx_next(pw(), 4 + 61, 0) == 66)
+    put_hdr(0, 100, ~100)
+    chk("rx: complement ok, frame runs past the transfer -> refused", ax88772.rx_frame_len(pw(), 50, 0) == 0)
+    put_hdr(0, 100, 100)
+    chk("rx: wrong complement refused", ax88772.rx_frame_len(pw(), 200, 0) == 0)
+    put_hdr(0, 1600, ~1600)
+    chk("rx: length 1600 refused", ax88772.rx_frame_len(pw(), 2000, 0) == 0)
+    put_hdr(0, 10, ~10)
+    chk("rx: runt below 14 refused", ax88772.rx_frame_len(pw(), 100, 0) == 0)
+    chk("rx: header cut off at the end refused", ax88772.rx_frame_len(pw(), 3, 0) == 0)
+
+    put_hdr(0, 60, ~60)
+    put_hdr(64, 70, ~70)
+    chk("rx: two frames: first at 0 (60), second header at 64", ax88772.rx_next(pw(), 200, 0) == 64)
+    chk("rx: second frame length 70", ax88772.rx_frame_len(pw(), 200, 64) == 70)
+    chk("rx: end of the transfer after the second frame", ax88772.rx_next(pw(), 138, 64) == 138)
+
+    ax88772.req_read_mac(pw())
+    chk("ctl: read node id = C0 13 00 00 00 00 06 00", b(0) == 0xC0 && b(1) == 0x13 && b(6) == 6 && b(7) == 0 && b(2) == 0)
+    ax88772.req_write_rxctl(pw(), 0x0388)
+    chk("ctl: write rx control = 40 10 88 03 00 00 00 00", b(0) == 0x40 && b(1) == 0x10 && b(2) == 0x88 && b(3) == 0x03 && b(6) == 0)
+    ax88772.req_write_medium(pw(), 0x0136)
+    chk("ctl: write medium mode = 40 1B 36 01", b(0) == 0x40 && b(1) == 0x1B && b(2) == 0x36 && b(3) == 0x01)
+    return 0
+}

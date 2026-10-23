@@ -49,7 +49,8 @@ PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc \
 grep sort uniq cut tr seq tee xargs true false sleep ps kill uname date \
 df du find which basename dirname chmod chown id whoami su login passwd \
 mount umount sync tar gzip gunzip diff patch sed env top \
-netstat ping wget opk power hwid locate edit"}
+netstat ping wget opk power hwid locate edit \
+init svc sshd dhcp ctr ota backup sntp host dnswt reboot shutdown"}
 
 mkdir -p "$OUT/bin"
 
@@ -99,10 +100,24 @@ if [ -n "$verboten" ]; then
 fi
 
 printf 'Osum, Serverbau. Kein Bildschirm, eine Leitung.\n' > "$OUT/readme.txt"
-SPEC="/bin/"
-for p in $gebaut; do SPEC="$SPEC /bin/$p=$OUT/bin/$p"; done
+cat > "$OUT/inittab" <<'TAB'
+# name:targets:kind:command:options
+dhcp:*:once:/bin/dhcp
+sntp:*:once:/bin/sntp:netz
+sshd:konsole:respawn:/bin/sshd -v:netz,log=/var/log/sshd.log
+sh:*:ctrl:/bin/sh
+TAB
+printf 'konsole\n' > "$OUT/ziel"
+printf 'osum-server\n' > "$OUT/hostname"
+SPEC="/bin/ /etc/ /run/ /var/ /var/log/@755:0:0 /proc/ /tmp/ /root/@700:0:0"
+for p in $gebaut; do
+    [ "${SERVER_INIT:-on}" = off ] && [ "$p" = init ] && continue
+    SPEC="$SPEC /bin/$p=$OUT/bin/$p@755:0:0"
+done
+SPEC="$SPEC /etc/ziel=$OUT/ziel@644:0:0 /etc/hostname=$OUT/hostname@644:0:0"
+[ "${SERVER_INIT:-on}" = off ] || SPEC="$SPEC /etc/inittab=$OUT/inittab@644:0:0"
 BLOCKS=${BLOCKS:-20480}
-python3 tools/osum/mkfs.py build "$OUT/disk.img" "$BLOCKS" $SPEC \
+python3 tools/osum/mkfs.py build "$OUT/disk.img" "$BLOCKS" ${OFSFLAG:---v3} $SPEC \
     /readme.txt="$OUT/readme.txt" > "$OUT/mkfs.txt" 2>&1 || {
     echo "== mkfs.py"; cat "$OUT/mkfs.txt"; exit 1; }
 
