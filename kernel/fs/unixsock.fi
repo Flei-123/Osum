@@ -91,7 +91,7 @@ export {
     socks_live, shms_live, bytes_moved, fds_moved,
     USOCK_MAX, USHM_MAX, USHM_PAGED, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX, SHM_PAGES_LIMIT, SHM_PAGES_CONTIG, SMF_CONTIG, SMF_RO, SMF_KEEP, SMF_FILE, UM_PAGES_MASK, UMAP_MAX,
     S_FREE, S_OPEN, S_LISTEN, S_CONNECTED, S_CLOSED,
-    UK_FREE, UK_STREAM, UK_DGRAM, send_dgram, send_dgram_to, recv_dgram, dgram_room, bind_dgram, find_dgram, connect_dgram
+    UK_FREE, UK_STREAM, UK_DGRAM, send_dgram, send_dgram_to, recv_dgram, dgram_len, dgram_room, bind_dgram, find_dgram, connect_dgram, fd_at_head, DGRAM_HDR
 }
 
 // ============================================================ DIE LAGE
@@ -965,6 +965,39 @@ fn send_dgram_to(state: u64, p: u64, src: u64, len: u64) -> u64 {
     kstate.set(state, sk_at(p) + SK_TAIL, t)
     kstate.add(state, UCNT_OFF + C_BYTES, len)
     return len
+}
+
+fn dgram_len(state: u64, i: u64) -> u64 {
+    if i >= USOCK_MAX || waiting(state, i) < DGRAM_HDR {
+        return 0
+    }
+    let r: u64 = kstate.get(state, sk_at(i) + SK_RING)
+    if r == 0 {
+        return 0
+    }
+    var h: u64 = kstate.get(state, sk_at(i) + SK_HEAD)
+    var mlen: u64 = 0
+    var o: u64 = 0
+    while o < DGRAM_HDR {
+        mlen = mlen | (rd8(r + RING_DATA + h) << (o * 8))
+        h = h + 1
+        if h >= RING_USABLE {
+            h = 0
+        }
+        o = o + 1
+    }
+    return mlen
+}
+
+fn fd_at_head(state: u64, i: u64) -> bool {
+    if i >= USOCK_MAX {
+        return false
+    }
+    let r: u64 = kstate.get(state, sk_at(i) + SK_RING)
+    if r == 0 || rd64(r + FQ_COUNT) == 0 {
+        return false
+    }
+    return rd64(r + FQ_MARK) == kstate.get(state, sk_at(i) + SK_HEAD)
 }
 
 // Take ONE frame from the own ring. Returns the bytes copied (at most `len`); the rest of the frame is dropped. 0 when nothing is waiting.

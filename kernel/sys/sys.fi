@@ -517,6 +517,7 @@ const AF_INET: u64 = 2
 const SA_BYTES: u64 = 16
 const SOCK_STREAM: u64 = 1
 const SOCK_DGRAM: u64 = 2
+const SOCK_SEQPACKET: u64 = 5
 // The two flags Linux packs into the TYPE argument (and into `accept4`).
 const SOCK_NONBLOCK: u64 = 2048 // 0o4000
 const SOCK_CLOEXEC: u64 = 524288 // 0o2000000
@@ -18241,6 +18242,9 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
         // Aufruf von libwayland ohnehin.
         return neg(errno.E_PIPE)
     }
+    if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
+        return sendmsg_frame(state, me, fd, si, mh, flags)
+    }
     let iov: u64 = get64u(state, me, mh + MH_IOV)
     let iovlen: u64 = get64u(state, me, mh + MH_IOVLEN)
     // ZUERST die Deskriptoren, DANN die Oktette. Andersherum saehe der
@@ -18356,6 +18360,211 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     return sent
 }
 
+const FRAME_MAX: u64 = 3600
+const MSG_TRUNC_FLAG: u64 = 32
+const MSG_CTRUNC_FLAG: u64 = 8
+
+fn frame_nonblock(state: u64, me: u64, fd: u64, flags: u64) -> bool {
+    if (flags & MSG_DONTWAIT) != 0 {
+        return true
+    }
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return false
+    }
+    return (file.open_flags(state, of) & UB_O_NONBLOCK) != 0
+}
+
+fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> u64 {
+    let iov: u64 = get64u(state, me, mh + MH_IOV)
+    let iovlen: u64 = get64u(state, me, mh + MH_IOVLEN)
+    if iovlen > 1024 {
+        return neg(errno.E_INVAL)
+    }
+    var total: u64 = 0
+    var v: u64 = 0
+    while v < iovlen {
+        if !proc.user_ok(state, me, iov + v * 16, 16) {
+            return neg(errno.E_FAULT)
+        }
+        total = total + get64u(state, me, iov + v * 16 + 8)
+        if total > FRAME_MAX {
+            return neg(errno.E_MSGSIZE)
+        }
+        v = v + 1
+    }
+    let ctl: u64 = get64u(state, me, mh + MH_CONTROL)
+    let ctllen: u64 = get64u(state, me, mh + MH_CONTROLLEN)
+    var nfds: u64 = 0
+    if ctl != 0 && ctllen >= 16 {
+        if !proc.user_ok(state, me, ctl, ctllen) {
+            return neg(errno.E_FAULT)
+        }
+        let clen: u64 = get64u(state, me, ctl)
+        if get32(state, me, ctl + 8) == SOL_SOCKET && get32(state, me, ctl + 12) == SCM_RIGHTS && clen >= 16 && clen <= ctllen {
+            nfds = (clen - 16) / 4
+            if nfds > unixsock.FDQ_MAX {
+                return neg(errno.E_INVAL)
+            }
+            var chk: u64 = 0
+            while chk < nfds {
+                if of_of(state, me, get32(state, me, ctl + 16 + chk * 4)) >= file.MAX_OPEN {
+                    return neg(errno.E_BADF)
+                }
+                chk = chk + 1
+            }
+        }
+    }
+    let nonblock: bool = frame_nonblock(state, me, fd, flags)
+    var waits: u64 = 0
+    while true {
+        if unixsock.peer_gone(state, si) {
+            return neg(errno.E_PIPE)
+        }
+        if unixsock.dgram_room(state, unixsock.sock_peer(state, si)) >= total && unixsock.fd_room(state, si) >= nfds {
+            let fl: u64 = unixsock.scratch_lock(state)
+            var ok: bool = true
+            var off: u64 = 0
+            v = 0
+            while v < iovlen && ok {
+                let blen: u64 = get64u(state, me, iov + v * 16 + 8)
+                if !copy_in(state, me, state + WL_SCRATCH + off, get64u(state, me, iov + v * 16), blen) {
+                    ok = false
+                }
+                off = off + blen
+                v = v + 1
+            }
+            if !ok {
+                unixsock.scratch_unlock(state, fl)
+                return neg(errno.E_FAULT)
+            }
+            var k: u64 = 0
+            while k < nfds {
+                unixsock.push_fd(state, si, of_of(state, me, get32(state, me, ctl + 16 + k * 4)))
+                k = k + 1
+            }
+            let w: u64 = unixsock.send_dgram(state, si, WL_SCRATCH, total)
+            unixsock.scratch_unlock(state, fl)
+            if errno.is_error(w) {
+                return neg(w)
+            }
+            sched.poll_kick(state)
+            return w
+        }
+        if nonblock || waits >= NET_ROUNDS {
+            return neg(errno.E_AGAIN)
+        }
+        waits = waits + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return 0
+}
+
+fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> u64 {
+    let iov: u64 = get64u(state, me, mh + MH_IOV)
+    let iovlen: u64 = get64u(state, me, mh + MH_IOVLEN)
+    if iovlen > 1024 {
+        return neg(errno.E_INVAL)
+    }
+    let nonblock: bool = frame_nonblock(state, me, fd, flags)
+    var waited: u64 = 0
+    while unixsock.waiting(state, si) < unixsock.DGRAM_HDR {
+        if unixsock.peer_gone(state, si) {
+            return 0
+        }
+        if nonblock || waited >= NET_ROUNDS {
+            return neg(errno.E_AGAIN)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    var cap: u64 = 0
+    var v: u64 = 0
+    while v < iovlen {
+        if !proc.user_ok(state, me, iov + v * 16, 16) {
+            return neg(errno.E_FAULT)
+        }
+        cap = cap + get64u(state, me, iov + v * 16 + 8)
+        v = v + 1
+    }
+    if cap > FRAME_MAX {
+        cap = FRAME_MAX
+    }
+    let mlen: u64 = unixsock.dgram_len(state, si)
+    let ctl: u64 = get64u(state, me, mh + MH_CONTROL)
+    let ctllen: u64 = get64u(state, me, mh + MH_CONTROLLEN)
+    if ctl != 0 && ctllen != 0 && !proc.user_ok(state, me, ctl, ctllen) {
+        return neg(errno.E_FAULT)
+    }
+    var room: u64 = 0
+    if ctl != 0 && ctllen >= 20 {
+        room = (ctllen - 16) / 4
+    }
+    var rflags: u64 = 0
+    var n: u64 = 0
+    while unixsock.fd_at_head(state, si) {
+        let sof: u64 = unixsock.pop_fd(state, si)
+        if sof >= file.MAX_OPEN {
+            break
+        }
+        var kept: bool = false
+        if n < room {
+            let nfd: u64 = file.fd_alloc(state, me, 0)
+            if nfd < file.MAX_FD {
+                file.fd_set(state, me, nfd, sof)
+                if (flags & MSG_CMSG_CLOEXEC) != 0 {
+                    cx_put(state, me, nfd, true)
+                }
+                if put32(state, me, ctl + 16 + n * 4, nfd) {
+                    n = n + 1
+                    kept = true
+                }
+            }
+        }
+        if !kept {
+            file.open_unref(state, sof)
+            rflags = rflags | MSG_CTRUNC_FLAG
+        }
+    }
+    var ctlout: u64 = 0
+    if n != 0 {
+        ctlout = 16 + n * 4
+        if !put64(state, me, ctl, ctlout) || !put32(state, me, ctl + 8, SOL_SOCKET) || !put32(state, me, ctl + 12, SCM_RIGHTS) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    if !put64(state, me, mh + MH_CONTROLLEN, ctlout) {
+        return neg(errno.E_FAULT)
+    }
+    if mlen > cap {
+        rflags = rflags | MSG_TRUNC_FLAG
+    }
+    if !put32(state, me, mh + MH_FLAGS, rflags) {
+        return neg(errno.E_FAULT)
+    }
+    let fl: u64 = unixsock.scratch_lock(state)
+    let got: u64 = unixsock.recv_dgram(state, si, WL_SCRATCH, cap)
+    var ok: bool = true
+    var off: u64 = 0
+    v = 0
+    while v < iovlen && off < got && ok {
+        var chunk: u64 = get64u(state, me, iov + v * 16 + 8)
+        if chunk > got - off {
+            chunk = got - off
+        }
+        if !copy_out(state, me, get64u(state, me, iov + v * 16), state + WL_SCRATCH + off, chunk) {
+            ok = false
+        }
+        off = off + chunk
+        v = v + 1
+    }
+    unixsock.scratch_unlock(state, fl)
+    if !ok {
+        return neg(errno.E_FAULT)
+    }
+    return got
+}
+
 fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     let nlof: u64 = nl_of(state, me, fd)
     if nlof < file.MAX_OPEN {
@@ -18367,6 +18576,9 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     }
     if !proc.user_ok(state, me, mh, MH_BYTES) {
         return neg(errno.E_FAULT)
+    }
+    if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
+        return recvmsg_frame(state, me, fd, si, mh, flags)
     }
     let iov: u64 = get64u(state, me, mh + MH_IOV)
     let iovlen: u64 = get64u(state, me, mh + MH_IOVLEN)
@@ -19403,14 +19615,14 @@ fn do_socketpair(state: u64, me: u64, domain: u64, kind: u64, protocol: u64, sv:
     if domain != AF_UNIX {
         return neg(errno.E_AFNOSUPPORT)
     }
-    if ((kind & 0xFF) != SOCK_STREAM && (kind & 0xFF) != SOCK_DGRAM) || protocol != 0 {
+    if ((kind & 0xFF) != SOCK_STREAM && (kind & 0xFF) != SOCK_DGRAM && (kind & 0xFF) != SOCK_SEQPACKET) || protocol != 0 {
         return neg(errno.E_PROTONOSUPPORT)
     }
     if !proc.user_ok(state, me, sv, 8) {
         return neg(errno.E_FAULT)
     }
     var uk: u64 = unixsock.UK_STREAM
-    if (kind & 0xFF) == SOCK_DGRAM {
+    if (kind & 0xFF) == SOCK_DGRAM || (kind & 0xFF) == SOCK_SEQPACKET {
         uk = unixsock.UK_DGRAM
     }
     let a: u64 = unixsock.sock_new(state, uk)
