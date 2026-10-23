@@ -436,6 +436,7 @@ fn one(state: u64, k: u64, param: u64, base: u64) {
     let dfst: u64 = mem.frame_alloc(state)
     if roh == 0 || page == 0 || dfst == 0 {
         kstate.add(state, kstate.SMP_OFF + S_FAILED, 1)
+        cpu.set(state, k, cpu.C_WHY, cpu.WHY_NOMEM)
         return
     }
     let stack: u64 = roh + AP_STACK_GUARD * mem.FRAME_SIZE
@@ -459,6 +460,8 @@ fn bring(state: u64, k: u64, param: u64, base: u64) {
     atomic.store(param + P_FLAG, 0)
 
     wake(state, cpu.apic_id(state, k), base >> 12)
+    // W-SMP2: the boot core's ESR right after the STARTUP IPIs (send errors show there).
+    cpu.set(state, k, cpu.C_ESR, apic.esr_take(state))
 
     // Wait for the core to have taken the block -- only then may the next
     // one have it. Two seconds is an eternity on a machine that answers
@@ -477,6 +480,7 @@ fn bring(state: u64, k: u64, param: u64, base: u64) {
     }
     if atomic.load(param + P_FLAG) == 0 {
         kstate.add(state, kstate.SMP_OFF + S_FAILED, 1)
+        cpu.set(state, k, cpu.C_WHY, cpu.WHY_NOSIPI)
         return
     }
     guard = 0
@@ -490,7 +494,70 @@ fn bring(state: u64, k: u64, param: u64, base: u64) {
     }
     if !cpu.online(state, k) {
         kstate.add(state, kstate.SMP_OFF + S_FAILED, 1)
+        cpu.set(state, k, cpu.C_WHY, cpu.WHY_NOONLINE)
+    } else {
+        cpu.set(state, k, cpu.C_WHY, cpu.WHY_OK)
     }
+}
+
+// W-SMP2: print a packed name (cpu.why_word) octet by octet.
+fn put_word(w: u64) {
+    var v: u64 = w
+    var i: u64 = 0
+    while v != 0 && i < 8 {
+        serial.put((v & 0xFF) as u8)
+        v = v >> 8
+        i = i + 1
+    }
+}
+
+// W-SMP2: "smp: 3 of 4 online, madt=4, failed: c1(apic 1,nosipi,esr 0) ..." -- one line that says WHY cores are missing.
+// With nothing failed it ends in "failed: none".
+fn report_line(state: u64, n: u64) {
+    var s_a: [u8; 7] = "smp: \0\0"
+    var s_b: [u8; 12] = " of \0\0\0\0\0\0\0\0"
+    var s_c: [u8; 10] = " online, \0"
+    var s_d: [u8; 6] = "madt=\0"
+    var s_e: [u8; 12] = ", failed:\0\0\0"
+    var s_f: [u8; 6] = " none\0"
+    var s_g: [u8; 3] = " c\0"
+    var s_h: [u8; 7] = "(apic \0"
+    var s_i: [u8; 6] = ",esr \0"
+    var s_j: [u8; 2] = ")\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(cpu.online_count(state))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_c[0]) as u64)
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(acpi.total(state))
+    serial.puts((&s_e[0]) as u64)
+    var bad: u64 = 0
+    var k: u64 = 0
+    while k < n && k < kstate.MAX_CPUS {
+        if !cpu.online(state, k) {
+            bad = bad + 1
+            serial.puts((&s_g[0]) as u64)
+            serial.dec(k)
+            serial.puts((&s_h[0]) as u64)
+            serial.dec(cpu.apic_id(state, k))
+            serial.put(44)
+            put_word(cpu.why_word(cpu.get(state, k, cpu.C_WHY)))
+            serial.puts((&s_i[0]) as u64)
+            serial.hex(cpu.get(state, k, cpu.C_ESR))
+            serial.puts((&s_j[0]) as u64)
+        }
+        k = k + 1
+    }
+    if acpi.total(state) > n {
+        var s_k: [u8; 12] = " notstarted\0"
+        serial.puts((&s_k[0]) as u64)
+        serial.put(61)
+        serial.dec(acpi.total(state) - n)
+    } else if bad == 0 {
+        serial.puts((&s_f[0]) as u64)
+    }
+    serial.nl()
 }
 
 // ---------------------------------------------------------- step three
@@ -884,6 +951,16 @@ fn frueh_start(state: u64) -> u64 {
         return 1
     }
     if on(state, M_NOSMP) {
+        // W-SMP2: still enter the cores in the table (not started), so /proc/cpus shows madt=N + why=nosmp before `stage` runs.
+        if sget(state, S_PROBED) == 0 {
+            let nn: u64 = probe(state)
+            sset(state, S_PROBED, 1)
+            var q: u64 = 1
+            while q < nn && q < kstate.MAX_CPUS {
+                cpu.set(state, q, cpu.C_WHY, cpu.WHY_NOSMP)
+                q = q + 1
+            }
+        }
         return 1
     }
     if sget(state, S_PROBED) != 0 {
@@ -984,6 +1061,11 @@ fn stage(state: u64) {
     if on(state, M_NOSMP) {
         serial.puts((&s_off[0]) as u64)
         serial.nl()
+        var q: u64 = 1
+        while q < n && q < kstate.MAX_CPUS {
+            cpu.set(state, q, cpu.C_WHY, cpu.WHY_NOSMP)
+            q = q + 1
+        }
     } else {
         // RUNDE ARGON (K-021): NICHT ZWEIMAL STARTEN. Hat
         // `frueh_start` die Kerne fuer die Entsperrung schon
@@ -1002,6 +1084,7 @@ fn stage(state: u64) {
     serial.puts((&s_fail[0]) as u64)
     serial.dec(sget(state, S_FAILED))
     serial.nl()
+    report_line(state, n)
 
     // THE MEASUREMENTS COST TWO AND A HALF SECONDS and they only say
     // something when there is more than one core to say it about. Every
@@ -1766,9 +1849,22 @@ fn scheduler_core(state: u64, index: u64) {
         // W-TSC: nothing to run on this core -> slow tick (10 Hz) while it
         // sleeps; full rate again the moment it wakes (an IPI or the slow
         // tick itself). Cuts the VM exits of idle cores by ~90 %.
+        //
+        // W-SMP2: the sleep is now KICKABLE. The boot core sends a timer-vector IPI to a sleeping core when a task is READY and the
+        // boot core is busy (sched.kick_idle_cores), so work is not left waiting for the 100 ms idle tick. Interrupts go off first,
+        // the halted flag is set, and `sti; hlt` runs as one pair (the instruction after `sti` is still protected), so a kick that
+        // lands between the flag and the `hlt` wakes the core instead of being lost; a kick that already landed (X_PEND) skips the sleep.
+        asm("cli")
         apic.timer_rate(state, 10)
-        idt.halt()
+        cpu.x_set(state, index, cpu.X_HALTED, 1)
+        if cpu.x_get(state, index, cpu.X_PEND) == 0 {
+            asm("sti\nhlt")
+        } else {
+            asm("sti")
+        }
+        cpu.x_set(state, index, cpu.X_HALTED, 0)
         apic.timer_rate(state, 1)
+        cpu.x_set(state, index, cpu.X_PEND, 0)
     }
 }
 

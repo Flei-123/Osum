@@ -35,7 +35,7 @@
 import serial
 import lib.kstate
 
-export { find, cpus, ioapic_addr, lapic_addr, revision, oem, valid, table,
+export { find, cpus, total, ioapic_addr, lapic_addr, revision, oem, valid, table,
     table_count, table_at,
     // RUNDE BLECHVIER: ab dem ersten Prozess nur noch das erste Gibioctet.
     only_first_give }
@@ -82,6 +82,7 @@ const S_IOAPIC: u64 = 88
 const S_REV: u64 = 96
 const S_OEM: u64 = 104
 const S_VALID: u64 = 112
+const S_TOTAL: u64 = 120 // W-SMP2: enabled processor entries the MADT lists (also those this kernel cannot start)
 
 fn sget(state: u64, off: u64) -> u64 {
     return kstate.get(state, kstate.SMP_OFF + off)
@@ -465,14 +466,20 @@ fn walk(state: u64, madt: u64) -> u64 {
     let end: u64 = madt + kstate.get32(madt + H_LENGTH)
     var p: u64 = madt + M_ENTRIES
     var n: u64 = 0
+    var tot: u64 = 0
+    sset(state, S_TOTAL, 0)
     while p + 2 <= end {
         let kind: u64 = kstate.get8(p)
         let len: u64 = kstate.get8(p + 1)
         if len < 2 {
+            sset(state, S_TOTAL, tot)
             return n
         }
         if kind == E_LAPIC && len >= 8 {
             let flags: u64 = kstate.get32(p + 4)
+            if (flags & 1) != 0 {
+                tot = tot + 1
+            }
             if (flags & 1) != 0 && n < kstate.MAX_CPUS {
                 store_cpu(state, n, kstate.get8(p + 3))
                 n = n + 1
@@ -481,6 +488,9 @@ fn walk(state: u64, madt: u64) -> u64 {
         if kind == E_X2APIC && len >= 16 {
             let id: u64 = kstate.get32(p + 4)
             let flags: u64 = kstate.get32(p + 8)
+            if (flags & 1) != 0 {
+                tot = tot + 1
+            }
             // This kernel addresses the APIC through its 8-bit id; an
             // x2APIC id above 255 needs the x2APIC mode it does not have.
             if (flags & 1) != 0 && id < 255 && n < kstate.MAX_CPUS {
@@ -497,7 +507,13 @@ fn walk(state: u64, madt: u64) -> u64 {
         }
         p = p + len
     }
+    sset(state, S_TOTAL, tot)
     return n
+}
+
+// W-SMP2: how many enabled processors the MADT lists in total (the number `cpus_madt` shows), even if fewer fit the table.
+fn total(state: u64) -> u64 {
+    return sget(state, S_TOTAL)
 }
 
 // The found ids are parked in the SMP page until `smp.probe` copies them
