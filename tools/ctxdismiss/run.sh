@@ -138,6 +138,8 @@ check_tree() { # <dir> <label> <expect: 1 = fixed tree, 0 = old tree>
         [ "$d" -gt 5000 ] && ok "$lab: COUNTER-PROOF: the menu SURVIVES the outside click ($d px)" || bad "$lab: COUNTER-PROOF: menu gone even without the fix ($d px)"
     fi
     if [ "$fixed" = 1 ]; then
+        d=$(gone "$dir" a0 a2 0 0 170 38)
+        [ "$d" -le 600 ] && ok "$lab: no stale menu picture at the top left after the dismissal ($d px; pointer only)" || bad "$lab: stale menu picture at the top left ($d px)"
         d=$(shows "$dir" a2 a3 $D1)
         [ "$d" -gt 5000 ] && ok "$lab: second right click shows the menu again ($d px)" || bad "$lab: no second menu ($d px)"
         d=$(gone "$dir" a2 a4 $D1)
