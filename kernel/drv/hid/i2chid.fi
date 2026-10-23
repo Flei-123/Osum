@@ -107,6 +107,9 @@ import lib.kstate
 import serial
 import bus.pci
 import acpi.acpi
+import acpi.aml
+import acpi.amlns
+import acpi.amlobj
 import drv.hid.hidrep
 import drv.hid.hidin
 import drv.hid.hidtest
@@ -119,7 +122,7 @@ export {
     hd_vid, hd_pid, say, selftest, SELFTEST_MAX,
     DW_MAGIC, MAX_SLAVES, HDESC_DEFAULT, HDESC_OLD,
     poll_tick, simrun, simrun2, SIM_MM, SIM_MM2,
-    nctrl, ndev, find_ctrls, dev_ctrl, dev_adr, dev_slot, render
+    nctrl, ndev, find_ctrls, dev_ctrl, dev_adr, dev_slot, render, aml_scan
 }
 
 // Zwei Seiten aus dem Rest, den `kstate.fi` nach Merge 2 ausweist.
@@ -923,6 +926,8 @@ fn stage(state: u64) {
     if nctrl() == 0 {
         return
     }
+    aml_scan(state)
+    say_aml(state)
     probe_all(state)
     say_devs(state)
 }
@@ -933,6 +938,9 @@ fn stage(state: u64) {
 // not HUNG; each hit becomes a device (own HID slot). A timeout only
 // hurts the controller it happened on.
 fn probe_all(state: u64) -> bool {
+    if tg(X_NAML) > 0 && probe_aml(state) {
+        return true
+    }
     var i: u64 = 0
     let n: u64 = g(state, S_NSLAVE)
     let old: bool = kstate.mode_on(state, kstate.M_I2COLD)
@@ -1085,6 +1093,325 @@ fn say_devs(state: u64) {
         j = j + 1
     }
 }
+
+// ======================================================================
+// W-TOUCH4: THE AML PATH. The namespace (held by acpiev when the machine has a lid/battery/button) names every
+// HID-over-I2C device: _HID or _CID = PNP0C50, _CRS = I2cSerialBus (slave address + the controller's path),
+// the controller's _ADR = PCI device/function, _DSM(3CDFF6F7-..., 1, 1) = the HID description register.
+// With candidates from here, probe_all touches ONLY these (controller, address, register) triples -- no byte search
+// on any controller. Word i2cnoaml = old behaviour. No namespace / no PNP0C50 device = no candidates = old search.
+const T_AML: u64 = 256
+const AML_MAX: u64 = 8
+const AM_CTRL: u64 = 0
+const AM_ADR: u64 = 1
+const AM_HREG: u64 = 2
+const AM_NODE: u64 = 3
+const X_NAML: u64 = 205
+const HREG_NONE: u64 = 0xFFFFFFFF
+const EISA_PNP0C50: u64 = 0x500CD041
+
+fn am_get(k: u64, f: u64) -> u64 {
+    return tg(T_AML + k * 4 + f)
+}
+
+fn am_set(k: u64, f: u64, v: u64) {
+    ts(T_AML + k * 4 + f, v)
+}
+
+fn aml_seg4(a: u64, b: u64, c: u64, d: u64) -> u64 {
+    return a | (b << 8) | (c << 16) | (d << 24)
+}
+
+// 1 when the object (an integer, a string, or a package of those) is the PNP0C50 id.
+fn aml_obj_is_hidi2c(o: u64) -> bool {
+    var want: [u8; 8] = "PNP0C50\0"
+    let t: u64 = amlobj.otype(o)
+    if t == amlobj.OT_INT {
+        return amlobj.to_int(o) == EISA_PNP0C50
+    }
+    if t == amlobj.OT_STR {
+        let sp: u64 = amlobj.ov1(o)
+        var i: u64 = 0
+        while i < 8 {
+            if amlns.rd8(sp + i) != (want[i as usize] as u64) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    if t == amlobj.OT_PKG {
+        let n: u64 = amlobj.ov2(o)
+        var k: u64 = 0
+        while k < n && k < 8 {
+            let e: u64 = amlobj.pkg_at(o, k)
+            let et: u64 = amlobj.otype(e)
+            if et == amlobj.OT_INT || et == amlobj.OT_STR {
+                if aml_obj_is_hidi2c(e) {
+                    return true
+                }
+            }
+            k = k + 1
+        }
+    }
+    return false
+}
+
+fn aml_dev_is_hidi2c(state: u64, dev: u64) -> bool {
+    var w_hid: [u8; 5] = "_HID\0"
+    var w_cid: [u8; 5] = "_CID\0"
+    var r: [u64; 3] = [0 as u64; 3]
+    let h: u64 = amlns.child(state, dev, amlns.seg_of((&w_hid[0]) as u64))
+    if h != amlns.NONE {
+        if aml.eval_node(state, h, (&r[0]) as u64) {
+            if aml_obj_is_hidi2c((&r[0]) as u64) {
+                return true
+            }
+        }
+    }
+    let c: u64 = amlns.child(state, dev, amlns.seg_of((&w_cid[0]) as u64))
+    if c != amlns.NONE {
+        if aml.eval_node(state, c, (&r[0]) as u64) {
+            if aml_obj_is_hidi2c((&r[0]) as u64) {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+// "\_SB.PCI0.I2C1" (also unpadded segments like "_SB") -> namespace node, or NONE.
+fn aml_resolve(state: u64, src: u64, maxlen: u64) -> u64 {
+    var cur: u64 = 0
+    var i: u64 = 0
+    if amlns.rd8(src) == 0x5C {
+        i = 1
+    }
+    while i < maxlen && amlns.rd8(src + i) != 0 {
+        var sg: [u8; 4] = "____"
+        var k: u64 = 0
+        while k < 4 && i < maxlen && amlns.rd8(src + i) != 0 && amlns.rd8(src + i) != 0x2E {
+            sg[k as usize] = amlns.rd8(src + i) as u8
+            k = k + 1
+            i = i + 1
+        }
+        if k == 0 || (i < maxlen && amlns.rd8(src + i) != 0 && amlns.rd8(src + i) != 0x2E) {
+            return amlns.NONE
+        }
+        let seg: u64 = aml_seg4(sg[0] as u64, sg[1] as u64, sg[2] as u64, sg[3] as u64)
+        cur = amlns.child(state, cur, seg)
+        if cur == amlns.NONE {
+            return amlns.NONE
+        }
+        if i < maxlen && amlns.rd8(src + i) == 0x2E {
+            i = i + 1
+        }
+    }
+    return cur
+}
+
+// The controller (index in our table) whose PCI device/function equals the node's _ADR, or 0xFF.
+fn aml_ctrl_of(state: u64, node: u64) -> u64 {
+    var w_adr: [u8; 5] = "_ADR\0"
+    let a: u64 = amlns.child(state, node, amlns.seg_of((&w_adr[0]) as u64))
+    if a == amlns.NONE {
+        return 0xFF
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, a, (&r[0]) as u64) || amlobj.otype((&r[0]) as u64) != amlobj.OT_INT {
+        return 0xFF
+    }
+    let v: u64 = amlobj.to_int((&r[0]) as u64)
+    let dev: u64 = (v >> 16) & 0xFFFF
+    let fnn: u64 = v & 0xFFFF
+    var c: u64 = 0
+    while c < nctrl() {
+        if pci.bdf_dev(ctg(c, CT_BDF)) == dev && pci.bdf_fn(ctg(c, CT_BDF)) == fnn {
+            return c
+        }
+        c = c + 1
+    }
+    return 0xFF
+}
+
+// _DSM(UUID 3CDFF6F7-4267-4555-AD05-B30A3D8938DE, rev 1, function 1, {}) = HID description register, or HREG_NONE.
+fn aml_dsm_hreg(state: u64, dev: u64) -> u64 {
+    var w_dsm: [u8; 5] = "_DSM\0"
+    let n: u64 = amlns.child(state, dev, amlns.seg_of((&w_dsm[0]) as u64))
+    if n == amlns.NONE {
+        return HREG_NONE
+    }
+    let u: u64 = amlobj.obj_buf(state, 16)
+    if u == 0 {
+        return HREG_NONE
+    }
+    let up: u64 = amlobj.ov1(u)
+    var uu: [u8; 16] = [0 as u8; 16]
+    uu[0] = 0xF7 as u8
+    uu[1] = 0xF6 as u8
+    uu[2] = 0xDF as u8
+    uu[3] = 0x3C as u8
+    uu[4] = 0x67 as u8
+    uu[5] = 0x42 as u8
+    uu[6] = 0x55 as u8
+    uu[7] = 0x45 as u8
+    uu[8] = 0xAD as u8
+    uu[9] = 0x05 as u8
+    uu[10] = 0xB3 as u8
+    uu[11] = 0x0A as u8
+    uu[12] = 0x3D as u8
+    uu[13] = 0x89 as u8
+    uu[14] = 0x38 as u8
+    uu[15] = 0xDE as u8
+    var i: u64 = 0
+    while i < 16 {
+        amlns.wr8(up + i, uu[i as usize] as u64)
+        i = i + 1
+    }
+    var a: [u64; 12] = [0 as u64; 12]
+    amlobj.ocopy((&a[0]) as u64, u)
+    amlobj.oint((&a[3]) as u64, 1)
+    amlobj.oint((&a[6]) as u64, 1)
+    amlobj.opkg((&a[9]) as u64, 0, 0)
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node_args(state, n, 4, (&a[0]) as u64, (&r[0]) as u64) {
+        return HREG_NONE
+    }
+    if amlobj.otype((&r[0]) as u64) != amlobj.OT_INT {
+        return HREG_NONE
+    }
+    let v: u64 = amlobj.to_int((&r[0]) as u64)
+    if v == 0 || v > 0xFFFF {
+        return HREG_NONE
+    }
+    return v
+}
+
+fn aml_add_cand(c: u64, adr: u64, hreg: u64, node: u64) {
+    let n: u64 = tg(X_NAML)
+    var k: u64 = 0
+    while k < n {
+        if am_get(k, AM_CTRL) == c && am_get(k, AM_ADR) == adr {
+            return
+        }
+        k = k + 1
+    }
+    if n >= AML_MAX {
+        return
+    }
+    am_set(n, AM_CTRL, c)
+    am_set(n, AM_ADR, adr)
+    am_set(n, AM_HREG, hreg)
+    am_set(n, AM_NODE, node)
+    ts(X_NAML, n + 1)
+}
+
+// Walk the held namespace. Returns the number of candidates (also in tg(X_NAML)); 0 = use the byte search.
+fn aml_scan(state: u64) -> u64 {
+    var w_crs: [u8; 5] = "_CRS\0"
+    ts(X_NAML, 0)
+    ts(X_AML, 0)
+    if kstate.mode_on(state, kstate.M_I2CNOAML) || aml.ns_arena(state) == 0 {
+        return 0
+    }
+    let crs_seg: u64 = amlns.seg_of((&w_crs[0]) as u64)
+    let nn: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < nn {
+        if amlns.node_kind(state, i) == amlns.NK_DEVICE && aml_dev_is_hidi2c(state, i) {
+            let cn: u64 = amlns.child(state, i, crs_seg)
+            var r: [u64; 3] = [0 as u64; 3]
+            if cn != amlns.NONE && aml.eval_node(state, cn, (&r[0]) as u64)
+                && amlobj.otype((&r[0]) as u64) == amlobj.OT_BUF {
+                let p: u64 = amlobj.ov1((&r[0]) as u64)
+                let len: u64 = amlobj.ov2((&r[0]) as u64)
+                var o: u64 = 0
+                while o + 3 <= len {
+                    let b: u64 = amlns.rd8(p + o)
+                    if (b & 0x80) == 0 {
+                        if (b >> 3) == 0x0F {
+                            o = len
+                        } else {
+                            o = o + 1 + (b & 7)
+                        }
+                    } else {
+                        let rl: u64 = amlns.rd8(p + o + 1) | (amlns.rd8(p + o + 2) << 8)
+                        if b == 0x8E && rl >= 15 && o + 3 + rl <= len && amlns.rd8(p + o + 5) == 1 {
+                            let tdl: u64 = amlns.rd8(p + o + 10) | (amlns.rd8(p + o + 11) << 8)
+                            let adr: u64 = amlns.rd8(p + o + 16) | (amlns.rd8(p + o + 17) << 8)
+                            if tdl >= 6 && adr > 0 && adr < 0x80 && 12 + tdl < 3 + rl {
+                                let src: u64 = p + o + 12 + tdl
+                                let cnode: u64 = aml_resolve(state, src, 3 + rl - 12 - tdl)
+                                if cnode != amlns.NONE {
+                                    let c: u64 = aml_ctrl_of(state, cnode)
+                                    if c != 0xFF {
+                                        aml_add_cand(c, adr, aml_dsm_hreg(state, i), i)
+                                    }
+                                }
+                            }
+                        }
+                        o = o + 3 + rl
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if tg(X_NAML) > 0 {
+        ts(X_AML, 1)
+    }
+    return tg(X_NAML)
+}
+
+// Probe the AML candidates (only these). Returns true when at least one device answered.
+fn probe_aml(state: u64) -> bool {
+    var k: u64 = 0
+    while k < tg(X_NAML) {
+        let c: u64 = am_get(k, AM_CTRL)
+        let adr: u64 = am_get(k, AM_ADR)
+        let hreg: u64 = am_get(k, AM_HREG)
+        if ctg(c, CT_STATE) == 0 && ndev() < hidrep.I2C_DEV_MAX && !dev_known(c, adr) {
+            var got: bool = false
+            if hreg != HREG_NONE {
+                got = versuche(state, c, adr, hreg)
+            }
+            if !got {
+                got = try_dev(state, c, adr)
+            }
+            if got {
+                dvs(ndev() - 1, DV_VIA, 1)
+            }
+        }
+        k = k + 1
+    }
+    return ndev() > 0
+}
+
+fn say_aml(state: u64) {
+    var s_a: [u8; 15] = "i2chid: aml n=\0"
+    var s_b: [u8; 7] = " cand=\0"
+    var s_c: [u8; 6] = " ctrl\0"
+    var s_d: [u8; 6] = " adr=\0"
+    var s_e: [u8; 7] = " hreg=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(tg(X_NAML))
+    serial.nl()
+    var k: u64 = 0
+    while k < tg(X_NAML) {
+        serial.puts((&s_b[0]) as u64)
+        serial.dec(k)
+        serial.puts((&s_c[0]) as u64)
+        serial.put(61 as u8)
+        serial.dec(am_get(k, AM_CTRL))
+        serial.puts((&s_d[0]) as u64)
+        serial.hex(am_get(k, AM_ADR))
+        serial.puts((&s_e[0]) as u64)
+        serial.hex(am_get(k, AM_HREG))
+        serial.nl()
+        k = k + 1
+    }
+}
+
 
 // ======================================================================
 // W-TOUCH4: /proc/inputdevs -- what the input stack found, as text.
@@ -2159,6 +2486,8 @@ fn simrun2(state: u64) {
     s(state, S_SLAVES + 16, 0x10)
     s(state, S_SLAVES + 24, 0x11)
     s(state, S_SLAVES + 32, 0x40)
+    aml_scan(state)
+    say_aml(state)
     probe_all(state)
     serial.puts((&s_a[0]) as u64)
     serial.dec(nctrl())
