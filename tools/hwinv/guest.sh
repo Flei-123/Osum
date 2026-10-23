@@ -15,7 +15,7 @@ TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-PROGS="sh cat echo hwinv"
+PROGS="sh cat echo hwinv sysinfo"
 mkdir -p "$TMPD/bin"
 bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1 && ok "hwinv builds" || { bad "build"; head -20 "$TMPD/b.txt"; echo "HWINV-GUEST: $pass passed, $fail failed"; exit 1; }
 ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel"; echo "HWINV-GUEST: $pass passed, $fail failed"; exit 1; }
@@ -36,6 +36,8 @@ hwinv
 echo ==FILE==
 hwinv /tmp/hw.txt
 cat /tmp/hw.txt
+echo ==HWCHECK==
+sysinfo --hwcheck
 echo ==END==
 EOS
 python3 tools/osum/mkfs.py build "$TMPD/d.img" 20000 /lib/ \
@@ -48,7 +50,7 @@ runvm() {
     local name=$1; shift
     cp "$TMPD/d.img" "$TMPD/d-$name.img"
     timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 -kernel "$TMPD/k0.img" -m 512 \
-        -device qemu-xhci -device usb-kbd -append "osum vfs usb script=sh /t/s.sh;exit" \
+        -device qemu-xhci -device usb-kbd -append "osum vfs usb ${WORDS:-} script=sh /t/s.sh;exit" \
         -serial "file:$TMPD/o-$name.txt" -display none -no-reboot \
         -drive "file=$TMPD/d-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" >/dev/null 2>&1
@@ -58,6 +60,7 @@ runvm base
 runvm ahci -device ich9-ahci,id=ahci -drive "file=$TMPD/extra.img,format=raw,if=none,id=x0" -device ide-hd,drive=x0,bus=ahci.0
 runvm nvme -drive "file=$TMPD/extra.img,format=raw,if=none,id=n0" -device nvme,drive=n0,serial=hwinvtest
 runvm raid -device megasas,id=raid0
+WORDS=fakeraid runvm rst -device ich9-ahci,id=ahci -drive "file=$TMPD/extra.img,format=raw,if=none,id=x0" -device ide-hd,drive=x0,bus=ahci.0
 runvm ssdt -acpitable sig=SSDT,file="$TMPD/ssdt.aml"
 has "$TMPD/base.klar" "hwinv: version=1" "base: report printed"
 has "$TMPD/base.klar" "hwinv: firmware=BIOS" "base: multiboot kernel run is measured as BIOS"
@@ -81,6 +84,13 @@ has "$TMPD/base.klar" "hwinv: acpi_tables=" "base: tables in the summary"
 has "$TMPD/base.klar" "hwinv: acpi_i2chid=0" "base: no i2c-hid device"
 hasnot "$TMPD/base.klar" "hwinv: pointing=acpi-i2c-hid" "counter-proof: base is not i2c-hid"
 hasnot "$TMPD/base.klar" "ELAN0000" "counter-proof: base has no touchpad id"
+has "$TMPD/rst.klar" "hwinv: storage_verdict=raid-rst-nvme-hidden" "rst: verdict names the hidden NVMe"
+has "$TMPD/rst.klar" "BIOS: set SATA mode to AHCI" "rst: the text names the BIOS setting"
+has "$TMPD/rst.klar" "storage: check BIOS: set SATA mode to AHCI" "rst: sysinfo --hwcheck shows the BIOS hint"
+hasnot "$TMPD/ahci.klar" "storage_verdict=raid-rst" "counter-proof: plain AHCI has no RST verdict"
+hasnot "$TMPD/ahci.klar" "set SATA mode to AHCI" "counter-proof: plain AHCI shows no BIOS hint"
+has "$TMPD/ahci.klar" "storage: ok" "ahci: sysinfo --hwcheck storage ok"
+hasnot "$TMPD/rst.klar" "EXCEPTION" "rst: no kernel exception with a RAID-class controller"
 has "$TMPD/ssdt.klar" "ELAN0000 cid=PNP0C50 x1 \\_SB.TPD0" "ssdt: /proc/acpi lists the touchpad with its CID and path"
 has "$TMPD/ssdt.klar" "hwinv: acpi_i2chid=1" "ssdt: one i2c-hid device counted"
 has "$TMPD/ssdt.klar" "hwinv: pointing=acpi-i2c-hid" "ssdt: pointing names acpi-i2c-hid"

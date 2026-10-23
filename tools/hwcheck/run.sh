@@ -32,5 +32,7 @@ mut() { # <name> <sed-expr>
 }
 mut "wlan class 0280 widened to any 02xx" 's/same4(l, 48, 50, 56, 48)/(ld(l, 8) == 48 \&\& ld(l, 9) == 50)/'
 mut "audio accepts 0402" 's/same4(l, 48, 52, 48, 49)/same4(l, 48, 52, 48, 50)/'
+mut "rst vendor test shifted" 's/ld(l, 13) == 56 \&\& ld(l, 14) == 48 \&\& ld(l, 15) == 56/ld(l, 13) == 57 \&\& ld(l, 14) == 48 \&\& ld(l, 15) == 56/'
+mut "nvme not counted as visible" 's/if same4(l, 48, 49, 48, 56) {/if same4(l, 48, 49, 48, 57) {/'
 echo "HWCHECK: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

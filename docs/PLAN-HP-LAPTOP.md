@@ -20,24 +20,26 @@ Ampel: GRÜN = Code da und in QEMU gated, aber am HP **ungemessen**; GELB = Teil
 
 | Baustein | Ampel | Aufwand | Befund |
 |---|---|---|---|
-| UEFI-Boot vom Stick | GRÜN | S | Limine BOOTX64.EFI, tools/stick + usbimg laufen unter OVMF; echter Laptop ungemessen (Secure Boot aus nötig, Lader unsigniert) |
+| UEFI-Boot vom Stick | GRÜN | S | Limine BOOTX64.EFI, tools/stick + usbimg laufen unter OVMF (tools/ovmfboot: q35/i440fx, EHCI/xHCI/NVMe/AHCI als Bootmedium, xHCI-Stick + AHCI- bzw. NVMe-Systemplatte; Gegenproben: leere AHCI-Platte bootet nicht, `acpiold` stürzt ab); echter Laptop ungemessen. Secure Boot muss aus sein (Lader unsigniert): das Limine-Menü trägt es im Kopf (`interface_branding`), ein Kernel-Absturz druckt `BIOS: Secure Boot OFF, SATA mode AHCI` auf den Schirm. Bei Secure Boot AN startet die Firmware den Lader gar nicht — dann erscheint nichts von uns |
 | Storage NVMe | GRÜN | S | nvme.fi, s3dev-Gate; HP-SSD ungemessen |
 | Storage SATA/AHCI | GRÜN | S | ahci.fi |
-| Intel RST (RAID-Modus) | ROT | M | NVMe verschwindet hinter RAID-Controller (Klasse 0104). Kein Treiber. Workaround: BIOS auf AHCI. Inventur erkennt und meldet das (`storage_verdict=raid-rst-nvme-hidden`) |
+| Intel RST (RAID-Modus) | ROT | M | NVMe verschwindet hinter RAID-Controller (Klasse 0104). Kein Treiber. Workaround: BIOS auf AHCI. Inventur erkennt und meldet das (`storage_verdict=raid-rst-nvme-hidden`). Seit 23.10.: Bootzeile `storage: Intel RST (RAID) mode, NVMe disks may be hidden. BIOS: set SATA mode to AHCI` (pci.rst_nvme_hidden, ahci.fi) und `sysinfo --hwcheck` zeigt `storage: check BIOS: set SATA mode to AHCI`; gated mit Testwort `fakeraid` (hwinv/guest.sh, ovmfboot) samt Gegenprobe ohne Wort |
 | Display HD 620 | GELB | M | nur UEFI-GOP-Framebuffer, kein Mode-Set, keine Helligkeit (r32/r33/r36); Panel läuft in nativer GOP-Auflösung |
-| Tastatur | GELB | S–M | USB-HID und PS/2 da; interne Tastatur ist PS/2 (i8042) — ACPI/EC-Weg ungemessen |
+| Tastatur | GELB | S–M | USB-HID und PS/2 da; interne Tastatur ist PS/2 (i8042) — ACPI/EC-Weg ungemessen. Ohne PS/2 (`-machine q35,i8042=off`) bootet das System bis zum Login (ovmfboot); Login nur mit Tastatur: tools/inputlogin |
 | Touchpad | GELB | M | `i2chid.fi` gegen simulierten DesignWare-Controller 18/0; ECHT fehlt: LPSS-I2C-Controller aus PCI (8086:9d60..) ansprechen + ACPI-Gerät (_HID, I2C-Adresse, GPIO-IRQ). AML-Interpreter existiert (kernel/acpi/aml*.fi). HP-6 Stand: Regler-Suche wacht LPSS-Funktion auf (D0, MEM, DesignWare-Reset bei +0x204), nur Quelltext, ungemessen (ACPI-Modus ohne PCI-Funktion wuerde nicht gefunden) |
-| Touchscreen | ROT | M | wie Touchpad (I2C-HID) oder USB-HID; Multitouch-Auswertung fehlt |
+| Touchscreen | ROT | M | wie Touchpad (I2C-HID) oder USB-HID; Multitouch-Auswertung fehlt. Ohne I2C-Controller kein Hänger, Zeiger über USB-Maus (ovmfboot: usb-kbd + usb-mouse, kein PS/2) |
 | Netz per USB-Dongle/Tethering | GELB | S | ECM, RNDIS (Android-Tethering), NCM in usbnet.fi verdrahtet; QEMU-Gates usbecm/usbrndis, NCM nur host-/Verdrahtungstest. ASIX AX88772/772B: Protokollhaelfte `lib/usbnet/ax88772.fi` (Rahmen, Setup-Pakete, `tools/usbvendor` 6/0 mit 4 Gegenproben), Treiber-Glue offen. Realtek RTL8153/CH336 ohne bzw. nur Protokoll, nichts am echten Geraet gemessen (Stand 23.10.) |
-| WLAN Intel 8265 | ROT | L | iwl.fi/lib/wlan zielen auf AX200/AX201 (CNVi, Context-Info). 8265 = Familie 8000 (altes FH-Chunk-Laden, ucode `iwlwifi-8265-*`) = **anderer** Ladeweg. Praktisch zuerst USB-Netz |
+| WLAN Intel 8265 | ROT | L | iwl.fi/lib/wlan zielen auf AX200/AX201 (CNVi, Context-Info). 8265 = Familie 8000 (altes FH-Chunk-Laden, ucode `iwlwifi-8265-*`) = **anderer** Ladeweg. Praktisch zuerst USB-Netz. Robustheit gated (ovmfboot, Testwort `fakewlan` = Karte meldet sich als 8086:24fd): Probe lehnt ab, Login erreicht, keine Fault-Zeile |
 | Bluetooth (Intel 8265 BT, USB) | ROT | L | r6; HCI + Firmware-Blob |
-| Audio HDA | GELB | M | hda.fi Ausgabe+Mikro gated; Codec des HP unbekannt (Pin-Konfig/Verbs), Jack-Erkennung r624 |
+| Audio HDA | GELB | M | hda.fi Ausgabe+Mikro gated; Codec des HP unbekannt (Pin-Konfig/Verbs), Jack-Erkennung r624. HDA-Controller ohne Codec (`-device intel-hda`): Boot ohne Fault-Zeile (ovmfboot) |
 | Kamera (UVC) | ROT | M–L | isochron fehlt in xHCI (r7) |
 | Fingerprint/NFC | ROT | L | nicht vor PIN-Login |
 | Akku/ACPI (Batterie, Deckel, Helligkeitstasten) | GELB | M | AML da (Dell hat Netzteil, kein Akku); _BIF/_BST und Lid-Event am Laptop ungemessen |
 | Standby | GELB | M | S3 in QEMU grün (s3, s3dev); Kaby Lake-U mit „Windows“-S0ix-Default? ungemessen, BIOS-Option Legacy S3 prüfen |
 | Thunderbolt/USB-C | ROT | L | nur als USB (xHCI); TB-Controller wird nur gelistet |
 | TPM/Sure Start | — | — | nicht relevant bis Messkette existiert |
+
+Hardware-Check (`sysinfo --hwcheck`) hat jetzt eine Zeile `storage` (ok / missing / BIOS-Hinweis bei Intel RST), host-gated in tools/hwcheck (43 Checks, 4 Mutationen).
 
 Prioritäten: **(1) Boot+Inventur, (2) Storage ehrlich melden, (3) Tastatur/Touchpad, (4) Display, (5) Netz per Dongle, (6) WLAN 8265.**
 

@@ -1549,6 +1549,7 @@ cat > "$OUT/limine.conf" <<'EOF'
 timeout: 5
 default_entry: 1
 verbose: yes
+interface_branding: @MARKE_PRODUKT@ - Secure Boot must be OFF
 
 /@MARKE_PRODUKT@
     protocol: multiboot1

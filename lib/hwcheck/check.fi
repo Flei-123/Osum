@@ -15,20 +15,23 @@
 // drivers only for the AR9271; AX201 is probe-only). The report says so in its last lines. Nothing in
 // this lib or its callers sends anything anywhere: the report is a text, "export" writes a local file.
 
-export { reset, feed_pci, feed_usb, feed_fw, item_state, item_detail, report, report_ptr,
-    DISPLAY, KEYBOARD, AUDIO, WLAN, MISSING, OK, UNKNOWN }
+export { reset, feed_pci, feed_usb, feed_fw, item_state, item_detail, report, report_ptr, rst_hint,
+    DISPLAY, KEYBOARD, AUDIO, WLAN, STORAGE, MISSING, OK, UNKNOWN }
 
 const DISPLAY: u64 = 0
 const KEYBOARD: u64 = 1
 const AUDIO: u64 = 2
 const WLAN: u64 = 3
+const STORAGE: u64 = 4
 const MISSING: u64 = 0
 const OK: u64 = 1
 const UNKNOWN: u64 = 2
 const DET: u64 = 40
 
-static mut st: [u8; 4] = [0 as u8; 4]
-static mut det: [u8; 160] = [0 as u8; 160]
+static mut st: [u8; 8] = [0 as u8; 8]
+static mut det: [u8; 320] = [0 as u8; 320]
+static mut seen_raid: u64 = 0
+static mut seen_nvme: u64 = 0
 static mut out: [u8; 1024] = [0 as u8; 1024]
 static mut out_n: u64 = 0
 
@@ -52,7 +55,9 @@ fn set_detail(item: u64, src: u64, n: u64) {
 
 fn reset() {
     var i: u64 = 0
-    while i < 4 {
+    seen_raid = 0
+    seen_nvme = 0
+    while i < 5 {
         st[i as usize] = MISSING as u8
         det[(i * DET) as usize] = 0 as u8
         i = i + 1
@@ -109,6 +114,16 @@ fn pci_line(l: u64, n: u64) {
     if (same4(l, 48, 52, 48, 51) || same4(l, 48, 52, 48, 49)) && item_state(AUDIO) != OK {
         set_state(AUDIO, OK)
         set_detail(AUDIO, l + 8, 14)
+    }
+    if same4(l, 48, 49, 48, 52) && ld(l, 13) == 56 && ld(l, 14) == 48 && ld(l, 15) == 56 && ld(l, 16) == 54 {
+        seen_raid = 1
+    }
+    if same4(l, 48, 49, 48, 56) {
+        seen_nvme = 1
+    }
+    if (same4(l, 48, 49, 48, 56) || same4(l, 48, 49, 48, 54) || same4(l, 48, 49, 48, 49)) && item_state(STORAGE) != OK {
+        set_state(STORAGE, OK)
+        set_detail(STORAGE, l + 8, 14)
     }
     if same4(l, 48, 50, 56, 48) && item_state(WLAN) != OK {
         set_state(WLAN, OK)
@@ -221,10 +236,21 @@ fn report() -> u64 {
     line_for((&n_k[0]) as u64, KEYBOARD)
     line_for((&n_a[0]) as u64, AUDIO)
     line_for((&n_w[0]) as u64, WLAN)
+    if seen_raid == 1 && seen_nvme == 0 {
+        var s_rst: [u8; 92] = "storage: check BIOS: set SATA mode to AHCI (Intel RST/RAID mode, NVMe disks can be hidden)\n\0"
+        put_s((&s_rst[0]) as u64)
+    } else {
+        var n_s: [u8; 8] = "storage\0"
+        line_for((&n_s[0]) as u64, STORAGE)
+    }
     put_s((&f1[0]) as u64)
     put_s((&f2[0]) as u64)
     out[out_n as usize] = 0 as u8
     return out_n
+}
+
+fn rst_hint() -> bool {
+    return seen_raid == 1 && seen_nvme == 0
 }
 
 fn report_ptr() -> u64 {
