@@ -72,3 +72,22 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 3. **Warten:** bis zu 1 Minute. OrientOS holt sich selbst eine Adresse (DHCP) und `jarvisd` meldet sich an der Bruecke an (nichts eintippen). DHCP versucht es nach Fehlschlag mit 5/10/20/40/60 s Abstand erneut.
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
+
+## Zwischen-Stick HP (23.10.2026, main 30d66381)
+
+- **Datei:** `orientos-usb-hp-<datum>-<commit>.img` (Pfad + SHA256 im Bericht `reports/*_w-stick2-*.md`). SHA256 vorher pruefen: `654d7e03d1e3cab95cf8db738ebda243558a8d793bd043ddc956eaa598f9f57c` (Datei `orientos-usb-hp-20261023-30d66381.img`, 146 MiB, GPT, UEFI+BIOS)
+- **Neu im Stick:** Rechtsklick-Menue schliesst per Wegklick, USB-Tethering + Bridge-Auto-Login, Helligkeitskette (`/proc/backlight`), Overlay/fbperf/Resize-Fix, WLAN-8265-Treiber (Sim, Firmware `iwlwifi-8265-36.ucode` gebuendelt), Touch-Pfad (Touchscreen/Stift).
+
+## Was der Boss fotografieren soll
+
+1. **Overlay:** `Strg+Shift+F` -- Foto vom ganzen Schirm (Zeile `fb_write_mbs`, FPS, CPU, RAM).
+2. **Terminal** (Win-Taste, "terminal"): je ein Foto der Ausgabe von
+   - `cat /proc/backlight`
+   - `cat /proc/frames`
+   - `cat /proc/cpuinfo` (`/proc/cpus` kommt erst mit dem SMP-Fix)
+   - `cat /var/jarvis/hwinv.txt`
+3. **USB-Tethering:** Handy per Kabel an den HP, am Handy "USB-Tethering" einschalten. Foto vom Terminal nach `ip` bzw. der Zeile `net: up ip=` und ob `jarvisd` sich meldet.
+4. **Rechtsklick:** Touchpad-Rechtsklick, Menue wegklicken, nochmal Rechtsklick -- muss wieder aufgehen. Kurz melden ja/nein.
+5. **Touchscreen:** antippen, ziehen, zwei Finger scrollen, lange tippen (= Rechtsklick). Melden was geht, Foto von `cat /proc/inputdevs` falls vorhanden.
+6. **WLAN:** `wlan verbinden <SSID> <Passwort>` -- Foto der Ausgabe. Der WLAN-Treiber ist noch Sim, **echtes Verbinden ist nicht zugesagt**.
+7. **Absturz/Panik:** Schirm fotografieren, danach `/var/jarvis/*` wie oben (Punkt 7-8).
