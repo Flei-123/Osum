@@ -73,7 +73,14 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
-## Zwischen-Stick HP (23.10.2026, main 30d66381)
+## Stick 3 HP (23.10.2026, main 4977617c + Bundle-Fix 03a803f0)
+
+- **Datei:** `orientos-usb-hp-20261023-03a803f0.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `b6d20b625c057e6a323428556862da6319c9012a8c2c68ceb922d1100664aca9`. Ersetzt den Stick 30d66381 (SHA 654d7e03...).
+- **Neu gegenueber Stick 2:** Mehrkern-Fix (SMP2 + Kick-IPI, `/proc/cpus`, Bootzeile `smp: N of M online`), Fallback-Icons (Buchstaben-Kachel in Leiste/Startmenue/Alt+Tab/Task-Manager), Fenster-Snap per Titelleisten-Ziehen, Tray-Chevron-Flyout (Raster/Hover/Rechtsklick), Taskleisten-Hover, Windows-11-Leiste.
+- **Noch NICHT im Stick:** Touchscreen auf Geraeten mit mehreren I2C-Reglern (i2chid Mehr-Regler, TOUCH3) und die Touchpad-Gesten-Settings (TPSET3) -- beide noch in Arbeit, nicht in main.
+- **Weiterhin:** WLAN 8265 ist Sim (echtes Verbinden nicht zugesagt), Fn-Helligkeitstasten am HP unbekannt.
+
+## Zwischen-Stick HP (23.10.2026, main 30d66381) -- abgeloest durch Stick 3
 
 - **Datei:** `orientos-usb-hp-<datum>-<commit>.img` (Pfad + SHA256 im Bericht `reports/*_w-stick2-*.md`). SHA256 vorher pruefen: `654d7e03d1e3cab95cf8db738ebda243558a8d793bd043ddc956eaa598f9f57c` (Datei `orientos-usb-hp-20261023-30d66381.img`, 146 MiB, GPT, UEFI+BIOS)
 - **Neu im Stick:** Rechtsklick-Menue schliesst per Wegklick, USB-Tethering + Bridge-Auto-Login, Helligkeitskette (`/proc/backlight`), Overlay/fbperf/Resize-Fix, WLAN-8265-Treiber (Sim, Firmware `iwlwifi-8265-36.ucode` gebuendelt), Touch-Pfad (Touchscreen/Stift).
@@ -84,10 +91,15 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 2. **Terminal** (Win-Taste, "terminal"): je ein Foto der Ausgabe von
    - `cat /proc/backlight`
    - `cat /proc/frames`
-   - `cat /proc/cpuinfo` (`/proc/cpus` kommt erst mit dem SMP-Fix)
+   - `cat /proc/cpuinfo`
+   - `cat /proc/cpus` (Mehrkern: `cpus_online`/`cpus_madt`, je Kern `why`/`esr` falls einer nicht hochkommt) und die Bootzeile `smp: N of M online`
    - `cat /var/jarvis/hwinv.txt`
 3. **USB-Tethering:** Handy per Kabel an den HP, am Handy "USB-Tethering" einschalten. Foto vom Terminal nach `ip` bzw. der Zeile `net: up ip=` und ob `jarvisd` sich meldet.
 4. **Rechtsklick:** Touchpad-Rechtsklick, Menue wegklicken, nochmal Rechtsklick -- muss wieder aufgehen. Kurz melden ja/nein.
 5. **Touchscreen:** antippen, ziehen, zwei Finger scrollen, lange tippen (= Rechtsklick). Melden was geht, Foto von `cat /proc/inputdevs` falls vorhanden.
 6. **WLAN:** `wlan verbinden <SSID> <Passwort>` -- Foto der Ausgabe. Der WLAN-Treiber ist noch Sim, **echtes Verbinden ist nicht zugesagt**.
 7. **Absturz/Panik:** Schirm fotografieren, danach `/var/jarvis/*` wie oben (Punkt 7-8).
+8. **Fenster-Snap:** ein Fenster an der Titelleiste an den linken/rechten/oberen Rand ziehen -- Vorschau + Einrasten? Foto.
+9. **Tray:** den Chevron (^) rechts in der Taskleiste anklicken -- Flyout mit Symbol-Raster; Hover und Rechtsklick darin. Foto.
+10. **Taskleisten-Hover:** Maus ueber Programmsymbole in der Leiste -- Hover-Hervorhebung/Vorschau da? Kurz melden.
+11. **Fallback-Icons:** Programme ohne eigenes Symbol (Leiste, Startmenue, Alt+Tab, Task-Manager) -- Buchstaben-Kachel statt leer? Foto.
