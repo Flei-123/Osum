@@ -10,12 +10,12 @@ Detail: `docs/GPU-PLAN.md` (options, risks), `docs/GFX-STACK.md` (measurements, 
 
 ## Gaps
 - Rasteriser: no clipping, mip, MSAA, stencil, tile binning (r683). Done 23.10.: scissor, source-over blending (submission order, thread independent), 8-bit bilinear (`lib/gpu/swr/pixel.fi`, `tools/gfx` 21/0).
-- Lowering: loops, UBO/push constants, derivatives (2x2 quads) missing (r732, r733); transcendental ops slow (r738).
+- Lowering: discard + late-Z, 3 samplers, uniform blocks / push constants (constant indices, `OP_LDU`) and the vertex stage (`lower_stage`, `lib/gpu/swr/vertex.fi`) done 23.10. Missing: loops, dynamic uniform array index, integer ops, texelFetch, flat varyings > 2 locations, derivatives (r732, r733); transcendental ops slow (r738).
 - No Vulkan API layer (83 functions needed by the Daidalos RHI, GFX-STACK ch. 6), no WSI into `wl_shm` (r1375, r737).
 - No guest client has rendered through the ICD yet (r1412).
 
 ## Stages
-1. **A -- fUi on software Vulkan:** lowering for the fUi shaders (discard + late-Z, vertex stage, 3+ samplers), clipping (near plane done: lib/gpu/swr/clip.fi, tools/gfx test_clip) + blending + bilinear (r1374, r684, r683). Gate: fUi frame through SWR equals the native frame.
+1. **A -- fUi on software Vulkan:** lowering for the fUi shaders (discard + late-Z, vertex stage, 3+ samplers), clipping (near plane done: lib/gpu/swr/clip.fi, tools/gfx test_clip) + blending + bilinear (r1374, r684, r683). Gate: fUi frame through SWR equals the native frame. Done for a fUi-style rect shader pair (`tools/gfx/test_fui.fi`, 12/0, pixel exact vs a native Firn model); the real `gpu_fs.glsl` (7 flat vec4 inputs, integer shifts, texelFetch, loop, uniform vec4[8] with dynamic index) is still out of reach.
 2. **B -- API layer + WSI:** Instance/Device/Pipeline/Swapchain as `libvulkan.so.1`, offscreen read-back into `wl_shm` (r737, r1375). Gate: `vulkaninfo`-like client lists the device in the guest.
 3. **C -- milestone:** a vkcube-like client renders in the guest, >= 30 fps at 640x480 on 4 cores (r1412).
 4. **D -- speed:** Firn SIMD or x86-64 JIT for the VM after measuring the real `mesh.frag`, tile binning, f32 transcendentals (r738, r675). Then compute + storage buffers for wgpu (T2).

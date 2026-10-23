@@ -26,7 +26,7 @@ import gpu.swr.clip
 
 export {
     Frame, frame_new, frame_free, frame_clear, frame_setup, frame_draw, frame_hash, frame_pixel,
-    frame_stat_pixels, frame_set_scissor, frame_set_blend, frame_set_bilinear, frame_set_program, frame_set_texture, frame_set_texture_slot, frame_set_kills, vtx_put,
+    frame_stat_pixels, frame_set_scissor, frame_set_blend, frame_set_bilinear, frame_set_program, frame_set_texture, frame_set_texture_slot, frame_set_kills, frame_set_ubo, vtx_put, vm_run, rg, WORK, NREG,
     MODE_NATIVE0, MODE_VM, MODE_NATIVE1, MODE_COUNT, LANES, VSTRIDE, BAND,
     ld_f32, st_f32,
 }
@@ -38,7 +38,7 @@ const MODE_NATIVE0: i32 = 0
 const MODE_VM: i32 = 1
 const MODE_NATIVE1: i32 = 2
 const MODE_COUNT: i32 = 3
-const NREG: usize = 64 // 32 before the SPIR-V lowering (lib/spirv/lower.fi needs room)
+const NREG: usize = 128 // 32 before the SPIR-V lowering, 64 before the fUi shaders (lib/spirv/lower.fi NREGS)
 const REC: usize = 48 // words per triangle record
 const SUB: usize = 3 // records per submitted triangle: near plane clipping turns one triangle into up to three
 const KF_OFF: usize = NREG * LANES * 4 + LANES * 4 + 256 // per lane discard flags (u32)
@@ -72,6 +72,7 @@ struct Frame {
     sy0: i32,
     sx1: i32,
     sy1: i32,
+    ubo: u64, // f32 [n] constant buffer read by OP_LDU (uniform blocks / push constants)
 }
 
 fn ld_f32(p: u64, i: usize) -> f32 {
@@ -117,6 +118,7 @@ fn frame_new(w: i32, h: i32, max_tri: i32) -> *mut Frame {
     (*f).sy0 = 0
     (*f).sx1 = w
     (*f).sy1 = h
+    (*f).ubo = 0 as u64
     (*f).xtex = rt.heap_alloc((NSLOT - 1) * 24)
     rt.mem_set((*f).xtex, 0 as u8, (NSLOT - 1) * 24)
     return f
@@ -137,6 +139,10 @@ fn frame_set_texture(f: *mut Frame, tex: u64, tw: i32, th: i32) {
 
 fn frame_set_program(f: *mut Frame, prog: u64) {
     (*f).prog = prog
+}
+
+fn frame_set_ubo(f: *mut Frame, ubo: u64) {
+    (*f).ubo = ubo
 }
 
 fn frame_set_kills(f: *mut Frame, on: bool) {
@@ -557,6 +563,13 @@ fn op_ldc(pd: u64, bits: u32, n: usize) {
     while l < n { st_f32(pd, l, imm); l = l + 1 }
 }
 #[no_inline]
+fn op_ldu(f: *mut Frame, pd: u64, idx: u32, n: usize) {
+    var v: f32 = 0.0f
+    if (*f).ubo != 0 as u64 { v = ld_f32((*f).ubo, idx as usize) }
+    var l: usize = 0
+    while l < n { st_f32(pd, l, v); l = l + 1 }
+}
+#[no_inline]
 fn op_rcp(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, 1.0f / ld_f32(pa, l)); l = l + 1 } }
 #[no_inline]
 fn op_sqrt(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.sqrt32(ld_f32(pa, l))); l = l + 1 } }
@@ -651,21 +664,27 @@ fn out_pack(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
 // instruction = 5 u32 (op, d, a, b, c); every op runs over n lanes (dispatch cost / n)
 // 26 KILL(a = lane predicate; killed lanes write no colour, and no depth when Frame.kills)  SAMPLE slot = operand c
 // ops: 0 END 1 MOV 2 ADD 3 SUB 4 MUL 5 MAD 6 MIN 7 MAX 8 SAT 9 LDC(d, bits in a) 10 RCP 11 SQRT 12 SAMPLE(d..d+3 = tex(a, b))
-// 13 DIV 14 ABS 15 FLOOR 16 RSQ 17 CLT 18 CLE 19 CEQ (1.0/0.0) 20 SEL(d = c!=0 ? a : b) 21 NEG 22 EXP2 23 LOG2 24 SIN 25 COS
+// 27 LDU(d = ubo[a] in every lane)  13 DIV 14 ABS 15 FLOOR 16 RSQ 17 CLT 18 CLE 19 CEQ (1.0/0.0) 20 SEL(d = c!=0 ? a : b) 21 NEG 22 EXP2 23 LOG2 24 SIN 25 COS
 // inputs: r0 u, r1 v, r2..r5 colour, r6 x+0.5, r7 y+0.5
 // output registers r8..r11
 #[no_inline]
 fn shade_vm(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
+    fill_frag(base, xs, y, n)
+    vm_run(f, (*f).prog, base, n)
+    out_pack(f, base, xs, y, n)
+}
+
+#[no_inline]
+fn vm_run(f: *mut Frame, prog: u64, base: u64, n: usize) {
     var pc: usize = 0
     var run: bool = true
     let st: u64 = LANES as u64 * (4 as u64)
-    fill_frag(base, xs, y, n)
     while run {
-        let op: u32 = rt.ld32((*f).prog, pc * 5)
-        let d: u32 = rt.ld32((*f).prog, pc * 5 + 1)
-        let a: u32 = rt.ld32((*f).prog, pc * 5 + 2)
-        let b: u32 = rt.ld32((*f).prog, pc * 5 + 3)
-        let c: u32 = rt.ld32((*f).prog, pc * 5 + 4)
+        let op: u32 = rt.ld32(prog, pc * 5)
+        let d: u32 = rt.ld32(prog, pc * 5 + 1)
+        let a: u32 = rt.ld32(prog, pc * 5 + 2)
+        let b: u32 = rt.ld32(prog, pc * 5 + 3)
+        let c: u32 = rt.ld32(prog, pc * 5 + 4)
         pc = pc + 1
         let pd: u64 = base + (d as u64) * st
         let pa: u64 = base + (a as u64) * st
@@ -697,9 +716,9 @@ fn shade_vm(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
         else if op == 24 as u32 { op_sin(pd, pa, n) }
         else if op == 25 as u32 { op_cos(pd, pa, n) }
         else if op == 26 as u32 { op_kill(base + (KF_OFF as u64), pa, n) }
+        else if op == 27 as u32 { op_ldu(f, pd, a, n) }
         else { run = false }
     }
-    out_pack(f, base, xs, y, n)
 }
 
 // ---------------------------------------------------------------- raster

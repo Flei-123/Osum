@@ -1,0 +1,314 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/gfx/test_fui.fi -- fUi-style frame through the SWR: SPIR-V vertex shader (uniform block, Position) + SPIR-V fragment shader
+// (discard, late-Z, clip/coverage maths, gradient) lowered to the VM, blended source-over, compared with a native Firn model of the same
+// shader maths. Counter-proofs: discard off, shifted constant block, wrong vertex stage -- all must differ from the model.
+// args: fui_rect.vert.spv fui_rect.frag.spv (run.sh compiles them with glslangValidator)
+import std.rt
+import std.io
+import std.math
+import jobs.jobs
+import gpu.swr.raster
+import gpu.swr.vertex
+import gpu.swr.pixel
+import spirv.parse
+import spirv.validate
+import spirv.lower
+import spirv.spv
+
+static mut passed: i32 = 0
+static mut failed: i32 = 0
+
+const W: i32 = 256
+const H: i32 = 160
+const NQ: usize = 7
+const QF: usize = 20
+const UF: usize = 20
+
+fn check(name: str, ok: bool) {
+    if ok { passed = passed + 1; io.fmt_print(f"OK    {name}\n") }
+    else { failed = failed + 1; io.fmt_print(f"FAIL  {name}\n") }
+}
+
+fn __thread_work(kind: u64, arg: u64) -> u64 {
+    if kind == jobs.WORKER_KIND { return jobs.worker_main(arg) }
+    return 0 as u64
+}
+
+fn lower_file(path: u64, stage: u32, prog: u64, info: *mut lower.LowerInfo) -> u32 {
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file(path, &b) { return 999 }
+    var m: parse.Module = parse.module_zero()
+    var e: u32 = parse.module_open(&m, rt.buf_ptr(&b), rt.buf_len(&b) / 4)
+    if e == 0 { e = validate.validate(&m) }
+    if e == 0 { e = lower.lower_stage(&m, stage, prog, 4000, info) }
+    else { (*info).err_pos = m.err_pos }
+    parse.module_close(&m)
+    return e
+}
+
+fn q_put(q: u64, n: usize, bx0: f32, by0: f32, bx1: f32, by1: f32, cx0: f32, cy0: f32, cx1: f32, cy1: f32,
+    r: f32, g: f32, b: f32, a: f32, r1: f32, g1: f32, b1: f32, gy0: f32, gy1: f32, gon: f32) {
+    let o: usize = n * QF
+    raster.st_f32(q, o, bx0); raster.st_f32(q, o + 1, by0); raster.st_f32(q, o + 2, bx1); raster.st_f32(q, o + 3, by1)
+    raster.st_f32(q, o + 4, cx0); raster.st_f32(q, o + 5, cy0); raster.st_f32(q, o + 6, cx1); raster.st_f32(q, o + 7, cy1)
+    raster.st_f32(q, o + 8, r); raster.st_f32(q, o + 9, g); raster.st_f32(q, o + 10, b); raster.st_f32(q, o + 11, a)
+    raster.st_f32(q, o + 12, r1); raster.st_f32(q, o + 13, g1); raster.st_f32(q, o + 14, b1)
+    raster.st_f32(q, o + 15, gy0); raster.st_f32(q, o + 16, gy1); raster.st_f32(q, o + 17, gon)
+}
+
+fn scene_new() -> u64 {
+    let q: u64 = rt.heap_alloc(NQ * QF * 4)
+    let full: f32 = 4096.0f
+    q_put(q, 0, 0.0f, 0.0f, 256.0f, 160.0f, 0.0f, 0.0f, full, full, 30.0f, 34.0f, 48.0f, 255.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f)
+    q_put(q, 1, 20.0f, 12.0f, 236.0f, 100.0f, 0.0f, 0.0f, full, full, 80.0f, 120.0f, 200.0f, 255.0f, 20.0f, 40.0f, 90.0f, 12.0f, 100.0f, 1.0f)
+    q_put(q, 2, 40.5f, 30.25f, 150.75f, 80.5f, 0.0f, 0.0f, full, full, 255.0f, 200.0f, 0.0f, 160.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f)
+    q_put(q, 3, 100.0f, 60.0f, 220.0f, 140.0f, 130.0f, 70.0f, 200.0f, 120.5f, 255.0f, 0.0f, 80.0f, 200.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f)
+    q_put(q, 4, 60.0f, 110.0f, 90.0f, 150.0f, 0.0f, 0.0f, full, full, 255.0f, 255.0f, 255.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f)
+    q_put(q, 5, 120.0f, 120.0f, 150.0f, 150.0f, 0.0f, 0.0f, 10.0f, 10.0f, 0.0f, 255.0f, 0.0f, 255.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f)
+    q_put(q, 6, 10.0f, 150.5f, 246.0f, 151.5f, 0.0f, 0.0f, full, full, 255.0f, 255.0f, 255.0f, 255.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f)
+    return q
+}
+
+fn ubo_fill(ubo: u64, q: u64, n: usize, shift: bool) {
+    var k: usize = 0
+    while k < 4 { raster.st_f32(ubo, k, raster.ld_f32(q, n * QF + 4 + k)); k = k + 1 }
+    k = 0
+    while k < 4 { raster.st_f32(ubo, 4 + k, raster.ld_f32(q, n * QF + k)); k = k + 1 }
+    k = 0
+    while k < 3 { raster.st_f32(ubo, 8 + k, raster.ld_f32(q, n * QF + 12 + k)); k = k + 1 }
+    raster.st_f32(ubo, 11, 255.0f)
+    raster.st_f32(ubo, 12, raster.ld_f32(q, n * QF + 15))
+    raster.st_f32(ubo, 13, raster.ld_f32(q, n * QF + 16))
+    raster.st_f32(ubo, 14, raster.ld_f32(q, n * QF + 17))
+    raster.st_f32(ubo, 15, 0.0f)
+    raster.st_f32(ubo, 16, W as f32)
+    raster.st_f32(ubo, 17, H as f32)
+    if shift { raster.st_f32(ubo, 0, raster.ld_f32(ubo, 0) + 1.0f) }
+}
+
+fn ceil_f(v: f32) -> f32 {
+    return 0.0f - (pixel.floor_i32(0.0f - v) as f32)
+}
+
+fn attrs_fill(at: u64, q: u64, n: usize) {
+    var x0: f32 = pixel.floor_i32(raster.ld_f32(q, n * QF)) as f32
+    var y0: f32 = pixel.floor_i32(raster.ld_f32(q, n * QF + 1)) as f32
+    var x1: f32 = ceil_f(raster.ld_f32(q, n * QF + 2))
+    var y1: f32 = ceil_f(raster.ld_f32(q, n * QF + 3))
+    if x0 < 0.0f { x0 = 0.0f }
+    if y0 < 0.0f { y0 = 0.0f }
+    if x1 > (W as f32) { x1 = W as f32 }
+    if y1 > (H as f32) { y1 = H as f32 }
+    var xs: [f32; 6] = [x0, x1, x1, x0, x1, x0]
+    var ys: [f32; 6] = [y0, y0, y1, y0, y1, y1]
+    var v: usize = 0
+    while v < 6 {
+        raster.st_f32(at, v * 8, xs[v])
+        raster.st_f32(at, v * 8 + 1, ys[v])
+        var c: usize = 0
+        while c < 4 { raster.st_f32(at, v * 8 + 4 + c, raster.ld_f32(q, n * QF + 8 + c)); c = c + 1 }
+        v = v + 1
+    }
+}
+
+fn ovl(a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
+    var lo: f32 = a1
+    if b1 < lo { lo = b1 }
+    var hi: f32 = a0
+    if b0 > hi { hi = b0 }
+    var d: f32 = lo - hi
+    if d < 0.0f { d = 0.0f }
+    return d
+}
+
+fn unit8(v: f32) -> u32 {
+    var x: f32 = v
+    if x < 0.0f { x = 0.0f }
+    if x > 1.0f { x = 1.0f }
+    return (x * 255.0f + 0.5f) as u32
+}
+
+// native model of fui_rect.frag + the vertex stage geometry; returns 0 when the fragment is discarded
+fn model_px(q: u64, n: usize, x: i32, y: i32) -> u32 {
+    let ix: f32 = x as f32
+    let iy: f32 = y as f32
+    let o: usize = n * QF
+    let clipf: f32 = ovl(ix, ix + 1.0f, raster.ld_f32(q, o + 4), raster.ld_f32(q, o + 6)) * ovl(iy, iy + 1.0f, raster.ld_f32(q, o + 5), raster.ld_f32(q, o + 7))
+    if clipf <= 0.0f { return 0 as u32 }
+    let f: f32 = ovl(ix, ix + 1.0f, raster.ld_f32(q, o), raster.ld_f32(q, o + 2)) * ovl(iy, iy + 1.0f, raster.ld_f32(q, o + 1), raster.ld_f32(q, o + 3))
+    if f <= 0.0f { return 0 as u32 }
+    var r: f32 = raster.ld_f32(q, o + 8)
+    var g: f32 = raster.ld_f32(q, o + 9)
+    var b: f32 = raster.ld_f32(q, o + 10)
+    var a: f32 = raster.ld_f32(q, o + 11)
+    if raster.ld_f32(q, o + 17) > 0.5f {
+        let g0: f32 = raster.ld_f32(q, o + 15)
+        var den: f32 = raster.ld_f32(q, o + 16) - g0
+        if den < 0.0001f { den = 0.0001f }
+        var tt: f32 = (iy - g0) / den
+        if tt < 0.0f { tt = 0.0f }
+        if tt > 1.0f { tt = 1.0f }
+        r = (pixel.floor_i32(r + (raster.ld_f32(q, o + 12) - r) * tt + 0.5f)) as f32
+        g = (pixel.floor_i32(g + (raster.ld_f32(q, o + 13) - g) * tt + 0.5f)) as f32
+        b = (pixel.floor_i32(b + (raster.ld_f32(q, o + 14) - b) * tt + 0.5f)) as f32
+        a = 255.0f
+    }
+    var cov: f32 = f * clipf
+    if cov > 1.0f { cov = 1.0f }
+    let al: f32 = a / 255.0f * cov
+    if al <= 0.0f { return 0 as u32 }
+    return unit8(r / 255.0f) | (unit8(g / 255.0f) << 8 as u32) | (unit8(b / 255.0f) << 16 as u32) | (unit8(al) << 24 as u32)
+}
+
+fn model_frame(color: u64, q: u64) {
+    var i: usize = 0
+    while i < (W as usize) * (H as usize) { rt.st32(color, i, 0xFF000000 as u32); i = i + 1 }
+    var n: usize = 0
+    while n < NQ {
+        var y: i32 = 0
+        while y < H {
+            var x: i32 = 0
+            while x < W {
+                let px: u32 = model_px(q, n, x, y)
+                if px != 0 as u32 {
+                    let idx: usize = (y as usize) * (W as usize) + (x as usize)
+                    rt.st32(color, idx, pixel.blend_over(px, rt.ld32(color, idx)))
+                }
+                x = x + 1
+            }
+            y = y + 1
+        }
+        n = n + 1
+    }
+}
+
+// mode: 0 normal, 2 shifted constant block, 3 wrong vertex stage (no y flip); counter-proof 1 passes a mutated fragment program
+fn swr_frame(f: *mut raster.Frame, vsp: u64, fsp: u64, q: u64, jp: u64, mode: i32) {
+    raster.frame_clear(f, 0xFF000000 as u32, 1.0f)
+    raster.frame_set_kills(f, true)
+    raster.frame_set_program(f, fsp)
+    let ubo: u64 = rt.heap_alloc(UF * 4)
+    let at: u64 = rt.heap_alloc(6 * 8 * 4)
+    raster.frame_set_ubo(f, ubo)
+    var n: usize = 0
+    while n < NQ {
+        ubo_fill(ubo, q, n, mode == 2)
+        attrs_fill(at, q, n)
+        vertex.vs_run(f, vsp, at, 8, 6, 0)
+        if mode == 3 {
+            var v: usize = 0
+            while v < 6 {
+                raster.vtx_put(f, v, raster.ld_f32(at, v * 8) / (W as f32) * 2.0f - 1.0f, raster.ld_f32(at, v * 8 + 1) / (H as f32) * 2.0f - 1.0f, 0.0f, 1.0f,
+                    raster.ld_f32(at, v * 8), raster.ld_f32(at, v * 8 + 1), raster.ld_f32(at, v * 8 + 4), raster.ld_f32(at, v * 8 + 5), raster.ld_f32(at, v * 8 + 6), raster.ld_f32(at, v * 8 + 7))
+                v = v + 1
+            }
+        }
+        (*f).ntri = 2
+        raster.frame_draw(f, jp)
+        n = n + 1
+    }
+    rt.heap_free(ubo, UF * 4)
+    rt.heap_free(at, 6 * 8 * 4)
+}
+
+fn diff_count(a: u64, b: u64, maxd: *mut i32) -> i32 {
+    var cnt: i32 = 0
+    var md: i32 = 0
+    var i: usize = 0
+    while i < (W as usize) * (H as usize) {
+        let pa: u32 = rt.ld32(a, i)
+        let pb: u32 = rt.ld32(b, i)
+        if pa != pb {
+            cnt = cnt + 1
+            var s: u32 = 0 as u32
+            while s < 32 as u32 {
+                var d: i32 = (((pa >> s) & 255 as u32) as i32) - (((pb >> s) & 255 as u32) as i32)
+                if d < 0 { d = 0 - d }
+                if d > md { md = d }
+                s = s + 8 as u32
+            }
+        }
+        i = i + 1
+    }
+    *maxd = md
+    return cnt
+}
+
+fn copy_color(f: *mut raster.Frame) -> u64 {
+    let c: u64 = rt.heap_alloc((W as usize) * (H as usize) * 4)
+    rt.mem_copy(c, (*f).color, (W as usize) * (H as usize) * 4)
+    return c
+}
+
+fn main(start: u64) -> i32 {
+    if rt.arg_count(start) < 3 {
+        io.fmt_print(f"SKIP  fui_rect spv files missing (glslangValidator not installed)\n")
+        return 0
+    }
+    let vsp: u64 = rt.heap_alloc(4000 * 20 + 64)
+    let fsp: u64 = rt.heap_alloc(4000 * 20 + 64)
+    var vi: lower.LowerInfo = lower.info_zero()
+    var fi: lower.LowerInfo = lower.info_zero()
+    let ev: u32 = lower_file(rt.arg_ptr(start, 1), spv.EM_VERTEX, vsp, &vi)
+    let ef: u32 = lower_file(rt.arg_ptr(start, 2), spv.EM_FRAGMENT, fsp, &fi)
+    check("fUi vertex shader (uniform block, gl_Position, 2 varyings) lowers", ev == 0)
+    check("fUi fragment shader (uniform block, discard, clip/coverage maths, gradient) lowers", ef == 0)
+    if ev != 0 { io.fmt_print(f"      vertex: {lower.lower_err_name(ev)} at word {vi.err_pos}\n") }
+    if ef != 0 { io.fmt_print(f"      fragment: {lower.lower_err_name(ef)} at word {fi.err_pos}\n") }
+    if ev != 0 || ef != 0 {
+        io.fmt_print(f"gfx fui: {passed} ok, {failed} fail\n")
+        return 1
+    }
+    io.fmt_print(f"      vertex {vi.ninstr} instr, {vi.peak_reg} regs, {vi.nubo} constant floats; fragment {fi.ninstr} instr, {fi.peak_reg} regs, {fi.nkill} kill, {fi.nubo} constant floats\n")
+    check("fragment shader has discards and reads the whole constant block", fi.nkill >= 3 && fi.nubo == 15 && vi.nubo == 18)
+
+    let f: *mut raster.Frame = raster.frame_new(W, H, 8)
+    (*f).mode = raster.MODE_VM
+    raster.frame_set_program(f, fsp)
+    (*f).depth_test = false
+    raster.frame_set_blend(f, true)
+    let q: u64 = scene_new()
+    let ref: u64 = rt.heap_alloc((W as usize) * (H as usize) * 4)
+    model_frame(ref, q)
+
+    swr_frame(f, vsp, fsp, q, 0 as u64, 0)
+    let good: u64 = copy_color(f)
+
+    var md: i32 = 0
+    let nd: i32 = diff_count(good, ref, &md)
+    io.fmt_print(f"      SWR vs native model: {nd} pixels differ of {W * H}, max channel diff {md}\n")
+    check("fUi frame via SWR == native model (pixel exact)", nd == 0)
+    let bg: u32 = rt.ld32(good, 5 * (W as usize) + 5)
+    check("background rect: opaque (30, 34, 48)", (bg & 255 as u32) == 30 as u32 && ((bg >> 8 as u32) & 255 as u32) == 34 as u32 && (bg >> 24 as u32) == 255 as u32)
+    check("gradient panel: top row differs from bottom row", rt.ld32(good, 14 * (W as usize) + 100) != rt.ld32(good, 98 * (W as usize) + 100))
+    check("fully transparent quad and quad outside its clip leave the background", rt.ld32(good, 130 * (W as usize) + 70) == rt.ld32(ref, 130 * (W as usize) + 70) && (rt.ld32(good, 130 * (W as usize) + 70) & 255 as u32) == 30 as u32 && (rt.ld32(good, 130 * (W as usize) + 135) & 255 as u32) != 0 as u32)
+    check("half covered line (y 150.5 .. 151.5) blends half of white into rows 150 and 151", (rt.ld32(good, 150 * (W as usize) + 100) & 255 as u32) > 100 as u32 && (rt.ld32(good, 150 * (W as usize) + 100) & 255 as u32) < 160 as u32)
+
+    var j: jobs.Jobs = jobs.create(3)
+    swr_frame(f, vsp, fsp, q, (&j) as u64, 0)
+    var md2: i32 = 0
+    check("4 threads == 1 thread", diff_count(good, (*f).color, &md2) == 0)
+    jobs.destroy(&j)
+
+    let msp: u64 = rt.heap_alloc(4000 * 20 + 64)
+    rt.mem_copy(msp, fsp, 4000 * 20 + 64)
+    var pc: usize = 0
+    var cut: bool = false
+    while rt.ld32(msp, pc * 5) != 0 as u32 && !cut {
+        if rt.ld32(msp, pc * 5) == 15 as u32 { rt.st32(msp, pc * 5, 1 as u32); cut = true }
+        pc = pc + 1
+    }
+    swr_frame(f, vsp, msp, q, 0 as u64, 1)
+    var m1: i32 = 0
+    check("counter-proof: fragment program with the pixel floor removed differs from the model", cut && diff_count((*f).color, ref, &m1) > 100)
+    swr_frame(f, vsp, fsp, q, 0 as u64, 2)
+    var m2: i32 = 0
+    check("counter-proof: constant block shifted by one pixel differs from the model", diff_count((*f).color, ref, &m2) > 100)
+    swr_frame(f, vsp, fsp, q, 0 as u64, 3)
+    var m3: i32 = 0
+    check("counter-proof: wrong vertex stage (no y flip) differs from the model", diff_count((*f).color, ref, &m3) > 100)
+
+    io.fmt_print(f"gfx fui: {passed} ok, {failed} fail\n")
+    if failed == 0 { return 0 }
+    return 1
+}
