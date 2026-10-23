@@ -8155,13 +8155,19 @@ fn lazy_undo(state: u64, me: u64, base: u64, upto: u64) {
     }
 }
 
-fn lazy_run(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> bool {
+fn lazy_run_f(state: u64, me: u64, base: u64, pages: u64, prot: u64, fk: u64, fpg: u64) -> bool {
     let rd: bool = (prot & PROT_READ) != 0
     let wr: bool = (prot & PROT_WRITE) != 0
     let ex: bool = (prot & PROT_EXEC) != 0
     var k: u64 = 0
     while k < pages {
-        if !proc.lazy_mark(state, me, base + k * PAGE, rd, wr, ex) {
+        var ok: bool = false
+        if fk != 0 {
+            ok = proc.lazy_mark_file(state, me, base + k * PAGE, rd, wr, ex, fk - 1, fpg + k)
+        } else {
+            ok = proc.lazy_mark(state, me, base + k * PAGE, rd, wr, ex)
+        }
+        if !ok {
             lazy_undo(state, me, base, k)
             return false
         }
@@ -8170,11 +8176,19 @@ fn lazy_run(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> bool {
     return true
 }
 
+fn lazy_run(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> bool {
+    return lazy_run_f(state, me, base, pages, prot, 0, 0)
+}
+
 fn lazy_alloc(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
+    return lazy_alloc_f(state, me, pages, prot, 0, 0)
+}
+
+fn lazy_alloc_f(state: u64, me: u64, pages: u64, prot: u64, fk: u64, fpg: u64) -> u64 {
     let top: u64 = lazy_bottom(state, me)
     if pages * PAGE <= top - proc.LAZY_BASE {
         let base: u64 = top - pages * PAGE
-        if lazy_run(state, me, base, pages, prot) {
+        if lazy_run_f(state, me, base, pages, prot, fk, fpg) {
             sched.tset(state, mem_owner(state, me), sched.T_LAZY, base)
             return base
         }
@@ -8183,7 +8197,7 @@ fn lazy_alloc(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
     if h == 0 {
         return neg(errno.E_NOMEM)
     }
-    if !lazy_run(state, me, h, pages, prot) {
+    if !lazy_run_f(state, me, h, pages, prot, fk, fpg) {
         return neg(errno.E_NOMEM)
     }
     return h
@@ -8333,6 +8347,10 @@ fn set_range_prot(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> u64 
 // `mmap` hands out of and only ABOVE their bump marks -- the pages below a mark are the allocator's to give, a fixed mapping there
 // would meet the next ordinary `mmap`.
 fn map_fixed(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
+    return map_fixed_f(state, me, addr, pages, prot, 0, 0)
+}
+
+fn map_fixed_f(state: u64, me: u64, addr: u64, pages: u64, prot: u64, fk: u64, fpg: u64) -> u64 {
     if (addr & (PAGE - 1)) != 0 {
         return neg(errno.E_INVAL)
     }
@@ -8355,7 +8373,13 @@ fn map_fixed(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
     while p < end {
         let _d: bool = proc.page_drop(state, me, p)
         if in_lazy {
-            if !proc.lazy_mark(state, me, p, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0) {
+            var marked: bool = false
+            if fk != 0 {
+                marked = proc.lazy_mark_file(state, me, p, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0, fk - 1, fpg + (p - addr) / PAGE)
+            } else {
+                marked = proc.lazy_mark(state, me, p, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
+            }
+            if !marked {
                 return neg(errno.E_NOMEM)
             }
         } else if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
@@ -8540,6 +8564,37 @@ fn map_file_shared(state: u64, me: u64, len: u64, flags: u64, fd: u64, off: u64,
     return r
 }
 
+const FLAZY_MIN_PAGES: u64 = 16
+
+// Demand-paged private file mapping: the pages are lazy entries that carry (inode, file page); the first touch reads the file page
+// into a frame of its own (proc.lazy_file_fault). 0 = not applicable (small, not a plain file, outside the lazy window): the eager path runs.
+fn map_file_lazy(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, of: u64, off: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOLAZY) || file.open_kind(state, of) != file.K_FILE {
+        return 0
+    }
+    let ino: u64 = file.open_ino(state, of)
+    let pages: u64 = page_up(len) / PAGE
+    let fpg: u64 = off / PAGE
+    if ino >= proc.LAZYF_MAX || pages < FLAZY_MIN_PAGES || fpg + pages >= proc.LAZYF_MAX {
+        return 0
+    }
+    if (flags & MAP_FIXED) != 0 {
+        if (addr & (PAGE - 1)) != 0 || addr < proc.LAZY_BASE || addr + pages * PAGE > proc.LAZY_TOP {
+            return 0
+        }
+        let r: u64 = map_fixed_f(state, me, addr, pages, prot, ino + 1, fpg)
+        if r >= 0xFFFFFFFFFFFFF000 {
+            return 0
+        }
+        return r
+    }
+    let r: u64 = lazy_alloc_f(state, me, pages, prot, ino + 1, fpg)
+    if r >= 0xFFFFFFFFFFFFF000 {
+        return 0
+    }
+    return r
+}
+
 // RUNDE UNTERBAU: mmap of a regular file. There is no page cache and no demand paging in this kernel, so the pages are made now
 // (zeroed) and filled with a read of the file -- what is beyond the end of the file stays zero. MAP_PRIVATE is exact (a copy the process
 // may change). MAP_SHARED is a snapshot only: it is allowed read-only, and refused (-ENODEV, the old answer for "no file mapping") when
@@ -8554,6 +8609,10 @@ fn map_file(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, fd:
     let of: u64 = of_of(state, me, fd)
     if of >= file.MAX_OPEN || !readable(state, of) {
         return neg(errno.E_ACCES)
+    }
+    let lz: u64 = map_file_lazy(state, me, addr, len, prot, flags, of, off)
+    if lz != 0 {
+        return lz
     }
     var rw: u64 = PROT_READ | PROT_WRITE
     if (prot & PROT_EXEC) != 0 {

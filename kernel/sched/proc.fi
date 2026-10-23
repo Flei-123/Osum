@@ -47,6 +47,7 @@ import ipc.uio
 import arch.x86_64.user
 import fs.file
 import fs.unixsock
+import fs.fs
 import ipc.handle
 import ipc.cap
 import bus.bus
@@ -64,7 +65,7 @@ export {
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
     IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS, STACK_FLOOR, grow_stack, stack_zone_has,
-    PRIV_SLOTS, MAIN_SLOTS, LAZY_BASE, LAZY_TOP, LAZY_ATOP, range_drop, lazy_mark, lazy_fault, lazy_find, page_taken, BIG_TOP, BIG_FLOOR, SHM_ARENA_BASE, SHM_ARENA_TOP, demand_fault, pd_slot, pt_for, page_free,
+    PRIV_SLOTS, MAIN_SLOTS, LAZY_BASE, LAZY_TOP, LAZY_ATOP, LAZYF_MAX, range_drop, lazy_mark, lazy_mark_file, lazy_fault, lazy_find, page_taken, BIG_TOP, BIG_FLOOR, SHM_ARENA_BASE, SHM_ARENA_TOP, demand_fault, pd_slot, pt_for, page_free,
     // ---- RUNDE SCHLAF (K-018, zweite Haelfte) ----
     frame_count, frame_at,
     // ---- RUNDE WACH (K-018, Abschluss: der Wiederanlauf) ----
@@ -205,6 +206,9 @@ const LAZY_TOP: u64 = 0x1000000000
 const PRIV_SLOTS: u64 = 32256
 const PAGE_LAZY: u64 = 0x400
 const PAGE_LAZYX: u64 = 0x800
+const PAGE_LAZYF: u64 = 0x200
+const LAZYF_KEEP: u64 = 0x000FFFFFFFFFF200
+const LAZYF_MAX: u64 = 0x100000
 const SHM_ARENA_BASE: u64 = 0x53600000
 const SHM_ARENA_TOP: u64 = 0x7B600000
 const BIG_TOP: u64 = 0x52C00000
@@ -1117,6 +1121,31 @@ fn lazy_mark(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runn
     return true
 }
 
+fn lazy_is_file(state: u64, i: u64, addr: u64) -> bool {
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    let e: u64 = read_entry(pt, pt_slot(addr))
+    return (e & PAGE_PRESENT) == 0 && (e & PAGE_LAZYF) != 0
+}
+
+fn lazy_mark_file(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool, ino: u64, pg: u64) -> bool {
+    if addr < LAZY_BASE || addr >= LAZY_TOP || ino >= LAZYF_MAX || pg >= LAZYF_MAX {
+        return false
+    }
+    let s: u64 = pt_slot(addr)
+    let pt: u64 = pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if read_entry(pt, s) != 0 {
+        return false
+    }
+    write_entry(pt, s, lazy_bits(readable, writable, runnable) | PAGE_LAZYF | (ino << 12) | (pg << 32))
+    return true
+}
+
 // Drops every page of [start, end) that has an entry (a frame or a lazy marker); absent tables are skipped a tile or a GiB at a time.
 fn range_drop(state: u64, i: u64, start: u64, end: u64) {
     var a: u64 = start
@@ -1495,6 +1524,54 @@ fn translate(state: u64, i: u64, addr: u64) -> u64 {
 // WP-DEMAND: a page of the sparse-object arena that is not there yet: made (zeroed frame of the object) and mapped. Called from the
 // page-fault handler (`err` = the fault's error word) and from `user_ok` (a system call names such a page, err = 0). true = the page is
 // there now (the instruction/call may go on); false = a real fault.
+// A lazy page that is backed by a file page (private mapping): the file page is read into a spare frame BEFORE the demand lock is taken
+// (the read may wait for the disk), then the page is made under the lock and the content copied in. Beyond the end of the file it is zero.
+fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> bool {
+    let e0: u64 = read_entry(pt, s)
+    if (e0 & PAGE_USER) == 0 {
+        return false
+    }
+    if (err & 2) != 0 && (e0 & PAGE_WRITE) == 0 {
+        return false
+    }
+    if (err & 16) != 0 && (e0 & PAGE_LAZYX) == 0 {
+        return false
+    }
+    let tmp: u64 = mem.frame_alloc_user(state)
+    if tmp == 0 {
+        return false
+    }
+    zero_frame(tmp)
+    let ino: u64 = (e0 >> 12) & 0xFFFFF
+    let pg: u64 = (e0 >> 32) & 0xFFFFF
+    let _got: u64 = fs.read_at(state, ino, pg * mem.FRAME_SIZE, tmp, mem.FRAME_SIZE)
+    var ok: bool = false
+    unixsock.demand_lock(state)
+    let e: u64 = read_entry(pt, s)
+    if (e & PAGE_PRESENT) != 0 {
+        ok = true
+    } else if (e & PAGE_LAZYF) != 0 && (e & PAGE_USER) != 0 && ((e ^ e0) & 0x000FFFFFFFFFF000) == 0 {
+        write_entry(pt, s, 0)
+        let f: u64 = map_page(state, cur, page, (e & PAGE_WRITE) != 0, (e & PAGE_LAZYX) != 0)
+        if f != 0 {
+            var o: u64 = 0
+            while o < mem.FRAME_SIZE / 8 {
+                __mmio_write64((f + o * 8) as *mut u64, __mmio_read64((tmp + o * 8) as *mut u64))
+                o = o + 1
+            }
+            ok = true
+        } else {
+            write_entry(pt, s, e)
+        }
+    }
+    unixsock.demand_unlock(state)
+    mem.frame_free(state, tmp)
+    if ok {
+        tlb_flush_if_current(state, cur)
+    }
+    return ok
+}
+
 fn lazy_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
     if addr < LAZY_BASE || addr >= LAZY_TOP || (err & 1) != 0 {
         return false
@@ -1504,6 +1581,10 @@ fn lazy_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
     let pt: u64 = pt_for(state, cur, page, false)
     if pt == 0 {
         return false
+    }
+    let e1: u64 = read_entry(pt, s)
+    if (e1 & PAGE_PRESENT) == 0 && (e1 & PAGE_LAZYF) != 0 {
+        return lazy_file_fault(state, cur, page, err, pt, s)
     }
     var ok: bool = false
     unixsock.demand_lock(state)
@@ -1960,7 +2041,7 @@ fn page_protect(state: u64, i: u64, addr: u64, readable: bool, writable: bool, r
     let e: u64 = read_entry(pt, s)
     if (e & PAGE_PRESENT) == 0 {
         if (e & PAGE_LAZY) != 0 {
-            write_entry(pt, s, lazy_bits(readable, writable, runnable))
+            write_entry(pt, s, lazy_bits(readable, writable, runnable) | (e & LAZYF_KEEP))
             return 0
         }
         return 1
@@ -2052,8 +2133,13 @@ fn page_zero(state: u64, i: u64, addr: u64) -> bool {
 
 // One page of the same process copied to another address of it (mremap that has to move). false when either page is not mapped.
 fn page_copy(state: u64, i: u64, from: u64, to: u64) -> bool {
-    let a: u64 = translate(state, i, from)
+    var a: u64 = translate(state, i, from)
     var b: u64 = translate(state, i, to)
+    if a == 0 && from >= LAZY_BASE && from < LAZY_TOP && lazy_is_file(state, i, from) {
+        if lazy_fault(state, i, from, 0) {
+            a = translate(state, i, from)
+        }
+    }
     if a == 0 {
         return false
     }
