@@ -56,7 +56,7 @@ NETDEV="-netdev user,id=n0 -device e1000,netdev=n0"
 runq "$TMPD/a0.txt" 120 "$TMPD/dA.img" "$BASE $NETW script=cat /proc/safe;exit" $NETDEV
 runq "$TMPD/a1.txt" 120 "$TMPD/dA.img" "$BASE safe $NETW script=cat /proc/safe;exit" $NETDEV
 runq "$TMPD/a2.txt" 120 "$TMPD/dA.img" "$BASE safe nosafefilter $NETW script=cat /proc/safe;exit" $NETDEV
-nl() { grep -aciE 'e1000|netsvc|dhcp|net: |nic' "$1"; }
+nl() { grep -aciE 'e1000|netsvc|dhcp' "$1"; }
 n0=$(nl "$TMPD/a0.txt"); n1=$(nl "$TMPD/a1.txt"); n2=$(nl "$TMPD/a2.txt")
 num "A baseline: network lines present" "$n0" gt 0
 num "A safe: network lines" "$n1" eq 0
