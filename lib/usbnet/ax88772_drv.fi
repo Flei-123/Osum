@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/usbnet/ax88772_drv.fi -- AX88772 bring-up sequence over an injected control transfer (kernel: xhci.control, gate: fake device)
+// Sequence as in the Linux driver (ax88772_hw_reset): PHY select, three software resets with pauses, RX off, read node id,
+// medium mode, RX on. Constants are protocol knowledge and unverified on silicon (see ax88772.fi).
+import usbnet.ax88772
+
+export { bringup, STEP_PHY, STEP_RESET1, STEP_RESET2, STEP_RESET3, STEP_RXOFF, STEP_MAC, STEP_MEDIUM, STEP_RXON, STEP_PLAUSIBLE, RESET_PAUSE_US }
+
+const STEP_PHY: u64 = 1
+const STEP_RESET1: u64 = 2
+const STEP_RESET2: u64 = 3
+const STEP_RESET3: u64 = 4
+const STEP_RXOFF: u64 = 5
+const STEP_MAC: u64 = 6
+const STEP_MEDIUM: u64 = 7
+const STEP_RXON: u64 = 8
+const STEP_PLAUSIBLE: u64 = 9
+const RESET_PAUSE_US: u64 = 150000
+
+fn out_cmd(state: u64, slot: u64, ctl: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, buf: u64, req: u64, value: u64) -> bool {
+    return ctl(state, slot, 0x40, req, value, 0, 0, buf) >= 0
+}
+
+fn reset_step(state: u64, slot: u64, ctl: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64,
+    delay: fn(u64, u64), buf: u64, value: u64) -> bool {
+    if !out_cmd(state, slot, ctl, buf, ax88772.CMD_SW_RESET, value) { return false }
+    delay(state, RESET_PAUSE_US)
+    return true
+}
+
+// returns the MAC (octet 0 lowest) or 0; *step is the failing step (0 when everything worked)
+fn bringup(state: u64, slot: u64, ctl: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64,
+    delay: fn(u64, u64), buf: u64, step: *mut u64) -> u64 {
+    *step = STEP_PHY
+    if !out_cmd(state, slot, ctl, buf, ax88772.CMD_SW_PHY_SELECT, ax88772.PHYSEL_EMBEDDED) { return 0 }
+    *step = STEP_RESET1
+    if !reset_step(state, slot, ctl, delay, buf, ax88772.SWRESET_IPPD | ax88772.SWRESET_PRL) { return 0 }
+    *step = STEP_RESET2
+    if !reset_step(state, slot, ctl, delay, buf, ax88772.SWRESET_CLEAR) { return 0 }
+    *step = STEP_RESET3
+    if !reset_step(state, slot, ctl, delay, buf, ax88772.SWRESET_IPRL) { return 0 }
+    *step = STEP_RXOFF
+    if !out_cmd(state, slot, ctl, buf, ax88772.CMD_WRITE_RX_CTL, 0) { return 0 }
+    *step = STEP_MAC
+    if ctl(state, slot, 0xC0, ax88772.CMD_READ_NODE_ID, 0, 0, 6, buf) < 6 { return 0 }
+    var mac: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        let o: u8 = *((buf + i) as *mut u8)
+        mac = mac | ((o as u64) << (i * 8))
+        i = i + 1
+    }
+    *step = STEP_PLAUSIBLE
+    if mac == 0 || (mac & 1) != 0 { return 0 }
+    *step = STEP_MEDIUM
+    if !out_cmd(state, slot, ctl, buf, ax88772.CMD_WRITE_MEDIUM_MODE, ax88772.MEDIUM_DEFAULT) { return 0 }
+    *step = STEP_RXON
+    if !out_cmd(state, slot, ctl, buf, ax88772.CMD_WRITE_RX_CTL, ax88772.RXCTL_DEFAULT) { return 0 }
+    *step = 0
+    return mac
+}
