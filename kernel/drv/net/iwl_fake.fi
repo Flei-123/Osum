@@ -20,7 +20,8 @@ profile kernel
 
 export {
     FAKE_PAGES, FAKE_NORMAL, FAKE_LOST, FAKE_BADWIN, SRAM_SIZE,
-    fake_init, fake_rd, fake_wr, fake_viol, fake_lost, fake_sum, fake_chick, fake_loadstat
+    fake_init, fake_rd, fake_wr, fake_viol, fake_lost, fake_sum, fake_chick, fake_loadstat,
+    fake_phase, fake_phase_bytes, fake_stops
 }
 
 const FAKE_PAGES: u64 = 3
@@ -43,6 +44,11 @@ const S_NP: u64 = 0x2040
 const S_BUSBASE: u64 = 0x2048
 const S_BUSSIZE: u64 = 0x2050
 const S_SRAM: u64 = 0x2058
+const S_AARM: u64 = 0x2060      // ALIVE countdown (CSR_INT bit 0 after the CPUs were released)
+const S_PHASE: u64 = 0x2068     // number of ALIVEs so far = index of the image being loaded
+const S_STOPPED: u64 = 0x2070   // a software reset happened since the last ALIVE
+const S_STOPS: u64 = 0x2078
+const S_PHB: u64 = 0x2080       // 4 x u64: octets DMA'd while image `phase` was loading
 const S_PKEY: u64 = 0x2100      // 16 x u64
 const S_PVAL: u64 = 0x2200      // 16 x u64
 const S_WKEY: u64 = 0x2300      // 8 x u64: window key + 1 (0 = unused)
@@ -84,6 +90,9 @@ fn fake_init(region: u64, sram: u64, mode: u64, bus_base: u64, bus_size: u64) {
 }
 
 fn fake_viol(ctx: u64) -> u64 { return g(ctx, S_VIOL) }
+fn fake_phase(ctx: u64) -> u64 { return g(ctx, S_PHASE) }
+fn fake_stops(ctx: u64) -> u64 { return g(ctx, S_STOPS) }
+fn fake_phase_bytes(ctx: u64, i: u64) -> u64 { return g(ctx, S_PHB + (i & 3) * 8) }
 fn fake_lost(ctx: u64) -> u64 { return g(ctx, S_LOST) }
 
 fn prph_find(ctx: u64, a: u64) -> i64 {
@@ -181,6 +190,8 @@ fn dma_run(ctx: u64) {
             *d = *t
             i = i + 1
         }
+        let ph: u64 = g(ctx, S_PHASE) & 3
+        s(ctx, S_PHB + ph * 8, g(ctx, S_PHB + ph * 8) + cnt)
     } else {
         s(ctx, S_LOST, g(ctx, S_LOST) + cnt)
     }
@@ -194,6 +205,13 @@ fn fake_wr(ctx: u64, off: u64, v: u64) {
         w32(ctx, 0x008, r32(ctx, 0x008) & (v ^ 0xFFFFFFFF))
     } else if off == 0x010 {
         w32(ctx, 0x010, r32(ctx, 0x010) & (v ^ 0xFFFFFFFF))
+    } else if off == 0x020 {
+        w32(ctx, 0x020, v)
+        if (v & 0x80) != 0 {
+            s(ctx, S_STOPPED, 1)
+            w32(ctx, 0x1AF0, 0)
+            s(ctx, S_STOPS, g(ctx, S_STOPS) + 1)
+        }
     } else if off == 0x024 {
         w32(ctx, 0x024, v)
         if (v & 8) != 0 { s(ctx, S_ACCESS, 1) } else { s(ctx, S_ACCESS, 0) }
@@ -215,8 +233,14 @@ fn fake_wr(ctx: u64, off: u64, v: u64) {
             if k >= 0 { s(ctx, S_PVAL + (k as u64) * 8, v & 0xFFFFFFFF) }
         }
     } else {
+        let prev: u64 = r32(ctx, off)
         w32(ctx, off, v)
-        if off == 0x1E20 {
+        if off == 0x1AF0 && v == 0xFFFFFFFF && prev != 0xFFFFFFFF {
+            if g(ctx, S_PHASE) > 0 && g(ctx, S_STOPPED) == 0 { viol(ctx) }
+            s(ctx, S_STOPPED, 0)
+            s(ctx, S_PHASE, g(ctx, S_PHASE) + 1)
+            if g(ctx, S_MODE) != FAKE_LOST { s(ctx, S_AARM, 3) }
+        } else if off == 0x1E20 {
             if v == 0 {
                 s(ctx, S_FLAGS, 0)
             } else if (v & 0x80000000) != 0 {
@@ -234,6 +258,11 @@ fn fake_wr(ctx: u64, off: u64, v: u64) {
 fn fake_rd(ctx: u64, off: u64) -> u64 {
     if off >= 0x2000 { return 0xFFFFFFFF }
     if off == 0x008 {
+        let aa: u64 = g(ctx, S_AARM)
+        if aa > 0 {
+            s(ctx, S_AARM, aa - 1)
+            if aa == 1 { w32(ctx, 0x008, r32(ctx, 0x008) | 0x1) }
+        }
         let arm: u64 = g(ctx, S_ARM)
         if arm > 0 {
             s(ctx, S_ARM, arm - 1)
