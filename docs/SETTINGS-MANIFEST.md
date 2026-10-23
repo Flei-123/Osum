@@ -17,6 +17,8 @@ page <id> <title-key> <symbol> <group>        beginnt eine Seite
 column left|right                             wohin die folgenden Einträge kommen (Standard: left)
 label <label-key>                             eine feste Textzeile
 note <label-key> [<zeilen>]                   ein umbrochener Absatz (1..9 Zeilen, Standard 1)
+sep                                           eine Trennlinie
+row ... endrow                                die Einträge dazwischen stehen nebeneinander in einer Zeile
 field <key> <type> [<label-key>] [<default>]  ein Bedienelement
 read <action>                                 direkt nach einem `field`: Aktion am Bus, die den Wert liefert (r149)
 write <action>                                direkt nach einem `field`: Aktion am Bus, die den Wert setzt (r149)
@@ -90,3 +92,7 @@ Was der Aufrufer (Settings-App) tun muss: die eingebaute Seite mit `load` lesen,
 4. **Mehr als 8 Paket-Seiten / eigene Gruppen-Überschriften** aus `group` (heute nur die 8 eingebauten Kategorien + „Apps“).
 5. **Ende-zu-Ende-Probe** in der VM: Paket-Seite öffnen und den Schalter klicken (braucht `social` in `/proc/apps` und das Abbild mit `SETTINGS`); heute prüfen nur die Host-Tests und der Bau.
 6. Erledigt (r143): Kennwort-Feld maskiert.
+
+## Seiten im Manifest (r1590/Folgearbeit)
+
+Neben „accounts“ kommen jetzt „network“, „display“ und „display2“ aus `settings.d/accounts.settings`. `page_man` in `settings.fi` rendert alle vier; je Seitengruppe bindet eine Namensdatei (`accounts.bind`, `network.bind`, `display.bind`) den Feldschlüssel an Steuer-ID, Puffer, Sichtbarkeit (`man_shown`), Breite (`man_wd`) und Knopfart (`man_bk`).
