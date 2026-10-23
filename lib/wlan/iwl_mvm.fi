@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/iwl_mvm.fi -- HP-9c.3: MVM host-command encoders for the Intel 8265 (family 8000) firmware.
+//
+// Pure memory codec (no allocator, no register): the caller hands in a zeroed buffer as u64 address and gets
+// the bytes of one host command (iwl_cmd_header + payload) plus its length. Layouts are taken from a READ of the
+// Linux uapi headers (fw/api/cmdhdr.h, commands.h, nvm-reg.h, phy.h, phy-ctxt.h, sta.h); nothing is copied.
+// The gate (tools/wlan/mvm.sh) compares every command with an independent Python reference built from
+// struct.pack -- that proves the encoder follows OUR reading, NOT that the 8265 firmware agrees (no silicon).
+//
+// Not here yet (roadmap): MAC_CONTEXT_CMD, BINDING_CONTEXT_CMD, SCAN_REQ_UMAC / SCAN_CFG_CMD, TX_CMD framing.
+
+export {
+    CMD_ALIVE, CMD_INIT_COMPLETE, CMD_PHY_CONTEXT, CMD_ADD_STA_KEY, CMD_ADD_STA, CMD_TX, CMD_PHY_CONFIG,
+    CMD_NVM_ACCESS, CMD_TX_ANT, CMD_RX_MPDU, ALIVE_OK, ALIVE_ERR, NVM_SEC_HW, NVM_SEC_SW, NVM_SEC_CALIB,
+    mvm_nvm_read, mvm_phy_cfg, mvm_tx_ant, mvm_phy_ctx, mvm_add_sta, mvm_sta_key_ccmp,
+    mvm_rx_cmd, mvm_rx_group, mvm_rx_seq, mvm_rx_unsolicited, mvm_alive_status, mvm_init_ok, mvm_nvm_resp_status,
+    mvm_nvm_resp_len, ALIVE_MIN_LEN, E_MVM_SHORT
+}
+
+const CMD_ALIVE: u64 = 0x01
+const CMD_INIT_COMPLETE: u64 = 0x04
+const CMD_PHY_CONTEXT: u64 = 0x08
+const CMD_ADD_STA_KEY: u64 = 0x17
+const CMD_ADD_STA: u64 = 0x18
+const CMD_TX: u64 = 0x1C
+const CMD_PHY_CONFIG: u64 = 0x6A
+const CMD_NVM_ACCESS: u64 = 0x88
+const CMD_TX_ANT: u64 = 0x98
+const CMD_RX_MPDU: u64 = 0xC1
+
+const ALIVE_OK: u64 = 0xCAFE
+const ALIVE_ERR: u64 = 0xDEAD
+const ALIVE_MIN_LEN: u64 = 4 + 2 + 2 + 32
+const E_MVM_SHORT: i64 = -50
+
+const NVM_SEC_SW: u64 = 1
+const NVM_SEC_CALIB: u64 = 4
+const NVM_SEC_HW: u64 = 5
+
+const HDR: u64 = 4
+
+fn st8(a: u64, o: u64, v: u64) { *((a + o) as *mut u8) = (v & 255) as u8 }
+fn ld8(a: u64, o: u64) -> u64 { let b: u8 = *((a + o) as *mut u8)
+    return b as u64 }
+fn st16(a: u64, o: u64, v: u64) { st8(a, o, v)
+    st8(a, o + 1, v >> 8) }
+fn st32(a: u64, o: u64, v: u64) { st16(a, o, v)
+    st16(a, o + 2, v >> 16) }
+fn st64(a: u64, o: u64, v: u64) { st32(a, o, v)
+    st32(a, o + 4, v >> 32) }
+fn ld16(a: u64, o: u64) -> u64 { return ld8(a, o) | (ld8(a, o + 1) << 8) }
+fn ld32(a: u64, o: u64) -> u64 { return ld16(a, o) | (ld16(a, o + 2) << 16) }
+
+fn zero(a: u64, n: u64) {
+    var i: u64 = 0
+    while i < n { st8(a, i, 0)
+        i = i + 1 }
+}
+
+// iwl_cmd_header: cmd u8, group u8, sequence le16 = (queue << 8) | slot
+fn hdr(a: u64, cmd: u64, qid: u64, slot: u64) {
+    st8(a, 0, cmd)
+    st8(a, 1, 0)
+    st16(a, 2, ((qid & 0x1F) << 8) | (slot & 0xFF))
+}
+
+// NVM_ACCESS_CMD read of one section chunk: op_code 0 (read), target 0 (chip), type = section, offset, length.
+fn mvm_nvm_read(a: u64, qid: u64, slot: u64, section: u64, offset: u64, length: u64) -> u64 {
+    zero(a, HDR + 8)
+    hdr(a, CMD_NVM_ACCESS, qid, slot)
+    st8(a, HDR, 0)
+    st8(a, HDR + 1, 0)
+    st16(a, HDR + 2, section)
+    st16(a, HDR + 4, offset)
+    st16(a, HDR + 6, length)
+    return HDR + 8
+}
+
+// PHY_CONFIGURATION_CMD (iwl_phy_cfg_cmd_v1): phy_cfg le32, calib_control {event_trigger, flow_trigger} le32 each.
+fn mvm_phy_cfg(a: u64, qid: u64, slot: u64, phy_cfg: u64, event_trig: u64, flow_trig: u64) -> u64 {
+    zero(a, HDR + 12)
+    hdr(a, CMD_PHY_CONFIG, qid, slot)
+    st32(a, HDR, phy_cfg)
+    st32(a, HDR + 4, event_trig)
+    st32(a, HDR + 8, flow_trig)
+    return HDR + 12
+}
+
+// TX_ANT_CONFIGURATION_CMD: valid antenna mask le32.
+fn mvm_tx_ant(a: u64, qid: u64, slot: u64, mask: u64) -> u64 {
+    zero(a, HDR + 4)
+    hdr(a, CMD_TX_ANT, qid, slot)
+    st32(a, HDR, mask)
+    return HDR + 4
+}
+
+// PHY_CONTEXT_CMD (iwl_phy_context_cmd_v1, 40 octets): id_and_color = id | (color << 8), action (1 add, 2 modify, 3 remove),
+// apply_time, tx_param_color, ci {channel le32, band u8 (0 = 5 GHz? driver: PHY_BAND_24 = 1, PHY_BAND_5 = 0), width, ctrl_pos, 0},
+// tail {txchain_info, rxchain_info, acquisition_data, dsp_cfg_flags}.
+fn mvm_phy_ctx(a: u64, qid: u64, slot: u64, id: u64, color: u64, action: u64, band: u64, channel: u64, width: u64, ctrl_pos: u64, chains: u64) -> u64 {
+    zero(a, HDR + 40)
+    hdr(a, CMD_PHY_CONTEXT, qid, slot)
+    st32(a, HDR, (id & 0xFF) | ((color & 0xFF) << 8))
+    st32(a, HDR + 4, action)
+    st32(a, HDR + 8, 0)
+    st32(a, HDR + 12, 0)
+    st32(a, HDR + 16, channel)
+    st8(a, HDR + 20, band)
+    st8(a, HDR + 21, width)
+    st8(a, HDR + 22, ctrl_pos)
+    st8(a, HDR + 23, 0)
+    st32(a, HDR + 24, chains)
+    st32(a, HDR + 28, chains)
+    st32(a, HDR + 32, 0)
+    st32(a, HDR + 36, 0)
+    return HDR + 40
+}
+
+// ADD_STA (iwl_mvm_add_sta_cmd_v7, 44 octets). mode 0 add / 1 modify. mac = 6 octets at address `mac`.
+fn mvm_add_sta(a: u64, qid: u64, slot: u64, mode: u64, mac_id_color: u64, mac: u64, sta_id: u64, flags: u64, flags_msk: u64, assoc_id: u64, queue_msk: u64) -> u64 {
+    zero(a, HDR + 44)
+    hdr(a, CMD_ADD_STA, qid, slot)
+    st8(a, HDR, mode)
+    st32(a, HDR + 4, mac_id_color)
+    var i: u64 = 0
+    while i < 6 {
+        st8(a, HDR + 8 + i, ld8(mac, i))
+        i = i + 1
+    }
+    st8(a, HDR + 16, sta_id)
+    st32(a, HDR + 20, flags)
+    st32(a, HDR + 24, flags_msk)
+    st16(a, HDR + 36, assoc_id)
+    st32(a, HDR + 40, queue_msk)
+    return HDR + 44
+}
+
+// ADD_STA_KEY (iwl_mvm_add_sta_key_cmd, 76 octets) with a CCMP key of 16 octets (at `key`), key id `keyid`,
+// `multicast` for the group key, 6-octet packet-number start at `pn` (little endian order as in the frame, byte 0 first).
+fn mvm_sta_key_ccmp(a: u64, qid: u64, slot: u64, sta_id: u64, key_offset: u64, keyid: u64, multicast: bool, key: u64, pn: u64) -> u64 {
+    zero(a, HDR + 76)
+    hdr(a, CMD_ADD_STA_KEY, qid, slot)
+    var fl: u64 = 2 | ((keyid & 3) << 8)
+    if multicast { fl = fl | 0x4000 }
+    st8(a, HDR, sta_id)
+    st8(a, HDR + 1, key_offset)
+    st16(a, HDR + 2, fl)
+    var i: u64 = 0
+    while i < 16 {
+        st8(a, HDR + 4 + i, ld8(key, i))
+        i = i + 1
+    }
+    i = 0
+    while i < 6 {
+        st8(a, HDR + 36 + i, ld8(pn, i))
+        i = i + 1
+    }
+    return HDR + 76
+}
+
+// ---- device -> host packets (RX buffer starts with the rx packet length word, then the iwl_cmd_header) ----
+
+fn mvm_rx_cmd(p: u64) -> u64 { return ld8(p, 0) }
+fn mvm_rx_group(p: u64) -> u64 { return ld8(p, 1) }
+fn mvm_rx_seq(p: u64) -> u64 { return ld16(p, 2) }
+fn mvm_rx_unsolicited(p: u64) -> bool { return (ld16(p, 2) & 0x8000) != 0 }
+
+// UCODE_ALIVE_NTFY v3 body after the 4-octet header: status le16 (0xCAFE ok), flags le16, lmac_data 32 octets, umac...
+// Returns the status or a negative E_MVM_SHORT when the packet is too short.
+fn mvm_alive_status(p: u64, len: u64) -> i64 {
+    if len < ALIVE_MIN_LEN { return E_MVM_SHORT }
+    if mvm_rx_cmd(p) != CMD_ALIVE { return E_MVM_SHORT - 1 }
+    return ld16(p, HDR) as i64
+}
+
+// INIT_COMPLETE_NOTIF: 1 when it is the right command id and long enough, else 0.
+fn mvm_init_ok(p: u64, len: u64) -> bool {
+    if len < HDR { return false }
+    return mvm_rx_cmd(p) == CMD_INIT_COMPLETE
+}
+
+// NVM_ACCESS_CMD response (iwl_nvm_access_resp): offset le16, length le16, type le16, status le16, data...
+fn mvm_nvm_resp_status(p: u64, len: u64) -> i64 {
+    if len < HDR + 8 { return E_MVM_SHORT }
+    return ld16(p, HDR + 6) as i64
+}
+
+fn mvm_nvm_resp_len(p: u64, len: u64) -> i64 {
+    if len < HDR + 8 { return E_MVM_SHORT }
+    return ld16(p, HDR + 2) as i64
+}

@@ -473,6 +473,92 @@ fn fh_report(r: i64, st: *mut iwl_fh8000.FhStat) {
     serial.nl()
 }
 
+// HP-9c.2: the REAL family-8000 sequence. INIT image -> ALIVE -> (NVM/calibration exchange, needs the command queue: HP-9c.1,
+// not built yet) -> stop the device -> RT image -> ALIVE. Every step logs `iwl: boot2 <phase> ...`; every wait is bounded
+// (iwl_pwr.POLL_MAX); on any failure interrupts are disabled and the rc is returned (caller falls back to "wlan: unavailable").
+fn b2_line(tag: u64, r: i64) {
+    var s_b2: [u8; 12] = "iwl: boot2 \0"
+    var s_rc: [u8; 6] = " rc=\0\0"
+    serial.puts((&s_b2[0]) as u64)
+    serial.puts(tag)
+    serial.puts((&s_rc[0]) as u64)
+    put_i(r)
+    serial.nl()
+}
+
+fn b2_phase(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64, tl: u64, ta: u64) -> i64 {
+    var s_by: [u8; 8] = " bytes=\0"
+    var st: iwl_fh8000.FhStat = iwl_fh8000.fhstat_new()
+    var r: i64 = iwl_fh8000.fh_load(p, f, blob, img, bounce, bounce, bsize, &st)
+    var s_rc2: [u8; 4] = "rc=\0"
+    serial.puts(tl)
+    serial.puts((&s_rc2[0]) as u64)
+    put_i(r)
+    serial.puts((&s_by[0]) as u64)
+    serial.dec(st.bytes)
+    serial.nl()
+    if r != 0 {
+        return r
+    }
+    r = iwl_alive.alive_wait(p)
+    b2_line(ta, r)
+    return r
+}
+
+fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, bounce_in: u64) -> i64 {
+    var t_il: [u8; 22] = "iwl: boot2 init load \0"
+    var t_ia: [u8; 11] = "init alive\0"
+    var t_rl: [u8; 21] = "iwl: boot2 rt load \0\0"
+    var t_ra: [u8; 9] = "rt alive\0"
+    var t_st: [u8; 10] = "init stop\0"
+    var t_no: [u8; 11] = "no init fw\0"
+    var t_pw: [u8; 6] = "power\0"
+    var t_sm: [u8; 33] = "init nvm: pending (HP-9c.1 ring)\0"
+    var bounce: u64 = bounce_in
+    if bounce == 0 {
+        bounce = dma_pages(state, FH_BOUNCE_FRAMES)
+    }
+    if bounce == 0 {
+        b2_line((&t_pw[0]) as u64, E_FW_MEM)
+        return E_FW_MEM
+    }
+    let bsize: u64 = FH_BOUNCE_FRAMES * 4096
+    if iwl_fw.fw_sec_count(f, iwl_fw.IMG_INIT) == 0 {
+        b2_line((&t_no[0]) as u64, E_FW_IMAGE)
+        return E_FW_IMAGE
+    }
+    var r: i64 = iwl_pwr.power_up(p)
+    if r != 0 {
+        b2_line((&t_pw[0]) as u64, r)
+        iwl_pwr.int_disable(p)
+        return r
+    }
+    r = b2_phase(p, f, blob, iwl_fw.IMG_INIT, bounce, bsize, (&t_il[0]) as u64, (&t_ia[0]) as u64)
+    if r != 0 {
+        iwl_pwr.int_disable(p)
+        return r
+    }
+    b2_line((&t_sm[0]) as u64, 0)
+    iwl_pwr.int_disable(p)
+    r = iwl_pwr.stop_master(p)
+    iwl_pwr.sw_reset(p)
+    b2_line((&t_st[0]) as u64, r)
+    if r != 0 {
+        return r
+    }
+    r = iwl_pwr.power_up(p)
+    if r != 0 {
+        b2_line((&t_pw[0]) as u64, r)
+        iwl_pwr.int_disable(p)
+        return r
+    }
+    r = b2_phase(p, f, blob, iwl_fw.IMG_RT, bounce, bsize, (&t_rl[0]) as u64, (&t_ra[0]) as u64)
+    if r != 0 {
+        iwl_pwr.int_disable(p)
+    }
+    return r
+}
+
 // HP-9b QEMU test bed: the REAL loader against the fake CSR window (word iwlfhtest).
 fn fh8000_fake(state: u64, blob: u64, f: *mut iwl_fw.FwInfo) {
     var s_bad: [u8; 21] = "iwl: fh no memory\0\0\0\0"
@@ -531,32 +617,52 @@ fn fh8000_fake(state: u64, blob: u64, f: *mut iwl_fw.FwInfo) {
     serial.puts((&s_dg[0]) as u64)
     serial.hex(sum[1])
     serial.nl()
+    fh8000_fake2(state, blob, f, mode, win)
+}
+
+// HP-9c.2 against a fresh fake: INIT -> ALIVE -> stop -> RT -> ALIVE (`iwl: boot2 ...` lines + model summary).
+fn fh8000_fake2(state: u64, blob: u64, f: *mut iwl_fw.FwInfo, mode: u64, win: u64) {
+    var s_sum: [u8; 19] = "iwl: boot2 SUMMARY\0"
+    var s_ph: [u8; 8] = " phase \0"
+    var s_b0: [u8; 7] = " init \0"
+    var s_b1: [u8; 5] = " rt \0"
+    var s_vi: [u8; 6] = " viol\0"
+    var s_sp: [u8; 7] = " stops\0"
+    let region: u64 = dma_pages(state, iwl_fake.FAKE_PAGES)
+    let sram: u64 = dma_pages(state, FH_SRAM_FRAMES)
+    let bnc: u64 = dma_pages(state, FH_BOUNCE_FRAMES)
+    if region == 0 || sram == 0 || bnc == 0 {
+        return
+    }
+    var w2: u64 = bnc
+    if mode == iwl_fake.FAKE_BADWIN {
+        w2 = bnc + 4096
+    }
+    iwl_fake.fake_init(region, sram, mode, w2, FH_BOUNCE_FRAMES * 4096)
+    var p: iwl_probe.Probe = iwl_probe.probe_new()
+    iwl_probe.mmio_set(&p, region, iwl_fake.fake_rd, iwl_fake.fake_wr)
+    let r: i64 = fh8000_phases(state, &p, f, blob, bnc)
+    serial.puts((&s_sum[0]) as u64)
+    serial.puts((&s_ph[0]) as u64)
+    serial.dec(iwl_fake.fake_phase(region))
+    serial.puts((&s_b0[0]) as u64)
+    serial.dec(iwl_fake.fake_phase_bytes(region, 0))
+    serial.puts((&s_b1[0]) as u64)
+    serial.dec(iwl_fake.fake_phase_bytes(region, 1))
+    serial.puts((&s_vi[0]) as u64)
+    serial.put(32 as u8)
+    serial.dec(iwl_fake.fake_viol(region))
+    serial.puts((&s_sp[0]) as u64)
+    serial.put(32 as u8)
+    serial.dec(iwl_fake.fake_stops(region))
+    serial.nl()
 }
 
 // Real device (word iwlboot, family 8000): power up, push the runtime image through the FH channel, wait for ALIVE.
 // Writes device registers; NOT MEASURED on silicon (HP-9c).
 fn fh8000_boot(state: u64, p: *mut iwl_probe.Probe, blob: u64, f: *mut iwl_fw.FwInfo) -> i64 {
     iwl_probe.mmio_set(p, (*p).ctx, rd, wr_real)
-    let bounce: u64 = dma_pages(state, FH_BOUNCE_FRAMES)
-    if bounce == 0 {
-        return E_FW_MEM
-    }
-    var r: i64 = iwl_pwr.power_up(p)
-    if r != 0 {
-        return r
-    }
-    var st: iwl_fh8000.FhStat = iwl_fh8000.fhstat_new()
-    r = iwl_fh8000.fh_load(p, f, blob, iwl_fw.IMG_RT, bounce, bounce, FH_BOUNCE_FRAMES * 4096, &st)
-    fh_report(r, &st)
-    if r != 0 {
-        iwl_pwr.int_disable(p)
-        return r
-    }
-    r = iwl_alive.alive_wait(p)
-    if r != 0 {
-        iwl_pwr.int_disable(p)
-    }
-    return r
+    return fh8000_phases(state, p, f, blob, 0)
 }
 
 // After the filesystem is mounted: firmware lookup for every target (read-only), or for a synthetic AX201 with the

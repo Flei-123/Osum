@@ -66,6 +66,7 @@ same() { # run-log expected-file description
 
 for c in big edges empty; do image "$c" "$T/blobs/$c.bin" || { bad "image $c"; exit 1; }; done
 image none || { bad "image none"; exit 1; }
+image two "$T/blobs/two.bin" || { bad "image two"; exit 1; }
 image badm "$T/blobs/bad_magic.bin" || { bad "image badm (iwlfw_ref gen)"; exit 1; }
 SIZE=$(stat -c %s "$T/blobs/big.bin")
 
@@ -78,7 +79,9 @@ BIGSHA=$(sha256sum "$T/blobs/big.bin" | cut -d' ' -f1)
 has "$A" "iwl: fw sha256=$BIGSHA pin=none" "file digest logged, synthetic blob is NOT a pinned firmware file"
 has "$A" 'iwl: fh STAT chunks=6 bytes=151461 ext=2 cpu1=3 cpu2=2' "anchor: 6 chunks, 2 extended-range chunks, paging section not loaded"
 has "$A" 'iwl: fh VIOL 0 LOST 0 NONZERO 151461' "anchor: no protocol violation, nothing misdirected, every byte in SRAM"
-hasnot "$A" 'iwl: boot' "no boot line without iwlboot"
+hasnot "$A" 'iwl: boot rc=' "no boot line without iwlboot"
+has "$A" 'iwl: boot2 no init fw rc=-43' "HP-9c.2: image without an INIT section is refused before any phase"
+hasnot "$A" 'iwl: boot2 rt' "HP-9c.2: no RT phase when INIT is missing"
 
 echo "-- B: extended-range edge sections"
 run b edges iwlfhtest
@@ -101,6 +104,24 @@ E="$T/e.klar"
 has "$E" 'iwl: fh RC 0 FAILSEC 0' "loader itself still completes"
 has "$E" 'iwl: fh VIOL 0 LOST 151461 NONZERO 0 DIGEST 0x0' "gate sees it: LOST == all bytes, SRAM empty"
 grep -a '^iwl: fh VIOL ' "$T/e.klar" | grep -qa 'LOST 0 ' && bad "control not detected" || ok "control run differs from run A"
+
+echo "-- I2: HP-9c.2 two-phase boot INIT -> ALIVE -> stop -> RT -> ALIVE against the fake (image with INIT 3000 octets + RT 151461)"
+run i2 two iwlfhtest
+I2="$T/i2.klar"
+has "$I2" 'iwl: boot2 init load rc=0 bytes=3000' "INIT image loaded first (3000 octets)"
+has "$I2" 'iwl: boot2 init alive rc=0' "ALIVE after the INIT image"
+has "$I2" 'iwl: boot2 init stop rc=0' "device stopped between the images"
+has "$I2" 'iwl: boot2 rt load rc=0 bytes=151461' "RT image loaded after the stop (151461 octets)"
+has "$I2" 'iwl: boot2 rt alive rc=0' "ALIVE after the RT image"
+grep -aE 'iwl: boot2 SUMMARY phase 2 init 3000 rt 151461 viol 0 stops [1-9]' "$I2" >/dev/null && ok "model: 2 ALIVEs, bytes per phase exact, no violation, stop seen" || { bad "model summary"; grep -a 'boot2 SUMMARY' "$I2"; }
+echo "-- I3: lost end-of-TFD interrupt in the INIT phase: bounded failure, RT never loaded"
+run i3 two "iwlfhtest iwlfhlost"
+I3="$T/i3.klar"
+has "$I3" 'iwl: boot2 init load rc=-45' "INIT load times out (RC -45)"
+hasnot "$I3" 'iwl: boot2 rt' "no RT phase after a failed INIT"
+echo "-- I4: misdirected DMA must be seen in both phases"
+run i4 two "iwlfhtest iwlfhbad"
+grep -aE 'iwl: boot2 SUMMARY phase [0-9] init 0 rt 0 ' "$T/i4.klar" >/dev/null && ok "bad window: nothing lands in either phase (init 0, rt 0)" || { bad "bad-window summary"; grep -a 'boot2' "$T/i4.klar" | head -5; }
 
 echo "-- F: file missing"
 run f none iwlfhtest
