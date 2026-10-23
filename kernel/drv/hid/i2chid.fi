@@ -118,7 +118,8 @@ export {
     hd_len, hd_rdlen, hd_rdreg, hd_inreg, hd_maxin, hd_cmdreg, hd_datareg,
     hd_vid, hd_pid, say, selftest, SELFTEST_MAX,
     DW_MAGIC, MAX_SLAVES, HDESC_DEFAULT, HDESC_OLD,
-    poll_tick, simrun, SIM_MM
+    poll_tick, simrun, simrun2, SIM_MM, SIM_MM2,
+    nctrl, ndev, render, find_ctrls, dev_ctrl, dev_adr, dev_slot
 }
 
 // Zwei Seiten aus dem Rest, den `kstate.fi` nach Merge 2 ausweist.
@@ -206,6 +207,142 @@ const H_VID: u64 = 0x150
 const H_PID: u64 = 0x158
 const H_VER: u64 = 0x160
 
+
+// ======================================================================
+// W-TOUCH3: TABLES FOR SEVERAL CONTROLLERS AND SEVERAL DEVICES.
+//
+// A laptop of 2026 has up to eight LPSS I2C controllers; the touchpad sits
+// on one, the touch screen and the pen on ANOTHER. The first version knew
+// exactly one controller (S_MMIO) and one device (HID_SLOT). The tables are
+// `static mut` (no kstate offset), one flat array of words:
+//   controller c (0..MAX_CTRL-1): words T_CTRL + c*8 + CT_*
+//   device j (0..I2C_DEV_MAX-1):  words T_DEV  + j*16 + DV_*  (HID slot = I2C_DEV_FIRST + j)
+// S_MMIO stays "the controller the dw_* functions talk to right now"
+// (select_ctrl), so the register code below did not have to change.
+static mut tb: [u64; 512] = [0 as u64; 512]
+const MAX_CTRL: u64 = 8
+const T_CTRL: u64 = 0
+const CT_MMIO: u64 = 0
+const CT_BDF: u64 = 1
+const CT_IDS: u64 = 2 // vendor << 16 | device
+const CT_STATE: u64 = 3 // 0 = ok, 1 = HUNG (3 timeouts), skipped from then on
+const CT_TMO: u64 = 4
+const CT_ABRT: u64 = 5
+const CT_PROBES: u64 = 6
+const T_DEV: u64 = 64
+const DV_CTRL: u64 = 0
+const DV_ADR: u64 = 1
+const DV_HREG: u64 = 2
+const DV_RDLEN: u64 = 3
+const DV_MAXIN: u64 = 4
+const DV_VID: u64 = 5
+const DV_PID: u64 = 6
+const DV_STATE: u64 = 7 // 0 = empty, 1 = ok, 2 = lost (still polled, slowly)
+const DV_FAILS: u64 = 8
+const DV_NEXT: u64 = 9 // next poll, ms
+const DV_BACK: u64 = 10 // current backoff, ms
+const DV_REPS: u64 = 11
+const DV_VIA: u64 = 12 // 0 = byte search, 1 = AML
+const DV_INREG: u64 = 13
+const DV_CMDREG: u64 = 14
+const DV_KIND: u64 = 15
+const X_NCTRL: u64 = 200
+const X_NDEV: u64 = 201
+const X_CUR_C: u64 = 202 // controller the setup was made for (0xFF = none)
+const X_CUR_A: u64 = 203 // address the setup was made for (0xFFFF = none)
+const X_AML: u64 = 204 // 1 = the AML path produced candidates
+const POLL_FAST_MS: u64 = 8
+const POLL_BACK_MAX: u64 = 500
+const LOST_FAILS: u64 = 40
+
+fn tg(i: u64) -> u64 {
+    return kstate.get((&tb[0]) as u64, i * 8)
+}
+
+fn ts(i: u64, v: u64) {
+    kstate.set((&tb[0]) as u64, i * 8, v)
+}
+
+fn ctg(c: u64, f: u64) -> u64 {
+    return tg(T_CTRL + c * 8 + f)
+}
+
+fn cts(c: u64, f: u64, v: u64) {
+    ts(T_CTRL + c * 8 + f, v)
+}
+
+fn dvg(j: u64, f: u64) -> u64 {
+    return tg(T_DEV + j * 16 + f)
+}
+
+fn dvs(j: u64, f: u64, v: u64) {
+    ts(T_DEV + j * 16 + f, v)
+}
+
+fn nctrl() -> u64 {
+    return tg(X_NCTRL)
+}
+
+fn ndev() -> u64 {
+    return tg(X_NDEV)
+}
+
+fn dev_ctrl(j: u64) -> u64 {
+    return dvg(j, DV_CTRL)
+}
+
+fn dev_adr(j: u64) -> u64 {
+    return dvg(j, DV_ADR)
+}
+
+fn dev_slot(j: u64) -> u64 {
+    return hidrep.I2C_DEV_FIRST + j
+}
+
+fn tables_reset() {
+    var i: u64 = 0
+    while i < 512 {
+        ts(i, 0)
+        i = i + 1
+    }
+    ts(X_CUR_C, 0xFF)
+    ts(X_CUR_A, 0xFFFF)
+}
+
+// Make controller c the one the dw_* functions talk to. The next transfer
+// must run dw_setup again (X_CUR_A invalid).
+fn select_ctrl(state: u64, c: u64) {
+    s(state, S_MMIO, ctg(c, CT_MMIO))
+    s(state, S_BDF, ctg(c, CT_BDF))
+    ts(X_CUR_C, c)
+    ts(X_CUR_A, 0xFFFF)
+}
+
+fn add_ctrl(state: u64, bdf: u64, ids: u64, mm: u64) -> bool {
+    let n: u64 = nctrl()
+    var i: u64 = 0
+    while i < n {
+        if ctg(i, CT_MMIO) == mm {
+            return false
+        }
+        i = i + 1
+    }
+    if n >= MAX_CTRL {
+        return false
+    }
+    cts(n, CT_MMIO, mm)
+    cts(n, CT_BDF, bdf)
+    cts(n, CT_IDS, ids)
+    cts(n, CT_STATE, 0)
+    ts(X_NCTRL, n + 1)
+    s(state, S_FOUND, 1)
+    if n == 0 {
+        s(state, S_BDF, bdf)
+        s(state, S_MMIO, mm)
+    }
+    return true
+}
+
 fn g(state: u64, off: u64) -> u64 {
     return kstate.get(state + I2C_OFF, off)
 }
@@ -223,7 +360,7 @@ fn present(state: u64) -> bool {
 }
 
 fn found(state: u64) -> bool {
-    return g(state, S_READY) == 1
+    return ndev() > 0
 }
 
 fn slaves(state: u64) -> u64 {
@@ -295,15 +432,6 @@ fn hd_pid(state: u64) -> u64 {
 // GEMESSEN: dass das auf einer Maschine OHNE einen solchen Regler
 // durchlaeuft und "keiner" meldet. NUR SPEZIFIKATION: dass es auf einer
 // Maschine MIT einem den richtigen findet -- QEMU hat keinen.
-fn find_ctrl(state: u64) -> bool {
-    if !suche_klasse(state, 0x0C, 0x80) {
-        if !suche_klasse(state, 0x11, 0x80) {
-            return false
-        }
-    }
-    return true
-}
-
 // SPEC ONLY on hardware (HP-6, r1514). Intel LPSS functions (Sunrise Point / Kaby Lake-U, e.g. 8086:9d60..9d65)
 // may sit in D3 and keep the DesignWare core in reset until the driver releases it (Linux intel-lpss:
 // private registers at BAR0+0x200, RESETS at +0x204, value 3 = both resets released). Without this the
@@ -332,27 +460,54 @@ fn lpss_wake(state: u64, i: u64, mm: u64) {
     __mmio_write32((mm + LPSS_PRIV_RESETS) as *mut u32, LPSS_RESETS_RELEASE as u32)
 }
 
-fn suche_klasse(state: u64, cls: u64, sub: u64) -> bool {
+// Intel LPSS I2C functions by PCI id (Sunrise Point-LP, Union Point/Kaby Lake, Cannon Point-LP, Cannon Lake PCH-H).
+fn is_lpss_id(dev: u64) -> bool {
+    if dev >= 0x9d60 && dev <= 0x9d66 {
+        return true
+    }
+    if dev >= 0xa160 && dev <= 0xa167 {
+        return true
+    }
+    if dev >= 0x9de8 && dev <= 0x9dec {
+        return true
+    }
+    if dev >= 0xa368 && dev <= 0xa36b {
+        return true
+    }
+    return false
+}
+
+// ALL controllers: every PCI function of class 0C/80 or 11/80 or of an
+// Intel LPSS id with a memory BAR 0 whose IC_COMP_TYPE reads DW_MAGIC.
+// Word `i2cold` (counter-check) keeps only the first one, like before.
+fn find_ctrls(state: u64) -> u64 {
     let n: u64 = pci.count(state)
     var i: u64 = 0
     while i < n {
-        if pci.get(state, i, pci.E_CLASS) == cls && pci.get(state, i, pci.E_SUBCLASS) == sub {
+        let cls: u64 = pci.get(state, i, pci.E_CLASS)
+        let sub: u64 = pci.get(state, i, pci.E_SUBCLASS)
+        let ven: u64 = pci.get(state, i, pci.E_VENDOR)
+        let dev: u64 = pci.get(state, i, pci.E_DEVICE)
+        var cand: bool = false
+        if (cls == 0x0C || cls == 0x11) && sub == 0x80 {
+            cand = true
+        }
+        if ven == 0x8086 && is_lpss_id(dev) {
+            cand = true
+        }
+        if cand && !(kstate.mode_on(state, kstate.M_I2COLD) && nctrl() >= 1) {
             let bar: u64 = pci.bar(state, i, 0)
             if bar != 0 && !pci.bar_is_io(state, i, 0) {
                 let mm: u64 = bar & 0xFFFFFFFFFFFFFFF0
                 lpss_wake(state, i, mm)
-                // NUR SPEZIFIKATION AB HIER: das Lesen der Blende.
                 if kstate.get32(mm + IC_COMP_TYPE) == DW_MAGIC {
-                    s(state, S_FOUND, 1)
-                    s(state, S_BDF, pci.get(state, i, pci.E_BDF))
-                    s(state, S_MMIO, mm)
-                    return true
+                    add_ctrl(state, pci.get(state, i, pci.E_BDF), (ven << 16) | dev, mm)
                 }
             }
         }
         i = i + 1
     }
-    return false
+    return nctrl()
 }
 
 // ======================================================================
@@ -444,15 +599,15 @@ fn kennt(state: u64, n: u64, adr: u64) -> bool {
 // gemessen. Das steht auch in docs/REALHW.md.
 
 fn r32(state: u64, mm: u64, off: u64) -> u64 {
-    if mm == SIM_MM {
-        return sim_rd(state, off)
+    if mm == SIM_MM || mm == SIM_MM2 {
+        return sim_rd(state, mm, off)
     }
     return kstate.get32(mm + off)
 }
 
 fn w32(state: u64, mm: u64, off: u64, v: u64) {
-    if mm == SIM_MM {
-        sim_wr(state, off, v)
+    if mm == SIM_MM || mm == SIM_MM2 {
+        sim_wr(state, mm, off, v)
         return
     }
     __mmio_write32((mm + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
@@ -480,6 +635,7 @@ fn dw_setup(state: u64, adr: u64) {
     w32(state, mm, IC_TX_TL, 0)
     w32(state, mm, IC_INTR_MASK, 0)
     w32(state, mm, IC_ENABLE, 1)
+    ts(X_CUR_A, adr)
 }
 
 // NUR SPEZIFIKATION. `wlen` Oktett hinschreiben, dann `rlen` lesen, mit
@@ -520,14 +676,18 @@ fn dw_xfer(state: u64, wp: u64, wlen: u64, rp: u64, rlen: u64) -> u64 {
         if (r32(state, mm, IC_RAW_INTR) & STAT_TX_ABRT) != 0 {
             let u2: u64 = r32(state, mm, IC_CLR_TX_ABRT)
             s(state, S_ABORTS, g(state, S_ABORTS) + 1)
+            let c1: u64 = tg(X_CUR_C)
+            if c1 < MAX_CTRL {
+                cts(c1, CT_ABRT, ctg(c1, CT_ABRT) + 1)
+            }
             return 0
         }
         var w: u64 = 0
-        while w < 100000 && r32(state, mm, IC_RXFLR) == 0 {
+        while w < 20000 && r32(state, mm, IC_RXFLR) == 0 {
             w = w + 1
         }
         if r32(state, mm, IC_RXFLR) == 0 {
-            s(state, S_TIMEOUTS, g(state, S_TIMEOUTS) + 1)
+            note_timeout(state, mm)
             return 0
         }
         kstate.set8(rp + got, (r32(state, mm, IC_DATA_CMD) & 0xFF) as u8)
@@ -541,9 +701,25 @@ fn dw_xfer(state: u64, wp: u64, wlen: u64, rp: u64, rlen: u64) -> u64 {
     return got
 }
 
+// A read that never got data: count it globally and on the controller,
+// switch the controller off (a hung transfer must not stay armed) and mark
+// it HUNG after 3 of them. Other controllers keep running.
+fn note_timeout(state: u64, mm: u64) {
+    s(state, S_TIMEOUTS, g(state, S_TIMEOUTS) + 1)
+    let c: u64 = tg(X_CUR_C)
+    if c < MAX_CTRL {
+        cts(c, CT_TMO, ctg(c, CT_TMO) + 1)
+        if ctg(c, CT_TMO) >= 3 {
+            cts(c, CT_STATE, 1)
+        }
+    }
+    w32(state, mm, IC_ENABLE, 0)
+    ts(X_CUR_A, 0xFFFF)
+}
+
 fn wait_space(state: u64, mm: u64) -> bool {
     var i: u64 = 0
-    while i < 100000 {
+    while i < 20000 {
         if r32(state, mm, IC_TXFLR) < 8 {
             return true
         }
@@ -612,7 +788,14 @@ fn le16(p: u64, i: u64) -> u64 {
 // USB-Geraet die Beschreibung des Touchpads ueberschreiben.
 const HID_SLOT: u64 = 3
 
-fn versuche(state: u64, adr: u64, reg: u64) -> bool {
+fn versuche(state: u64, c: u64, adr: u64, reg: u64) -> bool {
+    let j: u64 = ndev()
+    if j >= hidrep.I2C_DEV_MAX {
+        return false
+    }
+    let slot: u64 = hidrep.I2C_DEV_FIRST + j
+    select_ctrl(state, c)
+    cts(c, CT_PROBES, ctg(c, CT_PROBES) + 1)
     dw_setup(state, adr)
     let p: u64 = buf(state)
     if reg_read(state, reg, p, 30) != 30 {
@@ -625,16 +808,31 @@ fn versuche(state: u64, adr: u64, reg: u64) -> bool {
     // reports (spec 7.3; Linux does the same). SPEC ONLY on hardware.
     power_on_reset(state)
     let rdlen: u64 = g(state, H_RDLEN)
-    let dst: u64 = hidrep.raw_of(state, HID_SLOT)
+    let dst: u64 = hidrep.raw_of(state, slot)
     if reg_read(state, g(state, H_RDREG), dst, rdlen) != rdlen {
         return false
     }
-    if hidrep.parse(state, HID_SLOT, dst, rdlen) != hidrep.E_OK {
+    if hidrep.parse(state, slot, dst, rdlen) != hidrep.E_OK {
         return false
     }
+    dvs(j, DV_CTRL, c)
+    dvs(j, DV_ADR, adr)
+    dvs(j, DV_HREG, reg)
+    dvs(j, DV_RDLEN, rdlen)
+    dvs(j, DV_MAXIN, g(state, H_MAXIN))
+    dvs(j, DV_VID, g(state, H_VID))
+    dvs(j, DV_PID, g(state, H_PID))
+    dvs(j, DV_INREG, g(state, H_INREG))
+    dvs(j, DV_CMDREG, g(state, H_CMDREG))
+    dvs(j, DV_KIND, hidrep.kind(state, slot))
+    dvs(j, DV_STATE, 1)
+    dvs(j, DV_FAILS, 0)
+    dvs(j, DV_BACK, POLL_FAST_MS)
+    dvs(j, DV_NEXT, 0)
+    ts(X_NDEV, j + 1)
     s(state, S_READY, 1)
     s(state, S_HDREG, reg)
-    hidrep.say(state, HID_SLOT)
+    hidrep.say(state, slot)
     return true
 }
 
@@ -643,32 +841,66 @@ fn versuche(state: u64, adr: u64, reg: u64) -> bool {
 // Berichtsnummer, wenn das Geraet welche benutzt. Laenge 0 heisst "es
 // gibt nichts"; das ist kein Fehler, sondern die Antwort auf eine
 // Abfrage ohne Ereignis.
-fn poll(state: u64) {
-    if g(state, S_READY) != 1 {
+// One read of device j (no schedule). The fails/backoff bookkeeping lives
+// here; poll_tick decides WHEN.
+fn poll_dev(state: u64, j: u64) {
+    let c: u64 = dvg(j, DV_CTRL)
+    let adr: u64 = dvg(j, DV_ADR)
+    if dvg(j, DV_STATE) == 0 || ctg(c, CT_STATE) != 0 {
         return
     }
-    let p: u64 = buf(state)
-    let max: u64 = g(state, H_MAXIN)
+    let max: u64 = dvg(j, DV_MAXIN)
     if max < 2 || max > 1024 {
         return
     }
+    if tg(X_CUR_C) != c || tg(X_CUR_A) != adr {
+        select_ctrl(state, c)
+        dw_setup(state, adr)
+    }
+    // a device on this controller cannot hang the others: the transfer
+    // below is bounded (wait loops) and note_timeout switches it off
+    let p: u64 = buf(state)
+    let now: u64 = time.mono_ns(state) / 1000000
     if dw_xfer(state, 0, 0, p, max) < 2 {
+        ts(X_CUR_A, 0xFFFF)
         s(state, S_FAILS, g(state, S_FAILS) + 1)
-        if g(state, S_FAILS) >= POLL_GIVEUP {
-            var s_gu: [u8; 28] = "i2chid: input lost, poll off"
-            s(state, S_READY, 0)
+        dvs(j, DV_FAILS, dvg(j, DV_FAILS) + 1)
+        var b: u64 = dvg(j, DV_BACK) * 2
+        if b > POLL_BACK_MAX {
+            b = POLL_BACK_MAX
+        }
+        dvs(j, DV_BACK, b)
+        dvs(j, DV_NEXT, now + b)
+        if dvg(j, DV_FAILS) == LOST_FAILS {
+            var s_gu: [u8; 25] = "i2chid: input lost, dev \0"
+            dvs(j, DV_STATE, 2)
             serial.puts((&s_gu[0]) as u64)
+            serial.dec(j)
             serial.nl()
         }
         return
     }
+    dvs(j, DV_FAILS, 0)
+    dvs(j, DV_STATE, 1)
+    dvs(j, DV_BACK, POLL_FAST_MS)
+    dvs(j, DV_NEXT, now + POLL_FAST_MS)
     s(state, S_FAILS, 0)
     let n: u64 = le16(p, 0)
     if n < 3 || n > max {
         return
     }
     s(state, S_REPORTS, g(state, S_REPORTS) + 1)
-    hidin.report(state, HID_SLOT, p + 2, n - 2)
+    dvs(j, DV_REPS, dvg(j, DV_REPS) + 1)
+    hidin.report(state, hidrep.I2C_DEV_FIRST + j, p + 2, n - 2)
+}
+
+// Every device once, ignoring the schedule (test beds).
+fn poll(state: u64) {
+    var j: u64 = 0
+    while j < ndev() {
+        poll_dev(state, j)
+        j = j + 1
+    }
 }
 
 // ======================================================================
@@ -682,42 +914,66 @@ fn stage(state: u64) {
         serial.nl()
         return
     }
-    // DIE REIHENFOLGE IST ABSICHT. Zuerst die ACPI-Suche, DANN der
-    // Regler: die Suche rechnet nur auf Tabellen im Speicher und
-    // laeuft ueberall, der Regler laesst sich nur auf einem Brett
-    // finden, das einen hat. So steht in der Meldung auch dann etwas
-    // Nachpruefbares, wenn kein Regler da ist -- und genau das ist der
-    // Fall in QEMU.
+    tables_reset()
+    // ORDER IS INTENTIONAL: first the ACPI search (works everywhere), then
+    // the controllers (only on a board that has them).
     acpi_scan(state)
-    let hat: bool = find_ctrl(state)
+    find_ctrls(state)
     say(state)
-    if !hat {
+    if nctrl() == 0 {
         return
     }
     probe_all(state)
+    say_devs(state)
 }
 
 // Try every slave address the firmware names; the first one that
 // answers with a valid HID description wins.
+// Try every slave address the firmware names on every controller that is
+// not HUNG; each hit becomes a device (own HID slot). A timeout only
+// hurts the controller it happened on.
 fn probe_all(state: u64) -> bool {
     var i: u64 = 0
     let n: u64 = g(state, S_NSLAVE)
+    let old: bool = kstate.mode_on(state, kstate.M_I2COLD)
     while i < n {
         let adr: u64 = g(state, S_SLAVES + i * 8)
-        let to0: u64 = g(state, S_TIMEOUTS)
-        if versuche(state, adr, HDESC_DEFAULT) {
-            return true
-        }
-        if g(state, S_TIMEOUTS) != to0 {
-            return false
-        }
-        if versuche(state, adr, HDESC_OLD) {
-            return true
-        }
-        if g(state, S_TIMEOUTS) != to0 {
-            return false
+        var c: u64 = 0
+        while c < nctrl() {
+            if old && (c > 0 || ndev() > 0) {
+                return ndev() > 0
+            }
+            if ctg(c, CT_STATE) == 0 && ndev() < hidrep.I2C_DEV_MAX && !dev_known(c, adr) {
+                try_dev(state, c, adr)
+            }
+            c = c + 1
         }
         i = i + 1
+    }
+    return ndev() > 0
+}
+
+fn dev_known(c: u64, adr: u64) -> bool {
+    var j: u64 = 0
+    while j < ndev() {
+        if dvg(j, DV_CTRL) == c && dvg(j, DV_ADR) == adr {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
+fn try_dev(state: u64, c: u64, adr: u64) -> bool {
+    let to0: u64 = g(state, S_TIMEOUTS)
+    if versuche(state, c, adr, HDESC_DEFAULT) {
+        return true
+    }
+    if g(state, S_TIMEOUTS) != to0 {
+        return false
+    }
+    if versuche(state, c, adr, HDESC_OLD) {
+        return true
     }
     return false
 }
@@ -746,15 +1002,18 @@ const S_FAILS: u64 = 0x60
 const POLL_GIVEUP: u64 = 400
 
 fn poll_tick(state: u64) {
-    if g(state, S_READY) != 1 {
+    let n: u64 = ndev()
+    if n == 0 {
         return
     }
-    let now: u64 = time.mono_ns(state)
-    if now < g(state, S_LAST) + 8000000 {
-        return
+    let now: u64 = time.mono_ns(state) / 1000000
+    var j: u64 = 0
+    while j < n {
+        if dvg(j, DV_STATE) != 0 && now >= dvg(j, DV_NEXT) {
+            poll_dev(state, j)
+        }
+        j = j + 1
     }
-    s(state, S_LAST, now)
-    poll(state)
 }
 
 fn say(state: u64) {
@@ -765,11 +1024,7 @@ fn say(state: u64) {
     var s_e: [u8; 10] = " pnp0c50=\0"
     var s_f: [u8; 7] = " ding=\0"
     serial.puts((&s_a[0]) as u64)
-    var f: u64 = 0
-    if present(state) {
-        f = 1
-    }
-    serial.dec(f)
+    serial.dec(nctrl())
     serial.puts((&s_b[0]) as u64)
     serial.hex(g(state, S_MMIO))
     serial.puts((&s_c[0]) as u64)
@@ -779,11 +1034,7 @@ fn say(state: u64) {
     serial.puts((&s_e[0]) as u64)
     serial.dec(g(state, S_PNP0C50))
     serial.puts((&s_f[0]) as u64)
-    var r: u64 = 0
-    if found(state) {
-        r = 1
-    }
-    serial.dec(r)
+    serial.dec(ndev())
     serial.nl()
     var i: u64 = 0
     while i < g(state, S_NSLAVE) {
@@ -792,6 +1043,46 @@ fn say(state: u64) {
         serial.hex(g(state, S_SLAVES + i * 8))
         serial.nl()
         i = i + 1
+    }
+    var c: u64 = 0
+    while c < nctrl() {
+        var s_k: [u8; 14] = "i2chid: ctrl=\0"
+        var s_m: [u8; 6] = " bdf=\0"
+        var s_i: [u8; 5] = " id=\0"
+        serial.puts((&s_k[0]) as u64)
+        serial.dec(c)
+        serial.puts((&s_m[0]) as u64)
+        serial.hex(ctg(c, CT_BDF))
+        serial.puts((&s_i[0]) as u64)
+        serial.hex(ctg(c, CT_IDS))
+        serial.puts((&s_b[0]) as u64)
+        serial.hex(ctg(c, CT_MMIO))
+        serial.nl()
+        c = c + 1
+    }
+}
+
+// One line per device found.
+fn say_devs(state: u64) {
+    var j: u64 = 0
+    while j < ndev() {
+        var s_a: [u8; 13] = "i2chid: dev=\0"
+        var s_b: [u8; 7] = " ctrl=\0"
+        var s_c: [u8; 6] = " adr=\0"
+        var s_d: [u8; 7] = " kind=\0"
+        var s_e: [u8; 7] = " slot=\0"
+        serial.puts((&s_a[0]) as u64)
+        serial.dec(j)
+        serial.puts((&s_b[0]) as u64)
+        serial.dec(dvg(j, DV_CTRL))
+        serial.puts((&s_c[0]) as u64)
+        serial.hex(dvg(j, DV_ADR))
+        serial.puts((&s_d[0]) as u64)
+        serial.dec(dvg(j, DV_KIND))
+        serial.puts((&s_e[0]) as u64)
+        serial.dec(hidrep.I2C_DEV_FIRST + j)
+        serial.nl()
+        j = j + 1
     }
 }
 
@@ -893,312 +1184,622 @@ fn selftest(state: u64) -> u64 {
 }
 
 // ======================================================================
-// A SIMULATED DESIGNWARE I2C CONTROLLER WITH A HID TOUCHPAD (word i2csim).
+// SIMULATED DESIGNWARE I2C CONTROLLERS WITH HID DEVICES (words i2csim, touchsim).
 //
 // QEMU has no DW_apb_i2c, so the register-level path (dw_setup, dw_xfer,
-// reg_read, versuche, poll) could never run. This model sits behind r32/w32
-// when the "controller address" is SIM_MM (1 -- never a real BAR). It
-// behaves like the part the driver relies on: TAR only changes while the
-// controller is disabled, a command to an address without a device aborts
-// (TX_ABRT), reads pop an RX FIFO, a write phase followed by a RESTART
-// read selects the register. The device is a precision touchpad: HID
-// description at register 1, report description (the PTP of hidtest) at
-// 2, input reports at 3 or by a plain read. Reports are only delivered
-// after SET_POWER(on). Everything is state in the I2C page above 0x400.
+// reg_read, versuche, poll) could never run. These models sit behind
+// r32/w32 when the "controller address" is SIM_MM or SIM_MM2 (1 and 2 --
+// never a real BAR). A controller behaves like the part the driver relies
+// on: TAR only changes while it is disabled, a command to an address
+// without a device aborts (TX_ABRT), reads pop an RX FIFO, a write phase
+// followed by a RESTART read selects the register. A device is a HID
+// device: HID description at its description register (1 or 0x20), report
+// description at 2, input reports at 3 or by a plain read; reports only
+// flow after SET_POWER(on). A device flagged HANG ACKs but never answers
+// a read (the driver must time out and go on).
+//
+//   i2csim:   one controller, a decoy at 0x15 and the precision touchpad
+//   touchsim: A = touchpad 0x2C; B = touch screen 0x10 (description at
+//             0x20), pen 0x11, hanging device 0x40
+//
+// All state lives in the static array `sm` (2 controller pages of 0x1000,
+// then 5 device pages of 0x800).
 const SIM_MM: u64 = 1
+const SIM_MM2: u64 = 2
 const SIM_ADDR: u64 = 0x2C
-const SM_EN: u64 = 0x400
-const SM_TAR: u64 = 0x408
-const SM_ABRT: u64 = 0x410
-const SM_RXN: u64 = 0x418
-const SM_WN: u64 = 0x420
-const SM_SRC: u64 = 0x428
-const SM_POS: u64 = 0x430
-const SM_LEN: u64 = 0x438
-const SM_QH: u64 = 0x440
-const SM_QT: u64 = 0x448
-const SM_POWER: u64 = 0x450
-const SM_NPOW: u64 = 0x458
-const SM_NRST: u64 = 0x460
-const SM_TARBAD: u64 = 0x468
-const SM_NREAD: u64 = 0x470
-const SM_RXH: u64 = 0x478
-const SM_RX: u64 = 0x500 // 64-byte FIFO ring
-const SM_W: u64 = 0x540 // write phase bytes (8)
-const SM_HDESC: u64 = 0x560 // 30 bytes
-const SM_CUR: u64 = 0x580 // current input response (<= 64)
-const SM_RDESC: u64 = 0x600 // 433 bytes
-const SM_Q: u64 = 0x800 // 8 slots x 64: [n][payload...]
+const SIM_NDEV: u64 = 5
+static mut sm: [u64; 2304] = [0 as u64; 2304]
 
-fn sim_base(state: u64) -> u64 {
-    return state + I2C_OFF
+const CS_EN: u64 = 0x00
+const CS_TAR: u64 = 0x08
+const CS_ABRT: u64 = 0x10
+const CS_RXN: u64 = 0x18
+const CS_WN: u64 = 0x20
+const CS_SRC: u64 = 0x28
+const CS_POS: u64 = 0x30
+const CS_LEN: u64 = 0x38
+const CS_RXH: u64 = 0x40
+const CS_TARBAD: u64 = 0x48
+const CS_NREAD: u64 = 0x50
+const CS_RX: u64 = 0x100 // 64-byte FIFO ring
+const CS_W: u64 = 0x140 // write phase bytes (8)
+const CS_CUR: u64 = 0x180 // current input response (<= 64)
+const CS_SCRATCH: u64 = 0xC00
+
+const DS_BASE: u64 = 0x2000
+const DS_PAGE: u64 = 0x800
+const DS_ON: u64 = 0x00
+const DS_ADDR: u64 = 0x08
+const DS_CTRL: u64 = 0x10
+const DS_KIND: u64 = 0x18 // 0 pad, 1 touch screen, 2 pen
+const DS_QH: u64 = 0x20
+const DS_QT: u64 = 0x28
+const DS_POWER: u64 = 0x30
+const DS_NPOW: u64 = 0x38
+const DS_NRST: u64 = 0x40
+const DS_HANG: u64 = 0x48
+const DS_HDREG: u64 = 0x50
+const DS_RDLEN: u64 = 0x58
+const DS_HDESC: u64 = 0x80 // 30 bytes
+const DS_Q: u64 = 0x100 // 8 slots x 64: [n][payload...]
+const DS_RDESC: u64 = 0x300 // up to 0x500 bytes
+
+fn sm_base() -> u64 {
+    return (&sm[0]) as u64
 }
 
-fn sim_init(state: u64) {
+fn cb(mm: u64) -> u64 {
+    return sm_base() + (mm - 1) * 0x1000
+}
+
+fn db(i: u64) -> u64 {
+    return sm_base() + DS_BASE + i * DS_PAGE
+}
+
+fn scg(mm: u64, off: u64) -> u64 {
+    return kstate.get(cb(mm), off)
+}
+
+fn scs(mm: u64, off: u64, v: u64) {
+    kstate.set(cb(mm), off, v)
+}
+
+fn sdg(i: u64, off: u64) -> u64 {
+    return kstate.get(db(i), off)
+}
+
+fn sds(i: u64, off: u64, v: u64) {
+    kstate.set(db(i), off, v)
+}
+
+fn em(dst: u64, at: u64, b: u64) -> u64 {
+    kstate.set8(dst + at, b as u8)
+    return at + 1
+}
+
+fn sim_desc_touch(dst: u64) -> u64 {
+    // touch screen: 2 fingers (tip, id, x, y) + contact count, report id 1
+    var n: u64 = 0
+    n = em(dst, n, 0x05)
+    n = em(dst, n, 0x0D)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x04)
+    n = em(dst, n, 0xA1)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x85)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x22)
+    n = em(dst, n, 0xA1)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x42)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x25)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x07)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x03)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x51)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x25)
+    n = em(dst, n, 0x0F)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x08)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x05)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x30)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x26)
+    n = em(dst, n, 0x20)
+    n = em(dst, n, 0x0E)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x10)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x31)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x26)
+    n = em(dst, n, 0x88)
+    n = em(dst, n, 0x08)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x10)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x05)
+    n = em(dst, n, 0x0D)
+    n = em(dst, n, 0xC0)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x22)
+    n = em(dst, n, 0xA1)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x42)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x25)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x07)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x03)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x51)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x25)
+    n = em(dst, n, 0x0F)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x08)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x05)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x30)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x26)
+    n = em(dst, n, 0x20)
+    n = em(dst, n, 0x0E)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x10)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x31)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x26)
+    n = em(dst, n, 0x88)
+    n = em(dst, n, 0x08)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x10)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x05)
+    n = em(dst, n, 0x0D)
+    n = em(dst, n, 0xC0)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x54)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x25)
+    n = em(dst, n, 0x05)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x08)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0xC0)
+    return n
+}
+
+fn sim_desc_pen(dst: u64) -> u64 {
+    // pen: tip, barrel, in range, x, y, report id 2
+    var n: u64 = 0
+    n = em(dst, n, 0x05)
+    n = em(dst, n, 0x0D)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0xA1)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x85)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x20)
+    n = em(dst, n, 0xA1)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x42)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x25)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x44)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x32)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x05)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x03)
+    n = em(dst, n, 0x05)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x30)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x26)
+    n = em(dst, n, 0x20)
+    n = em(dst, n, 0x0E)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x10)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0x09)
+    n = em(dst, n, 0x31)
+    n = em(dst, n, 0x15)
+    n = em(dst, n, 0x00)
+    n = em(dst, n, 0x26)
+    n = em(dst, n, 0x88)
+    n = em(dst, n, 0x08)
+    n = em(dst, n, 0x75)
+    n = em(dst, n, 0x10)
+    n = em(dst, n, 0x95)
+    n = em(dst, n, 0x01)
+    n = em(dst, n, 0x81)
+    n = em(dst, n, 0x02)
+    n = em(dst, n, 0xC0)
+    n = em(dst, n, 0xC0)
+    return n
+}
+
+fn sim_clear() {
     var i: u64 = 0
-    while i < 0x180 {
-        s(state, 0x400 + i * 8, 0)
+    while i < 2304 {
+        kstate.set(sm_base(), i * 8, 0)
         i = i + 1
     }
-    let b: u64 = sim_base(state)
-    // HID over I2C description: 30 bytes, little endian.
-    var d: [u8; 30] = [0 as u8; 30]
-    d[0] = 30 as u8
-    d[2] = 0x00 as u8
-    d[3] = 0x01 as u8 // bcdVersion 0x0100
-    d[4] = 0xB1 as u8
-    d[5] = 0x01 as u8 // report description 433 bytes
-    d[6] = 0x02 as u8 // its register 2
-    d[8] = 0x03 as u8 // input register 3
-    d[10] = 31 as u8 // max input length (2 length bytes + 29)
-    d[12] = 0x04 as u8
-    d[14] = 12 as u8
-    d[16] = 0x05 as u8 // command register
-    d[18] = 0x06 as u8 // data register
-    d[20] = 0xF3 as u8
-    d[21] = 0x04 as u8 // vendor 0x04F3
-    d[22] = 0x03 as u8
-    d[23] = 0x30 as u8 // product 0x3003
-    i = 0
-    while i < 30 {
-        kstate.set8(b + SM_HDESC + i, d[i as usize])
-        i = i + 1
-    }
-    let n: u64 = hidtest.load(3, b + SM_RDESC)
-    s(state, SM_LEN, 0)
-    s(state, SM_TAR, 0xFFFF)
+    scs(SIM_MM, CS_TAR, 0xFFFF)
+    scs(SIM_MM2, CS_TAR, 0xFFFF)
 }
 
-// Put an input report (payload without the 2 length bytes) in the queue.
-fn sim_push_report(state: u64, p: u64, n: u64) -> bool {
-    let h: u64 = g(state, SM_QH)
-    let t: u64 = g(state, SM_QT)
+// Device i on controller mm at address adr. kind 0 = precision touchpad,
+// 1 = touch screen, 2 = pen. hdreg = register of the HID description.
+fn sim_add_dev(i: u64, mm: u64, adr: u64, kind: u64, hdreg: u64, vid: u64, pid: u64, hang: u64) {
+    sds(i, DS_ON, 1)
+    sds(i, DS_ADDR, adr)
+    sds(i, DS_CTRL, mm)
+    sds(i, DS_KIND, kind)
+    sds(i, DS_HDREG, hdreg)
+    sds(i, DS_HANG, hang)
+    let rd: u64 = db(i) + DS_RDESC
+    var rl: u64 = 0
+    if kind == 0 {
+        rl = hidtest.load(3, rd)
+    } else if kind == 1 {
+        rl = sim_desc_touch(rd)
+    } else {
+        rl = sim_desc_pen(rd)
+    }
+    sds(i, DS_RDLEN, rl)
+    let hd: u64 = db(i) + DS_HDESC
+    kstate.set8(hd + 0, 30 as u8)
+    kstate.set8(hd + 3, 0x01 as u8) // bcdVersion 0x0100
+    kstate.set8(hd + 4, (rl & 0xFF) as u8)
+    kstate.set8(hd + 5, ((rl >> 8) & 0xFF) as u8)
+    kstate.set8(hd + 6, 0x02 as u8) // report description register 2
+    kstate.set8(hd + 8, 0x03 as u8) // input register 3
+    kstate.set8(hd + 10, 31 as u8) // max input length (2 length bytes + 29)
+    kstate.set8(hd + 12, 0x04 as u8)
+    kstate.set8(hd + 14, 12 as u8)
+    kstate.set8(hd + 16, 0x05 as u8) // command register
+    kstate.set8(hd + 18, 0x06 as u8) // data register
+    kstate.set8(hd + 20, (vid & 0xFF) as u8)
+    kstate.set8(hd + 21, ((vid >> 8) & 0xFF) as u8)
+    kstate.set8(hd + 22, (pid & 0xFF) as u8)
+    kstate.set8(hd + 23, ((pid >> 8) & 0xFF) as u8)
+}
+
+fn sim_find(mm: u64, tar: u64) -> u64 {
+    var i: u64 = 0
+    while i < SIM_NDEV {
+        if sdg(i, DS_ON) == 1 && sdg(i, DS_CTRL) == mm && sdg(i, DS_ADDR) == tar {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Put an input report (payload without the 2 length bytes) in the queue
+// of device i.
+fn sim_push(i: u64, p: u64, n: u64) -> bool {
+    let h: u64 = sdg(i, DS_QH)
+    let t: u64 = sdg(i, DS_QT)
     if t - h >= 8 || n > 62 {
         return false
     }
-    let slot: u64 = sim_base(state) + SM_Q + (t % 8) * 64
+    let slot: u64 = db(i) + DS_Q + (t % 8) * 64
     kstate.set8(slot, n as u8)
-    var i: u64 = 0
-    while i < n {
-        kstate.set8(slot + 1 + i, kstate.get8(p + i) as u8)
-        i = i + 1
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(slot + 1 + k, kstate.get8(p + k) as u8)
+        k = k + 1
     }
-    s(state, SM_QT, t + 1)
+    sds(i, DS_QT, t + 1)
     return true
 }
 
 // The response of an input read: [len lo, len hi, payload...]. Empty
 // queue or device asleep = length 0 (two zero bytes).
-fn sim_load_input(state: u64) -> bool {
-    let b: u64 = sim_base(state)
-    var i: u64 = 0
-    while i < 64 {
-        kstate.set8(b + SM_CUR + i, 0 as u8)
-        i = i + 1
+fn sim_load_input(mm: u64, d: u64) -> bool {
+    let cur: u64 = cb(mm) + CS_CUR
+    var k: u64 = 0
+    while k < 64 {
+        kstate.set8(cur + k, 0 as u8)
+        k = k + 1
     }
-    s(state, SM_SRC, 3)
-    s(state, SM_LEN, 2)
-    let h: u64 = g(state, SM_QH)
-    if g(state, SM_POWER) != 1 || h == g(state, SM_QT) {
+    scs(mm, CS_SRC, 3)
+    scs(mm, CS_LEN, 2)
+    let h: u64 = sdg(d, DS_QH)
+    if sdg(d, DS_POWER) != 1 || h == sdg(d, DS_QT) {
         return true
     }
-    let slot: u64 = b + SM_Q + (h % 8) * 64
+    let slot: u64 = db(d) + DS_Q + (h % 8) * 64
     let n: u64 = kstate.get8(slot)
-    kstate.set8(b + SM_CUR, ((n + 2) & 0xFF) as u8)
-    kstate.set8(b + SM_CUR + 1, (((n + 2) >> 8) & 0xFF) as u8)
-    i = 0
-    while i < n {
-        kstate.set8(b + SM_CUR + 2 + i, kstate.get8(slot + 1 + i) as u8)
-        i = i + 1
+    kstate.set8(cur, ((n + 2) & 0xFF) as u8)
+    kstate.set8(cur + 1, (((n + 2) >> 8) & 0xFF) as u8)
+    k = 0
+    while k < n {
+        kstate.set8(cur + 2 + k, kstate.get8(slot + 1 + k) as u8)
+        k = k + 1
     }
-    s(state, SM_LEN, n + 2)
-    s(state, SM_QH, h + 1)
+    scs(mm, CS_LEN, n + 2)
+    sds(d, DS_QH, h + 1)
     return true
 }
 
 // A read phase starts: which source answers, from the write phase.
-fn sim_select(state: u64) -> bool {
-    let b: u64 = sim_base(state)
-    let wn: u64 = g(state, SM_WN)
+fn sim_select(mm: u64, d: u64) -> bool {
+    let w: u64 = cb(mm) + CS_W
+    let wn: u64 = scg(mm, CS_WN)
     if wn == 0 {
-        return sim_load_input(state)
+        return sim_load_input(mm, d)
     }
     if wn != 2 {
         return false
     }
-    let reg: u64 = kstate.get8(b + SM_W) | (kstate.get8(b + SM_W + 1) << 8)
-    if reg == 1 {
-        s(state, SM_SRC, 1)
-        s(state, SM_LEN, 30)
+    let reg: u64 = kstate.get8(w) | (kstate.get8(w + 1) << 8)
+    if reg == sdg(d, DS_HDREG) {
+        scs(mm, CS_SRC, 1)
+        scs(mm, CS_LEN, 30)
         return true
     }
     if reg == 2 {
-        s(state, SM_SRC, 2)
-        s(state, SM_LEN, 433)
+        scs(mm, CS_SRC, 2)
+        scs(mm, CS_LEN, sdg(d, DS_RDLEN))
         return true
     }
     if reg == 3 {
-        return sim_load_input(state)
+        return sim_load_input(mm, d)
     }
     return false
 }
 
-fn sim_byte(state: u64, pos: u64) -> u64 {
-    let b: u64 = sim_base(state)
-    if pos >= g(state, SM_LEN) {
+fn sim_byte(mm: u64, d: u64, pos: u64) -> u64 {
+    if pos >= scg(mm, CS_LEN) {
         return 0
     }
-    let src: u64 = g(state, SM_SRC)
+    let src: u64 = scg(mm, CS_SRC)
     if src == 1 {
-        return kstate.get8(b + SM_HDESC + pos)
+        return kstate.get8(db(d) + DS_HDESC + pos)
     }
     if src == 2 {
-        return kstate.get8(b + SM_RDESC + pos)
+        return kstate.get8(db(d) + DS_RDESC + pos)
     }
     if src == 3 {
-        return kstate.get8(b + SM_CUR + pos)
+        return kstate.get8(cb(mm) + CS_CUR + pos)
     }
     return 0
 }
 
 // A finished write phase = a command: register 5, then [byte0, opcode].
-fn sim_command(state: u64) {
-    let b: u64 = sim_base(state)
-    if g(state, SM_WN) < 4 {
+fn sim_command(mm: u64, d: u64) {
+    let w: u64 = cb(mm) + CS_W
+    if scg(mm, CS_WN) < 4 {
         return
     }
-    let reg: u64 = kstate.get8(b + SM_W) | (kstate.get8(b + SM_W + 1) << 8)
+    let reg: u64 = kstate.get8(w) | (kstate.get8(w + 1) << 8)
     if reg != 5 {
         return
     }
-    let b0: u64 = kstate.get8(b + SM_W + 2)
-    let op: u64 = kstate.get8(b + SM_W + 3) & 0x0F
+    let b0: u64 = kstate.get8(w + 2)
+    let op: u64 = kstate.get8(w + 3) & 0x0F
     if op == 8 {
-        s(state, SM_NPOW, g(state, SM_NPOW) + 1)
+        sds(d, DS_NPOW, sdg(d, DS_NPOW) + 1)
         if (b0 & 3) == 0 {
-            s(state, SM_POWER, 1)
+            sds(d, DS_POWER, 1)
         }
         if (b0 & 3) != 0 {
-            s(state, SM_POWER, 0)
+            sds(d, DS_POWER, 0)
         }
     }
     if op == 1 {
-        s(state, SM_NRST, g(state, SM_NRST) + 1)
-        s(state, SM_QH, 0)
-        s(state, SM_QT, 0)
+        sds(d, DS_NRST, sdg(d, DS_NRST) + 1)
+        sds(d, DS_QH, 0)
+        sds(d, DS_QT, 0)
     }
 }
 
-fn sim_rd(state: u64, off: u64) -> u64 {
+fn sim_rd(state: u64, mm: u64, off: u64) -> u64 {
     if off == IC_COMP_TYPE {
         return DW_MAGIC
     }
     if off == IC_ENABLE_STATUS {
-        return g(state, SM_EN) & 1
+        return scg(mm, CS_EN) & 1
     }
     if off == IC_RXFLR {
-        return g(state, SM_RXN)
+        return scg(mm, CS_RXN)
     }
     if off == IC_RAW_INTR {
-        if g(state, SM_ABRT) != 0 {
+        if scg(mm, CS_ABRT) != 0 {
             return STAT_TX_ABRT
         }
         return 0
     }
     if off == IC_CLR_TX_ABRT || off == IC_CLR_INTR {
-        s(state, SM_ABRT, 0)
+        scs(mm, CS_ABRT, 0)
         return 0
     }
     if off == IC_DATA_CMD {
-        let n: u64 = g(state, SM_RXN)
+        let n: u64 = scg(mm, CS_RXN)
         if n == 0 {
             return 0
         }
-        let h: u64 = g(state, SM_RXH)
-        let v: u64 = kstate.get8(sim_base(state) + SM_RX + h)
-        s(state, SM_RXH, (h + 1) % 64)
-        s(state, SM_RXN, n - 1)
+        let h: u64 = scg(mm, CS_RXH)
+        let v: u64 = kstate.get8(cb(mm) + CS_RX + h)
+        scs(mm, CS_RXH, (h + 1) % 64)
+        scs(mm, CS_RXN, n - 1)
         return v
     }
     return 0
 }
 
-fn sim_rx_push(state: u64, v: u64) {
-    let n: u64 = g(state, SM_RXN)
+fn sim_rx_push(mm: u64, v: u64) {
+    let n: u64 = scg(mm, CS_RXN)
     if n >= 64 {
         return
     }
-    let t: u64 = (g(state, SM_RXH) + n) % 64
-    kstate.set8(sim_base(state) + SM_RX + t, v as u8)
-    s(state, SM_RXN, n + 1)
+    let t: u64 = (scg(mm, CS_RXH) + n) % 64
+    kstate.set8(cb(mm) + CS_RX + t, v as u8)
+    scs(mm, CS_RXN, n + 1)
 }
 
-fn sim_wr(state: u64, off: u64, v: u64) {
-    let b: u64 = sim_base(state)
+fn sim_wr(state: u64, mm: u64, off: u64, v: u64) {
     if off == IC_ENABLE {
-        s(state, SM_EN, v & 1)
+        scs(mm, CS_EN, v & 1)
         if (v & 1) == 0 {
-            s(state, SM_WN, 0)
-            s(state, SM_SRC, 0)
-            s(state, SM_RXN, 0)
-            s(state, SM_RXH, 0)
+            scs(mm, CS_WN, 0)
+            scs(mm, CS_SRC, 0)
+            scs(mm, CS_RXN, 0)
+            scs(mm, CS_RXH, 0)
         }
         return
     }
     if off == IC_TAR {
         // The real part ignores a TAR write while enabled -- the driver
         // must disable first. Count the violations.
-        if g(state, SM_EN) == 1 {
-            s(state, SM_TARBAD, g(state, SM_TARBAD) + 1)
+        if scg(mm, CS_EN) == 1 {
+            scs(mm, CS_TARBAD, scg(mm, CS_TARBAD) + 1)
             return
         }
-        s(state, SM_TAR, v & 0x7F)
+        scs(mm, CS_TAR, v & 0x7F)
         return
     }
-    if off != IC_DATA_CMD || g(state, SM_EN) == 0 {
+    if off != IC_DATA_CMD || scg(mm, CS_EN) == 0 {
         return
     }
-    if g(state, SM_TAR) != SIM_ADDR {
+    let d1: u64 = sim_find(mm, scg(mm, CS_TAR))
+    if d1 == 0 {
         // NACK on the address phase: abort, TX FIFO flushed.
-        s(state, SM_ABRT, 1)
+        scs(mm, CS_ABRT, 1)
         return
     }
+    let d: u64 = d1 - 1
     if (v & CMD_READ) != 0 {
-        if (v & CMD_RESTART) != 0 || g(state, SM_SRC) == 0 {
-            if !sim_select(state) {
-                s(state, SM_ABRT, 1)
+        if sdg(d, DS_HANG) != 0 {
+            return // ACKed, but the device never answers
+        }
+        if (v & CMD_RESTART) != 0 || scg(mm, CS_SRC) == 0 {
+            if !sim_select(mm, d) {
+                scs(mm, CS_ABRT, 1)
                 return
             }
-            s(state, SM_POS, 0)
+            scs(mm, CS_POS, 0)
         }
-        let pos: u64 = g(state, SM_POS)
-        sim_rx_push(state, sim_byte(state, pos))
-        s(state, SM_POS, pos + 1)
-        s(state, SM_NREAD, g(state, SM_NREAD) + 1)
+        let pos: u64 = scg(mm, CS_POS)
+        sim_rx_push(mm, sim_byte(mm, d, pos))
+        scs(mm, CS_POS, pos + 1)
+        scs(mm, CS_NREAD, scg(mm, CS_NREAD) + 1)
         if (v & CMD_STOP) != 0 {
-            s(state, SM_SRC, 0)
-            s(state, SM_WN, 0)
+            scs(mm, CS_SRC, 0)
+            scs(mm, CS_WN, 0)
         }
         return
     }
     if (v & CMD_RESTART) != 0 {
-        s(state, SM_WN, 0)
+        scs(mm, CS_WN, 0)
     }
-    let wn: u64 = g(state, SM_WN)
+    let wn: u64 = scg(mm, CS_WN)
     if wn < 8 {
-        kstate.set8(b + SM_W + wn, (v & 0xFF) as u8)
+        kstate.set8(cb(mm) + CS_W + wn, (v & 0xFF) as u8)
     }
-    s(state, SM_WN, wn + 1)
-    s(state, SM_SRC, 0)
+    scs(mm, CS_WN, wn + 1)
+    scs(mm, CS_SRC, 0)
     if (v & CMD_STOP) != 0 {
-        sim_command(state)
-        s(state, SM_WN, 0)
+        sim_command(mm, d)
+        scs(mm, CS_WN, 0)
     }
 }
 
-// The test run: controller at SIM_MM with two slaves from "firmware"
-// (0x15 is a decoy without a device), probe, then play the precision
-// touchpad reports of hidtest through the I2C path.
+// The old test run (word i2csim): controller at SIM_MM with two slaves
+// from "firmware" (0x15 is a decoy without a device), probe, then play the
+// precision touchpad reports of hidtest through the I2C path.
 fn simrun(state: u64) {
     var s_a: [u8; 15] = "i2csim: ready=\0"
     var s_b: [u8; 9] = " aborts=\0"
@@ -1210,11 +1811,11 @@ fn simrun(state: u64) {
     var s_h: [u8; 17] = "i2csim: reports=\0"
     var s_i: [u8; 11] = " timeouts=\0"
     var s_j: [u8; 8] = " reads=\0"
-hidin.stage(state)
-    sim_init(state)
-    s(state, S_FOUND, 1)
-    s(state, S_BDF, 0)
-    s(state, S_MMIO, SIM_MM)
+    hidin.stage(state)
+    sim_clear()
+    sim_add_dev(0, SIM_MM, SIM_ADDR, 0, 1, 0x04F3, 0x3003, 0)
+    tables_reset()
+    add_ctrl(state, 0, 0, SIM_MM)
     s(state, S_NSLAVE, 2)
     s(state, S_SLAVES, 0x15)
     s(state, S_SLAVES + 8, 0x2C)
@@ -1224,25 +1825,25 @@ hidin.stage(state)
     serial.puts((&s_b[0]) as u64)
     serial.dec(g(state, S_ABORTS))
     serial.puts((&s_c[0]) as u64)
-    serial.dec(g(state, SM_NPOW))
+    serial.dec(sdg(0, DS_NPOW))
     serial.puts((&s_d[0]) as u64)
-    serial.dec(g(state, SM_NRST))
+    serial.dec(sdg(0, DS_NRST))
     serial.puts((&s_e[0]) as u64)
-    serial.dec(g(state, SM_TARBAD))
+    serial.dec(scg(SIM_MM, CS_TARBAD))
     serial.puts((&s_f[0]) as u64)
     serial.hex(g(state, H_VID))
     serial.nl()
     if !ok {
         return
     }
-    let scratch: u64 = sim_base(state) + 0xC00
+    let scratch: u64 = cb(SIM_MM) + CS_SCRATCH
     hidin.set_trace(state, true)
     var i: u64 = 0
     let n: u64 = hidtest.gbase()
     while i < n {
         if hidtest.bdesc(i) == 3 {
             let bl: u64 = hidtest.bload(i, scratch)
-            sim_push_report(state, scratch, bl)
+            sim_push(0, scratch, bl)
             poll(state)
             serial.puts((&s_g[0]) as u64)
             serial.dec(i)
@@ -1258,7 +1859,178 @@ hidin.stage(state)
     serial.puts((&s_i[0]) as u64)
     serial.dec(g(state, S_TIMEOUTS))
     serial.puts((&s_j[0]) as u64)
-    serial.dec(g(state, SM_NREAD))
+    serial.dec(scg(SIM_MM, CS_NREAD))
     serial.nl()
     hidin.say(state)
+}
+
+// ---------------------------------------------------------------------
+// touchsim: report builders and one step of the virtual clock.
+fn find_dev(c: u64, adr: u64) -> u64 {
+    var j: u64 = 0
+    while j < ndev() {
+        if dvg(j, DV_CTRL) == c && dvg(j, DV_ADR) == adr {
+            return j
+        }
+        j = j + 1
+    }
+    return 0xFF
+}
+
+fn sim_step(state: u64, ms: u64) {
+    hidin.set_vclk(state, ms)
+    poll(state)
+}
+
+// Touch screen report (rid 1): two fingers (tip, id, x, y) and the count.
+fn ts_report(state: u64, d: u64, n: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    let p: u64 = cb(SIM_MM2) + CS_SCRATCH
+    kstate.set8(p, 1 as u8)
+    var f: u64 = 0
+    while f < 2 {
+        var tip: u64 = 0
+        var x: u64 = 0
+        var y: u64 = 0
+        if f < n {
+            tip = 1
+            if f == 0 {
+                x = x0
+                y = y0
+            } else {
+                x = x1
+                y = y1
+            }
+        }
+        let o: u64 = p + 1 + f * 6
+        kstate.set8(o, tip as u8)
+        kstate.set8(o + 1, f as u8)
+        kstate.set8(o + 2, (x & 0xFF) as u8)
+        kstate.set8(o + 3, ((x >> 8) & 0xFF) as u8)
+        kstate.set8(o + 4, (y & 0xFF) as u8)
+        kstate.set8(o + 5, ((y >> 8) & 0xFF) as u8)
+        f = f + 1
+    }
+    kstate.set8(p + 13, n as u8)
+    sim_push(d, p, 14)
+}
+
+// Pen report (rid 2): bit 0 tip, bit 1 barrel, bit 2 in range; x, y.
+fn pen_report(state: u64, d: u64, bits: u64, x: u64, y: u64) {
+    let p: u64 = cb(SIM_MM2) + CS_SCRATCH + 0x100
+    kstate.set8(p, 2 as u8)
+    kstate.set8(p + 1, bits as u8)
+    kstate.set8(p + 2, (x & 0xFF) as u8)
+    kstate.set8(p + 3, ((x >> 8) & 0xFF) as u8)
+    kstate.set8(p + 4, (y & 0xFF) as u8)
+    kstate.set8(p + 5, ((y >> 8) & 0xFF) as u8)
+    sim_push(d, p, 6)
+}
+
+// The touch run (word touchsim): controller A (touchpad + decoy), controller
+// B (touch screen with the description at 0x20, pen, a device that hangs).
+fn simrun2(state: u64) {
+    var s_a: [u8; 17] = "touchsim: ctrls=\0"
+    var s_b: [u8; 7] = " devs=\0"
+    var s_c: [u8; 11] = " timeouts=\0"
+    var s_d: [u8; 9] = " aborts=\0"
+    var s_e: [u8; 10] = " b_state=\0"
+    var s_f: [u8; 8] = " b_tmo=\0"
+    var s_g: [u8; 18] = "touchsim: reports\0"
+    var s_h: [u8; 8] = " total=\0"
+    var s_i: [u8; 15] = "touchsim: end \0"
+    hidin.stage(state)
+    sim_clear()
+    sim_add_dev(0, SIM_MM, 0x2C, 0, 1, 0x04F3, 0x3003, 0)
+    sim_add_dev(1, SIM_MM2, 0x10, 1, 0x20, 0x04F3, 0x2A01, 0)
+    sim_add_dev(2, SIM_MM2, 0x11, 2, 1, 0x056A, 0x5002, 0)
+    sim_add_dev(3, SIM_MM2, 0x40, 0, 1, 0x1234, 0x0001, 1)
+    tables_reset()
+    add_ctrl(state, 0x0A00, 0x80869d60, SIM_MM)
+    add_ctrl(state, 0x0A08, 0x80869d61, SIM_MM2)
+    s(state, S_NSLAVE, 5)
+    s(state, S_SLAVES, 0x15)
+    s(state, S_SLAVES + 8, 0x2C)
+    s(state, S_SLAVES + 16, 0x10)
+    s(state, S_SLAVES + 24, 0x11)
+    s(state, S_SLAVES + 32, 0x40)
+    probe_all(state)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(nctrl())
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(ndev())
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(g(state, S_TIMEOUTS))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(g(state, S_ABORTS))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(ctg(1, CT_STATE))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(ctg(1, CT_TMO))
+    serial.nl()
+    say_devs(state)
+    let dscr: u64 = 1
+    let dpen: u64 = 2
+    // the sim device indexes 1 and 2 (touch screen, pen) as the driver sees them
+    let jt: u64 = find_dev(1, 0x10)
+    let jp: u64 = find_dev(1, 0x11)
+    hidin.set_trace(state, true)
+    // A: tap at the middle of the panel
+    ts_report(state, dscr, 1, 1808, 1092, 0, 0)
+    sim_step(state, 1000)
+    ts_report(state, dscr, 0, 0, 0, 0, 0)
+    sim_step(state, 1100)
+    // B: drag from the left to the right
+    ts_report(state, dscr, 1, 400, 400, 0, 0)
+    sim_step(state, 2000)
+    ts_report(state, dscr, 1, 1200, 400, 0, 0)
+    sim_step(state, 2020)
+    ts_report(state, dscr, 1, 1400, 420, 0, 0)
+    sim_step(state, 2040)
+    ts_report(state, dscr, 0, 0, 0, 0, 0)
+    sim_step(state, 2060)
+    // C: two-finger scroll, 600 units down (about 211 px = 5 notches)
+    ts_report(state, dscr, 2, 1000, 800, 1200, 800)
+    sim_step(state, 3000)
+    ts_report(state, dscr, 2, 1000, 1000, 1200, 1000)
+    sim_step(state, 3020)
+    ts_report(state, dscr, 2, 1000, 1200, 1200, 1200)
+    sim_step(state, 3040)
+    ts_report(state, dscr, 2, 1000, 1400, 1200, 1400)
+    sim_step(state, 3060)
+    ts_report(state, dscr, 0, 0, 0, 0, 0)
+    sim_step(state, 3080)
+    // D: long press (700 ms) = right click
+    ts_report(state, dscr, 1, 900, 900, 0, 0)
+    sim_step(state, 5000)
+    ts_report(state, dscr, 0, 0, 0, 0, 0)
+    sim_step(state, 5700)
+    // E: pen: hover, tip, tip + barrel, out of range
+    pen_report(state, dpen, 4, 2000, 1000)
+    sim_step(state, 6000)
+    pen_report(state, dpen, 5, 2000, 1000)
+    sim_step(state, 6020)
+    pen_report(state, dpen, 7, 2400, 1200)
+    sim_step(state, 6040)
+    pen_report(state, dpen, 0, 2400, 1200)
+    sim_step(state, 6060)
+    hidin.set_trace(state, false)
+    hidin.set_vclk(state, 0)
+    serial.puts((&s_g[0]) as u64)
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(g(state, S_REPORTS))
+    serial.nl()
+    var j: u64 = 0
+    while j < ndev() {
+        var s_r: [u8; 20] = "touchsim: dev reps=\0"
+        serial.puts((&s_r[0]) as u64)
+        serial.dec(dvg(j, DV_REPS))
+        serial.nl()
+        j = j + 1
+    }
+    hidin.touch_say(state)
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(jt)
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(jp)
+    serial.nl()
 }
