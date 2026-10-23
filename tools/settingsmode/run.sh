@@ -11,6 +11,8 @@
 # the entry rects appear in manual mode, and it proves itself red on doctored copies of the log (counter-proof).
 # The default window is 800x480 (low): the sidebar cannot show every tab there; picture 05 (last tab opened by its rect) is the look
 # at the sidebar reveal (a search filters the sidebar, so it cannot test scrolling).
+# Load-proof (r1611): every step waits for the state it needs (`settings: menu open`, the next `settings: controls`, the
+# rebuilt tab rects) instead of a fixed delay; SM_HALT raises the guest halt on a slower machine.
 # Pictures: 01..06 in the run folder; pass res=1280x800 for the roomy window.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -27,25 +29,31 @@ YRES=${RES#*x}
   echo "warte 12"
   echo "klick 24,$((YRES-20))"; echo "warte 3"
   echo "klickauf start_Settings"; echo "warte 12"
-  echo "warteauf settings: nav route=settings://personalization page=0 || 90"
+  echo "warteauf settings: nav route=settings://personalization page=0 || 150"
   echo "marke settings: controls page=3"
-  echo "klickauf srecttabd"; echo "warteneu settings: controls page=3 || 30"
+  echo "klickauf srecttabd"; echo "warteneu settings: controls page=3 || 90"
   echo "warte 2"; echo "foto 01-auto"
-  echo "marke settings: controls page=3"
-  echo "klickauf srectwco"; echo "warte 2"; echo "foto 02-popup"
+  echo "marke settings: menu open"
+  echo "klickauf srectwco"; echo "warteneu settings: menu open || 60"
+  echo "warte 1"; echo "foto 02-popup"
   echo "taste up"; echo "warte 1"
-  echo "taste ret"; echo "warteneu settings: controls page=3 || 30"
-  echo "warte 2"; echo "foto 03-auto"
   echo "marke settings: controls page=3"
-  echo "klickauf srectwco"; echo "warte 2"
+  echo "taste ret"; echo "warteneu settings: controls page=3 || 90"
+  echo "warte 2"; echo "foto 03-auto"
+  echo "marke settings: menu open"
+  echo "klickauf srectwco"; echo "warteneu settings: menu open || 60"
+  echo "warte 1"
   echo "taste down"; echo "warte 1"
-  echo "taste ret"; echo "warteneu settings: controls page=3 || 30"
+  echo "marke settings: controls page=3"
+  echo "taste ret"; echo "warteneu settings: controls page=3 || 90"
   echo "warte 2"; echo "foto 04-manual-again"
-  echo "klickauf srecttab28"; echo "warte 3"; echo "foto 05-last-tab"
+  echo "marke settings: rect name=tab28 "
+  echo "klickauf srecttab28"; echo "warteneu settings: rect name=tab28 || 90"
+  echo "warte 2"; echo "foto 05-last-tab"
 } > "$DREH"
 export AUDIT_TIMEOUT="${AUDIT_TIMEOUT:-1700}"
 export DESIGNBUILD="${DESIGNBUILD:-$OUT/build}"
-bash tools/design/audit.sh "$D" accel=kvm uitrace=yes halt=330 res=$RES drehbuch="$DREH" > "$OUT/audit.log" 2>&1
+bash tools/design/audit.sh "$D" accel=kvm uitrace=yes halt=${SM_HALT:-420} res=$RES drehbuch="$DREH" > "$OUT/audit.log" 2>&1
 python3 -I tools/settingsmode/check.py "$D/serial.txt" "$D"
 rc=$?
 rm -rf "$OUT/build" "$DREH"

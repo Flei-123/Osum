@@ -7,7 +7,7 @@
 # 1. the parser lib/settingsman/manifest.fi (built as tools/settingsman/dump.fi) and the second reader
 #    tools/settingsman/manifest.py give the SAME text for every case in tools/settingsman/cases/ and for the real
 #    page kernel/user/settings.d/accounts.settings, and both match the golden file (*.expect);
-# 2. limits (80 items, 8 pages, string pool) -- both readers agree and say the expected code;
+# 2. limits (120 items, 16 pages, string pool) -- both readers agree and say the expected code;
 # 3. the accounts page is WIRED: every field key of the manifest is bound in kernel/user/settings.fi (ab_names), every
 #    label is a catalogue key in en AND de, the Konten page no longer builds the book button by hand;
 # 4. the CATALOGUE (r143): several manifests (built-in page + packages /apps/<app>.prog/SETTINGS) in one catalogue --
@@ -63,8 +63,8 @@ for f in tools/settingsman/cases/*.txt; do
     esac
 done
 ok "golden files: every ok_* is accepted, every rej_* rejected with empty tables"
-head -1 tools/settingsman/accounts.expect | grep -q '^ok app=settings items=66 pages=4 warns=0$' \
-    && ok "settings manifest: accounts + network + display pages, 66 items, no warnings" || bad "accounts page header: $(head -1 tools/settingsman/accounts.expect)"
+head -1 tools/settingsman/accounts.expect | grep -q '^ok app=settings items=102 pages=12 warns=0$' \
+    && ok "settings manifest: accounts, network, display and personal pages, 102 items, no warnings" || bad "accounts page header: $(head -1 tools/settingsman/accounts.expect)"
 
 echo "== 2. limits =="
 python3 -I - "$T" <<'PY'
@@ -72,20 +72,20 @@ import sys
 t = sys.argv[1]
 hdr = "manifest 1\napp demo\n"
 def w(name, body): open(f"{t}/{name}.txt", "w").write(hdr + body)
-w("items80", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(80)))
-w("items81", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(81)))
-w("pages8", "".join(f"page p{i} t s g\n" for i in range(8)))
-w("pages9", "".join(f"page p{i} t s g\n" for i in range(9)))
-w("pool", "page a t s g\n" + "".join(f"field {'k%02d' % i + 'x' * 36} text {'l%02d' % i + 'y' * 36}\n" for i in range(60)))
+w("items120", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(120)))
+w("items121", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(121)))
+w("pages16", "".join(f"page p{i} t s g\n" for i in range(16)))
+w("pages17", "".join(f"page p{i} t s g\n" for i in range(17)))
+w("pool", "page a t s g\n" + "".join(f"field {'k%02d' % i + 'x' * 36} text {'l%02d' % i + 'y' * 36}\n" for i in range(80)))
 PY
 lim() { # name expected-first-line
     $PY < "$T/$1.txt" > "$T/$1.py"; "$T/dump" < "$T/$1.txt" > "$T/$1.fi" 2>/dev/null
     if cmp -s "$T/$1.py" "$T/$1.fi" && head -1 "$T/$1.fi" | grep -q "^$2"; then ok "$1: $(head -1 "$T/$1.fi")"; else bad "$1: expected '$2', Firn '$(head -1 "$T/$1.fi")', python '$(head -1 "$T/$1.py")'"; fi
 }
-lim items80 "ok app=demo items=80 "
-lim items81 "error 8 "
-lim pages8 "ok app=demo items=0 pages=8 "
-lim pages9 "error 8 "
+lim items120 "ok app=demo items=120 "
+lim items121 "error 8 "
+lim pages16 "ok app=demo items=0 pages=16 "
+lim pages17 "error 8 "
 lim pool "error 9 "
 
 echo "== 3. the accounts page is wired =="
@@ -109,7 +109,7 @@ for line in man.splitlines():
         if len(w) > 3: labels.append(w[3])
     elif w[0] in ("label", "note"): labels.append(w[1])
 fields = pages["accounts"]
-for bf, pgs in (("accounts", ("accounts",)), ("network", ("network",)), ("display", ("display", "display2"))):
+for bf, pgs in (("accounts", ("accounts",)), ("network", ("network",)), ("display", ("display", "display2")), ("personal", ("time", "lock", "password", "pin", "language", "wifi", "presets", "about"))):
     bound = [x for x in open("kernel/user/settings.d/%s.bind" % bf, encoding="utf-8").read().split("\n") if x]
     allf = [f for pg in pgs for f in pages[pg]]
     for f in allf:
@@ -132,6 +132,10 @@ if '__include_str("settings.d/network.bind")' not in src: bad("the network bindi
 if "fuiscene.label(left, (&l_nzust" in src: bad("the Network page is built by hand again")
 if '__include_str("settings.d/display.bind")' not in src: bad("the display binding names are not embedded in settings.fi")
 if "fuiscene.label(left, (&l_schirm" in src: bad("the Display page is built by hand again")
+if '__include_str("settings.d/personal.bind")' not in src: bad("the personal binding names are not embedded in settings.fi")
+for fnname in ("page_time", "page_benut", "page_passw", "page_pin", "page_sprache", "page_wifi", "page_vtrans", "page_info"):
+    m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
+    if not m or "page_man(3," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
 sys.exit(rc)
 PY
 
@@ -182,7 +186,7 @@ w("pages25", [p8(i) for i in range(3)] + [sec("add", "a3", one)])
 i80 = lambda i: sec("add", f"a{i}", one + "".join(f"field k{j} text\n" for j in range(80)))
 w("items240", [i80(i) for i in range(3)])
 w("items241", [i80(i) for i in range(3)] + [sec("add", "a3", one + "field k text\n")])
-big = lambda i, tail="": sec("add", f"a{i}", one + "".join(f"field {'k%02d' % j + 'x' * 36} text {'l%02d' % j + 'y' * 36}\n" for j in range(34)) + tail)
+big = lambda i, tail="": sec("add", f"a{i}", one + "".join(f"field {'k%02d' % j + 'x' * 36} text {'l%02d' % j + 'y' * 36}\n" for j in range(66)) + tail)
 w("pool_cat", [big(0), big(1), big(2)])
 w("pool_leak", [big(0), big(1, "field Bad text\n"), big(2)])
 PY
@@ -259,7 +263,7 @@ PY
     [ "$?" = 0 ] || { bad "mutation $1: anchor missing (the parser changed, update this script)"; return; }
     if ! build "$d/lib" "$d/dump"; then bad "mutation '$1' does not compile"; return; fi
     local n=0 f
-    for f in tools/settingsman/cases/*.txt $MAN "$T"/items8*.txt "$T"/pages*.txt "$T"/pool.txt; do
+    for f in tools/settingsman/cases/*.txt $MAN "$T"/items1*.txt "$T"/pages*.txt "$T"/pool.txt; do
         timeout 10 "$d/dump" < "$f" > "$d/o.txt" 2>/dev/null
         case "$f" in
             */cases/*) cmp -s "$d/o.txt" "${f%.txt}.expect" || n=$((n+1)) ;;
