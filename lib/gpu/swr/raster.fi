@@ -26,24 +26,28 @@ import gpu.swr.clip
 
 export {
     Frame, frame_new, frame_free, frame_clear, frame_setup, frame_draw, frame_hash, frame_pixel,
-    frame_stat_pixels, frame_set_scissor, frame_set_blend, frame_set_bilinear, frame_set_program, frame_set_texture, frame_set_texture_slot, frame_set_kills, frame_set_ubo, vtx_put, vm_run, rg, WORK, NREG,
+    frame_stat_pixels, frame_set_scissor, frame_set_blend, frame_set_bilinear, frame_set_program, frame_set_texture, frame_set_texture_slot, frame_set_kills, frame_set_ubo, frame_set_flat, FLAT0, FLATMAX, vtx_put, vm_run, rg, WORK, NREG,
     MODE_NATIVE0, MODE_VM, MODE_NATIVE1, MODE_COUNT, LANES, VSTRIDE, BAND,
     ld_f32, st_f32,
 }
 
 const LANES: usize = 64
-const VSTRIDE: usize = 10 // f32 per vertex
+const VSTRIDE: usize = 38 // f32 per vertex: clip x y z w, u v, colour rgba, then 7 flat vec4 (provoking vertex)
+const FLAT0: usize = 10
+const FLATMAX: usize = 28
+const REC_FLAT: usize = 96 // f32 index of the flat block inside a triangle record
 const BAND: i32 = 16 // rows per job
 const MODE_NATIVE0: i32 = 0
 const MODE_VM: i32 = 1
 const MODE_NATIVE1: i32 = 2
 const MODE_COUNT: i32 = 3
 const NREG: usize = 128 // 32 before the SPIR-V lowering, 64 before the fUi shaders (lib/spirv/lower.fi NREGS)
-const REC: usize = 48 // words per triangle record
+const REC: usize = 64 // words per triangle record
 const SUB: usize = 3 // records per submitted triangle: near plane clipping turns one triangle into up to three
 const KF_OFF: usize = NREG * LANES * 4 + LANES * 4 + 256 // per lane discard flags (u32)
 const ZS_OFF: usize = KF_OFF + LANES * 4 // per lane depth waiting for the late write (f32)
 const WORK: usize = ZS_OFF + LANES * 4
+const FLAT_REG: usize = 12
 const NSLOT: usize = 4 // texture slots; slot 0 is Frame.tex
 
 struct Frame {
@@ -73,6 +77,7 @@ struct Frame {
     sx1: i32,
     sy1: i32,
     ubo: u64, // f32 [n] constant buffer read by OP_LDU (uniform blocks / push constants)
+    nflat: i32, // flat varying floats copied from the provoking vertex into registers FLAT_REG.. (0 = none)
 }
 
 fn ld_f32(p: u64, i: usize) -> f32 {
@@ -119,6 +124,7 @@ fn frame_new(w: i32, h: i32, max_tri: i32) -> *mut Frame {
     (*f).sx1 = w
     (*f).sy1 = h
     (*f).ubo = 0 as u64
+    (*f).nflat = 0
     (*f).xtex = rt.heap_alloc((NSLOT - 1) * 24)
     rt.mem_set((*f).xtex, 0 as u8, (NSLOT - 1) * 24)
     return f
@@ -147,6 +153,10 @@ fn frame_set_ubo(f: *mut Frame, ubo: u64) {
 
 fn frame_set_kills(f: *mut Frame, on: bool) {
     (*f).kills = on
+}
+
+fn frame_set_flat(f: *mut Frame, nfloats: i32) {
+    (*f).nflat = nfloats
 }
 
 fn frame_set_blend(f: *mut Frame, on: bool) {
@@ -285,7 +295,15 @@ fn setup_tri(f: *mut Frame, t: usize) {
     let n: usize = clip.clip_poly(a, b, 3)
     var i: usize = 2
     while i < n {
-        setup_poly(f, (*f).rec + ((t * SUB + i - 2) as u64) * (REC as u64) * (8 as u64), a, 0, i - 1, i)
+        let rr: u64 = (*f).rec + ((t * SUB + i - 2) as u64) * (REC as u64) * (8 as u64)
+        setup_poly(f, rr, a, 0, i - 1, i)
+        if ld_i64(rr, 0) != 0 as i64 {
+            var q: usize = 0
+            while q < (*f).nflat as usize {
+                st_f32(rr, REC_FLAT + q, ld_f32((*f).vbuf, t * 3 * VSTRIDE + FLAT0 + q))
+                q = q + 1
+            }
+        }
         i = i + 1
     }
 }
@@ -570,6 +588,44 @@ fn op_ldu(f: *mut Frame, pd: u64, idx: u32, n: usize) {
     while l < n { st_f32(pd, l, v); l = l + 1 }
 }
 #[no_inline]
+fn op_ldux(f: *mut Frame, pd: u64, base_idx: u32, pb: u64, n: usize) {
+    var l: usize = 0
+    while l < n {
+        var v: f32 = 0.0f
+        if (*f).ubo != 0 as u64 { v = ld_f32((*f).ubo, base_idx as usize + (ld_f32(pb, l) as i32 as usize)) }
+        st_f32(pd, l, v)
+        l = l + 1
+    }
+}
+#[no_inline]
+fn op_fetch(f: *mut Frame, pd: u64, pa: u64, pb: u64, slot: usize, n: usize) {
+    let k: f32 = 1.0f / 255.0f
+    let p1: u64 = pd + ((LANES * 4) as u64)
+    let p2: u64 = p1 + ((LANES * 4) as u64)
+    let p3: u64 = p2 + ((LANES * 4) as u64)
+    var tp: u64 = (*f).tex
+    var tw: i32 = (*f).tw
+    var th: i32 = (*f).th
+    if slot != 0 {
+        let b: usize = (slot - 1) * 3
+        tp = rt.ld64((*f).xtex, b)
+        tw = rt.ld64((*f).xtex, b + 1) as i32
+        th = rt.ld64((*f).xtex, b + 2) as i32
+    }
+    var l: usize = 0
+    while l < n {
+        let tx: i32 = ld_f32(pa, l) as i32
+        let ty: i32 = ld_f32(pb, l) as i32
+        var tpx: u32 = 0 as u32
+        if tp != 0 as u64 && tx >= 0 && ty >= 0 && tx < tw && ty < th { tpx = rt.ld32(tp, (ty as usize) * (tw as usize) + (tx as usize)) }
+        st_f32(pd, l, ((tpx & 255 as u32) as f32) * k)
+        st_f32(p1, l, (((tpx >> 8 as u32) & 255 as u32) as f32) * k)
+        st_f32(p2, l, (((tpx >> 16 as u32) & 255 as u32) as f32) * k)
+        st_f32(p3, l, ((tpx >> 24 as u32) as f32) * k)
+        l = l + 1
+    }
+}
+#[no_inline]
 fn op_rcp(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, 1.0f / ld_f32(pa, l)); l = l + 1 } }
 #[no_inline]
 fn op_sqrt(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.sqrt32(ld_f32(pa, l))); l = l + 1 } }
@@ -664,7 +720,7 @@ fn out_pack(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
 // instruction = 5 u32 (op, d, a, b, c); every op runs over n lanes (dispatch cost / n)
 // 26 KILL(a = lane predicate; killed lanes write no colour, and no depth when Frame.kills)  SAMPLE slot = operand c
 // ops: 0 END 1 MOV 2 ADD 3 SUB 4 MUL 5 MAD 6 MIN 7 MAX 8 SAT 9 LDC(d, bits in a) 10 RCP 11 SQRT 12 SAMPLE(d..d+3 = tex(a, b))
-// 27 LDU(d = ubo[a] in every lane)  13 DIV 14 ABS 15 FLOOR 16 RSQ 17 CLT 18 CLE 19 CEQ (1.0/0.0) 20 SEL(d = c!=0 ? a : b) 21 NEG 22 EXP2 23 LOG2 24 SIN 25 COS
+// 28 FETCH(d..d+3 = texel (x = reg a, y = reg b) of slot c, 0 outside)  29 LDUX(d = ubo[a + int(reg b)] per lane)  27 LDU(d = ubo[a] in every lane)  13 DIV 14 ABS 15 FLOOR 16 RSQ 17 CLT 18 CLE 19 CEQ (1.0/0.0) 20 SEL(d = c!=0 ? a : b) 21 NEG 22 EXP2 23 LOG2 24 SIN 25 COS
 // inputs: r0 u, r1 v, r2..r5 colour, r6 x+0.5, r7 y+0.5
 // output registers r8..r11
 #[no_inline]
@@ -717,6 +773,8 @@ fn vm_run(f: *mut Frame, prog: u64, base: u64, n: usize) {
         else if op == 25 as u32 { op_cos(pd, pa, n) }
         else if op == 26 as u32 { op_kill(base + (KF_OFF as u64), pa, n) }
         else if op == 27 as u32 { op_ldu(f, pd, a, n) }
+        else if op == 28 as u32 { op_fetch(f, pd, pa, pb, c as usize, n) }
+        else if op == 29 as u32 { op_ldux(f, pd, a, pb, n) }
         else { run = false }
     }
 }
@@ -771,7 +829,7 @@ fn commit(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
 // per lane perspective-correct attributes u, v, r, g, b, a into registers r0..r5. rowc: 16 f64 =
 // base/step pairs (w, u, v, r, g, b, a ; step = per pixel in x) of the current row
 #[no_inline]
-fn fill_attrs(base: u64, xs: u64, rowc: u64, n: usize) {
+fn fill_attrs(f: *mut Frame, r: u64, base: u64, xs: u64, rowc: u64, n: usize) {
     let wb: f64 = ldd_(rowc, 0)
     let wd: f64 = ldd_(rowc, 1)
     let ub: f64 = ldd_(rowc, 2)
@@ -797,6 +855,13 @@ fn fill_attrs(base: u64, xs: u64, rowc: u64, n: usize) {
         st_f32(rg(base, 4, l), 0, ((bb + bd * xf) * rw) as f32)
         st_f32(rg(base, 5, l), 0, ((ab + ad * xf) * rw) as f32)
         l = l + 1
+    }
+    var q: usize = 0
+    while q < (*f).nflat as usize {
+        let v: f32 = ld_f32(r, REC_FLAT + q)
+        l = 0
+        while l < n { st_f32(rg(base, FLAT_REG + q, l), 0, v); l = l + 1 }
+        q = q + 1
     }
 }
 
@@ -885,14 +950,14 @@ fn band_tri(f: *mut Frame, r: u64, y0: i32, y1: i32, base: u64, xs: u64, rowc: u
                     nl = nl + 1
                     count = count + 1 as u64
                     if nl == LANES {
-                        if !cnt { fill_attrs(base, xs, rowc, nl) }
+                        if !cnt { fill_attrs(f, r, base, xs, rowc, nl) }
                         commit(f, base, xs, y as i32, nl)
                         nl = 0
                     }
                 }
                 x = x + 1 as i64
             }
-            if !cnt { fill_attrs(base, xs, rowc, nl) }
+            if !cnt { fill_attrs(f, r, base, xs, rowc, nl) }
             commit(f, base, xs, y as i32, nl)
         }
         y = y + 1 as i64

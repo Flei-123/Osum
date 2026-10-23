@@ -57,8 +57,9 @@ const VK_TEXVAR: u32 = 7
 const VK_UBLOCK: u32 = 8 // uniform block / push constant variable: loads go through OpAccessChain
 const VK_UPTR: u32 = 9 // pointer into a constant block: vreg[id*4] = byte offset, vreg[id*4+1] = pointee type
 
-const VS_POS: u32 = 16 // vertex stage: Position r16..r19, output location k = r(20 + 4k), inputs location k = r(4k)
-const VS_FIRST_TMP: u32 = 32
+const VS_POS: u32 = 36 // vertex stage: Position r36..r39, output location k = r(40 + 4k), inputs location k = r(4k)
+const VS_FIRST_TMP: u32 = 72
+const FLAT_BASE: u32 = 12 // fragment stage: flat input location k = r(12 + 4k)
 
 struct LowerInfo {
     ninstr: usize,
@@ -69,10 +70,11 @@ struct LowerInfo {
     nkill: u32, // OpKill instructions: the caller must set Frame.kills (late depth write)
     ntex: u32, // highest texture slot used + 1 (slot = Binding, 0..3)
     nubo: u32, // highest constant buffer float read + 1
+    nflat: u32, // flat varying floats the fragment stage reads from the provoking vertex (4 per location)
 }
 
 fn info_zero() -> LowerInfo {
-    var i: LowerInfo = LowerInfo { ninstr: 0, err_pos: 0, peak_reg: 0, nsample: 0, nsel: 0, nkill: 0, ntex: 0, nubo: 0 }
+    var i: LowerInfo = LowerInfo { ninstr: 0, err_pos: 0, peak_reg: 0, nsample: 0, nsel: 0, nkill: 0, ntex: 0, nubo: 0, nflat: 0 }
     return i
 }
 
@@ -124,6 +126,7 @@ struct Lw {
     nubo: u32,
     stage: u32,
     ftmp: u32,
+    nflatv: u32,
 }
 
 fn fail(l: *mut Lw, e: u32, pos: usize) {
@@ -624,9 +627,15 @@ fn lower_glsl(l: *mut Lw, pos: usize, wc: usize) {
             emit(l, shader.OP_MUL, t, t, rb, 0)
             emit(l, shader.OP_EXP2, d, t, 0, 0)
         }
-        else if inst == spv.GL_FMIN || inst == spv.GL_NMIN { emit(l, shader.OP_MIN, d, ra, rb, 0) }
-        else if inst == spv.GL_FMAX || inst == spv.GL_NMAX { emit(l, shader.OP_MAX, d, ra, rb, 0) }
-        else if inst == spv.GL_FCLAMP || inst == spv.GL_NCLAMP {
+        else if inst == spv.GL_FMA { emit(l, shader.OP_MAD, d, ra, rb, rc) }
+        else if inst == spv.GL_SABS {
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_NEG, t, ra, 0, 0)
+            emit(l, shader.OP_MAX, d, ra, t, 0)
+        }
+        else if inst == spv.GL_FMIN || inst == spv.GL_NMIN || inst == spv.GL_SMIN { emit(l, shader.OP_MIN, d, ra, rb, 0) }
+        else if inst == spv.GL_FMAX || inst == spv.GL_NMAX || inst == spv.GL_SMAX { emit(l, shader.OP_MAX, d, ra, rb, 0) }
+        else if inst == spv.GL_FCLAMP || inst == spv.GL_NCLAMP || inst == spv.GL_SCLAMP {
             let t: u32 = tmp_reg(l)
             emit(l, shader.OP_MAX, t, ra, rb, 0)
             emit(l, shader.OP_MIN, d, t, rc, 0)
@@ -707,12 +716,12 @@ fn setup_io_var(l: *mut Lw, id: u32) {
     if (*l).stage == spv.EM_VERTEX {
         if sc == spv.SC_INPUT {
             let loc: u32 = parse.loc_of(m, id)
-            if loc == 0 || loc > 4 || parse.builtin_of(m, id) != 0 { fail(l, L_IO, pos); return }
+            if loc == 0 || loc > 9 || parse.builtin_of(m, id) != 0 { fail(l, L_IO, pos); return }
             base = (loc - 1) * 4
             cap = 4
         } else {
             let loc: u32 = parse.loc_of(m, id)
-            if loc == 0 || loc > 3 || parse.builtin_of(m, id) != 0 { fail(l, L_IO, pos); return }
+            if loc == 0 || loc > 8 || parse.builtin_of(m, id) != 0 { fail(l, L_IO, pos); return }
             base = VS_POS + 4 * loc
             cap = 4
             var c: u32 = 0
@@ -740,7 +749,8 @@ fn setup_io_var(l: *mut Lw, id: u32) {
             return
         }
         let loc: u32 = parse.loc_of(m, id)
-        if loc == 1 { base = 0; cap = 2 }
+        if (parse.flags_of(m, id) & parse.F_FLAT) != 0 && loc != 0 && loc <= 7 { base = FLAT_BASE + (loc - 1) * 4; cap = 4 }
+        else if loc == 1 { base = 0; cap = 2 }
         else if loc == 2 { base = 2; cap = 4 }
         else { fail(l, L_IO, pos); return }
     }
@@ -1229,7 +1239,7 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
     if ep == 0 { return L_STAGE }
     let nb: usize = (*m).bound as usize
     var lw: Lw = Lw { m: m, prog: prog, pc: 0, maxpc: maxpc, err: 0, err_pos: 0, rrefs: 0, vreg: 0, vn: 0, vk: 0, uses: 0, bpred: 0,
-        mpred: 0, tmp: 0, ntmp: 0, ef: 0, et: 0, ep: 0, ed: 0, ne: 0, cur: 0, cpred: NONE, skip: false, peak: 12, nsample: 0, nsel: 0, nkill: 0, ntex: 0, nubo: 0, stage: stage, ftmp: FIRST_TMP }
+        mpred: 0, tmp: 0, ntmp: 0, ef: 0, et: 0, ep: 0, ed: 0, ne: 0, cur: 0, cpred: NONE, skip: false, peak: 12, nsample: 0, nsel: 0, nkill: 0, ntex: 0, nubo: 0, stage: stage, ftmp: FIRST_TMP, nflatv: 0 }
     let l: *mut Lw = &lw
     if stage == spv.EM_VERTEX { (*l).ftmp = VS_FIRST_TMP; (*l).peak = VS_FIRST_TMP }
     (*l).rrefs = rt.heap_alloc(128 * 4)
@@ -1262,6 +1272,25 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
     while i1 < (*m).ninst && parse.op_at(m, parse.inst_pos(m, i1)) != spv.OP_FUNCTIONEND { i1 = i1 + 1 }
     if i0 >= (*m).ninst || i1 >= (*m).ninst { fail(l, L_INTERNAL, fpos) }
 
+    // flat inputs live in r12.. : the temporaries start behind them
+    if (*l).err == 0 && stage == spv.EM_FRAGMENT {
+        let sl0: usize = parse.str_len_words(m, ep + 3, ep + parse.wc_at(m, ep))
+        var k0: usize = ep + 3 + sl0
+        var top: u32 = 0
+        while k0 < ep + parse.wc_at(m, ep) {
+            let vid: u32 = parse.w32(m, k0)
+            if (parse.flags_of(m, vid) & parse.F_FLAT) != 0 && parse.w32(m, parse.def_pos(m, vid) + 3) == spv.SC_INPUT {
+                let vl: u32 = parse.loc_of(m, vid)
+                if vl > top { top = vl }
+            }
+            k0 = k0 + 1
+        }
+        if top != 0 {
+            (*l).ftmp = FLAT_BASE + top * 4
+            (*l).peak = (*l).ftmp
+            (*l).nflatv = top * 4
+        }
+    }
     // interface variables
     if (*l).err == 0 {
         let sl: usize = parse.str_len_words(m, ep + 3, ep + parse.wc_at(m, ep))
@@ -1333,6 +1362,7 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
     (*info).nkill = (*l).nkill
     (*info).ntex = (*l).ntex
     (*info).nubo = (*l).nubo
+    (*info).nflat = (*l).nflatv
     rt.heap_free((*l).rrefs, 128 * 4)
     rt.heap_free((*l).vreg, nb * 16)
     rt.heap_free((*l).vn, nb * 4)
