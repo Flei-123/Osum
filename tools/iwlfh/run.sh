@@ -74,6 +74,8 @@ run a big iwlfhtest
 A="$T/a.klar"
 has "$A" "iwl: fw file=$FWPATH size=$SIZE" "file read through the VFS (family 8000 file name), size == $SIZE"
 same "$A" "$T/blobs/big.exp" "kernel loader summary"
+BIGSHA=$(sha256sum "$T/blobs/big.bin" | cut -d' ' -f1)
+has "$A" "iwl: fw sha256=$BIGSHA pin=none" "file digest logged, synthetic blob is NOT a pinned firmware file"
 has "$A" 'iwl: fh STAT chunks=6 bytes=151461 ext=2 cpu1=3 cpu2=2' "anchor: 6 chunks, 2 extended-range chunks, paging section not loaded"
 has "$A" 'iwl: fh VIOL 0 LOST 0 NONZERO 151461' "anchor: no protocol violation, nothing misdirected, every byte in SRAM"
 hasnot "$A" 'iwl: boot' "no boot line without iwlboot"
@@ -115,6 +117,35 @@ echo "-- H: no word"
 run h big ""
 hasnot "$T/h.klar" 'iwl: fh' "nothing happens without the word and without a device"
 hasnot "$T/h.klar" 'iwl: fw' "no firmware stage either"
+
+echo "-- I: the REAL Intel iwlwifi-8265-36.ucode (optional: WLAN_8265_FW=<file>; never committed, SHA-256 pinned)"
+PIN36=1336afcd028ed094d1fe33893c84c273bb5711be52970040344a75a12f276d56
+if [ -n "${WLAN_8265_FW:-}" ] && [ -f "$WLAN_8265_FW" ] && [ "$(sha256sum "$WLAN_8265_FW" | cut -d' ' -f1)" = "$PIN36" ]; then
+    mkdir -p "$T/real"
+    python3 -I tools/wlan/fh8000_ref.py real "$WLAN_8265_FW" "$T/real" || bad "real reference"
+    tail -5 "$T/real/real_128k.exp" > "$T/real/kern.exp"
+    image real "$WLAN_8265_FW" || { bad "image real"; echo "IWLFH: $pass ok, $fail fail"; exit 1; }
+    run i real iwlfhtest
+    has "$T/i.klar" "iwl: fw sha256=$PIN36 pin=8265/36" "kernel hashes the real file and recognises the pin (family 8265, API 36)"
+    has "$T/i.klar" 'iwl: fw rc=0 ver=36 lmac=4 umac=4 paging=2' "kernel TLV parser reads the real file: ver 36, 4 + 4 sections, 2 paging sections"
+    same "$T/i.klar" "$T/real/kern.exp" "REAL blob through the kernel loader"
+    has "$T/i.klar" 'iwl: fh STAT chunks=10 bytes=636520 ext=1 cpu1=4 cpu2=4' "anchor: 10 chunks, 636520 octets, one extended-range chunk"
+    echo "-- J: same file with ONE flipped octet inside a data section (pin must not match)"
+    python3 -I - "$WLAN_8265_FW" "$T/tamper.bin" <<'PYEOF'
+import sys
+b = bytearray(open(sys.argv[1], 'rb').read())
+b[300000] ^= 1
+open(sys.argv[2], 'wb').write(b)
+PYEOF
+    image tam "$T/tamper.bin" || { bad "image tam"; exit 1; }
+    run j tam iwlfhtest
+    hasnot "$T/j.klar" "pin=8265/36" "tampered file is not recognised as pinned"
+    has "$T/j.klar" 'iwl: fw rc=0 ver=36' "... but still parses (the ROM, not the pin, verifies the Intel signature)"
+    grep -a '^iwl: fh VIOL ' "$T/j.klar" > "$T/j.v"; grep -a 'VIOL' "$T/real/kern.exp" | sed 's/^/iwl: fh /' > "$T/i.v"
+    cmp -s "$T/j.v" "$T/i.v" && bad "tampered file gives the same SRAM digest" || ok "tampered file gives a different SRAM digest (the gate sees one flipped octet)"
+else
+    echo "  (no pinned WLAN_8265_FW: real-blob runs skipped)"
+fi
 
 echo "IWLFH: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]

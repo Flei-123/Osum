@@ -27,7 +27,9 @@ const FAKE_PAGES: u64 = 3
 const FAKE_NORMAL: u64 = 0
 const FAKE_LOST: u64 = 1
 const FAKE_BADWIN: u64 = 2
-const SRAM_SIZE: u64 = 1048576
+const SRAM_WIN: u64 = 1048576
+const SRAM_NWIN: u64 = 8
+const SRAM_SIZE: u64 = 8388608   // 8 windows of 1 MiB, bound to address windows (dst >> 20) on first use
 
 const S_ACCESS: u64 = 0x2000
 const S_WADDR: u64 = 0x2008
@@ -43,6 +45,7 @@ const S_BUSSIZE: u64 = 0x2050
 const S_SRAM: u64 = 0x2058
 const S_PKEY: u64 = 0x2100      // 16 x u64
 const S_PVAL: u64 = 0x2200      // 16 x u64
+const S_WKEY: u64 = 0x2300      // 8 x u64: window key + 1 (0 = unused)
 const NPRPH: u64 = 16
 
 const F_SRAM: u64 = 1
@@ -109,19 +112,43 @@ fn fake_sum(ctx: u64, out: *mut u64) {
     let sr: u64 = g(ctx, S_SRAM)
     var nz: u64 = 0
     var dig: u64 = 0
-    var i: u64 = 0
-    while i < SRAM_SIZE {
-        let q: *mut u8 = (sr + i) as *mut u8
-        let b: u64 = (*q) as u64
-        if b != 0 {
-            nz = nz + 1
-            dig = (dig + b * ((i % 251) + 1)) & 0xFFFFFFFF
+    var w: u64 = 0
+    while w < SRAM_NWIN {
+        let key: u64 = g(ctx, S_WKEY + w * 8)
+        if key != 0 {
+            let wb: u64 = (key - 1) << 20
+            var i: u64 = 0
+            while i < SRAM_WIN {
+                let q: *mut u8 = (sr + w * SRAM_WIN + i) as *mut u8
+                let b: u64 = (*q) as u64
+                if b != 0 {
+                    nz = nz + 1
+                    dig = (dig + b * (((wb + i) % 251) + 1)) & 0xFFFFFFFF
+                }
+                i = i + 1
+            }
         }
-        i = i + 1
+        w = w + 1
     }
     *out = nz
     let q1: *mut u64 = ((out as u64) + 8) as *mut u64
     *q1 = dig
+}
+
+// window index of address `a` (allocated on first use), -1 = no free window
+fn win(ctx: u64, a: u64) -> i64 {
+    let key: u64 = (a >> 20) + 1
+    var w: u64 = 0
+    while w < SRAM_NWIN {
+        let k: u64 = g(ctx, S_WKEY + w * 8)
+        if k == key { return w as i64 }
+        if k == 0 {
+            s(ctx, S_WKEY + w * 8, key)
+            return w as i64
+        }
+        w = w + 1
+    }
+    return 0 - 1
 }
 
 fn viol(ctx: u64) {
@@ -140,7 +167,7 @@ fn dma_run(ctx: u64) {
     let bb: u64 = g(ctx, S_BUSBASE)
     var good: bool = true
     if src < bb || src + cnt > bb + g(ctx, S_BUSSIZE) { good = false }
-    if dst + cnt > SRAM_SIZE { good = false }
+    if win(ctx, dst) < 0 || win(ctx, dst + cnt - 1) < 0 { good = false }
     var ext: u64 = 0
     if dst >= 0x40000 && dst <= 0x57FFF { ext = 1 }
     if (fake_chick(ctx) & 1) != ext { good = false }
@@ -148,7 +175,8 @@ fn dma_run(ctx: u64) {
         let sr: u64 = g(ctx, S_SRAM)
         var i: u64 = 0
         while i < cnt {
-            let d: *mut u8 = (sr + dst + i) as *mut u8
+            let wi: i64 = win(ctx, dst + i)
+            let d: *mut u8 = (sr + (wi as u64) * SRAM_WIN + ((dst + i) & 0xFFFFF)) as *mut u8
             let t: *mut u8 = (src + i) as *mut u8
             *d = *t
             i = i + 1

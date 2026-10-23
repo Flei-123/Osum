@@ -48,6 +48,8 @@ import wlan.iwl_ctxt
 import wlan.iwl_alive
 import wlan.iwl_pwr
 import wlan.iwl_fh8000
+import wlan.iwl_pin
+import crypto.sha256
 import drv.net.iwl_fake
 import mm.mem
 import fs.vfs
@@ -318,6 +320,31 @@ fn fw_load(state: u64, dev: u64, rev: u64, rf: u64, buf: u64, cap: u64, path: u6
     return 0
 }
 
+// Log the SHA-256 of the firmware file and whether it is one of the pinned linux-firmware files (iwl_pin.fi).
+// Only a log line: Intel's boot ROM checks the signature; the pin tells which exact file a measurement used.
+fn fw_pin_line(buf: u64, size: u64) {
+    var s_sha: [u8; 17] = "iwl: fw sha256=\0\0"
+    var s_pin: [u8; 6] = " pin=\0"
+    var s_none: [u8; 5] = "none\0"
+    var s_sl: [u8; 2] = "/\0"
+    var dg: [u8; 32] = [0 as u8; 32]
+    var hx: [u8; 65] = [0 as u8; 65]
+    sha256.hash(buf, size as usize, (&dg[0]) as u64)
+    iwl_pin.hex_digest((&dg[0]) as u64, (&hx[0]) as u64)
+    serial.puts((&s_sha[0]) as u64)
+    serial.puts((&hx[0]) as u64)
+    serial.puts((&s_pin[0]) as u64)
+    let api: u64 = iwl_pin.pin_api((&hx[0]) as u64)
+    if api == 0 {
+        serial.puts((&s_none[0]) as u64)
+    } else {
+        serial.dec(iwl_pin.pin_family((&hx[0]) as u64))
+        serial.puts((&s_sl[0]) as u64)
+        serial.dec(api)
+    }
+    serial.nl()
+}
+
 // Load + parse for one device identity; logs both lines. Returns 0 (f filled, blob in `buf`) or E_FW_*.
 fn fw_prepare(state: u64, dev: u64, rev: u64, rf: u64, buf: u64, f: *mut iwl_fw.FwInfo) -> i64 {
     var s_file: [u8; 14] = "iwl: fw file=\0"
@@ -337,6 +364,7 @@ fn fw_prepare(state: u64, dev: u64, rev: u64, rf: u64, buf: u64, f: *mut iwl_fw.
     serial.puts((&s_size[0]) as u64)
     serial.dec(size)
     serial.nl()
+    fw_pin_line(buf, size)
     let rc: i64 = iwl_fw.fw_parse(buf, size as usize, f)
     serial.puts((&s_rc[0]) as u64)
     if rc < 0 {
@@ -406,7 +434,7 @@ fn fw_boot(state: u64, p: *mut iwl_probe.Probe, blob: u64, f: *mut iwl_fw.FwInfo
 }
 
 const FH_BOUNCE_FRAMES: u64 = 32           // 128 KiB = FH_MEM_TB_MAX_LENGTH: fewest chunks
-const FH_SRAM_FRAMES: u64 = 256            // 1 MiB fake SRAM
+const FH_SRAM_FRAMES: u64 = 2048           // 8 MiB fake SRAM (8 windows of 1 MiB)
 const FH_TEST_DEV: u64 = 0x24FD            // synthetic Intel Wireless-AC 8265
 
 fn put_i(v: i64) {
