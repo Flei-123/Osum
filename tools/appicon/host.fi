@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/appicon/host.fi -- host test of lib/appicon.fi (fallback program icon). Built by tools/appicon/run.sh.
+import std.rt
+import std.io
+import appicon
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+static mut cbuf: [u8; 1024] = [0 as u8; 1024]
+static mut cslot: usize = 0
+static mut tile: [u8; 4108] = [0 as u8; 4108]
+
+fn c(s: str) -> u64 {
+    let base: usize = (cslot % 16) * 64
+    cslot = cslot + 1
+    var i: usize = 0
+    while i < s.length() && i < 63 {
+        cbuf[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    cbuf[base + i] = 0 as u8
+    return ((&cbuf[0 as usize]) as u64) + base as u64
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn px(x: u64, y: u64) -> u64 {
+    return (__mmio_read32((((&tile[0 as usize]) as u64) + 12 + (y * 32 + x) * 4) as *mut u32)) as u64
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    var i: u64 = 0
+    while i < appicon.PAL_N {
+        let v: u64 = appicon.pal(i)
+        io.fmt_print(f"pal {i} {v}\n")
+        i = i + 1
+    }
+    check(&t, appicon.hash_of(c("disks")) == appicon.hash_of(c("DISKS")), "hash ignores case")
+    check(&t, appicon.hash_of(c("disks")) == appicon.hash_of(c("disks")), "hash is stable")
+    check(&t, appicon.hash_of(c("disks")) != appicon.hash_of(c("snip")), "different names, different hash")
+    check(&t, appicon.color_of(c("disks")) == appicon.color_of(c("Disks")), "colour is stable across case")
+    check(&t, appicon.letter_cp(c("disks"), 0) == 68 && appicon.letter_cp(c("disks"), 1) == 0, "disks -> D")
+    check(&t, appicon.letter_cp(c("JARVIS Mini"), 0) == 74 && appicon.letter_cp(c("JARVIS Mini"), 1) == 77, "JARVIS Mini -> JM")
+    check(&t, appicon.letter_cp(c("wmplug-uhr"), 1) == 85, "wmplug-uhr -> second letter U")
+    check(&t, appicon.letter_cp(c("  x"), 0) == 88, "leading blanks skipped")
+    check(&t, appicon.letter_cp(c(""), 0) == 0 && appicon.letter_cp(c("-"), 0) == 0, "empty name -> no letter")
+    var seen: [u8; 12] = [0 as u8; 12]
+    let names: [str; 8] = ["disks", "snip", "viewer", "nedit", "a11ydemo", "calc", "mail", "notes"]
+    var k: usize = 0
+    while k < 8 {
+        let idx: u64 = appicon.hash_of(c(names[k])) % appicon.PAL_N
+        seen[idx as usize] = 1 as u8
+        k = k + 1
+    }
+    var used: u64 = 0
+    k = 0
+    while k < 12 {
+        used = used + (seen[k] as u64)
+        k = k + 1
+    }
+    check(&t, used >= 4, "eight names spread over at least four palette colours")
+    appicon.init_tile((&tile[0 as usize]) as u64, appicon.color_of(c("disks")))
+    check(&t, tile[0 as usize] == 79 as u8 && tile[3 as usize] == 77 as u8, "OSYM magic")
+    check(&t, (px(16, 16) >> 24) == 255, "centre opaque")
+    check(&t, (px(0, 0) >> 24) == 0 && (px(31, 31) >> 24) == 0 && (px(1, 16) >> 24) == 0, "outer ring transparent")
+    check(&t, (px(2, 2) >> 24) < 40, "corner pixel almost transparent (rounded)")
+    check(&t, (px(2, 16) >> 24) == 255 && (px(16, 2) >> 24) == 255, "edge middles opaque")
+    var edge: u64 = 0
+    var y: u64 = 0
+    while y < 32 {
+        var x: u64 = 0
+        while x < 32 {
+            let a: u64 = px(x, y) >> 24
+            if a > 0 && a < 255 {
+                edge = edge + 1
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    check(&t, edge >= 8, "anti-aliased arc pixels exist")
+    var cov: [u8; 4] = [255 as u8, 255 as u8, 0 as u8, 128 as u8]
+    appicon.blend_cover((&tile[0 as usize]) as u64, 10, 10, 2, 2, (&cov[0 as usize]) as u64)
+    check(&t, (px(10, 10) & 0xFFFFFF) == 0xFFFFFF && (px(11, 10) & 0xFFFFFF) == 0xFFFFFF, "full coverage = white")
+    check(&t, (px(10, 11) & 0xFFFFFF) == appicon.color_of(c("disks")), "zero coverage keeps the tile colour")
+    check(&t, (px(11, 11) & 0xFFFFFF) != 0xFFFFFF && (px(11, 11) & 0xFFFFFF) != appicon.color_of(c("disks")), "half coverage mixes")
+    check(&t, (px(10, 10) >> 24) == 255, "blend keeps alpha")
+    var o: [u8; 4] = [255 as u8, 255 as u8, 255 as u8, 255 as u8]
+    appicon.blend_cover((&tile[0 as usize]) as u64, 0, 0, 2, 2, (&o[0 as usize]) as u64)
+    check(&t, (px(0, 0) & 0xFFFFFF) != 0xFFFFFF && (px(0, 0) >> 24) == 0, "blend skips transparent pixels")
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}

@@ -1511,7 +1511,8 @@ if [ "$IMAGE_PROFILE" = personal ]; then
            "/etc/actions.d/jarvismini.actions=etc/actions.d/jarvismini.actions@0644"
            /apps/jarvismini.osp/
            "/apps/jarvismini.osp/INFO=pakete/jarvismini/INFO@0644"
-           "/apps/jarvismini.osp/start@/bin/jarvismini")
+           "/apps/jarvismini.osp/start@/bin/jarvismini"
+           "/apps/jarvismini.osp/symbol=pakete/jarvismini/symbol.osym@0644")
 fi
 # LCSH: extra mkfs specs for gates (`<path>=<host file>` words, no blanks inside) -- e.g. tools/usbimg/bbsh.sh puts a musl test program on the stick
 # shellcheck disable=SC2206

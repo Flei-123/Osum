@@ -202,6 +202,13 @@ static mut nlive: u64 = 0
 static mut c_ticks: [u64; 8] = [0 as u64; 8]
 static mut c_idle: [u64; 8] = [0 as u64; 8]
 static mut c_pm: [u64; 8] = [0 as u64; 8]
+static mut c_cyc: [u64; 8] = [0 as u64; 8]
+static mut c_icyc: [u64; 8] = [0 as u64; 8]
+static mut c_up: [u64; 8] = [1 as u64; 8]
+static mut ncpu_on: u64 = 1
+static mut u_onl: [u8; 10] = " (online \0"
+static mut u_clo: [u8; 2] = ")\0"
+static mut u_off: [u8; 8] = "offline\0"
 static mut ncpu: u64 = 1
 
 static mut h_cpu: [u64; 60] = [0 as u64; 60]
@@ -709,10 +716,25 @@ fn sample(first: bool) {
         n = 1
     }
     ncpu = n
+    // W-SMP2: TIME-weighted. An idle application core ticks at 10 Hz, a busy one at 100 Hz, so adding up tick deltas weighted the
+    // idle cores ~10x less than their wall time. Each online core now counts with its TSC-cycle delta (kernel CS_CYC / CS_IDLECYC),
+    // the overall value is the mean over the ONLINE cores' busy shares, and an offline core is shown as "offline" (c_up = 0).
+    var sum_pm: u64 = 0
+    var n_on: u64 = 0
     var d_all: u64 = 0
-    var d_busy: u64 = 0
     var i: u64 = 0
     while i < ncpu {
+        let up: u64 = cpustat(i, ulib.CS_UP)
+        c_up[(i) as usize] = up
+        let cy: u64 = cpustat(i, ulib.CS_CYC)
+        let icy: u64 = cpustat(i, ulib.CS_IDLECYC)
+        let dc: u64 = sub(cy, c_cyc[(i) as usize])
+        var dic: u64 = sub(icy, c_icyc[(i) as usize])
+        if dic > dc {
+            dic = dc
+        }
+        c_cyc[(i) as usize] = cy
+        c_icyc[(i) as usize] = icy
         let t: u64 = cpustat(i, ulib.CS_TICKS)
         let idl: u64 = cpustat(i, ulib.CS_IDLE)
         let dt: u64 = sub(t, c_ticks[(i) as usize])
@@ -722,15 +744,23 @@ fn sample(first: bool) {
         }
         c_ticks[(i) as usize] = t
         c_idle[(i) as usize] = idl
-        if !first && dt > 0 {
-            c_pm[(i) as usize] = (dt - di) * 1000 / dt
-        }
         d_all = d_all + dt
-        d_busy = d_busy + (dt - di)
+        if up == 0 {
+            c_pm[(i) as usize] = 0
+        } else {
+            n_on = n_on + 1
+            if !first && dc > 0 {
+                c_pm[(i) as usize] = (dc - dic) * 1000 / dc
+            } else if !first && dt > 0 {
+                c_pm[(i) as usize] = (dt - di) * 1000 / dt
+            }
+            sum_pm = sum_pm + c_pm[(i) as usize]
+        }
         i = i + 1
     }
-    if !first && d_all > 0 {
-        cpu_pm = d_busy * 1000 / d_all
+    ncpu_on = n_on
+    if !first && n_on > 0 {
+        cpu_pm = sum_pm / n_on
     }
 
     // Der Speicher: Rahmen, wie `top` sie zaehlt. Ein Rahmen ist 4 KiB.
@@ -1027,6 +1057,55 @@ fn head_sum(d: u64, at: u64, col: u64) -> u64 {
     return a
 }
 
+// ROUND W-ICON: the picture of a PROGRAM row. The bundle symbol (/apps/<name>.osp/symbol) when there is one,
+// otherwise the shared letter tile (wlibc.app_icon, lib/appicon.fi) -- the same picture the bar and the start
+// menu show for that name. A small cache keyed by the process name; 0 when the cache is full (the row then keeps
+// the plain "program" glyph).
+const ICO_N: u64 = 24
+const ICO_BYTES: u64 = 4108
+static mut ico_name: [u8; 576] = [0 as u8; 576]
+static mut ico_data: [u8; 98592] = [0 as u8; 98592]
+static mut ico_used: u64 = 0
+static mut ico_pre: [u8; 7] = "/apps/\0"
+static mut ico_post: [u8; 12] = ".osp/symbol\0"
+
+fn proc_icon(name: u64) -> u64 {
+    if name == 0 || __mmio_read8((name) as *mut u8) == 0 as u8 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < ico_used {
+        if ulib.streq((&ico_name[0]) as u64 + i * 24, name) {
+            return (&ico_data[0]) as u64 + i * ICO_BYTES
+        }
+        i = i + 1
+    }
+    if ico_used >= ICO_N {
+        return 0
+    }
+    let at: u64 = ico_used
+    ico_used = ico_used + 1
+    ulib.strncpy((&ico_name[0]) as u64 + at * 24, name, 23)
+    let out: u64 = (&ico_data[0]) as u64 + at * ICO_BYTES
+    var path: [u8; 64] = [0 as u8; 64]
+    ulib.strncpy((&path[0]) as u64, (&ico_pre[0]) as u64, 7)
+    ulib.strncpy((&path[0]) as u64 + 6, name, 23)
+    let n: u64 = ulib.length((&path[0]) as u64)
+    ulib.strncpy((&path[0]) as u64 + n, (&ico_post[0]) as u64, 12)
+    let fd: u64 = io.open((&path[0]) as u64, 0)
+    if !ulib.bad(fd) {
+        let got: u64 = io.read(fd, out, ICO_BYTES)
+        io.close(fd)
+        if !ulib.bad(got) && got >= 12 && wlibc.icon_ok(out) {
+            return out
+        }
+    }
+    if wlibc.app_icon((&ico_name[0]) as u64 + at * 24, out) {
+        return out
+    }
+    return 0
+}
+
 // The symbol of a process in the list: a program, a worker, the idle task, the kernel.
 fn kind_icon(k: u64) -> u64 {
     if k == 3 {
@@ -1089,6 +1168,12 @@ fn build_rows() {
             fuiscene.heat_set(r, 1, 0)
         } else {
             row_icons[(r) as usize] = kind_icon(p_kind[(s) as usize])
+            if p_kind[(s) as usize] == 3 {
+                let pic: u64 = proc_icon(name_of(s))
+                if pic != 0 {
+                    row_icons[(r) as usize] = pic
+                }
+            }
             a = tmfmt.put_str(d, a, name_of(s))
             a = tmfmt.put_str(d, a, ptr((&u_tab[0]) as u64))
             a = tmfmt.put_str(d, a, state_word(p_state[(s) as usize]))
@@ -1618,7 +1703,12 @@ fn stats_make() {
         stat_add(msg.get(ptr((&k_s_procs[0]) as u64)), tp)
         let _y: u64 = tmfmt.put_time(tp, 0, up_ms)
         stat_add(msg.get(ptr((&k_up[0]) as u64)), tp)
-        let _z: u64 = tmfmt.put_num(tp, 0, ncpu)
+        var _zb: u64 = tmfmt.put_num(tp, 0, ncpu)
+        if ncpu_on < ncpu {
+            _zb = tmfmt.put_str(tp, _zb, ptr((&u_onl[0]) as u64))
+            _zb = tmfmt.put_num(tp, _zb, ncpu_on)
+            _zb = tmfmt.put_str(tp, _zb, ptr((&u_clo[0]) as u64))
+        }
         stat_add(msg.get(ptr((&k_cores[0]) as u64)), tp)
         let _s1: u64 = tmfmt.put_str(tp, 0, ptr((&u_dash[0]) as u64))
         stat_add(msg.get(ptr((&k_s_sw[0]) as u64)), tp)
@@ -1803,6 +1893,9 @@ fn cores_draw(cx: u64, cy: u64, cw: u64, ch: u64) {
             var nb: [u8; 24] = [0 as u8; 24]
             var b: u64 = tmfmt.put_pm((&nb[0]) as u64, 0, c_pm[(c) as usize])
             b = tmfmt.put_str((&nb[0]) as u64, b, ptr((&u_pct[0]) as u64))
+            if c_up[(c) as usize] == 0 {
+                b = tmfmt.put_str((&nb[0]) as u64, 0, ptr((&u_off[0]) as u64))
+            }
             meter(cx + 14, cy + 10 + c * 24, sub(cw, 28), lab, c_pm[(c) as usize], (&nb[0]) as u64,
                 fuiscene.R_ACCENT)
             c = c + 1
