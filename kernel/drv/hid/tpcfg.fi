@@ -1,0 +1,206 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/hid/tpcfg.fi -- touchpad options from /etc/touchpad.conf (W-TPSET).
+//
+// key=value lines, written by settingsd from the `touchpad.*` keys of /etc/settings.schema:
+//   tap=true  tap2=true  drag=true  corner=true  natural=false  scrollspeed=100
+//   momentum=true  pinch=true  scroll=true  swipe3=1  swipe4=1
+// An option is numbered like lib/touchgest (gest.O_*); 11 and 12 are the three/four finger swipe modes
+// (0 off, 1 apps + desktop, 2 desktops + desktop). A key that is missing keeps its default.
+// The kernel reads the file once at start (`load`) and again when its mtime changes (`poll`, via ptrcfg.poll).
+
+profile kernel
+
+import lib.kstate
+import fs.fs
+
+export {
+    get, load, poll, loads, T_SWIPE3, T_SWIPE4, T_N, set_raw, def_of
+}
+
+const T_SWIPE3: u64 = 11
+const T_SWIPE4: u64 = 12
+const T_N: u64 = 13
+
+const O_VAL: u64 = 0x180
+const O_STAMP: u64 = 0x1F0
+const O_LOADS: u64 = 0x1F8
+const POLL_EVERY: u64 = 100
+const P_PATH_LEN: u64 = 19
+
+static mut tp_tick: u64 = 0
+static mut tp_keys: [u8; 78] = "tap\0tap2\0drag\0corner\0natural\0scrollspeed\0momentum\0pinch\0scroll\0swipe3\0swipe4\0\0"
+static mut tp_ids: [u8; 12] = [1,2,3,4,5,6,7,8,9,11,12, 0]
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state + kstate.MOUSE_OFF, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state + kstate.MOUSE_OFF, off, v)
+}
+
+fn def_of(opt: u64) -> u64 {
+    if opt == 1 || opt == 2 || opt == 3 || opt == 7 || opt == 8 || opt == 9 { return 1 }
+    if opt == 4 { return 25 }
+    if opt == 6 { return 100 }
+    if opt == 10 { return 300 }
+    if opt == 11 || opt == 12 { return 1 }
+    return 0
+}
+
+// the value of option opt (value + 1 is stored, 0 = never set = default)
+fn get(state: u64, opt: u64) -> u64 {
+    if opt == 0 || opt >= T_N { return 0 }
+    let v: u64 = g(state, O_VAL + opt * 8)
+    if v == 0 { return def_of(opt) }
+    return v - 1
+}
+
+fn set_raw(state: u64, opt: u64, v: u64) {
+    if opt == 0 || opt >= T_N { return }
+    s(state, O_VAL + opt * 8, v + 1)
+}
+
+fn loads(state: u64) -> u64 {
+    return g(state, O_LOADS)
+}
+
+fn get8(p: u64) -> u64 {
+    return kstate.get8(p)
+}
+
+fn conf_path(p: u64) {
+    var t: [u8; 19] = "/etc/touchpad.conf\0"
+    var i: u64 = 0
+    while i < P_PATH_LEN {
+        kstate.set8(p + i, t[i as usize])
+        i = i + 1
+    }
+}
+
+// the value start of `name=` at line start `at`, or 0
+fn field_at(buf: u64, n: u64, at: u64, name: u64, nlen: u64) -> u64 {
+    if at + nlen + 1 > n { return 0 }
+    var i: u64 = 0
+    while i < nlen {
+        if get8(buf + at + i) != get8(name + i) { return 0 }
+        i = i + 1
+    }
+    if get8(buf + at + nlen) != 61 { return 0 }
+    return at + nlen + 1
+}
+
+// digits at `at`, or all ones when there are none
+fn number(buf: u64, n: u64, at: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = at
+    var any: bool = false
+    while i < n {
+        let c: u64 = get8(buf + i)
+        if c < 48 || c > 57 { break }
+        v = v * 10 + (c - 48)
+        if v > 100000 { v = 100000 }
+        any = true
+        i = i + 1
+    }
+    if !any { return 0xFFFFFFFFFFFFFFFF }
+    return v
+}
+
+fn truth(buf: u64, at: u64) -> u64 {
+    let c: u64 = get8(buf + at)
+    if c == 116 || c == 49 || c == 121 { return 1 }
+    return 0
+}
+
+// one value of option opt from the text at v
+fn value_of(opt: u64, buf: u64, n: u64, v: u64) -> u64 {
+    let num: u64 = number(buf, n, v)
+    if opt == 6 {
+        if num == 0xFFFFFFFFFFFFFFFF { return 100 }
+        if num < 10 { return 10 }
+        if num > 500 { return 500 }
+        return num
+    }
+    if opt == 11 || opt == 12 {
+        if num == 0xFFFFFFFFFFFFFFFF { return def_of(opt) }
+        if num > 2 { return 2 }
+        return num
+    }
+    if opt == 4 {
+        if num == 0xFFFFFFFFFFFFFFFF {
+            if truth(buf, v) != 0 { return 25 }
+            return 0
+        }
+        if num == 1 { return 25 }
+        if num > 50 { return 50 }
+        return num
+    }
+    if num != 0xFFFFFFFFFFFFFFFF {
+        if num > 0 { return 1 }
+        return 0
+    }
+    return truth(buf, v)
+}
+
+// parse a config text of `n` octets; unknown keys and broken lines are skipped, missing keys keep the defaults
+fn parse(state: u64, buf: u64, n: u64) {
+    var o: u64 = 1
+    while o < T_N {
+        s(state, O_VAL + o * 8, 0)
+        o = o + 1
+    }
+    var at: u64 = 0
+    while at < n {
+        var k: u64 = 0
+        var kp: u64 = (&tp_keys[0]) as u64
+        var ki: u64 = 0
+        while get8(kp) != 0 {
+            var kl: u64 = 0
+            while get8(kp + kl) != 0 {
+                kl = kl + 1
+            }
+            let v: u64 = field_at(buf, n, at, kp, kl)
+            if v != 0 {
+                let opt: u64 = tp_ids[ki as usize] as u64
+                set_raw(state, opt, value_of(opt, buf, n, v))
+            }
+            kp = kp + kl + 1
+            ki = ki + 1
+        }
+        while at < n && get8(buf + at) != 10 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+}
+
+fn load(state: u64) -> bool {
+    if kstate.get(state, kstate.FS_READY) == 0 { return false }
+    var pf: [u8; 19] = [0 as u8; 19]
+    var buf: [u8; 512] = [0 as u8; 512]
+    conf_path((&pf[0]) as u64)
+    let ino: u64 = fs.path(state, (&pf[0]) as u64)
+    if ino == 0 { return false }
+    var n: u64 = fs.inode_size(state, ino)
+    if n > 511 { n = 511 }
+    let b: u64 = (&buf[0]) as u64
+    if fs.read_at(state, ino, 0, b, n) != n { return false }
+    parse(state, b, n)
+    s(state, O_STAMP, fs.inode_mtime(state, ino) + 1)
+    s(state, O_LOADS, g(state, O_LOADS) + 1)
+    return true
+}
+
+fn poll(state: u64) {
+    tp_tick = tp_tick + 1
+    if tp_tick % POLL_EVERY != 0 { return }
+    if kstate.get(state, kstate.FS_READY) == 0 { return }
+    var pf: [u8; 19] = [0 as u8; 19]
+    conf_path((&pf[0]) as u64)
+    let ino: u64 = fs.path(state, (&pf[0]) as u64)
+    if ino == 0 { return }
+    if fs.inode_mtime(state, ino) + 1 != g(state, O_STAMP) {
+        let _l: bool = load(state)
+    }
+}
