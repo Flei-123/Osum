@@ -3,7 +3,7 @@
 
 Abbild: `orientos-usb.img` (GPT + EFI-Partition, startet unter UEFI und BIOS).
 SHA256: `df4aa8bfeec83eb48a0c3f02dcc3ee16a90ea590607400cee9f8120408db819c`
-Stand: `61fcf87e` (main). Gleiche Schritte gelten fuer den Dell 9020 (dort F12 statt F9).
+Stand: Abbild gebaut aus origin/main `bbbc77c5` (Build-Commit `61fcf87e`, 23.10.2026 20:34 UTC). Gleiche Schritte gelten fuer den Dell 9020 (dort F12 statt F9).
 
 ## 0. Vorher (Rechner mit Linux/Windows, 2 Minuten)
 
