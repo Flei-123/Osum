@@ -52,9 +52,22 @@ if [ -x "$T/oracle" ]; then
     pass=$((pass+nok))
 fi
 
+"$FIRNC" tools/touchgest/oracle2.fi -o "$T/oracle2" 2> "$T/o2.err" \
+    && ok "oracle2 (TPSET options) builds against lib/touchgest" \
+    || { bad "oracle2 does not build"; head -10 "$T/o2.err"; }
+if [ -x "$T/oracle2" ]; then
+    "$T/oracle2" > "$T/out2.txt" 2>&1
+    nok=$(grep -c '^OK' "$T/out2.txt")
+    nbad=$(grep -c '^FAIL' "$T/out2.txt")
+    sed -n 's/^FAIL /  FAIL  oracle2: /p' "$T/out2.txt"
+    [ "$nbad" = 0 ] && ok "oracle2: no FAIL line" || bad "oracle2: $nbad FAIL lines"
+    [ "$nok" -ge 55 ] && ok "oracle2: $nok promises OK (>= 55)" || bad "oracle2: only $nok OK (< 55)"
+    pass=$((pass+nok))
+fi
+
 # negative controls: break one rule at a time in a copy of the lib
-mutate() { # name sed-expression
-    local name=$1 expr=$2
+mutate() { # name sed-expression [oracle]
+    local name=$1 expr=$2 orc=${3:-tools/touchgest/oracle.fi}
     local L="$T/lib-$name"
     mkdir -p "$L"
     for d in lib/*; do
@@ -66,7 +79,7 @@ mutate() { # name sed-expression
         bad "control $name: the mutation did not change the file"
         return
     fi
-    if ! FIRNLIB="$L" "$FIRNC" tools/touchgest/oracle.fi -o "$T/o-$name" 2>/dev/null; then
+    if ! FIRNLIB="$L" "$FIRNC" "$orc" -o "$T/o-$name" 2>/dev/null; then
         bad "control $name: mutated oracle does not build"
         return
     fi
@@ -85,6 +98,22 @@ mutate noedge      's/if c_edge\[k\] == 1 {/if false {/'
 mutate rightclick  's/emit(EV_CLICK, 2, 0)/emit(EV_CLICK, 1, 0)/'
 mutate nobutton    's/d_btn\[d\] == 0 \&\&//'
 mutate onedev      's/let d: usize = dev as usize/let d: usize = 0/g'
+
+O2=tools/touchgest/oracle2.fi
+mutate nonatural  's/if get_opt(dev, O_NATURAL) != 0 {/if false {/' $O2
+mutate noscale    's/if pct != 100 {/if false {/' $O2
+mutate nodrag     's/emit(EV_DRAG, 1, 0)/emit(EV_DRAG, 0, 0)/' $O2
+mutate dragwindow 's/now - d_lastclick\[d\] <= get_opt(dev, O_DRAG_MS)/now - d_lastclick[d] <= 100000/' $O2
+mutate nocorner   's/d_bmap\[d\] = 1$/d_bmap[d] = 0/' $O2
+mutate nomomentum 's/d_mom\[d\] = 1$/d_mom[d] = 0/' $O2
+mutate nodecay    's/d_vy\[d\] = d_vy\[d\] - sdiv(d_vy\[d\] \* dt, MOM_TAU_MS)/d_vy[d] = d_vy[d]/' $O2
+mutate notapopt   's/if get_opt(dev, O_TAP) != 0 {$/if true {/' $O2
+mutate notap2opt  's/if get_opt(dev, O_TAP2) != 0 { emit/if true { emit/' $O2
+mutate nopinchopt 's/if get_opt(dev, O_PINCH) == 0 { d_lock\[d\] = 3 }//' $O2
+mutate noscrollopt 's/if get_opt(dev, O_SCROLL) == 0 { return }//' $O2
+mutate noactions  's/if dir == 3 { return A_TASKVIEW }/if dir == 3 { return A_NONE }/' $O2
+mutate nolatch    's/^        d_bmap\[d\] = 0$/        d_bmap[d] = d_bmap[d]/' $O2
+mutate noclamp    's/if v > 500 { v = 500 }//' $O2
 
 echo "touchgest: $pass promises, $fail errors"
 [ "$fail" = 0 ]

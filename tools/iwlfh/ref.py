@@ -17,6 +17,9 @@ PICK = {'big': ('c1_big', 0), 'edges': ('cc_edges', 0), 'empty': ('c6_empty', 0)
 
 def gen(d):
     R.mk()
+    init = [(0x0, R.data(2000, 7)), (R.SEP_CPU, b''), (0x60000, R.data(1000, 9))]
+    secs, _b, _m, _p = R.CASES['c1_big']
+    open(os.path.join(d, 'two.bin'), 'wb').write(R.build(secs) + b''.join(R.tlv(20, R.u32(a) + dd) for a, dd in init))
     for name, (case, mode) in PICK.items():
         secs, bsize, _m, phys = R.CASES[case]
         assert bsize == 0x20000
