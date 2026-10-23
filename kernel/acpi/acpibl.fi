@@ -1,0 +1,351 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import serial
+import acpi.aml
+import acpi.amlns
+import acpi.amlobj
+import acpi.amlev
+
+export {
+    stage, ready, present, levels, level_min, level_max, percent, set_percent, on_notify, step,
+    selftest, writes, fails, node_dev
+}
+
+const MAX_LEVELS: u64 = 32
+const STEP_PCT: u64 = 10
+const MIN_FLOOR_PCT: u64 = 5
+
+static mut b_ready: u64 = 0
+static mut b_dev: u64 = 0
+static mut b_bcm: u64 = 0
+static mut b_bqc: u64 = 0
+static mut b_n: u64 = 0
+static mut b_writes: u64 = 0
+static mut b_fails: u64 = 0
+static mut b_cur_pct: u64 = 100
+static mut b_lv: [u64; 32] = [0 as u64; 32]
+
+fn ready() -> bool {
+    return b_ready == 1
+}
+
+fn present() -> bool {
+    return b_ready == 1
+}
+
+fn levels() -> u64 {
+    return b_n
+}
+
+fn writes() -> u64 {
+    return b_writes
+}
+
+fn fails() -> u64 {
+    return b_fails
+}
+
+fn node_dev() -> u64 {
+    return b_dev
+}
+
+fn level_min() -> u64 {
+    if b_n == 0 {
+        return 0
+    }
+    return b_lv[0 as usize]
+}
+
+fn level_max() -> u64 {
+    if b_n == 0 {
+        return 0
+    }
+    return b_lv[(b_n - 1) as usize]
+}
+
+fn child(state: u64, parent: u64, seg: u64) -> u64 {
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_parent(state, i) == parent && amlns.node_name(state, i) == seg {
+            return i
+        }
+        i = i + 1
+    }
+    return amlns.NONE
+}
+
+fn read_levels(state: u64, node: u64) -> u64 {
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, node, (&r[0]) as u64) {
+        amlns.err_set(state, amlns.ERR_OK)
+        return 0
+    }
+    if amlobj.otype((&r[0]) as u64) != amlobj.OT_PKG {
+        return 0
+    }
+    let cnt: u64 = amlobj.ov2((&r[0]) as u64)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < cnt && i < 64 {
+        var e: [u64; 3] = [0 as u64; 3]
+        amlobj.ocopy((&e[0]) as u64, amlobj.pkg_at((&r[0]) as u64, i))
+        amlev.deref(state, (&e[0]) as u64)
+        let v: u64 = amlobj.to_int((&e[0]) as u64)
+        if i >= 2 && v <= 0xFFFF {
+            var dup: bool = false
+            var j: u64 = 0
+            while j < n {
+                if b_lv[j as usize] == v {
+                    dup = true
+                }
+                j = j + 1
+            }
+            if !dup && n < MAX_LEVELS {
+                var k: u64 = n
+                while k > 0 && b_lv[(k - 1) as usize] > v {
+                    b_lv[k as usize] = b_lv[(k - 1) as usize]
+                    k = k - 1
+                }
+                b_lv[k as usize] = v
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn query(state: u64) -> u64 {
+    if b_bqc == 0 {
+        return 0xFFFFFFFF
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, b_bqc, (&r[0]) as u64) {
+        amlns.err_set(state, amlns.ERR_OK)
+        return 0xFFFFFFFF
+    }
+    return amlobj.to_int((&r[0]) as u64)
+}
+
+fn level_to_pct(v: u64) -> u64 {
+    if b_n == 0 {
+        return 100
+    }
+    var i: u64 = 0
+    while i < b_n {
+        if b_lv[i as usize] >= v {
+            if b_n == 1 {
+                return 100
+            }
+            return i * 100 / (b_n - 1)
+        }
+        i = i + 1
+    }
+    return 100
+}
+
+fn pct_to_level(pct: u64) -> u64 {
+    var p: u64 = pct
+    if p > 100 {
+        p = 100
+    }
+    if p < MIN_FLOOR_PCT {
+        p = MIN_FLOOR_PCT
+    }
+    let idx: u64 = (p * (b_n - 1) + 50) / 100
+    return b_lv[idx as usize]
+}
+
+fn stage(state: u64) {
+    var s_none: [u8; 14] = "acpibl: none\0\0"
+    var s_a: [u8; 16] = "acpibl: levels=\0"
+    var s_b: [u8; 6] = " min=\0"
+    var s_c: [u8; 6] = " max=\0"
+    var s_d: [u8; 6] = " cur=\0"
+    var s_e: [u8; 8] = " nobqc\0\0"
+    var w_bcm: [u8; 5] = "_BCM\0"
+    var w_bcl: [u8; 5] = "_BCL\0"
+    var w_bqc: [u8; 5] = "_BQC\0"
+    b_ready = 0
+    b_n = 0
+    b_bcm = 0
+    b_bqc = 0
+    b_dev = 0
+    if aml.ns_arena(state) == 0 {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return
+    }
+    let seg_bcm: u64 = amlns.seg_of((&w_bcm[0]) as u64)
+    let seg_bcl: u64 = amlns.seg_of((&w_bcl[0]) as u64)
+    let seg_bqc: u64 = amlns.seg_of((&w_bqc[0]) as u64)
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n && b_ready == 0 {
+        if amlns.node_name(state, i) == seg_bcm && amlns.node_kind(state, i) == amlns.NK_METHOD {
+            let par: u64 = amlns.node_parent(state, i)
+            let bcl: u64 = child(state, par, seg_bcl)
+            if bcl != amlns.NONE {
+                let cnt: u64 = read_levels(state, bcl)
+                if cnt >= 2 {
+                    b_n = cnt
+                    b_dev = par
+                    b_bcm = i
+                    let q: u64 = child(state, par, seg_bqc)
+                    if q != amlns.NONE {
+                        b_bqc = q
+                    }
+                    b_ready = 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    if b_ready == 0 {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return
+    }
+    let cur: u64 = query(state)
+    if cur != 0xFFFFFFFF {
+        b_cur_pct = level_to_pct(cur)
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(b_n)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(level_min())
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(level_max())
+    serial.puts((&s_d[0]) as u64)
+    if cur == 0xFFFFFFFF {
+        serial.puts((&s_e[0]) as u64)
+    } else {
+        serial.dec(cur)
+    }
+    serial.nl()
+}
+
+fn percent(state: u64) -> u64 {
+    if b_ready != 1 {
+        return 100
+    }
+    let q: u64 = query(state)
+    if q == 0xFFFFFFFF {
+        return b_cur_pct
+    }
+    return level_to_pct(q)
+}
+
+fn set_percent(state: u64, pct: u64) -> bool {
+    var s_f: [u8; 21] = "acpibl: _BCM failed\0\0"
+    if b_ready != 1 || b_n < 2 {
+        return false
+    }
+    let lv: u64 = pct_to_level(pct)
+    var arg: [u64; 3] = [0 as u64; 3]
+    var dst: [u64; 3] = [0 as u64; 3]
+    amlobj.oint((&arg[0]) as u64, lv)
+    if !aml.eval_node_arg(state, b_bcm, (&arg[0]) as u64, (&dst[0]) as u64) {
+        amlns.err_set(state, amlns.ERR_OK)
+        b_fails = b_fails + 1
+        if b_fails <= 4 {
+            serial.puts((&s_f[0]) as u64)
+            serial.nl()
+        }
+        if b_fails >= 8 {
+            b_ready = 0
+        }
+        return false
+    }
+    b_writes = b_writes + 1
+    b_cur_pct = pct
+    return true
+}
+
+fn step(state: u64, up: bool) -> bool {
+    if b_ready != 1 {
+        return false
+    }
+    var cur: u64 = percent(state)
+    var nx: u64 = cur
+    if up {
+        nx = cur + STEP_PCT
+        if nx > 100 {
+            nx = 100
+        }
+    } else {
+        if cur > STEP_PCT + MIN_FLOOR_PCT {
+            nx = cur - STEP_PCT
+        } else {
+            nx = MIN_FLOOR_PCT
+        }
+    }
+    return set_percent(state, nx)
+}
+
+fn on_notify(state: u64, code: u64) -> bool {
+    if b_ready != 1 {
+        return false
+    }
+    if code == 0x86 {
+        return step(state, true)
+    }
+    if code == 0x87 {
+        return step(state, false)
+    }
+    return false
+}
+
+fn num(v: u64) {
+    serial.dec(v)
+}
+
+fn selftest(state: u64) {
+    var s_a: [u8; 16] = "acpibl: test p=\0"
+    var s_b: [u8; 8] = " level=\0"
+    var s_c: [u8; 7] = " back=\0"
+    var s_d: [u8; 11] = " writes=\0\0\0"
+    var s_e: [u8; 19] = "acpibl: test done\0\0"
+    var s_f: [u8; 18] = "acpibl: key up p=\0"
+    var s_g: [u8; 21] = "acpibl: key down p=\0\0"
+    if b_ready != 1 {
+        var s_n: [u8; 23] = "acpibl: test no-device\0"
+        serial.puts((&s_n[0]) as u64)
+        serial.nl()
+        return
+    }
+    var tests: [u64; 4] = [0 as u64; 4]
+    tests[0] = 100
+    tests[1] = 50
+    tests[2] = 0
+    tests[3] = 100
+    var i: u64 = 0
+    while i < 4 {
+        let p: u64 = tests[i as usize]
+        set_percent(state, p)
+        serial.puts((&s_a[0]) as u64)
+        num(p)
+        serial.puts((&s_b[0]) as u64)
+        num(pct_to_level(p))
+        serial.puts((&s_c[0]) as u64)
+        num(query(state))
+        serial.nl()
+        i = i + 1
+    }
+    set_percent(state, 50)
+    on_notify(state, 0x86)
+    serial.puts((&s_f[0]) as u64)
+    num(percent(state))
+    serial.nl()
+    on_notify(state, 0x87)
+    on_notify(state, 0x87)
+    serial.puts((&s_g[0]) as u64)
+    num(percent(state))
+    serial.nl()
+    set_percent(state, 100)
+    serial.puts((&s_e[0]) as u64)
+    serial.nl()
+}
