@@ -213,7 +213,7 @@ def ntb_unwrap(b):
 
 
 def rndis_pkt(frame):
-    return u32(1) + u32(44 + len(frame)) + u32(36) + u32(len(frame)) + b'\0' * 24 + frame
+    return u32(1) + u32(44 + len(frame)) + u32(36) + u32(len(frame)) + b'\0' * 28 + frame
 
 
 def rndis_unwrap(b):

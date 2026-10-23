@@ -126,7 +126,6 @@ for c in $CASES; do
         ;;
     android-rndis)
         run andr android-rndis boot s.sh
-        chk andr "configuration 2 (RNDIS+ADB) selected" 'set_configuration 2'
         grep -aq 'set_configuration 2' "$T/andr.gadget" && ok "andr: gadget saw set_configuration 2" || bad "andr: gadget never got configuration 2 ($(grep -a configuration "$T/andr.gadget" | head -2 | tr '\n' ' '))"
         chk andr "bound to driver rndis" 'driver=rndis'
         net_ok andr
