@@ -85,7 +85,7 @@ int main(void)
     CHECKC("waitid_wnowait", rc == 0 && si.si_pid == kid && si.si_code == CLD_EXITED && si.si_status == 7, "rc=%d pid=%d code=%d st=%d", rc, (int)si.si_pid, si.si_code, si.si_status);
     memset(&si, 0, sizeof si);
     errno = 0;
-    rc = waitid(P_PID, kid, &si, WEXITED | WNOHANG);
+    rc = waitid(P_PID, kid, &si, WEXITED | WNOHANG | WNOWAIT);
     CHECKC("waitid_still_there", rc == 0 && si.si_pid == kid && si.si_status == 7, "rc=%d pid=%d", rc, (int)si.si_pid);
     int st = 0;
     pid_t w = waitpid(kid, &st, 0);
