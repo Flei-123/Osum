@@ -62,6 +62,7 @@ import klog
 import drv.con.tty
 import drv.con.odbuart
 import fs.unixsock
+import block.wlock
 
 export { ops, node_root, D_TTY, D_FB, D_CONSOLE, is_tty, is_fb, rdev_of, is_ptmx, pts_slot, shm_slot, full_path_in_shm }
 
@@ -122,7 +123,8 @@ const D_TTY6: u64 = 22
 const D_SHM: u64 = 23
 // ODB debug agent: raw COM2 (drv/con/odbuart.fi); listed only when the chip answers and the console does not own it
 const D_ODB: u64 = 24
-const D_LAST: u64 = 24
+const D_WLOCK: u64 = 25
+const D_LAST: u64 = 25
 // /dev/shm/NAME: node SHM_BASE + i is the paged shm object i (unixsock), its name lives in kstate.SHMN_OFF + i * SHMN_SLOT.
 // The name owns one reference of the object; unlink drops it. Only the USHM_PAGED paged objects can be named.
 const SHM_BASE: u64 = 300
@@ -257,6 +259,7 @@ fn name_at(node: u64, out: u64) -> bool {
     var n_pts: [u8; 4] = "pts\0"
     var n_shm: [u8; 4] = "shm\0"
     var n_odb: [u8; 5] = "odb0\0"
+    var n_wlock: [u8; 6] = "wlock\0"
     var src: u64 = 0
     if node >= D_TTY1 && node <= D_TTY6 {
         kstate.set8(out, 116 as u8)
@@ -302,6 +305,8 @@ fn name_at(node: u64, out: u64) -> bool {
         src = (&n_shm[0]) as u64
     } else if node == D_ODB {
         src = (&n_odb[0]) as u64
+    } else if node == D_WLOCK {
+        src = (&n_wlock[0]) as u64
     } else {
         return false
     }
@@ -526,7 +531,7 @@ fn d_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
         return D_ROOT
     }
     let node: u64 = index - 1
-    if node > D_LAST {
+    if node >= D_WLOCK {
         return 0
     }
     if !da(state, node) {
@@ -576,7 +581,7 @@ fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
         if node == D_SHM {
             return 1023 // 0o1777
         }
-        if node == D_ODB {
+        if node == D_ODB || node == D_WLOCK {
             return 384 // 0o600: root only
         }
         if node == D_ROOT || node == D_PTS {
@@ -646,8 +651,48 @@ fn d_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
         odb_note_overruns(state)
         return got
     }
+    if node == D_WLOCK {
+        return wlock_read(off, dst, len)
+    }
     if is_block(node) {
         return block_read(state, block_of(node), off, dst, len)
+    }
+    return 0
+}
+
+fn wlock_read(off: u64, dst: u64, len: u64) -> u64 {
+    var b: [u8; 96] = [0 as u8; 96]
+    let p: u64 = (&b[0 as usize]) as u64
+    let n: u64 = wlock.status(p)
+    if off >= n {
+        return 0
+    }
+    var c: u64 = n - off
+    if c > len {
+        c = len
+    }
+    var i: u64 = 0
+    while i < c {
+        kstate.set8(dst + i, kstate.get8(p + off + i) as u8)
+        i = i + 1
+    }
+    return c
+}
+
+fn wlock_write(src: u64, len: u64) -> u64 {
+    var b: [u8; 48] = [0 as u8; 48]
+    let p: u64 = (&b[0 as usize]) as u64
+    var n: u64 = len
+    if n > 47 {
+        n = 47
+    }
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(p + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    if wlock.command(p, n) {
+        return len
     }
     return 0
 }
@@ -720,6 +765,9 @@ fn d_write(state: u64, m: u64, node: u64, off: u64, src: u64,
     }
     if node == D_NULL || node == D_ZERO {
         return len // geschluckt, und das ist die Zusage
+    }
+    if node == D_WLOCK {
+        return wlock_write(src, len)
     }
     if is_block(node) {
         return block_write(state, block_of(node), off, src, len)
