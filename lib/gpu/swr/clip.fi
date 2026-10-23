@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/gpu/swr/clip.fi -- clip-space polygon clipping for the SWR rasterizer: near plane (z >= 0) and w >= 1e-6
+// vertices are STRIDE f64 each: x y z w u v r g b a; every attribute is linear in clip space, so lerping them is perspective correct
+import std.rt
+
+export { clip_poly, STRIDE, MAXV }
+
+const STRIDE: usize = 10
+const MAXV: usize = 8
+
+fn ld(p: u64, i: usize) -> f64 {
+    return *((p + (i as u64) * (8 as u64)) as *mut f64)
+}
+
+fn st(p: u64, i: usize, v: f64) {
+    *((p + (i as u64) * (8 as u64)) as *mut f64) = v
+}
+
+fn dist(p: u64, v: usize, plane: i32) -> f64 {
+    let o: usize = v * STRIDE
+    if plane == 0 { return ld(p, o + 2) }
+    return ld(p, o + 3) - 0.000001
+}
+
+fn copy_v(src: u64, s: usize, dst: u64, d: usize) {
+    var k: usize = 0
+    while k < STRIDE {
+        st(dst, d * STRIDE + k, ld(src, s * STRIDE + k))
+        k = k + 1
+    }
+}
+
+// dst vertex = inside + t * (outside - inside); always from the inside vertex so both triangles sharing an edge get the same point
+fn cut_v(src: u64, inside: usize, outside: usize, t: f64, dst: u64, d: usize) {
+    var k: usize = 0
+    while k < STRIDE {
+        let a: f64 = ld(src, inside * STRIDE + k)
+        let b: f64 = ld(src, outside * STRIDE + k)
+        st(dst, d * STRIDE + k, a + t * (b - a))
+        k = k + 1
+    }
+}
+
+fn clip_plane(src: u64, n: usize, dst: u64, plane: i32) -> usize {
+    var m: usize = 0
+    var i: usize = 0
+    while i < n {
+        var j: usize = i + 1
+        if j == n { j = 0 }
+        let di: f64 = dist(src, i, plane)
+        let dj: f64 = dist(src, j, plane)
+        let ii: bool = di >= 0.0
+        let ij: bool = dj >= 0.0
+        if ii {
+            copy_v(src, i, dst, m)
+            m = m + 1
+        }
+        if (ii && !ij) || (!ii && ij) {
+            if ii { cut_v(src, i, j, di / (di - dj), dst, m) } else { cut_v(src, j, i, dj / (dj - di), dst, m) }
+            m = m + 1
+        }
+        i = i + 1
+    }
+    return m
+}
+
+// polygon of n vertices in a; scratch b (MAXV vertices); result (0 .. 5 vertices) is left in a
+fn clip_poly(a: u64, b: u64, n: usize) -> usize {
+    var all_in: bool = true
+    var i: usize = 0
+    while i < n {
+        if !(dist(a, i, 0) >= 0.0 && dist(a, i, 1) >= 0.0) { all_in = false }
+        i = i + 1
+    }
+    if all_in { return n }
+    var m: usize = clip_plane(a, n, b, 0)
+    if m == 0 { return 0 }
+    m = clip_plane(b, m, a, 1)
+    return m
+}
