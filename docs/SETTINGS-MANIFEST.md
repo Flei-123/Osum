@@ -29,7 +29,7 @@ write <action>                                direkt nach einem `field`: Aktion 
 * `read`/`write` gehören zum `field` direkt davor (oder zum anderen der beiden `read`/`write`); höchstens je eines je Feld. Sonst (kein Feld davor, doppelt, schlechter Name, andere Wortzahl) wird die **ganze Datei abgelehnt** (Fehler 6/7/5). Bedeutung: `read` ruft die Aktion und nimmt aus der Antwort das Feld mit dem Namen des Feld-Keys (`share_activity=true`); `write` ruft die Aktion mit `<key>=true|false` (bool), `<key>=<Text>` (text/secret) oder ohne Argument (action).
 * `#` am Wortanfang beginnt einen Kommentar. Wörter trennen Leerzeichen, Tab, CR.
 * Namen (Id, Key, Symbol, Gruppe, Katalogschlüssel): `[a-z0-9._-]`, 1..40 Zeichen (App: 24).
-* Grenzen: 8 Seiten, 80 Einträge, 3072 Byte Textspeicher je Manifest.
+* Grenzen: 16 Seiten, 120 Einträge, 6144 Byte Textspeicher je Manifest.
 
 ## 2. Regeln
 
@@ -64,7 +64,7 @@ Regeln:
 * **Abgelehnt = Katalog wie vorher.** Von der Datei bleibt nichts (Einträge, Seiten, App, Textspeicher werden zurückgerollt). `err_code()`/`err_line()` gelten für den letzten Aufruf. `warn_count()` zählt je Datei neu.
 * **Ein App-Name einmal** (Fehler 12): kein Paket kann sich `settings` oder ein anderes Paket nehmen. Mit `add_pkg` darf ein Paket außerdem nur für sich selbst sprechen (13); `meld` ≠ `melder`.
 * **Seiten-Ids und Feld-Keys gelten je App**: zwei Apps dürfen beide eine Seite `accounts` mit Feld `name` haben. `page_find(id)` liefert die erste App mit dieser Id, `page_find_in(app, id)` die der gewünschten App. Eine Seite weiß ihre App (`page_app`), eine App ihre Seiten (`app_first_page`, `app_page_count`; Seiten einer App liegen hintereinander), `app_find(name)` → Index oder `NONE`.
-* **Grenzen**: je Datei weiter 8 Seiten, 80 Einträge, 3072 Byte Text. Katalog gesamt: 8 Apps, 24 Seiten, 240 Einträge, 8192 Byte Text (Fehler 8 bzw. 9).
+* **Grenzen**: je Datei 16 Seiten, 120 Einträge, 6144 Byte Text. Katalog gesamt: 8 Apps, 24 Seiten, 240 Einträge, 12288 Byte Text (Fehler 8 bzw. 9).
 * **Einträge vor der ersten Seite DIESER Datei** (`field`, `label`, `note`, `column`) sind Fehler 5 — auch wenn eine frühere App schon Seiten hat.
 
 Was der Aufrufer (Settings-App) tun muss: die eingebaute Seite mit `load` lesen, dann je Paket `/apps/<name>.prog/SETTINGS` (höchstens 3072 Byte; größere Dateien gar nicht erst lesen) mit `add_pkg(…, <name>)` anhängen. Ein abgelehntes Paket wird übersprungen — die anderen bleiben. Die App-Seite („das zeichnen“) ist noch **nicht** gebaut, siehe Abschnitt 6.
@@ -96,3 +96,5 @@ Was der Aufrufer (Settings-App) tun muss: die eingebaute Seite mit `load` lesen,
 ## Seiten im Manifest (r1590/Folgearbeit)
 
 Neben „accounts“ kommen jetzt „network“, „display“ und „display2“ aus `settings.d/accounts.settings`. `page_man` in `settings.fi` rendert alle vier; je Seitengruppe bindet eine Namensdatei (`accounts.bind`, `network.bind`, `display.bind`) den Feldschlüssel an Steuer-ID, Puffer, Sichtbarkeit (`man_shown`), Breite (`man_wd`) und Knopfart (`man_bk`).
+
+Dazu (r1612) die Seiten „time“, „lock“, „password“, „pin“, „language“, „wifi“, „presets“ und „about“ (Bindung `personal.bind`, Adapter `per_id`/`per_buf`/`per_bk`/`per_wd`, Gruppe w=3). Die alten Seitenfunktionen (`page_time` ...) sind Ein-Zeilen-Aufrufe von `page_man`. Dafür stiegen die Grenzen je Datei auf 120 Einträge, 16 Seiten, 6144 Byte (Katalog: 12288 Byte). Noch von Hand gebaut: Seiten mit Tabellen/Blobs, Schiebern, Leinwand oder bedingten Zeilen (darst, scheme, accent, taskbar, effects, sound, mouse, power, apps, proto, update, netv, system, rights, sync, bridge, usbnet, presets-Auswahl).

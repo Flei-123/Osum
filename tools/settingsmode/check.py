@@ -4,6 +4,8 @@ import re, sys
 
 serial, outdir = sys.argv[1:3]
 raw = open(serial, "rb").read().decode("latin1")
+INTERLEAVE = re.compile(r"(?<=[^\n])(?:wm|taskbar): [^\n]*\n")
+raw = INTERLEAVE.sub("", raw)
 CTL = re.compile(r"^settings: controls page=(\d+) n=(\d+)$", re.M)
 RECT = re.compile(r"settings: rect name=(\w+) ")
 NET = 3
