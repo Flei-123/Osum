@@ -112,7 +112,7 @@ for line in man.splitlines():
         if len(w) > 3 and w[3] != "-": labels.append(w[3])
     elif w[0] in ("label", "note"): labels.append(w[1])
 fields = pages["accounts"]
-for bf, pgs in (("accounts", ("accounts",)), ("network", ("network",)), ("display", ("display", "display2")), ("personal", ("time", "lock", "password", "pin", "language", "wifi", "presets", "about")), ("system", ("taskbar", "effects", "usbnet", "proto", "update", "presetsel")), ("tools", ("sync", "bridge", "system", "rights", "netv"))):
+for bf, pgs in (("accounts", ("accounts",)), ("network", ("network",)), ("display", ("display", "display2")), ("personal", ("time", "lock", "password", "pin", "language", "wifi", "presets", "about")), ("system", ("taskbar", "effects", "usbnet", "proto", "update", "presetsel", "mouse", "sound", "power", "darst", "scheme", "accent")), ("tools", ("sync", "bridge", "system", "rights", "netv"))):
     bound = [x for x in open("kernel/user/settings.d/%s.bind" % bf, encoding="utf-8").read().split("\n") if x]
     allf = [f for pg in pgs for f in pages[pg]]
     for f in allf:
@@ -139,7 +139,7 @@ if "fuiscene.label(left, (&l_nzust" in src: bad("the Network page is built by ha
 if '__include_str("settings.d/display.bind")' not in src: bad("the display binding names are not embedded in settings.fi")
 if "fuiscene.label(left, (&l_schirm" in src: bad("the Display page is built by hand again")
 if '__include_str("settings.d/personal.bind")' not in src: bad("the personal binding names are not embedded in settings.fi")
-for fnname in ("page_taskbar", "page_effects", "page_usbnet", "page_proto", "page_update", "page_vorl"):
+for fnname in ("page_taskbar", "page_effects", "page_usbnet", "page_proto", "page_update", "page_vorl", "page_maus", "page_sound", "page_energie", "page_darst", "page_scheme", "page_accent"):
     m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
     if not m or "page_man(4," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
 for fnname in ("page_sync", "page_bruecke", "page_system", "page_rechte", "page_netv"):
@@ -147,6 +147,8 @@ for fnname in ("page_sync", "page_bruecke", "page_system", "page_rechte", "page_
     if not m or "page_man(5," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
 if '__include_str("settings.d/tools.bind")' not in src: bad("the tools binding names are not embedded in settings.fi")
 if "fn net_tables" in src or "fuiscene.label(left, (&l_yprov" in src: bad("a tools page is built by hand again")
+for dead in ("fn page_energie_col", "k_ms_speed", "k_ms_accel", "k_sn_vol", "k_pw_scr", "k_pw_sby"):
+    if dead in src: bad("dead static or hand-built page code is back: " + dead)
 if "fn man_shown" in src: bad("man_shown is back: conditions belong in the manifest (when/unless)")
 for fnname in ("page_time", "page_benut", "page_passw", "page_pin", "page_sprache", "page_wifi", "page_vtrans", "page_info"):
     m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
