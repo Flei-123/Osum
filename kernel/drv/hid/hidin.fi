@@ -72,7 +72,7 @@ export {
     keys, releases, moves, wheels, touches, drops, reports, overruns,
     kbd_report_boot, mouse_report_boot,
     pad_x, pad_y, pad_fingers, pad_scrolls, pad_clicks,
-    down_count, is_down, reset_dev, selftest, say,
+    down_count, is_down, reset_dev, selftest, say, touch_say,
     gest_on, gest_taps, gest_scrolls, gest_sideways, gest_swipes, gest_zooms,
     gest_last_swipe, gest_hwheels, gest_say
 }
@@ -80,8 +80,8 @@ export {
 // Eine Seite. Je Geraet 256 Oktett Zustand, danach die Zaehler.
 const IN_OFF: u64 = 0xA6000
 const DEV_BYTES: u64 = 256
-const MAX_DEV: u64 = 4
-const CNT_BASIS: u64 = 0x400 // die Zaehler, relativ zu IN_OFF
+const MAX_DEV: u64 = 8
+const CNT_BASIS: u64 = 0x800 // die Zaehler, relativ zu IN_OFF
 
 // Je Geraet.
 const D_MAP: u64 = 0x00 // Tastenkarte jetzt, 256 Bit
@@ -101,6 +101,20 @@ const D_HSCROLL: u64 = 0x98 // r804: remainder of the sideways two-finger scroll
 const D_ORD: u64 = 0xA0 // r157: usages of the array field slots in REPORT order (8 bytes)
 const D_ORDN: u64 = 0xA8 // r157: how many of D_ORD are valid
 const ORD_MAX: u64 = 8
+const D_T_STATE: u64 = 0xB0 // touch screen: 0 idle, 1 down (undecided), 2 drag, 3 scroll
+const D_T_SX: u64 = 0xB8 // raw start position of the touch
+const D_T_SY: u64 = 0xC0
+const D_T_T0: u64 = 0xC8 // start time in ms
+const D_T_LX: u64 = 0xD0 // last raw position of the leading finger
+const D_T_LY: u64 = 0xD8 // last raw / pixel y of the leading finger or the two-finger centre
+const D_T_SCR: u64 = 0xE0 // two-finger scroll remainder in pixels
+const TS_IDLE: u64 = 0
+const TS_DOWN: u64 = 1
+const TS_DRAG: u64 = 2
+const TS_SCROLL: u64 = 3
+const TOUCH_SLOP_PX: u64 = 12
+const TOUCH_SCROLL_PX: u64 = 40
+const TOUCH_LONG_MS: u64 = 650
 
 // Die Zaehler.
 const C_KEYS: u64 = 0x00
@@ -132,6 +146,11 @@ const C_GSIDE: u64 = 0x90
 const C_GSWIPE: u64 = 0x98
 const C_GZOOM: u64 = 0xA0
 const C_GLAST: u64 = 0xA8 // last swipe: (dir << 8) | fingers
+const C_TTAP: u64 = 0xB8
+const C_TDRAG: u64 = 0xC0
+const C_TSCRL: u64 = 0xC8
+const C_TLONG: u64 = 0xD0
+const C_TPEN: u64 = 0xD8
 const C_GHWHL: u64 = 0xB0 // r804: horizontal wheel steps handed to the pointer layer (gesture or AC Pan)
 
 // A contact the pad flags as "not confident" (HID digitizer usage 0x47,
@@ -675,6 +694,9 @@ fn report(state: u64, dev: u64, buf: u64, len: u64) -> bool {
     if (art & hidrep.K_PAD) != 0 {
         return pad(state, dev, rid, p)
     }
+    if (art & (hidrep.K_TOUCH | hidrep.K_PEN)) != 0 {
+        return touch(state, dev, rid, p, art)
+    }
     return keys_and_mouse(state, dev, rid, p, art)
 }
 
@@ -947,6 +969,350 @@ fn abs_point(state: u64, x: u64, xlo: u64, xhi: u64, y: u64, ylo: u64, yhi: u64)
     cadd(state, C_MOVES, 1)
 }
 
+// ----------------------------------------------------------------------
+// TOUCH SCREEN AND PEN (digitizer page 0x0D, usage 0x04 / 0x02).
+//
+// A touch screen reports ABSOLUTE positions on the panel, not relative
+// motion, so it must not go through `pad` (the touchpad path). Pointer
+// emulation: a short touch is a click at the touched point, a touch that
+// moves beyond the slop is a drag (button held from the start point), two
+// fingers scroll (content follows the fingers), a long press is a right
+// click. The pen is an absolute pointer with tip = left, barrel = right.
+
+fn gest_dev(dev: u64) -> u64 {
+    if dev >= 4 {
+        return 3
+    }
+    return dev
+}
+
+fn scr_w(state: u64) -> u64 {
+    let w: u64 = gfx.width(state)
+    if w < 2 {
+        return SCREEN_W
+    }
+    return w
+}
+
+fn scr_h(state: u64) -> u64 {
+    let h: u64 = gfx.height(state)
+    if h < 2 {
+        return SCREEN_H
+    }
+    return h
+}
+
+fn absd(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a - b
+    }
+    return b - a
+}
+
+// Move the pointer to a raw digitizer position (through the panel inverse
+// of `fb.present`, like `abs_point`). Returns x << 32 | y.
+fn tpoint(state: u64, x: u64, xlo: u64, xhi: u64, y: u64, ylo: u64, yhi: u64) -> u64 {
+    var nx: u64 = abs_scale(x, xlo, xhi, scr_w(state))
+    var ny: u64 = abs_scale(y, ylo, yhi, scr_h(state))
+    let pw: u64 = gfx.panel_w(state)
+    let ph: u64 = gfx.panel_h(state)
+    if pw >= 2 && ph >= 2 {
+        let pp: u64 = gfx.pointer_from_panel(state, abs_scale(x, xlo, xhi, pw), abs_scale(y, ylo, yhi, ph))
+        nx = pp >> 32
+        ny = pp & 0xFFFFFFFF
+    }
+    gfx.mouse_set_pos(state, nx, ny)
+    cadd(state, C_MOVES, 1)
+    return (nx << 32) | ny
+}
+
+fn trace_touch(state: u64, code: u64, pos: u64, btn: u64) {
+    var s_a: [u8; 14] = "hidev: touch \0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_b: [u8; 4] = " b=\0"
+    if !spur_an(state) {
+        return
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(code)
+    serial.puts((&s_x[0]) as u64)
+    serial.hex(pos >> 32)
+    serial.puts((&s_y[0]) as u64)
+    serial.hex(pos & 0xFFFFFFFF)
+    serial.puts((&s_b[0]) as u64)
+    serial.hex(btn)
+    serial.nl()
+}
+
+fn touch_click(state: u64, dev: u64, btn: u64) {
+    mouse_report(state, dev, btn, 0, 0, 0, false)
+    mouse_report(state, dev, 0, 0, 0, 0, false)
+}
+
+fn touch_wheel(state: u64, dev: u64, r: u64) {
+    gfx.mouse_packet(state, 8, 0, 0, r, true)
+    gfx.mouse_now(state)
+    cadd(state, C_WHEEL, 1)
+    cadd(state, C_TSCRL, 1)
+    trace_touch(state, 7, 0, r)
+}
+
+fn touch(state: u64, dev: u64, rid: u64, p: u64, art: u64) -> bool {
+    var tip: [u64; 5] = [0 as u64; 5]
+    var cid: [u64; 5] = [0 as u64; 5]
+    var cx: [u64; 5] = [0 as u64; 5]
+    var cy: [u64; 5] = [0 as u64; 5]
+    var seen: u64 = 0
+    var cur: u64 = 0
+    var any: bool = false
+    var gemeldet: u64 = 0
+    var hat_zahl: bool = false
+    var hat_cid: bool = false
+    var hat_range: bool = false
+    var inrange: u64 = 1
+    var barrel: u64 = 0
+    var xlo: u64 = 0
+    var xhi: u64 = 0
+    var ylo: u64 = 0
+    var yhi: u64 = 0
+    let nf: u64 = hidrep.fields(state, dev)
+    var i: u64 = 0
+    while i < nf {
+        let kopf: u64 = hidrep.f_head(state, dev, i)
+        if ((kopf >> 8) & 0xFF) == hidrep.KIND_IN
+            && (kopf & 0xFF) == rid
+            && (((kopf >> 16) & 0xFFFF) & hidrep.FL_CONST) == 0 {
+            let page: u64 = hidrep.f_page(state, dev, i)
+            let off: u64 = hidrep.f_bitoff(state, dev, i)
+            let sz: u64 = hidrep.f_bitsz(state, dev, i)
+            let cnt: u64 = hidrep.f_count(state, dev, i)
+            let geb: u64 = hidrep.f_usage(state, dev, i)
+            var c: u64 = 0
+            while c < cnt {
+                let u: u64 = geb + c
+                let v: u64 = bits(p, off + c * sz, sz)
+                var bit: u64 = 0
+                if page == hidrep.UP_DIGITIZER {
+                    if u == hidrep.US_TIPSW {
+                        bit = 1
+                    } else if u == hidrep.US_CONTACTID {
+                        bit = 2
+                        hat_cid = true
+                    } else if u == hidrep.US_CONTACTCOUNT {
+                        gemeldet = v
+                        hat_zahl = true
+                    } else if u == 0x32 {
+                        inrange = v
+                        hat_range = true
+                    } else if u == 0x44 {
+                        barrel = v
+                    }
+                }
+                if page == hidrep.UP_DESKTOP {
+                    if u == hidrep.US_X {
+                        bit = 4
+                        xlo = hidrep.f_lmin(state, dev, i)
+                        xhi = hidrep.f_lmax(state, dev, i)
+                    } else if u == hidrep.US_Y {
+                        bit = 8
+                        ylo = hidrep.f_lmin(state, dev, i)
+                        yhi = hidrep.f_lmax(state, dev, i)
+                    }
+                }
+                if bit != 0 {
+                    // a usage seen twice starts the next finger's collection
+                    if (seen & bit) != 0 && cur + 1 < MAX_CONTACTS {
+                        cur = cur + 1
+                        seen = 0
+                    }
+                    seen = seen | bit
+                    any = true
+                    if bit == 1 {
+                        tip[cur as usize] = v
+                    } else if bit == 2 {
+                        cid[cur as usize] = v
+                    } else if bit == 4 {
+                        cx[cur as usize] = v
+                    } else {
+                        cy[cur as usize] = v
+                    }
+                }
+                c = c + 1
+            }
+        }
+        i = i + 1
+    }
+    if !any || xhi <= xlo || yhi <= ylo {
+        cadd(state, C_DROPS, 1)
+        return false
+    }
+    var nc: u64 = cur + 1
+
+    // A pen report (no contact id, no contact count): absolute pointer.
+    if (art & hidrep.K_PEN) != 0 && !hat_cid && !hat_zahl {
+        var pb: u64 = 0
+        if tip[0] != 0 {
+            pb = 1
+        }
+        if barrel != 0 {
+            pb = pb | 2
+        }
+        if hat_range && inrange == 0 {
+            if dg(state, dev, D_BTN) != 0 {
+                mouse_report(state, dev, 0, 0, 0, 0, false)
+            }
+            cs(state, C_FING, 0)
+            return true
+        }
+        let pp: u64 = tpoint(state, cx[0], xlo, xhi, cy[0], ylo, yhi)
+        mouse_report(state, dev, pb, 0, 0, 0, false)
+        trace_touch(state, 8, pp, pb)
+        cadd(state, C_TPEN, 1)
+        cs(state, C_FING, tip[0] & 1)
+        return true
+    }
+
+    var grenze: u64 = nc
+    if hat_zahl && gemeldet < nc {
+        grenze = gemeldet
+    }
+    var n: u64 = 0
+    var a: u64 = MAX_CONTACTS
+    var b: u64 = MAX_CONTACTS
+    var k: u64 = 0
+    while k < grenze {
+        if tip[k as usize] != 0 {
+            n = n + 1
+            if a == MAX_CONTACTS {
+                a = k
+            } else if b == MAX_CONTACTS {
+                b = k
+            }
+        }
+        k = k + 1
+    }
+    cs(state, C_FING, n)
+    if n > 0 {
+        cadd(state, C_TOUCH, 1)
+    }
+    let now: u64 = gest_now(state)
+    let st: u64 = dg(state, dev, D_T_STATE)
+    let w: u64 = scr_w(state)
+    let h: u64 = scr_h(state)
+
+    if n == 0 {
+        if st == TS_DRAG {
+            let pp: u64 = tpoint(state, dg(state, dev, D_T_LX), xlo, xhi, dg(state, dev, D_T_LY), ylo, yhi)
+            mouse_report(state, dev, 0, 0, 0, 0, false)
+            trace_touch(state, 4, pp, 0)
+        }
+        if st == TS_DOWN {
+            let pp: u64 = tpoint(state, dg(state, dev, D_T_LX), xlo, xhi, dg(state, dev, D_T_LY), ylo, yhi)
+            if now >= dg(state, dev, D_T_T0) + TOUCH_LONG_MS {
+                touch_click(state, dev, 2)
+                trace_touch(state, 6, pp, 2)
+                cadd(state, C_TLONG, 1)
+            } else {
+                touch_click(state, dev, 1)
+                trace_touch(state, 5, pp, 1)
+                cadd(state, C_TTAP, 1)
+            }
+            cadd(state, C_CLICKS, 1)
+        }
+        ds(state, dev, D_T_STATE, TS_IDLE)
+        return true
+    }
+
+    if n >= 2 && b != MAX_CONTACTS && st != TS_DRAG {
+        let cyp: u64 = abs_scale((cy[a as usize] + cy[b as usize]) / 2, ylo, yhi, h)
+        if st != TS_SCROLL {
+            ds(state, dev, D_T_STATE, TS_SCROLL)
+            ds(state, dev, D_T_LY, cyp)
+            ds(state, dev, D_T_SCR, 0)
+            return true
+        }
+        let acc: u64 = add(dg(state, dev, D_T_SCR), sub(cyp, dg(state, dev, D_T_LY)))
+        ds(state, dev, D_T_LY, cyp)
+        var rest: u64 = acc
+        while betrag(rest) >= TOUCH_SCROLL_PX {
+            if ist_neg(rest) {
+                touch_wheel(state, dev, 1)
+                rest = add(rest, TOUCH_SCROLL_PX)
+            } else {
+                touch_wheel(state, dev, 15)
+                rest = sub(rest, TOUCH_SCROLL_PX)
+            }
+        }
+        ds(state, dev, D_T_SCR, rest)
+        return true
+    }
+
+    if st == TS_SCROLL {
+        return true
+    }
+    let x: u64 = cx[a as usize]
+    let y: u64 = cy[a as usize]
+    if st == TS_IDLE {
+        ds(state, dev, D_T_STATE, TS_DOWN)
+        ds(state, dev, D_T_SX, x)
+        ds(state, dev, D_T_SY, y)
+        ds(state, dev, D_T_T0, now)
+        ds(state, dev, D_T_LX, x)
+        ds(state, dev, D_T_LY, y)
+        let pp: u64 = tpoint(state, x, xlo, xhi, y, ylo, yhi)
+        trace_touch(state, 1, pp, 0)
+        return true
+    }
+    ds(state, dev, D_T_LX, x)
+    ds(state, dev, D_T_LY, y)
+    if st == TS_DOWN {
+        let sx: u64 = dg(state, dev, D_T_SX)
+        let sy: u64 = dg(state, dev, D_T_SY)
+        let ddx: u64 = absd(abs_scale(x, xlo, xhi, w), abs_scale(sx, xlo, xhi, w))
+        let ddy: u64 = absd(abs_scale(y, ylo, yhi, h), abs_scale(sy, ylo, yhi, h))
+        if ddx > TOUCH_SLOP_PX || ddy > TOUCH_SLOP_PX {
+            ds(state, dev, D_T_STATE, TS_DRAG)
+            let p0: u64 = tpoint(state, sx, xlo, xhi, sy, ylo, yhi)
+            mouse_report(state, dev, 1, 0, 0, 0, false)
+            trace_touch(state, 2, p0, 1)
+            cadd(state, C_TDRAG, 1)
+            cadd(state, C_CLICKS, 1)
+            let p1: u64 = tpoint(state, x, xlo, xhi, y, ylo, yhi)
+            mouse_report(state, dev, 1, 0, 0, 0, false)
+            trace_touch(state, 3, p1, 1)
+        }
+        return true
+    }
+    if st == TS_DRAG {
+        let p2: u64 = tpoint(state, x, xlo, xhi, y, ylo, yhi)
+        mouse_report(state, dev, 1, 0, 0, 0, false)
+        trace_touch(state, 3, p2, 1)
+    }
+    return true
+}
+
+fn touch_say(state: u64) {
+    var s_a: [u8; 14] = "hidin: touch \0"
+    var s_b: [u8; 7] = " tap=\0\0"
+    var s_c: [u8; 7] = " drag=\0"
+    var s_d: [u8; 9] = " scroll=\0"
+    var s_e: [u8; 7] = " long=\0"
+    var s_f: [u8; 6] = " pen=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(cg(state, C_TTAP))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(cg(state, C_TDRAG))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(cg(state, C_TSCRL))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(cg(state, C_TLONG))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(cg(state, C_TPEN))
+    serial.nl()
+}
+
 // Aus den gelesenen Feldern ein PS/2-PAKET bauen und in denselben
 // Trichter geben, den die Maus am 8042 benutzt. Ab hier ist es
 // dieselbe Rechnung wie in Runde K10.
@@ -1169,9 +1535,10 @@ fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
     // the gesture machine (also the empty one: the tap is decided when
     // the last finger lifts). Without it the path below is unchanged.
     if gest_on(state) && maxx > 0 && maxy > 0 {
-        gest.configure(dev, maxx, maxy)
-        gest.set_palm_size(dev, GEST_PALM)
-        gest.begin(dev, gest_now(state))
+        let gd: u64 = gest_dev(dev)
+        gest.configure(gd, maxx, maxy)
+        gest.set_palm_size(gd, GEST_PALM)
+        gest.begin(gd, gest_now(state))
         var q: u64 = 0
         while q < grenze {
             if tip[q as usize] != 0 {
@@ -1184,7 +1551,7 @@ fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
             }
             q = q + 1
         }
-        gest.end(dev, btn)
+        gest.end(gd, btn)
         gest_apply(state, dev, btn)
         return true
     }
@@ -1730,7 +2097,7 @@ fn wiedergabe(state: u64) {
     var s_d: [u8; 7] = " desc=\0"
     var s_o: [u8; 5] = " ok=\0"
     var s_e: [u8; 17] = "hidin: ende n=\0\0\0"
-    let scratch: u64 = state + IN_OFF + 0x800
+    let scratch: u64 = state + IN_OFF + 0xC00
     var vorher: u64 = 999
     var i: u64 = 0
     // The gesture reports (from gbase on) only play with `hidgest`.

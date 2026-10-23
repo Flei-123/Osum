@@ -1402,6 +1402,24 @@ if [ -n "${STONES:-}" ]; then
     [ -r "$STONES/curl" ] && ARGS+=("/bin/curl=$STONES/curl")
     [ -r "$STONES/git" ] && ARGS+=("/bin/git=$STONES/git" /share/ /share/git-core/ /share/git-core/templates/)
 fi
+# WLAN-8265 (HP EliteBook): bundle Intel's firmware on the PRIVATE stick only. The blob is never in git: it is taken from a
+# cache file (WLAN_FW_FILE, default /root/fw-cache/iwlwifi-8265-36.ucode), checked against its SHA-256 pin, and copied unmodified to
+# /lib/firmware/intel/iwlwifi/ together with Intel's licence text (docs/WLAN-8265.md section 3). Not bundled when IMAGE_PROFILE=public.
+WLAN_FW_FILE=${WLAN_FW_FILE:-/root/fw-cache/iwlwifi-8265-36.ucode}
+WLAN_FW_PIN=1336afcd028ed094d1fe33893c84c273bb5711be52970040344a75a12f276d56
+WLAN_FW_LIC=${WLAN_FW_LIC:-/root/fw-cache/LICENCE.iwlwifi_firmware}
+if [ "${IMAGE_PROFILE:-}" != public ] && [ -r "$WLAN_FW_FILE" ] && [ "$(sha256sum "$WLAN_FW_FILE" | cut -d' ' -f1)" = "$WLAN_FW_PIN" ]; then
+    ARGS+=(/lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ "/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode=$WLAN_FW_FILE")
+    [ -r "$WLAN_FW_LIC" ] && ARGS+=("/lib/firmware/intel/iwlwifi/LICENCE.iwlwifi_firmware=$WLAN_FW_LIC")
+    sagen "wlan fw     iwlwifi-8265-36.ucode (pinned) nach /lib/firmware/intel/iwlwifi/"
+else
+    sagen "wlan fw     nicht gebuendelt (Datei oder SHA-Pin fehlt, oder IMAGE_PROFILE=public)"
+fi
+# WLAN_CONF=<file>: "ssid <name>" / "psk <password>" lines -> /etc/wlan.conf (private stick; same format as `wlan verbinden`).
+if [ "${IMAGE_PROFILE:-}" != public ] && [ -n "${WLAN_CONF:-}" ] && [ -s "$WLAN_CONF" ]; then
+    ARGS+=("/etc/wlan.conf=$WLAN_CONF")
+    sagen "wlan.conf   aus $WLAN_CONF"
+fi
 ARGS+=("/etc/ota.conf=$OUT/ota.conf")
 # DAILY-DRIVER: THE ZONE AND THE NETWORK CLOCK. `sntp boot` (started by
 # the desktop) applies /etc/time.conf to the kernel and, with auto=true,

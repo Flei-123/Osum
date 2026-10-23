@@ -1,0 +1,496 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import bus.pci
+import serial
+
+export { mark_ok, mark_fail, render, boot_report, rows, found_of, state_of,
+    D_NVME, D_AHCI, D_IDE, D_XHCI, D_E1000, D_R8169, D_HDA, D_VIRTIO_NET, D_VMSVGA, D_VIRTIO_BLK,
+    S_ABSENT, S_SEEN, S_BOUND, S_FAILED }
+
+const MAXR: u64 = 40
+const NAME_W: u64 = 24
+const ERR_W: u64 = 40
+const F_BUS: u64 = 0
+const F_VEND: u64 = 1
+const F_DEV: u64 = 2
+const F_CLS: u64 = 3
+const F_PROG: u64 = 4
+const F_HID: u64 = 5
+const F_STATE: u64 = 6
+const F_BOUND: u64 = 7
+const FIELDS: u64 = 8
+const BUS_PCI: u64 = 1
+const BUS_ACPI: u64 = 2
+const BUS_USB: u64 = 3
+const ANY_CLS: u64 = 0xFFFF
+const ANY_PROG: u64 = 0x1FF
+const NO_COUNT: u64 = 0xFFFFFFFFFFFFFFFF
+const S_ABSENT: u64 = 0
+const S_SEEN: u64 = 1
+const S_BOUND: u64 = 2
+const S_FAILED: u64 = 3
+const ST_NONE: u64 = 0
+const ST_BOUND: u64 = 1
+const ST_FAILED: u64 = 2
+
+static mut names: [u8; 960] = [0 as u8; 960]
+static mut errs: [u8; 1600] = [0 as u8; 1600]
+static mut tab: [u64; 320] = [0 as u64; 320]
+static mut nrows: u64 = 0
+static mut ready: u64 = 0
+static mut w_at: u64 = 0
+static mut w_cap: u64 = 0
+static mut w_out: u64 = 0
+
+const D_NVME: u64 = 0
+const D_AHCI: u64 = 1
+const D_IDE: u64 = 2
+const D_VIRTIO_BLK: u64 = 3
+const D_XHCI: u64 = 4
+const D_EHCI: u64 = 5
+const D_OHCI: u64 = 6
+const D_E1000: u64 = 7
+const D_R8169: u64 = 8
+const D_VIRTIO_NET: u64 = 9
+const D_IWL: u64 = 10
+const D_HDA: u64 = 11
+const D_VMSVGA: u64 = 12
+const D_VIRTIO_GPU: u64 = 13
+const D_LPSS_I2C: u64 = 14
+const D_PS2: u64 = 15
+const D_I2C_HID: u64 = 16
+const D_ACPI_EC: u64 = 17
+const D_ACPI_LID: u64 = 18
+const D_ACPI_BATTERY: u64 = 19
+const D_ACPI_AC: u64 = 20
+const D_USB_MSC: u64 = 21
+const D_USB_HID: u64 = 22
+const D_USB_NET: u64 = 23
+const D_USB_HUB: u64 = 24
+const NROWS: u64 = 25
+
+fn ld8(p: u64) -> u64 {
+    let b: u8 = *((p) as *mut u8)
+    return b as u64
+}
+
+fn reg(name: u64, bus: u64, vend: u64, dev: u64, cls: u64, prog: u64, hid: u64) -> u64 {
+    if nrows >= MAXR {
+        return NO_COUNT
+    }
+    let i: u64 = nrows
+    var k: u64 = 0
+    while k < NAME_W - 1 && ld8(name + k) != 0 {
+        names[(i * NAME_W + k) as usize] = ld8(name + k) as u8
+        k = k + 1
+    }
+    names[(i * NAME_W + k) as usize] = 0 as u8
+    tab[(i * FIELDS + F_BUS) as usize] = bus
+    tab[(i * FIELDS + F_VEND) as usize] = vend
+    tab[(i * FIELDS + F_DEV) as usize] = dev
+    tab[(i * FIELDS + F_CLS) as usize] = cls
+    tab[(i * FIELDS + F_PROG) as usize] = prog
+    tab[(i * FIELDS + F_HID) as usize] = hid
+    tab[(i * FIELDS + F_STATE) as usize] = ST_NONE
+    tab[(i * FIELDS + F_BOUND) as usize] = 0
+    nrows = nrows + 1
+    return i
+}
+
+fn builtin() {
+    var n0: [u8; 5] = "nvme\0"
+    var n1: [u8; 5] = "ahci\0"
+    var n2: [u8; 4] = "ide\0"
+    var n3: [u8; 11] = "virtio-blk\0"
+    var n4: [u8; 5] = "xhci\0"
+    var n5: [u8; 5] = "ehci\0"
+    var n6: [u8; 5] = "ohci\0"
+    var n7: [u8; 6] = "e1000\0"
+    var n8: [u8; 6] = "r8169\0"
+    var n9: [u8; 11] = "virtio-net\0"
+    var n10: [u8; 4] = "iwl\0"
+    var n11: [u8; 4] = "hda\0"
+    var n12: [u8; 7] = "vmsvga\0"
+    var n13: [u8; 11] = "virtio-gpu\0"
+    var n14: [u8; 9] = "lpss-i2c\0"
+    var n15: [u8; 4] = "ps2\0"
+    var n16: [u8; 8] = "i2c-hid\0"
+    var n17: [u8; 8] = "acpi-ec\0"
+    var n18: [u8; 9] = "acpi-lid\0"
+    var n19: [u8; 13] = "acpi-battery\0"
+    var n20: [u8; 8] = "acpi-ac\0"
+    var n21: [u8; 8] = "usb-msc\0"
+    var n22: [u8; 8] = "usb-hid\0"
+    var n23: [u8; 8] = "usb-net\0"
+    var n24: [u8; 8] = "usb-hub\0"
+    reg((&n0[0]) as u64, 1, 0x0, 0x0, 0x108, 0x1FF, 0x0)
+    reg((&n1[0]) as u64, 1, 0x0, 0x0, 0x106, 0x1, 0x0)
+    reg((&n2[0]) as u64, 1, 0x0, 0x0, 0x101, 0x1FF, 0x0)
+    reg((&n3[0]) as u64, 1, 0x1AF4, 0x0, 0x100, 0x1FF, 0x0)
+    reg((&n4[0]) as u64, 1, 0x0, 0x0, 0xC03, 0x30, 0x0)
+    reg((&n5[0]) as u64, 1, 0x0, 0x0, 0xC03, 0x20, 0x0)
+    reg((&n6[0]) as u64, 1, 0x0, 0x0, 0xC03, 0x10, 0x0)
+    reg((&n7[0]) as u64, 1, 0x8086, 0x0, 0x200, 0x1FF, 0x0)
+    reg((&n8[0]) as u64, 1, 0x10EC, 0x0, 0x200, 0x1FF, 0x0)
+    reg((&n9[0]) as u64, 1, 0x1AF4, 0x0, 0x200, 0x1FF, 0x0)
+    reg((&n10[0]) as u64, 1, 0x8086, 0x0, 0x280, 0x1FF, 0x0)
+    reg((&n11[0]) as u64, 1, 0x0, 0x0, 0x403, 0x1FF, 0x0)
+    reg((&n12[0]) as u64, 1, 0x15AD, 0x405, 0x300, 0x1FF, 0x0)
+    reg((&n13[0]) as u64, 1, 0x1AF4, 0x1050, 0xFFFF, 0x1FF, 0x0)
+    reg((&n14[0]) as u64, 1, 0x8086, 0x0, 0xC80, 0x1FF, 0x0)
+    reg((&n15[0]) as u64, 2, 0x0, 0x0, 0xFFFF, 0x1FF, 0x33303330504E50)
+    reg((&n16[0]) as u64, 2, 0x0, 0x0, 0xFFFF, 0x1FF, 0x30354330504E50)
+    reg((&n17[0]) as u64, 2, 0x0, 0x0, 0xFFFF, 0x1FF, 0x39304330504E50)
+    reg((&n18[0]) as u64, 2, 0x0, 0x0, 0xFFFF, 0x1FF, 0x44304330504E50)
+    reg((&n19[0]) as u64, 2, 0x0, 0x0, 0xFFFF, 0x1FF, 0x41304330504E50)
+    reg((&n20[0]) as u64, 2, 0x0, 0x0, 0xFFFF, 0x1FF, 0x3330303049504341)
+    reg((&n21[0]) as u64, 3, 0x0, 0x0, 0x800, 0x1FF, 0x0)
+    reg((&n22[0]) as u64, 3, 0x0, 0x0, 0x300, 0x1FF, 0x0)
+    reg((&n23[0]) as u64, 3, 0x0, 0x0, 0x200, 0x1FF, 0x0)
+    reg((&n24[0]) as u64, 3, 0x0, 0x0, 0x900, 0x1FF, 0x0)
+}
+
+fn ensure() {
+    if ready == 0 {
+        ready = 1
+        builtin()
+    }
+}
+
+fn rows() -> u64 {
+    ensure()
+    return nrows
+}
+
+fn mark_ok(id: u64) {
+    ensure()
+    if id >= nrows {
+        return
+    }
+    tab[(id * FIELDS + F_STATE) as usize] = ST_BOUND
+    tab[(id * FIELDS + F_BOUND) as usize] = tab[(id * FIELDS + F_BOUND) as usize] + 1
+}
+
+fn mark_fail(id: u64, text: u64) {
+    ensure()
+    if id >= nrows {
+        return
+    }
+    if tab[(id * FIELDS + F_STATE) as usize] != ST_BOUND {
+        tab[(id * FIELDS + F_STATE) as usize] = ST_FAILED
+    }
+    if errs[(id * ERR_W) as usize] == 0 as u8 {
+        var k: u64 = 0
+        while k < ERR_W - 1 && ld8(text + k) != 0 {
+            errs[(id * ERR_W + k) as usize] = ld8(text + k) as u8
+            k = k + 1
+        }
+        errs[(id * ERR_W + k) as usize] = 0 as u8
+    }
+}
+
+fn pci_match(state: u64, row: u64, idx: u64) -> bool {
+    let ven: u64 = tab[(row * FIELDS + F_VEND) as usize]
+    let dev: u64 = tab[(row * FIELDS + F_DEV) as usize]
+    let cls: u64 = tab[(row * FIELDS + F_CLS) as usize]
+    let prog: u64 = tab[(row * FIELDS + F_PROG) as usize]
+    if ven != 0 && pci.get(state, idx, pci.E_VENDOR) != ven {
+        return false
+    }
+    if dev != 0 && pci.get(state, idx, pci.E_DEVICE) != dev {
+        return false
+    }
+    if cls != ANY_CLS {
+        let have: u64 = (pci.get(state, idx, pci.E_CLASS) << 8) | pci.get(state, idx, pci.E_SUBCLASS)
+        if have != cls {
+            return false
+        }
+    }
+    if prog != ANY_PROG && pci.get(state, idx, pci.E_PROGIF) != prog {
+        return false
+    }
+    return true
+}
+
+fn found_of(state: u64, row: u64) -> u64 {
+    ensure()
+    if row >= nrows {
+        return 0
+    }
+    if tab[(row * FIELDS + F_BUS) as usize] != BUS_PCI {
+        return NO_COUNT
+    }
+    var n: u64 = 0
+    var i: u64 = 0
+    let total: u64 = pci.count(state)
+    while i < total {
+        if pci_match(state, row, i) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn state_of(state: u64, row: u64) -> u64 {
+    ensure()
+    if row >= nrows {
+        return S_ABSENT
+    }
+    let st: u64 = tab[(row * FIELDS + F_STATE) as usize]
+    if st == ST_BOUND {
+        return S_BOUND
+    }
+    if st == ST_FAILED {
+        return S_FAILED
+    }
+    let f: u64 = found_of(state, row)
+    if f == 0 {
+        return S_ABSENT
+    }
+    return S_SEEN
+}
+
+fn claimed(state: u64, idx: u64) -> bool {
+    var r: u64 = 0
+    while r < nrows {
+        if tab[(r * FIELDS + F_BUS) as usize] == BUS_PCI && pci_match(state, r, idx) {
+            return true
+        }
+        r = r + 1
+    }
+    return false
+}
+
+fn put_c(c: u64) {
+    if w_at + 1 < w_cap {
+        kstate.set8(w_out + w_at, c as u8)
+        w_at = w_at + 1
+    }
+}
+
+fn put_s(s: u64) {
+    var i: u64 = 0
+    while ld8(s + i) != 0 {
+        put_c(ld8(s + i))
+        i = i + 1
+    }
+}
+
+fn put_dec(v: u64) {
+    var tmp: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        put_c(tmp[n as usize] as u64)
+    }
+}
+
+fn put_hex(v: u64, digits: u64) {
+    var i: u64 = digits
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            put_c(48 + d)
+        } else {
+            put_c(87 + d)
+        }
+    }
+}
+
+fn put_spec(row: u64) {
+    let bus: u64 = tab[(row * FIELDS + F_BUS) as usize]
+    let cls: u64 = tab[(row * FIELDS + F_CLS) as usize]
+    if bus == BUS_PCI {
+        var s_star: [u8; 2] = "*\0"
+        let ven: u64 = tab[(row * FIELDS + F_VEND) as usize]
+        let dev: u64 = tab[(row * FIELDS + F_DEV) as usize]
+        if ven == 0 {
+            put_s((&s_star[0]) as u64)
+        } else {
+            put_hex(ven, 4)
+        }
+        put_c(58)
+        if dev == 0 {
+            put_s((&s_star[0]) as u64)
+        } else {
+            put_hex(dev, 4)
+        }
+        put_c(47)
+        if cls == ANY_CLS {
+            put_s((&s_star[0]) as u64)
+        } else {
+            put_hex(cls, 4)
+        }
+        let prog: u64 = tab[(row * FIELDS + F_PROG) as usize]
+        if prog != ANY_PROG {
+            put_c(46)
+            put_hex(prog, 2)
+        }
+        return
+    }
+    if bus == BUS_ACPI {
+        let hid: u64 = tab[(row * FIELDS + F_HID) as usize]
+        var k: u64 = 0
+        while k < 8 && ((hid >> (k * 8)) & 255) != 0 {
+            put_c((hid >> (k * 8)) & 255)
+            k = k + 1
+        }
+        return
+    }
+    var s_usb: [u8; 11] = "usb class=\0"
+    put_s((&s_usb[0]) as u64)
+    put_hex(cls >> 8, 2)
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    var s_head: [u8; 34] = "# name bus match found state err\n\0"
+    var s_found: [u8; 8] = " found=\0"
+    var s_state: [u8; 8] = " state=\0"
+    var s_err: [u8; 6] = " err=\0"
+    var s_q: [u8; 2] = "?\0"
+    var s_ab: [u8; 7] = "absent\0"
+    var s_se: [u8; 5] = "seen\0"
+    var s_bo: [u8; 6] = "bound\0"
+    var s_fa: [u8; 7] = "failed\0"
+    var s_dash: [u8; 2] = "-\0"
+    var s_un: [u8; 15] = "unclaimed pci \0"
+    var s_cls: [u8; 8] = " class=\0"
+    var s_sum: [u8; 13] = "# unclaimed=\0"
+    ensure()
+    w_out = out
+    w_cap = cap
+    w_at = 0
+    put_s((&s_head[0]) as u64)
+    var r: u64 = 0
+    while r < nrows {
+        put_s((&names[(r * NAME_W) as usize]) as u64)
+        put_c(32)
+        let bus: u64 = tab[(r * FIELDS + F_BUS) as usize]
+        if bus == BUS_PCI {
+            var s_p: [u8; 4] = "pci\0"
+            put_s((&s_p[0]) as u64)
+        } else if bus == BUS_ACPI {
+            var s_a: [u8; 5] = "acpi\0"
+            put_s((&s_a[0]) as u64)
+        } else {
+            var s_u: [u8; 4] = "usb\0"
+            put_s((&s_u[0]) as u64)
+        }
+        put_c(32)
+        put_spec(r)
+        put_s((&s_found[0]) as u64)
+        let f: u64 = found_of(state, r)
+        if f == NO_COUNT {
+            put_s((&s_q[0]) as u64)
+        } else {
+            put_dec(f)
+        }
+        put_s((&s_state[0]) as u64)
+        let st: u64 = state_of(state, r)
+        if st == S_BOUND {
+            put_s((&s_bo[0]) as u64)
+        } else if st == S_FAILED {
+            put_s((&s_fa[0]) as u64)
+        } else if st == S_SEEN {
+            put_s((&s_se[0]) as u64)
+        } else {
+            put_s((&s_ab[0]) as u64)
+        }
+        put_s((&s_err[0]) as u64)
+        if errs[(r * ERR_W) as usize] == 0 as u8 {
+            put_s((&s_dash[0]) as u64)
+        } else {
+            put_s((&errs[(r * ERR_W) as usize]) as u64)
+        }
+        put_c(10)
+        r = r + 1
+    }
+    var nun: u64 = 0
+    var i: u64 = 0
+    let total: u64 = pci.count(state)
+    while i < total {
+        if !claimed(state, i) {
+            nun = nun + 1
+            put_s((&s_un[0]) as u64)
+            let bdf: u64 = pci.get(state, i, pci.E_BDF)
+            put_hex(pci.bdf_bus(bdf), 2)
+            put_c(58)
+            put_hex(pci.bdf_dev(bdf), 2)
+            put_c(46)
+            put_hex(pci.bdf_fn(bdf), 1)
+            put_c(32)
+            put_hex(pci.get(state, i, pci.E_VENDOR), 4)
+            put_c(58)
+            put_hex(pci.get(state, i, pci.E_DEVICE), 4)
+            put_s((&s_cls[0]) as u64)
+            put_hex((pci.get(state, i, pci.E_CLASS) << 8) | pci.get(state, i, pci.E_SUBCLASS), 4)
+            put_c(10)
+        }
+        i = i + 1
+    }
+    put_s((&s_sum[0]) as u64)
+    put_dec(nun)
+    put_c(10)
+    return w_at
+}
+
+fn boot_report(state: u64) {
+    var s_head: [u8; 19] = "drv: registry rows\0"
+    var s_m: [u8; 10] = " matched=\0"
+    var s_u: [u8; 12] = " unclaimed=\0"
+    var s_line: [u8; 15] = "drv: unclaimed\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_eq: [u8; 2] = "=\0"
+    ensure()
+    var matched: u64 = 0
+    var nun: u64 = 0
+    var i: u64 = 0
+    let total: u64 = pci.count(state)
+    while i < total {
+        if claimed(state, i) {
+            matched = matched + 1
+        } else {
+            nun = nun + 1
+        }
+        i = i + 1
+    }
+    serial.puts((&s_head[0]) as u64)
+    serial.puts((&s_eq[0]) as u64)
+    serial.dec(nrows)
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(matched)
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(nun)
+    serial.nl()
+    var shown: u64 = 0
+    i = 0
+    while i < total && shown < 6 {
+        if !claimed(state, i) {
+            let bdf: u64 = pci.get(state, i, pci.E_BDF)
+            serial.puts((&s_line[0]) as u64)
+            serial.puts((&s_sp[0]) as u64)
+            serial.hex(pci.get(state, i, pci.E_VENDOR))
+            serial.puts((&s_sp[0]) as u64)
+            serial.hex(pci.get(state, i, pci.E_DEVICE))
+            serial.puts((&s_sp[0]) as u64)
+            serial.hex((pci.get(state, i, pci.E_CLASS) << 8) | pci.get(state, i, pci.E_SUBCLASS))
+            serial.nl()
+            shown = shown + 1
+        }
+        i = i + 1
+    }
+}

@@ -44,10 +44,14 @@
 
 export {
     MAX_DEV, MAX_CONTACT, MAX_EV,
-    EV_MOVE, EV_CLICK, EV_SCROLL, EV_SWIPE, EV_ZOOM,
+    EV_MOVE, EV_CLICK, EV_SCROLL, EV_SWIPE, EV_ZOOM, EV_DRAG,
+    O_TAP, O_TAP2, O_DRAG, O_CORNER, O_NATURAL, O_SCROLL_PCT, O_MOMENTUM, O_PINCH, O_SCROLL, O_DRAG_MS,
+    A_NONE, A_NEXT_WIN, A_PREV_WIN, A_TASKVIEW, A_SHOW_DESKTOP, A_RESTORE_DESKTOP, A_DESK_PREV, A_DESK_NEXT,
+    M_OFF, M_APPS, M_DESKTOPS,
     reset, configure, set_edge, set_palm_size, set_tap_ms, note_key,
+    set_opt, get_opt, swipe_action, out_buttons, dragging, momentum_on,
     slop, swipe_len,
-    begin, add_contact, end,
+    begin, add_contact, end, tick,
     ev_count, ev_kind, ev_a, ev_b, fingers, palms, in_touch
 }
 
@@ -60,6 +64,36 @@ const EV_CLICK: u64 = 2
 const EV_SCROLL: u64 = 3
 const EV_SWIPE: u64 = 4
 const EV_ZOOM: u64 = 5
+const EV_DRAG: u64 = 6
+
+const O_TAP: u64 = 1
+const O_TAP2: u64 = 2
+const O_DRAG: u64 = 3
+const O_CORNER: u64 = 4
+const O_NATURAL: u64 = 5
+const O_SCROLL_PCT: u64 = 6
+const O_MOMENTUM: u64 = 7
+const O_PINCH: u64 = 8
+const O_SCROLL: u64 = 9
+const O_DRAG_MS: u64 = 10
+const OPT_N: u64 = 16
+
+const A_NONE: u64 = 0
+const A_NEXT_WIN: u64 = 1
+const A_PREV_WIN: u64 = 2
+const A_TASKVIEW: u64 = 3
+const A_SHOW_DESKTOP: u64 = 4
+const A_RESTORE_DESKTOP: u64 = 5
+const A_DESK_PREV: u64 = 6
+const A_DESK_NEXT: u64 = 7
+
+const M_OFF: u64 = 0
+const M_APPS: u64 = 1
+const M_DESKTOPS: u64 = 2
+
+const MOM_MIN: i64 = 48
+const MOM_TAU_MS: i64 = 350
+const MOM_WINDOW_MS: u64 = 90
 
 const TYPING_MS: u64 = 300
 
@@ -69,6 +103,23 @@ static mut d_h: [i64; 4] = [700; 4]
 static mut d_edge: [i64; 4] = [10; 4]       // strip width in percent, 0 = off
 static mut d_palm: [u64; 4] = [0; 4]        // size threshold, 0 = off
 static mut d_tapms: [u64; 4] = [250; 4]
+static mut d_opt: [u64; 64] = [0; 64]       // value + 1, 0 = default
+static mut d_lastclick: [u64; 4] = [0; 4]
+static mut d_haveclick: [u64; 4] = [0; 4]
+static mut d_cand: [u64; 4] = [0; 4]        // this touch may become a tap-and-drag
+static mut d_drag: [u64; 4] = [0; 4]
+static mut d_pbtn: [u64; 4] = [0; 4]
+static mut d_bmap: [u64; 4] = [0; 4]        // the running press is mapped to the right button
+static mut d_rem_x: [i64; 4] = [0; 4]
+static mut d_rem_y: [i64; 4] = [0; 4]
+static mut d_vx: [i64; 4] = [0; 4]          // scroll velocity, units per ms * 256
+static mut d_vy: [i64; 4] = [0; 4]
+static mut d_scroll_t: [u64; 4] = [0; 4]
+static mut d_scrolling: [u64; 4] = [0; 4]
+static mut d_mom: [u64; 4] = [0; 4]
+static mut d_mom_t: [u64; 4] = [0; 4]
+static mut d_mrx: [i64; 4] = [0; 4]
+static mut d_mry: [i64; 4] = [0; 4]
 
 // ---- per device state
 static mut d_last_key: [u64; 4] = [0; 4]
@@ -148,6 +199,17 @@ fn reset(dev: u64) {
     d_npalm[d] = 0
     d_have_key[d] = 0
     d_last_key[d] = 0
+    d_haveclick[d] = 0
+    d_cand[d] = 0
+    d_drag[d] = 0
+    d_pbtn[d] = 0
+    d_bmap[d] = 0
+    d_rem_x[d] = 0
+    d_rem_y[d] = 0
+    d_vx[d] = 0
+    d_vy[d] = 0
+    d_scrolling[d] = 0
+    d_mom[d] = 0
     var s: u64 = 0
     while s < MAX_CONTACT {
         c_used[(dev * MAX_CONTACT + s) as usize] = 0
@@ -180,6 +242,74 @@ fn set_tap_ms(dev: u64, ms: u64) {
     d_tapms[dev as usize] = ms
 }
 
+fn opt_def(opt: u64) -> u64 {
+    if opt == O_TAP || opt == O_TAP2 || opt == O_PINCH || opt == O_SCROLL { return 1 }
+    if opt == O_SCROLL_PCT { return 100 }
+    if opt == O_DRAG_MS { return 300 }
+    return 0
+}
+
+fn set_opt(dev: u64, opt: u64, val: u64) {
+    if dev >= MAX_DEV || opt == 0 || opt >= OPT_N { return }
+    var v: u64 = val
+    if opt == O_SCROLL_PCT {
+        if v < 10 { v = 10 }
+        if v > 500 { v = 500 }
+    } else if opt == O_DRAG_MS {
+        if v < 100 { v = 100 }
+        if v > 1000 { v = 1000 }
+    } else if opt == O_CORNER {
+        if v > 50 { v = 50 }
+    } else if v > 1 {
+        v = 1
+    }
+    d_opt[(dev * OPT_N + opt) as usize] = v + 1
+}
+
+fn get_opt(dev: u64, opt: u64) -> u64 {
+    if dev >= MAX_DEV || opt == 0 || opt >= OPT_N { return 0 }
+    let v: u64 = d_opt[(dev * OPT_N + opt) as usize]
+    if v == 0 { return opt_def(opt) }
+    return v - 1
+}
+
+// three/four finger swipe: (mode, direction 1 left 2 right 3 up 4 down) -> action
+fn swipe_action(mode: u64, dir: u64) -> u64 {
+    if mode == M_OFF { return A_NONE }
+    if dir == 3 { return A_TASKVIEW }
+    if dir == 4 { return A_SHOW_DESKTOP }
+    if mode == M_DESKTOPS {
+        if dir == 1 { return A_DESK_NEXT }
+        if dir == 2 { return A_DESK_PREV }
+        return A_NONE
+    }
+    if dir == 1 { return A_NEXT_WIN }
+    if dir == 2 { return A_PREV_WIN }
+    return A_NONE
+}
+
+// the button mask the pointer layer should see after end()
+fn out_buttons(dev: u64) -> u64 {
+    if dev >= MAX_DEV { return 0 }
+    let d: usize = dev as usize
+    var b: u64 = d_pbtn[d]
+    if d_bmap[d] != 0 && (b & 1) != 0 {
+        b = (b & 0xFFFFFFFFFFFFFFFE) | 2
+    }
+    if d_drag[d] != 0 { b = b | 1 }
+    return b
+}
+
+fn dragging(dev: u64) -> bool {
+    if dev >= MAX_DEV { return false }
+    return d_drag[dev as usize] != 0
+}
+
+fn momentum_on(dev: u64) -> bool {
+    if dev >= MAX_DEV { return false }
+    return d_mom[dev as usize] != 0
+}
+
 // a key was pressed: contacts landing in the next TYPING_MS are palms
 fn note_key(dev: u64, now: u64) {
     if dev >= MAX_DEV { return }
@@ -199,6 +329,85 @@ fn slop(dev: u64) -> i64 {
 fn swipe_len(dev: u64) -> i64 {
     if dev >= MAX_DEV { return 100 }
     return d_w[dev as usize] / 6
+}
+
+fn sdiv(a: i64, b: i64) -> i64 {
+    if a < 0 { return 0 - ((0 - a) / b) }
+    return a / b
+}
+
+// scale one axis by pct percent, keep the remainder so slow motion is not lost
+fn scale_rem(v: i64, pct: i64, rem: i64) -> i64 {
+    return v * pct + rem
+}
+
+fn out_scroll(dev: u64, sx: i64, sy: i64) {
+    let d: usize = dev as usize
+    var x: i64 = sx
+    var y: i64 = sy
+    if get_opt(dev, O_NATURAL) != 0 {
+        x = 0 - x
+        y = 0 - y
+    }
+    let pct: i64 = get_opt(dev, O_SCROLL_PCT) as i64
+    if pct != 100 {
+        let tx: i64 = scale_rem(x, pct, d_rem_x[d])
+        let ty: i64 = scale_rem(y, pct, d_rem_y[d])
+        x = sdiv(tx, 100)
+        y = sdiv(ty, 100)
+        d_rem_x[d] = tx - x * 100
+        d_rem_y[d] = ty - y * 100
+    }
+    if x != 0 || y != 0 { emit(EV_SCROLL, x, y) }
+}
+
+// a scroll step from a finger: remember the velocity for the momentum, then output
+fn emit_scroll(dev: u64, now: u64, sx: i64, sy: i64) {
+    let d: usize = dev as usize
+    if get_opt(dev, O_SCROLL) == 0 { return }
+    var dt: i64 = 8
+    if d_scrolling[d] != 0 && now > d_scroll_t[d] {
+        dt = (now - d_scroll_t[d]) as i64
+    }
+    if dt > 50 { dt = 50 }
+    if dt < 1 { dt = 1 }
+    let nvx: i64 = sdiv(sx * 256, dt)
+    let nvy: i64 = sdiv(sy * 256, dt)
+    if d_scrolling[d] != 0 {
+        d_vx[d] = sdiv(d_vx[d] + nvx * 3, 4)
+        d_vy[d] = sdiv(d_vy[d] + nvy * 3, 4)
+    } else {
+        d_vx[d] = nvx
+        d_vy[d] = nvy
+    }
+    d_scrolling[d] = 1
+    d_scroll_t[d] = now
+    out_scroll(dev, sx, sy)
+}
+
+// momentum: called with the clock when no finger report arrives; returns the events
+fn tick(dev: u64, now: u64) -> u64 {
+    e_n = 0
+    if dev >= MAX_DEV { return 0 }
+    let d: usize = dev as usize
+    if d_mom[d] == 0 { return 0 }
+    if now <= d_mom_t[d] { return 0 }
+    var dt: i64 = (now - d_mom_t[d]) as i64
+    d_mom_t[d] = now
+    if dt > 100 { dt = 100 }
+    let tx: i64 = d_vx[d] * dt + d_mrx[d]
+    let ty: i64 = d_vy[d] * dt + d_mry[d]
+    let qx: i64 = sdiv(tx, 256)
+    let qy: i64 = sdiv(ty, 256)
+    d_mrx[d] = tx - qx * 256
+    d_mry[d] = ty - qy * 256
+    d_vx[d] = d_vx[d] - sdiv(d_vx[d] * dt, MOM_TAU_MS)
+    d_vy[d] = d_vy[d] - sdiv(d_vy[d] * dt, MOM_TAU_MS)
+    if absv(d_vx[d]) < MOM_MIN && absv(d_vy[d]) < MOM_MIN {
+        d_mom[d] = 0
+    }
+    out_scroll(dev, qx, qy)
+    return e_n
 }
 
 fn begin(dev: u64, now: u64) {
@@ -398,24 +607,65 @@ fn end(dev: u64, buttons: u64) {
     d_nact[d] = n
     d_npalm[d] = np
 
+    if (buttons & 1) != 0 && (d_pbtn[d] & 1) == 0 {
+        d_bmap[d] = 0
+        let cp: i64 = get_opt(dev, O_CORNER) as i64
+        if cp > 0 {
+            var cs: u64 = 0
+            while cs < MAX_CONTACT {
+                let ck: usize = (dev * MAX_CONTACT + cs) as usize
+                if c_used[ck] != 0 && c_palmf[ck] == 0 {
+                    if c_x[ck] >= d_w[d] - d_w[d] * cp / 100 && c_y[ck] >= d_h[d] - d_h[d] * cp / 100 {
+                        d_bmap[d] = 1
+                    }
+                }
+                cs = cs + 1
+            }
+        }
+    } else if (buttons & 1) == 0 {
+        d_bmap[d] = 0
+    }
+    d_pbtn[d] = buttons
+
     // 3. nothing on the pad: the touch is over; was it a tap?
     if n == 0 {
+        if d_drag[d] != 0 {
+            d_drag[d] = 0
+            emit(EV_DRAG, 0, 0)
+        }
         if d_sess[d] != 0 {
             d_sess[d] = 0
             let dur: u64 = now - d_t0[d]
             if d_moved[d] == 0 && d_btn[d] == 0 && dur <= d_tapms[d]
                 && d_maxn[d] >= 1 && d_maxn[d] <= 3 {
                 if d_maxn[d] == 1 {
-                    emit(EV_CLICK, 1, 0)
+                    if get_opt(dev, O_TAP) != 0 {
+                        emit(EV_CLICK, 1, 0)
+                        d_lastclick[d] = now
+                        d_haveclick[d] = 1
+                    }
                 } else if d_maxn[d] == 2 {
-                    emit(EV_CLICK, 2, 0)
+                    if get_opt(dev, O_TAP2) != 0 { emit(EV_CLICK, 2, 0) }
                 } else {
-                    emit(EV_CLICK, 4, 0)
+                    if get_opt(dev, O_TAP) != 0 { emit(EV_CLICK, 4, 0) }
                 }
             }
+            if d_scrolling[d] != 0 && get_opt(dev, O_MOMENTUM) != 0 && get_opt(dev, O_SCROLL) != 0
+                && now >= d_scroll_t[d] && now - d_scroll_t[d] <= MOM_WINDOW_MS
+                && (absv(d_vx[d]) >= MOM_MIN || absv(d_vy[d]) >= MOM_MIN) {
+                d_mom[d] = 1
+                d_mom_t[d] = now
+                d_mrx[d] = 0
+                d_mry[d] = 0
+            }
+            d_scrolling[d] = 0
         }
         d_phase[d] = 0
         return
+    }
+    if d_drag[d] != 0 && n != 1 {
+        d_drag[d] = 0
+        emit(EV_DRAG, 0, 0)
     }
 
     let cx: i64 = sumx / n as i64
@@ -429,6 +679,14 @@ fn end(dev: u64, buttons: u64) {
 
     if d_sess[d] == 0 {
         d_sess[d] = 1
+        d_mom[d] = 0
+        d_scrolling[d] = 0
+        d_cand[d] = 0
+        if get_opt(dev, O_DRAG) != 0 && d_haveclick[d] != 0 && now >= d_lastclick[d]
+            && now - d_lastclick[d] <= get_opt(dev, O_DRAG_MS) {
+            d_cand[d] = 1
+        }
+        d_haveclick[d] = 0
         d_t0[d] = now
         d_maxn[d] = 0
         d_moved[d] = 0
@@ -455,6 +713,10 @@ fn end(dev: u64, buttons: u64) {
                 d_moved[d] = 1
                 c_lx[k] = x
                 c_ly[k] = y
+                if d_cand[d] != 0 && c_edge[k] == 0 {
+                    d_drag[d] = 1
+                    emit(EV_DRAG, 1, 0)
+                }
             }
             return
         }
@@ -463,9 +725,9 @@ fn end(dev: u64, buttons: u64) {
         c_lx[k] = x
         c_ly[k] = y
         if c_edge[k] == 1 {
-            if dy != 0 { emit(EV_SCROLL, 0, dy) }
+            if dy != 0 { emit_scroll(dev, now, 0, dy) }
         } else if c_edge[k] == 2 {
-            if dx != 0 { emit(EV_SCROLL, dx, 0) }
+            if dx != 0 { emit_scroll(dev, now, dx, 0) }
         } else {
             if dx != 0 || dy != 0 { emit(EV_MOVE, dx, dy) }
         }
@@ -480,6 +742,7 @@ fn end(dev: u64, buttons: u64) {
             if tr > sl2 * 2 || dd > sl2 * 2 {
                 if dd > tr {
                     d_lock[d] = 2
+                    if get_opt(dev, O_PINCH) == 0 { d_lock[d] = 3 }
                 } else {
                     d_lock[d] = 1
                 }
@@ -495,8 +758,8 @@ fn end(dev: u64, buttons: u64) {
             let sy: i64 = cy - d_py[d]
             d_px[d] = cx
             d_py[d] = cy
-            if sx != 0 || sy != 0 { emit(EV_SCROLL, sx, sy) }
-        } else {
+            if sx != 0 || sy != 0 { emit_scroll(dev, now, sx, sy) }
+        } else if d_lock[d] == 2 {
             let zd: i64 = dist - d_distl[d]
             d_distl[d] = dist
             if zd != 0 { emit(EV_ZOOM, zd, 0) }
