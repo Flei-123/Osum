@@ -32,7 +32,7 @@ OrientOS-Quelle: Repo (sys.fi, tools/*, docs/RUNDE-*). Schätzungen sind als *Sc
 | Syscalls | Linux-x86-64-Nummern; ~200 `SYS_*` + `UB_*` + `EV_*` (epoll, eventfd2, timerfd, signalfd4, inotify) + Osum-Aufrufe ≥ 1000; unbekannte Nummer → `-ENOSYS` | kernel/sys/sys.fi (19229 Z.) |
 | Fäden/Prozesse | `clone` (VM/FS/FILES/SIGHAND/THREAD/SETTLS/TID), `fork`, `vfork`, `execve`, `wait4`, futex (ohne echte Warteschlange), `set_robust_list` = Stub (0) | sys.fi 409ff, futex.fi |
 | Signale | NSIG = 65 (RT 32..64), sigaltstack, sigsuspend, setitimer, `sigqueue` | signal.fi |
-| Speicher | mmap/munmap/mprotect/mremap/madvise/msync/mlock*, `memfd_create` (+Siegel), kein Demand-Paging, `MAP_SHARED` auf Datei = ENODEV | sys.fi, t_mem |
+| Speicher | mmap/munmap/mprotect/mremap/madvise/msync/mlock*, `memfd_create` (+Siegel), Demand-Paging für private Dateimappings (ab 16 Seiten, t_flazy), `MAP_SHARED` auf Datei = ENODEV | sys.fi, t_mem |
 | Grenzen | 512 fds/Prozess, 1024 offene Dateien, Rohr 64 KiB, Stapel 10 MiB, **32 Aufgaben (MAX_TASKS)**, ~185 MiB anonymer Speicher je Prozess | t_limits, RUNDE-UNTERBAU-FIREFOX |
 | Sockets | AF_UNIX (STREAM+DGRAM-socketpair, SCM_RIGHTS), AF_INET (TCP/UDP), AF_NETLINK (nur RTM_GET*-Dumps), `getsockopt/setsockopt`; **kein `SO_PEERCRED`/`SCM_CREDENTIALS`** | unixsock.fi, netlink.fi |
 | Dateisystem | OFS v3 (Journal), FAT/ext4/NTFS lesend; symlink/readlink/rename/link/flock(Stub)/fallocate; **kein** `/dev/shm`, `/dev/pts`, `/dev/dri`; `/proc` + `/sys` nur Teile | ofs.fi, procfs.fi |
