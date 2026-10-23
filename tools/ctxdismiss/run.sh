@@ -164,6 +164,6 @@ check_tree() { # <dir> <label> <expect: 1 = fixed tree, 0 = old tree>
 check_tree "$N" new 1
 check_tree "$O" old 0
 n=$(grep -ac 'desktop: context open' "$N/serial.txt")
-[ "$n" = 9 ] && ok "new: 9 'desktop: context open' (1 + 2 + 1... see script), counted $n" || bad "new: expected 9 desktop menus, counted $n"
+[ "$n" = 8 ] && ok "new: 8 desktop menus opened in the run (1 + 2 + 5)" || bad "new: expected 8 desktop menus, counted $n"
 echo; echo "CTXDISMISS: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
