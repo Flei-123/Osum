@@ -65,3 +65,10 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 - Bau: `OSUM_BUILD_JOBS=6 /root/jarvis/bin/heavy bash tools/usbimg/build.sh <dir>` (Cache `/root/.osum-bcache`, ~2-5 min).
 - Gates: `STICK_IMG=<img> KERNEL=<osum.mb> heavy bash tools/ovmfboot/run.sh` (UEFI/OVMF, AHCI+NVMe), `bash tools/hwinv/run.sh`, `bash tools/hwinv/guest.sh`, `bash tools/install/abnahme.sh`, `bash tools/hwcheck/run.sh`.
 - Zustandsdaten im Kern: `/proc/safe`, `/proc/firmware`, `/proc/pci`, `/proc/usb`.
+
+## Fern-Test per USB-Tethering (Zwischenloesung bis WLAN laeuft)
+1. **Handy vorbereiten:** Android: Einstellungen > Netzwerk > Hotspot und Tethering > **USB-Tethering einschalten** (das Handy braucht dafuer Mobilfunk oder WLAN). Alternativ ein USB-Ethernet-Dongle (ASIX AX88772, CDC-ECM) mit LAN-Kabel zum Router.
+2. **Kabel einstecken:** Handy/Dongle in einen USB-Port des HP stecken. Beim Handy erst NACH dem Boot oder davor -- beides geht (Stecken im laufenden Betrieb ist eingebaut).
+3. **Warten:** bis zu 1 Minute. OrientOS holt sich selbst eine Adresse (DHCP) und `jarvisd` meldet sich an der Bruecke an (nichts eintippen). DHCP versucht es nach Fehlschlag mit 5/10/20/40/60 s Abstand erneut.
+4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
+5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).

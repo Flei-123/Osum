@@ -597,7 +597,7 @@ fi
 # switched on the word `ata` (formats the audit disk -> no fonts -> "ttf: keine Schrift gefunden", never `wm: hold`), and a path
 # WITHOUT `osum` lacked the word `osum` the user land needs. So: boot with the RELATIVE name k0.mb from inside the build dir, and say
 # `osum` explicitly. (Worktrees under /root/jarvis/data/staff_wt/... never booted before this.)
-( cd "$BUILDD" && exec timeout ${AUDIT_TIMEOUT:-600} qemu-system-x86_64 "${ACC[@]}" -kernel k0.mb -m 512 ${AUDIT_SMP:+-smp $AUDIT_SMP} \
+( cd "$BUILDD" && exec timeout ${AUDIT_TIMEOUT:-600} qemu-system-x86_64 "${ACC[@]}" -kernel k0.mb -m ${AUDIT_MEM:-512} ${AUDIT_SMP:+-smp $AUDIT_SMP} \
     -append "gfx fbres=${XRES}x${YRES} osum wm desk wmhold wighalt=$halt nokbd nosched noproc $FSFLAG lang=$lang $SKAL $extra" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot \
     "${GPUDEV[@]}" \
