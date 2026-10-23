@@ -9,7 +9,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 rc=0
-for p in test test_clip test_fui $( [ "${1:-}" = bench ] && echo bench ); do
+for p in test test_clip test_ops test_fui $( [ "${1:-}" = bench ] && echo bench ); do
     OPT=""; [ "$p" = bench ] && OPT="--opt-level=release-fast"; FIRNLIB="$PWD/lib" vendor/firn/bin/firnc --profile=app $OPT tools/gfx/$p.fi -o "$T/$p" > "$T/$p.build" 2>&1 \
         || { echo "FAIL  build $p"; grep -v '^warning' "$T/$p.build" | head -30; rc=1; continue; }
     ARGS=()

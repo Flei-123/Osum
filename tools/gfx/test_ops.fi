@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/gfx/test_ops.fi -- VM op gates for OP_FETCH, OP_LDUX and flat varyings (hand assembled programs, exact model, mutation counter-proofs).
+import std.rt
+import std.io
+import jobs.jobs
+import gpu.swr.raster
+import gpu.swr.shader
+
+static mut passed: i32 = 0
+static mut failed: i32 = 0
+
+const W: i32 = 8
+const H: i32 = 8
+
+fn check(name: str, ok: bool) {
+    if ok { passed = passed + 1; io.fmt_print(f"OK    {name}\n") }
+    else { failed = failed + 1; io.fmt_print(f"FAIL  {name}\n") }
+}
+
+fn __thread_work(kind: u64, arg: u64) -> u64 {
+    if kind == jobs.WORKER_KIND { return jobs.worker_main(arg) }
+    return 0 as u64
+}
+
+fn quad(f: *mut raster.Frame, flat0: f32, flat1: f32) {
+    raster.vtx_put(f, 0, -1.0f, 1.0f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f)
+    raster.vtx_put(f, 1, 1.0f, 1.0f, 0.5f, 1.0f, 8.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f)
+    raster.vtx_put(f, 2, 1.0f, -1.0f, 0.5f, 1.0f, 8.0f, 8.0f, 1.0f, 1.0f, 1.0f, 1.0f)
+    raster.vtx_put(f, 3, -1.0f, 1.0f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f)
+    raster.vtx_put(f, 4, 1.0f, -1.0f, 0.5f, 1.0f, 8.0f, 8.0f, 1.0f, 1.0f, 1.0f, 1.0f)
+    raster.vtx_put(f, 5, -1.0f, -1.0f, 0.5f, 1.0f, 0.0f, 8.0f, 1.0f, 1.0f, 1.0f, 1.0f)
+    var v: usize = 0
+    while v < 6 {
+        var q: usize = 0
+        while q < 8 {
+            var val: f32 = 0.95f
+            if v == 0 || v == 3 {
+                val = flat0 + (q as f32) * 0.1f
+                if v == 3 { val = flat1 + (q as f32) * 0.1f }
+            }
+            raster.st_f32((*f).vbuf, v * raster.VSTRIDE + raster.FLAT0 + q, val)
+            q = q + 1
+        }
+        v = v + 1
+    }
+    (*f).ntri = 2
+}
+
+fn unit8(v: f32) -> u32 {
+    return (v * 255.0f + 0.5f) as u32
+}
+
+fn run(f: *mut raster.Frame, prog: u64, jp: u64) {
+    raster.frame_clear(f, 0xFF102030 as u32, 1.0f)
+    raster.frame_set_program(f, prog)
+    raster.frame_draw(f, jp)
+}
+
+fn tex_make(seed: u32) -> u64 {
+    let t: u64 = rt.heap_alloc(64 * 4)
+    var i: u32 = 0
+    while i < 64 as u32 {
+        rt.st32(t, i as usize, ((i * 3 as u32 + seed) & 255 as u32) | (((i * 5 as u32 + seed * 2 as u32) & 255 as u32) << 8 as u32) | (((i * 7 as u32 + seed * 3 as u32) & 255 as u32) << 16 as u32) | (((200 as u32 + i + seed) & 255 as u32) << 24 as u32))
+        i = i + 1
+    }
+    return t
+}
+
+fn count_wrong(f: *mut raster.Frame, expect: u64) -> i32 {
+    var bad: i32 = 0
+    var i: usize = 0
+    while i < 64 {
+        if rt.ld32((*f).color, i) != rt.ld32(expect, i) { bad = bad + 1 }
+        i = i + 1
+    }
+    return bad
+}
+
+fn fetch_prog(p: u64, dx: f32, slot: u32) {
+    var pc: usize = 0
+    pc = shader.prog_ldc(p, pc, 16 as u32, dx)
+    pc = shader.prog_emit(p, pc, shader.OP_ADD, 17 as u32, 6 as u32, 16 as u32, 0 as u32)
+    pc = shader.prog_emit(p, pc, shader.OP_FETCH, 8 as u32, 17 as u32, 7 as u32, slot)
+    pc = shader.prog_emit(p, pc, shader.OP_END, 0 as u32, 0 as u32, 0 as u32, 0 as u32)
+}
+
+fn test_fetch(f: *mut raster.Frame, jp: u64) {
+    let t0: u64 = tex_make(11 as u32)
+    let t1: u64 = tex_make(90 as u32)
+    raster.frame_set_texture_slot(f, 0, t0, 8, 8)
+    raster.frame_set_texture_slot(f, 1, t1, 8, 8)
+    quad(f, 0.0f, 0.0f)
+    let p: u64 = shader.prog_new()
+    let expect: u64 = rt.heap_alloc(64 * 4)
+    var i: usize = 0
+    while i < 64 { rt.st32(expect, i, rt.ld32(t0, i)); i = i + 1 }
+    fetch_prog(p, 0.0f, 0 as u32)
+    run(f, p, jp)
+    check("FETCH slot 0: every pixel is the texel at its own integer coordinates", count_wrong(f, expect) == 0)
+    i = 0
+    while i < 64 { rt.st32(expect, i, rt.ld32(t1, i)); i = i + 1 }
+    fetch_prog(p, 0.0f, 1 as u32)
+    run(f, p, jp)
+    check("FETCH slot 1 reads the second texture", count_wrong(f, expect) == 0)
+    fetch_prog(p, 3.0f, 0 as u32)
+    run(f, p, jp)
+    var bad: i32 = 0
+    var y: usize = 0
+    while y < 8 {
+        var x: usize = 0
+        while x < 8 {
+            var e: u32 = 0 as u32
+            if x + 3 < 8 { e = rt.ld32(t0, y * 8 + x + 3) }
+            if rt.ld32((*f).color, y * 8 + x) != e { bad = bad + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    check("FETCH x + 3: shifted texels inside, transparent black (0) outside the texture", bad == 0)
+    fetch_prog(p, 0.0f, 1 as u32)
+    run(f, p, jp)
+    check("counter-proof: wrong slot differs from slot 0 texture", count_wrong(f, t0) > 40)
+    fetch_prog(p, 1.0f, 0 as u32)
+    run(f, p, jp)
+    check("counter-proof: shifted coordinate differs from the unshifted texture", count_wrong(f, t0) > 40)
+    var pc: usize = 0
+    while rt.ld32(p, pc * 5) != 0 as u32 { if rt.ld32(p, pc * 5) == shader.OP_FETCH { rt.st32(p, pc * 5, shader.OP_SAMPLE) }; pc = pc + 1 }
+    run(f, p, jp)
+    check("counter-proof: filtered SAMPLE instead of FETCH differs", count_wrong(f, t0) > 20)
+}
+
+fn ldux_prog(p: u64, base: u32) {
+    var pc: usize = 0
+    pc = shader.prog_emit(p, pc, shader.OP_FLOOR, 16 as u32, 6 as u32, 0 as u32, 0 as u32)
+    pc = shader.prog_emit(p, pc, shader.OP_LDUX, 8 as u32, base, 16 as u32, 0 as u32)
+    pc = shader.prog_emit(p, pc, shader.OP_MOV, 9 as u32, 8 as u32, 0 as u32, 0 as u32)
+    pc = shader.prog_ldc(p, pc, 10 as u32, 0.0f)
+    pc = shader.prog_ldc(p, pc, 11 as u32, 1.0f)
+    pc = shader.prog_emit(p, pc, shader.OP_END, 0 as u32, 0 as u32, 0 as u32, 0 as u32)
+}
+
+fn test_ldux(f: *mut raster.Frame, jp: u64) {
+    let ubo: u64 = rt.heap_alloc(32 * 4)
+    var k: usize = 0
+    while k < 32 { raster.st_f32(ubo, k, ((k * 37 + 5) % 100) as f32 / 100.0f); k = k + 1 }
+    raster.frame_set_ubo(f, ubo)
+    quad(f, 0.0f, 0.0f)
+    let p: u64 = shader.prog_new()
+    let expect: u64 = rt.heap_alloc(64 * 4)
+    var y: usize = 0
+    while y < 8 {
+        var x: usize = 0
+        while x < 8 {
+            let v: u32 = unit8(raster.ld_f32(ubo, 6 + x))
+            rt.st32(expect, y * 8 + x, v | (v << 8 as u32) | (255 as u32) << 24 as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    ldux_prog(p, 6 as u32)
+    run(f, p, jp)
+    check("LDUX: ubo[6 + x] per lane, different value in every column", count_wrong(f, expect) == 0)
+    ldux_prog(p, 7 as u32)
+    run(f, p, jp)
+    check("counter-proof: base index off by one differs", count_wrong(f, expect) > 40)
+    var pc: usize = 0
+    while rt.ld32(p, pc * 5) != 0 as u32 { if rt.ld32(p, pc * 5) == shader.OP_LDUX { rt.st32(p, pc * 5, shader.OP_LDU); rt.st32(p, pc * 5 + 2, 6 as u32) }; pc = pc + 1 }
+    run(f, p, jp)
+    check("counter-proof: LDU (same value in all lanes) differs", count_wrong(f, expect) > 40)
+}
+
+fn flat_prog(p: u64, reg0: u32, reg1: u32) {
+    var pc: usize = 0
+    pc = shader.prog_emit(p, pc, shader.OP_MOV, 8 as u32, reg0, 0 as u32, 0 as u32)
+    pc = shader.prog_emit(p, pc, shader.OP_MOV, 9 as u32, reg0 + 1 as u32, 0 as u32, 0 as u32)
+    pc = shader.prog_emit(p, pc, shader.OP_MOV, 10 as u32, reg1, 0 as u32, 0 as u32)
+    pc = shader.prog_emit(p, pc, shader.OP_MOV, 11 as u32, reg1 + 3 as u32, 0 as u32, 0 as u32)
+    pc = shader.prog_emit(p, pc, shader.OP_END, 0 as u32, 0 as u32, 0 as u32, 0 as u32)
+}
+
+fn flat_expect(expect: u64, a: f32, b: f32) {
+    var y: usize = 0
+    while y < 8 {
+        var x: usize = 0
+        while x < 8 {
+            var o: f32 = b
+            if x > y { o = a }
+            rt.st32(expect, y * 8 + x, unit8(o) | (unit8(o + 0.1f) << 8 as u32) | (unit8(o + 0.4f) << 16 as u32) | (unit8(o + 0.7f) << 24 as u32))
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn off_diag_wrong(f: *mut raster.Frame, expect: u64) -> i32 {
+    var bad: i32 = 0
+    var y: usize = 0
+    while y < 8 {
+        var x: usize = 0
+        while x < 8 {
+            if x != y && rt.ld32((*f).color, y * 8 + x) != rt.ld32(expect, y * 8 + x) { bad = bad + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return bad
+}
+
+fn test_flat(f: *mut raster.Frame, jp: u64) {
+    quad(f, 0.1f, 0.2f)
+    let p: u64 = shader.prog_new()
+    let expect: u64 = rt.heap_alloc(64 * 4)
+    flat_expect(expect, 0.1f, 0.2f)
+    flat_prog(p, 12 as u32, 16 as u32)
+    raster.frame_set_flat(f, 8)
+    run(f, p, jp)
+    check("flat varyings: each triangle carries its own provoking vertex block (locations 0 and 1), no interpolation", off_diag_wrong(f, expect) == 0)
+    flat_prog(p, 13 as u32, 17 as u32)
+    run(f, p, jp)
+    check("counter-proof: reading the neighbouring flat registers differs", off_diag_wrong(f, expect) > 30)
+    raster.frame_set_flat(f, 0)
+    flat_prog(p, 12 as u32, 16 as u32)
+    run(f, p, jp)
+    check("counter-proof: nflat = 0 leaves the registers unset and differs", off_diag_wrong(f, expect) > 30)
+    raster.frame_set_flat(f, 8)
+    quad(f, 0.1f, 0.1f)
+    run(f, p, jp)
+    check("counter-proof: equal provoking blocks make the triangles equal, model with different blocks differs", off_diag_wrong(f, expect) > 20)
+    raster.frame_set_flat(f, 0)
+}
+
+fn main(start: u64) -> i32 {
+    let f: *mut raster.Frame = raster.frame_new(W, H, 8)
+    (*f).mode = raster.MODE_VM
+    (*f).depth_test = false
+    raster.frame_set_blend(f, false)
+    var j: jobs.Jobs = jobs.create(3)
+    test_fetch(f, 0 as u64)
+    test_ldux(f, 0 as u64)
+    test_flat(f, 0 as u64)
+    test_fetch(f, (&j) as u64)
+    test_flat(f, (&j) as u64)
+    io.fmt_print(f"gfx ops: {passed} ok, {failed} fail\n")
+    jobs.destroy(&j)
+    if failed == 0 { return 0 }
+    return 1
+}
