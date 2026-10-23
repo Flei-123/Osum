@@ -151,6 +151,9 @@ if [ -n "${WLAN_8265_FW:-}" ] && [ -f "$WLAN_8265_FW" ] && [ "$(sha256sum "$WLAN
     has "$T/i.klar" 'iwl: fw rc=0 ver=36 lmac=4 umac=4 paging=2' "kernel TLV parser reads the real file: ver 36, 4 + 4 sections, 2 paging sections"
     same "$T/i.klar" "$T/real/kern.exp" "REAL blob through the kernel loader"
     has "$T/i.klar" 'iwl: fh STAT chunks=10 bytes=636520 ext=1 cpu1=4 cpu2=4' "anchor: 10 chunks, 636520 octets, one extended-range chunk"
+    has "$T/i.klar" 'iwl: boot2 init alive rc=0' "HP-9c.2 REAL blob: INIT image loads and ALIVE comes (fake)"
+    has "$T/i.klar" 'iwl: boot2 rt alive rc=0' "HP-9c.2 REAL blob: RT image after the stop, ALIVE (fake)"
+    grep -aE 'iwl: boot2 SUMMARY phase 2 init [1-9][0-9]* rt 636520 viol 0 stops [1-9]' "$T/i.klar" >/dev/null && ok "HP-9c.2 REAL blob: RT = 636520 octets, no violation" || { bad "real boot2 summary"; grep -a 'boot2' "$T/i.klar" | head -6; }
     echo "-- J: same file with ONE flipped octet inside a data section (pin must not match)"
     python3 -I - "$WLAN_8265_FW" "$T/tamper.bin" <<'PYEOF'
 import sys
