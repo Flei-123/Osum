@@ -47,7 +47,11 @@ export {
     // RUNDE MERGE-7: der Zeitgeber-Wachhund JE KERN statt geteilt.
     C_TOTMARKE, C_TOTZEIT, C_TOTZAHL, C_TOTPER,
     // DD-12 (K-004c): park/resume of an application processor around S3.
-    C_PARKREQ, C_PARKED, C_RESUMED
+    C_PARKREQ, C_PARKED, C_RESUMED,
+    // W-SMP2: why a core is not online, the BSP's ESR after its SIPI.
+    C_WHY, C_ESR, WHY_NONE, WHY_OK, WHY_NOMEM, WHY_NOSIPI, WHY_NOONLINE, WHY_NOSMP,
+    why_word, x_get, x_set, x_add,
+    X_LASTTSC, X_TOTCYC, X_IDLECYC, X_HALTED, X_PEND, X_KICKTX, X_KICKRX
 }
 
 // ---------------------------------------------------- the record fields
@@ -167,6 +171,16 @@ const C_TOTZAHL: u64 = 192
 const C_PARKREQ: u64 = 200
 const C_PARKED: u64 = 208
 const C_RESUMED: u64 = 216
+// W-SMP2 (diagnosis): why this core is not online. One of the WHY_* codes (0 = not tried yet), and the ESR of the BOOT core read
+// right after the STARTUP IPIs to this core (send errors show up there). 240/248 were the last free words of the 256-octet record.
+const C_WHY: u64 = 240
+const C_ESR: u64 = 248
+const WHY_NONE: u64 = 0 // not tried
+const WHY_OK: u64 = 1 // came up
+const WHY_NOMEM: u64 = 2 // no frames for its stack / tables
+const WHY_NOSIPI: u64 = 3 // the SIPI was never taken (trampoline flag stayed 0)
+const WHY_NOONLINE: u64 = 4 // took the trampoline but never reached ap_main's online mark
+const WHY_NOSMP: u64 = 5 // `nosmp` on the command line
 
 // Where the address of the local APIC window is kept. It is written once,
 // by `smp.probe`, out of what `apic.fi` measured -- this file does not
@@ -352,4 +366,48 @@ fn online_count(state: u64) -> u64 {
         i = i + 1
     }
     return c
+}
+
+// W-SMP2: the name of a WHY_* code as up to 8 ASCII octets packed into one word (low octet first, 0 ends it). Callers print octet by
+// octet; no string table, so it works from any module (serial, /proc, task manager).
+fn why_word(code: u64) -> u64 {
+    if code == WHY_OK {
+        return 0x6b6f // "ok"
+    }
+    if code == WHY_NOMEM {
+        return 0x6d656d6f6e // "nomem"
+    }
+    if code == WHY_NOSIPI {
+        return 0x697069736f6e // "nosipi"
+    }
+    if code == WHY_NOONLINE {
+        return 0x656e696c6e6f6f6e // "noonline"
+    }
+    if code == WHY_NOSMP {
+        return 0x706d736f6e // "nosmp"
+    }
+    return 0x2D // "-"
+}
+
+// ----------------------------------------------- W-SMP2: the second per-core table (kstate.CPUX_OFF)
+//
+// 64 octets per core. Kept apart from the 256-octet record because that one is full.
+const X_LASTTSC: u64 = 0 // TSC at this core's previous timer tick (cycle accounting)
+const X_TOTCYC: u64 = 8 // cycles between ticks, summed (time-weighted total)
+const X_IDLECYC: u64 = 16 // ... of which the tick found the core idle
+const X_HALTED: u64 = 24 // 1 = the core sleeps in `hlt` in its idle loop right now
+const X_PEND: u64 = 32 // 1 = a kick IPI was sent and not yet consumed (closes the sti;hlt race)
+const X_KICKTX: u64 = 40 // kick IPIs sent TO this core by the boot core
+const X_KICKRX: u64 = 48 // timer-vector entries on this core that were kicks
+
+fn x_get(state: u64, i: u64, field: u64) -> u64 {
+    return __mmio_read64((state + kstate.CPUX_OFF + i * kstate.CPUX_BYTES + field) as *mut u64)
+}
+
+fn x_set(state: u64, i: u64, field: u64, v: u64) {
+    __mmio_write64((state + kstate.CPUX_OFF + i * kstate.CPUX_BYTES + field) as *mut u64, v)
+}
+
+fn x_add(state: u64, i: u64, field: u64, v: u64) -> u64 {
+    return __atomic_add((state + kstate.CPUX_OFF + i * kstate.CPUX_BYTES + field) as *mut u64, v) + v
 }

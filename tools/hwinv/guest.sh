@@ -63,6 +63,7 @@ runvm raid -device megasas,id=raid0
 WORDS=fakeraid runvm rst -device ich9-ahci,id=ahci -drive "file=$TMPD/extra.img,format=raw,if=none,id=x0" -device ide-hd,drive=x0,bus=ahci.0
 runvm iommu -machine q35,kernel-irqchip=split -device intel-iommu,intremap=on
 runvm ssdt -acpitable sig=SSDT,file="$TMPD/ssdt.aml"
+WORDS=smpfrueh runvm smp4 -machine q35 -cpu Skylake-Client -smp 4
 has "$TMPD/base.klar" "hwinv: version=1" "base: report printed"
 has "$TMPD/base.klar" "hwinv: firmware=BIOS" "base: multiboot kernel run is measured as BIOS"
 has "$TMPD/base.klar" "hwinv: storage=ide" "base: IDE only"
@@ -100,6 +101,13 @@ hasnot "$TMPD/base.klar" "hwinv: iommu=intel-vtd" "counter-proof: base is not in
 has "$TMPD/iommu.klar" "hwinv: iommu=intel-vtd" "iommu: q35 intel-iommu reported"
 has "$TMPD/iommu.klar" "hwinv: iommu_translation=off" "iommu: translation off"
 has "$TMPD/iommu.klar" "== dmar ==" "iommu: raw dmar section"
+has "$TMPD/base.klar" "hwinv: cpus_online=1" "base: one core online (hwinv cpus key)"
+has "$TMPD/base.klar" "hwinv: kick=on" "base: kick key"
+has "$TMPD/base.klar" "== cpus ==" "base: raw cpus section"
+has "$TMPD/smp4.klar" "hwinv: cpus_online=4" "smp4: four cores online in hwinv"
+has "$TMPD/smp4.klar" "hwinv: cpus_madt=4" "smp4: madt count key"
+has "$TMPD/smp4.klar" "hwinv: failed=0" "smp4: failed key"
+hasnot "$TMPD/smp4.klar" "hwinv: cpus_online=1" "counter-proof: smp4 is not one core"
 n=$(grep -c "^hwinv: " "$TMPD/base.klar"); [ "$n" -ge 28 ] && ok "base: $n hwinv lines (stdout + file copy)" || bad "base: only $n hwinv lines"
 echo "HWINV-GUEST: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
