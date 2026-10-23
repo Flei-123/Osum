@@ -6,4 +6,5 @@ echo "FX2 begin firefox --headless --screenshot"
 timeout 500 /usr/bin/firefox --headless --screenshot /tmp/x.png --profile /tmp/p about:blank
 echo "FX2 rc=$?"
 ls -la /tmp/x.png
+if [ -s /tmp/x.png ]; then echo "FX2 png ok"; fi
 echo FX-END

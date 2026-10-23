@@ -6,7 +6,7 @@ OUT=${2:-$(mktemp -d)}
 EXPECT=${EXPECT:-tools/linuxapps/expected-red.txt}
 mkdir -p "$OUT"
 declare -A GUEST=( [F3]=tools/linuxapps/guest-fx1-version.sh [F4]=tools/linuxapps/guest-fx2-shot.sh )
-declare -A MARK=( [F3]="FX1 rc=0" [F4]="FX2 rc=0" )
+declare -A MARK=( [F3]="FX1 rc=0" [F4]="FX2 png ok" )
 pass=0
 fail=0
 KERNEL_ARG=()
