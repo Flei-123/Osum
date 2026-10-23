@@ -109,7 +109,7 @@ for line in man.splitlines():
         conds.setdefault(cur, []).append(w[1])
     elif w[0] == "field":
         pages[cur].append(w[1])
-        if len(w) > 3: labels.append(w[3])
+        if len(w) > 3 and w[3] != "-": labels.append(w[3])
     elif w[0] in ("label", "note"): labels.append(w[1])
 fields = pages["accounts"]
 for bf, pgs in (("accounts", ("accounts",)), ("network", ("network",)), ("display", ("display", "display2")), ("personal", ("time", "lock", "password", "pin", "language", "wifi", "presets", "about")), ("system", ("taskbar", "effects", "usbnet", "proto", "update", "presetsel"))):
@@ -300,6 +300,7 @@ mutate dup-page-ok 'if text_eq(pool_ptr(pg_id[(p) as usize]), pool_ptr(id)) {' '
 mutate dup-field-ok 'if it_kind[(i) as usize] == K_FIELD && text_eq(' 'if false && text_eq('
 mutate dup-field-global 'var i: u64 = pg_first[(n_pages - 1) as usize]' 'var i: u64 = 0'
 mutate unknown-type-rejects '        warns = warns + 1
+        pend_cond = 0
         return 1
     }
     var label: u64 = 0' '        return fail(E_ITEM, line)
@@ -381,10 +382,8 @@ mutate load-keeps-catalogue 'reset()
     return add_man(buf, len)' 'return add_man(buf, len)'
 mutate warns-carry 'warns = 0
     too_many = 0
-    last_field = 0
-    cur_buf = buf' 'too_many = 0
-    last_field = 0
-    cur_buf = buf'
+    last_field = 0' 'too_many = 0
+    last_field = 0'
 mutate bind-needs-field 'if nw != 2 || was_field == 0 {' 'if nw != 2 {'
 mutate bind-read-twice 'if wr == 0 && it_read[i] != 0 {' 'if false {'
 mutate bind-write-twice 'if wr == 1 && it_write[i] != 0 {' 'if false {'
