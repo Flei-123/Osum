@@ -93,5 +93,7 @@ int main(void)
     errno = 0;
     rc = waitid(P_PID, kid, &si, WEXITED | WNOHANG);
     CHECK("waitid_no_child", rc == -1 && errno == ECHILD, "rc=%d errno=%d", rc, errno);
+    long fa = syscall(221, 0, 0L, 0L, 4);
+    CHECK("fadvise64_ok", fa == 0, "fa=%ld errno=%d", fa, errno);
     return 0;
 }
