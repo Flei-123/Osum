@@ -15,7 +15,7 @@ Detail: `docs/GPU-PLAN.md` (options, risks), `docs/GFX-STACK.md` (measurements, 
 - No guest client has rendered through the ICD yet (r1412).
 
 ## Stages
-1. **A -- fUi on software Vulkan:** lowering for the fUi shaders (discard + late-Z, vertex stage, 3+ samplers), clipping + blending + bilinear (r1374, r684, r683). Gate: fUi frame through SWR equals the native frame.
+1. **A -- fUi on software Vulkan:** lowering for the fUi shaders (discard + late-Z, vertex stage, 3+ samplers), clipping (near plane done: lib/gpu/swr/clip.fi, tools/gfx test_clip) + blending + bilinear (r1374, r684, r683). Gate: fUi frame through SWR equals the native frame.
 2. **B -- API layer + WSI:** Instance/Device/Pipeline/Swapchain as `libvulkan.so.1`, offscreen read-back into `wl_shm` (r737, r1375). Gate: `vulkaninfo`-like client lists the device in the guest.
 3. **C -- milestone:** a vkcube-like client renders in the guest, >= 30 fps at 640x480 on 4 cores (r1412).
 4. **D -- speed:** Firn SIMD or x86-64 JIT for the VM after measuring the real `mesh.frag`, tile binning, f32 transcendentals (r738, r675). Then compute + storage buffers for wgpu (T2).
