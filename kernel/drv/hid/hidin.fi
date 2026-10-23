@@ -65,6 +65,7 @@ import drv.hid.hidtest
 import sched.time
 import touchgest.gest
 import drv.hid.ptrcfg
+import drv.hid.tpcfg
 
 export {
     stage, report, press, release, scancode, is_ext, bits,
@@ -74,7 +75,7 @@ export {
     pad_x, pad_y, pad_fingers, pad_scrolls, pad_clicks,
     down_count, is_down, reset_dev, selftest, say, touch_say,
     gest_on, gest_taps, gest_scrolls, gest_sideways, gest_swipes, gest_zooms,
-    gest_last_swipe, gest_hwheels, gest_say
+    gest_last_swipe, gest_hwheels, gest_say, gest_tick
 }
 
 // Eine Seite. Je Geraet 256 Oktett Zustand, danach die Zaehler.
@@ -100,6 +101,7 @@ const D_SY: u64 = 0x90
 const D_HSCROLL: u64 = 0x98 // r804: remainder of the sideways two-finger scroll
 const D_ORD: u64 = 0xA0 // r157: usages of the array field slots in REPORT order (8 bytes)
 const D_ORDN: u64 = 0xA8 // r157: how many of D_ORD are valid
+const D_ZOOM: u64 = 0xB0 // W-TPSET2: pinch distance not yet turned into a wheel step (signed)
 const ORD_MAX: u64 = 8
 const D_T_STATE: u64 = 0xB0 // touch screen: 0 idle, 1 down (undecided), 2 drag, 3 scroll
 const D_T_SX: u64 = 0xB8 // raw start position of the touch
@@ -1538,6 +1540,10 @@ fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
         let gd: u64 = gest_dev(dev)
         gest.configure(gd, maxx, maxy)
         gest.set_palm_size(gd, GEST_PALM)
+        gest_opts(state, gd)
+        if gd == 3 {
+            gd3_dev = dev
+        }
         gest.begin(gd, gest_now(state))
         var q: u64 = 0
         while q < grenze {
@@ -1552,7 +1558,8 @@ fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
             q = q + 1
         }
         gest.end(gd, btn)
-        gest_apply(state, dev, btn)
+        // out_buttons: the physical mask with the corner right click mapped and the tap-and-drag left button held
+        gest_apply(state, dev, gd, gest.out_buttons(gd))
         return true
     }
 
@@ -1612,11 +1619,10 @@ fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
 // What the gesture machine decided for one frame, turned into the same
 // packets a mouse would send. Physical button changes the frame carried
 // go out too (a pointer move carries them; otherwise `button`).
-fn gest_apply(state: u64, dev: u64, btn: u64) {
+fn gest_apply(state: u64, dev: u64, gd: u64, btn: u64) {
     var s_w: [u8; 20] = "hidev: geste wisch \0"
     var s_n: [u8; 4] = " n=\0"
     var s_z: [u8; 21] = "hidev: geste zoom d=\0"
-    var s_h: [u8; 28] = "hidev: geste seitwaerts dx=\0"
     let n: u64 = gest.ev_count()
     var moved: bool = false
     var i: u64 = 0
@@ -1630,24 +1636,11 @@ fn gest_apply(state: u64, dev: u64, btn: u64) {
         } else if k == gest.EV_CLICK {
             gest_tap(state, dev, a as u64, btn)
         } else if k == gest.EV_SCROLL {
-            if b != 0 {
-                cadd(state, C_GSCRL, 1)
-                rollen(state, dev, b as u64, btn)
-            }
-            if a != 0 {
-                // r804: sideways scroll -> horizontal wheel (own sum next to the vertical one)
-                cadd(state, C_GSIDE, 1)
-                if spur_an(state) {
-                    serial.puts((&s_h[0]) as u64)
-                    serial.hex(a as u64)
-                    serial.nl()
-                }
-                hrollen(state, dev, a as u64)
-            }
+            gest_scroll(state, dev, a, b, btn)
         } else if k == gest.EV_SWIPE {
             cadd(state, C_GSWIPE, 1)
             cs(state, C_GLAST, ((a as u64) << 8) | (b as u64))
-            let _sw: bool = gfx.mouse_swipe(state, a as u64, b as u64)
+            gest_swipe(state, a as u64, b as u64)
             if spur_an(state) {
                 serial.puts((&s_w[0]) as u64)
                 serial.dec(a as u64)
@@ -1657,21 +1650,184 @@ fn gest_apply(state: u64, dev: u64, btn: u64) {
             }
         } else if k == gest.EV_ZOOM {
             cadd(state, C_GZOOM, 1)
+            gest_zoom(state, dev, gd, a, btn)
             if spur_an(state) {
                 serial.puts((&s_z[0]) as u64)
                 serial.hex(a as u64)
                 serial.nl()
             }
         }
+        // EV_DRAG needs no code of its own: gest.out_buttons already carries the held left button, and
+        // the `button` call below sends the change when no pointer move did.
         i = i + 1
     }
     if !moved {
         button(state, dev, btn)
     }
-    if gest.fingers(dev) == 0 {
+    if gest.fingers(gd) == 0 {
         // lifted: the wheel remainder does not carry over to the next touch
         ds(state, dev, D_SCROLL, 0)
         ds(state, dev, D_HSCROLL, 0)
+        ds(state, dev, D_ZOOM, 0)
+        zoom_ctrl_up(state)
+    }
+}
+
+// W-TPSET2: the options of /etc/touchpad.conf (drv.hid.tpcfg) go to the gesture machine before every frame.
+// Scroll direction: ps2m.scale_wheel flips every wheel step again when mouse.natural is set, so the machine
+// flips by (touchpad.natural XOR mouse.natural) and the net result is exactly touchpad.natural.
+fn gest_opts(state: u64, gd: u64) {
+    gest.set_opt(gd, gest.O_TAP, tpcfg.get(state, 1))
+    gest.set_opt(gd, gest.O_TAP2, tpcfg.get(state, 2))
+    gest.set_opt(gd, gest.O_DRAG, tpcfg.get(state, 3))
+    gest.set_opt(gd, gest.O_CORNER, tpcfg.get(state, 4))
+    var nat: u64 = tpcfg.get(state, 5)
+    if ptrcfg.natural(state) != 0 {
+        nat = 1 - nat
+    }
+    gest.set_opt(gd, gest.O_NATURAL, nat)
+    gest.set_opt(gd, gest.O_SCROLL_PCT, tpcfg.get(state, 6))
+    gest.set_opt(gd, gest.O_MOMENTUM, tpcfg.get(state, 7))
+    gest.set_opt(gd, gest.O_PINCH, tpcfg.get(state, 8))
+    gest.set_opt(gd, gest.O_SCROLL, tpcfg.get(state, 9))
+}
+
+// One scroll event (pad units, dx / dy) -> wheel steps of the pointer layer.
+fn gest_scroll(state: u64, dev: u64, a: i64, b: i64, btn: u64) {
+    var s_h: [u8; 28] = "hidev: geste seitwaerts dx=\0"
+    if b != 0 {
+        cadd(state, C_GSCRL, 1)
+        rollen(state, dev, b as u64, btn)
+    }
+    if a != 0 {
+        // r804: sideways scroll -> horizontal wheel (own sum next to the vertical one)
+        cadd(state, C_GSIDE, 1)
+        if spur_an(state) {
+            serial.puts((&s_h[0]) as u64)
+            serial.hex(a as u64)
+            serial.nl()
+        }
+        hrollen(state, dev, a as u64)
+    }
+}
+
+// W-TPSET2: three / four finger swipe -> the action of the configured mode (touchpad.swipe3 / swipe4).
+// Window switch: the window server (wm.gest_action). Show / restore desktop: the Win+D key the taskbar already
+// handles (a virtual key press, so the taskbar keeps its own list of hidden windows). Task view and virtual
+// desktops have no consumer yet (roadmap): the action is dropped.
+fn gest_swipe(state: u64, dir: u64, n: u64) {
+    var m: u64 = tpcfg.get(state, tpcfg.T_SWIPE3)
+    if n >= 4 {
+        m = tpcfg.get(state, tpcfg.T_SWIPE4)
+    }
+    var act: u64 = gest.swipe_action(m, dir)
+    if act == gest.A_TASKVIEW && desk_hidden != 0 {
+        act = gest.A_RESTORE_DESKTOP
+    }
+    if act == gest.A_NEXT_WIN || act == gest.A_PREV_WIN {
+        let _w: bool = gfx.mouse_gest_action(state, act, n)
+    } else if act == gest.A_SHOW_DESKTOP {
+        if desk_hidden == 0 {
+            desk_hidden = 1
+            key_super_d(state)
+        }
+    } else if act == gest.A_RESTORE_DESKTOP {
+        if desk_hidden != 0 {
+            desk_hidden = 0
+            key_super_d(state)
+        }
+    }
+}
+
+// Win+D as scan codes: E0 5B (Super), D (0x20), release in reverse order.
+fn key_super_d(state: u64) {
+    kbd.on_code(state, 0xE0)
+    kbd.on_code(state, 0x5B)
+    kbd.on_code(state, 0x20)
+    kbd.on_code(state, 0xA0)
+    kbd.on_code(state, 0xE0)
+    kbd.on_code(state, 0xDB)
+}
+
+// W-TPSET2: pinch -> Ctrl + wheel (browser / editor zoom). The virtual Ctrl is held while the pinch lasts
+// (so the window server still sees it when the wheel is handed out) and released when the fingers lift or
+// the pinch stays quiet for ZOOM_HOLD_MS. A real Ctrl that is already down is left alone.
+static mut zoom_ctrl: u64 = 0
+static mut zoom_last: u64 = 0
+static mut gd3_dev: u64 = 3
+static mut desk_hidden: u64 = 0
+static mut gt_last: u64 = 0
+const ZOOM_HOLD_MS: u64 = 400
+
+fn zoom_ctrl_up(state: u64) {
+    if zoom_ctrl != 0 {
+        zoom_ctrl = 0
+        kbd.on_code(state, 0x9D)
+    }
+}
+
+fn gest_zoom(state: u64, dev: u64, gd: u64, d: i64, btn: u64) {
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 0 && zoom_ctrl == 0 {
+        zoom_ctrl = 1
+        kbd.on_code(state, 0x1D)
+    }
+    zoom_last = gest_now(state)
+    var step: i64 = gest.swipe_len(gd) / 4
+    if step < 1 {
+        step = 1
+    }
+    var acc: i64 = (dg(state, dev, D_ZOOM) as i64) + d
+    var guard: u64 = 0
+    while (acc >= step || acc <= 0 - step) && guard < 8 {
+        // spreading = zoom in = wheel away from the user (-1 = 15); natural scrolling must not flip it
+        var r: u64 = 15
+        if acc < 0 {
+            r = 1
+            acc = acc + step
+        } else {
+            acc = acc - step
+        }
+        if ptrcfg.natural(state) != 0 {
+            r = 16 - r
+        }
+        gfx.mouse_packet(state, 8 | (btn & 7), 0, 0, r, true)
+        cadd(state, C_WHEEL, 1)
+        guard = guard + 1
+    }
+    ds(state, dev, D_ZOOM, acc as u64)
+}
+
+// W-TPSET2: called from the GUI loop (i2chid.poll_tick) every pass: momentum scrolling after a flick and the
+// release of the virtual Ctrl of a finished pinch. At most once per 8 ms.
+fn gest_tick(state: u64) {
+    if !gest_on(state) {
+        return
+    }
+    let now: u64 = gest_now(state)
+    if now < gt_last + 8 {
+        return
+    }
+    gt_last = now
+    if zoom_ctrl != 0 && now > zoom_last + ZOOM_HOLD_MS {
+        zoom_ctrl_up(state)
+    }
+    var gd: u64 = 0
+    while gd < MAX_DEV {
+        if gest.momentum_on(gd) {
+            let n: u64 = gest.tick(gd, now)
+            var dev: u64 = gd
+            if gd == 3 {
+                dev = gd3_dev
+            }
+            var i: u64 = 0
+            while i < n {
+                if gest.ev_kind(i) == gest.EV_SCROLL {
+                    gest_scroll(state, dev, gest.ev_a(i), gest.ev_b(i), gest.out_buttons(gd))
+                }
+                i = i + 1
+            }
+        }
+        gd = gd + 1
     }
 }
 
