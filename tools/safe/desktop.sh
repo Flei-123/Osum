@@ -50,13 +50,13 @@ done
 if [ "$fail" -gt 0 ]; then echo "SAFEDESK: $pass passed, $fail failed"; exit 1; fi
 grep -aq '^taskbar: health ' "$SA" && ok "A: desktop came up" || bad "A: no taskbar health"
 grep -aq 'boot marked good' "$SA" && ok "A idle: boot marked good: $(grep -a -m1 'boot marked good' "$SA")" || bad "A idle: no 'boot marked good'"
-nw=$(grep -ac 'watchdog: desktop loop' "$SA")
+nw=$(grep -ac '^safe: watchdog: desktop loop' "$SA")
 [ "$nw" = 0 ] && ok "A idle: 0 watchdog fires (no false positive)" || bad "A idle: $nw watchdog fires"
 grep -aiqE 'panic|kernel fault' "$SA" && bad "A idle: panic on serial" || ok "A idle: 0 panics"
-nb=$(grep -ac 'watchdog: desktop loop' "$SB")
-[ "$nb" = 1 ] && ok "B hang: watchdog fired once: $(grep -a -m1 'watchdog: desktop loop' "$SB")" || bad "B hang: expected 1 watchdog fire, found $nb"
+nb=$(grep -ac '^safe: watchdog: desktop loop' "$SB")
+[ "$nb" = 1 ] && ok "B hang: watchdog fired once: $(grep -a -m1 '^safe: watchdog: desktop loop' "$SB")" || bad "B hang: expected 1 watchdog fire, found $nb"
 grep -aiqE 'panic|kernel fault|trap' "$SB" && ok "B hang: panic path entered" || bad "B hang: no panic path after watchdog"
-nc=$(grep -ac 'watchdog: desktop loop' "$SC")
+nc=$(grep -ac '^safe: watchdog: desktop loop' "$SC")
 [ "$nc" = 0 ] && ok "C counter-proof (no safewd): 0 watchdog lines" || bad "C counter-proof: $nc watchdog lines"
 echo; echo "SAFEDESK: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
