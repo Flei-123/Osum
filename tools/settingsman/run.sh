@@ -7,7 +7,7 @@
 # 1. the parser lib/settingsman/manifest.fi (built as tools/settingsman/dump.fi) and the second reader
 #    tools/settingsman/manifest.py give the SAME text for every case in tools/settingsman/cases/ and for the real
 #    page kernel/user/settings.d/accounts.settings, and both match the golden file (*.expect);
-# 2. limits (120 items, 16 pages, string pool) -- both readers agree and say the expected code;
+# 2. limits (200 items, 20 pages, string pool) -- both readers agree and say the expected code;
 # 3. the accounts page is WIRED: every field key of the manifest is bound in kernel/user/settings.fi (ab_names), every
 #    label is a catalogue key in en AND de, the Konten page no longer builds the book button by hand;
 # 4. the CATALOGUE (r143): several manifests (built-in page + packages /apps/<app>.prog/SETTINGS) in one catalogue --
@@ -63,8 +63,8 @@ for f in tools/settingsman/cases/*.txt; do
     esac
 done
 ok "golden files: every ok_* is accepted, every rej_* rejected with empty tables"
-head -1 tools/settingsman/accounts.expect | grep -q '^ok app=settings items=102 pages=12 warns=0$' \
-    && ok "settings manifest: accounts, network, display and personal pages, 102 items, no warnings" || bad "accounts page header: $(head -1 tools/settingsman/accounts.expect)"
+head -1 tools/settingsman/accounts.expect | grep -q '^ok app=settings items=162 pages=18 warns=0$' \
+    && ok "settings manifest: accounts, network, display, personal and system pages, no warnings" || bad "accounts page header: $(head -1 tools/settingsman/accounts.expect)"
 
 echo "== 2. limits =="
 python3 -I - "$T" <<'PY'
@@ -72,20 +72,20 @@ import sys
 t = sys.argv[1]
 hdr = "manifest 1\napp demo\n"
 def w(name, body): open(f"{t}/{name}.txt", "w").write(hdr + body)
-w("items120", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(120)))
-w("items121", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(121)))
-w("pages16", "".join(f"page p{i} t s g\n" for i in range(16)))
-w("pages17", "".join(f"page p{i} t s g\n" for i in range(17)))
-w("pool", "page a t s g\n" + "".join(f"field {'k%02d' % i + 'x' * 36} text {'l%02d' % i + 'y' * 36}\n" for i in range(80)))
+w("items200", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(200)))
+w("items201", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(201)))
+w("pages20", "".join(f"page p{i} t s g\n" for i in range(20)))
+w("pages21", "".join(f"page p{i} t s g\n" for i in range(21)))
+w("pool", "page a t s g\n" + "".join(f"field {'k%02d' % i + 'x' * 36} text {'l%02d' % i + 'y' * 36}\n" for i in range(130)))
 PY
 lim() { # name expected-first-line
     $PY < "$T/$1.txt" > "$T/$1.py"; "$T/dump" < "$T/$1.txt" > "$T/$1.fi" 2>/dev/null
     if cmp -s "$T/$1.py" "$T/$1.fi" && head -1 "$T/$1.fi" | grep -q "^$2"; then ok "$1: $(head -1 "$T/$1.fi")"; else bad "$1: expected '$2', Firn '$(head -1 "$T/$1.fi")', python '$(head -1 "$T/$1.py")'"; fi
 }
-lim items120 "ok app=demo items=120 "
-lim items121 "error 8 "
-lim pages16 "ok app=demo items=0 pages=16 "
-lim pages17 "error 8 "
+lim items200 "ok app=demo items=200 "
+lim items201 "error 8 "
+lim pages20 "ok app=demo items=0 pages=20 "
+lim pages21 "error 8 "
 lim pool "error 9 "
 
 echo "== 3. the accounts page is wired =="
@@ -99,23 +99,29 @@ rc = 0
 def bad(m):
     global rc; rc = 1; print("  FAIL  " + m)
 pages, labels, cur = {}, [], None
+conds = {}
 for line in man.splitlines():
     w = line.split("#")[0].split()
     if not w: continue
     if w[0] == "page":
         cur = w[1]; pages[cur] = []
+    elif w[0] in ("when", "unless"):
+        conds.setdefault(cur, []).append(w[1])
     elif w[0] == "field":
         pages[cur].append(w[1])
         if len(w) > 3: labels.append(w[3])
     elif w[0] in ("label", "note"): labels.append(w[1])
 fields = pages["accounts"]
-for bf, pgs in (("accounts", ("accounts",)), ("network", ("network",)), ("display", ("display", "display2")), ("personal", ("time", "lock", "password", "pin", "language", "wifi", "presets", "about"))):
+for bf, pgs in (("accounts", ("accounts",)), ("network", ("network",)), ("display", ("display", "display2")), ("personal", ("time", "lock", "password", "pin", "language", "wifi", "presets", "about")), ("system", ("taskbar", "effects", "usbnet", "proto", "update", "presetsel"))):
     bound = [x for x in open("kernel/user/settings.d/%s.bind" % bf, encoding="utf-8").read().split("\n") if x]
     allf = [f for pg in pgs for f in pages[pg]]
     for f in allf:
         if f not in bound: bad("field %s has no binding in %s.bind" % (f, bf))
+    cks = [c for pg in pgs for c in conds.get(pg, [])]
+    for c in cks:
+        if c not in bound: bad("condition %s has no binding in %s.bind" % (c, bf))
     for b in bound:
-        if b not in allf: bad("binding %s is not a field of the pages of %s.bind" % (b, bf))
+        if b not in allf and b not in cks: bad("binding %s is not a field of the pages of %s.bind" % (b, bf))
     if len(set(allf)) != len(allf): bad("duplicate field keys in the pages of %s.bind" % bf)
 if not re.search(r"^field password secret ", man, re.M): bad("the password field of the accounts page is not type secret (shown in clear text)")
 for k in sorted(set(labels)):
@@ -133,6 +139,10 @@ if "fuiscene.label(left, (&l_nzust" in src: bad("the Network page is built by ha
 if '__include_str("settings.d/display.bind")' not in src: bad("the display binding names are not embedded in settings.fi")
 if "fuiscene.label(left, (&l_schirm" in src: bad("the Display page is built by hand again")
 if '__include_str("settings.d/personal.bind")' not in src: bad("the personal binding names are not embedded in settings.fi")
+for fnname in ("page_taskbar", "page_effects", "page_usbnet", "page_proto", "page_update", "page_vorl"):
+    m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
+    if not m or "page_man(4," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
+if "fn man_shown" in src: bad("man_shown is back: conditions belong in the manifest (when/unless)")
 for fnname in ("page_time", "page_benut", "page_passw", "page_pin", "page_sprache", "page_wifi", "page_vtrans", "page_info"):
     m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
     if not m or "page_man(3," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
@@ -180,9 +190,9 @@ def w(name, parts): open(f"{t}/cl_{name}.txt", "w").write("".join(parts))
 one = "page p t s g\n"
 w("apps8", [sec("add", f"a{i}", one) for i in range(8)])
 w("apps9", [sec("add", f"a{i}", one) for i in range(9)])
-p8 = lambda i: sec("add", f"a{i}", "".join(f"page p{j} t s g\n" for j in range(8)))
-w("pages24", [p8(i) for i in range(3)])
-w("pages25", [p8(i) for i in range(3)] + [sec("add", "a3", one)])
+p7 = lambda i: sec("add", f"a{i}", "".join(f"page p{j} t s g\n" for j in range(7)))
+w("pages28", [p7(i) for i in range(4)])
+w("pages29", [p7(i) for i in range(4)] + [sec("add", "a4", one)])
 i80 = lambda i: sec("add", f"a{i}", one + "".join(f"field k{j} text\n" for j in range(80)))
 w("items240", [i80(i) for i in range(3)])
 w("items241", [i80(i) for i in range(3)] + [sec("add", "a3", one + "field k text\n")])
@@ -196,8 +206,8 @@ clim() { # name expected-line-pattern
 }
 clim apps8 "^catalog apps=8 pages=8 items=0"
 clim apps9 "^add 9 error 8 line 2"
-clim pages24 "^catalog apps=3 pages=24 items=0"
-clim pages25 "^add 4 error 8 "
+clim pages28 "^catalog apps=4 pages=28 items=0"
+clim pages29 "^add 5 error 8 "
 clim items240 "^catalog apps=3 pages=3 items=240"
 clim items241 "^add 4 error 8 "
 clim pool_cat "^add 3 error 9 "
@@ -263,7 +273,7 @@ PY
     [ "$?" = 0 ] || { bad "mutation $1: anchor missing (the parser changed, update this script)"; return; }
     if ! build "$d/lib" "$d/dump"; then bad "mutation '$1' does not compile"; return; fi
     local n=0 f
-    for f in tools/settingsman/cases/*.txt $MAN "$T"/items1*.txt "$T"/pages*.txt "$T"/pool.txt; do
+    for f in tools/settingsman/cases/*.txt $MAN "$T"/items2*.txt "$T"/pages*.txt "$T"/pool.txt; do
         timeout 10 "$d/dump" < "$f" > "$d/o.txt" 2>/dev/null
         case "$f" in
             */cases/*) cmp -s "$d/o.txt" "${f%.txt}.expect" || n=$((n+1)) ;;
@@ -385,6 +395,20 @@ mutate bind-name-unchecked 'return fail(E_NAME, line)
     let i: usize = (n_items - 1) as usize' 'return 1
     }
     let i: usize = (n_items - 1) as usize'
+mutate when-lost 'it_cond[i] = pend_cond' 'it_cond[i] = 0'
+mutate unless-lost 'it_neg[i] = pend_neg' 'it_neg[i] = 0'
+mutate when-dangling-ok 'if pend_cond != 0 && !is_item_word() {' 'if false {'
+mutate when-eof-ok 'if err == 0 && pend_cond != 0 {' 'if false {'
+mutate when-sticks 'it_neg[i] = pend_neg
+    pend_cond = 0' 'it_neg[i] = pend_neg
+    pend_neg = 0'
+mutate type-slider-lost 'return T_SLIDER' 'return 0'
+mutate type-table-lost 'return T_TABLE' 'return 0'
+mutate type-canvas-lost 'return T_CANVAS' 'return 0'
+mutate row-gap-lost 'return add_item(K_ROW, 0, 0, 0, 0, gap, line)' 'return add_item(K_ROW, 0, 0, 0, 0, 0, line)'
+mutate row-gap-digits 'if c < 48 || c > 57 {
+                    return fail(E_ITEM, line)' 'if false {
+                    return fail(E_ITEM, line)'
 mutate app-find-prefix 'if text_eq(pool_ptr(ap_name[(a) as usize]), name) {' 'if rd(pool_ptr(ap_name[(a) as usize]), 0) == rd(name, 0) {'
 
 echo "SETTINGSMAN: $pass passed, $fail failed"

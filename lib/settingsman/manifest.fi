@@ -14,8 +14,10 @@
 //   label <label-key>                             a static line of text
 //   note <label-key> [<lines>]                    a wrapped paragraph (1..9 lines, default 1)
 //   sep                                           a separator line
-//   row ... endrow                                the items between them sit side by side in one row
-//   field <key> <type> [<label-key>] [<default>]  one control; <type>: bool choice text secret action status list
+//   row [<gap>] ... endrow                        the items between them sit side by side in one row (gap 0..99)
+//   field <key> <type> [<label-key>] [<default>]  one control; <type>: bool choice text secret action status list slider table canvas
+//   when <cond-key> | unless <cond-key>           the NEXT item line (a `row` hides its whole row) is shown only while the
+//                                                 condition the Settings app binds to <cond-key> holds (is false)
 //
 // '#' at the start of a word starts a comment (rest of the line). Words are split at blanks.
 //
@@ -32,18 +34,18 @@
 //   * CATALOGUE (r143): load() reads ONE manifest (the tables are emptied first). add() / add_pkg() append another one
 //     (the built-in page + /apps/<app>.prog/SETTINGS of the packages). A rejected add() leaves the catalogue exactly as
 //     it was. An app name exists once (E_DUP_APP: no package speaks for "settings"); add_pkg() also needs the `app` line
-//     to equal the package directory (E_MISMATCH). Page ids and field keys are per app. Limits: per manifest 120 items,
-//     16 pages, 6144 octets; catalogue 8 apps, 24 pages, 240 items, 12288 octets.
+//     to equal the package directory (E_MISMATCH). Page ids and field keys are per app. Limits: per manifest 200 items,
+//     20 pages, 10240 octets; catalogue 8 apps, 28 pages, 240 items, 14336 octets.
 
 export {
-    ERR, NONE, K_LABEL, K_NOTE, K_FIELD, K_SEP, K_ROW, K_ENDROW, T_BOOL, T_CHOICE, T_TEXT, T_SECRET, T_ACTION, T_STATUS, T_LIST,
+    ERR, NONE, K_LABEL, K_NOTE, K_FIELD, K_SEP, K_ROW, K_ENDROW, T_BOOL, T_CHOICE, T_TEXT, T_SECRET, T_ACTION, T_STATUS, T_LIST, T_SLIDER, T_TABLE, T_CANVAS,
     E_HEADER, E_APP, E_PAGE, E_DUP_PAGE, E_NO_PAGE, E_ITEM, E_NAME, E_FULL, E_POOL, E_COLUMN, E_DUP_FIELD,
     E_DUP_APP, E_MISMATCH,
     load, add, add_pkg, reset, err_code, err_line, warn_count, app_name,
     app_count, app_at, app_find, app_first_page, app_page_count, page_app, page_find_in,
     page_count, page_id, page_title, page_icon, page_group, page_find, page_first, page_len,
     names_index, item_count, item_kind, item_type, item_col, item_key, item_label, item_def, item_num,
-    item_read, item_write,
+    item_read, item_write, item_cond, item_neg,
 }
 
 const ERR: u64 = 4294967295 // load(): the file was rejected
@@ -61,6 +63,9 @@ const T_SECRET: u64 = 4
 const T_ACTION: u64 = 5
 const T_STATUS: u64 = 6
 const T_LIST: u64 = 7
+const T_SLIDER: u64 = 8
+const T_TABLE: u64 = 9
+const T_CANVAS: u64 = 10
 const E_HEADER: u64 = 1 // `manifest 1` missing, repeated or another version
 const E_APP: u64 = 2 // `app <name>` missing, repeated or malformed
 const E_PAGE: u64 = 3 // `page` malformed
@@ -76,16 +81,16 @@ const E_DUP_APP: u64 = 12 // a second manifest with an app name that is already 
 const E_MISMATCH: u64 = 13 // add_pkg(): the `app` line differs from the package directory name
 
 // limits PER manifest (one file)
-const MAX_ITEMS: u64 = 120
-const MAX_PAGES: u64 = 16
-const POOL_MAX: u64 = 6144
+const MAX_ITEMS: u64 = 200
+const MAX_PAGES: u64 = 20
+const POOL_MAX: u64 = 10240
 // limits of the whole catalogue (the built-in page + the packages)
 const MAX_APPS: u64 = 8
-const CAT_PAGES: u64 = 24
+const CAT_PAGES: u64 = 28
 const CAT_ITEMS: u64 = 240
-const CAT_POOL: u64 = 12288
+const CAT_POOL: u64 = 14336
 
-static mut pool: [u8; 12288] = [0 as u8; 12288]
+static mut pool: [u8; 14336] = [0 as u8; 14336]
 static mut pool_n: u64 = 0
 static mut it_kind: [u64; 240] = [0 as u64; 240]
 static mut it_type: [u64; 240] = [0 as u64; 240]
@@ -96,15 +101,19 @@ static mut it_def: [u64; 240] = [0 as u64; 240]
 static mut it_num: [u64; 240] = [0 as u64; 240]
 static mut it_read: [u64; 240] = [0 as u64; 240] // `read <action>` of a field (pool offset, 0 = none)
 static mut it_write: [u64; 240] = [0 as u64; 240] // `write <action>` of a field
+static mut it_cond: [u64; 240] = [0 as u64; 240] // `when`/`unless` key of the item (pool offset, 0 = always shown)
+static mut it_neg: [u64; 240] = [0 as u64; 240] // 1: `unless`
+static mut pend_cond: u64 = 0
+static mut pend_neg: u64 = 0
 static mut last_field: u64 = 0 // 1: the line just before was a (kept) `field` line -- only then `read`/`write` bind
 static mut n_items: u64 = 0
-static mut pg_id: [u64; 24] = [0 as u64; 24]
-static mut pg_title: [u64; 24] = [0 as u64; 24]
-static mut pg_icon: [u64; 24] = [0 as u64; 24]
-static mut pg_group: [u64; 24] = [0 as u64; 24]
-static mut pg_first: [u64; 24] = [0 as u64; 24]
-static mut pg_len: [u64; 24] = [0 as u64; 24]
-static mut pg_app: [u64; 24] = [0 as u64; 24]
+static mut pg_id: [u64; 28] = [0 as u64; 28]
+static mut pg_title: [u64; 28] = [0 as u64; 28]
+static mut pg_icon: [u64; 28] = [0 as u64; 28]
+static mut pg_group: [u64; 28] = [0 as u64; 28]
+static mut pg_first: [u64; 28] = [0 as u64; 28]
+static mut pg_len: [u64; 28] = [0 as u64; 28]
+static mut pg_app: [u64; 28] = [0 as u64; 28]
 static mut n_pages: u64 = 0
 static mut ap_name: [u64; 8] = [0 as u64; 8]
 static mut ap_first: [u64; 8] = [0 as u64; 8]
@@ -138,6 +147,8 @@ static mut kw_endrow: [u8; 6] = "endrow"
 static mut kw_field: [u8; 5] = "field"
 static mut kw_read: [u8; 4] = "read"
 static mut kw_write: [u8; 5] = "write"
+static mut kw_when: [u8; 4] = "when"
+static mut kw_unless: [u8; 6] = "unless"
 static mut kw_one: [u8; 1] = "1"
 static mut kw_left: [u8; 4] = "left"
 static mut kw_right: [u8; 5] = "right"
@@ -148,6 +159,9 @@ static mut ty_secret: [u8; 6] = "secret"
 static mut ty_action: [u8; 6] = "action"
 static mut ty_status: [u8; 6] = "status"
 static mut ty_list: [u8; 4] = "list"
+static mut ty_slider: [u8; 6] = "slider"
+static mut ty_table: [u8; 5] = "table"
+static mut ty_canvas: [u8; 6] = "canvas"
 static mut dash: [u8; 2] = "-\0"
 
 fn rd(p: u64, i: u64) -> u64 {
@@ -177,6 +191,8 @@ fn reset() {
     warns = 0
     too_many = 0
     last_field = 0
+    pend_cond = 0
+    pend_neg = 0
 }
 
 fn err_code() -> u64 {
@@ -318,6 +334,15 @@ fn type_of(w: u64) -> u64 {
     if word_eq(w, (&ty_list[0]) as u64, 4) {
         return T_LIST
     }
+    if word_eq(w, (&ty_slider[0]) as u64, 6) {
+        return T_SLIDER
+    }
+    if word_eq(w, (&ty_table[0]) as u64, 5) {
+        return T_TABLE
+    }
+    if word_eq(w, (&ty_canvas[0]) as u64, 6) {
+        return T_CANVAS
+    }
     return 0
 }
 
@@ -335,6 +360,10 @@ fn add_item(kind: u64, ty: u64, key: u64, label: u64, def: u64, num: u64, line: 
     it_num[i] = num
     it_read[i] = 0
     it_write[i] = 0
+    it_cond[i] = pend_cond
+    it_neg[i] = pend_neg
+    pend_cond = 0
+    pend_neg = 0
     if kind == K_FIELD {
         last_field = 1
     }
@@ -391,6 +420,7 @@ fn do_field(nw: u64, line: u64) -> u64 {
     if ty == 0 {
         // a type this Settings app does not know: skip, count (a newer manifest stays usable)
         warns = warns + 1
+        pend_cond = 0
         return 1
     }
     var label: u64 = 0
@@ -461,7 +491,26 @@ fn do_bind(nw: u64, line: u64, wr: u64, was_field: u64) -> u64 {
     return 1
 }
 
-fn do_line(nw: u64, line: u64) -> u64 {
+fn do_cond(nw: u64, line: u64, neg: u64) -> u64 {
+    if n_pages == base_pages {
+        return fail(E_NO_PAGE, line)
+    }
+    if nw != 2 || pend_cond != 0 {
+        return fail(E_ITEM, line)
+    }
+    if !name_ok(1, 40) {
+        return fail(E_NAME, line)
+    }
+    let c: u64 = put_word(1)
+    if c == 0 {
+        return fail(E_POOL, line)
+    }
+    pend_cond = c
+    pend_neg = neg
+    return 1
+}
+
+fn do_line0(nw: u64, line: u64) -> u64 {
     let was_field: u64 = last_field
     last_field = 0
     if too_many != 0 {
@@ -579,10 +628,25 @@ fn do_line(nw: u64, line: u64) -> u64 {
         if n_pages == base_pages {
             return fail(E_NO_PAGE, line)
         }
-        if nw != 1 {
+        if nw > 2 {
             return fail(E_ITEM, line)
         }
-        return add_item(K_ROW, 0, 0, 0, 0, 0, line)
+        var gap: u64 = 0
+        if nw == 2 {
+            if wlen[1] > 2 {
+                return fail(E_ITEM, line)
+            }
+            var g: u64 = 0
+            while g < wlen[1] {
+                let c: u64 = rd(cur_buf, wpos[1] + g)
+                if c < 48 || c > 57 {
+                    return fail(E_ITEM, line)
+                }
+                gap = gap * 10 + (c - 48)
+                g = g + 1
+            }
+        }
+        return add_item(K_ROW, 0, 0, 0, 0, gap, line)
     }
     if word_eq(0, (&kw_endrow[0]) as u64, 6) {
         if n_pages == base_pages {
@@ -599,6 +663,12 @@ fn do_line(nw: u64, line: u64) -> u64 {
         }
         return do_field(nw, line)
     }
+    if word_eq(0, (&kw_when[0]) as u64, 4) {
+        return do_cond(nw, line, 0)
+    }
+    if word_eq(0, (&kw_unless[0]) as u64, 6) {
+        return do_cond(nw, line, 1)
+    }
     if word_eq(0, (&kw_read[0]) as u64, 4) {
         return do_bind(nw, line, 0, was_field)
     }
@@ -610,10 +680,21 @@ fn do_line(nw: u64, line: u64) -> u64 {
     return 1
 }
 
+fn is_item_word() -> bool {
+    return word_eq(0, (&kw_label[0]) as u64, 5) || word_eq(0, (&kw_note[0]) as u64, 4) || word_eq(0, (&kw_sep[0]) as u64, 3) || word_eq(0, (&kw_row[0]) as u64, 3) || word_eq(0, (&kw_field[0]) as u64, 5)
+}
+
+fn do_line(nw: u64, line: u64) -> u64 {
+    if pend_cond != 0 && !is_item_word() {
+        return fail(E_ITEM, line)
+    }
+    return do_line0(nw, line)
+}
+
 // Adds the manifest buf[0..len) to the catalogue (earlier manifests stay). Returns the number of items of THIS
 // manifest, or ERR: then the catalogue is exactly as before (nothing of the file stays), err_code()/err_line() say why.
-// The limits (120 items, 16 pages, 6144 octets of text) count per manifest; the catalogue has its own (8 apps, 24 pages,
-// 240 items, 12288 octets). An app name can be in the catalogue once; page ids and field keys are per app.
+// The limits (200 items, 20 pages, 10240 octets of text) count per manifest; the catalogue has its own (8 apps, 28 pages,
+// 240 items, 14336 octets). An app name can be in the catalogue once; page ids and field keys are per app.
 fn add_man(buf: u64, len: u64) -> u64 {
     base_items = n_items
     base_pages = n_pages
@@ -627,6 +708,8 @@ fn add_man(buf: u64, len: u64) -> u64 {
     warns = 0
     too_many = 0
     last_field = 0
+    pend_cond = 0
+    pend_neg = 0
     cur_buf = buf
     var at: u64 = 0
     var line: u64 = 0
@@ -669,6 +752,9 @@ fn add_man(buf: u64, len: u64) -> u64 {
     }
     if err == 0 && st < 2 {
         fail(E_HEADER, line)
+    }
+    if err == 0 && pend_cond != 0 {
+        fail(E_ITEM, line)
     }
     if err != 0 {
         n_items = base_items
@@ -871,6 +957,21 @@ fn item_write(i: u64) -> u64 {
         return 0
     }
     return pool_ptr(it_write[(i) as usize])
+}
+
+// the condition key of an item (0 = none) and whether it is an `unless`
+fn item_cond(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return pool_ptr(it_cond[(i) as usize])
+}
+
+fn item_neg(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return it_neg[(i) as usize]
 }
 
 fn item_num(i: u64) -> u64 {
