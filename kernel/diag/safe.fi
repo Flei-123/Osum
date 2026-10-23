@@ -1,0 +1,461 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import serial
+import klog
+import sched.sched
+import fs.fs
+
+export { boot, tick, loop, clean, exhausted, fails, is_safe, fell_back, phase_now, panic_extra, MAX_FAILS, status_text }
+
+const MAX_FAILS: u64 = 3
+const WD_TICKS: u64 = 4000
+const GOOD_TICKS: u64 = 3000
+const BOOTLOG_TICKS: u64 = 2000
+
+const CM_MAGIC: u64 = 0x7C
+const CM_PHASE: u64 = 0x7D
+const CM_FAILS: u64 = 0x7E
+const CM_CHECK: u64 = 0x7F
+const MAGIC: u64 = 0xA5
+
+static mut cur_fails: u64 = 0
+static mut cur_phase: u64 = 0
+static mut auto_on: u64 = 0
+static mut safe_on: u64 = 0
+static mut fell: u64 = 0
+static mut marked: u64 = 0
+static mut wd_last: u64 = 0
+static mut wd_t: u64 = 0
+static mut wd_fired: u64 = 0
+static mut g_last: u64 = 0
+static mut g_t: u64 = 0
+static mut log_done: u64 = 0
+static mut chunk: [u8; 4096] = [0 as u8; 4096]
+
+static mut block_list: [u8; 141] = "nic nip nsvc nwait dhcp jarvis odb audio iwlboot iwlfwtest usbnet rndisonly i2chid hidpad hidgest wmplug sata ehci netdhot netlauf netvdemo \0"
+static mut block_prefix: [u8; 10] = "vgpu iwl \0"
+static mut w_safe: [u8; 5] = "safe\0"
+static mut w_auto: [u8; 9] = "safeauto\0"
+static mut w_nofilter: [u8; 13] = "nosafefilter\0"
+static mut w_wd: [u8; 7] = "safewd\0"
+static mut w_hold: [u8; 9] = "safehold\0"
+
+static mut t_src: [u8; 5] = "safe\0"
+static mut t_prev: [u8; 44] = "previous boot did not finish, fails so far \0"
+static mut t_fall: [u8; 37] = "SAFE MODE (automatic fallback) boot \0"
+static mut t_expl: [u8; 25] = "SAFE MODE (command line)\0"
+static mut t_stop: [u8; 41] = "giving up after failed boots, no reset: \0"
+static mut t_good: [u8; 22] = "boot marked good, up \0"
+static mut t_wd: [u8; 48] = "watchdog: desktop loop made no round for ticks \0"
+static mut t_state: [u8; 19] = "safe-state: fails=\0"
+static mut t_ph: [u8; 8] = " phase=\0"
+static mut t_sf: [u8; 7] = " safe=\0"
+static mut t_fb: [u8; 11] = " fallback=\0"
+static mut t_nl: [u8; 2] = "\n\0"
+static mut p_boot: [u8; 24] = "/var/jarvis/boot.log\0\0\0\0"
+static mut p_dir: [u8; 12] = "/var/jarvis\0"
+static mut p_var: [u8; 5] = "/var\0"
+
+fn cm_r(i: u64) -> u64 {
+    serial.out8(0x70 as u16, i as u8)
+    return serial.in8(0x71 as u16) as u64
+}
+
+fn cm_w(i: u64, v: u64) {
+    serial.out8(0x70 as u16, i as u8)
+    serial.out8(0x71 as u16, (v & 255) as u8)
+}
+
+fn check_of(phase: u64, f: u64) -> u64 {
+    return (MAGIC + phase * 3 + f * 7 + 0x5A) & 255
+}
+
+fn cm_store(phase: u64, f: u64) {
+    cm_w(CM_MAGIC, MAGIC)
+    cm_w(CM_PHASE, phase)
+    cm_w(CM_FAILS, f)
+    cm_w(CM_CHECK, check_of(phase, f))
+    cur_phase = phase
+    cur_fails = f
+}
+
+fn tok_end(cmd: u64, i: u64) -> u64 {
+    var j: u64 = i
+    while kstate.get8(cmd + j) != 0 && kstate.get8(cmd + j) != 32 {
+        j = j + 1
+    }
+    return j
+}
+
+fn name_len(cmd: u64, i: u64, e: u64) -> u64 {
+    var j: u64 = i
+    while j < e && kstate.get8(cmd + j) != 61 {
+        j = j + 1
+    }
+    return j - i
+}
+
+fn name_is(cmd: u64, i: u64, n: u64, w: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        let c: u64 = kstate.get8(w + k)
+        if c == 0 || c != kstate.get8(cmd + i + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return kstate.get8(w + n) == 0
+}
+
+fn has_word(cmd: u64, w: u64) -> bool {
+    var i: u64 = 0
+    while i < 4096 && kstate.get8(cmd + i) != 0 {
+        if kstate.get8(cmd + i) == 32 {
+            i = i + 1
+        } else {
+            let e: u64 = tok_end(cmd, i)
+            if name_is(cmd, i, name_len(cmd, i, e), w) {
+                return true
+            }
+            i = e
+        }
+    }
+    return false
+}
+
+fn in_list(cmd: u64, i: u64, n: u64, list: u64) -> bool {
+    var p: u64 = 0
+    while kstate.get8(list + p) != 0 {
+        var q: u64 = p
+        while kstate.get8(list + q) != 0 && kstate.get8(list + q) != 32 {
+            q = q + 1
+        }
+        let l: u64 = q - p
+        if l == n && l > 0 {
+            var k: u64 = 0
+            var same: bool = true
+            while k < l {
+                if kstate.get8(list + p + k) != kstate.get8(cmd + i + k) {
+                    same = false
+                }
+                k = k + 1
+            }
+            if same {
+                return true
+            }
+        }
+        p = q
+        if kstate.get8(list + p) == 32 {
+            p = p + 1
+        }
+    }
+    return false
+}
+
+fn has_prefix(cmd: u64, i: u64, e: u64, list: u64) -> bool {
+    var p: u64 = 0
+    while kstate.get8(list + p) != 0 {
+        var q: u64 = p
+        while kstate.get8(list + q) != 0 && kstate.get8(list + q) != 32 {
+            q = q + 1
+        }
+        let l: u64 = q - p
+        if l > 0 && e - i >= l {
+            var k: u64 = 0
+            var same: bool = true
+            while k < l {
+                if kstate.get8(list + p + k) != kstate.get8(cmd + i + k) {
+                    same = false
+                }
+                k = k + 1
+            }
+            if same {
+                return true
+            }
+        }
+        p = q
+        if kstate.get8(list + p) == 32 {
+            p = p + 1
+        }
+    }
+    return false
+}
+
+fn filter(cmd: u64) -> u64 {
+    var removed: u64 = 0
+    var i: u64 = 0
+    while i < 4096 && kstate.get8(cmd + i) != 0 {
+        if kstate.get8(cmd + i) == 32 {
+            i = i + 1
+        } else {
+            let e: u64 = tok_end(cmd, i)
+            let n: u64 = name_len(cmd, i, e)
+            if in_list(cmd, i, n, (&block_list[0]) as u64) || has_prefix(cmd, i, e, (&block_prefix[0]) as u64) {
+                var k: u64 = i
+                while k < e {
+                    kstate.set8(cmd + k, 32 as u8)
+                    k = k + 1
+                }
+                removed = removed + 1
+            }
+            i = e
+        }
+    }
+    return removed
+}
+
+fn say(state: u64, msg: u64, v: u64) {
+    klog.sayn(state, klog.L_WARN, (&t_src[0]) as u64, msg, v)
+    serial.puts((&t_src[0]) as u64)
+    serial.put(58 as u8)
+    serial.put(32 as u8)
+    serial.puts(msg)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn boot(state: u64, cmd: u64) {
+    if cmd == 0 {
+        return
+    }
+    let explicit: bool = has_word(cmd, (&w_safe[0]) as u64)
+    let autom: bool = has_word(cmd, (&w_auto[0]) as u64)
+    let nofilter: bool = has_word(cmd, (&w_nofilter[0]) as u64)
+    var want_safe: bool = explicit
+    if has_word(cmd, (&w_wd[0]) as u64) {
+        kstate.mode_add(state, kstate.M_SAFEWD)
+    }
+    if has_word(cmd, (&w_hold[0]) as u64) {
+        kstate.mode_add(state, kstate.M_SAFEHOLD)
+    }
+    if nofilter {
+        kstate.mode_add(state, kstate.M_NOSAFEFILTER)
+    }
+    var msg_prev: bool = false
+    if autom {
+        auto_on = 1
+        kstate.mode_add(state, kstate.M_SAFEAUTO)
+        kstate.mode_add(state, kstate.M_PANICBOOT)
+        let m: u64 = cm_r(CM_MAGIC)
+        let ph: u64 = cm_r(CM_PHASE)
+        let f: u64 = cm_r(CM_FAILS)
+        var valid: bool = m == MAGIC && cm_r(CM_CHECK) == check_of(ph, f) && ph <= 2 && f <= 200
+        var nf: u64 = 0
+        if valid && ph != 0 {
+            nf = f + 1
+            fell = 1
+            want_safe = true
+            msg_prev = true
+        } else if valid {
+            nf = 0
+        }
+        if explicit {
+            cm_store(2, nf)
+        } else if want_safe {
+            cm_store(2, nf)
+        } else {
+            cm_store(1, nf)
+        }
+        if msg_prev {
+            kstate.mode_add(state, kstate.M_SAFEFALL)
+        }
+    }
+    if want_safe {
+        safe_on = 1
+        kstate.mode_add(state, kstate.M_SAFE)
+        if !nofilter {
+            let _r: u64 = filter(cmd)
+        }
+    }
+    if !want_safe {
+        return
+    }
+    if msg_prev {
+        say(state, (&t_prev[0]) as u64, cur_fails)
+        say(state, (&t_fall[0]) as u64, cur_fails)
+    } else {
+        say(state, (&t_expl[0]) as u64, 0)
+    }
+}
+
+fn is_safe() -> bool {
+    return safe_on != 0
+}
+
+fn fell_back() -> bool {
+    return fell != 0
+}
+
+fn fails() -> u64 {
+    return cur_fails
+}
+
+fn phase_now() -> u64 {
+    return cur_phase
+}
+
+fn exhausted() -> bool {
+    return auto_on != 0 && cur_fails >= MAX_FAILS
+}
+
+fn good(state: u64) {
+    if marked != 0 || auto_on == 0 {
+        return
+    }
+    if kstate.mode_on(state, kstate.M_SAFEHOLD) {
+        return
+    }
+    marked = 1
+    cm_store(0, 0)
+}
+
+fn clean(state: u64) {
+    good(state)
+}
+
+fn tick(state: u64, rounds: u64) {
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if rounds != g_last {
+        g_last = rounds
+        g_t = now
+    }
+    if auto_on != 0 && marked == 0 && rounds > 100 && now >= GOOD_TICKS && now - g_t < 300 {
+        good(state)
+        say(state, (&t_good[0]) as u64, now / 100)
+    }
+    if !kstate.mode_on(state, kstate.M_SAFEWD) || wd_fired != 0 {
+        return
+    }
+    if rounds != wd_last {
+        wd_last = rounds
+        wd_t = now
+        return
+    }
+    if rounds == 0 || now - wd_t < WD_TICKS {
+        return
+    }
+    wd_fired = 1
+    say(state, (&t_wd[0]) as u64, now - wd_t)
+    sched.dump_tasks(state)
+    asm("ud2")
+}
+
+fn put_str(dst: u64, at: u64, s: u64) -> u64 {
+    var n: u64 = at
+    var i: u64 = 0
+    while kstate.get8(s + i) != 0 && n < 4000 {
+        kstate.set8(dst + n, kstate.get8(s + i) as u8)
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+fn put_dec(dst: u64, at: u64, v: u64) -> u64 {
+    var t: [u8; 24] = [0 as u8; 24]
+    var m: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        t[0] = 48 as u8
+        m = 1
+    }
+    while x > 0 {
+        t[m as usize] = (48 + (x % 10)) as u8
+        x = x / 10
+        m = m + 1
+    }
+    var n: u64 = at
+    while m > 0 {
+        kstate.set8(dst + n, t[(m - 1) as usize])
+        n = n + 1
+        m = m - 1
+    }
+    return n
+}
+
+fn status_text(dst: u64) -> u64 {
+    var n: u64 = put_str(dst, 0, (&t_state[0]) as u64)
+    n = put_dec(dst, n, cur_fails)
+    n = put_str(dst, n, (&t_ph[0]) as u64)
+    n = put_dec(dst, n, cur_phase)
+    n = put_str(dst, n, (&t_sf[0]) as u64)
+    n = put_dec(dst, n, safe_on)
+    n = put_str(dst, n, (&t_fb[0]) as u64)
+    n = put_dec(dst, n, fell)
+    n = put_str(dst, n, (&t_nl[0]) as u64)
+    kstate.set8(dst + n, 0 as u8)
+    return n
+}
+
+fn panic_extra(dst: u64) -> u64 {
+    return status_text(dst)
+}
+
+fn ensure_dir(state: u64) -> bool {
+    if fs.path(state, (&p_dir[0]) as u64) != 0 {
+        return true
+    }
+    if fs.path(state, (&p_var[0]) as u64) == 0 {
+        if fs.create_path(state, (&p_var[0]) as u64, fs.T_DIR) == 0 {
+            return false
+        }
+    }
+    return fs.create_path(state, (&p_dir[0]) as u64, fs.T_DIR) != 0
+}
+
+fn write_bootlog(state: u64) {
+    if !fs.ready(state) || !fs.free(state) {
+        return
+    }
+    let fl: u64 = fs.enter(state)
+    if !ensure_dir(state) {
+        fs.leave(state, fl)
+        return
+    }
+    var ino: u64 = fs.path(state, (&p_boot[0]) as u64)
+    if ino == 0 {
+        ino = fs.create_path(state, (&p_boot[0]) as u64, fs.T_FILE)
+    }
+    if ino == 0 {
+        fs.leave(state, fl)
+        return
+    }
+    let c: u64 = (&chunk[0]) as u64
+    var off: u64 = 0
+    var fill: u64 = 0
+    var s: u64 = klog.first_seq(state)
+    let last: u64 = klog.seq(state)
+    while s <= last {
+        let n: u64 = klog.line_at(state, s, c + fill, 300)
+        if n > 0 {
+            fill = fill + n
+            kstate.set8(c + fill, 10 as u8)
+            fill = fill + 1
+        }
+        if fill > 3600 {
+            let w: u64 = fs.write_at(state, ino, off, c, fill)
+            off = off + w
+            fill = 0
+        }
+        s = s + 1
+    }
+    if fill > 0 {
+        let w: u64 = fs.write_at(state, ino, off, c, fill)
+        off = off + w
+    }
+    let _z: bool = fs.set_size(state, ino, off)
+    fs.leave(state, fl)
+}
+
+fn loop(state: u64) {
+    if log_done != 0 {
+        return
+    }
+    if kstate.get(state, kstate.TICKS) < BOOTLOG_TICKS {
+        return
+    }
+    log_done = 1
+    write_bootlog(state)
+}
