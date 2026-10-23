@@ -1623,6 +1623,12 @@ interface_branding: @MARKE_PRODUKT@ - Secure Boot must be OFF
     module_path: boot():/root.img
     cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nosched noproc nofs anmeldung
 
+/@MARKE_PRODUKT@ (safe mode)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen safe nosched noproc nofs anmeldung
+
 /Command line
     protocol: multiboot1
     path: boot():/osum.mb
@@ -1763,6 +1769,8 @@ j = i + 1
 while j < len(lines) and lines[j].startswith(' '):
     if lines[j].strip().startswith('cmdline:') and ' absturzneustart' not in lines[j]:
         lines[j] = lines[j] + ' absturzneustart'
+    if lines[j].strip().startswith('cmdline:') and ' safeauto' not in lines[j]:
+        lines[j] = lines[j] + ' safeauto'
     # r343: /dev in entry 1 too (installer from the desktop); the SATA disk
     # comes up on demand through the installer's own syscall, not at boot.
     if lines[j].strip().startswith('cmdline:') and ' vfs ' not in lines[j] + ' ':
