@@ -92,6 +92,29 @@ int main(void)
         close(fd2);
     }
 
+    /* F_SEAL_FUTURE_WRITE (16): allowed with a live writable mapping (that one keeps working), refuses new writable mappings and write(2) */
+    int fd4 = (int)syscall(SYS_memfd_create, "seal4", 2);
+    if (fd4 >= 0) {
+        ftruncate(fd4, 4096);
+        unsigned char *fw = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd4, 0);
+        CHECKC("future_mmap_rw", fw != MAP_FAILED);
+        r = fcntl(fd4, F_ADD_SEALS, 16 | SEAL_SHRINK | SEAL_GROW | SEAL_SEAL);
+        CHECK("future_write_seal_ok_with_mapping", r == 0, "r=%d errno=%d", r, errno);
+        if (fw != MAP_FAILED) {
+            fw[7] = 0x5A;
+            CHECK("future_old_mapping_still_writable", fw[7] == 0x5A, "lost");
+        }
+        errno = 0;
+        void *w3 = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd4, 0);
+        CHECK("future_new_rw_mapping_refused", w3 == MAP_FAILED && errno == EPERM, "errno=%d", errno);
+        errno = 0;
+        wr = write(fd4, "x", 1);
+        CHECK("future_write_refused", wr == -1, "wr=%zd", wr);
+        void *ro = mmap(0, 4096, PROT_READ, MAP_SHARED, fd4, 0);
+        CHECK("future_ro_mapping_ok", ro != MAP_FAILED && ((unsigned char *)ro)[7] == 0x5A, "ro mapping");
+        close(fd4);
+    }
+
     /* the count survives a failed mapping: a too-large PROT_WRITE mmap must not leave a stale count behind */
     int fd3 = (int)syscall(SYS_memfd_create, "seal3", 2);
     if (fd3 >= 0) {
