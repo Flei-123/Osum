@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wunlock.fi -- ask the kernel to open the write lock of one block device after the caller has confirmed.
+
+profile kernel
+
+import ulib
+
+export { unlock, relock, status_open }
+
+static mut P_WLOCK: [u8; 12] = "/dev/wlock\0\0"
+static mut C_UNLOCK: [u8; 8] = "unlock \0"
+static mut C_LOCKALL: [u8; 10] = "lock all\0\0"
+static mut CMD: [u8; 40] = [0 as u8; 40]
+
+fn put(at: u64, v: u64) {
+    *((((&CMD[0 as usize]) as u64) + at) as *mut u8) = v as u8
+}
+
+fn name_len(dev: u64, at: u64) -> u64 {
+    let c0: u64 = ulib.byte_at(dev, at)
+    let c1: u64 = ulib.byte_at(dev, at + 1)
+    if (c0 == 104 && c1 == 100) || (c0 == 115 && c1 == 100) {
+        return 3
+    }
+    if c0 == 110 && c1 == 118 {
+        return 5
+    }
+    if c0 == 117 && c1 == 115 {
+        return 3
+    }
+    if c0 == 114 && c1 == 97 {
+        return 4
+    }
+    return ulib.length(dev) - at
+}
+
+fn send(n: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_WLOCK[0 as usize]) as u64, ulib.O_RDWR, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, (&CMD[0 as usize]) as u64, n)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(w) {
+        return false
+    }
+    return w == n
+}
+
+fn unlock(dev: u64) -> bool {
+    var i: u64 = 0
+    while i < 7 {
+        put(i, ulib.byte_at((&C_UNLOCK[0 as usize]) as u64, i))
+        i = i + 1
+    }
+    let at: u64 = 5
+    let n: u64 = name_len(dev, at)
+    if n == 0 || n > 20 {
+        return false
+    }
+    var k: u64 = 0
+    while k < n {
+        put(7 + k, ulib.byte_at(dev, at + k))
+        k = k + 1
+    }
+    put(7 + n, 10)
+    return send(8 + n)
+}
+
+fn relock() -> bool {
+    var i: u64 = 0
+    while i < 8 {
+        put(i, ulib.byte_at((&C_LOCKALL[0 as usize]) as u64, i))
+        i = i + 1
+    }
+    return send(8)
+}
+
+fn status_open() -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_WLOCK[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    ulib.sys(ulib.SYS_READ, fd, (&CMD[0 as usize]) as u64, 39)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return (&CMD[0 as usize]) as u64
+}
