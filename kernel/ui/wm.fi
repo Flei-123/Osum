@@ -6332,6 +6332,10 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     // Fenster ueberhaupt Schmuck traegt. Ein undekoriertes Fenster darf
     // bis auf 1x1 herunter; kleiner als ein Bildpunkt ist nichts, und
     // `w * h * 4` weiter unten bleibt damit wohldefiniert.
+    var keep_buf: u64 = 0
+    var keep_w: u64 = 0
+    var keep_h: u64 = 0
+    var keep_free: u64 = 0
     var min_w: u64 = 32
     var min_h: u64 = 16
     if !win_deco(state, i) {
@@ -6372,9 +6376,27 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     } else if wg(state, i, W_SHM) != 0 {
         // COMPOSITOR S3: a shared buffer has the row length of the old width. The window leaves it (the client keeps its mapping alive)
         // and gets a buffer of its own; the client takes the new size from E_RESIZE and attaches a new shared buffer (WM_SETBUF).
+        keep_buf = wg(state, i, W_BUF)
+        keep_w = wg(state, i, W_W)
+        keep_h = wg(state, i, W_H)
         if !detach_buf(state, i, w * h * 4) {
             return false
         }
+    } else if wg(state, i, W_KIND) != K_TERM && wg(state, i, W_BUF) != 0 && !resize_clear_an(state) {
+        // W-FLICKER: a window on a kernel-own buffer (the client has not re-attached yet, or never will) gets fresh frames at every size so
+        // that the old picture can be copied over with the new row length (the old way re-used the buffer and cleared it to the background)
+        let bytes: u64 = w * h * 4
+        let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+        let neu: u64 = mem.frame_run(state, rahmen)
+        if neu == 0 {
+            return false
+        }
+        keep_buf = wg(state, i, W_BUF)
+        keep_w = wg(state, i, W_W)
+        keep_h = wg(state, i, W_H)
+        keep_free = wg(state, i, W_BUFBYTES) / mem.FRAME_SIZE
+        wsv(state, i, W_BUF, neu)
+        wsv(state, i, W_BUFBYTES, rahmen * mem.FRAME_SIZE)
     } else if w * h * 4 > wg(state, i, W_BUFBYTES) {
         let bytes: u64 = w * h * 4
         let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
@@ -6394,12 +6416,59 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     }
     if wg(state, i, W_KIND) == K_TERM {
         term_setup(state, i)
+    } else if keep_buf != 0 && !resize_clear_an(state) {
+        keep_resized(state, i, keep_buf, keep_w, keep_h)
+        if keep_free != 0 {
+            mem.frame_free_run(state, keep_buf, keep_free)
+        }
     } else {
         fill(state, i, 0, 0, w, h, wg(state, i, W_BG))
     }
     ev_push(state, i, E_RESIZE, w, h, 0)
     damage_win(state, i)
     return true
+}
+
+// W-FLICKER (resize): THE OLD PICTURE STAYS UNTIL THE CLIENT HAS PAINTED THE NEW ONE.
+// Before: a resize filled the window's new kernel buffer with the background colour, the compositor showed that flat window until the client
+// had taken E_RESIZE, mapped a new shared buffer and painted (tens of ms on slow hardware = a visible flash on every step of a drag).
+// Now the overlap of the old and the new size is copied over (row by row, the row lengths differ), only the newly exposed strips get the
+// background colour. `old` is the buffer the window just left: the client still maps it, so it is alive.
+fn resize_clear_an(state: u64) -> bool {
+    return kstate.mode_on(state, kstate.M_RESCLEAR)
+}
+
+fn keep_resized(state: u64, i: u64, old: u64, ow: u64, oh: u64) {
+    let nw: u64 = wg(state, i, W_W)
+    let nh: u64 = wg(state, i, W_H)
+    let nb: u64 = wg(state, i, W_BUF)
+    if nb == 0 || old == 0 {
+        fill(state, i, 0, 0, nw, nh, wg(state, i, W_BG))
+        return
+    }
+    var cw: u64 = ow
+    if nw < cw {
+        cw = nw
+    }
+    var ch: u64 = oh
+    if nh < ch {
+        ch = nh
+    }
+    var y: u64 = 0
+    while y < ch {
+        copy_words(nb +% y *% nw *% 4, old +% y *% ow *% 4, cw / 2)
+        if (cw & 1) != 0 {
+            __mmio_write32((nb +% y *% nw *% 4 +% (cw - 1) *% 4) as *mut u32,
+                __mmio_read32((old +% y *% ow *% 4 +% (cw - 1) *% 4) as *mut u32))
+        }
+        y = y + 1
+    }
+    if nw > cw {
+        fill(state, i, cw, 0, nw - cw, ch, wg(state, i, W_BG))
+    }
+    if nh > ch {
+        fill(state, i, 0, ch, nw, nh - ch, wg(state, i, W_BG))
+    }
 }
 
 // ---------------------------------------------------- in ein Fenster
@@ -6723,6 +6792,20 @@ fn attach_buf(state: u64, i: u64, sbase: u64, sbytes: u64, sidx: u64) -> bool {
     }
     if wg(state, i, W_BUF) == sbase {
         return true
+    }
+    // W-FLICKER (resize): the new shared buffer starts out empty; the window keeps showing the picture it had (kept by `keep_resized`)
+    // until the client paints into the new buffer. Copy it over BEFORE the old frames go (a client that painted first is not asked: WM_SETBUF
+    // comes right after the buffer is made, in `win_reshare`).
+    if wg(state, i, W_SHM) == 0 && wg(state, i, W_BUF) != 0 && !resize_clear_an(state) {
+        let cb: u64 = wg(state, i, W_W) * wg(state, i, W_H) * 4
+        if cb <= wg(state, i, W_BUFBYTES) {
+            copy_words(sbase, wg(state, i, W_BUF), cb / 8)
+            var ci: u64 = (cb / 8) * 8
+            while ci < cb {
+                __mmio_write32((sbase +% ci) as *mut u32, __mmio_read32((wg(state, i, W_BUF) +% ci) as *mut u32))
+                ci = ci + 4
+            }
+        }
     }
     if wg(state, i, W_SHM) != 0 {
         unixsock.shm_unref(state, wg(state, i, W_SHM) - 1)

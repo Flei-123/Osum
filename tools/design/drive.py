@@ -487,16 +487,26 @@ class Fahrer:
         elif mode.startswith("key:"):
             # w-caret: `serie key:<name> <n> <name>` presses a key in the same write, then the burst
             cmds.append("sendkey %s" % mode[4:])
+        elif mode.startswith("drag:"):
+            # W-FLICKER: `serie drag:<dx>,<dy>,<period> <n> <name> <pace>` holds the left button (the pointer sits on a window border or
+            # corner) and moves by (dx,dy) before every dump, reversing the direction every <period> frames: a resize sweep
+            dgx, dgy, dgp = (int(v) for v in mode[5:].split(","))
+            cmds.append("mouse_button 1")
         paths = []
         for i in range(n):
             pth = os.path.join(self.out, "%s-%03d.ppm" % (name, i))
             if os.path.exists(pth):
                 os.unlink(pth)
             paths.append(pth)
+            if mode.startswith("drag:"):
+                sg = 1 if (i // dgp) % 2 == 0 else -1
+                cmds.append("mouse_move %d %d" % (sg * dgx, sg * dgy))
             if mode == "move":
                 # W-LOGIN: the pointer keeps moving between the frames (every move makes the window server compose)
                 cmds.append("mouse_move %d 0" % (6 if i % 2 == 0 else -6))
             cmds.append("screendump %s" % pth)
+        if mode.startswith("drag:"):
+            cmds.append("mouse_button 0")
         if pace_ms > 0:
             for c in cmds:
                 self.s.sendall((c + "\n").encode())
