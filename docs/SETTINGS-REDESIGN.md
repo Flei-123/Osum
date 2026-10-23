@@ -161,7 +161,7 @@ Depth: sidebar entry -> landing page -> sub-page (**max 2 levels below the sideb
 
 ### 7.1 What already exists (keep)
 
-`lib/settingsman/manifest.fi` (no heap, static tables), `kernel/user/settings.d/accounts.settings` embedded with `__include_str`, package pages from `/apps/<app>.prog/SETTINGS` (`add_pkg`, rights check, `app` = package folder), bus-backed `read`/`write` actions per field (broker handles rights, confirmation, audit), golden tests `tools/settingsman` (66 checks, 43 parser mutations). Limits today: 8 pages and 80 entries per file, 24 pages / 240 entries / 8192 B text per catalogue; `choice`/`list` are not drawn from the manifest.
+`lib/settingsman/manifest.fi` (no heap, static tables), `kernel/user/settings.d/builtin.settings` embedded with `__include_str`, package pages from `/apps/<app>.prog/SETTINGS` (`add_pkg`, rights check, `app` = package folder), bus-backed `read`/`write` actions per field (broker handles rights, confirmation, audit), golden tests `tools/settingsman` (66 checks, 43 parser mutations). Limits today: 8 pages and 80 entries per file, 24 pages / 240 entries / 8192 B text per catalogue; `choice`/`list` are not drawn from the manifest.
 
 ### 7.2 Format v2 (additions, all English ids)
 

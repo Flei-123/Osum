@@ -10,13 +10,13 @@ copied from the Firn code; tools/settingsman/run.sh feeds both the same files an
 """
 import sys
 
-MAX_ITEMS = 200     # per manifest
-MAX_PAGES = 20
-POOL_MAX = 10240
+MAX_ITEMS = 280     # per manifest
+MAX_PAGES = 32
+POOL_MAX = 16384
 MAX_APPS = 8        # whole catalogue
-CAT_PAGES = 28
-CAT_ITEMS = 240
-CAT_POOL = 14336
+CAT_PAGES = 44
+CAT_ITEMS = 340
+CAT_POOL = 20480
 TYPES = ["bool", "choice", "text", "secret", "action", "status", "list", "slider", "table", "canvas"]
 NAME_CHARS = set(b"abcdefghijklmnopqrstuvwxyz0123456789._-")
 

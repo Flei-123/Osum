@@ -6,8 +6,8 @@
 #
 # 1. the parser lib/settingsman/manifest.fi (built as tools/settingsman/dump.fi) and the second reader
 #    tools/settingsman/manifest.py give the SAME text for every case in tools/settingsman/cases/ and for the real
-#    page kernel/user/settings.d/accounts.settings, and both match the golden file (*.expect);
-# 2. limits (200 items, 20 pages, string pool) -- both readers agree and say the expected code;
+#    page kernel/user/settings.d/builtin.settings, and both match the golden file (*.expect);
+# 2. limits (280 items, 32 pages, string pool) -- both readers agree and say the expected code;
 # 3. the accounts page is WIRED: every field key of the manifest is bound in kernel/user/settings.fi (ab_names), every
 #    label is a catalogue key in en AND de, the Konten page no longer builds the book button by hand;
 # 4. the CATALOGUE (r143): several manifests (built-in page + packages /apps/<app>.prog/SETTINGS) in one catalogue --
@@ -25,7 +25,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 PY="python3 -I tools/settingsman/manifest.py"
-MAN=kernel/user/settings.d/accounts.settings
+MAN=kernel/user/settings.d/builtin.settings
 
 build() { # libdir out
     FIRNLIB="$1" vendor/firn/bin/firnc --profile=app tools/settingsman/dump.fi -o "$2" > "$2.build" 2>&1
@@ -43,7 +43,7 @@ compare_all() { # dump-binary label -> number of differences
         cmp -s "$T/out.fi" "$b.expect" || n=$((n+1))
     done
     "$bin" < $MAN > "$T/out.fi" 2>/dev/null
-    cmp -s "$T/out.fi" tools/settingsman/accounts.expect || n=$((n+1))
+    cmp -s "$T/out.fi" tools/settingsman/builtin.expect || n=$((n+1))
     echo "$n"
 }
 D=$(compare_all "$T/dump")
@@ -63,8 +63,8 @@ for f in tools/settingsman/cases/*.txt; do
     esac
 done
 ok "golden files: every ok_* is accepted, every rej_* rejected with empty tables"
-head -1 tools/settingsman/accounts.expect | grep -q '^ok app=settings items=162 pages=18 warns=0$' \
-    && ok "settings manifest: accounts, network, display, personal and system pages, no warnings" || bad "accounts page header: $(head -1 tools/settingsman/accounts.expect)"
+head -1 tools/settingsman/builtin.expect | grep -q '^ok app=settings items=213 pages=23 warns=0$' \
+    && ok "settings manifest: accounts, network, display, personal, system and tools pages, no warnings" || bad "accounts page header: $(head -1 tools/settingsman/builtin.expect)"
 
 echo "== 2. limits =="
 python3 -I - "$T" <<'PY'
@@ -72,27 +72,27 @@ import sys
 t = sys.argv[1]
 hdr = "manifest 1\napp demo\n"
 def w(name, body): open(f"{t}/{name}.txt", "w").write(hdr + body)
-w("items200", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(200)))
-w("items201", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(201)))
-w("pages20", "".join(f"page p{i} t s g\n" for i in range(20)))
-w("pages21", "".join(f"page p{i} t s g\n" for i in range(21)))
-w("pool", "page a t s g\n" + "".join(f"field {'k%02d' % i + 'x' * 36} text {'l%02d' % i + 'y' * 36}\n" for i in range(130)))
+w("items280", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(280)))
+w("items281", "page a t s g\n" + "".join(f"field k{i} text\n" for i in range(281)))
+w("pages32", "".join(f"page p{i} t s g\n" for i in range(32)))
+w("pages33", "".join(f"page p{i} t s g\n" for i in range(33)))
+w("pool", "page a t s g\n" + "".join(f"field {'k%02d' % i + 'x' * 36} text {'l%02d' % i + 'y' * 36}\n" for i in range(210)))
 PY
 lim() { # name expected-first-line
     $PY < "$T/$1.txt" > "$T/$1.py"; "$T/dump" < "$T/$1.txt" > "$T/$1.fi" 2>/dev/null
     if cmp -s "$T/$1.py" "$T/$1.fi" && head -1 "$T/$1.fi" | grep -q "^$2"; then ok "$1: $(head -1 "$T/$1.fi")"; else bad "$1: expected '$2', Firn '$(head -1 "$T/$1.fi")', python '$(head -1 "$T/$1.py")'"; fi
 }
-lim items200 "ok app=demo items=200 "
-lim items201 "error 8 "
-lim pages20 "ok app=demo items=0 pages=20 "
-lim pages21 "error 8 "
+lim items280 "ok app=demo items=280 "
+lim items281 "error 8 "
+lim pages32 "ok app=demo items=0 pages=32 "
+lim pages33 "error 8 "
 lim pool "error 9 "
 
 echo "== 3. the accounts page is wired =="
 python3 -I - <<'PY' && ok "wiring checks" || bad "wiring checks (see FAIL lines above)"
 import re, sys
 src = open("kernel/user/settings.fi", encoding="utf-8").read()
-man = open("kernel/user/settings.d/accounts.settings", encoding="utf-8").read()
+man = open("kernel/user/settings.d/builtin.settings", encoding="utf-8").read()
 en = open("locale/en/messages", encoding="utf-8", errors="replace").read()
 de = open("locale/de/messages", encoding="utf-8", errors="replace").read()
 rc = 0
@@ -112,7 +112,7 @@ for line in man.splitlines():
         if len(w) > 3 and w[3] != "-": labels.append(w[3])
     elif w[0] in ("label", "note"): labels.append(w[1])
 fields = pages["accounts"]
-for bf, pgs in (("accounts", ("accounts",)), ("network", ("network",)), ("display", ("display", "display2")), ("personal", ("time", "lock", "password", "pin", "language", "wifi", "presets", "about")), ("system", ("taskbar", "effects", "usbnet", "proto", "update", "presetsel"))):
+for bf, pgs in (("accounts", ("accounts",)), ("network", ("network",)), ("display", ("display", "display2")), ("personal", ("time", "lock", "password", "pin", "language", "wifi", "presets", "about")), ("system", ("taskbar", "effects", "usbnet", "proto", "update", "presetsel")), ("tools", ("sync", "bridge", "system", "rights", "netv"))):
     bound = [x for x in open("kernel/user/settings.d/%s.bind" % bf, encoding="utf-8").read().split("\n") if x]
     allf = [f for pg in pgs for f in pages[pg]]
     for f in allf:
@@ -132,7 +132,7 @@ for ix, k in re.findall(r"if ix == (\d+) \{ return (K_[A-Z]+) \}", src):
     if not re.search(r"^const %s: u64 = \d+" % k, src, re.M): bad("%s is not defined" % k)
 if "fuiscene.button(left, msg.get((&k_k_book" in src: bad("the book button is built by hand again")
 if '__include_str("settings.d/accounts.bind")' not in src: bad("the binding names are not embedded in settings.fi")
-if '__include_str("settings.d/accounts.settings")' not in src: bad("the manifest is not embedded in settings.fi")
+if '__include_str("settings.d/builtin.settings")' not in src: bad("the manifest is not embedded in settings.fi")
 if "manifest.page_find(" not in src: bad("page_accounts does not read the manifest")
 if '__include_str("settings.d/network.bind")' not in src: bad("the network binding names are not embedded in settings.fi")
 if "fuiscene.label(left, (&l_nzust" in src: bad("the Network page is built by hand again")
@@ -142,6 +142,11 @@ if '__include_str("settings.d/personal.bind")' not in src: bad("the personal bin
 for fnname in ("page_taskbar", "page_effects", "page_usbnet", "page_proto", "page_update", "page_vorl"):
     m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
     if not m or "page_man(4," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
+for fnname in ("page_sync", "page_bruecke", "page_system", "page_rechte", "page_netv"):
+    m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
+    if not m or "page_man(5," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
+if '__include_str("settings.d/tools.bind")' not in src: bad("the tools binding names are not embedded in settings.fi")
+if "fn net_tables" in src or "fuiscene.label(left, (&l_yprov" in src: bad("a tools page is built by hand again")
 if "fn man_shown" in src: bad("man_shown is back: conditions belong in the manifest (when/unless)")
 for fnname in ("page_time", "page_benut", "page_passw", "page_pin", "page_sprache", "page_wifi", "page_vtrans", "page_info"):
     m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
@@ -154,7 +159,7 @@ FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc --profile=app tools/settingsman/bind.f
 python3 -I - > "$T/bind.exp" <<'PY'
 names = [x for x in open("kernel/user/settings.d/accounts.bind").read().split("\n") if x]
 cur = None
-for line in open("kernel/user/settings.d/accounts.settings"):
+for line in open("kernel/user/settings.d/builtin.settings"):
     w = line.split("#")[0].split()
     if w and w[0] == "page": cur = w[1]
     if w and w[0] == "field" and cur == "accounts":
@@ -190,15 +195,15 @@ def w(name, parts): open(f"{t}/cl_{name}.txt", "w").write("".join(parts))
 one = "page p t s g\n"
 w("apps8", [sec("add", f"a{i}", one) for i in range(8)])
 w("apps9", [sec("add", f"a{i}", one) for i in range(9)])
-p7 = lambda i: sec("add", f"a{i}", "".join(f"page p{j} t s g\n" for j in range(7)))
-w("pages28", [p7(i) for i in range(4)])
-w("pages29", [p7(i) for i in range(4)] + [sec("add", "a4", one)])
-i80 = lambda i: sec("add", f"a{i}", one + "".join(f"field k{j} text\n" for j in range(80)))
-w("items240", [i80(i) for i in range(3)])
-w("items241", [i80(i) for i in range(3)] + [sec("add", "a3", one + "field k text\n")])
+p11 = lambda i: sec("add", f"a{i}", "".join(f"page p{j} t s g\n" for j in range(11)))
+w("pages44", [p11(i) for i in range(4)])
+w("pages45", [p11(i) for i in range(4)] + [sec("add", "a4", one)])
+i85 = lambda i: sec("add", f"a{i}", one + "".join(f"field k{j} text\n" for j in range(85)))
+w("items340", [i85(i) for i in range(4)])
+w("items341", [i85(i) for i in range(4)] + [sec("add", "a4", one + "field k text\n")])
 big = lambda i, tail="": sec("add", f"a{i}", one + "".join(f"field {'k%02d' % j + 'x' * 36} text {'l%02d' % j + 'y' * 36}\n" for j in range(66)) + tail)
-w("pool_cat", [big(0), big(1), big(2)])
-w("pool_leak", [big(0), big(1, "field Bad text\n"), big(2)])
+w("pool_cat", [big(0), big(1), big(2), big(3)])
+w("pool_leak", [big(0), big(1, "field Bad text\n"), big(2), big(3)])
 PY
 clim() { # name expected-line-pattern
     python3 -I tools/settingsman/manifest.py --catalog < "$T/cl_$1.txt" > "$T/cl_$1.py"; "$T/cat" < "$T/cl_$1.txt" > "$T/cl_$1.fi" 2>/dev/null
@@ -206,12 +211,12 @@ clim() { # name expected-line-pattern
 }
 clim apps8 "^catalog apps=8 pages=8 items=0"
 clim apps9 "^add 9 error 8 line 2"
-clim pages28 "^catalog apps=4 pages=28 items=0"
-clim pages29 "^add 5 error 8 "
-clim items240 "^catalog apps=3 pages=3 items=240"
-clim items241 "^add 4 error 8 "
-clim pool_cat "^add 3 error 9 "
-clim pool_leak "^add 3 ok "
+clim pages44 "^catalog apps=4 pages=44 items=0"
+clim pages45 "^add 5 error 8 "
+clim items340 "^catalog apps=4 pages=4 items=340"
+clim items341 "^add 5 error 8 "
+clim pool_cat "^add 4 error 9 "
+clim pool_leak "^add 4 ok "
 
 echo "== 4b. package pages (r149): pakete/social/SETTINGS + the Settings window =="
 "$T/dump" < pakete/social/SETTINGS > "$T/social.fi" 2>/dev/null; python3 -I tools/settingsman/manifest.py < pakete/social/SETTINGS > "$T/social.py"
@@ -277,7 +282,7 @@ PY
         timeout 10 "$d/dump" < "$f" > "$d/o.txt" 2>/dev/null
         case "$f" in
             */cases/*) cmp -s "$d/o.txt" "${f%.txt}.expect" || n=$((n+1)) ;;
-            *accounts.settings) cmp -s "$d/o.txt" tools/settingsman/accounts.expect || n=$((n+1)) ;;
+            *builtin.settings) cmp -s "$d/o.txt" tools/settingsman/builtin.expect || n=$((n+1)) ;;
             *) b=$(basename "$f" .txt); cmp -s "$d/o.txt" "$T/$b.py" || n=$((n+1)) ;;
         esac
     done

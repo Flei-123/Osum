@@ -811,9 +811,9 @@ echo "== 15. Einstellungen -> Konten: 'Adressbuch verbinden' (r125) =="
 # Gemessen wird die VERDRAHTUNG: Knopf, Flagge, jedes Wort, jeder Schluessel
 # in beiden Sprachen, und dass die Woerter dieselben sind, die konto sagt.
 SF=kernel/user/settings.fi
-# r136: die Seite kommt aus dem SETTINGS-Manifest (kernel/user/settings.d/accounts.settings); der Knopf ist dort eine
+# r136: die Seite kommt aus dem SETTINGS-Manifest (kernel/user/settings.d/builtin.settings); der Knopf ist dort eine
 # Aktion `book` mit dem Katalogschluessel konto.ui.book, und die Bindung `book` -> K_BKBOOK steht in settings.fi.
-num "Knopf K_BKBOOK in der Konten-Seite (Manifest-Aktion + Bindung)" "$(( $(grep -c '^field book action konto.ui.book$' kernel/user/settings.d/accounts.settings) + $(grep -c 'if ix == 7 { return K_BKBOOK }' $SF) ))" eq 2
+num "Knopf K_BKBOOK in der Konten-Seite (Manifest-Aktion + Bindung)" "$(( $(grep -c '^field book action konto.ui.book$' kernel/user/settings.d/builtin.settings) + $(grep -c 'if ix == 7 { return K_BKBOOK }' $SF) ))" eq 2
 num "der Knopf loest den Gerätefluss aus (selber Zweig wie 'Mit Code anmelden')" "$(grep -c 'id == K_BKDEV || id == K_BKBOOK' $SF)" eq 1
 num "nur der neue Knopf haengt --exchange an" "$(grep -c 'if id == K_BKBOOK {' $SF)" ge 2
 num "Schalter --exchange wird als Argument gesetzt" "$(grep -c '"--exchange' $SF)" eq 1
@@ -834,7 +834,7 @@ for K in konto.ui.book konto.ui.book.state konto.ui.book.on konto.ui.book.off ko
          konto.ui.book.offline konto.ui.book.refused konto.ui.book.noscope konto.ui.book.failed; do
     D=$(grep -a "^$K = " locale/de/messages | sed 's/^[^=]*= //'); E=$(grep -a "^$K = " locale/en/messages | sed 's/^[^=]*= //')
     if [ -n "$D" ] && [ -n "$E" ] && [ "$D" != "$E" ]; then ok "Meldung $K: de + en, verschieden"; else bad "Meldung $K fehlt oder ist unuebersetzt"; fi
-    num "Schluessel $K wird von der Seite benutzt" "$(( $(grep -c "\"$K\\\\0" $SF) + $(grep -c -F -w "$K" kernel/user/settings.d/accounts.settings) ))" ge 1
+    num "Schluessel $K wird von der Seite benutzt" "$(( $(grep -c "\"$K\\\\0" $SF) + $(grep -c -F -w "$K" kernel/user/settings.d/builtin.settings) ))" ge 1
 done
 # dieselbe Hinweis-Meldung wie im Ruecken (Vergleich Text gegen Text)
 HS=$(grep -c '"konto.hint.noscope' $SF); HB=$(grep -c '"konto.hint.noscope' kernel/app/anb_fleitec.fi)
