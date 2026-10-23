@@ -201,6 +201,13 @@ static mut nlive: u64 = 0
 static mut c_ticks: [u64; 8] = [0 as u64; 8]
 static mut c_idle: [u64; 8] = [0 as u64; 8]
 static mut c_pm: [u64; 8] = [0 as u64; 8]
+static mut c_cyc: [u64; 8] = [0 as u64; 8]
+static mut c_icyc: [u64; 8] = [0 as u64; 8]
+static mut c_up: [u64; 8] = [1 as u64; 8]
+static mut ncpu_on: u64 = 1
+static mut u_onl: [u8; 10] = " (online \0"
+static mut u_clo: [u8; 2] = ")\0"
+static mut u_off: [u8; 8] = "offline\0"
 static mut ncpu: u64 = 1
 
 static mut h_cpu: [u64; 60] = [0 as u64; 60]
@@ -708,10 +715,24 @@ fn sample(first: bool) {
         n = 1
     }
     ncpu = n
-    var d_all: u64 = 0
-    var d_busy: u64 = 0
+    // W-SMP2: TIME-weighted. An idle application core ticks at 10 Hz, a busy one at 100 Hz, so adding up tick deltas weighted the
+    // idle cores ~10x less than their wall time. Each online core now counts with its TSC-cycle delta (kernel CS_CYC / CS_IDLECYC),
+    // the overall value is the mean over the ONLINE cores' busy shares, and an offline core is shown as "offline" (c_up = 0).
+    var sum_pm: u64 = 0
+    var n_on: u64 = 0
     var i: u64 = 0
     while i < ncpu {
+        let up: u64 = cpustat(i, ulib.CS_UP)
+        c_up[(i) as usize] = up
+        let cy: u64 = cpustat(i, ulib.CS_CYC)
+        let icy: u64 = cpustat(i, ulib.CS_IDLECYC)
+        let dc: u64 = sub(cy, c_cyc[(i) as usize])
+        var dic: u64 = sub(icy, c_icyc[(i) as usize])
+        if dic > dc {
+            dic = dc
+        }
+        c_cyc[(i) as usize] = cy
+        c_icyc[(i) as usize] = icy
         let t: u64 = cpustat(i, ulib.CS_TICKS)
         let idl: u64 = cpustat(i, ulib.CS_IDLE)
         let dt: u64 = sub(t, c_ticks[(i) as usize])
@@ -721,15 +742,22 @@ fn sample(first: bool) {
         }
         c_ticks[(i) as usize] = t
         c_idle[(i) as usize] = idl
-        if !first && dt > 0 {
-            c_pm[(i) as usize] = (dt - di) * 1000 / dt
+        if up == 0 {
+            c_pm[(i) as usize] = 0
+        } else {
+            n_on = n_on + 1
+            if !first && dc > 0 {
+                c_pm[(i) as usize] = (dc - dic) * 1000 / dc
+            } else if !first && dt > 0 {
+                c_pm[(i) as usize] = (dt - di) * 1000 / dt
+            }
+            sum_pm = sum_pm + c_pm[(i) as usize]
         }
-        d_all = d_all + dt
-        d_busy = d_busy + (dt - di)
         i = i + 1
     }
-    if !first && d_all > 0 {
-        cpu_pm = d_busy * 1000 / d_all
+    ncpu_on = n_on
+    if !first && n_on > 0 {
+        cpu_pm = sum_pm / n_on
     }
 
     // Der Speicher: Rahmen, wie `top` sie zaehlt. Ein Rahmen ist 4 KiB.
@@ -1617,7 +1645,12 @@ fn stats_make() {
         stat_add(msg.get(ptr((&k_s_procs[0]) as u64)), tp)
         let _y: u64 = tmfmt.put_time(tp, 0, up_ms)
         stat_add(msg.get(ptr((&k_up[0]) as u64)), tp)
-        let _z: u64 = tmfmt.put_num(tp, 0, ncpu)
+        var _zb: u64 = tmfmt.put_num(tp, 0, ncpu)
+        if ncpu_on < ncpu {
+            _zb = tmfmt.put_str(tp, _zb, ptr((&u_onl[0]) as u64))
+            _zb = tmfmt.put_num(tp, _zb, ncpu_on)
+            _zb = tmfmt.put_str(tp, _zb, ptr((&u_clo[0]) as u64))
+        }
         stat_add(msg.get(ptr((&k_cores[0]) as u64)), tp)
         let _s1: u64 = tmfmt.put_str(tp, 0, ptr((&u_dash[0]) as u64))
         stat_add(msg.get(ptr((&k_s_sw[0]) as u64)), tp)
@@ -1802,6 +1835,9 @@ fn cores_draw(cx: u64, cy: u64, cw: u64, ch: u64) {
             var nb: [u8; 24] = [0 as u8; 24]
             var b: u64 = tmfmt.put_pm((&nb[0]) as u64, 0, c_pm[(c) as usize])
             b = tmfmt.put_str((&nb[0]) as u64, b, ptr((&u_pct[0]) as u64))
+            if c_up[(c) as usize] == 0 {
+                b = tmfmt.put_str((&nb[0]) as u64, 0, ptr((&u_off[0]) as u64))
+            }
             meter(cx + 14, cy + 10 + c * 24, sub(cw, 28), lab, c_pm[(c) as usize], (&nb[0]) as u64,
                 fuiscene.R_ACCENT)
             c = c + 1
