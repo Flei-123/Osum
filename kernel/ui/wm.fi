@@ -15203,6 +15203,19 @@ fn on_mouse_btn(state: u64, btn: u64) {
             ss(state, S_DRAG, 0)
             drag_end(state, i, x, y)
         } else {
+            if (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 && wg(state, i, W_NODE) == 0 && !fb.nosnap_an(state) {
+                let ddx: i64 = x - win_x(state, i) - gs(state, S_DRAGX) as i64
+                let ddy: i64 = y - win_y(state, i) - gs(state, S_DRAGY) as i64
+                let thr: i64 = 5 * uisc(state) as i64
+                if ddx > thr || ddx < 0 - thr || ddy > thr || ddy < 0 - thr {
+                    if !float_unmax(state, i, x, y) {
+                        move_win(state, i, x - gs(state, S_DRAGX) as i64,
+                            y - gs(state, S_DRAGY) as i64)
+                    }
+                    drag_hover(state, i, x, y)
+                }
+                return
+            }
             move_win(state, i, x - gs(state, S_DRAGX) as i64,
                 y - gs(state, S_DRAGY) as i64)
             drag_hover(state, i, x, y)
@@ -20376,8 +20389,189 @@ fn fit_rect(state: u64, i: u64, r: u64) -> bool {
     return true
 }
 
+// W-WIN11: SNAP OF A FLOATING WINDOW (Windows 11 behaviour). Dragging the title bar to a screen edge shows a preview and the drop
+// docks the window: left / right edge = half, top edge = maximize, a corner = quarter. Codes in S_DROPE: 1 left, 2 right, 3 top
+// (maximize), 9 top-left, 10 top-right, 11 bottom-left, 12 bottom-right (5..8 are the halves of a non-primary head, `snap_part`).
+fn snap_rect(wk: u64, code: u64) -> u64 {
+    let x: u64 = hw_x(wk)
+    let y: u64 = hw_y(wk)
+    let w: u64 = hw_w(wk)
+    let h: u64 = hw_h(wk)
+    let hw2: u64 = w / 2
+    let hh2: u64 = h / 2
+    if code == 1 {
+        return (x << 48) | (y << 32) | (hw2 << 16) | h
+    }
+    if code == 2 {
+        return ((x + w - hw2) << 48) | (y << 32) | (hw2 << 16) | h
+    }
+    if code == 9 {
+        return (x << 48) | (y << 32) | (hw2 << 16) | hh2
+    }
+    if code == 10 {
+        return ((x + w - hw2) << 48) | (y << 32) | (hw2 << 16) | hh2
+    }
+    if code == 11 {
+        return (x << 48) | ((y + h - hh2) << 32) | (hw2 << 16) | hh2
+    }
+    if code == 12 {
+        return ((x + w - hw2) << 48) | ((y + h - hh2) << 32) | (hw2 << 16) | hh2
+    }
+    return wk
+}
+
+fn snap_ok(state: u64, i: u64) -> bool {
+    if fb.nosnap_an(state) || !valid(state, i) {
+        return false
+    }
+    if !deko(state, i) || wg(state, i, W_LAYER) != L_NORMAL || wg(state, i, W_NODE) != 0 {
+        return false
+    }
+    return true
+}
+
+// the zone code (0 = none) of the pointer on the work area `wk`; the flags say which edges are real screen edges
+fn snap_zone(state: u64, wk: u64, x: i64, y: i64, nl: bool, nr: bool, nt: bool, nb: bool) -> u64 {
+    let wx0: i64 = hw_x(wk) as i64
+    let wy0: i64 = hw_y(wk) as i64
+    let sw: i64 = hw_w(wk) as i64
+    let sh: i64 = hw_h(wk) as i64
+    let rand: i64 = 2 * uisc(state) as i64
+    var cs: i64 = 64 * uisc(state) as i64
+    if cs > sh / 4 {
+        cs = sh / 4
+    }
+    if x < wx0 + rand && nl {
+        if y < wy0 + cs {
+            return 9
+        }
+        if y >= wy0 + sh - cs {
+            return 11
+        }
+        return 1
+    }
+    if x >= wx0 + sw - rand && nr {
+        if y < wy0 + cs {
+            return 10
+        }
+        if y >= wy0 + sh - cs {
+            return 12
+        }
+        return 2
+    }
+    if y < wy0 + rand && nt {
+        if x < wx0 + cs {
+            return 9
+        }
+        if x >= wx0 + sw - cs {
+            return 10
+        }
+        return 3
+    }
+    if y >= wy0 + sh - rand && nb {
+        if x < wx0 + cs {
+            return 11
+        }
+        if x >= wx0 + sw - cs {
+            return 12
+        }
+    }
+    return 0
+}
+
+fn float_hover(state: u64, i: u64, x: i64, y: i64) {
+    preview_damage(state)
+    ss(state, S_PVON, 0)
+    ss(state, S_DROPE, 0)
+    if !snap_ok(state, i) {
+        return
+    }
+    var wk: u64 = (gs(state, S_WORK_X) << 48) | (gs(state, S_WORK_Y) << 32) | (gs(state, S_WORK_W) << 16) | gs(state, S_WORK_H)
+    var nl: bool = true
+    var nr: bool = true
+    var nt: bool = true
+    var nb: bool = true
+    if hd_multi(state) {
+        let hd: u64 = hd_at(state, x, y)
+        if hd >= HD_MAX {
+            return
+        }
+        wk = head_work(state, hd)
+        let hx: i64 = hd_x(state, hd) as i64
+        let hy: i64 = hd_y(state, hd) as i64
+        nl = hd_at(state, hx - 1, y) == HD_MAX
+        nr = hd_at(state, hx + hd_w(state, hd) as i64, y) == HD_MAX
+        nt = hd_at(state, x, hy - 1) == HD_MAX
+        nb = hd_at(state, x, hy + hd_h(state, hd) as i64) == HD_MAX
+    }
+    let code: u64 = snap_zone(state, wk, x, y, nl, nr, nt, nb)
+    if code == 0 {
+        return
+    }
+    let r: u64 = snap_rect(wk, code)
+    ss(state, S_DROPE, code)
+    set_preview(state, hw_x(r), hw_y(r), hw_w(r), hw_h(r))
+    preview_damage(state)
+}
+
+// the drop: dock the window on the preview rectangle (the way back is saved like `maximize` does, once)
+fn float_drop(state: u64, i: u64, code: u64) {
+    if !snap_ok(state, i) {
+        return
+    }
+    let r: u64 = (gs(state, S_PVX) << 48) | (gs(state, S_PVY) << 32) | (gs(state, S_PVW) << 16) | gs(state, S_PVH)
+    let f: u64 = wg(state, i, W_FLAGS)
+    if code == 3 {
+        let _m: bool = maximize(state, i, true)
+        let _w: bool = fit_work(state, i)
+        return
+    }
+    if (f & F_MAXIMIZED) == 0 {
+        let sx: u64 = ((win_x(state, i) + 4096) as u64) & 0xFFFF
+        let sy: u64 = ((win_y(state, i) + 4096) as u64) & 0xFFFF
+        wsv(state, i, W_SAVE, (sx << 48) | (sy << 32)
+            | ((wg(state, i, W_W) & 0xFFFF) << 16)
+            | (wg(state, i, W_H) & 0xFFFF))
+        wsv(state, i, W_FLAGS, f | F_MAXIMIZED)
+    }
+    if !fit_rect(state, i, r) {
+        wsv(state, i, W_FLAGS, f)
+        return
+    }
+    damage_all(state)
+}
+
+// a maximized / snapped window that is dragged far enough comes back to its old size, the pointer keeping its place on the title bar
+fn float_unmax(state: u64, i: u64, x: i64, y: i64) -> bool {
+    if fb.nosnap_an(state) || !valid(state, i) || gs(state, S_TILE) != 0 || wg(state, i, W_NODE) != 0 {
+        return false
+    }
+    if (wg(state, i, W_FLAGS) & F_MAXIMIZED) == 0 || wg(state, i, W_LAYER) != L_NORMAL {
+        return false
+    }
+    if (wg(state, i, W_SAVE) & 0xFFFFFFFF) == 0 {
+        return false
+    }
+    let ow: i64 = outer_w(state, i) as i64
+    let off: i64 = x - win_x(state, i)
+    let dy: i64 = gs(state, S_DRAGY) as i64
+    if !maximize(state, i, false) {
+        return false
+    }
+    let nw: i64 = outer_w(state, i) as i64
+    var nx: i64 = x
+    if ow > 0 {
+        nx = x - off * nw / ow
+    }
+    move_win(state, i, nx, y - dy)
+    ss(state, S_DRAGX, (x - win_x(state, i)) as u64)
+    damage_all(state)
+    return true
+}
+
 fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
     if gs(state, S_TILE) == 0 {
+        float_hover(state, i, x, y)
         return
     }
     preview_damage(state)
@@ -20669,6 +20863,11 @@ fn drag_end(state: u64, i: u64, x: i64, y: i64) {
     serial.nl()
     rumpf_neu(state, i)
     if gs(state, S_TILE) == 0 {
+        let fe: u64 = gs(state, S_DROPE)
+        if fe != 0 {
+            float_drop(state, i, fe)
+        }
+        ss(state, S_DROPE, 0)
         ss(state, S_DRAGT, 0)
         return
     }
