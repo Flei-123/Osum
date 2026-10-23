@@ -382,8 +382,14 @@ mutate load-keeps-catalogue 'reset()
     return add_man(buf, len)' 'return add_man(buf, len)'
 mutate warns-carry 'warns = 0
     too_many = 0
-    last_field = 0' 'too_many = 0
-    last_field = 0'
+    last_field = 0
+    pend_cond = 0
+    pend_neg = 0
+    cur_buf = buf' 'too_many = 0
+    last_field = 0
+    pend_cond = 0
+    pend_neg = 0
+    cur_buf = buf'
 mutate bind-needs-field 'if nw != 2 || was_field == 0 {' 'if nw != 2 {'
 mutate bind-read-twice 'if wr == 0 && it_read[i] != 0 {' 'if false {'
 mutate bind-write-twice 'if wr == 1 && it_write[i] != 0 {' 'if false {'
