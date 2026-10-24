@@ -73,6 +73,13 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
+## Stick 9 HP (24.10.2026, Baustand 7f8c161e = main mit APMG-Fix)
+
+- **Datei:** `orientos-usb-hp-20261024-7f8c161e.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `6df57b6cd58d6b058336f8323ccf5067dbdb6e747b208d6ced37cae5be1db741`. Ersetzt Stick 8 (SHA 64881751...).
+- **Neu gegenueber Stick 8:** WLAN-8265 (Familie 8000) schreibt keine APMG-Register mehr (0x300C ist dort RELEASE_CPU_RESET -> die alten Schreibzugriffe liessen CPU2 haengen), setzt CSR_GIO_REG L0S_DISABLED wie Linux.
+- **Ehrlich:** Am echten 8265 UNVERIFIZIERT.
+- **Foto-Checkliste:** `cat /proc/wlan` -- alle Zeilen (phase, err, failed_at, fail_alive, fail_regs, fail_fh). Laeuft WLAN: Einstellungen > WLAN verbinden, dann nochmal `cat /proc/wlan`.
+
 ## Stick 8 HP (24.10.2026, Baustand a494ab5d = main mit ALIVE-Fix)
 
 - **Datei:** `orientos-usb-hp-20261024-a494ab5d.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `648817516761259ae77f2f6d1c5bd33fe843380e00b2ed501283f5d98cfb645c`. Ersetzt Stick 7 (SHA 4daaae3b...).
