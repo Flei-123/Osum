@@ -114,7 +114,8 @@ export {
     // Die Lampen der Tastatur und der Herzschlag darueber.
     set_leds, led_service, beat_leds, leds_sent, leds_fail, leds_last,
     leds_try, kbd_dev, mouse_dev,
-    dev_errs, dev_heal, dev_epstate, dev_slot, dev_intdci, heilungen,
+    dev_errs, dev_heal, dev_epstate, dev_slot, dev_intdci, heilungen, ch_diag,
+    CK_PRESENT, CK_VID, CK_PID, CK_SPEED, CK_ROUTE, CK_NCFG, CK_CFG, CK_RC, CK_CLASS, CK_SUB, CK_PROTO, CK_IFACE, CK_INDCI, CK_OUTDCI, CK_INT, CK_BULKMPS, CK_STEP, CK_RESULT, CK_SET,
     without_space,
     // Aufzaehlen NICHT mehr aus dem Zeitgeber.
     port_watch, hotplug_work, pending,
@@ -478,6 +479,11 @@ const S_NOECM: u64 = 0x1E8 // 1 = CDC-ECM is refused (word `rndisonly`)
 // r813: isochronous test bed (word `isoctest`). One audio streaming alt setting is remembered here (packed, see `iso_data`).
 const S_CHOK: u64 = 0x1D8 // 1 = a vendor-class FF/FF/FF interface may be picked in `wanted` (WCH dongle)
 const S_ISOOK: u64 = 0x1F0 // 1 = the audio control interface may be picked in `wanted`
+const S_CHDEV: u64 = 0x190 // device index + 1 of the WCH dongle (0 = none)
+const S_CHRC: u64 = 0x198 // SET_CONFIGURATION result of the WCH dongle (signed)
+const S_CHSTEP: u64 = 0x1A0 // bring-up step reached | result << 8 (1 ok, 2 failed)
+const S_CHINT: u64 = 0x1A8 // interrupt endpoint of the WCH dongle: dci | mps << 8 | interval << 24
+const S_CHSET: u64 = 0x1B0 // 1 once SET_CONFIGURATION was sent to the WCH dongle
 const S_ISOA: u64 = 0x1F8 // dci | iface << 8 | alt << 16 | binterval << 24 | wMaxPacketSize << 32 (0 = none found)
 const ISO_BUF_OFF: u64 = 0x56A00 // 8 packet buffers of 192 bytes (48 kHz, 16 bit, stereo, 1 ms)
 const ISO_BUFS: u64 = 8
@@ -1549,13 +1555,25 @@ fn configure(state: u64, d: u64) -> bool {
     if ax {
         s(state, S_AXOK, 1)
     }
+    let noecm0: u64 = g(state, S_NOECM)
+    let prefer_vendor: bool = ch397.supported(dg(state, d, D_VID), dg(state, d, D_PID))
+    if prefer_vendor {
+        s(state, S_NOECM, 1)
+    }
     var total: u64 = walk_configs(state, d, buf)
+    if prefer_vendor {
+        s(state, S_NOECM, noecm0)
+        if total != 0 && dg(state, d, D_DRIVER) == DRV_NONE {
+            total = walk_configs(state, d, buf)
+        }
+    }
     s(state, S_CHOK, 0)
     s(state, S_AXOK, 0)
     if total == 0 {
         return false
     }
     if dg(state, d, D_DRIVER) == DRV_CH336 {
+        s(state, S_CHINT, dg(state, d, D_INTDCI) | (dg(state, d, D_INTMPS) << 8) | (dg(state, d, D_INTIVL) << 24))
         ds(state, d, D_INTDCI, 0)
         if ax {
             ds(state, d, D_DRIVER, DRV_AX88772)
@@ -1600,11 +1618,62 @@ fn configure(state: u64, d: u64) -> bool {
     if !endpoints(state, d) {
         return false
     }
-    if xhci.control(state, slot, 0, REQ_SET_CONFIGURATION,
-        dg(state, d, D_CONFIG), 0, 0, 0, false) < 0 {
+    let src: i64 = xhci.control(state, slot, 0, REQ_SET_CONFIGURATION,
+        dg(state, d, D_CONFIG), 0, 0, 0, false)
+    if dg(state, d, D_DRIVER) == DRV_CH336 {
+        s(state, S_CHSET, 1)
+        s(state, S_CHRC, src as u64)
+    }
+    if src < 0 {
         return false
     }
     return true
+}
+
+const CK_PRESENT: u64 = 0
+const CK_VID: u64 = 1
+const CK_PID: u64 = 2
+const CK_SPEED: u64 = 3
+const CK_ROUTE: u64 = 4
+const CK_NCFG: u64 = 5
+const CK_CFG: u64 = 6
+const CK_RC: u64 = 7
+const CK_CLASS: u64 = 8
+const CK_SUB: u64 = 9
+const CK_PROTO: u64 = 10
+const CK_IFACE: u64 = 11
+const CK_INDCI: u64 = 12
+const CK_OUTDCI: u64 = 13
+const CK_INT: u64 = 14
+const CK_BULKMPS: u64 = 15
+const CK_STEP: u64 = 16
+const CK_RESULT: u64 = 17
+const CK_SET: u64 = 18
+
+fn ch_diag(state: u64, key: u64) -> u64 {
+    let dv: u64 = g(state, S_CHDEV)
+    if key == CK_PRESENT { return dv }
+    if dv == 0 { return 0 }
+    let d: u64 = dv - 1
+    if key == CK_VID { return dg(state, d, D_VID) }
+    if key == CK_PID { return dg(state, d, D_PID) }
+    if key == CK_SPEED { return dg(state, d, D_SPEED) }
+    if key == CK_ROUTE { return dg(state, d, D_ROUTE) }
+    if key == CK_NCFG { return dg(state, d, D_NCFG) }
+    if key == CK_CFG { return dg(state, d, D_CONFIG) }
+    if key == CK_RC { return g(state, S_CHRC) }
+    if key == CK_CLASS { return dg(state, d, D_CLASS) }
+    if key == CK_SUB { return dg(state, d, D_SUB) }
+    if key == CK_PROTO { return dg(state, d, D_PROTO) }
+    if key == CK_IFACE { return dg(state, d, D_IFACE) }
+    if key == CK_INDCI { return dg(state, d, D_INDCI) }
+    if key == CK_OUTDCI { return dg(state, d, D_OUTDCI) }
+    if key == CK_INT { return g(state, S_CHINT) }
+    if key == CK_BULKMPS { return dg(state, d, D_BULKMPS) }
+    if key == CK_STEP { return g(state, S_CHSTEP) & 255 }
+    if key == CK_RESULT { return (g(state, S_CHSTEP) >> 8) & 255 }
+    if key == CK_SET { return g(state, S_CHSET) }
+    return 0
 }
 
 // ======================================================= RUNDE HIDWEG
@@ -2554,6 +2623,8 @@ fn ch336_start(state: u64, d: u64) {
     let slot: u64 = dg(state, d, D_SLOT)
     let buf: u64 = state + DESC_OFF
     var step: u64 = 1
+    s(state, S_CHDEV, d + 1)
+    s(state, S_CHSTEP, 1)
     zero(buf, 64)
     var ok: bool = xhci.control(state, slot, 0xC0, ch397.REQ_INFO, 0, 0, 8, buf, true) >= 8
     xhci.udelay(state, 10000)
@@ -2568,6 +2639,7 @@ fn ch336_start(state: u64, d: u64) {
         }
         serial.nl()
         step = 2
+        s(state, S_CHSTEP, 2)
         zero(buf, 64)
         let lo: u64 = ch397.REG_MAC_L
         ok = xhci.control(state, slot, 0xC0, ch397.REQ_READ_REG, lo & 0xFFFF, lo >> 16, 4, buf, true) >= 4
@@ -2590,12 +2662,19 @@ fn ch336_start(state: u64, d: u64) {
     }
     if ok {
         step = 3
+        s(state, S_CHSTEP, 3)
         ok = usbnet.attach_ch336(state, slot, dg(state, d, D_INDCI), dg(state, d, D_OUTDCI),
             dg(state, d, D_BULKMPS), mac)
     }
     if ok {
         step = 4
+        s(state, S_CHSTEP, 4)
         ok = usbnet.ch_bringup(state, fwver)
+    }
+    if ok {
+        s(state, S_CHSTEP, 4 | (1 << 8))
+    } else {
+        s(state, S_CHSTEP, step | (2 << 8))
     }
     if !ok {
         serial.puts((&s_bad[0]) as u64)
