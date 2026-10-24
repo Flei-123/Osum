@@ -81,14 +81,17 @@ party_n() { grep -ac '^partyrun: start /bin/echo target=' "$S"; }
 dlg_n() { grep -ac 'wm: trusted dialog up no=' "$S"; }
 ans_n() { grep -ac 'wm: trusted dialog answer=1 ' "$S"; }
 answer_dialog() {
-    local i a0
-    for i in $(seq 1 40); do [ "$(dlg_n)" -gt "$1" ] && break; sleep 1; done
-    [ "$(dlg_n)" -gt "$1" ] || return 1
+    local i try a0
     a0=$(ans_n)
+    for i in $(seq 1 40); do [ "$(dlg_n)" -gt "$a0" ] && break; sleep 1; done
+    [ "$(dlg_n)" -gt "$a0" ] || return 1
     sleep 2
-    printf 'taste j\nwarte 3\n' > "$OUT/dj"
-    drive "$OUT/dj"
-    [ "$(ans_n)" -gt "$a0" ]
+    for try in 1 2 3 4; do
+        printf 'taste j\nwarte 3\n' > "$OUT/dj"
+        drive "$OUT/dj"
+        for i in 1 2 3 4 5 6; do [ "$(ans_n)" -gt "$a0" ] && return 0; sleep 1; done
+    done
+    return 1
 }
 
 # path A: friend -> Message (chat) -> Join (critical: the trusted dialog asks, the probe answers it)
@@ -109,7 +112,7 @@ for i in $(seq 1 60); do [ "$(party_n)" -gt "$n0" ] && break; sleep 1; done
 [ "$(party_n)" -gt "$n0" ] && ok "path A: Join starts the game through partyrun" || bad "path A: no partyrun start after Join"
 grep -aq '^partyrun: start /bin/echo target=game://lobby/88' "$S" && ok "path A: the target of the accepted answer is handed over" || bad "path A: wrong or missing target"
 
-# path B: back -> Pending tab -> Accept the open invitation
+# path B: back -> Pending tab -> Accept the open invitation (the banner lists Accept, Decline last)
 n1=$(party_n)
 cat > "$OUT/d3" <<EOT
 klickauf fdnth2x0
@@ -119,9 +122,20 @@ warte 4
 foto 05-pending
 EOT
 drive "$OUT/d3"
-echo "--- rects of the pending page ---"; grep -a '^freunde: rect ' "$S" | tail -n 8 | cut -c1-120
+grep -aq '^freunde: invite banner=1' "$S" && ok "path B: the open invitation shows as a banner" || bad "path B: no invitation banner"
+cat > "$OUT/d4" <<EOT
+klickauf fdnth2x-2
+warte 3
+foto 06-accept
+EOT
+drive "$OUT/d4"
+grep -aq '^freunde: key 41' "$S" && ok "path B: the Accept button reaches the bar" || bad "path B: no Accept key at the bar"
+answer_dialog && ok "path B: the trusted dialog took the yes" || bad "path B: no trusted dialog answered"
+for i in $(seq 1 60); do [ "$(party_n)" -gt "$n1" ] && break; sleep 1; done
+[ "$(party_n)" -gt "$n1" ] && ok "path B: Accept starts the game through partyrun" || bad "path B: no partyrun start after Accept"
+grep -aq '^partyrun: start /bin/echo target=game://lobby/echo' "$S" && ok "path B: the target of the accepted invitation is handed over" || bad "path B: wrong or missing target"
 if [ "$fail" != 0 ]; then
-    echo "--- diagnosis: launcher/freunde lines ---"; grep -aE '^(launcher|freunde|social): ' "$S" | head -30 | cut -c1-160
+    echo "--- diagnosis: freunde/partyrun lines ---"; grep -aE '^(freunde|partyrun): ' "$S" | grep -v ' rect ' | tail -n 40 | cut -c1-160
     echo "--- diagnosis: drive.log ---"; tail -n 25 "$OUT/drive.log" 2>/dev/null | cut -c1-160
 fi
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null

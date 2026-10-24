@@ -81,14 +81,17 @@ n0=$(grep -ac 'settings: stand' "$S")
 dlg_n() { grep -ac 'wm: trusted dialog up no=' "$S"; }
 ans_n() { grep -ac 'wm: trusted dialog answer=1 ' "$S"; }
 answer_dialog() {
-    local i a0
+    local i try a0
     for i in $(seq 1 40); do [ "$(dlg_n)" -gt "$1" ] && break; sleep 1; done
     [ "$(dlg_n)" -gt "$1" ] || return 1
     a0=$(ans_n)
     sleep 2
-    printf 'taste j\nwarte 3\n' > "$OUT/dj"
-    drive "$OUT/dj"
-    [ "$(ans_n)" -gt "$a0" ]
+    for try in 1 2 3 4; do
+        printf 'taste j\nwarte 3\n' > "$OUT/dj"
+        drive "$OUT/dj"
+        for i in 1 2 3 4 5 6; do [ "$(ans_n)" -gt "$a0" ] && return 0; sleep 1; done
+    done
+    return 1
 }
 pf_since() { tail -n +"$(( $1 + 1 ))" "$S" | sed -n 's/^settings: rect name=\(pf[a-z][a-z]\) .*/\1/p' | awk '!s[$0]++'; }
 ask_and_answer() {
