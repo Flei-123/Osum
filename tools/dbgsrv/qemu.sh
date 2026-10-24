@@ -19,7 +19,7 @@ P1=$((47000 + ($$ % 400) * 2)); P2=$((P1 + 1))
 PROGS="init sh sleep echo dhcp dbgsrv lspci log wlanctl cat"
 
 bash tools/sync/build.sh "$T/bin" 0 $PROGS > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; echo "DBGSRV-QEMU: build failed"; exit 1; }
-bash tools/build-kernel.sh "$T/k.mb" --gui off > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; echo "DBGSRV-QEMU: kernel build failed"; exit 1; }
+bash tools/build-kernel.sh "$T/k.mb" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; echo "DBGSRV-QEMU: kernel build failed"; exit 1; }
 
 printf '%s\n' "$TOKEN" > "$T/token"
 cat > "$T/inittab" <<'TAB'
