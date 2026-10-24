@@ -6,6 +6,8 @@ import wlan.iwl_ops
 import wlan.iwl_buf
 import wlan.join
 import wlan.dhcp_link
+import wlan.wlanconf
+import wlan.autojoin
 
 const LOG_MAX: usize = 32
 const LOG_SLOT: usize = 2700
@@ -40,6 +42,7 @@ static mut l_ack: usize = 0
 static mut data_n: usize = 0
 static mut txtb: [u8; 6000] = [0; 6000]
 static mut tlen: usize = 0
+static mut conf_buf: [u8; 512] = [0; 512]
 
 fn tch(c: u64) {
     if tlen < 5990 {
@@ -221,9 +224,17 @@ fn dump_log() {
 
 fn idle(ctx: u64) -> u64 { return 0 }
 
-fn run_join(line: u64, len: usize, at: *mut usize) {
-    let sl: i64 = field_hex(line, len, at, (&ssid[0]) as u64)
-    let pl: i64 = field_hex(line, len, at, (&pmk[0]) as u64)
+fn run_join(line: u64, len: usize, at: *mut usize, conf_mode: bool) {
+    var sl: i64 = 1
+    var pl: i64 = 32
+    var cl: i64 = 0
+    if conf_mode {
+        cl = field_hex(line, len, at, (&conf_buf[0]) as u64)
+        if cl < 0 { cl = 0 }
+    } else {
+        sl = field_hex(line, len, at, (&ssid[0]) as u64)
+        pl = field_hex(line, len, at, (&pmk[0]) as u64)
+    }
     let nl: i64 = field_hex(line, len, at, (&snonce[0]) as u64)
     l_beacon = field_hex(line, len, at, (&s_beacon[0]) as u64) as usize
     l_auth = field_hex(line, len, at, (&s_auth[0]) as u64) as usize
@@ -245,13 +256,33 @@ fn run_join(line: u64, len: usize, at: *mut usize) {
     iwl_ops.ops_set_address(&o, (&mac[0]) as u64)
     if !iwl_ops.ops_attach(&g, &o, 0, t_submit, t_poll) { tlit("fail attach"); temit(); return }
     join.join_idle_set(&j, 0, idle)
-    join.join_ssid_set(&j, (&ssid[0]) as u64, sl as usize)
-    join.join_pmk_set(&j, (&pmk[0]) as u64)
     join.join_snonce_set(&j, (&snonce[0]) as u64)
+    if !conf_mode {
+        join.join_ssid_set(&j, (&ssid[0]) as u64, sl as usize)
+        join.join_pmk_set(&j, (&pmk[0]) as u64)
+    }
     rx_phy(60, 6)
     rx_mpdu((&s_beacon[0]) as u64, l_beacon)
     rx_scan_done(1, 1)
-    let rc: i64 = join.join_run(&j, &s, &g, &o)
+    var au: autojoin.Auto = autojoin.auto_new()
+    var rc: i64 = 0
+    var ar: i64 = 0
+    if conf_mode {
+        ar = autojoin.auto_attempt(&au, (&conf_buf[0]) as u64, cl as usize, &j, &s, &g, &o, idle, 0, XID, 100)
+        rc = ar
+        if ar <= -200 && ar >= -204 { rc = 0 }
+        tlit("auto state ")
+        tnum(autojoin.auto_state(&au))
+        tlit(" rc ")
+        tsigned(autojoin.auto_rc(&au))
+        tlit(" tries ")
+        tnum(autojoin.auto_tries(&au))
+        tlit(" wait ")
+        tnum(autojoin.auto_wait_until(&au))
+        temit()
+    } else {
+        rc = join.join_run(&j, &s, &g, &o)
+    }
     tlit("join rc ")
     tsigned(rc)
     tlit(" detail ")
@@ -269,8 +300,15 @@ fn run_join(line: u64, len: usize, at: *mut usize) {
     temit()
     var lease: dhcp_link.Lease = dhcp_link.lease_new()
     var dr: i64 = 0
+    if conf_mode {
+        lease = *autojoin.auto_lease(&au)
+        dr = ar
+        if ar > -200 || ar < -204 { dr = 0 }
+    }
     if rc == 0 {
-        dr = dhcp_link.dhcp_acquire(&s, &g, idle, 0, XID, &lease)
+        if !conf_mode {
+            dr = dhcp_link.dhcp_acquire(&s, &g, idle, 0, XID, &lease)
+        }
         tlit("dhcp rc ")
         tsigned(dr)
         tlit(" ip ")
@@ -296,9 +334,71 @@ fn run_join(line: u64, len: usize, at: *mut usize) {
     temit()
 }
 
+fn run_conf(line: u64, len: usize, at: *mut usize) {
+    let cl: i64 = field_hex(line, len, at, (&conf_buf[0]) as u64)
+    var c: wlanconf.Conf = wlanconf.conf_new()
+    var rc: i64 = 0
+    if cl < 0 { rc = wlanconf.E_CONF_EMPTY } else { rc = wlanconf.conf_parse((&conf_buf[0]) as u64, cl as usize, &c) }
+    var kr: i64 = -1
+    if rc == 0 { kr = wlanconf.conf_pmk(&c) }
+    tlit("conf rc ")
+    tsigned(rc)
+    tlit(" ssidlen ")
+    tnum(wlanconf.conf_ssid_len(&c) as u64)
+    tlit(" psklen ")
+    tnum(wlanconf.conf_psk_len(&c) as u64)
+    tlit(" pmkrc ")
+    tsigned(kr)
+    tlit(" ssid ")
+    thex((&c.ssid[0]) as u64, wlanconf.conf_ssid_len(&c))
+    tlit(" pmk ")
+    if kr == 0 { thex((&c.pmk[0]) as u64, 32) } else { tch(45) }
+    temit()
+    wlanconf.conf_clear(&c)
+    tlit("cleared psklen ")
+    tnum(wlanconf.conf_psk_len(&c) as u64)
+    tlit(" psk0 ")
+    tnum(c.psk[0] as u64)
+    tlit(" pmk0 ")
+    tnum(c.pmk[0] as u64)
+    temit()
+}
+
+fn run_backoff() {
+    var au: autojoin.Auto = autojoin.auto_new()
+    var g: device.Device = device.device_new()
+    var o: iwl_ops.Mvm = iwl_ops.mvm_new()
+    var s: connect.Session = connect.session_new()
+    var j: join.Join = join.join_new()
+    var now: u64 = 0
+    var k: usize = 0
+    tlit("backoff")
+    while k < 9 {
+        let _r: i64 = autojoin.auto_attempt(&au, (&conf_buf[0]) as u64, 0, &j, &s, &g, &o, idle, 0, XID, now)
+        tlit(" ")
+        tnum(autojoin.auto_wait_until(&au) - now)
+        if autojoin.auto_due(&au, now) { tlit("!") }
+        now = autojoin.auto_wait_until(&au)
+        k = k + 1
+    }
+    autojoin.auto_driver_wait(&au)
+    tlit(" waitdrv ")
+    tnum(autojoin.auto_state(&au))
+    tlit(" ")
+    tnum(autojoin.auto_wait_until(&au))
+    var nm: [u8; 24] = [0; 24]
+    let nn: usize = autojoin.auto_name(autojoin.AS_RETRY, (&nm[0]) as u64)
+    tlit(" name ")
+    thex((&nm[0]) as u64, nn)
+    temit()
+}
+
 fn run_line(line: u64, len: usize) {
     var at: usize = 0
-    if word_is(line, len, &at, "join") { run_join(line, len, &at); return }
+    if word_is(line, len, &at, "join") { run_join(line, len, &at, false); return }
+    if word_is(line, len, &at, "auto") { run_join(line, len, &at, true); return }
+    if word_is(line, len, &at, "conf") { run_conf(line, len, &at); return }
+    if word_is(line, len, &at, "backoff") { run_backoff(); return }
     tlit("fail")
     temit()
 }

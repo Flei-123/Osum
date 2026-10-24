@@ -1,0 +1,152 @@
+import wlan.wpa
+import wlan.join
+
+export {
+    Conf, conf_new, conf_parse, conf_pmk, conf_apply, conf_clear, conf_ssid_len, conf_psk_len,
+    E_CONF_EMPTY, E_CONF_NO_SSID, E_CONF_NO_PSK, E_CONF_SSID_LEN, E_CONF_PSK_LEN, E_CONF_PMK
+}
+
+const E_CONF_EMPTY: i64 = -300
+const E_CONF_NO_SSID: i64 = -301
+const E_CONF_NO_PSK: i64 = -302
+const E_CONF_SSID_LEN: i64 = -303
+const E_CONF_PSK_LEN: i64 = -304
+const E_CONF_PMK: i64 = -305
+
+const SSID_MAX: usize = 32
+const PSK_MIN: usize = 8
+const PSK_MAX: usize = 63
+const LINE_MAX: usize = 160
+
+struct Conf {
+    ssid: [u8; 33],
+    ssid_len: usize,
+    psk: [u8; 64],
+    psk_len: usize,
+    pmk: [u8; 32],
+    have_ssid: bool,
+    have_psk: bool,
+    ssid_over: bool,
+    psk_over: bool
+}
+
+fn conf_new() -> Conf {
+    var c: Conf = Conf {
+        ssid: [0; 33], ssid_len: 0, psk: [0; 64], psk_len: 0, pmk: [0; 32],
+        have_ssid: false, have_psk: false, ssid_over: false, psk_over: false
+    }
+    return c
+}
+
+fn conf_ssid_len(c: *mut Conf) -> usize { return (*c).ssid_len }
+fn conf_psk_len(c: *mut Conf) -> usize { return (*c).psk_len }
+
+fn conf_clear(c: *mut Conf) {
+    var i: usize = 0
+    while i < 64 {
+        (*c).psk[i] = 0 as u8
+        i = i + 1
+    }
+    i = 0
+    while i < 32 {
+        (*c).pmk[i] = 0 as u8
+        i = i + 1
+    }
+    (*c).psk_len = 0
+    (*c).ssid_len = 0
+    (*c).have_ssid = false
+    (*c).have_psk = false
+}
+
+fn key_is(p: u64, len: usize, k0: u8, k1: u8, k2: u8, k3: u8, klen: usize) -> bool {
+    if len <= klen { return false }
+    if klen == 4 {
+        if *((p) as *mut u8) != k0 { return false }
+        if *((p + 1) as *mut u8) != k1 { return false }
+        if *((p + 2) as *mut u8) != k2 { return false }
+        if *((p + 3) as *mut u8) != k3 { return false }
+        return *((p + 4) as *mut u8) == 32 as u8
+    }
+    if *((p) as *mut u8) != k0 { return false }
+    if *((p + 1) as *mut u8) != k1 { return false }
+    if *((p + 2) as *mut u8) != k2 { return false }
+    return *((p + 3) as *mut u8) == 32 as u8
+}
+
+fn take_ssid(c: *mut Conf, p: u64, len: usize) {
+    (*c).have_ssid = true
+    (*c).ssid_over = false
+    if len > SSID_MAX {
+        (*c).ssid_over = true
+        (*c).ssid_len = 0
+        return
+    }
+    var i: usize = 0
+    while i < len {
+        (*c).ssid[i] = *((p + i as u64) as *mut u8)
+        i = i + 1
+    }
+    (*c).ssid_len = len
+}
+
+fn take_psk(c: *mut Conf, p: u64, len: usize) {
+    (*c).have_psk = true
+    (*c).psk_over = false
+    if len > PSK_MAX {
+        (*c).psk_over = true
+        (*c).psk_len = 0
+        return
+    }
+    var i: usize = 0
+    while i < len {
+        (*c).psk[i] = *((p + i as u64) as *mut u8)
+        i = i + 1
+    }
+    (*c).psk_len = len
+}
+
+fn conf_line(c: *mut Conf, p: u64, len: usize) {
+    var n: usize = len
+    while n > 0 && (*((p + (n - 1) as u64) as *mut u8) == 13 as u8) { n = n - 1 }
+    if n > LINE_MAX { return }
+    if key_is(p, n, 115 as u8, 115 as u8, 105 as u8, 100 as u8, 4) {
+        take_ssid(c, p + 5, n - 5)
+        return
+    }
+    if key_is(p, n, 112 as u8, 115 as u8, 107 as u8, 0 as u8, 3) {
+        take_psk(c, p + 4, n - 4)
+    }
+}
+
+fn conf_parse(buf: u64, len: usize, c: *mut Conf) -> i64 {
+    conf_clear(c)
+    (*c).ssid_over = false
+    (*c).psk_over = false
+    if len == 0 { return E_CONF_EMPTY }
+    var at: usize = 0
+    while at < len {
+        var e: usize = at
+        while e < len && *((buf + e as u64) as *mut u8) != 10 as u8 { e = e + 1 }
+        conf_line(c, buf + at as u64, e - at)
+        at = e + 1
+    }
+    if !(*c).have_ssid { return E_CONF_NO_SSID }
+    if (*c).ssid_over || (*c).ssid_len == 0 { return E_CONF_SSID_LEN }
+    if !(*c).have_psk { return E_CONF_NO_PSK }
+    if (*c).psk_over || (*c).psk_len < PSK_MIN { return E_CONF_PSK_LEN }
+    return 0
+}
+
+fn conf_pmk(c: *mut Conf) -> i64 {
+    if !wpa.pmk_off_password((&(*c).psk[0]) as u64, (*c).psk_len,
+        (&(*c).ssid[0]) as u64, (*c).ssid_len, (&(*c).pmk[0]) as u64) {
+        return E_CONF_PMK
+    }
+    return 0
+}
+
+fn conf_apply(c: *mut Conf, j: *mut join.Join) -> bool {
+    if !join.join_ssid_set(j, (&(*c).ssid[0]) as u64, (*c).ssid_len) { return false }
+    join.join_pmk_set(j, (&(*c).pmk[0]) as u64)
+    return true
+}
