@@ -71,8 +71,11 @@ fi
 mdir -i "$W/stick.img@@$OFF" :: > "$W/dir.txt" 2>&1
 mtype -i "$W/stick.img@@$OFF" ::limine.conf >/dev/null 2>&1 && mtype -i "$W/stick.img@@$OFF" ::osum.mb >/dev/null 2>&1 && ok "kernel and limine.conf are still on the FAT partition" || bad "kernel or limine.conf missing after the write"
 start_vm ser2
+waitfor 'glogin: bereit' 240 ser2; sleep 8
+keys s t a r t k e n n w o r t ret
 waitfor 'wlanpersist: ' $([ "$GEG" = 1 ] && echo 60 || echo 240) ser2; sleep 6
 stop_vm
+cp "$W/ser2" "${PERSIST_KEEP:-/dev/null}2" 2>/dev/null
 grep -aq 'wlanpersist: restored bytes=13' "$W/ser2" && R=0 || R=1
 xchk $R "[X] boot 2: the saved network comes back (wlanpersist: restored bytes=13)"
 grep -aq 'EXCEPTION\|kernel halted\|panic:' "$W/ser2" && bad "boot 2: fault line" || ok "boot 2: no fault line"
