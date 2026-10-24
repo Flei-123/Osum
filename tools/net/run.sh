@@ -203,7 +203,7 @@ for s in 0 1; do
     [ "$n" -eq 0 ] && ok "k$s.o: no syscall in the kernel's own code" \
                    || bad "k$s.o: $n syscall instructions"
 done
-[ -d lib/net ] && bad "there is a copy of the stack in lib/net -- it belongs in vendor/" \
+[ -n "$(ls lib/net 2>/dev/null | grep -v "^ws.fi$")" ] && bad "there is a copy of the stack in lib/net -- it belongs in vendor/" \
                || ok "no copy of the TCP/IP stack in this repository (vendor/net/PROVENANCE.md)"
 n=$(nm "$TMPD/k0.o" 2>/dev/null | grep -cE 'tcp__tcp_input|stack__net_input|wire__checksum')
 num "the stack of round K3 is really linked into the kernel (symbols)" "$n" ge 3

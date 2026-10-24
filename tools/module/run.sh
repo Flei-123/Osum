@@ -192,7 +192,7 @@ paar = {'k_puts': 'serial__puts', 'k_dec': 'serial__dec', 'k_hex': 'serial__hex'
         'k_nl': 'serial__nl', 'k_text': 'serial__text', 'k_get': 'kstate__get',
         'k_set': 'kstate__set', 'k_get8': 'kstate__get8', 'k_bind': 'modtab__bind',
         'k_abi': 'ksym__abi_value', 'k_putc': 'ksym__putc_u64',
-        'k_set8': 'ksym__set8_u64'}
+        'k_set8': 'ksym__set8_u64', 'k_fwreq': 'drvfw__request'}
 gut = 0
 for k, v in paar.items():
     a = tab.get(k)
@@ -201,11 +201,11 @@ for k, v in paar.items():
         gut += 1
     else:
         print("ABWEICHUNG %s: gedruckt=%s nm=%s" % (k, a, b))
-kd = tab.get('kdata')
-if kd is not None and kd == sym.get('kdata'):
-    gut += 1
-else:
-    print("ABWEICHUNG kdata: gedruckt=%s nm=%s" % (kd, sym.get('kdata')))
+for k in ('kdata',):
+    if tab.get(k) is not None and tab.get(k) == sym.get(k):
+        gut += 1
+    else:
+        print("ABWEICHUNG %s: gedruckt=%s nm=%s" % (k, tab.get(k), sym.get(k)))
 print("gleich=%d" % gut)
 PYEOF
 num "Adressen, die mit nm uebereinstimmen" "$(wert "$TMPD/nm.txt" 'gleich=[0-9]+')" eq 14
@@ -224,14 +224,14 @@ has "$TMPD/l-leer.txt" "modul: ende" "der Kern lebt und kommt bis ans Ende des A
 echo "== 4. mit Modul ist es da, und es bewegt sich wirklich =="
 has "$TMPD/l-gut.txt" "modul: vor init=0 present=0" "vor dem Laden: kein Zeigegeraet"
 has "$TMPD/l-gut.txt" "modul: laden=ok" "das Modul wird angenommen"
-has "$TMPD/l-gut.txt" "ps2maus: eingetragen 28" "modul_init lief IM KERN und trug 28 Adressen ein"
+has "$TMPD/l-gut.txt" "ps2maus: eingetragen 37" "modul_init lief IM KERN und trug 37 Adressen ein"
 has "$TMPD/l-gut.txt" "modul: nach init=1 present=1" "NACH dem Laden: dasselbe mouse_init sagt ja"
 num "sigok" "$(zwert "$TMPD/l-gut.txt" 'sigok=[0-9]+')" eq 1
 num "ELF-Abschnitte" "$(zwert "$TMPD/l-gut.txt" 'secs=[0-9]+')" ge 8
 num "aufgeloeste Relokationen" "$(zwert "$TMPD/l-gut.txt" 'rel=[0-9]+')" ge 500
 num "Namen, die aus dem KERN kamen" "$(zwert "$TMPD/l-gut.txt" 'ext=[0-9]+')" ge 6
 num "Rahmen fuer das Abbild" "$(zwert "$TMPD/l-gut.txt" 'rahmen=[0-9]+')" ge 1
-num "belegte Plaetze in der Treibertafel" "$(zwert "$TMPD/l-gut.txt" 'plaetze=[0-9]+')" eq 28
+num "belegte Plaetze in der Treibertafel" "$(zwert "$TMPD/l-gut.txt" 'plaetze=[0-9]+')" eq 37
 num "Rueckgabe von modul_init" "$(zwert "$TMPD/l-gut.txt" 'initrc=[0-9]+')" eq 0
 # Die Kennung des Geraets kommt vom ECHTEN 8042 und nicht aus einer
 # Tabelle: 3 heisst "mit Rad", und QEMU baut ein Rad ein.
