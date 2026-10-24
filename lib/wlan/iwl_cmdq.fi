@@ -6,7 +6,8 @@ import wlan.iwl_le
 import wlan.iwl_mvm_txq
 
 export {
-    Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_dq_inflight, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset,
+    Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_dq_inflight, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset, rx_closed, rx_raw_valid, rb_addr, cq_set_raw,
+    CMD_ALIVE, FRAME_INVALID, FRAME_SIZE_MSK, RX_MASK,
     CQ_RB_SIZE, CQ_RB_COUNT, CQ_TFD_SIZE, CQ_TFD_COUNT, CQ_SLOT_SIZE, CQ_SLOTS, CQ_NOTIF_SLOT, CQ_NOTIF_SLOTS,
     CQ_WAIT_CMD, CQ_WAIT_NOTIF, ALIVE_SCD_OFF, ALIVE_PKT_MIN,
     CMD_TX_DATA, E_CQ_TIMEOUT, E_CQ_BIG, E_CQ_NORX, E_CQ_NOTX, E_CQ_FULL, E_CQ_PROG, E_CQ_SHORT
@@ -72,13 +73,14 @@ struct Cq {
     drd: u64,
     dq_on: u64,
     dsent: u64,
-    dreclaimed: u64
+    dreclaimed: u64,
+    rx_raw: u64
 }
 
 fn cq_new() -> Cq {
     var c: Cq = Cq { rx_bd: 0, rx_stts: 0, rb: 0, tfd: 0, cmdbuf: 0, kw: 0, bc: 0, notif: 0, wr: 0, rd: 0, rxr: 0, rx_wptr: 0,
         rx_on: 0, tx_on: 0, nh: 0, nt: 0, scd: 0, dropped: 0, matched: 0,
-        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, dsent: 0, dreclaimed: 0 }
+        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, dsent: 0, dreclaimed: 0, rx_raw: 0 }
     return c
 }
 
@@ -136,6 +138,27 @@ fn cq_dq_disable(c: *mut Cq) {
 }
 
 fn rb_addr(c: *mut Cq, i: u64) -> u64 { return (*c).rb + (i & RX_MASK) * CQ_RB_SIZE }
+
+fn cq_set_raw(c: *mut Cq, on: u64) { (*c).rx_raw = on }
+
+fn rx_raw_valid(c: *mut Cq, i: u64) -> bool {
+    let lnf: u64 = iwl_le.ld32(rb_addr(c, i), 0)
+    if lnf == 0 || lnf == FRAME_INVALID { return false }
+    return (lnf & FRAME_SIZE_MSK) >= 4
+}
+
+fn rx_closed(c: *mut Cq) -> u64 {
+    let st: u64 = iwl_g1.rx_status_closed((*c).rx_stts) & RX_MASK
+    if (*c).rx_raw == 0 { return st }
+    var n: u64 = (*c).rxr
+    var k: u64 = 0
+    while k < RX_MASK && rx_raw_valid(c, n) {
+        n = (n + 1) & RX_MASK
+        k = k + 1
+    }
+    if n == (*c).rxr { return st }
+    return n
+}
 
 fn cq_nic_init(c: *mut Cq, p: *mut iwl_probe.Probe) -> i64 {
     cq_reset(c)
@@ -236,7 +259,7 @@ fn handle_pkt(c: *mut Cq, pkt: u64, len: u64, want_cmd: u64, want_idx: u64, resp
 
 fn drain(c: *mut Cq, p: *mut iwl_probe.Probe, held: bool, want_cmd: u64, want_idx: u64, resp: u64, cap: u64) -> bool {
     var hit: bool = false
-    let closed: u64 = iwl_g1.rx_status_closed((*c).rx_stts) & RX_MASK
+    let closed: u64 = rx_closed(c)
     while (*c).rxr != closed {
         let rb: u64 = rb_addr(c, (*c).rxr)
         var off: u64 = 0
@@ -369,7 +392,7 @@ fn find_cmd(c: *mut Cq, cmd: u64) -> i64 {
 
 fn rx_pending(c: *mut Cq) -> bool {
     if (*c).rx_on == 0 { return false }
-    return iwl_g1.rx_status_closed((*c).rx_stts) & RX_MASK != (*c).rxr
+    return rx_closed(c) != (*c).rxr
 }
 
 fn cq_wait(c: *mut Cq, p: *mut iwl_probe.Probe, cmd: u64, out: u64, cap: u64, budget: u64) -> i64 {

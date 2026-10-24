@@ -1,0 +1,195 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_le
+import wlan.iwl_w
+import wlan.iwl_probe
+import wlan.iwl_pwr
+import wlan.iwl_g1
+import wlan.iwl_cmdq
+
+export {
+    scan, render, has_data, alive_in_rx, WORDS,
+    W_VALID, W_STTS, W_RXR, W_NZ, W_FIRST, W_H0, W_H1, W_CMD, W_STATE, W_NALIVE, W_S0, W_S1, W_REGS, W_AIDX,
+    RX_NONE, RX_EMPTY, RX_ALIVE_SILENT, RX_ALIVE_STTS, RX_OTHER
+}
+
+const WORDS: u64 = 26
+const W_VALID: u64 = 0
+const W_STTS: u64 = 1
+const W_RXR: u64 = 2
+const W_NZ: u64 = 3
+const W_FIRST: u64 = 4
+const W_H0: u64 = 5
+const W_H1: u64 = 6
+const W_CMD: u64 = 7
+const W_STATE: u64 = 8
+const W_NALIVE: u64 = 9
+const W_S0: u64 = 10
+const W_S1: u64 = 11
+const W_REGS: u64 = 12
+const W_AIDX: u64 = 24
+
+const RX_NONE: u64 = 0
+const RX_EMPTY: u64 = 1
+const RX_ALIVE_SILENT: u64 = 2
+const RX_ALIVE_STTS: u64 = 3
+const RX_OTHER: u64 = 4
+
+const NREGS: u64 = 12
+const NO_INDEX: u64 = 0xFFFF
+
+fn reg_offset(i: u64) -> u64 {
+    if i == 0 { return 0x1BC0 }
+    if i == 1 { return 0x1BC4 }
+    if i == 2 { return 0x1BC8 }
+    if i == 3 { return 0x1BCC }
+    if i == 4 { return 0x1C00 }
+    if i == 5 { return 0x1C08 }
+    if i == 6 { return 0x1C44 }
+    if i == 7 { return 0x004 }
+    if i == 8 { return 0x008 }
+    if i == 9 { return 0x00C }
+    if i == 10 { return 0x010 }
+    return 0x0A0
+}
+
+fn put(out: u64, i: u64, v: u64) {
+    *((out + i * 8) as *mut u64) = v
+}
+
+fn at(words: u64, i: u64) -> u64 {
+    return *((words + i * 8) as *mut u64)
+}
+
+fn alive_in_rx(words: u64) -> bool {
+    let st: u64 = at(words, W_STATE)
+    return st == RX_ALIVE_SILENT || st == RX_ALIVE_STTS
+}
+
+fn has_data(words: u64) -> bool {
+    return at(words, W_VALID) != 0
+}
+
+fn scan(c: *mut iwl_cmdq.Cq, p: *mut iwl_probe.Probe, out: u64) {
+    var i: u64 = 0
+    while i < WORDS {
+        put(out, i, 0)
+        i = i + 1
+    }
+    put(out, W_VALID, 1)
+    put(out, W_FIRST, NO_INDEX)
+    put(out, W_AIDX, NO_INDEX)
+    put(out, W_STTS, iwl_g1.rx_status_closed((*c).rx_stts))
+    put(out, W_RXR, (*c).rxr)
+    put(out, W_S0, iwl_le.ld64((*c).rx_stts, 0))
+    put(out, W_S1, iwl_le.ld64((*c).rx_stts, 8))
+    var nz: u64 = 0
+    var nalive: u64 = 0
+    var n: u64 = 0
+    while n < iwl_cmdq.CQ_RB_COUNT {
+        let rb: u64 = iwl_cmdq.rb_addr(c, n)
+        let lnf: u64 = iwl_le.ld32(rb, 0)
+        if lnf != 0 {
+            nz = nz + 1
+            let cmd: u64 = iwl_le.ld8(rb, 4)
+            if at(out, W_FIRST) == NO_INDEX {
+                put(out, W_FIRST, n)
+                put(out, W_H0, iwl_le.ld64(rb, 0))
+                put(out, W_H1, iwl_le.ld64(rb, 8))
+                put(out, W_CMD, cmd)
+            }
+            if cmd == iwl_cmdq.CMD_ALIVE && lnf != iwl_cmdq.FRAME_INVALID {
+                nalive = nalive + 1
+                if at(out, W_AIDX) == NO_INDEX { put(out, W_AIDX, n) }
+            }
+        }
+        n = n + 1
+    }
+    put(out, W_NZ, nz)
+    put(out, W_NALIVE, nalive)
+    var r: u64 = 0
+    while r < NREGS {
+        put(out, W_REGS + r, iwl_pwr.rd(p, reg_offset(r)))
+        r = r + 1
+    }
+    var st: u64 = RX_OTHER
+    if nz == 0 {
+        st = RX_EMPTY
+    } else if nalive != 0 {
+        if (at(out, W_STTS) & iwl_cmdq.RX_MASK) != (*c).rxr { st = RX_ALIVE_STTS } else { st = RX_ALIVE_SILENT }
+    }
+    put(out, W_STATE, st)
+}
+
+fn state_name(st: u64, out: u64) {
+    var a: [u8; 9] = "rx-empty\0"
+    var b: [u8; 19] = "alive-in-rx-silent\0"
+    var d: [u8; 19] = "alive-stts-no-wake\0"
+    var e: [u8; 9] = "rx-other\0"
+    var f: [u8; 5] = "none\0"
+    var src: u64 = (&f[0]) as u64
+    if st == RX_EMPTY { src = (&a[0]) as u64 }
+    if st == RX_ALIVE_SILENT { src = (&b[0]) as u64 }
+    if st == RX_ALIVE_STTS { src = (&d[0]) as u64 }
+    if st == RX_OTHER { src = (&e[0]) as u64 }
+    var i: u64 = 0
+    while iwl_le.ld8(src, i) != 0 {
+        iwl_le.st8(out, i, iwl_le.ld8(src, i))
+        i = i + 1
+    }
+    iwl_le.st8(out, i, 0)
+}
+
+fn render(w: *mut iwl_w.W, words: u64) {
+    var k_rx: [u8; 9] = "fail_rx=\0"
+    var k_st: [u8; 6] = "stts=\0"
+    var k_rr: [u8; 6] = " rxr=\0"
+    var k_nz: [u8; 8] = " rbnz=\0\0"
+    var k_na: [u8; 7] = " alv=\0\0"
+    var k_fi: [u8; 8] = " first=\0"
+    var k_cm: [u8; 6] = " cmd=\0"
+    var k_h0: [u8; 5] = " h0=\0"
+    var k_h1: [u8; 5] = " h1=\0"
+    var k_s0: [u8; 5] = " s0=\0"
+    var k_s1: [u8; 5] = " s1=\0"
+    var k_r2: [u8; 10] = "fail_rxr=\0"
+    var k_names: [u8; 12] = "fail_rxs=\0\0\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    var tags: [u8; 25] = "b0b4b8bcc0c8rsk4kikmkfka\0"
+    iwl_w.w_s(w, (&k_names[0]) as u64)
+    state_name(at(words, W_STATE), (&nm[0]) as u64)
+    iwl_w.w_s(w, (&nm[0]) as u64)
+    iwl_w.w_nl(w)
+    iwl_w.w_s(w, (&k_rx[0]) as u64)
+    iwl_w.w_s(w, (&k_st[0]) as u64)
+    iwl_w.w_hex(w, at(words, W_STTS), 3)
+    iwl_w.w_s(w, (&k_rr[0]) as u64)
+    iwl_w.w_hex(w, at(words, W_RXR), 2)
+    iwl_w.w_s(w, (&k_nz[0]) as u64)
+    iwl_w.w_dec(w, at(words, W_NZ))
+    iwl_w.w_s(w, (&k_na[0]) as u64)
+    iwl_w.w_dec(w, at(words, W_NALIVE))
+    iwl_w.w_s(w, (&k_fi[0]) as u64)
+    iwl_w.w_hex(w, at(words, W_FIRST), 4)
+    iwl_w.w_s(w, (&k_cm[0]) as u64)
+    iwl_w.w_hex(w, at(words, W_CMD), 2)
+    iwl_w.w_s(w, (&k_h0[0]) as u64)
+    iwl_w.w_hex(w, at(words, W_H0), 16)
+    iwl_w.w_s(w, (&k_h1[0]) as u64)
+    iwl_w.w_hex(w, at(words, W_H1), 16)
+    iwl_w.w_s(w, (&k_s0[0]) as u64)
+    iwl_w.w_hex(w, at(words, W_S0), 16)
+    iwl_w.w_s(w, (&k_s1[0]) as u64)
+    iwl_w.w_hex(w, at(words, W_S1), 16)
+    iwl_w.w_nl(w)
+    iwl_w.w_s(w, (&k_r2[0]) as u64)
+    var r: u64 = 0
+    while r < NREGS {
+        iwl_w.w_ch(w, 32)
+        iwl_w.w_ch(w, tags[(r * 2) as usize] as u64)
+        iwl_w.w_ch(w, tags[(r * 2 + 1) as usize] as u64)
+        iwl_w.w_ch(w, 61)
+        iwl_w.w_hex(w, at(words, W_REGS + r), 8)
+        r = r + 1
+    }
+    iwl_w.w_nl(w)
+}
