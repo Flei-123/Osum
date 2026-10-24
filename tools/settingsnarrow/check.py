@@ -56,13 +56,13 @@ if nav:
     # keyboard focus: the wheel is idle during the Tab phase, so the pane can only move because the focus reveal scrolls it.
     # A page with few Tab stops makes the focus WRAP (offsets fall again); a page with many stops only rises. Both are fine:
     # the wheel phase makes at most 3 page reports (down, down, back up), so 2 rises in the tail can only come from the reveal.
-    # (serial lines of other programs may eat single reports.)
+    # (serial lines of other programs may eat single reports, so 4 intact reports are enough: open + 3 reveal steps.)
     offs = [l[5] for l in pg]
     tail = offs[-6:]
     rises = sum(1 for i in range(len(tail) - 1) if tail[i] < tail[i + 1])
     falls = sum(1 for i in range(len(tail) - 1) if tail[i] > tail[i + 1])
     maxoff = max((l[3] - l[4] for l in pg), default=0)
-    seq_ok = len(offs) >= 5 and rises >= 2 and max(tail) > 0 and max(offs) <= maxoff
+    seq_ok = len(offs) >= 4 and rises >= 2 and max(tail) > 0 and max(offs) <= maxoff
     ok(seq_ok, "Tab focus scrolled the page (reveal moves the pane while the focus walks, wrap optional: %s)" % tail)
     ok(lays[-1][1] == 0, "Back returned to the list (detail=0)")
     ok(any("whp" in l[6] for l in pg), "Back button reported on the page")

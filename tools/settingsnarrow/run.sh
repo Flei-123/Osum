@@ -41,7 +41,11 @@ for cfg in $CFGS; do
     echo "rad -6"; echo "warte 2"; echo "foto 01-wheel1"
     echo "rad -10"; echo "warte 2"; echo "foto 02-wheel2"
     case "$cfg" in
-      nav*) echo "klickauf srecttabq" ;;
+      nav*)
+        # serial lines of other programs (wm blur) can eat the LAST rect report, then klickauf uses a stale rect and opens the
+        # neighbour row. Re-arrive at the same end offset twice so an intact report of the final position always exists.
+        for _r in 1 2; do echo "rad 1"; echo "warte 1.5"; echo "rad -10"; echo "warte 2"; done
+        echo "klickauf srecttabq" ;;
       *) echo "rad 3"; echo "warte 2"; echo "klickauf srecttabd" ;;
     esac
     echo "warte 3"; echo "foto 03-page"
