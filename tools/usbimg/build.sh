@@ -302,7 +302,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
-orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo hwinv massren privacy welcome elevate runbox cliphist charmap apprights wmplug hotkeyd jarvismini social soclocal melder bench"}
+orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo hwinv massren privacy welcome elevate runbox cliphist charmap apprights wmplug hotkeyd jarvismini social soclocal melder bench wlanpersist"}
 # ODB=1 (debug build): the debug agent is one more program in /bin
 [ "${ODB:-0}" = 1 ] && PROGS="$PROGS odbd"
 # the public image has no chat server to reach: no JARVIS Mini binary there
@@ -1303,7 +1303,7 @@ if [ "${ODB:-0}" = 1 ]; then
     ARGS+=("/etc/odb.token=$ODB_TOKEN_FILE@0600:0:0" "/etc/odb.conf=$OUT/odb.conf@0644:0:0")
     echo "build.sh: ODB=1 -- debug agent odbd enabled (COM2), token from $ODB_TOKEN_FILE"
 fi
-ARGS+=(/dev/ /proc/ /mnt/ /tmp/ /store/ /apps/ /system/ /run/)
+ARGS+=(/dev/ /proc/ /mnt/ /esp/ /tmp/ /store/ /apps/ /system/ /run/)
 # RUNDE TUERSCHLOSS: EIN BEISPIEL ZUM UEBERSETZEN.
 #
 # Seit dieser Runde liegen `firnc` und `fas` auf dem Stick. Eine Quelle
@@ -1562,7 +1562,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/social /bin/soclocal /bin/melder /bin/socfleitec /apps/social.prog/ACTIONS /apps/social.prog/SETTINGS /etc/social/providers /etc/social/fleitec.conf /etc/social/games.tsv /bin/sysinfo /bin/hwinv /bin/privacy /bin/welcome /bin/elevate /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /apps/run.osp/symbol /bin/charmap /apps/charmap.osp/start /apps/charmap.osp/INFO /apps/charmap.osp/symbol /bin/cliphist /apps/cliphist.osp/start /apps/cliphist.osp/INFO /apps/cliphist.osp/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
-PFLICHT="$PFLICHT /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
+PFLICHT="$PFLICHT /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
 [ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip"
 [ "${ROOT_SLIM:-0}" = 1 ] || [ "${BOOT_KERNEL_COPY:-0}" != 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \

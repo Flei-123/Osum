@@ -1,0 +1,170 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+
+export { u_start }
+
+const BUF_MAX: u64 = 256
+const RESTORE_TRIES: u64 = 45
+const POLL_MS: u64 = 4000
+const RETRY_MS: u64 = 2000
+
+static mut p_conf: [u8; 15] = "/etc/wlan.conf\0"
+static mut p_esp: [u8; 5] = "/esp\0"
+static mut p_dev: [u8; 10] = "/dev/usb1\0"
+static mut p_copy: [u8; 14] = "/esp/wlan.cnf\0"
+static mut p_wlock: [u8; 11] = "/dev/wlock\0"
+static mut c_unlock: [u8; 12] = "unlock usb\n\0"
+static mut c_lock: [u8; 10] = "lock usb\n\0"
+static mut t_vfat: [u8; 5] = "vfat\0"
+static mut m_ram: [u8; 34] = "wlanpersist: root is not a module\0"
+static mut m_up: [u8; 29] = "wlanpersist: watching bytes=\0"
+static mut m_rest: [u8; 29] = "wlanpersist: restored bytes=\0"
+static mut m_save: [u8; 26] = "wlanpersist: saved bytes=\0"
+static mut m_fail: [u8; 32] = "wlanpersist: save failed errno=\0"
+static mut m_none: [u8; 32] = "wlanpersist: no stick partition\0"
+static mut fail_errno: u64 = 0
+static mut cur: [u8; 256] = [0 as u8; 256]
+static mut last: [u8; 256] = [0 as u8; 256]
+
+fn root_is_ram() -> bool {
+    return ulib.sys(ulib.SYS_MNTSTAT, 0, ulib.MS_DEV, 0) == 0
+}
+
+fn wlock_cmd(cmd: u64) {
+    let fd: u64 = io.open((&p_wlock[0 as usize]) as u64, 1)
+    if ulib.bad(fd) {
+        return
+    }
+    let _w: u64 = io.write_all(fd, cmd, ulib.length(cmd))
+    let _c: u64 = io.close(fd)
+}
+
+fn mount_esp() -> bool {
+    let r: u64 = ulib.sys4(ulib.SYS_VMOUNT, (&p_dev[0 as usize]) as u64,
+        (&p_esp[0 as usize]) as u64, (&t_vfat[0 as usize]) as u64, 0)
+    return !ulib.bad(r)
+}
+
+fn umount_esp() {
+    let _r: u64 = ulib.sys(ulib.SYS_UMOUNT2, (&p_esp[0 as usize]) as u64, 0, 0)
+}
+
+fn read_text(path: u64, dst: u64) -> u64 {
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = io.read_full(fd, dst, BUF_MAX - 1)
+    let _c: u64 = io.close(fd)
+    if ulib.bad(n) {
+        return 0
+    }
+    __mmio_write8((dst + n) as *mut u8, 0 as u8)
+    return n
+}
+
+fn write_text(path: u64, src: u64, n: u64) -> u64 {
+    let fd: u64 = io.create(path)
+    if ulib.bad(fd) {
+        fail_errno = 0 -% fd
+        return 1
+    }
+    let g: u64 = io.write_all(fd, src, n)
+    let _c: u64 = io.close(fd)
+    if ulib.bad(g) || g < n {
+        if ulib.bad(g) {
+            fail_errno = 0 -% g
+        }
+        return 2
+    }
+    return 0
+}
+
+fn wipe(p: u64) {
+    var z: u64 = 0
+    while z < BUF_MAX {
+        __mmio_write8((p + z) as *mut u8, 0 as u8)
+        z = z + 1
+    }
+}
+
+fn remember(n: u64) {
+    wipe((&last[0 as usize]) as u64)
+    ulib.copy((&last[0 as usize]) as u64, (&cur[0 as usize]) as u64, n)
+}
+
+fn restore_once() -> u64 {
+    if !mount_esp() {
+        return 0 - 1
+    }
+    let n: u64 = read_text((&p_copy[0 as usize]) as u64, (&cur[0 as usize]) as u64)
+    umount_esp()
+    if n == 0 {
+        return 0
+    }
+    var have: [u8; 256] = [0 as u8; 256]
+    let h: u64 = read_text((&p_conf[0 as usize]) as u64, (&have[0 as usize]) as u64)
+    if h == n && ulib.streq((&have[0 as usize]) as u64, (&cur[0 as usize]) as u64) {
+        return n
+    }
+    if write_text((&p_conf[0 as usize]) as u64, (&cur[0 as usize]) as u64, n) != 0 {
+        return 0
+    }
+    let _m: u64 = ulib.sys(90, (&p_conf[0 as usize]) as u64, 384, 0)
+    ulib.say_line((&m_rest[0 as usize]) as u64, n)
+    return n
+}
+
+fn restore() {
+    var tries: u64 = 0
+    while tries < RESTORE_TRIES {
+        let r: u64 = restore_once()
+        if !ulib.bad(r) {
+            return
+        }
+        let _s: u64 = ulib.sleep_ms(RETRY_MS)
+        tries = tries + 1
+    }
+    ulib.say_line((&m_none[0 as usize]) as u64, 0)
+}
+
+fn save(n: u64) {
+    if !mount_esp() {
+        ulib.say_line((&m_fail[0 as usize]) as u64, 0)
+        return
+    }
+    wlock_cmd((&c_unlock[0 as usize]) as u64)
+    let step: u64 = write_text((&p_copy[0 as usize]) as u64, (&cur[0 as usize]) as u64, n)
+    let _s: u64 = ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    umount_esp()
+    wlock_cmd((&c_lock[0 as usize]) as u64)
+    if step != 0 {
+        remember(n)
+        ulib.say_line((&m_fail[0 as usize]) as u64, fail_errno)
+        return
+    }
+    remember(n)
+    ulib.say_line((&m_save[0 as usize]) as u64, n)
+}
+
+fn u_start(args: u64) -> u64 {
+    if !root_is_ram() {
+        ulib.say_line((&m_ram[0 as usize]) as u64, 0)
+        return 0
+    }
+    restore()
+    let n0: u64 = read_text((&p_conf[0 as usize]) as u64, (&cur[0 as usize]) as u64)
+    remember(n0)
+    ulib.say_line((&m_up[0 as usize]) as u64, n0)
+    while true {
+        let _w: u64 = ulib.sleep_ms(POLL_MS)
+        let n: u64 = read_text((&p_conf[0 as usize]) as u64, (&cur[0 as usize]) as u64)
+        if n > 0 && !ulib.streq((&cur[0 as usize]) as u64, (&last[0 as usize]) as u64) {
+            save(n)
+        }
+    }
+    return 0
+}
