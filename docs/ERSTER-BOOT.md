@@ -75,7 +75,7 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 
 ## Stick 13 HP (24.10.2026, Debug-Werkzeuge: lspci, pcicfg, regdump, prphread, wlanctl, drvctl)
 
-- **Datei:** STICK12_FILE (GPT, UEFI+BIOS). SHA256 vorher pruefen: STICK12_SHA.
+- **Datei:** `orientos-usb-hp-20261024-badf40a6.img` (146 MiB, Baustand badf40a6 = main, Gate dbgtools 53/0) (GPT, UEFI+BIOS). SHA256 vorher pruefen: `0eec7bc9d0c1394e8e64a591aec3d4bfa81aedd531e8721ca467a5708ddf0587`.
 - **Neu:** `lspci [-v] [bb:dd.f]` (IDs, Klasse, Treiber, BARs), `pcicfg <bb:dd.f> [off [len]]` (Config-Space-Hexdump, Zahlen hex), `regdump <bb:dd.f> <bar> <off> [count]` (MMIO-Register), `prphread <bb:dd.f> <addr-hex> [count]` (Intel-WLAN PRPH, nur root), `wlanctl status|reload|dump`. Schreiben nur mit `--write` und nur als root (`pcicfg --write <bb:dd.f> <off> <breite> <wert>`, `regdump --write <bb:dd.f> <bar> <off> <wert>`).
 - **Korrektur:** `drvctl` stand in Stick 10 bis 12 NICHT im Abbild (fehlte in PROGS), obwohl dort dokumentiert. Ab Stick 13 ist es drin.
 - **Foto-Checkliste WLAN:** `wlanctl status` (zeigt /proc/wlan, `sb_cpu1`/`sb_cpu2` mit Bits), danach `wlanctl dump` und `cat /tmp/wlan-dump.txt` (Config-Space, CSR, Secure-Boot-PRPH). `wlanctl reload` startet das Firmware-Laden erneut (nur wenn kein WLAN-Treiber gebunden ist).
