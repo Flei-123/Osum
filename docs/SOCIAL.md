@@ -78,12 +78,13 @@ as ONE word, because `exec` takes eight arguments (`proc.MAX_ARGS`) and
 | `login [token <t>]` | `pair <code> <valid_s>` (exit 4) or `account <id> <name>` |
 | `send <id> <text>` | `sent <devices> <stamp>` |
 | `inbox` | `m id stamp in\|out text` — each message ONCE (the provider keeps its cursor) |
+| `watch` | a long-running process (cap `watch`): the first line `watch 1`, then `m` lines the moment they arrive; it ends with exit 2 when the session breaks |
 | `invite <id> <invite\|join> <target\|-> <name>` | `i <invite id>` |
 | `invites` | `i inv id in\|out invite\|join open\|accepted\|declined age_s target name` |
 | `answer <inv> yes\|no [target]` | the `i` line afterwards |
 
 `caps` names what the provider can: `contacts search relation presence
-activity alive login send inbox invite invites answer join games`. The service
+activity alive login send inbox invite invites answer join games watch`. The service
 only asks for what is there — a provider without chat simply has no
 `send`/`inbox`, and `social.messages.send` to its contacts answers
 `err unsupported send`.
@@ -170,8 +171,12 @@ service enforces itself, where the data leaves the device:
   `act call social.accounts.login provider=fleitec`), `/apps/social.prog/ACTIONS`, an empty
   `/etc/social/games.tsv` (the service fills it);
 * the same person at two providers is two contacts (no merge by person);
-* a provider call blocks the service for up to 4 s; chat is polled every
-  5 s (a watching provider — the relay's T_WATCH — is the next step);
+* a provider call blocks the service for up to 4 s; a provider with the cap
+  `watch` (the Fleitec account: `socfleitec watch` holds one relay T_WATCH
+  session, heartbeat every 10 s) is read without blocking in the service
+  loop (a pipe, every 100 ms) and is not polled; the service restarts it
+  5 s after it ended. Providers without `watch` are polled every 5 s
+  (`social serve [ticks] [refresh-ticks] [message-poll-ticks]`);
 * join targets travel through the Fleitec server in the clear (like the
   activity); messages do not;
 * no pictures, no group chats, no read marks going out yet.

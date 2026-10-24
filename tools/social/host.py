@@ -18,6 +18,8 @@
 #   ==KEY==      the guest's device key (its public half is the address)
 #   ==MSG1==     anna's FirnChat client (SOCIAL_ANNA_ID) reads what OrientOS
 #                wrote and answers
+#   ==WATCH1==   anna writes once more; the guest has message polling off, so it
+#                can only arrive by the live session (r40); the host times it
 #   ==INV1==     anna sees OrientOS's invite and says yes; then she invites
 #                justin into Counter-Strike 2
 import base64, hashlib, hmac, json, os, re, subprocess, sys, time, urllib.request
@@ -150,7 +152,24 @@ def watch(port, secret, serial, out):
             st3, j3 = api(port, t["anna"], "/api/kontakte/einladen",
                           {"konto": "u_JUSTIN", "art": "einladen", "name": "Counter-Strike 2", "ziel": "steam://connect/10.0.2.2:27015"})
             say(st3 == 200, f"anna invites justin into Counter-Strike 2: {st3}")
-        if "==FERTIG==" in s or ("inv" in done and "c2" in done):
+        if "==WATCH1==" in s and "push" not in done and "key" in done:
+            done.add("push")
+            mark = len(s)
+            t_send = time.time()
+            rc3, out3 = fc("send", keypub, "Push von Anna, ohne Abfrage", rp, aid)
+            say(rc3 == 0, f"anna writes again; message polling on the guest is off: rc={rc3}")
+            seen_at = None
+            while time.time() - t_send < 12:
+                try:
+                    s2 = open(serial, "rb").read().decode("latin-1")
+                except OSError:
+                    s2 = ""
+                if "social: message from fleitec:u_ANNA" in s2[mark - 1:] or "social: message from fleitec:u_ANNA" in s2.split("==WATCH1==")[-1]:
+                    seen_at = time.time() - t_send
+                    break
+                time.sleep(0.1)
+            say(seen_at is not None and seen_at < 5, f"the push reached OrientOS in {seen_at if seen_at is None else round(seen_at, 1)} s (poll is off)")
+        if "==FERTIG==" in s or ("inv" in done and "c2" in done and "push" in done):
             break
         time.sleep(0.2)
     res.close()

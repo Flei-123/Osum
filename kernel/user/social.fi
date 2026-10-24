@@ -64,6 +64,12 @@ const S_EXECVE: i64 = 59
 const S_WAIT4: i64 = 61
 const S_KILL: i64 = 62
 const S_MKDIR: i64 = 83
+const S_PIPE: i64 = 22
+const S_FCNTL: i64 = 72
+const F_SETFL: i64 = 4
+const O_NONBLOCK: i64 = 2048
+const WATCH_RETRY_TICKS: u64 = 500
+const WATCH_LINE: usize = 2048
 const WNOHANG: i64 = 1
 
 const PROV_MAX: usize = 8
@@ -92,6 +98,13 @@ static mut p_acct: [u8; 512] = [0 as u8; 512] // PROV_MAX * ACCT_W
 static mut p_state: [u8; 8] = [0 as u8; 8] // 0 not asked, 1 ok, 2 offline, 3 denied, 4 error
 static mut p_count: [u64; 8] = [0 as u64; 8]
 static mut n_prov: usize = 0
+static mut w_pid: [i64; 8] = [0 as i64; 8]
+static mut w_fd: [i64; 8] = [0 as i64; 8]
+static mut w_live: [u8; 8] = [0 as u8; 8]
+static mut w_next: [u64; 8] = [0 as u64; 8]
+static mut w_len: [usize; 8] = [0 as usize; 8]
+static mut w_buf: [u8; 16384] = [0 as u8; 16384]
+static mut msg_poll_ticks: u64 = 500
 
 // The merged book: one line per contact, TAB between fields:
 //   provider id relation presence name handle status activity since chat
@@ -446,6 +459,29 @@ fn prov_find(p: u64, n: usize) -> i64 {
     return -1
 }
 
+// "-c<conf>" as ONE word: exec takes eight arguments (proc.MAX_ARGS),
+// and `invite <id> <kind> <target> <name>` needs the other seven
+fn build_argv(i: usize, ws: *mut [u64; 6], argv: *mut [u64; 12], dc: *mut [u8; 100],
+    v1: *mut [u8; 3]) {
+    (*argv)[0] = pprog(i)
+    (*argv)[1] = (&(*v1)[0]) as u64
+    var n: usize = 2
+    if zlen(pconf(i)) > 0 {
+        (*dc)[0] = 45 as u8
+        (*dc)[1] = 99 as u8
+        zset((&(*dc)[2]) as u64, 98, pconf(i), zlen(pconf(i)))
+        (*argv)[n] = (&(*dc)[0]) as u64
+        n = n + 1
+    }
+    var k: usize = 0
+    while k < 6 && (*ws)[k] != 0 {
+        (*argv)[n] = (*ws)[k]
+        n = n + 1
+        k = k + 1
+    }
+    (*argv)[n] = 0
+}
+
 // Run `<program> v1 <w1> <w2> <w3...>` of provider i; the output lands
 // in `out`, the exit code is returned (124 = killed after `limit`
 // ticks, 127 = could not run). Words are zero-terminated strings; w3 may
@@ -470,27 +506,9 @@ fn runw(i: usize, ws: *mut [u64; 6], out: *mut SB, limit: u64) -> i64 {
         return 127
     }
     var v1: [u8; 3] = "v1\0"
-    // "-c<conf>" as ONE word: exec takes eight arguments (proc.MAX_ARGS),
-    // and `invite <id> <kind> <target> <name>` needs the other seven
     var dc: [u8; 100] = [0 as u8; 100]
     var argv: [u64; 12] = [0 as u64; 12]
-    argv[0] = pprog(i)
-    argv[1] = (&v1[0]) as u64
-    var n: usize = 2
-    if zlen(pconf(i)) > 0 {
-        dc[0] = 45 as u8
-        dc[1] = 99 as u8
-        zset((&dc[2]) as u64, 98, pconf(i), zlen(pconf(i)))
-        argv[n] = (&dc[0]) as u64
-        n = n + 1
-    }
-    var k: usize = 0
-    while k < 6 && (*ws)[k] != 0 {
-        argv[n] = (*ws)[k]
-        n = n + 1
-        k = k + 1
-    }
-    argv[n] = 0
+    build_argv(i, ws, &argv, &dc, &v1)
     let kid: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
     if kid < 0 {
         syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
@@ -1670,6 +1688,60 @@ fn full_id(b: *mut SB, i: usize, peer: u64, pn: usize) {
     sb_bytes(b, peer, pn)
 }
 
+fn msg_line(i: usize, lp: u64, ll: usize) {
+        // m peer stamp in|out text
+        var pn: usize = 0
+        let pp: u64 = fld(lp, 1, &pn)
+        var sn: usize = 0
+        let sp: u64 = fld(lp, 2, &sn)
+        var dn: usize = 0
+        let dp: u64 = fld(lp, 3, &dn)
+        let tp: u64 = lp + (2 + pn + 1 + sn + 1 + dn + 1) as u64
+        var tn: usize = 0
+        if 2 + pn + 1 + sn + 1 + dn + 1 <= ll {
+            tn = ll - (2 + pn + 1 + sn + 1 + dn + 1)
+        }
+        var stamp: u64 = 0
+        var q: usize = 0
+        while q < sn {
+            stamp = stamp * 10 + (r_ld8(sp, q) - 48 as u8) as u64
+            q = q + 1
+        }
+        var idb: [u8; 96] = [0 as u8; 96]
+        var ib: SB = sb((&idb[0]) as u64, 95)
+        full_id(&ib, i, pp, pn)
+        let incoming: bool = is(dp, dn, "in")
+        if incoming {
+            msgs_add(ib.ptr, ib.len, stamp, "in", false, tp, tn)
+            // the event and the bell
+            actwire.ob_reset()
+            ob_s("event social.message\nid=")
+            actwire.ob_n(ib.ptr, ib.len as u64)
+            actwire.ob_ch(10)
+            ob_s("text=")
+            var k: usize = tn
+            if k > 200 {
+                k = 200
+            }
+            ob_safe(tp, k)
+            actwire.ob_ch(10)
+            actwire.send_msg(svc_bus, actwire.K_EVT, evt_no,
+                actwire.ob_ptr(), actwire.ob_len())
+            evt_no = evt_no + 1
+            var nb: [u8; 160] = [0 as u8; 160]
+            var bb: SB = sb((&nb[0]) as u64, 159)
+            name_into(&bb, ib.ptr, ib.len)
+            sb_bytes(&bb, ": ".p as u64, 2)
+            sb_bytes(&bb, tp, tn)
+            bell(bb.ptr, bb.len)
+            say("social: message from ")
+            sayb(ib.ptr, ib.len)
+            say("\n")
+        } else {
+            msgs_add(ib.ptr, ib.len, stamp, "out", true, tp, tn)
+        }
+}
+
 // what came since the last call, at every provider that can chat
 fn poll_messages() {
     var out: SB = sb((&st_out[0]) as u64, 16383)
@@ -1677,7 +1749,7 @@ fn poll_messages() {
     var changed: bool = false
     var i: usize = 0
     while i < n_prov {
-        if has_cap(i, "inbox") && p_state[i] != 3 as u8 {
+        if has_cap(i, "inbox") && p_state[i] != 3 as u8 && w_pid[i] == 0 {
             let code: i64 = run(i, (&w[0]) as u64, 0, 0, &out, CALL_TICKS)
             if code == 0 {
                 var at: usize = 0
@@ -1685,62 +1757,151 @@ fn poll_messages() {
                     let lp: u64 = out.ptr + at as u64
                     let ll: usize = line_len(lp)
                     if ll > 2 && r_ld8(lp, 0) == 109 as u8 && r_ld8(lp, 1) == 9 as u8 {
-                        // m peer stamp in|out text
-                        var pn: usize = 0
-                        let pp: u64 = fld(lp, 1, &pn)
-                        var sn: usize = 0
-                        let sp: u64 = fld(lp, 2, &sn)
-                        var dn: usize = 0
-                        let dp: u64 = fld(lp, 3, &dn)
-                        let tp: u64 = lp + (2 + pn + 1 + sn + 1 + dn + 1) as u64
-                        var tn: usize = 0
-                        if 2 + pn + 1 + sn + 1 + dn + 1 <= ll {
-                            tn = ll - (2 + pn + 1 + sn + 1 + dn + 1)
-                        }
-                        var stamp: u64 = 0
-                        var q: usize = 0
-                        while q < sn {
-                            stamp = stamp * 10 + (r_ld8(sp, q) - 48 as u8) as u64
-                            q = q + 1
-                        }
-                        var idb: [u8; 96] = [0 as u8; 96]
-                        var ib: SB = sb((&idb[0]) as u64, 95)
-                        full_id(&ib, i, pp, pn)
-                        let incoming: bool = is(dp, dn, "in")
-                        if incoming {
-                            msgs_add(ib.ptr, ib.len, stamp, "in", false, tp, tn)
-                            // the event and the bell
-                            actwire.ob_reset()
-                            ob_s("event social.message\nid=")
-                            actwire.ob_n(ib.ptr, ib.len as u64)
-                            actwire.ob_ch(10)
-                            ob_s("text=")
-                            var k: usize = tn
-                            if k > 200 {
-                                k = 200
-                            }
-                            ob_safe(tp, k)
-                            actwire.ob_ch(10)
-                            actwire.send_msg(svc_bus, actwire.K_EVT, evt_no,
-                                actwire.ob_ptr(), actwire.ob_len())
-                            evt_no = evt_no + 1
-                            var nb: [u8; 160] = [0 as u8; 160]
-                            var bb: SB = sb((&nb[0]) as u64, 159)
-                            name_into(&bb, ib.ptr, ib.len)
-                            sb_bytes(&bb, ": ".p as u64, 2)
-                            sb_bytes(&bb, tp, tn)
-                            bell(bb.ptr, bb.len)
-                            say("social: message from ")
-                            sayb(ib.ptr, ib.len)
-                            say("\n")
-                        } else {
-                            msgs_add(ib.ptr, ib.len, stamp, "out", true, tp, tn)
-                        }
+                        msg_line(i, lp, ll)
                         changed = true
                     }
                     at = at + ll + 1
                 }
             }
+        }
+        i = i + 1
+    }
+    if changed {
+        msgs_save()
+    }
+}
+
+fn watch_start(i: usize) {
+    w_next[i] = actwire.ticks() + WATCH_RETRY_TICKS
+    var fds: [i32; 2] = [0; 2]
+    if syscall(S_PIPE, (&fds[0]) as i64, 0, 0, 0, 0, 0) < 0 {
+        return
+    }
+    var wd: [u8; 6] = "watch\0"
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&wd[0]) as u64
+    var v1: [u8; 3] = "v1\0"
+    var dc: [u8; 100] = [0 as u8; 100]
+    var argv: [u64; 12] = [0 as u64; 12]
+    build_argv(i, &ws, &argv, &dc, &v1)
+    let kid: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
+    if kid < 0 {
+        syscall(S_CLOSE, fds[0] as i64, 0, 0, 0, 0, 0)
+        syscall(S_CLOSE, fds[1] as i64, 0, 0, 0, 0, 0)
+        return
+    }
+    if kid == 0 {
+        syscall(S_DUP2, fds[1] as i64, 1, 0, 0, 0, 0)
+        syscall(S_DUP2, fds[1] as i64, 2, 0, 0, 0, 0)
+        syscall(S_CLOSE, fds[0] as i64, 0, 0, 0, 0, 0)
+        syscall(S_CLOSE, fds[1] as i64, 0, 0, 0, 0, 0)
+        syscall(S_EXECVE, argv[0] as i64, (&argv[0]) as i64, 0, 0, 0, 0)
+        syscall(60, 127, 0, 0, 0, 0, 0)
+    }
+    syscall(S_CLOSE, fds[1] as i64, 0, 0, 0, 0, 0)
+    syscall(S_FCNTL, fds[0] as i64, F_SETFL, O_NONBLOCK, 0, 0, 0)
+    w_pid[i] = kid
+    w_fd[i] = fds[0] as i64
+    w_live[i] = 0 as u8
+    w_len[i] = 0
+}
+
+fn watch_end(i: usize) {
+    syscall(S_CLOSE, w_fd[i], 0, 0, 0, 0, 0)
+    w_pid[i] = 0
+    w_live[i] = 0 as u8
+    w_len[i] = 0
+    w_next[i] = actwire.ticks() + WATCH_RETRY_TICKS
+}
+
+fn watch_stop_all() {
+    var i: usize = 0
+    while i < n_prov {
+        if w_pid[i] > 0 {
+            var st: i32 = 0
+            syscall(S_KILL, w_pid[i], 9, 0, 0, 0, 0)
+            syscall(S_WAIT4, w_pid[i], (&st) as i64, 0, 0, 0, 0)
+            watch_end(i)
+        }
+        i = i + 1
+    }
+}
+
+fn watch_slot(i: usize) -> u64 {
+    return (&w_buf[0]) as u64 + (i * WATCH_LINE) as u64
+}
+
+fn watch_line(i: usize, lp: u64, ll: usize) -> bool {
+    if ll > 2 && r_ld8(lp, 0) == 109 as u8 && r_ld8(lp, 1) == 9 as u8 {
+        msg_line(i, lp, ll)
+        return true
+    }
+    if is(lp, ll, "watch\t1") {
+        w_live[i] = 1 as u8
+        say("social: watch live ")
+        sayb(pname(i), zlen(pname(i)))
+        say("\n")
+    }
+    return false
+}
+
+fn watch_feed(i: usize, p: u64, n: usize) -> bool {
+    var changed: bool = false
+    let slot: u64 = watch_slot(i)
+    var k: usize = 0
+    while k < n {
+        let ch: u8 = r_ld8(p, k)
+        if ch == 10 as u8 {
+            if w_len[i] < WATCH_LINE {
+                if watch_line(i, slot, w_len[i]) {
+                    changed = true
+                }
+            }
+            w_len[i] = 0
+        } else if w_len[i] < WATCH_LINE {
+            r_st8(slot, w_len[i], ch)
+            w_len[i] = w_len[i] + 1
+        }
+        k = k + 1
+    }
+    return changed
+}
+
+fn watch_drain_one(i: usize) -> bool {
+    var changed: bool = false
+    var chunk: [u8; 512] = [0 as u8; 512]
+    var more: bool = true
+    while more {
+        let n: i64 = syscall(S_READ, w_fd[i], (&chunk[0]) as i64, 512, 0, 0, 0)
+        if n > 0 {
+            if watch_feed(i, (&chunk[0]) as u64, n as usize) {
+                changed = true
+            }
+        } else {
+            more = false
+        }
+    }
+    var st: i32 = 0
+    if syscall(S_WAIT4, w_pid[i], (&st) as i64, WNOHANG, 0, 0, 0) != 0 {
+        say("social: watch ended ")
+        sayb(pname(i), zlen(pname(i)))
+        say("\n")
+        watch_end(i)
+    }
+    return changed
+}
+
+fn watch_tick() {
+    var changed: bool = false
+    var i: usize = 0
+    while i < n_prov {
+        if w_pid[i] > 0 {
+            if watch_drain_one(i) {
+                changed = true
+            }
+        } else if has_cap(i, "watch") && p_state[i] != 3 as u8
+            && actwire.ticks() >= w_next[i] {
+            watch_start(i)
         }
         i = i + 1
     }
@@ -2454,6 +2615,7 @@ fn serve(limit: u64) -> u64 {
     var next_alive: u64 = t1 + 60
     var next_act: u64 = t1 + ACT_TICKS
     var next_poll: u64 = t1 + 80
+    var next_msg: u64 = t1 + 80
     // the first list of games once the first book is in (4 s in)
     var next_games: u64 = t1 + 400
     while limit == 0 || actwire.ticks() - t1 < limit {
@@ -2476,6 +2638,7 @@ fn serve(limit: u64) -> u64 {
                 last_check = now
                 if ulib.bad(actwire.bus_find((&n_bus[0]) as u64)) {
                     say("social: orient-bus is gone\n")
+                    watch_stop_all()
                     return 0
                 }
             }
@@ -2505,9 +2668,11 @@ fn serve(limit: u64) -> u64 {
                 }
                 next_act = actwire.ticks() + ACT_TICKS
             } else if now >= next_poll {
-                poll_messages()
                 poll_invites()
                 next_poll = actwire.ticks() + POLL_TICKS
+            } else if now >= next_msg {
+                poll_messages()
+                next_msg = actwire.ticks() + msg_poll_ticks
             } else if now >= next_games {
                 if sync_games() {
                     next_games = actwire.ticks() + GAMES_TICKS
@@ -2516,7 +2681,9 @@ fn serve(limit: u64) -> u64 {
                 }
             }
         }
+        watch_tick()
     }
+    watch_stop_all()
     return 0
 }
 
@@ -2528,6 +2695,9 @@ fn u_start(args: u64) -> u64 {
         }
         if ulib.arg_count(args) >= 4 {
             refresh_ticks = ulib.to_num(ulib.arg_at(args, 3))
+        }
+        if ulib.arg_count(args) >= 5 {
+            msg_poll_ticks = ulib.to_num(ulib.arg_at(args, 4))
         }
         return serve(lim)
     }
@@ -2551,7 +2721,7 @@ fn u_start(args: u64) -> u64 {
         }
         return 0
     }
-    say("usage: social serve [ticks] [refresh-ticks] | social glocke\n")
+    say("usage: social serve [ticks] [refresh-ticks] [message-poll-ticks] | social glocke\n")
     return 1
 }
 

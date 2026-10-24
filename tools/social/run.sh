@@ -149,7 +149,7 @@ printf 'c\toma\tincoming\tunknown\tOma Rosi\t\t\t\t0\t\nc\tpeter\tfriend\tonline
 cat > "$TMPD/s1.sh" <<'EOS'
 orientbus serve 90000 &
 sleep -m 300
-social serve 90000 300 &
+social serve 90000 300 60000 &
 act watch 90000 > /tmp/events.txt &
 sleep 4
 echo ==LIST==
@@ -297,6 +297,12 @@ echo rc=$?
 socfleitec v1 -c /tmp/tf4.conf login token fkx1.u_TOKX.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 echo rc=$?
 cat /tmp/tf3.conf
+echo ==WATCH1==
+sleep 5
+echo ==PUSHED==
+act call social.messages.list id=fleitec:u_ANNA
+act call social.messages.unread
+echo ==WATCHEND==
 echo ==EVENTS==
 cat /tmp/events.txt
 echo ==LOG==
@@ -417,7 +423,7 @@ while IFS= read -r l; do
     case "$l" in OK*) ok "${l#OK    }";; FAIL*) bad "${l#FAIL  }";; esac
 done < "$TMPD/host.txt"
 n_host=$(grep -c . "$TMPD/host.txt" 2>/dev/null || echo 0)
-[ "$n_host" = 11 ] && ok "the host checked at every marker (11 checks)" || bad "host checks: $n_host of 11 ran"
+[ "$n_host" = 13 ] && ok "the host checked at every marker (13 checks)" || bad "host checks: $n_host of 13 ran"
 
 echo "== 6. events =="
 part "$A" BERTON INVISIBLE > "$TMPD/p.txt"
@@ -429,6 +435,11 @@ grep -aq "^account.u_TOKT" "$TMPD/p.txt" && ok "socfleitec takes an fkt1 token (
 grep -aq "^token=fkt1.u_TOKT.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "$TMPD/p.txt" && ok "the fkt1 token is written to the configuration as it is" || bad "fkt1 token not in the configuration: $(tail -3 "$TMPD/p.txt")"
 grep -aq "^err.bad" "$TMPD/p.txt" && ok "a token of another family (fkx1) is still refused" || bad "fkx1 token was not refused"
 grep -aq "^account.u_TOKX" "$TMPD/p.txt" && bad "fkx1 token gave an account" || ok "the refused token names no account"
+echo "== 13. push instead of polling (r40) =="
+has "$A" "social: watch live fleitec" "socfleitec watch holds a live relay session for the fleitec account"
+part "$A" PUSHED WATCHEND > "$TMPD/p.txt"
+grep -aq "|in|0|Push von Anna, ohne Abfrage" "$TMPD/p.txt" && ok "anna's message arrived with message polling set to 10 minutes (it came by push)" || bad "no pushed message: $(grep -a message "$TMPD/p.txt" | head -4)"
+grep -aq "^contact.[0-9]=fleitec:u_ANNA|1" "$TMPD/p.txt" && ok "... and counts as unread" || bad "pushed message not unread"
 part "$A" EVENTS LOG > "$TMPD/p.txt"
 has "$TMPD/p.txt" "social.presence" "an event social.presence went out on the bus"
 grep -aq "id=fleitec:u_BERT" "$TMPD/p.txt" && ok "... for bert" || bad "no event for bert"

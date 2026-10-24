@@ -40,7 +40,7 @@ import std.crypto.random
 
 export {
     Relay, relay_new, relay_open, relay_close, relay_dir, relay_send,
-    relay_fetch, relay_srv,
+    relay_fetch, relay_srv, relay_watch, relay_watch_poll,
     key_load_or_create, key_hex_pub,
     Sess, sess_init, seal, open_sealed,
     sync_wrap, SYNC_HEAD, F_ENC, F_SYNC, F_CHANNEL, HDR_LEN,
@@ -57,6 +57,16 @@ const T_OK: u8 = 4
 const T_MSG: u8 = 5
 const T_ACK: u8 = 6
 const T_FETCH: u8 = 7
+const T_WATCH: u8 = 13
+const T_PUSH: u8 = 14
+const T_PING: u8 = 15
+const T_PONG: u8 = 16
+const WATCH_BEAT_MS: u64 = 15000
+const WATCH_PING_S: u64 = 10
+const WATCH_BURST: usize = 64
+const E_AGAIN: i32 = -11
+const WATCH_SLICE_MS: u64 = 30
+const WATCH_FRAME_MS: u64 = 8000
 const T_END: u8 = 9
 const T_ERR: u8 = 11
 const T_BYE: u8 = 12
@@ -317,12 +327,13 @@ struct Relay {
     hdr: [u8; 90],
     body: rt.Buf,
     err: i32,
+    beat: u64,
 }
 
 fn relay_new(key64: u64) -> Relay {
     var r: Relay = Relay { conn: net.Conn { fd: -1, err: 0, peer: 0 as u32,
         peer_port: 0 as u16 }, open: false, key: [0; 64], srv: [0; 32],
-        hdr: [0; 90], body: rt.buf_new(), err: 0 }
+        hdr: [0; 90], body: rt.buf_new(), err: 0, beat: 0 }
     var i: usize = 0
     while i < 64 {
         r.key[i] = rt.ld8(key64, i)
@@ -400,6 +411,11 @@ fn read_frame(r: *mut Relay) -> i32 {
     if !read_full(r, hp, HDR_LEN) {
         return -1
     }
+    return frame_rest(r)
+}
+
+fn frame_rest(r: *mut Relay) -> i32 {
+    let hp: u64 = (&(*r).hdr[0]) as u64
     if rt.ld8(hp, 0) != 70 as u8 || rt.ld8(hp, 1) != 67 as u8 || rt.ld8(hp, 2) != 1 as u8 {
         return -1
     }
@@ -546,6 +562,107 @@ fn relay_fetch(r: *mut Relay, want: usize, out: *mut rt.Buf) -> i32 {
             rt.buf_push_bytes(out, rt.buf_ptr(&(*r).body), rt.buf_len(&(*r).body))
             got = got + 1
         }
+    }
+    return got
+}
+
+// ------------------------------------------------------ the live session
+
+fn watch_ping(r: *mut Relay) -> bool {
+    var st: rt.Buf = rt.buf_new()
+    put_be(&st, now_unix() * 1000, 8)
+    let ok: bool = write_frame(r, T_PING, 0 as u8, 0 as u64, now_unix(), 0 as u64,
+        st.ptr, 8)
+    rt.buf_free(&st)
+    return ok
+}
+
+fn relay_watch(r: *mut Relay) -> bool {
+    var pay: rt.Buf = rt.buf_new()
+    put_be(&pay, WATCH_BEAT_MS, 8)
+    let sent: bool = write_frame(r, T_WATCH, 0 as u8, 0 as u64, now_unix(), 0 as u64,
+        pay.ptr, 8)
+    rt.buf_free(&pay)
+    if !sent || read_frame(r) != T_OK as i32 {
+        return false
+    }
+    (*r).beat = now_unix()
+    (*r).err = 0
+    let sl: bool = net.set_timeout(&(*r).conn, WATCH_SLICE_MS) catch false
+    return sl
+}
+
+fn watch_first_byte(r: *mut Relay) -> i32 {
+    var bad: bool = false
+    let k: usize = net.read(&(*r).conn, (&(*r).hdr[0]) as u64, 1) catch bad_len(&bad)
+    if bad {
+        if net.conn_error(&(*r).conn) == E_AGAIN {
+            return 0
+        }
+        return -1
+    }
+    if k == 0 {
+        return -1
+    }
+    return 1
+}
+
+fn watch_frame(r: *mut Relay) -> i32 {
+    let blocking: bool = net.set_timeout(&(*r).conn, WATCH_FRAME_MS) catch false
+    if !blocking {
+        return -1
+    }
+    var kind: i32 = -1
+    if read_full(r, (&(*r).hdr[1]) as u64, HDR_LEN - 1) {
+        kind = frame_rest(r)
+    }
+    let back: bool = net.set_timeout(&(*r).conn, WATCH_SLICE_MS) catch false
+    if !back {
+        return -1
+    }
+    return kind
+}
+
+fn relay_watch_poll(r: *mut Relay, out: *mut rt.Buf) -> i32 {
+    if (*r).err < 0 {
+        return -1
+    }
+    var got: i32 = 0
+    var burst: usize = 0
+    while burst < WATCH_BURST {
+        burst = burst + 1
+        let fb: i32 = watch_first_byte(r)
+        if fb < 0 {
+            (*r).err = -1
+            break
+        }
+        if fb == 0 {
+            break
+        }
+        let kind: i32 = watch_frame(r)
+        if kind < 0 || kind == T_ERR as i32 || kind == T_BYE as i32 {
+            (*r).err = -1
+            break
+        }
+        if kind == T_PUSH as i32 {
+            rt.buf_push_bytes(out, rt.buf_ptr(&(*r).body), rt.buf_len(&(*r).body))
+            got = got + 1
+        } else if kind == T_PING as i32 {
+            if !write_frame(r, T_PONG, 0 as u8, 0 as u64, now_unix(), 0 as u64,
+                rt.buf_ptr(&(*r).body), rt.buf_len(&(*r).body)) {
+                (*r).err = -1
+                break
+            }
+        }
+    }
+    if (*r).err == 0 && now_unix() - (*r).beat >= WATCH_PING_S {
+        (*r).beat = now_unix()
+        if !watch_ping(r) {
+            (*r).err = -1
+        }
+    }
+    if got == 0 && (*r).err < 0 {
+        return -1
     }
     return got
 }
