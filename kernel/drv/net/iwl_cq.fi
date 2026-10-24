@@ -1,0 +1,182 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import mm.mem
+import wlan.iwl_probe
+import wlan.iwl_pwr
+import wlan.iwl_cmdq
+import wlan.iwl_mvm
+import wlan.iwl_mvm_scan
+import wlan.iwl_mvm_ctx
+import wlan.iwl_le
+import drv.net.iwl_fake
+
+export { cq_alloc, cq_stage_init, cq_stage_alive, cq_selftest, E_CQ_MEM }
+
+const E_CQ_MEM: i64 = -77
+const CQ_PAGES_RXBD: u64 = 1
+const CQ_PAGES_STTS: u64 = 1
+const CQ_PAGES_TFD: u64 = 8
+const CQ_PAGES_CMD: u64 = 4
+const CQ_PAGES_KW: u64 = 1
+const CQ_PAGES_BC: u64 = 8
+const CQ_PAGES_NOTIF: u64 = 2
+const CQ_PAGES_TOTAL: u64 = 1 + 1 + 256 + 8 + 4 + 1 + 8 + 2
+const SELFTEST_STRESS: u64 = 300
+const SELFTEST_UID: u64 = 0x1234
+const SELFTEST_CHANNELS: u64 = 14
+
+fn put_i(v: i64) {
+    if v < 0 {
+        serial.put(45 as u8)
+        serial.dec((0 - v) as u64)
+    } else {
+        serial.dec(v as u64)
+    }
+}
+
+fn zero_run(a: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let q: *mut u64 = (a + i) as *mut u64
+        *q = 0
+        i = i + 8
+    }
+}
+
+fn cq_alloc(state: u64, cq: *mut iwl_cmdq.Cq) -> i64 {
+    let a: u64 = mem.frame_run(state, CQ_PAGES_TOTAL)
+    if a == 0 { return E_CQ_MEM }
+    zero_run(a, CQ_PAGES_TOTAL * 4096)
+    let bd: u64 = a
+    let stts: u64 = bd + CQ_PAGES_RXBD * 4096
+    let rb: u64 = stts + CQ_PAGES_STTS * 4096
+    let tfd: u64 = rb + 256 * 4096
+    let cmd: u64 = tfd + CQ_PAGES_TFD * 4096
+    let kw: u64 = cmd + CQ_PAGES_CMD * 4096
+    let bc: u64 = kw + CQ_PAGES_KW * 4096
+    let notif: u64 = bc + CQ_PAGES_BC * 4096
+    iwl_cmdq.cq_attach(cq, bd, stts, rb, tfd, cmd, kw, bc, notif)
+    return 0
+}
+
+fn cq_stage_init(state: u64, cq: *mut iwl_cmdq.Cq, p: *mut iwl_probe.Probe) -> i64 {
+    var s_in: [u8; 17] = "iwl: cq init rc=\0"
+    var r: i64 = 0
+    if (*cq).rb == 0 {
+        r = cq_alloc(state, cq)
+    }
+    if r == 0 {
+        r = iwl_cmdq.cq_nic_init(cq, p)
+    }
+    serial.puts((&s_in[0]) as u64)
+    put_i(r)
+    serial.nl()
+    return r
+}
+
+fn cq_stage_alive(state: u64, cq: *mut iwl_cmdq.Cq, p: *mut iwl_probe.Probe, scratch: u64) -> i64 {
+    var s_al: [u8; 19] = "iwl: cq alive scd=\0"
+    var s_rc: [u8; 5] = " rc=\0"
+    var s_sc: [u8; 18] = "iwl: cq sched rc=\0"
+    if (*cq).rx_on == 0 { return iwl_cmdq.E_CQ_NORX }
+    let scd: i64 = iwl_cmdq.cq_alive(cq, p, scratch, 4096)
+    serial.puts((&s_al[0]) as u64)
+    if scd < 0 {
+        serial.put(48 as u8)
+        serial.puts((&s_rc[0]) as u64)
+        put_i(scd)
+        serial.nl()
+        return scd
+    }
+    serial.hex(scd as u64)
+    serial.puts((&s_rc[0]) as u64)
+    serial.put(48 as u8)
+    serial.nl()
+    let r: i64 = iwl_cmdq.cq_fw_alive(cq, p, scd as u64)
+    serial.puts((&s_sc[0]) as u64)
+    put_i(r)
+    serial.nl()
+    return r
+}
+
+fn line(tag: u64, a: i64, b: i64) {
+    var s_p: [u8; 9] = "iwl: cq \0"
+    var s_a: [u8; 5] = " rc=\0"
+    var s_b: [u8; 4] = " v=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(tag)
+    serial.puts((&s_a[0]) as u64)
+    put_i(a)
+    serial.puts((&s_b[0]) as u64)
+    put_i(b)
+    serial.nl()
+}
+
+fn send_status(cq: *mut iwl_cmdq.Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64) -> i64 {
+    let n: i64 = iwl_cmdq.cq_send(cq, p, buf, len, resp, 256)
+    if n < 0 { return n }
+    return iwl_cmdq.cq_resp_status(resp, n as u64)
+}
+
+fn cq_selftest(state: u64, cq: *mut iwl_cmdq.Cq, p: *mut iwl_probe.Probe, region: u64) {
+    var t_bind: [u8; 8] = "binding\0"
+    var t_phy: [u8; 7] = "phycfg\0"
+    var t_scan: [u8; 5] = "scan\0"
+    var t_cplt: [u8; 14] = "scan-complete\0"
+    var t_uid: [u8; 9] = "scan-uid\0"
+    var t_stress: [u8; 7] = "stress\0"
+    var t_big: [u8; 8] = "ctl-big\0"
+    var t_norx: [u8; 9] = "ctl-norx\0"
+    var t_notx: [u8; 9] = "ctl-notx\0"
+    var t_fnorx: [u8; 13] = "ctl-fakenorx\0"
+    var t_sum: [u8; 22] = "iwl: cq SUMMARY cmds=\0"
+    var s_pk: [u8; 7] = " pkts=\0"
+    var s_dr: [u8; 8] = " drops=\0"
+    var s_vi: [u8; 7] = " viol=\0"
+    var s_lc: [u8; 7] = " last=\0"
+    let buf: u64 = mem.frame_run(state, 2)
+    let resp: u64 = mem.frame_run(state, 1)
+    if buf == 0 || resp == 0 { return }
+    zero_run(buf, 8192)
+    zero_run(resp, 4096)
+    let ml: u64 = iwl_mvm_ctx.mvm_binding(buf, 0, 0, 0, iwl_mvm_ctx.CTXT_ADD, 0, 0, 0, 0)
+    line((&t_bind[0]) as u64, send_status(cq, p, buf, ml, resp), ml as i64)
+    let pl: u64 = iwl_mvm.mvm_phy_cfg(buf, 0, 0, 0x1234, 0, 0)
+    line((&t_phy[0]) as u64, send_status(cq, p, buf, pl, resp), pl as i64)
+    let sl: u64 = iwl_mvm_scan.mvm_scan_req(buf, 0, 0, 0, SELFTEST_UID, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, SELFTEST_CHANNELS)
+    line((&t_scan[0]) as u64, send_status(cq, p, buf, sl, resp), sl as i64)
+    let nn: i64 = iwl_cmdq.cq_wait(cq, p, iwl_mvm_scan.CMD_SCAN_COMPLETE_UMAC, resp, 256, iwl_cmdq.CQ_WAIT_NOTIF)
+    line((&t_cplt[0]) as u64, nn, iwl_mvm_scan.mvm_scan_complete_status(resp) as i64)
+    line((&t_uid[0]) as u64, nn, iwl_mvm_scan.mvm_scan_complete_uid(resp) as i64)
+    var ok: i64 = 0
+    var i: u64 = 0
+    while i < SELFTEST_STRESS {
+        let tl: u64 = iwl_mvm.mvm_tx_ant(buf, 0, 0, i & 7)
+        if send_status(cq, p, buf, tl, resp) == 0 { ok = ok + 1 }
+        i = i + 1
+    }
+    line((&t_stress[0]) as u64, ok, SELFTEST_STRESS as i64)
+    line((&t_big[0]) as u64, iwl_cmdq.cq_send(cq, p, buf, iwl_cmdq.CQ_SLOT_SIZE + 1, resp, 256), 0)
+    iwl_fake.fake_set_norx(region, 1)
+    let tl2: u64 = iwl_mvm.mvm_tx_ant(buf, 0, 0, 1)
+    line((&t_fnorx[0]) as u64, send_status(cq, p, buf, tl2, resp), 0)
+    iwl_fake.fake_set_norx(region, 0)
+    var c2: iwl_cmdq.Cq = iwl_cmdq.cq_new()
+    iwl_cmdq.cq_attach(&c2, (*cq).rx_bd, (*cq).rx_stts, (*cq).rb, (*cq).tfd, (*cq).cmdbuf, (*cq).kw, (*cq).bc, (*cq).notif)
+    line((&t_norx[0]) as u64, iwl_cmdq.cq_send(&c2, p, buf, tl2, resp, 256), 0)
+    c2.rx_on = 1
+    line((&t_notx[0]) as u64, iwl_cmdq.cq_send(&c2, p, buf, tl2, resp, 256), 0)
+    serial.puts((&t_sum[0]) as u64)
+    serial.dec(iwl_fake.fake_cmds(region))
+    serial.puts((&s_pk[0]) as u64)
+    serial.dec(iwl_fake.fake_rx_pkts(region))
+    serial.puts((&s_dr[0]) as u64)
+    serial.dec(iwl_fake.fake_rx_drops(region))
+    serial.puts((&s_vi[0]) as u64)
+    serial.dec(iwl_fake.fake_viol(region))
+    serial.puts((&s_lc[0]) as u64)
+    serial.dec(iwl_fake.fake_last_cmd(region))
+    serial.nl()
+}

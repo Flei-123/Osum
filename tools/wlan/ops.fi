@@ -1,0 +1,321 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import wlan.device
+import wlan.iwl_ops
+import wlan.mgmt
+
+const CAP: usize = 2048
+const LOG_MAX: usize = 16
+const LOG_SLOT: usize = 2700
+
+static mut log: [u8; 43200] = [0; 43200]
+static mut log_len: [usize; 16] = [0; 16]
+static mut log_n: usize = 0
+static mut rxq: [u8; 1200] = [0; 1200]
+static mut rxq_len: [usize; 4] = [0; 4]
+static mut rxq_n: usize = 0
+static mut rxq_at: usize = 0
+static mut f0: [u8; 2048] = [0; 2048]
+static mut f1: [u8; 2048] = [0; 2048]
+static mut f2: [u8; 2048] = [0; 2048]
+static mut f3: [u8; 2048] = [0; 2048]
+static mut outb: [u8; 2048] = [0; 2048]
+static mut txtb: [u8; 6000] = [0; 6000]
+static mut tlen: usize = 0
+
+fn tch(c: u64) {
+    if tlen < 5990 {
+        txtb[tlen] = (c & 255) as u8
+        tlen = tlen + 1
+    }
+}
+fn tlit(w: str) {
+    var i: usize = 0
+    while i < w.n {
+        tch(rt.ld8(w.p as u64, i) as u64)
+        i = i + 1
+    }
+}
+fn tnum(v: u64) {
+    if v >= 10 { tnum(v / 10) }
+    tch(48 + (v % 10))
+}
+fn tsigned(v: i64) {
+    if v < 0 {
+        tch(45)
+        tnum((0 - v) as u64)
+    } else {
+        tnum(v as u64)
+    }
+}
+fn thex(p: u64, n: usize) {
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        tch(d[(v >> 4) as usize] as u64)
+        tch(d[(v & 15) as usize] as u64)
+        i = i + 1
+    }
+}
+fn temit() {
+    io.print_line_bytes((&txtb[0]) as u64, tlen)
+    tlen = 0
+}
+
+fn hexval(c: u64) -> i64 {
+    if c >= 48 && c <= 57 { return (c - 48) as i64 }
+    if c >= 97 && c <= 102 { return (c - 87) as i64 }
+    return -1
+}
+
+fn field_hex(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 { i = i + 1 }
+    *at = i
+    let n: usize = i - start
+    if n == 0 || n % 2 != 0 || n / 2 > CAP { return -1 }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hexval(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hexval(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 { return -1 }
+        rt.st8(dst, o, ((hi * 16 + lo) & 255) as u8)
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+fn field_num(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    var v: i64 = 0
+    while i < len && rt.ld8(line, i) >= 48 as u8 && rt.ld8(line, i) <= 57 as u8 {
+        v = v * 10 + ((rt.ld8(line, i) as i64) - 48)
+        i = i + 1
+    }
+    if i == start { return -1 }
+    *at = i
+    return v
+}
+
+fn word_is(line: u64, len: usize, at: *mut usize, w: str) -> bool {
+    var i: usize = 0
+    while i < w.n {
+        if i >= len || rt.ld8(line, i) != rt.ld8(w.p as u64, i) { return false }
+        i = i + 1
+    }
+    if len > w.n && rt.ld8(line, w.n) != 32 as u8 { return false }
+    *at = w.n
+    return true
+}
+
+fn t_submit(ctx: u64, buf: u64, len: usize) -> i64 {
+    if log_n >= LOG_MAX || len > LOG_SLOT { return -1 }
+    var i: usize = 0
+    while i < len {
+        log[log_n * LOG_SLOT + i] = rt.ld8(buf, i)
+        i = i + 1
+    }
+    log_len[log_n] = len
+    log_n = log_n + 1
+    return 0
+}
+
+fn t_poll(ctx: u64, buf: u64, room: usize) -> i64 {
+    if rxq_at >= rxq_n { return 0 }
+    let n: usize = rxq_len[rxq_at]
+    var i: usize = 0
+    while i < n {
+        rt.st8(buf, i, rxq[rxq_at * 300 + i])
+        i = i + 1
+    }
+    rxq_at = rxq_at + 1
+    return n as i64
+}
+
+fn rx_put(src: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        rxq[rxq_n * 300 + i] = rt.ld8(src, i)
+        i = i + 1
+    }
+    rxq_len[rxq_n] = n
+    rxq_n = rxq_n + 1
+}
+
+fn rx_phy(energy: u64, channel: u64) {
+    var p: [u8; 80] = [0; 80]
+    p[0] = 0xC0 as u8
+    p[2] = 0 as u8
+    p[26] = 0 as u8
+    p[22 + 4] = (channel & 255) as u8
+    p[32] = (energy & 255) as u8
+    rx_put((&p[0]) as u64, 80)
+}
+
+fn rx_mpdu(frame: u64, n: usize) {
+    var p: [u8; 290] = [0; 290]
+    p[0] = 0xC1 as u8
+    p[4] = (n & 255) as u8
+    p[5] = (n >> 8) as u8
+    var i: usize = 0
+    while i < n {
+        p[8 + i] = rt.ld8(frame, i)
+        i = i + 1
+    }
+    rx_put((&p[0]) as u64, n + 8 + 8)
+}
+
+fn rx_scan_done(uid: u64, status: u64) {
+    var p: [u8; 16] = [0; 16]
+    p[0] = 0x0F as u8
+    p[4] = uid as u8
+    p[10] = status as u8
+    rx_put((&p[0]) as u64, 16)
+}
+
+fn dump_log() {
+    var k: usize = 0
+    while k < log_n {
+        tlit("cmd ")
+        thex((&log[k * LOG_SLOT]) as u64, log_len[k])
+        temit()
+        k = k + 1
+    }
+}
+
+fn seq_cmd(hw: bool) {
+    var g: device.Device = device.device_new()
+    var o: iwl_ops.Mvm = iwl_ops.mvm_new()
+    var mac: [u8; 6] = [2, 0, 0, 0, 1, 0]
+    var bssid: [u8; 6] = [2, 0, 0, 0, 0, 0]
+    var key: [u8; 16] = [0x55; 16]
+    var ssid: [u8; 4] = [0x48, 0x50, 0x41, 0x50]
+    iwl_ops.ops_set_address(&o, (&mac[0]) as u64)
+    iwl_ops.ops_set_hw_crypto(&o, hw)
+    log_n = 0
+    rxq_n = 0
+    rxq_at = 0
+    if !iwl_ops.ops_attach(&g, &o, 0, t_submit, t_poll) { tlit("attach fail"); temit(); return }
+    let r0: i64 = iwl_ops.ops_setup(&o)
+    let r1: i64 = iwl_ops.ops_peer_add(&o, (&bssid[0]) as u64)
+    let r2: i64 = iwl_ops.ops_scan_start(&o, (&ssid[0]) as u64, 4)
+    let r3: i64 = device.channel_set(&g, 6, 2)
+    let r4: i64 = device.key_set(&g, device.KEY_PTK, 0, (&key[0]) as u64, 16)
+    let r5: i64 = device.key_set(&g, device.KEY_GTK, 1, (&key[0]) as u64, 16)
+    var fr: [u8; 30] = [0; 30]
+    let fl: usize = mgmt.auth_build((&fr[0]) as u64, (&mac[0]) as u64, (&bssid[0]) as u64)
+    let r6: i64 = device.send(&g, (&fr[0]) as u64, fl)
+    dump_log()
+    tlit("rc ")
+    tsigned(r0); tch(32); tsigned(r1); tch(32); tsigned(r2); tch(32); tsigned(r3); tch(32)
+    tsigned(r4); tch(32); tsigned(r5); tch(32); tsigned(r6)
+    tlit(" keys ")
+    tnum(iwl_ops.ops_keys_sent(&o))
+    tlit(" ccmp ")
+    if device.kann_ccmp_von(&g) { tch(49) } else { tch(48) }
+    temit()
+    rx_phy(60, 6)
+    rx_mpdu((&fr[0]) as u64, fl)
+    rx_scan_done(1, 1)
+    let n: i64 = device.receive(&g, (&outb[0]) as u64, 2048)
+    tlit("rx ")
+    tsigned(n)
+    tlit(" rssi ")
+    tsigned(iwl_ops.ops_rssi(&o))
+    tlit(" scan ")
+    tnum(iwl_ops.ops_scan_state(&o))
+    tch(32)
+    if n > 0 { thex((&outb[0]) as u64, n as usize) }
+    temit()
+    let n2: i64 = device.receive(&g, (&outb[0]) as u64, 2048)
+    tlit("rx2 ")
+    tsigned(n2)
+    tlit(" scan ")
+    tnum(iwl_ops.ops_scan_state(&o))
+    temit()
+}
+
+fn run_line(line: u64, len: usize) {
+    var at: usize = 0
+    if word_is(line, len, &at, "seqsw") { seq_cmd(false); return }
+    if word_is(line, len, &at, "seqhw") { seq_cmd(true); return }
+    if word_is(line, len, &at, "build") {
+        let ch: i64 = field_num(line, len, &at)
+        let sl: i64 = field_hex(line, len, &at, (&f0[0]) as u64)
+        let ml: i64 = field_hex(line, len, &at, (&f1[0]) as u64)
+        let bl: i64 = field_hex(line, len, &at, (&f2[0]) as u64)
+        if ch < 0 || sl < 0 || ml != 6 || bl != 6 { tlit("fail"); temit(); return }
+        let al: usize = mgmt.auth_build((&outb[0]) as u64, (&f1[0]) as u64, (&f2[0]) as u64)
+        tlit("auth ")
+        thex((&outb[0]) as u64, al)
+        temit()
+        let cl: i64 = mgmt.assoc_build((&outb[0]) as u64, (&f1[0]) as u64, (&f2[0]) as u64,
+            (&f0[0]) as u64, sl as u64, ch as u64, 2048)
+        tlit("assoc ")
+        if cl > 0 { thex((&outb[0]) as u64, cl as usize) }
+        temit()
+        return
+    }
+    if word_is(line, len, &at, "m2") {
+        let a: i64 = field_hex(line, len, &at, (&f0[0]) as u64)
+        let b: i64 = field_hex(line, len, &at, (&f1[0]) as u64)
+        let c: i64 = field_hex(line, len, &at, (&f2[0]) as u64)
+        if a < 99 || b != 32 || c != 16 { tlit("fail"); temit(); return }
+        let m: i64 = mgmt.m2_build((&outb[0]) as u64, (&f0[0]) as u64, (&f1[0]) as u64, (&f2[0]) as u64, 2)
+        tlit("m2 ")
+        if m > 0 { thex((&outb[0]) as u64, m as usize) }
+        temit()
+        return
+    }
+    if word_is(line, len, &at, "m4") {
+        let a: i64 = field_hex(line, len, &at, (&f0[0]) as u64)
+        let c: i64 = field_hex(line, len, &at, (&f2[0]) as u64)
+        if a < 99 || c != 16 { tlit("fail"); temit(); return }
+        let m: i64 = mgmt.m4_build((&outb[0]) as u64, (&f0[0]) as u64, (&f2[0]) as u64, 2)
+        tlit("m4 ")
+        if m > 0 { thex((&outb[0]) as u64, m as usize) }
+        temit()
+        return
+    }
+    if word_is(line, len, &at, "parse") {
+        let a: i64 = field_hex(line, len, &at, (&f0[0]) as u64)
+        let b: i64 = field_hex(line, len, &at, (&f2[0]) as u64)
+        if a < 0 || b != 6 { tlit("fail"); temit(); return }
+        tlit("auth ")
+        tsigned(mgmt.auth_status((&f0[0]) as u64, a as usize, (&f2[0]) as u64))
+        tlit(" assoc ")
+        tsigned(mgmt.assoc_status((&f0[0]) as u64, a as usize, (&f2[0]) as u64))
+        tlit(" aid ")
+        tnum(mgmt.assoc_aid((&f0[0]) as u64, a as usize))
+        tlit(" eapol ")
+        tsigned(mgmt.eapol_offset((&f0[0]) as u64, a as usize))
+        temit()
+        return
+    }
+    tlit("fail")
+    temit()
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) { return 1 }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var at: usize = 0
+    while at < n {
+        var e: usize = at
+        while e < n && rt.ld8(p, e) != 10 as u8 { e = e + 1 }
+        var len: usize = e - at
+        while len > 0 && rt.ld8(p, at + len - 1) == 13 as u8 { len = len - 1 }
+        if len > 0 { run_line(p + at as u64, len) }
+        at = e + 1
+    }
+    rt.buf_free(&inp)
+    return 0
+}
