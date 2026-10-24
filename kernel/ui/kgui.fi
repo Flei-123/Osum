@@ -31,6 +31,7 @@ import block.blk
 import ldr.bootmod
 import ldr.elf
 import gfx.fb
+import gfx.fbmtrr
 import fs.file
 import ui.shot
 import ipc.tip
@@ -1532,6 +1533,16 @@ fn perf_rate(state: u64, bytes: u64, cyc: u64, rounds: u64) -> u64 {
     return bytes * rounds / us
 }
 
+fn fb_clear_rate(state: u64, bytes: u64, color: u64) -> u64 {
+    let t: u64 = apic.tsc()
+    var n: u64 = 0
+    while n < GFX_RUNDEN && us_of(state, apic.tsc() -% t) < 400000 {
+        fb.clear(state, color)
+        n = n + 1
+    }
+    return perf_rate(state, bytes, apic.tsc() -% t, n)
+}
+
 fn fbperf(state: u64, back: u64) {
     var s_h: [u8; 16] = "        fbperf:\0"
     var s_w: [u8; 16] = "  fb_write_mbs=\0"
@@ -1540,6 +1551,10 @@ fn fbperf(state: u64, back: u64) {
     var s_m: [u8; 15] = "  cache_mode=\0\0"
     var s_p: [u8; 11] = "  pat_wc=\0\0"
     var s_t: [u8; 14] = "  mtrr_type=\0\0"
+    var s_f0: [u8; 17] = "  fb_write0_mbs=\0"
+    var s_ms: [u8; 16] = "  mtrr_wc_st=\0\0\0"
+    var s_mr: [u8; 16] = "  mtrr_wc_rs=\0\0\0"
+    var s_mc: [u8; 16] = "  mtrr_wc_n=\0\0\0\0"
     var s_n: [u8; 37] = "        fbperf: no time base\0\0\0\0\0\0\0\0\0"
     if apic.tsc_hz(state) == 0 {
         serial.puts((&s_n[0]) as u64)
@@ -1578,13 +1593,25 @@ fn fbperf(state: u64, back: u64) {
         cpy = perf_rate(state, bytes, apic.tsc() -% t, n)
     }
     fb.set_back(state, 0)
-    t = apic.tsc()
-    n = 0
-    while n < GFX_RUNDEN && us_of(state, apic.tsc() -% t) < 400000 {
-        fb.clear(state, farbe)
-        n = n + 1
+    var fbw: u64 = fb_clear_rate(state, bytes, farbe)
+    let fbw0: u64 = fbw
+    n = GFX_RUNDEN
+    if fb.wc(state) != 0 {
+        let st: u64 = fbmtrr.setup(state, fb.phys(state), fb.pitch(state) *% h, true, fb.nomtrr_an(state))
+        if st == fbmtrr.ST_TENTATIVE {
+            fbw = fb_clear_rate(state, bytes, farbe)
+            if fbw * 4 < fbw0 * 5 {
+                fbmtrr.revert(state, fbmtrr.RS_NO_GAIN)
+                fbw = fbw0
+            } else {
+                fbmtrr.confirm(state)
+            }
+        }
+    } else {
+        fbmtrr.setup(state, 0, 0, false, fb.nomtrr_an(state))
     }
-    let fbw: u64 = perf_rate(state, bytes, apic.tsc() -% t, n)
+    fb.mtrr_probe(state)
+    fb.perf_set(state, fb.PF_FBW0, fbw0)
     if back != 0 {
         fb.set_back(state, back)
         fb.dirty_all(state)
@@ -1609,6 +1636,14 @@ fn fbperf(state: u64, back: u64) {
     serial.dec(fb.wc(state))
     serial.puts((&s_t[0]) as u64)
     serial.dec(fb.perf_get(state, fb.PF_MTRR) & 255)
+    serial.puts((&s_f0[0]) as u64)
+    serial.dec(fbw0)
+    serial.puts((&s_ms[0]) as u64)
+    serial.dec(fbmtrr.state_of(state))
+    serial.puts((&s_mr[0]) as u64)
+    serial.dec(fbmtrr.reason_of(state))
+    serial.puts((&s_mc[0]) as u64)
+    serial.dec(fbmtrr.count_of(state))
     serial.nl()
 }
 
