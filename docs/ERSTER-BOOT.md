@@ -73,9 +73,9 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
-## Stick 7 HP (24.10.2026, main @COMMIT@)
+## Stick 7 HP (24.10.2026, Baustand 6f9bbf42 = main ohne Touchpad-Tipp-Sperre f7855e52)
 
-- **Datei:** `orientos-usb-hp-20261024-@COMMIT@.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `@SHA@`. Ersetzt Stick 6 (SHA 0e21cfb0...).
+- **Datei:** `orientos-usb-hp-20261024-6f9bbf42.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `4daaae3b2ab0f42bd8ad4a9f943be4fcd15a7c234129c8e0b076472e92d7c714`. Ersetzt Stick 6 (SHA 0e21cfb0...).
 - **Neu gegenueber Stick 6:** WLAN-8265-Firmware-Ladefehler `fw_load_init err=-45` (FH end-of-TFD timeout) behoben: PCI-Bus-Master wird vor dem Firmware-Laden gesetzt (vorher nie -> kein DMA), APMG-DMA-Takt + NIC-Funkkonfig fuer Familie 8000. `/proc/wlan` hat neue Diagnosezeilen `fail_hw=`, `fail_fhr=`, `fail_fh=`. Dazu: wlan.conf speichern als normaler Nutzer + Persistenz auf der Stick-EFI-Partition, Fn-Helligkeitstasten (`/proc/hotkeys`), Explorer-Rand ziehen ohne Flackern.
 - **Ehrlich:** Wirkung am echten 8265 UNVERIFIZIERT -- das ist genau der Test. Scan-Anfrage der echten Firmware (v7) ist noch NICHT umgestellt (Worker W-WLAN18b); selbst wenn die Firmware jetzt laedt, kann der Scan noch scheitern.
 - **Foto-Checkliste:** (1) Terminal `cat /proc/wlan` -- phase, err, failed_at und die neuen `fail_*`-Zeilen (alle Zeilen auf das Foto). (2) Fn+Helligkeit hoch/runter je 3x, dann `cat /proc/hotkeys` und `cat /proc/backlight` -- Foto; meldet: aendert sich die Helligkeit, eine Stufe pro Druck? (3) Einstellungen > WLAN: SSID + Passwort speichern, Neustart: Stehen SSID/Passwort wieder drin (`cat /etc/wlan.conf`)? (4) Explorer-Fensterrand ziehen: Flackern ja/nein?
