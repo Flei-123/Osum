@@ -1,0 +1,145 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import bus.pci
+import wlan.iwl_probe
+import wlan.iwl_pwr
+import wlan.iwl_g1
+import wlan.iwl_cmdq
+import wlan.iwl_rxscan
+import wlan.iwl_sbtrace
+import wlan.iwl_rxexp_tab
+
+export { run, ALIVE_NONE, ALIVE_CSR, ALIVE_RX }
+
+const ALIVE_NONE: u64 = 0
+const ALIVE_CSR: u64 = 1
+const ALIVE_RX: u64 = 2
+
+const WAIT_MS: u64 = 300
+const CFG_COMMAND: u64 = 0x04
+const CMD_INTX_DISABLE: u64 = 0x400
+const CSR_FH_INT: u64 = 0x010
+const CSR_DRAM_INT_TBL: u64 = 0x0A0
+const MASK_ALL: u64 = 0xFFFFFFFF
+const COALESCING_OFF: u64 = 0
+const NO_ACCESS: u64 = 0xEEEEEEEE
+
+struct Ctx {
+    p: *mut iwl_probe.Probe,
+    tr: *mut iwl_sbtrace.SbTrace,
+    cq: *mut iwl_cmdq.Cq,
+    tab: *mut iwl_rxexp_tab.Tab,
+    bdf: u64,
+    phy_sku: u64,
+    rx_stop: bool
+}
+
+fn apply_prog(c: *mut Ctx, g: *mut iwl_g1.Prog) {
+    let _r: i64 = iwl_g1.prog_run((*c).p, g)
+}
+
+fn x_mask(c: *mut Ctx) {
+    var g: iwl_g1.Prog = iwl_g1.prog_new()
+    let _a: bool = iwl_g1.prog_add(&g, iwl_g1.K_CSR, iwl_pwr.CSR_INT_MASK, MASK_ALL)
+    apply_prog(c, &g)
+}
+
+fn x_intx(c: *mut Ctx, disabled: bool) {
+    let cmd: u64 = pci.cfg_read16((*c).bdf, CFG_COMMAND)
+    if disabled {
+        pci.cfg_write16((*c).bdf, CFG_COMMAND, cmd | CMD_INTX_DISABLE)
+    } else {
+        pci.cfg_write16((*c).bdf, CFG_COMMAND, cmd & (0xFFFF ^ CMD_INTX_DISABLE))
+    }
+}
+
+fn x_coal(c: *mut Ctx) {
+    var g: iwl_g1.Prog = iwl_g1.prog_new()
+    let _a: bool = iwl_g1.prog_add(&g, iwl_g1.K_CSR8, iwl_g1.CSR_INT_COALESCING, COALESCING_OFF)
+    apply_prog(c, &g)
+}
+
+fn x_dram(c: *mut Ctx) {
+    var g: iwl_g1.Prog = iwl_g1.prog_new()
+    let _a: bool = iwl_g1.prog_add(&g, iwl_g1.K_CSR, CSR_DRAM_INT_TBL, 0)
+    apply_prog(c, &g)
+}
+
+fn x_wptr(c: *mut Ctx) {
+    var g: iwl_g1.Prog = iwl_g1.prog_new()
+    let _a: bool = iwl_g1.prog_add(&g, iwl_g1.K_DIRECT, iwl_g1.FH_RSCSR_RBDCB_WPTR, 0)
+    let _b: bool = iwl_g1.prog_rx_wptr(&g, (*(*c).cq).rx_wptr)
+    apply_prog(c, &g)
+}
+
+fn x_nic(c: *mut Ctx) {
+    let _r: i64 = iwl_pwr.nic_config((*c).p, (*c).phy_sku)
+    let _n: i64 = iwl_cmdq.cq_nic_init((*c).cq, (*c).p)
+}
+
+fn x_apm(c: *mut Ctx) {
+    let _r: i64 = iwl_pwr.apm_init((*c).p)
+}
+
+fn act(c: *mut Ctx, id: u64) {
+    if id == iwl_rxexp_tab.X_MASK { x_mask(c) }
+    if id == iwl_rxexp_tab.X_INTX_ON { x_intx(c, true) }
+    if id == iwl_rxexp_tab.X_INTX_OFF { x_intx(c, false) }
+    if id == iwl_rxexp_tab.X_COAL { x_coal(c) }
+    if id == iwl_rxexp_tab.X_DRAM { x_dram(c) }
+    if id == iwl_rxexp_tab.X_WPTR { x_wptr(c) }
+    if id == iwl_rxexp_tab.X_NIC { x_nic(c) }
+    if id == iwl_rxexp_tab.X_APM { x_apm(c) }
+}
+
+fn measure(c: *mut Ctx, id: u64) -> u64 {
+    let p: *mut iwl_probe.Probe = (*c).p
+    iwl_sbtrace.spin_ms(p, (*c).tr, WAIT_MS)
+    var rxw: [u64; 26] = [0 as u64; 26]
+    var cpu1: u64 = NO_ACCESS
+    var cpu2: u64 = NO_ACCESS
+    if iwl_pwr.mac_access_get(p) == 0 {
+        cpu1 = iwl_pwr.prph_rd(p, iwl_sbtrace.SB_CPU1) & 0xFFFFFFFF
+        cpu2 = iwl_pwr.prph_rd(p, iwl_sbtrace.SB_CPU2) & 0xFFFFFFFF
+        iwl_rxscan.scan((*c).cq, p, (&rxw[0]) as u64)
+    }
+    iwl_pwr.mac_access_put(p)
+    let int_v: u64 = iwl_pwr.rd(p, iwl_probe.CSR_INT)
+    let fh_v: u64 = iwl_pwr.rd(p, CSR_FH_INT)
+    var alive: u64 = ALIVE_NONE
+    if iwl_sbtrace.alive_seen(p, (*c).tr) != 0 { alive = ALIVE_CSR }
+    if alive == ALIVE_NONE && (*c).rx_stop && iwl_rxscan.alive_in_rx((&rxw[0]) as u64) { alive = ALIVE_RX }
+    iwl_rxexp_tab.tab_add((*c).tab, id, int_v, fh_v, cpu1, cpu2, rxw[iwl_rxscan.W_STATE as usize], rxw[iwl_rxscan.W_NZ as usize], alive)
+    return alive
+}
+
+fn step(c: *mut Ctx, id: u64) -> u64 {
+    act(c, id)
+    return measure(c, id)
+}
+
+fn run(p: *mut iwl_probe.Probe, tr: *mut iwl_sbtrace.SbTrace, cq: *mut iwl_cmdq.Cq, bdf: u64, phy_sku: u64, rx_stop: bool, tab: *mut iwl_rxexp_tab.Tab) -> u64 {
+    var c: Ctx = Ctx { p: p, tr: tr, cq: cq, tab: tab, bdf: bdf, phy_sku: phy_sku, rx_stop: rx_stop }
+    var a: u64 = measure(&c, iwl_rxexp_tab.X_BASE)
+    if a != ALIVE_NONE { return a }
+    a = step(&c, iwl_rxexp_tab.X_MASK)
+    if a != ALIVE_NONE { return a }
+    var orig: u64 = 0
+    if bdf != 0 {
+        orig = pci.cfg_read16(bdf, CFG_COMMAND)
+        a = step(&c, iwl_rxexp_tab.X_INTX_ON)
+        if a == ALIVE_NONE { a = step(&c, iwl_rxexp_tab.X_INTX_OFF) }
+        pci.cfg_write16(bdf, CFG_COMMAND, orig)
+        if a != ALIVE_NONE { return a }
+    }
+    a = step(&c, iwl_rxexp_tab.X_COAL)
+    if a != ALIVE_NONE { return a }
+    a = step(&c, iwl_rxexp_tab.X_DRAM)
+    if a != ALIVE_NONE { return a }
+    a = step(&c, iwl_rxexp_tab.X_WPTR)
+    if a != ALIVE_NONE { return a }
+    a = step(&c, iwl_rxexp_tab.X_NIC)
+    if a != ALIVE_NONE { return a }
+    return step(&c, iwl_rxexp_tab.X_APM)
+}

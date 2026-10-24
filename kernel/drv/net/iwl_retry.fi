@@ -8,7 +8,10 @@ import wlan.iwl_pwr
 import wlan.iwl_fh8000
 import wlan.iwl_sbtrace
 import wlan.iwl_cmdq
+import wlan.iwl_rxexp_tab
 import drv.net.iwl_cq
+import drv.net.iwl_rxexp
+import lib.kstate
 
 export { run }
 
@@ -47,10 +50,24 @@ fn attempt(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64
     return r
 }
 
+fn rx_stage(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, cq: *mut iwl_cmdq.Cq, tr: *mut iwl_sbtrace.SbTrace, bdf: u64,
+            xt: *mut iwl_rxexp_tab.Tab) -> u64 {
+    if kstate.mode_on(state, kstate.M_IWLNORXEXP) { return iwl_rxexp.ALIVE_NONE }
+    let rx_stop: bool = !kstate.mode_on(state, kstate.M_IWLNORAW)
+    return iwl_rxexp.run(p, tr, cq, bdf, (*f).phy_sku, rx_stop, xt)
+}
+
 fn run(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64,
-       cq: *mut iwl_cmdq.Cq, tr: *mut iwl_sbtrace.SbTrace, bdf: u64, first_err: i64, w: fn(u64, *mut iwl_probe.Probe, u64) -> i64) -> i64 {
+       cq: *mut iwl_cmdq.Cq, tr: *mut iwl_sbtrace.SbTrace, bdf: u64, first_err: i64, xt: *mut iwl_rxexp_tab.Tab,
+       w: fn(u64, *mut iwl_probe.Probe, u64) -> i64) -> i64 {
     iwl_sbtrace.trace_set_sampling(tr, 0)
     if iwl_sbtrace.series_run(p, tr) != 0 { return consume(state, p, cq, w) }
+    let xa: u64 = rx_stage(state, p, f, cq, tr, bdf, xt)
+    if xa == iwl_rxexp.ALIVE_CSR { return consume(state, p, cq, w) }
+    if xa == iwl_rxexp.ALIVE_RX {
+        iwl_cmdq.cq_set_raw(cq, 1)
+        return 0
+    }
     if iwl_sbtrace.exp_status(p, tr, SHORT_WAIT_MS) != 0 { return consume(state, p, cq, w) }
     if iwl_sbtrace.exp_release(p, tr, SHORT_WAIT_MS) != 0 { return consume(state, p, cq, w) }
     if iwl_sbtrace.exp_wait(p, tr, LONG_WAIT_MS) != 0 { return consume(state, p, cq, w) }

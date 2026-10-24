@@ -4,10 +4,11 @@ import wlan.iwl_pwr
 import wlan.iwl_le
 
 export {
-    Prog, prog_new, prog_len, prog_kind, prog_addr, prog_val, prog_run,
+    Prog, prog_new, prog_add, prog_len, prog_kind, prog_addr, prog_val, prog_run,
     prog_rx_init, prog_tx_init, prog_tx_cmd_init, prog_scd_init, prog_txq_enable, prog_rx_wptr, prog_tx_doorbell,
     rx_stop, rx_status_closed, rx_bd_put, rx_cfg_value,
-    K_DIRECT, K_PRPH, K_SRAM, K_PRPH_SET, K_CSR,
+    K_DIRECT, K_PRPH, K_SRAM, K_PRPH_SET, K_CSR, K_CSR8,
+    FH_RCSR_RBDCB_WPTR, FH_RCSR_FLUSH_RB_REQ, FH_RSCSR_RDPTR, INT_COALESCING_DEFAULT,
     FH_KW_MEM_ADDR_REG, FH_RSCSR_STTS_WPTR, FH_RSCSR_RBDCB_BASE, FH_RSCSR_RBDCB_WPTR, FH_RCSR_CONFIG, FH_RSSR_RX_STATUS,
     FH_TCSR_BASE, FH_TX_CHICKEN, CSR_INT_COALESCING, HBUS_TARG_WRPTR, HBUS_MEM_WADDR, HBUS_MEM_WDAT,
     SCD_SRAM_BASE_ADDR, SCD_DRAM_BASE_ADDR, SCD_TXFACT, SCD_CHAINEXT_EN, SCD_GP_CTRL,
@@ -24,6 +25,9 @@ const FH_RSCSR_STTS_WPTR: u64 = 0x1BC0
 const FH_RSCSR_RBDCB_BASE: u64 = 0x1BC4
 const FH_RSCSR_RBDCB_WPTR: u64 = 0x1BC8
 const FH_RCSR_CONFIG: u64 = 0x1C00
+const FH_RCSR_RBDCB_WPTR: u64 = 0x1C08
+const FH_RCSR_FLUSH_RB_REQ: u64 = 0x1C10
+const FH_RSCSR_RDPTR: u64 = 0x1BCC
 const FH_RSSR_RX_STATUS: u64 = 0x1C44
 const FH_RSSR_CHNL0_IDLE: u64 = 0x01000000
 const FH_TCSR_BASE: u64 = 0x1D00
@@ -72,6 +76,7 @@ const K_PRPH: u64 = 1
 const K_SRAM: u64 = 2
 const K_PRPH_SET: u64 = 3
 const K_CSR: u64 = 4
+const K_CSR8: u64 = 5
 
 const PROG_MAX: usize = 96
 
@@ -90,6 +95,8 @@ fn prog_new() -> Prog {
     var g: Prog = Prog { n: 0, kind: [0; 96], addr: [0; 96], val: [0; 96] }
     return g
 }
+
+fn prog_add(g: *mut Prog, k: u64, a: u64, v: u64) -> bool { return add(g, k, a, v) }
 
 fn prog_len(g: *mut Prog) -> usize { return (*g).n }
 fn prog_kind(g: *mut Prog, i: usize) -> u64 { return (*g).kind[i] }
@@ -124,11 +131,14 @@ fn rx_cfg_enable() -> u64 { return rx_cfg_value(0) }
 fn prog_rx_init(g: *mut Prog, bd_bus: u64, stts_bus: u64) -> bool {
     if bd_bus & 0xFF != 0 || stts_bus & 0xF != 0 { return false }
     var ok: bool = add(g, K_DIRECT, FH_RCSR_CONFIG, 0)
+    ok = ok && add(g, K_DIRECT, FH_RCSR_RBDCB_WPTR, 0)
+    ok = ok && add(g, K_DIRECT, FH_RCSR_FLUSH_RB_REQ, 0)
+    ok = ok && add(g, K_DIRECT, FH_RSCSR_RDPTR, 0)
     ok = ok && add(g, K_DIRECT, FH_RSCSR_RBDCB_WPTR, 0)
     ok = ok && add(g, K_DIRECT, FH_RSCSR_RBDCB_BASE, bd_bus >> 8)
     ok = ok && add(g, K_DIRECT, FH_RSCSR_STTS_WPTR, stts_bus >> 4)
     ok = ok && add(g, K_DIRECT, FH_RCSR_CONFIG, rx_cfg_enable())
-    ok = ok && add(g, K_CSR, CSR_INT_COALESCING, INT_COALESCING_DEFAULT)
+    ok = ok && add(g, K_CSR8, CSR_INT_COALESCING, INT_COALESCING_DEFAULT)
     return ok
 }
 
@@ -194,6 +204,8 @@ fn prog_run(p: *mut iwl_probe.Probe, g: *mut Prog) -> i64 {
         let v: u64 = (*g).val[i]
         if k == K_DIRECT || k == K_CSR {
             iwl_pwr.wr(p, a, v)
+        } else if k == K_CSR8 {
+            iwl_pwr.wr(p, a, (iwl_pwr.rd(p, a) & 0xFFFFFF00) | (v & 0xFF))
         } else if k == K_PRPH {
             iwl_pwr.prph_wr(p, a, v)
         } else if k == K_PRPH_SET {
