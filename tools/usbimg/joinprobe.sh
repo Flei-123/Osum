@@ -30,6 +30,7 @@ printf 'c\tpeter\tfriend\tonline\tPeter (LAN)\tpeter\tin the cellar\tEchoGame\t0
     printf 'i\tlinv30\tpeter\tin\tinvite\topen\t0\tgame://lobby/echo\tEchoGame\n'
 } > "$SEED/local.invites"
 printf 'l\techo\tEchoGame\n' > "$SEED/games.tsv"
+printf 'app:freunde contacts.read messages.send invites.send activity.write\n' > "$SEED/apps"
 printf 'name=Friends\ninfo=Friends bar\nkeys=friends,freunde\nfassung=1\n' > "$PKG/INFO"
 cp assets/apps/charmap.osp/symbol.osym "$PKG/symbol.osym"
 
@@ -70,7 +71,40 @@ foto 02-bar
 E
 drive "$OUT/d1"
 grep -aq '^freunde: rect ' "$S" && ok "friends bar is open and reports rectangles" || bad "friends bar did not come up"
-echo "--- freunde lines ---"; grep -aE "^(freunde|wlib): " "$S" | head -80 | cut -c1-170
+grep -aq '^freunde: eintraege=1 ' "$S" && ok "the bar lists the seeded friend" || bad "the bar lists no friend"
+wait_line() {
+    local pat="$1" i
+    for i in $(seq 1 60); do grep -aq "$pat" "$S" && return 0; sleep 1; done
+    return 1
+}
+party_n() { grep -ac '^partyrun: start /bin/echo target=' "$S"; }
+
+# path A: friend -> Message (chat) -> Join
+n0=$(party_n)
+cat > "$OUT/d2" <<EOT
+klickauf fdnth2x0
+warte 5
+foto 03-chat
+klickauf fdnth2x-1
+warte 5
+foto 04-join
+EOT
+drive "$OUT/d2"
+for i in $(seq 1 60); do [ "$(party_n)" -gt "$n0" ] && break; sleep 1; done
+[ "$(party_n)" -gt "$n0" ] && ok "path A: Join starts the game through partyrun" || bad "path A: no partyrun start after Join"
+grep -aq '^partyrun: start /bin/echo target=game://lobby/88' "$S" && ok "path A: the target of the accepted answer is handed over" || bad "path A: wrong or missing target"
+
+# path B: back -> Pending tab -> Accept the open invitation
+n1=$(party_n)
+cat > "$OUT/d3" <<EOT
+klickauf fdnth2x0
+warte 4
+klickauf fdnth7x2
+warte 4
+foto 05-pending
+EOT
+drive "$OUT/d3"
+echo "--- rects of the pending page ---"; grep -a '^freunde: rect ' "$S" | tail -n 8 | cut -c1-120
 if [ "$fail" != 0 ]; then
     echo "--- diagnosis: launcher/freunde lines ---"; grep -aE '^(launcher|freunde|social): ' "$S" | head -30 | cut -c1-160
     echo "--- diagnosis: drive.log ---"; tail -n 25 "$OUT/drive.log" 2>/dev/null | cut -c1-160

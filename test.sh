@@ -1698,6 +1698,16 @@ lauf "55c. social rights per app and privacy switches: scopes, user_only, never 
 lauf "55d. social SDK for apps and games: Firn module, C header, JS shim, party/join, social.party.take (tools/social/sdk.sh, r29)" \
      tools/social/sdk.sh socsdk '^SOCIAL-SDK: |^== |^  OK    |^  FAIL  '
 
+# 55e. THE SETTINGS PAGES OF THE SOCIAL PACKAGE ON THE REAL IMAGE (r348): a click on the
+# switch and on the text fields asks, the system dialog answers, nothing says "Failed.".
+lauf "55e. settings window, package pages of the social layer: ask, trusted dialog yes (tools/usbimg/settingsprobe.sh, r348)" \
+     tools/setprobe/run.sh setprobe '^SETTINGSPROBE: |^== |^  OK    |^  FAIL  '
+
+# 55f. THE FRIENDS BAR JOIN PATHS ON THE REAL IMAGE (r349): friend -> chat -> Join and
+# invitation -> Accept both end in partyrun starting the game.
+lauf "55f. friends bar: Join and Accept start the game through partyrun (tools/usbimg/joinprobe.sh, r349)" \
+     tools/joinprobe/run.sh joinprobe '^JOINPROBE: |^== |^  OK    |^  FAIL  '
+
 # 56. ROUND ACTION-BUS-3 ON A SCREEN: the foreign-window layer (a Linux
 # Wayland program on wayd steered through its window -- keys, typed text,
 # a click, the close box; the settings window is NOT steerable) and the

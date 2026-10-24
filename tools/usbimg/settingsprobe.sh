@@ -78,65 +78,56 @@ PF=$(grep -a 'settings: rect name=pf' "$S" | tail -n 20 | sed -n 's/.*name=\(pf[
 [ -n "$PF" ] && ok "page controls are reported (first: $PF)" || bad "no control of the page reported (pf..)"
 n0=$(grep -ac 'settings: stand' "$S")
 
-# 2. first click: the question
-if [ -n "$PF" ]; then
-cat > "$OUT/d2" <<E
-klickauf srect$PF
-warte 4
-foto 03-ask
-E
-drive "$OUT/d2"
-st1=$(status_of)
-echo "       status after click 1: [$st1]"
-case "$st1" in
-    *"click again"*|*"nochmal klicken"*) ok "click 1 asks for confirmation" ;;
-    *) bad "click 1 did not ask (status [$st1])" ;;
-esac
-# 3. second click: confirm
-cat > "$OUT/d3" <<E
-klickauf srect$PF
-warte 4
-foto 04-confirmed
-E
-drive "$OUT/d3"
-st2=$(status_of)
-echo "       status after click 2: [$st2]"
-case "$st2" in
-    *"Done."*|*"Erledigt"*) ok "click 2 confirms and the action runs" ;;
-    *) bad "click 2 did not end in Done (status [$st2])" ;;
-esac
-fi
+dlg_n() { grep -ac 'wm: trusted dialog up no=' "$S"; }
+ans_n() { grep -ac 'wm: trusted dialog answer=1 ' "$S"; }
+answer_dialog() {
+    local i a0
+    for i in $(seq 1 40); do [ "$(dlg_n)" -gt "$1" ] && break; sleep 1; done
+    [ "$(dlg_n)" -gt "$1" ] || return 1
+    a0=$(ans_n)
+    sleep 2
+    printf 'taste j\nwarte 3\n' > "$OUT/dj"
+    drive "$OUT/dj"
+    [ "$(ans_n)" -gt "$a0" ]
+}
 pf_since() { tail -n +"$(( $1 + 1 ))" "$S" | sed -n 's/^settings: rect name=\(pf[a-z][a-z]\) .*/\1/p' | awk '!s[$0]++'; }
+ask_and_answer() {
+    local tag="$1" st
+    st=$(status_of)
+    echo "       $tag status after the first action: [$st]"
+    case "$st" in
+        *"click again"*|*"nochmal klicken"*|*"system confirmation"*|*"Bestaetigungsdialog"*) ok "$tag: the action asks for confirmation" ;;
+        *) bad "$tag: the action did not ask (status [$st])" ;;
+    esac
+    if answer_dialog "$2"; then ok "$tag: the system dialog took the yes"; else bad "$tag: no trusted dialog answered"; fi
+}
 probe_text_field() {
-    local tab="$1" field="$2" text="$3" tag="$4"
-    cat > "$OUT/d_$tag" <<E
+    local field="$1" text="$2" tag="$3" d0
+    d0=$(dlg_n)
+    cat > "$OUT/d_$tag" <<EOT
 klickauf srect$field
 warte 1
 tippe $text
+foto $tag-typed
 taste ret
 warte 4
 foto $tag-ask
-E
+EOT
     drive "$OUT/d_$tag"
-    local a; a=$(status_of)
-    echo "       $tag status after Enter 1: [$a]"
-    case "$a" in
-        *"click again"*|*"nochmal klicken"*|*"Enter again"*|*"Enter nochmal"*) ok "$tag: Enter 1 asks for confirmation (critical action)" ;;
-        *) bad "$tag: Enter 1 did not ask (status [$a])" ;;
-    esac
-    cat > "$OUT/d_${tag}2" <<E
-taste ret
-warte 4
-foto $tag-done
-E
-    drive "$OUT/d_${tag}2"
-    local b; b=$(status_of)
-    echo "       $tag status after Enter 2: [$b]"
-    case "$b" in
-        *"Done."*|*"Erledigt"*) ok "$tag: Enter 2 confirms and the action runs" ;;
-        *) bad "$tag: Enter 2 did not end in Done (status [$b])" ;;
-    esac
+    ask_and_answer "$tag" "$d0"
 }
+
+# 2. first click: the question, answered in the trusted dialog (the window's own second click is refused: use_dialog)
+if [ -n "$PF" ]; then
+D0=$(dlg_n)
+cat > "$OUT/d2" <<EOT
+klickauf srect$PF
+warte 4
+foto 03-ask
+EOT
+drive "$OUT/d2"
+ask_and_answer share "$D0"
+fi
 
 # 4. page App rights (ptabb) and page Privacy (ptabc)
 off=$(wc -l < "$S")
@@ -151,8 +142,8 @@ echo "       rights page controls: [$RF]"
 [ -n "$RF" ] && ok "App rights: the page controls are reported" || bad "App rights: no control reported (pf..)"
 RFL=($RF)
 if [ "${#RFL[@]}" -ge 2 ]; then
-    probe_text_field ptabb "${RFL[$((${#RFL[@]}-2))]}" "app:probe contacts.read" allow
-    probe_text_field ptabb "${RFL[$((${#RFL[@]}-1))]}" "app:probe contacts.read" deny
+    probe_text_field "${RFL[$((${#RFL[@]}-2))]}" "app:probe contacts.read" allow
+    probe_text_field "${RFL[$((${#RFL[@]}-1))]}" "app:probe contacts.read" deny
 fi
 off=$(wc -l < "$S")
 cat > "$OUT/d5" <<'E'
@@ -166,7 +157,7 @@ echo "       privacy page controls: [$PV]"
 [ -n "$PV" ] && ok "Privacy: the page controls are reported" || bad "Privacy: no control reported (pf..)"
 PVL=($PV)
 if [ "${#PVL[@]}" -ge 2 ]; then
-    probe_text_field ptabc "${PVL[$((${#PVL[@]}-2))]}" "app:probe" entry
+    probe_text_field "${PVL[$((${#PVL[@]}-2))]}" "app:probe" entry
 fi
 if [ "$fail" != 0 ]; then
     echo "--- diagnosis: serial (settings/desk/wm lines) ---"; grep -aE '^(settings|desk|wm): ' "$S" | head -30 | cut -c1-160

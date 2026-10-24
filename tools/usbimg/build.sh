@@ -1361,7 +1361,7 @@ printf 'url=https://chat.fleitec.com\n' > "$OUT/social.fleitec.conf"
 SOCIAL_SEED_ARGS=()
 if [ -n "${SOCIAL_SEED:-}" ]; then
     [ -f "$SOCIAL_SEED/games.tsv" ] && cp "$SOCIAL_SEED/games.tsv" "$OUT/social.games.tsv"
-    for seed_file in local.book local.invites; do
+    for seed_file in local.book local.invites apps; do
         [ -f "$SOCIAL_SEED/$seed_file" ] && SOCIAL_SEED_ARGS+=("/etc/social/$seed_file=$SOCIAL_SEED/$seed_file@0644")
     done
 fi
