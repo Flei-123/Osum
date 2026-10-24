@@ -1,0 +1,274 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.procw
+import serial
+import sched.time
+
+export {
+    key_action, notify_action, accept, forget_last, unknown_count, unknown_last, note, render, selftest_reset,
+    ACT_NONE, ACT_UP, ACT_DOWN, ACT_MIN, ACT_CYCLE,
+    SRC_KEY, SRC_NOTIFY, KIND_EXT, KIND_KEY, KIND_ACPI
+}
+
+const ACT_NONE: u64 = 0
+const ACT_UP: u64 = 1
+const ACT_DOWN: u64 = 2
+const ACT_MIN: u64 = 3
+const ACT_CYCLE: u64 = 4
+const ACT_DUP: u64 = 5
+const ACT_UNKNOWN: u64 = 6
+
+const KIND_EXT: u64 = 1
+const KIND_KEY: u64 = 2
+const KIND_ACPI: u64 = 3
+
+const SRC_KEY: u64 = 1
+const SRC_NOTIFY: u64 = 2
+
+const RING: u64 = 16
+const SERIAL_LIMIT: u64 = 64
+const DEDUPE_NS: u64 = 150000000
+const PLAIN_FIRST_UNKNOWN: u64 = 0x59
+
+static mut up_ext: [u64; 8] = [0x17, 0x6F, 0x06, 0x4E, 0x59, 0x43, 0, 0]
+static mut down_ext: [u64; 8] = [0x12, 0x6E, 0x05, 0x7F, 0, 0, 0, 0]
+static mut ring: [u64; 16] = [0 as u64; 16]
+static mut ring_n: u64 = 0
+static mut repeats: u64 = 0
+static mut c_actions: u64 = 0
+static mut c_dups: u64 = 0
+static mut c_unknown: u64 = 0
+static mut unk: [u64; 4] = [0 as u64; 4]
+static mut last_src: u64 = 0
+static mut last_ns: u64 = 0
+
+fn in_up(code: u64) -> bool {
+    var i: u64 = 0
+    while i < 8 {
+        if up_ext[i as usize] == code && code != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn in_down(code: u64) -> bool {
+    var i: u64 = 0
+    while i < 8 {
+        if down_ext[i as usize] == code && code != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn known_ext(code: u64) -> bool {
+    if code == 0x48 || code == 0x4B || code == 0x4D || code == 0x50 || code == 0x47 || code == 0x4F {
+        return true
+    }
+    if code == 0x49 || code == 0x51 || code == 0x52 || code == 0x53 || code == 0x1C || code == 0x35 {
+        return true
+    }
+    if code == 0x1D || code == 0x38 || code == 0x5B || code == 0x5C || code == 0x5D || code == 0x37 {
+        return true
+    }
+    if code == 0x2A || code == 0x36 {
+        return true
+    }
+    return false
+}
+
+fn pack(kind: u64, res: u64, code: u64) -> u64 {
+    return (kind << 24) | (res << 16) | (code & 0xFFFF)
+}
+
+fn say(kind: u64, res: u64, code: u64) {
+    var s_h: [u8; 9] = "hotkey: \0"
+    var s_e: [u8; 4] = "ext\0"
+    var s_k: [u8; 4] = "key\0"
+    var s_a: [u8; 5] = "acpi\0"
+    var s_u: [u8; 9] = " unknown\0"
+    var s_c: [u8; 2] = " \0"
+    serial.puts((&s_h[0]) as u64)
+    if kind == KIND_EXT {
+        serial.puts((&s_e[0]) as u64)
+    } else if kind == KIND_KEY {
+        serial.puts((&s_k[0]) as u64)
+    } else {
+        serial.puts((&s_a[0]) as u64)
+    }
+    serial.puts((&s_c[0]) as u64)
+    serial.hex(code)
+    if res == ACT_UNKNOWN {
+        serial.puts((&s_u[0]) as u64)
+    }
+    serial.nl()
+}
+
+fn note(kind: u64, res: u64, code: u64) {
+    let e: u64 = pack(kind, res, code)
+    if ring_n > 0 && ring[((ring_n - 1) % RING) as usize] == e {
+        repeats = repeats + 1
+        return
+    }
+    ring[(ring_n % RING) as usize] = e
+    ring_n = ring_n + 1
+    if res == ACT_UNKNOWN {
+        unk[(c_unknown % 4) as usize] = code
+        c_unknown = c_unknown + 1
+        if c_unknown <= SERIAL_LIMIT {
+            say(kind, res, code)
+        }
+    }
+}
+
+fn key_action(state: u64, ext: bool, code: u64) -> u64 {
+    var act: u64 = ACT_NONE
+    if ext {
+        if !kstate.mode_on(state, kstate.M_NOHKTAB) {
+            if in_up(code) {
+                act = ACT_UP
+            } else if in_down(code) {
+                act = ACT_DOWN
+            }
+        }
+        if act == ACT_NONE && !known_ext(code) {
+            note(KIND_EXT, ACT_UNKNOWN, code)
+        } else if act != ACT_NONE {
+            note(KIND_EXT, act, code)
+        }
+    } else if code >= PLAIN_FIRST_UNKNOWN {
+        note(KIND_KEY, ACT_UNKNOWN, code)
+    }
+    return act
+}
+
+fn notify_action(state: u64, code: u64) -> u64 {
+    var act: u64 = ACT_NONE
+    if code == 0x86 {
+        act = ACT_UP
+    } else if code == 0x87 {
+        act = ACT_DOWN
+    } else if code == 0x88 {
+        act = ACT_MIN
+    } else if code == 0x85 {
+        act = ACT_CYCLE
+    }
+    if act == ACT_NONE {
+        note(KIND_ACPI, ACT_UNKNOWN, code)
+    } else {
+        note(KIND_ACPI, act, code)
+    }
+    return act
+}
+
+fn accept(state: u64, src: u64) -> bool {
+    let now: u64 = time.mono_ns(state)
+    if last_src != 0 && last_src != src && now - last_ns < DEDUPE_NS {
+        c_dups = c_dups + 1
+        return false
+    }
+    last_src = src
+    last_ns = now
+    c_actions = c_actions + 1
+    return true
+}
+
+fn unknown_count() -> u64 {
+    return c_unknown
+}
+
+fn unknown_last(i: u64) -> u64 {
+    return unk[(i % 4) as usize]
+}
+
+fn forget_last() {
+    last_src = 0
+    last_ns = 0
+}
+
+fn selftest_reset() {
+    forget_last()
+}
+
+fn put_res(res: u64) {
+    var n_u: [u8; 3] = "up\0"
+    var n_d: [u8; 5] = "down\0"
+    var n_m: [u8; 4] = "min\0"
+    var n_c: [u8; 6] = "cycle\0"
+    var n_x: [u8; 8] = "unknown\0"
+    var n_n: [u8; 5] = "none\0"
+    if res == ACT_UP {
+        procw.put_s((&n_u[0]) as u64)
+        return
+    }
+    if res == ACT_DOWN {
+        procw.put_s((&n_d[0]) as u64)
+        return
+    }
+    if res == ACT_MIN {
+        procw.put_s((&n_m[0]) as u64)
+        return
+    }
+    if res == ACT_CYCLE {
+        procw.put_s((&n_c[0]) as u64)
+        return
+    }
+    if res == ACT_UNKNOWN {
+        procw.put_s((&n_x[0]) as u64)
+        return
+    }
+    procw.put_s((&n_n[0]) as u64)
+}
+
+fn put_kind(kind: u64) {
+    var n_e: [u8; 4] = "ext\0"
+    var n_k: [u8; 4] = "key\0"
+    var n_a: [u8; 5] = "acpi\0"
+    if kind == KIND_EXT {
+        procw.put_s((&n_e[0]) as u64)
+        return
+    }
+    if kind == KIND_KEY {
+        procw.put_s((&n_k[0]) as u64)
+        return
+    }
+    procw.put_s((&n_a[0]) as u64)
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    var k_n: [u8; 8] = "events\0\0"
+    var k_u: [u8; 9] = "unknown\0\0"
+    var k_a: [u8; 8] = "actions\0"
+    var k_d: [u8; 6] = "dups\0\0"
+    var k_r: [u8; 8] = "repeats\0"
+    var k_t: [u8; 6] = "note\0\0"
+    var t_h: [u8; 61] = "kind code result: newest first; ext = E0-prefixed set-1 byte\0"
+    procw.begin(out, cap)
+    procw.line_num((&k_n[0]) as u64, ring_n)
+    procw.line_num((&k_u[0]) as u64, c_unknown)
+    procw.line_num((&k_a[0]) as u64, c_actions)
+    procw.line_num((&k_d[0]) as u64, c_dups)
+    procw.line_num((&k_r[0]) as u64, repeats)
+    procw.line_text((&k_t[0]) as u64, (&t_h[0]) as u64)
+    var i: u64 = 0
+    var shown: u64 = ring_n
+    if shown > RING {
+        shown = RING
+    }
+    while i < shown {
+        let e: u64 = ring[((ring_n - 1 - i) % RING) as usize]
+        put_kind(e >> 24)
+        procw.put_c(32)
+        procw.put_hex(e & 0xFFFF, 2)
+        procw.put_c(32)
+        put_res((e >> 16) & 0xFF)
+        procw.put_c(10)
+        i = i + 1
+    }
+    return procw.used()
+}
