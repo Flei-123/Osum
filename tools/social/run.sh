@@ -141,6 +141,7 @@ mkdir -p "$TMPD/etc"
 printf 'lang=de\n' > "$TMPD/etc/locale.conf"
 printf 'provider fleitec /bin/socfleitec /etc/social/fleitec.conf\nprovider local /bin/soclocal\nprovider lan2 /bin/soclocal /etc/social/lan2\n' > "$TMPD/etc/providers"
 printf 'url=http://10.0.2.2:%s\ntoken=%s\nrelay=10.0.2.2:%s\n' "$PORT" "$TOKEN" "$RP" > "$TMPD/etc/fleitec.conf"
+printf 'app:game activity.write\napp:other activity.write\napp:spam messages.send\n' > "$TMPD/etc/apps"
 printf 'c\tzoe\tfriend\tonline\tZoe (LAN 2)\tzoe\t\t\t0\t\t0\n' > "$TMPD/etc/lan2.book"
 printf 'm\tpeter\t1790000000\tin\tHallo von Peter aus dem Keller\n' > "$TMPD/etc/local.inbox"
 printf 'c\toma\tincoming\tunknown\tOma Rosi\t\t\t\t0\t\nc\tpeter\tfriend\tonline\tPeter (LAN)\tpeter\tim Keller\tMinecraft\t60\t\n' \
@@ -324,6 +325,7 @@ A_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
      "/etc/social/fleitec.conf=$TMPD/etc/fleitec.conf"
      "/etc/social/local.book=$TMPD/etc/local.book"
      "/etc/social/lan2.book=$TMPD/etc/lan2.book"
+     "/etc/social/apps=$TMPD/etc/apps"
      "/etc/social/local.inbox=$TMPD/etc/local.inbox"
      "/t/s.sh=$TMPD/s1.sh")
 python3 tools/osum/mkfs.py "${A_[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs: $(tail -2 "$TMPD/mkfs.txt")"; fin; }
@@ -351,7 +353,7 @@ echo "== 2. the catalogue =="
 part "$A" LIST STATUS > "$TMPD/p.txt"
 n_act=$(grep -ac '^social\.' "$TMPD/p.txt")
 n_evt=$(grep -ac '^event social\.' "$TMPD/p.txt")
-[ "$n_act" = 23 ] && [ "$n_evt" = 5 ] && ok "the catalogue has 23 social.* actions and 5 events" \
+[ "$n_act" = 29 ] && [ "$n_evt" = 5 ] && ok "the catalogue has 29 social.* actions and 5 events" \
     || { bad "catalogue: $n_act actions, $n_evt events"; head -20 "$TMPD/p.txt" | sed 's/^/        /'; }
 has "$TMPD/p.txt" "social.privacy.set critical" "privacy.set is critical"
 hasnot "$TMPD/p.txt" "(not running)" "the service is bound (not 'not running')"

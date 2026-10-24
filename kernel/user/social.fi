@@ -51,6 +51,7 @@ profile app
 import ulib
 import actwire
 import socjob
+import socperm
 
 export { u_start }
 
@@ -941,6 +942,9 @@ fn a_status() {
     } else {
         ob_s("share_activity=false\n")
     }
+    ob_s("invites_from=")
+    ob_s(socperm.invites_word())
+    actwire.ob_ch(10)
 }
 
 fn a_list(msg: u64) {
@@ -1165,6 +1169,21 @@ fn invisible() -> bool {
     return isz((&my_pres[0]) as u64, "invisible")
 }
 
+fn act_goes() -> bool {
+    return zlen((&my_act[0]) as u64) > 0 && share_act && !invisible()
+        && !socperm.never_hit((&my_act_client[0]) as u64, (&my_act[0]) as u64)
+}
+
+fn priv_save() {
+    var pb: [u8; 640] = [0 as u8; 640]
+    let n: usize = socperm.priv_render(share_act, (&pb[0]) as u64, 640)
+    let _w: bool = write_file("/etc/social/privacy", (&pb[0]) as u64, n)
+}
+
+fn apps_save() {
+    let _w: bool = write_file("/etc/social/apps", socperm.apps_ptr(), socperm.apps_len())
+}
+
 fn a_activity(msg: u64, dry: bool) -> bool {
     var nm: [u8; 64] = [0 as u8; 64]
     let _n: bool = arg(msg, "name", (&nm[0]) as u64, 64)
@@ -1172,7 +1191,9 @@ fn a_activity(msg: u64, dry: bool) -> bool {
         ob_err("bad_arg name")
         return false
     }
-    let goes: bool = share_act && !invisible()
+    var cl1: [u8; 24] = [0 as u8; 24]
+    let _c1: bool = arg(msg, "@client", (&cl1[0]) as u64, 24)
+    let goes: bool = share_act && !invisible() && !socperm.never_hit((&cl1[0]) as u64, (&nm[0]) as u64)
     if dry {
         actwire.ob_reset()
         ob_s("ok\ndry=1\nwould=activity ")
@@ -1193,6 +1214,8 @@ fn a_activity(msg: u64, dry: bool) -> bool {
     var shared: bool = false
     if goes {
         shared = send_activity()
+    } else if share_act && !invisible() {
+        mark_due(JK_ACTIVITY)
     }
     actwire.ob_reset()
     ob_s("ok\n")
@@ -1240,10 +1263,8 @@ fn a_privacy(msg: u64, dry: bool) -> bool {
         return false
     }
     share_act = on
-    if on {
-        let _w: bool = write_file("/etc/social/privacy", "share_activity=true\n".p as u64, 20)
-    } else {
-        let _w2: bool = write_file("/etc/social/privacy", "share_activity=false\n".p as u64, 21)
+    priv_save()
+    if !on {
         mark_due(JK_ACTIVITY)
     }
     actwire.ob_reset()
@@ -1325,8 +1346,37 @@ fn handle(msg: u64) {
         ob_s("pong\n")
         return
     }
+    var cl0: [u8; 24] = [0 as u8; 24]
+    let _c0: bool = arg(msg, "@client", (&cl0[0]) as u64, 24)
+    let pc: i64 = socperm.perm_check((&cl0[0]) as u64, np)
+    if pc != 0 {
+        socperm.perm_deny(pc)
+        return
+    }
     if isz(np, "social.status") {
         a_status()
+    } else if isz(np, "social.apps.list") {
+        socperm.a_apps_list()
+    } else if isz(np, "social.apps.grant") {
+        if socperm.a_apps_grant(msg, dry) {
+            apps_save()
+        }
+    } else if isz(np, "social.apps.revoke") {
+        if socperm.a_apps_revoke(msg, dry) {
+            apps_save()
+        }
+    } else if isz(np, "social.privacy.get") {
+        socperm.a_priv_get(share_act, invisible())
+    } else if isz(np, "social.privacy.hide") {
+        if socperm.a_priv_hide(msg, dry) {
+            priv_save()
+            mark_due(JK_ACTIVITY)
+        }
+    } else if isz(np, "social.privacy.invites") {
+        if socperm.a_priv_invites(msg, dry) {
+            priv_save()
+            mark_due(JK_INVITES)
+        }
     } else if isz(np, "social.contacts.list") {
         a_list(msg)
     } else if isz(np, "social.contacts.get") {
@@ -1962,7 +2012,7 @@ fn job_start_kind(i: usize, kind: u8) -> bool {
         }
     } else if kind == JK_ACTIVITY {
         ws[0] = (&wa[0]) as u64
-        if zlen((&my_act[0]) as u64) > 0 && share_act && !invisible() {
+        if act_goes() {
             if my_join && has_cap(i, "join") {
                 ws[1] = (&dj[0]) as u64
                 ws[2] = (&my_act[0]) as u64
@@ -2306,6 +2356,28 @@ fn a_msg_read(msg: u64, dry: bool) -> bool {
 
 // -------------------------------------------------------------- invites
 
+fn invite_from_ok(lp: u64) -> bool {
+    if !fld_is(lp, 3, "in") {
+        return true
+    }
+    var an: usize = 0
+    let ap: u64 = fld(lp, 0, &an)
+    var pn: usize = 0
+    let pp: u64 = fld(lp, 2, &pn)
+    var idb: [u8; 96] = [0 as u8; 96]
+    var ib: SB = sb((&idb[0]) as u64, 95)
+    sb_bytes(&ib, ap, an)
+    sb_push(&ib, 58 as u8)
+    sb_bytes(&ib, pp, pn)
+    var rn: usize = 0
+    var rp: u64 = ib.ptr
+    let at: i64 = book_find(ib.ptr, ib.len)
+    if at >= 0 {
+        rp = fld(book.ptr + at as u64, 2, &rn)
+    }
+    return socperm.invite_allowed(rp, rn)
+}
+
 // Every provider's invites; a new incoming open one rings the bell.
 fn invs_update(i: usize, out: *mut SB, code: i64) {
     var nb: SB = sb((&st_inv[0]) as u64, INV_CAP)
@@ -2321,9 +2393,13 @@ fn invs_update(i: usize, out: *mut SB, code: i64) {
                 let lp: u64 = (*out).ptr + at as u64
                 let ll: usize = line_len(lp)
                 if ll > 2 && r_ld8(lp, 0) == 105 as u8 && r_ld8(lp, 1) == 9 as u8 {
+                    let keep0: usize = nb.len
                     sb_bytes(&nb, pname(i), zlen(pname(i)))
                     sb_bytes(&nb, lp + 1, ll - 1)
                     sb_push(&nb, 10 as u8)
+                    if !invite_from_ok(nb.ptr + keep0 as u64) {
+                        nb.len = keep0
+                    }
                 }
                 at = at + ll + 1
             }
@@ -2334,7 +2410,7 @@ fn invs_update(i: usize, out: *mut SB, code: i64) {
                 let l2: usize = line_len(lp2)
                 var pn: usize = 0
                 let pp: u64 = fld(lp2, 0, &pn)
-                if pn == zlen(pname(j)) && r_eq(pp, pname(j), pn) {
+                if pn == zlen(pname(j)) && r_eq(pp, pname(j), pn) && invite_from_ok(lp2) {
                     sb_bytes(&nb, lp2, l2 + 1)
                 }
                 a2 = a2 + l2 + 1
@@ -2710,13 +2786,11 @@ fn serve(limit: u64) -> u64 {
     zset_s((&my_pres[0]) as u64, 16, "online")
     var pv: SB = sb((&st_file[0]) as u64, 4095)
     if read_file("/etc/social/privacy", &pv) {
-        var i: usize = 0
-        while i + 20 <= pv.len {
-            if is(pv.ptr + i as u64, 20, "share_activity=false") {
-                share_act = false
-            }
-            i = i + 1
-        }
+        share_act = socperm.priv_parse(pv.ptr, pv.len)
+    }
+    var ab: SB = sb((&st_tmp[0]) as u64, 2047)
+    if read_file("/etc/social/apps", &ab) {
+        socperm.apps_load(ab.ptr, ab.len)
     }
     providers_load()
     hello_all()
@@ -2801,7 +2875,7 @@ fn serve(limit: u64) -> u64 {
             next_alive = tnow + ALIVE_TICKS
         }
         if tnow >= next_act {
-            if zlen((&my_act[0]) as u64) > 0 && share_act && !invisible() {
+            if act_goes() {
                 mark_due(JK_ACTIVITY)
             }
             next_act = tnow + ACT_TICKS

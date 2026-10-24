@@ -22,6 +22,7 @@ line in `/etc/social/providers` and one program. `social.fi`,
 | `kernel/app/socfleitec.fi` → `/bin/socfleitec` | provider for a **Fleitec** account: fleikontakte (book, presence, activity, invites) with a device access token; chat **end to end** as a FirnChat device over the relay (`kernel/app/fcrelay.fi`: x25519, HKDF-SHA256, ChaCha20-Poly1305, own-device copies) |
 | `kernel/user/soclocal.fi` → `/bin/soclocal` | provider for accounts **without a server**: contacts, messages and invites in files (`-c <base>` = one account) — the second provider that passes the same checks |
 | `kernel/user/melder.fi` → `/bin/melder` | the **Melder** on OrientOS (r135): the OrientOS backend of FirnChat's `docs/MELDER-INTERFACE.md` v1 (`melder v1 hello/detect/games/privacy/autostart/report`; no `identity`: there is no token, the service is signed in) plus a small core (`melder serve [ticks] [every]`, `melder once`). A running game of `/etc/social/games.tsv` (same format as FirnChat's `spiele.tsv`, rows with os `l`) becomes `social.activity.set`, its end `social.activity.clear`; the switch is `social.privacy.set` (read back from `social.status` → `share_activity`); the list `never` is `/etc/social/melder.never`. Detection is `SYS_PSTAT` (r146: pid, basename of argv[0] 16 octets, age `P_AGE` in ms, command line `P_CMD0..` = argv joined by blanks, 256 octets at most, lowercased by the Melder): `detect` prints `p <pid> <exe> <age_s> <cmdline>`; a row with command-line text (column 4) matches when the exe is running AND its command line contains the text (case ignored) — `java` + `minecraft`, `wine` + the game's .exe. Autostart = the line `melder:*:respawn:/bin/melder serve` in `/etc/inittab` (server images with `init`; a screen image starts it in `kgui.desk_start`, r140, together with `/bin/social`; r147: the desktop loop restarts either one 5 s after it ended, back-off up to 60 s). Test: `tools/melder/run.sh` (test.sh § 55b) |
+| `kernel/user/socperm.fi` | rights per app (`/etc/social/apps`, scopes) and the privacy lists (never show, who may invite) used by `social.fi`; test `tools/social/perms.sh` (test.sh § 55c) |
 | `kernel/user/freunde.fi` → `/bin/freunde` | the friends bar like Discord's friends view: tabs **Online** (who plays first, then who is there), **Alle**, **Ausstehend (n)** (requests of every account both ways: Annehmen / Ablehnen / Zurückziehen) and **Hinzufügen** (search at every provider, "Freund hinzufügen"); the presence as the theme's role colours (success / warning / danger / secondary text) on the list's colour tiles plus the dot character; unread counts, the chat window (list, write), "Einladen"/"Beitreten", an incoming invite with "Annehmen"/"Ablehnen" (shown only while there is one), "Unsichtbar" — all through `social.*`. Test stand: `--tab N`, `--annehmen N`, `--suche TEXT [--anfrage N]` |
 | `tools/social/run.sh` (test.sh § 55) | a real guest, a real fleikontakte and a real FirnChat relay on the host, anna's FirnChat client. Standard: Gerätetoken fkt1; `SOCIAL_TOKEN_FORMAT=fkz1 bash tools/social/run.sh` = Legacy-Lauf (beide 109/0) |
 | `tools/social/chat.sh` | the Fleitec provider on the host against relay + fleikontakte + FirnChat's own client (login, E2E both ways, pin, replay, invites) |
@@ -37,6 +38,12 @@ line in `/etc/social/providers` and one program. `social.fi`,
 | `social.contacts.request/accept/decline/withdraw/remove` | write | relations |
 | `social.presence.set`, `social.activity.set [join=true]`, `social.activity.clear` | write | myself |
 | `social.privacy.set` | critical | share the activity or not |
+| `social.privacy.get` | read | `share_activity`, `invisible`, `invites_from`, `hidden`, `hide.N` |
+| `social.privacy.hide entry= [hide=true\|false]` | critical | never show the activity of a client (`app:game`) or an activity name |
+| `social.privacy.invites from=all\|friends\|none` | critical | who may invite me |
+| `social.apps.list` | read | `app.N=client\|scope,scope` |
+| `social.apps.grant client= scope=` | critical | give an app one of the four scopes |
+| `social.apps.revoke client= [scope=]` | critical | take a scope, or every right of the app |
 | `social.messages.send id= text=` | write | to a contact, via its account's provider |
 | `social.messages.list id= [before=]` | read | `message.N=index\|stamp\|in/out\|read\|text`, newest page |
 | `social.messages.unread`, `social.messages.read id=` | read / write | unread per contact, mark read |
@@ -111,15 +118,37 @@ FirnChat's own client and OrientOS read each other (`tools/social/chat.sh`
 
 Everything the broker does applies unchanged: reads are open, writes by
 an agent or an app need the user or a grant (`act grant app:game
-social.activity.* write`), `social.privacy.set` and
+social.activity.* write`), `social.privacy.*`, `social.apps.*` and
 `social.accounts.login` always ask, every call is in
 `/var/log/orientbus.log`. An app that writes in my name
-(`social.messages.send --as app:x`) is parked for the user. What the
-service enforces itself, where the data leaves the device:
+(`social.messages.send --as app:x`) is parked for the user. On top of the
+broker the service enforces itself (`kernel/user/socperm.fi`):
 
-* **invisible**: no signs of life, the activity is cleared everywhere;
+* **rights per app**: a client named `app:<x>` may call only what its
+  scopes cover; the table is `/etc/social/apps`, one line per client
+  (`app:game activity.write`). No line = no right (`err denied scope
+  <scope>`); everything not in a scope is for the user (`err denied
+  user_only`); `social.status` is open. The user (and agents, whom the
+  broker already asks) are not limited by the table.
+
+  | scope | actions |
+  |---|---|
+  | `contacts.read` | `social.contacts.list/get/search`, `social.refresh` |
+  | `activity.write` | `social.activity.set/clear`, `social.presence.set` |
+  | `messages.send` | `social.messages.send` |
+  | `invites.send` | `social.invites.send` |
+
+* **invisible** (`social.presence.set state=invisible`): no signs of life,
+  the activity is cleared everywhere;
 * **share_activity=false** (`/etc/social/privacy`): an activity stays on
   the device;
+* **never show**: `social.privacy.hide entry=app:game` (a client) or
+  `entry=<activity name>`; such an activity stays on the device
+  (`shared=false`), the lines `never=<entry>` are in `/etc/social/privacy`;
+* **who may invite me**: `social.privacy.invites from=all|friends|none`
+  (`invites=<word>` in `/etc/social/privacy`); an incoming invite or join
+  request from somebody who may not is dropped before the list, the event
+  and the bell;
 * an app clears only the activity **it** set; the user clears any.
 
 ## Setting a device up

@@ -66,6 +66,7 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "MELDER: skipped, qemu m
 mkdir -p "$TMPD/etc"
 printf 'lang=de\n' > "$TMPD/etc/locale.conf"
 printf 'provider local /bin/soclocal\n' > "$TMPD/etc/providers"
+printf 'app:melder activity.write\n' > "$TMPD/etc/apps"
 printf 'w\tnap\tWindows Nap\nl\tnap\tNap Quest\n# a comment\nl\techo\tEcho Hero\ttext-only-the-bash-core-can-check\nl\tcat\tCat Simulator\nl\tnap2\tWrong Args\tqq\nl\tnap2\tArgs Quest\tzz\n' > "$TMPD/etc/games.tsv"
 printf '# name:targets:kind:command:options\nlogin:konsole:respawn:/bin/login\n' > "$TMPD/etc/inittab"
 cp "$TMPD/bin/sleep.elf" "$TMPD/bin/nap.elf"
@@ -202,6 +203,7 @@ for p in $PROGS nap nap2; do A_+=("/bin/$p=$TMPD/bin/$p.elf"); done
 A_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
      "/etc/social/providers=$TMPD/etc/providers"
      "/etc/social/games.tsv=$TMPD/etc/games.tsv"
+     "/etc/social/apps=$TMPD/etc/apps"
      "/etc/inittab=$TMPD/etc/inittab"
      "/t/s.sh=$TMPD/s1.sh")
 python3 tools/osum/mkfs.py "${A_[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs: $(tail -2 "$TMPD/mkfs.txt")"; fin; }

@@ -1686,6 +1686,12 @@ lauf "55. the social layer: social.* actions on orient-bus, providers behind one
 lauf "55b. the Melder on OrientOS: backend v1 (hello/detect/games/privacy/autostart/report) and core, reporting as bus actions (tools/melder/run.sh, r135)" \
      tools/melder/run.sh melder '^MELDER: |^== |^  OK    |^  FAIL  '
 
+# 55c. RIGHTS PER APP AND PRIVACY OF THE SOCIAL SERVICE (r30): scopes
+# (contacts.read, activity.write, messages.send, invites.send), user_only,
+# the never-show list, who may invite -- one local provider, no network.
+lauf "55c. social rights per app and privacy switches: scopes, user_only, never show, who may invite (tools/social/perms.sh, r30)" \
+     tools/social/perms.sh socperms '^SOCIAL-PERMS: |^== |^  OK    |^  FAIL  '
+
 # 56. ROUND ACTION-BUS-3 ON A SCREEN: the foreign-window layer (a Linux
 # Wayland program on wayd steered through its window -- keys, typed text,
 # a click, the close box; the settings window is NOT steerable) and the

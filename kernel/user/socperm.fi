@@ -1,0 +1,679 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// socperm -- per-app rights and privacy switches of the social service.
+//
+// Rights: a client named app:<x> may only call the actions of the scopes it
+// was granted (contacts.read, activity.write, messages.send, invites.send);
+// everything else is for the user. Table: /etc/social/apps, one line per
+// client: "app:game activity.write contacts.read".
+//
+// Privacy: who may invite me (all, friends, none) and the entries whose
+// activity is never shown (a client name or an activity name). Kept in
+// /etc/social/privacy next to share_activity.
+
+profile kernel
+
+import actwire
+
+export { apps_load, apps_ptr, apps_len, perm_check, perm_deny, priv_parse, priv_render, never_hit,
+    invite_allowed, invites_word, a_apps_list, a_apps_grant, a_apps_revoke, a_priv_get, a_priv_hide,
+    a_priv_invites }
+
+const APPS_CAP: usize = 2048
+const NEVER_CAP: usize = 1024
+const ENTRY_MAX: usize = 63
+const CLIENT_MAX: usize = 23
+
+const SC_OPEN: i64 = 0
+const SC_USER: i64 = 1
+const SC_CONTACTS: i64 = 2
+const SC_ACTIVITY: i64 = 3
+const SC_MESSAGES: i64 = 4
+const SC_INVITES: i64 = 5
+
+const POL_ALL: usize = 0
+const POL_FRIENDS: usize = 1
+const POL_NONE: usize = 2
+
+static mut apps_buf: [u8; 2048] = [0 as u8; 2048]
+static mut apps_n: usize = 0
+static mut apps_tmp: [u8; 2048] = [0 as u8; 2048]
+static mut tmp_n: usize = 0
+static mut tmp_over: bool = false
+static mut never_buf: [u8; 1024] = [0 as u8; 1024]
+static mut never_n: usize = 0
+static mut inv_policy: usize = 0
+
+fn ld(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn cpy(d: u64, s: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        st(d, i, ld(s, i))
+        i = i + 1
+    }
+}
+
+fn zl(p: u64) -> usize {
+    var n: usize = 0
+    while ld(p, n) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn same(a: u64, an: usize, b: u64, bn: usize) -> bool {
+    if an != bn {
+        return false
+    }
+    var i: usize = 0
+    while i < an {
+        if ld(a, i) != ld(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn same_s(p: u64, n: usize, s: str) -> bool {
+    return same(p, n, s.p as u64, s.n)
+}
+
+fn zis(p: u64, s: str) -> bool {
+    return same_s(p, zl(p), s)
+}
+
+fn starts_app(p: u64) -> bool {
+    return zl(p) > 4 && ld(p, 0) == 97 as u8 && ld(p, 1) == 112 as u8 && ld(p, 2) == 112 as u8
+        && ld(p, 3) == 58 as u8
+}
+
+fn put(s: str) {
+    actwire.ob_n(s.p as u64, s.n as u64)
+}
+
+fn fail(code: str) {
+    actwire.ob_reset()
+    put("err ")
+    put(code)
+    actwire.ob_ch(10)
+}
+
+fn arg(msg: u64, key: str, out: u64, max: u64) -> bool {
+    var kz: [u8; 24] = [0 as u8; 24]
+    cpy((&kz[0]) as u64, key.p as u64, key.n)
+    st((&kz[0]) as u64, key.n, 0 as u8)
+    return actwire.kv_find(msg, (&kz[0]) as u64, out, max)
+}
+
+fn line_end(p: u64, n: usize, at: usize) -> usize {
+    var e: usize = at
+    while e < n && ld(p, e) != 10 as u8 {
+        e = e + 1
+    }
+    return e
+}
+
+fn tok(p: u64, n: usize, k: usize, out_n: *mut usize) -> u64 {
+    var i: usize = 0
+    var f: usize = 0
+    while i < n {
+        while i < n && ld(p, i) == 32 as u8 {
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        let s: usize = i
+        while i < n && ld(p, i) != 32 as u8 {
+            i = i + 1
+        }
+        if f == k {
+            *out_n = i - s
+            return p + s as u64
+        }
+        f = f + 1
+    }
+    *out_n = 0
+    return p + n as u64
+}
+
+fn is_true(p: u64) -> bool {
+    return zis(p, "true") || zis(p, "1")
+}
+
+fn scope_known(p: u64, n: usize) -> bool {
+    return same_s(p, n, "contacts.read") || same_s(p, n, "activity.write")
+        || same_s(p, n, "messages.send") || same_s(p, n, "invites.send")
+}
+
+fn scope_of(a: u64) -> i64 {
+    if zis(a, "social.status") || zis(a, "ping") {
+        return SC_OPEN
+    }
+    if zis(a, "social.contacts.list") || zis(a, "social.contacts.get")
+        || zis(a, "social.contacts.search") || zis(a, "social.refresh") {
+        return SC_CONTACTS
+    }
+    if zis(a, "social.activity.set") || zis(a, "social.activity.clear")
+        || zis(a, "social.presence.set") {
+        return SC_ACTIVITY
+    }
+    if zis(a, "social.messages.send") {
+        return SC_MESSAGES
+    }
+    if zis(a, "social.invites.send") {
+        return SC_INVITES
+    }
+    return SC_USER
+}
+
+fn scope_name(c: i64) -> str {
+    if c == SC_CONTACTS {
+        return "contacts.read"
+    }
+    if c == SC_ACTIVITY {
+        return "activity.write"
+    }
+    if c == SC_MESSAGES {
+        return "messages.send"
+    }
+    return "invites.send"
+}
+
+fn apps_ptr() -> u64 {
+    return (&apps_buf[0]) as u64
+}
+
+fn apps_len() -> usize {
+    return apps_n
+}
+
+fn apps_load(p: u64, n: usize) {
+    var k: usize = n
+    if k > APPS_CAP - 1 {
+        k = APPS_CAP - 1
+    }
+    cpy((&apps_buf[0]) as u64, p, k)
+    apps_n = k
+}
+
+fn client_has(c: u64, cn: usize, scope: str) -> bool {
+    let base: u64 = (&apps_buf[0]) as u64
+    var at: usize = 0
+    while at < apps_n {
+        let e: usize = line_end(base, apps_n, at)
+        let lp: u64 = base + at as u64
+        var n0: usize = 0
+        let p0: u64 = tok(lp, e - at, 0, &n0)
+        if same(p0, n0, c, cn) {
+            var k: usize = 1
+            while true {
+                var tn: usize = 0
+                let tp: u64 = tok(lp, e - at, k, &tn)
+                if tn == 0 {
+                    break
+                }
+                if same_s(tp, tn, scope) {
+                    return true
+                }
+                k = k + 1
+            }
+        }
+        at = e + 1
+    }
+    return false
+}
+
+fn perm_check(client: u64, action: u64) -> i64 {
+    if !starts_app(client) {
+        return 0
+    }
+    let sc: i64 = scope_of(action)
+    if sc == SC_OPEN {
+        return 0
+    }
+    if sc == SC_USER {
+        return SC_USER
+    }
+    if client_has(client, zl(client), scope_name(sc)) {
+        return 0
+    }
+    return sc
+}
+
+fn perm_deny(code: i64) {
+    actwire.ob_reset()
+    if code == SC_USER {
+        put("err denied user_only\n")
+        return
+    }
+    put("err denied scope ")
+    put(scope_name(code))
+    actwire.ob_ch(10)
+}
+
+fn tmp_put(p: u64, n: usize) {
+    if tmp_n + n >= APPS_CAP {
+        tmp_over = true
+        return
+    }
+    cpy((&apps_tmp[0]) as u64 + tmp_n as u64, p, n)
+    tmp_n = tmp_n + n
+}
+
+fn tmp_ch(c: u8) {
+    var b: [u8; 1] = [0 as u8; 1]
+    b[0] = c
+    tmp_put((&b[0]) as u64, 1)
+}
+
+// mode 0 add scope, 1 remove scope, 2 remove client; true when the table changed
+fn apps_edit(c: u64, cn: usize, sp: u64, sn: usize, mode: usize) -> bool {
+    let base: u64 = (&apps_buf[0]) as u64
+    tmp_n = 0
+    tmp_over = false
+    var found: bool = false
+    var at: usize = 0
+    while at < apps_n {
+        let e: usize = line_end(base, apps_n, at)
+        let lp: u64 = base + at as u64
+        let ln: usize = e - at
+        var n0: usize = 0
+        let p0: u64 = tok(lp, ln, 0, &n0)
+        if !same(p0, n0, c, cn) {
+            tmp_put(lp, ln)
+            tmp_ch(10 as u8)
+        } else if mode != 2 {
+            found = true
+            let start: usize = tmp_n
+            tmp_put(c, cn)
+            var kept: usize = 0
+            var has: bool = false
+            var k: usize = 1
+            while true {
+                var tn: usize = 0
+                let tp: u64 = tok(lp, ln, k, &tn)
+                if tn == 0 {
+                    break
+                }
+                if same(tp, tn, sp, sn) {
+                    has = true
+                }
+                if mode == 0 || !same(tp, tn, sp, sn) {
+                    tmp_ch(32 as u8)
+                    tmp_put(tp, tn)
+                    kept = kept + 1
+                }
+                k = k + 1
+            }
+            if mode == 0 && !has {
+                tmp_ch(32 as u8)
+                tmp_put(sp, sn)
+                kept = kept + 1
+            }
+            if kept > 0 {
+                tmp_ch(10 as u8)
+            } else {
+                tmp_n = start
+            }
+        }
+        at = e + 1
+    }
+    if mode == 0 && !found {
+        tmp_put(c, cn)
+        tmp_ch(32 as u8)
+        tmp_put(sp, sn)
+        tmp_ch(10 as u8)
+    }
+    if tmp_over {
+        return false
+    }
+    let changed: bool = !same((&apps_tmp[0]) as u64, tmp_n, base, apps_n)
+    cpy(base, (&apps_tmp[0]) as u64, tmp_n)
+    apps_n = tmp_n
+    return changed
+}
+
+fn a_apps_list() {
+    let base: u64 = (&apps_buf[0]) as u64
+    var cnt: u64 = 0
+    var at: usize = 0
+    while at < apps_n {
+        cnt = cnt + 1
+        at = line_end(base, apps_n, at) + 1
+    }
+    actwire.ob_reset()
+    put("ok\ncount=")
+    actwire.ob_num(cnt)
+    actwire.ob_ch(10)
+    var i: u64 = 0
+    at = 0
+    while at < apps_n {
+        let e: usize = line_end(base, apps_n, at)
+        let lp: u64 = base + at as u64
+        i = i + 1
+        put("app.")
+        actwire.ob_num(i)
+        actwire.ob_ch(61)
+        var n0: usize = 0
+        let p0: u64 = tok(lp, e - at, 0, &n0)
+        actwire.ob_n(p0, n0 as u64)
+        actwire.ob_ch(124)
+        var k: usize = 1
+        while true {
+            var tn: usize = 0
+            let tp: u64 = tok(lp, e - at, k, &tn)
+            if tn == 0 {
+                break
+            }
+            if k > 1 {
+                actwire.ob_ch(44)
+            }
+            actwire.ob_n(tp, tn as u64)
+            k = k + 1
+        }
+        actwire.ob_ch(10)
+        at = e + 1
+    }
+}
+
+fn a_apps_grant(msg: u64, dry: bool) -> bool {
+    var cl: [u8; 32] = [0 as u8; 32]
+    var sc: [u8; 24] = [0 as u8; 24]
+    let _c: bool = arg(msg, "client", (&cl[0]) as u64, 32)
+    let _s: bool = arg(msg, "scope", (&sc[0]) as u64, 24)
+    let cp: u64 = (&cl[0]) as u64
+    let sp: u64 = (&sc[0]) as u64
+    if !starts_app(cp) || zl(cp) > CLIENT_MAX || !scope_known(sp, zl(sp)) {
+        fail("bad_arg client scope")
+        return false
+    }
+    actwire.ob_reset()
+    if dry {
+        put("ok\ndry=1\nwould=grant ")
+        actwire.ob_n(cp, zl(cp) as u64)
+        actwire.ob_ch(32)
+        actwire.ob_n(sp, zl(sp) as u64)
+        actwire.ob_ch(10)
+        return false
+    }
+    let changed: bool = apps_edit(cp, zl(cp), sp, zl(sp), 0)
+    if tmp_over {
+        fail("full")
+        return false
+    }
+    actwire.ob_reset()
+    put("ok\n")
+    return changed
+}
+
+fn a_apps_revoke(msg: u64, dry: bool) -> bool {
+    var cl: [u8; 32] = [0 as u8; 32]
+    var sc: [u8; 24] = [0 as u8; 24]
+    let _c: bool = arg(msg, "client", (&cl[0]) as u64, 32)
+    let has_scope: bool = arg(msg, "scope", (&sc[0]) as u64, 24)
+    let cp: u64 = (&cl[0]) as u64
+    let sp: u64 = (&sc[0]) as u64
+    if !starts_app(cp) || zl(cp) > CLIENT_MAX || (has_scope && !scope_known(sp, zl(sp))) {
+        fail("bad_arg client scope")
+        return false
+    }
+    if dry {
+        actwire.ob_reset()
+        put("ok\ndry=1\nwould=revoke ")
+        actwire.ob_n(cp, zl(cp) as u64)
+        actwire.ob_ch(10)
+        return false
+    }
+    var changed: bool = false
+    if has_scope {
+        changed = apps_edit(cp, zl(cp), sp, zl(sp), 1)
+    } else {
+        changed = apps_edit(cp, zl(cp), sp, 0, 2)
+    }
+    actwire.ob_reset()
+    put("ok\n")
+    return changed
+}
+
+fn invites_word() -> str {
+    if inv_policy == POL_FRIENDS {
+        return "friends"
+    }
+    if inv_policy == POL_NONE {
+        return "none"
+    }
+    return "all"
+}
+
+fn never_find(p: u64, n: usize) -> i64 {
+    let base: u64 = (&never_buf[0]) as u64
+    var at: usize = 0
+    while at < never_n {
+        let e: usize = line_end(base, never_n, at)
+        if same(base + at as u64, e - at, p, n) {
+            return at as i64
+        }
+        at = e + 1
+    }
+    return -1
+}
+
+fn never_edit(p: u64, n: usize, add: bool) -> bool {
+    let base: u64 = (&never_buf[0]) as u64
+    let at: i64 = never_find(p, n)
+    if add {
+        if at >= 0 || n == 0 || n > ENTRY_MAX || never_n + n + 1 >= NEVER_CAP {
+            return false
+        }
+        cpy(base + never_n as u64, p, n)
+        st(base, never_n + n, 10 as u8)
+        never_n = never_n + n + 1
+        return true
+    }
+    if at < 0 {
+        return false
+    }
+    let start: usize = at as usize
+    let cut: usize = n + 1
+    var i: usize = start
+    while i + cut < never_n {
+        st(base, i, ld(base, i + cut))
+        i = i + 1
+    }
+    never_n = never_n - cut
+    return true
+}
+
+fn never_hit(client: u64, activity: u64) -> bool {
+    if never_n == 0 {
+        return false
+    }
+    return never_find(client, zl(client)) >= 0 || never_find(activity, zl(activity)) >= 0
+}
+
+fn invite_allowed(rel: u64, rn: usize) -> bool {
+    if inv_policy == POL_NONE {
+        return false
+    }
+    if inv_policy == POL_FRIENDS {
+        return same_s(rel, rn, "friend")
+    }
+    return true
+}
+
+fn policy_from(p: u64, n: usize) -> i64 {
+    if same_s(p, n, "all") {
+        return POL_ALL as i64
+    }
+    if same_s(p, n, "friends") {
+        return POL_FRIENDS as i64
+    }
+    if same_s(p, n, "none") {
+        return POL_NONE as i64
+    }
+    return -1
+}
+
+fn priv_parse(p: u64, n: usize) -> bool {
+    var share: bool = true
+    never_n = 0
+    inv_policy = POL_ALL
+    var at: usize = 0
+    while at < n {
+        let e: usize = line_end(p, n, at)
+        let lp: u64 = p + at as u64
+        let ln: usize = e - at
+        if same_s(lp, ln, "share_activity=false") {
+            share = false
+        } else if ln > 8 && same_s(lp, 8, "invites=") {
+            let v: i64 = policy_from(lp + 8, ln - 8)
+            if v >= 0 {
+                inv_policy = v as usize
+            }
+        } else if ln > 6 && same_s(lp, 6, "never=") {
+            let _a: bool = never_edit(lp + 6, ln - 6, true)
+        }
+        at = e + 1
+    }
+    return share
+}
+
+fn priv_render(share: bool, out: u64, cap: usize) -> usize {
+    var o: usize = 0
+    var line: str = "share_activity=true\n"
+    if !share {
+        line = "share_activity=false\n"
+    }
+    if o + line.n < cap {
+        cpy(out, line.p as u64, line.n)
+        o = o + line.n
+    }
+    let w: str = invites_word()
+    if o + 9 + w.n < cap {
+        cpy(out + o as u64, "invites=".p as u64, 8)
+        cpy(out + (o + 8) as u64, w.p as u64, w.n)
+        st(out, o + 8 + w.n, 10 as u8)
+        o = o + 9 + w.n
+    }
+    if o + never_n * 2 + 8 < cap {
+        let base: u64 = (&never_buf[0]) as u64
+        var at: usize = 0
+        while at < never_n {
+            let e: usize = line_end(base, never_n, at)
+            cpy(out + o as u64, "never=".p as u64, 6)
+            cpy(out + (o + 6) as u64, base + at as u64, e - at)
+            st(out, o + 6 + e - at, 10 as u8)
+            o = o + 7 + e - at
+            at = e + 1
+        }
+    }
+    return o
+}
+
+fn a_priv_get(share: bool, invisible: bool) {
+    let base: u64 = (&never_buf[0]) as u64
+    actwire.ob_reset()
+    put("ok\n")
+    if share {
+        put("share_activity=true\n")
+    } else {
+        put("share_activity=false\n")
+    }
+    if invisible {
+        put("invisible=true\n")
+    } else {
+        put("invisible=false\n")
+    }
+    put("invites_from=")
+    put(invites_word())
+    actwire.ob_ch(10)
+    var cnt: u64 = 0
+    var at: usize = 0
+    while at < never_n {
+        cnt = cnt + 1
+        at = line_end(base, never_n, at) + 1
+    }
+    put("hidden=")
+    actwire.ob_num(cnt)
+    actwire.ob_ch(10)
+    var i: u64 = 0
+    at = 0
+    while at < never_n {
+        let e: usize = line_end(base, never_n, at)
+        i = i + 1
+        put("hide.")
+        actwire.ob_num(i)
+        actwire.ob_ch(61)
+        actwire.ob_n(base + at as u64, (e - at) as u64)
+        actwire.ob_ch(10)
+        at = e + 1
+    }
+}
+
+fn a_priv_hide(msg: u64, dry: bool) -> bool {
+    var en: [u8; 64] = [0 as u8; 64]
+    var hv: [u8; 8] = [0 as u8; 8]
+    let _e: bool = arg(msg, "entry", (&en[0]) as u64, 64)
+    let has_hide: bool = arg(msg, "hide", (&hv[0]) as u64, 8)
+    let ep: u64 = (&en[0]) as u64
+    var hide: bool = true
+    if has_hide {
+        hide = is_true((&hv[0]) as u64)
+    }
+    if zl(ep) == 0 || zl(ep) > ENTRY_MAX {
+        fail("bad_arg entry")
+        return false
+    }
+    actwire.ob_reset()
+    if dry {
+        put("ok\ndry=1\nwould=")
+        if hide {
+            put("hide ")
+        } else {
+            put("show ")
+        }
+        actwire.ob_n(ep, zl(ep) as u64)
+        actwire.ob_ch(10)
+        return false
+    }
+    let changed: bool = never_edit(ep, zl(ep), hide)
+    if hide && !changed && never_find(ep, zl(ep)) < 0 {
+        fail("full")
+        return false
+    }
+    actwire.ob_reset()
+    put("ok\n")
+    return changed
+}
+
+fn a_priv_invites(msg: u64, dry: bool) -> bool {
+    var fv: [u8; 12] = [0 as u8; 12]
+    let _f: bool = arg(msg, "from", (&fv[0]) as u64, 12)
+    let v: i64 = policy_from((&fv[0]) as u64, zl((&fv[0]) as u64))
+    if v < 0 {
+        fail("bad_arg from")
+        return false
+    }
+    actwire.ob_reset()
+    if dry {
+        put("ok\ndry=1\nwould_invites_from=")
+        actwire.ob_n((&fv[0]) as u64, zl((&fv[0]) as u64) as u64)
+        actwire.ob_ch(10)
+        return false
+    }
+    let changed: bool = inv_policy != v as usize
+    inv_policy = v as usize
+    put("ok\ninvites_from=")
+    put(invites_word())
+    actwire.ob_ch(10)
+    return changed
+}
