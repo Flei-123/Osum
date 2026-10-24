@@ -73,6 +73,13 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
+## Stick 14 HP (24.10.2026, Baustand f69dadbf = main, WLAN Secure-Boot-Trace)
+
+- **Datei:** `orientos-usb-hp-20261024-f69dadbf.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `00cd0e0162d6c194a3aa66a8863f244b369380e2d263455cdb40783b1714e190`. Ersetzt Stick 13 (SHA 0eec7bc9...).
+- **Neu:** Faellt das Laden der 8265-Firmware durch (kein ALIVE), schreibt der Kern in `/proc/wlan`: `fail_trace=` (SB_CPU1/SB_CPU2/LOAD_STATUS nach jeder geladenen Sektion), `fail_series=` (8 Messungen im 250-ms-Abstand nach dem Timeout) und `fail_exp=` (Experimente: LOAD_STATUS erneut, RELEASE_CPU_RESET erneut, 10 s warten, Neuladen mit Pause nach INIT_DONE, mit PCI 0x41=0, mit Pause zwischen CPU1 und CPU2). Kommt ALIVE in einem Experiment, laeuft der Boot normal weiter (`iwl: boot2 exp alive`). `wlanctl dump` findet das Geraet jetzt auch ueber Intel + Klasse 0x02.
+- **Foto-Checkliste:** `cat /proc/wlan` (ALLE Zeilen, mehrere Fotos wenn lang), `wlanctl status`, `wlanctl dump`, `cat /tmp/wlan-dump.txt`. Bei Fehler dauert der Start der WLAN-Karte ca. 25 s laenger (Experimente). Windows vorher mit `shutdown /s /t 0` beenden.
+- **Ehrlich:** Am echten 8265 UNVERIFIZIERT. `hdr1=0 hdr2=0` ist bei Familie 8000 normal (Linux schreibt HDR_ADDR nur im 7000-Lader). D0/ASPM sind nicht die Ursache.
+
 ## Stick 13 HP (24.10.2026, Debug-Werkzeuge: lspci, pcicfg, regdump, prphread, wlanctl, drvctl)
 
 - **Datei:** `orientos-usb-hp-20261024-badf40a6.img` (146 MiB, Baustand badf40a6 = main, Gate dbgtools 53/0) (GPT, UEFI+BIOS). SHA256 vorher pruefen: `0eec7bc9d0c1394e8e64a591aec3d4bfa81aedd531e8721ca467a5708ddf0587`.
