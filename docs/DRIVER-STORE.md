@@ -50,6 +50,16 @@ Host tool: `mkpkg.py build <outdir> --name N --module M.omod --match "pci 1234:1
 - Deleting `/lib/omod.sperre` unlocks every banned module (K-014 open point: needs a minimum list in the kernel or in the OTA image).
 - A manifest signature binds only the manifest; the module is bound by its own signature. A validly signed old module paired with a new manifest is possible until the manifest carries the module signature hash (planned: `module-sig=` key).
 
-## 5. Open
+## 5. Kernel part (built 24.10.2026, gate `tools/drvstore/run.sh`)
 
-Index and auto-bind in the kernel, `/proc/drivers` device lines (all PCI/USB/ACPI), `drvctl`, `fw.request`, demo drivers (QEMU `edu` 1234:11e8 probe module, PS/2 mouse via store), QEMU gate `tools/drvstore/run.sh`, `nostore` word.
+- `kernel/bus/drvinf.fi`: manifest parser (same grammar as `mkpkg.py`), record layout, match specificity.
+- `kernel/bus/drvstore.fi`: scan `/lib/drivers`, signature check (`module.signatur_gilt`), ABI check, module file check, local deny list `/etc/drivers.deny` (one package name per line), index (16 packages), PCI auto-bind for devices no built-in row claims (`drvreg.claimed`). Boot lines `drvstore: pkgs=N valid=M`, `drvstore: pkg <name> ok|rejected <code>`, `drvstore: bind <name> -> pci ...`.
+- Reject codes: 1 syntax, 2 key, 3 duplicate, 4 name, 5 name != dir, 6 number, 7 module, 8 right, 9 fw, 10 slot, 11 missing key, 12 match, 13 no match, 14 too many, 15 too big, 20 signature, 21 ABI, 22 module file missing, 23 file missing.
+- Device context for the module at `state + 0xAA800` (`kstate.MODUL_OFF + 0x1800`): +0 version 1, +8 bus (1 pci), +16 vendor, +24 device, +32 subsys (vendor<<16|device), +40 class<<8|sub, +48 prog-if, +56 bdf, +64 BAR0 mapped (only with `rights=mmio`, which also enables memory decode), +72 irq line, +80 pci index, +88 BAR0 physical.
+- `/proc/drivers`: old registry table, then `# devices` with one line per PCI/USB/ACPI device: `drv=<name> src=builtin|store|none bind=bound|failed|seen|-`, plus `store=on pkgs= valid= bound= failed=` or `store=off`.
+- Word `nostore` (bit 1195) skips scan and bind.
+- Demo: `module/store/edudemo.fi` binds QEMU `edu` (1234:11e8), reads the id register and a liveness register through BAR0.
+
+## 6. Open
+
+`drvctl` (list/match/install/remove/ban), `fw.request(name, sha256)`, USB/ACPI auto-bind (only PCI binds; USB/ACPI are listed), hot-plug rescan, rights enforcement, PS/2 mouse via store.

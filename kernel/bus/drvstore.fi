@@ -6,6 +6,7 @@ import lib.ksym
 import bus.pci
 import bus.drvreg
 import bus.drvinf
+import arch.x86_64.apic
 import fs.fs
 import ldr.module
 import ldr.modidx
@@ -367,7 +368,9 @@ fn scan(state: u64) {
         if ino == 0 {
             going = false
         } else {
-            scan_one(state, ((&ent_buf[0]) as u64) + 8)
+            if ent_buf[8] != 46 as u8 {
+                scan_one(state, ((&ent_buf[0]) as u64) + 8)
+            }
             i = i + 1
         }
     }
@@ -484,7 +487,7 @@ fn best_acpi(packed: u64) -> u64 {
     return best_simple(drvinf.K_ACPI, packed)
 }
 
-fn write_ctx(state: u64, idx: u64) {
+fn write_ctx(state: u64, idx: u64, map_mmio: bool) {
     let c: u64 = state + kstate.MODUL_OFF + CTX_OFF
     kstate.set(c, 0, 1)
     kstate.set(c, 8, 1)
@@ -494,7 +497,13 @@ fn write_ctx(state: u64, idx: u64) {
     kstate.set(c, 40, (pci.get(state, idx, pci.E_CLASS) << 8) | pci.get(state, idx, pci.E_SUBCLASS))
     kstate.set(c, 48, pci.get(state, idx, pci.E_PROGIF))
     kstate.set(c, 56, pci.get(state, idx, pci.E_BDF))
-    kstate.set(c, 64, pci.bar(state, idx, 0))
+    let phys: u64 = pci.bar(state, idx, 0)
+    kstate.set(c, 88, phys)
+    var mapped: u64 = 0
+    if map_mmio && phys != 0 && !pci.bar_is_io(state, idx, 0) {
+        mapped = apic.map_device(state, phys)
+    }
+    kstate.set(c, 64, mapped)
     kstate.set(c, 72, pci.get(state, idx, pci.E_IRQLINE))
     kstate.set(c, 80, idx)
 }
@@ -505,10 +514,11 @@ fn bind_pci(state: u64, p: u64, idx: u64) {
     var s_ok: [u8; 3] = "ok\0"
     var s_fail: [u8; 7] = "fail: \0"
     let bdf: u64 = pci.get(state, idx, pci.E_BDF)
-    if (drvinf.rec_rights(rec_at(p)) & 2) != 0 {
+    let wants_mmio: bool = (drvinf.rec_rights(rec_at(p)) & 2) != 0
+    if wants_mmio {
         pci.cfg_write16(bdf, 4, pci.cfg_read16(bdf, 4) | 2)
     }
-    write_ctx(state, idx)
+    write_ctx(state, idx, wants_mmio)
     var rc: u64 = 0
     var res: u64 = BR_BOUND
     let k: u64 = mf(p, M_LOADK)
