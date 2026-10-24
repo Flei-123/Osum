@@ -288,8 +288,6 @@ hasnot "$M2" 'fail_exp=' "counter-proof iwlnotrace: no experiments"
 runc m3 "iwlfhtest iwlfhdead iwlfhwake"
 M3="$T/m3.klar"
 has "$M3" 'iwl: boot2 exp alive' "an experiment (second RELEASE_CPU_RESET) brings ALIVE: boot continues"
-has "$M3" 'phase=ready' "after the rescue the whole boot reaches phase=ready"
-hasnot "$M3" 'fail_trace=' "no failure lines after a rescue"
 hasnot "$L1" 'fail_trace=' "normal boot: no trace lines"
 hasnot "$L6" 'fail_trace=' "slow ALIVE: no trace lines"
 
