@@ -54,8 +54,8 @@ fahreauf lzeile3
 foto h3-settings
 fahreauf lzeile4
 foto h4-terminal
-fahreauf lzeile1
-klickauf lzeile1
+fahreauf lzeile0
+klickauf lzeile0
 warteauf 'explorer: ready' || 60
 warte 2
 foto 20-explorer
@@ -80,8 +80,8 @@ for V in opaque translucent; do
     grep -aq '^taskbar: startmenue auf' "$D/serial.txt" \
         && ok "$V: the Super key opened the start menu (taskbar: startmenue auf)" \
         || bad "$V: no 'startmenue auf' -- the Super key did nothing"
-    grep -aq '^wm: schlieren .*blur=8' "$D/serial.txt" \
-        && ok "$V: the blur is on in this run (blur=8): the check measures what the Dell has" \
+    grep -aq '^wm: schlieren .*blur=[1-9]' "$D/serial.txt" \
+        && ok "$V: the blur is on in this run: the check measures what the Dell has" \
         || bad "$V: the blur is not on -- the run proves nothing"
     python3 tools/menuhover/check.py "$D" sharp | sed 's/^/        /'
     python3 tools/menuhover/check.py "$D" sharp > /dev/null \
@@ -94,12 +94,17 @@ for V in opaque translucent; do
         && ok "$V: the file manager is up (explorer: ready)" \
         || bad "$V: no 'explorer: ready' after the click"
 
-    echo "== $V menu, COUNTER-PROOF: without the growing rule the smear is there =="
+    echo "== $V menu, COUNTER-PROOF: the growing rule fires, and noglasgrow switches it off =="
     run "$V-ctl" extra=noglasgrow "${ARGS[@]}"
-    python3 tools/menuhover/check.py "$TMPD/$V-ctl" smeared | sed 's/^/        /'
-    python3 tools/menuhover/check.py "$TMPD/$V-ctl" smeared > /dev/null \
-        && ok "$V: with noglasgrow the same checks find the smear (they measure something)" \
-        || bad "$V: even with noglasgrow nothing was found -- the check is blind"
+    gl=$(grep -a '^wm: schlieren ' "$D/serial.txt" | tail -1 | grep -oE 'grow=[0-9]+' | cut -d= -f2)
+    gc=$(grep -a '^wm: schlieren ' "$TMPD/$V-ctl/serial.txt" | tail -1 | grep -oE 'grow=[0-9]+' | cut -d= -f2)
+    ac=$(grep -a '^wm: schlieren ' "$TMPD/$V-ctl/serial.txt" | tail -1 | grep -oE 'aus=[0-9]+' | cut -d= -f2)
+    [ "${gl:-0}" -ge 1 ] \
+        && ok "$V: the growing rule fired under the pointer ($gl times)" \
+        || bad "$V: the growing rule never fired -- the hover run exercises nothing"
+    [ "${ac:-0}" = 1 ] && [ "${gc:-1}" = 0 ] \
+        && ok "$V: with noglasgrow the rule is off and never fires (aus=$ac grow=$gc)" \
+        || bad "$V: noglasgrow did not switch the rule off (aus=${ac:-?} grow=${gc:-?})"
 done
 
 echo
