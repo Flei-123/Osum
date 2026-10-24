@@ -23,6 +23,7 @@ line in `/etc/social/providers` and one program. `social.fi`,
 | `kernel/user/soclocal.fi` → `/bin/soclocal` | provider for accounts **without a server**: contacts, messages and invites in files (`-c <base>` = one account) — the second provider that passes the same checks |
 | `kernel/user/melder.fi` → `/bin/melder` | the **Melder** on OrientOS (r135): the OrientOS backend of FirnChat's `docs/MELDER-INTERFACE.md` v1 (`melder v1 hello/detect/games/privacy/autostart/report`; no `identity`: there is no token, the service is signed in) plus a small core (`melder serve [ticks] [every]`, `melder once`). A running game of `/etc/social/games.tsv` (same format as FirnChat's `spiele.tsv`, rows with os `l`) becomes `social.activity.set`, its end `social.activity.clear`; the switch is `social.privacy.set` (read back from `social.status` → `share_activity`); the list `never` is `/etc/social/melder.never`. Detection is `SYS_PSTAT` (r146: pid, basename of argv[0] 16 octets, age `P_AGE` in ms, command line `P_CMD0..` = argv joined by blanks, 256 octets at most, lowercased by the Melder): `detect` prints `p <pid> <exe> <age_s> <cmdline>`; a row with command-line text (column 4) matches when the exe is running AND its command line contains the text (case ignored) — `java` + `minecraft`, `wine` + the game's .exe. Autostart = the line `melder:*:respawn:/bin/melder serve` in `/etc/inittab` (server images with `init`; a screen image starts it in `kgui.desk_start`, r140, together with `/bin/social`; r147: the desktop loop restarts either one 5 s after it ended, back-off up to 60 s). Test: `tools/melder/run.sh` (test.sh § 55b) |
 | `kernel/user/socperm.fi` | rights per app (`/etc/social/apps`, scopes) and the privacy lists (never show, who may invite) used by `social.fi`; test `tools/social/perms.sh` (test.sh § 55c) |
+| `kernel/user/socparty.fi`, `kernel/user/socsdk.fi`, `sdk/social/` | the SDK for apps and games (section "The SDK"): party target, `social.party.take`, Firn module, C header, JS shim; test `tools/social/sdk.sh` (test.sh § 55d) |
 | `kernel/user/freunde.fi` → `/bin/freunde` | the friends bar like Discord's friends view: tabs **Online** (who plays first, then who is there), **Alle**, **Ausstehend (n)** (requests of every account both ways: Annehmen / Ablehnen / Zurückziehen) and **Hinzufügen** (search at every provider, "Freund hinzufügen"); the presence as the theme's role colours (success / warning / danger / secondary text) on the list's colour tiles plus the dot character; unread counts, the chat window (list, write), "Einladen"/"Beitreten", an incoming invite with "Annehmen"/"Ablehnen" (shown only while there is one), "Unsichtbar" — all through `social.*`. Test stand: `--tab N`, `--annehmen N`, `--suche TEXT [--anfrage N]` |
 | `tools/social/run.sh` (test.sh § 55) | a real guest, a real fleikontakte and a real FirnChat relay on the host, anna's FirnChat client. Standard: Gerätetoken fkt1; `SOCIAL_TOKEN_FORMAT=fkz1 bash tools/social/run.sh` = Legacy-Lauf (beide 109/0) |
 | `tools/social/chat.sh` | the Fleitec provider on the host against relay + fleikontakte + FirnChat's own client (login, E2E both ways, pin, replay, invites) |
@@ -36,7 +37,8 @@ line in `/etc/social/providers` and one program. `social.fi`,
 | `social.accounts.login provider= [token=]` | critical | pairing code (`state=pending code=…`) or signed in (`state=ok account=…`) |
 | `social.contacts.list/get/search` | read | `account:id\|relation\|presence\|name\|handle\|status\|activity\|since_s\|joinable` |
 | `social.contacts.request/accept/decline/withdraw/remove` | write | relations |
-| `social.presence.set`, `social.activity.set [join=true]`, `social.activity.clear` | write | myself |
+| `social.presence.set`, `social.activity.set [join=true] [party=]`, `social.activity.clear` | write | myself |
+| `social.party.take [name=]` | write | the join target of an accepted invite or join request, once (`found`, `target`, `name`, `kind`, `from`) |
 | `social.privacy.set` | critical | share the activity or not |
 | `social.privacy.get` | read | `share_activity`, `invisible`, `invites_from`, `hidden`, `hide.N` |
 | `social.privacy.hide entry= [hide=true\|false]` | critical | never show the activity of a client (`app:game`) or an activity name |
@@ -137,7 +139,7 @@ broker the service enforces itself (`kernel/user/socperm.fi`):
   | scope | actions |
   |---|---|
   | `contacts.read` | `social.contacts.list/get/search`, `social.refresh` |
-  | `activity.write` | `social.activity.set/clear`, `social.presence.set` |
+  | `activity.write` | `social.activity.set/clear`, `social.presence.set`, `social.party.take` |
   | `messages.send` | `social.messages.send` |
   | `invites.send` | `social.invites.send` |
 
@@ -153,6 +155,44 @@ broker the service enforces itself (`kernel/user/socperm.fi`):
   request from somebody who may not is dropped before the list, the event
   and the bell;
 * an app clears only the activity **it** set; the user clears any.
+
+## The SDK (r29)
+
+An app says what it plays; friends see it, can ask to join, and the join
+target travels with the invite. Four calls, the same in every language,
+each one a `social.*` action on orient-bus (so the scopes above apply:
+`activity.write` for the first three and `take`, `invites.send` for
+`invite` and `askToJoin`):
+
+| call | action |
+|---|---|
+| `setActivity(name, joinable, party)` | `social.activity.set name= [join=true] [party=]` — `party` is the join target to hand out (a server address, a lobby code); it implies `join=true` in the C header and the JS shim |
+| `clearActivity()` | `social.activity.clear` — also drops the party |
+| `invite(friend, name)` / `askToJoin(friend)` | `social.invites.send id= kind=invite\|join [name=]` — an invite without `target=` carries the party |
+| `takeJoin(name)` | `social.party.take [name=]` — the target that came back, once |
+
+The party is held by the service next to the activity (`kernel/user/socparty.fi`);
+it is replaced by the next `activity.set` (no `party=` clears it) and ends
+with `activity.clear`. It is used in two places only: an `invites.send
+kind=invite` without `target=`, and a `yes` to an incoming **join** request
+without `target=` (the reply carries it back to the asker). `social.party.take`
+returns, an invite that came **in** and was
+**accepted** or a join request that went **out** and was accepted, with a
+target that is not `-`; each is handed out once (the last 8 are
+remembered), `name=` limits it to one activity (case ignored), `--dry` only
+says what it would take. A game polls it (once a second is plenty) after
+the person said yes in the friends bar.
+
+| language | file | how it reaches the bus |
+|---|---|---|
+| Firn | `kernel/user/socsdk.fi` (`set_activity`, `clear_activity`, `invite`, `ask_to_join`, `take_join`; example app `kernel/user/socapp.fi`) | `actcli`, the window programs' door; an SDK module for `osdk` |
+| C | `sdk/social/orient_social.h` (header only, C99 + POSIX, builds with musl: `orient_set_activity`, `orient_clear_activity`, `orient_invite`, `orient_ask_to_join`, `orient_take_join`; 0 ok, -1 fail, `take_join` 1/0/-1) | runs `/bin/act call ...` (`ORIENT_ACT` overrides the path) |
+| JS | `sdk/social/orient-social.mjs` (`createSocial({act, run})` → `setActivity`, `clearActivity`, `invite`, `askToJoin`, `takeJoin`; promises) | `/bin/act` through `child_process`, or the `run(argv)` you hand in |
+
+Values may not contain a newline (such a call is refused before it is
+sent). Test: `tools/social/sdk.sh` — the C header and the JS shim against a
+fake `act` (exact command lines), the Firn module against the real broker,
+service and `soclocal` in a guest, the scopes with `--as`.
 
 ## Setting a device up
 
@@ -202,6 +242,7 @@ broker the service enforces itself (`kernel/user/socperm.fi`):
   `act call social.accounts.login provider=fleitec`), `/apps/social.prog/ACTIONS`, an empty
   `/etc/social/games.tsv` (the service fills it);
 * the same person at two providers is two contacts (no merge by person);
+* the SDK cannot launch an app: after a yes the join target waits in `social.party.take` for the game to ask for it, a launcher that starts the game by activity name is not built;
 * no provider call blocks the service loop: the timers (contacts, invites, inbox, presence,
   activity, alive, games) run as background jobs (`kernel/user/socjob.fi`, one slot per provider),
   and so do the calls of people and apps (`relation`, `send`, `invites.send`, `invites.answer`,

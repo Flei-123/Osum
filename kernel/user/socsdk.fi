@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// socsdk -- the Firn SDK of the social layer for apps and games.
+//
+//   socsdk.set_activity(name, joinable, party)   what I play; party = join target or 0
+//   socsdk.clear_activity()
+//   socsdk.invite(friend, name)                  invite into my activity (target = my party)
+//   socsdk.ask_to_join(friend)                   ask to join the friend's activity
+//   socsdk.take_join(name, out, max)             the join target that came back, once
+//
+// Every call is one social.* action on orient-bus; the broker names the
+// calling app and the service holds it to its scopes (activity.write for
+// set_activity, clear_activity and take_join, invites.send for invite and
+// ask_to_join). Strings are zero-terminated; a call returns true when the
+// service answered ok.
+
+profile kernel
+
+import actwire
+import actcli
+
+export { set_activity, clear_activity, invite, ask_to_join, take_join }
+
+const WAIT_TICKS: u64 = 1500
+
+static mut k_name: [u8; 5] = "name\0"
+static mut k_join: [u8; 5] = "join\0"
+static mut k_party: [u8; 6] = "party\0"
+static mut k_id: [u8; 3] = "id\0"
+static mut k_kind: [u8; 5] = "kind\0"
+
+fn begin(action: u64) {
+    var verb: [u8; 6] = "call \0"
+    actwire.ob_reset()
+    actwire.ob_str((&verb[0 as usize]) as u64)
+    actwire.ob_str(action)
+    actwire.ob_ch(10)
+}
+
+fn put(key: u64, value: u64) {
+    actcli.arg(key, value)
+}
+
+fn present(p: u64) -> bool {
+    return p != 0 && actwire.ld8(p, 0) != 0
+}
+
+fn finish() -> bool {
+    return actcli.send(WAIT_TICKS) == actcli.R_OK
+}
+
+fn set_activity(name: u64, joinable: bool, party: u64) -> bool {
+    if !actcli.open() || !present(name) {
+        return false
+    }
+    var a: [u8; 20] = "social.activity.set\0"
+    var yes: [u8; 5] = "true\0"
+    begin((&a[0 as usize]) as u64)
+    put((&k_name[0 as usize]) as u64, name)
+    if joinable {
+        put((&k_join[0 as usize]) as u64, (&yes[0 as usize]) as u64)
+    }
+    if present(party) {
+        put((&k_party[0 as usize]) as u64, party)
+    }
+    return finish()
+}
+
+fn clear_activity() -> bool {
+    if !actcli.open() {
+        return false
+    }
+    var a: [u8; 22] = "social.activity.clear\0"
+    begin((&a[0 as usize]) as u64)
+    return finish()
+}
+
+fn send_invite(friend: u64, kind: u64, name: u64) -> bool {
+    if !actcli.open() || !present(friend) {
+        return false
+    }
+    var a: [u8; 20] = "social.invites.send\0"
+    begin((&a[0 as usize]) as u64)
+    put((&k_id[0 as usize]) as u64, friend)
+    put((&k_kind[0 as usize]) as u64, kind)
+    if present(name) {
+        put((&k_name[0 as usize]) as u64, name)
+    }
+    return finish()
+}
+
+fn invite(friend: u64, name: u64) -> bool {
+    var k: [u8; 7] = "invite\0"
+    return send_invite(friend, (&k[0 as usize]) as u64, name)
+}
+
+fn ask_to_join(friend: u64) -> bool {
+    var k: [u8; 5] = "join\0"
+    return send_invite(friend, (&k[0 as usize]) as u64, 0)
+}
+
+fn take_join(name: u64, out: u64, max: u64) -> bool {
+    actwire.st8(out, 0, 0)
+    if !actcli.open() {
+        return false
+    }
+    var a: [u8; 18] = "social.party.take\0"
+    begin((&a[0 as usize]) as u64)
+    if present(name) {
+        put((&k_name[0 as usize]) as u64, name)
+    }
+    if !finish() {
+        return false
+    }
+    var f: [u8; 6] = "found\0"
+    var v: [u8; 8] = [0 as u8; 8]
+    var t: [u8; 7] = "target\0"
+    if !actcli.field((&f[0 as usize]) as u64, (&v[0 as usize]) as u64, 8) {
+        return false
+    }
+    if actwire.ld8((&v[0 as usize]) as u64, 0) != 116 {
+        return false
+    }
+    return actcli.field((&t[0 as usize]) as u64, out, max)
+}

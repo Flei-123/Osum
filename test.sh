@@ -1692,6 +1692,12 @@ lauf "55b. the Melder on OrientOS: backend v1 (hello/detect/games/privacy/autost
 lauf "55c. social rights per app and privacy switches: scopes, user_only, never show, who may invite (tools/social/perms.sh, r30)" \
      tools/social/perms.sh socperms '^SOCIAL-PERMS: |^== |^  OK    |^  FAIL  '
 
+# 55d. THE SOCIAL SDK (r29): setActivity with a party, invite, join -- the C
+# header and the JS shim against a fake act, the Firn module against the real
+# broker + service, social.party.take once, the scopes.
+lauf "55d. social SDK for apps and games: Firn module, C header, JS shim, party/join, social.party.take (tools/social/sdk.sh, r29)" \
+     tools/social/sdk.sh socsdk '^SOCIAL-SDK: |^== |^  OK    |^  FAIL  '
+
 # 56. ROUND ACTION-BUS-3 ON A SCREEN: the foreign-window layer (a Linux
 # Wayland program on wayd steered through its window -- keys, typed text,
 # a click, the close box; the settings window is NOT steerable) and the

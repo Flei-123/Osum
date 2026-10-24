@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// socparty -- the party (join target) of the activity an app has set, and
+// the join targets that came back for it.
+
+profile kernel
+
+export { set_target, clear_target, target_ptr, has_target, is_incoming_join, find_ready,
+    mark_taken }
+
+const TARGET_CAP: usize = 130
+const KEY_CAP: usize = 40
+const TAKEN_MAX: usize = 8
+
+const F_ACCOUNT: usize = 0
+const F_INVITE: usize = 1
+const F_DIR: usize = 3
+const F_KIND: usize = 4
+const F_STATE: usize = 5
+const F_TARGET: usize = 7
+const F_NAME: usize = 8
+
+static mut target: [u8; 130] = [0 as u8; 130]
+static mut taken: [u8; 320] = [0 as u8; 320]
+static mut taken_next: usize = 0
+
+fn ld(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn zl(p: u64) -> usize {
+    var n: usize = 0
+    while ld(p, n) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn put(dst: u64, cap: usize, p: u64, n: usize) {
+    var k: usize = n
+    if k > cap - 1 {
+        k = cap - 1
+    }
+    var i: usize = 0
+    while i < k {
+        st(dst, i, ld(p, i))
+        i = i + 1
+    }
+    st(dst, k, 0 as u8)
+}
+
+fn lower(c: u8) -> u8 {
+    if c >= 65 as u8 && c <= 90 as u8 {
+        return c + 32 as u8
+    }
+    return c
+}
+
+fn same_ci(a: u64, an: usize, b: u64, bn: usize) -> bool {
+    if an != bn {
+        return false
+    }
+    var i: usize = 0
+    while i < an {
+        if lower(ld(a, i)) != lower(ld(b, i)) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn field(p: u64, k: usize, out_n: *mut usize) -> u64 {
+    var i: usize = 0
+    var f: usize = 0
+    while f < k {
+        let c: u8 = ld(p, i)
+        if c == 10 as u8 || c == 0 as u8 {
+            *out_n = 0
+            return p + i as u64
+        }
+        if c == 9 as u8 {
+            f = f + 1
+        }
+        i = i + 1
+    }
+    var e: usize = i
+    while ld(p, e) != 9 as u8 && ld(p, e) != 10 as u8 && ld(p, e) != 0 as u8 {
+        e = e + 1
+    }
+    *out_n = e - i
+    return p + i as u64
+}
+
+fn field_is(lp: u64, k: usize, s: str) -> bool {
+    var n: usize = 0
+    let p: u64 = field(lp, k, &n)
+    return n == s.n && same_ci(p, n, s.p as u64, s.n)
+}
+
+fn line_len(p: u64) -> usize {
+    var i: usize = 0
+    while ld(p, i) != 10 as u8 && ld(p, i) != 0 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+fn set_target(p: u64, n: usize) {
+    put((&target[0]) as u64, TARGET_CAP, p, n)
+}
+
+fn clear_target() {
+    st((&target[0]) as u64, 0, 0 as u8)
+}
+
+fn has_target() -> bool {
+    return ld((&target[0]) as u64, 0) != 0 as u8
+}
+
+fn target_ptr() -> u64 {
+    return (&target[0]) as u64
+}
+
+fn is_incoming_join(invs: u64, len: usize, id: u64) -> bool {
+    let idn: usize = zl(id)
+    var at: usize = 0
+    while at < len {
+        let lp: u64 = invs + at as u64
+        var n: usize = 0
+        let p: u64 = field(lp, F_INVITE, &n)
+        if n == idn && same_ci(p, n, id, idn) && field_is(lp, F_DIR, "in")
+            && field_is(lp, F_KIND, "join") {
+            return true
+        }
+        at = at + line_len(lp) + 1
+    }
+    return false
+}
+
+fn key_of(lp: u64, out: u64) {
+    var an: usize = 0
+    let ap: u64 = field(lp, F_ACCOUNT, &an)
+    var kn: usize = 0
+    let kp: u64 = field(lp, F_INVITE, &kn)
+    var tmp: [u8; 40] = [0 as u8; 40]
+    let tp: u64 = (&tmp[0]) as u64
+    put(tp, KEY_CAP, ap, an)
+    let l1: usize = zl(tp)
+    if l1 < KEY_CAP - 2 {
+        st(tp, l1, 58 as u8)
+        put(tp + (l1 + 1) as u64, KEY_CAP - l1 - 1, kp, kn)
+    }
+    put(out, KEY_CAP, tp, zl(tp))
+}
+
+fn was_taken(key: u64) -> bool {
+    var i: usize = 0
+    while i < TAKEN_MAX {
+        let slot: u64 = (&taken[0]) as u64 + (i * KEY_CAP) as u64
+        if ld(slot, 0) != 0 as u8 && same_ci(slot, zl(slot), key, zl(key)) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn ready_line(lp: u64, wanted: u64) -> bool {
+    var tn: usize = 0
+    let _t: u64 = field(lp, F_TARGET, &tn)
+    if tn == 0 || field_is(lp, F_TARGET, "-") {
+        return false
+    }
+    if !field_is(lp, F_STATE, "accepted") {
+        return false
+    }
+    let invite_in: bool = field_is(lp, F_DIR, "in") && field_is(lp, F_KIND, "invite")
+    let join_out: bool = field_is(lp, F_DIR, "out") && field_is(lp, F_KIND, "join")
+    if !invite_in && !join_out {
+        return false
+    }
+    if zl(wanted) > 0 {
+        var nn: usize = 0
+        let np: u64 = field(lp, F_NAME, &nn)
+        if !same_ci(np, nn, wanted, zl(wanted)) {
+            return false
+        }
+    }
+    var key: [u8; 40] = [0 as u8; 40]
+    key_of(lp, (&key[0]) as u64)
+    return !was_taken((&key[0]) as u64)
+}
+
+fn find_ready(invs: u64, len: usize, wanted: u64) -> i64 {
+    var found: i64 = -1
+    var at: usize = 0
+    while at < len {
+        let lp: u64 = invs + at as u64
+        if ready_line(lp, wanted) {
+            found = at as i64
+        }
+        at = at + line_len(lp) + 1
+    }
+    return found
+}
+
+fn mark_taken(lp: u64) {
+    var key: [u8; 40] = [0 as u8; 40]
+    key_of(lp, (&key[0]) as u64)
+    let slot: u64 = (&taken[0]) as u64 + (taken_next * KEY_CAP) as u64
+    put(slot, KEY_CAP, (&key[0]) as u64, zl((&key[0]) as u64))
+    taken_next = (taken_next + 1) % TAKEN_MAX
+}

@@ -14,7 +14,7 @@ permissions: see "Permissions" below (AR-2).
 (kind `service` = a bus service on rpc.fi; kind `gui` = a window on fUi's scene tree: `profile app`, label + text field +
 main button that counts; `build` then copies the import closure of `wlib/fuiapp/fuiscene` and links with `--gc-sections`, ~0.9 MB;
 gate `tools/sdk/gui.sh`; see the window without a VM: docs/HOST-PREVIEW.md). `build` compiles `src/*.fi` with the SDK modules
-(`ulib`, `actwire`, `rpc` from kernel/user) next to them, writes `DIR/bin/<short>.elf`,
+(`ulib`, `actwire`, `rpc`, `actcli`, `socsdk` from kernel/user; `socsdk` is the social SDK: `docs/SOCIAL.md`, section "The SDK") next to them, writes `DIR/bin/<short>.elf`,
 `DIR/apps/<short>.osp/{INFO,symbol,data/}` and `DIR/mkfs.lines` (arguments for tools/osum/mkfs.py).
 No SYSTEM marker: a third-party app is labelled by the kernel.
 

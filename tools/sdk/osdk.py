@@ -33,7 +33,7 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 TEMPLATE = os.path.join(HERE, "template")
 
 # kernel/user modules a project may import (the SDK surface, docs/SDK.md)
-SDK_MODULES = ["ulib", "actwire", "rpc"]
+SDK_MODULES = ["ulib", "actwire", "rpc", "actcli", "socsdk"]
 
 # the launcher keys (kernel/user/appdir.fi) + the v2 keys
 KEYS_V1 = ["name", "info", "exec", "icon", "keys", "fassung", "net"]
