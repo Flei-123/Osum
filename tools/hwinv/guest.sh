@@ -36,6 +36,8 @@ hwinv
 echo ==FILE==
 hwinv /tmp/hw.txt
 cat /tmp/hw.txt
+echo ==INPUT==
+cat /proc/inputdevs
 echo ==HWCHECK==
 sysinfo --hwcheck
 echo ==END==
@@ -108,6 +110,12 @@ has "$TMPD/smp4.klar" "hwinv: cpus_online=4" "smp4: four cores online in hwinv"
 has "$TMPD/smp4.klar" "hwinv: cpus_madt=4" "smp4: madt count key"
 has "$TMPD/smp4.klar" "hwinv: failed=0" "smp4: failed key"
 hasnot "$TMPD/smp4.klar" "hwinv: cpus_online=1" "counter-proof: smp4 is not one core"
+has "$TMPD/base.klar" "==INPUT==" "base: input section ran"
+has "$TMPD/base.klar" "i2c_ctrls=0 i2c_devs=0 i2c_hung=0" "base: /proc/inputdevs head (no I2C controller in QEMU)"
+has "$TMPD/base.klar" "hwinv: i2c_ctrls=0" "base: hwinv key i2c_ctrls"
+has "$TMPD/base.klar" "hwinv: hid_devs=" "base: hwinv key hid_devs"
+has "$TMPD/base.klar" "== inputdevs ==" "base: raw inputdevs section"
+hasnot "$TMPD/base.klar" "hwinv: ctrl0" "counter-proof: controller lines are not keys"
 n=$(grep -c "^hwinv: " "$TMPD/base.klar"); [ "$n" -ge 28 ] && ok "base: $n hwinv lines (stdout + file copy)" || bad "base: only $n hwinv lines"
 echo "HWINV-GUEST: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
