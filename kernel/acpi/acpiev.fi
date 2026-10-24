@@ -97,6 +97,10 @@ import acpi.amlev
 import acpi.acpibl
 import pwr.blchain
 import pwr.hotkeys
+import pwr.hkdiag
+import acpi.ec
+import acpi.ecio
+import acpi.ecsim
 import acpi.aml
 import sched.time
 import arch.arch
@@ -392,6 +396,7 @@ fn out16(port: u64, v: u64) {
 const HID_LID: u64 = 0x0D0CD041
 const HID_PWRB: u64 = 0x0C0CD041
 const HID_BATT: u64 = 0x0A0CD041
+const HID_EC: u64 = 0x090CD041
 
 // Ein Kindknoten mit diesem Namen, oder NONE.
 fn child(state: u64, parent: u64, seg: u64) -> u64 {
@@ -796,6 +801,7 @@ fn irq(state: u64) {
             gpe_clear(state, bit)
             let w: u64 = E_PEND + (i / 64) * 8
             s(state, w, g(state, w) | (1 << (i & 63)))
+            hkdiag.add(hkdiag.GPE_FIRED, 1)
             etwas = true
         }
         i = i + 1
@@ -992,10 +998,18 @@ fn pump(state: u64) {
         }
         i = i + 1
     }
+    service_ec(state)
+    sync_diag(state)
+    if kstate.mode_on(state, kstate.M_ECSIM) {
+        ecsim.tick(state, g(state, E_PUMPN))
+    }
 }
 
 fn run_gpe(state: u64, idx: u64) {
-    let node: u64 = meth_node(state, idx)
+    run_node(state, meth_node(state, idx), true)
+}
+
+fn run_node(state: u64, node: u64, refresh: bool) {
     if node == amlns.NONE {
         return
     }
@@ -1008,7 +1022,7 @@ fn run_gpe(state: u64, idx: u64) {
         // Maschine laeuft weiter.
         var s_e: [u8; 22] = "acpiev: gpe fehler b=\0"
         serial.puts((&s_e[0]) as u64)
-        serial.hex_width(meth_bit(state, idx), 2)
+        serial.hex_width(node, 4)
         serial.nl()
         amlns.err_set(state, amlns.ERR_OK)
         return
@@ -1024,15 +1038,43 @@ fn run_gpe(state: u64, idx: u64) {
     // KEIN `Notify`, aber ein Ereignis: manche Firmware verlaesst sich
     // darauf, dass das Betriebssystem nach einem GPE ohnehin alles
     // nachliest. Also wird nachgelesen, was zu dem Bit passt.
-    if cnt == 0 {
+    if cnt == 0 && refresh {
         refresh_all(state)
     }
+}
+
+fn service_ec(state: u64) {
+    var n: u64 = 0
+    while n < 8 {
+        let q: u64 = ecio.poll_query()
+        if q == ecio.NO_QUERY {
+            return
+        }
+        let node: u64 = ec.query_node(state, q)
+        if node == amlns.NONE {
+            hkdiag.add(hkdiag.EC_QMISSING, 1)
+        } else {
+            hkdiag.add(hkdiag.EC_QRUN, 1)
+            run_node(state, node, false)
+        }
+        n = n + 1
+    }
+}
+
+fn sync_diag(state: u64) {
+    hkdiag.set(hkdiag.SCI_IRQS, g(state, E_IRQN))
+    hkdiag.set(hkdiag.SCI_SHARED, g(state, E_SHARED))
+    hkdiag.set(hkdiag.SCI_WAKE, g(state, E_WAKE))
+    hkdiag.set(hkdiag.SCI_EVENTS, g(state, E_EVENTS))
+    hkdiag.set(hkdiag.GPE_ARMED, g(state, E_ARMED))
 }
 
 // Ein `Notify(Geraet, Code)` zuordnen. Der Code 0x80 heisst bei allen
 // dreien "sieh nach", 0x81 beim Akku "die Beschreibung hat sich
 // geaendert".
 fn handle_notify(state: u64, node: u64, code: u64) {
+    hkdiag.add(hkdiag.NOTIFY_N, 1)
+    hkdiag.set(hkdiag.NOTIFY_LAST, code)
     if node == g(state, E_LIDDEV) && node != amlns.NONE {
         read_lid(state)
         return
@@ -1382,6 +1424,7 @@ fn stage(state: u64) {
     var w_bix: [u8; 5] = "_BIX\0"
     var w_psr: [u8; 5] = "_PSR\0"
     var w_ac: [u8; 9] = "ACPI0003\0"
+    var w_ec: [u8; 8] = "PNP0C09\0"
 
     s(state, E_LIDN, amlns.NONE)
     s(state, E_LIDDEV, amlns.NONE)
@@ -1496,6 +1539,12 @@ fn stage(state: u64) {
         i = i + 1
     }
     s(state, E_ARMED, armed)
+    var ecd: u64 = find_hid(state, HID_EC)
+    if ecd == amlns.NONE {
+        ecd = find_hid_str(state, (&w_ec[0]) as u64)
+    }
+    ec.setup(state, ecd)
+    ec.scan_hw(state)
 
     // Die Einschalttaste freigeben. Sie ist ein FESTES Ereignis und
     // haengt an keinem GPE-Bit.

@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import pwr.hkdiag
+import acpi.amlns
+import acpi.amlobj
+import acpi.aml
+import acpi.ecio
+
+export {
+    setup, query_node, active, scan_hw
+}
+
+static mut ec_node: u64 = 0xFFFFFFFF
+static mut is_active: bool = false
+static mut crs_data: u64 = 0
+static mut crs_cmd: u64 = 0
+
+fn active() -> bool {
+    return is_active
+}
+
+fn child_of(state: u64, parent: u64, seg: u64) -> u64 {
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_parent(state, i) == parent && amlns.node_name(state, i) == seg {
+            return i
+        }
+        i = i + 1
+    }
+    return amlns.NONE
+}
+
+fn eval_int(state: u64, node: u64) -> u64 {
+    if node == amlns.NONE {
+        return 0xFFFF
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, node, (&r[0]) as u64) {
+        return 0xFFFF
+    }
+    return amlobj.to_int((&r[0]) as u64)
+}
+
+fn store_port(k: u64, v: u64) {
+    if k == 0 {
+        crs_data = v
+    } else {
+        crs_cmd = v
+    }
+}
+
+fn crs_ports(state: u64, node: u64) -> bool {
+    var w_crs: [u8; 5] = "_CRS\0"
+    let crs: u64 = child_of(state, node, amlns.seg_of((&w_crs[0]) as u64))
+    if crs == amlns.NONE {
+        return false
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, crs, (&r[0]) as u64) {
+        return false
+    }
+    if amlobj.otype((&r[0]) as u64) != amlobj.OT_BUF {
+        return false
+    }
+    let at: u64 = amlobj.ov1((&r[0]) as u64)
+    let len: u64 = amlobj.ov2((&r[0]) as u64)
+    var i: u64 = 0
+    var found: u64 = 0
+    while i < len && found < 2 {
+        let tag: u64 = amlns.rd8(at + i)
+        if tag == 0x79 {
+            break
+        }
+        if (tag & 0x80) == 0 {
+            let l: u64 = tag & 7
+            let kind: u64 = (tag >> 3) & 0xF
+            if kind == 8 && l == 7 {
+                store_port(found, amlns.rd16(at + i + 2))
+                found = found + 1
+            } else if kind == 9 && l == 3 {
+                store_port(found, amlns.rd16(at + i + 1))
+                found = found + 1
+            }
+            i = i + 1 + l
+        } else {
+            i = i + 3 + amlns.rd16(at + i + 1)
+        }
+    }
+    return found == 2
+}
+
+fn call_reg(state: u64, node: u64) {
+    var w_reg: [u8; 5] = "_REG\0"
+    let reg: u64 = child_of(state, node, amlns.seg_of((&w_reg[0]) as u64))
+    if reg == amlns.NONE {
+        return
+    }
+    var args: [u64; 6] = [0 as u64; 6]
+    var dst: [u64; 3] = [0 as u64; 3]
+    amlobj.oint((&args[0]) as u64, 3)
+    amlobj.oint((&args[3]) as u64, 1)
+    if aml.eval_node_args(state, reg, 2, (&args[0]) as u64, (&dst[0]) as u64) {
+        hkdiag.set(hkdiag.EC_REG, 1)
+    }
+}
+
+fn setup(state: u64, node: u64) {
+    if kstate.mode_on(state, kstate.M_NOEC) {
+        hkdiag.set(hkdiag.EC_DISABLED, 1)
+        return
+    }
+    if node == amlns.NONE {
+        return
+    }
+    var w_gpe: [u8; 5] = "_GPE\0"
+    hkdiag.set(hkdiag.EC_FOUND, 1)
+    hkdiag.set(hkdiag.EC_GPE, eval_int(state, child_of(state, node, amlns.seg_of((&w_gpe[0]) as u64))))
+    var data: u64 = 0x62
+    var cmd: u64 = 0x66
+    if crs_ports(state, node) {
+        data = crs_data
+        cmd = crs_cmd
+    }
+    hkdiag.set(hkdiag.EC_DATA, data)
+    hkdiag.set(hkdiag.EC_CMD, cmd)
+    if kstate.mode_on(state, kstate.M_ECSIM) {
+        ecio.set_sim(true)
+    }
+    ec_node = node
+    ecio.configure(data, cmd)
+    is_active = true
+    call_reg(state, node)
+}
+
+fn hex_digit(v: u64) -> u64 {
+    if v < 10 {
+        return 48 + v
+    }
+    return 55 + v
+}
+
+fn query_node(state: u64, q: u64) -> u64 {
+    if !is_active {
+        return amlns.NONE
+    }
+    var nm: [u8; 5] = "_Q00\0"
+    nm[2] = hex_digit((q >> 4) & 15) as u8
+    nm[3] = hex_digit(q & 15) as u8
+    return child_of(state, ec_node, amlns.seg_of((&nm[0]) as u64))
+}
+
+fn has_prefix(txt: u64, w: u64) -> bool {
+    var i: u64 = 0
+    while amlns.rd8(w + i) != 0 {
+        if amlns.rd8(txt + i) != amlns.rd8(w + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn scan_hw(state: u64) {
+    var w_hid: [u8; 5] = "_HID\0"
+    var p_wmi: [u8; 8] = "PNP0C14\0"
+    var p_hpq: [u8; 4] = "HPQ\0"
+    let seg: u64 = amlns.seg_of((&w_hid[0]) as u64)
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_kind(state, i) == amlns.NK_DEVICE {
+            let h: u64 = child_of(state, i, seg)
+            if h != amlns.NONE {
+                var r: [u64; 3] = [0 as u64; 3]
+                if aml.eval_node(state, h, (&r[0]) as u64) {
+                    let t: u64 = amlobj.otype((&r[0]) as u64)
+                    if t == amlobj.OT_INT {
+                        let v: u64 = amlobj.ov1((&r[0]) as u64)
+                        if v == 0x140CD041 {
+                            hkdiag.add(hkdiag.WMI_DEVICES, 1)
+                        }
+                        if (v & 0xFFFF) == 0x1122 {
+                            hkdiag.add(hkdiag.HPQ_DEVICES, 1)
+                        }
+                    } else if t == amlobj.OT_STR {
+                        let sp: u64 = amlobj.ov1((&r[0]) as u64)
+                        if has_prefix(sp, (&p_wmi[0]) as u64) {
+                            hkdiag.add(hkdiag.WMI_DEVICES, 1)
+                        }
+                        if has_prefix(sp, (&p_hpq[0]) as u64) {
+                            hkdiag.add(hkdiag.HPQ_DEVICES, 1)
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}

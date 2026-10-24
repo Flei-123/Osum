@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import pwr.hkdiag
+
+export {
+    configure, is_ready, set_sim, read_reg, write_reg, poll_query, sim_inject, sim_poke, sim_peek, NO_QUERY
+}
+
+const NO_QUERY: u64 = 0x100
+const ST_OBF: u64 = 1
+const ST_IBF: u64 = 2
+const ST_SCI: u64 = 0x20
+const CMD_READ: u64 = 0x80
+const CMD_WRITE: u64 = 0x81
+const CMD_QUERY: u64 = 0x84
+const SPIN: u64 = 200000
+
+static mut data_port: u64 = 0x62
+static mut cmd_port: u64 = 0x66
+static mut ready_flag: bool = false
+static mut sim_on: bool = false
+static mut busy: u64 = 0
+static mut sim_regs: [u8; 256] = [0 as u8; 256]
+static mut sim_queue: [u8; 16] = [0 as u8; 16]
+static mut sim_qn: u64 = 0
+static mut sim_cmd: u64 = 0
+static mut sim_stage: u64 = 0
+static mut sim_addr: u64 = 0
+static mut sim_out: u64 = 0
+static mut sim_obf: bool = false
+
+fn configure(data: u64, cmd: u64) {
+    data_port = data
+    cmd_port = cmd
+    ready_flag = true
+}
+
+fn is_ready() -> bool {
+    return ready_flag
+}
+
+fn set_sim(on: bool) {
+    sim_on = on
+}
+
+fn sim_inject(q: u64) {
+    if sim_qn < 16 {
+        sim_queue[sim_qn as usize] = q as u8
+        sim_qn = sim_qn + 1
+    }
+}
+
+fn sim_poke(addr: u64, v: u64) {
+    sim_regs[(addr & 0xFF) as usize] = v as u8
+}
+
+fn sim_peek(addr: u64) -> u64 {
+    return sim_regs[(addr & 0xFF) as usize] as u64
+}
+
+fn sim_in(port: u64) -> u64 {
+    if port == cmd_port {
+        var st: u64 = 0
+        if sim_obf {
+            st = st | ST_OBF
+        }
+        if sim_qn > 0 {
+            st = st | ST_SCI
+        }
+        return st
+    }
+    if sim_obf {
+        sim_obf = false
+        return sim_out
+    }
+    return 0
+}
+
+fn sim_out_port(port: u64, v: u64) {
+    if port == cmd_port {
+        sim_cmd = v
+        sim_stage = 1
+        if v == CMD_QUERY {
+            sim_out = 0
+            if sim_qn > 0 {
+                sim_out = sim_queue[0] as u64
+                var i: u64 = 1
+                while i < sim_qn {
+                    sim_queue[(i - 1) as usize] = sim_queue[i as usize]
+                    i = i + 1
+                }
+                sim_qn = sim_qn - 1
+            }
+            sim_obf = true
+            sim_stage = 0
+        }
+        return
+    }
+    if sim_cmd == CMD_READ && sim_stage == 1 {
+        sim_out = sim_regs[(v & 0xFF) as usize] as u64
+        sim_obf = true
+        sim_stage = 0
+        return
+    }
+    if sim_cmd == CMD_WRITE && sim_stage == 1 {
+        sim_addr = v & 0xFF
+        sim_stage = 2
+        return
+    }
+    if sim_cmd == CMD_WRITE && sim_stage == 2 {
+        sim_regs[sim_addr as usize] = v as u8
+        sim_stage = 0
+    }
+}
+
+fn pin(port: u64) -> u64 {
+    if sim_on {
+        return sim_in(port)
+    }
+    return serial.in8(port as u16) as u64
+}
+
+fn pout(port: u64, v: u64) {
+    if sim_on {
+        sim_out_port(port, v)
+        return
+    }
+    serial.out8(port as u16, v as u8)
+}
+
+fn wait_clear(mask: u64) -> bool {
+    var n: u64 = 0
+    while n < SPIN {
+        if (pin(cmd_port) & mask) == 0 {
+            return true
+        }
+        n = n + 1
+    }
+    hkdiag.add(hkdiag.EC_ERRORS, 1)
+    return false
+}
+
+fn wait_set(mask: u64) -> bool {
+    var n: u64 = 0
+    while n < SPIN {
+        if (pin(cmd_port) & mask) != 0 {
+            return true
+        }
+        n = n + 1
+    }
+    hkdiag.add(hkdiag.EC_ERRORS, 1)
+    return false
+}
+
+fn drain() {
+    if (pin(cmd_port) & ST_OBF) != 0 {
+        let _x: u64 = pin(data_port)
+    }
+}
+
+fn read_reg(addr: u64) -> u64 {
+    if !ready_flag {
+        return 0
+    }
+    busy = busy + 1
+    var v: u64 = 0
+    drain()
+    if wait_clear(ST_IBF) {
+        pout(cmd_port, CMD_READ)
+        if wait_clear(ST_IBF) {
+            pout(data_port, addr)
+            if wait_set(ST_OBF) {
+                v = pin(data_port)
+            }
+        }
+    }
+    hkdiag.add(hkdiag.EC_READS, 1)
+    busy = busy - 1
+    return v
+}
+
+fn write_reg(addr: u64, v: u64) {
+    if !ready_flag {
+        return
+    }
+    busy = busy + 1
+    drain()
+    if wait_clear(ST_IBF) {
+        pout(cmd_port, CMD_WRITE)
+        if wait_clear(ST_IBF) {
+            pout(data_port, addr)
+            if wait_clear(ST_IBF) {
+                pout(data_port, v)
+                let _w: bool = wait_clear(ST_IBF)
+            }
+        }
+    }
+    hkdiag.add(hkdiag.EC_WRITES, 1)
+    busy = busy - 1
+}
+
+fn query() -> u64 {
+    var q: u64 = 0
+    if wait_clear(ST_IBF) {
+        pout(cmd_port, CMD_QUERY)
+        if wait_set(ST_OBF) {
+            q = pin(data_port)
+        }
+    }
+    hkdiag.add(hkdiag.EC_QUERIES, 1)
+    return q
+}
+
+fn poll_query() -> u64 {
+    if !ready_flag || busy != 0 {
+        return NO_QUERY
+    }
+    let st: u64 = pin(cmd_port)
+    hkdiag.set(hkdiag.EC_STATUS, st)
+    hkdiag.add(hkdiag.EC_POLLS, 1)
+    if (st & ST_SCI) == 0 {
+        return NO_QUERY
+    }
+    hkdiag.add(hkdiag.EC_SCI, 1)
+    busy = busy + 1
+    let q: u64 = query()
+    busy = busy - 1
+    if q == 0 {
+        return NO_QUERY
+    }
+    hkdiag.set(hkdiag.EC_LASTQ, q)
+    return q
+}

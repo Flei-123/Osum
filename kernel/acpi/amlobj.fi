@@ -40,6 +40,7 @@ import serial
 import mm.mem
 import bus.pci
 import acpi.amlns
+import acpi.ecio
 
 export {
     OT_NONE, OT_INT, OT_STR, OT_BUF, OT_PKG, OT_REF_SLOT, OT_REF_NODE,
@@ -48,7 +49,7 @@ export {
     obj_new, obj_int, obj_buf, obj_pkg,
     const_int, truth, to_int,
     field_read, field_write, region_check,
-    RS_MEM, RS_IO, RS_PCI,
+    RS_MEM, RS_IO, RS_PCI, RS_EC,
     res_first_irq, res_irq_count, res_irq_at
 }
 
@@ -67,6 +68,7 @@ const OT_DEBUG: u64 = 8
 const RS_MEM: u64 = 0
 const RS_IO: u64 = 1
 const RS_PCI: u64 = 2
+const RS_EC: u64 = 3
 
 // ------------------------------------------------------- ein Objektplatz
 
@@ -300,6 +302,9 @@ fn region_check(state: u64, space: u64, base: u64, len: u64) -> bool {
     if space == RS_PCI {
         return base + len <= 0x1000
     }
+    if space == RS_EC {
+        return ecio.is_ready() && base + len <= 0x100
+    }
     if space == RS_MEM {
         // Nur, was der Kernel identisch abgebildet hat. Alles darueber
         // waere ein Seitenfehler mit Ansage.
@@ -313,6 +318,9 @@ fn region_check(state: u64, space: u64, base: u64, len: u64) -> bool {
 }
 
 fn reg_read8(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
+    if space == RS_EC {
+        return ecio.read_reg((base + off) & 0xFF)
+    }
     if space == RS_IO {
         return serial.in8(((base + off) & 0xFFFF) as u16) as u64
     }
@@ -324,6 +332,10 @@ fn reg_read8(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
 
 fn reg_write8(state: u64, space: u64, node: u64, base: u64, off: u64,
     v: u64) {
+    if space == RS_EC {
+        ecio.write_reg((base + off) & 0xFF, v & 0xFF)
+        return
+    }
     if space == RS_IO {
         serial.out8(((base + off) & 0xFFFF) as u16, (v & 0xFF) as u8)
         return
@@ -336,6 +348,10 @@ fn reg_write8(state: u64, space: u64, node: u64, base: u64, off: u64,
 }
 
 fn reg_read32(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
+    if space == RS_EC {
+        return ecio.read_reg((base + off) & 0xFF) | (ecio.read_reg((base + off + 1) & 0xFF) << 8)
+            | (ecio.read_reg((base + off + 2) & 0xFF) << 16) | (ecio.read_reg((base + off + 3) & 0xFF) << 24)
+    }
     if space == RS_IO {
         return in32(((base + off) & 0xFFFF) as u16)
     }
@@ -347,6 +363,14 @@ fn reg_read32(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
 
 fn reg_write32(state: u64, space: u64, node: u64, base: u64, off: u64,
     v: u64) {
+    if space == RS_EC {
+        var k: u64 = 0
+        while k < 4 {
+            ecio.write_reg((base + off + k) & 0xFF, (v >> (k * 8)) & 0xFF)
+            k = k + 1
+        }
+        return
+    }
     if space == RS_IO {
         out32(((base + off) & 0xFFFF) as u16, v)
         return
