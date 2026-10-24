@@ -86,7 +86,7 @@ mtrr_run() { # <tag> <serial> <state> <reason> <mtrr_type> <min count> <expect m
     fi
     grep -aiqE 'panic|kernel fault' "$s" && bad "$t: panic on the serial line" || ok "$t: no panic"
 }
-mtrr_run A-natural "$SA" 3 2 0 0 -
+mtrr_run A-natural "$SA" 3 3 0 0 -
 mtrr_run C-sim4 "$TMPD/c/o/serial.txt" 2 0 1 1 15
 mtrr_run D-nomtrr "$TMPD/d/o/serial.txt" 3 8 0 0 -
 mtrr_run E-strict "$TMPD/e/o/serial.txt" 4 9 0 0 -
