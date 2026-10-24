@@ -1,0 +1,233 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import serial
+import drv.usb.xhci
+import usbnet.ch397
+
+export { bringup, house, link, bmsr, cfg, fw, changes, mode_line }
+
+const X_BMSR: u64 = 0x108
+const X_CFG: u64 = 0x110
+const X_FWV: u64 = 0x118
+const X_NEXT: u64 = 0x120
+const X_CHG: u64 = 0x128
+const X_LINK: u64 = 0x130
+const X_ANAR: u64 = 0x138
+const X_LPA: u64 = 0x140
+const X_SPEED: u64 = 0x148
+const WBUF: u64 = 0x200
+const RBUF: u64 = 0x300
+const CTL_DELAY_US: u64 = 10000
+const LINK_WAIT_STEPS: u64 = 30
+const LINK_STEP_US: u64 = 100000
+const HOUSE_TICKS: u64 = 100
+const NO_REPLY: u64 = 0x1FFFFFFFF
+
+fn getc(b: u64, off: u64) -> u64 {
+    let p: *mut u64 = (b + off) as *mut u64
+    return *p
+}
+
+fn setc(b: u64, off: u64, v: u64) {
+    let p: *mut u64 = (b + off) as *mut u64
+    *p = v
+}
+
+fn link(b: u64) -> u64 { return getc(b, X_LINK) }
+fn bmsr(b: u64) -> u64 { return getc(b, X_BMSR) }
+fn cfg(b: u64) -> u64 { return getc(b, X_CFG) }
+fn fw(b: u64) -> u64 { return getc(b, X_FWV) }
+fn changes(b: u64) -> u64 { return getc(b, X_CHG) }
+
+fn hexn(v: u64, digits: u64) {
+    var i: u64 = digits
+    while i > 0 {
+        i = i - 1
+        let x: u64 = (v >> (i * 4)) & 15
+        if x < 10 {
+            serial.put((48 + x) as u8)
+        } else {
+            serial.put((87 + x) as u8)
+        }
+    }
+}
+
+fn ld(p: u64, i: u64) -> u64 {
+    let q: *mut u8 = (p + i) as *mut u8
+    let v: u8 = *q
+    return v as u64
+}
+
+fn st(p: u64, i: u64, v: u64) {
+    let q: *mut u8 = (p + i) as *mut u8
+    *q = (v & 255) as u8
+}
+
+fn read_reg(state: u64, b: u64, slot: u64, reg: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < 8 {
+        st(b + RBUF, i, 0)
+        i = i + 1
+    }
+    let r: i64 = xhci.control(state, slot, 0xC0, ch397.REQ_READ_REG, reg & 0xFFFF, reg >> 16, n, b + RBUF, true)
+    xhci.udelay(state, CTL_DELAY_US)
+    if r < n as i64 {
+        return NO_REPLY
+    }
+    var v: u64 = 0
+    i = 0
+    while i < n {
+        v = v | (ld(b + RBUF, i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+fn write_reg(state: u64, b: u64, slot: u64, reg: u64, n: u64, val: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        st(b + WBUF, i, val >> (i * 8))
+        i = i + 1
+    }
+    let r: i64 = xhci.control(state, slot, 0x40, ch397.REQ_WRITE_REG, reg & 0xFFFF, reg >> 16, n, b + WBUF, false)
+    xhci.udelay(state, CTL_DELAY_US)
+    return r >= 0
+}
+
+fn phy_read(state: u64, b: u64, slot: u64, reg: u64) -> u64 {
+    st(b + RBUF, 0, 0)
+    st(b + RBUF, 1, 0)
+    let r: i64 = xhci.control(state, slot, 0xC0, ch397.REQ_PHY_READ, ch397.PHY_BASE, reg, 2, b + RBUF, true)
+    xhci.udelay(state, CTL_DELAY_US)
+    if r < 2 {
+        return NO_REPLY
+    }
+    return ld(b + RBUF, 0) | (ld(b + RBUF, 1) << 8)
+}
+
+fn cfg_write(state: u64, b: u64, slot: u64, v: u64) -> bool {
+    if ch397.maccfg_by_request(getc(b, X_FWV)) {
+        let r: i64 = xhci.control(state, slot, 0x40, ch397.REQ_WRITE_MACCFG, v & 0xFFFF, (v >> 16) & 0xFFFF, 0, 0, false)
+        xhci.udelay(state, CTL_DELAY_US)
+        return r >= 0
+    }
+    return write_reg(state, b, slot, ch397.REG_MAC_CFG, 4, v)
+}
+
+fn apply_media(state: u64, b: u64, slot: u64) -> bool {
+    let anar: u64 = phy_read(state, b, slot, ch397.MII_ANAR)
+    let lpa: u64 = phy_read(state, b, slot, ch397.MII_LPA)
+    if anar == NO_REPLY || lpa == NO_REPLY {
+        return false
+    }
+    setc(b, X_ANAR, anar)
+    setc(b, X_LPA, lpa)
+    let v: u64 = ch397.media_cfg(getc(b, X_CFG), anar, lpa)
+    let w: u64 = ch397.rx_mode_cfg(v)
+    setc(b, X_CFG, w)
+    return cfg_write(state, b, slot, w)
+}
+
+fn sample_link(state: u64, b: u64, slot: u64) -> u64 {
+    var bm: u64 = phy_read(state, b, slot, ch397.MII_BMSR)
+    if bm != NO_REPLY && !ch397.link_up(bm) {
+        bm = phy_read(state, b, slot, ch397.MII_BMSR)
+    }
+    return bm
+}
+
+fn mode_line(b: u64) {
+    var s_h: [u8; 17] = "usb: ch336 link=\0"
+    var s_u: [u8; 3] = "up\0"
+    var s_d: [u8; 5] = "down\0"
+    var s_b: [u8; 7] = " bmsr=\0"
+    var s_a: [u8; 7] = " anar=\0"
+    var s_l: [u8; 6] = " lpa=\0"
+    var s_c: [u8; 6] = " cfg=\0"
+    var s_f: [u8; 5] = " fw=\0"
+    serial.puts((&s_h[0]) as u64)
+    if getc(b, X_LINK) == 1 {
+        serial.puts((&s_u[0]) as u64)
+    } else {
+        serial.puts((&s_d[0]) as u64)
+    }
+    serial.puts((&s_b[0]) as u64)
+    hexn(getc(b, X_BMSR), 4)
+    serial.puts((&s_a[0]) as u64)
+    hexn(getc(b, X_ANAR), 4)
+    serial.puts((&s_l[0]) as u64)
+    hexn(getc(b, X_LPA), 4)
+    serial.puts((&s_c[0]) as u64)
+    hexn(getc(b, X_CFG), 8)
+    serial.puts((&s_f[0]) as u64)
+    hexn(getc(b, X_FWV), 2)
+    serial.nl()
+}
+
+fn bringup(state: u64, b: u64, slot: u64, fwver: u64) -> bool {
+    setc(b, X_FWV, fwver)
+    setc(b, X_CHG, 0)
+    setc(b, X_NEXT, 0)
+    setc(b, X_LINK, 0)
+    setc(b, X_BMSR, 0)
+    setc(b, X_ANAR, 0)
+    setc(b, X_LPA, 0)
+    let c: u64 = read_reg(state, b, slot, ch397.REG_MAC_CFG, 4)
+    if c == NO_REPLY {
+        return false
+    }
+    setc(b, X_CFG, c)
+    write_reg(state, b, slot, ch397.REG_HASH_HI, 4, 0xFFFFFFFF)
+    write_reg(state, b, slot, ch397.REG_HASH_LO, 4, 0xFFFFFFFF)
+    var steps: u64 = 0
+    var bm: u64 = NO_REPLY
+    while steps < LINK_WAIT_STEPS {
+        bm = sample_link(state, b, slot)
+        if bm != NO_REPLY && ch397.link_up(bm) {
+            steps = LINK_WAIT_STEPS
+        } else {
+            xhci.udelay(state, LINK_STEP_US)
+            steps = steps + 1
+        }
+    }
+    if bm == NO_REPLY {
+        bm = 0
+    }
+    setc(b, X_BMSR, bm)
+    if ch397.link_up(bm) {
+        setc(b, X_LINK, 1)
+        apply_media(state, b, slot)
+    } else {
+        setc(b, X_LINK, 2)
+        let w: u64 = ch397.rx_mode_cfg(c)
+        setc(b, X_CFG, w)
+        cfg_write(state, b, slot, w)
+    }
+    mode_line(b)
+    return true
+}
+
+fn house(state: u64, b: u64, slot: u64, now: u64) -> u64 {
+    if now < getc(b, X_NEXT) {
+        return 0
+    }
+    setc(b, X_NEXT, now + HOUSE_TICKS)
+    let bm: u64 = sample_link(state, b, slot)
+    if bm == NO_REPLY {
+        return 0
+    }
+    setc(b, X_BMSR, bm)
+    var now_link: u64 = 2
+    if ch397.link_up(bm) {
+        now_link = 1
+    }
+    if now_link == getc(b, X_LINK) {
+        return 0
+    }
+    setc(b, X_LINK, now_link)
+    setc(b, X_CHG, getc(b, X_CHG) + 1)
+    if now_link == 1 {
+        apply_media(state, b, slot)
+    }
+    mode_line(b)
+    return now_link
+}

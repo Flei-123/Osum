@@ -45,12 +45,13 @@ import usbnet.rndis
 import usbnet.ncm
 import usbnet.ch397
 import usbnet.ax88772
+import drv.net.ch336
 
 export {
     attach, attach_rndis, attach_ncm, attach_ch336, attach_ax88772, detach, unplug_slot, link_on, keepalives, exists, present_on, ready_on, up_on, mac_at_on,
     rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
     rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
-    errors, MAX_UNITS, FRAME_MAX
+    errors, MAX_UNITS, FRAME_MAX, ch_bringup, mode_get, ch_link, ch_bmsr, ch_cfg, ch_fw, ch_changes
 }
 
 const MAX_UNITS: u64 = 1
@@ -93,6 +94,9 @@ const C_KAA: u64 = 0xD8 // RNDIS: device keepalives answered
 const C_MISS: u64 = 0xE0 // RNDIS: rounds without an answer
 const C_CID: u64 = 0xE8 // RNDIS: request id counter
 const C_ROUND: u64 = 0xF0 // RNDIS: housekeeping round counter
+const C_CARRY: u64 = 0xF8
+const C_SKIP: u64 = 0x100
+const CH_BASE: u64 = 0x2800
 const CMD_OFF: u64 = 0x200
 const RSP_OFF: u64 = 0x300
 const HOUSE_TICKS: u64 = 300
@@ -184,7 +188,7 @@ fn attach_mode(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u6
     mode: u64) -> bool {
     var b: u64 = blk(state)
     if b == 0 {
-        b = mem.frame_run(state, 2)
+        b = mem.frame_run(state, 3)
         if b == 0 {
             return false
         }
@@ -214,13 +218,19 @@ fn attach_mode(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u6
     cs(state, C_MISS, 0)
     cs(state, C_CID, 100)
     cs(state, C_ROUND, 0)
+    cs(state, C_CARRY, 0)
+    cs(state, C_SKIP, 0)
     let i: u64 = xhci.ep_find(state, slot, indci)
     if i >= xhci.MAX_EP {
         return false
     }
     cs(state, C_SEQ, xhci.ep_seq(state, i))
     cs(state, C_READY, 1)
-    return xhci.int_queue(state, slot, indci, b + RXA_OFF, RXBUF)
+    var rxa: u64 = b + RXA_OFF
+    if mode == 3 {
+        rxa = b + CH_BASE
+    }
+    return xhci.int_queue(state, slot, indci, rxa, RXBUF)
 }
 
 fn detach(state: u64) {
@@ -388,8 +398,36 @@ fn mac_at_on(state: u64, u: u64, i: u64) -> u64 {
 }
 
 fn requeue(state: u64) {
-    xhci.int_queue(state, cg(state, C_SLOT), cg(state, C_IN),
-        blk(state) + RXA_OFF, RXBUF)
+    var rxa: u64 = blk(state) + RXA_OFF
+    if cg(state, C_MODE) == 3 {
+        rxa = blk(state) + CH_BASE
+    }
+    xhci.int_queue(state, cg(state, C_SLOT), cg(state, C_IN), rxa, RXBUF)
+}
+
+fn mode_get(state: u64) -> u64 { return cg(state, C_MODE) }
+fn ch_link(state: u64) -> u64 { return ch336.link(blk(state)) }
+fn ch_bmsr(state: u64) -> u64 { return ch336.bmsr(blk(state)) }
+fn ch_cfg(state: u64) -> u64 { return ch336.cfg(blk(state)) }
+fn ch_fw(state: u64) -> u64 { return ch336.fw(blk(state)) }
+fn ch_changes(state: u64) -> u64 { return ch336.changes(blk(state)) }
+
+fn ch_house(state: u64) {
+    if cg(state, C_MODE) != 3 {
+        return
+    }
+    let r: u64 = ch336.house(state, blk(state), cg(state, C_SLOT), ticks(state))
+    if r != 0 {
+        cs(state, C_LINK, r)
+    }
+}
+
+fn ch_bringup(state: u64, fwver: u64) -> bool {
+    if !ch336.bringup(state, blk(state), cg(state, C_SLOT), fwver) {
+        return false
+    }
+    cs(state, C_LINK, ch336.link(blk(state)))
+    return true
 }
 
 fn poll_on(state: u64, u: u64) -> bool {
@@ -400,6 +438,7 @@ fn poll_on(state: u64, u: u64) -> bool {
     if cg(state, C_MODE) == 1 {
         house(state)
     }
+    ch_house(state)
     if cg(state, C_HOLD) != 0 {
         return false
     }
@@ -422,6 +461,7 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     if cg(state, C_MODE) == 1 {
         house(state)
     }
+    ch_house(state)
     if cg(state, C_HOLD) != 0 {
         return 0
     }
@@ -465,8 +505,15 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         return rndis_next(state, frame, slot)
     }
     if cg(state, C_MODE) == 3 {
-        cs(state, C_RXOFF, 0)
-        cs(state, C_RXLEN, n)
+        var skip: u64 = cg(state, C_SKIP)
+        if skip >= n {
+            cs(state, C_SKIP, skip - n)
+            requeue(state)
+            return 0
+        }
+        cs(state, C_SKIP, 0)
+        cs(state, C_RXOFF, skip)
+        cs(state, C_RXLEN, cg(state, C_CARRY) + n)
         return ch_next(state, frame, slot)
     }
     if cg(state, C_MODE) == 4 {
@@ -578,26 +625,35 @@ fn ncm_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
 // re-queued after the last frame, and only after the frame was copied out of the RX buffer.
 fn ch_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     let b: u64 = blk(state)
-    let p: u64 = b + RXA_OFF
+    let carry: u64 = cg(state, C_CARRY)
+    let p: u64 = b + CH_BASE - carry
     let off: u64 = cg(state, C_RXOFF)
     let len: u64 = cg(state, C_RXLEN)
-    if off + 8 > len {
+    let st: u64 = ch397.rx_status(p, len as usize, off as usize)
+    if st == ch397.RX_MORE {
+        let tail: u64 = len - off
+        copy(b + CH_BASE - tail, p + off, tail)
+        cs(state, C_CARRY, tail)
+        cs(state, C_RXLEN, 0)
+        requeue(state)
+        return 0
+    }
+    if st == ch397.RX_BAD {
+        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        cs(state, C_CARRY, 0)
+        cs(state, C_SKIP, 0)
         cs(state, C_RXLEN, 0)
         requeue(state)
         return 0
     }
     let fl: u64 = ch397.rx_frame_len(p, len as usize, off as usize) as u64
-    if fl == 0 {
-        cs(state, C_ERR, cg(state, C_ERR) + 1)
-        cs(state, C_RXLEN, 0)
-        requeue(state)
-        return 0
-    }
     let fo: u64 = ch397.rx_frame_off(off as usize) as u64
     let nx: u64 = ch397.rx_next(p, len as usize, off as usize) as u64
     copy(b + HOLD_OFF, p + fo, fl)
     cs(state, C_RXOFF, nx)
-    if nx == 0 || nx + 8 > len {
+    if nx >= len {
+        cs(state, C_SKIP, ch397.rx_pad_missing(nx as usize, len as usize) as u64)
+        cs(state, C_CARRY, 0)
         cs(state, C_RXLEN, 0)
         requeue(state)
     }

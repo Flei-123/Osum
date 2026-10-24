@@ -1,37 +1,50 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// lib/usbnet/ch397.fi -- WCH CH336/CH339/CH396/CH397 USB 2.0 Ethernet (vendor class 0xFF), protocol half.
-//
-// Justin's dongle "USB2.0 Ethernet Adapter" 1A86:5394 is NOT ECM/NCM/RNDIS: Windows binds WCH's own
-// `WCHUSBNICA64` (compatible ids Class_FF/SubClass_FF/Prot_FF). The only open source found is the
-// MIT-licensed out-of-tree `ch397.c` (gitee.com/ydong08/ch397), which lists
-//   1a86:5397 CH397, 1a86:5396 CH396, 1a86:5395 CH339, 1a86:5394 CH336
-// and drives the chip with vendor control requests plus 4-byte-length-prefixed bulk frames.
-// EVERYTHING BELOW IS FROM THAT ONE SOURCE (read 15.10.2026) AND HAS NOT BEEN TRIED ON A REAL CHIP.
-// The framing is therefore a hypothesis until a USB capture of the real dongle confirms it.
-//
+// WCH CH336/CH339/CH396/CH397 USB 2.0 Ethernet (vendor class 0xFF), protocol half. See docs/WLAN-CH336.md.
 // No allocator, no syscall: callers pass buffers.
 
 export {
-    supported, chip_name_get, tx_wrap, rx_next, rx_frame_off, rx_frame_len,
-    VID_WCH, REQ_INFO, REQ_READ_REG, REQ_WRITE_REG, REQ_PHY_READ, REQ_PHY_WRITE,
-    REG_MAC_L, REG_MAC_H, REG_MAC_CFG, FRAME_MIN, FRAME_MAX, OVERHEAD
+    supported, chip_name_get, tx_wrap, rx_status, rx_frame_len, rx_frame_off, rx_next, rx_pad_missing,
+    rx_mode_cfg, media_cfg, link_up, an_done, maccfg_by_request,
+    VID_WCH, REQ_INFO, REQ_READ_REG, REQ_WRITE_REG, REQ_PHY_READ, REQ_PHY_WRITE, REQ_WRITE_MACCFG,
+    REG_MAC_L, REG_MAC_H, REG_MAC_CFG, REG_HASH_HI, REG_HASH_LO, PHY_BASE,
+    MII_BMCR, MII_BMSR, MII_ANAR, MII_LPA,
+    FRAME_MIN, FRAME_MAX, RX_MAX, OVERHEAD, RX_OK, RX_MORE, RX_BAD, FW_MACCFG_REQ
 }
 
 const VID_WCH: u64 = 0x1A86
-// vendor requests, bmRequestType 0xC0 (read) / 0x40 (write), device recipient;
-// register address = wValue (low 16) | wIndex << 16.
-const REQ_INFO: u64 = 0x10      // 8 bytes: chiptype, hwver, fwver, sta, 4 reserved
+const REQ_INFO: u64 = 0x10
 const REQ_READ_REG: u64 = 0x11
 const REQ_WRITE_REG: u64 = 0x12
 const REQ_PHY_READ: u64 = 0x15
 const REQ_PHY_WRITE: u64 = 0x16
-const REG_MAC_L: u64 = 0x40000714 // 4 bytes
-const REG_MAC_H: u64 = 0x40000710 // 2 bytes
+const REQ_WRITE_MACCFG: u64 = 0x1E
+const REG_MAC_L: u64 = 0x40000714
+const REG_MAC_H: u64 = 0x40000710
 const REG_MAC_CFG: u64 = 0x40000700
+const REG_HASH_HI: u64 = 0x40000730
+const REG_HASH_LO: u64 = 0x40000734
+const PHY_BASE: u64 = 0x740
+const MII_BMCR: u64 = 0
+const MII_BMSR: u64 = 1
+const MII_ANAR: u64 = 4
+const MII_LPA: u64 = 5
+const FW_MACCFG_REQ: u64 = 0x37
+
+const CFG_PS: u64 = 0x80
+const CFG_FD: u64 = 0x100
+const CFG_RA: u64 = 0x80000
+const CFG_PAM: u64 = 0x100000
+const CFG_PUF: u64 = 0x200000
+const CFG_PBD: u64 = 0x400000
 
 const FRAME_MIN: usize = 60
 const FRAME_MAX: usize = 1518
-const OVERHEAD: usize = 8 // 4 length octets + 4 octets whose meaning is unknown (TX: zero)
+const RX_MAX: usize = 1522
+const OVERHEAD: usize = 8
+
+const RX_OK: u64 = 0
+const RX_MORE: u64 = 1
+const RX_BAD: u64 = 2
 
 fn supported(vid: u64, pid: u64) -> bool {
     if vid != VID_WCH { return false }
@@ -39,7 +52,6 @@ fn supported(vid: u64, pid: u64) -> bool {
 }
 
 fn chip_name_get(pid: u64, out: u64) -> usize {
-    var s: u64 = 0
     var n: usize = 0
     if pid == 0x5394 { let t: [u8; 6] = "CH336\0"; n = cp(out, (&t[0]) as u64); return n }
     if pid == 0x5395 { let t: [u8; 6] = "CH339\0"; n = cp(out, (&t[0]) as u64); return n }
@@ -65,40 +77,40 @@ fn ld8(p: u64, o: usize) -> u64 {
     return b as u64
 }
 
-// Wrap one Ethernet frame for the bulk-OUT pipe. out must hold n + 16 octets.
-// Layout: [len u32 LE][4 zero octets][frame][zero pad]; frames below 60 octets are
-// zero-padded to 60; the total is rounded up to a multiple of 4 and, if it is then 512
-// or 1024, grown by 4 (avoids a total that is a multiple of the bulk packet size).
-// Returns the transfer length, or 0 if the frame is empty or longer than FRAME_MAX.
 fn tx_wrap(frame: u64, n: usize, out: u64) -> usize {
     if n == 0 || n > FRAME_MAX { return 0 }
     var fl: usize = n
     if fl < FRAME_MIN { fl = FRAME_MIN }
-    st8(out, 0, fl as u64)
-    st8(out, 1, (fl as u64) >> 8)
+    var total: usize = (OVERHEAD + fl + 3) & 0xFFFFFFFC
+    if total == 512 || total == 1024 { total = total + 4 }
+    let hl: usize = total - OVERHEAD
+    st8(out, 0, hl as u64)
+    st8(out, 1, (hl as u64) >> 8)
     st8(out, 2, 0)
     st8(out, 3, 0)
     var i: usize = 4
     while i < OVERHEAD { st8(out, i, 0); i = i + 1 }
     i = 0
     while i < n { st8(out, OVERHEAD + i, ld8(frame, i)); i = i + 1 }
-    while i < fl { st8(out, OVERHEAD + i, 0); i = i + 1 }
-    var total: usize = (OVERHEAD + fl + 3) & 0xFFFFFFFC
-    if total == 512 || total == 1024 { total = total + 4 }
-    i = OVERHEAD + fl
-    while i < total { st8(out, i, 0); i = i + 1 }
+    while i < hl { st8(out, OVERHEAD + i, 0); i = i + 1 }
     return total
 }
 
-// Walk a bulk-IN transfer of `len` octets holding several frames. `pos` is the offset of the
-// next header. rx_next returns the offset of the next header after the frame at `pos`, or
-// 0 if the frame at `pos` is malformed (length outside 60..1518 or running past `len`).
+fn rx_hdr(buf: u64, pos: usize) -> usize {
+    return (ld8(buf, pos) | (ld8(buf, pos + 1) << 8) | (ld8(buf, pos + 2) << 16) | (ld8(buf, pos + 3) << 24)) as usize
+}
+
+fn rx_status(buf: u64, len: usize, pos: usize) -> u64 {
+    if pos + OVERHEAD > len { return RX_MORE }
+    let l: usize = rx_hdr(buf, pos)
+    if l < FRAME_MIN || l > RX_MAX { return RX_BAD }
+    if pos + OVERHEAD + l > len { return RX_MORE }
+    return RX_OK
+}
+
 fn rx_frame_len(buf: u64, len: usize, pos: usize) -> usize {
-    if pos + 4 > len { return 0 }
-    let l: usize = (ld8(buf, pos) | (ld8(buf, pos + 1) << 8) | (ld8(buf, pos + 2) << 16) | (ld8(buf, pos + 3) << 24)) as usize
-    if l < FRAME_MIN || l > FRAME_MAX { return 0 }
-    if pos + OVERHEAD + l > len { return 0 }
-    return l
+    if rx_status(buf, len, pos) != RX_OK { return 0 }
+    return rx_hdr(buf, pos)
 }
 
 fn rx_frame_off(pos: usize) -> usize { return pos + OVERHEAD }
@@ -108,3 +120,35 @@ fn rx_next(buf: u64, len: usize, pos: usize) -> usize {
     if l == 0 { return 0 }
     return pos + OVERHEAD + ((l + 3) & 0xFFFFFFFC)
 }
+
+fn rx_pad_missing(next: usize, len: usize) -> usize {
+    if next > len { return next - len }
+    return 0
+}
+
+fn rx_mode_cfg(cfg: u64) -> u64 {
+    return (cfg | CFG_PBD | CFG_PUF | CFG_PAM) & (0xFFFFFFFF ^ CFG_RA)
+}
+
+fn link_up(bmsr: u64) -> bool { return (bmsr & 4) != 0 }
+fn an_done(bmsr: u64) -> bool { return (bmsr & 0x20) != 0 }
+
+fn media_cfg(cfg: u64, anar: u64, lpa: u64) -> u64 {
+    let common: u64 = anar & lpa
+    var fast: bool = false
+    var full: bool = false
+    if (common & 0x100) != 0 {
+        fast = true
+        full = true
+    } else if (common & 0x80) != 0 {
+        fast = true
+    } else if (common & 0x40) != 0 {
+        full = true
+    }
+    var v: u64 = cfg & (0xFFFFFFFF ^ (CFG_PS | CFG_FD))
+    if fast { v = v | CFG_PS }
+    if full { v = v | CFG_FD }
+    return v
+}
+
+fn maccfg_by_request(fwver: u64) -> bool { return fwver >= FW_MACCFG_REQ }

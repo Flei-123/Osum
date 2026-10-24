@@ -37,9 +37,10 @@ ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 MAC=52:54:00:12:34:99
 
 run() { # name extra-qemu-args...
+    XW=""; [ "$1" = nohub ] && XW="nohub"
     local name=$1; shift
     timeout 150 qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256 \
-        -append "osum nokbd nosched noproc nofs noring3 usb usbpoll nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
+        -append "osum nokbd nosched noproc nofs noring3 usb usbpoll nic nip=169.254.10.1/16 nsvc=0 nwait=0 $XW script=sh /t/s.sh;exit" \
         -serial "file:$T/$name.txt" -display none -no-reboot \
         -drive "file=$T/d.img,format=raw,if=ide,index=0" \
         -device qemu-xhci,id=x0 "$@" \
@@ -62,6 +63,17 @@ run none -netdev user,id=n0
 N="$T/none.klar"
 grep -aq 'driver=ecm' "$N" && bad "noecm: ecm line without device" || ok "noecm: no ecm line without device"
 grep -aq 'dhcp: ack ip=' "$N" && bad "noecm: lease without NIC" || ok "noecm: no lease without NIC"
+
+run hub -netdev user,id=n0 -device usb-hub,bus=x0.0,port=1,id=hub0 -device usb-net,bus=x0.0,port=1.1,netdev=n0,mac=$MAC
+H="$T/hub.klar"
+grep -aq 'usb: hub p=' "$H" && ok "hub: hub driver enumerates the hub" || bad "hub: hub line missing"
+grep -aq 'route=[1-9][0-9]* .*driver=ecm' "$H" && ok "hub: ecm behind the hub has a route string" || bad "hub: ecm behind hub missing"
+grep -aq 'dhcp: ack ip=10.0.2.15' "$H" && ok "hub: DHCP lease through the hub" || bad "hub: no lease through the hub"
+grep -aq 'octets from 10.0.2.2: icmp_seq=1' "$H" && ok "hub: ping through the hub" || bad "hub: no ping through the hub"
+
+run nohub -netdev user,id=n0 -device usb-hub,bus=x0.0,port=1,id=hub0 -device usb-net,bus=x0.0,port=1.1,netdev=n0,mac=$MAC
+NH="$T/nohub.klar"
+grep -aq 'driver=ecm' "$NH" && bad "nohub: ecm found without hub driver" || ok "nohub: no ecm without hub driver"
 
 echo "USBNET-QEMU: $pass ok, $fail fail"
 if [ "$fail" -gt 0 ]; then

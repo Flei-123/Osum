@@ -28,6 +28,19 @@ fn check(name: str, ok: bool) {
     emit()
 }
 
+fn sizes_ok(f: u64, o: u64) -> bool {
+    var n: usize = 1
+    while n <= 1518 {
+        let t: usize = ch397.tx_wrap(f, n, o)
+        let lo: u64 = rt.ld8(o, 0) as u64
+        let hi: u64 = rt.ld8(o, 1) as u64
+        let h: usize = (lo | (hi << 8)) as usize
+        if t == 0 || h + 8 != t || (t & 3) != 0 || t == 512 || t == 1024 || h < 60 { return false }
+        n = n + 1
+    }
+    return true
+}
+
 fn main() -> i32 {
     let f: u64 = (&fr[0]) as u64
     let o: u64 = (&ob[0]) as u64
@@ -46,11 +59,12 @@ fn main() -> i32 {
     let t20: usize = ch397.tx_wrap(f, 20, o)
     check("B4 runt padded to 60 -> 68", t20 == 68 && ob[0] == 60 && ob[8 + 19] == 19 && ob[8 + 20] == 0 && ob[8 + 59] == 0)
     check("B5 oversize and empty rejected", ch397.tx_wrap(f, 1519, o) == 0 && ch397.tx_wrap(f, 0, o) == 0)
-    check("B6 1518 -> 1528", ch397.tx_wrap(f, 1518, o) == 1528)
+    check("B6 1518 -> 1528, header 1520", ch397.tx_wrap(f, 1518, o) == 1528 && ob[0] == 0xF0 && ob[1] == 5)
     // total 512 -> +4: fl = 504 -> 8 + 504 = 512 -> 516
-    check("B7 total of 512 grows by 4", ch397.tx_wrap(f, 504, o) == 516)
-    check("B8 total of 1024 grows by 4", ch397.tx_wrap(f, 1016, o) == 1028)
-    check("B9 padding bytes zero", ch397.tx_wrap(f, 101, o) == 112 && ob[8 + 101] == 0 && ob[111] == 0)
+    check("B7 total of 512 grows by 4, header 508", ch397.tx_wrap(f, 504, o) == 516 && ob[0] == 0xFC && ob[1] == 1)
+    check("B8 total of 1024 grows by 4, header 1020", ch397.tx_wrap(f, 1016, o) == 1028 && ob[0] == 0xFC && ob[1] == 3)
+    check("B9 padding bytes zero, header 104 (aligned)", ch397.tx_wrap(f, 101, o) == 112 && ob[0] == 104 && ob[8 + 101] == 0 && ob[111] == 0)
+    check("B10 header == transfer length - 8 for every size", sizes_ok(f, o))
 
     // RX: two frames (61 -> padded to 64, then 60) in one transfer
     var k: usize = 0
@@ -74,6 +88,27 @@ fn main() -> i32 {
     check("C6 hostile length -> 0", ch397.rx_next(o, total, 72) == 0)
     check("C7 header cut off -> 0", ch397.rx_frame_len(o, 3, 0) == 0)
 
+    ob[72] = 60
+    ob[73] = 0
+    check("C9 status OK for complete frame", ch397.rx_status(o, total, 72) == ch397.RX_OK)
+    check("C10 status MORE for body cut", ch397.rx_status(o, total - 1, 72) == ch397.RX_MORE)
+    check("C11 status MORE for header cut", ch397.rx_status(o, 75, 72) == ch397.RX_MORE && ch397.rx_status(o, 0, 0) == ch397.RX_MORE)
+    ob[72] = 59
+    check("C12 status BAD for short length", ch397.rx_status(o, total, 72) == ch397.RX_BAD)
+    ob[72] = 0xF2
+    ob[73] = 5
+    check("C13 1522 accepted, 1523 BAD", ch397.rx_status(o, 72 + 8 + 1522, 72) == ch397.RX_OK)
+    ob[72] = 0xF3
+    check("C14 1523 BAD", ch397.rx_status(o, 72 + 8 + 1523, 72) == ch397.RX_BAD)
+    check("C15 pad missing counts octets", ch397.rx_pad_missing(80, 78) == 2 && ch397.rx_pad_missing(80, 80) == 0 && ch397.rx_pad_missing(80, 90) == 0)
+    check("D1 rx mode sets PBD PUF PAM clears RA", ch397.rx_mode_cfg(0x00080000) == 0x00700000)
+    check("D2 100 full from 100FULL common", ch397.media_cfg(0, 0x1E1, 0x45E1) == 0x180)
+    check("D3 100 half only", ch397.media_cfg(0x180, 0x1E1, 0x0081) == 0x80)
+    check("D4 10 full", ch397.media_cfg(0x80, 0x1E1, 0x41) == 0x100)
+    check("D5 10 half clears both", ch397.media_cfg(0x180, 0x1E1, 0x21) == 0)
+    check("D6 other cfg bits kept", ch397.media_cfg(0x00F00000, 0x1E1, 0x1E1) == 0x00F00180)
+    check("D7 link and AN-done bits", ch397.link_up(4) && !ch397.link_up(0x20) && ch397.an_done(0x20))
+    check("D8 fw 0x37 uses request, 0x36 uses register", ch397.maccfg_by_request(0x37) && !ch397.maccfg_by_request(0x36))
     lit("RESULT pass=")
     num(passn)
     lit(" fail=")
