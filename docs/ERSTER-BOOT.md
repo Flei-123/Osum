@@ -159,6 +159,12 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 10. **Taskleisten-Hover:** Maus ueber Programmsymbole in der Leiste -- Hover-Hervorhebung/Vorschau da? Kurz melden.
 11. **Fallback-Icons:** Programme ohne eigenes Symbol (Leiste, Startmenue, Alt+Tab, Task-Manager) -- Buchstaben-Kachel statt leer? Foto.
 
+## Stick 12 HP (24.10.2026, Baustand 9c417f68 = main, Gate iwlfh 103/0)
+
+- **Datei:** `orientos-usb-hp-20261024-9c417f68.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `02b1446dc35d87206a013c5f97858129469bcece271427a90b46f893719164a6`.
+- **Neu gegenueber Stick 11:** WLAN-Diagnose `fail_alive2=` (Ladestatus, CPU-Header-Woerter, Secure-Boot-Konfig, fehlgeschlagenes Image, Sektionen je CPU) und `fail_pm=` (PCI-Revision, Subsystem, Power-State, Link-Control Karte + Root Port, warmer CSR-Zustand), PCI-Power erzwungen auf D0 / ASPM aus.
+- **Test:** Windows vorher mit `shutdown /s /t 0 /full` ganz herunterfahren (kein Schnellstart). Im Terminal `cat /proc/wlan` -- Foto (alle fail_*-Zeilen).
+
 ## Stick 11 HP (24.10.2026, Baustand de07f2da = main, Gates drvstore 70/0 + drvreg 20/0)
 
 - **Datei:** `orientos-usb-hp-20261024-de07f2da.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `dc1044c155f04d64b570ad4c197dba1d1302936855b2e9408fc16aa1108a9902`.
