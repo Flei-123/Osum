@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_le
+
+export {
+    PhyDb, phydb_new, phydb_add, phydb_count, phydb_bytes, phydb_order, phydb_type, phydb_len, phydb_data,
+    CMD_CALIB_RES, CMD_PHY_DB, PD_CFG, PD_CALIB_NCH, PD_CALIB_PAPD, PD_CALIB_TXP,
+    E_PD_FULL, E_PD_SHORT, E_PD_TYPE
+}
+
+const CMD_CALIB_RES: u64 = 0x6B
+const CMD_PHY_DB: u64 = 0x6C
+const PD_CFG: u64 = 1
+const PD_CALIB_NCH: u64 = 2
+const PD_CALIB_PAPD: u64 = 3
+const PD_CALIB_TXP: u64 = 4
+
+const E_PD_FULL: i64 = -66
+const E_PD_SHORT: i64 = -67
+const E_PD_TYPE: i64 = -67
+
+const MAX_ENT: u64 = 48
+
+struct PhyDb {
+    pool: u64,
+    cap: u64,
+    used: u64,
+    n: u64,
+    typ: [u64; 48],
+    id: [u64; 48],
+    off: [u64; 48],
+    len: [u64; 48]
+}
+
+fn phydb_new(pool: u64, cap: u64) -> PhyDb {
+    var db: PhyDb = PhyDb { pool: pool, cap: cap, used: 0, n: 0, typ: [0; 48], id: [0; 48], off: [0; 48], len: [0; 48] }
+    return db
+}
+
+fn find(db: *mut PhyDb, typ: u64, id: u64) -> u64 {
+    var i: u64 = 0
+    while i < (*db).n {
+        if (*db).typ[i as usize] == typ && (*db).id[i as usize] == id { return i }
+        i = i + 1
+    }
+    return MAX_ENT
+}
+
+fn phydb_add(db: *mut PhyDb, p: u64, plen: u64) -> i64 {
+    if plen < 4 { return E_PD_SHORT }
+    let typ: u64 = iwl_le.ld16(p, 0)
+    let len: u64 = iwl_le.ld16(p, 2)
+    if typ < PD_CFG || typ > PD_CALIB_TXP { return E_PD_TYPE }
+    if 4 + len > plen { return E_PD_SHORT }
+    var id: u64 = 0
+    if typ == PD_CALIB_PAPD || typ == PD_CALIB_TXP {
+        if len < 2 { return E_PD_SHORT }
+        id = iwl_le.ld16(p, 4)
+    }
+    var at: u64 = find(db, typ, id)
+    if at == MAX_ENT {
+        if (*db).n >= MAX_ENT { return E_PD_FULL }
+        at = (*db).n
+        (*db).n = (*db).n + 1
+    }
+    if (*db).used + len > (*db).cap { return E_PD_FULL }
+    iwl_le.copy((*db).pool + (*db).used, p + 4, len)
+    (*db).typ[at as usize] = typ
+    (*db).id[at as usize] = id
+    (*db).off[at as usize] = (*db).used
+    (*db).len[at as usize] = len
+    (*db).used = (*db).used + len
+    return 0
+}
+
+fn phydb_count(db: *mut PhyDb) -> u64 { return (*db).n }
+
+fn phydb_bytes(db: *mut PhyDb) -> u64 {
+    var s: u64 = 0
+    var i: u64 = 0
+    while i < (*db).n {
+        s = s + (*db).len[i as usize]
+        i = i + 1
+    }
+    return s
+}
+
+fn before(db: *mut PhyDb, a: u64, b: u64) -> bool {
+    let ta: u64 = (*db).typ[a as usize]
+    let tb: u64 = (*db).typ[b as usize]
+    if ta != tb { return ta < tb }
+    return (*db).id[a as usize] < (*db).id[b as usize]
+}
+
+fn phydb_order(db: *mut PhyDb, k: u64) -> u64 {
+    var i: u64 = 0
+    while i < (*db).n {
+        var rank: u64 = 0
+        var j: u64 = 0
+        while j < (*db).n {
+            if before(db, j, i) { rank = rank + 1 }
+            j = j + 1
+        }
+        if rank == k { return i }
+        i = i + 1
+    }
+    return MAX_ENT
+}
+
+fn phydb_type(db: *mut PhyDb, i: u64) -> u64 { return (*db).typ[i as usize] }
+fn phydb_len(db: *mut PhyDb, i: u64) -> u64 { return (*db).len[i as usize] }
+fn phydb_data(db: *mut PhyDb, i: u64) -> u64 { return (*db).pool + (*db).off[i as usize] }
