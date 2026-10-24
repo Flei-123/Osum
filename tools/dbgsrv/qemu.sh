@@ -25,15 +25,16 @@ printf '%s\n' "$TOKEN" > "$T/token"
 cat > "$T/inittab" <<'TAB'
 dhcp:*:once:/bin/dhcp
 dbgsrv:*:respawn:/bin/dbgsrv:netz
-pub:*:respawn:/bin/dbgsrv -p 8766 -X:netz
+pub:*:respawn:/bin/dbgsrv -p 8766 -X:netz,log=/var/log/dbgsrv.log
 notoken:*:once:/bin/dbgsrv -k /etc/nope:netz
 TAB
 printf 'konsole\n' > "$T/ziel"
+printf 'jarvisd-test-line\n' > "$T/jlog"
 SPEC=""
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$T/bin/$p.elf@755:0:0"; done
 python3 tools/osum/mkfs.py build "$T/d.img" 20480 --v3 /bin/ /etc/ /run/ /var/ /var/log/@755:0:0 /proc/ /tmp/ \
     $SPEC /etc/inittab="$T/inittab"@644:0:0 /etc/ziel="$T/ziel"@644:0:0 \
-    /etc/dbgsrv.token="$T/token"@600:0:0 > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; echo "DBGSRV-QEMU: mkfs failed"; exit 1; }
+    /var/log/jarvisd.log="$T/jlog"@644:0:0 /etc/dbgsrv.token="$T/token"@600:0:0 > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; echo "DBGSRV-QEMU: mkfs failed"; exit 1; }
 
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 timeout 400 qemu-system-x86_64 -accel $ACC -kernel "$T/k.mb" -m 256 \
@@ -49,7 +50,7 @@ klar() { [ -f "$S" ] || return 0; tr -cd '\11\12\15\40-\176' < "$S"; }
 waitfor() { local i=0; while [ $i -lt $2 ]; do klar | grep -aq -- "$1" && return 0; kill -0 $QPID 2>/dev/null || return 1; sleep 1; i=$((i+1)); done; return 1; }
 
 if waitfor 'dbgsrv: listening on 8765' 200; then ok "dbgsrv listens after DHCP over the USB function"; else bad "dbgsrv never listened"; head -5 "$T/qemu.out"; klar | tail -30; fi
-klar | grep -aq 'dhcp: ack ip=10.0.2.15' && ok "DHCP lease on usb-net" || bad "no DHCP lease"
+waitfor 'dbgsrv: address is http://10.0.2.15:8765/' 60; klar | grep -aq 'dhcp: ack ip=10.0.2.15' && ok "DHCP lease on usb-net" || bad "no DHCP lease"
 klar | grep -aq 'dbgsrv: address is http://10.0.2.15:8765/' && ok "address announced on the console" || bad "address line missing"
 
 U="http://127.0.0.1:$P1"
@@ -63,7 +64,7 @@ rc=$(get "$U/wlan?t=$WRONG"); [ "$(code)" = "HTTP/1.0 401 Unauthorized" ] && ok 
 rc=$(get -H "X-Token: $TOKEN" "$U/wlan"); [ "$(code)" = "HTTP/1.0 200 OK" ] && [ -s "$T/o.txt" ] && ok "GET /wlan with X-Token -> 200 + body" || bad "/wlan: $(code) $(wc -c < "$T/o.txt")"
 rc=$(get -H "Authorization: Bearer $TOKEN" "$U/drivers"); [ "$(code)" = "HTTP/1.0 200 OK" ] && grep -q 'usb-net' "$T/o.txt" && ok "GET /drivers with Bearer lists usb-net" || bad "/drivers: $(code)"
 rc=$(get "$U/net?t=$TOKEN"); [ "$(code)" = "HTTP/1.0 200 OK" ] && [ -s "$T/o.txt" ] && ok "GET /net with query token" || bad "/net: $(code)"
-for r in lspci lspci/v dmesg klog pci usb version uptime wlanctl/status wlanctl/dump svclog dbgsrvlog; do
+for r in lspci lspci/v dmesg klog pci usb version uptime wlanctl/status wlanctl/dump ; do
     rc=$(get -H "X-Token: $TOKEN" "$U/$r")
     if [ "$(code)" = "HTTP/1.0 200 OK" ] && [ -s "$T/o.txt" ] && ! grep -q 'cannot read\|cannot run' "$T/o.txt"; then ok "GET /$r -> 200 + body ($(wc -c < "$T/o.txt") B)"; else bad "/$r: $(code) $(head -c 80 "$T/o.txt")"; fi
 done
@@ -75,13 +76,14 @@ rc=$(get -X POST -d x=1 -H "X-Token: $TOKEN" "$U/wlan"); [ "$(code)" = "HTTP/1.0
 rc=$(get -X PUT -d x=1 -H "X-Token: $TOKEN" "$U/wlan"); [ "$(code)" = "HTTP/1.0 405 Method Not Allowed" ] && ok "PUT -> 405" || bad "PUT: $(code)"
 rc=$(get -X DELETE -H "X-Token: $TOKEN" "$U/wlan"); [ "$(code)" = "HTTP/1.0 405 Method Not Allowed" ] && ok "DELETE -> 405" || bad "DELETE: $(code)"
 
-rc=$(curl -s -m 15 -o "$T/o.txt" -H "X-Token: $TOKEN" "http://127.0.0.1:$P2/wlan"; echo $?)
+rm -f "$T/o.txt"; rc=$(curl -s -m 15 -o "$T/o.txt" -H "X-Token: $TOKEN" "http://127.0.0.1:$P2/wlan"; echo $?)
 [ "$rc" != 0 ] && [ ! -s "$T/o.txt" ] && ok "public-address peer is dropped even with the right token (curl rc=$rc)" || bad "public-peer instance answered (rc=$rc)"
-klar | grep -aq 'dbgsrv: refused non-local 10.0.2.2' && ok "refusal logged with the peer address" || bad "refusal not logged"
+rc=$(get -H "X-Token: $TOKEN" "$U/dbgsrvlog"); grep -q 'refused non-local 10.0.2.2' "$T/o.txt" && ok "refusal logged with the peer address (read through /dbgsrvlog)" || bad "refusal not logged: $(head -c 100 "$T/o.txt")"
+grep -q -- "$TOKEN" "$T/o.txt" && bad "token leaked into /dbgsrvlog" || ok "token not in /dbgsrvlog"
+rc=$(get -H "X-Token: $TOKEN" "$U/svclog"); grep -q 'jarvisd-test-line' "$T/o.txt" && ok "GET /svclog returns the service log file" || bad "/svclog content"
 klar | grep -aq 'dbgsrv: no token, refusing to start' && ok "tokenless instance says so and exits" || bad "no-token message missing"
 klar | grep -aq 'dbgsrv: 401 bad token 10.0.2.2' && ok "bad tokens logged with the peer address" || bad "401 not logged"
 klar | grep -aq -- "$TOKEN" && bad "token leaked to the console log" || ok "token never appears in the console log"
-rc=$(get -H "X-Token: $TOKEN" "$U/dbgsrvlog"); grep -q -- "$TOKEN" "$T/o.txt" && bad "token leaked into /dbgsrvlog" || ok "token not in /dbgsrvlog"
 
 [ "$fail" = 0 ] || { echo "---- serial tail"; klar | tail -60; }
 echo "DBGSRV-QEMU: $pass ok, $fail fail"
