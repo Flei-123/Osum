@@ -28,5 +28,10 @@ alive = re.search(r"wm: fen i=\d+ id=19 ", last) is not None
 check(alive, "settings window still listed after the last resize")
 sizes = set(re.findall(r"wm: fen i=\d+ id=19 x=-?\d+ y=-?\d+ w=(\d+) h=(\d+)", serial))
 check(len(sizes) >= max(3, steps // 2), "the window really took %d different sizes" % len(sizes))
+small = [int(v) for v in re.findall(r"wm: fen i=\d+ id=19 x=-?\d+ y=-?\d+ w=(\d+) h=\d+", serial)]
+if any(v < 120 for v in small) and len(sys.argv) > 4 and sys.argv[4] == "guard":
+    check("fui: tiny skip" in serial, "a window below the minimum size is skipped, not painted")
+elif len(sys.argv) > 4 and sys.argv[4] == "noguard":
+    check("fui: tiny skip" not in serial, "without the guard nothing is skipped")
 print("RESIZE: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
