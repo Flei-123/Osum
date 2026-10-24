@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import fs.fs
+import serial
+import bus.drvinf
+import crypto.sha256
+
+export {
+    set_context, clear_context, request, read_all, last_error,
+    FW_OK, FW_NOCTX, FW_NORIGHT, FW_NOFW, FW_NAME, FW_HASH, FW_MISSING, FW_BIG, FW_READ, FW_DIGEST,
+    RIGHT_FW
+}
+
+const RIGHT_FW: u64 = 16
+const MAX_NAME: u64 = 32
+
+const FW_OK: u64 = 0
+const FW_NOCTX: u64 = 1
+const FW_NORIGHT: u64 = 2
+const FW_NOFW: u64 = 3
+const FW_NAME: u64 = 4
+const FW_HASH: u64 = 5
+const FW_MISSING: u64 = 6
+const FW_BIG: u64 = 7
+const FW_READ: u64 = 8
+const FW_DIGEST: u64 = 9
+
+static mut ctx_state: u64 = 0
+static mut ctx_rec: u64 = 0
+static mut err: u64 = 0
+static mut path_buf: [u8; 64] = [0 as u8; 64]
+static mut digest: [u8; 32] = [0 as u8; 32]
+
+fn set_context(state: u64, rec: u64) {
+    ctx_state = state
+    ctx_rec = rec
+}
+
+fn clear_context() {
+    ctx_state = 0
+    ctx_rec = 0
+}
+
+fn last_error() -> u64 {
+    return err
+}
+
+fn read_all(state: u64, ino: u64, dst: u64, len: u64) -> bool {
+    var done: u64 = 0
+    while done < len {
+        var take: u64 = len - done
+        if take > 512 {
+            take = 512
+        }
+        if fs.read_at(state, ino, done, dst + done, take) != take {
+            return false
+        }
+        done = done + take
+    }
+    return true
+}
+
+fn bytes_eq(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(a + i) != kstate.get8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn fail(code: u64) -> u64 {
+    var s_pre: [u8; 14] = "drvstore: fw \0"
+    var s_name: [u8; 8] = " error \0"
+    err = code
+    serial.puts((&s_pre[0]) as u64)
+    if ctx_rec != 0 {
+        serial.puts(drvinf.rec_name(ctx_rec))
+    }
+    serial.puts((&s_name[0]) as u64)
+    serial.dec(code)
+    serial.nl()
+    return 0
+}
+
+fn build_path(name: u64) {
+    var root: [u8; 15] = "/lib/firmware/\0"
+    var n: u64 = 0
+    while root[n as usize] != 0 as u8 {
+        path_buf[n as usize] = root[n as usize]
+        n = n + 1
+    }
+    var i: u64 = 0
+    while kstate.get8(name + i) != 0 && i < MAX_NAME {
+        path_buf[n as usize] = kstate.get8(name + i) as u8
+        n = n + 1
+        i = i + 1
+    }
+    path_buf[n as usize] = 0 as u8
+}
+
+fn request(name: u64, hash: u64, dst: u64, cap: u64) -> u64 {
+    var s_ok: [u8; 17] = "drvstore: fw ok \0"
+    if ctx_state == 0 || ctx_rec == 0 {
+        return fail(FW_NOCTX)
+    }
+    if (drvinf.rec_rights(ctx_rec) & RIGHT_FW) == 0 {
+        return fail(FW_NORIGHT)
+    }
+    if drvinf.rec_hasfw(ctx_rec) == 0 {
+        return fail(FW_NOFW)
+    }
+    if !drvinf.text_eq(name, drvinf.rec_fwname(ctx_rec)) {
+        return fail(FW_NAME)
+    }
+    if !bytes_eq(hash, drvinf.rec_fwhash(ctx_rec), 32) {
+        return fail(FW_HASH)
+    }
+    build_path(name)
+    let ino: u64 = fs.path(ctx_state, (&path_buf[0]) as u64)
+    if ino == 0 {
+        return fail(FW_MISSING)
+    }
+    let size: u64 = fs.inode_size(ctx_state, ino)
+    if size == 0 || size > cap {
+        return fail(FW_BIG)
+    }
+    if !read_all(ctx_state, ino, dst, size) {
+        return fail(FW_READ)
+    }
+    sha256.hash(dst, size as usize, (&digest[0]) as u64)
+    if !bytes_eq((&digest[0]) as u64, drvinf.rec_fwhash(ctx_rec), 32) {
+        return fail(FW_DIGEST)
+    }
+    err = FW_OK
+    serial.puts((&s_ok[0]) as u64)
+    serial.puts(name)
+    serial.put(32 as u8)
+    serial.dec(size)
+    serial.nl()
+    return size
+}

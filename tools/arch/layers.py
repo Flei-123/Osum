@@ -48,7 +48,7 @@ def _s(x):
 TABLE = {
     'base': _s("""ulib msg nv pw grp sha tools nidx appdir actwire actcli act image gif jpeg pngenc flate inflate media
         unix kbund bstore jenc jsig key vault pin trash chacha dcrypt bsec aiot setschema wl_data wl_input
-        wl_keytab wl_msg wlproto h264 h264tab mp3tab sync serline instkonto diskscan instkern dualkern
+        wl_keytab wl_msg wlproto h264 h264tab mp3tab sync serline instkonto diskscan drvpkg drvmatch instkern dualkern
         brand_start hwid"""),
     'cmd': _s("""cat chmod chown cp cut date df diff dirname du echo env false find grep gunzip gzip head id kill ln
         locate ls mkdir mount mv passwd patch ps rm rmdir sed seq shasum shutdown reboot sleep sort su
@@ -58,7 +58,7 @@ TABLE = {
     'toolkit': _s("""wlibc wlib fuib fuiglyph fuiapp fuiscene fuied winopts winfloat backdrop template"""),
     'services': _s("""orientbus odbd settingsd stored social sshd wayd powerd hotkeyd wmplug dhcp sntp svc rpc rpcc
         rpcd init ota opk presence proxy dnswt fsrv fsrw fsrlim fremdfs stickwr standby power
-        melder autorun diskctl dispctl ebpfctl axd bsect"""),
+        melder autorun diskctl drvctl dispctl ebpfctl axd bsect"""),
     'shell': _s("""desktop taskbar launcher glogin login signin lock lockclaim idlelock floatlock welcome barpop traypop
         calpop taskview notifc qs runbox wmd freunde tiling backlum cliphist mbg modul elevate"""),
     'apps': _s("""explorer expakt exporte fileop expdlg expmodell massren trashbin settings term termfull nedit calc

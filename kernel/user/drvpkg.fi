@@ -1,0 +1,360 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import crypto.ed25519
+
+export {
+    V_OK, V_NOINF, V_NOSIG, V_BADSIG, V_CTX, MAX_INF,
+    read_all, write_all, copy_file, verify_dir, field_nth, inf_text, inf_len,
+    valid_name, valid_file, banned, deny_add, join, byte_at, usable, file_exists
+}
+
+const V_OK: u64 = 0
+const V_NOINF: u64 = 1
+const V_NOSIG: u64 = 2
+const V_BADSIG: u64 = 3
+const V_CTX: u64 = 4
+const MAX_INF: u64 = 1536
+const DENY_CAP: u64 = 1024
+const ABI_NOW: u64 = 1
+
+static mut INF: [u8; 1600] = [0 as u8; 1600]
+static mut SIG: [u8; 72] = [0 as u8; 72]
+static mut DENY: [u8; 1100] = [0 as u8; 1100]
+static mut CHUNK: [u8; 512] = [0 as u8; 512]
+static mut PATH: [u8; 192] = [0 as u8; 192]
+static mut INF_LEN: u64 = 0
+static mut KEY: [u8; 32] = [
+    0x51, 0xDA, 0xE5, 0x64, 0x2C, 0xBA, 0x5D, 0x80,
+    0x15, 0x1E, 0xED, 0x35, 0xDC, 0x3F, 0x69, 0x54,
+    0x64, 0x26, 0x86, 0x0E, 0xAC, 0x91, 0xF7, 0x70,
+    0x32, 0x6F, 0x57, 0xE5, 0x4A, 0x22, 0xB8, 0x8E
+]
+
+fn byte_at(p: u64) -> u64 {
+    return (*(p as *mut u8)) as u64
+}
+
+fn inf_text() -> u64 {
+    return (&INF[0 as usize]) as u64
+}
+
+fn inf_len() -> u64 {
+    return INF_LEN
+}
+
+fn join(dst: u64, a: u64, b: u64) {
+    var slash: [u8; 2] = "/\0"
+    ulib.strcpy(dst, a)
+    ulib.strcat(dst, (&slash[0 as usize]) as u64)
+    ulib.strcat(dst, b)
+}
+
+fn read_all(path: u64, buf: u64, cap: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var total: u64 = 0
+    var going: bool = true
+    while going && total < cap {
+        var take: u64 = cap - total
+        if take > 512 {
+            take = 512
+        }
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, buf + total, take)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            total = total + n
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return total
+}
+
+fn write_all(path: u64, buf: u64, len: u64) -> bool {
+    ulib.sys(ulib.SYS_UNLINK, path, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var done: u64 = 0
+    var good: bool = true
+    while good && done < len {
+        var take: u64 = len - done
+        if take > 512 {
+            take = 512
+        }
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, buf + done, take)
+        if ulib.bad(w) || w != take {
+            good = false
+        } else {
+            done = done + take
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return good
+}
+
+fn copy_file(src: u64, dst: u64) -> bool {
+    let in_fd: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
+    if ulib.bad(in_fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, dst, 0, 0)
+    let out_fd: u64 = ulib.sys(ulib.SYS_OPEN, dst, ulib.O_MAKE, 0)
+    if ulib.bad(out_fd) {
+        ulib.sys(ulib.SYS_CLOSE, in_fd, 0, 0)
+        return false
+    }
+    var good: bool = true
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, in_fd, (&CHUNK[0 as usize]) as u64, 512)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            let w: u64 = ulib.sys(ulib.SYS_WRITE, out_fd, (&CHUNK[0 as usize]) as u64, n)
+            if ulib.bad(w) || w != n {
+                good = false
+                going = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, in_fd, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, out_fd, 0, 0)
+    return good
+}
+
+fn verify_dir(dir: u64) -> u64 {
+    var f_inf: [u8; 11] = "driver.inf\0"
+    var f_sig: [u8; 15] = "driver.inf.sig\0"
+    join((&PATH[0 as usize]) as u64, dir, (&f_inf[0 as usize]) as u64)
+    INF_LEN = read_all((&PATH[0 as usize]) as u64, (&INF[0 as usize]) as u64, 1600)
+    if INF_LEN == 0 || INF_LEN > MAX_INF {
+        INF_LEN = 0
+        return V_NOINF
+    }
+    INF[INF_LEN as usize] = 0 as u8
+    join((&PATH[0 as usize]) as u64, dir, (&f_sig[0 as usize]) as u64)
+    if read_all((&PATH[0 as usize]) as u64, (&SIG[0 as usize]) as u64, 72) != 64 {
+        INF_LEN = 0
+        return V_NOSIG
+    }
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        INF_LEN = 0
+        return V_CTX
+    }
+    if !ed25519.ed25519_verify(&c, (&KEY[0 as usize]) as u64, (&INF[0 as usize]) as u64,
+        INF_LEN as usize, (&SIG[0 as usize]) as u64) {
+        INF_LEN = 0
+        return V_BADSIG
+    }
+    return V_OK
+}
+
+fn field_nth(key: u64, nth: u64, out: u64, cap: u64) -> bool {
+    let klen: u64 = ulib.length(key)
+    let base: u64 = (&INF[0 as usize]) as u64
+    var at: u64 = 0
+    var seen: u64 = 0
+    while at < INF_LEN {
+        var j: u64 = 0
+        while j < klen && at + j < INF_LEN && byte_at(base + at + j) == byte_at(key + j) {
+            j = j + 1
+        }
+        if j == klen && at + klen < INF_LEN && byte_at(base + at + klen) == 61 {
+            if seen == nth {
+                var n: u64 = 0
+                var q: u64 = at + klen + 1
+                while q < INF_LEN && byte_at(base + q) != 10 && n + 1 < cap {
+                    *((out + n) as *mut u8) = byte_at(base + q) as u8
+                    n = n + 1
+                    q = q + 1
+                }
+                *((out + n) as *mut u8) = 0 as u8
+                return true
+            }
+            seen = seen + 1
+        }
+        while at < INF_LEN && byte_at(base + at) != 10 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+    return false
+}
+
+fn valid_name(p: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    if n == 0 || n > 23 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = byte_at(p + i)
+        let lower: bool = c >= 97 && c <= 122
+        let digit: bool = c >= 48 && c <= 57
+        let sep: bool = (c == 95 || c == 45) && i > 0
+        if !(lower || digit || sep) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn valid_file(p: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    if n == 0 || n > 31 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = byte_at(p + i)
+        let alnum: bool = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57)
+        let sep: bool = (c == 95 || c == 45 || c == 46) && i > 0
+        if !(alnum || sep) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn load_deny() -> u64 {
+    var path: [u8; 18] = "/etc/drivers.deny\0"
+    let n: u64 = read_all((&path[0 as usize]) as u64, (&DENY[0 as usize]) as u64, DENY_CAP)
+    DENY[n as usize] = 0 as u8
+    return n
+}
+
+fn banned(name: u64) -> bool {
+    let n: u64 = load_deny()
+    let base: u64 = (&DENY[0 as usize]) as u64
+    let nlen: u64 = ulib.length(name)
+    var at: u64 = 0
+    while at < n {
+        var j: u64 = 0
+        while j < nlen && at + j < n && byte_at(base + at + j) == byte_at(name + j) {
+            j = j + 1
+        }
+        let end: u64 = at + j
+        let tail: bool = end >= n || byte_at(base + end) == 10 || byte_at(base + end) == 13
+        if j == nlen && tail {
+            return true
+        }
+        while at < n && byte_at(base + at) != 10 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+    return false
+}
+
+fn deny_add(name: u64) -> bool {
+    var path: [u8; 18] = "/etc/drivers.deny\0"
+    if banned(name) {
+        return true
+    }
+    var n: u64 = load_deny()
+    let nlen: u64 = ulib.length(name)
+    if n + nlen + 2 > DENY_CAP {
+        return false
+    }
+    if n > 0 && DENY[(n - 1) as usize] != 10 as u8 {
+        DENY[n as usize] = 10 as u8
+        n = n + 1
+    }
+    var i: u64 = 0
+    while i < nlen {
+        DENY[(n + i) as usize] = byte_at(name + i) as u8
+        i = i + 1
+    }
+    DENY[(n + nlen) as usize] = 10 as u8
+    return write_all((&path[0 as usize]) as u64, (&DENY[0 as usize]) as u64, n + nlen + 1)
+}
+
+fn file_exists(path: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+fn key_is(p: u64, n: u64, word: u64) -> bool {
+    if ulib.length(word) != n {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if byte_at(p + i) != byte_at(word + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn key_known(p: u64, n: u64) -> bool {
+    var k0: [u8; 5] = "name\0"
+    var k1: [u8; 8] = "version\0"
+    var k2: [u8; 4] = "abi\0"
+    var k3: [u8; 5] = "rank\0"
+    var k4: [u8; 7] = "module\0"
+    var k5: [u8; 7] = "rights\0"
+    var k6: [u8; 3] = "fw\0"
+    var k7: [u8; 5] = "slot\0"
+    var k8: [u8; 6] = "match\0"
+    return key_is(p, n, (&k0[0 as usize]) as u64) || key_is(p, n, (&k1[0 as usize]) as u64)
+        || key_is(p, n, (&k2[0 as usize]) as u64) || key_is(p, n, (&k3[0 as usize]) as u64)
+        || key_is(p, n, (&k4[0 as usize]) as u64) || key_is(p, n, (&k5[0 as usize]) as u64)
+        || key_is(p, n, (&k6[0 as usize]) as u64) || key_is(p, n, (&k7[0 as usize]) as u64)
+        || key_is(p, n, (&k8[0 as usize]) as u64)
+}
+
+fn shape_ok() -> bool {
+    let base: u64 = (&INF[0 as usize]) as u64
+    var at: u64 = 0
+    while at < INF_LEN {
+        var end: u64 = at
+        var eq: u64 = 0
+        while end < INF_LEN && byte_at(base + end) != 10 {
+            if eq == 0 && byte_at(base + end) == 61 {
+                eq = end - at
+            }
+            end = end + 1
+        }
+        let blank: bool = end == at || byte_at(base + at) == 35
+        if !blank && (eq == 0 || !key_known(base + at, eq)) {
+            return false
+        }
+        at = end + 1
+    }
+    return true
+}
+
+fn usable(dir: u64) -> bool {
+    var k_abi: [u8; 4] = "abi\0"
+    var k_module: [u8; 7] = "module\0"
+    var num: [u8; 24] = [0 as u8; 24]
+    var mod_file: [u8; 40] = [0 as u8; 40]
+    if !shape_ok() {
+        return false
+    }
+    if !field_nth((&k_abi[0 as usize]) as u64, 0, (&num[0 as usize]) as u64, 24)
+        || ulib.to_num((&num[0 as usize]) as u64) != ABI_NOW {
+        return false
+    }
+    if !field_nth((&k_module[0 as usize]) as u64, 0, (&mod_file[0 as usize]) as u64, 40)
+        || !valid_file((&mod_file[0 as usize]) as u64) {
+        return false
+    }
+    join((&PATH[0 as usize]) as u64, dir, (&mod_file[0 as usize]) as u64)
+    return file_exists((&PATH[0 as usize]) as u64)
+}

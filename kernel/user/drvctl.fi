@@ -1,0 +1,343 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import tools
+import libc.io
+import libc.errno
+import drvpkg
+import drvmatch
+
+export { u_start }
+
+const MAX_NAMES: u64 = 32
+const NAME_BYTES: u64 = 24
+
+static mut NAMES: [u8; 768] = [0 as u8; 768]
+static mut ENTRY: [u8; 512] = [0 as u8; 512]
+static mut DIR: [u8; 64] = [0 as u8; 64]
+static mut FILE: [u8; 192] = [0 as u8; 192]
+static mut DST: [u8; 192] = [0 as u8; 192]
+static mut VALUE: [u8; 96] = [0 as u8; 96]
+static mut BEST: [u8; 24] = [0 as u8; 24]
+
+fn name_ptr(i: u64) -> u64 {
+    return (&NAMES[0 as usize]) as u64 + i * NAME_BYTES
+}
+
+fn say(p: u64) {
+    tools.ob_str(p)
+}
+
+fn fail(msg: u64, arg: u64) -> u64 {
+    tools.ob_flush()
+    ulib.esay_line(msg, arg)
+    return 1
+}
+
+fn collect_names() -> u64 {
+    var root: [u8; 13] = "/lib/drivers\0"
+    let fd: u64 = io.dir_open((&root[0 as usize]) as u64)
+    if errno.failed(fd) {
+        return 0
+    }
+    var count: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = io.dir_read(fd, (&ENTRY[0 as usize]) as u64, 512)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&ENTRY[0 as usize]) as u64 + at
+                let name: u64 = io.dir_name(rec)
+                if io.dir_kind(rec) == io.DT_DIR && drvpkg.byte_at(name) != 46 && count < MAX_NAMES
+                    && ulib.length(name) < NAME_BYTES {
+                    ulib.strcpy(name_ptr(count), name)
+                    count = count + 1
+                }
+                at = at + io.dir_reclen(rec)
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return count
+}
+
+fn pkg_dir(name: u64) -> u64 {
+    var root: [u8; 13] = "/lib/drivers\0"
+    drvpkg.join((&DIR[0 as usize]) as u64, (&root[0 as usize]) as u64, name)
+    return (&DIR[0 as usize]) as u64
+}
+
+fn number(key: u64) -> u64 {
+    if !drvpkg.field_nth(key, 0, (&VALUE[0 as usize]) as u64, 96) {
+        return 0
+    }
+    return ulib.to_num((&VALUE[0 as usize]) as u64)
+}
+
+fn cmd_list() -> u64 {
+    var s_pkg: [u8; 5] = "pkg \0"
+    var s_ver: [u8; 10] = " version=\0"
+    var s_rank: [u8; 7] = " rank=\0"
+    var s_ok: [u8; 8] = " sig=ok\0"
+    var s_bad: [u8; 9] = " sig=bad\0"
+    var s_none: [u8; 13] = " sig=missing\0"
+    var s_ban: [u8; 8] = " banned\0"
+    var s_inv: [u8; 9] = " invalid\0"
+    var s_sum: [u8; 10] = "packages=\0"
+    var s_valid: [u8; 8] = " valid=\0"
+    var k_ver: [u8; 8] = "version\0"
+    var k_rank: [u8; 5] = "rank\0"
+    let total: u64 = collect_names()
+    var valid: u64 = 0
+    var i: u64 = 0
+    while i < total {
+        let name: u64 = name_ptr(i)
+        let v: u64 = drvpkg.verify_dir(pkg_dir(name))
+        say((&s_pkg[0 as usize]) as u64)
+        say(name)
+        if v == drvpkg.V_OK {
+            let good: bool = drvpkg.usable(pkg_dir(name))
+            say((&s_ver[0 as usize]) as u64)
+            tools.ob_num(number((&k_ver[0 as usize]) as u64))
+            say((&s_rank[0 as usize]) as u64)
+            tools.ob_num(number((&k_rank[0 as usize]) as u64))
+            say((&s_ok[0 as usize]) as u64)
+            if good {
+                valid = valid + 1
+            } else {
+                say((&s_inv[0 as usize]) as u64)
+            }
+            if drvpkg.banned(name) {
+                say((&s_ban[0 as usize]) as u64)
+            }
+        } else if v == drvpkg.V_BADSIG {
+            say((&s_bad[0 as usize]) as u64)
+        } else {
+            say((&s_none[0 as usize]) as u64)
+        }
+        tools.ob_nl()
+        i = i + 1
+    }
+    say((&s_sum[0 as usize]) as u64)
+    tools.ob_num(total)
+    say((&s_valid[0 as usize]) as u64)
+    tools.ob_num(valid)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+fn best_score(qkind: u64, qid: u64) -> u64 {
+    var k_match: [u8; 6] = "match\0"
+    var top: u64 = 0
+    var m: u64 = 0
+    while drvpkg.field_nth((&k_match[0 as usize]) as u64, m, (&VALUE[0 as usize]) as u64, 96) {
+        let s: u64 = drvmatch.score((&VALUE[0 as usize]) as u64, qkind, qid)
+        if s > top {
+            top = s
+        }
+        m = m + 1
+    }
+    return top
+}
+
+fn cmd_match(qkind: u64, qid: u64) -> u64 {
+    var s_hit: [u8; 7] = "match \0"
+    var s_spec: [u8; 7] = " spec=\0"
+    var s_ver: [u8; 10] = " version=\0"
+    var s_rank: [u8; 7] = " rank=\0"
+    var s_none: [u8; 11] = "match none\0"
+    var k_ver: [u8; 8] = "version\0"
+    var k_rank: [u8; 5] = "rank\0"
+    let total: u64 = collect_names()
+    var found: bool = false
+    var bspec: u64 = 0
+    var brank: u64 = 0
+    var bver: u64 = 0
+    var i: u64 = 0
+    while i < total {
+        let name: u64 = name_ptr(i)
+        if drvpkg.verify_dir(pkg_dir(name)) == drvpkg.V_OK && drvpkg.usable(pkg_dir(name)) && !drvpkg.banned(name) {
+            let spec: u64 = best_score(qkind, qid)
+            let rank: u64 = number((&k_rank[0 as usize]) as u64)
+            let ver: u64 = number((&k_ver[0 as usize]) as u64)
+            if spec > 0 && (!found || drvmatch.better(spec, rank, ver, bspec, brank, bver)) {
+                found = true
+                bspec = spec
+                brank = rank
+                bver = ver
+                ulib.strcpy((&BEST[0 as usize]) as u64, name)
+            }
+        }
+        i = i + 1
+    }
+    if !found {
+        say((&s_none[0 as usize]) as u64)
+        tools.ob_nl()
+        tools.ob_flush()
+        return 1
+    }
+    say((&s_hit[0 as usize]) as u64)
+    say((&BEST[0 as usize]) as u64)
+    say((&s_spec[0 as usize]) as u64)
+    tools.ob_num(bspec)
+    say((&s_rank[0 as usize]) as u64)
+    tools.ob_num(brank)
+    say((&s_ver[0 as usize]) as u64)
+    tools.ob_num(bver)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+fn copy_into(src_dir: u64, dst_dir: u64, file: u64) -> bool {
+    drvpkg.join((&FILE[0 as usize]) as u64, src_dir, file)
+    drvpkg.join((&DST[0 as usize]) as u64, dst_dir, file)
+    return drvpkg.copy_file((&FILE[0 as usize]) as u64, (&DST[0 as usize]) as u64)
+}
+
+fn cmd_install(src: u64) -> u64 {
+    var e_sig: [u8; 38] = "drvctl: signature check failed for \0\0\0"
+    var e_name: [u8; 27] = "drvctl: bad package name: \0"
+    var e_file: [u8; 26] = "drvctl: bad module name: \0"
+    var e_copy: [u8; 24] = "drvctl: cannot copy \0\0\0\0"
+    var e_dir: [u8; 30] = "drvctl: install needs a dir\0\0\0"
+    var s_done: [u8; 11] = "installed \0"
+    var s_boot: [u8; 23] = " (active after reboot)\0"
+    var k_name: [u8; 5] = "name\0"
+    var k_module: [u8; 7] = "module\0"
+    var f_inf: [u8; 11] = "driver.inf\0"
+    var f_sig: [u8; 15] = "driver.inf.sig\0"
+    var root: [u8; 13] = "/lib/drivers\0"
+    var mod_name: [u8; 40] = [0 as u8; 40]
+    var pkg_name: [u8; 40] = [0 as u8; 40]
+    if !ulib.is_dir(src) {
+        return fail((&e_dir[0 as usize]) as u64, 0)
+    }
+    if drvpkg.verify_dir(src) != drvpkg.V_OK {
+        return fail((&e_sig[0 as usize]) as u64, src)
+    }
+    drvpkg.field_nth((&k_name[0 as usize]) as u64, 0, (&pkg_name[0 as usize]) as u64, 40)
+    drvpkg.field_nth((&k_module[0 as usize]) as u64, 0, (&mod_name[0 as usize]) as u64, 40)
+    if !drvpkg.valid_name((&pkg_name[0 as usize]) as u64) {
+        return fail((&e_name[0 as usize]) as u64, (&pkg_name[0 as usize]) as u64)
+    }
+    if !drvpkg.valid_file((&mod_name[0 as usize]) as u64) {
+        return fail((&e_file[0 as usize]) as u64, (&mod_name[0 as usize]) as u64)
+    }
+    var dst_dir: [u8; 96] = [0 as u8; 96]
+    drvpkg.join((&dst_dir[0 as usize]) as u64, (&root[0 as usize]) as u64, (&pkg_name[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_MKDIR, (&root[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&dst_dir[0 as usize]) as u64, 0, 0)
+    if !copy_into(src, (&dst_dir[0 as usize]) as u64, (&mod_name[0 as usize]) as u64) {
+        return fail((&e_copy[0 as usize]) as u64, (&mod_name[0 as usize]) as u64)
+    }
+    if !copy_into(src, (&dst_dir[0 as usize]) as u64, (&f_sig[0 as usize]) as u64)
+        || !copy_into(src, (&dst_dir[0 as usize]) as u64, (&f_inf[0 as usize]) as u64) {
+        return fail((&e_copy[0 as usize]) as u64, (&dst_dir[0 as usize]) as u64)
+    }
+    say((&s_done[0 as usize]) as u64)
+    say((&pkg_name[0 as usize]) as u64)
+    say((&s_boot[0 as usize]) as u64)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+fn remove_files(dir: u64) {
+    let fd: u64 = io.dir_open(dir)
+    if errno.failed(fd) {
+        return
+    }
+    var count: u64 = 0
+    let n: u64 = io.dir_read(fd, (&ENTRY[0 as usize]) as u64, 512)
+    var at: u64 = 0
+    while n != 0 && !ulib.bad(n) && at < n && count < 16 {
+        let rec: u64 = (&ENTRY[0 as usize]) as u64 + at
+        let name: u64 = io.dir_name(rec)
+        if drvpkg.byte_at(name) != 46 {
+            drvpkg.join((&FILE[0 as usize]) as u64, dir, name)
+            ulib.sys(ulib.SYS_UNLINK, (&FILE[0 as usize]) as u64, 0, 0)
+        }
+        count = count + 1
+        at = at + io.dir_reclen(rec)
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
+fn cmd_remove(name: u64) -> u64 {
+    var e_name: [u8; 27] = "drvctl: bad package name: \0"
+    var e_none: [u8; 24] = "drvctl: no such package\0"
+    var s_done: [u8; 9] = "removed \0"
+    if !drvpkg.valid_name(name) {
+        return fail((&e_name[0 as usize]) as u64, name)
+    }
+    let dir: u64 = pkg_dir(name)
+    if !ulib.is_dir(dir) {
+        return fail((&e_none[0 as usize]) as u64, name)
+    }
+    remove_files(dir)
+    ulib.sys(ulib.SYS_RMDIR, dir, 0, 0)
+    say((&s_done[0 as usize]) as u64)
+    say(name)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+fn cmd_ban(name: u64) -> u64 {
+    var e_name: [u8; 27] = "drvctl: bad package name: \0"
+    var e_write: [u8; 28] = "drvctl: cannot write deny\0\0\0"
+    var s_done: [u8; 8] = "banned \0"
+    var s_boot: [u8; 23] = " (active after reboot)\0"
+    if !drvpkg.valid_name(name) {
+        return fail((&e_name[0 as usize]) as u64, name)
+    }
+    if !drvpkg.deny_add(name) {
+        return fail((&e_write[0 as usize]) as u64, 0)
+    }
+    say((&s_done[0 as usize]) as u64)
+    say(name)
+    say((&s_boot[0 as usize]) as u64)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 78] = "usage: drvctl list | match <kind> <id> | install <dir> | remove <n> | ban <n>\0"
+    var w_list: [u8; 5] = "list\0"
+    var w_match: [u8; 6] = "match\0"
+    var w_install: [u8; 8] = "install\0"
+    var w_remove: [u8; 7] = "remove\0"
+    var w_ban: [u8; 4] = "ban\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc >= 2 {
+        let cmd: u64 = ulib.arg_at(args, 1)
+        if ulib.streq(cmd, (&w_list[0 as usize]) as u64) {
+            return cmd_list()
+        }
+        if ulib.streq(cmd, (&w_match[0 as usize]) as u64) && argc >= 4 {
+            return cmd_match(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+        }
+        if ulib.streq(cmd, (&w_install[0 as usize]) as u64) && argc >= 3 {
+            return cmd_install(ulib.arg_at(args, 2))
+        }
+        if ulib.streq(cmd, (&w_remove[0 as usize]) as u64) && argc >= 3 {
+            return cmd_remove(ulib.arg_at(args, 2))
+        }
+        if ulib.streq(cmd, (&w_ban[0 as usize]) as u64) && argc >= 3 {
+            return cmd_ban(ulib.arg_at(args, 2))
+        }
+    }
+    ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+    return 2
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

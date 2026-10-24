@@ -176,7 +176,7 @@ nwert() { grep -a 'modul: nach init=' "$1" | head -1 | grep -oE "$2" | grep -oE 
 echo "== 2. die Ausfuhrtafel des Kerns: dieselben Zahlen, die nm nennt =="
 lauf "$TMPD/k-modul" "$TMPD/d-gut.img" "modul modulaus $QUIET" "$TMPD/l-gut.txt"
 num "der Lauf endet sauber" "$RC" eq 21
-num "Symbole in der Tafel" "$(wert "$TMPD/l-gut.txt" 'modul: syms=[0-9]+')" eq 13
+num "Symbole in der Tafel" "$(wert "$TMPD/l-gut.txt" 'modul: syms=[0-9]+')" eq 14
 python3 - "$TMPD/l-gut.txt" "$TMPD/k-modul.elf" > "$TMPD/nm.txt" 2>&1 <<'PYEOF'
 import re, subprocess, sys
 log = open(sys.argv[1], errors='replace').read()
@@ -208,7 +208,7 @@ else:
     print("ABWEICHUNG kdata: gedruckt=%s nm=%s" % (kd, sym.get('kdata')))
 print("gleich=%d" % gut)
 PYEOF
-num "Adressen, die mit nm uebereinstimmen" "$(wert "$TMPD/nm.txt" 'gleich=[0-9]+')" eq 13
+num "Adressen, die mit nm uebereinstimmen" "$(wert "$TMPD/nm.txt" 'gleich=[0-9]+')" eq 14
 grep -q ABWEICHUNG "$TMPD/nm.txt" && sed 's/^/        /' "$TMPD/nm.txt" | head -5
 
 # ------------------------------------------ 3. ohne Modul fehlt das Geraet

@@ -13,7 +13,8 @@ D=$(mktemp -d); [ -z "${DRVSTORE_KEEP:-}" ] && trap 'rm -rf "$D"' EXIT
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 bash tools/module/build.sh "$D/edudemo.omod" --quelle module/store/edudemo.fi > "$D/m.txt" 2>&1 && ok "edudemo module builds and is signed" || { bad "module"; tail -5 "$D/m.txt"; echo "DRVSTORE: $pass passed, $fail failed"; exit 1; }
-PROGS="sh cat echo"
+bash tools/module/build.sh "$D/fwdemo.omod" --quelle module/store/fwdemo.fi > "$D/mf.txt" 2>&1 && ok "fwdemo module builds and is signed" || { bad "fwdemo module"; tail -5 "$D/mf.txt"; }
+PROGS="sh cat echo drvctl"
 mkdir -p "$D/bin" "$D/pk"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/b.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/b.txt"; echo "DRVSTORE: $pass passed, $fail failed"; exit 1; }
 ./tools/build-kernel.sh "$D/k0.img" --stufe 0 > "$D/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel"; tail -5 "$D/k.txt"; echo "DRVSTORE: $pass passed, $fail failed"; exit 1; }
@@ -49,7 +50,7 @@ mkimg() {
 runvm() {
     local name=$1; local words=$2; shift 2
     timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 -kernel "$D/k0.img" -m 512 \
-        -append "osum vfs $words script=sh /t/s.sh;exit" \
+        -append "osum vfs $words script=sh ${SCRIPT:-/t/s.sh};exit" \
         -serial "file:$D/o-$name.txt" -display none -no-reboot \
         -drive "file=$D/d-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" >/dev/null 2>&1
@@ -89,5 +90,121 @@ has "$D/deny.klar" "drvstore: pkg edudemo ok banned" "deny: package marked banne
 has "$D/deny.klar" "drv=lowrank src=store bind=bound" "deny: next package takes over"
 has "$D/empty.klar" "store=on pkgs=0 valid=0 bound=0" "empty: no packages"
 hasnot "$D/empty.klar" "src=store" "counter-proof empty: nothing bound"
+mkdir -p "$D/pksrc"
+python3 tools/drvstore/mkpkg.py build "$D/pksrc" --module "$MK" --name newdrv --rank 5 --match "pci 8086:24fd:8086:9010" --match "pciclass 0280" > /dev/null
+python3 tools/drvstore/mkpkg.py build "$D/pksrc" --module "$MK" --name generic --rank 99 --match "pci 8086:24fd" > /dev/null
+python3 tools/drvstore/mkpkg.py build "$D/pksrc" --module "$MK" --name evil --rank 99 --match "pci 8086:24fd" --bad-sig > /dev/null
+SRCF="/t/src/"
+for p in newdrv generic evil; do
+    SRCF="$SRCF /t/src/$p/"
+    for f in $(ls "$D/pksrc/$p"); do SRCF="$SRCF /t/src/$p/$f=$D/pksrc/$p/$f"; done
+done
+cat > "$D/c1.sh" <<'EOS'
+echo ==C1==
+drvctl list
+drvctl match pci 1234:11e8
+drvctl match pci 8086:ffff
+drvctl match pci 9999:9999
+drvctl install /t/src/newdrv
+drvctl install /t/src/generic
+drvctl install /t/src/evil
+drvctl install /t/src/nothing
+drvctl match pci 8086:24fd:8086:9010
+drvctl match pci 8086:24fd:1111:2222
+drvctl match pciclass 0280:00
+drvctl ban edudemo
+drvctl ban BAD/NAME
+drvctl match pci 1234:11e8
+cat /etc/drivers.deny
+drvctl remove generic
+drvctl remove nosuch
+drvctl match pci 8086:24fd:1111:2222
+drvctl list
+drvctl
+echo ==C1END==
+EOS
+cat > "$D/c2.sh" <<'EOS'
+echo ==C2==
+cat /proc/drivers
+echo ==C2END==
+EOS
+mkimg ctl1 $FILES $SRCF "/t/c1.sh=$D/c1.sh" "/t/c2.sh=$D/c2.sh" /etc/
+SCRIPT=/t/c1.sh runvm ctl1 "" -device edu
+cp "$D/d-ctl1.img" "$D/d-ctl2.img"
+SCRIPT=/t/c2.sh runvm ctl2 "" -device edu
+has "$D/ctl1.klar" "pkg edudemo version=1 rank=10 sig=ok" "ctl list: good package listed"
+has "$D/ctl1.klar" "pkg badsig sig=bad" "ctl list: bad signature shown"
+has "$D/ctl1.klar" "pkg tampered sig=bad" "ctl list: tampered shown as bad"
+has "$D/ctl1.klar" "pkg wrongabi version=1 rank=95 sig=ok invalid" "ctl list: wrong ABI marked invalid"
+has "$D/ctl1.klar" "pkg nomod version=1 rank=96 sig=ok invalid" "ctl list: missing module marked invalid"
+has "$D/ctl1.klar" "pkg garbage version=1 rank=97 sig=ok invalid" "ctl list: bad manifest line marked invalid"
+has "$D/ctl1.klar" "packages=8 valid=3" "ctl list: counts match the kernel (3 usable of 8)"
+has "$D/ctl1.klar" "match edudemo spec=30 rank=10 version=1" "ctl match: rank wins among equal specificity"
+has "$D/ctl1.klar" "match unrelated spec=30" "ctl match: exact id"
+has "$D/ctl1.klar" "match none" "ctl match: no package for unknown id"
+has "$D/ctl1.klar" "installed newdrv (active after reboot)" "ctl install: signed package installed"
+has "$D/ctl1.klar" "installed generic (active after reboot)" "ctl install: second package installed"
+has "$D/ctl1.klar" "drvctl: signature check failed for /t/src/evil" "ctl install: bad signature refused"
+hasnot "$D/ctl1.klar" "installed evil" "counter-proof ctl install: evil not installed"
+has "$D/ctl1.klar" "drvctl: install needs a dir" "ctl install: missing dir refused"
+has "$D/ctl1.klar" "match newdrv spec=40" "ctl match: subsystem beats a higher rank"
+has "$D/ctl1.klar" "match generic spec=30 rank=99" "ctl match: other subsystem falls back"
+has "$D/ctl1.klar" "match newdrv spec=15 rank=5" "ctl match: pciclass"
+has "$D/ctl1.klar" "banned edudemo (active after reboot)" "ctl ban: written"
+has "$D/ctl1.klar" "drvctl: bad package name: BAD/NAME" "ctl ban: path-like name refused"
+has "$D/ctl1.klar" "match lowrank spec=30 rank=1" "ctl match: banned package skipped"
+has "$D/ctl1.klar" "removed generic" "ctl remove: done"
+has "$D/ctl1.klar" "drvctl: no such package" "ctl remove: unknown name refused"
+has "$D/ctl1.klar" "usage: drvctl" "ctl: usage text"
+has "$D/ctl2.klar" "drvstore: pkg edudemo ok banned" "ctl reboot: ban survives, package banned"
+has "$D/ctl2.klar" "drv=lowrank src=store bind=bound" "ctl reboot: next package binds after ban"
+has "$D/ctl2.klar" "drvstore: pkg newdrv ok" "ctl reboot: installed package scanned and valid"
+hasnot "$D/ctl2.klar" "drvstore: pkg generic" "ctl reboot: removed package gone"
+hasnot "$D/ctl2.klar" "drvstore: pkg evil" "counter-proof ctl reboot: refused package absent"
+
+FWBLOB="OrientOS fw demo blob"
+FWHASH=c44a0725b6b3e2bad7103b68b309c068f5d4a0727f515c3f257c5c0f40f8eeee
+printf '%s\n' "$FWBLOB" > "$D/fw.good"
+printf 'tampered fw demo blob\n' > "$D/fw.bad"
+fwpk() {
+    local v=$1; shift
+    mkdir -p "$D/pkfw-$v"
+    python3 tools/drvstore/mkpkg.py build "$D/pkfw-$v" --module "$D/fwdemo.omod" --name fwdemo --match "pci 1234:11e8" "$@" > /dev/null
+}
+fwimg() {
+    local v=$1; local blob=$2
+    local files="/lib/drivers/fwdemo/"
+    for f in $(ls "$D/pkfw-$v/fwdemo"); do files="$files /lib/drivers/fwdemo/$f=$D/pkfw-$v/fwdemo/$f"; done
+    local fwf="/lib/firmware/"
+    [ -n "$blob" ] && fwf="/lib/firmware/ /lib/firmware/fwdemo.bin=$blob"
+    mkimg "fw-$v" $files $fwf
+}
+fwpk good --rights mmio,fw --fw "fwdemo.bin:$FWHASH"
+fwpk noright --rights mmio --fw "fwdemo.bin:$FWHASH"
+fwpk nofw --rights mmio,fw
+fwpk wronghash --rights mmio,fw --fw "fwdemo.bin:$(printf '0%.0s' $(seq 64))"
+fwimg good "$D/fw.good"
+fwpk tamper --rights mmio,fw --fw "fwdemo.bin:$FWHASH"
+fwimg tamper "$D/fw.bad"
+fwimg noright "$D/fw.good"
+fwimg nofw "$D/fw.good"
+fwimg wronghash "$D/fw.good"
+fwpk missing --rights mmio,fw --fw "fwdemo.bin:$FWHASH"
+fwimg missing ""
+for v in good tamper noright nofw wronghash missing; do
+    runvm "fw-$v" "" -device edu
+done
+has "$D/fw-good.klar" "drvstore: fw ok fwdemo.bin 22" "fw good: firmware verified and delivered"
+has "$D/fw-good.klar" "fwdemo: fw len=22 b0=79" "fw good: module received the bytes"
+hasnot "$D/fw-good.klar" "fw error" "fw good: no error"
+has "$D/fw-tamper.klar" "drvstore: fw fwdemo error 9" "fw tampered file: digest mismatch refused"
+has "$D/fw-tamper.klar" "fwdemo: fw none" "fw tampered file: module got nothing"
+hasnot "$D/fw-tamper.klar" "fw len=" "counter-proof tampered: no bytes delivered"
+has "$D/fw-noright.klar" "drvstore: fw fwdemo error 2" "fw without right fw: refused"
+hasnot "$D/fw-noright.klar" "fw len=" "counter-proof noright: no bytes delivered"
+has "$D/fw-nofw.klar" "drvstore: fw fwdemo error 3" "fw without manifest entry: refused"
+has "$D/fw-wronghash.klar" "drvstore: fw fwdemo error 5" "fw hash differs from module expectation: refused"
+has "$D/fw-missing.klar" "drvstore: fw fwdemo error 6" "fw file missing: reported"
+hasnot "$D/fw-good.klar" "EXCEPTION" "fw: no kernel exception"
 echo "DRVSTORE: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
