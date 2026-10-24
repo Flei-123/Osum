@@ -101,8 +101,11 @@ static mut held_addr: u64 = 0
 static mut diag_d: iwl_diag.Diag = iwl_diag.Diag {
     phase: 0, failed_at: 0, armed: 0, init_alive: 0, rt_alive: 0, err: 0, hw_rev: 0, rf_id: 0, fw_ver: 0, fw_size: 0,
     nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, last_cmd: 0, last_notif: 0,
-    cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32]
+    cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32],
+    step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, miss: [0 as u8; 64]
 }
+
+static mut snap_p: u64 = 0
 
 fn now_ms(state: u64) -> u64 {
     return kstate.get(state, kstate.TICKS) * 10
@@ -121,7 +124,16 @@ fn diag_step(state: u64, ph: u64) {
 }
 
 fn diag_bad(state: u64, code: i64) {
+    if snap_p != 0 {
+        var rg: [u64; 8] = [0 as u64; 8]
+        iwl_pwr.snap_regs(snap_p as *mut iwl_probe.Probe, (&rg[0]) as u64)
+        iwl_diag.diag_snap(&diag_d, (&rg[0]) as u64)
+    }
     iwl_diag.diag_fail(&diag_d, code, now_ms(state))
+}
+
+fn mark(st: u64) {
+    iwl_diag.diag_mark(&diag_d, st)
 }
 
 fn rd(ctx: u64, off: u64) -> u64 {
@@ -546,6 +558,7 @@ fn b2_phase(state: u64, lph: u64, aph: u64, p: *mut iwl_probe.Probe, f: *mut iwl
     var s_by: [u8; 8] = " bytes=\0"
     var st: iwl_fh8000.FhStat = iwl_fh8000.fhstat_new()
     diag_step(state, lph)
+    if lph == iwl_diag.PH_FW_LOAD_INIT { mark(iwl_diag.ST_FH_INIT) } else { mark(iwl_diag.ST_FH_RT) }
     var r: i64 = iwl_fh8000.fh_load(p, f, blob, img, bounce, bounce, bsize, &st)
     var s_rc2: [u8; 4] = "rc=\0"
     serial.puts(tl)
@@ -555,9 +568,11 @@ fn b2_phase(state: u64, lph: u64, aph: u64, p: *mut iwl_probe.Probe, f: *mut iwl
     serial.dec(st.bytes)
     serial.nl()
     if r != 0 {
+        iwl_diag.diag_fhfail(&diag_d, st.fail_sec, st.chunks, st.bytes)
         diag_bad(state, r)
         return r
     }
+    if lph == iwl_diag.PH_FW_LOAD_INIT { mark(iwl_diag.ST_ALIVE_INIT) } else { mark(iwl_diag.ST_ALIVE_RT) }
     r = iwl_alive.alive_wait(p)
     b2_line(ta, r)
     if r != 0 {
@@ -573,6 +588,7 @@ fn b2_phase(state: u64, lph: u64, aph: u64, p: *mut iwl_probe.Probe, f: *mut iwl
     return r
 }
 
+#[allow_escape]
 fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, bounce_in: u64, cq: *mut iwl_cmdq.Cq) -> i64 {
     var t_il: [u8; 22] = "iwl: boot2 init load \0"
     var t_ia: [u8; 11] = "init alive\0"
@@ -601,6 +617,8 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
         diag_bad(state, E_FW_IMAGE)
         return E_FW_IMAGE
     }
+    snap_p = p as u64
+    mark(iwl_diag.ST_POWER_INIT)
     var r: i64 = iwl_pwr.power_up(p)
     if r != 0 {
         b2_line((&t_pw[0]) as u64, r)
@@ -626,6 +644,7 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
         iwl_pwr.int_disable(p)
         return r
     }
+    mark(iwl_diag.ST_NVM)
     r = iwl_boot.init_stage(&bt, &diag_d)
     if r == 0 { iwl_heldmac.store(&bt, quirk_bits(state)) }
     b2_line((&t_sm[0]) as u64, r)
@@ -635,12 +654,14 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
         return r
     }
     iwl_pwr.int_disable(p)
+    mark(iwl_diag.ST_INIT_STOP)
     r = iwl_pwr.stop_master(p)
     iwl_pwr.sw_reset(p)
     b2_line((&t_st[0]) as u64, r)
     if r != 0 {
         return r
     }
+    mark(iwl_diag.ST_POWER_RT)
     r = iwl_pwr.power_up(p)
     if r != 0 {
         b2_line((&t_pw[0]) as u64, r)
@@ -654,6 +675,7 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
     if r != 0 {
         iwl_pwr.int_disable(p)
     } else {
+        mark(iwl_diag.ST_RT_STAGE)
         r = iwl_boot.rt_stage(&bt, &diag_d)
     }
     return r
@@ -721,6 +743,7 @@ fn fh8000_fake(state: u64, blob: u64, f: *mut iwl_fw.FwInfo) {
 }
 
 // HP-9c.2 against a fresh fake: INIT -> ALIVE -> stop -> RT -> ALIVE (`iwl: boot2 ...` lines + model summary).
+#[allow_escape]
 fn fh8000_fake2(state: u64, blob: u64, f: *mut iwl_fw.FwInfo, mode: u64, win: u64) {
     var s_sum: [u8; 19] = "iwl: boot2 SUMMARY\0"
     var s_ph: [u8; 8] = " phase \0"
@@ -794,6 +817,7 @@ fn fh8000_fake2(state: u64, blob: u64, f: *mut iwl_fw.FwInfo, mode: u64, win: u6
 
 // Real device (word iwlboot, family 8000): power up, push the runtime image through the FH channel, wait for ALIVE.
 // Writes device registers; NOT MEASURED on silicon (HP-9c).
+#[allow_escape]
 fn fh8000_boot(state: u64, p: *mut iwl_probe.Probe, blob: u64, f: *mut iwl_fw.FwInfo) -> i64 {
     iwl_probe.mmio_set(p, (*p).ctx, rd, wr_real)
     let h: u64 = dma_pages(state, 1)
@@ -851,6 +875,12 @@ fn held_ready() -> bool {
 // After the filesystem is mounted: firmware lookup for every target (read-only), or for a synthetic AX201 with the
 // word `iwlfwtest`, and the opt-in boot with the word `iwlboot`.
 fn fw_stage(state: u64) {
+    fw_stage_run(state)
+    snap_p = 0
+}
+
+#[allow_escape]
+fn fw_stage_run(state: u64) {
     var s_none: [u8; 17] = "iwl: fw no file\0\0"
     var s_boot: [u8; 14] = "iwl: boot rc=\0"
     var s_test: [u8; 15] = "iwl: fw test\0\0\0"
@@ -894,9 +924,17 @@ fn fw_stage(state: u64) {
         var p: iwl_probe.Probe = iwl_probe.probe_new()
         let r: i64 = probe_at(state, i, &p, false)
         if r == 0 {
+            snap_p = (&p) as u64
+            mark(iwl_diag.ST_FW_FILE)
             let rf: i64 = fw_prepare(state, p.dev, p.hw_rev, p.rf_id, buf, &f)
             let boot_on: bool = wants_boot(state, &p)
             iwl_diag.diag_armed(&diag_d, boot_on)
+            if rf == E_FW_NONE {
+                var mn: [u8; 64] = [0 as u8; 64]
+                let _mn: usize = iwl_fwsel.dev_name(p.dev, p.hw_rev, p.rf_id, 0, (&mn[0]) as u64)
+                iwl_diag.diag_fwmiss(&diag_d, (&mn[0]) as u64)
+            }
+            if rf == E_FW_PARSE { mark(iwl_diag.ST_FW_PARSE) }
             if rf != 0 && boot_on {
                 diag_step(state, iwl_diag.PH_FW_LOAD_INIT)
                 diag_bad(state, rf)

@@ -13,8 +13,8 @@ import wlan.iwl_probe
 
 export {
     rd, wr, poll, set_bits, stop_master, sw_reset, apm_init, mac_access_get, mac_access_put,
-    prph_rd, prph_wr, int_disable, power_up, fw_kick,
-    E_PWR_MASTER, E_PWR_CLOCK, E_PWR_ACCESS, POLL_MAX,
+    prph_rd, prph_wr, int_disable, power_up, fw_kick, prepare_card, settle, snap_regs,
+    E_PWR_MASTER, E_PWR_CLOCK, E_PWR_ACCESS, E_PWR_NOTREADY, POLL_MAX, SNAP_N,
     CSR_INT_MASK, CSR_FH_INT_STATUS, CSR_CTXT_INFO_BA, CSR_CTXT_INFO_BA_HI,
     HBUS_WADDR, HBUS_WDAT, HBUS_RADDR, HBUS_RDAT, HBUS_WRPTR, UREG_CPU_INIT_RUN,
     RESET_SW, RESET_STOP_MASTER, RESET_MASTER_DISABLED,
@@ -22,6 +22,23 @@ export {
 }
 
 const CSR_INT_MASK: u64 = 0x00C
+const CSR_MBOX_SET: u64 = 0x088
+const CSR_GIO_CHICKEN: u64 = 0x100
+const CSR_DBG_HPET: u64 = 0x240
+const CSR_DBG_LINK_PWR: u64 = 0x250
+const CSR_UCODE_GP1: u64 = 0x054
+const HWIF_NIC_READY: u64 = 0x00400000
+const HWIF_PREPARE: u64 = 0x08000000
+const HWIF_HAP_WAKE_L1A: u64 = 0x00080000
+const LINK_PWR_DISABLED: u64 = 0x80000000
+const GIO_L1A_NO_L0S_RX: u64 = 0x00800000
+const HPET_VAL: u64 = 0xFFFF0000
+const MBOX_OS_ALIVE: u64 = 0x20
+const READY_POLL: u64 = 2000
+const PREPARE_ROUNDS: u64 = 10
+const PREPARE_POLL: u64 = 20000
+const RESET_SETTLE: u64 = 8000
+const SNAP_N: u64 = 8
 const CSR_FH_INT_STATUS: u64 = 0x010
 const CSR_CTXT_INFO_BA: u64 = 0x040
 const CSR_CTXT_INFO_BA_HI: u64 = 0x044
@@ -53,6 +70,7 @@ const POLL_MAX: u64 = 25000
 const E_PWR_MASTER: i64 = -20
 const E_PWR_CLOCK: i64 = -21
 const E_PWR_ACCESS: i64 = -22
+const E_PWR_NOTREADY: i64 = -23
 
 fn rd(p: *mut iwl_probe.Probe, off: u64) -> u64 {
     let m: iwl_probe.Mmio = (*p).m
@@ -98,12 +116,61 @@ fn stop_master(p: *mut iwl_probe.Probe) -> i64 {
     return 0
 }
 
+fn settle(p: *mut iwl_probe.Probe, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let _v: u64 = rd(p, iwl_probe.CSR_HW_REV)
+        i = i + 1
+    }
+}
+
 fn sw_reset(p: *mut iwl_probe.Probe) {
     set_bits(p, iwl_probe.CSR_RESET, RESET_SW)
+    settle(p, RESET_SETTLE)
+}
+
+fn hw_ready(p: *mut iwl_probe.Probe, polls: u64) -> bool {
+    set_bits(p, iwl_probe.CSR_HW_IF_CONFIG, HWIF_NIC_READY)
+    var i: u64 = 0
+    while i < polls {
+        if rd(p, iwl_probe.CSR_HW_IF_CONFIG) & HWIF_NIC_READY != 0 {
+            set_bits(p, CSR_MBOX_SET, MBOX_OS_ALIVE)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn prepare_card(p: *mut iwl_probe.Probe) -> i64 {
+    if hw_ready(p, READY_POLL) { return 0 }
+    set_bits(p, CSR_DBG_LINK_PWR, LINK_PWR_DISABLED)
+    settle(p, READY_POLL)
+    var it: u64 = 0
+    while it < PREPARE_ROUNDS {
+        set_bits(p, iwl_probe.CSR_HW_IF_CONFIG, HWIF_PREPARE)
+        if hw_ready(p, PREPARE_POLL) { return 0 }
+        it = it + 1
+    }
+    return E_PWR_NOTREADY
+}
+
+fn snap_regs(p: *mut iwl_probe.Probe, out: u64) {
+    *((out) as *mut u64) = rd(p, iwl_probe.CSR_HW_IF_CONFIG)
+    *((out + 8) as *mut u64) = rd(p, iwl_probe.CSR_INT)
+    *((out + 16) as *mut u64) = rd(p, CSR_INT_MASK)
+    *((out + 24) as *mut u64) = rd(p, CSR_FH_INT_STATUS)
+    *((out + 32) as *mut u64) = rd(p, iwl_probe.CSR_RESET)
+    *((out + 40) as *mut u64) = rd(p, iwl_probe.CSR_GP_CNTRL)
+    *((out + 48) as *mut u64) = rd(p, iwl_probe.CSR_HW_REV)
+    *((out + 56) as *mut u64) = rd(p, CSR_UCODE_GP1)
 }
 
 // Request the clock: INIT_DONE, then wait for MAC_CLOCK_READY.
 fn apm_init(p: *mut iwl_probe.Probe) -> i64 {
+    set_bits(p, CSR_GIO_CHICKEN, GIO_L1A_NO_L0S_RX)
+    set_bits(p, CSR_DBG_HPET, HPET_VAL)
+    set_bits(p, iwl_probe.CSR_HW_IF_CONFIG, HWIF_HAP_WAKE_L1A)
     set_bits(p, iwl_probe.CSR_GP_CNTRL, GP_INIT_DONE)
     if !poll(p, iwl_probe.CSR_GP_CNTRL, GP_CLOCK_READY, GP_CLOCK_READY) { return E_PWR_CLOCK }
     return 0
@@ -135,6 +202,7 @@ fn prph_wr(p: *mut iwl_probe.Probe, addr: u64, v: u64) {
 // Full M2 bring-up: interrupts off, master stop, reset, clock. Leaves the device clocked, quiet,
 // mac access released. Returns 0 or E_PWR_*.
 fn power_up(p: *mut iwl_probe.Probe) -> i64 {
+    let _ready: i64 = prepare_card(p)
     int_disable(p)
     var r: i64 = stop_master(p)
     if r != 0 { return r }
