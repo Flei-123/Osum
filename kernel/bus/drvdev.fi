@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.procw
+import bus.pci
+import bus.drvreg
+import bus.drvstore
+import usb.usb
+import acpi.acpidev
+
+export { render }
+
+const MAX_ACPI: u64 = 64
+
+static mut acpi_hid: [u64; 64] = [0 as u64; 64]
+static mut acpi_cnt: [u64; 64] = [0 as u64; 64]
+
+fn put_src(src: u64, drv: u64, bind: u64) {
+    var s_drv: [u8; 6] = " drv=\0"
+    var s_src: [u8; 6] = " src=\0"
+    var s_bind: [u8; 7] = " bind=\0"
+    procw.put_s((&s_drv[0]) as u64)
+    procw.put_s(drv)
+    procw.put_s((&s_src[0]) as u64)
+    var b0: [u8; 8] = "builtin\0"
+    var b1: [u8; 6] = "store\0"
+    var b2: [u8; 5] = "none\0"
+    if src == 1 {
+        procw.put_s((&b0[0]) as u64)
+    } else if src == 2 {
+        procw.put_s((&b1[0]) as u64)
+    } else {
+        procw.put_s((&b2[0]) as u64)
+    }
+    procw.put_s((&s_bind[0]) as u64)
+    var t0: [u8; 6] = "bound\0"
+    var t1: [u8; 7] = "failed\0"
+    var t2: [u8; 5] = "seen\0"
+    var t3: [u8; 2] = "-\0"
+    if bind == 1 {
+        procw.put_s((&t0[0]) as u64)
+    } else if bind == 2 {
+        procw.put_s((&t1[0]) as u64)
+    } else if bind == 3 {
+        procw.put_s((&t2[0]) as u64)
+    } else {
+        procw.put_s((&t3[0]) as u64)
+    }
+    procw.put_c(10)
+}
+
+fn pci_lines(state: u64) -> u64 {
+    var s_pci: [u8; 5] = "pci \0"
+    var s_sub: [u8; 6] = " sub=\0"
+    var s_cls: [u8; 8] = " class=\0"
+    var s_none: [u8; 5] = "none\0"
+    var none: u64 = 0
+    var i: u64 = 0
+    let total: u64 = pci.count(state)
+    while i < total {
+        let bdf: u64 = pci.get(state, i, pci.E_BDF)
+        procw.put_s((&s_pci[0]) as u64)
+        procw.put_hex(pci.bdf_bus(bdf), 2)
+        procw.put_c(58)
+        procw.put_hex(pci.bdf_dev(bdf), 2)
+        procw.put_c(46)
+        procw.put_hex(pci.bdf_fn(bdf), 1)
+        procw.put_c(32)
+        procw.put_hex(pci.get(state, i, pci.E_VENDOR), 4)
+        procw.put_c(58)
+        procw.put_hex(pci.get(state, i, pci.E_DEVICE), 4)
+        if (pci.get(state, i, pci.E_HDR) & 0x7F) == 0 {
+            let v: u64 = pci.cfg_read32(bdf, 0x2C)
+            procw.put_s((&s_sub[0]) as u64)
+            procw.put_hex(v & 0xFFFF, 4)
+            procw.put_c(58)
+            procw.put_hex((v >> 16) & 0xFFFF, 4)
+        }
+        procw.put_s((&s_cls[0]) as u64)
+        procw.put_hex((pci.get(state, i, pci.E_CLASS) << 8) | pci.get(state, i, pci.E_SUBCLASS), 4)
+        let row: u64 = drvreg.pci_row(state, i)
+        let b: u64 = drvstore.find_bind(1, i)
+        if row != 0xFFFFFFFFFFFFFFFF {
+            put_src(1, drvreg.row_name(row), drvreg.state_of(state, row) + 0)
+        } else if b != drvstore.NONE {
+            var res: u64 = 2
+            if drvstore.bind_result(b) == drvstore.BR_BOUND {
+                res = 1
+            }
+            put_src(2, drvstore.pkg_name(drvstore.bind_pkg(b)), res)
+        } else {
+            none = none + 1
+            put_src(0, (&s_none[0]) as u64, 0)
+        }
+        i = i + 1
+    }
+    return none
+}
+
+fn usb_name(k: u64, dst: u64) {
+    var n: [u8; 9] = "usb-drv0\0"
+    var i: u64 = 0
+    while i < 8 {
+        kstate.set8(dst + i, n[i as usize])
+        i = i + 1
+    }
+    kstate.set8(dst + 7, (48 + k) as u8)
+    kstate.set8(dst + 8, 0 as u8)
+}
+
+fn usb_lines(state: u64) -> u64 {
+    var s_usb: [u8; 5] = "usb \0"
+    var s_cls: [u8; 8] = " class=\0"
+    var s_none: [u8; 5] = "none\0"
+    var nm: [u8; 12] = [0 as u8; 12]
+    var none: u64 = 0
+    var i: u64 = 0
+    let total: u64 = usb.fund_count(state)
+    while i < total {
+        procw.put_s((&s_usb[0]) as u64)
+        procw.put_hex(usb.fund_vid(state, i), 4)
+        procw.put_c(58)
+        procw.put_hex(usb.fund_pid(state, i), 4)
+        procw.put_s((&s_cls[0]) as u64)
+        var c: u64 = usb.fund_icls(state, i)
+        if c == 0 {
+            c = usb.fund_dcls(state, i)
+        }
+        procw.put_hex(c, 2)
+        let k: u64 = usb.fund_driver(state, i)
+        if k != 0 && k < 10 {
+            usb_name(k, (&nm[0]) as u64)
+            put_src(1, (&nm[0]) as u64, 1)
+        } else {
+            none = none + 1
+            put_src(0, (&s_none[0]) as u64, 0)
+        }
+        i = i + 1
+    }
+    return none
+}
+
+fn acpi_lines(state: u64) -> u64 {
+    var s_acpi: [u8; 6] = "acpi \0"
+    var s_x: [u8; 3] = " x\0"
+    var s_none: [u8; 5] = "none\0"
+    var none: u64 = 0
+    let n: u64 = acpidev.hid_list(state, (&acpi_hid[0]) as u64, (&acpi_cnt[0]) as u64, MAX_ACPI)
+    var i: u64 = 0
+    while i < n {
+        let h: u64 = acpi_hid[i as usize]
+        procw.put_s((&s_acpi[0]) as u64)
+        var k: u64 = 0
+        while k < 8 && ((h >> (k * 8)) & 255) != 0 {
+            procw.put_c((h >> (k * 8)) & 255)
+            k = k + 1
+        }
+        procw.put_s((&s_x[0]) as u64)
+        procw.put_dec(acpi_cnt[i as usize])
+        let row: u64 = drvreg.acpi_row(h)
+        if row != 0xFFFFFFFFFFFFFFFF {
+            put_src(1, drvreg.row_name(row), 0)
+        } else {
+            none = none + 1
+            put_src(0, (&s_none[0]) as u64, 0)
+        }
+        i = i + 1
+    }
+    return none
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    var s_head: [u8; 32] = "# devices: bus id drv src bind\n\0"
+    var s_on: [u8; 15] = "store=on pkgs=\0"
+    var s_off: [u8; 11] = "store=off\n\0"
+    var s_valid: [u8; 8] = " valid=\0"
+    var s_bound: [u8; 8] = " bound=\0"
+    var s_failed: [u8; 9] = " failed=\0"
+    var s_sum: [u8; 12] = "# none pci=\0"
+    var s_usb: [u8; 6] = " usb=\0"
+    var s_acpi: [u8; 7] = " acpi=\0"
+    let n: u64 = drvreg.render(state, out, cap)
+    procw.begin(out + n, cap - n)
+    procw.put_s((&s_head[0]) as u64)
+    if drvstore.enabled() {
+        var valid: u64 = 0
+        var p: u64 = 0
+        while p < drvstore.pkg_total() {
+            if drvstore.pkg_valid(p) {
+                valid = valid + 1
+            }
+            p = p + 1
+        }
+        procw.put_s((&s_on[0]) as u64)
+        procw.put_dec(drvstore.pkg_total())
+        procw.put_s((&s_valid[0]) as u64)
+        procw.put_dec(valid)
+        procw.put_s((&s_bound[0]) as u64)
+        procw.put_dec(drvstore.bound_count())
+        procw.put_s((&s_failed[0]) as u64)
+        procw.put_dec(drvstore.failed_count())
+        procw.put_c(10)
+    } else {
+        procw.put_s((&s_off[0]) as u64)
+    }
+    let np: u64 = pci_lines(state)
+    let nu: u64 = usb_lines(state)
+    let na: u64 = acpi_lines(state)
+    procw.put_s((&s_sum[0]) as u64)
+    procw.put_dec(np)
+    procw.put_s((&s_usb[0]) as u64)
+    procw.put_dec(nu)
+    procw.put_s((&s_acpi[0]) as u64)
+    procw.put_dec(na)
+    procw.put_c(10)
+    return n + procw.used()
+}

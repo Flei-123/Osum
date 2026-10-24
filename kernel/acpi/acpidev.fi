@@ -5,7 +5,7 @@ import acpi.amlns
 import acpi.amlobj
 import acpi.aml
 
-export { render }
+export { render, hid_list }
 
 const SLOTS: u64 = 96
 const TXT: u64 = 16
@@ -289,25 +289,10 @@ fn entry_wanted(state: u64, hidn: u64, seg_cid: u64) -> bool {
     return false
 }
 
-fn devices(state: u64, out: u64, at: u64, cap: u64) -> u64 {
+fn collect(state: u64, keys: u64, cnt: u64, first: u64) -> u64 {
     var w_hid: [u8; 5] = "_HID\0"
-    var w_cid: [u8; 5] = "_CID\0"
-    var l_none: [u8; 12] = "acpi_ns: no\0"
-    var l_head: [u8; 13] = "acpi_ns: yes\0"
-    var l_more: [u8; 7] = "more: \0"
-    var keys: [u64; 96] = [0 as u64; 96]
-    var cnt: [u64; 96] = [0 as u64; 96]
-    var first: [u64; 96] = [0 as u64; 96]
     var r: [u64; 3] = [0 as u64; 3]
-    var p: u64 = at
-    if aml.ns_arena(state) == 0 {
-        p = put_cstr(out, p, cap, (&l_none[0]) as u64)
-        return put(out, p, cap, 10)
-    }
-    p = put_cstr(out, p, cap, (&l_head[0]) as u64)
-    p = put(out, p, cap, 10)
     let seg_hid: u64 = amlns.seg_of((&w_hid[0]) as u64)
-    let seg_cid: u64 = amlns.seg_of((&w_cid[0]) as u64)
     let n: u64 = amlns.nodes(state)
     var used: u64 = 0
     var i: u64 = 1
@@ -318,15 +303,15 @@ fn devices(state: u64, out: u64, at: u64, cap: u64) -> u64 {
                 let k: u64 = obj_key((&r[0]) as u64)
                 if k != 0 {
                     var j: u64 = 0
-                    while j < used && keys[j as usize] != k {
+                    while j < used && kstate.get(0, keys + j * 8) != k {
                         j = j + 1
                     }
                     if j < used {
-                        cnt[j as usize] = cnt[j as usize] + 1
+                        kstate.set(0, cnt + j * 8, kstate.get(0, cnt + j * 8) + 1)
                     } else if used < SLOTS {
-                        keys[used as usize] = k
-                        cnt[used as usize] = 1
-                        first[used as usize] = i
+                        kstate.set(0, keys + used * 8, k)
+                        kstate.set(0, cnt + used * 8, 1)
+                        kstate.set(0, first + used * 8, i)
                         used = used + 1
                     }
                 }
@@ -334,6 +319,54 @@ fn devices(state: u64, out: u64, at: u64, cap: u64) -> u64 {
         }
         i = i + 1
     }
+    return used
+}
+
+fn hid_list(state: u64, packed: u64, count: u64, max: u64) -> u64 {
+    var keys: [u64; 96] = [0 as u64; 96]
+    var cnt: [u64; 96] = [0 as u64; 96]
+    var first: [u64; 96] = [0 as u64; 96]
+    var tx: [u8; 16] = [0 as u8; 16]
+    if aml.ns_arena(state) == 0 {
+        return 0
+    }
+    let used: u64 = collect(state, (&keys[0]) as u64, (&cnt[0]) as u64, (&first[0]) as u64)
+    var j: u64 = 0
+    var n: u64 = 0
+    while j < used && n < max {
+        if node_text(state, first[j as usize], (&tx[0]) as u64) {
+            var v: u64 = 0
+            var c: u64 = 0
+            while c < 8 && tx[c as usize] != 0 as u8 {
+                v = v | ((tx[c as usize] as u64) << (c * 8))
+                c = c + 1
+            }
+            kstate.set(0, packed + n * 8, v)
+            kstate.set(0, count + n * 8, cnt[j as usize])
+            n = n + 1
+        }
+        j = j + 1
+    }
+    return n
+}
+
+fn devices(state: u64, out: u64, at: u64, cap: u64) -> u64 {
+    var w_cid: [u8; 5] = "_CID\0"
+    var l_none: [u8; 12] = "acpi_ns: no\0"
+    var l_head: [u8; 13] = "acpi_ns: yes\0"
+    var l_more: [u8; 7] = "more: \0"
+    var keys: [u64; 96] = [0 as u64; 96]
+    var cnt: [u64; 96] = [0 as u64; 96]
+    var first: [u64; 96] = [0 as u64; 96]
+    var p: u64 = at
+    if aml.ns_arena(state) == 0 {
+        p = put_cstr(out, p, cap, (&l_none[0]) as u64)
+        return put(out, p, cap, 10)
+    }
+    p = put_cstr(out, p, cap, (&l_head[0]) as u64)
+    p = put(out, p, cap, 10)
+    let seg_cid: u64 = amlns.seg_of((&w_cid[0]) as u64)
+    let used: u64 = collect(state, (&keys[0]) as u64, (&cnt[0]) as u64, (&first[0]) as u64)
     var pass: u64 = 0
     var left: u64 = 0
     while pass < 2 {

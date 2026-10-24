@@ -1,0 +1,634 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.ksym
+import bus.pci
+import bus.drvreg
+import bus.drvinf
+import fs.fs
+import ldr.module
+import ldr.modidx
+import serial
+
+export {
+    init, enabled, pkg_total, pkg_valid, pkg_name, pkg_dir, pkg_status, pkg_loaded,
+    pkg_bound, pkg_banned, pkg_version, pkg_rank, pkg_nmatch, pkg_kind, pkg_a, pkg_b,
+    pkg_rec, bind_total, bind_pkg, bind_id, bind_result, bind_code,
+    find_bind, best_pci, best_usb, best_acpi, bound_count, failed_count,
+    CTX_OFF, ST_OK, ST_BANNED, X_SIG, X_ABI, X_NOMODULE, X_NOFILE, X_DENY,
+    BR_NONE, BR_BOUND, BR_FAILED, NONE
+}
+
+const MAXPKG: u64 = 16
+const MAXBIND: u64 = 32
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const CTX_OFF: u64 = 0x1800
+
+const M_VALID: u64 = 0
+const M_STATUS: u64 = 1
+const M_LOADK: u64 = 2
+const M_BOUND: u64 = 3
+const M_BANNED: u64 = 4
+const M_LOADRC: u64 = 5
+const M_FIELDS: u64 = 6
+
+const ST_OK: u64 = 0
+const ST_BANNED: u64 = 30
+const X_SIG: u64 = 20
+const X_ABI: u64 = 21
+const X_NOMODULE: u64 = 22
+const X_NOFILE: u64 = 23
+const X_DENY: u64 = 24
+
+const BR_NONE: u64 = 0
+const BR_BOUND: u64 = 1
+const BR_FAILED: u64 = 2
+
+const B_KIND: u64 = 0
+const B_ID: u64 = 1
+const B_PKG: u64 = 2
+const B_RESULT: u64 = 3
+const B_CODE: u64 = 4
+const B_FIELDS: u64 = 5
+
+const NO_LOAD: u64 = 99
+
+static mut records: [u8; 6912] = [0 as u8; 6912]
+static mut meta: [u64; 96] = [0 as u64; 96]
+static mut dirs: [u8; 384] = [0 as u8; 384]
+static mut binds: [u64; 160] = [0 as u64; 160]
+static mut npkg: u64 = 0
+static mut nbind: u64 = 0
+static mut on: u64 = 0
+static mut inf_buf: [u8; 1600] = [0 as u8; 1600]
+static mut sig_buf: [u8; 72] = [0 as u8; 72]
+static mut deny_buf: [u8; 1032] = [0 as u8; 1032]
+static mut path_buf: [u8; 112] = [0 as u8; 112]
+static mut ent_buf: [u8; 64] = [0 as u8; 64]
+static mut n_bound: u64 = 0
+static mut n_failed: u64 = 0
+
+fn enabled() -> bool {
+    return on != 0
+}
+
+fn pkg_total() -> u64 {
+    return npkg
+}
+
+fn rec_at(i: u64) -> u64 {
+    return ((&records[0]) as u64) + i * drvinf.REC_BYTES
+}
+
+fn pkg_rec(i: u64) -> u64 {
+    return rec_at(i)
+}
+
+fn mf(i: u64, f: u64) -> u64 {
+    return meta[(i * M_FIELDS + f) as usize]
+}
+
+fn mset(i: u64, f: u64, v: u64) {
+    meta[(i * M_FIELDS + f) as usize] = v
+}
+
+fn pkg_valid(i: u64) -> bool {
+    return i < npkg && mf(i, M_VALID) == 1
+}
+
+fn pkg_status(i: u64) -> u64 {
+    return mf(i, M_STATUS)
+}
+
+fn pkg_loaded(i: u64) -> bool {
+    return mf(i, M_LOADK) != NO_LOAD
+}
+
+fn pkg_bound(i: u64) -> u64 {
+    return mf(i, M_BOUND)
+}
+
+fn pkg_banned(i: u64) -> bool {
+    return mf(i, M_BANNED) != 0
+}
+
+fn pkg_dir(i: u64) -> u64 {
+    return ((&dirs[0]) as u64) + i * 24
+}
+
+fn pkg_name(i: u64) -> u64 {
+    if mf(i, M_VALID) == 1 {
+        return drvinf.rec_name(rec_at(i))
+    }
+    return pkg_dir(i)
+}
+
+fn pkg_version(i: u64) -> u64 {
+    return drvinf.rec_version(rec_at(i))
+}
+
+fn pkg_rank(i: u64) -> u64 {
+    return drvinf.rec_rank(rec_at(i))
+}
+
+fn pkg_nmatch(i: u64) -> u64 {
+    return drvinf.rec_nmatch(rec_at(i))
+}
+
+fn pkg_kind(i: u64, m: u64) -> u64 {
+    return drvinf.rec_kind(rec_at(i), m)
+}
+
+fn pkg_a(i: u64, m: u64) -> u64 {
+    return drvinf.rec_a(rec_at(i), m)
+}
+
+fn pkg_b(i: u64, m: u64) -> u64 {
+    return drvinf.rec_b(rec_at(i), m)
+}
+
+fn bind_total() -> u64 {
+    return nbind
+}
+
+fn bf(i: u64, f: u64) -> u64 {
+    return binds[(i * B_FIELDS + f) as usize]
+}
+
+fn bind_pkg(i: u64) -> u64 { return bf(i, B_PKG) }
+fn bind_id(i: u64) -> u64 { return bf(i, B_ID) }
+fn bind_result(i: u64) -> u64 { return bf(i, B_RESULT) }
+fn bind_code(i: u64) -> u64 { return bf(i, B_CODE) }
+
+fn bound_count() -> u64 { return n_bound }
+fn failed_count() -> u64 { return n_failed }
+
+fn find_bind(kind: u64, id: u64) -> u64 {
+    var i: u64 = 0
+    while i < nbind {
+        if bf(i, B_KIND) == kind && bf(i, B_ID) == id {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn add_bind(kind: u64, id: u64, pkg: u64, result: u64, code: u64) {
+    if nbind >= MAXBIND {
+        return
+    }
+    let i: u64 = nbind
+    binds[(i * B_FIELDS + B_KIND) as usize] = kind
+    binds[(i * B_FIELDS + B_ID) as usize] = id
+    binds[(i * B_FIELDS + B_PKG) as usize] = pkg
+    binds[(i * B_FIELDS + B_RESULT) as usize] = result
+    binds[(i * B_FIELDS + B_CODE) as usize] = code
+    nbind = nbind + 1
+    if result == BR_BOUND {
+        n_bound = n_bound + 1
+    } else {
+        n_failed = n_failed + 1
+    }
+}
+
+fn pkg_path(dir: u64, file: u64) {
+    var root: [u8; 14] = "/lib/drivers/\0"
+    var n: u64 = 0
+    var i: u64 = 0
+    while root[i as usize] != 0 as u8 {
+        path_buf[n as usize] = root[i as usize]
+        n = n + 1
+        i = i + 1
+    }
+    i = 0
+    while kstate.get8(dir + i) != 0 && n < 90 {
+        path_buf[n as usize] = kstate.get8(dir + i) as u8
+        n = n + 1
+        i = i + 1
+    }
+    path_buf[n as usize] = 47 as u8
+    n = n + 1
+    i = 0
+    while kstate.get8(file + i) != 0 && n < 108 {
+        path_buf[n as usize] = kstate.get8(file + i) as u8
+        n = n + 1
+        i = i + 1
+    }
+    path_buf[n as usize] = 0 as u8
+}
+
+fn read_all(state: u64, ino: u64, dst: u64, len: u64) -> bool {
+    var done: u64 = 0
+    while done < len {
+        var take: u64 = len - done
+        if take > 512 {
+            take = 512
+        }
+        if fs.read_at(state, ino, done, dst + done, take) != take {
+            return false
+        }
+        done = done + take
+    }
+    return true
+}
+
+fn load_pkg_files(state: u64, dir: u64) -> u64 {
+    var f_inf: [u8; 11] = "driver.inf\0"
+    var f_sig: [u8; 15] = "driver.inf.sig\0"
+    pkg_path(dir, (&f_inf[0]) as u64)
+    let ino: u64 = fs.path(state, (&path_buf[0]) as u64)
+    if ino == 0 {
+        return X_NOFILE
+    }
+    let size: u64 = fs.inode_size(state, ino)
+    if size == 0 || size > 1536 {
+        return drvinf.E_TOOBIG
+    }
+    if !read_all(state, ino, (&inf_buf[0]) as u64, size) {
+        return X_NOFILE
+    }
+    pkg_path(dir, (&f_sig[0]) as u64)
+    let sino: u64 = fs.path(state, (&path_buf[0]) as u64)
+    if sino == 0 || fs.inode_size(state, sino) != 64 {
+        return X_SIG
+    }
+    if !read_all(state, sino, (&sig_buf[0]) as u64, 64) {
+        return X_SIG
+    }
+    if !module.signatur_gilt(state, (&inf_buf[0]) as u64, size, (&sig_buf[0]) as u64) {
+        return X_SIG
+    }
+    return size
+}
+
+fn check_module_file(state: u64, rec: u64, dir: u64) -> bool {
+    pkg_path(dir, drvinf.rec_module(rec))
+    return fs.path(state, (&path_buf[0]) as u64) != 0
+}
+
+fn copy_dir(i: u64, src: u64) {
+    var k: u64 = 0
+    while k < 23 && kstate.get8(src + k) != 0 {
+        dirs[(i * 24 + k) as usize] = kstate.get8(src + k) as u8
+        k = k + 1
+    }
+    dirs[(i * 24 + k) as usize] = 0 as u8
+}
+
+fn scan_one(state: u64, name: u64) {
+    if npkg >= MAXPKG {
+        return
+    }
+    let i: u64 = npkg
+    npkg = npkg + 1
+    copy_dir(i, name)
+    mset(i, M_VALID, 0)
+    mset(i, M_LOADK, NO_LOAD)
+    mset(i, M_BOUND, 0)
+    mset(i, M_BANNED, 0)
+    mset(i, M_LOADRC, 0)
+    let size: u64 = load_pkg_files(state, name)
+    if size == X_NOFILE || size == X_SIG || size == drvinf.E_TOOBIG {
+        mset(i, M_STATUS, size)
+        return
+    }
+    let rec: u64 = rec_at(i)
+    let e: u64 = drvinf.parse((&inf_buf[0]) as u64, size, name, rec)
+    if e != drvinf.E_OK {
+        mset(i, M_STATUS, e)
+        return
+    }
+    if drvinf.rec_abi(rec) != ksym.ABI {
+        mset(i, M_STATUS, X_ABI)
+        return
+    }
+    if !check_module_file(state, rec, name) {
+        mset(i, M_STATUS, X_NOMODULE)
+        return
+    }
+    mset(i, M_VALID, 1)
+    mset(i, M_STATUS, ST_OK)
+}
+
+fn apply_deny(state: u64) {
+    var f_deny: [u8; 18] = "/etc/drivers.deny\0"
+    let ino: u64 = fs.path(state, (&f_deny[0]) as u64)
+    if ino == 0 {
+        return
+    }
+    var size: u64 = fs.inode_size(state, ino)
+    if size == 0 {
+        return
+    }
+    if size > 1024 {
+        size = 1024
+    }
+    if !read_all(state, ino, (&deny_buf[0]) as u64, size) {
+        return
+    }
+    deny_buf[size as usize] = 10 as u8
+    var at: u64 = 0
+    while at < size {
+        var end: u64 = at
+        while end < size && deny_buf[end as usize] != 10 as u8 {
+            end = end + 1
+        }
+        if end > at && end - at < 24 {
+            var nm: [u8; 24] = [0 as u8; 24]
+            var k: u64 = 0
+            while k < end - at {
+                nm[k as usize] = deny_buf[(at + k) as usize]
+                k = k + 1
+            }
+            var p: u64 = 0
+            while p < npkg {
+                if drvinf.text_eq(pkg_name(p), (&nm[0]) as u64) {
+                    mset(p, M_BANNED, 1)
+                }
+                p = p + 1
+            }
+        }
+        at = end + 1
+    }
+}
+
+fn scan(state: u64) {
+    var d: [u8; 13] = "/lib/drivers\0"
+    let dir: u64 = fs.path(state, (&d[0]) as u64)
+    if dir == 0 {
+        return
+    }
+    var i: u64 = 0
+    var going: bool = true
+    while going {
+        let ino: u64 = fs.entry_at(state, dir, i, (&ent_buf[0]) as u64)
+        if ino == 0 {
+            going = false
+        } else {
+            scan_one(state, ((&ent_buf[0]) as u64) + 8)
+            i = i + 1
+        }
+    }
+    apply_deny(state)
+}
+
+fn pci_sub(state: u64, idx: u64) -> u64 {
+    if (pci.get(state, idx, pci.E_HDR) & 0x7F) != 0 {
+        return drvinf.NO_SUB
+    }
+    let v: u64 = pci.cfg_read32(pci.get(state, idx, pci.E_BDF), 0x2C)
+    return ((v & 0xFFFF) << 16) | ((v >> 16) & 0xFFFF)
+}
+
+fn match_score(state: u64, rec: u64, m: u64, idx: u64) -> u64 {
+    let k: u64 = drvinf.rec_kind(rec, m)
+    let a: u64 = drvinf.rec_a(rec, m)
+    let b: u64 = drvinf.rec_b(rec, m)
+    if k == drvinf.K_PCI {
+        let have: u64 = (pci.get(state, idx, pci.E_VENDOR) << 16) | pci.get(state, idx, pci.E_DEVICE)
+        if have != a {
+            return 0
+        }
+        if b != drvinf.NO_SUB && b != pci_sub(state, idx) {
+            return 0
+        }
+        return drvinf.spec_of(rec, m)
+    }
+    if k == drvinf.K_PCICLASS {
+        let cls: u64 = (pci.get(state, idx, pci.E_CLASS) << 8) | pci.get(state, idx, pci.E_SUBCLASS)
+        if cls != a {
+            return 0
+        }
+        if b != drvinf.NO_PROG && b != pci.get(state, idx, pci.E_PROGIF) {
+            return 0
+        }
+        return drvinf.spec_of(rec, m)
+    }
+    return 0
+}
+
+fn better(spec: u64, rank: u64, ver: u64, bspec: u64, brank: u64, bver: u64) -> bool {
+    if spec != bspec {
+        return spec > bspec
+    }
+    if rank != brank {
+        return rank > brank
+    }
+    return ver > bver
+}
+
+fn best_pci(state: u64, idx: u64) -> u64 {
+    var best: u64 = NONE
+    var bspec: u64 = 0
+    var brank: u64 = 0
+    var bver: u64 = 0
+    var p: u64 = 0
+    while p < npkg {
+        if mf(p, M_VALID) == 1 && mf(p, M_BANNED) == 0 {
+            let rec: u64 = rec_at(p)
+            var m: u64 = 0
+            var top: u64 = 0
+            while m < drvinf.rec_nmatch(rec) {
+                let s: u64 = match_score(state, rec, m, idx)
+                if s > top {
+                    top = s
+                }
+                m = m + 1
+            }
+            if top > 0 && (best == NONE || better(top, drvinf.rec_rank(rec), drvinf.rec_version(rec), bspec, brank, bver)) {
+                best = p
+                bspec = top
+                brank = drvinf.rec_rank(rec)
+                bver = drvinf.rec_version(rec)
+            }
+        }
+        p = p + 1
+    }
+    return best
+}
+
+fn best_simple(kind: u64, a: u64) -> u64 {
+    var best: u64 = NONE
+    var brank: u64 = 0
+    var bver: u64 = 0
+    var p: u64 = 0
+    while p < npkg {
+        if mf(p, M_VALID) == 1 && mf(p, M_BANNED) == 0 {
+            let rec: u64 = rec_at(p)
+            var m: u64 = 0
+            var hit: bool = false
+            while m < drvinf.rec_nmatch(rec) {
+                if drvinf.rec_kind(rec, m) == kind && drvinf.rec_a(rec, m) == a {
+                    hit = true
+                }
+                m = m + 1
+            }
+            if hit && (best == NONE || better(4, drvinf.rec_rank(rec), drvinf.rec_version(rec), 4, brank, bver)) {
+                best = p
+                brank = drvinf.rec_rank(rec)
+                bver = drvinf.rec_version(rec)
+            }
+        }
+        p = p + 1
+    }
+    return best
+}
+
+fn best_usb(vid: u64, pid: u64) -> u64 {
+    return best_simple(drvinf.K_USB, (vid << 16) | pid)
+}
+
+fn best_acpi(packed: u64) -> u64 {
+    return best_simple(drvinf.K_ACPI, packed)
+}
+
+fn write_ctx(state: u64, idx: u64) {
+    let c: u64 = state + kstate.MODUL_OFF + CTX_OFF
+    kstate.set(c, 0, 1)
+    kstate.set(c, 8, 1)
+    kstate.set(c, 16, pci.get(state, idx, pci.E_VENDOR))
+    kstate.set(c, 24, pci.get(state, idx, pci.E_DEVICE))
+    kstate.set(c, 32, pci_sub(state, idx))
+    kstate.set(c, 40, (pci.get(state, idx, pci.E_CLASS) << 8) | pci.get(state, idx, pci.E_SUBCLASS))
+    kstate.set(c, 48, pci.get(state, idx, pci.E_PROGIF))
+    kstate.set(c, 56, pci.get(state, idx, pci.E_BDF))
+    kstate.set(c, 64, pci.bar(state, idx, 0))
+    kstate.set(c, 72, pci.get(state, idx, pci.E_IRQLINE))
+    kstate.set(c, 80, idx)
+}
+
+fn bind_pci(state: u64, p: u64, idx: u64) {
+    var s_pre: [u8; 16] = "drvstore: bind \0"
+    var s_arrow: [u8; 5] = " -> \0"
+    var s_ok: [u8; 3] = "ok\0"
+    var s_fail: [u8; 7] = "fail: \0"
+    let bdf: u64 = pci.get(state, idx, pci.E_BDF)
+    if (drvinf.rec_rights(rec_at(p)) & 2) != 0 {
+        pci.cfg_write16(bdf, 4, pci.cfg_read16(bdf, 4) | 2)
+    }
+    write_ctx(state, idx)
+    var rc: u64 = 0
+    var res: u64 = BR_BOUND
+    let k: u64 = mf(p, M_LOADK)
+    if k == NO_LOAD {
+        pkg_path(pkg_dir(p), drvinf.rec_module(rec_at(p)))
+        var slot: u64 = modidx.MAX_SLOT
+        if drvinf.rec_slot(rec_at(p)) == 1 {
+            slot = modidx.SLOT_MOUSE
+        }
+        rc = module.load(state, (&path_buf[0]) as u64, slot)
+        if rc == module.R_OK {
+            mset(p, M_LOADK, module.last_placed(state))
+        } else {
+            res = BR_FAILED
+            mset(p, M_LOADRC, rc)
+        }
+    } else {
+        rc = module.ruf1(module.entry_of(state, k), state)
+        if rc != 0 {
+            res = BR_FAILED
+        }
+    }
+    serial.puts((&s_pre[0]) as u64)
+    serial.puts(pkg_name(p))
+    serial.puts((&s_arrow[0]) as u64)
+    pci.hexn(pci.bdf_bus(bdf), 2)
+    serial.put(58 as u8)
+    pci.hexn(pci.bdf_dev(bdf), 2)
+    serial.put(46 as u8)
+    pci.hexn(pci.bdf_fn(bdf), 1)
+    serial.put(32 as u8)
+    pci.hexn(pci.get(state, idx, pci.E_VENDOR), 4)
+    serial.put(58 as u8)
+    pci.hexn(pci.get(state, idx, pci.E_DEVICE), 4)
+    serial.put(32 as u8)
+    if res == BR_BOUND {
+        serial.puts((&s_ok[0]) as u64)
+        mset(p, M_BOUND, mf(p, M_BOUND) + 1)
+    } else {
+        serial.puts((&s_fail[0]) as u64)
+        if mf(p, M_LOADK) == NO_LOAD {
+            module.say_reason(rc)
+        } else {
+            serial.dec(rc)
+        }
+    }
+    serial.nl()
+    add_bind(1, idx, p, res, rc)
+}
+
+fn bind_all(state: u64) {
+    var i: u64 = 0
+    let total: u64 = pci.count(state)
+    while i < total {
+        if !drvreg.claimed(state, i) {
+            let p: u64 = best_pci(state, i)
+            if p != NONE {
+                bind_pci(state, p, i)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn report(state: u64) {
+    var s_head: [u8; 16] = "drvstore: pkgs=\0"
+    var s_valid: [u8; 8] = " valid=\0"
+    var s_pkg: [u8; 15] = "drvstore: pkg \0"
+    var s_ok: [u8; 3] = "ok\0"
+    var s_bad: [u8; 10] = "rejected \0"
+    var s_ban: [u8; 8] = " banned\0"
+    var s_sum: [u8; 17] = "drvstore: bound=\0"
+    var s_fl: [u8; 9] = " failed=\0"
+    var valid: u64 = 0
+    var p: u64 = 0
+    while p < npkg {
+        if mf(p, M_VALID) == 1 {
+            valid = valid + 1
+        }
+        p = p + 1
+    }
+    serial.puts((&s_head[0]) as u64)
+    serial.dec(npkg)
+    serial.puts((&s_valid[0]) as u64)
+    serial.dec(valid)
+    serial.nl()
+    p = 0
+    while p < npkg {
+        serial.puts((&s_pkg[0]) as u64)
+        serial.puts(pkg_name(p))
+        serial.put(32 as u8)
+        if mf(p, M_VALID) == 1 {
+            serial.puts((&s_ok[0]) as u64)
+            if mf(p, M_BANNED) != 0 {
+                serial.puts((&s_ban[0]) as u64)
+            }
+        } else {
+            serial.puts((&s_bad[0]) as u64)
+            serial.dec(mf(p, M_STATUS))
+        }
+        serial.nl()
+        p = p + 1
+    }
+    serial.puts((&s_sum[0]) as u64)
+    serial.dec(n_bound)
+    serial.puts((&s_fl[0]) as u64)
+    serial.dec(n_failed)
+    serial.nl()
+}
+
+fn init(state: u64) {
+    on = 1
+    npkg = 0
+    nbind = 0
+    n_bound = 0
+    n_failed = 0
+    if !module.ready(state) {
+        module.init(state)
+    }
+    scan(state)
+    bind_all(state)
+    report(state)
+}

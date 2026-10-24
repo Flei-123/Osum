@@ -1,0 +1,508 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+
+export {
+    parse, rec_name, rec_module, rec_fwname, rec_fwhash, rec_version, rec_abi, rec_rank,
+    rec_slot, rec_nmatch, rec_hasfw, rec_rights, rec_kind, rec_a, rec_b, rec_c,
+    spec_of, pack_hid, text_eq,
+    REC_BYTES, MAXMATCH, K_PCI, K_PCICLASS, K_USB, K_ACPI, NO_SUB, NO_PROG,
+    E_OK, E_SYNTAX, E_KEY, E_DUP, E_NAME, E_NAMEDIR, E_NUM, E_MODULE, E_RIGHT, E_FW,
+    E_SLOT, E_MISSING, E_MATCH, E_NOMATCH, E_TOOMANY, E_TOOBIG
+}
+
+const REC_BYTES: u64 = 432
+const MAXMATCH: u64 = 8
+const MAX_INF: u64 = 1536
+
+const O_NAME: u64 = 0
+const O_MODULE: u64 = 24
+const O_FWNAME: u64 = 56
+const O_FWHASH: u64 = 88
+const O_VERSION: u64 = 120
+const O_ABI: u64 = 128
+const O_RANK: u64 = 136
+const O_SLOT: u64 = 144
+const O_NMATCH: u64 = 152
+const O_HASFW: u64 = 160
+const O_RIGHTS: u64 = 168
+const O_MATCH: u64 = 176
+const MATCH_BYTES: u64 = 32
+
+const K_PCI: u64 = 1
+const K_PCICLASS: u64 = 2
+const K_USB: u64 = 3
+const K_ACPI: u64 = 4
+const NO_SUB: u64 = 0x100000000
+const NO_PROG: u64 = 0x1FF
+
+const E_OK: u64 = 0
+const E_SYNTAX: u64 = 1
+const E_KEY: u64 = 2
+const E_DUP: u64 = 3
+const E_NAME: u64 = 4
+const E_NAMEDIR: u64 = 5
+const E_NUM: u64 = 6
+const E_MODULE: u64 = 7
+const E_RIGHT: u64 = 8
+const E_FW: u64 = 9
+const E_SLOT: u64 = 10
+const E_MISSING: u64 = 11
+const E_MATCH: u64 = 12
+const E_NOMATCH: u64 = 13
+const E_TOOMANY: u64 = 14
+const E_TOOBIG: u64 = 15
+
+const SEEN_NAME: u64 = 1
+const SEEN_VERSION: u64 = 2
+const SEEN_ABI: u64 = 4
+const SEEN_RANK: u64 = 8
+const SEEN_MODULE: u64 = 16
+const SEEN_RIGHTS: u64 = 32
+const SEEN_FW: u64 = 64
+const SEEN_SLOT: u64 = 128
+
+fn ld(p: u64) -> u64 {
+    return kstate.get(0, p)
+}
+
+fn st(p: u64, v: u64) {
+    kstate.set(0, p, v)
+}
+
+fn rec_name(rec: u64) -> u64 { return rec + O_NAME }
+fn rec_module(rec: u64) -> u64 { return rec + O_MODULE }
+fn rec_fwname(rec: u64) -> u64 { return rec + O_FWNAME }
+fn rec_fwhash(rec: u64) -> u64 { return rec + O_FWHASH }
+fn rec_version(rec: u64) -> u64 { return ld(rec + O_VERSION) }
+fn rec_abi(rec: u64) -> u64 { return ld(rec + O_ABI) }
+fn rec_rank(rec: u64) -> u64 { return ld(rec + O_RANK) }
+fn rec_slot(rec: u64) -> u64 { return ld(rec + O_SLOT) }
+fn rec_nmatch(rec: u64) -> u64 { return ld(rec + O_NMATCH) }
+fn rec_hasfw(rec: u64) -> u64 { return ld(rec + O_HASFW) }
+fn rec_rights(rec: u64) -> u64 { return ld(rec + O_RIGHTS) }
+fn rec_kind(rec: u64, i: u64) -> u64 { return ld(rec + O_MATCH + i * MATCH_BYTES) }
+fn rec_a(rec: u64, i: u64) -> u64 { return ld(rec + O_MATCH + i * MATCH_BYTES + 8) }
+fn rec_b(rec: u64, i: u64) -> u64 { return ld(rec + O_MATCH + i * MATCH_BYTES + 16) }
+fn rec_c(rec: u64, i: u64) -> u64 { return ld(rec + O_MATCH + i * MATCH_BYTES + 24) }
+
+fn text_eq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(a + i) == kstate.get8(b + i) {
+        if kstate.get8(a + i) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn is_lower(c: u64) -> bool { return c >= 97 && c <= 122 }
+fn is_digit(c: u64) -> bool { return c >= 48 && c <= 57 }
+fn is_upper(c: u64) -> bool { return c >= 65 && c <= 90 }
+
+fn hexval(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 16
+}
+
+fn hex_run(p: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let h: u64 = hexval(kstate.get8(p + i))
+        if h == 16 {
+            return NO_SUB
+        }
+        v = v * 16 + h
+        i = i + 1
+    }
+    return v
+}
+
+fn valid_name(p: u64, n: u64) -> bool {
+    if n == 0 || n > 23 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = kstate.get8(p + i)
+        let ok: bool = is_lower(c) || is_digit(c) || (i > 0 && (c == 95 || c == 45))
+        if !ok {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn valid_module(p: u64, n: u64) -> bool {
+    if n == 0 || n > 31 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = kstate.get8(p + i)
+        let alnum: bool = is_lower(c) || is_upper(c) || is_digit(c)
+        let ok: bool = alnum || (i > 0 && (c == 46 || c == 95 || c == 45))
+        if !ok {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn copy_text(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(dst + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(dst + n, 0 as u8)
+}
+
+fn key_is(p: u64, n: u64, lit: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(lit + i) != kstate.get8(p + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return kstate.get8(lit + n) == 0
+}
+
+fn parse_dec(p: u64, n: u64) -> u64 {
+    if n == 0 || n > 9 {
+        return NO_SUB
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = kstate.get8(p + i)
+        if !is_digit(c) {
+            return NO_SUB
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn pack_hid(p: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n && i < 8 {
+        v = v | (kstate.get8(p + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+fn right_bit(p: u64, n: u64) -> u64 {
+    var r0: [u8; 8] = "pci-cfg\0"
+    var r1: [u8; 5] = "mmio\0"
+    var r2: [u8; 4] = "irq\0"
+    var r3: [u8; 4] = "dma\0"
+    var r4: [u8; 3] = "fw\0"
+    var r5: [u8; 4] = "usb\0"
+    var r6: [u8; 5] = "acpi\0"
+    var r7: [u8; 12] = "mouse-slot\0\0"
+    if key_is(p, n, (&r0[0]) as u64) { return 1 }
+    if key_is(p, n, (&r1[0]) as u64) { return 2 }
+    if key_is(p, n, (&r2[0]) as u64) { return 4 }
+    if key_is(p, n, (&r3[0]) as u64) { return 8 }
+    if key_is(p, n, (&r4[0]) as u64) { return 16 }
+    if key_is(p, n, (&r5[0]) as u64) { return 32 }
+    if key_is(p, n, (&r6[0]) as u64) { return 64 }
+    if key_is(p, n, (&r7[0]) as u64) { return 128 }
+    return 0
+}
+
+fn parse_rights(p: u64, n: u64) -> u64 {
+    var mask: u64 = 0
+    var start: u64 = 0
+    var i: u64 = 0
+    while i <= n {
+        if i == n || kstate.get8(p + i) == 44 {
+            let b: u64 = right_bit(p + start, i - start)
+            if b == 0 {
+                return NO_SUB
+            }
+            mask = mask | b
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return mask
+}
+
+fn parse_fw(rec: u64, p: u64, n: u64) -> bool {
+    if n < 66 {
+        return false
+    }
+    let nl: u64 = n - 65
+    if nl > 31 || kstate.get8(p + nl) != 58 {
+        return false
+    }
+    var i: u64 = 0
+    while i < nl {
+        let c: u64 = kstate.get8(p + i)
+        let ok: bool = is_lower(c) || is_upper(c) || is_digit(c) || c == 46 || c == 95 || c == 45
+        if !ok {
+            return false
+        }
+        i = i + 1
+    }
+    var k: u64 = 0
+    while k < 32 {
+        let hi: u64 = hexval(kstate.get8(p + nl + 1 + k * 2))
+        let lo: u64 = hexval(kstate.get8(p + nl + 2 + k * 2))
+        if hi > 15 || lo > 15 {
+            return false
+        }
+        kstate.set8(rec + O_FWHASH + k, (hi * 16 + lo) as u8)
+        k = k + 1
+    }
+    copy_text(rec + O_FWNAME, p, nl)
+    return true
+}
+
+fn parse_match(rec: u64, idx: u64, p: u64, n: u64) -> bool {
+    var m0: [u8; 4] = "pci\0"
+    var m1: [u8; 9] = "pciclass\0"
+    var m2: [u8; 4] = "usb\0"
+    var m3: [u8; 5] = "acpi\0"
+    var sp: u64 = 0
+    while sp < n && kstate.get8(p + sp) != 32 {
+        sp = sp + 1
+    }
+    if sp >= n {
+        return false
+    }
+    let v: u64 = p + sp + 1
+    let vn: u64 = n - sp - 1
+    let at: u64 = rec + O_MATCH + idx * MATCH_BYTES
+    if key_is(p, sp, (&m0[0]) as u64) {
+        if vn != 9 && vn != 19 {
+            return false
+        }
+        if kstate.get8(v + 4) != 58 {
+            return false
+        }
+        let ven: u64 = hex_run(v, 4)
+        let dev: u64 = hex_run(v + 5, 4)
+        if ven == NO_SUB || dev == NO_SUB {
+            return false
+        }
+        var sub: u64 = NO_SUB
+        if vn == 19 {
+            if kstate.get8(v + 9) != 58 || kstate.get8(v + 14) != 58 {
+                return false
+            }
+            let sv: u64 = hex_run(v + 10, 4)
+            let sd: u64 = hex_run(v + 15, 4)
+            if sv == NO_SUB || sd == NO_SUB {
+                return false
+            }
+            sub = (sv << 16) | sd
+        }
+        st(at, K_PCI)
+        st(at + 8, (ven << 16) | dev)
+        st(at + 16, sub)
+        st(at + 24, 0)
+        return true
+    }
+    if key_is(p, sp, (&m1[0]) as u64) {
+        if vn != 4 && vn != 7 {
+            return false
+        }
+        let cls: u64 = hex_run(v, 4)
+        if cls == NO_SUB {
+            return false
+        }
+        var prog: u64 = NO_PROG
+        if vn == 7 {
+            if kstate.get8(v + 4) != 58 {
+                return false
+            }
+            prog = hex_run(v + 5, 2)
+            if prog == NO_SUB {
+                return false
+            }
+        }
+        st(at, K_PCICLASS)
+        st(at + 8, cls)
+        st(at + 16, prog)
+        st(at + 24, 0)
+        return true
+    }
+    if key_is(p, sp, (&m2[0]) as u64) {
+        if vn != 9 || kstate.get8(v + 4) != 58 {
+            return false
+        }
+        let vid: u64 = hex_run(v, 4)
+        let pid: u64 = hex_run(v + 5, 4)
+        if vid == NO_SUB || pid == NO_SUB {
+            return false
+        }
+        st(at, K_USB)
+        st(at + 8, (vid << 16) | pid)
+        st(at + 16, 0)
+        st(at + 24, 0)
+        return true
+    }
+    if key_is(p, sp, (&m3[0]) as u64) {
+        if vn < 3 || vn > 8 {
+            return false
+        }
+        var i: u64 = 0
+        while i < vn {
+            let c: u64 = kstate.get8(v + i)
+            if !(is_upper(c) || is_digit(c)) {
+                return false
+            }
+            i = i + 1
+        }
+        st(at, K_ACPI)
+        st(at + 8, pack_hid(v, vn))
+        st(at + 16, 0)
+        st(at + 24, 0)
+        return true
+    }
+    return false
+}
+
+fn spec_of(rec: u64, i: u64) -> u64 {
+    let k: u64 = rec_kind(rec, i)
+    if k == K_PCI {
+        if rec_b(rec, i) != NO_SUB {
+            return 5
+        }
+        return 4
+    }
+    if k == K_PCICLASS {
+        if rec_b(rec, i) != NO_PROG {
+            return 3
+        }
+        return 2
+    }
+    return 4
+}
+
+fn parse(buf: u64, len: u64, dirname: u64, rec: u64) -> u64 {
+    var k0: [u8; 5] = "name\0"
+    var k1: [u8; 8] = "version\0"
+    var k2: [u8; 4] = "abi\0"
+    var k3: [u8; 5] = "rank\0"
+    var k4: [u8; 7] = "module\0"
+    var k5: [u8; 7] = "rights\0"
+    var k6: [u8; 3] = "fw\0"
+    var k7: [u8; 5] = "slot\0"
+    var k8: [u8; 6] = "match\0"
+    var s_mouse: [u8; 6] = "mouse\0"
+    var i: u64 = 0
+    while i < REC_BYTES {
+        kstate.set8(rec + i, 0 as u8)
+        i = i + 1
+    }
+    if len > MAX_INF {
+        return E_TOOBIG
+    }
+    var seen: u64 = 0
+    var at: u64 = 0
+    while at < len {
+        var end: u64 = at
+        while end < len && kstate.get8(buf + end) != 10 {
+            end = end + 1
+        }
+        let n: u64 = end - at
+        let p: u64 = buf + at
+        if n > 0 && kstate.get8(p) != 35 {
+            var eq: u64 = 0
+            while eq < n && kstate.get8(p + eq) != 61 {
+                eq = eq + 1
+            }
+            if eq >= n {
+                return E_SYNTAX
+            }
+            let vp: u64 = p + eq + 1
+            let vn: u64 = n - eq - 1
+            if key_is(p, eq, (&k8[0]) as u64) {
+                let cnt: u64 = ld(rec + O_NMATCH)
+                if cnt >= MAXMATCH {
+                    return E_TOOMANY
+                }
+                if !parse_match(rec, cnt, vp, vn) {
+                    return E_MATCH
+                }
+                st(rec + O_NMATCH, cnt + 1)
+            } else if key_is(p, eq, (&k0[0]) as u64) {
+                if (seen & SEEN_NAME) != 0 { return E_DUP }
+                seen = seen | SEEN_NAME
+                if !valid_name(vp, vn) { return E_NAME }
+                copy_text(rec + O_NAME, vp, vn)
+                if !key_is(vp, vn, dirname) { return E_NAMEDIR }
+            } else if key_is(p, eq, (&k1[0]) as u64) {
+                if (seen & SEEN_VERSION) != 0 { return E_DUP }
+                seen = seen | SEEN_VERSION
+                let v: u64 = parse_dec(vp, vn)
+                if v == NO_SUB { return E_NUM }
+                st(rec + O_VERSION, v)
+            } else if key_is(p, eq, (&k2[0]) as u64) {
+                if (seen & SEEN_ABI) != 0 { return E_DUP }
+                seen = seen | SEEN_ABI
+                let v: u64 = parse_dec(vp, vn)
+                if v == NO_SUB { return E_NUM }
+                st(rec + O_ABI, v)
+            } else if key_is(p, eq, (&k3[0]) as u64) {
+                if (seen & SEEN_RANK) != 0 { return E_DUP }
+                seen = seen | SEEN_RANK
+                let v: u64 = parse_dec(vp, vn)
+                if v == NO_SUB || v > 255 { return E_NUM }
+                st(rec + O_RANK, v)
+            } else if key_is(p, eq, (&k4[0]) as u64) {
+                if (seen & SEEN_MODULE) != 0 { return E_DUP }
+                seen = seen | SEEN_MODULE
+                if !valid_module(vp, vn) { return E_MODULE }
+                copy_text(rec + O_MODULE, vp, vn)
+            } else if key_is(p, eq, (&k5[0]) as u64) {
+                if (seen & SEEN_RIGHTS) != 0 { return E_DUP }
+                seen = seen | SEEN_RIGHTS
+                let mask: u64 = parse_rights(vp, vn)
+                if mask == NO_SUB { return E_RIGHT }
+                st(rec + O_RIGHTS, mask)
+            } else if key_is(p, eq, (&k6[0]) as u64) {
+                if (seen & SEEN_FW) != 0 { return E_DUP }
+                seen = seen | SEEN_FW
+                if !parse_fw(rec, vp, vn) { return E_FW }
+                st(rec + O_HASFW, 1)
+            } else if key_is(p, eq, (&k7[0]) as u64) {
+                if (seen & SEEN_SLOT) != 0 { return E_DUP }
+                seen = seen | SEEN_SLOT
+                if !key_is(vp, vn, (&s_mouse[0]) as u64) { return E_SLOT }
+                st(rec + O_SLOT, 1)
+            } else {
+                return E_KEY
+            }
+        }
+        at = end + 1
+    }
+    if (seen & (SEEN_NAME | SEEN_VERSION | SEEN_ABI | SEEN_MODULE)) != (SEEN_NAME | SEEN_VERSION | SEEN_ABI | SEEN_MODULE) {
+        return E_MISSING
+    }
+    if ld(rec + O_NMATCH) == 0 {
+        return E_NOMATCH
+    }
+    return E_OK
+}
