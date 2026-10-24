@@ -187,7 +187,7 @@ else
     echo "  (no pinned WLAN_8265_FW: real-blob runs skipped)"
 fi
 
-printf 'echo ==START==\ncat /proc/wlan\necho ==END==\n' > "$T/s2.sh"
+printf 'echo ==START==\ncat /proc/wlan\ncat /proc/wlanpoll\necho ==END==\n' > "$T/s2.sh"
 echo "-- L: INIT stage over the command queue (NVM, PHY_CFG, calibration, INIT_COMPLETE), RT replay, /proc/wlan"
 python3 tools/osum/mkfs.py build "$T/twoc.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
     /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" "/t/s.sh=$T/s2.sh" "$FWPATH=$T/blobs/two.bin" > "$T/twoc.mkfs" 2>&1 || bad "image twoc"
