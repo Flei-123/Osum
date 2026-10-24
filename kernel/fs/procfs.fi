@@ -69,6 +69,7 @@ import lib.brand
 import fs.mnt
 import fs.vfsops
 import sched.sched
+import net.wlan_auto
 import sched.proc
 import sched.origin
 import fs.file
@@ -1787,7 +1788,7 @@ fn make_usb(state: u64) -> u64 {
 //   "00:14.3 8086:a0f0 hw_rev=0x00000351 rf_id=0x0010a110 mac=QuZ rf=HR"
 //   "00:14.3 8086:a0f0 err=dead"      (device did not answer)
 //   "none"                            (no such device on the bus)
-fn make_wlan(state: u64) -> u64 {
+fn make_wlan_devices(state: u64) -> u64 {
     var l_none: [u8; 5] = "none\0"
     var l_hw: [u8; 12] = " hw_rev=0x\0\0"
     var l_rf: [u8; 10] = " rf_id=0x\0"
@@ -1850,6 +1851,69 @@ fn make_wlan(state: u64) -> u64 {
     while di < dn {
         p = w_ch(state, p, dg[di as usize] as u64)
         di = di + 1
+    }
+    return p
+}
+
+fn w_ip(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = w_num(state, at, (v >> 24) & 255)
+    p = w_ch(state, p, 46)
+    p = w_num(state, p, (v >> 16) & 255)
+    p = w_ch(state, p, 46)
+    p = w_num(state, p, (v >> 8) & 255)
+    p = w_ch(state, p, 46)
+    return w_num(state, p, v & 255)
+}
+
+// /proc/wlan, autostart part (net/wlan_auto.fi), appended after the device lines:
+//   "wlan: waiting for driver"                   (no transport bound yet)
+//   "auto=retry rc=-111 tries=3 driver=bound"
+//   "ip=192.168.0.50 mask=255.255.255.0 gw=192.168.0.1"    (only when up)
+fn make_wlan(state: u64) -> u64 {
+    var l_wait: [u8; 25] = "wlan: waiting for driver\0"
+    var l_auto: [u8; 6] = "auto=\0"
+    var l_rc: [u8; 5] = " rc=\0"
+    var l_tr: [u8; 8] = " tries=\0"
+    var l_drv: [u8; 9] = " driver=\0"
+    var l_bound: [u8; 6] = "bound\0"
+    var l_waiting: [u8; 8] = "waiting\0"
+    var l_ip: [u8; 4] = "ip=\0"
+    var l_mask: [u8; 7] = " mask=\0"
+    var l_gw: [u8; 5] = " gw=\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    var p: u64 = make_wlan_devices(state)
+    if !wlan_auto.driver_ready() {
+        p = w_str(state, p, (&l_wait[0]) as u64)
+        p = w_nl(state, p)
+    }
+    let _n: usize = wlan_auto.name_copy((&nm[0]) as u64)
+    p = w_str(state, p, (&l_auto[0]) as u64)
+    p = w_str(state, p, (&nm[0]) as u64)
+    p = w_str(state, p, (&l_rc[0]) as u64)
+    let rc: i64 = wlan_auto.rc_get()
+    if rc < 0 {
+        p = w_ch(state, p, 45)
+        p = w_num(state, p, (0 - rc) as u64)
+    } else {
+        p = w_num(state, p, rc as u64)
+    }
+    p = w_str(state, p, (&l_tr[0]) as u64)
+    p = w_num(state, p, wlan_auto.tries_get())
+    p = w_str(state, p, (&l_drv[0]) as u64)
+    if wlan_auto.driver_ready() {
+        p = w_str(state, p, (&l_bound[0]) as u64)
+    } else {
+        p = w_str(state, p, (&l_waiting[0]) as u64)
+    }
+    p = w_nl(state, p)
+    if wlan_auto.lease_ip() != 0 {
+        p = w_str(state, p, (&l_ip[0]) as u64)
+        p = w_ip(state, p, wlan_auto.lease_ip())
+        p = w_str(state, p, (&l_mask[0]) as u64)
+        p = w_ip(state, p, wlan_auto.lease_mask())
+        p = w_str(state, p, (&l_gw[0]) as u64)
+        p = w_ip(state, p, wlan_auto.lease_gateway())
+        p = w_nl(state, p)
     }
     return p
 }

@@ -1,0 +1,194 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import mm.mem
+import sched.sched
+import fs.vfs
+import wlan.device
+import wlan.connect
+import wlan.iwl_ops
+import wlan.join
+import wlan.dhcp_link
+import wlan.autojoin
+
+export {
+    start, task_body, bind, unbind, driver_ready, state_code, rc_get, tries_get, name_copy,
+    lease_ip, lease_mask, lease_gateway, driver_bound, STATE_NONE
+}
+
+const STATE_NONE: u64 = 0xFFFF
+const CONF_MAX: u64 = 512
+const OBJ_PAGES: u64 = 8
+const POLL_TICKS: u64 = 100
+const UP_TICKS: u64 = 500
+const TICKS_PER_SEC: u64 = 100
+const XID_BASE: u64 = 0x57A10000
+
+static mut wa_obj: u64 = 0
+static mut wa_task: u64 = 0
+static mut wa_dev: u64 = 0
+static mut wa_mvm: u64 = 0
+static mut wa_bound: u64 = 0
+static mut wa_xid: u64 = 0
+static mut wa_conf: [u8; 520] = [0 as u8; 520]
+static mut wa_path: [u8; 15] = "/etc/wlan.conf\0"
+
+fn auto_of() -> *mut autojoin.Auto { return (wa_obj) as *mut autojoin.Auto }
+fn join_of() -> *mut join.Join { return (wa_obj + 2 * 4096) as *mut join.Join }
+fn session_of() -> *mut connect.Session { return (wa_obj + 6 * 4096) as *mut connect.Session }
+
+fn alloc_objects(state: u64) -> bool {
+    if wa_obj != 0 { return true }
+    let a: u64 = mem.frame_run(state, OBJ_PAGES)
+    if a == 0 { return false }
+    var i: u64 = 0
+    while i < OBJ_PAGES * 4096 {
+        let q: *mut u64 = (a + i) as *mut u64
+        *q = 0
+        i = i + 8
+    }
+    wa_obj = a
+    *auto_of() = autojoin.auto_new()
+    return true
+}
+
+fn bind(g: u64, o: u64) {
+    wa_dev = g
+    wa_mvm = o
+    wa_bound = 1
+}
+
+fn unbind() {
+    wa_bound = 0
+    wa_dev = 0
+    wa_mvm = 0
+}
+
+fn driver_bound() -> bool { return wa_bound != 0 }
+fn driver_ready() -> bool { return wa_bound != 0 && wa_dev != 0 && wa_mvm != 0 }
+
+fn state_code() -> u64 {
+    if wa_obj == 0 { return STATE_NONE }
+    return autojoin.auto_state(auto_of())
+}
+
+fn rc_get() -> i64 {
+    if wa_obj == 0 { return 0 }
+    return autojoin.auto_rc(auto_of())
+}
+
+fn tries_get() -> u64 {
+    if wa_obj == 0 { return 0 }
+    return autojoin.auto_tries(auto_of())
+}
+
+fn name_copy(dst: u64) -> usize {
+    var code: u64 = state_code()
+    if code == STATE_NONE { code = autojoin.AS_WAIT_DRIVER }
+    return autojoin.auto_name(code, dst)
+}
+
+fn lease_ip() -> u64 {
+    if wa_obj == 0 || !autojoin.auto_up(auto_of()) { return 0 }
+    return (*autojoin.auto_lease(auto_of())).ip
+}
+
+fn lease_mask() -> u64 {
+    if wa_obj == 0 || !autojoin.auto_up(auto_of()) { return 0 }
+    return (*autojoin.auto_lease(auto_of())).mask
+}
+
+fn lease_gateway() -> u64 {
+    if wa_obj == 0 || !autojoin.auto_up(auto_of()) { return 0 }
+    return (*autojoin.auto_lease(auto_of())).gateway
+}
+
+fn conf_read(state: u64) -> u64 {
+    let m: u64 = vfs.mount_for(state, (&wa_path[0]) as u64)
+    if m >= vfs.MAX_MNT { return 0 }
+    let node: u64 = vfs.node_for(state, m, (&wa_path[0]) as u64)
+    if node == 0 { return 0 }
+    let n: u64 = vfs.v_read(state, m, node, 0, (&wa_conf[0]) as u64, CONF_MAX)
+    if n > CONF_MAX { return 0 }
+    return n
+}
+
+fn conf_wipe() {
+    var i: u64 = 0
+    while i < 520 {
+        wa_conf[i as usize] = 0 as u8
+        i = i + 1
+    }
+}
+
+fn idle_yield(ctx: u64) -> u64 {
+    sched.yield_now(ctx)
+    return 0
+}
+
+fn now_sec(state: u64) -> u64 {
+    return kstate.get(state, kstate.TICKS) / TICKS_PER_SEC
+}
+
+fn log_state(rc: i64) {
+    var nm: [u8; 24] = [0 as u8; 24]
+    var s_a: [u8; 12] = "wlan: auto \0"
+    var s_r: [u8; 5] = " rc \0"
+    var s_t: [u8; 8] = " tries \0"
+    let _n: usize = name_copy((&nm[0]) as u64)
+    serial.puts((&s_a[0]) as u64)
+    serial.puts((&nm[0]) as u64)
+    serial.puts((&s_r[0]) as u64)
+    if rc < 0 {
+        serial.put(45 as u8)
+        serial.dec((0 - rc) as u64)
+    } else {
+        serial.dec(rc as u64)
+    }
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(tries_get())
+    serial.nl()
+}
+
+fn attempt(state: u64) {
+    let n: u64 = conf_read(state)
+    *join_of() = join.join_new()
+    *session_of() = connect.session_new()
+    wa_xid = wa_xid + 1
+    let rc: i64 = autojoin.auto_attempt(auto_of(), (&wa_conf[0]) as u64, n as usize, join_of(), session_of(),
+        (wa_dev) as *mut device.Device, (wa_mvm) as *mut iwl_ops.Mvm, idle_yield, state,
+        XID_BASE + wa_xid, now_sec(state))
+    conf_wipe()
+    log_state(rc)
+}
+
+fn task_body(state: u64, index: u64) {
+    while true {
+        if !alloc_objects(state) {
+            sched.sleep_ticks(state, UP_TICKS)
+        } else if !driver_ready() {
+            if autojoin.auto_state(auto_of()) != autojoin.AS_WAIT_DRIVER {
+                autojoin.auto_driver_wait(auto_of())
+            }
+            sched.sleep_ticks(state, POLL_TICKS)
+        } else if autojoin.auto_up(auto_of()) {
+            sched.sleep_ticks(state, UP_TICKS)
+        } else if autojoin.auto_due(auto_of(), now_sec(state)) {
+            attempt(state)
+            sched.sleep_ticks(state, 1)
+        } else {
+            sched.sleep_ticks(state, POLL_TICKS)
+        }
+    }
+}
+
+fn start(state: u64) -> u64 {
+    if wa_task != 0 { return wa_task }
+    let t: u64 = sched.create(state, sched.K_WLAN, 1, 0, 0)
+    if t == 0 { return 0 }
+    sched.start(state, t)
+    wa_task = t
+    return t
+}

@@ -1,0 +1,132 @@
+import wlan.device
+import wlan.connect
+import wlan.iwl_ops
+import wlan.join
+import wlan.dhcp_link
+import wlan.wlanconf
+
+export {
+    Auto, auto_new, auto_attempt, auto_due, auto_state, auto_rc, auto_tries, auto_wait_until,
+    auto_driver_wait, auto_lease, auto_conf, auto_name, auto_up,
+    AS_WAIT_DRIVER, AS_NO_CONF, AS_BAD_CONF, AS_JOINING, AS_DHCP, AS_UP, AS_RETRY,
+    BACKOFF_MIN, BACKOFF_MAX
+}
+
+const AS_WAIT_DRIVER: u64 = 0
+const AS_NO_CONF: u64 = 1
+const AS_BAD_CONF: u64 = 2
+const AS_JOINING: u64 = 3
+const AS_DHCP: u64 = 4
+const AS_UP: u64 = 5
+const AS_RETRY: u64 = 6
+
+const BACKOFF_MIN: u64 = 2
+const BACKOFF_MAX: u64 = 64
+
+struct Auto {
+    state: u64,
+    last_rc: i64,
+    tries: u64,
+    wait_until: u64,
+    step: u64,
+    lease: dhcp_link.Lease,
+    conf: wlanconf.Conf
+}
+
+fn auto_new() -> Auto {
+    var a: Auto = Auto {
+        state: AS_WAIT_DRIVER, last_rc: 0, tries: 0, wait_until: 0, step: 0,
+        lease: dhcp_link.lease_new(), conf: wlanconf.conf_new()
+    }
+    return a
+}
+
+fn auto_state(a: *mut Auto) -> u64 { return (*a).state }
+fn auto_rc(a: *mut Auto) -> i64 { return (*a).last_rc }
+fn auto_tries(a: *mut Auto) -> u64 { return (*a).tries }
+fn auto_wait_until(a: *mut Auto) -> u64 { return (*a).wait_until }
+fn auto_up(a: *mut Auto) -> bool { return (*a).state == AS_UP }
+fn auto_lease(a: *mut Auto) -> *mut dhcp_link.Lease { return &(*a).lease }
+fn auto_conf(a: *mut Auto) -> *mut wlanconf.Conf { return &(*a).conf }
+
+fn auto_due(a: *mut Auto, now: u64) -> bool { return now >= (*a).wait_until }
+
+fn auto_driver_wait(a: *mut Auto) {
+    (*a).state = AS_WAIT_DRIVER
+    (*a).step = 0
+    (*a).wait_until = 0
+}
+
+fn backoff(a: *mut Auto, now: u64) {
+    var s: u64 = (*a).step
+    if s == 0 { s = BACKOFF_MIN } else { s = s * 2 }
+    if s > BACKOFF_MAX { s = BACKOFF_MAX }
+    (*a).step = s
+    (*a).wait_until = now + s
+}
+
+fn fail(a: *mut Auto, state: u64, rc: i64, now: u64) -> i64 {
+    (*a).state = state
+    (*a).last_rc = rc
+    backoff(a, now)
+    return rc
+}
+
+#[allow_escape]
+fn auto_attempt(a: *mut Auto, buf: u64, len: usize, j: *mut join.Join, s: *mut connect.Session,
+    g: *mut device.Device, o: *mut iwl_ops.Mvm, idle: fn(u64) -> u64, idle_ctx: u64,
+    xid: u64, now: u64) -> i64 {
+    (*a).tries = (*a).tries + 1
+    let pr: i64 = wlanconf.conf_parse(buf, len, &(*a).conf)
+    if pr != 0 {
+        wlanconf.conf_clear(&(*a).conf)
+        if pr == wlanconf.E_CONF_EMPTY { return fail(a, AS_NO_CONF, pr, now) }
+        return fail(a, AS_BAD_CONF, pr, now)
+    }
+    let kr: i64 = wlanconf.conf_pmk(&(*a).conf)
+    if kr != 0 || !wlanconf.conf_apply(&(*a).conf, j) {
+        wlanconf.conf_clear(&(*a).conf)
+        return fail(a, AS_BAD_CONF, wlanconf.E_CONF_PMK, now)
+    }
+    wlanconf.conf_clear(&(*a).conf)
+    (*a).state = AS_JOINING
+    join.join_idle_set(j, idle_ctx, idle)
+    let jr: i64 = join.join_run(j, s, g, o)
+    if jr != 0 { return fail(a, AS_RETRY, jr, now) }
+    (*a).state = AS_DHCP
+    (*a).lease = dhcp_link.lease_new()
+    let dr: i64 = dhcp_link.dhcp_acquire(s, g, idle, idle_ctx, xid, &(*a).lease)
+    if dr != 0 { return fail(a, AS_RETRY, dr, now) }
+    (*a).state = AS_UP
+    (*a).last_rc = 0
+    (*a).step = 0
+    (*a).wait_until = 0
+    return 0
+}
+
+fn copy_name(src: u64, dst: u64) -> usize {
+    var i: usize = 0
+    while *((src + i as u64) as *mut u8) != 0 as u8 {
+        *((dst + i as u64) as *mut u8) = *((src + i as u64) as *mut u8)
+        i = i + 1
+    }
+    *((dst + i as u64) as *mut u8) = 0 as u8
+    return i
+}
+
+fn auto_name(state: u64, dst: u64) -> usize {
+    var n_wait: [u8; 15] = "waiting-driver\0"
+    var n_noconf: [u8; 8] = "no-conf\0"
+    var n_bad: [u8; 9] = "bad-conf\0"
+    var n_join: [u8; 8] = "joining\0"
+    var n_dhcp: [u8; 5] = "dhcp\0"
+    var n_up: [u8; 3] = "up\0"
+    var n_retry: [u8; 6] = "retry\0"
+    if state == AS_NO_CONF { return copy_name((&n_noconf[0]) as u64, dst) }
+    if state == AS_BAD_CONF { return copy_name((&n_bad[0]) as u64, dst) }
+    if state == AS_JOINING { return copy_name((&n_join[0]) as u64, dst) }
+    if state == AS_DHCP { return copy_name((&n_dhcp[0]) as u64, dst) }
+    if state == AS_UP { return copy_name((&n_up[0]) as u64, dst) }
+    if state == AS_RETRY { return copy_name((&n_retry[0]) as u64, dst) }
+    return copy_name((&n_wait[0]) as u64, dst)
+}

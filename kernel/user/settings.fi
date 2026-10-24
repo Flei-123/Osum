@@ -529,7 +529,7 @@ const SYS_PIPE: u64 = 22
 static mut e_pw1: [u8; 64] = [0 as u8; 64]
 static mut e_wssid: [u8; 40] = [0 as u8; 40]
 static mut e_wpw: [u8; 72] = [0 as u8; 72]
-static mut l_wstat: [u8; 160] = [0 as u8; 160]
+static mut l_wstat: [u8; 320] = [0 as u8; 320]
 static mut l_ustat: [u8; 160] = [0 as u8; 160]
 static mut p_proc_usb: [u8; 10] = "/proc/usb\0"
 static mut k_wf_ssid: [u8; 19] = "settings.wifi.ssid\0"
@@ -541,6 +541,14 @@ static mut k_wf_noscan: [u8; 21] = "settings.wifi.noscan\0"
 static mut k_wf_bad_ssid: [u8; 22] = "settings.wifi.badssid\0"
 static mut k_wf_short: [u8; 20] = "settings.wifi.short\0"
 static mut k_wf_nodrv: [u8; 23] = "settings.wifi.nodriver\0"
+static mut k_wf_saved: [u8; 20] = "settings.wifi.saved\0"
+static mut k_wf_nowrite: [u8; 22] = "settings.wifi.nowrite\0"
+static mut k_wf_drv: [u8; 18] = "settings.wifi.drv\0"
+static mut k_wf_found: [u8; 20] = "settings.wifi.found\0"
+static mut p_proc_wlan: [u8; 11] = "/proc/wlan\0"
+static mut p_wlan_conf: [u8; 15] = "/etc/wlan.conf\0"
+static mut wf_proc: [u8; 1024] = [0 as u8; 1024]
+static mut k_sp_one: [u8; 3] = " \0\0"
 static mut k_us_ref: [u8; 24] = "settings.usbnet.refresh\0"
 static mut k_us_note: [u8; 21] = "settings.usbnet.note\0"
 static mut k_us_none: [u8; 21] = "settings.usbnet.none\0"
@@ -6846,7 +6854,150 @@ fn wifi_status(why: u64) {
     let _t: u64 = text_an((&l_wstat[0 as usize]) as u64, 0, msg.get(key))
 }
 
-// Connect: name 1..32, password 8..63 (the netui password machine), then the honest result.
+fn wf_token(key: u64, klen: u64, dst: u64, max: u64) -> bool {
+    let n: u64 = file_read((&p_proc_wlan[0 as usize]) as u64, (&wf_proc[0 as usize]) as u64, 1024)
+    var i: u64 = 0
+    while i + klen < n {
+        var same: bool = true
+        var k: u64 = 0
+        while k < klen {
+            if wf_proc[(i + k) as usize] != __mmio_read8((key + k) as *mut u8) {
+                same = false
+            }
+            k = k + 1
+        }
+        if same && (i == 0 || wf_proc[(i - 1) as usize] == 10 as u8 || wf_proc[(i - 1) as usize] == 32 as u8) {
+            var o: u64 = 0
+            var q: u64 = i + klen
+            while q < n && o + 1 < max && wf_proc[q as usize] != 32 as u8 && wf_proc[q as usize] != 10 as u8 {
+                __mmio_write8((dst + o) as *mut u8, wf_proc[q as usize])
+                o = o + 1
+                q = q + 1
+            }
+            __mmio_write8((dst + o) as *mut u8, 0 as u8)
+            return o > 0
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn wf_add(at: u64, q: u64) -> u64 {
+    return text_an((&l_wstat[0 as usize]) as u64, at, q)
+}
+
+fn wifi_driver_line(at: u64) -> u64 {
+    var k_phase: [u8; 7] = "phase=\0"
+    var k_auto: [u8; 6] = "auto=\0"
+    var s_none: [u8; 20] = "waiting-for-driver\0\0"
+    var s_sp: [u8; 3] = " \0\0"
+    var s_ph: [u8; 8] = "phase=\0\0"
+    var s_au: [u8; 8] = ", auto=\0"
+    var ph: [u8; 32] = [0 as u8; 32]
+    var au: [u8; 32] = [0 as u8; 32]
+    var p: u64 = wf_add(at, (&s_sp[0 as usize]) as u64)
+    p = wf_add(p, msg.get((&k_wf_drv[0 as usize]) as u64))
+    p = wf_add(p, (&s_sp[0 as usize]) as u64)
+    p = wf_add(p, (&s_ph[0 as usize]) as u64)
+    if wf_token((&k_phase[0 as usize]) as u64, 6, (&ph[0 as usize]) as u64, 32) {
+        p = wf_add(p, (&ph[0 as usize]) as u64)
+    } else {
+        p = wf_add(p, (&s_none[0 as usize]) as u64)
+    }
+    if wf_token((&k_auto[0 as usize]) as u64, 5, (&au[0 as usize]) as u64, 32) {
+        p = wf_add(p, (&s_au[0 as usize]) as u64)
+        p = wf_add(p, (&au[0 as usize]) as u64)
+    }
+    return p
+}
+
+fn wifi_status_drv(key: u64) {
+    let p: u64 = wf_add(0, msg.get(key))
+    let _q: u64 = wifi_driver_line(p)
+}
+
+fn wifi_save_conf() -> bool {
+    var inh: [u8; 160] = [0 as u8; 160]
+    var k_ssid: [u8; 6] = "ssid \0"
+    var k_psk: [u8; 5] = "psk \0"
+    var at: u64 = 0
+    var i: u64 = 0
+    while k_ssid[(i) as usize] != 0 as u8 {
+        inh[(at) as usize] = k_ssid[(i) as usize]
+        at = at + 1
+        i = i + 1
+    }
+    i = 0
+    while e_wssid[(i) as usize] != 0 as u8 && at < 100 {
+        inh[(at) as usize] = e_wssid[(i) as usize]
+        at = at + 1
+        i = i + 1
+    }
+    inh[(at) as usize] = 10 as u8
+    at = at + 1
+    i = 0
+    while k_psk[(i) as usize] != 0 as u8 {
+        inh[(at) as usize] = k_psk[(i) as usize]
+        at = at + 1
+        i = i + 1
+    }
+    i = 0
+    while e_wpw[(i) as usize] != 0 as u8 && at < 158 {
+        inh[(at) as usize] = e_wpw[(i) as usize]
+        at = at + 1
+        i = i + 1
+    }
+    inh[(at) as usize] = 10 as u8
+    at = at + 1
+    if !file_write((&p_wlan_conf[0 as usize]) as u64, (&inh[0 as usize]) as u64, at) {
+        return false
+    }
+    let r: u64 = ulib.sys(90, (&p_wlan_conf[0 as usize]) as u64, 384, 0)
+    var z: u64 = 0
+    while z < 160 {
+        inh[(z) as usize] = 0 as u8
+        z = z + 1
+    }
+    if ulib.bad(r) {
+        let _u: u64 = ulib.sys(ulib.SYS_UNLINK, (&p_wlan_conf[0 as usize]) as u64, 0, 0)
+        return false
+    }
+    return true
+}
+
+// Scan: lists the networks the driver reports on /proc/wlan (lines "net <ssid> ..."), else says why not.
+fn wifi_scan() {
+    var k_phase: [u8; 7] = "phase=\0"
+    var ph: [u8; 32] = [0 as u8; 32]
+    let n: u64 = file_read((&p_proc_wlan[0 as usize]) as u64, (&wf_proc[0 as usize]) as u64, 1024)
+    var at: u64 = 0
+    var found: u64 = 0
+    var i: u64 = 0
+    while i + 4 < n {
+        if (i == 0 || wf_proc[(i - 1) as usize] == 10 as u8) && wf_proc[i as usize] == 110 as u8
+            && wf_proc[(i + 1) as usize] == 101 as u8 && wf_proc[(i + 2) as usize] == 116 as u8
+            && wf_proc[(i + 3) as usize] == 32 as u8 {
+            if found == 0 {
+                at = wf_add(0, msg.get((&k_wf_found[0 as usize]) as u64))
+            }
+            found = found + 1
+            var q: u64 = i + 4
+            at = wf_add(at, (&k_sp_one[0 as usize]) as u64)
+            while q < n && wf_proc[q as usize] != 32 as u8 && wf_proc[q as usize] != 10 as u8 && at < 250 {
+                __mmio_write8(((&l_wstat[0 as usize]) as u64 + at) as *mut u8, wf_proc[q as usize])
+                at = at + 1
+                q = q + 1
+            }
+            __mmio_write8(((&l_wstat[0 as usize]) as u64 + at) as *mut u8, 0 as u8)
+        }
+        i = i + 1
+    }
+    if found == 0 {
+        wifi_status_drv((&k_wf_noscan[0 as usize]) as u64)
+    }
+}
+
+// Connect: name 1..32, password 8..63 (the netui password machine), then /etc/wlan.conf (0600) for the autostart.
 fn wifi_connect() {
     let sl: u64 = ulib.length((&e_wssid[0 as usize]) as u64)
     if sl == 0 || sl > 32 {
@@ -6864,7 +7015,11 @@ fn wifi_connect() {
         wifi_status((&k_wf_short[0 as usize]) as u64)
         return
     }
-    wifi_status((&k_wf_nodrv[0 as usize]) as u64)
+    if !wifi_save_conf() {
+        wifi_status_drv((&k_wf_nowrite[0 as usize]) as u64)
+        return
+    }
+    wifi_status_drv((&k_wf_saved[0 as usize]) as u64)
 }
 
 // Refresh: count the lines of /proc/usb (one per device the kernel found).
@@ -12021,7 +12176,7 @@ fn u_start(args: u64) -> u64 {
                     // (described again)
                     melde_stand()
                 } else if id == K_WSC {
-                    wifi_status((&k_wf_noscan[0 as usize]) as u64)
+                    wifi_scan()
                     melde_stand()
                 } else if id == K_WCO {
                     wifi_connect()

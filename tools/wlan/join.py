@@ -260,6 +260,7 @@ def check_all():
     ok(r["foreign_dhcp"].dhcp is not None and r["foreign_dhcp"].dhcp["rc"] == -201, "DHCP reply under a foreign key is dropped")
 
 
-check_all()
-print("RESULT pass=%d fail=%d" % (PASS, FAIL))
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    check_all()
+    print("RESULT pass=%d fail=%d" % (PASS, FAIL))
+    sys.exit(1 if FAIL else 0)
