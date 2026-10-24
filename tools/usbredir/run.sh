@@ -22,21 +22,23 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "USBTETHER: skipped, no qemu"; exit 0; }
-CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none}"
+CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc}"
 cleanup_pids() { for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; pkill -P $$ 2>/dev/null; true; }
 trap 'cleanup_pids; [ -n "${USBTETHER_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/dhcp.elf" ]; then
     bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-    bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp ping host > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
+    bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp ping host cat > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
     ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 fi
 printf 'echo ==START==\ndhcp\nping 192.168.42.129\nhost example.org\nsleep 2\necho ==END==\n' > "$T/s.sh"
 printf 'echo ==START==\nsleep 1\ndhcp\nping 192.168.42.129\nhost example.org\nsleep 2\necho ==END==\n' > "$T/s_hot.sh"
 printf 'echo ==START==\ndhcp\nping 192.168.42.129\nsleep 1\necho ==END==\n' > "$T/s_re.sh"
+printf 'echo ==START==\nping 192.168.42.129\nping 192.168.42.129\nping 192.168.42.129\nping 192.168.42.129\ndhcp\nping 192.168.42.129\nsleep 1\necho ==END==\n' > "$T/s_late.sh"
+printf 'echo ==START==\ndhcp\nping 192.168.42.129\nsleep 2\ncat /proc/usbnet\necho ==END==\n' > "$T/s_proc.sh"
 python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
-    /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" \
-    /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
+    /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
+    /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_late.sh="$T/s_late.sh" /t/s_proc.sh="$T/s_proc.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 PORT=$((47000 + ($$ % 500) * 4))
 
@@ -64,12 +66,12 @@ run() {
         local trig="--trigger $T/$n.trig"
         [ "$mode" = boot ] && : > "$T/$n.trig"
         python3 -I tools/usbredir/usbdev.py --sock "$T/$n.sock" --profile "$prof" --net-local $((p+1)) --net-remote "$p" \
-            $trig --unplug "$T/$n.unplug" --log "$T/$n.gadget" --max-secs 200 &
+            $trig --unplug "$T/$n.unplug" --log "$T/$n.gadget" --max-secs 200 ${GARGS:-} &
         echo $! > "$T/$n.gpid"
         extra="-chardev socket,id=r0,path=$T/$n.sock,server=on,wait=off -device usb-redir,chardev=r0"
     fi
     timeout 170 qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256 \
-        -append "osum nokbd nosched noproc nofs noring3 $words nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
+        -append "osum ${BASEW:-nokbd nosched noproc nofs noring3} $words ${XWORDS:-} nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
         -serial "file:$T/$n.txt" -display none -nic none -no-reboot -pidfile "$T/$n.qpid" -S \
         -monitor "unix:$T/$n.mon,server,nowait" \
         -drive "file=$T/d.img,format=raw,if=ide,index=0" \
@@ -146,6 +148,45 @@ for c in $CASES; do
         chk re "bound to driver ncm" 'driver=ncm'
         chk re "unplug noticed" 'usbnet: detached'
         panics re
+        ;;
+    ch336)
+        GARGS="--phy-boot down" run ch ch336 boot s.sh
+        chk ch "bound to driver ch336" 'driver=ch336'
+        grep -aq 'phy kick #1 via 0x1F' "$T/ch.gadget" && ok "ch: gadget saw the PHY kick" || bad "ch: gadget never saw a PHY kick"
+        chk ch "link up with BMCR restored and one kick" 'usb: ch336 link=[a-z]* bmsr=782d .* bmcr=1000 kicks=01'
+        net_ok ch
+        ;;
+    ch336-late)
+        GARGS="--phy-boot an" run chl ch336 boot s_late.sh
+        grep -aq 'phy kick #1' "$T/chl.gadget" && ok "chl: kick after the link wait" || bad "chl: no kick after the link wait"
+        chk chl "link came up after the kick" 'usb: ch336 link=up'
+        net_ok chl
+        ;;
+    ch336-nokick)
+        GARGS="--phy-boot down" XWORDS="nophykick" run chn ch336 boot s.sh
+        chk chn "bound to driver ch336" 'driver=ch336'
+        grep -aq 'phy kick' "$T/chn.gadget" && bad "chn: kick sent despite nophykick" || ok "chn: no kick sent"
+        nochk chn "no link without the kick" 'usb: ch336 link=up'
+        chk chn "link down with kicks=00" 'usb: ch336 link=down .* kicks=00'
+        nochk chn "no lease without the kick" 'dhcp: ack ip='
+        panics chn
+        ;;
+    ch336-ecmfirst)
+        GARGS="--phy-boot down" run che ch336-ecmfirst boot s.sh
+        chk che "vendor configuration wins over ECM" 'driver=ch336'
+        nochk che "ECM not bound" 'driver=ecm'
+        net_ok che
+        ;;
+    ch336-proc)
+        GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run chp ch336 boot s_proc.sh
+        chk chp "usb line with id" 'usb: ch336 id=1a86:5394'
+        chk chp "configuration seen" 'usb: ncfg=2 cfg=1 setcfg=1 rc=0'
+        chk chp "interface vendor class" 'usb: iface=ff/ff/ff'
+        chk chp "bring-up finished" 'usb: step=4 ok'
+        chk chp "phy line with kick count" 'phy: bmcr=1000 bmsr=782d id=0e400141'
+        chk chp "link up line" 'link: state=up'
+        chk chp "usbnet counters" 'usbnet: ready mode=3 link=up'
+        chk chp "dhcp line" 'dhcp: state='
         ;;
     none)
         run none ncm none s.sh

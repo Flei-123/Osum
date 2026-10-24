@@ -27,6 +27,8 @@ ap.add_argument('--log', default='')
 ap.add_argument('--mac', default='02:11:22:33:44:55')
 ap.add_argument('--caps', default='')
 ap.add_argument('--max-secs', type=int, default=240)
+ap.add_argument('--phy-boot', default='down')
+ap.add_argument('--phy-deaf', action='store_true')
 A = ap.parse_args()
 MAC = bytes(int(x, 16) for x in A.mac.split(':'))
 LOGF = open(A.log, 'w') if A.log else sys.stderr
@@ -89,6 +91,10 @@ def ncm_ifaces(first, eps=(0x81, 0x82, 0x03)):
     ]
 
 
+def vendor_ifaces():
+    return [dict(n=0, alt=0, cls=0xFF, sub=0xFF, proto=0xFF, eps=[(INT_IN, 3, 16, 1), (BULK_IN, 2, 512, 0), (BULK_OUT, 2, 512, 0)])]
+
+
 def ecm_ifaces(first):
     ci = first
     di = first + 1
@@ -132,6 +138,8 @@ PROFILES['android-rndis-msc'] = dict(kind='rndis', vid=0x18D1, pid=0x4EE4, dcls=
     rndis_ifaces(0) + adb_iface(2, 0x84, 0x04)])
 PROFILES['android-ncm'] = dict(kind='ncm', vid=0x18D1, pid=0x4EE8, dcls=0, multi=1, cfgs=[
     adb_iface(0, 0x84, 0x04) + ncm_ifaces(1)])
+PROFILES['ch336'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[vendor_ifaces(), ecm_ifaces(0)])
+PROFILES['ch336-ecmfirst'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[ecm_ifaces(0), vendor_ifaces()])
 PROF = PROFILES[A.profile]
 KIND = PROF['kind']
 CFGS = [build_cfg(i + 1, c) for i, c in enumerate(PROF['cfgs'])]
@@ -174,6 +182,9 @@ class Link:
 
 
 LINK = Link()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ch336model import Ch336Model
+CH = Ch336Model(MAC, A.phy_boot, lambda s: log(s), not A.phy_deaf) if PROF['kind'] == 'ch336' else None
 STAT = dict(tx=0, rx=0)
 
 
@@ -326,6 +337,10 @@ class Dev:
             if self.rndis_resp:
                 return self.ctl_reply(rid, h, 0, self.rndis_resp.pop(0)[:ln])
             return self.ctl_reply(rid, h, 0, b'')
+        if KIND == 'ch336':
+            out = CH.control(rt, req, val, idx, data, ln)
+            if out is not None:
+                return self.ctl_reply(rid, h, 0, out)
         log('ctl STALL rt=%02x req=%02x val=%04x idx=%04x' % (rt, req, val, idx))
         return self.ctl_reply(rid, h, 4)
 
@@ -359,8 +374,12 @@ class Dev:
                 frames = []
         elif KIND == 'rndis':
             frames = rndis_unwrap(data)
+        elif KIND == 'ch336':
+            frames = CH.unwrap_out(data)
         else:
             frames = [data]
+        if KIND == 'ch336' and not CH.started:
+            frames = []
         for f in frames:
             STAT['tx'] += 1
             LINK.send(f)
@@ -368,6 +387,8 @@ class Dev:
     def pack_in(self):
         n = PROF['multi'] if KIND == 'ncm' else 1
         take = []
+        if KIND == 'ch336' and not CH.started:
+            LINK.to_guest.clear()
         while LINK.to_guest and len(take) < n:
             take.append(LINK.to_guest.pop(0))
         if not take:
@@ -378,6 +399,8 @@ class Dev:
             return ntb_wrap(take, self.seq)
         if KIND == 'rndis':
             return rndis_pkt(take[0])
+        if KIND == 'ch336':
+            return CH.wrap_in(take[0])
         return take[0]
 
     def serve_in(self):
