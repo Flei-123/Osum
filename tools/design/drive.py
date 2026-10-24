@@ -69,10 +69,17 @@ BORDER = 2
 TITLE_H = 22
 
 
+SERIAL_SPLICE = re.compile(r"(?<=[^\n])wm: schlieren grow=\d+ alpha=\d+ blur=\d+ aus=\d+ unterpx=\d+\n")
+
+
+def unsplice(text):
+    return SERIAL_SPLICE.sub("", text)
+
+
 def lies(pfad):
     try:
         with open(pfad, "rb") as f:
-            return f.read().decode("latin1")
+            return unsplice(f.read().decode("latin1"))
     except OSError:
         return ""
 

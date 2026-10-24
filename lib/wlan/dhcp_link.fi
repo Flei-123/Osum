@@ -1,0 +1,140 @@
+import wlan.device
+import wlan.frame
+import wlan.llc
+import wlan.connect
+import wlan.iwl_le
+
+export {
+    Lease, lease_new, dhcp_acquire, discover_frame, request_frame, reply_parse,
+    E_DHCP_SEND, E_DHCP_NO_OFFER, E_DHCP_NO_ACK, E_DHCP_NAK, E_DHCP_STATE
+}
+
+const E_DHCP_SEND: i64 = -200
+const E_DHCP_NO_OFFER: i64 = -201
+const E_DHCP_NO_ACK: i64 = -202
+const E_DHCP_NAK: i64 = -203
+const E_DHCP_STATE: i64 = -204
+
+const HDR_LEN: u64 = 24
+const IP_AT: u64 = 32
+const UDP_AT: u64 = 52
+const DHCP_AT: u64 = 60
+const BROADCAST: u64 = 0xFFFFFFFF
+const MAX_WAIT: u64 = 400
+const BUF: usize = 2400
+
+struct Lease {
+    ip: u64,
+    mask: u64,
+    gateway: u64,
+    dns: u64,
+    server: u64,
+    kind: u64,
+    xid: u64
+}
+
+fn lease_new() -> Lease {
+    return Lease { ip: 0, mask: 0, gateway: 0, dns: 0, server: 0, kind: 0, xid: 0 }
+}
+
+fn head(out: u64, sa: u64, bssid: u64) {
+    iwl_le.zero(out, HDR_LEN)
+    iwl_le.st8(out, 0, 0x08)
+    iwl_le.st8(out, 1, 0x01)
+    var i: u64 = 0
+    while i < 6 {
+        iwl_le.st8(out, 4 + i, iwl_le.ld8(bssid, i))
+        iwl_le.st8(out, 10 + i, iwl_le.ld8(sa, i))
+        iwl_le.st8(out, 16 + i, 0xFF)
+        i = i + 1
+    }
+}
+
+fn wrap(out: u64, sa: u64, bssid: u64, dl: usize, ident: u64) -> usize {
+    head(out, sa, bssid)
+    llc.snap_build(out + HDR_LEN, llc.ET_IPV4)
+    llc.udp_build(out + UDP_AT, 0, BROADCAST, 68, 67, dl)
+    llc.ipv4_build(out + IP_AT, 0, BROADCAST, llc.P_UDP, 8 + dl, ident)
+    return (DHCP_AT as usize) + dl
+}
+
+fn discover_frame(out: u64, sa: u64, bssid: u64, xid: u64) -> usize {
+    let dl: usize = llc.dhcp_discover_build(out + DHCP_AT, xid, sa)
+    return wrap(out, sa, bssid, dl, 1)
+}
+
+fn request_frame(out: u64, sa: u64, bssid: u64, xid: u64, wanted: u64, server: u64) -> usize {
+    let dl: usize = llc.dhcp_request_build(out + DHCP_AT, xid, sa, wanted, server)
+    return wrap(out, sa, bssid, dl, 2)
+}
+
+fn reply_parse(p: u64, n: usize, xid: u64, lease: *mut Lease) -> bool {
+    let hl: i64 = frame.header_len(p, n)
+    if hl < 0 { return false }
+    let h: usize = hl as usize
+    if n < h + llc.SNAP_LEN + llc.IPV4_MIN { return false }
+    if llc.snap_parse(p + h as u64, n - h) != llc.ET_IPV4 { return false }
+    let at: usize = h + llc.SNAP_LEN
+    var ip: llc.Ipv4 = llc.ipv4_new()
+    if !llc.ipv4_parse(&ip, p + at as u64, n - at) { return false }
+    if !ip.summe_ok || ip.protokoll != llc.P_UDP { return false }
+    var ud: llc.Udp = llc.udp_new()
+    if !llc.udp_parse(&ud, ip.nutz, ip.nutz_len, ip.quelle, ip.ziel) { return false }
+    if !ud.summe_ok || ud.ziel != 68 { return false }
+    var dh: llc.Dhcp = llc.dhcp_new()
+    if !llc.dhcp_parse(&dh, ud.nutz, ud.nutz_len) { return false }
+    if dh.xid != xid { return false }
+    if dh.yiaddr == 0 && dh.art != llc.D_NAK { return false }
+    (*lease).ip = dh.yiaddr
+    (*lease).mask = dh.maske
+    (*lease).gateway = dh.tor
+    (*lease).dns = dh.dns
+    (*lease).server = dh.server
+    (*lease).kind = dh.art
+    (*lease).xid = xid
+    return true
+}
+
+fn wait_reply(s: *mut connect.Session, g: *mut device.Device, idle: fn(u64) -> u64, idle_ctx: u64,
+    xid: u64, lease: *mut Lease, raw: u64, plain: u64) -> bool {
+    var tries: u64 = 0
+    while tries < MAX_WAIT {
+        let n: i64 = connect.data_receive(s, g, raw, BUF, plain, BUF)
+        if n > 0 {
+            if reply_parse(plain, n as usize, xid, lease) { return true }
+        } else {
+            idle(idle_ctx)
+            tries = tries + 1
+        }
+    }
+    return false
+}
+
+#[allow_escape]
+fn dhcp_acquire(s: *mut connect.Session, g: *mut device.Device, idle: fn(u64) -> u64, idle_ctx: u64,
+    xid: u64, lease: *mut Lease) -> i64 {
+    if !connect.may_data(s) { return E_DHCP_STATE }
+    var mac: [u8; 6] = [0; 6]
+    device.address_of(g, (&mac[0]) as u64)
+    let sa: u64 = (&mac[0]) as u64
+    let bssid: u64 = (&(*s).aa[0]) as u64
+    var out: [u8; 400] = [0; 400]
+    var prot: [u8; 2400] = [0; 2400]
+    var raw: [u8; 2400] = [0; 2400]
+    var plain: [u8; 2400] = [0; 2400]
+    let o: u64 = (&out[0]) as u64
+    let dl: usize = discover_frame(o, sa, bssid, xid)
+    if connect.data_send(s, g, o, dl, (&prot[0]) as u64, BUF) < 0 { return E_DHCP_SEND }
+    if !wait_reply(s, g, idle, idle_ctx, xid, lease, (&raw[0]) as u64, (&plain[0]) as u64) {
+        return E_DHCP_NO_OFFER
+    }
+    if (*lease).kind != llc.D_OFFER { return E_DHCP_NO_OFFER }
+    let rl: usize = request_frame(o, sa, bssid, xid, (*lease).ip, (*lease).server)
+    if connect.data_send(s, g, o, rl, (&prot[0]) as u64, BUF) < 0 { return E_DHCP_SEND }
+    if !wait_reply(s, g, idle, idle_ctx, xid, lease, (&raw[0]) as u64, (&plain[0]) as u64) {
+        return E_DHCP_NO_ACK
+    }
+    if (*lease).kind == llc.D_NAK { return E_DHCP_NAK }
+    if (*lease).kind != llc.D_ACK { return E_DHCP_NO_ACK }
+    return 0
+}
