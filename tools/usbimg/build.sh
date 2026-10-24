@@ -1350,12 +1350,20 @@ ARGS+=(/etc/orientbus/ /etc/actions.d/
 printf 'provider local /bin/soclocal\nprovider fleitec /bin/socfleitec /etc/social/fleitec.conf\n' > "$OUT/social.providers"
 printf 'url=https://chat.fleitec.com\n' > "$OUT/social.fleitec.conf"
 : > "$OUT/social.games.tsv"
+SOCIAL_SEED_ARGS=()
+if [ -n "${SOCIAL_SEED:-}" ]; then
+    [ -f "$SOCIAL_SEED/games.tsv" ] && cp "$SOCIAL_SEED/games.tsv" "$OUT/social.games.tsv"
+    for seed_file in local.book local.invites; do
+        [ -f "$SOCIAL_SEED/$seed_file" ] && SOCIAL_SEED_ARGS+=("/etc/social/$seed_file=$SOCIAL_SEED/$seed_file@0644")
+    done
+fi
 ARGS+=(/etc/social/ /apps/social.prog/
        "/apps/social.prog/ACTIONS=pakete/social/ACTIONS@0644"
        "/apps/social.prog/SETTINGS=pakete/social/SETTINGS@0644"
        "/etc/social/providers=$OUT/social.providers@0644"
        "/etc/social/fleitec.conf=$OUT/social.fleitec.conf@0644"
        "/etc/social/games.tsv=$OUT/social.games.tsv@0644")
+[ "${#SOCIAL_SEED_ARGS[@]}" -gt 0 ] && ARGS+=("${SOCIAL_SEED_ARGS[@]}")
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
     ARGS+=("/etc/ssl/roots.pem=$ROOTS")
     # OpenSSL (python ssl) looks at /etc/ssl/cert.pem by default; curl+mbedtls is built for /etc/ssl/roots.pem

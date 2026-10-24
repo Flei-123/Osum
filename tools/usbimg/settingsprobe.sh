@@ -33,7 +33,7 @@ S="$OUT/serial.txt"; SOCK="$OUT/mon.sock"
 : > "$S"
 timeout 400 qemu-system-x86_64 "${KVM[@]}" -m 512 \
     -kernel "$OUT/bau/osum.mb" -initrd "$OUT/bau/root.img" \
-    -append "modfs osum gfx wm wig desk wmhold wighalt=300 nokbd nosched noproc nofs lang=en" \
+    -append "modfs osum vfs gfx wm wig desk wmhold wighalt=300 nokbd nosched fbres=1920x1200 lang=en" \
     -serial "file:$S" -display none -no-reboot -vga std \
     -monitor "unix:$SOCK,server,nowait" > "$OUT/qemu.log" 2>&1 &
 QPID=$!
@@ -59,6 +59,11 @@ klickauf start_Settings
 warteauf settings: ready || 60
 warte 4
 foto 01-settings
+taste f12
+warte 3
+klickauf cap_max
+warte 5
+foto 01b-maximized
 klickauf srectptaba
 warte 4
 foto 02-activity

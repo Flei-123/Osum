@@ -57,6 +57,7 @@ Namen fuer `klickauf`:
     lzeile<N>       Zeile N der Trefferliste des Starters
     srect<NAME>     Widget NAME der Einstellungen (settings: rect name=)
     frect<N>        Widget N des Dateimanagers (explorer: rect id=N)
+    fdrect<N>       widget N of the friends bar (freunde: rect id=N)
 """
 import faulthandler
 import os
@@ -1084,6 +1085,14 @@ class Fahrer:
                 fa, fb = name[6:].split("x")
                 return (o[0] + rx + rw_ * int(fa) // 100, o[1] + ry + rh_ * int(fb) // 100, 0, 0)
             return (o[0] + rx, o[1] + ry, rw_, rh_)
+        if name.startswith("fdrect"):
+            n = int(name[6:])
+            m = letzte(r"freunde: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
+            o = self.fenster("freunde")
+            if m is None or o is None:
+                return None
+            return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
         if name.startswith("frect"):
             n = int(name[5:])
             m = letzte(r"explorer: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
