@@ -26,6 +26,7 @@ Megaoktett.
 
 Verwendung:
     bundle.py <assets/apps> <arbeitsverzeichnis> [nur=<programmliste>]
+    bundle.py --lint <assets/apps>      (host check: every bundle has INFO, start.txt, data/README, a symbol)
 
 RUNDE WERKZEUGE: `nur=` -- WELCHE PROGRAMME AUF DIESER PLATTE LIEGEN.
 
@@ -103,11 +104,45 @@ def console_von(pfad):
     return os.path.isfile(os.path.join(pfad, "console.txt"))
 
 
+REQUIRED_FILES = ("INFO", "start.txt", os.path.join("data", "README"))
+
+
+def lint_bundle(path):
+    problems = []
+    for rel in REQUIRED_FILES:
+        if not os.path.isfile(os.path.join(path, rel)):
+            problems.append("%s: missing %s" % (path, rel))
+    has_symbol = (os.path.isfile(os.path.join(path, "symbol.osym"))
+                  or os.path.isfile(os.path.join(path, "symbol.txt")))
+    if not has_symbol:
+        problems.append("%s: missing symbol.osym or symbol.txt" % path)
+    return problems
+
+
+def lint_all(source):
+    problems = []
+    for name in sorted(os.listdir(source)):
+        if name.endswith(".osp"):
+            problems.extend(lint_bundle(os.path.join(source, name)))
+    return problems
+
+
 def main(argv):
+    if len(argv) >= 3 and argv[1] == "--lint":
+        problems = lint_all(argv[2])
+        for line in problems:
+            print("bundle lint: " + line, file=sys.stderr)
+        print("bundle lint: %d problem(s)" % len(problems))
+        return 1 if problems else 0
     if len(argv) < 3:
         print(__doc__)
         return 2
     quelle, arbeit = argv[1], argv[2]
+    problems = lint_all(quelle)
+    if problems:
+        for line in problems:
+            print("bundle lint: " + line, file=sys.stderr)
+        return 1
     nur = None
     for a in argv[3:]:
         if a.startswith("nur="):
