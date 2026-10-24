@@ -87,7 +87,7 @@ runvm vio "nic" "${NETDEV[@]}" -device virtio-net-pci,netdev=n0,mac=52:54:00:aa:
 runvm vionc "nic noclass" "${NETDEV[@]}" -device virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc
 runvm usbn "nic usbpoll" "${NETDEV[@]}" -device usb-net,netdev=n0,mac=52:54:00:aa:bb:cc
 runvm usbnc "nic usbpoll noclass" "${NETDEV[@]}" -device usb-net,netdev=n0,mac=52:54:00:aa:bb:cc
-runvm nonic "nic"
+runvm nonic "nic" -nic none
 [ -n "${CLASSES_DUMP:-}" ] && cp "$D"/*.klar "$CLASSES_DUMP"/
 
 echo "== 2. class column + built-in bind state =="
@@ -108,7 +108,21 @@ hasnot "$D/nonic.klar" "r8169 pci 10ec:*/0200 found=0 state=bound" "no NIC: r816
 has "$D/nonic.klar" "r8169 pci 10ec:*/0200 found=0 state=absent" "no NIC: r8169 row absent"
 hasnot "$D/nonic.klar" "# class-calls net-eth" "no NIC: no dispatch through the net-eth table"
 has "$D/e1k.klar" "e1000 pci 8086:*/0200 found=1 state=bound err=- class=net-eth" "e1000 NIC: e1000 row bound"
-hasnot "$D/e1k.klar" "# class-calls net-eth" "e1000 NIC: the r8169 table is never used"
+num "e1000 NIC: class-calls net-eth counted through the e1000 table" "$(grep -aoE '^# class-calls net-eth=[0-9]+' "$D/e1k.klar" | tail -1 | cut -d= -f2)" ge 5
+has "$D/e1k.klar" "netdev: c0=e1000" "e1000 NIC: netdev picked e1000"
+has "$D/e1k.klar" "r8169 pci 10ec:*/0200 found=0 state=absent" "e1000 NIC: r8169 row absent"
+has "$D/e1knc.klar" "e1000 pci 8086:*/0200 found=1 state=failed err=init failed class=net-eth" "e1000 noclass: row failed with its reason"
+hasnot "$D/e1knc.klar" "# class-calls net-eth" "e1000 noclass: no dispatch counted"
+has "$D/vio.klar" "virtio-net pci 1af4:*/0200 found=1 state=bound err=- class=net-eth" "virtio NIC: row bound, class=net-eth"
+has "$D/vio.klar" "netdev: c0=virtio-net" "virtio NIC: netdev picked virtio-net"
+num "virtio NIC: class-calls net-eth counted" "$(grep -aoE '^# class-calls net-eth=[0-9]+' "$D/vio.klar" | tail -1 | cut -d= -f2)" ge 5
+has "$D/vionc.klar" "virtio-net pci 1af4:*/0200 found=1 state=failed err=init failed class=net-eth" "virtio noclass: row failed with its reason"
+hasnot "$D/vionc.klar" "# class-calls net-eth" "virtio noclass: no dispatch counted"
+has "$D/usbn.klar" "usb-net usb usb class=02 found=? state=bound err=- class=net-eth" "usb-net: row bound, class=net-eth"
+has "$D/usbn.klar" "netdev: c0=usbnet" "usb-net: netdev picked usbnet"
+num "usb-net: class-calls net-eth counted" "$(grep -aoE '^# class-calls net-eth=[0-9]+' "$D/usbn.klar" | tail -1 | cut -d= -f2)" ge 5
+has "$D/usbnc.klar" "usb-net usb usb class=02 found=? state=failed err=init failed class=net-eth" "usb-net noclass: row failed with its reason"
+hasnot "$D/usbnc.klar" "# class-calls net-eth" "usb-net noclass: no dispatch counted"
 hasnot "$D/rtlno.klar" "r8169 pci 10ec:*/0200 found=1 state=bound" "noclass: r8169 row is not bound"
 has "$D/rtlno.klar" "r8169 pci 10ec:*/0200 found=1 state=failed err=init failed class=net-eth" "noclass: r8169 row failed with its reason"
 hasnot "$D/rtlno.klar" "# class-calls net-eth" "noclass: no dispatch counted"
@@ -145,14 +159,14 @@ await_line() {
     return 1
 }
 ping_run() {
-    local name=$1 words=$2 out="$D/ping-$1.txt"
+    local name=$1 words=$2 model=${3:-rtl8139} out="$D/ping-$1.txt"
     wire_up; bridge_up
     rm -f "$out"
     ( timeout 220 qemu-system-x86_64 -kernel "$D/k0.img" -m 256 \
         -append "osum nokbd nosched noproc nofs noring3 nic nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=900 $words" \
         -serial "file:$out" -display none -no-reboot \
         -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
-        -device "rtl8139,netdev=n0,id=nic0,mac=52:54:00:aa:bb:cc" \
+        -device "$model,netdev=n0,id=nic0,mac=52:54:00:aa:bb:cc" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 ) &
     QPID=$!
     await_line "$out" "nic: netd=" 25
@@ -172,4 +186,14 @@ num "badclass: replies with the transmit hook swapped" "$got" eq 0
 has "$D/ping-bad.txt" "netdev: c0=r8169" "badclass: the card was still found"
 got=$(ping_run none "noclass")
 num "noclass: replies without a table" "$got" eq 0
+for pair in e1000:e1000 virtio-net-pci:virtio-net; do
+    model=${pair%%:*}; kname=${pair##*:}
+    got=$(ping_run "g-$kname" "" "$model")
+    num "$kname: ping -c 20 replies through the table" "$got" ge 19
+    has "$D/ping-g-$kname.txt" "netdev: c0=$kname" "$kname: netdev picked $kname"
+    got=$(ping_run "b-$kname" "badclass" "$model")
+    num "$kname badclass: replies with the transmit hook swapped" "$got" eq 0
+    got=$(ping_run "n-$kname" "noclass" "$model")
+    num "$kname noclass: replies without a table" "$got" eq 0
+done
 finish
