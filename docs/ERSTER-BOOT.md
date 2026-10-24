@@ -73,7 +73,14 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
-## Stick 5 HP (24.10.2026, main 2380d6c4)
+## Stick 6 HP (24.10.2026, main e2bf91e6)
+
+- **Datei:** `orientos-usb-hp-20261024-e2bf91e6.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `0e21cfb022d7ef4796e61ff2007ca93a7fc09dfb4f2cfe828c39a605afa2e3b6`. Ersetzt Stick 5 (SHA 435a5f54...).
+- **Neu gegenueber Stick 5:** Netzkarte `wlan0` (Task K_WLAN, DHCP aus dem Lease), Auto-Join aus `/etc/wlan.conf`, `/proc/wlan` mit `net <ssid> ch= sec= rssi=`, `auto=<state> rc= tries= driver=` und `ip= mask= gw=`. Fake-AP-Gegenstelle nur im Test.
+- **Ehrlich:** Am echten 8265 UNVERIFIZIERT (Daten-TX ueber Cmd-Queue 0, kein Beacon-Loss, kein Scan waehrend verbunden). Ziel: sehen, wie weit phase/net/auto kommen.
+- **Foto-Checkliste:** (1) Terminal `cat /proc/wlan` -- phase, err, fw, nvm, calib, net-Zeilen, auto=. (2) Einstellungen > Netzwerk > WLAN: Suchen, Netz waehlen, Verbinden (Passwort), danach nochmal `cat /proc/wlan` -- Foto. (3) Strg+Shift+F (Entwickler-Overlay) -- Foto. (4) Bei Haenger/Panik: Neustart mit Kernelwort `noiwl` (WLAN aus), Foto der Bootzeile.
+
+## Stick 5 HP (24.10.2026, main 2380d6c4) -- abgeloest durch Stick 6
 
 - **Datei:** `orientos-usb-hp-20261024-2380d6c4.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `435a5f545d8207aebb6ffec2a22a9fb192f5c1e30636ed6d21321311c8c671c4`. Ersetzt Stick 4 (SHA 79dbb51a...).
 - **Neu gegenueber Stick 4:** WLAN-Treiber 8265 mit Befehlswarteschlange, INIT-/RT-Firmware-Boot und Auto-Start auf 8086:24fd, `/proc/wlan` (phase, err, fw, nvm, calib), Einstellungen > **WLAN** schreibt `/etc/wlan.conf` (0600), SMP-/Helligkeits-/Touch-Korrekturen aus main. Kernelwort `noiwl` schaltet den WLAN-Autostart ab.
@@ -100,7 +107,7 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 
 ## Was der Boss fotografieren soll
 
-0. **WLAN (Stick 5):** Terminal: `cat /proc/wlan` -- Foto (phase/err/err_text/fw/nvm/calib). Dann Einstellungen > WLAN: SSID + Passwort eintragen, speichern, nochmal `cat /proc/wlan` -- Foto. Bei Haenger/Panik Neustart mit Kernelwort `noiwl` (Foto der Bootzeile).
+0. **WLAN (Stick 6):** Terminal: `cat /proc/wlan` -- Foto (phase/err/err_text/fw/nvm/calib, net-Zeilen, auto=). Dann Einstellungen > WLAN: SSID + Passwort eintragen, speichern, nochmal `cat /proc/wlan` -- Foto. Bei Haenger/Panik Neustart mit Kernelwort `noiwl` (Foto der Bootzeile).
 1. **Overlay:** `Strg+Shift+F` -- Foto vom ganzen Schirm (Zeile `fb_write_mbs`, FPS, CPU, RAM).
 2. **Terminal** (Win-Taste, "terminal"): je ein Foto der Ausgabe von
    - `cat /proc/backlight`
