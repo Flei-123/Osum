@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import socbook
+import socbuf
+import socprov
+import socstate
+
+export { words_load, bell, name_into, hello_apply, hello_arm, hello_pending, hello_done }
+
+fn word_line(lp: u64, ln: usize, key: str, out: u64) {
+    if ln <= key.n + 3 || !socbuf.r_eq(lp, key.p as u64, key.n) {
+        return
+    }
+    var i: usize = key.n
+    while i < ln && (socbuf.r_ld8(lp, i) == 32 as u8 || socbuf.r_ld8(lp, i) == 61 as u8) {
+        i = i + 1
+    }
+    if i > key.n && i < ln && socbuf.r_ld8(lp, key.n) == 32 as u8 {
+        socbuf.zset(out, 48, lp + i as u64, ln - i)
+    }
+}
+
+fn words_load() {
+    var lc: socbuf.SB = socbuf.sb((&socstate.st_tmp[0]) as u64, 4095)
+    if !socbuf.read_file("/etc/locale.conf", &lc) {
+        return
+    }
+    var lang: [u8; 8] = [0 as u8; 8]
+    var i: usize = 0
+    while i + 5 < lc.len {
+        if socbuf.is(lc.ptr + i as u64, 5, "lang=") {
+            var k: usize = 0
+            while k < 7 && i + 5 + k < lc.len {
+                let ch: u8 = socbuf.r_ld8(lc.ptr, i + 5 + k)
+                if ch < 97 as u8 || ch > 122 as u8 {
+                    k = 7
+                } else {
+                    lang[k] = ch
+                    k = k + 1
+                }
+            }
+            i = lc.len
+        }
+        i = i + 1
+    }
+    if lang[0] == 0 as u8 {
+        return
+    }
+    var path: [u8; 64] = [0 as u8; 64]
+    var pb: socbuf.SB = socbuf.sb((&path[0]) as u64, 63)
+    socbuf.sb_bytes(&pb, "/usr/share/locale/".p as u64, 18)
+    socbuf.sb_bytes(&pb, (&lang[0]) as u64, socbuf.zlen((&lang[0]) as u64))
+    socbuf.sb_bytes(&pb, "/messages".p as u64, 9)
+    socbuf.sb_push(&pb, 0 as u8)
+    let fd: i64 = syscall(socbuf.S_OPEN, (&path[0]) as i64, 0, 0, 0, 0, 0)
+    if fd < 0 {
+        return
+    }
+    // line by line through a 1 KB window
+    var line: [u8; 256] = [0 as u8; 256]
+    var ln: usize = 0
+    var chunk: [u8; 1024] = [0 as u8; 1024]
+    while true {
+        let n: i64 = syscall(socbuf.S_READ, fd, (&chunk[0]) as i64, 1024, 0, 0, 0)
+        if n <= 0 {
+            break
+        }
+        var j: usize = 0
+        while j < n as usize {
+            let ch: u8 = chunk[j]
+            if ch == 10 as u8 {
+                word_line((&line[0]) as u64, ln, "social.invite", (&socstate.w_invite[0]) as u64)
+                word_line((&line[0]) as u64, ln, "social.join", (&socstate.w_join[0]) as u64)
+                ln = 0
+            } else if ln < 255 {
+                line[ln] = ch
+                ln = ln + 1
+            }
+            j = j + 1
+        }
+    }
+    syscall(socbuf.S_CLOSE, fd, 0, 0, 0, 0, 0)
+}
+
+// the bell of the system (bus.noti_post): the taskbar shows it as a toast
+fn bell(p: u64, n: usize) {
+    // SYS_OSUM_BUS (1960), BUS_NOTIPOST_OP (19), priority 1 = a hint
+    let _r: u64 = asm("syscall", out("rax"), in("rax") 1960, in("rdi") 19,
+        in("rsi") 1, in("rdx") p, in("r10") n as u64, in("r8") 0, in("r9") 0,
+        clobber("rcx"), clobber("r11"), clobber("memory"))
+}
+
+// the display name of "<account>:<id>" out of the book, else the id
+fn name_into(b: *mut socbuf.SB, id: u64, idn: usize) {
+    let at: i64 = socbook.book_find(id, idn)
+    if at >= 0 {
+        var n: usize = 0
+        let p: u64 = socbuf.fld(socstate.book.ptr + at as u64, 4, &n)
+        if n > 0 {
+            socbuf.sb_bytes(b, p, n)
+            return
+        }
+    }
+    socbuf.sb_bytes(b, id, idn)
+}
+
+// what every provider can do, and whose account it is
+fn hello_apply(i: usize, out: *mut socbuf.SB, code: i64) {
+    socbuf.r_st8(socprov.pcaps(i), 0, 0 as u8)
+    socbuf.r_st8(socprov.pacct(i), 0, 0 as u8)
+    if code != 0 {
+        return
+    }
+    var at: usize = 0
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
+        let ll: usize = socbuf.line_len(lp)
+        if ll > 5 && socbuf.is(lp, 5, "caps\t") {
+            socbuf.zset(socprov.pcaps(i), socstate.CAPS_W, lp + 5, ll - 5)
+        }
+        if ll > 8 && socbuf.is(lp, 8, "account\t") {
+            socbuf.zset(socprov.pacct(i), socstate.ACCT_W, lp + 8, ll - 8)
+            var k: usize = 0
+            while socbuf.r_ld8(socprov.pacct(i), k) != 0 as u8 {
+                if socbuf.r_ld8(socprov.pacct(i), k) == 9 as u8 {
+                    socbuf.r_st8(socprov.pacct(i), k, 32 as u8)
+                }
+                k = k + 1
+            }
+        }
+        at = at + ll + 1
+    }
+}
+
+fn hello_arm() {
+    var i: usize = 0
+    while i < socstate.n_prov {
+        socstate.p_hello[i] = 0 as u8
+        socstate.j_due[i * socstate.J_STRIDE + socstate.JK_HELLO as usize] = 1 as u8
+        i = i + 1
+    }
+}
+
+fn hello_pending() -> bool {
+    var i: usize = 0
+    while i < socstate.n_prov {
+        if socstate.p_hello[i] == 0 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn hello_done(i: usize) {
+    socstate.p_hello[i] = 1 as u8
+    var k: u8 = socstate.JK_CONTACTS
+    while k < socstate.JK_COUNT {
+        var due: bool = k != socstate.JK_PRESENCE
+        if k == socstate.JK_ALIVE && socbook.invisible() {
+            due = false
+        }
+        if k == socstate.JK_ACTIVITY && !socbook.act_goes() {
+            due = false
+        }
+        if due && socprov.job_eligible(i, k) {
+            socstate.j_due[i * socstate.J_STRIDE + k as usize] = 1 as u8
+        }
+        k = k + 1 as u8
+    }
+}

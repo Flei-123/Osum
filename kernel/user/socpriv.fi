@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import actwire
+import socperm
+import socparty
+import socbook
+import socbuf
+import socprov
+import socstate
+import socujob
+
+export { a_presence, priv_save, apps_save, a_activity, ob_activity_reply, a_activity_clear, a_privacy }
+
+fn a_presence(msg: u64, dry: bool) -> bool {
+    var st: [u8; 16] = [0 as u8; 16]
+    var tx: [u8; 64] = [0 as u8; 64]
+    let _s: bool = socbuf.arg(msg, "state", (&st[0]) as u64, 16)
+    let _t: bool = socbuf.arg(msg, "text", (&tx[0]) as u64, 64)
+    let sp: u64 = (&st[0]) as u64
+    if !(socbuf.isz(sp, "online") || socbuf.isz(sp, "away") || socbuf.isz(sp, "dnd") || socbuf.isz(sp, "invisible")) {
+        socbuf.ob_err("bad_arg state")
+        return false
+    }
+    if dry {
+        actwire.ob_reset()
+        socbuf.ob_s("ok\ndry=1\nwould=presence ")
+        actwire.ob_str(sp)
+        actwire.ob_ch(10)
+        return false
+    }
+    socbuf.zset((&socstate.my_pres[0]) as u64, 16, sp, socbuf.zlen(sp))
+    socbuf.zset((&socstate.my_text[0]) as u64, 64, (&tx[0]) as u64, socbuf.zlen((&tx[0]) as u64))
+    socprov.mark_due(socstate.JK_PRESENCE)
+    socprov.mark_due(socstate.JK_ACTIVITY)
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_kv("presence", sp, socbuf.zlen(sp))
+    return true
+}
+
+fn priv_save() {
+    var pb: [u8; 640] = [0 as u8; 640]
+    let n: usize = socperm.priv_render(socstate.share_act, (&pb[0]) as u64, 640)
+    let _w: bool = socbuf.write_file("/etc/social/privacy", (&pb[0]) as u64, n)
+}
+
+fn apps_save() {
+    let _w: bool = socbuf.write_file("/etc/social/apps", socperm.apps_ptr(), socperm.apps_len())
+}
+
+fn a_activity(msg: u64, dry: bool) -> bool {
+    var nm: [u8; 64] = [0 as u8; 64]
+    let _n: bool = socbuf.arg(msg, "name", (&nm[0]) as u64, 64)
+    if socbuf.zlen((&nm[0]) as u64) == 0 {
+        socbuf.ob_err("bad_arg name")
+        return false
+    }
+    var cl1: [u8; 24] = [0 as u8; 24]
+    let _c1: bool = socbuf.arg(msg, "@client", (&cl1[0]) as u64, 24)
+    let goes: bool = socstate.share_act && !socbook.invisible() && !socperm.never_hit((&cl1[0]) as u64, (&nm[0]) as u64)
+    if dry {
+        actwire.ob_reset()
+        socbuf.ob_s("ok\ndry=1\nwould=activity ")
+        actwire.ob_str((&nm[0]) as u64)
+        actwire.ob_ch(10)
+        if goes {
+            socbuf.ob_s("shared=true\n")
+        } else {
+            socbuf.ob_s("shared=false\n")
+        }
+        return false
+    }
+    if goes && socstate.n_prov > 0 && socujob.defer_group() {
+        return false
+    }
+    socbuf.zset((&socstate.my_act[0]) as u64, 64, (&nm[0]) as u64, socbuf.zlen((&nm[0]) as u64))
+    let _c: bool = socbuf.arg(msg, "@client", (&socstate.my_act_client[0]) as u64, 24)
+    var jv: [u8; 8] = [0 as u8; 8]
+    let _j: bool = socbuf.arg(msg, "join", (&jv[0]) as u64, 8)
+    socstate.my_join = socbuf.isz((&jv[0]) as u64, "true") || socbuf.isz((&jv[0]) as u64, "1")
+    var pt: [u8; 130] = [0 as u8; 130]
+    if socbuf.arg(msg, "party", (&pt[0]) as u64, 130) && socbuf.zlen((&pt[0]) as u64) > 0 {
+        socparty.set_target((&pt[0]) as u64, socbuf.zlen((&pt[0]) as u64))
+    } else {
+        socparty.clear_target()
+    }
+    if goes && socujob.group_start(socstate.UK_GACT) {
+        return true
+    }
+    if !goes && socstate.share_act && !socbook.invisible() {
+        socprov.mark_due(socstate.JK_ACTIVITY)
+    }
+    ob_activity_reply(false)
+    return true
+}
+
+fn ob_activity_reply(shared: bool) {
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    if shared {
+        socbuf.ob_s("shared=true\n")
+    } else {
+        socbuf.ob_s("shared=false\n")
+    }
+}
+
+fn a_activity_clear(msg: u64, dry: bool) -> bool {
+    // an app clears only what it set itself; the user clears anything
+    var cl: [u8; 24] = [0 as u8; 24]
+    let _c: bool = socbuf.arg(msg, "@client", (&cl[0]) as u64, 24)
+    if socbuf.zlen((&socstate.my_act[0]) as u64) > 0 && !socbuf.isz((&cl[0]) as u64, "user")
+        && !socbuf.r_eq((&cl[0]) as u64, (&socstate.my_act_client[0]) as u64, 24) {
+        socbuf.ob_err("denied not_your_activity")
+        return false
+    }
+    if dry {
+        actwire.ob_reset()
+        socbuf.ob_s("ok\ndry=1\nwould=clear activity\n")
+        return false
+    }
+    socbuf.r_st8((&socstate.my_act[0]) as u64, 0, 0 as u8)
+    socparty.clear_target()
+    socprov.mark_due(socstate.JK_ACTIVITY)
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    return true
+}
+
+fn a_privacy(msg: u64, dry: bool) -> bool {
+    var v: [u8; 8] = [0 as u8; 8]
+    let _v: bool = socbuf.arg(msg, "share_activity", (&v[0]) as u64, 8)
+    let on: bool = socbuf.isz((&v[0]) as u64, "true") || socbuf.isz((&v[0]) as u64, "1")
+    if dry {
+        actwire.ob_reset()
+        socbuf.ob_s("ok\ndry=1\n")
+        if on {
+            socbuf.ob_s("would_share_activity=true\n")
+        } else {
+            socbuf.ob_s("would_share_activity=false\n")
+        }
+        return false
+    }
+    socstate.share_act = on
+    priv_save()
+    if !on {
+        socprov.mark_due(socstate.JK_ACTIVITY)
+    }
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    if on {
+        socbuf.ob_s("share_activity=true\n")
+    } else {
+        socbuf.ob_s("share_activity=false\n")
+    }
+    return true
+}

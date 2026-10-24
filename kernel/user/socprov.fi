@@ -1,0 +1,262 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import actwire
+import socbuf
+import socstate
+
+export { pname, pcaps, pacct, has_cap, providers_load, prov_find, build_argv, state_of, state_word, job_eligible, mark_due }
+
+const S_MKDIR: i64 = 83
+
+const PROV_MAX: usize = 8
+const CONF_W: usize = 96 // octets per configuration path
+
+
+// The providers: name and program, from /etc/social/providers.
+static mut p_name: [u8; 128] = [0 as u8; 128] // PROV_MAX * 16
+static mut p_prog: [u8; 512] = [0 as u8; 512] // PROV_MAX * 64
+static mut p_conf: [u8; 768] = [0 as u8; 768] // PROV_MAX * CONF_W, "" = none
+static mut p_caps: [u8; 1280] = [0 as u8; 1280] // PROV_MAX * CAPS_W
+static mut p_acct: [u8; 512] = [0 as u8; 512] // PROV_MAX * ACCT_W
+
+
+fn pname(i: usize) -> u64 {
+    return (&p_name[0]) as u64 + (i * 16) as u64
+}
+
+fn pprog(i: usize) -> u64 {
+    return (&p_prog[0]) as u64 + (i * 64) as u64
+}
+
+fn pconf(i: usize) -> u64 {
+    return (&p_conf[0]) as u64 + (i * CONF_W) as u64
+}
+
+fn pcaps(i: usize) -> u64 {
+    return (&p_caps[0]) as u64 + (i * socstate.CAPS_W) as u64
+}
+
+fn pacct(i: usize) -> u64 {
+    return (&p_acct[0]) as u64 + (i * socstate.ACCT_W) as u64
+}
+
+// does provider i say it can do `cap` (a word of its caps line)?
+fn has_cap(i: usize, cap: str) -> bool {
+    let p: u64 = pcaps(i)
+    let n: usize = socbuf.zlen(p)
+    var s0: usize = 0
+    while s0 < n {
+        var e: usize = s0
+        while e < n && socbuf.r_ld8(p, e) != 32 as u8 {
+            e = e + 1
+        }
+        if socbuf.is(p + s0 as u64, e - s0, cap) {
+            return true
+        }
+        s0 = e + 1
+    }
+    return false
+}
+
+// /etc/social/providers: "provider <name> <program>" per line
+fn providers_load() {
+    socstate.n_prov = 0
+    var f: socbuf.SB = socbuf.sb((&socstate.st_file[0]) as u64, 4095)
+    if !socbuf.read_file("/etc/social/providers", &f) {
+        return
+    }
+    socbuf.sb_push(&f, 0 as u8)
+    var at: usize = 0
+    while at < f.len && socstate.n_prov < PROV_MAX {
+        let lp: u64 = f.ptr + at as u64
+        let ll: usize = socbuf.line_len(lp)
+        var w: [u8; 64] = [0 as u8; 64]
+        let x0: u64 = actwire.word_copy(lp, 0, (&w[0]) as u64, 16)
+        if socbuf.isz((&w[0]) as u64, "provider") {
+            let x1: u64 = actwire.word_copy(lp, x0, pname(socstate.n_prov), 16)
+            let x2: u64 = actwire.word_copy(lp, x1, pprog(socstate.n_prov), 64)
+            socbuf.r_st8(pconf(socstate.n_prov), 0, 0 as u8)
+            if x2 < ll as u64 {
+                actwire.word_copy(lp, x2, pconf(socstate.n_prov), CONF_W as u64)
+            }
+            if socbuf.zlen(pname(socstate.n_prov)) > 0 && socbuf.r_ld8(pprog(socstate.n_prov), 0) == 47 as u8
+                && prov_find(pname(socstate.n_prov), socbuf.zlen(pname(socstate.n_prov))) < 0 {
+                socstate.p_state[socstate.n_prov] = 0 as u8
+                socstate.p_count[socstate.n_prov] = 0
+                socbuf.r_st8(pcaps(socstate.n_prov), 0, 0 as u8)
+                socbuf.r_st8(pacct(socstate.n_prov), 0, 0 as u8)
+                socstate.n_prov = socstate.n_prov + 1
+            }
+        }
+        at = at + ll + 1
+    }
+}
+
+fn prov_find(p: u64, n: usize) -> i64 {
+    var i: usize = 0
+    while i < socstate.n_prov {
+        if n == socbuf.zlen(pname(i)) && socbuf.r_eq(pname(i), p, n) {
+            return i as i64
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// "-c<conf>" as ONE word: exec takes eight arguments (proc.MAX_ARGS),
+// and `invite <id> <kind> <target> <name>` needs the other seven
+fn build_argv(i: usize, ws: *mut [u64; 6], argv: *mut [u64; 12], dc: *mut [u8; 100],
+    v1: *mut [u8; 3]) {
+    (*argv)[0] = pprog(i)
+    (*argv)[1] = (&(*v1)[0]) as u64
+    var n: usize = 2
+    if socbuf.zlen(pconf(i)) > 0 {
+        (*dc)[0] = 45 as u8
+        (*dc)[1] = 99 as u8
+        socbuf.zset((&(*dc)[2]) as u64, 98, pconf(i), socbuf.zlen(pconf(i)))
+        (*argv)[n] = (&(*dc)[0]) as u64
+        n = n + 1
+    }
+    var k: usize = 0
+    while k < 6 && (*ws)[k] != 0 {
+        (*argv)[n] = (*ws)[k]
+        n = n + 1
+        k = k + 1
+    }
+    (*argv)[n] = 0
+}
+
+// Run `<program> v1 <w1> <w2> <w3...>` of provider i; the output lands
+// in `out`, the exit code is returned (124 = killed after `limit`
+// ticks, 127 = could not run). Words are zero-terminated strings; w3 may
+// be several words joined by spaces -- the provider joins them back.
+fn run(i: usize, w1: u64, w2: u64, w3: u64, out: *mut socbuf.SB,
+    limit: u64) -> i64 {
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = w1
+    ws[1] = w2
+    ws[2] = w3
+    return runw(i, &ws, out, limit)
+}
+
+// the same with up to six words (0 ends them)
+fn runw(i: usize, ws: *mut [u64; 6], out: *mut socbuf.SB, limit: u64) -> i64 {
+    socbuf.sb_clear(out)
+    syscall(S_MKDIR, "/tmp/social\0".p as i64, 493, 0, 0, 0, 0)
+    // O_WRONLY | O_CREAT | O_TRUNC
+    let fd: i64 = syscall(socbuf.S_OPEN, "/tmp/social/provider.out\0".p as i64,
+        1 | 64 | 512, 384, 0, 0, 0)
+    if fd < 0 {
+        return 127
+    }
+    var v1: [u8; 3] = "v1\0"
+    var dc: [u8; 100] = [0 as u8; 100]
+    var argv: [u64; 12] = [0 as u64; 12]
+    build_argv(i, ws, &argv, &dc, &v1)
+    let kid: i64 = syscall(socstate.S_FORK, 0, 0, 0, 0, 0, 0)
+    if kid < 0 {
+        syscall(socbuf.S_CLOSE, fd, 0, 0, 0, 0, 0)
+        return 127
+    }
+    if kid == 0 {
+        syscall(socstate.S_DUP2, fd, 1, 0, 0, 0, 0)
+        syscall(socstate.S_DUP2, fd, 2, 0, 0, 0, 0)
+        syscall(socbuf.S_CLOSE, fd, 0, 0, 0, 0, 0)
+        syscall(socstate.S_EXECVE, argv[0] as i64, (&argv[0]) as i64, 0, 0, 0, 0)
+        syscall(60, 127, 0, 0, 0, 0, 0)
+    }
+    syscall(socbuf.S_CLOSE, fd, 0, 0, 0, 0, 0)
+    var st: i32 = 0
+    let t0: u64 = actwire.ticks()
+    var code: i64 = -1
+    while code < 0 {
+        let r: i64 = syscall(socstate.S_WAIT4, kid, (&st) as i64, socstate.WNOHANG, 0, 0, 0)
+        if r == kid {
+            code = 255
+            if (st & 127) == 0 {
+                code = ((st >> 8) & 255) as i64
+            }
+        } else if r < 0 {
+            code = 127
+        } else if actwire.ticks() - t0 > limit {
+            syscall(socstate.S_KILL, kid, 9, 0, 0, 0, 0)
+            var k: u64 = 0
+            while k < 100 {
+                let r2: i64 = syscall(socstate.S_WAIT4, kid, (&st) as i64, socstate.WNOHANG, 0, 0, 0)
+                if r2 == kid || r2 < 0 {
+                    k = 100
+                }
+                socbuf.sleep_ms(10)
+                k = k + 1
+            }
+            code = 124
+        } else {
+            socbuf.sleep_ms(10)
+        }
+    }
+    let _r: bool = socbuf.read_file("/tmp/social/provider.out", out)
+    socbuf.sb_push(out, 0 as u8)
+    (*out).len = (*out).len - 1
+    return code
+}
+
+fn state_of(code: i64) -> u8 {
+    if code == 0 {
+        return 1 as u8
+    }
+    if code == 2 || code == 124 || code == 127 {
+        return 2 as u8
+    }
+    if code == 3 {
+        return 3 as u8
+    }
+    return 4 as u8
+}
+
+fn state_word(s: u8) -> str {
+    if s == 1 as u8 {
+        return "ok"
+    }
+    if s == 2 as u8 {
+        return "offline"
+    }
+    if s == 3 as u8 {
+        return "denied"
+    }
+    if s == 4 as u8 {
+        return "error"
+    }
+    return "new"
+}
+
+
+fn job_eligible(i: usize, kind: u8) -> bool {
+    if kind == socstate.JK_HELLO {
+        return true
+    }
+    if socstate.p_hello[i] == 0 as u8 {
+        return false
+    }
+    if kind == socstate.JK_INVITES {
+        return has_cap(i, "invites") && socstate.p_state[i] != 3 as u8
+    }
+    if kind == socstate.JK_INBOX {
+        return has_cap(i, "inbox") && socstate.p_state[i] != 3 as u8 && socstate.w_pid[i] == 0
+    }
+    if kind == socstate.JK_GAMES {
+        return has_cap(i, "games")
+    }
+    return true
+}
+
+fn mark_due(kind: u8) {
+    var i: usize = 0
+    while i < socstate.n_prov {
+        if job_eligible(i, kind) {
+            socstate.j_due[i * socstate.J_STRIDE + kind as usize] = 1 as u8
+        }
+        i = i + 1
+    }
+}

@@ -1,0 +1,330 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import ulib
+import actwire
+import socperm
+import socbook
+import socbuf
+import socprov
+import socstate
+import socujob
+
+export { a_status, a_list, a_get, split_id, ob_provider_err, a_relation, ob_relation_reply, ob_search_reply, a_search, search_take }
+
+static mut u_full: [u8; 768] = [0 as u8; 768]
+static mut u_verb: [u8; 96] = [0 as u8; 96]
+static mut g_sl: [u8; 2048] = [0 as u8; 2048]
+static mut g_sln: usize = 0
+static mut g_scnt: u64 = 0
+
+fn a_status() {
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_kn("providers", socstate.n_prov as u64)
+    var i: usize = 0
+    while i < socstate.n_prov {
+        socbuf.ob_s("provider.")
+        actwire.ob_num((i + 1) as u64)
+        actwire.ob_ch(61)
+        actwire.ob_n(socprov.pname(i), socbuf.zlen(socprov.pname(i)) as u64)
+        actwire.ob_ch(32)
+        socbuf.ob_s(socprov.state_word(socstate.p_state[i]))
+        actwire.ob_ch(32)
+        actwire.ob_num(socstate.p_count[i])
+        actwire.ob_ch(10)
+        i = i + 1
+    }
+    var total: u64 = 0
+    var online: u64 = 0
+    var active: u64 = 0
+    var on: [u8; 7] = "online\0"
+    var ac: [u8; 7] = "active\0"
+    var at: usize = 0
+    while at < socstate.book.len {
+        let lp: u64 = socstate.book.ptr + at as u64
+        total = total + 1
+        if socbook.matches(lp, (&on[0]) as u64) {
+            online = online + 1
+        }
+        if socbook.matches(lp, (&ac[0]) as u64) {
+            active = active + 1
+        }
+        at = at + socbuf.line_len(lp) + 1
+    }
+    socbuf.ob_kn("contacts", total)
+    socbuf.ob_kn("online", online)
+    socbuf.ob_kn("active", active)
+    socbuf.ob_kv("presence", (&socstate.my_pres[0]) as u64, socbuf.zlen((&socstate.my_pres[0]) as u64))
+    socbuf.ob_kv("activity", (&socstate.my_act[0]) as u64, socbuf.zlen((&socstate.my_act[0]) as u64))
+    // the one truth for "share my activity" -- the Melder reads it here
+    if socstate.share_act {
+        socbuf.ob_s("share_activity=true\n")
+    } else {
+        socbuf.ob_s("share_activity=false\n")
+    }
+    socbuf.ob_s("invites_from=")
+    socbuf.ob_s(socperm.invites_word())
+    actwire.ob_ch(10)
+}
+
+fn a_list(msg: u64) {
+    var filter: [u8; 16] = [0 as u8; 16]
+    var offs: [u8; 16] = [0 as u8; 16]
+    let _f: bool = socbuf.arg(msg, "filter", (&filter[0]) as u64, 16)
+    let _o: bool = socbuf.arg(msg, "offset", (&offs[0]) as u64, 16)
+    let skip: u64 = ulib.to_num((&offs[0]) as u64)
+    var total: u64 = 0
+    var shown: u64 = 0
+    var next: u64 = 0
+    var lines: socbuf.SB = socbuf.sb((&socstate.st_lines[0]) as u64, 4095)
+    actwire.ob_reset()
+    var at: usize = 0
+    while at < socstate.book.len {
+        let lp: u64 = socstate.book.ptr + at as u64
+        if socbook.matches(lp, (&filter[0]) as u64) {
+            if total >= skip && next == 0 {
+                let before: u64 = actwire.ob_len()
+                socbuf.ob_s("contact.")
+                actwire.ob_num(shown + 1)
+                actwire.ob_ch(61)
+                socbook.ob_contact(lp)
+                actwire.ob_ch(10)
+                if actwire.ob_len() > socstate.PAGE_MAX as u64 {
+                    // does not fit: this one starts the next page
+                    next = total
+                } else {
+                    socbuf.sb_bytes(&lines, actwire.ob_ptr() + before,
+                        (actwire.ob_len() - before) as usize)
+                    shown = shown + 1
+                }
+            }
+            total = total + 1
+        }
+        at = at + socbuf.line_len(lp) + 1
+    }
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_kn("total", total)
+    socbuf.ob_kn("next", next)
+    actwire.ob_n(lines.ptr, lines.len as u64)
+}
+
+fn a_get(msg: u64) {
+    var id: [u8; 96] = [0 as u8; 96]
+    let _i: bool = socbuf.arg(msg, "id", (&id[0]) as u64, 96)
+    let at: i64 = socbook.book_find((&id[0]) as u64, socbuf.zlen((&id[0]) as u64))
+    if at < 0 {
+        socbuf.ob_err("no_such_contact")
+        return
+    }
+    let lp: u64 = socstate.book.ptr + at as u64
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_s("id=")
+    socbook.ob_id(lp)
+    actwire.ob_ch(10)
+    var n: usize = 0
+    var p: u64 = socbuf.fld(lp, 0, &n)
+    socbuf.ob_kv("provider", p, n)
+    var names: [str; 11] = ["provider", "id_at_provider", "relation", "presence", "name",
+        "handle", "status_text", "activity", "since_s", "chat", "joinable"]
+    var k: usize = 2
+    while k <= 10 {
+        if k == 8 {
+            socbuf.ob_kn("since_s", socbook.since_now(lp))
+        } else {
+            p = socbuf.fld(lp, k, &n)
+            socbuf.ob_s(names[k])
+            actwire.ob_ch(61)
+            socbook.ob_safe(p, n)
+            actwire.ob_ch(10)
+        }
+        k = k + 1
+    }
+}
+
+// "prov:id" -> provider index and the id at the provider (zero-terminated)
+fn split_id(msg: u64, idz: u64, max: usize) -> i64 {
+    var id: [u8; 96] = [0 as u8; 96]
+    let _i: bool = socbuf.arg(msg, "id", (&id[0]) as u64, 96)
+    let ip: u64 = (&id[0]) as u64
+    let n: usize = socbuf.zlen(ip)
+    var c: usize = 0
+    while c < n && socbuf.r_ld8(ip, c) != 58 as u8 {
+        c = c + 1
+    }
+    if c == 0 || c >= n - 1 {
+        return -1
+    }
+    let pi: i64 = socprov.prov_find(ip, c)
+    if pi < 0 {
+        return -1
+    }
+    socbuf.zset(idz, max, ip + (c + 1) as u64, n - c - 1)
+    return pi
+}
+
+fn relation_of(idp: u64) -> str {
+    let at: i64 = socbook.book_find(idp, socbuf.zlen(idp))
+    if at < 0 {
+        return "none"
+    }
+    let lp: u64 = socstate.book.ptr + at as u64
+    if socbook.fld_is(lp, 2, "friend") {
+        return "friend"
+    }
+    if socbook.fld_is(lp, 2, "incoming") {
+        return "incoming"
+    }
+    if socbook.fld_is(lp, 2, "outgoing") {
+        return "outgoing"
+    }
+    if socbook.fld_is(lp, 2, "blocked") {
+        return "blocked"
+    }
+    return "none"
+}
+
+// the last line of a provider's answer ("err<TAB>code<TAB>text") as our error
+fn ob_provider_err(out: *mut socbuf.SB, code: i64) {
+    if code == 3 {
+        socbuf.ob_err("provider denied")
+    } else if code == 2 || code == 124 || code == 127 {
+        socbuf.ob_err("provider offline")
+    } else {
+        socbuf.ob_err("provider error")
+    }
+    // what the provider said, for whoever reads the reply (and the log)
+    socbuf.ob_kn("exit", code as u64)
+    var at: usize = 0
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
+        let ll: usize = socbuf.line_len(lp)
+        if ll > 4 && socbuf.is(lp, 4, "err\t") {
+            socbuf.ob_s("detail=")
+            socbook.ob_safe(lp + 4, ll - 4)
+            actwire.ob_ch(10)
+        }
+        at = at + ll + 1
+    }
+}
+
+// request / accept / decline / withdraw / remove
+fn a_relation(msg: u64, verb: str, dry: bool) -> bool {
+    var idz: [u8; 96] = [0 as u8; 96]
+    let pi: i64 = split_id(msg, (&idz[0]) as u64, 96)
+    if pi < 0 {
+        socbuf.ob_err("no_such_contact")
+        return false
+    }
+    if dry {
+        actwire.ob_reset()
+        socbuf.ob_s("ok\ndry=1\nwould=")
+        socbuf.ob_s(verb)
+        actwire.ob_ch(32)
+        actwire.ob_n(socprov.pname(pi as usize), socbuf.zlen(socprov.pname(pi as usize)) as u64)
+        actwire.ob_ch(58)
+        actwire.ob_str((&idz[0]) as u64)
+        actwire.ob_ch(10)
+        return false
+    }
+    if socujob.defer_user(pi as usize) {
+        return false
+    }
+    let ui: usize = pi as usize
+    let _f: bool = socbuf.arg(msg, "id", socujob.cx((&u_full[0]) as u64, ui, 96), 96)
+    socbuf.zset(socujob.cx((&socstate.u_idz[0]) as u64, ui, 96), 96, (&idz[0]) as u64, socbuf.zlen((&idz[0]) as u64))
+    socbuf.zset_s(socujob.cx((&u_verb[0]) as u64, ui, 12), 12, verb)
+    var w1: [u8; 9] = "relation\0"
+    var w2: [u8; 12] = [0 as u8; 12]
+    socbuf.zset_s((&w2[0]) as u64, 12, verb)
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&w1[0]) as u64
+    ws[1] = (&w2[0]) as u64
+    ws[2] = (&idz[0]) as u64
+    return socujob.ujob_begin(ui, socstate.UK_REL, &ws)
+}
+
+fn ob_relation_reply(i: usize) {
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    let rel: str = relation_of(socujob.cx((&u_full[0]) as u64, i, 96))
+    socbuf.ob_s("relation=")
+    socbuf.ob_s(rel)
+    actwire.ob_ch(10)
+    let vp: u64 = socujob.cx((&u_verb[0]) as u64, i, 12)
+    if socbuf.isz(vp, "request") || socbuf.isz(vp, "accept") {
+        socbuf.ob_s("@undo id=")
+        actwire.ob_n(socprov.pname(i), socbuf.zlen(socprov.pname(i)) as u64)
+        actwire.ob_ch(58)
+        actwire.ob_str(socujob.cx((&socstate.u_idz[0]) as u64, i, 96))
+        actwire.ob_ch(10)
+    }
+}
+
+fn search_collect(i: usize, out: *mut socbuf.SB, lines: *mut socbuf.SB, cnt0: u64) -> u64 {
+    var cnt: u64 = cnt0
+    var at: usize = 0
+    while at < (*out).len && cnt < 10 {
+        let lp: u64 = (*out).ptr + at as u64
+        let ll: usize = socbuf.line_len(lp)
+        if ll > 2 && socbuf.r_ld8(lp, 0) == 99 as u8 {
+            socbuf.sb_bytes(lines, "contact.".p as u64, 8)
+            socbuf.sb_dec(lines, cnt + 1)
+            socbuf.sb_push(lines, 61 as u8)
+            socbuf.sb_bytes(lines, socprov.pname(i), socbuf.zlen(socprov.pname(i)))
+            socbuf.sb_push(lines, 58 as u8)
+            var k: usize = 1
+            while k <= 5 {
+                var n: usize = 0
+                let p: u64 = socbuf.fld(lp, k, &n)
+                if k > 1 {
+                    socbuf.sb_push(lines, 124 as u8)
+                }
+                var j: usize = 0
+                while j < n {
+                    var ch: u8 = socbuf.r_ld8(p, j)
+                    if ch == 124 as u8 {
+                        ch = 47 as u8
+                    }
+                    socbuf.sb_push(lines, ch)
+                    j = j + 1
+                }
+                k = k + 1
+            }
+            socbuf.sb_bytes(lines, "|||\n".p as u64, 4)
+            cnt = cnt + 1
+        }
+        at = at + ll + 1
+    }
+    return cnt
+}
+
+fn ob_search_reply() {
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_kn("count", g_scnt)
+    actwire.ob_n((&g_sl[0]) as u64, g_sln as u64)
+}
+
+fn a_search(msg: u64) {
+    if socstate.n_prov > 0 && socujob.defer_group() {
+        return
+    }
+    let _q: bool = socbuf.arg(msg, "query", (&socstate.g_q[0]) as u64, 64)
+    g_sln = 0
+    g_scnt = 0
+    if socstate.n_prov > 0 && socujob.group_start(socstate.UK_GSRCH) {
+        return
+    }
+    ob_search_reply()
+}
+
+fn search_take(i: usize, out: *mut socbuf.SB) {
+    var lines: socbuf.SB = socbuf.sb((&g_sl[0]) as u64, 2047)
+    lines.len = g_sln
+    g_scnt = search_collect(i, out, &lines, g_scnt)
+    g_sln = lines.len
+}

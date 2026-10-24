@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import actwire
+import socbook
+import socbuf
+import socprov
+import socstate
+import socujob
+
+export { a_accounts, a_login, ob_login_body }
+
+fn a_accounts() {
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_kn("count", socstate.n_prov as u64)
+    var i: usize = 0
+    while i < socstate.n_prov {
+        // "name|state|account|caps"
+        socbuf.ob_s("account.")
+        actwire.ob_num((i + 1) as u64)
+        actwire.ob_ch(61)
+        actwire.ob_n(socprov.pname(i), socbuf.zlen(socprov.pname(i)) as u64)
+        actwire.ob_ch(124)
+        socbuf.ob_s(socprov.state_word(socstate.p_state[i]))
+        actwire.ob_ch(124)
+        socbook.ob_safe(socprov.pacct(i), socbuf.zlen(socprov.pacct(i)))
+        actwire.ob_ch(124)
+        socbook.ob_safe(socprov.pcaps(i), socbuf.zlen(socprov.pcaps(i)))
+        actwire.ob_ch(10)
+        i = i + 1
+    }
+}
+
+// social.accounts.login provider=<account> [token=<...>]: the provider's
+// own way in. `pair` = a code the person types in at her account.
+fn a_login(msg: u64, dry: bool) -> bool {
+    var pv: [u8; 16] = [0 as u8; 16]
+    var tk: [u8; 200] = [0 as u8; 200]
+    let _p: bool = socbuf.arg(msg, "provider", (&pv[0]) as u64, 16)
+    let _t: bool = socbuf.arg(msg, "token", (&tk[0]) as u64, 200)
+    let pi: i64 = socprov.prov_find((&pv[0]) as u64, socbuf.zlen((&pv[0]) as u64))
+    if pi < 0 {
+        socbuf.ob_err("no_such_provider")
+        return false
+    }
+    let i: usize = pi as usize
+    if !socprov.has_cap(i, "login") {
+        socbuf.ob_err("unsupported login")
+        return false
+    }
+    if dry {
+        actwire.ob_reset()
+        socbuf.ob_s("ok\ndry=1\nwould=login ")
+        actwire.ob_str(socprov.pname(i))
+        actwire.ob_ch(10)
+        return false
+    }
+    if socujob.defer_user(i) {
+        return false
+    }
+    var w1: [u8; 6] = "login\0"
+    var w2: [u8; 6] = "token\0"
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&w1[0]) as u64
+    if socbuf.zlen((&tk[0]) as u64) > 0 {
+        ws[1] = (&w2[0]) as u64
+        ws[2] = (&tk[0]) as u64
+    }
+    return socujob.ujob_begin(i, socstate.UK_LOGIN, &ws)
+}
+
+fn ob_login_body(out: *mut socbuf.SB) {
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    var at: usize = 0
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
+        let ll: usize = socbuf.line_len(lp)
+        var n: usize = 0
+        if ll > 5 && socbuf.is(lp, 5, "pair\t") {
+            socbuf.ob_s("state=pending\n")
+            let p: u64 = socbuf.fld(lp, 1, &n)
+            socbuf.ob_kv("code", p, n)
+            let p2: u64 = socbuf.fld(lp, 2, &n)
+            socbuf.ob_kv("valid_s", p2, n)
+        }
+        if ll > 8 && socbuf.is(lp, 8, "account\t") {
+            socbuf.ob_s("state=ok\n")
+            let p3: u64 = socbuf.fld(lp, 1, &n)
+            socbuf.ob_kv("account", p3, n)
+        }
+        at = at + ll + 1
+    }
+}

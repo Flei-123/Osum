@@ -1,0 +1,186 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import actwire
+import socjob
+import socacct
+import socbook
+import socbuf
+import sochello
+import socinv
+import socmsg
+import socpriv
+import socstate
+import socujob
+import socview
+
+export { user_tick }
+
+const UK_REL2: u8 = 2
+const UK_INV2: u8 = 5
+const UK_ANS2: u8 = 7
+const UK_LOGIN2: u8 = 9
+const UK_LOGIN3: u8 = 10
+
+fn user_done(i: usize, kind: u8, code: i64) {
+    let slot: usize = socstate.US_BASE + i
+    let n: usize = socjob.job_len(slot)
+    let p: u64 = socjob.job_out(slot)
+    socbuf.r_st8(p, n, 0 as u8)
+    var o: socbuf.SB = socbuf.sb(p, 16383)
+    o.len = n
+    let id: u64 = socstate.u_id[i]
+    if kind == socstate.UK_GACT || kind == socstate.UK_GREF || kind == socstate.UK_GSRCH {
+        if kind == socstate.UK_GREF {
+            socbook.book_update(i, &o, code)
+            socbook.mark_stale(i, socstate.JK_CONTACTS)
+        } else if kind == socstate.UK_GSRCH {
+            if code == 0 {
+                socview.search_take(i, &o)
+            }
+        } else if code == 0 {
+            socstate.g_any = true
+        }
+        socjob.job_release(slot)
+        if socstate.g_left > 0 {
+            socstate.g_left = socstate.g_left - 1
+        }
+        if socstate.g_left == 0 {
+            if kind == socstate.UK_GREF {
+                socujob.ob_refresh_reply()
+            } else if kind == socstate.UK_GSRCH {
+                socview.ob_search_reply()
+            } else {
+                socpriv.ob_activity_reply(socstate.g_any)
+            }
+            socujob.reply_to(socstate.g_id)
+        }
+        return
+    }
+    if kind == socstate.UK_REL {
+        if code != 0 {
+            socview.ob_provider_err(&o, code)
+            socjob.job_release(slot)
+            socujob.reply_to(id)
+            return
+        }
+        socjob.job_release(slot)
+        if !socujob.ujob_word(i, UK_REL2, "contacts") {
+            socview.ob_relation_reply(i)
+            socujob.reply_to(id)
+        }
+        return
+    }
+    if kind == UK_REL2 {
+        socbook.book_update(i, &o, code)
+        socbook.mark_stale(i, socstate.JK_CONTACTS)
+        socjob.job_release(slot)
+        socview.ob_relation_reply(i)
+        socujob.reply_to(id)
+        return
+    }
+    if kind == socstate.UK_SEND {
+        if code != 0 {
+            socview.ob_provider_err(&o, code)
+        } else {
+            socmsg.send_done(i, &o)
+        }
+        socjob.job_release(slot)
+        socujob.reply_to(id)
+        return
+    }
+    if kind == socstate.UK_INV {
+        if code != 0 {
+            socview.ob_provider_err(&o, code)
+            socjob.job_release(slot)
+            socujob.reply_to(id)
+            return
+        }
+        socinv.inv_sent_take(i, &o)
+        socjob.job_release(slot)
+        if !socujob.ujob_word(i, UK_INV2, "invites") {
+            socinv.ob_inv_sent_reply(i)
+            socujob.reply_to(id)
+        }
+        return
+    }
+    if kind == UK_INV2 {
+        socinv.invs_update(i, &o, code)
+        socbook.mark_stale(i, socstate.JK_INVITES)
+        socjob.job_release(slot)
+        socinv.ob_inv_sent_reply(i)
+        socujob.reply_to(id)
+        return
+    }
+    if kind == socstate.UK_ANS {
+        if code != 0 {
+            socview.ob_provider_err(&o, code)
+            socjob.job_release(slot)
+            socujob.reply_to(id)
+            return
+        }
+        socinv.ans_take(i, &o)
+        socjob.job_release(slot)
+        if !socujob.ujob_word(i, UK_ANS2, "invites") {
+            socinv.ob_ans_reply(i)
+            socujob.reply_to(id)
+        }
+        return
+    }
+    if kind == UK_ANS2 {
+        socinv.invs_update(i, &o, code)
+        socbook.mark_stale(i, socstate.JK_INVITES)
+        socjob.job_release(slot)
+        socinv.ob_ans_reply(i)
+        socujob.reply_to(id)
+        return
+    }
+    if kind == socstate.UK_LOGIN {
+        if code != 0 && code != 4 {
+            socview.ob_provider_err(&o, code)
+            socjob.job_release(slot)
+            socujob.reply_to(id)
+            return
+        }
+        socacct.ob_login_body(&o)
+        let sp: u64 = socujob.cx((&socstate.u_tx[0]) as u64, i, 1200)
+        socbuf.zset(sp, 1200, actwire.ob_ptr(), actwire.ob_len() as usize)
+        socjob.job_release(slot)
+        if code != 0 || !socujob.ujob_word(i, UK_LOGIN2, "hello") {
+            socujob.reply_stored_login(i, id)
+        }
+        return
+    }
+    if kind == UK_LOGIN2 {
+        sochello.hello_apply(i, &o, code)
+        socstate.p_hello[i] = 1 as u8
+        socjob.job_release(slot)
+        if !socujob.ujob_word(i, UK_LOGIN3, "contacts") {
+            socujob.reply_stored_login(i, id)
+        }
+        return
+    }
+    if kind == UK_LOGIN3 {
+        socbook.book_update(i, &o, code)
+        socbook.mark_stale(i, socstate.JK_CONTACTS)
+        socjob.job_release(slot)
+        socujob.reply_stored_login(i, id)
+        return
+    }
+    socjob.job_release(slot)
+}
+
+fn user_tick() {
+    var i: usize = 0
+    while i < socstate.n_prov {
+        let slot: usize = socstate.US_BASE + i
+        if socjob.job_busy(slot) {
+            let code: i64 = socjob.job_poll(slot)
+            if code >= 0 {
+                user_done(i, socjob.job_kind(slot), code)
+            }
+        }
+        i = i + 1
+    }
+}

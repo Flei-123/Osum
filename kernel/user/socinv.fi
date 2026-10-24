@@ -1,0 +1,475 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import actwire
+import socperm
+import socparty
+import socbook
+import socbuf
+import sochello
+import socmsg
+import socprov
+import socstate
+import socujob
+import socview
+
+export { invs_update, a_inv_list, a_inv_send, inv_sent_take, ob_inv_sent_reply, a_inv_answer, a_party_take, ans_take, ob_ans_reply }
+
+static mut u_iv: [u8; 320] = [0 as u8; 320]
+static mut u_sv: [u8; 192] = [0 as u8; 192]
+static mut u_tv: [u8; 1088] = [0 as u8; 1088]
+static mut u_got: [u8; 8] = [0 as u8; 8]
+static mut p_inv_seen: [u8; 8] = [0 as u8; 8]
+static mut st_inv2: [u8; 8192] = [0 as u8; 8192]
+static mut inv_flip: bool = false
+
+
+fn invite_from_ok(lp: u64) -> bool {
+    if !socbook.fld_is(lp, 3, "in") {
+        return true
+    }
+    var an: usize = 0
+    let ap: u64 = socbuf.fld(lp, 0, &an)
+    var pn: usize = 0
+    let pp: u64 = socbuf.fld(lp, 2, &pn)
+    var idb: [u8; 96] = [0 as u8; 96]
+    var ib: socbuf.SB = socbuf.sb((&idb[0]) as u64, 95)
+    socbuf.sb_bytes(&ib, ap, an)
+    socbuf.sb_push(&ib, 58 as u8)
+    socbuf.sb_bytes(&ib, pp, pn)
+    var rn: usize = 0
+    var rp: u64 = ib.ptr
+    let at: i64 = socbook.book_find(ib.ptr, ib.len)
+    if at >= 0 {
+        rp = socbuf.fld(socstate.book.ptr + at as u64, 2, &rn)
+    }
+    return socperm.invite_allowed(rp, rn)
+}
+
+// Every provider's invites; a new incoming open one rings the bell.
+fn invs_update(i: usize, out: *mut socbuf.SB, code: i64) {
+    var nb: socbuf.SB = socbuf.sb((&socstate.st_inv[0]) as u64, socstate.INV_CAP)
+    if !inv_flip {
+        nb = socbuf.sb((&st_inv2[0]) as u64, socstate.INV_CAP)
+    }
+    var j: usize = 0
+    while j < socstate.n_prov {
+        var fresh: bool = j == i && code == 0
+        if fresh {
+            var at: usize = 0
+            while at < (*out).len {
+                let lp: u64 = (*out).ptr + at as u64
+                let ll: usize = socbuf.line_len(lp)
+                if ll > 2 && socbuf.r_ld8(lp, 0) == 105 as u8 && socbuf.r_ld8(lp, 1) == 9 as u8 {
+                    let keep0: usize = nb.len
+                    socbuf.sb_bytes(&nb, socprov.pname(i), socbuf.zlen(socprov.pname(i)))
+                    socbuf.sb_bytes(&nb, lp + 1, ll - 1)
+                    socbuf.sb_push(&nb, 10 as u8)
+                    if !invite_from_ok(nb.ptr + keep0 as u64) {
+                        nb.len = keep0
+                    }
+                }
+                at = at + ll + 1
+            }
+        } else {
+            var a2: usize = 0
+            while a2 < socstate.invs.len {
+                let lp2: u64 = socstate.invs.ptr + a2 as u64
+                let l2: usize = socbuf.line_len(lp2)
+                var pn: usize = 0
+                let pp: u64 = socbuf.fld(lp2, 0, &pn)
+                if pn == socbuf.zlen(socprov.pname(j)) && socbuf.r_eq(pp, socprov.pname(j), pn) && invite_from_ok(lp2) {
+                    socbuf.sb_bytes(&nb, lp2, l2 + 1)
+                }
+                a2 = a2 + l2 + 1
+            }
+        }
+        j = j + 1
+    }
+    var at3: usize = 0
+    while at3 < nb.len {
+        let lp: u64 = nb.ptr + at3 as u64
+        let ll: usize = socbuf.line_len(lp)
+        if socbook.fld_is(lp, 3, "in") && socbook.fld_is(lp, 5, "open") {
+            var old: bool = false
+            var a4: usize = 0
+            while a4 < socstate.invs.len {
+                let op: u64 = socstate.invs.ptr + a4 as u64
+                if socbook.same_fld(lp, op, 0) && socbook.same_fld(lp, op, 1) {
+                    old = true
+                }
+                a4 = a4 + socbuf.line_len(op) + 1
+            }
+            if !old && p_inv_seen[i] != 0 as u8 {
+                inv_event(lp)
+            }
+        }
+        at3 = at3 + ll + 1
+    }
+    inv_flip = !inv_flip
+    socstate.invs = nb
+    if code == 0 {
+        p_inv_seen[i] = 1 as u8
+    }
+}
+
+// "<account>:<invid>" of an invite line
+fn ob_inv_id(lp: u64) {
+    var n: usize = 0
+    let p0: u64 = socbuf.fld(lp, 0, &n)
+    actwire.ob_n(p0, n as u64)
+    actwire.ob_ch(58)
+    let p1: u64 = socbuf.fld(lp, 1, &n)
+    actwire.ob_n(p1, n as u64)
+}
+
+fn inv_event(lp: u64) {
+    var an: usize = 0
+    let ap: u64 = socbuf.fld(lp, 0, &an)
+    var pn: usize = 0
+    let pp: u64 = socbuf.fld(lp, 2, &pn)
+    var idb: [u8; 96] = [0 as u8; 96]
+    var ib: socbuf.SB = socbuf.sb((&idb[0]) as u64, 95)
+    socbuf.sb_bytes(&ib, ap, an)
+    socbuf.sb_push(&ib, 58 as u8)
+    socbuf.sb_bytes(&ib, pp, pn)
+    var nn: usize = 0
+    let np: u64 = socbuf.fld(lp, 8, &nn)
+    actwire.ob_reset()
+    socbuf.ob_s("event social.invite\nid=")
+    ob_inv_id(lp)
+    actwire.ob_ch(10)
+    socbuf.ob_s("from=")
+    actwire.ob_n(ib.ptr, ib.len as u64)
+    actwire.ob_ch(10)
+    socbuf.ob_s("kind=")
+    var kn: usize = 0
+    let kp: u64 = socbuf.fld(lp, 4, &kn)
+    socbook.ob_safe(kp, kn)
+    actwire.ob_ch(10)
+    socbuf.ob_s("name=")
+    socbook.ob_safe(np, nn)
+    actwire.ob_ch(10)
+    actwire.send_msg(socstate.svc_bus, actwire.K_EVT, socstate.evt_no, actwire.ob_ptr(), actwire.ob_len())
+    socstate.evt_no = socstate.evt_no + 1
+    var bb0: [u8; 200] = [0 as u8; 200]
+    var bb: socbuf.SB = socbuf.sb((&bb0[0]) as u64, 199)
+    sochello.name_into(&bb, ib.ptr, ib.len)
+    socbuf.sb_push(&bb, 32 as u8)
+    if socbuf.is(kp, kn, "join") {
+        socbuf.sb_bytes(&bb, (&socstate.w_join[0]) as u64, socbuf.zlen((&socstate.w_join[0]) as u64))
+    } else {
+        socbuf.sb_bytes(&bb, (&socstate.w_invite[0]) as u64, socbuf.zlen((&socstate.w_invite[0]) as u64))
+    }
+    socbuf.sb_push(&bb, 32 as u8)
+    socbuf.sb_bytes(&bb, np, nn)
+    sochello.bell(bb.ptr, bb.len)
+    socbuf.say("social: invite from ")
+    socbuf.sayb(ib.ptr, ib.len)
+    socbuf.say("\n")
+}
+
+// invite.N=<account>:<invid>|<account>:<peer>|in/out|invite/join|state|age_s|target|name
+fn ob_invite(lp: u64) {
+    ob_inv_id(lp)
+    actwire.ob_ch(124)
+    var n: usize = 0
+    let p0: u64 = socbuf.fld(lp, 0, &n)
+    actwire.ob_n(p0, n as u64)
+    actwire.ob_ch(58)
+    let p2: u64 = socbuf.fld(lp, 2, &n)
+    actwire.ob_n(p2, n as u64)
+    var k: usize = 3
+    while k <= 8 {
+        actwire.ob_ch(124)
+        let p: u64 = socbuf.fld(lp, k, &n)
+        socbook.ob_safe(p, n)
+        k = k + 1
+    }
+}
+
+fn a_inv_list(msg: u64) {
+    var filter: [u8; 16] = [0 as u8; 16]
+    let _f: bool = socbuf.arg(msg, "filter", (&filter[0]) as u64, 16)
+    let only_open: bool = socbuf.isz((&filter[0]) as u64, "open")
+    var lines: socbuf.SB = socbuf.sb((&socstate.st_lines[0]) as u64, 4095)
+    actwire.ob_reset()
+    var c: u64 = 0
+    var at: usize = 0
+    while at < socstate.invs.len {
+        let lp: u64 = socstate.invs.ptr + at as u64
+        if !only_open || socbook.fld_is(lp, 5, "open") {
+            let before: u64 = actwire.ob_len()
+            c = c + 1
+            socbuf.ob_s("invite.")
+            actwire.ob_num(c)
+            actwire.ob_ch(61)
+            ob_invite(lp)
+            actwire.ob_ch(10)
+            socbuf.sb_bytes(&lines, actwire.ob_ptr() + before, (actwire.ob_len() - before) as usize)
+        }
+        at = at + socbuf.line_len(lp) + 1
+    }
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_kn("count", c)
+    actwire.ob_n(lines.ptr, lines.len as u64)
+}
+
+// social.invites.send id=<account>:<peer> kind=invite|join [name=] [target=]
+// name defaults to my own activity (an invite) -- asking to join names
+// what the friend plays.
+fn a_inv_send(msg: u64, dry: bool) -> bool {
+    var idz: [u8; 96] = [0 as u8; 96]
+    let pi: i64 = socview.split_id(msg, (&idz[0]) as u64, 96)
+    if pi < 0 {
+        socbuf.ob_err("no_such_contact")
+        return false
+    }
+    let i: usize = pi as usize
+    if !socprov.has_cap(i, "invite") {
+        socbuf.ob_err("unsupported invite")
+        return false
+    }
+    var kind: [u8; 8] = [0 as u8; 8]
+    var nm: [u8; 64] = [0 as u8; 64]
+    var tg: [u8; 130] = [0 as u8; 130]
+    let _k: bool = socbuf.arg(msg, "kind", (&kind[0]) as u64, 8)
+    let _n: bool = socbuf.arg(msg, "name", (&nm[0]) as u64, 64)
+    let _t: bool = socbuf.arg(msg, "target", (&tg[0]) as u64, 130)
+    let kp: u64 = (&kind[0]) as u64
+    if socbuf.zlen(kp) == 0 {
+        socbuf.zset_s(kp, 8, "invite")
+    }
+    if !socbuf.isz(kp, "invite") && !socbuf.isz(kp, "join") {
+        socbuf.ob_err("bad_arg kind")
+        return false
+    }
+    if socbuf.zlen((&nm[0]) as u64) == 0 {
+        if socbuf.isz(kp, "invite") {
+            socbuf.zset((&nm[0]) as u64, 64, (&socstate.my_act[0]) as u64, socbuf.zlen((&socstate.my_act[0]) as u64))
+        } else {
+            var full: [u8; 96] = [0 as u8; 96]
+            var fb: socbuf.SB = socbuf.sb((&full[0]) as u64, 95)
+            socmsg.full_id(&fb, i, (&idz[0]) as u64, socbuf.zlen((&idz[0]) as u64))
+            let at: i64 = socbook.book_find(fb.ptr, fb.len)
+            if at >= 0 {
+                var an: usize = 0
+                let ap: u64 = socbuf.fld(socstate.book.ptr + at as u64, 7, &an)
+                socbuf.zset((&nm[0]) as u64, 64, ap, an)
+            }
+        }
+    }
+    if socbuf.zlen((&nm[0]) as u64) == 0 {
+        socbuf.ob_err("bad_arg name")
+        return false
+    }
+    if socbuf.zlen((&tg[0]) as u64) == 0 && socbuf.isz(kp, "invite") && socparty.has_target() {
+        socbuf.zset((&tg[0]) as u64, 130, socparty.target_ptr(), socbuf.zlen(socparty.target_ptr()))
+    }
+    if socbuf.zlen((&tg[0]) as u64) == 0 {
+        socbuf.zset_s((&tg[0]) as u64, 130, "-")
+    }
+    if dry {
+        actwire.ob_reset()
+        socbuf.ob_s("ok\ndry=1\nwould=")
+        actwire.ob_str(kp)
+        actwire.ob_ch(32)
+        actwire.ob_n(socprov.pname(i), socbuf.zlen(socprov.pname(i)) as u64)
+        actwire.ob_ch(58)
+        actwire.ob_str((&idz[0]) as u64)
+        actwire.ob_ch(10)
+        return false
+    }
+    if socujob.defer_user(i) {
+        return false
+    }
+    var w1: [u8; 7] = "invite\0"
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&w1[0]) as u64
+    ws[1] = (&idz[0]) as u64
+    ws[2] = kp
+    ws[3] = (&tg[0]) as u64
+    ws[4] = (&nm[0]) as u64
+    return socujob.ujob_begin(i, socstate.UK_INV, &ws)
+}
+
+fn inv_sent_take(i: usize, out: *mut socbuf.SB) {
+    let ivp: u64 = socujob.cx((&u_iv[0]) as u64, i, 40)
+    socbuf.r_st8(ivp, 0, 0 as u8)
+    var at: usize = 0
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
+        let ll: usize = socbuf.line_len(lp)
+        if ll > 2 && socbuf.r_ld8(lp, 0) == 105 as u8 && socbuf.r_ld8(lp, 1) == 9 as u8 {
+            var n: usize = 0
+            let p: u64 = socbuf.fld(lp, 1, &n)
+            if n > 39 {
+                n = 39
+            }
+            socbuf.zset(ivp, 40, p, n)
+        }
+        at = at + ll + 1
+    }
+}
+
+fn ob_inv_sent_reply(i: usize) {
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    let ivp: u64 = socujob.cx((&u_iv[0]) as u64, i, 40)
+    if socbuf.zlen(ivp) > 0 {
+        socbuf.ob_s("invite=")
+        actwire.ob_n(socprov.pname(i), socbuf.zlen(socprov.pname(i)) as u64)
+        actwire.ob_ch(58)
+        actwire.ob_n(ivp, socbuf.zlen(ivp) as u64)
+        actwire.ob_ch(10)
+    }
+}
+
+// the newest open invite that came in from `from` ("account:peer"):
+// its account index, its id into idz; -1 when there is none
+fn inv_from(from: u64, idz: u64, max: usize) -> i64 {
+    let fn0: usize = socbuf.zlen(from)
+    var found: i64 = -1
+    var at: usize = 0
+    while at < socstate.invs.len {
+        let lp: u64 = socstate.invs.ptr + at as u64
+        if socbook.fld_is(lp, 3, "in") && socbook.fld_is(lp, 5, "open") {
+            var an: usize = 0
+            let ap: u64 = socbuf.fld(lp, 0, &an)
+            var pn: usize = 0
+            let pp: u64 = socbuf.fld(lp, 2, &pn)
+            if an + 1 + pn == fn0 && socbuf.r_eq(from, ap, an) && socbuf.r_ld8(from, an) == 58 as u8
+                && socbuf.r_eq(from + (an + 1) as u64, pp, pn) {
+                found = socprov.prov_find(ap, an)
+                var inn: usize = 0
+                let ip: u64 = socbuf.fld(lp, 1, &inn)
+                socbuf.zset(idz, max, ip, inn)
+            }
+        }
+        at = at + socbuf.line_len(lp) + 1
+    }
+    return found
+}
+
+// social.invites.answer id=<account>:<invid> | from=<account>:<peer>
+//   accept=true|false [target=]
+fn a_inv_answer(msg: u64, dry: bool) -> bool {
+    var idz: [u8; 96] = [0 as u8; 96]
+    var pi: i64 = socview.split_id(msg, (&idz[0]) as u64, 96)
+    var fromv: [u8; 96] = [0 as u8; 96]
+    if pi < 0 && socbuf.arg(msg, "from", (&fromv[0]) as u64, 96) {
+        pi = inv_from((&fromv[0]) as u64, (&idz[0]) as u64, 96)
+    }
+    if pi < 0 {
+        socbuf.ob_err("no_such_invite")
+        return false
+    }
+    let i: usize = pi as usize
+    if !socprov.has_cap(i, "answer") {
+        socbuf.ob_err("unsupported answer")
+        return false
+    }
+    var ac: [u8; 8] = [0 as u8; 8]
+    var tg: [u8; 130] = [0 as u8; 130]
+    let _a: bool = socbuf.arg(msg, "accept", (&ac[0]) as u64, 8)
+    let _t: bool = socbuf.arg(msg, "target", (&tg[0]) as u64, 130)
+    let yes: bool = socbuf.isz((&ac[0]) as u64, "true") || socbuf.isz((&ac[0]) as u64, "1")
+    if yes && socbuf.zlen((&tg[0]) as u64) == 0 && socparty.has_target()
+        && socparty.is_incoming_join(socstate.invs.ptr, socstate.invs.len, (&idz[0]) as u64) {
+        socbuf.zset((&tg[0]) as u64, 130, socparty.target_ptr(), socbuf.zlen(socparty.target_ptr()))
+    }
+    if dry {
+        actwire.ob_reset()
+        socbuf.ob_s("ok\ndry=1\nwould=answer ")
+        actwire.ob_str((&idz[0]) as u64)
+        if yes {
+            socbuf.ob_s(" yes\n")
+        } else {
+            socbuf.ob_s(" no\n")
+        }
+        return false
+    }
+    if socujob.defer_user(i) {
+        return false
+    }
+    var w1: [u8; 7] = "answer\0"
+    var wy: [u8; 4] = "yes\0"
+    var wn: [u8; 3] = "no\0"
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&w1[0]) as u64
+    ws[1] = (&idz[0]) as u64
+    if yes {
+        ws[2] = (&wy[0]) as u64
+    } else {
+        ws[2] = (&wn[0]) as u64
+    }
+    if socbuf.zlen((&tg[0]) as u64) > 0 {
+        ws[3] = (&tg[0]) as u64
+    }
+    return socujob.ujob_begin(i, socstate.UK_ANS, &ws)
+}
+
+fn a_party_take(msg: u64, dry: bool) {
+    var wanted: [u8; 64] = [0 as u8; 64]
+    let _w: bool = socbuf.arg(msg, "name", (&wanted[0]) as u64, 64)
+    let at: i64 = socparty.find_ready(socstate.invs.ptr, socstate.invs.len, (&wanted[0]) as u64)
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    if at < 0 {
+        socbuf.ob_s("found=false\n")
+        return
+    }
+    let lp: u64 = socstate.invs.ptr + at as u64
+    if dry {
+        socbuf.ob_s("dry=1\nwould=take\n")
+        return
+    }
+    socparty.mark_taken(lp)
+    socbuf.ob_s("found=true\n")
+    var n: usize = 0
+    var p: u64 = socbuf.fld(lp, 7, &n)
+    socbuf.ob_kv("target", p, n)
+    p = socbuf.fld(lp, 8, &n)
+    socbuf.ob_kv("name", p, n)
+    p = socbuf.fld(lp, 4, &n)
+    socbuf.ob_kv("kind", p, n)
+    var an: usize = 0
+    let ap: u64 = socbuf.fld(lp, 0, &an)
+    socbuf.ob_s("from=")
+    actwire.ob_n(ap, an as u64)
+    actwire.ob_ch(58)
+    p = socbuf.fld(lp, 2, &n)
+    actwire.ob_n(p, n as u64)
+    actwire.ob_ch(10)
+}
+
+fn ans_take(i: usize, out: *mut socbuf.SB) {
+    u_got[i] = 0 as u8
+    var at: usize = 0
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
+        let ll: usize = socbuf.line_len(lp)
+        if ll > 2 && socbuf.r_ld8(lp, 0) == 105 as u8 && socbuf.r_ld8(lp, 1) == 9 as u8 {
+            var n: usize = 0
+            let sp: u64 = socbuf.fld(lp, 5, &n)
+            socbuf.zset(socujob.cx((&u_sv[0]) as u64, i, 24), 24, sp, n)
+            let tp: u64 = socbuf.fld(lp, 7, &n)
+            socbuf.zset(socujob.cx((&u_tv[0]) as u64, i, 136), 136, tp, n)
+            u_got[i] = 1 as u8
+        }
+        at = at + ll + 1
+    }
+}
+
+fn ob_ans_reply(i: usize) {
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    if u_got[i] != 0 as u8 {
+        let svp: u64 = socujob.cx((&u_sv[0]) as u64, i, 24)
+        let tvp: u64 = socujob.cx((&u_tv[0]) as u64, i, 136)
+        socbuf.ob_kv("state", svp, socbuf.zlen(svp))
+        socbuf.ob_kv("target", tvp, socbuf.zlen(tvp))
+    }
+}

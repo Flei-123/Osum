@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import actwire
+import socjob
+import socperm
+import socbuf
+import socprov
+import socstate
+
+export { book_find, ob_id, ob_safe, since_now, ob_contact, fld_is, matches, same_fld, book_update, mark_stale, invisible, act_goes }
+
+static mut p_got: [u64; 8] = [0 as u64; 8]
+static mut st_b: [u8; 16384] = [0 as u8; 16384]
+
+
+// the book line of `id` ("prov:id"), or -1
+fn book_find(p: u64, n: usize) -> i64 {
+    var at: usize = 0
+    while at < socstate.book.len {
+        let lp: u64 = socstate.book.ptr + at as u64
+        var pn: usize = 0
+        let pp: u64 = socbuf.fld(lp, 0, &pn)
+        var inn: usize = 0
+        let ip: u64 = socbuf.fld(lp, 1, &inn)
+        if n == pn + 1 + inn && socbuf.r_eq(p, pp, pn)
+            && socbuf.r_ld8(p, pn) == 58 as u8 && socbuf.r_eq(p + (pn + 1) as u64, ip, inn) {
+            return at as i64
+        }
+        at = at + socbuf.line_len(lp) + 1
+    }
+    return -1
+}
+
+// "prov:id" of the line at lp into the output buffer
+fn ob_id(lp: u64) {
+    var n: usize = 0
+    let p0: u64 = socbuf.fld(lp, 0, &n)
+    actwire.ob_n(p0, n as u64)
+    actwire.ob_ch(58)
+    let p1: u64 = socbuf.fld(lp, 1, &n)
+    actwire.ob_n(p1, n as u64)
+}
+
+// a field into the output, with '|' and control characters out
+fn ob_safe(p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        var c: u8 = socbuf.r_ld8(p, i)
+        if c == 124 as u8 {
+            c = 47 as u8
+        }
+        if c < 32 as u8 {
+            c = 32 as u8
+        }
+        actwire.ob_ch(c as u64)
+        i = i + 1
+    }
+}
+
+fn since_now(lp: u64) -> u64 {
+    var n: usize = 0
+    let p: u64 = socbuf.fld(lp, 8, &n)
+    var v: u64 = 0
+    var i: usize = 0
+    while i < n {
+        v = v * 10 + (socbuf.r_ld8(p, i) - 48 as u8) as u64
+        i = i + 1
+    }
+    var gn: usize = 0
+    let gp: u64 = socbuf.fld(lp, 0, &gn)
+    let gi: i64 = socprov.prov_find(gp, gn)
+    var g: u64 = 0
+    if gi >= 0 {
+        g = p_got[gi as usize]
+    }
+    return v + (actwire.ticks() - g) / 100
+}
+
+// "prov:id|relation|presence|name|handle|status|activity|since_s"
+fn ob_contact(lp: u64) {
+    ob_id(lp)
+    var k: usize = 2
+    while k <= 7 {
+        actwire.ob_ch(124)
+        var n: usize = 0
+        let p: u64 = socbuf.fld(lp, k, &n)
+        ob_safe(p, n)
+        k = k + 1
+    }
+    actwire.ob_ch(124)
+    var an: usize = 0
+    let _a: u64 = socbuf.fld(lp, 7, &an)
+    if an > 0 {
+        actwire.ob_num(since_now(lp))
+    }
+    // joinable: the provider said the activity is open to join
+    actwire.ob_ch(124)
+    if fld_is(lp, 10, "1") {
+        actwire.ob_ch(49)
+    } else {
+        actwire.ob_ch(48)
+    }
+}
+
+fn fld_is(lp: u64, k: usize, s: str) -> bool {
+    var n: usize = 0
+    let p: u64 = socbuf.fld(lp, k, &n)
+    return socbuf.is(p, n, s)
+}
+
+fn matches(lp: u64, filter: u64) -> bool {
+    if socbuf.zlen(filter) == 0 || socbuf.isz(filter, "all") {
+        return true
+    }
+    if socbuf.isz(filter, "friends") {
+        return fld_is(lp, 2, "friend")
+    }
+    if socbuf.isz(filter, "incoming") {
+        return fld_is(lp, 2, "incoming")
+    }
+    if socbuf.isz(filter, "outgoing") {
+        return fld_is(lp, 2, "outgoing")
+    }
+    let friend: bool = fld_is(lp, 2, "friend")
+    if socbuf.isz(filter, "online") {
+        return friend && (fld_is(lp, 3, "online") || fld_is(lp, 3, "away")
+            || fld_is(lp, 3, "dnd"))
+    }
+    if socbuf.isz(filter, "active") {
+        var n: usize = 0
+        let _p: u64 = socbuf.fld(lp, 7, &n)
+        return friend && n > 0
+    }
+    return false
+}
+
+// the same field in two lines?
+fn same_fld(a: u64, b: u64, k: usize) -> bool {
+    var an: usize = 0
+    var bn: usize = 0
+    let ap: u64 = socbuf.fld(a, k, &an)
+    let bp: u64 = socbuf.fld(b, k, &bn)
+    return an == bn && socbuf.r_eq(ap, bp, an)
+}
+
+fn event2(name: str, lp: u64, key: str, k: usize) {
+    actwire.ob_reset()
+    socbuf.ob_s("event ")
+    socbuf.ob_s(name)
+    actwire.ob_ch(10)
+    socbuf.ob_s("id=")
+    ob_id(lp)
+    actwire.ob_ch(10)
+    socbuf.ob_s(key)
+    actwire.ob_ch(61)
+    var n: usize = 0
+    let p: u64 = socbuf.fld(lp, k, &n)
+    ob_safe(p, n)
+    actwire.ob_ch(10)
+    actwire.send_msg(socstate.svc_bus, actwire.K_EVT, socstate.evt_no, actwire.ob_ptr(),
+        actwire.ob_len())
+    socstate.evt_no = socstate.evt_no + 1
+}
+
+// What changed between `old` and the book: events.
+fn diff(old: *mut socbuf.SB) {
+    var at: usize = 0
+    while at < socstate.book.len {
+        let lp: u64 = socstate.book.ptr + at as u64
+        // the same id in the old book
+        var pn: usize = 0
+        let pp: u64 = socbuf.fld(lp, 0, &pn)
+        var inn: usize = 0
+        let ip: u64 = socbuf.fld(lp, 1, &inn)
+        var found: u64 = 0
+        var bt: usize = 0
+        while bt < (*old).len && found == 0 {
+            let op: u64 = (*old).ptr + bt as u64
+            if same_fld(lp, op, 0) && same_fld(lp, op, 1) {
+                found = op
+            }
+            bt = bt + socbuf.line_len(op) + 1
+        }
+        if found == 0 {
+            event2("social.contact", lp, "relation", 2)
+        } else {
+            if !same_fld(lp, found, 2) {
+                event2("social.contact", lp, "relation", 2)
+            }
+            if !same_fld(lp, found, 3) {
+                event2("social.presence", lp, "presence", 3)
+            }
+            if !same_fld(lp, found, 7) {
+                event2("social.activity", lp, "activity", 7)
+            }
+        }
+        at = at + socbuf.line_len(lp) + 1
+    }
+}
+
+fn book_keep(nb: *mut socbuf.SB, i: usize) -> u64 {
+    var cnt: u64 = 0
+    var at2: usize = 0
+    while at2 < socstate.book.len {
+        let lp2: u64 = socstate.book.ptr + at2 as u64
+        let ll2: usize = socbuf.line_len(lp2)
+        var pn: usize = 0
+        let pp: u64 = socbuf.fld(lp2, 0, &pn)
+        if pn == socbuf.zlen(socprov.pname(i)) && socbuf.r_eq(pp, socprov.pname(i), pn) {
+            socbuf.sb_bytes(nb, lp2, ll2 + 1)
+            cnt = cnt + 1
+        }
+        at2 = at2 + ll2 + 1
+    }
+    return cnt
+}
+
+fn book_take(nb: *mut socbuf.SB, i: usize, out: *mut socbuf.SB, code: i64) {
+    socstate.p_state[i] = socprov.state_of(code)
+    var cnt: u64 = 0
+    if code == 0 {
+        p_got[i] = actwire.ticks()
+        var at: usize = 0
+        while at < (*out).len {
+            let lp: u64 = (*out).ptr + at as u64
+            let ll: usize = socbuf.line_len(lp)
+            if ll > 2 && socbuf.r_ld8(lp, 0) == 99 as u8 && socbuf.r_ld8(lp, 1) == 9 as u8 {
+                socbuf.sb_bytes(nb, socprov.pname(i), socbuf.zlen(socprov.pname(i)))
+                socbuf.sb_bytes(nb, lp + 1, ll - 1)
+                socbuf.sb_push(nb, 10 as u8)
+                cnt = cnt + 1
+            }
+            at = at + ll + 1
+        }
+    } else {
+        cnt = book_keep(nb, i)
+    }
+    socstate.p_count[i] = cnt
+}
+
+fn book_next() -> socbuf.SB {
+    var nb: socbuf.SB = socbuf.sb((&socstate.st_a[0]) as u64, 16383)
+    if !socstate.flip {
+        nb = socbuf.sb((&st_b[0]) as u64, 16383)
+    }
+    socstate.flip = !socstate.flip
+    return nb
+}
+
+fn book_install(nb: socbuf.SB) {
+    var old: socbuf.SB = socstate.book
+    socstate.book = nb
+    socbuf.sb_push(&socstate.book, 0 as u8)
+    socstate.book.len = socstate.book.len - 1
+    diff(&old)
+}
+
+fn book_update(i: usize, out: *mut socbuf.SB, code: i64) {
+    var nb: socbuf.SB = book_next()
+    var j: usize = 0
+    while j < socstate.n_prov {
+        if j == i {
+            book_take(&nb, i, out, code)
+        } else {
+            let _k: u64 = book_keep(&nb, j)
+        }
+        j = j + 1
+    }
+    book_install(nb)
+}
+
+fn mark_stale(i: usize, kind: u8) {
+    if socjob.job_busy(i) && socjob.job_kind(i) == kind {
+        socstate.j_stale[i] = 1 as u8
+    }
+}
+
+fn invisible() -> bool {
+    return socbuf.isz((&socstate.my_pres[0]) as u64, "invisible")
+}
+
+fn act_goes() -> bool {
+    return socbuf.zlen((&socstate.my_act[0]) as u64) > 0 && socstate.share_act && !invisible()
+        && !socperm.never_hit((&socstate.my_act_client[0]) as u64, (&socstate.my_act[0]) as u64)
+}

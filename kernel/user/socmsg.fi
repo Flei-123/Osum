@@ -1,0 +1,405 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import ulib
+import actwire
+import socbook
+import socbuf
+import sochello
+import socprov
+import socstate
+import socujob
+import socview
+
+export { msgs_save, full_id, msg_line, inbox_apply, a_msg_send, send_done, a_msg_list, a_msg_unread, a_msg_read }
+
+fn msgs_save() {
+    let _w: bool = socbuf.write_file("/etc/social/messages", socstate.msgs.ptr, socstate.msgs.len)
+}
+
+// one line into the store; the oldest go when it is full
+fn msgs_add(id: u64, idn: usize, stamp: u64, dir: str, read: bool, t: u64, tn: usize) {
+    var ln: [u8; 1400] = [0 as u8; 1400]
+    var l: socbuf.SB = socbuf.sb((&ln[0]) as u64, 1399)
+    socbuf.sb_bytes(&l, id, idn)
+    socbuf.sb_push(&l, 9 as u8)
+    socbuf.sb_dec(&l, stamp)
+    socbuf.sb_push(&l, 9 as u8)
+    socbuf.sb_bytes(&l, dir.p as u64, dir.n)
+    socbuf.sb_push(&l, 9 as u8)
+    if read {
+        socbuf.sb_push(&l, 49 as u8)
+    } else {
+        socbuf.sb_push(&l, 48 as u8)
+    }
+    socbuf.sb_push(&l, 9 as u8)
+    var i: usize = 0
+    while i < tn && l.len < 1398 {
+        var ch: u8 = socbuf.r_ld8(t, i)
+        if ch == 9 as u8 || ch == 10 as u8 || ch == 13 as u8 {
+            ch = 32 as u8
+        }
+        socbuf.sb_push(&l, ch)
+        i = i + 1
+    }
+    socbuf.sb_push(&l, 10 as u8)
+    // make room: drop whole lines from the front
+    while socstate.msgs.len + l.len > socstate.msgs.cap && socstate.msgs.len > 0 {
+        let first: usize = socbuf.line_len(socstate.msgs.ptr) + 1
+        var k: usize = first
+        while k < socstate.msgs.len {
+            socbuf.r_st8(socstate.msgs.ptr, k - first, socbuf.r_ld8(socstate.msgs.ptr, k))
+            k = k + 1
+        }
+        socstate.msgs.len = socstate.msgs.len - first
+    }
+    socbuf.sb_bytes(&socstate.msgs, l.ptr, l.len)
+}
+
+fn id_is(lp: u64, id: u64, idn: usize) -> bool {
+    var n: usize = 0
+    let p: u64 = socbuf.fld(lp, 0, &n)
+    return n == idn && socbuf.r_eq(p, id, idn)
+}
+
+// "<account>:<peer>" of a provider line's peer
+fn full_id(b: *mut socbuf.SB, i: usize, peer: u64, pn: usize) {
+    socbuf.sb_bytes(b, socprov.pname(i), socbuf.zlen(socprov.pname(i)))
+    socbuf.sb_push(b, 58 as u8)
+    socbuf.sb_bytes(b, peer, pn)
+}
+
+fn msg_line(i: usize, lp: u64, ll: usize) {
+        // m peer stamp in|out text
+        var pn: usize = 0
+        let pp: u64 = socbuf.fld(lp, 1, &pn)
+        var sn: usize = 0
+        let sp: u64 = socbuf.fld(lp, 2, &sn)
+        var dn: usize = 0
+        let dp: u64 = socbuf.fld(lp, 3, &dn)
+        let tp: u64 = lp + (2 + pn + 1 + sn + 1 + dn + 1) as u64
+        var tn: usize = 0
+        if 2 + pn + 1 + sn + 1 + dn + 1 <= ll {
+            tn = ll - (2 + pn + 1 + sn + 1 + dn + 1)
+        }
+        var stamp: u64 = 0
+        var q: usize = 0
+        while q < sn {
+            stamp = stamp * 10 + (socbuf.r_ld8(sp, q) - 48 as u8) as u64
+            q = q + 1
+        }
+        var idb: [u8; 96] = [0 as u8; 96]
+        var ib: socbuf.SB = socbuf.sb((&idb[0]) as u64, 95)
+        full_id(&ib, i, pp, pn)
+        let incoming: bool = socbuf.is(dp, dn, "in")
+        if incoming {
+            msgs_add(ib.ptr, ib.len, stamp, "in", false, tp, tn)
+            // the event and the bell
+            actwire.ob_reset()
+            socbuf.ob_s("event social.message\nid=")
+            actwire.ob_n(ib.ptr, ib.len as u64)
+            actwire.ob_ch(10)
+            socbuf.ob_s("text=")
+            var k: usize = tn
+            if k > 200 {
+                k = 200
+            }
+            socbook.ob_safe(tp, k)
+            actwire.ob_ch(10)
+            actwire.send_msg(socstate.svc_bus, actwire.K_EVT, socstate.evt_no,
+                actwire.ob_ptr(), actwire.ob_len())
+            socstate.evt_no = socstate.evt_no + 1
+            var nb: [u8; 160] = [0 as u8; 160]
+            var bb: socbuf.SB = socbuf.sb((&nb[0]) as u64, 159)
+            sochello.name_into(&bb, ib.ptr, ib.len)
+            socbuf.sb_bytes(&bb, ": ".p as u64, 2)
+            socbuf.sb_bytes(&bb, tp, tn)
+            sochello.bell(bb.ptr, bb.len)
+            socbuf.say("social: message from ")
+            socbuf.sayb(ib.ptr, ib.len)
+            socbuf.say("\n")
+        } else {
+            msgs_add(ib.ptr, ib.len, stamp, "out", true, tp, tn)
+        }
+}
+
+// what came since the last call, at every provider that can chat
+fn inbox_apply(i: usize, out: *mut socbuf.SB) -> bool {
+    var changed: bool = false
+    var at: usize = 0
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
+        let ll: usize = socbuf.line_len(lp)
+        if ll > 2 && socbuf.r_ld8(lp, 0) == 109 as u8 && socbuf.r_ld8(lp, 1) == 9 as u8 {
+            msg_line(i, lp, ll)
+            changed = true
+        }
+        at = at + ll + 1
+    }
+    return changed
+}
+
+fn now_unix() -> u64 {
+    var ts: [i64; 2] = [0 as i64; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+// social.messages.send id=<account>:<peer> text=...
+fn a_msg_send(msg: u64, dry: bool) -> bool {
+    var idz: [u8; 96] = [0 as u8; 96]
+    let pi: i64 = socview.split_id(msg, (&idz[0]) as u64, 96)
+    if pi < 0 {
+        socbuf.ob_err("no_such_contact")
+        return false
+    }
+    let i: usize = pi as usize
+    if !socprov.has_cap(i, "send") {
+        socbuf.ob_err("unsupported send")
+        return false
+    }
+    var tx: [u8; 1200] = [0 as u8; 1200]
+    let _t: bool = socbuf.arg(msg, "text", (&tx[0]) as u64, 1200)
+    let tn: usize = socbuf.zlen((&tx[0]) as u64)
+    if tn == 0 {
+        socbuf.ob_err("bad_arg text")
+        return false
+    }
+    if dry {
+        actwire.ob_reset()
+        socbuf.ob_s("ok\ndry=1\nwould=send ")
+        actwire.ob_n(socprov.pname(i), socbuf.zlen(socprov.pname(i)) as u64)
+        actwire.ob_ch(58)
+        actwire.ob_str((&idz[0]) as u64)
+        actwire.ob_ch(10)
+        return false
+    }
+    if socujob.defer_user(i) {
+        return false
+    }
+    socbuf.zset(socujob.cx((&socstate.u_idz[0]) as u64, i, 96), 96, (&idz[0]) as u64, socbuf.zlen((&idz[0]) as u64))
+    socbuf.zset(socujob.cx((&socstate.u_tx[0]) as u64, i, 1200), 1200, (&tx[0]) as u64, tn)
+    var w1: [u8; 5] = "send\0"
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&w1[0]) as u64
+    ws[1] = (&idz[0]) as u64
+    ws[2] = (&tx[0]) as u64
+    return socujob.ujob_begin(i, socstate.UK_SEND, &ws)
+}
+
+fn send_done(i: usize, out: *mut socbuf.SB) {
+    var idb: [u8; 96] = [0 as u8; 96]
+    var ib: socbuf.SB = socbuf.sb((&idb[0]) as u64, 95)
+    let idp: u64 = socujob.cx((&socstate.u_idz[0]) as u64, i, 96)
+    let txp: u64 = socujob.cx((&socstate.u_tx[0]) as u64, i, 1200)
+    full_id(&ib, i, idp, socbuf.zlen(idp))
+    msgs_add(ib.ptr, ib.len, now_unix(), "out", true, txp, socbuf.zlen(txp))
+    msgs_save()
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    var at: usize = 0
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
+        let ll: usize = socbuf.line_len(lp)
+        if ll > 5 && socbuf.is(lp, 5, "sent\t") {
+            var n: usize = 0
+            let p: u64 = socbuf.fld(lp, 1, &n)
+            socbuf.ob_kv("devices", p, n)
+        }
+        at = at + ll + 1
+    }
+}
+
+// social.messages.list id=<...> [before=<index>]: the newest that fit,
+// oldest of them first; `first` is the index of the first one shown
+fn a_msg_list(msg: u64) {
+    var id: [u8; 96] = [0 as u8; 96]
+    var bf: [u8; 16] = [0 as u8; 16]
+    let _i: bool = socbuf.arg(msg, "id", (&id[0]) as u64, 96)
+    let hasb: bool = socbuf.arg(msg, "before", (&bf[0]) as u64, 16)
+    let idp: u64 = (&id[0]) as u64
+    let idn: usize = socbuf.zlen(idp)
+    var total: u64 = 0
+    var at: usize = 0
+    while at < socstate.msgs.len {
+        let lp: u64 = socstate.msgs.ptr + at as u64
+        if id_is(lp, idp, idn) {
+            total = total + 1
+        }
+        at = at + socbuf.line_len(lp) + 1
+    }
+    var before: u64 = total
+    if hasb {
+        before = ulib.to_num((&bf[0]) as u64)
+        if before > total {
+            before = total
+        }
+    }
+    // how many of the newest before `before` fit into one reply
+    var fit: u64 = 0
+    var size: u64 = 0
+    var idx: u64 = total
+    // walk from the back: find each message's line length
+    while idx > 0 && fit < 40 {
+        // the line of index idx-1
+        var k: u64 = 0
+        var a2: usize = 0
+        var len: u64 = 0
+        while a2 < socstate.msgs.len {
+            let lp: u64 = socstate.msgs.ptr + a2 as u64
+            if id_is(lp, idp, idn) {
+                if k == idx - 1 {
+                    len = socbuf.line_len(lp) as u64
+                }
+                k = k + 1
+            }
+            a2 = a2 + socbuf.line_len(lp) + 1
+        }
+        if idx <= before {
+            if size + len + 16 > socstate.PAGE_MAX as u64 {
+                idx = 0
+            } else {
+                size = size + len + 16
+                fit = fit + 1
+                idx = idx - 1
+            }
+        } else {
+            idx = idx - 1
+        }
+    }
+    let first: u64 = before - fit
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_kn("total", total)
+    socbuf.ob_kn("first", first)
+    var k2: u64 = 0
+    var n: u64 = 0
+    at = 0
+    while at < socstate.msgs.len {
+        let lp: u64 = socstate.msgs.ptr + at as u64
+        let ll: usize = socbuf.line_len(lp)
+        if id_is(lp, idp, idn) {
+            if k2 >= first && k2 < before {
+                // message.N=index|stamp|dir|read|text
+                n = n + 1
+                socbuf.ob_s("message.")
+                actwire.ob_num(n)
+                actwire.ob_ch(61)
+                actwire.ob_num(k2)
+                var f: usize = 1
+                while f <= 3 {
+                    actwire.ob_ch(124)
+                    var fn2: usize = 0
+                    let fp: u64 = socbuf.fld(lp, f, &fn2)
+                    socbook.ob_safe(fp, fn2)
+                    f = f + 1
+                }
+                actwire.ob_ch(124)
+                var tn: usize = 0
+                let tp: u64 = socbuf.fld(lp, 4, &tn)
+                // the text is the rest of the line
+                let rest: usize = ll - (tp - lp) as usize
+                socbook.ob_safe(tp, rest)
+                actwire.ob_ch(10)
+            }
+            k2 = k2 + 1
+        }
+        at = at + ll + 1
+    }
+}
+
+fn a_msg_unread() {
+    var lines: socbuf.SB = socbuf.sb((&socstate.st_lines[0]) as u64, 4095)
+    var ids: [u8; 4096] = [0 as u8; 4096]
+    var seen: socbuf.SB = socbuf.sb((&ids[0]) as u64, 4095) // "id\n" each, in order
+    var total: u64 = 0
+    var at: usize = 0
+    while at < socstate.msgs.len {
+        let lp: u64 = socstate.msgs.ptr + at as u64
+        if socbook.fld_is(lp, 2, "in") && socbook.fld_is(lp, 3, "0") {
+            total = total + 1
+            var n: usize = 0
+            let p: u64 = socbuf.fld(lp, 0, &n)
+            var known: bool = false
+            var s2: usize = 0
+            while s2 < seen.len {
+                let q: u64 = seen.ptr + s2 as u64
+                let qn: usize = socbuf.line_len(q)
+                if qn == n && socbuf.r_eq(q, p, n) {
+                    known = true
+                }
+                s2 = s2 + qn + 1
+            }
+            if !known {
+                socbuf.sb_bytes(&seen, p, n)
+                socbuf.sb_push(&seen, 10 as u8)
+            }
+        }
+        at = at + socbuf.line_len(lp) + 1
+    }
+    var c: u64 = 0
+    var s3: usize = 0
+    while s3 < seen.len {
+        let q: u64 = seen.ptr + s3 as u64
+        let qn: usize = socbuf.line_len(q)
+        var cnt: u64 = 0
+        var a3: usize = 0
+        while a3 < socstate.msgs.len {
+            let lp: u64 = socstate.msgs.ptr + a3 as u64
+            if id_is(lp, q, qn) && socbook.fld_is(lp, 2, "in") && socbook.fld_is(lp, 3, "0") {
+                cnt = cnt + 1
+            }
+            a3 = a3 + socbuf.line_len(lp) + 1
+        }
+        c = c + 1
+        socbuf.sb_bytes(&lines, "contact.".p as u64, 8)
+        socbuf.sb_dec(&lines, c)
+        socbuf.sb_push(&lines, 61 as u8)
+        socbuf.sb_bytes(&lines, q, qn)
+        socbuf.sb_push(&lines, 124 as u8)
+        socbuf.sb_dec(&lines, cnt)
+        socbuf.sb_push(&lines, 10 as u8)
+        s3 = s3 + qn + 1
+    }
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_kn("total", total)
+    socbuf.ob_kn("contacts", c)
+    actwire.ob_n(lines.ptr, lines.len as u64)
+}
+
+fn a_msg_read(msg: u64, dry: bool) -> bool {
+    var id: [u8; 96] = [0 as u8; 96]
+    let _i: bool = socbuf.arg(msg, "id", (&id[0]) as u64, 96)
+    let idp: u64 = (&id[0]) as u64
+    let idn: usize = socbuf.zlen(idp)
+    if idn == 0 {
+        socbuf.ob_err("bad_arg id")
+        return false
+    }
+    if dry {
+        actwire.ob_reset()
+        socbuf.ob_s("ok\ndry=1\n")
+        return false
+    }
+    var marked: u64 = 0
+    var at: usize = 0
+    while at < socstate.msgs.len {
+        let lp: u64 = socstate.msgs.ptr + at as u64
+        if id_is(lp, idp, idn) && socbook.fld_is(lp, 2, "in") && socbook.fld_is(lp, 3, "0") {
+            var n: usize = 0
+            let p: u64 = socbuf.fld(lp, 3, &n)
+            socbuf.r_st8(p, 0, 49 as u8)
+            marked = marked + 1
+        }
+        at = at + socbuf.line_len(lp) + 1
+    }
+    if marked > 0 {
+        msgs_save()
+    }
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_kn("marked", marked)
+    return true
+}

@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import actwire
+
+export { S_READ, S_OPEN, S_CLOSE, r_ld8, r_st8, r_eq, SB, sb, sb_clear, sb_push, sb_bytes, sb_dec, zlen, zset, zset_s, is, isz, say, sayb, ob_s, ob_kv, ob_kn, ob_err, read_file, write_file, sleep_ms, fld, line_len, arg }
+
+const S_READ: i64 = 0
+const S_WRITE: i64 = 1
+const S_OPEN: i64 = 2
+const S_CLOSE: i64 = 3
+const S_NANOSLEEP: i64 = 35
+
+
+//
+// The programs under kernel/user/ are also assembled by `fas` on the
+// system itself (tools/k16/run.sh), and fas cannot take what the heap of
+// `profile app` compiles to (`lock xadd`, `fs:0`). So no SB here: a
+// buffer is a window on a static array, full is full (and counted).
+// std.rt is NOT imported: under `profile app` it brings the heap's
+// runtime along (see SB above) -- these five are all this file needs.
+fn r_ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn r_st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn r_copy(d: u64, s: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        r_st8(d, i, r_ld8(s, i))
+        i = i + 1
+    }
+}
+
+fn r_eq(a: u64, b: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < n {
+        if r_ld8(a, i) != r_ld8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn r_clen(p: u64) -> usize {
+    var n: usize = 0
+    while r_ld8(p, n) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+struct SB {
+    ptr: u64,
+    len: usize,
+    cap: usize,
+}
+
+fn sb(p: u64, cap: usize) -> SB {
+    return SB { ptr: p, len: 0, cap: cap }
+}
+
+fn sb_clear(b: *mut SB) {
+    (*b).len = 0
+}
+
+fn sb_push(b: *mut SB, c: u8) {
+    if (*b).len < (*b).cap {
+        r_st8((*b).ptr, (*b).len, c)
+        (*b).len = (*b).len + 1
+    }
+}
+
+fn sb_bytes(b: *mut SB, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        sb_push(b, r_ld8(p, i))
+        i = i + 1
+    }
+}
+
+fn sb_dec(b: *mut SB, v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: usize = 0
+    var x: u64 = v
+    while x > 0 || n == 0 {
+        d[n] = (48 + x % 10) as u8
+        n = n + 1
+        x = x / 10
+    }
+    while n > 0 {
+        n = n - 1
+        sb_push(b, d[n])
+    }
+}
+
+
+fn zlen(p: u64) -> usize {
+    return r_clen(p)
+}
+
+fn zset(dst: u64, cap: usize, p: u64, n: usize) {
+    var k: usize = n
+    if k > cap - 1 {
+        k = cap - 1
+    }
+    r_copy(dst, p, k)
+    r_st8(dst, k, 0 as u8)
+}
+
+fn zset_s(dst: u64, cap: usize, s: str) {
+    zset(dst, cap, s.p as u64, s.n)
+}
+
+fn is(p: u64, n: usize, s: str) -> bool {
+    if n != s.n {
+        return false
+    }
+    var i: usize = 0
+    while i < n {
+        if r_ld8(p, i) != r_ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn isz(p: u64, s: str) -> bool {
+    return is(p, zlen(p), s)
+}
+
+fn say(s: str) {
+    syscall(S_WRITE, 1, s.p as i64, s.n as i64, 0, 0, 0)
+}
+
+fn sayb(p: u64, n: usize) {
+    syscall(S_WRITE, 1, p as i64, n as i64, 0, 0, 0)
+}
+
+fn ob_s(s: str) {
+    actwire.ob_n(s.p as u64, s.n as u64)
+}
+
+fn ob_kv(k: str, p: u64, n: usize) {
+    ob_s(k)
+    actwire.ob_ch(61)
+    actwire.ob_n(p, n as u64)
+    actwire.ob_ch(10)
+}
+
+fn ob_kn(k: str, v: u64) {
+    ob_s(k)
+    actwire.ob_ch(61)
+    actwire.ob_num(v)
+    actwire.ob_ch(10)
+}
+
+fn ob_err(code: str) {
+    actwire.ob_reset()
+    ob_s("err ")
+    ob_s(code)
+    actwire.ob_ch(10)
+}
+
+fn read_file(path: str, into: *mut SB) -> bool {
+    var pz: [u8; 64] = [0 as u8; 64]
+    zset((&pz[0]) as u64, 64, path.p as u64, path.n)
+    let fd: i64 = syscall(S_OPEN, (&pz[0]) as i64, 0, 0, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    var chunk: [u8; 1024] = [0 as u8; 1024]
+    while true {
+        let n: i64 = syscall(S_READ, fd, (&chunk[0]) as i64, 1024, 0, 0, 0)
+        if n <= 0 {
+            break
+        }
+        sb_bytes(into, (&chunk[0]) as u64, n as usize)
+    }
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    return true
+}
+
+fn write_file(path: str, p: u64, n: usize) -> bool {
+    var pz: [u8; 64] = [0 as u8; 64]
+    zset((&pz[0]) as u64, 64, path.p as u64, path.n)
+    // O_WRONLY | O_CREAT | O_TRUNC
+    let fd: i64 = syscall(S_OPEN, (&pz[0]) as i64, 1 | 64 | 512, 384, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    syscall(S_WRITE, fd, p as i64, n as i64, 0, 0, 0)
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    return true
+}
+
+fn sleep_ms(ms: u64) {
+    var ts: [i64; 2] = [0 as i64; 2]
+    ts[0] = (ms / 1000) as i64
+    ts[1] = ((ms % 1000) * 1000000) as i64
+    syscall(S_NANOSLEEP, (&ts[0]) as i64, 0, 0, 0, 0, 0)
+}
+
+// Field k (0-based) of a TAB line starting at p (ends at LF or 0):
+// pointer and length.
+fn fld(p: u64, k: usize, out_n: *mut usize) -> u64 {
+    var i: usize = 0
+    var f: usize = 0
+    while f < k {
+        let c: u8 = r_ld8(p, i)
+        if c == 10 as u8 || c == 0 as u8 {
+            *out_n = 0
+            return p + i as u64
+        }
+        if c == 9 as u8 {
+            f = f + 1
+        }
+        i = i + 1
+    }
+    var e: usize = i
+    while r_ld8(p, e) != 9 as u8 && r_ld8(p, e) != 10 as u8
+        && r_ld8(p, e) != 0 as u8 {
+        e = e + 1
+    }
+    *out_n = e - i
+    return p + i as u64
+}
+
+fn line_len(p: u64) -> usize {
+    var i: usize = 0
+    while r_ld8(p, i) != 10 as u8 && r_ld8(p, i) != 0 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+fn arg(msg: u64, key: str, out: u64, max: u64) -> bool {
+    var kz: [u8; 24] = [0 as u8; 24]
+    zset((&kz[0]) as u64, 24, key.p as u64, key.n)
+    return actwire.kv_find(msg, (&kz[0]) as u64, out, max)
+}

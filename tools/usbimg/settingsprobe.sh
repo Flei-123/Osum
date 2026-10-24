@@ -25,14 +25,15 @@ KVM=()
 
 UITRACE=1 bash tools/usbimg/build.sh "$OUT/bau" > "$OUT/build.txt" 2>&1 \
     && ok "image builds (uitrace on)" || { bad "image does not build"; tail -5 "$OUT/build.txt"; echo "SETTINGSPROBE: $pass passed, $fail failed"; exit 1; }
-python3 tools/osum/mkfs.py list "$OUT/bau/root.img" 2>/dev/null | grep -q '/apps/social.prog/SETTINGS' \
+python3 tools/osum/mkfs.py list "$OUT/bau/root.img" > "$OUT/files.txt" 2>/dev/null
+grep -q '/apps/social.prog/SETTINGS' "$OUT/files.txt" \
     && ok "/apps/social.prog/SETTINGS is on the image" || bad "/apps/social.prog/SETTINGS is missing on the image"
 
 S="$OUT/serial.txt"; SOCK="$OUT/mon.sock"
 : > "$S"
 timeout 400 qemu-system-x86_64 "${KVM[@]}" -m 512 \
     -kernel "$OUT/bau/osum.mb" -initrd "$OUT/bau/root.img" \
-    -append "modfs osum gfx wm wig desk wmhold wighalt=300 nokbd nosched noproc nofs" \
+    -append "modfs osum gfx wm wig desk wmhold wighalt=300 nokbd nosched noproc nofs lang=en" \
     -serial "file:$S" -display none -no-reboot -vga std \
     -monitor "unix:$SOCK,server,nowait" > "$OUT/qemu.log" 2>&1 &
 QPID=$!
@@ -143,6 +144,11 @@ drive "$OUT/d4"
 RF=$(pf_since "$off" | tr '\n' ' ')
 echo "       rights page controls: [$RF]"
 [ -n "$RF" ] && ok "App rights: the page controls are reported" || bad "App rights: no control reported (pf..)"
+RFL=($RF)
+if [ "${#RFL[@]}" -ge 2 ]; then
+    probe_text_field ptabb "${RFL[$((${#RFL[@]}-2))]}" "app:probe contacts.read" allow
+    probe_text_field ptabb "${RFL[$((${#RFL[@]}-1))]}" "app:probe contacts.read" deny
+fi
 off=$(wc -l < "$S")
 cat > "$OUT/d5" <<'E'
 klickauf srectptabc
@@ -153,6 +159,10 @@ drive "$OUT/d5"
 PV=$(pf_since "$off" | tr '\n' ' ')
 echo "       privacy page controls: [$PV]"
 [ -n "$PV" ] && ok "Privacy: the page controls are reported" || bad "Privacy: no control reported (pf..)"
+PVL=($PV)
+if [ "${#PVL[@]}" -ge 2 ]; then
+    probe_text_field ptabc "${PVL[$((${#PVL[@]}-2))]}" "app:probe" entry
+fi
 if [ "$fail" != 0 ]; then
     echo "--- diagnosis: serial (settings/desk/wm lines) ---"; grep -aE '^(settings|desk|wm): ' "$S" | head -30 | cut -c1-160
     echo "--- diagnosis: launcher lines ---"; grep -aE '^launcher: (geom|tile)' "$S" | head -n 12 | cut -c1-160

@@ -1,0 +1,162 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import actwire
+import socbuf
+import socmsg
+import socprov
+import socstate
+
+export { watch_stop_all, watch_tick }
+
+const S_PIPE: i64 = 22
+const S_FCNTL: i64 = 72
+const F_SETFL: i64 = 4
+const O_NONBLOCK: i64 = 2048
+const WATCH_RETRY_TICKS: u64 = 500
+const WATCH_LINE: usize = 2048
+static mut w_fd: [i64; 8] = [0 as i64; 8]
+static mut w_live: [u8; 8] = [0 as u8; 8]
+static mut w_next: [u64; 8] = [0 as u64; 8]
+static mut w_len: [usize; 8] = [0 as usize; 8]
+static mut w_buf: [u8; 16384] = [0 as u8; 16384]
+
+fn watch_start(i: usize) {
+    w_next[i] = actwire.ticks() + WATCH_RETRY_TICKS
+    var fds: [i32; 2] = [0; 2]
+    if syscall(S_PIPE, (&fds[0]) as i64, 0, 0, 0, 0, 0) < 0 {
+        return
+    }
+    var wd: [u8; 6] = "watch\0"
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&wd[0]) as u64
+    var v1: [u8; 3] = "v1\0"
+    var dc: [u8; 100] = [0 as u8; 100]
+    var argv: [u64; 12] = [0 as u64; 12]
+    socprov.build_argv(i, &ws, &argv, &dc, &v1)
+    let kid: i64 = syscall(socstate.S_FORK, 0, 0, 0, 0, 0, 0)
+    if kid < 0 {
+        syscall(socbuf.S_CLOSE, fds[0] as i64, 0, 0, 0, 0, 0)
+        syscall(socbuf.S_CLOSE, fds[1] as i64, 0, 0, 0, 0, 0)
+        return
+    }
+    if kid == 0 {
+        syscall(socstate.S_DUP2, fds[1] as i64, 1, 0, 0, 0, 0)
+        syscall(socstate.S_DUP2, fds[1] as i64, 2, 0, 0, 0, 0)
+        syscall(socbuf.S_CLOSE, fds[0] as i64, 0, 0, 0, 0, 0)
+        syscall(socbuf.S_CLOSE, fds[1] as i64, 0, 0, 0, 0, 0)
+        syscall(socstate.S_EXECVE, argv[0] as i64, (&argv[0]) as i64, 0, 0, 0, 0)
+        syscall(60, 127, 0, 0, 0, 0, 0)
+    }
+    syscall(socbuf.S_CLOSE, fds[1] as i64, 0, 0, 0, 0, 0)
+    syscall(S_FCNTL, fds[0] as i64, F_SETFL, O_NONBLOCK, 0, 0, 0)
+    socstate.w_pid[i] = kid
+    w_fd[i] = fds[0] as i64
+    w_live[i] = 0 as u8
+    w_len[i] = 0
+}
+
+fn watch_end(i: usize) {
+    syscall(socbuf.S_CLOSE, w_fd[i], 0, 0, 0, 0, 0)
+    socstate.w_pid[i] = 0
+    w_live[i] = 0 as u8
+    w_len[i] = 0
+    w_next[i] = actwire.ticks() + WATCH_RETRY_TICKS
+}
+
+fn watch_stop_all() {
+    var i: usize = 0
+    while i < socstate.n_prov {
+        if socstate.w_pid[i] > 0 {
+            var st: i32 = 0
+            syscall(socstate.S_KILL, socstate.w_pid[i], 9, 0, 0, 0, 0)
+            syscall(socstate.S_WAIT4, socstate.w_pid[i], (&st) as i64, 0, 0, 0, 0)
+            watch_end(i)
+        }
+        i = i + 1
+    }
+}
+
+fn watch_slot(i: usize) -> u64 {
+    return (&w_buf[0]) as u64 + (i * WATCH_LINE) as u64
+}
+
+fn watch_line(i: usize, lp: u64, ll: usize) -> bool {
+    if ll > 2 && socbuf.r_ld8(lp, 0) == 109 as u8 && socbuf.r_ld8(lp, 1) == 9 as u8 {
+        socmsg.msg_line(i, lp, ll)
+        return true
+    }
+    if socbuf.is(lp, ll, "watch\t1") {
+        w_live[i] = 1 as u8
+        socbuf.say("social: watch live ")
+        socbuf.sayb(socprov.pname(i), socbuf.zlen(socprov.pname(i)))
+        socbuf.say("\n")
+    }
+    return false
+}
+
+fn watch_feed(i: usize, p: u64, n: usize) -> bool {
+    var changed: bool = false
+    let slot: u64 = watch_slot(i)
+    var k: usize = 0
+    while k < n {
+        let ch: u8 = socbuf.r_ld8(p, k)
+        if ch == 10 as u8 {
+            if w_len[i] < WATCH_LINE {
+                if watch_line(i, slot, w_len[i]) {
+                    changed = true
+                }
+            }
+            w_len[i] = 0
+        } else if w_len[i] < WATCH_LINE {
+            socbuf.r_st8(slot, w_len[i], ch)
+            w_len[i] = w_len[i] + 1
+        }
+        k = k + 1
+    }
+    return changed
+}
+
+fn watch_drain_one(i: usize) -> bool {
+    var changed: bool = false
+    var chunk: [u8; 512] = [0 as u8; 512]
+    var more: bool = true
+    while more {
+        let n: i64 = syscall(socbuf.S_READ, w_fd[i], (&chunk[0]) as i64, 512, 0, 0, 0)
+        if n > 0 {
+            if watch_feed(i, (&chunk[0]) as u64, n as usize) {
+                changed = true
+            }
+        } else {
+            more = false
+        }
+    }
+    var st: i32 = 0
+    if syscall(socstate.S_WAIT4, socstate.w_pid[i], (&st) as i64, socstate.WNOHANG, 0, 0, 0) != 0 {
+        socbuf.say("social: watch ended ")
+        socbuf.sayb(socprov.pname(i), socbuf.zlen(socprov.pname(i)))
+        socbuf.say("\n")
+        watch_end(i)
+    }
+    return changed
+}
+
+fn watch_tick() {
+    var changed: bool = false
+    var i: usize = 0
+    while i < socstate.n_prov {
+        if socstate.w_pid[i] > 0 {
+            if watch_drain_one(i) {
+                changed = true
+            }
+        } else if socprov.has_cap(i, "watch") && socstate.p_state[i] != 3 as u8
+            && actwire.ticks() >= w_next[i] {
+            watch_start(i)
+        }
+        i = i + 1
+    }
+    if changed {
+        socmsg.msgs_save()
+    }
+}

@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import actwire
+import socjob
+import socbuf
+import sochello
+import socprov
+import socstate
+
+export { cx, user_busy_any, defer_user, defer_group, reply_to, ujob_word, ujob_begin, group_start, ob_refresh_reply, a_refresh, reply_stored_login }
+
+//
+// A call of a person or an app runs as a job in the provider's user slot
+// (US_BASE + i); the request id is kept and the answer goes out when the
+// job is done. A provider that is busy (or has not said hello yet) makes
+// the request wait in socq.
+
+fn cx(base: u64, i: usize, w: usize) -> u64 {
+    return base + (i * w) as u64
+}
+
+fn user_busy_any() -> bool {
+    var i: usize = 0
+    while i < socstate.n_prov {
+        if socjob.job_busy(socstate.US_BASE + i) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn defer_user(i: usize) -> bool {
+    if socjob.job_busy(socstate.US_BASE + i) || socstate.p_hello[i] == 0 as u8 {
+        socstate.st_defer = true
+        return true
+    }
+    return false
+}
+
+fn defer_group() -> bool {
+    if user_busy_any() || sochello.hello_pending() {
+        socstate.st_defer = true
+        return true
+    }
+    return false
+}
+
+fn reply_to(id: u64) {
+    actwire.send_msg(socstate.svc_bus, actwire.K_REP, id, actwire.ob_ptr(), actwire.ob_len())
+}
+
+fn ujob_run(i: usize, kind: u8, ws: *mut [u64; 6]) -> bool {
+    var v1: [u8; 3] = "v1\0"
+    var dc: [u8; 100] = [0 as u8; 100]
+    var argv: [u64; 12] = [0 as u64; 12]
+    socprov.build_argv(i, ws, &argv, &dc, &v1)
+    return socjob.job_start(socstate.US_BASE + i, (&argv[0]) as u64, kind, socstate.CALL_TICKS)
+}
+
+fn ujob_word(i: usize, kind: u8, w: str) -> bool {
+    var wz: [u8; 16] = [0 as u8; 16]
+    socbuf.zset_s((&wz[0]) as u64, 16, w)
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&wz[0]) as u64
+    return ujob_run(i, kind, &ws)
+}
+
+fn ujob_begin(i: usize, kind: u8, ws: *mut [u64; 6]) -> bool {
+    socstate.u_id[i] = socstate.cur_id
+    if ujob_run(i, kind, ws) {
+        socstate.st_async = true
+        return true
+    }
+    socbuf.ob_err("provider offline")
+    return false
+}
+
+fn group_start(kind: u8) -> bool {
+    socstate.g_left = 0
+    socstate.g_any = false
+    socstate.g_id = socstate.cur_id
+    var w1: [u8; 9] = "activity\0"
+    var dj: [u8; 3] = "-j\0"
+    var i: usize = 0
+    while i < socstate.n_prov {
+        var started: bool = false
+        if kind == socstate.UK_GREF {
+            started = ujob_word(i, kind, "contacts")
+        } else if kind == socstate.UK_GSRCH {
+            var ws: [u64; 6] = [0 as u64; 6]
+            var wsr: [u8; 7] = "search\0"
+            ws[0] = (&wsr[0]) as u64
+            ws[1] = (&socstate.g_q[0]) as u64
+            started = ujob_run(i, kind, &ws)
+        } else {
+            var ws: [u64; 6] = [0 as u64; 6]
+            ws[0] = (&w1[0]) as u64
+            if socstate.my_join && socprov.has_cap(i, "join") {
+                ws[1] = (&dj[0]) as u64
+                ws[2] = (&socstate.my_act[0]) as u64
+            } else {
+                ws[1] = (&socstate.my_act[0]) as u64
+            }
+            started = ujob_run(i, kind, &ws)
+        }
+        if started {
+            socstate.g_left = socstate.g_left + 1
+        }
+        i = i + 1
+    }
+    if socstate.g_left > 0 {
+        socstate.st_async = true
+        return true
+    }
+    return false
+}
+
+fn ob_refresh_reply() {
+    var total: u64 = 0
+    var at: usize = 0
+    while at < socstate.book.len {
+        total = total + 1
+        at = at + socbuf.line_len(socstate.book.ptr + at as u64) + 1
+    }
+    actwire.ob_reset()
+    socbuf.ob_s("ok\n")
+    socbuf.ob_kn("contacts", total)
+}
+
+fn a_refresh() {
+    if socstate.n_prov > 0 && defer_group() {
+        return
+    }
+    if socstate.n_prov > 0 && group_start(socstate.UK_GREF) {
+        return
+    }
+    ob_refresh_reply()
+}
+
+fn reply_stored_login(i: usize, id: u64) {
+    let p: u64 = cx((&socstate.u_tx[0]) as u64, i, 1200)
+    actwire.ob_reset()
+    actwire.ob_n(p, socbuf.zlen(p) as u64)
+    reply_to(id)
+}

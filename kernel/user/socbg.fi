@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import ulib
+import actwire
+import socjob
+import socbook
+import socbuf
+import sochello
+import socinv
+import socmsg
+import socprov
+import socstate
+
+export { bg_tick }
+
+const GAMES_RETRY: u64 = 60000 // 10 min after a failure
+const GAMES_CALL: u64 = 1500 // 15 s for one fetch
+
+fn job_start_kind(i: usize, kind: u8) -> bool {
+    var ws: [u64; 6] = [0 as u64; 6]
+    var wc: [u8; 9] = "contacts\0"
+    var wv: [u8; 8] = "invites\0"
+    var wi: [u8; 6] = "inbox\0"
+    var wp: [u8; 9] = "presence\0"
+    var wa: [u8; 9] = "activity\0"
+    var wl: [u8; 6] = "alive\0"
+    var wg: [u8; 6] = "games\0"
+    var wh: [u8; 6] = "hello\0"
+    var dj: [u8; 3] = "-j\0"
+    var limit: u64 = socstate.CALL_TICKS
+    if kind == socstate.JK_HELLO {
+        ws[0] = (&wh[0]) as u64
+    } else if kind == socstate.JK_CONTACTS {
+        ws[0] = (&wc[0]) as u64
+    } else if kind == socstate.JK_INVITES {
+        ws[0] = (&wv[0]) as u64
+    } else if kind == socstate.JK_INBOX {
+        ws[0] = (&wi[0]) as u64
+    } else if kind == socstate.JK_PRESENCE {
+        ws[0] = (&wp[0]) as u64
+        ws[1] = (&socstate.my_pres[0]) as u64
+        if socbuf.zlen((&socstate.my_text[0]) as u64) > 0 {
+            ws[2] = (&socstate.my_text[0]) as u64
+        }
+    } else if kind == socstate.JK_ACTIVITY {
+        ws[0] = (&wa[0]) as u64
+        if socbook.act_goes() {
+            if socstate.my_join && socprov.has_cap(i, "join") {
+                ws[1] = (&dj[0]) as u64
+                ws[2] = (&socstate.my_act[0]) as u64
+            } else {
+                ws[1] = (&socstate.my_act[0]) as u64
+            }
+        }
+    } else if kind == socstate.JK_ALIVE {
+        ws[0] = (&wl[0]) as u64
+    } else {
+        ws[0] = (&wg[0]) as u64
+        limit = GAMES_CALL
+    }
+    var v1: [u8; 3] = "v1\0"
+    var dc: [u8; 100] = [0 as u8; 100]
+    var argv: [u64; 12] = [0 as u64; 12]
+    socprov.build_argv(i, &ws, &argv, &dc, &v1)
+    socstate.j_stale[i] = 0 as u8
+    return socjob.job_start(i, (&argv[0]) as u64, kind, limit)
+}
+
+fn job_done(i: usize, kind: u8, code: i64) {
+    let n: usize = socjob.job_len(i)
+    let p: u64 = socjob.job_out(i)
+    socbuf.r_st8(p, n, 0 as u8)
+    var o: socbuf.SB = socbuf.sb(p, 16383)
+    o.len = n
+    if kind == socstate.JK_HELLO {
+        sochello.hello_apply(i, &o, code)
+        sochello.hello_done(i)
+        return
+    }
+    if socstate.j_stale[i] != 0 as u8 && (kind == socstate.JK_CONTACTS || kind == socstate.JK_INVITES) {
+        return
+    }
+    if kind == socstate.JK_CONTACTS {
+        socbook.book_update(i, &o, code)
+        socbuf.say("social: book ")
+        var cnt: u64 = 0
+        var at: usize = 0
+        while at < socstate.book.len {
+            cnt = cnt + 1
+            at = at + socbuf.line_len(socstate.book.ptr + at as u64) + 1
+        }
+        var d2: [u8; 8] = [0 as u8; 8]
+        let dn2: u64 = ulib.digits(cnt, (&d2[0]) as u64)
+        socbuf.sayb((&d2[0]) as u64, dn2 as usize)
+        socbuf.say("\n")
+    } else if kind == socstate.JK_INVITES {
+        socinv.invs_update(i, &o, code)
+    } else if kind == socstate.JK_INBOX {
+        if code == 0 && socmsg.inbox_apply(i, &o) {
+            socmsg.msgs_save()
+        }
+    } else if kind == socstate.JK_GAMES {
+        if code != 0 {
+            socstate.g_next = actwire.ticks() + GAMES_RETRY
+        }
+    }
+}
+
+fn bg_tick() {
+    var i: usize = 0
+    while i < socstate.n_prov {
+        if socjob.job_busy(i) {
+            let code: i64 = socjob.job_poll(i)
+            if code >= 0 {
+                let kind: u8 = socjob.job_kind(i)
+                job_done(i, kind, code)
+                socjob.job_release(i)
+            }
+        }
+        if !socjob.job_busy(i) {
+            var k: u8 = 1 as u8
+            var started: bool = false
+            while k < socstate.JK_COUNT && !started {
+                if socstate.j_due[i * socstate.J_STRIDE + k as usize] != 0 as u8 {
+                    socstate.j_due[i * socstate.J_STRIDE + k as usize] = 0 as u8
+                    if socprov.job_eligible(i, k) {
+                        started = job_start_kind(i, k)
+                    }
+                }
+                k = k + 1 as u8
+            }
+        }
+        i = i + 1
+    }
+}
