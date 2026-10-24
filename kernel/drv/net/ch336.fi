@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import serial
+import lib.kstate
 import drv.usb.xhci
 import usbnet.ch397
 
-export { bringup, house, link, bmsr, cfg, fw, changes, mode_line }
+export { bringup, house, link, bmsr, cfg, fw, changes, mode_line, bmcr, phyid, aner, anar, lpa, kicks, kick_rc }
 
 const X_BMSR: u64 = 0x108
 const X_CFG: u64 = 0x110
@@ -14,6 +15,14 @@ const X_LINK: u64 = 0x130
 const X_ANAR: u64 = 0x138
 const X_LPA: u64 = 0x140
 const X_SPEED: u64 = 0x148
+const X_BMCR: u64 = 0x150
+const X_PHYID: u64 = 0x158
+const X_ANER: u64 = 0x160
+const X_KICKS: u64 = 0x168
+const X_KICKT: u64 = 0x170
+const X_KICKRC: u64 = 0x178
+const KICK_TICKS: u64 = 300
+const KICK_MAX: u64 = 3
 const WBUF: u64 = 0x200
 const RBUF: u64 = 0x300
 const CTL_DELAY_US: u64 = 10000
@@ -37,6 +46,13 @@ fn bmsr(b: u64) -> u64 { return getc(b, X_BMSR) }
 fn cfg(b: u64) -> u64 { return getc(b, X_CFG) }
 fn fw(b: u64) -> u64 { return getc(b, X_FWV) }
 fn changes(b: u64) -> u64 { return getc(b, X_CHG) }
+fn bmcr(b: u64) -> u64 { return getc(b, X_BMCR) }
+fn phyid(b: u64) -> u64 { return getc(b, X_PHYID) }
+fn aner(b: u64) -> u64 { return getc(b, X_ANER) }
+fn anar(b: u64) -> u64 { return getc(b, X_ANAR) }
+fn lpa(b: u64) -> u64 { return getc(b, X_LPA) }
+fn kicks(b: u64) -> u64 { return getc(b, X_KICKS) }
+fn kick_rc(b: u64) -> u64 { return getc(b, X_KICKRC) }
 
 fn hexn(v: u64, digits: u64) {
     var i: u64 = digits
@@ -104,6 +120,50 @@ fn phy_read(state: u64, b: u64, slot: u64, reg: u64) -> u64 {
     return ld(b + RBUF, 0) | (ld(b + RBUF, 1) << 8)
 }
 
+fn phy_write(state: u64, b: u64, slot: u64, reg: u64, val: u64) -> bool {
+    st(b + WBUF, 0, val)
+    st(b + WBUF, 1, val >> 8)
+    let r: i64 = xhci.control(state, slot, 0x40, ch397.REQ_PHY_WRITE, ch397.PHY_BASE, reg, 2, b + WBUF, false)
+    xhci.udelay(state, CTL_DELAY_US)
+    return r >= 0
+}
+
+fn kick_enabled(state: u64) -> bool {
+    return !kstate.mode_on(state, kstate.M_NOPHYKICK)
+}
+
+fn kick(state: u64, b: u64, slot: u64, stamp: u64) {
+    setc(b, X_KICKS, getc(b, X_KICKS) + 1)
+    var rc: u64 = 0
+    if ch397.autoneg_by_request(getc(b, X_FWV)) {
+        let r: i64 = xhci.control(state, slot, 0x40, ch397.REQ_AUTONEG, ch397.AUTONEG_ON, 0, 0, 0, false)
+        xhci.udelay(state, CTL_DELAY_US)
+        if r < 0 {
+            rc = rc | 1
+        }
+    }
+    if !phy_write(state, b, slot, ch397.MII_BMCR, ch397.BMCR_KICK) {
+        rc = rc | 2
+    }
+    setc(b, X_KICKRC, rc)
+    setc(b, X_KICKT, stamp)
+}
+
+fn refresh_bmcr(state: u64, b: u64, slot: u64) -> u64 {
+    let v: u64 = phy_read(state, b, slot, ch397.MII_BMCR)
+    setc(b, X_BMCR, v)
+    return v
+}
+
+fn refresh_regs(state: u64, b: u64, slot: u64) -> u64 {
+    let bc: u64 = refresh_bmcr(state, b, slot)
+    let i1: u64 = phy_read(state, b, slot, ch397.MII_ID1)
+    let i2: u64 = phy_read(state, b, slot, ch397.MII_ID2)
+    setc(b, X_PHYID, ((i2 & 0xFFFF) << 16) | (i1 & 0xFFFF))
+    setc(b, X_ANER, phy_read(state, b, slot, ch397.MII_ANER))
+    return bc
+}
+
 fn cfg_write(state: u64, b: u64, slot: u64, v: u64) -> bool {
     if ch397.maccfg_by_request(getc(b, X_FWV)) {
         let r: i64 = xhci.control(state, slot, 0x40, ch397.REQ_WRITE_MACCFG, v & 0xFFFF, (v >> 16) & 0xFFFF, 0, 0, false)
@@ -144,6 +204,8 @@ fn mode_line(b: u64) {
     var s_l: [u8; 6] = " lpa=\0"
     var s_c: [u8; 6] = " cfg=\0"
     var s_f: [u8; 5] = " fw=\0"
+    var s_m: [u8; 7] = " bmcr=\0"
+    var s_k: [u8; 8] = " kicks=\0"
     serial.puts((&s_h[0]) as u64)
     if getc(b, X_LINK) == 1 {
         serial.puts((&s_u[0]) as u64)
@@ -160,6 +222,10 @@ fn mode_line(b: u64) {
     hexn(getc(b, X_CFG), 8)
     serial.puts((&s_f[0]) as u64)
     hexn(getc(b, X_FWV), 2)
+    serial.puts((&s_m[0]) as u64)
+    hexn(getc(b, X_BMCR), 4)
+    serial.puts((&s_k[0]) as u64)
+    hexn(getc(b, X_KICKS), 2)
     serial.nl()
 }
 
@@ -171,6 +237,12 @@ fn bringup(state: u64, b: u64, slot: u64, fwver: u64) -> bool {
     setc(b, X_BMSR, 0)
     setc(b, X_ANAR, 0)
     setc(b, X_LPA, 0)
+    setc(b, X_BMCR, 0)
+    setc(b, X_PHYID, 0)
+    setc(b, X_ANER, 0)
+    setc(b, X_KICKS, 0)
+    setc(b, X_KICKT, 0)
+    setc(b, X_KICKRC, 0)
     let c: u64 = read_reg(state, b, slot, ch397.REG_MAC_CFG, 4)
     if c == NO_REPLY {
         return false
@@ -178,6 +250,10 @@ fn bringup(state: u64, b: u64, slot: u64, fwver: u64) -> bool {
     setc(b, X_CFG, c)
     write_reg(state, b, slot, ch397.REG_HASH_HI, 4, 0xFFFFFFFF)
     write_reg(state, b, slot, ch397.REG_HASH_LO, 4, 0xFFFFFFFF)
+    let bc0: u64 = refresh_regs(state, b, slot)
+    if kick_enabled(state) && bc0 != NO_REPLY && ch397.bmcr_bad(bc0) {
+        kick(state, b, slot, 0)
+    }
     var steps: u64 = 0
     var bm: u64 = NO_REPLY
     while steps < LINK_WAIT_STEPS {
@@ -197,6 +273,10 @@ fn bringup(state: u64, b: u64, slot: u64, fwver: u64) -> bool {
         setc(b, X_LINK, 1)
         apply_media(state, b, slot)
     } else {
+        if kick_enabled(state) && getc(b, X_KICKS) == 0 {
+            kick(state, b, slot, 0)
+        }
+        refresh_bmcr(state, b, slot)
         setc(b, X_LINK, 2)
         let w: u64 = ch397.rx_mode_cfg(c)
         setc(b, X_CFG, w)
@@ -219,6 +299,19 @@ fn house(state: u64, b: u64, slot: u64, now: u64) -> u64 {
     var now_link: u64 = 2
     if ch397.link_up(bm) {
         now_link = 1
+    }
+    if now_link == 2 {
+        refresh_bmcr(state, b, slot)
+        if kick_enabled(state) && getc(b, X_KICKS) < KICK_MAX {
+            let t0: u64 = getc(b, X_KICKT)
+            if t0 == 0 {
+                setc(b, X_KICKT, now + 1)
+            } else if now + 1 - t0 >= KICK_TICKS {
+                kick(state, b, slot, now + 1)
+                refresh_regs(state, b, slot)
+                mode_line(b)
+            }
+        }
     }
     if now_link == getc(b, X_LINK) {
         return 0
