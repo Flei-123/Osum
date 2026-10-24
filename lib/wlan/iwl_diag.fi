@@ -3,7 +3,7 @@ import wlan.iwl_le
 
 export {
     Diag, diag_new, diag_phase, diag_fail, diag_hw, diag_fw, diag_cmd, diag_notif, diag_rings, diag_nvm, diag_calib,
-    diag_armed, diag_render, phase_name, err_text, diag_mark, diag_snap, diag_fhfail, diag_fwmiss, step_name,
+    diag_armed, diag_render, phase_name, err_text, diag_mark, diag_snap, diag_snap2, diag_pci, diag_fhfail, diag_fwmiss, step_name,
     ST_NONE, ST_FW_FILE, ST_FW_PARSE, ST_DMA, ST_POWER_INIT, ST_CQ_INIT, ST_FH_INIT, ST_ALIVE_INIT, ST_NVM, ST_INIT_STOP,
     ST_POWER_RT, ST_FH_RT, ST_ALIVE_RT, ST_RT_STAGE, ST_INIT_IMG,
     PH_IDLE, PH_PCI, PH_FW_LOAD_INIT, PH_INIT_ALIVE, PH_NVM, PH_INIT_COMPLETE, PH_FW_LOAD_RT, PH_RT_ALIVE, PH_READY, PH_FAILED,
@@ -77,6 +77,15 @@ struct Diag {
     fh_chunks: u64,
     fh_bytes: u64,
     fh_valid: u64,
+    fh_dst: u64,
+    fh_phys: u64,
+    fh_cnt: u64,
+    snapped2: u64,
+    regs2: [u64; 8],
+    pci_valid: u64,
+    pci_cmd: u64,
+    pci_bar: u64,
+    pci_size: u64,
     miss: [u8; 64]
 }
 
@@ -85,7 +94,7 @@ fn diag_new() -> Diag {
         phase: 0, failed_at: 0, armed: 0, init_alive: 0, rt_alive: 0, err: 0, hw_rev: 0, rf_id: 0, fw_ver: 0, fw_size: 0,
         nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, last_cmd: 0, last_notif: 0,
         cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32],
-        step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, miss: [0 as u8; 64]
+        step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, miss: [0 as u8; 64]
     }
     return d
 }
@@ -111,7 +120,26 @@ fn diag_snap(d: *mut Diag, src: u64) {
     (*d).snapped = 1
 }
 
-fn diag_fhfail(d: *mut Diag, sec: u64, chunks: u64, bytes: u64) {
+fn diag_snap2(d: *mut Diag, src: u64) {
+    var i: u64 = 0
+    while i < 8 {
+        (*d).regs2[i as usize] = *((src + i * 8) as *mut u64)
+        i = i + 1
+    }
+    (*d).snapped2 = 1
+}
+
+fn diag_pci(d: *mut Diag, cmd: u64, bar: u64, size: u64) {
+    (*d).pci_cmd = cmd
+    (*d).pci_bar = bar
+    (*d).pci_size = size
+    (*d).pci_valid = 1
+}
+
+fn diag_fhfail(d: *mut Diag, sec: u64, chunks: u64, bytes: u64, dst: u64, phys: u64, cnt: u64) {
+    (*d).fh_dst = dst
+    (*d).fh_phys = phys
+    (*d).fh_cnt = cnt
     (*d).fh_sec = sec
     (*d).fh_chunks = chunks
     (*d).fh_bytes = bytes
@@ -428,6 +456,22 @@ fn render_fail(w: *mut W, d: *mut Diag) {
     var f_s: [u8; 5] = "sec=\0"
     var f_c: [u8; 9] = " chunks=\0"
     var f_b: [u8; 8] = " bytes=\0"
+    var k_hw: [u8; 9] = "fail_hw=\0"
+    var k_x: [u8; 10] = "fail_fhr=\0"
+    var h_c: [u8; 8] = "pcicmd=\0"
+    var h_b: [u8; 7] = " bar0=\0"
+    var h_z: [u8; 8] = " barsz=\0"
+    var x_t: [u8; 6] = "tssr=\0"
+    var x_c: [u8; 7] = " cfg9=\0"
+    var x_s: [u8; 7] = " sts9=\0"
+    var x_a: [u8; 7] = " sram=\0"
+    var x_0: [u8; 6] = " td0=\0"
+    var x_1: [u8; 6] = " td1=\0"
+    var x_u: [u8; 7] = " ucod=\0"
+    var x_g: [u8; 5] = " gp=\0"
+    var f_d: [u8; 6] = " dst=\0"
+    var f_p: [u8; 7] = " phys=\0"
+    var f_n: [u8; 6] = " cnt=\0"
     var nm: [u8; 48] = [0 as u8; 48]
     w_s(w, (&k_step[0]) as u64)
     step_name((*d).fail_step, (&nm[0]) as u64)
@@ -467,6 +511,42 @@ fn render_fail(w: *mut W, d: *mut Diag) {
         w_dec(w, (*d).fh_chunks)
         w_s(w, (&f_b[0]) as u64)
         w_dec(w, (*d).fh_bytes)
+        w_s(w, (&f_d[0]) as u64)
+        w_hex(w, (*d).fh_dst, 8)
+        w_s(w, (&f_p[0]) as u64)
+        w_hex(w, (*d).fh_phys, 9)
+        w_s(w, (&f_n[0]) as u64)
+        w_hex(w, (*d).fh_cnt, 6)
+        w_nl(w)
+    }
+    if (*d).pci_valid != 0 {
+        w_s(w, (&k_hw[0]) as u64)
+        w_s(w, (&h_c[0]) as u64)
+        w_hex(w, (*d).pci_cmd, 4)
+        w_s(w, (&h_b[0]) as u64)
+        w_hex(w, (*d).pci_bar, 9)
+        w_s(w, (&h_z[0]) as u64)
+        w_hex(w, (*d).pci_size, 8)
+        w_nl(w)
+    }
+    if (*d).snapped2 != 0 {
+        w_s(w, (&k_x[0]) as u64)
+        w_s(w, (&x_t[0]) as u64)
+        w_hex(w, (*d).regs2[0], 8)
+        w_s(w, (&x_c[0]) as u64)
+        w_hex(w, (*d).regs2[1], 8)
+        w_s(w, (&x_s[0]) as u64)
+        w_hex(w, (*d).regs2[2], 8)
+        w_s(w, (&x_a[0]) as u64)
+        w_hex(w, (*d).regs2[3], 8)
+        w_s(w, (&x_0[0]) as u64)
+        w_hex(w, (*d).regs2[4], 8)
+        w_s(w, (&x_1[0]) as u64)
+        w_hex(w, (*d).regs2[5], 8)
+        w_s(w, (&x_u[0]) as u64)
+        w_hex(w, (*d).regs2[6], 8)
+        w_s(w, (&x_g[0]) as u64)
+        w_hex(w, (*d).regs2[7], 8)
         w_nl(w)
     }
     if (*d).miss[0] != 0 as u8 {
