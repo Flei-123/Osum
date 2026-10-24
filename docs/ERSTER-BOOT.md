@@ -73,7 +73,14 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
-## Stick 6 HP (24.10.2026, main e2bf91e6)
+## Stick 7 HP (24.10.2026, main @COMMIT@)
+
+- **Datei:** `orientos-usb-hp-20261024-@COMMIT@.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `@SHA@`. Ersetzt Stick 6 (SHA 0e21cfb0...).
+- **Neu gegenueber Stick 6:** WLAN-8265-Firmware-Ladefehler `fw_load_init err=-45` (FH end-of-TFD timeout) behoben: PCI-Bus-Master wird vor dem Firmware-Laden gesetzt (vorher nie -> kein DMA), APMG-DMA-Takt + NIC-Funkkonfig fuer Familie 8000. `/proc/wlan` hat neue Diagnosezeilen `fail_hw=`, `fail_fhr=`, `fail_fh=`. Dazu: wlan.conf speichern als normaler Nutzer + Persistenz auf der Stick-EFI-Partition, Fn-Helligkeitstasten (`/proc/hotkeys`), Explorer-Rand ziehen ohne Flackern.
+- **Ehrlich:** Wirkung am echten 8265 UNVERIFIZIERT -- das ist genau der Test. Scan-Anfrage der echten Firmware (v7) ist noch NICHT umgestellt (Worker W-WLAN18b); selbst wenn die Firmware jetzt laedt, kann der Scan noch scheitern.
+- **Foto-Checkliste:** (1) Terminal `cat /proc/wlan` -- phase, err, failed_at und die neuen `fail_*`-Zeilen (alle Zeilen auf das Foto). (2) Fn+Helligkeit hoch/runter je 3x, dann `cat /proc/hotkeys` und `cat /proc/backlight` -- Foto; meldet: aendert sich die Helligkeit, eine Stufe pro Druck? (3) Einstellungen > WLAN: SSID + Passwort speichern, Neustart: Stehen SSID/Passwort wieder drin (`cat /etc/wlan.conf`)? (4) Explorer-Fensterrand ziehen: Flackern ja/nein?
+
+## Stick 6 HP (24.10.2026, main e2bf91e6) -- abgeloest durch Stick 7
 
 - **Datei:** `orientos-usb-hp-20261024-e2bf91e6.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `0e21cfb022d7ef4796e61ff2007ca93a7fc09dfb4f2cfe828c39a605afa2e3b6`. Ersetzt Stick 5 (SHA 435a5f54...).
 - **Neu gegenueber Stick 5:** Netzkarte `wlan0` (Task K_WLAN, DHCP aus dem Lease), Auto-Join aus `/etc/wlan.conf`, `/proc/wlan` mit `net <ssid> ch= sec= rssi=`, `auto=<state> rc= tries= driver=` und `ip= mask= gw=`. Fake-AP-Gegenstelle nur im Test.
@@ -107,7 +114,7 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 
 ## Was der Boss fotografieren soll
 
-0. **WLAN (Stick 6):** Terminal: `cat /proc/wlan` -- Foto (phase/err/err_text/fw/nvm/calib, net-Zeilen, auto=). Dann Einstellungen > WLAN: SSID + Passwort eintragen, speichern, nochmal `cat /proc/wlan` -- Foto. Bei Haenger/Panik Neustart mit Kernelwort `noiwl` (Foto der Bootzeile).
+0. **WLAN (Stick 6/7):** Terminal: `cat /proc/wlan` -- Foto (phase/err/err_text/fw/nvm/calib, net-Zeilen, auto=). Dann Einstellungen > WLAN: SSID + Passwort eintragen, speichern, nochmal `cat /proc/wlan` -- Foto. Bei Haenger/Panik Neustart mit Kernelwort `noiwl` (Foto der Bootzeile).
    - **WLAN-Persistenz (ab main 4b852a81):** gespeicherte SSID/Passwort wird vom Dienst `wlanpersist` auf die EFI-Partition (`wlan.cnf`) gespiegelt und beim Boot zurueckgespielt (nur wenn die Wurzel RAM ist). Settings zeigt sonst "Nur bis zum Neustart gespeichert".
 0b. **Helligkeits-Tasten (Fn):** Fn+Helligkeit hoch/runter druecken (je 3x), danach Terminal: `cat /proc/hotkeys` -- Foto. Jede Taste, die nicht Helligkeit aendert, steht dort als `ext 0x.. unknown` / `key 0x.. unknown` / `acpi 0x.. unknown` (das ist der echte Code); dazu `cat /proc/backlight` (Zeilen `hotkeys`, `acpi.notifies`, `acpi.lastnt`, `ext.last0..3`). Meldung ja/nein: aendert sich die Helligkeit, und springt sie pro Tastendruck um GENAU eine Stufe (nicht zwei)?
 1. **Overlay:** `Strg+Shift+F` -- Foto vom ganzen Schirm (Zeile `fb_write_mbs`, FPS, CPU, RAM).
