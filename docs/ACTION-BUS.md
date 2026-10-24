@@ -132,6 +132,7 @@ Rules
 | types: `string`, `int`, `bool` | enough for the prototype; `enum`, `path` (a handle, not a string), `datetime`, lists are planned |
 | level: `read`, `write`, `critical` | the input of the rights decision (section 5) |
 | `dryrun` | the app can *simulate* the action; otherwise the broker answers a dry run itself |
+| `noask` | a `write` action that only hands out what the person already approved (a join target): a client that holds the scope calls it without a confirmation; `act deny` still wins, `critical` ignores it |
 | `undo <action>` | the **manifest** fixes which action reverses this one, in the same app; the app only supplies its arguments at run time |
 | unknown words are skipped with a warning; a broken line rejects the whole file | newer manifests on older brokers; never half an app |
 

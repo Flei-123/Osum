@@ -149,6 +149,9 @@ def parse(text, path="<manifest>", wrapper=False):
         elif k == "dryrun":
             if cur is not None and "dry_run" in cur:
                 cur["dry_run"] = True
+        elif k == "noask":
+            if cur is not None and "dry_run" in cur:
+                cur["noask"] = True
         elif k == "undo":
             if cur is None or len(w) < 2 or not w[1].startswith(app + "."):
                 raise Bad("%s: undo must name an action of the same app" % where)

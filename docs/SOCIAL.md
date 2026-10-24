@@ -38,7 +38,7 @@ line in `/etc/social/providers` and one program. `social.fi`,
 | `social.contacts.list/get/search` | read | `account:id\|relation\|presence\|name\|handle\|status\|activity\|since_s\|joinable` |
 | `social.contacts.request/accept/decline/withdraw/remove` | write | relations |
 | `social.presence.set`, `social.activity.set [join=true] [party=]`, `social.activity.clear` | write | myself |
-| `social.party.take [name=]` | write | the join target of an accepted invite or join request, once (`found`, `target`, `name`, `kind`, `from`) |
+| `social.party.take [name=]` | write, `noask` | the join target of an accepted invite or join request, once (`found`, `target`, `name`, `kind`, `from`) |
 | `social.privacy.set` | critical | share the activity or not |
 | `social.privacy.get` | read | `share_activity`, `invisible`, `invites_from`, `hidden`, `hide.N` |
 | `social.privacy.hide entry= [hide=true\|false]` | critical | never show the activity of a client (`app:game`) or an activity name |
