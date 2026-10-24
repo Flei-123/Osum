@@ -73,18 +73,18 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
-## Stick 12 HP (24.10.2026, Debug-Werkzeuge: lspci, pcicfg, regdump, prphread, wlanctl, drvctl)
+## Stick 13 HP (24.10.2026, Debug-Werkzeuge: lspci, pcicfg, regdump, prphread, wlanctl, drvctl)
 
 - **Datei:** STICK12_FILE (GPT, UEFI+BIOS). SHA256 vorher pruefen: STICK12_SHA.
 - **Neu:** `lspci [-v] [bb:dd.f]` (IDs, Klasse, Treiber, BARs), `pcicfg <bb:dd.f> [off [len]]` (Config-Space-Hexdump, Zahlen hex), `regdump <bb:dd.f> <bar> <off> [count]` (MMIO-Register), `prphread <bb:dd.f> <addr-hex> [count]` (Intel-WLAN PRPH, nur root), `wlanctl status|reload|dump`. Schreiben nur mit `--write` und nur als root (`pcicfg --write <bb:dd.f> <off> <breite> <wert>`, `regdump --write <bb:dd.f> <bar> <off> <wert>`).
-- **Korrektur:** `drvctl` stand in Stick 10 und 11 NICHT im Abbild (fehlte in PROGS), obwohl dort dokumentiert. Ab Stick 12 ist es drin.
+- **Korrektur:** `drvctl` stand in Stick 10 bis 12 NICHT im Abbild (fehlte in PROGS), obwohl dort dokumentiert. Ab Stick 13 ist es drin.
 - **Foto-Checkliste WLAN:** `wlanctl status` (zeigt /proc/wlan, `sb_cpu1`/`sb_cpu2` mit Bits), danach `wlanctl dump` und `cat /tmp/wlan-dump.txt` (Config-Space, CSR, Secure-Boot-PRPH). `wlanctl reload` startet das Firmware-Laden erneut (nur wenn kein WLAN-Treiber gebunden ist).
 - **Ehrlich:** Am echten 8265 UNVERIFIZIERT; nur in QEMU gegen e1000/NVMe/edu und die WLAN-Attrappe geprueft.
 
 ## Stick 10 HP (24.10.2026, Baustand 71e8521e = main mit Treiber-Store drvctl + fw.request)
 
 - **Datei:** `orientos-usb-hp-20261024-71e8521e.img` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `4c89c0b993b33b79217821b28bda392bf14dbed9e3a6139950a2a6fea59416b9`.
-- **Neu gegenueber Stick 9:** Treiber-Store im Kern (`/lib/drivers`, signierte Pakete), `drvctl list|match|install|remove|ban` (NICHT im Stick 10/11-Abbild, erst ab Stick 12), `/proc/drivers` mit allen PCI/USB/ACPI-Geraeten.
+- **Neu gegenueber Stick 9:** Treiber-Store im Kern (`/lib/drivers`, signierte Pakete), `drvctl list|match|install|remove|ban` (NICHT im Stick 10-12-Abbild, erst ab Stick 13), `/proc/drivers` mit allen PCI/USB/ACPI-Geraeten.
 - **Foto-Checkliste:** `cat /proc/drivers` -- Zeilen mit `drv=none` sind die Luecken (Geraete ohne Treiber); ganz unten `store=on pkgs=... valid=...`. Dazu `drvctl list`.
 - **Ehrlich:** WLAN-Fixes aus Branch staff/orientos-w25x (fail_alive2/fail_pm) sind NICHT enthalten. Windows vorher ganz herunterfahren (`shutdown /s /t 0`).
 
