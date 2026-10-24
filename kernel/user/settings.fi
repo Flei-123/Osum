@@ -6916,6 +6916,39 @@ fn wifi_status_drv(key: u64) {
     let _q: u64 = wifi_driver_line(p)
 }
 
+static mut wf_step: u64 = 0
+static mut wf_errno: u64 = 0
+
+fn wifi_wipe(p: u64) {
+    var z: u64 = 0
+    while z < 160 {
+        __mmio_write8((p + z) as *mut u8, 0 as u8)
+        z = z + 1
+    }
+}
+
+fn wifi_fail_status() {
+    var s_open: [u8; 6] = "open \0\0"
+    var s_wr: [u8; 7] = "write \0"
+    var s_chm: [u8; 7] = "chmod \0"
+    var s_pre: [u8; 7] = " [step=\0"
+    var s_err: [u8; 8] = " errno=\0"
+    var s_end: [u8; 2] = "]\0"
+    var step: u64 = (&s_open[0 as usize]) as u64
+    if wf_step == 2 {
+        step = (&s_wr[0 as usize]) as u64
+    } else if wf_step == 3 {
+        step = (&s_chm[0 as usize]) as u64
+    }
+    var p: u64 = wf_add(0, msg.get((&k_wf_nowrite[0 as usize]) as u64))
+    p = wf_add(p, (&s_pre[0 as usize]) as u64)
+    p = wf_add(p, step)
+    p = wf_add(p, (&s_err[0 as usize]) as u64)
+    p = num_at((&l_wstat[0 as usize]) as u64, p, wf_errno)
+    p = wf_add(p, (&s_end[0 as usize]) as u64)
+    let _q: u64 = wifi_driver_line(p)
+}
+
 fn wifi_save_conf() -> bool {
     var inh: [u8; 160] = [0 as u8; 160]
     var k_ssid: [u8; 6] = "ssid \0"
@@ -6949,19 +6982,39 @@ fn wifi_save_conf() -> bool {
     }
     inh[(at) as usize] = 10 as u8
     at = at + 1
-    if !file_write((&p_wlan_conf[0 as usize]) as u64, (&inh[0 as usize]) as u64, at) {
+    wf_step = 0
+    wf_errno = 0
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_wlan_conf[0 as usize]) as u64, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        wf_step = 1
+        wf_errno = 0 -% fd
+        wifi_wipe((&inh[0 as usize]) as u64)
         return false
     }
-    let r: u64 = ulib.sys(90, (&p_wlan_conf[0 as usize]) as u64, 384, 0)
-    var z: u64 = 0
-    while z < 160 {
-        inh[(z) as usize] = 0 as u8
-        z = z + 1
+    var done: u64 = 0
+    while done < at {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, (&inh[0 as usize]) as u64 + done, at - done)
+        if ulib.bad(w) || w == 0 {
+            wf_step = 2
+            if ulib.bad(w) {
+                wf_errno = 0 -% w
+            }
+            io.close(fd)
+            wifi_wipe((&inh[0 as usize]) as u64)
+            return false
+        }
+        done = done + w
     }
+    io.close(fd)
+    let r: u64 = ulib.sys(90, (&p_wlan_conf[0 as usize]) as u64, 384, 0)
+    wifi_wipe((&inh[0 as usize]) as u64)
     if ulib.bad(r) {
+        wf_step = 3
+        wf_errno = 0 -% r
         let _u: u64 = ulib.sys(ulib.SYS_UNLINK, (&p_wlan_conf[0 as usize]) as u64, 0, 0)
         return false
     }
+    geschrieben = geschrieben + 1
     return true
 }
 
@@ -7016,7 +7069,7 @@ fn wifi_connect() {
         return
     }
     if !wifi_save_conf() {
-        wifi_status_drv((&k_wf_nowrite[0 as usize]) as u64)
+        wifi_fail_status()
         return
     }
     wifi_status_drv((&k_wf_saved[0 as usize]) as u64)
