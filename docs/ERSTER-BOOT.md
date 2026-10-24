@@ -78,6 +78,7 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 - **Datei:** `orientos-usb-hp-20261024-7f8c161e.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `6df57b6cd58d6b058336f8323ccf5067dbdb6e747b208d6ced37cae5be1db741`. Ersetzt Stick 8 (SHA 64881751...).
 - **Neu gegenueber Stick 8:** WLAN-8265 (Familie 8000) schreibt keine APMG-Register mehr (0x300C ist dort RELEASE_CPU_RESET -> die alten Schreibzugriffe liessen CPU2 haengen), setzt CSR_GIO_REG L0S_DISABLED wie Linux.
 - **Ehrlich:** Am echten 8265 UNVERIFIZIERT.
+- **WICHTIG vor dem Boot (HP mit Windows 11):** Windows Schnellstart ist AN (HiberbootEnabled=1) und laesst die WLAN-Karte im Restzustand (Firmware geladen, Clock/PCIe-Power-State). Windows vorher ganz herunterfahren: `shutdown /s /t 0` (Neustart reicht auch) oder Schnellstart aus (Energieoptionen > Auswahl der Netzschalterfunktion > Schnellstart deaktivieren). Dann erst vom Stick booten.
 - **Foto-Checkliste:** `cat /proc/wlan` -- alle Zeilen (phase, err, failed_at, fail_alive, fail_regs, fail_fh). Laeuft WLAN: Einstellungen > WLAN verbinden, dann nochmal `cat /proc/wlan`.
 
 ## Stick 8 HP (24.10.2026, Baustand a494ab5d = main mit ALIVE-Fix)
