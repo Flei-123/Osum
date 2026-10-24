@@ -194,6 +194,10 @@ sent). Test: `tools/social/sdk.sh` — the C header and the JS shim against a
 fake `act` (exact command lines), the Firn module against the real broker,
 service and `soclocal` in a guest, the scopes with `--as`.
 
+### Beitreten starts the game (launcher)
+
+`/bin/partyrun` (`kernel/user/partyrun.fi`, logic in `kernel/user/partylaunch.fi`) closes the loop on the receiving side: for every `os l` row of `/etc/social/games.tsv` whose program (`/bin/<exe>`, or an absolute path) is **not running**, it calls `social.party.take name=<activity>`; a target that came back starts the program as `<exe> --join <target>` (`ulib.spawn_app`, one line `partyrun: start <path> target=<target>` on stdout). A game that already runs is left alone, so it still takes its own target with `takeJoin`. `partyrun once` looks once and prints `started=<n>`; `partyrun watch [seconds]` (default 300) looks every second and ends after the first launch. The friends bar starts `partyrun watch` after "Beitreten" (join request sent) and after "Annehmen" on an invite. Test: `tools/social/sdk.sh` section 6 (real broker, service and `soclocal`; `echo` is the game, `sleep` the running game).
+
 ## Setting a device up
 
 1. `/etc/social/providers`: `provider fleitec /bin/socfleitec /etc/social/fleitec.conf`

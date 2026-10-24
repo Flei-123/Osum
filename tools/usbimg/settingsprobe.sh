@@ -64,7 +64,10 @@ foto 02-activity
 E
 drive "$OUT/d1"
 grep -aq 'settings: rect name=ptaba ' "$S" && ok "sidebar entry of the package page is reported (ptaba)" || bad "no rect ptaba reported"
-grep -aq 'settings: rect name=ptabb ' "$S" && bad "a second package tab appeared (ptabb)" || ok "exactly one package tab on this image"
+for t in ptabb ptabc; do
+    grep -aq "settings: rect name=$t " "$S" && ok "sidebar entry $t is reported (App rights / Privacy)" || bad "no rect $t reported"
+done
+grep -aq 'settings: rect name=ptabd ' "$S" && bad "a fourth package tab appeared (ptabd)" || ok "exactly three package tabs on this image"
 PF=$(grep -a 'settings: rect name=pf' "$S" | tail -n 20 | sed -n 's/.*name=\(pf[a-z][a-z]\) .*/\1/p' | awk '!s[$0]++' | head -1)
 [ -n "$PF" ] && ok "page controls are reported (first: $PF)" || bad "no control of the page reported (pf..)"
 n0=$(grep -ac 'settings: stand' "$S")
@@ -97,6 +100,59 @@ case "$st2" in
     *) bad "click 2 did not end in Done (status [$st2])" ;;
 esac
 fi
+pf_since() { tail -n +"$(( $1 + 1 ))" "$S" | sed -n 's/^settings: rect name=\(pf[a-z][a-z]\) .*/\1/p' | awk '!s[$0]++'; }
+probe_text_field() {
+    local tab="$1" field="$2" text="$3" tag="$4"
+    cat > "$OUT/d_$tag" <<E
+klickauf srect$field
+warte 1
+tippe $text
+taste ret
+warte 4
+foto $tag-ask
+E
+    drive "$OUT/d_$tag"
+    local a; a=$(status_of)
+    echo "       $tag status after Enter 1: [$a]"
+    case "$a" in
+        *"click again"*|*"nochmal klicken"*|*"Enter again"*|*"Enter nochmal"*) ok "$tag: Enter 1 asks for confirmation (critical action)" ;;
+        *) bad "$tag: Enter 1 did not ask (status [$a])" ;;
+    esac
+    cat > "$OUT/d_${tag}2" <<E
+taste ret
+warte 4
+foto $tag-done
+E
+    drive "$OUT/d_${tag}2"
+    local b; b=$(status_of)
+    echo "       $tag status after Enter 2: [$b]"
+    case "$b" in
+        *"Done."*|*"Erledigt"*) ok "$tag: Enter 2 confirms and the action runs" ;;
+        *) bad "$tag: Enter 2 did not end in Done (status [$b])" ;;
+    esac
+}
+
+# 4. page App rights (ptabb) and page Privacy (ptabc)
+off=$(wc -l < "$S")
+cat > "$OUT/d4" <<'E'
+klickauf srectptabb
+warte 4
+foto 05-rights
+E
+drive "$OUT/d4"
+RF=$(pf_since "$off" | tr '\n' ' ')
+echo "       rights page controls: [$RF]"
+[ -n "$RF" ] && ok "App rights: the page controls are reported" || bad "App rights: no control reported (pf..)"
+off=$(wc -l < "$S")
+cat > "$OUT/d5" <<'E'
+klickauf srectptabc
+warte 4
+foto 06-privacy
+E
+drive "$OUT/d5"
+PV=$(pf_since "$off" | tr '\n' ' ')
+echo "       privacy page controls: [$PV]"
+[ -n "$PV" ] && ok "Privacy: the page controls are reported" || bad "Privacy: no control reported (pf..)"
 if [ "$fail" != 0 ]; then
     echo "--- diagnosis: serial (settings/desk/wm lines) ---"; grep -aE '^(settings|desk|wm): ' "$S" | head -30 | cut -c1-160
     echo "--- diagnosis: launcher lines ---"; grep -aE '^launcher: (geom|tile)' "$S" | head -n 12 | cut -c1-160

@@ -1,0 +1,174 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+import actwire
+import socsdk
+
+export { launch_ready, watch }
+
+const PROC_MAX: u64 = 32
+const LINE_CAP: u64 = 256
+const TARGET_CAP: u64 = 132
+const PATH_CAP: u64 = 80
+const FIELDS: u64 = 4
+const WATCH_STEP_MS: u64 = 1000
+
+static mut games_path: [u8; 22] = "/etc/social/games.tsv\0"
+static mut bin_prefix: [u8; 6] = "/bin/\0"
+static mut flag_join: [u8; 7] = "--join\0"
+static mut msg_start: [u8; 17] = "partyrun: start \0"
+static mut msg_target: [u8; 9] = " target=\0"
+static mut rdctx: [u8; 528] = [0 as u8; 528]
+static mut line: [u8; 256] = [0 as u8; 256]
+static mut fields: [u64; 4] = [0 as u64; 4]
+static mut path: [u8; 80] = [0 as u8; 80]
+static mut target: [u8; 132] = [0 as u8; 132]
+static mut argv: [u64; 4] = [0 as u64; 4]
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn split_tabs(lp: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    fields[0] = lp
+    n = 1
+    while actwire.ld8(lp, i) != 0 {
+        if actwire.ld8(lp, i) == 9 {
+            actwire.st8(lp, i, 0)
+            if n < FIELDS {
+                fields[n as usize] = lp + i + 1
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn name_matches(proc_name: u64, exe: u64) -> bool {
+    var i: u64 = 0
+    while i < 16 {
+        let a: u64 = lower(actwire.ld8(proc_name, i))
+        let b: u64 = lower(actwire.ld8(exe, i))
+        if a != b {
+            return false
+        }
+        if a == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn slot_name(slot: u64, out: u64) -> bool {
+    let n0: u64 = ulib.sys(ulib.SYS_PSTAT, slot, ulib.P_NAME0, 0)
+    let n1: u64 = ulib.sys(ulib.SYS_PSTAT, slot, ulib.P_NAME1, 0)
+    if ulib.bad(n0) || (n0 & 255) == 0 {
+        return false
+    }
+    var k: u64 = 0
+    while k < 8 {
+        actwire.st8(out, k, (n0 >> (k * 8)) & 255)
+        actwire.st8(out, k + 8, (n1 >> (k * 8)) & 255)
+        k = k + 1
+    }
+    actwire.st8(out, 16, 0)
+    return true
+}
+
+fn is_running(exe: u64) -> bool {
+    var name: [u8; 17] = [0 as u8; 17]
+    let np: u64 = (&name[0 as usize]) as u64
+    var i: u64 = 0
+    while i < PROC_MAX {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 && st != 5 {
+            let kind: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_KIND, 0)
+            if !ulib.bad(kind) && kind >= 3 && slot_name(i, np) && name_matches(np, exe) {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn build_path(exe: u64) {
+    let pp: u64 = (&path[0 as usize]) as u64
+    var n: u64 = 0
+    if actwire.ld8(exe, 0) != 47 {
+        n = ulib.strncpy(pp, (&bin_prefix[0 as usize]) as u64, 8)
+    }
+    ulib.strncpy(pp + n, exe, PATH_CAP - n - 1)
+}
+
+fn start(exe: u64, party: u64) -> u64 {
+    build_path(exe)
+    argv[0] = (&path[0 as usize]) as u64
+    argv[1] = (&flag_join[0 as usize]) as u64
+    argv[2] = party
+    ulib.say((&msg_start[0 as usize]) as u64)
+    ulib.say((&path[0 as usize]) as u64)
+    ulib.say((&msg_target[0 as usize]) as u64)
+    ulib.say(party)
+    ulib.nl()
+    return ulib.spawn_app((&path[0 as usize]) as u64, (&argv[0 as usize]) as u64, 3)
+}
+
+fn is_game_row(count: u64) -> bool {
+    if count < 3 {
+        return false
+    }
+    let os: u64 = fields[0]
+    return actwire.ld8(os, 0) == 108 && actwire.ld8(os, 1) == 0
+        && actwire.ld8(fields[1], 0) != 0 && actwire.ld8(fields[2], 0) != 0
+}
+
+fn launch_ready() -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&games_path[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let cx: u64 = (&rdctx[0 as usize]) as u64
+    let lp: u64 = (&line[0 as usize]) as u64
+    let tp: u64 = (&target[0 as usize]) as u64
+    var launched: u64 = 0
+    ulib.rd_init(cx)
+    while true {
+        let n: u64 = ulib.rd_line(fd, cx, lp, LINE_CAP)
+        if n == ulib.EOF {
+            break
+        }
+        if n > 0 && actwire.ld8(lp, 0) != 35 && is_game_row(split_tabs(lp))
+            && !is_running(fields[1])
+            && socsdk.take_join(fields[2], tp, TARGET_CAP - 2) {
+            let pid: u64 = start(fields[1], tp)
+            if !ulib.bad(pid) {
+                launched = launched + 1
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return launched
+}
+
+fn watch(seconds: u64) -> u64 {
+    var left: u64 = seconds
+    while left > 0 {
+        let n: u64 = launch_ready()
+        if n > 0 {
+            return n
+        }
+        ulib.sleep_ms(WATCH_STEP_MS)
+        left = left - 1
+    }
+    return 0
+}

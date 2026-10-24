@@ -26,7 +26,7 @@ fin() { echo "SOCIAL-SDK: $pass passed, $fail failed"; exit $(( fail > 0 )); }
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 BLOCKS=30000
-PROGS="sh ls cat echo sleep mkdir orientbus act social soclocal socapp"
+PROGS="sh ls cat echo sleep mkdir orientbus act social soclocal socapp partyrun"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 
@@ -102,7 +102,10 @@ printf 'c\toma\tincoming\tunknown\tOma Rosi\t\t\t\t0\t\nc\tpeter\tfriend\tonline
     printf 'i\tlinv13\tpeter\tin\tinvite\topen\t0\tgame://lobby/99\tOpen\n'
     printf 'i\tlinv20\tpeter\tin\tjoin\topen\t0\t-\tMinecraft\n'
     printf 'i\tlinv21\tpeter\tin\tjoin\topen\t0\t-\tMinecraft\n'
+    printf 'i\tlinv30\tpeter\tin\tinvite\topen\t0\tgame://lobby/echo\tEchoGame\n'
+    printf 'i\tlinv31\tpeter\tin\tinvite\topen\t0\tgame://lobby/busy\tBusyGame\n'
 } > "$TMPD/etc/local.invites"
+printf 'l\techo\tEchoGame\nl\tsleep\tBusyGame\nl\tnap\tQuietGame\nl\techo\tOpen\nw\techo\tWinGame\n' > "$TMPD/etc/games.tsv"
 printf 'app:game activity.write\napp:reader contacts.read\napp:talker messages.send invites.send\n' > "$TMPD/etc/apps"
 
 cat > "$TMPD/s.sh" <<'EOS'
@@ -157,6 +160,24 @@ act call social.activity.clear --as app:talker
 act call social.activity.clear --as app:game
 act call social.invites.send id=local:peter kind=invite name=Pong2 --as app:talker
 act call social.invites.list
+echo ==LAUNCH==
+act call social.invites.answer id=local:linv30 accept=true
+act call social.invites.answer id=local:linv31 accept=true
+sleep 15 &
+partyrun once
+sleep 1
+echo ==LAUNCH2==
+partyrun once
+echo ==BUSY==
+socapp take BusyGame
+echo ==WATCH==
+partyrun watch 12 &
+sleep 2
+act call social.invites.answer id=local:linv13 accept=true
+sleep 5
+echo ==WATCHEND==
+partyrun watch 2
+echo ==LAUNCHEND==
 act stop
 sleep 1
 echo ==FERTIG==
@@ -173,6 +194,7 @@ S_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
      "/etc/social/local.book=$TMPD/etc/local.book"
      "/etc/social/local.invites=$TMPD/etc/local.invites"
      "/etc/social/apps=$TMPD/etc/apps"
+     "/etc/social/games.tsv=$TMPD/etc/games.tsv"
      "/t/s.sh=$TMPD/s.sh")
 python3 tools/osum/mkfs.py "${S_[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs: $(tail -2 "$TMPD/mkfs.txt")"; fin; }
 : > "$TMPD/c.txt"
@@ -217,7 +239,7 @@ has "$TMPD/p.txt" "state=accepted" "answering after the activity was cleared: ac
 hasnot "$TMPD/p.txt" "target=mc://" "... and the cleared party is no longer handed out"
 
 echo "== 5. scopes =="
-part "$C" SCOPES FERTIG > "$TMPD/p.txt"
+part "$C" SCOPES LAUNCH > "$TMPD/p.txt"
 has "$TMPD/p.txt" "found=false" "activity.write: social.party.take works for app:game"
 has "$TMPD/p.txt" "err denied scope activity.write" "contacts.read only: social.party.take is refused"
 hasre "$TMPD/p.txt" "\|pong://1\|Pong" "app:game's party is the default target of app:talker's invite"
@@ -225,4 +247,20 @@ hasre "$TMPD/p.txt" "\|[0-9]+\|\|Pong2" "after app:game cleared its activity the
 [ "$(grep -ac 'err denied scope activity.write' "$TMPD/p.txt")" -ge 5 ] \
     && ok "take (reader, talker, none) and clear (reader, talker) are denied without activity.write" \
     || bad "expected five scope denials, got $(grep -ac 'err denied scope activity.write' "$TMPD/p.txt")"
+
+echo "== 6. launcher: Beitreten starts the game with the target =="
+part "$C" LAUNCH LAUNCH2 > "$TMPD/p.txt"
+has "$TMPD/p.txt" "partyrun: start /bin/echo target=game://lobby/echo" "partyrun once: a game that is not running and has an accepted invite is started with its target"
+has "$TMPD/p.txt" "--join game://lobby/echo" "... the game gets --join <target> as its arguments"
+has "$TMPD/p.txt" "started=1" "... exactly one game started (QuietGame has nothing waiting, BusyGame is running, WinGame is not an os l row)"
+hasnot "$TMPD/p.txt" "start /bin/sleep" "a game that already runs is left alone"
+part "$C" LAUNCH2 BUSY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "started=0" "the same invite is not launched twice"
+part "$C" BUSY WATCH > "$TMPD/p.txt"
+has "$TMPD/p.txt" "target=game://lobby/busy" "the running game still takes its own target (the launcher did not use it up)"
+part "$C" WATCH WATCHEND > "$TMPD/p.txt"
+has "$TMPD/p.txt" "partyrun: start /bin/echo target=game://lobby/99" "partyrun watch: waits, the answer yes arrives, the game starts with the target"
+has "$TMPD/p.txt" "started=1" "... and the watcher ends after the launch"
+part "$C" WATCHEND LAUNCHEND > "$TMPD/p.txt"
+has "$TMPD/p.txt" "started=0" "partyrun watch without a waiting target ends with started=0 after its time"
 fin
