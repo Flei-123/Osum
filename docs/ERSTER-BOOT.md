@@ -80,9 +80,9 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 - **Foto-Checkliste:** `cat /proc/wlan` (ALLE Zeilen, mehrere Fotos wenn lang), `wlanctl status`, `wlanctl dump`, `cat /tmp/wlan-dump.txt`. Bei Fehler dauert der Start der WLAN-Karte ca. 25 s laenger (Experimente). Windows vorher mit `shutdown /s /t 0` beenden.
 - **Ehrlich:** Am echten 8265 UNVERIFIZIERT. `hdr1=0 hdr2=0` ist bei Familie 8000 normal (Linux schreibt HDR_ADDR nur im 7000-Lader). D0/ASPM sind nicht die Ursache.
 
-## Stick CH336 HP (24.10.2026, USB-LAN-Dongle 1A86:5394 hinter dem WCH-Hub; Baustand @SHORT@ = main + Branch staff/orientos-mvmpzl9g)
+## Stick CH336 HP (24.10.2026, USB-LAN-Dongle 1A86:5394 hinter dem WCH-Hub; Baustand c1f8cf06 = main + Branch staff/orientos-mvmpzl9g)
 
-- **Datei:** `@FILE@` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `@SHA@`.
+- **Datei:** `orientos-usb-hp-20261024-c1f8cf06-ch336.img` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `49d1dd88299f114b49a5d5349a5c68089e81f598f146e1c1de6f3176c83226bf`.
 - **Neu:** CH336-Treiber nach Hersteller-Quelle abgeglichen (TX-Laenge, RX bis 1522, geteilte Frames, PHY-Link, Speed/Duplex ins MAC-Register), `/proc/drivers` zeigt `driver=ch336`, `usbnet: ...` und `net: ip= gw=`. Hub-Treiber ist da; ECM hinter Hub in QEMU gemessen (DHCP + Ping), High-Speed-Hub nur Review. Details: `docs/WLAN-CH336.md`.
 - **Dongle in die Buchse stecken, kabelgebunden an den Router, dann Stick booten.** Danach `dhcp`, `ping <Router-IP>`.
 - **Foto-Checkliste:** (1) `cat /proc/drivers` -- Zeilen `1a86:809d ... driver=hub`, `1a86:5394 ... hub=.. driver=ch336`, `349c:0418`, ganz unten `usbnet: ready mode=3 link=.. bmsr=.. cfg=.. fw=..` und `net: ip=`. (2) `dhcp` und `ping` -- Ausgabe. (3) Falls nichts da: Seriell/Bootzeilen `usb: hub p=`, `usb: ch336 ...` (Foto vom Boot).
