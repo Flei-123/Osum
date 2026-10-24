@@ -1,0 +1,326 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import tools
+import dbgio
+
+export { u_start }
+
+const CLASS_WLAN: u64 = 0x0280
+const PRPH_SB_CPU1: u64 = 0xA01E30
+const PRPH_SB_CPU2: u64 = 0xA01E34
+const PROC_CAP: u64 = 4000
+const SB1_OK: u64 = 3
+const SB2_STUCK: u64 = 0x29F5
+
+static mut PROC: [u8; 4096] = [0 as u8; 4096]
+static mut LIST: [u8; 1024] = [0 as u8; 1024]
+static mut INFO: [u8; 176] = [0 as u8; 176]
+static mut BUF: [u8; 1024] = [0 as u8; 1024]
+static mut DRV: [u8; 256] = [0 as u8; 256]
+
+fn proc_text() -> u64 {
+    var path: [u8; 11] = "/proc/wlan\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        PROC[0 as usize] = 0 as u8
+        return 0
+    }
+    var n: u64 = 0
+    var going: bool = true
+    while going && n < PROC_CAP {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, (&PROC[0 as usize]) as u64 + n, 512)
+        if r == 0 || ulib.bad(r) {
+            going = false
+        } else {
+            n = n + r
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    PROC[n as usize] = 0 as u8
+    return n
+}
+
+fn match_at(text: u64, at: u64, key: u64) -> bool {
+    var k: u64 = 0
+    while dbgio.byte_at(key + k) != 0 {
+        if dbgio.byte_at(text + at + k) != dbgio.byte_at(key + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn field_hex(text: u64, len: u64, key: u64) -> u64 {
+    var i: u64 = 0
+    while i < len {
+        if match_at(text, i, key) {
+            var at: u64 = i + ulib.length(key)
+            var v: u64 = 0
+            var n: u64 = 0
+            var going: bool = true
+            while going && n < 8 {
+                let c: u64 = dbgio.byte_at(text + at)
+                var d: u64 = dbgio.BAD
+                if c >= 48 && c <= 57 {
+                    d = c - 48
+                } else if c >= 97 && c <= 102 {
+                    d = c - 87
+                } else if c >= 65 && c <= 70 {
+                    d = c - 55
+                }
+                if d == dbgio.BAD {
+                    going = false
+                } else {
+                    v = (v << 4) | d
+                    n = n + 1
+                    at = at + 1
+                }
+            }
+            if n == 0 {
+                return dbgio.BAD
+            }
+            return v
+        }
+        i = i + 1
+    }
+    return dbgio.BAD
+}
+
+fn put_bits(v: u64) {
+    var s_bits: [u8; 7] = " bits=\0"
+    var s_none: [u8; 6] = "none\0\0"
+    tools.ob_str((&s_bits[0 as usize]) as u64)
+    if v == 0 {
+        tools.ob_str((&s_none[0 as usize]) as u64)
+        return
+    }
+    var first: bool = true
+    var b: u64 = 0
+    while b < 32 {
+        if ((v >> b) & 1) != 0 {
+            if !first {
+                tools.ob_byte(44)
+            }
+            tools.ob_num(b)
+            first = false
+        }
+        b = b + 1
+    }
+}
+
+fn put_secure_boot(label: u64, v: u64, cpu: u64) {
+    var s_none: [u8; 19] = " (not seen in log)\0"
+    var s_zero: [u8; 14] = " not started\0\0"
+    var s_ok: [u8; 55] = " secure boot success (value seen on a healthy HP boot)\0"
+    var s_stuck: [u8; 46] = " UMAC stuck (value seen on HP sticks 8 and 9)\0"
+    var s_unnamed: [u8; 18] = " (bits unnamed)\0\0\0"
+    var s_eq: [u8; 2] = "=\0"
+    tools.ob_str(label)
+    tools.ob_str((&s_eq[0 as usize]) as u64)
+    if v == dbgio.BAD {
+        tools.ob_str((&s_none[0 as usize]) as u64)
+        tools.ob_nl()
+        return
+    }
+    dbgio.put_hex(v, 8)
+    put_bits(v)
+    if v == 0 {
+        tools.ob_str((&s_zero[0 as usize]) as u64)
+    } else if cpu == 1 && v == SB1_OK {
+        tools.ob_str((&s_ok[0 as usize]) as u64)
+    } else if cpu == 2 && v == SB2_STUCK {
+        tools.ob_str((&s_stuck[0 as usize]) as u64)
+    } else {
+        tools.ob_str((&s_unnamed[0 as usize]) as u64)
+    }
+    tools.ob_nl()
+}
+
+fn put_state() {
+    var s_head: [u8; 16] = "reload pending=\0"
+    var s_fin: [u8; 11] = " finished=\0"
+    let w: u64 = dbgio.call(dbgio.OP_WLAN_STATE, 0, 0, 0, 0)
+    tools.ob_str((&s_head[0 as usize]) as u64)
+    tools.ob_num(w & 0xFF)
+    tools.ob_str((&s_fin[0 as usize]) as u64)
+    tools.ob_num(w >> 8)
+    tools.ob_nl()
+}
+
+fn put_decoded(text: u64, len: u64) {
+    var k1: [u8; 6] = "cpu1=\0"
+    var k2: [u8; 6] = "cpu2=\0"
+    var l1: [u8; 10] = "sb_cpu1\0\0\0"
+    var l2: [u8; 10] = "sb_cpu2\0\0\0"
+    put_secure_boot((&l1[0 as usize]) as u64, field_hex(text, len, (&k1[0 as usize]) as u64), 1)
+    put_secure_boot((&l2[0 as usize]) as u64, field_hex(text, len, (&k2[0 as usize]) as u64), 2)
+}
+
+fn cmd_status() -> u64 {
+    let n: u64 = proc_text()
+    put_state()
+    tools.ob_str((&PROC[0 as usize]) as u64)
+    put_decoded((&PROC[0 as usize]) as u64, n)
+    tools.ob_flush()
+    return 0
+}
+
+fn cmd_reload() -> u64 {
+    var s_name: [u8; 8] = "wlanctl\0"
+    var s_ok: [u8; 17] = "reload requested\0"
+    let r: u64 = dbgio.call(dbgio.OP_WLAN_RELOAD, 0, 0, 0, 0)
+    if ulib.bad(r) {
+        dbgio.put_error((&s_name[0 as usize]) as u64, r)
+        return 1
+    }
+    tools.ob_str((&s_ok[0 as usize]) as u64)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+fn find_wlan() -> u64 {
+    let n: u64 = dbgio.call(dbgio.OP_LIST, (&LIST[0 as usize]) as u64, 0, 0, 0)
+    if ulib.bad(n) {
+        return dbgio.BAD
+    }
+    var i: u64 = 0
+    while i < n {
+        let bdf: u64 = *(((&LIST[0 as usize]) as u64 + i * 8) as *mut u64)
+        let r: u64 = dbgio.call(dbgio.OP_INFO, bdf, (&INFO[0 as usize]) as u64, 0, 0)
+        if r == 0 && (*(((&INFO[0 as usize]) as u64 + 16) as *mut u64) >> 8) == CLASS_WLAN {
+            return bdf
+        }
+        i = i + 1
+    }
+    return dbgio.BAD
+}
+
+fn put_section(title: u64) {
+    var s_pre: [u8; 4] = "== \0"
+    var s_post: [u8; 4] = " ==\0"
+    tools.ob_str((&s_pre[0 as usize]) as u64)
+    tools.ob_str(title)
+    tools.ob_str((&s_post[0 as usize]) as u64)
+    tools.ob_nl()
+}
+
+fn dump_device(bdf: u64) {
+    var t_dev: [u8; 7] = "device\0"
+    var t_cfg: [u8; 7] = "pcicfg\0"
+    var t_csr: [u8; 11] = "csr bar0\0\0\0"
+    var t_prph: [u8; 13] = "prph sb_cpu\0\0"
+    var s_ids: [u8; 6] = " ids=\0"
+    var s_drv: [u8; 6] = " drv=\0"
+    var s_denied: [u8; 20] = "not readable: rc=\0\0\0"
+    var s_sep: [u8; 3] = ": \0"
+    put_section((&t_dev[0 as usize]) as u64)
+    dbgio.put_bdf(bdf)
+    tools.ob_str((&s_ids[0 as usize]) as u64)
+    dbgio.put_hex(*(((&INFO[0 as usize]) as u64) as *mut u64), 4)
+    tools.ob_byte(58)
+    dbgio.put_hex(*(((&INFO[0 as usize]) as u64 + 8) as *mut u64), 4)
+    tools.ob_str((&s_drv[0 as usize]) as u64)
+    let d: u64 = dbgio.call(dbgio.OP_DRIVER, bdf, (&DRV[0 as usize]) as u64, 0, 0)
+    if !ulib.bad(d) {
+        tools.ob_str((&DRV[0 as usize]) as u64)
+    }
+    tools.ob_nl()
+    put_section((&t_cfg[0 as usize]) as u64)
+    let c: u64 = dbgio.call(dbgio.OP_CFGREAD, bdf, 0, (&BUF[0 as usize]) as u64, 256)
+    if !ulib.bad(c) {
+        dbgio.put_bytes((&BUF[0 as usize]) as u64, 0, c)
+    }
+    put_section((&t_csr[0 as usize]) as u64)
+    let m: u64 = dbgio.call(dbgio.OP_MMIOREAD, bdf, 0, (&BUF[0 as usize]) as u64, 64)
+    if ulib.bad(m) {
+        tools.ob_str((&s_denied[0 as usize]) as u64)
+        tools.ob_num(0 - m)
+        tools.ob_nl()
+    } else {
+        dbgio.put_dwords(0, 0, (&BUF[0 as usize]) as u64, m)
+    }
+    put_section((&t_prph[0 as usize]) as u64)
+    let p: u64 = dbgio.call(dbgio.OP_PRPHREAD, bdf, PRPH_SB_CPU1, (&BUF[0 as usize]) as u64, 2)
+    if ulib.bad(p) {
+        tools.ob_str((&s_denied[0 as usize]) as u64)
+        tools.ob_num(0 - p)
+        tools.ob_nl()
+    } else {
+        dbgio.put_hex(PRPH_SB_CPU1, 8)
+        tools.ob_str((&s_sep[0 as usize]) as u64)
+        dbgio.put_hex(dbgio.dword_at((&BUF[0 as usize]) as u64), 8)
+        tools.ob_nl()
+        dbgio.put_hex(PRPH_SB_CPU2, 8)
+        tools.ob_str((&s_sep[0 as usize]) as u64)
+        dbgio.put_hex(dbgio.dword_at((&BUF[0 as usize]) as u64 + 4), 8)
+        tools.ob_nl()
+    }
+}
+
+fn cmd_dump() -> u64 {
+    var out_path: [u8; 20] = "/tmp/wlan-dump.txt\0\0"
+    var s_name: [u8; 8] = "wlanctl\0"
+    var s_done: [u8; 9] = "wrote \0\0\0"
+    var t_state: [u8; 6] = "state\0"
+    var t_proc: [u8; 11] = "/proc/wlan\0"
+    var t_sb: [u8; 12] = "secure boot\0"
+    var t_none: [u8; 28] = "no wireless pci device\0\0\0\0\0\0"
+    ulib.sys(ulib.SYS_UNLINK, (&out_path[0 as usize]) as u64, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&out_path[0 as usize]) as u64, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        dbgio.put_error((&s_name[0 as usize]) as u64, fd)
+        return 1
+    }
+    let n: u64 = proc_text()
+    tools.ob_to(fd)
+    put_section((&t_state[0 as usize]) as u64)
+    put_state()
+    put_section((&t_proc[0 as usize]) as u64)
+    tools.ob_str((&PROC[0 as usize]) as u64)
+    put_section((&t_sb[0 as usize]) as u64)
+    put_decoded((&PROC[0 as usize]) as u64, n)
+    let bdf: u64 = find_wlan()
+    if bdf == dbgio.BAD {
+        tools.ob_str((&t_none[0 as usize]) as u64)
+        tools.ob_nl()
+    } else {
+        dump_device(bdf)
+    }
+    tools.ob_flush()
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    tools.ob_to(1)
+    tools.ob_str((&s_done[0 as usize]) as u64)
+    tools.ob_str((&out_path[0 as usize]) as u64)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 40] = "usage: wlanctl status | reload | dump\0\0\0"
+    var w_status: [u8; 7] = "status\0"
+    var w_reload: [u8; 7] = "reload\0"
+    var w_dump: [u8; 5] = "dump\0"
+    if ulib.arg_count(args) >= 2 {
+        let cmd: u64 = ulib.arg_at(args, 1)
+        if ulib.streq(cmd, (&w_status[0 as usize]) as u64) {
+            return cmd_status()
+        }
+        if ulib.streq(cmd, (&w_reload[0 as usize]) as u64) {
+            return cmd_reload()
+        }
+        if ulib.streq(cmd, (&w_dump[0 as usize]) as u64) {
+            return cmd_dump()
+        }
+    }
+    ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+    return 2
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
