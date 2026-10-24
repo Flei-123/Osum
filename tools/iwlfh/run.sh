@@ -207,7 +207,7 @@ has "$L1" 'iwl: boot2 init nvm rc=0' "INIT stage over the command queue succeeds
 has "$L1" 'iwl: boot2 FAKEFW nvm=6 phydb=4 initc=1' "fake saw 6 NVM_ACCESS reads, 4 PHY_DB replays, 1 INIT_COMPLETE"
 has "$L1" 'phase=ready' "/proc/wlan: phase=ready after RT"
 has "$L1" 'err_text=ok' "/proc/wlan: err_text=ok"
-has "$L1" 'nvm=ok bytes=192 secs=2' "/proc/wlan: NVM read (2 sections, 192 octets)"
+has "$L1" 'nvm=ok bytes=200 secs=3' "/proc/wlan: NVM read (3 sections incl. MAC override, 200 octets)"
 has "$L1" 'calib=4 bytes=24 replayed=4' "/proc/wlan: 4 calibration results collected and replayed"
 has "$L1" 'last_cmd=0x6a last_notif=0x04' "/proc/wlan: last command PHY_CFG, last notification INIT_COMPLETE"
 has "$L1" 'alive=yes init_alive=yes rt_alive=yes' "/proc/wlan: both ALIVEs seen"
