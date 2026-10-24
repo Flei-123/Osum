@@ -106,7 +106,7 @@ PY
 }
 
 mkdir -p "$TMPD/new" "$TMPD/old"
-git worktree add --detach "$BT" "${BASE:-HEAD~1}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
+git worktree add --detach "$BT" "${BASE:-3642080c~1}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
 cp -f tools/design/drive.py "$BT/tools/design/drive.py"
 run_tree "$ROOT" "$TMPD/new" &
 run_tree "$BT" "$TMPD/old" &
