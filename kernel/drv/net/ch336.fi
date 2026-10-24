@@ -4,7 +4,7 @@ import lib.kstate
 import drv.usb.xhci
 import usbnet.ch397
 
-export { bringup, house, link, bmsr, cfg, fw, changes, mode_line, bmcr, phyid, aner, anar, lpa, kicks, kick_rc }
+export { bringup, house, link, bmsr, cfg, fw, changes, mode_line, bmcr, phyid, aner, anar, lpa, kicks, kick_rc, intr_get }
 
 const X_BMSR: u64 = 0x108
 const X_CFG: u64 = 0x110
@@ -21,6 +21,19 @@ const X_ANER: u64 = 0x160
 const X_KICKS: u64 = 0x168
 const X_KICKT: u64 = 0x170
 const X_KICKRC: u64 = 0x178
+const X_INTDCI: u64 = 0x180
+const X_INTMPS: u64 = 0x188
+const X_INTN: u64 = 0x190
+const X_INTLAST: u64 = 0x198
+const X_INTLINK: u64 = 0x1A0
+const X_INTERR: u64 = 0x1A8
+const X_INTARMS: u64 = 0x1B0
+const X_INTSEQ: u64 = 0x1B8
+const X_INTARMED: u64 = 0x1C0
+const X_INTBUF: u64 = 0x1D0
+const INT_BUF_LEN: u64 = 16
+const INT_ERR_MAX: u64 = 8
+const INT_LINK_BIT: u64 = 0x40
 const KICK_TICKS: u64 = 300
 const KICK_MAX: u64 = 3
 const WBUF: u64 = 0x200
@@ -53,6 +66,16 @@ fn anar(b: u64) -> u64 { return getc(b, X_ANAR) }
 fn lpa(b: u64) -> u64 { return getc(b, X_LPA) }
 fn kicks(b: u64) -> u64 { return getc(b, X_KICKS) }
 fn kick_rc(b: u64) -> u64 { return getc(b, X_KICKRC) }
+
+fn intr_get(b: u64, which: u64) -> u64 {
+    if which == 0 { return getc(b, X_INTDCI) }
+    if which == 1 { return getc(b, X_INTN) }
+    if which == 2 { return getc(b, X_INTLAST) }
+    if which == 3 { return getc(b, X_INTLINK) }
+    if which == 4 { return getc(b, X_INTERR) }
+    if which == 5 { return getc(b, X_INTARMS) }
+    return 0
+}
 
 fn hexn(v: u64, digits: u64) {
     var i: u64 = digits
@@ -187,6 +210,67 @@ fn apply_media(state: u64, b: u64, slot: u64) -> bool {
     return cfg_write(state, b, slot, w)
 }
 
+fn intr_arm(state: u64, b: u64, slot: u64, i: u64) {
+    var len: u64 = getc(b, X_INTMPS)
+    if len == 0 || len > INT_BUF_LEN {
+        len = INT_BUF_LEN
+    }
+    setc(b, X_INTSEQ, xhci.ep_seq(state, i))
+    setc(b, X_INTARMED, 1)
+    setc(b, X_INTARMS, getc(b, X_INTARMS) + 1)
+    xhci.int_queue(state, slot, getc(b, X_INTDCI), b + X_INTBUF, len)
+}
+
+fn intr_take(state: u64, b: u64, slot: u64, i: u64) -> bool {
+    setc(b, X_INTARMED, 0)
+    let cc: u64 = xhci.ep_code(state, i)
+    if cc != xhci.CC_SUCCESS && cc != xhci.CC_SHORT {
+        setc(b, X_INTERR, getc(b, X_INTERR) + 1)
+        if xhci.ep_halted(state, slot, getc(b, X_INTDCI)) {
+            xhci.reset_endpoint(state, slot, getc(b, X_INTDCI))
+            xhci.set_dequeue(state, slot, getc(b, X_INTDCI), i)
+        }
+        return false
+    }
+    var want: u64 = getc(b, X_INTMPS)
+    if want == 0 || want > INT_BUF_LEN {
+        want = INT_BUF_LEN
+    }
+    if xhci.ep_resid(state, i) >= want {
+        return false
+    }
+    let v: u64 = ld(b + X_INTBUF, 0)
+    setc(b, X_INTN, getc(b, X_INTN) + 1)
+    setc(b, X_INTLAST, v)
+    var nl: u64 = 2
+    if (v & INT_LINK_BIT) != 0 {
+        nl = 1
+    }
+    if nl == getc(b, X_INTLINK) {
+        return false
+    }
+    setc(b, X_INTLINK, nl)
+    return true
+}
+
+fn intr_poll(state: u64, b: u64, slot: u64) -> bool {
+    if getc(b, X_INTDCI) == 0 {
+        return false
+    }
+    let i: u64 = xhci.ep_find(state, slot, getc(b, X_INTDCI))
+    if i >= xhci.MAX_EP {
+        return false
+    }
+    var changed: bool = false
+    if getc(b, X_INTARMED) != 0 && xhci.ep_seq(state, i) != getc(b, X_INTSEQ) {
+        changed = intr_take(state, b, slot, i)
+    }
+    if getc(b, X_INTARMED) == 0 && getc(b, X_INTERR) < INT_ERR_MAX {
+        intr_arm(state, b, slot, i)
+    }
+    return changed
+}
+
 fn sample_link(state: u64, b: u64, slot: u64) -> u64 {
     var bm: u64 = phy_read(state, b, slot, ch397.MII_BMSR)
     if bm != NO_REPLY && !ch397.link_up(bm) {
@@ -229,8 +313,17 @@ fn mode_line(b: u64) {
     serial.nl()
 }
 
-fn bringup(state: u64, b: u64, slot: u64, fwver: u64) -> bool {
+fn bringup(state: u64, b: u64, slot: u64, fwver: u64, intinfo: u64) -> bool {
     setc(b, X_FWV, fwver)
+    setc(b, X_INTDCI, intinfo & 255)
+    setc(b, X_INTMPS, (intinfo >> 8) & 0xFFFF)
+    setc(b, X_INTN, 0)
+    setc(b, X_INTLAST, 0)
+    setc(b, X_INTLINK, 0)
+    setc(b, X_INTERR, 0)
+    setc(b, X_INTARMS, 0)
+    setc(b, X_INTSEQ, 0)
+    setc(b, X_INTARMED, 0)
     setc(b, X_CHG, 0)
     setc(b, X_NEXT, 0)
     setc(b, X_LINK, 0)
@@ -287,6 +380,9 @@ fn bringup(state: u64, b: u64, slot: u64, fwver: u64) -> bool {
 }
 
 fn house(state: u64, b: u64, slot: u64, now: u64) -> u64 {
+    if intr_poll(state, b, slot) {
+        setc(b, X_NEXT, 0)
+    }
     if now < getc(b, X_NEXT) {
         return 0
     }
@@ -300,6 +396,7 @@ fn house(state: u64, b: u64, slot: u64, now: u64) -> u64 {
     if ch397.link_up(bm) {
         now_link = 1
     }
+    let phy_link: u64 = now_link
     if now_link == 2 {
         refresh_bmcr(state, b, slot)
         if kick_enabled(state) && getc(b, X_KICKS) < KICK_MAX {
@@ -312,6 +409,9 @@ fn house(state: u64, b: u64, slot: u64, now: u64) -> u64 {
                 mode_line(b)
             }
         }
+    }
+    if phy_link == 2 && getc(b, X_INTLINK) == 1 {
+        now_link = 1
     }
     if now_link == getc(b, X_LINK) {
         return 0

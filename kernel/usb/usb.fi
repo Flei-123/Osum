@@ -1630,6 +1630,28 @@ fn configure(state: u64, d: u64) -> bool {
     return true
 }
 
+const CH_INT_OPEN: u64 = 0x100000000
+const CH_INT_FAILED: u64 = 0x200000000
+
+fn ch_int_info(state: u64) -> u64 {
+    let v: u64 = g(state, S_CHINT)
+    if (v & CH_INT_OPEN) == 0 {
+        return 0
+    }
+    return v & 0xFFFFFFFF
+}
+
+fn ch_int_wanted(state: u64, d: u64) -> bool {
+    if dg(state, d, D_DRIVER) != DRV_CH336 || kstate.mode_on(state, kstate.M_NOCHINTR) {
+        return false
+    }
+    let v: u64 = g(state, S_CHINT)
+    if (v & CH_INT_FAILED) != 0 {
+        return false
+    }
+    return (v & 255) != 0 && ((v >> 8) & 0xFFFF) != 0
+}
+
 const CK_PRESENT: u64 = 0
 const CK_VID: u64 = 1
 const CK_PID: u64 = 2
@@ -2158,10 +2180,30 @@ fn endpoints(state: u64, d: u64) -> bool {
             top = adci
         }
     }
+    if ch_int_wanted(state, d) {
+        let cv: u64 = g(state, S_CHINT)
+        let cdci: u64 = cv & 255
+        let ci: u64 = xhci.ep_open(state, slot, cdci)
+        if ci < xhci.MAX_EP {
+            let cmps: u64 = (cv >> 8) & 0xFFFF
+            build_ep(state, cdci, 7, cmps, interval_of(dg(state, d, D_SPEED), (cv >> 24) & 255),
+                xhci.ep_ring(state, ci), cmps)
+            add = add | (1 << cdci)
+            if cdci > top {
+                top = cdci
+            }
+            s(state, S_CHINT, cv | CH_INT_OPEN)
+        }
+    }
     build_slot(state, d, top)
     wr32(ic, 0)
     wr32(ic + 4, add)
-    return xhci.configure_endpoint(state, slot) == xhci.CC_SUCCESS
+    let crc: u64 = xhci.configure_endpoint(state, slot)
+    if crc != xhci.CC_SUCCESS && (g(state, S_CHINT) & CH_INT_OPEN) != 0 {
+        s(state, S_CHINT, (g(state, S_CHINT) & 0xFFFFFFFF) | CH_INT_FAILED)
+        return endpoints(state, d)
+    }
+    return crc == xhci.CC_SUCCESS
 }
 
 fn drop_dev(state: u64, d: u64) {
@@ -2669,7 +2711,7 @@ fn ch336_start(state: u64, d: u64) {
     if ok {
         step = 4
         s(state, S_CHSTEP, 4)
-        ok = usbnet.ch_bringup(state, fwver)
+        ok = usbnet.ch_bringup(state, fwver, ch_int_info(state))
     }
     if ok {
         s(state, S_CHSTEP, 4 | (1 << 8))
