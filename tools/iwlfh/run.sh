@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/iwlfh/run.sh -- gate for the kernel glue of the family-8000 firmware loader (HP-9b).
 #
-#   bash tools/iwlfh/run.sh        (heavy: kernel build + 8 QEMU boots)
+#   bash tools/iwlfh/run.sh        (heavy: kernel build + 10 QEMU boots)
 #
 # MEASURES (QEMU, no Intel WLAN device; kernel word `iwlfhtest` fakes an 8265 identity and runs the REAL
 # lib/wlan/iwl_fh8000.fi against a fake CSR window in RAM, kernel/drv/net/iwl_fake.fi):
@@ -233,6 +233,20 @@ has "$L5" 'phase=failed' "control noalive: ALIVE packet missing -> phase=failed"
 has "$L5" 'err=-70' "control noalive: bounded timeout (-70)"
 hasnot "$L5" 'iwl: boot2 init nvm' "control noalive: no NVM exchange without a command queue"
 has "$L5" '==END==' "control noalive: the rest of the system keeps running"
+runc l6 "iwlfhtest iwlfhslow"
+L6="$T/l6.klar"
+has "$L6" 'iwl: boot2 init alive rc=0' "slow ALIVE (60000 reads): the clock-bounded wait still sees it"
+has "$L6" 'iwl: boot2 rt alive rc=0' "slow ALIVE: runtime image reaches ALIVE too"
+has "$L6" 'phase=ready' "slow ALIVE: /proc/wlan phase=ready"
+hasnot "$L6" 'fail_alive=' "slow ALIVE: no failure line"
+runc l7 "iwlfhtest iwlfhslow iwloldalive"
+L7="$T/l7.klar"
+has "$L7" 'iwl: boot2 init alive rc=-30' "counter-proof iwloldalive: the old 25000-read wait times out on the slow ALIVE (-30)"
+has "$L7" 'phase=failed' "counter-proof iwloldalive: phase=failed"
+has "$L7" 'err_text=ALIVE timeout' "counter-proof iwloldalive: err_text=ALIVE timeout"
+has "$L7" 'fail_alive=int=' "counter-proof iwloldalive: fail_alive line (CSR_INT, FH_INT, GP1/GP2, CPU status) is in /proc/wlan"
+has "$L7" 'fail_regs=hwif=' "counter-proof iwloldalive: first failure snapshot kept (not overwritten after int_disable)"
+has "$L7" '==END==' "counter-proof iwloldalive: the rest of the system keeps running"
 
 echo "IWLFH: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]

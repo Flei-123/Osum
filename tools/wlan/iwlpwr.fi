@@ -73,13 +73,15 @@ static mut oplog: [u64; 128] = [0; 128]    // (off << 32) | low 32 bits of value
 static mut nop: u64 = 0
 static mut alive_arm: u64 = 0
 static mut alive_kind: u64 = 1
+static mut slow_arm: u64 = 0
+static mut peek_after: u64 = 0
 
 fn m_reset() {
     var i: usize = 0
     while i < 512 { regs[i] = 0
         i = i + 1 }
     dis_arm = 0; clk_arm = 0; init_done = 0; acc_req = 0; acc_arm = 0; access = 0; sleepy = 0
-    resets = 0; viol = 0; np = 0; nrd = 0; nop = 0; alive_arm = 0; alive_kind = 1
+    resets = 0; viol = 0; np = 0; nrd = 0; nop = 0; alive_arm = 0; alive_kind = 1; slow_arm = 0; peek_after = 0
     i = 0
     while i < 16 { pkey[i] = 0
         pval[i] = 0
@@ -144,6 +146,10 @@ fn m_wr(ctx: u64, off: u64, v: u64) {
 
 fn m_rd(ctx: u64, off: u64) -> u64 {
     nrd = nrd + 1
+    if slow_arm > 0 {
+        slow_arm = slow_arm - 1
+        if slow_arm == 0 { regs[2] = regs[2] | 0x1 }
+    }
     if off >= 2048 { return 0xFFFFFFFF }
     if off == 0x008 {
         if alive_arm > 0 {
@@ -152,6 +158,8 @@ fn m_rd(ctx: u64, off: u64) -> u64 {
                 if alive_kind == 1 { regs[2] = regs[2] | 0x1 }
                 if alive_kind == 3 { regs[2] = regs[2] | 0x20000000 }
                 if alive_kind == 4 { regs[2] = regs[2] | 0x02000000 }
+                if alive_kind == 5 { slow_arm = 300000 }
+                if alive_kind == 6 { regs[2] = regs[2] | 0x80000000 }
             }
         }
     } else if off == 0x020 {
@@ -183,6 +191,19 @@ fn m_rd(ctx: u64, off: u64) -> u64 {
         return pval[k as usize]
     }
     return regs[(off / 4) as usize]
+}
+
+fn clk_now(c: u64) -> u64 { return nrd / 250 }
+
+fn clk_peek(c: u64) -> u64 {
+    if peek_after != 0 && nrd > peek_after { return 1 }
+    return 0
+}
+
+fn new_ac() -> iwl_alive.AliveCtx {
+    var a: iwl_alive.AliveCtx = iwl_alive.alive_new()
+    iwl_alive.alive_hooks(&a, clk_now, 0, clk_peek, 0)
+    return a
 }
 
 fn new_probe() -> iwl_probe.Probe {
@@ -381,7 +402,8 @@ fn main() -> i32 {
     m_reset()
     mode = 0
     p = new_probe()
-    r = iwl_alive.boot_fw(&p, 0x123456000)
+    var ac: iwl_alive.AliveCtx = new_ac()
+    r = iwl_alive.boot_fw(&p, 0x123456000, &ac)
     check("A1 boot_fw reaches ALIVE and returns 0", r == 0)
     check("A2 ALIVE is acknowledged by writing the bit", find_w(0x008, 0xFFFFFFFF, 1) != 9999 && (regs[2] & 1) == 0)
     check("A3 order: reset < BA < CPU run < ALIVE ack", find_w(0x020, 0x80, 0x80) < find_w(0x040, 0, 0) && find_w(0x040, 0, 0) < find_w(0x444, 0xFFFFF, 0x05C44) && find_w(0x444, 0xFFFFF, 0x05C44) < find_w(0x008, 0xFFFFFFFF, 1))
@@ -389,24 +411,60 @@ fn main() -> i32 {
     m_reset()
     alive_kind = 2
     p = new_probe()
+    ac = new_ac()
     let rd0: u64 = nrd
-    r = iwl_alive.boot_fw(&p, 0x123456000)
-    check("A5 no ALIVE -> E_ALIVE_TIMEOUT after bounded polling", r == iwl_alive.E_ALIVE_TIMEOUT && nrd - rd0 < 2 * iwl_pwr.POLL_MAX + 2000)
+    r = iwl_alive.boot_fw(&p, 0x123456000, &ac)
+    check("A5 no ALIVE -> E_ALIVE_TIMEOUT after about 2.5 s of clock, bounded reads", r == iwl_alive.E_ALIVE_TIMEOUT && nrd - rd0 > 600000 && nrd - rd0 < 760000 && ac.waited_ms >= 2500)
     check("A6 timeout masks interrupts and never resets again", regs[0x00C / 4] == 0 && resets == 1)
+    m_reset()
+    alive_kind = 2
+    p = new_probe()
+    ac = iwl_alive.alive_new()
+    let rd1: u64 = nrd
+    r = iwl_alive.boot_fw(&p, 0x123456000, &ac)
+    check("A5b dead clock: slice bound stops the wait", r == iwl_alive.E_ALIVE_TIMEOUT && nrd - rd1 < (iwl_alive.MAX_SLICES + 1) * iwl_alive.SLICE_ROUNDS * (iwl_alive.SLICE_STRIDE + 2) + 20000 && ac.slices == iwl_alive.MAX_SLICES)
+    m_reset()
+    alive_kind = 5
+    p = new_probe()
+    ac = new_ac()
+    r = iwl_alive.boot_fw(&p, 0x123456000, &ac)
+    check("A5c slow chip (ALIVE after 300000 reads) is still caught", r == 0 && ac.waited_ms < 2500)
+    m_reset()
+    slow_arm = 300000
+    p = new_probe()
+    ac = new_ac()
+    r = iwl_alive.alive_wait_poll(&p, &ac)
+    check("A5d legacy poll gives up long before a slow ALIVE", r == iwl_alive.E_ALIVE_TIMEOUT)
+    m_reset()
+    alive_kind = 6
+    p = new_probe()
+    ac = new_ac()
+    r = iwl_alive.boot_fw(&p, 0x123456000, &ac)
+    check("A5e FH_RX interrupt bit alone counts as ALIVE and is acknowledged", r == 0 && find_w(0x008, 0xFFFFFFFF, 0x80000000) != 9999)
+    m_reset()
+    alive_kind = 2
+    peek_after = 200000
+    p = new_probe()
+    ac = new_ac()
+    r = iwl_alive.boot_fw(&p, 0x123456000, &ac)
+    check("A5f RX ring hit without any interrupt bit counts as ALIVE", r == 0)
     m_reset()
     alive_kind = 3
     p = new_probe()
-    r = iwl_alive.boot_fw(&p, 0x123456000)
+    ac = new_ac()
+    r = iwl_alive.boot_fw(&p, 0x123456000, &ac)
     check("A7 HW error bit -> E_ALIVE_HW", r == iwl_alive.E_ALIVE_HW)
     m_reset()
     alive_kind = 4
     p = new_probe()
-    r = iwl_alive.boot_fw(&p, 0x123456000)
+    ac = new_ac()
+    r = iwl_alive.boot_fw(&p, 0x123456000, &ac)
     check("A8 SW error bit -> E_ALIVE_SW", r == iwl_alive.E_ALIVE_SW)
     m_reset()
     mode = 1
     p = new_probe()
-    r = iwl_alive.boot_fw(&p, 0x123456000)
+    ac = new_ac()
+    r = iwl_alive.boot_fw(&p, 0x123456000, &ac)
     check("A9 master never stops: boot_fw fails early, firmware NOT kicked", r == iwl_pwr.E_PWR_MASTER && find_w(0x040, 0, 0) == 9999 && resets == 0)
     mode = 0
     var nm: [u8; 96] = [0; 96]

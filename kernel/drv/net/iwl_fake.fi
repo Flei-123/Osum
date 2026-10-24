@@ -23,7 +23,7 @@ import drv.net.iwl_fakefw
 export {
     FAKE_PAGES, FAKE_NORMAL, FAKE_LOST, FAKE_BADWIN, SRAM_SIZE,
     fake_init, fake_rd, fake_wr, fake_viol, fake_lost, fake_sum, fake_chick, fake_loadstat,
-    fake_phase, fake_phase_bytes, fake_stops, fake_set_norx, fake_set_knobs, fake_phydb_cmds, fake_nvm_reads, fake_init_completes, fake_cmds, fake_rx_pkts, fake_rx_drops, fake_last_cmd, fake_last_uid, fake_set_ap
+    fake_phase, fake_phase_bytes, fake_stops, fake_set_norx, fake_set_knobs, fake_phydb_cmds, fake_nvm_reads, fake_init_completes, fake_cmds, fake_rx_pkts, fake_rx_drops, fake_last_cmd, fake_last_uid, fake_set_ap, fake_set_slow
 }
 
 const FAKE_PAGES: u64 = 3
@@ -50,6 +50,9 @@ const S_AARM: u64 = 0x2060      // ALIVE countdown (CSR_INT bit 0 after the CPUs
 const S_PHASE: u64 = 0x2068     // number of ALIVEs so far = index of the image being loaded
 const S_STOPPED: u64 = 0x2070   // a software reset happened since the last ALIVE
 const S_STOPS: u64 = 0x2078
+const S_SLOWN: u64 = 0x24B8
+const S_SLOWC: u64 = 0x24C0
+const SLOW_READS: u64 = 60000
 const S_PHB: u64 = 0x2080       // 4 x u64: octets DMA'd while image `phase` was loading
 const S_PKEY: u64 = 0x2100      // 16 x u64
 const S_PVAL: u64 = 0x2200      // 16 x u64
@@ -93,6 +96,9 @@ fn fake_init(region: u64, sram: u64, mode: u64, bus_base: u64, bus_size: u64) {
 
 fn fake_set_ap(ctx: u64, on: u64) { iwl_fakefw.set_ap(ctx, on) }
 fn fake_set_norx(ctx: u64, on: u64) { iwl_fakefw.set_norx(ctx, on) }
+fn fake_set_slow(ctx: u64, on: u64) {
+    if on != 0 { s(ctx, S_SLOWN, SLOW_READS) } else { s(ctx, S_SLOWN, 0) }
+}
 fn fake_set_knobs(ctx: u64, nonvm: u64, noinitc: u64, noalive: u64, badnvm: u64) { iwl_fakefw.set_knobs(ctx, nonvm, noinitc, noalive, badnvm) }
 fn fake_phydb_cmds(ctx: u64) -> u64 { return iwl_fakefw.phydb_cmds(ctx) }
 fn fake_nvm_reads(ctx: u64) -> u64 { return iwl_fakefw.nvm_reads(ctx) }
@@ -263,7 +269,9 @@ fn fake_wr(ctx: u64, off: u64, v: u64) {
             if g(ctx, S_PHASE) > 0 && g(ctx, S_STOPPED) == 0 { viol(ctx) }
             s(ctx, S_STOPPED, 0)
             s(ctx, S_PHASE, g(ctx, S_PHASE) + 1)
-            if g(ctx, S_MODE) != FAKE_LOST { s(ctx, S_AARM, 3) }
+            if g(ctx, S_MODE) != FAKE_LOST {
+                if g(ctx, S_SLOWN) != 0 { s(ctx, S_SLOWC, g(ctx, S_SLOWN)) } else { s(ctx, S_AARM, 3) }
+            }
         } else if off == 0x1E20 {
             if v == 0 {
                 s(ctx, S_FLAGS, 0)
@@ -281,6 +289,14 @@ fn fake_wr(ctx: u64, off: u64, v: u64) {
 
 fn fake_rd(ctx: u64, off: u64) -> u64 {
     if off >= 0x2000 { return 0xFFFFFFFF }
+    let sc: u64 = g(ctx, S_SLOWC)
+    if sc > 0 {
+        s(ctx, S_SLOWC, sc - 1)
+        if sc == 1 {
+            w32(ctx, 0x008, r32(ctx, 0x008) | 0x1)
+            iwl_fakefw.alive(ctx)
+        }
+    }
     if off == 0x008 {
         let aa: u64 = g(ctx, S_AARM)
         if aa > 0 {

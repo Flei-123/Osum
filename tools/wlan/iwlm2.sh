@@ -5,7 +5,7 @@
 #   lib/wlan/iwl_pwr.fi  reset/clock/PRPH/fw-kick      vs a CSR model with real handshakes (iwlpwr.fi)
 #   lib/wlan/iwl_ctxt.fi context info, TFD, command queue (round trips, bounds, layout table)
 #   lib/wlan/scanfmt.fi  scan results as text lines (real beacons from tools/wlan/mitschnitt.txt)
-# Plus 15 counter-probes: each mutates ONE line of a copy of lib/wlan and must turn the gate red.
+# Plus 18 counter-probes: each mutates ONE line of a copy of lib/wlan and must turn the gate red.
 # With WLAN_AX201_FW=<real .ucode> the real blob is parsed too and compared with the Python walk.
 # usage: bash tools/wlan/iwlm2.sh        exit 0 = all OK
 set -uo pipefail
@@ -89,9 +89,12 @@ mutate "context info size word wrong"         iwl_ctxt.fi 's/st16(buf, 4, (CTXT_
 mutate "TFD accepts 4096-octet buffers"       iwl_ctxt.fi 's/len >= 4096/len > 4096/' pw
 mutate "section classifier: separators swapped" iwl_fw.fi 's/^const SEP_CPU: u64 = 0xFFFFCCCC/const SEP_CPU: u64 = 0xAAAABBBB/;s/^const SEP_PAGING: u64 = 0xAAAABBBB/const SEP_PAGING: u64 = 0xFFFFCCCC/' fw
 mutate "alive_wait ignores the HW error bit"   iwl_alive.fi 's/if v \& INT_HW_ERR != 0 {/if false {/' pw
-mutate "alive_wait never acks ALIVE"           iwl_alive.fi '/INT_ALIVE_BIT != 0 {/,/}/ s/ack_int(p, INT_ALIVE_BIT)/let _x: u64 = 0/' pw
+mutate "alive_wait never acks ALIVE"           iwl_alive.fi '/if v \& accept != 0 {/,/}/ s/ack_int(p, v \& accept)/let _x: u64 = 0/' pw
 mutate "boot_fw kicks even if power_up failed" iwl_alive.fi 's/    if r != 0 { return r }\n    r = iwl_pwr.fw_kick//;0,/if r != 0 { return r }/ s/if r != 0 { return r }/if false { return r }/' pw
-mutate "alive_wait has no bound"               iwl_alive.fi 's/while i < iwl_pwr.POLL_MAX {/while i < 400000000 {/' pw
+mutate "alive_wait_poll has no bound"          iwl_alive.fi 's/while i < iwl_pwr.POLL_MAX {/while i < 400000000 {/' pw
+mutate "alive_wait_for ignores the clock limit" iwl_alive.fi 's/if waited >= (\*a).limit_ms { return E_ALIVE_TIMEOUT }//' pw
+mutate "alive_wait_for ignores the RX ring"     iwl_alive.fi 's/if h.peek((\*a).peek_ctx) != 0 { return 0 }//' pw
+mutate "alive accepts only CSR_INT bit 0"       iwl_alive.fi 's/judge(p, a, rd_int(p), ACCEPT_ALL)/judge(p, a, rd_int(p), ACCEPT_LEGACY)/' pw
 mutate "Qu candidate order swapped"            iwl_fwsel.fi 's/    if i == 0 {/    if i == 1 {/' pw
 mutate "non-HR radio gets candidates"          iwl_fwsel.fi 's/if !rf_ok(rf) { return 0 }//' pw
 mutate "scanfmt lets control octets through"  scanfmt.fi  's/if c < 0x21 || c > 0x7E { c = 63 }//' sf
