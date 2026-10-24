@@ -29,6 +29,7 @@ ap.add_argument('--caps', default='')
 ap.add_argument('--max-secs', type=int, default=240)
 ap.add_argument('--phy-boot', default='down')
 ap.add_argument('--phy-deaf', action='store_true')
+ap.add_argument('--intr', default='off')
 A = ap.parse_args()
 MAC = bytes(int(x, 16) for x in A.mac.split(':'))
 LOGF = open(A.log, 'w') if A.log else sys.stderr
@@ -251,6 +252,8 @@ class Dev:
         self.rndis_resp = []
         self.n_ctrl = 0
         self.got_hello = False
+        self.intr_last = None
+        self.intr_t = 0.0
 
     def tx(self, typ, rid, payload=b''):
         self.sock.setblocking(True)
@@ -412,6 +415,20 @@ class Dev:
                 return
             self.tx(T_BULK, rid, struct.pack('<BBHIH', ep, 0, len(b) & 0xFFFF, 0, len(b) >> 16) + b)
 
+    def serve_intr(self):
+        if KIND != 'ch336' or INT_IN not in self.int_rx:
+            return
+        pkt = CH.intr_packet(A.intr)
+        if pkt is None:
+            return
+        now = time.time()
+        if pkt == self.intr_last and now - self.intr_t < 1.0:
+            return
+        self.intr_last = pkt
+        self.intr_t = now
+        self.tx(T_INTERRUPT, 0, struct.pack('<BBH', INT_IN, 0, len(pkt)) + pkt)
+        log('interrupt packet %s' % pkt[:1].hex())
+
     def handle(self, typ, rid, p):
         if typ == T_HELLO:
             return
@@ -525,6 +542,7 @@ def main():
             log('device_disconnect')
         if plugged and not unplugged:
             d.serve_in()
+            d.serve_intr()
     log('stats tx=%d rx=%d ctrl=%d' % (STAT['tx'], STAT['rx'], d.n_ctrl))
 
 

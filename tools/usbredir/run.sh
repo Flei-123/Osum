@@ -22,7 +22,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "USBTETHER: skipped, no qemu"; exit 0; }
-CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc}"
+CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr}"
 cleanup_pids() { for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; pkill -P $$ 2>/dev/null; true; }
 trap 'cleanup_pids; [ -n "${USBTETHER_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/dhcp.elf" ]; then
@@ -35,10 +35,11 @@ printf 'echo ==START==\nsleep 1\ndhcp\nping 192.168.42.129\nhost example.org\nsl
 printf 'echo ==START==\ndhcp\nping 192.168.42.129\nsleep 1\necho ==END==\n' > "$T/s_re.sh"
 printf 'echo ==START==\nping 192.168.42.129\nping 192.168.42.129\nping 192.168.42.129\nping 192.168.42.129\ndhcp\nping 192.168.42.129\nsleep 1\necho ==END==\n' > "$T/s_late.sh"
 printf 'echo ==START==\ndhcp\nping 192.168.42.129\nsleep 2\ncat /proc/usbnet\necho ==END==\n' > "$T/s_proc.sh"
+printf 'echo ==START==\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\ncat /proc/usbnet\necho ==END==\n' > "$T/s_intr.sh"
 python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
-    /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_late.sh="$T/s_late.sh" /t/s_proc.sh="$T/s_proc.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
+    /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_late.sh="$T/s_late.sh" /t/s_proc.sh="$T/s_proc.sh" /t/s_intr.sh="$T/s_intr.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 PORT=$((47000 + ($$ % 500) * 4))
 
@@ -187,6 +188,28 @@ for c in $CASES; do
         chk chp "link up line" 'link: state=up'
         chk chp "usbnet counters" 'usbnet: ready mode=3 link=up'
         chk chp "dhcp line" 'dhcp: state='
+        ;;
+    ch336-intr)
+        GARGS="--phy-boot down --intr link" BASEW="nokbd nosched vfs" run chi ch336 boot s_proc.sh
+        grep -aq 'interrupt packet 40' "$T/chi.gadget" && ok "chi: gadget sent an interrupt packet with the link bit" || bad "chi: no interrupt packet with the link bit"
+        chk chi "interrupt endpoint open and polled" 'intr: open=1 ep=3 n=[1-9]'
+        chk chi "interrupt byte 0x40 means link up" 'last=0x40 link=up'
+        chk chi "link up line" 'link: state=up'
+        net_ok chi
+        ;;
+    ch336-intr-only)
+        GARGS="--phy-boot down --phy-deaf --intr up" BASEW="nokbd nosched vfs" run chy ch336 boot s_intr.sh
+        chk chy "PHY never reports link" 'phy: bmcr=[0-9a-f]* bmsr=7809'
+        chk chy "interrupt endpoint says up" 'last=0x40 link=up'
+        chk chy "link state follows the interrupt" 'link: state=up'
+        panics chy
+        ;;
+    ch336-nochintr)
+        GARGS="--phy-boot down --phy-deaf --intr up" XWORDS="nochintr" BASEW="nokbd nosched vfs" run chx ch336 boot s_intr.sh
+        chk chx "interrupt endpoint not opened" 'intr: open=0 ep=0 n=0'
+        nochk chx "link not taken from the interrupt" 'link: state=up'
+        chk chx "link stays down" 'link: state=down'
+        panics chx
         ;;
     none)
         run none ncm none s.sh

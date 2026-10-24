@@ -9,6 +9,7 @@ FW_VERSION = 0x39
 ANAR_VALUE = 0x01E1
 LPA_VALUE = 0x45E1
 KICK_WORD = 0xFA00
+INTR_LINK_BIT = 0x40
 
 
 class Ch336Model:
@@ -88,6 +89,17 @@ class Ch336Model:
                 self.start_phy('0x1F')
             return b''
         return None
+
+    def intr_packet(self, mode):
+        if mode == 'link':
+            up = self.started
+        elif mode == 'up':
+            up = True
+        elif mode == 'down':
+            up = False
+        else:
+            return None
+        return bytes([INTR_LINK_BIT if up else 0]) + bytes(7)
 
     @staticmethod
     def unwrap_out(data):
