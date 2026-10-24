@@ -93,7 +93,7 @@ ALLOWED_CONSTS = ("const RGB24", "const RGB_WHITE", "const RGB_BLACK",
 ALLOWED_FN = {
     # `platte` ORs the marker of a text plate into the high byte of a pixel:
     # 0xFFFFFF is the mask that keeps the colour, not a colour.
-    "kernel/user/wlibc.fi": ["fn primitives_builtin", "fn platte"],
+    "kernel/user/wlibc.fi": ["fn primitives_builtin", "fn platte", "fn plate_ink"],
     # The two report functions print the bar's colour as six hex digits:
     # `& 0xFFFFFF` strips the alpha byte, it names no colour.
     "kernel/user/taskbar.fi": ["fn glas_say", "fn schild_say"],

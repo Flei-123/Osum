@@ -36,5 +36,6 @@ DREH="$OUT-drehbuch.txt"
   done
 } > "$DREH"
 export DESIGNBUILD="${DESIGNBUILD:-$OUT-build}"
+export AUDIT_TIMEOUT="${AUDIT_TIMEOUT:-1800}"
 bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt="${HALT:-1500}" res="$RES" uiscale="$SCALE" extra="$EXTRA" drehbuch="$DREH" > "$OUT.log" 2>&1
 python3 -I tools/guibugs/resize_check.py "$OUT/serial.txt" "$OUT" "$n" "${GUARDMODE:-guard}"
