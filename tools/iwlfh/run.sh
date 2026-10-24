@@ -33,7 +33,7 @@ python3 -I tools/iwlfh/ref.py gen "$T/blobs" || { bad "reference generator"; exi
 python3 -I tools/wlan/iwlfw_ref.py gen "$T/blobs" >/dev/null 2>&1
 FWPATH=/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode
 
-bash tools/sync/build.sh "$T/bin" 0 sh echo > "$T/b.txt" 2>&1 \
+bash tools/sync/build.sh "$T/bin" 0 sh echo cat > "$T/b.txt" 2>&1 \
     && ok "programs build" || { bad "programs build"; tail "$T/b.txt"; echo "IWLFH: $pass ok, $fail fail"; exit 1; }
 ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 \
     && ok "kernel builds" || { bad "kernel build"; tail -30 "$T/k.txt"; echo "IWLFH: $pass ok, $fail fail"; exit 1; }
@@ -128,7 +128,7 @@ has "$I2" 'iwl: cq ctl-big rc=-71' "control: command larger than the slot refuse
 has "$I2" 'iwl: cq ctl-fakenorx rc=-70' "control: firmware never answers -> bounded timeout (-70)"
 has "$I2" 'iwl: cq ctl-norx rc=-72' "control: RX ring not programmed -> -72"
 has "$I2" 'iwl: cq ctl-notx rc=-73' "control: scheduler/queue not enabled -> -73"
-has "$I2" 'iwl: cq SUMMARY cmds=304 pkts=306 drops=1 viol=0 last=152' "model: 304 commands, 306 RX packets, 1 intended drop, no protocol violation"
+has "$I2" 'iwl: cq SUMMARY cmds=318 pkts=325 drops=1 viol=0 last=152' "model: 318 commands (14 boot + 304 selftest), 325 RX packets, 1 intended drop, no protocol violation"
 echo "-- I3: lost end-of-TFD interrupt in the INIT phase: bounded failure, RT never loaded"
 run i3 two "iwlfhtest iwlfhlost"
 I3="$T/i3.klar"
@@ -186,6 +186,53 @@ PYEOF
 else
     echo "  (no pinned WLAN_8265_FW: real-blob runs skipped)"
 fi
+
+printf 'echo ==START==\ncat /proc/wlan\necho ==END==\n' > "$T/s2.sh"
+echo "-- L: INIT stage over the command queue (NVM, PHY_CFG, calibration, INIT_COMPLETE), RT replay, /proc/wlan"
+python3 tools/osum/mkfs.py build "$T/twoc.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+    /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" "/t/s.sh=$T/s2.sh" "$FWPATH=$T/blobs/two.bin" > "$T/twoc.mkfs" 2>&1 || bad "image twoc"
+runc() {
+    cp "$T/twoc.img" "$T/$1.img"
+    local n=$1 words=$2
+    timeout 200 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$T/k.img" -m 512 \
+        -append "osum vfs $words script=sh /t/s.sh;exit" \
+        -serial "file:$T/$n.txt" -display none -no-reboot \
+        -drive "file=$T/$n.img,format=raw,if=ide,index=0" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+    tr -cd '\11\12\15\40-\176' < "$T/$n.txt" > "$T/$n.klar"
+}
+runc l1 iwlfhtest
+L1="$T/l1.klar"
+has "$L1" 'iwl: boot2 init nvm rc=0' "INIT stage over the command queue succeeds"
+has "$L1" 'iwl: boot2 FAKEFW nvm=6 phydb=4 initc=1' "fake saw 6 NVM_ACCESS reads, 4 PHY_DB replays, 1 INIT_COMPLETE"
+has "$L1" 'phase=ready' "/proc/wlan: phase=ready after RT"
+has "$L1" 'err_text=ok' "/proc/wlan: err_text=ok"
+has "$L1" 'nvm=ok bytes=192 secs=2' "/proc/wlan: NVM read (2 sections, 192 octets)"
+has "$L1" 'calib=4 bytes=24 replayed=4' "/proc/wlan: 4 calibration results collected and replayed"
+has "$L1" 'last_cmd=0x6a last_notif=0x04' "/proc/wlan: last command PHY_CFG, last notification INIT_COMPLETE"
+has "$L1" 'alive=yes init_alive=yes rt_alive=yes' "/proc/wlan: both ALIVEs seen"
+runc l2 "iwlfhtest iwlfhnonvm"
+L2="$T/l2.klar"
+has "$L2" 'iwl: boot2 init nvm rc=-61' "control nonvm: NVM_ACCESS never answered -> bounded failure (-61)"
+has "$L2" 'phase=failed' "control nonvm: /proc/wlan phase=failed"
+has "$L2" 'failed_at=nvm' "control nonvm: failed_at=nvm"
+hasnot "$L2" 'iwl: boot2 rt load' "control nonvm: RT image never loaded"
+has "$L2" '==END==' "control nonvm: the rest of the system keeps running"
+runc l3 "iwlfhtest iwlfhnoinitc"
+L3="$T/l3.klar"
+has "$L3" 'iwl: boot2 init nvm rc=-62' "control noinitc: INIT_COMPLETE never comes -> bounded timeout (-62)"
+has "$L3" 'failed_at=init_complete' "control noinitc: failed_at=init_complete"
+hasnot "$L3" 'iwl: boot2 rt load' "control noinitc: RT image never loaded"
+runc l4 "iwlfhtest iwlfhbadnvm"
+L4="$T/l4.klar"
+has "$L4" 'iwl: boot2 init nvm rc=-63' "control badnvm: invalid HW section refused (-63)"
+has "$L4" 'err=-63' "control badnvm: /proc/wlan err=-63"
+runc l5 "iwlfhtest iwlfhnoalive"
+L5="$T/l5.klar"
+has "$L5" 'phase=failed' "control noalive: ALIVE packet missing -> phase=failed"
+has "$L5" 'err=-70' "control noalive: bounded timeout (-70)"
+hasnot "$L5" 'iwl: boot2 init nvm' "control noalive: no NVM exchange without a command queue"
+has "$L5" '==END==' "control noalive: the rest of the system keeps running"
 
 echo "IWLFH: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]

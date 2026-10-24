@@ -26,7 +26,7 @@ if FIRNLIB="$PWD/lib" $FC --profile=app tools/power/host.fi -o "$T/host" > "$T/h
     grep '^FAIL' "$T/host.out" | head -20
     n=$(grep -c '^ok' "$T/host.out")
     [ "$hrc" = 0 ] && ok "host.fi: $(tail -1 "$T/host.out")" || bad "host.fi: $(tail -1 "$T/host.out")"
-    [ "$n" -ge 28 ] && ok "at least 28 checks ran ($n)" || bad "only $n checks ran"
+    [ "$n" -ge 36 ] && ok "at least 36 checks ran ($n)" || bad "only $n checks ran"
 else
     bad "host.fi does not build"; grep -v '^warning' "$T/host.build" | head -20
 fi
@@ -171,6 +171,23 @@ tr -cd '\11\12\15\40-\176' < "$T/ser2.txt" | tr -d '\r' > "$T/ser2.klar" 2>/dev/
 n=$(grep -ac "powerd: standby after idle mains=0" "$T/ser2.klar")
 [ "$n" = 1 ] && ok "idle 6 s on battery -> standby wish, fired exactly once" || bad "idle standby fired $n times (want 1)"
 grep -aq "powerd: lid closed mains=0 action=sleep" "$T/ser.klar" && bad "unexpected sleep action on battery" || ok "no sleep action where the conf says nothing"
+# third boot: brightness persistence (restore from /etc/backlight.conf, save a changed level), fake PWM via `blpch`
+printf 'percent=40\n' > "$T/backlight.conf"
+printf 'powerd &\nsleep -m 3500\necho ==A==\ncat /etc/backlight.conf\necho ==END==\n' > "$T/s3.sh"
+python3 tools/osum/mkfs.py build "$T/disk3.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ "/etc/power.conf=$T/power.conf" "/etc/backlight.conf=$T/backlight.conf" \
+    "/bin/sh=$T/bin/sh.elf" "/bin/echo=$T/bin/echo.elf" "/bin/sleep=$T/bin/sleep.elf" "/bin/cat=$T/bin/cat.elf" \
+    "/bin/powerd=$T/bin/powerd.elf" "/t/s.sh=$T/s3.sh" > "$T/mkfs3.txt" 2>&1 || { bad "mkfs (backlight boot) failed"; tail -3 "$T/mkfs3.txt"; }
+timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$K" -m 512 \
+    -append "osum vfs nokbd nosched noproc acpiev evfake blpch script=sh /t/s.sh;exit" \
+    -acpitable "file=$T/asl/laptop.aml" \
+    -serial "file:$T/ser3.txt" -display none -no-reboot \
+    -drive "file=$T/disk3.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+tr -cd '\11\12\15\40-\176' < "$T/ser3.txt" | tr -d '\r' > "$T/ser3.klar" 2>/dev/null
+if [ -n "${POWER_KEEP:-}" ]; then cp "$T/ser3.klar" "$POWER_KEEP.bl"; fi
+awk '/==A==/{f=1;next} /==END==/{f=0} f' "$T/ser3.klar" | grep -aqF "percent=40" && ok "/etc/backlight.conf keeps percent=40" || bad "/etc/backlight.conf lost percent=40"
+grep -aqF "powerd: backlight restored 40" "$T/ser3.klar" && ok "boot applies the saved level from /etc/backlight.conf" || bad "saved level not applied at boot"
+awk '/==END==/{exit} {print}' "$T/ser3.klar" | grep -aqF "powerd: backlight saved" && bad "level saved although nothing changed" || ok "unchanged level (just restored) is not written back"
 if [ -n "${POWER_KEEP:-}" ]; then cp "$T/ser.klar" "$POWER_KEEP"; fi
 else
     bad "QEMU stage inputs missing (kernel / laptop.aml / powerd.elf)"

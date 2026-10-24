@@ -1,0 +1,357 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import wlan.iwl_le
+import wlan.iwl_boot
+import wlan.iwl_diag
+import wlan.iwl_phydb
+
+static mut line: [u8; 1024] = [0; 1024]
+static mut ln: u64 = 0
+static mut q: [u8; 8192] = [0; 8192]
+static mut qoff: [u64; 16] = [0; 16]
+static mut qlen: [u64; 16] = [0; 16]
+static mut qhead: u64 = 0
+static mut qtail: u64 = 0
+static mut qfill: u64 = 0
+static mut clog: [u8; 16384] = [0; 16384]
+static mut cloff: [u64; 64] = [0; 64]
+static mut cllen: [u64; 64] = [0; 64]
+static mut ncl: u64 = 0
+static mut clfill: u64 = 0
+static mut fmode: u64 = 0
+static mut in_rt: u64 = 0
+static mut idle: u64 = 0
+static mut clock: u64 = 0
+static mut cmdbuf: [u8; 4096] = [0; 4096]
+static mut rxbuf: [u8; 4096] = [0; 4096]
+static mut nvmbuf: [u8; 8192] = [0; 8192]
+static mut pool: [u8; 4096] = [0; 4096]
+static mut rbuf: [u8; 2048] = [0; 2048]
+
+fn put_s(s: u64) {
+    var i: u64 = 0
+    while iwl_le.ld8(s, i) != 0 {
+        line[ln as usize] = iwl_le.ld8(s, i) as u8
+        ln = ln + 1
+        i = i + 1
+    }
+}
+
+fn put_i(v: i64) {
+    if v < 0 {
+        line[ln as usize] = 45 as u8
+        ln = ln + 1
+        put_u((0 - v) as u64)
+    } else {
+        put_u(v as u64)
+    }
+}
+
+fn put_u(v: u64) {
+    var tmp: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        line[ln as usize] = 48 as u8
+        ln = ln + 1
+        return
+    }
+    while x != 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        line[ln as usize] = tmp[n as usize]
+        ln = ln + 1
+    }
+}
+
+fn hexd(v: u64) -> u8 {
+    if v < 10 { return (48 + v) as u8 }
+    return (87 + v) as u8
+}
+
+fn put_hex(v: u64, digits: u64) {
+    var i: u64 = digits
+    while i > 0 {
+        i = i - 1
+        line[ln as usize] = hexd((v >> (i * 4)) & 15)
+        ln = ln + 1
+    }
+}
+
+fn flush() {
+    io.print_line_bytes((&line[0]) as u64, ln as usize)
+    ln = 0
+}
+
+fn pkt_begin(cmd: u64) -> u64 {
+    let at: u64 = qfill
+    qoff[qtail as usize] = at
+    iwl_le.st8((&q[0]) as u64, at, cmd)
+    iwl_le.st8((&q[0]) as u64, at + 1, 0)
+    iwl_le.st16((&q[0]) as u64, at + 2, 0x8000)
+    return at
+}
+
+fn pkt_end(at: u64, len: u64) {
+    qlen[qtail as usize] = len
+    qtail = qtail + 1
+    qfill = at + len
+}
+
+fn calib(typ: u64, len: u64, seed: u64, id: u64, has_id: bool) {
+    let a: u64 = pkt_begin(0x6B)
+    let base: u64 = (&q[0]) as u64 + a
+    iwl_le.st16(base, 4, typ)
+    iwl_le.st16(base, 6, len)
+    var i: u64 = 0
+    while i < len {
+        iwl_le.st8(base, 8 + i, seed + i)
+        i = i + 1
+    }
+    if has_id {
+        iwl_le.st16(base, 8, id)
+    }
+    pkt_end(a, 8 + len)
+}
+
+fn sec_size(s: u64) -> u64 {
+    if s == 1 { return 3000 }
+    if s == 3 { return 100 }
+    if s == 5 { return 2048 }
+    if s == 11 { return 6 }
+    if s == 12 { return 40 }
+    return 0
+}
+
+fn nvm_reply(base: u64) {
+    let sec: u64 = iwl_le.ld16(base, 6)
+    let off: u64 = iwl_le.ld16(base, 8)
+    let size: u64 = sec_size(sec)
+    let a: u64 = pkt_begin(0x88)
+    let p: u64 = (&q[0]) as u64 + a
+    var rlen: u64 = 0
+    var st: u64 = 0
+    if off >= size || (fmode == 1 && sec == 1) {
+        st = 1
+    } else {
+        rlen = size - off
+        if rlen > 2048 { rlen = 2048 }
+    }
+    var roff: u64 = off
+    if fmode == 6 && sec == 3 { roff = off + 1 }
+    var claimed: u64 = rlen
+    if fmode == 3 && sec == 3 { claimed = rlen + 10 }
+    iwl_le.st16(p, 4, roff)
+    iwl_le.st16(p, 6, claimed)
+    iwl_le.st16(p, 8, sec)
+    iwl_le.st16(p, 10, st)
+    var i: u64 = 0
+    while i < rlen {
+        iwl_le.st8(p, 12 + i, sec * 7 + off + i)
+        i = i + 1
+    }
+    pkt_end(a, 12 + rlen)
+}
+
+fn fake_send(ctx: u64, a: u64, n: u64) -> i64 {
+    let id: u64 = iwl_le.ld8(a, 0)
+    cloff[ncl as usize] = clfill
+    cllen[ncl as usize] = n
+    iwl_le.copy((&clog[0]) as u64 + clfill, a, n)
+    clfill = clfill + n
+    ncl = ncl + 1
+    if fmode == 4 && ncl == 5 { return 0 - 1 }
+    if id == 0x88 {
+        nvm_reply(a)
+    }
+    if id == 0x6A && in_rt == 0 {
+        let u: u64 = pkt_begin(0x77)
+        pkt_end(u, 8)
+        calib(1, 8, 0x10, 0, false)
+        calib(2, 10, 0x20, 0, false)
+        calib(3, 6, 0x40, 1, true)
+        calib(3, 6, 0x50, 0, true)
+        calib(2, 12, 0x30, 0, false)
+        if fmode != 2 {
+            let c: u64 = pkt_begin(0x04)
+            pkt_end(c, 8)
+        }
+    }
+    return 0
+}
+
+fn fake_recv(ctx: u64, buf: u64, cap: u64) -> i64 {
+    if fmode == 5 { return 0 - 7 }
+    idle = idle + 1
+    if idle % 2 == 0 { return 0 }
+    if qhead == qtail { return 0 }
+    let n: u64 = qlen[qhead as usize]
+    iwl_le.copy(buf, (&q[0]) as u64 + qoff[qhead as usize], n)
+    qhead = qhead + 1
+    return n as i64
+}
+
+fn fake_now(ctx: u64) -> u64 {
+    clock = clock + 1
+    return clock
+}
+
+fn fnv(a: u64, n: u64) -> u64 {
+    var h: u64 = 0x811C9DC5
+    var i: u64 = 0
+    while i < n {
+        h = ((h ^ iwl_le.ld8(a, i)) * 0x01000193) & 0xFFFFFFFF
+        i = i + 1
+    }
+    return h
+}
+
+fn reset(mode: u64) {
+    qhead = 0
+    qtail = 0
+    qfill = 0
+    ncl = 0
+    clfill = 0
+    fmode = mode
+    in_rt = 0
+    idle = 0
+    clock = 0
+    iwl_le.zero((&nvmbuf[0]) as u64, 8192)
+}
+
+fn scenario(name: u64, mode: u64, present: u64, require: u64, nvm_cap: u64, pool_cap: u64, dump: bool) {
+    var k_s: [u8; 3] = "S \0"
+    var k_ir: [u8; 7] = " init=\0"
+    var k_rr: [u8; 5] = " rt=\0"
+    var k_ph: [u8; 8] = " phase=\0"
+    var k_er: [u8; 6] = " err=\0"
+    var k_fa: [u8; 12] = " failed_at=\0"
+    var k_cm: [u8; 7] = " cmds=\0"
+    var k_nt: [u8; 9] = " notifs=\0"
+    var k_nv: [u8; 6] = " nvm=\0"
+    var k_nb: [u8; 8] = " nbytes\0"
+    var k_ca: [u8; 8] = " calib=\0"
+    var k_rp: [u8; 11] = " replayed=\0"
+    var k_fn: [u8; 6] = " fnv=\0"
+    var k_c: [u8; 5] = "cmd \0"
+    var k_d: [u8; 3] = "D \0"
+    reset(mode)
+    var d: iwl_diag.Diag = iwl_diag.diag_new()
+    var b: iwl_boot.Boot = iwl_boot.boot_new((&cmdbuf[0]) as u64, 4096, (&rxbuf[0]) as u64, 4096, (&nvmbuf[0]) as u64, nvm_cap, (&pool[0]) as u64, pool_cap)
+    b.phy_cfg = 0x00330F00
+    b.ev_trig = 1
+    b.fl_trig = 2
+    b.rt_ev_trig = 0
+    b.rt_fl_trig = 4
+    b.require = require
+    if present != 0 {
+        b.x = iwl_boot.Xport { present: 1, ctx: 0, send: fake_send, recv: fake_recv, now: fake_now }
+    }
+    iwl_diag.diag_phase(&d, iwl_diag.PH_INIT_ALIVE, 0)
+    let r1: i64 = iwl_boot.init_stage(&b, &d)
+    var r2: i64 = 0
+    if r1 == 0 {
+        in_rt = 1
+        iwl_diag.diag_phase(&d, iwl_diag.PH_RT_ALIVE, 0)
+        r2 = iwl_boot.rt_stage(&b, &d)
+    }
+    var ph: [u8; 24] = [0 as u8; 24]
+    put_s((&k_s[0]) as u64)
+    put_s(name)
+    put_s((&k_ir[0]) as u64)
+    put_i(r1)
+    put_s((&k_rr[0]) as u64)
+    put_i(r2)
+    put_s((&k_ph[0]) as u64)
+    iwl_diag.phase_name(d.phase, (&ph[0]) as u64)
+    put_s((&ph[0]) as u64)
+    put_s((&k_fa[0]) as u64)
+    iwl_diag.phase_name(d.failed_at, (&ph[0]) as u64)
+    put_s((&ph[0]) as u64)
+    put_s((&k_er[0]) as u64)
+    put_i(d.err)
+    put_s((&k_cm[0]) as u64)
+    put_u(d.cmds)
+    put_s((&k_nt[0]) as u64)
+    put_u(d.notifs)
+    put_s((&k_nv[0]) as u64)
+    put_u(d.nvm_state)
+    put_s((&k_nb[0]) as u64)
+    put_ch(61)
+    put_u(d.nvm_bytes)
+    put_ch(47)
+    put_u(d.nvm_secs)
+    put_s((&k_ca[0]) as u64)
+    put_u(d.calib_n)
+    put_ch(47)
+    put_u(d.calib_bytes)
+    put_s((&k_rp[0]) as u64)
+    put_u(d.replayed)
+    put_s((&k_fn[0]) as u64)
+    put_hex(fnv((&nvmbuf[0]) as u64, b.nvm_len), 8)
+    flush()
+    if dump {
+        var k: u64 = 0
+        while k < ncl {
+            put_s((&k_c[0]) as u64)
+            var j: u64 = 0
+            while j < cllen[k as usize] {
+                put_hex(iwl_le.ld8((&clog[0]) as u64 + cloff[k as usize], j), 2)
+                j = j + 1
+            }
+            flush()
+            k = k + 1
+        }
+        let n: u64 = iwl_diag.diag_render(&d, (&rbuf[0]) as u64, 2048)
+        var s: u64 = 0
+        var i: u64 = 0
+        while i < n {
+            if i == 0 || iwl_le.ld8((&rbuf[0]) as u64, i - 1) == 10 {
+                put_s((&k_d[0]) as u64)
+            }
+            line[ln as usize] = rbuf[i as usize]
+            if rbuf[i as usize] == 10 {
+                flush()
+            } else {
+                ln = ln + 1
+            }
+            i = i + 1
+        }
+    }
+}
+
+fn put_ch(c: u64) {
+    line[ln as usize] = c as u8
+    ln = ln + 1
+}
+
+fn main() -> i32 {
+    var a: [u8; 5] = "full\0"
+    var b: [u8; 7] = "nocmdq\0"
+    var c: [u8; 8] = "require\0"
+    var d: [u8; 8] = "badnvm1\0"
+    var e: [u8; 9] = "noinitc\0\0"
+    var f: [u8; 8] = "shortn\0\0"
+    var g: [u8; 8] = "sendbad\0"
+    var h: [u8; 7] = "rxbad\0\0"
+    var i: [u8; 8] = "nvmfull\0"
+    var j: [u8; 9] = "poolfull\0"
+    var k: [u8; 8] = "offbad\0\0"
+    scenario((&a[0]) as u64, 0, 1, 0, 8192, 4096, true)
+    scenario((&b[0]) as u64, 0, 0, 0, 8192, 4096, false)
+    scenario((&c[0]) as u64, 0, 0, 1, 8192, 4096, true)
+    scenario((&d[0]) as u64, 1, 1, 0, 8192, 4096, false)
+    scenario((&e[0]) as u64, 2, 1, 0, 8192, 4096, false)
+    scenario((&f[0]) as u64, 3, 1, 0, 8192, 4096, false)
+    scenario((&g[0]) as u64, 4, 1, 0, 8192, 4096, false)
+    scenario((&h[0]) as u64, 5, 1, 0, 8192, 4096, false)
+    scenario((&i[0]) as u64, 0, 1, 0, 3000, 4096, false)
+    scenario((&j[0]) as u64, 0, 1, 0, 8192, 20, false)
+    scenario((&k[0]) as u64, 6, 1, 0, 8192, 4096, false)
+    return 0
+}
