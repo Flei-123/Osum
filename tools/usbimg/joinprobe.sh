@@ -78,18 +78,33 @@ wait_line() {
     return 1
 }
 party_n() { grep -ac '^partyrun: start /bin/echo target=' "$S"; }
+dlg_n() { grep -ac 'wm: trusted dialog up no=' "$S"; }
+ans_n() { grep -ac 'wm: trusted dialog answer=1 ' "$S"; }
+answer_dialog() {
+    local i a0
+    for i in $(seq 1 40); do [ "$(dlg_n)" -gt "$1" ] && break; sleep 1; done
+    [ "$(dlg_n)" -gt "$1" ] || return 1
+    a0=$(ans_n)
+    sleep 2
+    printf 'taste j\nwarte 3\n' > "$OUT/dj"
+    drive "$OUT/dj"
+    [ "$(ans_n)" -gt "$a0" ]
+}
 
-# path A: friend -> Message (chat) -> Join
+# path A: friend -> Message (chat) -> Join (critical: the trusted dialog asks, the probe answers it)
 n0=$(party_n)
+d0=$(dlg_n)
 cat > "$OUT/d2" <<EOT
 klickauf fdnth2x0
 warte 5
 foto 03-chat
 klickauf fdnth2x-1
-warte 5
+warte 3
 foto 04-join
 EOT
 drive "$OUT/d2"
+grep -aq '^freunde: key 55' "$S" && ok "path A: the Join button reaches the bar" || bad "path A: no Join key at the bar"
+answer_dialog "$d0" && ok "path A: the trusted dialog took the yes" || bad "path A: no trusted dialog answered"
 for i in $(seq 1 60); do [ "$(party_n)" -gt "$n0" ] && break; sleep 1; done
 [ "$(party_n)" -gt "$n0" ] && ok "path A: Join starts the game through partyrun" || bad "path A: no partyrun start after Join"
 grep -aq '^partyrun: start /bin/echo target=game://lobby/88' "$S" && ok "path A: the target of the accepted answer is handed over" || bad "path A: wrong or missing target"
