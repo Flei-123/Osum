@@ -53,12 +53,19 @@ python3 tools/osum/mkfs.py build "$D/d.img" 20000 /lib/ \
     $(for p in $PROGS; do echo "/bin/$p=$D/bin/$p.elf"; done) \
     "/t/s.sh=$D/s.sh" > "$D/mkfs.txt" 2>&1 || tail -3 "$D/mkfs.txt"
 num "ethreg.ops_for is in the kernel" "$(nm "$D/k0.img.elf" 2>/dev/null | grep -c 'ethreg__ops_for')" ge 1
-for fn in tx_frame_on rx_take_on poll_on; do
-    num "netdev.$fn calls the r8169 table through a pointer (indirect call)" \
+for fn in tx_frame_on rx_take_on poll_on present_on ready_on init_dispatch link_up_on hwstat_on irq_kind_on kill_cards resume_cards; do
+    num "netdev.$fn calls the table through a pointer (indirect call)" \
         "$(objdump -d --no-show-raw-insn --disassemble=_F0.netdev__$fn "$D/k0.img.elf" 2>/dev/null | grep -c 'call.*\*')" ge 1
 done
-num "netdev.fi has no direct r8169 operation call left" \
-    "$(grep -cE 'r8169\.[a-z_0-9]+_on\(' kernel/net/netdev.fi)" eq 0
+for chip in r8169 e1000 virtio usbnet wlan_net; do
+    num "netdev.fi has no direct $chip operation call left" \
+        "$(grep -cE "\b$chip\.[a-z_0-9]+_on\(" kernel/net/netdev.fi)" eq 0
+done
+for cls in r8169 e1000 virtio usbnet wlan; do
+    num "ethreg registers the ${cls}_class table" "$(grep -c "${cls}_class.ops()" kernel/drv/net/ethreg.fi)" eq 1
+done
+num "netdev.fi has no per-kind chain on KIND_E1000 / KIND_VIRTIO left in the operation set" \
+    "$(grep -cE 'return (e1000|virtio)\.' kernel/net/netdev.fi)" eq 0
 
 runvm() {
     local name=$1 words=$2; shift 2
@@ -75,7 +82,13 @@ runvm rtl "nic" "${NETDEV[@]}" -device rtl8139,netdev=n0,mac=52:54:00:aa:bb:cc
 runvm rtlno "nic noclass" "${NETDEV[@]}" -device rtl8139,netdev=n0,mac=52:54:00:aa:bb:cc
 runvm rtlbad "nic badclass" "${NETDEV[@]}" -device rtl8139,netdev=n0,mac=52:54:00:aa:bb:cc
 runvm e1k "nic" "${NETDEV[@]}" -device e1000,netdev=n0,mac=52:54:00:aa:bb:cc
+runvm e1knc "nic noclass" "${NETDEV[@]}" -device e1000,netdev=n0,mac=52:54:00:aa:bb:cc
+runvm vio "nic" "${NETDEV[@]}" -device virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc
+runvm vionc "nic noclass" "${NETDEV[@]}" -device virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc
+runvm usbn "nic usbpoll" "${NETDEV[@]}" -device usb-net,netdev=n0,mac=52:54:00:aa:bb:cc
+runvm usbnc "nic usbpoll noclass" "${NETDEV[@]}" -device usb-net,netdev=n0,mac=52:54:00:aa:bb:cc
 runvm nonic "nic"
+[ -n "${CLASSES_DUMP:-}" ] && cp "$D"/*.klar "$CLASSES_DUMP"/
 
 echo "== 2. class column + built-in bind state =="
 has "$D/rtl.klar" "r8169 pci 10ec:*/0200 found=1 state=bound err=- class=net-eth" "rtl: r8169 row bound, class=net-eth"
