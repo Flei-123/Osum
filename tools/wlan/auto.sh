@@ -102,9 +102,21 @@ for ctl in "d iwloldscan 'bad length' a" "e iwloldslot 'bad length' a" "f iwlold
     image "$1" "$( [ "$4" = c ] && echo "$T/good.conf" )" || { bad "image $1"; continue; }
     run "$1" "iwlfhtest iwlfhbind $2"
     has "$T/$1.klar" "fakefw: scan bad $3" "$2: fake firmware names the format error"
-    hasnot "$T/$1.klar" 'fakefw: scan ok' "$2: no scan accepted"
-    hasnot "$T/$1.klar" 'net OrientFake ' "$2: no network found (fake AP stays silent)"
+    if [ "$2" = iwloldssid ]; then
+        has "$T/$1.klar" 'fakefw: scan ok' "$2: the broadcast scan is still accepted"
+        hasnot "$T/$1.klar" 'fakeap: m4 ok' "$2: no handshake after the refused directed scan"
+    else
+        hasnot "$T/$1.klar" 'fakefw: scan ok' "$2: no scan accepted"
+        hasnot "$T/$1.klar" 'net OrientFake ' "$2: no network found (fake AP stays silent)"
+    fi
 done
+
+has "$C" 'fakefw: sta 06:11:22:33:44:55' "W-WLAN18: station address comes from NVM section 11 (MAC override)"
+echo "-- g: counter-proof iwloldmac (NVM override ignored, WFMP/default address)"
+image g || { bad "image g"; }
+run g "iwlfhtest iwlfhbind iwloldmac"
+has "$T/g.klar" 'fakefw: sta 02:4f:52:49:45:4e' "iwloldmac: the old address is used"
+hasnot "$T/g.klar" 'fakefw: sta 06:11:22:33:44:55' "iwloldmac: override not applied"
 
 echo "WLANAUTO: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]

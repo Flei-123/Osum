@@ -5,6 +5,7 @@ import wlan.iwl_le
 import drv.net.iwl_fakeap
 import drv.net.iwl_fakeap_frames
 import drv.net.iwl_fakescan
+import drv.net.iwl_fakemac
 
 export {
     doorbell, alive, reset, rx_enabled, set_norx, set_knobs, cmds, rx_pkts, rx_drops, last_cmd, set_ap, ap_on, last_uid, phydb_cmds, nvm_reads, init_completes, FAKE_SCD_BASE
@@ -41,9 +42,17 @@ const TX_FLG_MH_PAD: u64 = 0x100000
 const CMD_INIT_COMPLETE: u64 = 0x04
 const CMD_PHY_CFG: u64 = 0x6A
 const CMD_NVM_ACCESS: u64 = 0x88
+const CMD_MAC_CONTEXT: u64 = 0x28
 const CMD_CALIB_RES: u64 = 0x6B
 const CMD_PHY_DB: u64 = 0x6C
 const NVM_FAKE_LEN: u64 = 96
+const MAO_SEC: u64 = 11
+const MAO_FAKE_LEN: u64 = 8
+
+fn mao_byte(i: u64) -> u64 {
+    var m: [u8; 8] = [0, 0, 0x06, 0x11, 0x22, 0x33, 0x44, 0x55]
+    return m[(i & 7) as usize] as u64
+}
 
 const REG_RBD_BASE: u64 = 0x1BC4
 const REG_STTS: u64 = 0x1BC0
@@ -227,10 +236,12 @@ fn put_nvm(ctx: u64, req: u64, seq: u64) {
     let want: u64 = iwl_le.ld16(req, 10)
     var dl: u64 = 0
     var status: u64 = 1
-    let valid: bool = sec == 1 || sec == 5
+    let valid: bool = sec == 1 || sec == 5 || sec == MAO_SEC
     if valid && !(sec == 1 && g(ctx, S_BADNVM) != 0) {
         status = 0
-        if off < NVM_FAKE_LEN { dl = NVM_FAKE_LEN - off }
+        var total: u64 = NVM_FAKE_LEN
+        if sec == MAO_SEC { total = MAO_FAKE_LEN }
+        if off < total { dl = total - off }
         if dl > want { dl = want }
     }
     rx_hdr(rb, 8 + dl, CMD_NVM_ACCESS, seq)
@@ -240,7 +251,9 @@ fn put_nvm(ctx: u64, req: u64, seq: u64) {
     iwl_le.st16(rb, 14, status)
     var i: u64 = 0
     while i < dl {
-        iwl_le.st8(rb, 16 + i, (sec * 16 + off + i) & 0xFF)
+        var v: u64 = (sec * 16 + off + i) & 0xFF
+        if sec == MAO_SEC { v = mao_byte(off + i) }
+        iwl_le.st8(rb, 16 + i, v)
         i = i + 1
     }
     s(ctx, S_NVMRD, g(ctx, S_NVMRD) + 1)
@@ -308,6 +321,7 @@ fn one_tfd(ctx: u64, ring: u64, idx: u64) {
         if g(ctx, S_AP) != 0 && scan_ok { put_beacons(ctx) }
         put_scan_complete(ctx, uid)
     }
+    if cmd == CMD_MAC_CONTEXT { iwl_fakemac.report(tb0) }
     if cmd == CMD_TX && g(ctx, S_AP) != 0 { ap_air(ctx, tb0) }
 }
 
