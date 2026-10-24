@@ -17,5 +17,25 @@ out['ctx'] = hdr(0x08, 0, 6) + struct.pack('<IIII', 1 | (2 << 8), 1, 0, 0) + str
 out['sta'] = hdr(0x18, 0, 7) + struct.pack('<BBHI6sHBBHIIBBHHHHHI', 0, 0, 0, 0x0100, mac, 0, 0, 0, 0, 4, 0xFF, 0, 0, 0, 0, 0, 1, 0, 0x10)
 out['key'] = sta_key(0, 8, 0, 1, 0, False)
 out['gkey'] = sta_key(0, 9, 1, 2, 2, True)
-for k in ['nvm', 'phy', 'ant', 'ctx', 'sta', 'key', 'gkey']:
+bssid = bytes([0x10, 0x20, 0x30, 0x40, 0x50, 0x60])
+chans = bytes([1, 6, 11, 36])
+probe = bytes(0x40 + i for i in range(40))
+frame = bytes(0x80 + i for i in range(30))
+acs = b''.join(struct.pack('<HHBBH', 15 + a, 1023 - a, 2 + a, 1 << (a & 3), 47 * a) for a in range(5))
+mac_common = struct.pack('<IIII', 1 | (2 << 8), 1, 5, 0) + mac + b'\0\0' + bssid + b'\0\0' + struct.pack('<IIIIIII', 0xF, 0x15F, 3, 1, 1, 0x4C, 3) + acs
+mac_sta = struct.pack('<IIQIIIIIII', 1, 100, 0x0102030405060708, 100, 0, 3, 1, 10, 7, 55)
+out['mac'] = hdr(0x28, 0, 10) + mac_common + mac_sta.ljust(48, b'\0')
+out['bnd'] = hdr(0x2b, 0, 11) + struct.pack('<IIIIII', 2 | (1 << 8), 1, 1 | (2 << 8), 0xffffffff, 0xffffffff, 1 | (2 << 8))
+out['scf'] = hdr(0x0c, 0, 12) + struct.pack('<IIIIII', 0x1 | 0x100 | 0x200 | 0x800 | 0x8000 | (4 << 26), 3, 3, 0xFF, 50, 120) + struct.pack('<BBBB', 20, 110, 40, 0) + mac + struct.pack('<BB', 2, 1) + chans
+chcfg = b''.join(struct.pack('<IBBH', f, c, 1, 0) for f, c in [(0x40000000, 1), (0x40000000, 6), (0x80000000, 36)])
+head = struct.pack('<IIIHBB', 2, 5, 4, 0x20 | 0x40, 0, 0) + struct.pack('<BBBBIII', 0, 20, 110, 40, 50, 120, 2) + struct.pack('<BBH', 1, 3, 0)
+buf = (probe[:24] + probe[24:30] + probe[30:34] + probe[34:40]).ljust(512, b'\0')
+preq = struct.pack('<HHHHHHHH', 0, 24, 24, 6, 30, 4, 34, 6) + buf
+sched = struct.pack('<HBBHBB', 0, 1, 0, 0, 0, 0)
+tail = sched + struct.pack('<HH', 0, 0) + preq + (bytes([0, 4]) + b'HPAP').ljust(34, b'\0') + bytes(34 * 19)
+out['srq'] = hdr(0x0d, 0, 13) + head + chcfg + tail
+out['sab'] = hdr(0x0e, 0, 14) + struct.pack('<II', 5, 0)
+txc = struct.pack('<HHIIIBBBB', 30, 0, 0x8 | 0x2000, 0, 0x4001, 1, 0, 0, 0) + key + struct.pack('<IIIBBBBHH', 0, 0xFFFF, 0x34ABCD00, 0x12, 15, 7, 0, 0, 0)
+out['tx'] = hdr(0x1c, 2, 15) + txc + frame
+for k in ['nvm', 'phy', 'ant', 'ctx', 'sta', 'key', 'gkey', 'mac', 'bnd', 'scf', 'srq', 'sab', 'tx']:
     print(k, out[k].hex())
