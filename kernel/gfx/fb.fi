@@ -68,7 +68,7 @@ import arch.arch
 import arch.x86_64.fpu
 
 export {
-    wc,
+    wc, swizzled, panel_order, canon_probe,
     init, ready, echo, geometry_ok,
     width, height, pitch, bpp, bytes, addr, phys, source, back, draw_at,
     cols, rows, cx, cy, chars, flushes, scrolls, huges, block, offset,
@@ -416,6 +416,9 @@ const S_RM_OUT: u64 = 0x910 // ... and what was left after the merge
 // vboxlag: DIFF FLUSH. A shadow copy of what was last written to the card; `flush_rect` writes only the words that differ from it.
 const S_PATVAL: u64 = 0x938 // the PAT value the boot core set (WC at index 4); every other core copies it in `sched.on_tick`
 const S_PATDONE: u64 = 0x940 // bit per core: this core has the value (bit 0 = the boot core)
+const S_PRS: u64 = 0x988 // panel red shift (what the card scans); S_RSHIFT is the shift of the back buffer
+const S_PGS: u64 = 0x990 // panel green shift
+const S_PBS: u64 = 0x998 // panel blue shift
 const S_SHADOW: u64 = 0x918 // shadow buffer (same layout as the back buffer), 0 = none
 const S_SHVALID: u64 = 0x920 // 1 = the shadow equals what the card shows
 const S_SHBYTES: u64 = 0x928 // size of the shadow buffer
@@ -810,6 +813,9 @@ fn vbe_set(w: u64, h: u64) -> u64 {
     vbe_write(VBE_XOFF, 0)
     vbe_write(VBE_YOFF, 0)
     vbe_write(VBE_ENABLE, VBE_ENABLED | VBE_LFB)
+    if virt_want >= w {
+        vbe_write(VBE_VWIDTH, virt_want)
+    }
     // Zurueckgelesen wird, was die Karte WIRKLICH genommen hat. Eine
     // Karte darf eine Aufloesung ablehnen, und ein Kern, der seinen
     // Wunsch fuer die Wahrheit haelt, schreibt daneben.
@@ -1216,6 +1222,29 @@ fn scale_for(w: u64, h: u64) -> u64 {
 //
 // Gibt wahr zurueck, wenn danach ein Bildschirm da ist.
 static mut pad_wunsch: u64 = 0
+static mut virt_want: u64 = 0
+static mut rgb_want: u64 = 0
+static mut canon_want: u64 = 0
+static mut noswz_want: u64 = 0
+static mut nopitch_want: u64 = 0
+
+fn canon_probe(state: u64) {
+    if canon_want == 0 || !ready(state) {
+        return
+    }
+    fill(state, 500, 0, 100, 100, 0xFF0000)
+    fill(state, 600, 0, 100, 100, 0x00FF00)
+    fill(state, 700, 0, 100, 100, 0x0000FF)
+    fill(state, 800, 0, 100, 100, 0x102030)
+}
+
+fn virt_set(n: u64) {
+    virt_want = n
+}
+
+fn rgb_set(n: u64) {
+    rgb_want = n
+}
 
 fn pad_set(n: u64) {
     pad_wunsch = n
@@ -1286,6 +1315,9 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     // Ein Rahmenpuffer, dessen Zeile schmaler als seine Breite ist, ist
     // keiner -- lieber gar keine Konsole als eine, die in fremden
     // Speicher schreibt.
+    if nopitch_want != 0 && pt > w * (bp / 8) {
+        pt = w * (bp / 8)
+    }
     if pt < w * (bp / 8) {
         return false
     }
@@ -1396,6 +1428,19 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     // Seitenumschaltung fragt danach, und `n` waere die halbe Wahrheit.
     kstate.set(state, FB_OFF + S_MAPPED, kacheln *% HUGE_SIZE -% inner)
     kstate.set(state, FB_OFF + S_SOURCE, quelle)
+    if rgb_want != 0 {
+        rs = 0
+        gs = 8
+        bs = 16
+    }
+    kstate.set(state, FB_OFF + S_PRS, rs)
+    kstate.set(state, FB_OFF + S_PGS, gs)
+    kstate.set(state, FB_OFF + S_PBS, bs)
+    if back != 0 && streifen == 0 && bp == 32 && noswz_want == 0 {
+        rs = 16
+        gs = 8
+        bs = 0
+    }
     kstate.set(state, FB_OFF + S_RSHIFT, rs)
     kstate.set(state, FB_OFF + S_GSHIFT, gs)
     kstate.set(state, FB_OFF + S_BSHIFT, bs)
@@ -3722,6 +3767,24 @@ fn parse(state: u64, cmd: u64) {
     var m: u64 = 0
     if cmd != 0 {
         pad_set(num_after(state, cmd, (&w_pad[0]) as u64, 6))
+        var w_virt: [u8; 8] = "fbvirt=\0"
+        var w_rgbo: [u8; 6] = "fbrgb\0"
+        virt_set(num_after(state, cmd, (&w_virt[0]) as u64, 7))
+        if find(cmd, (&w_rgbo[0]) as u64, 5) != 0 {
+            rgb_set(1)
+        }
+        var w_canon: [u8; 8] = "fbcanon\0"
+        var w_noswz: [u8; 8] = "fbnoswz\0"
+        var w_nopit: [u8; 10] = "fbnopitch\0"
+        if find(cmd, (&w_canon[0]) as u64, 7) != 0 {
+            canon_want = 1
+        }
+        if find(cmd, (&w_noswz[0]) as u64, 7) != 0 {
+            noswz_want = 1
+        }
+        if find(cmd, (&w_nopit[0]) as u64, 9) != 0 {
+            nopitch_want = 1
+        }
         if find(cmd, (&w_gfx[0]) as u64, 3) != 0 {
             m = m | M_GFX
         }
@@ -4442,8 +4505,34 @@ fn presents(state: u64) -> u64 {
 
 // Steht zwischen dem Zweitpuffer und der Tafel irgendeine Rechnung?
 // Nur dann laeuft `present`; sonst bleibt es beim `rep movsq` von K7.
+fn swizzled(state: u64) -> bool {
+    if kstate.get(state, FB_OFF + S_PRS) != kstate.get(state, FB_OFF + S_RSHIFT) {
+        return true
+    }
+    if kstate.get(state, FB_OFF + S_PGS) != kstate.get(state, FB_OFF + S_GSHIFT) {
+        return true
+    }
+    return kstate.get(state, FB_OFF + S_PBS) != kstate.get(state, FB_OFF + S_BSHIFT)
+}
+
+fn panel_order(state: u64) -> u64 {
+    let r: u64 = kstate.get(state, FB_OFF + S_PRS)
+    let g: u64 = kstate.get(state, FB_OFF + S_PGS)
+    let b: u64 = kstate.get(state, FB_OFF + S_PBS)
+    if r == 16 && g == 8 && b == 0 {
+        return 1
+    }
+    if r == 0 && g == 8 && b == 16 {
+        return 2
+    }
+    return 3
+}
+
 fn transformed(state: u64) -> bool {
     if kstate.get(state, FB_OFF + S_ROT) != 0 {
+        return true
+    }
+    if swizzled(state) {
         return true
     }
     if kstate.get(state, FB_OFF + S_LUT) != 0 {
@@ -4949,6 +5038,10 @@ fn present(state: u64) {
     let rs: u64 = kstate.get(state, FB_OFF + S_RSHIFT)
     let gs: u64 = kstate.get(state, FB_OFF + S_GSHIFT)
     let bs: u64 = kstate.get(state, FB_OFF + S_BSHIFT)
+    let ors: u64 = kstate.get(state, FB_OFF + S_PRS)
+    let ogs: u64 = kstate.get(state, FB_OFF + S_PGS)
+    let obs: u64 = kstate.get(state, FB_OFF + S_PBS)
+    let swz: bool = swizzled(state)
     let tabr: u64 = tab
     let tabg: u64 = tab + 256
     let tabb: u64 = tab + 512
@@ -4961,7 +5054,7 @@ fn present(state: u64) {
     // Eine Konsole, die eine Zeile schreibt, kostet damit sechzehn
     // Bildzeilen und nicht siebenhundertachtundsechzig. Die beiden
     // Zahlen stehen nebeneinander in docs/DISPLAY.md.
-    if rot == 0 && dw == rw && dh == rh && tab != 0 && sat == 100 {
+    if rot == 0 && dw == rw && dh == rh && (tab != 0 || swz) && sat == 100 {
         var lo: u64 = kstate.get(state, FB_OFF + S_DIRTY_LO)
         var hi: u64 = kstate.get(state, FB_OFF + S_DIRTY_HI)
         if hi > lh {
@@ -4975,13 +5068,19 @@ fn present(state: u64) {
                 var x: u64 = 0
                 while x < dw {
                     let c: u64 = __mmio_read32(src as *mut u32) as u64
-                    let v: u64 =
-                        ((__mmio_read8((tabr + ((c >> rs) & 0xFF)) as *mut u8)
-                            as u64) << rs)
-                        | ((__mmio_read8((tabg + ((c >> gs) & 0xFF))
-                            as *mut u8) as u64) << gs)
-                        | ((__mmio_read8((tabb + ((c >> bs) & 0xFF))
-                            as *mut u8) as u64) << bs)
+                    var v: u64 = 0
+                    if tab != 0 {
+                        v = ((__mmio_read8((tabr + ((c >> rs) & 0xFF)) as *mut u8)
+                                as u64) << ors)
+                            | ((__mmio_read8((tabg + ((c >> gs) & 0xFF))
+                                as *mut u8) as u64) << ogs)
+                            | ((__mmio_read8((tabb + ((c >> bs) & 0xFF))
+                                as *mut u8) as u64) << obs)
+                    } else {
+                        v = (((c >> rs) & 0xFF) << ors)
+                            | (((c >> gs) & 0xFF) << ogs)
+                            | (((c >> bs) & 0xFF) << obs)
+                    }
                     __mmio_write32(dst as *mut u32, v as u32)
                     src = src +% 4
                     dst = dst +% 4
@@ -5040,7 +5139,7 @@ fn present(state: u64) {
         // Schleifenrumpf und den Verschiebungen davor steht in
         // docs/DISPLAY.md daneben. Der Umweg ueber die drei Faelle
         // kostet drei Vergleiche JE BILDZEILE statt zweien je Bildpunkt.
-        if tab == 0 && sat == 100 {
+        if tab == 0 && sat == 100 && !swz {
             while px < dw {
                 var idx: u64 = (px * stepx) >> 16
                 if idx >= grenze {
@@ -5065,13 +5164,19 @@ fn present(state: u64) {
                 }
                 let c: u64 = __mmio_read32((basis +% idx *% einheit)
                     as *mut u32) as u64
-                let v: u64 =
-                    ((__mmio_read8((tabr + ((c >> rs) & 0xFF)) as *mut u8)
-                        as u64) << rs)
-                    | ((__mmio_read8((tabg + ((c >> gs) & 0xFF)) as *mut u8)
-                        as u64) << gs)
-                    | ((__mmio_read8((tabb + ((c >> bs) & 0xFF)) as *mut u8)
-                        as u64) << bs)
+                var v: u64 = 0
+                if tab != 0 {
+                    v = ((__mmio_read8((tabr + ((c >> rs) & 0xFF)) as *mut u8)
+                            as u64) << ors)
+                        | ((__mmio_read8((tabg + ((c >> gs) & 0xFF)) as *mut u8)
+                            as u64) << ogs)
+                        | ((__mmio_read8((tabb + ((c >> bs) & 0xFF)) as *mut u8)
+                            as u64) << obs)
+                } else {
+                    v = (((c >> rs) & 0xFF) << ors)
+                        | (((c >> gs) & 0xFF) << ogs)
+                        | (((c >> bs) & 0xFF) << obs)
+                }
                 __mmio_write32(dst as *mut u32, v as u32)
                 dst = dst +% 4
                 px = px + 1
@@ -5099,9 +5204,9 @@ fn present(state: u64) {
                 let gr: u64 = (c >> gs) & 0xFF
                 let bl: u64 = (c >> bs) & 0xFF
                 let grau: u64 = (77 * r + 150 * gr + 29 * bl) >> 8
-                let v: u64 = (sat_channel(r, grau, sat) << rs)
-                    | (sat_channel(gr, grau, sat) << gs)
-                    | (sat_channel(bl, grau, sat) << bs)
+                let v: u64 = (sat_channel(r, grau, sat) << ors)
+                    | (sat_channel(gr, grau, sat) << ogs)
+                    | (sat_channel(bl, grau, sat) << obs)
                 __mmio_write32(dst as *mut u32, v as u32)
                 dst = dst +% 4
                 px = px + 1
@@ -5556,6 +5661,7 @@ fn flush_rows(state: u64, lo: u64, hi: u64) {
         return
     }
     if transformed(state) {
+        dirty(state, lo, hi)
         present(state)
         return
     }
@@ -5830,6 +5936,7 @@ fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
         return
     }
     if transformed(state) {
+        dirty(state, y, y + h)
         present(state)
         return
     }
