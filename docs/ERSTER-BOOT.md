@@ -73,7 +73,13 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
-## Stick 3 HP (23.10.2026, main 4977617c + Bundle-Fix 03a803f0)
+## Stick 4 HP (24.10.2026, main b2937208)
+
+- **Datei:** `orientos-usb-hp-20261024-b2937208.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `79dbb51ac7af1e648794fd0aa65d768e6eca89c9a4cde496f230834e75078b10`. Ersetzt Stick 3 (SHA b6d20b62...).
+- **Neu gegenueber Stick 3:** Touchscreen auf Geraeten mit mehreren I2C-Reglern (i2chid Mehr-Regler + AML-Geraetesuche, `/proc/inputdevs`), Touchpad-Gesten + Einstellungen-Seite **Touchpad**, Rechtsklick per Touchpad-Ecke (Ecke unten rechts), Touchscreen-Gesten (tippen/ziehen/zwei Finger/lang = Rechtsklick).
+- **Weiterhin:** WLAN 8265 ist Sim (echtes Verbinden nicht zugesagt), Fn-Helligkeitstasten am HP unbekannt. Bekannte Flake: Einstellungen-Gate nav1 (nur Testproblem, nicht Stick).
+
+## Stick 3 HP (23.10.2026, main 4977617c + Bundle-Fix 03a803f0) -- abgeloest durch Stick 4
 
 - **Datei:** `orientos-usb-hp-20261023-03a803f0.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `b6d20b625c057e6a323428556862da6319c9012a8c2c68ceb922d1100664aca9`. Ersetzt den Stick 30d66381 (SHA 654d7e03...).
 - **Neu gegenueber Stick 2:** Mehrkern-Fix (SMP2 + Kick-IPI, `/proc/cpus`, Bootzeile `smp: N of M online`), Fallback-Icons (Buchstaben-Kachel in Leiste/Startmenue/Alt+Tab/Task-Manager), Fenster-Snap per Titelleisten-Ziehen, Tray-Chevron-Flyout (Raster/Hover/Rechtsklick), Taskleisten-Hover, Windows-11-Leiste.
@@ -92,12 +98,15 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
    - `cat /proc/backlight`
    - `cat /proc/frames`
    - `cat /proc/cpuinfo`
+   - `cat /proc/inputdevs` (Touchpad/Touchscreen/I2C-Regler: welche Geraete erkannt, Treiber)
    - `cat /proc/cpus` (Mehrkern: `cpus_online`/`cpus_madt`, je Kern `why`/`esr` falls einer nicht hochkommt) und die Bootzeile `smp: N of M online`
    - `cat /var/jarvis/hwinv.txt`
 3. **USB-Tethering:** Handy per Kabel an den HP, am Handy "USB-Tethering" einschalten. Foto vom Terminal nach `ip` bzw. der Zeile `net: up ip=` und ob `jarvisd` sich meldet.
 4. **Rechtsklick:** Touchpad-Rechtsklick, Menue wegklicken, nochmal Rechtsklick -- muss wieder aufgehen. Kurz melden ja/nein.
-5. **Touchscreen:** antippen, ziehen, zwei Finger scrollen, lange tippen (= Rechtsklick). Melden was geht, Foto von `cat /proc/inputdevs` falls vorhanden.
-6. **WLAN:** `wlan verbinden <SSID> <Passwort>` -- Foto der Ausgabe. Der WLAN-Treiber ist noch Sim, **echtes Verbinden ist nicht zugesagt**.
+5. **Touchscreen:** antippen, ziehen, zwei Finger scrollen, lange tippen (= Rechtsklick). Melden was geht. **Foto von `cat /proc/inputdevs`** (zeigt jedes Eingabegeraet: Touchpad, Touchscreen, Stift, I2C-Regler).
+5b. **Touchpad-Einstellungen:** Einstellungen > **Touchpad** oeffnen (Tippen, Gesten, Scroll, Ecken-Rechtsklick) -- Foto der Seite; je eine Einstellung aendern und melden ob es wirkt.
+5c. **Ecken-Rechtsklick:** Touchpad unten rechts antippen -- Kontextmenue? Ja/nein.
+6. **WLAN (Sim-Hinweis):** der Treiber ist Sim, es kann sein, dass nichts verbindet -- das ist erwartet. `wlan verbinden <SSID> <Passwort>` -- Foto der Ausgabe. Der WLAN-Treiber ist noch Sim, **echtes Verbinden ist nicht zugesagt**.
 7. **Absturz/Panik:** Schirm fotografieren, danach `/var/jarvis/*` wie oben (Punkt 7-8).
 8. **Fenster-Snap:** ein Fenster an der Titelleiste an den linken/rechten/oberen Rand ziehen -- Vorschau + Einrasten? Foto.
 9. **Tray:** den Chevron (^) rechts in der Taskleiste anklicken -- Flyout mit Symbol-Raster; Hover und Rechtsklick darin. Foto.
