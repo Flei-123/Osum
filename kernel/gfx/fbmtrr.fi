@@ -1,0 +1,259 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import sync.atomic
+import arch.arch
+import arch.msr
+import arch.x86_64.fpu
+
+export {
+    setup, confirm, revert, here, state_of, reason_of, count_of,
+    ST_NONE, ST_TENTATIVE, ST_CONFIRMED, ST_SKIPPED, ST_REVERTED,
+    RS_NONE, RS_NOWC_CAP, RS_DISABLED, RS_CACHED_DEFAULT, RS_OVERLAP, RS_NO_SLOT,
+    RS_TOO_MANY, RS_VERIFY, RS_WORD, RS_NO_GAIN, RS_NO_PAT,
+}
+
+const OFF: u64 = 0x3C000
+const F_STATE: u64 = 0x990
+const F_REASON: u64 = 0x998
+const F_COUNT: u64 = 0x9A0
+const F_DONE: u64 = 0x9A8
+const F_ENTRIES: u64 = 0x9B0
+const MAX_CHUNKS: u64 = 3
+
+const MSR_CAP: u64 = 0xFE
+const MSR_DEF: u64 = 0x2FF
+const MSR_BASE0: u64 = 0x200
+const TYPE_WC: u64 = 1
+const MASK_VALID: u64 = 0x800
+const DEF_ENABLE: u64 = 0x800
+const CR0_CD: u64 = 0x40000000
+const CR0_NW: u64 = 0x20000000
+const CR4_PGE: u64 = 0x80
+const MIN_CHUNK: u64 = 0x200000
+
+const ST_NONE: u64 = 0
+const ST_TENTATIVE: u64 = 1
+const ST_CONFIRMED: u64 = 2
+const ST_SKIPPED: u64 = 3
+const ST_REVERTED: u64 = 4
+
+const RS_NONE: u64 = 0
+const RS_NOWC_CAP: u64 = 1
+const RS_DISABLED: u64 = 2
+const RS_CACHED_DEFAULT: u64 = 3
+const RS_OVERLAP: u64 = 4
+const RS_NO_SLOT: u64 = 5
+const RS_TOO_MANY: u64 = 6
+const RS_VERIFY: u64 = 7
+const RS_WORD: u64 = 8
+const RS_NO_GAIN: u64 = 9
+const RS_NO_PAT: u64 = 10
+
+fn state_of(state: u64) -> u64 {
+    return kstate.get(state, OFF + F_STATE)
+}
+
+fn reason_of(state: u64) -> u64 {
+    return kstate.get(state, OFF + F_REASON)
+}
+
+fn count_of(state: u64) -> u64 {
+    return kstate.get(state, OFF + F_COUNT)
+}
+
+fn skip(state: u64, reason: u64) -> u64 {
+    kstate.set(state, OFF + F_STATE, ST_SKIPPED)
+    kstate.set(state, OFF + F_REASON, reason)
+    return ST_SKIPPED
+}
+
+fn phys_mask(state: u64) -> u64 {
+    var bits: u64 = 36
+    if fpu.cpuid_a(0x80000000, 0) >= 0x80000008 {
+        bits = fpu.cpuid_a(0x80000008, 0) & 255
+    }
+    if bits > 52 {
+        bits = 52
+    }
+    return ((1 << bits) - 1) & (~0xFFF)
+}
+
+fn reload_translations() {
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
+}
+
+fn program_here(state: u64, clear: bool) {
+    let n: u64 = kstate.get(state, OFF + F_COUNT)
+    let fl: u64 = arch.irq_save()
+    let cr0: u64 = asm("mov rax, cr0", out("rax"))
+    let cr4: u64 = asm("mov rax, cr4", out("rax"))
+    let cd: u64 = (cr0 | CR0_CD) & (~CR0_NW)
+    asm("mov cr0, rax", in("rax") cd)
+    asm("wbinvd")
+    if (cr4 & CR4_PGE) != 0 {
+        asm("mov cr4, rax", in("rax") cr4 & (~CR4_PGE))
+    }
+    reload_translations()
+    let def: u64 = msr.rd0(state, MSR_DEF)
+    msr.wr(state, MSR_DEF, def & (~DEF_ENABLE))
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = OFF + F_ENTRIES + i * 24
+        let idx: u64 = kstate.get(state, e)
+        if clear {
+            msr.wr(state, MSR_BASE0 + idx * 2 + 1, 0)
+            msr.wr(state, MSR_BASE0 + idx * 2, 0)
+        } else {
+            msr.wr(state, MSR_BASE0 + idx * 2, kstate.get(state, e + 8))
+            msr.wr(state, MSR_BASE0 + idx * 2 + 1, kstate.get(state, e + 16))
+        }
+        i = i + 1
+    }
+    asm("wbinvd")
+    reload_translations()
+    msr.wr(state, MSR_DEF, def)
+    asm("mov cr0, rax", in("rax") cr0)
+    if (cr4 & CR4_PGE) != 0 {
+        asm("mov cr4, rax", in("rax") cr4)
+    }
+    arch.irq_restore(fl)
+}
+
+fn verify(state: u64) -> bool {
+    let n: u64 = kstate.get(state, OFF + F_COUNT)
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = OFF + F_ENTRIES + i * 24
+        let idx: u64 = kstate.get(state, e)
+        if msr.rd0(state, MSR_BASE0 + idx * 2) != kstate.get(state, e + 8) {
+            return false
+        }
+        if msr.rd0(state, MSR_BASE0 + idx * 2 + 1) != kstate.get(state, e + 16) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn overlaps(b1: u64, m1: u64, b2: u64, m2: u64) -> bool {
+    return ((b1 ^ b2) & m1 & m2 & (~0xFFF)) == 0
+}
+
+fn setup(state: u64, start: u64, len: u64, pat_wc: bool, word_off: bool) -> u64 {
+    kstate.set(state, OFF + F_COUNT, 0)
+    kstate.set(state, OFF + F_DONE, 0)
+    if word_off {
+        return skip(state, RS_WORD)
+    }
+    if !pat_wc {
+        return skip(state, RS_NO_PAT)
+    }
+    let cap: u64 = msr.rd0(state, MSR_CAP)
+    if ((cap >> 10) & 1) == 0 {
+        return skip(state, RS_NOWC_CAP)
+    }
+    let def: u64 = msr.rd0(state, MSR_DEF)
+    if (def & DEF_ENABLE) == 0 {
+        return skip(state, RS_DISABLED)
+    }
+    if (def & 255) != 0 {
+        return skip(state, RS_CACHED_DEFAULT)
+    }
+    let amask: u64 = phys_mask(state)
+    let lo: u64 = start & (~(MIN_CHUNK - 1))
+    let hi: u64 = (start + len + MIN_CHUNK - 1) & (~(MIN_CHUNK - 1))
+    var p: u64 = lo
+    var chunks: u64 = 0
+    var cb: [u64; 4] = [0 as u64; 4]
+    var cs: [u64; 4] = [0 as u64; 4]
+    while p < hi {
+        var size: u64 = MIN_CHUNK
+        while (p & (size * 2 - 1)) == 0 && p + size * 2 <= hi && size < (1 << 40) {
+            size = size * 2
+        }
+        if chunks >= MAX_CHUNKS {
+            return skip(state, RS_TOO_MANY)
+        }
+        cb[chunks as usize] = p
+        cs[chunks as usize] = size
+        chunks = chunks + 1
+        p = p + size
+    }
+    let vcnt: u64 = cap & 255
+    var free_idx: [u64; 4] = [0 as u64; 4]
+    var nfree: u64 = 0
+    var i: u64 = 0
+    while i < vcnt && i < 16 {
+        let b: u64 = msr.rd0(state, MSR_BASE0 + i * 2)
+        let m: u64 = msr.rd0(state, MSR_BASE0 + i * 2 + 1)
+        if (m & MASK_VALID) != 0 {
+            var k: u64 = 0
+            while k < chunks {
+                let cm: u64 = (~(cs[k as usize] - 1)) & amask
+                if overlaps(b, m, cb[k as usize], cm) {
+                    return skip(state, RS_OVERLAP)
+                }
+                k = k + 1
+            }
+        } else if nfree < MAX_CHUNKS {
+            free_idx[nfree as usize] = i
+            nfree = nfree + 1
+        }
+        i = i + 1
+    }
+    if nfree < chunks {
+        return skip(state, RS_NO_SLOT)
+    }
+    var k2: u64 = 0
+    while k2 < chunks {
+        let e: u64 = OFF + F_ENTRIES + k2 * 24
+        kstate.set(state, e, free_idx[k2 as usize])
+        kstate.set(state, e + 8, cb[k2 as usize] | TYPE_WC)
+        kstate.set(state, e + 16, ((~(cs[k2 as usize] - 1)) & amask) | MASK_VALID)
+        k2 = k2 + 1
+    }
+    kstate.set(state, OFF + F_COUNT, chunks)
+    program_here(state, false)
+    if !verify(state) {
+        program_here(state, true)
+        kstate.set(state, OFF + F_COUNT, 0)
+        return skip(state, RS_VERIFY)
+    }
+    kstate.set(state, OFF + F_DONE, 1)
+    kstate.set(state, OFF + F_STATE, ST_TENTATIVE)
+    kstate.set(state, OFF + F_REASON, RS_NONE)
+    return ST_TENTATIVE
+}
+
+fn confirm(state: u64) {
+    if kstate.get(state, OFF + F_STATE) == ST_TENTATIVE {
+        kstate.set(state, OFF + F_STATE, ST_CONFIRMED)
+    }
+}
+
+fn revert(state: u64, reason: u64) {
+    if kstate.get(state, OFF + F_STATE) != ST_TENTATIVE {
+        return
+    }
+    program_here(state, true)
+    kstate.set(state, OFF + F_COUNT, 0)
+    kstate.set(state, OFF + F_STATE, ST_REVERTED)
+    kstate.set(state, OFF + F_REASON, reason)
+}
+
+fn here(state: u64, me: u64) {
+    if me == 0 || me >= 63 {
+        return
+    }
+    if kstate.get(state, OFF + F_STATE) != ST_CONFIRMED {
+        return
+    }
+    let bit: u64 = 1 << me
+    if (kstate.get(state, OFF + F_DONE) & bit) != 0 {
+        return
+    }
+    program_here(state, false)
+    atomic.fetch_add(state + OFF + F_DONE, bit)
+}
