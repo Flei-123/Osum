@@ -177,4 +177,8 @@ Goal: every internal part is covered by one class driver with an open standard, 
 
 ## 7. Implementation status
 
-Step 1 (inventory + design) is delivered by this document. The net-eth proof (`kernel/drv/net/netclass.fi`, r8169 adapter, `tools/classes/run.sh`) is **not built**: the worker ran out of context. Plan for it: `netclass.fi` defines `EthOps` and `ops_for(kind)`, a new `r8169_class.fi` returns the table over the unchanged `r8169.fi`, the 30 `r8169.` branches in `netdev.fi` call through the table, the gate boots QEMU `rtl8139` and checks traffic plus a call counter with counter-proofs (no NIC, e1000 NIC), then runs `tools/net`, `tools/rtl`, `tools/drvreg`, `tools/drvstore`, `tools/dbgtools` through `/root/jarvis/bin/heavy`. Nothing in this document was executed.
+Step 1 (inventory + design) is delivered by sections 1-6.
+
+- **net-eth is complete on the table:** `kernel/drv/net/netclass.fi` (`EthOps`, `null_ops`), one adapter per driver (`r8169_class.fi`, `e1000_class.fi`, `virtio_class.fi`, `usbnet_class.fi`, `wlan_class.fi`) and the registry `ethreg.ops_for(state, kind)`. `netdev.fi` has no direct chip operation call left. Extras are fields (`irq_mode`, `hwstat`, `kill`, `resume`) plus caps (`CAP_POLL_ONLY`, `CAP_MSIX`, `CAP_SPEED`, `CAP_HWSTAT`, `CAP_SUSPEND`). Gate: `tools/classes/run.sh` (words `noclass`, `badclass` as counter-proofs).
+- **block is on the table:** `kernel/block/blockclass.fi` (`BlockOps`: init, present, blocks, bsize, flush, dev, caps, tag), adapters `nvme_class.fi`, `ahci_class.fi`, `usbmsc_class.fi`, `ata_class.fi`, registry `blkreg.ops_for(state, kind)`. `blkdev.fi` forwards `init_on/present_on/blocks_on/bsize_on/flush_on/dev_of` through it; read/write stay on `blk.fi` (device number from `BlockOps.dev`). Gate: `tools/classes/block.sh`.
+- Still open: multi-block `read/write` in the table, `probe/remove` per driver, audio/input/display tables, `class=` key in `driver.inf` (sections 3.1, 6 steps 4-5).

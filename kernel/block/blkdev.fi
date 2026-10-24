@@ -79,6 +79,8 @@ import block.blk
 import drv.blk.nvme
 import drv.blk.ahci
 import usb.usb
+import block.blockclass
+import block.blkreg
 
 export {
     probe, kind_on, print_kind, print_disks, print_table,
@@ -124,11 +126,11 @@ const S_UNSUP: u64 = 0x208 // n * 24: Hersteller, Geraet, Grund
 const MAX_UNSUP: u64 = 16
 
 // DIE TREIBER. Die Zahlen SIND die Suchreihenfolge.
-const KIND_NONE: u64 = 0
-const KIND_NVME: u64 = 1 // kernel/nvme.fi
-const KIND_AHCI: u64 = 2 // kernel/ahci.fi
-const KIND_USB: u64 = 3 // kernel/usb.fi (Stick ueber xHCI)
-const KIND_ATA: u64 = 4 // kernel/blk.fi, ATA-PIO auf 0x1F0
+const KIND_NONE: u64 = blkreg.KIND_NONE
+const KIND_NVME: u64 = blkreg.KIND_NVME
+const KIND_AHCI: u64 = blkreg.KIND_AHCI
+const KIND_USB: u64 = blkreg.KIND_USB
+const KIND_ATA: u64 = blkreg.KIND_ATA
 
 // WARUM ein erkannter Controller trotzdem keinen Treiber bekommt. Das
 // ist dieselbe Unterscheidung, die `netdev.reason_for` fuer Netzkarten
@@ -441,19 +443,7 @@ fn unsupported_reason(state: u64, i: u64) -> u64 {
 // zweite Nummernwelt daneben waere die Abstraktion, die spaeter niemand
 // mehr auseinandernimmt.
 fn dev_of(k: u64) -> u64 {
-    if k == KIND_NVME {
-        return blk.DEV_NVME
-    }
-    if k == KIND_AHCI {
-        return blk.DEV_AHCI
-    }
-    if k == KIND_USB {
-        return blk.DEV_USB
-    }
-    if k == KIND_ATA {
-        return blk.DEV_ATA
-    }
-    return blk.DEV_RAM
+    return blkreg.dev_of(k)
 }
 
 fn dev_at(state: u64, i: u64) -> u64 {
@@ -468,77 +458,23 @@ fn dev_at(state: u64, i: u64) -> u64 {
 // ein dritter Treiber. Woertlich dieselbe Regel wie in `netdev.fi`.
 
 fn init_on(state: u64, i: u64) -> bool {
-    let k: u64 = kind_at(state, i)
-    if k == KIND_NVME {
-        if !nvme.present(state) {
-            return false
-        }
-        if nvme.blocks(state) == 0 {
-            return nvme.init(state, true, true)
-        }
-        return true
-    }
-    if k == KIND_AHCI {
-        if ahci.mode(state) == ahci.MODE_AHCI {
-            return true
-        }
-        return ahci.init(state)
-    }
-    if k == KIND_USB {
-        return usb.msc_ready(state)
-    }
-    if k == KIND_ATA {
-        return blk.present(state)
-    }
-    return false
+    let bo: blockclass.BlockOps = blkreg.ops_for(state, kind_at(state, i))
+    return bo.init(state, i)
 }
 
 fn present_on(state: u64, i: u64) -> bool {
-    let k: u64 = kind_at(state, i)
-    if k == KIND_NVME {
-        return nvme.present(state)
-    }
-    if k == KIND_AHCI {
-        return ahci.present(state)
-    }
-    if k == KIND_USB {
-        return usb.msc_ready(state)
-    }
-    if k == KIND_ATA {
-        return blk.present(state)
-    }
-    return false
+    let bo: blockclass.BlockOps = blkreg.ops_for(state, kind_at(state, i))
+    return bo.present(state, i)
 }
 
 fn blocks_on(state: u64, i: u64) -> u64 {
-    let k: u64 = kind_at(state, i)
-    if k == KIND_NVME {
-        return nvme.blocks(state)
-    }
-    if k == KIND_AHCI {
-        return ahci.blocks(state)
-    }
-    if k == KIND_USB {
-        return usb.msc_blocks(state)
-    }
-    if k == KIND_ATA {
-        return blk.blocks_on(state, blk.DEV_ATA)
-    }
-    return 0
+    let bo: blockclass.BlockOps = blkreg.ops_for(state, kind_at(state, i))
+    return bo.blocks(state, i)
 }
 
 fn bsize_on(state: u64, i: u64) -> u64 {
-    let k: u64 = kind_at(state, i)
-    if k == KIND_NVME {
-        return 1 << nvme.block_shift(state)
-    }
-    if k == KIND_AHCI {
-        return 1 << ahci.block_shift(state)
-    }
-    if k == KIND_USB {
-        return usb.msc_bsize(state)
-    }
-    return blk.BLOCK_SIZE
+    let bo: blockclass.BlockOps = blkreg.ops_for(state, kind_at(state, i))
+    return bo.bsize(state, i)
 }
 
 // Lesen und Schreiben gehen ueber `blk.read_on`/`write_on` und nicht
@@ -554,17 +490,8 @@ fn write_on(state: u64, i: u64, lba: u64, src: u64) -> bool {
 }
 
 fn flush_on(state: u64, i: u64) -> bool {
-    let k: u64 = kind_at(state, i)
-    if k == KIND_NVME {
-        return nvme.flush(state)
-    }
-    if k == KIND_AHCI {
-        return ahci.flush(state)
-    }
-    // ATA-PIO und der Stick schreiben durch; es gibt nichts zu leeren,
-    // und `true` heisst hier "es steht draussen" und nicht "ich habe es
-    // ignoriert".
-    return true
+    let bo: blockclass.BlockOps = blkreg.ops_for(state, kind_at(state, i))
+    return bo.flush(state, i)
 }
 
 // ---------------------------------------------------------- Ausgabe
