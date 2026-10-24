@@ -53,12 +53,14 @@ if [ -n "${WLAN_8265_FW:-}" ] && [ -f "$WLAN_8265_FW" ]; then
     if [ "$sha" = "$PIN36" ] || [ "$sha" = "$PIN34" ]; then
         ok "real blob matches a pinned SHA-256 ($sha)"
         mkdir -p "$D/real" && python3 -I tools/wlan/fh8000_ref.py real "$WLAN_8265_FW" "$D/real" || bad "real reference"
-        for c in real_128k real_4k; do
+        for c in real_128k real_4k realinit_128k realinit_4k; do
             "$D/fh" < "$D/real/$c.case" > "$D/real/$c.out" 2>&1
             if cmp -s "$D/real/$c.out" "$D/real/$c.exp"; then ok "REAL blob $c: trace + summary == Python reference ($(wc -l < "$D/real/$c.exp") lines)"
             else bad "REAL blob $c differs from the reference"; diff "$D/real/$c.out" "$D/real/$c.exp" | head -4; fi
         done
         grep -q 'VIOL 0 LOST 0 NONZERO' "$D/real/real_128k.out" && ok "REAL blob: every byte of the RT image reached SRAM (no LOST)" || bad "REAL blob: bytes lost"
+        grep -q 'VIOL 0 LOST 0 NONZERO' "$D/real/realinit_128k.out" && ok "REAL blob: every byte of the INIT image reached SRAM (no LOST)" || bad "REAL blob: INIT bytes lost"
+        grep -q 'cpu1=5 cpu2=4' "$D/real/realinit_128k.out" && ok "REAL blob: INIT image 5 + 4 sections (CPU1 / CPU2), paging section not loaded" || bad "REAL blob: INIT section split differs"
         grep -q 'cpu1=4 cpu2=4' "$D/real/real_128k.out" && ok "REAL blob: 4 + 4 sections (CPU1 / CPU2), paging section not loaded" || bad "REAL blob: section split differs"
     else
         bad "WLAN_8265_FW has an unpinned SHA-256 ($sha): refusing to trust it"

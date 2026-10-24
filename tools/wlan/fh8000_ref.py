@@ -174,24 +174,25 @@ def gen(d):
         open(os.path.join(d, name + '.exp'), 'w').write('\n'.join(expected(secs, bsize, mode, phys)) + '\n')
 
 
-def real_secs(path):
-    """REAL Intel ucode (not committed): TLV walk, SEC_RT (type 19) sections incl. separators, in file order."""
+def real_secs(path, kind=19):
+    """REAL Intel ucode (not committed): TLV walk, SEC_RT (19) or SEC_INIT (20) sections incl. separators, in file order."""
     b = open(path, 'rb').read()
     if struct.unpack_from('<II', b, 0) != (0, 0x0A4C5749): raise SystemExit('not a ucode file')
     o, secs = 80, []
     while o + 8 <= len(b):
         t, n = struct.unpack_from('<II', b, o)
         d = b[o + 8:o + 8 + n]
-        if t == 19: secs.append((struct.unpack_from('<I', d, 0)[0], d[4:]))
+        if t == kind: secs.append((struct.unpack_from('<I', d, 0)[0], d[4:]))
         o += 8 + n + ((-n) & 3)
     return secs
 
 
 def gen_real(path, d):
-    secs = real_secs(path)
-    for name, bsize, phys in (('real_128k', 0x20000, 0x1000), ('real_4k', 4096, 0x300001000)):
-        open(os.path.join(d, name + '.case'), 'wb').write(struct.pack('<IIQ', bsize, 0, phys) + open(path, 'rb').read())
-        open(os.path.join(d, name + '.exp'), 'w').write('\n'.join(expected(secs, bsize, 0, phys)) + '\n')
+    for kind, tag, mode in ((19, 'real', 0), (20, 'realinit', 16)):
+        secs = real_secs(path, kind)
+        for name, bsize, phys in ((tag + '_128k', 0x20000, 0x1000), (tag + '_4k', 4096, 0x300001000)):
+            open(os.path.join(d, name + '.case'), 'wb').write(struct.pack('<IIQ', bsize, mode, phys) + open(path, 'rb').read())
+            open(os.path.join(d, name + '.exp'), 'w').write('\n'.join(expected(secs, bsize, 0, phys)) + '\n')
 
 
 if __name__ == '__main__':
