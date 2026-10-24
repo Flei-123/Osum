@@ -2,9 +2,11 @@
 profile kernel
 
 import wlan.iwl_le
+import drv.net.iwl_fakeap
+import drv.net.iwl_fakeap_frames
 
 export {
-    doorbell, alive, reset, rx_enabled, set_norx, set_knobs, cmds, rx_pkts, rx_drops, last_cmd, last_uid, phydb_cmds, nvm_reads, init_completes, FAKE_SCD_BASE
+    doorbell, alive, reset, rx_enabled, set_norx, set_knobs, cmds, rx_pkts, rx_drops, last_cmd, set_ap, ap_on, last_uid, phydb_cmds, nvm_reads, init_completes, FAKE_SCD_BASE
 }
 
 const FAKE_SCD_BASE: u64 = 0x00800000
@@ -28,6 +30,12 @@ const S_PHASE: u64 = 0x2468
 const S_PHYDB: u64 = 0x2470
 const S_NVMRD: u64 = 0x2478
 const S_INITC: u64 = 0x2480
+const S_AP: u64 = 0x2488
+const CMD_TX: u64 = 0x1C
+const CMD_RX_PHY: u64 = 0xC0
+const CMD_RX_MPDU: u64 = 0xC1
+const TX_CMD_HDR: u64 = 60
+const TX_FLG_MH_PAD: u64 = 0x100000
 
 const CMD_INIT_COMPLETE: u64 = 0x04
 const CMD_PHY_CFG: u64 = 0x6A
@@ -68,6 +76,11 @@ fn set_knobs(ctx: u64, nonvm: u64, noinitc: u64, noalive: u64, badnvm: u64) {
     s(ctx, S_NOALIVE, noalive)
     s(ctx, S_BADNVM, badnvm)
 }
+fn set_ap(ctx: u64, on: u64) {
+    s(ctx, S_AP, on)
+    if on != 0 { iwl_fakeap.reset() }
+}
+fn ap_on(ctx: u64) -> bool { return g(ctx, S_AP) != 0 }
 fn phydb_cmds(ctx: u64) -> u64 { return g(ctx, S_PHYDB) }
 fn nvm_reads(ctx: u64) -> u64 { return g(ctx, S_NVMRD) }
 fn init_completes(ctx: u64) -> u64 { return g(ctx, S_INITC) }
@@ -125,6 +138,60 @@ fn put_status(ctx: u64, cmd: u64, seq: u64) {
     rx_hdr(rb, 4, cmd, seq)
     iwl_le.st32(rb, 8, 0)
     rx_commit(ctx)
+}
+
+fn put_phy(ctx: u64, energy: u64, channel: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 64, CMD_RX_PHY, SEQ_RX_FRAME)
+    iwl_le.zero(rb + 8, 64)
+    iwl_le.st16(rb, 8 + 22, channel)
+    iwl_le.st32(rb, 8 + 28, energy)
+    rx_commit(ctx)
+}
+
+fn put_mpdu(ctx: u64, frame: u64, len: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 4 + len, CMD_RX_MPDU, SEQ_RX_FRAME)
+    iwl_le.st16(rb, 8, len)
+    iwl_le.st16(rb, 10, 0)
+    iwl_le.copy(rb + 12, frame, len)
+    rx_commit(ctx)
+}
+
+fn put_beacons(ctx: u64) {
+    var buf: [u8; 256] = [0 as u8; 256]
+    let b: u64 = (&buf[0]) as u64
+    var i: u64 = 0
+    while i < iwl_fakeap_frames.net_count() {
+        let n: u64 = iwl_fakeap_frames.beacon_build(i, b)
+        put_phy(ctx, iwl_fakeap_frames.net_energy(i), iwl_fakeap_frames.net_channel(i))
+        put_mpdu(ctx, b, n)
+        i = i + 1
+    }
+}
+
+fn ap_air(ctx: u64, tb0: u64) {
+    let flen: u64 = iwl_le.ld16(tb0, 4)
+    if flen < 24 || flen > 400 { return }
+    let flags: u64 = iwl_le.ld32(tb0, 8)
+    var fr: u64 = tb0 + TX_CMD_HDR
+    var fl: u64 = flen
+    var plain: [u8; 400] = [0 as u8; 400]
+    if (flags & TX_FLG_MH_PAD) != 0 && (flen & 3) != 0 {
+        var hl: u64 = 24
+        if (iwl_le.ld8(tb0, TX_CMD_HDR) & 0x80) != 0 { hl = 26 }
+        iwl_le.copy((&plain[0]) as u64, fr, hl)
+        iwl_le.copy((&plain[0]) as u64 + hl, fr + hl + 2, flen - hl)
+        fr = (&plain[0]) as u64
+    }
+    let cnt: u64 = iwl_fakeap.on_tx(fr, fl)
+    var k: u64 = 0
+    while k < cnt {
+        put_mpdu(ctx, iwl_fakeap.resp_ptr(k), iwl_fakeap.resp_len(k))
+        k = k + 1
+    }
 }
 
 fn put_scan_complete(ctx: u64, uid: u64) {
@@ -234,8 +301,10 @@ fn one_tfd(ctx: u64, ring: u64, idx: u64) {
     if cmd == CMD_SCAN_REQ_UMAC {
         let uid: u64 = iwl_le.ld32(tb0, 8)
         s(ctx, S_LASTUID, uid)
+        if g(ctx, S_AP) != 0 { put_beacons(ctx) }
         put_scan_complete(ctx, uid)
     }
+    if cmd == CMD_TX && g(ctx, S_AP) != 0 { ap_air(ctx, tb0) }
 }
 
 fn doorbell(ctx: u64, v: u64, sched_ok: bool) {

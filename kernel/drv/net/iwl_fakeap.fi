@@ -1,0 +1,340 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import wlan.iwl_le
+import wlan.frame
+import wlan.wpa
+import wlan.llc
+import wlan.ccmp
+import crypto.aes
+import drv.net.iwl_fakeap_frames
+
+export { reset, on_tx, resp_ptr, resp_len, stat, STAT_AUTH, STAT_ASSOC, STAT_M2, STAT_BADMIC, STAT_M4, STAT_DISCOVER, STAT_REQUEST, STAT_DATA }
+
+const SLOT: u64 = 512
+const SLOTS: u64 = 4
+const ST_IDLE: u64 = 0
+const ST_AUTHED: u64 = 1
+const ST_M1: u64 = 2
+const ST_M3: u64 = 3
+const ST_KEYED: u64 = 4
+const AKM: u64 = 2
+
+const STAT_AUTH: u64 = 0
+const STAT_ASSOC: u64 = 1
+const STAT_M2: u64 = 2
+const STAT_BADMIC: u64 = 3
+const STAT_M4: u64 = 4
+const STAT_DISCOVER: u64 = 5
+const STAT_REQUEST: u64 = 6
+const STAT_DATA: u64 = 7
+
+static mut fa_state: u64 = 0
+static mut fa_pmk_ok: u64 = 0
+static mut fa_resp_n: u64 = 0
+static mut fa_nonce_seq: u64 = 0
+static mut fa_stats: [u64; 8] = [0 as u64; 8]
+static mut fa_resp_len: [u64; 4] = [0 as u64; 4]
+static mut fa_resp: [u8; 2048] = [0 as u8; 2048]
+static mut fa_pmk: [u8; 32] = [0 as u8; 32]
+static mut fa_ptk: [u8; 48] = [0 as u8; 48]
+static mut fa_anonce: [u8; 32] = [0 as u8; 32]
+static mut fa_sta: [u8; 6] = [0 as u8; 6]
+static mut fa_bssid: [u8; 6] = [0 as u8; 6]
+static mut fa_pn: [u8; 6] = [0 as u8; 6]
+static mut fa_plain: [u8; 640] = [0 as u8; 640]
+static mut fa_out: [u8; 640] = [0 as u8; 640]
+static mut fa_kd: [u8; 48] = [0 as u8; 48]
+static mut fa_mic: [u8; 16] = [0 as u8; 16]
+static mut fa_msg_auth: [u8; 14] = "fakeap: auth\0\0"
+static mut fa_msg_assoc: [u8; 14] = "fakeap: assoc\0"
+static mut fa_msg_m2ok: [u8; 14] = "fakeap: m2 ok\0"
+static mut fa_msg_bad: [u8; 18] = "fakeap: m2 badmic\0"
+static mut fa_msg_m4: [u8; 14] = "fakeap: m4 ok\0"
+static mut fa_msg_disc: [u8; 17] = "fakeap: discover\0"
+static mut fa_msg_req: [u8; 16] = "fakeap: request\0"
+
+fn say(msg: u64) {
+    serial.puts(msg)
+    serial.nl()
+}
+
+fn stat(i: u64) -> u64 { return fa_stats[(i & 7) as usize] }
+
+fn bump(i: u64) { fa_stats[(i & 7) as usize] = fa_stats[(i & 7) as usize] + 1 }
+
+fn reset() {
+    fa_state = ST_IDLE
+    fa_resp_n = 0
+    fa_nonce_seq = 0
+    var i: u64 = 0
+    while i < 8 {
+        fa_stats[i as usize] = 0
+        i = i + 1
+    }
+    iwl_le.zero((&fa_pn[0]) as u64, 6)
+    iwl_fakeap_frames.bssid_set(0, (&fa_bssid[0]) as u64)
+}
+
+fn slot_ptr(k: u64) -> u64 { return (&fa_resp[0]) as u64 + k * SLOT }
+
+fn resp_ptr(k: u64) -> u64 { return slot_ptr(k) }
+
+fn resp_len(k: u64) -> u64 { return fa_resp_len[(k & 3) as usize] }
+
+fn queue_begin() -> u64 {
+    if fa_resp_n >= SLOTS { return 0 }
+    return slot_ptr(fa_resp_n)
+}
+
+fn queue_commit(n: u64) {
+    fa_resp_len[fa_resp_n as usize] = n
+    fa_resp_n = fa_resp_n + 1
+}
+
+fn bssid_addr() -> u64 { return (&fa_bssid[0]) as u64 }
+fn sta_addr() -> u64 { return (&fa_sta[0]) as u64 }
+fn ptk_addr() -> u64 { return (&fa_ptk[0]) as u64 }
+
+fn put_be16(a: u64, o: u64, v: u64) {
+    iwl_le.st8(a, o, v >> 8)
+    iwl_le.st8(a, o + 1, v)
+}
+
+fn ld_be16(a: u64, o: u64) -> u64 {
+    return (iwl_le.ld8(a, o) << 8) | iwl_le.ld8(a, o + 1)
+}
+
+fn make_nonce() {
+    fa_nonce_seq = fa_nonce_seq + 1
+    var i: u64 = 0
+    while i < 32 {
+        fa_anonce[i as usize] = ((i * 7 + 3 + fa_nonce_seq * 29) & 255) as u8
+        i = i + 1
+    }
+}
+
+fn ensure_pmk() -> bool {
+    if fa_pmk_ok != 0 { return true }
+    let ok: bool = wpa.pmk_off_password(iwl_fakeap_frames.pass_ptr(), iwl_fakeap_frames.PASS_LEN as usize,
+        iwl_fakeap_frames.ssid_ptr(0), iwl_fakeap_frames.net_ssid_len(0) as usize, (&fa_pmk[0]) as u64)
+    if ok { fa_pmk_ok = 1 }
+    return ok
+}
+
+fn key_head(f: u64) -> u64 {
+    let hl: u64 = iwl_fakeap_frames.data_head_from_ds(f, sta_addr(), bssid_addr())
+    return hl + llc.snap_build(f + hl, llc.ET_EAPOL) as u64
+}
+
+fn key_fixed(e: u64, key_info: u64, counter: u64, dlen: u64) {
+    iwl_le.zero(e, 99 + dlen)
+    iwl_le.st8(e, 0, 2)
+    iwl_le.st8(e, 1, 3)
+    put_be16(e, 2, 95 + dlen)
+    iwl_le.st8(e, 4, 2)
+    put_be16(e, 5, key_info)
+    put_be16(e, 7, 16)
+    iwl_le.st8(e, 16, counter)
+    var i: u64 = 0
+    while i < 32 {
+        iwl_le.st8(e, 17 + i, fa_anonce[i as usize] as u64)
+        i = i + 1
+    }
+    put_be16(e, 97, dlen)
+}
+
+fn send_m1() {
+    let f: u64 = queue_begin()
+    if f == 0 { return }
+    make_nonce()
+    let at: u64 = key_head(f)
+    key_fixed(f + at, 0x008A, 1, 0)
+    queue_commit(at + 99)
+    fa_state = ST_M1
+}
+
+fn build_keydata() {
+    let k: u64 = (&fa_kd[0]) as u64
+    iwl_le.zero(k, 48)
+    var at: u64 = iwl_fakeap_frames.rsn_ie(k, 0)
+    iwl_le.st8(k, at, 0xDD)
+    iwl_le.st8(k, at + 1, 0x16)
+    iwl_le.st8(k, at + 2, 0x00)
+    iwl_le.st8(k, at + 3, 0x0F)
+    iwl_le.st8(k, at + 4, 0xAC)
+    iwl_le.st8(k, at + 5, 0x01)
+    iwl_le.st8(k, at + 6, 0x01)
+    iwl_le.st8(k, at + 7, 0x00)
+    var i: u64 = 0
+    while i < 16 {
+        iwl_le.st8(k, at + 8 + i, 0xA0 + i)
+        i = i + 1
+    }
+    at = at + 24
+    iwl_le.st8(k, at, 0xDD)
+    iwl_le.st8(k, at + 1, 0x00)
+}
+
+fn send_m3() {
+    let f: u64 = queue_begin()
+    if f == 0 { return }
+    let at: u64 = key_head(f)
+    let e: u64 = f + at
+    key_fixed(e, 0x13CA, 2, 56)
+    build_keydata()
+    if !aes.key_wrap(ptk_addr() + 16, 16, (&fa_kd[0]) as u64, 48, e + 99) { return }
+    if !wpa.mic_compute(ptk_addr(), 16, e, 155, AKM, (&fa_mic[0]) as u64) { return }
+    iwl_le.copy(e + 81, (&fa_mic[0]) as u64, 16)
+    queue_commit(at + 155)
+    fa_state = ST_M3
+}
+
+fn on_m2(e: u64, elen: u64) {
+    if fa_state != ST_M1 { return }
+    if !ensure_pmk() { return }
+    if !wpa.ptk_ableiten((&fa_pmk[0]) as u64, 32, bssid_addr(), sta_addr(), (&fa_anonce[0]) as u64, e + 17, AKM,
+        ptk_addr(), 48) { return }
+    if !wpa.mic_check(ptk_addr(), 16, e, elen as usize, AKM) {
+        bump(STAT_BADMIC)
+        say((&fa_msg_bad[0]) as u64)
+        return
+    }
+    bump(STAT_M2)
+    say((&fa_msg_m2ok[0]) as u64)
+    send_m3()
+}
+
+fn on_m4(e: u64, elen: u64) {
+    if fa_state != ST_M3 { return }
+    if !wpa.mic_check(ptk_addr(), 16, e, elen as usize, AKM) {
+        bump(STAT_BADMIC)
+        return
+    }
+    bump(STAT_M4)
+    say((&fa_msg_m4[0]) as u64)
+    iwl_le.zero((&fa_pn[0]) as u64, 6)
+    fa_state = ST_KEYED
+}
+
+fn on_eapol(e: u64, avail: u64) {
+    if avail < 99 { return }
+    var elen: u64 = 4 + ld_be16(e, 2)
+    if elen > avail { return }
+    let ki: u64 = ld_be16(e, 5)
+    if (ki & 0x0100) == 0 || (ki & 0x0080) != 0 { return }
+    if (ki & 0x0200) != 0 { on_m4(e, elen) } else { on_m2(e, elen) }
+}
+
+fn next_pn() {
+    var i: i64 = 5
+    while i >= 0 {
+        let v: u64 = (fa_pn[i as usize] as u64) + 1
+        fa_pn[i as usize] = (v & 255) as u8
+        if v < 256 { i = -1 } else { i = i - 1 }
+    }
+}
+
+fn send_protected(plain: u64, n: u64) {
+    let f: u64 = queue_begin()
+    if f == 0 { return }
+    next_pn()
+    let m: i64 = ccmp.protect(ptk_addr() + 32, (&fa_pn[0]) as u64, plain, n as usize, f, SLOT as usize)
+    if m < 0 { return }
+    queue_commit(m as u64)
+}
+
+fn send_dhcp(kind: u64, xid: u64) {
+    let o: u64 = (&fa_out[0]) as u64
+    let hl: u64 = iwl_fakeap_frames.data_head_from_ds(o, sta_addr(), bssid_addr())
+    llc.snap_build(o + hl, llc.ET_IPV4)
+    let dl: u64 = iwl_fakeap_frames.dhcp_reply_build(o + 60, kind, xid, sta_addr())
+    llc.udp_build(o + 52, iwl_fakeap_frames.AP_IP, 0xFFFFFFFF, 67, 68, dl as usize)
+    llc.ipv4_build(o + 32, iwl_fakeap_frames.AP_IP, 0xFFFFFFFF, llc.P_UDP, (8 + dl) as usize, 7)
+    send_protected(o, 60 + dl)
+}
+
+fn on_ip(p: u64, n: u64) {
+    let hl: i64 = frame.header_len(p, n as usize)
+    if hl < 0 { return }
+    let h: u64 = hl as u64
+    if n < h + 8 + 20 { return }
+    if llc.snap_parse(p + h, (n - h) as usize) != llc.ET_IPV4 { return }
+    let at: u64 = h + 8
+    var ip: llc.Ipv4 = llc.ipv4_new()
+    if !llc.ipv4_parse(&ip, p + at, (n - at) as usize) { return }
+    if ip.protokoll != llc.P_UDP { return }
+    var ud: llc.Udp = llc.udp_new()
+    if !llc.udp_parse(&ud, ip.nutz, ip.nutz_len, ip.quelle, ip.ziel) { return }
+    if ud.ziel != 67 { return }
+    var dh: llc.Dhcp = llc.dhcp_new()
+    if !llc.dhcp_parse(&dh, ud.nutz, ud.nutz_len) { return }
+    if dh.art == llc.D_DISCOVER {
+        bump(STAT_DISCOVER)
+        say((&fa_msg_disc[0]) as u64)
+        send_dhcp(llc.D_OFFER, dh.xid)
+    }
+    if dh.art == llc.D_REQUEST {
+        bump(STAT_REQUEST)
+        say((&fa_msg_req[0]) as u64)
+        send_dhcp(llc.D_ACK, dh.xid)
+    }
+}
+
+fn on_data(p: u64, n: u64) {
+    let fc1: u64 = iwl_le.ld8(p, 1)
+    if (fc1 & 3) != 1 { return }
+    if !iwl_fakeap_frames.same6(p, 4, bssid_addr(), 0) { return }
+    if fa_state == ST_IDLE || fa_state == ST_AUTHED { return }
+    if !iwl_fakeap_frames.same6(p, 10, sta_addr(), 0) { return }
+    if (fc1 & 0x40) != 0 {
+        if fa_state != ST_KEYED { return }
+        let m: i64 = ccmp.unprotect(ptk_addr() + 32, p, n as usize, (&fa_plain[0]) as u64, 640)
+        if m < 0 { return }
+        bump(STAT_DATA)
+        on_ip((&fa_plain[0]) as u64, m as u64)
+        return
+    }
+    if n < 32 + 4 { return }
+    if llc.snap_parse(p + 24, (n - 24) as usize) != llc.ET_EAPOL { return }
+    on_eapol(p + 32, n - 32)
+}
+
+fn on_mgmt(p: u64, n: u64) {
+    if !iwl_fakeap_frames.same6(p, 4, bssid_addr(), 0) { return }
+    let sub: u64 = iwl_le.ld8(p, 0) >> 4
+    if sub == 11 {
+        if n < 30 { return }
+        if iwl_le.ld16(p, 24) != 0 || iwl_le.ld16(p, 26) != 1 { return }
+        iwl_fakeap_frames.copy6(sta_addr(), 0, p, 10)
+        let f: u64 = queue_begin()
+        if f == 0 { return }
+        queue_commit(iwl_fakeap_frames.auth_reply_build(f, sta_addr(), bssid_addr()))
+        fa_state = ST_AUTHED
+        bump(STAT_AUTH)
+        say((&fa_msg_auth[0]) as u64)
+    }
+    if sub == 0 {
+        if fa_state != ST_AUTHED { return }
+        if !iwl_fakeap_frames.same6(p, 10, sta_addr(), 0) { return }
+        let f: u64 = queue_begin()
+        if f == 0 { return }
+        queue_commit(iwl_fakeap_frames.assoc_reply_build(f, sta_addr(), bssid_addr()))
+        bump(STAT_ASSOC)
+        say((&fa_msg_assoc[0]) as u64)
+        send_m1()
+    }
+    if sub == 12 || sub == 10 {
+        fa_state = ST_IDLE
+    }
+}
+
+fn on_tx(p: u64, n: u64) -> u64 {
+    fa_resp_n = 0
+    if n < 24 { return 0 }
+    let typ: u64 = (iwl_le.ld8(p, 0) >> 2) & 3
+    if typ == 0 { on_mgmt(p, n) }
+    if typ == 2 { on_data(p, n) }
+    return fa_resp_n
+}
