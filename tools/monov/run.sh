@@ -149,6 +149,25 @@ else
     d3=$(diffpix "$TMPD/b/o/00-off.ppm" "$TMPD/b/o/01-on.ppm" "$x" "$y" "$w" "$h")
     [ "$d3" -le 150 ] && ok "COUNTER-PROOF without the key the rectangle stays as it was ($d3 pixels differ)" || bad "without the key $d3 pixels changed"
 fi
+if [ -n "$sl" ]; then
+    ovl=$(python3 -I - "$SA" "$x" "$y" "$w" "$h" <<'PY'
+import re, sys
+ox, oy, ow, oh = (int(v) for v in sys.argv[2:6])
+hits = []
+for line in open(sys.argv[1], "rb").read().decode("latin-1").splitlines():
+    m = re.search(r"desktop: modul (\d+) name=(\S*) an=(\d+).* x=(\d+) y=(\d+) w=(\d+) h=(\d+)", line)
+    if not m or m.group(3) != "1":
+        continue
+    x, y, w, h = (int(m.group(i)) for i in (4, 5, 6, 7))
+    if w and h and x < ox + ow and ox < x + w and y < oy + oh and oy < y + h:
+        hits.append(m.group(2))
+print(",".join(hits) if hits else "none")
+PY
+)
+    nm=$(grep -ac 'desktop: modul ' "$SA")
+    [ "$nm" -ge 1 ] && ok "desktop modules reported ($nm lines)" || bad "no desktop module lines to compare against"
+    [ "$ovl" = "none" ] && ok "the overlay overlaps no desktop module tile" || bad "the overlay overlaps desktop module tiles: $ovl"
+fi
 grep -aq 'fpsov: hidden' "$SA" && ok "the overlay was hidden again (\`fpsov: hidden\`)" || bad "no 'fpsov: hidden'"
 st=$(grep -a 'fpsov: stat peak=' "$SA" | tail -1 | sed 's/.*fpsov: stat/fpsov: stat/')
 if [ -z "$st" ]; then
@@ -156,6 +175,8 @@ if [ -z "$st" ]; then
 else
     pk=$(num "$st" peak); cpu=$(num "$st" cpu); us=$(num "$st" used); tt=$(num "$st" tot)
     ok "numbers: peak=$pk cpu=$cpu used=$us tot=$tt"
+    cap=$(num "$st" cap)
+    [ "$cap" -gt 0 ] && ok "frame cost reported (phases sum $cap x0.1 ms)" || bad "no frame cost in the stat line"
     [ "$cpu" -le 100 ] && ok "cpu within 0..100" || bad "cpu out of range: $cpu"
     [ "$us" -gt 0 ] && [ "$us" -le "$tt" ] && ok "used memory plausible ($us of $tt MB)" || bad "memory implausible: used=$us tot=$tt"
 fi
