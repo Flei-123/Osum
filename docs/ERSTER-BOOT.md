@@ -80,9 +80,9 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 - **Foto-Checkliste:** Start oeffnen, "All apps", Maus ueber verschiedene Zeilen; Suche "e" tippen, Maus ueber Treffer. Flackern: welche Fenster genau (Name) + Aufloesung/Massstab. Settings-Absturz: Fenster am Rand ziehen oder Maximieren-Knopf? Foto/Text der Fehlerzeile (`dmesg` oder Serial), Aufloesung.
 - **Ehrlich:** Flackern und Settings-Absturz sind in QEMU NICHT reproduziert und NICHT behoben; Flacker-Verdacht (Fenster ohne privates Bild) liegt als Branch `staff/orientos-mvmqoy35-atomic` bereit, ungetestet.
 
-## Stick 17 HP (24.10.2026, Baustand 268394bb = main, WLAN Trace + RX-Scan + Experimente inkl. MSI, GUI-Fixes, Treiber-Store, Debug-Werkzeuge, CH336)
+## Stick 17 HP (24.10.2026, Baustand b594cd60 = main, WLAN Trace + RX-Scan + Experimente inkl. MSI, GUI-Fixes, Treiber-Store, Debug-Werkzeuge, CH336)
 
-- **Datei:** `orientos-usb-hp-20261024-268394bb.img` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `SHA17PLACEHOLDER`. Ersetzt Stick 16.
+- **Datei:** `orientos-usb-hp-20261024-b594cd60.img` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `89a11cf3ab8e3ac16e87b2dcf8945154c7e2b8d559f2632576f272505c7f2798`. Ersetzt Stick 16.
 - **Neu gegenueber Stick 16:** MSI-Experiment (`fail_exp2=msi`), Startmenue-Hover in der Liste, Settings-Resize ohne Absturz, kein Flackern bei Scene-Fenstern (`set_atomic`), Fenster unter 120x80 werden nicht mehr gebaut/gemalt, USB-LAN CH336/AX88772.
 - **Foto-Checkliste:** (1) `cat /proc/wlan` (fail_rxs, fail_rx, fail_exp2, ALLE Zeilen), (2) `wlanctl status`, (3) `wlanctl dump`, (4) `lspci`, (5) `cat /proc/drivers`. Windows vorher mit `shutdown /s /t 0` beenden.
 - **Ehrlich:** Am echten 8265 UNVERIFIZIERT. Gates gruen: iwlfh 165/0 (echte FW), wlan/auto 69/0, classes 33/0, dbgtools, menurows 10/0, tmflick (taskmgr, explorer, charmap) 6/0, settingsnarrow, Resize-Serie ohne Absturz. Siehe Bericht fuer offene Gates.
