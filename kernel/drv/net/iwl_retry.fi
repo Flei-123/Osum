@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import bus.pci
+import wlan.iwl_probe
+import wlan.iwl_fw
+import wlan.iwl_pwr
+import wlan.iwl_fh8000
+import wlan.iwl_sbtrace
+import wlan.iwl_cmdq
+import drv.net.iwl_cq
+
+export { run }
+
+const SHORT_WAIT_MS: u64 = 1000
+const LONG_WAIT_MS: u64 = 10000
+const PAUSE_MS: u64 = 500
+const INIT_DELAY_READS: u64 = 6
+const CFG_RETRY_TIMEOUT: u64 = 0x41
+
+fn consume(state: u64, p: *mut iwl_probe.Probe, cq: *mut iwl_cmdq.Cq, w: fn(u64, *mut iwl_probe.Probe, u64) -> i64) -> i64 {
+    return w(state, p, cq as u64)
+}
+
+fn reload(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64,
+          cq: *mut iwl_cmdq.Cq, tr: *mut iwl_sbtrace.SbTrace, init_reads: u64, pause_ms: u64, w: fn(u64, *mut iwl_probe.Probe, u64) -> i64) -> i64 {
+    iwl_sbtrace.trace_set_pause(tr, pause_ms)
+    var r: i64 = iwl_pwr.power_up_x(p, init_reads)
+    if r != 0 { return r }
+    r = iwl_pwr.nic_config(p, (*f).phy_sku)
+    if r != 0 { return r }
+    let _i: i64 = iwl_cq.cq_stage_init(state, cq, p)
+    var st: iwl_fh8000.FhStat = iwl_fh8000.fhstat_new()
+    st.tr = tr as u64
+    r = iwl_fh8000.fh_load(p, f, blob, img, bounce, bounce, bsize, &st)
+    if r != 0 { return r }
+    return w(state, p, cq as u64)
+}
+
+fn attempt(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64,
+           cq: *mut iwl_cmdq.Cq, tr: *mut iwl_sbtrace.SbTrace, id: u64, init_reads: u64, pause_ms: u64, w: fn(u64, *mut iwl_probe.Probe, u64) -> i64) -> i64 {
+    let slot: u64 = iwl_sbtrace.exp_open(tr, id)
+    let r: i64 = reload(state, p, f, blob, img, bounce, bsize, cq, tr, init_reads, pause_ms, w)
+    let _a: u64 = iwl_sbtrace.exp_close(p, tr, slot, 0)
+    if r == 0 { iwl_sbtrace.exp_mark_alive(tr, slot) }
+    iwl_sbtrace.trace_set_pause(tr, 0)
+    return r
+}
+
+fn run(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64,
+       cq: *mut iwl_cmdq.Cq, tr: *mut iwl_sbtrace.SbTrace, bdf: u64, first_err: i64, w: fn(u64, *mut iwl_probe.Probe, u64) -> i64) -> i64 {
+    iwl_sbtrace.trace_set_sampling(tr, 0)
+    if iwl_sbtrace.series_run(p, tr) != 0 { return consume(state, p, cq, w) }
+    if iwl_sbtrace.exp_status(p, tr, SHORT_WAIT_MS) != 0 { return consume(state, p, cq, w) }
+    if iwl_sbtrace.exp_release(p, tr, SHORT_WAIT_MS) != 0 { return consume(state, p, cq, w) }
+    if iwl_sbtrace.exp_wait(p, tr, LONG_WAIT_MS) != 0 { return consume(state, p, cq, w) }
+    if attempt(state, p, f, blob, img, bounce, bsize, cq, tr, iwl_sbtrace.EXP_INITDELAY, INIT_DELAY_READS, 0, w) == 0 { return 0 }
+    if bdf != 0 { pci.cfg_write8(bdf, CFG_RETRY_TIMEOUT, 0) }
+    if attempt(state, p, f, blob, img, bounce, bsize, cq, tr, iwl_sbtrace.EXP_PCI41, 0, 0, w) == 0 { return 0 }
+    if attempt(state, p, f, blob, img, bounce, bsize, cq, tr, iwl_sbtrace.EXP_PAUSE, 0, PAUSE_MS, w) == 0 { return 0 }
+    return first_err
+}

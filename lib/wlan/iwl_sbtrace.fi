@@ -1,0 +1,236 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_probe
+import wlan.iwl_pwr
+
+export {
+    SbTrace, trace_new, trace_hooks, trace_on, trace_enabled, trace_set_sampling, exp_mark_alive, trace_pause_ms,
+    sample_sec, sample_end, series_run, exp_open, exp_close, exp_status, exp_release, exp_wait, alive_seen,
+    word_at, trace_set_pause, pause_run, trace_copy,
+    TR_WORDS, MAX_SAMPLES, SERIES_N, MAX_EXP, SAMPLE_BASE, SERIES_BASE, EXP_BASE,
+    W_NSAMPLES, W_NSERIES, W_NEXP,
+    END_CPU1, END_CPU2, SERIES_MS,
+    EXP_STATUS, EXP_RELEASE, EXP_LONGWAIT, EXP_INITDELAY, EXP_PCI41, EXP_PAUSE,
+    SB_CPU1, SB_CPU2, LOAD_STATUS, RELEASE_CPU_RESET
+}
+
+const SB_CPU1: u64 = 0xA01E30
+const SB_CPU2: u64 = 0xA01E34
+const LOAD_STATUS: u64 = 0x1AF0
+const RELEASE_CPU_RESET: u64 = 0x300C
+const RELEASE_VALUE: u64 = 0x01000000
+const STATUS_ALL: u64 = 0xFFFFFFFF
+const NO_ACCESS: u64 = 0xEEEEEEEE
+
+const ALIVE_BITS: u64 = 0x80000001
+
+const MAX_SAMPLES: u64 = 20
+const SERIES_N: u64 = 8
+const MAX_EXP: u64 = 6
+const SERIES_MS: u64 = 250
+const SPIN_ROUNDS: u64 = 2000000
+const SPIN_READS: u64 = 400
+
+const SAMPLE_WORDS: u64 = 5
+const SERIES_WORDS: u64 = 5
+const EXP_WORDS: u64 = 6
+const W_NSAMPLES: u64 = 0
+const W_NSERIES: u64 = 1
+const W_NEXP: u64 = 2
+const W_PAUSE: u64 = 3
+const W_ON: u64 = 4
+const W_SAMPLING: u64 = 5
+const SAMPLE_BASE: u64 = 8
+const SERIES_BASE: u64 = 108
+const EXP_BASE: u64 = 148
+const TR_WORDS: u64 = 192
+
+const END_CPU1: u64 = 190
+const END_CPU2: u64 = 290
+
+const EXP_STATUS: u64 = 1
+const EXP_RELEASE: u64 = 2
+const EXP_LONGWAIT: u64 = 3
+const EXP_INITDELAY: u64 = 4
+const EXP_PCI41: u64 = 5
+const EXP_PAUSE: u64 = 6
+
+struct SbTrace {
+    w: [u64; 192],
+    now: fn(u64) -> u64,
+    now_ctx: u64,
+    peek: fn(u64) -> u64,
+    peek_ctx: u64,
+    t0: u64
+}
+
+fn no_now(c: u64) -> u64 { return 0 }
+fn no_peek(c: u64) -> u64 { return 0 }
+
+fn trace_new() -> SbTrace {
+    var t: SbTrace = SbTrace { w: [0; 192], now: no_now, now_ctx: 0, peek: no_peek, peek_ctx: 0, t0: 0 }
+    return t
+}
+
+fn trace_hooks(t: *mut SbTrace, now: fn(u64) -> u64, now_ctx: u64, peek: fn(u64) -> u64, peek_ctx: u64) {
+    (*t).now = now
+    (*t).now_ctx = now_ctx
+    (*t).peek = peek
+    (*t).peek_ctx = peek_ctx
+    (*t).t0 = now(now_ctx)
+}
+
+fn trace_on(t: *mut SbTrace) {
+    (*t).w[W_ON as usize] = 1
+    (*t).w[W_SAMPLING as usize] = 1
+}
+
+fn trace_set_sampling(t: *mut SbTrace, v: u64) { (*t).w[W_SAMPLING as usize] = v }
+
+fn exp_mark_alive(t: *mut SbTrace, slot: u64) {
+    if slot < MAX_EXP { (*t).w[(EXP_BASE + slot * EXP_WORDS + 4) as usize] = 1 }
+}
+
+fn trace_enabled(t: *mut SbTrace) -> bool { return (*t).w[W_ON as usize] != 0 }
+
+fn trace_pause_ms(t: *mut SbTrace) -> u64 { return (*t).w[W_PAUSE as usize] }
+
+fn word_at(t: *mut SbTrace, i: u64) -> u64 { return (*t).w[i as usize] }
+
+fn trace_set_pause(t: *mut SbTrace, ms: u64) { (*t).w[W_PAUSE as usize] = ms }
+
+fn pause_run(p: *mut iwl_probe.Probe, t: *mut SbTrace) {
+    let ms: u64 = (*t).w[W_PAUSE as usize]
+    if ms != 0 { spin_ms(p, t, ms) }
+}
+
+fn trace_copy(t: *mut SbTrace, dst: u64) {
+    var i: u64 = 0
+    while i < TR_WORDS {
+        *((dst + i * 8) as *mut u64) = (*t).w[i as usize]
+        i = i + 1
+    }
+}
+
+fn since(t: *mut SbTrace) -> u64 {
+    let n: u64 = (*t).now((*t).now_ctx)
+    if n < (*t).t0 { return 0 }
+    return n - (*t).t0
+}
+
+fn rd32(p: *mut iwl_probe.Probe, off: u64) -> u64 {
+    let m: iwl_probe.Mmio = (*p).m
+    (*p).reads = (*p).reads + 1
+    return m.rd32((*p).ctx, off) & 0xFFFFFFFF
+}
+
+fn wr32(p: *mut iwl_probe.Probe, off: u64, v: u64) {
+    let m: iwl_probe.Mmio = (*p).m
+    (*p).writes = (*p).writes + 1
+    m.wr32((*p).ctx, off, v & 0xFFFFFFFF)
+}
+
+fn grab(p: *mut iwl_probe.Probe, t: *mut SbTrace, at: u64) {
+    if iwl_pwr.mac_access_get(p) != 0 {
+        iwl_pwr.mac_access_put(p)
+        (*t).w[at as usize] = NO_ACCESS
+        (*t).w[(at + 1) as usize] = NO_ACCESS
+        (*t).w[(at + 2) as usize] = NO_ACCESS
+        return
+    }
+    (*t).w[at as usize] = iwl_pwr.prph_rd(p, SB_CPU1) & 0xFFFFFFFF
+    (*t).w[(at + 1) as usize] = iwl_pwr.prph_rd(p, SB_CPU2) & 0xFFFFFFFF
+    (*t).w[(at + 2) as usize] = rd32(p, LOAD_STATUS)
+    iwl_pwr.mac_access_put(p)
+}
+
+fn sample_sec(p: *mut iwl_probe.Probe, t: *mut SbTrace, tag: u64) {
+    let n: u64 = (*t).w[W_NSAMPLES as usize]
+    if n >= MAX_SAMPLES || (*t).w[W_SAMPLING as usize] == 0 { return }
+    let b: u64 = SAMPLE_BASE + n * SAMPLE_WORDS
+    (*t).w[b as usize] = tag
+    (*t).w[(b + 1) as usize] = since(t)
+    grab(p, t, b + 2)
+    (*t).w[W_NSAMPLES as usize] = n + 1
+}
+
+fn sample_end(p: *mut iwl_probe.Probe, t: *mut SbTrace, cpu: u64) {
+    if cpu == 1 { sample_sec(p, t, END_CPU1) } else { sample_sec(p, t, END_CPU2) }
+}
+
+fn spin_ms(p: *mut iwl_probe.Probe, t: *mut SbTrace, ms: u64) {
+    let t0: u64 = (*t).now((*t).now_ctx)
+    var r: u64 = 0
+    while r < SPIN_ROUNDS {
+        if (*t).now((*t).now_ctx) >= t0 + ms { return }
+        iwl_pwr.settle(p, SPIN_READS)
+        r = r + 1
+    }
+}
+
+fn alive_seen(p: *mut iwl_probe.Probe, t: *mut SbTrace) -> u64 {
+    if rd32(p, iwl_probe.CSR_INT) & ALIVE_BITS != 0 { return 1 }
+    if (*t).peek((*t).peek_ctx) != 0 { return 1 }
+    return 0
+}
+
+fn series_run(p: *mut iwl_probe.Probe, t: *mut SbTrace) -> u64 {
+    var i: u64 = 0
+    var alive: u64 = 0
+    while i < SERIES_N && alive == 0 {
+        spin_ms(p, t, SERIES_MS)
+        let b: u64 = SERIES_BASE + i * SERIES_WORDS
+        (*t).w[b as usize] = since(t)
+        grab(p, t, b + 1)
+        alive = alive_seen(p, t)
+        (*t).w[(b + 4) as usize] = rd32(p, iwl_probe.CSR_INT)
+        i = i + 1
+        (*t).w[W_NSERIES as usize] = i
+    }
+    return alive
+}
+
+fn exp_open(t: *mut SbTrace, id: u64) -> u64 {
+    let n: u64 = (*t).w[W_NEXP as usize]
+    if n >= MAX_EXP { return MAX_EXP }
+    let b: u64 = EXP_BASE + n * EXP_WORDS
+    (*t).w[b as usize] = id
+    (*t).w[W_NEXP as usize] = n + 1
+    return n
+}
+
+fn exp_close(p: *mut iwl_probe.Probe, t: *mut SbTrace, slot: u64, wait_ms: u64) -> u64 {
+    if slot >= MAX_EXP { return 0 }
+    let b: u64 = EXP_BASE + slot * EXP_WORDS
+    let t0: u64 = (*t).now((*t).now_ctx)
+    var alive: u64 = alive_seen(p, t)
+    var r: u64 = 0
+    while alive == 0 && r < SPIN_ROUNDS {
+        if (*t).now((*t).now_ctx) >= t0 + wait_ms { break }
+        iwl_pwr.settle(p, SPIN_READS)
+        alive = alive_seen(p, t)
+        r = r + 1
+    }
+    grab(p, t, b + 1)
+    (*t).w[(b + 4) as usize] = alive
+    (*t).w[(b + 5) as usize] = since(t)
+    return alive
+}
+
+fn exp_status(p: *mut iwl_probe.Probe, t: *mut SbTrace, wait_ms: u64) -> u64 {
+    let s: u64 = exp_open(t, EXP_STATUS)
+    if iwl_pwr.mac_access_get(p) == 0 { wr32(p, LOAD_STATUS, STATUS_ALL) }
+    iwl_pwr.mac_access_put(p)
+    return exp_close(p, t, s, wait_ms)
+}
+
+fn exp_release(p: *mut iwl_probe.Probe, t: *mut SbTrace, wait_ms: u64) -> u64 {
+    let s: u64 = exp_open(t, EXP_RELEASE)
+    if iwl_pwr.mac_access_get(p) == 0 { iwl_pwr.prph_wr(p, RELEASE_CPU_RESET, RELEASE_VALUE) }
+    iwl_pwr.mac_access_put(p)
+    return exp_close(p, t, s, wait_ms)
+}
+
+fn exp_wait(p: *mut iwl_probe.Probe, t: *mut SbTrace, wait_ms: u64) -> u64 {
+    let s: u64 = exp_open(t, EXP_LONGWAIT)
+    return exp_close(p, t, s, wait_ms)
+}

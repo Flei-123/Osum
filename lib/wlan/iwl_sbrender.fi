@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_w
+import wlan.iwl_sbtrace
+
+export { render, has_data }
+
+fn at(words: u64, i: u64) -> u64 {
+    return *((words + i * 8) as *mut u64)
+}
+
+fn has_data(words: u64) -> bool {
+    return at(words, iwl_sbtrace.W_NSAMPLES) + at(words, iwl_sbtrace.W_NSERIES) + at(words, iwl_sbtrace.W_NEXP) != 0
+}
+
+fn put_regs(w: *mut iwl_w.W, words: u64, b: u64) {
+    var k_c1: [u8; 7] = " cpu1=\0"
+    var k_c2: [u8; 7] = " cpu2=\0"
+    var k_ls: [u8; 5] = " ls=\0"
+    iwl_w.w_s(w, (&k_c1[0]) as u64)
+    iwl_w.w_hex(w, at(words, b), 8)
+    iwl_w.w_s(w, (&k_c2[0]) as u64)
+    iwl_w.w_hex(w, at(words, b + 1), 8)
+    iwl_w.w_s(w, (&k_ls[0]) as u64)
+    iwl_w.w_hex(w, at(words, b + 2), 8)
+}
+
+fn put_time(w: *mut iwl_w.W, t: u64) {
+    var k_t: [u8; 4] = " t=\0"
+    iwl_w.w_s(w, (&k_t[0]) as u64)
+    iwl_w.w_dec(w, t)
+}
+
+fn put_tag(w: *mut iwl_w.W, tag: u64) {
+    var k_c: [u8; 2] = "c\0"
+    var k_s: [u8; 2] = "s\0"
+    var k_e: [u8; 4] = "end\0"
+    iwl_w.w_s(w, (&k_c[0]) as u64)
+    iwl_w.w_dec(w, tag / 100)
+    if tag % 100 >= 90 {
+        iwl_w.w_s(w, (&k_e[0]) as u64)
+    } else {
+        iwl_w.w_s(w, (&k_s[0]) as u64)
+        iwl_w.w_dec(w, tag % 100)
+    }
+}
+
+fn exp_name(id: u64, out: u64) {
+    var n1: [u8; 7] = "status\0"
+    var n2: [u8; 8] = "release\0"
+    var n3: [u8; 5] = "wait\0"
+    var n4: [u8; 10] = "initdelay\0"
+    var n5: [u8; 6] = "pci41\0"
+    var n6: [u8; 6] = "pause\0"
+    var nx: [u8; 4] = "?\0\0\0"
+    var src: u64 = (&nx[0]) as u64
+    if id == iwl_sbtrace.EXP_STATUS { src = (&n1[0]) as u64 }
+    if id == iwl_sbtrace.EXP_RELEASE { src = (&n2[0]) as u64 }
+    if id == iwl_sbtrace.EXP_LONGWAIT { src = (&n3[0]) as u64 }
+    if id == iwl_sbtrace.EXP_INITDELAY { src = (&n4[0]) as u64 }
+    if id == iwl_sbtrace.EXP_PCI41 { src = (&n5[0]) as u64 }
+    if id == iwl_sbtrace.EXP_PAUSE { src = (&n6[0]) as u64 }
+    var i: u64 = 0
+    while *((src + i) as *mut u8) != 0 {
+        *((out + i) as *mut u8) = *((src + i) as *mut u8)
+        i = i + 1
+    }
+    *((out + i) as *mut u8) = 0
+}
+
+fn render(w: *mut iwl_w.W, words: u64) {
+    var k_tr: [u8; 12] = "fail_trace=\0"
+    var k_se: [u8; 13] = "fail_series=\0"
+    var k_ex: [u8; 10] = "fail_exp=\0"
+    var k_in: [u8; 6] = " int=\0"
+    var k_al: [u8; 8] = " alive=\0"
+    var nm: [u8; 16] = [0 as u8; 16]
+    var i: u64 = 0
+    let ns: u64 = at(words, iwl_sbtrace.W_NSAMPLES)
+    while i < ns {
+        let b: u64 = iwl_sbtrace.SAMPLE_BASE + i * 5
+        iwl_w.w_s(w, (&k_tr[0]) as u64)
+        put_tag(w, at(words, b))
+        put_time(w, at(words, b + 1))
+        put_regs(w, words, b + 2)
+        iwl_w.w_nl(w)
+        i = i + 1
+    }
+    i = 0
+    let nr: u64 = at(words, iwl_sbtrace.W_NSERIES)
+    while i < nr {
+        let b: u64 = iwl_sbtrace.SERIES_BASE + i * 5
+        iwl_w.w_s(w, (&k_se[0]) as u64)
+        iwl_w.w_dec(w, i)
+        put_time(w, at(words, b))
+        put_regs(w, words, b + 1)
+        iwl_w.w_s(w, (&k_in[0]) as u64)
+        iwl_w.w_hex(w, at(words, b + 4), 8)
+        iwl_w.w_nl(w)
+        i = i + 1
+    }
+    i = 0
+    let ne: u64 = at(words, iwl_sbtrace.W_NEXP)
+    while i < ne {
+        let b: u64 = iwl_sbtrace.EXP_BASE + i * 6
+        iwl_w.w_s(w, (&k_ex[0]) as u64)
+        exp_name(at(words, b), (&nm[0]) as u64)
+        iwl_w.w_s(w, (&nm[0]) as u64)
+        put_regs(w, words, b + 1)
+        iwl_w.w_s(w, (&k_al[0]) as u64)
+        iwl_w.w_dec(w, at(words, b + 4))
+        put_time(w, at(words, b + 5))
+        iwl_w.w_nl(w)
+        i = i + 1
+    }
+}

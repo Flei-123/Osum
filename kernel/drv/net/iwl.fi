@@ -58,6 +58,8 @@ import drv.net.iwl_cq
 import drv.net.iwl_xport
 import drv.net.iwl_heldcaps
 import drv.net.iwl_pcipm
+import drv.net.iwl_retry
+import wlan.iwl_sbtrace
 import drv.net.iwl_heldmac
 import wlan.iwl_fwcaps
 import wlan.iwl_cmdq
@@ -104,7 +106,7 @@ static mut diag_d: iwl_diag.Diag = iwl_diag.Diag {
     phase: 0, failed_at: 0, armed: 0, init_alive: 0, rt_alive: 0, err: 0, hw_rev: 0, rf_id: 0, fw_ver: 0, fw_size: 0,
     nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, last_cmd: 0, last_notif: 0,
     cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32],
-    step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, alive_valid: 0, alive: [0; 16], pm_valid: 0, pm: [0; 16], miss: [0 as u8; 64]
+    step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, alive_valid: 0, alive: [0; 16], pm_valid: 0, pm: [0; 16], tr_valid: 0, tr: [0; 192], miss: [0 as u8; 64]
 }
 
 static mut snap_p: u64 = 0
@@ -162,8 +164,7 @@ fn diag_step(state: u64, ph: u64) {
     iwl_diag.diag_phase(&diag_d, ph, now_ms(state))
 }
 
-fn diag_bad(state: u64, code: i64) {
-    if diag_d.phase == iwl_diag.PH_FAILED { return }
+fn diag_take_snaps() {
     if snap_p != 0 {
         var rg: [u64; 8] = [0 as u64; 8]
         iwl_pwr.snap_regs(snap_p as *mut iwl_probe.Probe, (&rg[0]) as u64)
@@ -175,6 +176,11 @@ fn diag_bad(state: u64, code: i64) {
     if snap_bdf != 0 {
         iwl_diag.diag_pci(&diag_d, pci.cfg_read16(snap_bdf, CFG_COMMAND), snap_bar, snap_bar_size)
     }
+}
+
+fn diag_bad(state: u64, code: i64) {
+    if diag_d.phase == iwl_diag.PH_FAILED { return }
+    if diag_d.snapped == 0 { diag_take_snaps() }
     iwl_diag.diag_fail(&diag_d, code, now_ms(state))
 }
 
@@ -602,9 +608,27 @@ fn b2_line(tag: u64, r: i64) {
     serial.nl()
 }
 
+fn run_experiments(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64,
+                   cq: *mut iwl_cmdq.Cq, tr: *mut iwl_sbtrace.SbTrace, first_err: i64) -> i64 {
+    diag_take_snaps()
+    let r: i64 = iwl_retry.run(state, p, f, blob, img, bounce, bsize, cq, tr, snap_bdf, first_err, wait_alive)
+    var words: [u64; 192] = [0 as u64; 192]
+    iwl_sbtrace.trace_copy(tr, (&words[0]) as u64)
+    iwl_diag.diag_trace(&diag_d, (&words[0]) as u64)
+    return r
+}
+
+#[allow_escape]
 fn b2_phase(state: u64, lph: u64, aph: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64, tl: u64, ta: u64, cq: *mut iwl_cmdq.Cq, scratch: u64) -> i64 {
     var s_by: [u8; 8] = " bytes=\0"
     var st: iwl_fh8000.FhStat = iwl_fh8000.fhstat_new()
+    var tr: iwl_sbtrace.SbTrace = iwl_sbtrace.trace_new()
+    let tracing: bool = !kstate.mode_on(state, kstate.M_IWLNOTRACE)
+    if tracing {
+        iwl_sbtrace.trace_on(&tr)
+        iwl_sbtrace.trace_hooks(&tr, now_ms, state, alive_peek, cq as u64)
+        st.tr = (&tr) as u64
+    }
     diag_step(state, lph)
     if lph == iwl_diag.PH_FW_LOAD_INIT { mark(iwl_diag.ST_FH_INIT) } else { mark(iwl_diag.ST_FH_RT) }
     var r: i64 = iwl_fh8000.fh_load(p, f, blob, img, bounce, bounce, bsize, &st)
@@ -627,8 +651,17 @@ fn b2_phase(state: u64, lph: u64, aph: u64, p: *mut iwl_probe.Probe, f: *mut iwl
         var img_code: u64 = 2
         if lph == iwl_diag.PH_FW_LOAD_INIT { img_code = 1 }
         diag_alive_snap(p, img_code, st.secs[0], st.secs[1])
-        diag_bad(state, r)
-    } else {
+        if tracing {
+            var s_ex: [u8; 21] = "iwl: boot2 exp alive\0"
+            r = run_experiments(state, p, f, blob, img, bounce, bsize, cq, &tr, r)
+            if r == 0 {
+                serial.puts((&s_ex[0]) as u64)
+                serial.nl()
+            }
+        }
+        if r != 0 { diag_bad(state, r) }
+    }
+    if r == 0 {
         diag_step(state, aph)
         let sa: i64 = iwl_cq.cq_stage_alive(state, cq, p, scratch)
         if sa != 0 {
@@ -834,6 +867,7 @@ fn fh8000_fake2(state: u64, blob: u64, f: *mut iwl_fw.FwInfo, mode: u64, win: u6
     iwl_fakeap.set_drop(mode_flag(state, kstate.M_IWLFHDROP))
     iwl_fake.fake_set_slow(region, mode_flag(state, kstate.M_IWLFHSLOW))
     iwl_fake.fake_set_rxonly(region, mode_flag(state, kstate.M_IWLFHRXONLY))
+    iwl_fake.fake_set_wake(region, mode_flag(state, kstate.M_IWLFHWAKE))
     var p: iwl_probe.Probe = iwl_probe.probe_new()
     iwl_probe.mmio_set(&p, region, iwl_fake.fake_rd, iwl_fake.fake_wr)
     var cq: iwl_cmdq.Cq = iwl_cmdq.cq_new()

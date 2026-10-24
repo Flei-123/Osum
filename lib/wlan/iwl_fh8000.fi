@@ -19,6 +19,7 @@
 import wlan.iwl_probe
 import wlan.iwl_fw
 import wlan.iwl_pwr
+import wlan.iwl_sbtrace
 
 export {
     FhStat, fhstat_new, fh_load, fh_chunk_size, fh_nchunks, fh_is_ext, fh_status_bits, fh_sec_of,
@@ -71,11 +72,12 @@ struct FhStat {
     fail_sec: u64,      // image index of the section that failed (valid when the result is < 0)
     last_dst: u64,
     last_phys: u64,
-    last_cnt: u64
+    last_cnt: u64,
+    tr: u64
 }
 
 fn fhstat_new() -> FhStat {
-    var s: FhStat = FhStat { chunks: 0, bytes: 0, ext_chunks: 0, secs: [0; 2], fail_sec: 0, last_dst: 0, last_phys: 0, last_cnt: 0 }
+    var s: FhStat = FhStat { chunks: 0, bytes: 0, ext_chunks: 0, secs: [0; 2], fail_sec: 0, last_dst: 0, last_phys: 0, last_cnt: 0, tr: 0 }
     return s
 }
 
@@ -281,10 +283,13 @@ fn load_cpu(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usiz
         let r2: i64 = direct_or(p, FH_UCODE_LOAD_STATUS, fh_status_bits(k, cpu))
         if r2 != 0 { return r2 }
         (*st).secs[(cpu - 1) as usize] = k
+        if (*st).tr != 0 { iwl_sbtrace.sample_sec(p, (*st).tr as *mut iwl_sbtrace.SbTrace, cpu * 100 + k - 1) }
     }
     wr(p, iwl_pwr.CSR_INT_MASK, INT_INI_SET_MASK)
-    if cpu == 1 { return direct_wr(p, FH_UCODE_LOAD_STATUS, 0xFFFF) }
-    return direct_wr(p, FH_UCODE_LOAD_STATUS, 0xFFFFFFFF)
+    var rc: i64 = 0
+    if cpu == 1 { rc = direct_wr(p, FH_UCODE_LOAD_STATUS, 0xFFFF) } else { rc = direct_wr(p, FH_UCODE_LOAD_STATUS, 0xFFFFFFFF) }
+    if (*st).tr != 0 { iwl_sbtrace.sample_end(p, (*st).tr as *mut iwl_sbtrace.SbTrace, cpu) }
+    return rc
 }
 
 // Load image `img` (iwl_fw.IMG_RT / IMG_INIT) of a parsed ucode blob. The device must be powered
@@ -292,7 +297,9 @@ fn load_cpu(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usiz
 // `bsize` its size (>= 4096; 0x20000 gives the fewest chunks). Returns 0 or E_FH_* / E_PWR_*.
 fn fh_load(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize,
            bounce: u64, bphys: u64, bsize: u64, st: *mut FhStat) -> i64 {
+    let keep_tr: u64 = (*st).tr
     *st = fhstat_new()
+    (*st).tr = keep_tr
     if bsize < 4096 { return E_FH_BOUNCE }
     if iwl_fw.fw_kind_count(f, img, iwl_fw.KIND_LMAC) == 0 { return E_FH_NOCPU }
     if iwl_fw.fw_kind_count(f, img, iwl_fw.KIND_LMAC) > FH_CPU_MAX { return E_FH_TOOMANY }
@@ -315,5 +322,6 @@ fn fh_load(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize
     if r != 0 { return r }
     r = load_cpu(p, f, blob, img, 1, bounce, bphys, bsize, st)
     if r != 0 { return r }
+    if (*st).tr != 0 { iwl_sbtrace.pause_run(p, (*st).tr as *mut iwl_sbtrace.SbTrace) }
     return load_cpu(p, f, blob, img, 2, bounce, bphys, bsize, st)
 }

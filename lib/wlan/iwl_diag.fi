@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import wlan.iwl_le
+import wlan.iwl_w
+import wlan.iwl_sbrender
 
 export {
     Diag, diag_new, diag_phase, diag_fail, diag_hw, diag_fw, diag_cmd, diag_notif, diag_rings, diag_nvm, diag_calib,
-    diag_armed, diag_render, phase_name, err_text, diag_mark, diag_snap, diag_snap2, diag_alive, diag_pm, diag_pci, diag_fhfail, diag_fwmiss, step_name,
+    diag_armed, diag_render, phase_name, err_text, diag_mark, diag_snap, diag_snap2, diag_alive, diag_pm, diag_pci, diag_fhfail, diag_fwmiss, diag_trace, step_name,
     ST_NONE, ST_FW_FILE, ST_FW_PARSE, ST_DMA, ST_POWER_INIT, ST_CQ_INIT, ST_FH_INIT, ST_ALIVE_INIT, ST_NVM, ST_INIT_STOP,
     ST_POWER_RT, ST_FH_RT, ST_ALIVE_RT, ST_RT_STAGE, ST_INIT_IMG,
     PH_IDLE, PH_PCI, PH_FW_LOAD_INIT, PH_INIT_ALIVE, PH_NVM, PH_INIT_COMPLETE, PH_FW_LOAD_RT, PH_RT_ALIVE, PH_READY, PH_FAILED,
@@ -90,6 +92,8 @@ struct Diag {
     alive: [u64; 16],
     pm_valid: u64,
     pm: [u64; 16],
+    tr_valid: u64,
+    tr: [u64; 192],
     miss: [u8; 64]
 }
 
@@ -98,7 +102,7 @@ fn diag_new() -> Diag {
         phase: 0, failed_at: 0, armed: 0, init_alive: 0, rt_alive: 0, err: 0, hw_rev: 0, rf_id: 0, fw_ver: 0, fw_size: 0,
         nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, last_cmd: 0, last_notif: 0,
         cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32],
-        step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, alive_valid: 0, alive: [0; 16], pm_valid: 0, pm: [0; 16], miss: [0 as u8; 64]
+        step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, alive_valid: 0, alive: [0; 16], pm_valid: 0, pm: [0; 16], tr_valid: 0, tr: [0; 192], miss: [0 as u8; 64]
     }
     return d
 }
@@ -131,6 +135,15 @@ fn diag_snap2(d: *mut Diag, src: u64) {
         i = i + 1
     }
     (*d).snapped2 = 1
+}
+
+fn diag_trace(d: *mut Diag, src: u64) {
+    var i: u64 = 0
+    while i < 192 {
+        (*d).tr[i as usize] = *((src + i * 8) as *mut u64)
+        i = i + 1
+    }
+    (*d).tr_valid = 1
 }
 
 fn diag_pm(d: *mut Diag, src: u64) {
@@ -240,69 +253,6 @@ fn diag_armed(d: *mut Diag, on: bool) {
     if on { (*d).armed = 1 } else { (*d).armed = 0 }
 }
 
-struct W {
-    a: u64,
-    cap: u64,
-    n: u64
-}
-
-fn w_ch(w: *mut W, c: u64) {
-    if (*w).n + 1 < (*w).cap {
-        iwl_le.st8((*w).a, (*w).n, c)
-        (*w).n = (*w).n + 1
-    }
-}
-
-fn w_s(w: *mut W, s: u64) {
-    var i: u64 = 0
-    while iwl_le.ld8(s, i) != 0 {
-        w_ch(w, iwl_le.ld8(s, i))
-        i = i + 1
-    }
-}
-
-fn w_dec(w: *mut W, v: u64) {
-    var tmp: [u8; 20] = [0 as u8; 20]
-    var n: u64 = 0
-    var x: u64 = v
-    if x == 0 {
-        w_ch(w, 48)
-        return
-    }
-    while x != 0 {
-        tmp[n as usize] = (48 + x % 10) as u8
-        x = x / 10
-        n = n + 1
-    }
-    while n > 0 {
-        n = n - 1
-        w_ch(w, tmp[n as usize] as u64)
-    }
-}
-
-fn w_int(w: *mut W, v: i64) {
-    if v < 0 {
-        w_ch(w, 45)
-        w_dec(w, (0 - v) as u64)
-    } else {
-        w_dec(w, v as u64)
-    }
-}
-
-fn hexd(v: u64) -> u64 {
-    if v < 10 { return 48 + v }
-    return 87 + v
-}
-
-fn w_hex(w: *mut W, v: u64, digits: u64) {
-    var i: u64 = digits
-    while i > 0 {
-        i = i - 1
-        w_ch(w, hexd((v >> (i * 4)) & 15))
-    }
-}
-
-fn w_nl(w: *mut W) { w_ch(w, 10) }
 
 fn phase_name(ph: u64, out: u64) {
     var s0: [u8; 5] = "idle\0"
@@ -445,21 +395,21 @@ fn err_text(code: i64, out: u64) {
     iwl_le.st8(out, i, 0)
 }
 
-fn yes_no(w: *mut W, v: u64) {
+fn yes_no(w: *mut iwl_w.W, v: u64) {
     var y: [u8; 4] = "yes\0"
     var n: [u8; 3] = "no\0"
-    if v != 0 { w_s(w, (&y[0]) as u64) } else { w_s(w, (&n[0]) as u64) }
+    if v != 0 { iwl_w.w_s(w, (&y[0]) as u64) } else { iwl_w.w_s(w, (&n[0]) as u64) }
 }
 
-fn nvm_name(w: *mut W, v: u64) {
+fn nvm_name(w: *mut iwl_w.W, v: u64) {
     var a: [u8; 8] = "pending\0"
     var b: [u8; 3] = "ok\0"
     var c: [u8; 8] = "skipped\0"
     var e: [u8; 7] = "failed\0"
-    if v == NVM_OK { w_s(w, (&b[0]) as u64) } else if v == NVM_SKIPPED { w_s(w, (&c[0]) as u64) } else if v == NVM_FAILED { w_s(w, (&e[0]) as u64) } else { w_s(w, (&a[0]) as u64) }
+    if v == NVM_OK { iwl_w.w_s(w, (&b[0]) as u64) } else if v == NVM_SKIPPED { iwl_w.w_s(w, (&c[0]) as u64) } else if v == NVM_FAILED { iwl_w.w_s(w, (&e[0]) as u64) } else { iwl_w.w_s(w, (&a[0]) as u64) }
 }
 
-fn render_fail(w: *mut W, d: *mut Diag) {
+fn render_fail(w: *mut iwl_w.W, d: *mut Diag) {
     var k_step: [u8; 11] = "fail_step=\0"
     var k_why: [u8; 10] = "fail_why=\0"
     var k_rc: [u8; 5] = " rc=\0"
@@ -528,155 +478,158 @@ fn render_fail(w: *mut W, d: *mut Diag) {
     var f_p: [u8; 7] = " phys=\0"
     var f_n: [u8; 6] = " cnt=\0"
     var nm: [u8; 48] = [0 as u8; 48]
-    w_s(w, (&k_step[0]) as u64)
+    iwl_w.w_s(w, (&k_step[0]) as u64)
     step_name((*d).fail_step, (&nm[0]) as u64)
-    w_s(w, (&nm[0]) as u64)
-    w_nl(w)
-    w_s(w, (&k_why[0]) as u64)
+    iwl_w.w_s(w, (&nm[0]) as u64)
+    iwl_w.w_nl(w)
+    iwl_w.w_s(w, (&k_why[0]) as u64)
     err_text((*d).err, (&nm[0]) as u64)
-    w_s(w, (&nm[0]) as u64)
-    w_s(w, (&k_rc[0]) as u64)
-    w_int(w, (*d).err)
-    w_nl(w)
+    iwl_w.w_s(w, (&nm[0]) as u64)
+    iwl_w.w_s(w, (&k_rc[0]) as u64)
+    iwl_w.w_int(w, (*d).err)
+    iwl_w.w_nl(w)
+    if (*d).tr_valid != 0 && iwl_sbrender.has_data((&(*d).tr[0]) as u64) {
+        iwl_sbrender.render(w, (&(*d).tr[0]) as u64)
+    }
     if (*d).snapped != 0 {
-        w_s(w, (&k_regs[0]) as u64)
-        w_s(w, (&r_n[0]) as u64)
-        w_hex(w, (*d).regs[0], 8)
-        w_s(w, (&r_i[0]) as u64)
-        w_hex(w, (*d).regs[1], 8)
-        w_s(w, (&r_m[0]) as u64)
-        w_hex(w, (*d).regs[2], 8)
-        w_s(w, (&r_f[0]) as u64)
-        w_hex(w, (*d).regs[3], 8)
-        w_s(w, (&r_r[0]) as u64)
-        w_hex(w, (*d).regs[4], 8)
-        w_s(w, (&r_g[0]) as u64)
-        w_hex(w, (*d).regs[5], 8)
-        w_s(w, (&r_v[0]) as u64)
-        w_hex(w, (*d).regs[6], 8)
-        w_s(w, (&r_p[0]) as u64)
-        w_hex(w, (*d).regs[7], 8)
-        w_nl(w)
+        iwl_w.w_s(w, (&k_regs[0]) as u64)
+        iwl_w.w_s(w, (&r_n[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs[0], 8)
+        iwl_w.w_s(w, (&r_i[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs[1], 8)
+        iwl_w.w_s(w, (&r_m[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs[2], 8)
+        iwl_w.w_s(w, (&r_f[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs[3], 8)
+        iwl_w.w_s(w, (&r_r[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs[4], 8)
+        iwl_w.w_s(w, (&r_g[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs[5], 8)
+        iwl_w.w_s(w, (&r_v[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs[6], 8)
+        iwl_w.w_s(w, (&r_p[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs[7], 8)
+        iwl_w.w_nl(w)
     }
     if (*d).fh_valid != 0 {
-        w_s(w, (&k_fh[0]) as u64)
-        w_s(w, (&f_s[0]) as u64)
-        w_dec(w, (*d).fh_sec)
-        w_s(w, (&f_c[0]) as u64)
-        w_dec(w, (*d).fh_chunks)
-        w_s(w, (&f_b[0]) as u64)
-        w_dec(w, (*d).fh_bytes)
-        w_s(w, (&f_d[0]) as u64)
-        w_hex(w, (*d).fh_dst, 8)
-        w_s(w, (&f_p[0]) as u64)
-        w_hex(w, (*d).fh_phys, 9)
-        w_s(w, (&f_n[0]) as u64)
-        w_hex(w, (*d).fh_cnt, 6)
-        w_nl(w)
+        iwl_w.w_s(w, (&k_fh[0]) as u64)
+        iwl_w.w_s(w, (&f_s[0]) as u64)
+        iwl_w.w_dec(w, (*d).fh_sec)
+        iwl_w.w_s(w, (&f_c[0]) as u64)
+        iwl_w.w_dec(w, (*d).fh_chunks)
+        iwl_w.w_s(w, (&f_b[0]) as u64)
+        iwl_w.w_dec(w, (*d).fh_bytes)
+        iwl_w.w_s(w, (&f_d[0]) as u64)
+        iwl_w.w_hex(w, (*d).fh_dst, 8)
+        iwl_w.w_s(w, (&f_p[0]) as u64)
+        iwl_w.w_hex(w, (*d).fh_phys, 9)
+        iwl_w.w_s(w, (&f_n[0]) as u64)
+        iwl_w.w_hex(w, (*d).fh_cnt, 6)
+        iwl_w.w_nl(w)
     }
     if (*d).pci_valid != 0 {
-        w_s(w, (&k_hw[0]) as u64)
-        w_s(w, (&h_c[0]) as u64)
-        w_hex(w, (*d).pci_cmd, 4)
-        w_s(w, (&h_b[0]) as u64)
-        w_hex(w, (*d).pci_bar, 9)
-        w_s(w, (&h_z[0]) as u64)
-        w_hex(w, (*d).pci_size, 8)
-        w_nl(w)
+        iwl_w.w_s(w, (&k_hw[0]) as u64)
+        iwl_w.w_s(w, (&h_c[0]) as u64)
+        iwl_w.w_hex(w, (*d).pci_cmd, 4)
+        iwl_w.w_s(w, (&h_b[0]) as u64)
+        iwl_w.w_hex(w, (*d).pci_bar, 9)
+        iwl_w.w_s(w, (&h_z[0]) as u64)
+        iwl_w.w_hex(w, (*d).pci_size, 8)
+        iwl_w.w_nl(w)
     }
     if (*d).snapped2 != 0 {
-        w_s(w, (&k_x[0]) as u64)
-        w_s(w, (&x_t[0]) as u64)
-        w_hex(w, (*d).regs2[0], 8)
-        w_s(w, (&x_c[0]) as u64)
-        w_hex(w, (*d).regs2[1], 8)
-        w_s(w, (&x_s[0]) as u64)
-        w_hex(w, (*d).regs2[2], 8)
-        w_s(w, (&x_a[0]) as u64)
-        w_hex(w, (*d).regs2[3], 8)
-        w_s(w, (&x_0[0]) as u64)
-        w_hex(w, (*d).regs2[4], 8)
-        w_s(w, (&x_1[0]) as u64)
-        w_hex(w, (*d).regs2[5], 8)
-        w_s(w, (&x_u[0]) as u64)
-        w_hex(w, (*d).regs2[6], 8)
-        w_s(w, (&x_g[0]) as u64)
-        w_hex(w, (*d).regs2[7], 8)
-        w_nl(w)
+        iwl_w.w_s(w, (&k_x[0]) as u64)
+        iwl_w.w_s(w, (&x_t[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs2[0], 8)
+        iwl_w.w_s(w, (&x_c[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs2[1], 8)
+        iwl_w.w_s(w, (&x_s[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs2[2], 8)
+        iwl_w.w_s(w, (&x_a[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs2[3], 8)
+        iwl_w.w_s(w, (&x_0[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs2[4], 8)
+        iwl_w.w_s(w, (&x_1[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs2[5], 8)
+        iwl_w.w_s(w, (&x_u[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs2[6], 8)
+        iwl_w.w_s(w, (&x_g[0]) as u64)
+        iwl_w.w_hex(w, (*d).regs2[7], 8)
+        iwl_w.w_nl(w)
     }
     if (*d).alive_valid != 0 {
-        w_s(w, (&k_al[0]) as u64)
-        w_s(w, (&a_i[0]) as u64)
-        w_hex(w, (*d).alive[0], 8)
-        w_s(w, (&a_f[0]) as u64)
-        w_hex(w, (*d).alive[1], 8)
-        w_s(w, (&a_g[0]) as u64)
-        w_hex(w, (*d).alive[2], 8)
-        w_s(w, (&a_h[0]) as u64)
-        w_hex(w, (*d).alive[3], 8)
-        w_s(w, (&a_c[0]) as u64)
-        w_hex(w, (*d).alive[4], 8)
-        w_s(w, (&a_d[0]) as u64)
-        w_hex(w, (*d).alive[5], 8)
-        w_s(w, (&a_w[0]) as u64)
-        w_hex(w, (*d).alive[6], 8)
-        w_s(w, (&a_s[0]) as u64)
-        w_hex(w, (*d).alive[7], 8)
-        w_nl(w)
-        w_s(w, (&k_al2[0]) as u64)
-        w_s(w, (&b_l[0]) as u64)
-        w_hex(w, (*d).alive[8], 8)
-        w_s(w, (&b_1[0]) as u64)
-        w_hex(w, (*d).alive[9], 8)
-        w_s(w, (&b_2[0]) as u64)
-        w_hex(w, (*d).alive[10], 8)
-        w_s(w, (&b_c[0]) as u64)
-        w_hex(w, (*d).alive[11], 8)
-        w_s(w, (&b_m[0]) as u64)
-        if (*d).alive[12] == 1 { w_s(w, (&b_i1[0]) as u64) } else if (*d).alive[12] == 2 { w_s(w, (&b_i2[0]) as u64) } else { w_s(w, (&b_i0[0]) as u64) }
-        w_s(w, (&b_n1[0]) as u64)
-        w_dec(w, (*d).alive[13])
-        w_s(w, (&b_n2[0]) as u64)
-        w_dec(w, (*d).alive[14])
-        w_nl(w)
+        iwl_w.w_s(w, (&k_al[0]) as u64)
+        iwl_w.w_s(w, (&a_i[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[0], 8)
+        iwl_w.w_s(w, (&a_f[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[1], 8)
+        iwl_w.w_s(w, (&a_g[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[2], 8)
+        iwl_w.w_s(w, (&a_h[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[3], 8)
+        iwl_w.w_s(w, (&a_c[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[4], 8)
+        iwl_w.w_s(w, (&a_d[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[5], 8)
+        iwl_w.w_s(w, (&a_w[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[6], 8)
+        iwl_w.w_s(w, (&a_s[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[7], 8)
+        iwl_w.w_nl(w)
+        iwl_w.w_s(w, (&k_al2[0]) as u64)
+        iwl_w.w_s(w, (&b_l[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[8], 8)
+        iwl_w.w_s(w, (&b_1[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[9], 8)
+        iwl_w.w_s(w, (&b_2[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[10], 8)
+        iwl_w.w_s(w, (&b_c[0]) as u64)
+        iwl_w.w_hex(w, (*d).alive[11], 8)
+        iwl_w.w_s(w, (&b_m[0]) as u64)
+        if (*d).alive[12] == 1 { iwl_w.w_s(w, (&b_i1[0]) as u64) } else if (*d).alive[12] == 2 { iwl_w.w_s(w, (&b_i2[0]) as u64) } else { iwl_w.w_s(w, (&b_i0[0]) as u64) }
+        iwl_w.w_s(w, (&b_n1[0]) as u64)
+        iwl_w.w_dec(w, (*d).alive[13])
+        iwl_w.w_s(w, (&b_n2[0]) as u64)
+        iwl_w.w_dec(w, (*d).alive[14])
+        iwl_w.w_nl(w)
     }
     if (*d).pm_valid != 0 {
-        w_s(w, (&k_pm[0]) as u64)
-        w_s(w, (&m_r[0]) as u64)
-        w_hex(w, (*d).pm[0], 2)
-        w_s(w, (&m_s[0]) as u64)
-        w_hex(w, (*d).pm[1], 8)
-        w_s(w, (&m_p[0]) as u64)
-        w_hex(w, (*d).pm[2], 4)
-        w_s(w, (&m_ar[0]) as u64)
-        w_hex(w, (*d).pm[3], 4)
-        w_s(w, (&m_l[0]) as u64)
-        w_hex(w, (*d).pm[4], 4)
-        w_s(w, (&m_ar[0]) as u64)
-        w_hex(w, (*d).pm[5], 4)
-        w_s(w, (&m_rp[0]) as u64)
-        w_hex(w, (*d).pm[6], 4)
-        w_s(w, (&m_rl[0]) as u64)
-        w_hex(w, (*d).pm[7], 4)
-        w_s(w, (&m_ar[0]) as u64)
-        w_hex(w, (*d).pm[8], 4)
-        w_s(w, (&m_g[0]) as u64)
-        w_hex(w, (*d).pm[9], 8)
-        w_s(w, (&m_h[0]) as u64)
-        w_hex(w, (*d).pm[10], 8)
-        w_s(w, (&m_1[0]) as u64)
-        w_hex(w, (*d).pm[11], 8)
-        w_s(w, (&m_2[0]) as u64)
-        w_hex(w, (*d).pm[12], 8)
-        w_s(w, (&m_v[0]) as u64)
-        w_hex(w, (*d).pm[13], 8)
-        w_nl(w)
+        iwl_w.w_s(w, (&k_pm[0]) as u64)
+        iwl_w.w_s(w, (&m_r[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[0], 2)
+        iwl_w.w_s(w, (&m_s[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[1], 8)
+        iwl_w.w_s(w, (&m_p[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[2], 4)
+        iwl_w.w_s(w, (&m_ar[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[3], 4)
+        iwl_w.w_s(w, (&m_l[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[4], 4)
+        iwl_w.w_s(w, (&m_ar[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[5], 4)
+        iwl_w.w_s(w, (&m_rp[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[6], 4)
+        iwl_w.w_s(w, (&m_rl[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[7], 4)
+        iwl_w.w_s(w, (&m_ar[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[8], 4)
+        iwl_w.w_s(w, (&m_g[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[9], 8)
+        iwl_w.w_s(w, (&m_h[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[10], 8)
+        iwl_w.w_s(w, (&m_1[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[11], 8)
+        iwl_w.w_s(w, (&m_2[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[12], 8)
+        iwl_w.w_s(w, (&m_v[0]) as u64)
+        iwl_w.w_hex(w, (*d).pm[13], 8)
+        iwl_w.w_nl(w)
     }
     if (*d).miss[0] != 0 as u8 {
-        w_s(w, (&k_fw[0]) as u64)
-        w_s(w, (&k_nf[0]) as u64)
-        w_s(w, (&(*d).miss[0]) as u64)
-        w_nl(w)
+        iwl_w.w_s(w, (&k_fw[0]) as u64)
+        iwl_w.w_s(w, (&k_nf[0]) as u64)
+        iwl_w.w_s(w, (&(*d).miss[0]) as u64)
+        iwl_w.w_nl(w)
     }
 }
 
@@ -710,92 +663,92 @@ fn diag_render(d: *mut Diag, a: u64, cap: u64) -> u64 {
     var k_t: [u8; 4] = "t_\0\0"
     var k_ms: [u8; 4] = "ms\0\0"
     var nm: [u8; 48] = [0 as u8; 48]
-    var w: W = W { a: a, cap: cap, n: 0 }
-    w_s(&w, (&k_phase[0]) as u64)
+    var w: iwl_w.W = iwl_w.W { a: a, cap: cap, n: 0 }
+    iwl_w.w_s(&w, (&k_phase[0]) as u64)
     phase_name((*d).phase, (&nm[0]) as u64)
-    w_s(&w, (&nm[0]) as u64)
-    w_nl(&w)
+    iwl_w.w_s(&w, (&nm[0]) as u64)
+    iwl_w.w_nl(&w)
     if (*d).phase == PH_FAILED {
-        w_s(&w, (&k_fail[0]) as u64)
+        iwl_w.w_s(&w, (&k_fail[0]) as u64)
         phase_name((*d).failed_at, (&nm[0]) as u64)
-        w_s(&w, (&nm[0]) as u64)
-        w_nl(&w)
+        iwl_w.w_s(&w, (&nm[0]) as u64)
+        iwl_w.w_nl(&w)
         render_fail(&w, d)
     }
-    w_s(&w, (&k_armed[0]) as u64)
+    iwl_w.w_s(&w, (&k_armed[0]) as u64)
     yes_no(&w, (*d).armed)
-    w_nl(&w)
-    w_s(&w, (&k_alive[0]) as u64)
+    iwl_w.w_nl(&w)
+    iwl_w.w_s(&w, (&k_alive[0]) as u64)
     yes_no(&w, (*d).init_alive | (*d).rt_alive)
-    w_s(&w, (&k_ia[0]) as u64)
+    iwl_w.w_s(&w, (&k_ia[0]) as u64)
     yes_no(&w, (*d).init_alive)
-    w_s(&w, (&k_ra[0]) as u64)
+    iwl_w.w_s(&w, (&k_ra[0]) as u64)
     yes_no(&w, (*d).rt_alive)
-    w_nl(&w)
-    w_s(&w, (&k_err[0]) as u64)
-    w_int(&w, (*d).err)
-    w_nl(&w)
-    w_s(&w, (&k_et[0]) as u64)
+    iwl_w.w_nl(&w)
+    iwl_w.w_s(&w, (&k_err[0]) as u64)
+    iwl_w.w_int(&w, (*d).err)
+    iwl_w.w_nl(&w)
+    iwl_w.w_s(&w, (&k_et[0]) as u64)
     err_text((*d).err, (&nm[0]) as u64)
-    w_s(&w, (&nm[0]) as u64)
-    w_nl(&w)
-    w_s(&w, (&k_hw[0]) as u64)
-    w_hex(&w, (*d).hw_rev, 8)
-    w_s(&w, (&k_rf[0]) as u64)
-    w_hex(&w, (*d).rf_id, 8)
-    w_nl(&w)
-    w_s(&w, (&k_fn[0]) as u64)
-    w_s(&w, (&(*d).fw_name[0]) as u64)
-    w_s(&w, (&k_fv[0]) as u64)
-    w_dec(&w, (*d).fw_ver)
-    w_s(&w, (&k_fz[0]) as u64)
-    w_dec(&w, (*d).fw_size)
-    w_nl(&w)
-    w_s(&w, (&k_fs[0]) as u64)
+    iwl_w.w_s(&w, (&nm[0]) as u64)
+    iwl_w.w_nl(&w)
+    iwl_w.w_s(&w, (&k_hw[0]) as u64)
+    iwl_w.w_hex(&w, (*d).hw_rev, 8)
+    iwl_w.w_s(&w, (&k_rf[0]) as u64)
+    iwl_w.w_hex(&w, (*d).rf_id, 8)
+    iwl_w.w_nl(&w)
+    iwl_w.w_s(&w, (&k_fn[0]) as u64)
+    iwl_w.w_s(&w, (&(*d).fw_name[0]) as u64)
+    iwl_w.w_s(&w, (&k_fv[0]) as u64)
+    iwl_w.w_dec(&w, (*d).fw_ver)
+    iwl_w.w_s(&w, (&k_fz[0]) as u64)
+    iwl_w.w_dec(&w, (*d).fw_size)
+    iwl_w.w_nl(&w)
+    iwl_w.w_s(&w, (&k_fs[0]) as u64)
     var i: u64 = 0
     while i < 32 {
-        w_hex(&w, (*d).fw_sha[i as usize] as u64, 2)
+        iwl_w.w_hex(&w, (*d).fw_sha[i as usize] as u64, 2)
         i = i + 1
     }
-    w_nl(&w)
-    w_s(&w, (&k_nvm[0]) as u64)
+    iwl_w.w_nl(&w)
+    iwl_w.w_s(&w, (&k_nvm[0]) as u64)
     nvm_name(&w, (*d).nvm_state)
-    w_s(&w, (&k_nb[0]) as u64)
-    w_dec(&w, (*d).nvm_bytes)
-    w_s(&w, (&k_ns[0]) as u64)
-    w_dec(&w, (*d).nvm_secs)
-    w_nl(&w)
-    w_s(&w, (&k_cal[0]) as u64)
-    w_dec(&w, (*d).calib_n)
-    w_s(&w, (&k_cb[0]) as u64)
-    w_dec(&w, (*d).calib_bytes)
-    w_s(&w, (&k_cr[0]) as u64)
-    w_dec(&w, (*d).replayed)
-    w_nl(&w)
-    w_s(&w, (&k_rx[0]) as u64)
-    w_dec(&w, (*d).rx_head)
-    w_s(&w, (&k_tx[0]) as u64)
-    w_dec(&w, (*d).tx_head)
-    w_nl(&w)
-    w_s(&w, (&k_lc[0]) as u64)
-    w_hex(&w, (*d).last_cmd, 2)
-    w_s(&w, (&k_ln[0]) as u64)
-    w_hex(&w, (*d).last_notif, 2)
-    w_s(&w, (&k_cn[0]) as u64)
-    w_dec(&w, (*d).cmds)
-    w_s(&w, (&k_nn[0]) as u64)
-    w_dec(&w, (*d).notifs)
-    w_nl(&w)
+    iwl_w.w_s(&w, (&k_nb[0]) as u64)
+    iwl_w.w_dec(&w, (*d).nvm_bytes)
+    iwl_w.w_s(&w, (&k_ns[0]) as u64)
+    iwl_w.w_dec(&w, (*d).nvm_secs)
+    iwl_w.w_nl(&w)
+    iwl_w.w_s(&w, (&k_cal[0]) as u64)
+    iwl_w.w_dec(&w, (*d).calib_n)
+    iwl_w.w_s(&w, (&k_cb[0]) as u64)
+    iwl_w.w_dec(&w, (*d).calib_bytes)
+    iwl_w.w_s(&w, (&k_cr[0]) as u64)
+    iwl_w.w_dec(&w, (*d).replayed)
+    iwl_w.w_nl(&w)
+    iwl_w.w_s(&w, (&k_rx[0]) as u64)
+    iwl_w.w_dec(&w, (*d).rx_head)
+    iwl_w.w_s(&w, (&k_tx[0]) as u64)
+    iwl_w.w_dec(&w, (*d).tx_head)
+    iwl_w.w_nl(&w)
+    iwl_w.w_s(&w, (&k_lc[0]) as u64)
+    iwl_w.w_hex(&w, (*d).last_cmd, 2)
+    iwl_w.w_s(&w, (&k_ln[0]) as u64)
+    iwl_w.w_hex(&w, (*d).last_notif, 2)
+    iwl_w.w_s(&w, (&k_cn[0]) as u64)
+    iwl_w.w_dec(&w, (*d).cmds)
+    iwl_w.w_s(&w, (&k_nn[0]) as u64)
+    iwl_w.w_dec(&w, (*d).notifs)
+    iwl_w.w_nl(&w)
     var ph: u64 = 0
     while ph < 10 {
         if ((*d).seen >> ph) & 1 != 0 {
-            w_s(&w, (&k_t[0]) as u64)
+            iwl_w.w_s(&w, (&k_t[0]) as u64)
             phase_name(ph, (&nm[0]) as u64)
-            w_s(&w, (&nm[0]) as u64)
-            w_ch(&w, 61)
-            w_dec(&w, (*d).t[ph as usize])
-            w_s(&w, (&k_ms[0]) as u64)
-            w_nl(&w)
+            iwl_w.w_s(&w, (&nm[0]) as u64)
+            iwl_w.w_ch(&w, 61)
+            iwl_w.w_dec(&w, (*d).t[ph as usize])
+            iwl_w.w_s(&w, (&k_ms[0]) as u64)
+            iwl_w.w_nl(&w)
         }
         ph = ph + 1
     }
