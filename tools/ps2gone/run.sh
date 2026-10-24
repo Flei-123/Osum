@@ -16,13 +16,13 @@ run() {
 }
 g() { grep -ac "$2" "$D/$1.txt"; }
 echo "== 1. ps2gone: init stops at once"
-W="gfx fbres=640x480 osum wm desk wmhold wighalt=420 nokbd nosched noproc"
+W="modul nokbd noring3 nofs"
 run gone "ps2gone $W" > /dev/null
-eq "no-controller line printed once" 1 "$(g gone 'ps2m: no i8042')"
+eq "both module inits stop with the no-controller line (vor + nach)" 2 "$(g gone 'ps2m: no i8042')"
 eq "no kernel exception" 0 "$(g gone EXCEPTION)"
 echo "== 2. counter-proof: without the word the mouse starts"
 run base "$W" > /dev/null
-eq "boot reached the window manager" 1 "$( [ "$(g base 'wm:')" -gt 0 ] && echo 1 || echo 0)"
+eq "module init ran and reported" 2 "$(g base '^modul: [a-z]* init=')"
 eq "no no-controller line" 0 "$(g base 'ps2m: no i8042')"
 echo; echo "ps2gone: $OK ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]
