@@ -1,0 +1,236 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_le
+import wlan.iwl_buf
+import wlan.iwl_mvm
+import wlan.iwl_diag
+import wlan.iwl_phydb
+
+export {
+    Xport, Boot, boot_new, xport_none, init_stage, rt_stage,
+    E_NO_CMDQ, E_SEND, E_TIMEOUT, E_NVM_STATUS, E_NVM_OFFSET, E_NVM_FULL, E_RX, E_NVM_SHORT, E_CMD_BIG
+}
+
+const E_NO_CMDQ: i64 = -60
+const E_SEND: i64 = -61
+const E_TIMEOUT: i64 = -62
+const E_NVM_STATUS: i64 = -63
+const E_NVM_OFFSET: i64 = -64
+const E_NVM_FULL: i64 = -65
+const E_RX: i64 = -68
+const E_NVM_SHORT: i64 = -69
+const E_CMD_BIG: i64 = -70
+
+const HDR: u64 = 4
+const NVM_CHUNK: u64 = 2048
+const NVM_SECS: u64 = 6
+
+struct Xport {
+    present: u64,
+    ctx: u64,
+    send: fn(u64, u64, u64) -> i64,
+    recv: fn(u64, u64, u64) -> i64,
+    now: fn(u64) -> u64
+}
+
+struct Boot {
+    x: Xport,
+    cmd: u64,
+    cmd_cap: u64,
+    rx: u64,
+    rx_cap: u64,
+    polls: u64,
+    nvm: u64,
+    nvm_cap: u64,
+    nvm_len: u64,
+    qid: u64,
+    seq: u64,
+    tx_ant: u64,
+    phy_cfg: u64,
+    ev_trig: u64,
+    fl_trig: u64,
+    rt_ev_trig: u64,
+    rt_fl_trig: u64,
+    require: u64,
+    db: iwl_phydb.PhyDb
+}
+
+fn x_send(ctx: u64, a: u64, n: u64) -> i64 { return E_NO_CMDQ }
+fn x_recv(ctx: u64, a: u64, n: u64) -> i64 { return E_NO_CMDQ }
+fn x_now(ctx: u64) -> u64 { return 0 }
+
+fn xport_none() -> Xport {
+    var x: Xport = Xport { present: 0, ctx: 0, send: x_send, recv: x_recv, now: x_now }
+    return x
+}
+
+fn boot_new(cmd: u64, cmd_cap: u64, rx: u64, rx_cap: u64, nvm: u64, nvm_cap: u64, pool: u64, pool_cap: u64) -> Boot {
+    var b: Boot = Boot {
+        x: xport_none(), cmd: cmd, cmd_cap: cmd_cap, rx: rx, rx_cap: rx_cap, polls: 64, nvm: nvm, nvm_cap: nvm_cap, nvm_len: 0,
+        qid: 0, seq: 0, tx_ant: 3, phy_cfg: 0, ev_trig: 0, fl_trig: 0, rt_ev_trig: 0, rt_fl_trig: 0, require: 0,
+        db: iwl_phydb.phydb_new(pool, pool_cap)
+    }
+    return b
+}
+
+fn send_cmd(b: *mut Boot, d: *mut iwl_diag.Diag, len: u64) -> i64 {
+    iwl_diag.diag_cmd(d, iwl_le.ld8((*b).cmd, 0))
+    (*b).seq = (*b).seq + 1
+    let x: Xport = (*b).x
+    let r: i64 = x.send(x.ctx, (*b).cmd, len)
+    if r != 0 { return E_SEND }
+    return 0
+}
+
+fn wait_for(b: *mut Boot, d: *mut iwl_diag.Diag, want: u64) -> i64 {
+    var i: u64 = 0
+    while i < (*b).polls {
+        let x: Xport = (*b).x
+        let r: i64 = x.recv(x.ctx, (*b).rx, (*b).rx_cap)
+        if r < 0 { return E_RX }
+        if r > 0 {
+            if (r as u64) < HDR { return iwl_mvm.E_MVM_SHORT }
+            let id: u64 = iwl_mvm.mvm_rx_cmd((*b).rx)
+            iwl_diag.diag_notif(d, id)
+            if id == iwl_phydb.CMD_CALIB_RES {
+                let rc: i64 = iwl_phydb.phydb_add(&(*b).db, (*b).rx + HDR, (r as u64) - HDR)
+                if rc != 0 { return rc }
+            } else if id == want {
+                return r
+            }
+        }
+        i = i + 1
+    }
+    return E_TIMEOUT
+}
+
+fn read_section(b: *mut Boot, d: *mut iwl_diag.Diag, sec: u64, got: *mut u64) -> i64 {
+    var off: u64 = 0
+    var done: bool = false
+    *got = 0
+    while !done {
+        let n: u64 = iwl_mvm.mvm_nvm_read((*b).cmd, (*b).qid, (*b).seq & 0xFF, sec, off, NVM_CHUNK)
+        var rc: i64 = send_cmd(b, d, n)
+        if rc != 0 { return rc }
+        let r: i64 = wait_for(b, d, iwl_mvm.CMD_NVM_ACCESS)
+        if r < 0 { return r }
+        let st: i64 = iwl_mvm.mvm_nvm_resp_status((*b).rx, r as u64)
+        if st < 0 { return E_NVM_SHORT }
+        if st != 0 {
+            if off == 0 && sec == 1 { return E_NVM_STATUS }
+            done = true
+        } else {
+            let roff: u64 = iwl_le.ld16((*b).rx, HDR)
+            let rlen: u64 = iwl_le.ld16((*b).rx, HDR + 2)
+            if roff != off { return E_NVM_OFFSET }
+            if HDR + 8 + rlen > (r as u64) { return E_NVM_SHORT }
+            if (*b).nvm_len + rlen > (*b).nvm_cap { return E_NVM_FULL }
+            iwl_le.copy((*b).nvm + (*b).nvm_len, (*b).rx + HDR + 8, rlen)
+            (*b).nvm_len = (*b).nvm_len + rlen
+            off = off + rlen
+            if rlen < NVM_CHUNK { done = true }
+        }
+    }
+    *got = off
+    return 0
+}
+
+fn nvm_all(b: *mut Boot, d: *mut iwl_diag.Diag) -> i64 {
+    var secs: [u64; 6] = [1, 3, 4, 5, 11, 12]
+    var k: u64 = 0
+    var n_secs: u64 = 0
+    while k < NVM_SECS {
+        var got: u64 = 0
+        let rc: i64 = read_section(b, d, secs[k as usize], &got)
+        if rc != 0 { return rc }
+        if got != 0 { n_secs = n_secs + 1 }
+        k = k + 1
+    }
+    iwl_diag.diag_nvm(d, iwl_diag.NVM_OK, (*b).nvm_len, n_secs)
+    return 0
+}
+
+fn cfg_cmds(b: *mut Boot, d: *mut iwl_diag.Diag, ev: u64, fl: u64) -> i64 {
+    var n: u64 = iwl_mvm.mvm_tx_ant((*b).cmd, (*b).qid, (*b).seq & 0xFF, (*b).tx_ant)
+    var rc: i64 = send_cmd(b, d, n)
+    if rc != 0 { return rc }
+    n = iwl_mvm.mvm_phy_cfg((*b).cmd, (*b).qid, (*b).seq & 0xFF, (*b).phy_cfg, ev, fl)
+    return send_cmd(b, d, n)
+}
+
+fn stage_now(b: *mut Boot) -> u64 {
+    let x: Xport = (*b).x
+    return x.now(x.ctx)
+}
+
+fn init_stage(b: *mut Boot, d: *mut iwl_diag.Diag) -> i64 {
+    if x_absent(b) {
+        if (*b).require == 0 {
+            iwl_diag.diag_nvm(d, iwl_diag.NVM_SKIPPED, 0, 0)
+            return 0
+        }
+        iwl_diag.diag_phase(d, iwl_diag.PH_NVM, stage_now(b))
+        iwl_diag.diag_nvm(d, iwl_diag.NVM_FAILED, 0, 0)
+        iwl_diag.diag_fail(d, E_NO_CMDQ, stage_now(b))
+        return E_NO_CMDQ
+    }
+    iwl_diag.diag_phase(d, iwl_diag.PH_NVM, stage_now(b))
+    var rc: i64 = nvm_all(b, d)
+    if rc != 0 {
+        iwl_diag.diag_nvm(d, iwl_diag.NVM_FAILED, (*b).nvm_len, 0)
+        iwl_diag.diag_fail(d, rc, stage_now(b))
+        return rc
+    }
+    iwl_diag.diag_phase(d, iwl_diag.PH_INIT_COMPLETE, stage_now(b))
+    rc = cfg_cmds(b, d, (*b).ev_trig, (*b).fl_trig)
+    if rc == 0 {
+        let r: i64 = wait_for(b, d, iwl_mvm.CMD_INIT_COMPLETE)
+        if r < 0 { rc = r }
+    }
+    iwl_diag.diag_calib(d, iwl_phydb.phydb_count(&(*b).db), iwl_phydb.phydb_bytes(&(*b).db), 0)
+    if rc != 0 {
+        iwl_diag.diag_fail(d, rc, stage_now(b))
+        return rc
+    }
+    return 0
+}
+
+fn replay_one(b: *mut Boot, d: *mut iwl_diag.Diag, i: u64) -> i64 {
+    let len: u64 = iwl_phydb.phydb_len(&(*b).db, i)
+    if HDR + 4 + len > (*b).cmd_cap { return E_CMD_BIG }
+    iwl_le.zero((*b).cmd, HDR + 4 + len)
+    iwl_buf.hdr((*b).cmd, iwl_phydb.CMD_PHY_DB, (*b).qid, (*b).seq & 0xFF)
+    iwl_le.st16((*b).cmd, HDR, iwl_phydb.phydb_type(&(*b).db, i))
+    iwl_le.st16((*b).cmd, HDR + 2, len)
+    iwl_le.copy((*b).cmd + HDR + 4, iwl_phydb.phydb_data(&(*b).db, i), len)
+    return send_cmd(b, d, HDR + 4 + len)
+}
+
+fn rt_stage(b: *mut Boot, d: *mut iwl_diag.Diag) -> i64 {
+    if x_absent(b) {
+        if (*b).require != 0 {
+            iwl_diag.diag_fail(d, E_NO_CMDQ, stage_now(b))
+            return E_NO_CMDQ
+        }
+        return 0
+    }
+    let total: u64 = iwl_phydb.phydb_count(&(*b).db)
+    var k: u64 = 0
+    var rc: i64 = 0
+    while k < total && rc == 0 {
+        rc = replay_one(b, d, iwl_phydb.phydb_order(&(*b).db, k))
+        if rc == 0 { k = k + 1 }
+    }
+    iwl_diag.diag_calib(d, total, iwl_phydb.phydb_bytes(&(*b).db), k)
+    if rc == 0 { rc = cfg_cmds(b, d, (*b).rt_ev_trig, (*b).rt_fl_trig) }
+    if rc != 0 {
+        iwl_diag.diag_fail(d, rc, stage_now(b))
+        return rc
+    }
+    iwl_diag.diag_phase(d, iwl_diag.PH_READY, stage_now(b))
+    return 0
+}
+
+fn x_absent(b: *mut Boot) -> bool {
+    let x: Xport = (*b).x
+    return x.present == 0
+}
