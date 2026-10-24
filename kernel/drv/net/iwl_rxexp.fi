@@ -6,6 +6,7 @@ import wlan.iwl_probe
 import wlan.iwl_pwr
 import wlan.iwl_g1
 import wlan.iwl_cmdq
+import wlan.iwl_mvm_txq
 import wlan.iwl_rxscan
 import wlan.iwl_sbtrace
 import wlan.iwl_rxexp_tab
@@ -25,6 +26,11 @@ const CSR_DRAM_INT_TBL: u64 = 0x0A0
 const MASK_ALL: u64 = 0xFFFFFFFF
 const COALESCING_OFF: u64 = 0
 const NO_ACCESS: u64 = 0xEEEEEEEE
+const CSR_MAC_SHADOW_REG_CTRL: u64 = 0x0A8
+const SHADOW_ENABLE: u64 = 0x800FFFFF
+const CSR_UCODE_DRV_GP1_CLR: u64 = 0x05C
+const GP1_CMD_BLOCKED: u64 = 0x4
+const UDELAY2_READS: u64 = 4
 
 struct Ctx {
     p: *mut iwl_probe.Probe,
@@ -89,7 +95,39 @@ fn x_apm(c: *mut Ctx) {
     let _r: i64 = iwl_pwr.apm_init((*c).p)
 }
 
+fn x_shad(c: *mut Ctx) {
+    iwl_pwr.set_bits((*c).p, CSR_MAC_SHADOW_REG_CTRL, SHADOW_ENABLE)
+}
+
+fn x_gp1(c: *mut Ctx) {
+    iwl_pwr.wr((*c).p, CSR_UCODE_DRV_GP1_CLR, GP1_CMD_BLOCKED)
+    x_nic(c)
+}
+
+fn x_tx(c: *mut Ctx) {
+    var g: iwl_g1.Prog = iwl_g1.prog_new()
+    let q: *mut iwl_cmdq.Cq = (*c).cq
+    let _a: bool = iwl_g1.prog_tx_linux(&g, (*q).kw, (*q).tfd)
+    if (*q).dtfd != 0 {
+        let _b: bool = iwl_g1.prog_tx_init(&g, (*q).kw, (*q).tfd, iwl_cmdq.CMD_QUEUE, (*q).dtfd, iwl_mvm_txq.DATA_QUEUE)
+    } else {
+        let _b: bool = iwl_g1.prog_tx_cmd_init(&g, (*q).kw, (*q).tfd, iwl_cmdq.CMD_QUEUE)
+    }
+    apply_prog(c, &g)
+}
+
+fn x_dly(c: *mut Ctx) {
+    let p: *mut iwl_probe.Probe = (*c).p
+    if iwl_pwr.mac_access_get(p) == 0 { iwl_pwr.settle(p, UDELAY2_READS) }
+    iwl_pwr.mac_access_put(p)
+    let _r: i64 = iwl_pwr.apm_init_x(p, UDELAY2_READS)
+}
+
 fn act(c: *mut Ctx, id: u64) {
+    if id == iwl_rxexp_tab.X_SHAD { x_shad(c) }
+    if id == iwl_rxexp_tab.X_GP1 { x_gp1(c) }
+    if id == iwl_rxexp_tab.X_TX { x_tx(c) }
+    if id == iwl_rxexp_tab.X_DLY { x_dly(c) }
     if id == iwl_rxexp_tab.X_MASK { x_mask(c) }
     if id == iwl_rxexp_tab.X_INTX_ON { x_intx(c, true) }
     if id == iwl_rxexp_tab.X_INTX_OFF { x_intx(c, false) }
@@ -154,5 +192,13 @@ fn run(p: *mut iwl_probe.Probe, tr: *mut iwl_sbtrace.SbTrace, cq: *mut iwl_cmdq.
     if a != ALIVE_NONE { return a }
     a = step(&c, iwl_rxexp_tab.X_NIC)
     if a != ALIVE_NONE { return a }
-    return step(&c, iwl_rxexp_tab.X_APM)
+    a = step(&c, iwl_rxexp_tab.X_APM)
+    if a != ALIVE_NONE { return a }
+    a = step(&c, iwl_rxexp_tab.X_SHAD)
+    if a != ALIVE_NONE { return a }
+    a = step(&c, iwl_rxexp_tab.X_GP1)
+    if a != ALIVE_NONE { return a }
+    a = step(&c, iwl_rxexp_tab.X_TX)
+    if a != ALIVE_NONE { return a }
+    return step(&c, iwl_rxexp_tab.X_DLY)
 }
