@@ -58,7 +58,7 @@ import drv.hid.ptrcfg
 
 export {
     e2e_selftest, init, present, irq, id, x, y, buttons, wheel, hwheel, hwheel_add, packets, drops, moves,
-    irqs, polls, spurious, clicks, status, reset_counters, poll_one,
+    irqs, polls, spurious, clicks, status, reset_counters, poll_one, gone,
     set_poll, polling,
     set_bounds, set_pos, changed, take_change, usb_packet, adopt,
     set_heads, set_head, heads, head_clamp, head_x, head_y, head_w, head_h,
@@ -193,8 +193,29 @@ fn init(state: u64, w: u64, h: u64) -> bool {
     return r
 }
 
+static mut c_gone: u64 = 0
+
+fn gone() -> bool {
+    return c_gone == 1
+}
+
+fn controller_missing(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_PS2GONE) {
+        return true
+    }
+    return (serial.in8(CMD) as u64) == 0xFF && (serial.in8(CMD) as u64) == 0xFF
+}
+
 fn init_inner(state: u64, w: u64, h: u64) -> bool {
     s(state, S_READY, 0)
+    c_gone = 0
+    if controller_missing(state) {
+        c_gone = 1
+        var s_g: [u8; 29] = "ps2m: no i8042 (status 0xFF)\0"
+        serial.puts((&s_g[0]) as u64)
+        serial.nl()
+        return false
+    }
     s(state, S_ID, 0)
     s(state, S_PHASE, 0)
     s(state, S_BTN, 0)
@@ -488,6 +509,9 @@ fn delta(v: u64, negativ: bool) -> i64 {
 // Gespenst als Paketanfang in die Zustandsmaschine. Gemessen: 18
 // verworfene Oktette bei siebzehn Paketen, und nach der Pruefung keines.
 fn irq(state: u64) {
+    if c_gone == 1 {
+        return
+    }
     s(state, S_IRQS, g(state, S_IRQS) + 1)
     if (serial.in8(CMD) as u64 & 0x21) != 0x21 {
         s(state, S_SPURIOUS, g(state, S_SPURIOUS) + 1)
@@ -721,6 +745,9 @@ fn polling(state: u64) -> bool {
 // Klammer 18 verworfene Oktette in einem Lauf mit siebzehn Paketen, mit
 // ihr keines.
 fn poll_one(state: u64) -> bool {
+    if c_gone == 1 {
+        return false
+    }
     let flags: u64 = asm("pushfq\npop rax\ncli", out("rax"))
     var gab: bool = false
     if (serial.in8(CMD) as u64 & 0x21) == 0x21 {

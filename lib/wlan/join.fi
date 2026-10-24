@@ -1,0 +1,299 @@
+import wlan.device
+import wlan.frame
+import wlan.beacon
+import wlan.connect
+import wlan.mgmt
+import wlan.iwl_le
+import wlan.iwl_ops
+
+export {
+    Join, join_new, join_idle_set, join_ssid_set, join_pmk_set, join_snonce_set,
+    join_scan, join_connect, join_run, join_detail, join_net_bssid, join_last_status,
+    J_OK, J_SETUP, J_SCAN, J_NO_NET, J_CHOOSE, J_PEER, J_AUTH_TIMEOUT, J_ASSOC_TIMEOUT,
+    J_M1_TIMEOUT, J_M3_TIMEOUT, J_BUILD, J_SEND, J_REJECTED, J_AUTH_DENIED, J_ASSOC_DENIED,
+    J_KEYS
+}
+
+const J_OK: i64 = 0
+const J_SETUP: i64 = -100
+const J_SCAN: i64 = -101
+const J_NO_NET: i64 = -102
+const J_CHOOSE: i64 = -103
+const J_PEER: i64 = -104
+const J_AUTH_TIMEOUT: i64 = -105
+const J_ASSOC_TIMEOUT: i64 = -106
+const J_M1_TIMEOUT: i64 = -107
+const J_M3_TIMEOUT: i64 = -108
+const J_BUILD: i64 = -109
+const J_SEND: i64 = -110
+const J_REJECTED: i64 = -111
+const J_AUTH_DENIED: i64 = -112
+const J_ASSOC_DENIED: i64 = -113
+const J_KEYS: i64 = -114
+
+const AKM_PSK: u64 = 2
+const MAX_WAIT: u64 = 400
+const SCAN_WAIT: u64 = 2000
+const RX_ROOM: usize = 2400
+const MAX_SSID: usize = 32
+
+const KIND_AUTH: u64 = 0
+const KIND_ASSOC: u64 = 1
+const KIND_EAPOL: u64 = 2
+
+fn noop_idle(ctx: u64) -> u64 { return 0 }
+
+struct Join {
+    idle: fn(u64) -> u64,
+    idle_ctx: u64,
+    ssid: [u8; 32],
+    ssid_len: usize,
+    pmk: [u8; 32],
+    snonce: [u8; 32],
+    bssids: [u8; 48],
+    setup_done: bool,
+    detail: u64,
+    last_status: i64,
+    rx: [u8; 2400],
+    tx: [u8; 2400],
+    key: [u8; 256]
+}
+
+fn join_new() -> Join {
+    var j: Join = Join {
+        idle: noop_idle, idle_ctx: 0,
+        ssid: [0; 32], ssid_len: 0, pmk: [0; 32], snonce: [0; 32],
+        bssids: [0; 48], setup_done: false, detail: 0, last_status: 0,
+        rx: [0; 2400], tx: [0; 2400], key: [0; 256]
+    }
+    return j
+}
+
+fn join_idle_set(j: *mut Join, ctx: u64, f: fn(u64) -> u64) {
+    (*j).idle = f
+    (*j).idle_ctx = ctx
+}
+
+fn join_ssid_set(j: *mut Join, ssid: u64, len: usize) -> bool {
+    if len == 0 || len > MAX_SSID { return false }
+    var i: usize = 0
+    while i < len {
+        (*j).ssid[i] = *((ssid + i as u64) as *mut u8)
+        i = i + 1
+    }
+    (*j).ssid_len = len
+    return true
+}
+
+fn join_pmk_set(j: *mut Join, pmk: u64) {
+    var i: usize = 0
+    while i < 32 {
+        (*j).pmk[i] = *((pmk + i as u64) as *mut u8)
+        i = i + 1
+    }
+}
+
+fn join_snonce_set(j: *mut Join, snonce: u64) {
+    var i: usize = 0
+    while i < 32 {
+        (*j).snonce[i] = *((snonce + i as u64) as *mut u8)
+        i = i + 1
+    }
+}
+
+fn join_detail(j: *mut Join) -> u64 { return (*j).detail }
+fn join_last_status(j: *mut Join) -> i64 { return (*j).last_status }
+
+fn join_net_bssid(j: *mut Join, k: usize) -> u64 {
+    return (&(*j).bssids[k * 6]) as u64
+}
+
+fn rx_addr(j: *mut Join) -> u64 { return (&(*j).rx[0]) as u64 }
+fn tx_addr(j: *mut Join) -> u64 { return (&(*j).tx[0]) as u64 }
+
+fn ssid_equals(s: *mut connect.Session, k: usize, ssid: u64, len: usize) -> bool {
+    if connect.net_ssid_len(s, k) != len { return false }
+    var tmp: [u8; 32] = [0; 32]
+    if !connect.net_ssid_get(s, k, (&tmp[0]) as u64) { return false }
+    var i: usize = 0
+    while i < len {
+        if tmp[i] != *((ssid + i as u64) as *mut u8) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn index_of_beacon(j: *mut Join, s: *mut connect.Session, n: *mut beacon.Network) -> i64 {
+    var k: usize = 0
+    var found: i64 = -1
+    while k < connect.net_count(s) {
+        if ssid_equals(s, k, (&(*n).ssid[0]) as u64, (*n).ssid_len) { found = k as i64 }
+        k = k + 1
+    }
+    return found
+}
+
+fn take_beacon(j: *mut Join, s: *mut connect.Session, p: u64, n: usize, rssi: i64) {
+    var nw: beacon.Network = beacon.network_new()
+    if !beacon.zerlege(&nw, p, n) { return }
+    if !connect.beacon_aufnehmen(s, p, n, rssi) { return }
+    let k: i64 = index_of_beacon(j, s, &nw)
+    if k < 0 { return }
+    var i: usize = 0
+    while i < 6 {
+        (*j).bssids[(k as usize) * 6 + i] = nw.bssid[i]
+        i = i + 1
+    }
+}
+
+fn join_scan(j: *mut Join, s: *mut connect.Session, g: *mut device.Device, o: *mut iwl_ops.Mvm) -> i64 {
+    if !(*j).setup_done {
+        if iwl_ops.ops_setup(o) < 0 { return J_SETUP }
+        (*j).setup_done = true
+    }
+    if !connect.suchlauf_beginnen(s, g) { return J_SCAN }
+    var hint: u64 = 0
+    if (*j).ssid_len != 0 { hint = (&(*j).ssid[0]) as u64 }
+    if iwl_ops.ops_scan_start(o, hint, (*j).ssid_len as u64) < 0 { return J_SCAN }
+    var tries: u64 = 0
+    while tries < SCAN_WAIT {
+        let n: i64 = device.receive(g, rx_addr(j), RX_ROOM)
+        if n > 0 {
+            take_beacon(j, s, rx_addr(j), n as usize, iwl_ops.ops_rssi(o))
+        } else {
+            let st: u64 = iwl_ops.ops_scan_state(o)
+            if st == iwl_ops.SCAN_DONE { return 0 }
+            if st == iwl_ops.SCAN_ABORTED { return J_SCAN }
+            let f: fn(u64) -> u64 = (*j).idle
+            f((*j).idle_ctx)
+            tries = tries + 1
+        }
+    }
+    return J_SCAN
+}
+
+fn matches_kind(j: *mut Join, kind: u64, n: usize, bssid: u64) -> bool {
+    let p: u64 = rx_addr(j)
+    if kind == KIND_AUTH {
+        let st: i64 = mgmt.auth_status(p, n, bssid)
+        if st < 0 { return false }
+        (*j).last_status = st
+        return true
+    }
+    if kind == KIND_ASSOC {
+        let st: i64 = mgmt.assoc_status(p, n, bssid)
+        if st < 0 { return false }
+        (*j).last_status = st
+        return true
+    }
+    return mgmt.eapol_offset(p, n) >= 0
+}
+
+fn wait_frame(j: *mut Join, g: *mut device.Device, kind: u64, bssid: u64) -> i64 {
+    var tries: u64 = 0
+    while tries < MAX_WAIT {
+        let n: i64 = device.receive(g, rx_addr(j), RX_ROOM)
+        if n > 0 {
+            if matches_kind(j, kind, n as usize, bssid) { return n }
+        } else {
+            let f: fn(u64) -> u64 = (*j).idle
+            f((*j).idle_ctx)
+            tries = tries + 1
+        }
+    }
+    return -1
+}
+
+fn send_eapol(j: *mut Join, g: *mut device.Device, sa: u64, bssid: u64, eapol: u64, elen: usize) -> bool {
+    let fl: usize = mgmt.eapol_frame_build(tx_addr(j), sa, bssid, eapol, elen)
+    return device.send(g, tx_addr(j), fl) >= 0
+}
+
+fn join_connect(j: *mut Join, s: *mut connect.Session, g: *mut device.Device,
+    o: *mut iwl_ops.Mvm, k: usize) -> i64 {
+    var mac: [u8; 6] = [0; 6]
+    device.address_of(g, (&mac[0]) as u64)
+    let bssid: u64 = join_net_bssid(j, k)
+    connect.identity_set(s, (&mac[0]) as u64, bssid)
+    connect.pmk_set(s, (&(*j).pmk[0]) as u64)
+    connect.akm_set(s, AKM_PSK)
+    if !connect.net_choose(s, g, k) { return J_CHOOSE }
+    if iwl_ops.ops_peer_add(o, bssid) < 0 { return J_PEER }
+
+    let al: usize = mgmt.auth_build(tx_addr(j), (&mac[0]) as u64, bssid)
+    if device.send(g, tx_addr(j), al) < 0 { return J_SEND }
+    if wait_frame(j, g, KIND_AUTH, bssid) < 0 { return J_AUTH_TIMEOUT }
+    if (*j).last_status != 0 {
+        connect.auth_angenommen(s, false)
+        return J_AUTH_DENIED
+    }
+    connect.auth_angenommen(s, true)
+
+    let sel: usize = connect.net_ssid_len(s, k)
+    var ssid: [u8; 32] = [0; 32]
+    connect.net_ssid_get(s, k, (&ssid[0]) as u64)
+    let cl: i64 = mgmt.assoc_build(tx_addr(j), (&mac[0]) as u64, bssid, (&ssid[0]) as u64,
+        sel as u64, connect.net_channel_of(s, k), 2400)
+    if cl < 0 { return J_BUILD }
+    if device.send(g, tx_addr(j), cl as usize) < 0 { return J_SEND }
+    let an: i64 = wait_frame(j, g, KIND_ASSOC, bssid)
+    if an < 0 { return J_ASSOC_TIMEOUT }
+    if (*j).last_status != 0 {
+        connect.assoz_angenommen(s, false)
+        return J_ASSOC_DENIED
+    }
+    let aid: u64 = mgmt.assoc_aid(rx_addr(j), an as usize)
+    if iwl_ops.ops_associated(o, aid) < 0 { return J_PEER }
+    connect.assoz_angenommen(s, true)
+
+    let m1n: i64 = wait_frame(j, g, KIND_EAPOL, bssid)
+    if m1n < 0 { return J_M1_TIMEOUT }
+    let m1o: i64 = mgmt.eapol_offset(rx_addr(j), m1n as usize)
+    let m1: u64 = rx_addr(j) + m1o as u64
+    let m1l: usize = (m1n - m1o) as usize
+    if connect.nachricht1_behandeln(s, g, m1, m1l, (&(*j).snonce[0]) as u64, 0, 0) < 0 {
+        (*j).detail = connect.reason_from(s)
+        return J_REJECTED
+    }
+    let m2l: i64 = mgmt.m2_build((&(*j).key[0]) as u64, m1, (&(*j).snonce[0]) as u64,
+        (&(*s).ptk[0]) as u64, AKM_PSK)
+    if m2l < 0 { return J_BUILD }
+    if !send_eapol(j, g, (&mac[0]) as u64, bssid, (&(*j).key[0]) as u64, m2l as usize) { return J_SEND }
+
+    var tries: u64 = 0
+    var m3n: i64 = -1
+    var m3o: i64 = -1
+    while tries < 4 && m3o < 0 {
+        m3n = wait_frame(j, g, KIND_EAPOL, bssid)
+        if m3n < 0 { return J_M3_TIMEOUT }
+        m3o = mgmt.eapol_offset(rx_addr(j), m3n as usize)
+        tries = tries + 1
+    }
+    if m3o < 0 { return J_M3_TIMEOUT }
+    let m3: u64 = rx_addr(j) + m3o as u64
+    let m3l: usize = (m3n - m3o) as usize
+    var m4: [u8; 128] = [0; 128]
+    if !connect.nachricht3_behandeln(s, g, m3, m3l) {
+        (*j).detail = connect.reason_from(s)
+        connect.trennen(s, g)
+        return J_REJECTED
+    }
+    let m4l: i64 = mgmt.m4_build((&m4[0]) as u64, m3, (&(*s).ptk[0]) as u64, AKM_PSK)
+    if m4l < 0 { return J_BUILD }
+    if !send_eapol(j, g, (&mac[0]) as u64, bssid, (&m4[0]) as u64, m4l as usize) { return J_SEND }
+    if !connect.may_data(s) { return J_KEYS }
+    return J_OK
+}
+
+fn join_run(j: *mut Join, s: *mut connect.Session, g: *mut device.Device, o: *mut iwl_ops.Mvm) -> i64 {
+    let r: i64 = join_scan(j, s, g, o)
+    if r < 0 { return r }
+    var k: usize = 0
+    var pick: i64 = -1
+    while k < connect.net_count(s) {
+        if ssid_equals(s, k, (&(*j).ssid[0]) as u64, (*j).ssid_len) { pick = k as i64 }
+        k = k + 1
+    }
+    if pick < 0 { return J_NO_NET }
+    return join_connect(j, s, g, o, pick as usize)
+}

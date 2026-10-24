@@ -27,6 +27,7 @@ gehen durch dieselbe.
 DIE SCHRITTE, einer je Zeile:
 
     warte <sekunden>
+    warteauf <regex> <anzahl> <frist>   poll the serial until <anzahl> lines match
     marke <text>              nur in den Ablauf schreiben
     klick <x>,<y>             Zeiger dorthin, druecken, loslassen
     ziel <worte ...>          Stelle aus dem Mitschnitt holen
@@ -41,6 +42,7 @@ mal 120 sind 720 und reichen auf einem 1280 breiten Schirm nicht (auch
 das eine Messung, siehe tools/themestore/click.py).
 """
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -135,12 +137,39 @@ class Monitor:
         return 0
 
 
-def ziel_holen(serial, worte):
+def ziel_einmal(serial, worte):
     r = subprocess.run(["python3", os.path.join(HIER, "klickplan.py"), serial]
                        + worte, capture_output=True, text=True)
     if r.returncode != 0 or not r.stdout.strip():
         return None, (r.stdout + r.stderr).strip()
     return r.stdout.strip(), ""
+
+
+def ziel_holen(serial, worte, frist=12.0):
+    bis = time.time() + frist
+    while True:
+        p, fehler = ziel_einmal(serial, worte)
+        if p is not None or time.time() >= bis:
+            return p, fehler
+        time.sleep(0.5)
+
+
+def zaehle(serial, muster):
+    try:
+        with open(serial, "rb") as f:
+            t = f.read().decode("latin1")
+    except OSError:
+        return 0
+    return len(re.findall(muster, t, re.M))
+
+
+def warte_auf(serial, muster, anzahl, frist):
+    bis = time.time() + frist
+    while time.time() < bis:
+        if zaehle(serial, muster) >= anzahl:
+            return True
+        time.sleep(0.25)
+    return zaehle(serial, muster) >= anzahl
 
 
 def main(argv):
@@ -157,6 +186,9 @@ def main(argv):
         was = teile[0]
         if was == "warte":
             time.sleep(float(teile[1]))
+        elif was == "warteauf":
+            ok = warte_auf(serial, teile[1], int(teile[2]), float(teile[3]))
+            print("plan: warteauf %s >=%s -> %s" % (teile[1], teile[2], "ok" if ok else "TIMEOUT"))
         elif was == "marke":
             print("plan: %s" % " ".join(teile[1:]))
         elif was == "klick":

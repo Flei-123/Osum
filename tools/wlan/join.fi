@@ -1,0 +1,322 @@
+import std.rt
+import std.io
+import wlan.device
+import wlan.connect
+import wlan.iwl_ops
+import wlan.iwl_buf
+import wlan.join
+import wlan.dhcp_link
+
+const LOG_MAX: usize = 32
+const LOG_SLOT: usize = 2700
+const RXS: usize = 512
+const RX_MAX: usize = 12
+const XID: u64 = 0x12345678
+
+static mut log: [u8; 86400] = [0; 86400]
+static mut log_len: [usize; 32] = [0; 32]
+static mut log_n: usize = 0
+static mut rxq: [u8; 6144] = [0; 6144]
+static mut rxq_len: [usize; 12] = [0; 12]
+static mut rxq_n: usize = 0
+static mut rxq_at: usize = 0
+static mut ssid: [u8; 64] = [0; 64]
+static mut pmk: [u8; 64] = [0; 64]
+static mut snonce: [u8; 64] = [0; 64]
+static mut s_beacon: [u8; 512] = [0; 512]
+static mut s_auth: [u8; 512] = [0; 512]
+static mut s_assoc: [u8; 512] = [0; 512]
+static mut s_m1: [u8; 512] = [0; 512]
+static mut s_m3: [u8; 512] = [0; 512]
+static mut s_offer: [u8; 512] = [0; 512]
+static mut s_ack: [u8; 512] = [0; 512]
+static mut l_beacon: usize = 0
+static mut l_auth: usize = 0
+static mut l_assoc: usize = 0
+static mut l_m1: usize = 0
+static mut l_m3: usize = 0
+static mut l_offer: usize = 0
+static mut l_ack: usize = 0
+static mut data_n: usize = 0
+static mut txtb: [u8; 6000] = [0; 6000]
+static mut tlen: usize = 0
+
+fn tch(c: u64) {
+    if tlen < 5990 {
+        txtb[tlen] = (c & 255) as u8
+        tlen = tlen + 1
+    }
+}
+fn tlit(w: str) {
+    var i: usize = 0
+    while i < w.n {
+        tch(rt.ld8(w.p as u64, i) as u64)
+        i = i + 1
+    }
+}
+fn tnum(v: u64) {
+    if v >= 10 { tnum(v / 10) }
+    tch(48 + (v % 10))
+}
+fn tsigned(v: i64) {
+    if v < 0 {
+        tch(45)
+        tnum((0 - v) as u64)
+    } else {
+        tnum(v as u64)
+    }
+}
+fn thex(p: u64, n: usize) {
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        tch(d[(v >> 4) as usize] as u64)
+        tch(d[(v & 15) as usize] as u64)
+        i = i + 1
+    }
+}
+fn temit() {
+    io.print_line_bytes((&txtb[0]) as u64, tlen)
+    tlen = 0
+}
+
+fn hexval(c: u64) -> i64 {
+    if c >= 48 && c <= 57 { return (c - 48) as i64 }
+    if c >= 97 && c <= 102 { return (c - 87) as i64 }
+    return -1
+}
+
+fn field_hex(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 { i = i + 1 }
+    *at = i
+    let n: usize = i - start
+    if n == 1 && rt.ld8(line, start) == 45 as u8 { return 0 }
+    if n == 0 || n % 2 != 0 || n / 2 > 500 { return -1 }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hexval(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hexval(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 { return -1 }
+        rt.st8(dst, o, ((hi * 16 + lo) & 255) as u8)
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+fn word_is(line: u64, len: usize, at: *mut usize, w: str) -> bool {
+    var i: usize = 0
+    while i < w.n {
+        if i >= len || rt.ld8(line, i) != rt.ld8(w.p as u64, i) { return false }
+        i = i + 1
+    }
+    if len > w.n && rt.ld8(line, w.n) != 32 as u8 { return false }
+    *at = w.n
+    return true
+}
+
+fn rx_put(src: u64, n: usize) {
+    if rxq_n >= RX_MAX { return }
+    var i: usize = 0
+    while i < n {
+        rxq[rxq_n * RXS + i] = rt.ld8(src, i)
+        i = i + 1
+    }
+    rxq_len[rxq_n] = n
+    rxq_n = rxq_n + 1
+}
+
+fn rx_phy(energy: u64, channel: u64) {
+    var p: [u8; 80] = [0; 80]
+    p[0] = 0xC0 as u8
+    p[22 + 4] = (channel & 255) as u8
+    p[32] = (energy & 255) as u8
+    rx_put((&p[0]) as u64, 80)
+}
+
+fn rx_mpdu(frame: u64, n: usize) {
+    if n == 0 { return }
+    var p: [u8; 500] = [0; 500]
+    p[0] = 0xC1 as u8
+    p[4] = (n & 255) as u8
+    p[5] = (n >> 8) as u8
+    var i: usize = 0
+    while i < n {
+        p[8 + i] = rt.ld8(frame, i)
+        i = i + 1
+    }
+    rx_put((&p[0]) as u64, n + 16)
+}
+
+fn rx_scan_done(uid: u64, status: u64) {
+    var p: [u8; 16] = [0; 16]
+    p[0] = 0x0F as u8
+    p[4] = uid as u8
+    p[10] = status as u8
+    rx_put((&p[0]) as u64, 16)
+}
+
+fn t_poll(ctx: u64, buf: u64, room: usize) -> i64 {
+    if rxq_at >= rxq_n { return 0 }
+    let n: usize = rxq_len[rxq_at]
+    var i: usize = 0
+    while i < n {
+        rt.st8(buf, i, rxq[rxq_at * RXS + i])
+        i = i + 1
+    }
+    rxq_at = rxq_at + 1
+    return n as i64
+}
+
+fn react(cmd: u64) {
+    let f: u64 = cmd + 60
+    let fc0: u64 = rt.ld8(f, 0) as u64
+    let fc1: u64 = rt.ld8(f, 1) as u64
+    let kind: u64 = fc0 & 0x0C
+    if kind == 0 {
+        let sub: u64 = fc0 >> 4
+        if sub == 11 { rx_mpdu((&s_auth[0]) as u64, l_auth) }
+        if sub == 0 {
+            rx_mpdu((&s_assoc[0]) as u64, l_assoc)
+            rx_mpdu((&s_m1[0]) as u64, l_m1)
+        }
+        return
+    }
+    if kind != 8 { return }
+    if (fc1 & 0x40) == 0 {
+        let ki: u64 = ((rt.ld8(f, 24 + 8 + 5) as u64) << 8) | (rt.ld8(f, 24 + 8 + 6) as u64)
+        if ki == 0x010A { rx_mpdu((&s_m3[0]) as u64, l_m3) }
+        return
+    }
+    data_n = data_n + 1
+    if data_n == 1 { rx_mpdu((&s_offer[0]) as u64, l_offer) }
+    if data_n == 2 { rx_mpdu((&s_ack[0]) as u64, l_ack) }
+}
+
+fn t_submit(ctx: u64, buf: u64, len: usize) -> i64 {
+    if log_n >= LOG_MAX || len > LOG_SLOT { return -1 }
+    var i: usize = 0
+    while i < len {
+        log[log_n * LOG_SLOT + i] = rt.ld8(buf, i)
+        i = i + 1
+    }
+    log_len[log_n] = len
+    log_n = log_n + 1
+    if rt.ld8(buf, 0) == 0x1C as u8 && len > 60 { react(buf) }
+    return 0
+}
+
+fn dump_log() {
+    var k: usize = 0
+    while k < log_n {
+        tlit("cmd ")
+        thex((&log[k * LOG_SLOT]) as u64, log_len[k])
+        temit()
+        k = k + 1
+    }
+}
+
+fn idle(ctx: u64) -> u64 { return 0 }
+
+fn run_join(line: u64, len: usize, at: *mut usize) {
+    let sl: i64 = field_hex(line, len, at, (&ssid[0]) as u64)
+    let pl: i64 = field_hex(line, len, at, (&pmk[0]) as u64)
+    let nl: i64 = field_hex(line, len, at, (&snonce[0]) as u64)
+    l_beacon = field_hex(line, len, at, (&s_beacon[0]) as u64) as usize
+    l_auth = field_hex(line, len, at, (&s_auth[0]) as u64) as usize
+    l_assoc = field_hex(line, len, at, (&s_assoc[0]) as u64) as usize
+    l_m1 = field_hex(line, len, at, (&s_m1[0]) as u64) as usize
+    l_m3 = field_hex(line, len, at, (&s_m3[0]) as u64) as usize
+    l_offer = field_hex(line, len, at, (&s_offer[0]) as u64) as usize
+    l_ack = field_hex(line, len, at, (&s_ack[0]) as u64) as usize
+    if sl <= 0 || pl != 32 || nl != 32 { tlit("fail args"); temit(); return }
+    log_n = 0
+    rxq_n = 0
+    rxq_at = 0
+    data_n = 0
+    var g: device.Device = device.device_new()
+    var o: iwl_ops.Mvm = iwl_ops.mvm_new()
+    var s: connect.Session = connect.session_new()
+    var j: join.Join = join.join_new()
+    var mac: [u8; 6] = [2, 0, 0, 0, 1, 0]
+    iwl_ops.ops_set_address(&o, (&mac[0]) as u64)
+    if !iwl_ops.ops_attach(&g, &o, 0, t_submit, t_poll) { tlit("fail attach"); temit(); return }
+    join.join_idle_set(&j, 0, idle)
+    join.join_ssid_set(&j, (&ssid[0]) as u64, sl as usize)
+    join.join_pmk_set(&j, (&pmk[0]) as u64)
+    join.join_snonce_set(&j, (&snonce[0]) as u64)
+    rx_phy(60, 6)
+    rx_mpdu((&s_beacon[0]) as u64, l_beacon)
+    rx_scan_done(1, 1)
+    let rc: i64 = join.join_run(&j, &s, &g, &o)
+    tlit("join rc ")
+    tsigned(rc)
+    tlit(" detail ")
+    tnum(join.join_detail(&j))
+    tlit(" status ")
+    tsigned(join.join_last_status(&j))
+    tlit(" nets ")
+    tnum(connect.net_count(&s) as u64)
+    tlit(" may ")
+    if connect.may_data(&s) { tch(49) } else { tch(48) }
+    tlit(" keys ")
+    tnum(iwl_ops.ops_keys_sent(&o))
+    tlit(" state ")
+    tnum(connect.state_of(&s))
+    temit()
+    var lease: dhcp_link.Lease = dhcp_link.lease_new()
+    var dr: i64 = 0
+    if rc == 0 {
+        dr = dhcp_link.dhcp_acquire(&s, &g, idle, 0, XID, &lease)
+        tlit("dhcp rc ")
+        tsigned(dr)
+        tlit(" ip ")
+        tnum(lease.ip)
+        tlit(" mask ")
+        tnum(lease.mask)
+        tlit(" gw ")
+        tnum(lease.gateway)
+        tlit(" dns ")
+        tnum(lease.dns)
+        tlit(" kind ")
+        tnum(lease.kind)
+        temit()
+    }
+    var fr: [u8; 64] = [0; 64]
+    var pr: [u8; 128] = [0; 128]
+    fr[0] = 0x08 as u8
+    fr[1] = 0x01 as u8
+    let sr: i64 = connect.data_send(&s, &g, (&fr[0]) as u64, 40, (&pr[0]) as u64, 128)
+    dump_log()
+    tlit("send ")
+    tsigned(sr)
+    temit()
+}
+
+fn run_line(line: u64, len: usize) {
+    var at: usize = 0
+    if word_is(line, len, &at, "join") { run_join(line, len, &at); return }
+    tlit("fail")
+    temit()
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) { return 1 }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var at: usize = 0
+    while at < n {
+        var e: usize = at
+        while e < n && rt.ld8(p, e) != 10 as u8 { e = e + 1 }
+        var len: usize = e - at
+        while len > 0 && rt.ld8(p, at + len - 1) == 13 as u8 { len = len - 1 }
+        if len > 0 { run_line(p + at as u64, len) }
+        at = e + 1
+    }
+    rt.buf_free(&inp)
+    return 0
+}

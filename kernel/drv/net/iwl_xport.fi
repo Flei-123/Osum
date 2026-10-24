@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import wlan.iwl_probe
+import wlan.iwl_cmdq
+import wlan.iwl_boot
+import wlan.iwl_le
+
+export { XCtx, xctx_new, xport_make, E_XP_NOCQ }
+
+const E_XP_NOCQ: i64 = -80
+const PEND_CAP: u64 = 4096
+const RECV_BUDGET_MS: u64 = 250
+const RECV_SPIN_MAX: u64 = 400000
+
+struct XCtx {
+    state: u64,
+    cq: u64,
+    p: u64,
+    pend: u64,
+    pend_len: u64,
+    last_err: i64
+}
+
+fn xctx_new(state: u64, cq: u64, p: u64, pend: u64) -> XCtx {
+    var x: XCtx = XCtx { state: state, cq: cq, p: p, pend: pend, pend_len: 0, last_err: 0 }
+    return x
+}
+
+fn xp_now(ctx: u64) -> u64 {
+    let x: *mut XCtx = ctx as *mut XCtx
+    return kstate.get((*x).state, kstate.TICKS) * 10
+}
+
+fn xp_send(ctx: u64, a: u64, n: u64) -> i64 {
+    let x: *mut XCtx = ctx as *mut XCtx
+    if (*x).cq == 0 { return E_XP_NOCQ }
+    (*x).pend_len = 0
+    let r: i64 = iwl_cmdq.cq_send((*x).cq as *mut iwl_cmdq.Cq, (*x).p as *mut iwl_probe.Probe, a, n, (*x).pend, PEND_CAP)
+    if r < 0 {
+        (*x).last_err = r
+        return r
+    }
+    (*x).pend_len = r as u64
+    return 0
+}
+
+fn xp_recv(ctx: u64, a: u64, n: u64) -> i64 {
+    let x: *mut XCtx = ctx as *mut XCtx
+    if (*x).cq == 0 { return E_XP_NOCQ }
+    if (*x).pend_len != 0 {
+        var m: u64 = (*x).pend_len
+        if m > n { m = n }
+        iwl_le.copy(a, (*x).pend, m)
+        (*x).pend_len = 0
+        return m as i64
+    }
+    let t0: u64 = xp_now(ctx)
+    var spins: u64 = 0
+    while spins < RECV_SPIN_MAX {
+        let r: i64 = iwl_cmdq.cq_poll((*x).cq as *mut iwl_cmdq.Cq, (*x).p as *mut iwl_probe.Probe, a, n)
+        if r != 0 { return r }
+        if xp_now(ctx) - t0 >= RECV_BUDGET_MS { return 0 }
+        spins = spins + 1
+    }
+    return 0
+}
+
+fn xport_make(x: *mut XCtx) -> iwl_boot.Xport {
+    var t: iwl_boot.Xport = iwl_boot.Xport { present: 1, ctx: x as u64, send: xp_send, recv: xp_recv, now: xp_now }
+    return t
+}

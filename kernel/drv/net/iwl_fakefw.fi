@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import wlan.iwl_le
+
+export {
+    doorbell, alive, reset, rx_enabled, set_norx, set_knobs, cmds, rx_pkts, rx_drops, last_cmd, last_uid, phydb_cmds, nvm_reads, init_completes, FAKE_SCD_BASE
+}
+
+const FAKE_SCD_BASE: u64 = 0x00800000
+
+const S_ACCESS: u64 = 0x2000
+const S_VIOL: u64 = 0x2018
+const S_TXRD: u64 = 0x2400
+const S_CLOSED: u64 = 0x2408
+const S_CMDS: u64 = 0x2410
+const S_DROPS: u64 = 0x2418
+const S_NORX: u64 = 0x2420
+const S_PKTS: u64 = 0x2428
+const S_LASTCMD: u64 = 0x2430
+const S_LASTUID: u64 = 0x2438
+const S_PENDING: u64 = 0x2440
+const S_NONVM: u64 = 0x2448
+const S_NOINITC: u64 = 0x2450
+const S_NOALIVE: u64 = 0x2458
+const S_BADNVM: u64 = 0x2460
+const S_PHASE: u64 = 0x2468
+const S_PHYDB: u64 = 0x2470
+const S_NVMRD: u64 = 0x2478
+const S_INITC: u64 = 0x2480
+
+const CMD_INIT_COMPLETE: u64 = 0x04
+const CMD_PHY_CFG: u64 = 0x6A
+const CMD_NVM_ACCESS: u64 = 0x88
+const CMD_CALIB_RES: u64 = 0x6B
+const CMD_PHY_DB: u64 = 0x6C
+const NVM_FAKE_LEN: u64 = 96
+
+const REG_RBD_BASE: u64 = 0x1BC4
+const REG_STTS: u64 = 0x1BC0
+const REG_RBD_WPTR: u64 = 0x1BC8
+const REG_RX_CONFIG: u64 = 0x1C00
+const REG_CBBC_Q0: u64 = 0x19D0
+const RX_ENABLE: u64 = 0x80000000
+
+const CMD_SCAN_REQ_UMAC: u64 = 0x0D
+const CMD_SCAN_COMPLETE_UMAC: u64 = 0x0F
+const CMD_ALIVE: u64 = 0x01
+const SEQ_RX_FRAME: u64 = 0x8000
+const TFD_SIZE: u64 = 128
+const FIRST_TB: u64 = 20
+
+fn g(ctx: u64, o: u64) -> u64 { return iwl_le.ld64(ctx, o) }
+fn s(ctx: u64, o: u64, v: u64) { iwl_le.st64(ctx, o, v) }
+fn r32(ctx: u64, o: u64) -> u64 { return iwl_le.ld32(ctx, o) }
+
+fn viol(ctx: u64) { s(ctx, S_VIOL, g(ctx, S_VIOL) + 1) }
+
+fn cmds(ctx: u64) -> u64 { return g(ctx, S_CMDS) }
+fn rx_pkts(ctx: u64) -> u64 { return g(ctx, S_PKTS) }
+fn rx_drops(ctx: u64) -> u64 { return g(ctx, S_DROPS) }
+fn last_cmd(ctx: u64) -> u64 { return g(ctx, S_LASTCMD) }
+fn last_uid(ctx: u64) -> u64 { return g(ctx, S_LASTUID) }
+fn set_norx(ctx: u64, on: u64) { s(ctx, S_NORX, on) }
+fn set_knobs(ctx: u64, nonvm: u64, noinitc: u64, noalive: u64, badnvm: u64) {
+    s(ctx, S_NONVM, nonvm)
+    s(ctx, S_NOINITC, noinitc)
+    s(ctx, S_NOALIVE, noalive)
+    s(ctx, S_BADNVM, badnvm)
+}
+fn phydb_cmds(ctx: u64) -> u64 { return g(ctx, S_PHYDB) }
+fn nvm_reads(ctx: u64) -> u64 { return g(ctx, S_NVMRD) }
+fn init_completes(ctx: u64) -> u64 { return g(ctx, S_INITC) }
+
+fn reset(ctx: u64) {
+    s(ctx, S_TXRD, 0)
+    s(ctx, S_CLOSED, 0)
+    iwl_le.st32(ctx, REG_STTS, 0)
+    iwl_le.st32(ctx, REG_RBD_BASE, 0)
+    iwl_le.st32(ctx, REG_RBD_WPTR, 0)
+    iwl_le.st32(ctx, REG_RX_CONFIG, 0)
+    iwl_le.st32(ctx, REG_CBBC_Q0, 0)
+}
+
+fn rx_enabled(ctx: u64) -> bool {
+    return (r32(ctx, REG_RX_CONFIG) & RX_ENABLE) != 0 && r32(ctx, REG_RBD_BASE) != 0 && r32(ctx, REG_STTS) != 0
+}
+
+fn rx_begin(ctx: u64) -> u64 {
+    if g(ctx, S_NORX) != 0 || !rx_enabled(ctx) {
+        s(ctx, S_DROPS, g(ctx, S_DROPS) + 1)
+        return 0
+    }
+    let closed: u64 = g(ctx, S_CLOSED)
+    if ((r32(ctx, REG_RBD_WPTR) + 256 - closed) & 0xFF) == 0 {
+        s(ctx, S_DROPS, g(ctx, S_DROPS) + 1)
+        return 0
+    }
+    let bd: u64 = r32(ctx, REG_RBD_BASE) << 8
+    let rb: u64 = iwl_le.ld32(bd, 4 * closed) << 8
+    if rb == 0 {
+        viol(ctx)
+        return 0
+    }
+    return rb
+}
+
+fn rx_commit(ctx: u64) {
+    let closed: u64 = (g(ctx, S_CLOSED) + 1) & 0xFF
+    s(ctx, S_CLOSED, closed)
+    iwl_le.st16(r32(ctx, REG_STTS) << 4, 0, closed)
+    s(ctx, S_PKTS, g(ctx, S_PKTS) + 1)
+}
+
+fn rx_hdr(rb: u64, plen: u64, cmd: u64, seq: u64) {
+    iwl_le.st32(rb, 0, 4 + plen)
+    iwl_le.st8(rb, 4, cmd)
+    iwl_le.st8(rb, 5, 0)
+    iwl_le.st16(rb, 6, seq)
+}
+
+fn put_status(ctx: u64, cmd: u64, seq: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 4, cmd, seq)
+    iwl_le.st32(rb, 8, 0)
+    rx_commit(ctx)
+}
+
+fn put_scan_complete(ctx: u64, uid: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 16, CMD_SCAN_COMPLETE_UMAC, SEQ_RX_FRAME)
+    iwl_le.zero(rb + 8, 16)
+    iwl_le.st32(rb, 8, uid)
+    iwl_le.st8(rb, 12, 1)
+    iwl_le.st8(rb, 13, 1)
+    iwl_le.st8(rb, 14, 1)
+    rx_commit(ctx)
+}
+
+fn alive(ctx: u64) {
+    s(ctx, S_PHASE, g(ctx, S_PHASE) + 1)
+    if g(ctx, S_NOALIVE) != 0 { return }
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 64, CMD_ALIVE, SEQ_RX_FRAME)
+    iwl_le.zero(rb + 8, 64)
+    iwl_le.st16(rb, 8, 0xCAFE)
+    iwl_le.st32(rb, 8 + 36, FAKE_SCD_BASE)
+    rx_commit(ctx)
+}
+
+fn put_nvm(ctx: u64, req: u64, seq: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    let sec: u64 = iwl_le.ld16(req, 6)
+    let off: u64 = iwl_le.ld16(req, 8)
+    let want: u64 = iwl_le.ld16(req, 10)
+    var dl: u64 = 0
+    var status: u64 = 1
+    let valid: bool = sec == 1 || sec == 5
+    if valid && !(sec == 1 && g(ctx, S_BADNVM) != 0) {
+        status = 0
+        if off < NVM_FAKE_LEN { dl = NVM_FAKE_LEN - off }
+        if dl > want { dl = want }
+    }
+    rx_hdr(rb, 8 + dl, CMD_NVM_ACCESS, seq)
+    iwl_le.st16(rb, 8, off)
+    iwl_le.st16(rb, 10, dl)
+    iwl_le.st16(rb, 12, sec)
+    iwl_le.st16(rb, 14, status)
+    var i: u64 = 0
+    while i < dl {
+        iwl_le.st8(rb, 16 + i, (sec * 16 + off + i) & 0xFF)
+        i = i + 1
+    }
+    s(ctx, S_NVMRD, g(ctx, S_NVMRD) + 1)
+    rx_commit(ctx)
+}
+
+fn put_calib(ctx: u64, typ: u64, len: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 4 + len, CMD_CALIB_RES, SEQ_RX_FRAME)
+    iwl_le.zero(rb + 8, 4 + len)
+    iwl_le.st16(rb, 8, typ)
+    iwl_le.st16(rb, 10, len)
+    if len >= 2 { iwl_le.st16(rb, 12, typ) }
+    rx_commit(ctx)
+}
+
+fn put_init_complete(ctx: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 4, CMD_INIT_COMPLETE, SEQ_RX_FRAME)
+    iwl_le.st32(rb, 8, 0)
+    s(ctx, S_INITC, g(ctx, S_INITC) + 1)
+    rx_commit(ctx)
+}
+
+fn after_phy_cfg(ctx: u64) {
+    if g(ctx, S_PHASE) != 1 { return }
+    put_calib(ctx, 1, 4)
+    put_calib(ctx, 2, 8)
+    put_calib(ctx, 3, 6)
+    put_calib(ctx, 4, 6)
+    if g(ctx, S_NOINITC) == 0 { put_init_complete(ctx) }
+}
+
+fn one_tfd(ctx: u64, ring: u64, idx: u64) {
+    let t: u64 = ring + idx * TFD_SIZE
+    let n: u64 = iwl_le.ld8(t, 3)
+    let hn0: u64 = iwl_le.ld16(t, 8)
+    let tb0: u64 = iwl_le.ld32(t, 4) | ((hn0 & 0xF) << 32)
+    let l0: u64 = hn0 >> 4
+    if n < 1 || n > 2 || tb0 == 0 || l0 == 0 {
+        viol(ctx)
+        return
+    }
+    if n == 2 && l0 != FIRST_TB { viol(ctx) }
+    let cmd: u64 = iwl_le.ld8(tb0, 0)
+    let seq: u64 = iwl_le.ld16(tb0, 2)
+    if (seq & 0xFF) != idx || ((seq >> 8) & 0x1F) != 0 { viol(ctx) }
+    s(ctx, S_CMDS, g(ctx, S_CMDS) + 1)
+    s(ctx, S_LASTCMD, cmd)
+    if cmd == CMD_NVM_ACCESS {
+        if g(ctx, S_NONVM) == 0 { put_nvm(ctx, tb0, seq) }
+    } else {
+        put_status(ctx, cmd, seq)
+    }
+    if cmd == CMD_PHY_DB { s(ctx, S_PHYDB, g(ctx, S_PHYDB) + 1) }
+    if cmd == CMD_PHY_CFG { after_phy_cfg(ctx) }
+    if cmd == CMD_SCAN_REQ_UMAC {
+        let uid: u64 = iwl_le.ld32(tb0, 8)
+        s(ctx, S_LASTUID, uid)
+        put_scan_complete(ctx, uid)
+    }
+}
+
+fn doorbell(ctx: u64, v: u64, sched_ok: bool) {
+    if ((v >> 8) & 0x1F) != 0 { return }
+    let wr: u64 = v & 0xFF
+    var rd: u64 = g(ctx, S_TXRD)
+    if rd == wr { return }
+    let ring: u64 = r32(ctx, REG_CBBC_Q0) << 8
+    if g(ctx, S_ACCESS) == 0 || ring == 0 || !sched_ok {
+        viol(ctx)
+        return
+    }
+    while rd != wr {
+        one_tfd(ctx, ring, rd)
+        rd = (rd + 1) & 0xFF
+    }
+    s(ctx, S_TXRD, rd)
+}
