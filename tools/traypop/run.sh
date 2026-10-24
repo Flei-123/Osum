@@ -57,6 +57,21 @@ klickauf chevron
 warteauf 'traypop: shut toggle' || 25
 warte 3
 foto 02-shut
+marke 'traypop: open'
+klickauf chevron
+warteneu 'traypop: open' || 25
+warte 3
+rklick 300,300
+warteauf 'traypop: shut outside' || 15
+warte 3
+marke 'traypop: open'
+klickauf chevron
+warteneu 'traypop: open' || 25
+warte 3
+taste meta_l
+warteauf 'traypop: shut focus' || 15
+warte 3
+foto 07-focus
 EOF
 
 diffpix() { # <a.ppm> <b.ppm> <x> <y> <w> <h> -> number of different pixels
@@ -139,6 +154,8 @@ for MODE in $MODES; do
     grep -aq 'traypop: shut esc' "$S" && ok "$MODE: the second Esc shuts the flyout (traypop: shut esc)" || bad "$MODE: no 'traypop: shut esc'"
     d4=$(diffpix "$O/00-before.ppm" "$O/06-esc.ppm" "$x" "$y" "$w" "$h")
     [ "$d4" -le 3000 ] && ok "$MODE: after the Esc the rectangle is as before ($d4 px differ)" || bad "$MODE: the flyout stayed in the picture after Esc ($d4 px)"
+    grep -aq 'traypop: shut outside' "$S" && ok "$MODE: a RIGHT click outside shuts the flyout (traypop: shut outside)" || bad "$MODE: right click outside did not shut it"
+    grep -aq 'traypop: shut focus' "$S" && ok "$MODE: a focus change (start menu by key) shuts the flyout (traypop: shut focus)" || bad "$MODE: focus change did not shut it"
     grep -aq 'taskbar: no traypop' "$S" && bad "$MODE: the bar has no traypop host" || ok "$MODE: the bar had a host"
 done
 echo; echo "TRAYPOP: $pass passed, $fail failed"

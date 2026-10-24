@@ -171,10 +171,21 @@ def strip_width(img, r):
     return best
 
 
+def strip_height(img, r):
+    cx = r[0] + r[2] // 2
+    base = px(img, r[0] + E, r[1] + r[3] - 8 * sc)
+    return sum(1 for dy in range(1, 8 * sc + 1) if dist(px(img, cx, r[1] + r[3] - dy), base) >= 30)
+
+
 we, wt, ws = strip_width(act, fe), strip_width(act, ft), strip_width(act, fs)
 print("        strip widths: explorer(focused)=%d taskmgr(running)=%d settings(idle)=%d" % (we, wt, ws))
 check(ws == 0, "idle pin: no strip", "idle pin carries a strip (%d px)" % ws)
 check(wt >= 3 * sc, "running program: short strip (%d px)" % wt, "running program without a strip (%d px)" % wt)
+check(wt >= 9 * sc, "running strip scales with uiscale (%d px, want >= %d)" % (wt, 9 * sc),
+      "running strip does not scale (%d px, want >= %d)" % (wt, 9 * sc))
+ht = strip_height(act, ft)
+check(ht >= 3 * sc, "strip thickness scales with uiscale (%d px, want >= %d)" % (ht, 3 * sc),
+      "strip thickness does not scale (%d px, want >= %d)" % (ht, 3 * sc))
 check(we >= wt * 3 // 2 and we >= 6 * sc, "focused program: wide strip (%d px > %d px)" % (we, wt),
       "focused strip not wider than the running one (%d vs %d)" % (we, wt))
 # 6. hover over a running (not focused) pin

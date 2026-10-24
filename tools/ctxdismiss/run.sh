@@ -10,6 +10,7 @@
 #   3. five times: rklick, click outside -> five more menus, all closed again (no menu survives)
 #   4. bare task bar: rklick -> menu, click outside -> gone, rklick again -> menu again (`taskbar: kontext leer` twice)
 #   5. start menu: open, click outside -> closed (no regression of the existing dismissal)
+#   6. Esc closes the menu, no ghost at 0,0; a focus change (start menu by the Windows key) closes the menu
 # COUNTER-PROOF: the tree before the fix (BASE, default HEAD~1): the menu survives the outside click, no second menu ever opens.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -73,6 +74,18 @@ foto s1
 klick 1000,450
 warte 3
 foto s2
+rklick 900,250
+warte 2
+foto e1
+taste esc
+warte 2
+foto e2
+rklick 900,250
+warte 2
+foto f1
+taste meta_l
+warte 4
+foto f2
 EOF
 } > "$TMPD/dreh.txt"
 
@@ -156,6 +169,11 @@ check_tree() { # <dir> <label> <expect: 1 = fixed tree, 0 = old tree>
         d=$(shows "$dir" c5 t1 400 730 600 70); e=$(gone "$dir" c5 t2 400 730 600 70)
         local tn; tn=$(grep -ac 'taskbar: kontext leer x=' "$dir/serial.txt")
         [ "$tn" = 2 ] && ok "$lab: bar menu opened twice ($tn lines) after an outside click in between" || bad "$lab: bar menu lines=$tn (want 2)"
+        d=$(shows "$dir" a0 e1 $D1); e=$(gone "$dir" a0 e2 $D1); g=$(gone "$dir" a0 e2 0 0 167 124)
+        [ "$d" -gt 5000 ] && [ "$e" -le 400 ] && ok "$lab: Esc closes the menu (open $d px, closed $e px)" || bad "$lab: Esc: open=$d closed=$e"
+        [ "$g" -le 600 ] && ok "$lab: no ghost at 0,0 after Esc ($g px; pointer only)" || bad "$lab: ghost at 0,0 after Esc ($g px)"
+        d=$(shows "$dir" a0 f1 $D1); e=$(gone "$dir" a0 f2 $D1)
+        [ "$d" -gt 5000 ] && [ "$e" -le 400 ] && ok "$lab: a focus change (start menu by key) closes the menu (open $d px, closed $e px)" || bad "$lab: focus change: open=$d closed=$e"
         d=$(gone "$dir" c5 s2 0 80 430 660)
         [ "$d" -le 800 ] && ok "$lab: start menu closed by the outside click ($d px)" || bad "$lab: start menu survived the outside click ($d px)"
     else
@@ -166,6 +184,6 @@ check_tree() { # <dir> <label> <expect: 1 = fixed tree, 0 = old tree>
 check_tree "$N" new 1
 check_tree "$O" old 0
 n=$(grep -ac 'desktop: context open' "$N/serial.txt")
-[ "$n" = 8 ] && ok "new: 8 desktop menus opened in the run (1 + 2 + 5)" || bad "new: expected 8 desktop menus, counted $n"
+[ "$n" = 10 ] && ok "new: 10 desktop menus opened in the run (1 + 2 + 5 + Esc + focus)" || bad "new: expected 10 desktop menus, counted $n"
 echo; echo "CTXDISMISS: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -74,7 +74,7 @@ old kernel/user/idlelock.fi | grep -aq 'idle limit now' && bad "COUNTER-PROOF ol
 
 echo "== D. i18n: no raw key in the UI =="
 if python3 -I tools/i18nlint/check.py > "$T/i18n.txt" 2>&1; then ok "$(tail -1 "$T/i18n.txt")"; else bad "i18nlint"; head -5 "$T/i18n.txt"; fi
-for k in tray.mute tray.more tray.none tray.unmute tray.net tray.sound tray.nonet; do
+for k in tray.mute tray.more tray.none tray.unmute tray.net tray.sound tray.nonet tray.open tray.settings tray.quit; do
     grep -aq "^$k = " locale/de/messages && grep -aq "^$k = " locale/en/messages || bad "$k missing in a table"
 done
 # counter-proof: old locale tables + the same sources -> the lint must find the missing tray keys
