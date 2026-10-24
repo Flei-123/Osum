@@ -124,10 +124,10 @@ runip() { # name url-file-or-empty
 }
 runip g9 "$OUT/dbgurl"
 S=$OUT/g9/serial.txt
-hat "$S" "glogin: netz=Keine Internetverbindung (10.0.2.15:8765)" "with /run/dbgsrv.url the network text carries ip:port"
+hat "$S" "glogin: netzadr=10.0.2.15:8765" "with /run/dbgsrv.url the network card shows ip:port"
 runip g10 ""
 S=$OUT/g10/serial.txt
-hat "$S" "glogin: netz=Keine Internetverbindung (10.0.2.15)" "COUNTER-PROOF: without the file only the ip"
+hat "$S" "glogin: netzadr=10.0.2.15" "COUNTER-PROOF: without the file the address is still shown"
 hatnicht "$S" ":8765" "COUNTER-PROOF: no port shown without the file"
 
 echo "== Shift+Tab goes back =="
