@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.errno
+import bus.pci
+import bus.drvreg
+import bus.drvstore
+import arch.x86_64.apic
+
+export {
+    list_devices, device_info, cfg_read, cfg_write, mmio_read, mmio_write, driver_text, device_index,
+    CFG_LIMIT, MMIO_MAX_DWORDS, INFO_QWORDS
+}
+
+const CFG_LIMIT: u64 = 256
+const MMIO_MAX_DWORDS: u64 = 256
+const INFO_QWORDS: u64 = 22
+const CFG_COMMAND: u64 = 0x04
+const CMD_MEM: u64 = 0x2
+
+fn device_index(state: u64, bdf: u64) -> u64 {
+    return pci.find_bdf(state, bdf)
+}
+
+fn list_devices(state: u64, out: u64) -> u64 {
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        *((out + i * 8) as *mut u64) = pci.get(state, i, pci.E_BDF)
+        i = i + 1
+    }
+    return n
+}
+
+fn device_info(state: u64, bdf: u64, out: u64) -> u64 {
+    let i: u64 = device_index(state, bdf)
+    if i >= pci.MAX_DEV {
+        return errno.neg(errno.E_NODEV)
+    }
+    *((out) as *mut u64) = pci.get(state, i, pci.E_VENDOR)
+    *((out + 8) as *mut u64) = pci.get(state, i, pci.E_DEVICE)
+    *((out + 16) as *mut u64) = (pci.get(state, i, pci.E_CLASS) << 16) | (pci.get(state, i, pci.E_SUBCLASS) << 8)
+        | pci.get(state, i, pci.E_PROGIF)
+    *((out + 24) as *mut u64) = pci.get(state, i, pci.E_HDR)
+    var n: u64 = 0
+    while n < 6 {
+        *((out + 32 + n * 24) as *mut u64) = pci.bar(state, i, n)
+        *((out + 40 + n * 24) as *mut u64) = pci.bar_size(state, i, n)
+        *((out + 48 + n * 24) as *mut u64) = pci.bar_flags(state, i, n)
+        n = n + 1
+    }
+    return 0
+}
+
+fn cfg_read(state: u64, bdf: u64, off: u64, len: u64, out: u64) -> u64 {
+    if device_index(state, bdf) >= pci.MAX_DEV {
+        return errno.neg(errno.E_NODEV)
+    }
+    if len == 0 || off + len > CFG_LIMIT {
+        return errno.neg(errno.E_INVAL)
+    }
+    var k: u64 = 0
+    while k < len {
+        *((out + k) as *mut u8) = pci.cfg_read8(bdf, off + k) as u8
+        k = k + 1
+    }
+    return len
+}
+
+fn cfg_write(state: u64, bdf: u64, off: u64, value: u64, width: u64) -> u64 {
+    if device_index(state, bdf) >= pci.MAX_DEV {
+        return errno.neg(errno.E_NODEV)
+    }
+    if (width != 1 && width != 2 && width != 4) || off + width > CFG_LIMIT || (off & (width - 1)) != 0 {
+        return errno.neg(errno.E_INVAL)
+    }
+    if width == 1 {
+        pci.cfg_write8(bdf, off, value)
+    } else if width == 2 {
+        pci.cfg_write16(bdf, off, value)
+    } else {
+        pci.cfg_write32(bdf, off, value)
+    }
+    return 0
+}
+
+fn mmio_window(state: u64, bdf: u64, bar: u64, off: u64, count: u64) -> u64 {
+    let i: u64 = device_index(state, bdf)
+    if i >= pci.MAX_DEV {
+        return 0
+    }
+    if bar >= 6 || pci.bar_is_io(state, i, bar) {
+        return 0
+    }
+    let phys: u64 = pci.bar(state, i, bar)
+    let size: u64 = pci.bar_size(state, i, bar)
+    if phys == 0 || size == 0 || (off & 3) != 0 || off + count * 4 > size {
+        return 0
+    }
+    if (pci.cfg_read16(bdf, CFG_COMMAND) & CMD_MEM) == 0 {
+        return 0
+    }
+    return phys + off
+}
+
+fn mmio_read(state: u64, bdf: u64, bar: u64, off: u64, count: u64, out: u64) -> u64 {
+    if count == 0 || count > MMIO_MAX_DWORDS {
+        return errno.neg(errno.E_INVAL)
+    }
+    let phys: u64 = mmio_window(state, bdf, bar, off, count)
+    if phys == 0 {
+        return errno.neg(errno.E_NXIO)
+    }
+    var k: u64 = 0
+    while k < count {
+        let va: u64 = apic.map_device(state, phys + k * 4)
+        if va == 0 {
+            return errno.neg(errno.E_NOMEM)
+        }
+        *((out + k * 4) as *mut u32) = __mmio_read32(va as *mut u32)
+        k = k + 1
+    }
+    return count
+}
+
+fn mmio_write(state: u64, bdf: u64, bar: u64, off: u64, value: u64) -> u64 {
+    let phys: u64 = mmio_window(state, bdf, bar, off, 1)
+    if phys == 0 {
+        return errno.neg(errno.E_NXIO)
+    }
+    let va: u64 = apic.map_device(state, phys)
+    if va == 0 {
+        return errno.neg(errno.E_NOMEM)
+    }
+    __mmio_write32(va as *mut u32, (value & 0xFFFFFFFF) as u32)
+    return 0
+}
+
+fn put_word(out: u64, at: u64, s: u64) -> u64 {
+    var n: u64 = at
+    var k: u64 = 0
+    while *((s + k) as *mut u8) != 0 as u8 {
+        *((out + n) as *mut u8) = *((s + k) as *mut u8)
+        n = n + 1
+        k = k + 1
+    }
+    return n
+}
+
+fn driver_text(state: u64, bdf: u64, out: u64, cap: u64) -> u64 {
+    var w_none: [u8; 5] = "none\0"
+    var w_builtin: [u8; 8] = "builtin\0"
+    var w_store: [u8; 6] = "store\0"
+    var w_bound: [u8; 6] = "bound\0"
+    var w_failed: [u8; 7] = "failed\0"
+    var w_seen: [u8; 5] = "seen\0"
+    var w_dash: [u8; 2] = "-\0"
+    var w_sp: [u8; 2] = " \0"
+    let i: u64 = device_index(state, bdf)
+    if i >= pci.MAX_DEV || cap < 64 {
+        return errno.neg(errno.E_NODEV)
+    }
+    var n: u64 = 0
+    let row: u64 = drvreg.pci_row(state, i)
+    let b: u64 = drvstore.find_bind(1, i)
+    if row != 0xFFFFFFFFFFFFFFFF {
+        n = put_word(out, n, drvreg.row_name(row))
+        n = put_word(out, n, (&w_sp[0]) as u64)
+        n = put_word(out, n, (&w_builtin[0]) as u64)
+        n = put_word(out, n, (&w_sp[0]) as u64)
+        let st: u64 = drvreg.state_of(state, row)
+        if st == drvreg.S_BOUND {
+            n = put_word(out, n, (&w_bound[0]) as u64)
+        } else if st == drvreg.S_FAILED {
+            n = put_word(out, n, (&w_failed[0]) as u64)
+        } else if st == drvreg.S_SEEN {
+            n = put_word(out, n, (&w_seen[0]) as u64)
+        } else {
+            n = put_word(out, n, (&w_dash[0]) as u64)
+        }
+    } else if b != drvstore.NONE {
+        n = put_word(out, n, drvstore.pkg_name(drvstore.bind_pkg(b)))
+        n = put_word(out, n, (&w_sp[0]) as u64)
+        n = put_word(out, n, (&w_store[0]) as u64)
+        n = put_word(out, n, (&w_sp[0]) as u64)
+        if drvstore.bind_result(b) == drvstore.BR_BOUND {
+            n = put_word(out, n, (&w_bound[0]) as u64)
+        } else {
+            n = put_word(out, n, (&w_failed[0]) as u64)
+        }
+    } else {
+        n = put_word(out, n, (&w_none[0]) as u64)
+        n = put_word(out, n, (&w_sp[0]) as u64)
+        n = put_word(out, n, (&w_dash[0]) as u64)
+        n = put_word(out, n, (&w_sp[0]) as u64)
+        n = put_word(out, n, (&w_dash[0]) as u64)
+    }
+    *((out + n) as *mut u8) = 0 as u8
+    return n
+}

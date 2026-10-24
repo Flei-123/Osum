@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import bus.pci
+import wlan.iwl_probe
+import wlan.iwl_pwr
+import drv.net.iwl
+
+export { prph_read, PRPH_MAX_DWORDS }
+
+const PRPH_MAX_DWORDS: u64 = 256
+const CFG_COMMAND: u64 = 0x04
+const CMD_MEM: u64 = 0x2
+const ALL_ONES: u64 = 0xFFFFFFFF
+
+fn hook_rd(ctx: u64, off: u64) -> u64 {
+    return __mmio_read32((ctx + off) as *mut u32) as u64
+}
+
+fn hook_wr(ctx: u64, off: u64, v: u64) {
+    __mmio_write32((ctx + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn prph_read(state: u64, bdf: u64, addr: u64, count: u64, out: u64) -> u64 {
+    let i: u64 = pci.find_bdf(state, bdf)
+    if i >= pci.MAX_DEV {
+        return errno.neg(errno.E_NODEV)
+    }
+    if count == 0 || count > PRPH_MAX_DWORDS || (addr & 3) != 0 {
+        return errno.neg(errno.E_INVAL)
+    }
+    if (pci.cfg_read16(bdf, CFG_COMMAND) & CMD_MEM) == 0 {
+        return errno.neg(errno.E_NXIO)
+    }
+    var p: iwl_probe.Probe = iwl_probe.probe_new()
+    if iwl.probe_at(state, i, &p, false) != 0 {
+        return errno.neg(errno.E_NXIO)
+    }
+    iwl_probe.mmio_set(&p, p.ctx, hook_rd, hook_wr)
+    let gp: u64 = iwl_pwr.rd(&p, iwl_probe.CSR_GP_CNTRL)
+    if gp == ALL_ONES {
+        return errno.neg(errno.E_IO)
+    }
+    let had: bool = (gp & iwl_pwr.GP_ACCESS_REQ) != 0
+    if !had {
+        if iwl_pwr.mac_access_get(&p) != 0 {
+            iwl_pwr.mac_access_put(&p)
+            return errno.neg(errno.E_IO)
+        }
+    }
+    var k: u64 = 0
+    while k < count {
+        *((out + k * 4) as *mut u32) = iwl_pwr.prph_rd(&p, addr + k * 4) as u32
+        k = k + 1
+    }
+    if !had {
+        iwl_pwr.mac_access_put(&p)
+    }
+    return count
+}

@@ -79,6 +79,9 @@ import net.ebpfhook
 import ipc.share
 import net.wg
 import bus.bus
+import bus.pcidbg
+import drv.net.iwl_dbg
+import net.wlan_reload
 import ipc.perm
 import sched.ctr
 import sched.origin
@@ -1663,6 +1666,7 @@ const KL_CRASH: u64 = 30 // liegt ein Absturzbericht vom letzten Start vor?
 const SYS_OSUM_KRACH: u64 = 1861
 
 const SYS_OSUM_CPUSTAT: u64 = 1840
+const SYS_OSUM_DBG: u64 = 2000
 
 // ===================================================== RUNDE FEEDBACK,
 // in diesen Zweig geholt von RUNDE BRIDGE-2.
@@ -3428,6 +3432,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE WERKZEUGE: die Kerne, einzeln.
     if number == SYS_OSUM_CPUSTAT {
         return do_cpustat(state, a0, a1)
+    }
+    if number == SYS_OSUM_DBG {
+        return do_dbg(state, me, a0, a1, a2, a3, a4)
     }
     // RUNDE FEEDBACK (ueber BRIDGE-2): das Bildschirmfoto. Der Weg geht
     // ueber `gfx`, weil er den Fensterserver braucht -- bei `gui=off`
@@ -11951,6 +11958,89 @@ fn do_krach(state: u64, me: u64, art: u64) -> u64 {
     }
     crash.knall(state, art)
     return 0
+}
+
+const DBG_LIST: u64 = 1
+const DBG_INFO: u64 = 2
+const DBG_CFGREAD: u64 = 3
+const DBG_CFGWRITE: u64 = 4
+const DBG_MMIOREAD: u64 = 5
+const DBG_MMIOWRITE: u64 = 6
+const DBG_DRIVER: u64 = 7
+const DBG_PRPHREAD: u64 = 8
+const DBG_WLAN_RELOAD: u64 = 9
+const DBG_WLAN_STATE: u64 = 10
+const DBG_WRITE_MAGIC: u64 = 0x57524954
+
+fn dbg_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> u64 {
+    if !copy_out(state, me, dst, src, len) {
+        return neg(errno.E_FAULT)
+    }
+    return len
+}
+
+fn do_dbg(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    var tmp: [u8; 1024] = [0 as u8; 1024]
+    let t: u64 = (&tmp[0]) as u64
+    let root: bool = sched.tget(state, me, sched.T_EUID) == 0
+    var r: u64 = 0
+    if op == DBG_LIST {
+        r = pcidbg.list_devices(state, t)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a1, t, r * 8)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    if op == DBG_INFO {
+        r = pcidbg.device_info(state, a1, t)
+        if r != 0 { return r }
+        return dbg_out(state, me, a2, t, pcidbg.INFO_QWORDS * 8)
+    }
+    if op == DBG_CFGREAD {
+        r = pcidbg.cfg_read(state, a1, a2, a4, t)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a3, t, r)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    if op == DBG_DRIVER {
+        r = pcidbg.driver_text(state, a1, t, 256)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a2, t, r + 1)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    if op == DBG_WLAN_STATE {
+        return wlan_reload.state_word()
+    }
+    if !root {
+        return neg(errno.E_PERM)
+    }
+    if op == DBG_CFGWRITE {
+        return pcidbg.cfg_write(state, a1, a2, a3, a4)
+    }
+    if op == DBG_MMIOWRITE {
+        if a4 != DBG_WRITE_MAGIC { return neg(errno.E_PERM) }
+        return pcidbg.mmio_write(state, a1 & 0xFFFF, a1 >> 16, a2, a3)
+    }
+    if op == DBG_MMIOREAD {
+        r = pcidbg.mmio_read(state, a1 & 0xFFFF, a1 >> 16, a2, a4, t)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a3, t, r * 4)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    if op == DBG_PRPHREAD {
+        r = iwl_dbg.prph_read(state, a1, a2, a4, t)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a3, t, r * 4)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    if op == DBG_WLAN_RELOAD {
+        return wlan_reload.request(state)
+    }
+    return neg(errno.E_INVAL)
 }
 
 fn do_pmon(state: u64, me: u64, kind: u64, index: u64, field: u64) -> u64 {
