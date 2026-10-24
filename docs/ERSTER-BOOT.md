@@ -158,3 +158,8 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 9. **Tray:** den Chevron (^) rechts in der Taskleiste anklicken -- Flyout mit Symbol-Raster; Hover und Rechtsklick darin. Foto.
 10. **Taskleisten-Hover:** Maus ueber Programmsymbole in der Leiste -- Hover-Hervorhebung/Vorschau da? Kurz melden.
 11. **Fallback-Icons:** Programme ohne eigenes Symbol (Leiste, Startmenue, Alt+Tab, Task-Manager) -- Buchstaben-Kachel statt leer? Foto.
+
+## Stick 11 HP (24.10.2026, Baustand de07f2da = main, Gates drvstore 70/0 + drvreg 20/0)
+
+- **Datei:** `orientos-usb-hp-20261024-de07f2da.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `dc1044c155f04d64b570ad4c197dba1d1302936855b2e9408fc16aa1108a9902`.
+- **Neu gegenueber Stick 10:** Modulbau ps2maus mit ptrcfg/tpcfg, 37 Modul-Slots; WLAN-Diagnose fail_pm (Branch w25x) noch NICHT enthalten.
