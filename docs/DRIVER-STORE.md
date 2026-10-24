@@ -60,6 +60,15 @@ Host tool: `mkpkg.py build <outdir> --name N --module M.omod --match "pci 1234:1
 - Word `nostore` (bit 1195) skips scan and bind.
 - Demo: `module/store/edudemo.fi` binds QEMU `edu` (1234:11e8), reads the id register and a liveness register through BAR0.
 
-## 6. Open
+## 6. drvctl and fw.request (built 24.10.2026, gate `tools/drvstore/run.sh` 70/0)
 
-`drvctl` (list/match/install/remove/ban), `fw.request(name, sha256)`, USB/ACPI auto-bind (only PCI binds; USB/ACPI are listed), hot-plug rescan, rights enforcement, PS/2 mouse via store.
+- `drvctl list`: one line per `/lib/drivers/<name>`: `version= rank= sig=ok|bad|missing`, plus `invalid` (wrong ABI, missing module, unknown manifest line) and `banned`; ends with `packages=N valid=M` (same count as the kernel scan).
+- `drvctl match <pci|pciclass|usb|acpi> <id>`: best package with the kernel rule (specificity, then rank, then version); banned and invalid packages are skipped. `pci` ids: `VVVV:DDDD` or `VVVV:DDDD:SSSS:ssss`; `pciclass`: `CCSS` or `CCSS:PP`.
+- `drvctl install <dir>`: verifies `driver.inf.sig` (Ed25519, same key as the kernel) before anything is copied; copies manifest, signature and module to `/lib/drivers/<name>`; takes effect at the next boot.
+- `drvctl remove <name>`, `drvctl ban <name>` (appends to `/etc/drivers.deny`); names are validated (`[a-z0-9_-]`, no paths).
+- `fw.request`: kernel symbol `k_fwreq(name, sha256_32_bytes, dst, cap) -> length (0 = refused)`, in `kernel/bus/drvfw.fi`. Needs the manifest right `fw`, a `fw=` key, name and hash equal to the signed manifest, and the SHA-256 of `/lib/firmware/<name>` must match. Errors are printed as `drvstore: fw <pkg> error N`: 2 no right, 3 no fw key, 4 name, 5 hash differs from module, 6 file missing, 7 too big, 8 read, 9 digest mismatch.
+- `ksym` has 14 symbols now (`k_fwreq` appended, ABI unchanged).
+
+## 7. Open
+
+USB/ACPI auto-bind (only PCI binds; USB/ACPI are listed), hot-plug rescan, rights enforcement besides `mmio` and `fw`, PS/2 mouse via store, `drvctl` has no live rescan (active after reboot).
