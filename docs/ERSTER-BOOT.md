@@ -73,7 +73,14 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
-## Stick 4 HP (24.10.2026, main b2937208)
+## Stick 5 HP (24.10.2026, main 2380d6c4)
+
+- **Datei:** `orientos-usb-hp-20261024-2380d6c4.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `435a5f545d8207aebb6ffec2a22a9fb192f5c1e30636ed6d21321311c8c671c4`. Ersetzt Stick 4 (SHA 79dbb51a...).
+- **Neu gegenueber Stick 4:** WLAN-Treiber 8265 mit Befehlswarteschlange, INIT-/RT-Firmware-Boot und Auto-Start auf 8086:24fd, `/proc/wlan` (phase, err, fw, nvm, calib), Einstellungen > **WLAN** schreibt `/etc/wlan.conf` (0600), SMP-/Helligkeits-/Touch-Korrekturen aus main. Kernelwort `noiwl` schaltet den WLAN-Autostart ab.
+- **Ehrlich:** Verbinden ist am echten Silizium UNVERIFIZIERT (Firmware-Werte nur gegen Fake-Firmware geprueft). Ziel dieses Sticks: `/proc/wlan` zeigt, wie weit der Firmware-Boot am HP kommt.
+- **Gates:** ovmfboot, hwinv-guest 57/0, touchsim 37/0; echte HP-Hardware nicht getestet.
+
+## Stick 4 HP (24.10.2026, main b2937208) -- abgeloest durch Stick 5
 
 - **Datei:** `orientos-usb-hp-20261024-b2937208.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `79dbb51ac7af1e648794fd0aa65d768e6eca89c9a4cde496f230834e75078b10`. Ersetzt Stick 3 (SHA b6d20b62...).
 - **Neu gegenueber Stick 3:** Touchscreen auf Geraeten mit mehreren I2C-Reglern (i2chid Mehr-Regler + AML-Geraetesuche, `/proc/inputdevs`), Touchpad-Gesten + Einstellungen-Seite **Touchpad**, Rechtsklick per Touchpad-Ecke (Ecke unten rechts), Touchscreen-Gesten (tippen/ziehen/zwei Finger/lang = Rechtsklick).
@@ -93,6 +100,7 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 
 ## Was der Boss fotografieren soll
 
+0. **WLAN (Stick 5):** Terminal: `cat /proc/wlan` -- Foto (phase/err/err_text/fw/nvm/calib). Dann Einstellungen > WLAN: SSID + Passwort eintragen, speichern, nochmal `cat /proc/wlan` -- Foto. Bei Haenger/Panik Neustart mit Kernelwort `noiwl` (Foto der Bootzeile).
 1. **Overlay:** `Strg+Shift+F` -- Foto vom ganzen Schirm (Zeile `fb_write_mbs`, FPS, CPU, RAM).
 2. **Terminal** (Win-Taste, "terminal"): je ein Foto der Ausgabe von
    - `cat /proc/backlight`
