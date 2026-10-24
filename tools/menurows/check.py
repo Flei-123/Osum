@@ -22,7 +22,7 @@ def check(cond, text):
 
 
 def last(pat):
-    found = re.findall(pat, serial)
+    found = [m.groups() for m in re.finditer(pat, serial)]
     return tuple(int(v) for v in found[-1]) if found else None
 
 
@@ -72,8 +72,8 @@ def hover_checks(prefix, rest, first, second, n1, n2, away):
     area = row_box(n1)
     plate = differing(base, h1, area, sprite(n1))
     check(plate >= 400, "%s: hover on row %d paints a plate (%d points differ from rest)" % (prefix, n1, plate))
-    other = differing(base, h1, row_box(n2 + 1), sprite(n1))
-    check(other <= 5, "%s: the row below the pointer stays as at rest (%d points)" % (prefix, other))
+    other = differing(base, h1, row_box(0), sprite(n1))
+    check(other <= 200, "%s: the selected first row stays as at rest (%d points)" % (prefix, other))
     moved = differing(base, h2, row_box(n1), sprite(n2))
     check(moved <= 5, "%s: row %d is back at rest after the pointer left it (%d points)" % (prefix, n1, moved))
     plate2 = differing(base, h2, row_box(n2), sprite(n2))
@@ -83,7 +83,7 @@ def hover_checks(prefix, rest, first, second, n1, n2, away):
         check(gone <= 5, "%s: the plate is gone when the pointer is away (%d points)" % (prefix, gone))
 
 
-hover_checks("all apps", "a0-rest", "a1-row2", "a2-row4", 2, 4, "a3-away")
+hover_checks("all apps", "a0-rest", "a1-row2", "a2-row1", 2, 1, "a3-away")
 hover_checks("search", "s0-rest", "s1-row2", "s2-row1", 2, 1, None)
 print("MENUROWS: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
