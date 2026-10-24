@@ -73,6 +73,13 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
+## Stick 10 HP (24.10.2026, Baustand 71e8521e = main mit Treiber-Store drvctl + fw.request)
+
+- **Datei:** `orientos-usb-hp-20261024-71e8521e.img` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `4c89c0b993b33b79217821b28bda392bf14dbed9e3a6139950a2a6fea59416b9`.
+- **Neu gegenueber Stick 9:** Treiber-Store im Kern (`/lib/drivers`, signierte Pakete), `drvctl list|match|install|remove|ban`, `/proc/drivers` mit allen PCI/USB/ACPI-Geraeten.
+- **Foto-Checkliste:** `cat /proc/drivers` -- Zeilen mit `drv=none` sind die Luecken (Geraete ohne Treiber); ganz unten `store=on pkgs=... valid=...`. Dazu `drvctl list`.
+- **Ehrlich:** WLAN-Fixes aus Branch staff/orientos-w25x (fail_alive2/fail_pm) sind NICHT enthalten. Windows vorher ganz herunterfahren (`shutdown /s /t 0`).
+
 ## Stick 9 HP (24.10.2026, Baustand 7f8c161e = main mit APMG-Fix)
 
 - **Datei:** `orientos-usb-hp-20261024-7f8c161e.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `6df57b6cd58d6b058336f8323ccf5067dbdb6e747b208d6ced37cae5be1db741`. Ersetzt Stick 8 (SHA 64881751...).
