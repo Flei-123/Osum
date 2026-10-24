@@ -85,5 +85,6 @@ klar | grep -aq 'dbgsrv: 401 bad token 10.0.2.2' && ok "bad tokens logged with t
 klar | grep -aq -- "$TOKEN" && bad "token leaked to the console log" || ok "token never appears in the console log"
 rc=$(get -H "X-Token: $TOKEN" "$U/dbgsrvlog"); grep -q -- "$TOKEN" "$T/o.txt" && bad "token leaked into /dbgsrvlog" || ok "token not in /dbgsrvlog"
 
+[ "$fail" = 0 ] || { echo "---- serial tail"; klar | tail -60; }
 echo "DBGSRV-QEMU: $pass ok, $fail fail"
 [ "$fail" = 0 ]
