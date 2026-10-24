@@ -4,9 +4,10 @@ profile kernel
 import lib.kstate
 import bus.pci
 import serial
+import bus.drvclass
 
-export { mark_ok, mark_fail, render, boot_report, rows, found_of, state_of, claimed, acpi_row, row_name, pci_row,
-    D_NVME, D_AHCI, D_IDE, D_XHCI, D_E1000, D_R8169, D_HDA, D_VIRTIO_NET, D_VMSVGA, D_VIRTIO_BLK,
+export { class_of, mark_ok, mark_fail, render, boot_report, rows, found_of, state_of, claimed, acpi_row, row_name, pci_row,
+    D_NVME, D_AHCI, D_IDE, D_XHCI, D_E1000, D_R8169, D_HDA, D_VIRTIO_NET, D_VMSVGA, D_VIRTIO_BLK, D_USB_NET, D_IWL,
     S_ABSENT, S_SEEN, S_BOUND, S_FAILED }
 
 const MAXR: u64 = 40
@@ -20,7 +21,8 @@ const F_PROG: u64 = 4
 const F_HID: u64 = 5
 const F_STATE: u64 = 6
 const F_BOUND: u64 = 7
-const FIELDS: u64 = 8
+const F_CLASS: u64 = 8
+const FIELDS: u64 = 9
 const BUS_PCI: u64 = 1
 const BUS_ACPI: u64 = 2
 const BUS_USB: u64 = 3
@@ -95,8 +97,23 @@ fn reg(name: u64, bus: u64, vend: u64, dev: u64, cls: u64, prog: u64, hid: u64) 
     tab[(i * FIELDS + F_HID) as usize] = hid
     tab[(i * FIELDS + F_STATE) as usize] = ST_NONE
     tab[(i * FIELDS + F_BOUND) as usize] = 0
+    tab[(i * FIELDS + F_CLASS) as usize] = drvclass.CLS_NONE
     nrows = nrows + 1
     return i
+}
+
+fn set_class(id: u64, cls: u64) {
+    if id < nrows && drvclass.valid(cls) {
+        tab[(id * FIELDS + F_CLASS) as usize] = cls
+    }
+}
+
+fn class_of(id: u64) -> u64 {
+    ensure()
+    if id >= nrows {
+        return drvclass.CLS_NONE
+    }
+    return tab[(id * FIELDS + F_CLASS) as usize]
 }
 
 fn builtin() {
@@ -150,6 +167,22 @@ fn builtin() {
     reg((&n22[0]) as u64, 3, 0x0, 0x0, 0x300, 0x1FF, 0x0)
     reg((&n23[0]) as u64, 3, 0x0, 0x0, 0x200, 0x1FF, 0x0)
     reg((&n24[0]) as u64, 3, 0x0, 0x0, 0x900, 0x1FF, 0x0)
+    set_class(D_NVME, drvclass.CLS_BLOCK)
+    set_class(D_AHCI, drvclass.CLS_BLOCK)
+    set_class(D_IDE, drvclass.CLS_BLOCK)
+    set_class(D_VIRTIO_BLK, drvclass.CLS_BLOCK)
+    set_class(D_USB_MSC, drvclass.CLS_BLOCK)
+    set_class(D_E1000, drvclass.CLS_NET_ETH)
+    set_class(D_R8169, drvclass.CLS_NET_ETH)
+    set_class(D_VIRTIO_NET, drvclass.CLS_NET_ETH)
+    set_class(D_USB_NET, drvclass.CLS_NET_ETH)
+    set_class(D_IWL, drvclass.CLS_NET_WLAN)
+    set_class(D_HDA, drvclass.CLS_AUDIO)
+    set_class(D_PS2, drvclass.CLS_INPUT)
+    set_class(D_I2C_HID, drvclass.CLS_INPUT)
+    set_class(D_USB_HID, drvclass.CLS_INPUT)
+    set_class(D_VMSVGA, drvclass.CLS_DISPLAY)
+    set_class(D_VIRTIO_GPU, drvclass.CLS_DISPLAY)
 }
 
 fn ensure() {
@@ -308,6 +341,14 @@ fn put_s(s: u64) {
     }
 }
 
+fn put_tag(t: u64) {
+    var k: u64 = 0
+    while k < 8 && ((t >> (k * 8)) & 255) != 0 {
+        put_c((t >> (k * 8)) & 255)
+        k = k + 1
+    }
+}
+
 fn put_dec(v: u64) {
     var tmp: [u8; 20] = [0 as u8; 20]
     var n: u64 = 0
@@ -399,6 +440,8 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
     var s_un: [u8; 15] = "unclaimed pci \0"
     var s_cls: [u8; 8] = " class=\0"
     var s_sum: [u8; 13] = "# unclaimed=\0"
+    var s_cl: [u8; 8] = " class=\0"
+    var s_ch: [u8; 15] = "# class-calls \0"
     ensure()
     w_out = out
     w_cap = cap
@@ -445,6 +488,8 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
         } else {
             put_s((&errs[(r * ERR_W) as usize]) as u64)
         }
+        put_s((&s_cl[0]) as u64)
+        put_tag(drvclass.tag_of(tab[(r * FIELDS + F_CLASS) as usize]))
         put_c(10)
         r = r + 1
     }
@@ -474,6 +519,17 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
     put_s((&s_sum[0]) as u64)
     put_dec(nun)
     put_c(10)
+    var cl: u64 = 1
+    while cl < drvclass.CLS_COUNT {
+        if drvclass.hits(cl) != 0 {
+            put_s((&s_ch[0]) as u64)
+            put_tag(drvclass.tag_of(cl))
+            put_c(61)
+            put_dec(drvclass.hits(cl))
+            put_c(10)
+        }
+        cl = cl + 1
+    }
     return w_at
 }
 

@@ -17,7 +17,7 @@ All `state: u64` first (data region). `u` = unit number inside the driver, `c`/`
 
 Dispatcher chooses by `KIND_VIRTIO=1, E1000=2, R8169=3, I219=4, USBNET=5, WLAN=6`. `driver_for(ven,dev,rev)->kind` is the match table, `reason_for` names recognised-but-undriven chips, `probe` walks PCI class 02:00 and fills 8 card slots (`MAX_CARDS=8`, only cards 0/1 get an IRQ vector, `IRQ_CARDS=2`). 44 `r8169.` references and ~30 `if k == KIND_x` chains.
 
-Core set every driver exports (identical names/signatures in `e1000.fi`, `r8169.fi`, `usbnet.fi`, `wlan_net.fi`, virtio-net in `kernel/drv/blk/virtio.fi`):
+Core set every driver exports (identical names/signatures in `e1000.fi`, `r8169.fi`, `usbnet.fi`, `wlan_net.fi`, virtio-net in `kernel/drv/net/virtio.fi`):
 
 ```
 present_on(state,u)->bool  ready_on  up_on  link_up_on  poll_on(state,u)->bool
@@ -31,7 +31,7 @@ init_on(state,u,use_msix:bool,armed:bool,vec:u64)->bool     irq_on(state,u)     
 |---|---|---|
 | e1000 / I217 / I219 (`e1000.fi`, 2755 l.) | `hwstat_on`, `kill_on`, `resume_on` (S3), `irq_mode_on`, `warn_on`, `step_on`, `storm_on`, `phy_id_on`, `swflag_on`, `txprobe_on`, `link_speed_on`, `msix_on` | only driver with suspend/resume and raw register stats; `MAX_UNITS` 2; two `KIND`s (E1000, I219) for one file |
 | r8169 (`r8169.fi`, 1484 l.) | `rx_errors_on`, `oversize_on`, `rx_overflow_on`, `selftest_on`, `print_regs_on`, `variant_of(dev)`; `irq_kind` hard-coded `1` (pin) in netdev | no suspend/resume; chip variants (8139C+, 8168, 8125) decided by `variant_of`, not by the dispatcher |
-| virtio-net (`drv/blk/virtio.fi`, wrong folder) | `features_on`, `queue_size_on`, `notified_on`, `msix_on` | `MAX_CARDS=2` |
+| virtio-net (`drv/net/virtio.fi`, moved from drv/blk) | `features_on`, `queue_size_on`, `notified_on`, `msix_on` | `MAX_CARDS=2` |
 | USB ECM/RNDIS/NCM/CH397/AX88772 (`drv/net/usbnet.fi`, 715 l.) | `attach`, `attach_rndis`, `attach_ncm`, `attach_ch336`, `attach_ax88772`, `detach`, `unplug_slot`, `link_on`, `exists`, `keepalives` | **push model**: `usb.fi` enumerates and calls `attach*`, netdev only polls `exists` (`late_usb`); `MAX_UNITS=1`; always polled; hot-unplug exists; chip protocol is in `lib/usbnet/{ch397,ax88772,ncm,rndis}.fi` (`tx_wrap`, `rx_next`, `rx_frame_off`, `rx_frame_len`, `supported`) and chosen inside `usbnet.fi` by `rx_take_on` -> `rndis_next`/`ncm_next`/`ch_next`/`ax_next` |
 | WLAN (`net/wlan_net.fi`) | `exists`, `set_mac`, `set_link`, `rx_offer`, `tx_take`, `tx_pending` | one-slot ring buffers pumped by a kernel task; no PCI place |
 

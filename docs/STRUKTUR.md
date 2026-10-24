@@ -862,7 +862,7 @@ Die vollständige Liste:
 | `kernel/hwid.fi` | `kernel/diag/hwid.fi` |
 | `kernel/ahci.fi` | `kernel/drv/blk/ahci.fi` |
 | `kernel/nvme.fi` | `kernel/drv/blk/nvme.fi` |
-| `kernel/virtio.fi` | `kernel/drv/blk/virtio.fi` |
+| `kernel/virtio.fi` | `kernel/drv/net/virtio.fi` |
 | `kernel/ansi.fi` | `kernel/drv/con/ansi.fi` |
 | `kernel/sercon.fi` | `kernel/drv/con/sercon.fi` |
 | `kernel/tty.fi` | `kernel/drv/con/tty.fi` |

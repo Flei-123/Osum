@@ -52,10 +52,13 @@
 import lib.kstate
 import serial
 import bus.pci
+import bus.drvreg
 import lib.chipname
-import drv.blk.virtio
+import drv.net.virtio
 import drv.net.e1000
 import drv.net.r8169
+import drv.net.netclass
+import drv.net.ethreg
 import drv.net.usbnet
 import net.wlan_net
 
@@ -148,7 +151,7 @@ const MAX_UNSUP: u64 = 16
 const KIND_NONE: u64 = 0
 const KIND_VIRTIO: u64 = 1
 const KIND_E1000: u64 = 2
-const KIND_R8169: u64 = 3 // Runde RTL: kernel/r8169.fi
+const KIND_R8169: u64 = ethreg.KIND_R8169
 const KIND_WLAN: u64 = 6 // W-WLAN11: Intel WLAN wlan0 (kernel/net/wlan_net.fi, ring buffers pumped by the K_WLAN task)
 const KIND_USBNET: u64 = 5 // L-015: USB CDC-ECM function (kernel/drv/net/usbnet.fi)
 const KIND_I219: u64 = 4 // Runde RTL: kernel/e1000.fi, PCH-Zweig
@@ -654,8 +657,9 @@ fn selftest(state: u64) {
     while c < MAX_CARDS {
         let k: u64 = kind_on(state, c)
         if k == KIND_R8169 {
-            r8169.print_regs_on(state, unit_of(state, c))
-            r8169.selftest_on(state, unit_of(state, c))
+            let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+            eo.print_regs(state, unit_of(state, c))
+            eo.selftest(state, unit_of(state, c))
         }
         c = c + 1
     }
@@ -949,7 +953,7 @@ fn polled_on(state: u64, c: u64) -> bool {
     return kind_on(state, c) != KIND_NONE && (c >= IRQ_CARDS || kind_on(state, c) == KIND_USBNET || kind_on(state, c) == KIND_WLAN)
 }
 
-fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
+fn init_dispatch(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
     let k: u64 = kind_on(state, c)
     let vec: u64 = vector_for(c)
     if vec == 0 {
@@ -964,7 +968,8 @@ fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
         return e1000.init_on(state, unit_of(state, c), use_msix, armed, vec)
     }
     if k == KIND_R8169 {
-        return r8169.init_on(state, unit_of(state, c), use_msix, armed, vec)
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.init(state, unit_of(state, c), use_msix, armed, vec)
     }
     if k == KIND_USBNET {
         // the USB function was brought up by kernel/usb/usb.fi; it is polled
@@ -976,6 +981,39 @@ fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
         return wlan_net.ready_on(state, unit_of(state, c))
     }
     return false
+}
+
+fn registry_row(k: u64) -> u64 {
+    if k == KIND_VIRTIO {
+        return drvreg.D_VIRTIO_NET
+    }
+    if k == KIND_E1000 || k == KIND_I219 {
+        return drvreg.D_E1000
+    }
+    if k == KIND_R8169 {
+        return drvreg.D_R8169
+    }
+    if k == KIND_USBNET {
+        return drvreg.D_USB_NET
+    }
+    if k == KIND_WLAN {
+        return drvreg.D_IWL
+    }
+    return 0xFFFF
+}
+
+fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
+    let k: u64 = kind_on(state, c)
+    let ok: bool = init_dispatch(state, c, use_msix, armed)
+    if k != KIND_NONE {
+        if ok {
+            drvreg.mark_ok(registry_row(k))
+        } else {
+            var s_fail: [u8; 12] = "init failed\0"
+            drvreg.mark_fail(registry_row(k), (&s_fail[0]) as u64)
+        }
+    }
+    return ok
 }
 
 // ROUND NIC9020: how the card interrupts -- 0 polled, 1 pin, 2 MSI,
@@ -1007,7 +1045,8 @@ fn present_on(state: u64, c: u64) -> bool {
         return e1000.present_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.present_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.present(state, unit_of(state, c))
     }
     if k == KIND_USBNET {
         return usbnet.present_on(state, unit_of(state, c))
@@ -1027,7 +1066,8 @@ fn ready_on(state: u64, c: u64) -> bool {
         return e1000.ready_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.ready_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.ready(state, unit_of(state, c))
     }
     if k == KIND_USBNET {
         return usbnet.ready_on(state, unit_of(state, c))
@@ -1047,7 +1087,8 @@ fn up_on(state: u64, c: u64) -> bool {
         return e1000.up_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.up_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.up(state, unit_of(state, c))
     }
     if k == KIND_USBNET {
         return usbnet.up_on(state, unit_of(state, c))
@@ -1067,7 +1108,8 @@ fn bdf_on(state: u64, c: u64) -> u64 {
         return e1000.bdf_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.bdf_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.bdf(state, unit_of(state, c))
     }
     return 0
 }
@@ -1081,7 +1123,8 @@ fn idx_on(state: u64, c: u64) -> u64 {
         return e1000.idx_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.idx_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.idx(state, unit_of(state, c))
     }
     return pci.MAX_DEV
 }
@@ -1095,7 +1138,8 @@ fn irqs_on(state: u64, c: u64) -> u64 {
         return e1000.irqs_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.irqs_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.irqs(state, unit_of(state, c))
     }
     return 0
 }
@@ -1109,7 +1153,8 @@ fn rx_frames_on(state: u64, c: u64) -> u64 {
         return e1000.rx_frames_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.rx_frames_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.rx_frames(state, unit_of(state, c))
     }
     if k == KIND_USBNET {
         return usbnet.rx_frames_on(state, unit_of(state, c))
@@ -1129,7 +1174,8 @@ fn tx_frames_on(state: u64, c: u64) -> u64 {
         return e1000.tx_frames_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.tx_frames_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.tx_frames(state, unit_of(state, c))
     }
     if k == KIND_USBNET {
         return usbnet.tx_frames_on(state, unit_of(state, c))
@@ -1149,7 +1195,8 @@ fn tx_drops_on(state: u64, c: u64) -> u64 {
         return e1000.tx_drops_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.tx_drops_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.tx_drops(state, unit_of(state, c))
     }
     if k == KIND_USBNET {
         return usbnet.tx_drops_on(state, unit_of(state, c))
@@ -1169,7 +1216,8 @@ fn rx_octets_on(state: u64, c: u64) -> u64 {
         return e1000.rx_octets_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.rx_octets_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.rx_octets(state, unit_of(state, c))
     }
     if k == KIND_USBNET {
         return usbnet.rx_octets_on(state, unit_of(state, c))
@@ -1189,7 +1237,8 @@ fn tx_octets_on(state: u64, c: u64) -> u64 {
         return e1000.tx_octets_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.tx_octets_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.tx_octets(state, unit_of(state, c))
     }
     if k == KIND_USBNET {
         return usbnet.tx_octets_on(state, unit_of(state, c))
@@ -1209,7 +1258,8 @@ fn features_on(state: u64, c: u64) -> u64 {
         return e1000.features_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.features_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.features(state, unit_of(state, c))
     }
     return 0
 }
@@ -1223,7 +1273,8 @@ fn queue_size_on(state: u64, c: u64) -> u64 {
         return e1000.queue_size_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.queue_size_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.queue_size(state, unit_of(state, c))
     }
     return 0
 }
@@ -1237,7 +1288,8 @@ fn msix_on(state: u64, c: u64) -> bool {
         return e1000.msix_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.msix_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.msix(state, unit_of(state, c))
     }
     return false
 }
@@ -1251,7 +1303,8 @@ fn notified_on(state: u64, c: u64) -> u64 {
         return e1000.notified_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.notified_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.notified(state, unit_of(state, c))
     }
     return 0
 }
@@ -1265,7 +1318,8 @@ fn link_up_on(state: u64, c: u64) -> bool {
         return e1000.link_up_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.link_up_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.link_up(state, unit_of(state, c))
     }
     return false
 }
@@ -1293,7 +1347,8 @@ fn link_speed_on(state: u64, c: u64) -> u64 {
         return e1000.link_speed_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.link_speed_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.link_speed(state, unit_of(state, c))
     }
     return 0
 }
@@ -1319,7 +1374,8 @@ fn mac_at_on(state: u64, c: u64, i: u64) -> u64 {
         return e1000.mac_at_on(state, unit_of(state, c), i)
     }
     if k == KIND_R8169 {
-        return r8169.mac_at_on(state, unit_of(state, c), i)
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.mac_at(state, unit_of(state, c), i)
     }
     if k == KIND_USBNET {
         return usbnet.mac_at_on(state, unit_of(state, c), i)
@@ -1339,7 +1395,8 @@ fn rx_take_on(state: u64, c: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         return e1000.rx_take_on(state, unit_of(state, c), frame, slot)
     }
     if k == KIND_R8169 {
-        return r8169.rx_take_on(state, unit_of(state, c), frame, slot)
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.rx_take(state, unit_of(state, c), frame, slot)
     }
     if k == KIND_USBNET {
         return usbnet.rx_take_on(state, unit_of(state, c), frame, slot)
@@ -1360,7 +1417,8 @@ fn rx_recycle_on(state: u64, c: u64, id: u64) {
         e1000.rx_recycle_on(state, unit_of(state, c), id)
     }
     if k == KIND_R8169 {
-        r8169.rx_recycle_on(state, unit_of(state, c), id)
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        eo.rx_recycle(state, unit_of(state, c), id)
     }
     if k == KIND_USBNET {
         usbnet.rx_recycle_on(state, unit_of(state, c), id)
@@ -1379,7 +1437,8 @@ fn tx_room_on(state: u64, c: u64) -> u64 {
         return e1000.tx_room_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.tx_room_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.tx_room(state, unit_of(state, c))
     }
     if k == KIND_USBNET {
         return usbnet.tx_room_on(state, unit_of(state, c))
@@ -1399,7 +1458,8 @@ fn tx_frame_on(state: u64, c: u64, src: u64, n: u64) -> bool {
         return e1000.tx_frame_on(state, unit_of(state, c), src, n)
     }
     if k == KIND_R8169 {
-        return r8169.tx_frame_on(state, unit_of(state, c), src, n)
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.tx_frame(state, unit_of(state, c), src, n)
     }
     if k == KIND_USBNET {
         return usbnet.tx_frame_on(state, unit_of(state, c), src, n)
@@ -1419,7 +1479,8 @@ fn poll_on(state: u64, c: u64) -> bool {
         return e1000.poll_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        return r8169.poll_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.poll(state, unit_of(state, c))
     }
     if k == KIND_USBNET {
         return usbnet.poll_on(state, unit_of(state, c))
@@ -1440,7 +1501,8 @@ fn irq_on(state: u64, c: u64) {
         e1000.irq_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        r8169.irq_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        eo.irq(state, unit_of(state, c))
     }
 }
 
@@ -1454,7 +1516,8 @@ fn shut_down_on(state: u64, c: u64) {
         e1000.shut_down_on(state, unit_of(state, c))
     }
     if k == KIND_R8169 {
-        r8169.shut_down_on(state, unit_of(state, c))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        eo.shut_down(state, unit_of(state, c))
     }
 }
 
@@ -1509,21 +1572,24 @@ fn rx_recycle(state: u64, id: u64) { rx_recycle_on(state, 0, id) }
 // zaehlt, und eine erfundene Zahl waere schlimmer als eine fehlende.
 fn rx_errors(state: u64) -> u64 {
     if kind_on(state, 0) == KIND_R8169 {
-        return r8169.rx_errors_on(state, unit_of(state, 0))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.rx_errors(state, unit_of(state, 0))
     }
     return 0
 }
 
 fn oversize(state: u64) -> u64 {
     if kind_on(state, 0) == KIND_R8169 {
-        return r8169.oversize_on(state, unit_of(state, 0))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.oversize(state, unit_of(state, 0))
     }
     return 0
 }
 
 fn rx_overflow(state: u64) -> u64 {
     if kind_on(state, 0) == KIND_R8169 {
-        return r8169.rx_overflow_on(state, unit_of(state, 0))
+        let eo: netclass.EthOps = ethreg.ops_for(state, KIND_R8169)
+        return eo.rx_overflow(state, unit_of(state, 0))
     }
     return 0
 }
