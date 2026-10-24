@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import wlan.iwl_le
+import wlan.iwl_buf
+import wlan.iwl_mvm_txq
+
+export {
+    say, scd_check, sta_has_q4, tx_check,
+    W_SCD_OK, W_SCD_BAD, W_STA_OK, W_STA_NO, W_TX_OK, W_TX_Q0, W_TX_SEQ, W_TX_SCRATCH, W_TX_BC, W_TX_CFG, W_TX_STA, W_TX_TB
+}
+
+const W_SCD_OK: u64 = 1
+const W_SCD_BAD: u64 = 2
+const W_STA_OK: u64 = 3
+const W_STA_NO: u64 = 4
+const W_TX_OK: u64 = 5
+const W_TX_Q0: u64 = 6
+const W_TX_SEQ: u64 = 7
+const W_TX_SCRATCH: u64 = 8
+const W_TX_BC: u64 = 9
+const W_TX_CFG: u64 = 10
+const W_TX_STA: u64 = 11
+const W_TX_TB: u64 = 12
+
+const STA_MSK_OFF: u64 = 40
+const TX_LEN_OFF: u64 = 4
+const TX_STA_OFF: u64 = 20
+const TX_SEC_OFF: u64 = 21
+const TX_SCRATCH_LSB: u64 = 48
+const TX_SCRATCH_MSB: u64 = 52
+const TX_SCRATCH_DELTA: u64 = 12
+const TX_FIRST_TB: u64 = 20
+
+fn say(which: u64) {
+    var t_scd_ok: [u8; 18] = "fakefw: scd ok q4\0"
+    var t_scd_bad: [u8; 16] = "fakefw: scd bad\0"
+    var t_sta_ok: [u8; 21] = "fakefw: addsta q4 ok\0"
+    var t_sta_no: [u8; 26] = "fakefw: addsta q4 missing\0"
+    var t_tx_ok: [u8; 17] = "fakefw: tx ok q4\0"
+    var t_tx_q0: [u8; 28] = "fakefw: tx bad on cmd queue\0"
+    var t_tx_seq: [u8; 19] = "fakefw: tx bad seq\0"
+    var t_tx_scratch: [u8; 23] = "fakefw: tx bad scratch\0"
+    var t_tx_bc: [u8; 18] = "fakefw: tx bad bc\0"
+    var t_tx_cfg: [u8; 36] = "fakefw: tx bad queue not configured\0"
+    var t_tx_sta: [u8; 24] = "fakefw: tx bad sta mask\0"
+    var t_tx_tb: [u8; 18] = "fakefw: tx bad tb\0"
+    if which == W_SCD_OK { serial.puts((&t_scd_ok[0]) as u64) }
+    if which == W_SCD_BAD { serial.puts((&t_scd_bad[0]) as u64) }
+    if which == W_STA_OK { serial.puts((&t_sta_ok[0]) as u64) }
+    if which == W_STA_NO { serial.puts((&t_sta_no[0]) as u64) }
+    if which == W_TX_OK { serial.puts((&t_tx_ok[0]) as u64) }
+    if which == W_TX_Q0 { serial.puts((&t_tx_q0[0]) as u64) }
+    if which == W_TX_SEQ { serial.puts((&t_tx_seq[0]) as u64) }
+    if which == W_TX_SCRATCH { serial.puts((&t_tx_scratch[0]) as u64) }
+    if which == W_TX_BC { serial.puts((&t_tx_bc[0]) as u64) }
+    if which == W_TX_CFG { serial.puts((&t_tx_cfg[0]) as u64) }
+    if which == W_TX_STA { serial.puts((&t_tx_sta[0]) as u64) }
+    if which == W_TX_TB { serial.puts((&t_tx_tb[0]) as u64) }
+    serial.nl()
+}
+
+fn scd_check(tb0: u64, total: u64) -> bool {
+    if !iwl_mvm_txq.scd_cfg_check(tb0, total) {
+        say(W_SCD_BAD)
+        return false
+    }
+    if iwl_le.ld8(tb0, iwl_buf.HDR + 3) != iwl_mvm_txq.DATA_QUEUE {
+        say(W_SCD_BAD)
+        return false
+    }
+    say(W_SCD_OK)
+    return true
+}
+
+fn sta_has_q4(tb0: u64) -> bool {
+    let m: u64 = iwl_le.ld32(tb0, iwl_buf.HDR + STA_MSK_OFF)
+    let ok: bool = (m & iwl_mvm_txq.queue_msk_of(iwl_mvm_txq.DATA_QUEUE)) != 0
+    if ok { say(W_STA_OK) } else { say(W_STA_NO) }
+    return ok
+}
+
+fn tx_check(tb0: u64, l0: u64, idx: u64, bc_base: u64, q4_cfg: bool, q4_msk: bool) -> u64 {
+    if !q4_cfg { return W_TX_CFG }
+    if !q4_msk { return W_TX_STA }
+    if l0 != TX_FIRST_TB { return W_TX_TB }
+    if iwl_le.ld16(tb0, 2) != ((iwl_mvm_txq.DATA_QUEUE << 8) | idx) { return W_TX_SEQ }
+    let want: u64 = tb0 + TX_SCRATCH_DELTA
+    if iwl_le.ld32(tb0, TX_SCRATCH_LSB) != (want & 0xFFFFFFFF) { return W_TX_SCRATCH }
+    if iwl_le.ld8(tb0, TX_SCRATCH_MSB) != ((want >> 32) & 0xFF) { return W_TX_SCRATCH }
+    let e: u64 = iwl_mvm_txq.bc_entry(iwl_le.ld16(tb0, TX_LEN_OFF), iwl_le.ld8(tb0, TX_SEC_OFF), iwl_le.ld8(tb0, TX_STA_OFF))
+    let base: u64 = bc_base + iwl_mvm_txq.DATA_QUEUE * iwl_mvm_txq.BC_TABLE_BYTES
+    if bc_base == 0 { return W_TX_BC }
+    if iwl_le.ld16(base, idx * 2) != e { return W_TX_BC }
+    if idx < iwl_mvm_txq.BC_DUP_BELOW && iwl_le.ld16(base, (idx + 256) * 2) != e { return W_TX_BC }
+    return 0
+}

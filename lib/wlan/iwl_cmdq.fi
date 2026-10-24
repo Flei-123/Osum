@@ -3,12 +3,13 @@ import wlan.iwl_probe
 import wlan.iwl_pwr
 import wlan.iwl_g1
 import wlan.iwl_le
+import wlan.iwl_mvm_txq
 
 export {
-    Cq, cq_new, cq_attach, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, cq_resp_status, cq_reset,
+    Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_dq_inflight, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, cq_resp_status, cq_reset,
     CQ_RB_SIZE, CQ_RB_COUNT, CQ_TFD_SIZE, CQ_TFD_COUNT, CQ_SLOT_SIZE, CQ_SLOTS, CQ_NOTIF_SLOT, CQ_NOTIF_SLOTS,
     CQ_WAIT_CMD, CQ_WAIT_NOTIF, ALIVE_SCD_OFF, ALIVE_PKT_MIN,
-    E_CQ_TIMEOUT, E_CQ_BIG, E_CQ_NORX, E_CQ_NOTX, E_CQ_FULL, E_CQ_PROG, E_CQ_SHORT
+    CMD_TX_DATA, E_CQ_TIMEOUT, E_CQ_BIG, E_CQ_NORX, E_CQ_NOTX, E_CQ_FULL, E_CQ_PROG, E_CQ_SHORT
 }
 
 const CQ_RB_SIZE: u64 = 4096
@@ -30,6 +31,10 @@ const FRAME_SIZE_MSK: u64 = 0x3FFF
 const FRAME_ALIGN: u64 = 64
 const RX_MASK: u64 = 255
 const CMD_QUEUE: u64 = 0
+const CMD_TX_DATA: u64 = 0x1C
+const TXCMD_HDR: u64 = 4
+const TXCMD_DRAM_LSB: u64 = 48
+const TXCMD_SCRATCH_OFF: u64 = 12
 const ALIVE_SCD_OFF: u64 = 40
 const ALIVE_PKT_MIN: u64 = 44
 
@@ -60,12 +65,20 @@ struct Cq {
     nt: u64,
     scd: u64,
     dropped: u64,
-    matched: u64
+    matched: u64,
+    dtfd: u64,
+    dbuf: u64,
+    dwr: u64,
+    drd: u64,
+    dq_on: u64,
+    dsent: u64,
+    dreclaimed: u64
 }
 
 fn cq_new() -> Cq {
     var c: Cq = Cq { rx_bd: 0, rx_stts: 0, rb: 0, tfd: 0, cmdbuf: 0, kw: 0, bc: 0, notif: 0, wr: 0, rd: 0, rxr: 0, rx_wptr: 0,
-        rx_on: 0, tx_on: 0, nh: 0, nt: 0, scd: 0, dropped: 0, matched: 0 }
+        rx_on: 0, tx_on: 0, nh: 0, nt: 0, scd: 0, dropped: 0, matched: 0,
+        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, dsent: 0, dreclaimed: 0 }
     return c
 }
 
@@ -92,6 +105,34 @@ fn cq_reset(c: *mut Cq) {
     (*c).scd = 0
     (*c).dropped = 0
     (*c).matched = 0
+    (*c).dwr = 0
+    (*c).drd = 0
+    (*c).dq_on = 0
+    (*c).dsent = 0
+    (*c).dreclaimed = 0
+}
+
+fn cq_attach_data(c: *mut Cq, dtfd: u64, dbuf: u64) {
+    (*c).dtfd = dtfd
+    (*c).dbuf = dbuf
+}
+
+fn cq_dq_on(c: *mut Cq) -> bool { return (*c).dq_on != 0 }
+fn cq_dq_sent(c: *mut Cq) -> u64 { return (*c).dsent }
+fn cq_dq_reclaimed(c: *mut Cq) -> u64 { return (*c).dreclaimed }
+fn cq_dq_inflight(c: *mut Cq) -> u64 { return (*c).dwr - (*c).drd }
+
+fn cq_dq_enable(c: *mut Cq, ssn: u64) {
+    if (*c).dtfd == 0 { return }
+    (*c).dwr = ssn & 0xFF
+    (*c).drd = ssn & 0xFF
+    (*c).dq_on = 1
+}
+
+fn cq_dq_disable(c: *mut Cq) {
+    (*c).dq_on = 0
+    (*c).dwr = 0
+    (*c).drd = 0
 }
 
 fn rb_addr(c: *mut Cq, i: u64) -> u64 { return (*c).rb + (i & RX_MASK) * CQ_RB_SIZE }
@@ -100,6 +141,7 @@ fn cq_nic_init(c: *mut Cq, p: *mut iwl_probe.Probe) -> i64 {
     cq_reset(c)
     iwl_le.zero((*c).rx_stts, 16)
     iwl_le.zero((*c).tfd, CQ_TFD_COUNT * CQ_TFD_SIZE)
+    if (*c).dtfd != 0 { iwl_le.zero((*c).dtfd, CQ_TFD_COUNT * CQ_TFD_SIZE) }
     var i: u64 = 0
     while i < CQ_RB_COUNT {
         iwl_g1.rx_bd_put((*c).rx_bd, i, rb_addr(c, i))
@@ -109,7 +151,11 @@ fn cq_nic_init(c: *mut Cq, p: *mut iwl_probe.Probe) -> i64 {
     var g: iwl_g1.Prog = iwl_g1.prog_new()
     var ok: bool = iwl_g1.prog_rx_init(&g, (*c).rx_bd, (*c).rx_stts)
     ok = ok && iwl_g1.prog_rx_wptr(&g, (*c).rx_wptr)
-    ok = ok && iwl_g1.prog_tx_cmd_init(&g, (*c).kw, (*c).tfd, CMD_QUEUE)
+    if (*c).dtfd != 0 {
+        ok = ok && iwl_g1.prog_tx_init(&g, (*c).kw, (*c).tfd, CMD_QUEUE, (*c).dtfd, iwl_mvm_txq.DATA_QUEUE)
+    } else {
+        ok = ok && iwl_g1.prog_tx_cmd_init(&g, (*c).kw, (*c).tfd, CMD_QUEUE)
+    }
     if !ok { return E_CQ_PROG }
     let r: i64 = iwl_g1.prog_run(p, &g)
     if r != 0 { return r }
@@ -156,8 +202,20 @@ fn stash(c: *mut Cq, pkt: u64, len: u64) {
     (*c).nh = (*c).nh + 1
 }
 
+fn reclaim_data(c: *mut Cq, idx: u64) {
+    if (*c).dwr == (*c).drd { return }
+    var adv: u64 = (idx + 257 - ((*c).drd & 0xFF)) & 0xFF
+    if (*c).drd + adv > (*c).dwr { adv = (*c).dwr - (*c).drd }
+    (*c).drd = (*c).drd + adv
+    (*c).dreclaimed = (*c).dreclaimed + 1
+}
+
 fn handle_pkt(c: *mut Cq, pkt: u64, len: u64, want_cmd: u64, want_idx: u64, resp: u64, cap: u64) -> bool {
     let seq: u64 = iwl_le.ld16(pkt, 2)
+    if (seq & SEQ_RX_FRAME) == 0 && ((seq >> 8) & 0x1F) == iwl_mvm_txq.DATA_QUEUE && iwl_le.ld8(pkt, 0) == CMD_TX_DATA && (*c).dq_on != 0 {
+        reclaim_data(c, seq & 0xFF)
+        return false
+    }
     if (seq & SEQ_RX_FRAME) == 0 && ((seq >> 8) & 0x1F) == CMD_QUEUE && (*c).wr != (*c).rd {
         let idx: u64 = seq & 0xFF
         (*c).rd = (*c).rd + ((idx + 257 - ((*c).rd & 0xFF)) & 0xFF)
@@ -200,17 +258,7 @@ fn drain(c: *mut Cq, p: *mut iwl_probe.Probe, held: bool, want_cmd: u64, want_id
     return hit
 }
 
-fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, cap: u64) -> i64 {
-    if (*c).rx_on == 0 { return E_CQ_NORX }
-    if (*c).tx_on == 0 { return E_CQ_NOTX }
-    if len < 4 || len > CQ_SLOT_SIZE { return E_CQ_BIG }
-    if (*c).wr - (*c).rd >= CQ_TFD_COUNT - 6 { return E_CQ_FULL }
-    let idx: u64 = (*c).wr & 0xFF
-    let slot: u64 = (*c).cmdbuf + (idx % CQ_SLOTS) * CQ_SLOT_SIZE
-    iwl_le.copy(slot, buf, len)
-    iwl_le.st16(slot, 2, (CMD_QUEUE << 8) | idx)
-    let cmd: u64 = iwl_le.ld8(slot, 0)
-    let t: u64 = (*c).tfd + idx * CQ_TFD_SIZE
+fn put_tfd(t: u64, slot: u64, len: u64) {
     iwl_le.zero(t, CQ_TFD_SIZE)
     var n0: u64 = len
     if n0 > FIRST_TB { n0 = FIRST_TB }
@@ -223,6 +271,19 @@ fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, c
         iwl_le.st16(t, 14, (((slot + FIRST_TB) >> 32) & 0xF) | ((len - FIRST_TB) << 4))
     }
     iwl_le.st8(t, 3, ntb)
+}
+
+fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, cap: u64) -> i64 {
+    if (*c).rx_on == 0 { return E_CQ_NORX }
+    if (*c).tx_on == 0 { return E_CQ_NOTX }
+    if len < 4 || len > CQ_SLOT_SIZE { return E_CQ_BIG }
+    if (*c).wr - (*c).rd >= CQ_TFD_COUNT - 6 { return E_CQ_FULL }
+    let idx: u64 = (*c).wr & 0xFF
+    let slot: u64 = (*c).cmdbuf + (idx % CQ_SLOTS) * CQ_SLOT_SIZE
+    iwl_le.copy(slot, buf, len)
+    iwl_le.st16(slot, 2, (CMD_QUEUE << 8) | idx)
+    let cmd: u64 = iwl_le.ld8(slot, 0)
+    put_tfd((*c).tfd + idx * CQ_TFD_SIZE, slot, len)
     (*c).matched = 0
     (*c).wr = (*c).wr + 1
     if iwl_pwr.mac_access_get(p) != 0 {
@@ -242,6 +303,35 @@ fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, c
     iwl_pwr.mac_access_put(p)
     if !done { return E_CQ_TIMEOUT }
     return ((*c).matched - 1) as i64
+}
+
+fn cq_dq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64) -> i64 {
+    if (*c).rx_on == 0 { return E_CQ_NORX }
+    if (*c).dq_on == 0 { return E_CQ_NOTX }
+    if len <= TXCMD_HDR + 56 || len > CQ_SLOT_SIZE { return E_CQ_BIG }
+    let _d: bool = drain(c, p, false, 0xFFFF, 0xFFFF, 0, 0)
+    if (*c).dwr - (*c).drd >= CQ_SLOTS { return E_CQ_FULL }
+    let idx: u64 = (*c).dwr & 0xFF
+    let slot: u64 = (*c).dbuf + (idx % CQ_SLOTS) * CQ_SLOT_SIZE
+    iwl_le.copy(slot, buf, len)
+    iwl_le.st16(slot, 2, (iwl_mvm_txq.DATA_QUEUE << 8) | idx)
+    let scratch: u64 = slot + TXCMD_SCRATCH_OFF
+    iwl_le.st32(slot, TXCMD_DRAM_LSB, scratch)
+    iwl_le.st8(slot, TXCMD_DRAM_LSB + 4, scratch >> 32)
+    let flen: u64 = iwl_le.ld16(slot, TXCMD_HDR)
+    let sta: u64 = iwl_le.ld8(slot, TXCMD_HDR + 16)
+    let sec: u64 = iwl_le.ld8(slot, TXCMD_HDR + 17)
+    iwl_mvm_txq.bc_store((*c).bc, iwl_mvm_txq.DATA_QUEUE, idx, iwl_mvm_txq.bc_entry(flen, sec, sta))
+    put_tfd((*c).dtfd + idx * CQ_TFD_SIZE, slot, len)
+    (*c).dwr = (*c).dwr + 1
+    if iwl_pwr.mac_access_get(p) != 0 {
+        (*c).dwr = (*c).dwr - 1
+        return iwl_pwr.E_PWR_ACCESS
+    }
+    iwl_pwr.wr(p, iwl_g1.HBUS_TARG_WRPTR, ((*c).dwr & 0xFF) | (iwl_mvm_txq.DATA_QUEUE << 8))
+    iwl_pwr.mac_access_put(p)
+    (*c).dsent = (*c).dsent + 1
+    return 0
 }
 
 fn pop_to(c: *mut Cq, j: u64, out: u64, cap: u64) -> i64 {

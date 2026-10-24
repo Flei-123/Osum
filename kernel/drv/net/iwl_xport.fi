@@ -6,6 +6,8 @@ import wlan.iwl_probe
 import wlan.iwl_cmdq
 import wlan.iwl_boot
 import wlan.iwl_le
+import wlan.iwl_mvm_txq
+import wlan.iwl_fwcaps
 
 export { XCtx, xctx_new, xctx_fast, xport_make, tr_submit, tr_poll, E_XP_NOCQ }
 
@@ -46,13 +48,31 @@ fn xp_send(ctx: u64, a: u64, n: u64) -> i64 {
     let x: *mut XCtx = ctx as *mut XCtx
     if (*x).cq == 0 { return E_XP_NOCQ }
     (*x).pend_len = 0
+    let cq: *mut iwl_cmdq.Cq = (*x).cq as *mut iwl_cmdq.Cq
+    if iwl_le.ld8(a, 0) == iwl_cmdq.CMD_TX_DATA && iwl_cmdq.cq_dq_on(cq) {
+        let d: i64 = iwl_cmdq.cq_dq_send(cq, (*x).p as *mut iwl_probe.Probe, a, n)
+        if d < 0 { (*x).last_err = d }
+        return d
+    }
     let r: i64 = iwl_cmdq.cq_send((*x).cq as *mut iwl_cmdq.Cq, (*x).p as *mut iwl_probe.Probe, a, n, (*x).pend, PEND_CAP)
     if r < 0 {
         (*x).last_err = r
         return r
     }
     (*x).pend_len = r as u64
+    if iwl_le.ld8(a, 0) == iwl_fwcaps.CMD_SCD_QUEUE_CFG { scd_track(cq, a, n) }
     return 0
+}
+
+fn scd_track(cq: *mut iwl_cmdq.Cq, a: u64, n: u64) {
+    if n != iwl_mvm_txq.SCD_CFG_LEN { return }
+    let h: u64 = 4
+    if iwl_le.ld8(a, h + 3) != iwl_mvm_txq.DATA_QUEUE { return }
+    if iwl_le.ld8(a, h + 4) == iwl_mvm_txq.SCD_ACTION_ENABLE {
+        iwl_cmdq.cq_dq_enable(cq, iwl_le.ld16(a, h + 8))
+    } else {
+        iwl_cmdq.cq_dq_disable(cq)
+    }
 }
 
 fn xp_recv(ctx: u64, a: u64, n: u64) -> i64 {

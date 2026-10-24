@@ -8,6 +8,7 @@ import wlan.iwl_mvm
 import wlan.iwl_mvm_ctx
 import wlan.iwl_mvm_scan
 import wlan.iwl_mvm_tx
+import wlan.iwl_mvm_txq
 
 export {
     Mvm, Transport, mvm_new, ops_attach, ops_setup, ops_scan_start, ops_scan_state,
@@ -59,6 +60,7 @@ struct Mvm {
     hw_crypto: bool,
     ctx_ready: bool,
     peer_added: bool,
+    queue_msk: u64,
     scan_state: u64,
     scan_uid: u64,
     scan_status: u64,
@@ -79,7 +81,7 @@ fn mvm_new() -> Mvm {
         tr: Transport { submit: dead_submit, poll: dead_poll },
         tctx: 0, mac: [0; 6], bssid: [0; 6], channel: 1,
         cmd_queue: 0, tx_queue: 2, slot: 0, hw_crypto: false,
-        ctx_ready: false, peer_added: false,
+        ctx_ready: false, peer_added: false, queue_msk: iwl_mvm_txq.QUEUE_MSK_LEGACY,
         scan_state: 0, scan_uid: 0, scan_status: 0,
         rssi: 0, rx_channel: 0, cmds: 0, keys_sent: 0,
         caps: [0; 16], cmd: [0; 2600], rx: [0; 2600]
@@ -298,6 +300,17 @@ fn ops_scan_start(o: *mut Mvm, ssid: u64, ssid_len: u64) -> i64 {
     return r
 }
 
+fn dqa_on(o: *mut Mvm) -> bool {
+    let w: *mut u64 = ops_caps(o)
+    return iwl_fwcaps.caps_known(w) && iwl_fwcaps.caps_dqa(w) && !iwl_fwcaps.caps_quirk(w, iwl_fwcaps.Q_OLD_TXQ)
+}
+
+fn scd_cmd(o: *mut Mvm, action: u64) -> i64 {
+    let n: u64 = iwl_mvm_txq.mvm_scd_cfg(cmd_addr(o), (*o).cmd_queue, next_slot(o), STA_AP, iwl_mvm_txq.TID_ALL,
+        iwl_mvm_txq.DATA_QUEUE, action, 0)
+    return submit(o, n)
+}
+
 fn ops_peer_add(o: *mut Mvm, bssid: u64) -> i64 {
     if !(*o).ctx_ready { return E_OPS_STATE }
     var i: usize = 0
@@ -305,8 +318,15 @@ fn ops_peer_add(o: *mut Mvm, bssid: u64) -> i64 {
         (*o).bssid[i] = *((bssid + i as u64) as *mut u8)
         i = i + 1
     }
+    var msk: u64 = iwl_mvm_txq.QUEUE_MSK_LEGACY
+    if dqa_on(o) {
+        let q: i64 = scd_cmd(o, iwl_mvm_txq.SCD_ACTION_ENABLE)
+        if q < 0 { return q }
+        msk = iwl_mvm_txq.queue_msk_of(iwl_mvm_txq.DATA_QUEUE)
+    }
+    (*o).queue_msk = msk
     let n: u64 = iwl_mvm.mvm_add_sta(cmd_addr(o), (*o).cmd_queue, next_slot(o), 0,
-        iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, 0, 0xF)
+        iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, 0, msk)
     let r: i64 = submit(o, n)
     if r < 0 { return r }
     (*o).peer_added = true
@@ -316,7 +336,7 @@ fn ops_peer_add(o: *mut Mvm, bssid: u64) -> i64 {
 fn ops_associated(o: *mut Mvm, aid: u64) -> i64 {
     if !(*o).peer_added { return E_OPS_STATE }
     let n: u64 = iwl_mvm.mvm_add_sta(cmd_addr(o), (*o).cmd_queue, next_slot(o), 1,
-        iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, aid, 0xF)
+        iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, aid, (*o).queue_msk)
     let r: i64 = submit(o, n)
     if r < 0 { return r }
     return mac_cmd(o, iwl_mvm_ctx.CTXT_MODIFY, true, aid)
@@ -330,6 +350,10 @@ fn ops_peer_remove(o: *mut Mvm) -> i64 {
     iwl_le.st8(a, iwl_buf.HDR, STA_AP)
     let r: i64 = submit(o, iwl_buf.HDR + 4)
     (*o).peer_added = false
+    if (*o).queue_msk != iwl_mvm_txq.QUEUE_MSK_LEGACY {
+        let _q: i64 = scd_cmd(o, iwl_mvm_txq.SCD_ACTION_DISABLE)
+        (*o).queue_msk = iwl_mvm_txq.QUEUE_MSK_LEGACY
+    }
     return r
 }
 

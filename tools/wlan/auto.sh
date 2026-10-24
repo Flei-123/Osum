@@ -95,6 +95,12 @@ has "$C" '==END==' "system keeps running"
 has "$C" 'fakefw: scan ok v7 slots=52 nchan=35' "W-WLAN17: scan request is v7 with 52 channel slots (from the blob TLVs), 35 channels used"
 hasnot "$C" 'fakefw: scan bad' "W-WLAN17: the fake firmware format check never fails"
 
+has "$C" 'fakefw: scd ok q4' "W-WLAN19: SCD_QUEUE_CFG v1 for queue 4 accepted by the format check"
+has "$C" 'fakefw: addsta q4 ok' "W-WLAN19: ADD_STA carries tfd_queue_msk BIT(4)"
+has "$C" 'fakefw: tx ok q4' "W-WLAN19: data frames go through DQA queue 4 (seq, scratch pointer, byte-count table)"
+hasnot "$C" 'fakefw: tx bad' "W-WLAN19: no malformed TX descriptor"
+hasnot "$C" 'fakefw: addsta q4 missing' "W-WLAN19: queue mask never missing"
+
 printf 'echo ==START==\nsleep 6\ncat /proc/wlan\necho ==END==\n' > "$T/s.sh"
 for ctl in "d iwloldscan 'bad length' a" "e iwloldslot 'bad length' a" "f iwloldssid 'ssid bitmap missing' c"; do
     eval set -- $ctl
@@ -117,6 +123,14 @@ image g || { bad "image g"; }
 run g "iwlfhtest iwlfhbind iwloldmac"
 has "$T/g.klar" 'fakefw: sta 02:4f:52:49:45:4e' "iwloldmac: the old address is used"
 hasnot "$T/g.klar" 'fakefw: sta 06:11:22:33:44:55' "iwloldmac: override not applied"
+
+echo "-- h: counter-proof iwloldtxq (data frames on the command queue)"
+image h "$T/good.conf" || { bad "image h"; }
+run h "iwlfhtest iwlfhbind iwloldtxq"
+has "$T/h.klar" 'fakefw: tx bad on cmd queue' "iwloldtxq: fake firmware refuses data frames on queue 0"
+has "$T/h.klar" 'fakefw: addsta q4 missing' "iwloldtxq: ADD_STA without the queue bit is named"
+hasnot "$T/h.klar" 'fakeap: m4 ok' "iwloldtxq: no handshake without data TX"
+hasnot "$T/h.klar" 'fakefw: tx ok q4' "iwloldtxq: no accepted DQA frame"
 
 echo "WLANAUTO: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]

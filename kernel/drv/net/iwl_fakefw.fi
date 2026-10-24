@@ -6,9 +6,11 @@ import drv.net.iwl_fakeap
 import drv.net.iwl_fakeap_frames
 import drv.net.iwl_fakescan
 import drv.net.iwl_fakemac
+import drv.net.iwl_faketx
+import wlan.iwl_mvm_txq
 
 export {
-    doorbell, alive, reset, rx_enabled, set_norx, set_knobs, cmds, rx_pkts, rx_drops, last_cmd, set_ap, ap_on, last_uid, phydb_cmds, nvm_reads, init_completes, FAKE_SCD_BASE
+    doorbell, alive, reset, rx_enabled, set_norx, set_knobs, cmds, rx_pkts, rx_drops, tx_ok, tx_bad, last_cmd, set_ap, ap_on, last_uid, phydb_cmds, nvm_reads, init_completes, FAKE_SCD_BASE
 }
 
 const FAKE_SCD_BASE: u64 = 0x00800000
@@ -33,7 +35,15 @@ const S_PHYDB: u64 = 0x2470
 const S_NVMRD: u64 = 0x2478
 const S_INITC: u64 = 0x2480
 const S_AP: u64 = 0x2488
+const S_TXRD4: u64 = 0x2490
+const S_Q4CFG: u64 = 0x2498
+const S_Q4MSK: u64 = 0x24A0
+const S_TXOK: u64 = 0x24A8
+const S_TXBAD: u64 = 0x24B0
 const CMD_TX: u64 = 0x1C
+const CMD_ADD_STA: u64 = 0x18
+const CMD_SCD_CFG: u64 = 0x1D
+const TX_OK_LOG: u64 = 3
 const CMD_RX_PHY: u64 = 0xC0
 const CMD_RX_MPDU: u64 = 0xC1
 const TX_CMD_HDR: u64 = 60
@@ -59,6 +69,7 @@ const REG_STTS: u64 = 0x1BC0
 const REG_RBD_WPTR: u64 = 0x1BC8
 const REG_RX_CONFIG: u64 = 0x1C00
 const REG_CBBC_Q0: u64 = 0x19D0
+const REG_CBBC_Q4: u64 = 0x19E0
 const RX_ENABLE: u64 = 0x80000000
 
 const CMD_SCAN_REQ_UMAC: u64 = 0x0D
@@ -77,6 +88,8 @@ fn viol(ctx: u64) { s(ctx, S_VIOL, g(ctx, S_VIOL) + 1) }
 fn cmds(ctx: u64) -> u64 { return g(ctx, S_CMDS) }
 fn rx_pkts(ctx: u64) -> u64 { return g(ctx, S_PKTS) }
 fn rx_drops(ctx: u64) -> u64 { return g(ctx, S_DROPS) }
+fn tx_ok(ctx: u64) -> u64 { return g(ctx, S_TXOK) }
+fn tx_bad(ctx: u64) -> u64 { return g(ctx, S_TXBAD) }
 fn last_cmd(ctx: u64) -> u64 { return g(ctx, S_LASTCMD) }
 fn last_uid(ctx: u64) -> u64 { return g(ctx, S_LASTUID) }
 fn set_norx(ctx: u64, on: u64) { s(ctx, S_NORX, on) }
@@ -98,6 +111,10 @@ fn init_completes(ctx: u64) -> u64 { return g(ctx, S_INITC) }
 fn reset(ctx: u64) {
     s(ctx, S_TXRD, 0)
     s(ctx, S_CLOSED, 0)
+    s(ctx, S_TXRD4, 0)
+    s(ctx, S_Q4CFG, 0)
+    s(ctx, S_Q4MSK, 0)
+    iwl_le.st32(ctx, REG_CBBC_Q4, 0)
     iwl_le.st32(ctx, REG_STTS, 0)
     iwl_le.st32(ctx, REG_RBD_BASE, 0)
     iwl_le.st32(ctx, REG_RBD_WPTR, 0)
@@ -147,6 +164,15 @@ fn put_status(ctx: u64, cmd: u64, seq: u64) {
     if rb == 0 { return }
     rx_hdr(rb, 4, cmd, seq)
     iwl_le.st32(rb, 8, 0)
+    rx_commit(ctx)
+}
+
+fn put_tx_resp(ctx: u64, seq: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 16, CMD_TX, seq)
+    iwl_le.zero(rb + 8, 16)
+    iwl_le.st8(rb, 8, 1)
     rx_commit(ctx)
 }
 
@@ -322,10 +348,79 @@ fn one_tfd(ctx: u64, ring: u64, idx: u64) {
         put_scan_complete(ctx, uid)
     }
     if cmd == CMD_MAC_CONTEXT { iwl_fakemac.report(tb0) }
-    if cmd == CMD_TX && g(ctx, S_AP) != 0 { ap_air(ctx, tb0) }
+    if cmd == CMD_ADD_STA {
+        let has: bool = iwl_faketx.sta_has_q4(tb0)
+        if has { s(ctx, S_Q4MSK, 1) } else { s(ctx, S_Q4MSK, 0) }
+    }
+    if cmd == CMD_SCD_CFG {
+        var total_c: u64 = l0
+        if n == 2 { total_c = l0 + (iwl_le.ld16(t, 14) >> 4) }
+        if iwl_faketx.scd_check(tb0, total_c) {
+            if iwl_le.ld8(tb0, 8) == iwl_mvm_txq.SCD_ACTION_ENABLE {
+                s(ctx, S_Q4CFG, 1)
+                s(ctx, S_TXRD4, iwl_le.ld16(tb0, 12) & 0xFF)
+            } else {
+                s(ctx, S_Q4CFG, 0)
+                s(ctx, S_TXRD4, 0)
+            }
+        }
+    }
+    if cmd == CMD_TX {
+        iwl_faketx.say(iwl_faketx.W_TX_Q0)
+        s(ctx, S_TXBAD, g(ctx, S_TXBAD) + 1)
+    }
 }
 
-fn doorbell(ctx: u64, v: u64, sched_ok: bool) {
+fn data_tfd(ctx: u64, ring: u64, idx: u64, bc_base: u64) {
+    let t: u64 = ring + idx * TFD_SIZE
+    let n: u64 = iwl_le.ld8(t, 3)
+    let hn0: u64 = iwl_le.ld16(t, 8)
+    let tb0: u64 = iwl_le.ld32(t, 4) | ((hn0 & 0xF) << 32)
+    let l0: u64 = hn0 >> 4
+    if n != 2 || tb0 == 0 {
+        viol(ctx)
+        return
+    }
+    let cmd: u64 = iwl_le.ld8(tb0, 0)
+    var why: u64 = 0
+    if cmd != CMD_TX { why = iwl_faketx.W_TX_SEQ }
+    if why == 0 {
+        why = iwl_faketx.tx_check(tb0, l0, idx, bc_base, g(ctx, S_Q4CFG) != 0, g(ctx, S_Q4MSK) != 0)
+    }
+    s(ctx, S_CMDS, g(ctx, S_CMDS) + 1)
+    s(ctx, S_LASTCMD, cmd)
+    if why != 0 {
+        iwl_faketx.say(why)
+        s(ctx, S_TXBAD, g(ctx, S_TXBAD) + 1)
+        return
+    }
+    if g(ctx, S_TXOK) < TX_OK_LOG { iwl_faketx.say(iwl_faketx.W_TX_OK) }
+    s(ctx, S_TXOK, g(ctx, S_TXOK) + 1)
+    put_tx_resp(ctx, (iwl_mvm_txq.DATA_QUEUE << 8) | idx)
+    if g(ctx, S_AP) != 0 { ap_air(ctx, tb0) }
+}
+
+fn data_doorbell(ctx: u64, v: u64, bc_base: u64) {
+    let wr: u64 = v & 0xFF
+    var rd: u64 = g(ctx, S_TXRD4)
+    if rd == wr { return }
+    let ring: u64 = r32(ctx, REG_CBBC_Q4) << 8
+    if g(ctx, S_ACCESS) == 0 || ring == 0 {
+        viol(ctx)
+        return
+    }
+    while rd != wr {
+        data_tfd(ctx, ring, rd, bc_base)
+        rd = (rd + 1) & 0xFF
+    }
+    s(ctx, S_TXRD4, rd)
+}
+
+fn doorbell(ctx: u64, v: u64, sched_ok: bool, bc_base: u64) {
+    if ((v >> 8) & 0x1F) == iwl_mvm_txq.DATA_QUEUE {
+        data_doorbell(ctx, v, bc_base)
+        return
+    }
     if ((v >> 8) & 0x1F) != 0 { return }
     let wr: u64 = v & 0xFF
     var rd: u64 = g(ctx, S_TXRD)
