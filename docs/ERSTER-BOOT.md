@@ -80,6 +80,13 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 - **Foto-Checkliste:** Start oeffnen, "All apps", Maus ueber verschiedene Zeilen; Suche "e" tippen, Maus ueber Treffer. Flackern: welche Fenster genau (Name) + Aufloesung/Massstab. Settings-Absturz: Fenster am Rand ziehen oder Maximieren-Knopf? Foto/Text der Fehlerzeile (`dmesg` oder Serial), Aufloesung.
 - **Ehrlich:** Flackern und Settings-Absturz sind in QEMU NICHT reproduziert und NICHT behoben; Flacker-Verdacht (Fenster ohne privates Bild) liegt als Branch `staff/orientos-mvmqoy35-atomic` bereit, ungetestet.
 
+## Stick 15 HP (24.10.2026, Baustand 95cc9d8e = main, WLAN RX-Scan + Debug-Werkzeuge + Treiber-Store + Klassen)
+
+- **Datei:** `orientos-usb-hp-20261024-95cc9d8e.img` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `66a5f6ba93b39380abc78bcdeaaef8db3e174f985f98ab6bdf7ec3878b9a156d`. Ersetzt Stick 14.
+- **Neu gegenueber Stick 14:** Kommt nach dem Timeout kein ALIVE, durchsucht der Kern die RX-Puffer roh (`fail_rxs=`, `fail_rx=`, `fail_rxr=` in `/proc/wlan`) und nimmt ein dort gefundenes ALIVE an (`iwl: boot2 rx-raw alive`). `wlanctl status` liest das letzte `cpu1=` (Fehlerzeile), `ping` ist im Abbild. Dazu Trace (`fail_trace=`, `fail_series=`, `fail_exp=`), Debug-Werkzeuge (`lspci`, `pcicfg`, `regdump`, `prphread`, `wlanctl`), Treiber-Store (`drvctl`, `/proc/drivers`) und Geraeteklassen (`class=` je Zeile in `/proc/drivers`).
+- **Foto-Checkliste:** (1) `cat /proc/wlan` (ALLE Zeilen, mehrere Fotos), (2) `wlanctl status`, (3) `wlanctl dump`, (4) `lspci`, (5) `cat /proc/drivers`. Bei Fehler dauert der WLAN-Start ca. 25 s laenger. Windows vorher mit `shutdown /s /t 0` beenden.
+- **Ehrlich:** Am echten 8265 UNVERIFIZIERT. Gates gruen: iwlfh 142/0 (mit echter Firmware), wlan/auto 69/0, dbgtools 53/0, classes 33/0, drvstore 70/0, drvreg 20/0. `/proc/wlan` im Fehlerfall (echte Firmware) vollstaendig, nicht abgeschnitten.
+
 ## Stick 14 HP (24.10.2026, Baustand f69dadbf = main, WLAN Secure-Boot-Trace)
 
 - **Datei:** `orientos-usb-hp-20261024-f69dadbf.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `00cd0e0162d6c194a3aa66a8863f244b369380e2d263455cdb40783b1714e190`. Ersetzt Stick 13 (SHA 0eec7bc9...).
