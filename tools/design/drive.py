@@ -708,6 +708,16 @@ class Fahrer:
                 return None
             return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        if name.startswith("start_row"):
+            n_ = int(name[9:])
+            m = letzte(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            g = letzte(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            z = letzte(r"launcher: rows x=\d+ base=\d+ zh=(\d+)")
+            if m is None or g is None or z is None:
+                return None
+            zh = int(z.group(1))
+            return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)) + n_ * zh,
+                    int(m.group(3)), zh)
         if name.startswith("start_"):
             m = letzte(r"launcher: tile i=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)\s+name=\[%s\]"
                        % re.escape(name[6:]))
