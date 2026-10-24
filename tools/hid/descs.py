@@ -929,7 +929,7 @@ def firn():
     a("}")
     a("")
     a("fn oktett(i: u64, k: u64) -> u64 {")
-    a("    let w: u64 = wort(off_of(i) + k / 8)")
+    a("    let w: u64 = word(off_of(i) + k / 8)")
     a("    return (w >> ((k % 8) * 8)) & 0xFF")
     a("}")
     a("")
@@ -940,7 +940,7 @@ def firn():
             worte.append(int.from_bytes(pad[k:k + 8], "little"))
     a("const NW: u64 = %d" % len(worte))
     a("")
-    a("fn wort(i: u64) -> u64 {")
+    a("fn word(i: u64) -> u64 {")
     a("    var t: [u64; %d] = [" % len(worte))
     for k in range(0, len(worte), 4):
         stueck = ", ".join("0x%016X" % w for w in worte[k:k + 4])
@@ -1020,7 +1020,7 @@ def firn():
     a("}")
     a("")
     a("fn boktett(i: u64, k: u64) -> u64 {")
-    a("    let w: u64 = bwort(boff_of(i) + k / 8)")
+    a("    let w: u64 = bword(boff_of(i) + k / 8)")
     a("    return (w >> ((k % 8) * 8)) & 0xFF")
     a("}")
     a("")
@@ -1031,7 +1031,7 @@ def firn():
             bworte.append(int.from_bytes(pad[k:k + 8], "little"))
     a("const NBW: u64 = %d" % len(bworte))
     a("")
-    a("fn bwort(i: u64) -> u64 {")
+    a("fn bword(i: u64) -> u64 {")
     a("    var t: [u64; %d] = [" % len(bworte))
     for k in range(0, len(bworte), 4):
         st = ", ".join("0x%016X" % w for w in bworte[k:k + 4])
@@ -1066,7 +1066,7 @@ def firn():
     a("}")
     a("")
     a("fn aoktett(k: u64) -> u64 {")
-    a("    return (awort(k / 8) >> ((k % 8) * 8)) & 0xFF")
+    a("    return (aword(k / 8) >> ((k % 8) * 8)) & 0xFF")
     a("}")
     a("")
     ablob = ACPI_BLOB + b"\0" * ((8 - len(ACPI_BLOB) % 8) % 8)
@@ -1074,7 +1074,7 @@ def firn():
               for k in range(0, len(ablob), 8)]
     a("const NAW: u64 = %d" % len(aworte))
     a("")
-    a("fn awort(i: u64) -> u64 {")
+    a("fn aword(i: u64) -> u64 {")
     a("    var t: [u64; %d] = [" % len(aworte))
     for k in range(0, len(aworte), 4):
         st = ", ".join("0x%016X" % w for w in aworte[k:k + 4])

@@ -4,7 +4,7 @@
 #
 #   bash tools/snap/run.sh [outdir]       SNAP_SCALES="1 2" SNAP_OUT keeps the pictures
 #
-# Machine of the stick (tools/design/eh6.sh).  The shell terminal window is dragged (tools/snap/dreh.txt) to the left edge,
+# Machine of the stick (tools/design/eh6.sh).  The shell terminal window is dragged (tools/snap/scenario.txt) to the left edge,
 # back out, to the right edge, to the top edge, out again, to the two corners.  The window server says on the serial line
 #   wm: snap id= zone= x= y= w= h=      (zone 1 left, 2 right, 3 top = maximized, 9..12 corners)
 # Checks per scale (1 and 2, the Windows size of the edge zones scales with it):
@@ -101,7 +101,7 @@ PY
 run() { # <name> <res> <uiscale> [extra]
     local name=$1 res=$2 sc=$3 extra=${4:-}
     mkdir -p "$OUTD/$name"
-    bash tools/design/eh6.sh "$OUTD/$name" "res=$res" "uiscale=$sc" mode=light tafel=nein accel=kvm "drehbuch=tools/snap/dreh.txt" ${extra:+"extra=$extra"} > "$OUTD/$name.log" 2>&1
+    bash tools/design/eh6.sh "$OUTD/$name" "res=$res" "uiscale=$sc" mode=light tafel=nein accel=kvm "drehbuch=tools/snap/scenario.txt" ${extra:+"extra=$extra"} > "$OUTD/$name.log" 2>&1
 }
 
 for sc in $SCALES; do

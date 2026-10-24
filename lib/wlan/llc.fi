@@ -230,38 +230,38 @@ const P_UDP: u64 = 17
 struct Ipv4 {
     ihl: usize,        // Kopflaenge in Oktetten
     gesamt: usize,     // Gesamtlaenge laut Kopf
-    protokoll: u64,
-    quelle: u64,
-    ziel: u64,
-    nutz: u64,         // Zeiger auf die Nutzlast
-    nutz_len: usize,
-    summe_ok: bool
+    proto: u64,
+    source: u64,
+    dest: u64,
+    payload: u64,         // Zeiger auf die Nutzlast
+    payload_len: usize,
+    sum_ok: bool
 }
 
 fn ipv4_new() -> Ipv4 {
     var i: Ipv4 = Ipv4 {
-        ihl: 0, gesamt: 0, protokoll: 0, quelle: 0, ziel: 0,
-        nutz: 0, nutz_len: 0, summe_ok: false
+        ihl: 0, gesamt: 0, proto: 0, source: 0, dest: 0,
+        payload: 0, payload_len: 0, sum_ok: false
     }
     return i
 }
 
 // Baut einen Kopf OHNE Optionen (IHL immer 5). Die Pruefsumme wird
 // gerechnet, nicht geraten.
-fn ipv4_build(out: u64, quelle: u64, ziel: u64, protokoll: u64,
-    nutz_len: usize, kennung: u64) -> usize {
+fn ipv4_build(out: u64, source: u64, dest: u64, proto: u64,
+    payload_len: usize, kennung: u64) -> usize {
     st8(out, 0, 0x45 as u8)          // Fassung 4, IHL 5
     st8(out, 1, 0 as u8)             // kein Dienstgueteverkehr
-    put16(out, 2, (IPV4_MIN + nutz_len) as u64)
+    put16(out, 2, (IPV4_MIN + payload_len) as u64)
     put16(out, 4, kennung)
     // Nicht zerteilen. Diese Datei setzt nichts wieder zusammen, also
     // darf sie auch nichts erzeugen, was zerteilt werden muesste.
     put16(out, 6, 0x4000)
     st8(out, 8, 64 as u8)            // Lebenszeit
-    st8(out, 9, (protokoll & 255) as u8)
+    st8(out, 9, (proto & 255) as u8)
     put16(out, 10, 0)                // Pruefsummenfeld erst null
-    put32(out, 12, quelle)
-    put32(out, 16, ziel)
+    put32(out, 12, source)
+    put32(out, 16, dest)
     put16(out, 10, sum16(out, IPV4_MIN, 0))
     return IPV4_MIN
 }
@@ -280,12 +280,12 @@ fn ipv4_parse(v: *mut Ipv4, p: u64, n: usize) -> bool {
     if gesamt > n { return false }
     (*v).ihl = ihl
     (*v).gesamt = gesamt
-    (*v).protokoll = ld8(p, 9) as u64
-    (*v).quelle = be32(p, 12)
-    (*v).ziel = be32(p, 16)
-    (*v).nutz = p + ihl as u64
-    (*v).nutz_len = gesamt - ihl
-    (*v).summe_ok = sum16_check(p, ihl, 0)
+    (*v).proto = ld8(p, 9) as u64
+    (*v).source = be32(p, 12)
+    (*v).dest = be32(p, 16)
+    (*v).payload = p + ihl as u64
+    (*v).payload_len = gesamt - ihl
+    (*v).sum_ok = sum16_check(p, ihl, 0)
     return true
 }
 
@@ -293,12 +293,12 @@ fn ipv4_parse(v: *mut Ipv4, p: u64, n: usize) -> bool {
 // Laenge. Er wird NICHT uebertragen, geht aber in die Pruefsumme ein.
 // Das ist die Stelle, an der eine UDP- oder TCP-Pruefsumme haeufig
 // falsch wird, deshalb steht sie genau einmal hier.
-fn pseudo_sum(quelle: u64, ziel: u64, protokoll: u64,
+fn pseudo_sum(source: u64, dest: u64, proto: u64,
     len: usize) -> u64 {
     var s: u64 = 0
-    s = s + ((quelle >> 16) & 0xFFFF) + (quelle & 0xFFFF)
-    s = s + ((ziel >> 16) & 0xFFFF) + (ziel & 0xFFFF)
-    s = s + protokoll
+    s = s + ((source >> 16) & 0xFFFF) + (source & 0xFFFF)
+    s = s + ((dest >> 16) & 0xFFFF) + (dest & 0xFFFF)
+    s = s + proto
     s = s + (len as u64)
     return s
 }
@@ -310,32 +310,32 @@ fn pseudo_sum(quelle: u64, ziel: u64, protokoll: u64,
 const UDP_LEN: usize = 8
 
 struct Udp {
-    quelle: u64,
-    ziel: u64,
+    source: u64,
+    dest: u64,
     len: usize,
-    nutz: u64,
-    nutz_len: usize,
-    summe_ok: bool
+    payload: u64,
+    payload_len: usize,
+    sum_ok: bool
 }
 
 fn udp_new() -> Udp {
     var u: Udp = Udp {
-        quelle: 0, ziel: 0, len: 0, nutz: 0, nutz_len: 0,
-        summe_ok: false
+        source: 0, dest: 0, len: 0, payload: 0, payload_len: 0,
+        sum_ok: false
     }
     return u
 }
 
-// `nutz` liegt bereits hinter `out` (out + 8). Der Aufrufer legt sie
+// `payload` liegt bereits hinter `out` (out + 8). Der Aufrufer legt sie
 // dorthin, diese Funktion setzt nur den Kopf und rechnet.
 fn udp_build(out: u64, qip: u64, zip: u64, qport: u64, zport: u64,
-    nutz_len: usize) -> usize {
+    payload_len: usize) -> usize {
     put16(out, 0, qport)
     put16(out, 2, zport)
-    put16(out, 4, (UDP_LEN + nutz_len) as u64)
+    put16(out, 4, (UDP_LEN + payload_len) as u64)
     put16(out, 6, 0)
-    let ps: u64 = pseudo_sum(qip, zip, P_UDP, UDP_LEN + nutz_len)
-    var s: u64 = sum16(out, UDP_LEN + nutz_len, ps)
+    let ps: u64 = pseudo_sum(qip, zip, P_UDP, UDP_LEN + payload_len)
+    var s: u64 = sum16(out, UDP_LEN + payload_len, ps)
     // RFC 768: eine errechnete Null wird als 0xFFFF uebertragen, weil
     // die Null "keine Pruefsumme" bedeutet. Ohne diese Zeile waere ein
     // gueltiges Paket gelegentlich als ungeprueft markiert.
@@ -350,17 +350,17 @@ fn udp_parse(u: *mut Udp, p: u64, n: usize, qip: u64,
     let len: usize = be16(p, 4) as usize
     if len < UDP_LEN { return false }
     if len > n { return false }
-    (*u).quelle = be16(p, 0)
-    (*u).ziel = be16(p, 2)
+    (*u).source = be16(p, 0)
+    (*u).dest = be16(p, 2)
     (*u).len = len
-    (*u).nutz = p + UDP_LEN as u64
-    (*u).nutz_len = len - UDP_LEN
+    (*u).payload = p + UDP_LEN as u64
+    (*u).payload_len = len - UDP_LEN
     if be16(p, 6) == 0 {
         // Null heisst "nicht gerechnet". Das ist bei IPv4 erlaubt.
-        (*u).summe_ok = true
+        (*u).sum_ok = true
     } else {
         let ps: u64 = pseudo_sum(qip, zip, P_UDP, len)
-        (*u).summe_ok = sum16_check(p, len, ps)
+        (*u).sum_ok = sum16_check(p, len, ps)
     }
     return true
 }
@@ -577,28 +577,28 @@ const T_ACK: u64 = 16
 const TCP_MIN: usize = 20
 
 struct Tcp {
-    quelle: u64,
-    ziel: u64,
+    source: u64,
+    dest: u64,
     seq: u64,
     ack: u64,
     off: usize,
     flags: u64,
     fenster: u64,
-    nutz: u64,
-    nutz_len: usize,
-    summe_ok: bool
+    payload: u64,
+    payload_len: usize,
+    sum_ok: bool
 }
 
 fn tcp_new() -> Tcp {
     var t: Tcp = Tcp {
-        quelle: 0, ziel: 0, seq: 0, ack: 0, off: 0, flags: 0,
-        fenster: 0, nutz: 0, nutz_len: 0, summe_ok: false
+        source: 0, dest: 0, seq: 0, ack: 0, off: 0, flags: 0,
+        fenster: 0, payload: 0, payload_len: 0, sum_ok: false
     }
     return t
 }
 
 fn tcp_build(out: u64, qip: u64, zip: u64, qport: u64, zport: u64,
-    seq: u64, ack: u64, flags: u64, nutz_len: usize) -> usize {
+    seq: u64, ack: u64, flags: u64, payload_len: usize) -> usize {
     put16(out, 0, qport)
     put16(out, 2, zport)
     put32(out, 4, seq)
@@ -608,8 +608,8 @@ fn tcp_build(out: u64, qip: u64, zip: u64, qport: u64, zport: u64,
     put16(out, 14, 8192)          // ein festes Fenster
     put16(out, 16, 0)
     put16(out, 18, 0)             // kein dringender Zeiger
-    let ps: u64 = pseudo_sum(qip, zip, P_TCP, TCP_MIN + nutz_len)
-    put16(out, 16, sum16(out, TCP_MIN + nutz_len, ps))
+    let ps: u64 = pseudo_sum(qip, zip, P_TCP, TCP_MIN + payload_len)
+    put16(out, 16, sum16(out, TCP_MIN + payload_len, ps))
     return TCP_MIN
 }
 
@@ -619,17 +619,17 @@ fn tcp_parse(t: *mut Tcp, p: u64, n: usize, qip: u64,
     let off: usize = ((ld8(p, 12) >> 4) as usize) * 4
     if off < TCP_MIN { return false }
     if off > n { return false }
-    (*t).quelle = be16(p, 0)
-    (*t).ziel = be16(p, 2)
+    (*t).source = be16(p, 0)
+    (*t).dest = be16(p, 2)
     (*t).seq = be32(p, 4)
     (*t).ack = be32(p, 8)
     (*t).off = off
     (*t).flags = (ld8(p, 13) as u64) & 255
     (*t).fenster = be16(p, 14)
-    (*t).nutz = p + off as u64
-    (*t).nutz_len = n - off
+    (*t).payload = p + off as u64
+    (*t).payload_len = n - off
     let ps: u64 = pseudo_sum(qip, zip, P_TCP, n)
-    (*t).summe_ok = sum16_check(p, n, ps)
+    (*t).sum_ok = sum16_check(p, n, ps)
     return true
 }
 

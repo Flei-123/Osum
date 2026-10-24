@@ -250,7 +250,7 @@ fn temit() {
 //
 // Die Adressen stehen nach 802.11-2016 9.2.4.7.2 fuer ToDS=1 so:
 //   A1 = BSSID (der Zugangspunkt), A2 = Sender, A3 = Ziel.
-fn datenrahmen_bauen(out: u64, spa: u64, aa: u64, nutz: usize) -> usize {
+fn datenrahmen_bauen(out: u64, spa: u64, aa: u64, payload: usize) -> usize {
     // FC: Typ Daten (2), Untertyp 0, ToDS gesetzt
     rt.st8(out, 0, 8 as u8)
     rt.st8(out, 1, 1 as u8)
@@ -270,15 +270,15 @@ fn datenrahmen_bauen(out: u64, spa: u64, aa: u64, nutz: usize) -> usize {
     // Ein UDP-Paket von 0.0.0.0:68 an 255.255.255.255:67 -- also
     // genau die Form, die ein DHCP-Discover hat.
     let ipl: usize = llc.ipv4_build(koerper + 8, 0, 0xFFFFFFFF,
-        llc.P_UDP, 8 + nutz, 1)
+        llc.P_UDP, 8 + payload, 1)
     var k: usize = 0
-    while k < nutz {
+    while k < payload {
         rt.st8(koerper + 8 + (ipl as u64) + 8, k, (65 + k) as u8)
         k = k + 1
     }
     llc.udp_build(koerper + 8 + (ipl as u64), 0, 0xFFFFFFFF, 68, 67,
-        nutz)
-    return 24 + 8 + ipl + 8 + nutz
+        payload)
+    return 24 + 8 + ipl + 8 + payload
 }
 
 // ==================================================================
@@ -880,8 +880,8 @@ fn run_line(line: u64, len: usize) {
         var ipok: bool = false
         var sum_ok: bool = false
         var proto: u64 = 0
-        var quelle: u64 = 0
-        var ziel: u64 = 0
+        var source: u64 = 0
+        var dest: u64 = 0
         var uok: bool = false
         var usum: bool = false
         var qport: u64 = 0
@@ -897,20 +897,20 @@ fn run_line(line: u64, len: usize) {
             var ip: llc.Ipv4 = llc.ipv4_new()
             if llc.ipv4_parse(&ip, p0 + 8, n - 8) {
                 ipok = true
-                sum_ok = ip.summe_ok
-                proto = ip.protokoll
-                quelle = ip.quelle
-                ziel = ip.ziel
-                if ip.protokoll == llc.P_UDP {
+                sum_ok = ip.sum_ok
+                proto = ip.proto
+                source = ip.source
+                dest = ip.dest
+                if ip.proto == llc.P_UDP {
                     var ud: llc.Udp = llc.udp_new()
-                    if llc.udp_parse(&ud, ip.nutz, ip.nutz_len,
-                        ip.quelle, ip.ziel) {
+                    if llc.udp_parse(&ud, ip.payload, ip.payload_len,
+                        ip.source, ip.dest) {
                         uok = true
-                        usum = ud.summe_ok
-                        qport = ud.quelle
-                        zport = ud.ziel
+                        usum = ud.sum_ok
+                        qport = ud.source
+                        zport = ud.dest
                         var dh: llc.Dhcp = llc.dhcp_new()
-                        if llc.dhcp_parse(&dh, ud.nutz, ud.nutz_len) {
+                        if llc.dhcp_parse(&dh, ud.payload, ud.payload_len) {
                             dok = true
                             dart = dh.art
                             yia = dh.yiaddr
@@ -937,10 +937,10 @@ fn run_line(line: u64, len: usize) {
         tnum(proto)
         var g5: [u8; 8] = " qip=\0\0\0"
         tlit((&g5[0]) as u64)
-        tnum(quelle)
+        tnum(source)
         var g6: [u8; 8] = " zip=\0\0\0"
         tlit((&g6[0]) as u64)
-        tnum(ziel)
+        tnum(dest)
         var g7: [u8; 8] = " udp=\0\0\0"
         tlit((&g7[0]) as u64)
         tbit(uok)
@@ -1135,19 +1135,19 @@ fn run_line(line: u64, len: usize) {
                 let k2: i64 = frame.header_len((&kl2[0]) as u64,
                     n2 as usize)
                 if k2 > 0 {
-                    let nutz: u64 = (&kl2[0]) as u64 + (k2 as u64)
+                    let payload: u64 = (&kl2[0]) as u64 + (k2 as u64)
                     let nn: usize = (n2 as usize) - (k2 as usize)
-                    if llc.snap_parse(nutz, nn) == llc.ET_IPV4 {
+                    if llc.snap_parse(payload, nn) == llc.ET_IPV4 {
                         var ip: llc.Ipv4 = llc.ipv4_new()
-                        if llc.ipv4_parse(&ip, nutz + 8, nn - 8) {
-                            if ip.summe_ok && ip.protokoll == llc.P_UDP {
+                        if llc.ipv4_parse(&ip, payload + 8, nn - 8) {
+                            if ip.sum_ok && ip.proto == llc.P_UDP {
                                 var ud: llc.Udp = llc.udp_new()
-                                if llc.udp_parse(&ud, ip.nutz,
-                                    ip.nutz_len, ip.quelle, ip.ziel) {
-                                    if ud.summe_ok && ud.ziel == 68 {
+                                if llc.udp_parse(&ud, ip.payload,
+                                    ip.payload_len, ip.source, ip.dest) {
+                                    if ud.sum_ok && ud.dest == 68 {
                                         var dh: llc.Dhcp = llc.dhcp_new()
-                                        if llc.dhcp_parse(&dh, ud.nutz,
-                                            ud.nutz_len) {
+                                        if llc.dhcp_parse(&dh, ud.payload,
+                                            ud.payload_len) {
                                             dart = dh.art
                                             adresse = dh.yiaddr
                                             maske = dh.maske
@@ -1183,15 +1183,15 @@ fn run_line(line: u64, len: usize) {
                     if llc.snap_parse(nutz3, nn3) == llc.ET_IPV4 {
                         var ip3: llc.Ipv4 = llc.ipv4_new()
                         if llc.ipv4_parse(&ip3, nutz3 + 8, nn3 - 8) {
-                            if ip3.summe_ok && ip3.protokoll == llc.P_TCP {
+                            if ip3.sum_ok && ip3.proto == llc.P_TCP {
                                 var tc: llc.Tcp = llc.tcp_new()
-                                if llc.tcp_parse(&tc, ip3.nutz,
-                                    ip3.nutz_len, ip3.quelle, ip3.ziel) {
-                                    if tc.summe_ok {
+                                if llc.tcp_parse(&tc, ip3.payload,
+                                    ip3.payload_len, ip3.source, ip3.dest) {
+                                    if tc.sum_ok {
                                         status = llc.http_status_of(
-                                            tc.nutz, tc.nutz_len)
+                                            tc.payload, tc.payload_len)
                                         rumpf = llc.http_body_offset(
-                                            tc.nutz, tc.nutz_len)
+                                            tc.payload, tc.payload_len)
                                     }
                                 }
                             }

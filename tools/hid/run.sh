@@ -98,11 +98,11 @@ gleich() { # name erwartet bekommen
     fi
 }
 
-echo "== 0a. kein Moduswort steckt neu in einem anderen"
+echo "== 0a. no mode word is newly contained in another"
 python3 tools/hid/worte.py kernel
 zusage "die Moduswoerter des ganzen Baums sind eindeutig" $?
 
-echo "== 0. der Kern wird gebaut"
+echo "== 0. the kernel is built"
 ./tools/build-kernel.sh "$TMPD/osum.mb" > /dev/null || { echo "Bau fehlgeschlagen"; exit 1; }
 IMG="$TMPD/osum.mb"
 
@@ -117,7 +117,7 @@ lauf() { # name kommandozeile [qemu-args...]
 
 # ----------------------------------------------------------------------
 echo
-echo "== 1. der Zerleger gegen den zweiten Zerleger"
+echo "== 1. the parser against the second parser"
 RC=$(lauf zerleger "hidrep nokbd noring3 nofs")
 zusage "der Lauf endet sauber (Code 21, bekommen $RC)" \
     "$([ "$RC" = 21 ] && echo 0 || echo 1)"
@@ -168,7 +168,7 @@ zusage "der Kern laeuft nach allen vierzehn weiter" $?
 
 # ----------------------------------------------------------------------
 echo
-echo "== 3. Berichte durch denselben Weg, den ein Geraet nimmt"
+echo "== 3. reports through the same path a device takes"
 RC=$(lauf berichte "hidpad nokbd noring3 nofs")
 zusage "der Lauf endet sauber (Code 21, bekommen $RC)" \
     "$([ "$RC" = 21 ] && echo 0 || echo 1)"
@@ -182,7 +182,7 @@ gleich "acht Tasten aus EINEM Bericht" "8" "$ACHT"
 for u in 0x4 0x5 0x6 0x7 0x8 0x9 0xa 0xb; do
     grep -aq "^hidev: druck $u " "$B" || { FAIL=$((FAIL+1)); echo "  FALL  Taste $u fehlt"; }
 done
-OK=$((OK+1)); echo "  ok    alle acht Gebraeuche 0x4..0xb sind einzeln da"
+OK=$((OK+1)); echo "  ok    all eight usages 0x4..0xb are present individually"
 # Bericht 1 legt zwei weitere und Umschalt dazu: elf gleichzeitig.
 grep -aq '^hidev: druck 0xe1 code=0x2a' "$B"
 zusage "Umschalt kommt als eigener Abtastcode 0x2a" $?
@@ -261,7 +261,7 @@ gleich "kein Bericht ging verloren" "0" "$WEG"
 
 # ----------------------------------------------------------------------
 echo
-echo "== 4b. Gesten (L-002 r797): Wort hidgest, Standard AUS"
+echo "== 4b. gestures (L-002 r797): word hidgest, default OFF"
 # WITHOUT the word nothing of the gesture section plays and no gesture
 # line appears -- the pad path measured above is unchanged.
 G0=$(python3 tools/hid/descs.py nr "gest: tap aufsetzen")
@@ -327,7 +327,7 @@ gleich "hidgest: kein Bericht ging verloren" "0" \
 
 # ----------------------------------------------------------------------
 echo
-echo "== 4c. Mehrfinger (W-TPSET4): Ziehen, Kneifen, Wisch, Ecke, Optionswechsel mitten im Lauf"
+echo "== 4c. multi-finger (W-TPSET4): drag, pinch, swipe, corner, option switch mid-run"
 # Same replay as 4b (the mf: reports follow "gest: ende"). Expected values are what lib/touchgest decides
 # (tools/touchgest/run.sh proves the machine itself); this proves the KERNEL glue: tap-and-drag holds the left
 # button, a pinch is a virtual Ctrl + one wheel step, a 3-finger swipe reaches wm.gest_action, the corner press is a
@@ -420,7 +420,7 @@ gleich "GEGENPROBE nurboot: usb-kbd laeuft weiter (Boot-Protokoll)" "1" \
 
 # ----------------------------------------------------------------------
 echo
-echo "== 6. I2C-HID, so weit es in QEMU geht"
+echo "== 6. I2C-HID, as far as QEMU goes"
 RC=$(lauf i2ctest "hiddump nokbd noring3 nofs")
 zusage "der Lauf endet sauber ($RC)" \
     "$([ "$RC" = 21 ] && echo 0 || echo 1)"
