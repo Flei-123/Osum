@@ -355,7 +355,7 @@ echo "== 2. the catalogue =="
 part "$A" LIST STATUS > "$TMPD/p.txt"
 n_act=$(grep -ac '^social\.' "$TMPD/p.txt")
 n_evt=$(grep -ac '^event social\.' "$TMPD/p.txt")
-[ "$n_act" = 32 ] && [ "$n_evt" = 5 ] && ok "the catalogue has 32 social.* actions and 5 events" \
+[ "$n_act" = 33 ] && [ "$n_evt" = 5 ] && ok "the catalogue has 33 social.* actions and 5 events" \
     || { bad "catalogue: $n_act actions, $n_evt events"; head -20 "$TMPD/p.txt" | sed 's/^/        /'; }
 has "$TMPD/p.txt" "social.privacy.set critical" "privacy.set is critical"
 hasnot "$TMPD/p.txt" "(not running)" "the service is bound (not 'not running')"

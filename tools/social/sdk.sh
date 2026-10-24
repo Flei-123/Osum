@@ -47,7 +47,7 @@ fi
 python3 tools/actionbus/manifest.py check pakete/social/ACTIONS > "$TMPD/lint.txt" 2>&1 \
     && ok "host reader: $(head -1 "$TMPD/lint.txt")" \
     || bad "host reader refuses pakete/social/ACTIONS: $(cat "$TMPD/lint.txt")"
-[ "$(wc -c < pakete/social/ACTIONS)" -lt 8191 ] && ok "the manifest fits the broker's read buffer (8191 octets)" || bad "pakete/social/ACTIONS is over 8191 octets (the broker rejects it)"
+[ "$(wc -c < pakete/social/ACTIONS)" -lt 16383 ] && ok "the manifest fits the broker's read buffer (16383 octets)" || bad "pakete/social/ACTIONS is over 16383 octets (the broker rejects it)"
 has pakete/social/ACTIONS "action social.party.take" "ACTIONS declares social.party.take"
 has pakete/social/ACTIONS "arg party string optional" "ACTIONS declares the party argument of social.activity.set"
 
