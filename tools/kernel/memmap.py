@@ -281,7 +281,7 @@ BEREICHE = [
     # hier zum ersten Mal.  Darin liegen die Skalare des Laders, die
     # vier Modulsaetze, die Abschnittstafel des laufenden Ladevorgangs
     # und die TREIBERTAFEL, die ein geladenes Modul fuellt.
-    ("MODUL",      "kstate.fi", "MODUL_OFF",      "MODUL_MAX"),
+    ("MODUL",      "kstate.fi", "MODULE_OFF",      "MODUL_MAX"),
     ("BUS",        "kstate.fi", "BUS_OFF",        "BUS_MAX"),
 
     # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).

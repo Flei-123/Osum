@@ -33,7 +33,7 @@ Host tool: `mkpkg.py build <outdir> --name N --module M.omod --match "pci 1234:1
 ## 2. Planned kernel flow (not built)
 
 1. After the root is mounted: scan `/lib/drivers`, verify each `driver.inf.sig`, parse, build an index (hardware id -> package) without loading any `.omod`.
-2. For every PCI/USB/ACPI device without a built-in driver pick the best package, write a device context into `kstate.MODUL_OFF + 0x1800` (bus, ids, subsystem, bdf, bar0), call `module.load` (signature, revocation list, ABI), one error line on failure, boot continues.
+2. For every PCI/USB/ACPI device without a built-in driver pick the best package, write a device context into `kstate.MODULE_OFF + 0x1800` (bus, ids, subsystem, bdf, bar0), call `module.load` (signature, revocation list, ABI), one error line on failure, boot continues.
 3. `/proc/drivers` gets one line per device (id, driver, source `builtin|store|-`, bind result); devices without driver show `drv=none`.
 4. `drvctl list|match|install|remove|ban`: `install` verifies the signature before copying to `/lib/drivers`; `ban` is a local deny list `/etc/drivers.deny` (the signed revocation list can only be produced on the host: the private key is not on the target).
 5. Word `nostore` (planned bit 1195) switches the whole thing off (counter-proof).
@@ -55,7 +55,7 @@ Host tool: `mkpkg.py build <outdir> --name N --module M.omod --match "pci 1234:1
 - `kernel/bus/drvinf.fi`: manifest parser (same grammar as `mkpkg.py`), record layout, match specificity.
 - `kernel/bus/drvstore.fi`: scan `/lib/drivers`, signature check (`module.signatur_gilt`), ABI check, module file check, local deny list `/etc/drivers.deny` (one package name per line), index (16 packages), PCI auto-bind for devices no built-in row claims (`drvreg.claimed`). Boot lines `drvstore: pkgs=N valid=M`, `drvstore: pkg <name> ok|rejected <code>`, `drvstore: bind <name> -> pci ...`.
 - Reject codes: 1 syntax, 2 key, 3 duplicate, 4 name, 5 name != dir, 6 number, 7 module, 8 right, 9 fw, 10 slot, 11 missing key, 12 match, 13 no match, 14 too many, 15 too big, 20 signature, 21 ABI, 22 module file missing, 23 file missing.
-- Device context for the module at `state + 0xAA800` (`kstate.MODUL_OFF + 0x1800`): +0 version 1, +8 bus (1 pci), +16 vendor, +24 device, +32 subsys (vendor<<16|device), +40 class<<8|sub, +48 prog-if, +56 bdf, +64 BAR0 mapped (only with `rights=mmio`, which also enables memory decode), +72 irq line, +80 pci index, +88 BAR0 physical.
+- Device context for the module at `state + 0xAA800` (`kstate.MODULE_OFF + 0x1800`): +0 version 1, +8 bus (1 pci), +16 vendor, +24 device, +32 subsys (vendor<<16|device), +40 class<<8|sub, +48 prog-if, +56 bdf, +64 BAR0 mapped (only with `rights=mmio`, which also enables memory decode), +72 irq line, +80 pci index, +88 BAR0 physical.
 - `/proc/drivers`: old registry table, then `# devices` with one line per PCI/USB/ACPI device: `drv=<name> src=builtin|store|none bind=bound|failed|seen|-`, plus `store=on pkgs= valid= bound= failed=` or `store=off`.
 - Word `nostore` (bit 1195) skips scan and bind.
 - Demo: `module/store/edudemo.fi` binds QEMU `edu` (1234:11e8), reads the id register and a liveness register through BAR0.

@@ -96,7 +96,7 @@ export {
     init, load, entladen, ready, reason, say_reason,
     tries, rejects, loaded, syms, ext_syms, relocs, image_bytes, file_bytes,
     sig_ok, secs, unloads, entry_of, base_of, frames_of, abi_of_file,
-    init_rc, ruf1, ruf0, ruf2, ruf3, ruf6, signatur_gilt, last_placed,
+    init_rc, ruf1, ruf0, ruf2, ruf3, ruf6, signature_valid, last_placed,
     R_OK, R_NOFILE, R_SHORT, R_TOOBIG, R_MAGIC, R_FORMAT, R_ABI, R_LEN,
     R_SIG, R_ELF, R_ETYPE, R_MACHINE, R_SHDR, R_SECTIONS, R_NOMEM,
     R_SYMTAB, R_SYM, R_RELTYPE, R_RANGE, R_ENTRY, R_SLOT, R_INIT,
@@ -138,7 +138,7 @@ const R_BANLIST: u64 = 26 // K-014: a revocation list exists but is not valid
 
 // --------------------------------------------------------- die Aufteilung
 //
-// `kstate.MODUL_OFF` (0x4D000), drei Seiten. 0x0800..0x0C00 gehoert
+// `kstate.MODULE_OFF` (0x4D000), drei Seiten. 0x0800..0x0C00 gehoert
 // `modtab.fi`; alles andere hier. Eingetragen in
 // `tools/kernel/memmap.py`.
 const S_READY: u64 = 0x00
@@ -254,32 +254,32 @@ fn passt(groesse: u64, off: u64, len: u64) -> bool {
 }
 
 fn sec(state: u64, i: u64) -> u64 {
-    return kstate.get(state, kstate.MODUL_OFF + SEC_OFF + i * 8)
+    return kstate.get(state, kstate.MODULE_OFF + SEC_OFF + i * 8)
 }
 
 fn sec_set(state: u64, i: u64, v: u64) {
-    kstate.set(state, kstate.MODUL_OFF + SEC_OFF + i * 8, v)
+    kstate.set(state, kstate.MODULE_OFF + SEC_OFF + i * 8, v)
 }
 
 fn m(state: u64, k: u64, off: u64) -> u64 {
-    return kstate.get(state, kstate.MODUL_OFF + MOD_OFF + k * MOD_SPAN + off)
+    return kstate.get(state, kstate.MODULE_OFF + MOD_OFF + k * MOD_SPAN + off)
 }
 
 fn m_set(state: u64, k: u64, off: u64, v: u64) {
-    kstate.set(state, kstate.MODUL_OFF + MOD_OFF + k * MOD_SPAN + off, v)
+    kstate.set(state, kstate.MODULE_OFF + MOD_OFF + k * MOD_SPAN + off, v)
 }
 
 fn zaehl(state: u64, off: u64) {
-    kstate.set(state, kstate.MODUL_OFF + off,
-        kstate.get(state, kstate.MODUL_OFF + off) + 1)
+    kstate.set(state, kstate.MODULE_OFF + off,
+        kstate.get(state, kstate.MODULE_OFF + off) + 1)
 }
 
 fn setz(state: u64, off: u64, v: u64) {
-    kstate.set(state, kstate.MODUL_OFF + off, v)
+    kstate.set(state, kstate.MODULE_OFF + off, v)
 }
 
 fn hol(state: u64, off: u64) -> u64 {
-    return kstate.get(state, kstate.MODUL_OFF + off)
+    return kstate.get(state, kstate.MODULE_OFF + off)
 }
 
 fn fail(state: u64, grund: u64) -> u64 {
@@ -542,7 +542,7 @@ fn schluessel(dst: u64) {
     }
 }
 
-fn signatur_gilt(state: u64, msg: u64, len: u64, sig: u64) -> bool {
+fn signature_valid(state: u64, msg: u64, len: u64, sig: u64) -> bool {
     var key: [u8; 32] = [0; 32]
     schluessel((&key[0]) as u64)
     var c: ed25519.Ctx = ed25519.ctx_new()
@@ -691,7 +691,7 @@ fn check_and_place(state: u64, datei: u64, groesse: u64, k: u64,
     if groesse - HDR_LEN - n != SIG_LEN {
         return R_LEN
     }
-    if !signatur_gilt(state, datei, HDR_LEN + n, datei + HDR_LEN + n) {
+    if !signature_valid(state, datei, HDR_LEN + n, datei + HDR_LEN + n) {
         return R_SIG
     }
     setz(state, S_SIGOK, 1)
@@ -707,7 +707,7 @@ fn check_and_place(state: u64, datei: u64, groesse: u64, k: u64,
     // Den Namen fuer die Anzeige merken.
     var j: u64 = 0
     while j < 32 {
-        kstate.set8(state + kstate.MODUL_OFF + MOD_OFF + k * MOD_SPAN
+        kstate.set8(state + kstate.MODULE_OFF + MOD_OFF + k * MOD_SPAN
             + M_NAME + j, (kstate.get8(datei + 32 + j) & 0xFF) as u8)
         j = j + 1
     }
@@ -766,7 +766,7 @@ fn check_banlist(state: u64, sig: u64) -> u64 {
         }
     }
     let body: u64 = BAN_HDR + anzahl * SIG_LEN
-    if g == R_OK && !signatur_gilt(state, buf, body, buf + body) {
+    if g == R_OK && !signature_valid(state, buf, body, buf + body) {
         g = R_BANLIST
     }
     if g == R_OK {
@@ -996,16 +996,25 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
     }
 
     // ------ Ein- und Aussprung
+    var ein_new: [u8; 12] = "module_init\0"
+    var aus_new: [u8; 12] = "module_exit\0"
     var ein: [u8; 11] = "modul_init\0"
     var aus: [u8; 11] = "modul_exit\0"
-    let e: u64 = sym_adresse(state, symtab, symn, strtab, (&ein[0]) as u64,
-        shnum)
+    var e: u64 = sym_adresse(state, symtab, symn, strtab,
+        (&ein_new[0]) as u64, shnum)
+    if e == 0 {
+        e = sym_adresse(state, symtab, symn, strtab, (&ein[0]) as u64, shnum)
+    }
     if e == 0 {
         return R_ENTRY
     }
     m_set(state, k, M_ENTRY, e)
-    m_set(state, k, M_EXIT, sym_adresse(state, symtab, symn, strtab,
-        (&aus[0]) as u64, shnum))
+    var x: u64 = sym_adresse(state, symtab, symn, strtab,
+        (&aus_new[0]) as u64, shnum)
+    if x == 0 {
+        x = sym_adresse(state, symtab, symn, strtab, (&aus[0]) as u64, shnum)
+    }
+    m_set(state, k, M_EXIT, x)
     return R_OK
 }
 
