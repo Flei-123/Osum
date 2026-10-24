@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// socjob -- background provider calls for the social service.
+//
+// One slot per provider. A job is a forked child whose output goes into a
+// non-blocking pipe; job_poll drains it and reaps the child without ever
+// waiting, so the service loop keeps answering the bus while a provider
+// is slow.
+
+profile kernel
+
+import actwire
+
+export { job_start, job_busy, job_poll, job_out, job_len, job_kind, job_release }
+
+const S_READ: i64 = 0
+const S_CLOSE: i64 = 3
+const S_PIPE: i64 = 22
+const S_DUP2: i64 = 33
+const S_FORK: i64 = 57
+const S_EXECVE: i64 = 59
+const S_WAIT4: i64 = 61
+const S_KILL: i64 = 62
+const S_FCNTL: i64 = 72
+const F_SETFL: i64 = 4
+const O_NONBLOCK: i64 = 2048
+const WNOHANG: i64 = 1
+
+const SLOTS: usize = 8
+const SLOT_BUF: usize = 16384
+
+static mut j_pid: [i64; 8] = [0 as i64; 8]
+static mut j_fd: [i64; 8] = [0 as i64; 8]
+static mut j_start: [u64; 8] = [0 as u64; 8]
+static mut j_limit: [u64; 8] = [0 as u64; 8]
+static mut j_len: [usize; 8] = [0 as usize; 8]
+static mut j_kind: [u8; 8] = [0 as u8; 8]
+static mut j_killed: [u8; 8] = [0 as u8; 8]
+static mut j_buf: [u8; 131072] = [0 as u8; 131072]
+
+fn slot_ptr(slot: usize) -> u64 {
+    return (&j_buf[0]) as u64 + (slot * SLOT_BUF) as u64
+}
+
+fn job_busy(slot: usize) -> bool {
+    return slot < SLOTS && j_pid[slot] > 0
+}
+
+fn job_out(slot: usize) -> u64 {
+    return slot_ptr(slot)
+}
+
+fn job_len(slot: usize) -> usize {
+    return j_len[slot]
+}
+
+fn job_kind(slot: usize) -> u8 {
+    return j_kind[slot]
+}
+
+fn job_release(slot: usize) {
+    j_pid[slot] = 0
+    j_len[slot] = 0
+}
+
+fn job_start(slot: usize, argv: u64, kind: u8, limit: u64) -> bool {
+    if slot >= SLOTS || j_pid[slot] > 0 {
+        return false
+    }
+    var fds: [i32; 2] = [0; 2]
+    if syscall(S_PIPE, (&fds[0]) as i64, 0, 0, 0, 0, 0) < 0 {
+        return false
+    }
+    let kid: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
+    if kid < 0 {
+        syscall(S_CLOSE, fds[0] as i64, 0, 0, 0, 0, 0)
+        syscall(S_CLOSE, fds[1] as i64, 0, 0, 0, 0, 0)
+        return false
+    }
+    if kid == 0 {
+        syscall(S_DUP2, fds[1] as i64, 1, 0, 0, 0, 0)
+        syscall(S_DUP2, fds[1] as i64, 2, 0, 0, 0, 0)
+        syscall(S_CLOSE, fds[0] as i64, 0, 0, 0, 0, 0)
+        syscall(S_CLOSE, fds[1] as i64, 0, 0, 0, 0, 0)
+        let a0: u64 = *(argv as *mut u64)
+        syscall(S_EXECVE, a0 as i64, argv as i64, 0, 0, 0, 0)
+        syscall(60, 127, 0, 0, 0, 0, 0)
+    }
+    syscall(S_CLOSE, fds[1] as i64, 0, 0, 0, 0, 0)
+    syscall(S_FCNTL, fds[0] as i64, F_SETFL, O_NONBLOCK, 0, 0, 0)
+    j_pid[slot] = kid
+    j_fd[slot] = fds[0] as i64
+    j_start[slot] = actwire.ticks()
+    j_limit[slot] = limit
+    j_len[slot] = 0
+    j_kind[slot] = kind
+    j_killed[slot] = 0 as u8
+    return true
+}
+
+fn drain(slot: usize) {
+    var chunk: [u8; 512] = [0 as u8; 512]
+    var more: bool = true
+    while more {
+        let n: i64 = syscall(S_READ, j_fd[slot], (&chunk[0]) as i64, 512, 0, 0, 0)
+        if n > 0 {
+            var k: usize = 0
+            let base: u64 = slot_ptr(slot)
+            while k < n as usize {
+                if j_len[slot] < SLOT_BUF - 1 {
+                    *((base + j_len[slot] as u64) as *mut u8) = chunk[k]
+                    j_len[slot] = j_len[slot] + 1
+                }
+                k = k + 1
+            }
+        } else {
+            more = false
+        }
+    }
+}
+
+fn job_poll(slot: usize) -> i64 {
+    if !job_busy(slot) {
+        return -1
+    }
+    drain(slot)
+    var st: i32 = 0
+    let r: i64 = syscall(S_WAIT4, j_pid[slot], (&st) as i64, WNOHANG, 0, 0, 0)
+    if r == j_pid[slot] || r < 0 {
+        drain(slot)
+        syscall(S_CLOSE, j_fd[slot], 0, 0, 0, 0, 0)
+        j_fd[slot] = 0
+        if j_killed[slot] != 0 as u8 {
+            return 124
+        }
+        if r < 0 {
+            return 127
+        }
+        if (st & 127) == 0 {
+            return ((st >> 8) & 255) as i64
+        }
+        return 255
+    }
+    if j_killed[slot] == 0 as u8 && actwire.ticks() - j_start[slot] > j_limit[slot] {
+        syscall(S_KILL, j_pid[slot], 9, 0, 0, 0, 0)
+        j_killed[slot] = 1 as u8
+    }
+    return -1
+}

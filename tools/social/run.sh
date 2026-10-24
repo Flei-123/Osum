@@ -389,7 +389,7 @@ has "$TMPD/p.txt" "relation=friend" "the user accepts carla: friend"
 part "$A" DRY WITHDRAW > "$TMPD/p.txt"
 has "$TMPD/p.txt" "would=remove fleitec:u_BERT" "dry run says what it would do"
 part "$A" WITHDRAW REQUNDO > "$TMPD/p.txt"
-has "$TMPD/p.txt" "relation=none" "the request to dora is withdrawn"
+grep -aq "relation=none" "$TMPD/p.txt" && ok "the request to dora is withdrawn" || { bad "the request to dora is withdrawn -- 'relation=none' missing"; head -12 "$TMPD/p.txt" | sed 's/^/        /'; }
 part "$A" REQUNDO LOCAL > "$TMPD/p.txt"
 has "$TMPD/p.txt" "relation=outgoing" "request at the local provider: outgoing"
 grep -aq "^relation=none" "$TMPD/p.txt" && ok "undo runs the manifest's inverse (withdraw): none again" \
@@ -596,4 +596,54 @@ if [ -f "$TMPD/bar.ppm" ]; then
 else
     note "no picture (socat/monitor missing) -- not a failure of this round"
 fi
+
+echo "== 14. a slow provider does not block the service (r40) =="
+printf 'provider local /bin/soclocal\nprovider slow /bin/soclocal /etc/social/slow\n' > "$TMPD/etc/providers_slow"
+printf '3000' > "$TMPD/etc/slow.slow"
+printf 'c\tzed\tfriend\tonline\tZed (slow)\tzed\t\t\t0\t\t0\n' > "$TMPD/etc/slow.book"
+cat > "$TMPD/s3.sh" <<'EOS'
+orientbus serve 6000 &
+sleep -m 300
+social serve 6000 300 60000 &
+sleep 1
+echo ==EARLY==
+act call social.status
+echo ==EARLYBOOK==
+act call social.contacts.list
+sleep 6
+echo ==LATE==
+act call social.status
+echo ==SLOWEND==
+EOS
+S_=(build "$TMPD/C.img" $BLOCKS /lib/
+    /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/
+    /etc/actions.d/ /etc/orientbus/ /etc/social/ /apps/ /apps/social.prog/ /var/ /var/log/
+    /usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/
+    "/etc/locale.conf=$TMPD/etc/locale.conf")
+for p in $PROGS; do S_+=("/bin/$p=$TMPD/bin/$p.elf"); done
+S_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
+     "/etc/social/providers=$TMPD/etc/providers_slow"
+     "/etc/social/local.book=$TMPD/etc/local.book"
+     "/etc/social/slow.book=$TMPD/etc/slow.book"
+     "/etc/social/slow.slow=$TMPD/etc/slow.slow"
+     "/t/s.sh=$TMPD/s3.sh")
+python3 tools/osum/mkfs.py "${S_[@]}" > "$TMPD/mkfs3.txt" 2>&1 || bad "mkfs (slow): $(tail -2 "$TMPD/mkfs3.txt")"
+: > "$TMPD/c.txt"
+timeout 120 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
+    -kernel "$TMPD/k0.img" -m 512 \
+    -append "osum vfs nokbd bus script=sh /t/s.sh;exit" \
+    -serial "file:$TMPD/c.txt" -display none -no-reboot \
+    -drive "file=$TMPD/C.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+tr -cd '\11\12\15\40-\176' < "$TMPD/c.txt" > "$TMPD/c.klar"
+C="$TMPD/c.klar"
+has "$C" "==SLOWEND==" "the slow-provider guest reached its end"
+part "$C" EARLY EARLYBOOK > "$TMPD/p.txt"
+has "$TMPD/p.txt" "provider.1=local ok 2" "1 s in: the fast provider's book is already in"
+has "$TMPD/p.txt" "provider.2=slow new 0" "... while the slow provider is still running in the background (the service answered)"
+part "$C" EARLYBOOK LATE > "$TMPD/p.txt"
+hasnot "$TMPD/p.txt" "slow:zed" "the book of the slow provider is not there yet"
+part "$C" LATE SLOWEND > "$TMPD/p.txt"
+has "$TMPD/p.txt" "provider.2=slow ok 1" "later: the slow provider's book arrived"
+
 fin

@@ -224,14 +224,14 @@ TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | sed 's/^[^=]*=//' | grep
 # DAILY-DRIVER: FUENFZEHN -- "Updates" ist der 15. Reiter.
 # r149: NEUNZEHN -- Maus (16), Energie (17), Info (18) und Apps (19) kamen dazu; die Zahl stand auf 15 (Altlast).
 # Seiten von Paketen (/apps/<app>.prog/SETTINGS) stehen NICHT in settings.tabs, sie kommen aus dem Katalog.
-# r1588: 30 -- two catalogue lines (settings.tabs, settings.tabs2) because one value holds at most 191 octets (msg VALW 192)
+# 31 (touchpad tab added) -- two catalogue lines (settings.tabs, settings.tabs2) because one value holds at most 191 octets (msg VALW 192)
 TABS_LINES=$(grep -ac '^settings.tabs' locale/de/messages)
-num "Reiter in settings.tabs + settings.tabs2 (deutsch)" "$((TABS_DE + TABS_LINES))" eq 30
+num "Reiter in settings.tabs + settings.tabs2 (deutsch)" "$((TABS_DE + TABS_LINES))" eq 31
 
 # ======================================================================
 echo "== 3. der Aufbau: Kern, Userland, Zertifikat, Attrappe =="
 # ======================================================================
-HWNET_PROGS="sh ls cat echo settings" bash tools/hwnet/build.sh "$TMPD/s0" 0 \
+HWNET_BLOCKS=16384 HWNET_PROGS="sh ls cat echo settings" bash tools/hwnet/build.sh "$TMPD/s0" 0 \
     > "$TMPD/b0.txt" 2>&1 \
     || { bad "der Kern baut nicht"; tail -8 "$TMPD/b0.txt" | sed 's/^/        /'
          echo "KONTO: $pass passed, $fail failed"; exit 1; }
