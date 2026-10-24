@@ -7,12 +7,14 @@ import wlan.iwl_cmdq
 import wlan.iwl_boot
 import wlan.iwl_le
 
-export { XCtx, xctx_new, xport_make, E_XP_NOCQ }
+export { XCtx, xctx_new, xctx_fast, xport_make, tr_submit, tr_poll, E_XP_NOCQ }
 
 const E_XP_NOCQ: i64 = -80
 const PEND_CAP: u64 = 4096
 const RECV_BUDGET_MS: u64 = 250
 const RECV_SPIN_MAX: u64 = 400000
+const FAST_BUDGET_MS: u64 = 20
+const FAST_SPIN_MAX: u64 = 2000
 
 struct XCtx {
     state: u64,
@@ -20,12 +22,19 @@ struct XCtx {
     p: u64,
     pend: u64,
     pend_len: u64,
-    last_err: i64
+    last_err: i64,
+    budget_ms: u64,
+    spin_max: u64
 }
 
 fn xctx_new(state: u64, cq: u64, p: u64, pend: u64) -> XCtx {
-    var x: XCtx = XCtx { state: state, cq: cq, p: p, pend: pend, pend_len: 0, last_err: 0 }
+    var x: XCtx = XCtx { state: state, cq: cq, p: p, pend: pend, pend_len: 0, last_err: 0, budget_ms: RECV_BUDGET_MS, spin_max: RECV_SPIN_MAX }
     return x
+}
+
+fn xctx_fast(x: *mut XCtx) {
+    (*x).budget_ms = FAST_BUDGET_MS
+    (*x).spin_max = FAST_SPIN_MAX
 }
 
 fn xp_now(ctx: u64) -> u64 {
@@ -58,10 +67,10 @@ fn xp_recv(ctx: u64, a: u64, n: u64) -> i64 {
     }
     let t0: u64 = xp_now(ctx)
     var spins: u64 = 0
-    while spins < RECV_SPIN_MAX {
+    while spins < (*x).spin_max {
         let r: i64 = iwl_cmdq.cq_poll((*x).cq as *mut iwl_cmdq.Cq, (*x).p as *mut iwl_probe.Probe, a, n)
         if r != 0 { return r }
-        if xp_now(ctx) - t0 >= RECV_BUDGET_MS { return 0 }
+        if xp_now(ctx) - t0 >= (*x).budget_ms { return 0 }
         spins = spins + 1
     }
     return 0
@@ -71,3 +80,7 @@ fn xport_make(x: *mut XCtx) -> iwl_boot.Xport {
     var t: iwl_boot.Xport = iwl_boot.Xport { present: 1, ctx: x as u64, send: xp_send, recv: xp_recv, now: xp_now }
     return t
 }
+
+fn tr_submit(ctx: u64, a: u64, n: usize) -> i64 { return xp_send(ctx, a, n as u64) }
+
+fn tr_poll(ctx: u64, a: u64, n: usize) -> i64 { return xp_recv(ctx, a, n as u64) }

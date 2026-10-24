@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+export {
+    exists, registered, mark_registered, set_link, link_is_up, set_mac,
+    present_on, ready_on, up_on, mac_at_on, rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
+    rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
+    rx_offer, tx_take, tx_pending, FRAME_CAP
+}
+
+const FRAME_CAP: u64 = 1536
+const TX_SLOTS: u64 = 8
+
+static mut wn_avail: u64 = 0
+static mut wn_up: u64 = 0
+static mut wn_reg: u64 = 0
+static mut wn_mac: [u8; 6] = [0 as u8; 6]
+static mut wn_rx: [u8; 1536] = [0 as u8; 1536]
+static mut wn_rx_len: u64 = 0
+static mut wn_tx: [u8; 12288] = [0 as u8; 12288]
+static mut wn_tx_len: [u64; 8] = [0 as u64; 8]
+static mut wn_head: u64 = 0
+static mut wn_tail: u64 = 0
+static mut wn_rxp: u64 = 0
+static mut wn_txp: u64 = 0
+static mut wn_drop: u64 = 0
+static mut wn_rxb: u64 = 0
+static mut wn_txb: u64 = 0
+
+fn exists(state: u64) -> bool { return wn_avail != 0 }
+fn registered() -> bool { return wn_reg != 0 }
+fn mark_registered() { wn_reg = 1 }
+fn link_is_up() -> bool { return wn_up != 0 }
+
+fn set_mac(mac: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        wn_mac[i as usize] = *((mac + i) as *mut u8)
+        i = i + 1
+    }
+}
+
+fn set_link(on: bool) {
+    if on {
+        wn_avail = 1
+        wn_up = 1
+    } else {
+        wn_up = 0
+        wn_rx_len = 0
+        wn_head = wn_tail
+    }
+}
+
+fn present_on(state: u64, u: u64) -> bool { return wn_avail != 0 }
+fn ready_on(state: u64, u: u64) -> bool { return wn_up != 0 }
+fn up_on(state: u64, u: u64) -> bool { return wn_up != 0 }
+fn mac_at_on(state: u64, u: u64, i: u64) -> u64 { return wn_mac[(i % 6) as usize] as u64 }
+fn rx_frames_on(state: u64, u: u64) -> u64 { return wn_rxp }
+fn tx_frames_on(state: u64, u: u64) -> u64 { return wn_txp }
+fn tx_drops_on(state: u64, u: u64) -> u64 { return wn_drop }
+fn rx_octets_on(state: u64, u: u64) -> u64 { return wn_rxb }
+fn tx_octets_on(state: u64, u: u64) -> u64 { return wn_txb }
+fn poll_on(state: u64, u: u64) -> bool { return wn_up != 0 && wn_rx_len != 0 }
+
+fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    if wn_up == 0 || wn_rx_len == 0 { return 0 }
+    *frame = (&wn_rx[0]) as u64
+    *slot = 0
+    return wn_rx_len
+}
+
+fn rx_recycle_on(state: u64, u: u64, id: u64) { wn_rx_len = 0 }
+
+fn tx_room_on(state: u64, u: u64) -> u64 {
+    if wn_up == 0 { return 0 }
+    return TX_SLOTS - (wn_head - wn_tail)
+}
+
+fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
+    if wn_up == 0 || n == 0 || n > FRAME_CAP || wn_head - wn_tail >= TX_SLOTS {
+        wn_drop = wn_drop + 1
+        return false
+    }
+    let k: u64 = wn_head % TX_SLOTS
+    let base: u64 = (&wn_tx[0]) as u64 + k * FRAME_CAP
+    var i: u64 = 0
+    while i < n {
+        *((base + i) as *mut u8) = *((src + i) as *mut u8)
+        i = i + 1
+    }
+    wn_tx_len[k as usize] = n
+    wn_head = wn_head + 1
+    return true
+}
+
+fn tx_pending() -> bool { return wn_head != wn_tail }
+
+fn tx_take(dst: u64, cap: u64) -> u64 {
+    if wn_head == wn_tail { return 0 }
+    let k: u64 = wn_tail % TX_SLOTS
+    let n: u64 = wn_tx_len[k as usize]
+    wn_tail = wn_tail + 1
+    if n > cap { return 0 }
+    let base: u64 = (&wn_tx[0]) as u64 + k * FRAME_CAP
+    var i: u64 = 0
+    while i < n {
+        *((dst + i) as *mut u8) = *((base + i) as *mut u8)
+        i = i + 1
+    }
+    wn_txp = wn_txp + 1
+    wn_txb = wn_txb + n
+    return n
+}
+
+fn rx_offer(src: u64, n: u64) -> bool {
+    if wn_up == 0 || wn_rx_len != 0 || n == 0 || n > FRAME_CAP { return false }
+    var i: u64 = 0
+    while i < n {
+        wn_rx[i as usize] = *((src + i) as *mut u8)
+        i = i + 1
+    }
+    wn_rx_len = n
+    wn_rxp = wn_rxp + 1
+    wn_rxb = wn_rxb + n
+    return true
+}

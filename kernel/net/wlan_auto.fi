@@ -12,15 +12,23 @@ import wlan.iwl_ops
 import wlan.join
 import wlan.dhcp_link
 import wlan.autojoin
+import wlan.iwl_pwr
+import wlan.iwl_probe
+import wlan.scanfmt
+import wlan.iwl_le
+import drv.net.iwl
+import drv.net.iwl_xport
 
 export {
     start, task_body, bind, unbind, driver_ready, state_code, rc_get, tries_get, name_copy,
-    lease_ip, lease_mask, lease_gateway, driver_bound, STATE_NONE
+    lease_ip, lease_mask, lease_gateway, driver_bound, attach_held, scan_text, scan_count, STATE_NONE
 }
 
 const STATE_NONE: u64 = 0xFFFF
 const CONF_MAX: u64 = 512
-const OBJ_PAGES: u64 = 8
+const OBJ_PAGES: u64 = 16
+const SCAN_PERIOD: u64 = 30
+const SCAN_TEXT_CAP: u64 = 1024
 const POLL_TICKS: u64 = 100
 const UP_TICKS: u64 = 500
 const TICKS_PER_SEC: u64 = 100
@@ -32,12 +40,23 @@ static mut wa_dev: u64 = 0
 static mut wa_mvm: u64 = 0
 static mut wa_bound: u64 = 0
 static mut wa_xid: u64 = 0
+static mut wa_scan_at: u64 = 0
+static mut wa_scan_n: u64 = 0
+static mut wa_scan_len: u64 = 0
+static mut wa_scan_buf: [u8; 1100] = [0 as u8; 1100]
+static mut wa_raw: [u8; 1100] = [0 as u8; 1100]
+static mut wa_mac: [u8; 6] = [0 as u8; 6]
 static mut wa_conf: [u8; 520] = [0 as u8; 520]
 static mut wa_path: [u8; 15] = "/etc/wlan.conf\0"
 
 fn auto_of() -> *mut autojoin.Auto { return (wa_obj) as *mut autojoin.Auto }
 fn join_of() -> *mut join.Join { return (wa_obj + 2 * 4096) as *mut join.Join }
 fn session_of() -> *mut connect.Session { return (wa_obj + 6 * 4096) as *mut connect.Session }
+fn scan_session_of() -> *mut connect.Session { return (wa_obj + 7 * 4096) as *mut connect.Session }
+fn device_of() -> *mut device.Device { return (wa_obj + 8 * 4096) as *mut device.Device }
+fn mvm_of() -> *mut iwl_ops.Mvm { return (wa_obj + 9 * 4096) as *mut iwl_ops.Mvm }
+fn xctx_of() -> *mut iwl_xport.XCtx { return (wa_obj + 12 * 4096) as *mut iwl_xport.XCtx }
+fn pend_addr() -> u64 { return wa_obj + 13 * 4096 }
 
 fn alloc_objects(state: u64) -> bool {
     if wa_obj != 0 { return true }
@@ -51,6 +70,48 @@ fn alloc_objects(state: u64) -> bool {
     }
     wa_obj = a
     *auto_of() = autojoin.auto_new()
+    return true
+}
+
+fn read_mac(p: *mut iwl_probe.Probe) {
+    wa_mac[0] = 2 as u8
+    wa_mac[1] = 0x4F as u8
+    wa_mac[2] = 0x52 as u8
+    wa_mac[3] = 0x49 as u8
+    wa_mac[4] = 0x45 as u8
+    wa_mac[5] = 0x4E as u8
+    if iwl_pwr.mac_access_get(p) != 0 { return }
+    let m0: u64 = iwl_pwr.prph_rd(p, 0xA03080)
+    let m1: u64 = iwl_pwr.prph_rd(p, 0xA03084)
+    iwl_pwr.mac_access_put(p)
+    if m0 == 0 && m1 == 0 { return }
+    if m0 == 0xFFFFFFFF { return }
+    let b0: u64 = (m0 >> 24) & 0xFF
+    if (b0 & 1) != 0 { return }
+    wa_mac[0] = b0 as u8
+    wa_mac[1] = ((m0 >> 16) & 0xFF) as u8
+    wa_mac[2] = ((m0 >> 8) & 0xFF) as u8
+    wa_mac[3] = (m0 & 0xFF) as u8
+    wa_mac[4] = ((m1 >> 8) & 0xFF) as u8
+    wa_mac[5] = (m1 & 0xFF) as u8
+}
+
+fn attach_held(state: u64) -> bool {
+    if wa_bound != 0 { return true }
+    if !iwl.held_ready() { return false }
+    if !alloc_objects(state) { return false }
+    let p: *mut iwl_probe.Probe = iwl.held_probe()
+    read_mac(p)
+    let x: *mut iwl_xport.XCtx = xctx_of()
+    *x = iwl_xport.xctx_new(state, (iwl.held_cq()) as u64, (p) as u64, pend_addr())
+    iwl_xport.xctx_fast(x)
+    let o: *mut iwl_ops.Mvm = mvm_of()
+    *o = iwl_ops.mvm_new()
+    iwl_ops.ops_set_address(o, (&wa_mac[0]) as u64)
+    let g: *mut device.Device = device_of()
+    *g = device.device_new()
+    if !iwl_ops.ops_attach(g, o, (x) as u64, iwl_xport.tr_submit, iwl_xport.tr_poll) { return false }
+    bind((g) as u64, (o) as u64)
     return true
 }
 
@@ -164,17 +225,69 @@ fn attempt(state: u64) {
     log_state(rc)
 }
 
+fn scan_count() -> u64 { return wa_scan_n }
+
+fn scan_text(dst: u64, cap: u64) -> u64 {
+    var n: u64 = wa_scan_len
+    if n > cap { n = cap }
+    var i: u64 = 0
+    while i < n {
+        *((dst + i) as *mut u8) = wa_scan_buf[i as usize]
+        i = i + 1
+    }
+    return n
+}
+
+fn scan_render() {
+    let raw: u64 = (&wa_raw[0]) as u64
+    let n: usize = scanfmt.scan_lines(scan_session_of(), raw, SCAN_TEXT_CAP as usize)
+    var out: u64 = 0
+    var lines: u64 = 0
+    var at: u64 = 0
+    while at < n as u64 {
+        if out + 4 + 1 > SCAN_TEXT_CAP { break }
+        wa_scan_buf[out as usize] = 110 as u8
+        wa_scan_buf[(out + 1) as usize] = 101 as u8
+        wa_scan_buf[(out + 2) as usize] = 116 as u8
+        wa_scan_buf[(out + 3) as usize] = 32 as u8
+        out = out + 4
+        var c: u8 = 0 as u8
+        while at < n as u64 && c != 10 as u8 {
+            c = wa_raw[at as usize]
+            if out < SCAN_TEXT_CAP + 64 { wa_scan_buf[out as usize] = c }
+            out = out + 1
+            at = at + 1
+        }
+        lines = lines + 1
+    }
+    wa_scan_len = out
+    wa_scan_n = lines
+}
+
+fn scan_pass(state: u64) {
+    *join_of() = join.join_new()
+    join.join_idle_set(join_of(), state, idle_yield)
+    *scan_session_of() = connect.session_new()
+    let rc: i64 = join.join_scan(join_of(), scan_session_of(), device_of(), mvm_of())
+    if rc == 0 { scan_render() }
+    wa_scan_at = now_sec(state)
+}
+
 fn task_body(state: u64, index: u64) {
     while true {
         if !alloc_objects(state) {
             sched.sleep_ticks(state, UP_TICKS)
-        } else if !driver_ready() {
+        } else if !driver_ready() && !attach_held(state) {
             if autojoin.auto_state(auto_of()) != autojoin.AS_WAIT_DRIVER {
                 autojoin.auto_driver_wait(auto_of())
             }
             sched.sleep_ticks(state, POLL_TICKS)
         } else if autojoin.auto_up(auto_of()) {
             sched.sleep_ticks(state, UP_TICKS)
+        } else if wa_scan_at == 0 || now_sec(state) >= wa_scan_at + SCAN_PERIOD {
+            scan_pass(state)
+            wa_scan_at = now_sec(state)
+            sched.sleep_ticks(state, 1)
         } else if autojoin.auto_due(auto_of(), now_sec(state)) {
             attempt(state)
             sched.sleep_ticks(state, 1)

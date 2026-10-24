@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_le
+
+export { eth_to_wlan, wlan_to_eth, ETH_HDR, ETH_MAX, WLAN_HDR }
+
+const ETH_HDR: u64 = 14
+const ETH_MAX: u64 = 1514
+const WLAN_HDR: u64 = 24
+const SNAP_LEN: u64 = 8
+const FC_QOS: u64 = 0x80
+const FC_TODS: u64 = 0x01
+const FC_FROMDS: u64 = 0x02
+
+fn copy6(dst: u64, doff: u64, src: u64, soff: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        iwl_le.st8(dst, doff + i, iwl_le.ld8(src, soff + i))
+        i = i + 1
+    }
+}
+
+fn eth_to_wlan(eth: u64, n: u64, out: u64, cap: u64, bssid: u64) -> i64 {
+    if n < ETH_HDR || n > ETH_MAX { return -1 }
+    let total: u64 = WLAN_HDR + SNAP_LEN + (n - ETH_HDR)
+    if total > cap { return -1 }
+    iwl_le.zero(out, WLAN_HDR)
+    iwl_le.st8(out, 0, 0x08)
+    iwl_le.st8(out, 1, FC_TODS)
+    copy6(out, 4, bssid, 0)
+    copy6(out, 10, eth, 6)
+    copy6(out, 16, eth, 0)
+    iwl_le.st8(out, WLAN_HDR, 0xAA)
+    iwl_le.st8(out, WLAN_HDR + 1, 0xAA)
+    iwl_le.st8(out, WLAN_HDR + 2, 0x03)
+    iwl_le.st8(out, WLAN_HDR + 3, 0)
+    iwl_le.st8(out, WLAN_HDR + 4, 0)
+    iwl_le.st8(out, WLAN_HDR + 5, 0)
+    iwl_le.st8(out, WLAN_HDR + 6, iwl_le.ld8(eth, 12))
+    iwl_le.st8(out, WLAN_HDR + 7, iwl_le.ld8(eth, 13))
+    iwl_le.copy(out + WLAN_HDR + SNAP_LEN, eth + ETH_HDR, n - ETH_HDR)
+    return total as i64
+}
+
+fn wlan_to_eth(frame: u64, n: u64, out: u64, cap: u64) -> i64 {
+    if n < WLAN_HDR + SNAP_LEN { return -1 }
+    let fc0: u64 = iwl_le.ld8(frame, 0)
+    let fc1: u64 = iwl_le.ld8(frame, 1)
+    if (fc0 & 0x0C) != 0x08 { return -1 }
+    if (fc1 & FC_FROMDS) == 0 || (fc1 & FC_TODS) != 0 { return -1 }
+    var hl: u64 = WLAN_HDR
+    if (fc0 & FC_QOS) != 0 { hl = hl + 2 }
+    if n < hl + SNAP_LEN { return -1 }
+    if iwl_le.ld8(frame, hl) != 0xAA || iwl_le.ld8(frame, hl + 1) != 0xAA || iwl_le.ld8(frame, hl + 2) != 0x03 { return -1 }
+    let plen: u64 = n - hl - SNAP_LEN
+    if ETH_HDR + plen > cap { return -1 }
+    copy6(out, 0, frame, 4)
+    copy6(out, 6, frame, 16)
+    iwl_le.st8(out, 12, iwl_le.ld8(frame, hl + 6))
+    iwl_le.st8(out, 13, iwl_le.ld8(frame, hl + 7))
+    iwl_le.copy(out + ETH_HDR, frame + hl + SNAP_LEN, plen)
+    return (ETH_HDR + plen) as i64
+}
