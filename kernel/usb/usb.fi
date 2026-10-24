@@ -483,7 +483,7 @@ const S_CHDEV: u64 = 0x1B8 // device index + 1 of the WCH dongle (0 = none)
 const S_CHRC: u64 = 0x1C0 // SET_CONFIGURATION result of the WCH dongle (signed)
 const S_CHSTEP: u64 = 0x1C8 // bring-up step reached | result << 8 (1 ok, 2 failed)
 const S_CHINT: u64 = 0x1A8 // interrupt endpoint of the WCH dongle: dci | mps << 8 | interval << 24
-const S_CHSET: u64 = 0x1B0 // 1 once SET_CONFIGURATION was sent to the WCH dongle
+const S_CHSET: u64 = 0x1B0 // WCH dongle: bit0 SET_CONFIGURATION sent, bits 8-15 alt, bit16 alt scan used, bit17 SET_INTERFACE sent, bit18 failed, bits 24-31 error
 const S_ISOA: u64 = 0x1F8 // dci | iface << 8 | alt << 16 | binterval << 24 | wMaxPacketSize << 32 (0 = none found)
 const ISO_BUF_OFF: u64 = 0x56A00 // 8 packet buffers of 192 bytes (48 kHz, 16 bit, stereo, 1 ms)
 const ISO_BUFS: u64 = 8
@@ -1573,6 +1573,7 @@ fn configure(state: u64, d: u64) -> bool {
         return false
     }
     if dg(state, d, D_DRIVER) == DRV_CH336 {
+        ch_alt(state, d, buf, total)
         s(state, S_CHINT, dg(state, d, D_INTDCI) | (dg(state, d, D_INTMPS) << 8) | (dg(state, d, D_INTIVL) << 24))
         ds(state, d, D_INTDCI, 0)
         if ax {
@@ -1621,7 +1622,7 @@ fn configure(state: u64, d: u64) -> bool {
     let src: i64 = xhci.control(state, slot, 0, REQ_SET_CONFIGURATION,
         dg(state, d, D_CONFIG), 0, 0, 0, false)
     if dg(state, d, D_DRIVER) == DRV_CH336 {
-        s(state, S_CHSET, 1)
+        s(state, S_CHSET, g(state, S_CHSET) | 1)
         s(state, S_CHRC, src as u64)
     }
     if src < 0 {
@@ -1652,6 +1653,122 @@ fn ch_int_wanted(state: u64, d: u64) -> bool {
     return (v & 255) != 0 && ((v >> 8) & 0xFFFF) != 0
 }
 
+const CH_ALT_SCAN: u64 = 0x10000
+const CH_SETIF_SENT: u64 = 0x20000
+const CH_SETIF_FAIL: u64 = 0x40000
+const ALT_ANY_VENDOR: u64 = 0x100
+
+fn alt_group_ok(mask: u64, cls: u64, iface: u64, want: u64) -> bool {
+    if mask != 3 {
+        return false
+    }
+    if want == ALT_ANY_VENDOR {
+        return cls == 0xFF
+    }
+    return iface == want
+}
+
+fn alt_find(buf: u64, total: u64, want: u64) -> u64 {
+    var at: u64 = 0
+    var mask: u64 = 0
+    var iface: u64 = 0
+    var alt: u64 = 0
+    var cls: u64 = 0
+    var have: bool = false
+    var found: u64 = 0
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                if have && found == 0 && alt_group_ok(mask, cls, iface, want) {
+                    found = iface | (alt << 8) | CH_ALT_SCAN
+                }
+                have = true
+                mask = 0
+                iface = b8(buf, at + 2)
+                alt = b8(buf, at + 3)
+                cls = b8(buf, at + 5)
+            } else if kind == 5 && len >= 7 && have {
+                if (b8(buf, at + 3) & 3) == 2 {
+                    if (b8(buf, at + 2) & 0x80) != 0 {
+                        mask = mask | 1
+                    } else {
+                        mask = mask | 2
+                    }
+                }
+            }
+            at = at + len
+        }
+    }
+    if have && found == 0 && alt_group_ok(mask, cls, iface, want) {
+        found = iface | (alt << 8) | CH_ALT_SCAN
+    }
+    return found
+}
+
+fn alt_take(state: u64, d: u64, buf: u64, total: u64, iface: u64, alt: u64) {
+    ds(state, d, D_INTDCI, 0)
+    ds(state, d, D_INDCI, 0)
+    ds(state, d, D_OUTDCI, 0)
+    var at: u64 = 0
+    var mine: bool = false
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                mine = b8(buf, at + 2) == iface && b8(buf, at + 3) == alt
+            } else if kind == 5 && len >= 7 && mine {
+                take_ep(state, d, buf, at)
+            }
+            at = at + len
+        }
+    }
+}
+
+fn ch_alt(state: u64, d: u64, buf: u64, total: u64) {
+    s(state, S_CHSET, 0)
+    ds(state, d, D_DATAALT, 0)
+    if kstate.mode_on(state, kstate.M_NOCHALT) {
+        return
+    }
+    if dg(state, d, D_INDCI) != 0 && dg(state, d, D_OUTDCI) != 0 {
+        return
+    }
+    var found: u64 = alt_find(buf, total, dg(state, d, D_IFACE))
+    if found == 0 {
+        found = alt_find(buf, total, ALT_ANY_VENDOR)
+    }
+    if found == 0 {
+        return
+    }
+    let iface: u64 = found & 0xFF
+    let alt: u64 = (found >> 8) & 0xFF
+    alt_take(state, d, buf, total, iface, alt)
+    ds(state, d, D_IFACE, iface)
+    ds(state, d, D_DATAALT, alt)
+    s(state, S_CHSET, CH_ALT_SCAN | (alt << 8))
+}
+
+fn ch_set_interface(state: u64, d: u64, slot: u64) {
+    if kstate.mode_on(state, kstate.M_NOSETIF) {
+        return
+    }
+    let rc: i64 = xhci.control(state, slot, 0x01, 0x0B, dg(state, d, D_DATAALT),
+        dg(state, d, D_IFACE), 0, 0, false)
+    var v: u64 = g(state, S_CHSET) | CH_SETIF_SENT
+    if rc < 0 {
+        v = v | CH_SETIF_FAIL | (((0 - rc) as u64 & 0xFF) << 24)
+    }
+    s(state, S_CHSET, v)
+    xhci.udelay(state, 10000)
+}
+
 const CK_PRESENT: u64 = 0
 const CK_VID: u64 = 1
 const CK_PID: u64 = 2
@@ -1671,6 +1788,9 @@ const CK_BULKMPS: u64 = 15
 const CK_STEP: u64 = 16
 const CK_RESULT: u64 = 17
 const CK_SET: u64 = 18
+const CK_ALT: u64 = 19
+const CK_ALTSCAN: u64 = 20
+const CK_SETIF: u64 = 21
 
 fn ch_diag(state: u64, key: u64) -> u64 {
     let dv: u64 = g(state, S_CHDEV)
@@ -1694,7 +1814,15 @@ fn ch_diag(state: u64, key: u64) -> u64 {
     if key == CK_BULKMPS { return dg(state, d, D_BULKMPS) }
     if key == CK_STEP { return g(state, S_CHSTEP) & 255 }
     if key == CK_RESULT { return (g(state, S_CHSTEP) >> 8) & 255 }
-    if key == CK_SET { return g(state, S_CHSET) }
+    if key == CK_SET { return g(state, S_CHSET) & 1 }
+    if key == CK_ALT { return dg(state, d, D_DATAALT) }
+    if key == CK_ALTSCAN { return (g(state, S_CHSET) >> 16) & 1 }
+    if key == CK_SETIF {
+        let v: u64 = g(state, S_CHSET)
+        if (v & CH_SETIF_SENT) == 0 { return 0 }
+        if (v & CH_SETIF_FAIL) == 0 { return 1 }
+        return 2 + ((v >> 24) & 0xFF)
+    }
     return 0
 }
 
@@ -2086,7 +2214,11 @@ fn build_ep(state: u64, dci: u64, art: u64, mps: u64, ivl: u64, ring: u64,
     wr32(ec, ivl << 16)
     wr32(ec + 4, (3 << 1) | (art << 3) | (mps << 16))
     __mmio_write64((ec + 8) as *mut u64, ring | 1)
-    wr32(ec + 16, avg | (mps << 16))
+    var esit: u64 = 0
+    if art == 7 {
+        esit = mps << 16
+    }
+    wr32(ec + 16, avg | esit)
 }
 
 // Das Zeitraster einer Unterbrechungsmeldung. Bei hoher Geschwindigkeit
@@ -2667,6 +2799,7 @@ fn ch336_start(state: u64, d: u64) {
     var step: u64 = 1
     s(state, S_CHDEV, d + 1)
     s(state, S_CHSTEP, 1)
+    ch_set_interface(state, d, slot)
     zero(buf, 64)
     var ok: bool = xhci.control(state, slot, 0xC0, ch397.REQ_INFO, 0, 0, 8, buf, true) >= 8
     xhci.udelay(state, 10000)

@@ -96,6 +96,11 @@ def vendor_ifaces():
     return [dict(n=0, alt=0, cls=0xFF, sub=0xFF, proto=0xFF, eps=[(INT_IN, 3, 16, 1), (BULK_IN, 2, 512, 0), (BULK_OUT, 2, 512, 0)])]
 
 
+def vendor_alt_ifaces():
+    return [dict(n=0, alt=0, cls=0xFF, sub=0xFF, proto=0xFF, eps=[]),
+            dict(n=0, alt=1, cls=0xFF, sub=0xFF, proto=0xFF, eps=[(INT_IN, 3, 16, 1), (BULK_IN, 2, 512, 0), (BULK_OUT, 2, 512, 0)])]
+
+
 def ecm_ifaces(first):
     ci = first
     di = first + 1
@@ -140,6 +145,7 @@ PROFILES['android-rndis-msc'] = dict(kind='rndis', vid=0x18D1, pid=0x4EE4, dcls=
 PROFILES['android-ncm'] = dict(kind='ncm', vid=0x18D1, pid=0x4EE8, dcls=0, multi=1, cfgs=[
     adb_iface(0, 0x84, 0x04) + ncm_ifaces(1)])
 PROFILES['ch336'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[vendor_ifaces(), ecm_ifaces(0)])
+PROFILES['ch336-alt1'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[vendor_alt_ifaces(), ecm_ifaces(0)])
 PROFILES['ch336-ecmfirst'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[ecm_ifaces(0), vendor_ifaces()])
 PROF = PROFILES[A.profile]
 KIND = PROF['kind']
@@ -272,6 +278,9 @@ class Dev:
         if not self.cfg:
             return []
         return [it for it in PROF['cfgs'][self.cfg - 1] if it['alt'] == self.alt.get(it['n'], 0)]
+
+    def ep_active(self, ep):
+        return any(e[0] == ep for it in self.active_ifaces() for e in it['eps'])
 
     def send_info(self):
         ifs = self.active_ifaces()
@@ -472,6 +481,11 @@ class Dev:
             return
         if typ == T_BULK:
             ep, st, ln, sid, lnh = struct.unpack_from('<BBHIH', p)
+            if KIND == 'ch336' and not self.ep_active(ep):
+                STAT['stall'] = STAT.get('stall', 0) + 1
+                log('bulk STALL ep=%02x (endpoint not in the active alt setting)' % ep)
+                self.tx(T_BULK, rid, struct.pack('<BBHIH', ep, 4, 0, 0, 0))
+                return
             if ep & 0x80:
                 self.pend_in.append((rid, ep, ln))
                 self.serve_in()

@@ -22,7 +22,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "USBTETHER: skipped, no qemu"; exit 0; }
-CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr}"
+CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif}"
 cleanup_pids() { for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; pkill -P $$ 2>/dev/null; true; }
 trap 'cleanup_pids; [ -n "${USBTETHER_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/dhcp.elf" ]; then
@@ -184,6 +184,8 @@ for c in $CASES; do
         chk chp "configuration seen" 'usb: ncfg=2 cfg=1 setcfg=1 rc=0'
         chk chp "interface vendor class" 'usb: iface=ff/ff/ff'
         chk chp "bring-up finished" 'usb: step=4 ok'
+        chk chp "alt scan not needed, SET_INTERFACE sent and accepted" 'usb: alt=0 scan=0 setif=1'
+        grep -aq 'set_alt_setting if=0 alt=0' "$T/chp.gadget" && ok "chp: gadget saw SET_INTERFACE alt 0" || bad "chp: gadget never saw SET_INTERFACE alt 0"
         chk chp "phy line with kick count" 'phy: bmcr=1000 bmsr=782d id=0e400141'
         chk chp "link up line" 'link: state=up'
         chk chp "usbnet counters" 'usbnet: ready mode=3 link=up'
@@ -209,6 +211,31 @@ for c in $CASES; do
         nochk chx "link not taken from the interrupt" 'usb: ch336 link=up'
         grep -aq 'interrupt packet' "$T/chx.gadget" && bad "chx: interrupt endpoint was opened despite nochintr" || ok "chx: interrupt endpoint not opened"
         panics chx
+        ;;
+    ch336-alt1)
+        GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run ca1 ch336-alt1 boot s_proc.sh
+        chk ca1 "bound to driver ch336" 'driver=ch336'
+        chk ca1 "bulk endpoints taken from alt 1" 'usb: ep in=[1-9][0-9]* out=[1-9][0-9]*'
+        chk ca1 "alt scan picked alt 1, SET_INTERFACE accepted" 'usb: alt=1 scan=1 setif=1'
+        grep -aq 'set_alt_setting if=0 alt=1' "$T/ca1.gadget" && ok "ca1: gadget saw SET_INTERFACE alt 1" || bad "ca1: gadget never saw SET_INTERFACE alt 1"
+        grep -aq 'bulk STALL' "$T/ca1.gadget" && bad "ca1: bulk transfer stalled" || ok "ca1: no bulk stall"
+        net_ok ca1
+        ;;
+    ch336-alt1-nochalt)
+        GARGS="--phy-boot down" XWORDS="nochalt" BASEW="nokbd nosched vfs" run ca2 ch336-alt1 boot s_proc.sh
+        chk ca2 "bound to driver ch336" 'driver=ch336'
+        chk ca2 "no bulk endpoints without the alt scan" 'usb: ep in=0 out=0'
+        chk ca2 "no scan reported" 'usb: alt=0 scan=0'
+        nochk ca2 "no lease without the alt scan" 'dhcp: ack ip='
+        panics ca2
+        ;;
+    ch336-alt1-nosetif)
+        GARGS="--phy-boot down" XWORDS="nosetif" BASEW="nokbd nosched vfs" run ca3 ch336-alt1 boot s_proc.sh
+        chk ca3 "alt scan picked alt 1" 'usb: alt=1 scan=1 setif=0'
+        grep -aq 'set_alt_setting if=0 alt=1' "$T/ca3.gadget" && bad "ca3: SET_INTERFACE sent despite nosetif" || ok "ca3: no SET_INTERFACE sent"
+        grep -aq 'bulk STALL' "$T/ca3.gadget" && ok "ca3: gadget stalled the bulk pipe" || bad "ca3: gadget never stalled"
+        nochk ca3 "no lease without SET_INTERFACE" 'dhcp: ack ip='
+        panics ca3
         ;;
     none)
         run none ncm none s.sh
