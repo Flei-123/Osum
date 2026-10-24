@@ -39,6 +39,8 @@
 #  11. invites: OrientOS invites anna (she says yes on the server); anna
 #      invites justin, the guest accepts by `from=` and gets the target
 #  12. the bar opens a chat and writes into it (the service's actions)
+#  15. a slow call of a person does not block the service: status is answered
+#      meanwhile, the call under its saved id; a second call waits in the queue
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -647,5 +649,58 @@ part "$C" EARLYBOOK LATE > "$TMPD/p.txt"
 hasnot "$TMPD/p.txt" "slow:zed" "the book of the slow provider is not there yet"
 part "$C" LATE SLOWEND > "$TMPD/p.txt"
 has "$TMPD/p.txt" "provider.2=slow ok 1" "later: the slow provider's book arrived"
+
+echo "== 15. a slow call of a person does not block the service (r40) =="
+printf '1800' > "$TMPD/etc/slow.slowcall"
+cat > "$TMPD/s4.sh" <<'EOS'
+orientbus serve 9000 &
+sleep -m 300
+social serve 9000 300 60000 &
+sleep 1
+act call social.invites.send id=slow:zed kind=invite name=Pong &
+sleep -m 400
+echo ==STATUSA==
+act call social.status
+echo ==STATUSB==
+sleep 3
+echo ==CALLEND==
+act call social.messages.send id=slow:zed text=first-queued &
+act call social.messages.send id=slow:zed text=second-queued &
+sleep 6
+echo ==QUEUEEND==
+act call social.messages.list id=slow:zed
+echo ==SLOW2END==
+EOS
+S_=(build "$TMPD/D.img" $BLOCKS /lib/
+    /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/
+    /etc/actions.d/ /etc/orientbus/ /etc/social/ /apps/ /apps/social.prog/ /var/ /var/log/
+    /usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/
+    "/etc/locale.conf=$TMPD/etc/locale.conf")
+for p in $PROGS; do S_+=("/bin/$p=$TMPD/bin/$p.elf"); done
+S_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
+     "/etc/social/providers=$TMPD/etc/providers_slow"
+     "/etc/social/local.book=$TMPD/etc/local.book"
+     "/etc/social/slow.book=$TMPD/etc/slow.book"
+     "/etc/social/slow.slowcall=$TMPD/etc/slow.slowcall"
+     "/t/s.sh=$TMPD/s4.sh")
+python3 tools/osum/mkfs.py "${S_[@]}" > "$TMPD/mkfs4.txt" 2>&1 || bad "mkfs (slow call): $(tail -2 "$TMPD/mkfs4.txt")"
+: > "$TMPD/d.txt"
+timeout 120 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
+    -kernel "$TMPD/k0.img" -m 512 \
+    -append "osum vfs nokbd bus script=sh /t/s.sh;exit" \
+    -serial "file:$TMPD/d.txt" -display none -no-reboot \
+    -drive "file=$TMPD/D.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+tr -cd '\11\12\15\40-\176' < "$TMPD/d.txt" > "$TMPD/d.klar"
+D4="$TMPD/d.klar"
+has "$D4" "==SLOW2END==" "the slow-call guest reached its end"
+part "$D4" STATUSA STATUSB > "$TMPD/p.txt"
+has "$TMPD/p.txt" "provider.2=slow" "while a person's call waits for the slow provider, the service answers status"
+hasnot "$TMPD/p.txt" "invite=slow:" "... and the call itself is not answered yet"
+part "$D4" STATUSB CALLEND > "$TMPD/p.txt"
+has "$TMPD/p.txt" "invite=slow:" "the call is answered under its own request id when the job is done"
+part "$D4" QUEUEEND SLOW2END > "$TMPD/p.txt"
+has "$TMPD/p.txt" "first-queued" "two calls for the busy provider: the first one went through"
+has "$TMPD/p.txt" "second-queued" "... and the second one waited in the queue and went through"
 
 fin

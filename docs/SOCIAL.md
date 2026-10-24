@@ -185,8 +185,7 @@ broker the service enforces itself (`kernel/user/socperm.fi`):
   server that ignores `os` sends all rows) and keeps the rows with os `l`, an executable, a name and
   an optional command-line text (column 4, up to 60 octets); the icon column goes. The service asks
   every provider with the cap `games` 4 s after the start and then
-  hourly (10 min after a failure; one fetch blocks the service for up to 15 s,
-  so never from a request). The server's Linux list is tiny (8 rows today): only rows the
+  hourly (10 min after a failure; one fetch is a background job of up to 15 s). The server's Linux list is tiny (8 rows today): only rows the
   list holds can be found. Apps can still say what they play with `social.activity.set`;
 * a **screen image** has no `init`: `kgui.desk_start` starts `/bin/social serve`
   and `/bin/melder serve` after the broker, if the image carries them
@@ -200,7 +199,15 @@ broker the service enforces itself (`kernel/user/socperm.fi`):
   `act call social.accounts.login provider=fleitec`), `/apps/social.prog/ACTIONS`, an empty
   `/etc/social/games.tsv` (the service fills it);
 * the same person at two providers is two contacts (no merge by person);
-* a provider call blocks the service for up to 4 s; a provider with the cap
+* no provider call blocks the service loop: the timers (contacts, invites, inbox, presence,
+  activity, alive, games) run as background jobs (`kernel/user/socjob.fi`, one slot per provider),
+  and so do the calls of people and apps (`relation`, `send`, `invites.send`, `invites.answer`,
+  `accounts.login`, `activity.set`, `refresh`; user slot `8 + provider`): the request id is kept
+  and the answer goes out when the job is done (a call and its follow-up, e.g. the contacts read
+  after a `relation`, are two jobs under one id; a job is killed after 4 s). A call for a provider
+  that is busy, or has not said `hello` yet (`hello` runs as a job at the start), waits in a small
+  queue (`kernel/user/socq.fi`, 6 requests; a full queue answers `err busy`) and runs when the
+  provider is free. `contacts.search` still runs the providers inline. A provider with the cap
   `watch` (the Fleitec account: `socfleitec watch` holds one relay T_WATCH
   session, heartbeat every 10 s) is read without blocking in the service
   loop (a pipe, every 100 ms) and is not polled; the service restarts it

@@ -41,10 +41,11 @@
 // and publishes `social.presence`, `social.activity` and `social.contact`
 // events for what changed between two books.
 //
-// A provider call blocks this loop while it runs (at most CALL_TICKS);
-// frames for us wait in the kernel meanwhile. The broker gives a call 5 s
-// -- a provider that takes longer is killed and the call answered
-// `err provider offline`, never left hanging.
+// No provider call blocks this loop: timers and the calls of people and
+// apps run as jobs (socjob), a call is answered under its saved request id
+// when its job is done. The broker gives a call 5 s -- a provider that
+// takes longer is killed (CALL_TICKS) and the call answered `err provider
+// offline`, never left hanging.
 
 profile app
 
@@ -52,6 +53,7 @@ import ulib
 import actwire
 import socjob
 import socperm
+import socq
 
 export { u_start }
 
@@ -107,15 +109,46 @@ static mut w_next: [u64; 8] = [0 as u64; 8]
 static mut w_len: [usize; 8] = [0 as usize; 8]
 static mut w_buf: [u8; 16384] = [0 as u8; 16384]
 static mut msg_poll_ticks: u64 = 500
-const JK_CONTACTS: u8 = 1
-const JK_INVITES: u8 = 2
-const JK_INBOX: u8 = 3
-const JK_PRESENCE: u8 = 4
-const JK_ACTIVITY: u8 = 5
-const JK_ALIVE: u8 = 6
-const JK_GAMES: u8 = 7
-const JK_COUNT: u8 = 8
-static mut j_due: [u8; 64] = [0 as u8; 64]
+const JK_HELLO: u8 = 1
+const JK_CONTACTS: u8 = 2
+const JK_INVITES: u8 = 3
+const JK_INBOX: u8 = 4
+const JK_PRESENCE: u8 = 5
+const JK_ACTIVITY: u8 = 6
+const JK_ALIVE: u8 = 7
+const JK_GAMES: u8 = 8
+const JK_COUNT: u8 = 9
+const J_STRIDE: usize = 16
+static mut j_due: [u8; 128] = [0 as u8; 128]
+static mut p_hello: [u8; 8] = [0 as u8; 8]
+const US_BASE: usize = 8
+const UK_REL: u8 = 1
+const UK_REL2: u8 = 2
+const UK_SEND: u8 = 3
+const UK_INV: u8 = 4
+const UK_INV2: u8 = 5
+const UK_ANS: u8 = 6
+const UK_ANS2: u8 = 7
+const UK_LOGIN: u8 = 8
+const UK_LOGIN2: u8 = 9
+const UK_LOGIN3: u8 = 10
+const UK_GACT: u8 = 11
+const UK_GREF: u8 = 12
+static mut u_id: [u64; 8] = [0 as u64; 8]
+static mut u_full: [u8; 768] = [0 as u8; 768]
+static mut u_idz: [u8; 768] = [0 as u8; 768]
+static mut u_verb: [u8; 96] = [0 as u8; 96]
+static mut u_tx: [u8; 9600] = [0 as u8; 9600]
+static mut u_iv: [u8; 320] = [0 as u8; 320]
+static mut u_sv: [u8; 192] = [0 as u8; 192]
+static mut u_tv: [u8; 1088] = [0 as u8; 1088]
+static mut u_got: [u8; 8] = [0 as u8; 8]
+static mut g_id: u64 = 0
+static mut g_left: usize = 0
+static mut g_any: bool = false
+static mut cur_id: u64 = 0
+static mut st_async: bool = false
+static mut st_defer: bool = false
 static mut j_stale: [u8; 8] = [0 as u8; 8]
 static mut p_got: [u64; 8] = [0 as u64; 8]
 static mut p_inv_seen: [u8; 8] = [0 as u8; 8]
@@ -863,29 +896,6 @@ fn mark_stale(i: usize, kind: u8) {
     }
 }
 
-// Ask every provider for its contacts; the merged book replaces the old.
-fn refresh(limit: u64) {
-    var nb: SB = book_next()
-    var out: SB = sb((&st_out[0]) as u64, 16383)
-    var w: [u8; 9] = "contacts\0"
-    var i: usize = 0
-    while i < n_prov {
-        let code: i64 = run(i, (&w[0]) as u64, 0, 0, &out, limit)
-        book_take(&nb, i, &out, code)
-        mark_stale(i, JK_CONTACTS)
-        i = i + 1
-    }
-    book_install(nb)
-}
-
-fn refresh_one(i: usize, limit: u64) {
-    var out: SB = sb((&st_out[0]) as u64, 16383)
-    var w: [u8; 9] = "contacts\0"
-    let code: i64 = run(i, (&w[0]) as u64, 0, 0, &out, limit)
-    book_update(i, &out, code)
-    mark_stale(i, JK_CONTACTS)
-}
-
 // ------------------------------------------------------------ the verbs
 
 static mut k_dry: [u8; 5] = "@dry\0"
@@ -1044,10 +1054,8 @@ fn split_id(msg: u64, idz: u64, max: usize) -> i64 {
     return pi
 }
 
-fn relation_after(msg: u64) -> str {
-    var id: [u8; 96] = [0 as u8; 96]
-    let _i: bool = arg(msg, "id", (&id[0]) as u64, 96)
-    let at: i64 = book_find((&id[0]) as u64, zlen((&id[0]) as u64))
+fn relation_of(idp: u64) -> str {
+    let at: i64 = book_find(idp, zlen(idp))
     if at < 0 {
         return "none"
     }
@@ -1110,32 +1118,38 @@ fn a_relation(msg: u64, verb: str, dry: bool) -> bool {
         actwire.ob_ch(10)
         return false
     }
+    if defer_user(pi as usize) {
+        return false
+    }
+    let ui: usize = pi as usize
+    let _f: bool = arg(msg, "id", cx((&u_full[0]) as u64, ui, 96), 96)
+    zset(cx((&u_idz[0]) as u64, ui, 96), 96, (&idz[0]) as u64, zlen((&idz[0]) as u64))
+    zset_s(cx((&u_verb[0]) as u64, ui, 12), 12, verb)
     var w1: [u8; 9] = "relation\0"
     var w2: [u8; 12] = [0 as u8; 12]
     zset_s((&w2[0]) as u64, 12, verb)
-    var out: SB = sb((&st_out[0]) as u64, 16383)
-    let code: i64 = run(pi as usize, (&w1[0]) as u64, (&w2[0]) as u64,
-        (&idz[0]) as u64, &out, CALL_TICKS)
-    if code != 0 {
-        ob_provider_err(&out, code)
-        return false
-    }
-    refresh_one(pi as usize, CALL_TICKS)
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&w1[0]) as u64
+    ws[1] = (&w2[0]) as u64
+    ws[2] = (&idz[0]) as u64
+    return ujob_begin(ui, UK_REL, &ws)
+}
+
+fn ob_relation_reply(i: usize) {
     actwire.ob_reset()
     ob_s("ok\n")
-    let rel: str = relation_after(msg)
+    let rel: str = relation_of(cx((&u_full[0]) as u64, i, 96))
     ob_s("relation=")
     ob_s(rel)
     actwire.ob_ch(10)
-    // the inverse's arguments (WHICH action is fixed by the manifest)
-    if is(verb.p as u64, verb.n, "request") || is(verb.p as u64, verb.n, "accept") {
+    let vp: u64 = cx((&u_verb[0]) as u64, i, 12)
+    if isz(vp, "request") || isz(vp, "accept") {
         ob_s("@undo id=")
-        actwire.ob_n(pname(pi as usize), zlen(pname(pi as usize)) as u64)
+        actwire.ob_n(pname(i), zlen(pname(i)) as u64)
         actwire.ob_ch(58)
-        actwire.ob_str((&idz[0]) as u64)
+        actwire.ob_str(cx((&u_idz[0]) as u64, i, 96))
         actwire.ob_ch(10)
     }
-    return true
 }
 
 fn a_presence(msg: u64, dry: bool) -> bool {
@@ -1206,17 +1220,25 @@ fn a_activity(msg: u64, dry: bool) -> bool {
         }
         return false
     }
+    if goes && n_prov > 0 && defer_group() {
+        return false
+    }
     zset((&my_act[0]) as u64, 64, (&nm[0]) as u64, zlen((&nm[0]) as u64))
     let _c: bool = arg(msg, "@client", (&my_act_client[0]) as u64, 24)
     var jv: [u8; 8] = [0 as u8; 8]
     let _j: bool = arg(msg, "join", (&jv[0]) as u64, 8)
     my_join = isz((&jv[0]) as u64, "true") || isz((&jv[0]) as u64, "1")
-    var shared: bool = false
-    if goes {
-        shared = send_activity()
-    } else if share_act && !invisible() {
+    if goes && group_start(UK_GACT) {
+        return true
+    }
+    if !goes && share_act && !invisible() {
         mark_due(JK_ACTIVITY)
     }
+    ob_activity_reply(false)
+    return true
+}
+
+fn ob_activity_reply(shared: bool) {
     actwire.ob_reset()
     ob_s("ok\n")
     if shared {
@@ -1224,7 +1246,6 @@ fn a_activity(msg: u64, dry: bool) -> bool {
     } else {
         ob_s("shared=false\n")
     }
-    return true
 }
 
 fn a_activity_clear(msg: u64, dry: bool) -> bool {
@@ -1332,6 +1353,15 @@ fn a_search(msg: u64) {
 }
 
 // One call; the reply is built in actwire's output buffer.
+fn is_provider_call(np: u64) -> bool {
+    return isz(np, "social.contacts.request") || isz(np, "social.contacts.accept")
+        || isz(np, "social.contacts.decline") || isz(np, "social.contacts.withdraw")
+        || isz(np, "social.contacts.remove") || isz(np, "social.activity.set")
+        || isz(np, "social.accounts.login") || isz(np, "social.messages.send")
+        || isz(np, "social.invites.send") || isz(np, "social.invites.answer")
+        || isz(np, "social.refresh")
+}
+
 fn handle(msg: u64) {
     var verb: [u8; 16] = [0 as u8; 16]
     var name: [u8; 40] = [0 as u8; 40]
@@ -1351,6 +1381,10 @@ fn handle(msg: u64) {
     let pc: i64 = socperm.perm_check((&cl0[0]) as u64, np)
     if pc != 0 {
         socperm.perm_deny(pc)
+        return
+    }
+    if hello_pending() && is_provider_call(np) {
+        st_defer = true
         return
     }
     if isz(np, "social.status") {
@@ -1420,16 +1454,7 @@ fn handle(msg: u64) {
     } else if isz(np, "social.invites.answer") {
         let _r: bool = a_inv_answer(msg, dry)
     } else if isz(np, "social.refresh") {
-        refresh(CALL_TICKS)
-        var total: u64 = 0
-        var at: usize = 0
-        while at < book.len {
-            total = total + 1
-            at = at + line_len(book.ptr + at as u64) + 1
-        }
-        actwire.ob_reset()
-        ob_s("ok\n")
-        ob_kn("contacts", total)
+        a_refresh()
     } else {
         ob_err("unknown_action")
     }
@@ -1545,64 +1570,69 @@ fn name_into(b: *mut SB, id: u64, idn: usize) {
 }
 
 // what every provider can do, and whose account it is
-fn hello_all() {
-    var out: SB = sb((&st_out[0]) as u64, 16383)
-    var w: [u8; 6] = "hello\0"
-    var i: usize = 0
-    while i < n_prov {
-        r_st8(pcaps(i), 0, 0 as u8)
-        r_st8(pacct(i), 0, 0 as u8)
-        let code: i64 = run(i, (&w[0]) as u64, 0, 0, &out, CALL_TICKS)
-        if code == 0 {
-            var at: usize = 0
-            while at < out.len {
-                let lp: u64 = out.ptr + at as u64
-                let ll: usize = line_len(lp)
-                var n: usize = 0
-                if ll > 5 && is(lp, 5, "caps\t") {
-                    zset(pcaps(i), CAPS_W, lp + 5, ll - 5)
+fn hello_apply(i: usize, out: *mut SB, code: i64) {
+    r_st8(pcaps(i), 0, 0 as u8)
+    r_st8(pacct(i), 0, 0 as u8)
+    if code != 0 {
+        return
+    }
+    var at: usize = 0
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
+        let ll: usize = line_len(lp)
+        if ll > 5 && is(lp, 5, "caps\t") {
+            zset(pcaps(i), CAPS_W, lp + 5, ll - 5)
+        }
+        if ll > 8 && is(lp, 8, "account\t") {
+            zset(pacct(i), ACCT_W, lp + 8, ll - 8)
+            var k: usize = 0
+            while r_ld8(pacct(i), k) != 0 as u8 {
+                if r_ld8(pacct(i), k) == 9 as u8 {
+                    r_st8(pacct(i), k, 32 as u8)
                 }
-                if ll > 8 && is(lp, 8, "account\t") {
-                    // "id<TAB>name" -> "id name"
-                    zset(pacct(i), ACCT_W, lp + 8, ll - 8)
-                    var k: usize = 0
-                    while r_ld8(pacct(i), k) != 0 as u8 {
-                        if r_ld8(pacct(i), k) == 9 as u8 {
-                            r_st8(pacct(i), k, 32 as u8)
-                        }
-                        k = k + 1
-                    }
-                }
-                at = at + ll + 1
-                n = n + 1
+                k = k + 1
             }
         }
+        at = at + ll + 1
+    }
+}
+
+fn hello_arm() {
+    var i: usize = 0
+    while i < n_prov {
+        p_hello[i] = 0 as u8
+        j_due[i * J_STRIDE + JK_HELLO as usize] = 1 as u8
         i = i + 1
     }
 }
 
-// the activity to every provider, "-j" when it is open to join
-fn send_activity() -> bool {
-    var out: SB = sb((&st_out[0]) as u64, 16383)
-    var w1: [u8; 9] = "activity\0"
-    var dj: [u8; 3] = "-j\0"
-    var any: bool = false
+fn hello_pending() -> bool {
     var i: usize = 0
     while i < n_prov {
-        var ws: [u64; 6] = [0 as u64; 6]
-        ws[0] = (&w1[0]) as u64
-        if my_join && has_cap(i, "join") {
-            ws[1] = (&dj[0]) as u64
-            ws[2] = (&my_act[0]) as u64
-        } else {
-            ws[1] = (&my_act[0]) as u64
-        }
-        if runw(i, &ws, &out, CALL_TICKS) == 0 {
-            any = true
+        if p_hello[i] == 0 as u8 {
+            return true
         }
         i = i + 1
     }
-    return any
+    return false
+}
+
+fn hello_done(i: usize) {
+    p_hello[i] = 1 as u8
+    var k: u8 = JK_CONTACTS
+    while k < JK_COUNT {
+        var due: bool = k != JK_PRESENCE
+        if k == JK_ALIVE && invisible() {
+            due = false
+        }
+        if k == JK_ACTIVITY && !act_goes() {
+            due = false
+        }
+        if due && job_eligible(i, k) {
+            j_due[i * J_STRIDE + k as usize] = 1 as u8
+        }
+        k = k + 1 as u8
+    }
 }
 
 // ------------------------------------------------------------ accounts
@@ -1653,7 +1683,9 @@ fn a_login(msg: u64, dry: bool) -> bool {
         actwire.ob_ch(10)
         return false
     }
-    var out: SB = sb((&st_out[0]) as u64, 16383)
+    if defer_user(i) {
+        return false
+    }
     var w1: [u8; 6] = "login\0"
     var w2: [u8; 6] = "token\0"
     var ws: [u64; 6] = [0 as u64; 6]
@@ -1662,16 +1694,15 @@ fn a_login(msg: u64, dry: bool) -> bool {
         ws[1] = (&w2[0]) as u64
         ws[2] = (&tk[0]) as u64
     }
-    let code: i64 = runw(i, &ws, &out, CALL_TICKS)
-    if code != 0 && code != 4 {
-        ob_provider_err(&out, code)
-        return false
-    }
+    return ujob_begin(i, UK_LOGIN, &ws)
+}
+
+fn ob_login_body(out: *mut SB) {
     actwire.ob_reset()
     ob_s("ok\n")
     var at: usize = 0
-    while at < out.len {
-        let lp: u64 = out.ptr + at as u64
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
         let ll: usize = line_len(lp)
         var n: usize = 0
         if ll > 5 && is(lp, 5, "pair\t") {
@@ -1688,11 +1719,6 @@ fn a_login(msg: u64, dry: bool) -> bool {
         }
         at = at + ll + 1
     }
-    if code == 0 {
-        hello_all()
-        refresh_one(i, CALL_TICKS)
-    }
-    return true
 }
 
 // ------------------------------------------------------------ messages
@@ -1965,6 +1991,12 @@ fn watch_tick() {
 // ------------------------------------------------ background provider calls
 
 fn job_eligible(i: usize, kind: u8) -> bool {
+    if kind == JK_HELLO {
+        return true
+    }
+    if p_hello[i] == 0 as u8 {
+        return false
+    }
     if kind == JK_INVITES {
         return has_cap(i, "invites") && p_state[i] != 3 as u8
     }
@@ -1981,7 +2013,7 @@ fn mark_due(kind: u8) {
     var i: usize = 0
     while i < n_prov {
         if job_eligible(i, kind) {
-            j_due[i * 8 + kind as usize] = 1 as u8
+            j_due[i * J_STRIDE + kind as usize] = 1 as u8
         }
         i = i + 1
     }
@@ -1996,9 +2028,12 @@ fn job_start_kind(i: usize, kind: u8) -> bool {
     var wa: [u8; 9] = "activity\0"
     var wl: [u8; 6] = "alive\0"
     var wg: [u8; 6] = "games\0"
+    var wh: [u8; 6] = "hello\0"
     var dj: [u8; 3] = "-j\0"
     var limit: u64 = CALL_TICKS
-    if kind == JK_CONTACTS {
+    if kind == JK_HELLO {
+        ws[0] = (&wh[0]) as u64
+    } else if kind == JK_CONTACTS {
         ws[0] = (&wc[0]) as u64
     } else if kind == JK_INVITES {
         ws[0] = (&wv[0]) as u64
@@ -2040,6 +2075,11 @@ fn job_done(i: usize, kind: u8, code: i64) {
     r_st8(p, n, 0 as u8)
     var o: SB = sb(p, 16383)
     o.len = n
+    if kind == JK_HELLO {
+        hello_apply(i, &o, code)
+        hello_done(i)
+        return
+    }
     if j_stale[i] != 0 as u8 && (kind == JK_CONTACTS || kind == JK_INVITES) {
         return
     }
@@ -2084,8 +2124,8 @@ fn bg_tick() {
             var k: u8 = 1 as u8
             var started: bool = false
             while k < JK_COUNT && !started {
-                if j_due[i * 8 + k as usize] != 0 as u8 {
-                    j_due[i * 8 + k as usize] = 0 as u8
+                if j_due[i * J_STRIDE + k as usize] != 0 as u8 {
+                    j_due[i * J_STRIDE + k as usize] = 0 as u8
                     if job_eligible(i, k) {
                         started = job_start_kind(i, k)
                     }
@@ -2132,24 +2172,32 @@ fn a_msg_send(msg: u64, dry: bool) -> bool {
         actwire.ob_ch(10)
         return false
     }
-    var out: SB = sb((&st_out[0]) as u64, 16383)
-    var w1: [u8; 5] = "send\0"
-    let code: i64 = run(i, (&w1[0]) as u64, (&idz[0]) as u64, (&tx[0]) as u64, &out, CALL_TICKS)
-    if code != 0 {
-        ob_provider_err(&out, code)
+    if defer_user(i) {
         return false
     }
+    zset(cx((&u_idz[0]) as u64, i, 96), 96, (&idz[0]) as u64, zlen((&idz[0]) as u64))
+    zset(cx((&u_tx[0]) as u64, i, 1200), 1200, (&tx[0]) as u64, tn)
+    var w1: [u8; 5] = "send\0"
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&w1[0]) as u64
+    ws[1] = (&idz[0]) as u64
+    ws[2] = (&tx[0]) as u64
+    return ujob_begin(i, UK_SEND, &ws)
+}
+
+fn send_done(i: usize, out: *mut SB) {
     var idb: [u8; 96] = [0 as u8; 96]
     var ib: SB = sb((&idb[0]) as u64, 95)
-    full_id(&ib, i, (&idz[0]) as u64, zlen((&idz[0]) as u64))
-    msgs_add(ib.ptr, ib.len, now_unix(), "out", true, (&tx[0]) as u64, tn)
+    let idp: u64 = cx((&u_idz[0]) as u64, i, 96)
+    let txp: u64 = cx((&u_tx[0]) as u64, i, 1200)
+    full_id(&ib, i, idp, zlen(idp))
+    msgs_add(ib.ptr, ib.len, now_unix(), "out", true, txp, zlen(txp))
     msgs_save()
     actwire.ob_reset()
     ob_s("ok\n")
-    // "sent<TAB>n<TAB>stamp" of the provider, when it says so
     var at: usize = 0
-    while at < out.len {
-        let lp: u64 = out.ptr + at as u64
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
         let ll: usize = line_len(lp)
         if ll > 5 && is(lp, 5, "sent\t") {
             var n: usize = 0
@@ -2158,7 +2206,6 @@ fn a_msg_send(msg: u64, dry: bool) -> bool {
         }
         at = at + ll + 1
     }
-    return true
 }
 
 // social.messages.list id=<...> [before=<index>]: the newest that fit,
@@ -2445,21 +2492,6 @@ fn invs_update(i: usize, out: *mut SB, code: i64) {
     }
 }
 
-fn poll_invites() {
-    var out: SB = sb((&st_out[0]) as u64, 16383)
-    var w: [u8; 8] = "invites\0"
-    var i: usize = 0
-    while i < n_prov {
-        if job_eligible(i, JK_INVITES) {
-            let code: i64 = run(i, (&w[0]) as u64, 0, 0, &out, CALL_TICKS)
-            invs_update(i, &out, code)
-            mark_stale(i, JK_INVITES)
-        }
-        i = i + 1
-    }
-}
-
-
 // "<account>:<invid>" of an invite line
 fn ob_inv_id(lp: u64) {
     var n: usize = 0
@@ -2625,7 +2657,9 @@ fn a_inv_send(msg: u64, dry: bool) -> bool {
         actwire.ob_ch(10)
         return false
     }
-    var out: SB = sb((&st_out[0]) as u64, 16383)
+    if defer_user(i) {
+        return false
+    }
     var w1: [u8; 7] = "invite\0"
     var ws: [u64; 6] = [0 as u64; 6]
     ws[0] = (&w1[0]) as u64
@@ -2633,17 +2667,15 @@ fn a_inv_send(msg: u64, dry: bool) -> bool {
     ws[2] = kp
     ws[3] = (&tg[0]) as u64
     ws[4] = (&nm[0]) as u64
-    let code: i64 = runw(i, &ws, &out, CALL_TICKS)
-    if code != 0 {
-        ob_provider_err(&out, code)
-        return false
-    }
-    // the id first: poll_invites runs the providers again into st_out
-    var iv: [u8; 40] = [0 as u8; 40]
-    var ivn: usize = 0
+    return ujob_begin(i, UK_INV, &ws)
+}
+
+fn inv_sent_take(i: usize, out: *mut SB) {
+    let ivp: u64 = cx((&u_iv[0]) as u64, i, 40)
+    r_st8(ivp, 0, 0 as u8)
     var at: usize = 0
-    while at < out.len {
-        let lp: u64 = out.ptr + at as u64
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
         let ll: usize = line_len(lp)
         if ll > 2 && r_ld8(lp, 0) == 105 as u8 && r_ld8(lp, 1) == 9 as u8 {
             var n: usize = 0
@@ -2651,22 +2683,23 @@ fn a_inv_send(msg: u64, dry: bool) -> bool {
             if n > 39 {
                 n = 39
             }
-            zset((&iv[0]) as u64, 40, p, n)
-            ivn = n
+            zset(ivp, 40, p, n)
         }
         at = at + ll + 1
     }
-    poll_invites()
+}
+
+fn ob_inv_sent_reply(i: usize) {
     actwire.ob_reset()
     ob_s("ok\n")
-    if ivn > 0 {
+    let ivp: u64 = cx((&u_iv[0]) as u64, i, 40)
+    if zlen(ivp) > 0 {
         ob_s("invite=")
         actwire.ob_n(pname(i), zlen(pname(i)) as u64)
         actwire.ob_ch(58)
-        actwire.ob_n((&iv[0]) as u64, ivn as u64)
+        actwire.ob_n(ivp, zlen(ivp) as u64)
         actwire.ob_ch(10)
     }
-    return true
 }
 
 // the newest open invite that came in from `from` ("account:peer"):
@@ -2729,7 +2762,9 @@ fn a_inv_answer(msg: u64, dry: bool) -> bool {
         }
         return false
     }
-    var out: SB = sb((&st_out[0]) as u64, 16383)
+    if defer_user(i) {
+        return false
+    }
     var w1: [u8; 7] = "answer\0"
     var wy: [u8; 4] = "yes\0"
     var wn: [u8; 3] = "no\0"
@@ -2744,38 +2779,362 @@ fn a_inv_answer(msg: u64, dry: bool) -> bool {
     if zlen((&tg[0]) as u64) > 0 {
         ws[3] = (&tg[0]) as u64
     }
-    let code: i64 = runw(i, &ws, &out, CALL_TICKS)
-    if code != 0 {
-        ob_provider_err(&out, code)
-        return false
-    }
-    // copy first: poll_invites reruns the providers into st_out and may
-    // post an event through the same reply buffer
-    var sv: [u8; 24] = [0 as u8; 24]
-    var tv: [u8; 136] = [0 as u8; 136]
-    var got: bool = false
+    return ujob_begin(i, UK_ANS, &ws)
+}
+
+fn ans_take(i: usize, out: *mut SB) {
+    u_got[i] = 0 as u8
     var at: usize = 0
-    while at < out.len {
-        let lp: u64 = out.ptr + at as u64
+    while at < (*out).len {
+        let lp: u64 = (*out).ptr + at as u64
         let ll: usize = line_len(lp)
         if ll > 2 && r_ld8(lp, 0) == 105 as u8 && r_ld8(lp, 1) == 9 as u8 {
             var n: usize = 0
             let sp: u64 = fld(lp, 5, &n)
-            zset((&sv[0]) as u64, 24, sp, n)
+            zset(cx((&u_sv[0]) as u64, i, 24), 24, sp, n)
             let tp: u64 = fld(lp, 7, &n)
-            zset((&tv[0]) as u64, 136, tp, n)
-            got = true
+            zset(cx((&u_tv[0]) as u64, i, 136), 136, tp, n)
+            u_got[i] = 1 as u8
         }
         at = at + ll + 1
     }
-    poll_invites()
+}
+
+fn ob_ans_reply(i: usize) {
     actwire.ob_reset()
     ob_s("ok\n")
-    if got {
-        ob_kv("state", (&sv[0]) as u64, zlen((&sv[0]) as u64))
-        ob_kv("target", (&tv[0]) as u64, zlen((&tv[0]) as u64))
+    if u_got[i] != 0 as u8 {
+        let svp: u64 = cx((&u_sv[0]) as u64, i, 24)
+        let tvp: u64 = cx((&u_tv[0]) as u64, i, 136)
+        ob_kv("state", svp, zlen(svp))
+        ob_kv("target", tvp, zlen(tvp))
     }
-    return true
+}
+
+// ------------------------------------------------ user calls as jobs
+//
+// A call of a person or an app runs as a job in the provider's user slot
+// (US_BASE + i); the request id is kept and the answer goes out when the
+// job is done. A provider that is busy (or has not said hello yet) makes
+// the request wait in socq.
+
+fn cx(base: u64, i: usize, w: usize) -> u64 {
+    return base + (i * w) as u64
+}
+
+fn user_busy_any() -> bool {
+    var i: usize = 0
+    while i < n_prov {
+        if socjob.job_busy(US_BASE + i) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn defer_user(i: usize) -> bool {
+    if socjob.job_busy(US_BASE + i) || p_hello[i] == 0 as u8 {
+        st_defer = true
+        return true
+    }
+    return false
+}
+
+fn defer_group() -> bool {
+    if user_busy_any() || hello_pending() {
+        st_defer = true
+        return true
+    }
+    return false
+}
+
+fn reply_to(id: u64) {
+    actwire.send_msg(svc_bus, actwire.K_REP, id, actwire.ob_ptr(), actwire.ob_len())
+}
+
+fn ujob_run(i: usize, kind: u8, ws: *mut [u64; 6]) -> bool {
+    var v1: [u8; 3] = "v1\0"
+    var dc: [u8; 100] = [0 as u8; 100]
+    var argv: [u64; 12] = [0 as u64; 12]
+    build_argv(i, ws, &argv, &dc, &v1)
+    return socjob.job_start(US_BASE + i, (&argv[0]) as u64, kind, CALL_TICKS)
+}
+
+fn ujob_word(i: usize, kind: u8, w: str) -> bool {
+    var wz: [u8; 16] = [0 as u8; 16]
+    zset_s((&wz[0]) as u64, 16, w)
+    var ws: [u64; 6] = [0 as u64; 6]
+    ws[0] = (&wz[0]) as u64
+    return ujob_run(i, kind, &ws)
+}
+
+fn ujob_begin(i: usize, kind: u8, ws: *mut [u64; 6]) -> bool {
+    u_id[i] = cur_id
+    if ujob_run(i, kind, ws) {
+        st_async = true
+        return true
+    }
+    ob_err("provider offline")
+    return false
+}
+
+fn group_start(kind: u8) -> bool {
+    g_left = 0
+    g_any = false
+    g_id = cur_id
+    var w1: [u8; 9] = "activity\0"
+    var dj: [u8; 3] = "-j\0"
+    var i: usize = 0
+    while i < n_prov {
+        var started: bool = false
+        if kind == UK_GREF {
+            started = ujob_word(i, kind, "contacts")
+        } else {
+            var ws: [u64; 6] = [0 as u64; 6]
+            ws[0] = (&w1[0]) as u64
+            if my_join && has_cap(i, "join") {
+                ws[1] = (&dj[0]) as u64
+                ws[2] = (&my_act[0]) as u64
+            } else {
+                ws[1] = (&my_act[0]) as u64
+            }
+            started = ujob_run(i, kind, &ws)
+        }
+        if started {
+            g_left = g_left + 1
+        }
+        i = i + 1
+    }
+    if g_left > 0 {
+        st_async = true
+        return true
+    }
+    return false
+}
+
+fn ob_refresh_reply() {
+    var total: u64 = 0
+    var at: usize = 0
+    while at < book.len {
+        total = total + 1
+        at = at + line_len(book.ptr + at as u64) + 1
+    }
+    actwire.ob_reset()
+    ob_s("ok\n")
+    ob_kn("contacts", total)
+}
+
+fn a_refresh() {
+    if n_prov > 0 && defer_group() {
+        return
+    }
+    if n_prov > 0 && group_start(UK_GREF) {
+        return
+    }
+    ob_refresh_reply()
+}
+
+fn reply_stored_login(i: usize, id: u64) {
+    let p: u64 = cx((&u_tx[0]) as u64, i, 1200)
+    actwire.ob_reset()
+    actwire.ob_n(p, zlen(p) as u64)
+    reply_to(id)
+}
+
+fn user_done(i: usize, kind: u8, code: i64) {
+    let slot: usize = US_BASE + i
+    let n: usize = socjob.job_len(slot)
+    let p: u64 = socjob.job_out(slot)
+    r_st8(p, n, 0 as u8)
+    var o: SB = sb(p, 16383)
+    o.len = n
+    let id: u64 = u_id[i]
+    if kind == UK_GACT || kind == UK_GREF {
+        if kind == UK_GREF {
+            book_update(i, &o, code)
+            mark_stale(i, JK_CONTACTS)
+        } else if code == 0 {
+            g_any = true
+        }
+        socjob.job_release(slot)
+        if g_left > 0 {
+            g_left = g_left - 1
+        }
+        if g_left == 0 {
+            if kind == UK_GREF {
+                ob_refresh_reply()
+            } else {
+                ob_activity_reply(g_any)
+            }
+            reply_to(g_id)
+        }
+        return
+    }
+    if kind == UK_REL {
+        if code != 0 {
+            ob_provider_err(&o, code)
+            socjob.job_release(slot)
+            reply_to(id)
+            return
+        }
+        socjob.job_release(slot)
+        if !ujob_word(i, UK_REL2, "contacts") {
+            ob_relation_reply(i)
+            reply_to(id)
+        }
+        return
+    }
+    if kind == UK_REL2 {
+        book_update(i, &o, code)
+        mark_stale(i, JK_CONTACTS)
+        socjob.job_release(slot)
+        ob_relation_reply(i)
+        reply_to(id)
+        return
+    }
+    if kind == UK_SEND {
+        if code != 0 {
+            ob_provider_err(&o, code)
+        } else {
+            send_done(i, &o)
+        }
+        socjob.job_release(slot)
+        reply_to(id)
+        return
+    }
+    if kind == UK_INV {
+        if code != 0 {
+            ob_provider_err(&o, code)
+            socjob.job_release(slot)
+            reply_to(id)
+            return
+        }
+        inv_sent_take(i, &o)
+        socjob.job_release(slot)
+        if !ujob_word(i, UK_INV2, "invites") {
+            ob_inv_sent_reply(i)
+            reply_to(id)
+        }
+        return
+    }
+    if kind == UK_INV2 {
+        invs_update(i, &o, code)
+        mark_stale(i, JK_INVITES)
+        socjob.job_release(slot)
+        ob_inv_sent_reply(i)
+        reply_to(id)
+        return
+    }
+    if kind == UK_ANS {
+        if code != 0 {
+            ob_provider_err(&o, code)
+            socjob.job_release(slot)
+            reply_to(id)
+            return
+        }
+        ans_take(i, &o)
+        socjob.job_release(slot)
+        if !ujob_word(i, UK_ANS2, "invites") {
+            ob_ans_reply(i)
+            reply_to(id)
+        }
+        return
+    }
+    if kind == UK_ANS2 {
+        invs_update(i, &o, code)
+        mark_stale(i, JK_INVITES)
+        socjob.job_release(slot)
+        ob_ans_reply(i)
+        reply_to(id)
+        return
+    }
+    if kind == UK_LOGIN {
+        if code != 0 && code != 4 {
+            ob_provider_err(&o, code)
+            socjob.job_release(slot)
+            reply_to(id)
+            return
+        }
+        ob_login_body(&o)
+        let sp: u64 = cx((&u_tx[0]) as u64, i, 1200)
+        zset(sp, 1200, actwire.ob_ptr(), actwire.ob_len() as usize)
+        socjob.job_release(slot)
+        if code != 0 || !ujob_word(i, UK_LOGIN2, "hello") {
+            reply_stored_login(i, id)
+        }
+        return
+    }
+    if kind == UK_LOGIN2 {
+        hello_apply(i, &o, code)
+        p_hello[i] = 1 as u8
+        socjob.job_release(slot)
+        if !ujob_word(i, UK_LOGIN3, "contacts") {
+            reply_stored_login(i, id)
+        }
+        return
+    }
+    if kind == UK_LOGIN3 {
+        book_update(i, &o, code)
+        mark_stale(i, JK_CONTACTS)
+        socjob.job_release(slot)
+        reply_stored_login(i, id)
+        return
+    }
+    socjob.job_release(slot)
+}
+
+fn user_tick() {
+    var i: usize = 0
+    while i < n_prov {
+        let slot: usize = US_BASE + i
+        if socjob.job_busy(slot) {
+            let code: i64 = socjob.job_poll(slot)
+            if code >= 0 {
+                user_done(i, socjob.job_kind(slot), code)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn dispatch(msg: u64, id: u64) {
+    cur_id = id
+    st_async = false
+    st_defer = false
+    handle(msg)
+    if st_defer {
+        if !socq.q_put(msg, id) {
+            ob_err("busy")
+            reply_to(id)
+        }
+        return
+    }
+    if !st_async {
+        reply_to(id)
+    }
+}
+
+fn queue_run() {
+    if socq.q_count() == 0 {
+        return
+    }
+    var k: i64 = socq.q_next(0)
+    while k >= 0 {
+        let kk: usize = k as usize
+        let seq: u64 = socq.q_seq(kk)
+        cur_id = socq.q_id(kk)
+        st_async = false
+        st_defer = false
+        handle(socq.q_msg(kk))
+        if !st_defer {
+            if !st_async {
+                reply_to(cur_id)
+            }
+            socq.q_drop(kk)
+        }
+        k = socq.q_next(seq)
+    }
 }
 
 // ---------------------------------------------------------------- serve
@@ -2793,7 +3152,7 @@ fn serve(limit: u64) -> u64 {
         socperm.apps_load(ab.ptr, ab.len)
     }
     providers_load()
-    hello_all()
+    hello_arm()
     msgs = sb((&st_msg[0]) as u64, MSG_CAP)
     invs = sb((&st_inv[0]) as u64, INV_CAP)
     let _m: bool = read_file("/etc/social/messages", &msgs)
@@ -2840,15 +3199,16 @@ fn serve(limit: u64) -> u64 {
     g_next = t1 + 400
     while limit == 0 || actwire.ticks() - t1 < limit {
         // AB-002: wait in the kernel (at most 100 ms, for the timers below)
-        let n: u64 = actwire.bus_wait(fp, mp, 100)
+        var wait_ms: u64 = 100
+        if user_busy_any() || hello_pending() || socq.q_count() > 0 {
+            wait_ms = 20
+        }
+        let n: u64 = actwire.bus_wait(fp, mp, wait_ms)
         if !ulib.bad(n) && n > 0 {
             let s: u64 = actwire.asm_feed(fp, mp)
             if s != actwire.NONE {
                 if actwire.asm_kind(s) == actwire.K_REQ {
-                    let id: u64 = actwire.asm_id(s)
-                    handle(actwire.asm_buf(s))
-                    actwire.send_msg(svc_bus, actwire.K_REP, id,
-                        actwire.ob_ptr(), actwire.ob_len())
+                    dispatch(actwire.asm_buf(s), actwire.asm_id(s))
                 }
                 actwire.asm_free(s)
             }
@@ -2893,6 +3253,8 @@ fn serve(limit: u64) -> u64 {
             g_next = tnow + GAMES_TICKS
         }
         bg_tick()
+        user_tick()
+        queue_run()
         watch_tick()
     }
     watch_stop_all()
