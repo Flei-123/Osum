@@ -73,7 +73,14 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
-## Stick 7 HP (24.10.2026, Baustand 6f9bbf42 = main ohne Touchpad-Tipp-Sperre f7855e52)
+## Stick 8 HP (24.10.2026, Baustand a494ab5d = main mit ALIVE-Fix)
+
+- **Datei:** `orientos-usb-hp-20261024-a494ab5d.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `648817516761259ae77f2f6d1c5bd33fe843380e00b2ed501283f5d98cfb645c`. Ersetzt Stick 7 (SHA 4daaae3b...).
+- **Neu gegenueber Stick 7:** WLAN-8265 ALIVE-Wartezeit 2,5 s nach Tick-Uhr (vorher ~70 ms), ALIVE gilt bei CSR_INT Bit 0, Bit 31 oder Paket im RX-Ring (wie Linux). Das erste Fehlerfoto bleibt erhalten (vorher mit int=0 ueberschrieben). Neue Zeile `fail_alive=int= fhint= gp1= gp2= cpu1= cpu2= wfp= seen=` in `/proc/wlan`. Dazu EC-Treiber + `/proc/hotkeys`, Touchpad-Tipp-Sperre, WLAN-Link-Ueberwachung, PBKDF2 in Etappen.
+- **Ehrlich:** Am echten 8265 UNVERIFIZIERT.
+- **Foto-Checkliste:** (1) `cat /proc/wlan` -- alle Zeilen (phase, err, failed_at, fail_alive, fail_regs, fail_fh). (2) Fn+Helligkeit 3x, dann `cat /proc/hotkeys` und `cat /proc/backlight`. (3) Falls WLAN laeuft: Einstellungen > WLAN verbinden, dann `cat /proc/wlan`.
+
+## Stick 7 HP (24.10.2026, Baustand 6f9bbf42 = main ohne Touchpad-Tipp-Sperre f7855e52) -- abgeloest durch Stick 8
 
 - **Datei:** `orientos-usb-hp-20261024-6f9bbf42.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `4daaae3b2ab0f42bd8ad4a9f943be4fcd15a7c234129c8e0b076472e92d7c714`. Ersetzt Stick 6 (SHA 0e21cfb0...).
 - **Neu gegenueber Stick 6:** WLAN-8265-Firmware-Ladefehler `fw_load_init err=-45` (FH end-of-TFD timeout) behoben: PCI-Bus-Master wird vor dem Firmware-Laden gesetzt (vorher nie -> kein DMA), APMG-DMA-Takt + NIC-Funkkonfig fuer Familie 8000. `/proc/wlan` hat neue Diagnosezeilen `fail_hw=`, `fail_fhr=`, `fail_fh=`. Dazu: wlan.conf speichern als normaler Nutzer + Persistenz auf der Stick-EFI-Partition, Fn-Helligkeitstasten (`/proc/hotkeys`), Explorer-Rand ziehen ohne Flackern.
