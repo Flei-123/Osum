@@ -293,6 +293,11 @@ if [ -n "${WLAN_8265_FW:-}" ] && [ -f "$T/real/kern.exp" ]; then
     has "$M4" 'fail_trace=c2end t=' "REAL blob failure: trace reaches the end of CPU2"
     has "$M4" 'fail_series=7 t=' "REAL blob failure: series complete in /proc/wlan"
     has "$M4" 'fail_exp=pause ' "REAL blob failure: last experiment line not cut off"
+    has "$M4" 'fail_rxs=' "REAL blob failure: RX scan line in /proc/wlan"
+    has "$M4" 'fail_rx=stts=' "REAL blob failure: RX scan register line in /proc/wlan"
+    has "$M4" 'fail_alive2=load=' "REAL blob failure: second diagnostics line in /proc/wlan"
+    has "$M4" 'fail_pm=rev=' "REAL blob failure: PCI diagnostics line in /proc/wlan"
+    has "$M4" 'err_text=' "REAL blob failure: generic tail of /proc/wlan not cut off"
     has "$M4" '==END==' "REAL blob failure: system keeps running"
 fi
 runc m3 "iwlfhtest iwlfhdead iwlfhwake"
