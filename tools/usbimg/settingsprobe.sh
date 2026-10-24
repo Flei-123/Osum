@@ -86,8 +86,8 @@ answer_dialog() {
     [ "$(dlg_n)" -gt "$1" ] || return 1
     a0=$(ans_n)
     sleep 2
-    for try in 1 2 3 4; do
-        printf 'taste j\nwarte 3\n' > "$OUT/dj"
+    for try in j y shift-j ret; do
+        printf 'taste %s\nwarte 3\n' "$try" > "$OUT/dj"
         drive "$OUT/dj"
         for i in 1 2 3 4 5 6; do [ "$(ans_n)" -gt "$a0" ] && return 0; sleep 1; done
     done

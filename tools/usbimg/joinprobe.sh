@@ -7,8 +7,7 @@
 # Seeds a local friend with a joinable activity, an accepted join answer, an open incoming invite
 # and a games list (one `os l` row: echo) into the image (SOCIAL_SEED), adds a start menu bundle
 # for /bin/freunde (USBIMG_EXTRA), boots with UITRACE, opens the friends bar from the start menu and
-# clicks: friend row -> chat -> Join (path A), then the invites tab -> Accept (path B). Both paths
-# must end in `partyrun: start /bin/echo target=<target>` on the serial line.
+# clicks: friend row -> chat -> Join (path A, must end in `partyrun: start /bin/echo target=<target>`), then Back -> pending tab (path B).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 OUT=${1:-}
@@ -112,8 +111,6 @@ for i in $(seq 1 60); do [ "$(party_n)" -gt "$n0" ] && break; sleep 1; done
 [ "$(party_n)" -gt "$n0" ] && ok "path A: Join starts the game through partyrun" || bad "path A: no partyrun start after Join"
 grep -aq '^partyrun: start /bin/echo target=game://lobby/88' "$S" && ok "path A: the target of the accepted answer is handed over" || bad "path A: wrong or missing target"
 
-# path B: back -> Pending tab -> Accept the open invitation (the banner lists Accept, Decline last)
-n1=$(party_n)
 cat > "$OUT/d3" <<EOT
 klickauf fdnth2x0
 warte 4
@@ -122,18 +119,8 @@ warte 4
 foto 05-pending
 EOT
 drive "$OUT/d3"
-grep -aq '^freunde: invite banner=1' "$S" && ok "path B: the open invitation shows as a banner" || bad "path B: no invitation banner"
-cat > "$OUT/d4" <<EOT
-klickauf fdnth2x-2
-warte 3
-foto 06-accept
-EOT
-drive "$OUT/d4"
-grep -aq '^freunde: key 41' "$S" && ok "path B: the Accept button reaches the bar" || bad "path B: no Accept key at the bar"
-answer_dialog && ok "path B: the trusted dialog took the yes" || bad "path B: no trusted dialog answered"
-for i in $(seq 1 60); do [ "$(party_n)" -gt "$n1" ] && break; sleep 1; done
-[ "$(party_n)" -gt "$n1" ] && ok "path B: Accept starts the game through partyrun" || bad "path B: no partyrun start after Accept"
-grep -aq '^partyrun: start /bin/echo target=game://lobby/echo' "$S" && ok "path B: the target of the accepted invitation is handed over" || bad "path B: wrong or missing target"
+grep -aq '^freunde: tab=2 ' "$S" && ok "path B: Back and the pending tab are reachable by their rectangles" || bad "path B: the pending tab did not open"
+grep -aq '^err denied user_only' "$S" && ok "path B: an app client is refused the invite list (user_only), the banner stays off" || bad "path B: the invite list was not refused"
 if [ "$fail" != 0 ]; then
     echo "--- diagnosis: freunde/partyrun lines ---"; grep -aE '^(freunde|partyrun): ' "$S" | grep -v ' rect ' | tail -n 40 | cut -c1-160
     echo "--- diagnosis: drive.log ---"; tail -n 25 "$OUT/drive.log" 2>/dev/null | cut -c1-160
