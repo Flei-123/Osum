@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import dbgsrv.acl
+import dbgsrv.request
+import dbgsrv.routes
+
+static mut tb: [u8; 200] = [0; 200]
+static mut tl: usize = 0
+static mut passn: u64 = 0
+static mut failn: u64 = 0
+
+fn lit(w: str) {
+    var i: usize = 0
+    while i < w.n && tl < 190 { tb[tl] = rt.ld8(w.p as u64, i) as u8; tl = tl + 1; i = i + 1 }
+}
+fn num(v: u64) {
+    if v >= 10 { num(v / 10) }
+    tb[tl] = (48 + (v % 10)) as u8
+    tl = tl + 1
+}
+fn emit() { io.print_line_bytes((&tb[0]) as u64, tl); tl = 0 }
+fn check(name: str, ok: bool) {
+    if ok { passn = passn + 1; lit("  OK    ") } else { failn = failn + 1; lit("  FAIL  ") }
+    lit(name)
+    emit()
+}
+
+fn ip(a: u64, b: u64, c: u64, d: u64) -> u64 {
+    return (a << 24) | (b << 16) | (c << 8) | d
+}
+
+fn tok_ok(req: str, tok: str) -> bool {
+    return request.token_ok(req.p as u64, req.n as u64, tok.p as u64, tok.n as u64)
+}
+
+fn path_is(req: str, want: str) -> u64 {
+    let s: u64 = request.path_span(req.p as u64, req.n as u64)
+    return routes.route_find(req.p as u64 + request.span_off(s), request.span_len(s))
+}
+
+fn main() -> i32 {
+    check("10.1.2.3 private", acl.private_ip(ip(10, 1, 2, 3)))
+    check("172.16.0.1 private", acl.private_ip(ip(172, 16, 0, 1)))
+    check("172.31.255.254 private", acl.private_ip(ip(172, 31, 255, 254)))
+    check("172.32.0.1 public", !acl.private_ip(ip(172, 32, 0, 1)))
+    check("172.15.0.1 public", !acl.private_ip(ip(172, 15, 0, 1)))
+    check("192.168.178.20 private", acl.private_ip(ip(192, 168, 178, 20)))
+    check("192.169.0.1 public", !acl.private_ip(ip(192, 169, 0, 1)))
+    check("169.254.10.1 link-local ok", acl.private_ip(ip(169, 254, 10, 1)))
+    check("8.8.8.8 public", !acl.private_ip(ip(8, 8, 8, 8)))
+    check("11.0.0.1 public", !acl.private_ip(ip(11, 0, 0, 1)))
+    check("100.64.0.1 (CGNAT) public", !acl.private_ip(ip(100, 64, 0, 1)))
+    check("0.0.0.0 public", !acl.private_ip(0))
+    check("oversized value public", !acl.private_ip((1 << 40) | ip(10, 0, 0, 1)))
+    check("force_public refuses private", !acl.peer_allowed(ip(10, 0, 0, 1), true))
+    check("peer_allowed private", acl.peer_allowed(ip(10, 0, 0, 1), false))
+
+    check("x-token accepted", tok_ok("GET /wlan HTTP/1.0\r\nX-Token: abc123\r\n\r\n", "abc123"))
+    check("header name case-insensitive", tok_ok("GET /wlan HTTP/1.0\r\nx-TOKEN:abc123\r\n\r\n", "abc123"))
+    check("bearer accepted", tok_ok("GET /wlan HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc123\r\n\r\n", "abc123"))
+    check("query t= accepted", tok_ok("GET /wlan?t=abc123 HTTP/1.0\r\n\r\n", "abc123"))
+    check("query t= after other arg", tok_ok("GET /wlan?x=1&t=abc123&y=2 HTTP/1.0\r\n\r\n", "abc123"))
+    check("wrong token refused", !tok_ok("GET /wlan HTTP/1.0\r\nX-Token: abc124\r\n\r\n", "abc123"))
+    check("prefix of token refused", !tok_ok("GET /wlan HTTP/1.0\r\nX-Token: abc12\r\n\r\n", "abc123"))
+    check("longer token refused", !tok_ok("GET /wlan HTTP/1.0\r\nX-Token: abc1234\r\n\r\n", "abc123"))
+    check("no token refused", !tok_ok("GET /wlan HTTP/1.0\r\n\r\n", "abc123"))
+    check("empty header token refused", !tok_ok("GET /wlan HTTP/1.0\r\nX-Token:\r\n\r\n", "abc123"))
+    check("empty server token refuses all", !tok_ok("GET /wlan HTTP/1.0\r\nX-Token: abc\r\n\r\n", ""))
+    check("token in body not read", !tok_ok("GET /wlan HTTP/1.0\r\n\r\nX-Token: abc123\r\n", "abc123"))
+    check("basic auth not a bearer", !tok_ok("GET /wlan HTTP/1.0\r\nAuthorization: Basic abc123\r\n\r\n", "abc123"))
+    check("ct_equal equal", request.ct_equal("abc".p as u64, 3, "abc".p as u64, 3))
+    check("ct_equal differ", !request.ct_equal("abc".p as u64, 3, "abd".p as u64, 3))
+
+    check("GET recognised", request.is_get("GET /x HTTP/1.0\r\n".p as u64, 17))
+    check("POST refused", !request.is_get("POST /x HTTP/1.0\r\n".p as u64, 18))
+    check("PUT refused", !request.is_get("PUT /x HTTP/1.0\r\n".p as u64, 17))
+
+    check("route /wlan", path_is("GET /wlan HTTP/1.0\r\n\r\n", "") == 1)
+    check("route /wlan with query", path_is("GET /wlan?t=x HTTP/1.0\r\n\r\n", "") == 1)
+    check("route /lspci/v distinct from /lspci", path_is("GET /lspci/v HTTP/1.0\r\n\r\n", "") == 7 && path_is("GET /lspci HTTP/1.0\r\n\r\n", "") == 6)
+    check("route /wlanctl/dump", path_is("GET /wlanctl/dump HTTP/1.0\r\n\r\n", "") == 13)
+    check("unknown route 0", path_is("GET /etc/passwd HTTP/1.0\r\n\r\n", "") == 0)
+    check("prefix route 0", path_is("GET /wla HTTP/1.0\r\n\r\n", "") == 0)
+    check("traversal route 0", path_is("GET /../etc/shadow HTTP/1.0\r\n\r\n", "") == 0)
+    check("route count matches table", routes.line_span(routes.names_ptr(), routes.names_len(), routes.route_count() - 1) != 0 && routes.line_span(routes.target_ptr(), routes.target_len(), routes.route_count()) == 0)
+
+    lit("dbgsrv host: pass=")
+    num(passn)
+    lit(" fail=")
+    num(failn)
+    emit()
+    if failn == 0 { return 0 }
+    return 1
+}

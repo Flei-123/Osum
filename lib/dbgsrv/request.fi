@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: GPL-2.0-only
+export { is_get, path_span, token_span, token_ok, span_off, span_len, ct_equal, match_at }
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn span_off(s: u64) -> u64 {
+    return s >> 32
+}
+
+fn span_len(s: u64) -> u64 {
+    return s & 0xFFFFFFFF
+}
+
+fn span(off: u64, len: u64) -> u64 {
+    return (off << 32) | len
+}
+
+fn match_at(buf: u64, n: u64, off: u64, z: u64) -> bool {
+    var i: u64 = 0
+    while ld8(z, i) != 0 {
+        if off + i >= n {
+            return false
+        }
+        if lower(ld8(buf, off + i)) != lower(ld8(z, i)) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn is_get(buf: u64, n: u64) -> bool {
+    var g: [u8; 5] = "GET \0"
+    return match_at(buf, n, 0, (&g[0 as usize]) as u64)
+}
+
+fn is_end(c: u64) -> bool {
+    return c == 32 || c == 13 || c == 10 || c == 0
+}
+
+fn path_span(buf: u64, n: u64) -> u64 {
+    var i: u64 = 4
+    while i < n && !is_end(ld8(buf, i)) && ld8(buf, i) != 63 {
+        i = i + 1
+    }
+    return span(4, i - 4)
+}
+
+fn first_line_end(buf: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n && ld8(buf, i) != 10 {
+        i = i + 1
+    }
+    return i
+}
+
+fn value_span(buf: u64, n: u64, start: u64) -> u64 {
+    var i: u64 = start
+    while i < n && (ld8(buf, i) == 32 || ld8(buf, i) == 9) {
+        i = i + 1
+    }
+    let b: u64 = i
+    while i < n && ld8(buf, i) != 13 && ld8(buf, i) != 10 {
+        i = i + 1
+    }
+    while i > b && (ld8(buf, i - 1) == 32 || ld8(buf, i - 1) == 9) {
+        i = i - 1
+    }
+    return span(b, i - b)
+}
+
+fn header_value(buf: u64, n: u64, name_z: u64) -> u64 {
+    var i: u64 = first_line_end(buf, n) + 1
+    while i < n {
+        if ld8(buf, i) == 10 || (ld8(buf, i) == 13 && i + 1 < n && ld8(buf, i + 1) == 10) {
+            return 0
+        }
+        if match_at(buf, n, i, name_z) {
+            var k: u64 = 0
+            while ld8(name_z, k) != 0 {
+                k = k + 1
+            }
+            return value_span(buf, n, i + k)
+        }
+        while i < n && ld8(buf, i) != 10 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn query_token(buf: u64, n: u64) -> u64 {
+    let le: u64 = first_line_end(buf, n)
+    var i: u64 = 4
+    while i < le && ld8(buf, i) != 63 && !is_end(ld8(buf, i)) {
+        i = i + 1
+    }
+    if i >= le || ld8(buf, i) != 63 {
+        return 0
+    }
+    i = i + 1
+    while i + 1 < le {
+        if ld8(buf, i) == 116 && ld8(buf, i + 1) == 61 {
+            let b: u64 = i + 2
+            var e: u64 = b
+            while e < le && !is_end(ld8(buf, e)) && ld8(buf, e) != 38 {
+                e = e + 1
+            }
+            return span(b, e - b)
+        }
+        while i < le && ld8(buf, i) != 38 && !is_end(ld8(buf, i)) {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn token_span(buf: u64, n: u64) -> u64 {
+    var h_x: [u8; 9] = "x-token:\0"
+    var h_a: [u8; 15] = "authorization:\0"
+    var bear: [u8; 8] = "bearer \0"
+    let x: u64 = header_value(buf, n, (&h_x[0 as usize]) as u64)
+    if span_len(x) != 0 {
+        return x
+    }
+    let a: u64 = header_value(buf, n, (&h_a[0 as usize]) as u64)
+    if span_len(a) > 7 && match_at(buf, n, span_off(a), (&bear[0 as usize]) as u64) {
+        return value_span(buf, n, span_off(a) + 7)
+    }
+    return query_token(buf, n)
+}
+
+fn ct_equal(a: u64, alen: u64, b: u64, blen: u64) -> bool {
+    var diff: u64 = alen ^ blen
+    var m: u64 = alen
+    if blen > m {
+        m = blen
+    }
+    var i: u64 = 0
+    while i < m {
+        var x: u64 = 0
+        var y: u64 = 0
+        if i < alen {
+            x = ld8(a, i)
+        }
+        if i < blen {
+            y = ld8(b, i)
+        }
+        diff = diff | (x ^ y)
+        i = i + 1
+    }
+    return diff == 0
+}
+
+fn token_ok(buf: u64, n: u64, tok: u64, toklen: u64) -> bool {
+    if toklen == 0 {
+        return false
+    }
+    let s: u64 = token_span(buf, n)
+    if span_len(s) == 0 {
+        return false
+    }
+    return ct_equal(buf + span_off(s), span_len(s), tok, toklen)
+}

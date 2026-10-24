@@ -302,7 +302,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp ping log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
-orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo hwinv massren privacy welcome elevate runbox cliphist charmap apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl"}
+orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo hwinv massren privacy welcome elevate runbox cliphist charmap apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl dbgsrv"}
 # ODB=1 (debug build): the debug agent is one more program in /bin
 [ "${ODB:-0}" = 1 ] && PROGS="$PROGS odbd"
 # the public image has no chat server to reach: no JARVIS Mini binary there
@@ -1302,6 +1302,14 @@ if [ "${ODB:-0}" = 1 ]; then
     printf 'enable=1\n' > "$OUT/odb.conf"
     ARGS+=("/etc/odb.token=$ODB_TOKEN_FILE@0600:0:0" "/etc/odb.conf=$OUT/odb.conf@0644:0:0")
     echo "build.sh: ODB=1 -- debug agent odbd enabled (COM2), token from $ODB_TOKEN_FILE"
+fi
+DBGSRV_DEFAULT=0; [ "$IMAGE_PROFILE" = personal ] && DBGSRV_DEFAULT=1
+if [ "${DBGSRV:-$DBGSRV_DEFAULT}" = 1 ]; then
+    DBGSRV_TOKEN_FILE="${IMG%.img}.dbgsrv.token"
+    ( umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$DBGSRV_TOKEN_FILE" )
+    printf 'dbgsrv:*:respawn:/bin/dbgsrv:netz,log=/var/log/dbgsrv.log\n' >> "$OUT/inittab"
+    ARGS+=("/etc/dbgsrv.token=$DBGSRV_TOKEN_FILE@0600:0:0")
+    echo "build.sh: DBGSRV=1 -- debug HTTP service dbgsrv on port 8765 (docs/DEBUG-NET.md), token in $DBGSRV_TOKEN_FILE"
 fi
 ARGS+=(/dev/ /proc/ /mnt/ /esp/ /tmp/ /store/ /apps/ /system/ /run/)
 # RUNDE TUERSCHLOSS: EIN BEISPIEL ZUM UEBERSETZEN.

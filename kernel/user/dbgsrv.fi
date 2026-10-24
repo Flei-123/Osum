@@ -1,0 +1,488 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.net
+import libc.proc
+import dbgsrv.acl
+import dbgsrv.request
+import dbgsrv.routes
+
+export { u_start }
+
+const DEFAULT_PORT: u64 = 8765
+const REQ_CAP: u64 = 4096
+const BODY_CAP: u64 = 60000
+const READ_MS: u64 = 3000
+const EXEC_TRIES: u64 = 400
+const SYS_WAIT4: u64 = 61
+const WNOHANG: u64 = 1
+const SYS_RT_SIGPROCMASK: u64 = 14
+const SIG_BLOCK: u64 = 0
+const SIGCHLD_BIT: u64 = 65536
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+const MAX_ARGS: u64 = 7
+
+static mut TOKEN_PATH: [u8; 19] = "/etc/dbgsrv.token\0\0"
+static mut OUT_PATH: [u8; 17] = "/run/dbgsrv.out\0\0"
+static mut URL_PATH: [u8; 17] = "/run/dbgsrv.url\0\0"
+static mut O_PORT: [u8; 3] = "-p\0"
+static mut O_KEY: [u8; 3] = "-k\0"
+static mut O_LIFE: [u8; 3] = "-t\0"
+static mut O_PUBLIC: [u8; 3] = "-X\0"
+
+static mut L_LISTEN: [u8; 22] = "dbgsrv: listening on \0"
+static mut L_NOTOKEN: [u8; 37] = "dbgsrv: no token, refusing to start\n\0"
+static mut L_REFUSED: [u8; 27] = "dbgsrv: refused non-local \0"
+static mut L_BADTOKEN: [u8; 23] = "dbgsrv: 401 bad token \0"
+static mut L_SERVED: [u8; 17] = "dbgsrv: 200 GET \0"
+static mut L_404: [u8; 17] = "dbgsrv: 404 GET \0"
+static mut L_405: [u8; 18] = "dbgsrv: 405 from \0"
+static mut L_IPCHANGE: [u8; 20] = "dbgsrv: address is \0"
+static mut L_FROM: [u8; 7] = " from \0"
+
+static mut H_OK: [u8; 105] = "HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n\0"
+static mut H_401: [u8; 75] = "HTTP/1.0 401 Unauthorized\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\0"
+static mut H_404: [u8; 72] = "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\0"
+static mut H_405: [u8; 81] = "HTTP/1.0 405 Method Not Allowed\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\0"
+static mut B_401: [u8; 14] = "unauthorized\n\0"
+static mut B_404: [u8; 11] = "not found\n\0"
+static mut B_405: [u8; 18] = "only GET allowed\n\0"
+static mut B_NOFILE: [u8; 21] = "dbgsrv: cannot read\n\0"
+
+static mut req: [u8; 4096] = [0 as u8; 4096]
+static mut body: [u8; 60000] = [0 as u8; 60000]
+static mut token: [u8; 128] = [0 as u8; 128]
+static mut toklen: u64 = 0
+static mut cmdbuf: [u8; 160] = [0 as u8; 160]
+static mut resbuf: [u8; 64] = [0 as u8; 64]
+static mut argv: [u64; 8] = [0 as u64; 8]
+static mut fdsbuf: [u8; 64] = [0 as u8; 64]
+static mut force_public: bool = false
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, (v & 255) as u8)
+}
+
+fn nl() {
+    var s: [u8; 2] = "\n\0"
+    ulib.say((&s[0 as usize]) as u64)
+}
+
+fn say_ip(a: u64) {
+    var b: [u8; 24] = [0 as u8; 24]
+    let n: u64 = net.ip_text(a, (&b[0 as usize]) as u64)
+    ulib.put((&b[0 as usize]) as u64, n)
+}
+
+fn poll_wait(f: u64, n: u64, ms: u64) -> u64 {
+    var tries: u64 = 0
+    while tries < 8 {
+        let r: u64 = io.poll(f, n, ms)
+        if !errno.failed(r) {
+            return r
+        }
+        if errno.errno() != errno.E_INTR {
+            return r
+        }
+        tries = tries + 1
+    }
+    return 0
+}
+
+fn block_sigchld() {
+    var set: [u64; 1] = [0 as u64; 1]
+    set[0 as usize] = SIGCHLD_BIT
+    kcall.sys3(SYS_RT_SIGPROCMASK, SIG_BLOCK, (&set[0 as usize]) as u64, 0)
+}
+
+fn mono_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, (&ts[0 as usize]) as u64)
+    return (ts[0 as usize] *% 1000) +% (ts[1 as usize] / 1000000)
+}
+
+fn reap() {
+    var going: bool = true
+    while going {
+        let r: u64 = kcall.sys4(SYS_WAIT4, 0 -% 1, 0, WNOHANG, 0)
+        if errno.is_error(r) || r == 0 {
+            going = false
+        }
+    }
+}
+
+fn load_token(path: u64) -> bool {
+    let fd: u64 = io.open(path, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return false
+    }
+    let n: u64 = io.read_full(fd, (&token[0 as usize]) as u64, 127)
+    io.close(fd)
+    if errno.failed(n) {
+        return false
+    }
+    var e: u64 = n
+    while e > 0 && ld8((&token[0 as usize]) as u64, e - 1) <= 32 {
+        e = e - 1
+    }
+    toklen = e
+    return e > 0
+}
+
+fn read_request(fd: u64) -> u64 {
+    let t0: u64 = mono_ms()
+    var n: u64 = 0
+    var done: bool = false
+    while !done && n < REQ_CAP {
+        let now: u64 = mono_ms()
+        if now -% t0 >= READ_MS {
+            done = true
+        } else {
+            let f: u64 = (&fdsbuf[0 as usize]) as u64
+            io.poll_set(f, 0, fd, io.POLLIN)
+            let r: u64 = poll_wait(f, 1, READ_MS - (now -% t0))
+            if errno.failed(r) || r == 0 {
+                done = true
+            } else {
+                let g: u64 = net.recv_some(fd, (&req[0 as usize]) as u64 + n, REQ_CAP - n)
+                if net.failed(g) || g == 0 {
+                    done = true
+                } else {
+                    n = n + g
+                    if has_blank_line(n) {
+                        done = true
+                    }
+                }
+            }
+        }
+    }
+    return n
+}
+
+fn has_blank_line(n: u64) -> bool {
+    var i: u64 = 0
+    let b: u64 = (&req[0 as usize]) as u64
+    while i + 3 < n {
+        if ld8(b, i) == 13 && ld8(b, i + 1) == 10 && ld8(b, i + 2) == 13 && ld8(b, i + 3) == 10 {
+            return true
+        }
+        if ld8(b, i) == 10 && ld8(b, i + 1) == 10 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn send_z(fd: u64, z: u64) {
+    net.send_all(fd, z, ulib.length(z))
+}
+
+fn read_tail(path: u64) -> u64 {
+    let fd: u64 = io.open(path, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return ulib.EOF
+    }
+    let size: u64 = io.size_of(path)
+    if !errno.failed(size) && size > BODY_CAP {
+        io.seek(fd, size - BODY_CAP, 0)
+    }
+    let n: u64 = io.read_full(fd, (&body[0 as usize]) as u64, BODY_CAP)
+    io.close(fd)
+    if errno.failed(n) {
+        return ulib.EOF
+    }
+    return n
+}
+
+fn run_exec(line: u64, len: u64) -> u64 {
+    var i: u64 = 2
+    var k: u64 = 0
+    var nargs: u64 = 0
+    var result: u64 = (&OUT_PATH[0 as usize]) as u64
+    let cb: u64 = (&cmdbuf[0 as usize]) as u64
+    while i < len && k < 150 {
+        let ch: u64 = ld8(line, i)
+        if ch == 62 {
+            var j: u64 = 0
+            i = i + 1
+            while i < len && j < 60 {
+                st8((&resbuf[0 as usize]) as u64, j, ld8(line, i))
+                i = i + 1
+                j = j + 1
+            }
+            st8((&resbuf[0 as usize]) as u64, j, 0)
+            result = (&resbuf[0 as usize]) as u64
+        } else {
+            st8(cb, k, ch)
+            k = k + 1
+            i = i + 1
+        }
+    }
+    st8(cb, k, 0)
+    var p: u64 = 0
+    var in_word: bool = false
+    while p < k && nargs < MAX_ARGS {
+        if ld8(cb, p) == 32 {
+            st8(cb, p, 0)
+            in_word = false
+        } else if !in_word {
+            argv[nargs as usize] = cb + p
+            nargs = nargs + 1
+            in_word = true
+        }
+        p = p + 1
+    }
+    argv[nargs as usize] = 0
+    if nargs == 0 {
+        return ulib.EOF
+    }
+    ulib.sys(ulib.SYS_UNLINK, result, 0, 0)
+    ulib.sys(ulib.SYS_UNLINK, (&OUT_PATH[0 as usize]) as u64, 0, 0)
+    let target: u64 = ulib.sys(ulib.SYS_OPEN, (&OUT_PATH[0 as usize]) as u64, ulib.O_MAKE, 0)
+    if ulib.bad(target) {
+        return ulib.EOF
+    }
+    let who: u64 = proc.split()
+    if errno.failed(who) {
+        io.close(target)
+        return ulib.EOF
+    }
+    if who == 0 {
+        io.dup2(target, 1)
+        io.dup2(target, 2)
+        io.close(target)
+        proc.enter(argv[0 as usize], (&argv[0 as usize]) as u64)
+        proc.leave(127)
+    }
+    io.close(target)
+    var tries: u64 = 0
+    var ended: bool = false
+    while !ended && tries < EXEC_TRIES {
+        let r: u64 = kcall.sys4(SYS_WAIT4, who, 0, WNOHANG, 0)
+        if errno.is_error(r) || r != 0 {
+            ended = true
+        } else {
+            proc.sleep(0, 30)
+            tries = tries + 1
+        }
+    }
+    if !ended {
+        ulib.sys(ulib.SYS_KILL, who, 137, 0)
+        kcall.sys4(SYS_WAIT4, who, 0, 0, 0)
+    }
+    return read_tail(result)
+}
+
+fn run_file(line: u64, len: u64) -> u64 {
+    var pb: [u8; 96] = [0 as u8; 96]
+    var i: u64 = 2
+    while i < len && i < 94 {
+        st8((&pb[0 as usize]) as u64, i - 2, ld8(line, i))
+        i = i + 1
+    }
+    st8((&pb[0 as usize]) as u64, i - 2, 0)
+    return read_tail((&pb[0 as usize]) as u64)
+}
+
+fn index_body() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    let b: u64 = (&body[0 as usize]) as u64
+    while i < routes.names_len() {
+        st8(b, n, ld8(routes.names_ptr(), i))
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+fn log_peer(prefix: u64, peer: u64) {
+    ulib.say(prefix)
+    say_ip(peer)
+    nl()
+}
+
+fn serve(fd: u64, peer: u64) {
+    let rn: u64 = read_request(fd)
+    let rb: u64 = (&req[0 as usize]) as u64
+    if rn == 0 {
+        return
+    }
+    if !request.is_get(rb, rn) {
+        send_z(fd, (&H_405[0 as usize]) as u64)
+        send_z(fd, (&B_405[0 as usize]) as u64)
+        log_peer((&L_405[0 as usize]) as u64, peer)
+        return
+    }
+    if !request.token_ok(rb, rn, (&token[0 as usize]) as u64, toklen) {
+        send_z(fd, (&H_401[0 as usize]) as u64)
+        send_z(fd, (&B_401[0 as usize]) as u64)
+        log_peer((&L_BADTOKEN[0 as usize]) as u64, peer)
+        return
+    }
+    let ps: u64 = request.path_span(rb, rn)
+    let plen: u64 = request.span_len(ps)
+    let pptr: u64 = rb + request.span_off(ps)
+    var got: u64 = ulib.EOF
+    var found: bool = false
+    if plen == 1 && ld8(pptr, 0) == 47 {
+        got = index_body()
+        found = true
+    } else {
+        let idx: u64 = routes.route_find(pptr, plen)
+        if idx != 0 {
+            found = true
+            let ts: u64 = routes.line_span(routes.target_ptr(), routes.target_len(), idx - 1)
+            let line: u64 = routes.target_ptr() + request.span_off(ts)
+            let llen: u64 = request.span_len(ts)
+            if ld8(line, 0) == 88 {
+                got = run_exec(line, llen)
+            } else {
+                got = run_file(line, llen)
+            }
+        }
+    }
+    if !found {
+        send_z(fd, (&H_404[0 as usize]) as u64)
+        send_z(fd, (&B_404[0 as usize]) as u64)
+        ulib.say((&L_404[0 as usize]) as u64)
+        ulib.put(pptr, plen)
+        nl()
+        return
+    }
+    send_z(fd, (&H_OK[0 as usize]) as u64)
+    if got == ulib.EOF {
+        send_z(fd, (&B_NOFILE[0 as usize]) as u64)
+    } else {
+        net.send_all(fd, (&body[0 as usize]) as u64, got)
+    }
+    ulib.say((&L_SERVED[0 as usize]) as u64)
+    ulib.put(pptr, plen)
+    ulib.say((&L_FROM[0 as usize]) as u64)
+    say_ip(peer)
+    nl()
+}
+
+fn publish_address(port: u64, ip: u64) {
+    var url: [u8; 64] = [0 as u8; 64]
+    var h: [u8; 8] = "http://\0"
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 7 {
+        st8((&url[0 as usize]) as u64, n, ld8((&h[0 as usize]) as u64, i))
+        n = n + 1
+        i = i + 1
+    }
+    n = n + net.ip_text(ip, (&url[0 as usize]) as u64 + n)
+    st8((&url[0 as usize]) as u64, n, 58)
+    n = n + 1
+    n = n + ulib.digits(port, (&url[0 as usize]) as u64 + n)
+    st8((&url[0 as usize]) as u64, n, 47)
+    n = n + 1
+    st8((&url[0 as usize]) as u64, n, 10)
+    n = n + 1
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&URL_PATH[0 as usize]) as u64, ulib.O_MAKE, 0)
+    if !ulib.bad(fd) {
+        io.write_all(fd, (&url[0 as usize]) as u64, n)
+        io.close(fd)
+    }
+    ulib.say((&L_IPCHANGE[0 as usize]) as u64)
+    ulib.put((&url[0 as usize]) as u64, n)
+}
+
+fn u_start(args: u64) -> u64 {
+    var port: u64 = DEFAULT_PORT
+    var life: u64 = 0
+    var key: u64 = (&TOKEN_PATH[0 as usize]) as u64
+    let ac: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    while i < ac {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&O_PORT[0 as usize]) as u64) && i + 1 < ac {
+            port = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 1
+        } else if ulib.streq(a, (&O_KEY[0 as usize]) as u64) && i + 1 < ac {
+            key = ulib.arg_at(args, i + 1)
+            i = i + 1
+        } else if ulib.streq(a, (&O_LIFE[0 as usize]) as u64) && i + 1 < ac {
+            life = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 1
+        } else if ulib.streq(a, (&O_PUBLIC[0 as usize]) as u64) {
+            force_public = true
+        }
+        i = i + 1
+    }
+    if !load_token(key) {
+        ulib.say((&L_NOTOKEN[0 as usize]) as u64)
+        return 1
+    }
+    block_sigchld()
+    let s: u64 = net.tcp_socket()
+    if net.failed(s) {
+        return 1
+    }
+    if net.failed(net.bind_port(s, port)) {
+        return 1
+    }
+    if net.failed(net.listen(s, 4)) {
+        return 1
+    }
+    var cur_ip: u64 = ulib.sys(ulib.SYS_NETGET, ulib.NG_IP, 0, 0)
+    publish_address(port, cur_ip)
+    ulib.say((&L_LISTEN[0 as usize]) as u64)
+    ulib.sayu(port)
+    nl()
+    var left: u64 = life
+    var going: bool = true
+    while going {
+        let f: u64 = (&fdsbuf[0 as usize]) as u64
+        io.poll_set(f, 0, s, io.POLLIN)
+        let r: u64 = poll_wait(f, 1, 500)
+        reap()
+        if errno.failed(r) {
+            going = false
+        } else if r == 0 {
+            let now_ip: u64 = ulib.sys(ulib.SYS_NETGET, ulib.NG_IP, 0, 0)
+            if now_ip != cur_ip && now_ip != 0 {
+                cur_ip = now_ip
+                publish_address(port, cur_ip)
+            }
+            if life != 0 {
+                if left <= 500 {
+                    going = false
+                } else {
+                    left = left - 500
+                }
+            }
+        } else if io.poll_ready(f, 0, io.POLLIN) {
+            var sa: [u8; 16] = [0 as u8; 16]
+            let cfd: u64 = net.accept_from(s, (&sa[0 as usize]) as u64)
+            if !net.failed(cfd) {
+                let peer: u64 = net.sa_ip((&sa[0 as usize]) as u64)
+                if acl.peer_allowed(peer, force_public) {
+                    serve(cfd, peer)
+                } else {
+                    log_peer((&L_REFUSED[0 as usize]) as u64, peer)
+                }
+                net.shutdown(cfd, 1)
+                net.close(cfd)
+            }
+        }
+    }
+    net.close(s)
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
