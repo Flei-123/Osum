@@ -95,7 +95,7 @@ run() {
         sleep 2
         : > "$T/$n.unplug"
     fi
-    bash tools/work/waitfor.sh -t 160 -i 2 pid "$qp" >/dev/null 2>&1
+    bash tools/work/waitfor.sh -t ${QWAIT:-160} -i 2 pid "$qp" >/dev/null 2>&1
     kill "$qp" 2>/dev/null
     [ -f "$T/$n.hpid" ] && kill "$(cat "$T/$n.hpid")" 2>/dev/null
     [ -f "$T/$n.gpid" ] && kill "$(cat "$T/$n.gpid")" 2>/dev/null
@@ -198,17 +198,16 @@ for c in $CASES; do
         net_ok chi
         ;;
     ch336-intr-only)
-        GARGS="--phy-boot down --phy-deaf --intr up" BASEW="nokbd nosched vfs" run chy ch336 boot s_intr.sh
-        chk chy "PHY never reports link" 'phy: bmcr=[0-9a-f]* bmsr=7809'
-        chk chy "interrupt endpoint says up" 'last=0x40 link=up'
-        chk chy "link state follows the interrupt" 'link: state=up'
+        GARGS="--phy-boot down --phy-deaf --intr up" QWAIT=45 BASEW="nokbd nosched noproc nofs noring3" run chy ch336 boot s_intr.sh
+        chk chy "bring-up saw no PHY link" 'usb: ch336 link=down bmsr=7809'
+        chk chy "link went up on the interrupt byte while the PHY stayed down" 'usb: ch336 link=up bmsr=7809'
         panics chy
         ;;
     ch336-nochintr)
-        GARGS="--phy-boot down --phy-deaf --intr up" XWORDS="nochintr" BASEW="nokbd nosched vfs" run chx ch336 boot s_intr.sh
-        chk chx "interrupt endpoint not opened" 'intr: open=0 ep=0 n=0'
-        nochk chx "link not taken from the interrupt" 'link: state=up'
-        chk chx "link stays down" 'link: state=down'
+        GARGS="--phy-boot down --phy-deaf --intr up" XWORDS="nochintr" QWAIT=45 BASEW="nokbd nosched noproc nofs noring3" run chx ch336 boot s_intr.sh
+        chk chx "bring-up saw no PHY link" 'usb: ch336 link=down bmsr=7809'
+        nochk chx "link not taken from the interrupt" 'usb: ch336 link=up'
+        grep -aq 'interrupt packet' "$T/chx.gadget" && bad "chx: interrupt endpoint was opened despite nochintr" || ok "chx: interrupt endpoint not opened"
         panics chx
         ;;
     none)
