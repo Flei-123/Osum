@@ -9,6 +9,7 @@ import wlan.iwl_cmdq
 import wlan.iwl_rxscan
 import wlan.iwl_sbtrace
 import wlan.iwl_rxexp_tab
+import drv.net.iwl_msi
 
 export { run, ALIVE_NONE, ALIVE_CSR, ALIVE_RX }
 
@@ -31,6 +32,8 @@ struct Ctx {
     cq: *mut iwl_cmdq.Cq,
     tab: *mut iwl_rxexp_tab.Tab,
     bdf: u64,
+    msi: iwl_msi.Msi,
+    msi_addr: u64,
     phy_sku: u64,
     rx_stop: bool
 }
@@ -52,6 +55,10 @@ fn x_intx(c: *mut Ctx, disabled: bool) {
     } else {
         pci.cfg_write16((*c).bdf, CFG_COMMAND, cmd & (0xFFFF ^ CMD_INTX_DISABLE))
     }
+}
+
+fn x_msi(c: *mut Ctx) {
+    iwl_msi.msi_arm(&(*c).msi, (*c).msi_addr)
 }
 
 fn x_coal(c: *mut Ctx) {
@@ -86,6 +93,7 @@ fn act(c: *mut Ctx, id: u64) {
     if id == iwl_rxexp_tab.X_MASK { x_mask(c) }
     if id == iwl_rxexp_tab.X_INTX_ON { x_intx(c, true) }
     if id == iwl_rxexp_tab.X_INTX_OFF { x_intx(c, false) }
+    if id == iwl_rxexp_tab.X_MSI { x_msi(c) }
     if id == iwl_rxexp_tab.X_COAL { x_coal(c) }
     if id == iwl_rxexp_tab.X_DRAM { x_dram(c) }
     if id == iwl_rxexp_tab.X_WPTR { x_wptr(c) }
@@ -119,8 +127,8 @@ fn step(c: *mut Ctx, id: u64) -> u64 {
     return measure(c, id)
 }
 
-fn run(p: *mut iwl_probe.Probe, tr: *mut iwl_sbtrace.SbTrace, cq: *mut iwl_cmdq.Cq, bdf: u64, phy_sku: u64, rx_stop: bool, tab: *mut iwl_rxexp_tab.Tab) -> u64 {
-    var c: Ctx = Ctx { p: p, tr: tr, cq: cq, tab: tab, bdf: bdf, phy_sku: phy_sku, rx_stop: rx_stop }
+fn run(p: *mut iwl_probe.Probe, tr: *mut iwl_sbtrace.SbTrace, cq: *mut iwl_cmdq.Cq, bdf: u64, phy_sku: u64, rx_stop: bool, tab: *mut iwl_rxexp_tab.Tab, msi_addr: u64) -> u64 {
+    var c: Ctx = Ctx { p: p, tr: tr, cq: cq, tab: tab, bdf: bdf, msi: iwl_msi.msi_find(bdf), msi_addr: msi_addr, phy_sku: phy_sku, rx_stop: rx_stop }
     var a: u64 = measure(&c, iwl_rxexp_tab.X_BASE)
     if a != ALIVE_NONE { return a }
     a = step(&c, iwl_rxexp_tab.X_MASK)
@@ -132,6 +140,11 @@ fn run(p: *mut iwl_probe.Probe, tr: *mut iwl_sbtrace.SbTrace, cq: *mut iwl_cmdq.
         if a == ALIVE_NONE { a = step(&c, iwl_rxexp_tab.X_INTX_OFF) }
         pci.cfg_write16(bdf, CFG_COMMAND, orig)
         if a != ALIVE_NONE { return a }
+        if c.msi.cap != 0 && msi_addr != 0 {
+            a = step(&c, iwl_rxexp_tab.X_MSI)
+            iwl_msi.msi_restore(&c.msi)
+            if a != ALIVE_NONE { return a }
+        }
     }
     a = step(&c, iwl_rxexp_tab.X_COAL)
     if a != ALIVE_NONE { return a }

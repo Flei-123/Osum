@@ -53,7 +53,7 @@ run() { # name image words
         -append "osum vfs $words script=sh /t/s.sh;exit" \
         -serial "file:$T/$n.txt" -display none -no-reboot \
         -drive "file=$T/$img.img,format=raw,if=ide,index=0" \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 ${RUNC_EXTRA:-} >/dev/null 2>&1
     tr -cd '\11\12\15\40-\176' < "$T/$n.txt" > "$T/$n.klar"
 }
 # the five `iwl: fh ...` summary lines of a run, prefix stripped
@@ -335,6 +335,15 @@ runc o1 "iwlfhtest iwlfhdead iwlfhexpwake"
 O1="$T/o1.klar"
 has "$O1" 'iwl: boot2 rxexp rows=4 alive=1' "exp2: ALIVE after the dram row stops the table (no wptr/nic/apm)"
 has "$O1" 'iwl: boot2 exp alive' "exp2: boot continues after the experiment ALIVE"
+has "$O1" 'phase=ready' "exp2: RT phase completes after the experiment ALIVE (phase=ready)"
+RUNC_EXTRA="-device edu" runc o3 "iwlfhtest iwlfhdead iwlfhmsi"
+O3="$T/o3.klar"
+has "$O3" 'fail_exp2=msi i=' "exp2: MSI row measured against the stand-in PCI device"
+grep -aEq 'iwl: boot2 msi c0x[0-9A-Fa-f]+ ctrl=(0x[0-9A-Fa-f]+)->0x[0-9A-Fa-f]*[13579BDFbdf]->\1 cmd=(0x[0-9A-Fa-f]+)->0x[0-9A-Fa-f]+->\2' "$O3" && ok "MSI: enable bit set while armed, control and command restored" || bad "MSI: arm/restore line wrong"
+hasnot "$M1" 'fail_exp2=msi' "exp2: no MSI row without the stand-in word"
+hasnot "$M1" 'iwl: boot2 msi' "exp2: no MSI serial line without the stand-in word"
+RUNC_EXTRA="-device edu" runc o4 "iwlfhtest iwlfhdead iwlfhmsi iwlnorxexp"
+hasnot "$T/o4.klar" 'fail_exp2=msi' "counter-proof iwlnorxexp: no MSI row"
 runc o2 "iwlfhtest iwlfhdead iwlfhexpwake iwlnorxexp"
 O2="$T/o2.klar"
 has "$O2" 'phase=failed' "counter-proof iwlnorxexp: without the table the boot fails"

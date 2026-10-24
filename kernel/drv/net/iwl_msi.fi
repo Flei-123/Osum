@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import bus.pci
+import serial
+
+export { Msi, msi_find, msi_arm, msi_restore, VECTOR }
+
+const VECTOR: u64 = 45
+const CFG_COMMAND: u64 = 0x04
+const CMD_INTX_DISABLE: u64 = 0x400
+const MSI_ENABLE: u64 = 0x1
+const MSI_MME_MASK: u64 = 0x70
+const MSI_64BIT: u64 = 0x80
+
+struct Msi {
+    bdf: u64,
+    cap: u64,
+    ctrl: u64,
+    cmd: u64
+}
+
+fn msi_find(bdf: u64) -> Msi {
+    var m: Msi = Msi { bdf: bdf, cap: 0, ctrl: 0, cmd: 0 }
+    if bdf == 0 { return m }
+    m.cap = pci.cap_find(bdf, pci.CAP_MSI)
+    if m.cap != 0 {
+        m.ctrl = pci.cfg_read16(bdf, m.cap + 2)
+        m.cmd = pci.cfg_read16(bdf, CFG_COMMAND)
+    }
+    return m
+}
+
+fn msi_arm(m: *mut Msi, addr: u64) {
+    let bdf: u64 = (*m).bdf
+    let cap: u64 = (*m).cap
+    pci.cfg_write32(bdf, cap + 4, addr)
+    if ((*m).ctrl & MSI_64BIT) != 0 {
+        pci.cfg_write32(bdf, cap + 8, 0)
+        pci.cfg_write16(bdf, cap + 12, VECTOR)
+    } else {
+        pci.cfg_write16(bdf, cap + 8, VECTOR)
+    }
+    pci.cfg_write16(bdf, cap + 2, ((*m).ctrl | MSI_ENABLE) & (0xFFFF ^ MSI_MME_MASK))
+    pci.cfg_write16(bdf, CFG_COMMAND, (*m).cmd | CMD_INTX_DISABLE)
+}
+
+fn msi_restore(m: *mut Msi) {
+    var s0: [u8; 17] = "iwl: boot2 msi c\0"
+    var s1: [u8; 7] = " ctrl=\0"
+    var s2: [u8; 3] = "->\0"
+    var s3: [u8; 6] = " cmd=\0"
+    let armed: u64 = pci.cfg_read16((*m).bdf, (*m).cap + 2)
+    pci.cfg_write16((*m).bdf, (*m).cap + 2, (*m).ctrl)
+    pci.cfg_write16((*m).bdf, CFG_COMMAND, (*m).cmd)
+    serial.puts((&s0[0]) as u64)
+    serial.hex((*m).cap)
+    serial.puts((&s1[0]) as u64)
+    serial.hex((*m).ctrl)
+    serial.puts((&s2[0]) as u64)
+    serial.hex(armed)
+    serial.puts((&s2[0]) as u64)
+    serial.hex(pci.cfg_read16((*m).bdf, (*m).cap + 2))
+    serial.puts((&s3[0]) as u64)
+    serial.hex((*m).cmd)
+    serial.puts((&s2[0]) as u64)
+    serial.hex(pci.cfg_read16((*m).bdf, CFG_COMMAND))
+    serial.nl()
+}

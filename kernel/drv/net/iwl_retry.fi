@@ -12,9 +12,11 @@ import wlan.iwl_rxexp_tab
 import drv.net.iwl_cq
 import drv.net.iwl_rxexp
 import lib.kstate
+import arch.x86_64.apic
 
 export { run }
 
+const EDU_VENDOR: u64 = 0x1234
 const SHORT_WAIT_MS: u64 = 1000
 const LONG_WAIT_MS: u64 = 10000
 const PAUSE_MS: u64 = 500
@@ -50,11 +52,23 @@ fn attempt(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64
     return r
 }
 
+fn msi_standin(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < pci.count(state) {
+        if pci.get(state, i, pci.E_MSI) != 0 && pci.get(state, i, pci.E_VENDOR) == EDU_VENDOR { return pci.get(state, i, pci.E_BDF) }
+        i = i + 1
+    }
+    return 0
+}
+
 fn rx_stage(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, cq: *mut iwl_cmdq.Cq, tr: *mut iwl_sbtrace.SbTrace, bdf: u64,
             xt: *mut iwl_rxexp_tab.Tab) -> u64 {
     if kstate.mode_on(state, kstate.M_IWLNORXEXP) { return iwl_rxexp.ALIVE_NONE }
     let rx_stop: bool = !kstate.mode_on(state, kstate.M_IWLNORAW)
-    return iwl_rxexp.run(p, tr, cq, bdf, (*f).phy_sku, rx_stop, xt)
+    var target: u64 = bdf
+    if target == 0 && kstate.mode_on(state, kstate.M_IWLFHMSI) { target = msi_standin(state) }
+    let addr: u64 = apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12)
+    return iwl_rxexp.run(p, tr, cq, target, (*f).phy_sku, rx_stop, xt, addr)
 }
 
 fn run(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64,
