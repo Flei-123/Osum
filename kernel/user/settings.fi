@@ -949,6 +949,8 @@ static mut k_tp_pinch: [u8; 24] = "settings.touchpad.pinch\0"
 static mut k_tp_speed: [u8; 24] = "settings.touchpad.speed\0"
 static mut k_tp_sw3: [u8; 22] = "settings.touchpad.sw3\0"
 static mut k_tp_sw4: [u8; 22] = "settings.touchpad.sw4\0"
+static mut k_tp_typing: [u8; 25] = "settings.touchpad.typing\0"
+static mut k_tp_on: [u8; 21] = "settings.touchpad.on\0"
 static mut k_tp_saved: [u8; 24] = "settings.touchpad.saved\0"
 static mut k_tp_nobus: [u8; 24] = "settings.touchpad.nobus\0"
 static mut k_ms_title: [u8; 21] = "settings.mouse.title\0"
@@ -4732,6 +4734,8 @@ fn bus_rects() {
         var t9: [u8; 6] = "tpspd\0"
         var ta: [u8; 6] = "tpsw3\0"
         var tb: [u8; 6] = "tpsw4\0"
+        var tc: [u8; 6] = "tptyp\0"
+        var td: [u8; 5] = "tpon\0"
         rect_say((&t1[0 as usize]) as u64, K_TP_TAP)
         rect_say((&t2[0 as usize]) as u64, K_TP_TAP2)
         rect_say((&t3[0 as usize]) as u64, K_TP_DRAG)
@@ -4743,6 +4747,8 @@ fn bus_rects() {
         rect_say((&t9[0 as usize]) as u64, K_TP_SPD)
         rect_say((&ta[0 as usize]) as u64, K_TP_SW3)
         rect_say((&tb[0 as usize]) as u64, K_TP_SW4)
+        rect_say((&tc[0 as usize]) as u64, K_TP_TYP)
+        rect_say((&td[0 as usize]) as u64, K_TP_ON)
     }
     if reiter == R_KONTO {
         // r126: the two device-flow buttons, so a runner can click them
@@ -6296,6 +6302,8 @@ const K_TP_PINCH: u64 = 147 // W-TPSET3: touchpad page
 const K_TP_SPD: u64 = 148 // W-TPSET3: touchpad page
 const K_TP_SW3: u64 = 149 // W-TPSET3: touchpad page
 const K_TP_SW4: u64 = 150 // W-TPSET3: touchpad page
+const K_TP_TYP: u64 = 151 // touchpad page: ignore the pad while typing
+const K_TP_ON: u64 = 152 // touchpad page: touchpad on/off
 const K_SND_BAR: u64 = 138 // TK-2: the info bar that says there is no sound device
 const K_MS_MON: u64 = 123 // MON: developer overlay toggle (schema key debug.mon, /etc/mouse.conf mon=)
 const K_MS_FPS: u64 = 122 // FPS-OV: frame-rate overlay toggle (schema key debug.fps, /etc/mouse.conf fps=)
@@ -7540,9 +7548,10 @@ fn page_sound(left: usize, right: usize) {
 // The eleven values live in /etc/touchpad.conf (schema keys touchpad.*, `store` lines); the kernel (drv/hid/tpcfg.fi)
 // reloads that file within about a second. The page writes through the action bus (settingsd stores the file);
 // without a bus it writes the file itself. Position i of the tables = option number tp_opt(i) of tpcfg.
-static mut tp_v: [u64; 11] = [1, 1, 1, 1, 0, 1, 1, 1, 100, 1, 1]
-static mut tp_fk: [u8; 100] = "\ntap=\0\ntap2=\0\ndrag=\0\ncorner=\0\nnatural=\0\nscroll=\0\nmomentum=\0\npinch=\0\nscrollspeed=\0\nswipe3=\0\nswipe4=\0\0"
-static mut tp_bk: [u8; 177] = "touchpad.tap\0touchpad.tap2\0touchpad.drag\0touchpad.corner\0touchpad.natural\0touchpad.scroll\0touchpad.momentum\0touchpad.pinch\0touchpad.scrollspeed\0touchpad.swipe3\0touchpad.swipe4\0\0"
+const TP_N: u64 = 13
+static mut tp_v: [u64; 13] = [1, 1, 1, 1, 0, 1, 1, 1, 100, 1, 1, 1, 1]
+static mut tp_fk: [u8; 119] = "\ntap=\0\ntap2=\0\ndrag=\0\ncorner=\0\nnatural=\0\nscroll=\0\nmomentum=\0\npinch=\0\nscrollspeed=\0\nswipe3=\0\nswipe4=\0\ntyping=\0\nenabled=\0\0"
+static mut tp_bk: [u8; 210] = "touchpad.tap\0touchpad.tap2\0touchpad.drag\0touchpad.corner\0touchpad.natural\0touchpad.scroll\0touchpad.momentum\0touchpad.pinch\0touchpad.scrollspeed\0touchpad.swipe3\0touchpad.swipe4\0touchpad.typing\0touchpad.enabled\0\0"
 static mut tp_conf: [u8; 19] = "/etc/touchpad.conf\0"
 static mut tp_buf: [u8; 320] = [0 as u8; 320]
 
@@ -7560,6 +7569,10 @@ fn tp_nth(base: u64, n: u64) -> u64 {
     return p
 }
 
+fn tp_numeric(i: u64) -> bool {
+    return i >= 8 && i <= 10
+}
+
 fn tp_clamp() {
     var i: u64 = 0
     while i < 8 {
@@ -7567,6 +7580,12 @@ fn tp_clamp() {
             tp_v[(i) as usize] = 1
         }
         i = i + 1
+    }
+    if tp_v[11] > 1 {
+        tp_v[11] = 1
+    }
+    if tp_v[12] > 1 {
+        tp_v[12] = 1
     }
     if tp_v[8] < 10 {
         tp_v[8] = 10
@@ -7585,7 +7604,7 @@ fn tp_clamp() {
 fn tp_load() {
     var i: u64 = 0
     // defaults = Windows 11 (the same as tpcfg.def_of)
-    while i < 11 {
+    while i < TP_N {
         tp_v[(i) as usize] = 1
         i = i + 1
     }
@@ -7602,11 +7621,11 @@ fn tp_load() {
         if !ulib.bad(n) && n > 0 {
             __mmio_write8((b + 1 + n) as *mut u8, 0 as u8)
             i = 0
-            while i < 11 {
+            while i < TP_N {
                 let at: u64 = ulib.find(b, tp_nth((&tp_fk[0 as usize]) as u64, i))
                 if at != 0xFFFFFFFFFFFFFFFF {
                     let v: u64 = b + at + ulib.length(tp_nth((&tp_fk[0 as usize]) as u64, i))
-                    if i >= 8 {
+                    if tp_numeric(i) {
                         tp_v[(i) as usize] = ulib.to_num(v)
                     } else if rb(v, 0) == 116 || rb(v, 0) == 49 {
                         tp_v[(i) as usize] = 1
@@ -7630,10 +7649,10 @@ fn tp_file_write() -> bool {
     let b: u64 = (&tp_buf[0 as usize]) as u64
     ulib.strcpy(b, (&h[0 as usize]) as u64)
     var i: u64 = 0
-    while i < 11 {
+    while i < TP_N {
         // file key without its leading newline
         ulib.strcat(b, tp_nth((&tp_fk[0 as usize]) as u64, i) + 1)
-        if i >= 8 {
+        if tp_numeric(i) {
             let d: u64 = ulib.digits(tp_v[(i) as usize], (&z[0 as usize]) as u64)
             z[(d) as usize] = 0 as u8
             ulib.strcat(b, (&z[0 as usize]) as u64)
@@ -7661,9 +7680,9 @@ fn tp_say_state(i: u64, ok: bool) {
     var s_ok: [u8; 5] = " ok=\0"
     say((&s_tp[0 as usize]) as u64)
     var j: u64 = 0
-    while j < 11 {
+    while j < TP_N {
         sayn(tp_v[(j) as usize])
-        if j < 10 {
+        if j + 1 < TP_N {
             var sp: [u8; 2] = ",\0"
             say((&sp[0 as usize]) as u64)
         }
@@ -7709,6 +7728,8 @@ fn tp_index(id: u64) -> u64 {
     if id == K_TP_MOM { return 6 }
     if id == K_TP_PINCH { return 7 }
     if id == K_TP_SW3 { return 9 }
+    if id == K_TP_TYP { return 11 }
+    if id == K_TP_ON { return 12 }
     return 10
 }
 
@@ -7730,6 +7751,7 @@ fn tp_slider() {
 
 fn page_touchpad(left: usize, right: usize) {
     let _n_tp: usize = fuiscene.label(left, msg.get((&k_tp_note[0 as usize]) as u64))
+    let _n_on: usize = fuiscene.toggle(left, msg.get((&k_tp_on[0 as usize]) as u64), K_TP_ON, (tp_v[12] != 0))
     let _n_tap: usize = fuiscene.toggle(left, msg.get((&k_tp_tap[0 as usize]) as u64), K_TP_TAP, (tp_v[0] != 0))
     let _n_tap2: usize = fuiscene.toggle(left, msg.get((&k_tp_tap2[0 as usize]) as u64), K_TP_TAP2, (tp_v[1] != 0))
     let _n_drag: usize = fuiscene.toggle(left, msg.get((&k_tp_drag[0 as usize]) as u64), K_TP_DRAG, (tp_v[2] != 0))
@@ -7745,6 +7767,7 @@ fn page_touchpad(left: usize, right: usize) {
     let _n_pin: usize = fuiscene.toggle(left, msg.get((&k_tp_pinch[0 as usize]) as u64), K_TP_PINCH, (tp_v[7] != 0))
     let _n_sw3: usize = fuiscene.toggle(left, msg.get((&k_tp_sw3[0 as usize]) as u64), K_TP_SW3, (tp_v[9] != 0))
     let _n_sw4: usize = fuiscene.toggle(left, msg.get((&k_tp_sw4[0 as usize]) as u64), K_TP_SW4, (tp_v[10] != 0))
+    let _n_typ: usize = fuiscene.toggle(left, msg.get((&k_tp_typing[0 as usize]) as u64), K_TP_TYP, (tp_v[11] != 0))
 }
 
 // ============================================ ROUND R783 (L-007c): page Energie
@@ -11769,7 +11792,7 @@ fn u_start(args: u64) -> u64 {
                 sound_slider()
             } else if kind == wlib.K_SLIDER && id == K_TP_SPD {
                 tp_slider()
-            } else if kind == wlib.K_BUTTON && id >= K_TP_TAP && id <= K_TP_SW4 && id != K_TP_SPD {
+            } else if kind == wlib.K_BUTTON && id >= K_TP_TAP && id <= K_TP_ON && id != K_TP_SPD {
                 tp_toggle(id)
             } else if kind == wlib.K_BUTTON && id == K_SND_MUTE {
                 sound_toggle_mute()

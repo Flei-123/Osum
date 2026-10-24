@@ -5,10 +5,10 @@ import re, sys
 serial = sys.argv[1]
 raw = open(serial, "rb").read().decode("latin1")
 CTL = re.compile(r"^settings: controls page=(\d+) n=(\d+)$", re.M)
-TP = re.compile(r"^settings: touchpad ((?:\d+,){10}\d+) i=(\d+) ok=(\d)", re.M)
+TP = re.compile(r"^settings: touchpad ((?:\d+,){12}\d+) i=(\d+) ok=(\d)", re.M)
 RECT = re.compile(r"settings: rect name=(\w+) ")
 PAGE = 30
-NAMES = ("tptap", "tptap2", "tpdrag", "tpcorner", "tpnat", "tpscroll", "tpmom", "tppinch", "tpspd", "tpsw3", "tpsw4")
+NAMES = ("tptap", "tptap2", "tpdrag", "tpcorner", "tpnat", "tpscroll", "tpmom", "tppinch", "tpspd", "tpsw3", "tpsw4", "tptyp", "tpon")
 
 
 def rows(txt):
@@ -23,7 +23,7 @@ def judge(txt):
 
     ctl = [int(m.group(2)) for m in CTL.finditer(txt) if int(m.group(1)) == PAGE]
     ok(ctl, "Touchpad page built (page=30)")
-    ok(ctl and max(ctl) == 11, "Touchpad page has 11 controls (%s)" % ctl)
+    ok(ctl and max(ctl) == 13, "Touchpad page has 13 controls (%s)" % ctl)
     names = set(RECT.findall(txt))
     for n in NAMES:
         ok(n in names, "control rect %s reported" % n)
@@ -40,7 +40,7 @@ def judge(txt):
     ok(r and r[-1][0][0] == 0 and r[-1][0][4] == 1 and r[-1][0][9] == 0,
        "last line carries all four changes together (%s)" % (r[-1:],))
     ok(r and all(o == 1 for _, _, o in r), "every change stored (ok=1: bus or file)")
-    ok(r and all(len(v) == 11 and all(x >= 0 for x in v) for v, _, _ in r), "eleven sane values per line")
+    ok(r and all(len(v) == 13 and all(x >= 0 for x in v) for v, _, _ in r), "thirteen sane values per line")
     ok(r and all(x in (0, 1) for v, _, _ in r for x in v[:8]), "toggles are 0 or 1")
     ok(not re.search(r"ABSTURZ|EXCEPTION", txt), "no crash lines")
     return res

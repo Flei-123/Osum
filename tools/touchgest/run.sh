@@ -91,6 +91,8 @@ mutate() { # name sed-expression [oracle]
 mutate notapwindow 's/dur <= d_tapms\[d\]/dur <= 100000/'
 mutate nopalmsize  's/if d_palm\[d\] != 0 \&\& size >= d_palm\[d\] {/if false {/'
 mutate notyping    's/f_now - d_last_key\[d\] < TYPING_MS/f_now < 0/'
+mutate notypingopt 's/if get_opt(dev, O_TYPING) != 0 \&\& d_have_key/if d_have_key/'
+mutate noenabled  's/if get_opt(f_dev, O_ENABLED) == 0 { return }//'
 mutate noslop      's/if absv(x - c_lx\[k\]) + absv(y - c_ly\[k\]) > sl2 {/if absv(x - c_lx[k]) + absv(y - c_ly[k]) > 0 {/'
 mutate nopinch     's/if dd > tr {/if false {/'
 mutate swipeagain  's/if d_fired\[d\] == 0 {/if true {/'

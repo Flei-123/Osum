@@ -1442,7 +1442,7 @@ ARGS+=("/etc/time.conf=$OUT/time.conf" "/etc/ntp.conf=$OUT/ntp.conf")
 printf '# /etc/mouse.conf -- written by settingsd (keys mouse.*)\nspeed=100\naccel=0\nnatural=false\ngestures=true\n' > "$OUT/mouse.conf"
 # W-TPSET2: touchpad defaults like Windows 11 (tap on, two-finger tap = right click, tap-and-drag on, corner off,
 # "down motion scrolls down", momentum on, pinch on, three/four finger swipe = apps + desktop). settingsd rewrites it.
-printf '# /etc/touchpad.conf -- written by settingsd (keys touchpad.*)\ntap=true\ntap2=true\ndrag=true\ncorner=true\nnatural=false\nscrollspeed=100\nmomentum=true\npinch=true\nscroll=true\nswipe3=1\nswipe4=1\n' > "$OUT/touchpad.conf"
+printf '# /etc/touchpad.conf -- written by settingsd (keys touchpad.*)\ntap=true\ntap2=true\ndrag=true\ncorner=true\nnatural=false\nscrollspeed=100\nmomentum=true\npinch=true\nscroll=true\nswipe3=1\nswipe4=1\ntyping=true\nenabled=true\n' > "$OUT/touchpad.conf"
 printf '# /etc/power.conf -- written by settingsd (keys power.*), read by powerd\nlid_bat=sleep\nlid_ac=sleep\nscreen_bat=300\nscreen_ac=600\nstandby_bat=900\nstandby_ac=0\nprofile_bat=save\nprofile_ac=balanced\n' > "$OUT/power.conf"
 ARGS+=("/etc/mouse.conf=$OUT/mouse.conf" "/etc/touchpad.conf=$OUT/touchpad.conf" "/etc/power.conf=$OUT/power.conf")
 # REMOTE INPUT (click/type through the bridge) MUST NEVER BE ON IN A PUBLIC
