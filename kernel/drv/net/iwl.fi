@@ -51,6 +51,8 @@ import wlan.iwl_fh8000
 import wlan.iwl_pin
 import crypto.sha256
 import drv.net.iwl_fake
+import drv.net.iwl_cq
+import wlan.iwl_cmdq
 import mm.mem
 import fs.vfs
 import fs.vfsops
@@ -486,7 +488,7 @@ fn b2_line(tag: u64, r: i64) {
     serial.nl()
 }
 
-fn b2_phase(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64, tl: u64, ta: u64) -> i64 {
+fn b2_phase(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64, tl: u64, ta: u64, cq: *mut iwl_cmdq.Cq, scratch: u64) -> i64 {
     var s_by: [u8; 8] = " bytes=\0"
     var st: iwl_fh8000.FhStat = iwl_fh8000.fhstat_new()
     var r: i64 = iwl_fh8000.fh_load(p, f, blob, img, bounce, bounce, bsize, &st)
@@ -502,10 +504,13 @@ fn b2_phase(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usiz
     }
     r = iwl_alive.alive_wait(p)
     b2_line(ta, r)
+    if r == 0 {
+        let _sa: i64 = iwl_cq.cq_stage_alive(0, cq, p, scratch)
+    }
     return r
 }
 
-fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, bounce_in: u64) -> i64 {
+fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, bounce_in: u64, cq: *mut iwl_cmdq.Cq) -> i64 {
     var t_il: [u8; 22] = "iwl: boot2 init load \0"
     var t_ia: [u8; 11] = "init alive\0"
     var t_rl: [u8; 21] = "iwl: boot2 rt load \0\0"
@@ -523,6 +528,7 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
         return E_FW_MEM
     }
     let bsize: u64 = FH_BOUNCE_FRAMES * 4096
+    let scratch: u64 = dma_pages(state, 1)
     if iwl_fw.fw_sec_count(f, iwl_fw.IMG_INIT) == 0 {
         b2_line((&t_no[0]) as u64, E_FW_IMAGE)
         return E_FW_IMAGE
@@ -533,7 +539,8 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
         iwl_pwr.int_disable(p)
         return r
     }
-    r = b2_phase(p, f, blob, iwl_fw.IMG_INIT, bounce, bsize, (&t_il[0]) as u64, (&t_ia[0]) as u64)
+    let _i1: i64 = iwl_cq.cq_stage_init(state, cq, p)
+    r = b2_phase(p, f, blob, iwl_fw.IMG_INIT, bounce, bsize, (&t_il[0]) as u64, (&t_ia[0]) as u64, cq, scratch)
     if r != 0 {
         iwl_pwr.int_disable(p)
         return r
@@ -552,7 +559,8 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
         iwl_pwr.int_disable(p)
         return r
     }
-    r = b2_phase(p, f, blob, iwl_fw.IMG_RT, bounce, bsize, (&t_rl[0]) as u64, (&t_ra[0]) as u64)
+    let _i2: i64 = iwl_cq.cq_stage_init(state, cq, p)
+    r = b2_phase(p, f, blob, iwl_fw.IMG_RT, bounce, bsize, (&t_rl[0]) as u64, (&t_ra[0]) as u64, cq, scratch)
     if r != 0 {
         iwl_pwr.int_disable(p)
     }
@@ -641,7 +649,11 @@ fn fh8000_fake2(state: u64, blob: u64, f: *mut iwl_fw.FwInfo, mode: u64, win: u6
     iwl_fake.fake_init(region, sram, mode, w2, FH_BOUNCE_FRAMES * 4096)
     var p: iwl_probe.Probe = iwl_probe.probe_new()
     iwl_probe.mmio_set(&p, region, iwl_fake.fake_rd, iwl_fake.fake_wr)
-    let r: i64 = fh8000_phases(state, &p, f, blob, bnc)
+    var cq: iwl_cmdq.Cq = iwl_cmdq.cq_new()
+    let r: i64 = fh8000_phases(state, &p, f, blob, bnc, &cq)
+    if r == 0 && cq.tx_on != 0 {
+        iwl_cq.cq_selftest(state, &cq, &p, region)
+    }
     serial.puts((&s_sum[0]) as u64)
     serial.puts((&s_ph[0]) as u64)
     serial.dec(iwl_fake.fake_phase(region))
@@ -662,7 +674,8 @@ fn fh8000_fake2(state: u64, blob: u64, f: *mut iwl_fw.FwInfo, mode: u64, win: u6
 // Writes device registers; NOT MEASURED on silicon (HP-9c).
 fn fh8000_boot(state: u64, p: *mut iwl_probe.Probe, blob: u64, f: *mut iwl_fw.FwInfo) -> i64 {
     iwl_probe.mmio_set(p, (*p).ctx, rd, wr_real)
-    return fh8000_phases(state, p, f, blob, 0)
+    var cq: iwl_cmdq.Cq = iwl_cmdq.cq_new()
+    return fh8000_phases(state, p, f, blob, 0, &cq)
 }
 
 // After the filesystem is mounted: firmware lookup for every target (read-only), or for a synthetic AX201 with the

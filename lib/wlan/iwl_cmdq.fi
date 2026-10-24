@@ -1,0 +1,303 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_probe
+import wlan.iwl_pwr
+import wlan.iwl_g1
+import wlan.iwl_le
+
+export {
+    Cq, cq_new, cq_attach, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, cq_resp_status, cq_reset,
+    CQ_RB_SIZE, CQ_RB_COUNT, CQ_TFD_SIZE, CQ_TFD_COUNT, CQ_SLOT_SIZE, CQ_SLOTS, CQ_NOTIF_SLOT, CQ_NOTIF_SLOTS,
+    CQ_WAIT_CMD, CQ_WAIT_NOTIF, ALIVE_SCD_OFF, ALIVE_PKT_MIN,
+    E_CQ_TIMEOUT, E_CQ_BIG, E_CQ_NORX, E_CQ_NOTX, E_CQ_FULL, E_CQ_PROG, E_CQ_SHORT
+}
+
+const CQ_RB_SIZE: u64 = 4096
+const CQ_RB_COUNT: u64 = 256
+const CQ_TFD_SIZE: u64 = 128
+const CQ_TFD_COUNT: u64 = 256
+const CQ_SLOT_SIZE: u64 = 2048
+const CQ_SLOTS: u64 = 8
+const CQ_NOTIF_SLOT: u64 = 1024
+const CQ_NOTIF_SLOTS: u64 = 8
+const CQ_WAIT_CMD: u64 = 2000000
+const CQ_WAIT_NOTIF: u64 = 4000000
+
+const CMD_ALIVE: u64 = 0x01
+const FIRST_TB: u64 = 20
+const SEQ_RX_FRAME: u64 = 0x8000
+const FRAME_INVALID: u64 = 0x55550000
+const FRAME_SIZE_MSK: u64 = 0x3FFF
+const FRAME_ALIGN: u64 = 64
+const RX_MASK: u64 = 255
+const CMD_QUEUE: u64 = 0
+const ALIVE_SCD_OFF: u64 = 40
+const ALIVE_PKT_MIN: u64 = 44
+
+const E_CQ_TIMEOUT: i64 = -70
+const E_CQ_BIG: i64 = -71
+const E_CQ_NORX: i64 = -72
+const E_CQ_NOTX: i64 = -73
+const E_CQ_FULL: i64 = -74
+const E_CQ_PROG: i64 = -75
+const E_CQ_SHORT: i64 = -76
+
+struct Cq {
+    rx_bd: u64,
+    rx_stts: u64,
+    rb: u64,
+    tfd: u64,
+    cmdbuf: u64,
+    kw: u64,
+    bc: u64,
+    notif: u64,
+    wr: u64,
+    rd: u64,
+    rxr: u64,
+    rx_wptr: u64,
+    rx_on: u64,
+    tx_on: u64,
+    nh: u64,
+    nt: u64,
+    scd: u64,
+    dropped: u64,
+    matched: u64
+}
+
+fn cq_new() -> Cq {
+    var c: Cq = Cq { rx_bd: 0, rx_stts: 0, rb: 0, tfd: 0, cmdbuf: 0, kw: 0, bc: 0, notif: 0, wr: 0, rd: 0, rxr: 0, rx_wptr: 0,
+        rx_on: 0, tx_on: 0, nh: 0, nt: 0, scd: 0, dropped: 0, matched: 0 }
+    return c
+}
+
+fn cq_attach(c: *mut Cq, rx_bd: u64, rx_stts: u64, rb: u64, tfd: u64, cmdbuf: u64, kw: u64, bc: u64, notif: u64) {
+    (*c).rx_bd = rx_bd
+    (*c).rx_stts = rx_stts
+    (*c).rb = rb
+    (*c).tfd = tfd
+    (*c).cmdbuf = cmdbuf
+    (*c).kw = kw
+    (*c).bc = bc
+    (*c).notif = notif
+}
+
+fn cq_reset(c: *mut Cq) {
+    (*c).wr = 0
+    (*c).rd = 0
+    (*c).rxr = 0
+    (*c).rx_wptr = 0
+    (*c).rx_on = 0
+    (*c).tx_on = 0
+    (*c).nh = 0
+    (*c).nt = 0
+    (*c).scd = 0
+    (*c).dropped = 0
+    (*c).matched = 0
+}
+
+fn rb_addr(c: *mut Cq, i: u64) -> u64 { return (*c).rb + (i & RX_MASK) * CQ_RB_SIZE }
+
+fn cq_nic_init(c: *mut Cq, p: *mut iwl_probe.Probe) -> i64 {
+    cq_reset(c)
+    iwl_le.zero((*c).rx_stts, 16)
+    iwl_le.zero((*c).tfd, CQ_TFD_COUNT * CQ_TFD_SIZE)
+    var i: u64 = 0
+    while i < CQ_RB_COUNT {
+        iwl_g1.rx_bd_put((*c).rx_bd, i, rb_addr(c, i))
+        i = i + 1
+    }
+    (*c).rx_wptr = (CQ_RB_COUNT - 1) & 0xFFF8
+    var g: iwl_g1.Prog = iwl_g1.prog_new()
+    var ok: bool = iwl_g1.prog_rx_init(&g, (*c).rx_bd, (*c).rx_stts)
+    ok = ok && iwl_g1.prog_rx_wptr(&g, (*c).rx_wptr)
+    ok = ok && iwl_g1.prog_tx_cmd_init(&g, (*c).kw, (*c).tfd, CMD_QUEUE)
+    if !ok { return E_CQ_PROG }
+    let r: i64 = iwl_g1.prog_run(p, &g)
+    if r != 0 { return r }
+    (*c).rx_on = 1
+    return 0
+}
+
+fn cq_fw_alive(c: *mut Cq, p: *mut iwl_probe.Probe, scd_base: u64) -> i64 {
+    if (*c).rx_on == 0 { return E_CQ_NORX }
+    var g: iwl_g1.Prog = iwl_g1.prog_new()
+    var ok: bool = iwl_g1.prog_scd_init(&g, (*c).bc)
+    ok = ok && iwl_g1.prog_txq_enable(&g, scd_base, CMD_QUEUE, iwl_g1.SCD_FIFO_CMD)
+    if !ok { return E_CQ_PROG }
+    let r: i64 = iwl_g1.prog_run(p, &g)
+    if r != 0 { return r }
+    (*c).scd = scd_base
+    (*c).wr = 0
+    (*c).rd = 0
+    (*c).tx_on = 1
+    return 0
+}
+
+fn restock(c: *mut Cq, p: *mut iwl_probe.Probe, held: bool) {
+    let target: u64 = ((*c).rxr + RX_MASK) & RX_MASK & 0xFFF8
+    if target == (*c).rx_wptr { return }
+    (*c).rx_wptr = target
+    if !held {
+        if iwl_pwr.mac_access_get(p) != 0 { return }
+    }
+    iwl_pwr.wr(p, iwl_g1.FH_RSCSR_RBDCB_WPTR, target)
+    if !held { iwl_pwr.mac_access_put(p) }
+}
+
+fn stash(c: *mut Cq, pkt: u64, len: u64) {
+    if (*c).nh - (*c).nt >= CQ_NOTIF_SLOTS {
+        (*c).dropped = (*c).dropped + 1
+        return
+    }
+    let s: u64 = (*c).notif + ((*c).nh % CQ_NOTIF_SLOTS) * CQ_NOTIF_SLOT
+    var n: u64 = len
+    if n > CQ_NOTIF_SLOT - 4 { n = CQ_NOTIF_SLOT - 4 }
+    iwl_le.st32(s, 0, len)
+    iwl_le.copy(s + 4, pkt, n)
+    (*c).nh = (*c).nh + 1
+}
+
+fn handle_pkt(c: *mut Cq, pkt: u64, len: u64, want_cmd: u64, want_idx: u64, resp: u64, cap: u64) -> bool {
+    let seq: u64 = iwl_le.ld16(pkt, 2)
+    if (seq & SEQ_RX_FRAME) == 0 && ((seq >> 8) & 0x1F) == CMD_QUEUE && (*c).wr != (*c).rd {
+        let idx: u64 = seq & 0xFF
+        (*c).rd = (*c).rd + ((idx + 257 - ((*c).rd & 0xFF)) & 0xFF)
+        if iwl_le.ld8(pkt, 0) == want_cmd && idx == want_idx && (*c).matched == 0 {
+            (*c).matched = len + 1
+            if resp != 0 {
+                var n: u64 = len
+                if n > cap { n = cap }
+                iwl_le.copy(resp, pkt, n)
+            }
+            return true
+        }
+        return false
+    }
+    stash(c, pkt, len)
+    return false
+}
+
+fn drain(c: *mut Cq, p: *mut iwl_probe.Probe, held: bool, want_cmd: u64, want_idx: u64, resp: u64, cap: u64) -> bool {
+    var hit: bool = false
+    let closed: u64 = iwl_g1.rx_status_closed((*c).rx_stts) & RX_MASK
+    while (*c).rxr != closed {
+        let rb: u64 = rb_addr(c, (*c).rxr)
+        var off: u64 = 0
+        var more: bool = true
+        while more && off + 8 <= CQ_RB_SIZE {
+            let lnf: u64 = iwl_le.ld32(rb, off)
+            let plen: u64 = lnf & FRAME_SIZE_MSK
+            if lnf == FRAME_INVALID || plen < 4 || off + 4 + plen > CQ_RB_SIZE {
+                more = false
+            } else {
+                if handle_pkt(c, rb + off + 4, plen, want_cmd, want_idx, resp, cap) { hit = true }
+                off = off + ((plen + 4 + FRAME_ALIGN - 1) / FRAME_ALIGN) * FRAME_ALIGN
+            }
+        }
+        iwl_le.zero(rb, off + 8)
+        (*c).rxr = ((*c).rxr + 1) & RX_MASK
+    }
+    restock(c, p, held)
+    return hit
+}
+
+fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, cap: u64) -> i64 {
+    if (*c).rx_on == 0 { return E_CQ_NORX }
+    if (*c).tx_on == 0 { return E_CQ_NOTX }
+    if len < 4 || len > CQ_SLOT_SIZE { return E_CQ_BIG }
+    if (*c).wr - (*c).rd >= CQ_TFD_COUNT - 6 { return E_CQ_FULL }
+    let idx: u64 = (*c).wr & 0xFF
+    let slot: u64 = (*c).cmdbuf + (idx % CQ_SLOTS) * CQ_SLOT_SIZE
+    iwl_le.copy(slot, buf, len)
+    iwl_le.st16(slot, 2, (CMD_QUEUE << 8) | idx)
+    let cmd: u64 = iwl_le.ld8(slot, 0)
+    let t: u64 = (*c).tfd + idx * CQ_TFD_SIZE
+    iwl_le.zero(t, CQ_TFD_SIZE)
+    var n0: u64 = len
+    if n0 > FIRST_TB { n0 = FIRST_TB }
+    var ntb: u64 = 1
+    iwl_le.st32(t, 4, slot)
+    iwl_le.st16(t, 8, ((slot >> 32) & 0xF) | (n0 << 4))
+    if len > FIRST_TB {
+        ntb = 2
+        iwl_le.st32(t, 10, slot + FIRST_TB)
+        iwl_le.st16(t, 14, (((slot + FIRST_TB) >> 32) & 0xF) | ((len - FIRST_TB) << 4))
+    }
+    iwl_le.st8(t, 3, ntb)
+    (*c).matched = 0
+    (*c).wr = (*c).wr + 1
+    if iwl_pwr.mac_access_get(p) != 0 {
+        (*c).wr = (*c).wr - 1
+        return iwl_pwr.E_PWR_ACCESS
+    }
+    iwl_pwr.wr(p, iwl_g1.HBUS_TARG_WRPTR, ((*c).wr & 0xFF) | (CMD_QUEUE << 8))
+    var i: u64 = 0
+    var done: bool = false
+    while i < CQ_WAIT_CMD && !done {
+        if drain(c, p, true, cmd, idx, resp, cap) { done = true }
+        if !done {
+            let _d: u64 = iwl_pwr.rd(p, iwl_probe.CSR_INT)
+        }
+        i = i + 1
+    }
+    iwl_pwr.mac_access_put(p)
+    if !done { return E_CQ_TIMEOUT }
+    return ((*c).matched - 1) as i64
+}
+
+fn pop_to(c: *mut Cq, j: u64, out: u64, cap: u64) -> i64 {
+    let s: u64 = (*c).notif + (j % CQ_NOTIF_SLOTS) * CQ_NOTIF_SLOT
+    let full: u64 = iwl_le.ld32(s, 0)
+    var n: u64 = full
+    if n > CQ_NOTIF_SLOT - 4 { n = CQ_NOTIF_SLOT - 4 }
+    if n > cap { n = cap }
+    iwl_le.copy(out, s + 4, n)
+    var k: u64 = j
+    while k + 1 < (*c).nh {
+        iwl_le.copy((*c).notif + (k % CQ_NOTIF_SLOTS) * CQ_NOTIF_SLOT, (*c).notif + ((k + 1) % CQ_NOTIF_SLOTS) * CQ_NOTIF_SLOT, CQ_NOTIF_SLOT)
+        k = k + 1
+    }
+    (*c).nh = (*c).nh - 1
+    return n as i64
+}
+
+fn cq_poll(c: *mut Cq, p: *mut iwl_probe.Probe, out: u64, cap: u64) -> i64 {
+    if (*c).rx_on == 0 { return E_CQ_NORX }
+    let _h: bool = drain(c, p, false, 0xFFFF, 0xFFFF, 0, 0)
+    if (*c).nh == (*c).nt { return 0 }
+    return pop_to(c, (*c).nt, out, cap)
+}
+
+fn find_cmd(c: *mut Cq, cmd: u64) -> i64 {
+    var j: u64 = (*c).nt
+    while j < (*c).nh {
+        let s: u64 = (*c).notif + (j % CQ_NOTIF_SLOTS) * CQ_NOTIF_SLOT
+        if iwl_le.ld8(s, 4) == cmd { return j as i64 }
+        j = j + 1
+    }
+    return 0 - 1
+}
+
+fn cq_wait(c: *mut Cq, p: *mut iwl_probe.Probe, cmd: u64, out: u64, cap: u64, budget: u64) -> i64 {
+    if (*c).rx_on == 0 { return E_CQ_NORX }
+    var i: u64 = 0
+    while i < budget {
+        let _h: bool = drain(c, p, false, 0xFFFF, 0xFFFF, 0, 0)
+        let j: i64 = find_cmd(c, cmd)
+        if j >= 0 { return pop_to(c, j as u64, out, cap) }
+        let _d: u64 = iwl_pwr.rd(p, iwl_probe.CSR_INT)
+        i = i + 1
+    }
+    return E_CQ_TIMEOUT
+}
+
+fn cq_alive(c: *mut Cq, p: *mut iwl_probe.Probe, out: u64, cap: u64) -> i64 {
+    let n: i64 = cq_wait(c, p, CMD_ALIVE, out, cap, CQ_WAIT_NOTIF)
+    if n < 0 { return n }
+    if (n as u64) < ALIVE_PKT_MIN { return E_CQ_SHORT }
+    return iwl_le.ld32(out, ALIVE_SCD_OFF) as i64
+}
+
+fn cq_resp_status(resp: u64, len: u64) -> i64 {
+    if len < 8 { return E_CQ_SHORT }
+    return iwl_le.ld32(resp, 4) as i64
+}
