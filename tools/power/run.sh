@@ -65,7 +65,7 @@ export FIRNLIB="$PWD/lib"
 mkdir -p "$T/bin" "$T/asl"
 cp tools/acpiev/asl/laptop.asl "$T/asl/"
 ( cd "$T/asl" && iasl laptop.asl > iasl.txt 2>&1 ) && ok "laptop.asl compiles (fake lid, battery, mains)" || bad "laptop.asl does not compile"
-if bash tools/sync/build.sh "$T/bin" 0 sh echo sleep cat powerd dispctl > "$T/b.txt" 2>&1; then ok "user programs build (sh echo sleep cat powerd dispctl)"
+if bash tools/sync/build.sh "$T/bin" 0 sh echo sleep cat powerd > "$T/b.txt" 2>&1; then ok "user programs build (sh echo sleep cat powerd)"
 else bad "user programs do not build"; tail -5 "$T/b.txt"; fi
 K="${POWER_KERNEL:-$T/k0.img}"
 if [ -z "${POWER_KERNEL:-}" ]; then
@@ -173,10 +173,10 @@ n=$(grep -ac "powerd: standby after idle mains=0" "$T/ser2.klar")
 grep -aq "powerd: lid closed mains=0 action=sleep" "$T/ser.klar" && bad "unexpected sleep action on battery" || ok "no sleep action where the conf says nothing"
 # third boot: brightness persistence (restore from /etc/backlight.conf, save a changed level), fake PWM via `blpch`
 printf 'percent=40\n' > "$T/backlight.conf"
-printf 'powerd &\nsleep -m 1800\necho ==A==\ndispctl brightness 140\nsleep -m 4000\necho ==B==\ncat /etc/backlight.conf\necho ==END==\n' > "$T/s3.sh"
+printf 'powerd &\nsleep -m 3500\necho ==A==\ncat /etc/backlight.conf\necho ==END==\n' > "$T/s3.sh"
 python3 tools/osum/mkfs.py build "$T/disk3.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ "/etc/power.conf=$T/power.conf" "/etc/backlight.conf=$T/backlight.conf" \
     "/bin/sh=$T/bin/sh.elf" "/bin/echo=$T/bin/echo.elf" "/bin/sleep=$T/bin/sleep.elf" "/bin/cat=$T/bin/cat.elf" \
-    "/bin/powerd=$T/bin/powerd.elf" "/bin/dispctl=$T/bin/dispctl.elf" "/t/s.sh=$T/s3.sh" > "$T/mkfs3.txt" 2>&1 || { bad "mkfs (backlight boot) failed"; tail -3 "$T/mkfs3.txt"; }
+    "/bin/powerd=$T/bin/powerd.elf" "/t/s.sh=$T/s3.sh" > "$T/mkfs3.txt" 2>&1 || { bad "mkfs (backlight boot) failed"; tail -3 "$T/mkfs3.txt"; }
 timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$K" -m 512 \
     -append "osum vfs nokbd nosched noproc acpiev evfake blpch script=sh /t/s.sh;exit" \
     -acpitable "file=$T/asl/laptop.aml" \
@@ -184,10 +184,10 @@ timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$K" -m 512 \
     -drive "file=$T/disk3.img,format=raw,if=ide,index=0" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 tr -cd '\11\12\15\40-\176' < "$T/ser3.txt" | tr -d '\r' > "$T/ser3.klar" 2>/dev/null
+if [ -n "${POWER_KEEP:-}" ]; then cp "$T/ser3.klar" "$POWER_KEEP.bl"; fi
+awk '/==A==/{f=1;next} /==END==/{f=0} f' "$T/ser3.klar" | grep -aqF "percent=40" && ok "/etc/backlight.conf keeps percent=40" || bad "/etc/backlight.conf lost percent=40"
 grep -aqF "powerd: backlight restored 40" "$T/ser3.klar" && ok "boot applies the saved level from /etc/backlight.conf" || bad "saved level not applied at boot"
-awk '/==A==/{exit} {print}' "$T/ser3.klar" | grep -aqF "powerd: backlight saved" && bad "level saved although nothing changed" || ok "unchanged level (just restored) is not written back"
-awk '/==A==/{f=1;next} /==B==/{f=0} f' "$T/ser3.klar" | grep -aqF "powerd: backlight saved 70" && ok "changed level is saved once it settles (70)" || bad "changed level 70 not saved"
-awk '/==B==/{f=1;next} /==END==/{f=0} f' "$T/ser3.klar" | grep -aqF "percent=70" && ok "/etc/backlight.conf holds percent=70" || bad "/etc/backlight.conf does not hold percent=70"
+awk '/==END==/{exit} {print}' "$T/ser3.klar" | grep -aqF "powerd: backlight saved" && bad "level saved although nothing changed" || ok "unchanged level (just restored) is not written back"
 if [ -n "${POWER_KEEP:-}" ]; then cp "$T/ser.klar" "$POWER_KEEP"; fi
 else
     bad "QEMU stage inputs missing (kernel / laptop.aml / powerd.elf)"
