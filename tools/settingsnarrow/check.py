@@ -5,6 +5,7 @@ import re, sys, os
 
 cfg, serial, outdir = sys.argv[1:4]
 txt = open(serial, "rb").read().decode("latin1")
+txt = re.sub(r"(?<=[^\n])wm: schlieren grow=\d+ alpha=\d+ blur=\d+ aus=\d+ unterpx=\d+\n", "", txt)
 fails = 0
 
 

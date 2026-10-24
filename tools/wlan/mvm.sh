@@ -27,11 +27,11 @@ mut() { # sed-expr description [module]
 mut 's/const CMD_NVM_ACCESS: u64 = 0x88/const CMD_NVM_ACCESS: u64 = 0x89/' "NVM command id"
 mut 's/st32(a, HDR + 4, mac_id_color)/st32(a, HDR + 8, mac_id_color)/' "ADD_STA mac_id_n_color offset"
 mut 's/var fl: u64 = 2 |/var fl: u64 = 3 |/' "CCMP cipher flag"
-mut 's/iwl_buf.st32(a, h + 8, mac_type)/iwl_buf.st32(a, h + 12, mac_type)/' "MAC_CONTEXT mac_type offset" iwl_mvm_ctx.fi
+mut 's/iwl_le.st32(a, h + 8, mac_type)/iwl_le.st32(a, h + 12, mac_type)/' "MAC_CONTEXT mac_type offset" iwl_mvm_ctx.fi
 mut 's/const MAC_UNION_LEN: u64 = 48/const MAC_UNION_LEN: u64 = 44/' "MAC_CONTEXT union size" iwl_mvm_ctx.fi
-mut 's/iwl_buf.st32(a, h + 20, phy_id_color)/iwl_buf.st32(a, h + 16, phy_id_color)/' "BINDING phy offset" iwl_mvm_ctx.fi
+mut 's/iwl_le.st32(a, h + 20, phy_id_color)/iwl_le.st32(a, h + 16, phy_id_color)/' "BINDING phy offset" iwl_mvm_ctx.fi
 mut 's/flags | (nchan << 26)/flags | (nchan << 25)/' "SCAN_CFG channel count field" iwl_mvm_scan.fi
 mut 's/const SCAN_DIRECT_LEN: u64 = 34/const SCAN_DIRECT_LEN: u64 = 33/' "SCAN_REQ direct scan entry size" iwl_mvm_scan.fi
-mut 's/iwl_buf.st8(a, h + 51, tid)/iwl_buf.st8(a, h + 50, tid)/' "TX_CMD tid offset" iwl_mvm_tx.fi
+mut 's/iwl_le.st8(a, h + 51, tid)/iwl_le.st8(a, h + 50, tid)/' "TX_CMD tid offset" iwl_mvm_tx.fi
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
