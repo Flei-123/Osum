@@ -258,7 +258,7 @@ has "$L8" 'iwl: boot2 init alive rc=0' "rx-only ALIVE (no CSR_INT bit 0): accept
 has "$L8" 'iwl: boot2 rt alive rc=0' "rx-only ALIVE: runtime image reaches ALIVE too"
 has "$L8" 'phase=ready' "rx-only ALIVE: /proc/wlan phase=ready"
 hasnot "$L8" 'fail_alive=' "rx-only ALIVE: no failure line"
-runc l9 "iwlfhtest iwlfhrxonly iwloldalive iwlnotrace"
+runc l9 "iwlfhtest iwlfhrxonly iwloldalive iwlnotrace iwlnoraw"
 L9="$T/l9.klar"
 has "$L9" 'iwl: boot2 init alive rc=-30' "counter-proof iwloldalive: bit-0-only wait never sees the rx-only ALIVE (-30)"
 has "$L9" 'phase=failed' "counter-proof iwloldalive rxonly: phase=failed"
