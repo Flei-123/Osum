@@ -18,10 +18,12 @@
 
 profile kernel
 
+import drv.net.iwl_fakefw
+
 export {
     FAKE_PAGES, FAKE_NORMAL, FAKE_LOST, FAKE_BADWIN, SRAM_SIZE,
     fake_init, fake_rd, fake_wr, fake_viol, fake_lost, fake_sum, fake_chick, fake_loadstat,
-    fake_phase, fake_phase_bytes, fake_stops
+    fake_phase, fake_phase_bytes, fake_stops, fake_set_norx, fake_cmds, fake_rx_pkts, fake_rx_drops, fake_last_cmd, fake_last_uid
 }
 
 const FAKE_PAGES: u64 = 3
@@ -52,7 +54,7 @@ const S_PHB: u64 = 0x2080       // 4 x u64: octets DMA'd while image `phase` was
 const S_PKEY: u64 = 0x2100      // 16 x u64
 const S_PVAL: u64 = 0x2200      // 16 x u64
 const S_WKEY: u64 = 0x2300      // 8 x u64: window key + 1 (0 = unused)
-const NPRPH: u64 = 16
+const NPRPH: u64 = 32
 
 const F_SRAM: u64 = 1
 const F_C0: u64 = 2
@@ -88,6 +90,13 @@ fn fake_init(region: u64, sram: u64, mode: u64, bus_base: u64, bus_size: u64) {
     s(region, S_BUSBASE, bus_base)
     s(region, S_BUSSIZE, bus_size)
 }
+
+fn fake_set_norx(ctx: u64, on: u64) { iwl_fakefw.set_norx(ctx, on) }
+fn fake_cmds(ctx: u64) -> u64 { return iwl_fakefw.cmds(ctx) }
+fn fake_rx_pkts(ctx: u64) -> u64 { return iwl_fakefw.rx_pkts(ctx) }
+fn fake_rx_drops(ctx: u64) -> u64 { return iwl_fakefw.rx_drops(ctx) }
+fn fake_last_cmd(ctx: u64) -> u64 { return iwl_fakefw.last_cmd(ctx) }
+fn fake_last_uid(ctx: u64) -> u64 { return iwl_fakefw.last_uid(ctx) }
 
 fn fake_viol(ctx: u64) -> u64 { return g(ctx, S_VIOL) }
 fn fake_phase(ctx: u64) -> u64 { return g(ctx, S_PHASE) }
@@ -211,10 +220,17 @@ fn fake_wr(ctx: u64, off: u64, v: u64) {
             s(ctx, S_STOPPED, 1)
             w32(ctx, 0x1AF0, 0)
             s(ctx, S_STOPS, g(ctx, S_STOPS) + 1)
+            iwl_fakefw.reset(ctx)
         }
     } else if off == 0x024 {
         w32(ctx, 0x024, v)
         if (v & 8) != 0 { s(ctx, S_ACCESS, 1) } else { s(ctx, S_ACCESS, 0) }
+    } else if off == 0x460 {
+        w32(ctx, off, v)
+        var sched_ok: bool = false
+        let sk: i64 = prph_find(ctx, 0x02D0C)
+        if sk >= 0 { sched_ok = (g(ctx, S_PVAL + (sk as u64) * 8) & 8) != 0 }
+        iwl_fakefw.doorbell(ctx, v, sched_ok)
     } else if off == 0x444 {
         s(ctx, S_WADDR, v)
     } else if off == 0x448 {
@@ -261,7 +277,10 @@ fn fake_rd(ctx: u64, off: u64) -> u64 {
         let aa: u64 = g(ctx, S_AARM)
         if aa > 0 {
             s(ctx, S_AARM, aa - 1)
-            if aa == 1 { w32(ctx, 0x008, r32(ctx, 0x008) | 0x1) }
+            if aa == 1 {
+                w32(ctx, 0x008, r32(ctx, 0x008) | 0x1)
+                iwl_fakefw.alive(ctx)
+            }
         }
         let arm: u64 = g(ctx, S_ARM)
         if arm > 0 {
