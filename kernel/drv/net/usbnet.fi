@@ -51,7 +51,7 @@ export {
     attach, attach_rndis, attach_ncm, attach_ch336, attach_ax88772, detach, unplug_slot, link_on, keepalives, exists, present_on, ready_on, up_on, mac_at_on,
     rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
     rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
-    errors, MAX_UNITS, FRAME_MAX, ch_bringup, mode_get, ch_link, ch_bmsr, ch_cfg, ch_fw, ch_changes, ch_phy, ch_intr
+    errors, MAX_UNITS, FRAME_MAX, ch_bringup, mode_get, tx_diag, ch_link, ch_bmsr, ch_cfg, ch_fw, ch_changes, ch_phy, ch_intr
 }
 
 const MAX_UNITS: u64 = 1
@@ -96,6 +96,10 @@ const C_CID: u64 = 0xE8 // RNDIS: request id counter
 const C_ROUND: u64 = 0xF0 // RNDIS: housekeeping round counter
 const C_CARRY: u64 = 0xF8
 const C_SKIP: u64 = 0x100
+const C_TXRC: u64 = 0x1E0
+const C_TXFAIL: u64 = 0x1E8
+const C_TXHALT: u64 = 0x1F0
+const C_TXEPST: u64 = 0x1F8
 const CH_BASE: u64 = 0x2800
 const CMD_OFF: u64 = 0x200
 const RSP_OFF: u64 = 0x300
@@ -162,7 +166,36 @@ fn attach_rndis(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u
 
 // LW-1a: WCH CH336/CH339/CH396/CH397 vendor-class function (lib/usbnet/ch397.fi framing, unverified on silicon).
 fn attach_ch336(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64) -> bool {
-    return attach_mode(state, slot, indci, outdci, mps, mac, 3)
+    if !attach_mode(state, slot, indci, outdci, mps, mac, 3) {
+        return false
+    }
+    cs(state, C_TXRC, 0)
+    cs(state, C_TXFAIL, 0)
+    cs(state, C_TXHALT, 0)
+    cs(state, C_TXEPST, 0)
+    return true
+}
+
+fn tx_diag(state: u64, which: u64) -> u64 {
+    if which == 0 { return cg(state, C_TXRC) }
+    if which == 1 { return cg(state, C_TXFAIL) }
+    if which == 2 { return cg(state, C_TXHALT) }
+    return cg(state, C_TXEPST)
+}
+
+fn tx_recover(state: u64, slot: u64, dci: u64) -> bool {
+    cs(state, C_TXEPST, xhci.ep_state(state, slot, dci))
+    let i: u64 = xhci.ep_find(state, slot, dci)
+    if i >= xhci.MAX_EP {
+        return false
+    }
+    if !xhci.ep_halted(state, slot, dci) {
+        return false
+    }
+    xhci.reset_endpoint(state, slot, dci)
+    xhci.set_dequeue(state, slot, dci, i)
+    cs(state, C_TXHALT, cg(state, C_TXHALT) + 1)
+    return true
 }
 
 // r1607: ASIX AX88772/772B (lib/usbnet/ax88772.fi framing and ax88772_drv.fi bring-up, unverified on silicon).
@@ -769,7 +802,14 @@ fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
     }
     let slot: u64 = cg(state, C_SLOT)
     let dci: u64 = cg(state, C_OUT)
-    let r: i64 = xhci.bulk(state, slot, dci, b + TX_OFF, tn)
+    var r: i64 = xhci.bulk(state, slot, dci, b + TX_OFF, tn)
+    if r < 0 {
+        cs(state, C_TXRC, r as u64)
+        cs(state, C_TXFAIL, cg(state, C_TXFAIL) + 1)
+        if cg(state, C_MODE) == 3 && tx_recover(state, slot, dci) {
+            r = xhci.bulk(state, slot, dci, b + TX_OFF, tn)
+        }
+    }
     if r < 0 {
         cs(state, C_DROP, cg(state, C_DROP) + 1)
         return false
