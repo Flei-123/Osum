@@ -108,6 +108,7 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 ## Was der Boss fotografieren soll
 
 0. **WLAN (Stick 6):** Terminal: `cat /proc/wlan` -- Foto (phase/err/err_text/fw/nvm/calib, net-Zeilen, auto=). Dann Einstellungen > WLAN: SSID + Passwort eintragen, speichern, nochmal `cat /proc/wlan` -- Foto. Bei Haenger/Panik Neustart mit Kernelwort `noiwl` (Foto der Bootzeile).
+   - **WLAN-Persistenz (ab main 4b852a81):** gespeicherte SSID/Passwort wird vom Dienst `wlanpersist` auf die EFI-Partition (`wlan.cnf`) gespiegelt und beim Boot zurueckgespielt (nur wenn die Wurzel RAM ist). Settings zeigt sonst "Nur bis zum Neustart gespeichert".
 0b. **Helligkeits-Tasten (Fn):** Fn+Helligkeit hoch/runter druecken (je 3x), danach Terminal: `cat /proc/hotkeys` -- Foto. Jede Taste, die nicht Helligkeit aendert, steht dort als `ext 0x.. unknown` / `key 0x.. unknown` / `acpi 0x.. unknown` (das ist der echte Code); dazu `cat /proc/backlight` (Zeilen `hotkeys`, `acpi.notifies`, `acpi.lastnt`, `ext.last0..3`). Meldung ja/nein: aendert sich die Helligkeit, und springt sie pro Tastendruck um GENAU eine Stufe (nicht zwei)?
 1. **Overlay:** `Strg+Shift+F` -- Foto vom ganzen Schirm (Zeile `fb_write_mbs`, FPS, CPU, RAM).
 2. **Terminal** (Win-Taste, "terminal"): je ein Foto der Ausgabe von
