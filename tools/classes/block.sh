@@ -73,5 +73,31 @@ runide ide ""
 runvm nvmeno "noclass" -device nvme,drive=d0,serial=cls
 runvm ahcino "noclass" -device ahci,id=a0 -device ide-hd,drive=d0,bus=a0.0
 runvm nvmebad "badclass" -device nvme,drive=d0,serial=cls
+runhw() {
+    local name=$1 words=$2; shift 2
+    cp "$D/d.img" "$D/d-$name.img"
+    timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 -kernel "$D/k0.img" -m 512 \
+        -append "osum nokbd hwdiag nosched noproc nofs noring3 $words" \
+        -serial "file:$D/o-$name.txt" -display none -no-reboot \
+        -drive "file=$D/d-$name.img,format=raw,if=none,id=d0" "$@" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+    tr -cd '\11\12\15\40-\176' < "$D/o-$name.txt" > "$D/$name.klar"
+}
+runhw hnvme "" -device nvme,drive=d0,serial=cls
+runhw hnvmeno "noclass" -device nvme,drive=d0,serial=cls
+runhw hnvmebad "badclass" -device nvme,drive=d0,serial=cls
+runhw hahci "" -device ahci,id=a0 -device ide-hd,drive=d0,bus=a0.0
+runhw hahcino "noclass" -device ahci,id=a0 -device ide-hd,drive=d0,bus=a0.0
 [ -n "${CLASSES_DUMP:-}" ] && cp "$D"/*.klar "$CLASSES_DUMP"/
+
+echo "== 3. table answers and counter-proofs =="
+for r in nvme ahci; do
+    has "$D/$r.klar" "rootsel: $r -- WURZEL" "$r: root found and mounted as before"
+    has "$D/$r.klar" "osum: mount=1" "$r: mounted"
+    has "$D/h$r.klar" "self d0 $r  da=1  bloecke=8192  bsize=512" "$r: init/present/blocks/bsize come through the table"
+    has "$D/h${r}no.klar" "self d0 $r  da=0  bloecke=0  bsize=512" "$r noclass: no table, disk invisible to the dispatcher"
+done
+has "$D/hnvmebad.klar" "self d0 nvme  da=1  bloecke=0  bsize=512" "nvme badclass: blocks hook swapped, size reads 0"
+hasnot "$D/hnvme.klar" "self d0 nvme  da=0" "nvme: not reported absent"
+has "$D/ide.klar" "osum: ata0 sectors=8192" "ide root: legacy path unchanged"
 finish
