@@ -18,7 +18,7 @@ line in `/etc/social/providers` and one program. `social.fi`,
 | file | what |
 |---|---|
 | `kernel/user/social.fi` → `/bin/social` | the service: provider on orient-bus (`a.social`), the merged book, messages (`/etc/social/messages`), invites, own presence/activity, privacy, events, the bell |
-| `pakete/social/ACTIONS` → `/apps/social.prog/ACTIONS` | 23 actions + 5 events (below) |
+| `pakete/social/ACTIONS` → `/apps/social.prog/ACTIONS` | 32 actions + 5 events (below); the broker reads a manifest up to 16383 octets |
 | `kernel/app/socfleitec.fi` → `/bin/socfleitec` | provider for a **Fleitec** account: fleikontakte (book, presence, activity, invites) with a device access token; chat **end to end** as a FirnChat device over the relay (`kernel/app/fcrelay.fi`: x25519, HKDF-SHA256, ChaCha20-Poly1305, own-device copies) |
 | `kernel/user/soclocal.fi` → `/bin/soclocal` | provider for accounts **without a server**: contacts, messages and invites in files (`-c <base>` = one account) — the second provider that passes the same checks |
 | `kernel/user/melder.fi` → `/bin/melder` | the **Melder** on OrientOS (r135): the OrientOS backend of FirnChat's `docs/MELDER-INTERFACE.md` v1 (`melder v1 hello/detect/games/privacy/autostart/report`; no `identity`: there is no token, the service is signed in) plus a small core (`melder serve [ticks] [every]`, `melder once`). A running game of `/etc/social/games.tsv` (same format as FirnChat's `spiele.tsv`, rows with os `l`) becomes `social.activity.set`, its end `social.activity.clear`; the switch is `social.privacy.set` (read back from `social.status` → `share_activity`); the list `never` is `/etc/social/melder.never`. Detection is `SYS_PSTAT` (r146: pid, basename of argv[0] 16 octets, age `P_AGE` in ms, command line `P_CMD0..` = argv joined by blanks, 256 octets at most, lowercased by the Melder): `detect` prints `p <pid> <exe> <age_s> <cmdline>`; a row with command-line text (column 4) matches when the exe is running AND its command line contains the text (case ignored) — `java` + `minecraft`, `wine` + the game's .exe. Autostart = the line `melder:*:respawn:/bin/melder serve` in `/etc/inittab` (server images with `init`; a screen image starts it in `kgui.desk_start`, r140, together with `/bin/social`; r147: the desktop loop restarts either one 5 s after it ended, back-off up to 60 s). Test: `tools/melder/run.sh` (test.sh § 55b) |
@@ -44,6 +44,9 @@ line in `/etc/social/providers` and one program. `social.fi`,
 | `social.apps.list` | read | `app.N=client\|scope,scope` |
 | `social.apps.grant client= scope=` | critical | give an app one of the four scopes |
 | `social.apps.revoke client= [scope=]` | critical | take a scope, or every right of the app |
+| `social.apps.allow allow="client scope"` | critical | the same as grant with ONE text, for the Settings page "App rights" (a field sends only its own key) |
+| `social.apps.deny deny="client [scope]"` | critical | the same as revoke with one text |
+| `social.privacy.show show=` | critical | take a client or activity name off the never list again |
 | `social.messages.send id= text=` | write | to a contact, via its account's provider |
 | `social.messages.list id= [before=]` | read | `message.N=index\|stamp\|in/out\|read\|text`, newest page |
 | `social.messages.unread`, `social.messages.read id=` | read / write | unread per contact, mark read |

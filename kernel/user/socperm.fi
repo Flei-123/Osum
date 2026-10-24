@@ -16,8 +16,8 @@ profile kernel
 import actwire
 
 export { apps_load, apps_ptr, apps_len, perm_check, perm_deny, priv_parse, priv_render, never_hit,
-    invite_allowed, invites_word, a_apps_list, a_apps_grant, a_apps_revoke, a_priv_get, a_priv_hide,
-    a_priv_invites }
+    invite_allowed, invites_word, a_apps_list, a_apps_grant, a_apps_allow, a_apps_revoke, a_apps_deny,
+    a_priv_get, a_priv_hide, a_priv_show, a_priv_invites }
 
 const APPS_CAP: usize = 2048
 const NEVER_CAP: usize = 1024
@@ -385,13 +385,7 @@ fn a_apps_list() {
     }
 }
 
-fn a_apps_grant(msg: u64, dry: bool) -> bool {
-    var cl: [u8; 32] = [0 as u8; 32]
-    var sc: [u8; 24] = [0 as u8; 24]
-    let _c: bool = arg(msg, "client", (&cl[0]) as u64, 32)
-    let _s: bool = arg(msg, "scope", (&sc[0]) as u64, 24)
-    let cp: u64 = (&cl[0]) as u64
-    let sp: u64 = (&sc[0]) as u64
+fn grant_run(cp: u64, sp: u64, dry: bool) -> bool {
     if !starts_app(cp) || zl(cp) > CLIENT_MAX || !scope_known(sp, zl(sp)) {
         fail("bad_arg client scope")
         return false
@@ -415,13 +409,7 @@ fn a_apps_grant(msg: u64, dry: bool) -> bool {
     return changed
 }
 
-fn a_apps_revoke(msg: u64, dry: bool) -> bool {
-    var cl: [u8; 32] = [0 as u8; 32]
-    var sc: [u8; 24] = [0 as u8; 24]
-    let _c: bool = arg(msg, "client", (&cl[0]) as u64, 32)
-    let has_scope: bool = arg(msg, "scope", (&sc[0]) as u64, 24)
-    let cp: u64 = (&cl[0]) as u64
-    let sp: u64 = (&sc[0]) as u64
+fn revoke_run(cp: u64, sp: u64, has_scope: bool, dry: bool) -> bool {
     if !starts_app(cp) || zl(cp) > CLIENT_MAX || (has_scope && !scope_known(sp, zl(sp))) {
         fail("bad_arg client scope")
         return false
@@ -442,6 +430,54 @@ fn a_apps_revoke(msg: u64, dry: bool) -> bool {
     actwire.ob_reset()
     put("ok\n")
     return changed
+}
+
+fn entry_words(msg: u64, key: str, cl: u64, sc: u64) -> bool {
+    var en: [u8; 64] = [0 as u8; 64]
+    let _e: bool = arg(msg, key, (&en[0]) as u64, 64)
+    let ep: u64 = (&en[0]) as u64
+    var cn: usize = 0
+    var sn: usize = 0
+    let cp: u64 = tok(ep, zl(ep), 0, &cn)
+    let sp: u64 = tok(ep, zl(ep), 1, &sn)
+    if cn == 0 || cn > CLIENT_MAX || sn > 23 {
+        return false
+    }
+    cpy(cl, cp, cn)
+    st(cl, cn, 0 as u8)
+    cpy(sc, sp, sn)
+    st(sc, sn, 0 as u8)
+    return sn > 0
+}
+
+fn a_apps_grant(msg: u64, dry: bool) -> bool {
+    var cl: [u8; 32] = [0 as u8; 32]
+    var sc: [u8; 24] = [0 as u8; 24]
+    let _c: bool = arg(msg, "client", (&cl[0]) as u64, 32)
+    let _s: bool = arg(msg, "scope", (&sc[0]) as u64, 24)
+    return grant_run((&cl[0]) as u64, (&sc[0]) as u64, dry)
+}
+
+fn a_apps_allow(msg: u64, dry: bool) -> bool {
+    var cl: [u8; 32] = [0 as u8; 32]
+    var sc: [u8; 24] = [0 as u8; 24]
+    let _w: bool = entry_words(msg, "allow", (&cl[0]) as u64, (&sc[0]) as u64)
+    return grant_run((&cl[0]) as u64, (&sc[0]) as u64, dry)
+}
+
+fn a_apps_revoke(msg: u64, dry: bool) -> bool {
+    var cl: [u8; 32] = [0 as u8; 32]
+    var sc: [u8; 24] = [0 as u8; 24]
+    let _c: bool = arg(msg, "client", (&cl[0]) as u64, 32)
+    let has_scope: bool = arg(msg, "scope", (&sc[0]) as u64, 24)
+    return revoke_run((&cl[0]) as u64, (&sc[0]) as u64, has_scope, dry)
+}
+
+fn a_apps_deny(msg: u64, dry: bool) -> bool {
+    var cl: [u8; 32] = [0 as u8; 32]
+    var sc: [u8; 24] = [0 as u8; 24]
+    let has_scope: bool = entry_words(msg, "deny", (&cl[0]) as u64, (&sc[0]) as u64)
+    return revoke_run((&cl[0]) as u64, (&sc[0]) as u64, has_scope, dry)
 }
 
 fn invites_word() -> str {
@@ -619,16 +655,7 @@ fn a_priv_get(share: bool, invisible: bool) {
     }
 }
 
-fn a_priv_hide(msg: u64, dry: bool) -> bool {
-    var en: [u8; 64] = [0 as u8; 64]
-    var hv: [u8; 8] = [0 as u8; 8]
-    let _e: bool = arg(msg, "entry", (&en[0]) as u64, 64)
-    let has_hide: bool = arg(msg, "hide", (&hv[0]) as u64, 8)
-    let ep: u64 = (&en[0]) as u64
-    var hide: bool = true
-    if has_hide {
-        hide = is_true((&hv[0]) as u64)
-    }
+fn hide_run(ep: u64, hide: bool, dry: bool) -> bool {
     if zl(ep) == 0 || zl(ep) > ENTRY_MAX {
         fail("bad_arg entry")
         return false
@@ -653,6 +680,24 @@ fn a_priv_hide(msg: u64, dry: bool) -> bool {
     actwire.ob_reset()
     put("ok\n")
     return changed
+}
+
+fn a_priv_hide(msg: u64, dry: bool) -> bool {
+    var en: [u8; 64] = [0 as u8; 64]
+    var hv: [u8; 8] = [0 as u8; 8]
+    let _e: bool = arg(msg, "entry", (&en[0]) as u64, 64)
+    let has_hide: bool = arg(msg, "hide", (&hv[0]) as u64, 8)
+    var hide: bool = true
+    if has_hide {
+        hide = is_true((&hv[0]) as u64)
+    }
+    return hide_run((&en[0]) as u64, hide, dry)
+}
+
+fn a_priv_show(msg: u64, dry: bool) -> bool {
+    var en: [u8; 64] = [0 as u8; 64]
+    let _e: bool = arg(msg, "show", (&en[0]) as u64, 64)
+    return hide_run((&en[0]) as u64, false, dry)
 }
 
 fn a_priv_invites(msg: u64, dry: bool) -> bool {

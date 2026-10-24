@@ -134,6 +134,7 @@ const UK_LOGIN2: u8 = 9
 const UK_LOGIN3: u8 = 10
 const UK_GACT: u8 = 11
 const UK_GREF: u8 = 12
+const UK_GSRCH: u8 = 13
 static mut u_id: [u64; 8] = [0 as u64; 8]
 static mut u_full: [u8; 768] = [0 as u8; 768]
 static mut u_idz: [u8; 768] = [0 as u8; 768]
@@ -146,6 +147,10 @@ static mut u_got: [u8; 8] = [0 as u8; 8]
 static mut g_id: u64 = 0
 static mut g_left: usize = 0
 static mut g_any: bool = false
+static mut g_q: [u8; 64] = [0 as u8; 64]
+static mut g_sl: [u8; 2048] = [0 as u8; 2048]
+static mut g_sln: usize = 0
+static mut g_scnt: u64 = 0
 static mut cur_id: u64 = 0
 static mut st_async: bool = false
 static mut st_defer: bool = false
@@ -1298,58 +1303,69 @@ fn a_privacy(msg: u64, dry: bool) -> bool {
     return true
 }
 
-fn a_search(msg: u64) {
-    var q: [u8; 64] = [0 as u8; 64]
-    let _q: bool = arg(msg, "query", (&q[0]) as u64, 64)
-    var w1: [u8; 7] = "search\0"
-    var out: SB = sb((&st_out[0]) as u64, 16383)
-    var lines: SB = sb((&st_lines[0]) as u64, 4095)
-    var cnt: u64 = 0
-    var i: usize = 0
-    while i < n_prov {
-        let code: i64 = run(i, (&w1[0]) as u64, (&q[0]) as u64, 0, &out, CALL_TICKS)
-        if code == 0 {
-            var at: usize = 0
-            while at < out.len && cnt < 10 {
-                let lp: u64 = out.ptr + at as u64
-                let ll: usize = line_len(lp)
-                if ll > 2 && r_ld8(lp, 0) == 99 as u8 {
-                    // "c<TAB>id<TAB>rel<TAB>pres<TAB>name<TAB>handle..."
-                    sb_bytes(&lines, "contact.".p as u64, 8)
-                    sb_dec(&lines, cnt + 1)
-                    sb_push(&lines, 61 as u8)
-                    sb_bytes(&lines, pname(i), zlen(pname(i)))
-                    sb_push(&lines, 58 as u8)
-                    var k: usize = 1
-                    while k <= 5 {
-                        var n: usize = 0
-                        let p: u64 = fld(lp, k, &n)
-                        if k > 1 {
-                            sb_push(&lines, 124 as u8)
-                        }
-                        var j: usize = 0
-                        while j < n {
-                            var ch: u8 = r_ld8(p, j)
-                            if ch == 124 as u8 {
-                                ch = 47 as u8
-                            }
-                            sb_push(&lines, ch)
-                            j = j + 1
-                        }
-                        k = k + 1
-                    }
-                    sb_bytes(&lines, "|||\n".p as u64, 4)
-                    cnt = cnt + 1
+fn search_collect(i: usize, out: *mut SB, lines: *mut SB, cnt0: u64) -> u64 {
+    var cnt: u64 = cnt0
+    var at: usize = 0
+    while at < (*out).len && cnt < 10 {
+        let lp: u64 = (*out).ptr + at as u64
+        let ll: usize = line_len(lp)
+        if ll > 2 && r_ld8(lp, 0) == 99 as u8 {
+            sb_bytes(lines, "contact.".p as u64, 8)
+            sb_dec(lines, cnt + 1)
+            sb_push(lines, 61 as u8)
+            sb_bytes(lines, pname(i), zlen(pname(i)))
+            sb_push(lines, 58 as u8)
+            var k: usize = 1
+            while k <= 5 {
+                var n: usize = 0
+                let p: u64 = fld(lp, k, &n)
+                if k > 1 {
+                    sb_push(lines, 124 as u8)
                 }
-                at = at + ll + 1
+                var j: usize = 0
+                while j < n {
+                    var ch: u8 = r_ld8(p, j)
+                    if ch == 124 as u8 {
+                        ch = 47 as u8
+                    }
+                    sb_push(lines, ch)
+                    j = j + 1
+                }
+                k = k + 1
             }
+            sb_bytes(lines, "|||\n".p as u64, 4)
+            cnt = cnt + 1
         }
-        i = i + 1
+        at = at + ll + 1
     }
+    return cnt
+}
+
+fn ob_search_reply() {
     actwire.ob_reset()
     ob_s("ok\n")
-    ob_kn("count", cnt)
-    actwire.ob_n(lines.ptr, lines.len as u64)
+    ob_kn("count", g_scnt)
+    actwire.ob_n((&g_sl[0]) as u64, g_sln as u64)
+}
+
+fn a_search(msg: u64) {
+    if n_prov > 0 && defer_group() {
+        return
+    }
+    let _q: bool = arg(msg, "query", (&g_q[0]) as u64, 64)
+    g_sln = 0
+    g_scnt = 0
+    if n_prov > 0 && group_start(UK_GSRCH) {
+        return
+    }
+    ob_search_reply()
+}
+
+fn search_take(i: usize, out: *mut SB) {
+    var lines: SB = sb((&g_sl[0]) as u64, 2047)
+    lines.len = g_sln
+    g_scnt = search_collect(i, out, &lines, g_scnt)
+    g_sln = lines.len
 }
 
 // One call; the reply is built in actwire's output buffer.
@@ -1359,7 +1375,7 @@ fn is_provider_call(np: u64) -> bool {
         || isz(np, "social.contacts.remove") || isz(np, "social.activity.set")
         || isz(np, "social.accounts.login") || isz(np, "social.messages.send")
         || isz(np, "social.invites.send") || isz(np, "social.invites.answer")
-        || isz(np, "social.refresh")
+        || isz(np, "social.refresh") || isz(np, "social.contacts.search")
 }
 
 fn handle(msg: u64) {
@@ -1395,9 +1411,22 @@ fn handle(msg: u64) {
         if socperm.a_apps_grant(msg, dry) {
             apps_save()
         }
+    } else if isz(np, "social.apps.allow") {
+        if socperm.a_apps_allow(msg, dry) {
+            apps_save()
+        }
     } else if isz(np, "social.apps.revoke") {
         if socperm.a_apps_revoke(msg, dry) {
             apps_save()
+        }
+    } else if isz(np, "social.apps.deny") {
+        if socperm.a_apps_deny(msg, dry) {
+            apps_save()
+        }
+    } else if isz(np, "social.privacy.show") {
+        if socperm.a_priv_show(msg, dry) {
+            priv_save()
+            mark_due(JK_ACTIVITY)
         }
     } else if isz(np, "social.privacy.get") {
         socperm.a_priv_get(share_act, invisible())
@@ -2890,6 +2919,12 @@ fn group_start(kind: u8) -> bool {
         var started: bool = false
         if kind == UK_GREF {
             started = ujob_word(i, kind, "contacts")
+        } else if kind == UK_GSRCH {
+            var ws: [u64; 6] = [0 as u64; 6]
+            var wsr: [u8; 7] = "search\0"
+            ws[0] = (&wsr[0]) as u64
+            ws[1] = (&g_q[0]) as u64
+            started = ujob_run(i, kind, &ws)
         } else {
             var ws: [u64; 6] = [0 as u64; 6]
             ws[0] = (&w1[0]) as u64
@@ -2950,10 +2985,14 @@ fn user_done(i: usize, kind: u8, code: i64) {
     var o: SB = sb(p, 16383)
     o.len = n
     let id: u64 = u_id[i]
-    if kind == UK_GACT || kind == UK_GREF {
+    if kind == UK_GACT || kind == UK_GREF || kind == UK_GSRCH {
         if kind == UK_GREF {
             book_update(i, &o, code)
             mark_stale(i, JK_CONTACTS)
+        } else if kind == UK_GSRCH {
+            if code == 0 {
+                search_take(i, &o)
+            }
         } else if code == 0 {
             g_any = true
         }
@@ -2964,6 +3003,8 @@ fn user_done(i: usize, kind: u8, code: i64) {
         if g_left == 0 {
             if kind == UK_GREF {
                 ob_refresh_reply()
+            } else if kind == UK_GSRCH {
+                ob_search_reply()
             } else {
                 ob_activity_reply(g_any)
             }

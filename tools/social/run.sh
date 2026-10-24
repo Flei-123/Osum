@@ -39,7 +39,7 @@
 #  11. invites: OrientOS invites anna (she says yes on the server); anna
 #      invites justin, the guest accepts by `from=` and gets the target
 #  12. the bar opens a chat and writes into it (the service's actions)
-#  15. a slow call of a person does not block the service: status is answered
+#  15. a slow call of a person or a search does not block the service: status is answered
 #      meanwhile, the call under its saved id; a second call waits in the queue
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -355,7 +355,7 @@ echo "== 2. the catalogue =="
 part "$A" LIST STATUS > "$TMPD/p.txt"
 n_act=$(grep -ac '^social\.' "$TMPD/p.txt")
 n_evt=$(grep -ac '^event social\.' "$TMPD/p.txt")
-[ "$n_act" = 29 ] && [ "$n_evt" = 5 ] && ok "the catalogue has 29 social.* actions and 5 events" \
+[ "$n_act" = 32 ] && [ "$n_evt" = 5 ] && ok "the catalogue has 32 social.* actions and 5 events" \
     || { bad "catalogue: $n_act actions, $n_evt events"; head -20 "$TMPD/p.txt" | sed 's/^/        /'; }
 has "$TMPD/p.txt" "social.privacy.set critical" "privacy.set is critical"
 hasnot "$TMPD/p.txt" "(not running)" "the service is bound (not 'not running')"
@@ -670,6 +670,13 @@ sleep 6
 echo ==QUEUEEND==
 act call social.messages.list id=slow:zed
 echo ==SLOW2END==
+act call social.contacts.search query=zed &
+sleep -m 400
+echo ==SRCHA==
+act call social.status
+echo ==SRCHB==
+sleep 3
+echo ==SRCHEND==
 EOS
 S_=(build "$TMPD/D.img" $BLOCKS /lib/
     /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/
@@ -702,5 +709,10 @@ has "$TMPD/p.txt" "invite=slow:" "the call is answered under its own request id 
 part "$D4" QUEUEEND SLOW2END > "$TMPD/p.txt"
 has "$TMPD/p.txt" "first-queued" "two calls for the busy provider: the first one went through"
 has "$TMPD/p.txt" "second-queued" "... and the second one waited in the queue and went through"
+part "$D4" SRCHA SRCHB > "$TMPD/p.txt"
+has "$TMPD/p.txt" "provider.2=slow" "r341: while a search waits for the slow provider, the service answers status"
+hasnot "$TMPD/p.txt" "contact.1=" "... and the search itself is not answered yet"
+part "$D4" SRCHB SRCHEND > "$TMPD/p.txt"
+has "$TMPD/p.txt" "contact.1=slow:zed" "r341: the search is answered under its own request id when the job is done"
 
 fin

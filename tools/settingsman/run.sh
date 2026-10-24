@@ -248,8 +248,10 @@ for key, ty, kind, act in binds:
     if not act.startswith(app + "."): bad("%s %s: action %s is outside the namespace %s." % (key, kind, act, app))
     if act not in blocks: bad("%s: action %s is not in ACTIONS" % (key, act)); continue
     b = blocks[act]
-    if kind == "read" and not re.search(r"^  returns %s " % re.escape(key), b, re.M): bad("%s: %s does not return %s" % (key, act, key))
+    rkey = re.sub(r"\.[0-9]+$", ".N", key)
+    if kind == "read" and not re.search(r"^  returns %s " % re.escape(rkey), b, re.M): bad("%s: %s does not return %s" % (key, act, rkey))
     if kind == "write" and ty == "bool" and not re.search(r"^  arg %s bool " % re.escape(key), b, re.M): bad("%s: %s has no bool arg %s" % (key, act, key))
+    if kind == "write" and ty in ("text", "secret") and not re.search(r"^  arg %s string " % re.escape(key), b, re.M): bad("%s: %s has no string arg %s" % (key, act, key))
 for k in ("settings.catpkg", "settings.pkg.ok", "settings.pkg.ask", "settings.pkg.err", "settings.pkg.nobus", "settings.pkg.deny"):
     for nm, cat in (("en", en), ("de", de)):
         if not re.search(r"^" + re.escape(k) + r" = ", cat, re.M): bad("catalogue key %s missing in %s" % (k, nm))

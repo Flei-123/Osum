@@ -14,6 +14,7 @@
 #   5. grant and revoke by the user (critical, asked), the table on disk
 #   6. never show: by client and by activity name, switched back on
 #   7. who may invite me: friends / none / all, filtered before the bell
+#   8. the calls of the Settings pages (allow/deny/show with one text) and contacts.search as a group job (r341)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 T=$'\t'
@@ -52,7 +53,8 @@ fi
 python3 tools/actionbus/manifest.py check pakete/social/ACTIONS > "$TMPD/lint.txt" 2>&1 \
     && ok "host reader: $(head -1 "$TMPD/lint.txt")" \
     || bad "host reader refuses pakete/social/ACTIONS: $(cat "$TMPD/lint.txt")"
-[ "$(wc -c < pakete/social/ACTIONS)" -lt 8191 ] && ok "the manifest fits the broker's read buffer (8191 octets)" || bad "pakete/social/ACTIONS is over 8191 octets (the broker rejects it)"
+[ "$(wc -c < pakete/social/ACTIONS)" -lt 16383 ] && ok "the manifest fits the broker's read buffer (16383 octets)" || bad "pakete/social/ACTIONS is over 16383 octets (the broker rejects it)"
+[ "$(wc -c < pakete/social/ACTIONS)" -gt 8191 ] && ok "the manifest is over the old 8191 octets: the larger buffer is in use" || bad "the manifest is back under the old 8191 octets"
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "SOCIAL-PERMS: skipped, qemu missing"; fin; }
 
 mkdir -p "$TMPD/etc"
@@ -167,6 +169,36 @@ sleep 3
 act call social.invites.list
 act call social.status
 cat /etc/social/privacy
+echo ==PAGE==
+act call social.apps.allow "allow=app:reader messages.send"
+act confirm last
+act call social.apps.list
+act call social.apps.allow "allow=app:reader"
+act confirm last
+act call social.apps.allow "allow=user messages.send"
+act confirm last
+act call social.apps.deny "deny=app:reader messages.send"
+act confirm last
+act call social.apps.list
+act call social.apps.deny "deny=app:reader"
+act confirm last
+act call social.apps.list
+cat /etc/social/apps
+echo ==PAGEHIDE==
+act call social.privacy.hide "entry=Zelda"
+act confirm last
+act call social.privacy.get
+act call social.privacy.show "show=Zelda"
+act confirm last
+act call social.privacy.show "show=app:seeded"
+act confirm last
+act call social.privacy.get
+cat /etc/social/privacy
+echo ==SEARCH==
+act call social.contacts.search query=Pet
+act call social.contacts.search query=Pet --as app:talker
+act call social.contacts.search query=nobody-here
+echo ==SEARCHEND==
 echo ==LOG==
 cat /var/log/orientbus.log
 act stop
@@ -284,6 +316,25 @@ part "$C" INVFRIENDS LOG > "$TMPD/p.txt"
 has "$TMPD/p.txt" "local:peter" "friends again: the friend is back"
 hasnot "$TMPD/p.txt" "local:oma" "... the stranger is gone"
 has "$TMPD/p.txt" "invites_from=friends" "social.status shows the policy"
+part "$C" PAGE PAGEHIDE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "app:reader|contacts.read,messages.send" "r341 page: allow=<client scope> gives one right (one text field)"
+n_two=$(grep -ac 'contacts.read,messages.send' "$TMPD/p.txt")
+[ "$n_two" = 1 ] && ok "... and exactly once: after deny=<client scope> the right is gone again" || bad "reader listed with both rights $n_two times (1 expected)"
+n_bad=$(grep -ac '^err bad_arg client scope' "$TMPD/p.txt")
+[ "$n_bad" = 2 ] && ok "... a missing scope and a non-app client are refused" || bad "bad_arg: $n_bad of 2"
+n_ar=$(grep -ac 'app\.[0-9]*=app:reader' "$TMPD/p.txt")
+[ "$n_ar" = 2 ] && ok "deny=<client> takes all rights: the reader is listed twice before, gone after" || bad "reader listed $n_ar times (2 expected)"
+has "$TMPD/p.txt" "app:talker messages.send invites.send" "the table on disk after the page calls"
+part "$C" PAGEHIDE SEARCH > "$TMPD/p.txt"
+has "$TMPD/p.txt" "hide.3=Zelda" "r341 page: entry=<name> adds to the never list"
+n_ze=$(grep -ac 'Zelda' "$TMPD/p.txt")
+[ "$n_ze" = 1 ] && ok "... and show=<name> takes it off again (listed once, before)" || bad "Zelda appears $n_ze times (1 expected)"
+has "$TMPD/p.txt" "never=app:game" "... the file keeps the other entries"
+hasnot "$TMPD/p.txt" "never=app:seeded" "... and show=app:seeded took the seeded one off"
+part "$C" SEARCH SEARCHEND > "$TMPD/p.txt"
+has "$TMPD/p.txt" "contact.1=local:peter" "contacts.search as a group job: finds the friend"
+has "$TMPD/p.txt" "count=0" "... and an empty search answers count=0"
+has "$TMPD/p.txt" "err denied scope contacts.read" "... without the contacts.read right it is denied"
 part "$C" LOG FERTIG > "$TMPD/p.txt"
 has "$TMPD/p.txt" "social.privacy.invites" "the audit log names the privacy calls"
 has "$TMPD/p.txt" "social.apps.grant" "... and the grants"
