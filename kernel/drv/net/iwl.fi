@@ -49,6 +49,8 @@ import wlan.iwl_alive
 import wlan.iwl_pwr
 import wlan.iwl_fh8000
 import wlan.iwl_pin
+import wlan.iwl_diag
+import wlan.iwl_boot
 import crypto.sha256
 import drv.net.iwl_fake
 import mm.mem
@@ -56,7 +58,7 @@ import fs.vfs
 import fs.vfsops
 
 export {
-    boot, fw_stage, fw_load, count_targets, target_at, probe_at, ERR_NODEV, ERR_MAP,
+    boot, fw_stage, fw_load, diag_text, count_targets, target_at, probe_at, ERR_NODEV, ERR_MAP,
     E_FW_NONE, E_FW_PARSE, E_FW_MEM, E_FW_IMAGE
 }
 
@@ -75,6 +77,28 @@ const CMD_MEM: u64 = 0x2
 // Extra error codes next to iwl_probe.E_*.
 const ERR_NODEV: i64 = -20 // index is not a target function
 const ERR_MAP: i64 = -21 // apic.map_device found no window
+
+static mut diag_d: iwl_diag.Diag = iwl_diag.Diag {
+    phase: 0, failed_at: 0, armed: 0, init_alive: 0, rt_alive: 0, err: 0, hw_rev: 0, rf_id: 0, fw_ver: 0, fw_size: 0,
+    nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, last_cmd: 0, last_notif: 0,
+    cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32]
+}
+
+fn now_ms(state: u64) -> u64 {
+    return kstate.get(state, kstate.TICKS) * 10
+}
+
+fn diag_text(buf: u64, cap: u64) -> u64 {
+    return iwl_diag.diag_render(&diag_d, buf, cap)
+}
+
+fn diag_step(state: u64, ph: u64) {
+    iwl_diag.diag_phase(&diag_d, ph, now_ms(state))
+}
+
+fn diag_bad(state: u64, code: i64) {
+    iwl_diag.diag_fail(&diag_d, code, now_ms(state))
+}
 
 fn rd(ctx: u64, off: u64) -> u64 {
     return __mmio_read32((ctx + off) as *mut u32) as u64
@@ -220,6 +244,8 @@ fn boot(state: u64) {
             put_bdf(bdf)
             serial.nl()
         } else {
+            iwl_diag.diag_hw(&diag_d, p.hw_rev, p.rf_id)
+            diag_step(state, iwl_diag.PH_PCI)
             serial.puts((&s_hw[0]) as u64)
             pci.hexn(p.hw_rev, 8)
             serial.puts((&s_rf[0]) as u64)
@@ -331,6 +357,11 @@ fn fw_pin_line(buf: u64, size: u64) {
     var hx: [u8; 65] = [0 as u8; 65]
     sha256.hash(buf, size as usize, (&dg[0]) as u64)
     iwl_pin.hex_digest((&dg[0]) as u64, (&hx[0]) as u64)
+    var di: usize = 0
+    while di < 32 {
+        diag_d.fw_sha[di] = dg[di]
+        di = di + 1
+    }
     serial.puts((&s_sha[0]) as u64)
     serial.puts((&hx[0]) as u64)
     serial.puts((&s_pin[0]) as u64)
@@ -373,6 +404,7 @@ fn fw_prepare(state: u64, dev: u64, rev: u64, rf: u64, buf: u64, f: *mut iwl_fw.
         serial.nl()
         return E_FW_PARSE
     }
+    iwl_diag.diag_fw(&diag_d, (&path[0]) as u64, (*f).ver, size, (&diag_d.fw_sha[0]) as u64)
     serial.dec(rc as u64)
     serial.puts((&s_ver[0]) as u64)
     serial.dec((*f).ver)
@@ -486,9 +518,10 @@ fn b2_line(tag: u64, r: i64) {
     serial.nl()
 }
 
-fn b2_phase(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64, tl: u64, ta: u64) -> i64 {
+fn b2_phase(state: u64, lph: u64, aph: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64, tl: u64, ta: u64) -> i64 {
     var s_by: [u8; 8] = " bytes=\0"
     var st: iwl_fh8000.FhStat = iwl_fh8000.fhstat_new()
+    diag_step(state, lph)
     var r: i64 = iwl_fh8000.fh_load(p, f, blob, img, bounce, bounce, bsize, &st)
     var s_rc2: [u8; 4] = "rc=\0"
     serial.puts(tl)
@@ -498,10 +531,16 @@ fn b2_phase(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usiz
     serial.dec(st.bytes)
     serial.nl()
     if r != 0 {
+        diag_bad(state, r)
         return r
     }
     r = iwl_alive.alive_wait(p)
     b2_line(ta, r)
+    if r != 0 {
+        diag_bad(state, r)
+    } else {
+        diag_step(state, aph)
+    }
     return r
 }
 
@@ -513,32 +552,44 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
     var t_st: [u8; 10] = "init stop\0"
     var t_no: [u8; 11] = "no init fw\0"
     var t_pw: [u8; 6] = "power\0"
-    var t_sm: [u8; 33] = "init nvm: pending (HP-9c.1 ring)\0"
+    var t_sm: [u8; 36] = "init nvm: skipped, no command queue\0"
     var bounce: u64 = bounce_in
     if bounce == 0 {
         bounce = dma_pages(state, FH_BOUNCE_FRAMES)
     }
     if bounce == 0 {
         b2_line((&t_pw[0]) as u64, E_FW_MEM)
+        diag_step(state, iwl_diag.PH_FW_LOAD_INIT)
+        diag_bad(state, E_FW_MEM)
         return E_FW_MEM
     }
     let bsize: u64 = FH_BOUNCE_FRAMES * 4096
     if iwl_fw.fw_sec_count(f, iwl_fw.IMG_INIT) == 0 {
         b2_line((&t_no[0]) as u64, E_FW_IMAGE)
+        diag_step(state, iwl_diag.PH_FW_LOAD_INIT)
+        diag_bad(state, E_FW_IMAGE)
         return E_FW_IMAGE
     }
     var r: i64 = iwl_pwr.power_up(p)
     if r != 0 {
         b2_line((&t_pw[0]) as u64, r)
+        diag_step(state, iwl_diag.PH_FW_LOAD_INIT)
+        diag_bad(state, r)
         iwl_pwr.int_disable(p)
         return r
     }
-    r = b2_phase(p, f, blob, iwl_fw.IMG_INIT, bounce, bsize, (&t_il[0]) as u64, (&t_ia[0]) as u64)
+    r = b2_phase(state, iwl_diag.PH_FW_LOAD_INIT, iwl_diag.PH_INIT_ALIVE, p, f, blob, iwl_fw.IMG_INIT, bounce, bsize, (&t_il[0]) as u64, (&t_ia[0]) as u64)
     if r != 0 {
         iwl_pwr.int_disable(p)
         return r
     }
-    b2_line((&t_sm[0]) as u64, 0)
+    var bt: iwl_boot.Boot = iwl_boot.boot_new(0, 0, 0, 0, 0, 0, 0, 0)
+    r = iwl_boot.init_stage(&bt, &diag_d)
+    b2_line((&t_sm[0]) as u64, r)
+    if r != 0 {
+        iwl_pwr.int_disable(p)
+        return r
+    }
     iwl_pwr.int_disable(p)
     r = iwl_pwr.stop_master(p)
     iwl_pwr.sw_reset(p)
@@ -549,12 +600,16 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
     r = iwl_pwr.power_up(p)
     if r != 0 {
         b2_line((&t_pw[0]) as u64, r)
+        diag_step(state, iwl_diag.PH_FW_LOAD_INIT)
+        diag_bad(state, r)
         iwl_pwr.int_disable(p)
         return r
     }
-    r = b2_phase(p, f, blob, iwl_fw.IMG_RT, bounce, bsize, (&t_rl[0]) as u64, (&t_ra[0]) as u64)
+    r = b2_phase(state, iwl_diag.PH_FW_LOAD_RT, iwl_diag.PH_RT_ALIVE, p, f, blob, iwl_fw.IMG_RT, bounce, bsize, (&t_rl[0]) as u64, (&t_ra[0]) as u64)
     if r != 0 {
         iwl_pwr.int_disable(p)
+    } else {
+        r = iwl_boot.rt_stage(&bt, &diag_d)
     }
     return r
 }
@@ -712,6 +767,11 @@ fn fw_stage(state: u64) {
         let r: i64 = probe_at(state, i, &p, false)
         if r == 0 {
             let rf: i64 = fw_prepare(state, p.dev, p.hw_rev, p.rf_id, buf, &f)
+            iwl_diag.diag_armed(&diag_d, kstate.mode_on(state, kstate.M_IWLBOOT))
+            if rf != 0 && kstate.mode_on(state, kstate.M_IWLBOOT) {
+                diag_step(state, iwl_diag.PH_FW_LOAD_INIT)
+                diag_bad(state, rf)
+            }
             if rf == E_FW_NONE {
                 serial.puts((&s_none[0]) as u64)
                 serial.nl()
