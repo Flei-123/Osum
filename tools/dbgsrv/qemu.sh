@@ -42,13 +42,13 @@ timeout 400 qemu-system-x86_64 -accel $ACC -kernel "$T/k.mb" -m 256 \
     -drive "file=$T/d.img,format=raw,if=ide" \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$P1-:8765,hostfwd=tcp:127.0.0.1:$P2-:8766,hostfwd=tcp:127.0.0.1:$((P2+1))-:8767" \
     -device qemu-xhci,id=x0 -device usb-net,netdev=n0,mac=52:54:00:12:34:77 \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$T/qemu.out" 2>&1 &
 QPID=$!
 S="$T/ser.txt"
-klar() { tr -cd '\11\12\15\40-\176' < "$S"; }
+klar() { [ -f "$S" ] || return 0; tr -cd '\11\12\15\40-\176' < "$S"; }
 waitfor() { local i=0; while [ $i -lt $2 ]; do klar | grep -aq -- "$1" && return 0; kill -0 $QPID 2>/dev/null || return 1; sleep 1; i=$((i+1)); done; return 1; }
 
-if waitfor 'dbgsrv: listening on 8765' 200; then ok "dbgsrv listens after DHCP over the USB function"; else bad "dbgsrv never listened"; klar | tail -30; fi
+if waitfor 'dbgsrv: listening on 8765' 200; then ok "dbgsrv listens after DHCP over the USB function"; else bad "dbgsrv never listened"; head -5 "$T/qemu.out"; klar | tail -30; fi
 klar | grep -aq 'dhcp: ack ip=10.0.2.15' && ok "DHCP lease on usb-net" || bad "no DHCP lease"
 klar | grep -aq 'dbgsrv: address is http://10.0.2.15:8765/' && ok "address announced on the console" || bad "address line missing"
 
