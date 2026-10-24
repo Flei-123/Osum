@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/hotkeys/run.sh -- Windows-style global hotkeys (W1b):
 #   Win+E explorer, Win+I settings, Win+D show desktop (toggle), Win+R run (start menu),
-#   Win+Left/Right/Up/Down window snap, Ctrl+Shift+Esc task manager.
+#   Win+Left/Right/Up/Down window snap, Win+Tab task view, Ctrl+Shift+Esc task manager.
 # One desktop boot (QEMU usb-kbd through the HID layer, keys via the monitor `sendkey`), then the serial lines are checked:
 #   kbd.fi latches the key ("hk: super+<c>", "kbd: win+arrow", "hk: taskmgr"),
 #   the taskbar acts ("taskbar: hk start <bundle>", "taskbar: hk desktop n="),
@@ -27,7 +27,7 @@ PROGS="desktop taskbar launcher settings theme explorer sh echo ls cat"
 # warm-up: the first key after the first pulse line was lost once on a loaded host -> wait, send a harmless shift
 KEYS=(mon="warte 5" mon="sendkey shift" mon="warte 2" mon="sendkey meta_l-e" mon="warte 2" mon="sendkey meta_l-i" mon="warte 2" mon="sendkey meta_l-d" mon="warte 2"
       mon="sendkey meta_l-d" mon="warte 2" mon="sendkey meta_l-left" mon="warte 2" mon="sendkey meta_l-right" mon="warte 2"
-      mon="sendkey meta_l-up" mon="warte 2" mon="sendkey meta_l-down" mon="warte 2" mon="sendkey ctrl-shift-esc" mon="warte 2"
+      mon="sendkey meta_l-up" mon="warte 2" mon="sendkey meta_l-down" mon="warte 2" mon="sendkey ctrl-shift-esc" mon="warte 2" mon="sendkey meta_l-tab" mon="warte 2"
       mon="sendkey meta_l-r" mon="warte 2")
 
 run_tree() { # tree out
@@ -48,6 +48,8 @@ has "$S" "taskbar: hk start /apps/settings.osp/start" "Win+I starts the settings
 has "$S" "hk: super+d" "Win+D latched"
 N=$(grep -ac 'taskbar: hk desktop n=' "$S")
 [ "$N" -ge 2 ] && ok "Win+D twice -> two show-desktop toggles ($N)" || bad "Win+D toggles: $N, want >= 2"
+has "$S" "taskbar: hk tv" "Win+Tab toggles the task view"
+has "$S" "taskview: open n=" "Win+Tab opens the task view card"
 has "$S" "hk: super+r" "Win+R latched"
 has "$S" "taskbar: hk start /apps/run.osp/start" "Win+R starts the Run dialog bundle"
 has "$S" "hk: taskmgr" "Ctrl+Shift+Esc latched (own line, no garbage char)"
@@ -73,6 +75,7 @@ if git rev-parse -q --verify "$BASE_COMMIT^{commit}" >/dev/null 2>&1; then
     hasnt "$O" "taskbar: hk desktop n=" "old: Win+D does nothing"
     hasnt "$O" "wm: winarrow" "old: Win+arrows do not snap"
     hasnt "$O" "hk: taskmgr" "old: Ctrl+Shift+Esc not latched"
+    hasnt "$O" "taskbar: hk tv" "old: Win+Tab does nothing"
     [ -s "$O" ] && ok "old kernel booted (counter-probe is a real run)" || bad "old run produced no serial"
 else
     echo "  (skipped: base commit $BASE_COMMIT not in this clone)"
