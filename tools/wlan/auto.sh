@@ -132,5 +132,39 @@ has "$T/h.klar" 'fakefw: addsta q4 missing' "iwloldtxq: ADD_STA without the queu
 hasnot "$T/h.klar" 'fakeap: m4 ok' "iwloldtxq: no handshake without data TX"
 hasnot "$T/h.klar" 'fakefw: tx ok q4' "iwloldtxq: no accepted DQA frame"
 
+pmkfield() { grep -aoE "wlan: pmk steps [0-9]+ max_us [0-9]+" "$1" | head -1 | awk -v f="$2" '{print (f=="steps") ? $4 : $6}'; }
+cs=$(pmkfield "$C" steps); cm=$(pmkfield "$C" max)
+[ -n "$cs" ] && [ "$cs" -ge 16 ] && ok "W-WLAN20: PMK computed in $cs steps with a yield after each" || bad "W-WLAN20: PMK step count '$cs'"
+[ -n "$cm" ] && [ "$cm" -lt 20000 ] && ok "W-WLAN20: longest PMK block ${cm} us < 20000 us" || bad "W-WLAN20: longest PMK block '$cm' us"
+echo "-- i: counter-proof iwloldpbkdf (PBKDF2 in one block)"
+image i "$T/good.conf" || { bad "image i"; }
+run i "iwlfhtest iwlfhbind iwloldpbkdf"
+is=$(pmkfield "$T/i.klar" steps); im=$(pmkfield "$T/i.klar" max)
+[ "$is" = 1 ] && ok "iwloldpbkdf: one single step" || bad "iwloldpbkdf: steps '$is'"
+[ -n "$im" ] && [ -n "$cm" ] && [ "$im" -gt $((cm * 4)) ] && [ "$im" -ge 20000 ] && ok "iwloldpbkdf: one block of ${im} us vs ${cm} us staged" || bad "iwloldpbkdf: block '$im' us not clearly longer than staged '$cm' us"
+has "$T/i.klar" 'fakeap: m4 ok' "iwloldpbkdf: the join still completes (same PMK)"
+
+printf 'echo ==START==\nsleep 30\necho ==SNAP 0==\ncat /proc/wlan\nsleep 30\necho ==SNAP 1==\ncat /proc/wlan\necho ==END==\n' > "$T/s.sh"
+echo "-- j: AP vanishes after the lease (iwlfhdrop): probe, link lost, reconnect"
+image j "$T/good.conf" || { bad "image j"; }
+run j "iwlfhtest iwlfhbind iwlfhdrop wlanloss"
+J="$T/j.klar"
+has "$J" 'fakeap: drop' "W-WLAN20: fake AP goes deaf after the lease"
+has "$J" 'wlan: link probe 0' "W-WLAN20: quiet link triggers the ARP probe"
+has "$J" 'wlan: link lost 1' "W-WLAN20: unanswered probe declares the link lost"
+[ "$(grep -ac 'fakeap: m4 ok' "$J")" -ge 2 ] && ok "W-WLAN20: second 4-way handshake after the loss" || bad "W-WLAN20: no second handshake"
+grep -aqE 'link losses=[1-9][0-9]* reconnects=[1-9][0-9]*' "$J" && ok "W-WLAN20: /proc/wlan reports losses and reconnects" || bad "W-WLAN20: /proc/wlan counters missing"
+awk '/==SNAP 1==/{f=1} f' "$J" | grep -aq 'auto=up rc=0' && ok "W-WLAN20: up again at the end" || bad "W-WLAN20: not up again"
+hasnot "$J" 'fakefw: tx bad' "W-WLAN20: no malformed TX descriptor on reconnect"
+echo "-- k: counter-proof iwloldloss (no beacon-loss detection)"
+image lk "$T/good.conf" || { bad "image lk"; }
+run lk "iwlfhtest iwlfhbind iwlfhdrop wlanloss iwloldloss"
+K="$T/lk.klar"
+has "$K" 'fakeap: drop' "iwloldloss: the AP still vanishes"
+hasnot "$K" 'wlan: link lost' "iwloldloss: the loss is never noticed"
+hasnot "$K" 'wlan: link probe' "iwloldloss: no probe"
+[ "$(grep -ac 'fakeap: m4 ok' "$K")" -eq 1 ] && ok "iwloldloss: no reconnect" || bad "iwloldloss: unexpected handshake count"
+has "$K" 'link losses=0 reconnects=0' "iwloldloss: counters stay zero"
+
 echo "WLANAUTO: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]

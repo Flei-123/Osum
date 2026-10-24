@@ -10,7 +10,7 @@ import wlan.ccmp
 import crypto.aes
 import drv.net.iwl_fakeap_frames
 
-export { reset, on_tx, resp_ptr, resp_len, stat, STAT_AUTH, STAT_ASSOC, STAT_M2, STAT_BADMIC, STAT_M4, STAT_DISCOVER, STAT_REQUEST, STAT_DATA, STAT_ARP, STAT_ICMP }
+export { reset, set_drop, on_tx, resp_ptr, resp_len, stat, STAT_AUTH, STAT_ASSOC, STAT_M2, STAT_BADMIC, STAT_M4, STAT_DISCOVER, STAT_REQUEST, STAT_DATA, STAT_ARP, STAT_ICMP }
 
 const SLOT: u64 = 512
 const SLOTS: u64 = 4
@@ -33,6 +33,9 @@ const STAT_ARP: u64 = 8
 const STAT_ICMP: u64 = 9
 
 static mut fa_state: u64 = 0
+static mut fa_drop_arm: u64 = 0
+static mut fa_deaf: u64 = 0
+static mut fa_msg_drop: [u8; 13] = "fakeap: drop\0"
 static mut fa_pmk_ok: u64 = 0
 static mut fa_resp_n: u64 = 0
 static mut fa_nonce_seq: u64 = 0
@@ -68,8 +71,11 @@ fn stat(i: u64) -> u64 { return fa_stats[(i & 15) as usize] }
 
 fn bump(i: u64) { fa_stats[(i & 15) as usize] = fa_stats[(i & 15) as usize] + 1 }
 
+fn set_drop(on: u64) { fa_drop_arm = on }
+
 fn reset() {
     fa_state = ST_IDLE
+    fa_deaf = 0
     fa_resp_n = 0
     fa_nonce_seq = 0
     var i: u64 = 0
@@ -319,10 +325,16 @@ fn on_ip(p: u64, n: u64) {
         bump(STAT_REQUEST)
         say((&fa_msg_req[0]) as u64)
         send_dhcp(llc.D_ACK, dh.xid)
+        if fa_drop_arm != 0 {
+            fa_drop_arm = 0
+            fa_deaf = 1
+            say((&fa_msg_drop[0]) as u64)
+        }
     }
 }
 
 fn on_data(p: u64, n: u64) {
+    if fa_deaf != 0 { return }
     let fc1: u64 = iwl_le.ld8(p, 1)
     if (fc1 & 3) != 1 { return }
     if !iwl_fakeap_frames.same6(p, 4, bssid_addr(), 0) { return }
@@ -352,6 +364,7 @@ fn on_mgmt(p: u64, n: u64) {
         if f == 0 { return }
         queue_commit(iwl_fakeap_frames.auth_reply_build(f, sta_addr(), bssid_addr()))
         fa_state = ST_AUTHED
+        fa_deaf = 0
         bump(STAT_AUTH)
         say((&fa_msg_auth[0]) as u64)
     }

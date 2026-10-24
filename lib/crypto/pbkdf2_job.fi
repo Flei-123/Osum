@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import crypto.sha1
+
+export {
+    Pbkdf2Job, pbkdf2_job_new, pbkdf2_job_start, pbkdf2_job_step, pbkdf2_job_active, pbkdf2_job_wipe,
+    JOB_DIGEST
+}
+
+const JOB_DIGEST: usize = 20
+
+struct Pbkdf2Job {
+    pw: u64,
+    pwlen: usize,
+    salt: u64,
+    saltlen: usize,
+    iters: usize,
+    out: u64,
+    outlen: usize,
+    blocknr: u64,
+    pos: usize,
+    it: usize,
+    active: bool,
+    idx: [u8; 4],
+    u: [u8; 20],
+    acc: [u8; 20]
+}
+
+fn pbkdf2_job_new() -> Pbkdf2Job {
+    var j: Pbkdf2Job = Pbkdf2Job {
+        pw: 0, pwlen: 0, salt: 0, saltlen: 0, iters: 0, out: 0, outlen: 0,
+        blocknr: 1, pos: 0, it: 0, active: false,
+        idx: [0; 4], u: [0; 20], acc: [0; 20]
+    }
+    return j
+}
+
+fn pbkdf2_job_active(j: *mut Pbkdf2Job) -> bool { return (*j).active }
+
+fn pbkdf2_job_wipe(j: *mut Pbkdf2Job) {
+    var i: usize = 0
+    while i < 20 {
+        (*j).u[i] = 0 as u8
+        (*j).acc[i] = 0 as u8
+        i = i + 1
+    }
+    (*j).pw = 0
+    (*j).salt = 0
+    (*j).active = false
+}
+
+fn pbkdf2_job_start(j: *mut Pbkdf2Job, pw: u64, pwlen: usize, salt: u64, saltlen: usize,
+    iters: usize, out: u64, outlen: usize) -> bool {
+    if outlen > sha1.OUT_MAX || iters == 0 || outlen == 0 { return false }
+    (*j).pw = pw
+    (*j).pwlen = pwlen
+    (*j).salt = salt
+    (*j).saltlen = saltlen
+    (*j).iters = iters
+    (*j).out = out
+    (*j).outlen = outlen
+    (*j).blocknr = 1
+    (*j).pos = 0
+    (*j).it = 0
+    (*j).active = true
+    return true
+}
+
+fn block_begin(j: *mut Pbkdf2Job) {
+    let b: u64 = (*j).blocknr
+    (*j).idx[0] = ((b >> 24) & 255) as u8
+    (*j).idx[1] = ((b >> 16) & 255) as u8
+    (*j).idx[2] = ((b >> 8) & 255) as u8
+    (*j).idx[3] = (b & 255) as u8
+    sha1.hmac3((*j).pw, (*j).pwlen, (*j).salt, (*j).saltlen, (&(*j).idx[0]) as u64, 4, 0, 0,
+        (&(*j).u[0]) as u64)
+    var i: usize = 0
+    while i < JOB_DIGEST {
+        (*j).acc[i] = (*j).u[i]
+        i = i + 1
+    }
+    (*j).it = 1
+}
+
+fn block_round(j: *mut Pbkdf2Job) {
+    sha1.hmac3((*j).pw, (*j).pwlen, (&(*j).u[0]) as u64, JOB_DIGEST, 0, 0, 0, 0, (&(*j).u[0]) as u64)
+    var i: usize = 0
+    while i < JOB_DIGEST {
+        (*j).acc[i] = (*j).acc[i] ^ (*j).u[i]
+        i = i + 1
+    }
+    (*j).it = (*j).it + 1
+}
+
+fn block_finish(j: *mut Pbkdf2Job) {
+    var i: usize = 0
+    while i < JOB_DIGEST && (*j).pos + i < (*j).outlen {
+        *(((*j).out + ((*j).pos + i) as u64) as *mut u8) = (*j).acc[i]
+        i = i + 1
+    }
+    (*j).pos = (*j).pos + JOB_DIGEST
+    (*j).blocknr = (*j).blocknr + 1
+    (*j).it = 0
+    if (*j).pos >= (*j).outlen { (*j).active = false }
+}
+
+fn pbkdf2_job_step(j: *mut Pbkdf2Job, budget: usize) -> bool {
+    var left: usize = budget
+    if left == 0 { left = 1 }
+    while left > 0 && (*j).active {
+        if (*j).it == 0 {
+            block_begin(j)
+        } else if (*j).it < (*j).iters {
+            block_round(j)
+        }
+        left = left - 1
+        if (*j).it >= (*j).iters { block_finish(j) }
+    }
+    return !(*j).active
+}

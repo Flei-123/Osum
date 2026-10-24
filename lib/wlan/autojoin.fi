@@ -7,8 +7,9 @@ import wlan.wlanconf
 
 export {
     Auto, auto_new, auto_attempt, auto_due, auto_state, auto_rc, auto_tries, auto_wait_until,
-    auto_driver_wait, auto_lease, auto_conf, auto_name, auto_up,
-    AS_WAIT_DRIVER, AS_NO_CONF, AS_BAD_CONF, AS_JOINING, AS_DHCP, AS_UP, AS_RETRY,
+    auto_driver_wait, auto_pmk_chunk_set, auto_pmk_steps, auto_rx_seen, auto_link_check, auto_link_lost, auto_losses, auto_reconnects, auto_lease, auto_conf, auto_name, auto_up,
+    AS_WAIT_DRIVER, AS_NO_CONF, AS_BAD_CONF, AS_JOINING, AS_DHCP, AS_UP, AS_RETRY, AS_PMK, PMK_CHUNK_DEFAULT,
+    LC_OK, LC_PROBE, LC_LOST, LINK_QUIET, LINK_PROBE_WAIT, E_LINK_LOST,
     BACKOFF_MIN, BACKOFF_MAX
 }
 
@@ -19,6 +20,16 @@ const AS_JOINING: u64 = 3
 const AS_DHCP: u64 = 4
 const AS_UP: u64 = 5
 const AS_RETRY: u64 = 6
+const AS_PMK: u64 = 7
+
+const PMK_CHUNK_DEFAULT: u64 = 128
+
+const LINK_QUIET: u64 = 8
+const LINK_PROBE_WAIT: u64 = 3
+const LC_OK: u64 = 0
+const LC_PROBE: u64 = 1
+const LC_LOST: u64 = 2
+const E_LINK_LOST: i64 = -310
 
 const BACKOFF_MIN: u64 = 2
 const BACKOFF_MAX: u64 = 64
@@ -29,6 +40,13 @@ struct Auto {
     tries: u64,
     wait_until: u64,
     step: u64,
+    pmk_chunk: u64,
+    pmk_steps: u64,
+    rx_at: u64,
+    probe_at: u64,
+    probing: bool,
+    losses: u64,
+    reconnects: u64,
     lease: dhcp_link.Lease,
     conf: wlanconf.Conf
 }
@@ -36,6 +54,8 @@ struct Auto {
 fn auto_new() -> Auto {
     var a: Auto = Auto {
         state: AS_WAIT_DRIVER, last_rc: 0, tries: 0, wait_until: 0, step: 0,
+        pmk_chunk: PMK_CHUNK_DEFAULT, pmk_steps: 0,
+        rx_at: 0, probe_at: 0, probing: false, losses: 0, reconnects: 0,
         lease: dhcp_link.lease_new(), conf: wlanconf.conf_new()
     }
     return a
@@ -48,6 +68,44 @@ fn auto_wait_until(a: *mut Auto) -> u64 { return (*a).wait_until }
 fn auto_up(a: *mut Auto) -> bool { return (*a).state == AS_UP }
 fn auto_lease(a: *mut Auto) -> *mut dhcp_link.Lease { return &(*a).lease }
 fn auto_conf(a: *mut Auto) -> *mut wlanconf.Conf { return &(*a).conf }
+
+fn auto_pmk_chunk_set(a: *mut Auto, n: u64) {
+    if n == 0 { (*a).pmk_chunk = PMK_CHUNK_DEFAULT } else { (*a).pmk_chunk = n }
+}
+
+fn auto_pmk_steps(a: *mut Auto) -> u64 { return (*a).pmk_steps }
+
+fn auto_losses(a: *mut Auto) -> u64 { return (*a).losses }
+fn auto_reconnects(a: *mut Auto) -> u64 { return (*a).reconnects }
+
+fn auto_rx_seen(a: *mut Auto, now: u64) {
+    (*a).rx_at = now
+    (*a).probing = false
+}
+
+fn auto_link_check(a: *mut Auto, now: u64) -> u64 {
+    if (*a).state != AS_UP { return LC_OK }
+    if (*a).probing {
+        if now >= (*a).probe_at + LINK_PROBE_WAIT { return LC_LOST }
+        return LC_OK
+    }
+    if now >= (*a).rx_at + LINK_QUIET {
+        (*a).probing = true
+        (*a).probe_at = now
+        return LC_PROBE
+    }
+    return LC_OK
+}
+
+fn auto_link_lost(a: *mut Auto, now: u64) {
+    (*a).state = AS_RETRY
+    (*a).last_rc = E_LINK_LOST
+    (*a).losses = (*a).losses + 1
+    (*a).probing = false
+    (*a).step = 0
+    (*a).wait_until = now
+    (*a).lease = dhcp_link.lease_new()
+}
 
 fn auto_due(a: *mut Auto, now: u64) -> bool { return now >= (*a).wait_until }
 
@@ -72,6 +130,21 @@ fn fail(a: *mut Auto, state: u64, rc: i64, now: u64) -> i64 {
     return rc
 }
 
+fn pmk_run(a: *mut Auto, idle: fn(u64) -> u64, idle_ctx: u64) -> i64 {
+    (*a).state = AS_PMK
+    (*a).pmk_steps = 0
+    let br: i64 = wlanconf.conf_pmk_begin(&(*a).conf)
+    if br != 0 { return br }
+    let _y0: u64 = idle(idle_ctx)
+    var done: bool = false
+    while !done {
+        done = wlanconf.conf_pmk_step(&(*a).conf, (*a).pmk_chunk as usize)
+        (*a).pmk_steps = (*a).pmk_steps + 1
+        let _y: u64 = idle(idle_ctx)
+    }
+    return 0
+}
+
 #[allow_escape]
 fn auto_attempt(a: *mut Auto, buf: u64, len: usize, j: *mut join.Join, s: *mut connect.Session,
     g: *mut device.Device, o: *mut iwl_ops.Mvm, idle: fn(u64) -> u64, idle_ctx: u64,
@@ -83,7 +156,7 @@ fn auto_attempt(a: *mut Auto, buf: u64, len: usize, j: *mut join.Join, s: *mut c
         if pr == wlanconf.E_CONF_EMPTY { return fail(a, AS_NO_CONF, pr, now) }
         return fail(a, AS_BAD_CONF, pr, now)
     }
-    let kr: i64 = wlanconf.conf_pmk(&(*a).conf)
+    let kr: i64 = pmk_run(a, idle, idle_ctx)
     if kr != 0 || !wlanconf.conf_apply(&(*a).conf, j) {
         wlanconf.conf_clear(&(*a).conf)
         return fail(a, AS_BAD_CONF, wlanconf.E_CONF_PMK, now)
@@ -99,6 +172,9 @@ fn auto_attempt(a: *mut Auto, buf: u64, len: usize, j: *mut join.Join, s: *mut c
     if dr != 0 { return fail(a, AS_RETRY, dr, now) }
     (*a).state = AS_UP
     (*a).last_rc = 0
+    (*a).probing = false
+    (*a).rx_at = now
+    if (*a).losses > (*a).reconnects { (*a).reconnects = (*a).reconnects + 1 }
     (*a).step = 0
     (*a).wait_until = 0
     return 0
@@ -122,11 +198,13 @@ fn auto_name(state: u64, dst: u64) -> usize {
     var n_dhcp: [u8; 5] = "dhcp\0"
     var n_up: [u8; 3] = "up\0"
     var n_retry: [u8; 6] = "retry\0"
+    var n_pmk: [u8; 4] = "pmk\0"
     if state == AS_NO_CONF { return copy_name((&n_noconf[0]) as u64, dst) }
     if state == AS_BAD_CONF { return copy_name((&n_bad[0]) as u64, dst) }
     if state == AS_JOINING { return copy_name((&n_join[0]) as u64, dst) }
     if state == AS_DHCP { return copy_name((&n_dhcp[0]) as u64, dst) }
     if state == AS_UP { return copy_name((&n_up[0]) as u64, dst) }
     if state == AS_RETRY { return copy_name((&n_retry[0]) as u64, dst) }
+    if state == AS_PMK { return copy_name((&n_pmk[0]) as u64, dst) }
     return copy_name((&n_wait[0]) as u64, dst)
 }
