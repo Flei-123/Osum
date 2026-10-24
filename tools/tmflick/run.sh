@@ -17,7 +17,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 APPS=${*:-taskmgr explorer}
-corner() { case $1 in taskmgr) echo 982,618;; explorer) echo 931,673;; esac; }
+corner() { case $1 in taskmgr) echo 982,618;; explorer) echo 931,673;; charmap) echo 922,543;; esac; }
 appargs() { case $1 in taskmgr) echo ",takt,100";; *) echo "";; esac; }
 for app in $APPS; do
     printf "warte 8\nfoto base\nfahre $(corner $app)\nwarte 2\nserie drag:14,9,12 72 r 35\nwarte 2\nfoto post\n" > "$TMPD/book.txt"

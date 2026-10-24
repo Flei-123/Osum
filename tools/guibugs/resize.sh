@@ -24,7 +24,11 @@ DREH="$OUT-drehbuch.txt"
   for s in $STEPS; do
     n=$((n + 1))
     IFS=, read -r e dx dy <<< "$s"
-    echo "ziehkante ${WINID:-19} $e $((dx * SCALE)),$((dy * SCALE))"
+    case "$e" in
+      max) echo "taste f12"; echo "warte 2"; echo "klickauf cap_max" ;;
+      page) echo "klickauf ${PAGETAB:-srecttabd}" ;;
+      *) echo "ziehkante ${WINID:-19} $e $((dx * SCALE)),$((dy * SCALE))" ;;
+    esac
     echo "warte 4"
     echo "taste f12"
     echo "warte 2"
