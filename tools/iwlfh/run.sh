@@ -248,5 +248,17 @@ has "$L7" 'fail_alive=int=' "counter-proof iwloldalive: fail_alive line (CSR_INT
 has "$L7" 'fail_regs=hwif=' "counter-proof iwloldalive: first failure snapshot kept (not overwritten after int_disable)"
 has "$L7" '==END==' "counter-proof iwloldalive: the rest of the system keeps running"
 
+runc l8 "iwlfhtest iwlfhrxonly"
+L8="$T/l8.klar"
+has "$L8" 'iwl: boot2 init alive rc=0' "rx-only ALIVE (no CSR_INT bit 0): accepted via the RX ring"
+has "$L8" 'iwl: boot2 rt alive rc=0' "rx-only ALIVE: runtime image reaches ALIVE too"
+has "$L8" 'phase=ready' "rx-only ALIVE: /proc/wlan phase=ready"
+hasnot "$L8" 'fail_alive=' "rx-only ALIVE: no failure line"
+runc l9 "iwlfhtest iwlfhrxonly iwloldalive"
+L9="$T/l9.klar"
+has "$L9" 'iwl: boot2 init alive rc=-30' "counter-proof iwloldalive: bit-0-only wait never sees the rx-only ALIVE (-30)"
+has "$L9" 'phase=failed' "counter-proof iwloldalive rxonly: phase=failed"
+has "$L9" '==END==' "counter-proof iwloldalive rxonly: the rest of the system keeps running"
+
 echo "IWLFH: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]
