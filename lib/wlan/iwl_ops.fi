@@ -1,0 +1,442 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.device
+import wlan.frame
+import wlan.iwl_buf
+import wlan.iwl_le
+import wlan.iwl_mvm
+import wlan.iwl_mvm_ctx
+import wlan.iwl_mvm_scan
+import wlan.iwl_mvm_tx
+
+export {
+    Mvm, Transport, mvm_new, ops_attach, ops_setup, ops_scan_start, ops_scan_state,
+    ops_peer_add, ops_peer_remove, ops_associated, ops_poll_one, ops_rssi, ops_rx_channel,
+    ops_keys_sent, ops_cmd_count, ops_set_hw_crypto, ops_set_queues, ops_set_address,
+    ops_default_channels,
+    SCAN_IDLE, SCAN_RUNNING, SCAN_DONE, SCAN_ABORTED,
+    E_OPS_STATE, E_OPS_FW, E_OPS_ARGS, STA_AP, MAX_CHANNELS
+}
+
+const SCAN_IDLE: u64 = 0
+const SCAN_RUNNING: u64 = 1
+const SCAN_DONE: u64 = 2
+const SCAN_ABORTED: u64 = 3
+
+const E_OPS_STATE: i64 = -60
+const E_OPS_FW: i64 = -61
+const E_OPS_ARGS: i64 = -62
+
+const STA_AP: u64 = 0
+const STA_BCAST: u64 = 1
+const MAC_ID: u64 = 0
+const PHY_ID: u64 = 0
+const BIND_ID: u64 = 0
+const MAX_CHANNELS: u64 = 40
+
+const CMD_REMOVE_STA: u64 = 0x19
+const CMD_PHY_CTX: u64 = 0x08
+const CMD_BUF: usize = 2600
+const RX_BUF: usize = 2600
+const RATE_6M_OFDM: u64 = 0x400D
+const PHY_CHAINS: u64 = 0x606
+const FRAME_PAD: u64 = 2
+
+struct Transport {
+    submit: fn(u64, u64, usize) -> i64,
+    poll: fn(u64, u64, usize) -> i64
+}
+
+struct Mvm {
+    tr: Transport,
+    tctx: u64,
+    mac: [u8; 6],
+    bssid: [u8; 6],
+    channel: u64,
+    cmd_queue: u64,
+    tx_queue: u64,
+    slot: u64,
+    hw_crypto: bool,
+    ctx_ready: bool,
+    peer_added: bool,
+    scan_state: u64,
+    scan_uid: u64,
+    scan_status: u64,
+    rssi: i64,
+    rx_channel: u64,
+    cmds: u64,
+    keys_sent: u64,
+    cmd: [u8; 2600],
+    rx: [u8; 2600]
+}
+
+fn dead_submit(ctx: u64, buf: u64, len: usize) -> i64 { return -1 }
+fn dead_poll(ctx: u64, buf: u64, room: usize) -> i64 { return -1 }
+
+fn mvm_new() -> Mvm {
+    var o: Mvm = Mvm {
+        tr: Transport { submit: dead_submit, poll: dead_poll },
+        tctx: 0, mac: [0; 6], bssid: [0; 6], channel: 1,
+        cmd_queue: 0, tx_queue: 2, slot: 0, hw_crypto: false,
+        ctx_ready: false, peer_added: false,
+        scan_state: 0, scan_uid: 0, scan_status: 0,
+        rssi: 0, rx_channel: 0, cmds: 0, keys_sent: 0,
+        cmd: [0; 2600], rx: [0; 2600]
+    }
+    return o
+}
+
+fn ops_set_hw_crypto(o: *mut Mvm, on: bool) { (*o).hw_crypto = on }
+fn ops_set_queues(o: *mut Mvm, cmd_queue: u64, tx_queue: u64) {
+    (*o).cmd_queue = cmd_queue
+    (*o).tx_queue = tx_queue
+}
+fn ops_scan_state(o: *mut Mvm) -> u64 { return (*o).scan_state }
+fn ops_rssi(o: *mut Mvm) -> i64 { return (*o).rssi }
+fn ops_rx_channel(o: *mut Mvm) -> u64 { return (*o).rx_channel }
+fn ops_keys_sent(o: *mut Mvm) -> u64 { return (*o).keys_sent }
+fn ops_cmd_count(o: *mut Mvm) -> u64 { return (*o).cmds }
+
+fn ops_set_address(o: *mut Mvm, mac: u64) {
+    var i: usize = 0
+    while i < 6 {
+        (*o).mac[i] = *((mac + i as u64) as *mut u8)
+        i = i + 1
+    }
+}
+
+fn cmd_addr(o: *mut Mvm) -> u64 { return (&(*o).cmd[0]) as u64 }
+fn rx_addr(o: *mut Mvm) -> u64 { return (&(*o).rx[0]) as u64 }
+fn mac_addr(o: *mut Mvm) -> u64 { return (&(*o).mac[0]) as u64 }
+fn bssid_addr(o: *mut Mvm) -> u64 { return (&(*o).bssid[0]) as u64 }
+
+fn next_slot(o: *mut Mvm) -> u64 {
+    (*o).slot = ((*o).slot + 1) & 0xFF
+    return (*o).slot
+}
+
+fn submit(o: *mut Mvm, len: u64) -> i64 {
+    (*o).cmds = (*o).cmds + 1
+    let t: Transport = (*o).tr
+    let r: i64 = t.submit((*o).tctx, cmd_addr(o), len as usize)
+    if r < 0 { return r }
+    if r > 0 { return E_OPS_FW }
+    return 0
+}
+
+fn ops_attach(g: *mut device.Device, o: *mut Mvm, tctx: u64,
+    submit_fn: fn(u64, u64, usize) -> i64,
+    poll_fn: fn(u64, u64, usize) -> i64) -> bool {
+    (*o).tr = Transport { submit: submit_fn, poll: poll_fn }
+    (*o).tctx = tctx
+    let ok: bool = device.board_set(g, o as u64, o_send, o_receive,
+        o_channel, o_key, (*o).hw_crypto)
+    if ok { device.addr_set(g, mac_addr(o)) }
+    return ok
+}
+
+fn band_of(channel: u64) -> u64 {
+    if channel <= 14 { return 1 }
+    return 0
+}
+
+fn phy_cmd(o: *mut Mvm, action: u64, channel: u64) -> i64 {
+    let n: u64 = iwl_mvm.mvm_phy_ctx(cmd_addr(o), (*o).cmd_queue, next_slot(o),
+        PHY_ID, 0, action, band_of(channel), channel, 0, 0, PHY_CHAINS)
+    return submit(o, n)
+}
+
+fn mac_cmd(o: *mut Mvm, action: u64, assoc: bool, aid: u64) -> i64 {
+    let a: u64 = cmd_addr(o)
+    let n: u64 = iwl_mvm_ctx.mvm_mac_ctx(a, (*o).cmd_queue, next_slot(o),
+        iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), action, iwl_mvm_ctx.MAC_TYPE_BSS_STA, 0,
+        mac_addr(o), bssid_addr(o), 0xF, 0xFF, 0, 0, 0, 0, 1)
+    iwl_mvm_ctx.mvm_mac_ac(a, 0, 15, 1023, 3, 2, 0)
+    iwl_mvm_ctx.mvm_mac_ac(a, 1, 15, 1023, 7, 3, 0)
+    iwl_mvm_ctx.mvm_mac_ac(a, 2, 7, 15, 2, 1, 3008)
+    iwl_mvm_ctx.mvm_mac_ac(a, 3, 3, 7, 2, 0, 1504)
+    var is_assoc: u64 = 0
+    if assoc { is_assoc = 1 }
+    iwl_mvm_ctx.mvm_mac_sta(a, is_assoc, 0, 0, 100, 1, 0, 0, aid, 0)
+    return submit(o, n)
+}
+
+fn bind_cmd(o: *mut Mvm) -> i64 {
+    let n: u64 = iwl_mvm_ctx.mvm_binding(cmd_addr(o), (*o).cmd_queue, next_slot(o),
+        iwl_mvm_ctx.mvm_id_color(BIND_ID, 0), iwl_mvm_ctx.CTXT_ADD,
+        iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), iwl_mvm_ctx.CTXT_INVALID,
+        iwl_mvm_ctx.CTXT_INVALID, iwl_mvm_ctx.mvm_id_color(PHY_ID, 0))
+    return submit(o, n)
+}
+
+fn scan_cfg_cmd(o: *mut Mvm) -> i64 {
+    var chans: [u8; 40] = [0; 40]
+    let n: u64 = ops_default_channels((&chans[0]) as u64)
+    let flags: u64 = iwl_mvm_scan.SCAN_CFG_ACTIVATE | iwl_mvm_scan.SCAN_CFG_SET_TX_CHAINS
+        | iwl_mvm_scan.SCAN_CFG_SET_RX_CHAINS | iwl_mvm_scan.SCAN_CFG_SET_ALL_TIMES
+        | iwl_mvm_scan.SCAN_CFG_SET_CHANNEL_FLAGS | iwl_mvm_scan.SCAN_CFG_SET_LEGACY_RATES
+        | iwl_mvm_scan.SCAN_CFG_SET_MAC_ADDR
+    let len: u64 = iwl_mvm_scan.mvm_scan_cfg(cmd_addr(o), (*o).cmd_queue, next_slot(o),
+        flags, 3, 3, 0xFF0F, 0, 0, 30, 110, 44, 0, mac_addr(o), STA_BCAST, 1,
+        (&chans[0]) as u64, n)
+    return submit(o, len)
+}
+
+fn ops_setup(o: *mut Mvm) -> i64 {
+    var r: i64 = phy_cmd(o, 1, (*o).channel)
+    if r < 0 { return r }
+    r = mac_cmd(o, iwl_mvm_ctx.CTXT_ADD, false, 0)
+    if r < 0 { return r }
+    r = bind_cmd(o)
+    if r < 0 { return r }
+    r = scan_cfg_cmd(o)
+    if r < 0 { return r }
+    (*o).ctx_ready = true
+    return 0
+}
+
+fn ops_default_channels(out: u64) -> u64 {
+    var n: u64 = 0
+    var c: u64 = 1
+    while c <= 11 {
+        iwl_buf.st8(out, n, c)
+        n = n + 1
+        c = c + 1
+    }
+    c = 36
+    while c <= 64 {
+        iwl_buf.st8(out, n, c)
+        n = n + 1
+        c = c + 4
+    }
+    c = 100
+    while c <= 140 {
+        iwl_buf.st8(out, n, c)
+        n = n + 1
+        c = c + 4
+    }
+    c = 149
+    while c <= 165 {
+        iwl_buf.st8(out, n, c)
+        n = n + 1
+        c = c + 4
+    }
+    return n
+}
+
+fn ops_scan_start(o: *mut Mvm, ssid: u64, ssid_len: u64) -> i64 {
+    if !(*o).ctx_ready { return E_OPS_STATE }
+    if ssid_len > 32 { return E_OPS_ARGS }
+    var chans: [u8; 40] = [0; 40]
+    let nchan: u64 = ops_default_channels((&chans[0]) as u64)
+    var preq: [u8; 48] = [0; 48]
+    var i: u64 = 0
+    iwl_buf.st8((&preq[0]) as u64, 0, 0x40)
+    while i < 6 {
+        iwl_buf.st8((&preq[0]) as u64, 4 + i, 0xFF)
+        iwl_buf.st8((&preq[0]) as u64, 10 + i, (*o).mac[i as usize] as u64)
+        iwl_buf.st8((&preq[0]) as u64, 16 + i, 0xFF)
+        i = i + 1
+    }
+    i = 0
+    while i < 2 {
+        let at: u64 = 24 + (i * 10)
+        iwl_buf.st8((&preq[0]) as u64, at, 1)
+        iwl_buf.st8((&preq[0]) as u64, at + 1, 8)
+        iwl_buf.st8((&preq[0]) as u64, at + 2, 0x8C)
+        iwl_buf.st8((&preq[0]) as u64, at + 3, 0x12)
+        iwl_buf.st8((&preq[0]) as u64, at + 4, 0x98)
+        iwl_buf.st8((&preq[0]) as u64, at + 5, 0x24)
+        iwl_buf.st8((&preq[0]) as u64, at + 6, 0xB0)
+        iwl_buf.st8((&preq[0]) as u64, at + 7, 0x48)
+        iwl_buf.st8((&preq[0]) as u64, at + 8, 0x60)
+        iwl_buf.st8((&preq[0]) as u64, at + 9, 0x6C)
+        i = i + 1
+    }
+    (*o).scan_uid = (*o).scan_uid + 1
+    let a: u64 = cmd_addr(o)
+    var gen: u64 = iwl_mvm_scan.SCAN_GEN_PASS_ALL | iwl_mvm_scan.SCAN_GEN_ITER_COMPLETE
+    if ssid_len != 0 { gen = gen | iwl_mvm_scan.SCAN_GEN_MULTIPLE_SSID }
+    let len: u64 = iwl_mvm_scan.mvm_scan_req(a, (*o).cmd_queue, next_slot(o), 0, (*o).scan_uid,
+        0, gen, MAC_ID, 0, 30, 110, 44, 0, 0, 2, 1, nchan)
+    i = 0
+    while i < nchan {
+        iwl_mvm_scan.mvm_scan_chan(a, i, 0, iwl_buf.ld8((&chans[0]) as u64, i), 1, 0)
+        i = i + 1
+    }
+    iwl_mvm_scan.mvm_scan_tail(a, nchan, 0, 0, 1, (&preq[0]) as u64, 24, 10, 10, 0, ssid, ssid_len)
+    (*o).scan_state = SCAN_RUNNING
+    (*o).scan_status = 0
+    let r: i64 = submit(o, len)
+    if r < 0 { (*o).scan_state = SCAN_IDLE }
+    return r
+}
+
+fn ops_peer_add(o: *mut Mvm, bssid: u64) -> i64 {
+    if !(*o).ctx_ready { return E_OPS_STATE }
+    var i: usize = 0
+    while i < 6 {
+        (*o).bssid[i] = *((bssid + i as u64) as *mut u8)
+        i = i + 1
+    }
+    let n: u64 = iwl_mvm.mvm_add_sta(cmd_addr(o), (*o).cmd_queue, next_slot(o), 0,
+        iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, 0, 0xF)
+    let r: i64 = submit(o, n)
+    if r < 0 { return r }
+    (*o).peer_added = true
+    return mac_cmd(o, iwl_mvm_ctx.CTXT_MODIFY, false, 0)
+}
+
+fn ops_associated(o: *mut Mvm, aid: u64) -> i64 {
+    if !(*o).peer_added { return E_OPS_STATE }
+    let n: u64 = iwl_mvm.mvm_add_sta(cmd_addr(o), (*o).cmd_queue, next_slot(o), 1,
+        iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, aid, 0xF)
+    let r: i64 = submit(o, n)
+    if r < 0 { return r }
+    return mac_cmd(o, iwl_mvm_ctx.CTXT_MODIFY, true, aid)
+}
+
+fn ops_peer_remove(o: *mut Mvm) -> i64 {
+    if !(*o).peer_added { return 0 }
+    let a: u64 = cmd_addr(o)
+    iwl_buf.zero(a, iwl_buf.HDR + 4)
+    iwl_buf.hdr(a, CMD_REMOVE_STA, (*o).cmd_queue, next_slot(o))
+    iwl_buf.st8(a, iwl_buf.HDR, STA_AP)
+    let r: i64 = submit(o, iwl_buf.HDR + 4)
+    (*o).peer_added = false
+    return r
+}
+
+fn o_channel(ctx: u64, channel: u64, band: u64) -> i64 {
+    let o: *mut Mvm = ctx as *mut Mvm
+    if !(*o).ctx_ready { return E_OPS_STATE }
+    if channel == 0 || channel > 196 { return E_OPS_ARGS }
+    let r: i64 = phy_cmd(o, 2, channel)
+    if r < 0 { return r }
+    (*o).channel = channel
+    return 0
+}
+
+fn o_key(ctx: u64, art: u64, id: u64, key: u64, len: usize) -> i64 {
+    let o: *mut Mvm = ctx as *mut Mvm
+    if art == device.KEY_OFF {
+        if (*o).hw_crypto { return ops_peer_remove(o) }
+        return 0
+    }
+    if !(*o).hw_crypto { return 0 }
+    if !(*o).peer_added { return E_OPS_STATE }
+    var pn: [u8; 6] = [0; 6]
+    var offset: u64 = 0
+    var multicast: bool = false
+    if art == device.KEY_GTK {
+        offset = 1 + (id & 3)
+        multicast = true
+    }
+    let n: u64 = iwl_mvm.mvm_sta_key_ccmp(cmd_addr(o), (*o).cmd_queue, next_slot(o), STA_AP,
+        offset, id, multicast, key, (&pn[0]) as u64)
+    (*o).keys_sent = (*o).keys_sent + 1
+    return submit(o, n)
+}
+
+fn o_send(ctx: u64, frame_ptr: u64, len: usize) -> i64 {
+    let o: *mut Mvm = ctx as *mut Mvm
+    if !(*o).ctx_ready { return E_OPS_STATE }
+    if len < 10 || len > 2400 { return E_OPS_ARGS }
+    let fcv: u64 = frame.fc(frame_ptr, len)
+    var flags: u64 = iwl_mvm_tx.TX_FLG_ACK
+    if frame.art(fcv) == frame.ART_VERWALTUNG { flags = flags | iwl_mvm_tx.TX_FLG_SEQ_CTL }
+    var pad: u64 = 0
+    var hl: u64 = 0
+    let hli: i64 = frame.header_len(frame_ptr, len)
+    if hli > 0 { hl = hli as u64 }
+    if hl != 0 && (hl & 3) != 0 && (len as u64) > hl {
+        pad = FRAME_PAD
+        flags = flags | iwl_mvm_tx.TX_FLG_MH_PAD
+    }
+    var sec: u64 = 0
+    var keyp: u64 = 0
+    if (*o).hw_crypto && frame.geschuetzt(fcv) { sec = 1 }
+    let total: u64 = iwl_mvm_tx.mvm_tx_cmd(cmd_addr(o), (*o).tx_queue, next_slot(o), 0, flags,
+        RATE_6M_OFDM, STA_AP, sec, 0, keyp, 0xFFFFFFFF, 0, 60, 15, 0, frame_ptr, len as u64)
+    if pad != 0 {
+        let base: u64 = iwl_mvm_tx.TX_CMD_LEN
+        var i: u64 = len as u64
+        while i > hl {
+            iwl_buf.st8(cmd_addr(o), base + i + pad - 1, iwl_buf.ld8(cmd_addr(o), base + i - 1))
+            i = i - 1
+        }
+        iwl_buf.st8(cmd_addr(o), base + hl, 0)
+        iwl_buf.st8(cmd_addr(o), base + hl + 1, 0)
+    }
+    (*o).cmds = (*o).cmds + 1
+    let t: Transport = (*o).tr
+    let r: i64 = t.submit((*o).tctx, cmd_addr(o), (total + pad) as usize)
+    if r < 0 { return r }
+    return len as i64
+}
+
+fn parse_phy(o: *mut Mvm, n: usize) {
+    let a: u64 = rx_addr(o)
+    let h: u64 = iwl_buf.HDR
+    if (n as u64) < h + 60 { return }
+    (*o).rx_channel = iwl_buf.ld16(a, h + 22)
+    let e: u64 = iwl_buf.ld32(a, h + 24 + 4)
+    var best: u64 = 0
+    var k: u64 = 0
+    while k < 3 {
+        let v: u64 = (e >> (k * 8)) & 0xFF
+        if v != 0 && (best == 0 || v < best) { best = v }
+        k = k + 1
+    }
+    if best == 0 {
+        (*o).rssi = -127
+    } else {
+        (*o).rssi = 0 - (best as i64)
+    }
+}
+
+fn parse_scan_done(o: *mut Mvm, n: usize) {
+    if (n as u64) < iwl_buf.HDR + 8 { return }
+    let a: u64 = rx_addr(o)
+    if iwl_mvm_scan.mvm_scan_complete_uid(a) != (*o).scan_uid { return }
+    if iwl_mvm_scan.mvm_scan_complete_status(a) == iwl_mvm_scan.SCAN_COMPLETED {
+        (*o).scan_state = SCAN_DONE
+    } else {
+        (*o).scan_state = SCAN_ABORTED
+    }
+}
+
+fn ops_poll_one(o: *mut Mvm, out: u64, room: usize) -> i64 {
+    let t: Transport = (*o).tr
+    let n: i64 = t.poll((*o).tctx, rx_addr(o), RX_BUF)
+    if n <= 0 { return n }
+    let a: u64 = rx_addr(o)
+    let cmd: u64 = iwl_buf.ld8(a, 0)
+    if cmd == 0xC0 {
+        parse_phy(o, n as usize)
+        return -2
+    }
+    if cmd == iwl_mvm_scan.CMD_SCAN_COMPLETE_UMAC {
+        parse_scan_done(o, n as usize)
+        return -2
+    }
+    if cmd == iwl_mvm.CMD_RX_MPDU {
+        let h: u64 = iwl_buf.HDR
+        if (n as u64) < h + 4 { return -2 }
+        let bytes: u64 = iwl_buf.ld16(a, h)
+        if bytes == 0 || h + 4 + bytes > (n as u64) || (bytes as usize) > room { return -2 }
+        iwl_le.copy(out, a + h + 4, bytes)
+        return bytes as i64
+    }
+    return -2
+}
+
+fn o_receive(ctx: u64, buf: u64, room: usize) -> i64 {
+    let o: *mut Mvm = ctx as *mut Mvm
+    var guard: u64 = 0
+    while guard < 32 {
+        let r: i64 = ops_poll_one(o, buf, room)
+        if r != -2 { return r }
+        guard = guard + 1
+    }
+    return 0
+}
