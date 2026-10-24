@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import bus.pci
+
+export { settle, PM_WORDS }
+
+const PM_WORDS: u64 = 10
+const CAP_PM: u64 = 0x01
+const CAP_PCIE: u64 = 0x10
+const PM_CTRL: u64 = 4
+const PM_STATE_MASK: u64 = 3
+const PCIE_LNKCTL: u64 = 0x10
+const LNKCTL_PM_BITS: u64 = 0x103
+const CFG_REV: u64 = 0x08
+const CFG_SUBSYS: u64 = 0x2C
+const CFG_HDR: u64 = 0x0E
+const CFG_SECBUS: u64 = 0x19
+const NO_DEVICE: u64 = 0xFFFF
+
+fn find_parent(bdf: u64) -> u64 {
+    let want: u64 = pci.bdf_bus(bdf)
+    var bus: u64 = 0
+    while bus < want {
+        var dev: u64 = 0
+        while dev < 32 {
+            var fnc: u64 = 0
+            while fnc < 8 {
+                let cand: u64 = (bus << 8) | (dev << 3) | fnc
+                if pci.cfg_read16(cand, 0) != NO_DEVICE {
+                    if (pci.cfg_read8(cand, CFG_HDR) & 0x7F) == 1 && pci.cfg_read8(cand, CFG_SECBUS) == want {
+                        return cand
+                    }
+                } else if fnc == 0 {
+                    fnc = 7
+                }
+                fnc = fnc + 1
+            }
+            dev = dev + 1
+        }
+        bus = bus + 1
+    }
+    return 0
+}
+
+fn link_pm_off(bdf: u64, before: *mut u64, after: *mut u64) {
+    *before = 0
+    *after = 0
+    let cap: u64 = pci.cap_find(bdf, CAP_PCIE)
+    if cap == 0 { return }
+    let v: u64 = pci.cfg_read16(bdf, cap + PCIE_LNKCTL)
+    *before = v
+    if (v & LNKCTL_PM_BITS) != 0 {
+        pci.cfg_write16(bdf, cap + PCIE_LNKCTL, v & (0xFFFF ^ LNKCTL_PM_BITS))
+    }
+    *after = pci.cfg_read16(bdf, cap + PCIE_LNKCTL)
+}
+
+fn settle(bdf: u64, out: *mut u64) -> bool {
+    var i: u64 = 0
+    while i < PM_WORDS {
+        *((out as u64 + i * 8) as *mut u64) = 0
+        i = i + 1
+    }
+    *out = pci.cfg_read8(bdf, CFG_REV)
+    *((out as u64 + 8) as *mut u64) = pci.cfg_read32(bdf, CFG_SUBSYS)
+    var woke: bool = false
+    let pm: u64 = pci.cap_find(bdf, CAP_PM)
+    if pm != 0 {
+        let cs: u64 = pci.cfg_read16(bdf, pm + PM_CTRL)
+        *((out as u64 + 16) as *mut u64) = cs
+        if (cs & PM_STATE_MASK) != 0 {
+            pci.cfg_write16(bdf, pm + PM_CTRL, cs & (0xFFFF ^ PM_STATE_MASK))
+            woke = true
+        }
+        *((out as u64 + 24) as *mut u64) = pci.cfg_read16(bdf, pm + PM_CTRL)
+    }
+    link_pm_off(bdf, (out as u64 + 32) as *mut u64, (out as u64 + 40) as *mut u64)
+    let rp: u64 = find_parent(bdf)
+    *((out as u64 + 48) as *mut u64) = rp
+    if rp != 0 {
+        link_pm_off(rp, (out as u64 + 56) as *mut u64, (out as u64 + 64) as *mut u64)
+    }
+    return woke
+}

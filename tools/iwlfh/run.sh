@@ -245,6 +245,7 @@ has "$L7" 'iwl: boot2 init alive rc=-30' "counter-proof iwloldalive: the old 250
 has "$L7" 'phase=failed' "counter-proof iwloldalive: phase=failed"
 has "$L7" 'err_text=ALIVE timeout' "counter-proof iwloldalive: err_text=ALIVE timeout"
 has "$L7" 'fail_alive=int=' "counter-proof iwloldalive: fail_alive line (CSR_INT, FH_INT, GP1/GP2, CPU status) is in /proc/wlan"
+has "$L7" 'fail_pm=rev=' "counter-proof iwloldalive: PCI diagnostics line (revision, subsystem, PM state, link control of card and root port, warm CSR state) is in /proc/wlan"
 has "$L7" 'fail_alive2=load=' "counter-proof iwloldalive: second diagnostics line (load status, CPU header words, secure-boot config) is in /proc/wlan"
 has "$L7" ' img=init sc1=' "counter-proof iwloldalive: the failing image (init) and the sections loaded per CPU are reported"
 hasnot "$L7" ' sc1=0 sc2=0' "counter-proof iwloldalive: both CPUs got sections before the wait"
