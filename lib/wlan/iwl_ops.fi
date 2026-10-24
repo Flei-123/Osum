@@ -3,6 +3,7 @@ import wlan.device
 import wlan.frame
 import wlan.iwl_buf
 import wlan.iwl_le
+import wlan.iwl_fwcaps
 import wlan.iwl_mvm
 import wlan.iwl_mvm_ctx
 import wlan.iwl_mvm_scan
@@ -12,7 +13,7 @@ export {
     Mvm, Transport, mvm_new, ops_attach, ops_setup, ops_scan_start, ops_scan_state,
     ops_peer_add, ops_peer_remove, ops_associated, ops_poll_one, ops_rssi, ops_rx_channel,
     ops_keys_sent, ops_cmd_count, ops_set_hw_crypto, ops_set_queues, ops_set_address,
-    ops_default_channels,
+    ops_default_channels, ops_set_caps, ops_caps,
     SCAN_IDLE, SCAN_RUNNING, SCAN_DONE, SCAN_ABORTED,
     E_OPS_STATE, E_OPS_FW, E_OPS_ARGS, STA_AP, MAX_CHANNELS
 }
@@ -65,6 +66,7 @@ struct Mvm {
     rx_channel: u64,
     cmds: u64,
     keys_sent: u64,
+    caps: [u64; 16],
     cmd: [u8; 2600],
     rx: [u8; 2600]
 }
@@ -80,10 +82,20 @@ fn mvm_new() -> Mvm {
         ctx_ready: false, peer_added: false,
         scan_state: 0, scan_uid: 0, scan_status: 0,
         rssi: 0, rx_channel: 0, cmds: 0, keys_sent: 0,
-        cmd: [0; 2600], rx: [0; 2600]
+        caps: [0; 16], cmd: [0; 2600], rx: [0; 2600]
     }
+    iwl_fwcaps.caps_default((&o.caps[0]) as *mut u64)
     return o
 }
+
+fn ops_set_caps(o: *mut Mvm, w: *mut u64) {
+    var i: u64 = 0
+    while i < iwl_fwcaps.CAPS_WORDS {
+        (*o).caps[i as usize] = iwl_fwcaps.caps_get(w, i)
+        i = i + 1
+    }
+}
+fn ops_caps(o: *mut Mvm) -> *mut u64 { return (&(*o).caps[0]) as *mut u64 }
 
 fn ops_set_hw_crypto(o: *mut Mvm, on: bool) { (*o).hw_crypto = on }
 fn ops_set_queues(o: *mut Mvm, cmd_queue: u64, tx_queue: u64) {
@@ -256,14 +268,29 @@ fn ops_scan_start(o: *mut Mvm, ssid: u64, ssid_len: u64) -> i64 {
     let a: u64 = cmd_addr(o)
     var gen: u64 = iwl_mvm_scan.SCAN_GEN_PASS_ALL | iwl_mvm_scan.SCAN_GEN_ITER_COMPLETE
     if ssid_len != 0 { gen = gen | iwl_mvm_scan.SCAN_GEN_MULTIPLE_SSID }
-    let len: u64 = iwl_mvm_scan.mvm_scan_req(a, (*o).cmd_queue, next_slot(o), 0, (*o).scan_uid,
-        0, gen, MAC_ID, 0, 30, 110, 44, 0, 0, 2, 1, nchan)
+    var ch_flags: u64 = 0
+    if ssid_len != 0 && !iwl_fwcaps.caps_quirk(ops_caps(o), iwl_fwcaps.Q_OLD_SSID) { ch_flags = 1 }
+    let ver: u64 = iwl_fwcaps.caps_get(ops_caps(o), iwl_fwcaps.W_SCAN_VER)
+    var slots: u64 = iwl_fwcaps.caps_get(ops_caps(o), iwl_fwcaps.W_SCAN_SLOTS)
+    if slots < nchan { slots = nchan }
+    var len: u64 = 0
+    if ver >= 7 {
+        var budget: u64 = iwl_mvm_scan.SCAN_BUDGET_FULL
+        if ssid_len != 0 { budget = iwl_mvm_scan.SCAN_BUDGET_DIRECTED }
+        len = iwl_mvm_scan.mvm_scan_req7(a, (*o).cmd_queue, next_slot(o), 0, (*o).scan_uid, gen, MAC_ID,
+            10, 110, 44, 2, 10, budget, 0, 0, 6, 0, nchan, slots)
+    } else {
+        len = iwl_mvm_scan.mvm_scan_req(a, (*o).cmd_queue, next_slot(o), 0, (*o).scan_uid,
+            0, gen, MAC_ID, 0, 30, 110, 44, 0, 0, 2, 1, nchan)
+        slots = nchan
+    }
+    let head: u64 = iwl_mvm_scan.scan_head_len(ver)
     i = 0
     while i < nchan {
-        iwl_mvm_scan.mvm_scan_chan(a, i, 0, iwl_le.ld8((&chans[0]) as u64, i), 1, 0)
+        iwl_mvm_scan.mvm_scan_chan_at(a, head, i, ch_flags, iwl_le.ld8((&chans[0]) as u64, i), 1, 0)
         i = i + 1
     }
-    iwl_mvm_scan.mvm_scan_tail(a, nchan, 0, 0, 1, (&preq[0]) as u64, 24, 10, 10, 0, ssid, ssid_len)
+    iwl_mvm_scan.mvm_scan_tail_at(a, head + (slots * iwl_mvm_scan.SCAN_CHAN_LEN), 0, 0, 1, (&preq[0]) as u64, 24, 10, 10, 0, ssid, ssid_len)
     (*o).scan_state = SCAN_RUNNING
     (*o).scan_status = 0
     let r: i64 = submit(o, len)

@@ -7,7 +7,8 @@ export {
     SCAN_CFG_ACTIVATE, SCAN_CFG_SET_TX_CHAINS, SCAN_CFG_SET_RX_CHAINS, SCAN_CFG_SET_ALL_TIMES, SCAN_CFG_SET_CHANNEL_FLAGS,
     SCAN_CFG_SET_LEGACY_RATES, SCAN_CFG_SET_MAC_ADDR, SCAN_CFG_FIXED_LEN, SCAN_REQ_HEAD_LEN, SCAN_CHAN_LEN, SCAN_TAIL_LEN,
     SCAN_GEN_PASS_ALL, SCAN_GEN_PASSIVE, SCAN_GEN_ITER_COMPLETE, SCAN_GEN_MULTIPLE_SSID, SCAN_FLAG_START_NOTIF,
-    SCAN_COMPLETED, SCAN_ABORTED, SCAN_PROBE_BUF_LEN, SCAN_MAX_CHANNELS,
+    SCAN_COMPLETED, SCAN_ABORTED, SCAN_PROBE_BUF_LEN, SCAN_MAX_CHANNELS, SCAN_V7_HEAD_LEN, SCAN_BUDGET_FULL, SCAN_BUDGET_DIRECTED,
+    mvm_scan_req7, mvm_scan_chan_at, mvm_scan_tail_at, scan_req_len, scan_head_len,
     mvm_scan_cfg, mvm_scan_req, mvm_scan_chan, mvm_scan_tail, mvm_scan_abort, mvm_scan_complete_uid, mvm_scan_complete_status
 }
 
@@ -36,6 +37,9 @@ const SCAN_ABORTED: u64 = 2
 
 const SCAN_CFG_FIXED_LEN: u64 = iwl_buf.HDR + 36
 const SCAN_REQ_HEAD_LEN: u64 = iwl_buf.HDR + 36
+const SCAN_V7_HEAD_LEN: u64 = iwl_buf.HDR + 48
+const SCAN_BUDGET_FULL: u64 = 300
+const SCAN_BUDGET_DIRECTED: u64 = 100
 const SCAN_CHAN_LEN: u64 = 8
 const SCAN_PROBE_BUF_LEN: u64 = 512
 const SCAN_DIRECT_LEN: u64 = 34
@@ -97,12 +101,52 @@ fn mvm_scan_req(a: u64, qid: u64, slot: u64, flags: u64, uid: u64, ooc_priority:
     return SCAN_REQ_HEAD_LEN + (nchan * SCAN_CHAN_LEN) + SCAN_TAIL_LEN
 }
 
-fn mvm_scan_chan(a: u64, idx: u64, flags: u64, channel: u64, iter_count: u64, iter_interval: u64) {
-    let o: u64 = SCAN_REQ_HEAD_LEN + (idx * SCAN_CHAN_LEN)
+fn scan_head_len(ver: u64) -> u64 {
+    if ver >= 7 { return SCAN_V7_HEAD_LEN }
+    return SCAN_REQ_HEAD_LEN
+}
+
+fn scan_req_len(ver: u64, slots: u64) -> u64 {
+    return scan_head_len(ver) + (slots * SCAN_CHAN_LEN) + SCAN_TAIL_LEN
+}
+
+fn mvm_scan_req7(a: u64, qid: u64, slot: u64, flags: u64, uid: u64, general_flags: u64, start_mac_id: u64,
+                 dwell_active: u64, dwell_passive: u64, dwell_frag: u64, n_aps: u64, n_aps_social: u64, budget: u64,
+                 max_out: u64, suspend: u64, priority: u64, chan_flags: u64, nchan: u64, slots: u64) -> u64 {
+    let h: u64 = iwl_buf.HDR
+    let total: u64 = scan_req_len(7, slots)
+    iwl_le.zero(a, total)
+    iwl_buf.hdr(a, CMD_SCAN_REQ_UMAC, qid, slot)
+    iwl_le.st32(a, h, flags)
+    iwl_le.st32(a, h + 4, uid)
+    iwl_le.st16(a, h + 12, general_flags)
+    iwl_le.st8(a, h + 15, start_mac_id)
+    iwl_le.st8(a, h + 16, dwell_active)
+    iwl_le.st8(a, h + 17, dwell_passive)
+    iwl_le.st8(a, h + 18, dwell_frag)
+    iwl_le.st8(a, h + 19, n_aps)
+    iwl_le.st8(a, h + 20, n_aps_social)
+    iwl_le.st16(a, h + 22, budget)
+    iwl_le.st32(a, h + 24, max_out)
+    iwl_le.st32(a, h + 28, max_out)
+    iwl_le.st32(a, h + 32, suspend)
+    iwl_le.st32(a, h + 36, suspend)
+    iwl_le.st32(a, h + 40, priority)
+    iwl_le.st8(a, h + 44, chan_flags)
+    iwl_le.st8(a, h + 45, nchan)
+    return total
+}
+
+fn mvm_scan_chan_at(a: u64, head: u64, idx: u64, flags: u64, channel: u64, iter_count: u64, iter_interval: u64) {
+    let o: u64 = head + (idx * SCAN_CHAN_LEN)
     iwl_le.st32(a, o, flags)
     iwl_le.st8(a, o + 4, channel)
     iwl_le.st8(a, o + 5, iter_count)
     iwl_le.st16(a, o + 6, iter_interval)
+}
+
+fn mvm_scan_chan(a: u64, idx: u64, flags: u64, channel: u64, iter_count: u64, iter_interval: u64) {
+    mvm_scan_chan_at(a, SCAN_REQ_HEAD_LEN, idx, flags, channel, iter_count, iter_interval)
 }
 
 fn seg(a: u64, o: u64, offset: u64, len: u64) {
@@ -112,7 +156,11 @@ fn seg(a: u64, o: u64, offset: u64, len: u64) {
 
 fn mvm_scan_tail(a: u64, nchan: u64, delay: u64, sched_interval: u64, sched_iters: u64, preq: u64,
                  mh: u64, b0: u64, b1: u64, cm: u64, ssid: u64, ssid_len: u64) {
-    let t: u64 = SCAN_REQ_HEAD_LEN + (nchan * SCAN_CHAN_LEN)
+    mvm_scan_tail_at(a, SCAN_REQ_HEAD_LEN + (nchan * SCAN_CHAN_LEN), delay, sched_interval, sched_iters, preq, mh, b0, b1, cm, ssid, ssid_len)
+}
+
+fn mvm_scan_tail_at(a: u64, t: u64, delay: u64, sched_interval: u64, sched_iters: u64, preq: u64,
+                    mh: u64, b0: u64, b1: u64, cm: u64, ssid: u64, ssid_len: u64) {
     iwl_le.st16(a, t, sched_interval)
     iwl_le.st8(a, t + 2, sched_iters)
     iwl_le.st16(a, t + 8, delay)

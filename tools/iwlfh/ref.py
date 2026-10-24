@@ -15,11 +15,20 @@ import fh8000_ref as R  # noqa: E402
 PICK = {'big': ('c1_big', 0), 'edges': ('cc_edges', 0), 'empty': ('c6_empty', 0), 'lost': ('c1_big', 1)}
 
 
+def extra_tlvs():
+    api = R.tlv(29, R.u32(1) + R.u32(0x1))
+    capa = R.tlv(30, R.u32(0) + R.u32((1 << 2) | (1 << 12)))
+    cmdv = R.tlv(48, bytes([0, 0x0D, 7, 7, 0, 0x0C, 2, 2, 0, 0x18, 10, 0, 0, 0x1C, 5, 0, 0, 0x1D, 1, 0]))
+    nscan = R.tlv(31, R.u32(52))
+    return api + capa + cmdv + nscan
+
+
 def gen(d):
     R.mk()
     init = [(0x0, R.data(2000, 7)), (R.SEP_CPU, b''), (0x60000, R.data(1000, 9))]
     secs, _b, _m, _p = R.CASES['c1_big']
     open(os.path.join(d, 'two.bin'), 'wb').write(R.build(secs) + b''.join(R.tlv(20, R.u32(a) + dd) for a, dd in init))
+    open(os.path.join(d, 'v7.bin'), 'wb').write(R.build(R.CASES['c1_big'][0]) + b''.join(R.tlv(20, R.u32(a) + dd) for a, dd in init) + extra_tlvs())
     for name, (case, mode) in PICK.items():
         secs, bsize, _m, phys = R.CASES[case]
         assert bsize == 0x20000

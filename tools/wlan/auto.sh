@@ -41,7 +41,7 @@ image() { # name [conf-file]
     [ -n "$conf" ] && extra=("/etc/wlan.conf=$conf")
     python3 tools/osum/mkfs.py build "$T/$n.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
         /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" \
-        "/t/s.sh=$T/s.sh" "$FWPATH=$T/blobs/two.bin" "${extra[@]}" > "$T/$n.mkfs" 2>&1 \
+        "/t/s.sh=$T/s.sh" "$FWPATH=$T/blobs/v7.bin" "${extra[@]}" > "$T/$n.mkfs" 2>&1 \
         || { tail -3 "$T/$n.mkfs"; return 1; }
 }
 run() { # name words
@@ -92,6 +92,19 @@ has "$C" 'auto=up rc=0' "autostart state up"
 has "$C" 'ip=192.168.77.50 mask=255.255.255.0 gw=192.168.77.1' "lease 192.168.77.50 / 255.255.255.0 / gw .1"
 hasnot "$C" 'fakeap: m2 badmic' "no MIC failure"
 has "$C" '==END==' "system keeps running"
+has "$C" 'fakefw: scan ok v7 slots=52 nchan=35' "W-WLAN17: scan request is v7 with 52 channel slots (from the blob TLVs), 35 channels used"
+hasnot "$C" 'fakefw: scan bad' "W-WLAN17: the fake firmware format check never fails"
+
+printf 'echo ==START==\nsleep 6\ncat /proc/wlan\necho ==END==\n' > "$T/s.sh"
+for ctl in "d iwloldscan 'bad length' a" "e iwloldslot 'bad length' a" "f iwloldssid 'ssid bitmap missing' c"; do
+    eval set -- $ctl
+    echo "-- $1: counter-proof $2 (old driver behaviour must be refused by the fake firmware)"
+    image "$1" "$( [ "$4" = c ] && echo "$T/good.conf" )" || { bad "image $1"; continue; }
+    run "$1" "iwlfhtest iwlfhbind $2"
+    has "$T/$1.klar" "fakefw: scan bad $3" "$2: fake firmware names the format error"
+    hasnot "$T/$1.klar" 'fakefw: scan ok' "$2: no scan accepted"
+    hasnot "$T/$1.klar" 'net OrientFake ' "$2: no network found (fake AP stays silent)"
+done
 
 echo "WLANAUTO: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]
