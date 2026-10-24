@@ -80,6 +80,14 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 - **Foto-Checkliste:** `cat /proc/wlan` (ALLE Zeilen, mehrere Fotos wenn lang), `wlanctl status`, `wlanctl dump`, `cat /tmp/wlan-dump.txt`. Bei Fehler dauert der Start der WLAN-Karte ca. 25 s laenger (Experimente). Windows vorher mit `shutdown /s /t 0` beenden.
 - **Ehrlich:** Am echten 8265 UNVERIFIZIERT. `hdr1=0 hdr2=0` ist bei Familie 8000 normal (Linux schreibt HDR_ADDR nur im 7000-Lader). D0/ASPM sind nicht die Ursache.
 
+## Stick CH336 HP (24.10.2026, USB-LAN-Dongle 1A86:5394 hinter dem WCH-Hub; Baustand @SHORT@ = main + Branch staff/orientos-mvmpzl9g)
+
+- **Datei:** `@FILE@` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `@SHA@`.
+- **Neu:** CH336-Treiber nach Hersteller-Quelle abgeglichen (TX-Laenge, RX bis 1522, geteilte Frames, PHY-Link, Speed/Duplex ins MAC-Register), `/proc/drivers` zeigt `driver=ch336`, `usbnet: ...` und `net: ip= gw=`. Hub-Treiber ist da; ECM hinter Hub in QEMU gemessen (DHCP + Ping), High-Speed-Hub nur Review. Details: `docs/WLAN-CH336.md`.
+- **Dongle in die Buchse stecken, kabelgebunden an den Router, dann Stick booten.** Danach `dhcp`, `ping <Router-IP>`.
+- **Foto-Checkliste:** (1) `cat /proc/drivers` -- Zeilen `1a86:809d ... driver=hub`, `1a86:5394 ... hub=.. driver=ch336`, `349c:0418`, ganz unten `usbnet: ready mode=3 link=.. bmsr=.. cfg=.. fw=..` und `net: ip=`. (2) `dhcp` und `ping` -- Ausgabe. (3) Falls nichts da: Seriell/Bootzeilen `usb: hub p=`, `usb: ch336 ...` (Foto vom Boot).
+- **Ehrlich:** Am echten Dongle UNVERIFIZIERT. Einzige Referenz ist der WCH-Linux-Treiber; Hub mit High-Speed-Geraet nur im Code geprueft.
+
 ## Stick 13 HP (24.10.2026, Debug-Werkzeuge: lspci, pcicfg, regdump, prphread, wlanctl, drvctl)
 
 - **Datei:** `orientos-usb-hp-20261024-badf40a6.img` (146 MiB, Baustand badf40a6 = main, Gate dbgtools 53/0) (GPT, UEFI+BIOS). SHA256 vorher pruefen: `0eec7bc9d0c1394e8e64a591aec3d4bfa81aedd531e8721ca467a5708ddf0587`.
