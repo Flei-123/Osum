@@ -192,7 +192,7 @@ echo "-- L: INIT stage over the command queue (NVM, PHY_CFG, calibration, INIT_C
 python3 tools/osum/mkfs.py build "$T/twoc.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
     /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" "/t/s.sh=$T/s2.sh" "$FWPATH=$T/blobs/two.bin" > "$T/twoc.mkfs" 2>&1 || bad "image twoc"
 runc() {
-    cp "$T/twoc.img" "$T/$1.img"
+    cp "$T/${RUNC_BASE:-twoc}.img" "$T/$1.img"
     local n=$1 words=$2
     timeout 200 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$T/k.img" -m 512 \
         -append "osum vfs $words script=sh /t/s.sh;exit" \
@@ -285,6 +285,16 @@ M2="$T/m2.klar"
 has "$M2" 'phase=failed' "counter-proof iwlnotrace: still failed"
 hasnot "$M2" 'fail_trace=' "counter-proof iwlnotrace: no trace lines"
 hasnot "$M2" 'fail_exp=' "counter-proof iwlnotrace: no experiments"
+if [ -n "${WLAN_8265_FW:-}" ] && [ -f "$T/real/kern.exp" ]; then
+    python3 tools/osum/mkfs.py build "$T/realc.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+        /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" "/t/s.sh=$T/s2.sh" "$FWPATH=$WLAN_8265_FW" > "$T/realc.mkfs" 2>&1 || bad "image realc"
+    RUNC_BASE=realc runc m4 "iwlfhtest iwlfhdead"
+    M4="$T/m4.klar"
+    has "$M4" 'fail_trace=c2end t=' "REAL blob failure: trace reaches the end of CPU2"
+    has "$M4" 'fail_series=7 t=' "REAL blob failure: series complete in /proc/wlan"
+    has "$M4" 'fail_exp=pause ' "REAL blob failure: last experiment line not cut off"
+    has "$M4" '==END==' "REAL blob failure: system keeps running"
+fi
 runc m3 "iwlfhtest iwlfhdead iwlfhwake"
 M3="$T/m3.klar"
 has "$M3" 'iwl: boot2 exp alive' "an experiment (second RELEASE_CPU_RESET) brings ALIVE: boot continues"
