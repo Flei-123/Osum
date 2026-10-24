@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import sched.sched
+import net.wlan_auto
+import net.wlan_net
+import net.netdev
+import net.netsvc
+import diag.hw
+
+export { task_body, wired }
+
+const YIELD_TURNS: u64 = 64
+
+static mut wl_wired: u64 = 0
+
+fn wired() -> bool { return wl_wired != 0 }
+
+fn prefix_of(mask: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        if ((mask >> (31 - i)) & 1) == 0 { return n }
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+fn wire(state: u64) {
+    wlan_net.set_mac(wlan_auto.mac_ptr())
+    wlan_net.set_link(true)
+    hw.net_set(state, wlan_auto.lease_ip(), prefix_of(wlan_auto.lease_mask()), wlan_auto.lease_gateway())
+    wl_wired = 1
+    netsvc.stage(state)
+}
+
+fn task_body(state: u64, index: u64) {
+    var idle: u64 = 0
+    while true {
+        if wlan_auto.task_step(state) {
+            if wl_wired == 0 { wire(state) }
+            let w: u64 = wlan_auto.pump()
+            if w != 0 {
+                idle = 0
+                sched.yield_now(state)
+            } else {
+                idle = idle + 1
+                if idle > YIELD_TURNS {
+                    sched.sleep_ticks(state, 1)
+                } else {
+                    sched.yield_now(state)
+                }
+            }
+        }
+    }
+}

@@ -16,11 +16,13 @@ import wlan.iwl_pwr
 import wlan.iwl_probe
 import wlan.scanfmt
 import wlan.iwl_le
+import wlan.ethconv
+import net.wlan_net
 import drv.net.iwl
 import drv.net.iwl_xport
 
 export {
-    start, task_body, bind, unbind, driver_ready, state_code, rc_get, tries_get, name_copy,
+    start, task_step, mac_ptr, pump, is_up, bind, unbind, driver_ready, state_code, rc_get, tries_get, name_copy,
     lease_ip, lease_mask, lease_gateway, driver_bound, attach_held, scan_text, scan_count, STATE_NONE
 }
 
@@ -46,6 +48,11 @@ static mut wa_scan_len: u64 = 0
 static mut wa_scan_buf: [u8; 1100] = [0 as u8; 1100]
 static mut wa_raw: [u8; 1100] = [0 as u8; 1100]
 static mut wa_mac: [u8; 6] = [0 as u8; 6]
+static mut wa_eth: [u8; 1536] = [0 as u8; 1536]
+static mut wa_frame: [u8; 1600] = [0 as u8; 1600]
+static mut wa_prot: [u8; 1700] = [0 as u8; 1700]
+static mut wa_rx: [u8; 2400] = [0 as u8; 2400]
+static mut wa_plain: [u8; 2400] = [0 as u8; 2400]
 static mut wa_conf: [u8; 520] = [0 as u8; 520]
 static mut wa_path: [u8; 15] = "/etc/wlan.conf\0"
 
@@ -273,28 +280,72 @@ fn scan_pass(state: u64) {
     wa_scan_at = now_sec(state)
 }
 
-fn task_body(state: u64, index: u64) {
-    while true {
-        if !alloc_objects(state) {
-            sched.sleep_ticks(state, UP_TICKS)
-        } else if !driver_ready() && !attach_held(state) {
-            if autojoin.auto_state(auto_of()) != autojoin.AS_WAIT_DRIVER {
-                autojoin.auto_driver_wait(auto_of())
+fn mac_ptr() -> u64 { return (&wa_mac[0]) as u64 }
+
+fn is_up() -> bool { return wa_obj != 0 && autojoin.auto_up(auto_of()) }
+
+fn pump_tx() -> u64 {
+    var w: u64 = 0
+    while wlan_net.tx_pending() && w < 8 {
+        let n: u64 = wlan_net.tx_take((&wa_eth[0]) as u64, 1536)
+        w = w + 1
+        if n != 0 {
+            let fl: i64 = ethconv.eth_to_wlan((&wa_eth[0]) as u64, n, (&wa_frame[0]) as u64, 1600,
+                (&(*session_of()).aa[0]) as u64)
+            if fl > 0 {
+                let _r: i64 = connect.data_send(session_of(), (wa_dev) as *mut device.Device, (&wa_frame[0]) as u64,
+                    fl as usize, (&wa_prot[0]) as u64, 1700)
             }
-            sched.sleep_ticks(state, POLL_TICKS)
-        } else if autojoin.auto_up(auto_of()) {
-            sched.sleep_ticks(state, UP_TICKS)
-        } else if wa_scan_at == 0 || now_sec(state) >= wa_scan_at + SCAN_PERIOD {
-            scan_pass(state)
-            wa_scan_at = now_sec(state)
-            sched.sleep_ticks(state, 1)
-        } else if autojoin.auto_due(auto_of(), now_sec(state)) {
-            attempt(state)
-            sched.sleep_ticks(state, 1)
-        } else {
-            sched.sleep_ticks(state, POLL_TICKS)
         }
     }
+    return w
+}
+
+fn pump_rx() -> u64 {
+    var w: u64 = 0
+    var tries: u64 = 0
+    while wlan_net.rx_free() && tries < 8 {
+        tries = tries + 1
+        let n: i64 = connect.data_receive(session_of(), (wa_dev) as *mut device.Device, (&wa_rx[0]) as u64, 2400,
+            (&wa_plain[0]) as u64, 2400)
+        if n == 0 { return w }
+        w = w + 1
+        if n > 0 {
+            let m: i64 = ethconv.wlan_to_eth((&wa_plain[0]) as u64, n as u64, (&wa_eth[0]) as u64, 1536)
+            if m > 0 {
+                let _o: bool = wlan_net.rx_offer((&wa_eth[0]) as u64, m as u64)
+            }
+        }
+    }
+    return w
+}
+
+fn pump() -> u64 {
+    if !driver_ready() || !is_up() { return 0 }
+    return pump_tx() + pump_rx()
+}
+
+fn task_step(state: u64) -> bool {
+    if !alloc_objects(state) {
+        sched.sleep_ticks(state, UP_TICKS)
+    } else if !driver_ready() && !attach_held(state) {
+        if autojoin.auto_state(auto_of()) != autojoin.AS_WAIT_DRIVER {
+            autojoin.auto_driver_wait(auto_of())
+        }
+        sched.sleep_ticks(state, POLL_TICKS)
+    } else if autojoin.auto_up(auto_of()) {
+        return true
+    } else if wa_scan_at == 0 || now_sec(state) >= wa_scan_at + SCAN_PERIOD {
+        scan_pass(state)
+        wa_scan_at = now_sec(state)
+        sched.sleep_ticks(state, 1)
+    } else if autojoin.auto_due(auto_of(), now_sec(state)) {
+        attempt(state)
+        sched.sleep_ticks(state, 1)
+    } else {
+        sched.sleep_ticks(state, POLL_TICKS)
+    }
+    return false
 }
 
 fn start(state: u64) -> u64 {
