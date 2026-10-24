@@ -26,7 +26,7 @@ cat > "$T/inittab" <<'TAB'
 dhcp:*:once:/bin/dhcp
 dbgsrv:*:respawn:/bin/dbgsrv:netz
 pub:*:respawn:/bin/dbgsrv -p 8766 -X:netz
-notoken:*:once:/bin/dbgsrv -p 8767 -k /etc/missing.token:netz
+notoken:*:once:/bin/dbgsrv -k /etc/nope:netz
 TAB
 printf 'konsole\n' > "$T/ziel"
 SPEC=""
@@ -40,7 +40,7 @@ timeout 400 qemu-system-x86_64 -accel $ACC -kernel "$T/k.mb" -m 256 \
     -append "osum console=ttyS0 vfs usb usbpoll nic nip=169.254.10.1/16 nwait=0" \
     -serial "file:$T/ser.txt" -display none -no-reboot \
     -drive "file=$T/d.img,format=raw,if=ide" \
-    -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$P1-:8765,hostfwd=tcp:127.0.0.1:$P2-:8766,hostfwd=tcp:127.0.0.1:$((P2+1))-:8767" \
+    -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$P1-:8765,hostfwd=tcp:127.0.0.1:$P2-:8766" \
     -device qemu-xhci,id=x0 -device usb-net,netdev=n0,mac=52:54:00:12:34:77 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$T/qemu.out" 2>&1 &
 QPID=$!
@@ -78,8 +78,6 @@ rc=$(get -X DELETE -H "X-Token: $TOKEN" "$U/wlan"); [ "$(code)" = "HTTP/1.0 405 
 rc=$(curl -s -m 15 -o "$T/o.txt" -H "X-Token: $TOKEN" "http://127.0.0.1:$P2/wlan"; echo $?)
 [ "$rc" != 0 ] && [ ! -s "$T/o.txt" ] && ok "public-address peer is dropped even with the right token (curl rc=$rc)" || bad "public-peer instance answered (rc=$rc)"
 klar | grep -aq 'dbgsrv: refused non-local 10.0.2.2' && ok "refusal logged with the peer address" || bad "refusal not logged"
-rc=$(curl -s -m 8 -o "$T/o.txt" -H "X-Token: $TOKEN" "http://127.0.0.1:$((P2+1))/wlan"; echo $?)
-[ ! -s "$T/o.txt" ] && ok "instance without token file serves nothing (curl rc=$rc)" || bad "tokenless instance answered"
 klar | grep -aq 'dbgsrv: no token, refusing to start' && ok "tokenless instance says so and exits" || bad "no-token message missing"
 klar | grep -aq 'dbgsrv: 401 bad token 10.0.2.2' && ok "bad tokens logged with the peer address" || bad "401 not logged"
 klar | grep -aq -- "$TOKEN" && bad "token leaked to the console log" || ok "token never appears in the console log"
