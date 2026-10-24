@@ -32,6 +32,9 @@ mut 's/const MAC_UNION_LEN: u64 = 48/const MAC_UNION_LEN: u64 = 44/' "MAC_CONTEX
 mut 's/iwl_le.st32(a, h + 20, phy_id_color)/iwl_le.st32(a, h + 16, phy_id_color)/' "BINDING phy offset" iwl_mvm_ctx.fi
 mut 's/flags | (nchan << 26)/flags | (nchan << 25)/' "SCAN_CFG channel count field" iwl_mvm_scan.fi
 mut 's/const SCAN_DIRECT_LEN: u64 = 34/const SCAN_DIRECT_LEN: u64 = 33/' "SCAN_REQ direct scan entry size" iwl_mvm_scan.fi
+mut 's/iwl_le.st8(a, h + 19, n_aps)/iwl_le.st8(a, h + 18, n_aps)/' "SCAN_REQ v7 n_aps offset" iwl_mvm_scan.fi
+mut 's/iwl_le.st16(a, h + 22, budget)/iwl_le.st16(a, h + 20, budget)/' "SCAN_REQ v7 budget offset" iwl_mvm_scan.fi
+mut 's/const SCAN_V7_HEAD_LEN: u64 = iwl_buf.HDR + 48/const SCAN_V7_HEAD_LEN: u64 = iwl_buf.HDR + 44/' "SCAN_REQ v7 head length" iwl_mvm_scan.fi
 mut 's/iwl_le.st8(a, h + 51, tid)/iwl_le.st8(a, h + 50, tid)/' "TX_CMD tid offset" iwl_mvm_tx.fi
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

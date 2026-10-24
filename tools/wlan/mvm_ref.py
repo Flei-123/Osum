@@ -34,8 +34,11 @@ preq = struct.pack('<HHHHHHHH', 0, 24, 24, 6, 30, 4, 34, 6) + buf
 sched = struct.pack('<HBBHBB', 0, 1, 0, 0, 0, 0)
 tail = sched + struct.pack('<HH', 0, 0) + preq + (bytes([0, 4]) + b'HPAP').ljust(34, b'\0') + bytes(34 * 19)
 out['srq'] = hdr(0x0d, 0, 13) + head + chcfg + tail
+head7 = struct.pack('<IIIHBB', 2, 5, 0, 0x20 | 0x40, 0, 0) + struct.pack('<BBBBBB', 10, 110, 44, 2, 10, 0) + struct.pack('<HIIIII', 300, 50, 50, 120, 120, 6) + struct.pack('<BBH', 1, 3, 0)
+assert len(head7) == 48
+out['sr7'] = hdr(0x0d, 0, 16) + head7 + chcfg + tail
 out['sab'] = hdr(0x0e, 0, 14) + struct.pack('<II', 5, 0)
 txc = struct.pack('<HHIIIBBBB', 30, 0, 0x8 | 0x2000, 0, 0x4001, 1, 0, 0, 0) + key + struct.pack('<IIIBBBBHH', 0, 0xFFFF, 0x34ABCD00, 0x12, 15, 7, 0, 0, 0)
 out['tx'] = hdr(0x1c, 2, 15) + txc + frame
-for k in ['nvm', 'phy', 'ant', 'ctx', 'sta', 'key', 'gkey', 'mac', 'bnd', 'scf', 'srq', 'sab', 'tx']:
+for k in ['nvm', 'phy', 'ant', 'ctx', 'sta', 'key', 'gkey', 'mac', 'bnd', 'scf', 'srq', 'sr7', 'sab', 'tx']:
     print(k, out[k].hex())
