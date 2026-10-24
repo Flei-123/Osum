@@ -29,6 +29,7 @@ run_case() {
         rm -rf "$D"
         bash tools/design/eh6.sh "$D" res=1280x800 uiscale=1 mode=dark accel=kvm drehbuch="$TMPD/dreh.txt" "$@" > "$TMPD/$name.log" 2>&1
         grep -aq 'qs: open ' "$D/serial.txt" 2>/dev/null && break
+        tail -n 12 "$TMPD/$name.log"
     done
 }
 live_before_release() {

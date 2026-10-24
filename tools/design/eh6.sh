@@ -91,6 +91,7 @@ edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc \
 find du chmod id whoami touch true false sleep kill sort uniq rmdir \
 theme locate dhcp host ping netstat"
 
+xfiles=""
 for a in "$@"; do
     case "$a" in
         res=*) res=${a#*=} ;;
@@ -117,6 +118,7 @@ for a in "$@"; do
         moreprogs=*) moreprogs=${a#*=} ;;
         tzrule=*) tzrule=${a#*=} ;;
         themeextra=*) themeextra=${a#*=} ;;
+        xfile=*) xfiles="$xfiles ${a#*=}" ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
 done
@@ -233,6 +235,7 @@ ARGS+=(/etc/
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/uitrace=$OUT/uitrace@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+for xf in $xfiles; do ARGS+=("${xf}@0644"); done
 # EH_ETC_EXTRA: more files for /etc, space separated `/etc/<name>=<host path>@0644` (e.g. tools/barctx/run.sh: /etc/ctxmenu.conf)
 for e in ${EH_ETC_EXTRA:-}; do ARGS+=("$e"); done
 # like tools/usbimg/build.sh (AB-016): with the broker `orientbus` built, the image carries its rules, the
