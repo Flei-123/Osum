@@ -113,6 +113,23 @@ hat "$S" "glogin: schnell=1" "the network icon opens the network text"
 hat "$S" "glogin: schnell=0" "a second Enter closes it again"
 hatnicht "$S" "glogin: energie" "COUNTER-PROOF: nothing was switched off"
 
+echo "== debug address under the network text =="
+printf 'http://10.0.2.15:8765/\n' > "$OUT/dbgurl"
+runip() { # name url-file-or-empty
+    local nm=$1 u=$2 xf=""
+    [ -n "$u" ] && xf="xfile=/run/dbgsrv.url=$u"
+    eval bash "$B" "$OUT/$nm" kbd=yes uitrace=yes warten=10 bloecke=32768 \
+        extra=\"wigapp=/bin/glogin wighalt=${HALT:-100} nic nip=10.0.2.15/24\" progs=\"$PROGS\" xdir=/run xfile=/etc/shadow="$OUT/shadow" xfile=/etc/uiblink="$OUT/uiblink" $xf \
+        passwdfile="$OUT/passwd" $(keys tab tab tab tab ret) > "$OUT/$nm.log" 2>&1
+}
+runip g9 "$OUT/dbgurl"
+S=$OUT/g9/serial.txt
+hat "$S" "glogin: netz=Keine Internetverbindung (10.0.2.15:8765)" "with /run/dbgsrv.url the network text carries ip:port"
+runip g10 ""
+S=$OUT/g10/serial.txt
+hat "$S" "glogin: netz=Keine Internetverbindung (10.0.2.15)" "COUNTER-PROOF: without the file only the ip"
+hatnicht "$S" ":8765" "COUNTER-PROOF: no port shown without the file"
+
 echo "== Shift+Tab goes back =="
 run g8 10 tab tab shift-tab
 F=$(foc "$OUT/g8/serial.txt" | tr -s ' ' | sed 's/^0 //')

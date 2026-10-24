@@ -110,6 +110,10 @@ static mut qa_offen: u64 = 0 // 0 nothing, 1 network text, 2 power choice
 static mut uhr: [u8; 16] = [0 as u8; 16]
 static mut netzinfo: [u8; 64] = [0 as u8; 64]
 static mut netz_st: u64 = 99
+static mut netz_key: u64 = 99
+static mut dbg_buf: [u8; 64] = [0 as u8; 64]
+static mut S_NETZ: [u8; 14] = "glogin: netz=\0"
+static mut P_DBGURL: [u8; 16] = "/run/dbgsrv.url\0"
 static mut uhr_min: u64 = 99999
 static mut qa_t: u64 = 0
 static mut T_AUS: [u8; 15] = "Herunterfahren\0"
@@ -665,14 +669,60 @@ fn zahl_an(p: u64, v: u64) -> u64 {
 // The network: the kernel's own four states (`NG_STATE`, the ones the
 // taskbar shows), the icon follows them, and the text says it in words
 // and with the address.
+fn dbg_port() -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_DBGURL[(0) as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&dbg_buf[(0) as usize]) as u64, 62)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return 0
+    }
+    var colon: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if dbg_buf[(i) as usize] == 58 {
+            colon = i
+        }
+        i = i + 1
+    }
+    if colon == 0 {
+        return 0
+    }
+    var port: u64 = 0
+    i = colon + 1
+    while i < n && dbg_buf[(i) as usize] >= 48 && dbg_buf[(i) as usize] <= 57 {
+        port = port * 10 + (dbg_buf[(i) as usize] as u64) - 48
+        i = i + 1
+    }
+    if port > 65535 {
+        return 0
+    }
+    return port
+}
+
 fn netz_setzen() -> bool {
     var st: u64 = ulib.sys(SYS_NETGET, NG_STATE, 0, 0)
     if ulib.bad(st) {
         st = 9
     }
-    if st == netz_st {
+    var ip: u64 = 0
+    var port: u64 = 0
+    if st == 2 || st == 3 {
+        ip = ulib.sys(SYS_NETGET, NG_IP, 0, 0)
+        if ulib.bad(ip) {
+            ip = 0
+        }
+        if ip != 0 {
+            port = dbg_port()
+        }
+    }
+    let key: u64 = st | (ip << 8) | (port << 40)
+    if key == netz_key {
         return false
     }
+    netz_key = key
     netz_st = st
     let b: u64 = (&netzinfo[(0) as usize]) as u64
     var t: u64 = (&T_NX[(0) as usize]) as u64
@@ -687,8 +737,7 @@ fn netz_setzen() -> bool {
     }
     var at: u64 = ulib.strcpy(b, t)
     if st == 2 || st == 3 {
-        let ip: u64 = ulib.sys(SYS_NETGET, NG_IP, 0, 0)
-        if !ulib.bad(ip) && ip != 0 {
+        if ip != 0 {
             __mmio_write8((b + at) as *mut u8, 32 as u8)
             __mmio_write8((b + at + 1) as *mut u8, 40 as u8)
             at = at + 2
@@ -702,10 +751,18 @@ fn netz_setzen() -> bool {
             __mmio_write8((b + at) as *mut u8, 46 as u8)
             at = at + 1
             at = at + zahl_an(b + at, ip & 255)
+            if port != 0 {
+                __mmio_write8((b + at) as *mut u8, 58 as u8)
+                at = at + 1
+                at = at + zahl_an(b + at, port)
+            }
             __mmio_write8((b + at) as *mut u8, 41 as u8)
             __mmio_write8((b + at + 1) as *mut u8, 0 as u8)
         }
     }
+    sag((&S_NETZ[(0) as usize]) as u64)
+    sag(b)
+    sagnl()
     return true
 }
 
