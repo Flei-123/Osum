@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_le
+import wlan.llc
+import wlan.frame
+import wlan.wpa
+
+export {
+    auth_build, assoc_build, auth_status, assoc_status, assoc_aid,
+    eapol_frame_build, eapol_offset, m2_build, m4_build, mgmt_from,
+    RSN_IE_LEN, AUTH_LEN, M4_LEN, M2_FIXED_LEN
+}
+
+const AUTH_LEN: usize = 30
+const RSN_IE_LEN: usize = 22
+const M2_FIXED_LEN: usize = 99
+const M4_LEN: usize = 99
+const KEY_INFO_M2: u64 = 0x010A
+const KEY_INFO_M4: u64 = 0x030A
+const CAP_INFO: u64 = 0x0431
+
+fn put_be16(a: u64, o: u64, v: u64) {
+    iwl_le.st8(a, o, v >> 8)
+    iwl_le.st8(a, o + 1, v)
+}
+
+fn put_mac(a: u64, o: u64, mac: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        iwl_le.st8(a, o + i, iwl_le.ld8(mac, i))
+        i = i + 1
+    }
+}
+
+fn mgmt_head(out: u64, subtype: u64, da: u64, sa: u64, bssid: u64) {
+    iwl_le.zero(out, 24)
+    iwl_le.st8(out, 0, subtype << 4)
+    put_mac(out, 4, da)
+    put_mac(out, 10, sa)
+    put_mac(out, 16, bssid)
+}
+
+fn rsn_ie(out: u64, at: u64) -> u64 {
+    iwl_le.st8(out, at, 0x30)
+    iwl_le.st8(out, at + 1, 20)
+    iwl_le.st16(out, at + 2, 1)
+    iwl_le.st8(out, at + 4, 0x00)
+    iwl_le.st8(out, at + 5, 0x0F)
+    iwl_le.st8(out, at + 6, 0xAC)
+    iwl_le.st8(out, at + 7, 4)
+    iwl_le.st16(out, at + 8, 1)
+    iwl_le.st8(out, at + 10, 0x00)
+    iwl_le.st8(out, at + 11, 0x0F)
+    iwl_le.st8(out, at + 12, 0xAC)
+    iwl_le.st8(out, at + 13, 4)
+    iwl_le.st16(out, at + 14, 1)
+    iwl_le.st8(out, at + 16, 0x00)
+    iwl_le.st8(out, at + 17, 0x0F)
+    iwl_le.st8(out, at + 18, 0xAC)
+    iwl_le.st8(out, at + 19, 2)
+    iwl_le.st16(out, at + 20, 0)
+    return at + RSN_IE_LEN as u64
+}
+
+fn auth_build(out: u64, sa: u64, bssid: u64) -> usize {
+    mgmt_head(out, 11, bssid, sa, bssid)
+    iwl_le.zero(out + 24, 6)
+    iwl_le.st16(out, 24, 0)
+    iwl_le.st16(out, 26, 1)
+    iwl_le.st16(out, 28, 0)
+    return AUTH_LEN
+}
+
+fn assoc_build(out: u64, sa: u64, bssid: u64, ssid: u64, ssid_len: u64, channel: u64, max: usize) -> i64 {
+    if ssid_len == 0 || ssid_len > 32 { return -1 }
+    if max < 24 + 4 + 2 + 32 + 10 + 6 + RSN_IE_LEN { return -1 }
+    mgmt_head(out, 0, bssid, sa, bssid)
+    iwl_le.st16(out, 24, CAP_INFO)
+    iwl_le.st16(out, 26, 10)
+    var at: u64 = 28
+    iwl_le.st8(out, at, 0)
+    iwl_le.st8(out, at + 1, ssid_len)
+    var i: u64 = 0
+    while i < ssid_len {
+        iwl_le.st8(out, at + 2 + i, iwl_le.ld8(ssid, i))
+        i = i + 1
+    }
+    at = at + 2 + ssid_len
+    iwl_le.st8(out, at, 1)
+    iwl_le.st8(out, at + 1, 8)
+    if channel <= 14 {
+        iwl_le.st8(out, at + 2, 0x82)
+        iwl_le.st8(out, at + 3, 0x84)
+        iwl_le.st8(out, at + 4, 0x8B)
+        iwl_le.st8(out, at + 5, 0x96)
+        iwl_le.st8(out, at + 6, 0x0C)
+        iwl_le.st8(out, at + 7, 0x12)
+        iwl_le.st8(out, at + 8, 0x18)
+        iwl_le.st8(out, at + 9, 0x24)
+    } else {
+        iwl_le.st8(out, at + 2, 0x8C)
+        iwl_le.st8(out, at + 3, 0x12)
+        iwl_le.st8(out, at + 4, 0x98)
+        iwl_le.st8(out, at + 5, 0x24)
+        iwl_le.st8(out, at + 6, 0xB0)
+        iwl_le.st8(out, at + 7, 0x48)
+        iwl_le.st8(out, at + 8, 0x60)
+        iwl_le.st8(out, at + 9, 0x6C)
+    }
+    at = at + 10
+    if channel <= 14 {
+        iwl_le.st8(out, at, 50)
+        iwl_le.st8(out, at + 1, 4)
+        iwl_le.st8(out, at + 2, 0x30)
+        iwl_le.st8(out, at + 3, 0x48)
+        iwl_le.st8(out, at + 4, 0x60)
+        iwl_le.st8(out, at + 5, 0x6C)
+        at = at + 6
+    }
+    at = rsn_ie(out, at)
+    return at as i64
+}
+
+fn mgmt_from(p: u64, n: usize, subtype: u64, bssid: u64) -> bool {
+    if n < 24 { return false }
+    let f: u64 = frame.fc(p, n)
+    if frame.art(f) != frame.ART_VERWALTUNG { return false }
+    if frame.untertyp(f) != subtype { return false }
+    var i: u64 = 0
+    while i < 6 {
+        if iwl_le.ld8(p, 10 + i) != iwl_le.ld8(bssid, i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn auth_status(p: u64, n: usize, bssid: u64) -> i64 {
+    if !mgmt_from(p, n, 11, bssid) { return -1 }
+    if n < AUTH_LEN { return -1 }
+    if iwl_le.ld16(p, 24) != 0 || iwl_le.ld16(p, 26) != 2 { return -1 }
+    return iwl_le.ld16(p, 28) as i64
+}
+
+fn assoc_status(p: u64, n: usize, bssid: u64) -> i64 {
+    if !mgmt_from(p, n, 1, bssid) { return -1 }
+    if n < 30 { return -1 }
+    return iwl_le.ld16(p, 26) as i64
+}
+
+fn assoc_aid(p: u64, n: usize) -> u64 {
+    if n < 30 { return 0 }
+    return iwl_le.ld16(p, 28) & 0x3FFF
+}
+
+fn eapol_frame_build(out: u64, sa: u64, bssid: u64, eapol: u64, elen: usize) -> usize {
+    iwl_le.zero(out, 24)
+    iwl_le.st8(out, 0, 0x08)
+    iwl_le.st8(out, 1, 0x01)
+    put_mac(out, 4, bssid)
+    put_mac(out, 10, sa)
+    put_mac(out, 16, bssid)
+    let sl: usize = llc.snap_build(out + 24, llc.ET_EAPOL)
+    iwl_le.copy(out + 24 + sl as u64, eapol, elen as u64)
+    return 24 + sl + elen
+}
+
+fn eapol_offset(p: u64, n: usize) -> i64 {
+    let hl: i64 = frame.header_len(p, n)
+    if hl < 0 { return -1 }
+    let f: u64 = frame.fc(p, n)
+    if frame.art(f) != frame.ART_DATEN { return -1 }
+    if frame.geschuetzt(f) { return -1 }
+    let h: usize = hl as usize
+    if n < h + llc.SNAP_LEN + 4 { return -1 }
+    if llc.snap_parse(p + h as u64, n - h) != llc.ET_EAPOL { return -1 }
+    return (h + llc.SNAP_LEN) as i64
+}
+
+fn key_frame(out: u64, key_info: u64, m1: u64, key_data: u64, dlen: u64) {
+    iwl_le.zero(out, M2_FIXED_LEN as u64 + dlen)
+    iwl_le.st8(out, 0, 2)
+    iwl_le.st8(out, 1, 3)
+    put_be16(out, 2, 95 + dlen)
+    iwl_le.st8(out, 4, 2)
+    put_be16(out, 5, key_info)
+    iwl_le.st16(out, 7, 0)
+    var i: u64 = 0
+    while i < 8 {
+        iwl_le.st8(out, 9 + i, iwl_le.ld8(m1, 9 + i))
+        i = i + 1
+    }
+    put_be16(out, 97, dlen)
+    i = 0
+    while i < dlen {
+        iwl_le.st8(out, 99 + i, iwl_le.ld8(key_data, i))
+        i = i + 1
+    }
+}
+
+fn mic_set(out: u64, total: usize, kck: u64, akm: u64) -> bool {
+    var mic: [u8; 16] = [0; 16]
+    if !wpa.mic_compute(kck, 16, out, total, akm, (&mic[0]) as u64) { return false }
+    var i: u64 = 0
+    while i < 16 {
+        iwl_le.st8(out, 81 + i, mic[i as usize] as u64)
+        i = i + 1
+    }
+    return true
+}
+
+fn m2_build(out: u64, m1: u64, snonce: u64, kck: u64, akm: u64) -> i64 {
+    var rsn: [u8; 22] = [0; 22]
+    rsn_ie((&rsn[0]) as u64, 0)
+    key_frame(out, KEY_INFO_M2, m1, (&rsn[0]) as u64, RSN_IE_LEN as u64)
+    var i: u64 = 0
+    while i < 32 {
+        iwl_le.st8(out, 17 + i, iwl_le.ld8(snonce, i))
+        i = i + 1
+    }
+    let total: usize = M2_FIXED_LEN + RSN_IE_LEN
+    if !mic_set(out, total, kck, akm) { return -1 }
+    return total as i64
+}
+
+fn m4_build(out: u64, m3: u64, kck: u64, akm: u64) -> i64 {
+    key_frame(out, KEY_INFO_M4, m3, 0, 0)
+    if !mic_set(out, M4_LEN, kck, akm) { return -1 }
+    return M4_LEN as i64
+}

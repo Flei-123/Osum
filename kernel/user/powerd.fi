@@ -18,6 +18,7 @@ profile kernel
 import ulib
 import libc.io
 import power.policy
+import power.blstore
 import fui.traypower
 
 export { u_start }
@@ -34,12 +35,19 @@ const PG_LID: u64 = 48
 const PS_PROFILE: u64 = 0
 const PS_BRIGHT: u64 = 1
 const PS_BLANKAFTER: u64 = 3
+const SYS_DISPGET: u64 = 1810
+const SYS_DISPSET: u64 = 1811
+const DG_BRIGHT: u64 = 16
+const DS_BRIGHT: u64 = 3
 const PS_INJECT: u64 = 4
 const OP_IDLE: u64 = 3
 const OP_WISH: u64 = 11
 const OP_ANSWER: u64 = 12
 
 static mut t_conf: [u8; 16] = "/etc/power.conf\0"
+static mut t_bl: [u8; 20] = "/etc/backlight.conf\0"
+static mut m_blr: [u8; 28] = "powerd: backlight restored \0"
+static mut m_bls: [u8; 26] = "powerd: backlight saved \0\0"
 static mut t_svc: [u8; 13] = "/run/svc.cmd\0"
 static mut t_down: [u8; 10] = "shutdown\n\0"
 static mut m_start: [u8; 18] = "powerd: on, conf \0"
@@ -136,6 +144,7 @@ static mut ap_src: u64 = 9
 static mut ap_prof: u64 = 9
 static mut ap_blank: u64 = 0xFFFFFFFF
 static mut ap_bri: u64 = 0xFFFFFFFF
+static mut bl_resync: u64 = 0
 
 // Push profile, screen-off time and brightness of the current source into the kernel -- only what changed.
 fn apply(c: *mut policy.Conf, mains: bool) {
@@ -156,6 +165,7 @@ fn apply(c: *mut policy.Conf, mains: bool) {
     let _b: u64 = ulib.sys(SYS_PWRSET, PS_BLANKAFTER, blank, 0)
     if bri <= 100 && bri != ap_bri {
         let _r: u64 = ulib.sys(SYS_PWRSET, PS_BRIGHT, bri, 0)
+        bl_resync = 1
     }
     ap_src = m
     ap_prof = prof
@@ -170,6 +180,74 @@ fn apply(c: *mut policy.Conf, mains: bool) {
     ulib.say((&m_bri[0 as usize]) as u64)
     num(bri)
     ulib.nl()
+}
+
+fn bl_now() -> u64 {
+    let k: u64 = ulib.sys(SYS_DISPGET, DG_BRIGHT, 0, 0)
+    if ulib.bad(k) {
+        return blstore.NONE
+    }
+    var p: u64 = k / 2
+    if p > blstore.MAX_PCT {
+        p = blstore.MAX_PCT
+    }
+    return p
+}
+
+fn bl_restore() {
+    var tb: [u8; 64] = [0 as u8; 64]
+    let fd: u64 = io.open((&t_bl[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let n: u64 = io.read(fd, (&tb[0 as usize]) as u64, 63)
+    io.close(fd)
+    if ulib.bad(n) {
+        return
+    }
+    tb[n as usize] = 0 as u8
+    let p: u64 = blstore.parse((&tb[0 as usize]) as u64)
+    if p == blstore.NONE {
+        return
+    }
+    let rc: u64 = ulib.sys(SYS_DISPSET, DS_BRIGHT, p * 2, 0)
+    if ulib.bad(rc) {
+        return
+    }
+    ulib.say((&m_blr[0 as usize]) as u64)
+    num(p)
+    ulib.nl()
+}
+
+fn bl_save(p: u64) {
+    var tb: [u8; 32] = [0 as u8; 32]
+    let n: u64 = blstore.format(p, (&tb[0 as usize]) as u64, 32)
+    if n == 0 {
+        return
+    }
+    let fd: u64 = io.open((&t_bl[0 as usize]) as u64, 577)
+    if ulib.bad(fd) {
+        return
+    }
+    let _w: u64 = io.write(fd, (&tb[0 as usize]) as u64, n)
+    io.close(fd)
+    ulib.say((&m_bls[0 as usize]) as u64)
+    num(p)
+    ulib.nl()
+}
+
+fn bl_tick(s: *mut blstore.Saver) {
+    let p: u64 = bl_now()
+    if bl_resync == 1 {
+        bl_resync = 0
+        if p != blstore.NONE {
+            *s = blstore.saver_new(p)
+        }
+        return
+    }
+    if p != blstore.NONE && blstore.track(s, p) {
+        bl_save(p)
+    }
 }
 
 fn inject(args: u64) -> u64 {
@@ -257,6 +335,8 @@ fn u_start(args: u64) -> u64 {
     ulib.say((&m_start[0 as usize]) as u64)
     ulib.say((&t_conf[0 as usize]) as u64)
     ulib.nl()
+    bl_restore()
+    var bls: blstore.Saver = blstore.saver_new(bl_now())
     var lid: u64 = lid_now()
     var armed: u64 = 1
     var round: u64 = 0
@@ -267,6 +347,7 @@ fn u_start(args: u64) -> u64 {
         }
         let mains: bool = on_mains()
         apply(&c, mains)
+        bl_tick(&bls)
         var mi: u64 = 0
         if mains {
             mi = 1
