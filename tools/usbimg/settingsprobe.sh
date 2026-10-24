@@ -31,7 +31,7 @@ grep -q '/apps/social.prog/SETTINGS' "$OUT/files.txt" \
 
 S="$OUT/serial.txt"; SOCK="$OUT/mon.sock"
 : > "$S"
-timeout 400 qemu-system-x86_64 "${KVM[@]}" -m 512 \
+timeout 1500 qemu-system-x86_64 "${KVM[@]}" -m 512 \
     -kernel "$OUT/bau/osum.mb" -initrd "$OUT/bau/root.img" \
     -append "modfs osum vfs gfx wm wig desk wmhold wighalt=300 nokbd nosched fbres=1920x1200 lang=en" \
     -serial "file:$S" -display none -no-reboot -vga std \
