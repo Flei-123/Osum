@@ -73,6 +73,13 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
 5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
 
+## Stick GUI-Fixes HP (24.10.2026, Baustand 6e33009f = main, Gates menurows 10/0 + startmenu 26/0)
+
+- **Datei:** `orientos-usb-hp-20261024-6e33009f-guibugs.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `9adb0daa363231da8ec258d202fc9b648dd30ece62aaddeb0cdc7be88fbd3f19`.
+- **Neu:** Startmenue: in "Alle Apps" und in den Suchtreffern leuchtet jetzt die Zeile unter dem Mauszeiger (vorher gar nicht). Die angepinnten Kacheln leuchteten schon.
+- **Foto-Checkliste:** Start oeffnen, "All apps", Maus ueber verschiedene Zeilen; Suche "e" tippen, Maus ueber Treffer. Flackern: welche Fenster genau (Name) + Aufloesung/Massstab. Settings-Absturz: Fenster am Rand ziehen oder Maximieren-Knopf? Foto/Text der Fehlerzeile (`dmesg` oder Serial), Aufloesung.
+- **Ehrlich:** Flackern und Settings-Absturz sind in QEMU NICHT reproduziert und NICHT behoben; Flacker-Verdacht (Fenster ohne privates Bild) liegt als Branch `staff/orientos-mvmqoy35-atomic` bereit, ungetestet.
+
 ## Stick 14 HP (24.10.2026, Baustand f69dadbf = main, WLAN Secure-Boot-Trace)
 
 - **Datei:** `orientos-usb-hp-20261024-f69dadbf.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `00cd0e0162d6c194a3aa66a8863f244b369380e2d263455cdb40783b1714e190`. Ersetzt Stick 13 (SHA 0eec7bc9...).
