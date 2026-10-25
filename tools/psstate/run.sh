@@ -41,9 +41,9 @@ S="$T/ser.txt"
 klar() { [ -f "$S" ] || return 0; tr -cd '\11\12\15\40-\176' < "$S"; }
 i=0; while [ $i -lt 150 ] && ! klar | grep -aq 'PSSTATE-DONE'; do kill -0 $QPID 2>/dev/null || break; sleep 1; i=$((i+1)); done
 klar | grep -aq 'PSSTATE-DONE' && ok "snapshot script ran" || { bad "snapshot script did not finish"; klar | tail -20; }
-klar | grep -a 'orientbus' | head -3 > "$T/rows.txt"
-grep -aq ' poll  .*orientbus' "$T/rows.txt" && ok "ps shows orientbus as poll" || { bad "ps does not show orientbus as poll"; cat "$T/rows.txt"; }
-klar | grep -a ' new  ' | grep -av 'new    user.*-$' > "$T/newrows.txt" || true
+klar | grep -aE '^ *[0-9]+ +[0-9]+ .*orientbus' | head -3 > "$T/rows.txt"
+grep -aq ' poll ' "$T/rows.txt" && ok "ps shows orientbus as poll" || { bad "ps does not show orientbus as poll"; cat "$T/rows.txt"; }
+klar | grep -aE '^ *[0-9]+ +[0-9]+ +new ' > "$T/newrows.txt" || true
 grep -aq 'orientbus' "$T/newrows.txt" && bad "orientbus still shown as new" || ok "orientbus not shown as new"
 echo "PSSTATE: $pass ok / $fail fail"
 [ "$fail" -eq 0 ]
