@@ -111,6 +111,11 @@ static mut k_full_t: [u8; 20] = "launcher.full.title\0"
 static mut k_full_x: [u8; 19] = "launcher.full.text\0"
 static mut s_full: [u8; 32] = "launcher: start refused pid=\0\0\0\0"
 static mut t_dir: [u8; 8] = "/apps\0\0\0"
+static mut lw_refresh_off: [u8; 12] = "refresh=off\0"
+static mut g_refresh: bool = true
+static mut g_fp: u64 = 0
+static mut g_nokeys: bool = false
+static mut s_reload: [u8; 25] = "launcher: apps reloaded \0"
 // WIE VIELE DATEITREFFER UNTER DIE PROGRAMME PASSEN. Der Index kann
 // Tausende liefern; ein Fenster kann sieben Zeilen zeigen, und wer nach
 // "e" sucht, will nicht 3000 Zeilen sehen, sondern die ersten paar und
@@ -1201,6 +1206,67 @@ fn start_style_read() {
         }
         i = i + 1
     }
+    if buf_has(b, n, (&lw_refresh_off[0 as usize]) as u64, 11) {
+        g_refresh = false
+    }
+}
+
+fn buf_has(b: u64, n: u64, word: u64, wl: u64) -> bool {
+    var i: u64 = 0
+    while i + wl <= n {
+        var k: u64 = 0
+        while k < wl && __mmio_read8((b + i + k) as *mut u8) == __mmio_read8((word + k) as *mut u8) {
+            k = k + 1
+        }
+        if k == wl {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn apps_refresh() -> bool {
+    if !g_refresh {
+        return false
+    }
+    let fp: u64 = appdir.fingerprint((&t_dir[0 as usize]) as u64)
+    if fp == g_fp {
+        return false
+    }
+    g_fp = fp
+    var tok: [u8; 144] = [0 as u8; 144]
+    var probe: [u8; 24] = [0 as u8; 24]
+    var empty_q: [u8; 2] = [0 as u8; 2]
+    let keep: u64 = mru_n
+    var k: u64 = 0
+    while k < keep {
+        app_token(mru[(k) as usize], (&tok[0 as usize]) as u64 + k * 24)
+        k = k + 1
+    }
+    let n: u64 = appdir.load((&t_dir[0 as usize]) as u64, g_nokeys)
+    all_n = appdir.search((&empty_q[0 as usize]) as u64, (&all_app[0 as usize]) as u64, 24)
+    mru_n = 0
+    k = 0
+    while k < keep {
+        var j: u64 = 0
+        while j < n {
+            app_token(j, (&probe[0 as usize]) as u64)
+            if ulib.streq((&probe[0 as usize]) as u64, (&tok[0 as usize]) as u64 + k * 24) {
+                mru[(mru_n) as usize] = j
+                mru_n = mru_n + 1
+                break
+            }
+            j = j + 1
+        }
+        k = k + 1
+    }
+    pins_read()
+    new_find()
+    say((&s_reload[0 as usize]) as u64)
+    sayn(n)
+    nl()
+    return true
 }
 
 fn schluessel_ist(p: u64, n: u64, name: u64) -> bool {
@@ -1870,6 +1936,8 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
     let n: u64 = appdir.load((&t_dir[0 as usize]) as u64, nokeys)
+    g_nokeys = nokeys
+    g_fp = appdir.fingerprint((&t_dir[0 as usize]) as u64)
     // r402: the whole directory in its order (the pinned grid and the recommended block take
     // from it); the name of the user for the footer
     var empty_q: [u8; 2] = [0 as u8; 2]
@@ -2303,11 +2371,15 @@ fn u_start(args: u64) -> u64 {
             let hd_now: u64 = wlibc.start_head_get()
             // r1007: the screen may have another size than at the last placement (host hint, Settings): place again
             let scr_now: u64 = (wlibc.screen_w() << 16) | wlibc.screen_h()
-            if hd_now != g_head || scr_now != g_scr {
+            let reloaded: bool = apps_refresh()
+            if hd_now != g_head || scr_now != g_scr || reloaded {
                 g_scr = scr_now
                 g_head = hd_now
                 head_follow(hd_now)
                 sbh = refit_menu(sk, sbw, sbh)
+                if reloaded && g_w11 {
+                    home_prepare()
+                }
                 let hh_m: u64 = fuiscene.handle()
                 if hh_m != 0 {
                     let _mv: u64 = wlibc.win_move(hh_m, anker_x(sbw), anker_y(sbh))
