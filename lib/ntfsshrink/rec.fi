@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.runs
+import ntfsshrink.vol
+
+export {
+    fixup_apply, fixup_make, attr_find, attr_runs, mft_load, rec_read, rec_write, mft_read, mft_write,
+    WHICH_MFT, WHICH_MIRROR, AT_VOLINFO, AT_DATA, AT_ATTRLIST, AT_STDINFO, AT_BITMAP, AT_END
+}
+
+const WHICH_MFT: u64 = 0
+const WHICH_MIRROR: u64 = 1
+const AT_STDINFO: u64 = 16
+const AT_ATTRLIST: u64 = 32
+const AT_VOLINFO: u64 = 112
+const AT_DATA: u64 = 128
+const AT_BITMAP: u64 = 176
+const AT_END: u64 = 4294967295
+const FILE_MAGIC: u64 = 1162627398
+
+fn fixup_apply(rec: u64, size: u64, bps: u64) -> bool {
+    if bytes.le32(rec) != FILE_MAGIC {
+        return false
+    }
+    let ofs: u64 = bytes.le16(rec + 4)
+    let cnt: u64 = bytes.le16(rec + 6)
+    if cnt != size / bps + 1 || ofs < 42 || ofs + cnt * 2 > size || (ofs & 1) != 0 {
+        return false
+    }
+    let usn: u64 = bytes.le16(rec + ofs)
+    var i: u64 = 1
+    while i < cnt {
+        if bytes.le16(rec + i * bps - 2) != usn {
+            return false
+        }
+        i = i + 1
+    }
+    i = 1
+    while i < cnt {
+        bytes.put16(rec + i * bps - 2, bytes.le16(rec + ofs + i * 2))
+        i = i + 1
+    }
+    return true
+}
+
+fn fixup_make(rec: u64, size: u64, bps: u64) {
+    let ofs: u64 = bytes.le16(rec + 4)
+    let cnt: u64 = bytes.le16(rec + 6)
+    let usn: u64 = bytes.le16(rec + ofs)
+    var i: u64 = 1
+    while i < cnt {
+        bytes.put16(rec + ofs + i * 2, bytes.le16(rec + i * bps - 2))
+        bytes.put16(rec + i * bps - 2, usn)
+        i = i + 1
+    }
+}
+
+fn attr_find(rec: u64, size: u64, kind: u64, name_len: u64) -> u64 {
+    var a: u64 = bytes.le16(rec + 20)
+    let used: u64 = bytes.le32(rec + 24)
+    if used > size || a < 42 {
+        return 0
+    }
+    while a + 16 <= used {
+        let t: u64 = bytes.le32(rec + a)
+        if t == AT_END {
+            return 0
+        }
+        let len: u64 = bytes.le32(rec + a + 4)
+        if len < 16 || (len & 7) != 0 || a + len > used {
+            return 0
+        }
+        if t == kind && bytes.ld8(rec + a, 9) == name_len {
+            return rec + a
+        }
+        a = a + len
+    }
+    return 0
+}
+
+fn attr_runs(attr: u64, out_end: *mut u64) -> u64 {
+    if bytes.ld8(attr, 8) == 0 {
+        return 0
+    }
+    let ro: u64 = bytes.le16(attr + 32)
+    let len: u64 = bytes.le32(attr + 4)
+    if ro < 64 || ro >= len {
+        return 0
+    }
+    *out_end = attr + len
+    return attr + ro
+}
+
+fn rec_sector(v: *mut vol.Vol, which: u64, n: u64, i: u64, out: *mut u64) -> u64 {
+    let spr: u64 = (*v).rec_size / 512
+    if which == WHICH_MIRROR {
+        if n >= 4 {
+            return codes.E_RANGE
+        }
+        *out = (*v).mirr_lcn * (*v).spc + n * spr + i
+        return codes.E_OK
+    }
+    let vsec: u64 = n * spr + i
+    if vsec * 512 >= (*v).mft_size {
+        return codes.E_RANGE
+    }
+    if (*v).mrun_len == 0 {
+        return codes.E_CORRUPT
+    }
+    var it: runs.RunIt = runs.it_new()
+    let p: u64 = (&(*v).mruns[0]) as u64
+    let vcn: u64 = vsec / (*v).spc
+    if !runs.locate(&it, p, p + (*v).mrun_len, vcn) || it.sparse != 0 {
+        return codes.E_CORRUPT
+    }
+    let lcn: u64 = it.lcn + (vcn - it.vcn)
+    if lcn >= (*v).clusters {
+        return codes.E_CORRUPT
+    }
+    *out = lcn * (*v).spc + (vsec % (*v).spc)
+    return codes.E_OK
+}
+
+fn rec_read(v: *mut vol.Vol, which: u64, n: u64, raw: u64, rec: u64) -> u64 {
+    let spr: u64 = (*v).rec_size / 512
+    var i: u64 = 0
+    while i < spr {
+        var rel: u64 = 0
+        let r: u64 = rec_sector(v, which, n, i, &rel)
+        if r != codes.E_OK {
+            return r
+        }
+        if vol.vread(v, rel, 1, raw + i * 512) != codes.E_OK {
+            return codes.E_IO
+        }
+        i = i + 1
+    }
+    bytes.copy(rec, raw, (*v).rec_size)
+    if !fixup_apply(rec, (*v).rec_size, 512) {
+        return codes.E_CORRUPT
+    }
+    return codes.E_OK
+}
+
+fn rec_write(v: *mut vol.Vol, which: u64, n: u64, raw: u64, rec: u64, tmp: u64) -> u64 {
+    let spr: u64 = (*v).rec_size / 512
+    bytes.copy(tmp, rec, (*v).rec_size)
+    fixup_make(tmp, (*v).rec_size, 512)
+    var i: u64 = 0
+    while i < spr {
+        var same: bool = true
+        var j: u64 = 0
+        while j < 512 && same {
+            if bytes.ld8(tmp + i * 512, j) != bytes.ld8(raw + i * 512, j) {
+                same = false
+            }
+            j = j + 1
+        }
+        if !same {
+            var rel: u64 = 0
+            let r: u64 = rec_sector(v, which, n, i, &rel)
+            if r != codes.E_OK {
+                return r
+            }
+            if vol.vwrite(v, rel, 1, tmp + i * 512) != codes.E_OK {
+                return codes.E_IO
+            }
+            bytes.copy(raw + i * 512, tmp + i * 512, 512)
+        }
+        i = i + 1
+    }
+    return codes.E_OK
+}
+
+fn mft_read(v: *mut vol.Vol, n: u64, raw: u64, rec: u64) -> u64 {
+    return rec_read(v, WHICH_MFT, n, raw, rec)
+}
+
+fn mft_write(v: *mut vol.Vol, n: u64, raw: u64, rec: u64, tmp: u64) -> u64 {
+    return rec_write(v, WHICH_MFT, n, raw, rec, tmp)
+}
+
+fn mft_load(v: *mut vol.Vol, raw: u64, rec: u64) -> u64 {
+    let spr: u64 = (*v).rec_size / 512
+    if vol.vread(v, (*v).mft_lcn * (*v).spc, spr, raw) != codes.E_OK {
+        return codes.E_IO
+    }
+    bytes.copy(rec, raw, (*v).rec_size)
+    if !fixup_apply(rec, (*v).rec_size, 512) {
+        return codes.E_CORRUPT
+    }
+    if attr_find(rec, (*v).rec_size, AT_ATTRLIST, 0) != 0 {
+        return codes.E_COMPLEX
+    }
+    let a: u64 = attr_find(rec, (*v).rec_size, AT_DATA, 0)
+    if a == 0 || bytes.ld8(a, 8) == 0 || bytes.le64(a + 16) != 0 {
+        return codes.E_CORRUPT
+    }
+    var re: u64 = 0
+    let rp: u64 = attr_runs(a, &re)
+    if rp == 0 || re - rp > vol.MRUN_MAX {
+        return codes.E_COMPLEX
+    }
+    let size: u64 = bytes.le64(a + 48)
+    let cl: u64 = runs.total_clusters(rp, re)
+    if cl == 0 || cl * (*v).cb < size || size < 16 * (*v).rec_size {
+        return codes.E_CORRUPT
+    }
+    var it: runs.RunIt = runs.it_new()
+    runs.it_init(&it, rp, re)
+    if !runs.next(&it) || it.sparse != 0 || it.lcn != (*v).mft_lcn {
+        return codes.E_CORRUPT
+    }
+    bytes.copy((&(*v).mruns[0]) as u64, rp, re - rp)
+    (*v).mrun_len = re - rp
+    (*v).mft_size = size
+    return codes.E_OK
+}

@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.vol
+
+export { bitmap_bytes, get_bit, last_used, set_padding, CHUNK_SECTORS, CHUNK_BYTES }
+
+const CHUNK_SECTORS: u64 = 16
+const CHUNK_BYTES: u64 = 8192
+
+fn bitmap_bytes(clusters: u64) -> u64 {
+    return ((clusters + 7) / 8 + 7) / 8 * 8
+}
+
+fn byte_mask(k: u64, limit: u64) -> u64 {
+    var m: u64 = 0
+    var b: u64 = 0
+    while b < 8 {
+        if k * 8 + b < limit {
+            m = m | (1 << b)
+        }
+        b = b + 1
+    }
+    return m
+}
+
+fn get_bit(v: *mut vol.Vol, rp: u64, re: u64, n: u64, sector: u64, out: *mut u64) -> u64 {
+    let r: u64 = vol.ds_read(v, rp, re, n / 8 / 512, 1, sector)
+    if r != codes.E_OK {
+        return r
+    }
+    *out = (bytes.ld8(sector, n / 8 % 512) >> (n % 8)) & 1
+    return codes.E_OK
+}
+
+fn last_used(v: *mut vol.Vol, rp: u64, re: u64, clusters: u64, buf: u64, out: *mut u64) -> u64 {
+    let nbytes: u64 = (clusters + 7) / 8
+    var top: u64 = (nbytes + 511) / 512
+    while top > 0 {
+        let first: u64 = if top > CHUNK_SECTORS { top - CHUNK_SECTORS } else { 0 }
+        let n: u64 = top - first
+        let r: u64 = vol.ds_read(v, rp, re, first, n, buf)
+        if r != codes.E_OK {
+            return r
+        }
+        var k: u64 = n * 512
+        while k > 0 {
+            k = k - 1
+            let idx: u64 = first * 512 + k
+            if idx < nbytes {
+                let m: u64 = byte_mask(idx, clusters)
+                let b: u64 = bytes.ld8(buf, k) & m
+                if b != 0 {
+                    var bit: u64 = 7
+                    while (b >> bit) & 1 == 0 {
+                        bit = bit - 1
+                    }
+                    *out = idx * 8 + bit + 1
+                    return codes.E_OK
+                }
+            }
+        }
+        top = first
+    }
+    *out = 0
+    return codes.E_OK
+}
+
+fn set_padding(v: *mut vol.Vol, rp: u64, re: u64, new_clusters: u64, sector: u64) -> u64 {
+    let d: u64 = bitmap_bytes(new_clusters)
+    var s: u64 = new_clusters / 8 / 512
+    let last: u64 = (d - 1) / 512
+    while s <= last {
+        let r: u64 = vol.ds_read(v, rp, re, s, 1, sector)
+        if r != codes.E_OK {
+            return r
+        }
+        var changed: bool = false
+        var k: u64 = 0
+        while k < 512 {
+            let idx: u64 = s * 512 + k
+            if idx >= new_clusters / 8 && idx < d {
+                let want: u64 = 255 & (255 - byte_mask(idx, new_clusters))
+                let cur: u64 = bytes.ld8(sector, k)
+                if (cur | want) != cur {
+                    bytes.st8(sector + k, cur | want)
+                    changed = true
+                }
+            }
+            k = k + 1
+        }
+        if changed {
+            let w: u64 = vol.ds_write(v, rp, re, s, 1, sector)
+            if w != codes.E_OK {
+                return w
+            }
+        }
+        s = s + 1
+    }
+    return codes.E_OK
+}

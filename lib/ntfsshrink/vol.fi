@@ -1,0 +1,210 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.runs
+
+export { Vol, vol_new, open, vread, vwrite, ds_read, ds_write, same_boot, MRUN_MAX, SCRATCH_BOOT }
+
+const MRUN_MAX: u64 = 4096
+const SCRATCH_BOOT: u64 = 1024
+
+struct Vol {
+    rd: fn(u64, u64, u64) -> u64,
+    wr: fn(u64, u64, u64) -> u64,
+    base: u64,
+    psize: u64,
+    bps: u64,
+    spc: u64,
+    cb: u64,
+    sectors: u64,
+    clusters: u64,
+    mft_lcn: u64,
+    mirr_lcn: u64,
+    rec_size: u64,
+    idx_size: u64,
+    serial: u64,
+    mft_size: u64,
+    mrun_len: u64,
+    mruns: [u8; 4096]
+}
+
+fn no_io(a: u64, b: u64, c: u64) -> u64 {
+    return 1
+}
+
+fn vol_new() -> Vol {
+    var v: Vol = Vol {
+        rd: no_io, wr: no_io, base: 0, psize: 0, bps: 0, spc: 0, cb: 0, sectors: 0, clusters: 0, mft_lcn: 0,
+        mirr_lcn: 0, rec_size: 0, idx_size: 0, serial: 0, mft_size: 0, mrun_len: 0, mruns: [0; 4096]
+    }
+    return v
+}
+
+fn vread(v: *mut Vol, rel: u64, n: u64, buf: u64) -> u64 {
+    if rel + n > (*v).psize {
+        return codes.E_IO
+    }
+    if (*v).rd((*v).base + rel, n, buf) != 0 {
+        return codes.E_IO
+    }
+    return codes.E_OK
+}
+
+fn vwrite(v: *mut Vol, rel: u64, n: u64, buf: u64) -> u64 {
+    if rel + n > (*v).psize {
+        return codes.E_IO
+    }
+    if (*v).wr((*v).base + rel, n, buf) != 0 {
+        return codes.E_IO
+    }
+    return codes.E_OK
+}
+
+fn str_at(p: u64, s: str) -> bool {
+    var i: usize = 0
+    while i < s.n {
+        if bytes.ld8(p, i as u64) != bytes.ld8(s.p as u64, i as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn same_boot(a: u64, b: u64) -> bool {
+    if !str_at(a + 3, "NTFS    ") || !str_at(b + 3, "NTFS    ") {
+        return false
+    }
+    if bytes.le16(a + 11) != bytes.le16(b + 11) || bytes.ld8(a, 13) != bytes.ld8(b, 13) {
+        return false
+    }
+    if bytes.le64(a + 40) != bytes.le64(b + 40) || bytes.le64(a + 48) != bytes.le64(b + 48) {
+        return false
+    }
+    if bytes.le64(a + 56) != bytes.le64(b + 56) || bytes.le64(a + 72) != bytes.le64(b + 72) {
+        return false
+    }
+    return true
+}
+
+fn pow2(n: u64) -> bool {
+    return n != 0 && (n & (n - 1)) == 0
+}
+
+fn size_field(raw: u64, cb: u64) -> u64 {
+    if raw < 128 {
+        return raw * cb
+    }
+    let sh: u64 = 256 - raw
+    if sh > 16 {
+        return 0
+    }
+    return 1 << sh
+}
+
+fn open(v: *mut Vol, rd: fn(u64, u64, u64) -> u64, wr: fn(u64, u64, u64) -> u64, base: u64, psize: u64, scratch: u64) -> u64 {
+    (*v).rd = rd
+    (*v).wr = wr
+    (*v).base = base
+    (*v).psize = psize
+    let b: u64 = scratch
+    let alt: u64 = scratch + 512
+    if vread(v, 0, 1, b) != codes.E_OK {
+        return codes.E_IO
+    }
+    if bytes.ld8(b, 510) != 85 || bytes.ld8(b, 511) != 170 {
+        return codes.E_NOT_NTFS
+    }
+    if str_at(b + 3, "-FVE-FS-") {
+        return codes.E_ENCRYPTED
+    }
+    if !str_at(b + 3, "NTFS    ") {
+        return codes.E_NOT_NTFS
+    }
+    let bps: u64 = bytes.le16(b + 11)
+    let spc: u64 = bytes.ld8(b, 13)
+    if bps != 512 || !pow2(spc) || spc > 128 {
+        return codes.E_UNSUPPORTED
+    }
+    let s: u64 = bytes.le64(b + 40)
+    if s < 64 || s + 1 > psize {
+        return codes.E_CORRUPT
+    }
+    let c: u64 = s / spc
+    let mft: u64 = bytes.le64(b + 48)
+    let mirr: u64 = bytes.le64(b + 56)
+    if mft == 0 || mft >= c || mirr == 0 || mirr >= c || mft == mirr {
+        return codes.E_CORRUPT
+    }
+    let cb: u64 = spc * bps
+    var rs: u64 = size_field(bytes.ld8(b, 64), cb)
+    let is: u64 = size_field(bytes.ld8(b, 68), cb)
+    if !pow2(rs) || rs < 1024 || rs > 4096 || !pow2(is) || is < 512 {
+        return codes.E_UNSUPPORTED
+    }
+    if vread(v, s, 1, alt) != codes.E_OK {
+        return codes.E_IO
+    }
+    if !same_boot(b, alt) {
+        return codes.E_CORRUPT
+    }
+    (*v).bps = bps
+    (*v).spc = spc
+    (*v).cb = cb
+    (*v).sectors = s
+    (*v).clusters = c
+    (*v).mft_lcn = mft
+    (*v).mirr_lcn = mirr
+    (*v).rec_size = rs
+    (*v).idx_size = is
+    (*v).serial = bytes.le64(b + 72)
+    (*v).mft_size = 0
+    (*v).mrun_len = 0
+    return codes.E_OK
+}
+
+fn ds_rel(v: *mut Vol, rp: u64, re: u64, vsec: u64, out: *mut u64) -> u64 {
+    var it: runs.RunIt = runs.it_new()
+    let vcn: u64 = vsec / (*v).spc
+    if !runs.locate(&it, rp, re, vcn) || it.sparse != 0 {
+        return codes.E_CORRUPT
+    }
+    let lcn: u64 = it.lcn + (vcn - it.vcn)
+    if lcn >= (*v).clusters {
+        return codes.E_CORRUPT
+    }
+    *out = lcn * (*v).spc + (vsec % (*v).spc)
+    return codes.E_OK
+}
+
+fn ds_read(v: *mut Vol, rp: u64, re: u64, vsec: u64, n: u64, dst: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        var rel: u64 = 0
+        let r: u64 = ds_rel(v, rp, re, vsec + i, &rel)
+        if r != codes.E_OK {
+            return r
+        }
+        if vread(v, rel, 1, dst + i * 512) != codes.E_OK {
+            return codes.E_IO
+        }
+        i = i + 1
+    }
+    return codes.E_OK
+}
+
+fn ds_write(v: *mut Vol, rp: u64, re: u64, vsec: u64, n: u64, src: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        var rel: u64 = 0
+        let r: u64 = ds_rel(v, rp, re, vsec + i, &rel)
+        if r != codes.E_OK {
+            return r
+        }
+        if vwrite(v, rel, 1, src + i * 512) != codes.E_OK {
+            return codes.E_IO
+        }
+        i = i + 1
+    }
+    return codes.E_OK
+}

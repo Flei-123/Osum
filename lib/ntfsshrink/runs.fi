@@ -1,0 +1,113 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+
+export { RunIt, it_new, it_init, next, locate, total_clusters, LCN_LIMIT }
+
+const LCN_LIMIT: u64 = 9223372036854775807
+const LEN_LIMIT: u64 = 281474976710656
+
+struct RunIt {
+    p: u64,
+    end: u64,
+    acc: u64,
+    nvcn: u64,
+    vcn: u64,
+    lcn: u64,
+    len: u64,
+    sparse: u64,
+    bad: u64
+}
+
+fn it_new() -> RunIt {
+    var it: RunIt = RunIt { p: 0, end: 0, acc: 0, nvcn: 0, vcn: 0, lcn: 0, len: 0, sparse: 0, bad: 0 }
+    return it
+}
+
+fn it_init(it: *mut RunIt, p: u64, end: u64) {
+    (*it).p = p
+    (*it).end = end
+    (*it).acc = 0
+    (*it).nvcn = 0
+    (*it).vcn = 0
+    (*it).lcn = 0
+    (*it).len = 0
+    (*it).sparse = 0
+    (*it).bad = 0
+}
+
+fn read_unsigned(p: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        v = v | (bytes.ld8(p, i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+fn read_signed(p: u64, n: u64) -> u64 {
+    var v: u64 = read_unsigned(p, n)
+    if n < 8 && (bytes.ld8(p, n - 1) & 128) != 0 {
+        v = v | (18446744073709551615 << (n * 8))
+    }
+    return v
+}
+
+fn next(it: *mut RunIt) -> bool {
+    if (*it).bad != 0 || (*it).p >= (*it).end {
+        return false
+    }
+    let h: u64 = bytes.ld8((*it).p, 0)
+    if h == 0 {
+        return false
+    }
+    let lb: u64 = h & 15
+    let ob: u64 = h >> 4
+    if lb == 0 || lb > 8 || ob > 8 || (*it).p + 1 + lb + ob > (*it).end {
+        (*it).bad = 1
+        return false
+    }
+    let len: u64 = read_unsigned((*it).p + 1, lb)
+    if len == 0 || len >= LEN_LIMIT || (bytes.ld8((*it).p, lb) & 128) != 0 {
+        (*it).bad = 1
+        return false
+    }
+    (*it).len = len
+    (*it).vcn = (*it).nvcn
+    (*it).nvcn = (*it).nvcn + len
+    if ob == 0 {
+        (*it).sparse = 1
+        (*it).lcn = 0
+    } else {
+        (*it).sparse = 0
+        (*it).acc = (*it).acc +% read_signed((*it).p + 1 + lb, ob)
+        if (*it).acc >= LCN_LIMIT {
+            (*it).bad = 1
+            return false
+        }
+        (*it).lcn = (*it).acc
+    }
+    (*it).p = (*it).p + 1 + lb + ob
+    return true
+}
+
+fn locate(it: *mut RunIt, p: u64, end: u64, vcn: u64) -> bool {
+    it_init(it, p, end)
+    while next(it) {
+        if vcn >= (*it).vcn && vcn - (*it).vcn < (*it).len {
+            return true
+        }
+    }
+    return false
+}
+
+fn total_clusters(p: u64, end: u64) -> u64 {
+    var it: RunIt = it_new()
+    it_init(&it, p, end)
+    while next(&it) {
+    }
+    if it.bad != 0 {
+        return 0
+    }
+    return it.nvcn
+}
