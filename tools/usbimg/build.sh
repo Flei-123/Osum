@@ -1548,6 +1548,10 @@ fi
 # LCSH: extra mkfs specs for gates (`<path>=<host file>` words, no blanks inside) -- e.g. tools/usbimg/bbsh.sh puts a musl test program on the stick
 # shellcheck disable=SC2206
 [ -n "${USBIMG_EXTRA:-}" ] && ARGS+=($USBIMG_EXTRA)
+if [ -n "${USBIMG_SPECFILE:-}" ]; then
+    mapfile -t SPEC_LINES < "$USBIMG_SPECFILE"
+    ARGS+=("${SPEC_LINES[@]}")
+fi
 ph pre-mkfs
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { tail -20 "$OUT/mkfs.log" >&2; fehler "mkfs.py fehlgeschlagen"; }
