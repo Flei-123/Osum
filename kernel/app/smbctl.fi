@@ -7,6 +7,7 @@ import libc.dns
 import smb.wire
 import smb.client
 import smb.files
+import smb.shares
 import smb.cred
 
 const DEFAULT_PORT: u32 = 445
@@ -23,6 +24,8 @@ struct Opts {
     cmd: u64,
     arg1: u64,
     arg2: u64,
+    out_path: u64,
+    pw_file: u64,
 }
 
 fn eq(a: u64, lit: u64) -> bool {
@@ -143,6 +146,22 @@ fn error_name(code: u64) -> str {
     return "status"
 }
 
+fn exit_for(code: u64) -> i32 {
+    if code == wire.E_AUTH {
+        return 3
+    }
+    if code == wire.E_CONNECT {
+        return 4
+    }
+    if code == wire.E_SHARE || code == wire.E_NOTFOUND {
+        return 5
+    }
+    if code == wire.E_DENIED {
+        return 6
+    }
+    return 1
+}
+
 fn fail(s: *mut wire.Smb, stage: str, code: u64) -> i32 {
     var b: rt.Buf = rt.buf_new()
     io.print("smbctl: FAILED ")
@@ -154,7 +173,7 @@ fn fail(s: *mut wire.Smb, stage: str, code: u64) -> i32 {
     rt.buf_push(&b, 10 as u8)
     say(&b)
     rt.buf_free(&b)
-    return 1
+    return exit_for(code)
 }
 
 static mut LABEL: [u8; 8] = " sha256 "
@@ -184,6 +203,18 @@ fn report(kind: str, total: u64, digest: u64) {
     rt.buf_free(&b)
 }
 
+fn emit(o: *mut Opts, out: *mut rt.Buf) -> bool {
+    if (*o).out_path == 0 {
+        say(out)
+        return true
+    }
+    if !io.write_file((*o).out_path, rt.buf_ptr(out), rt.buf_len(out)) {
+        io.print("smbctl: cannot write the output file\n")
+        return false
+    }
+    return true
+}
+
 fn cmd_ls(s: *mut wire.Smb, o: *mut Opts) -> i32 {
     var h: files.Handle = files.handle_new()
     var path: u64 = (*o).arg1
@@ -201,10 +232,29 @@ fn cmd_ls(s: *mut wire.Smb, o: *mut Opts) -> i32 {
         rt.buf_free(&out)
         return fail(s, "list", lc)
     }
-    say(&out)
+    let wrote: bool = emit(o, &out)
     rt.buf_free(&out)
     files.close(s, &h)
+    if !wrote {
+        return 1
+    }
     io.print("smbctl: ls ok\n")
+    return 0
+}
+
+fn cmd_shares(s: *mut wire.Smb, o: *mut Opts) -> i32 {
+    var out: rt.Buf = rt.buf_new()
+    let code: u64 = shares.list(s, (*o).host, rt.c_length((*o).host), &out)
+    if code != wire.E_OK {
+        rt.buf_free(&out)
+        return fail(s, "shares", code)
+    }
+    let wrote: bool = emit(o, &out)
+    rt.buf_free(&out)
+    if !wrote {
+        return 1
+    }
+    io.print("smbctl: shares ok\n")
     return 0
 }
 
@@ -328,6 +378,10 @@ fn run(s: *mut wire.Smb, o: *mut Opts) -> i32 {
     if code != wire.E_OK {
         return fail(s, "login", code)
     }
+    var c_shares: [u8; 7] = "shares\0"
+    if eq((*o).cmd, (&c_shares[0]) as u64) {
+        (*o).share = shares.ipc_name()
+    }
     code = client.tree_connect(s, (*o).host, rt.c_length((*o).host), (*o).share, rt.c_length((*o).share))
     if code != wire.E_OK {
         return fail(s, "tree", code)
@@ -338,6 +392,8 @@ fn run(s: *mut wire.Smb, o: *mut Opts) -> i32 {
     var c_put: [u8; 4] = "put\0"
     if eq((*o).cmd, (&c_ls[0]) as u64) {
         rc = cmd_ls(s, o)
+    } else if eq((*o).cmd, (&c_shares[0]) as u64) {
+        rc = cmd_shares(s, o)
     } else if eq((*o).cmd, (&c_get[0]) as u64) {
         rc = cmd_get(s, o)
     } else if eq((*o).cmd, (&c_put[0]) as u64) {
@@ -352,7 +408,7 @@ fn run(s: *mut wire.Smb, o: *mut Opts) -> i32 {
 
 fn main(start: u64) -> i32 {
     var o: Opts = Opts { port: DEFAULT_PORT, user: 0, password: 0, domain: 0, no_sign: false,
-        host: 0, share: 0, cmd: 0, arg1: 0, arg2: 0 }
+        host: 0, share: 0, cmd: 0, arg1: 0, arg2: 0, out_path: 0, pw_file: 0 }
     let empty: [u8; 1] = [0]
     o.domain = (&empty[0]) as u64
     let argc: usize = rt.arg_count(start)
@@ -370,6 +426,10 @@ fn main(start: u64) -> i32 {
                 o.user = v
             } else if c == 100 as u8 {
                 o.domain = v
+            } else if c == 111 as u8 {
+                o.out_path = v
+            } else if c == 70 as u8 {
+                o.pw_file = v
             } else if c == 109 as u8 {
                 client.set_max_dialect(dialect_of(parse_dec(v)))
             } else {
@@ -394,12 +454,21 @@ fn main(start: u64) -> i32 {
         }
         i = i + 1
     }
+    var c_list: [u8; 7] = "shares\0"
+    if o.host != 0 && o.share != 0 && o.cmd == 0 && eq(o.share, (&c_list[0]) as u64) {
+        o.cmd = o.share
+        o.share = shares.ipc_name()
+    }
     if o.host == 0 || o.share == 0 || o.cmd == 0 || o.user == 0 {
-        io.print("usage: smbctl [-p port] -u user [-d domain] [-m 202|210|300|302|311] [-N] host share ls [path] | get remote [local] | put local remote\n")
+        io.print("usage: smbctl [-p port] -u user [-d domain] [-m 202|210|300|302|311] [-o outfile] [-F passwordfile] [-N] host shares | host share ls [path] | get remote [local] | put local remote\n")
         io.print("password: environment SMB_PASSWORD, else prompted on standard input\n")
         return 2
     }
-    o.password = cred.read_password(start)
+    if o.pw_file != 0 {
+        o.password = cred.read_password_file(o.pw_file)
+    } else {
+        o.password = cred.read_password(start)
+    }
     if o.password == 0 {
         io.print("smbctl: no password\n")
         return 2

@@ -112,6 +112,45 @@ start_smbd mandatory || bad "samba 3.1.1 did not start"
 FIRNLIB="$D/badlib" $FIRNC kernel/app/smbctl.fi -o "$D/smbctl_badpre" 2>/dev/null
 out=$(timeout 60 "$D/smbctl_badpre" -p "$PORT" -u gateuser 127.0.0.1 data ls); echo "$out" | grep -q 'ls ok' && bad "counter-proof: a wrong 3.1.1 signing-key label was ACCEPTED" || ok "counter-proof: a wrong 3.1.1 signing-key label is refused by the server"
 stop_smbd
+SMB_MIN=SMB2_02; SMB_MAX=SMB3_11
+mkdir -p "$D/s2"
+SMB_SHARES="[docs]
+path = $D/s2
+comment = Documents of the team
+read only = yes
+[hidden\$]
+path = $D/s2
+[Ünï]
+path = $D/s2
+comment = Ünïcode remark"
+for n in $(seq 1 120); do SMB_SHARES="$SMB_SHARES
+[bulk$n]
+path = $D/s2
+comment = bulk share number $n with a rather long remark text to force several RPC fragments"; done
+start_smbd mandatory && ok "samba (many shares) listening" || bad "samba shares did not start"
+out=$(C 127.0.0.1 shares)
+echo "$out" | grep -q '^d data	' && echo "$out" | grep -q '^d docs	Documents of the team$' && echo "$out" | grep -q '^d hidden\$	' && echo "$out" | grep -q '^i IPC\$	' && ok "shares: names, kinds, remarks (disk, hidden \$, IPC)" || bad "shares: $(echo "$out" | head -5)"
+echo "$out" | grep -q '^d Ünï	Ünïcode remark$' && ok "shares: UTF-8 names and remarks round-trip" || bad "shares utf8"
+[ "$(echo "$out" | grep -c '^d bulk')" = 120 ] && echo "$out" | grep -q '^d bulk120	bulk share number 120 ' && echo "$out" | grep -q 'shares ok' && ok "shares: 120 extra shares (multi-fragment RPC response) all listed" || bad "shares fragments: $(echo "$out" | grep -c '^d bulk')"
+for m in 210 300 302 311; do
+    echo "$(C -m $m 127.0.0.1 shares)" | grep -q 'shares ok' && ok "shares over SMB dialect $m" || bad "shares dialect $m"
+done
+C -o "$D/list.txt" 127.0.0.1 data ls | grep -q 'ls ok' && grep -q '^- 12 hello.txt$' "$D/list.txt" && ok "-o writes the listing to a file, not to the terminal" || bad "-o ls"
+out=$(C -o "$D/shares.txt" 127.0.0.1 shares); ! echo "$out" | grep -q '^d data' && grep -q '^d docs' "$D/shares.txt" && ok "-o also takes the share list" || bad "-o shares"
+printf 'gatepass\nignored\n' > "$D/pw.txt"
+out=$(SMB_PASSWORD= timeout 60 "$D/smbctl" -p "$PORT" -u gateuser -F "$D/pw.txt" 127.0.0.1 data ls)
+echo "$out" | grep -q 'ls ok' && [ ! -e "$D/pw.txt" ] && ok "-F reads the password from a file (first line) and deletes the file" || bad "-F: $out"
+printf 'wrongpass\n' > "$D/pw.txt"
+SMB_PASSWORD= timeout 60 "$D/smbctl" -p "$PORT" -u gateuser -F "$D/pw.txt" 127.0.0.1 data ls >/dev/null; rc=$?
+[ "$rc" = 3 ] && [ ! -e "$D/pw.txt" ] && ok "counter-proof: wrong password from -F exits 3 (auth) and the file is still deleted" || bad "-F wrong: rc=$rc"
+SMB_PASSWORD=wrongpass C 127.0.0.1 shares >/dev/null; [ $? = 3 ] && ok "counter-proof: shares with a wrong password exits 3 (auth)" || bad "shares wrong password rc"
+C 127.0.0.1 nosuchshare ls >/dev/null; [ $? = 5 ] && ok "exit code 5 for a missing share" || bad "exit 5"
+timeout 20 "$D/smbctl" -p 1 -u gateuser 127.0.0.1 shares >/dev/null; [ $? = 4 ] && ok "exit code 4 for a closed port" || bad "exit 4"
+C 127.0.0.1 data get nothere.txt >/dev/null; [ $? = 5 ] && ok "exit code 5 for a missing file" || bad "exit 5 file"
+mkdir -p "$D/badlib2" && cp -r "$ROOT/lib/." "$D/badlib2/" && sed -i 's/^const OP_NET_SHARE_ENUM_ALL: u64 = 15/const OP_NET_SHARE_ENUM_ALL: u64 = 99/' "$D/badlib2/smb/shares.fi"
+FIRNLIB="$D/badlib2" $FIRNC kernel/app/smbctl.fi -o "$D/smbctl_badop" 2>/dev/null
+out=$(timeout 60 "$D/smbctl_badop" -p "$PORT" -u gateuser 127.0.0.1 shares); echo "$out" | grep -q 'shares ok' && bad "counter-proof: a wrong RPC opnum was ACCEPTED" || ok "counter-proof: a wrong RPC opnum makes the server fault and the listing fail"
+stop_smbd
 if [ -z "${SMB_NO_GUEST:-}" ]; then
     echo "== guest (tools/smb/guest.sh) =="
     gout=$(bash tools/smb/guest.sh 2>&1)

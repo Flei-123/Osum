@@ -7,12 +7,14 @@ SMB_MAX=${SMB_MAX:-SMB3_11}
 SMB_USER=${SMB_USER:-gateuser}
 SMB_PASS=${SMB_PASS:-gatepass}
 SMB_EXTRA=${SMB_EXTRA:-}
+SMB_SHARES=${SMB_SHARES:-}
 SMBPID=""
 
 samba_setup() {
     SMB_D=$1
     SMB_PORT=${2:-$(( 20000 + RANDOM % 20000 ))}
     SHARE="$SMB_D/share"
+    SMB_NCAL=$(mktemp -d /tmp/sn.XXXXXX)
     mkdir -p "$SHARE/sub" "$SMB_D/priv" "$SMB_D/lock" "$SMB_D/state" "$SMB_D/cache"
     chmod 755 "$SMB_D"; chmod 777 "$SHARE" "$SHARE/sub"
     echo "hello world" > "$SHARE/hello.txt"
@@ -37,6 +39,7 @@ private dir = $SMB_D/priv
 lock directory = $SMB_D/lock
 state directory = $SMB_D/state
 cache directory = $SMB_D/cache
+ncalrpc dir = $SMB_NCAL
 pid directory = $SMB_D/lock
 passdb backend = tdbsam:$SMB_D/priv/passdb.tdb
 username map = $SMB_D/usermap
@@ -49,6 +52,7 @@ $SMB_EXTRA
 path = $SHARE
 read only = no
 force user = root
+$SMB_SHARES
 CONF
 }
 
@@ -59,12 +63,15 @@ samba_user() {
 samba_stop() {
     [ -n "$SMBPID" ] && kill "$SMBPID" 2>/dev/null && wait "$SMBPID" 2>/dev/null
     SMBPID=""
+    [ -n "${SMB_D:-}" ] && for helper in $(pgrep -f "configfile=$SMB_D/smb.conf" 2>/dev/null); do kill "$helper" 2>/dev/null; done
+    [ -n "${SMB_NCAL:-}" ] && rm -rf "$SMB_NCAL"
 }
 
 samba_start() {
     samba_stop
+    mkdir -p "$SMB_NCAL"
     samba_conf "$1"
-    setsid $SMB_PREFIX smbd -s "$SMB_D/smb.conf" -F --no-process-group > "$SMB_D/smbd.out" 2>&1 < /dev/null &
+    TMPDIR=/tmp setsid $SMB_PREFIX smbd -s "$SMB_D/smb.conf" -F --no-process-group > "$SMB_D/smbd.out" 2>&1 < /dev/null &
     SMBPID=$!
     for _ in $(seq 1 50); do
         $SMB_PREFIX ss -ltn 2>/dev/null | grep -q ":$SMB_PORT " && return 0

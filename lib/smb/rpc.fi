@@ -1,0 +1,206 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import smb.pack
+import smb.wire
+import smb.files
+
+export { bind, call }
+
+const NDR_VERSION_MAJOR: u64 = 2
+const FSCTL_PIPE_TRANSCEIVE: u64 = 1163287
+const IOCTL_FIXED: usize = 56
+const FRAG_MAX: usize = 4280
+const PTYPE_REQUEST: u64 = 0
+const PTYPE_RESPONSE: u64 = 2
+const PTYPE_FAULT: u64 = 3
+const PTYPE_BIND: u64 = 11
+const PTYPE_BIND_ACK: u64 = 12
+const FLAG_FIRST_LAST: u64 = 3
+const FLAG_LAST: u64 = 2
+const PDU_HEADER: usize = 16
+const RESPONSE_HEADER: usize = 24
+
+static mut CALL_ID: u64 = 1
+
+fn push_header(b: *mut rt.Buf, ptype: u64) {
+    rt.buf_push(b, 5 as u8)
+    rt.buf_push(b, 0 as u8)
+    rt.buf_push(b, ptype as u8)
+    rt.buf_push(b, FLAG_FIRST_LAST as u8)
+    rt.buf_push(b, 16 as u8)
+    rt.buf_push(b, 0 as u8)
+    rt.buf_push(b, 0 as u8)
+    rt.buf_push(b, 0 as u8)
+    pack.push16(b, 0)
+    pack.push16(b, 0)
+    pack.push32(b, CALL_ID)
+    CALL_ID = CALL_ID + 1
+}
+
+fn transceive(s: *mut wire.Smb, h: *mut files.Handle, req: u64, n: usize, pdu: *mut rt.Buf) -> u64 {
+    var b: rt.Buf = rt.buf_new()
+    pack.push16(&b, 57)
+    pack.push16(&b, 0)
+    pack.push32(&b, FSCTL_PIPE_TRANSCEIVE)
+    pack.push_raw(&b, (&(*h).id[0]) as u64, 16)
+    pack.push32(&b, (wire.HEADER_SIZE + IOCTL_FIXED) as u64)
+    pack.push32(&b, n as u64)
+    pack.push32(&b, 0)
+    pack.push32(&b, 0)
+    pack.push32(&b, 0)
+    pack.push32(&b, FRAG_MAX as u64)
+    pack.push32(&b, 1)
+    pack.push32(&b, 0)
+    pack.push_raw(&b, req, n)
+    let code: u64 = wire.request(s, wire.CMD_IOCTL, rt.buf_ptr(&b), rt.buf_len(&b))
+    rt.buf_free(&b)
+    if code != wire.E_OK {
+        return code
+    }
+    if (*s).status != wire.NT_SUCCESS && (*s).status != wire.NT_BUFFER_OVERFLOW {
+        return wire.status_error((*s).status)
+    }
+    if wire.body_len(s) < 48 {
+        return wire.E_PROTO
+    }
+    let body: u64 = wire.body_ptr(s)
+    let off: usize = pack.get32(body, 32) as usize
+    let len: usize = pack.get32(body, 36) as usize
+    if off < wire.HEADER_SIZE || off - wire.HEADER_SIZE + len > wire.body_len(s) {
+        return wire.E_PROTO
+    }
+    pack.push_raw(pdu, body + (off - wire.HEADER_SIZE) as u64, len)
+    return wire.E_OK
+}
+
+fn frag_len(pdu: *mut rt.Buf) -> usize {
+    return pack.get16(rt.buf_ptr(pdu), 8) as usize
+}
+
+fn complete(s: *mut wire.Smb, h: *mut files.Handle, pdu: *mut rt.Buf) -> u64 {
+    var stalls: usize = 0
+    while stalls < 4 {
+        var want: usize = FRAG_MAX
+        if rt.buf_len(pdu) >= PDU_HEADER {
+            let fl: usize = frag_len(pdu)
+            if fl < PDU_HEADER || fl > FRAG_MAX * 16 {
+                return wire.E_PROTO
+            }
+            if rt.buf_len(pdu) >= fl {
+                return wire.E_OK
+            }
+            want = fl - rt.buf_len(pdu)
+        }
+        let before: usize = rt.buf_len(pdu)
+        let code: u64 = files.read_chunk(s, h, 0, want, pdu)
+        if code != wire.E_OK {
+            return code
+        }
+        if rt.buf_len(pdu) == before {
+            stalls = stalls + 1
+        }
+    }
+    return wire.E_PROTO
+}
+
+fn push_uuid_ctx(b: *mut rt.Buf, abstract_uuid: u64, major: u64) {
+    var ndr: [u8; 16] = [4, 93, 136, 138, 235, 28, 201, 17, 159, 232, 8, 0, 43, 16, 72, 96]
+    pack.push16(b, 0)
+    rt.buf_push(b, 1 as u8)
+    rt.buf_push(b, 0 as u8)
+    pack.push_raw(b, abstract_uuid, 16)
+    pack.push16(b, major)
+    pack.push16(b, 0)
+    pack.push_raw(b, (&ndr[0]) as u64, 16)
+    pack.push16(b, NDR_VERSION_MAJOR)
+    pack.push16(b, 0)
+}
+
+fn bind(s: *mut wire.Smb, h: *mut files.Handle, abstract_uuid: u64, major: u64) -> u64 {
+    var b: rt.Buf = rt.buf_new()
+    push_header(&b, PTYPE_BIND)
+    pack.push16(&b, FRAG_MAX as u64)
+    pack.push16(&b, FRAG_MAX as u64)
+    pack.push32(&b, 0)
+    rt.buf_push(&b, 1 as u8)
+    rt.buf_push(&b, 0 as u8)
+    rt.buf_push(&b, 0 as u8)
+    rt.buf_push(&b, 0 as u8)
+    push_uuid_ctx(&b, abstract_uuid, major)
+    pack.set16(&b, 8, rt.buf_len(&b) as u64)
+    var pdu: rt.Buf = rt.buf_new()
+    let code: u64 = bind_exchange(s, h, &b, &pdu)
+    rt.buf_free(&b)
+    rt.buf_free(&pdu)
+    return code
+}
+
+fn bind_exchange(s: *mut wire.Smb, h: *mut files.Handle, b: *mut rt.Buf, pdu: *mut rt.Buf) -> u64 {
+    var code: u64 = transceive(s, h, rt.buf_ptr(b), rt.buf_len(b), pdu)
+    if code != wire.E_OK {
+        return code
+    }
+    code = complete(s, h, pdu)
+    if code != wire.E_OK {
+        return code
+    }
+    let p: u64 = rt.buf_ptr(pdu)
+    let n: usize = frag_len(pdu)
+    if rt.ld8(p, 2) as u64 != PTYPE_BIND_ACK || n < 28 {
+        return wire.E_PROTO
+    }
+    let addr_len: usize = pack.get16(p, 24) as usize
+    let at: usize = (26 + addr_len + 3) / 4 * 4
+    if at + 8 > n || rt.ld8(p, at) == 0 as u8 {
+        return wire.E_PROTO
+    }
+    if pack.get16(p, at + 4) != 0 {
+        return wire.E_PROTO
+    }
+    return wire.E_OK
+}
+
+fn call(s: *mut wire.Smb, h: *mut files.Handle, opnum: u64, stub: u64, n: usize, out: *mut rt.Buf) -> u64 {
+    var b: rt.Buf = rt.buf_new()
+    push_header(&b, PTYPE_REQUEST)
+    pack.push32(&b, n as u64)
+    pack.push16(&b, 0)
+    pack.push16(&b, opnum)
+    pack.push_raw(&b, stub, n)
+    pack.set16(&b, 8, rt.buf_len(&b) as u64)
+    var pdu: rt.Buf = rt.buf_new()
+    var code: u64 = transceive(s, h, rt.buf_ptr(&b), rt.buf_len(&b), &pdu)
+    rt.buf_free(&b)
+    var done: bool = false
+    var frags: usize = 0
+    while code == wire.E_OK && !done {
+        code = complete(s, h, &pdu)
+        if code != wire.E_OK {
+            break
+        }
+        let p: u64 = rt.buf_ptr(&pdu)
+        let fl: usize = frag_len(&pdu)
+        let auth: usize = pack.get16(p, 10) as usize
+        if rt.ld8(p, 2) as u64 == PTYPE_FAULT {
+            code = wire.E_STATUS
+            break
+        }
+        if rt.ld8(p, 2) as u64 != PTYPE_RESPONSE || fl < RESPONSE_HEADER + auth {
+            code = wire.E_PROTO
+            break
+        }
+        pack.push_raw(out, p + RESPONSE_HEADER as u64, fl - RESPONSE_HEADER - auth)
+        if (rt.ld8(p, 3) as u64 & FLAG_LAST) != 0 {
+            done = true
+        } else {
+            frags = frags + 1
+            if frags > 4096 {
+                code = wire.E_TOOBIG
+                break
+            }
+            rt.buf_clear(&pdu)
+        }
+    }
+    rt.buf_free(&pdu)
+    return code
+}
