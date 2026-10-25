@@ -76,6 +76,7 @@ import usbnet.ax88772_drv
 import drv.net.usbnet
 import drv.usb.xhci
 import drv.usb.chdiag
+import drv.usb.usbdiag
 import drv.hid.kbd
 import drv.hid.hidrep
 import drv.hid.hidin
@@ -716,6 +717,7 @@ fn stage(state: u64) {
     // Anschluessen steht, damit ein Mensch Tastatur und Maus notfalls
     // an denselben stecken kann.
     chdiag.arm(state)
+    usbdiag.reset_all()
     let anzahl: u64 = xhci.count_hc(state)
     // ================================= RUNDE HIDPUNKTE: DER BESTE, NICHT DER ERSTE
     //
@@ -750,6 +752,8 @@ fn stage(state: u64) {
         let _wieder: u64 = versuch(state, bester, armed)
     }
     s(state, S_WAHL, bester)
+    usbdiag.set_choice(bester)
+    usbdiag.set_t0(kstate.get(state, kstate.TICKS) + 1)
     // EINE ZEILE FUER EIN FOTO: welcher Regler wie viele Punkte hatte
     // und welcher gewonnen hat. Ohne sie ist "die Tastatur geht nicht"
     // nicht von "die Tastatur haengt am anderen Regler" zu trennen.
@@ -774,6 +778,47 @@ fn stage(state: u64) {
     serial.nl()
 }
 
+fn usbdiag_snap_all(state: u64, h: u64, kind: u64) {
+    let n: u64 = xhci.ports(state)
+    var p: u64 = 1
+    while p <= n && p <= usbdiag.MAX_PORT {
+        usbdiag.snap(h, kind, p, xhci.portsc(state, p))
+        p = p + 1
+    }
+}
+
+fn usbdiag_open(state: u64, h: u64) {
+    usbdiag.set_info(h, usbdiag.I_STATE, 1)
+    usbdiag.set_info(h, usbdiag.I_PORTS, xhci.ports(state))
+    usbdiag.set_info(h, usbdiag.I_SLOTS, xhci.slots(state))
+    usbdiag.set_info(h, usbdiag.I_BDF, xhci.bdf(state))
+    var p: u64 = 1
+    while p <= xhci.ports(state) && p <= usbdiag.MAX_PORT {
+        usbdiag.set_proto(h, p, xhci.port_major(state, p))
+        p = p + 1
+    }
+    usbdiag_snap_all(state, h, usbdiag.SNAP_PRE)
+}
+
+fn usbdiag_close(state: u64, h: u64) {
+    usbdiag_snap_all(state, h, usbdiag.SNAP_FINAL)
+    usbdiag.set_info(h, usbdiag.I_STS, xhci.usbsts_raw(state))
+    usbdiag.set_info(h, usbdiag.I_CMDS, xhci.cmds(state))
+    usbdiag.set_info(h, usbdiag.I_EVENTS, xhci.events(state))
+    usbdiag.set_info(h, usbdiag.I_ERRORS, xhci.errors(state))
+    usbdiag.set_info(h, usbdiag.I_NDEV, g(state, S_NDEV))
+    usbdiag.set_info(h, usbdiag.I_RESETFAIL, xhci.reset_fails(state))
+    var pend: u64 = 0
+    var p: u64 = 1
+    while p <= xhci.ports(state) {
+        if xhci.port_link_pending(state, p) {
+            pend = pend + 1
+        }
+        p = p + 1
+    }
+    usbdiag.set_info(h, usbdiag.I_PENDING, pend)
+}
+
 // EIN REGLER: aufsetzen, Anschluesse einschalten, aufzaehlen, berichten.
 // Gibt zurueck, ob an ihm eine Tastatur oder eine Maus haengt.
 fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
@@ -790,6 +835,7 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
     xhci.teardown(state)
     chdiag.bump(state, chdiag.F_PASSES)
     chdiag.set64(state, chdiag.F_UNIT, einheit)
+    usbdiag.begin_pass(einheit)
     s(state, S_READY, 0)
     zero(state + UDEV_OFF, MAX_DEV * DEV_BYTES)
     s(state, S_NDEV, 0)
@@ -803,6 +849,7 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
     }
     s(state, S_ATTACHED, 0)
     if !xhci.init_at(state, einheit, armed) {
+        usbdiag.set_info(einheit, usbdiag.I_STATE, 2)
         serial.puts((&s_fail[0]) as u64)
         serial.dec(einheit)
         serial.nl()
@@ -824,7 +871,9 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
     serial.dec(einheit)
     serial.nl()
     s(state, S_READY, 1)
+    usbdiag_open(state, einheit)
     scan(state)
+    usbdiag_close(state, einheit)
     xhci.bericht(state)
     say(state)
     return punkte(state)
@@ -841,6 +890,7 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
 // 7 slot enable failed, 8 address ok, 9 address failed (cc), 10 descriptor ok,
 // 11 descriptor failed, 12 configure ok, 13 configure failed, 14 second pass.
 fn tr(state: u64, step: u64, v: u64) {
+    usbdiag.step(step, v)
     if !kstate.mode_on(state, kstate.M_USBTRACE) {
         return
     }
@@ -924,9 +974,13 @@ fn scan(state: u64) {
     tr(state, 1, n)
     let _mit: u64 = xhci.power_all(state)
     tr(state, 2, _mit)
+    usbdiag_snap_all(state, xhci.unit(state), usbdiag.SNAP_POWER)
     xhci.drain(state)
     var p: u64 = 1
     while p <= n {
+        if xhci.port_link_pending(state, p) {
+            let _up: bool = xhci.settle_usb3(state, p)
+        }
         if xhci.port_connected(state, p) {
             tr(state, 3, p)
             mark(state, p)
@@ -951,13 +1005,25 @@ fn scan(state: u64) {
     // Wurde beim ersten Mal etwas gefunden, ist die Wartezeit ohnehin
     // ueberfluessig; auf Justins Brett, wo nichts gefunden wurde, ist
     // sie der ganze Zweck.
-    if g(state, S_NDEV) == 0 {
+    var late: bool = false
+    p = 1
+    while p <= n {
+        if xhci.port_link_pending(state, p) {
+            late = true
+        }
+        p = p + 1
+    }
+    if g(state, S_NDEV) == 0 || late {
         tr(state, 14, 0)
         xhci.udelay(state, 300000)
         xhci.drain(state)
         p = 1
         while p <= n {
+            if xhci.port_link_pending(state, p) {
+                let _up2: bool = xhci.settle_usb3(state, p)
+            }
             if xhci.port_connected(state, p) && !was_there(state, p) {
+                tr(state, 3, p)
                 mark(state, p)
                 attach(state, p)
             }
@@ -1086,6 +1152,7 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     var s_slot: [u8; 7] = " slot=\0"
     var s_rt: [u8; 8] = " route=\0"
 
+    usbdiag.set_cur(usbdiag.cur_hc(), rootport)
     var speed: u64 = vorspeed
     if !mitspeed {
         if !xhci.port_reset(state, rootport) {
@@ -1100,7 +1167,7 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     }
     let slot: u64 = xhci.slot_enable(state)
     if slot == 0 {
-        tr(state, 7, 0)
+        tr(state, 7, xhci.last_rc_get())
         s(state, S_FAILS, g(state, S_FAILS) + 1)
         return false
     }
@@ -1138,14 +1205,14 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     tr(state, 6, slot)
 
     if !address(state, d) {
-        tr(state, 9, 0)
+        tr(state, 9, xhci.last_rc_get())
         drop_dev(state, d)
         return false
     }
     tr(state, 8, slot)
     fund_flag(state, f, F_ADDR)
     if !describe(state, d) {
-        tr(state, 11, 0)
+        tr(state, 11, xhci.last_ctl_get())
         drop_dev(state, d)
         return false
     }
@@ -1155,7 +1222,7 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     let cfg_ok: bool = configure(state, d)
     chdiag.set_active(state, false)
     if !cfg_ok {
-        tr(state, 13, 0)
+        tr(state, 13, xhci.last_ctl_get())
         drop_dev(state, d)
         return false
     }
@@ -4129,6 +4196,9 @@ fn fund_if_class(state: u64, i: u64, c: u64, u: u64, pr: u64) {
 }
 
 fn fund_driver_set(state: u64, i: u64, k: u64) {
+    if k != 0 {
+        usbdiag.bound()
+    }
     if i < MAX_FUND {
         fs(state, i, F_FLAGS, (fg(state, i, F_FLAGS) & 0xFF) | (k << 8))
     }
@@ -4593,6 +4663,7 @@ fn hub_start(state: u64, d: u64) {
         serial.nl()
         return
     }
+    usbdiag.hub_seen(xhci.unit(state), dg(state, d, D_PORT), dg(state, d, D_PORTS))
     s(state, S_HUBS, g(state, S_HUBS) + 1)
     s(state, S_HUBPORTS, g(state, S_HUBPORTS) + dg(state, d, D_PORTS))
     let ok: bool = hub_slot_update(state, d)
@@ -4633,13 +4704,21 @@ fn hub_scan(state: u64, d: u64) {
     p = 1
     while p <= n {
         let st: u64 = hub_port_status(state, d, p)
+        let hidx: u64 = usbdiag.info(xhci.unit(state), usbdiag.I_HUBS) - 1
+        usbdiag.hub_port(xhci.unit(state), hidx, p, st, 2)
         if (st & (1 << 16)) != 0 {
             hub_feature(state, d, false, PF_C_CONNECTION, p)
         }
         if (st & 1) != 0 {
             // Prellzeit, wie am Wurzelanschluss (USB 2.0, 7.1.7.3).
             xhci.udelay(state, 100000)
-            if hub_port_reset(state, d, p) {
+            let hrst: bool = hub_port_reset(state, d, p)
+            var hrv: u64 = 0
+            if hrst {
+                hrv = 1
+            }
+            usbdiag.hub_port(xhci.unit(state), hidx, p, st, hrv)
+            if hrst {
                 let st2: u64 = hub_port_status(state, d, p)
                 let sp: u64 = hub_speed(state, d, st2)
                 // DER WEGWEISER. Ein Nibble je Etage, das unterste
@@ -4689,9 +4768,19 @@ fn port_watch(state: u64) {
         return
     }
     let n: u64 = xhci.ports(state)
+    let due: u64 = usbdiag.timed_due(kstate.get(state, kstate.TICKS))
+    if due != 0 {
+        usbdiag_snap_all(state, xhci.unit(state), due)
+    }
+    let rescan: bool = usbdiag.rescan_due(kstate.get(state, kstate.TICKS))
     var p: u64 = 1
     while p <= n && p < 64 {
+        if rescan && xhci.port_connected(state, p) && !was_there(state, p) {
+            s(state, S_PEND, g(state, S_PEND) | (1 << p))
+        }
         if xhci.port_has_change(state, p) {
+            usbdiag.event(p, xhci.portsc(state, p))
+            usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_PSC, p, xhci.portsc(state, p))
             xhci.port_clear_changes(state, p)
             s(state, S_PEND, g(state, S_PEND) | (1 << p))
             s(state, S_PENDN, g(state, S_PENDN) + 1)
@@ -4836,6 +4925,7 @@ fn hotplug_work(state: u64) {
         return
     }
     s(state, S_PEND, 0)
+    chdiag.bump(state, chdiag.F_PASSES)
     s(state, S_BUSY, 1)
     let n: u64 = xhci.ports(state)
     var p: u64 = 1

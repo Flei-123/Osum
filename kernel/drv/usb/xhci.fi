@@ -69,11 +69,12 @@ import arch.x86_64.apic
 import sync.atomic
 import mm.mem
 import xhciiso.iso
+import drv.usb.usbdiag
 
 export {
     kill, present, init, ready, base_of, bdf, ctx_size, slots, ports,
     irq, drain, irqs, events, cmds, port_events, errors, usbsts, iman,
-    portsc, port_connected, port_enabled, port_power, port_speed,
+    portsc, last_rc_get, last_ctl_get, port_pls, port_major, settle_usb3, usbsts_raw, port_link_pending, port_connected, port_enabled, port_power, port_speed,
     port_reset, port_clear_changes, port_has_change,
     slot_enable, slot_disable, address_device, configure_endpoint,
     evaluate_context, reset_endpoint, stop_endpoint, set_dequeue,
@@ -288,6 +289,8 @@ const PSC_PRC: u64 = 0x200000
 const PSC_PLC: u64 = 0x400000
 const PSC_CEC: u64 = 0x800000
 const PSC_CHANGES: u64 = 0xFE0000
+const PSC_CAS: u64 = 0x1000000
+const PSC_WPR: u64 = 0x80000000
 
 // TRB-Arten.
 const T_NORMAL: u64 = 1
@@ -958,11 +961,13 @@ fn command(state: u64, param: u64, status: u64, control: u64) -> u64 {
     while spin < SPIN_LIMIT {
         drain(state)
         if g(state, S_CC_SEQ) >= want {
-            return g(state, S_CC_CODE)
+            last_rc = g(state, S_CC_CODE)
+            return last_rc
         }
         spin = spin + 1
     }
     s(state, S_ERRORS, g(state, S_ERRORS) + 1)
+    last_rc = 0xFF
     return 0xFF
 }
 
@@ -1151,7 +1156,87 @@ fn portsc(state: u64, p: u64) -> u64 {
 }
 
 fn portsc_write(state: u64, p: u64, v: u64) {
+    if (v & PSC_PP) == 0 && (portsc(state, p) & PSC_PP) != 0 {
+        usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_PPCLR, p, v)
+    }
     wr32(op(state), O_PORTSC + (p - 1) * 0x10, v)
+}
+
+fn last_rc_get() -> u64 {
+    return last_rc
+}
+
+fn last_ctl_get() -> u64 {
+    return last_ctl
+}
+
+fn port_pls(state: u64, p: u64) -> u64 {
+    return (portsc(state, p) >> 5) & 0xF
+}
+
+fn usbsts_raw(state: u64) -> u64 {
+    return rd32(op(state), 4)
+}
+
+fn port_major(state: u64, p: u64) -> u64 {
+    let b: u64 = base_of(state)
+    var at: u64 = xecp_first(b)
+    var n: u64 = 0
+    while at != 0 && n < 64 {
+        let w: u64 = rd32(b, at)
+        if (w & 0xFF) == 2 {
+            let d2: u64 = rd32(b, at + 8)
+            let first: u64 = d2 & 0xFF
+            let cnt: u64 = (d2 >> 8) & 0xFF
+            if p >= first && p < first + cnt {
+                return (w >> 24) & 0xFF
+            }
+        }
+        let next: u64 = (w >> 8) & 0xFF
+        if next == 0 {
+            at = 0
+        } else {
+            at = at + next * 4
+        }
+        n = n + 1
+    }
+    return 0
+}
+
+fn port_link_pending(state: u64, p: u64) -> bool {
+    let v: u64 = portsc(state, p)
+    if (v & PSC_PP) == 0 || (v & PSC_CCS) != 0 {
+        return false
+    }
+    let pls: u64 = (v >> 5) & 0xF
+    return pls == 6 || pls == 7 || pls == 10 || (v & PSC_CAS) != 0
+}
+
+fn settle_usb3(state: u64, p: u64) -> bool {
+    if port_major(state, p) != 3 {
+        return false
+    }
+    let v0: u64 = portsc(state, p)
+    let pls0: u64 = (v0 >> 5) & 0xF
+    if (v0 & PSC_CCS) != 0 || (v0 & PSC_PP) == 0 {
+        return (v0 & PSC_CCS) != 0
+    }
+    if pls0 == 6 || pls0 == 10 || (v0 & PSC_CAS) != 0 {
+        usbdiag.usb3_warm()
+        portsc_write(state, p, (v0 & PSC_KEEP) | PSC_WPR)
+        var wms: u64 = 0
+        while wms < 500 && (portsc(state, p) & PSC_WRC) == 0 {
+            udelay(state, 1000)
+            wms = wms + 1
+        }
+        portsc_write(state, p, (portsc(state, p) & PSC_KEEP) | (portsc(state, p) & PSC_CHANGES))
+    }
+    var ms: u64 = 0
+    while ms < 400 && (portsc(state, p) & PSC_CCS) == 0 {
+        udelay(state, 1000)
+        ms = ms + 1
+    }
+    return (portsc(state, p) & PSC_CCS) != 0
 }
 
 fn port_connected(state: u64, p: u64) -> bool {
@@ -1190,6 +1275,7 @@ fn port_power(state: u64, p: u64) {
     if (cur & PSC_PP) != 0 {
         return
     }
+    usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_PPSET, p, cur)
     portsc_write(state, p, (cur & PSC_KEEP) | PSC_PP)
 }
 
@@ -1576,6 +1662,17 @@ fn ep0_recover(state: u64, slot: u64, i: u64) {
 
 fn control(state: u64, slot: u64, bmreq: u64, brequest: u64, wvalue: u64,
     windex: u64, wlength: u64, dst: u64, in_dir: bool) -> i64 {
+    let r: i64 = control_run(state, slot, bmreq, brequest, wvalue, windex, wlength, dst, in_dir)
+    if r < 0 {
+        last_ctl = (0 - r) as u64
+    } else {
+        last_ctl = 0
+    }
+    return r
+}
+
+fn control_run(state: u64, slot: u64, bmreq: u64, brequest: u64, wvalue: u64,
+    windex: u64, wlength: u64, dst: u64, in_dir: bool) -> i64 {
     let i: u64 = ep_find(state, slot, 1)
     if i >= MAX_EP {
         return 0 - 1
@@ -1749,6 +1846,8 @@ fn init(state: u64, armed: bool) -> bool {
 // through the return value"). Der Protokollring liest den Namen
 // erst im Aufruf danach.
 static mut q_xhci: [u8; 5] = "xhci\0"
+static mut last_rc: u64 = 0
+static mut last_ctl: u64 = 0
 
 fn lq() -> u64 {
     return (&q_xhci[0]) as u64
@@ -1930,6 +2029,7 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
 
 fn halt(state: u64) -> bool {
     let o: u64 = op(state)
+    usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_HALT, 0, 0)
     wr32(o, O_USBCMD, rd32(o, O_USBCMD) & (~CMD_RS) & 0xFFFFFFFF)
     var spin: u64 = 0
     while spin < SPIN_LIMIT {
@@ -1943,6 +2043,7 @@ fn halt(state: u64) -> bool {
 
 fn reset(state: u64) -> bool {
     let o: u64 = op(state)
+    usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_HCRST, 0, 0)
     wr32(o, O_USBCMD, CMD_HCRST)
     var spin: u64 = 0
     while spin < SPIN_LIMIT {

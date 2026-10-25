@@ -22,7 +22,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "USBTETHER: skipped, no qemu"; exit 0; }
-CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc}"
+CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none}"
 cleanup_pids() { for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; pkill -P $$ 2>/dev/null; true; }
 trap 'cleanup_pids; [ -n "${USBTETHER_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/dhcp.elf" ]; then
@@ -36,11 +36,12 @@ printf 'echo ==START==\ndhcp\nping 192.168.42.129\nsleep 1\necho ==END==\n' > "$
 printf 'echo ==START==\nping 192.168.42.129\nping 192.168.42.129\nping 192.168.42.129\nping 192.168.42.129\ndhcp\nping 192.168.42.129\nsleep 1\necho ==END==\n' > "$T/s_late.sh"
 printf 'echo ==START==\ndhcp\nping 192.168.42.129\nsleep 2\ncat /proc/usbnet\necho ==END==\n' > "$T/s_proc.sh"
 printf 'echo ==START==\nsleep 3\ncat /proc/usbnet\ndhcp\necho ==END==\n' > "$T/s_procd.sh"
+printf 'echo ==START==\nsleep 2\ncat /proc/usbsum\necho ==END==\n' > "$T/s_sum.sh"
 printf 'echo ==START==\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\ncat /proc/usbnet\necho ==END==\n' > "$T/s_intr.sh"
 python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
-    /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_late.sh="$T/s_late.sh" /t/s_proc.sh="$T/s_proc.sh" /t/s_procd.sh="$T/s_procd.sh" /t/s_intr.sh="$T/s_intr.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
+    /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_late.sh="$T/s_late.sh" /t/s_proc.sh="$T/s_proc.sh" /t/s_procd.sh="$T/s_procd.sh" /t/s_intr.sh="$T/s_intr.sh" /t/s_sum.sh="$T/s_sum.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 PORT=$((47000 + ($$ % 500) * 4))
 
@@ -264,6 +265,23 @@ for c in $CASES; do
         chk ca3 "alt scan reported with SET_INTERFACE refused" 'usb: alt=1 scan=1 setif=0'
         nochk ca3 "no lease without SET_INTERFACE" 'dhcp: ack ip='
         panics ca3
+        ;;
+    usbsum)
+        BASEW="nokbd nosched vfs" run usum ch336 boot s_sum.sh
+        chk usum "summary header" 'usbsum v1 hc=1 sel=0 passes=1'
+        chk usum "controller line with ports and init state" 'h0 00:0[0-9a-f]\.0 .* init=ok ports='
+        chk usum "connected root port line with step mask" 'h0p[0-9][0-9] U[23] pre=.* fin=.*[13579bdf] m=7[0-9a-f]'
+        chk usum "device line with the dongle id" 'dev p=[0-9]* hp=0 spd=[0-9]* 1a86:5394'
+        chk usum "log line counts" 'log hcrst=1 halt=[0-9]* ppclr=[0-9]* late hcrst=0 halt=0 ppclr=0'
+        chk usum "script reached the end" '==END=='
+        panics usum
+        ;;
+    usbsum-none)
+        BASEW="nokbd nosched vfs" run usnone ncm none s_sum.sh
+        chk usnone "summary header" 'usbsum v1 hc=1'
+        nochk usnone "no dongle device line" '1a86:5394'
+        nochk usnone "no connected port without a gadget" 'h0p[0-9][0-9] .*m=[1-9a-f]'
+        chk usnone "script reached the end" '==END=='
         ;;
     none)
         run none ncm none s.sh
