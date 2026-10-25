@@ -222,6 +222,10 @@ sleep 40
 act call store.status
 opk list
 act call store.list
+echo ==A-AGAIN==
+act call store.install name=gruss
+act confirm last
+sleep 3
 echo ==A-REM==
 act call store.remove name=gruss
 act confirm last
@@ -293,10 +297,12 @@ has "$TMPD/p.txt" "phase=fertig" "install gruss: done"
 has "$TMPD/p.txt" "msg=installiert" "... and says so"
 has "$TMPD/p.txt" "  gruss -> " "gruss is in the package list (opk list)"
 has "$TMPD/p.txt" "|aktuell" "gruss is up to date (state aktuell)"
-part "$A" A-UPD A-REM > "$TMPD/p.txt"
+part "$A" A-UPD A-AGAIN > "$TMPD/p.txt"
 has "$TMPD/p.txt" "phase=fertig" "update hallo: done"
 has "$TMPD/p.txt" "item=hallo|2.0.0|" "hallo is in the catalog"
 [ "$(grep -c '|update' "$TMPD/p.txt")" = 0 ] && ok "hallo is no longer 'update' (it IS 2.0.0 now)" || bad "hallo still says update"
+part "$A" A-AGAIN A-REM > "$TMPD/p.txt"
+has "$TMPD/p.txt" "already_installed" "installing a program that is installed and current is refused (already_installed)"
 part "$A" A-REM A-RIGHTS > "$TMPD/p.txt"
 has "$TMPD/p.txt" "msg=entfernt" "remove gruss: done"
 hasnot "$TMPD/p.txt" "  gruss -> " "gruss is gone from the package list"
