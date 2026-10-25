@@ -1353,6 +1353,12 @@ ARGS+=(/etc/orientbus/ /etc/actions.d/
        # DAILY-DRIVER (P-007): the program store -- provider /bin/stored, window /bin/store
        "/etc/actions.d/store.actions=etc/actions.d/store.actions"
        "/etc/store.conf=etc/store.conf")
+ARGS+=("/etc/hotkeys.conf=$OUT/hotkeys.conf@0644"
+       "/etc/wmplug.conf=$OUT/wmplug.conf@0644"
+       "/etc/wmplug.autostart=$OUT/wmplug.autostart@0644"
+       "/etc/apprights.conf=$OUT/apprights.conf@0644"
+       "/etc/screenreader.conf=$OUT/screenreader.conf@0644"
+       "/etc/actions.d/screenreader.actions=etc/actions.d/screenreader.actions")
 # r145: THE SOCIAL LAYER on the shipped image (docs/SOCIAL.md). The programs /bin/social,
 # /bin/soclocal, /bin/melder (PROGS) and /bin/socfleitec (APPS) are built above; here the
 # data they read: the action manifest (read by orient-bus), the accounts (one provider
@@ -1518,20 +1524,21 @@ while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 #   /bin/jarvismini  started hidden at login by the autostart line `jmini` (/etc/wmplug.conf: prog=/bin/jarvismini);
 #                    --as-app labels it app:jarvismini and drops to uid 1000, so /etc/apprights.conf is REALLY checked
 #   Ctrl+Alt+J -> hotkeyd -> bus action jarvismini.toggle -> the box shows / hides
+{ cat etc/wmplug.conf; printf 'screenreader rechte=0x001 prog=/bin/screenreader\n'; } > "$OUT/wmplug.conf"
+printf 'hotkey\nscreenreader serve\n' > "$OUT/wmplug.autostart"
+printf 'ctrl+alt+n screenreader.toggle\n' > "$OUT/hotkeys.conf"
+printf 'screenreader hotkey\n' > "$OUT/apprights.conf"
+printf 'autostart=0\nenabled=0\n' > "$OUT/screenreader.conf"
 if [ "$IMAGE_PROFILE" = personal ]; then
     # W-MINI2: link mode (no "ip port" line): the Mini talks to /bin/jmlink, which reaches the real server over TLS
     printf 'server jarvis.fleitec.com\n' > "$OUT/jarvismini.conf"
-    printf 'jarvismini window.float,hotkey,net\n' > "$OUT/apprights.conf"
-    { cat etc/wmplug.conf
-      printf '\n# W-IMG2: JARVIS Mini, started hidden at login (not a plugin: only the name -> prog= mapping is used)\n'
-      printf 'jmini rechte=0x001 prog=/bin/jarvismini\n'; } > "$OUT/wmplug.conf"
-    printf 'hotkey\njmini --hidden --as-app\n' > "$OUT/wmplug.autostart"
+    printf 'jarvismini window.float,hotkey,net\n' >> "$OUT/apprights.conf"
+    printf '\n# W-IMG2: JARVIS Mini, started hidden at login (not a plugin: only the name -> prog= mapping is used)\n' >> "$OUT/wmplug.conf"
+    printf 'jmini rechte=0x001 prog=/bin/jarvismini\n' >> "$OUT/wmplug.conf"
+    printf 'jmini --hidden --as-app\n' >> "$OUT/wmplug.autostart"
+    { cat etc/hotkeys.conf; cat "$OUT/hotkeys.conf"; } > "$OUT/hotkeys.all" && mv "$OUT/hotkeys.all" "$OUT/hotkeys.conf"
     python3 -I -c 'import sys; sys.path.insert(0, "tools/k15"); import symjoin; sys.stdout.buffer.write(symjoin.joined("pakete/jarvismini"))' > "$OUT/jarvismini.symbol"
     ARGS+=("/etc/jarvismini.conf=$OUT/jarvismini.conf@0644"
-           "/etc/hotkeys.conf=etc/hotkeys.conf@0644"
-           "/etc/wmplug.conf=$OUT/wmplug.conf@0644"
-           "/etc/wmplug.autostart=$OUT/wmplug.autostart@0644"
-           "/etc/apprights.conf=$OUT/apprights.conf@0644"
            "/etc/actions.d/jarvismini.actions=etc/actions.d/jarvismini.actions@0644"
            /apps/jarvismini.osp/
            "/apps/jarvismini.osp/INFO=pakete/jarvismini/INFO@0644"
@@ -1576,7 +1583,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/init /etc/inittab /etc/ziel \
 /bin/orientbus /bin/act /bin/settingsd /etc/orientbus/policy \
 /etc/settings.schema /etc/actions.d/settings.actions \
-/bin/axd /etc/actions.d/a11y.actions \
+/bin/axd /etc/actions.d/a11y.actions /etc/actions.d/screenreader.actions /etc/screenreader.conf \
 /bin/pdfview /apps/pdfview.osp/start /apps/pdfview.osp/INFO /apps/pdfview.osp/symbol \
 /bin/store /bin/stored /etc/actions.d/store.actions /etc/store.conf \
 /apps/store.osp/start /apps/store.osp/INFO /apps/store.osp/symbol \

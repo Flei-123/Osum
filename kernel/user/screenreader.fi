@@ -26,6 +26,7 @@ import fui.speaktext
 import audio.speech
 import audio.speechlang
 import msg
+import srconf
 
 export { u_start }
 
@@ -65,6 +66,12 @@ static mut last_flags: u64 = 0
 static mut last_win: u64 = 0xFFFFFFFFFFFF
 static mut silent: bool = false
 static mut audio_note: bool = false
+static mut is_on: bool = false
+static mut bus_me: bool = false
+static mut bus_known: bool = false
+static mut bus_svc: u64 = 0
+static mut bus_fr: [u8; 64] = [0 as u8; 64]
+static mut bus_meta: [u64; 6] = [0 as u64; 6]
 
 fn nd(i: u64) -> u64 {
     return (&nodes[0 as usize]) as u64 + i * NODE_BYTES
@@ -350,6 +357,99 @@ fn handle(w: u64) {
     }
 }
 
+fn announce(on: bool) {
+    var s_on: [u8; 17] = "Screen reader on\0"
+    var s_off: [u8; 18] = "Screen reader off\0"
+    if on {
+        speak((&s_on[0 as usize]) as u64)
+    } else {
+        speak((&s_off[0 as usize]) as u64)
+    }
+}
+
+fn apply_state(on: bool) {
+    if on == is_on {
+        return
+    }
+    is_on = on
+    last_key = 0xFFFFFFFFFFFF
+    last_flags = 0
+    last_win = 0xFFFFFFFFFFFF
+    announce(on)
+}
+
+fn bus_handle(msg: u64) {
+    var verb: [u8; 16] = [0 as u8; 16]
+    var name: [u8; 40] = [0 as u8; 40]
+    var k_ping: [u8; 5] = "ping\0"
+    var a_tog: [u8; 20] = "screenreader.toggle\0"
+    var e_unk: [u8; 19] = "err unknown_action\0"
+    var s_ok: [u8; 12] = "ok\nenabled=\0"
+    let vp: u64 = (&verb[0 as usize]) as u64
+    let np: u64 = (&name[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    actwire.ob_reset()
+    if actwire.str_eq(vp, (&k_ping[0 as usize]) as u64) {
+        actwire.ob_str((&k_ping[0 as usize]) as u64)
+        return
+    }
+    if !actwire.str_eq(np, (&a_tog[0 as usize]) as u64) {
+        actwire.ob_str((&e_unk[0 as usize]) as u64)
+        actwire.ob_ch(10)
+        return
+    }
+    let want: bool = !is_on
+    let _w: bool = srconf.set_enabled(want)
+    apply_state(want)
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    if is_on {
+        actwire.ob_num(1)
+    } else {
+        actwire.ob_num(0)
+    }
+    actwire.ob_ch(10)
+}
+
+fn bus_open() {
+    var n_me: [u8; 17] = "a.screenreader\0\0\0"
+    let me: u64 = actwire.bus_reg((&n_me[0 as usize]) as u64, actwire.A_ROOT)
+    bus_me = !ulib.bad(me)
+}
+
+fn bus_wait_ms(ms: u64) {
+    if !bus_me {
+        ulib.sleep_ms(ms)
+        return
+    }
+    var n_bus: [u8; 11] = "orient.bus\0"
+    var s_hello: [u8; 19] = "hello screenreader\n"
+    if !bus_known {
+        let f: u64 = actwire.bus_find((&n_bus[0 as usize]) as u64)
+        if !ulib.bad(f) {
+            bus_svc = f
+            bus_known = true
+            actwire.send_msg(bus_svc, actwire.K_REQ, actwire.rnd() & 0xFFFFFFFF, (&s_hello[0 as usize]) as u64, 18)
+        }
+    }
+    let fpp: u64 = (&bus_fr[0 as usize]) as u64
+    let mp: u64 = (&bus_meta[0 as usize]) as u64
+    let n: u64 = actwire.bus_wait(fpp, mp, ms)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    let s: u64 = actwire.asm_feed(fpp, mp)
+    if s == actwire.NONE {
+        return
+    }
+    if actwire.asm_kind(s) == actwire.K_REQ && bus_known {
+        let id: u64 = actwire.asm_id(s)
+        bus_handle(actwire.asm_buf(s))
+        actwire.send_msg(bus_svc, actwire.K_REP, id, actwire.ob_ptr(), actwire.ob_len())
+    }
+    actwire.asm_free(s)
+}
+
 fn serve(limit: u64) -> u64 {
     var s_start: [u8; 20] = "sr: serving rights=\0"
     let r: u64 = ulib.sys(AX_PERM, 1, 0xFFFF, P_READ)
@@ -367,25 +467,63 @@ fn serve(limit: u64) -> u64 {
     if ulib.bad(r) || ulib.bad(on) {
         return 1
     }
+    bus_open()
     var ev: [u64; 2] = [0 as u64; 2]
+    if srconf.autostart_known() {
+        let start_on: bool = srconf.autostart()
+        let _w: bool = srconf.set_enabled(start_on)
+        apply_state(start_on)
+    } else {
+        is_on = true
+    }
     let t1: u64 = actwire.ticks()
+    var t_poll: u64 = t1
     while limit == 0 || actwire.ticks() - t1 < limit {
         let got: u64 = ulib.sys(AX_EVENT, (&ev[0 as usize]) as u64, 16, 0)
         if got == 16 {
-            handle(ev[0 as usize])
+            if is_on {
+                handle(ev[0 as usize])
+            }
+        } else if is_on {
+            bus_wait_ms(20)
         } else {
-            ulib.sleep_ms(20)
+            bus_wait_ms(100)
+        }
+        let tn: u64 = actwire.ticks()
+        if tn - t_poll >= 30 {
+            t_poll = tn
+            apply_state(srconf.enabled_or(is_on))
         }
     }
+    return 0
+}
+
+fn toggle_conf() -> u64 {
+    var s_t: [u8; 13] = "sr: enabled=\0"
+    let want: bool = !srconf.enabled_or(false)
+    if !srconf.set_enabled(want) {
+        return 1
+    }
+    var n: u64 = app_s(0, (&s_t[0 as usize]) as u64)
+    if want {
+        n = app_n(n, 1)
+    } else {
+        n = app_n(n, 0)
+    }
+    emit_line(n)
     return 0
 }
 
 fn u_start(args: u64) -> u64 {
     var c_serve: [u8; 6] = "serve\0"
     var c_say: [u8; 4] = "say\0"
+    var c_toggle: [u8; 7] = "toggle\0"
     var c_silent: [u8; 7] = "silent\0"
-    var h: [u8; 56] = "usage: screenreader serve [ticks] [silent] | say <text>\0"
+    var h: [u8; 66] = "usage: screenreader serve [ticks] [silent] | say <text> | toggle\0\0"
     let argc: u64 = ulib.arg_count(args)
+    if argc >= 2 && ulib.streq(ulib.arg_at(args, 1), (&c_toggle[0 as usize]) as u64) {
+        return toggle_conf()
+    }
     if argc >= 3 && ulib.streq(ulib.arg_at(args, 1), (&c_say[0 as usize]) as u64) {
         speak(ulib.arg_at(args, 2))
         return 0

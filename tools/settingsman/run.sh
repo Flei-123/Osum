@@ -63,7 +63,7 @@ for f in tools/settingsman/cases/*.txt; do
     esac
 done
 ok "golden files: every ok_* is accepted, every rej_* rejected with empty tables"
-head -1 tools/settingsman/builtin.expect | grep -q '^ok app=settings items=214 pages=23 warns=0$' \
+head -1 tools/settingsman/builtin.expect | grep -q '^ok app=settings items=216 pages=23 warns=0$' \
     && ok "settings manifest: accounts, network, display, personal, system and tools pages, no warnings" || bad "accounts page header: $(head -1 tools/settingsman/builtin.expect)"
 
 echo "== 2. limits =="
