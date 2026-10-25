@@ -138,6 +138,14 @@ mutate fs-other-data fspolicy.fi "    var i: u64 = 0
         }
         i = i + 1
     }" ""
+mutate fs-no-fold-read fspolicy.fi "    if fold(path, b) == 0 {
+        return false
+    }
+    return read_flat(label, b)" "    return read_flat(label, path)"
+mutate fs-no-fold-write fspolicy.fi "    if fold(path, b) == 0 {
+        return false
+    }
+    return write_flat(label, b)" "    return write_flat(label, path)"
 mutate fs-link-open fspolicy.fi "    return confined_app(label) == 0" "    return true"
 mutate fs-prefix-loose fspolicy.fi "            if plen == n - 1 {
                 cmp = n - 1

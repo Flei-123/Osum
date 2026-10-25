@@ -159,8 +159,7 @@ cp "$TMPD/sys.orig" "$SYS"
 if [ -s "$TMPD/kb.img" ]; then
     mkimg; runvm "$TMPD/kb.img" bb s1.sh
     part "$TMPD/bb.klar" WRITE UNLINK > "$TMPD/nb.txt"
-    [ "$(fsl "$TMPD/nb.txt")" = "OK OK DENY OK OK OK DENY " ] || true
-    [ "$(grep -ac 'tryfs: OK' "$TMPD/nb.txt")" -ge 4 ] && ok "(b) COUNTER-PROBE: without the write check at open, writes outside the data folder succeed ($(fsl "$TMPD/nb.txt"))" || bad "(b) counter-probe: '$(fsl "$TMPD/nb.txt")'"
+    [ "$(fsl "$TMPD/nb.txt")" = "OK OK DENY DENY DENY OK DENY " ] && ok "(b) COUNTER-PROBE: without the write check at open, a write into the readable system area /bin succeeds ($(fsl "$TMPD/nb.txt"))" || bad "(b) counter-probe: '$(fsl "$TMPD/nb.txt")'"
 fi
 
 mkimg
