@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 SIZE = 72
+ROW_SIZES = (44, 64)
 PAD = 1.25
 STROKE = 2.2
 
@@ -51,7 +52,12 @@ def main(argv):
         if rc != 0:
             print("bake failed", app, rc)
             return 1
-        print("%s: symbol.svg -> symbol.osym %dx%d" % (app, SIZE, SIZE))
+        for rs in (ROW_SIZES if folder.startswith("assets/apps/") else ()):
+            rc = subprocess.run([bake, svg, os.path.join(d, "symbol%d.osym" % rs), str(rs)]).returncode
+            if rc != 0:
+                print("bake failed", app, rs, rc)
+                return 1
+        print("%s: symbol.svg -> symbol.osym %dx%d + rows %s" % (app, SIZE, SIZE, ROW_SIZES))
     return 0
 
 

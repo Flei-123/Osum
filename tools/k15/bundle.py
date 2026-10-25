@@ -49,6 +49,8 @@ import subprocess
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HIER)
+import symjoin  # noqa: E402
 
 
 # ===================================================== RUNDE TUERSCHLOSS
@@ -177,7 +179,8 @@ def main(argv):
             print("bundle: %s has symbol.svg but no baked symbol.osym (run tools/svg/apps.sh)" % pfad, file=sys.stderr)
             return 1
         if os.path.isfile(fertig):
-            shutil.copyfile(fertig, sym)
+            with open(sym, "wb") as out:
+                out.write(symjoin.joined(pfad))
         else:
             r = subprocess.run([sys.executable, os.path.join(HIER, "icon.py"),
                                 os.path.join(pfad, "symbol.txt"), sym],
