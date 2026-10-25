@@ -59,7 +59,7 @@ say(not bad, "present= of every block equals the glyph count of the font files (
 b0 = blk[0]
 say(b0[1] == "0020" and b0[2] == "007F" and b0[3] == "95" and b0[4] == "95", "first block is Basic Latin 0020-007F with 95 of 95 glyphs (%s)" % (b0[1:6],))
 # 1b. the fallback chain really loaded its faces from the image (one fuiglyph line per process that missed a glyph)
-say(re.search(r"fuiglyph: fallback sym=1 emo=1", ser) is not None, "fuiglyph loaded both fallback faces from the image (/lib/symbols.ttf, /lib/emoji.ttf)")
+say(re.search(r"fuiglyph: fallback=1,1", ser) is not None, "fuiglyph loaded both fallback faces from the image (/lib/symbols.ttf, /lib/emoji.ttf)")
 # 2. copy: first cell, euro, the missing emoji
 cp = re.findall(r"charmap: copy U\+([0-9A-F]+) present=(\d) len=(\d) clip=(\w+)", ser)
 say(len(cp) >= 3, "three clicks copied (%d copy lines)" % len(cp))
