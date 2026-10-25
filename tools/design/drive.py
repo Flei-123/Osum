@@ -52,6 +52,7 @@ Namen fuer `klickauf`:
     netz            die Symbolgruppe       (taskbar: field net ...)
     uhr             die Uhr                (taskbar: field clock ...)
     calrect<N>      Knopf N des Kalenders  (calpop: rect name=N ..., Bildschirmpixel)
+    oskrect<NAME>   key NAME of the on-screen keyboard (osk: rect name=), osktrect<NAME> element of the witness window
     chrect<NAME>    Element NAME der Zeichentabelle (charmap: rect name= ... ax= ay=, Bildschirmpixel)
     lrect<N>        Widget N des Starters  (launcher: rect id=N ...)
     lzeile<N>       Zeile N der Trefferliste des Starters
@@ -925,6 +926,16 @@ class Fahrer:
             if m is None:
                 return None
             return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+        if name.startswith("oskrect"):
+            m = letzte(r"osk: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[7:]))
+            if m is None:
+                return None
+            return (int(m.group(3)), int(m.group(4)), int(m.group(1)), int(m.group(2)))
+        if name.startswith("osktrect"):
+            m = letzte(r"osktest: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[8:]))
+            if m is None:
+                return None
+            return (int(m.group(3)), int(m.group(4)), int(m.group(1)), int(m.group(2)))
         if name.startswith("chrect"):
             # charmap.fi (P-015): `charmap: rect name=<n> x= y= w= h= ax= ay=` -- ax/ay are SCREEN pixels of the element
             m = letzte(r"charmap: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[6:]))

@@ -1,0 +1,398 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import wlibc
+import fuiscene
+import msg
+import osklay
+
+export { u_start }
+
+const SYS_TIPP: u64 = 1843
+const SYS_KBD: u64 = 1703
+const TI_INFO: u64 = 0
+const TI_OSK: u64 = 8
+const KB_SET: u64 = 1
+const TQ_LAYOUT: u64 = 12
+const TQ_CODEOF: u64 = 13
+const K_KEY0: u64 = 100
+const UNIT: u64 = 10
+const KEY_H: u64 = 46
+const SC_SHIFT: u64 = 0x2A
+const SC_CTRL: u64 = 0x1D
+const SC_ALT: u64 = 0x38
+const SC_EXT: u64 = 0xE0
+const BREAK: u64 = 0x80
+
+static mut k_title: [u8; 10] = "osk.title\0"
+static mut k_app: [u8; 4] = "osk\0"
+static mut s_badscan_arg: [u8; 8] = "badscan\0"
+static mut s_latch_shift: bool = false
+static mut s_latch_ctrl: bool = false
+static mut s_latch_altgr: bool = false
+static mut s_caps: bool = false
+static mut s_badscan: bool = false
+static mut s_closing: bool = false
+static mut s_wx: u64 = 0
+static mut s_wy: u64 = 0
+
+fn rd8(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+fn wr8(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, v as u8)
+}
+
+fn say(p: u64) {
+    let _s: u64 = ulib.say(p)
+}
+
+fn flag(v: bool) -> u64 {
+    if v {
+        return 1
+    }
+    return 0
+}
+
+fn utf8_put(cp: u64, out: u64) {
+    if cp < 128 {
+        wr8(out, cp)
+        wr8(out + 1, 0)
+        return
+    }
+    if cp < 2048 {
+        wr8(out, 192 | (cp >> 6))
+        wr8(out + 1, 128 | (cp & 63))
+        wr8(out + 2, 0)
+        return
+    }
+    if cp < 65536 {
+        wr8(out, 224 | (cp >> 12))
+        wr8(out + 1, 128 | ((cp >> 6) & 63))
+        wr8(out + 2, 128 | (cp & 63))
+        wr8(out + 3, 0)
+        return
+    }
+    wr8(out, 240 | (cp >> 18))
+    wr8(out + 1, 128 | ((cp >> 12) & 63))
+    wr8(out + 2, 128 | ((cp >> 6) & 63))
+    wr8(out + 3, 128 | (cp & 63))
+    wr8(out + 4, 0)
+}
+
+fn layout_us() -> bool {
+    return ulib.sys(SYS_TIPP, TI_INFO, TQ_LAYOUT, 0) != 1
+}
+
+fn code_of(sc: u64, shift: bool, altgr: bool) -> u64 {
+    let arg: u64 = sc | (flag(shift) << 8) | (flag(altgr) << 9)
+    let r: u64 = ulib.sys(SYS_TIPP, TI_INFO, TQ_CODEOF, arg)
+    if ulib.bad(r) {
+        return 0
+    }
+    return r
+}
+
+fn is_letter(cp: u64) -> bool {
+    if cp >= 97 && cp <= 122 {
+        return true
+    }
+    return cp >= 0xDF && cp <= 0xFF && cp != 0xF7
+}
+
+fn shown_shift(sc: u64) -> bool {
+    var sh: bool = s_latch_shift
+    if s_caps && is_letter(code_of(sc, false, false)) {
+        sh = !sh
+    }
+    return sh
+}
+
+fn inject(sc: u64) -> bool {
+    return !ulib.bad(ulib.sys(SYS_TIPP, TI_OSK, sc, 0))
+}
+
+fn say_key(sc: u64, cp: u64, sh: bool, ok: bool) {
+    var a: [u8; 13] = "osk: key sc=\0"
+    var b: [u8; 5] = " cp=\0"
+    var c: [u8; 5] = " sh=\0"
+    var d: [u8; 6] = " alt=\0"
+    var e: [u8; 6] = " ctl=\0"
+    var f: [u8; 6] = " inj=\0"
+    say((&a[0 as usize]) as u64)
+    ulib.sayn(sc)
+    say((&b[0 as usize]) as u64)
+    ulib.sayn(cp)
+    say((&c[0 as usize]) as u64)
+    ulib.sayn(flag(sh))
+    say((&d[0 as usize]) as u64)
+    ulib.sayn(flag(s_latch_altgr))
+    say((&e[0 as usize]) as u64)
+    ulib.sayn(flag(s_latch_ctrl))
+    say((&f[0 as usize]) as u64)
+    ulib.sayn(flag(ok))
+    ulib.nl()
+}
+
+fn say_mods() {
+    var a: [u8; 16] = "osk: mod shift=\0"
+    var b: [u8; 7] = " ctrl=\0"
+    var c: [u8; 8] = " altgr=\0"
+    var d: [u8; 7] = " caps=\0"
+    say((&a[0 as usize]) as u64)
+    ulib.sayn(flag(s_latch_shift))
+    say((&b[0 as usize]) as u64)
+    ulib.sayn(flag(s_latch_ctrl))
+    say((&c[0 as usize]) as u64)
+    ulib.sayn(flag(s_latch_altgr))
+    say((&d[0 as usize]) as u64)
+    ulib.sayn(flag(s_caps))
+    ulib.nl()
+}
+
+fn press(i: u64) {
+    let k: u64 = osklay.kind(i)
+    var sc: u64 = osklay.scan(i)
+    let shift: bool = shown_shift(sc)
+    let cp: u64 = code_of(sc, shift, s_latch_altgr)
+    var ok: bool = true
+    if s_badscan && k == osklay.K_CHAR {
+        sc = sc + 1
+    }
+    if s_latch_ctrl {
+        ok = inject(SC_CTRL) && ok
+    }
+    if shift {
+        ok = inject(SC_SHIFT) && ok
+    }
+    if s_latch_altgr {
+        ok = inject(SC_EXT) && ok
+        ok = inject(SC_ALT) && ok
+    }
+    if k == osklay.K_EXT {
+        ok = inject(SC_EXT) && ok
+    }
+    ok = inject(sc) && ok
+    if k == osklay.K_EXT {
+        ok = inject(SC_EXT) && ok
+    }
+    ok = inject(sc | BREAK) && ok
+    if s_latch_altgr {
+        ok = inject(SC_EXT) && ok
+        ok = inject(SC_ALT | BREAK) && ok
+    }
+    if shift {
+        ok = inject(SC_SHIFT | BREAK) && ok
+    }
+    if s_latch_ctrl {
+        ok = inject(SC_CTRL | BREAK) && ok
+    }
+    say_key(osklay.scan(i), cp, shift, ok)
+    s_latch_shift = false
+    s_latch_ctrl = false
+    s_latch_altgr = false
+    say_mods()
+}
+
+fn toggle_layout() {
+    var next: u64 = 1
+    if !layout_us() {
+        next = 0
+    }
+    let _r: u64 = ulib.sys(SYS_KBD, KB_SET, next, 0)
+}
+
+fn handle(i: u64) {
+    let k: u64 = osklay.kind(i)
+    if k == osklay.K_SHIFT {
+        s_latch_shift = !s_latch_shift
+        say_mods()
+        return
+    }
+    if k == osklay.K_CTRL {
+        s_latch_ctrl = !s_latch_ctrl
+        say_mods()
+        return
+    }
+    if k == osklay.K_ALTGR {
+        s_latch_altgr = !s_latch_altgr
+        say_mods()
+        return
+    }
+    if k == osklay.K_CAPS {
+        s_caps = !s_caps
+        say_mods()
+        return
+    }
+    if k == osklay.K_LAYOUT {
+        toggle_layout()
+        return
+    }
+    if k == osklay.K_CLOSE {
+        s_closing = true
+        return
+    }
+    press(i)
+}
+
+fn latched(i: u64) -> bool {
+    let k: u64 = osklay.kind(i)
+    if k == osklay.K_SHIFT {
+        return s_latch_shift
+    }
+    if k == osklay.K_CTRL {
+        return s_latch_ctrl
+    }
+    if k == osklay.K_ALTGR {
+        return s_latch_altgr
+    }
+    if k == osklay.K_CAPS {
+        return s_caps
+    }
+    return false
+}
+
+fn draw_key(key: u64, x: u64, y: u64, w: u64, h: u64) {
+    fuiscene.cv_rect(x, y, w, h, fuiscene.R_SURFACE)
+    if key < K_KEY0 || key >= K_KEY0 + osklay.NKEYS {
+        return
+    }
+    let i: u64 = key - K_KEY0
+    let k: u64 = osklay.kind(i)
+    var face: u64 = fuiscene.R_BORDER
+    var ink: u64 = fuiscene.R_TEXT
+    if k == osklay.K_CHAR {
+        face = fuiscene.R_FIELD
+    }
+    if latched(i) {
+        face = fuiscene.R_ACCENT
+        ink = fuiscene.R_ONFILL
+    }
+    fuiscene.cv_round(x + 2, y + 2, w - 4, h - 4, 6, face)
+    var buf: [u8; 8] = [0 as u8; 8]
+    let bp: u64 = (&buf[0 as usize]) as u64
+    var text: u64 = bp
+    if k == osklay.K_CHAR {
+        let sc: u64 = osklay.scan(i)
+        let cp: u64 = code_of(sc, shown_shift(sc), s_latch_altgr)
+        if cp >= 32 {
+            utf8_put(cp, bp)
+        }
+    } else {
+        text = osklay.label(i, layout_us())
+    }
+    let sz: u64 = fuiscene.sp(16)
+    let tw: u64 = fuiscene.text_width(text, sz)
+    var tx: u64 = x
+    if tw < w {
+        tx = x + (w - tw) / 2
+    }
+    fuiscene.text_role(tx, y + h / 2 + fuiscene.sp(6), w, text, sz, false, ink)
+}
+
+fn build() {
+    let col: usize = fuiscene.root()
+    fuiscene.set_gap(col, 0)
+    fuiscene.set_pad(col, 0)
+    var r: u64 = 0
+    var i: u64 = 0
+    while r < osklay.NROWS {
+        let rw: usize = fuiscene.row(col)
+        fuiscene.set_gap(rw, 0)
+        fuiscene.set_pad(rw, 0)
+        while i < osklay.NKEYS && osklay.row(i) == r {
+            let cn: usize = fuiscene.canvas2(rw, K_KEY0 + i, osklay.units(i) * UNIT, KEY_H, draw_key)
+            fuiscene.set_noshrink(cn)
+            i = i + 1
+        }
+        r = r + 1
+    }
+}
+
+fn say_rect(i: u64) {
+    let g: u64 = fuiscene.key_geom(K_KEY0 + i)
+    if g == 0 {
+        return
+    }
+    var s_a: [u8; 16] = "osk: rect name=\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_ax: [u8; 5] = " ax=\0"
+    var s_ay: [u8; 5] = " ay=\0"
+    let x: u64 = g >> 48
+    let y: u64 = (g >> 32) & 65535
+    say((&s_a[0 as usize]) as u64)
+    say(osklay.rect_name(i))
+    say((&s_x[0 as usize]) as u64)
+    ulib.sayn(x)
+    say((&s_y[0 as usize]) as u64)
+    ulib.sayn(y)
+    say((&s_w[0 as usize]) as u64)
+    ulib.sayn((g >> 16) & 65535)
+    say((&s_h[0 as usize]) as u64)
+    ulib.sayn(g & 65535)
+    say((&s_ax[0 as usize]) as u64)
+    ulib.sayn(s_wx + x)
+    say((&s_ay[0 as usize]) as u64)
+    ulib.sayn(s_wy + y)
+    ulib.nl()
+}
+
+fn say_rects() {
+    var i: u64 = 0
+    while i < osklay.NKEYS {
+        say_rect(i)
+        i = i + 1
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_bad: [u8; 16] = "osk: no surface\0"
+    var s_go: [u8; 11] = "osk: ready\0"
+    let _mi: u64 = msg.init()
+    if ulib.arg_count(args) >= 2 {
+        if ulib.streq(ulib.arg_at(args, 1), (&s_badscan_arg[0 as usize]) as u64) {
+            s_badscan = true
+        }
+    }
+    let w: u64 = osklay.ROW_UNITS * UNIT
+    let h: u64 = osklay.NROWS * KEY_H
+    if !fuiscene.open_plain(0, 0, w, h, msg.get((&k_title[0 as usize]) as u64), wlibc.L_FLOAT, build) {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    fuiscene.set_app((&k_app[0 as usize]) as u64)
+    let sw: u64 = wlibc.screen_w()
+    if sw > w {
+        s_wx = (sw - w) / 2
+    }
+    let by: u64 = wlibc.band_y()
+    if by > h + 8 {
+        s_wy = by - h - 8
+    }
+    let _m: u64 = wlibc.win_move(fuiscene.handle(), s_wx, s_wy)
+    var first: bool = true
+    while fuiscene.alive() && !s_closing {
+        let key: u64 = fuiscene.pump()
+        if first {
+            first = false
+            say_rects()
+            say((&s_go[0 as usize]) as u64)
+            ulib.nl()
+        }
+        if key >= K_KEY0 && key < K_KEY0 + osklay.NKEYS {
+            handle(key - K_KEY0)
+            fuiscene.refresh()
+        }
+    }
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
