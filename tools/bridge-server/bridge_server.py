@@ -14,6 +14,7 @@ import threading
 import time
 
 import legacy
+import pairing
 
 JOB_KINDS = ('system', 'screenshot', 'run', 'read', 'write', 'list', 'log', 'key', 'mouse', 'click', 'scan', 'input')
 MAX_BODY = 24 * 1024 * 1024
@@ -95,6 +96,8 @@ class Device:
         self.paired = False
         self.blocked = False
         self.code = None
+        self.code_time = 0.0
+        self.code_expires = 0.0
         self.challenge = None
         self.token = None
         self.token_until = 0.0
@@ -373,6 +376,7 @@ def wol_send(mac, targets, port=9):
     return sent
 SERVER_START = time.time()
 _unknown = {}
+_limiter = pairing.WrongCodeLimiter()
 
 def get_device(device_id, create=True):
     with _lock:
@@ -506,6 +510,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 items = [g.to_json() for g in _devices.values()]
             self.reply({'devices': items})
             return
+        if path == '/bridge/pending':
+            if not self.is_admin():
+                self.error(403, 'admin key missing')
+                return
+            with _lock:
+                items = pairing.pending_json(_devices, now())
+            self.reply({'pending': items})
+            return
         if path == '/bridge/fetch':
             self.fetch()
             return
@@ -604,6 +616,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.job()
         elif path == '/bridge/pair':
             self.pair()
+        elif path == '/bridge/forget':
+            self.forget()
         elif path == '/bridge/wire':
             self.wire()
         elif path == '/bridge/wol':
@@ -829,6 +843,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log('PRE-PAIRED: %s' % device_id)
             self.reply({'paired': True, 'device_id': device_id})
             return
+        if 'device' not in d and 'code' in d:
+            self.pair_by_code(d)
+            return
         device_id = sanitize(str(d.get('device', '')))
         g = get_device(device_id, create=False)
         if g is None:
@@ -857,7 +874,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.reply({'blocked': True})
                 return
             code = str(d.get('code', ''))
-            if not g.code or not hmac.compare_digest(g.code, code):
+            if not pairing.code_valid(g, now()) or not hmac.compare_digest(g.code, code):
                 log('PAIRING REJECTED (wrong code): %s' % device_id)
                 self.error(403, 'code does not match')
                 return
@@ -869,6 +886,54 @@ class Handler(http.server.BaseHTTPRequestHandler):
             book_write()
             log('PAIRED: %s' % device_id)
             self.reply({'paired': True, 'secret': g.secret})
+
+    def pair_by_code(self, d):
+        code = str(d.get('code', ''))[:16]
+        t = now()
+        with _lock:
+            if _limiter.locked(t):
+                self.error(429, 'too many wrong codes, try again later')
+                return
+            g = pairing.find_by_code(_devices, code, t)
+            if g is None:
+                if _limiter.record_wrong(t):
+                    pairing.reroll_all(_devices, t)
+                    log('PAIRING LOCKED: too many wrong codes, pending codes re-rolled')
+                else:
+                    log('PAIRING REJECTED (no match)')
+                self.error(404, 'no match')
+                return
+            if d.get('peek'):
+                self.reply({'found': True, 'id': g.device_id, 'info': g.info})
+                return
+            g.paired = True
+            g.blocked = False
+            g.code = None
+            _limiter.clear()
+            if not HAS_ED25519 and (not g.secret):
+                g.secret = secrets.token_hex(32)
+            book_write()
+            log('PAIRED (code): %s' % g.device_id)
+            self.reply({'paired': True, 'id': g.device_id, 'info': g.info})
+
+    def forget(self):
+        if not self.is_admin():
+            self.error(403, 'admin key missing')
+            return
+        d = self.read_json()
+        if d is None:
+            return
+        device_id = sanitize(str(d.get('device', '')))
+        g = get_device(device_id, create=False)
+        if g is None:
+            self.error(404, 'no such device')
+            return
+        with _lock:
+            pairing.forget_device(g)
+            g.waker.notify_all()
+            book_write()
+        log('FORGOTTEN: %s' % device_id)
+        self.reply({'ok': True})
 
     def wire(self):
         raw = self.read_body(MAX_JOB_BODY)
@@ -953,12 +1018,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     log('REJECTED (blocked): %s from %s' % (device_id, ip))
                     return self._drop('this device is blocked')
                 if not g.paired:
-                    if not g.code:
-                        g.code = '%06d' % secrets.randbelow(1000000)
                     g.pubkey = pub or g.pubkey
                     g.info = self.info_from({'info': {'ip': ip}}, ip)
+                    pairing.ensure_code(_devices, g, now())
                     book_write()
-                    log('PAIRING NEEDED: %s (%s) code %s' % (device_id, ip, g.code))
+                    log('PAIRING NEEDED: %s (%s)' % (device_id, ip))
                     return self._send('pairing-needed ' + g.code.encode().hex())
                 if g.pubkey and pub and (pub != g.pubkey):
                     log('REJECTED (foreign key): %s from %s' % (device_id, ip))
