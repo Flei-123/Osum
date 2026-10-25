@@ -265,6 +265,10 @@ const S_LEDS: u64 = 0x110 // was zuletzt an die Tastatur ging
 const S_LEDOK: u64 = 0x118 // erfolgreiche SET_REPORT
 const S_LEDBAD: u64 = 0x120 // fehlgeschlagene
 const S_PEND: u64 = 0x128 // Bitkarte der Anschluesse mit offenem Wechsel
+const S_HUBDUE: u64 = 0xD8
+const S_HUBTRY: u64 = 0xE0
+const S_HUBHITS: u64 = 0xE8
+const HUB_TRY_MAX: u64 = 48
 const S_PENDN: u64 = 0x130 // wie oft der Zeitgeber einen Wechsel sah
 const S_LEDHERZ: u64 = 0x138 // die Lampe, die der Herzschlag gerade legt
 // RUNDE BLECHZWEI: wie oft es VERSUCHT wurde. `LED 0` allein sagt
@@ -4709,33 +4713,85 @@ fn hub_scan(state: u64, d: u64) {
         if (st & (1 << 16)) != 0 {
             hub_feature(state, d, false, PF_C_CONNECTION, p)
         }
-        if (st & 1) != 0 {
-            // Prellzeit, wie am Wurzelanschluss (USB 2.0, 7.1.7.3).
-            xhci.udelay(state, 100000)
-            let hrst: bool = hub_port_reset(state, d, p)
-            var hrv: u64 = 0
-            if hrst {
-                hrv = 1
+        hub_probe_port(state, d, p, hidx, st)
+        p = p + 1
+    }
+}
+
+fn hub_probe_port(state: u64, d: u64, p: u64, hidx: u64, st: u64) -> bool {
+    if (st & 1) == 0 {
+        return false
+    }
+    xhci.udelay(state, 100000)
+    let hrst: bool = hub_port_reset(state, d, p)
+    var hrv: u64 = 0
+    if hrst {
+        hrv = 1
+    }
+    usbdiag.hub_port(xhci.unit(state), hidx, p, st, hrv)
+    if !hrst {
+        return false
+    }
+    let st2: u64 = hub_port_status(state, d, p)
+    let sp: u64 = hub_speed(state, d, st2)
+    var rt: u64 = dg(state, d, D_ROUTE)
+    var schicht: u64 = 0
+    while schicht < 5 && ((rt >> (schicht * 4)) & 0xF) != 0 {
+        schicht = schicht + 1
+    }
+    var pn: u64 = p
+    if pn > 15 {
+        pn = 15
+    }
+    if schicht < 5 {
+        rt = rt | (pn << (schicht * 4))
+    }
+    return attach_at(state, dg(state, d, D_PORT), rt, d, p, true, sp)
+}
+
+fn hub_child_present(state: u64, d: u64, p: u64) -> bool {
+    var i: u64 = 0
+    while i < MAX_DEV {
+        if dg(state, i, D_USED) != 0 && dg(state, i, D_PARENT) == dg(state, d, D_SLOT)
+            && dg(state, i, D_HUBPORT) == p {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn hub_rescan(state: u64) {
+    var d: u64 = 0
+    while d < MAX_DEV {
+        if dg(state, d, D_USED) != 0 && dg(state, d, D_DRIVER) == DRV_HUB {
+            if dg(state, d, D_PORTS) == 0 {
+                if g(state, S_HUBTRY) < HUB_TRY_MAX {
+                    s(state, S_HUBTRY, g(state, S_HUBTRY) + 1)
+                    hub_start(state, d)
+                }
+            } else {
+                hub_rescan_ports(state, d)
             }
-            usbdiag.hub_port(xhci.unit(state), hidx, p, st, hrv)
-            if hrst {
-                let st2: u64 = hub_port_status(state, d, p)
-                let sp: u64 = hub_speed(state, d, st2)
-                // DER WEGWEISER. Ein Nibble je Etage, das unterste
-                // zuerst. Mehr als fuenf Etagen kann USB nicht.
-                var rt: u64 = dg(state, d, D_ROUTE)
-                var schicht: u64 = 0
-                while schicht < 5 && ((rt >> (schicht * 4)) & 0xF) != 0 {
-                    schicht = schicht + 1
-                }
-                var pn: u64 = p
-                if pn > 15 {
-                    pn = 15
-                }
-                if schicht < 5 {
-                    rt = rt | (pn << (schicht * 4))
-                }
-                attach_at(state, dg(state, d, D_PORT), rt, d, p, true, sp)
+        }
+        d = d + 1
+    }
+}
+
+fn hub_rescan_ports(state: u64, d: u64) {
+    let n: u64 = dg(state, d, D_PORTS)
+    let hidx: u64 = usbdiag.info(xhci.unit(state), usbdiag.I_HUBS) - 1
+    var p: u64 = 1
+    while p <= n {
+        if !hub_child_present(state, d, p) && g(state, S_HUBTRY) < HUB_TRY_MAX {
+            let st: u64 = hub_port_status(state, d, p)
+            if (st & (1 << 16)) != 0 {
+                hub_feature(state, d, false, PF_C_CONNECTION, p)
+            }
+            if (st & 1) != 0 {
+                s(state, S_HUBTRY, g(state, S_HUBTRY) + 1)
+                s(state, S_HUBHITS, g(state, S_HUBHITS) + 1)
+                hub_probe_port(state, d, p, hidx, st)
             }
         }
         p = p + 1
@@ -4772,7 +4828,13 @@ fn port_watch(state: u64) {
     if due != 0 {
         usbdiag_snap_all(state, xhci.unit(state), due)
     }
-    let rescan: bool = usbdiag.rescan_due(kstate.get(state, kstate.TICKS))
+    var rescan: bool = usbdiag.rescan_due(kstate.get(state, kstate.TICKS))
+    if kstate.mode_on(state, kstate.M_NOUSBRESCAN) {
+        rescan = false
+    }
+    if rescan && g(state, S_HUBS) != 0 {
+        s(state, S_HUBDUE, 1)
+    }
     var p: u64 = 1
     while p <= n && p < 64 {
         if rescan && xhci.port_connected(state, p) && !was_there(state, p) {
@@ -4921,11 +4983,15 @@ fn hotplug_work(state: u64) {
         return
     }
     let offen: u64 = g(state, S_PEND)
-    if offen == 0 {
+    let hubdue: u64 = g(state, S_HUBDUE)
+    if offen == 0 && hubdue == 0 {
         return
     }
     s(state, S_PEND, 0)
-    chdiag.bump(state, chdiag.F_PASSES)
+    s(state, S_HUBDUE, 0)
+    if offen != 0 {
+        chdiag.bump(state, chdiag.F_PASSES)
+    }
     s(state, S_BUSY, 1)
     let n: u64 = xhci.ports(state)
     var p: u64 = 1
@@ -4941,6 +5007,9 @@ fn hotplug_work(state: u64) {
             }
         }
         p = p + 1
+    }
+    if hubdue != 0 {
+        hub_rescan(state)
     }
     s(state, S_BUSY, 0)
 }

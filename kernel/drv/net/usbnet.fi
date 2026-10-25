@@ -51,7 +51,7 @@ export {
     attach, attach_rndis, attach_ncm, attach_ch336, attach_ax88772, detach, unplug_slot, link_on, keepalives, exists, present_on, ready_on, up_on, mac_at_on,
     rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
     rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
-    errors, MAX_UNITS, FRAME_MAX, ch_bringup, mode_get, tx_diag, ch_link, ch_bmsr, ch_cfg, ch_fw, ch_changes, ch_phy, ch_intr
+    errors, err_kind, err_cc, MAX_UNITS, FRAME_MAX, ch_bringup, mode_get, tx_diag, ch_link, ch_bmsr, ch_cfg, ch_fw, ch_changes, ch_phy, ch_intr
 }
 
 const MAX_UNITS: u64 = 1
@@ -96,6 +96,8 @@ const C_CID: u64 = 0xE8 // RNDIS: request id counter
 const C_ROUND: u64 = 0xF0 // RNDIS: housekeeping round counter
 const C_CARRY: u64 = 0xF8
 const C_SKIP: u64 = 0x100
+const C_ERRK: u64 = 0x108
+const C_ERRCC: u64 = 0x110
 const C_TXRC: u64 = 0x1E0
 const C_TXFAIL: u64 = 0x1E8
 const C_TXHALT: u64 = 0x1F0
@@ -239,6 +241,8 @@ fn attach_mode(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u6
     cs(state, C_TXB, 0)
     cs(state, C_DROP, 0)
     cs(state, C_ERR, 0)
+    cs(state, C_ERRK, 0)
+    cs(state, C_ERRCC, 0)
     cs(state, C_MODE, mode)
     cs(state, C_RXOFF, 0)
     cs(state, C_RXLEN, 0)
@@ -544,7 +548,8 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     let code: u64 = xhci.ep_code(state, i)
     let resid: u64 = xhci.ep_resid(state, i)
     if code != xhci.CC_SUCCESS && code != xhci.CC_SHORT {
-        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        cs(state, C_ERRCC, code)
+        err_note(state, 0)
         requeue(state)
         return 0
     }
@@ -577,7 +582,7 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     }
     if cg(state, C_MODE) == 2 {
         if !ncm.ntb_ok(blk(state) + RXA_OFF, n) {
-            cs(state, C_ERR, cg(state, C_ERR) + 1)
+            err_note(state, 1)
             requeue(state)
             return 0
         }
@@ -586,7 +591,7 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         return ncm_next(state, frame, slot)
     }
     if n < 14 || n > FRAME_MAX {
-        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        err_note(state, 2)
         requeue(state)
         return 0
     }
@@ -615,7 +620,7 @@ fn rndis_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     let p: u64 = b + RXA_OFF + off
     let left: u64 = len - off
     if !rndis.packet_ok(p, left) {
-        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        err_note(state, 3)
         cs(state, C_RXLEN, 0)
         requeue(state)
         return 0
@@ -629,7 +634,7 @@ fn rndis_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         requeue(state)
     }
     if dl > FRAME_MAX {
-        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        err_note(state, 4)
         return 0
     }
     copy(b + HOLD_OFF, p + doff, dl)
@@ -654,7 +659,7 @@ fn ncm_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         let dl: u64 = ncm.ntb_dg_len(p, len, idx)
         idx = idx + 1
         if off == 0 || dl > FRAME_MAX {
-            cs(state, C_ERR, cg(state, C_ERR) + 1)
+            err_note(state, 5)
         } else {
             copy(b + HOLD_OFF, p + off, dl)
             cs(state, C_RXOFF, idx)
@@ -693,7 +698,7 @@ fn ch_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         return 0
     }
     if st == ch397.RX_BAD {
-        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        err_note(state, 6)
         cs(state, C_CARRY, 0)
         cs(state, C_SKIP, 0)
         cs(state, C_RXLEN, 0)
@@ -732,7 +737,7 @@ fn ax_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     }
     let fl: u64 = ax88772.rx_frame_len(p, len as usize, off as usize) as u64
     if fl == 0 {
-        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        err_note(state, 7)
         cs(state, C_RXLEN, 0)
         requeue(state)
         return 0
@@ -830,3 +835,13 @@ fn tx_drops_on(state: u64, u: u64) -> u64 { return cg(state, C_DROP) }
 fn rx_octets_on(state: u64, u: u64) -> u64 { return cg(state, C_RXB) }
 fn tx_octets_on(state: u64, u: u64) -> u64 { return cg(state, C_TXB) }
 fn errors(state: u64) -> u64 { return cg(state, C_ERR) }
+fn err_kind(state: u64, kind: u64) -> u64 { return (cg(state, C_ERRK) >> (kind * 8)) & 0xFF }
+fn err_cc(state: u64) -> u64 { return cg(state, C_ERRCC) }
+
+fn err_note(state: u64, kind: u64) {
+    cs(state, C_ERR, cg(state, C_ERR) + 1)
+    let packed: u64 = cg(state, C_ERRK)
+    if ((packed >> (kind * 8)) & 0xFF) < 255 {
+        cs(state, C_ERRK, packed + (1 << (kind * 8)))
+    }
+}
