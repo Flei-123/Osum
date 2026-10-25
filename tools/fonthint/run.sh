@@ -89,7 +89,7 @@ if build_painter "$ROOT/lib" "$T/painter"; then
 else bad "painter build"; grep -v '^warning' "$T/pbuild.log" | head -20; fi
 
 mkdir -p "$T/lib-nopainter"; cp -r lib/. "$T/lib-nopainter/"
-sed -i 's/^    return vfactor(painter_slot(f), f, px as u64, top)$/    return 1.0/' "$T/lib-nopainter/fonthint.fi"
+sed -i 's/^    let v: f64 = vfactor(painter_slot(f), f, px as u64, top)$/    let v: f64 = 1.0/' "$T/lib-nopainter/fonthint.fi"
 if build_painter "$T/lib-nopainter" "$T/painter-no"; then
     run_host "$T/painter-no" "$T/painter-no.out"; rc=$?
     nf=$(grep -ac '^FAIL' "$T/painter-no.out")
