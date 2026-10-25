@@ -84,6 +84,10 @@ hd unplug-a two | grep -aq 'x=0 y=0 w=640 h=452 head=0' && ok "unplug head 1: ma
 has '^wm: heads n=2 present=1 ' two && ok "unplug: one head present" || bad "unplug: present count"
 hd replug-bar two | grep -aq 'head=' && ok "replug ran" || bad "replug missing"
 has '^wm: head 1 rect=640,0 640x480 work=640,0 640x452$' two && ok "replug: head 1 back with its strut" || bad "replug head 1"
+hd mirror-pre two | grep -aq 'head=1' && ok "r872: new window stands on head 1 before the mirror switch" || bad "mirror-pre: $(hd mirror-pre two)"
+hd mode-on two | grep -aq 'mirror=1 connected=2 present=1' && ok "r872: run-time mirror: 2 connected, 1 head in the window server" || bad "mode-on: $(hd mode-on two)"
+hd mirror-on two | grep -aq 'head=0' && ok "r872: mirror: the window on head 1 came to head 0" || bad "mirror-on: $(hd mirror-on two)"
+hd mode-off two | grep -aq 'mirror=0 connected=2 present=2' && ok "r872: back to extend: 2 heads in the window server" || bad "mode-off: $(hd mode-off two)"
 
 echo "== control: single head (max_outputs=1) with the same words"
 run_case one 1 "fbres=1280x480 vgpuheads vgpuextend hdtest"

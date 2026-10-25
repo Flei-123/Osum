@@ -142,6 +142,16 @@ else
     bad "mirror screendumps missing"
 fi
 
+echo "== r872: run-time mirror (set_mirror) on an extended desktop"
+run_case rt 2 1280x480 "vgpuheads vgpuextend vgpurtmirror"
+if [ -s "$T/rt.h0.ppm" ] && [ -s "$T/rt.h1.ppm" ]; then
+    [ "$(px "$T/rt.h1.ppm" 50 50)" = "$RED" ] && ok "r872: head 1 (50,50) shows head 0's red square after the switch" || bad "rt head 1 (50,50) = $(px "$T/rt.h1.ppm" 50 50)"
+    [ "$(px "$T/rt.h1.ppm" 180 200)" = "$MAG" ] && ok "r872: head 1 shows head 0's magenta box, not its cyan one" || bad "rt head 1 box = $(px "$T/rt.h1.ppm" 180 200)"
+    cmp -s "$T/rt.h0.ppm" "$T/rt.h1.ppm" && ok "r872: run-time mirror heads byte-identical" || bad "rt heads differ"
+else
+    bad "rt screendumps missing"
+fi
+
 echo "== r827: desktop size derived from the heads (no fbres=)"
 run_case auto 2 auto "vgpuheads vgpuextend"
 L=$(grep -a '^vgpu: bdf' "$T/auto.txt" | tail -1); echo "   $L"
