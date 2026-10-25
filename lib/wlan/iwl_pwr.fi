@@ -19,7 +19,7 @@ export {
     CSR_INT_MASK, CSR_FH_INT_STATUS, CSR_CTXT_INFO_BA, CSR_CTXT_INFO_BA_HI,
     HBUS_WADDR, HBUS_WDAT, HBUS_RADDR, HBUS_RDAT, HBUS_WRPTR, UREG_CPU_INIT_RUN,
     RESET_SW, RESET_STOP_MASTER, RESET_MASTER_DISABLED,
-    GP_CLOCK_READY, GP_INIT_DONE, GP_ACCESS_REQ, GP_SLEEP
+    GP_CLOCK_READY, GP_INIT_DONE, GP_ACCESS_REQ, GP_SLEEP, shadow_enable
 }
 
 const CSR_INT_MASK: u64 = 0x00C
@@ -45,11 +45,18 @@ const GIO_L0S_DISABLED: u64 = 0x2
 const HPET_VAL: u64 = 0xFFFF0000
 const MBOX_OS_ALIVE: u64 = 0x20
 const READY_POLL: u64 = 2000
+const MAC_ACCESS_DELAY_READS: u64 = 4
+const CSR_UCODE_DRV_GP1_CLR: u64 = 0x05C
+const GP1_SW_RFKILL: u64 = 0x2
+const GP1_CMD_BLOCKED: u64 = 0x4
+const INT_BIT_RFKILL: u64 = 0x80
+const CSR_MAC_SHADOW_REG_CTRL: u64 = 0x0A8
+const SHADOW_ENABLE: u64 = 0x800FFFFF
 const PREPARE_ROUNDS: u64 = 10
 const PREPARE_POLL: u64 = 20000
 const RESET_SETTLE: u64 = 8000
 const SNAP_N: u64 = 8
-const HWIF_NIC_CFG_MASK: u64 = 0x0000F30F
+const HWIF_NIC_CFG_MASK: u64 = 0x0000FC0F
 const HWIF_RADIO_MAC_SI: u64 = 0x00000300
 const FH_TSSR_TX_STATUS: u64 = 0x1EB0
 const FH_TCSR_CFG9: u64 = 0x1E20
@@ -184,7 +191,18 @@ fn retake_own(p: *mut iwl_probe.Probe) -> i64 {
 }
 
 fn start_fw(p: *mut iwl_probe.Probe) -> i64 {
-    return retake_own(p)
+    let r: i64 = retake_own(p)
+    wr(p, CSR_INT_MASK, INT_BIT_RFKILL)
+    wr(p, iwl_probe.CSR_INT, 0xFFFFFFFF)
+    int_disable(p)
+    wr(p, CSR_UCODE_DRV_GP1_CLR, GP1_SW_RFKILL)
+    wr(p, CSR_UCODE_DRV_GP1_CLR, GP1_CMD_BLOCKED)
+    wr(p, iwl_probe.CSR_INT, 0xFFFFFFFF)
+    return r
+}
+
+fn shadow_enable(p: *mut iwl_probe.Probe) {
+    set_bits(p, CSR_MAC_SHADOW_REG_CTRL, SHADOW_ENABLE)
 }
 
 fn snap_regs(p: *mut iwl_probe.Probe, out: u64) {
@@ -299,6 +317,7 @@ fn apm_init_x(p: *mut iwl_probe.Probe, init_delay_reads: u64) -> i64 {
 // clock ready AND not going to sleep.
 fn mac_access_get(p: *mut iwl_probe.Probe) -> i64 {
     set_bits(p, iwl_probe.CSR_GP_CNTRL, GP_ACCESS_REQ)
+    if !iwl_probe.has_ctxinfo((*p).fam) { settle(p, MAC_ACCESS_DELAY_READS) }
     if !poll(p, iwl_probe.CSR_GP_CNTRL, GP_CLOCK_READY | GP_SLEEP, GP_CLOCK_READY) { return E_PWR_ACCESS }
     return 0
 }
