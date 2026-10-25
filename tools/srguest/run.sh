@@ -18,7 +18,9 @@ note(){ printf '        %s\n' "$1"; }
 has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 
 TMPD=${1:-$(mktemp -d)}
-[ -n "${1:-}" ] || trap 'rm -rf "$TMPD"' EXIT
+SRSRC=kernel/user/screenreader.fi
+cp "$SRSRC" "$TMPD.srorig"
+trap 'cp "$TMPD.srorig" "$SRSRC"; rm -f "$TMPD.srorig"; [ -n "${1:-}" ] || rm -rf "$TMPD"' EXIT
 mkdir -p "$TMPD/bin"
 PROGS="sh ls cat echo sleep a11ydemo screenreader"
 
@@ -57,17 +59,37 @@ EOS
 mkscript loud "" "screenreader say probe"
 mkscript mute "silent" "echo no-say"
 cp "$TMPD/loud.sh" "$TMPD/nodev.sh"
+cat > "$TMPD/tog.sh" <<EOS
+sleep -m 300
+/apps/a11ydemo.prog/start &
+sleep 3
+screenreader serve 6000 &
+sleep 3
+echo ==SR-READY==
+sleep 25
+screenreader toggle
+sleep 3
+echo ==SR-OFF==
+sleep 16
+echo ==SR-QUIET==
+screenreader toggle
+sleep 3
+echo ==SR-ON==
+sleep 16
+echo ==FERTIG==
+EOS
 
+BINDIR="$TMPD/bin"
 mkdisk() { # name
     local A=(build "$TMPD/$1.img" 32768 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf"
        "/lib/sans.ttf=assets/osum-sans.ttf" /bin/ /t/ /tmp/ /var/ /var/log/ /etc/ /apps/ /apps/a11ydemo.prog/
-       "/apps/a11ydemo.prog/start=$TMPD/bin/a11ydemo.elf" "/t/g.sh=$TMPD/$1.sh")
+       "/apps/a11ydemo.prog/start=$BINDIR/a11ydemo.elf" "/t/g.sh=$TMPD/$1.sh")
     [ -f assets/osum-icons.ttf ] && A+=("/lib/icons.ttf=assets/osum-icons.ttf")
     [ -f assets/osum-sans-bold.ttf ] && A+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
     printf '# /etc/theme.conf\nscheme=day\nmode=light\naccent=\nshape=classic\n' > "$TMPD/theme.conf"
     A+=("/etc/theme.conf=$TMPD/theme.conf" /etc/schemas/)
     for s in assets/schemes/*.scheme; do A+=("/etc/schemas/$(basename "$s" .scheme)=$s"); done
-    for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
+    for p in $PROGS; do A+=("/bin/$p=$BINDIR/$p.elf"); done
     python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1
 }
 
@@ -116,6 +138,14 @@ run_guest() { # name audio(1/0)
         keys "sendkey tab"
         keys "sendkey tab"
         keys "sendkey tab"
+        if [[ "$n" == tog* ]]; then
+            if waitfor "==SR-OFF==" 120; then
+                keys "sendkey tab"; keys "sendkey tab"; keys "sendkey tab"; keys "sendkey tab"
+            fi
+            if waitfor "==SR-ON==" 120; then
+                keys "sendkey tab"; keys "sendkey tab"; keys "sendkey tab"; keys "sendkey tab"
+            fi
+        fi
     else
         bad "$n: the script did not reach the reader start"
     fi
@@ -128,6 +158,7 @@ run_guest() { # name audio(1/0)
 
 wavnum() { grep -oE "$2=[0-9.-]+" "$1" | head -1 | cut -d= -f2; }
 
+if [ -z "${SRG_FAST:-}" ]; then
 echo "== 2. loud run: intel-hda + wav =="
 run_guest loud 1
 G="$TMPD/loud.klar"
@@ -177,6 +208,62 @@ has "$G3" "sr: audio none" "without a sound device the reader says so and keeps 
 n=$(grep -ac '^sr: say: ' "$G3")
 [ "$n" -ge 3 ] && ok "announcements continue without a device ($n)" || bad "without device only $n announcements"
 grep -qaF "==FERTIG==" "$G3" && ok "the script ran to the end" || bad "no FERTIG without device"
+
+fi
+
+echo "== 5. switch: toggle off, silence, toggle on =="
+run_guest tog 1
+G4="$TMPD/tog.klar"
+sed -n '/==SR-READY==/,/==SR-OFF==/p' "$G4" > "$TMPD/tog.a"
+sed -n '/==SR-OFF==/,/==SR-QUIET==/p' "$G4" > "$TMPD/tog.b"
+sed -n '/==SR-QUIET==/,/==FERTIG==/p' "$G4" > "$TMPD/tog.c"
+has "$TMPD/tog.a" "sr: enabled=0" "first toggle without a config file switches OFF (a running reader counts as on)"
+has "$TMPD/tog.a" "sr: say: Screen reader off" "switching off is announced"
+n=$(grep -ac '^sr: say: ' "$TMPD/tog.b")
+[ "$n" = 0 ] && ok "while off nothing is spoken despite focus moves" || bad "$n announcements while off"
+has "$TMPD/tog.c" "sr: enabled=1" "second toggle switches ON again"
+has "$TMPD/tog.c" "sr: say: Screen reader on" "switching on is announced"
+n=$(grep -ac '^sr: say: ' "$TMPD/tog.c")
+[ "$n" -ge 3 ] && ok "announcements resume after switching on ($n)" || bad "after switching on only $n announcements"
+
+variant() { # name sed-expression
+    cp "$TMPD.srorig" "$SRSRC"
+    python3 -I - "$SRSRC" "$2" "$3" <<'EP'
+import sys
+p,a,b=sys.argv[1:4]
+t=open(p,encoding="latin-1").read()
+if a not in t: sys.exit(3)
+open(p,"w",encoding="latin-1").write(t.replace(a,b,1))
+EP
+    local r=$?
+    if [ $r != 0 ]; then cp "$TMPD.srorig" "$SRSRC"; return 1; fi
+    mkdir -p "$TMPD/bin.$1"
+    bash tools/sync/build.sh "$TMPD/bin.$1" 0 screenreader > "$TMPD/b.$1.txt" 2>&1; r=$?
+    cp "$TMPD.srorig" "$SRSRC"
+    [ $r = 0 ] || return 1
+    for p in $PROGS; do [ -f "$TMPD/bin.$1/$p.elf" ] || cp "$TMPD/bin/$p.elf" "$TMPD/bin.$1/$p.elf"; done
+}
+
+echo "== 6. counter-proofs for the switch =="
+if variant deaf "            if is_on {
+                handle(ev[0 as usize])
+            }" "            handle(ev[0 as usize])"; then
+    BINDIR="$TMPD/bin.deaf"; cp "$TMPD/tog.sh" "$TMPD/togdeaf.sh"; run_guest togdeaf 1; BINDIR="$TMPD/bin"
+    sed -n '/==SR-OFF==/,/==SR-QUIET==/p' "$TMPD/togdeaf.klar" > "$TMPD/togdeaf.b"
+    n=$(grep -ac '^sr: say: ' "$TMPD/togdeaf.b")
+    grep -qaF "==FERTIG==" "$TMPD/togdeaf.klar" || bad "counter-proof ignore-switch: the run did not finish"
+    [ "$n" -ge 1 ] && ok "counter-proof: a reader that ignores the switch speaks while off ($n lines) -- the silence check measures" || bad "counter-proof ignore-switch stayed silent"
+else
+    bad "counter-proof ignore-switch: variant build failed"
+fi
+if variant dflt "!srconf.enabled_or(true)" "!srconf.enabled_or(false)"; then
+    BINDIR="$TMPD/bin.dflt"; cp "$TMPD/tog.sh" "$TMPD/togdflt.sh"; run_guest togdflt 1; BINDIR="$TMPD/bin"
+    sed -n '/==SR-READY==/,/==SR-OFF==/p' "$TMPD/togdflt.klar" > "$TMPD/togdflt.a"
+    grep -qaF "==SR-OFF==" "$TMPD/togdflt.klar" || bad "counter-proof wrong default: the run did not reach the marker"
+    grep -qaF "sr: enabled=0" "$TMPD/togdflt.a" && bad "counter-proof wrong default: first toggle still went OFF" || ok "counter-proof: with the wrong default the first toggle does not switch off -- the default check measures"
+else
+    bad "counter-proof wrong default: variant build failed"
+fi
 
 rm -f "$TMPD"/*.img "$TMPD"/*.wav
 echo "SRGUEST: $pass passed, $fail failed"
