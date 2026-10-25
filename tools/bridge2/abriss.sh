@@ -132,7 +132,7 @@ timeout 200 qemu-system-x86_64 -kernel "$W/k.mb" -m 256 \
     -device "e1000,netdev=n0,mac=52:54:00:cc:dd:ee" -vga std \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$W/q-ohne.log" 2>&1
 
-VERSUCHE=$(grep -ac 'jarvisd: keine Verbindung' "$W/s-ohne.txt" 2>/dev/null || echo 0)
+VERSUCHE=$(grep -ac 'jarvisd: no connection' "$W/s-ohne.txt" 2>/dev/null || echo 0)
 WARTEMS=$(grep -aoE 'jarvisd: wartezeit_ms [0-9]+' "$W/s-ohne.txt" | tail -1 | awk '{print $3}')
 AUFRUFE=$(grep -aoE 'jarvisd: aufrufe_beim_warten [0-9]+' "$W/s-ohne.txt" | tail -1 | awk '{print $3}')
 
@@ -206,10 +206,10 @@ ip netns exec "$NS" python3 tools/bridge/peer.py \
     --kein-beweis --wartezeit 120 > "$W/g2.log" 2>&1 & GPID=$!
 
 wait $QPID 2>/dev/null
-VERB=$(grep -ac 'jarvisd: verbunden' "$W/s-abriss.txt" 2>/dev/null || echo 0)
+VERB=$(grep -ac 'jarvisd: connected' "$W/s-abriss.txt" 2>/dev/null || echo 0)
 if [ "${VERB:-0}" -ge 2 ]; then
     ok "das Geraet hat sich NACH dem Abriss von selbst wieder gemeldet ($VERB Verbindungen)"
-    grep -aE 'jarvisd: (verbunden|angemeldet|warten|keine Verbindung)' "$W/s-abriss.txt" \
+    grep -aE 'jarvisd: (connected|signed in|waiting|no connection)' "$W/s-abriss.txt" \
         | head -12 | sed 's/^/        /'
 else
     bad "nach dem Abriss kam keine neue Verbindung ($VERB)"

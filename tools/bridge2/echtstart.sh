@@ -101,7 +101,7 @@ timeout 120 qemu-system-x86_64 -kernel "$KERN" -m 1024 \
     -device "e1000,netdev=n0,mac=52:54:00:cc:dd:02" -vga std \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$W/a2.qemu" 2>&1
 grep -a 'jarvisd:\|dhcp:' "$W/a2.txt" 2>/dev/null | head -12 | sed 's/^/   /'
-if grep -qa 'jarvisd: keine Verbindung\|jarvisd: warten' "$W/a2.txt"; then
+if grep -qa 'jarvisd: no connection\|jarvisd: waiting' "$W/a2.txt"; then
     ok "ohne DHCP/ohne Gegenstelle: es WARTET und haemmert nicht"
 else
     hm "kein Warte-/Wiederholverhalten in der Ausgabe erkennbar"
