@@ -17,7 +17,7 @@ CHANGES-<N>.txt,schluessel.pub}. The VERZEICHNIS is the same signed document for
 the package feed uses (OTA2: key chain + signature by the existing bundle), plus
 
     system   <count> <commit7> <min_from> <name>
-    sysfile  <role> <sha256> <octets> <file>          role: kernel | notes | root
+    sysfile  <role> <sha256> <octets> <file>          role: kernel | notes | root | roots
 
 Old clients ignore both line types. The channel directory is separate from
 `aktuell/` (which veroeffentlichen.py rebuilds), so the live package feed is untouched.
@@ -36,6 +36,9 @@ SELFUPDATE stage 2 (docs/SELFUPDATE.md):
                 bit INSIDE the deflate data, its sysgz hash is recomputed (so the transport check passes
                 and only the gunzip CRC / format check can catch it).
 --bad-ovl-hash  negative control: the first overlay file's sysfile hash is wrong.
+--roots FILE    trust-root bundle (PEM): published as `sysfile roots` (+ a sysgz line with --gz). The device
+                fetches + hash-checks it and hands it to `rootsctl apply`, which writes /etc/ssl/roots.pem.
+--bad-roots-hash negative control: the roots sysfile hash is wrong.
 """
 import gzip, hashlib, os, re, shutil, subprocess, sys
 
@@ -50,7 +53,7 @@ def main():
         raise SystemExit(__doc__)
     img, feed, chan = a[0], a[1], a[2]
     opt = {"--bund": None, "--key": None, "--count": None, "--min-from": "0", "--notes": None,
-           "--name": "", "--overlay": None}
+           "--name": "", "--overlay": None, "--roots": None}
     flags = set()
     i = 3
     while i < len(a):
@@ -111,6 +114,11 @@ def main():
             if not raw:
                 raise SystemExit("overlay file is empty: %s" % fn)
             ovl_files.append((fn, raw))
+    roots_raw = None
+    if opt["--roots"]:
+        roots_raw = open(opt["--roots"], "rb").read()
+        if b"-----BEGIN CERTIFICATE-----" not in roots_raw:
+            raise SystemExit("roots bundle holds no PEM certificate")
     notes = opt["--notes"]
     ntext = open(notes, "rb").read() if notes else (
         ("Build %d (%s)\n" % (count, commit)).encode())
@@ -130,6 +138,15 @@ def main():
         lines.append("sysfile\tfile\t%s\t%d\t%s\t%s" % (oh, len(raw), srv, fn))
         if want_gz:
             gz_make(fn, srv, raw, bad_gz)
+    if roots_raw is not None:
+        srv = "f%d-roots.pem" % count
+        open(os.path.join(out, srv), "wb").write(roots_raw)
+        rh = hashlib.sha256(roots_raw).hexdigest()
+        if "--bad-roots-hash" in flags:
+            rh = ("0" if rh[0] != "0" else "1") + rh[1:]
+        lines.append("sysfile\troots\t%s\t%d\t%s" % (rh, len(roots_raw), srv))
+        if want_gz:
+            gz_make("roots", srv, roots_raw)
     if want_gz:
         gz_make("kernel", kname, data, bad_gz and not ovl_files)
     lines.extend(gz_lines)
