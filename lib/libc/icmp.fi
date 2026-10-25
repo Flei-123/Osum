@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.kcall
+
+export { echo, last_rtt_ms, E_OK, E_NOSOCK, E_NOARP, E_TIMEOUT }
+
+const E_OK: u64 = 0
+const E_NOSOCK: u64 = 1
+const E_NOARP: u64 = 2
+const E_TIMEOUT: u64 = 3
+
+const AF_INET: u64 = 2
+const SOCK_DGRAM: u64 = 2
+const SOCK_NONBLOCK: u64 = 2048
+const IPPROTO_ICMP: u64 = 1
+const SA_BYTES: u64 = 16
+const HDR: u64 = 8
+const PAYLOAD: u64 = 32
+const POLL_MS: u64 = 10
+
+static mut TS: [u8; 16] = [0 as u8; 16]
+static mut RTT: u64 = 0
+
+fn last_rtt_ms() -> u64 { return RTT }
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, (v & 255) as u8)
+}
+
+fn bad(v: u64) -> bool {
+    return v > 0xFFFFFFFFFFFFF000
+}
+
+fn now_ms() -> u64 {
+    let r: u64 = kcall.sys2(kcall.SYS_CLOCK_GETTIME, 1, (&TS[0 as usize]) as u64)
+    if bad(r) {
+        return 0
+    }
+    let s: u64 = *((&TS[0 as usize]) as *mut u64)
+    let ns: u64 = *((((&TS[0 as usize]) as u64) + 8) as *mut u64)
+    return s * 1000 + ns / 1000000
+}
+
+fn sleep_ms(ms: u64) {
+    var t: [u8; 16] = [0 as u8; 16]
+    let p: u64 = (&t[0 as usize]) as u64
+    *((p) as *mut u64) = ms / 1000
+    *((p + 8) as *mut u64) = (ms % 1000) * 1000000
+    kcall.sys2(kcall.SYS_NANOSLEEP, p, 0)
+}
+
+fn sa_build(sa: u64, a: u64) {
+    var i: u64 = 0
+    while i < SA_BYTES {
+        st8(sa, i, 0)
+        i = i + 1
+    }
+    st8(sa, 0, AF_INET)
+    st8(sa, 4, (a >> 24) & 255)
+    st8(sa, 5, (a >> 16) & 255)
+    st8(sa, 6, (a >> 8) & 255)
+    st8(sa, 7, a & 255)
+}
+
+fn echo(addr: u64, timeout_ms: u64) -> u64 {
+    var msg: [u8; 40] = [0 as u8; 40]
+    var back: [u8; 64] = [0 as u8; 64]
+    var sa: [u8; 16] = [0 as u8; 16]
+    let m: u64 = (&msg[0 as usize]) as u64
+    let b: u64 = (&back[0 as usize]) as u64
+    let sap: u64 = (&sa[0 as usize]) as u64
+    RTT = 0
+    let fd: u64 = kcall.sys3(kcall.SYS_SOCKET, AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_ICMP)
+    if bad(fd) {
+        return E_NOSOCK
+    }
+    let ident: u64 = kcall.sys1(kcall.SYS_GETPID, 0) & 0xFFFF
+    st8(m, 0, 8)
+    st8(m, 4, (ident >> 8) & 255)
+    st8(m, 5, ident & 255)
+    st8(m, 7, 1)
+    var k: u64 = 0
+    while k < PAYLOAD {
+        st8(m, HDR + k, (k + 16) & 255)
+        k = k + 1
+    }
+    sa_build(sap, addr)
+    let t0: u64 = now_ms()
+    var sent: bool = false
+    while !sent && now_ms() - t0 < timeout_ms {
+        let r: u64 = kcall.sock_send(fd, m, HDR + PAYLOAD, sap, SA_BYTES)
+        if bad(r) {
+            sleep_ms(POLL_MS)
+        } else {
+            sent = true
+        }
+    }
+    if !sent {
+        kcall.sys1(kcall.SYS_CLOSE, fd)
+        return E_NOARP
+    }
+    while now_ms() - t0 < timeout_ms {
+        let n: u64 = kcall.sock_recv(fd, b, 64, 0, 0)
+        if !bad(n) && n >= HDR && ld8(b, 0) == 0 {
+            RTT = now_ms() - t0
+            kcall.sys1(kcall.SYS_CLOSE, fd)
+            return E_OK
+        }
+        sleep_ms(POLL_MS)
+    }
+    kcall.sys1(kcall.SYS_CLOSE, fd)
+    return E_TIMEOUT
+}

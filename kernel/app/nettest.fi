@@ -1,0 +1,250 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.io
+import std.rt
+import libc.dns
+import libc.icmp
+import netdiag.procnet
+import netdiag.tlsprobe
+
+
+struct Tally {
+    ok: u64,
+    total: u64,
+}
+
+fn put(out: *mut rt.Buf, s: str) {
+    rt.buf_push_bytes(out, s.p as u64, s.n)
+}
+
+fn put_ip(out: *mut rt.Buf, a: u64) {
+    rt.buf_push_dec_u64(out, (a >> 24) & 255)
+    rt.buf_push(out, 46 as u8)
+    rt.buf_push_dec_u64(out, (a >> 16) & 255)
+    rt.buf_push(out, 46 as u8)
+    rt.buf_push_dec_u64(out, (a >> 8) & 255)
+    rt.buf_push(out, 46 as u8)
+    rt.buf_push_dec_u64(out, a & 255)
+}
+
+fn verdict(t: *mut Tally, out: *mut rt.Buf, good: bool, label: str) {
+    (*t).total = (*t).total + 1
+    if good {
+        (*t).ok = (*t).ok + 1
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print(label)
+    rt.write_everything(1, (*out).ptr, (*out).len)
+    io.print("\n")
+    rt.buf_clear(out)
+}
+
+fn has(p: u64, n: usize, key: str) -> u64 {
+    return procnet.find(p, n as u64, key.p as u64, key.n as u64)
+}
+
+fn check_link(t: *mut Tally, out: *mut rt.Buf, p: u64, n: usize) {
+    let u: u64 = has(p, n, "usbnet: ready mode=")
+    if u == procnet.NOT_FOUND {
+        let ip: u64 = has(p, n, "net: ip=")
+        if ip == procnet.NOT_FOUND {
+            put(out, "no network interface")
+            verdict(t, out, false, "link     ")
+        } else {
+            put(out, "nic (no usb adapter)")
+            verdict(t, out, true, "link     ")
+        }
+        return
+    }
+    let lk: u64 = has(p, n, " link=")
+    put(out, "usb link=")
+    var up: bool = false
+    if lk != procnet.NOT_FOUND {
+        if rt.ld8(p, lk as usize) == 117 as u8 {
+            up = true
+            put(out, "up")
+        } else if rt.ld8(p, lk as usize) == 100 as u8 {
+            put(out, "down")
+        } else {
+            put(out, "unknown")
+        }
+    }
+    let rx: u64 = has(p, n, " rx=")
+    let tx: u64 = has(p, n, " tx=")
+    let er: u64 = has(p, n, " err=")
+    put(out, " rx=")
+    rt.buf_push_dec_u64(out, procnet.num_after(p, n as u64, rx))
+    put(out, " tx=")
+    rt.buf_push_dec_u64(out, procnet.num_after(p, n as u64, tx))
+    put(out, " err=")
+    rt.buf_push_dec_u64(out, procnet.num_after(p, n as u64, er))
+    verdict(t, out, up, "link     ")
+}
+
+fn check_ip(t: *mut Tally, out: *mut rt.Buf, p: u64, n: usize, gw: *mut u64) {
+    let at: u64 = has(p, n, "net: ip=")
+    if at == procnet.NOT_FOUND {
+        put(out, "no address (dhcp state=")
+        let d: u64 = has(p, n, "dhcp: state=")
+        rt.buf_push_dec_u64(out, procnet.num_after(p, n as u64, d))
+        put(out, ")")
+        verdict(t, out, false, "ip       ")
+        return
+    }
+    let ip: u64 = procnet.ip_after(p, n as u64, at)
+    let g: u64 = has(p, n, " gw=")
+    *gw = procnet.ip_after(p, n as u64, g)
+    put_ip(out, ip)
+    let m: u64 = has(p, n, "net: mask=")
+    put(out, " mask ")
+    put_ip(out, procnet.ip_after(p, n as u64, m))
+    verdict(t, out, ip != 0 && (ip >> 16) != 0xA9FE, "ip       ")
+}
+
+fn check_gateway(t: *mut Tally, out: *mut rt.Buf, p: u64, n: usize, gw: u64) {
+    put_ip(out, gw)
+    let r: u64 = has(p, n, "route: ")
+    let mac: u64 = has(p, n, " mac=")
+    if r != procnet.NOT_FOUND && mac != procnet.NOT_FOUND {
+        put(out, " mac=")
+        let e: u64 = procnet.line_end(p, n as u64, mac)
+        rt.buf_push_bytes(out, p + mac, (e - mac) as usize)
+    }
+    verdict(t, out, gw != 0, "gateway  ")
+}
+
+fn check_dns(t: *mut Tally, out: *mut rt.Buf, p: u64, n: usize) {
+    let d: u64 = has(p, n, "\ndns: ")
+    var seen: u64 = 0
+    if d != procnet.NOT_FOUND {
+        put(out, "kernel ")
+        let e: u64 = procnet.line_end(p, n as u64, d)
+        rt.buf_push_bytes(out, p + d, (e - d) as usize)
+        seen = seen + 1
+    }
+    let c: u64 = dns.conf_load()
+    if c > 0 {
+        if seen > 0 {
+            put(out, "; ")
+        }
+        put(out, "resolv.conf ")
+        put_ip(out, dns.conf_at(0))
+        seen = seen + 1
+    }
+    if seen == 0 {
+        put(out, "no nameserver")
+    }
+    verdict(t, out, seen > 0, "dns      ")
+}
+
+fn check_ping(t: *mut Tally, out: *mut rt.Buf, label: str, addr: u64) {
+    put_ip(out, addr)
+    var good: bool = false
+    if addr == 0 {
+        put(out, " (no address)")
+    } else {
+        let r: u64 = icmp.echo(addr, 3000)
+        if r == icmp.E_OK {
+            good = true
+            put(out, " ")
+            rt.buf_push_dec_u64(out, icmp.last_rtt_ms())
+            put(out, " ms")
+        } else if r == icmp.E_NOARP {
+            put(out, " next hop does not answer ARP")
+        } else {
+            put(out, " no answer")
+        }
+    }
+    verdict(t, out, good, label)
+}
+
+fn now_seconds() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+fn main(start: u64) -> i32 {
+    var name: u64 = 0
+    var roots: u64 = 0
+    var target: u64 = 0
+    let argc: usize = rt.arg_count(start)
+    var i: usize = 1
+    while i + 1 < argc {
+        let a: u64 = rt.arg_ptr(start, i)
+        if rt.c_length(a) == 2 && rt.ld8(a, 0) == 45 as u8 {
+            let c: u8 = rt.ld8(a, 1)
+            if c == 110 as u8 {
+                name = rt.arg_ptr(start, i + 1)
+            } else if c == 114 as u8 {
+                roots = rt.arg_ptr(start, i + 1)
+            } else if c == 116 as u8 {
+                let z: u64 = rt.arg_ptr(start, i + 1)
+                target = procnet.ip_after(z, rt.c_length(z) as u64, 0)
+            }
+        }
+        i = i + 2
+    }
+    var s_name: [u8; 12] = "example.com\0"
+    var s_roots: [u8; 20] = "/etc/ssl/roots.pem\0\0"
+    var s_proc: [u8; 16] = "/proc/usbnet\0\0\0\0"
+    if name == 0 {
+        name = (&s_name[0]) as u64
+    }
+    if roots == 0 {
+        roots = (&s_roots[0]) as u64
+    }
+    if target == 0 {
+        target = 0x01010101
+    }
+    var t: Tally = Tally { ok: 0, total: 0 }
+    var out: rt.Buf = rt.buf_new()
+    var proc_text: rt.Buf = rt.buf_new()
+    rt.read_file((&s_proc[0]) as u64, &proc_text)
+    let p: u64 = proc_text.ptr
+    let n: usize = proc_text.len
+    var gw: u64 = 0
+    check_link(&t, &out, p, n)
+    check_ip(&t, &out, p, n, &gw)
+    check_gateway(&t, &out, p, n, gw)
+    check_dns(&t, &out, p, n)
+    check_ping(&t, &out, "ping-gw  ", gw)
+    check_ping(&t, &out, "ping-net ", target)
+    let nl: usize = rt.c_length(name)
+    let addr: u64 = dns.resolve_a(name)
+    rt.buf_push_bytes(&out, name, nl)
+    if addr != 0 {
+        put(&out, " -> ")
+        put_ip(&out, addr)
+    } else {
+        put(&out, " no answer")
+    }
+    verdict(&t, &out, addr != 0, "resolve  ")
+    var detail: rt.Buf = rt.buf_new()
+    var code: u64 = 0
+    if addr != 0 {
+        code = tlsprobe.probe(addr as u32, 443 as u16, name, nl, roots, now_seconds(), &detail)
+    } else {
+        put(&detail, "skipped, no address")
+    }
+    put(&out, "https://")
+    rt.buf_push_bytes(&out, name, nl)
+    put(&out, " ")
+    if code > 0 {
+        rt.buf_push_dec_u64(&out, code)
+    } else {
+        rt.buf_push_bytes(&out, detail.ptr, detail.len)
+    }
+    verdict(&t, &out, code >= 200 && code < 400, "tls      ")
+    io.print("nettest: ")
+    rt.buf_push_dec_u64(&out, t.ok)
+    put(&out, "/")
+    rt.buf_push_dec_u64(&out, t.total)
+    put(&out, " OK\n")
+    rt.write_everything(1, out.ptr, out.len)
+    if t.ok == t.total {
+        return 0
+    }
+    return 1
+}

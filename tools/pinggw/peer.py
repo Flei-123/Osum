@@ -9,6 +9,7 @@ import time
 GW_MAC = bytes.fromhex("525400112233")
 GW_IP = bytes([192, 168, 1, 1])
 LEASE_IP = bytes([192, 168, 1, 50])
+ANSWER_IP = bytes([203, 0, 113, 80])
 BCAST = b"\xff" * 6
 
 
@@ -29,6 +30,31 @@ def ip_packet(src, dst, proto, payload):
 
 def eth(dst, src, kind, payload):
     return dst + src + struct.pack("!H", kind) + payload
+
+
+def pseudo_checksum(src, dst, proto, segment):
+    return checksum(src + dst + struct.pack("!BBH", 0, proto, len(segment)) + segment)
+
+
+def dns_answer(query, src_mac, src_ip, sport):
+    if len(query) < 17:
+        return None
+    head = query[:2] + struct.pack("!HHHHH", 0x8180, 1, 1, 0, 0)
+    end = 12
+    while end < len(query) and query[end] != 0:
+        end += query[end] + 1
+    question = query[12:end + 5]
+    answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + ANSWER_IP
+    body = head + question + answer
+    udp = struct.pack("!HHHH", 53, sport, 8 + len(body), 0) + body
+    return eth(src_mac, GW_MAC, 0x0800, ip_packet(GW_IP, src_ip, 17, udp))
+
+
+def tcp_reset(frame, src_mac, src_ip, dst_ip):
+    sport, dport, seq = struct.unpack("!HHI", frame[34:42])
+    seg = struct.pack("!HHIIBBHHH", dport, sport, 0, (seq + 1) & 0xFFFFFFFF, 0x50, 0x14, 0, 0, 0)
+    seg = seg[:16] + struct.pack("!H", pseudo_checksum(dst_ip, src_ip, 6, seg)) + seg[18:]
+    return eth(src_mac, GW_MAC, 0x0800, ip_packet(dst_ip, src_ip, 6, seg))
 
 
 def dhcp_reply(request, kind, mask):
@@ -63,6 +89,7 @@ def main():
     ap.add_argument("--log", required=True)
     ap.add_argument("--secs", type=int, default=150)
     ap.add_argument("--no-echo", action="store_true")
+    ap.add_argument("--no-dns", action="store_true")
     a = ap.parse_args()
     mask = bytes(int(x) for x in a.mask.split("."))
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -98,6 +125,15 @@ def main():
                 if k in (1, 3):
                     log.write("DHCP %s mask=%s\n" % ("DISCOVER" if k == 1 else "REQUEST", a.mask))
                     sock.sendto(dhcp_reply(frame[14 + 20 + 8:], 2 if k == 1 else 5, mask), out)
+            elif proto == 17 and frame[14 + 20 + 2:14 + 20 + 4] == b"\x00\x35":
+                log.write("DNS-QUERY\n")
+                if not a.no_dns and frame[0:6] == GW_MAC and dst_ip == GW_IP:
+                    reply = dns_answer(frame[14 + 20 + 8:], src_mac, src_ip, struct.unpack("!H", frame[34:36])[0])
+                    if reply:
+                        sock.sendto(reply, out)
+            elif proto == 6 and len(frame) >= 54 and frame[47] & 0x02:
+                log.write("TCP-SYN dst=%s port=%d\n" % (".".join(map(str, dst_ip)), struct.unpack("!H", frame[36:38])[0]))
+                sock.sendto(tcp_reset(frame, src_mac, src_ip, dst_ip), out)
             elif proto == 1 and frame[34] == 8:
                 via_gw = frame[0:6] == GW_MAC
                 log.write("ECHO dst=%s via_gw=%d\n" % (".".join(map(str, dst_ip)), 1 if via_gw else 0))

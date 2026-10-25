@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.net
+import tls.tls
+import tls.x509
+
+export { probe }
+
+const CONNECT_MS: u64 = 10000
+const IO_MS: u64 = 10000
+const CHUNK: usize = 1024
+
+fn put(out: *mut rt.Buf, s: str) {
+    rt.buf_push_bytes(out, s.p as u64, s.n)
+}
+
+fn conn_failed(bad: *mut bool) -> net.Conn {
+    *bad = true
+    return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+}
+
+fn put_reason(out: *mut rt.Buf, r: u32) {
+    if r == x509.V_OK {
+        put(out, "verify ok")
+    } else if r == x509.V_EXPIRED {
+        put(out, "certificate expired")
+    } else if r == x509.V_NOT_YET {
+        put(out, "certificate not yet valid (clock?)")
+    } else if r == x509.V_NAME {
+        put(out, "wrong certificate name")
+    } else if r == x509.V_UNKNOWN_ISSUER {
+        put(out, "unknown issuer")
+    } else if r == x509.V_BAD_SIGNATURE {
+        put(out, "bad signature")
+    } else {
+        put(out, "certificate refused")
+    }
+}
+
+fn status_of(p: u64, n: usize) -> u64 {
+    if n < 12 {
+        return 0
+    }
+    if rt.ld8(p, 0) != 72 as u8 || rt.ld8(p, 1) != 84 as u8 || rt.ld8(p, 2) != 84 as u8 || rt.ld8(p, 3) != 80 as u8 {
+        return 0
+    }
+    var i: usize = 4
+    while i < n && rt.ld8(p, i) != 32 as u8 {
+        i = i + 1
+    }
+    i = i + 1
+    var v: u64 = 0
+    var digits: u64 = 0
+    while i < n && digits < 3 && rt.ld8(p, i) >= 48 as u8 && rt.ld8(p, i) <= 57 as u8 {
+        v = v * 10 + (rt.ld8(p, i) - 48 as u8) as u64
+        digits = digits + 1
+        i = i + 1
+    }
+    return v
+}
+
+fn probe(addr: u32, port: u16, name: u64, namelen: usize, roots: u64, now: u64, detail: *mut rt.Buf) -> u64 {
+    var bad: bool = false
+    var c: net.Conn = net.connect_tcp(addr, port)
+    catch | e | conn_failed(&bad)
+    if bad {
+        put(detail, "tcp connect failed")
+        return 0
+    }
+    let tmo: bool = net.set_timeout(&c, IO_MS) catch false
+    var storebuf: rt.Buf = rt.buf_new()
+    var store: x509.Store = x509.store_new()
+    if !rt.read_file(roots, &storebuf) {
+        put(detail, "no trust store")
+        net.close(&c)
+        return 0
+    }
+    let taken: usize = x509.store_load_pem(&store, storebuf.ptr, storebuf.len)
+    var t: tls.Tls = tls.tls_new()
+    let okinit: bool = tls.tls_init(&t, &c, &store, name, namelen, now)
+    var failed: bool = false
+    var errs: rt.Buf = rt.buf_new()
+    let hs: bool = tls.tls_handshake(&t)
+    catch | e | tls.tls_fail_into(&errs, e, &failed)
+    if failed {
+        put(detail, "handshake failed: ")
+        put_reason(detail, tls.tls_verify_reason(&t))
+        net.close(&c)
+        rt.buf_free(&errs)
+        rt.buf_free(&storebuf)
+        return 0
+    }
+    var req: rt.Buf = rt.buf_new()
+    put(&req, "GET / HTTP/1.1\r\nHost: ")
+    rt.buf_push_bytes(&req, name, namelen)
+    put(&req, "\r\nConnection: close\r\nUser-Agent: osum-nettest\r\n\r\n")
+    var werr: bool = false
+    let w: bool = tls.tls_write(&t, req.ptr, req.len)
+    catch | e | tls.tls_fail_into(&errs, e, &werr)
+    rt.buf_free(&req)
+    if werr {
+        put(detail, "request not sent")
+        net.close(&c)
+        rt.buf_free(&errs)
+        rt.buf_free(&storebuf)
+        return 0
+    }
+    var chunk: [u8; 1024] = [0; 1024]
+    var rerr: bool = false
+    let n: usize = tls.tls_read(&t, (&chunk[0]) as u64, CHUNK)
+    catch | e | tls.tls_fail_len(&errs, e, &rerr)
+    var code: u64 = 0
+    if !rerr {
+        code = status_of((&chunk[0]) as u64, n)
+    }
+    if code == 0 {
+        put(detail, "no HTTP answer")
+    }
+    tls.tls_close(&t)
+    tls.tls_free(&t)
+    net.close(&c)
+    rt.buf_free(&errs)
+    rt.buf_free(&storebuf)
+    return code
+}
