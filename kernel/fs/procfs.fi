@@ -69,6 +69,7 @@ import lib.brand
 import fs.mnt
 import fs.vfsops
 import sched.sched
+import sched.time
 import net.wlan_auto
 import sched.proc
 import sched.origin
@@ -219,7 +220,8 @@ const G_HOTKEYS: u64 = 29 // W-HW6: /proc/hotkeys
 const G_USBNET: u64 = 30 // W-CH336-3: /proc/usbnet
 const G_WLANPOLL: u64 = 31 // W-WLAN32: /proc/wlanpoll (exp2 table + register poll)
 const G_WLANIRQ: u64 = 32
-const G_LAST: u64 = 32
+const G_CLOCK: u64 = 33
+const G_LAST: u64 = 33
 const GPU_NA: u64 = 0xFFFFFFFFFFFFFFFF
 
 // Die Dateien je Prozess.
@@ -2368,6 +2370,153 @@ fn make_wlanpoll(state: u64) -> u64 {
     return p
 }
 
+fn w_d2(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = w_ch(state, at, 48 + ((v / 10) % 10))
+    return w_ch(state, p, 48 + (v % 10))
+}
+
+fn w_stamp(state: u64, at: u64, secs: u64) -> u64 {
+    var f: [u64; 6] = [0 as u64; 6]
+    time.split(secs, (&f[0 as usize]) as u64)
+    var p: u64 = w_num(state, at, f[0 as usize])
+    p = w_ch(state, p, 45)
+    p = w_d2(state, p, f[1 as usize])
+    p = w_ch(state, p, 45)
+    p = w_d2(state, p, f[2 as usize])
+    p = w_ch(state, p, 32)
+    p = w_d2(state, p, f[3 as usize])
+    p = w_ch(state, p, 58)
+    p = w_d2(state, p, f[4 as usize])
+    p = w_ch(state, p, 58)
+    return w_d2(state, p, f[5 as usize])
+}
+
+fn make_clock(state: u64) -> u64 {
+    var m_loc: [u8; 6] = "local\0"
+    var m_utc: [u8; 4] = "utc\0"
+    var f_non: [u8; 5] = "none\0"
+    var f_std: [u8; 4] = "std\0"
+    var f_sum: [u8; 7] = "summer\0"
+    var f_utc: [u8; 4] = "utc\0"
+    var r0: [u8; 6] = "fixed\0"
+    var r1: [u8; 3] = "eu\0"
+    var r2: [u8; 3] = "us\0"
+    var r3: [u8; 3] = "au\0"
+    var r4: [u8; 3] = "nz\0"
+    var l_rtc: [u8; 5] = "rtc \0"
+    var l_mode: [u8; 7] = " mode=\0"
+    var l_frame: [u8; 8] = " frame=\0"
+    var l_rule: [u8; 7] = " rule=\0"
+    var l_base: [u8; 7] = " base=\0"
+    var l_dst: [u8; 6] = " dst=\0"
+    var l_utc: [u8; 5] = "utc \0"
+    var l_local: [u8; 8] = " local \0"
+    var l_off: [u8; 6] = " off=\0"
+    var l_conv: [u8; 7] = " conv=\0"
+    var l_moved: [u8; 8] = " moved=\0"
+    var l_alt: [u8; 24] = "alt-summer-frame local \0"
+    var p: u64 = w_str(state, 0, (&l_rtc[0]) as u64)
+    let raw: u64 = time.rtc_raw(state)
+    p = w_stamp(state, p, raw)
+    p = w_str(state, p, (&l_mode[0]) as u64)
+    var is_utc: bool = time.rtc_utc(state) != 0
+    if is_utc {
+        p = w_str(state, p, (&m_utc[0]) as u64)
+    } else {
+        p = w_str(state, p, (&m_loc[0]) as u64)
+    }
+    p = w_str(state, p, (&l_frame[0]) as u64)
+    let fr: u64 = time.rtc_frame_get(state)
+    if fr == 1 {
+        p = w_str(state, p, (&f_std[0]) as u64)
+    } else if fr == 2 {
+        p = w_str(state, p, (&f_sum[0]) as u64)
+    } else if fr == 3 {
+        p = w_str(state, p, (&f_utc[0]) as u64)
+    } else {
+        p = w_str(state, p, (&f_non[0]) as u64)
+    }
+    p = w_str(state, p, (&l_rule[0]) as u64)
+    let rw: u64 = time.tz_rule_get(state)
+    let rule: u64 = rw & 0xFF
+    if rule == 1 {
+        p = w_str(state, p, (&r1[0]) as u64)
+    } else if rule == 2 {
+        p = w_str(state, p, (&r2[0]) as u64)
+    } else if rule == 3 {
+        p = w_str(state, p, (&r3[0]) as u64)
+    } else if rule == 4 {
+        p = w_str(state, p, (&r4[0]) as u64)
+    } else {
+        p = w_str(state, p, (&r0[0]) as u64)
+    }
+    p = w_ch(state, p, 40)
+    p = w_num(state, p, rule)
+    p = w_ch(state, p, 41)
+    p = w_str(state, p, (&l_base[0]) as u64)
+    if (rw >> 8) != 0 {
+        p = w_ch(state, p, 45)
+    } else {
+        p = w_ch(state, p, 43)
+    }
+    p = w_num(state, p, time.tz_base(state))
+    let utc: u64 = time.now_sec(state)
+    p = w_str(state, p, (&l_dst[0]) as u64)
+    if time.eu_dst(utc) {
+        p = w_ch(state, p, 49)
+    } else {
+        p = w_ch(state, p, 48)
+    }
+    p = w_ch(state, p, 10)
+    p = w_str(state, p, (&l_utc[0]) as u64)
+    p = w_stamp(state, p, utc)
+    p = w_str(state, p, (&l_local[0]) as u64)
+    p = w_stamp(state, p, time.now_local(state))
+    p = w_str(state, p, (&l_off[0]) as u64)
+    if (rw >> 8) != 0 {
+        p = w_ch(state, p, 45)
+    } else {
+        p = w_ch(state, p, 43)
+    }
+    p = w_num(state, p, time.tz_min(state))
+    p = w_str(state, p, (&l_conv[0]) as u64)
+    p = w_num(state, p, time.tz_done_get(state))
+    p = w_str(state, p, (&l_moved[0]) as u64)
+    p = w_num(state, p, time.clock_moved_get(state))
+    p = w_ch(state, p, 10)
+    if !is_utc && rule != 0 && fr == 1 && time.eu_dst(utc -% 2592000) {
+        p = w_str(state, p, (&l_alt[0]) as u64)
+        p = w_stamp(state, p, time.now_local(state) -% 3600)
+        p = w_ch(state, p, 10)
+    }
+    var l_sync: [u8; 8] = "sync n=\0"
+    var l_last: [u8; 11] = " last utc \0"
+    var l_delta: [u8; 8] = " delta=\0"
+    var l_rtcw: [u8; 10] = " rtc_set=\0"
+    var l_none: [u8; 10] = "sync none\0"
+    let sn: u64 = time.sync_get(state, 0)
+    if sn == 0 {
+        p = w_str(state, p, (&l_none[0]) as u64)
+        return w_ch(state, p, 10)
+    }
+    p = w_str(state, p, (&l_sync[0]) as u64)
+    p = w_num(state, p, sn)
+    p = w_str(state, p, (&l_last[0]) as u64)
+    p = w_stamp(state, p, time.sync_get(state, 1))
+    p = w_str(state, p, (&l_delta[0]) as u64)
+    let dl: u64 = time.sync_get(state, 2)
+    if dl >= 0x8000000000000000 {
+        p = w_ch(state, p, 45)
+        p = w_num(state, p, 0 -% dl)
+    } else {
+        p = w_ch(state, p, 43)
+        p = w_num(state, p, dl)
+    }
+    p = w_str(state, p, (&l_rtcw[0]) as u64)
+    p = w_num(state, p, time.sync_get(state, 3))
+    return w_ch(state, p, 10)
+}
+
 fn make_wlanirq(state: u64) -> u64 {
     var dg: [u8; 3400] = [0 as u8; 3400]
     let dn: u64 = iwl.diag_irq_text((&dg[0]) as u64, 3400)
@@ -3159,6 +3308,9 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_WLANIRQ {
             return make_wlanirq(state)
         }
+        if sub == G_CLOCK {
+            return make_clock(state)
+        }
         if sub == G_INPUTDEVS {
             return i2chid.render(state, buf(state), BUF_MAX)
         }
@@ -3303,6 +3455,10 @@ fn global_of(name: u64) -> u64 {
     var gwq: [u8; 8] = "wlanirq\0"
     if streq(name, (&gwq[0]) as u64) {
         return G_WLANIRQ
+    }
+    var gck: [u8; 6] = "clock\0"
+    if streq(name, (&gck[0]) as u64) {
+        return G_CLOCK
     }
     if streq(name, (&ghk[0]) as u64) {
         return G_HOTKEYS
@@ -3603,8 +3759,11 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var hk2: [u8; 8] = "hotkeys\0"
     var wp2: [u8; 9] = "wlanpoll\0"
     var wq2: [u8; 8] = "wlanirq\0"
+    var ck2: [u8; 6] = "clock\0"
     var src: u64 = (&a[0]) as u64
-    if sub == G_WLANIRQ {
+    if sub == G_CLOCK {
+        src = (&ck2[0]) as u64
+    } else if sub == G_WLANIRQ {
         src = (&wq2[0]) as u64
     } else if sub == G_WLANPOLL {
         src = (&wp2[0]) as u64
