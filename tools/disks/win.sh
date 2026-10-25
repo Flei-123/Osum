@@ -13,8 +13,6 @@ dd if=/dev/zero of="$D/blank.img" bs=1M count=0 seek=16 2>/dev/null
 cat > "$D/plan.txt" <<PLAN
 marke ---- system disk: every button is off ----
 foto a_system
-ziel diskbtn init
-warte 2
 marke ---- the second disk ----
 ziel disknav 1
 warte 3
@@ -64,6 +62,9 @@ tippe /dev/hdb
 taste ret
 warte 8
 foto g_delete
+ziel diskbtn delete
+warte 3
+foto h_after
 PLAN
 
 echo "== 1. /bin/disks: buttons, typed confirmation, system disk refused =="
@@ -81,7 +82,7 @@ echo "$ACTS" | sed -n 2p | grep -q 'act init rc=0' && ok "init with the right ty
 [ "$(echo "$ACTS" | grep -c 'act create rc=0')" = 2 ] && ok "two partitions created through the window" || bad "create"
 echo "$ACTS" | grep -q 'act format rc=0' && ok "format of a chosen partition" || bad "format"
 echo "$ACTS" | grep -q 'act delete rc=0' && ok "delete of a chosen partition" || bad "delete"
-[ "$(echo "$ACTS" | wc -l)" = 6 ] && ok "exactly six actions ran: the click on the locked system disk started none" || bad "action count $(echo "$ACTS" | wc -l)"
+[ "$(echo "$ACTS" | wc -l)" = 6 ] && ok "exactly six actions ran: the click on the switched-off delete button started none" || bad "action count $(echo "$ACTS" | wc -l)"
 grep -qa '^disks: allow disk=/dev/hdb init=0 new=1 format=0 delete=0' "$W" && ok "after init: new is on, format/delete wait for a chosen row" || bad "state after init"
 grep -qa '^disks: allow disk=/dev/hdb init=0 new=1 format=1 delete=1' "$W" && ok "a chosen row turns format and delete on" || bad "row selection"
 if [ -s "$D/win/second.img" ]; then
