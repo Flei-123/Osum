@@ -64,11 +64,11 @@ rc=$(get "$U/wlan?t=$WRONG"); [ "$(code)" = "HTTP/1.0 401 Unauthorized" ] && ok 
 rc=$(get -H "X-Token: $TOKEN" "$U/wlan"); [ "$(code)" = "HTTP/1.0 200 OK" ] && [ -s "$T/o.txt" ] && ok "GET /wlan with X-Token -> 200 + body" || bad "/wlan: $(code) $(wc -c < "$T/o.txt")"
 rc=$(get -H "Authorization: Bearer $TOKEN" "$U/drivers"); [ "$(code)" = "HTTP/1.0 200 OK" ] && grep -q 'usb-net' "$T/o.txt" && ok "GET /drivers with Bearer lists usb-net" || bad "/drivers: $(code)"
 rc=$(get "$U/net?t=$TOKEN"); [ "$(code)" = "HTTP/1.0 200 OK" ] && [ -s "$T/o.txt" ] && ok "GET /net with query token" || bad "/net: $(code)"
-for r in lspci lspci/v dmesg klog pci usb version uptime wlanctl/status wlanctl/dump wlanpoll wlanirq usbnet time wlanctl/knobs ; do
+for r in lspci lspci/v dmesg klog pci usb version uptime wlanctl/status wlanctl/dump usbnet time wlanctl/knobs ; do
     rc=$(get -H "X-Token: $TOKEN" "$U/$r")
     if [ "$(code)" = "HTTP/1.0 200 OK" ] && [ -s "$T/o.txt" ] && ! grep -q 'cannot read\|cannot run' "$T/o.txt"; then ok "GET /$r -> 200 + body ($(wc -c < "$T/o.txt") B)"; else bad "/$r: $(code) $(head -c 80 "$T/o.txt")"; fi
 done
-rc=$(get -H "X-Token: $TOKEN" "$U/usbsum"); [ "$(code)" = "HTTP/1.0 200 OK" ] && ok "GET /usbsum answers 200 (file may be absent on this kernel)" || bad "/usbsum: $(code)"
+for r in usbsum wlanpoll wlanirq; do rc=$(get -H "X-Token: $TOKEN" "$U/$r"); [ "$(code)" = "HTTP/1.0 200 OK" ] && ok "GET /$r answers 200 (body may be empty without the device)" || bad "/$r: $(code)"; done
 rc=$(get -H "X-Token: $TOKEN" "$U/time"); grep -q '^rtc 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9:]* mode=\(local\|utc\) frame=' "$T/o.txt" && grep -q ' rule=.* base=[+-][0-9]* dst=[01]$' "$T/o.txt" && grep -q '^utc 20[0-9][0-9]-.* local 20[0-9][0-9]-.* off=[+-][0-9]* conv=[0-9]* moved=[0-9]*' "$T/o.txt" && ok "/time (= /proc/clock) shows RTC, mode, zone and epoch lines" || bad "/time content: $(head -c 200 "$T/o.txt")"
 rc=$(get -H "X-Token: $TOKEN" "$U/wlanctl/knobs"); grep -q '^iwlnoipoll=off$' "$T/o.txt" && ! grep -q '=on' "$T/o.txt" && ok "/wlanctl/knobs lists the whitelist, all off at boot" || bad "/wlanctl/knobs: $(head -c 200 "$T/o.txt")"
 rc=$(get -H "X-Token: $TOKEN" "$U/wlanctl/reload"); [ "$(code)" = "HTTP/1.0 404 Not Found" ] && ok "GET /wlanctl/reload is not a route -> 404" || bad "GET reload: $(code)"
