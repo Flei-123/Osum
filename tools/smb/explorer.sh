@@ -60,7 +60,7 @@ run_case() { # <name> <script> <image files>
     wire_up
     samba_conf auto; samba_user
     samba_start auto || { bad "$1: samba did not start"; head -3 "$TMPD/smb/smbd.out"; }
-    bash tools/design/capture.sh "$TMPD/$1" res=1280x800 uitrace=yes lang=en \
+    bash tools/design/capture.sh "$TMPD/$1" res=1280x800 uitrace=yes lang=en halt=900 \
         extra="$KARGS" qemuargs="$QARGS" imgfiles="$3" drehbuch="$2" > "$TMPD/$1.log" 2>&1
     [ -n "${SMB_KEEP:-}" ] && { mkdir -p "$SMB_KEEP/$1"; cp "$TMPD/$1/serial.txt" "$TMPD/$1"/*.png "$TMPD/$1.log" "$SMB_KEEP/$1/" 2>/dev/null; }
     wire_down
@@ -107,6 +107,8 @@ foto 14-opened
 taste ctrl-c
 warte 3
 taste ctrl-l
+warte 1
+taste ctrl-l
 warte 2
 taste backspace
 taste backspace
@@ -129,7 +131,11 @@ taste backspace
 taste backspace
 tippe /data/bilder
 taste ret
-warte 6
+warte 2
+taste esc
+warte 1
+warteauf explorer: cd /data/bilder n= || 60
+warte 4
 taste ctrl-v
 warteauf expsmb: copy-down rc=0 octets=12 || 120
 warte 4
@@ -148,9 +154,14 @@ taste backspace
 taste backspace
 taste backspace
 taste backspace
+marke explorer: cd /data n=
 tippe /data
 taste ret
-warte 6
+warte 2
+taste esc
+warte 1
+warteneu explorer: cd /data n= || 60
+warte 4
 klickauf ftabzeile2
 warte 2
 taste ctrl-c
@@ -162,15 +173,75 @@ taste backspace
 taste backspace
 taste backspace
 taste backspace
-marke expsmb: list rc=0 entries=1
+marke explorer: cd smb://10.9.0.1/data/sub n=
 tippe smb://10.9.0.1/data/sub
 taste ret
-warteneu expsmb: list rc=0 entries=1 || 120
+warte 2
+taste esc
+warte 1
+warteneu explorer: cd smb://10.9.0.1/data/sub n=1 || 120
 warte 4
 taste ctrl-v
 warteauf expsmb: copy-up rc=0 octets=5 || 120
 warte 4
 foto 16-pasted-remote
+marke explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt
+taste ctrl-v
+warteneu explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt || 120
+warte 3
+foto 17-conflict
+taste esc
+warte 4
+marke explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt
+taste ctrl-v
+warteneu explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt || 120
+warte 3
+marke expsmb: copy-up rc=0 octets=5
+taste ret
+warteneu expsmb: copy-up rc=0 octets=5 || 120
+warte 4
+foto 18-replaced
+klickauf ftabzeile1
+warte 2
+taste ctrl-x
+warte 3
+taste ctrl-l
+warte 2
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+marke explorer: cd /data/bilder n=
+tippe /data/bilder
+taste ret
+warte 2
+taste esc
+warte 1
+warteneu explorer: cd /data/bilder n= || 60
+warte 4
+taste ctrl-v
+warteauf expsmb: rm rc=0 || 120
+warte 4
+foto 19-cut
 DREH
 
 echo "== 2. explorer walk: smb:// -> user -> wrong password -> retry -> listing -> open file =="
@@ -186,9 +257,17 @@ has "$W" 'expsmb: dialog user-retry$' "wrong password: the user dialog comes bac
 has "$W" 'expsmb: list rc=0 entries=3$' "right password: listing with 3 entries (sub, big.bin, hello.txt)"
 has "$W" "expsmb: fetch rc=0 octets=$WANT_HELLO\$" "double click on hello.txt: fetched $WANT_HELLO octets"
 has "$W" 'expsmb: copy-down rc=0 octets=12$' "copy hello.txt from smb:// and paste into /data/bilder: 12 octets"
-has "$W" 'expsmb: list rc=0 entries=1$' "browse smb://10.9.0.1/data/sub: 1 entry"
+has "$W" 'explorer: cd /data/bilder n=' "the path field took /data/bilder (copy-down target)"
+has "$W" 'explorer: cd smb://10.9.0.1/data/sub n=1$' "browse smb://10.9.0.1/data/sub: 1 entry"
 has "$W" 'expsmb: copy-up rc=0 octets=5$' "copy a local file and paste into smb://.../sub: 5 octets"
+has "$W" 'expsmb: stat rc=5$' "paste target is probed first: new name does not exist (stat exit 5)"
+has "$W" 'expsmb: stat rc=0$' "paste target is probed: existing name found (stat exit 0)"
+[ "$(grep -ac 'explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt' "$W")" -eq 2 ] && ok "pasting onto an existing remote name asks (conflict dialog), twice for two pastes" || bad "conflict dialog count"
+[ "$(grep -ac 'expsmb: copy-up rc=0 octets=5' "$W")" -eq 2 ] && ok "Esc cancelled (no third upload), Enter replaced (second upload)" || bad "copy-up count after Esc/Enter"
 [ -f "$SHARE/sub/alpha.txt" ] && [ "$(cat "$SHARE/sub/alpha.txt")" = "eins" ] && ok "the pasted file is on the share with the right content" || bad "alpha.txt did not land on the share"
+has "$W" 'expsmb: rm rc=0$' "cut from smb:// removes the remote source after the copy"
+[ ! -e "$SHARE/sub/inner.txt" ] && ok "cut: inner.txt is gone from the share" || bad "cut: inner.txt is still on the share"
+[ "$(grep -ac 'expsmb: copy-down rc=0 octets=9' "$W")" -eq 1 ] && ok "cut: the data came down first (9 octets)" || bad "cut: copy-down of alpha.txt"
 hasnot "$W" 'expsmb: dialog error' "no error dialog on the good path"
 grep -aoE 'expsmb: list rc=[0-9]+' "$W" | head -3 | tr '\n' ' ' | sed 's/^/  list results: /'; echo
 
@@ -205,12 +284,21 @@ taste backspace
 taste backspace
 tippe smb://10.9.0.1/data
 taste ret
+warte 2
+taste esc
+warte 1
 warteauf expsmb: dialog user || 120
 tippe gateuser
 taste ret
+warte 2
+taste esc
+warte 1
 warteauf expsmb: dialog pass || 60
 tippe gatepass
 taste ret
+warte 2
+taste esc
+warte 1
 warteauf expsmb: list rc=255 || 120
 warte 5
 foto 20-failed

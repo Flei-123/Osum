@@ -13,7 +13,7 @@ export {
     WAIT_USER, WAIT_PASS, STATE_IDLE, STATE_OK, STATE_AUTH, STATE_ERROR,
     is_url, parent_in_place, list, state, prompt, on_confirm,
     entry_count, entry_name, entry_is_dir, entry_size,
-    fetch, local_copy, forget, copy_down, copy_up
+    fetch, local_copy, forget, copy_down, copy_up, exists, remove
 }
 
 const WAIT_USER: u64 = 21
@@ -71,6 +71,8 @@ static mut c_shares: [u8; 7] = "shares\0"
 static mut c_ls: [u8; 3] = "ls\0"
 static mut c_get: [u8; 4] = "get\0"
 static mut c_put: [u8; 4] = "put\0"
+static mut c_stat: [u8; 5] = "stat\0"
+static mut c_rm: [u8; 3] = "rm\0"
 static mut t_out: [u8; 11] = "/tmp/smbl.\0"
 static mut t_pw: [u8; 11] = "/tmp/smbp.\0"
 static mut t_get: [u8; 11] = "/tmp/smbg.\0"
@@ -80,6 +82,8 @@ static mut s_tr_fetch: [u8; 18] = "expsmb: fetch rc=\0"
 static mut s_tr_octets: [u8; 9] = " octets=\0"
 static mut s_tr_dialog: [u8; 16] = "expsmb: dialog \0"
 static mut s_tr_down: [u8; 24] = "expsmb: copy-down rc=\0\0\0"
+static mut s_tr_stat: [u8; 18] = "expsmb: stat rc=\0\0"
+static mut s_tr_rm: [u8; 16] = "expsmb: rm rc=\0\0"
 static mut s_tr_up: [u8; 22] = "expsmb: copy-up rc=\0\0\0"
 static mut s_tr_user: [u8; 5] = "user\0"
 static mut s_tr_retry: [u8; 11] = "user-retry\0"
@@ -384,26 +388,40 @@ fn local_copy(p: u64) -> u64 {
     return (&copy_path[0 as usize]) as u64
 }
 
-fn run_transfer(p: u64, local: u64, upload: bool) -> bool {
+fn remote_args(p: u64) -> u64 {
     if url.level(p) != url.LEVEL_SHARE || !url.host_of(p, (&a_host[0 as usize]) as u64, 128) {
         cur_state = STATE_ERROR
-        return false
+        return 0
     }
     let host: u64 = (&a_host[0 as usize]) as u64
     if !have_credentials(host) {
         need_login(host)
-        return false
+        return 0
     }
     pid_suffix((&a_pw[0 as usize]) as u64, (&t_pw[0 as usize]) as u64, 48)
     if !write_password_file((&a_pw[0 as usize]) as u64) {
         cur_state = STATE_ERROR
-        return false
+        return 0
     }
     var n: u64 = base_args(p, url.LEVEL_SHARE)
     let _s: bool = url.share_of(p, (&a_share[0 as usize]) as u64, 128)
     let _r: bool = url.rest_of(p, (&a_rest[0 as usize]) as u64, 256)
     n = argv_push(n, host)
     n = argv_push(n, (&a_share[0 as usize]) as u64)
+    return n
+}
+
+fn remote_finish(n: u64) -> u64 {
+    let code: u64 = run_client(n)
+    let _u: u64 = io.unlink((&a_pw[0 as usize]) as u64)
+    return code
+}
+
+fn run_transfer(p: u64, local: u64, upload: bool) -> bool {
+    var n: u64 = remote_args(p)
+    if n == 0 {
+        return false
+    }
     if upload {
         n = argv_push(n, (&c_put[0 as usize]) as u64)
         n = argv_push(n, local)
@@ -413,14 +431,50 @@ fn run_transfer(p: u64, local: u64, upload: bool) -> bool {
         n = argv_push(n, (&a_rest[0 as usize]) as u64)
         n = argv_push(n, local)
     }
-    let code: u64 = run_client(n)
-    let _u: u64 = io.unlink((&a_pw[0 as usize]) as u64)
+    let code: u64 = remote_finish(n)
     if code != 0 {
-        start_failed(host, code)
+        start_failed(a_host_ptr(), code)
         return false
     }
     cur_state = STATE_OK
     return true
+}
+
+fn a_host_ptr() -> u64 {
+    return (&a_host[0 as usize]) as u64
+}
+
+fn run_verb(p: u64, verb: u64) -> u64 {
+    cur_state = STATE_IDLE
+    var n: u64 = remote_args(p)
+    if n == 0 {
+        return 255
+    }
+    n = argv_push(n, verb)
+    n = argv_push(n, (&a_rest[0 as usize]) as u64)
+    let code: u64 = remote_finish(n)
+    if code != 0 && code != EXIT_MISSING {
+        start_failed(a_host_ptr(), code)
+    } else {
+        cur_state = STATE_OK
+        last_exit = code
+    }
+    return code
+}
+
+fn exists(p: u64) -> bool {
+    let code: u64 = run_verb(p, (&c_stat[0 as usize]) as u64)
+    trace_pair((&s_tr_stat[0 as usize]) as u64, code, 0, 0)
+    return code == 0
+}
+
+fn remove(p: u64) -> u64 {
+    let code: u64 = run_verb(p, (&c_rm[0 as usize]) as u64)
+    trace_pair((&s_tr_rm[0 as usize]) as u64, code, 0, 0)
+    if code != 0 {
+        return 0 -% errno.E_IO
+    }
+    return 0
 }
 
 fn fetch(p: u64) -> u64 {
