@@ -8,8 +8,6 @@ import socstate
 
 export { pname, pcaps, pacct, has_cap, providers_load, prov_find, build_argv, state_of, state_word, job_eligible, mark_due }
 
-const S_MKDIR: i64 = 83
-
 const PROV_MAX: usize = 8
 const CONF_W: usize = 96 // octets per configuration path
 
@@ -126,80 +124,6 @@ fn build_argv(i: usize, ws: *mut [u64; 6], argv: *mut [u64; 12], dc: *mut [u8; 1
         k = k + 1
     }
     (*argv)[n] = 0
-}
-
-// Run `<program> v1 <w1> <w2> <w3...>` of provider i; the output lands
-// in `out`, the exit code is returned (124 = killed after `limit`
-// ticks, 127 = could not run). Words are zero-terminated strings; w3 may
-// be several words joined by spaces -- the provider joins them back.
-fn run(i: usize, w1: u64, w2: u64, w3: u64, out: *mut socbuf.SB,
-    limit: u64) -> i64 {
-    var ws: [u64; 6] = [0 as u64; 6]
-    ws[0] = w1
-    ws[1] = w2
-    ws[2] = w3
-    return runw(i, &ws, out, limit)
-}
-
-// the same with up to six words (0 ends them)
-fn runw(i: usize, ws: *mut [u64; 6], out: *mut socbuf.SB, limit: u64) -> i64 {
-    socbuf.sb_clear(out)
-    syscall(S_MKDIR, "/tmp/social\0".p as i64, 493, 0, 0, 0, 0)
-    // O_WRONLY | O_CREAT | O_TRUNC
-    let fd: i64 = syscall(socbuf.S_OPEN, "/tmp/social/provider.out\0".p as i64,
-        1 | 64 | 512, 384, 0, 0, 0)
-    if fd < 0 {
-        return 127
-    }
-    var v1: [u8; 3] = "v1\0"
-    var dc: [u8; 100] = [0 as u8; 100]
-    var argv: [u64; 12] = [0 as u64; 12]
-    build_argv(i, ws, &argv, &dc, &v1)
-    let kid: i64 = syscall(socstate.S_FORK, 0, 0, 0, 0, 0, 0)
-    if kid < 0 {
-        syscall(socbuf.S_CLOSE, fd, 0, 0, 0, 0, 0)
-        return 127
-    }
-    if kid == 0 {
-        syscall(socstate.S_DUP2, fd, 1, 0, 0, 0, 0)
-        syscall(socstate.S_DUP2, fd, 2, 0, 0, 0, 0)
-        syscall(socbuf.S_CLOSE, fd, 0, 0, 0, 0, 0)
-        syscall(socstate.S_EXECVE, argv[0] as i64, (&argv[0]) as i64, 0, 0, 0, 0)
-        syscall(60, 127, 0, 0, 0, 0, 0)
-    }
-    syscall(socbuf.S_CLOSE, fd, 0, 0, 0, 0, 0)
-    var st: i32 = 0
-    let t0: u64 = actwire.ticks()
-    var code: i64 = -1
-    while code < 0 {
-        let r: i64 = syscall(socstate.S_WAIT4, kid, (&st) as i64, socstate.WNOHANG, 0, 0, 0)
-        if r == kid {
-            code = 255
-            if (st & 127) == 0 {
-                code = ((st >> 8) & 255) as i64
-            }
-        } else if r < 0 {
-            code = 127
-        } else if actwire.ticks() - t0 > limit {
-            syscall(socstate.S_KILL, kid, 9, 0, 0, 0, 0)
-            var k: u64 = 0
-            while k < 100 {
-                let r2: i64 = syscall(socstate.S_WAIT4, kid, (&st) as i64, socstate.WNOHANG, 0, 0, 0)
-                if r2 == kid || r2 < 0 {
-                    k = 100
-                }
-                socbuf.sleep_ms(10)
-                k = k + 1
-            }
-            code = 124
-        } else {
-            socbuf.sleep_ms(10)
-        }
-    }
-    let _r: bool = socbuf.read_file("/tmp/social/provider.out", out)
-    socbuf.sb_push(out, 0 as u8)
-    (*out).len = (*out).len - 1
-    return code
 }
 
 fn state_of(code: i64) -> u8 {
