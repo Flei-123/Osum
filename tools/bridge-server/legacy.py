@@ -75,6 +75,8 @@ RESULT_STATUS_DE_EN = {"nein": "failed"}
 SIGN_PREFIXES = ("bridge:", "bruecke:")
 INPUT_KINDS = ("key", "mouse", "click", "scan")
 
+WHAT_DE_EN = {"vorab": "preauth", "frei": "approve", "sperren": "block"}
+
 STATE_FILES = {"pairing_book.json": "koppelbuch.json", "admin.key": "verwalter.key"}
 STATE_DIRS = {"devices": "geraete"}
 ARG_ALIASES = ("--wurzel",)
@@ -97,7 +99,7 @@ def _rename_keys(obj, table, value_keys):
 
 
 def normalize_in(obj):
-    return _rename_keys(obj, KEYS_DE_EN, {"kind": KINDS_DE_EN, "state": STATE_VALUES_DE_EN})
+    return _rename_keys(obj, KEYS_DE_EN, {"kind": KINDS_DE_EN, "state": STATE_VALUES_DE_EN, "what": WHAT_DE_EN})
 
 
 def kind_in(kind):

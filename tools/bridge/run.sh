@@ -349,7 +349,7 @@ echo "   -- das Protokoll unter /var/log/jarvisd.log"
 hat "$F" "service started" "der Start steht im Protokoll"
 hat "$F" "session signed-in" "die Anmeldung steht im Protokoll"
 hat "$F" "system ok" 'ein erledigter Auftrag steht mit ok im Protokoll'
-hat "$F" "foto REJECTED" 'ein abgelehnter steht mit ABGELEHNT darin'
+hat "$F" "screenshot REJECTED" 'ein abgelehnter steht mit ABGELEHNT darin'
 
 VERB_MS=$(( (T1-T0)/1000000 ))
 note "vom QEMU-Start bis zum Ende dieses Laufs: $VERB_MS ms (mit Bau des Abbilds ausserhalb)"
@@ -772,7 +772,7 @@ elif grep -qa "screen size\|framebuffer" "$G.1.bin" 2>/dev/null; then
 else
     bad "foto mit Schein: $(grep -a '^ANTWORT 1 ' "$G") -- $(head -c 120 "$G.1.bin" 2>/dev/null)"
 fi
-hat "$F" "foto " "das Foto steht im Protokoll -- heimlich geht es nicht"
+hat "$F" "screenshot " "das Foto steht im Protokoll -- heimlich geht es nicht"
 EXTRA=""
 
 echo "   -- der PNG-Kodierer selbst, mit einem gerechneten Bild"

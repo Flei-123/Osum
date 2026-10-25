@@ -373,7 +373,7 @@ static mut k_session_ms: u64 = 0
 //      ends, or when it has had no good contact for `watchdog` seconds
 //      (default 600, 0 = off) -- judged from /var/jarvis/alive, which the
 //      worker rewrites after every good exchange (at most every 30 s).
-static mut k_draht: u64 = 0        // the wire of the running session, 0 = none
+static mut k_wire: u64 = 0        // the wire of the running session, 0 = none
 static mut k_lebt_ms: u64 = 0      // uptime ms of the last keepalive or exchange
 static mut k_ok_ms: u64 = 0        // uptime ms of the last good exchange with the server
 static mut k_alive_ms: u64 = 0     // when /var/jarvis/alive was written last
@@ -488,7 +488,7 @@ fn wait_child(kind: i64, st: *mut i32) -> bool {
 // LEBT_MS. A server that does not know `lebt` answers `weg`, which ends the
 // session after the command -- the server was updated before this client.
 fn keepalive() {
-    if k_draht == 0 as u64 {
+    if k_wire == 0 as u64 {
         return
     }
     let t: u64 = now_ms()
@@ -496,11 +496,11 @@ fn keepalive() {
         return
     }
     k_lebt_ms = t
-    let d: *mut Draht = k_draht as *mut Draht
+    let d: *mut Wire = k_wire as *mut Wire
     if !(*d).https {
         return
     }
-    let _k: bool = word_send(d, "lebt", 0, 0 as usize)
+    let _k: bool = word_send(d, "alive", 0, 0 as usize)
 }
 
 fn alive_schreiben() {
@@ -545,7 +545,7 @@ fn gut_gemeldet() {
 
 // Tell the server what only this machine knows: the MAC of its network card
 // (the server needs it for Wake-on-LAN). `info mac=aabbccddeeff` as payload.
-fn sende_info(d: *mut Draht) {
+fn sende_info(d: *mut Wire) {
     let m0: u64 = syscall(S_NETGET, NG_MAC0, 0, 0, 0, 0, 0) as u64
     let m1: u64 = syscall(S_NETGET, NG_MAC1, 0, 0, 0, 0, 0) as u64
     var m: [u8; 6] = [0; 6]
@@ -874,8 +874,8 @@ fn addr_read(p: u64, n: usize) -> bool {
 // gerufen, damit ein entfernter Eintrag wirklich weg ist.
 fn konf_leeren() {
     k_https = false
-    var dp: [u8; 16] = "/bruecke/draht\0\0"
-    k_pfadlen = hinein((&k_pfad[0]) as u64, 96, (&dp[0]) as u64, 14)
+    var dp: [u8; 16] = "/bridge/wire\0\0\0\0"
+    k_pfadlen = hinein((&k_pfad[0]) as u64, 96, (&dp[0]) as u64, 12)
     k_befehle = false
     k_foto = false
     k_system = false
@@ -983,6 +983,11 @@ fn conf_read() -> bool {
                     k_https = ist(wp, wl, (&w_https[0]) as u64)
                 } else if ist(sp, sl, (&s_pfad[0]) as u64) {
                     k_pfadlen = hinein((&k_pfad[0]) as u64, 96, wp, wl)
+                    var old_path: [u8; 15] = "/bruecke/draht\0"
+                    if ist((&k_pfad[0]) as u64, k_pfadlen, (&old_path[0]) as u64) {
+                        var cur_path: [u8; 13] = "/bridge/wire\0"
+                        k_pfadlen = hinein((&k_pfad[0]) as u64, 96, (&cur_path[0]) as u64, 12)
+                    }
                 } else if ist(sp, sl, (&s_name[0]) as u64) {
                     k_namelen = hinein((&k_name[0]) as u64, 96, wp, wl)
                 } else if ist(sp, sl, (&s_wurzeln[0]) as u64) {
@@ -1177,7 +1182,7 @@ fn notiere(art: u64, artn: usize, erg: str, det: u64, detn: usize) {
 // und dann wird JEDER laufende Auftrag abgebrochen, statt auf Oktette
 // zu warten, die nicht mehr kommen.
 
-struct Draht {
+struct Wire {
     t: u64, // *mut tls.Tls, als Zahl gehalten
     puf: rt.Buf,
     at: usize,
@@ -1196,8 +1201,8 @@ struct Draht {
     store_ok: bool,
 }
 
-fn wire_new(t: *mut tls.Tls) -> Draht {
-    return Draht { t: t as u64, puf: rt.buf_new(), at: 0, tot: false,
+fn wire_new(t: *mut tls.Tls) -> Wire {
+    return Wire { t: t as u64, puf: rt.buf_new(), at: 0, tot: false,
         https: false, aus: rt.buf_new(), store: x509.store_new(), store_ok: false }
 }
 
@@ -1217,8 +1222,8 @@ fn wire_new(t: *mut tls.Tls) -> Draht {
 //
 // WAS SICH NICHT AENDERT, und das ist der ganze Witz dieser Loesung:
 // das Zeilenprotokoll. `anmelden`, `bediene`, `sende`, `zerlege` --
-// alles darueber bleibt Zeile fuer Zeile dasselbe. Nur `draht_senden`
-// und `draht_fuellen` nehmen einen anderen Weg. Die 113 gemessenen
+// alles darueber bleibt Zeile fuer Zeile dasselbe. Nur `wire_write`
+// und `wire_fill` nehmen einen anderen Weg. Die 113 gemessenen
 // Zusagen aus Runde BRIDGE gelten damit weiter: derselbe
 // Zustandsautomat, derselbe Handschlag, dieselbe Unterschrift aus
 // `jsig` -- der private Schluessel bleibt, wo er ist.
@@ -1237,8 +1242,8 @@ fn wire_new(t: *mut tls.Tls) -> Draht {
 // genau die Oktette, die frueher in den TLS-Strom gingen. Die Antwort
 // ist dasselbe in der Gegenrichtung; eine LEERE Antwort heisst
 // "nichts zu tun".
-fn wire_new_https() -> Draht {
-    return Draht { t: 0, puf: rt.buf_new(), at: 0, tot: false,
+fn wire_new_https() -> Wire {
+    return Wire { t: 0, puf: rt.buf_new(), at: 0, tot: false,
         https: true, aus: rt.buf_new(), store: x509.store_new(), store_ok: false }
 }
 
@@ -1251,8 +1256,8 @@ fn http_request(req: *mut rt.Buf, rumpfn: usize) {
     var v: [u8; 18] = " HTTP/1.1\r\nHost: \0"
     rt.buf_push_bytes(req, (&v[0]) as u64, 17)
     rt.buf_push_bytes(req, (&k_name[0]) as u64, k_namelen)
-    var x: [u8; 12] = "\r\nX-Draht: \0"
-    rt.buf_push_bytes(req, (&x[0]) as u64, 11)
+    var x: [u8; 19] = "\r\nX-Bridge-Wire: \0"
+    rt.buf_push_bytes(req, (&x[0]) as u64, 18)
     rt.buf_push_bytes(req, (&k_sid[0]) as u64, k_sidlen)
     var l: [u8; 19] = "\r\nContent-Length: \0"
     rt.buf_push_bytes(req, (&l[0]) as u64, 18)
@@ -1302,7 +1307,7 @@ fn http_body_from(p: u64, n: usize) -> usize {
 
 // EINE Nachricht hin, EINE Antwort zurueck. Das Ergebnis landet in
 // `(*d).puf`, also genau dort, wo `draht_zeile` es ohnehin sucht.
-fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
+fn https_wechsel(d: *mut Wire, rumpf: u64, rumpfn: usize) -> bool {
     var schief: bool = false
     var c: net.Conn = net.connect_tcp(k_ip, k_port as u16)
     catch | e | fail_conn(&schief)
@@ -1312,7 +1317,7 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
     }
     let okt: bool = net.set_timeout(&c, 60000 as u64) catch false
 
-    // The store is parsed once per session (DELL STABILITY, see `Draht`). Before
+    // The store is parsed once per session (DELL STABILITY, see `Wire`). Before
     // that it was built for every request and had to be freed on every way out
     // (27.09.2026: it never was, the helper's heap grew with each request and
     // after a few hundred reading the root file failed with "no root store").
@@ -1395,7 +1400,7 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
     return true
 }
 
-fn wire_gone(d: *mut Draht) {
+fn wire_gone(d: *mut Wire) {
     rt.buf_free(&(*d).puf)
     rt.buf_free(&(*d).aus)
     x509.store_free(&(*d).store)
@@ -1404,7 +1409,7 @@ fn wire_gone(d: *mut Draht) {
 
 // Aufraeumen: was schon gelesen wurde, faellt vorne weg. Ohne das
 // waechst der Puffer eine lange Sitzung lang und wird nie kleiner.
-fn draht_kuerzen(d: *mut Draht) {
+fn wire_trim(d: *mut Wire) {
     if (*d).at == 0 {
         return
     }
@@ -1416,7 +1421,7 @@ fn draht_kuerzen(d: *mut Draht) {
     (*d).at = 0
 }
 
-fn draht_fuellen(d: *mut Draht) -> bool {
+fn wire_fill(d: *mut Wire) -> bool {
     if (*d).tot {
         return false
     }
@@ -1454,7 +1459,7 @@ fn fail_bool(schief: *mut bool) -> bool {
 }
 
 // Eine Zeile OHNE den Umbruch. false = die Verbindung ist weg.
-fn wire_line(d: *mut Draht, aus: *mut rt.Buf) -> bool {
+fn wire_line(d: *mut Wire, aus: *mut rt.Buf) -> bool {
     rt.buf_clear(aus)
     while true {
         var i: usize = (*d).at
@@ -1467,7 +1472,7 @@ fn wire_line(d: *mut Draht, aus: *mut rt.Buf) -> bool {
                 }
                 rt.buf_push_bytes(aus, (*d).puf.ptr + (*d).at as u64, n)
                 (*d).at = i + 1
-                draht_kuerzen(d)
+                wire_trim(d)
                 return true
             }
             i = i + 1
@@ -1478,20 +1483,20 @@ fn wire_line(d: *mut Draht, aus: *mut rt.Buf) -> bool {
             (*d).tot = true
             return false
         }
-        if !draht_fuellen(d) {
+        if !wire_fill(d) {
             return false
         }
     }
     return false
 }
 
-fn draht_oktette(d: *mut Draht, n: usize, aus: *mut rt.Buf) -> bool {
+fn wire_bytes(d: *mut Wire, n: usize, aus: *mut rt.Buf) -> bool {
     rt.buf_clear(aus)
     var fehlt: usize = n
     while fehlt > 0 {
         let da: usize = (*d).puf.len - (*d).at
         if da == 0 {
-            if !draht_fuellen(d) {
+            if !wire_fill(d) {
                 return false
             }
             continue
@@ -1503,12 +1508,12 @@ fn draht_oktette(d: *mut Draht, n: usize, aus: *mut rt.Buf) -> bool {
         rt.buf_push_bytes(aus, (*d).puf.ptr + (*d).at as u64, k)
         (*d).at = (*d).at + k
         fehlt = fehlt - k
-        draht_kuerzen(d)
+        wire_trim(d)
     }
     return true
 }
 
-fn draht_senden(d: *mut Draht, p: u64, n: usize) -> bool {
+fn wire_write(d: *mut Wire, p: u64, n: usize) -> bool {
     if (*d).tot {
         return false
     }
@@ -1539,7 +1544,7 @@ fn draht_senden(d: *mut Draht, p: u64, n: usize) -> bool {
 // Eine Nachricht: Zeile, dann Nutzlast. Die Laenge steht immer als
 // letztes Feld der Zeile -- hier wird sie angehaengt, damit kein
 // Aufrufer sie vergessen kann.
-fn sende(d: *mut Draht, kopf: *mut rt.Buf, nutz: u64, nutzn: usize) -> bool {
+fn sende(d: *mut Wire, kopf: *mut rt.Buf, nutz: u64, nutzn: usize) -> bool {
     var b: rt.Buf = rt.buf_new()
     rt.buf_push_bytes(&b, (*kopf).ptr, (*kopf).len)
     rt.buf_push(&b, 32 as u8)
@@ -1548,7 +1553,7 @@ fn sende(d: *mut Draht, kopf: *mut rt.Buf, nutz: u64, nutzn: usize) -> bool {
     if nutzn > 0 {
         rt.buf_push_bytes(&b, nutz, nutzn)
     }
-    let ok: bool = draht_senden(d, b.ptr, b.len)
+    let ok: bool = wire_write(d, b.ptr, b.len)
     rt.buf_free(&b)
     return ok
 }
@@ -1605,7 +1610,7 @@ fn line_num(aus: *mut rt.Buf, name: u64, v: u64) {
     rt.buf_push(aus, 10 as u8)
 }
 
-fn tue_system(aus: *mut rt.Buf) -> bool {
+fn do_system(aus: *mut rt.Buf) -> bool {
     if !k_system {
         return ablehnen(aus, "sysinfo is not allowed in permissions.conf")
     }
@@ -1656,7 +1661,7 @@ fn tight_make(fd: i64, maske: i64, aus: *mut rt.Buf) -> i64 {
     return enger
 }
 
-fn tue_lies(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
+fn do_read(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
     if !path_clean(pfad, pn) {
         return ablehnen(aus, "not a clean absolute path")
     }
@@ -1696,7 +1701,7 @@ fn tue_lies(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
 
 // ----------------------------------------------------------- schreib
 
-fn tue_schreib(pfad: u64, pn: usize, nutz: *mut rt.Buf,
+fn do_write(pfad: u64, pn: usize, nutz: *mut rt.Buf,
     aus: *mut rt.Buf) -> bool {
     if !path_clean(pfad, pn) {
         return ablehnen(aus, "not a clean absolute path")
@@ -2185,7 +2190,7 @@ fn photo_over_kernel(aus: *mut rt.Buf) -> bool {
 // ihn gebraucht hat, ist ein offenes Fenster. Der Kern deckelt
 // zusaetzlich die Zahl der Anschlaege je Schein (MAX_ANSCHLAEGE),
 // damit auch ein Fehler hier keinen Tippautomaten ergibt.
-fn tue_tipp(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
+fn do_input(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     if !k_tipp {
         return ablehnen(aus, "`input = no` in /etc/jarvis/permissions.conf")
     }
@@ -2203,11 +2208,11 @@ fn tue_tipp(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     zerlege(p, n, &f)
     if f.n < 2 {
         syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
-        return ablehnen(aus, "input needs: taste <code> <mods> | maus <x> <y> | knopf <mask> <down>")
+        return ablehnen(aus, "input needs: key <code> <mods> | mouse <x> <y> | click <mask> <down>")
     }
-    var w_taste: [u8; 6] = "taste\0"
-    var w_maus: [u8; 5] = "maus\0"
-    var w_knopf: [u8; 6] = "knopf\0"
+    var w_key: [u8; 4] = "key\0"
+    var w_mouse: [u8; 6] = "mouse\0"
+    var w_click: [u8; 6] = "click\0"
     var w_scan: [u8; 5] = "scan\0"
     let wp: u64 = p + f.off[0] as u64
     let wn: usize = f.len[0]
@@ -2220,11 +2225,11 @@ fn tue_tipp(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
         b = num_from(p + f.off[2] as u64, f.len[2])
     }
     var erg: i64 = -1
-    if ist(wp, wn, (&w_taste[0]) as u64) {
+    if ist(wp, wn, (&w_key[0]) as u64) {
         erg = syscall(S_TIPP, TI_KEY, a as i64, b as i64, 0, 0, 0)
-    } else if ist(wp, wn, (&w_maus[0]) as u64) {
+    } else if ist(wp, wn, (&w_mouse[0]) as u64) {
         erg = syscall(S_TIPP, TI_MOVE, a as i64, b as i64, 0, 0, 0)
-    } else if ist(wp, wn, (&w_knopf[0]) as u64) {
+    } else if ist(wp, wn, (&w_click[0]) as u64) {
         erg = syscall(S_TIPP, TI_BUTTON, a as i64, b as i64, 0, 0, 0)
     } else if ist(wp, wn, (&w_scan[0]) as u64) {
         // scan <c1> [<c2> ...]: several set-1 codes in one job, so a
@@ -2238,7 +2243,7 @@ fn tue_tipp(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
         }
     } else {
         syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
-        return ablehnen(aus, "unknown input kind -- taste, maus, knopf or scan")
+        return ablehnen(aus, "unknown input kind -- key, mouse, click or scan")
     }
     // DEN SCHEIN IMMER ZURUECKGEBEN, auch wenn es schiefging.
     syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
@@ -2251,7 +2256,7 @@ fn tue_tipp(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     return true
 }
 
-fn tue_foto(aus: *mut rt.Buf) -> bool {
+fn do_screenshot(aus: *mut rt.Buf) -> bool {
     if !k_foto {
         return ablehnen(aus, "`screenshot = no` in /etc/jarvis/permissions.conf")
     }
@@ -2551,7 +2556,7 @@ fn kopplung_bestaetigt(codep: u64, coden: usize) -> bool {
 // DIE ANMELDUNG
 // ====================================================================
 
-fn word_send(d: *mut Draht, w: str, arg: u64, argn: usize) -> bool {
+fn word_send(d: *mut Wire, w: str, arg: u64, argn: usize) -> bool {
     var kopf: rt.Buf = rt.buf_new()
     rt.buf_push_bytes(&kopf, w.p as u64, w.n)
     if argn > 0 {
@@ -2564,10 +2569,10 @@ fn word_send(d: *mut Draht, w: str, arg: u64, argn: usize) -> bool {
 }
 
 // 0 = angemeldet, 1 = abgelehnt, 2 = Verbindung weg.
-fn anmelden(d: *mut Draht) -> u64 {
+fn anmelden(d: *mut Wire) -> u64 {
     var hallo: rt.Buf = rt.buf_new()
-    var h: [u8; 16] = "osum-bruecke 1\0\0"  // DRAHT: Protokollwort, /root/jarvis/lib/osumbridge.js vergleicht `osum-bruecke`
-    rt.buf_push_bytes(&hallo, (&h[0]) as u64, 14)
+    var h: [u8; 16] = "osum-bridge 1\0\0\0"
+    rt.buf_push_bytes(&hallo, (&h[0]) as u64, 13)
     let okh: bool = sende(d, &hallo, 0, 0 as usize)
     rt.buf_free(&hallo)
     if !okh {
@@ -2601,7 +2606,7 @@ fn anmelden(d: *mut Draht) -> u64 {
     // ist und bleibt die Ed25519-Unterschrift auf die Forderung, die
     // `jsig` leistet -- der private Schluessel liegt weiter dort und
     // nicht in diesem Programm. Die Kennung sagt nur: "das ist
-    // derselbe Draht wie eben".
+    // derselbe Wire wie eben".
     if (*d).https {
         var kl: usize = pubhex.len
         if kl > 24 {
@@ -2609,7 +2614,7 @@ fn anmelden(d: *mut Draht) -> u64 {
         }
         k_sidlen = hinein((&k_sid[0]) as u64, 40 as usize, pubhex.ptr, kl)
     }
-    if !word_send(d, "ich", pubhex.ptr, pubhex.len) {
+    if !word_send(d, "hello", pubhex.ptr, pubhex.len) {
         rt.buf_free(&pubhex)
         return 2
     }
@@ -2629,11 +2634,11 @@ fn anmelden(d: *mut Draht) -> u64 {
         }
         let wp: u64 = zeile.ptr + f.off[0] as u64
         let wn: usize = f.len[0]
-        var w_frage: [u8; 6] = "frage\0"
-        var w_will: [u8; 11] = "willkommen\0"
-        var w_weg: [u8; 4] = "weg\0"
-        var w_kop: [u8; 16] = "kopplung-noetig\0"
-        if ist(wp, wn, (&w_frage[0]) as u64) && f.n >= 2 {
+        var w_challenge: [u8; 10] = "challenge\0"
+        var w_welcome: [u8; 8] = "welcome\0"
+        var w_drop: [u8; 5] = "drop\0"
+        var w_pairing: [u8; 15] = "pairing-needed\0"
+        if ist(wp, wn, (&w_challenge[0]) as u64) && f.n >= 2 {
             // Unterschreiben lassen. Das Argument ist schon Hex, genau
             // die Form, die `jsig unterschreibe` erwartet.
             var nonce: [u8; 260] = [0; 260]
@@ -2654,14 +2659,14 @@ fn anmelden(d: *mut Draht) -> u64 {
                 ergebnis = 1
                 break
             }
-            let ok: bool = word_send(d, "beweis",
+            let ok: bool = word_send(d, "proof",
                 sigb.ptr + sv as u64, sb - sv)
             rt.buf_free(&sigb)
             if !ok {
                 ergebnis = 2
                 break
             }
-        } else if ist(wp, wn, (&w_kop[0]) as u64) && f.n >= 2 {
+        } else if ist(wp, wn, (&w_pairing[0]) as u64) && f.n >= 2 {
             let cp: u64 = zeile.ptr + f.off[1] as u64
             let cn: usize = f.len[1]
             var shown: rt.Buf = rt.buf_new()
@@ -2679,14 +2684,14 @@ fn anmelden(d: *mut Draht) -> u64 {
             let confirmed: bool = kopplung_bestaetigt(sp, sn)
             rt.buf_free(&shown)
             if confirmed {
-                if !word_send(d, "kopplung", cp, cn) {
+                if !word_send(d, "pair", cp, cn) {
                     ergebnis = 2
                     break
                 }
                 var a1: [u8; 8] = "pairing\0"
                 notiere((&a1[0]) as u64, 7, "confirmed", cp, cn)
             } else {
-                word_send(d, "kopplung-abgelehnt", 0, 0 as usize)
+                word_send(d, "pair-rejected", 0, 0 as usize)
                 var a2: [u8; 8] = "pairing\0"
                 var g: [u8; 28] = "not confirmed on the device\0"
                 notiere((&a2[0]) as u64, 7, "rejected", (&g[0]) as u64, 27)
@@ -2695,10 +2700,10 @@ fn anmelden(d: *mut Draht) -> u64 {
                 ergebnis = 1
                 break
             }
-        } else if ist(wp, wn, (&w_will[0]) as u64) {
+        } else if ist(wp, wn, (&w_welcome[0]) as u64) {
             ergebnis = 0
             break
-        } else if ist(wp, wn, (&w_weg[0]) as u64) {
+        } else if ist(wp, wn, (&w_drop[0]) as u64) {
             sag("jarvisd: the server rejected the sign-in\n")
             ergebnis = 1
             break
@@ -2712,7 +2717,7 @@ fn anmelden(d: *mut Draht) -> u64 {
 // DIE AUFTRAGSSCHLEIFE
 // ====================================================================
 
-fn bediene(d: *mut Draht) -> bool {
+fn bediene(d: *mut Wire) -> bool {
     var zeile: rt.Buf = rt.buf_new()
     var nutz: rt.Buf = rt.buf_new()
     var aus: rt.Buf = rt.buf_new()
@@ -2737,7 +2742,7 @@ fn bediene(d: *mut Draht) -> bool {
                     say_if_loud("jarvisd: poll failed, trying again\n")
                     schlafe_ms(1000 << (versuche - 1))
                 }
-                sent_ok = word_send(d, "puls", 0, 0 as usize)
+                sent_ok = word_send(d, "poll", 0, 0 as usize)
                 versuche = versuche + 1
             }
             if !sent_ok {
@@ -2767,20 +2772,20 @@ fn bediene(d: *mut Draht) -> bool {
         }
         let wp: u64 = zeile.ptr + f.off[0] as u64
         let wn: usize = f.len[0]
-        var w_ende: [u8; 9] = "tschuess\0"
-        var w_auf: [u8; 8] = "auftrag\0"
-        var w_weg: [u8; 4] = "weg\0"
-        if ist(wp, wn, (&w_ende[0]) as u64) {
+        var w_bye: [u8; 4] = "bye\0"
+        var w_job: [u8; 4] = "job\0"
+        var w_drop: [u8; 5] = "drop\0"
+        if ist(wp, wn, (&w_bye[0]) as u64) {
             break
         }
-        if ist(wp, wn, (&w_weg[0]) as u64) {
+        if ist(wp, wn, (&w_drop[0]) as u64) {
             // Server dropped the session (token expired, device
             // blocked). Sign in again in a fresh round.
             sag("jarvisd: the server ended the session\n")
             sauber = false
             break
         }
-        if !ist(wp, wn, (&w_auf[0]) as u64) {
+        if !ist(wp, wn, (&w_job[0]) as u64) {
             continue
         }
         // auftrag <id> <art> <a1hex> <a2hex> <laenge>
@@ -2806,7 +2811,7 @@ fn bediene(d: *mut Draht) -> bool {
             sauber = false
             break
         }
-        if !draht_oktette(d, laenge, &nutz) {
+        if !wire_bytes(d, laenge, &nutz) {
             sauber = false
             break
         }
@@ -2822,39 +2827,28 @@ fn bediene(d: *mut Draht) -> bool {
         if f.n >= 5 {
             hex_out(zeile.ptr + f.off[3] as u64, f.len[3], &arg1)
         }
-        // Job kinds. English since E-001 (04.10.2026); the German names
-        // are accepted for a transition period (the server sends German
-        // until it is told otherwise, and a device updated before the
-        // server must still understand it). Remove the German words once
-        // the server sends English only.
         var w_sys: [u8; 7] = "system\0"
-        var w_lies: [u8; 5] = "lies\0"
-        var w_schr: [u8; 8] = "schreib\0"
-        var w_list: [u8; 6] = "liste\0"
-        var w_bef: [u8; 7] = "befehl\0"
-        var w_foto: [u8; 5] = "foto\0"
-        var w_tipp: [u8; 8] = "eingabe\0"
         var e_read: [u8; 5] = "read\0"
         var e_write: [u8; 6] = "write\0"
         var e_list: [u8; 5] = "list\0"
-        var e_cmd: [u8; 8] = "command\0"
-        var e_photo: [u8; 6] = "photo\0"
+        var e_run: [u8; 4] = "run\0"
+        var e_shot: [u8; 11] = "screenshot\0"
         var e_input: [u8; 6] = "input\0"
         var gut: bool = false
         if ist(artp, artn, (&w_sys[0]) as u64) {
-            gut = tue_system(&aus)
-        } else if ist(artp, artn, (&w_lies[0]) as u64) || ist(artp, artn, (&e_read[0]) as u64) {
-            gut = tue_lies(arg1.ptr, arg1.len, &aus)
-        } else if ist(artp, artn, (&w_schr[0]) as u64) || ist(artp, artn, (&e_write[0]) as u64) {
-            gut = tue_schreib(arg1.ptr, arg1.len, &nutz, &aus)
-        } else if ist(artp, artn, (&w_list[0]) as u64) || ist(artp, artn, (&e_list[0]) as u64) {
+            gut = do_system(&aus)
+        } else if ist(artp, artn, (&e_read[0]) as u64) {
+            gut = do_read(arg1.ptr, arg1.len, &aus)
+        } else if ist(artp, artn, (&e_write[0]) as u64) {
+            gut = do_write(arg1.ptr, arg1.len, &nutz, &aus)
+        } else if ist(artp, artn, (&e_list[0]) as u64) {
             gut = do_list(arg1.ptr, arg1.len, &aus)
-        } else if ist(artp, artn, (&w_bef[0]) as u64) || ist(artp, artn, (&e_cmd[0]) as u64) {
+        } else if ist(artp, artn, (&e_run[0]) as u64) {
             gut = do_cmd(arg1.ptr, arg1.len, &aus)
-        } else if ist(artp, artn, (&w_foto[0]) as u64) || ist(artp, artn, (&e_photo[0]) as u64) {
-            gut = tue_foto(&aus)
-        } else if ist(artp, artn, (&w_tipp[0]) as u64) || ist(artp, artn, (&e_input[0]) as u64) {
-            gut = tue_tipp(arg1.ptr, arg1.len, &aus)
+        } else if ist(artp, artn, (&e_shot[0]) as u64) {
+            gut = do_screenshot(&aus)
+        } else if ist(artp, artn, (&e_input[0]) as u64) {
+            gut = do_input(arg1.ptr, arg1.len, &aus)
         } else {
             gut = ablehnen(&aus, "unknown request kind")
         }
@@ -2864,8 +2858,8 @@ fn bediene(d: *mut Draht) -> bool {
             notiere(artp, artn, "REJECTED", aus.ptr, aus.len)
         }
         var kopf: rt.Buf = rt.buf_new()
-        var w_fertig: [u8; 7] = "fertig\0"
-        rt.buf_push_bytes(&kopf, (&w_fertig[0]) as u64, 6)
+        var w_done: [u8; 5] = "done\0"
+        rt.buf_push_bytes(&kopf, (&w_done[0]) as u64, 4)
         rt.buf_push(&kopf, 32 as u8)
         rt.buf_push_bytes(&kopf, idp, idn)
         rt.buf_push(&kopf, 32 as u8)
@@ -2873,8 +2867,8 @@ fn bediene(d: *mut Draht) -> bool {
             var s_ok: [u8; 3] = "ok\0"
             rt.buf_push_bytes(&kopf, (&s_ok[0]) as u64, 2)
         } else {
-            var s_nein: [u8; 5] = "nein\0"
-            rt.buf_push_bytes(&kopf, (&s_nein[0]) as u64, 4)
+            var s_failed: [u8; 7] = "failed\0"
+            rt.buf_push_bytes(&kopf, (&s_failed[0]) as u64, 6)
         }
         let okk: bool = sende(d, &kopf, aus.ptr, aus.len)
         rt.buf_free(&kopf)
@@ -2911,7 +2905,7 @@ fn fail_conn(schief: *mut bool) -> net.Conn {
 // Funktion tut deshalb nur zwei Dinge: den Namen aufloesen (einmal je
 // Runde, nicht je Nachricht) und das Zeilenprotokoll fuehren, das ab
 // hier UNVERAENDERT ist.
-// k_draht points at the wire `d` for the keepalive and is cleared before return.
+// k_wire points at the wire `d` for the keepalive and is cleared before return.
 #[allow_escape]
 fn eine_runde_https() -> u64 {
     // Der Name wird HIER aufgeloest und nicht in der Rechteliste
@@ -2943,7 +2937,7 @@ fn eine_runde_https() -> u64 {
         zeig_ip("", k_ip as u64)
     }
 
-    var d: Draht = wire_new_https()
+    var d: Wire = wire_new_https()
     var erg: u64 = 2
     let an: u64 = anmelden(&d)
     if an == 0 {
@@ -2952,14 +2946,14 @@ fn eine_runde_https() -> u64 {
         notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
         z_sitzungen = z_sitzungen + 1
         k_session_ms = now_ms()
-        k_draht = (&d) as u64
+        k_wire = (&d) as u64
         sende_info(&d)
         if bediene(&d) {
             erg = 0
         } else {
             erg = 2
         }
-        k_draht = 0 as u64
+        k_wire = 0 as u64
     } else {
         erg = an
     }
@@ -3021,7 +3015,7 @@ fn eine_runde() -> u64 {
     say_num(tls.tls_peer_cert_count(&t) as u64)
     sag("\n")
 
-    var d: Draht = wire_new(&t)
+    var d: Wire = wire_new(&t)
     var erg: u64 = 2
     let an: u64 = anmelden(&d)
     if an == 0 {
@@ -3169,7 +3163,7 @@ fn screen() -> i32 {
 //
 //     jarvisd -f /var/jarvis/schirm.ppm
 //
-// WARUM PPM UND NICHT PNG. Der Auftragsweg (`tue_foto`) liefert PNG
+// WARUM PPM UND NICHT PNG. Der Auftragsweg (`do_screenshot`) liefert PNG
 // ueber die Leitung, weil dort jedes Oktett zaehlt. Diese Fassung hier
 // schreibt in eine DATEI auf DIESEM Geraet, und dafuer ist PPM die
 // richtige Wahl: kein zlib, kein CRC, kein Zwischenpuffer ueber dem
@@ -3280,7 +3274,7 @@ fn ppm_over_kernel(pfad: u64, w: i64, h: i64) -> i32 {
 }
 
 fn photo_file(pfad: u64) -> i32 {
-    // RUNDE BRIDGE-2: ZUERST DEN KERN FRAGEN, genau wie `tue_foto` es
+    // RUNDE BRIDGE-2: ZUERST DEN KERN FRAGEN, genau wie `do_screenshot` es
     // tut. Vorher stand hier nur `WIG_SCREEN`, und das liegt hinter dem
     // Fensterserver -- auf einem Kern mit Rahmenpuffer, aber ohne
     // laufenden Fensterserver sagte dieses Programm "keine

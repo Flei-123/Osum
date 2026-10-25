@@ -309,7 +309,7 @@ def watchdog():
                             g.end_time = g.seen
                             event(g, 'SILENT: last report %s, session lasted %d s, %d reports, longest gap %d s, IP %s, commit %s.%s The server cannot tell whether the device is off, crashed, suspended or the network is gone.' % (utc_text(g.seen), duration, g.polls, g.max_gap, g.last_ip or '?', (g.info or {}).get('commit', '') or '?', extra))
                         elif z == 'knocking':
-                            event(g, 'ONLY KNOCKING: %d greetings since %s (about every 30 s), but never a `hello` after. The device IS ALIVE and reaches the server; login fails on the device itself before it can send anything signed (/bin/jsig cannot start, e.g. process table full, or work file not writable). Last real contact: %s.' % (utc_text(g.knock_since), g.knocks, utc_text(g.seen or g.prev_seen)))
+                            event(g, 'ONLY KNOCKING: %d greetings since %s (about every 30 s), but never a `hello` after. The device IS ALIVE and reaches the server; login fails on the device itself before it can send anything signed (/bin/jsig cannot start, e.g. process table full, or work file not writable). Last real contact: %s.' % (g.knocks, utc_text(g.knock_since), utc_text(g.seen or g.prev_seen)))
                         elif z == 'online' and old in ('silent', 'busy', 'clean_exit', 'knocking'):
                             event(g, 'BACK (was %s)' % old)
                     if z in ('silent', 'clean_exit'):

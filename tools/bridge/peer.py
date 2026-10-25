@@ -46,7 +46,7 @@ except Exception:
     HAT_CRYPTO = False
 
 
-class Draht:
+class Wire:
     """Zeilen und Nutzlasten auf einem TLS-Strom."""
 
     def __init__(self, s):
@@ -88,6 +88,23 @@ class Draht:
     def sende(self, felder, nutz=b""):
         kopf = " ".join(felder) + " " + str(len(nutz)) + "\n"
         self.s.sendall(kopf.encode() + nutz)
+
+
+KIND_WIRE = {"lies": "read", "schreib": "write", "liste": "list", "befehl": "run",
+             "foto": "screenshot", "eingabe": "input"}
+INPUT_WIRE = {"taste": "key", "maus": "mouse", "knopf": "click"}
+STATUS_LOG = {"failed": "nein"}
+
+
+def wire_kind(art):
+    return KIND_WIRE.get(art, art)
+
+
+def wire_arg(art, arg):
+    if art != "eingabe":
+        return arg
+    head, sep, tail = arg.partition(" ")
+    return INPUT_WIRE.get(head, head) + sep + tail
 
 
 def hex_von(s):
@@ -163,25 +180,25 @@ def eine_verbindung(a, ctx, lauscher, sag, auftraege, runde):
         return 1
     sag("TLS", s.version(), s.cipher()[0])
 
-    d = Draht(s)
+    d = Wire(s)
     pub = None
     try:
         # ---------------------------------------------------- Anmeldung
         f, _ = d.nachricht()
         sag("GRUSS", " ".join(f))
         f, _ = d.nachricht()
-        if f[0] != "ich":
-            sag("FEHLER kein `ich`")
+        if f[0] != "hello":
+            sag("FEHLER kein `hello`")
             return 1
         pub = bytes.fromhex(f[1])
         sag("PUB", f[1])
 
         if not a.kein_beweis:
             nonce = os.urandom(32)
-            d.sende(["frage", nonce.hex()])
+            d.sende(["challenge", nonce.hex()])
             f, _ = d.nachricht()
-            if f[0] != "beweis":
-                sag("FEHLER kein `beweis`, sondern", f[0])
+            if f[0] != "proof":
+                sag("FEHLER kein `proof`, sondern", f[0])
                 return 1
             sig = bytes.fromhex(f[1])
             sag("SIG", f[1])
@@ -205,22 +222,22 @@ def eine_verbindung(a, ctx, lauscher, sag, auftraege, runde):
 
         if a.kopplung:
             wire_code = hex_von(a.kopplung) if a.kopplung_hex else a.kopplung
-            d.sende(["kopplung-noetig", wire_code])
+            d.sende(["pairing-needed", wire_code])
             f, _ = d.nachricht()
             sag("KOPPLUNG", " ".join(f))
-            if f[0] == "kopplung-abgelehnt":
+            if f[0] == "pair-rejected":
                 sag("KOPPLUNG-ABGELEHNT")
                 return 0
-            if f[0] != "kopplung" or f[1] != wire_code:
+            if f[0] != "pair" or f[1] != wire_code:
                 sag("KOPPLUNG-FALSCH")
                 return 1
-        d.sende(["willkommen"])
+        d.sende(["welcome"])
         sag("ANGEMELDET")
 
         # ---------------------------------------------------- Auftraege
         for nr, (art, arg1, nutzhex) in enumerate(auftraege, start=1):
             nutz = bytes.fromhex(nutzhex) if nutzhex else b""
-            d.sende(["auftrag", str(nr), art, hex_von(arg1), "0"], nutz)
+            d.sende(["job", str(nr), wire_kind(art), hex_von(wire_arg(art, arg1)), "0"], nutz)
             if a.abriss and nr == 1:
                 # MITTEN IM AUFTRAG die Verbindung wegnehmen. Der Helfer
                 # darf daran nicht sterben und nichts liegenlassen.
@@ -232,16 +249,16 @@ def eine_verbindung(a, ctx, lauscher, sag, auftraege, runde):
                 s.close()
                 return 0
             f, inhalt = d.nachricht()
-            if f[0] != "fertig":
+            if f[0] != "done":
                 sag("FEHLER unerwartet", " ".join(f))
                 return 1
             dig = hashlib.sha256(inhalt).hexdigest()
-            sag("ANTWORT", f[1], art, f[2], len(inhalt), dig)
+            sag("ANTWORT", f[1], art, STATUS_LOG.get(f[2], f[2]), len(inhalt), dig)
             with open("%s.%s.bin" % (a.aus, f[1]), "wb") as fh:
                 fh.write(inhalt)
-            if f[2] == "nein":
+            if f[2] == "failed":
                 sag("GRUND", inhalt.decode("utf-8", "replace").strip())
-        d.sende(["tschuess"])
+        d.sende(["bye"])
         sag("TSCHUESS")
     except (EOFError, socket.timeout, ConnectionResetError,
             ssl.SSLError, OSError) as e:
