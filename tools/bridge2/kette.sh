@@ -219,7 +219,7 @@ DIENST="http://10.9.1.1:$DIENST_PORT"
 # echten Rechner um. `--wurzel $W/dienst` haelt beides getrennt.
 PW="$W/dienst"
 mkdir -p "$PW"
-python3 "$BRUECKE/bruecke_server.py" --port "$DIENST_PORT" \
+python3 "$BRUECKE/bridge_server.py" --port "$DIENST_PORT" \
     --bind 10.9.1.1 --wurzel "$PW" > "$W/dienst.log" 2>&1 & DIPID=$!
 # WARTEN, BIS ER WIRKLICH ANTWORTET, und nicht `sleep 1`. Der erste
 # Anlauf fragte nach einer Sekunde und bekam nichts -- der Dienst stand
