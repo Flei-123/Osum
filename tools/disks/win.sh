@@ -92,6 +92,7 @@ if [ -s "$D/win/second.img" ]; then
 else
     bad "no second.img"
 fi
+grep -qa '^panic' "$W" && bad "the disks program panicked" || ok "no panic while the window drew its lists"
 tail -c 512 "$D/win/disk.img" | grep -qa 'EFI PART' && bad "THE SYSTEM DISK GOT A GPT" || ok "the system disk has no GPT at its end"
 mkdir -p docs/shots/disks
 cp "$D/win/e_two.png" docs/shots/disks/disks-write.png 2>/dev/null || true
