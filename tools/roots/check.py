@@ -16,8 +16,10 @@ from cryptography.x509.oid import NameOID
 
 ROOTSCTL = os.path.abspath(sys.argv[1])
 TLS_MAIN = os.path.abspath(sys.argv[2])
+FETCH = os.path.abspath(sys.argv[3])
 PASS = 0
 FAIL = []
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 NOW = datetime.datetime.now(datetime.timezone.utc)
 
 
@@ -59,7 +61,7 @@ def count_blocks(path):
     return open(path, "rb").read().count(b"-----BEGIN CERTIFICATE-----")
 
 
-def tls_verify(d, root_cert, root_key):
+def start_server(d, root_cert, root_key):
     leaf_key = ec.generate_private_key(ec.SECP256R1())
     leaf = (x509.CertificateBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]))
@@ -87,12 +89,31 @@ def tls_verify(d, root_cert, root_key):
             break
         except OSError:
             time.sleep(0.05)
+    return srv, port
+
+
+def tls_verify(d, root_cert, root_key):
+    srv, port = start_server(d, root_cert, root_key)
     try:
         p = subprocess.run([TLS_MAIN, "127.0.0.1", str(port), "localhost", os.path.join(d, "store.pem"), "/"],
                            capture_output=True, text=True, timeout=30)
     finally:
         srv.terminate()
     return p.stdout
+
+
+def fetch_with_store(d, root_cert, root_key, store_path):
+    srv, port = start_server(d, root_cert, root_key)
+    try:
+        p = subprocess.run([FETCH, "-n", "localhost", "-r", store_path, "https://127.0.0.1:%d/" % port],
+                           capture_output=True, text=True, timeout=40)
+    finally:
+        srv.terminate()
+    return p.stdout
+
+
+def warning_lines(out):
+    return [ln for ln in out.splitlines() if "WARNING" in ln]
 
 
 def main():
@@ -163,6 +184,57 @@ def main():
     ok("tls: chain to a valid root verifies", "VERIFY OK" in out, out)
     out = tls_verify(d, expired, exp_k)
     ok("tls counter: chain to an expired root refused as EXPIRED", "VERIFY EXPIRED" in out and "ERR" in out, out)
+
+    rc, f, out = ctl("check", bundle("names.pem", good, expired))
+    ok("check: the warning names the expired root",
+       "rootsctl: warning: expired roots (1): Expired Root" in out, out)
+    _, exp2 = make_root("Second Expired Root", -500, -40)
+    rc, f, out = ctl("check", bundle("two.pem", good, expired, exp2))
+    ok("check: two expired roots are both named",
+       "expired roots (2): Expired Root, Second Expired Root" in out, out)
+    many = [make_root("Long Expired Root Name Number %02d" % i, -500, -40 - i)[1] for i in range(12)]
+    rc, f, out = ctl("check", bundle("many.pem", good, *many))
+    names_line = [ln for ln in out.splitlines() if ln.startswith("rootsctl: warning: expired roots")]
+    ok("check: a long list is cut with a count", len(names_line) == 1 and len(names_line[0]) < 240
+       and " more" in names_line[0] and "(12)" in names_line[0], out)
+    _, fresh = make_root("Just Expired Root", -400, -2.0 / 24)
+    rc, f, out = ctl("check", bundle("fresh.pem", good, fresh))
+    ok("check: a root that ended 2 hours ago is inside the clock tolerance", f.get("EXPIRED") == 0 and f.get("VALID") == 2, out)
+    _, stale = make_root("Stale Root", -400, -3)
+    rc, f, out = ctl("check", bundle("stale.pem", good, stale))
+    ok("check counter: a root that ended 3 days ago is expired", f.get("EXPIRED") == 1, out)
+
+    store_path = os.path.join(d, "fetch-store.pem")
+    open(store_path, "wb").write(pem(expired) + pem(exp2) + pem(good))
+    out = fetch_with_store(d, good, good_k, store_path)
+    wl = warning_lines(out)
+    ok("fetch: expired roots give ONE readable warning line with names",
+       len([w for w in wl if "expired roots" in w]) == 1
+       and "fetch: WARNING expired roots (2): Expired Root, Second Expired Root" in out, out)
+    ok("fetch: and the chain still verifies against the valid root", "fetch: verify OK" in out and "fetch: code 200" in out, out)
+    ok("fetch: all roots counted", "fetch: roots 3" in out, out)
+    ok("fetch: warning line fits 80 columns", all(len(w) <= 80 for w in wl), "\n".join(wl))
+    open(store_path, "wb").write(pem(good))
+    out = fetch_with_store(d, good, good_k, store_path)
+    ok("fetch counter: a healthy store prints no expired warning", "expired roots" not in out and "fetch: verify OK" in out, out)
+    open(store_path, "wb").write(pem(expired) + pem(exp2))
+    out = fetch_with_store(d, good, good_k, store_path)
+    ok("fetch counter: only expired roots -> warning and REFUSED, nothing trusted",
+       "expired roots (2)" in out and "fetch: verify OK" not in out and "fetch: code 200" not in out, out)
+
+    subset = os.path.join(REPO, "tools", "roots", "mozilla-subset.pem")
+    rc, f, out = ctl("check", subset)
+    ok("subset: the shipped store has no expired root and at least 12 valid ones",
+       f.get("EXPIRED") == 0 and f.get("VALID", 0) >= 12 and f.get("NOT_YET") == 0, out)
+    pin = open(os.path.join(REPO, "tools", "roots", "bundle.sha256")).read().split()[0]
+    ok("subset: the header names the pinned bundle digest", ("sha256 " + pin) in open(subset).readline())
+    ok("subset: the pin is a sha256", len(pin) == 64 and all(c in "0123456789abcdef" for c in pin))
+    _, old_isrg = make_root("ISRG Root X1", -400, -10)
+    src = bundle("mk-src.pem", old_isrg, good)
+    mk = subprocess.run([sys.executable, os.path.join(REPO, "tools", "hwnet", "mkroots.py"),
+                         os.path.join(d, "mk-out.pem"), src], capture_output=True, text=True)
+    ok("mkroots counter: an expired wanted root is dropped and reported",
+       "dropped expired: ISRG Root X1" in mk.stdout and count_blocks(os.path.join(d, "mk-out.pem")) == 0, mk.stdout + mk.stderr)
 
     for t, g in FAIL:
         print("  FAIL", t, "|", g.strip().replace("\n", " ; ")[:200])
