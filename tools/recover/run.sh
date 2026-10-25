@@ -46,7 +46,7 @@ rm -f "$OUT/fatpart.img"
 export ZWEITE_PLATTE="$OUT/store.img"
 
 head -c $((256 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
-rc=$(lauf save iso "mkdir /data;mkdir /data/sub;echo recover-marker-7 > /data/a.txt;echo deep-file-9 > /data/sub/b.txt;cp /bin/sh /data/sh.copy;shasum /bin/sh /data/sh.copy;mount;echo unlock hdb > /dev/wlock;mkdir /mnt/store;backup save /data /mnt/store snap1;backup list /mnt/store;exit" 900)
+rc=$(OSUM_EXTRA=nowlock lauf save iso "mkdir /data;mkdir /data/sub;echo recover-marker-7 > /data/a.txt;echo deep-file-9 > /data/sub/b.txt;cp /bin/sh /data/sh.copy;shasum /bin/sh /data/sh.copy;mount;mkdir /mnt/store;backup save /data /mnt/store snap1;backup list /mnt/store;exit" 900)
 gleich "save run: exit code" "$rc" "21"
 hat "$OUT/save.txt" "snap1" "the snapshot exists"
 SHA_ORIG=$(grep -aoE '^[0-9a-f]{64}  /bin/sh' "$OUT/save.txt" | head -1 | cut -c1-64)
@@ -68,7 +68,7 @@ b[off] ^= 0x01
 open(p, 'wb').write(b)
 PY
 mcopy -o -i "$OUT/store.img@@1048576" "$OUT/PACK.bin" "::$PACKPATH/PACK" && ok "one octet in the pack flipped on the medium"
-rc=$(lauf bad iso "mount;echo unlock hdb > /dev/wlock;recover /dev/hda /mnt/store snap1 --ja --into /data;exit" 900)
+rc=$(lauf bad iso "mount;recover /dev/hda /mnt/store snap1 --ja --into /data;exit" 900)
 hat "$OUT/bad.txt" "recover: backup verify failed, target untouched" "damaged backup is refused before anything is written"
 nicht "$OUT/bad.txt" "install: gpt ok" "the installer never ran"
 gleich "target disk after the refused run" "$(sum "$OUT/ziel.img")" "$BEFORE"
@@ -76,15 +76,15 @@ cp -f "$OUT/store-good.img" "$OUT/store.img"
 
 echo
 echo "== 4. counter-proof: a dry run writes nothing =="
-rc=$(lauf dry iso "mount;echo unlock hdb > /dev/wlock;recover /dev/hda /mnt/store snap1;exit" 900)
+rc=$(lauf dry iso "mount;recover /dev/hda /mnt/store snap1;exit" 900)
 hat "$OUT/dry.txt" "recover: dry run, nothing written" "dry run says so"
 gleich "target disk after the dry run" "$(sum "$OUT/ziel.img")" "$BEFORE"
-rc=$(lauf prot iso "mount;echo unlock hdb > /dev/wlock;recover /dev/ram0 /mnt/store snap1 --ja;exit" 900)
+rc=$(lauf prot iso "mount;recover /dev/ram0 /mnt/store snap1 --ja;exit" 900)
 hat "$OUT/prot.txt" "recover: refused, boot or ram device" "the boot ram device is refused"
 
 echo
 echo "== 5. recovery onto the blank disk =="
-rc=$(lauf rec iso "ls /data;mount;echo unlock hdb > /dev/wlock;recover /dev/hda /mnt/store snap1 --ja --into /data;exit" 1500)
+rc=$(lauf rec iso "ls /data;mount;recover /dev/hda /mnt/store snap1 --ja --into /data;exit" 1500)
 gleich "recover run: exit code" "$rc" "21"
 hat "$OUT/rec.txt" "recover: backup verified" "backup verified first"
 hat "$OUT/rec.txt" "install: fertig" "system installed on the blank disk"
