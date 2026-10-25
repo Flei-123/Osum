@@ -66,7 +66,7 @@ def handle(raw, ctx, args, log, lock):
             headers[k.strip().decode()] = v.strip().decode()
         path = lines[0].split(b" ")[1].decode()
         up = http.client.HTTPConnection("127.0.0.1", args.upstream, timeout=60)
-        fwd = {"X-Draht": headers.get("X-Draht", ""), "Content-Length": str(len(body))}
+        fwd = {"X-Bridge-Wire": headers.get("X-Bridge-Wire", headers.get("X-Draht", "")), "Content-Length": str(len(body))}
         up.request("POST", path, body=body, headers=fwd)
         resp = up.getresponse()
         data = resp.read()

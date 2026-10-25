@@ -15,7 +15,7 @@ Two modes, ONE app table (APPS below):
         log is cut per step (drive.py `schritt`) and scanned for crash lines, the pictures are
         compared pixel by pixel (a step that changes nothing on the screen did not happen).
   echt  does the same on the real Dell through the bridge (POST /bruecke/auftrag on the local
-        bridge server, see docs/BRUECKE.md): input = scan codes + mouse jobs, photo = PNG job,
+        bridge server, see docs/BRIDGE.md): input = scan codes + mouse jobs, photo = PNG job,
         ps / log / jarvisd.log as the process and crash evidence. Needs the device online and
         `input = yes` in its /etc/jarvis/permissions.conf. See docs/QA-DELL-DURCHKLICK.md.
 

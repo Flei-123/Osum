@@ -60,7 +60,7 @@ E
 )
 printf '%s\n' "$SEED" > "$T/geraet.key"
 mkdir -p "$T/srv"
-python3 "$HERE/tools/bruecke-server/bruecke_server.py" --port $UP --bind 127.0.0.1 --wurzel "$T/srv" 2> "$T/server.log" >/dev/null &
+python3 "$HERE/tools/bridge-server/bridge_server.py" --port $UP --bind 127.0.0.1 --root "$T/srv" 2> "$T/server.log" >/dev/null &
 PIDS+=($!)
 sleep 1.5
 ADMIN=$(cat "$T/srv/verwalter.key")
