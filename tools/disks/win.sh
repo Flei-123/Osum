@@ -31,7 +31,7 @@ tippe /dev/hdb
 taste ret
 warte 8
 foto d_init
-ziel diskbtn new
+ziel diskbtn create
 warte 2
 tippe 8
 taste ret
@@ -39,7 +39,7 @@ warte 2
 tippe /dev/hdb
 taste ret
 warte 8
-ziel diskbtn new
+ziel diskbtn create
 warte 2
 tippe 4
 taste ret
@@ -68,7 +68,7 @@ PLAN
 
 echo "== 1. /bin/disks: buttons, typed confirmation, system disk refused =="
 bash tools/toolbench/build.sh "$D/win" app=/bin/disks progs="disks diskctl explorer sh echo ls cat mount" second="$D/blank.img" \
-    extra="vfs nopart" wait=12 last=300 accel=kvm plan="$D/plan.txt" > "$D/win.log" 2>&1
+    extra="vfs nopart wighalt=240" wait=12 last=330 accel=kvm plan="$D/plan.txt" > "$D/win.log" 2>&1
 W="$D/win/serial.txt"
 grep -a "ZIEL NICHT\|unbekannt" "$D/win/plan.log" | head -5
 [ -n "${1:-}" ] && { mkdir -p "$1"; cp "$D/win/plan.log" "$D/win/serial.txt" "$D/win.log" "$D"/win/*.png "$1/" 2>/dev/null; }
