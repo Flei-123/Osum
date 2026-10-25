@@ -10,4 +10,5 @@ Security: grants itself `P_READ` only (never `P_ACT`), right falls at exec; only
 fields say name + "protected"; value events of entries/passwords/sliders/scroll bars are dropped (no typing echo); locked screen = kernel drops events.
 
 Gate: `bash tools/screenreader/run.sh` (host, seconds): 33 checks (texts, canary, phoneme rules, pitch, formants, hiss, capacity) + 3 counter-proofs.
-Open: guest gate with QEMU HDA wav capture; German voice; reading by caret/word; terminal is not in the tree; Braille.
+Guest gate: `bash tools/srguest/run.sh` (QEMU intel-hda + audiodev wav, a11ydemo, sendkey tab): announcements on serial, password rule, WAV not silent, counter-proofs `serve silent` and no sound device.
+Open: German voice; reading by caret/word; terminal is not in the tree; Braille.
