@@ -67,28 +67,28 @@ echo "== 2. guest: /apps keeps the bundled programs =="
 run_guest "$TMPD/bin/opk.elf" "$TMPD/new.txt"
 N="$TMPD/new.txt.clean"
 grep -aq '==FERTIG==' "$N" && ok "guest script ran to the end" || { bad "guest script did not finish"; tail -12 "$N"; }
-section "$N" '==A0==' '==A1==' | grep -aq 'base.osp' && ok "before: base.osp is in /apps" || bad "before: base.osp missing"
-section "$N" '==A1==' '==A2==' | grep -aq 'alpha.osp' && ok "after rebuild: alpha.osp (from the plan) is in /apps" || bad "after rebuild: alpha.osp missing"
-section "$N" '==A1==' '==A2==' | grep -aq 'base.osp' && ok "after rebuild: bundled base.osp is STILL in /apps" || bad "after rebuild: bundled base.osp is gone"
+section "$N" '==A0==' '==A1==' | grep -aqE '(^| )base.osp/( |$)' && ok "before: base.osp is in /apps" || bad "before: base.osp missing"
+section "$N" '==A1==' '==A2==' | grep -aqE '(^| )alpha.osp/( |$)' && ok "after rebuild: alpha.osp (from the plan) is in /apps" || bad "after rebuild: alpha.osp missing"
+section "$N" '==A1==' '==A2==' | grep -aqE '(^| )base.osp/( |$)' && ok "after rebuild: bundled base.osp is STILL in /apps" || bad "after rebuild: bundled base.osp is gone"
 section "$N" '==A1==' '==A2==' | grep -aq 'name=Base' && ok "after rebuild: base.osp/INFO is readable" || bad "after rebuild: base.osp/INFO unreadable"
-section "$N" '==A2==' '==FERTIG==' | grep -aq 'alpha.osp' && bad "after remove: alpha.osp is still in /apps" || ok "after remove: alpha.osp is gone"
-section "$N" '==A2==' '==FERTIG==' | grep -aq 'base.osp' && ok "after remove: bundled base.osp is still there" || bad "after remove: bundled base.osp is gone"
+section "$N" '==A2==' '==FERTIG==' | grep -aqE '(^| )alpha.osp/( |$)' && bad "after remove: alpha.osp is still in /apps" || ok "after remove: alpha.osp is gone"
+section "$N" '==A2==' '==FERTIG==' | grep -aqE '(^| )base.osp/( |$)' && ok "after remove: bundled base.osp is still there" || bad "after remove: bundled base.osp is gone"
 
 echo "== 3. counter-proof: old rebuild (wipe /apps) =="
 run_guest "$TMPD/binold/opk.elf" "$TMPD/old.txt"
 O="$TMPD/old.txt.clean"
-if section "$O" '==A1==' '==A2==' | grep -aq 'base.osp'; then bad "old opk kept base.osp -- the check is blind"; else ok "old opk wipes the bundled base.osp (the HP state): the check sees the bug"; fi
+if section "$O" '==A1==' '==A2==' | grep -aqE '(^| )base.osp/( |$)'; then bad "old opk kept base.osp -- the check is blind"; else ok "old opk wipes the bundled base.osp (the HP state): the check sees the bug"; fi
 
 if [ "${STARTFRESH_GUI:-1}" = 1 ]; then
   echo "== 4. launcher reloads /apps when the menu is shown =="
   D="$TMPD/gui"
-  bash tools/design/eh6.sh "$D" res=1280x800 accel=kvm drehbuch=tools/startfresh/dreh.txt > "$TMPD/gui.log" 2>&1
+  bash tools/design/eh6.sh "$D" res=1280x800 accel=kvm drehbuch=tools/startfresh/dreh.txt "xfile=/etc/zzinfo=$ROOT/tools/startfresh/zzinfo" > "$TMPD/gui.log" 2>&1
   S="$D/serial.txt"
   grep -aqE 'launcher: apps reloaded [0-9]+' "$S" && ok "the launcher reloaded the app list after a bundle appeared" || bad "no 'launcher: apps reloaded' after the bundle was created"
   grep -aq 'launcher: treffer i=[0-9]* name=\[ZzFresh\]' "$S" && ok "search finds the fresh app 'ZzFresh'" || bad "search does not find 'ZzFresh'"
   echo "== 5. counter-proof: refresh=off =="
   D2="$TMPD/gui2"
-  bash tools/design/eh6.sh "$D2" res=1280x800 accel=kvm drehbuch=tools/startfresh/dreh.txt "xfile=/etc/startmenu.conf=$ROOT/tools/startfresh/off.conf" > "$TMPD/gui2.log" 2>&1
+  bash tools/design/eh6.sh "$D2" res=1280x800 accel=kvm drehbuch=tools/startfresh/dreh.txt "xfile=/etc/zzinfo=$ROOT/tools/startfresh/zzinfo" "xfile=/etc/startmenu.conf=$ROOT/tools/startfresh/off.conf" > "$TMPD/gui2.log" 2>&1
   grep -aq 'launcher: treffer i=[0-9]* name=\[ZzFresh\]' "$D2/serial.txt" && bad "refresh=off still finds ZzFresh -- the check is blind" || ok "refresh=off: the stale list does not find ZzFresh (the HP state)"
 fi
 echo
