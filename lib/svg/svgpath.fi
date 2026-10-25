@@ -1,0 +1,394 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import svg.svgmath
+import svg.svgscan
+import svg.svggeom
+
+export {
+    path_run, path_errors, errors_clear, move_abs, line_abs, close_abs, arc_abs, cubic_abs,
+    rect_path, ellipse_path, poly_path
+}
+
+static mut cx: i64 = 0
+static mut cy: i64 = 0
+static mut sx: i64 = 0
+static mut sy: i64 = 0
+static mut lcx: i64 = 0
+static mut lcy: i64 = 0
+static mut prev: u64 = 0
+static mut errs: i64 = 0
+
+fn path_errors() -> i64 {
+    return errs
+}
+
+fn errors_clear() {
+    errs = 0
+}
+
+fn move_abs(x: i64, y: i64) {
+    svggeom.begin_sub(x, y)
+    cx = x
+    cy = y
+    sx = x
+    sy = y
+}
+
+fn line_abs(x: i64, y: i64) {
+    svggeom.line_user(x, y)
+    cx = x
+    cy = y
+}
+
+fn close_abs() {
+    svggeom.close_sub()
+    cx = sx
+    cy = sy
+}
+
+fn begin_if_closed() {
+    if svggeom.open_sub() == 0 {
+        svggeom.begin_sub(cx, cy)
+    }
+}
+
+fn cubic_abs(c1x: i64, c1y: i64, c2x: i64, c2y: i64, x: i64, y: i64) {
+    begin_if_closed()
+    svggeom.cubic_user(c1x, c1y, c2x, c2y, x, y)
+    lcx = c2x
+    lcy = c2y
+    cx = x
+    cy = y
+}
+
+fn quad_abs(qx: i64, qy: i64, x: i64, y: i64) {
+    let c1x: i64 = cx + svgmath.rdiv(2 * (qx - cx), 3)
+    let c1y: i64 = cy + svgmath.rdiv(2 * (qy - cy), 3)
+    let c2x: i64 = x + svgmath.rdiv(2 * (qx - x), 3)
+    let c2y: i64 = y + svgmath.rdiv(2 * (qy - y), 3)
+    cubic_abs(c1x, c1y, c2x, c2y, x, y)
+    lcx = qx
+    lcy = qy
+}
+
+fn arc_step_deg(r_px: i64) -> i64 {
+    if r_px >= 20 {
+        return 4
+    }
+    if r_px >= 8 {
+        return 6
+    }
+    return 10
+}
+
+fn arc_abs(rx0: i64, ry0: i64, rot: i64, fa: i64, fs: i64, x: i64, y: i64) {
+    begin_if_closed()
+    let x1: i64 = cx
+    let y1: i64 = cy
+    var rx: i64 = svgmath.iabs(rx0)
+    var ry: i64 = svgmath.iabs(ry0)
+    if rx == 0 || ry == 0 || (x1 == x && y1 == y) {
+        line_abs(x, y)
+        return
+    }
+    let phi: i64 = svgmath.rdiv(rot * svgmath.TURN, 360 * 65536)
+    let cph: i64 = svgmath.cos16(phi)
+    let sph: i64 = svgmath.sin16(phi)
+    let dx2: i64 = (x1 - x) / 2
+    let dy2: i64 = (y1 - y) / 2
+    let x1p: i64 = svgmath.mul16(cph, dx2) + svgmath.mul16(sph, dy2)
+    let y1p: i64 = svgmath.mul16(0 - sph, dx2) + svgmath.mul16(cph, dy2)
+    var p: i64 = svgmath.div16(x1p, rx)
+    var q: i64 = svgmath.div16(y1p, ry)
+    var lam: i64 = svgmath.mul16(p, p) + svgmath.mul16(q, q)
+    if lam > 65536 {
+        let sc: i64 = svgmath.isqrt(lam * 65536)
+        p = svgmath.div16(p, sc)
+        q = svgmath.div16(q, sc)
+        rx = svgmath.mul16(rx, sc)
+        ry = svgmath.mul16(ry, sc)
+        lam = 65536
+    }
+    let d2: i64 = 65536 - lam
+    let d: i64 = svgmath.isqrt(d2 * 65536)
+    let h: i64 = svgmath.isqrt(lam * 65536)
+    if h == 0 {
+        line_abs(x, y)
+        return
+    }
+    let coef: i64 = svgmath.div16(d, h)
+    var sgn: i64 = 1
+    if fa == fs {
+        sgn = 0 - 1
+    }
+    let cnx: i64 = sgn * svgmath.mul16(coef, q)
+    let cny: i64 = 0 - sgn * svgmath.mul16(coef, p)
+    let th1: i64 = svgmath.atan2_turn(q - cny, p - cnx)
+    let th2: i64 = svgmath.atan2_turn(0 - q - cny, 0 - p - cnx)
+    var dth: i64 = th2 - th1
+    if fs == 1 {
+        if dth <= 0 {
+            dth = dth + svgmath.TURN
+        }
+    } else {
+        if dth >= 0 {
+            dth = dth - svgmath.TURN
+        }
+    }
+    let r_px: i64 = svgmath.mul16(svgmath.imax(rx, ry), svggeom.ctm_scale()) >> 16
+    let step: i64 = arc_step_deg(r_px)
+    let per: i64 = step * svgmath.TURN
+    var n: i64 = (svgmath.iabs(dth) * 360 + per - 1) / per
+    if n < 1 {
+        n = 1
+    }
+    let mx: i64 = (x1 + x) / 2
+    let my: i64 = (y1 + y) / 2
+    var i: i64 = 1
+    while i < n {
+        let ang: i64 = th1 + (dth * i) / n
+        let ux: i64 = cnx + svgmath.cos16(ang)
+        let uy: i64 = cny + svgmath.sin16(ang)
+        let ex: i64 = svgmath.mul16(rx, ux)
+        let ey: i64 = svgmath.mul16(ry, uy)
+        let ax: i64 = svgmath.mul16(cph, ex) - svgmath.mul16(sph, ey) + mx
+        let ay: i64 = svgmath.mul16(sph, ex) + svgmath.mul16(cph, ey) + my
+        svggeom.line_user(ax, ay)
+        i = i + 1
+    }
+    line_abs(x, y)
+}
+
+fn is_cmd(c: u64) -> bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+fn upper(c: u64) -> u64 {
+    if c >= 97 {
+        return c - 32
+    }
+    return c
+}
+
+fn path_run(p: u64, n: u64) {
+    svgscan.begin(p, n)
+    cx = 0
+    cy = 0
+    sx = 0
+    sy = 0
+    lcx = 0
+    lcy = 0
+    prev = 0
+    var cmd: u64 = 0
+    var first: bool = true
+    while true {
+        svgscan.skip_sep()
+        if svgscan.at_end() {
+            break
+        }
+        let c: u64 = svgscan.peek()
+        if is_cmd(c) {
+            cmd = c
+            svgscan.advance()
+            svgscan.skip_ws()
+            if first && upper(cmd) != 77 {
+                errs = errs + 1
+                break
+            }
+        } else if cmd == 0 || upper(cmd) == 90 || !svgscan.is_num_start(c) {
+            errs = errs + 1
+            break
+        }
+        first = false
+        let rel: bool = cmd >= 97
+        let u: u64 = upper(cmd)
+        let ox: i64 = if_rel(rel, cx)
+        let oy: i64 = if_rel(rel, cy)
+        if u == 77 {
+            let x: i64 = svgscan.num() + ox
+            let y: i64 = svgscan.num() + oy
+            if !svgscan.ok() {
+                errs = errs + 1
+                break
+            }
+            move_abs(x, y)
+            prev = 77
+            if rel {
+                cmd = 108
+            } else {
+                cmd = 76
+            }
+        } else if u == 76 {
+            let x: i64 = svgscan.num() + ox
+            let y: i64 = svgscan.num() + oy
+            if !svgscan.ok() {
+                errs = errs + 1
+                break
+            }
+            begin_if_closed()
+            line_abs(x, y)
+            prev = 76
+        } else if u == 72 {
+            let x: i64 = svgscan.num() + ox
+            if !svgscan.ok() {
+                errs = errs + 1
+                break
+            }
+            begin_if_closed()
+            line_abs(x, cy)
+            prev = 72
+        } else if u == 86 {
+            let y: i64 = svgscan.num() + oy
+            if !svgscan.ok() {
+                errs = errs + 1
+                break
+            }
+            begin_if_closed()
+            line_abs(cx, y)
+            prev = 86
+        } else if u == 67 {
+            let x1: i64 = svgscan.num() + ox
+            let y1: i64 = svgscan.num() + oy
+            let x2: i64 = svgscan.num() + ox
+            let y2: i64 = svgscan.num() + oy
+            let x: i64 = svgscan.num() + ox
+            let y: i64 = svgscan.num() + oy
+            if !svgscan.ok() {
+                errs = errs + 1
+                break
+            }
+            cubic_abs(x1, y1, x2, y2, x, y)
+            prev = 67
+        } else if u == 83 {
+            var x1: i64 = cx
+            var y1: i64 = cy
+            if prev == 67 || prev == 83 {
+                x1 = 2 * cx - lcx
+                y1 = 2 * cy - lcy
+            }
+            let x2: i64 = svgscan.num() + ox
+            let y2: i64 = svgscan.num() + oy
+            let x: i64 = svgscan.num() + ox
+            let y: i64 = svgscan.num() + oy
+            if !svgscan.ok() {
+                errs = errs + 1
+                break
+            }
+            cubic_abs(x1, y1, x2, y2, x, y)
+            prev = 83
+        } else if u == 81 {
+            let x1: i64 = svgscan.num() + ox
+            let y1: i64 = svgscan.num() + oy
+            let x: i64 = svgscan.num() + ox
+            let y: i64 = svgscan.num() + oy
+            if !svgscan.ok() {
+                errs = errs + 1
+                break
+            }
+            quad_abs(x1, y1, x, y)
+            prev = 81
+        } else if u == 84 {
+            var x1: i64 = cx
+            var y1: i64 = cy
+            if prev == 81 || prev == 84 {
+                x1 = 2 * cx - lcx
+                y1 = 2 * cy - lcy
+            }
+            let x: i64 = svgscan.num() + ox
+            let y: i64 = svgscan.num() + oy
+            if !svgscan.ok() {
+                errs = errs + 1
+                break
+            }
+            quad_abs(x1, y1, x, y)
+            prev = 84
+        } else if u == 65 {
+            let rx: i64 = svgscan.num()
+            let ry: i64 = svgscan.num()
+            let rot: i64 = svgscan.num()
+            let fa: i64 = svgscan.flag()
+            let fs: i64 = svgscan.flag()
+            let x: i64 = svgscan.num() + ox
+            let y: i64 = svgscan.num() + oy
+            if !svgscan.ok() {
+                errs = errs + 1
+                break
+            }
+            arc_abs(rx, ry, rot, fa, fs, x, y)
+            prev = 65
+        } else if u == 90 {
+            close_abs()
+            prev = 90
+        } else {
+            errs = errs + 1
+            break
+        }
+    }
+}
+
+fn if_rel(rel: bool, v: i64) -> i64 {
+    if rel {
+        return v
+    }
+    return 0
+}
+
+fn rect_path(x: i64, y: i64, w: i64, h: i64, rx0: i64, ry0: i64) {
+    var rx: i64 = svgmath.imin(rx0, w / 2)
+    var ry: i64 = svgmath.imin(ry0, h / 2)
+    if rx <= 0 || ry <= 0 {
+        move_abs(x, y)
+        line_abs(x + w, y)
+        line_abs(x + w, y + h)
+        line_abs(x, y + h)
+        close_abs()
+        return
+    }
+    move_abs(x + rx, y)
+    line_abs(x + w - rx, y)
+    arc_abs(rx, ry, 0, 0, 1, x + w, y + ry)
+    line_abs(x + w, y + h - ry)
+    arc_abs(rx, ry, 0, 0, 1, x + w - rx, y + h)
+    line_abs(x + rx, y + h)
+    arc_abs(rx, ry, 0, 0, 1, x, y + h - ry)
+    line_abs(x, y + ry)
+    arc_abs(rx, ry, 0, 0, 1, x + rx, y)
+    close_abs()
+}
+
+fn ellipse_path(ecx: i64, ecy: i64, rx: i64, ry: i64) {
+    if rx <= 0 || ry <= 0 {
+        return
+    }
+    move_abs(ecx + rx, ecy)
+    arc_abs(rx, ry, 0, 1, 1, ecx - rx, ecy)
+    arc_abs(rx, ry, 0, 1, 1, ecx + rx, ecy)
+    close_abs()
+}
+
+fn poly_path(p: u64, n: u64, closed: bool) {
+    svgscan.begin(p, n)
+    var k: i64 = 0
+    while true {
+        svgscan.skip_sep()
+        if svgscan.at_end() {
+            break
+        }
+        let x: i64 = svgscan.num()
+        let y: i64 = svgscan.num()
+        if !svgscan.ok() {
+            errs = errs + 1
+            break
+        }
+        if k == 0 {
+            move_abs(x, y)
+        } else {
+            line_abs(x, y)
+        }
+        k = k + 1
+    }
+    if closed && k > 0 {
+        close_abs()
+    }
+}

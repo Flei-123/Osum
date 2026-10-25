@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import svg.svgmath
+import svg.svgfill
+import svg.svggeom
+
+export {
+    CAP_BUTT, CAP_ROUND, CAP_SQUARE, JOIN_MITER, JOIN_ROUND, JOIN_BEVEL,
+    stroke_all
+}
+
+const CAP_BUTT: i64 = 0
+const CAP_ROUND: i64 = 1
+const CAP_SQUARE: i64 = 2
+const JOIN_MITER: i64 = 0
+const JOIN_ROUND: i64 = 1
+const JOIN_BEVEL: i64 = 2
+
+static mut tpx: [i64; 40] = [0 as i64; 40]
+static mut tpy: [i64; 40] = [0 as i64; 40]
+static mut circ_c: [i64; 32] = [0 as i64; 32]
+static mut circ_s: [i64; 32] = [0 as i64; 32]
+static mut circ_ready: i64 = 0
+static mut dir_x: i64 = 0
+static mut dir_y: i64 = 0
+static mut hw: i64 = 0
+static mut cap_kind: i64 = 0
+static mut join_kind: i64 = 0
+static mut miter_lim: i64 = 262144
+
+fn circ_init() {
+    if circ_ready != 0 {
+        return
+    }
+    var i: i64 = 0
+    while i < 32 {
+        let a: i64 = (i * svgmath.TURN) / 32
+        circ_c[i as usize] = svgmath.cos16(a)
+        circ_s[i as usize] = svgmath.sin16(a)
+        i = i + 1
+    }
+    circ_ready = 1
+}
+
+fn emit(n: i64) {
+    var area: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let j: i64 = (i + 1) % n
+        area = area + tpx[i as usize] * tpy[j as usize] - tpx[j as usize] * tpy[i as usize]
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let j: i64 = (i + 1) % n
+        if area >= 0 {
+            svgfill.edge(tpx[i as usize], tpy[i as usize], tpx[j as usize], tpy[j as usize])
+        } else {
+            svgfill.edge(tpx[j as usize], tpy[j as usize], tpx[i as usize], tpy[i as usize])
+        }
+        i = i + 1
+    }
+}
+
+fn set_pt(k: i64, x: i64, y: i64) {
+    tpx[k as usize] = x
+    tpy[k as usize] = y
+}
+
+fn unit(ax: i64, ay: i64, bx: i64, by: i64) -> i64 {
+    let dx: i64 = bx - ax
+    let dy: i64 = by - ay
+    let len: i64 = svgmath.isqrt(dx * dx + dy * dy)
+    if len == 0 {
+        return 0
+    }
+    dir_x = svgmath.rdiv(dx * 65536, len)
+    dir_y = svgmath.rdiv(dy * 65536, len)
+    return len
+}
+
+fn seg_quad(ax: i64, ay: i64, bx: i64, by: i64, dx: i64, dy: i64) {
+    let nx: i64 = svgmath.mul16(0 - dy, hw)
+    let ny: i64 = svgmath.mul16(dx, hw)
+    set_pt(0, ax + nx, ay + ny)
+    set_pt(1, bx + nx, by + ny)
+    set_pt(2, bx - nx, by - ny)
+    set_pt(3, ax - nx, ay - ny)
+    emit(4)
+}
+
+fn circle_at(vx: i64, vy: i64) {
+    circ_init()
+    var stride: i64 = 2
+    if hw >= 1024 {
+        stride = 1
+    }
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < 32 {
+        set_pt(n, vx + svgmath.mul16(circ_c[i as usize], hw), vy + svgmath.mul16(circ_s[i as usize], hw))
+        n = n + 1
+        i = i + stride
+    }
+    emit(n)
+}
+
+fn join_at(vx: i64, vy: i64, d0x: i64, d0y: i64, d1x: i64, d1y: i64) {
+    let cr: i64 = svgmath.mul16(d0x, d1y) - svgmath.mul16(d0y, d1x)
+    let dt: i64 = svgmath.mul16(d0x, d1x) + svgmath.mul16(d0y, d1y)
+    if svgmath.iabs(cr) < 40 && dt > 0 {
+        return
+    }
+    var s: i64 = 1
+    if cr > 0 {
+        s = 0 - 1
+    }
+    let n0x: i64 = s * svgmath.mul16(0 - d0y, hw)
+    let n0y: i64 = s * svgmath.mul16(d0x, hw)
+    let n1x: i64 = s * svgmath.mul16(0 - d1y, hw)
+    let n1y: i64 = s * svgmath.mul16(d1x, hw)
+    if join_kind == JOIN_ROUND && dt < 58982 {
+        circle_at(vx, vy)
+        return
+    }
+    if join_kind == JOIN_MITER && (65536 + dt) > 200 {
+        let ml2: i64 = svgmath.mul16(miter_lim, miter_lim)
+        if svgmath.mul16(65536 + dt, ml2) >= 131072 {
+            let mx: i64 = svgmath.rdiv((n0x + n1x) * 65536, 65536 + dt)
+            let my: i64 = svgmath.rdiv((n0y + n1y) * 65536, 65536 + dt)
+            set_pt(0, vx, vy)
+            set_pt(1, vx + n0x, vy + n0y)
+            set_pt(2, vx + mx, vy + my)
+            set_pt(3, vx + n1x, vy + n1y)
+            emit(4)
+            return
+        }
+    }
+    set_pt(0, vx, vy)
+    set_pt(1, vx + n0x, vy + n0y)
+    set_pt(2, vx + n1x, vy + n1y)
+    emit(3)
+}
+
+fn cap_at(vx: i64, vy: i64, dx: i64, dy: i64) {
+    if cap_kind == CAP_ROUND {
+        circle_at(vx, vy)
+        return
+    }
+    if cap_kind == CAP_SQUARE {
+        let nx: i64 = svgmath.mul16(0 - dy, hw)
+        let ny: i64 = svgmath.mul16(dx, hw)
+        let ex: i64 = svgmath.mul16(dx, hw)
+        let ey: i64 = svgmath.mul16(dy, hw)
+        set_pt(0, vx + nx, vy + ny)
+        set_pt(1, vx + nx + ex, vy + ny + ey)
+        set_pt(2, vx - nx + ex, vy - ny + ey)
+        set_pt(3, vx - nx, vy - ny)
+        emit(4)
+    }
+}
+
+fn stroke_sub(f: i64, n: i64, closed: bool) {
+    var m: i64 = n
+    if closed && m >= 2 && svggeom.pt_x(f) == svggeom.pt_x(f + m - 1) && svggeom.pt_y(f) == svggeom.pt_y(f + m - 1) {
+        m = m - 1
+    }
+    if m < 2 {
+        return
+    }
+    var nseg: i64 = m - 1
+    if closed {
+        nseg = m
+    }
+    var have: bool = false
+    var fdx: i64 = 0
+    var fdy: i64 = 0
+    var pdx: i64 = 0
+    var pdy: i64 = 0
+    var s: i64 = 0
+    while s < nseg {
+        let ax: i64 = svggeom.pt_x(f + s)
+        let ay: i64 = svggeom.pt_y(f + s)
+        let bi: i64 = (s + 1) % m
+        let bx: i64 = svggeom.pt_x(f + bi)
+        let by: i64 = svggeom.pt_y(f + bi)
+        if unit(ax, ay, bx, by) > 0 {
+            let dx: i64 = dir_x
+            let dy: i64 = dir_y
+            seg_quad(ax, ay, bx, by, dx, dy)
+            if have {
+                join_at(ax, ay, pdx, pdy, dx, dy)
+            } else {
+                fdx = dx
+                fdy = dy
+            }
+            pdx = dx
+            pdy = dy
+            have = true
+        }
+        s = s + 1
+    }
+    if !have {
+        return
+    }
+    if closed {
+        join_at(svggeom.pt_x(f), svggeom.pt_y(f), pdx, pdy, fdx, fdy)
+    } else {
+        cap_at(svggeom.pt_x(f), svggeom.pt_y(f), 0 - fdx, 0 - fdy)
+        cap_at(svggeom.pt_x(f + m - 1), svggeom.pt_y(f + m - 1), pdx, pdy)
+    }
+}
+
+fn stroke_all(width: i64, cap: i64, join: i64, miter: i64) {
+    hw = width / 2
+    cap_kind = cap
+    join_kind = join
+    miter_lim = miter
+    if hw <= 0 {
+        return
+    }
+    var k: i64 = 0
+    while k < svggeom.sub_total() {
+        stroke_sub(svggeom.sub_first(k), svggeom.sub_len(k), svggeom.sub_closed(k) != 0)
+        k = k + 1
+    }
+}
