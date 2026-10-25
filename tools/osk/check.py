@@ -57,7 +57,9 @@ if counter:
     print("RESULT ok=%d fail=%d" % (ok, fail))
     sys.exit(1 if fail else 0)
 
-say(texts == EXPECT, "the witness entry received exactly the clicked keys, in order, with Shift, Caps, layout switch, AltGr, Backspace and a cursor arrow (%s)" % texts)
+say(texts[:len(EXPECT)] == EXPECT, "the witness entry received exactly the clicked keys, in order, with Shift, Caps, layout switch, AltGr, Backspace and a cursor arrow (%s)" % texts[:len(EXPECT)])
+say(len(texts) > len(EXPECT) and "again" in texts[-1], "the real keyboard still types into the entry while the keyboard window is open (%s)" % texts[-1:])
+say(ser.count("osk: ready") == 1 and "osk: toggled" in ser, "a second `osk` start opened no second window and reported the toggle (ready x%d)" % ser.count("osk: ready"))
 keys = re.findall(r"osk: key sc=(\d+) cp=(\d+) sh=(\d) alt=(\d) ctl=(\d) inj=(\d)", ser)
 say(len(keys) >= 10 and all(k[5] == "1" for k in keys), "every key press was accepted by the kernel (inj=1 on %d key lines)" % len(keys))
 shifted = [k for k in keys if k[0] == "31" and k[2] == "1"]
@@ -75,6 +77,12 @@ for n_, *v in re.findall(r"osk: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) 
 say(len(rects) >= 60, "the keyboard reported %d key rectangles" % len(rects))
 bad = [k for k, v in rects.items() if not (v[4] >= 0 and v[4] + v[2] <= W and v[5] >= 0 and v[5] + v[3] <= H - 30)]
 say(not bad, "every key lies inside the screen and above the task bar band (%s)" % bad[:3])
+say(max(v[5] + v[3] for v in rects.values()) > H // 2, "the keyboard sits in the lower half of the screen (bottom %d)" % max(v[5] + v[3] for v in rects.values()))
+entry = re.findall(r"osktest: rect name=entry x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)", ser)
+if entry:
+    ew, eh, ex, ey = (int(v) for v in entry[0])
+    cover = [k for k, v in rects.items() if v[4] < ex + ew and v[4] + v[2] > ex and v[5] < ey + eh and v[5] + v[3] > ey]
+    say(not cover, "no key covers the witness entry (%s)" % cover[:3])
 xs = [v[4] for v in rects.values()]
 ys = [v[5] for v in rects.values()]
 say(min(xs) > 100 and max(v[4] + v[2] for v in rects.values()) < W - 100, "the keyboard is centred (x %d..%d)" % (min(xs), max(v[4] + v[2] for v in rects.values())))
@@ -95,6 +103,8 @@ try:
     say(d_alt >= 20, "latched AltGr relabels the keys (q -> @, %d px differ)" % d_alt)
     d_lay = diff(crop("00-open", lay), crop("03-de", lay))
     say(d_lay >= 20, "the layout key shows the layout in force (US -> DE, %d px differ)" % d_lay)
+    d_gone = diff(crop("05-end", k1e), crop("06-gone", k1e))
+    say(d_gone >= 30, "the second start closed the keyboard: its key area changed (%d px differ)" % d_gone)
     colours = len(set(crop("00-open", k1e)[i:i + 3] for i in range(0, len(crop("00-open", k1e)), 3)))
     say(colours >= 3, "a key is drawn (face, border, glyph: %d colours)" % colours)
 except (KeyError, OSError, TypeError) as e:
