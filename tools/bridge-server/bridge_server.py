@@ -642,11 +642,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             pub = str(d.get('pubkey', ''))[:64]
             if not g.paired:
-                if not g.code:
-                    g.code = '%06d' % secrets.randbelow(1000000)
+                pairing.ensure_code(_devices, g, now())
                 g.pubkey = pub or g.pubkey
                 g.info = self.info_from(d, ip)
-                log('PAIRING NEEDED: %s (%s) code %s' % (device_id, ip, g.code))
+                book_write()
+                log('PAIRING NEEDED: %s (%s)' % (device_id, ip))
                 self.reply({'state': 'pairing-needed', 'code': g.code})
                 return
             if g.pubkey and pub and (pub != g.pubkey):

@@ -107,6 +107,17 @@ try:
     chk("new code issued after expiry", cx2 is not None and x.device_id in pending_ids())
     chk("fresh code pairs", api("/bridge/pair", {"code": cx2})[1] == 200)
 
+    h = Dev()
+    body, st = api("/bridge/login", {"device_id": h.device_id, "pubkey": h.pub}, admin=False)
+    hc = body.get("code", "")
+    chk("http login of unknown device gives 6-digit code", st == 200 and len(hc) == 6 and hc.isdigit(), str(body))
+    chk("http login device is pending", h.device_id in pending_ids())
+    chk("http login code pairs", api("/bridge/pair", {"code": hc})[1] == 200)
+    h2 = Dev()
+    hc2 = api("/bridge/login", {"device_id": h2.device_id, "pubkey": h2.pub}, admin=False)[0].get("code", "")
+    time.sleep(3.6)
+    chk("http login code expires", len(hc2) == 6 and h2.device_id not in pending_ids())
+
     batch = []
     for _ in range(6):
         b = Dev()
