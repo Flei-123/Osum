@@ -50,7 +50,7 @@ if len(picks) >= 2:
 shuts = re.findall(r"calpop: shut (\w+)", ser)
 say(shuts[:2] == ["toggle", "outside"], "closed by a clock press and by an outside press (%s)" % shuts)
 keys = re.findall(r"calpop: key (\d+)", ser)
-print("  INFO  Esc closes the popup: %s; key 27 reached the popup: %s (open issue, see roadmap)" % ("yes" if "esc" in shuts else "NO", "yes" if "27" in keys else "NO"))
+say("esc" in shuts and "27" in keys, "Esc reaches the popup and closes it (shuts %s, keys %s)" % (shuts, keys))
 rects = dict((n_, tuple(int(v) for v in r)) for n_, *r in re.findall(r"calpop: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser))
 say(all(k in rects for k in ("prev", "next", "today", "cell")), "the popup reports its buttons (%s)" % sorted(rects))
 # geometry: the card lies above the bar and inside the screen
