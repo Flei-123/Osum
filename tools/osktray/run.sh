@@ -27,6 +27,7 @@ klickauf trayrectosk
 warteauf 'osk: ready' || 60
 warte 5
 foto a-osk
+marke 'traypop: rect name=osk'
 klickauf chevron
 warteneu 'traypop: rect name=osk' || 25
 warte 3
