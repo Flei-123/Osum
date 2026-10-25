@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import font.ttf
+
+export {
+    MAX_FACES, FIRST_CP, TAG_SHIFT,
+    count, path_at, tag_of, face_of_tag, set_loaded, loaded, enable, enabled,
+    find, pair_kern
+}
+
+const MAX_FACES: u64 = 2
+const FIRST_CP: u32 = 0xA0 as u32
+const TAG_SHIFT: u32 = 24 as u32
+const GID_MASK: u32 = 0xFFFFFF as u32
+
+static mut s_paths: [u8; 33] = "/lib/symbols.ttf\0/lib/emoji.ttf\0\0"
+static mut s_loaded: [u64; 2] = [0; 2]
+static mut s_enabled: u64 = 1
+
+fn rd(i: u64) -> u64 {
+    return (__mmio_read8((((&s_paths[0]) as u64) + i) as *mut u8)) as u64
+}
+
+fn path_start(i: u64) -> u64 {
+    var at: u64 = 0
+    var k: u64 = 0
+    while k < i {
+        while rd(at) != 0 {
+            at = at + 1
+        }
+        at = at + 1
+        k = k + 1
+    }
+    return at
+}
+
+fn count() -> u64 {
+    var n: u64 = 0
+    var at: u64 = 0
+    while rd(at) != 0 && n < MAX_FACES {
+        while rd(at) != 0 {
+            at = at + 1
+        }
+        at = at + 1
+        n = n + 1
+    }
+    return n
+}
+
+fn path_at(i: u64) -> u64 {
+    if i >= count() {
+        return 0
+    }
+    return ((&s_paths[0]) as u64) + path_start(i)
+}
+
+fn tag_of(i: u64) -> u32 {
+    return ((i + 1) as u32) << TAG_SHIFT
+}
+
+fn face_of_tag(gid: u32) -> u64 {
+    let k: u32 = gid >> TAG_SHIFT
+    if k == 0 as u32 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return (k - 1 as u32) as u64
+}
+
+fn set_loaded(i: u64, v: u64) {
+    if i < MAX_FACES {
+        s_loaded[i as usize] = v
+    }
+}
+
+fn loaded(i: u64) -> bool {
+    return i < MAX_FACES && s_loaded[i as usize] != 0
+}
+
+fn enable(v: u64) {
+    s_enabled = v
+}
+
+fn enabled() -> bool {
+    return s_enabled != 0
+}
+
+fn face_ptr(base: u64, stride: u64, i: u64) -> *mut ttf.Font {
+    return (base + i * stride) as *mut ttf.Font
+}
+
+fn find(base: u64, stride: u64, cp: u32, upem: u32) -> u32 {
+    if !enabled() || cp < FIRST_CP {
+        return 0 as u32
+    }
+    var i: u64 = 0
+    let n: u64 = count()
+    while i < n {
+        if loaded(i) {
+            let f: *mut ttf.Font = face_ptr(base, stride, i)
+            if upem == 0 as u32 || ttf.font_upem(f) == upem {
+                let g: u32 = ttf.font_glyph_for(f, cp)
+                if g != 0 as u32 {
+                    return (g & GID_MASK) | tag_of(i)
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0 as u32
+}
+
+fn pair_kern(base: u64, stride: u64, face: u64, c1: u32, c2: u32) -> i32 {
+    if face >= count() || !loaded(face) {
+        return 0
+    }
+    let f: *mut ttf.Font = face_ptr(base, stride, face)
+    let g1: u32 = ttf.font_glyph_for(f, c1)
+    let g2: u32 = ttf.font_glyph_for(f, c2)
+    if g1 == 0 as u32 || g2 == 0 as u32 {
+        return 0
+    }
+    return ttf.font_kern(f, g1, g2)
+}
