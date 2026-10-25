@@ -18,7 +18,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "PINGGW: skipped, no qemu"; exit 0; }
-CASES="${*:-dhcp wrongmask}"
+CASES="${*:-dhcp wrongmask nogw}"
 trap 'for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; [ -n "${PINGGW_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/ping.elf" ]; then
     bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
@@ -42,7 +42,7 @@ run() { # name script nipword peer-args
     echo $! > "$T/$n.ppid"
     sleep 1
     timeout 140 qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256 \
-        -append "osum nokbd nosched noproc nofs noring3 usb usbpoll nic $nip nsvc=0 nwait=0 script=sh /t/$script;exit" \
+        -append "osum nokbd nosched vfs usb usbpoll nic $nip nsvc=0 nwait=0 script=sh /t/$script;exit" \
         -serial "file:$T/$n.txt" -display none -no-reboot -pidfile "$T/$n.pid" \
         -netdev "dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port=$p,remote.type=inet,remote.host=127.0.0.1,remote.port=$((p+1))" \
         -device virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc \
@@ -75,6 +75,7 @@ for c in $CASES; do
         chk dhcp "proc: route 1.1.1.1 via gateway" 'route: 1.1.1.1 next=gw hop=192.168.1.1 mac=52:54:00:11:22:33'
         chk dhcp "proc: route 8.8.8.8 via gateway" 'route: 8.8.8.8 next=gw hop=192.168.1.1 mac=52:54:00:11:22:33'
         chk dhcp "proc: arp entry of the gateway" 'arp: 192.168.1.1 52:54:00:11:22:33'
+        nochk dhcp "arp table holds no off-link entry (1.1.1.1)" 'arp: 1.1.1.1 '
         chk dhcp "statistics" '0% packet loss'
         chk dhcp "script reached the end" '==END=='
         panics dhcp
@@ -89,6 +90,16 @@ for c in $CASES; do
         chk wrongmask "proc: route 1.1.1.1 direct" 'route: 1.1.1.1 next=direct hop=1.1.1.1 mac=pending'
         chk wrongmask "script reached the end" '==END=='
         panics wrongmask
+        ;;
+    nogw)
+        run nogw s_dhcp.sh "nip=169.254.10.1/16" "--no-echo"
+        chk nogw "lease" 'dhcp: ack ip=192.168.1.50'
+        pchk nogw "echo for 1.1.1.1 reached the gateway" 'ECHO dst=1.1.1.1 via_gw=1'
+        chk nogw "timeout line per packet" 'ping: no answer for 2'
+        chk nogw "100% loss reported" '100% packet loss'
+        chk nogw "second target ends too" 'PING 8.8.8.8'
+        chk nogw "script reached the end" '==END=='
+        panics nogw
         ;;
     esac
 done
