@@ -59,8 +59,11 @@
 //
 // T1 NO SESSION RESUMPTION, no 0-RTT, no PSK. Every connection is a full
 //    handshake. `NewSessionTicket` is read and thrown away.
-// T2 NO KEY UPDATE (see `keys.fi` K2). A `key_update` from the server ends
-//    the connection with an alert instead of being ignored.
+// T2 KEY UPDATE (RFC 8446 4.6.3, TLS 1.3 only). A `key_update` from the
+//    server rotates the read keys; when it asks for one in return the write
+//    keys rotate too. `tls_key_update` starts a rotation, and `tls_write`
+//    starts one by itself after `rekey_after` records under one key.
+//    `tls_set_key_update(t, false)` refuses them with an alert.
 // T3 NO CLIENT CERTIFICATE. A `CertificateRequest` is answered with an
 //    empty Certificate message, which is what a client without one must
 //    do -- not with an alert, because plenty of servers ask optionally.
@@ -142,6 +145,8 @@ export {
     // round ASYNC -- non-blocking mode (see N1..N4 below)
     tls_set_nonblocking, tls_handshake_step, tls_flush, tls_out_pending,
     tls_is_nonblocking, tls_closed, tls_note_error,
+    tls_key_update, tls_set_key_update, tls_set_rekey_after, tls_rekeys_out,
+    tls_rekeys_in,
     SUITE12_ECDSA_AES128GCM, SUITE12_ECDSA_AES256GCM, SUITE12_RSA_AES128GCM,
     SUITE12_RSA_AES256GCM, SUITE12_ECDSA_CHACHA20, SUITE12_RSA_CHACHA20,
 }
@@ -195,6 +200,7 @@ const HS_CLIENT_KEY_EXCHANGE: u32 = 16
 const HS_FINISHED: u32 = 20
 const HS_KEY_UPDATE: u32 = 24
 
+const REKEY_AFTER_RECORDS: u64 = 8388608 // 2^23, below the AES-GCM limit of RFC 8446 5.5
 const MAX_RECORD: usize = 16640 // 2^14 plus the AEAD expansion
 const MAX_HANDSHAKE: usize = 65536
 const MAX_CERTS: usize = 10
@@ -230,6 +236,12 @@ struct Tls {
     skey: [u8; 32],
     siv: [u8; 12],
     sseq: u64,
+    c_app: [u8; 32],
+    s_app: [u8; 32],
+    rekey_after: u64,
+    rekeys_out: u32,
+    rekeys_in: u32,
+    key_update_ok: bool,
     have_keys: bool,
     hs_secret: [u8; 32],
     ms_secret: [u8; 32],
@@ -288,7 +300,9 @@ fn tls_new() -> Tls {
         tr: rt.buf_new(), app: rt.buf_new(),
         apos: 0, host: [0; 256], hostlen: 0, alpn: [0; 32], alpnlen: 0,
         suite: 0, keylen: 0, ckey: [0; 32], civ: [0; 12], cseq: 0,
-        skey: [0; 32], siv: [0; 12], sseq: 0, have_keys: false,
+        skey: [0; 32], siv: [0; 12], sseq: 0, c_app: [0; 32], s_app: [0; 32],
+        rekey_after: REKEY_AFTER_RECORDS, rekeys_out: 0 as u32, rekeys_in: 0 as u32,
+        key_update_ok: true, have_keys: false,
         hs_secret: [0; 32], ms_secret: [0; 32], c_hs_secret: [0; 32],
         s_hs_secret: [0; 32], priv: [0; 32], pub_key: [0; 32],
         p256_priv: [0; 32], p256_pub: [0; 65], group: 0 as u32,
@@ -1361,12 +1375,119 @@ fn install_application_keys(t: *mut Tls) -> bool {
         (&(*t).ckey[0]) as u64, (&(*t).civ[0]) as u64) {
         return false
     }
+    rt.mem_copy((&(*t).c_app[0]) as u64, (&cs[0]) as u64, 32)
+    rt.mem_copy((&(*t).s_app[0]) as u64, (&ss[0]) as u64, 32)
     if !keys.traffic_keys((&ss[0]) as u64, (*t).keylen,
         (&(*t).skey[0]) as u64, (&(*t).siv[0]) as u64) {
         return false
     }
     (*t).cseq = 0
     (*t).sseq = 0
+    return true
+}
+
+fn rotate_server_keys(t: *mut Tls) -> bool {
+    var next: [u8; 32] = [0; 32]
+    if !keys.next_secret((&(*t).s_app[0]) as u64, (&next[0]) as u64) {
+        return false
+    }
+    if !keys.traffic_keys((&next[0]) as u64, (*t).keylen,
+        (&(*t).skey[0]) as u64, (&(*t).siv[0]) as u64) {
+        return false
+    }
+    rt.mem_copy((&(*t).s_app[0]) as u64, (&next[0]) as u64, 32)
+    (*t).sseq = 0
+    (*t).rekeys_in = (*t).rekeys_in + 1 as u32
+    return true
+}
+
+fn rotate_client_keys(t: *mut Tls) -> bool {
+    var next: [u8; 32] = [0; 32]
+    if !keys.next_secret((&(*t).c_app[0]) as u64, (&next[0]) as u64) {
+        return false
+    }
+    if !keys.traffic_keys((&next[0]) as u64, (*t).keylen,
+        (&(*t).ckey[0]) as u64, (&(*t).civ[0]) as u64) {
+        return false
+    }
+    rt.mem_copy((&(*t).c_app[0]) as u64, (&next[0]) as u64, 32)
+    (*t).cseq = 0
+    (*t).rekeys_out = (*t).rekeys_out + 1 as u32
+    return true
+}
+
+fn send_key_update(t: *mut Tls, request: bool) -> bool {
+    var msg: [u8; 5] = [24, 0, 0, 1, 0]
+    if request {
+        msg[4] = 1 as u8
+    }
+    if !write_record(t, REC_HANDSHAKE, (&msg[0]) as u64, 5) {
+        return false
+    }
+    return rotate_client_keys(t)
+}
+
+fn tls_key_update(t: *mut Tls, request: bool) -> TlsError!bool {
+    if !(*t).established || (*t).v12 || (*t).closed {
+        return TlsError::Protocol
+    }
+    if !send_key_update(t, request) {
+        return TlsError::Io
+    }
+    return true
+}
+
+fn tls_set_key_update(t: *mut Tls, on: bool) {
+    (*t).key_update_ok = on
+}
+
+fn tls_set_rekey_after(t: *mut Tls, records: u64) {
+    (*t).rekey_after = records
+}
+
+fn tls_rekeys_out(t: *mut Tls) -> u32 {
+    return (*t).rekeys_out
+}
+
+fn tls_rekeys_in(t: *mut Tls) -> u32 {
+    return (*t).rekeys_in
+}
+
+fn post_handshake(t: *mut Tls) -> TlsError!bool {
+    let p: u64 = (*t).rec.ptr
+    let n: usize = (*t).rec.len
+    var at: usize = 0
+    while at + 4 <= n {
+        let ht: u32 = rt.ld8(p, at) as u32
+        let hl: usize = be24(p, at + 1)
+        if at + 4 + hl > n {
+            return true
+        }
+        if ht == HS_KEY_UPDATE && !(*t).v12 {
+            if !(*t).key_update_ok {
+                send_alert(t, 2 as u32, 40 as u32)
+                return TlsError::Unsupported
+            }
+            let req: u8 = rt.ld8(p, at + 4)
+            if hl != 1 || req > 1 as u8 {
+                send_alert(t, 2 as u32, 47 as u32)
+                return TlsError::Protocol
+            }
+            if at + 5 != n {
+                send_alert(t, 2 as u32, 10 as u32)
+                return TlsError::Protocol
+            }
+            if !rotate_server_keys(t) {
+                return TlsError::Protocol
+            }
+            if req == 1 as u8 {
+                if !send_key_update(t, false) {
+                    return TlsError::Io
+                }
+            }
+        }
+        at = at + 4 + hl
+    }
     return true
 }
 
@@ -2142,6 +2263,11 @@ fn tls_write(t: *mut Tls, p: u64, n: usize) -> TlsError!bool {
         if chunk > 16384 {
             chunk = 16384
         }
+        if !(*t).v12 && (*t).cseq >= (*t).rekey_after {
+            if !send_key_update(t, false) {
+                return TlsError::Io
+            }
+        }
         if !write_record(t, REC_APPDATA, p + at as u64, chunk) {
             return TlsError::Io
         }
@@ -2189,6 +2315,9 @@ fn tls_read(t: *mut Tls, out: u64, max: usize) -> TlsError!usize {
             // this client does not do (T7): a warning alert says so.
             if (*t).v12 && (*t).rec.len >= 1 && rt.ld8((*t).rec.ptr, 0) == 0 as u8 {
                 send_alert(t, 1 as u32, 100 as u32) // no_renegotiation
+            }
+            if !(*t).v12 {
+                let pg: bool = try post_handshake(t)
             }
             continue
         }

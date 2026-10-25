@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/apprights/fspolicy.fi -- file-access rules of a CONFINED app (S-010, docs/APP-RECHTE-ENERGIE.md stage 3).
+//
+// Pure functions, no heap, importable from the kernel (kernel/ipc/appfs.fi) and from host tests.
+// A confined app is a sticky "app:<name>" label whose manifest says `sandbox=files` and that holds no `fs.home` grant.
+// Everything else (unlabelled tools, system bundles, unconfined apps) is never limited here.
+// Absolute paths are folded here (".", "..", repeated slashes) before the prefix test; the kernel sees the raw user string.
+// READ: the data folder of the app plus the shared system areas listed in `tbl`.
+// WRITE: only /data/<name> and below. Creating links is refused outright (a link out of the data folder would defeat the prefix test).
+
+import apprights.policy
+
+export { read_ok, write_ok, link_ok }
+
+static mut tbl: [u8; 219] = "/\0/data\0/etc/resolv.conf\0/etc/hosts\0/etc/localtime\0/etc/locale.conf\0/dev/null\0/dev/zero\0/dev/urandom\0/dev/random\0/dev/tty\0/dev/fb\0/apps/\0/bin/\0/lib/\0/usr/\0/proc/\0/system/\0/etc/ssl/\0/etc/zoneinfo/\0/etc/fonts/\0/dev/shm/\0\0"
+
+fn rd(p: u64, i: u64) -> u64 {
+    let c: u8 = *((p + i) as *mut u8)
+    return c as u64
+}
+
+fn slen(p: u64) -> u64 {
+    var n: u64 = 0
+    while n < 4096 && rd(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn tbl_match(path: u64, plen: u64) -> bool {
+    var at: u64 = 0
+    while rd((&tbl[0]) as u64, at) != 0 {
+        let base: u64 = ((&tbl[0]) as u64) + at
+        let n: u64 = slen(base)
+        var same: bool = true
+        var i: u64 = 0
+        var cmp: u64 = n
+        if rd(base, n - 1) == 47 && n > 1 {
+            if plen == n - 1 {
+                cmp = n - 1
+            } else if plen < n {
+                same = false
+            }
+        } else {
+            if plen != n {
+                same = false
+            }
+        }
+        while same && i < cmp {
+            if rd(path, i) != rd(base, i) {
+                same = false
+            }
+            i = i + 1
+        }
+        if same {
+            return true
+        }
+        at = at + n + 1
+    }
+    return false
+}
+
+fn under_data(app: u64, path: u64, plen: u64) -> bool {
+    let an: u64 = slen(app)
+    if plen < 6 + an {
+        return false
+    }
+    if rd(path, 0) != 47 || rd(path, 1) != 100 || rd(path, 2) != 97 || rd(path, 3) != 116 || rd(path, 4) != 97 || rd(path, 5) != 47 {
+        return false
+    }
+    var i: u64 = 0
+    while i < an {
+        if rd(path, 6 + i) != rd(app, i) {
+            return false
+        }
+        i = i + 1
+    }
+    if plen == 6 + an {
+        return true
+    }
+    return rd(path, 6 + an) == 47
+}
+
+fn confined_app(label: u64) -> u64 {
+    let app: u64 = policy.label_app(label)
+    if app == 0 {
+        return 0
+    }
+    if !policy.confined(app) {
+        return 0
+    }
+    return app
+}
+
+fn read_flat(label: u64, path: u64) -> bool {
+    let app: u64 = confined_app(label)
+    if app == 0 {
+        return true
+    }
+    let plen: u64 = slen(path)
+    if under_data(app, path, plen) {
+        return true
+    }
+    return tbl_match(path, plen)
+}
+
+fn write_flat(label: u64, path: u64) -> bool {
+    let app: u64 = confined_app(label)
+    if app == 0 {
+        return true
+    }
+    return under_data(app, path, slen(path))
+}
+
+const FOLD_MAX: u64 = 512
+
+fn wr(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = v as u8
+}
+
+fn pop_component(out: u64, olen: u64) -> u64 {
+    var n: u64 = olen
+    if n > 1 {
+        n = n - 1
+    }
+    while n > 1 && rd(out, n - 1) != 47 {
+        n = n - 1
+    }
+    if n > 1 {
+        n = n - 1
+    }
+    return n
+}
+
+fn fold(path: u64, out: u64) -> u64 {
+    wr(out, 0, 47)
+    var olen: u64 = 1
+    var i: u64 = 0
+    while rd(path, i) != 0 {
+        while rd(path, i) == 47 {
+            i = i + 1
+        }
+        let start: u64 = i
+        while rd(path, i) != 0 && rd(path, i) != 47 {
+            i = i + 1
+        }
+        let n: u64 = i - start
+        if n == 0 {
+        } else if n == 1 && rd(path, start) == 46 {
+        } else if n == 2 && rd(path, start) == 46 && rd(path, start + 1) == 46 {
+            olen = pop_component(out, olen)
+        } else {
+            if olen + n + 2 > FOLD_MAX {
+                return 0
+            }
+            if olen > 1 {
+                wr(out, olen, 47)
+                olen = olen + 1
+            }
+            var k: u64 = 0
+            while k < n {
+                wr(out, olen + k, rd(path, start + k))
+                k = k + 1
+            }
+            olen = olen + n
+        }
+    }
+    wr(out, olen, 0)
+    return olen
+}
+
+fn read_ok(label: u64, path: u64) -> bool {
+    if confined_app(label) == 0 || rd(path, 0) != 47 {
+        return read_flat(label, path)
+    }
+    var buf: [u8; 512] = [0 as u8; 512]
+    let b: u64 = (&buf[0]) as u64
+    if fold(path, b) == 0 {
+        return false
+    }
+    return read_flat(label, b)
+}
+
+fn write_ok(label: u64, path: u64) -> bool {
+    if confined_app(label) == 0 || rd(path, 0) != 47 {
+        return write_flat(label, path)
+    }
+    var buf: [u8; 512] = [0 as u8; 512]
+    let b: u64 = (&buf[0]) as u64
+    if fold(path, b) == 0 {
+        return false
+    }
+    return write_flat(label, b)
+}
+
+fn link_ok(label: u64) -> bool {
+    return confined_app(label) == 0
+}

@@ -83,6 +83,7 @@ import bus.pcidbg
 import drv.net.iwl_dbg
 import net.wlan_reload
 import ipc.perm
+import ipc.appfs
 import sched.ctr
 import sched.origin
 import apprights.policy
@@ -155,9 +156,9 @@ export {
     SYS_OSUM_TILEBIND,
     SYS_OSUM_PMON, SYS_OSUM_CPUSTAT,
     SYS_OSUM_SHOT, SH_INFO, SH_ARM, SH_GRAB, SH_KEY, SH_DROP,
-    SYS_OSUM_TIPP, TI_INFO, TI_ARM, TI_DROP, TI_KEY, TI_MOVE, TI_BUTTON, TI_SCAN, TI_LOCK,
+    SYS_OSUM_TIPP, TI_INFO, TI_ARM, TI_DROP, TI_KEY, TI_MOVE, TI_BUTTON, TI_SCAN, TI_LOCK, TI_OSK,
     TQ_ARMED, TQ_ARMPID, TQ_USED, TQ_TOTAL, TQ_DENIED, TQ_ARMS, TQ_KEYFOR, TQ_LAYOUT,
-    TQ_LASTPID, TQ_MAX, TQ_RECENT, TQ_LOCKED, TQ_COUNT,
+    TQ_LASTPID, TQ_MAX, TQ_RECENT, TQ_LOCKED, TQ_CODEOF, TQ_COUNT,
     SI_READY, SI_WIDTH, SI_HEIGHT, SI_ROWBYTES, SI_BYTES,
     SI_CHUNKROWS, SI_SHOTS, SI_LASTPID, SI_ARMED, SI_ARMPID,
     SI_DENIED, SI_ARMS, SI_NEXT, SI_KEY, SI_COUNT,
@@ -1768,6 +1769,7 @@ const TI_KEY: u64 = 3
 const TI_MOVE: u64 = 4
 const TI_BUTTON: u64 = 5
 const TI_SCAN: u64 = 6
+const TI_OSK: u64 = 8 // a1 = set-1 scancode from the on-screen keyboard: no permit, no remote-input mark; unlabelled callers, root and the bar only
 const TI_LOCK: u64 = 7 // a1 != 0: engage the emergency stop (anyone); a1 == 0: release (root only)
 
 // Die Felder von TI_INFO. Alle frei abfragbar -- wer tippt, soll sich
@@ -1784,7 +1786,8 @@ const TQ_RECENT: u64 = 8 // 1 = input from outside flowing now or within the las
 const TQ_LOCKED: u64 = 9 // 1 = emergency stop engaged
 const TQ_KEYFOR: u64 = 11 // a2 = code point (+ (layout + 1) << 24 for another layout than the running one): scancode that types it, +0x200 Shift, +0x400 AltGr; 0 = no such key
 const TQ_LAYOUT: u64 = 12 // the keyboard layout in force (kbd.L_*: 0 us, 1 de, 2 uk, 3 fr, 4 es, 5 it, 6 ru)
-const TQ_COUNT: u64 = 13
+const TQ_CODEOF: u64 = 13 // a2 = scancode | shift << 8 | altgr << 9: the code point that key types on the layout in force (0 = none)
+const TQ_COUNT: u64 = 14
 // ============================================ RUNDE ALLTAG: DIE SPERRE
 //
 //   1870  osum_sperre(op, arg)
@@ -6228,6 +6231,9 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64) -> u64 {
     if !perm.walk(state, me, buf) {
         return neg(errno.E_ACCES)
     }
+    if ((flags & 3) != 0 || (flags & O_CREAT) != 0 || (flags & O_TRUNC) != 0) && !appfs.write_ok(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     // ============================================= RUNDE K14: die Weiche
     //
     // HIER, UND NUR HIER, ENTSCHEIDET SICH, AUF WELCHEM DATEISYSTEM EIN
@@ -6470,7 +6476,7 @@ fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
     // Warum vor und nicht hinter ihr, steht ausgeschrieben in `do_open`:
     // sonst prueft der eine Weg, was der andere nicht kennt, und
     // `tools/k14/run.sh` haelt beide Oktett fuer Oktett gegeneinander.
-    if !perm.walk(state, me, buf) {
+    if !perm.walk_w(state, me, buf) {
         return neg(errno.E_ACCES)
     }
     if vfs.ready(state) {
@@ -6543,7 +6549,7 @@ fn do_rmdir(state: u64, me: u64, name: u64) -> u64 {
     if errno.is_error(len) {
         return len
     }
-    if !perm.walk(state, me, buf) {
+    if !perm.walk_w(state, me, buf) {
         return neg(errno.E_ACCES)
     }
     if vfs.ready(state) {
@@ -6599,7 +6605,7 @@ fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
     // Warum vor und nicht hinter ihr, steht ausgeschrieben in `do_open`:
     // sonst prueft der eine Weg, was der andere nicht kennt, und
     // `tools/k14/run.sh` haelt beide Oktett fuer Oktett gegeneinander.
-    if !perm.walk(state, me, buf) {
+    if !perm.walk_w(state, me, buf) {
         return neg(errno.E_ACCES)
     }
     if vfs.ready(state) {
@@ -6865,6 +6871,9 @@ fn do_lstat(state: u64, me: u64, name: u64, out: u64) -> u64 {
 // ist das VERZEICHNIS, in dem er entstehen soll: wer dort nicht
 // schreiben darf, darf auch keinen Verweis hineinlegen.
 fn do_symlink(state: u64, me: u64, ziel: u64, wo: u64) -> u64 {
+    if !appfs.free_ok(state, me) {
+        return neg(errno.E_ACCES)
+    }
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
     }
@@ -7053,7 +7062,7 @@ fn do_utimensat(state: u64, me: u64, fd: u64, name: u64, zeiten: u64,
         // nicht betreten darf, soll nicht einmal erfahren, ob der Name
         // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
         // stehen in `kernel/perm.fi`.
-        if !perm.walk(state, me, buf) {
+        if !perm.walk_w(state, me, buf) {
             return neg(errno.E_ACCES)
         }
         ino = fs.path(state, buf)
@@ -11103,6 +11112,9 @@ fn do_vfs_umount(state: u64, me: u64, target: u64) -> u64 {
 // Namen; Linux sagt dazu EXDEV, und dieser Kern auch. FAT32 kennt
 // ueberhaupt keine zweiten Namen.
 fn do_link(state: u64, me: u64, from: u64, to: u64) -> u64 {
+    if !appfs.free_ok(state, me) {
+        return neg(errno.E_ACCES)
+    }
     let a: u64 = nameb(state)
     let b: u64 = nameb(state) + 1024
     let la: u64 = fetch_path(state, me, from, a, MAX_NAME)
@@ -11333,10 +11345,10 @@ fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
     // braucht in BEIDEN Schreib- und Betretungsrecht -- an der Datei
     // selbst nichts, denn ihr Inhalt wird nicht angefasst. Genau so
     // steht es in POSIX, und genau so steht es jetzt hier.
-    if !perm.walk(state, me, a) {
+    if !perm.walk_w(state, me, a) {
         return neg(errno.E_ACCES)
     }
-    if !perm.walk(state, me, b) {
+    if !perm.walk_w(state, me, b) {
         return neg(errno.E_ACCES)
     }
     if vfs.ready(state) {
@@ -16731,6 +16743,9 @@ fn ino_of_path(state: u64, me: u64, name: u64) -> u64 {
 }
 
 fn do_chmod(state: u64, me: u64, name: u64, mode: u64) -> u64 {
+    if !appfs.free_ok(state, me) {
+        return neg(errno.E_ACCES)
+    }
     let ino: u64 = ino_of_path(state, me, name)
     if errno.is_error(ino) {
         return ino
@@ -16739,6 +16754,9 @@ fn do_chmod(state: u64, me: u64, name: u64, mode: u64) -> u64 {
 }
 
 fn do_chown(state: u64, me: u64, name: u64, uid: u64, gid: u64) -> u64 {
+    if !appfs.free_ok(state, me) {
+        return neg(errno.E_ACCES)
+    }
     let ino: u64 = ino_of_path(state, me, name)
     if errno.is_error(ino) {
         return ino
@@ -19078,6 +19096,9 @@ const LC_CHROOT: u64 = 161
 // A nested chroot gets a new slot whose root is longer (the path already carries the old root), so it can only go deeper.
 // The cwd becomes "/" (Linux keeps it; every user of chroot calls chdir("/") next, and a cwd outside the root must not survive).
 fn do_chroot(state: u64, me: u64, name: u64) -> u64 {
+    if !appfs.free_ok(state, me) {
+        return neg(errno.E_ACCES)
+    }
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
     }

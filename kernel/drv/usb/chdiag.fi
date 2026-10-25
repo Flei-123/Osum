@@ -1,0 +1,211 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import mm.mem
+
+export { arm, active, set_active, get64, set64, raw, note_device, note_config, bump, entry_count, entry_byte, F_STARTS, F_PASSES, F_DESCS, F_UNIT, F_DEVINFO, F_IDS, F_NCFG, F_CFGINFO, F_START, F_REC, F_ARMS }
+
+const PTR_OFF: u64 = 0x56980
+const MAGIC: u64 = 0x43484447
+
+const F_MAGIC: u64 = 0x00
+const F_ACTIVE: u64 = 0x08
+const F_STARTS: u64 = 0x10
+const F_PASSES: u64 = 0x18
+const F_DESCS: u64 = 0x20
+const F_UNIT: u64 = 0x28
+const F_DEVINFO: u64 = 0x30
+const F_IDS: u64 = 0x38
+const F_NCFG: u64 = 0x40
+const F_CFGINFO: u64 = 0x48
+const F_START: u64 = 0x50
+const F_REC: u64 = 0x58
+const F_ARMS: u64 = 0x60
+const F_ENTS: u64 = 0x68
+const DEV_RAW: u64 = 0x80
+const DEV_RAW_LEN: u64 = 18
+const CFG_RAW: u64 = 0x100
+const CFG_RAW_LEN: u64 = 256
+const ENT_BASE: u64 = 0x200
+const ENT_BYTES: u64 = 16
+const ENT_MAX: u64 = 32
+
+const K_IFACE: u64 = 1
+const K_EP: u64 = 2
+const NO_BURST: u64 = 0xFF
+
+fn base(state: u64) -> u64 {
+    let p: *mut u64 = (state + PTR_OFF) as *mut u64
+    return *p
+}
+
+fn arm(state: u64) -> u64 {
+    var b: u64 = base(state)
+    if b != 0 {
+        return b
+    }
+    b = mem.frame_alloc(state)
+    if b == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < 512 {
+        let q: *mut u64 = (b + i * 8) as *mut u64
+        *q = 0
+        i = i + 1
+    }
+    let m: *mut u64 = (b + F_MAGIC) as *mut u64
+    *m = MAGIC
+    let p: *mut u64 = (state + PTR_OFF) as *mut u64
+    *p = b
+    return b
+}
+
+fn get64(state: u64, off: u64) -> u64 {
+    let b: u64 = base(state)
+    if b == 0 {
+        return 0
+    }
+    let q: *mut u64 = (b + off) as *mut u64
+    return *q
+}
+
+fn set64(state: u64, off: u64, v: u64) {
+    let b: u64 = base(state)
+    if b == 0 {
+        return
+    }
+    let q: *mut u64 = (b + off) as *mut u64
+    *q = v
+}
+
+fn bump(state: u64, off: u64) {
+    set64(state, off, get64(state, off) + 1)
+}
+
+fn active(state: u64) -> bool {
+    return get64(state, F_ACTIVE) != 0
+}
+
+fn set_active(state: u64, on: bool) {
+    if on {
+        set64(state, F_ACTIVE, 1)
+    } else {
+        set64(state, F_ACTIVE, 0)
+    }
+}
+
+fn put8(state: u64, off: u64, v: u64) {
+    let b: u64 = base(state)
+    if b == 0 {
+        return
+    }
+    kstate.set8(b + off, (v & 255) as u8)
+}
+
+fn raw(state: u64, kind: u64, i: u64) -> u64 {
+    let b: u64 = base(state)
+    if b == 0 {
+        return 0
+    }
+    if kind == 0 {
+        if i >= DEV_RAW_LEN { return 0 }
+        return kstate.get8(b + DEV_RAW + i)
+    }
+    if i >= CFG_RAW_LEN {
+        return 0
+    }
+    return kstate.get8(b + CFG_RAW + i)
+}
+
+fn note_device(state: u64, buf: u64, info: u64, ids: u64) {
+    let b: u64 = arm(state)
+    if b == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < DEV_RAW_LEN {
+        put8(state, DEV_RAW + i, kstate.get8(buf + i))
+        i = i + 1
+    }
+    bump(state, F_DESCS)
+    set64(state, F_DEVINFO, info)
+    set64(state, F_IDS, ids)
+    set64(state, F_NCFG, kstate.get8(buf + 17))
+    set64(state, F_ENTS, 0)
+    set64(state, F_CFGINFO, 0)
+    set_active(state, true)
+}
+
+fn entry_count(state: u64) -> u64 {
+    return get64(state, F_ENTS)
+}
+
+fn entry_byte(state: u64, idx: u64, i: u64) -> u64 {
+    let b: u64 = base(state)
+    if b == 0 || idx >= ENT_MAX || i >= ENT_BYTES {
+        return 0
+    }
+    return kstate.get8(b + ENT_BASE + idx * ENT_BYTES + i)
+}
+
+fn add_entry(state: u64, kind: u64, ci: u64, iface: u64, alt: u64, a: u64, bb: u64, c: u64, d: u64, e: u64, f: u64) -> u64 {
+    let n: u64 = get64(state, F_ENTS)
+    if n >= ENT_MAX {
+        return ENT_MAX
+    }
+    let o: u64 = ENT_BASE + n * ENT_BYTES
+    put8(state, o, kind)
+    put8(state, o + 1, ci)
+    put8(state, o + 2, iface)
+    put8(state, o + 3, alt)
+    put8(state, o + 4, a)
+    put8(state, o + 5, bb)
+    put8(state, o + 6, c)
+    put8(state, o + 7, d)
+    put8(state, o + 8, e)
+    put8(state, o + 9, f)
+    set64(state, F_ENTS, n + 1)
+    return n
+}
+
+fn b8(p: u64, i: u64) -> u64 {
+    return kstate.get8(p + i)
+}
+
+fn note_config(state: u64, ci: u64, total: u64, got: u64, buf: u64) {
+    if !active(state) {
+        return
+    }
+    set64(state, F_CFGINFO, ci | (total << 8) | ((got & 0xFFFF) << 24) | (b8(buf, 4) << 40) | (b8(buf, 5) << 48))
+    if ci == 0 {
+        var i: u64 = 0
+        while i < CFG_RAW_LEN && i < total {
+            put8(state, CFG_RAW + i, b8(buf, i))
+            i = i + 1
+        }
+    }
+    var at: u64 = 0
+    var iface: u64 = 0
+    var alt: u64 = 0
+    var last_ep: u64 = ENT_MAX
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                iface = b8(buf, at + 2)
+                alt = b8(buf, at + 3)
+                add_entry(state, K_IFACE, ci, iface, alt, b8(buf, at + 5), b8(buf, at + 6), b8(buf, at + 7), b8(buf, at + 4), 0, 0)
+                last_ep = ENT_MAX
+            } else if kind == 5 && len >= 7 {
+                let mps: u64 = b8(buf, at + 4) | (b8(buf, at + 5) << 8)
+                last_ep = add_entry(state, K_EP, ci, iface, alt, b8(buf, at + 2), b8(buf, at + 3), mps & 255, mps >> 8, b8(buf, at + 6), NO_BURST)
+            } else if kind == 0x30 && len >= 6 && last_ep < ENT_MAX {
+                put8(state, ENT_BASE + last_ep * ENT_BYTES + 9, b8(buf, at + 2))
+            }
+            at = at + len
+        }
+    }
+}

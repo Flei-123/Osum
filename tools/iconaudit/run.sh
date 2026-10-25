@@ -9,10 +9,10 @@
 # kind of icon. Red means a program would show an empty square / a different
 # drawing style:
 #   1. every bundle assets/apps/*.osp has INFO (name=), start.txt and a symbol
-#   2. the symbol is the vector picture (symbol.osym, OSYM 32x32, >= 10 % opaque
+#   2. the symbol is the vector picture (symbol.osym, OSYM 72x72, baked from symbol.svg, >= 10 % opaque
 #      pixels, not one flat colour, NO FILLED TILE behind the glyph: r1016) -- no 16x16 pixel art
 #      among 24 px icons
-#   3. tools/design/mkicons.py knows every bundle (else the next icon run
+#   3. tools/svg/apps.tsv knows every bundle (else the next icon run
 #      leaves it out)
 #   4. every installable GUI package (pakete/*/rezept with `datei=start`) ships
 #      `datei=symbol` and has its symbol.txt source
@@ -36,17 +36,17 @@ def osym_check(path):
     d = open(path, "rb").read()
     if d[:4] != b"OSYM" or len(d) < 12: return "no OSYM header"
     w, h = struct.unpack("<II", d[4:12])
-    if (w, h) != (32, 32): return "%dx%d, not 32x32 vector tile" % (w, h)
+    if (w, h) != (72, 72): return "%dx%d, not 72x72 vector tile" % (w, h)
     if len(d) != 12 + w * h * 4: return "wrong size"
     px = [d[12 + i*4:16 + i*4] for i in range(w * h)]
     opaque = sum(1 for p in px if p[3] > 128)
     if opaque * 10 < w * h: return "only %d opaque pixels" % opaque
     # r1016: NO TILE.  A program icon is the glyph itself, rounded by its own shape; a filled
-    # square / rounded square behind it (Win11 does not do that) shows as (a) most of the 32x32
+    # square / rounded square behind it (Win11 does not do that) shows as (a) most of the 72x72
     # box opaque, or (b) the four corner insets AND the four edge middles all opaque.
     def op(x, y): return px[y * w + x][3] > 128
-    ring = [(16, 3), (16, 28), (3, 16), (28, 16)]
-    cor = [(5, 5), (26, 5), (5, 26), (26, 26)]
+    ring = [(36, 6), (36, 65), (6, 36), (65, 36)]
+    cor = [(10, 10), (61, 10), (10, 61), (61, 61)]
     if opaque * 100 > w * h * 62: return "filled tile: %d %% of the box opaque" % (opaque * 100 // (w * h))
     if all(op(x, y) for x, y in ring) and all(op(x, y) for x, y in cor):
         return "filled tile: corners and edge middles opaque"
@@ -66,11 +66,11 @@ for a in apps:
         say(False, "%s: only a 16x16 symbol.txt, no vector symbol.osym" % n)
     else:
         say(False, "%s: NO ICON (no symbol.osym, no symbol.txt)" % n)
-mk = open(os.path.join(root, "tools/design/mkicons.py")).read()
-known = set(re.findall(r'^\s+"([a-z0-9_]+)":\s+\(', mk, re.M))
+mk = open(os.path.join(root, "tools/svg/apps.tsv")).read()
+known = set(re.findall(r"^([a-z0-9_]+)\t", mk, re.M))
 for a in apps:
     n = os.path.basename(a)[:-4]
-    say(n in known, "%s: listed in tools/design/mkicons.py" % n)
+    say(n in known, "%s: listed in tools/svg/apps.tsv" % n)
 for r in sorted(glob.glob(os.path.join(root, "pakete/*/rezept"))):
     t = open(r, errors="replace").read()
     n = os.path.basename(os.path.dirname(r))
@@ -120,26 +120,26 @@ PASS=$((PASS+np)); FAIL=$((FAIL+nf))
 
 echo "== 2. COUNTER-PROOF: the audit must turn red on broken trees"
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
-mkcopy() { rm -rf "$D/t"; mkdir -p "$D/t/assets" "$D/t/tools/design" "$D/t/tools/usbimg" "$D/t/pakete"
+mkcopy() { rm -rf "$D/t"; mkdir -p "$D/t/assets" "$D/t/tools/svg" "$D/t/tools/usbimg" "$D/t/pakete"
     cp -r "$ROOT/assets/apps" "$D/t/assets/apps"
-    cp "$ROOT/tools/design/mkicons.py" "$D/t/tools/design/"; cp "$ROOT/tools/usbimg/build.sh" "$D/t/tools/usbimg/"
+    cp "$ROOT/tools/svg/apps.tsv" "$D/t/tools/svg/"; cp "$ROOT/tools/usbimg/build.sh" "$D/t/tools/usbimg/"
     cp -r "$ROOT/pakete/." "$D/t/pakete/"; mkdir -p "$D/t/kernel"; cp -r "$ROOT/kernel/user" "$D/t/kernel/user"; }
 expect_red() {  # expect_red <name>
     r=$(audit "$D/t" | grep -c '^FAIL'); [ "$r" -ge 1 ] && ok "counter-proof '$1': $r red" || bad "counter-proof '$1' stayed green"; }
 mkcopy; rm "$D/t/assets/apps/store.osp/symbol.osym"; expect_red "icon file removed"
 mkcopy; python3 -I -c "
-import sys; sys.stdout.buffer.write(b'OSYM'+(32).to_bytes(4,'little')*2+bytes([0,0,0,0])*1024)" > "$D/t/assets/apps/store.osp/symbol.osym"; expect_red "empty transparent icon"
+import sys; sys.stdout.buffer.write(b'OSYM'+(72).to_bytes(4,'little')*2+bytes([0,0,0,0])*5184)" > "$D/t/assets/apps/store.osp/symbol.osym"; expect_red "empty transparent icon"
 mkcopy; head -c 1036 "$ROOT/assets/apps/explorer.osp/symbol.osym" > "$D/t/assets/apps/store.osp/symbol.osym"; expect_red "truncated / 16x16 icon"
 mkcopy; python3 -I -c "
 import sys
-b=bytearray(b'OSYM'+(32).to_bytes(4,'little')*2)
-for y in range(32):
-    for x in range(32):
-        b+=bytes((200,100,50,255)) if 1<=x<=30 and 1<=y<=30 else bytes((0,0,0,0))
+b=bytearray(b'OSYM'+(72).to_bytes(4,'little')*2)
+for y in range(72):
+    for x in range(72):
+        b+=bytes((200,100,50,255)) if 1<=x<=70 and 1<=y<=70 else bytes((0,0,0,0))
         if (x*7+y*3)%5==0: b[-4:]=bytes((255,255,255,255))
 sys.stdout.buffer.write(bytes(b))" > "$D/t/assets/apps/store.osp/symbol.osym"; expect_red "icon on a filled tile (the old look)"
 mkcopy; mkdir -p "$D/t/assets/apps/newapp.osp"; echo "name=New" > "$D/t/assets/apps/newapp.osp/INFO"; echo /bin/new > "$D/t/assets/apps/newapp.osp/start.txt"; expect_red "new program without icon"
-mkcopy; sed -i '/"welcome":/d' "$D/t/tools/design/mkicons.py"; expect_red "program not in mkicons.py"
+mkcopy; sed -i '/^welcome\t/d' "$D/t/tools/svg/apps.tsv"; expect_red "program not in apps.tsv"
 mkcopy; sed -i 's/^datei=symbol .*//' "$D/t/pakete/mail/rezept"; expect_red "package without symbol"
 mkcopy; sed -i '/set_app(/d' "$D/t/kernel/user/welcome.fi"; expect_red "program without set_app (empty taskbar plate)"
 mkcopy; sed -i 's/^const SYM_N: u64 = .*/const SYM_N: u64 = 10/' "$D/t/kernel/user/taskbar.fi"; expect_red "symbol cache smaller than pins + window buttons (grey charmap button)"

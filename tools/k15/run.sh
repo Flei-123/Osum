@@ -1441,7 +1441,7 @@ pruef() { local name=$1; shift
 pruef_nicht() { local name=$1; shift
     local aus rc; aus=$(python3 tools/k15/iconpixels.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch"; fi; }
-# r399: a bundle may carry a finished vector picture (symbol.osym, 32x32, tools/design/mkicons.py)
+# r399: a bundle may carry a finished vector picture (symbol.osym, 48x48, baked from symbol.svg by tools/svg/apps.sh)
 # that wins over the 16x16 drawing; the screen checks then compare its opaque pixels 1:1
 ICS=16
 [ -f assets/apps/explorer.osp/symbol.osym ] && ICS=32

@@ -1,0 +1,392 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import msg
+import wlib
+import fuiapp
+import fuiscene
+import dtext
+import disks.table
+import disks.guard
+import diskscan
+
+export { NONE_ROW, act_of_key, clear_status, A_INIT, A_NEW, A_FORMAT, A_DELETE, build_buttons, refresh_buttons, begin, on_dialog, status_text, set_part, report_geometry }
+
+const A_INIT: u64 = 0
+const A_NEW: u64 = 1
+const A_FORMAT: u64 = 2
+const A_DELETE: u64 = 3
+const K_FIRST: u64 = 7
+const NONE_ROW: u64 = 4294967295
+const SECTORS_PER_MB: u64 = 2048
+const EXIT_OK: u64 = 0
+const EXIT_REFUSED: u64 = 3
+
+static mut btn: [usize; 4] = [0 as usize; 4]
+static mut cur_disk: u64 = 0
+static mut cur_part: u64 = 4294967295
+static mut pending: u64 = 4294967295
+static mut step: u64 = 0
+static mut new_sectors: u64 = 0
+static mut status: [u8; 160] = [0 as u8; 160]
+static mut title_buf: [u8; 96] = [0 as u8; 96]
+static mut label_buf: [u8; 160] = [0 as u8; 160]
+static mut size_buf: [u8; 24] = [0 as u8; 24]
+static mut confirm_arg: [u8; 64] = [0 as u8; 64]
+static mut num_arg: [u8; 24] = [0 as u8; 24]
+static mut size_arg: [u8; 24] = [0 as u8; 24]
+static mut argv: [u64; 10] = [0 as u64; 10]
+static mut uitrace: bool = false
+
+static mut k_init: [u8; 11] = "disks.init\0"
+static mut k_new: [u8; 10] = "disks.new\0"
+static mut k_format: [u8; 13] = "disks.format\0"
+static mut k_delete: [u8; 13] = "disks.delete\0"
+static mut k_ask_size: [u8; 14] = "disks.asksize\0"
+static mut k_type_it: [u8; 13] = "disks.typeit\0"
+static mut k_ok: [u8; 9] = "disks.ok\0"
+static mut k_cancel: [u8; 13] = "disks.cancel\0"
+static mut k_s_done: [u8; 13] = "disks.s.done\0"
+static mut k_s_refused: [u8; 16] = "disks.s.refused\0"
+static mut k_s_failed: [u8; 15] = "disks.s.failed\0"
+static mut k_s_system: [u8; 15] = "disks.s.system\0"
+static mut k_s_size: [u8; 13] = "disks.s.size\0"
+static mut p_diskctl: [u8; 13] = "/bin/diskctl\0"
+static mut v_init: [u8; 5] = "init\0"
+static mut v_create: [u8; 7] = "create\0"
+static mut v_format: [u8; 7] = "format\0"
+static mut v_delete: [u8; 7] = "delete\0"
+static mut a_auto: [u8; 5] = "auto\0"
+static mut a_kind: [u8; 4] = "ofs\0"
+static mut a_name: [u8; 5] = "data\0"
+static mut a_confirm: [u8; 11] = "--confirm=\0"
+static mut a_default_mb: [u8; 3] = "16\0"
+static mut s_btn: [u8; 17] = "disks: btn verb=\0"
+static mut s_cx: [u8; 5] = " cx=\0"
+static mut s_cy: [u8; 5] = " cy=\0"
+static mut s_allow: [u8; 19] = "disks: allow disk=\0"
+static mut s_in: [u8; 7] = " init=\0"
+static mut s_ne: [u8; 6] = " new=\0"
+static mut s_fo: [u8; 9] = " format=\0"
+static mut s_de: [u8; 9] = " delete=\0"
+static mut s_nav: [u8; 17] = "disks: navrow n=\0"
+static mut s_row: [u8; 14] = "disks: row p=\0"
+static mut s_act: [u8; 12] = "disks: act \0"
+static mut s_rc: [u8; 5] = " rc=\0"
+static mut s_sp: [u8; 2] = " \0"
+
+fn nl() {
+    ulib.nl()
+}
+
+fn key_of(a: u64) -> u64 {
+    return K_FIRST + a
+}
+
+fn act_of_key(key: u64) -> u64 {
+    if key >= K_FIRST && key < K_FIRST + 4 {
+        return key - K_FIRST
+    }
+    return NONE_ROW
+}
+
+fn verb_of(a: u64) -> u64 {
+    if a == A_INIT {
+        return (&v_init[0]) as u64
+    }
+    if a == A_NEW {
+        return (&v_create[0]) as u64
+    }
+    if a == A_FORMAT {
+        return (&v_format[0]) as u64
+    }
+    return (&v_delete[0]) as u64
+}
+
+fn name_of(a: u64) -> u64 {
+    if a == A_INIT {
+        return msg.get((&k_init[0]) as u64)
+    }
+    if a == A_NEW {
+        return msg.get((&k_new[0]) as u64)
+    }
+    if a == A_FORMAT {
+        return msg.get((&k_format[0]) as u64)
+    }
+    return msg.get((&k_delete[0]) as u64)
+}
+
+fn op_of(a: u64) -> u64 {
+    if a == A_INIT {
+        return guard.OP_INIT
+    }
+    if a == A_NEW {
+        return guard.OP_CREATE
+    }
+    if a == A_FORMAT {
+        return guard.OP_FORMAT
+    }
+    return guard.OP_DELETE
+}
+
+fn allowed(a: u64) -> bool {
+    if diskscan.count() == 0 || cur_disk >= diskscan.count() {
+        return false
+    }
+    let t: u64 = diskscan.table_of(cur_disk)
+    let has_table: bool = table.scheme(t) != table.SCH_NONE
+    let gpt: bool = table.scheme(t) == table.SCH_GPT
+    var part_mounted: bool = false
+    if a == A_INIT && has_table {
+        return false
+    }
+    if a != A_INIT && !gpt {
+        return false
+    }
+    if a == A_FORMAT || a == A_DELETE {
+        if cur_part == NONE_ROW || cur_part >= table.count(t) {
+            return false
+        }
+        part_mounted = diskscan.part_mount(cur_disk, cur_part) != 0
+    }
+    return guard.check(op_of(a), diskscan.system_disk(cur_disk), diskscan.mounts_on(cur_disk) > 0, part_mounted,
+        has_table, true) == guard.R_OK
+}
+
+fn set_status(key: u64) {
+    let _n: u64 = dtext.put((&status[0]) as u64, 0, msg.get(key))
+}
+
+fn build_buttons(bar: usize) {
+    var a: u64 = 0
+    while a < 4 {
+        let b: usize = fuiscene.button(bar, name_of(a), key_of(a))
+        fuiscene.set_size(b, 100, 32)
+        fuiscene.set_noshrink(b)
+        btn[a as usize] = b
+        a = a + 1
+    }
+}
+
+fn report_allow() {
+    if !fuiscene.trace_on() || diskscan.count() == 0 {
+        return
+    }
+    ulib.say((&s_allow[0]) as u64)
+    ulib.say(diskscan.path(cur_disk))
+    ulib.say((&s_in[0]) as u64)
+    ulib.sayn(allowed_num(A_INIT))
+    ulib.say((&s_ne[0]) as u64)
+    ulib.sayn(allowed_num(A_NEW))
+    ulib.say((&s_fo[0]) as u64)
+    ulib.sayn(allowed_num(A_FORMAT))
+    ulib.say((&s_de[0]) as u64)
+    ulib.sayn(allowed_num(A_DELETE))
+    nl()
+}
+
+fn allowed_num(a: u64) -> u64 {
+    if allowed(a) {
+        return 1
+    }
+    return 0
+}
+
+fn refresh_buttons(disk: u64) {
+    cur_disk = disk
+    var a: u64 = 0
+    while a < 4 {
+        fuiscene.set_enabled(btn[a as usize], allowed(a))
+        a = a + 1
+    }
+    report_allow()
+    if diskscan.count() > 0 && diskscan.system_disk(cur_disk) && status[0] == 0 as u8 {
+        set_status((&k_s_system[0]) as u64)
+    }
+}
+
+fn set_part(p: u64) {
+    cur_part = p
+    refresh_buttons(cur_disk)
+}
+
+fn status_text() -> u64 {
+    return (&status[0]) as u64
+}
+
+fn clear_status() {
+    status[0] = 0 as u8
+}
+
+fn open_confirm(a: u64) {
+    var t: u64 = dtext.put((&title_buf[0]) as u64, 0, name_of(a))
+    if a == A_FORMAT || a == A_DELETE {
+        t = dtext.put((&title_buf[0]) as u64, t, (&s_sp[0]) as u64)
+        t = dtext.put_n((&title_buf[0]) as u64, t, cur_part + 1)
+    }
+    var l: u64 = dtext.put((&label_buf[0]) as u64, 0, msg.get((&k_type_it[0]) as u64))
+    l = dtext.put((&label_buf[0]) as u64, l, (&s_sp[0]) as u64)
+    l = dtext.put((&label_buf[0]) as u64, l, diskscan.path(cur_disk))
+    fuiscene.dialog_entry((&title_buf[0]) as u64, (&label_buf[0]) as u64, 0, msg.get((&k_ok[0]) as u64),
+        msg.get((&k_cancel[0]) as u64))
+    step = 2
+}
+
+fn open_size() {
+    let _t: u64 = dtext.put((&title_buf[0]) as u64, 0, name_of(A_NEW))
+    let _l: u64 = dtext.put((&label_buf[0]) as u64, 0, msg.get((&k_ask_size[0]) as u64))
+    fuiscene.dialog_entry((&title_buf[0]) as u64, (&label_buf[0]) as u64, (&a_default_mb[0]) as u64,
+        msg.get((&k_ok[0]) as u64), msg.get((&k_cancel[0]) as u64))
+    step = 1
+}
+
+fn begin(a: u64) {
+    if !allowed(a) {
+        return
+    }
+    clear_status()
+    pending = a
+    if a == A_NEW {
+        open_size()
+    } else {
+        open_confirm(a)
+    }
+}
+
+fn arg_confirm(typed: u64) {
+    var at: u64 = dtext.put((&confirm_arg[0]) as u64, 0, (&a_confirm[0]) as u64)
+    at = dtext.put((&confirm_arg[0]) as u64, at, typed)
+}
+
+fn run_diskctl(a: u64, typed: u64) -> u64 {
+    arg_confirm(typed)
+    var n: u64 = 0
+    argv[0] = (&p_diskctl[0]) as u64
+    argv[1] = verb_of(a)
+    argv[2] = diskscan.path(cur_disk)
+    n = 3
+    if a == A_NEW {
+        argv[3] = (&a_auto[0]) as u64
+        let _s: u64 = dtext.put_n((&size_arg[0]) as u64, 0, new_sectors)
+        argv[4] = (&size_arg[0]) as u64
+        argv[5] = (&a_kind[0]) as u64
+        argv[6] = (&a_name[0]) as u64
+        n = 7
+    } else if a == A_FORMAT || a == A_DELETE {
+        let _p: u64 = dtext.put_n((&num_arg[0]) as u64, 0, cur_part + 1)
+        argv[3] = (&num_arg[0]) as u64
+        n = 4
+    }
+    argv[n as usize] = (&confirm_arg[0]) as u64
+    n = n + 1
+    let pid: u64 = ulib.spawn_priv(argv[0], (&argv[0]) as u64, n)
+    if ulib.bad(pid) {
+        return 255
+    }
+    return ulib.wait_code(pid)
+}
+
+fn report_act(a: u64, rc: u64) {
+    if !uitrace {
+        return
+    }
+    ulib.say((&s_act[0]) as u64)
+    ulib.say(verb_of(a))
+    ulib.say((&s_rc[0]) as u64)
+    ulib.sayn(rc)
+    nl()
+}
+
+fn status_for(rc: u64) {
+    if rc == EXIT_OK {
+        set_status((&k_s_done[0]) as u64)
+    } else if rc == EXIT_REFUSED {
+        set_status((&k_s_refused[0]) as u64)
+    } else {
+        set_status((&k_s_failed[0]) as u64)
+    }
+}
+
+fn on_dialog() -> bool {
+    let res: u64 = fuiscene.dialog_result()
+    let _esc: bool = fuiscene.dialog_cancelled()
+    let a: u64 = pending
+    if a > 3 {
+        return false
+    }
+    if res != 1 {
+        pending = 4294967295
+        step = 0
+        return false
+    }
+    if step == 1 {
+        let mb: u64 = ulib.to_num(fuiscene.dialog_entry_text())
+        if mb == 0 {
+            set_status((&k_s_size[0]) as u64)
+            pending = 4294967295
+            step = 0
+            return true
+        }
+        new_sectors = mb * SECTORS_PER_MB
+        open_confirm(a)
+        return false
+    }
+    let rc: u64 = run_diskctl(a, fuiscene.dialog_entry_text())
+    report_act(a, rc)
+    status_for(rc)
+    pending = 4294967295
+    step = 0
+    return true
+}
+
+fn abs_x(nx: u64) -> u64 {
+    return wlib.win_x(fuiapp.win()) + fuiscene.org_x() + nx
+}
+
+fn abs_y(ny: u64) -> u64 {
+    return wlib.win_y(fuiapp.win()) + fuiscene.org_y() + ny
+}
+
+fn report_geometry(nav_key: u64, list_key: u64, rows: u64) {
+    uitrace = fuiscene.trace_on()
+    if !uitrace {
+        return
+    }
+    var a: u64 = 0
+    while a < 4 {
+        let n: usize = btn[a as usize]
+        ulib.say((&s_btn[0]) as u64)
+        ulib.say(verb_of(a))
+        ulib.say((&s_cx[0]) as u64)
+        ulib.sayn(abs_x(fuiscene.node_x(n) + fuiscene.node_w(n) / 2))
+        ulib.say((&s_cy[0]) as u64)
+        ulib.sayn(abs_y(fuiscene.node_y(n) + fuiscene.node_h(n) / 2))
+        nl()
+        a = a + 1
+    }
+    var d: u64 = 0
+    while d < diskscan.count() {
+        let nn: usize = fuiscene.node_of_key(nav_key)
+        ulib.say((&s_nav[0]) as u64)
+        ulib.sayn(d)
+        ulib.say((&s_cx[0]) as u64)
+        ulib.sayn(abs_x(fuiscene.node_x(nn) + 60))
+        ulib.say((&s_cy[0]) as u64)
+        ulib.sayn(abs_y(fuiscene.table_row_top(nav_key, d) + fuiscene.table_row_h(nav_key) / 2))
+        nl()
+        d = d + 1
+    }
+    var p: u64 = 0
+    while p < rows {
+        let ln: usize = fuiscene.node_of_key(list_key)
+        ulib.say((&s_row[0]) as u64)
+        ulib.sayn(p)
+        ulib.say((&s_cx[0]) as u64)
+        ulib.sayn(abs_x(fuiscene.node_x(ln) + 60))
+        ulib.say((&s_cy[0]) as u64)
+        ulib.sayn(abs_y(fuiscene.table_row_top(list_key, p) + fuiscene.table_row_h(list_key) / 2))
+        nl()
+        p = p + 1
+    }
+}

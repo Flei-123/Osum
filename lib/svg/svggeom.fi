@@ -1,0 +1,208 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import svg.svgmath
+import svg.svgfill
+
+export {
+    MAX_PTS, MAX_SUB,
+    geom_clear, geom_overflow, set_ctm, ctm_scale, dev_x, dev_y,
+    begin_sub, line_user, cubic_user, close_sub, last_dev_x, last_dev_y,
+    sub_total, sub_first, sub_len, sub_closed, pt_x, pt_y, fill_edges, open_sub
+}
+
+const MAX_PTS: i64 = 4096
+const MAX_SUB: i64 = 256
+
+static mut pxs: [i64; 4096] = [0 as i64; 4096]
+static mut pys: [i64; 4096] = [0 as i64; 4096]
+static mut n_pts: i64 = 0
+static mut s_first: [i64; 256] = [0 as i64; 256]
+static mut s_len: [i64; 256] = [0 as i64; 256]
+static mut s_closed: [i64; 256] = [0 as i64; 256]
+static mut n_sub: i64 = 0
+static mut cur_open: i64 = 0
+static mut over: i64 = 0
+static mut m_a: i64 = 65536
+static mut m_b: i64 = 0
+static mut m_c: i64 = 0
+static mut m_d: i64 = 65536
+static mut m_e: i64 = 0
+static mut m_f: i64 = 0
+static mut m_scale: i64 = 65536
+
+fn geom_clear() {
+    n_pts = 0
+    n_sub = 0
+    cur_open = 0
+    over = 0
+}
+
+fn geom_overflow() -> i64 {
+    return over
+}
+
+fn set_ctm(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) {
+    m_a = a
+    m_b = b
+    m_c = c
+    m_d = d
+    m_e = e
+    m_f = f
+    let det: i64 = svgmath.iabs(svgmath.mul16(a, d) - svgmath.mul16(b, c))
+    m_scale = svgmath.isqrt(det * 65536)
+}
+
+fn ctm_scale() -> i64 {
+    return m_scale
+}
+
+fn dev_x(x: i64, y: i64) -> i64 {
+    return (m_a * x + m_c * y + m_e * 65536 + 8388608) >> 24
+}
+
+fn dev_y(x: i64, y: i64) -> i64 {
+    return (m_b * x + m_d * y + m_f * 65536 + 8388608) >> 24
+}
+
+fn open_sub() -> i64 {
+    return cur_open
+}
+
+fn push_dev(x: i64, y: i64) {
+    if n_pts > 0 && cur_open != 0 && s_len[(n_sub - 1) as usize] > 0 {
+        if pxs[(n_pts - 1) as usize] == x && pys[(n_pts - 1) as usize] == y {
+            return
+        }
+    }
+    if n_pts >= MAX_PTS {
+        over = over + 1
+        return
+    }
+    pxs[n_pts as usize] = x
+    pys[n_pts as usize] = y
+    n_pts = n_pts + 1
+    s_len[(n_sub - 1) as usize] = s_len[(n_sub - 1) as usize] + 1
+}
+
+fn begin_sub(x: i64, y: i64) {
+    if n_sub >= MAX_SUB {
+        over = over + 1
+        cur_open = 0
+        return
+    }
+    s_first[n_sub as usize] = n_pts
+    s_len[n_sub as usize] = 0
+    s_closed[n_sub as usize] = 0
+    n_sub = n_sub + 1
+    cur_open = 1
+    push_dev(dev_x(x, y), dev_y(x, y))
+}
+
+fn line_user(x: i64, y: i64) {
+    if cur_open == 0 {
+        begin_sub(x, y)
+        return
+    }
+    push_dev(dev_x(x, y), dev_y(x, y))
+}
+
+fn last_dev_x() -> i64 {
+    if n_pts == 0 {
+        return 0
+    }
+    return pxs[(n_pts - 1) as usize]
+}
+
+fn last_dev_y() -> i64 {
+    if n_pts == 0 {
+        return 0
+    }
+    return pys[(n_pts - 1) as usize]
+}
+
+fn dist(ax: i64, ay: i64, bx: i64, by: i64) -> i64 {
+    let dx: i64 = bx - ax
+    let dy: i64 = by - ay
+    return svgmath.isqrt(dx * dx + dy * dy)
+}
+
+fn cubic_user(c1x: i64, c1y: i64, c2x: i64, c2y: i64, x: i64, y: i64) {
+    if cur_open == 0 {
+        return
+    }
+    let x0: i64 = last_dev_x()
+    let y0: i64 = last_dev_y()
+    let x1: i64 = dev_x(c1x, c1y)
+    let y1: i64 = dev_y(c1x, c1y)
+    let x2: i64 = dev_x(c2x, c2y)
+    let y2: i64 = dev_y(c2x, c2y)
+    let x3: i64 = dev_x(x, y)
+    let y3: i64 = dev_y(x, y)
+    let len: i64 = dist(x0, y0, x1, y1) + dist(x1, y1, x2, y2) + dist(x2, y2, x3, y3)
+    let n: i64 = svgmath.clamp(4 + len / 768, 4, 48)
+    var i: i64 = 1
+    while i < n {
+        let t: i64 = (i * 65536) / n
+        let mt: i64 = 65536 - t
+        let t2: i64 = svgmath.mul16(t, t)
+        let mt2: i64 = svgmath.mul16(mt, mt)
+        let b0: i64 = svgmath.mul16(mt2, mt)
+        let b1: i64 = 3 * svgmath.mul16(mt2, t)
+        let b2: i64 = 3 * svgmath.mul16(t2, mt)
+        let b3: i64 = svgmath.mul16(t2, t)
+        let px: i64 = (b0 * x0 + b1 * x1 + b2 * x2 + b3 * x3 + 32768) >> 16
+        let py: i64 = (b0 * y0 + b1 * y1 + b2 * y2 + b3 * y3 + 32768) >> 16
+        push_dev(px, py)
+        i = i + 1
+    }
+    push_dev(x3, y3)
+}
+
+fn close_sub() {
+    if cur_open != 0 && n_sub > 0 {
+        s_closed[(n_sub - 1) as usize] = 1
+    }
+    cur_open = 0
+}
+
+fn sub_total() -> i64 {
+    return n_sub
+}
+
+fn sub_first(k: i64) -> i64 {
+    return s_first[k as usize]
+}
+
+fn sub_len(k: i64) -> i64 {
+    return s_len[k as usize]
+}
+
+fn sub_closed(k: i64) -> i64 {
+    return s_closed[k as usize]
+}
+
+fn pt_x(i: i64) -> i64 {
+    return pxs[i as usize]
+}
+
+fn pt_y(i: i64) -> i64 {
+    return pys[i as usize]
+}
+
+fn fill_edges() {
+    var k: i64 = 0
+    while k < n_sub {
+        let f: i64 = s_first[k as usize]
+        let n: i64 = s_len[k as usize]
+        if n >= 2 {
+            var i: i64 = 0
+            while i + 1 < n {
+                svgfill.edge(pxs[(f + i) as usize], pys[(f + i) as usize], pxs[(f + i + 1) as usize], pys[(f + i + 1) as usize])
+                i = i + 1
+            }
+            svgfill.edge(pxs[(f + n - 1) as usize], pys[(f + n - 1) as usize], pxs[f as usize], pys[f as usize])
+        }
+        k = k + 1
+    }
+}

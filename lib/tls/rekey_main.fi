@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.net
+import tls.tls
+import tls.x509
+import tls.cli
+
+fn key_name(out: *mut rt.Buf, key: u64, n: usize, v: u64) {
+    cli.say_num(out, key, n, v)
+}
+
+fn read_line(t: *mut tls.Tls, got: *mut rt.Buf, failed: *mut bool, out: *mut rt.Buf) -> bool {
+    var chunk: [u8; 512] = [0; 512]
+    rt.buf_clear(got)
+    while true {
+        let n: usize = tls.tls_read(t, (&chunk[0]) as u64, 512)
+        catch | e | tls.tls_fail_len(out, e, failed)
+        if *failed || n == 0 {
+            return false
+        }
+        rt.buf_push_bytes(got, (&chunk[0]) as u64, n)
+        if rt.ld8((*got).ptr, (*got).len - 1) == 10 as u8 {
+            return true
+        }
+    }
+    return false
+}
+
+fn main(start: u64) -> i32 {
+    var out: rt.Buf = rt.buf_new()
+    if rt.arg_count(start) < 9 {
+        var u: [u8; 5] = "USAGE"
+        cli.put(&out, (&u[0]) as u64, 5)
+        cli.line(&out)
+        rt.write_everything(1, out.ptr, out.len)
+        return 2
+    }
+    let addr: u32 = cli.parse_ip(rt.arg_ptr(start, 1))
+    let port: u32 = cli.parse_u32(rt.arg_ptr(start, 2))
+    let hostp: u64 = rt.arg_ptr(start, 3)
+    let hostn: usize = rt.c_length(hostp)
+    let rounds: u32 = cli.parse_u32(rt.arg_ptr(start, 5))
+    let rekey_after: u32 = cli.parse_u32(rt.arg_ptr(start, 6))
+    let refuse: u32 = cli.parse_u32(rt.arg_ptr(start, 7))
+    let every: u32 = cli.parse_u32(rt.arg_ptr(start, 8))
+    var storebuf: rt.Buf = rt.buf_new()
+    var store: x509.Store = x509.store_new()
+    if rt.read_file(rt.arg_ptr(start, 4), &storebuf) {
+        let taken: usize = x509.store_load_pem(&store, storebuf.ptr, storebuf.len)
+    }
+    var bad: bool = false
+    var c: net.Conn = net.connect_tcp(addr, port as u16)
+    catch | e | cli.fail_conn(&bad)
+    if bad {
+        var x: [u8; 10] = "ERRCONNECT"
+        cli.put(&out, (&x[0]) as u64, 10)
+        cli.line(&out)
+        rt.write_everything(1, out.ptr, out.len)
+        return 1
+    }
+    let okt: bool = net.set_timeout(&c, 15000 as u64) catch false
+    var t: tls.Tls = tls.tls_new()
+    let oki: bool = tls.tls_init(&t, &c, &store, hostp, hostn, cli.now_seconds())
+    if rekey_after > 0 as u32 {
+        tls.tls_set_rekey_after(&t, rekey_after as u64)
+    }
+    if refuse == 1 as u32 {
+        tls.tls_set_key_update(&t, false)
+    }
+    var failed: bool = false
+    let ok: bool = tls.tls_handshake(&t)
+    catch | e | tls.tls_fail_into(&out, e, &failed)
+    var done: u32 = 0
+    var mismatch: u32 = 0
+    var got: rt.Buf = rt.buf_new()
+    var msg: rt.Buf = rt.buf_new()
+    var i: u32 = 0
+    while !failed && i < rounds {
+        if every > 0 as u32 && i > 0 as u32 && i % every == 0 as u32 {
+            let ku: bool = tls.tls_key_update(&t, (i / every) % 2 as u32 == 0 as u32)
+            catch | e | tls.tls_fail_into(&out, e, &failed)
+        }
+        rt.buf_clear(&msg)
+        rt.buf_push(&msg, 99 as u8)
+        rt.buf_push_dec_u64(&msg, i as u64)
+        rt.buf_push(&msg, 32 as u8)
+        var pad: u32 = (i * 7 as u32) % 300 as u32
+        while pad > 0 as u32 {
+            rt.buf_push(&msg, 120 as u8)
+            pad = pad - 1 as u32
+        }
+        rt.buf_push(&msg, 10 as u8)
+        let w: bool = tls.tls_write(&t, msg.ptr, msg.len)
+        catch | e | tls.tls_fail_into(&out, e, &failed)
+        if failed {
+            break
+        }
+        let have: bool = read_line(&t, &got, &failed, &out)
+        if failed || !have {
+            break
+        }
+        rt.buf_clear(&msg)
+        rt.buf_push(&msg, 115 as u8)
+        rt.buf_push_dec_u64(&msg, i as u64)
+        rt.buf_push(&msg, 10 as u8)
+        var same: bool = got.len == msg.len
+        var k: usize = 0
+        while same && k < msg.len {
+            if rt.ld8(got.ptr, k) != rt.ld8(msg.ptr, k) {
+                same = false
+            }
+            k = k + 1
+        }
+        if !same {
+            mismatch = mismatch + 1 as u32
+        }
+        done = done + 1 as u32
+        i = i + 1 as u32
+    }
+    var k_r: [u8; 6] = "ROUNDS"
+    key_name(&out, (&k_r[0]) as u64, 6, done as u64)
+    var k_m: [u8; 8] = "MISMATCH"
+    key_name(&out, (&k_m[0]) as u64, 8, mismatch as u64)
+    var k_o: [u8; 9] = "REKEYSOUT"
+    key_name(&out, (&k_o[0]) as u64, 9, tls.tls_rekeys_out(&t) as u64)
+    var k_i: [u8; 8] = "REKEYSIN"
+    key_name(&out, (&k_i[0]) as u64, 8, tls.tls_rekeys_in(&t) as u64)
+    var k_a: [u8; 5] = "ALERT"
+    key_name(&out, (&k_a[0]) as u64, 5, tls.tls_alert_desc(&t) as u64)
+    tls.tls_close(&t)
+    tls.tls_free(&t)
+    net.close(&c)
+    rt.write_everything(1, out.ptr, out.len)
+    return 0
+}

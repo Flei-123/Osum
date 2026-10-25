@@ -1,0 +1,96 @@
+# vendor/firn/patches/0010-font-face-table.patch
+#
+# OSUM G-009a / r1921 (25.10.2026) -- FALLBACK FACES AS A TABLE, NOT TWO FIELDS.
+#
+# WHY. 0009 gave a Font exactly two fallback faces (fb1, fb2; tags 1 and 2). Every further script (CJK, Arabic, Devanagari, ...)
+# would have needed another Font field and another branch in fb_owner. The faces of a process already sit in one contiguous
+# array of Font structs (lib/fontchain.fi registry), so the Font only needs to know where that array starts.
+#
+# WHAT. fb1/fb2 become fb_base/fb_stride/fb_n. API: ttf.font_set_faces(f, base, stride, n, miss) replaces font_set_fallback.
+# fb_owner maps the tag k (1..fb_n, at most 255) to base + (k - 1) * stride. Ids below 2^24 and fonts without a table behave
+# bit for bit as before.
+#
+--- a/font/ttf.fi
++++ b/font/ttf.fi
+@@ -51,7 +51,7 @@
+     Font,
+     font_new, font_init, font_ok,
+     font_upem, font_ascent, font_descent, font_line_gap, font_num_glyphs,
+-    font_glyph_for, font_set_fallback, font_advance, font_lsb, font_kern, font_has_kern,
++    font_glyph_for, font_set_faces, font_advance, font_lsb, font_kern, font_has_kern,
+     font_glyph_bbox, font_outline, font_outline_m,
+     font_scratch_needed,
+     font_cmap_format,
+@@ -105,12 +105,13 @@
+     // same `font_glyph_for`, so the answers are the same numbers.
+     lat: [u32; 256],
+     lat_ok: usize,
+-    // OSUM FALLBACK FACES (vendor/firn/patches/0009): two more faces asked for a code point this one lacks. Their glyph ids come
+-    // back as `gid | (k << 24)`, k = 1 or 2; advance, bbox and outline of such an id are answered by the face it belongs to.
++    // OSUM FALLBACK FACES (vendor/firn/patches/0009, 0010): a face table asked for a code point this one lacks. Their glyph ids come
++    // back as `gid | (k << 24)`, k = 1..fb_n; advance, bbox and outline of such an id are answered by the face it belongs to.
+     // `miss` is called for a code point (>= U+00A0) this face has no glyph for, with this face's units per em; it loads the
+     // fallback faces on the first ask and returns the encoded id, or 0.
+-    fb1: usize,
+-    fb2: usize,
++    fb_base: usize,
++    fb_stride: usize,
++    fb_n: usize,
+     miss: fn(u32, u32) -> u32,
+     miss_on: usize,
+ }
+@@ -232,8 +233,9 @@
+         line_gap: 0,
+         lat: [0 as u32; 256],
+         lat_ok: 0,
+-        fb1: 0,
+-        fb2: 0,
++        fb_base: 0,
++        fb_stride: 0,
++        fb_n: 0,
+         miss: miss_none,
+         miss_on: 0,
+     }
+@@ -244,12 +246,17 @@
+     return 0 as u32
+ }
+ 
+-// Hands a face its fallbacks (patch 0009). `fb1`/`fb2` are the faces that ids with k = 1 / 2 belong to; they must stay where they
+-// are for as long as this face is used, and they must have no fallback of their own.
+-#[no_gc]
+-fn font_set_fallback(f: *mut Font, fb1: *mut Font, fb2: *mut Font, miss: fn(u32, u32) -> u32) {
+-    (*f).fb1 = fb1 as u64 as usize
+-    (*f).fb2 = fb2 as u64 as usize
++// Hands a face its fallback table (patches 0009, 0010): `n` faces of `stride` bytes each, contiguous from `base`; the face at
++// base + (k - 1) * stride owns ids with tag k (1..255). They must stay where they are for as long as this face is used, and they
++// must have no fallback of their own.
++#[no_gc]
++fn font_set_faces(f: *mut Font, base: *mut Font, stride: usize, n: usize, miss: fn(u32, u32) -> u32) {
++    (*f).fb_base = base as u64 as usize
++    (*f).fb_stride = stride
++    (*f).fb_n = n
++    if n > 255 {
++        (*f).fb_n = 255
++    }
+     (*f).miss = miss
+     (*f).miss_on = 1
+ }
+@@ -257,14 +264,11 @@
+ // The face an encoded glyph id belongs to (0 = none).
+ #[no_gc]
+ fn fb_owner(f: *mut Font, gid: u32) -> *mut Font {
+-    let k: u32 = gid >> 24
+-    if k == 1 as u32 {
+-        return (*f).fb1 as u64 as *mut Font
+-    }
+-    if k == 2 as u32 {
+-        return (*f).fb2 as u64 as *mut Font
++    let k: usize = (gid >> 24) as usize
++    if k == 0 || k > (*f).fb_n {
++        return 0 as u64 as *mut Font
+     }
+-    return 0 as u64 as *mut Font
++    return ((*f).fb_base + (k - 1) * (*f).fb_stride) as u64 as *mut Font
+ }
+ 
+ #[no_gc]

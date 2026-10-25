@@ -1,0 +1,313 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+# tools/smb/explorer.sh -- the file manager opens smb://10.9.0.1/data in the OrientOS guest (QEMU, e1000) against Samba in a netns.
+set -uo pipefail
+cd "$(dirname "$0")/../.."
+ROOT=$(pwd)
+export FIRNLIB="$ROOT/lib"
+
+NS=smbx-$$
+V0=sx0-$$
+V1=sx1
+QPORT=$(( 14000 + ($$ % 400) * 2 ))
+BPORT=$(( QPORT + 1 ))
+TMPD=$(mktemp -d)
+chmod 755 "$TMPD"
+. tools/smb/samba.sh
+. tools/smb/wire.sh
+cleanup() {
+    wire_down
+    rm -rf "$TMPD"
+}
+trap cleanup EXIT
+
+pass=0; fail=0
+ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
+bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
+has() { grep -qaE "$2" "$1" && ok "$3" || bad "$3 -- '$2' is missing"; }
+hasnot() { grep -qaE "$2" "$1" && bad "$3 -- '$2' is present" || ok "$3"; }
+
+for t in qemu-system-x86_64 ip smbd smbpasswd gcc python3; do
+    command -v "$t" >/dev/null 2>&1 || command -v "/usr/sbin/$t" >/dev/null 2>&1 || { echo "SMBEXPLORER: skipped, $t is missing"; exit 0; }
+done
+export PATH="$PATH:/usr/sbin"
+python3 -c "import PIL" 2>/dev/null || { echo "SMBEXPLORER: skipped, Pillow is missing"; exit 0; }
+ip netns add "$NS" 2>/dev/null || { echo "SMBEXPLORER: skipped, no network namespaces"; exit 0; }
+ip netns del "$NS" 2>/dev/null
+
+echo "== 1. build: smbctl, kernel, programs =="
+bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+if vendor/firn/bin/firnc -c --profile=app -o "$TMPD/smbctl.o" kernel/app/smbctl.fi > "$TMPD/cc.log" 2>&1 \
+   && ld -T kernel/user/user.ld -o "$TMPD/smbctl.elf" "$TMPD/smbctl.o" 2>"$TMPD/ld.err"; then
+    strip --strip-all "$TMPD/smbctl.elf" 2>/dev/null
+    ok "smbctl builds as a ring-3 app"
+else
+    bad "smbctl does not build"; head -10 "$TMPD/cc.log" "$TMPD/ld.err"; echo "SMBEXPLORER: $pass passed, $fail failed"; exit 1
+fi
+gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>/dev/null || bad "bridge.c"
+export DESIGNBUILD=${DESIGNBUILD:-$TMPD/db}
+
+samba_setup "$TMPD/smb" 445
+SMB_PREFIX="ip netns exec $NS"
+SMB_BIND=10.9.0.1
+printf 'sub file\n' > "$SHARE/sub/inner.txt"
+WANT_HELLO=$(stat -c%s "$SHARE/hello.txt")
+
+KARGS="nostart wigapp=/bin/explorer nic nip=10.9.0.2/24 ngw=10.9.0.1 nsvc=0 nwait=0"
+QARGS="-netdev socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT -device e1000,netdev=n0,mac=52:54:00:aa:bb:cc"
+
+run_case() { # <name> <script> <image files>
+    wire_up
+    samba_conf auto; samba_user
+    samba_start auto || { bad "$1: samba did not start"; head -3 "$TMPD/smb/smbd.out"; }
+    bash tools/design/capture.sh "$TMPD/$1" res=1280x800 uitrace=yes lang=en halt=900 \
+        extra="$KARGS" qemuargs="$QARGS" imgfiles="$3" drehbuch="$2" > "$TMPD/$1.log" 2>&1
+    [ -n "${SMB_KEEP:-}" ] && { mkdir -p "$SMB_KEEP/$1"; cp "$TMPD/$1/serial.txt" "$TMPD/$1"/*.png "$TMPD/$1.log" "$SMB_KEEP/$1/" 2>/dev/null; }
+    wire_down
+}
+
+cat > "$TMPD/walk.txt" <<'DREH'
+warteauf explorer: ready || 300
+warte 8
+taste ctrl-l
+warte 2
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+tippe smb://10.9.0.1/data
+taste ret
+warteauf expsmb: dialog user || 120
+warte 2
+foto 10-user
+tippe gateuser
+taste ret
+warteauf expsmb: dialog pass || 60
+warte 2
+foto 11-pass
+tippe wrongpass
+taste ret
+warteauf expsmb: list rc=3 || 120
+warteauf expsmb: dialog user-retry || 60
+warte 2
+foto 12-retry
+tippe gateuser
+taste ret
+warteauf expsmb: dialog pass || 60
+tippe gatepass
+taste ret
+warteauf expsmb: list rc=0 entries=3 || 120
+warte 4
+foto 13-listing
+doppelauf ftabzeile2
+warteauf expsmb: fetch rc=0 || 120
+warte 4
+foto 14-opened
+taste ctrl-c
+warte 3
+taste ctrl-l
+warte 1
+taste ctrl-l
+warte 2
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+tippe /data/bilder
+taste ret
+warte 2
+taste esc
+warte 1
+warteauf explorer: cd /data/bilder n= || 60
+warte 4
+taste ctrl-v
+warteauf expsmb: copy-down rc=0 octets=12 || 120
+warte 4
+foto 15-pasted-local
+taste ctrl-l
+warte 2
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+marke explorer: cd /data n=
+tippe /data
+taste ret
+warte 2
+taste esc
+warte 1
+warteneu explorer: cd /data n= || 60
+warte 4
+klickauf ftabzeile2
+warte 2
+taste ctrl-c
+warte 3
+taste ctrl-l
+warte 2
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+marke explorer: cd smb://10.9.0.1/data/sub n=
+tippe smb://10.9.0.1/data/sub
+taste ret
+warte 2
+taste esc
+warte 1
+warteneu explorer: cd smb://10.9.0.1/data/sub n=1 || 120
+warte 4
+taste ctrl-v
+warteauf expsmb: copy-up rc=0 octets=5 || 120
+warte 4
+foto 16-pasted-remote
+marke explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt
+taste ctrl-v
+warteneu explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt || 120
+warte 3
+foto 17-conflict
+taste esc
+warte 4
+marke explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt
+taste ctrl-v
+warteneu explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt || 120
+warte 3
+marke expsmb: copy-up rc=0 octets=5
+taste ret
+warteneu expsmb: copy-up rc=0 octets=5 || 120
+warte 4
+foto 18-replaced
+klickauf ftabzeile1
+warte 2
+taste ctrl-x
+warte 3
+taste ctrl-l
+warte 2
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+marke explorer: cd /data/bilder n=
+tippe /data/bilder
+taste ret
+warte 2
+taste esc
+warte 1
+warteneu explorer: cd /data/bilder n= || 60
+warte 4
+taste ctrl-v
+warteauf expsmb: rm rc=0 || 120
+warte 4
+foto 19-cut
+DREH
+
+echo "== 2. explorer walk: smb:// -> user -> wrong password -> retry -> listing -> open file =="
+run_case walk "$TMPD/walk.txt" "/tmp/ /bin/smbctl=$TMPD/smbctl.elf"
+W="$TMPD/walk/serial.txt"
+if [ ! -s "$W" ]; then bad "no serial output"; tail -20 "$TMPD/walk.log"; fi
+hasnot "$W" '^panic' "no panic in the guest"
+has "$W" 'explorer: ready' "the file manager is up"
+has "$W" 'expsmb: dialog user$' "first: the user dialog opens"
+has "$W" 'expsmb: dialog pass$' "then the password dialog opens"
+has "$W" 'expsmb: list rc=3$' "wrong password: smbctl exits 3 (auth) in the guest"
+has "$W" 'expsmb: dialog user-retry$' "wrong password: the user dialog comes back as a retry"
+has "$W" 'expsmb: list rc=0 entries=3$' "right password: listing with 3 entries (sub, big.bin, hello.txt)"
+has "$W" "expsmb: fetch rc=0 octets=$WANT_HELLO\$" "double click on hello.txt: fetched $WANT_HELLO octets"
+has "$W" 'expsmb: copy-down rc=0 octets=12$' "copy hello.txt from smb:// and paste into /data/bilder: 12 octets"
+has "$W" 'explorer: cd /data/bilder n=' "the path field took /data/bilder (copy-down target)"
+has "$W" 'explorer: cd smb://10.9.0.1/data/sub n=1$' "browse smb://10.9.0.1/data/sub: 1 entry"
+has "$W" 'expsmb: copy-up rc=0 octets=5$' "copy a local file and paste into smb://.../sub: 5 octets"
+has "$W" 'expsmb: stat rc=5$' "paste target is probed first: new name does not exist (stat exit 5)"
+has "$W" 'expsmb: stat rc=0$' "paste target is probed: existing name found (stat exit 0)"
+[ "$(grep -ac 'explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt' "$W")" -eq 2 ] && ok "pasting onto an existing remote name asks (conflict dialog), twice for two pastes" || bad "conflict dialog count"
+[ "$(grep -ac 'expsmb: copy-up rc=0 octets=5' "$W")" -eq 2 ] && ok "Esc cancelled (no third upload), Enter replaced (second upload)" || bad "copy-up count after Esc/Enter"
+[ -f "$SHARE/sub/alpha.txt" ] && [ "$(cat "$SHARE/sub/alpha.txt")" = "eins" ] && ok "the pasted file is on the share with the right content" || bad "alpha.txt did not land on the share"
+has "$W" 'expsmb: rm rc=0$' "cut from smb:// removes the remote source after the copy"
+[ ! -e "$SHARE/sub/inner.txt" ] && ok "cut: inner.txt is gone from the share" || bad "cut: inner.txt is still on the share"
+[ "$(grep -ac 'expsmb: copy-down rc=0 octets=9' "$W")" -eq 1 ] && ok "cut: the data came down first (9 octets)" || bad "cut: copy-down of alpha.txt"
+hasnot "$W" 'expsmb: dialog error' "no error dialog on the good path"
+grep -aoE 'expsmb: list rc=[0-9]+' "$W" | head -3 | tr '\n' ' ' | sed 's/^/  list results: /'; echo
+
+echo "== 3. counter-proof: image without /bin/smbctl =="
+cat > "$TMPD/noctl.txt" <<'DREH'
+warteauf explorer: ready || 300
+warte 8
+taste ctrl-l
+warte 2
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+tippe smb://10.9.0.1/data
+taste ret
+warte 2
+taste esc
+warte 1
+warteauf expsmb: dialog user || 120
+tippe gateuser
+taste ret
+warte 2
+taste esc
+warte 1
+warteauf expsmb: dialog pass || 60
+tippe gatepass
+taste ret
+warte 2
+taste esc
+warte 1
+warteauf expsmb: list rc=255 || 120
+warte 5
+foto 20-failed
+DREH
+run_case noctl "$TMPD/noctl.txt" "/tmp/"
+N="$TMPD/noctl/serial.txt"
+has "$N" 'expsmb: list rc=255$' "no helper: the list fails with 255, no listing"
+has "$N" 'expsmb: dialog error$' "no helper: the error dialog opens"
+hasnot "$N" 'expsmb: list rc=0' "no helper: no list ever succeeds"
+
+echo "SMBEXPLORER: $pass passed, $fail failed"
+[ "$fail" -eq 0 ] || exit 1

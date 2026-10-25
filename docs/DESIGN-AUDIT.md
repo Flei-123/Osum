@@ -4,7 +4,7 @@ Order from Justin (07.10.2026): "the look is bad compared with a modern Windows 
 browser app; the old stand looked better -- make an honest analysis and fix the biggest gaps."
 This file is the analysis, the fixes, and the numbers. Pictures are in
 `docs/shots/design-audit/`; the tools that made and measure them are `tools/design/`
-(`audit.sh`, `screens.sh`, `check.py`, `measure.py`, `mkboards.py`, `mkfont.py`, `mkicons.py`,
+(`audit.sh`, `screens.sh`, `check.py`, `measure.py`, `mkboards.py`, `mkfont.py`,
 `run.sh`).
 
 ## 0. The honest short version
@@ -136,9 +136,10 @@ text; the high-contrast schemes keep the solid accent plate. The list painters o
 draw a 3 px accent indicator bar (`fuiscene.sel_bar`). `tools/theme/model.py` mirrors the binding.
 
 ### 4.4 Icons
-`tools/design/mkicons.py` draws every bundle's icon from a Lucide glyph (ISC) on a rounded
-gradient tile, supersampled and reduced with Lanczos, 32x32, true alpha, into
-`assets/apps/<bundle>.osp/symbol.osym`; `tools/k15/bundle.py` takes it before `symbol.txt`.
+`tools/svg/mkapps.py` (via `tools/svg/apps.sh`) composes every bundle's icon from a Lucide glyph
+(ISC, `assets/icons/svg/`) with a gradient stroke and tint (`tools/svg/apps.tsv`) into
+`assets/apps/<bundle>.osp/symbol.svg` and bakes it with the fixed-point rasterizer `lib/svg`
+(`tools/svg/bake.fi`) to 72x72, true alpha, `symbol.osym`; `tools/k15/bundle.py` takes it before `symbol.txt`.
 `wlibc.icon_draw_fit` draws such a picture into a square of any size (area-averaged,
 premultiplied); the bar draws it at 24 points, the start menu at 32 (`fuiscene.row_icon`,
 `icon_col`). 16x16 drawings are told apart by size and keep their integer scale.

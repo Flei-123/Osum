@@ -1,0 +1,328 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.table
+import disks.bytes
+
+export {
+    init, create, remove, free_start, kind_known,
+    SCRATCH, E_OK, E_NOTABLE, E_RANGE, E_OVERLAP, E_FULL, E_IO, E_KIND, E_NOBACKUP, E_INDEX, E_SIZE,
+    ALIGN
+}
+
+const SCRATCH: u64 = 17408
+const ALIGN: u64 = 2048
+const E_OK: u64 = 0
+const E_NOTABLE: u64 = 1
+const E_RANGE: u64 = 2
+const E_OVERLAP: u64 = 3
+const E_FULL: u64 = 4
+const E_IO: u64 = 5
+const E_KIND: u64 = 6
+const E_NOBACKUP: u64 = 7
+const E_INDEX: u64 = 8
+const E_SIZE: u64 = 9
+
+const ARR_OFF: u64 = 512
+const BHDR_OFF: u64 = 16896
+const ENT_SECTORS: u64 = 32
+const ENT_SIZE: u64 = 128
+
+fn kind_lo(kind: u64) -> u64 {
+    if kind == table.K_OFS {
+        return 0x53014f464f53554d
+    }
+    if kind == table.K_EFI {
+        return 0x11d2f81fc12a7328
+    }
+    if kind == table.K_LINUX {
+        return 0x477284830fc63daf
+    }
+    if kind == table.K_BASIC || kind == table.K_FAT32 {
+        return 0x4433b9e5ebd0a0a2
+    }
+    return 0
+}
+
+fn kind_hi(kind: u64) -> u64 {
+    if kind == table.K_OFS {
+        return 0x534f69726f6d758e
+    }
+    if kind == table.K_EFI {
+        return 0x3bc93ec9a0004bba
+    }
+    if kind == table.K_LINUX {
+        return 0xe47d47d8693d798e
+    }
+    if kind == table.K_BASIC || kind == table.K_FAT32 {
+        return 0xc79926b7b668c087
+    }
+    return 0
+}
+
+fn kind_known(kind: u64) -> bool {
+    return kind_lo(kind) != 0
+}
+
+fn m32(a: u64) -> u64 {
+    var x: u64 = a % 4294967291
+    x = (x * 2654435761 + 1013904223) % 4294967291
+    x = (x * 2246822519 + 3266489917) % 4294967291
+    return x
+}
+
+fn mix(a: u64) -> u64 {
+    return m32(a) | (m32(a + 2654435769) << 32)
+}
+
+fn header_crc(h: u64) -> u64 {
+    let size: u64 = bytes.le32(h + 12)
+    bytes.put32(h + 16, 0)
+    let c: u64 = table.crc32(h, size)
+    bytes.put32(h + 16, c)
+    return c
+}
+
+fn header_ok(h: u64) -> bool {
+    if bytes.ld8(h, 0) != 69 || bytes.ld8(h, 1) != 70 || bytes.ld8(h, 2) != 73 || bytes.ld8(h, 3) != 32 {
+        return false
+    }
+    let size: u64 = bytes.le32(h + 12)
+    if size < 92 || size > 512 {
+        return false
+    }
+    let stored: u64 = bytes.le32(h + 16)
+    return header_crc(h) == stored
+}
+
+fn put_magic(h: u64) {
+    bytes.st8(h, 69)
+    bytes.st8(h + 1, 70)
+    bytes.st8(h + 2, 73)
+    bytes.st8(h + 3, 32)
+    bytes.st8(h + 4, 80)
+    bytes.st8(h + 5, 65)
+    bytes.st8(h + 6, 82)
+    bytes.st8(h + 7, 84)
+}
+
+fn fill_header(h: u64, me: u64, alt: u64, first: u64, last: u64, glo: u64, ghi: u64, entlba: u64, acrc: u64) {
+    bytes.zero(h, 512)
+    put_magic(h)
+    bytes.put32(h + 8, 65536)
+    bytes.put32(h + 12, 92)
+    bytes.put64(h + 24, me)
+    bytes.put64(h + 32, alt)
+    bytes.put64(h + 40, first)
+    bytes.put64(h + 48, last)
+    bytes.put64(h + 56, glo)
+    bytes.put64(h + 64, ghi)
+    bytes.put64(h + 72, entlba)
+    bytes.put32(h + 80, 128)
+    bytes.put32(h + 84, ENT_SIZE)
+    bytes.put32(h + 88, acrc)
+    header_crc(h)
+}
+
+fn protective(sector: u64, total: u64) {
+    bytes.zero(sector, 512)
+    var n: u64 = total - 1
+    if n > 4294967295 {
+        n = 4294967295
+    }
+    bytes.st8(sector + 446 + 2, 2)
+    bytes.st8(sector + 446 + 4, 238)
+    bytes.st8(sector + 446 + 5, 255)
+    bytes.st8(sector + 446 + 6, 255)
+    bytes.st8(sector + 446 + 7, 255)
+    bytes.put32(sector + 446 + 8, 1)
+    bytes.put32(sector + 446 + 12, n)
+    bytes.st8(sector + 510, 85)
+    bytes.st8(sector + 511, 170)
+}
+
+fn init(write: fn(u64, u64, u64) -> u64, total: u64, seed: u64, scratch: u64) -> u64 {
+    if total < 68 {
+        return E_SIZE
+    }
+    let hdr: u64 = scratch
+    let arr: u64 = scratch + ARR_OFF
+    bytes.zero(arr, ENT_SECTORS * 512)
+    let acrc: u64 = table.crc32(arr, 128 * ENT_SIZE)
+    let glo: u64 = mix(seed)
+    let ghi: u64 = mix(seed + 1)
+    if write(2, ENT_SECTORS, arr) != 0 || write(total - 33, ENT_SECTORS, arr) != 0 {
+        return E_IO
+    }
+    fill_header(hdr, total - 1, 1, 34, total - 34, glo, ghi, total - 33, acrc)
+    if write(total - 1, 1, hdr) != 0 {
+        return E_IO
+    }
+    fill_header(hdr, 1, total - 1, 34, total - 34, glo, ghi, 2, acrc)
+    if write(1, 1, hdr) != 0 {
+        return E_IO
+    }
+    protective(hdr, total)
+    if write(0, 1, hdr) != 0 {
+        return E_IO
+    }
+    return E_OK
+}
+
+fn load(read: fn(u64, u64, u64) -> u64, total: u64, scratch: u64) -> u64 {
+    let hdr: u64 = scratch
+    let arr: u64 = scratch + ARR_OFF
+    let bhdr: u64 = scratch + BHDR_OFF
+    if read(1, 1, hdr) != 0 || !header_ok(hdr) {
+        return E_NOTABLE
+    }
+    let nent: u64 = bytes.le32(hdr + 80)
+    let esize: u64 = bytes.le32(hdr + 84)
+    if esize != ENT_SIZE || nent == 0 || nent > 128 {
+        return E_NOTABLE
+    }
+    let sectors: u64 = (nent * esize + 511) / 512
+    if read(bytes.le64(hdr + 72), sectors, arr) != 0 {
+        return E_IO
+    }
+    if table.crc32(arr, nent * esize) != bytes.le32(hdr + 88) {
+        return E_NOTABLE
+    }
+    let alt: u64 = bytes.le64(hdr + 32)
+    if alt != total - 1 || read(alt, 1, bhdr) != 0 || !header_ok(bhdr) {
+        return E_NOBACKUP
+    }
+    if bytes.le32(bhdr + 80) != nent || bytes.le32(bhdr + 84) != esize {
+        return E_NOBACKUP
+    }
+    return E_OK
+}
+
+fn commit(write: fn(u64, u64, u64) -> u64, scratch: u64) -> u64 {
+    let hdr: u64 = scratch
+    let arr: u64 = scratch + ARR_OFF
+    let bhdr: u64 = scratch + BHDR_OFF
+    let nent: u64 = bytes.le32(hdr + 80)
+    let sectors: u64 = (nent * ENT_SIZE + 511) / 512
+    let acrc: u64 = table.crc32(arr, nent * ENT_SIZE)
+    if write(bytes.le64(bhdr + 72), sectors, arr) != 0 {
+        return E_IO
+    }
+    bytes.put32(bhdr + 88, acrc)
+    header_crc(bhdr)
+    if write(bytes.le64(bhdr + 24), 1, bhdr) != 0 {
+        return E_IO
+    }
+    if write(bytes.le64(hdr + 72), sectors, arr) != 0 {
+        return E_IO
+    }
+    bytes.put32(hdr + 88, acrc)
+    header_crc(hdr)
+    if write(1, 1, hdr) != 0 {
+        return E_IO
+    }
+    return E_OK
+}
+
+fn slot_used(e: u64) -> bool {
+    return bytes.le64(e) != 0 || bytes.le64(e + 8) != 0
+}
+
+fn slot_live(e: u64) -> bool {
+    return slot_used(e) && bytes.le64(e + 40) >= bytes.le64(e + 32)
+}
+
+fn create(read: fn(u64, u64, u64) -> u64, write: fn(u64, u64, u64) -> u64, total: u64, start: u64, sectors: u64,
+    kind: u64, name: u64, seed: u64, scratch: u64) -> u64 {
+    if !kind_known(kind) {
+        return E_KIND
+    }
+    let rc: u64 = load(read, total, scratch)
+    if rc != E_OK {
+        return rc
+    }
+    let hdr: u64 = scratch
+    let arr: u64 = scratch + ARR_OFF
+    let nent: u64 = bytes.le32(hdr + 80)
+    let last: u64 = start + sectors - 1
+    if sectors == 0 || start < bytes.le64(hdr + 40) || last > bytes.le64(hdr + 48) {
+        return E_RANGE
+    }
+    var free_slot: u64 = nent
+    var i: u64 = 0
+    while i < nent {
+        let e: u64 = arr + i * ENT_SIZE
+        if slot_live(e) {
+            if start <= bytes.le64(e + 40) && last >= bytes.le64(e + 32) {
+                return E_OVERLAP
+            }
+        } else if free_slot == nent && !slot_used(e) {
+            free_slot = i
+        }
+        i = i + 1
+    }
+    if free_slot == nent {
+        return E_FULL
+    }
+    let e: u64 = arr + free_slot * ENT_SIZE
+    bytes.zero(e, ENT_SIZE)
+    bytes.put64(e, kind_lo(kind))
+    bytes.put64(e + 8, kind_hi(kind))
+    bytes.put64(e + 16, mix(seed + free_slot * 7 + start))
+    bytes.put64(e + 24, mix(seed + 3 + free_slot + sectors))
+    bytes.put64(e + 32, start)
+    bytes.put64(e + 40, last)
+    var j: u64 = 0
+    while j < 35 && bytes.ld8(name, j) != 0 {
+        bytes.put16(e + 56 + j * 2, bytes.ld8(name, j))
+        j = j + 1
+    }
+    return commit(write, scratch)
+}
+
+fn remove(read: fn(u64, u64, u64) -> u64, write: fn(u64, u64, u64) -> u64, total: u64, index: u64, scratch: u64) -> u64 {
+    let rc: u64 = load(read, total, scratch)
+    if rc != E_OK {
+        return rc
+    }
+    let arr: u64 = scratch + ARR_OFF
+    let nent: u64 = bytes.le32(scratch + 80)
+    var seen: u64 = 0
+    var i: u64 = 0
+    while i < nent {
+        let e: u64 = arr + i * ENT_SIZE
+        if slot_live(e) {
+            seen = seen + 1
+            if seen == index {
+                bytes.zero(e, ENT_SIZE)
+                return commit(write, scratch)
+            }
+        }
+        i = i + 1
+    }
+    return E_INDEX
+}
+
+fn align_up(v: u64) -> u64 {
+    return ((v + ALIGN - 1) / ALIGN) * ALIGN
+}
+
+fn free_start(tab: u64, sectors: u64) -> u64 {
+    var cand: u64 = align_up(table.first_usable(tab))
+    var again: bool = true
+    while again {
+        again = false
+        if sectors == 0 || cand + sectors - 1 > table.last_usable(tab) {
+            return 0
+        }
+        var i: u64 = 0
+        while i < table.count(tab) {
+            let s: u64 = table.start_of(tab, i)
+            let e: u64 = s + table.sectors_of(tab, i) - 1
+            if cand <= e && cand + sectors - 1 >= s {
+                cand = align_up(e + 1)
+                again = true
+            }
+            i = i + 1
+        }
+    }
+    return cand
+}

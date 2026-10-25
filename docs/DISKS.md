@@ -83,3 +83,12 @@ the file manager has no such entry.
 
 OrientOS roadmap items r444..r447 (P-012a..d) hold the stages; this file is their design (SDD) -- the
 status of each stage is kept there, not here.
+
+## 7. Stage D-3 (first cut, 25.10.2026): writes on disposable disks
+
+`diskctl init|create|delete|format <device> ... --confirm=<device>` (kernel/user/diskwrite.fi) on top of `lib/disks/gptw.fi`
+(GPT entries edited in place, backup copy first, primary header last, both CRCs), `lib/disks/ofsfmt.fi` (OFS v2/v3, equal to
+`tools/osum/mkfs.py` octet for octet) and `lib/disks/guard.fi` (policy). Refused: the disk that holds `/` or `/boot`, any
+disk with a mounted partition for init, a mounted partition for delete/format, init over an existing table, a missing or
+wrong `--confirm`. The kernel write lock (`/dev/wlock`) is opened for the one device only while the write runs.
+Gate: `bash tools/disks/write.sh`. Not yet: journal and replay, window dialog, grow/shrink/move.

@@ -50,7 +50,7 @@ import tz.tz
 
 export {
     init, calibrate, mono_ns, real_ns, boot_sec, rtc_field, tsc, khz,
-    set_rtc_utc, rtc_utc, tz_anwenden,
+    set_rtc_utc, rtc_utc, tz_anwenden, rtc_raw, rtc_frame_get, sync_get, clock_moved_get, tz_done_get,
     // RUNDE BLECHFUENF: der Versatz auf Ortszeit.
     tz_min, set_tz, now_local,
     // DAILY-DRIVER: summer time by rule, setting the clock.
@@ -432,6 +432,40 @@ static mut rtc_roh: u64 = 0
 // value after that.
 static mut tz_done: u64 = 0
 static mut clock_moved: u64 = 0
+static mut rtc_frame: u64 = 0
+static mut sync_n: u64 = 0
+static mut sync_last: u64 = 0
+static mut sync_delta: u64 = 0
+static mut sync_rtc: u64 = 0
+
+fn sync_get(state: u64, what: u64) -> u64 {
+    if what == 0 {
+        return sync_n
+    }
+    if what == 1 {
+        return sync_last
+    }
+    if what == 2 {
+        return sync_delta
+    }
+    return sync_rtc
+}
+
+fn rtc_raw(state: u64) -> u64 {
+    return rtc_roh
+}
+
+fn rtc_frame_get(state: u64) -> u64 {
+    return rtc_frame
+}
+
+fn clock_moved_get(state: u64) -> u64 {
+    return clock_moved
+}
+
+fn tz_done_get(state: u64) -> u64 {
+    return tz_done
+}
 
 fn set_tz(state: u64, minuten: u64) {
     if minuten > 1440 {
@@ -544,7 +578,9 @@ fn tz_anwenden(state: u64) {
         return
     }
     var utc: u64 = roh
+    var frame: u64 = 3
     if rtc_ist_utc == 0 {
+        frame = 1
         // wrapped signed seconds: east of Greenwich subtracts, west adds
         let ab: u64 = base_w() *% 60
         if tz_west != 0 || roh > ab {
@@ -556,9 +592,11 @@ fn tz_anwenden(state: u64) {
             let u1: u64 = roh -% (ab +% 3600)
             if eu_dst(u1) {
                 utc = u1
+                frame = 2
             }
         }
     }
+    rtc_frame = frame
     kstate.set(state, kstate.TIME_BOOT, utc)
     // A zone that is not known yet (no `tz=` on the boot line; it comes
     // later from /etc/time.conf through SETTZ) leaves the door open: the
@@ -582,8 +620,13 @@ fn set_utc(state: u64, utc: u64) -> bool {
     if up > utc {
         return false
     }
+    let before: u64 = now_sec(state)
     kstate.set(state, kstate.TIME_BOOT, utc -% up)
     clock_moved = 1
+    sync_n = sync_n + 1
+    sync_last = utc
+    sync_delta = utc -% before
+    sync_rtc = 0
     return true
 }
 
@@ -626,6 +669,7 @@ fn rtc_write(state: u64) -> bool {
     cmos_w(2, to_bcd(b, f[(R_MIN) as usize]))
     cmos_w(0, to_bcd(b, f[(R_SEC) as usize]))
     cmos_w(0x0B, b & 0x7F)
+    sync_rtc = 1
     return true
 }
 

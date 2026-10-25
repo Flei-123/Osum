@@ -1,0 +1,207 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+
+export { load, key_of, count_on, text_on, month_mask, add, drop_last }
+
+const CAP: u64 = 3072
+const TEXT_MAX: u64 = 48
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut ev_buf: [u8; 3072] = [0 as u8; 3072]
+static mut ev_len: u64 = 0
+static mut out_b: [u8; 64] = [0 as u8; 64]
+static mut p_ev: [u8; 17] = "/etc/calendar.ev\0"
+
+fn key_of(y: u64, m: u64, d: u64) -> u64 {
+    return y * 10000 + m * 100 + d
+}
+
+fn byte_at(i: u64) -> u64 {
+    let c: u8 = ev_buf[i as usize]
+    return c as u64
+}
+
+fn line_key(at: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        if at + i >= ev_len {
+            return NONE
+        }
+        let c: u64 = byte_at(at + i)
+        if c < 48 || c > 57 {
+            return NONE
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn line_end(at: u64) -> u64 {
+    var i: u64 = at
+    while i < ev_len && byte_at(i) != 10 {
+        i = i + 1
+    }
+    return i
+}
+
+fn find(key: u64, idx: u64) -> u64 {
+    var at: u64 = 0
+    var seen: u64 = 0
+    while at < ev_len {
+        let e: u64 = line_end(at)
+        if line_key(at) == key {
+            if seen == idx {
+                return at
+            }
+            seen = seen + 1
+        }
+        at = e + 1
+    }
+    return NONE
+}
+
+fn count_on(key: u64) -> u64 {
+    var at: u64 = 0
+    var n: u64 = 0
+    while at < ev_len {
+        let e: u64 = line_end(at)
+        if line_key(at) == key {
+            n = n + 1
+        }
+        at = e + 1
+    }
+    return n
+}
+
+fn text_on(key: u64, idx: u64) -> u64 {
+    let at: u64 = find(key, idx)
+    if at == NONE {
+        return 0
+    }
+    let e: u64 = line_end(at)
+    var i: u64 = at + 9
+    var o: u64 = 0
+    while i < e && o < 62 {
+        out_b[o as usize] = byte_at(i) as u8
+        o = o + 1
+        i = i + 1
+    }
+    out_b[o as usize] = 0 as u8
+    return (&out_b[0 as usize]) as u64
+}
+
+fn month_mask(y: u64, m: u64) -> u64 {
+    var mask: u64 = 0
+    var at: u64 = 0
+    let ym: u64 = y * 100 + m
+    while at < ev_len {
+        let e: u64 = line_end(at)
+        let k: u64 = line_key(at)
+        if k != NONE && k / 100 == ym {
+            let d: u64 = k % 100
+            if d >= 1 && d <= 31 {
+                mask = mask | (1 << (d - 1))
+            }
+        }
+        at = e + 1
+    }
+    return mask
+}
+
+fn save() -> bool {
+    let fd: u64 = io.create((&p_ev[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return false
+    }
+    let g: u64 = io.write_all(fd, (&ev_buf[0 as usize]) as u64, ev_len)
+    io.close(fd)
+    return !ulib.bad(g) && g >= ev_len
+}
+
+fn load() {
+    ev_len = 0
+    ev_buf[0 as usize] = 0 as u8
+    let fd: u64 = io.open((&p_ev[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    var guard: u64 = 0
+    while ev_len < CAP - 1 && guard < 64 {
+        let r: u64 = io.read(fd, (&ev_buf[0 as usize]) as u64 + ev_len, CAP - 1 - ev_len)
+        if ulib.bad(r) || r == 0 {
+            break
+        }
+        ev_len = ev_len + r
+        guard = guard + 1
+    }
+    io.close(fd)
+    ev_buf[ev_len as usize] = 0 as u8
+}
+
+fn add(key: u64, text: u64) -> bool {
+    var tmp: [u8; 64] = [0 as u8; 64]
+    var n: u64 = 0
+    var i: u64 = 0
+    while n < TEXT_MAX {
+        let c: u8 = __mmio_read8((text + i) as *mut u8)
+        if c == 0 as u8 {
+            break
+        }
+        i = i + 1
+        if c < 32 as u8 {
+            continue
+        }
+        if c == 32 as u8 && n == 0 {
+            continue
+        }
+        tmp[n as usize] = c
+        n = n + 1
+    }
+    while n > 0 && tmp[(n - 1) as usize] == 32 as u8 {
+        n = n - 1
+    }
+    if n == 0 || ev_len + 10 + n > CAP - 1 {
+        return false
+    }
+    var d: u64 = key
+    var k: u64 = 8
+    while k > 0 {
+        ev_buf[(ev_len + k - 1) as usize] = (48 + d % 10) as u8
+        d = d / 10
+        k = k - 1
+    }
+    ev_buf[(ev_len + 8) as usize] = 32 as u8
+    var j: u64 = 0
+    while j < n {
+        ev_buf[(ev_len + 9 + j) as usize] = tmp[j as usize]
+        j = j + 1
+    }
+    ev_buf[(ev_len + 9 + n) as usize] = 10 as u8
+    ev_len = ev_len + 10 + n
+    ev_buf[ev_len as usize] = 0 as u8
+    return save()
+}
+
+fn drop_last(key: u64) -> bool {
+    let cnt: u64 = count_on(key)
+    if cnt == 0 {
+        return false
+    }
+    let at: u64 = find(key, cnt - 1)
+    let e: u64 = line_end(at) + 1
+    var i: u64 = e
+    var o: u64 = at
+    while i < ev_len {
+        ev_buf[o as usize] = ev_buf[i as usize]
+        o = o + 1
+        i = i + 1
+    }
+    ev_len = o
+    ev_buf[ev_len as usize] = 0 as u8
+    return save()
+}

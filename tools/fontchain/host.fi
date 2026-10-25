@@ -1,0 +1,321 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import font.ttf
+import font.raster
+import fontchain
+
+const FONT_WORDS: u64 = 256
+const STRIDE: u64 = 2048
+const RASTER_BYTES: usize = 65536
+const SCRATCH_BYTES: usize = 16384
+const WIN: usize = 64
+const PX: f64 = 32.0
+
+static mut fonts: [u64; 1792] = [0; 1792]
+static mut raster_mem: [u8; 65536] = [0 as u8; 65536]
+static mut scratch: [u8; 16384] = [0 as u8; 16384]
+static mut img_a: [u8; 4096] = [0 as u8; 4096]
+static mut img_b: [u8; 4096] = [0 as u8; 4096]
+static mut rast: [u64; 64] = [0; 64]
+
+static mut p_sans: [u8; 9] = "sans.ttf\0"
+static mut p_sym: [u8; 12] = "symbols.ttf\0"
+static mut p_emo: [u8; 10] = "emoji.ttf\0"
+static mut p_x1: [u8; 16] = "/lib/extra1.ttf\0"
+static mut p_x2: [u8; 16] = "/lib/extra2.ttf\0"
+static mut p_x3: [u8; 16] = "/lib/extra3.ttf\0"
+static mut p_x4: [u8; 16] = "/lib/extra4.ttf\0"
+static mut p_x5: [u8; 16] = "/lib/extra5.ttf\0"
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn font_at(i: u64) -> *mut ttf.Font {
+    return (&fonts[(i * FONT_WORDS) as usize]) as u64 as *mut ttf.Font
+}
+
+fn ras() -> *mut raster.Raster {
+    return (&rast[0]) as u64 as *mut raster.Raster
+}
+
+fn load(slot: u64, path: u64) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file(path, &b) {
+        return false
+    }
+    *font_at(slot) = ttf.font_new()
+    return ttf.font_init(font_at(slot), b.ptr as *mut u8, b.len)
+}
+
+fn miss(cp: u32, upem: u32) -> u32 {
+    return fontchain.find((font_at(1)) as u64, STRIDE, cp, upem)
+}
+
+fn same_path(i: u64, want: str) -> bool {
+    let p: u64 = fontchain.path_at(i)
+    if p == 0 {
+        return false
+    }
+    var k: usize = 0
+    while k < want.length() {
+        if *((p + k as u64) as *mut u8) != *((want.p as u64 + k as u64) as *mut u8) {
+            return false
+        }
+        k = k + 1
+    }
+    return *((p + k as u64) as *mut u8) == 0 as u8
+}
+
+#[allow_fp]
+fn render(f: *mut ttf.Font, gid: u32, out: u64) -> u64 {
+    var k: usize = 0
+    while k < WIN * WIN {
+        *((out + k as u64) as *mut u8) = 0 as u8
+        k = k + 1
+    }
+    var x0: i32 = 0
+    var y0: i32 = 0
+    var x1: i32 = 0
+    var y1: i32 = 0
+    if !ttf.font_glyph_bbox(f, gid, &x0, &y0, &x1, &y1) || x1 <= x0 || y1 <= y0 {
+        return 0
+    }
+    let sc: f64 = PX / (ttf.font_upem(f) as f64)
+    let bx0: i64 = ((x0 as f64) * sc) as i64 - 1
+    let by1: i64 = ((y1 as f64) * sc) as i64 + 1
+    var w: usize = (((x1 as f64) * sc) as i64 - bx0 + 2) as usize
+    var h: usize = (by1 - ((y0 as f64) * sc) as i64 + 2) as usize
+    if w > WIN {
+        w = WIN
+    }
+    if h > WIN {
+        h = WIN
+    }
+    *ras() = raster.raster_new()
+    raster.raster_attach(ras(), (&raster_mem[0]) as u64 as *mut u8, RASTER_BYTES)
+    if !raster.raster_begin(ras(), bx0 as f64, (0 - by1) as f64, w, h) {
+        return 0
+    }
+    if !ttf.font_outline(f, gid, ras(), 0.0, 0.0, sc, (&scratch[0]) as u64 as *mut u8, SCRATCH_BYTES, 0) {
+        return 0
+    }
+    raster.raster_finish(ras())
+    var ink: u64 = 0
+    var r: usize = 0
+    while r < h {
+        var c: usize = 0
+        while c < w {
+            var cov: f64 = raster.raster_cov(ras(), c, r)
+            if cov < 0.0 {
+                cov = 0.0
+            }
+            if cov > 1.0 {
+                cov = 1.0
+            }
+            let a: u64 = (cov * 255.0 + 0.5) as u64
+            *((out + (r * WIN + c) as u64) as *mut u8) = a as u8
+            if a > 64 {
+                ink = ink + 1
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return ink
+}
+
+fn rd8(addr: u64) -> u64 {
+    let p: *mut u8 = addr as *mut u8
+    return (*p) as u64
+}
+
+fn diff(a: u64, b: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < (WIN * WIN) as u64 {
+        let x: u64 = rd8(a + k)
+        let y: u64 = rd8(b + k)
+        if (x > 64) != (y > 64) {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn row_edge(img: u64, row: u64, right: bool) -> i64 {
+    var best: i64 = 0 - 1
+    var c: u64 = 0
+    while c < WIN as u64 {
+        if rd8(img + row * WIN as u64 + c) > 64 {
+            if right {
+                best = c as i64
+            } else if best < 0 {
+                best = c as i64
+            }
+        }
+        c = c + 1
+    }
+    return best
+}
+
+#[allow_fp]
+fn min_gap(sans: *mut ttf.Font, ga: u32, gv: u32, kerned: bool) -> i64 {
+    render(sans, ga, (&img_a[0]) as u64)
+    render(sans, gv, (&img_b[0]) as u64)
+    let sc: f64 = PX / (ttf.font_upem(sans) as f64)
+    var pen: i64 = (((ttf.font_advance(sans, ga) as f64) * sc) + 0.5) as i64
+    if kerned {
+        pen = pen + (((ttf.font_kern(sans, ga, gv) as f64) * sc) - 0.5) as i64
+    }
+    var x0: i32 = 0
+    var y0: i32 = 0
+    var x1: i32 = 0
+    var y1: i32 = 0
+    ttf.font_glyph_bbox(sans, ga, &x0, &y0, &x1, &y1)
+    let ax: i64 = ((x0 as f64) * sc) as i64 - 1
+    ttf.font_glyph_bbox(sans, gv, &x0, &y0, &x1, &y1)
+    let vx: i64 = ((x0 as f64) * sc) as i64 - 1
+    var best: i64 = 1000
+    var r: u64 = 0
+    while r < WIN as u64 {
+        let ar: i64 = row_edge((&img_a[0]) as u64, r, true)
+        let vl: i64 = row_edge((&img_b[0]) as u64, r, false)
+        if ar >= 0 && vl >= 0 {
+            let gap: i64 = (pen + vx + vl) - (ax + ar)
+            if gap < best {
+                best = gap
+            }
+        }
+        r = r + 1
+    }
+    return best
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    check(&t, load(0, (&p_sans[0]) as u64), "sans.ttf loads")
+    check(&t, load(1, (&p_sym[0]) as u64), "symbols.ttf loads")
+    check(&t, load(2, (&p_emo[0]) as u64), "emoji.ttf loads")
+    check(&t, fontchain.count() == 2, "registry lists 2 faces")
+    check(&t, fontchain.MAX_FACES >= 6, "registry holds at least 6 faces")
+    check(&t, same_path(0, "/lib/symbols.ttf"), "face 0 is /lib/symbols.ttf")
+    check(&t, same_path(1, "/lib/emoji.ttf"), "face 1 is /lib/emoji.ttf")
+    check(&t, fontchain.path_at(2) == 0, "no face 2")
+    fontchain.set_loaded(0, 1)
+    fontchain.set_loaded(1, 1)
+    let sans: *mut ttf.Font = font_at(0)
+    ttf.font_set_faces(sans, font_at(1), STRIDE as usize, 2, miss)
+    let upem: u32 = ttf.font_upem(sans)
+    check(&t, ttf.font_upem(font_at(1)) == upem && ttf.font_upem(font_at(2)) == upem, "all faces share the sans em size")
+
+    let cps: [u32; 4] = [0x2603 as u32, 0x1F600 as u32, 0x0220 as u32, 0x2318 as u32]
+    var i: usize = 0
+    while i < 4 {
+        let cp: u32 = cps[i]
+        fontchain.enable(0)
+        let off: u32 = ttf.font_glyph_for(sans, cp)
+        fontchain.enable(1)
+        let on: u32 = ttf.font_glyph_for(sans, cp)
+        let tag: u64 = fontchain.face_of_tag(on)
+        io.fmt_print(f"cp {cp} off {off} on {on} face {tag}\n")
+        check(&t, off == 0 as u32, "sans alone has no glyph (missing box)")
+        check(&t, on != 0 as u32 && tag < 2, "chain finds a glyph in a registered face")
+        let ink_on: u64 = render(sans, on, (&img_a[0]) as u64)
+        fontchain.enable(0)
+        let ink_off: u64 = render(sans, ttf.font_glyph_for(sans, cp), (&img_b[0]) as u64)
+        fontchain.enable(1)
+        let d: u64 = diff((&img_a[0]) as u64, (&img_b[0]) as u64)
+        io.fmt_print(f"cp {cp} ink_on {ink_on} ink_off {ink_off} diff {d}\n")
+        check(&t, ink_on >= 20, "fallback glyph has ink")
+        check(&t, d >= 30, "fallback glyph differs from the missing box")
+        i = i + 1
+    }
+
+    fontchain.enable(1)
+    check(&t, fontchain.face_of_tag(ttf.font_glyph_for(sans, 0x2603 as u32)) == 0, "snowman comes from symbols (face 0)")
+    check(&t, fontchain.face_of_tag(ttf.font_glyph_for(sans, 0x1F600 as u32)) == 1, "smiley comes from emoji (face 1)")
+    check(&t, fontchain.find(font_at(1) as u64, STRIDE, 0x41 as u32, 0 as u32) == 0 as u32, "ASCII never falls back")
+    check(&t, fontchain.find(font_at(1) as u64, STRIDE, 0x2603 as u32, upem + 1 as u32) == 0 as u32, "a face with another em size is refused")
+    check(&t, fontchain.find(font_at(1) as u64, STRIDE, 0x378 as u32, 0 as u32) == 0 as u32, "unassigned code point: no face")
+    check(&t, fontchain.pair_kern(font_at(1) as u64, STRIDE, 7, 0x41 as u32, 0x56 as u32) == 0, "unknown face: no pair kerning")
+
+    check(&t, load(3, (&p_sym[0]) as u64), "symbols copy loads as face 2")
+    check(&t, load(4, (&p_emo[0]) as u64), "emoji copy loads as face 3")
+    check(&t, load(5, (&p_sym[0]) as u64), "symbols copy loads as face 4")
+    check(&t, load(6, (&p_emo[0]) as u64), "emoji copy loads as face 5")
+    check(&t, fontchain.register((&p_x1[0]) as u64) && fontchain.register((&p_x2[0]) as u64), "two more faces register")
+    check(&t, fontchain.count() == 4, "registry lists 4 faces")
+    check(&t, same_path(2, "/lib/extra1.ttf") && same_path(3, "/lib/extra2.ttf"), "registered paths keep their order")
+    check(&t, fontchain.register((&p_x3[0]) as u64) && fontchain.register((&p_x4[0]) as u64), "faces 5 and 6 register")
+    check(&t, !fontchain.register((&p_x5[0]) as u64), "a 7th face is refused")
+    check(&t, fontchain.count() == fontchain.MAX_FACES, "registry stops at MAX_FACES")
+    ttf.font_set_faces(sans, font_at(1), STRIDE as usize, fontchain.MAX_FACES as usize, miss)
+    var q: u64 = 0
+    while q < 6 {
+        fontchain.set_loaded(q, 1)
+        q = q + 1
+    }
+    let g_sn0: u32 = ttf.font_glyph_for(sans, 0x2603 as u32)
+    let ink0: u64 = render(sans, g_sn0, (&img_a[0]) as u64)
+    let g_sm0: u32 = ttf.font_glyph_for(sans, 0x1F600 as u32)
+    let ink1: u64 = render(sans, g_sm0, (&img_b[0]) as u64)
+    fontchain.set_loaded(0, 0)
+    fontchain.set_loaded(1, 0)
+    let g_sn2: u32 = ttf.font_glyph_for(sans, 0x2603 as u32)
+    let g_sm3: u32 = ttf.font_glyph_for(sans, 0x1F600 as u32)
+    io.fmt_print(f"tags face {fontchain.face_of_tag(g_sn2)} {fontchain.face_of_tag(g_sm3)}\n")
+    check(&t, fontchain.face_of_tag(g_sn2) == 2, "with faces 0-1 gone the snowman comes from face 2 (tag 3)")
+    check(&t, fontchain.face_of_tag(g_sm3) == 2 || fontchain.face_of_tag(g_sm3) == 3, "the smiley comes from a later face")
+    let ink2: u64 = render(sans, g_sn2, (&img_a[0]) as u64)
+    check(&t, ink2 == ink0 && ink2 >= 20, "face 2 draws the same snowman as face 0 (outline of tag 3)")
+    fontchain.set_loaded(2, 0)
+    let g_sn4: u32 = ttf.font_glyph_for(sans, 0x2603 as u32)
+    check(&t, fontchain.face_of_tag(g_sn4) == 4, "with faces 0-2 gone the snowman comes from face 4 (tag 5)")
+    let ink4: u64 = render(sans, g_sn4, (&img_a[0]) as u64)
+    check(&t, ink4 == ink0, "face 4 draws the same snowman (outline of tag 5)")
+    let adv0: i32 = ttf.font_advance(sans, g_sn0)
+    check(&t, ttf.font_advance(sans, g_sn4) == adv0 && adv0 > 0, "advance of tag 5 comes from its own face")
+    fontchain.set_loaded(3, 0)
+    fontchain.set_loaded(4, 0)
+    let g_sm5: u32 = ttf.font_glyph_for(sans, 0x1F600 as u32)
+    check(&t, fontchain.face_of_tag(g_sm5) == 5, "with faces 0-4 gone the smiley comes from face 5 (tag 6)")
+    let ink5: u64 = render(sans, g_sm5, (&img_b[0]) as u64)
+    check(&t, ink5 == ink1 && ink5 >= 20, "face 5 draws the same smiley (outline of tag 6)")
+    var r0: u64 = 0
+    while r0 < 6 {
+        fontchain.set_loaded(r0, 0)
+        r0 = r0 + 1
+    }
+    fontchain.set_loaded(0, 1)
+    fontchain.set_loaded(1, 1)
+    fontchain.reset()
+    check(&t, fontchain.count() == 2, "reset restores the two default faces")
+    let ga: u32 = ttf.font_glyph_for(sans, 0x41 as u32)
+    let gv: u32 = ttf.font_glyph_for(sans, 0x56 as u32)
+    let k: i32 = ttf.font_kern(sans, ga, gv)
+    io.fmt_print(f"kern AV {k}\n")
+    check(&t, ttf.font_has_kern(sans), "sans carries kerning pairs")
+    check(&t, k < 0, "AV has a negative kerning value")
+    let gk: i64 = min_gap(sans, ga, gv, true)
+    let gn: i64 = min_gap(sans, ga, gv, false)
+    io.fmt_print(f"gap kerned {gk} unkerned {gn}\n")
+    check(&t, gk < gn, "kerned AV stands closer than unkerned AV (pixel gap)")
+    check(&t, gk >= 0 - 1, "kerned AV does not collide")
+
+    io.fmt_print(f"checks {t.checks} fails {t.fails}\n")
+    return t.fails
+}

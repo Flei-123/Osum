@@ -22,7 +22,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "USBTETHER: skipped, no qemu"; exit 0; }
-CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif}"
+CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan}"
 cleanup_pids() { for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; pkill -P $$ 2>/dev/null; true; }
 trap 'cleanup_pids; [ -n "${USBTETHER_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/dhcp.elf" ]; then
@@ -36,11 +36,13 @@ printf 'echo ==START==\ndhcp\nping 192.168.42.129\nsleep 1\necho ==END==\n' > "$
 printf 'echo ==START==\nping 192.168.42.129\nping 192.168.42.129\nping 192.168.42.129\nping 192.168.42.129\ndhcp\nping 192.168.42.129\nsleep 1\necho ==END==\n' > "$T/s_late.sh"
 printf 'echo ==START==\ndhcp\nping 192.168.42.129\nsleep 2\ncat /proc/usbnet\necho ==END==\n' > "$T/s_proc.sh"
 printf 'echo ==START==\nsleep 3\ncat /proc/usbnet\ndhcp\necho ==END==\n' > "$T/s_procd.sh"
+printf 'echo ==START==\nsleep 2\ncat /proc/usbsum\necho ==END==\n' > "$T/s_sum.sh"
+printf 'echo ==START==\nsleep 12\ncat /proc/usbnet\ncat /proc/usbsum\necho ==END==\n' > "$T/s_hubhot.sh"
 printf 'echo ==START==\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\ncat /proc/usbnet\necho ==END==\n' > "$T/s_intr.sh"
 python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
-    /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_late.sh="$T/s_late.sh" /t/s_proc.sh="$T/s_proc.sh" /t/s_procd.sh="$T/s_procd.sh" /t/s_intr.sh="$T/s_intr.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
+    /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_late.sh="$T/s_late.sh" /t/s_proc.sh="$T/s_proc.sh" /t/s_procd.sh="$T/s_procd.sh" /t/s_intr.sh="$T/s_intr.sh" /t/s_sum.sh="$T/s_sum.sh" /t/s_hubhot.sh="$T/s_hubhot.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 PORT=$((47000 + ($$ % 500) * 4))
 
@@ -70,14 +72,15 @@ run() {
         python3 -I tools/usbredir/usbdev.py --sock "$T/$n.sock" --profile "$prof" --net-local $((p+1)) --net-remote "$p" \
             $trig --unplug "$T/$n.unplug" --log "$T/$n.gadget" --max-secs 200 ${GARGS:-} &
         echo $! > "$T/$n.gpid"
-        extra="-chardev socket,id=r0,path=$T/$n.sock,server=on,wait=off -device usb-redir,chardev=r0"
+        extra="-chardev socket,id=r0,path=$T/$n.sock,server=on,wait=off -device usb-redir,chardev=r0${REDIR_BUS:+,bus=$REDIR_BUS}"
+        [ -n "${BEHIND_HUB:-}" ] && extra="-device usb-hub,bus=x0.0,port=1,id=h0 -chardev socket,id=r0,path=$T/$n.sock,server=on,wait=off -device usb-redir,chardev=r0,bus=x0.0,port=1.2"
     fi
     timeout 170 qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256 \
         -append "osum ${BASEW:-nokbd nosched noproc nofs noring3} $words ${XWORDS:-} nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
         -serial "file:$T/$n.txt" -display none -nic none -no-reboot -pidfile "$T/$n.qpid" -S \
         -monitor "unix:$T/$n.mon,server,nowait" \
         -drive "file=$T/d.img,format=raw,if=ide,index=0" \
-        -device qemu-xhci,id=x0 $extra \
+        -device qemu-xhci,id=x0 ${XHCI2:-} $extra \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
     local qp=$!
     bash tools/work/waitfor.sh -t 20 -i 1 file "$T/$n.mon" >/dev/null 2>&1
@@ -185,12 +188,38 @@ for c in $CASES; do
         chk chp "configuration seen" 'usb: ncfg=2 cfg=1 setcfg=1 rc=0'
         chk chp "interface vendor class" 'usb: iface=ff/ff/ff'
         chk chp "bring-up finished" 'usb: step=4 ok'
+        chk chp "debug counters line" 'usb: dbg starts=1 passes=1 unit=0 descs=1 rec=live'
+        chk chp "raw device descriptor" 'usb: dev18=1201.*861a9453'
+        chk chp "config header" 'usb: cfghdr c0 total='
+        chk chp "raw config descriptor" 'usb: cfg0=0902'
+        chk chp "parsed interface and endpoint list" 'usb: c0 i0 a0 ff/ff/ff n'
         chk chp "alt scan not needed, SET_INTERFACE sent and accepted" 'usb: alt=0 scan=0 setif=1'
         grep -aq 'set_alt_setting if=0 alt=0' "$T/chp.gadget" && ok "chp: gadget saw SET_INTERFACE alt 0" || bad "chp: gadget never saw SET_INTERFACE alt 0"
         chk chp "phy line with kick count" 'phy: bmcr=1000 bmsr=782d id=0e400141'
         chk chp "link up line" 'link: state=up'
         chk chp "usbnet counters" 'usbnet: ready mode=3 link=up'
         chk chp "dhcp line" 'dhcp: state='
+        ;;
+    ch336-hub)
+        BEHIND_HUB=1 GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run chh ch336 boot s_proc.sh
+        chk chh "bound to driver ch336 behind a hub" 'driver=ch336'
+        chk chh "usb line with id behind a hub" 'usb: ch336 id=1a86:5394'
+        chk chh "bring-up finished behind a hub" 'usb: step=4 ok'
+        chk chh "bulk endpoints found behind a hub" 'usb: ep in=[1-9]'
+        chk chh "usbnet ready behind a hub" 'usbnet: ready mode=3'
+        ;;
+    ch336-2hc)
+        XHCI2="-device qemu-xhci,id=x1" GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run ch2 ch336 boot s_proc.sh
+        chk ch2 "bound to driver ch336 with two controllers" 'driver=ch336'
+        chk ch2 "usb line with id with two controllers" 'usb: ch336 id=1a86:5394'
+        chk ch2 "bulk endpoints found with two controllers" 'usb: ep in=[1-9]'
+        ;;
+    ch336-lasthc)
+        XHCI2="-device qemu-xhci,id=x1" REDIR_BUS=x1.0 GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run chl2 ch336 boot s_proc.sh
+        chk chl2 "dongle on the last controller survives the controller choice" 'usb: dbg starts=[1-9] passes=2'
+        chk chl2 "dongle record still live" 'rec=live'
+        chk chl2 "bulk endpoints found" 'usb: ep in=[1-9]'
+        chk chl2 "usbnet ready" 'usbnet: ready mode=3'
         ;;
     ch336-intr)
         GARGS="--phy-boot down --intr link" BASEW="nokbd nosched vfs" run chi ch336 boot s_proc.sh
@@ -237,6 +266,38 @@ for c in $CASES; do
         chk ca3 "alt scan reported with SET_INTERFACE refused" 'usb: alt=1 scan=1 setif=0'
         nochk ca3 "no lease without SET_INTERFACE" 'dhcp: ack ip='
         panics ca3
+        ;;
+    usbsum)
+        BASEW="nokbd nosched vfs" run usum ch336 boot s_sum.sh
+        chk usum "summary header" 'usbsum v1 hc=1 sel=0 passes=1'
+        chk usum "controller line with ports and init state" 'h0 0x00:0x0[0-9a-f]\.0x0 .* init=ok ports='
+        chk usum "connected root port line with step mask" 'h0p[0-9][0-9] U[23] pre=.* fin=.*[13579bdf] m=0x[7f][0-9a-f]'
+        chk usum "device line with the dongle id" 'dev p=[0-9]* hp=0 spd=[0-9]* 0x1a86:0x5394'
+        chk usum "log line counts" 'log hcrst=1 halt=[0-9]* ppclr=[0-9]* late hcrst=0 halt=0 ppclr=0'
+        chk usum "script reached the end" '==END=='
+        panics usum
+        ;;
+    usbsum-none)
+        BASEW="nokbd nosched vfs" run usnone ncm none s_sum.sh
+        chk usnone "summary header" 'usbsum v1 hc=1'
+        nochk usnone "no dongle device line" '1a86:5394'
+        nochk usnone "no connected port without a gadget" 'h0p[0-9][0-9] .*m=[1-9a-f]'
+        chk usnone "script reached the end" '==END=='
+        ;;
+    hubhot)
+        BEHIND_HUB=1 GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run hh ch336 hot s_hubhot.sh
+        chk hh "hold window ran" 'k17: hold'
+        chk hh "dongle found behind the hub after boot" 'usb: ch336 id=1a86:5394'
+        chk hh "dongle bound after boot" 'driver=ch336'
+        chk hh "hub rescan found the child" 'dev p=[0-9]* hp=[1-9]'
+        chk hh "script reached the end" '==END=='
+        panics hh
+        ;;
+    hubhot-norescan)
+        BEHIND_HUB=1 XWORDS="usbnorescan" GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run hn ch336 hot s_hubhot.sh
+        chk hn "hold window ran" 'k17: hold'
+        nochk hn "no dongle found without the rescan" 'usb: ch336 id=1a86:5394'
+        chk hn "script reached the end" '==END=='
         ;;
     none)
         run none ncm none s.sh

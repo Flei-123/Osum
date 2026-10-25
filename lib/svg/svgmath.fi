@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+export {
+    Q, TURN, imin, imax, iabs, clamp, rdiv, mul16, div16, isqrt, sin16, cos16, atan2_turn
+}
+
+const Q: i64 = 65536
+const TURN: i64 = 1048576
+const CORDIC_K: i64 = 10188014
+const CORDIC_N: i64 = 20
+
+static mut atan_tab: [i64; 20] = [0 as i64; 20]
+static mut tab_ready: u64 = 0
+static mut cr_x: i64 = 0
+static mut cr_y: i64 = 0
+
+fn imin(a: i64, b: i64) -> i64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn imax(a: i64, b: i64) -> i64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn iabs(a: i64) -> i64 {
+    if a < 0 {
+        return 0 - a
+    }
+    return a
+}
+
+fn clamp(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+fn rdiv(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0
+    }
+    var za: i64 = a
+    var nb: i64 = b
+    if nb < 0 {
+        za = 0 - za
+        nb = 0 - nb
+    }
+    if za >= 0 {
+        return (za + nb / 2) / nb
+    }
+    return 0 - ((0 - za) + nb / 2) / nb
+}
+
+fn mul16(a: i64, b: i64) -> i64 {
+    return (a * b + 32768) >> 16
+}
+
+fn div16(a: i64, b: i64) -> i64 {
+    return rdiv(a * 65536, b)
+}
+
+fn isqrt(v: i64) -> i64 {
+    if v <= 0 {
+        return 0
+    }
+    if v < 2 {
+        return v
+    }
+    var x: i64 = v
+    var y: i64 = (x + 1) / 2
+    var n: i64 = 0
+    while y < x && n < 64 {
+        x = y
+        y = (x + v / x) / 2
+        n = n + 1
+    }
+    return x
+}
+
+fn tab_init() {
+    if tab_ready != 0 {
+        return
+    }
+    atan_tab[0 as usize] = 131072
+    atan_tab[1 as usize] = 77376
+    atan_tab[2 as usize] = 40884
+    atan_tab[3 as usize] = 20753
+    atan_tab[4 as usize] = 10417
+    atan_tab[5 as usize] = 5213
+    atan_tab[6 as usize] = 2607
+    atan_tab[7 as usize] = 1304
+    atan_tab[8 as usize] = 652
+    atan_tab[9 as usize] = 326
+    atan_tab[10 as usize] = 163
+    atan_tab[11 as usize] = 81
+    atan_tab[12 as usize] = 41
+    atan_tab[13 as usize] = 20
+    atan_tab[14 as usize] = 10
+    atan_tab[15 as usize] = 5
+    atan_tab[16 as usize] = 3
+    atan_tab[17 as usize] = 1
+    atan_tab[18 as usize] = 1
+    atan_tab[19 as usize] = 0
+    tab_ready = 1
+}
+
+fn cordic_rot(a: i64) {
+    tab_init()
+    var x: i64 = CORDIC_K
+    var y: i64 = 0
+    var z: i64 = a
+    var i: i64 = 0
+    while i < CORDIC_N {
+        let xs: i64 = x >> i
+        let ys: i64 = y >> i
+        if z >= 0 {
+            x = x - ys
+            y = y + xs
+            z = z - atan_tab[i as usize]
+        } else {
+            x = x + ys
+            y = y - xs
+            z = z + atan_tab[i as usize]
+        }
+        i = i + 1
+    }
+    cr_x = x
+    cr_y = y
+}
+
+fn quadrant(a: i64) -> i64 {
+    var t: i64 = a % TURN
+    if t < 0 {
+        t = t + TURN
+    }
+    let q: i64 = t >> 18
+    cordic_rot(t & 262143)
+    return q
+}
+
+fn pick(q: i64, want_sin: bool) -> i64 {
+    let c: i64 = cr_x
+    let s: i64 = cr_y
+    var rc: i64 = c
+    var rs: i64 = s
+    if q == 1 {
+        rc = 0 - s
+        rs = c
+    } else if q == 2 {
+        rc = 0 - c
+        rs = 0 - s
+    } else if q == 3 {
+        rc = s
+        rs = 0 - c
+    }
+    if want_sin {
+        return (rs + 128) >> 8
+    }
+    return (rc + 128) >> 8
+}
+
+fn sin16(a: i64) -> i64 {
+    let q: i64 = quadrant(a)
+    return pick(q, true)
+}
+
+fn cos16(a: i64) -> i64 {
+    let q: i64 = quadrant(a)
+    return pick(q, false)
+}
+
+fn atan2_turn(y0: i64, x0: i64) -> i64 {
+    tab_init()
+    var x: i64 = x0
+    var y: i64 = y0
+    var m: i64 = imax(iabs(x), iabs(y))
+    if m == 0 {
+        return 0
+    }
+    while m < 1073741824 {
+        x = x * 2
+        y = y * 2
+        m = m * 2
+    }
+    while m >= 1099511627776 {
+        x = x / 2
+        y = y / 2
+        m = m / 2
+    }
+    var base: i64 = 0
+    if x < 0 {
+        x = 0 - x
+        y = 0 - y
+        base = TURN / 2
+    }
+    var z: i64 = 0
+    var i: i64 = 0
+    while i < CORDIC_N {
+        let xs: i64 = x >> i
+        let ys: i64 = y >> i
+        if y > 0 {
+            x = x + ys
+            y = y - xs
+            z = z + atan_tab[i as usize]
+        } else {
+            x = x - ys
+            y = y + xs
+            z = z - atan_tab[i as usize]
+        }
+        i = i + 1
+    }
+    var r: i64 = (z + base) % TURN
+    if r < 0 {
+        r = r + TURN
+    }
+    return r
+}

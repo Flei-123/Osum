@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import disks.table
+import disks.gptw
+import disks.ofsfmt
+import disks.guard
+
+static mut img: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut out: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut fmtimg: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut scratch: [u8; 17408] = [0 as u8; 17408]
+static mut tab: [u8; 2312] = [0 as u8; 2312]
+static mut small: [u8; 1024] = [0 as u8; 1024]
+
+fn read_sectors(lba: u64, n: u64, dst: u64) -> u64 {
+    let off: u64 = lba * 512
+    let want: u64 = n * 512
+    if off + want > img.len as u64 {
+        return 1
+    }
+    var i: u64 = 0
+    while i < want {
+        *((dst + i) as *mut u8) = *((img.ptr as u64 + off + i) as *mut u8)
+        i = i + 1
+    }
+    return 0
+}
+
+fn write_sectors(lba: u64, n: u64, src: u64) -> u64 {
+    let off: u64 = lba * 512
+    let want: u64 = n * 512
+    if off + want > img.len as u64 {
+        return 1
+    }
+    var i: u64 = 0
+    while i < want {
+        *((img.ptr as u64 + off + i) as *mut u8) = *((src + i) as *mut u8)
+        i = i + 1
+    }
+    return 0
+}
+
+fn write_fmt(lba: u64, n: u64, src: u64) -> u64 {
+    let off: u64 = lba * 512
+    let want: u64 = n * 512
+    if off + want > fmtimg.len as u64 {
+        return 1
+    }
+    var i: u64 = 0
+    while i < want {
+        *((fmtimg.ptr as u64 + off + i) as *mut u8) = *((src + i) as *mut u8)
+        i = i + 1
+    }
+    return 0
+}
+
+fn add_s(s: str) {
+    rt.buf_push_bytes(&out, s.p as u64, s.n)
+}
+
+fn add_n(v: u64) {
+    rt.buf_push_dec_u64(&out, v)
+}
+
+fn dump(name: str) {
+    var path: [u8; 32] = [0 as u8; 32]
+    var i: u64 = 0
+    while i < (name.n as u64) && i < 31 {
+        path[i as usize] = *((name.p as u64 + i) as *mut u8)
+        i = i + 1
+    }
+    rt.write_file((&path[0]) as u64, img.ptr as u64, img.len)
+}
+
+fn show(label: str) {
+    let t: u64 = (&tab[0]) as u64
+    let total: u64 = img.len as u64 / 512
+    let sch: u64 = table.read_table(read_sectors, total, t, (&scratch[0]) as u64)
+    add_s(label)
+    add_s(": scheme ")
+    rt.buf_push_bytes(&out, table.scheme_word(sch), rt.c_length(table.scheme_word(sch)))
+    add_s(" count ")
+    add_n(table.count(t))
+    add_s(" flags ")
+    add_n(table.flags_of(t))
+    add_s("\n")
+    var i: u64 = 0
+    while i < table.count(t) {
+        add_s("  part ")
+        add_n(i + 1)
+        add_s(" start ")
+        add_n(table.start_of(t, i))
+        add_s(" sectors ")
+        add_n(table.sectors_of(t, i))
+        add_s(" kind ")
+        rt.buf_push_bytes(&out, table.kind_word(table.kind_of(t, i)), rt.c_length(table.kind_word(table.kind_of(t, i))))
+        add_s(" name ")
+        rt.buf_push_bytes(&out, table.name_of(t, i), rt.c_length(table.name_of(t, i)))
+        add_s("\n")
+        i = i + 1
+    }
+}
+
+fn rc(label: str, v: u64) {
+    add_s(label)
+    add_s(" rc=")
+    add_n(v)
+    add_s("\n")
+}
+
+fn format_case(file: str, blocks: u64, version: u64, inodes: u64) {
+    rt.buf_clear(&fmtimg)
+    rt.buf_reserve_or_die(&fmtimg, (blocks * 512) as usize)
+    rt.mem_set(fmtimg.ptr as u64, 0, (blocks * 512) as usize)
+    rt.buf_set_len(&fmtimg, (blocks * 512) as usize)
+    let r: u64 = ofsfmt.format(write_fmt, blocks, version, inodes, 1700000000, (&small[0]) as u64)
+    rc(file, r)
+    var path: [u8; 32] = [0 as u8; 32]
+    var i: u64 = 0
+    while i < (file.n as u64) && i < 31 {
+        path[i as usize] = *((file.p as u64 + i) as *mut u8)
+        i = i + 1
+    }
+    rt.write_file((&path[0]) as u64, fmtimg.ptr as u64, fmtimg.len)
+}
+
+fn main() -> i32 {
+    var path: [u8; 9] = "disk.img\0"
+    if !rt.read_file((&path[0]) as u64, &img) {
+        return 3 as i32
+    }
+    let total: u64 = img.len as u64 / 512
+    let sc: u64 = (&scratch[0]) as u64
+    var nm1: [u8; 6] = "data1\0"
+    var nm2: [u8; 5] = "boot\0"
+    var nm3: [u8; 4] = "big\0"
+
+    rc("init", gptw.init(write_sectors, total, 7, sc))
+    show("after init")
+    dump("s1.img")
+    rc("init-again-guard", guard.check(guard.OP_INIT, false, false, false, true, true))
+
+    rc("create1", gptw.create(read_sectors, write_sectors, total, 2048, 8192, table.K_OFS, (&nm1[0]) as u64, 7, sc))
+    let t: u64 = (&tab[0]) as u64
+    table.read_table(read_sectors, total, t, sc)
+    let free: u64 = gptw.free_start(t, 4096)
+    add_s("free_start ")
+    add_n(free)
+    add_s("\n")
+    rc("create2", gptw.create(read_sectors, write_sectors, total, free, 4096, table.K_EFI, (&nm2[0]) as u64, 7, sc))
+    rc("create-overlap", gptw.create(read_sectors, write_sectors, total, 4000, 4096, table.K_BASIC, (&nm3[0]) as u64, 7, sc))
+    rc("create-range", gptw.create(read_sectors, write_sectors, total, total - 10, 100, table.K_BASIC, (&nm3[0]) as u64, 7, sc))
+    rc("create-below-first", gptw.create(read_sectors, write_sectors, total, 10, 100, table.K_BASIC, (&nm3[0]) as u64, 7, sc))
+    rc("create-kind", gptw.create(read_sectors, write_sectors, total, 20000, 100, 99, (&nm3[0]) as u64, 7, sc))
+    show("after creates")
+    dump("s2.img")
+
+    rc("delete-bad", gptw.remove(read_sectors, write_sectors, total, 9, sc))
+    rc("delete1", gptw.remove(read_sectors, write_sectors, total, 1, sc))
+    show("after delete")
+    dump("s3.img")
+    rc("create-reuse", gptw.create(read_sectors, write_sectors, total, 2048, 2048, table.K_LINUX, (&nm3[0]) as u64, 8, sc))
+    show("after reuse")
+    dump("s4.img")
+
+    format_case("fmt-v2-small.img", 8192, 2, 128)
+    format_case("fmt-v3-small.img", 8192, 3, 128)
+    format_case("fmt-v2-big.img", 20000, 2, 1250)
+    format_case("fmt-v3-big.img", 40000, 3, 2500)
+    rc("fmt-too-small", ofsfmt.format(write_fmt, 40, 2, 128, 0, (&small[0]) as u64))
+    rc("fmt-bad-version", ofsfmt.format(write_fmt, 8192, 1, 128, 0, (&small[0]) as u64))
+
+    rt.write_everything(1, out.ptr as u64, out.len)
+    return 0 as i32
+}

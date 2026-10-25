@@ -1,0 +1,386 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.procw
+import bus.pci
+import usb.usb
+import drv.usb.xhci
+import drv.usb.usbdiag
+import acpi.acpidev
+
+export { render }
+
+static mut L0: [u8; 10] = "----:----\0"
+static mut L1: [u8; 8] = "pci tb \0"
+static mut L2: [u8; 9] = "pci usb \0"
+static mut L3: [u8; 6] = " cls=\0"
+static mut L4: [u8; 5] = " if=\0"
+static mut L5: [u8; 9] = "--------\0"
+static mut L6: [u8; 2] = "h\0"
+static mut L7: [u8; 2] = "p\0"
+static mut L8: [u8; 3] = " U\0"
+static mut L9: [u8; 6] = " pre=\0"
+static mut L10: [u8; 6] = " pwr=\0"
+static mut L11: [u8; 6] = " fin=\0"
+static mut L12: [u8; 5] = " t5=\0"
+static mut L13: [u8; 6] = " t30=\0"
+static mut L14: [u8; 6] = " now=\0"
+static mut L15: [u8; 4] = " m=\0"
+static mut L16: [u8; 4] = " f=\0"
+static mut L17: [u8; 8] = " idle U\0"
+static mut L18: [u8; 9] = " init=ok\0"
+static mut L19: [u8; 11] = " init=FAIL\0"
+static mut L20: [u8; 11] = " init=none\0"
+static mut L21: [u8; 8] = " ports=\0"
+static mut L22: [u8; 8] = " slots=\0"
+static mut L23: [u8; 6] = " sts=\0"
+static mut L24: [u8; 6] = " dev=\0"
+static mut L25: [u8; 6] = " hub=\0"
+static mut L26: [u8; 2] = "/\0"
+static mut L27: [u8; 7] = " pend=\0"
+static mut L28: [u8; 6] = " cmd=\0"
+static mut L29: [u8; 6] = " evt=\0"
+static mut L30: [u8; 6] = " err=\0"
+static mut L31: [u8; 5] = " rf=\0"
+static mut L32: [u8; 4] = "hub\0"
+static mut L33: [u8; 7] = "dev p=\0"
+static mut L34: [u8; 5] = " hp=\0"
+static mut L35: [u8; 6] = " spd=\0"
+static mut L36: [u8; 5] = " fl=\0"
+static mut L37: [u8; 6] = " drv=\0"
+static mut L38: [u8; 8] = "events=\0"
+static mut L39: [u8; 10] = " rescans=\0"
+static mut L40: [u8; 3] = " p\0"
+static mut L41: [u8; 11] = "log hcrst=\0"
+static mut L42: [u8; 7] = " halt=\0"
+static mut L43: [u8; 8] = " ppclr=\0"
+static mut L44: [u8; 13] = " late hcrst=\0"
+static mut L45: [u8; 3] = "t=\0"
+static mut L46: [u8; 4] = " k=\0"
+static mut L47: [u8; 4] = " a=\0"
+static mut L48: [u8; 4] = " v=\0"
+static mut L49: [u8; 14] = "usbsum v1 hc=\0"
+static mut L50: [u8; 6] = " sel=\0"
+static mut L51: [u8; 9] = " passes=\0"
+static mut L52: [u8; 7] = " warm=\0"
+static mut L53: [u8; 7] = " ucsi=\0"
+static mut L54: [u8; 5] = " ec=\0"
+
+static mut hid_keys: [u64; 64] = [0 as u64; 64]
+static mut hid_cnt: [u64; 64] = [0 as u64; 64]
+
+fn ps(s: u64) {
+    procw.put_s(s)
+}
+
+fn ph(v: u64, n: u64) {
+    procw.put_hex(v, n)
+}
+
+fn pd(v: u64) {
+    procw.put_dec(v)
+}
+
+fn pn() {
+    procw.put_c(10)
+}
+
+fn pkv(label: u64, v: u64) {
+    ps(label)
+    pd(v)
+}
+
+fn count_hid(state: u64, want: u64) -> u64 {
+    let n: u64 = acpidev.hid_list(state, (&hid_keys[0]) as u64, (&hid_cnt[0]) as u64, 64)
+    var i: u64 = 0
+    var total: u64 = 0
+    while i < n {
+        if hid_keys[i as usize] == want {
+            total = total + hid_cnt[i as usize]
+        }
+        i = i + 1
+    }
+    return total
+}
+
+fn bdf_text(bdf: u64) {
+    ph(pci.bdf_bus(bdf), 2)
+    procw.put_c(58)
+    ph(pci.bdf_dev(bdf), 2)
+    procw.put_c(46)
+    ph(pci.bdf_fn(bdf), 1)
+}
+
+fn hc_pci(state: u64, bdf: u64) {
+    var i: u64 = 0
+    let total: u64 = pci.count(state)
+    while i < total {
+        if pci.get(state, i, pci.E_BDF) == bdf {
+            ph(pci.get(state, i, pci.E_VENDOR), 4)
+            procw.put_c(58)
+            ph(pci.get(state, i, pci.E_DEVICE), 4)
+            return
+        }
+        i = i + 1
+    }
+    ps((&L0[0]) as u64)
+}
+
+fn pci_usb_lines(state: u64) {
+    var i: u64 = 0
+    var shown: u64 = 0
+    let total: u64 = pci.count(state)
+    while i < total && shown < 6 {
+        let cls: u64 = pci.get(state, i, pci.E_CLASS)
+        let sub: u64 = pci.get(state, i, pci.E_SUBCLASS)
+        let ven: u64 = pci.get(state, i, pci.E_VENDOR)
+        let dev: u64 = pci.get(state, i, pci.E_DEVICE)
+        let tb: bool = ven == 0x8086 && dev >= 0x1575 && dev <= 0x15EF
+        if (cls == 12 && sub == 3) || tb {
+            if tb {
+                ps((&L1[0]) as u64)
+            } else {
+                ps((&L2[0]) as u64)
+            }
+            bdf_text(pci.get(state, i, pci.E_BDF))
+            procw.put_c(32)
+            ph(ven, 4)
+            procw.put_c(58)
+            ph(dev, 4)
+            ps((&L3[0]) as u64)
+            ph((cls << 8) | sub, 4)
+            ps((&L4[0]) as u64)
+            ph(pci.get(state, i, pci.E_PROGIF), 2)
+            pn()
+            shown = shown + 1
+        }
+        i = i + 1
+    }
+}
+
+fn idle_psc(h: u64, p: u64) -> bool {
+    if usbdiag.mask(h, p) != 0 {
+        return false
+    }
+    let v: u64 = usbdiag.snap_get(h, usbdiag.SNAP_FINAL, p)
+    return (v & 0x1) == 0 && (v & 0xFE0000) == 0
+}
+
+fn put_psc(h: u64, kind: u64, p: u64, label: u64) {
+    ps(label)
+    if usbdiag.snap_valid(h, kind, p) {
+        ph(usbdiag.snap_get(h, kind, p), 8)
+    } else {
+        ps((&L5[0]) as u64)
+    }
+}
+
+fn port_line(state: u64, h: u64, p: u64, live: bool) {
+    ps((&L6[0]) as u64)
+    pd(h)
+    ps((&L7[0]) as u64)
+    if p < 10 {
+        procw.put_c(48)
+    }
+    pd(p)
+    ps((&L8[0]) as u64)
+    pd(usbdiag.proto(h, p))
+    put_psc(h, usbdiag.SNAP_PRE, p, (&L9[0]) as u64)
+    put_psc(h, usbdiag.SNAP_POWER, p, (&L10[0]) as u64)
+    put_psc(h, usbdiag.SNAP_FINAL, p, (&L11[0]) as u64)
+    put_psc(h, usbdiag.SNAP_T5, p, (&L12[0]) as u64)
+    put_psc(h, usbdiag.SNAP_T30, p, (&L13[0]) as u64)
+    if live {
+        ps((&L14[0]) as u64)
+        ph(xhci.portsc(state, p), 8)
+    }
+    ps((&L15[0]) as u64)
+    ph(usbdiag.mask(h, p), 2)
+    if usbdiag.fail_step(h, p) != 0 {
+        ps((&L16[0]) as u64)
+        pd(usbdiag.fail_step(h, p))
+        procw.put_c(47)
+        pd(usbdiag.fail_value(h, p))
+    }
+    pn()
+}
+
+fn idle_list(h: u64, n: u64, major: u64) {
+    var p: u64 = 1
+    var any: bool = false
+    while p <= n && p <= usbdiag.MAX_PORT {
+        if usbdiag.proto(h, p) == major && idle_psc(h, p) {
+            if !any {
+                ps((&L6[0]) as u64)
+                pd(h)
+                ps((&L17[0]) as u64)
+                pd(major)
+                procw.put_c(58)
+                any = true
+            } else {
+                procw.put_c(44)
+            }
+            pd(p)
+        }
+        p = p + 1
+    }
+    if any {
+        pn()
+    }
+}
+
+fn hc_lines(state: u64, h: u64) {
+    ps((&L6[0]) as u64)
+    pd(h)
+    procw.put_c(32)
+    bdf_text(usbdiag.info(h, usbdiag.I_BDF))
+    procw.put_c(32)
+    hc_pci(state, usbdiag.info(h, usbdiag.I_BDF))
+    let st: u64 = usbdiag.info(h, usbdiag.I_STATE)
+    if st == 1 {
+        ps((&L18[0]) as u64)
+    } else if st == 2 {
+        ps((&L19[0]) as u64)
+    } else {
+        ps((&L20[0]) as u64)
+    }
+    pkv((&L21[0]) as u64, usbdiag.info(h, usbdiag.I_PORTS))
+    pkv((&L22[0]) as u64, usbdiag.info(h, usbdiag.I_SLOTS))
+    ps((&L23[0]) as u64)
+    ph(usbdiag.info(h, usbdiag.I_STS), 4)
+    pkv((&L24[0]) as u64, usbdiag.info(h, usbdiag.I_NDEV))
+    pkv((&L25[0]) as u64, usbdiag.info(h, usbdiag.I_HUBS))
+    pkv((&L26[0]) as u64, usbdiag.info(h, usbdiag.I_HUBPORTS))
+    pkv((&L27[0]) as u64, usbdiag.info(h, usbdiag.I_PENDING))
+    pkv((&L28[0]) as u64, usbdiag.info(h, usbdiag.I_CMDS))
+    pkv((&L29[0]) as u64, usbdiag.info(h, usbdiag.I_EVENTS))
+    pkv((&L30[0]) as u64, usbdiag.info(h, usbdiag.I_ERRORS))
+    pkv((&L31[0]) as u64, usbdiag.info(h, usbdiag.I_RESETFAIL))
+    pn()
+    let n: u64 = usbdiag.info(h, usbdiag.I_PORTS)
+    let live: bool = xhci.ready(state) && xhci.unit(state) == h
+    var p: u64 = 1
+    while p <= n && p <= usbdiag.MAX_PORT {
+        if !idle_psc(h, p) {
+            port_line(state, h, p, live)
+        }
+        p = p + 1
+    }
+    idle_list(h, n, 2)
+    idle_list(h, n, 3)
+    idle_list(h, n, 0)
+}
+
+fn hub_lines(h: u64) {
+    var k: u64 = 0
+    while k < 2 && k < usbdiag.info(h, usbdiag.I_HUBS) {
+        ps((&L32[0]) as u64)
+        pd(k)
+        var p: u64 = 1
+        while p <= 15 {
+            let v: u64 = usbdiag.hub_port_get(k, p)
+            if v != 0 {
+                procw.put_c(32)
+                pd(p)
+                procw.put_c(61)
+                ph(v & 0xFFFFFFFF, 8)
+                procw.put_c(47)
+                pd((v >> 32) & 3)
+            }
+            p = p + 1
+        }
+        pn()
+        k = k + 1
+    }
+}
+
+fn dev_lines(state: u64) {
+    var i: u64 = 0
+    let total: u64 = usb.fund_count(state)
+    while i < total && i < 8 {
+        ps((&L33[0]) as u64)
+        pd(usb.fund_port(state, i))
+        ps((&L34[0]) as u64)
+        pd(usb.fund_hub(state, i))
+        ps((&L35[0]) as u64)
+        pd(usb.fund_speed(state, i))
+        procw.put_c(32)
+        ph(usb.fund_vid(state, i), 4)
+        procw.put_c(58)
+        ph(usb.fund_pid(state, i), 4)
+        ps((&L3[0]) as u64)
+        ph(usb.fund_dcls(state, i) >> 8, 4)
+        ps((&L36[0]) as u64)
+        ph(usb.fund_flags(state, i) & 0xFF, 2)
+        pkv((&L37[0]) as u64, usb.fund_flags(state, i) >> 8)
+        pn()
+        i = i + 1
+    }
+}
+
+fn event_lines() {
+    let n: u64 = usbdiag.event_count()
+    ps((&L38[0]) as u64)
+    pd(n)
+    pkv((&L39[0]) as u64, usbdiag.rescan_count())
+    var i: u64 = 0
+    while i < n && i < 3 {
+        ps((&L40[0]) as u64)
+        pd(usbdiag.event_get(i, 0))
+        procw.put_c(61)
+        ph(usbdiag.event_get(i, 1), 8)
+        i = i + 1
+    }
+    pn()
+}
+
+fn log_lines() {
+    ps((&L41[0]) as u64)
+    pd(usbdiag.count_of(usbdiag.LK_HCRST))
+    pkv((&L42[0]) as u64, usbdiag.count_of(usbdiag.LK_HALT))
+    pkv((&L43[0]) as u64, usbdiag.count_of(usbdiag.LK_PPCLR))
+    pkv((&L44[0]) as u64, usbdiag.late_of(usbdiag.LK_HCRST))
+    pkv((&L42[0]) as u64, usbdiag.late_of(usbdiag.LK_HALT))
+    pkv((&L43[0]) as u64, usbdiag.late_of(usbdiag.LK_PPCLR))
+    pn()
+    var i: u64 = 0
+    var n: u64 = usbdiag.log_count()
+    if n > 6 {
+        n = 6
+    }
+    while i < n {
+        ps((&L45[0]) as u64)
+        pd(usbdiag.log_get(i, 0))
+        pkv((&L46[0]) as u64, usbdiag.log_get(i, 1))
+        pkv((&L47[0]) as u64, usbdiag.log_get(i, 2))
+        ps((&L48[0]) as u64)
+        ph(usbdiag.log_get(i, 3), 8)
+        pn()
+        i = i + 1
+    }
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    procw.begin(out, cap)
+    let nh: u64 = xhci.count_hc(state)
+    ps((&L49[0]) as u64)
+    pd(nh)
+    pkv((&L50[0]) as u64, usb.choice(state))
+    pkv((&L51[0]) as u64, usbdiag.passes())
+    pkv((&L52[0]) as u64, usbdiag.usb3_warm_count())
+    pkv((&L53[0]) as u64, count_hid(state, 0x30303043425355))
+    pkv((&L54[0]) as u64, count_hid(state, 0x39304330504e50))
+    pn()
+    pci_usb_lines(state)
+    var h: u64 = 0
+    while h < nh && h < usbdiag.MAX_HC {
+        hc_lines(state, h)
+        hub_lines(h)
+        h = h + 1
+    }
+    dev_lines(state)
+    event_lines()
+    log_lines()
+    return procw.used()
+}

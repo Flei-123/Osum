@@ -1,0 +1,404 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+export {
+    MAX_HC, MAX_PORT, SNAP_PRE, SNAP_POWER, SNAP_FINAL, SNAP_T5, SNAP_T30, KINDS, set_t0, timed_due,
+    M_SEEN, M_CONNECT, M_RESET, M_SLOT, M_ADDR, M_DESC, M_CFG, M_BOUND,
+    I_STATE, I_PORTS, I_SLOTS, I_STS, I_CMDS, I_EVENTS, I_ERRORS, I_NDEV, I_BDF, I_IDS, I_HUBS, I_HUBPORTS, I_PENDING, I_RESETFAIL,
+    reset_all, begin_pass, set_info, info, snap, snap_get, snap_valid, set_proto, proto, set_cur, cur_hc, cur_port, step, mask, fail_step, fail_value,
+    bound, hub_seen, hub_port, hub_port_get, event, event_count, event_get, passes, set_choice, choice, usb3_warm, usb3_warm_count,
+    LK_HCRST, LK_HALT, LK_PPSET, LK_PPCLR, LK_PSC, rescan_due, rescan_count, log, log_count, log_get, count_of, late_of
+}
+
+const MAX_HC: u64 = 4
+const LK_HCRST: u64 = 1
+const LK_HALT: u64 = 2
+const LK_PPSET: u64 = 3
+const LK_PPCLR: u64 = 4
+const LK_PSC: u64 = 5
+const MAX_PORT: u64 = 32
+const MAX_HUBP: u64 = 16
+const MAX_EVENT: u64 = 8
+const VALID: u64 = 0x100000000
+
+const SNAP_PRE: u64 = 0
+const SNAP_POWER: u64 = 1
+const SNAP_FINAL: u64 = 2
+const SNAP_T5: u64 = 3
+const SNAP_T30: u64 = 4
+const KINDS: u64 = 5
+
+const M_SEEN: u64 = 1
+const M_CONNECT: u64 = 2
+const M_RESET: u64 = 4
+const M_SLOT: u64 = 8
+const M_ADDR: u64 = 16
+const M_DESC: u64 = 32
+const M_CFG: u64 = 64
+const M_BOUND: u64 = 128
+
+const I_STATE: u64 = 0
+const I_PORTS: u64 = 1
+const I_SLOTS: u64 = 2
+const I_STS: u64 = 3
+const I_CMDS: u64 = 4
+const I_EVENTS: u64 = 5
+const I_ERRORS: u64 = 6
+const I_NDEV: u64 = 7
+const I_BDF: u64 = 8
+const I_IDS: u64 = 9
+const I_HUBS: u64 = 10
+const I_HUBPORTS: u64 = 11
+const I_PENDING: u64 = 12
+const I_RESETFAIL: u64 = 13
+const I_N: u64 = 16
+
+static mut hc_info: [u64; 64] = [0 as u64; 64]
+static mut psc_snap: [u64; 640] = [0 as u64; 640]
+static mut port_proto: [u64; 128] = [0 as u64; 128]
+static mut port_mask: [u64; 128] = [0 as u64; 128]
+static mut port_fail: [u64; 128] = [0 as u64; 128]
+static mut hubp: [u64; 32] = [0 as u64; 32]
+static mut ev_port: [u64; 8] = [0 as u64; 8]
+static mut ev_psc: [u64; 8] = [0 as u64; 8]
+static mut ev_n: u64 = 0
+static mut cur_h: u64 = 0
+static mut cur_p: u64 = 0
+static mut pass_n: u64 = 0
+static mut chosen: u64 = 0
+static mut warm_n: u64 = 0
+static mut lg_tick: [u64; 16] = [0 as u64; 16]
+static mut lg_kind: [u64; 16] = [0 as u64; 16]
+static mut lg_arg: [u64; 16] = [0 as u64; 16]
+static mut lg_val: [u64; 16] = [0 as u64; 16]
+static mut lg_n: u64 = 0
+static mut cnt_kind: [u64; 8] = [0 as u64; 8]
+static mut late_kind: [u64; 8] = [0 as u64; 8]
+static mut armed_late: u64 = 0
+static mut next_rescan: u64 = 0
+static mut rescan_n: u64 = 0
+static mut t0_ticks: u64 = 0
+static mut t_done: u64 = 0
+
+fn clip(h: u64) -> u64 {
+    if h >= MAX_HC {
+        return MAX_HC - 1
+    }
+    return h
+}
+
+fn reset_all() {
+    var i: u64 = 0
+    while i < 64 {
+        hc_info[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 128 {
+        port_proto[i as usize] = 0
+        port_mask[i as usize] = 0
+        port_fail[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 640 {
+        psc_snap[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 32 {
+        hubp[i as usize] = 0
+        i = i + 1
+    }
+    ev_n = 0
+    pass_n = 0
+    cur_h = 0
+    cur_p = 0
+    warm_n = 0
+}
+
+fn begin_pass(h: u64) {
+    let hc: u64 = clip(h)
+    pass_n = pass_n + 1
+    cur_h = hc
+    cur_p = 0
+    var i: u64 = 0
+    while i < I_N {
+        hc_info[(hc * I_N + i) as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < MAX_PORT {
+        port_mask[(hc * MAX_PORT + i) as usize] = 0
+        port_fail[(hc * MAX_PORT + i) as usize] = 0
+        port_proto[(hc * MAX_PORT + i) as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < KINDS * MAX_PORT {
+        psc_snap[(hc * KINDS * MAX_PORT + i) as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < MAX_HUBP * 2 {
+        hubp[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn passes() -> u64 {
+    return pass_n
+}
+
+fn set_choice(h: u64) {
+    chosen = h
+}
+
+fn choice() -> u64 {
+    return chosen
+}
+
+fn set_info(h: u64, key: u64, v: u64) {
+    hc_info[(clip(h) * I_N + key) as usize] = v
+}
+
+fn info(h: u64, key: u64) -> u64 {
+    return hc_info[(clip(h) * I_N + key) as usize]
+}
+
+fn snap(h: u64, kind: u64, p: u64, v: u64) {
+    if p == 0 || p > MAX_PORT {
+        return
+    }
+    psc_snap[(clip(h) * KINDS * MAX_PORT + kind * MAX_PORT + (p - 1)) as usize] = (v & 0xFFFFFFFF) | VALID
+}
+
+fn snap_valid(h: u64, kind: u64, p: u64) -> bool {
+    if p == 0 || p > MAX_PORT {
+        return false
+    }
+    return (psc_snap[(clip(h) * KINDS * MAX_PORT + kind * MAX_PORT + (p - 1)) as usize] & VALID) != 0
+}
+
+fn snap_get(h: u64, kind: u64, p: u64) -> u64 {
+    if p == 0 || p > MAX_PORT {
+        return 0
+    }
+    return psc_snap[(clip(h) * KINDS * MAX_PORT + kind * MAX_PORT + (p - 1)) as usize] & 0xFFFFFFFF
+}
+
+fn set_proto(h: u64, p: u64, major: u64) {
+    if p == 0 || p > MAX_PORT {
+        return
+    }
+    port_proto[(clip(h) * MAX_PORT + (p - 1)) as usize] = major
+}
+
+fn proto(h: u64, p: u64) -> u64 {
+    if p == 0 || p > MAX_PORT {
+        return 0
+    }
+    return port_proto[(clip(h) * MAX_PORT + (p - 1)) as usize]
+}
+
+fn set_cur(h: u64, p: u64) {
+    cur_h = clip(h)
+    cur_p = p
+}
+
+fn cur_hc() -> u64 {
+    return cur_h
+}
+
+fn cur_port() -> u64 {
+    return cur_p
+}
+
+fn or_mask(h: u64, p: u64, bit: u64) {
+    if p == 0 || p > MAX_PORT {
+        return
+    }
+    let at: usize = (clip(h) * MAX_PORT + (p - 1)) as usize
+    port_mask[at] = port_mask[at] | bit
+}
+
+fn set_fail(h: u64, p: u64, st: u64, v: u64) {
+    if p == 0 || p > MAX_PORT {
+        return
+    }
+    port_fail[(clip(h) * MAX_PORT + (p - 1)) as usize] = (st << 32) | (v & 0xFFFFFFFF)
+}
+
+fn step(st: u64, v: u64) {
+    let h: u64 = cur_h
+    if st == 3 {
+        or_mask(h, v, M_SEEN)
+        cur_p = v
+        return
+    }
+    let p: u64 = cur_p
+    if st == 4 {
+        or_mask(h, p, M_CONNECT | M_RESET)
+    } else if st == 6 {
+        or_mask(h, p, M_SLOT)
+    } else if st == 8 {
+        or_mask(h, p, M_ADDR)
+    } else if st == 10 {
+        or_mask(h, p, M_DESC)
+    } else if st == 12 {
+        or_mask(h, p, M_CFG)
+    } else if st == 5 || st == 7 || st == 9 || st == 11 || st == 13 {
+        or_mask(h, p, M_CONNECT)
+        set_fail(h, p, st, v)
+    }
+}
+
+fn mask(h: u64, p: u64) -> u64 {
+    if p == 0 || p > MAX_PORT {
+        return 0
+    }
+    return port_mask[(clip(h) * MAX_PORT + (p - 1)) as usize]
+}
+
+fn fail_step(h: u64, p: u64) -> u64 {
+    if p == 0 || p > MAX_PORT {
+        return 0
+    }
+    return port_fail[(clip(h) * MAX_PORT + (p - 1)) as usize] >> 32
+}
+
+fn fail_value(h: u64, p: u64) -> u64 {
+    if p == 0 || p > MAX_PORT {
+        return 0
+    }
+    return port_fail[(clip(h) * MAX_PORT + (p - 1)) as usize] & 0xFFFFFFFF
+}
+
+fn bound() {
+    or_mask(cur_h, cur_p, M_BOUND)
+}
+
+fn hub_seen(h: u64, rootport: u64, nports: u64) {
+    set_info(h, I_HUBS, info(h, I_HUBS) + 1)
+    set_info(h, I_HUBPORTS, info(h, I_HUBPORTS) + nports)
+    or_mask(h, rootport, M_SEEN)
+}
+
+fn hub_port(h: u64, hub: u64, p: u64, status: u64, reset_ok: u64) {
+    if hub >= 2 || p == 0 || p > 15 {
+        return
+    }
+    hubp[(hub * MAX_HUBP + p) as usize] = (status & 0xFFFFFFFF) | (reset_ok << 32) | VALID
+}
+
+fn hub_port_get(hub: u64, p: u64) -> u64 {
+    if hub >= 2 || p == 0 || p > 15 {
+        return 0
+    }
+    return hubp[(hub * MAX_HUBP + p) as usize]
+}
+
+fn event(p: u64, psc: u64) {
+    ev_port[(ev_n % MAX_EVENT) as usize] = p
+    ev_psc[(ev_n % MAX_EVENT) as usize] = psc
+    ev_n = ev_n + 1
+}
+
+fn event_count() -> u64 {
+    return ev_n
+}
+
+fn event_get(i: u64, which: u64) -> u64 {
+    let at: u64 = (ev_n - 1 - i) % MAX_EVENT
+    if which == 0 {
+        return ev_port[at as usize]
+    }
+    return ev_psc[at as usize]
+}
+
+fn usb3_warm() {
+    warm_n = warm_n + 1
+}
+
+fn usb3_warm_count() -> u64 {
+    return warm_n
+}
+
+fn set_t0(ticks: u64) {
+    armed_late = 1
+    t0_ticks = ticks
+    t_done = 0
+}
+
+fn timed_due(ticks: u64) -> u64 {
+    if t0_ticks == 0 {
+        return 0
+    }
+    if (t_done & 1) == 0 && ticks >= t0_ticks + 500 {
+        t_done = t_done | 1
+        return SNAP_T5
+    }
+    if (t_done & 2) == 0 && ticks >= t0_ticks + 3000 {
+        t_done = t_done | 2
+        return SNAP_T30
+    }
+    return 0
+}
+
+fn log(tick: u64, kind: u64, arg: u64, val: u64) {
+    let at: usize = (lg_n % 16) as usize
+    lg_tick[at] = tick
+    lg_kind[at] = kind
+    lg_arg[at] = arg
+    lg_val[at] = val
+    lg_n = lg_n + 1
+    if kind < 8 {
+        cnt_kind[kind as usize] = cnt_kind[kind as usize] + 1
+        if armed_late != 0 {
+            late_kind[kind as usize] = late_kind[kind as usize] + 1
+        }
+    }
+}
+
+fn log_count() -> u64 {
+    return lg_n
+}
+
+fn log_get(i: u64, which: u64) -> u64 {
+    let at: usize = ((lg_n - 1 - i) % 16) as usize
+    if which == 0 {
+        return lg_tick[at]
+    }
+    if which == 1 {
+        return lg_kind[at]
+    }
+    if which == 2 {
+        return lg_arg[at]
+    }
+    return lg_val[at]
+}
+
+fn count_of(kind: u64) -> u64 {
+    return cnt_kind[kind as usize]
+}
+
+fn late_of(kind: u64) -> u64 {
+    return late_kind[kind as usize]
+}
+
+fn rescan_due(ticks: u64) -> bool {
+    if t0_ticks == 0 || ticks < next_rescan {
+        return false
+    }
+    if ticks - t0_ticks < 6000 {
+        next_rescan = ticks + 200
+    } else {
+        next_rescan = ticks + 1000
+    }
+    rescan_n = rescan_n + 1
+    return true
+}
+
+fn rescan_count() -> u64 {
+    return rescan_n
+}

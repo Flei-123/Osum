@@ -199,7 +199,7 @@ come from outside `kernel/` and `lib/libc/`.
 `tools/wm/run.sh` and `tools/i18n/run.sh`. Inter has no reserved font name, so the modified
 (subset) files may be shipped under their own names. The monospace face is still DejaVu Sans
 Mono (4.1). The program icons (`assets/apps/*.osp/symbol.osym`) are drawn from Lucide glyphs
-(ISC, `assets/icons/LICENSE.lucide`) by `tools/design/mkicons.py`.
+(ISC, `assets/icons/LICENSE.lucide`) by `tools/svg/mkapps.py` (SVG baked with `tools/svg/bake.fi`).
 
 ### 4.1b G-009 / r1084: the fallback faces (symbols, emoji)
 

@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import svg.svgmath
+
+export {
+    MAXDIM, MAX_EDGES, NONZERO, EVENODD,
+    edges_clear, edge, edge_count, edges_overflow, fill, cov_at, cov_ptr
+}
+
+const MAXDIM: i64 = 128
+const MAX_EDGES: i64 = 12288
+const MAX_CROSS: i64 = 1024
+const SUB: i64 = 16
+const NONZERO: i64 = 0
+const EVENODD: i64 = 1
+
+static mut ex0: [i64; 12288] = [0 as i64; 12288]
+static mut ey0: [i64; 12288] = [0 as i64; 12288]
+static mut ex1: [i64; 12288] = [0 as i64; 12288]
+static mut ey1: [i64; 12288] = [0 as i64; 12288]
+static mut e_n: i64 = 0
+static mut e_over: i64 = 0
+static mut act: [i64; 12288] = [0 as i64; 12288]
+static mut cross_x: [i64; 1024] = [0 as i64; 1024]
+static mut cross_d: [i64; 1024] = [0 as i64; 1024]
+static mut acc: [i64; 130] = [0 as i64; 130]
+static mut cov: [u8; 16384] = [0 as u8; 16384]
+static mut cov_w: i64 = 0
+
+fn edges_clear() {
+    e_n = 0
+    e_over = 0
+}
+
+fn edge_count() -> i64 {
+    return e_n
+}
+
+fn edges_overflow() -> i64 {
+    return e_over
+}
+
+fn edge(x0: i64, y0: i64, x1: i64, y1: i64) {
+    if y0 == y1 {
+        return
+    }
+    if e_n >= MAX_EDGES {
+        e_over = e_over + 1
+        return
+    }
+    ex0[e_n as usize] = x0
+    ey0[e_n as usize] = y0
+    ex1[e_n as usize] = x1
+    ey1[e_n as usize] = y1
+    e_n = e_n + 1
+}
+
+fn cov_ptr() -> u64 {
+    return (&cov[0 as usize]) as u64
+}
+
+fn cov_at(x: i64, y: i64) -> i64 {
+    return cov[(y * cov_w + x) as usize] as i64
+}
+
+fn add_cross(n: i64, x: i64, d: i64) -> i64 {
+    if n >= MAX_CROSS {
+        return n
+    }
+    var j: i64 = n
+    while j > 0 {
+        if cross_x[(j - 1) as usize] <= x {
+            break
+        }
+        cross_x[j as usize] = cross_x[(j - 1) as usize]
+        cross_d[j as usize] = cross_d[(j - 1) as usize]
+        j = j - 1
+    }
+    cross_x[j as usize] = x
+    cross_d[j as usize] = d
+    return n + 1
+}
+
+fn add_span(xa0: i64, xb0: i64, w: i64) {
+    let xa: i64 = svgmath.imax(xa0, 0)
+    let xb: i64 = svgmath.imin(xb0, w * 256)
+    if xb <= xa {
+        return
+    }
+    let ia: i64 = xa >> 8
+    let ib: i64 = xb >> 8
+    if ia == ib {
+        acc[ia as usize] = acc[ia as usize] + (xb - xa)
+        return
+    }
+    acc[ia as usize] = acc[ia as usize] + (256 - (xa & 255))
+    var i: i64 = ia + 1
+    while i < ib {
+        acc[i as usize] = acc[i as usize] + 256
+        i = i + 1
+    }
+    acc[ib as usize] = acc[ib as usize] + (xb & 255)
+}
+
+fn scan_sub(na: i64, sy: i64, w: i64, rule: i64) {
+    var nc: i64 = 0
+    var a: i64 = 0
+    while a < na {
+        let e: i64 = act[a as usize]
+        var xa: i64 = ex0[e as usize]
+        var ya: i64 = ey0[e as usize]
+        var xb: i64 = ex1[e as usize]
+        var yb: i64 = ey1[e as usize]
+        var d: i64 = 1
+        if ya > yb {
+            let tx: i64 = xa
+            let ty: i64 = ya
+            xa = xb
+            ya = yb
+            xb = tx
+            yb = ty
+            d = 0 - 1
+        }
+        if ya <= sy && sy < yb {
+            let x: i64 = xa + svgmath.rdiv((sy - ya) * (xb - xa), yb - ya)
+            nc = add_cross(nc, x, d)
+        }
+        a = a + 1
+    }
+    var wind: i64 = 0
+    var j: i64 = 0
+    while j < nc {
+        wind = wind + cross_d[j as usize]
+        var inside: bool = wind != 0
+        if rule == EVENODD {
+            inside = (wind & 1) != 0
+        }
+        if inside && j + 1 < nc {
+            add_span(cross_x[j as usize], cross_x[(j + 1) as usize], w)
+        }
+        j = j + 1
+    }
+}
+
+fn fill(w: i64, h: i64, rule: i64) {
+    cov_w = w
+    var z: i64 = 0
+    while z < w * h {
+        cov[z as usize] = 0 as u8
+        z = z + 1
+    }
+    var row: i64 = 0
+    while row < h {
+        let top: i64 = row * 256
+        let bot: i64 = top + 256
+        var na: i64 = 0
+        var e: i64 = 0
+        while e < e_n {
+            let lo: i64 = svgmath.imin(ey0[e as usize], ey1[e as usize])
+            let hi: i64 = svgmath.imax(ey0[e as usize], ey1[e as usize])
+            if hi > top && lo < bot {
+                act[na as usize] = e
+                na = na + 1
+            }
+            e = e + 1
+        }
+        if na > 0 {
+            var i: i64 = 0
+            while i < w + 1 {
+                acc[i as usize] = 0
+                i = i + 1
+            }
+            var k: i64 = 0
+            while k < SUB {
+                scan_sub(na, top + k * 16 + 8, w, rule)
+                k = k + 1
+            }
+            var x: i64 = 0
+            while x < w {
+                var v: i64 = (acc[x as usize] * 255 + 2048) >> 12
+                if v > 255 {
+                    v = 255
+                }
+                cov[(row * w + x) as usize] = v as u8
+                x = x + 1
+            }
+        }
+        row = row + 1
+    }
+}

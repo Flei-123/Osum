@@ -69,6 +69,7 @@ import lib.brand
 import fs.mnt
 import fs.vfsops
 import sched.sched
+import sched.time
 import net.wlan_auto
 import sched.proc
 import sched.origin
@@ -89,6 +90,7 @@ import wlan.iwl_probe
 import apprights.policy
 import usb.usb
 import drv.usb.xhci
+import drv.usb.chdiag
 import diag.hwdiag
 import acpi.acpi
 import acpi.acpidev
@@ -99,6 +101,7 @@ import pwr.hkdiag
 import drv.hid.i2chid
 import bus.drvreg
 import bus.drvdev
+import fs.procusb
 import gfx.gfx
 import arch.x86_64.fpu
 import mm.mem
@@ -217,7 +220,10 @@ const G_INPUTDEVS: u64 = 28 // W-TOUCH4: /proc/inputdevs
 const G_HOTKEYS: u64 = 29 // W-HW6: /proc/hotkeys
 const G_USBNET: u64 = 30 // W-CH336-3: /proc/usbnet
 const G_WLANPOLL: u64 = 31 // W-WLAN32: /proc/wlanpoll (exp2 table + register poll)
-const G_LAST: u64 = 31
+const G_WLANIRQ: u64 = 32
+const G_CLOCK: u64 = 33
+const G_USBSUM: u64 = 34
+const G_LAST: u64 = 34
 const GPU_NA: u64 = 0xFFFFFFFFFFFFFFFF
 
 // Die Dateien je Prozess.
@@ -1861,6 +1867,9 @@ fn w_usbnet_lines(state: u64, at: u64) -> u64 {
         p = w_str(state, p, (&l_dr[0]) as u64)
         p = w_num(state, p, usbnet.tx_drops_on(state, 0))
         p = w_nl(state, p)
+        if usbnet.errors(state) != 0 {
+            p = w_usbnet_errk(state, p)
+        }
         if usbnet.mode_get(state) == 3 {
             p = w_str(state, p, (&l_tq[0]) as u64)
             p = w_sdec(state, p, usbnet.tx_diag(state, 0))
@@ -1957,6 +1966,39 @@ fn w_net_route_lines(state: u64, at: u64) -> u64 {
         i = i + 1
     }
     return p
+}
+
+fn w_usbnet_errk(state: u64, at: u64) -> u64 {
+    var l_ek: [u8; 13] = "usbnet: errk\0"
+    var l_n0: [u8; 7] = " xfer=\0"
+    var l_n1: [u8; 6] = " ntb=\0"
+    var l_n2: [u8; 6] = " len=\0"
+    var l_n3: [u8; 7] = " rpkt=\0"
+    var l_n4: [u8; 7] = " rlen=\0"
+    var l_n5: [u8; 6] = " ndg=\0"
+    var l_n6: [u8; 8] = " chbad=\0"
+    var l_n7: [u8; 8] = " axlen=\0"
+    var l_cc: [u8; 5] = " cc=\0"
+    var p: u64 = w_str(state, at, (&l_ek[0]) as u64)
+    p = w_str(state, p, (&l_n0[0]) as u64)
+    p = w_num(state, p, usbnet.err_kind(state, 0))
+    p = w_str(state, p, (&l_n1[0]) as u64)
+    p = w_num(state, p, usbnet.err_kind(state, 1))
+    p = w_str(state, p, (&l_n2[0]) as u64)
+    p = w_num(state, p, usbnet.err_kind(state, 2))
+    p = w_str(state, p, (&l_n3[0]) as u64)
+    p = w_num(state, p, usbnet.err_kind(state, 3))
+    p = w_str(state, p, (&l_n4[0]) as u64)
+    p = w_num(state, p, usbnet.err_kind(state, 4))
+    p = w_str(state, p, (&l_n5[0]) as u64)
+    p = w_num(state, p, usbnet.err_kind(state, 5))
+    p = w_str(state, p, (&l_n6[0]) as u64)
+    p = w_num(state, p, usbnet.err_kind(state, 6))
+    p = w_str(state, p, (&l_n7[0]) as u64)
+    p = w_num(state, p, usbnet.err_kind(state, 7))
+    p = w_str(state, p, (&l_cc[0]) as u64)
+    p = w_num(state, p, usbnet.err_cc(state))
+    return w_nl(state, p)
 }
 
 fn w_sdec(state: u64, at: u64, v: u64) -> u64 {
@@ -2171,8 +2213,173 @@ fn w_usbnet_dhcp(state: u64, at: u64) -> u64 {
     return w_nl(state, p)
 }
 
+fn w_hexbytes(state: u64, at: u64, kind: u64, from: u64, n: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 0
+    while i < n {
+        p = w_hexn(state, p, chdiag.raw(state, kind, from + i), 2)
+        i = i + 1
+    }
+    return p
+}
+
+fn w_usbnet_desc(state: u64, at: u64) -> u64 {
+    var l_db: [u8; 17] = "usb: dbg starts=\0"
+    var l_ps: [u8; 9] = " passes=\0"
+    var l_un: [u8; 7] = " unit=\0"
+    var l_ds: [u8; 8] = " descs=\0"
+    var l_rl: [u8; 11] = " rec=live\0\0"
+    var l_rs: [u8; 12] = " rec=stale\0\0"
+    var l_at: [u8; 18] = "usb: attach slot=\0"
+    var l_sp: [u8; 8] = " speed=\0"
+    var l_rt: [u8; 8] = " route=\0"
+    var l_po: [u8; 7] = " port=\0"
+    var l_hp: [u8; 10] = " hubport=\0"
+    var l_st: [u8; 15] = "usb: start in=\0"
+    var l_ou: [u8; 6] = " out=\0"
+    var l_in: [u8; 6] = " int=\0"
+    var l_mp: [u8; 6] = " mps=\0"
+    var l_if: [u8; 5] = " if=\0"
+    var l_al: [u8; 6] = " alt=\0"
+    var l_cf: [u8; 6] = " cfg=\0"
+    var l_rc: [u8; 6] = " rec=\0"
+    var l_d18: [u8; 12] = "usb: dev18=\0"
+    var l_ch: [u8; 14] = "usb: cfghdr c\0"
+    var l_tt: [u8; 8] = " total=\0"
+    var l_go: [u8; 6] = " got=\0"
+    var l_ni: [u8; 6] = " nif=\0"
+    var l_cv: [u8; 6] = " val=\0"
+    var l_nc: [u8; 7] = " ncfg=\0"
+    var l_r0: [u8; 11] = "usb: cfg0=\0"
+    var l_r1: [u8; 11] = "usb: cfg1=\0"
+    var l_ci: [u8; 8] = "usb: c\0\0"
+    var l_ii: [u8; 4] = " i\0\0"
+    var l_aa: [u8; 4] = " a\0\0"
+    var l_ne: [u8; 4] = " n\0\0"
+    var l_bb: [u8; 3] = "+b\0"
+    var p: u64 = at
+    if chdiag.get64(state, chdiag.F_STARTS) + chdiag.get64(state, chdiag.F_DESCS) + chdiag.get64(state, chdiag.F_PASSES) == 0 {
+        return p
+    }
+    p = w_str(state, p, (&l_db[0]) as u64)
+    p = w_num(state, p, chdiag.get64(state, chdiag.F_STARTS))
+    p = w_str(state, p, (&l_ps[0]) as u64)
+    p = w_num(state, p, chdiag.get64(state, chdiag.F_PASSES))
+    p = w_str(state, p, (&l_un[0]) as u64)
+    p = w_num(state, p, chdiag.get64(state, chdiag.F_UNIT))
+    p = w_str(state, p, (&l_ds[0]) as u64)
+    p = w_num(state, p, chdiag.get64(state, chdiag.F_DESCS))
+    if usb.ch_diag(state, usb.CK_LIVE) == 1 {
+        p = w_str(state, p, (&l_rl[0]) as u64)
+    } else {
+        p = w_str(state, p, (&l_rs[0]) as u64)
+    }
+    p = w_nl(state, p)
+    let di: u64 = chdiag.get64(state, chdiag.F_DEVINFO)
+    p = w_str(state, p, (&l_at[0]) as u64)
+    p = w_num(state, p, di & 255)
+    p = w_str(state, p, (&l_sp[0]) as u64)
+    p = w_num(state, p, (di >> 8) & 255)
+    p = w_str(state, p, (&l_rt[0]) as u64)
+    p = w_hexn(state, p, (di >> 16) & 0xFFFFF, 5)
+    p = w_str(state, p, (&l_po[0]) as u64)
+    p = w_num(state, p, (di >> 40) & 255)
+    p = w_str(state, p, (&l_hp[0]) as u64)
+    p = w_num(state, p, (di >> 48) & 255)
+    p = w_nl(state, p)
+    let sv: u64 = chdiag.get64(state, chdiag.F_START)
+    let rv: u64 = chdiag.get64(state, chdiag.F_REC)
+    p = w_str(state, p, (&l_st[0]) as u64)
+    p = w_num(state, p, sv & 255)
+    p = w_str(state, p, (&l_ou[0]) as u64)
+    p = w_num(state, p, (sv >> 8) & 255)
+    p = w_str(state, p, (&l_in[0]) as u64)
+    p = w_num(state, p, (sv >> 16) & 255)
+    p = w_str(state, p, (&l_mp[0]) as u64)
+    p = w_num(state, p, (sv >> 24) & 0xFFFF)
+    p = w_str(state, p, (&l_if[0]) as u64)
+    p = w_num(state, p, (sv >> 40) & 255)
+    p = w_str(state, p, (&l_al[0]) as u64)
+    p = w_num(state, p, (sv >> 48) & 255)
+    p = w_str(state, p, (&l_cf[0]) as u64)
+    p = w_num(state, p, (sv >> 56) & 255)
+    p = w_str(state, p, (&l_rc[0]) as u64)
+    p = w_num(state, p, rv & 255)
+    p = w_ch(state, p, 47)
+    p = w_num(state, p, (rv >> 8) & 255)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_d18[0]) as u64)
+    p = w_hexbytes(state, p, 0, 0, 18)
+    p = w_nl(state, p)
+    let ci: u64 = chdiag.get64(state, chdiag.F_CFGINFO)
+    p = w_str(state, p, (&l_ch[0]) as u64)
+    p = w_num(state, p, ci & 255)
+    p = w_str(state, p, (&l_tt[0]) as u64)
+    p = w_num(state, p, (ci >> 8) & 0xFFFF)
+    p = w_str(state, p, (&l_go[0]) as u64)
+    p = w_hexn(state, p, (ci >> 24) & 0xFFFF, 4)
+    p = w_str(state, p, (&l_ni[0]) as u64)
+    p = w_num(state, p, (ci >> 40) & 255)
+    p = w_str(state, p, (&l_cv[0]) as u64)
+    p = w_num(state, p, (ci >> 48) & 255)
+    p = w_str(state, p, (&l_nc[0]) as u64)
+    p = w_num(state, p, chdiag.get64(state, chdiag.F_NCFG))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_r0[0]) as u64)
+    p = w_hexbytes(state, p, 1, 0, 32)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_r1[0]) as u64)
+    p = w_hexbytes(state, p, 1, 32, 32)
+    p = w_nl(state, p)
+    let n: u64 = chdiag.entry_count(state)
+    var open: bool = false
+    var e: u64 = 0
+    while e < n {
+        if chdiag.entry_byte(state, e, 0) == 1 {
+            if open {
+                p = w_nl(state, p)
+            }
+            p = w_str(state, p, (&l_ci[0]) as u64)
+            p = w_num(state, p, chdiag.entry_byte(state, e, 1))
+            p = w_str(state, p, (&l_ii[0]) as u64)
+            p = w_num(state, p, chdiag.entry_byte(state, e, 2))
+            p = w_str(state, p, (&l_aa[0]) as u64)
+            p = w_num(state, p, chdiag.entry_byte(state, e, 3))
+            p = w_ch(state, p, 32)
+            p = w_hexn(state, p, chdiag.entry_byte(state, e, 4), 2)
+            p = w_ch(state, p, 47)
+            p = w_hexn(state, p, chdiag.entry_byte(state, e, 5), 2)
+            p = w_ch(state, p, 47)
+            p = w_hexn(state, p, chdiag.entry_byte(state, e, 6), 2)
+            p = w_str(state, p, (&l_ne[0]) as u64)
+            p = w_num(state, p, chdiag.entry_byte(state, e, 7))
+            p = w_ch(state, p, 58)
+            open = true
+        } else {
+            p = w_ch(state, p, 32)
+            p = w_hexn(state, p, chdiag.entry_byte(state, e, 4), 2)
+            p = w_ch(state, p, 47)
+            p = w_hexn(state, p, chdiag.entry_byte(state, e, 5), 2)
+            p = w_ch(state, p, 47)
+            p = w_hexn(state, p, chdiag.entry_byte(state, e, 6) | (chdiag.entry_byte(state, e, 7) << 8), 4)
+            p = w_ch(state, p, 47)
+            p = w_num(state, p, chdiag.entry_byte(state, e, 8))
+            if chdiag.entry_byte(state, e, 9) != 255 {
+                p = w_str(state, p, (&l_bb[0]) as u64)
+                p = w_num(state, p, chdiag.entry_byte(state, e, 9))
+            }
+        }
+        e = e + 1
+    }
+    if open {
+        p = w_nl(state, p)
+    }
+    return p
+}
+
 fn make_usbnet(state: u64) -> u64 {
     var p: u64 = w_usbnet_usb(state, 0)
+    p = w_usbnet_desc(state, p)
     p = w_usbnet_phy(state, p)
     p = w_usbnet_intr(state, p)
     p = w_usbnet_lines(state, p)
@@ -2184,6 +2391,18 @@ fn make_usbnet(state: u64) -> u64 {
 //   "00:14.3 8086:a0f0 hw_rev=0x00000351 rf_id=0x0010a110 mac=QuZ rf=HR"
 //   "00:14.3 8086:a0f0 err=dead"      (device did not answer)
 //   "none"                            (no such device on the bus)
+fn w_rfkill(state: u64, at: u64, gp: u64) -> u64 {
+    var l_rk: [u8; 13] = "rfkill: hw=\0\0"
+    var l_on: [u8; 3] = "on\0"
+    var l_off: [u8; 4] = "off\0"
+    var l_gp: [u8; 5] = " gp=\0"
+    var p: u64 = w_str(state, at, (&l_rk[0]) as u64)
+    if (gp & 0x08000000) == 0 { p = w_str(state, p, (&l_on[0]) as u64) } else { p = w_str(state, p, (&l_off[0]) as u64) }
+    p = w_str(state, p, (&l_gp[0]) as u64)
+    p = w_hexn(state, p, gp, 8)
+    return w_nl(state, p)
+}
+
 fn make_wlan_devices(state: u64) -> u64 {
     var l_none: [u8; 5] = "none\0"
     var l_hw: [u8; 12] = " hw_rev=0x\0\0"
@@ -2200,6 +2419,7 @@ fn make_wlan_devices(state: u64) -> u64 {
     if n == 0 {
         p = w_str(state, p, (&l_none[0]) as u64)
         p = w_nl(state, p)
+        if iwl.bed_gp_known() { p = w_rfkill(state, p, iwl.bed_gp()) }
         if !iwl.diag_active() { return p }
     }
     var k: u64 = 0
@@ -2239,6 +2459,7 @@ fn make_wlan_devices(state: u64) -> u64 {
             p = w_str(state, p, (&nm[0]) as u64)
         }
         p = w_nl(state, p)
+        if r == 0 { p = w_rfkill(state, p, pr.gp_cntrl) }
         k = k + 1
     }
     var dg: [u8; 3400] = [0 as u8; 3400]
@@ -2254,6 +2475,165 @@ fn make_wlan_devices(state: u64) -> u64 {
 fn make_wlanpoll(state: u64) -> u64 {
     var dg: [u8; 3400] = [0 as u8; 3400]
     let dn: u64 = iwl.diag_more_text((&dg[0]) as u64, 3400)
+    var p: u64 = 0
+    var di: u64 = 0
+    while di < dn {
+        p = w_ch(state, p, dg[di as usize] as u64)
+        di = di + 1
+    }
+    return p
+}
+
+fn w_d2(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = w_ch(state, at, 48 + ((v / 10) % 10))
+    return w_ch(state, p, 48 + (v % 10))
+}
+
+fn w_stamp(state: u64, at: u64, secs: u64) -> u64 {
+    var f: [u64; 6] = [0 as u64; 6]
+    time.split(secs, (&f[0 as usize]) as u64)
+    var p: u64 = w_num(state, at, f[0 as usize])
+    p = w_ch(state, p, 45)
+    p = w_d2(state, p, f[1 as usize])
+    p = w_ch(state, p, 45)
+    p = w_d2(state, p, f[2 as usize])
+    p = w_ch(state, p, 32)
+    p = w_d2(state, p, f[3 as usize])
+    p = w_ch(state, p, 58)
+    p = w_d2(state, p, f[4 as usize])
+    p = w_ch(state, p, 58)
+    return w_d2(state, p, f[5 as usize])
+}
+
+fn make_clock(state: u64) -> u64 {
+    var m_loc: [u8; 6] = "local\0"
+    var m_utc: [u8; 4] = "utc\0"
+    var f_non: [u8; 5] = "none\0"
+    var f_std: [u8; 4] = "std\0"
+    var f_sum: [u8; 7] = "summer\0"
+    var f_utc: [u8; 4] = "utc\0"
+    var r0: [u8; 6] = "fixed\0"
+    var r1: [u8; 3] = "eu\0"
+    var r2: [u8; 3] = "us\0"
+    var r3: [u8; 3] = "au\0"
+    var r4: [u8; 3] = "nz\0"
+    var l_rtc: [u8; 5] = "rtc \0"
+    var l_mode: [u8; 7] = " mode=\0"
+    var l_frame: [u8; 8] = " frame=\0"
+    var l_rule: [u8; 7] = " rule=\0"
+    var l_base: [u8; 7] = " base=\0"
+    var l_dst: [u8; 6] = " dst=\0"
+    var l_utc: [u8; 5] = "utc \0"
+    var l_local: [u8; 8] = " local \0"
+    var l_off: [u8; 6] = " off=\0"
+    var l_conv: [u8; 7] = " conv=\0"
+    var l_moved: [u8; 8] = " moved=\0"
+    var l_alt: [u8; 24] = "alt-summer-frame local \0"
+    var p: u64 = w_str(state, 0, (&l_rtc[0]) as u64)
+    let raw: u64 = time.rtc_raw(state)
+    p = w_stamp(state, p, raw)
+    p = w_str(state, p, (&l_mode[0]) as u64)
+    var is_utc: bool = time.rtc_utc(state) != 0
+    if is_utc {
+        p = w_str(state, p, (&m_utc[0]) as u64)
+    } else {
+        p = w_str(state, p, (&m_loc[0]) as u64)
+    }
+    p = w_str(state, p, (&l_frame[0]) as u64)
+    let fr: u64 = time.rtc_frame_get(state)
+    if fr == 1 {
+        p = w_str(state, p, (&f_std[0]) as u64)
+    } else if fr == 2 {
+        p = w_str(state, p, (&f_sum[0]) as u64)
+    } else if fr == 3 {
+        p = w_str(state, p, (&f_utc[0]) as u64)
+    } else {
+        p = w_str(state, p, (&f_non[0]) as u64)
+    }
+    p = w_str(state, p, (&l_rule[0]) as u64)
+    let rw: u64 = time.tz_rule_get(state)
+    let rule: u64 = rw & 0xFF
+    if rule == 1 {
+        p = w_str(state, p, (&r1[0]) as u64)
+    } else if rule == 2 {
+        p = w_str(state, p, (&r2[0]) as u64)
+    } else if rule == 3 {
+        p = w_str(state, p, (&r3[0]) as u64)
+    } else if rule == 4 {
+        p = w_str(state, p, (&r4[0]) as u64)
+    } else {
+        p = w_str(state, p, (&r0[0]) as u64)
+    }
+    p = w_ch(state, p, 40)
+    p = w_num(state, p, rule)
+    p = w_ch(state, p, 41)
+    p = w_str(state, p, (&l_base[0]) as u64)
+    if (rw >> 8) != 0 {
+        p = w_ch(state, p, 45)
+    } else {
+        p = w_ch(state, p, 43)
+    }
+    p = w_num(state, p, time.tz_base(state))
+    let utc: u64 = time.now_sec(state)
+    p = w_str(state, p, (&l_dst[0]) as u64)
+    if time.eu_dst(utc) {
+        p = w_ch(state, p, 49)
+    } else {
+        p = w_ch(state, p, 48)
+    }
+    p = w_ch(state, p, 10)
+    p = w_str(state, p, (&l_utc[0]) as u64)
+    p = w_stamp(state, p, utc)
+    p = w_str(state, p, (&l_local[0]) as u64)
+    p = w_stamp(state, p, time.now_local(state))
+    p = w_str(state, p, (&l_off[0]) as u64)
+    if (rw >> 8) != 0 {
+        p = w_ch(state, p, 45)
+    } else {
+        p = w_ch(state, p, 43)
+    }
+    p = w_num(state, p, time.tz_min(state))
+    p = w_str(state, p, (&l_conv[0]) as u64)
+    p = w_num(state, p, time.tz_done_get(state))
+    p = w_str(state, p, (&l_moved[0]) as u64)
+    p = w_num(state, p, time.clock_moved_get(state))
+    p = w_ch(state, p, 10)
+    if !is_utc && rule != 0 && fr == 1 && time.eu_dst(utc -% 2592000) {
+        p = w_str(state, p, (&l_alt[0]) as u64)
+        p = w_stamp(state, p, time.now_local(state) -% 3600)
+        p = w_ch(state, p, 10)
+    }
+    var l_sync: [u8; 8] = "sync n=\0"
+    var l_last: [u8; 11] = " last utc \0"
+    var l_delta: [u8; 8] = " delta=\0"
+    var l_rtcw: [u8; 10] = " rtc_set=\0"
+    var l_none: [u8; 10] = "sync none\0"
+    let sn: u64 = time.sync_get(state, 0)
+    if sn == 0 {
+        p = w_str(state, p, (&l_none[0]) as u64)
+        return w_ch(state, p, 10)
+    }
+    p = w_str(state, p, (&l_sync[0]) as u64)
+    p = w_num(state, p, sn)
+    p = w_str(state, p, (&l_last[0]) as u64)
+    p = w_stamp(state, p, time.sync_get(state, 1))
+    p = w_str(state, p, (&l_delta[0]) as u64)
+    let dl: u64 = time.sync_get(state, 2)
+    if dl >= 0x8000000000000000 {
+        p = w_ch(state, p, 45)
+        p = w_num(state, p, 0 -% dl)
+    } else {
+        p = w_ch(state, p, 43)
+        p = w_num(state, p, dl)
+    }
+    p = w_str(state, p, (&l_rtcw[0]) as u64)
+    p = w_num(state, p, time.sync_get(state, 3))
+    return w_ch(state, p, 10)
+}
+
+fn make_wlanirq(state: u64) -> u64 {
+    var dg: [u8; 3400] = [0 as u8; 3400]
+    let dn: u64 = iwl.diag_irq_text((&dg[0]) as u64, 3400)
     var p: u64 = 0
     var di: u64 = 0
     while di < dn {
@@ -3039,6 +3419,15 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_WLANPOLL {
             return make_wlanpoll(state)
         }
+        if sub == G_WLANIRQ {
+            return make_wlanirq(state)
+        }
+        if sub == G_CLOCK {
+            return make_clock(state)
+        }
+        if sub == G_USBSUM {
+            return procusb.render(state, buf(state), BUF_MAX)
+        }
         if sub == G_INPUTDEVS {
             return i2chid.render(state, buf(state), BUF_MAX)
         }
@@ -3179,6 +3568,18 @@ fn global_of(name: u64) -> u64 {
     var gwp: [u8; 9] = "wlanpoll\0"
     if streq(name, (&gwp[0]) as u64) {
         return G_WLANPOLL
+    }
+    var gus: [u8; 7] = "usbsum\0"
+    if streq(name, (&gus[0]) as u64) {
+        return G_USBSUM
+    }
+    var gwq: [u8; 8] = "wlanirq\0"
+    if streq(name, (&gwq[0]) as u64) {
+        return G_WLANIRQ
+    }
+    var gck: [u8; 6] = "clock\0"
+    if streq(name, (&gck[0]) as u64) {
+        return G_CLOCK
     }
     if streq(name, (&ghk[0]) as u64) {
         return G_HOTKEYS
@@ -3478,8 +3879,17 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var id2: [u8; 10] = "inputdevs\0"
     var hk2: [u8; 8] = "hotkeys\0"
     var wp2: [u8; 9] = "wlanpoll\0"
+    var wq2: [u8; 8] = "wlanirq\0"
+    var ck2: [u8; 6] = "clock\0"
+    var us2s: [u8; 7] = "usbsum\0"
     var src: u64 = (&a[0]) as u64
-    if sub == G_WLANPOLL {
+    if sub == G_CLOCK {
+        src = (&ck2[0]) as u64
+    } else if sub == G_USBSUM {
+        src = (&us2s[0]) as u64
+    } else if sub == G_WLANIRQ {
+        src = (&wq2[0]) as u64
+    } else if sub == G_WLANPOLL {
         src = (&wp2[0]) as u64
     } else if sub == G_HOTKEYS {
         src = (&hk2[0]) as u64

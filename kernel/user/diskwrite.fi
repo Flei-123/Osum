@@ -1,0 +1,460 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import tools
+import libc.io
+import libc.kcall
+import disks.table
+import disks.gptw
+import disks.ofsfmt
+import disks.guard
+import diskscan
+
+export { run, is_write_cmd }
+
+const MAXPOS: u64 = 8
+const EXIT_USAGE: u64 = 2
+const EXIT_REFUSED: u64 = 3
+const EXIT_FAILED: u64 = 4
+
+static mut S_PLAN: [u8; 7] = "plan: \0"
+static mut S_CREATE: [u8; 8] = "create \0"
+static mut S_DELETE: [u8; 8] = "delete \0"
+static mut S_INIT: [u8; 6] = "init \0"
+static mut S_FORMAT: [u8; 8] = "format \0"
+static mut S_GPT: [u8; 5] = " gpt\0"
+static mut S_PART: [u8; 12] = " partition \0"
+static mut S_START: [u8; 8] = " start=\0"
+static mut S_SECT: [u8; 10] = " sectors=\0"
+static mut S_KIND: [u8; 7] = " kind=\0"
+static mut S_NAME: [u8; 7] = " name=\0"
+static mut S_VER: [u8; 10] = " version=\0"
+static mut S_AT: [u8; 5] = " at \0"
+static mut S_REF: [u8; 10] = "refused: \0"
+static mut S_R_SYS: [u8; 12] = "system disk\0"
+static mut S_R_BUSY: [u8; 40] = "disk is in use (a partition is mounted)\0"
+static mut S_R_MNT: [u8; 25] = "partition is mounted at \0"
+static mut S_R_TAB: [u8; 35] = "disk already has a partition table\0"
+static mut S_R_NODISK: [u8; 13] = "no such disk\0"
+static mut S_R_NOPART: [u8; 18] = "no such partition\0"
+static mut S_R_ARGS: [u8; 14] = "bad arguments\0"
+static mut S_R_FREE: [u8; 27] = "no free space of that size\0"
+static mut S_R_KIND: [u8; 13] = "unknown kind\0"
+static mut S_R_TABLE: [u8; 30] = "the table cannot be changed (\0"
+static mut S_NEED: [u8; 43] = "needs confirmation: repeat with --confirm=\0"
+static mut S_DONE: [u8; 7] = "done: \0"
+static mut S_VERIFY: [u8; 15] = "verify: table=\0"
+static mut S_PARTS: [u8; 13] = " partitions=\0"
+static mut S_FAILED: [u8; 9] = "failed: \0"
+static mut S_OPEN: [u8; 23] = "cannot open the device\0"
+static mut S_IOERR: [u8; 12] = "write error\0"
+static mut S_E_NOTABLE: [u8; 15] = "no valid table\0"
+static mut S_E_RANGE: [u8; 25] = "outside the usable range\0"
+static mut S_E_OVERLAP: [u8; 21] = "overlaps a partition\0"
+static mut S_E_FULL: [u8; 14] = "table is full\0"
+static mut S_E_NOBACKUP: [u8; 23] = "no valid backup header\0"
+static mut S_E_INDEX: [u8; 18] = "no such partition\0"
+static mut S_E_SIZE: [u8; 15] = "disk too small\0"
+static mut S_E_KIND: [u8; 13] = "unknown kind\0"
+static mut S_FMT_SMALL: [u8; 20] = "partition too small\0"
+static mut S_ST_NONE: [u8; 5] = "none\0"
+static mut S_USE: [u8; 54] = "usage: diskctl init|create|delete|format <device> ...\0"
+static mut S_W_INIT: [u8; 5] = "init\0"
+static mut S_W_CREATE: [u8; 7] = "create\0"
+static mut S_W_DELETE: [u8; 7] = "delete\0"
+static mut S_W_FORMAT: [u8; 7] = "format\0"
+static mut S_W_AUTO: [u8; 5] = "auto\0"
+static mut S_K_OFS: [u8; 4] = "ofs\0"
+static mut S_K_EFI: [u8; 4] = "efi\0"
+static mut S_K_BASIC: [u8; 6] = "basic\0"
+static mut S_K_LINUX: [u8; 6] = "linux\0"
+static mut S_K_FAT32: [u8; 6] = "fat32\0"
+static mut S_P_CONFIRM: [u8; 11] = "--confirm=\0"
+static mut S_P_TIME: [u8; 8] = "--time=\0"
+static mut S_W_V2: [u8; 3] = "v2\0"
+static mut S_W_V3: [u8; 3] = "v3\0"
+static mut S_ONE: [u8; 2] = ")\0"
+
+static mut S_WL_PATH: [u8; 11] = "/dev/wlock\0"
+static mut S_WL_UNLOCK: [u8; 8] = "unlock \0"
+static mut S_WL_LOCK: [u8; 6] = "lock \0"
+static mut wcmd: [u8; 48] = [0 as u8; 48]
+static mut wfd: u64 = 0
+static mut base: u64 = 0
+static mut gscratch: [u8; 17408] = [0 as u8; 17408]
+static mut fscratch: [u8; 1024] = [0 as u8; 1024]
+static mut pos: [u64; 8] = [0 as u64; 8]
+static mut npos: u64 = 0
+static mut confirm_arg: u64 = 0
+static mut time_arg: u64 = 0
+static mut time_set: bool = false
+
+fn has_prefix(a: u64, pre: u64) -> bool {
+    var i: u64 = 0
+    while *((pre + i) as *mut u8) != 0 as u8 {
+        if *((a + i) as *mut u8) != *((pre + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn prefix_len(pre: u64) -> u64 {
+    var n: u64 = 0
+    while *((pre + n) as *mut u8) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn is_write_cmd(args: u64) -> bool {
+    if ulib.arg_count(args) < 2 {
+        return false
+    }
+    let a: u64 = ulib.arg_at(args, 1)
+    return ulib.streq(a, (&S_W_INIT[0]) as u64) || ulib.streq(a, (&S_W_CREATE[0]) as u64)
+        || ulib.streq(a, (&S_W_DELETE[0]) as u64) || ulib.streq(a, (&S_W_FORMAT[0]) as u64)
+}
+
+fn parse_args(args: u64) {
+    npos = 0
+    confirm_arg = 0
+    time_set = false
+    var i: u64 = 2
+    while i < ulib.arg_count(args) {
+        let a: u64 = ulib.arg_at(args, i)
+        if has_prefix(a, (&S_P_CONFIRM[0]) as u64) {
+            confirm_arg = a + prefix_len((&S_P_CONFIRM[0]) as u64)
+        } else if has_prefix(a, (&S_P_TIME[0]) as u64) {
+            time_arg = ulib.to_num(a + prefix_len((&S_P_TIME[0]) as u64))
+            time_set = true
+        } else if npos < MAXPOS {
+            pos[npos as usize] = a
+            npos = npos + 1
+        }
+        i = i + 1
+    }
+}
+
+fn dread(lba: u64, n: u64, dst: u64) -> u64 {
+    if ulib.bad(io.seek(wfd, lba * 512, 0)) {
+        return 1
+    }
+    let got: u64 = io.read_full(wfd, dst, n * 512)
+    if ulib.bad(got) || got != n * 512 {
+        return 1
+    }
+    return 0
+}
+
+fn dwrite(lba: u64, n: u64, src: u64) -> u64 {
+    if ulib.bad(io.seek(wfd, lba * 512, 0)) {
+        return 1
+    }
+    let put: u64 = io.write_all(wfd, src, n * 512)
+    if ulib.bad(put) || put != n * 512 {
+        return 1
+    }
+    return 0
+}
+
+fn pwrite(lba: u64, n: u64, src: u64) -> u64 {
+    return dwrite(base + lba, n, src)
+}
+
+fn wlock_send(verb: u64, devpath: u64) {
+    var n: u64 = 0
+    while *((verb + n) as *mut u8) != 0 as u8 {
+        wcmd[n as usize] = *((verb + n) as *mut u8)
+        n = n + 1
+    }
+    var k: u64 = 5
+    while *((devpath + k) as *mut u8) != 0 as u8 && n < 46 {
+        wcmd[n as usize] = *((devpath + k) as *mut u8)
+        n = n + 1
+        k = k + 1
+    }
+    wcmd[n as usize] = 0 as u8
+    let fd: u64 = io.open((&S_WL_PATH[0]) as u64, kcall.O_WRONLY)
+    if ulib.bad(fd) {
+        return
+    }
+    io.write_all(fd, (&wcmd[0]) as u64, n)
+    io.close(fd)
+}
+
+fn say(p: u64) {
+    tools.ob_str(p)
+}
+
+fn say_s(s: u64, v: u64) {
+    tools.ob_str(s)
+    tools.ob_str(v)
+    tools.ob_nl()
+}
+
+fn refuse(msg: u64) -> u64 {
+    say((&S_REF[0]) as u64)
+    say(msg)
+    tools.ob_nl()
+    tools.ob_flush()
+    return EXIT_REFUSED
+}
+
+fn fail(msg: u64) -> u64 {
+    say((&S_FAILED[0]) as u64)
+    say(msg)
+    tools.ob_nl()
+    tools.ob_flush()
+    return EXIT_FAILED
+}
+
+fn gpt_error(e: u64) -> u64 {
+    if e == gptw.E_NOTABLE {
+        return (&S_E_NOTABLE[0]) as u64
+    }
+    if e == gptw.E_RANGE {
+        return (&S_E_RANGE[0]) as u64
+    }
+    if e == gptw.E_OVERLAP {
+        return (&S_E_OVERLAP[0]) as u64
+    }
+    if e == gptw.E_FULL {
+        return (&S_E_FULL[0]) as u64
+    }
+    if e == gptw.E_NOBACKUP {
+        return (&S_E_NOBACKUP[0]) as u64
+    }
+    if e == gptw.E_INDEX {
+        return (&S_E_INDEX[0]) as u64
+    }
+    if e == gptw.E_SIZE {
+        return (&S_E_SIZE[0]) as u64
+    }
+    if e == gptw.E_KIND {
+        return (&S_E_KIND[0]) as u64
+    }
+    return (&S_IOERR[0]) as u64
+}
+
+fn kind_of_word(w: u64) -> u64 {
+    if ulib.streq(w, (&S_K_OFS[0]) as u64) {
+        return table.K_OFS
+    }
+    if ulib.streq(w, (&S_K_EFI[0]) as u64) {
+        return table.K_EFI
+    }
+    if ulib.streq(w, (&S_K_BASIC[0]) as u64) {
+        return table.K_BASIC
+    }
+    if ulib.streq(w, (&S_K_LINUX[0]) as u64) {
+        return table.K_LINUX
+    }
+    if ulib.streq(w, (&S_K_FAT32[0]) as u64) {
+        return table.K_FAT32
+    }
+    return table.K_OTHER
+}
+
+fn find_disk(path: u64) -> u64 {
+    var i: u64 = 0
+    while i < diskscan.count() {
+        if ulib.streq(diskscan.path(i), path) {
+            return i
+        }
+        i = i + 1
+    }
+    return 99
+}
+
+fn print_plan(op: u64, d: u64, a: u64, b: u64, c: u64, w: u64) {
+    say((&S_PLAN[0]) as u64)
+    say(guard.op_word(op))
+    say((&S_AT[0]) as u64)
+    say(diskscan.path(d))
+    if op == guard.OP_CREATE {
+        say((&S_START[0]) as u64)
+        tools.ob_num(a)
+        say((&S_SECT[0]) as u64)
+        tools.ob_num(b)
+        say((&S_KIND[0]) as u64)
+        say(table.kind_word(c))
+        say((&S_NAME[0]) as u64)
+        say(w)
+    }
+    if op == guard.OP_DELETE || op == guard.OP_FORMAT {
+        say((&S_PART[0]) as u64)
+        tools.ob_num(a)
+    }
+    if op == guard.OP_FORMAT {
+        say((&S_VER[0]) as u64)
+        tools.ob_num(b)
+    }
+    tools.ob_nl()
+}
+
+fn reason_text(r: u64, mnt: u64) -> u64 {
+    if r == guard.R_SYSTEM {
+        return refuse((&S_R_SYS[0]) as u64)
+    }
+    if r == guard.R_BUSY {
+        return refuse((&S_R_BUSY[0]) as u64)
+    }
+    if r == guard.R_HAS_TABLE {
+        return refuse((&S_R_TAB[0]) as u64)
+    }
+    if r == guard.R_MOUNTED {
+        say((&S_REF[0]) as u64)
+        say_s((&S_R_MNT[0]) as u64, mnt)
+        tools.ob_flush()
+        return EXIT_REFUSED
+    }
+    return refuse((&S_R_ARGS[0]) as u64)
+}
+
+fn report_verify(d: u64) -> u64 {
+    diskscan.scan()
+    let i: u64 = find_disk(pos[0])
+    if i == 99 {
+        return fail((&S_E_NOTABLE[0]) as u64)
+    }
+    let t: u64 = diskscan.table_of(i)
+    say((&S_VERIFY[0]) as u64)
+    say(table.scheme_word(table.scheme(t)))
+    say((&S_PARTS[0]) as u64)
+    tools.ob_num(table.count(t))
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+fn run(args: u64) -> u64 {
+    parse_args(args)
+    let w: u64 = ulib.arg_at(args, 1)
+    var op: u64 = guard.OP_INIT
+    if ulib.streq(w, (&S_W_CREATE[0]) as u64) {
+        op = guard.OP_CREATE
+    } else if ulib.streq(w, (&S_W_DELETE[0]) as u64) {
+        op = guard.OP_DELETE
+    } else if ulib.streq(w, (&S_W_FORMAT[0]) as u64) {
+        op = guard.OP_FORMAT
+    }
+    var need: u64 = 1
+    if op == guard.OP_CREATE {
+        need = 5
+    } else if op == guard.OP_DELETE {
+        need = 2
+    } else if op == guard.OP_FORMAT {
+        need = 2
+    }
+    if npos < need {
+        ulib.esay_line((&S_USE[0]) as u64, 0)
+        return EXIT_USAGE
+    }
+    diskscan.scan()
+    let d: u64 = find_disk(pos[0])
+    if d == 99 {
+        return refuse((&S_R_NODISK[0]) as u64)
+    }
+    let total: u64 = diskscan.sectors(d)
+    let t: u64 = diskscan.table_of(d)
+    let has_table: bool = table.scheme(t) != table.SCH_NONE
+    var a: u64 = 0
+    var b: u64 = 0
+    var c: u64 = 0
+    var nm: u64 = (&S_ST_NONE[0]) as u64
+    var mnt: u64 = 0
+    var part_mounted: bool = false
+    if op == guard.OP_CREATE {
+        b = ulib.to_num(pos[2])
+        c = kind_of_word(pos[3])
+        nm = pos[4]
+        if ulib.streq(pos[1], (&S_W_AUTO[0]) as u64) {
+            a = gptw.free_start(t, b)
+        } else {
+            a = ulib.to_num(pos[1])
+        }
+    }
+    if op == guard.OP_DELETE || op == guard.OP_FORMAT {
+        a = ulib.to_num(pos[1])
+        if diskscan.system_disk(d) {
+            print_plan(op, d, a, b, c, nm)
+            return refuse((&S_R_SYS[0]) as u64)
+        }
+        if table.scheme(t) != table.SCH_GPT || a == 0 || a > table.count(t) {
+            print_plan(op, d, a, b, c, nm)
+            return refuse((&S_R_NOPART[0]) as u64)
+        }
+        mnt = diskscan.part_mount(d, a - 1)
+        part_mounted = mnt != 0
+        b = 2
+        if op == guard.OP_FORMAT && npos > 2 && ulib.streq(pos[3], (&S_W_V3[0]) as u64) {
+            b = 3
+        }
+    }
+    print_plan(op, d, a, b, c, nm)
+    var confirmed: bool = false
+    if confirm_arg != 0 && ulib.streq(confirm_arg, diskscan.path(d)) {
+        confirmed = true
+    }
+    let r: u64 = guard.check(op, diskscan.system_disk(d), diskscan.mounts_on(d) > 0, part_mounted, has_table, confirmed)
+    if r != guard.R_OK {
+        if r == guard.R_UNCONFIRMED {
+            say((&S_NEED[0]) as u64)
+            say(diskscan.path(d))
+            tools.ob_nl()
+            tools.ob_flush()
+            return EXIT_REFUSED
+        }
+        return reason_text(r, mnt)
+    }
+    if op == guard.OP_CREATE && (a == 0 || !gptw.kind_known(c)) {
+        if a == 0 {
+            return refuse((&S_R_FREE[0]) as u64)
+        }
+        return refuse((&S_R_KIND[0]) as u64)
+    }
+    wlock_send((&S_WL_UNLOCK[0]) as u64, diskscan.path(d))
+    wfd = io.open(diskscan.path(d), kcall.O_RDWR)
+    if ulib.bad(wfd) {
+        wlock_send((&S_WL_LOCK[0]) as u64, diskscan.path(d))
+        return fail((&S_OPEN[0]) as u64)
+    }
+    let seed: u64 = io.now_sec() + total
+    var rc: u64 = 0
+    if op == guard.OP_INIT {
+        rc = gptw.init(dwrite, total, seed, (&gscratch[0]) as u64)
+    } else if op == guard.OP_CREATE {
+        rc = gptw.create(dread, dwrite, total, a, b, c, nm, seed, (&gscratch[0]) as u64)
+    } else if op == guard.OP_DELETE {
+        rc = gptw.remove(dread, dwrite, total, a, (&gscratch[0]) as u64)
+    } else {
+        let sectors: u64 = table.sectors_of(t, a - 1)
+        base = table.start_of(t, a - 1)
+        var zeit: u64 = io.now_sec()
+        if time_set {
+            zeit = time_arg
+        }
+        rc = ofsfmt.format(pwrite, sectors, b, ofsfmt.default_inodes(sectors), zeit, (&fscratch[0]) as u64)
+        if rc == ofsfmt.E_SMALL {
+            io.close(wfd)
+            wlock_send((&S_WL_LOCK[0]) as u64, diskscan.path(d))
+            return refuse((&S_FMT_SMALL[0]) as u64)
+        }
+    }
+    io.fsync(wfd)
+    io.close(wfd)
+    wlock_send((&S_WL_LOCK[0]) as u64, diskscan.path(d))
+    if rc != 0 {
+        if op == guard.OP_FORMAT {
+            return fail((&S_IOERR[0]) as u64)
+        }
+        return fail(gpt_error(rc))
+    }
+    say((&S_DONE[0]) as u64)
+    say(guard.op_word(op))
+    tools.ob_nl()
+    return report_verify(d)
+}

@@ -60,6 +60,9 @@ import drv.net.iwl_xport
 import drv.net.iwl_heldcaps
 import drv.net.iwl_pcipm
 import drv.net.iwl_retry
+import drv.net.iwl_irqpci
+import wlan.iwl_irqdiag
+import wlan.iwl_irqpoll
 import wlan.iwl_rxexp_tab
 import wlan.iwl_pollrec
 import wlan.iwl_sbtrace
@@ -71,7 +74,7 @@ import fs.vfs
 import fs.vfsops
 
 export {
-    boot, fw_stage, fw_load, reload_reset, diag_text, diag_more_text, held_cq, held_probe, held_ready, diag_active, count_targets, target_at, probe_at, ERR_NODEV, ERR_MAP,
+    boot, fw_stage, fw_load, reload_reset, diag_text, diag_more_text, diag_irq_text, bed_gp_known, bed_gp, held_cq, held_probe, held_ready, diag_active, count_targets, target_at, probe_at, ERR_NODEV, ERR_MAP,
     E_FW_NONE, E_FW_PARSE, E_FW_MEM, E_FW_IMAGE
 }
 
@@ -109,10 +112,12 @@ static mut diag_d: iwl_diag.Diag = iwl_diag.Diag {
     phase: 0, failed_at: 0, armed: 0, init_alive: 0, rt_alive: 0, err: 0, hw_rev: 0, rf_id: 0, fw_ver: 0, fw_size: 0,
     nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, last_cmd: 0, last_notif: 0,
     cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32],
-    step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, alive_valid: 0, alive: [0; 16], pm_valid: 0, pm: [0; 16], tr_valid: 0, tr: [0; 192], rx_valid: 0, rx: [0; 26], x2_valid: 0, x2: [0; 136], poll_valid: 0, poll: [0; 360], miss: [0 as u8; 64]
+    step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, own_valid: 0, own_hwif: 0, own_mbox: 0, own_rc: 0, alive_valid: 0, alive: [0; 16], pm_valid: 0, pm: [0; 16], tr_valid: 0, tr: [0; 192], rx_valid: 0, rx: [0; 26], x2_valid: 0, x2: [0; 136], poll_valid: 0, poll: [0; 360], irq_valid: 0, irq: [0; 48], ipoll_valid: 0, ipoll: [0; 320], miss: [0 as u8; 64]
 }
 
 static mut snap_p: u64 = 0
+static mut bed_gp_val: u64 = 0
+static mut bed_gp_set: u64 = 0
 static mut alive_seen: u64 = 0
 static mut snap_bdf: u64 = 0
 static mut snap_bar: u64 = 0
@@ -159,6 +164,18 @@ fn diag_more_text(buf: u64, cap: u64) -> u64 {
     return iwl_diag.diag_more(&diag_d, buf, cap)
 }
 
+fn diag_irq_text(buf: u64, cap: u64) -> u64 {
+    return iwl_diag.diag_irq_text(&diag_d, buf, cap)
+}
+
+fn bed_gp_known() -> bool {
+    return bed_gp_set != 0
+}
+
+fn bed_gp() -> u64 {
+    return bed_gp_val
+}
+
 fn diag_active() -> bool {
     return diag_d.phase != iwl_diag.PH_IDLE
 }
@@ -179,6 +196,7 @@ fn diag_take_snaps() {
         var rf: [u64; 8] = [0 as u64; 8]
         iwl_pwr.snap_fh(snap_p as *mut iwl_probe.Probe, (&rf[0]) as u64)
         iwl_diag.diag_snap2(&diag_d, (&rf[0]) as u64)
+        iwl_diag.diag_own(&diag_d, (*(snap_p as *mut iwl_probe.Probe)).own_hwif, (*(snap_p as *mut iwl_probe.Probe)).own_mbox, (*(snap_p as *mut iwl_probe.Probe)).own_rc)
     }
     if snap_bdf != 0 {
         iwl_diag.diag_pci(&diag_d, pci.cfg_read16(snap_bdf, CFG_COMMAND), snap_bar, snap_bar_size)
@@ -272,7 +290,9 @@ fn probe_at(state: u64, i: u64, p: *mut iwl_probe.Probe, log: bool) -> i64 {
         return ERR_MAP
     }
     iwl_probe.mmio_set(p, base, rd, wr)
-    return iwl_probe.probe_run(p, ven, dev, size, io)
+    let prc: i64 = iwl_probe.probe_run(p, ven, dev, size, io)
+    (*p).no_own = mode_flag(state, kstate.M_IWLNOOWN)
+    return prc
 }
 
 fn put_bdf(bdf: u64) {
@@ -620,8 +640,14 @@ fn run_experiments(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, b
     diag_take_snaps()
     var xt: iwl_rxexp_tab.Tab = iwl_rxexp_tab.tab_new()
     var pl: iwl_pollrec.Poll = iwl_pollrec.poll_new()
-    let r: i64 = iwl_retry.run(state, p, f, blob, img, bounce, bsize, cq, tr, snap_bdf, first_err, &xt, &pl, wait_alive)
+    var ip: iwl_irqpoll.IPoll = iwl_irqpoll.ipoll_new()
+    var irqw: [u64; 48] = [0 as u64; 48]
+    iwl_irqdiag.take_csr(p, cq, (&irqw[0]) as u64)
+    iwl_irqpci.take(snap_bdf, (&irqw[0]) as u64)
+    iwl_diag.diag_irq(&diag_d, (&irqw[0]) as u64)
+    let r: i64 = iwl_retry.run(state, p, f, blob, img, bounce, bsize, cq, tr, snap_bdf, first_err, &xt, &pl, &ip, wait_alive)
     iwl_diag.diag_poll(&diag_d, iwl_pollrec.poll_ptr(&pl))
+    iwl_diag.diag_ipoll(&diag_d, iwl_irqpoll.ipoll_ptr(&ip))
     iwl_diag.diag_x2(&diag_d, iwl_rxexp_tab.tab_ptr(&xt))
     if iwl_rxexp_tab.tab_count(&xt) != 0 {
         var s_rx: [u8; 24] = "iwl: boot2 rxexp rows=\0\0"
@@ -741,6 +767,7 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
         iwl_pwr.int_disable(p)
         return r
     }
+    let _sf1: i64 = iwl_pwr.start_fw(p)
     r = iwl_pwr.nic_config(p, (*f).phy_sku)
     if r != 0 {
         b2_line((&t_pw[0]) as u64, r)
@@ -792,6 +819,7 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
         iwl_pwr.int_disable(p)
         return r
     }
+    let _sf2: i64 = iwl_pwr.start_fw(p)
     r = iwl_pwr.nic_config(p, (*f).phy_sku)
     if r != 0 {
         b2_line((&t_pw[0]) as u64, r)
@@ -842,6 +870,7 @@ fn fh8000_fake(state: u64, blob: u64, f: *mut iwl_fw.FwInfo) {
     iwl_fake.fake_init(region, sram, mode, win, bsize)
     var p: iwl_probe.Probe = iwl_probe.probe_new()
     iwl_probe.mmio_set(&p, region, iwl_fake.fake_rd, iwl_fake.fake_wr)
+    p.no_own = mode_flag(state, kstate.M_IWLNOOWN)
     let pw: i64 = iwl_pwr.power_up(&p)
     if pw != 0 {
         serial.puts((&s_pw[0]) as u64)
@@ -901,8 +930,12 @@ fn fh8000_fake2(state: u64, blob: u64, f: *mut iwl_fw.FwInfo, mode: u64, win: u6
     iwl_fake.fake_set_wake(region, mode_flag(state, kstate.M_IWLFHWAKE))
     iwl_fake.fake_set_dead(region, mode_flag(state, kstate.M_IWLFHDEAD))
     iwl_fake.fake_set_expwake(region, mode_flag(state, kstate.M_IWLFHEXPWAKE))
+    iwl_fake.fake_set_rfkill(region, mode_flag(state, kstate.M_IWLFHRFKILL))
     var p: iwl_probe.Probe = iwl_probe.probe_new()
     iwl_probe.mmio_set(&p, region, iwl_fake.fake_rd, iwl_fake.fake_wr)
+    p.no_own = mode_flag(state, kstate.M_IWLNOOWN)
+    bed_gp_val = iwl_pwr.rd(&p, iwl_probe.CSR_GP_CNTRL)
+    bed_gp_set = 1
     var cq: iwl_cmdq.Cq = iwl_cmdq.cq_new()
     var cqp: *mut iwl_cmdq.Cq = &cq
     let bind: bool = kstate.mode_on(state, kstate.M_IWLFHBIND)

@@ -1,0 +1,236 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import font.ttf
+import font.raster
+import fonthint
+
+const WIN: usize = 64
+const RASTER_BYTES: usize = 65536
+const SCRATCH_BYTES: usize = 16384
+const MIN_SIZE: u64 = 9
+const MAX_SIZE: u64 = 16
+
+static mut font_mem: [u64; 512] = [0; 512]
+static mut raster_mem: [u8; 65536] = [0 as u8; 65536]
+static mut scratch: [u8; 16384] = [0 as u8; 16384]
+static mut img: [u8; 4096] = [0 as u8; 4096]
+static mut rast: [u64; 64] = [0; 64]
+static mut rows: [u64; 64] = [0; 64]
+static mut p_sans: [u8; 9] = "sans.ttf\0"
+static mut p_sym: [u8; 12] = "symbols.ttf\0"
+static mut glyphs: [u32; 5] = [0x45 as u32, 0x54 as u32, 0x46 as u32, 0x5A as u32, 0x7A as u32]
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+struct Shape {
+    top_row: u64,
+    ink_rows: u64,
+    top_sum: u64,
+    max_sum: u64,
+    area: u64,
+    cols: u64,
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn font_at(i: u64) -> *mut ttf.Font {
+    return (&font_mem[(i * 256) as usize]) as u64 as *mut ttf.Font
+}
+
+fn ras() -> *mut raster.Raster {
+    return (&rast[0]) as u64 as *mut raster.Raster
+}
+
+fn load(slot: u64, path: u64) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file(path, &b) {
+        return false
+    }
+    *font_at(slot) = ttf.font_new()
+    return ttf.font_init(font_at(slot), b.ptr as *mut u8, b.len)
+}
+
+#[allow_fp]
+fn ffloor(v: f64) -> i64 {
+    let t: i64 = v as i64
+    if (t as f64) > v {
+        return t - 1
+    }
+    return t
+}
+
+#[allow_fp]
+fn fceil(v: f64) -> i64 {
+    let t: i64 = v as i64
+    if (t as f64) < v {
+        return t + 1
+    }
+    return t
+}
+
+#[allow_fp]
+fn shape_of(slot: u64, cp: u32, px: u64, out: *mut Shape) -> bool {
+    let f: *mut ttf.Font = font_at(slot)
+    let gid: u32 = ttf.font_glyph_for(f, cp)
+    var x0: i32 = 0
+    var y0: i32 = 0
+    var x1: i32 = 0
+    var y1: i32 = 0
+    if !ttf.font_glyph_bbox(f, gid, &x0, &y0, &x1, &y1) {
+        return false
+    }
+    let sc: f64 = (px as f64) / (ttf.font_upem(f) as f64)
+    let vf: f64 = fonthint.vfactor(slot, f, px, y1)
+    let bx0: i64 = ffloor((x0 as f64) * sc)
+    let bx1: i64 = fceil((x1 as f64) * sc)
+    let by0: i64 = ffloor((y0 as f64) * sc * vf)
+    let by1: i64 = fceil((y1 as f64) * sc * vf - 0.0001)
+    let w: usize = (bx1 - bx0) as usize
+    let h: usize = (by1 - by0) as usize
+    if w > WIN || h > WIN || w == 0 || h == 0 {
+        return false
+    }
+    *ras() = raster.raster_new()
+    raster.raster_attach(ras(), (&raster_mem[0]) as u64 as *mut u8, RASTER_BYTES)
+    if !raster.raster_begin(ras(), bx0 as f64, (0 - by1) as f64, w, h) {
+        return false
+    }
+    if !ttf.font_outline_m(f, gid, ras(), 0.0, 0.0, sc, 1.0, 0.0, 0.0, vf, (&scratch[0]) as u64 as *mut u8, SCRATCH_BYTES, 0) {
+        return false
+    }
+    raster.raster_finish(ras())
+    var r: usize = 0
+    var area: u64 = 0
+    while r < h {
+        var sum: u64 = 0
+        var c: usize = 0
+        while c < w {
+            var cov: f64 = raster.raster_cov(ras(), c, r)
+            if cov < 0.0 {
+                cov = 0.0
+            }
+            if cov > 1.0 {
+                cov = 1.0
+            }
+            sum = sum + ((cov * 255.0 + 0.5) as u64)
+            c = c + 1
+        }
+        rows[r] = sum
+        area = area + sum
+        r = r + 1
+    }
+    var max_sum: u64 = 0
+    r = 0
+    while r < h {
+        if rows[r] > max_sum {
+            max_sum = rows[r]
+        }
+        r = r + 1
+    }
+    var top: u64 = 0
+    while top < h as u64 && rows[top as usize] * 50 < max_sum {
+        top = top + 1
+    }
+    var last: u64 = h as u64
+    while last > top && rows[(last - 1) as usize] * 50 < max_sum {
+        last = last - 1
+    }
+    (*out).top_row = top
+    (*out).ink_rows = last - top
+    (*out).top_sum = rows[top as usize]
+    (*out).max_sum = max_sum
+    (*out).area = area
+    (*out).cols = w as u64
+    return true
+}
+
+fn blank() -> Shape {
+    return Shape { top_row: 0, ink_rows: 0, top_sum: 0, max_sum: 0, area: 0, cols: 0 }
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    check(&t, load(0, (&p_sans[0]) as u64), "sans.ttf loads")
+    check(&t, load(1, (&p_sym[0]) as u64), "symbols.ttf loads")
+    let sans: *mut ttf.Font = font_at(0)
+    let upem: i32 = ttf.font_upem(sans) as i32
+    let xh: i32 = fonthint.zone_height(0, sans, 0)
+    let cap: i32 = fonthint.zone_height(0, sans, 1)
+    let asc: i32 = fonthint.zone_height(0, sans, 2)
+    io.fmt_print(f"zones xh {xh} cap {cap} asc {asc} upem {upem}\n")
+    check(&t, xh > 0 && cap > xh && asc >= xh, "sans reports x-height < cap-height <= ascender")
+    check(&t, fonthint.zone_height(1, font_at(1), 0) == 0, "symbols face has no zones (never hinted)")
+    check(&t, fonthint.vfactor(1, font_at(1), 12, 700) == 1.0, "symbols face: factor 1.0")
+    check(&t, fonthint.vfactor(0, sans, 40, cap) == 1.0, "large size (40 px): no hinting")
+    check(&t, fonthint.vfactor(0, sans, 5, cap) == 1.0, "tiny size (5 px): no hinting")
+    check(&t, fonthint.vfactor(0, sans, 12, (upem * 9) / 10) == 1.0, "a top far from every zone stays unscaled")
+    check(&t, fonthint.vfactor(0, sans, 12, 0) == 1.0, "no top: factor 1.0")
+
+    var hint_sum: u64 = 0
+    var raw_sum: u64 = 0
+    var n: u64 = 0
+    var exact: u64 = 0
+    var width_same: u64 = 0
+    var area_ok: u64 = 0
+    var px: u64 = MIN_SIZE
+    while px <= MAX_SIZE {
+        var gi: usize = 0
+        while gi < 5 {
+            let cp: u32 = glyphs[gi]
+            var a: Shape = blank()
+            var b: Shape = blank()
+            fonthint.enable(0)
+            let ok_raw: bool = shape_of(0, cp, px, &a)
+            fonthint.enable(1)
+            let ok_hint: bool = shape_of(0, cp, px, &b)
+            if ok_raw && ok_hint {
+                n = n + 1
+                raw_sum = raw_sum + (a.top_sum * 1000) / a.max_sum
+                hint_sum = hint_sum + (b.top_sum * 1000) / b.max_sum
+                var zh: i32 = cap
+                if cp == 0x7A as u32 {
+                    zh = xh
+                }
+                let want: u64 = ((((zh as u64) * px * 2) / (upem as u64)) + 1) / 2
+                if b.ink_rows == want {
+                    exact = exact + 1
+                }
+                if a.cols == b.cols {
+                    width_same = width_same + 1
+                }
+                let lo: u64 = (a.area * 88) / 100
+                let hi: u64 = (a.area * 112) / 100
+                if b.area >= lo && b.area <= hi {
+                    area_ok = area_ok + 1
+                }
+                io.fmt_print(f"glyph {cp} px {px} raw top {a.top_sum * 1000 / a.max_sum} hint top {b.top_sum * 1000 / b.max_sum} rows {a.ink_rows} -> {b.ink_rows} want {want} area {a.area} -> {b.area}\n")
+            }
+            gi = gi + 1
+        }
+        px = px + 1
+    }
+    fonthint.enable(1)
+    let raw_mean: u64 = raw_sum / n
+    let hint_mean: u64 = hint_sum / n
+    io.fmt_print(f"crisp raw {raw_mean} hinted {hint_mean} permille over {n} glyph renders\n")
+    check(&t, n == 40, "40 glyph renders (5 glyphs x 8 sizes)")
+    check(&t, hint_mean >= 950, "hinted flat tops are crisp (mean top-row fill >= 950 permille)")
+    check(&t, hint_mean >= raw_mean + 80, "hinting beats the unhinted rasteriser by >= 80 permille")
+    check(&t, exact == n, "hinted glyph height is exactly the rounded zone height in rows")
+    check(&t, width_same == n, "hinting never changes glyph width")
+    check(&t, area_ok == n, "hinted ink area stays within 12 percent of unhinted")
+    io.fmt_print(f"checks {t.checks} fails {t.fails}\n")
+    return t.fails
+}

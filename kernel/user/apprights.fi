@@ -7,6 +7,7 @@
 //     apprights load                         boot: ceilings from /apps/*/INFO `perm=`, grants from /etc/apprights.conf
 //     apprights forget <app>                 package removed: drop its grants and its auto-grant record
 //     apprights trymic|trygrant <app>        test: a child labelled app:<app> reads the microphone / grants itself `mic`
+//     apprights tryfs <read|write|unlink|link> <app|-> <path>   test: a child labelled app:<app> touches a path (OK / DENY)
 //     apprights try <what> <app>             test: a child labelled app:<app> uses clipr clipw notify audio net
 //     apprights list                         one line per app of /proc/apps: app <name> <mask> <ceil> <cpu> <wakeups> <tx> <rx> <data>
 //     apprights stop <app>                   force stop: kill every task labelled app:<app>
@@ -255,14 +256,31 @@ fn load_bundle(nm: u64, ext_len: u64) -> u64 {
         let got: u64 = io.read(fd, (&info_buf[0]) as u64, 2047)
         io.close(fd)
         if !ulib.bad(got) {
-            ceil = conf.manifest_perm((&info_buf[0]) as u64, got)
+            ceil = conf.manifest_perm((&info_buf[0]) as u64, got) | conf.manifest_sandbox((&info_buf[0]) as u64, got)
         }
     }
     let r: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 4, (&app[0]) as u64, ceil)
     if ulib.failed(r) {
         return 0
     }
+    if (ceil & policy.F_SANDBOX) != 0 {
+        make_data_dir((&app[0]) as u64)
+    }
     return 1
+}
+
+fn make_data_dir(name: u64) {
+    var root: [u8; 6] = "/data\0"
+    var path: [u8; 40] = [0 as u8; 40]
+    let n: u64 = ulib.length(name)
+    if n == 0 || n > policy.NAME_MAX {
+        return
+    }
+    let _r: u64 = io.make_dir((&root[0]) as u64)
+    ulib.copy((&path[0]) as u64, (&root[0]) as u64, 5)
+    path[5 as usize] = 47 as u8
+    ulib.copy((&path[6]) as u64, name, n)
+    let _d: u64 = io.make_dir((&path[0]) as u64)
 }
 
 // The text of the PLAN of the current opk generation (= the packages that came in through the signature check) into
@@ -540,6 +558,70 @@ fn child_try(app: u64, which: u64) -> u64 {
     return 0
 }
 
+static mut fs_path: u64 = 0
+static mut fs_mode: u64 = 0
+
+fn tryfs_one(path: u64, flags: u64) -> u64 {
+    var s_den: [u8; 5] = "DENY\0"
+    var s_ok: [u8; 3] = "OK\0"
+    var s_oth: [u8; 4] = "ERR\0"
+    let fd: u64 = kcall.sys2(kcall.SYS_OPEN, path, flags)
+    if ulib.failed(fd) {
+        if code_of(fd) == 13 {
+            ulib.say((&s_den[0]) as u64)
+        } else {
+            ulib.say((&s_oth[0]) as u64)
+        }
+        return 1
+    }
+    io.close(fd)
+    ulib.say((&s_ok[0]) as u64)
+    return 0
+}
+
+fn child_tryfs(app: u64, path: u64, mode: u64) -> u64 {
+    var s_lab: [u8; 13] = "tryfs: label\0"
+    var s_pre: [u8; 8] = "tryfs: \0"
+    var unlabelled: bool = false
+    if ulib.length(app) == 1 && *(app as *mut u8) == 45 as u8 {
+        unlabelled = true
+    }
+    if !unlabelled && !label_self(app) {
+        ulib.say((&s_lab[0]) as u64)
+        ulib.nl()
+        return 3
+    }
+    ulib.say((&s_pre[0]) as u64)
+    var r: u64 = 0
+    if mode == 0 {
+        r = tryfs_one(path, 0)
+    } else if mode == 1 {
+        r = tryfs_one(path, 1 | 64)
+    } else if mode == 2 {
+        let u: u64 = kcall.sys1(kcall.SYS_UNLINK, path)
+        var s_u: [u8; 5] = "DENY\0"
+        var s_v: [u8; 3] = "OK\0"
+        if ulib.failed(u) && code_of(u) == 13 {
+            ulib.say((&s_u[0]) as u64)
+            r = 1
+        } else {
+            ulib.say((&s_v[0]) as u64)
+        }
+    } else if mode == 3 {
+        let u: u64 = kcall.sys2(kcall.SYS_SYMLINK, path, path)
+        var s_u: [u8; 5] = "DENY\0"
+        var s_v: [u8; 3] = "OK\0"
+        if ulib.failed(u) && code_of(u) == 13 {
+            ulib.say((&s_u[0]) as u64)
+            r = 1
+        } else {
+            ulib.say((&s_v[0]) as u64)
+        }
+    }
+    ulib.nl()
+    return r
+}
+
 fn run_child(app: u64, which: u64) -> u64 {
     var s_nofork: [u8; 19] = "apprights: no fork\0"
     let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
@@ -554,6 +636,8 @@ fn run_child(app: u64, which: u64) -> u64 {
             rc = child_trymic(app)
         } else if which == 1 {
             rc = child_trygrant(app)
+        } else if which == 7 {
+            rc = child_tryfs(app, fs_path, fs_mode)
         } else {
             rc = child_try(app, which)
         }
@@ -811,6 +895,32 @@ fn u_start(args: u64) -> u64 {
     let app: u64 = ulib.arg_at(args, 2)
     if ulib.streq(cmd, (&s_ceil[0]) as u64) {
         return do_ceil(args, argc)
+    }
+    var s_tryfs: [u8; 6] = "tryfs\0"
+    if ulib.streq(cmd, (&s_tryfs[0]) as u64) {
+        if argc < 5 {
+            return 1
+        }
+        var m_read: [u8; 5] = "read\0"
+        var m_write: [u8; 6] = "write\0"
+        var m_unlink: [u8; 7] = "unlink\0"
+        var m_link: [u8; 5] = "link\0"
+        let mname: u64 = ulib.arg_at(args, 2)
+        fs_path = ulib.arg_at(args, 4)
+        fs_mode = 9
+        if ulib.streq(mname, (&m_read[0]) as u64) {
+            fs_mode = 0
+        } else if ulib.streq(mname, (&m_write[0]) as u64) {
+            fs_mode = 1
+        } else if ulib.streq(mname, (&m_unlink[0]) as u64) {
+            fs_mode = 2
+        } else if ulib.streq(mname, (&m_link[0]) as u64) {
+            fs_mode = 3
+        }
+        if fs_mode == 9 {
+            return 1
+        }
+        return run_child(ulib.arg_at(args, 3), 7)
     }
     if ulib.streq(cmd, (&s_try[0]) as u64) {
         if argc < 4 {

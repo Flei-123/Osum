@@ -2666,6 +2666,15 @@ static mut SU_GFILE: [u8; 128] = [0 as u8; 128]
 static mut su_glen: u64 = 0
 static mut su_olen: u64 = 0
 static mut su_nfiles: u64 = 0
+static mut su_rolen: u64 = 0
+static mut SU_ROHEX: [u8; 72] = [0 as u8; 72]
+static mut SU_ROFILE: [u8; 128] = [0 as u8; 128]
+static mut SU_R_ROOTS: [u8; 6] = "roots\0"
+static mut P_ROOTSCTL: [u8; 14] = "/bin/rootsctl\0"
+static mut P_ROOTS_NEW: [u8; 22] = "/system/new/roots.pem\0"
+static mut A_APPLY: [u8; 6] = "apply\0"
+static mut E_SU_ROOTS: [u8; 63] = "ota: trust roots not updated (download, check or apply failed)\0"
+static mut S_SU_ROOTS: [u8; 28] = "system: trust roots updated\0"
 static mut su_phase: u64 = 0
 const NOTFOUND: u64 = 0xFFFFFFFFFFFFFFFF
 
@@ -2782,6 +2791,8 @@ fn su_parse() -> u64 {
     su_nlen = 0
     su_root = false
     su_nfiles = 0
+    su_rolen = 0
+    p8((&SU_ROFILE[0 as usize]) as u64, 0)
     var k: u64 = 0
     var more: bool = true
     while more {
@@ -2805,6 +2816,12 @@ fn su_parse() -> u64 {
                 } else if len((&FELD[0 as usize]) as u64) == 4
                     && ulib.strneq((&FELD[0 as usize]) as u64, (&SU_R_FILE[0 as usize]) as u64, 4) {
                     su_nfiles = su_nfiles + 1
+                } else if len((&FELD[0 as usize]) as u64) == 5
+                    && ulib.strneq((&FELD[0 as usize]) as u64, (&SU_R_ROOTS[0 as usize]) as u64, 5) {
+                    field(f, e, 1, (&SU_ROHEX[0 as usize]) as u64, 70)
+                    field(f, e, 2, (&SU_TMP[0 as usize]) as u64, 20)
+                    su_rolen = ulib.to_num((&SU_TMP[0 as usize]) as u64)
+                    field(f, e, 3, (&SU_ROFILE[0 as usize]) as u64, 120)
                 } else {
                     su_root = true
                 }
@@ -3603,6 +3620,39 @@ fn su_apply_live() -> u64 {
     return 0
 }
 
+// The signed trust-root bundle (`sysfile roots`): fetched + hash-checked into /system/new, then
+// handed to `rootsctl apply` (parses every block, keeps only valid roots, atomic replace, .prev
+// stays). Independent of the kernel trial; any failure leaves /etc/ssl/roots.pem untouched.
+fn su_roots_apply() {
+    if su_rolen == 0 {
+        return
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&P_SU_NEWD[0 as usize]) as u64, 0, 0)
+    let dst: u64 = (&P_ROOTS_NEW[0 as usize]) as u64
+    remove(dst)
+    var good: bool = len((&SU_ROHEX[0 as usize]) as u64) == 64
+        && g8((&SU_ROFILE[0 as usize]) as u64) != 0
+    if good {
+        good = su_fetch_item((&SU_R_ROOTS[0 as usize]) as u64, (&SU_ROFILE[0 as usize]) as u64,
+            su_rolen, (&SU_ROHEX[0 as usize]) as u64, dst)
+    }
+    if good {
+        ARGV[0 as usize] = (&P_ROOTSCTL[0 as usize]) as u64
+        ARGV[1 as usize] = (&A_APPLY[0 as usize]) as u64
+        ARGV[2 as usize] = dst
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&P_ROOTSCTL[0 as usize]) as u64,
+            (&ARGV[0 as usize]) as u64, 3)
+        good = !ulib.bad(pid) && ulib.wait_code(pid) == 0
+    }
+    remove(dst)
+    if good {
+        ulib.say((&S_SU_ROOTS[0 as usize]) as u64)
+        ulib.nl()
+    } else {
+        err((&E_SU_ROOTS[0 as usize]) as u64, 0)
+    }
+}
+
 // ------------------------------------------------ apply
 fn cmd_sys_apply(restart: bool) -> u64 {
     if in_erprobung() || su_pending() {
@@ -3617,6 +3667,7 @@ fn cmd_sys_apply(restart: bool) -> u64 {
         ulib.nl()
     }
     su_notes_show()
+    su_roots_apply()
     if !su_esp_open() {
         return err((&E_SU_ESP[0 as usize]) as u64, 0)
     }

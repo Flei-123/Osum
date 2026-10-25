@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import utf8
+
+export { push16, push32, push64, push_zero, push_raw, push_utf16, set16, set32, set64,
+    store16, store32, store64,
+    get16, get32, get64, utf16_to_utf8, ascii_upper }
+
+fn push16(b: *mut rt.Buf, v: u64) {
+    rt.buf_push(b, (v & 255 as u64) as u8)
+    rt.buf_push(b, ((v >> 8) & 255 as u64) as u8)
+}
+
+fn push32(b: *mut rt.Buf, v: u64) {
+    push16(b, v & 65535 as u64)
+    push16(b, (v >> 16) & 65535 as u64)
+}
+
+fn push64(b: *mut rt.Buf, v: u64) {
+    push32(b, v & 4294967295 as u64)
+    push32(b, v >> 32)
+}
+
+fn push_zero(b: *mut rt.Buf, n: usize) {
+    var i: usize = 0
+    while i < n {
+        rt.buf_push(b, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn push_raw(b: *mut rt.Buf, p: u64, n: usize) {
+    rt.buf_push_bytes(b, p, n)
+}
+
+fn ascii_upper(c: u64) -> u64 {
+    if c >= 97 && c <= 122 {
+        return c - 32
+    }
+    return c
+}
+
+fn push_utf16(b: *mut rt.Buf, p: u64, n: usize, upper: bool) {
+    var i: u64 = 0
+    while i < n as u64 {
+        let packed: u64 = utf8.next(p, n as u64, i)
+        let len: u64 = utf8.len_of(packed)
+        if len == 0 {
+            break
+        }
+        var cp: u64 = utf8.cp_of(packed)
+        if upper {
+            cp = ascii_upper(cp)
+        }
+        if cp >= 65536 {
+            let v: u64 = cp - 65536
+            push16(b, 55296 + (v >> 10))
+            push16(b, 56320 + (v & 1023))
+        } else {
+            push16(b, cp)
+        }
+        i = i + len
+    }
+}
+
+fn store16(p: u64, at: usize, v: u64) {
+    rt.st8(p, at, (v & 255 as u64) as u8)
+    rt.st8(p, at + 1, ((v >> 8) & 255 as u64) as u8)
+}
+
+fn store32(p: u64, at: usize, v: u64) {
+    store16(p, at, v & 65535 as u64)
+    store16(p, at + 2, (v >> 16) & 65535 as u64)
+}
+
+fn store64(p: u64, at: usize, v: u64) {
+    store32(p, at, v & 4294967295 as u64)
+    store32(p, at + 4, v >> 32)
+}
+
+fn set16(b: *mut rt.Buf, at: usize, v: u64) {
+    store16(rt.buf_ptr(b), at, v)
+}
+
+fn set32(b: *mut rt.Buf, at: usize, v: u64) {
+    store32(rt.buf_ptr(b), at, v)
+}
+
+fn set64(b: *mut rt.Buf, at: usize, v: u64) {
+    store64(rt.buf_ptr(b), at, v)
+}
+
+fn get16(p: u64, at: usize) -> u64 {
+    return (rt.ld8(p, at) as u64) | ((rt.ld8(p, at + 1) as u64) << 8)
+}
+
+fn get32(p: u64, at: usize) -> u64 {
+    return get16(p, at) | (get16(p, at + 2) << 16)
+}
+
+fn get64(p: u64, at: usize) -> u64 {
+    return get32(p, at) | (get32(p, at + 4) << 32)
+}
+
+fn utf16_to_utf8(p: u64, nbytes: usize, out: *mut rt.Buf) {
+    var i: usize = 0
+    var tmp: [u8; 4] = [0; 4]
+    while i + 1 < nbytes {
+        var cp: u64 = get16(p, i)
+        i = i + 2
+        if cp >= 55296 && cp < 56320 && i + 1 < nbytes {
+            let lo: u64 = get16(p, i)
+            if lo >= 56320 && lo < 57344 {
+                cp = 65536 + ((cp - 55296) << 10) + (lo - 56320)
+                i = i + 2
+            }
+        }
+        let k: u64 = utf8.encode(cp, (&tmp[0]) as u64)
+        rt.buf_push_bytes(out, (&tmp[0]) as u64, k as usize)
+    }
+}

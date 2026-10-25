@@ -26,6 +26,7 @@
 #  12. UPD-3/UPD-2 live apply: the offered kernel is byte-identical to slot A -> `ota system apply` swaps the
 #      overlay in WITHOUT a trial, restart or slot B; version grows at once, a running `launcher` is ended
 #      (shell supervisor restarts it), old backups gone; counter-proof: section 2 (other kernel = slot B)
+#  13. trust-root delivery (sysfile roots): rootsctl apply from the signed list; counter-proofs wrong hash, junk block
 # Sections 2 and 5 run with the gzip feed (kernel + overlay files as .gz, streaming gunzip on the
 # device): the trial boot sees the new /bin files, confirm drops the backups, a lost trial restores them.
 # OSU_SECS="8 9" runs only the listed sections (1 always runs); OSU_ONLY7=1 = "7".
@@ -472,6 +473,46 @@ gleich "next boot runs the same kernel" "$(commit_of "$OUT/l2.txt")" "$OLD"
 hat "$OUT/l2.txt" "00000300" "SYSVERSION 300 survives the reboot"
 hat "$OUT/l2.txt" "LIVE-NEW-CONTENT" "the new file survives the reboot"
 hat "$OUT/l2.txt" "system: up to date" "search now says up to date"
+dienst_aus
+
+fi
+
+if want 13; then
+echo "== 13. trust-root delivery (sysfile roots): good bundle replaces /etc/ssl/roots.pem, bad hash and unparsable block refused =="
+fresh_disk
+cat "$OUT/certs/ca.pem" "$OUT/certs/fremd-ca.pem" > "$OUT/roots-good.pem"
+{ cat "$OUT/certs/ca.pem"; printf -- '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n'; } > "$OUT/roots-junk.pem"
+pubt "$OUT/img-old" "$OUT/feed-roots" dev --count 400 --roots "$OUT/roots-good.pem" --gz && ok "roots feed: build 400, kernel identical to slot A, roots bundle with 2 roots" || { cat "$OUT/pub.log"; bad "publish roots"; }
+pubt "$OUT/img-old" "$OUT/feed-roots-bad" dev --count 400 --roots "$OUT/roots-good.pem" --bad-roots-hash && ok "roots feed with a wrong bundle hash" || bad "publish roots bad hash"
+pubt "$OUT/img-old" "$OUT/feed-roots-junk" dev --count 400 --roots "$OUT/roots-junk.pem" && ok "roots feed with an unparsable block" || bad "publish roots junk"
+grep -qa "^sysfile.roots" "$OUT/feed-roots/system/dev/VERZEICHNIS" && grep -qa "^sysgz.roots" "$OUT/feed-roots/system/dev/VERZEICHNIS" && ok "list carries sysfile roots + sysgz roots" || bad "list lacks the roots lines"
+dienst "$OUT/feed-roots" && ok "feed up" || bad "feed does not start"
+rc=$(lauf r1 "rootsctl check;ota system search;ota system apply;rootsctl check;ls /etc/ssl;cat /system/SYSVERSION;ota system search;ota system status;exit")
+sed -n '/^osum\$ rootsctl check/,/^osum\$ ota system search/p' "$OUT/r1.txt" | head -20 > "$OUT/r1.before"
+sed -n '/^osum\$ ota system apply/,$p' "$OUT/r1.txt" > "$OUT/r1.after"
+hat "$OUT/r1.before" "BLOCKS 1" "before: the store holds 1 root"
+hat "$OUT/r1.after" "system: trust roots updated" "apply reports the trust roots updated"
+hat "$OUT/r1.after" "APPLIED 2" "rootsctl applied 2 roots"
+hat "$OUT/r1.after" "BLOCKS 2" "after: the store holds 2 roots"
+hat "$OUT/r1.after" "roots.pem.prev" "the previous store is kept as roots.pem.prev"
+hatnicht "$OUT/r1.after" "trust roots not updated" "no failure message"
+hat "$OUT/r1.after" "00000400" "SYSVERSION grows to 400"
+hat "$OUT/r1.after" "system: up to date" "TLS still works against the new store (search after apply)"
+fresh_disk
+dienst "$OUT/feed-roots-bad" && ok "feed up (bad bundle hash)" || bad "feed does not start"
+rc=$(lauf r2 "ota system search;ota system apply;rootsctl check;ls /etc/ssl;ls /system/new;exit")
+sed -n '/^osum\$ ota system apply/,$p' "$OUT/r2.txt" > "$OUT/r2.after"
+hat "$OUT/r2.after" "ota: trust roots not updated" "counter-proof: wrong bundle hash -> reported, not applied"
+hatnicht "$OUT/r2.after" "system: trust roots updated" "counter-proof: no success message"
+hat "$OUT/r2.after" "BLOCKS 1" "counter-proof: the store still holds 1 root"
+hatnicht "$OUT/r2.after" "roots.pem.prev" "counter-proof: no .prev written"
+fresh_disk
+dienst "$OUT/feed-roots-junk" && ok "feed up (unparsable block)" || bad "feed does not start"
+rc=$(lauf r3 "ota system search;ota system apply;rootsctl check;ls /etc/ssl;exit")
+sed -n '/^osum\$ ota system apply/,$p' "$OUT/r3.txt" > "$OUT/r3.after"
+hat "$OUT/r3.after" "rootsctl: refused" "counter-proof: a bundle with an unparsable block is refused by rootsctl"
+hat "$OUT/r3.after" "ota: trust roots not updated" "counter-proof: reported"
+hat "$OUT/r3.after" "BLOCKS 1" "counter-proof: the store still holds 1 root"
 dienst_aus
 
 fi

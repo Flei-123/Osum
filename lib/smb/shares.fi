@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import smb.pack
+import smb.wire
+import smb.files
+import smb.rpc
+
+export { list, ipc_name, IPC_NAME_LEN }
+
+const OP_NET_SHARE_ENUM_ALL: u64 = 15
+const ENTRY_MAX: usize = 4096
+const ENTRY_SIZE: usize = 12
+const TYPE_MASK: u64 = 255
+const SHARE_DISK: u64 = 0
+const SHARE_PRINT: u64 = 1
+const SHARE_DEVICE: u64 = 2
+const SHARE_IPC: u64 = 3
+const REFERENT_BASE: u64 = 131072
+
+const IPC_NAME_LEN: usize = 4
+static mut IPC_NAME: [u8; 5] = "IPC$\0"
+
+fn ipc_name() -> u64 {
+    return (&IPC_NAME[0]) as u64
+}
+
+fn push_aligned_string(b: *mut rt.Buf, p: u64, n: usize, prefix: bool) {
+    var w: rt.Buf = rt.buf_new()
+    if prefix {
+        var bs: [u8; 2] = [92, 92]
+        pack.push_utf16(&w, (&bs[0]) as u64, 2, false)
+    }
+    pack.push_utf16(&w, p, n, false)
+    pack.push16(&w, 0)
+    let count: u64 = (rt.buf_len(&w) / 2) as u64
+    pack.push32(b, count)
+    pack.push32(b, 0)
+    pack.push32(b, count)
+    pack.push_raw(b, rt.buf_ptr(&w), rt.buf_len(&w))
+    rt.buf_free(&w)
+    if (rt.buf_len(b) % 4) != 0 {
+        pack.push_zero(b, 4 - rt.buf_len(b) % 4)
+    }
+}
+
+fn build_request(host: u64, hlen: usize, b: *mut rt.Buf) {
+    pack.push32(b, REFERENT_BASE)
+    push_aligned_string(b, host, hlen, true)
+    pack.push32(b, 1)
+    pack.push32(b, 1)
+    pack.push32(b, REFERENT_BASE + 4)
+    pack.push32(b, 0)
+    pack.push32(b, 0)
+    pack.push32(b, 4294967295)
+    pack.push32(b, REFERENT_BASE + 8)
+    pack.push32(b, 0)
+}
+
+fn kind_char(t: u64) -> u8 {
+    let k: u64 = t & TYPE_MASK
+    if k == SHARE_DISK {
+        return 100 as u8
+    }
+    if k == SHARE_PRINT {
+        return 112 as u8
+    }
+    if k == SHARE_DEVICE {
+        return 99 as u8
+    }
+    if k == SHARE_IPC {
+        return 105 as u8
+    }
+    return 63 as u8
+}
+
+fn read_string(stub: u64, n: usize, at: *mut usize, out: *mut rt.Buf) -> bool {
+    let a: usize = *at
+    if a + 12 > n {
+        return false
+    }
+    let max: u64 = pack.get32(stub, a)
+    let off: u64 = pack.get32(stub, a + 4)
+    let actual: u64 = pack.get32(stub, a + 8)
+    if off != 0 || actual > max || actual > 65536 {
+        return false
+    }
+    let bytes: usize = actual as usize * 2
+    if a + 12 + bytes > n {
+        return false
+    }
+    var used: usize = bytes
+    if bytes >= 2 && pack.get16(stub, a + 12 + bytes - 2) == 0 {
+        used = bytes - 2
+    }
+    pack.utf16_to_utf8(stub + (a + 12) as u64, used, out)
+    *at = (a + 12 + bytes + 3) / 4 * 4
+    return true
+}
+
+fn parse_entries(stub: u64, n: usize, out: *mut rt.Buf) -> u64 {
+    if n < 24 {
+        return wire.E_PROTO
+    }
+    if pack.get32(stub, 0) != 1 || pack.get32(stub, 4) != 1 {
+        return wire.E_PROTO
+    }
+    if pack.get32(stub, n - 4) != 0 {
+        return wire.E_STATUS
+    }
+    let entries: usize = pack.get32(stub, 12) as usize
+    if entries == 0 || pack.get32(stub, 16) == 0 {
+        return wire.E_OK
+    }
+    if entries > ENTRY_MAX || 24 + entries * ENTRY_SIZE > n || pack.get32(stub, 20) < entries as u64 {
+        return wire.E_PROTO
+    }
+    let table: usize = 24
+    var at: usize = table + entries * ENTRY_SIZE
+    var i: usize = 0
+    while i < entries {
+        let row: usize = table + i * ENTRY_SIZE
+        rt.buf_push(out, kind_char(pack.get32(stub, row + 4)))
+        rt.buf_push(out, 32 as u8)
+        if pack.get32(stub, row) != 0 {
+            if !read_string(stub, n, &at, out) {
+                return wire.E_PROTO
+            }
+        }
+        rt.buf_push(out, 9 as u8)
+        if pack.get32(stub, row + 8) != 0 {
+            if !read_string(stub, n, &at, out) {
+                return wire.E_PROTO
+            }
+        }
+        rt.buf_push(out, 10 as u8)
+        i = i + 1
+    }
+    return wire.E_OK
+}
+
+fn list(s: *mut wire.Smb, host: u64, hlen: usize, out: *mut rt.Buf) -> u64 {
+    var h: files.Handle = files.handle_new()
+    var name: [u8; 6] = "srvsvc"
+    var code: u64 = files.open_pipe(s, &h, (&name[0]) as u64, 6)
+    if code != wire.E_OK {
+        return code
+    }
+    code = enumerate(s, &h, host, hlen, out)
+    files.close(s, &h)
+    return code
+}
+
+fn enumerate(s: *mut wire.Smb, h: *mut files.Handle, host: u64, hlen: usize, out: *mut rt.Buf) -> u64 {
+    var uuid: [u8; 16] = [200, 79, 50, 75, 112, 22, 211, 1, 18, 120, 90, 71, 191, 110, 225, 136]
+    var code: u64 = rpc.bind(s, h, (&uuid[0]) as u64, 3)
+    if code != wire.E_OK {
+        return code
+    }
+    var req: rt.Buf = rt.buf_new()
+    build_request(host, hlen, &req)
+    var stub: rt.Buf = rt.buf_new()
+    code = rpc.call(s, h, OP_NET_SHARE_ENUM_ALL, rt.buf_ptr(&req), rt.buf_len(&req), &stub)
+    rt.buf_free(&req)
+    if code == wire.E_OK {
+        code = parse_entries(rt.buf_ptr(&stub), rt.buf_len(&stub), out)
+    }
+    rt.buf_free(&stub)
+    return code
+}

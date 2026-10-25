@@ -26,9 +26,10 @@ cat > "$T/kcheck.fi" <<'EOF'
 profile kernel
 import apprights.policy
 import apprights.conf
+import apprights.fspolicy
 export { u_start }
 fn u_start(args: u64) -> u64 {
-    return policy.get_mask(args) + conf.manifest_perm(args, 0)
+    return policy.get_mask(args) + conf.manifest_perm(args, 0) + (fspolicy.read_ok(args, args) as u64)
 }
 EOF
 if FIRNLIB="$PWD/lib" vendor/firn/bin/firnc --profile=kernel -c "$T/kcheck.fi" -o "$T/kcheck.o" > "$T/kcheck.build" 2>&1; then
@@ -112,5 +113,49 @@ mutate acct-unbound-app policy.fi "    let s: u64 = app_slot(app)
     }
     return ((&acct[0]) as u64)"
 
+mutate fs-sandbox-ignored policy.fi "    if !sandboxed(name) {
+        return false
+    }
+    return (get_mask(name) & P_FS_HOME) == 0" "    return (get_mask(name) & P_FS_HOME) == 0"
+mutate fs-home-ignored policy.fi "    return (get_mask(name) & P_FS_HOME) == 0" "    return true"
+mutate fs-flag-in-ceiling policy.fi "    return ceils[s as usize]
+}
+
+fn set_mask" "    return ceils[s as usize] | (sbx[s as usize] * F_SANDBOX)
+}
+
+fn set_mask"
+mutate fs-read-all fspolicy.fi "    if under_data(app, path, plen) {
+        return true
+    }
+    return tbl_match(path, plen)" "    return true"
+mutate fs-write-all fspolicy.fi "    return under_data(app, path, slen(path))" "    return true"
+mutate fs-name-prefix fspolicy.fi "    return rd(path, 6 + an) == 47" "    return true"
+mutate fs-other-data fspolicy.fi "    var i: u64 = 0
+    while i < an {
+        if rd(path, 6 + i) != rd(app, i) {
+            return false
+        }
+        i = i + 1
+    }" ""
+mutate fs-no-fold-read fspolicy.fi "    if fold(path, b) == 0 {
+        return false
+    }
+    return read_flat(label, b)" "    return read_flat(label, path)"
+mutate fs-no-fold-write fspolicy.fi "    if fold(path, b) == 0 {
+        return false
+    }
+    return write_flat(label, b)" "    return write_flat(label, path)"
+mutate fs-link-open fspolicy.fi "    return confined_app(label) == 0" "    return true"
+mutate fs-prefix-loose fspolicy.fi "            if plen == n - 1 {
+                cmp = n - 1
+            } else if plen < n {
+                same = false
+            }" "            cmp = 1"
+mutate fs-exact-loose fspolicy.fi "            if plen != n {
+                same = false
+            }" ""
+mutate fs-sandbox-manifest conf.fi "            return policy.F_SANDBOX" "            return 0"
+mutate fs-sandbox-trim conf.fi "while te > at && (rd(buf, te - 1) == 13 || rd(buf, te - 1) == 32) {" "while false {"
 echo "APPRIGHTS-HOST: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

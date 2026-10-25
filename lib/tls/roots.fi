@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import tls.x509
+
+export { RootStats, stats_new, stats_free, roots_scan, expired_summary }
+
+struct RootStats {
+    blocks: usize,
+    parsed: usize,
+    valid: usize,
+    expired: usize,
+    not_yet: usize,
+    soon: usize,
+    next_expiry: u64,
+    expired_names: rt.Buf,
+}
+
+const CLOCK_SKEW: u64 = 86400
+const NAME_MAX: usize = 40
+const NAMES_MAX: usize = 600
+const SEP_RESERVE: usize = 10
+
+fn stats_new() -> RootStats {
+    return RootStats { blocks: 0, parsed: 0, valid: 0, expired: 0,
+        not_yet: 0, soon: 0, next_expiry: 0 as u64, expired_names: rt.buf_new() }
+}
+
+fn stats_free(st: *mut RootStats) {
+    rt.buf_free(&(*st).expired_names)
+}
+
+fn note_expired(st: *mut RootStats, cert: *mut x509.Cert, index: usize) {
+    if (*st).expired_names.len >= NAMES_MAX {
+        return
+    }
+    if (*st).expired_names.len > 0 {
+        rt.buf_push(&(*st).expired_names, 0 as u8)
+    }
+    if x509.cert_has_cn(cert) && x509.cert_cn_len(cert) > 0 {
+        var n: usize = x509.cert_cn_len(cert)
+        if n > NAME_MAX {
+            n = NAME_MAX
+        }
+        var i: usize = 0
+        while i < n {
+            var ch: u8 = rt.ld8(x509.cert_base(cert), x509.cert_cn_off(cert) + i)
+            if ch < 32 as u8 || ch > 126 as u8 {
+                ch = 63 as u8
+            }
+            rt.buf_push(&(*st).expired_names, ch)
+            i = i + 1
+        }
+    } else {
+        var tag: [u8; 6] = "root #"
+        rt.buf_push_bytes(&(*st).expired_names, (&tag[0]) as u64, 6)
+        rt.buf_push_dec_u64(&(*st).expired_names, index as u64)
+    }
+}
+
+fn expired_summary(st: *mut RootStats, out: *mut rt.Buf, width: usize) {
+    var head: [u8; 15] = "expired roots ("
+    rt.buf_push_bytes(out, (&head[0]) as u64, 15)
+    rt.buf_push_dec_u64(out, (*st).expired as u64)
+    rt.buf_push(out, 41 as u8)
+    if (*st).expired_names.len == 0 {
+        return
+    }
+    rt.buf_push(out, 58 as u8)
+    rt.buf_push(out, 32 as u8)
+    let names: u64 = (*st).expired_names.ptr as u64
+    let total: usize = (*st).expired_names.len
+    var used: usize = 0
+    var shown: usize = 0
+    var at: usize = 0
+    while at < total {
+        var stop: usize = at
+        while stop < total && rt.ld8(names, stop) != 0 as u8 {
+            stop = stop + 1
+        }
+        let n: usize = stop - at
+        var more: usize = 0
+        if stop < total || shown + 1 < (*st).expired {
+            more = SEP_RESERVE
+        }
+        var add: usize = n
+        if shown > 0 {
+            add = add + 2
+        }
+        if shown > 0 && used + add + more > width {
+            break
+        }
+        if shown > 0 {
+            rt.buf_push(out, 44 as u8)
+            rt.buf_push(out, 32 as u8)
+        }
+        rt.buf_push_bytes(out, names + at as u64, n)
+        used = used + add
+        shown = shown + 1
+        at = stop + 1
+    }
+    if shown < (*st).expired {
+        var tail: [u8; 3] = ", +"
+        rt.buf_push_bytes(out, (&tail[0]) as u64, 3)
+        rt.buf_push_dec_u64(out, ((*st).expired - shown) as u64)
+        var more_s: [u8; 5] = " more"
+        rt.buf_push_bytes(out, (&more_s[0]) as u64, 5)
+    }
+}
+
+fn roots_scan(pem: u64, n: usize, now: u64, soon_secs: u64,
+    st: *mut RootStats, keep: *mut rt.Buf) {
+    var at: usize = 0
+    var begin: usize = 0
+    var body: usize = 0
+    var stop: usize = 0
+    var after: usize = 0
+    var der: rt.Buf = rt.buf_new()
+    var late: u64 = now
+    if now > CLOCK_SKEW {
+        late = now - CLOCK_SKEW
+    }
+    while at < n && x509.pem_next_block(pem, n, at, &begin, &body, &stop, &after) {
+        (*st).blocks = (*st).blocks + 1
+        rt.buf_clear(&der)
+        var cert: x509.Cert = x509.cert_new()
+        if x509.base64_decode(pem + body as u64, stop - body, &der)
+            && x509.cert_parse(&cert, der.ptr, der.len) {
+            (*st).parsed = (*st).parsed + 1
+            let tv: u32 = x509.cert_time_ok(&cert, late)
+            let early: u32 = x509.cert_time_ok(&cert, now + CLOCK_SKEW)
+            if early == x509.V_NOT_YET {
+                (*st).not_yet = (*st).not_yet + 1
+            } else if tv == x509.V_EXPIRED {
+                (*st).expired = (*st).expired + 1
+                note_expired(st, &cert, (*st).blocks)
+            } else {
+                (*st).valid = (*st).valid + 1
+                let na: u64 = x509.cert_not_after(&cert)
+                if na < now + soon_secs {
+                    (*st).soon = (*st).soon + 1
+                }
+                if (*st).next_expiry == 0 as u64 || na < (*st).next_expiry {
+                    (*st).next_expiry = na
+                }
+                rt.buf_push_bytes(keep, pem + begin as u64, after - begin)
+                rt.buf_push(keep, 10 as u8)
+            }
+        }
+        at = after
+    }
+    rt.buf_free(&der)
+}

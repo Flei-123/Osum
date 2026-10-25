@@ -1,0 +1,488 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import svg.svgmath
+import svg.svgscan
+import svg.svgnames
+import svg.svgfill
+import svg.svggeom
+import svg.svgpath
+import svg.svgstroke
+import svg.svgstyle
+
+export {
+    MAX_SIZE, OSYM_HEAD, render, unsupported, problems, ink_pixels
+}
+
+const MAX_SIZE: i64 = 128
+const OSYM_HEAD: u64 = 12
+const MAX_ATTR: i64 = 40
+const K_PLAIN: i64 = 0
+const K_DEFS: i64 = 1
+const K_GRAD: i64 = 2
+
+static mut out_p: u64 = 0
+static mut out_w: i64 = 0
+static mut out_h: i64 = 0
+static mut in_defs: i64 = 0
+static mut probs: i64 = 0
+static mut kinds: [i64; 24] = [0 as i64; 24]
+static mut a_hash: [u64; 40] = [0 as u64; 40]
+static mut a_ptr: [u64; 40] = [0 as u64; 40]
+static mut a_len: [u64; 40] = [0 as u64; 40]
+static mut a_n: i64 = 0
+static mut have_root: i64 = 0
+static mut bb_x0: i64 = 0
+static mut bb_y0: i64 = 0
+static mut bb_x1: i64 = 0
+static mut bb_y1: i64 = 0
+
+fn unsupported() -> i64 {
+    return svgstyle.unsupported()
+}
+
+fn problems() -> i64 {
+    return probs + svgpath.path_errors() + svggeom.geom_overflow() + svgfill.edges_overflow()
+}
+
+fn rd(p: u64, i: u64) -> u64 {
+    return (__mmio_read8((p + i) as *mut u8)) as u64
+}
+
+fn is_ws(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13
+}
+
+fn pix_ptr(x: i64, y: i64) -> u64 {
+    return out_p + OSYM_HEAD + ((y * out_w + x) * 4) as u64
+}
+
+fn ink_pixels() -> i64 {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < out_w * out_h {
+        let v: u64 = (__mmio_read32((out_p + OSYM_HEAD + (i * 4) as u64) as *mut u32)) as u64
+        if (v >> 24) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn out_init(p: u64, w: i64, h: i64) {
+    out_p = p
+    out_w = w
+    out_h = h
+    __mmio_write8(p as *mut u8, 79 as u8)
+    __mmio_write8((p + 1) as *mut u8, 83 as u8)
+    __mmio_write8((p + 2) as *mut u8, 89 as u8)
+    __mmio_write8((p + 3) as *mut u8, 77 as u8)
+    __mmio_write32((p + 4) as *mut u32, w as u32)
+    __mmio_write32((p + 8) as *mut u32, h as u32)
+    var i: i64 = 0
+    while i < w * h {
+        __mmio_write32((p + OSYM_HEAD + (i * 4) as u64) as *mut u32, 0 as u32)
+        i = i + 1
+    }
+}
+
+fn blend(x: i64, y: i64, rgb: i64, sa: i64) {
+    if sa <= 0 {
+        return
+    }
+    let at: u64 = pix_ptr(x, y)
+    let d: i64 = (__mmio_read32(at as *mut u32)) as i64
+    let da: i64 = (d >> 24) & 255
+    let dr: i64 = (d >> 16) & 255
+    let dg: i64 = (d >> 8) & 255
+    let db: i64 = d & 255
+    let sr: i64 = (rgb >> 16) & 255
+    let sg: i64 = (rgb >> 8) & 255
+    let sb: i64 = rgb & 255
+    let oa: i64 = sa * 255 + da * (255 - sa)
+    if oa == 0 {
+        return
+    }
+    let wd: i64 = da * (255 - sa)
+    let ws: i64 = sa * 255
+    let or: i64 = (sr * ws + dr * wd + oa / 2) / oa
+    let og: i64 = (sg * ws + dg * wd + oa / 2) / oa
+    let ob: i64 = (sb * ws + db * wd + oa / 2) / oa
+    let na: i64 = (oa + 127) / 255
+    __mmio_write32(at as *mut u32, ((na << 24) | (or << 16) | (og << 8) | ob) as u32)
+}
+
+fn bbox() {
+    bb_x0 = 1 << 40
+    bb_y0 = 1 << 40
+    bb_x1 = 0 - (1 << 40)
+    bb_y1 = 0 - (1 << 40)
+    var i: i64 = 0
+    var total: i64 = 0
+    var k: i64 = 0
+    while k < svggeom.sub_total() {
+        total = total + svggeom.sub_len(k)
+        k = k + 1
+    }
+    while i < total {
+        bb_x0 = svgmath.imin(bb_x0, svggeom.pt_x(i))
+        bb_y0 = svgmath.imin(bb_y0, svggeom.pt_y(i))
+        bb_x1 = svgmath.imax(bb_x1, svggeom.pt_x(i))
+        bb_y1 = svgmath.imax(bb_y1, svggeom.pt_y(i))
+        i = i + 1
+    }
+}
+
+fn composite(kind: i64, rgb: i64, grad: i64, ca: i64, op: i64) {
+    let opa: i64 = (ca * op + 127) / 255
+    let ea: i64 = (opa * svgstyle.get(svgstyle.F_OPACITY) + 127) / 255
+    if kind == svgstyle.PAINT_GRAD {
+        bbox()
+        svgstyle.grad_device(grad, bb_x0, bb_y0, bb_x1, bb_y1)
+    }
+    var y: i64 = 0
+    while y < out_h {
+        var x: i64 = 0
+        while x < out_w {
+            let c: i64 = svgfill.cov_at(x, y)
+            if c > 0 {
+                var col: i64 = rgb
+                var ga: i64 = 255
+                if kind == svgstyle.PAINT_GRAD {
+                    col = svgstyle.grad_eval(grad, x * 256 + 128, y * 256 + 128)
+                    ga = svgstyle.grad_alpha()
+                }
+                let sa: i64 = (((c * ea + 127) / 255) * ga + 127) / 255
+                blend(x, y, col, sa)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn paint_shape() {
+    svgstyle.ctm_apply()
+    let fk: i64 = svgstyle.get(svgstyle.F_FILL_KIND)
+    if fk != svgstyle.PAINT_NONE {
+        svgfill.edges_clear()
+        svggeom.fill_edges()
+        svgfill.fill(out_w, out_h, svgstyle.get(svgstyle.F_RULE))
+        composite(fk, svgstyle.get(svgstyle.F_FILL_RGB), svgstyle.get(svgstyle.F_FILL_GRAD), svgstyle.get(svgstyle.F_FILL_A), svgstyle.get(svgstyle.F_FILL_OP))
+    }
+    let sk: i64 = svgstyle.get(svgstyle.F_STROKE_KIND)
+    let sw: i64 = svgstyle.get(svgstyle.F_WIDTH)
+    if sk != svgstyle.PAINT_NONE && sw > 0 {
+        svgfill.edges_clear()
+        let wdev: i64 = svgmath.mul16(sw, svggeom.ctm_scale()) >> 8
+        svgstroke.stroke_all(wdev, svgstyle.get(svgstyle.F_CAP), svgstyle.get(svgstyle.F_JOIN), svgstyle.get(svgstyle.F_MITER))
+        svgfill.fill(out_w, out_h, svgfill.NONZERO)
+        composite(sk, svgstyle.get(svgstyle.F_STROKE_RGB), svgstyle.get(svgstyle.F_STROKE_GRAD), svgstyle.get(svgstyle.F_STROKE_A), svgstyle.get(svgstyle.F_STROKE_OP))
+    }
+    svggeom.geom_clear()
+}
+
+fn find_attr(h: u64) -> i64 {
+    var i: i64 = 0
+    while i < a_n {
+        if a_hash[i as usize] == h {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+fn attr_num(h: u64, dflt: i64) -> i64 {
+    let i: i64 = find_attr(h)
+    if i < 0 {
+        return dflt
+    }
+    svgscan.begin(a_ptr[i as usize], a_len[i as usize])
+    let v: i64 = svgscan.num()
+    if !svgscan.ok() {
+        probs = probs + 1
+        return dflt
+    }
+    return v
+}
+
+fn apply_attrs() {
+    var i: i64 = 0
+    while i < a_n {
+        let h: u64 = a_hash[i as usize]
+        if h == svgnames.A_STYLE {
+            svgstyle.apply_style_attr(a_ptr[i as usize], a_len[i as usize])
+        } else {
+            svgstyle.apply_prop(h, a_ptr[i as usize], a_len[i as usize])
+        }
+        i = i + 1
+    }
+}
+
+fn root_viewbox() {
+    var vx: i64 = 0
+    var vy: i64 = 0
+    var vw: i64 = out_w * 65536
+    var vh: i64 = out_h * 65536
+    let i: i64 = find_attr(svgnames.A_VIEWBOX)
+    if i >= 0 {
+        svgscan.begin(a_ptr[i as usize], a_len[i as usize])
+        let x: i64 = svgscan.num()
+        let y: i64 = svgscan.num()
+        let w: i64 = svgscan.num()
+        let h: i64 = svgscan.num()
+        if svgscan.ok() && w > 0 && h > 0 {
+            vx = x
+            vy = y
+            vw = w
+            vh = h
+        } else {
+            probs = probs + 1
+        }
+    } else {
+        vw = attr_num(svgnames.A_WIDTH, vw)
+        vh = attr_num(svgnames.A_HEIGHT, vh)
+    }
+    let s: i64 = svgmath.imin(svgmath.rdiv(out_w * 4294967296, vw), svgmath.rdiv(out_h * 4294967296, vh))
+    let tx: i64 = (out_w * 65536 - svgmath.mul16(vw, s)) / 2 - svgmath.mul16(vx, s)
+    let ty: i64 = (out_h * 65536 - svgmath.mul16(vh, s)) / 2 - svgmath.mul16(vy, s)
+    svgstyle.ctm_load(s, 0, 0, s, tx, ty)
+}
+
+fn draw_element(h: u64) {
+    svggeom.geom_clear()
+    svgstyle.ctm_apply()
+    if h == svgnames.E_PATH {
+        let i: i64 = find_attr(svgnames.A_D)
+        if i >= 0 {
+            svgpath.path_run(a_ptr[i as usize], a_len[i as usize])
+        }
+    } else if h == svgnames.E_RECT {
+        svgpath.rect_path(attr_num(svgnames.A_X, 0), attr_num(svgnames.A_Y, 0), attr_num(svgnames.A_WIDTH, 0), attr_num(svgnames.A_HEIGHT, 0), attr_num(svgnames.A_RX, attr_num(svgnames.A_RY, 0)), attr_num(svgnames.A_RY, attr_num(svgnames.A_RX, 0)))
+    } else if h == svgnames.E_CIRCLE {
+        let r: i64 = attr_num(svgnames.A_R, 0)
+        svgpath.ellipse_path(attr_num(svgnames.A_CX, 0), attr_num(svgnames.A_CY, 0), r, r)
+    } else if h == svgnames.E_ELLIPSE {
+        svgpath.ellipse_path(attr_num(svgnames.A_CX, 0), attr_num(svgnames.A_CY, 0), attr_num(svgnames.A_RX, 0), attr_num(svgnames.A_RY, 0))
+    } else if h == svgnames.E_LINE {
+        svgpath.move_abs(attr_num(svgnames.A_X1, 0), attr_num(svgnames.A_Y1, 0))
+        svgpath.line_abs(attr_num(svgnames.A_X2, 0), attr_num(svgnames.A_Y2, 0))
+    } else if h == svgnames.E_POLYLINE || h == svgnames.E_POLYGON {
+        let i: i64 = find_attr(svgnames.A_POINTS)
+        if i >= 0 {
+            svgpath.poly_path(a_ptr[i as usize], a_len[i as usize], h == svgnames.E_POLYGON)
+        }
+    }
+    svgstyle.ctm_apply()
+    paint_shape()
+}
+
+fn open_element(h: u64, selfclose: bool) {
+    if !svgstyle.push() {
+        return
+    }
+    let d: i64 = svgstyle.depth()
+    kinds[d as usize] = K_PLAIN
+    if h == svgnames.E_SVG {
+        if have_root == 0 {
+            have_root = 1
+            root_viewbox()
+        } else {
+            svgstyle.unsup_add()
+        }
+        apply_attrs()
+    } else if h == svgnames.E_DEFS {
+        kinds[d as usize] = K_DEFS
+        in_defs = in_defs + 1
+    } else if h == svgnames.E_LINEAR {
+        kinds[d as usize] = K_GRAD
+        let i: i64 = find_attr(svgnames.A_ID)
+        var idh: i64 = 0
+        if i >= 0 {
+            idh = svgnames.hash_name(a_ptr[i as usize], a_len[i as usize]) as i64
+        }
+        svgstyle.grad_begin(idh)
+        var k: i64 = 0
+        while k < a_n {
+            svgstyle.grad_attr(a_hash[k as usize], a_ptr[k as usize], a_len[k as usize])
+            k = k + 1
+        }
+    } else if h == svgnames.E_STOP {
+        var off: i64 = 0
+        var rgb: i64 = 0
+        var sa: i64 = 255
+        var k: i64 = 0
+        while k < a_n {
+            let ah: u64 = a_hash[k as usize]
+            if ah == svgnames.A_OFFSET {
+                off = attr_num(svgnames.A_OFFSET, 0)
+            } else if ah == svgnames.A_STOP_COLOR {
+                let c: i64 = svgstyle.color_of(a_ptr[k as usize], a_len[k as usize])
+                if c >= 0 {
+                    rgb = c
+                    sa = svgstyle.color_alpha()
+                }
+            } else if ah == svgnames.A_STOP_OPACITY {
+                sa = svgstyle.opacity_value(a_ptr[k as usize], a_len[k as usize])
+            } else if ah == svgnames.A_STYLE {
+                svgstyle.unsup_add()
+            }
+            k = k + 1
+        }
+        svgstyle.grad_stop(off, rgb, sa)
+    } else if h == svgnames.E_G {
+        apply_attrs()
+    } else if h == svgnames.E_PATH || h == svgnames.E_RECT || h == svgnames.E_CIRCLE || h == svgnames.E_ELLIPSE || h == svgnames.E_LINE || h == svgnames.E_POLYLINE || h == svgnames.E_POLYGON {
+        apply_attrs()
+        if in_defs == 0 {
+            draw_element(h)
+        }
+    } else if h == svgnames.E_TITLE || h == svgnames.E_DESC || h == svgnames.E_METADATA {
+        kinds[d as usize] = K_DEFS
+        in_defs = in_defs + 1
+    } else {
+        svgstyle.unsup_add()
+        kinds[d as usize] = K_DEFS
+        in_defs = in_defs + 1
+    }
+    if selfclose {
+        close_element()
+    }
+}
+
+fn close_element() {
+    let d: i64 = svgstyle.depth()
+    if d <= 0 {
+        return
+    }
+    let k: i64 = kinds[d as usize]
+    if k == K_DEFS {
+        in_defs = in_defs - 1
+    } else if k == K_GRAD {
+        svgstyle.grad_end()
+    }
+    svgstyle.pop()
+}
+
+fn skip_to(p: u64, n: u64, i0: u64, a: u64, b: u64, c: u64) -> u64 {
+    var i: u64 = i0
+    while i + 2 < n + 0 && !(rd(p, i) == a && rd(p, i + 1) == b && rd(p, i + 2) == c) {
+        i = i + 1
+    }
+    return i + 3
+}
+
+fn parse_tag(p: u64, n: u64, i0: u64) -> u64 {
+    var i: u64 = i0
+    let ns: u64 = i
+    while i < n && !is_ws(rd(p, i)) && rd(p, i) != 47 && rd(p, i) != 62 {
+        i = i + 1
+    }
+    let h: u64 = svgnames.hash_name(p + ns, i - ns)
+    a_n = 0
+    var selfclose: bool = false
+    while i < n {
+        while i < n && is_ws(rd(p, i)) {
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        let c: u64 = rd(p, i)
+        if c == 62 {
+            i = i + 1
+            break
+        }
+        if c == 47 {
+            selfclose = true
+            i = i + 1
+            continue
+        }
+        let ans: u64 = i
+        while i < n && !is_ws(rd(p, i)) && rd(p, i) != 61 && rd(p, i) != 62 && rd(p, i) != 47 {
+            i = i + 1
+        }
+        let anl: u64 = i - ans
+        while i < n && is_ws(rd(p, i)) {
+            i = i + 1
+        }
+        if i < n && rd(p, i) == 61 {
+            i = i + 1
+            while i < n && is_ws(rd(p, i)) {
+                i = i + 1
+            }
+            if i < n && (rd(p, i) == 34 || rd(p, i) == 39) {
+                let q: u64 = rd(p, i)
+                i = i + 1
+                let vs: u64 = i
+                while i < n && rd(p, i) != q {
+                    i = i + 1
+                }
+                if a_n < MAX_ATTR {
+                    a_hash[a_n as usize] = svgnames.hash_name(p + ans, anl)
+                    a_ptr[a_n as usize] = p + vs
+                    a_len[a_n as usize] = i - vs
+                    a_n = a_n + 1
+                } else {
+                    probs = probs + 1
+                }
+                i = i + 1
+            }
+        }
+    }
+    open_element(h, selfclose)
+    return i
+}
+
+fn render(src: u64, len: u64, out: u64, w: i64, h: i64) -> i64 {
+    if w <= 0 || h <= 0 || w > MAX_SIZE || h > MAX_SIZE {
+        return 0 - 1
+    }
+    out_init(out, w, h)
+    svgstyle.style_reset()
+    svgfill.edges_clear()
+    svggeom.geom_clear()
+    svgpath.errors_clear()
+    probs = 0
+    in_defs = 0
+    have_root = 0
+    kinds[0 as usize] = K_PLAIN
+    var i: u64 = 0
+    while i < len {
+        if rd(src, i) != 60 {
+            i = i + 1
+            continue
+        }
+        let c1: u64 = rd(src, i + 1)
+        if c1 == 33 && rd(src, i + 2) == 45 && rd(src, i + 3) == 45 {
+            i = skip_to(src, len, i + 4, 45, 45, 62)
+        } else if c1 == 63 {
+            var j: u64 = i + 2
+            while j + 1 < len && !(rd(src, j) == 63 && rd(src, j + 1) == 62) {
+                j = j + 1
+            }
+            i = j + 2
+        } else if c1 == 33 {
+            var j: u64 = i + 2
+            while j < len && rd(src, j) != 62 {
+                j = j + 1
+            }
+            i = j + 1
+        } else if c1 == 47 {
+            var j: u64 = i + 2
+            while j < len && rd(src, j) != 62 {
+                j = j + 1
+            }
+            close_element()
+            i = j + 1
+        } else {
+            i = parse_tag(src, len, i + 1)
+        }
+    }
+    if have_root == 0 {
+        return 0 - 2
+    }
+    return problems()
+}

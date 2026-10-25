@@ -293,7 +293,7 @@ printf 'Notizen zur Runde ECHTHARDWARE-5.\n' > "$OUT/heim/notizen.txt"
 printf 'a,b,c\n1,2,3\n' > "$OUT/heim/tabelle.csv"
 ARGS+=("/users/justin/notizen.txt=$OUT/heim/notizen.txt@0644"
        "/users/justin/tabelle.csv=$OUT/heim/tabelle.csv@0644")
-rm -rf "$OUT/apps"; cp -a assets/apps "$OUT/apps"
+rm -rf "$OUT/apps"; cp -a "${APPS_DIR:-assets/apps}" "$OUT/apps"
 # like tools/usbimg/build.sh: with `term` built, the Terminal bundle opens a NEW window per start (/bin/term), not /bin/sh
 TERM_START=/bin/sh
 case " $GEBAUT " in *" term "*) TERM_START=/bin/term ;; esac

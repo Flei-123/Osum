@@ -11,6 +11,8 @@
 #     accel=kvm|tcg
 #     progs="..."                   Programmliste
 #     drehbuch=<pfad>               eigenes Drehbuch statt des eingebauten
+#     qemuargs="..."                extra QEMU arguments (e.g. -netdev/-device for a NIC)
+#     imgfiles="/bin/x=path ..."    extra mkfs entries for the image
 #
 # WARUM EIN START UND NICHT SIEBEN.  Jede Runde davor hat je Bild eine
 # eigene Maschine gebootet.  Sieben Maschinen sind sieben Uhrzeiten in
@@ -86,6 +88,8 @@ vorherbild=nein
 # AUS, damit die Bilder der anderen Runden sich nicht aendern.
 ton=nein
 drehbuch=""
+qemuargs=""
+imgfiles=""
 # RUNDE MERGE-10: die Sprache der Bilder, Vorgabe Englisch wie im Abbild.
 lang=en
 # RUNDE FARBE: das Schema des Dunkelmodus und ein Akzent, beide leer =
@@ -132,6 +136,8 @@ for a in "$@"; do
         accel=*) accel=${a#*=} ;;
         progs=*) progs=${a#*=} ;;
         drehbuch=*) drehbuch=${a#*=} ;;
+        qemuargs=*) qemuargs=${a#*=} ;;
+        imgfiles=*) imgfiles=${a#*=} ;;
         halt=*) halt=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
         # RUNDE FREMDFS: eine ZWEITE Platte anhaengen, damit sich
@@ -323,6 +329,7 @@ ARGS=(build "$OUT/disk.img" 49152 --v3 "--time=${CAPTURE_TIME:-$(date +%s)}" /li
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" "/lib/bold.ttf=assets/osum-sans-bold.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
+for z in $imgfiles; do ARGS+=("$z"); done
 ARGS+=("/bin/files@/bin/explorer")
 # RUNDE FREMDFS: ein leeres /mnt. Ein Einhaengepunkt muss ein
 # Verzeichnis sein, DAS ES GIBT (vfs.mount_at) -- ohne diese Zeile
@@ -561,6 +568,7 @@ timeout 600 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
     -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
     "${ZWEITE[@]}" \
     "${TONDEV[@]}" \
+    $qemuargs \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 &
 PID=$!
 i=0
