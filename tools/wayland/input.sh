@@ -313,6 +313,20 @@ has "$sb" "offer mime=text/plain;charset=utf-8" "B: wl_data_offer.offer text/pla
 has "$sb" "paste=hello-from-A" "B received the text THROUGH A (receive with a descriptor, source.send): hello-from-A"
 has "$(L A)" "source send mime=text/plain;charset=utf-8 wrote=12" "A: wl_data_source.send reached it with a descriptor and A wrote 12 octets"
 has "$sb" "sysclip=hello-from-A" "WL -> SYSTEM: the OrientOS clipboard holds A's text (read by a native system call)"
+lz=$(grep -a 'sysclip first=' <<< "$sb" | head -1)
+fz=$(grep -a 'sysclip foreignfill=' <<< "$sb" | head -1)
+f0=$(sed -E 's/.*fills0=(-?[0-9]+).*/\1/' <<< "$fz")
+ff=$(sed -E 's/.*foreignfill=(-?[0-9]+).*/\1/' <<< "$fz")
+l1=$(sed -E 's/.*first=(-?[0-9]+).*/\1/' <<< "$lz")
+lt=$(sed -E 's/.* tries=([0-9]+).*/\1/' <<< "$lz")
+lo=$(sed -E 's/.* offers=([0-9]+).*/\1/' <<< "$lz")
+lf=$(sed -E 's/.* fills=([0-9]+).*/\1/' <<< "$lz")
+[ "${lo:-0}" -ge 1 ] && ok "deferred handover: the WL selection was only OFFERED to the system clipboard (offers=$lo)" || bad "no bus OFFER (offers='$lo')"
+[ "${f0:-1}" = 0 ] && ok "COUNTER-PROOF: nothing was fetched from A before a native program asked (fills=0)" || bad "A was fetched eagerly (fills before the first read: '$f0')"
+[ "${l1:-0}" -lt 0 ] && ok "the first native read of the offer is refused (first=$l1), not served stale" || bad "first read returned '$l1', expected an error"
+[ "${lt:-0}" -ge 1 ] && ok "the reader waited for the owner ($lt polls) and then got the text" || bad "reader did not wait (tries='$lt')"
+[ "${lf:-0}" -ge 1 ] && ok "the owner (wayd) FILLED the offer on demand (fills=$lf)" || bad "no bus FILL (fills='$lf')"
+[ "${ff:-0}" -lt 0 ] && ok "COUNTER-PROOF: a foreign process cannot fill somebody else's offer (r=$ff)" || bad "foreign fill was accepted or silent (r='$ff')"
 # the system clipboard -> Wayland
 mark
 keys f9

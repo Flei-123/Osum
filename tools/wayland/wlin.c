@@ -77,6 +77,7 @@ static int n_offered;
 static int did_set;
 static uint32_t seat_ver;
 static void sysclip(const char *tag);
+static void sysclip_get(const char *tag, int wait);
 
 static void say(const char *fmt, ...)
 {
@@ -207,7 +208,7 @@ static void dd_selection(void *d, struct wl_data_device *dev, struct wl_data_off
     close(fds[0]);
     text[got] = 0;
     say("paste=%s", text);
-    sysclip("sysclip");
+    sysclip_get("sysclip", 1);
 }
 static const struct wl_data_device_listener dd_l = { dd_data_offer, dd_enter, dd_leave, dd_motion, dd_drop, dd_selection };
 
@@ -241,11 +242,31 @@ static void kb_leave(void *d, struct wl_keyboard *k, uint32_t s, struct wl_surfa
 }
 static void sysclip(const char *tag)
 {
+    sysclip_get(tag, 0);
+}
+
+static void sysclip_get(const char *tag, int wait)
+{
     char buf[256];
     uint64_t meta[6];
-    long n;
+    long n, first, foreign = 0, fills0 = 0;
+    int tries = 0;
     memset(buf, 0, sizeof buf);
+    if (wait) {
+        foreign = syscall(SYS_OSUM_BUS, 14, buf, 3, 0, 0, 0);
+        fills0 = (long)syscall(SYS_OSUM_BUS, 22, 0x68, 0, 0, 0, 0);
+        say("%s foreignfill=%ld fills0=%ld", tag, foreign, fills0);
+    }
     n = syscall(SYS_OSUM_BUS, 11, 0, buf, 192, meta, 0);
+    first = n;
+    while (wait && n <= 0 && tries < 100) {
+        usleep(20000);
+        n = syscall(SYS_OSUM_BUS, 11, 0, buf, 192, meta, 0);
+        tries++;
+    }
+    if (wait)
+        say("%s first=%ld tries=%d offers=%ld fills=%ld", tag, first, tries,
+            (long)syscall(SYS_OSUM_BUS, 22, 0x60, 0, 0, 0, 0), (long)syscall(SYS_OSUM_BUS, 22, 0x68, 0, 0, 0, 0));
     if (n > 0)
         say("%s=%s", tag, buf);
     else

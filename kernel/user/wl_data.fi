@@ -39,7 +39,7 @@ export {
     busy, client_init, client_gone, on_manager, on_device, on_source, on_offer, emit, tick, init_bridge,
     nq_count, nq_client, nq_id, nq_iface, nq_clear,
     fm_count, fm_client, fm_ptr, fm_len, fm_fd, fm_clear,
-    sel_kind, n_sets, n_receives, n_mirrors, n_offers,
+    sel_kind, n_sets, n_receives, n_mirrors, n_offers, n_lazy_offers, n_lazy_fills,
 }
 
 const MAXC: u64 = 4
@@ -127,6 +127,10 @@ static mut n_sets: u64 = 0
 static mut n_receives: u64 = 0
 static mut n_mirrors: u64 = 0
 static mut n_offers: u64 = 0
+static mut n_lazy_offers: u64 = 0
+static mut n_lazy_fills: u64 = 0
+static mut lazy_gen: u64 = 0
+static mut lazy_fetch: u64 = 0
 
 // ------------------------------------------------------------- helpers
 fn ticks() -> u64 {
@@ -447,13 +451,13 @@ fn on_source(c: u64, id: u64, op: u64, argp: u64) {
 }
 
 // Ask the source for its text and mirror it into the system clipboard (never blocks).
-fn begin_fetch(c: u64, si: u64) {
+fn begin_fetch(c: u64, si: u64) -> bool {
     if bus_ok == 0 {
-        return
+        return false
     }
     let m: u64 = text_mime(si)
     if m >= MM {
-        return
+        return false
     }
     var x: u64 = 4
     var k: u64 = 0
@@ -464,10 +468,10 @@ fn begin_fetch(c: u64, si: u64) {
         k = k + 1
     }
     if x >= 4 {
-        return
+        return false
     }
     if ulib.failed(ulib.sys(22, (&pp[0 as usize]) as u64, 0, 0)) { // pipe
-        return
+        return false
     }
     let rfd: u64 = pp[0 as usize] & 0xFFFFFFFF
     let wfd: u64 = (pp[0 as usize] >> 32) & 0xFFFFFFFF
@@ -478,6 +482,59 @@ fn begin_fetch(c: u64, si: u64) {
     xi_len[x as usize] = 0
     xi_t0[x as usize] = ticks()
     fm_send(c, sr_id[si as usize], mime_ptr(si, m), sr_mlen[(si * MM + m) as usize], wfd)
+    return true
+}
+
+fn offer_lazy(c: u64, si: u64) {
+    lazy_gen = 0
+    lazy_fetch = 0
+    if bus_ok == 0 || text_mime(si) >= MM {
+        return
+    }
+    if ulib.failed(bus5(13, 1, 0, 0, 0)) {
+        begin_fetch(c, si)
+        return
+    }
+    lazy_gen = sel_gen
+    n_lazy_offers = n_lazy_offers + 1
+}
+
+fn settle_lazy_fetch(len: u64) {
+    var wrote: u64 = len
+    if wrote > TEXT_MAX {
+        wrote = TEXT_MAX
+    }
+    bus5(14, (&cl_buf[0 as usize]) as u64, wrote, 0, 0)
+    n_lazy_fills = n_lazy_fills + 1
+    lazy_gen = 0
+    lazy_fetch = 0
+    read_sys_text()
+    sys_seen = sys_seq_now
+}
+
+fn serve_lazy() {
+    if lazy_gen == 0 {
+        return
+    }
+    if !(sel_kind == SEL_WL && sel_gen == lazy_gen) {
+        lazy_gen = 0
+        lazy_fetch = 0
+        return
+    }
+    let f: u64 = bus5(12, 0, 4, 0, 0)
+    if ulib.failed(f) || (f & 1) == 0 {
+        lazy_gen = 0
+        lazy_fetch = 0
+        return
+    }
+    if lazy_fetch != 0 || (f & 2) == 0 {
+        return
+    }
+    if begin_fetch(sel_c, sel_c * MS + sel_k) {
+        lazy_fetch = 1
+        return
+    }
+    settle_lazy_fetch(0)
 }
 
 // wl_data_device: start_drag, set_selection(source, serial), release
@@ -536,7 +593,7 @@ fn on_device(c: u64, id: u64, op: u64, argp: u64) {
     sel_c = c
     sel_k = si - c * MS
     sel_gen = sel_gen + 1
-    begin_fetch(c, si)
+    offer_lazy(c, si)
 }
 
 // wl_data_offer: accept, receive(mime, fd), destroy, finish, set_actions
@@ -616,7 +673,7 @@ fn on_offer(c: u64, id: u64, op: u64, argp: u64, fd: u64) {
 // The newest clipboard item as text into cl_buf; sets sys_len (0 = none or not text) and sys_seq_now, meta[1] is the setter's pid.
 fn read_sys_text() {
     sys_len = 0
-    if bus_ok == 0 {
+    if bus_ok == 0 || lazy_gen != 0 {
         return
     }
     let n: u64 = bus5(11, 0, (&cl_buf[0 as usize]) as u64, TEXT_MAX, (&cl_meta[0 as usize]) as u64)
@@ -721,11 +778,20 @@ fn tick() {
                 // the client never answers: give up, never hang
                 close_fd(fd)
                 xi_fd[x as usize] = 0
+                if lazy_gen != 0 && xi_gen[x as usize] == lazy_gen {
+                    settle_lazy_fetch(0)
+                }
             } else if done {
                 close_fd(fd)
                 xi_fd[x as usize] = 0
-                // only if this is still the selection it was fetched for
-                if sel_kind == SEL_WL && sel_gen == xi_gen[x as usize] && xi_len[x as usize] != 0 {
+                if lazy_gen != 0 && xi_gen[x as usize] == lazy_gen {
+                    var b3: u64 = 0
+                    while b3 < xi_len[x as usize] {
+                        cl_buf[b3 as usize] = xi_buf[(x * 200 + b3) as usize]
+                        b3 = b3 + 1
+                    }
+                    settle_lazy_fetch(xi_len[x as usize])
+                } else if sel_kind == SEL_WL && sel_gen == xi_gen[x as usize] && xi_len[x as usize] != 0 {
                     var b2: u64 = 0
                     while b2 < xi_len[x as usize] {
                         cl_buf[b2 as usize] = xi_buf[(x * 200 + b2) as usize]
@@ -758,6 +824,7 @@ fn tick() {
         }
         x = x + 1
     }
+    serve_lazy()
     watch_system()
 }
 
