@@ -139,9 +139,10 @@ def main(out):
                 bx, by, bw, bh = rects[rid]
                 X, Y = ox + bx, oy + by
                 tb = t2.getpixel((X + 3, Y + bh // 2))[:3]
-                r = M.band_center(t2, X + 12, X + min(bw - 30, 80), Y + 3, Y + bh - 3, tb)
+                r = M.ink_box(t2, X + 12, Y + 3, X + min(bw - 30, 80), Y + bh - 3, tb, 150)
                 if r:
-                    check(abs(r[0] - (Y + (bh - 1) / 2.0)) <= 1.0, "tab %d: the label is %+.1f from the middle of the tab" % (rid - 49, r[0] - (Y + (bh - 1) / 2.0)))
+                    off = (r[2] + r[3]) / 2.0 - (Y + (bh - 1) / 2.0)
+                    check(abs(off) <= 1.0, "tab %d: the label is %+.1f from the middle of the tab" % (rid - 49, off))
     # ---- the context menu (picture 03-menu): the text of each row on its centre line
     p3 = os.path.join(out, "03-menu.ppm")
     mr = re.findall(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+) zh=(\d+)", t)
