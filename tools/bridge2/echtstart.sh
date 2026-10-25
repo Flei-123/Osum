@@ -106,7 +106,7 @@ if grep -qa 'jarvisd: no connection\|jarvisd: waiting' "$W/a2.txt"; then
 else
     hm "kein Warte-/Wiederholverhalten in der Ausgabe erkennbar"
 fi
-WMS=$(grep -aoE 'jarvisd: wartezeit_ms [0-9]+' "$W/a2.txt" | tail -1 | awk '{print $3}')
+WMS=$(grep -aoE 'jarvisd: wait_ms [0-9]+' "$W/a2.txt" | tail -1 | awk '{print $3}')
 [ -n "${WMS:-}" ] && echo "   gemessene Wartezeit_ms: $WMS"
 echo
 

@@ -432,7 +432,7 @@ osum$ jarvisd -c /mnt/rechte.conf -1 -t 90000
       jarvisd: bereit
       jarvisd: verbunden, Verfahren 4867, Zertifikate 1
       jarvisd: angemeldet
-      jarvisd: verbindungen 1  auftraege 2  abgelehnt 0
+      jarvisd: connections 1  auftraege 2  abgelehnt 0
 ```
 
 und auf der anderen Seite, in Python geschrieben und von Python geprüft:

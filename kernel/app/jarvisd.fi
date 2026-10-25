@@ -156,11 +156,14 @@ import tls.tls
 import tls.x509
 // RUNDE MERGE-11: der Weg ueber 443 braucht einen Namen, keine Zahl.
 import libc.dns
+import pairstate
 
 // ====================================================================
 // ZAHLEN
 // ====================================================================
 
+const PAIR_TTL_S: u64 = 600
+const PAIR_REASK_MS: u64 = 3000
 const MAXPFAD: usize = 128 // Oktette je Eintrag der Rechteliste
 const MAXLISTE: usize = 64 // entries per list (was 32: the 33rd command_allowed -- /bin/act -- was silently dropped; was 6 before)
 const MAXBEFEHLE: usize = 8
@@ -291,6 +294,7 @@ static mut k_port: u32 = 0 as u32
 // store.fleitec.com, statt einen rohen TLS-Port zu waehlen. Der Grund
 // steht ausfuehrlich bei `draht_https_schritt`.
 static mut k_https: bool = false
+static mut k_pair_web: bool = false
 static mut k_pfad: [u8; 96] = [0; 96]
 static mut k_pfadlen: usize = 0
 // Die Drahtkennung: eine Zufallszahl je Lauf. Sie sagt dem Server nur,
@@ -874,6 +878,7 @@ fn addr_read(p: u64, n: usize) -> bool {
 // gerufen, damit ein entfernter Eintrag wirklich weg ist.
 fn konf_leeren() {
     k_https = false
+    k_pair_web = false
     var dp: [u8; 16] = "/bridge/wire\0\0\0\0"
     k_pfadlen = hinein((&k_pfad[0]) as u64, 96, (&dp[0]) as u64, 12)
     k_befehle = false
@@ -924,6 +929,7 @@ fn conf_read() -> bool {
     var s_prot: [u8; 4] = "log\0"
     var s_arb: [u8; 10] = "work_file\0"
     var s_sch: [u8; 12] = "permit_file\0"
+    var s_pair: [u8; 8] = "pairing\0"
 
     var at: usize = 0
     while at < b.len {
@@ -988,6 +994,9 @@ fn conf_read() -> bool {
                         var cur_path: [u8; 13] = "/bridge/wire\0"
                         k_pfadlen = hinein((&k_pfad[0]) as u64, 96, (&cur_path[0]) as u64, 12)
                     }
+                } else if ist(sp, sl, (&s_pair[0]) as u64) {
+                    var w_web: [u8; 4] = "web\0"
+                    k_pair_web = ist(wp, wl, (&w_web[0]) as u64)
                 } else if ist(sp, sl, (&s_name[0]) as u64) {
                     k_namelen = hinein((&k_name[0]) as u64, 96, wp, wl)
                 } else if ist(sp, sl, (&s_wurzeln[0]) as u64) {
@@ -2618,7 +2627,9 @@ fn anmelden(d: *mut Wire) -> u64 {
         rt.buf_free(&pubhex)
         return 2
     }
-    rt.buf_free(&pubhex)
+    var pair_t0: u64 = 0
+    var pair_last: [u8; 24] = [0; 24]
+    var pair_last_n: usize = 0
 
     var zeile: rt.Buf = rt.buf_new()
     var f: Felder = Felder { off: [0; 10], len: [0; 10], n: 0 }
@@ -2676,11 +2687,50 @@ fn anmelden(d: *mut Wire) -> u64 {
                 sp = shown.ptr
                 sn = shown.len
             }
+            if k_pair_web {
+                var left: u64 = PAIR_TTL_S
+                if pair_t0 == 0 {
+                    pair_t0 = now_ms()
+                } else {
+                    let waited: u64 = (now_ms() - pair_t0) / 1000
+                    if waited >= PAIR_TTL_S {
+                        left = 0
+                    } else {
+                        left = PAIR_TTL_S - waited
+                    }
+                }
+                if left == 0 {
+                    pairstate.write_none()
+                    sag("jarvisd: pairing code expired -- nobody entered it in the web UI\n")
+                    z_abgelehnt = z_abgelehnt + 1
+                    rt.buf_free(&shown)
+                    ergebnis = 1
+                    break
+                }
+                if !eq((&pair_last[0]) as u64, pair_last_n, sp, sn) {
+                    sag("jarvisd: PAIRING CODE ")
+                    sag_oktette(sp, sn)
+                    sag("\n         Enter it in the JARVIS web UI (Devices)\n")
+                    pair_last_n = hinein((&pair_last[0]) as u64, 24 as usize, sp, sn)
+                    var p_code: [u8; 20] = "/var/jarvis/pairing\0"
+                    rt.write_file((&p_code[0]) as u64, sp, sn)
+                }
+                pairstate.write_waiting(sp, sn, left)
+                rt.buf_free(&shown)
+                schlafe_ms(PAIR_REASK_MS)
+                keepalive()
+                if !word_send(d, "hello", pubhex.ptr, pubhex.len) {
+                    ergebnis = 2
+                    break
+                }
+                continue
+            }
             sag("jarvisd: PAIRING CODE ")
             sag_oktette(sp, sn)
             sag("\n         Confirm on THIS device with: jarvisctl pair ")
             sag_oktette(sp, sn)
             sag("\n")
+            pairstate.write_confirm(sp, sn)
             let confirmed: bool = kopplung_bestaetigt(sp, sn)
             rt.buf_free(&shown)
             if confirmed {
@@ -2701,6 +2751,11 @@ fn anmelden(d: *mut Wire) -> u64 {
                 break
             }
         } else if ist(wp, wn, (&w_welcome[0]) as u64) {
+            pairstate.write_ok()
+            if pair_t0 != 0 {
+                var p_gone: [u8; 20] = "/var/jarvis/pairing\0"
+                sys_unlink((&p_gone[0]) as u64)
+            }
             ergebnis = 0
             break
         } else if ist(wp, wn, (&w_drop[0]) as u64) {
@@ -2710,6 +2765,7 @@ fn anmelden(d: *mut Wire) -> u64 {
         }
     }
     rt.buf_free(&zeile)
+    rt.buf_free(&pubhex)
     return ergebnis
 }
 
@@ -3513,15 +3569,15 @@ fn diagnose() -> i32 {
 }
 
 fn bericht() {
-    sag("jarvisd: verbindungen ")
+    sag("jarvisd: connections ")
     say_num(z_verbindungen)
-    sag("\njarvisd: auftraege ")
+    sag("\njarvisd: jobs ")
     say_num(z_auftraege)
-    sag("\njarvisd: abgelehnt ")
+    sag("\njarvisd: rejected ")
     say_num(z_abgelehnt)
-    sag("\njarvisd: wartezeit_ms ")
+    sag("\njarvisd: wait_ms ")
     say_num(z_wartems)
-    sag("\njarvisd: aufrufe_beim_warten ")
+    sag("\njarvisd: calls_while_waiting ")
     say_num(z_warteaufrufe)
     sag("\n")
 }
@@ -3654,6 +3710,7 @@ fn main(start: u64) -> i32 {
     k_ok_ms = now_ms()
     var a_start: [u8; 8] = "service\0"
     notiere((&a_start[0]) as u64, 7, "started", 0, 0 as usize)
+    pairstate.write_none()
     sag("jarvisd: ready\n")
 
     let t0: u64 = now_ms()

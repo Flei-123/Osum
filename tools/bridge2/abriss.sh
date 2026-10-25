@@ -133,8 +133,8 @@ timeout 200 qemu-system-x86_64 -kernel "$W/k.mb" -m 256 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$W/q-ohne.log" 2>&1
 
 VERSUCHE=$(grep -ac 'jarvisd: no connection' "$W/s-ohne.txt" 2>/dev/null || echo 0)
-WARTEMS=$(grep -aoE 'jarvisd: wartezeit_ms [0-9]+' "$W/s-ohne.txt" | tail -1 | awk '{print $3}')
-AUFRUFE=$(grep -aoE 'jarvisd: aufrufe_beim_warten [0-9]+' "$W/s-ohne.txt" | tail -1 | awk '{print $3}')
+WARTEMS=$(grep -aoE 'jarvisd: wait_ms [0-9]+' "$W/s-ohne.txt" | tail -1 | awk '{print $3}')
+AUFRUFE=$(grep -aoE 'jarvisd: calls_while_waiting [0-9]+' "$W/s-ohne.txt" | tail -1 | awk '{print $3}')
 
 if [ "${VERSUCHE:-0}" -ge 3 ]; then
     ok "das Geraet versucht es wieder -- $VERSUCHE Versuche in 70 s"

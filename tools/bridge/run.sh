@@ -342,8 +342,8 @@ hat "$G.6.bin" "ende 0" "befehl: mit seinem Beendigungscode"
 # foto steht in dieser Liste auf `nein`, also MUSS es scheitern.
 [ "$(status_von 7)" = nein ] && ok 'foto: abgelehnt, weil bildschirmfoto = nein' \
                              || bad "foto: $(antwort 7)"
-hat "$F" "jarvisd: verbindungen 1" "genau eine Verbindung"
-hat "$F" "jarvisd: auftraege 7" "sieben Auftraege gezaehlt"
+hat "$F" "jarvisd: connections 1" "genau eine Verbindung"
+hat "$F" "jarvisd: jobs 7" "sieben Auftraege gezaehlt"
 
 echo "   -- das Protokoll unter /var/log/jarvisd.log"
 hat "$F" "service started" "der Start steht im Protokoll"
@@ -407,7 +407,7 @@ for a in system read write list run screenshot; do
         && ok "$a: die Ablehnung steht im Protokoll" \
         || bad "$a: keine Ablehnungszeile im Protokoll"
 done
-hat "$F" "jarvisd: abgelehnt 8" "acht Ablehnungen gezaehlt"
+hat "$F" "jarvisd: rejected 8" "acht Ablehnungen gezaehlt"
 
 # =====================================================================
 echo "== 6. ZUSAGE (b): falsche Zertifikate =="
@@ -521,7 +521,7 @@ gegenstelle_aus
 draht_zu
 hat "$TMPD/g5.log" "ABRISS nach Auftrag 1" "die Gegenstelle hat mitten im Auftrag abgerissen"
 hat "$TMPD/r5.txt" "jarvisd: waiting" "der Helfer stirbt nicht, sondern wartet auf den naechsten Versuch"
-hat "$TMPD/r5.txt" "jarvisd: verbindungen 1" "er zaehlt die eine Verbindung, die es gab"
+hat "$TMPD/r5.txt" "jarvisd: connections 1" "er zaehlt die eine Verbindung, die es gab"
 # Er versucht es WIRKLICH wieder -- ohne Gegenstelle scheitert der
 # Versuch, und genau das steht dann da.
 hat "$TMPD/r5.txt" "jarvisd: no connection" "und er versucht es danach wieder (die Gegenstelle ist weg)"
@@ -612,7 +612,7 @@ lauf_und_miss "$TMPD/nonet.img" "jarvisd -t 20000 -v;exit" "$TMPD/r7.txt" 60
 F="$TMPD/r7.txt"
 hat "$F" "jarvisd: ready" "ohne Netz startet der Dienst trotzdem"
 hat "$F" "jarvisd: no connection" "er sagt, dass da nichts ist"
-hat "$F" "jarvisd: verbindungen 0" "keine einzige Verbindung"
+hat "$F" "jarvisd: connections 0" "keine einzige Verbindung"
 hat "$F" "service stopped" "und er endet geordnet an seiner Zeitgrenze"
 
 # LAUF B: der Draht steht, aber niemand lauscht. Dann kommt die
@@ -623,8 +623,8 @@ lauf_und_miss "$TMPD/nonet.img" "jarvisd -t 20000 -v;exit" "$TMPD/r7c.txt" 60
 draht_zu
 F="$TMPD/r7c.txt"
 hat "$F" "jarvisd: waiting" "mit Draht, aber ohne Gegenstelle: er wartet zwischen den Versuchen"
-WMS=$(grep -a 'wartezeit_ms' "$F" | tail -1 | awk '{print $3}')
-WAUF=$(grep -a 'aufrufe_beim_warten' "$F" | tail -1 | awk '{print $3}')
+WMS=$(grep -a 'wait_ms' "$F" | tail -1 | awk '{print $3}')
+WAUF=$(grep -a 'calls_while_waiting' "$F" | tail -1 | awk '{print $3}')
 note "gewartet: ${WMS:-?} ms, Systemaufrufe des ganzen Systems dabei: ${WAUF:-?}"
 if [ -n "${WMS:-}" ] && [ "${WMS:-0}" -ge 1000 ] && [ -n "${WAUF:-}" ]; then
     # Eine Warteschleife braucht je Umlauf mindestens einen Aufruf. Bei
@@ -844,7 +844,7 @@ lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 60000 -v;exit" "$TMPD/r12.txt" 22
 gegenstelle_aus
 draht_zu
 F="$TMPD/r12.txt"
-hat "$F" "jarvisd: auftraege 3" "drei Auftraege in einer Sitzung"
+hat "$F" "jarvisd: jobs 3" "drei Auftraege in einer Sitzung"
 ANZ=$(grep -ac "^ANTWORT " "$TMPD/g9.log")
 zahl "Antworten, die die Gegenstelle bekommen hat" "$ANZ" eq 3
 
