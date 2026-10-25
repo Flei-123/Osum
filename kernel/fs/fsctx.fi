@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import fs.fs
+import fs.mnt
+import fs.ofsj
+
+
+export { is_root, enter, leave, mount_foreign, forget, foreign_active }
+
+const WORDS: u64 = 48
+const W_ROOT: u64 = 0
+const W_READY: u64 = 1
+const W_FSVER: u64 = 2
+const W_GEOM: u64 = 3
+const GEOM_WORDS: u64 = 16
+const W_JRNL: u64 = 19
+const JRNL_WORDS: u64 = 17
+const W_DEV: u64 = 36
+const W_FIRST: u64 = 37
+const W_BLOCKS: u64 = 38
+const W_CRYPT: u64 = 39
+const W_NIDX: u64 = 40
+const NIDX_READY: u64 = 0x18
+const SLOTS: u64 = 9
+
+static mut saved: [u64; 432] = [0 as u64; 432]
+static mut active_slot: [u64; 1] = [0 as u64; 1]
+
+fn is_root(state: u64, m: u64) -> bool {
+    if m == 0 {
+        return true
+    }
+    return mnt.dev(state, m) == kstate.get(state, kstate.DISK_DEV)
+        && mnt.first(state, m) == kstate.get(state, kstate.DISK_FIRST)
+}
+
+fn foreign_active() -> bool {
+    return active_slot[0] != 0
+}
+
+fn capture(state: u64, base: u64) {
+    saved[(base + W_ROOT) as usize] = kstate.get(state, kstate.FS_ROOT)
+    saved[(base + W_READY) as usize] = kstate.get(state, kstate.FS_READY)
+    saved[(base + W_FSVER) as usize] = kstate.get(state, kstate.K13_OFF + kstate.U_FSVER)
+    var i: u64 = 0
+    while i < GEOM_WORDS {
+        saved[(base + W_GEOM + i) as usize] = kstate.get(state, kstate.FSG_OFF + i * 8)
+        i = i + 1
+    }
+    i = 0
+    while i < JRNL_WORDS {
+        saved[(base + W_JRNL + i) as usize] = kstate.get(state, kstate.JR_OFF + i * 8)
+        i = i + 1
+    }
+    saved[(base + W_DEV) as usize] = kstate.get(state, kstate.DISK_DEV)
+    saved[(base + W_FIRST) as usize] = kstate.get(state, kstate.DISK_FIRST)
+    saved[(base + W_BLOCKS) as usize] = kstate.get(state, kstate.DISK_BLOCKS)
+    saved[(base + W_CRYPT) as usize] = kstate.get(state, kstate.CRY_ON)
+    saved[(base + W_NIDX) as usize] = kstate.get(state, kstate.JRNL_OFF + NIDX_READY)
+}
+
+fn restore(state: u64, base: u64) {
+    kstate.set(state, kstate.FS_ROOT, saved[(base + W_ROOT) as usize])
+    kstate.set(state, kstate.FS_READY, saved[(base + W_READY) as usize])
+    kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, saved[(base + W_FSVER) as usize])
+    var i: u64 = 0
+    while i < GEOM_WORDS {
+        kstate.set(state, kstate.FSG_OFF + i * 8, saved[(base + W_GEOM + i) as usize])
+        i = i + 1
+    }
+    i = 0
+    while i < JRNL_WORDS {
+        kstate.set(state, kstate.JR_OFF + i * 8, saved[(base + W_JRNL + i) as usize])
+        i = i + 1
+    }
+    kstate.set(state, kstate.DISK_DEV, saved[(base + W_DEV) as usize])
+    kstate.set(state, kstate.DISK_FIRST, saved[(base + W_FIRST) as usize])
+    kstate.set(state, kstate.DISK_BLOCKS, saved[(base + W_BLOCKS) as usize])
+    kstate.set(state, kstate.CRY_ON, saved[(base + W_CRYPT) as usize])
+    kstate.set(state, kstate.JRNL_OFF + NIDX_READY, saved[(base + W_NIDX) as usize])
+}
+
+fn slot_base(m: u64) -> u64 {
+    return (m + 1) * WORDS
+}
+
+fn swap_in(state: u64, m: u64) {
+    capture(state, 0)
+    restore(state, slot_base(m))
+    kstate.set(state, kstate.DISK_DEV, mnt.dev(state, m))
+    kstate.set(state, kstate.DISK_FIRST, mnt.first(state, m))
+    kstate.set(state, kstate.DISK_BLOCKS, mnt.blocks(state, m))
+    kstate.set(state, kstate.CRY_ON, 0)
+    kstate.set(state, kstate.JRNL_OFF + NIDX_READY, 0)
+    active_slot[0] = m
+}
+
+fn swap_out(state: u64, m: u64) {
+    capture(state, slot_base(m))
+    restore(state, 0)
+    active_slot[0] = 0
+}
+
+fn enter(state: u64, m: u64) -> u64 {
+    if is_root(state, m) || m >= SLOTS {
+        return 0
+    }
+    let flags: u64 = fs.lock_only(state)
+    if !fs.flags_nested(flags) {
+        swap_in(state, m)
+    }
+    ofsj.begin(state)
+    return flags
+}
+
+fn leave(state: u64, m: u64, flags: u64) {
+    if is_root(state, m) || m >= SLOTS {
+        return
+    }
+    ofsj.commit(state)
+    if !fs.flags_nested(flags) {
+        swap_out(state, m)
+    }
+    fs.unlock_only(state, flags)
+}
+
+fn mount_foreign(state: u64, m: u64) -> u64 {
+    if m >= SLOTS || mnt.dev(state, m) == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < WORDS {
+        saved[(slot_base(m) + i) as usize] = 0
+        i = i + 1
+    }
+    let flags: u64 = enter(state, m)
+    var r: u64 = 0
+    if fs.mount(state) {
+        r = fs.root(state)
+    }
+    leave(state, m, flags)
+    return r
+}
+
+fn forget(state: u64, m: u64) {
+    if m >= SLOTS {
+        return
+    }
+    var i: u64 = 0
+    while i < WORDS {
+        saved[(slot_base(m) + i) as usize] = 0
+        i = i + 1
+    }
+}

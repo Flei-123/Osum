@@ -29,10 +29,11 @@ profile kernel
 
 import lib.kstate
 import fs.fs
+import fs.fsctx
 import fs.mnt
 import fs.vfsops
 
-export { ops, node_root }
+export { ops, node_root, mount_probe }
 
 // ---------------------------------------------------------- die Zaehler
 //
@@ -54,7 +55,7 @@ fn node_root(state: u64) -> u64 {
 
 // ------------------------------------------------------ die Verrichtungen
 
-fn o_lookup(state: u64, m: u64, path: u64) -> u64 {
+fn i_lookup(state: u64, m: u64, path: u64) -> u64 {
     tick(state)
     if kstate.get(state, kstate.FS_READY) == 0 {
         return 0
@@ -62,7 +63,7 @@ fn o_lookup(state: u64, m: u64, path: u64) -> u64 {
     return fs.path(state, path)
 }
 
-fn o_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+fn i_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
     tick(state)
     let scratch: u64 = state + kstate.K14_OFF + 0xD00
     let ino: u64 = fs.entry_at(state, dir, index, scratch)
@@ -93,7 +94,7 @@ fn o_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
     return ino
 }
 
-fn o_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
+fn i_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
     tick(state)
     if what == vfsops.A_TYPE {
         let art: u64 = fs.inode_type(state, node)
@@ -152,19 +153,19 @@ fn o_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
     return 0
 }
 
-fn o_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
+fn i_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
     len: u64) -> u64 {
     tick(state)
     return fs.read_at(state, node, off, dst, len)
 }
 
-fn o_write(state: u64, m: u64, node: u64, off: u64, src: u64,
+fn i_write(state: u64, m: u64, node: u64, off: u64, src: u64,
     len: u64) -> u64 {
     tick(state)
     return fs.write_at(state, node, off, src, len)
 }
 
-fn o_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+fn i_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
     tick(state)
     var kind: u64 = fs.T_FILE
     if art == vfsops.N_DIR {
@@ -173,7 +174,7 @@ fn o_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
     return fs.create_path(state, path, kind)
 }
 
-fn o_unlink(state: u64, m: u64, path: u64) -> u64 {
+fn i_unlink(state: u64, m: u64, path: u64) -> u64 {
     tick(state)
     if !fs.unlink_path(state, path) {
         return 2 // ENOENT -- oder ein volles Verzeichnis; `fs.fi`
@@ -182,12 +183,12 @@ fn o_unlink(state: u64, m: u64, path: u64) -> u64 {
     return 0
 }
 
-fn o_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
+fn i_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
     tick(state)
     return fs.rename_path(state, from, to)
 }
 
-fn o_trunc(state: u64, m: u64, node: u64) -> u64 {
+fn i_trunc(state: u64, m: u64, node: u64) -> u64 {
     tick(state)
     fs.file_truncate(state, node)
     return 0
@@ -199,6 +200,76 @@ fn o_trunc(state: u64, m: u64, node: u64) -> u64 {
 // `tag` sind vier Oktette Text, kleinendig gepackt: 'o','f','s',0. Ein
 // Name als Zahl und nicht als Zeiger, damit die Tafel selbst nirgends
 // hinzeigt, wo etwas liegen koennte, das sich bewegt.
+fn o_lookup(state: u64, m: u64, path: u64) -> u64 {
+    let flags: u64 = fsctx.enter(state, m)
+    let r: u64 = i_lookup(state, m, path)
+    fsctx.leave(state, m, flags)
+    return r
+}
+
+fn o_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+    let flags: u64 = fsctx.enter(state, m)
+    let r: u64 = i_readdir(state, m, dir, index, out)
+    fsctx.leave(state, m, flags)
+    return r
+}
+
+fn o_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
+    let flags: u64 = fsctx.enter(state, m)
+    let r: u64 = i_attr(state, m, node, what)
+    fsctx.leave(state, m, flags)
+    return r
+}
+
+fn o_read(state: u64, m: u64, node: u64, off: u64, dst: u64, len: u64) -> u64 {
+    let flags: u64 = fsctx.enter(state, m)
+    let r: u64 = i_read(state, m, node, off, dst, len)
+    fsctx.leave(state, m, flags)
+    return r
+}
+
+fn o_write(state: u64, m: u64, node: u64, off: u64, src: u64, len: u64) -> u64 {
+    let flags: u64 = fsctx.enter(state, m)
+    let r: u64 = i_write(state, m, node, off, src, len)
+    fsctx.leave(state, m, flags)
+    return r
+}
+
+fn o_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    let flags: u64 = fsctx.enter(state, m)
+    let r: u64 = i_create(state, m, path, art)
+    fsctx.leave(state, m, flags)
+    return r
+}
+
+fn o_unlink(state: u64, m: u64, path: u64) -> u64 {
+    let flags: u64 = fsctx.enter(state, m)
+    let r: u64 = i_unlink(state, m, path)
+    fsctx.leave(state, m, flags)
+    return r
+}
+
+fn o_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    let flags: u64 = fsctx.enter(state, m)
+    let r: u64 = i_rename(state, m, from, to)
+    fsctx.leave(state, m, flags)
+    return r
+}
+
+fn o_trunc(state: u64, m: u64, node: u64) -> u64 {
+    let flags: u64 = fsctx.enter(state, m)
+    let r: u64 = i_trunc(state, m, node)
+    fsctx.leave(state, m, flags)
+    return r
+}
+
+fn mount_probe(state: u64, m: u64) -> u64 {
+    if fsctx.is_root(state, m) {
+        return node_root(state)
+    }
+    return fsctx.mount_foreign(state, m)
+}
+
 fn ops() -> vfsops.Ops {
     return vfsops.Ops {
         lookup: o_lookup,
