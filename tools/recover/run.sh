@@ -88,13 +88,13 @@ rc=$(lauf rec iso "ls /data;mount;recover /dev/hda /mnt/store snap1 --ja --into 
 gleich "recover run: exit code" "$rc" "21"
 hat "$OUT/rec.txt" "recover: backup verified" "backup verified first"
 hat "$OUT/rec.txt" "install: fertig" "system installed on the blank disk"
-hat "$OUT/rec.txt" "recover: restored" "backup restored into the new root"
+hat "$OUT/rec.txt" "recover: next, boot the new disk, mount the store and run: backup restore /mnt/store snap1 /data" "the restore step is announced"
 hat "$OUT/rec.txt" "recover: done" "recover finished"
-nicht "$OUT/rec.txt" "recover: restore failed" "no restore failure"
+nicht "$OUT/rec.txt" "recover: install failed" "no install failure"
 
 echo
 echo "== 6. boot FROM the recovered disk =="
-rc=$(lauf boot platte "cat /data/a.txt;cat /data/sub/b.txt;shasum /data/sh.copy;ls /data;uname -a;exit" 600)
+rc=$(lauf boot platte "mount;mkdir /data;backup restore /mnt/store snap1 /data;cat /data/a.txt;cat /data/sub/b.txt;shasum /data/sh.copy;ls /data;uname -a;exit" 600)
 gleich "boot run: exit code" "$rc" "21"
 hat "$OUT/boot.txt" "recover-marker-7" "file restored with its content"
 hat "$OUT/boot.txt" "deep-file-9" "nested file restored"
