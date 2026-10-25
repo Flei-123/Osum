@@ -455,7 +455,7 @@ cat > "$TMPD/auf-kurz.txt" <<'AUF'
 system||
 AUF
 draht_auf
-gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g3.log" --kopplung "$CODE"
+gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g3.log" --kopplung "$CODE" --kopplung-hex
 lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 30000;jarvisctl log 10;exit" "$TMPD/r3.txt" 150
 gegenstelle_aus
 draht_zu
@@ -467,13 +467,43 @@ hat_nicht "$TMPD/g3.log" "ANGEMELDET" "und der Server hat KEINE angemeldete Sitz
 
 echo "   -- und jetzt mit Bestaetigung, damit die Ablehnung etwas bedeutet"
 draht_auf
-gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g4.log" --kopplung "$CODE" --verbindungen 2
+gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g4.log" --kopplung "$CODE" --kopplung-hex --verbindungen 2
 lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 20000;jarvisctl pair $CODE;jarvisd -1 -t 30000;jarvisctl log 10;exit" "$TMPD/r4.txt" 200
 gegenstelle_aus
 draht_zu
 hat "$TMPD/r4.txt" "Pairing confirmed" "jarvisctl pair nimmt den Code an, den der Helfer bekommen hat"
 hat "$TMPD/g4.log" "ANGEMELDET" "beim zweiten Anlauf ist die Kopplung durch"
 hat "$TMPD/r4.txt" "pairing confirmed" "und sie steht im Protokoll"
+
+echo "   -- der echte Server schickt den Code als Hex der Ziffern: der Mensch sieht und tippt die Ziffern"
+HEXCODE=$(python3 -c 'import sys;print(sys.argv[1].encode().hex())' "$CODE")
+draht_auf
+gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g5.log" --kopplung "$CODE" --kopplung-hex --verbindungen 2
+lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 20000;jarvisctl status;jarvisctl pair $CODE;jarvisd -1 -t 30000;jarvisctl log 10;exit" "$TMPD/r5.txt" 200
+gegenstelle_aus
+draht_zu
+hat "$TMPD/r5.txt" "PAIRING CODE $CODE" "Hex-Code vom Server: am Geraet stehen die Ziffern"
+hat_nicht "$TMPD/r5.txt" "PAIRING CODE $HEXCODE" "und nicht der Hex-Text"
+hat "$TMPD/r5.txt" "jarvisctl pair $CODE" "der Hinweis nennt die Ziffern"
+hat "$TMPD/r5.txt" "Pairing confirmed" "jarvisctl pair mit den Ziffern wird angenommen"
+hat "$TMPD/g5.log" "ANGEMELDET" "und die Kopplung ist durch (der Server bekam den Hex-Code zurueck)"
+echo "   -- der Hex-Text wird ebenfalls akzeptiert (alte Anzeige)"
+draht_auf
+gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g6.log" --kopplung "$CODE" --kopplung-hex --verbindungen 2
+lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 20000;jarvisctl pair $HEXCODE;jarvisd -1 -t 30000;jarvisctl log 10;exit" "$TMPD/r6.txt" 200
+gegenstelle_aus
+draht_zu
+hat "$TMPD/r6.txt" "Pairing confirmed" "jarvisctl pair mit dem Hex-Text wird auch angenommen"
+hat "$TMPD/g6.log" "ANGEMELDET" "und die Kopplung ist durch"
+echo "   -- GEGENPROBE: falsche Ziffern werden abgelehnt"
+draht_auf
+gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g7.log" --kopplung "$CODE" --kopplung-hex
+lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 20000;jarvisctl pair 000000;jarvisctl log 10;exit" "$TMPD/r7.txt" 150
+gegenstelle_aus
+draht_zu
+hat "$TMPD/r7.txt" "does not match" "falsche Ziffern: jarvisctl lehnt ab"
+hat "$TMPD/g7.log" "KOPPLUNG-ABGELEHNT" "und der Server sieht eine Ablehnung"
+hat_nicht "$TMPD/g7.log" "ANGEMELDET" "es gibt keine Sitzung"
 
 echo "   -- GEGENPROBE: ein Code, den niemand angefragt hat"
 lauf_ohne_netz "$TMPD/nonet.img" "jarvisctl pair 424242;exit" "$TMPD/r4b.txt"

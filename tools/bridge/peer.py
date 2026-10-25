@@ -15,7 +15,7 @@
 #
 # Aufruf:
 #   peer.py --cert C --key K --port P --auftraege A --aus D
-#                  [--kopplung CODE] [--abriss] [--kein-beweis]
+#                  [--kopplung CODE [--kopplung-hex]] [--abriss] [--kein-beweis]
 #                  [--wartezeit S]
 #
 # Die Auftragsdatei traegt eine Zeile je Auftrag:
@@ -102,6 +102,7 @@ def main():
     p.add_argument("--auftraege", default="")
     p.add_argument("--aus", default="/tmp/bridge-aus")
     p.add_argument("--kopplung", default="")
+    p.add_argument("--kopplung-hex", action="store_true")
     p.add_argument("--abriss", action="store_true")
     p.add_argument("--kein-beweis", action="store_true")
     p.add_argument("--wartezeit", type=float, default=60.0)
@@ -203,13 +204,14 @@ def eine_verbindung(a, ctx, lauscher, sag, auftraege, runde):
                 sag("BEWEIS ungeprueft (python3-cryptography fehlt)")
 
         if a.kopplung:
-            d.sende(["kopplung-noetig", a.kopplung])
+            wire_code = hex_von(a.kopplung) if a.kopplung_hex else a.kopplung
+            d.sende(["kopplung-noetig", wire_code])
             f, _ = d.nachricht()
             sag("KOPPLUNG", " ".join(f))
             if f[0] == "kopplung-abgelehnt":
                 sag("KOPPLUNG-ABGELEHNT")
                 return 0
-            if f[0] != "kopplung" or f[1] != a.kopplung:
+            if f[0] != "kopplung" or f[1] != wire_code:
                 sag("KOPPLUNG-FALSCH")
                 return 1
         d.sende(["willkommen"])
