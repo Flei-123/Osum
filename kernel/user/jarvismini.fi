@@ -30,6 +30,7 @@ import wlibc
 import fuiapp
 import fuiscene
 import actwire
+import pairshow
 import libc.kcall
 import fui.backlum
 import std.rt
@@ -72,6 +73,10 @@ static mut txt_col: u64 = 1 // backlum.TXT_WHITE / TXT_BLACK
 static mut cur_opac: u64 = 200
 static mut next_tick: u64 = 0
 static mut next_beat: u64 = 0
+static mut next_pair: u64 = 0
+static mut pair_seen: u64 = 0
+static mut pair_sig: u64 = 0
+static mut PAIR_B: [u8; 80] = [0 as u8; 80]
 static mut last_lum: u64 = 0
 
 // chat connection
@@ -101,6 +106,15 @@ fn lb_str(s: str) {
     var i: u64 = 0
     while i < (s.n as u64) && lb_n < 190 {
         LB[lb_n as usize] = rt.ld8(s.p as u64, i as usize)
+        lb_n = lb_n + 1
+        i = i + 1
+    }
+}
+
+fn lb_cstr(p: u64) {
+    var i: u64 = 0
+    while rt.ld8(p, i as usize) != 0 as u8 && lb_n < 190 {
+        LB[lb_n as usize] = rt.ld8(p, i as usize)
         lb_n = lb_n + 1
         i = i + 1
     }
@@ -245,6 +259,69 @@ fn vis_count() -> u64 {
         return VIS_MAX
     }
     return L_N
+}
+
+fn pair_signature(mode: u64) -> u64 {
+    var h: u64 = mode
+    if mode == pairshow.MODE_WAITING || mode == pairshow.MODE_CONFIRM {
+        let c: u64 = pairshow.code()
+        var i: u64 = 0
+        while rt.ld8(c, i as usize) != 0 as u8 && i < 20 {
+            h = h * 31 + rt.ld8(c, i as usize) as u64
+            i = i + 1
+        }
+    }
+    return h
+}
+
+fn pair_line(head: str, code: u64) {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < (head.n as u64) {
+        rt.st8((&PAIR_B[0 as usize]) as u64, n as usize, rt.ld8(head.p as u64, i as usize))
+        n = n + 1
+        i = i + 1
+    }
+    var k: u64 = 0
+    while rt.ld8(code, k as usize) != 0 as u8 && k < 20 {
+        rt.st8((&PAIR_B[0 as usize]) as u64, n as usize, rt.ld8(code, k as usize))
+        n = n + 1
+        k = k + 1
+    }
+    rt.st8((&PAIR_B[0 as usize]) as u64, n as usize, 0 as u8)
+    add_text(2, (&PAIR_B[0 as usize]) as u64)
+}
+
+fn pair_poll() -> bool {
+    let mode: u64 = pairshow.load()
+    let sig: u64 = pair_signature(mode)
+    if mode == pair_seen && sig == pair_sig {
+        return false
+    }
+    let prev: u64 = pair_seen
+    pair_seen = mode
+    pair_sig = sig
+    lb_begin()
+    lb_str("pair mode=")
+    lb_num(mode)
+    if mode == pairshow.MODE_WAITING || mode == pairshow.MODE_CONFIRM {
+        lb_str(" code=")
+        lb_cstr(pairshow.code())
+    }
+    lb_end()
+    if mode == pairshow.MODE_WAITING {
+        pair_line("Pairing: enter this code in the JARVIS web UI: ", pairshow.code())
+        return true
+    }
+    if mode == pairshow.MODE_CONFIRM {
+        pair_line("Pairing: confirm this code on the server: ", pairshow.code())
+        return true
+    }
+    if mode == pairshow.MODE_OK && prev != pairshow.MODE_NONE {
+        pair_line("Pairing complete", pairshow.code())
+        return true
+    }
+    return false
 }
 
 // ------------------------------------------------------------------ the picture
@@ -1192,6 +1269,12 @@ fn run_box(hidden: bool, as_app: bool) -> u64 {
         }
         if net_poll(now) {
             dirty = true
+        }
+        if now >= next_pair {
+            next_pair = now + 1000
+            if pair_poll() {
+                dirty = true
+            }
         }
         if L_N != seen_lines {
             seen_lines = L_N

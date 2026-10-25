@@ -28,6 +28,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 MODES=${TRAYPOP_MODES:-"light dark"}
 PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc find du chmod id whoami touch true false sleep kill sort uniq rmdir theme locate dhcp host ping netstat notify"
 
+printf 'pairing: waiting 4821 95\n' > "$TMPD/state"
 printf 'backup|7|Backup is running\nchat|8|Chat: 2 unread\nsync|9|Sync paused\nmic|1|0\n' > "$TMPD/tray.items"
 cat > "$TMPD/dreh.txt" <<'EOF'
 warteauf 'taskbar: steht|taskbar: geom' || 120
@@ -121,7 +122,9 @@ PY
 for MODE in $MODES; do
     echo "== $MODE"
     O="$TMPD/o-$MODE"
-    EH_MKFS_EXTRA="/etc/tray.items=$TMPD/tray.items@0644" bash tools/design/eh6.sh "$O" res=1280x800 accel=kvm mode="$MODE" progs="$PROGS" \
+    PAIR_EXTRA=""
+    [ "$MODE" = light ] && PAIR_EXTRA=" /var/jarvis/ /var/jarvis/state=$TMPD/state@0644"
+    EH_MKFS_EXTRA="/etc/tray.items=$TMPD/tray.items@0644$PAIR_EXTRA" bash tools/design/eh6.sh "$O" res=1280x800 accel=kvm mode="$MODE" progs="$PROGS" \
         tbextra="tray_chevron=1" drehbuch="$TMPD/dreh.txt" > "$TMPD/o-$MODE.log" 2>&1 < /dev/null
     S="$O/serial.txt"
     if [ -n "${TRAYPOP_OUT:-}" ]; then mkdir -p "$TRAYPOP_OUT/$MODE"; cp "$O"/*.ppm "$S" "$TRAYPOP_OUT/$MODE/" 2>/dev/null; fi
@@ -135,6 +138,15 @@ for MODE in $MODES; do
     n=$(echo "$ol" | sed -E 's/.* n=([0-9]+).*/\1/'); x=$(echo "$ol" | sed -E 's/.* x=([0-9]+).*/\1/'); y=$(echo "$ol" | sed -E 's/.* y=([0-9]+).*/\1/')
     w=$(echo "$ol" | sed -E 's/.* w=([0-9]+).*/\1/'); h=$(echo "$ol" | sed -E 's/.* h=([0-9]+).*/\1/')
     ok "$MODE: serial '$ol'"
+    pl=$(grep -a 'traypop: pair mode=' "$S" | head -1 | sed 's/.*traypop: pair/traypop: pair/')
+    if [ "$MODE" = light ]; then
+        [ "$pl" = "traypop: pair mode=1 code=4821" ] && ok "$MODE: pairing row reported ($pl)" || bad "$MODE: pairing line is '$pl'"
+        echo "$h" > "$TMPD/h-light"
+    else
+        [ "$pl" = "traypop: pair mode=0" ] && ok "$MODE: no pairing state, no row (COUNTER-PROOF: $pl)" || bad "$MODE: pairing line is '$pl'"
+        hl=$(cat "$TMPD/h-light" 2>/dev/null || echo 0)
+        [ "$hl" = 0 ] || [ "$hl" -gt "$h" ] && ok "$MODE: the card with the pairing row is taller ($hl > $h)" || bad "$MODE: card heights light=$hl dark=$h"
+    fi
     [ "$n" -ge 2 ] && ok "$MODE: both registered items are in the flyout (n=$n)" || bad "$MODE: n=$n, expected >= 2 overflow items"
     d=$(diffpix "$O/00-before.ppm" "$O/01-open.ppm" "$x" "$y" "$w" "$h")
     [ "$d" -gt $((w * h / 3)) ] && ok "$MODE: the picture differs inside the rectangle ($d of $((w * h)) px)" || bad "$MODE: only $d of $((w * h)) px differ -- no flyout in the picture"

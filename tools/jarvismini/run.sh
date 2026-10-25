@@ -50,6 +50,7 @@ printf '# test: the hotkey helper\nhotkey\n' > "$D/autostart"
 printf 'jarvismini window.float,hotkey,net\n' > "$D/rights.yes"
 printf '# no grants\n' > "$D/rights.no"
 printf 'trace on\n' > "$D/debug"
+printf 'pairing: waiting 4821 95\n' > "$D/state"
 MORE="orientbus act wmplug hotkeyd jarvismini apprights mbg"
 EXTRA_COMMON="/etc/jarvismini.conf=$D/jarvismini.conf@0644 /etc/hotkeys.conf=etc/hotkeys.conf@0644 /etc/wmplug.conf=etc/wmplug.conf@0644 /etc/wmplug.autostart=$D/autostart@0644 /etc/actions.d/jarvismini.actions=etc/actions.d/jarvismini.actions@0644 /apps/ /apps/jarvismini.osp/ /apps/jarvismini.osp/INFO=pakete/jarvismini/INFO@0644 /apps/jarvismini.osp/start@/bin/jarvismini"
 
@@ -115,7 +116,7 @@ want() { [ -z "${JM_ONLY:-}" ] || [[ " $JM_ONLY " == *" $1 "* ]]; }
 if want A; then
 echo "== boot A (rights granted) =="
 start_stub A
-run_boot A "$D/rights.yes"
+RB_EXTRA="/var/jarvis/ /var/jarvis/state=$D/state@0644" run_boot A "$D/rights.yes"
 stop_stubs
 SA="$D/A/serial.txt"
 [ -s "$SA" ] || { bad "boot A: no serial output"; tail -15 "$D/A.log"; }
@@ -286,6 +287,8 @@ if se:
     res("E: no `hotkeyd: failed` (was rc=3: the Mini never looked up the broker)", n_bad == 0, f"failed={n_bad}")
 sa_ = rd(f"{d}/A/serial.txt")
 if sa_:
+    res("A: the pairing code from /var/jarvis/state reached the Mini", "jarvismini: pair mode=1 code=4821" in sa_, "")
+    res("A: COUNTER-PROOF: boot B without a state file has no pair line", "jarvismini: pair mode=" not in rd(f"{d}/B/serial.txt"), "")
     res("A: hotkeyd got the Mini's answer (ok, no rc=3)", "hotkeyd: ok - jarvismini.toggle" in sa_ and "hotkeyd: failed - jarvismini.toggle" not in sa_, "")
 for tag in ("A", "B"):
     raw = rd(f"{d}/{tag}/serial.txt")

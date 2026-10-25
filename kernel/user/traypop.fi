@@ -48,6 +48,7 @@ import fui.painter
 import fui.icon
 import fui.tray
 import osktray
+import pairshow
 
 export { init, toggle, step, is_open, hit, shut_now, net_glyph, wlan_glyph, speaker_glyph, mic_glyph,
     chevron_glyph }
@@ -94,6 +95,8 @@ const A_CAPMUTE: u64 = 56
 const A_CAPWHO0: u64 = 60 // task index of the 1st program reading the microphone
 const AS_CAPMUTE: u64 = 16
 const K_MICMUTE: u64 = 304
+const CK_PAIR: u64 = 403
+const PAIR_POLL_MS: u64 = 1000
 
 // glyph kinds of the network
 const NK_ETH: u64 = 0
@@ -126,6 +129,11 @@ static mut mic_who: u64 = 0 // task index of the first program reading the micro
 static mut mic_da: u64 = 0 // 1 = the kernel has a microphone path (SYS_AUDREAD works)
 static mut mic_stub: u64 = 0 // 1 = /etc/tray.items has a `mic|` line (test aid): it overrides the kernel's numbers
 static mut want_sheet: u64 = 0
+static mut pair_mode: u64 = 0
+static mut pair_left: u64 = 0
+static mut pair_next: u64 = 0
+static mut pair_sig: u64 = 0
+static mut pair_b: [u8; 96] = [0 as u8; 96]
 static mut osk_on: u64 = 0
 static mut tile_say: u64 = 0
 static mut n_rows: u64 = 0
@@ -158,6 +166,11 @@ static mut s_oskwhy: [u8; 4] = "osk\0"
 static mut k_micuse: [u8; 13] = "tray.mic.use\0"
 static mut k_micmuted: [u8; 15] = "tray.mic.muted\0"
 static mut k_more: [u8; 10] = "tray.more\0"
+static mut k_pairw: [u8; 18] = "tray.pair.waiting\0"
+static mut k_pairc: [u8; 18] = "tray.pair.confirm\0"
+static mut n_pair: [u8; 8] = "pairing\0"
+static mut s_pair: [u8; 20] = "traypop: pair mode=\0"
+static mut s_pcode: [u8; 7] = " code=\0"
 static mut k_none: [u8; 10] = "tray.none\0"
 static mut k_up: [u8; 8] = "tray.up\0"
 static mut k_hide: [u8; 10] = "tray.hide\0"
@@ -478,6 +491,8 @@ fn draw_cv(key: u64, x: u64, y: u64, w: u64, h: u64) {
         } else {
             letter_glyph(ox, oy, size, ow)
         }
+    } else if key == CK_PAIR {
+        letter_glyph(ox, oy, size, (&n_pair[0 as usize]) as u64)
     } else if key == CK_SHEET {
         sheet(x, y, w, h)
     }
@@ -715,6 +730,82 @@ fn mic_text() {
     }
 }
 
+fn pair_shown() -> bool {
+    return pair_mode == pairshow.MODE_WAITING || pair_mode == pairshow.MODE_CONFIRM
+}
+
+fn pair_signature() -> u64 {
+    var h: u64 = pair_mode * 1000003 + pair_left
+    if pair_shown() {
+        let c: u64 = pairshow.code()
+        var i: u64 = 0
+        while *((c + i) as *mut u8) != 0 as u8 && i < 20 {
+            h = h * 31 + (*((c + i) as *mut u8)) as u64
+            i = i + 1
+        }
+    }
+    return h
+}
+
+fn read_pair() {
+    pair_mode = pairshow.load()
+    pair_left = 0
+    if pair_mode == pairshow.MODE_WAITING {
+        pair_left = pairshow.seconds_left()
+    }
+    pair_sig = pair_signature()
+}
+
+fn say_pair() {
+    say((&s_pair[0 as usize]) as u64)
+    sayn(pair_mode)
+    if pair_shown() {
+        say((&s_pcode[0 as usize]) as u64)
+        say(pairshow.code())
+    }
+    nl()
+}
+
+fn pair_text() -> u64 {
+    var key: u64 = (&k_pairw[0 as usize]) as u64
+    if pair_mode == pairshow.MODE_CONFIRM {
+        key = (&k_pairc[0 as usize]) as u64
+    }
+    var at: u64 = ulib.strncpy((&pair_b[0 as usize]) as u64, mg(key), 60)
+    __mmio_write8(((&pair_b[0 as usize]) as u64 + at) as *mut u8, 32 as u8)
+    at = at + 1
+    at = at + ulib.strncpy((&pair_b[0 as usize]) as u64 + at, pairshow.code(), 20)
+    if pair_mode == pairshow.MODE_WAITING {
+        __mmio_write8(((&pair_b[0 as usize]) as u64 + at) as *mut u8, 32 as u8)
+        __mmio_write8(((&pair_b[0 as usize]) as u64 + at + 1) as *mut u8, 40 as u8)
+        at = at + 2
+        var tmp: [u8; 24] = [0 as u8; 24]
+        var n: u64 = 0
+        var x: u64 = pair_left
+        if x == 0 {
+            tmp[0] = 48 as u8
+            n = 1
+        }
+        while x > 0 {
+            tmp[n as usize] = (48 + x % 10) as u8
+            x = x / 10
+            n = n + 1
+        }
+        var k: u64 = 0
+        while k < n {
+            __mmio_write8(((&pair_b[0 as usize]) as u64 + at + k) as *mut u8, tmp[(n - 1 - k) as usize])
+            k = k + 1
+        }
+        at = at + n
+        __mmio_write8(((&pair_b[0 as usize]) as u64 + at) as *mut u8, 115 as u8)
+        __mmio_write8(((&pair_b[0 as usize]) as u64 + at + 1) as *mut u8, 41 as u8)
+        __mmio_write8(((&pair_b[0 as usize]) as u64 + at + 2) as *mut u8, 0 as u8)
+    } else {
+        __mmio_write8(((&pair_b[0 as usize]) as u64 + at) as *mut u8, 0 as u8)
+    }
+    return (&pair_b[0 as usize]) as u64
+}
+
 fn rows_count() -> u64 {
     var n: u64 = tray.tray_count(&tr, tray.PLACE_OVERFLOW) as u64
     if n > MAXROWS {
@@ -776,6 +867,9 @@ fn card_h() -> u64 {
     h = h + ROW_H + GAPP // network
     h = h + ROW_H + GAPP // sound: mute button + slider on one row
     if mic_shown() {
+        h = h + ROW_H + GAPP
+    }
+    if pair_shown() {
         h = h + ROW_H + GAPP
     }
     if osk_on != 0 {
@@ -856,6 +950,12 @@ fn build() {
             }
             let _bmm: usize = fuiscene.button(rm, mg(mmk), K_MICMUTE)
         }
+    }
+    if pair_shown() {
+        let rp: usize = fuiscene.row(r)
+        fuiscene.set_gap(rp, GAPP + 2)
+        let _gp: usize = fuiscene.canvas2(rp, CK_PAIR, ROW_H - 4, ROW_H - 4, draw_cv)
+        let _lp: usize = fuiscene.label(rp, pair_text())
     }
     if osk_on != 0 {
         let ro: usize = fuiscene.row(r)
@@ -990,6 +1090,8 @@ fn open_now() {
     }
     read_items()
     read_audio()
+    read_pair()
+    pair_next = fuiapp.now_ms() + PAIR_POLL_MS
     osk_on = 0
     if osktray.shown() {
         osk_on = 1
@@ -1019,6 +1121,7 @@ fn open_now() {
     sayn(ph_)
     nl()
     say_osk_rect()
+    say_pair()
     var i: u64 = 0
     while i < n_rows {
         let id: u64 = row_id[i as usize]
@@ -1281,5 +1384,17 @@ fn step() -> bool {
         }
     }
     btn_last = btn
+    if mode == M_LIST {
+        let now: u64 = fuiapp.now_ms()
+        if now >= pair_next {
+            pair_next = now + PAIR_POLL_MS
+            let old: u64 = pair_sig
+            read_pair()
+            if pair_sig != old {
+                say_pair()
+                relayout()
+            }
+        }
+    }
     return false
 }
