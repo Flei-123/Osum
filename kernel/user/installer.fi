@@ -98,6 +98,8 @@ import instkern
 import instkonto
 import dualkern
 import wunlock
+import shrinkflow
+import ntfsshrink.codes
 
 export { u_start }
 
@@ -218,6 +220,11 @@ static mut d_frei_von: u64 = 0
 static mut d_frei_bis: u64 = 0
 static mut d_esp_idx: u64 = 0xFFFFFFFFFFFFFFFF
 static mut d_moeglich: u64 = 0 // 1 = "daneben" geht auf dieser Platte
+static mut d_shrink: u64 = 0
+static mut d_shrink_fail: u64 = 0
+static mut d_shrink_done: u64 = 0
+static mut shrinktext: [u8; 400] = [0 as u8; 400]
+static mut m_sh_state: [u8; 19] = "installer: shrink=\0"
 static mut d_neue_nr: u64 = 0  // die Nummer der angelegten Partition
 
 // Welche Platte ist gewaehlt (Index in p_*), und wie weit ist die
@@ -698,16 +705,26 @@ fn tabelle_bauen() {
 fn tafel_holen(dev: u64) {
     d_gelesen = 0
     d_moeglich = 0
+    d_shrink = 0
     d_frei_von = 0
     d_frei_bis = 0
     d_esp_idx = 0xFFFFFFFFFFFFFFFF
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, dev, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, dev, ulib.O_RDWR, 0)
     if ulib.bad(fd) {
         return
     }
     let sekt: u64 = ulib.size_of(dev) / instkern.BS
-    let n: u64 = dualkern.tafel_lesen(fd, sekt)
+    shrinkflow.bind(fd, sekt, dev)
+    let fixed: u64 = shrinkflow.recover_pending()
+    say(ptr((&m_sh_state[0 as usize]) as u64))
+    ulib.sayu(fixed)
+    ulib.nl()
+    tafel_holen_fd(fd, sekt)
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
+fn tafel_holen_fd(fd: u64, sekt: u64) {
+    let n: u64 = dualkern.tafel_lesen(fd, sekt)
     say(ptr((&m_d_tafel[0 as usize]) as u64))
     ulib.sayu(n)
     luft()
@@ -733,7 +750,9 @@ fn tafel_holen(dev: u64) {
         i = i + 1
     }
     // Der freie Platz.
+    var gap: bool = false
     if dualkern.luecke_suchen(65536) {
+        gap = true
         d_frei_von = dualkern.luecke_start()
         d_frei_bis = dualkern.luecke_ende()
         say(ptr((&m_d_frei[0 as usize]) as u64))
@@ -742,7 +761,17 @@ fn tafel_holen(dev: u64) {
         ulib.sayu(d_frei_bis)
         ulib.nl()
     } else {
-        return
+        d_shrink = shrinkflow.scan()
+        say(ptr((&m_sh_state[0 as usize]) as u64))
+        ulib.sayu(100 + d_shrink)
+        luft()
+        ulib.sayu(shrinkflow.refusal())
+        luft()
+        ulib.sayu(shrinkflow.offer_free())
+        ulib.nl()
+        if d_shrink != shrinkflow.S_OFFER {
+            return
+        }
     }
     // Die fremde EFI-Partition.
     let e: u64 = dualkern.esp_finden()
@@ -756,7 +785,53 @@ fn tafel_holen(dev: u64) {
     say(ptr((&m_d_espi[0 as usize]) as u64))
     ulib.sayu(e + 1)
     ulib.nl()
-    d_moeglich = 1
+    if gap {
+        d_moeglich = 1
+    } else {
+        d_moeglich = 2
+    }
+}
+
+fn shrink_ask_text() {
+    b_start((&shrinktext[0 as usize]) as u64, 400)
+    b_s(msg.get(shrinkflow.key_ask_text()))
+    b_c(32)
+    b_n(shrinkflow.free_target(shrinkflow.offer_free()) / 2048)
+    b_c(32)
+    b_c(77)
+    b_c(105)
+    b_c(66)
+    b_ende()
+}
+
+fn shrink_now(dev: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, dev, ulib.O_RDWR, 0)
+    if ulib.bad(fd) {
+        d_shrink_fail = codes.E_IO
+        return false
+    }
+    let sekt: u64 = ulib.size_of(dev) / instkern.BS
+    shrinkflow.bind(fd, sekt, dev)
+    shrinkflow.recover_pending()
+    var r: u64 = codes.E_NO_SPACE
+    if shrinkflow.scan() == shrinkflow.S_OFFER {
+        r = shrinkflow.run_shrink(shrinkflow.free_target(shrinkflow.offer_free()))
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    say(ptr((&m_sh_state[0 as usize]) as u64))
+    ulib.sayu(200 + r)
+    ulib.nl()
+    d_shrink_fail = r
+    tafel_holen(dev)
+    return r == codes.E_OK
+}
+
+fn ansicht_neu() {
+    ptabelle_bauen()
+    dzeilen_bauen()
+    fuiscene.table_set_blob(K_PTAB, (&pblob[0 as usize]) as u64)
+    status_bauen()
+    fuiscene.refresh()
 }
 
 // Der Name einer Art, aus dem Katalog.
@@ -853,6 +928,27 @@ fn dzeilen_bauen() {
         }
         b_c(32)
         b_s(msg.get(ptr((&k_d_espweg[0 as usize]) as u64)))
+        b_ende()
+    } else if d_frei_bis <= d_frei_von && d_shrink_fail != 0 {
+        b_s(msg.get(shrinkflow.key_fail()))
+        b_c(32)
+        b_s(msg.get(shrinkflow.refusal_key(d_shrink_fail)))
+        b_ende()
+    } else if d_frei_bis <= d_frei_von && d_shrink == shrinkflow.S_OFFER {
+        b_s(msg.get(ptr((&k_d_fkein[0 as usize]) as u64)))
+        b_c(32)
+        b_s(msg.get(shrinkflow.key_offer()))
+        b_c(32)
+        b_n(shrinkflow.offer_free() / 2048)
+        b_c(32)
+        b_c(77)
+        b_c(105)
+        b_c(66)
+        b_ende()
+    } else if d_frei_bis <= d_frei_von && d_shrink == shrinkflow.S_REFUSED {
+        b_s(msg.get(ptr((&k_d_fkein[0 as usize]) as u64)))
+        b_c(32)
+        b_s(msg.get(shrinkflow.refusal_key(shrinkflow.refusal())))
         b_ende()
     } else if d_frei_bis <= d_frei_von {
         b_s(msg.get(ptr((&k_d_fkein[0 as usize]) as u64)))
@@ -1091,7 +1187,7 @@ fn weg_moeglich() -> bool {
         return false
     }
     if welcher_weg == 1 {
-        return d_moeglich == 1
+        return d_moeglich >= 1
     }
     return true
 }
@@ -1099,6 +1195,9 @@ fn weg_moeglich() -> bool {
 // Die Aufschrift des Knopfes. Sie sagt, was gleich passiert -- und auf
 // den beiden Reitern passiert etwas Verschiedenes.
 fn weg_knopftext() -> u64 {
+    if welcher_weg == 1 && d_moeglich == 2 {
+        return msg.get(shrinkflow.key_go())
+    }
     if welcher_weg == 1 {
         return msg.get(ptr((&k_d_go[0 as usize]) as u64))
     }
@@ -2115,7 +2214,12 @@ fn u_start(args: u64) -> u64 {
             // AUF DEM WEG "DANEBEN" WIRD NUR LOSGELEGT, WENN ES GEHT.
             // Sonst bliebe der Lauf haengen und die Abnahme meldete
             // "keine Schritte", statt den Abbruchgrund zu zeigen.
-            if welcher_weg == 1 && d_moeglich == 0 {
+            if welcher_weg == 1 && d_moeglich == 2 {
+                let _sh: bool = shrink_now(nptr(gewaehlt))
+                ansicht_neu()
+                let _k3: u64 = fuiscene.pump()
+            }
+            if welcher_weg == 1 && d_moeglich != 1 {
                 say(ptr((&m_d_nein[0 as usize]) as u64))
                 luft()
                 ulib.sayu(dualkern.grund())
@@ -2222,7 +2326,19 @@ fn u_start(args: u64) -> u64 {
             wahl_zeigen()
             fuiscene.refresh()
         } else if id == K_GO && weg_moeglich() && laeuft == 0 {
-            if welcher_weg == 1 {
+            if welcher_weg == 1 && d_moeglich == 2 {
+                frage = 3
+                d_shrink_fail = 0
+                shrink_ask_text()
+                fuiscene.dialog_open(
+                    msg.get(shrinkflow.key_ask_title()),
+                    (&shrinktext[0 as usize]) as u64,
+                    ptr((&t_ja[0 as usize]) as u64),
+                    ptr((&t_nein[0 as usize]) as u64))
+                say(ptr((&m_ask[0 as usize]) as u64))
+                ulib.sayu(3)
+                ulib.nl()
+            } else if welcher_weg == 1 {
                 // AUF DEM WEG "DANEBEN" GENUEGT EINE FRAGE.
                 //
                 // Die zweite Frage des anderen Weges gibt es,
@@ -2269,6 +2385,7 @@ fn u_start(args: u64) -> u64 {
                 // ist nicht klar, um welche Platte es geht, und ein
                 // Programm, das beim Start jede Platte durchliest,
                 // haelt den Menschen auf.
+                d_shrink_fail = 0
                 tafel_holen(nptr(gewaehlt))
                 ptabelle_bauen()
                 dzeilen_bauen()
@@ -2287,7 +2404,22 @@ fn u_start(args: u64) -> u64 {
         } else if id == fuiscene.KEY_DIALOG {
             // Die Antwort auf eine der beiden Fragen.
             let ja: bool = fuiscene.dialog_result() == 1
-            if ja && frage == 1 {
+            if ja && frage == 3 {
+                frage = 0
+                let done: bool = shrink_now(nptr(gewaehlt))
+                ansicht_neu()
+                if done && d_moeglich == 1 {
+                    frage = 2
+                    fuiscene.dialog_open(
+                        msg.get(ptr((&k_d_askt[0 as usize]) as u64)),
+                        msg.get(ptr((&k_d_askx[0 as usize]) as u64)),
+                        ptr((&t_ja[0 as usize]) as u64),
+                        ptr((&t_nein[0 as usize]) as u64))
+                    say(ptr((&m_ask[0 as usize]) as u64))
+                    ulib.sayu(9)
+                    ulib.nl()
+                }
+            } else if ja && frage == 1 {
                 // DIE ZWEITE FRAGE. Sie kommt erst, wenn die erste mit
                 // Ja beantwortet ist -- und sie sagt, dass es jetzt
                 // unwiderruflich wird.

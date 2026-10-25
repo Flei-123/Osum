@@ -1,0 +1,355 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import instkern
+import dualkern
+import wunlock
+import ntfsshrink.codes
+import ntfsshrink.shrink
+import ntfsshrink.ptab
+
+export {
+    bind, parse_dec, recover_pending, scan, run_shrink, free_target, new_size_for,
+    offer_part, offer_base, offer_psize, offer_free, offer_cluster_kib,
+    refusal, refusal_key, key_offer, key_go, key_ask_title, key_ask_text, key_busy, key_done, key_fail,
+    S_NONE, S_OFFER, S_REFUSED, ALIGN, MIN_FREE, WANT_FREE
+}
+
+const S_NONE: u64 = 0
+const S_OFFER: u64 = 1
+const S_REFUSED: u64 = 2
+const ALIGN: u64 = 2048
+const MIN_FREE: u64 = 65536
+const WANT_FREE: u64 = 16777216
+const BS: u64 = 512
+
+static mut fd: u64 = 0
+static mut total: u64 = 0
+static mut dev_name: u64 = 0
+static mut SCR: [u8; 118784] = [0 as u8; 118784]
+static mut SIG: [u8; 512] = [0 as u8; 512]
+
+static mut o_part: u64 = 0
+static mut o_base: u64 = 0
+static mut o_psize: u64 = 0
+static mut o_free: u64 = 0
+static mut o_cb: u64 = 0
+static mut r_code: u64 = 0
+static mut r_size: u64 = 0
+
+static mut K_OFFER: [u8; 13] = "shrink.offer\0"
+static mut K_GO: [u8; 10] = "shrink.go\0"
+static mut K_ASKT: [u8; 17] = "shrink.ask.title\0"
+static mut K_ASKX: [u8; 16] = "shrink.ask.text\0"
+static mut K_BUSY: [u8; 12] = "shrink.busy\0"
+static mut K_DONE: [u8; 12] = "shrink.done\0"
+static mut K_FAIL: [u8; 12] = "shrink.fail\0"
+static mut K_E_IO: [u8; 14] = "shrink.err.io\0"
+static mut K_E_NTFS: [u8; 16] = "shrink.err.ntfs\0"
+static mut K_E_CRYPT: [u8; 18] = "shrink.err.crypto\0"
+static mut K_E_UNSUP: [u8; 18] = "shrink.err.unsupp\0"
+static mut K_E_CORR: [u8; 16] = "shrink.err.corr\0"
+static mut K_E_DIRTY: [u8; 17] = "shrink.err.dirty\0"
+static mut K_E_HIBER: [u8; 16] = "shrink.err.hibr\0"
+static mut K_E_LOG: [u8; 15] = "shrink.err.log\0"
+static mut K_E_SPACE: [u8; 17] = "shrink.err.space\0"
+static mut K_E_RANGE: [u8; 17] = "shrink.err.range\0"
+static mut K_E_TABLE: [u8; 17] = "shrink.err.table\0"
+static mut K_E_CMPLX: [u8; 17] = "shrink.err.cmplx\0"
+static mut K_E_BAD: [u8; 15] = "shrink.err.bad\0"
+static mut K_E_DONE: [u8; 16] = "shrink.err.done\0"
+static mut K_E_NONE: [u8; 16] = "shrink.err.none\0"
+
+fn dev_rd(lba: u64, n: u64, dst: u64) -> u64 {
+    if instkern.lese(fd, lba, dst, n * BS) {
+        return 0
+    }
+    return 1
+}
+
+fn dev_wr(lba: u64, n: u64, src: u64) -> u64 {
+    if instkern.schreibe(fd, lba, src, n * BS) {
+        return 0
+    }
+    return 1
+}
+
+fn parse_dec(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while true {
+        let c: u64 = (*((p + i) as *mut u8)) as u64
+        if c < 48 || c > 57 {
+            return v
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn scratch() -> u64 {
+    return (&SCR[0 as usize]) as u64
+}
+
+fn bind(dev_fd: u64, sectors: u64, dev: u64) {
+    fd = dev_fd
+    total = sectors
+    dev_name = dev
+    o_part = 0
+    o_base = 0
+    o_psize = 0
+    o_free = 0
+    o_cb = 0
+    r_code = 0
+    r_size = 0
+}
+
+fn backup_gpt_present() -> bool {
+    if total < 40 {
+        return false
+    }
+    let p: u64 = (&SIG[0 as usize]) as u64
+    if !instkern.lese(fd, total - 1, p, BS) {
+        return false
+    }
+    return SIG[0 as usize] == 69 as u8 && SIG[1 as usize] == 70 as u8 && SIG[2 as usize] == 73 as u8
+        && SIG[3 as usize] == 32 as u8 && SIG[4 as usize] == 80 as u8
+}
+
+fn recover_all(n: u64) -> u64 {
+    var fixed: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if dualkern.p_typ(i) == dualkern.T_DATEN {
+            let base: u64 = dualkern.p_start(i)
+            if shrink.pending_at(dev_rd, total, base, scratch()) {
+                if wunlock.unlock(dev_name) {
+                    var st: u64 = 0
+                    if shrink.recover(dev_rd, dev_wr, total, base, scratch(), &st) == codes.E_OK && st == 1 {
+                        fixed = fixed + 1
+                    }
+                    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+                    wunlock.relock()
+                }
+            }
+        }
+        i = i + 1
+    }
+    return fixed
+}
+
+fn recover_pending() -> u64 {
+    var n: u64 = dualkern.tafel_lesen(fd, total)
+    var fixed: u64 = 0
+    if !dualkern.gpt_pruefen() {
+        if dualkern.grund() == dualkern.D_LESEN || !backup_gpt_present() {
+            return 0
+        }
+        if !wunlock.unlock(dev_name) {
+            return 0
+        }
+        let r: u64 = ptab.prepare(dev_rd, dev_wr, total, scratch())
+        ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+        wunlock.relock()
+        if r != codes.E_OK {
+            return 0
+        }
+        n = dualkern.tafel_lesen(fd, total)
+        if !dualkern.gpt_pruefen() {
+            return 0
+        }
+        fixed = 1
+    }
+    fixed = fixed + recover_all(n)
+    if fixed != 0 {
+        dualkern.tafel_lesen(fd, total)
+    }
+    return fixed
+}
+
+fn free_target(max_free: u64) -> u64 {
+    var f: u64 = max_free
+    if f > WANT_FREE {
+        f = WANT_FREE
+    }
+    return f
+}
+
+fn new_size_for(base: u64, psize: u64, free: u64) -> u64 {
+    let end: u64 = base + psize - free
+    let aligned: u64 = ((end + ALIGN - 1) / ALIGN) * ALIGN
+    return aligned - base
+}
+
+fn consider(i: u64) {
+    let base: u64 = dualkern.p_start(i)
+    var inf: shrink.Info = shrink.info_new()
+    var r: u64 = shrink.info(dev_rd, total, base, scratch(), &inf)
+    if r == codes.E_OK {
+        r = shrink.check(dev_rd, total, base, scratch())
+    }
+    if r == codes.E_NOT_NTFS {
+        return
+    }
+    var free: u64 = 0
+    if r == codes.E_OK {
+        if inf.psize > inf.min_sectors {
+            free = inf.psize - inf.min_sectors
+        }
+        if free < MIN_FREE {
+            r = codes.E_NO_SPACE
+        }
+    }
+    if r == codes.E_OK {
+        if o_free == 0 || free > o_free {
+            o_part = i + 1
+            o_base = base
+            o_psize = inf.psize
+            o_free = free
+            o_cb = inf.cb
+        }
+        return
+    }
+    let size: u64 = dualkern.p_ende(i) - base + 1
+    if r_code == 0 || size > r_size {
+        r_code = r
+        r_size = size
+    }
+}
+
+fn scan() -> u64 {
+    o_part = 0
+    o_free = 0
+    r_code = 0
+    r_size = 0
+    let n: u64 = dualkern.anz()
+    var i: u64 = 0
+    while i < n {
+        if dualkern.p_typ(i) == dualkern.T_DATEN {
+            consider(i)
+        }
+        i = i + 1
+    }
+    if o_free != 0 {
+        r_code = 0
+        return S_OFFER
+    }
+    if r_code != 0 {
+        return S_REFUSED
+    }
+    return S_NONE
+}
+
+fn run_shrink(free: u64) -> u64 {
+    if o_part == 0 || free < MIN_FREE || free > o_free {
+        return codes.E_RANGE
+    }
+    if !wunlock.unlock(dev_name) {
+        return codes.E_IO
+    }
+    let ns: u64 = new_size_for(o_base, o_psize, free)
+    let r: u64 = shrink.run(dev_rd, dev_wr, total, o_base, ns, scratch())
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    wunlock.relock()
+    return r
+}
+
+fn offer_part() -> u64 {
+    return o_part
+}
+
+fn offer_base() -> u64 {
+    return o_base
+}
+
+fn offer_psize() -> u64 {
+    return o_psize
+}
+
+fn offer_free() -> u64 {
+    return o_free
+}
+
+fn offer_cluster_kib() -> u64 {
+    return o_cb / 1024
+}
+
+fn refusal() -> u64 {
+    return r_code
+}
+
+fn refusal_key(code: u64) -> u64 {
+    if code == codes.E_IO {
+        return (&K_E_IO[0 as usize]) as u64
+    }
+    if code == codes.E_NOT_NTFS {
+        return (&K_E_NTFS[0 as usize]) as u64
+    }
+    if code == codes.E_ENCRYPTED {
+        return (&K_E_CRYPT[0 as usize]) as u64
+    }
+    if code == codes.E_UNSUPPORTED {
+        return (&K_E_UNSUP[0 as usize]) as u64
+    }
+    if code == codes.E_CORRUPT {
+        return (&K_E_CORR[0 as usize]) as u64
+    }
+    if code == codes.E_DIRTY {
+        return (&K_E_DIRTY[0 as usize]) as u64
+    }
+    if code == codes.E_HIBERNATED {
+        return (&K_E_HIBER[0 as usize]) as u64
+    }
+    if code == codes.E_LOG_UNCLEAN {
+        return (&K_E_LOG[0 as usize]) as u64
+    }
+    if code == codes.E_NO_SPACE {
+        return (&K_E_SPACE[0 as usize]) as u64
+    }
+    if code == codes.E_RANGE {
+        return (&K_E_RANGE[0 as usize]) as u64
+    }
+    if code == codes.E_TABLE {
+        return (&K_E_TABLE[0 as usize]) as u64
+    }
+    if code == codes.E_COMPLEX {
+        return (&K_E_CMPLX[0 as usize]) as u64
+    }
+    if code == codes.E_BADCLUS {
+        return (&K_E_BAD[0 as usize]) as u64
+    }
+    if code == codes.E_DONE {
+        return (&K_E_DONE[0 as usize]) as u64
+    }
+    return (&K_E_NONE[0 as usize]) as u64
+}
+
+fn key_offer() -> u64 {
+    return (&K_OFFER[0 as usize]) as u64
+}
+
+fn key_go() -> u64 {
+    return (&K_GO[0 as usize]) as u64
+}
+
+fn key_ask_title() -> u64 {
+    return (&K_ASKT[0 as usize]) as u64
+}
+
+fn key_ask_text() -> u64 {
+    return (&K_ASKX[0 as usize]) as u64
+}
+
+fn key_busy() -> u64 {
+    return (&K_BUSY[0 as usize]) as u64
+}
+
+fn key_done() -> u64 {
+    return (&K_DONE[0 as usize]) as u64
+}
+
+fn key_fail() -> u64 {
+    return (&K_FAIL[0 as usize]) as u64
+}
