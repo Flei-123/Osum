@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: MPL-2.0
+// lib/audio/speechdsp.fi -- audio.speechdsp: integer DSP parts of the speech synthesizer (no heap, no floats).
+profile kernel
+
+export { RATE, cos_fine, res_set, res_step, res_reset, noise_next, noise_seed }
+
+const RATE: u64 = 16000
+const NRES: u64 = 4
+
+static mut qsin_tab: [u16; 65] = [
+    0,402,804,1205,1606,2006,2404,2801,3196,3590,3981,4370,4756,5139,5520,5897,6270,6639,7005,7366,7723,8076,8423,8765,9102,9434,9760,10080,10394,10702,11003,11297,11585,11866,12140,12406,12665,12916,13160,13395,13623,13842,14053,14256,14449,14635,14811,14978,15137,15286,15426,15557,15679,15791,15893,15986,16069,16143,16207,16261,16305,16340,16364,16379,16384
+]
+static mut r_a1: [i64; 4] = [0 as i64; 4]
+static mut r_a2: [i64; 4] = [0 as i64; 4]
+static mut r_b: [i64; 4] = [0 as i64; 4]
+static mut r_y1: [i64; 4] = [0 as i64; 4]
+static mut r_y2: [i64; 4] = [0 as i64; 4]
+static mut lfsr: u64 = 0xACE1
+
+fn qsin(k: u64) -> i64 {
+    let i: u64 = k >> 2
+    let f: u64 = k & 3
+    let a: i64 = (qsin_tab[(i) as usize]) as i64
+    var b: i64 = a
+    if i < 64 {
+        b = (qsin_tab[(i + 1) as usize]) as i64
+    }
+    return a + (b - a) * (f as i64) / 4
+}
+
+fn sin_q14(idx: u64) -> i64 {
+    let i: u64 = idx & 1023
+    let q: u64 = i >> 8
+    let k: u64 = i & 255
+    if q == 0 {
+        return qsin(k)
+    }
+    if q == 1 {
+        return qsin(256 - k)
+    }
+    if q == 2 {
+        return 0 - qsin(k)
+    }
+    return 0 - qsin(256 - k)
+}
+
+fn cos_fine(phase: u64) -> i64 {
+    let base: u64 = (phase >> 4) + 256
+    let f: u64 = phase & 15
+    let a: i64 = sin_q14(base)
+    let b: i64 = sin_q14(base + 1)
+    return a + (b - a) * (f as i64) / 16
+}
+
+fn res_set(k: u64, hz: u64, bw: u64) {
+    if k >= NRES {
+        return
+    }
+    let phase: u64 = hz * 16384 / RATE
+    let c: i64 = cos_fine(phase)
+    var r: i64 = 16384 - ((bw * 51472 / RATE) as i64)
+    if r < 8192 {
+        r = 8192
+    }
+    let a1: i64 = 2 * r * c / 16384
+    let a2: i64 = 0 - (r * r / 16384)
+    r_a1[(k) as usize] = a1
+    r_a2[(k) as usize] = a2
+    r_b[(k) as usize] = 16384 - a1 - a2
+    r_y1[(k) as usize] = 0 as i64
+    r_y2[(k) as usize] = 0 as i64
+}
+
+fn res_reset(k: u64) {
+    if k >= NRES {
+        return
+    }
+    r_y1[(k) as usize] = 0 as i64
+    r_y2[(k) as usize] = 0 as i64
+}
+
+fn res_step(k: u64, x: i64) -> i64 {
+    let i: usize = (k) as usize
+    let y: i64 = (r_b[i] * x + r_a1[i] * r_y1[i] + r_a2[i] * r_y2[i]) / 16384
+    r_y2[i] = r_y1[i]
+    r_y1[i] = y
+    return y
+}
+
+fn noise_seed(s: u64) {
+    lfsr = (s & 0xFFFF) | 1
+}
+
+fn noise_next() -> i64 {
+    let bit: u64 = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1
+    lfsr = (lfsr >> 1) | (bit << 15)
+    return ((lfsr & 0xFFF) as i64) - 2048
+}

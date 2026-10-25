@@ -1,0 +1,290 @@
+import std.rt
+import std.io
+import audio.speech
+import audio.speechdsp
+import audio.speechphon
+import fui.speaktext
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+static mut cbuf: [u8; 2048] = [0 as u8; 2048]
+static mut cslot: usize = 0
+static mut pcm: [u8; 262144] = [0 as u8; 262144]
+static mut obuf: [u8; 256] = [0 as u8; 256]
+static mut phb: [u8; 512] = [0 as u8; 512]
+
+fn c(s: str) -> u64 {
+    let base: usize = (cslot % 16) * 128
+    cslot = cslot + 1
+    var i: usize = 0
+    while i < s.length() && i < 127 {
+        cbuf[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    cbuf[base + i] = 0 as u8
+    return ((&cbuf[0 as usize]) as u64) + base as u64
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn is_s(p: u64, s: str) -> bool {
+    var i: usize = 0
+    while i < s.length() {
+        if rt.ld8(p, i) != rt.ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rt.ld8(p, i) == 0 as u8
+}
+
+fn has_sub(p: u64, s: str) -> bool {
+    var i: usize = 0
+    while rt.ld8(p, i) != 0 as u8 {
+        var k: usize = 0
+        var same: bool = true
+        while k < s.length() && same {
+            if rt.ld8(p, i + k) != rt.ld8(s.p as u64, k) {
+                same = false
+            }
+            k = k + 1
+        }
+        if same {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn say(role: u64, flags: u64, name: str) -> u64 {
+    return speaktext.describe(role, flags, c(name), (&obuf[0 as usize]) as u64, 256)
+}
+
+fn talk(text: str) -> u64 {
+    return speech.render(c(text), (&pcm[0 as usize]) as u64, 65000)
+}
+
+fn smp(i: u64) -> i64 {
+    let lo: i64 = rt.ld8((&pcm[0 as usize]) as u64, (i * 4) as usize) as i64
+    let hi: i64 = rt.ld8((&pcm[0 as usize]) as u64, (i * 4 + 1) as usize) as i64
+    let v: i64 = lo + hi * 256
+    if v >= 32768 {
+        return v - 65536
+    }
+    return v
+}
+
+fn sum_sig(n: u64) -> u64 {
+    var h: u64 = 7
+    var i: u64 = 0
+    while i < n * 4 {
+        h = (h * 31 + rt.ld8((&pcm[0 as usize]) as u64, i as usize) as u64) % 1000000007
+        i = i + 1
+    }
+    return h
+}
+
+fn peak(n: u64) -> i64 {
+    var pk: i64 = 0
+    var i: u64 = 0
+    while i < n {
+        var a: i64 = smp(i)
+        if a < 0 {
+            a = 0 - a
+        }
+        if a > pk {
+            pk = a
+        }
+        i = i + 1
+    }
+    return pk
+}
+
+fn tone_energy(from: u64, n: u64, hz: u64) -> u64 {
+    var re: i64 = 0
+    var im: i64 = 0
+    var i: u64 = 0
+    while i < n {
+        let ph: u64 = (hz * (from + i) * 16384 / 16000) % 16384
+        let x: i64 = smp(from + i)
+        re = re + x * speechdsp.cos_fine(ph) / 1024
+        im = im + x * speechdsp.cos_fine((ph + 12288) % 16384) / 1024
+        i = i + 1
+    }
+    let a: i64 = re / 64
+    let b: i64 = im / 64
+    return (a * a + b * b) as u64
+}
+
+fn band(from: u64, n: u64, lo: u64, hi: u64) -> u64 {
+    var e: u64 = 0
+    var f: u64 = lo
+    while f <= hi {
+        e = e + tone_energy(from, n, f)
+        f = f + 50
+    }
+    return e
+}
+
+fn period_of(from: u64, n: u64) -> u64 {
+    var best: u64 = 0
+    var best_v: i64 = 0 - 1
+    var lag: u64 = 60
+    while lag < 220 {
+        var s: i64 = 0
+        var i: u64 = 0
+        while i < n {
+            s = s + smp(from + i) * smp(from + i + lag) / 256
+            i = i + 1
+        }
+        if s > best_v {
+            best_v = s
+            best = lag
+        }
+        lag = lag + 1
+    }
+    return best
+}
+
+fn longest_zero_run(n: u64) -> u64 {
+    var best: u64 = 0
+    var run: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if smp(i) == 0 {
+            run = run + 1
+            if run > best {
+                best = run
+            }
+        } else {
+            run = 0
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn phon(text: str) -> u64 {
+    return speechphon.to_phonemes(c(text), (&phb[0 as usize]) as u64, 512)
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+
+    check(&t, say(3, 3, "Save") > 0 && is_s((&obuf[0 as usize]) as u64, "Save, button"), "button: name, role")
+    check(&t, say(4, 1 + 32, "Remember me") > 0 && is_s((&obuf[0 as usize]) as u64, "Remember me, check box, checked"), "check box checked")
+    say(4, 1, "Remember me")
+    check(&t, is_s((&obuf[0 as usize]) as u64, "Remember me, check box, not checked"), "check box not checked")
+    say(3, 2, "Disabled")
+    check(&t, is_s((&obuf[0 as usize]) as u64, "Disabled, button, unavailable"), "disabled button says unavailable")
+    say(6, 1 + 2 + 64, "Password")
+    check(&t, is_s((&obuf[0 as usize]) as u64, "Password, password field, protected"), "password field: name, role, protected")
+    check(&t, say(3, 1 + 16, "Hidden") == 0 && rt.ld8((&obuf[0 as usize]) as u64, 0) == 0 as u8, "hidden node says nothing")
+    say(2, 1, "Just text")
+    check(&t, is_s((&obuf[0 as usize]) as u64, "Just text"), "label: name only")
+    say(8, 1 + 8, "Files")
+    check(&t, is_s((&obuf[0 as usize]) as u64, "Files, table, selected"), "table selected")
+    say(1, 1, "Notes")
+    check(&t, is_s((&obuf[0 as usize]) as u64, "Notes, window"), "window node: no 'unavailable'")
+    say(5, 1, "a\tb")
+    check(&t, is_s((&obuf[0 as usize]) as u64, "a b, edit field"), "control characters become spaces")
+    say(3, 1, "0123456789012345678901234567890123456789ABCDEFGH")
+    check(&t, !has_sub((&obuf[0 as usize]) as u64, "ABCDEFGH") && has_sub((&obuf[0 as usize]) as u64, "0123456789012345678901234567890123456789"), "name cut at 40 octets")
+    var canary: [u8; 24] = [0 as u8; 24]
+    canary[0 as usize] = 80 as u8
+    canary[1 as usize] = 119 as u8
+    canary[2 as usize] = 0 as u8
+    canary[3 as usize] = 71 as u8
+    canary[4 as usize] = 69 as u8
+    canary[5 as usize] = 72 as u8
+    canary[6 as usize] = 69 as u8
+    canary[7 as usize] = 73 as u8
+    canary[8 as usize] = 77 as u8
+    speaktext.describe(6, 1 + 64, (&canary[0 as usize]) as u64, (&obuf[0 as usize]) as u64, 256)
+    check(&t, !has_sub((&obuf[0 as usize]) as u64, "GEHEIM") && has_sub((&obuf[0 as usize]) as u64, "Pw, password field, protected"), "protected node: nothing past the name is spoken")
+    speaktext.window_intro(c("Notes"), (&obuf[0 as usize]) as u64, 256)
+    check(&t, is_s((&obuf[0 as usize]) as u64, "Notes, window"), "window intro")
+    check(&t, speaktext.describe(3, 1, c("Long name here"), (&obuf[0 as usize]) as u64, 8) <= 7, "output capacity respected")
+
+    check(&t, phon("save") == 3 && rt.ld8((&phb[0 as usize]) as u64, 0) == speechphon.PH_S && rt.ld8((&phb[0 as usize]) as u64, 2) == speechphon.PH_V, "silent final e: save = s a v")
+    check(&t, phon("a b") == 3 && rt.ld8((&phb[0 as usize]) as u64, 1) == speechphon.PH_WORD, "space between words is a word pause")
+    let p1: u64 = phon("shop")
+    check(&t, p1 == 3 && rt.ld8((&phb[0 as usize]) as u64, 0) == speechphon.PH_SH, "digraph sh")
+    check(&t, phon("1") > 2 && phon("Menü") == phon("Menu"), "digits are words; umlauts fold to vowels")
+    check(&t, phon("a,") == 2 && rt.ld8((&phb[0 as usize]) as u64, 1) == speechphon.PH_COMMA, "comma is a longer pause")
+
+    check(&t, talk("") == 0, "empty text, no audio")
+    let na: u64 = talk("a")
+    check(&t, na >= 1800 && na < 2600, "a vowel lasts 110 to 160 ms")
+    let ha: u64 = sum_sig(na)
+    let nb: u64 = talk("a")
+    check(&t, nb == na && sum_sig(nb) == ha, "rendering is deterministic")
+    let n1: u64 = talk("hello")
+    let n2: u64 = talk("hello world")
+    check(&t, n2 > n1 + 1000, "longer text, longer audio")
+    let np: u64 = talk("hello world")
+    check(&t, np == n2 && peak(np) <= 32000 && peak(np) >= 2500, "audible and never clipped")
+    let d1: u64 = talk("1")
+    let dh: u64 = sum_sig(d1)
+    let d2: u64 = talk("2")
+    check(&t, d1 > 1500 && sum_sig(d2) != dh, "digits render and differ")
+    let s1: u64 = talk("save")
+    let h1: u64 = sum_sig(s1)
+    let s2: u64 = talk("close")
+    check(&t, sum_sig(s2) != h1, "different text, different audio")
+
+    var cap_ok: bool = true
+    var g: u64 = 0
+    while g < 16 {
+        pcm[(1000 * 4 + g) as usize] = 170 as u8
+        g = g + 1
+    }
+    let nc: u64 = speech.render(c("hello world this is a long sentence"), (&pcm[0 as usize]) as u64, 1000)
+    g = 0
+    while g < 16 {
+        if pcm[(1000 * 4 + g) as usize] != 170 as u8 {
+            cap_ok = false
+        }
+        g = g + 1
+    }
+    check(&t, nc == 1000 && cap_ok, "capacity respected, nothing written past it")
+
+    let va: u64 = talk("a")
+    let mid: u64 = va / 2 - 400
+    let per: u64 = period_of(mid, 800)
+    check(&t, per >= 112 && per <= 140, "vowel pitch period near 125 Hz")
+    let a_low: u64 = band(mid, 800, 600, 900)
+    let a_high: u64 = band(mid, 800, 2100, 2600)
+    check(&t, a_low > a_high * 2, "a: energy at F1 (730) beats 2.1-2.6 kHz")
+    let vi: u64 = talk("i")
+    let mi: u64 = vi / 2 - 400
+    let i_low: u64 = band(mi, 800, 600, 900)
+    let i_high: u64 = band(mi, 800, 2100, 2600)
+    check(&t, i_high > i_low * 2, "i: energy at F2 (2290) beats 600-900 Hz")
+    let vs: u64 = talk("s")
+    let ms: u64 = vs / 2 - 400
+    check(&t, band(ms, 800, 4000, 7000) > band(ms, 800, 100, 1000) * 5, "s: hiss, energy above 4 kHz")
+    let vm: u64 = talk("m")
+    let mm: u64 = vm / 2 - 400
+    check(&t, band(mm, 800, 150, 500) > band(mm, 800, 3000, 6000) * 3, "m: low voiced hum")
+    let vg: u64 = talk("a a")
+    check(&t, longest_zero_run(vg) >= 1000, "word gap is real silence")
+
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails > 0 {
+        return 1
+    }
+    return 0
+}

@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: MPL-2.0
+// lib/fui/speaktext.fi -- fui.speaktext: what a screen reader says about an accessibility node (no heap).
+//
+// Node words as in kernel/ui/ax.fi: role (0..16), state bits (enabled 1, focusable 2, focused 4, selected 8, hidden 16,
+// checked 32, protected 64). The text is built from role, state and the accessible NAME only. The value of a node is
+// never spoken: a password field says its name and "protected", nothing else.
+profile kernel
+
+export { describe, window_intro, sanitize, ROLE_WINDOW, ROLE_LABEL, ROLE_CHECK, ROLE_PASSWORD, S_ENABLED, S_FOCUSED, S_SELECTED, S_HIDDEN, S_CHECKED, S_PROTECTED, NAME_MAX }
+
+const ROLE_WINDOW: u64 = 1
+const ROLE_LABEL: u64 = 2
+const ROLE_CHECK: u64 = 4
+const ROLE_PASSWORD: u64 = 6
+const S_ENABLED: u64 = 1
+const S_FOCUSED: u64 = 4
+const S_SELECTED: u64 = 8
+const S_HIDDEN: u64 = 16
+const S_CHECKED: u64 = 32
+const S_PROTECTED: u64 = 64
+const NAME_MAX: u64 = 40
+const STRIDE: u64 = 16
+
+static mut role_words: [u8; 272] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0window\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0button\0\0\0\0\0\0\0\0\0\0check box\0\0\0\0\0\0\0edit field\0\0\0\0\0\0password field\0\0list\0\0\0\0\0\0\0\0\0\0\0\0table\0\0\0\0\0\0\0\0\0\0\0tab\0\0\0\0\0\0\0\0\0\0\0\0\0menu bar\0\0\0\0\0\0\0\0combo box\0\0\0\0\0\0\0separator\0\0\0\0\0\0\0scroll bar\0\0\0\0\0\0menu\0\0\0\0\0\0\0\0\0\0\0\0dialog\0\0\0\0\0\0\0\0\0\0slider\0\0\0\0\0\0\0\0\0\0"
+static mut w_unavailable: [u8; 12] = "unavailable\0"
+static mut w_checked: [u8; 8] = "checked\0"
+static mut w_unchecked: [u8; 12] = "not checked\0"
+static mut w_selected: [u8; 9] = "selected\0"
+static mut w_protected: [u8; 10] = "protected\0"
+static mut w_window: [u8; 7] = "window\0"
+static mut o_ptr: u64 = 0
+static mut o_len: u64 = 0
+static mut o_cap: u64 = 0
+
+fn ch(c: u8) {
+    if o_len + 1 < o_cap {
+        *((o_ptr + o_len) as *mut u8) = c
+        o_len = o_len + 1
+    }
+}
+
+fn put_s(p: u64) {
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 {
+        ch(*((p + i) as *mut u8))
+        i = i + 1
+    }
+}
+
+fn sep() {
+    if o_len > 0 {
+        ch(44 as u8)
+        ch(32 as u8)
+    }
+}
+
+fn sanitize(src: u64, dst: u64, cap: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < NAME_MAX && n + 1 < cap {
+        let c: u8 = *((src + i) as *mut u8)
+        if c == 0 as u8 {
+            break
+        }
+        if c < 32 as u8 || c == 127 as u8 {
+            *((dst + n) as *mut u8) = 32 as u8
+        } else {
+            *((dst + n) as *mut u8) = c
+        }
+        n = n + 1
+        i = i + 1
+    }
+    *((dst + n) as *mut u8) = 0 as u8
+    return n
+}
+
+fn role_word(role: u64) -> u64 {
+    var r: u64 = role
+    if r > 16 {
+        r = 0
+    }
+    return (&role_words[0 as usize]) as u64 + r * STRIDE
+}
+
+fn describe(role: u64, flags: u64, name: u64, out: u64, cap: u64) -> u64 {
+    o_ptr = out
+    o_len = 0
+    o_cap = cap
+    if cap == 0 {
+        return 0
+    }
+    *((out) as *mut u8) = 0 as u8
+    if (flags & S_HIDDEN) != 0 {
+        return 0
+    }
+    var nm: [u8; 48] = [0 as u8; 48]
+    let nl: u64 = sanitize(name, (&nm[0 as usize]) as u64, 48)
+    if nl > 0 {
+        put_s((&nm[0 as usize]) as u64)
+    }
+    if role == ROLE_LABEL {
+        *((out + o_len) as *mut u8) = 0 as u8
+        return o_len
+    }
+    let rw: u64 = role_word(role)
+    if *((rw) as *mut u8) != 0 as u8 {
+        sep()
+        put_s(rw)
+    }
+    if role != ROLE_WINDOW && (flags & S_ENABLED) == 0 {
+        sep()
+        put_s((&w_unavailable[0 as usize]) as u64)
+    }
+    if role == ROLE_CHECK {
+        sep()
+        if (flags & S_CHECKED) != 0 {
+            put_s((&w_checked[0 as usize]) as u64)
+        } else {
+            put_s((&w_unchecked[0 as usize]) as u64)
+        }
+    }
+    if (flags & S_SELECTED) != 0 {
+        sep()
+        put_s((&w_selected[0 as usize]) as u64)
+    }
+    if (flags & S_PROTECTED) != 0 {
+        sep()
+        put_s((&w_protected[0 as usize]) as u64)
+    }
+    *((out + o_len) as *mut u8) = 0 as u8
+    return o_len
+}
+
+fn window_intro(name: u64, out: u64, cap: u64) -> u64 {
+    o_ptr = out
+    o_len = 0
+    o_cap = cap
+    if cap == 0 {
+        return 0
+    }
+    var nm: [u8; 48] = [0 as u8; 48]
+    let nl: u64 = sanitize(name, (&nm[0 as usize]) as u64, 48)
+    if nl > 0 {
+        put_s((&nm[0 as usize]) as u64)
+        sep()
+    }
+    put_s((&w_window[0 as usize]) as u64)
+    *((out + o_len) as *mut u8) = 0 as u8
+    return o_len
+}

@@ -1,0 +1,262 @@
+// SPDX-License-Identifier: MPL-2.0
+// lib/audio/speech.fi -- audio.speech: small formant speech synthesizer (integer only, no heap).
+//
+//     import audio.speech
+//     let frames: u64 = speech.render(text_ptr, out_ptr, cap_frames)   // 16000 Hz, S16LE stereo, 4 octets per frame
+//
+// Text is a NUL terminated ASCII/UTF-8 string. Output is rough, robotic English-like speech; digits are spoken.
+profile kernel
+
+import audio.speechdsp
+import audio.speechphon
+
+export { render, speak_rate, MAX_PH, TARGET_PEAK }
+
+const MAX_PH: u64 = 512
+const TMP_MAX: u64 = 4608
+const TARGET_PEAK: i64 = 9000
+const K_PAUSE: u16 = 0
+const K_VOICED: u16 = 1
+const K_FRIC: u16 = 2
+const K_VFRIC: u16 = 3
+const K_STOP: u16 = 4
+const K_VSTOP: u16 = 5
+
+static mut p_kind: [u16; 28] = [0,0,0, 1,1,1,1,1,1, 1,1,1,1,1,1, 2,2,2,2,2, 3,3, 4,4,4, 5,5,5]
+static mut p_dur: [u16; 28] = [70,160,280, 120,110,110,120,120,70, 80,80,75,80,70,70, 110,120,90,70,90, 100,80, 75,75,80, 75,70,75]
+static mut p_f1: [u16; 28] = [0,0,0, 730,530,270,570,300,500, 250,250,350,420,300,280, 0,0,0,0,0, 200,200, 0,0,0, 0,0,0]
+static mut p_f2: [u16; 28] = [0,0,0, 1090,1840,2290,840,870,1500, 1000,1500,1200,1300,610,2200, 0,0,0,0,0, 1500,1500, 0,0,0, 0,0,0]
+static mut p_f3: [u16; 28] = [0,0,0, 2440,2480,3010,2410,2240,2500, 2200,2500,2800,1650,2200,2900, 0,0,0,0,0, 2500,2500, 0,0,0, 0,0,0]
+static mut p_nz: [u16; 28] = [0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0, 5200,2600,3500,1500,4500, 5200,3500, 800,4500,2000, 800,4500,2000]
+static mut p_nbw: [u16; 28] = [0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0, 2400,1200,3500,2500,3500, 2400,3500, 700,1800,900, 700,1800,900]
+static mut p_amp: [u16; 28] = [0,0,0, 100,100,90,100,90,70, 55,55,65,65,70,70, 45,55,25,25,20, 40,25, 50,55,50, 40,45,40]
+
+static mut ph_buf: [u8; 512] = [0 as u8; 512]
+static mut tmp_a: [i64; 4608] = [0 as i64; 4608]
+static mut tmp_b: [i64; 4608] = [0 as i64; 4608]
+static mut glottal: u64 = 0
+static mut done_frames: u64 = 0
+static mut out_ptr: u64 = 0
+static mut out_cap: u64 = 0
+
+fn speak_rate() -> u64 {
+    return speechdsp.RATE
+}
+
+fn abs64(v: i64) -> i64 {
+    if v < 0 {
+        return 0 - v
+    }
+    return v
+}
+
+fn put_frame(s: i64) {
+    if done_frames >= out_cap {
+        return
+    }
+    var v: i64 = s
+    if v > 32000 {
+        v = 32000
+    }
+    if v < 0 - 32000 {
+        v = 0 - 32000
+    }
+    let u: u64 = ((v + 65536) as u64) & 0xFFFF
+    let at: u64 = out_ptr + done_frames * 4
+    *((at) as *mut u8) = (u & 0xFF) as u8
+    *((at + 1) as *mut u8) = (u >> 8) as u8
+    *((at + 2) as *mut u8) = (u & 0xFF) as u8
+    *((at + 3) as *mut u8) = (u >> 8) as u8
+    done_frames = done_frames + 1
+}
+
+fn voice_pulse() -> i64 {
+    var pitch: u64 = 125
+    let decl: u64 = done_frames / 800
+    if decl < 30 {
+        pitch = 125 - decl
+    } else {
+        pitch = 95
+    }
+    let period: u64 = speechdsp.RATE / pitch
+    glottal = glottal + 1
+    if glottal >= period {
+        glottal = 0
+        return 1000 as i64
+    }
+    return 0 as i64
+}
+
+fn peak_of(buf: u64, n: u64) -> i64 {
+    var pk: i64 = 1
+    var i: u64 = 0
+    while i < n {
+        let a: i64 = abs64(*((buf + i * 8) as *mut i64))
+        if a > pk {
+            pk = a
+        }
+        i = i + 1
+    }
+    return pk
+}
+
+fn commit(buf: u64, n: u64, amp: i64, fade: u64) {
+    let pk: i64 = peak_of(buf, n)
+    let target: i64 = TARGET_PEAK * amp / 100
+    var i: u64 = 0
+    while i < n {
+        var v: i64 = *((buf + i * 8) as *mut i64) * target / pk
+        if i < fade {
+            v = v * (i as i64) / (fade as i64)
+        }
+        if n - 1 - i < fade {
+            v = v * ((n - 1 - i) as i64) / (fade as i64)
+        }
+        put_frame(v)
+        i = i + 1
+    }
+}
+
+fn silence(ms: u64) {
+    let n: u64 = ms * speechdsp.RATE / 1000
+    var i: u64 = 0
+    while i < n {
+        put_frame(0 as i64)
+        i = i + 1
+    }
+}
+
+fn gen_voiced(id: u64, n: u64) {
+    speechdsp.res_set(0, p_f1[(id) as usize] as u64, 60)
+    speechdsp.res_set(1, p_f2[(id) as usize] as u64, 90)
+    speechdsp.res_set(2, p_f3[(id) as usize] as u64, 120)
+    var i: u64 = 0
+    while i < n {
+        let x: i64 = voice_pulse()
+        var y: i64 = speechdsp.res_step(0, x)
+        y = speechdsp.res_step(1, y)
+        y = speechdsp.res_step(2, y)
+        tmp_a[(i) as usize] = y
+        i = i + 1
+    }
+    commit((&tmp_a[0 as usize]) as u64, n, p_amp[(id) as usize] as i64, 96)
+}
+
+fn gen_noise(buf: u64, n: u64, hz: u64, bw: u64, from: u64) {
+    speechdsp.res_set(3, hz, bw)
+    var prev: i64 = 0
+    var prev2: i64 = 0
+    var i: u64 = 0
+    while i < n {
+        var x: i64 = speechdsp.noise_next()
+        if hz >= 4000 {
+            let cur: i64 = x
+            x = cur - 2 * prev + prev2
+            prev2 = prev
+            prev = cur
+        }
+        let y: i64 = speechdsp.res_step(3, x)
+        *((buf + (from + i) * 8) as *mut i64) = y
+        i = i + 1
+    }
+}
+
+fn gen_fric(id: u64, n: u64) {
+    gen_noise((&tmp_a[0 as usize]) as u64, n, p_nz[(id) as usize] as u64, p_nbw[(id) as usize] as u64, 0)
+    commit((&tmp_a[0 as usize]) as u64, n, p_amp[(id) as usize] as i64, 160)
+}
+
+fn gen_vfric(id: u64, n: u64) {
+    gen_noise((&tmp_a[0 as usize]) as u64, n, p_nz[(id) as usize] as u64, p_nbw[(id) as usize] as u64, 0)
+    speechdsp.res_set(0, p_f1[(id) as usize] as u64, 80)
+    speechdsp.res_set(1, p_f2[(id) as usize] as u64, 200)
+    var i: u64 = 0
+    while i < n {
+        let y: i64 = speechdsp.res_step(1, speechdsp.res_step(0, voice_pulse()))
+        tmp_b[(i) as usize] = y
+        i = i + 1
+    }
+    let pa: i64 = peak_of((&tmp_a[0 as usize]) as u64, n)
+    let pb: i64 = peak_of((&tmp_b[0 as usize]) as u64, n)
+    i = 0
+    while i < n {
+        tmp_a[(i) as usize] = tmp_a[(i) as usize] * 1000 / pa + tmp_b[(i) as usize] * 1000 / pb
+        i = i + 1
+    }
+    commit((&tmp_a[0 as usize]) as u64, n, p_amp[(id) as usize] as i64, 160)
+}
+
+fn gen_stop(id: u64, voiced: bool) {
+    let rate: u64 = speechdsp.RATE
+    let closure: u64 = 30 * rate / 1000
+    let burst: u64 = 12 * rate / 1000
+    var asp: u64 = 18 * rate / 1000
+    if voiced {
+        asp = 0
+    }
+    if closure > 0 {
+        if voiced {
+            speechdsp.res_set(0, 180, 80)
+            var j: u64 = 0
+            while j < closure {
+                tmp_b[(j) as usize] = speechdsp.res_step(0, voice_pulse())
+                j = j + 1
+            }
+            let pk: i64 = peak_of((&tmp_b[0 as usize]) as u64, closure)
+            j = 0
+            while j < closure {
+                put_frame(tmp_b[(j) as usize] * (TARGET_PEAK / 6) / pk)
+                j = j + 1
+            }
+        } else {
+            silence(30)
+        }
+    }
+    gen_noise((&tmp_a[0 as usize]) as u64, burst, p_nz[(id) as usize] as u64, p_nbw[(id) as usize] as u64, 0)
+    var i: u64 = 0
+    while i < burst {
+        tmp_a[(i) as usize] = tmp_a[(i) as usize] * ((burst - i) as i64) / (burst as i64)
+        i = i + 1
+    }
+    commit((&tmp_a[0 as usize]) as u64, burst, p_amp[(id) as usize] as i64, 8)
+    if asp > 0 {
+        gen_noise((&tmp_a[0 as usize]) as u64, asp, 1500, 2500, 0)
+        commit((&tmp_a[0 as usize]) as u64, asp, 22, 48)
+    }
+}
+
+fn render_one(id: u64) {
+    let n: u64 = (p_dur[(id) as usize] as u64) * speechdsp.RATE / 1000
+    let k: u16 = p_kind[(id) as usize]
+    if k == K_PAUSE {
+        silence(p_dur[(id) as usize] as u64)
+    } else if k == K_VOICED {
+        gen_voiced(id, n)
+    } else if k == K_FRIC {
+        gen_fric(id, n)
+    } else if k == K_VFRIC {
+        gen_vfric(id, n)
+    } else if k == K_STOP {
+        gen_stop(id, false)
+    } else {
+        gen_stop(id, true)
+    }
+}
+
+fn render(text: u64, out: u64, cap_frames: u64) -> u64 {
+    out_ptr = out
+    out_cap = cap_frames
+    done_frames = 0
+    glottal = 0
+    speechdsp.noise_seed(0xACE1)
+    let n: u64 = speechphon.to_phonemes(text, (&ph_buf[0 as usize]) as u64, MAX_PH)
+    var i: u64 = 0
+    while i < n && done_frames < out_cap {
+        let id: u64 = (ph_buf[(i) as usize]) as u64
+        if id < speechphon.PH_COUNT {
+            render_one(id)
+        }
+        i = i + 1
+    }
+    return done_frames
+}

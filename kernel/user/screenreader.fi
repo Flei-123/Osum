@@ -1,0 +1,401 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/screenreader.fi -- ROUND SR-1 (P-016): THE SCREEN READER.
+//
+// Reads the accessibility tree (kernel/ui/ax.fi, docs/A11Y.md) and SPEAKS what has the focus: the name, the role and the
+// state of the focused control, and the window title when the focus moves into another window.
+//
+//   screenreader serve [ticks] [silent]   run as root; grants itself P_READ only (never P_ACT), switches recording on,
+//                                         follows the focus and value events
+//   screenreader say <text>               speak a text (no tree access needed)
+//
+// Output: every announcement is one serial line `sr: say "<text>"`, then the synthesizer (lib/audio/speech.fi) renders it
+// and the stereo 16-bit frames go to the mixer (SYS_OSUM_AUDOPEN / AUDSEND). `silent` and a missing sound device skip
+// only the last step. A newer event cuts the speech that is playing.
+//
+// SECURITY: the reader sees the whole screen, so it has the right only because root grants it to itself, and the right
+// falls at exec. What is spoken is built by lib/fui/speaktext.fi from role, state and NAME only; the value of a node is
+// never read, a password field says its name and "protected". Typing into entries is not echoed (value events of
+// entries, passwords, sliders and scroll bars are dropped). While the screen is locked the kernel drops the events and
+// refuses the reads of foreign windows.
+
+profile kernel
+
+import ulib
+import actwire
+import fui.speaktext
+import audio.speech
+
+export { u_start }
+
+const AX_READ: u64 = 1911
+const AX_EVENT: u64 = 1912
+const AX_PERM: u64 = 1913
+const AX_INFO: u64 = 1914
+const AX_SET: u64 = 1915
+const SYS_AUDSET: u64 = 1851
+const SYS_AUDOPEN: u64 = 1853
+const SYS_AUDSEND: u64 = 1854
+const AS_END: u64 = 9
+const AS_CLOSE: u64 = 8
+const AI_COUNT: u64 = 0
+const AI_GEN: u64 = 1
+const AI_EVENTS: u64 = 10
+const AI_ON: u64 = 12
+const C_ON: u64 = 3
+const P_READ: u64 = 1
+const AE_FOCUS: u64 = 1
+const AE_VALUE: u64 = 2
+const NODE_BYTES: u64 = 96
+const MAXN: u64 = 224
+const PCM_FRAMES: u64 = 48000
+const ROLE_WINDOW: u64 = 1
+const ROLE_LABEL: u64 = 2
+
+static mut nodes: [u8; 21504] = [0 as u8; 21504]
+static mut n_nodes: u64 = 0
+static mut pcm: [u8; 192000] = [0 as u8; 192000]
+static mut line: [u8; 384] = [0 as u8; 384]
+static mut text: [u8; 200] = [0 as u8; 200]
+static mut part: [u8; 96] = [0 as u8; 96]
+static mut counters: [u64; 256] = [0 as u64; 256]
+static mut last_key: u64 = 0xFFFFFFFFFFFF
+static mut last_flags: u64 = 0
+static mut last_win: u64 = 0xFFFFFFFFFFFF
+static mut silent: bool = false
+static mut audio_note: bool = false
+
+fn nd(i: u64) -> u64 {
+    return (&nodes[0 as usize]) as u64 + i * NODE_BYTES
+}
+
+fn w0(i: u64) -> u64 {
+    return *((nd(i)) as *mut u64)
+}
+
+fn role(i: u64) -> u64 {
+    return w0(i) & 0xFF
+}
+
+fn flags(i: u64) -> u64 {
+    return (w0(i) >> 8) & 0xFF
+}
+
+fn win(i: u64) -> u64 {
+    return (w0(i) >> 16) & 0xFF
+}
+
+fn task(i: u64) -> u64 {
+    return (w0(i) >> 32) & 0xFF
+}
+
+fn load() -> bool {
+    var tries: u64 = 0
+    while tries < 4 {
+        let g0: u64 = ulib.sys(AX_INFO, AI_GEN, 0, 0)
+        var n: u64 = ulib.sys(AX_INFO, AI_COUNT, 0, 0)
+        if ulib.bad(n) {
+            return false
+        }
+        if n > MAXN {
+            n = MAXN
+        }
+        var i: u64 = 0
+        var ok: bool = true
+        while i < n && ok {
+            if ulib.bad(ulib.sys(AX_READ, i, nd(i), NODE_BYTES)) {
+                ok = false
+            }
+            i = i + 1
+        }
+        if ok && ulib.sys(AX_INFO, AI_GEN, 0, 0) == g0 {
+            n_nodes = n
+            return true
+        }
+        tries = tries + 1
+    }
+    return false
+}
+
+fn app_s(at: u64, p: u64) -> u64 {
+    var n: u64 = at
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 && n < 370 {
+        line[(n) as usize] = *((p + i) as *mut u8)
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+fn app_n(at: u64, v: u64) -> u64 {
+    var tmp: [u8; 24] = [0 as u8; 24]
+    var k: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0 as usize] = 48 as u8
+        k = 1
+    }
+    while x > 0 {
+        tmp[(k) as usize] = (48 + x % 10) as u8
+        x = x / 10
+        k = k + 1
+    }
+    var n: u64 = at
+    while k > 0 {
+        k = k - 1
+        line[(n) as usize] = tmp[(k) as usize]
+        n = n + 1
+    }
+    return n
+}
+
+fn emit_line(n: u64) {
+    line[(n) as usize] = 10 as u8
+    ulib.put((&line[0 as usize]) as u64, n + 1)
+}
+
+fn peak_frames(frames: u64) -> u64 {
+    var pk: u64 = 0
+    var i: u64 = 0
+    while i < frames {
+        let lo: u64 = (pcm[(i * 4) as usize]) as u64
+        let hi: u64 = (pcm[(i * 4 + 1) as usize]) as u64
+        var v: u64 = lo + hi * 256
+        if v >= 32768 {
+            v = 65536 - v
+        }
+        if v > pk {
+            pk = v
+        }
+        i = i + 1
+    }
+    return pk
+}
+
+fn events_now() -> u64 {
+    return ulib.sys(AX_INFO, AI_EVENTS, 0, 0)
+}
+
+fn play(frames: u64, seen: u64) {
+    if silent || frames == 0 {
+        return
+    }
+    let id: u64 = ulib.sys(SYS_AUDOPEN, speech.speak_rate(), 0, 0)
+    if ulib.bad(id) {
+        if !audio_note {
+            audio_note = true
+            var s_none: [u8; 15] = "sr: audio none\0"
+            var n: u64 = app_s(0, (&s_none[0 as usize]) as u64)
+            emit_line(n)
+        }
+        return
+    }
+    var sent: u64 = 0
+    var cut: bool = false
+    let t0: u64 = actwire.ticks()
+    while sent < frames && !cut {
+        var want: u64 = frames - sent
+        if want > 1024 {
+            want = 1024
+        }
+        let got: u64 = ulib.sys4(SYS_AUDSEND, id, ((&pcm[0 as usize]) as u64) + sent * 4, want, 0)
+        if ulib.bad(got) {
+            cut = true
+        } else if got == 0 {
+            actwire.yield_now()
+        } else {
+            sent = sent + got
+        }
+        if events_now() != seen {
+            cut = true
+        }
+    }
+    ulib.sys(SYS_AUDSET, AS_END, id, 0)
+    let dur: u64 = frames * 100 / speech.speak_rate() + 25
+    while !cut && actwire.ticks() - t0 < dur {
+        actwire.yield_now()
+        if events_now() != seen {
+            cut = true
+        }
+    }
+    ulib.sys(SYS_AUDSET, AS_CLOSE, id, 0)
+}
+
+fn speak(txt: u64) {
+    if *((txt) as *mut u8) == 0 as u8 {
+        return
+    }
+    let seen: u64 = events_now()
+    var s_say: [u8; 10] = "sr: say: \0"
+    var n: u64 = app_s(0, (&s_say[0 as usize]) as u64)
+    n = app_s(n, txt)
+    emit_line(n)
+    let frames: u64 = speech.render(txt, (&pcm[0 as usize]) as u64, PCM_FRAMES)
+    var s_au: [u8; 18] = "sr: audio frames=\0"
+    n = app_s(0, (&s_au[0 as usize]) as u64)
+    n = app_n(n, frames)
+    var s_pk: [u8; 7] = " peak=\0"
+    n = app_s(n, (&s_pk[0 as usize]) as u64)
+    n = app_n(n, peak_frames(frames))
+    emit_line(n)
+    play(frames, seen)
+}
+
+fn find_event_node(win_no: u64, rel: u64) -> u64 {
+    var i: u64 = 0
+    while i < 256 {
+        counters[(i) as usize] = 0
+        i = i + 1
+    }
+    var k: u64 = 0
+    while k < n_nodes {
+        let t: u64 = task(k)
+        let r: u64 = counters[(t) as usize]
+        counters[(t) as usize] = r + 1
+        if r == rel && win(k) == win_no && role(k) != ROLE_WINDOW {
+            return k
+        }
+        k = k + 1
+    }
+    return MAXN
+}
+
+fn find_focused(win_no: u64) -> u64 {
+    var k: u64 = 0
+    while k < n_nodes {
+        if (flags(k) & speaktext.S_FOCUSED) != 0 && role(k) != ROLE_WINDOW && win(k) == win_no {
+            return k
+        }
+        k = k + 1
+    }
+    return MAXN
+}
+
+fn window_node(t: u64, w: u64) -> u64 {
+    var k: u64 = 0
+    while k < n_nodes {
+        if role(k) == ROLE_WINDOW && task(k) == t && win(k) == w {
+            return k
+        }
+        k = k + 1
+    }
+    return MAXN
+}
+
+fn speak_node(idx: u64, with_window: bool) {
+    let key: u64 = (task(idx) << 24) | (win(idx) << 16) | idx
+    let fl: u64 = flags(idx)
+    if key == last_key && fl == last_flags {
+        return
+    }
+    last_key = key
+    last_flags = fl
+    let tw: u64 = (task(idx) << 8) | win(idx)
+    var at: u64 = 0
+    if with_window && tw != last_win {
+        last_win = tw
+        let wn: u64 = window_node(task(idx), win(idx))
+        if wn < MAXN {
+            let m: u64 = speaktext.window_intro(nd(wn) + 24, (&text[0 as usize]) as u64, 100)
+            at = m
+            if at > 0 && at < 110 {
+                text[(at) as usize] = 46 as u8
+                text[(at + 1) as usize] = 32 as u8
+                at = at + 2
+            }
+        }
+    }
+    let m2: u64 = speaktext.describe(role(idx), fl, nd(idx) + 24, ((&text[0 as usize]) as u64) + at, 96)
+    if m2 == 0 && at == 0 {
+        return
+    }
+    speak((&text[0 as usize]) as u64)
+}
+
+fn speaks_value(r: u64) -> bool {
+    return r == 4 || r == 7 || r == 8 || r == 9 || r == 11 || r == 14
+}
+
+fn handle(w: u64) {
+    let typ: u64 = w & 0xFFFFFFFF
+    let win_no: u64 = (w >> 32) & 0xFFFF
+    let rel: u64 = (w >> 48) & 0xFFFF
+    if typ != AE_FOCUS && typ != AE_VALUE {
+        return
+    }
+    if !load() {
+        return
+    }
+    var idx: u64 = find_event_node(win_no, rel)
+    if typ == AE_FOCUS {
+        if idx >= MAXN || (flags(idx) & speaktext.S_FOCUSED) == 0 {
+            idx = find_focused(win_no)
+        }
+        if idx < MAXN {
+            speak_node(idx, true)
+        }
+        return
+    }
+    if idx < MAXN && speaks_value(role(idx)) {
+        speak_node(idx, false)
+    }
+}
+
+fn serve(limit: u64) -> u64 {
+    var s_start: [u8; 20] = "sr: serving rights=\0"
+    let r: u64 = ulib.sys(AX_PERM, 1, 0xFFFF, P_READ)
+    let on: u64 = ulib.sys(AX_SET, C_ON, 1, 0)
+    var n: u64 = app_s(0, (&s_start[0 as usize]) as u64)
+    n = app_n(n, r)
+    var s_au: [u8; 8] = " audio=\0"
+    n = app_s(n, (&s_au[0 as usize]) as u64)
+    if silent {
+        n = app_n(n, 0)
+    } else {
+        n = app_n(n, 1)
+    }
+    emit_line(n)
+    if ulib.bad(r) || ulib.bad(on) {
+        return 1
+    }
+    var ev: [u64; 2] = [0 as u64; 2]
+    let t1: u64 = actwire.ticks()
+    while limit == 0 || actwire.ticks() - t1 < limit {
+        let got: u64 = ulib.sys(AX_EVENT, (&ev[0 as usize]) as u64, 16, 0)
+        if got == 16 {
+            handle(ev[0 as usize])
+        } else {
+            ulib.sleep_ms(20)
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var c_serve: [u8; 6] = "serve\0"
+    var c_say: [u8; 4] = "say\0"
+    var c_silent: [u8; 7] = "silent\0"
+    var h: [u8; 56] = "usage: screenreader serve [ticks] [silent] | say <text>\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc >= 3 && ulib.streq(ulib.arg_at(args, 1), (&c_say[0 as usize]) as u64) {
+        speak(ulib.arg_at(args, 2))
+        return 0
+    }
+    if argc >= 2 && ulib.streq(ulib.arg_at(args, 1), (&c_serve[0 as usize]) as u64) {
+        var lim: u64 = 0
+        var a: u64 = 2
+        while a < argc {
+            let s: u64 = ulib.arg_at(args, a)
+            if ulib.streq(s, (&c_silent[0 as usize]) as u64) {
+                silent = true
+            } else {
+                lim = ulib.to_num(s)
+            }
+            a = a + 1
+        }
+        return serve(lim)
+    }
+    ulib.say((&h[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}
