@@ -17,8 +17,8 @@ echo "== 1. build =="
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"
 else bad "programs do not build"; tail -8 "$TMPD/b.txt"; echo "STARTFRESH: $pass passed, $fail failed"; exit 1; fi
 cp -a kernel/user/. "$TMPD/srcold/"
-sed -i 's|^    apps_unlink_managed(top)$|    remove((\&P_APPS[0 as usize]) as u64)|' "$TMPD/srcold/opk.fi"
-if grep -q 'apps_unlink_managed(top)' "$TMPD/srcold/opk.fi"; then bad "counter-proof patch did not apply"; fi
+sed -i 's|^    apps_clear()$|    remove((\&P_APPS[0 as usize]) as u64)|' "$TMPD/srcold/opk.fi"
+if grep -q '^    apps_clear()$' "$TMPD/srcold/opk.fi"; then bad "counter-proof patch did not apply"; fi
 if USRC="$TMPD/srcold" bash tools/sync/build.sh "$TMPD/binold" 0 opk > "$TMPD/bo.txt" 2>&1; then ok "counter-proof opk (old rebuild: wipe /apps) builds"
 else bad "counter-proof opk does not build"; tail -8 "$TMPD/bo.txt"; fi
 if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then ok "kernel builds"
