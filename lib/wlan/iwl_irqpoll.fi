@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_w
+import wlan.iwl_probe
+import wlan.iwl_pwr
+import wlan.iwl_cmdq
+import wlan.iwl_g1
+import wlan.iwl_le
+import wlan.iwl_sbtrace
+
+export { IPoll, ipoll_new, ipoll_ptr, ipoll_run, ipoll_render, ipoll_has_data, IPOLL_WORDS }
+
+const NCOLS: u64 = 11
+const ROW_WORDS: u64 = 13
+const MAX_ROWS: u64 = 24
+const IPOLL_WORDS: u64 = 320
+const HEAD_WORDS: u64 = 4
+const W_ROWS: u64 = 0
+const W_SAMPLES: u64 = 1
+const W_ALIVE: u64 = 2
+const W_DROPPED: u64 = 3
+const PRPH_SB1: u64 = 0xA01E30
+const PRPH_SB2: u64 = 0xA01E34
+const CSR_GP1: u64 = 0x054
+const CSR_GP2: u64 = 0x058
+
+struct IPoll {
+    w: [u64; 320]
+}
+
+fn ipoll_new() -> IPoll {
+    var s: IPoll = IPoll { w: [0; 320] }
+    return s
+}
+
+fn ipoll_ptr(s: *mut IPoll) -> u64 { return (&(*s).w[0]) as u64 }
+
+fn at(words: u64, i: u64) -> u64 {
+    return *((words + i * 8) as *mut u64)
+}
+
+fn ipoll_has_data(words: u64) -> bool {
+    return at(words, W_SAMPLES) != 0
+}
+
+fn add_row(s: *mut IPoll, t: u64, mask: u64, vals: u64) {
+    let n: u64 = (*s).w[W_ROWS as usize]
+    if n >= MAX_ROWS {
+        (*s).w[W_DROPPED as usize] = (*s).w[W_DROPPED as usize] + 1
+        return
+    }
+    let b: u64 = HEAD_WORDS + n * ROW_WORDS
+    (*s).w[b as usize] = t
+    (*s).w[(b + 1) as usize] = mask
+    var i: u64 = 0
+    while i < NCOLS {
+        (*s).w[(b + 2 + i) as usize] = *((vals + i * 8) as *mut u64)
+        i = i + 1
+    }
+    (*s).w[W_ROWS as usize] = n + 1
+}
+
+fn sample(p: *mut iwl_probe.Probe, c: *mut iwl_cmdq.Cq, pci_rd: fn(u64) -> u64, bdf: u64, cur: u64) {
+    var v: [u64; 11] = [0 as u64; 11]
+    v[0] = pci_rd(bdf)
+    v[1] = iwl_pwr.rd(p, iwl_probe.CSR_INT)
+    v[2] = iwl_pwr.rd(p, iwl_pwr.CSR_FH_INT_STATUS)
+    v[3] = iwl_pwr.rd(p, iwl_probe.CSR_GP_CNTRL)
+    v[4] = iwl_pwr.rd(p, CSR_GP1)
+    v[5] = iwl_pwr.rd(p, CSR_GP2)
+    v[6] = iwl_pwr.rd(p, iwl_probe.CSR_MBOX_SET)
+    let rc: i64 = iwl_pwr.mac_access_get(p)
+    if rc == 0 {
+        v[7] = iwl_pwr.prph_rd(p, PRPH_SB1) & 0xFFFFFFFF
+        v[8] = iwl_pwr.prph_rd(p, PRPH_SB2) & 0xFFFFFFFF
+        iwl_pwr.mac_access_put(p)
+    }
+    v[9] = iwl_g1.rx_status_closed((*c).rx_stts)
+    v[10] = iwl_le.ld32(iwl_cmdq.rb_addr(c, 0), 0)
+    var i: u64 = 0
+    while i < NCOLS {
+        *((cur + i * 8) as *mut u64) = v[i as usize]
+        i = i + 1
+    }
+}
+
+fn ipoll_run(p: *mut iwl_probe.Probe, tr: *mut iwl_sbtrace.SbTrace, c: *mut iwl_cmdq.Cq, s: *mut IPoll, total_ms: u64, interval_ms: u64,
+             pci_rd: fn(u64) -> u64, bdf: u64) -> u64 {
+    var last: [u64; 11] = [0 as u64; 11]
+    var cur: [u64; 11] = [0 as u64; 11]
+    let t0: u64 = iwl_sbtrace.elapsed(tr)
+    var first: bool = true
+    while iwl_sbtrace.elapsed(tr) < t0 + total_ms {
+        sample(p, c, pci_rd, bdf, (&cur[0]) as u64)
+        var mask: u64 = 0
+        var i: u64 = 0
+        while i < NCOLS {
+            if first || cur[i as usize] != last[i as usize] { mask = mask | (1 << i) }
+            last[i as usize] = cur[i as usize]
+            i = i + 1
+        }
+        first = false
+        (*s).w[W_SAMPLES as usize] = (*s).w[W_SAMPLES as usize] + 1
+        if mask != 0 { add_row(s, iwl_sbtrace.elapsed(tr) - t0, mask, (&cur[0]) as u64) }
+        if iwl_sbtrace.alive_seen(p, tr) != 0 {
+            (*s).w[W_ALIVE as usize] = 1
+            return 1
+        }
+        iwl_sbtrace.spin_ms(p, tr, interval_ms)
+    }
+    return 0
+}
+
+fn ipoll_render(w: *mut iwl_w.W, words: u64) {
+    var k_h: [u8; 15] = "fail_ipoll= n=\0"
+    var k_r: [u8; 7] = " rows=\0"
+    var k_a: [u8; 8] = " alive=\0"
+    var k_d: [u8; 10] = " dropped=\0"
+    var k_t: [u8; 4] = " t=\0"
+    var tags: [u8; 23] = "psinfhgpg1g2mbs1s2stro\0"
+    iwl_w.w_s(w, (&k_h[0]) as u64)
+    iwl_w.w_dec(w, at(words, W_SAMPLES))
+    iwl_w.w_s(w, (&k_r[0]) as u64)
+    iwl_w.w_dec(w, at(words, W_ROWS))
+    iwl_w.w_s(w, (&k_a[0]) as u64)
+    iwl_w.w_dec(w, at(words, W_ALIVE))
+    iwl_w.w_s(w, (&k_d[0]) as u64)
+    iwl_w.w_dec(w, at(words, W_DROPPED))
+    iwl_w.w_nl(w)
+    var n: u64 = 0
+    while n < at(words, W_ROWS) {
+        let b: u64 = HEAD_WORDS + n * ROW_WORDS
+        iwl_w.w_s(w, (&k_t[0]) as u64)
+        iwl_w.w_dec(w, at(words, b))
+        let mask: u64 = at(words, b + 1)
+        var r: u64 = 0
+        while r < NCOLS {
+            if (mask >> r) & 1 != 0 {
+                iwl_w.w_ch(w, 32)
+                iwl_w.w_ch(w, tags[(r * 2) as usize] as u64)
+                iwl_w.w_ch(w, tags[(r * 2 + 1) as usize] as u64)
+                iwl_w.w_ch(w, 61)
+                iwl_w.w_hex(w, at(words, b + 2 + r), 8)
+            }
+            r = r + 1
+        }
+        iwl_w.w_nl(w)
+        n = n + 1
+    }
+}
