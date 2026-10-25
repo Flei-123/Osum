@@ -126,10 +126,16 @@ und die Maschine kommt trotzdem hoch" der ganze Punkt ist.
 ### A6. Der Wurzelzertifikatsspeicher altert
 **Da seit dieser Runde:** `/etc/ssl/roots.pem`, elf Wurzeln, Herkunft in
 `tools/hwnet/mkroots.py` dokumentiert.
-**Fehlt:** ein Weg, ihn zu erneuern. Er ist ins Abbild gebacken. Eine
-zurückgezogene Wurzel bleibt drin; eine neue fehlt.
-**Lösung:** er wird ein Paket wie jedes andere und steht damit im PLAN.
-Das setzt A1 und A3 voraus, ist danach aber Fleißarbeit.
+**Da seit r25:** `rootsctl check` meldet abgelaufene, bald ablaufende und
+noch nicht gueltige Wurzeln (Exit 3/4), `fetch` warnt beim Laden;
+`rootsctl apply <neu> [datei [min]]` nimmt ein Buendel nur an, wenn jeder
+Block parst und mindestens `min` gueltige Wurzeln bleiben, filtert
+Abgelaufene heraus und ersetzt die Datei atomar (`.prev` bleibt). Gate:
+`tools/roots/run.sh`.
+**Fehlt:** die Zustellung. Das Buendel muss ueber den signierten System-Feed
+kommen: `sysfile`-Rolle `roots` in `publish_system.py` und im Geraeteteil
+von `kernel/user/ota.fi` (Ziel `/etc/ssl/roots.pem` statt `/bin`, danach
+`rootsctl apply`).
 **Nebenbei**, nach A1/A3.
 
 ### A7. Die Uhr

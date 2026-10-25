@@ -1,0 +1,160 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import tls.roots
+import tls.cli
+
+const EXIT_OK: i32 = 0
+const EXIT_USAGE: i32 = 2
+const EXIT_EXPIRED: i32 = 3
+const EXIT_SOON: i32 = 4
+const EXIT_REFUSED: i32 = 5
+const EXIT_IO: i32 = 6
+
+const DAY: u64 = 86400
+const DEFAULT_WARN_DAYS: u32 = 90
+
+fn num_line(out: *mut rt.Buf, key: u64, kn: usize, v: u64) {
+    cli.say_num(out, key, kn, v)
+}
+
+fn report(out: *mut rt.Buf, st: *mut roots.RootStats) {
+    var k_b: [u8; 6] = "BLOCKS"
+    num_line(out, (&k_b[0]) as u64, 6, (*st).blocks as u64)
+    var k_p: [u8; 6] = "PARSED"
+    num_line(out, (&k_p[0]) as u64, 6, (*st).parsed as u64)
+    var k_v: [u8; 5] = "VALID"
+    num_line(out, (&k_v[0]) as u64, 5, (*st).valid as u64)
+    var k_e: [u8; 7] = "EXPIRED"
+    num_line(out, (&k_e[0]) as u64, 7, (*st).expired as u64)
+    var k_n: [u8; 7] = "NOT_YET"
+    num_line(out, (&k_n[0]) as u64, 7, (*st).not_yet as u64)
+    var k_s: [u8; 4] = "SOON"
+    num_line(out, (&k_s[0]) as u64, 4, (*st).soon as u64)
+    var k_x: [u8; 11] = "NEXT_EXPIRY"
+    num_line(out, (&k_x[0]) as u64, 11, (*st).next_expiry)
+}
+
+fn warn(out: *mut rt.Buf, text: u64, tn: usize, v: u64) {
+    cli.put(out, text, tn)
+    rt.buf_push_dec_u64(out, v)
+    cli.line(out)
+}
+
+fn cmd_check(start: u64, out: *mut rt.Buf) -> i32 {
+    var path: u64 = 0
+    var def: [u8; 19] = "/etc/ssl/roots.pem\0"
+    path = (&def[0]) as u64
+    if rt.arg_count(start) > 2 {
+        path = rt.arg_ptr(start, 2)
+    }
+    var days: u32 = DEFAULT_WARN_DAYS
+    if rt.arg_count(start) > 3 {
+        days = cli.parse_u32(rt.arg_ptr(start, 3))
+    }
+    var pem: rt.Buf = rt.buf_new()
+    if !rt.read_file(path, &pem) {
+        var m: [u8; 28] = "rootsctl: cannot read store\n"
+        cli.put(out, (&m[0]) as u64, 28)
+        return EXIT_IO
+    }
+    var st: roots.RootStats = roots.stats_new()
+    var keep: rt.Buf = rt.buf_new()
+    roots.roots_scan(pem.ptr, pem.len, cli.now_seconds(), (days as u64) * DAY, &st, &keep)
+    report(out, &st)
+    var rc: i32 = EXIT_OK
+    if st.expired > 0 || st.valid == 0 {
+        var w: [u8; 40] = "rootsctl: warning: expired trust roots: "
+        warn(out, (&w[0]) as u64, 40, st.expired as u64)
+        rc = EXIT_EXPIRED
+    }
+    if st.soon > 0 {
+        var w2: [u8; 38] = "rootsctl: warning: roots expiring soon"
+        warn(out, (&w2[0]) as u64, 38, st.soon as u64)
+        if rc == EXIT_OK {
+            rc = EXIT_SOON
+        }
+    }
+    return rc
+}
+
+fn path_with(base: u64, suffix: u64, sn: usize, out: *mut rt.Buf) {
+    rt.buf_clear(out)
+    rt.buf_push_bytes(out, base, rt.c_length(base))
+    rt.buf_push_bytes(out, suffix, sn)
+    rt.buf_push(out, 0 as u8)
+}
+
+fn exists(path: u64) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    let ok: bool = rt.read_file(path, &b)
+    rt.buf_free(&b)
+    return ok
+}
+
+fn cmd_apply(start: u64, out: *mut rt.Buf) -> i32 {
+    if rt.arg_count(start) < 3 {
+        return EXIT_USAGE
+    }
+    let cand: u64 = rt.arg_ptr(start, 2)
+    var def: [u8; 19] = "/etc/ssl/roots.pem\0"
+    var target: u64 = (&def[0]) as u64
+    if rt.arg_count(start) > 3 {
+        target = rt.arg_ptr(start, 3)
+    }
+    var min_valid: u32 = 1 as u32
+    if rt.arg_count(start) > 4 {
+        min_valid = cli.parse_u32(rt.arg_ptr(start, 4))
+    }
+    var pem: rt.Buf = rt.buf_new()
+    if !rt.read_file(cand, &pem) {
+        var m: [u8; 34] = "rootsctl: cannot read candidate\n\0\0"
+        cli.put(out, (&m[0]) as u64, 32)
+        return EXIT_IO
+    }
+    var st: roots.RootStats = roots.stats_new()
+    var keep: rt.Buf = rt.buf_new()
+    roots.roots_scan(pem.ptr, pem.len, cli.now_seconds(), 0 as u64, &st, &keep)
+    report(out, &st)
+    if st.blocks != st.parsed || (st.valid as u32) < min_valid || st.valid == 0 {
+        var r: [u8; 25] = "rootsctl: refused: ROOTS "
+        warn(out, (&r[0]) as u64, 25, st.valid as u64)
+        return EXIT_REFUSED
+    }
+    var tmp: rt.Buf = rt.buf_new()
+    var prev: rt.Buf = rt.buf_new()
+    var sfx_new: [u8; 4] = ".new"
+    var sfx_prev: [u8; 5] = ".prev"
+    path_with(target, (&sfx_new[0]) as u64, 4, &tmp)
+    path_with(target, (&sfx_prev[0]) as u64, 5, &prev)
+    if !rt.write_file(tmp.ptr as u64, keep.ptr, keep.len) {
+        return EXIT_IO
+    }
+    if exists(target) {
+        syscall(82, target as i64, prev.ptr as i64, 0, 0, 0, 0)
+    }
+    syscall(82, tmp.ptr as i64, target as i64, 0, 0, 0, 0)
+    var k_a: [u8; 7] = "APPLIED"
+    num_line(out, (&k_a[0]) as u64, 7, st.valid as u64)
+    var k_d: [u8; 7] = "DROPPED"
+    num_line(out, (&k_d[0]) as u64, 7, st.expired as u64 + st.not_yet as u64)
+    return EXIT_OK
+}
+
+fn main(start: u64) -> i32 {
+    var out: rt.Buf = rt.buf_new()
+    var rc: i32 = EXIT_USAGE
+    if rt.arg_count(start) >= 2 {
+        let c: u64 = rt.arg_ptr(start, 1)
+        if rt.c_length(c) == 5 && rt.ld8(c, 0) == 99 as u8 {
+            rc = cmd_check(start, &out)
+        } else if rt.c_length(c) == 5 && rt.ld8(c, 0) == 97 as u8 {
+            rc = cmd_apply(start, &out)
+        }
+    }
+    if rc == EXIT_USAGE {
+        var u: [u8; 63] = "usage: rootsctl check [file [days]] | apply <new> [file [min]]\n"
+        cli.put(&out, (&u[0]) as u64, 63)
+    }
+    rt.write_everything(1, out.ptr, out.len)
+    return rc
+}

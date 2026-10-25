@@ -89,7 +89,7 @@ export {
     cert_not_before, cert_not_after,
     cert_mod_ptr, cert_mod_len, cert_exp_ptr, cert_exp_len, cert_ec_ptr,
     ecdsa_der_split,
-    store_new, store_free, store_load_pem, store_count,
+    store_new, store_free, store_load_pem, store_count, pem_next_block,
     verify_signature_by, verify_chain,
     base64_decode,
     V_OK, V_PARSE, V_EXPIRED, V_NOT_YET, V_NAME, V_UNKNOWN_ISSUER,
@@ -1050,57 +1050,40 @@ fn base64_decode(p: u64, n: usize, out: *mut rt.Buf) -> bool {
 // A PEM bundle: every `-----BEGIN CERTIFICATE-----` block is decoded and
 // appended. Blocks of any other kind are skipped, so a file with a private
 // key in it does not confuse the store.
+fn pem_next_block(p: u64, n: usize, from: usize, begin: *mut usize,
+    body: *mut usize, stop: *mut usize, after: *mut usize) -> bool {
+    var open: [u8; 27] = "-----BEGIN CERTIFICATE-----"
+    var close: [u8; 25] = "-----END CERTIFICATE-----"
+    var i: usize = from
+    while i + 27 <= n {
+        if rt.mem_eq(p + i as u64, (&open[0]) as u64, 27) {
+            var j: usize = i + 27
+            while j + 25 <= n {
+                if rt.mem_eq(p + j as u64, (&close[0]) as u64, 25) {
+                    *begin = i
+                    *body = i + 27
+                    *stop = j
+                    *after = j + 25
+                    return true
+                }
+                j = j + 1
+            }
+            return false
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fn store_load_pem(s: *mut Store, p: u64, n: usize) -> usize {
-    var begin: [u8; 27] = "-----BEGIN CERTIFICATE-----"
-    var end: [u8; 25] = "-----END CERTIFICATE-----"
     var i: usize = 0
     var taken: usize = 0
-    while i < n && (*s).n < MAX_STORE {
-        // find the next BEGIN
-        var found: bool = false
-        while i + 27 <= n {
-            var same: bool = true
-            var k: usize = 0
-            while k < 27 {
-                if rt.ld8(p, i + k) != begin[k] {
-                    same = false
-                    break
-                }
-                k = k + 1
-            }
-            if same {
-                found = true
-                break
-            }
-            i = i + 1
-        }
-        if !found {
-            break
-        }
-        let body: usize = i + 27
-        var j: usize = body
-        var stop: usize = n
-        var have_end: bool = false
-        while j + 25 <= n {
-            var same: bool = true
-            var k: usize = 0
-            while k < 25 {
-                if rt.ld8(p, j + k) != end[k] {
-                    same = false
-                    break
-                }
-                k = k + 1
-            }
-            if same {
-                stop = j
-                have_end = true
-                break
-            }
-            j = j + 1
-        }
-        if !have_end {
-            break
-        }
+    var begin: usize = 0
+    var body: usize = 0
+    var stop: usize = 0
+    var after: usize = 0
+    while i < n && (*s).n < MAX_STORE
+        && pem_next_block(p, n, i, &begin, &body, &stop, &after) {
         let before: usize = (*s).blob.len
         if base64_decode(p + body as u64, stop - body, &(*s).blob) {
             (*s).off[(*s).n] = before
@@ -1110,7 +1093,7 @@ fn store_load_pem(s: *mut Store, p: u64, n: usize) -> usize {
         } else {
             rt.buf_set_len(&(*s).blob, before)
         }
-        i = stop + 25
+        i = after
     }
     return taken
 }
