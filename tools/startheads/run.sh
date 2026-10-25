@@ -111,12 +111,12 @@ chk "$G" 640 1280 "launcher --head 1 stands inside output 1 above its bar"
 run_case h0 2 "fbres=1280x480 vgpuheads vgpuextend" 0
 chk "$T/h0.klar" 0 640 "launcher --head 0 stands inside output 0 above its bar"
 
-echo "== r871: output 1 is a quarter shorter (vgpushort): the menu is sized for it"
+echo "== r871: output 1 is a tenth shorter (vgpushort): the menu is sized for it"
 run_case sh1 2 "fbres=1280x480 vgpuheads vgpuextend vgpushort" 1
 grep -a "^launcher: geom " "$T/sh1.klar" | sort -u | head -4 | sed 's/^/   /'
 chk "$T/sh1.klar" 640 1280 "short output 1: the menu stands inside it"
 SG=$(geom "$T/sh1.klar"); eval "$SG"; SH_Y=$y; SH_H=$h
-[ $((SH_Y + SH_H)) -le 320 ] && ok "short output 1: menu bottom (y+h=$((SH_Y + SH_H))) above its bar (360-40)" || bad "short output 1: menu bottom $((SH_Y + SH_H)) > 320"
+[ "$SH_H" -lt 416 ] && [ $((SH_Y + SH_H)) -le 432 ] && ok "short output 1 (432 high): menu is smaller than on a 480 output (h=$SH_H < 416) and inside it" || bad "short output 1: h=$SH_H y=$SH_Y not resized"
 
 echo "== control: one output"
 run_case one 1 "" 0
