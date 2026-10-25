@@ -16,13 +16,13 @@ python3 -I tools/psstate/names.py kernel/sched/sched.fi kernel/user/taskstate.fi
 sed 's/poll   \\0/new    \\0/' kernel/user/taskstate.fi > "$T/taskstate_bad.fi"
 python3 -I tools/psstate/names.py kernel/sched/sched.fi "$T/taskstate_bad.fi" > /dev/null 2>&1 && bad "counter-proof: poll named new was not caught" || ok "counter-proof: poll named new is caught"
 
-PROGS="init sh ps top sleep orientbus cat"
+PROGS="init sh ps top sleep orientbus cat echo"
 bash tools/sync/build.sh "$T/bin" 0 $PROGS > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; echo "PSSTATE: build failed"; exit 1; }
 bash tools/build-kernel.sh "$T/k.mb" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; echo "PSSTATE: kernel build failed"; exit 1; }
 
 mkdir -p "$T/inc"
 cat > "$T/inittab" <<'TAB'
-bus:*:respawn:/bin/orientbus
+bus:*:respawn:/bin/orientbus serve
 snap:*:once:/bin/sh /etc/snap.sh
 TAB
 printf '/bin/sleep 6\n/bin/ps\n/bin/top -n 1\n/bin/echo PSSTATE-DONE\n' > "$T/snap.sh"

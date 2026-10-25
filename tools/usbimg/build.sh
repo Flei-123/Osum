@@ -1539,6 +1539,10 @@ if [ "$IMAGE_PROFILE" = personal ]; then
            "/apps/jarvismini.osp/INFO=pakete/jarvismini/INFO@0644"
            "/apps/jarvismini.osp/start@/bin/jarvismini"
            "/apps/jarvismini.osp/symbol=$OUT/jarvismini.symbol@0644")
+    if [ "${HP_STICK:-0}" = 1 ]; then
+        printf 'on\n' > "$OUT/jarvismini.debug"
+        ARGS+=("/etc/jarvismini.debug=$OUT/jarvismini.debug@0644")
+    fi
 fi
 # LCSH: extra mkfs specs for gates (`<path>=<host file>` words, no blanks inside) -- e.g. tools/usbimg/bbsh.sh puts a musl test program on the stick
 # shellcheck disable=SC2206
