@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import std.rt
 
-export { wrap_init, wrap_response, find_ntlm }
+export { wrap_init, wrap_response, parse_response, STATE_COMPLETED, STATE_INCOMPLETE, STATE_REJECT, STATE_NONE }
+
+const STATE_COMPLETED: u64 = 0
+const STATE_INCOMPLETE: u64 = 1
+const STATE_REJECT: u64 = 2
+const STATE_NONE: u64 = 99
 
 fn len_size(n: usize) -> usize {
     if n < 128 {
@@ -69,18 +74,83 @@ fn wrap_response(token: u64, n: usize, out: *mut rt.Buf) {
     rt.buf_push_bytes(out, token, n)
 }
 
-fn find_ntlm(p: u64, n: usize) -> usize {
-    var sig: [u8; 8] = "NTLMSSP\0"
-    var i: usize = 0
-    while i + 8 <= n {
-        var j: usize = 0
-        while j < 8 && rt.ld8(p, i + j) == sig[j] {
-            j = j + 1
-        }
-        if j == 8 {
-            return i
-        }
-        i = i + 1
+struct Der {
+    tag: u8,
+    start: usize,
+    len: usize,
+    next: usize,
+}
+
+fn der_read(p: u64, n: usize, at: usize, out: *mut Der) -> bool {
+    if at + 2 > n {
+        return false
     }
-    return n
+    let tag: u8 = rt.ld8(p, at)
+    let first: usize = rt.ld8(p, at + 1) as usize
+    var len: usize = first
+    var start: usize = at + 2
+    if first >= 128 {
+        let count: usize = first - 128
+        if count == 0 || count > 3 || start + count > n {
+            return false
+        }
+        len = 0
+        var i: usize = 0
+        while i < count {
+            len = len * 256 + rt.ld8(p, start + i) as usize
+            i = i + 1
+        }
+        start = start + count
+    }
+    if start > n || len > n - start {
+        return false
+    }
+    (*out).tag = tag
+    (*out).start = start
+    (*out).len = len
+    (*out).next = start + len
+    return true
+}
+
+fn der_new() -> Der {
+    return Der { tag: 0 as u8, start: 0, len: 0, next: 0 }
+}
+
+fn parse_response(p: u64, n: usize, state: *mut u64, tok_at: *mut usize, tok_len: *mut usize) -> bool {
+    var outer: Der = der_new()
+    if !der_read(p, n, 0, &outer) || outer.tag != 161 as u8 {
+        return false
+    }
+    var seq: Der = der_new()
+    if !der_read(p, outer.next, outer.start, &seq) || seq.tag != 48 as u8 {
+        return false
+    }
+    *state = 99
+    *tok_at = 0
+    *tok_len = 0
+    var at: usize = seq.start
+    while at < seq.next {
+        var field: Der = der_new()
+        if !der_read(p, seq.next, at, &field) {
+            return false
+        }
+        var inner: Der = der_new()
+        if field.len > 0 && !der_read(p, field.next, field.start, &inner) {
+            return false
+        }
+        if field.tag == 160 as u8 {
+            if inner.tag != 10 as u8 || inner.len != 1 {
+                return false
+            }
+            *state = rt.ld8(p, inner.start) as u64
+        } else if field.tag == 162 as u8 {
+            if inner.tag != 4 as u8 {
+                return false
+            }
+            *tok_at = inner.start
+            *tok_len = inner.len
+        }
+        at = field.next
+    }
+    return true
 }

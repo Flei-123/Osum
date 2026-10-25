@@ -368,7 +368,7 @@ if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PR
 # `tools/install/build.sh` und `tools/bridge/build.sh`.
 # ROUND ROADMAP-5 (K-008): `ipprint` prints over IPP -- same build path
 # (profile app, TrueType reader from the library), see kernel/app/ipprint.fi.
-APPS=${APPS:-"fetch jarvisd ipprint socfleitec rootsctl"}
+APPS=${APPS:-"fetch jarvisd ipprint socfleitec rootsctl smbctl"}
 # W-MINI2: the network half of the JARVIS Mini (TLS + login + WebSocket), personal stick only
 if [ "$IMAGE_PROFILE" = personal ]; then case " $APPS " in *" jmlink "*) ;; *) APPS="$APPS jmlink" ;; esac; fi
 

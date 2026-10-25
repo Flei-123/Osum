@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.io
+import std.rt
+
+export { env_value, read_password, PASSWORD_VAR }
+
+static mut PASSWORD_VAR: [u8; 13] = "SMB_PASSWORD\0"
+
+fn name_matches(entry: u64, name: u64) -> bool {
+    var i: usize = 0
+    while rt.ld8(name, i) != 0 as u8 {
+        if rt.ld8(entry, i) != rt.ld8(name, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rt.ld8(entry, i) == 61 as u8
+}
+
+const OSUM_ENV_SLOT: usize = 256
+const OSUM_ENV_MAX: u64 = 16
+
+fn osum_layout(start: u64) -> bool {
+    return (start & 4095) == 0 && rt.ld64(start, OSUM_ENV_SLOT) <= OSUM_ENV_MAX
+}
+
+fn env_value(start: u64, name: u64) -> u64 {
+    if start == 0 {
+        return 0
+    }
+    var k: usize = 2 + rt.arg_count(start)
+    var limit: usize = 4096
+    if osum_layout(start) {
+        limit = rt.ld64(start, OSUM_ENV_SLOT) as usize
+        k = OSUM_ENV_SLOT + 1
+    }
+    var seen: usize = 0
+    while seen < limit {
+        let entry: u64 = rt.ld64(start, k)
+        if entry == 0 {
+            return 0
+        }
+        if name_matches(entry, name) {
+            return entry + (rt.c_length(name) + 1) as u64
+        }
+        k = k + 1
+        seen = seen + 1
+    }
+    return 0
+}
+
+fn read_line_into(out: *mut rt.Buf) {
+    var c: [u8; 1] = [0]
+    while true {
+        let got: i64 = syscall(0, 0, rt.addr_of(&c[0]) as i64, 1, 0, 0, 0)
+        if got != 1 || c[0] == 10 as u8 {
+            return
+        }
+        if c[0] != 13 as u8 {
+            rt.buf_push(out, c[0])
+        }
+    }
+}
+
+fn read_password(start: u64) -> u64 {
+    let from_env: u64 = env_value(start, (&PASSWORD_VAR[0]) as u64)
+    if from_env != 0 && rt.ld8(from_env, 0) != 0 as u8 {
+        return from_env
+    }
+    io.print("Password: ")
+    var buf: rt.Buf = rt.buf_new()
+    read_line_into(&buf)
+    if rt.buf_len(&buf) == 0 {
+        return 0
+    }
+    rt.buf_push(&buf, 0 as u8)
+    return rt.buf_ptr(&buf)
+}
