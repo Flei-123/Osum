@@ -1,0 +1,184 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.runs
+import ntfsshrink.vol
+import ntfsshrink.rec
+import ntfsshrink.layout
+import ntfsshrink.hiber
+
+export {
+    check_all, check_dirty, check_log, check_bad,
+    SKIP_DIRTY, SKIP_LOG, SKIP_BAD, SKIP_HIBER
+}
+
+const SKIP_DIRTY: u64 = 1
+const SKIP_LOG: u64 = 2
+const SKIP_BAD: u64 = 4
+const SKIP_HIBER: u64 = 8
+
+const FLAGS_MASK: u64 = 49207
+const MAGIC_RSTR: u64 = 1381258066
+const MAGIC_CHKD: u64 = 1145784387
+const LOG_PAGE: u64 = 4096
+
+fn check_dirty(v: *mut vol.Vol, work: u64) -> u64 {
+    let raw: u64 = work + layout.OFF_RAW_A
+    let rc: u64 = work + layout.OFF_REC_A
+    let r: u64 = rec.mft_read(v, layout.MFT_VOLUME, raw, rc)
+    if r != codes.E_OK {
+        return r
+    }
+    let a: u64 = rec.attr_find(rc, (*v).rec_size, rec.AT_VOLINFO, 0)
+    if a == 0 || bytes.ld8(a, 8) != 0 || bytes.le32(a + 16) < 12 {
+        return codes.E_CORRUPT
+    }
+    let flags: u64 = bytes.le16(a + bytes.le16(a + 20) + 10)
+    if (flags & FLAGS_MASK) != 0 {
+        return codes.E_DIRTY
+    }
+    return codes.E_OK
+}
+
+fn log_page(page: u64, lsn: *mut u64, clean: *mut u64, valid: *mut u64) -> u64 {
+    *valid = 0
+    let magic: u64 = bytes.le32(page)
+    if magic != MAGIC_RSTR && magic != MAGIC_CHKD {
+        let fill: u64 = bytes.ld8(page, 0)
+        if fill != 0 && fill != 255 {
+            return codes.E_LOG_UNCLEAN
+        }
+        var i: u64 = 0
+        while i < 512 {
+            if bytes.ld8(page, i) != fill {
+                return codes.E_LOG_UNCLEAN
+            }
+            i = i + 1
+        }
+        return codes.E_OK
+    }
+    let ra_off: u64 = bytes.le16(page + 24)
+    if bytes.le32(page + 16) != LOG_PAGE || ra_off < 32 || ra_off > 480 {
+        return codes.E_LOG_UNCLEAN
+    }
+    let ra: u64 = page + ra_off
+    *lsn = bytes.le64(ra)
+    let in_use: u64 = bytes.le16(ra + 12)
+    let flags: u64 = bytes.le16(ra + 14)
+    *clean = if in_use == 65535 || (flags & 2) != 0 { 1 } else { 0 }
+    *valid = 1
+    return codes.E_OK
+}
+
+fn check_log(v: *mut vol.Vol, work: u64) -> u64 {
+    let raw: u64 = work + layout.OFF_RAW_A
+    let rc: u64 = work + layout.OFF_REC_A
+    let size: u64 = (*v).rec_size
+    var r: u64 = rec.mft_read(v, layout.MFT_LOGFILE, raw, rc)
+    if r != codes.E_OK {
+        return r
+    }
+    let a: u64 = rec.attr_find(rc, size, rec.AT_DATA, 0)
+    if a == 0 || bytes.ld8(a, 8) == 0 || bytes.le64(a + 48) < 2 * LOG_PAGE || rec.attr_find(rc, size, rec.AT_ATTRLIST, 0) != 0 {
+        return codes.E_CORRUPT
+    }
+    var re: u64 = 0
+    let rp: u64 = rec.attr_runs(a, &re)
+    if rp == 0 {
+        return codes.E_CORRUPT
+    }
+    let buf: u64 = work + layout.OFF_BLOCK
+    r = vol.ds_read(v, rp, re, 0, 2 * LOG_PAGE / 512, buf)
+    if r != codes.E_OK {
+        return r
+    }
+    var lsn0: u64 = 0
+    var clean0: u64 = 0
+    var valid0: u64 = 0
+    var lsn1: u64 = 0
+    var clean1: u64 = 0
+    var valid1: u64 = 0
+    r = log_page(buf, &lsn0, &clean0, &valid0)
+    if r != codes.E_OK {
+        return r
+    }
+    r = log_page(buf + LOG_PAGE, &lsn1, &clean1, &valid1)
+    if r != codes.E_OK {
+        return r
+    }
+    if valid0 == 0 && valid1 == 0 {
+        return codes.E_OK
+    }
+    var clean: u64 = clean0
+    if valid0 == 0 || (valid1 != 0 && lsn1 > lsn0) {
+        clean = clean1
+    }
+    if clean == 0 {
+        return codes.E_LOG_UNCLEAN
+    }
+    return codes.E_OK
+}
+
+fn check_bad(v: *mut vol.Vol, work: u64) -> u64 {
+    let raw: u64 = work + layout.OFF_RAW_A
+    let rc: u64 = work + layout.OFF_REC_A
+    let size: u64 = (*v).rec_size
+    let r: u64 = rec.mft_read(v, layout.MFT_BADCLUS, raw, rc)
+    if r != codes.E_OK {
+        return r
+    }
+    let a: u64 = rec.attr_find(rc, size, rec.AT_DATA, 4)
+    if a == 0 || bytes.ld8(a, 8) == 0 || rec.attr_find(rc, size, rec.AT_ATTRLIST, 0) != 0 {
+        return codes.E_CORRUPT
+    }
+    let nm: u64 = a + bytes.le16(a + 10)
+    if bytes.ld8(nm, 0) != 36 || bytes.ld8(nm, 2) != 66 || bytes.ld8(nm, 4) != 97 || bytes.ld8(nm, 6) != 100 {
+        return codes.E_CORRUPT
+    }
+    var re: u64 = 0
+    let rp: u64 = rec.attr_runs(a, &re)
+    if rp == 0 {
+        return codes.E_BADCLUS
+    }
+    var it: runs.RunIt = runs.it_new()
+    runs.it_init(&it, rp, re)
+    if !runs.next(&it) || it.sparse == 0 || it.len != (*v).clusters {
+        return codes.E_BADCLUS
+    }
+    if runs.next(&it) || it.bad != 0 {
+        return codes.E_BADCLUS
+    }
+    return codes.E_OK
+}
+
+fn check_all(v: *mut vol.Vol, skip: u64, work: u64) -> u64 {
+    var r: u64 = rec.mft_load(v, work + layout.OFF_RAW_A, work + layout.OFF_REC_A)
+    if r != codes.E_OK {
+        return r
+    }
+    if (skip & SKIP_DIRTY) == 0 {
+        r = check_dirty(v, work)
+        if r != codes.E_OK {
+            return r
+        }
+    }
+    if (skip & SKIP_LOG) == 0 {
+        r = check_log(v, work)
+        if r != codes.E_OK {
+            return r
+        }
+    }
+    if (skip & SKIP_BAD) == 0 {
+        r = check_bad(v, work)
+        if r != codes.E_OK {
+            return r
+        }
+    }
+    if (skip & SKIP_HIBER) == 0 {
+        r = hiber.check_hiber(v, work)
+        if r != codes.E_OK {
+            return r
+        }
+    }
+    return codes.E_OK
+}

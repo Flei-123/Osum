@@ -1,0 +1,231 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.runs
+import ntfsshrink.vol
+import ntfsshrink.rec
+import ntfsshrink.layout
+
+export { check_hiber }
+
+const AT_INDEX_ROOT: u64 = 144
+const AT_INDEX_ALLOC: u64 = 160
+const MAGIC_INDX: u64 = 1480871497
+const SIG_WAKE_LO: u64 = 1701536119
+const SIG_WAKE_UP: u64 = 1162559831
+const REC_NUMBER_MASK: u64 = 281474976710655
+const BLOCK_MAX: u64 = 8192
+
+fn hiber_name() -> str {
+    return "hiberfil.sys"
+}
+
+fn name_matches(key: u64, klen: u64) -> bool {
+    let want: str = hiber_name()
+    let n: u64 = want.n as u64
+    if klen < 66 + n * 2 || bytes.ld8(key, 64) != n {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        var c: u64 = bytes.ld8(key, 66 + i * 2)
+        if c >= 65 && c <= 90 {
+            c = c + 32
+        }
+        if bytes.ld8(key, 67 + i * 2) != 0 || c != bytes.ld8(want.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn first_bytes(v: *mut vol.Vol, a: u64, work: u64, out: *mut u64) -> u64 {
+    *out = 0
+    if bytes.ld8(a, 8) == 0 {
+        let len: u64 = bytes.le32(a + 16)
+        let off: u64 = bytes.le16(a + 20)
+        if off + len > bytes.le32(a + 4) {
+            return codes.E_CORRUPT
+        }
+        var sig: u64 = 0
+        var i: u64 = 0
+        while i < 4 && i < len {
+            sig = sig | (bytes.ld8(a + off, i) << (i * 8))
+            i = i + 1
+        }
+        *out = sig
+        return codes.E_OK
+    }
+    if bytes.le64(a + 16) != 0 {
+        return codes.E_CORRUPT
+    }
+    if bytes.le64(a + 48) == 0 {
+        return codes.E_OK
+    }
+    var re: u64 = 0
+    let rp: u64 = rec.attr_runs(a, &re)
+    if rp == 0 {
+        return codes.E_CORRUPT
+    }
+    var it: runs.RunIt = runs.it_new()
+    if !runs.locate(&it, rp, re, 0) {
+        return codes.E_CORRUPT
+    }
+    if it.sparse != 0 {
+        return codes.E_OK
+    }
+    if it.lcn >= (*v).clusters {
+        return codes.E_CORRUPT
+    }
+    let sec: u64 = work + layout.OFF_SECTOR
+    if vol.vread(v, it.lcn * (*v).spc, 1, sec) != codes.E_OK {
+        return codes.E_IO
+    }
+    *out = bytes.le32(sec)
+    return codes.E_OK
+}
+
+fn judge_hiber(v: *mut vol.Vol, n: u64, seq: u64, work: u64) -> u64 {
+    let raw: u64 = work + layout.OFF_RAW_B
+    let rc: u64 = work + layout.OFF_REC_B
+    let r: u64 = rec.mft_read(v, n, raw, rc)
+    if r == codes.E_RANGE {
+        return codes.E_OK
+    }
+    if r == codes.E_CORRUPT {
+        if bytes.le32(raw) != rec.FILE_MAGIC {
+            return codes.E_OK
+        }
+        return r
+    }
+    if r != codes.E_OK {
+        return r
+    }
+    let flags: u64 = bytes.le16(rc + 22)
+    if (flags & 1) == 0 || (flags & 2) != 0 {
+        return codes.E_OK
+    }
+    if bytes.le16(rc + 16) != seq || (bytes.le64(rc + 32) & REC_NUMBER_MASK) != 0 {
+        return codes.E_OK
+    }
+    let size: u64 = (*v).rec_size
+    if rec.attr_find(rc, size, rec.AT_ATTRLIST, 0) != 0 {
+        return codes.E_COMPLEX
+    }
+    let a: u64 = rec.attr_find(rc, size, rec.AT_DATA, 0)
+    if a == 0 {
+        return codes.E_OK
+    }
+    var sig: u64 = 0
+    let fr: u64 = first_bytes(v, a, work, &sig)
+    if fr != codes.E_OK {
+        return fr
+    }
+    if sig == 0 || sig == SIG_WAKE_LO || sig == SIG_WAKE_UP {
+        return codes.E_OK
+    }
+    return codes.E_HIBERNATED
+}
+
+fn scan_entries(v: *mut vol.Vol, first: u64, end: u64, work: u64) -> u64 {
+    var e: u64 = first
+    while e + 16 <= end {
+        let elen: u64 = bytes.le16(e + 8)
+        let klen: u64 = bytes.le16(e + 10)
+        let flags: u64 = bytes.le16(e + 12)
+        if elen < 16 || (elen & 7) != 0 || e + elen > end {
+            return codes.E_CORRUPT
+        }
+        if (flags & 2) != 0 {
+            return codes.E_OK
+        }
+        if 16 + klen > elen {
+            return codes.E_CORRUPT
+        }
+        if name_matches(e + 16, klen) {
+            let fref: u64 = bytes.le64(e)
+            let r: u64 = judge_hiber(v, fref & REC_NUMBER_MASK, fref >> 48, work)
+            if r != codes.E_OK {
+                return r
+            }
+        }
+        e = e + elen
+    }
+    return codes.E_OK
+}
+
+fn scan_block(v: *mut vol.Vol, blk: u64, work: u64) -> u64 {
+    let b: u64 = work + layout.OFF_BLOCK
+    if bytes.le32(b) != MAGIC_INDX {
+        return codes.E_OK
+    }
+    if !rec.fixup_apply_as(b, blk, 512, MAGIC_INDX, 40) {
+        return codes.E_CORRUPT
+    }
+    let hdr: u64 = b + 24
+    let eoff: u64 = bytes.le32(hdr)
+    let ilen: u64 = bytes.le32(hdr + 4)
+    let alloc: u64 = bytes.le32(hdr + 8)
+    if eoff < 16 || eoff > ilen || ilen > alloc || 24 + alloc > blk {
+        return codes.E_CORRUPT
+    }
+    return scan_entries(v, hdr + eoff, hdr + ilen, work)
+}
+
+fn check_hiber(v: *mut vol.Vol, work: u64) -> u64 {
+    let raw: u64 = work + layout.OFF_RAW_A
+    let rc: u64 = work + layout.OFF_REC_A
+    let size: u64 = (*v).rec_size
+    var r: u64 = rec.mft_read(v, layout.MFT_ROOT, raw, rc)
+    if r != codes.E_OK {
+        return r
+    }
+    if (bytes.le16(rc + 22) & 3) != 3 || rec.attr_find(rc, size, rec.AT_ATTRLIST, 0) != 0 {
+        return codes.E_CORRUPT
+    }
+    let ir: u64 = rec.attr_find(rc, size, AT_INDEX_ROOT, 4)
+    if ir == 0 || bytes.ld8(ir, 8) != 0 {
+        return codes.E_CORRUPT
+    }
+    let value: u64 = ir + bytes.le16(ir + 20)
+    let vlen: u64 = bytes.le32(ir + 16)
+    let blk: u64 = bytes.le32(value + 8)
+    if vlen < 32 || blk < 512 || blk > BLOCK_MAX || (blk & (blk - 1)) != 0 || (blk % 512) != 0 {
+        return codes.E_UNSUPPORTED
+    }
+    let hdr: u64 = value + 16
+    let eoff: u64 = bytes.le32(hdr)
+    let ilen: u64 = bytes.le32(hdr + 4)
+    if eoff < 16 || eoff > ilen || 16 + ilen > vlen {
+        return codes.E_CORRUPT
+    }
+    r = scan_entries(v, hdr + eoff, hdr + ilen, work)
+    if r != codes.E_OK {
+        return r
+    }
+    let ia: u64 = rec.attr_find(rc, size, AT_INDEX_ALLOC, 4)
+    if ia == 0 {
+        return codes.E_OK
+    }
+    var re: u64 = 0
+    let rp: u64 = rec.attr_runs(ia, &re)
+    if rp == 0 || bytes.le64(ia + 16) != 0 {
+        return codes.E_CORRUPT
+    }
+    let blocks: u64 = bytes.le64(ia + 48) / blk
+    var i: u64 = 0
+    while i < blocks {
+        r = vol.ds_read(v, rp, re, i * (blk / 512), blk / 512, work + layout.OFF_BLOCK)
+        if r != codes.E_OK {
+            return r
+        }
+        r = scan_block(v, blk, work)
+        if r != codes.E_OK {
+            return r
+        }
+        i = i + 1
+    }
+    return codes.E_OK
+}
+
