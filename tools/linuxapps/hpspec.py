@@ -3,7 +3,7 @@ import sys
 
 KEEP_PREFIXES = ("/usr/", "/var/cache/fontconfig", "/etc/fonts", "/etc/gtk-3.0", "/etc/xdg")
 KEEP_EXACT = {"/lib/libc.musl-x86_64.so.1->ld-musl-x86_64.so.1"}
-SKIP_DIRS = {"/usr/", "/usr/lib/", "/usr/share/"}
+SKIP_DIRS = {"/usr/", "/usr/share/"}
 
 
 def spec_path(line):
