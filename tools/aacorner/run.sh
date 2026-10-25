@@ -71,18 +71,20 @@ RADIUS=$(grep -E '^radius_window=' assets/shapes/osum.shape | head -1 | cut -d= 
 RADIUS=${RADIUS:-12}
 # fields: name file regexp-for-rectangle corners
 measure() {  # run name
-    local o=$TMPD/$1 s=$TMPD/$1/serial.txt line x y w h
+    local o=$TMPD/$1 s=$TMPD/$1/serial.txt line x y w h SC=${1: -1}
     [ -s "$s" ] || { bad "$1: no serial"; return 1; }
     # tooltip: `wlib: tip [..] x= y= w= h=`
     line=$(grep -a 'wlib: tip \[' "$s" | head -1)
     x=$(sed -E 's/.* x=([0-9]+).*/\1/' <<<"$line"); y=$(sed -E 's/.* y=([0-9]+).*/\1/' <<<"$line")
     w=$(sed -E 's/.* w=([0-9]+).*/\1/' <<<"$line"); h=$(sed -E 's/.* h=([0-9]+).*/\1/' <<<"$line")
+    w=$(( (w + SC - 1) / SC * SC )); h=$(( (h + SC - 1) / SC * SC ))
     TIP=$(python3 -I tools/aacorner/aacorner.py "$o/01-tip.ppm" "$x" "$y" "$w" "$h" "$RADIUS")
-    # toast: `taskbar: toast [..] x= y= w= h=`; the left stripe is not the rim: right corners only
+    # toast: `taskbar: toast [..] x= y= w= h=`; the left stripe is not the rim: top right corner only (the toast below it, and the shadow, cover the lower ones)
     line=$(grep -a 'taskbar: toast \[' "$s" | tail -1)
     x=$(sed -E 's/.* x=([0-9]+).*/\1/' <<<"$line"); y=$(sed -E 's/.* y=([0-9]+).*/\1/' <<<"$line")
     w=$(sed -E 's/.* w=([0-9]+).*/\1/' <<<"$line"); h=$(sed -E 's/.* h=([0-9]+).*/\1/' <<<"$line")
-    TOAST=$(python3 -I tools/aacorner/aacorner.py "$o/03-toast.ppm" "$x" "$y" "$w" "$h" "$RADIUS" tr,br)
+    w=$(( (w + SC - 1) / SC * SC )); h=$(( (h + SC - 1) / SC * SC ))
+    TOAST=$(python3 -I tools/aacorner/aacorner.py "$o/03-toast.ppm" "$x" "$y" "$w" "$h" "$RADIUS" tr)
     # context menu: the last popup-layer window (`lay=5`) the server listed before the picture
     line=$(grep -a 'wm: fen .* lay=5 ' "$s" | tail -1)
     x=$(sed -E 's/.* x=([0-9]+) .*/\1/' <<<"$line"); y=$(sed -E 's/.* y=([0-9]+) .*/\1/' <<<"$line")

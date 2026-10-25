@@ -104,12 +104,11 @@ def measure(img, x, y, w, h, r, which=None):
         # pure colours from the straight edge, in the middle of the side
         # that carries this corner's rim (top for t*, bottom for b*)
         mx = x + w // 2
+        ground = get(ex + 2 if sx > 0 else ex - 3, ey + 2 if sy > 0 else ey - 3)
         if sy < 0:
-            ground = get(mx, y - 2)
             rim = get(mx, y)
             fill = get(mx, y + 3)
         else:
-            ground = get(mx, y + h + 1)
             rim = get(mx, y + h - 1)
             fill = get(mx, y + h - 4)
         # the corner circle centre of the outer and of the inner shape
@@ -127,6 +126,9 @@ def measure(img, x, y, w, h, r, which=None):
                 inner_x = (pxx >= x + 1) and (pxx < x + w - 1)
                 inner_y = (pyy >= y + 1) and (pyy < y + h - 1)
                 if not (inner_x and inner_y):
+                    ci = 0.0
+                if pxx < x or pxx >= x + w or pyy < y or pyy >= y + h:
+                    co = 0.0
                     ci = 0.0
                 if r == 0:
                     ci = 1.0 if (inner_x and inner_y) else 0.0
