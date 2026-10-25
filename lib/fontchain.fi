@@ -6,20 +6,87 @@ import font.ttf
 export {
     MAX_FACES, FIRST_CP, TAG_SHIFT,
     count, path_at, tag_of, face_of_tag, set_loaded, loaded, enable, enabled,
-    find, pair_kern
+    register, reset, find, pair_kern
 }
 
-const MAX_FACES: u64 = 2
+const MAX_FACES: u64 = 6
 const FIRST_CP: u32 = 0xA0 as u32
 const TAG_SHIFT: u32 = 24 as u32
 const GID_MASK: u32 = 0xFFFFFF as u32
+const TABLE_BYTES: u64 = 320
 
-static mut s_paths: [u8; 33] = "/lib/symbols.ttf\0/lib/emoji.ttf\0\0"
-static mut s_loaded: [u64; 2] = [0; 2]
+static mut s_defaults: [u8; 33] = "/lib/symbols.ttf\0/lib/emoji.ttf\0\0"
+static mut s_table: [u8; 320] = [0 as u8; 320]
+static mut s_booted: u64 = 0
+static mut s_loaded: [u64; 6] = [0; 6]
 static mut s_enabled: u64 = 1
 
+fn boot() {
+    if s_booted != 0 {
+        return
+    }
+    s_booted = 1
+    var i: u64 = 0
+    while i < 33 {
+        s_table[i as usize] = s_defaults[i as usize]
+        i = i + 1
+    }
+    while i < TABLE_BYTES {
+        s_table[i as usize] = 0 as u8
+        i = i + 1
+    }
+}
+
+fn reset() {
+    s_booted = 0
+    boot()
+    var i: u64 = 0
+    while i < MAX_FACES {
+        s_loaded[i as usize] = 0
+        i = i + 1
+    }
+}
+
 fn rd(i: u64) -> u64 {
-    return (__mmio_read8((((&s_paths[0]) as u64) + i) as *mut u8)) as u64
+    boot()
+    if i >= TABLE_BYTES {
+        return 0
+    }
+    return s_table[i as usize] as u64
+}
+
+fn table_end() -> u64 {
+    var at: u64 = 0
+    while rd(at) != 0 {
+        while rd(at) != 0 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+    return at
+}
+
+fn register(path: u64) -> bool {
+    boot()
+    if count() >= MAX_FACES || path == 0 {
+        return false
+    }
+    var len: u64 = 0
+    while *((path + len) as *mut u8) != 0 as u8 {
+        len = len + 1
+    }
+    let at: u64 = table_end()
+    if len == 0 || at + len + 2 > TABLE_BYTES {
+        return false
+    }
+    var k: u64 = 0
+    while k < len {
+        s_table[(at + k) as usize] = *((path + k) as *mut u8)
+        k = k + 1
+    }
+    s_table[(at + len) as usize] = 0 as u8
+    s_table[(at + len + 1) as usize] = 0 as u8
+    return true
 }
 
 fn path_start(i: u64) -> u64 {
@@ -52,7 +119,7 @@ fn path_at(i: u64) -> u64 {
     if i >= count() {
         return 0
     }
-    return ((&s_paths[0]) as u64) + path_start(i)
+    return ((&s_table[0]) as u64) + path_start(i)
 }
 
 fn tag_of(i: u64) -> u32 {

@@ -4,7 +4,7 @@
 #   bash tools/fontchain/run.sh [repo-root]
 # 1) registry + fallback + kerning against the real font files (host.fi, rasterised pixels)
 # 2) wiring audit: fuiglyph asks the registry (miss callback, rasteriser, kerning), no hard-wired faces left
-# 3) COUNTER-PROOFS: nofallback (chain disabled) fails 1), nokern (font without kerning) fails 1), unwired fuiglyph fails 2)
+# 3) COUNTER-PROOFS: nofallback (chain disabled) fails 1), nokern (font without kerning) fails 1), twofaces (owner table capped at 2) fails 1), unwired fuiglyph fails 2)
 set -uo pipefail
 ROOT=${1:-$(cd "$(dirname "$0")/../.." && pwd)}
 cd "$ROOT"
@@ -45,6 +45,14 @@ if build_host "$T/lib-nofb" "$T/host-nofb"; then
     if [ "$rc" != 0 ] && [ "$nf" -ge 8 ]; then ok "counter-proof nofallback: chain disabled -> $nf checks red (missing box, no ink)"; else bad "counter-proof nofallback not caught (exit $rc, $nf red)"; fi
 else bad "nofallback build"; fi
 
+mkdir -p "$T/lib-two/font"; cp -r lib/. "$T/lib-two/"; cp vendor/firn/lib/font/ttf.fi "$T/lib-two/font/ttf.fi"
+sed -i 's/if k == 0 || k > (\*f).fb_n {/if k == 0 || k > 2 {/' "$T/lib-two/font/ttf.fi"
+if build_host "$T/lib-two" "$T/host-two"; then
+    run_host "$T/host-two" "$T/fonts" "$T/two.out"; rc=$?
+    nt=$(grep -ac '^FAIL' "$T/two.out")
+    if [ "$rc" != 0 ] && [ "$nt" -ge 4 ]; then ok "counter-proof twofaces: owner table capped at 2 -> $nt checks red (tags 3-6 resolve to nothing)"; else bad "counter-proof twofaces not caught (exit $rc, $nt red)"; fi
+else bad "twofaces build"; grep -v '^warning' "$T/build.log" | head; fi
+
 if [ -x "$T/host" ]; then
     run_host "$T/host" "$T/monofonts" "$T/nokern.out"; rc=$?
     if [ "$rc" != 0 ] && grep -aq '^FAIL sans carries kerning pairs' "$T/nokern.out"; then ok "counter-proof nokern: a font without pairs is caught"; else bad "counter-proof nokern not caught (exit $rc)"; fi
@@ -62,6 +70,7 @@ def say(ok,m): print(("OK    " if ok else "FAIL  ")+m)
 say("import fontchain" in src, "fuiglyph imports the registry")
 say("fontchain.find" in fn("fb_miss"), "painter miss callback asks the registry")
 say("fontchain.find" in fn("fb_slot"), "rasteriser / character map lookup asks the registry")
+say("font_set_faces" in fn("fontset") and "MAX_FACES" in fn("fontset"), "painter font gets the whole face table (font_set_faces, MAX_FACES)")
 say("fontchain.pair_kern" in fn("fb_kern"), "kerning inside a fallback face asks the registry")
 say("fb_kern" in fn("kern26"), "kern26 reaches the fallback kerning")
 say(not re.search(r'/lib/(symbols|emoji)\.ttf', src), "no hard-wired face paths left in fuiglyph")
