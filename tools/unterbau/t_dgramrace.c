@@ -23,10 +23,12 @@ static int worker(int me, int *socks)
     struct sockaddr_un to = mk(names[(me + 1) % PROCS]);
     struct sockaddr_un mine = mk(names[me]);
     char b[64];
+    int fl = fcntl(socks[me], F_GETFL);
+    (void)!fcntl(socks[me], F_SETFL, fl | O_NONBLOCK);
     for (int i = 0; i < ROUNDS; i++) {
         ssize_t w = sendto(out, "x", 1, MSG_DONTWAIT, (struct sockaddr *)&to, SALEN(to));
         if (w < 0 && errno != EAGAIN) bad++;
-        while (recv(socks[me], b, sizeof b, MSG_DONTWAIT) > 0) { }
+        while (recv(socks[me], b, sizeof b, 0) > 0) { }
         if (i % 64 == 0) {
             int p = socket(AF_UNIX, SOCK_DGRAM, 0);
             ssize_t pw = sendto(p, "p", 1, MSG_DONTWAIT, (struct sockaddr *)&mine, SALEN(mine));
