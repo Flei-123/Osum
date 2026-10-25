@@ -35,11 +35,12 @@ printf 'echo ==START==\nsleep 1\ndhcp\nping 192.168.42.129\nhost example.org\nsl
 printf 'echo ==START==\ndhcp\nping 192.168.42.129\nsleep 1\necho ==END==\n' > "$T/s_re.sh"
 printf 'echo ==START==\nping 192.168.42.129\nping 192.168.42.129\nping 192.168.42.129\nping 192.168.42.129\ndhcp\nping 192.168.42.129\nsleep 1\necho ==END==\n' > "$T/s_late.sh"
 printf 'echo ==START==\ndhcp\nping 192.168.42.129\nsleep 2\ncat /proc/usbnet\necho ==END==\n' > "$T/s_proc.sh"
+printf 'echo ==START==\nsleep 3\ncat /proc/usbnet\ndhcp\necho ==END==\n' > "$T/s_procd.sh"
 printf 'echo ==START==\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\ncat /proc/usbnet\necho ==END==\n' > "$T/s_intr.sh"
 python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
-    /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_late.sh="$T/s_late.sh" /t/s_proc.sh="$T/s_proc.sh" /t/s_intr.sh="$T/s_intr.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
+    /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_late.sh="$T/s_late.sh" /t/s_proc.sh="$T/s_proc.sh" /t/s_procd.sh="$T/s_procd.sh" /t/s_intr.sh="$T/s_intr.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 PORT=$((47000 + ($$ % 500) * 4))
 
@@ -222,7 +223,7 @@ for c in $CASES; do
         net_ok ca1
         ;;
     ch336-alt1-nochalt)
-        GARGS="--phy-boot down" XWORDS="nochalt" BASEW="nokbd nosched vfs" run ca2 ch336-alt1 boot s_proc.sh
+        GARGS="--phy-boot down" XWORDS="nochalt" QWAIT=70 BASEW="nokbd nosched vfs" run ca2 ch336-alt1 boot s_procd.sh
         chk ca2 "bound to driver ch336" 'driver=ch336'
         chk ca2 "no bulk endpoints without the alt scan" 'usb: ep in=0 out=0'
         chk ca2 "no scan reported" 'usb: alt=0 scan=0'
@@ -230,10 +231,11 @@ for c in $CASES; do
         panics ca2
         ;;
     ch336-alt1-nosetif)
-        GARGS="--phy-boot down" XWORDS="nosetif" BASEW="nokbd nosched vfs" run ca3 ch336-alt1 boot s_proc.sh
+        GARGS="--phy-boot down" XWORDS="nosetif" QWAIT=70 BASEW="nokbd nosched vfs" run ca3 ch336-alt1 boot s_procd.sh
         chk ca3 "alt scan picked alt 1" 'usb: alt=1 scan=1 setif=0'
         grep -aq 'set_alt_setting if=0 alt=1' "$T/ca3.gadget" && bad "ca3: SET_INTERFACE sent despite nosetif" || ok "ca3: no SET_INTERFACE sent"
-        grep -aq 'bulk STALL' "$T/ca3.gadget" && ok "ca3: gadget stalled the bulk pipe" || bad "ca3: gadget never stalled"
+        grep -aq 'stats\|tx=' "$T/ca3.gadget" && grep -aq 'stats tx=0' "$T/ca3.gadget" && ok "ca3: no frame reached the gadget" || bad "ca3: frames reached the gadget without SET_INTERFACE"
+        chk ca3 "TX dropped on the unconfigured alt setting" 'drop=[1-9]'
         nochk ca3 "no lease without SET_INTERFACE" 'dhcp: ack ip='
         panics ca3
         ;;
