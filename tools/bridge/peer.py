@@ -120,6 +120,7 @@ def main():
     p.add_argument("--aus", default="/tmp/bridge-aus")
     p.add_argument("--kopplung", default="")
     p.add_argument("--kopplung-hex", action="store_true")
+    p.add_argument("--kopplung-web", type=int, default=0)
     p.add_argument("--abriss", action="store_true")
     p.add_argument("--kein-beweis", action="store_true")
     p.add_argument("--wartezeit", type=float, default=60.0)
@@ -220,7 +221,19 @@ def eine_verbindung(a, ctx, lauscher, sag, auftraege, runde):
             else:
                 sag("BEWEIS ungeprueft (python3-cryptography fehlt)")
 
-        if a.kopplung:
+        if a.kopplung and a.kopplung_web:
+            wire_code = hex_von(a.kopplung) if a.kopplung_hex else a.kopplung
+            for n in range(abs(a.kopplung_web)):
+                d.sende(["pairing-needed", wire_code])
+                f, _ = d.nachricht()
+                sag("KOPPLUNG-WEB", n + 1, " ".join(f[:1]))
+                if f[0] != "hello":
+                    sag("KOPPLUNG-WEB-FALSCH", f[0])
+                    return 1
+            if a.kopplung_web < 0:
+                sag("KOPPLUNG-WEB-ENDE ohne Freigabe")
+                return 0
+        elif a.kopplung:
             wire_code = hex_von(a.kopplung) if a.kopplung_hex else a.kopplung
             d.sende(["pairing-needed", wire_code])
             f, _ = d.nachricht()

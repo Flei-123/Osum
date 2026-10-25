@@ -509,6 +509,41 @@ echo "   -- GEGENPROBE: ein Code, den niemand angefragt hat"
 lauf_ohne_netz "$TMPD/nonet.img" "jarvisctl pair 424242;exit" "$TMPD/r4b.txt"
 hat "$TMPD/r4b.txt" "No pairing request" "jarvisctl weigert sich, eine Kopplung zu bestaetigen, die es nicht gibt"
 
+echo "== 7b. Kopplung per Web: kein lokales Bestaetigen, Wiederanfrage, Anzeige =="
+# =====================================================================
+cp "$TMPD/voll.conf" "$TMPD/web.conf"
+printf '\npairing = web\n' >> "$TMPD/web.conf"
+abbild "$TMPD/web.img" "$TMPD/web.conf" "/var/jarvis/gruss.txt=$TMPD/gruss.txt"
+draht_auf
+gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/gw1.log" --kopplung "$CODE" --kopplung-hex --kopplung-web 3
+lauf_mit_netz "$TMPD/web.img" "jarvisd -1 -t 40000;cat /var/jarvis/state;jarvisctl log 10;exit" "$TMPD/rw1.txt" 200
+gegenstelle_aus
+draht_zu
+hat "$TMPD/rw1.txt" "PAIRING CODE $CODE" "web: der Code wird am Geraet gezeigt"
+hat "$TMPD/rw1.txt" "web UI" "web: mit dem Hinweis auf die Weboberflaeche"
+hat_nicht "$TMPD/rw1.txt" "jarvisctl pair $CODE" "web: kein lokales Bestaetigen verlangt"
+hat "$TMPD/gw1.log" "KOPPLUNG-WEB 3 hello" "web: das Geraet fragt alle paar Sekunden neu (3 Anfragen)"
+hat "$TMPD/gw1.log" "ANGEMELDET" "web: nach der Freigabe im Web ist es angemeldet"
+hat "$TMPD/rw1.txt" "pairing: ok" "web: /var/jarvis/state sagt ok"
+echo "   -- Anzeige waehrend das Geraet wartet"
+draht_auf
+gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/gw2.log" --kopplung "$CODE" --kopplung-hex --kopplung-web -2
+lauf_mit_netz "$TMPD/web.img" "jarvisd -1 -t 20000;jarvisctl status;exit" "$TMPD/rw2.txt" 150
+gegenstelle_aus
+draht_zu
+hat "$TMPD/rw2.txt" "WAITING -- enter this code in the JARVIS web UI" "web: jarvisctl status zeigt den Code gross"
+hat "$TMPD/rw2.txt" "##" "web: in Blockziffern"
+hat "$TMPD/rw2.txt" "> Devices" "web: mit dem Ort der Eingabe"
+hat_nicht "$TMPD/gw2.log" "ANGEMELDET" "web: ohne Freigabe keine Sitzung"
+echo "   -- GEGENPROBE: Modus device verlangt weiter die Bestaetigung am Geraet"
+draht_auf
+gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/gw3.log" --kopplung "$CODE" --kopplung-hex --kopplung-web 3
+lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 30000;exit" "$TMPD/rw3.txt" 150
+gegenstelle_aus
+draht_zu
+hat "$TMPD/gw3.log" "KOPPLUNG-WEB-FALSCH" "device: das Geraet wartet nicht auf das Web, es lehnt ab"
+hat_nicht "$TMPD/gw3.log" "ANGEMELDET" "device: keine Sitzung ohne lokale Bestaetigung"
+
 # =====================================================================
 echo "== 8. ZUSAGE (d): Abriss mitten im Auftrag =="
 # =====================================================================
