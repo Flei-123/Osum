@@ -123,3 +123,12 @@ Rough total after stage 1: 4-6 weeks of focused work, of which stages 3 and 5 ar
 - Gates: `apprights` (stage 1), `apprights-host` (lib + 12 mutations), `apprights2` (QEMU, restart over the same disk, ceiling, enforcement, 3 counter-probes).
 - Known limits: `load` runs asynchronously after the desktop starts, an app started in the first moments runs at default deny; the conf is
   rewritten in place (no atomic rename); the table holds 16 apps.
+
+## 8. Stage 3 as built: file sandbox (S-010, 25.10.2026)
+
+- **Opt-in by manifest:** INFO line `sandbox=files`. `apprights load` passes it with the ceiling (ORIGIN op 4, flag bit 16384 = `policy.F_SANDBOX`, not part of `perm=`) and creates `/data/<name>`.
+- **Confined** = sticky label `app:<name>` + flag + no `fs.home` grant. Granting `fs.home` lifts it at once, revoking confines again. Unlabelled callers, other labels, SYSTEM bundles, apps without the flag and apps without a table slot are never limited.
+- **Rules** (`lib/apprights/fspolicy.fi`, pure): read = `/data/<name>` + `/bin/ /lib/ /usr/ /apps/ /proc/ /system/ /etc/ssl/ /etc/zoneinfo/ /etc/fonts/ /dev/shm/` + exact `/ /data /etc/resolv.conf /etc/hosts /etc/localtime /etc/locale.conf /dev/null /dev/zero /dev/urandom /dev/random /dev/tty /dev/fb`. Write = `/data/<name>` only. Symlink, hard link, chmod, chown, chroot refused.
+- **Chokepoints** (`kernel/ipc/appfs.fi`): every path that goes through `perm.walk` is read-checked (open, stat, exec lookups, chdir, readlink ...); `perm.walk_w` adds the write rule for unlink, rmdir, mkdir, rename (both names), utimensat; `open_named` checks write intent (O_WRONLY/O_RDWR/O_CREAT/O_TRUNC). Paths are already absolute and `..`-folded (`uio.resolve`), so the prefix test is sound.
+- **Gates:** `bash tools/apprights-host/run.sh` (host checks plus mutations incl. 11 for the sandbox), `bash tools/appfs/run.sh` (QEMU, `apprights tryfs`, counter-probes a/b/c).
+- **Known limits:** `load` runs after the desktop starts, so an app started in the first moments is unconfined; no file picker portal yet (a confined app cannot open a file the person chose); the shipped packages (mail, notes, social, fvviewer, jarvismini) do not say `sandbox=files` yet; syscalls that take no path through `perm.walk` (fd-relative opens on a held directory fd, size changes by path) are not audited; /proc is fully readable.

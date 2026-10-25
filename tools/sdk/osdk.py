@@ -38,7 +38,7 @@ SDK_MODULES = ["ulib", "actwire", "rpc", "actcli", "socsdk"]
 # the launcher keys (kernel/user/appdir.fi) + the v2 keys
 KEYS_V1 = ["name", "info", "exec", "icon", "keys", "fassung", "net"]
 KEYS_V2 = ["manifest", "id", "version", "author", "license", "min_os", "perm",
-           "service", "actions", "opens", "needs"]
+           "service", "actions", "opens", "needs", "sandbox"]
 REQUIRED = ["name", "info", "fassung", "manifest", "id", "version"]
 
 # permission -> (enforced by the system today?, what it means)
@@ -48,7 +48,7 @@ PERMS = {
     "clipboard.read": (True, "read the clipboard (bus CLIPGET)"),
     "clipboard.write": (True, "write the clipboard (bus CLIPSET)"),
     "mic": (True, "record from the microphone (SYS_OSUM_AUDREAD)"),
-    "fs.home": (False, "read/write the user's home"),
+    "fs.home": (True, "read/write outside the app data folder; only needed by an app that says sandbox=files"),
     "audio.play": (True, "play sound"),
     "hotkey": (True, "a global shortcut: hotkeyd binds a key (from /etc/hotkeys.conf) to one of the app's named bus actions; the app never sees the keys"),
     "window.float": (True, "a window above the normal ones (layer L_FLOAT, never above the lock screen or task bar)"),
@@ -162,6 +162,8 @@ def lint(info_path, project=None):
         rep.err(f["min_os"][1], "min_os: 1-3 dotted numbers")
     elif "min_os" in f:
         rep.warn(f["min_os"][1], "min_os is declared only: the OS has no version number to compare yet")
+    if "sandbox" in f and f["sandbox"][0] != "files":
+        rep.err(f["sandbox"][1], "sandbox: files")
     if "net" in f:
         if f["net"][0] not in ("real", "filtered", "faked", "none"):
             rep.err(f["net"][1], "net: real|filtered|faked|none")

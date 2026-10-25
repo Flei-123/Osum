@@ -6,6 +6,7 @@ import std.rt
 import std.io
 import apprights.policy
 import apprights.conf
+import apprights.fspolicy
 
 struct T {
     fails: i32,
@@ -192,6 +193,45 @@ fn main() -> i32 {
     check(&t, policy.slot_used(ms) && is_s(policy.slot_name(ms), "mail") && policy.slot_name(policy.MAX_APPS) == 0, "slot_name / slot_used")
     policy.reset()
     check(&t, policy.set_mask(c("mail"), 0) == policy.E_OK && policy.acct_get(policy.app_slot(c("mail")), policy.A_CPU) == 0, "a re-allocated slot starts at 0")
+
+    // ---- S-010: file confinement
+    policy.reset()
+    check(&t, policy.set_ceiling(c("box"), 0 | policy.F_SANDBOX) == policy.E_OK, "box registered with sandbox flag")
+    check(&t, policy.set_ceiling(c("free"), 0) == policy.E_OK, "free registered without sandbox flag")
+    check(&t, policy.set_ceiling(c("home"), policy.P_FS_HOME | policy.F_SANDBOX) == policy.E_OK, "home registered with sandbox flag and fs.home ceiling")
+    check(&t, policy.get_ceiling(c("box")) == 0, "the sandbox flag is not part of the ceiling")
+    check(&t, policy.sandboxed(c("box")) && !policy.sandboxed(c("free")) && !policy.sandboxed(c("none")), "sandboxed(): only the flagged app")
+    check(&t, policy.confined(c("box")) && !policy.confined(c("free")), "confined(): flagged app without fs.home")
+    check(&t, policy.set_mask(c("home"), policy.P_FS_HOME) == policy.E_OK && !policy.confined(c("home")), "fs.home grant lifts the confinement")
+    check(&t, policy.set_mask(c("home"), 0) == policy.E_OK && policy.confined(c("home")), "revoking fs.home confines again")
+    check(&t, fspolicy.read_ok(c(""), c("/etc/shadow")) && fspolicy.write_ok(c(""), c("/etc/shadow")), "unlabelled caller is never limited")
+    check(&t, fspolicy.read_ok(c("jarvis"), c("/etc/shadow")) && fspolicy.write_ok(c("system"), c("/bin/sh")), "non-app labels are never limited")
+    check(&t, fspolicy.read_ok(c("app:free"), c("/etc/shadow")) && fspolicy.write_ok(c("app:free"), c("/etc/shadow")), "unconfined app is not limited")
+    check(&t, fspolicy.read_ok(c("app:nobody"), c("/etc/shadow")), "app without a table slot is not limited")
+    check(&t, fspolicy.read_ok(c("app:home"), c("/etc/shadow")) == false, "app:home confined again after revoke")
+    check(&t, fspolicy.read_ok(c("app:box"), c("/data/box/a.txt")) && fspolicy.write_ok(c("app:box"), c("/data/box/a.txt")), "own data folder: read and write")
+    check(&t, fspolicy.read_ok(c("app:box"), c("/data/box")) && fspolicy.write_ok(c("app:box"), c("/data/box")), "own data folder itself")
+    check(&t, !fspolicy.read_ok(c("app:box"), c("/data/boxer/a.txt")) && !fspolicy.read_ok(c("app:box"), c("/data/bo")), "name prefix is not a folder prefix")
+    check(&t, !fspolicy.read_ok(c("app:box"), c("/data/other/a.txt")) && !fspolicy.write_ok(c("app:box"), c("/data/other/a.txt")), "another app's data folder is closed")
+    check(&t, !fspolicy.read_ok(c("app:box"), c("/data/xyz/a.txt")) && !fspolicy.write_ok(c("app:box"), c("/data/xyz/a.txt")), "a folder with a same-length name is closed")
+    check(&t, !fspolicy.read_ok(c("app:box"), c("/data/dokumente/x.txt")) && !fspolicy.read_ok(c("app:box"), c("/data/bilder")), "the person's documents are closed")
+    check(&t, !fspolicy.read_ok(c("app:box"), c("/etc/passwd")) && !fspolicy.read_ok(c("app:box"), c("/etc/apprights.conf")) && !fspolicy.read_ok(c("app:box"), c("/etc/dbgsrv.token")), "secrets under /etc are closed")
+    check(&t, !fspolicy.read_ok(c("app:box"), c("/home/justin/x")) && !fspolicy.read_ok(c("app:box"), c("/root/x")) && !fspolicy.read_ok(c("app:box"), c("/mnt/disk/x")), "home, root and mounts are closed")
+    check(&t, !fspolicy.read_ok(c("app:box"), c("/dev/hda")) && !fspolicy.read_ok(c("app:box"), c("/dev/nvme0n1")), "raw disks are closed")
+    check(&t, fspolicy.read_ok(c("app:box"), c("/dev/null")) && fspolicy.read_ok(c("app:box"), c("/dev/urandom")) && fspolicy.read_ok(c("app:box"), c("/dev/shm/x")), "harmless devices stay open")
+    check(&t, fspolicy.read_ok(c("app:box"), c("/bin/sh")) && fspolicy.read_ok(c("app:box"), c("/lib/sans.ttf")) && fspolicy.read_ok(c("app:box"), c("/usr/share/x")), "system programs and libraries are readable")
+    check(&t, fspolicy.read_ok(c("app:box"), c("/apps/box.osp/INFO")) && fspolicy.read_ok(c("app:box"), c("/apps")) && fspolicy.read_ok(c("app:box"), c("/")), "bundles and the root are readable")
+    check(&t, fspolicy.read_ok(c("app:box"), c("/etc/resolv.conf")) && fspolicy.read_ok(c("app:box"), c("/etc/ssl/ca.pem")), "name server and certificates are readable")
+    check(&t, !fspolicy.read_ok(c("app:box"), c("/etc/resolv.conf.bak")) && !fspolicy.read_ok(c("app:box"), c("/binx/y")), "exact entries and prefix entries do not leak to look-alikes")
+    check(&t, !fspolicy.write_ok(c("app:box"), c("/bin/sh")) && !fspolicy.write_ok(c("app:box"), c("/tmp/x")) && !fspolicy.write_ok(c("app:box"), c("/apps/box.osp/INFO")), "system areas are read-only")
+    check(&t, !fspolicy.write_ok(c("app:box"), c("/")) && !fspolicy.write_ok(c("app:box"), c("/data")), "root and /data are not writable")
+    check(&t, !fspolicy.link_ok(c("app:box")) && fspolicy.link_ok(c("app:free")) && fspolicy.link_ok(c("")), "links are refused for the confined app only")
+    check(&t, conf.manifest_sandbox(c("name=x\nsandbox=files\nperm=net\n"), 33) == policy.F_SANDBOX, "manifest: sandbox=files line")
+    check(&t, conf.manifest_sandbox(c("name=x\nsandbox=files\r\n"), 24) == policy.F_SANDBOX, "manifest: sandbox=files with CRLF")
+    check(&t, conf.manifest_sandbox(c("name=x\nperm=net\n"), 17) == 0, "manifest without the line: not sandboxed")
+    check(&t, conf.manifest_sandbox(c("name=x\nsandbox=filesx\n"), 22) == 0 && conf.manifest_sandbox(c("name=x\n#sandbox=files\n"), 22) == 0, "manifest: look-alikes and comments do not count")
+    policy.reset()
+    check(&t, !policy.sandboxed(c("box")), "reset clears the sandbox flags")
 
     io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
     if t.fails != 0 {

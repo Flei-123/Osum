@@ -10,9 +10,9 @@
 
 export {
     P_MIC, P_CAMERA, P_NET, P_FS_HOME, P_NOTIFY, P_CLIP_READ, P_CLIP_WRITE, P_AUDIO_PLAY,
-    P_LOCATION, P_CONTACTS, P_PHONE, P_WINDOW_FLOAT, P_HOTKEY, P_ALL, P_SAFE, NAME_MAX, MAX_APPS,
+    P_LOCATION, P_CONTACTS, P_PHONE, P_WINDOW_FLOAT, P_HOTKEY, P_ALL, P_SAFE, F_SANDBOX, NAME_MAX, MAX_APPS,
     E_OK, E_FULL, E_BADNAME, E_CEIL, CEIL_NONE,
-    set_ceiling, get_ceiling, has_ceiling,
+    set_ceiling, get_ceiling, has_ceiling, sandboxed, confined,
     A_CPU, A_WAKE, A_TX, A_RX, acct_addr, acct_get, acct_clear, slot_used, slot_name,
     name_ok, label_app, app_slot, set_mask, get_mask, grant, revoke, label_allows, reset, count, bit_of, name_of_bit,
 }
@@ -41,6 +41,8 @@ const P_ALL: u64 = 8191
 // clipboard.write 64 + audio.play 128.
 const P_SAFE: u64 = 244
 
+const F_SANDBOX: u64 = 16384
+
 const NAME_MAX: u64 = 19 // "app:" + 19 = the 23 characters of a label (origin.LABEL_MAX)
 const MAX_APPS: u64 = 16
 const SLOT: u64 = 24 // octets per name in the table (19 + zero, padded)
@@ -60,6 +62,7 @@ static mut masks: [u64; 16] = [0 as u64; 16]
 static mut used: [u64; 16] = [0 as u64; 16]
 static mut ceils: [u64; 16] = [0 as u64; 16]
 static mut ceilset: [u64; 16] = [0 as u64; 16]
+static mut sbx: [u64; 16] = [0 as u64; 16]
 
 // PER-APP COUNTERS (AR-2b). Four words per table slot, booked by the kernel at the places where the work happens:
 // A_CPU timer ticks charged to a task of the app, A_WAKE blocked->ready transitions of its tasks (wakeups),
@@ -174,6 +177,7 @@ fn slot_for(name: u64) -> u64 {
     masks[s as usize] = 0
     ceils[s as usize] = 0
     ceilset[s as usize] = 0
+    sbx[s as usize] = 0
     acct_clear(s)
     return s
 }
@@ -235,9 +239,28 @@ fn set_ceiling(name: u64, ceil: u64) -> u64 {
     }
     ceils[s as usize] = ceil & P_ALL
     ceilset[s as usize] = 1
+    sbx[s as usize] = 0
+    if (ceil & F_SANDBOX) != 0 {
+        sbx[s as usize] = 1
+    }
     // a lowered ceiling takes rights away at once
     masks[s as usize] = masks[s as usize] & ceils[s as usize]
     return E_OK
+}
+
+fn sandboxed(name: u64) -> bool {
+    let s: u64 = app_slot(name)
+    if s >= MAX_APPS {
+        return false
+    }
+    return sbx[s as usize] != 0
+}
+
+fn confined(name: u64) -> bool {
+    if !sandboxed(name) {
+        return false
+    }
+    return (get_mask(name) & P_FS_HOME) == 0
 }
 
 fn has_ceiling(name: u64) -> bool {
@@ -320,6 +343,7 @@ fn reset() {
         masks[s as usize] = 0
         ceils[s as usize] = 0
         ceilset[s as usize] = 0
+        sbx[s as usize] = 0
         acct_clear(s)
         s = s + 1
     }

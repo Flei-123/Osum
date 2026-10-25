@@ -34,8 +34,8 @@ State of AR-2 (docs/APP-RECHTE-ENERGIE.md). The manifest `perm=` (INFO file) is 
 than the app declared. The kernel table of 16 apps (`lib/apprights/policy.fi`), `/bin/apprights` and `/etc/apprights.conf` hold what
 the person actually granted (default deny).
 
-- **Enforced by the kernel:** `net notify clipboard.read clipboard.write audio.play mic window.float hotkey`.
-- **Declared only:** `fs.home` (S-010, no sandbox yet).
+- **Enforced by the kernel:** `net notify clipboard.read clipboard.write audio.play mic window.float hotkey fs.home`.
+- **`fs.home` / `sandbox=files`** (S-010): an app whose INFO has the line `sandbox=files` and that holds no `fs.home` grant is *confined*: it reads its own `/data/<name>` plus the shared system areas (`/bin /lib /usr /apps /proc /system`, a few `/dev` and `/etc` entries), writes only `/data/<name>`, and creates no links. Without the line an app is not confined (opt-in until the shipped packages are audited). `docs/APP-RECHTE-ENERGIE.md` section 8.
 - **In the rights table, not yet in the manifest vocabulary:** camera, location, contacts, phone (bits `P_CAMERA P_LOCATION P_CONTACTS P_PHONE`).
 - **`window.float`** (S2 built): a window above the normal ones, layer `L_FLOAT`, never `L_TOP`; without the right `WS_LAYER` returns `E_RIGHTS`, revoking it drops the window back to `L_NORMAL`.
 - **`hotkey`** (S3 built, `docs/HOTKEYS.md`): the helper `hotkeyd` owns the key and calls the app's named bus action (e.g. `jarvismini.toggle`); a line in `/etc/hotkeys.conf` for an app without the right is refused, never bound. Granted by the person like the microphone, NOT in the automatic grant.
