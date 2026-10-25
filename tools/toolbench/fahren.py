@@ -105,7 +105,7 @@ class Monitor:
         time.sleep(0.6)
 
     def tippe(self, text):
-        keys = {" ": "spc", ".": "dot", "-": "minus"}
+        keys = {" ": "spc", ".": "dot", "-": "minus", "/": "slash"}
         for ch in text:
             self.cmd("sendkey %s" % keys.get(ch, ch), 0.15)
         time.sleep(0.6)

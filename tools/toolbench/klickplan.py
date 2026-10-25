@@ -115,6 +115,20 @@ def main(argv):
     # Kontrollzentrums liegen in der Taskleiste und im Panel -- beides
     # sind Fenster, die keine Widget-Spur schreiben, und ein Laeufer, der
     # hier abbricht, weil ein UNBETEILIGTES Fenster fehlt, misst nichts.
+    if was in ("diskbtn", "diskrow", "disknav"):
+        pat = {"diskbtn": r"disks: btn verb=(\S+) cx=(\d+) cy=(\d+)",
+               "diskrow": r"disks: row p=(\d+) cx=(\d+) cy=(\d+)",
+               "disknav": r"disks: navrow n=(\d+) cx=(\d+) cy=(\d+)"}[was]
+        hit = None
+        for z in zeilen:
+            m = re.search(pat, z)
+            if m and m.group(1) == argv[3]:
+                hit = m
+        if hit is None:
+            raise SystemExit("klickplan: %s %s not reported" % (was, argv[3]))
+        print("%s,%s" % (hit.group(2), hit.group(3)))
+        return 0
+
     if was in ("qsfeld", "kachel", "qszeile1", "qszeile2"):
         cx = 0
         cy = 0

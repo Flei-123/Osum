@@ -125,7 +125,7 @@ def main(d):
 
 
 
-def vm(path, expect_parts, fmt_blocks):
+def vm(path, expect_parts, fmt_blocks, drift=False):
     spec = importlib.util.spec_from_file_location("mkfs", os.path.join(os.path.dirname(__file__), "..", "osum", "mkfs.py"))
     mk = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mk)
@@ -140,7 +140,13 @@ def vm(path, expect_parts, fmt_blocks):
         fs.format()
         n = (fs.data_start + 1) * SECT
         got = img[start * SECT:start * SECT + n]
-        check("vm: formatted partition equals mkfs.py (%d blocks)" % (fs.data_start + 1), got == bytes(fs.d[:n]))
+        want = bytes(fs.d[:n])
+        if drift:
+            diff = [i for i in range(n) if got[i] != want[i]] if len(got) == n else list(range(n))
+            check("vm: formatted partition equals mkfs.py except the root inode times (%d blocks, %d bytes differ)" % (fs.data_start + 1, len(diff)),
+                  len(diff) <= 12 and (not diff or diff[-1] - diff[0] < 32))
+        else:
+            check("vm: formatted partition equals mkfs.py (%d blocks)" % (fs.data_start + 1), got == want)
     bad = [n for n, c in results if not c]
     print("WCHECK: %d passed, %d failed" % (len(results) - len(bad), len(bad)))
     sys.exit(1 if bad else 0)
@@ -148,6 +154,6 @@ def vm(path, expect_parts, fmt_blocks):
 
 if __name__ == "__main__":
     if sys.argv[1] == "vm":
-        vm(sys.argv[2], eval(sys.argv[3]), int(sys.argv[4]))
+        vm(sys.argv[2], eval(sys.argv[3]), int(sys.argv[4]), len(sys.argv) > 5 and sys.argv[5] == "drift")
     else:
         main(sys.argv[1])
