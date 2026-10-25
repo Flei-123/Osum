@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import disks.table
+import disks.gptw
+import disks.mbrw
+import ntfsshrink.codes
+
+export { SCRATCH_BYTES, prepare, lookup, apply }
+
+const TYPE_PROTECTIVE: u64 = 238
+const GPT_OFF: u64 = 0
+const TAB_OFF: u64 = 18432
+const SCAN_OFF: u64 = 20992
+const SCRATCH_BYTES: u64 = 40960
+
+fn protective(rd: fn(u64, u64, u64) -> u64, buf: u64) -> u64 {
+    if rd(0, 1, buf) != 0 {
+        return 2
+    }
+    if bytes.ld8(buf, 510) != 85 || bytes.ld8(buf, 511) != 170 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < 4 {
+        if bytes.ld8(buf + 446 + i * 16, 4) == TYPE_PROTECTIVE {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn prepare(rd: fn(u64, u64, u64) -> u64, wr: fn(u64, u64, u64) -> u64, total: u64, scratch: u64) -> u64 {
+    let p: u64 = protective(rd, scratch + SCAN_OFF)
+    if p == 2 {
+        return codes.E_IO
+    }
+    if p == 0 {
+        return codes.E_OK
+    }
+    if gptw.repair(rd, wr, total, scratch + GPT_OFF) != gptw.E_OK {
+        return codes.E_TABLE
+    }
+    return codes.E_OK
+}
+
+fn lookup(rd: fn(u64, u64, u64) -> u64, total: u64, start: u64, scratch: u64, out: *mut u64) -> u64 {
+    let tab: u64 = scratch + TAB_OFF
+    if table.read_table(rd, total, tab, scratch + SCAN_OFF) == table.SCH_NONE {
+        return codes.E_TABLE
+    }
+    var i: u64 = 0
+    while i < table.count(tab) {
+        if table.start_of(tab, i) == start && table.sectors_of(tab, i) != 0 {
+            *out = table.sectors_of(tab, i)
+            return codes.E_OK
+        }
+        i = i + 1
+    }
+    return codes.E_TABLE
+}
+
+fn apply(rd: fn(u64, u64, u64) -> u64, wr: fn(u64, u64, u64) -> u64, total: u64, start: u64, sectors: u64,
+    scratch: u64) -> u64 {
+    let p: u64 = protective(rd, scratch + SCAN_OFF)
+    var rc: u64 = gptw.E_NOTABLE
+    if p == 1 {
+        rc = gptw.resize(rd, wr, total, start, sectors, scratch + GPT_OFF)
+    } else if p == 0 {
+        rc = mbrw.resize(rd, wr, total, start, sectors, scratch + GPT_OFF)
+    }
+    if rc != gptw.E_OK {
+        return codes.E_TABLE
+    }
+    return codes.E_OK
+}

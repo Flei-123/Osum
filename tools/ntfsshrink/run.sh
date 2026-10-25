@@ -252,5 +252,7 @@ mutcase "journal verdict inverted" 's/if clean == 0 {/if clean == 7 {/' "$D/x_lo
 mutcase "bad-cluster length ignored" 's/ || it.len != (\*v).clusters//; s/if runs.next(&it) || it.bad != 0 {/if false {/' "$D/x_bad.img"
 mutcase "hibernation verdict dropped" 's/    return codes.E_HIBERNATED/    return codes.E_OK/' "$D/x_hib.img" hiber.fi
 
+. tools/ntfsshrink/shrink.sh
+
 echo "NTFSSHRINK: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

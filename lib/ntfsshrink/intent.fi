@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import disks.table
+
+export { Intent, intent_new, encode, decode, read_at, write_at, clear_at, SIZE }
+
+const SIZE: u64 = 512
+const VERSION: u64 = 1
+const CRC_AT: u64 = 508
+
+struct Intent {
+    base: u64,
+    old_s: u64,
+    new_s: u64,
+    old_psize: u64,
+    new_psize: u64,
+    serial: u64
+}
+
+fn intent_new() -> Intent {
+    var it: Intent = Intent { base: 0, old_s: 0, new_s: 0, old_psize: 0, new_psize: 0, serial: 0 }
+    return it
+}
+
+fn magic_ok(p: u64) -> bool {
+    let m: str = "OSNTSHR1"
+    var i: usize = 0
+    while i < m.n {
+        if bytes.ld8(p, i as u64) != bytes.ld8(m.p as u64, i as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn encode(buf: u64, it: *mut Intent) {
+    let m: str = "OSNTSHR1"
+    bytes.zero(buf, SIZE)
+    var i: usize = 0
+    while i < m.n {
+        bytes.st8(buf + i as u64, bytes.ld8(m.p as u64, i as u64))
+        i = i + 1
+    }
+    bytes.put32(buf + 8, VERSION)
+    bytes.put64(buf + 16, (*it).base)
+    bytes.put64(buf + 24, (*it).old_s)
+    bytes.put64(buf + 32, (*it).new_s)
+    bytes.put64(buf + 40, (*it).old_psize)
+    bytes.put64(buf + 48, (*it).new_psize)
+    bytes.put64(buf + 56, (*it).serial)
+    bytes.put32(buf + CRC_AT, table.crc32(buf, CRC_AT))
+}
+
+fn decode(buf: u64, it: *mut Intent) -> bool {
+    if !magic_ok(buf) || bytes.le32(buf + 8) != VERSION {
+        return false
+    }
+    if table.crc32(buf, CRC_AT) != bytes.le32(buf + CRC_AT) {
+        return false
+    }
+    (*it).base = bytes.le64(buf + 16)
+    (*it).old_s = bytes.le64(buf + 24)
+    (*it).new_s = bytes.le64(buf + 32)
+    (*it).old_psize = bytes.le64(buf + 40)
+    (*it).new_psize = bytes.le64(buf + 48)
+    (*it).serial = bytes.le64(buf + 56)
+    return true
+}
+
+fn read_at(rd: fn(u64, u64, u64) -> u64, lba: u64, buf: u64, it: *mut Intent) -> bool {
+    if rd(lba, 1, buf) != 0 {
+        return false
+    }
+    return decode(buf, it)
+}
+
+fn write_at(wr: fn(u64, u64, u64) -> u64, lba: u64, buf: u64, it: *mut Intent) -> bool {
+    encode(buf, it)
+    return wr(lba, 1, buf) == 0
+}
+
+fn clear_at(wr: fn(u64, u64, u64) -> u64, lba: u64, buf: u64) -> bool {
+    bytes.zero(buf, SIZE)
+    return wr(lba, 1, buf) == 0
+}

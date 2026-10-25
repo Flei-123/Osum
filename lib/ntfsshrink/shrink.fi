@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.vol
+import ntfsshrink.rec
+import ntfsshrink.intent
+import ntfsshrink.ptab
+import ntfsshrink.steps
+import ntfsshrink.checks
+
+export { Info, info_new, info, run, recover, SCRATCH_BYTES, RESERVE_BYTES, MIN_SECTORS }
+
+const RESERVE_BYTES: u64 = 16777216
+const MIN_SECTORS: u64 = 2048
+const O_BOOT: u64 = 45056
+const O_INT: u64 = 46080
+const O_PTAB: u64 = 49152
+const O_WORK: u64 = 90112
+const SCRATCH_BYTES: u64 = 118784
+
+struct Info {
+    psize: u64,
+    sectors: u64,
+    clusters: u64,
+    spc: u64,
+    cb: u64,
+    used_end: u64,
+    reserve: u64,
+    min_sectors: u64
+}
+
+fn info_new() -> Info {
+    var i: Info = Info { psize: 0, sectors: 0, clusters: 0, spc: 0, cb: 0, used_end: 0, reserve: 0, min_sectors: 0 }
+    return i
+}
+
+fn deny(a: u64, b: u64, c: u64) -> u64 {
+    return 1
+}
+
+fn reserve_clusters(cb: u64) -> u64 {
+    return (RESERVE_BYTES + cb - 1) / cb
+}
+
+fn open_vol(rd: fn(u64, u64, u64) -> u64, wr: fn(u64, u64, u64) -> u64, total: u64, base: u64, scratch: u64,
+    v: *mut vol.Vol) -> u64 {
+    var psize: u64 = 0
+    let r: u64 = ptab.lookup(rd, total, base, scratch + O_PTAB, &psize)
+    if r != codes.E_OK {
+        return r
+    }
+    if base + psize > total {
+        return codes.E_TABLE
+    }
+    return vol.open(v, rd, wr, base, psize, scratch + O_BOOT)
+}
+
+fn info(rd: fn(u64, u64, u64) -> u64, total: u64, base: u64, scratch: u64, out: *mut Info) -> u64 {
+    var v: vol.Vol = vol.vol_new()
+    var r: u64 = open_vol(rd, deny, total, base, scratch, &v)
+    if r != codes.E_OK {
+        return r
+    }
+    var b: steps.Bufs = steps.bufs_at(scratch)
+    r = rec.mft_load(&v, b.raw, b.rec)
+    if r != codes.E_OK {
+        return r
+    }
+    var used: u64 = 0
+    r = steps.used_end(&v, &b, &used)
+    if r != codes.E_OK {
+        return r
+    }
+    (*out).psize = v.psize
+    (*out).sectors = v.sectors
+    (*out).clusters = v.clusters
+    (*out).spc = v.spc
+    (*out).cb = v.cb
+    (*out).used_end = used
+    (*out).reserve = reserve_clusters(v.cb)
+    (*out).min_sectors = (used + reserve_clusters(v.cb)) * v.spc + 1
+    return codes.E_OK
+}
+
+fn pending(v: *mut vol.Vol, scratch: u64, it: *mut intent.Intent) -> bool {
+    if !intent.read_at((*v).rd, (*v).base + (*v).sectors + 1, scratch + O_INT, it) {
+        return false
+    }
+    if (*it).base != (*v).base || (*it).new_s != (*v).sectors || (*it).old_s <= (*it).new_s {
+        return false
+    }
+    return (*it).serial == (*v).serial && (*it).new_psize == (*it).new_s + 1
+}
+
+fn finish(v: *mut vol.Vol, b: *mut steps.Bufs, it: *mut intent.Intent, total: u64, scratch: u64) -> u64 {
+    let c_new: u64 = (*it).new_s / (*v).spc
+    var r: u64 = steps.set_dirty(v, b, true)
+    if r != codes.E_OK {
+        return r
+    }
+    r = steps.fix_bitmap(v, b, c_new)
+    if r != codes.E_OK {
+        return r
+    }
+    r = steps.fix_bad(v, b, c_new)
+    if r != codes.E_OK {
+        return r
+    }
+    r = ptab.apply((*v).rd, (*v).wr, total, (*v).base, (*it).new_psize, scratch + O_PTAB)
+    if r != codes.E_OK {
+        return r
+    }
+    r = steps.set_dirty(v, b, false)
+    if r != codes.E_OK {
+        return r
+    }
+    if !intent.clear_at((*v).wr, (*v).base + (*it).old_s, scratch + O_INT) {
+        return codes.E_IO
+    }
+    if !intent.clear_at((*v).wr, (*v).base + (*it).new_s + 1, scratch + O_INT) {
+        return codes.E_IO
+    }
+    return codes.E_OK
+}
+
+fn recover(rd: fn(u64, u64, u64) -> u64, wr: fn(u64, u64, u64) -> u64, total: u64, base: u64, scratch: u64,
+    state: *mut u64) -> u64 {
+    *state = 0
+    var r: u64 = ptab.prepare(rd, wr, total, scratch + O_PTAB)
+    if r != codes.E_OK {
+        return r
+    }
+    var v: vol.Vol = vol.vol_new()
+    r = open_vol(rd, wr, total, base, scratch, &v)
+    if r != codes.E_OK {
+        return r
+    }
+    var it: intent.Intent = intent.intent_new()
+    if !pending(&v, scratch, &it) {
+        return codes.E_OK
+    }
+    var b: steps.Bufs = steps.bufs_at(scratch)
+    r = rec.mft_load(&v, b.raw, b.rec)
+    if r != codes.E_OK {
+        return r
+    }
+    r = finish(&v, &b, &it, total, scratch)
+    if r == codes.E_OK {
+        *state = 1
+    }
+    return r
+}
+
+fn run(rd: fn(u64, u64, u64) -> u64, wr: fn(u64, u64, u64) -> u64, total: u64, base: u64, new_sectors: u64,
+    scratch: u64) -> u64 {
+    var st: u64 = 0
+    var r: u64 = recover(rd, wr, total, base, scratch, &st)
+    if r != codes.E_OK {
+        return r
+    }
+    var v: vol.Vol = vol.vol_new()
+    r = open_vol(rd, wr, total, base, scratch, &v)
+    if r != codes.E_OK {
+        return r
+    }
+    if new_sectors == v.psize && v.sectors + 1 == v.psize {
+        return codes.E_DONE
+    }
+    if new_sectors >= v.psize || new_sectors < MIN_SECTORS || new_sectors >= v.sectors {
+        return codes.E_RANGE
+    }
+    let s_new: u64 = new_sectors - 1
+    let c_new: u64 = s_new / v.spc
+    if v.clusters < c_new + 2 {
+        return codes.E_RANGE
+    }
+    var b: steps.Bufs = steps.bufs_at(scratch)
+    r = rec.mft_load(&v, b.raw, b.rec)
+    if r != codes.E_OK {
+        return r
+    }
+    var used: u64 = 0
+    r = steps.used_end(&v, &b, &used)
+    if r != codes.E_OK {
+        return r
+    }
+    if used + reserve_clusters(v.cb) > c_new {
+        return codes.E_NO_SPACE
+    }
+    r = checks.check_all(&v, 0, scratch + O_WORK)
+    if r != codes.E_OK {
+        return r
+    }
+    r = steps.write_boot(&v, b.sec, s_new, s_new)
+    if r != codes.E_OK {
+        return r
+    }
+    var it: intent.Intent = make_intent(&v, s_new, new_sectors, base)
+    if !intent.write_at(wr, base + s_new + 1, scratch + O_INT, &it) {
+        return codes.E_IO
+    }
+    r = steps.write_boot(&v, b.sec, 0, s_new)
+    if r != codes.E_OK {
+        return r
+    }
+    return recover(rd, wr, total, base, scratch, &st)
+}
+
+fn make_intent(v: *mut vol.Vol, s_new: u64, new_sectors: u64, base: u64) -> intent.Intent {
+    var it: intent.Intent = intent.intent_new()
+    it.base = base
+    it.old_s = (*v).sectors
+    it.new_s = s_new
+    it.old_psize = (*v).psize
+    it.new_psize = new_sectors
+    it.serial = (*v).serial
+    return it
+}

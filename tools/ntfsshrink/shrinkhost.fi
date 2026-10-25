@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.shrink
+
+static mut img: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut scratch: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut out: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut calls: u64 = 0
+static mut limit: u64 = 0
+static mut tear: u64 = 0
+
+fn rd(lba: u64, n: u64, dst: u64) -> u64 {
+    if (lba + n) * 512 > img.len as u64 {
+        return 1
+    }
+    bytes.copy(dst, img.ptr as u64 + lba * 512, n * 512)
+    return 0
+}
+
+fn wr(lba: u64, n: u64, src: u64) -> u64 {
+    if (lba + n) * 512 > img.len as u64 {
+        return 1
+    }
+    calls = calls + 1
+    if calls > limit {
+        if tear == 1 && n > 1 {
+            bytes.copy(img.ptr as u64 + lba * 512, src, (n / 2) * 512)
+        }
+        return 1
+    }
+    bytes.copy(img.ptr as u64 + lba * 512, src, n * 512)
+    return 0
+}
+
+fn put(s: str) {
+    rt.buf_push_bytes(&out, s.p as u64, s.n)
+}
+
+fn kv(k: str, v: u64) {
+    put(k)
+    put("=")
+    rt.buf_push_dec_u64(&out, v)
+    put("\n")
+}
+
+fn parse_dec(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while rt.ld8(p, i) != 0 as u8 {
+        v = v * 10 + ((rt.ld8(p, i) as u64) - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn arg_or(start: u64, i: usize, dflt: u64) -> u64 {
+    if rt.arg_count(start) > i {
+        return parse_dec(rt.arg_ptr(start, i))
+    }
+    return dflt
+}
+
+fn flush() {
+    rt.write_everything(1, rt.buf_ptr(&out), rt.buf_len(&out))
+}
+
+fn main(start: u64) -> i32 {
+    if rt.arg_count(start) < 4 {
+        return 2 as i32
+    }
+    if !rt.read_file(rt.arg_ptr(start, 1), &img) {
+        return 3 as i32
+    }
+    rt.buf_reserve_or_die(&scratch, shrink.SCRATCH_BYTES as usize)
+    rt.mem_set(rt.buf_ptr(&scratch), 0, shrink.SCRATCH_BYTES as usize)
+    rt.buf_set_len(&scratch, shrink.SCRATCH_BYTES as usize)
+    let sp: u64 = rt.buf_ptr(&scratch)
+    let mode: u64 = rt.arg_ptr(start, 2)
+    let base: u64 = parse_dec(rt.arg_ptr(start, 3))
+    let total: u64 = img.len as u64 / 512
+    limit = 1000000000
+    var code: u64 = 0
+    let m: u8 = rt.ld8(mode, 0)
+    if m == 105 as u8 {
+        var inf: shrink.Info = shrink.info_new()
+        code = shrink.info(rd, total, base, sp, &inf)
+        kv("psize", inf.psize)
+        kv("sectors", inf.sectors)
+        kv("clusters", inf.clusters)
+        kv("spc", inf.spc)
+        kv("used_end", inf.used_end)
+        kv("reserve", inf.reserve)
+        kv("min_sectors", inf.min_sectors)
+    }
+    if m == 114 as u8 {
+        let newsec: u64 = arg_or(start, 5, 0)
+        limit = arg_or(start, 6, 1000000000)
+        tear = arg_or(start, 7, 0)
+        code = shrink.run(rd, wr, total, base, newsec, sp)
+        kv("writes", calls)
+    }
+    if m == 99 as u8 {
+        limit = arg_or(start, 5, 1000000000)
+        tear = arg_or(start, 6, 0)
+        var st: u64 = 0
+        code = shrink.recover(rd, wr, total, base, sp, &st)
+        kv("state", st)
+        kv("writes", calls)
+    }
+    kv("code", code)
+    if rt.arg_count(start) > 4 && m != 105 as u8 {
+        rt.write_file(rt.arg_ptr(start, 4), img.ptr as u64, img.len)
+    }
+    flush()
+    return 0 as i32
+}

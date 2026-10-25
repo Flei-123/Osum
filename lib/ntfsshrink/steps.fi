@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.runs
+import ntfsshrink.vol
+import ntfsshrink.rec
+import ntfsshrink.bitmap
+
+export { Bufs, bufs_at, BUF_BYTES, write_boot, set_dirty, fix_bitmap, fix_bad, used_end }
+
+const BUF_BYTES: u64 = 45056
+const MFT_VOLUME: u64 = 3
+const MFT_MIRROR: u64 = 1
+const MFT_BITMAP: u64 = 6
+const MFT_BADCLUS: u64 = 8
+const BAD_NAME_LEN: u64 = 4
+const DIRTY_BIT: u64 = 1
+
+struct Bufs {
+    raw: u64,
+    rec: u64,
+    tmp: u64,
+    rawm: u64,
+    recm: u64,
+    sec: u64,
+    chunk: u64
+}
+
+fn bufs_at(p: u64) -> Bufs {
+    var b: Bufs = Bufs {
+        raw: p, rec: p + 4096, tmp: p + 8192, rawm: p + 12288, recm: p + 16384, sec: p + 20480, chunk: p + 24576
+    }
+    return b
+}
+
+fn write_boot(v: *mut vol.Vol, sec: u64, rel: u64, new_s: u64) -> u64 {
+    let r: u64 = vol.vread(v, 0, 1, sec)
+    if r != codes.E_OK {
+        return r
+    }
+    bytes.put64(sec + 40, new_s)
+    return vol.vwrite(v, rel, 1, sec)
+}
+
+fn flag_pos(v: *mut vol.Vol, rec_p: u64) -> u64 {
+    let va: u64 = rec.attr_find(rec_p, (*v).rec_size, rec.AT_VOLINFO, 0)
+    if va == 0 || bytes.ld8(va, 8) != 0 || bytes.le16(va + 20) + 12 > bytes.le32(va + 4) {
+        return 0
+    }
+    return va + bytes.le16(va + 20) + 10
+}
+
+fn set_dirty_one(v: *mut vol.Vol, b: *mut Bufs, which: u64, on: bool) -> u64 {
+    var r: u64 = rec.rec_read(v, which, MFT_VOLUME, (*b).raw, (*b).rec)
+    if r != codes.E_OK {
+        return r
+    }
+    let fl: u64 = flag_pos(v, (*b).rec)
+    if fl == 0 {
+        return codes.E_CORRUPT
+    }
+    let cur: u64 = bytes.le16(fl)
+    let want: u64 = if on { cur | DIRTY_BIT } else { cur & (65535 - DIRTY_BIT) }
+    if want == cur {
+        return codes.E_OK
+    }
+    bytes.put16(fl, want)
+    return rec.rec_write(v, which, MFT_VOLUME, (*b).raw, (*b).rec, (*b).tmp)
+}
+
+fn set_dirty(v: *mut vol.Vol, b: *mut Bufs, on: bool) -> u64 {
+    let r: u64 = set_dirty_one(v, b, rec.WHICH_MFT, on)
+    if r != codes.E_OK {
+        return r
+    }
+    return set_dirty_one(v, b, rec.WHICH_MIRROR, on)
+}
+
+fn used_end(v: *mut vol.Vol, b: *mut Bufs, out: *mut u64) -> u64 {
+    let r: u64 = rec.mft_read(v, MFT_BITMAP, (*b).raw, (*b).rec)
+    if r != codes.E_OK {
+        return r
+    }
+    let da: u64 = rec.attr_find((*b).rec, (*v).rec_size, rec.AT_DATA, 0)
+    var re: u64 = 0
+    let rp: u64 = if da != 0 { rec.attr_runs(da, &re) } else { 0 }
+    if rp == 0 {
+        return codes.E_CORRUPT
+    }
+    return bitmap.last_used(v, rp, re, (*v).clusters, (*b).chunk, out)
+}
+
+fn mirror_count(v: *mut vol.Vol, b: *mut Bufs) -> u64 {
+    if rec.mft_read(v, MFT_MIRROR, (*b).rawm, (*b).recm) != codes.E_OK {
+        return 0
+    }
+    let a: u64 = rec.attr_find((*b).recm, (*v).rec_size, rec.AT_DATA, 0)
+    if a == 0 || bytes.ld8(a, 8) == 0 {
+        return 0
+    }
+    return bytes.le64(a + 48) / (*v).rec_size
+}
+
+fn write_record(v: *mut vol.Vol, b: *mut Bufs, n: u64) -> u64 {
+    let r: u64 = rec.mft_write(v, n, (*b).raw, (*b).rec, (*b).tmp)
+    if r != codes.E_OK {
+        return r
+    }
+    if n >= mirror_count(v, b) {
+        return codes.E_OK
+    }
+    let m: u64 = rec.rec_read(v, rec.WHICH_MIRROR, n, (*b).rawm, (*b).recm)
+    if m != codes.E_OK {
+        return m
+    }
+    bytes.copy((*b).recm, (*b).rec, (*v).rec_size)
+    return rec.rec_write(v, rec.WHICH_MIRROR, n, (*b).rawm, (*b).recm, (*b).tmp)
+}
+
+fn fix_bitmap(v: *mut vol.Vol, b: *mut Bufs, c_new: u64) -> u64 {
+    var r: u64 = rec.mft_read(v, MFT_BITMAP, (*b).raw, (*b).rec)
+    if r != codes.E_OK {
+        return r
+    }
+    let da: u64 = rec.attr_find((*b).rec, (*v).rec_size, rec.AT_DATA, 0)
+    var re: u64 = 0
+    let rp: u64 = if da != 0 { rec.attr_runs(da, &re) } else { 0 }
+    let d: u64 = bitmap.bitmap_bytes(c_new)
+    if rp == 0 || d > bytes.le64(da + 40) {
+        return codes.E_CORRUPT
+    }
+    r = bitmap.set_padding(v, rp, re, c_new, (*b).sec)
+    if r != codes.E_OK {
+        return r
+    }
+    if bytes.le64(da + 48) == d && bytes.le64(da + 56) == d {
+        return codes.E_OK
+    }
+    bytes.put64(da + 48, d)
+    bytes.put64(da + 56, d)
+    return write_record(v, b, MFT_BITMAP)
+}
+
+fn len_bytes(n: u64) -> u64 {
+    var k: u64 = 1
+    while k < 8 && n >= (1 << (k * 8 - 1)) {
+        k = k + 1
+    }
+    return k
+}
+
+fn fix_bad(v: *mut vol.Vol, b: *mut Bufs, c_new: u64) -> u64 {
+    var r: u64 = rec.mft_read(v, MFT_BADCLUS, (*b).raw, (*b).rec)
+    if r != codes.E_OK {
+        return r
+    }
+    let ba: u64 = rec.attr_find((*b).rec, (*v).rec_size, rec.AT_DATA, BAD_NAME_LEN)
+    var re: u64 = 0
+    let rp: u64 = if ba != 0 { rec.attr_runs(ba, &re) } else { 0 }
+    if rp == 0 {
+        return codes.E_BADCLUS
+    }
+    var it: runs.RunIt = runs.it_new()
+    runs.it_init(&it, rp, re)
+    if !runs.next(&it) || it.sparse == 0 {
+        return codes.E_BADCLUS
+    }
+    let first: u64 = it.len
+    if runs.next(&it) || it.bad != 0 {
+        return codes.E_BADCLUS
+    }
+    let alloc: u64 = c_new * (*v).cb
+    if first == c_new && bytes.le64(ba + 24) == c_new - 1 && bytes.le64(ba + 40) == alloc && bytes.le64(ba + 48) == alloc {
+        return codes.E_OK
+    }
+    let n: u64 = len_bytes(c_new)
+    if rp + 2 + n > re {
+        return codes.E_COMPLEX
+    }
+    bytes.zero(rp, re - rp)
+    bytes.st8(rp, n)
+    var i: u64 = 0
+    while i < n {
+        bytes.st8(rp + 1 + i, (c_new >> (i * 8)) & 255)
+        i = i + 1
+    }
+    bytes.put64(ba + 24, c_new - 1)
+    bytes.put64(ba + 40, alloc)
+    bytes.put64(ba + 48, alloc)
+    return write_record(v, b, MFT_BADCLUS)
+}
