@@ -110,6 +110,7 @@ run_case auto auto "SMB_PASSWORD=gatepass;export SMB_PASSWORD;$S data ls;$S data
 A="$TMPD/auto.txt"
 has "$A" "hello.txt" "ls lists hello.txt from inside the guest"
 has "$A" "smbctl: ls ok" "ls ok"
+has "$A" "dialect 0311" "the guest negotiated SMB 3.1.1 (preauth hash, SMBSigningKey) with Samba"
 [ "$(digest_of "$A" get 300000)" = "$WANT_BIG" ] && ok "get big.bin: 300000 octets, sha256 equals the share's file" || bad "get big.bin digest '$(digest_of "$A" get 300000)' != $WANT_BIG"
 [ -f "$SHARE/guest-up.bin" ] && [ "$(sha256sum "$SHARE/guest-up.bin" | awk '{print $1}')" = "$WANT_UP" ] && ok "put: 40000 octets landed on the share byte-exact" || bad "put: file on the share missing or different"
 [ -f "$SHARE/rt-big.bin" ] && cmp -s "$SHARE/rt-big.bin" "$SHARE/big.bin" && ok "get then put of 300000 octets (several chunks) round-trips byte-exact" || bad "round trip of big.bin"

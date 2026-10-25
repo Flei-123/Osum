@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.crypto.aes
+
+export { aes128_cmac }
+
+fn dbl(v: *mut [u8; 16]) {
+    let carry: u8 = (*v)[0] >> 7 as u8
+    var i: usize = 0
+    while i < 15 {
+        (*v)[i] = ((*v)[i] << 1 as u8) | ((*v)[i + 1] >> 7 as u8)
+        i = i + 1
+    }
+    (*v)[15] = (*v)[15] << 1 as u8
+    if carry != 0 as u8 {
+        (*v)[15] = (*v)[15] ^ 135 as u8
+    }
+}
+
+fn xor_block(x: *mut [u8; 16], p: u64, at: usize) {
+    var i: usize = 0
+    while i < 16 {
+        (*x)[i] = (*x)[i] ^ rt.ld8(p, at + i)
+        i = i + 1
+    }
+}
+
+fn aes128_cmac(key: u64, msg: u64, n: usize, out: u64) {
+    var a: aes.Aes = aes.aes128_new(key)
+    var zero: [u8; 16] = [0; 16]
+    var k1: [u8; 16] = [0; 16]
+    var k2: [u8; 16] = [0; 16]
+    aes.aes_encrypt_block(&a, (&zero[0]) as u64, (&k1[0]) as u64)
+    dbl(&k1)
+    k2 = k1
+    dbl(&k2)
+    var blocks: usize = (n + 15) / 16
+    var complete: bool = n != 0 && n % 16 == 0
+    if blocks == 0 {
+        blocks = 1
+    }
+    var x: [u8; 16] = [0; 16]
+    var tmp: [u8; 16] = [0; 16]
+    var b: usize = 0
+    while b + 1 < blocks {
+        xor_block(&x, msg, b * 16)
+        aes.aes_encrypt_block(&a, (&x[0]) as u64, (&tmp[0]) as u64)
+        x = tmp
+        b = b + 1
+    }
+    var last: [u8; 16] = [0; 16]
+    let rest: usize = n - b * 16
+    var i: usize = 0
+    while i < rest {
+        last[i] = rt.ld8(msg, b * 16 + i)
+        i = i + 1
+    }
+    if complete {
+        i = 0
+        while i < 16 {
+            last[i] = last[i] ^ k1[i]
+            i = i + 1
+        }
+    } else {
+        last[rest] = 128 as u8
+        i = 0
+        while i < 16 {
+            last[i] = last[i] ^ k2[i]
+            i = i + 1
+        }
+    }
+    xor_block(&x, (&last[0]) as u64, 0)
+    aes.aes_encrypt_block(&a, (&x[0]) as u64, out)
+}

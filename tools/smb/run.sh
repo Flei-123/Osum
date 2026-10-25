@@ -30,6 +30,21 @@ for k in key "$(printf 'k%.0s' $(seq 1 100))"; do
     [ "$got" = "$want" ] && ok "hmac-md5 equals openssl (key ${#k} octets)" || bad "hmac-md5 key ${#k}: $got != $want"
 done
 
+RFC_MSG='\x6b\xc1\xbe\xe2\x2e\x40\x9f\x96\xe9\x3e\x7d\x11\x73\x93\x17\x2a\xae\x2d\x8a\x57\x1e\x03\xac\x9c\x9e\xb7\x6f\xac\x45\xaf\x8e\x51\x30\xc8\x1c\x46\xa3\x5c\xe4\x11\xe5\xfb\xc1\x19\x1a\x0a\x52\xef\xf6\x9f\x24\x45\xdf\x4f\x9b\x17\xad\x2b\x41\x7b\xe6\x6c\x37\x10'
+CMAC_KEY=2b7e151628aed2a6abf7158809cf4f3c
+cmac_ref() { openssl mac -cipher AES-128-CBC -macopt hexkey:$CMAC_KEY CMAC | tr 'A-F' 'a-f'; }
+for n in 0 16 40 64; do
+    printf "$RFC_MSG" | head -c $n > "$D/rfc.msg"
+    got=$("$D/ct" c "$(cat "$D/rfc.msg")" x); want=$(cmac_ref < "$D/rfc.msg")
+    [ "$got" = "$want" ] && ok "aes-128-cmac equals openssl on the RFC 4493 message ($n octets)" || bad "cmac $n: $got != $want"
+done
+for n in 1 15 17 31 32 33 63 100 255; do
+    m=$(head -c $n /dev/zero | tr '\0' 'q')
+    got=$("$D/ct" c "$m" x); want=$(printf %s "$m" | cmac_ref)
+    [ "$got" = "$want" ] || { bad "cmac len $n: $got != $want"; continue; }
+done
+ok "aes-128-cmac equals openssl for lengths 1,15,17,31,32,33,63,100,255"
+got=$("$D/ct" c a x); [ "$got" != "$("$D/ct" c b x)" ] && ok "counter-proof: cmac differs for different messages" || bad "cmac counter-proof"
 . tools/smb/samba.sh
 samba_setup "$D"
 PORT=$SMB_PORT
@@ -61,7 +76,7 @@ out=$(C 127.0.0.1 nosuchshare ls); echo "$out" | grep -q 'FAILED tree share c000
 out=$(C 127.0.0.1 data get nothere.txt); echo "$out" | grep -q 'FAILED open notfound c0000034' && ok "counter-proof: missing file -> open notfound c0000034" || bad "missing file: $out"
 out=$(timeout 20 "$D/smbctl" -p "$PORT" -u nosuchuser 127.0.0.1 data ls); echo "$out" | grep -q 'FAILED login auth' && ok "counter-proof: unknown user -> login auth" || bad "unknown user: $out"
 out=$(timeout 20 "$D/smbctl" -p 1 -u gateuser 127.0.0.1 data ls); echo "$out" | grep -q 'FAILED connect connect' && ok "counter-proof: closed port -> connect" || bad "closed port: $out"
-C -N 127.0.0.1 data ls | grep -q 'ls ok' && ok "signing off against a server that does not require it works (-N)" || bad "-N against auto server"
+C -m 210 -N 127.0.0.1 data ls | grep -q "ls ok" && ok "SMB 2.1: signing off against a server that does not require it works (-N)" || bad "-N against auto server"
 stop_smbd
 
 start_smbd mandatory && ok "samba (signing mandatory) listening" || bad "samba mandatory did not start"
@@ -69,5 +84,43 @@ C 127.0.0.1 data ls | grep -q 'ls ok' && ok "HMAC-SHA256 signing: mandatory-sign
 out=$(C 127.0.0.1 data get big.bin); echo "$out" | grep -q "sha256 $want" && ok "signed get of 300000 octets verifies every response signature" || bad "signed get: $out"
 out=$(C -N 127.0.0.1 data ls); echo "$out" | grep -q 'ls ok' && bad "counter-proof: unsigned session was ACCEPTED by a mandatory-signing server" || ok "counter-proof: -N (no signing) against mandatory server is refused"
 stop_smbd
+SMB_EXTRA=""
+for row in "SMB2_10:0210" "SMB3_00:0300" "SMB3_02:0302" "SMB3_11:0311"; do
+    name=${row%%:*}; want_d=${row##*:}
+    SMB_MIN=$name; SMB_MAX=$name
+    start_smbd mandatory || bad "samba $name did not start"
+    out=$(C 127.0.0.1 data ls); echo "$out" | grep -q "dialect $want_d" && echo "$out" | grep -q 'ls ok' && ok "$name: negotiated dialect $want_d, signed ls against a mandatory-signing server" || bad "$name ls: $out"
+    out=$(C 127.0.0.1 data get big.bin); echo "$out" | grep -q "sha256 $want" && ok "$name: signed get of 300000 octets, every response signature verified" || bad "$name get: $out"
+    C 127.0.0.1 data put "$D/up.bin" "sub/up-$want_d.bin" >/dev/null && cmp -s "$D/up.bin" "$SHARE/sub/up-$want_d.bin" && ok "$name: signed put of 200000 octets lands byte-exact" || bad "$name put"
+    out=$(C -N 127.0.0.1 data ls); echo "$out" | grep -q 'ls ok' && bad "$name: unsigned session ACCEPTED" || ok "$name: counter-proof: unsigned session refused"
+    stop_smbd
+done
+SMB_MIN=SMB3_00; SMB_MAX=SMB3_11
+start_smbd mandatory || bad "samba SMB3 only did not start"
+out=$(C -m 210 127.0.0.1 data ls); echo "$out" | grep -q 'FAILED negotiate' && ok "counter-proof: a client limited to SMB 2.1 against an SMB3-only server is refused at negotiate" || bad "-m 210 vs SMB3-only: $out"
+out=$(C -m 300 127.0.0.1 data ls); echo "$out" | grep -q 'dialect 0300' && echo "$out" | grep -q 'ls ok' && ok "client limited to 3.0 against a server that offers up to 3.1.1 settles on 3.0" || bad "-m 300: $out"
+stop_smbd
+SMB_MIN=SMB3_02; SMB_MAX=SMB3_02
+start_smbd mandatory || bad "samba 3.0.2 did not start"
+mkdir -p "$D/badlib" && cp -r "$ROOT/lib/." "$D/badlib/" && sed -i 's/SMB2AESCMAC/SMB2AESCMAX/' "$D/badlib/smb/client.fi"
+FIRNLIB="$D/badlib" $FIRNC kernel/app/smbctl.fi -o "$D/smbctl_badkdf" 2>/dev/null && ok "variant with a wrong signing-key label builds" || bad "badkdf build"
+out=$(timeout 60 "$D/smbctl_badkdf" -p "$PORT" -u gateuser 127.0.0.1 data ls); echo "$out" | grep -q 'ls ok' && bad "counter-proof: a wrong CMAC signing key was ACCEPTED" || ok "counter-proof: a wrong CMAC signing-key label is refused by the server"
+sed -i 's/SMBSigningKey/SMBSigningKez/' "$D/badlib/smb/client.fi"
+stop_smbd
+SMB_MIN=SMB3_11; SMB_MAX=SMB3_11
+start_smbd mandatory || bad "samba 3.1.1 did not start"
+FIRNLIB="$D/badlib" $FIRNC kernel/app/smbctl.fi -o "$D/smbctl_badpre" 2>/dev/null
+out=$(timeout 60 "$D/smbctl_badpre" -p "$PORT" -u gateuser 127.0.0.1 data ls); echo "$out" | grep -q 'ls ok' && bad "counter-proof: a wrong 3.1.1 signing-key label was ACCEPTED" || ok "counter-proof: a wrong 3.1.1 signing-key label is refused by the server"
+stop_smbd
+if [ -z "${SMB_NO_GUEST:-}" ]; then
+    echo "== guest (tools/smb/guest.sh) =="
+    gout=$(bash tools/smb/guest.sh 2>&1)
+    echo "$gout" | sed 's/^/  | /'
+    gl=$(echo "$gout" | grep -a '^SMBGUEST: ' | tail -1)
+    if echo "$gl" | grep -q 'skipped'; then echo "  guest part skipped"
+    elif [ -n "$gl" ]; then
+        pass=$((pass + $(echo "$gl" | awk '{print $2}'))); fail=$((fail + $(echo "$gl" | awk '{print $4}')))
+    else bad "guest gate gave no summary"; fi
+fi
 echo "  SMB gate: $pass ok, $fail FAIL"
 [ "$fail" = 0 ]

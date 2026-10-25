@@ -5,8 +5,9 @@ import smb.pack
 import smb.wire
 import smb.ntlm
 import smb.spnego
+import smb.kdf
 
-export { connect, negotiate, login, tree_connect, tree_disconnect, logoff, set_signing,
+export { set_max_dialect, connect, negotiate, login, tree_connect, tree_disconnect, logoff, set_signing,
     SIGNING_AUTO, SIGNING_OFF }
 
 const SIGNING_AUTO: u64 = 0
@@ -17,8 +18,18 @@ const SESSION_GUEST: u64 = 1
 const SESSION_NULL: u64 = 2
 const DIALECT_202: u64 = 514
 const DIALECT_210: u64 = 528
+const DIALECT_300: u64 = 768
+const DIALECT_302: u64 = 770
+const DIALECT_311: u64 = 785
+const CTX_PREAUTH: u64 = 1
+const HASH_SHA512: u64 = 1
 
 static mut SIGNING_MODE: u64 = 0
+static mut MAX_DIALECT: u64 = 785
+
+fn set_max_dialect(d: u64) {
+    MAX_DIALECT = d
+}
 
 fn set_signing(mode: u64) {
     SIGNING_MODE = mode
@@ -40,10 +51,53 @@ fn connect_failed(failed: *mut bool) -> net.Conn {
     return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
 }
 
+fn dialect_count() -> u64 {
+    var n: u64 = 2
+    if MAX_DIALECT >= DIALECT_300 {
+        n = n + 1
+    }
+    if MAX_DIALECT >= DIALECT_302 {
+        n = n + 1
+    }
+    if MAX_DIALECT >= DIALECT_311 {
+        n = n + 1
+    }
+    return n
+}
+
+fn push_dialects(b: *mut rt.Buf) {
+    pack.push16(b, DIALECT_202)
+    pack.push16(b, DIALECT_210)
+    if MAX_DIALECT >= DIALECT_300 {
+        pack.push16(b, DIALECT_300)
+    }
+    if MAX_DIALECT >= DIALECT_302 {
+        pack.push16(b, DIALECT_302)
+    }
+    if MAX_DIALECT >= DIALECT_311 {
+        pack.push16(b, DIALECT_311)
+    }
+}
+
+fn push_preauth_context(b: *mut rt.Buf) {
+    pack.push16(b, CTX_PREAUTH)
+    pack.push16(b, 38)
+    pack.push32(b, 0)
+    pack.push16(b, 1)
+    pack.push16(b, 32)
+    pack.push16(b, HASH_SHA512)
+    var i: usize = 0
+    while i < 32 {
+        rt.buf_push(b, ((i * 29 + 11) & 255) as u8)
+        i = i + 1
+    }
+}
+
 fn negotiate(s: *mut wire.Smb) -> u64 {
     var b: rt.Buf = rt.buf_new()
+    let with_contexts: bool = MAX_DIALECT >= DIALECT_311
     pack.push16(&b, 36)
-    pack.push16(&b, 2)
+    pack.push16(&b, dialect_count())
     pack.push16(&b, SEC_SIGNING_ENABLED)
     pack.push16(&b, 0)
     pack.push32(&b, 0)
@@ -54,9 +108,19 @@ fn negotiate(s: *mut wire.Smb) -> u64 {
         i = i + 1
     }
     pack.push_raw(&b, (&guid[0]) as u64, 16)
-    pack.push64(&b, 0)
-    pack.push16(&b, DIALECT_202)
-    pack.push16(&b, DIALECT_210)
+    if with_contexts {
+        let list_end: usize = 36 + 2 * dialect_count() as usize
+        let ctx_at: usize = (list_end + 7) / 8 * 8
+        pack.push32(&b, (wire.HEADER_SIZE + ctx_at) as u64)
+        pack.push16(&b, 1)
+        pack.push16(&b, 0)
+        push_dialects(&b)
+        pack.push_zero(&b, ctx_at - list_end)
+        push_preauth_context(&b)
+    } else {
+        pack.push64(&b, 0)
+        push_dialects(&b)
+    }
     let code: u64 = wire.request(s, wire.CMD_NEGOTIATE, rt.buf_ptr(&b), rt.buf_len(&b))
     rt.buf_free(&b)
     if code != wire.E_OK {
@@ -74,13 +138,17 @@ fn negotiate(s: *mut wire.Smb) -> u64 {
     }
     let mode: u64 = pack.get16(body, 2)
     (*s).dialect = pack.get16(body, 4)
-    if (*s).dialect != DIALECT_202 && (*s).dialect != DIALECT_210 {
+    if (*s).dialect != DIALECT_202 && (*s).dialect != DIALECT_210 && (*s).dialect != DIALECT_300
+        && (*s).dialect != DIALECT_302 && (*s).dialect != DIALECT_311 {
+        return wire.E_PROTO
+    }
+    if (*s).dialect > MAX_DIALECT {
         return wire.E_PROTO
     }
     (*s).signing = false
     (*s).sign_wanted = SIGNING_MODE == SIGNING_AUTO && (mode & (SEC_SIGNING_ENABLED | SEC_SIGNING_REQUIRED)) != 0
-    let max_read: u64 = pack.get32(body, 28)
-    let max_write: u64 = pack.get32(body, 32)
+    let max_read: u64 = pack.get32(body, 32)
+    let max_write: u64 = pack.get32(body, 36)
     var cap: u64 = 61440
     if max_read < cap {
         cap = max_read
@@ -109,6 +177,25 @@ fn session_setup(s: *mut wire.Smb, token: u64, n: usize) -> u64 {
     let code: u64 = wire.request(s, wire.CMD_SESSION_SETUP, rt.buf_ptr(&b), rt.buf_len(&b))
     rt.buf_free(&b)
     return code
+}
+
+fn derive_signing_key(s: *mut wire.Smb, session_key: u64) {
+    if (*s).dialect < DIALECT_300 {
+        var i: usize = 0
+        while i < 16 {
+            (*s).sign_key[i] = rt.ld8(session_key, i)
+            i = i + 1
+        }
+        return
+    }
+    if (*s).dialect == DIALECT_311 {
+        var label: [u8; 14] = "SMBSigningKey\0"
+        kdf.derive(session_key, (&label[0]) as u64, 14, (&(*s).preauth[0]) as u64, 64, (&(*s).sign_key[0]) as u64)
+        return
+    }
+    var label: [u8; 12] = "SMB2AESCMAC\0"
+    var ctx: [u8; 8] = "SmbSign\0"
+    kdf.derive(session_key, (&label[0]) as u64, 12, (&ctx[0]) as u64, 8, (&(*s).sign_key[0]) as u64)
 }
 
 fn login(s: *mut wire.Smb, user: u64, ulen: usize, domain: u64, dlen: usize,
@@ -175,11 +262,7 @@ fn login_steps(s: *mut wire.Smb, st: *mut ntlm.Ntlm, raw: *mut rt.Buf, wrapped: 
     let flags: u64 = pack.get16(wire.body_ptr(s), 2)
     if (flags & (SESSION_GUEST | SESSION_NULL)) == 0 && (*s).sign_wanted {
         (*s).signing = true
-        var i: usize = 0
-        while i < 16 {
-            (*s).sign_key[i] = (*st).session_key[i]
-            i = i + 1
-        }
+        derive_signing_key(s, (&(*st).session_key[0]) as u64)
     }
     return wire.E_OK
 }

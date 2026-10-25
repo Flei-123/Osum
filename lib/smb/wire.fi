@@ -2,9 +2,11 @@
 import std.rt
 import std.net
 import std.crypto.hmac
+import std.crypto.sha512
+import crypto.cmac
 import smb.pack
 
-export { Smb, smb_new, smb_free, request, last_status, status_error, body_ptr, body_len,
+export { DIALECT_300, preauth_update, Smb, smb_new, smb_free, request, last_status, status_error, body_ptr, body_len,
     CMD_NEGOTIATE, CMD_SESSION_SETUP, CMD_LOGOFF, CMD_TREE_CONNECT, CMD_TREE_DISCONNECT,
     CMD_CREATE, CMD_CLOSE, CMD_READ, CMD_WRITE, CMD_QUERY_DIRECTORY,
     E_OK, E_CONNECT, E_IO, E_PROTO, E_AUTH, E_SHARE, E_NOTFOUND, E_DENIED, E_STATUS, E_SIGN,
@@ -13,6 +15,7 @@ export { Smb, smb_new, smb_free, request, last_status, status_error, body_ptr, b
     HEADER_SIZE }
 
 const HEADER_SIZE: usize = 64
+const DIALECT_300: u64 = 768
 const FRAME_MAX: usize = 1048576
 const FLAG_SIGNED: u64 = 8
 const FLAG_ASYNC: u64 = 2
@@ -58,6 +61,7 @@ struct Smb {
     signing: bool,
     sign_wanted: bool,
     sign_key: [u8; 16],
+    preauth: [u8; 64],
     dialect: u64,
     tx: rt.Buf,
     rx: rt.Buf,
@@ -68,7 +72,7 @@ struct Smb {
 fn smb_new() -> Smb {
     return Smb { conn: net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 },
         open: false, session_id: 0, tree_id: 0, message_id: 0, signing: false, sign_wanted: false,
-        sign_key: [0 as u8; 16], dialect: 0, tx: rt.buf_new(), rx: rt.buf_new(), status: 0,
+        sign_key: [0 as u8; 16], preauth: [0 as u8; 64], dialect: 0, tx: rt.buf_new(), rx: rt.buf_new(), status: 0,
         max_io: 61440 }
 }
 
@@ -154,9 +158,20 @@ fn begin(s: *mut Smb, cmd: u64) {
     pack.push_zero(&(*s).tx, 16)
 }
 
+fn preauth_update(s: *mut Smb, msg: u64, n: usize) {
+    var h: sha512.Sha512 = sha512.sha512_new()
+    sha512.sha512_update(&h, (&(*s).preauth[0]) as u64, 64)
+    sha512.sha512_update(&h, msg, n)
+    sha512.sha512_final(&h, (&(*s).preauth[0]) as u64)
+}
+
 fn sign(s: *mut Smb, msg: u64, n: usize, out: u64) {
     var mac: [u8; 32] = [0; 32]
-    hmac.hmac_sha256((&(*s).sign_key[0]) as u64, 16, msg, n, (&mac[0]) as u64)
+    if (*s).dialect >= DIALECT_300 {
+        cmac.aes128_cmac((&(*s).sign_key[0]) as u64, msg, n, (&mac[0]) as u64)
+    } else {
+        hmac.hmac_sha256((&(*s).sign_key[0]) as u64, 16, msg, n, (&mac[0]) as u64)
+    }
     var i: usize = 0
     while i < 16 {
         rt.st8(out, i, mac[i])
@@ -237,6 +252,10 @@ fn request(s: *mut Smb, cmd: u64, body: u64, n: usize) -> u64 {
     if !send_frame(s) {
         return E_IO
     }
+    let hashed: bool = cmd == CMD_NEGOTIATE || cmd == CMD_SESSION_SETUP
+    if hashed {
+        preauth_update(s, rt.buf_ptr(&(*s).tx) + 4, rt.buf_len(&(*s).tx) - 4)
+    }
     var answered: bool = false
     var code: u64 = E_OK
     while !answered {
@@ -259,6 +278,9 @@ fn request(s: *mut Smb, cmd: u64, body: u64, n: usize) -> u64 {
         return E_PROTO
     }
     (*s).message_id = (*s).message_id + 1
+    if hashed && (cmd == CMD_NEGOTIATE || (*s).status == NT_MORE_PROCESSING) {
+        preauth_update(s, rt.buf_ptr(&(*s).rx), rt.buf_len(&(*s).rx))
+    }
     if (*s).signing && cmd != CMD_SESSION_SETUP {
         if !verify(s) {
             return E_SIGN
