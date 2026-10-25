@@ -113,10 +113,13 @@ res=$(python3 -I tools/shrinkinst/check.py "$OUT/pristine.img" "$EXPECT" "$HF" 2
 res=$(python3 -I tools/shrinkinst/check.py "$OUT/skip.img" "$EXPECT" "$HF" 2>&1)
 [ "$res" != ALLOK ] && ok "skipped shrink (dry-run disk) is rejected" || bad "oracle accepted the skipped shrink"
 cp "$OUT/main.img" "$OUT/flip.img"
-python3 -I - "$OUT/flip.img" "$NTFS_START" <<'PY'
+python3 -I - "$OUT/flip.img" "$NTFS_START" "$HF/a.bin" <<'PY'
 import sys
 f = open(sys.argv[1], 'r+b'); base = int(sys.argv[2]) * 512
-f.seek(base + 3 * 1048576); b = f.read(1); f.seek(base + 3 * 1048576); f.write(bytes([b[0] ^ 255])); f.close()
+head = open(sys.argv[3], 'rb').read(64)
+f.seek(base); data = f.read(300 * 1048576); at = data.find(head)
+assert at >= 0
+f.seek(base + at + 100); b = f.read(1); f.seek(base + at + 100); f.write(bytes([b[0] ^ 255])); f.close()
 PY
 res=$(python3 -I tools/shrinkinst/check.py "$OUT/flip.img" "$EXPECT" "$HF" 2>&1)
 [ "$res" != ALLOK ] && ok "one flipped data byte is detected" || bad "oracle missed a flipped data byte"
