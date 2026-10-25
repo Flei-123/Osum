@@ -76,13 +76,6 @@ taste backspace
 taste backspace
 taste backspace
 taste backspace
-taste backspace
-taste backspace
-taste backspace
-taste backspace
-taste backspace
-taste backspace
-taste backspace
 tippe smb://10.9.0.1/data
 taste ret
 warteauf expsmb: dialog user || 120
@@ -111,6 +104,73 @@ doppelauf ftabzeile2
 warteauf expsmb: fetch rc=0 || 120
 warte 4
 foto 14-opened
+taste ctrl-c
+warte 3
+taste ctrl-l
+warte 2
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+tippe /data/bilder
+taste ret
+warte 6
+taste ctrl-v
+warteauf expsmb: copy-down rc=0 octets=12 || 120
+warte 4
+foto 15-pasted-local
+taste ctrl-l
+warte 2
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+tippe /data
+taste ret
+warte 6
+klickauf ftabzeile2
+warte 2
+taste ctrl-c
+warte 3
+taste ctrl-l
+warte 2
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+taste backspace
+marke expsmb: list rc=0 entries=1
+tippe smb://10.9.0.1/data/sub
+taste ret
+warteneu expsmb: list rc=0 entries=1 || 120
+warte 4
+taste ctrl-v
+warteauf expsmb: copy-up rc=0 octets=5 || 120
+warte 4
+foto 16-pasted-remote
 DREH
 
 echo "== 2. explorer walk: smb:// -> user -> wrong password -> retry -> listing -> open file =="
@@ -125,6 +185,10 @@ has "$W" 'expsmb: list rc=3$' "wrong password: smbctl exits 3 (auth) in the gues
 has "$W" 'expsmb: dialog user-retry$' "wrong password: the user dialog comes back as a retry"
 has "$W" 'expsmb: list rc=0 entries=3$' "right password: listing with 3 entries (sub, big.bin, hello.txt)"
 has "$W" "expsmb: fetch rc=0 octets=$WANT_HELLO\$" "double click on hello.txt: fetched $WANT_HELLO octets"
+has "$W" 'expsmb: copy-down rc=0 octets=12$' "copy hello.txt from smb:// and paste into /data/bilder: 12 octets"
+has "$W" 'expsmb: list rc=0 entries=1$' "browse smb://10.9.0.1/data/sub: 1 entry"
+has "$W" 'expsmb: copy-up rc=0 octets=5$' "copy a local file and paste into smb://.../sub: 5 octets"
+[ -f "$SHARE/sub/alpha.txt" ] && [ "$(cat "$SHARE/sub/alpha.txt")" = "eins" ] && ok "the pasted file is on the share with the right content" || bad "alpha.txt did not land on the share"
 hasnot "$W" 'expsmb: dialog error' "no error dialog on the good path"
 grep -aoE 'expsmb: list rc=[0-9]+' "$W" | head -3 | tr '\n' ' ' | sed 's/^/  list results: /'; echo
 
@@ -134,13 +198,6 @@ warteauf explorer: ready || 300
 warte 8
 taste ctrl-l
 warte 2
-taste backspace
-taste backspace
-taste backspace
-taste backspace
-taste backspace
-taste backspace
-taste backspace
 taste backspace
 taste backspace
 taste backspace
