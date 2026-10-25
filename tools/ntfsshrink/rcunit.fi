@@ -1,0 +1,216 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.vol
+import ntfsshrink.balloc
+import ntfsshrink.mpatch
+import ntfsshrink.rjournal
+
+static mut img: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut out: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut rlb: [u8; 512] = [0; 512]
+static mut rec: [u8; 1024] = [0; 1024]
+static mut sc: [u8; 4096] = [0; 4096]
+static mut pb: [u8; 512] = [0; 512]
+
+fn rd(lba: u64, n: u64, dst: u64) -> u64 {
+    if (lba + n) * 512 > img.len as u64 {
+        return 1
+    }
+    bytes.copy(dst, img.ptr as u64 + lba * 512, n * 512)
+    return 0
+}
+
+fn wr(lba: u64, n: u64, src: u64) -> u64 {
+    if (lba + n) * 512 > img.len as u64 {
+        return 1
+    }
+    bytes.copy(img.ptr as u64 + lba * 512, src, n * 512)
+    return 0
+}
+
+fn put(s: str) {
+    rt.buf_push_bytes(&out, s.p as u64, s.n)
+}
+
+fn kv(k: str, v: u64) {
+    put(k)
+    put("=")
+    rt.buf_push_dec_u64(&out, v)
+    put("\n")
+}
+
+fn hexval(c: u64) -> u64 {
+    if c >= 97 {
+        return c - 87
+    }
+    return c - 48
+}
+
+fn hex_to(h: u64, dst: u64, max: u64) -> u64 {
+    let n: u64 = rt.c_length(h) as u64 / 2
+    var i: u64 = 0
+    while i < n && i < max {
+        bytes.st8(dst + i, (hexval(rt.ld8(h, (i * 2) as usize) as u64) << 4) | hexval(rt.ld8(h, (i * 2 + 1) as usize) as u64))
+        i = i + 1
+    }
+    return i
+}
+
+fn parse_dec(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while rt.ld8(p, i) != 0 as u8 {
+        v = v * 10 + ((rt.ld8(p, i) as u64) - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn arg(start: u64, i: usize) -> u64 {
+    return parse_dec(rt.arg_ptr(start, i))
+}
+
+fn hexdump(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let b: u64 = bytes.ld8(p, i)
+        rt.buf_push_dec_u64(&out, b)
+        put(",")
+        i = i + 1
+    }
+    put("\n")
+}
+
+fn mkvol(spc: u64, clusters: u64) -> vol.Vol {
+    var v: vol.Vol = vol.vol_new()
+    v.rd = rd
+    v.wr = wr
+    v.psize = img.len as u64 / 512
+    v.bps = 512
+    v.spc = spc
+    v.cb = spc * 512
+    v.clusters = clusters
+    v.sectors = clusters * spc
+    v.serial = 1234605616436508552
+    return v
+}
+
+fn journal_cmd(start: u64) -> u64 {
+    var v: vol.Vol = mkvol(1, arg(start, 4))
+    v.sectors = arg(start, 4)
+    let sub: u8 = rt.ld8(rt.arg_ptr(start, 3), 0)
+    let buf: u64 = (&sc[0 as usize]) as u64
+    var j: rjournal.Journal = rjournal.journal_new()
+    var code: u64 = 0
+    if sub == 119 as u8 {
+        j.state = arg(start, 5)
+        j.rec_no = arg(start, 6)
+        j.src = arg(start, 7)
+        j.dst = arg(start, 8)
+        j.len = arg(start, 9)
+        j.patch_off = arg(start, 10)
+        j.patch_len = hex_to(rt.arg_ptr(start, 11), (&j.patch.data[0]) as u64, 376)
+        code = rjournal.write(&v, buf, &j)
+        kv("jslot", v.jslot)
+    }
+    if sub == 114 as u8 {
+        var present: u64 = 0
+        code = rjournal.read(&v, buf, &j, &present)
+        kv("present", present)
+        kv("state", j.state)
+        kv("serial", j.serial)
+        kv("old_s", j.old_s)
+        kv("rec_no", j.rec_no)
+        kv("src", j.src)
+        kv("dst", j.dst)
+        kv("len", j.len)
+        kv("patch_off", j.patch_off)
+        kv("patch_len", j.patch_len)
+        put("patch=")
+        hexdump((&j.patch.data[0]) as u64, j.patch_len)
+    }
+    if sub == 99 as u8 {
+        code = rjournal.close_session(&v, buf)
+        kv("jslot", v.jslot)
+    }
+    return code
+}
+
+fn patch_cmd(start: u64) -> u64 {
+    let alen: u64 = arg(start, 4)
+    let k: u64 = arg(start, 5)
+    let lcn: u64 = arg(start, 6)
+    let r: u64 = (&rec[0 as usize]) as u64
+    let rp: u64 = r + 96
+    bytes.zero(r, 1024)
+    hex_to(rt.arg_ptr(start, 3), rp, 512)
+    var p: mpatch.Patch = mpatch.patch_new()
+    let code: u64 = mpatch.build(r, rp, rp + alen, k, lcn, &p)
+    if code == 0 {
+        mpatch.apply(r, &p)
+        kv("off", p.off - 96)
+        kv("len", p.len)
+    }
+    put("rl=")
+    hexdump(rp, alen + 16)
+    return code
+}
+
+fn alloc_cmd(start: u64, m: u8) -> u64 {
+    var v: vol.Vol = mkvol(arg(start, 4), arg(start, 5))
+    let rp: u64 = (&rlb[0 as usize]) as u64
+    let n: u64 = hex_to(rt.arg_ptr(start, 3), rp, 512)
+    let re: u64 = rp + n
+    let buf: u64 = (&sc[0 as usize]) as u64
+    var code: u64 = 0
+    if m == 102 as u8 {
+        var res: u64 = 0
+        code = balloc.find_free(&v, rp, re, arg(start, 6), arg(start, 7), arg(start, 8), buf, &res)
+        kv("res", res)
+    }
+    if m == 115 as u8 {
+        code = balloc.set_range(&v, rp, re, arg(start, 6), arg(start, 7), arg(start, 8) != 0, buf)
+    }
+    if m == 99 as u8 {
+        var cnt: u64 = 0
+        var is1: u64 = 0
+        var is0: u64 = 0
+        code = balloc.count_set(&v, rp, re, arg(start, 6), arg(start, 7), buf, &cnt)
+        if code == 0 {
+            code = balloc.range_is(&v, rp, re, arg(start, 6), arg(start, 7), true, buf, &is1)
+        }
+        if code == 0 {
+            code = balloc.range_is(&v, rp, re, arg(start, 6), arg(start, 7), false, buf, &is0)
+        }
+        kv("count", cnt)
+        kv("all_set", is1)
+        kv("all_clear", is0)
+    }
+    return code
+}
+
+fn main(start: u64) -> i32 {
+    if rt.arg_count(start) < 4 {
+        return 2 as i32
+    }
+    if !rt.read_file(rt.arg_ptr(start, 2), &img) {
+        return 3 as i32
+    }
+    let m: u8 = rt.ld8(rt.arg_ptr(start, 1), 0)
+    var code: u64 = 0
+    if m == 112 as u8 {
+        code = patch_cmd(start)
+    } else if m == 106 as u8 {
+        code = journal_cmd(start)
+    } else {
+        code = alloc_cmd(start, m)
+    }
+    kv("code", code)
+    if m == 115 as u8 || m == 106 as u8 {
+        rt.write_file(rt.arg_ptr(start, 2), img.ptr as u64, img.len)
+    }
+    rt.write_everything(1, rt.buf_ptr(&out), rt.buf_len(&out))
+    return 0 as i32
+}

@@ -253,6 +253,7 @@ mutcase "bad-cluster length ignored" 's/ || it.len != (\*v).clusters//; s/if run
 mutcase "hibernation verdict dropped" 's/    return codes.E_HIBERNATED/    return codes.E_OK/' "$D/x_hib.img" hiber.fi
 
 . tools/ntfsshrink/shrink.sh
+. tools/ntfsshrink/reloc.sh
 
 echo "NTFSSHRINK: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.vol
+
+export { find_free, set_range, count_set, range_is, SECTOR_BITS }
+
+const SECTOR_BITS: u64 = 4096
+const NO_SECTOR: u64 = 18446744073709551615
+
+fn popcount8(b: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        n = n + ((b >> i) & 1)
+        i = i + 1
+    }
+    return n
+}
+
+fn load(v: *mut vol.Vol, rp: u64, re: u64, sec: u64, cur: *mut u64, buf: u64) -> u64 {
+    if *cur == sec {
+        return codes.E_OK
+    }
+    let r: u64 = vol.ds_read(v, rp, re, sec, 1, buf)
+    if r != codes.E_OK {
+        return r
+    }
+    *cur = sec
+    return codes.E_OK
+}
+
+fn find_free(v: *mut vol.Vol, rp: u64, re: u64, limit: u64, len: u64, hint: u64, buf: u64, out: *mut u64) -> u64 {
+    if len == 0 || limit > (*v).clusters || hint > limit || len > limit {
+        return codes.E_RANGE
+    }
+    var n: u64 = hint / 8 * 8
+    var run: u64 = 0
+    var start: u64 = 0
+    var cur: u64 = NO_SECTOR
+    while n < limit {
+        let r: u64 = load(v, rp, re, n / SECTOR_BITS, &cur, buf)
+        if r != codes.E_OK {
+            return r
+        }
+        let byte: u64 = bytes.ld8(buf, n / 8 % 512)
+        if n + 8 <= limit && byte == 255 {
+            run = 0
+            n = n + 8
+            continue
+        }
+        if n + 8 <= limit && byte == 0 {
+            if run == 0 {
+                start = n
+            }
+            run = run + 8
+            n = n + 8
+            if run >= len {
+                *out = start
+                return codes.E_OK
+            }
+            continue
+        }
+        var b: u64 = 0
+        while b < 8 && n + b < limit {
+            if (byte >> b) & 1 == 0 {
+                if run == 0 {
+                    start = n + b
+                }
+                run = run + 1
+                if run >= len {
+                    *out = start
+                    return codes.E_OK
+                }
+            } else {
+                run = 0
+            }
+            b = b + 1
+        }
+        n = n + 8
+    }
+    return codes.E_NO_SPACE
+}
+
+fn set_range(v: *mut vol.Vol, rp: u64, re: u64, from: u64, len: u64, on: bool, buf: u64) -> u64 {
+    if from + len > (*v).clusters {
+        return codes.E_RANGE
+    }
+    var n: u64 = from
+    let end: u64 = from + len
+    while n < end {
+        let sec: u64 = n / SECTOR_BITS
+        var r: u64 = vol.ds_read(v, rp, re, sec, 1, buf)
+        if r != codes.E_OK {
+            return r
+        }
+        var changed: bool = false
+        while n < end && n / SECTOR_BITS == sec {
+            let k: u64 = n / 8 % 512
+            let cur: u64 = bytes.ld8(buf, k)
+            let m: u64 = 1 << (n % 8)
+            let want: u64 = if on { cur | m } else { cur & (255 - m) }
+            if want != cur {
+                bytes.st8(buf + k, want)
+                changed = true
+            }
+            n = n + 1
+        }
+        if changed {
+            r = vol.ds_write(v, rp, re, sec, 1, buf)
+            if r != codes.E_OK {
+                return r
+            }
+        }
+    }
+    return codes.E_OK
+}
+
+fn count_set(v: *mut vol.Vol, rp: u64, re: u64, from: u64, len: u64, buf: u64, out: *mut u64) -> u64 {
+    if from + len > (*v).clusters {
+        return codes.E_RANGE
+    }
+    var n: u64 = from
+    let end: u64 = from + len
+    var total: u64 = 0
+    var cur: u64 = NO_SECTOR
+    while n < end {
+        let r: u64 = load(v, rp, re, n / SECTOR_BITS, &cur, buf)
+        if r != codes.E_OK {
+            return r
+        }
+        let byte: u64 = bytes.ld8(buf, n / 8 % 512)
+        if n % 8 == 0 && n + 8 <= end {
+            total = total + popcount8(byte)
+            n = n + 8
+        } else {
+            total = total + ((byte >> (n % 8)) & 1)
+            n = n + 1
+        }
+    }
+    *out = total
+    return codes.E_OK
+}
+
+fn range_is(v: *mut vol.Vol, rp: u64, re: u64, from: u64, len: u64, on: bool, buf: u64, out: *mut u64) -> u64 {
+    var c: u64 = 0
+    let r: u64 = count_set(v, rp, re, from, len, buf, &c)
+    if r != codes.E_OK {
+        return r
+    }
+    let want: u64 = if on { len } else { 0 }
+    *out = if c == want { 1 } else { 0 }
+    return codes.E_OK
+}

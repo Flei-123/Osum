@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.runs
+
+export { Patch, patch_new, build, apply, PATCH_MAX }
+
+const PATCH_MAX: u64 = 376
+
+struct Patch {
+    off: u64,
+    len: u64,
+    data: [u8; 376]
+}
+
+fn patch_new() -> Patch {
+    var p: Patch = Patch { off: 0, len: 0, data: [0; 376] }
+    return p
+}
+
+fn delta_len(a: u64, b: u64) -> u64 {
+    let neg: bool = a < b
+    let mag: u64 = if neg { b - a } else { a - b }
+    var n: u64 = 1
+    while n < 8 {
+        let lim: u64 = 1 << (n * 8 - 1)
+        if neg && mag <= lim {
+            return n
+        }
+        if !neg && mag < lim {
+            return n
+        }
+        n = n + 1
+    }
+    return 8
+}
+
+fn put_delta(dst: u64, a: u64, b: u64, n: u64) {
+    let neg: bool = a < b
+    let val: u64 = if neg { (18446744073709551615 - (b - a)) + 1 } else { a - b }
+    var i: u64 = 0
+    while i < n {
+        bytes.st8(dst + i, (val >> (i * 8)) & 255)
+        i = i + 1
+    }
+}
+
+fn emit_run(dst: u64, src: u64, lb: u64, lcn: u64, base: u64) -> u64 {
+    let ob: u64 = delta_len(lcn, base)
+    bytes.st8(dst, lb | (ob << 4))
+    bytes.copy(dst + 1, src + 1, lb)
+    put_delta(dst + 1 + lb, lcn, base, ob)
+    return 1 + lb + ob
+}
+
+fn build(rec: u64, rp: u64, re: u64, k: u64, new_lcn: u64, out: *mut Patch) -> u64 {
+    var it: runs.RunIt = runs.it_new()
+    runs.it_init(&it, rp, re)
+    var idx: u64 = 0
+    var start_k: u64 = rp
+    var base_k: u64 = 0
+    while true {
+        start_k = it.p
+        base_k = it.acc
+        if !runs.next(&it) {
+            return codes.E_CORRUPT
+        }
+        if idx == k {
+            break
+        }
+        idx = idx + 1
+    }
+    if it.sparse != 0 || new_lcn == 0 || new_lcn + it.len >= runs.LCN_LIMIT {
+        return codes.E_UNMOVABLE
+    }
+    let end_k: u64 = it.p
+    let lb_k: u64 = bytes.ld8(start_k, 0) & 15
+    var mid_end: u64 = end_k
+    var nstart: u64 = 0
+    var nend: u64 = 0
+    var nlcn: u64 = 0
+    var have_next: bool = false
+    var more: bool = true
+    while more {
+        let s: u64 = it.p
+        if !runs.next(&it) {
+            more = false
+        } else if it.sparse == 0 {
+            nstart = s
+            nend = it.p
+            nlcn = it.lcn
+            have_next = true
+            more = false
+        } else {
+            mid_end = it.p
+        }
+    }
+    let tail_from: u64 = if have_next { nend } else { mid_end }
+    if have_next {
+        mid_end = nstart
+    }
+    while runs.next(&it) {
+    }
+    if it.bad != 0 || it.p >= re || bytes.ld8(it.p, 0) != 0 {
+        return codes.E_CORRUPT
+    }
+    let t: u64 = it.p
+    let old_end: u64 = t + 1
+    let tail_len: u64 = old_end - tail_from
+    let mid_len: u64 = mid_end - end_k
+    let sz_k: u64 = 1 + lb_k + delta_len(new_lcn, base_k)
+    var sz_n: u64 = 0
+    var lb_n: u64 = 0
+    if have_next {
+        lb_n = bytes.ld8(nstart, 0) & 15
+        sz_n = 1 + lb_n + delta_len(nlcn, new_lcn)
+    }
+    let new_len: u64 = sz_k + mid_len + sz_n + tail_len
+    let old_len: u64 = old_end - start_k
+    let win: u64 = if new_len > old_len { new_len } else { old_len }
+    if start_k + new_len > re || win > PATCH_MAX {
+        return codes.E_UNMOVABLE
+    }
+    let d: u64 = (&(*out).data[0]) as u64
+    bytes.zero(d, PATCH_MAX)
+    var w: u64 = emit_run(d, start_k, lb_k, new_lcn, base_k)
+    bytes.copy(d + w, end_k, mid_len)
+    w = w + mid_len
+    if have_next {
+        w = w + emit_run(d + w, nstart, lb_n, nlcn, new_lcn)
+    }
+    bytes.copy(d + w, tail_from, tail_len)
+    (*out).off = start_k - rec
+    (*out).len = win
+    return codes.E_OK
+}
+
+fn apply(rec: u64, p: *mut Patch) {
+    bytes.copy(rec + (*p).off, (&(*p).data[0]) as u64, (*p).len)
+}

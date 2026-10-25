@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import disks.table
+import ntfsshrink.codes
+import ntfsshrink.tags
+import ntfsshrink.vol
+import ntfsshrink.mpatch
+
+export { Journal, journal_new, encode, decode, read, write, close_session, ST_SESSION, ST_UNIT, DATA_AT }
+
+const VERSION: u64 = 1
+const SIZE: u64 = 512
+const CRC_AT: u64 = 508
+const DATA_AT: u64 = 128
+const ST_SESSION: u64 = 1
+const ST_UNIT: u64 = 2
+
+struct Journal {
+    state: u64,
+    serial: u64,
+    old_s: u64,
+    rec_no: u64,
+    patch_off: u64,
+    patch_len: u64,
+    src: u64,
+    dst: u64,
+    len: u64,
+    patch: mpatch.Patch
+}
+
+fn journal_new() -> Journal {
+    var j: Journal = Journal {
+        state: 0, serial: 0, old_s: 0, rec_no: 0, patch_off: 0, patch_len: 0, src: 0, dst: 0, len: 0, patch: mpatch.patch_new()
+    }
+    return j
+}
+
+fn encode(buf: u64, j: *mut Journal) {
+    bytes.zero(buf, SIZE)
+    bytes.copy(buf, tags.ptr_of(tags.T_RJ), tags.len_of(tags.T_RJ))
+    bytes.put32(buf + 8, VERSION)
+    bytes.put32(buf + 12, (*j).state)
+    bytes.put64(buf + 16, (*j).serial)
+    bytes.put64(buf + 24, (*j).old_s)
+    bytes.put64(buf + 32, (*j).rec_no)
+    bytes.put32(buf + 44, (*j).patch_off)
+    bytes.put32(buf + 48, (*j).patch_len)
+    bytes.put64(buf + 56, (*j).src)
+    bytes.put64(buf + 64, (*j).dst)
+    bytes.put64(buf + 72, (*j).len)
+    if (*j).patch_len <= mpatch.PATCH_MAX {
+        bytes.copy(buf + DATA_AT, (&(*j).patch.data[0]) as u64, (*j).patch_len)
+    }
+    bytes.put32(buf + CRC_AT, table.crc32(buf, CRC_AT))
+}
+
+fn decode(buf: u64, j: *mut Journal) -> bool {
+    if !tags.eq(buf, tags.T_RJ) || bytes.le32(buf + 8) != VERSION {
+        return false
+    }
+    if table.crc32(buf, CRC_AT) != bytes.le32(buf + CRC_AT) {
+        return false
+    }
+    let state: u64 = bytes.le32(buf + 12)
+    let plen: u64 = bytes.le32(buf + 48)
+    if (state != ST_SESSION && state != ST_UNIT) || plen > mpatch.PATCH_MAX {
+        return false
+    }
+    (*j).state = state
+    (*j).serial = bytes.le64(buf + 16)
+    (*j).old_s = bytes.le64(buf + 24)
+    (*j).rec_no = bytes.le64(buf + 32)
+    (*j).patch_off = bytes.le32(buf + 44)
+    (*j).patch_len = plen
+    (*j).src = bytes.le64(buf + 56)
+    (*j).dst = bytes.le64(buf + 64)
+    (*j).len = bytes.le64(buf + 72)
+    (*j).patch.off = (*j).patch_off
+    (*j).patch.len = plen
+    bytes.copy((&(*j).patch.data[0]) as u64, buf + DATA_AT, plen)
+    return true
+}
+
+fn read(v: *mut vol.Vol, buf: u64, j: *mut Journal, present: *mut u64) -> u64 {
+    *present = 0
+    let r: u64 = vol.vread(v, (*v).sectors, 1, buf)
+    if r != codes.E_OK {
+        return r
+    }
+    if !tags.eq(buf, tags.T_RJ) {
+        return codes.E_OK
+    }
+    if !decode(buf, j) {
+        return codes.E_CORRUPT
+    }
+    *present = 1
+    return codes.E_OK
+}
+
+fn write(v: *mut vol.Vol, buf: u64, j: *mut Journal) -> u64 {
+    (*j).serial = (*v).serial
+    (*j).old_s = (*v).sectors
+    encode(buf, j)
+    let r: u64 = vol.vwrite(v, (*v).sectors, 1, buf)
+    if r == codes.E_OK {
+        (*v).jslot = 1
+    }
+    return r
+}
+
+fn close_session(v: *mut vol.Vol, buf: u64) -> u64 {
+    var r: u64 = vol.vread(v, 0, 1, buf)
+    if r != codes.E_OK {
+        return r
+    }
+    r = vol.vwrite(v, (*v).sectors, 1, buf)
+    if r == codes.E_OK {
+        (*v).jslot = 0
+    }
+    return r
+}
