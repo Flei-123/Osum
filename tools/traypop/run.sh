@@ -123,7 +123,7 @@ for MODE in $MODES; do
     echo "== $MODE"
     O="$TMPD/o-$MODE"
     PAIR_EXTRA=""
-    [ "$MODE" = light ] && PAIR_EXTRA=" /var/jarvis/ /var/jarvis/state=$TMPD/state@0644"
+    [ "$MODE" = light ] && PAIR_EXTRA=" /var/ /var/jarvis/ /var/jarvis/state=$TMPD/state@0644"
     EH_MKFS_EXTRA="/etc/tray.items=$TMPD/tray.items@0644$PAIR_EXTRA" bash tools/design/eh6.sh "$O" res=1280x800 accel=kvm mode="$MODE" progs="$PROGS" \
         tbextra="tray_chevron=1" drehbuch="$TMPD/dreh.txt" > "$TMPD/o-$MODE.log" 2>&1 < /dev/null
     S="$O/serial.txt"

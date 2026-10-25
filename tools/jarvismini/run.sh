@@ -116,7 +116,7 @@ want() { [ -z "${JM_ONLY:-}" ] || [[ " $JM_ONLY " == *" $1 "* ]]; }
 if want A; then
 echo "== boot A (rights granted) =="
 start_stub A
-RB_EXTRA="/var/jarvis/ /var/jarvis/state=$D/state@0644" run_boot A "$D/rights.yes"
+RB_EXTRA="/var/ /var/jarvis/ /var/jarvis/state=$D/state@0644" run_boot A "$D/rights.yes"
 stop_stubs
 SA="$D/A/serial.txt"
 [ -s "$SA" ] || { bad "boot A: no serial output"; tail -15 "$D/A.log"; }
