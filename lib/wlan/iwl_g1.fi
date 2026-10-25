@@ -5,13 +5,14 @@ import wlan.iwl_le
 
 export {
     Prog, prog_new, prog_add, prog_len, prog_kind, prog_addr, prog_val, prog_run,
-    prog_rx_init, prog_tx_init, prog_tx_cmd_init, prog_tx_linux, prog_scd_init, prog_txq_enable, prog_rx_wptr, prog_tx_doorbell,
+    prog_rx_init, prog_tx_init, prog_tx_cmd_init, prog_tx_linux, prog_scd_head, prog_scd_tail, prog_txq_enable, prog_rx_wptr, prog_tx_doorbell,
     rx_stop, rx_status_closed, rx_bd_put, rx_cfg_value,
     K_DIRECT, K_PRPH, K_SRAM, K_PRPH_SET, K_CSR, K_CSR8,
     FH_RCSR_RBDCB_WPTR, FH_RCSR_FLUSH_RB_REQ, FH_RSCSR_RDPTR, INT_COALESCING_DEFAULT,
     FH_KW_MEM_ADDR_REG, FH_RSCSR_STTS_WPTR, FH_RSCSR_RBDCB_BASE, FH_RSCSR_RBDCB_WPTR, FH_RCSR_CONFIG, FH_RSSR_RX_STATUS,
     FH_TCSR_BASE, FH_TX_CHICKEN, CSR_INT_COALESCING, HBUS_TARG_WRPTR, HBUS_MEM_WADDR, HBUS_MEM_WDAT,
-    SCD_SRAM_BASE_ADDR, SCD_DRAM_BASE_ADDR, SCD_TXFACT, SCD_CHAINEXT_EN, SCD_GP_CTRL,
+    SCD_SRAM_BASE_ADDR, SCD_DRAM_BASE_ADDR, SCD_TXFACT, SCD_CHAINEXT_EN, SCD_GP_CTRL, SCD_EN_CTRL, SCD_AGGR_SEL, SCD_CONTEXT_MEM,
+    scd_base_read, scd_ctx_clear,
     RX_BD_COUNT, RX_BD_LOG2, RX_STTS_SIZE, SCD_FIFO_CMD,
     cbbc_reg, scd_status_reg, scd_rdptr_reg, scd_ctx_offset, rx_cfg_enable,
     E_G1_PROG, E_G1_ACCESS, E_G1_IDLE
@@ -61,6 +62,10 @@ const SCD_WIN_SIZE: u64 = 64
 const SCD_FRAME_LIMIT: u64 = 64
 const SCD_FIFO_CMD: u64 = 7
 const SCD_TXFACT_ALL: u64 = 0xFF
+const SCD_EN_CTRL: u64 = 0xA02E54
+const SCD_AGGR_SEL: u64 = 0xA02E48
+const SCD_STTS_ACT_EN: u64 = 0x80000
+const SCD_CTX_CLEAR_DWORDS: u64 = 135
 
 const RX_BD_COUNT: u64 = 256
 const RX_BD_LOG2: u64 = 8
@@ -77,6 +82,8 @@ const K_SRAM: u64 = 2
 const K_PRPH_SET: u64 = 3
 const K_CSR: u64 = 4
 const K_CSR8: u64 = 5
+const K_DIRECT_SET: u64 = 6
+const K_PRPH_CLR: u64 = 7
 
 const PROG_MAX: usize = 96
 
@@ -170,28 +177,35 @@ fn prog_tx_cmd_init(g: *mut Prog, kw_bus: u64, cmd_ring: u64, cmd_q: u64) -> boo
     return ok
 }
 
-fn prog_scd_init(g: *mut Prog, bc_bus: u64) -> bool {
+fn prog_scd_head(g: *mut Prog, bc_bus: u64) -> bool {
     if bc_bus & 0x3FF != 0 { return false }
     var ok: bool = add(g, K_PRPH, SCD_DRAM_BASE_ADDR, bc_bus >> 10)
     ok = ok && add(g, K_PRPH, SCD_CHAINEXT_EN, 0)
     ok = ok && add(g, K_PRPH_SET, SCD_GP_CTRL, SCD_GP_AUTO_ACTIVE | SCD_GP_ENABLE_31)
-    ok = ok && add(g, K_DIRECT, FH_TX_CHICKEN, FH_TX_CHICKEN_AUTO_RETRY)
+    return ok
+}
+
+fn prog_scd_tail(g: *mut Prog) -> bool {
+    var ok: bool = add(g, K_PRPH, SCD_TXFACT, SCD_TXFACT_ALL)
     var c: u64 = 0
     while c < FH_TCSR_CHNL_NUM {
         ok = ok && add(g, K_DIRECT, FH_TCSR_BASE + 0x20 * c, TCSR_ENABLE | TCSR_CREDIT_ENABLE)
         c = c + 1
     }
-    ok = ok && add(g, K_PRPH, SCD_TXFACT, SCD_TXFACT_ALL)
+    ok = ok && add(g, K_DIRECT_SET, FH_TX_CHICKEN, FH_TX_CHICKEN_AUTO_RETRY)
     return ok
 }
 
 fn prog_txq_enable(g: *mut Prog, scd_base: u64, q: u64, fifo: u64) -> bool {
-    var ok: bool = add(g, K_PRPH, scd_status_reg(q), 0)
+    var ok: bool = add(g, K_PRPH, SCD_EN_CTRL, 0)
+    ok = ok && add(g, K_PRPH, scd_status_reg(q), SCD_STTS_ACT_EN)
+    ok = ok && add(g, K_PRPH_CLR, SCD_AGGR_SEL, 1 << q)
     ok = ok && add(g, K_DIRECT, HBUS_TARG_WRPTR, q << 8)
     ok = ok && add(g, K_PRPH, scd_rdptr_reg(q), 0)
     ok = ok && add(g, K_SRAM, scd_base + scd_ctx_offset(q), 0)
     ok = ok && add(g, K_SRAM, scd_base + scd_ctx_offset(q) + 4, (SCD_FRAME_LIMIT << 16) | SCD_WIN_SIZE)
     ok = ok && add(g, K_PRPH, scd_status_reg(q), (1 << SCD_STTS_ACTIVE) | (fifo << SCD_STTS_TXF) | (1 << SCD_STTS_WSL) | SCD_STTS_MSK)
+    ok = ok && add(g, K_PRPH, SCD_EN_CTRL, 1 << q)
     return ok
 }
 
@@ -206,6 +220,24 @@ fn prog_tx_doorbell(g: *mut Prog, q: u64, wr: u64) -> bool {
 fn sram_write(p: *mut iwl_probe.Probe, addr: u64, v: u64) {
     iwl_pwr.wr(p, HBUS_MEM_WADDR, addr)
     iwl_pwr.wr(p, HBUS_MEM_WDAT, v)
+}
+
+fn scd_base_read(p: *mut iwl_probe.Probe) -> u64 {
+    if iwl_pwr.mac_access_get(p) != 0 { return 0 }
+    let v: u64 = iwl_pwr.prph_rd(p, SCD_SRAM_BASE_ADDR) & 0xFFFFFFFF
+    iwl_pwr.mac_access_put(p)
+    return v
+}
+
+fn scd_ctx_clear(p: *mut iwl_probe.Probe, scd_base: u64) -> i64 {
+    if iwl_pwr.mac_access_get(p) != 0 { return E_G1_ACCESS }
+    var i: u64 = 0
+    while i < SCD_CTX_CLEAR_DWORDS {
+        sram_write(p, scd_base + SCD_CONTEXT_MEM + 4 * i, 0)
+        i = i + 1
+    }
+    iwl_pwr.mac_access_put(p)
+    return 0
 }
 
 fn prog_run(p: *mut iwl_probe.Probe, g: *mut Prog) -> i64 {
@@ -223,6 +255,10 @@ fn prog_run(p: *mut iwl_probe.Probe, g: *mut Prog) -> i64 {
             iwl_pwr.prph_wr(p, a, v)
         } else if k == K_PRPH_SET {
             iwl_pwr.prph_wr(p, a, iwl_pwr.prph_rd(p, a) | v)
+        } else if k == K_DIRECT_SET {
+            iwl_pwr.wr(p, a, iwl_pwr.rd(p, a) | v)
+        } else if k == K_PRPH_CLR {
+            iwl_pwr.prph_wr(p, a, iwl_pwr.prph_rd(p, a) & (0xFFFFFFFF ^ v))
         } else if k == K_SRAM {
             sram_write(p, a, v)
         } else {

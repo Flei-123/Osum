@@ -27,5 +27,7 @@ mut 's/const FH_RSCSR_RDPTR: u64 = 0x1BCC/const FH_RSCSR_RDPTR: u64 = 0x1BC8/' "
 mut 's/FH_RCSR_RBDCB_WPTR: u64 = 0x1C08/FH_RCSR_RBDCB_WPTR: u64 = 0x1C0C/' "RCSR write pointer register"
 mut 's/add(g, K_CSR8, CSR_INT_COALESCING/add(g, K_CSR, CSR_INT_COALESCING/' "coalescing byte write kind"
 mut 's/(iwl_pwr.rd(p, a) \& 0xFFFFFF00) | (v \& 0xFF)/v/' "coalescing read-modify-write keeps other bytes"
+mut 's/ok = ok && add(g, K_PRPH, SCD_EN_CTRL, 1 << q)/ok = ok/' "scheduler enable of the command queue (SCD_EN_CTRL)"
+mut 's/add(g, K_PRPH, scd_status_reg(q), SCD_STTS_ACT_EN)/add(g, K_PRPH, scd_status_reg(q), 0)/' "queue set inactive before configuring"
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
