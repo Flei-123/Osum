@@ -7,6 +7,8 @@
 # Peer (tools/pinggw/peer.py) = home router on 192.168.1.0/24: DHCP (mask/router/dns), ARP only for 192.168.1.1,
 # ICMP echo reply for ANY destination when the frame is addressed to the gateway MAC.
 #   dhcp      lease -> ping 1.1.1.1 and 8.8.8.8 answered via the gateway; /proc/usbnet shows mask, gw mac, route, arp
+#   storm     unanswered ARP target, ping -c 12: ARP requests on the wire stay <= 30 (counter-proof stormopen: noarpgap word, > 100)
+#   blocksend blocking ICMP socket to an unanswered target: sendto gives up after ~3 s, ARP <= 12 (counter-proof blocksendopen: noarpgap, > 100)
 #   wrongmask static mask /0 (negative control) -> 1.1.1.1 looks on-link, ARP asked directly, no answer, loss reported
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -18,7 +20,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "PINGGW: skipped, no qemu"; exit 0; }
-CASES="${*:-dhcp wrongmask nogw}"
+CASES="${*:-dhcp wrongmask nogw storm stormopen blocksend blocksendopen}"
 trap 'for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; [ -n "${PINGGW_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/ping.elf" ]; then
     bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
@@ -27,10 +29,12 @@ if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/ping.elf" ]; then
 fi
 printf 'echo ==START==\ndhcp\nping -c 2 1.1.1.1\nping -c 2 8.8.8.8\nsleep 1\ncat /proc/usbnet\necho ==END==\n' > "$T/s_dhcp.sh"
 printf 'echo ==START==\nping -c 2 1.1.1.1\nsleep 1\ncat /proc/usbnet\necho ==END==\n' > "$T/s_static.sh"
+printf 'echo ==START==\nping -c 12 1.1.1.1\ncat /proc/usbnet\necho ==END==\n' > "$T/s_storm.sh"
+printf 'echo ==START==\nping -b -c 1 1.1.1.1\necho ==MID==\ncat /proc/usbnet\necho ==END==\n' > "$T/s_block.sh"
 python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
-    /t/s_dhcp.sh="$T/s_dhcp.sh" /t/s_static.sh="$T/s_static.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
+    /t/s_dhcp.sh="$T/s_dhcp.sh" /t/s_static.sh="$T/s_static.sh" /t/s_storm.sh="$T/s_storm.sh" /t/s_block.sh="$T/s_block.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 PORT=$((48000 + ($$ % 500) * 4))
 
@@ -59,6 +63,9 @@ chk() { grep -aq -- "$3" "$T/$1.klar" && ok "$1: $2" || bad "$1: $2 (missing: $3
 nochk() { grep -aq -- "$3" "$T/$1.klar" && bad "$1: $2 (found: $3)" || ok "$1: $2"; }
 pchk() { grep -aq -- "$3" "$T/$1.peer" && ok "$1: $2" || bad "$1: $2 (peer log missing: $3)"; }
 pnochk() { grep -aq -- "$3" "$T/$1.peer" && bad "$1: $2 (peer log has: $3)" || ok "$1: $2"; }
+txk() { grep -a '^txk:' "$T/$1.klar" | head -1 | sed -n "s/.*$2=\\([0-9][0-9]*\\).*/\\1/p"; }
+atmost() { local v; v=$(txk "$1" "$2"); [ -n "$v" ] && [ "$v" -le "$3" ] && ok "$1: $4 ($2=$v <= $3)" || bad "$1: $4 ($2=${v:-none}, wanted <= $3)"; }
+atleast() { local v; v=$(txk "$1" "$2"); [ -n "$v" ] && [ "$v" -ge "$3" ] && ok "$1: $4 ($2=$v >= $3)" || bad "$1: $4 ($2=${v:-none}, wanted >= $3)"; }
 panics() { grep -aiq 'panic\|exception\|#PF\|#GP\|#UD' "$T/$1.klar" && bad "$1: panic/exception in log" || ok "$1: no panic/exception"; }
 
 for c in $CASES; do
@@ -100,6 +107,31 @@ for c in $CASES; do
         chk nogw "second target ends too" 'PING 8.8.8.8'
         chk nogw "script reached the end" '==END=='
         panics nogw
+        ;;
+    storm)
+        run storm s_storm.sh "nip=192.168.1.50/0 ngw=192.168.1.1" ""
+        chk storm "ping ran to the end" '100% packet loss'
+        atmost storm arp 30 "ARP requests on the wire are rate limited"
+        atleast storm arpgated 1 "excess ARP requests were held back"
+        chk storm "script reached the end" '==END=='
+        panics storm
+        ;;
+    stormopen)
+        run stormopen s_storm.sh "nip=192.168.1.50/0 ngw=192.168.1.1 noarpgap" ""
+        atleast stormopen arp 100 "counter-proof: without the gap the storm shows"
+        chk stormopen "script reached the end" '==END=='
+        ;;
+    blocksend)
+        run blocksend s_block.sh "nip=192.168.1.50/0 ngw=192.168.1.1" ""
+        chk blocksend "blocking ping returned" '==MID=='
+        chk blocksend "no answer reported" 'ping: no answer for 1'
+        atmost blocksend arp 12 "ARP requests of a blocking send are rate limited"
+        chk blocksend "script reached the end" '==END=='
+        panics blocksend
+        ;;
+    blocksendopen)
+        run blocksendopen s_block.sh "nip=192.168.1.50/0 ngw=192.168.1.1 noarpgap" ""
+        atleast blocksendopen arp 100 "counter-proof: blocking send floods without the gap"
         ;;
     esac
 done

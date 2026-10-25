@@ -79,7 +79,7 @@ export {
     next_hop, route_via_gw, hop_mac, arp_slots, arp_ip_at, arp_mac_slot,
     sock_new, sock_free, sock_kind, sock_handle,
     sock_bind, sock_listen, sock_accept, sock_connect,
-    sock_send, sock_recv, sock_sendto, sock_recvfrom,
+    sock_send, sock_recv, sock_sendto, sock_recvfrom, tx_kind_count, TXK_ARP, TXK_ICMP, TXK_UDP, TXK_TCP, TXK_OTHER, TXK_ARP_SUPPRESSED,
     sock_close, sock_shutdown, sock_state, sock_peer, sock_local,
     sock_readable, sock_writable, sock_error,
     sock_acceptable, sock_hup,
@@ -114,6 +114,23 @@ const S_TSCDIV: u64 = 0x388
 const S_SOCKS: u64 = 0x390
 const S_BOUNCE: u64 = 0x398
 const S_SADDR: u64 = 0x3F0
+const S_TXARP: u64 = 0x3A0
+const S_TXICMP: u64 = 0x3A8
+const S_TXUDP: u64 = 0x3B0
+const S_TXTCP: u64 = 0x3B8
+const S_TXOTHER: u64 = 0x3C0
+const S_ARPSUP: u64 = 0x3C8
+const S_ARPTGT: u64 = 0x3D0
+const S_ARPTICK: u64 = 0x3D8
+
+const TXK_ARP: u64 = 0
+const TXK_ICMP: u64 = 1
+const TXK_UDP: u64 = 2
+const TXK_TCP: u64 = 3
+const TXK_OTHER: u64 = 4
+const TXK_ARP_SUPPRESSED: u64 = 5
+const ARP_GAP_ANY: u64 = 5
+const ARP_GAP_SAME: u64 = 50
 
 // The socket table, the shadow address cache and the queue of ICMP
 // answers -- all three in the same page-sized area, all three fixed.
@@ -266,6 +283,67 @@ fn gw_known(state: u64) -> bool {
 
 fn pumps(state: u64) -> u64 {
     return kstate.get(state, sc(S_PUMPS))
+}
+
+fn tx_slot(kind: u64) -> u64 {
+    if kind == TXK_ARP {
+        return S_TXARP
+    }
+    if kind == TXK_ICMP {
+        return S_TXICMP
+    }
+    if kind == TXK_UDP {
+        return S_TXUDP
+    }
+    if kind == TXK_TCP {
+        return S_TXTCP
+    }
+    if kind == TXK_ARP_SUPPRESSED {
+        return S_ARPSUP
+    }
+    return S_TXOTHER
+}
+
+fn tx_kind_count(state: u64, kind: u64) -> u64 {
+    return kstate.get(state, sc(tx_slot(kind)))
+}
+
+fn count_tx(state: u64, f: u64, n: u64) {
+    var kind: u64 = TXK_OTHER
+    if n >= 14 {
+        let et: u64 = (kstate.get8(f + 12) << 8) | kstate.get8(f + 13)
+        if et == 0x0806 {
+            kind = TXK_ARP
+        } else if et == 0x0800 && n >= 24 {
+            let proto: u64 = kstate.get8(f + 23)
+            if proto == 1 {
+                kind = TXK_ICMP
+            } else if proto == 17 {
+                kind = TXK_UDP
+            } else if proto == 6 {
+                kind = TXK_TCP
+            }
+        }
+    }
+    kstate.add(state, sc(tx_slot(kind)), 1)
+}
+
+fn arp_may_ask(state: u64, target: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOARPGAP) {
+        return true
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    let last: u64 = kstate.get(state, sc(S_ARPTICK))
+    if last != 0 && now >= last {
+        let age: u64 = now - last
+        if age < ARP_GAP_ANY || (age < ARP_GAP_SAME && kstate.get(state, sc(S_ARPTGT)) == target) {
+            kstate.add(state, sc(S_ARPSUP), 1)
+            return false
+        }
+    }
+    kstate.set(state, sc(S_ARPTICK), now)
+    kstate.set(state, sc(S_ARPTGT), target)
+    return true
 }
 
 fn frames_in(state: u64) -> u64 {
@@ -696,6 +774,7 @@ fn pump(state: u64) -> u64 {
                 // form itself) or refuses (the switch is armed and the
                 // tunnel is not carrying) never reaches the card.
                 if wg.tx_hook(state, out, len as u64) == 0 {
+                    count_tx(state, out, len as u64)
                     netdev.tx_frame(state, out, len as u64)
                     kstate.add(state, sc(S_OUT), 1)
                 }
@@ -891,6 +970,9 @@ fn arp_look(state: u64, target: u64) -> u64 {
 // broadcast, so it needs no hardware address to be sent, which is the
 // whole point of ARP.
 fn arp_ask(state: u64, target: u64) {
+    if !arp_may_ask(state, target) {
+        return
+    }
     var f: [u8; 64] = [0 as u8; 64]
     var me: [u8; 6] = [0 as u8; 6]
     var zero: [u8; 6] = [0 as u8; 6]
@@ -909,6 +991,7 @@ fn arp_ask(state: u64, target: u64) {
     // belongs to nobody -- it goes into the system bucket, which is
     // what that bucket is for.
     netmon.frame_seen(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64, true)
+    count_tx(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64)
     netdev.tx_frame(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64)
 }
 
@@ -1017,6 +1100,7 @@ fn icmp_send(state: u64, dst: u64, body: u64, n: u64) -> u64 {
     // measured run of this round showed exactly that: `ping  192 <- 192
     // payload, wire 0 <- 294`. Here is the missing half.
     netmon.frame_seen(state, (&f[0]) as u64, 14 + 20 + n, true)
+    count_tx(state, (&f[0]) as u64, 14 + 20 + n)
     if !netdev.tx_frame(state, (&f[0]) as u64, 14 + 20 + n) {
         return errno.neg(errno.E_AGAIN)
     }
