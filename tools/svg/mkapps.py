@@ -52,7 +52,7 @@ def main(argv):
         if rc != 0:
             print("bake failed", app, rc)
             return 1
-        for rs in (ROW_SIZES if folder.startswith("assets/apps/") else ()):
+        for rs in ROW_SIZES:
             rc = subprocess.run([bake, svg, os.path.join(d, "symbol%d.osym" % rs), str(rs)]).returncode
             if rc != 0:
                 print("bake failed", app, rs, rc)

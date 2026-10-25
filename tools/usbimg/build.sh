@@ -1522,6 +1522,7 @@ if [ "$IMAGE_PROFILE" = personal ]; then
       printf '\n# W-IMG2: JARVIS Mini, started hidden at login (not a plugin: only the name -> prog= mapping is used)\n'
       printf 'jmini rechte=0x001 prog=/bin/jarvismini\n'; } > "$OUT/wmplug.conf"
     printf 'hotkey\njmini --hidden --as-app\n' > "$OUT/wmplug.autostart"
+    python3 -I -c 'import sys; sys.path.insert(0, "tools/k15"); import symjoin; sys.stdout.buffer.write(symjoin.joined("pakete/jarvismini"))' > "$OUT/jarvismini.symbol"
     ARGS+=("/etc/jarvismini.conf=$OUT/jarvismini.conf@0644"
            "/etc/hotkeys.conf=etc/hotkeys.conf@0644"
            "/etc/wmplug.conf=$OUT/wmplug.conf@0644"
@@ -1531,7 +1532,7 @@ if [ "$IMAGE_PROFILE" = personal ]; then
            /apps/jarvismini.osp/
            "/apps/jarvismini.osp/INFO=pakete/jarvismini/INFO@0644"
            "/apps/jarvismini.osp/start@/bin/jarvismini"
-           "/apps/jarvismini.osp/symbol=pakete/jarvismini/symbol.osym@0644")
+           "/apps/jarvismini.osp/symbol=$OUT/jarvismini.symbol@0644")
 fi
 # LCSH: extra mkfs specs for gates (`<path>=<host file>` words, no blanks inside) -- e.g. tools/usbimg/bbsh.sh puts a musl test program on the stick
 # shellcheck disable=SC2206

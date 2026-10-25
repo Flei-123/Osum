@@ -44,8 +44,9 @@ def reference(svg, size):
 
 
 def main(root):
-    bundles = [d for d in sorted(glob.glob(os.path.join(root, "assets/apps/*.osp"))) if os.path.isfile(os.path.join(d, "symbol.svg"))]
-    say(len(bundles) >= 21, "%d bundles carry symbol.svg" % len(bundles))
+    bundles = [d for d in sorted(glob.glob(os.path.join(root, "assets/apps/*.osp")) + [os.path.join(root, "pakete/jarvismini")])
+               if os.path.isfile(os.path.join(d, "symbol.svg"))]
+    say(len(bundles) >= 22, "%d bundles carry symbol.svg" % len(bundles))
     errs = {size: [] for size in (22, 32, 44, 64)}
     old_errs = {size: [] for size in (22, 32, 44, 64)}
     slot_bad = 0
