@@ -992,6 +992,10 @@ printf 'OrientOS build %s (%s) %s\n' "$SYS_BUILD" "$SYS_COMMIT" "$(date -u +%Y-%
 # gestartet meldet sich der Dienst nirgends an und fuehrt nichts aus.
 # Wer ihn benutzen will, traegt Server und Rechte ein -- von Hand oder
 # mit `jarvisd -c <eigene datei>`.
+if [ "${HP_STICK:-0}" = 1 ] && [ "$IMAGE_PROFILE" = personal ]; then
+    JARVIS_CONF=${JARVIS_CONF:-assets/jarvis/rechte-hp.conf}
+    JARVIS_DEVICE_KEY=${JARVIS_DEVICE_KEY:-${JARVIS_ABB:-/root/abbilder}/hp-device.key}
+fi
 if [ -n "${JARVIS_CONF:-}" ] && [ -s "${JARVIS_CONF}" ]; then
     cp -f "$JARVIS_CONF" "$OUT/rechte.conf"
 else
