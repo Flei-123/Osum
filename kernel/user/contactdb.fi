@@ -1,0 +1,225 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+
+export { load, count, name_of, phone_of, email_of, add, drop, find, NONE }
+
+const CAP: u64 = 4096
+const FIELD_MAX: u64 = 47
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const NAME: u64 = 0
+const PHONE: u64 = 1
+const EMAIL: u64 = 2
+
+static mut cb: [u8; 4096] = [0 as u8; 4096]
+static mut cb_len: u64 = 0
+static mut out_name: [u8; 64] = [0 as u8; 64]
+static mut out_phone: [u8; 64] = [0 as u8; 64]
+static mut out_email: [u8; 64] = [0 as u8; 64]
+static mut p_db: [u8; 14] = "/etc/contacts\0"
+
+fn byte_at(i: u64) -> u64 {
+    let c: u8 = cb[i as usize]
+    return c as u64
+}
+
+fn line_end(at: u64) -> u64 {
+    var i: u64 = at
+    while i < cb_len && byte_at(i) != 10 {
+        i = i + 1
+    }
+    return i
+}
+
+fn line_start(idx: u64) -> u64 {
+    var at: u64 = 0
+    var seen: u64 = 0
+    while at < cb_len {
+        if seen == idx {
+            return at
+        }
+        at = line_end(at) + 1
+        seen = seen + 1
+    }
+    return NONE
+}
+
+fn count() -> u64 {
+    var at: u64 = 0
+    var n: u64 = 0
+    while at < cb_len {
+        n = n + 1
+        at = line_end(at) + 1
+    }
+    return n
+}
+
+fn field_into(idx: u64, f: u64, dst: u64) -> u64 {
+    __mmio_write8(dst as *mut u8, 0 as u8)
+    let at: u64 = line_start(idx)
+    if at == NONE {
+        return dst
+    }
+    let e: u64 = line_end(at)
+    var i: u64 = at
+    var cur: u64 = 0
+    while i < e && cur < f {
+        if byte_at(i) == 9 {
+            cur = cur + 1
+        }
+        i = i + 1
+    }
+    var o: u64 = 0
+    while i < e && byte_at(i) != 9 && o < 62 {
+        __mmio_write8((dst + o) as *mut u8, byte_at(i) as u8)
+        o = o + 1
+        i = i + 1
+    }
+    __mmio_write8((dst + o) as *mut u8, 0 as u8)
+    return dst
+}
+
+fn name_of(idx: u64) -> u64 {
+    return field_into(idx, NAME, (&out_name[0 as usize]) as u64)
+}
+
+fn phone_of(idx: u64) -> u64 {
+    return field_into(idx, PHONE, (&out_phone[0 as usize]) as u64)
+}
+
+fn email_of(idx: u64) -> u64 {
+    return field_into(idx, EMAIL, (&out_email[0 as usize]) as u64)
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn find(text: u64) -> u64 {
+    let tl: u64 = ulib.length(text)
+    var idx: u64 = 0
+    let n: u64 = count()
+    while idx < n {
+        let nm: u64 = name_of(idx)
+        let nl: u64 = ulib.length(nm)
+        var s: u64 = 0
+        while s + tl <= nl && tl > 0 {
+            var k: u64 = 0
+            while k < tl && lower(__mmio_read8((nm + s + k) as *mut u8) as u64) == lower(__mmio_read8((text + k) as *mut u8) as u64) {
+                k = k + 1
+            }
+            if k == tl {
+                return idx
+            }
+            s = s + 1
+        }
+        idx = idx + 1
+    }
+    return NONE
+}
+
+fn save() -> bool {
+    let fd: u64 = io.create((&p_db[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return false
+    }
+    let g: u64 = io.write_all(fd, (&cb[0 as usize]) as u64, cb_len)
+    io.close(fd)
+    return !ulib.bad(g) && g >= cb_len
+}
+
+fn load() {
+    cb_len = 0
+    cb[0 as usize] = 0 as u8
+    let fd: u64 = io.open((&p_db[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    var guard: u64 = 0
+    while cb_len < CAP - 1 && guard < 64 {
+        let r: u64 = io.read(fd, (&cb[0 as usize]) as u64 + cb_len, CAP - 1 - cb_len)
+        if ulib.bad(r) || r == 0 {
+            break
+        }
+        cb_len = cb_len + r
+        guard = guard + 1
+    }
+    io.close(fd)
+    cb[cb_len as usize] = 0 as u8
+}
+
+fn put_field(src: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while n < FIELD_MAX {
+        let c: u8 = __mmio_read8((src + i) as *mut u8)
+        if c == 0 as u8 {
+            break
+        }
+        i = i + 1
+        if c < 32 as u8 {
+            continue
+        }
+        if cb_len + n + 3 >= CAP - 1 {
+            break
+        }
+        cb[(cb_len + n) as usize] = c
+        n = n + 1
+    }
+    return n
+}
+
+fn add(name: u64, phone: u64, email: u64) -> bool {
+    let keep: u64 = cb_len
+    var n: u64 = put_field(name)
+    if n == 0 {
+        cb_len = keep
+        return false
+    }
+    cb_len = keep + n
+    cb[cb_len as usize] = 9 as u8
+    cb_len = cb_len + 1
+    n = put_field(phone)
+    cb_len = cb_len + n
+    cb[cb_len as usize] = 9 as u8
+    cb_len = cb_len + 1
+    n = put_field(email)
+    cb_len = cb_len + n
+    if cb_len + 2 >= CAP {
+        cb_len = keep
+        cb[cb_len as usize] = 0 as u8
+        return false
+    }
+    cb[cb_len as usize] = 10 as u8
+    cb_len = cb_len + 1
+    cb[cb_len as usize] = 0 as u8
+    if !save() {
+        cb_len = keep
+        cb[cb_len as usize] = 0 as u8
+        return false
+    }
+    return true
+}
+
+fn drop(idx: u64) -> bool {
+    let at: u64 = line_start(idx)
+    if at == NONE {
+        return false
+    }
+    let e: u64 = line_end(at) + 1
+    var i: u64 = e
+    var o: u64 = at
+    while i < cb_len {
+        cb[o as usize] = cb[i as usize]
+        o = o + 1
+        i = i + 1
+    }
+    cb_len = o
+    cb[cb_len as usize] = 0 as u8
+    return save()
+}
