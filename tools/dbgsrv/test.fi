@@ -39,6 +39,16 @@ fn path_is(req: str, want: str) -> u64 {
     return routes.route_find(req.p as u64 + request.span_off(s), request.span_len(s))
 }
 
+fn act_is(req: str) -> u64 {
+    let s: u64 = request.target_span(req.p as u64, req.n as u64)
+    return routes.action_find(req.p as u64 + request.span_off(s), request.span_len(s))
+}
+
+fn base_is(req: str) -> u64 {
+    let s: u64 = request.path_span(req.p as u64, req.n as u64)
+    return routes.base_find(req.p as u64 + request.span_off(s), request.span_len(s))
+}
+
 fn main() -> i32 {
     check("10.1.2.3 private", acl.private_ip(ip(10, 1, 2, 3)))
     check("172.16.0.1 private", acl.private_ip(ip(172, 16, 0, 1)))
@@ -84,6 +94,35 @@ fn main() -> i32 {
     check("prefix route 0", path_is("GET /wla HTTP/1.0\r\n\r\n", "") == 0)
     check("traversal route 0", path_is("GET /../etc/shadow HTTP/1.0\r\n\r\n", "") == 0)
     check("route count matches table", routes.line_span(routes.names_ptr(), routes.names_len(), routes.route_count() - 1) != 0 && routes.line_span(routes.target_ptr(), routes.target_len(), routes.route_count()) == 0)
+
+    check("POST recognised", request.is_post("POST /x HTTP/1.0\r\n".p as u64, 18))
+    check("GET is not POST", !request.is_post("GET /x HTTP/1.0\r\n".p as u64, 17))
+    check("POST header token accepted", request.header_token_ok("POST /x HTTP/1.0\r\nX-Token: abc123\r\n\r\n".p as u64, 36, "abc123".p as u64, 6))
+    check("POST query token refused", !request.header_token_ok("POST /x?t=abc123 HTTP/1.0\r\n\r\n".p as u64, 29, "abc123".p as u64, 6))
+    check("POST wrong header token refused", !request.header_token_ok("POST /x HTTP/1.0\r\nX-Token: abc124\r\n\r\n".p as u64, 36, "abc123".p as u64, 6))
+    check("POST bearer accepted", request.header_token_ok("POST /x HTTP/1.0\r\nAuthorization: Bearer abc123\r\n\r\n".p as u64, 48, "abc123".p as u64, 6))
+    check("POST path span skips the verb", path_is("POST /wlan HTTP/1.0\r\n\r\n", "") == 1)
+    check("route /wlanpoll", path_is("GET /wlanpoll HTTP/1.0\r\n\r\n", "") == 16)
+    check("route /wlanirq", path_is("GET /wlanirq HTTP/1.0\r\n\r\n", "") == 17)
+    check("route /usbnet", path_is("GET /usbnet HTTP/1.0\r\n\r\n", "") == 18)
+    check("route /usbsum", path_is("GET /usbsum HTTP/1.0\r\n\r\n", "") == 19)
+    check("route /time", path_is("GET /time HTTP/1.0\r\n\r\n", "") == 20)
+    check("route /wlanctl/knobs", path_is("GET /wlanctl/knobs HTTP/1.0\r\n\r\n", "") == 21)
+    check("GET /wlanctl/reload is no route", path_is("GET /wlanctl/reload HTTP/1.0\r\n\r\n", "") == 0)
+    check("action plain reload", act_is("POST /wlanctl/reload?param=none HTTP/1.0\r\n\r\n") == 1)
+    check("action knob on", act_is("POST /wlanctl/reload?param=iwlnoipoll&value=on HTTP/1.0\r\n\r\n") == 4)
+    check("action knob off", act_is("POST /wlanctl/reload?param=iwlnoipoll&value=off HTTP/1.0\r\n\r\n") == 5)
+    check("action unknown knob refused", act_is("POST /wlanctl/reload?param=bogus&value=on HTTP/1.0\r\n\r\n") == 0)
+    check("action unknown value refused", act_is("POST /wlanctl/reload?param=iwlnoipoll&value=2 HTTP/1.0\r\n\r\n") == 0)
+    check("action prefix refused", act_is("POST /wlanctl/reload?param=iwlnoip&value=on HTTP/1.0\r\n\r\n") == 0)
+    check("action suffix refused", act_is("POST /wlanctl/reload?param=iwlnoipoll&value=on;id HTTP/1.0\r\n\r\n") == 0)
+    check("action extra argument refused", act_is("POST /wlanctl/reload?param=iwlnoipoll&value=on&x=1 HTTP/1.0\r\n\r\n") == 0)
+    check("action empty query refused", act_is("POST /wlanctl/reload HTTP/1.0\r\n\r\n") == 0)
+    check("action case sensitive", act_is("POST /wlanctl/reload?param=IWLNOIPOLL&value=on HTTP/1.0\r\n\r\n") == 0)
+    check("action shell metachar refused", act_is("POST /wlanctl/reload?param=none%20dump HTTP/1.0\r\n\r\n") == 0)
+    check("action base known", base_is("POST /wlanctl/reload?param=bogus HTTP/1.0\r\n\r\n") != 0)
+    check("action base unknown path", base_is("POST /wlan?param=none HTTP/1.0\r\n\r\n") == 0)
+    check("action table line count", routes.line_span(routes.action_target_ptr(), routes.action_target_len(), 18) != 0 && routes.line_span(routes.action_target_ptr(), routes.action_target_len(), 19) == 0)
 
     lit("dbgsrv host: pass=")
     num(passn)

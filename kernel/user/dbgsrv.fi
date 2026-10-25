@@ -44,11 +44,15 @@ static mut L_404: [u8; 17] = "dbgsrv: 404 GET \0"
 static mut L_405: [u8; 18] = "dbgsrv: 405 from \0"
 static mut L_IPCHANGE: [u8; 20] = "dbgsrv: address is \0"
 static mut L_FROM: [u8; 7] = " from \0"
+static mut L_400: [u8; 18] = "dbgsrv: 400 POST \0"
+static mut L_POSTED: [u8; 18] = "dbgsrv: 200 POST \0"
 
 static mut H_OK: [u8; 105] = "HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n\0"
 static mut H_401: [u8; 75] = "HTTP/1.0 401 Unauthorized\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\0"
 static mut H_404: [u8; 72] = "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\0"
 static mut H_405: [u8; 81] = "HTTP/1.0 405 Method Not Allowed\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\0"
+static mut H_400: [u8; 74] = "HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\0"
+static mut B_400: [u8; 16] = "unknown action\n\0"
 static mut B_401: [u8; 14] = "unauthorized\n\0"
 static mut B_404: [u8; 11] = "not found\n\0"
 static mut B_405: [u8; 18] = "only GET allowed\n\0"
@@ -312,10 +316,53 @@ fn log_peer(prefix: u64, peer: u64) {
     nl()
 }
 
+fn reject(fd: u64, header: u64, body_z: u64, prefix: u64, peer: u64) {
+    send_z(fd, header)
+    send_z(fd, body_z)
+    log_peer(prefix, peer)
+}
+
+fn serve_post(fd: u64, peer: u64, rb: u64, rn: u64) {
+    let ts: u64 = request.target_span(rb, rn)
+    let tptr: u64 = rb + request.span_off(ts)
+    let tlen: u64 = request.span_len(ts)
+    let idx: u64 = routes.action_find(tptr, tlen)
+    if idx == 0 {
+        let ps: u64 = request.path_span(rb, rn)
+        if routes.base_find(rb + request.span_off(ps), request.span_len(ps)) != 0 {
+            reject(fd, (&H_400[0 as usize]) as u64, (&B_400[0 as usize]) as u64, (&L_400[0 as usize]) as u64, peer)
+        } else {
+            reject(fd, (&H_405[0 as usize]) as u64, (&B_405[0 as usize]) as u64, (&L_405[0 as usize]) as u64, peer)
+        }
+        return
+    }
+    let ats: u64 = routes.line_span(routes.action_target_ptr(), routes.action_target_len(), idx - 1)
+    let got: u64 = run_exec(routes.action_target_ptr() + request.span_off(ats), request.span_len(ats))
+    send_z(fd, (&H_OK[0 as usize]) as u64)
+    if got == ulib.EOF {
+        send_z(fd, (&B_NOFILE[0 as usize]) as u64)
+    } else {
+        net.send_all(fd, (&body[0 as usize]) as u64, got)
+    }
+    ulib.say((&L_POSTED[0 as usize]) as u64)
+    ulib.put(tptr, tlen)
+    ulib.say((&L_FROM[0 as usize]) as u64)
+    say_ip(peer)
+    nl()
+}
+
 fn serve(fd: u64, peer: u64) {
     let rn: u64 = read_request(fd)
     let rb: u64 = (&req[0 as usize]) as u64
     if rn == 0 {
+        return
+    }
+    if request.is_post(rb, rn) {
+        if !request.header_token_ok(rb, rn, (&token[0 as usize]) as u64, toklen) {
+            reject(fd, (&H_401[0 as usize]) as u64, (&B_401[0 as usize]) as u64, (&L_BADTOKEN[0 as usize]) as u64, peer)
+            return
+        }
+        serve_post(fd, peer, rb, rn)
         return
     }
     if !request.is_get(rb, rn) {

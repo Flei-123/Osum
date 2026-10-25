@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-export { is_get, path_span, token_span, token_ok, span_off, span_len, ct_equal, match_at }
+export { is_get, is_post, path_span, target_span, token_span, token_ok, header_token_ok, span_off, span_len, ct_equal, match_at }
 
 fn ld8(p: u64, i: u64) -> u64 {
     return (*((p + i) as *mut u8)) as u64
@@ -43,16 +43,38 @@ fn is_get(buf: u64, n: u64) -> bool {
     return match_at(buf, n, 0, (&g[0 as usize]) as u64)
 }
 
+fn is_post(buf: u64, n: u64) -> bool {
+    var g: [u8; 6] = "POST \0"
+    return match_at(buf, n, 0, (&g[0 as usize]) as u64)
+}
+
+fn path_start(buf: u64, n: u64) -> u64 {
+    if is_post(buf, n) {
+        return 5
+    }
+    return 4
+}
+
 fn is_end(c: u64) -> bool {
     return c == 32 || c == 13 || c == 10 || c == 0
 }
 
 fn path_span(buf: u64, n: u64) -> u64 {
-    var i: u64 = 4
+    let b: u64 = path_start(buf, n)
+    var i: u64 = b
     while i < n && !is_end(ld8(buf, i)) && ld8(buf, i) != 63 {
         i = i + 1
     }
-    return span(4, i - 4)
+    return span(b, i - b)
+}
+
+fn target_span(buf: u64, n: u64) -> u64 {
+    let b: u64 = path_start(buf, n)
+    var i: u64 = b
+    while i < n && !is_end(ld8(buf, i)) {
+        i = i + 1
+    }
+    return span(b, i - b)
 }
 
 fn first_line_end(buf: u64, n: u64) -> u64 {
@@ -101,7 +123,7 @@ fn header_value(buf: u64, n: u64, name_z: u64) -> u64 {
 
 fn query_token(buf: u64, n: u64) -> u64 {
     let le: u64 = first_line_end(buf, n)
-    var i: u64 = 4
+    var i: u64 = path_start(buf, n)
     while i < le && ld8(buf, i) != 63 && !is_end(ld8(buf, i)) {
         i = i + 1
     }
@@ -126,7 +148,7 @@ fn query_token(buf: u64, n: u64) -> u64 {
     return 0
 }
 
-fn token_span(buf: u64, n: u64) -> u64 {
+fn header_token(buf: u64, n: u64) -> u64 {
     var h_x: [u8; 9] = "x-token:\0"
     var h_a: [u8; 15] = "authorization:\0"
     var bear: [u8; 8] = "bearer \0"
@@ -137,6 +159,14 @@ fn token_span(buf: u64, n: u64) -> u64 {
     let a: u64 = header_value(buf, n, (&h_a[0 as usize]) as u64)
     if span_len(a) > 7 && match_at(buf, n, span_off(a), (&bear[0 as usize]) as u64) {
         return value_span(buf, n, span_off(a) + 7)
+    }
+    return 0
+}
+
+fn token_span(buf: u64, n: u64) -> u64 {
+    let h: u64 = header_token(buf, n)
+    if span_len(h) != 0 {
+        return h
     }
     return query_token(buf, n)
 }
@@ -168,6 +198,17 @@ fn token_ok(buf: u64, n: u64, tok: u64, toklen: u64) -> bool {
         return false
     }
     let s: u64 = token_span(buf, n)
+    if span_len(s) == 0 {
+        return false
+    }
+    return ct_equal(buf + span_off(s), span_len(s), tok, toklen)
+}
+
+fn header_token_ok(buf: u64, n: u64, tok: u64, toklen: u64) -> bool {
+    if toklen == 0 {
+        return false
+    }
+    let s: u64 = header_token(buf, n)
     if span_len(s) == 0 {
         return false
     }
