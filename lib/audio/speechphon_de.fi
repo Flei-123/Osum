@@ -1,0 +1,694 @@
+// SPDX-License-Identifier: MPL-2.0
+// lib/audio/speechphon_de.fi -- audio.speechphon_de: German grapheme-to-phoneme rules (rule based, heuristic) for the speech synthesizer.
+profile kernel
+
+import audio.phonbuf
+
+export { to_phonemes }
+
+const C_A: u64 = 97
+const C_B: u64 = 98
+const C_C: u64 = 99
+const C_D: u64 = 100
+const C_E: u64 = 101
+const C_F: u64 = 102
+const C_G: u64 = 103
+const C_H: u64 = 104
+const C_I: u64 = 105
+const C_J: u64 = 106
+const C_K: u64 = 107
+const C_L: u64 = 108
+const C_M: u64 = 109
+const C_N: u64 = 110
+const C_O: u64 = 111
+const C_P: u64 = 112
+const C_Q: u64 = 113
+const C_R: u64 = 114
+const C_S: u64 = 115
+const C_T: u64 = 116
+const C_U: u64 = 117
+const C_V: u64 = 118
+const C_W: u64 = 119
+const C_X: u64 = 120
+const C_Y: u64 = 121
+const C_Z: u64 = 122
+const C_AE: u64 = 228
+const C_OE: u64 = 246
+const C_UE: u64 = 252
+const C_SS: u64 = 223
+
+static mut wbuf: [u8; 64] = [0 as u8; 64]
+static mut wl: u64 = 0
+static mut run_units: u64 = 0
+static mut run_end: u64 = 0
+
+static mut units: [u8; 180] = "null\0\0\0\0\0eins\0\0\0\0\0zwei\0\0\0\0\0drei\0\0\0\0\0fier\0\0\0\0\0f{nf\0\0\0\0\0sechs\0\0\0\0sieben\0\0\0acht\0\0\0\0\0neun\0\0\0\0\0zehn\0\0\0\0\0elf\0\0\0\0\0\0zw|lf\0\0\0\0dreizehn\0fierzehn\0f{nfzehn\0sechzehn\0siebzehn\0achtzehn\0neunzehn\0"
+static mut tens: [u8; 80] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0zwanzig\0drei~ig\0fierzig\0f{nfzig\0sechzig\0siebzig\0achtzig\0neunzig\0"
+static mut lits: [u8; 36] = "ein\0\0\0\0\0\0tausend\0\0hundert\0\0und\0\0\0\0\0\0"
+static mut short_words: [u8; 73] = "in\0an\0im\0am\0mit\0bis\0von\0das\0was\0man\0ob\0um\0es\0ab\0dem\0des\0zum\0nun\0hin\0her\0\0"
+static mut f_prefixes: [u8; 44] = "ver\0vor\0voll\0viel\0vier\0vat\0vog\0von\0vom\0vie\0\0"
+static mut v_exceptions: [u8; 8] = "versio\0\0"
+
+fn rb(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+fn ch(i: u64) -> u64 {
+    if i >= wl {
+        return 0
+    }
+    return (wbuf[i as usize]) as u64
+}
+
+fn back(i: u64, k: u64) -> u64 {
+    if i < k {
+        return 0
+    }
+    return ch(i - k)
+}
+
+fn is_vowel(c: u64) -> bool {
+    return c == C_A || c == C_E || c == C_I || c == C_O || c == C_U || c == C_Y || c == C_AE || c == C_OE || c == C_UE
+}
+
+fn is_letter(c: u64) -> bool {
+    return (c >= C_A && c <= C_Z) || c == C_AE || c == C_OE || c == C_UE || c == C_SS
+}
+
+fn is_cons(c: u64) -> bool {
+    return is_letter(c) && !is_vowel(c)
+}
+
+fn table_has(tab: u64, whole: bool) -> bool {
+    var p: u64 = tab
+    while rb(p) != 0 {
+        var k: u64 = 0
+        var same: bool = true
+        while rb(p + k) != 0 {
+            if ch(k) != rb(p + k) {
+                same = false
+            }
+            k = k + 1
+        }
+        if same && (!whole || k == wl) {
+            return true
+        }
+        p = p + k + 1
+    }
+    return false
+}
+
+fn scan_cons(from: u64) {
+    var i: u64 = from
+    var u: u64 = 0
+    while i < wl && !is_vowel(ch(i)) {
+        let c: u64 = ch(i)
+        if c == C_S && ch(i + 1) == C_C && ch(i + 2) == C_H {
+            i = i + 3
+            u = u + 1
+        } else if (c == C_C || c == C_P || c == C_T) && ch(i + 1) == C_H {
+            i = i + 2
+            u = u + 1
+        } else if c == C_X || c == C_Z || c == C_Q {
+            i = i + 1
+            u = u + 2
+        } else {
+            i = i + 1
+            u = u + 1
+        }
+    }
+    run_units = u
+    run_end = i
+}
+
+fn has_vowel_before(i: u64) -> bool {
+    var k: u64 = 0
+    while k < i {
+        if is_vowel(ch(k)) {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn vowel_long(i: u64, c: u64) -> bool {
+    let nx: u64 = ch(i + 1)
+    if nx == C_H || nx == C_SS {
+        return true
+    }
+    scan_cons(i + 1)
+    if run_units == 0 {
+        return true
+    }
+    if run_units == 1 {
+        if nx == C_C && ch(i + 2) == C_H {
+            return c == C_U
+        }
+        if nx == C_S && ch(i + 2) == C_C && ch(i + 3) == C_H {
+            return c == C_U
+        }
+        if run_end >= wl {
+            if c == C_I && nx == C_G {
+                return false
+            }
+            if c == C_U && (nx == C_M || nx == C_S) && has_vowel_before(i) {
+                return false
+            }
+            return !table_has((&short_words[0 as usize]) as u64, true)
+        }
+        return true
+    }
+    return false
+}
+
+fn emit_vowel(c: u64, long: bool) {
+    var ph: u8 = phonbuf.PH_SCHWA
+    if c == C_A {
+        ph = phonbuf.PH_A
+        if long {
+            ph = phonbuf.PH_AL
+        }
+    } else if c == C_E || c == C_AE {
+        ph = phonbuf.PH_E
+        if long {
+            ph = phonbuf.PH_EL
+        }
+    } else if c == C_I {
+        ph = phonbuf.PH_I
+        if long {
+            ph = phonbuf.PH_IL
+        }
+    } else if c == C_O {
+        ph = phonbuf.PH_O
+        if long {
+            ph = phonbuf.PH_OL
+        }
+    } else if c == C_U {
+        ph = phonbuf.PH_U
+        if long {
+            ph = phonbuf.PH_UL
+        }
+    } else if c == C_OE {
+        ph = phonbuf.PH_OE
+        if long {
+            ph = phonbuf.PH_OEL
+        }
+    } else {
+        ph = phonbuf.PH_UE
+        if long {
+            ph = phonbuf.PH_UEL
+        }
+    }
+    phonbuf.emit(ph)
+}
+
+fn schwa_e(i: u64) -> u64 {
+    let n1: u64 = ch(i + 1)
+    let n2: u64 = ch(i + 2)
+    if i == 0 {
+        return 0
+    }
+    if i + 1 == wl && !is_vowel(back(i, 1)) {
+        return 1
+    }
+    if has_vowel_before(i) {
+        if i + 2 == wl && (n1 == C_N || n1 == C_L || n1 == C_R || n1 == C_M || n1 == C_S || n1 == C_T) {
+            if n1 == C_R {
+                return 2
+            }
+            return 1
+        }
+        if i + 3 == wl && n1 == C_N && n2 == C_D {
+            return 1
+        }
+        if i + 3 == wl && n1 == C_R && n2 == C_T {
+            return 2
+        }
+        if i + 3 == wl && (n1 == C_R || n1 == C_L) && n2 == C_N {
+            if n1 == C_R {
+                return 2
+            }
+            return 1
+        }
+    }
+    if i == 1 && (ch(0) == C_B || ch(0) == C_G) && wl >= 5 && n1 != C_H {
+        scan_cons(2)
+        if is_vowel(n1) || run_units >= 2 || wl >= 6 {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn vowel_at(i: u64) -> u64 {
+    let c: u64 = ch(i)
+    let n1: u64 = ch(i + 1)
+    if (c == C_E || c == C_A) && (n1 == C_I || n1 == C_Y) {
+        phonbuf.emit(phonbuf.PH_A)
+        phonbuf.emit(phonbuf.PH_I)
+        return i + 2
+    }
+    if (c == C_E || c == C_AE) && n1 == C_U {
+        phonbuf.emit(phonbuf.PH_O)
+        phonbuf.emit(phonbuf.PH_I)
+        return i + 2
+    }
+    if c == C_A && n1 == C_U {
+        phonbuf.emit(phonbuf.PH_A)
+        phonbuf.emit(phonbuf.PH_U)
+        return i + 2
+    }
+    if c == C_I && n1 == C_E {
+        phonbuf.emit(phonbuf.PH_IL)
+        if ch(i + 2) == C_H {
+            return i + 3
+        }
+        return i + 2
+    }
+    if (c == C_A || c == C_E || c == C_O) && n1 == c {
+        emit_vowel(c, true)
+        return i + 2
+    }
+    if c == C_E {
+        let s: u64 = schwa_e(i)
+        if s == 1 {
+            phonbuf.emit(phonbuf.PH_SCHWA)
+            return i + 1
+        }
+        if s == 2 {
+            return i + 1
+        }
+    }
+    emit_vowel(c, vowel_long(i, c))
+    if n1 == C_H {
+        return i + 2
+    }
+    return i + 1
+}
+
+fn devoice(i: u64) -> bool {
+    let n1: u64 = ch(i + 1)
+    if i + 1 >= wl {
+        return true
+    }
+    return is_cons(n1) && n1 != C_L && n1 != C_R && n1 != C_N && n1 != C_M && n1 != C_J && n1 != C_W && n1 != C_H
+}
+
+fn ng_split(i: u64) -> bool {
+    let after: u64 = ch(i + 2)
+    if i == 1 && ch(0) == C_A && (after == C_A || after == C_E) {
+        return true
+    }
+    if i == 1 && ch(0) == C_U && (after == C_E || after == C_UE) {
+        return true
+    }
+    return i == 2 && ch(0) == C_E && ch(1) == C_I
+}
+
+fn f_prefix() -> bool {
+    return table_has((&f_prefixes[0 as usize]) as u64, false) && !table_has((&v_exceptions[0 as usize]) as u64, false)
+}
+
+fn after_back_vowel(i: u64) -> bool {
+    let p: u64 = back(i, 1)
+    return p == C_A || p == C_O || p == C_U
+}
+
+fn cons_at(i: u64) -> u64 {
+    let c: u64 = ch(i)
+    let n1: u64 = ch(i + 1)
+    let n2: u64 = ch(i + 2)
+    let pv: u64 = back(i, 1)
+    if c == n1 && is_cons(c) {
+        return i + 1
+    }
+    if c == C_B {
+        if devoice(i) {
+            phonbuf.emit(phonbuf.PH_P)
+        } else {
+            phonbuf.emit(phonbuf.PH_B)
+        }
+        return i + 1
+    }
+    if c == C_D {
+        if n1 == C_T {
+            phonbuf.emit(phonbuf.PH_T)
+            return i + 2
+        }
+        if devoice(i) {
+            phonbuf.emit(phonbuf.PH_T)
+        } else {
+            phonbuf.emit(phonbuf.PH_D)
+        }
+        return i + 1
+    }
+    if c == C_G {
+        if pv == C_I && (i + 1 >= wl || n1 == C_K || n1 == C_L || n1 == C_S || n1 == C_T) {
+            phonbuf.emit(phonbuf.PH_CI)
+        } else if devoice(i) {
+            phonbuf.emit(phonbuf.PH_K)
+        } else {
+            phonbuf.emit(phonbuf.PH_G)
+        }
+        return i + 1
+    }
+    if c == C_C {
+        if n1 == C_H {
+            if n2 == C_S {
+                phonbuf.emit(phonbuf.PH_K)
+                phonbuf.emit(phonbuf.PH_S)
+                return i + 3
+            }
+            if i == 0 {
+                if n2 == C_A || n2 == C_O || n2 == C_U || n2 == C_L || n2 == C_R {
+                    phonbuf.emit(phonbuf.PH_K)
+                } else {
+                    phonbuf.emit(phonbuf.PH_CI)
+                }
+            } else if after_back_vowel(i) {
+                phonbuf.emit(phonbuf.PH_CA)
+            } else {
+                phonbuf.emit(phonbuf.PH_CI)
+            }
+            return i + 2
+        }
+        if n1 == C_K {
+            phonbuf.emit(phonbuf.PH_K)
+            return i + 2
+        }
+        if n1 == C_E || n1 == C_I || n1 == C_Y || n1 == C_AE {
+            phonbuf.emit(phonbuf.PH_T)
+            phonbuf.emit(phonbuf.PH_S)
+        } else {
+            phonbuf.emit(phonbuf.PH_K)
+        }
+        return i + 1
+    }
+    if c == C_F {
+        phonbuf.emit(phonbuf.PH_F)
+        return i + 1
+    }
+    if c == C_H {
+        if is_vowel(n1) && !is_vowel(pv) {
+            phonbuf.emit(phonbuf.PH_H)
+        }
+        return i + 1
+    }
+    if c == C_J {
+        phonbuf.emit(phonbuf.PH_Y)
+        return i + 1
+    }
+    if c == C_K {
+        phonbuf.emit(phonbuf.PH_K)
+        return i + 1
+    }
+    if c == C_L {
+        phonbuf.emit(phonbuf.PH_L)
+        return i + 1
+    }
+    if c == C_M {
+        phonbuf.emit(phonbuf.PH_M)
+        return i + 1
+    }
+    if c == C_N {
+        if n1 == C_G && !ng_split(i) {
+            phonbuf.emit(phonbuf.PH_NG)
+            return i + 2
+        }
+        if n1 == C_K {
+            phonbuf.emit(phonbuf.PH_NG)
+            return i + 1
+        }
+        phonbuf.emit(phonbuf.PH_N)
+        return i + 1
+    }
+    if c == C_P {
+        if n1 == C_F {
+            phonbuf.emit(phonbuf.PH_P)
+            phonbuf.emit(phonbuf.PH_F)
+            return i + 2
+        }
+        if n1 == C_H {
+            phonbuf.emit(phonbuf.PH_F)
+            return i + 2
+        }
+        phonbuf.emit(phonbuf.PH_P)
+        return i + 1
+    }
+    if c == C_Q {
+        phonbuf.emit(phonbuf.PH_K)
+        phonbuf.emit(phonbuf.PH_V)
+        if n1 == C_U {
+            return i + 2
+        }
+        return i + 1
+    }
+    if c == C_R {
+        var p: u64 = i
+        if i > 0 {
+            p = i - 1
+            if ch(p) == C_H && p > 0 {
+                p = p - 1
+            }
+        }
+        if i > 0 && is_vowel(ch(p)) && !is_vowel(n1) {
+            phonbuf.emit(phonbuf.PH_SCHWA)
+        } else {
+            phonbuf.emit(phonbuf.PH_R)
+        }
+        return i + 1
+    }
+    if c == C_S {
+        if n1 == C_C && n2 == C_H {
+            phonbuf.emit(phonbuf.PH_SH)
+            return i + 3
+        }
+        if i == 0 && (n1 == C_P || n1 == C_T) {
+            phonbuf.emit(phonbuf.PH_SH)
+            return i + 1
+        }
+        if is_vowel(n1) && pv != C_S {
+            phonbuf.emit(phonbuf.PH_Z)
+        } else {
+            phonbuf.emit(phonbuf.PH_S)
+        }
+        return i + 1
+    }
+    if c == C_SS {
+        phonbuf.emit(phonbuf.PH_S)
+        return i + 1
+    }
+    if c == C_T {
+        if n1 == C_S && n2 == C_C && ch(i + 3) == C_H {
+            phonbuf.emit(phonbuf.PH_T)
+            phonbuf.emit(phonbuf.PH_SH)
+            return i + 4
+        }
+        if n1 == C_Z {
+            phonbuf.emit(phonbuf.PH_T)
+            phonbuf.emit(phonbuf.PH_S)
+            return i + 2
+        }
+        if n1 == C_H {
+            phonbuf.emit(phonbuf.PH_T)
+            return i + 2
+        }
+        if n1 == C_I && n2 == C_O {
+            phonbuf.emit(phonbuf.PH_T)
+            phonbuf.emit(phonbuf.PH_S)
+            phonbuf.emit(phonbuf.PH_Y)
+            return i + 2
+        }
+        phonbuf.emit(phonbuf.PH_T)
+        return i + 1
+    }
+    if c == C_V {
+        if i == 0 && f_prefix() {
+            phonbuf.emit(phonbuf.PH_F)
+        } else {
+            phonbuf.emit(phonbuf.PH_V)
+        }
+        return i + 1
+    }
+    if c == C_W {
+        phonbuf.emit(phonbuf.PH_V)
+        return i + 1
+    }
+    if c == C_X {
+        phonbuf.emit(phonbuf.PH_K)
+        phonbuf.emit(phonbuf.PH_S)
+        return i + 1
+    }
+    if c == C_Z {
+        phonbuf.emit(phonbuf.PH_T)
+        phonbuf.emit(phonbuf.PH_S)
+        return i + 1
+    }
+    return i + 1
+}
+
+fn word_de() {
+    var i: u64 = 0
+    while i < wl {
+        if is_vowel(ch(i)) {
+            i = vowel_at(i)
+        } else {
+            i = cons_at(i)
+        }
+    }
+}
+
+fn flush_word() {
+    if wl > 0 {
+        word_de()
+        wl = 0
+    }
+}
+
+fn put_char(c: u64) {
+    if wl < 63 {
+        wbuf[wl as usize] = c as u8
+        wl = wl + 1
+    }
+}
+
+fn put_piece(p: u64) {
+    var k: u64 = 0
+    while rb(p + k) != 0 {
+        var c: u64 = rb(p + k)
+        if c == 123 {
+            c = C_UE
+        } else if c == 124 {
+            c = C_OE
+        } else if c == 126 {
+            c = C_SS
+        }
+        put_char(c)
+        k = k + 1
+    }
+}
+
+fn put_unit(n: u64) {
+    put_piece(((&units[0 as usize]) as u64) + n * 9)
+}
+
+fn put_lit(which: u64) {
+    put_piece(((&lits[0 as usize]) as u64) + which * 9)
+}
+
+fn put_prefix(n: u64) {
+    if n == 1 {
+        put_lit(0)
+    } else {
+        put_unit(n)
+    }
+}
+
+fn say_number(v: u64) {
+    flush_word()
+    phonbuf.emit_pause(phonbuf.PH_WORD)
+    if v == 0 {
+        put_unit(0)
+    } else {
+        let th: u64 = v / 1000
+        let rest: u64 = v % 1000
+        if th > 0 {
+            put_prefix(th)
+            put_lit(1)
+        }
+        let h: u64 = rest / 100
+        let r: u64 = rest % 100
+        if h > 0 {
+            put_prefix(h)
+            put_lit(2)
+        }
+        if r > 0 && r < 20 {
+            put_unit(r)
+        } else if r >= 20 {
+            let u: u64 = r % 10
+            if u > 0 {
+                put_prefix(u)
+                put_lit(3)
+            }
+            put_piece(((&tens[0 as usize]) as u64) + (r / 10) * 8)
+        }
+    }
+    flush_word()
+    phonbuf.emit_pause(phonbuf.PH_WORD)
+}
+
+fn say_digits(text: u64, from: u64) -> u64 {
+    var n: u64 = 0
+    while n < 16 && rb(text + from + n) >= 48 && rb(text + from + n) <= 57 {
+        n = n + 1
+    }
+    if n <= 4 && (n == 1 || rb(text + from) != 48) {
+        var v: u64 = 0
+        var k: u64 = 0
+        while k < n {
+            v = v * 10 + (rb(text + from + k) - 48)
+            k = k + 1
+        }
+        say_number(v)
+    } else {
+        var k: u64 = 0
+        while k < n {
+            say_number(rb(text + from + k) - 48)
+            k = k + 1
+        }
+    }
+    return n
+}
+
+fn to_phonemes(text: u64, out: u64, cap: u64) -> u64 {
+    phonbuf.begin(out, cap)
+    wl = 0
+    var i: u64 = 0
+    var guard: u64 = 0
+    while guard < 512 {
+        guard = guard + 1
+        var c: u64 = rb(text + i)
+        if c == 0 {
+            break
+        }
+        i = i + 1
+        if c == 195 {
+            let d: u64 = rb(text + i)
+            if d != 0 {
+                i = i + 1
+            }
+            if d == 164 || d == 132 {
+                c = C_AE
+            } else if d == 182 || d == 150 {
+                c = C_OE
+            } else if d == 188 || d == 156 {
+                c = C_UE
+            } else if d == 159 {
+                c = C_SS
+            } else {
+                c = 32
+            }
+        }
+        if c >= 65 && c <= 90 {
+            c = c + 32
+        }
+        if is_letter(c) {
+            put_char(c)
+        } else {
+            flush_word()
+            if c >= 48 && c <= 57 {
+                i = i - 1
+                i = i + say_digits(text, i)
+            } else if c == 44 || c == 59 || c == 58 {
+                phonbuf.emit_pause(phonbuf.PH_COMMA)
+            } else if c == 46 || c == 33 || c == 63 {
+                phonbuf.emit_pause(phonbuf.PH_STOP)
+            } else {
+                phonbuf.emit_pause(phonbuf.PH_WORD)
+            }
+        }
+    }
+    flush_word()
+    return phonbuf.count()
+}

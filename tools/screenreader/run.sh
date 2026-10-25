@@ -42,6 +42,24 @@ mk flat
 sed -i 's/pitch = 125 - decl/pitch = 125/; s/let period: u64 = speechdsp.RATE \/ pitch/let period: u64 = speechdsp.RATE \/ 62/' "$T/lib.flat/audio/speech.fi"
 host "$T/lib.flat" flat > "$T/flat.res" 2>&1; frc=$?
 [ $frc != 0 ] && echo "OK    counter-proof wrong pitch is red" || { echo "FAIL  counter-proof wrong pitch stayed green"; rc=1; }
+mk nodevoice
+sed -i '0,/    if i + 1 >= wl {/s//    if false {/' "$T/lib.nodevoice/audio/speechphon_de.fi"
+cmp -s lib/audio/speechphon_de.fi "$T/lib.nodevoice/audio/speechphon_de.fi" && { echo "FAIL  counter-proof final devoicing: patch did not apply"; rc=1; }
+host "$T/lib.nodevoice" nodevoice > "$T/nodevoice.res" 2>&1; drc=$?
+[ $drc != 0 ] && echo "OK    counter-proof without final devoicing is red" || { echo "FAIL  counter-proof final devoicing stayed green"; rc=1; }
+mk noach
+sed -i 's/phonbuf.PH_CA/phonbuf.PH_CI/' "$T/lib.noach/audio/speechphon_de.fi"
+host "$T/lib.noach" noach > "$T/noach.res" 2>&1; arc=$?
+[ $arc != 0 ] && echo "OK    counter-proof ach-Laut as ich-Laut is red" || { echo "FAIL  counter-proof ach-Laut stayed green"; rc=1; }
+mk noumlaut
+sed -i 's/c = C_UE/c = C_U/' "$T/lib.noumlaut/audio/speechphon_de.fi"
+host "$T/lib.noumlaut" noumlaut > "$T/noumlaut.res" 2>&1; urc=$?
+[ $urc != 0 ] && echo "OK    counter-proof without umlaut mapping is red" || { echo "FAIL  counter-proof umlaut stayed green"; rc=1; }
+mk nolang
+sed -i 's/                cur = id/                cur = 0/' "$T/lib.nolang/audio/speechlang.fi"
+cmp -s lib/audio/speechlang.fi "$T/lib.nolang/audio/speechlang.fi" && { echo "FAIL  counter-proof language: patch did not apply"; rc=1; }
+host "$T/lib.nolang" nolang > "$T/nolang.res" 2>&1; nrc=$?
+[ $nrc != 0 ] && echo "OK    counter-proof ignored language selection is red" || { echo "FAIL  counter-proof language stayed green"; rc=1; }
 if bash tools/sync/build.sh "$T/bin" 0 screenreader > "$T/b.txt" 2>&1 && [ -s "$T/bin/screenreader.elf" ]; then
     echo "OK    /bin/screenreader builds"
 else
