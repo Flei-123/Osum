@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+import wunlock
+
+export { u_start }
+
+static mut P_BACKUP: [u8; 12] = "/bin/backup\0"
+static mut P_INSTALL: [u8; 13] = "/bin/install\0"
+static mut V_VERIFY: [u8; 7] = "verify\0"
+static mut V_RESTORE: [u8; 8] = "restore\0"
+static mut O_YES: [u8; 5] = "--ja\0"
+static mut O_NAME: [u8; 7] = "--name\0"
+static mut O_INTO: [u8; 7] = "--into\0"
+static mut P_MNT: [u8; 9] = "/recover\0"
+static mut T_OFS: [u8; 4] = "ofs\0"
+static mut M_USE: [u8; 98] = "usage: recover TARGET STORE NAME [--ja] [--name DISK] [--into PATH] [-p<password>] [-m<password>]\0"
+static mut M_PLAN: [u8; 85] = "recover: plan: verify the backup, install onto the target, restore into the new root\0"
+static mut M_DRY: [u8; 45] = "recover: dry run, nothing written (add --ja)\0"
+static mut M_REFUSE: [u8; 37] = "recover: refused, boot or ram device\0"
+static mut M_BADVERIFY: [u8; 48] = "recover: backup verify failed, target untouched\0"
+static mut M_VERIFIED: [u8; 25] = "recover: backup verified\0"
+static mut M_BADINST: [u8; 24] = "recover: install failed\0"
+static mut M_INSTALLED: [u8; 19] = "recover: installed\0"
+static mut M_BADUNLOCK: [u8; 34] = "recover: cannot unlock the target\0"
+static mut M_BADMNT: [u8; 35] = "recover: cannot mount the new root\0"
+static mut M_BADREST: [u8; 24] = "recover: restore failed\0"
+static mut M_RESTORED: [u8; 18] = "recover: restored\0"
+static mut M_DONE: [u8; 14] = "recover: done\0"
+
+const MAX_FWD: u64 = 8
+const EXIT_USAGE: u64 = 1
+const EXIT_VERIFY: u64 = 2
+const EXIT_INSTALL: u64 = 3
+const EXIT_UNLOCK: u64 = 4
+const EXIT_MOUNT: u64 = 5
+const EXIT_RESTORE: u64 = 6
+
+static mut ROOT_DEV: [u8; 32] = [0 as u8; 32]
+static mut RESTORE_PATH: [u8; 96] = [0 as u8; 96]
+static mut ARGV: [u64; 10] = [0 as u64; 10]
+
+fn is_option(a: u64, c0: u64, c1: u64) -> bool {
+    return (*((a) as *mut u8)) as u64 == c0 && (*((a + 1) as *mut u8)) as u64 == c1
+}
+
+fn run(argc: u64) -> u64 {
+    let pid: u64 = ulib.spawn_priv(ARGV[0 as usize], (&ARGV[0 as usize]) as u64, argc)
+    if ulib.bad(pid) {
+        return 255
+    }
+    return ulib.wait_code(pid)
+}
+
+fn forward_secrets(args: u64, argc: u64, at: u64) -> u64 {
+    var n: u64 = at
+    var i: u64 = 4
+    while i < argc && n < MAX_FWD {
+        let a: u64 = ulib.arg_at(args, i)
+        if is_option(a, 45, 112) || is_option(a, 45, 109) {
+            ARGV[n as usize] = a
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn flag_set(args: u64, argc: u64, word: u64) -> bool {
+    var i: u64 = 4
+    while i < argc {
+        if ulib.streq(ulib.arg_at(args, i), word) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn value_of(args: u64, argc: u64, word: u64) -> u64 {
+    var i: u64 = 4
+    while i + 1 < argc {
+        if ulib.streq(ulib.arg_at(args, i), word) {
+            return ulib.arg_at(args, i + 1)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn build_restore_path(into: u64) -> bool {
+    let mnt: u64 = ulib.length((&P_MNT[0 as usize]) as u64)
+    ulib.strncpy((&RESTORE_PATH[0 as usize]) as u64, (&P_MNT[0 as usize]) as u64, 24)
+    if into == 0 {
+        return true
+    }
+    let n: u64 = ulib.length(into)
+    if n > 60 || (*((into) as *mut u8)) as u64 != 47 {
+        return false
+    }
+    if n == 1 {
+        return true
+    }
+    ulib.strncpy((&RESTORE_PATH[0 as usize]) as u64 + mnt, into, 60)
+    var i: u64 = mnt + 1
+    while i < mnt + n {
+        if RESTORE_PATH[i as usize] == 47 as u8 {
+            RESTORE_PATH[i as usize] = 0 as u8
+            ulib.sys(ulib.SYS_MKDIR, (&RESTORE_PATH[0 as usize]) as u64, 0, 0)
+            RESTORE_PATH[i as usize] = 47 as u8
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn verify_backup(args: u64, argc: u64) -> u64 {
+    ARGV[0 as usize] = (&P_BACKUP[0 as usize]) as u64
+    ARGV[1 as usize] = (&V_VERIFY[0 as usize]) as u64
+    ARGV[2 as usize] = ulib.arg_at(args, 2)
+    ARGV[3 as usize] = ulib.arg_at(args, 3)
+    return run(forward_secrets(args, argc, 4))
+}
+
+fn install_target(args: u64, argc: u64) -> u64 {
+    ARGV[0 as usize] = (&P_INSTALL[0 as usize]) as u64
+    ARGV[1 as usize] = ulib.arg_at(args, 1)
+    ARGV[2 as usize] = (&O_YES[0 as usize]) as u64
+    var n: u64 = 3
+    let disk: u64 = value_of(args, argc, (&O_NAME[0 as usize]) as u64)
+    if disk != 0 {
+        ARGV[3 as usize] = (&O_NAME[0 as usize]) as u64
+        ARGV[4 as usize] = disk
+        n = 5
+    }
+    return run(n)
+}
+
+fn restore_backup(args: u64, argc: u64) -> u64 {
+    ARGV[0 as usize] = (&P_BACKUP[0 as usize]) as u64
+    ARGV[1 as usize] = (&V_RESTORE[0 as usize]) as u64
+    ARGV[2 as usize] = ulib.arg_at(args, 2)
+    ARGV[3 as usize] = ulib.arg_at(args, 3)
+    ARGV[4 as usize] = (&RESTORE_PATH[0 as usize]) as u64
+    return run(forward_secrets(args, argc, 5))
+}
+
+fn build_root_dev(target: u64) -> bool {
+    let n: u64 = ulib.length(target)
+    if n == 0 || n > 24 {
+        return false
+    }
+    ulib.strncpy((&ROOT_DEV[0 as usize]) as u64, target, 24)
+    ROOT_DEV[n as usize] = 50 as u8
+    ROOT_DEV[(n + 1) as usize] = 0 as u8
+    return true
+}
+
+fn say_line(p: u64) {
+    ulib.say(p)
+    ulib.nl()
+}
+
+fn fail(msg: u64, code: u64) -> u64 {
+    ulib.esay_line(msg, 0)
+    return code
+}
+
+fn restore_into_new_root(args: u64, argc: u64) -> u64 {
+    let target: u64 = ulib.arg_at(args, 1)
+    if !wunlock.unlock(target) {
+        return fail((&M_BADUNLOCK[0 as usize]) as u64, EXIT_UNLOCK)
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&P_MNT[0 as usize]) as u64, 0, 0)
+    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT, (&ROOT_DEV[0 as usize]) as u64,
+        (&P_MNT[0 as usize]) as u64, (&T_OFS[0 as usize]) as u64, 0)
+    if ulib.bad(m) {
+        wunlock.relock()
+        return fail((&M_BADMNT[0 as usize]) as u64, EXIT_MOUNT)
+    }
+    var rc: u64 = 1
+    if build_restore_path(value_of(args, argc, (&O_INTO[0 as usize]) as u64)) {
+        rc = restore_backup(args, argc)
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_UMOUNT2, (&P_MNT[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    wunlock.relock()
+    if rc != 0 {
+        return fail((&M_BADREST[0 as usize]) as u64, EXIT_RESTORE)
+    }
+    say_line((&M_RESTORED[0 as usize]) as u64)
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 4 {
+        return fail((&M_USE[0 as usize]) as u64, EXIT_USAGE)
+    }
+    let target: u64 = ulib.arg_at(args, 1)
+    if wunlock.protected(target) || !build_root_dev(target) {
+        return fail((&M_REFUSE[0 as usize]) as u64, EXIT_USAGE)
+    }
+    say_line((&M_PLAN[0 as usize]) as u64)
+    if verify_backup(args, argc) != 0 {
+        return fail((&M_BADVERIFY[0 as usize]) as u64, EXIT_VERIFY)
+    }
+    say_line((&M_VERIFIED[0 as usize]) as u64)
+    if !flag_set(args, argc, (&O_YES[0 as usize]) as u64) {
+        say_line((&M_DRY[0 as usize]) as u64)
+        return 0
+    }
+    if install_target(args, argc) != 0 {
+        return fail((&M_BADINST[0 as usize]) as u64, EXIT_INSTALL)
+    }
+    say_line((&M_INSTALLED[0 as usize]) as u64)
+    let rc: u64 = restore_into_new_root(args, argc)
+    if rc != 0 {
+        return rc
+    }
+    say_line((&M_DONE[0 as usize]) as u64)
+    return 0
+}
