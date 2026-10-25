@@ -402,7 +402,7 @@ pruefe_nein 7 "lies mit .."  "not a clean absolute path"
 pruefe_nein 8 "lies auf den Schluessel" '`read`'
 
 hat_nicht "$F" "NIE" "und NICHTS ist passiert: /var/jarvis/darfnicht.txt gibt es nicht"
-for a in system lies schreib liste befehl foto; do
+for a in system read write list run screenshot; do
     grep -qa "^[0-9-]* [0-9:]* $a REJECTED" "$F" \
         && ok "$a: die Ablehnung steht im Protokoll" \
         || bad "$a: keine Ablehnungszeile im Protokoll"

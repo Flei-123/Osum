@@ -234,7 +234,7 @@ for i in $(seq 1 40); do
     case "$G" in *'"gesund"'*) break ;; esac
     sleep 0.25
 done
-VK=$(cat "$PW/verwalter.key" 2>/dev/null || echo "")
+VK=$(cat "$PW/admin.key" 2>/dev/null || cat "$PW/verwalter.key" 2>/dev/null || echo "")
 G=$(ip netns exec "$NS" curl -s --max-time 5 "$DIENST/bruecke/gesund" 2>/dev/null || true)
 GUT=0
 case "$G" in *'"gesund"'*) GUT=1 ;; esac
