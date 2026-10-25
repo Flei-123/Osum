@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+
+export { format, default_inodes, SCRATCH, E_OK, E_SMALL, E_IO, E_VERSION }
+
+const SCRATCH: u64 = 1024
+const E_OK: u64 = 0
+const E_SMALL: u64 = 1
+const E_IO: u64 = 2
+const E_VERSION: u64 = 3
+
+const MAGIC: u64 = 0x4F53554D2D4F4653
+const BITS: u64 = 4096
+const T_DIR: u64 = 2
+
+fn default_inodes(blocks: u64) -> u64 {
+    var n: u64 = blocks / 16
+    if n < 128 {
+        n = 128
+    }
+    if n > 4096 {
+        n = 4096
+    }
+    return n
+}
+
+fn bitmap_byte(base: u64, blocks: u64, used: u64) -> u64 {
+    if base + 7 <= used || base >= blocks {
+        return 255
+    }
+    if base > used && base + 7 < blocks {
+        return 0
+    }
+    var v: u64 = 0
+    var j: u64 = 0
+    while j < 8 {
+        let b: u64 = base + j
+        if b <= used || b >= blocks {
+            v = v | (1 << j)
+        }
+        j = j + 1
+    }
+    return v
+}
+
+fn write_bitmap(write: fn(u64, u64, u64) -> u64, buf: u64, blocks: u64, bmb: u64, used: u64) -> u64 {
+    var k: u64 = 0
+    while k < bmb {
+        var i: u64 = 0
+        while i < 512 {
+            bytes.st8(buf + i, bitmap_byte(k * BITS + i * 8, blocks, used))
+            i = i + 1
+        }
+        if write(1 + k, 1, buf) != 0 {
+            return E_IO
+        }
+        k = k + 1
+    }
+    return E_OK
+}
+
+fn format(write: fn(u64, u64, u64) -> u64, blocks: u64, version: u64, inodes: u64, zeit: u64, scratch: u64) -> u64 {
+    if version != 2 && version != 3 {
+        return E_VERSION
+    }
+    var isz: u64 = 128
+    var ipb: u64 = 4
+    var dent: u64 = 32
+    var nlen: u64 = 24
+    if version == 3 {
+        isz = 256
+        ipb = 2
+        dent = 264
+        nlen = 256
+    }
+    var bmb: u64 = (blocks + BITS - 1) / BITS
+    if bmb == 0 {
+        bmb = 1
+    }
+    let itab: u64 = 1 + bmb
+    let itb: u64 = (inodes + ipb - 1) / ipb
+    let ds: u64 = itab + itb
+    if blocks < ds + 8 {
+        return E_SMALL
+    }
+    let buf: u64 = scratch
+
+    var k: u64 = 0
+    bytes.zero(buf, 512)
+    while k < itb {
+        if k == 0 {
+            bytes.put64(buf, T_DIR)
+            bytes.put64(buf + 8, 2 * dent)
+            bytes.put64(buf + 16, 1)
+            bytes.put64(buf + 24, ds)
+            if version == 3 {
+                bytes.put64(buf + 32, ds + 1)
+            }
+            bytes.put64(buf + 88, 493)
+            if version == 3 {
+                bytes.put64(buf + 136, zeit)
+                bytes.put64(buf + 144, zeit)
+                bytes.put64(buf + 152, zeit)
+            }
+        }
+        if write(itab + k, 1, buf) != 0 {
+            return E_IO
+        }
+        if k == 0 {
+            bytes.zero(buf, 512)
+        }
+        k = k + 1
+    }
+
+    var root_blocks: u64 = 1
+    if version == 3 {
+        root_blocks = 2
+    }
+    bytes.zero(buf, 1024)
+    bytes.put64(buf, 1)
+    bytes.st8(buf + 8, 46)
+    bytes.put64(buf + dent, 1)
+    bytes.st8(buf + dent + 8, 46)
+    bytes.st8(buf + dent + 9, 46)
+    var r: u64 = 0
+    while r < root_blocks {
+        if write(ds + r, 1, buf + r * 512) != 0 {
+            return E_IO
+        }
+        r = r + 1
+    }
+
+    if write_bitmap(write, buf, blocks, bmb, ds + root_blocks - 1) != E_OK {
+        return E_IO
+    }
+
+    bytes.zero(buf, 512)
+    bytes.put64(buf, MAGIC)
+    bytes.put64(buf + 8, 512)
+    bytes.put64(buf + 16, blocks)
+    bytes.put64(buf + 24, inodes)
+    bytes.put64(buf + 32, 1)
+    bytes.put64(buf + 40, itab)
+    bytes.put64(buf + 48, ds)
+    bytes.put64(buf + 56, 1)
+    bytes.put64(buf + 64, version)
+    if version == 3 {
+        bytes.put64(buf + 72, bmb)
+        bytes.put64(buf + 80, isz)
+        bytes.put64(buf + 88, dent)
+        bytes.put64(buf + 96, nlen)
+    } else if bmb > 1 {
+        bytes.put64(buf + 72, bmb)
+    }
+    if write(0, 1, buf) != 0 {
+        return E_IO
+    }
+    return E_OK
+}
