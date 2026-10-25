@@ -129,3 +129,7 @@ recomputed) and `--bad-ovl-hash`. Empty files are refused.
 when free < 2 x sum + 512 KiB; nothing is downloaded or touched (gate section 12).
 **Running binary**: `/bin/ota` itself may be part of the overlay (rename of a running program works; gate 2/8 use a byte-identical copy).
 **Limits**: the overlay is live from `apply` on (also under the old kernel); the check uses the final sizes, not the gz sizes.
+
+## Trust-root delivery (r25)
+
+`publish_system.py --roots FILE [--bad-roots-hash]` adds `sysfile roots <sha256> <octets> <file>` (and a `sysgz roots` line with `--gz`). `ota system apply` fetches and hash-checks it into `/system/new/roots.pem`, then runs `/bin/rootsctl apply` (parses every block, keeps only valid roots, atomic replace of `/etc/ssl/roots.pem`, `.prev` stays). A failure prints `ota: trust roots not updated` and never blocks the kernel/overlay update. Gate: `OSU_SECS=13 bash tools/osupdate/run.sh` (wrong hash and unparsable block are the counter-proofs).
