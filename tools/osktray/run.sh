@@ -72,8 +72,10 @@ run_one() {
 }
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 run_one a "$TMPD/a.txt" "/etc/osk.conf=$TMPD/osk.conf@0644"
-run_one b "$TMPD/b.txt" ""
-run_one c "$TMPD/c.txt" ""
+if [ -z "${OSKTRAY_ONLY_A:-}" ]; then
+    run_one b "$TMPD/b.txt" ""
+    run_one c "$TMPD/c.txt" ""
+fi
 SA="$TMPD/a/o/serial.txt"; SB="$TMPD/b/o/serial.txt"; SC="$TMPD/c/o/serial.txt"
 if [ -n "${OSKTRAY_OUT:-}" ]; then
     mkdir -p "$OSKTRAY_OUT"
