@@ -84,6 +84,8 @@ fi
 # RUNDE FREMDFS: STANDARD IST AN -- die Begruendung steht in
 # docs/RUNDE-FREMDFS.md, Abschnitt 10, und sie stuetzt sich auf die
 # GEMESSENE Groesse und nicht auf ein Gefuehl.
+MODULE_KEYS=${MODULE_KEYS:-}
+BAN_FLOOR=${BAN_FLOOR:-}
 OHNE_EXT4=${OHNE_EXT4:-0}
 OHNE_NTFS=${OHNE_NTFS:-0}
 [[ -n ${OSUM_EXT4:-} ]] && [[ $OSUM_EXT4 == off ]] && OHNE_EXT4=1
@@ -97,6 +99,8 @@ while [[ $# -gt 0 ]]; do
         --ohne-ntfs) OHNE_NTFS=1; shift ;;
         --ohne-fremdfs) OHNE_EXT4=1; OHNE_NTFS=1; shift ;;
         --ohne-ps2m) OHNE_PS2M=1; shift ;;
+        --module-keys) MODULE_KEYS=$2; shift 2 ;;
+        --ban-floor) BAN_FLOOR=$2; shift 2 ;;
         --ohne-bruecke) OHNE_BRUECKE=1; shift ;;
         --ohne-symbole) SYMBOLE=off; shift ;;
         --gui) GUI=$2; shift 2 ;;
@@ -337,6 +341,13 @@ if [[ $OHNE_PS2M == 1 ]]; then
 fi
 weg ps2m-aus
 KDIR="$TMP/kernel"
+if [[ -n $MODULE_KEYS || -n $BAN_FLOOR ]]; then
+    cp -a lib "$TMP/lib" || exit 1
+    export FIRNLIB="$TMP/lib"
+    python3 tools/module/mkpolicy.py "$TMP/lib/modpolicy/policydata.fi" \
+        ${MODULE_KEYS:+--keys "$MODULE_KEYS"} ${BAN_FLOOR:+--floor "$BAN_FLOOR"} \
+        >/dev/null || { echo "mkpolicy failed" >&2; exit 1; }
+fi
 
 # Auch die zwei Wurzeln werden gesucht: `kmain.fi` bleibt zwar oben im
 # Kernverzeichnis, aber das steht in keinem Gesetz.

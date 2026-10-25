@@ -50,6 +50,9 @@ bc_common_key() {
         cat "$ROOT/vendor/firn/.gebaut" 2>/dev/null
         (cd "$work" && bc_tree_hash kernel)
         (cd "$ROOT" && bc_tree_hash lib vendor/firn/lib)
+        if [[ -n ${FIRNLIB:-} && $FIRNLIB != "$ROOT/lib" && -d $FIRNLIB ]]; then
+            (cd "$FIRNLIB" && bc_tree_hash .)
+        fi
     } | sha256sum | cut -c1-64
 }
 

@@ -90,13 +90,14 @@ import fs.fs
 import lib.ksym
 import ldr.modtab
 import ldr.modidx
+import ldr.modpolicy
 import crypto.ed25519
 
 export {
     init, load, entladen, ready, reason, say_reason,
     tries, rejects, loaded, syms, ext_syms, relocs, image_bytes, file_bytes,
     sig_ok, secs, unloads, entry_of, base_of, frames_of, abi_of_file,
-    init_rc, ruf1, ruf0, ruf2, ruf3, ruf6, signature_valid, last_placed,
+    init_rc, ref, unref, refs_of, busy_count, ruf1, ruf0, ruf2, ruf3, ruf6, signature_valid, last_placed,
     R_OK, R_NOFILE, R_SHORT, R_TOOBIG, R_MAGIC, R_FORMAT, R_ABI, R_LEN,
     R_SIG, R_ELF, R_ETYPE, R_MACHINE, R_SHDR, R_SECTIONS, R_NOMEM,
     R_SYMTAB, R_SYM, R_RELTYPE, R_RANGE, R_ENTRY, R_SLOT, R_INIT,
@@ -158,6 +159,7 @@ const S_INITRC: u64 = 0x68
 const S_EXTSYMS: u64 = 0x70 // wie viele Namen aus dem KERN kamen
 const S_BANLEN: u64 = 0x78 // K-014: entries in the last valid revocation list
 const S_LASTK: u64 = 0x80
+const S_BUSY: u64 = 0x88
 
 // Die Modulsaetze.
 const MOD_OFF: u64 = 0x0100
@@ -170,6 +172,7 @@ const M_ENTRY: u64 = 0x18
 const M_EXIT: u64 = 0x20
 const M_SLOT: u64 = 0x28
 const M_NAME: u64 = 0x30 // 32 Oktett
+const M_REFS: u64 = 0x50
 
 // Wo die Plaetze der Abschnitte im Abbild vermerkt werden.
 const SEC_OFF: u64 = 0x0400
@@ -435,6 +438,33 @@ fn init_rc(state: u64) -> u64 {
     return hol(state, S_INITRC)
 }
 
+fn ref(state: u64, k: u64) -> bool {
+    if k >= MAX_MOD || m(state, k, M_USED) == 0 {
+        return false
+    }
+    m_set(state, k, M_REFS, m(state, k, M_REFS) + 1)
+    return true
+}
+
+fn unref(state: u64, k: u64) -> bool {
+    if k >= MAX_MOD || m(state, k, M_USED) == 0 || m(state, k, M_REFS) == 0 {
+        return false
+    }
+    m_set(state, k, M_REFS, m(state, k, M_REFS) - 1)
+    return true
+}
+
+fn refs_of(state: u64, k: u64) -> u64 {
+    if k >= MAX_MOD {
+        return 0
+    }
+    return m(state, k, M_REFS)
+}
+
+fn busy_count(state: u64) -> u64 {
+    return hol(state, S_BUSY)
+}
+
 fn entry_of(state: u64, k: u64) -> u64 {
     if k >= MAX_MOD {
         return 0
@@ -528,29 +558,21 @@ fn say_reason(g: u64) {
 // DIES IST DER PRUEFSCHLUESSEL DIESER RUNDE und liegt absichtlich im
 // Repo (`tools/module/pruef.seed`). Eine Auslieferung braucht einen
 // anderen; das steht in `docs/RUNDE-MODUL.md` unter "was noch fehlt".
-fn schluessel(dst: u64) {
-    var k: [u8; 32] = [
-        0x51, 0xDA, 0xE5, 0x64, 0x2C, 0xBA, 0x5D, 0x80,
-        0x15, 0x1E, 0xED, 0x35, 0xDC, 0x3F, 0x69, 0x54,
-        0x64, 0x26, 0x86, 0x0E, 0xAC, 0x91, 0xF7, 0x70,
-        0x32, 0x6F, 0x57, 0xE5, 0x4A, 0x22, 0xB8, 0x8E
-    ]
-    var i: u64 = 0
-    while i < 32 {
-        kstate.set8(dst + i, k[i as usize])
-        i = i + 1
-    }
-}
-
 fn signature_valid(state: u64, msg: u64, len: u64, sig: u64) -> bool {
     var key: [u8; 32] = [0; 32]
-    schluessel((&key[0]) as u64)
     var c: ed25519.Ctx = ed25519.ctx_new()
     if !ed25519.ctx_init(&c) {
         return false
     }
-    return ed25519.ed25519_verify(&c, (&key[0]) as u64, msg, len as usize,
-        sig)
+    var k: u64 = 0
+    while k < modpolicy.key_total() {
+        modpolicy.key_copy(k, (&key[0]) as u64)
+        if ed25519.ed25519_verify(&c, (&key[0]) as u64, msg, len as usize, sig) {
+            return true
+        }
+        k = k + 1
+    }
+    return false
 }
 
 // ------------------------------------------------------------- das Laden
@@ -727,6 +749,9 @@ fn check_banlist(state: u64, sig: u64) -> u64 {
     var pfad: [u8; 17] = "/lib/omod.sperre\0"
     var mag: [u8; 9] = "OSUMSPR\n\0"
     setz(state, S_BANLEN, 0)
+    if modpolicy.floor_hit(sig) {
+        return R_REVOKED
+    }
     if kstate.get(state, kstate.FS_READY) == 0 {
         return R_OK
     }
@@ -894,6 +919,7 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
         return R_NOMEM
     }
     m_set(state, k, M_USED, 1)
+    m_set(state, k, M_REFS, 0)
     m_set(state, k, M_BASE, basis)
     m_set(state, k, M_FRAMES, rahmen)
 
@@ -1178,6 +1204,10 @@ fn entladen(state: u64, k: u64) -> bool {
         return false
     }
     if m(state, k, M_USED) == 0 {
+        return false
+    }
+    if m(state, k, M_REFS) != 0 {
+        zaehl(state, S_BUSY)
         return false
     }
     let slot: u64 = m(state, k, M_SLOT)
