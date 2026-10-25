@@ -52,6 +52,7 @@ Namen fuer `klickauf`:
     netz            die Symbolgruppe       (taskbar: field net ...)
     uhr             die Uhr                (taskbar: field clock ...)
     calrect<N>      Knopf N des Kalenders  (calpop: rect name=N ..., Bildschirmpixel)
+    trayrect<NAME>  element NAME of the tray flyout (traypop: rect name=, screen pixels)
     oskrect<NAME>   key NAME of the on-screen keyboard (osk: rect name=), osktrect<NAME> element of the witness window
     chrect<NAME>    Element NAME der Zeichentabelle (charmap: rect name= ... ax= ay=, Bildschirmpixel)
     lrect<N>        Widget N des Starters  (launcher: rect id=N ...)
@@ -920,6 +921,11 @@ class Fahrer:
             x, y = int(m.group(1)), int(m.group(2))
             w, h = int(m.group(3)), int(m.group(4))
             return (x + 10, y + h - 10 - 22, w - 20, 22)
+        if name.startswith("trayrect"):
+            m = letzte(r"traypop: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % re.escape(name[8:]))
+            if m is None:
+                return None
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name.startswith("calrect"):
             # calpop.fi (P-011) reports its buttons in SCREEN pixels: `calpop: rect name=<n> x= y= w= h=`
             m = letzte(r"calpop: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % re.escape(name[7:]))

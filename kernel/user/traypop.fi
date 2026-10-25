@@ -47,6 +47,7 @@ import fui.render
 import fui.painter
 import fui.icon
 import fui.tray
+import osktray
 
 export { init, toggle, step, is_open, hit, shut_now, net_glyph, wlan_glyph, speaker_glyph, mic_glyph,
     chevron_glyph }
@@ -64,6 +65,7 @@ const MAXH: u64 = 560
 
 const K_MUTE: u64 = 300
 const K_VOL: u64 = 301
+const K_OSK: u64 = 303
 const K_ITEM: u64 = 320
 const K_MENU: u64 = 340
 const K_ENT: u64 = 360
@@ -124,6 +126,7 @@ static mut mic_who: u64 = 0 // task index of the first program reading the micro
 static mut mic_da: u64 = 0 // 1 = the kernel has a microphone path (SYS_AUDREAD works)
 static mut mic_stub: u64 = 0 // 1 = /etc/tray.items has a `mic|` line (test aid): it overrides the kernel's numbers
 static mut want_sheet: u64 = 0
+static mut osk_on: u64 = 0
 static mut tile_say: u64 = 0
 static mut n_rows: u64 = 0
 static mut row_id: [u64; 8] = [0 as u64; 8]
@@ -146,6 +149,12 @@ static mut k_snd: [u8; 11] = "tray.sound\0"
 static mut k_mute: [u8; 10] = "tray.mute\0"
 static mut k_unmute: [u8; 12] = "tray.unmute\0"
 static mut k_nosnd: [u8; 13] = "tray.nosound\0"
+static mut k_osk: [u8; 9] = "tray.osk\0"
+static mut k_oskgo: [u8; 14] = "tray.osk.open\0"
+static mut s_oskpid: [u8; 18] = "traypop: osk pid=\0"
+static mut s_rect: [u8; 20] = "traypop: rect name=\0"
+static mut n_osk: [u8; 4] = "osk\0"
+static mut s_oskwhy: [u8; 4] = "osk\0"
 static mut k_micuse: [u8; 13] = "tray.mic.use\0"
 static mut k_micmuted: [u8; 15] = "tray.mic.muted\0"
 static mut k_more: [u8; 10] = "tray.more\0"
@@ -769,6 +778,9 @@ fn card_h() -> u64 {
     if mic_shown() {
         h = h + ROW_H + GAPP
     }
+    if osk_on != 0 {
+        h = h + ROW_H + GAPP
+    }
     h = h + 22 + GAPP // the "more" caption
     if n_rows == 0 {
         h = h + 22 + GAPP
@@ -844,6 +856,12 @@ fn build() {
             }
             let _bmm: usize = fuiscene.button(rm, mg(mmk), K_MICMUTE)
         }
+    }
+    if osk_on != 0 {
+        let ro: usize = fuiscene.row(r)
+        fuiscene.set_gap(ro, GAPP + 2)
+        let _lo: usize = fuiscene.label(ro, mg((&k_osk[0 as usize]) as u64))
+        let _bo: usize = fuiscene.button(ro, mg((&k_oskgo[0 as usize]) as u64), K_OSK)
     }
     // overflow
     let _lc: usize = fuiscene.label_muted(r, mg((&k_more[0 as usize]) as u64))
@@ -943,12 +961,39 @@ fn relayout() {
     let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, tp_h, (px_ << 16) | py_, 0)
 }
 
+fn say_osk_rect() {
+    if osk_on == 0 {
+        return
+    }
+    let _s: bool = fuiscene.win_select(tp_win)
+    let g: u64 = fuiscene.key_geom(K_OSK)
+    let _u: bool = fuiscene.win_select(0)
+    if g == 0 {
+        return
+    }
+    say((&s_rect[0 as usize]) as u64)
+    say((&n_osk[0 as usize]) as u64)
+    say((&s_xy[0 as usize]) as u64)
+    sayn(px_ + (g >> 48))
+    say((&s_yy[0 as usize]) as u64)
+    sayn(py_ + ((g >> 32) & 65535))
+    say((&s_ww[0 as usize]) as u64)
+    sayn((g >> 16) & 65535)
+    say((&s_hh[0 as usize]) as u64)
+    sayn(g & 65535)
+    nl()
+}
+
 fn open_now() {
     if open_ != 0 || tp_win == NONE {
         return
     }
     read_items()
     read_audio()
+    osk_on = 0
+    if osktray.shown() {
+        osk_on = 1
+    }
     mode = M_LIST
     tile_say = 1
     relayout()
@@ -973,6 +1018,7 @@ fn open_now() {
     say((&s_hh[0 as usize]) as u64)
     sayn(ph_)
     nl()
+    say_osk_rect()
     var i: u64 = 0
     while i < n_rows {
         let id: u64 = row_id[i as usize]
@@ -1071,6 +1117,14 @@ fn pos_of(id: u64) -> u64 {
 }
 
 fn on_key(key: u64) -> bool {
+    if key == K_OSK {
+        let pid: u64 = osktray.launch()
+        say((&s_oskpid[0 as usize]) as u64)
+        sayn(pid)
+        nl()
+        shut((&s_oskwhy[0 as usize]) as u64)
+        return true
+    }
     if key == K_MICMUTE {
         var nm: u64 = 1
         if mic_muted != 0 {
