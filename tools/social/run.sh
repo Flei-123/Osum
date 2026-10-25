@@ -144,7 +144,7 @@ printf 'lang=de\n' > "$TMPD/etc/locale.conf"
 printf 'provider fleitec /bin/socfleitec /etc/social/fleitec.conf\nprovider local /bin/soclocal\nprovider lan2 /bin/soclocal /etc/social/lan2\n' > "$TMPD/etc/providers"
 printf 'url=http://10.0.2.2:%s\ntoken=%s\nrelay=10.0.2.2:%s\n' "$PORT" "$TOKEN" "$RP" > "$TMPD/etc/fleitec.conf"
 printf 'app:game activity.write\napp:other activity.write\napp:spam messages.send\n' > "$TMPD/etc/apps"
-printf 'c\tzoe\tfriend\tonline\tZoe (LAN 2)\tzoe\t\t\t0\t\t0\n' > "$TMPD/etc/lan2.book"
+printf 'c\tzoe\tfriend\tonline\tZoe (LAN 2)\tzoe\t\t\t0\t\t0\nc\tpeterx\tfriend\tonline\tPeter (LAN 2)\tPeter\t\t\t0\t\t0\n' > "$TMPD/etc/lan2.book"
 printf 'm\tpeter\t1790000000\tin\tHallo von Peter aus dem Keller\n' > "$TMPD/etc/local.inbox"
 printf 'c\toma\tincoming\tunknown\tOma Rosi\t\t\t\t0\t\nc\tpeter\tfriend\tonline\tPeter (LAN)\tpeter\tim Keller\tMinecraft\t60\t\n' \
     > "$TMPD/etc/local.book"
@@ -167,6 +167,7 @@ echo ==ACTIVE==
 act call social.contacts.list filter=active
 echo ==GET==
 act call social.contacts.get id=fleitec:u_ANNA
+act call social.contacts.get id=lan2:peterx
 echo ==SEARCH==
 act call social.contacts.search query=dora
 echo ==AGENT==
@@ -365,21 +366,24 @@ echo "== 3. the book =="
 part "$A" STATUS ALL > "$TMPD/p.txt"
 has "$TMPD/p.txt" "provider.1=fleitec ok 4" "fleitec: ok, 4 contacts (anna, bert, carla, dora) over the guest's network"
 has "$TMPD/p.txt" "provider.2=local ok 2" "local: ok, 2 contacts"
-has "$TMPD/p.txt" "provider.3=lan2 ok 1" "lan2 (the local program again, another base): ok, 1 contact"
-has "$TMPD/p.txt" "contacts=7" "the merged book has 7"
+has "$TMPD/p.txt" "provider.3=lan2 ok 2" "lan2 (the local program again, another base): ok, 2 contacts"
+has "$TMPD/p.txt" "contacts=8" "the book has 8 rows"
 has "$TMPD/p.txt" "online=3" "3 friends online (anna, peter, zoe)"
 has "$TMPD/p.txt" "active=2" "2 friends active (anna plays, peter plays)"
 part "$A" ALL ONLINE > "$TMPD/p.txt"
-has "$TMPD/p.txt" "total=7" "list: 7 contacts"
+has "$TMPD/p.txt" "total=7" "list: 7 contacts (the same person at two providers is one)"
+hasnot "$TMPD/p.txt" "=lan2:peterx|" "r37: lan2:peterx is not a contact of its own"
 has "$TMPD/p.txt" "fleitec:u_ANNA|friend|online|Anna Berger|anna_berger||Counter-Strike 2|" "anna: friend, online, plays Counter-Strike 2"
 has "$TMPD/p.txt" "fleitec:u_CARLA|incoming|" "carla asks justin (incoming)"
 has "$TMPD/p.txt" "fleitec:u_DORA|outgoing|" "justin asked dora (outgoing)"
 has "$TMPD/p.txt" "local:peter|friend|online|Peter (LAN)|peter|im Keller|Minecraft|" "a contact of the local provider in the same book"
+has "$TMPD/p.txt" "|lan2:peterx" "r37: local:peter carries the other provider's id in the last column"
 part "$A" ONLINE ACTIVE > "$TMPD/p.txt"
 has "$TMPD/p.txt" "total=3" "filter=online: 3"
 hasnot "$TMPD/p.txt" "u_BERT" "bert (invisible) is not online"
 part "$A" GET SEARCH > "$TMPD/p.txt"
 has "$TMPD/p.txt" "activity=Counter-Strike 2" "get: one contact with every field"
+has "$TMPD/p.txt" "id=lan2:peterx" "r37: the hidden twin can still be read by its own id"
 has "$TMPD/p.txt" "provider=fleitec" "get: its provider"
 part "$A" SEARCH AGENT > "$TMPD/p.txt"
 has "$TMPD/p.txt" "fleitec:u_DORA|" "search at the providers finds dora"

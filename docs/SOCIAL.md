@@ -35,7 +35,7 @@ line in `/etc/social/providers` and one program. `social.fi`,
 | `social.status`, `social.refresh` | read | providers, counts |
 | `social.accounts.list` | read | `account.N=name\|state\|account\|caps` |
 | `social.accounts.login provider= [token=]` | critical | pairing code (`state=pending code=…`) or signed in (`state=ok account=…`) |
-| `social.contacts.list/get/search` | read | `account:id\|relation\|presence\|name\|handle\|status\|activity\|since_s\|joinable` |
+| `social.contacts.list/get/search` | read | `account:id\|relation\|presence\|name\|handle\|status\|activity\|since_s\|joinable\|also` |
 | `social.contacts.request/accept/decline/withdraw/remove` | write | relations |
 | `social.presence.set`, `social.activity.set [join=true] [party=]`, `social.activity.clear` | write | myself |
 | `social.party.take [name=]` | write, `noask` | the join target of an accepted invite or join request, once (`found`, `target`, `name`, `kind`, `from`) |
@@ -245,7 +245,7 @@ service and `soclocal` in a guest, the scopes with `--as`.
   `/etc/social/fleitec.conf` with `url=https://chat.fleitec.com`; pair it with
   `act call social.accounts.login provider=fleitec`), `/apps/social.prog/ACTIONS`, an empty
   `/etc/social/games.tsv` (the service fills it);
-* the same person at two providers is two contacts (no merge by person);
+* the same person at two providers is ONE contact in the list (r37, `kernel/user/socmerge.fi`): rows of different accounts with the same non-empty handle (case ignored) merge; the best row shows (friend before request before none, then plays, then online, then book order) and the last column `also` carries the other ids (`account:id,account:id`); `contacts.get` still answers for each id, the counts and filters see the merged list; the book itself keeps every row;
 * the SDK cannot launch an app: after a yes the join target waits in `social.party.take` for the game to ask for it, a launcher that starts the game by activity name is not built;
 * no provider call blocks the service loop: the timers (contacts, invites, inbox, presence,
   activity, alive, games) run as background jobs (`kernel/user/socjob.fi`, one slot per provider),
