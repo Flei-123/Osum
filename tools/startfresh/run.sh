@@ -26,6 +26,7 @@ else bad "kernel does not build"; tail -5 "$TMPD/k.txt"; echo "STARTFRESH: $pass
 
 HA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 printf 'name=Base\nkeys=base\nfassung=1\n' > "$TMPD/bd/base.info"
+printf 'image\n' > "$TMPD/bd/SYSTEM"
 printf 'name=Alpha\nkeys=alpha\nfassung=1\n' > "$TMPD/bd/alpha.info"
 printf '00000001\n' > "$TMPD/bd/AKTUELL"
 printf 'alpha\t%s\n' "$HA" > "$TMPD/bd/PLAN"
@@ -47,7 +48,7 @@ run_guest() {
      "/etc/passwd=$TMPD/passwd" /system/generations/ /system/generations/1/
      "/system/AKTUELL=$TMPD/bd/AKTUELL" "/system/generations/1/PLAN=$TMPD/bd/PLAN" "/system/generations/1/GRUND=$TMPD/bd/GRUND" /store/
      "/t/g.sh=$TMPD/g.sh"
-     "/apps/base.osp/" "/apps/base.osp/INFO=$TMPD/bd/base.info"
+     "/apps/base.osp/" "/apps/base.osp/INFO=$TMPD/bd/base.info" "/apps/base.osp/SYSTEM=$TMPD/bd/SYSTEM"
      "/store/${HA:0:20}/" "/store/${HA:0:20}/INFO=$TMPD/bd/alpha.info")
   for p in $PROGS; do
     if [ "$p" = opk ]; then A+=("/bin/opk=$opkelf"); else A+=("/bin/$p=$TMPD/bin/$p.elf"); fi
