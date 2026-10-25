@@ -155,7 +155,7 @@ printf '# taskbar.conf\nedge=0\nheight=40\nwidth=0\nautohide=0\nontop=1\n' > "$T
 # full", und ohne Abbild startet kein QEMU -- die sechzehn roten
 # Zusagen dieses Laeufers haengen fast alle daran.
 # EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
-ARGS=(build "$TMPD/disk.img" 32768 /lib/
+ARGS=(build "$TMPD/disk.img" 65536 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
