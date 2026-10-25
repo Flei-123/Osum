@@ -36,8 +36,9 @@ const CMD_TX_DATA: u64 = 0x1C
 const TXCMD_HDR: u64 = 4
 const TXCMD_DRAM_LSB: u64 = 48
 const TXCMD_SCRATCH_OFF: u64 = 12
-const ALIVE_SCD_OFF: u64 = 40
-const ALIVE_PKT_MIN: u64 = 44
+const ALIVE_SCD_OFF: u64 = 44
+const ALIVE_CNT_OFF: u64 = 40
+const ALIVE_PKT_MIN: u64 = 48
 
 const E_CQ_TIMEOUT: i64 = -70
 const E_CQ_BIG: i64 = -71
@@ -74,13 +75,17 @@ struct Cq {
     dq_on: u64,
     dsent: u64,
     dreclaimed: u64,
-    rx_raw: u64
+    rx_raw: u64,
+    scd_alive: u64,
+    alive_cnt: u64,
+    scd_hw: u64,
+    stage: u64
 }
 
 fn cq_new() -> Cq {
     var c: Cq = Cq { rx_bd: 0, rx_stts: 0, rb: 0, tfd: 0, cmdbuf: 0, kw: 0, bc: 0, notif: 0, wr: 0, rd: 0, rxr: 0, rx_wptr: 0,
         rx_on: 0, tx_on: 0, nh: 0, nt: 0, scd: 0, dropped: 0, matched: 0,
-        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, dsent: 0, dreclaimed: 0, rx_raw: 0 }
+        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, dsent: 0, dreclaimed: 0, rx_raw: 0, scd_alive: 0, alive_cnt: 0, scd_hw: 0, stage: 0 }
     return c
 }
 
@@ -188,11 +193,19 @@ fn cq_nic_init(c: *mut Cq, p: *mut iwl_probe.Probe) -> i64 {
     return 0
 }
 
-fn cq_fw_alive(c: *mut Cq, p: *mut iwl_probe.Probe, scd_base: u64) -> i64 {
+fn cq_fw_alive(c: *mut Cq, p: *mut iwl_probe.Probe, scd_alive: u64) -> i64 {
     if (*c).rx_on == 0 { return E_CQ_NORX }
+    let hw: u64 = iwl_g1.scd_base_read(p)
+    (*c).scd_hw = hw
+    var scd_base: u64 = hw
+    if scd_base == 0 { scd_base = scd_alive }
+    if scd_base == 0 { return E_CQ_PROG }
+    let rc: i64 = iwl_g1.scd_ctx_clear(p, scd_base)
+    if rc != 0 { return rc }
     var g: iwl_g1.Prog = iwl_g1.prog_new()
-    var ok: bool = iwl_g1.prog_scd_init(&g, (*c).bc)
+    var ok: bool = iwl_g1.prog_scd_head(&g, (*c).bc)
     ok = ok && iwl_g1.prog_txq_enable(&g, scd_base, CMD_QUEUE, iwl_g1.SCD_FIFO_CMD)
+    ok = ok && iwl_g1.prog_scd_tail(&g)
     if !ok { return E_CQ_PROG }
     let r: i64 = iwl_g1.prog_run(p, &g)
     if r != 0 { return r }
@@ -200,6 +213,7 @@ fn cq_fw_alive(c: *mut Cq, p: *mut iwl_probe.Probe, scd_base: u64) -> i64 {
     (*c).wr = 0
     (*c).rd = 0
     (*c).tx_on = 1
+    (*c).stage = 3
     return 0
 }
 
@@ -414,7 +428,10 @@ fn cq_alive(c: *mut Cq, p: *mut iwl_probe.Probe, out: u64, cap: u64) -> i64 {
     let n: i64 = cq_wait(c, p, CMD_ALIVE, out, cap, CQ_WAIT_NOTIF)
     if n < 0 { return n }
     if (n as u64) < ALIVE_PKT_MIN { return E_CQ_SHORT }
-    return iwl_le.ld32(out, ALIVE_SCD_OFF) as i64
+    (*c).alive_cnt = iwl_le.ld32(out, ALIVE_CNT_OFF)
+    (*c).scd_alive = iwl_le.ld32(out, ALIVE_SCD_OFF)
+    (*c).stage = 2
+    return (*c).scd_alive as i64
 }
 
 fn cq_resp_status(resp: u64, len: u64) -> i64 {
