@@ -51,7 +51,7 @@ export {
     attach, attach_rndis, attach_ncm, attach_ch336, attach_ax88772, detach, unplug_slot, link_on, keepalives, exists, present_on, ready_on, up_on, mac_at_on,
     rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
     rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
-    errors, MAX_UNITS, FRAME_MAX, ch_bringup, mode_get, tx_diag, ch_link, ch_bmsr, ch_cfg, ch_fw, ch_changes, ch_phy, ch_intr
+    errors, rx_diag, rx_dump, MAX_UNITS, FRAME_MAX, ch_bringup, mode_get, tx_diag, ch_link, ch_bmsr, ch_cfg, ch_fw, ch_changes, ch_phy, ch_intr
 }
 
 const MAX_UNITS: u64 = 1
@@ -101,6 +101,17 @@ const C_TXFAIL: u64 = 0x1E8
 const C_TXHALT: u64 = 0x1F0
 const C_TXEPST: u64 = 0x1F8
 const CH_BASE: u64 = 0x2800
+const D_BAD: u64 = 0x400
+const D_CODE: u64 = 0x408
+const D_LASTCODE: u64 = 0x410
+const D_LASTHDR: u64 = 0x418
+const D_LASTLEN: u64 = 0x420
+const D_LASTOFF: u64 = 0x428
+const D_XFERS: u64 = 0x430
+const D_MULTI: u64 = 0x438
+const D_MORE: u64 = 0x440
+const D_SHORT: u64 = 0x448
+const D_DUMP: u64 = 0x450
 const CMD_OFF: u64 = 0x200
 const RSP_OFF: u64 = 0x300
 const HOUSE_TICKS: u64 = 300
@@ -239,6 +250,7 @@ fn attach_mode(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u6
     cs(state, C_TXB, 0)
     cs(state, C_DROP, 0)
     cs(state, C_ERR, 0)
+    diag_reset(state)
     cs(state, C_MODE, mode)
     cs(state, C_RXOFF, 0)
     cs(state, C_RXLEN, 0)
@@ -430,6 +442,55 @@ fn mac_at_on(state: u64, u: u64, i: u64) -> u64 {
     return (cg(state, C_MAC) >> (i * 8)) & 0xFF
 }
 
+fn diag_reset(state: u64) {
+    var o: u64 = D_BAD
+    while o < D_DUMP + 32 {
+        cs(state, o, 0)
+        o = o + 8
+    }
+}
+
+fn bump(state: u64, off: u64) {
+    cs(state, off, cg(state, off) + 1)
+}
+
+fn rx_diag(state: u64, which: u64) -> u64 {
+    if which == 0 { return cg(state, D_BAD) }
+    if which == 1 { return cg(state, D_CODE) }
+    if which == 2 { return cg(state, D_LASTCODE) }
+    if which == 3 { return cg(state, D_LASTHDR) }
+    if which == 4 { return cg(state, D_LASTLEN) }
+    if which == 5 { return cg(state, D_LASTOFF) }
+    if which == 6 { return cg(state, D_XFERS) }
+    if which == 7 { return cg(state, D_MULTI) }
+    if which == 8 { return cg(state, D_MORE) }
+    if which == 9 { return cg(state, D_SHORT) }
+    return 0
+}
+
+fn rx_dump(state: u64, i: u64) -> u64 {
+    return cg(state, D_DUMP + (i & 3) * 8)
+}
+
+fn dump_bad(state: u64, p: u64, off: u64, len: u64) {
+    var k: u64 = 0
+    while k < 4 {
+        var w: u64 = 0
+        if off + k * 8 + 8 <= len {
+            w = *((p + off + k * 8) as *mut u64)
+        }
+        cs(state, D_DUMP + k * 8, w)
+        k = k + 1
+    }
+    var h: u64 = 0
+    if off + 4 <= len {
+        h = *((p + off) as *mut u32) as u64
+    }
+    cs(state, D_LASTHDR, h)
+    cs(state, D_LASTLEN, len)
+    cs(state, D_LASTOFF, off)
+}
+
 fn requeue(state: u64) {
     var rxa: u64 = blk(state) + RXA_OFF
     if cg(state, C_MODE) == 3 {
@@ -545,6 +606,8 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     let resid: u64 = xhci.ep_resid(state, i)
     if code != xhci.CC_SUCCESS && code != xhci.CC_SHORT {
         cs(state, C_ERR, cg(state, C_ERR) + 1)
+        bump(state, D_CODE)
+        cs(state, D_LASTCODE, code)
         requeue(state)
         return 0
     }
@@ -553,6 +616,7 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         return 0
     }
     let n: u64 = RXBUF - resid
+    bump(state, D_XFERS)
     if cg(state, C_MODE) == 1 {
         cs(state, C_RXOFF, 0)
         cs(state, C_RXLEN, n)
@@ -685,6 +749,7 @@ fn ch_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     let len: u64 = cg(state, C_RXLEN)
     let st: u64 = ch397.rx_status(p, len as usize, off as usize)
     if st == ch397.RX_MORE {
+        bump(state, D_MORE)
         let tail: u64 = len - off
         copy(b + CH_BASE - tail, p + off, tail)
         cs(state, C_CARRY, tail)
@@ -694,6 +759,8 @@ fn ch_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     }
     if st == ch397.RX_BAD {
         cs(state, C_ERR, cg(state, C_ERR) + 1)
+        bump(state, D_BAD)
+        dump_bad(state, p, off, len)
         cs(state, C_CARRY, 0)
         cs(state, C_SKIP, 0)
         cs(state, C_RXLEN, 0)
@@ -705,6 +772,9 @@ fn ch_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     let nx: u64 = ch397.rx_next(p, len as usize, off as usize) as u64
     copy(b + HOLD_OFF, p + fo, fl)
     cs(state, C_RXOFF, nx)
+    if nx < len {
+        bump(state, D_MULTI)
+    }
     if nx >= len {
         cs(state, C_SKIP, ch397.rx_pad_missing(nx as usize, len as usize) as u64)
         cs(state, C_CARRY, 0)
