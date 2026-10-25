@@ -170,9 +170,12 @@ def main(argv):
         zeilen.append("%s/INFO=%s" % (ziel, os.path.join(pfad, "INFO")))
         sym = os.path.join(arbeit, name + ".symbol")
         # r399 (design audit): a bundle may carry a finished OSYM picture
-        # (`symbol.osym`, vector art baked by tools/design/mkicons.py); it wins over the
+        # (`symbol.osym`, vector art baked from symbol.svg by tools/svg/apps.sh); it wins over the
         # 16x16 drawing in `symbol.txt`.
         fertig = os.path.join(pfad, "symbol.osym")
+        if os.path.isfile(os.path.join(pfad, "symbol.svg")) and not os.path.isfile(fertig):
+            print("bundle: %s has symbol.svg but no baked symbol.osym (run tools/svg/apps.sh)" % pfad, file=sys.stderr)
+            return 1
         if os.path.isfile(fertig):
             shutil.copyfile(fertig, sym)
         else:
