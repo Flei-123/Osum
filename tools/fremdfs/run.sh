@@ -173,7 +173,7 @@ done
 
 # Und: die zwei Treiber tragen NUR die vier lesenden Bits.
 for f in ext4 ntfs; do
-    if grep -qaE '^\s*mask: vfsops\.OP_READONLY,' "kernel/$f.fi"; then
+    if grep -qaE '^\s*mask: vfsops\.OP_READONLY,' "kernel/fs/$f.fi"; then
         ok "kernel/$f.fi sagt OP_READONLY zu (und nichts darueber hinaus)"
     else
         bad "kernel/$f.fi traegt nicht OP_READONLY"
