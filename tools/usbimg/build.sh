@@ -1525,7 +1525,9 @@ if [ "$IMAGE_PROFILE" = personal ]; then
     { cat etc/wmplug.conf
       printf '\n# W-IMG2: JARVIS Mini, started hidden at login (not a plugin: only the name -> prog= mapping is used)\n'
       printf 'jmini rechte=0x001 prog=/bin/jarvismini\n'; } > "$OUT/wmplug.conf"
-    printf 'hotkey\njmini --hidden --as-app\n' > "$OUT/wmplug.autostart"
+    JM_AUTOSTART='jmini --hidden --as-app'
+    [ "${HP_STICK:-0}" = 1 ] && [ "${JM_HIDDEN:-0}" != 1 ] && JM_AUTOSTART='jmini --as-app'
+    printf 'hotkey\n%s\n' "$JM_AUTOSTART" > "$OUT/wmplug.autostart"
     python3 -I -c 'import sys; sys.path.insert(0, "tools/k15"); import symjoin; sys.stdout.buffer.write(symjoin.joined("pakete/jarvismini"))' > "$OUT/jarvismini.symbol"
     ARGS+=("/etc/jarvismini.conf=$OUT/jarvismini.conf@0644"
            "/etc/hotkeys.conf=etc/hotkeys.conf@0644"
