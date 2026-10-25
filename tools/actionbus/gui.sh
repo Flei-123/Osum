@@ -120,7 +120,7 @@ settingsd serve 0 &
 sleep 1
 wayd /tmp/wayland-0 2000000000 &
 sleep 1
-wlkeys /tmp/wayland-0 300 &
+wlkeys /tmp/wayland-0 600 &
 sleep 4
 echo ==G-LIST==
 act list
@@ -151,11 +151,11 @@ sleep 30
 echo ==G-SCREEN==
 sleep 25
 echo ==G-NET==
-sleep 35
+sleep 70
 echo ==G-LOGPAGE==
-sleep 15
+sleep 40
 echo ==G-UPDPAGE==
-sleep 15
+sleep 40
 echo ==G-NETDONE==
 cat /etc/network.conf
 echo ==G-TRUST==
