@@ -86,5 +86,28 @@ try:
     say(wa == W and ha == H, "picture size %dx%d" % (wa, ha))
 except OSError as e:
     say(False, "pictures missing: %s" % e)
+evs = re.findall(r"calpop: event (add|del) (\d+) n=(\d+) (ok|refused)", ser)
+tk = ty * 10000 + tm * 100 + td
+say([e[0] for e in evs] == ["add", "add", "del"] and all(int(e[1]) == tk for e in evs), "event lines add, add, del for today's key %d (%s)" % (tk, evs))
+say(len(evs) == 3 and [(e[2], e[3]) for e in evs] == [("1", "ok"), ("1", "refused"), ("0", "ok")], "store counts: 1 after add, empty add refused (still 1), 0 after del (%s)" % [(e[2], e[3]) for e in evs])
+def cell_diff(a, b):
+    r_ = rects.get("tday")
+    if not r_: return -1
+    wa, ha, da = load_ppm(os.path.join(out, a + ".ppm")); wb, hb, db = load_ppm(os.path.join(out, b + ".ppm"))
+    x0, y0, w0, h0 = r_
+    d = 0
+    for yy in range(y0, y0 + h0):
+        for xx in range(x0, x0 + w0):
+            o = (yy * wa + xx) * 3
+            if max(abs(da[o + c] - db[o + c]) for c in range(3)) > 24: d += 1
+    return d
+try:
+    on = cell_diff("05-today", "05a-event")
+    off = cell_diff("05-today", "05b-deleted")
+    say(on >= 6, "the event dot appears in today's cell (%d px differ)" % on)
+    say(0 <= off <= 1, "COUNTER-PROOF: after del the cell is as before, so the dot is not noise (%d px differ)" % off)
+    say(region_diff("05-today", "05a-event") >= 1, "the event line and entry repaint the card (%d %% differs)" % region_diff("05-today", "05a-event"))
+except OSError as e:
+    say(False, "event pictures missing: %s" % e)
 print("RESULT ok=%d fail=%d" % (ok, fail))
 sys.exit(1 if fail else 0)
