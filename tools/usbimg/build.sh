@@ -1535,7 +1535,9 @@ if [ "$IMAGE_PROFILE" = personal ]; then
     printf 'jarvismini window.float,hotkey,net\n' >> "$OUT/apprights.conf"
     printf '\n# W-IMG2: JARVIS Mini, started hidden at login (not a plugin: only the name -> prog= mapping is used)\n' >> "$OUT/wmplug.conf"
     printf 'jmini rechte=0x001 prog=/bin/jarvismini\n' >> "$OUT/wmplug.conf"
-    printf 'jmini --hidden --as-app\n' >> "$OUT/wmplug.autostart"
+    JM_AUTOSTART='jmini --hidden --as-app'
+    [ "${HP_STICK:-0}" = 1 ] && [ "${JM_HIDDEN:-0}" != 1 ] && JM_AUTOSTART='jmini --as-app'
+    printf '%s\n' "$JM_AUTOSTART" >> "$OUT/wmplug.autostart"
     { cat etc/hotkeys.conf; cat "$OUT/hotkeys.conf"; } > "$OUT/hotkeys.all" && mv "$OUT/hotkeys.all" "$OUT/hotkeys.conf"
     python3 -I -c 'import sys; sys.path.insert(0, "tools/k15"); import symjoin; sys.stdout.buffer.write(symjoin.joined("pakete/jarvismini"))' > "$OUT/jarvismini.symbol"
     ARGS+=("/etc/jarvismini.conf=$OUT/jarvismini.conf@0644"
@@ -1544,6 +1546,10 @@ if [ "$IMAGE_PROFILE" = personal ]; then
            "/apps/jarvismini.osp/INFO=pakete/jarvismini/INFO@0644"
            "/apps/jarvismini.osp/start@/bin/jarvismini"
            "/apps/jarvismini.osp/symbol=$OUT/jarvismini.symbol@0644")
+    if [ "${HP_STICK:-0}" = 1 ]; then
+        printf 'on\n' > "$OUT/jarvismini.debug"
+        ARGS+=("/etc/jarvismini.debug=$OUT/jarvismini.debug@0644")
+    fi
 fi
 # LCSH: extra mkfs specs for gates (`<path>=<host file>` words, no blanks inside) -- e.g. tools/usbimg/bbsh.sh puts a musl test program on the stick
 # shellcheck disable=SC2206
