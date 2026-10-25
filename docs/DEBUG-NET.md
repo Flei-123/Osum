@@ -17,7 +17,7 @@ Read-only HTTP service for the HP without photos: `/bin/dbgsrv`, port 8765, star
 - Also accepted: `Authorization: Bearer <token>` or `?t=<token>`.
 
 ## Endpoints
-`/` list, `/wlan`, `/drivers`, `/net`, `/pci`, `/usb`, `/lspci`, `/lspci/v`, `/dmesg` (log -n 400), `/klog`, `/svclog` (jarvisd log), `/dbgsrvlog`, `/wlanctl/status`, `/wlanctl/dump`, `/wlanctl/knobs`, `/version`, `/uptime`, `/wlanpoll`, `/wlanirq`, `/usbnet`, `/usbsum` (empty message until the kernel has `/proc/usbsum`), `/time` (RTC raw reading, local/utc mode, zone, epochs).
+`/` list, `/wlan`, `/drivers`, `/net`, `/pci`, `/usb`, `/lspci`, `/lspci/v`, `/dmesg` (log -n 400), `/klog`, `/svclog` (jarvisd log), `/dbgsrvlog`, `/wlanctl/status`, `/wlanctl/dump`, `/wlanctl/knobs`, `/version`, `/uptime`, `/wlanpoll`, `/wlanirq`, `/usbnet`, `/usbsum`, `/time` (= `/proc/clock`: RTC raw reading, local/utc mode, frame, zone rule, epochs).
 
 ## Experiment interface (one POST route)
 - `curl -X POST -H "X-Token: $T" 'http://<ip>:8765/wlanctl/reload?param=none'` retries the WLAN firmware load (only while no driver is bound).
