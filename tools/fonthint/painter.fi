@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import font.ttf
+import font.metrics
+import paint.canvas
+import fui.painter
+import fonthint
+
+const W: usize = 160
+const H: usize = 40
+const FONTSET_BYTES: usize = 4096
+const MIN_SIZE: u64 = 9
+const MAX_SIZE: u64 = 16
+const BASE: f64 = 28.0
+
+static mut p_sans: [u8; 9] = "sans.ttf\0"
+static mut txt_cap: [u8; 9] = "EEEEEEEE\0"
+static mut txt_x: [u8; 9] = "zzzzzzzz\0"
+static mut rows: [u64; 40] = [0; 40]
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+struct Ink {
+    top_sum: u64,
+    max_sum: u64,
+    rows: u64,
+    x0: u64,
+    x1: u64,
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn cov_at(cv: *mut canvas.Canvas, x: usize, y: usize) -> u64 {
+    let px: u32 = canvas.canvas_get(cv, x, y)
+    return (255 - ((px >> 8) & 255 as u32)) as u64
+}
+
+fn measure(cv: *mut canvas.Canvas) -> Ink {
+    var out: Ink = Ink { top_sum: 0, max_sum: 0, rows: 0, x0: 1000, x1: 0 }
+    var y: usize = 0
+    while y < H {
+        var sum: u64 = 0
+        var x: usize = 0
+        while x < W {
+            let c: u64 = cov_at(cv, x, y)
+            sum = sum + c
+            if c > 40 {
+                if (x as u64) < out.x0 {
+                    out.x0 = x as u64
+                }
+                if (x as u64) > out.x1 {
+                    out.x1 = x as u64
+                }
+            }
+            x = x + 1
+        }
+        rows[y] = sum
+        if sum > out.max_sum {
+            out.max_sum = sum
+        }
+        y = y + 1
+    }
+    var top: usize = 0
+    while top < H && rows[top] * 50 < out.max_sum {
+        top = top + 1
+    }
+    var last: usize = H
+    while last > top && rows[last - 1] * 50 < out.max_sum {
+        last = last - 1
+    }
+    out.rows = (last - top) as u64
+    if top < H {
+        out.top_sum = rows[top]
+    }
+    return out
+}
+
+fn paint(z: *mut painter.Painter, cv: *mut canvas.Canvas, p: u64, size: f64) {
+    canvas.canvas_clear(cv, 0xFFFFFFFF as u32)
+    painter.text(z, 4.0, BASE, 150.0, size, 0xFF000000 as u32, p, 8, painter.TEXT_L)
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    var fbuf: rt.Buf = rt.buf_new()
+    check(&t, rt.read_file((&p_sans[0]) as u64, &fbuf), "sans.ttf reads")
+    let fsp: *mut metrics.FontSet = rt.heap_alloc(FONTSET_BYTES) as *mut metrics.FontSet
+    *fsp = metrics.fontset_new()
+    check(&t, metrics.fontset_load(fsp, fbuf.ptr as *mut u8, fbuf.len), "sans.ttf loads into a font set")
+    var cv: canvas.Canvas = canvas.canvas_new()
+    check(&t, canvas.canvas_init(&cv, W, H), "canvas")
+    var z: painter.Painter = painter.painter_new()
+    check(&t, painter.painter_init(&z, &cv, W, H), "painter")
+    painter.painter_set_font(&z, fsp as u64)
+
+    paint(&z, &cv, (&txt_x[0]) as u64, 12.0)
+    let c0: Ink = measure(&cv)
+    ttf.font_set_vhint(metrics.fontset_font(fsp as u64), fonthint.painter_hook)
+    fonthint.enable(0)
+    paint(&z, &cv, (&txt_x[0]) as u64, 12.0)
+    let c1: Ink = measure(&cv)
+    fonthint.enable(1)
+    check(&t, c0.top_sum == c1.top_sum && c0.rows == c1.rows && c0.max_sum == c1.max_sum, "hook with hinting switched off paints like no hook")
+
+    var raw_sum: u64 = 0
+    var hint_sum: u64 = 0
+    var n: u64 = 0
+    var same_width: u64 = 0
+    var taller: u64 = 0
+    var size: u64 = MIN_SIZE
+    while size <= MAX_SIZE {
+        var a: Ink = Ink { top_sum: 0, max_sum: 1, rows: 0, x0: 0, x1: 0 }
+        var b: Ink = Ink { top_sum: 0, max_sum: 1, rows: 0, x0: 0, x1: 0 }
+        fonthint.enable(0)
+        paint(&z, &cv, (&txt_cap[0]) as u64, size as f64)
+        a = measure(&cv)
+        fonthint.enable(1)
+        paint(&z, &cv, (&txt_cap[0]) as u64, size as f64)
+        b = measure(&cv)
+        if a.max_sum > 0 && b.max_sum > 0 {
+            n = n + 1
+            raw_sum = raw_sum + (a.top_sum * 1000) / a.max_sum
+            hint_sum = hint_sum + (b.top_sum * 1000) / b.max_sum
+            if a.x0 == b.x0 && a.x1 == b.x1 {
+                same_width = same_width + 1
+            }
+            io.fmt_print(f"painter px {size} raw top {a.top_sum * 1000 / a.max_sum} hint top {b.top_sum * 1000 / b.max_sum} rows {a.rows} -> {b.rows} x {a.x0}..{a.x1} -> {b.x0}..{b.x1}\n")
+        }
+        size = size + 1
+    }
+    let raw_mean: u64 = raw_sum / n
+    let hint_mean: u64 = hint_sum / n
+    io.fmt_print(f"crisp raw {raw_mean} hinted {hint_mean} permille over {n} painter runs\n")
+    check(&t, n == 8, "8 painter runs (E x 8 sizes)")
+    check(&t, hint_mean >= 950, "painter text: hinted flat tops are crisp (mean top-row fill >= 950 permille)")
+    check(&t, hint_mean >= raw_mean + 80, "painter text: hinting beats the unhinted painter by >= 80 permille")
+    check(&t, same_width == n, "painter text: hinting never moves glyphs sideways")
+
+    painter.painter_free(&z)
+    canvas.canvas_free(&cv)
+    io.fmt_print(f"checks {t.checks} fails {t.fails}\n")
+    return t.fails
+}

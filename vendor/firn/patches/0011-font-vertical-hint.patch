@@ -1,0 +1,91 @@
+# OSUM r1927 -- vertical hint hook: ttf.Font gets font_set_vhint/font_vhint, the fUi painter scales each glyph y by the hook answer.
+#
+--- a/font/ttf.fi
++++ b/font/ttf.fi
+@@ -51,7 +51,7 @@
+     Font,
+     font_new, font_init, font_ok,
+     font_upem, font_ascent, font_descent, font_line_gap, font_num_glyphs,
+-    font_glyph_for, font_set_faces, font_advance, font_lsb, font_kern, font_has_kern,
++    font_glyph_for, font_set_faces, font_set_vhint, font_vhint, font_advance, font_lsb, font_kern, font_has_kern,
+     font_glyph_bbox, font_outline, font_outline_m,
+     font_scratch_needed,
+     font_cmap_format,
+@@ -114,6 +114,8 @@
+     fb_n: usize,
+     miss: fn(u32, u32) -> u32,
+     miss_on: usize,
++    vhint: fn(*mut Font, u32, i32) -> f64,
++    vhint_on: usize,
+ }
+ 
+ // ------------------------------------------------------- Big endian reads
+@@ -238,6 +240,8 @@
+         fb_n: 0,
+         miss: miss_none,
+         miss_on: 0,
++        vhint: vhint_none,
++        vhint_on: 0,
+     }
+ }
+ 
+@@ -246,6 +250,28 @@
+     return 0 as u32
+ }
+ 
++#[no_gc]
++#[allow_fp]
++fn vhint_none(f: *mut Font, px: u32, top: i32) -> f64 {
++    return 1.0
++}
++
++#[no_gc]
++fn font_set_vhint(f: *mut Font, h: fn(*mut Font, u32, i32) -> f64) {
++    (*f).vhint = h
++    (*f).vhint_on = 1
++}
++
++#[no_gc]
++#[allow_fp]
++fn font_vhint(f: *mut Font, px: u32, top: i32) -> f64 {
++    if (*f).vhint_on == 0 {
++        return 1.0
++    }
++    let h: fn(*mut Font, u32, i32) -> f64 = (*f).vhint
++    return h(f, px, top)
++}
++
+ // Hands a face its fallback table (patches 0009, 0010): `n` faces of `stride` bytes each, contiguous from `base`; the face at
+ // base + (k - 1) * stride owns ids with tag k (1..255). They must stay where they are for as long as this face is used, and they
+ // must have no fallback of their own.
+--- a/fui/painter.fi
++++ b/fui/painter.fi
+@@ -1863,11 +1863,27 @@
+         passes = BOLD_PASSES
+         step = (*r).size * BOLD_STEP
+     }
++    var vy: f64 = 1.0
++    let szr: f64 = (*r).size
++    let pxi: i64 = (szr + 0.5) as i64
++    var dpx: f64 = szr - (pxi as f64)
++    if dpx < 0.0 {
++        dpx = 0.0 - dpx
++    }
++    if pxi > 0 && dpx < 0.05 {
++        var bx0: i32 = 0
++        var by0: i32 = 0
++        var bx1: i32 = 0
++        var by1: i32 = 0
++        if ttf.font_glyph_bbox(f, gid, &bx0, &by0, &bx1, &by1) {
++            vy = ttf.font_vhint(f, pxi as u32, by1)
++        }
++    }
+     while k < passes {
+         let dx: f64 = (k as f64) * step
+         let okg: bool = ttf.outline_at(f, gid, &(*z).ra,
+             pen + dx, base_y, sc,
+-            1.0, 0.0, m10, 1.0, 0.0, 0.0,
++            1.0, 0.0, m10, vy, 0.0, 0.0,
+             (*z).scratch, SCRATCH, 0)
+         k = k + 1
+     }

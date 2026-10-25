@@ -5,6 +5,7 @@
 # 1) host.fi rasterises E T F Z z at 9..16 px with and without hinting: top-row fill (crispness), exact zone rows, width and area kept
 # 2) wiring audit: fuiglyph glyph_into asks fonthint.vfactor and rasterises through the y-scaling outline
 # 3) COUNTER-PROOFS: nohint (hinting off) fails 1), unwired fuiglyph fails 2), overhint (factor applied to every top) fails 1)
+# 4) fUi painter (r1927): painter.fi paints E rows at 9..16 px through fui.painter with the hook (vendor patch 0011); audit: fuiglyph.fontset attaches it; counter-proofs nopainter, unattached
 set -uo pipefail
 ROOT=${1:-$(cd "$(dirname "$0")/../.." && pwd)}
 cd "$ROOT"
@@ -75,6 +76,46 @@ mkdir -p "$T/old/kernel/user"
 sed 's/fonthint\.vfactor/REMOVED_/g' kernel/user/fuiglyph.fi > "$T/old/kernel/user/fuiglyph.fi"
 wire "$T/old" > "$T/wire-old.out"
 if grep -q '^FAIL' "$T/wire-old.out"; then ok "counter-proof unwired: $(grep -c '^FAIL' "$T/wire-old.out") audit lines red"; else bad "counter-proof unwired not caught"; fi
+
+build_painter() {
+    FIRNLIB="$1" vendor/firn/bin/firnc --profile=app tools/fonthint/painter.fi -o "$2" > "$T/pbuild.log" 2>&1
+}
+if build_painter "$ROOT/lib" "$T/painter"; then
+    run_host "$T/painter" "$T/painter.out"; rc=$?
+    grep -a '^FAIL' "$T/painter.out" | head -20
+    grep -a '^crisp ' "$T/painter.out" | sed 's/^/        /'
+    PASS=$((PASS+$(grep -ac '^ok ' "$T/painter.out")))
+    [ "$rc" = 0 ] && ok "painter test: crisp flat tops through fui.painter, no sideways shift" || bad "painter test (exit $rc)"
+else bad "painter build"; grep -v '^warning' "$T/pbuild.log" | head -20; fi
+
+mkdir -p "$T/lib-nopainter"; cp -r lib/. "$T/lib-nopainter/"
+sed -i 's/^    return vfactor(painter_slot(f), f, px as u64, top)$/    return 1.0/' "$T/lib-nopainter/fonthint.fi"
+if build_painter "$T/lib-nopainter" "$T/painter-no"; then
+    run_host "$T/painter-no" "$T/painter-no.out"; rc=$?
+    nf=$(grep -ac '^FAIL' "$T/painter-no.out")
+    if [ "$rc" != 0 ] && [ "$nf" -ge 2 ]; then ok "counter-proof nopainter: hook answers 1.0 -> $nf checks red"; else bad "counter-proof nopainter not caught (exit $rc, $nf red)"; fi
+else bad "nopainter build"; fi
+
+attach() {
+python3 -I - "$1" "$2" <<'PY'
+import sys,os,re
+r=sys.argv[1]; v=sys.argv[2]
+src=open(os.path.join(r,"kernel/user/fuiglyph.fi"),'rb').read().decode('latin1')
+pat=open(os.path.join(v,"lib/fui/painter.fi"),'rb').read().decode('latin1')
+m=re.search(r'^fn fontset\(.*?^}', src, re.S|re.M)
+fs=m.group(0) if m else ""
+def say(ok,t): print(("OK    " if ok else "FAIL  ")+t)
+say("fonthint.painter_attach(&(*fs).f)" in fs, "fontset attaches the painter hook")
+say("if role != ROLE_ICON {" in fs and fs.find("fonthint.painter_attach") > fs.find("if role != ROLE_ICON {"), "the icon font set never gets the hook")
+say("ttf.font_vhint(f, pxi as u32, by1)" in pat and "1.0, 0.0, m10, vy, 0.0, 0.0" in pat, "vendor painter scales glyphs by the hook factor (patch 0011)")
+PY
+}
+attach "$ROOT" "$ROOT/vendor/firn" > "$T/attach.out"; cat "$T/attach.out"
+PASS=$((PASS+$(grep -c '^OK' "$T/attach.out"))); FAIL=$((FAIL+$(grep -c '^FAIL' "$T/attach.out")))
+mkdir -p "$T/old2/kernel/user"
+sed 's/fonthint\.painter_attach/REMOVED_/g' kernel/user/fuiglyph.fi > "$T/old2/kernel/user/fuiglyph.fi"
+attach "$T/old2" "$ROOT/vendor/firn" > "$T/attach-old.out"
+if grep -q '^FAIL' "$T/attach-old.out"; then ok "counter-proof unattached: $(grep -c '^FAIL' "$T/attach-old.out") audit lines red"; else bad "counter-proof unattached not caught"; fi
 
 echo "FONTHINT: $PASS ok, $FAIL fail"
 [ "$FAIL" = 0 ]
