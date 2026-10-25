@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 import argparse
+import os
 import socket
 import struct
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 GW_MAC = bytes.fromhex("525400112233")
 GW_IP = bytes([192, 168, 1, 1])
@@ -90,6 +93,8 @@ def main():
     ap.add_argument("--secs", type=int, default=150)
     ap.add_argument("--no-echo", action="store_true")
     ap.add_argument("--no-dns", action="store_true")
+    ap.add_argument("--tls-cert")
+    ap.add_argument("--tls-key")
     a = ap.parse_args()
     mask = bytes(int(x) for x in a.mask.split("."))
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -98,6 +103,11 @@ def main():
     out = ("127.0.0.1", a.remote)
     log = open(a.log, "w", buffering=1)
     end = time.time() + a.secs
+    tls = None
+    if a.tls_cert:
+        from tlsserve import TlsServer
+        tls = TlsServer(a.tls_cert, a.tls_key, 443, GW_MAC, (ip_packet, eth, pseudo_checksum),
+                        lambda f: sock.sendto(f, out), log)
     while time.time() < end:
         try:
             frame, _ = sock.recvfrom(2048)
@@ -131,6 +141,8 @@ def main():
                     reply = dns_answer(frame[14 + 20 + 8:], src_mac, src_ip, struct.unpack("!H", frame[34:36])[0])
                     if reply:
                         sock.sendto(reply, out)
+            elif proto == 6 and tls is not None and tls.handle(frame):
+                pass
             elif proto == 6 and len(frame) >= 54 and frame[47] & 0x02:
                 log.write("TCP-SYN dst=%s port=%d\n" % (".".join(map(str, dst_ip)), struct.unpack("!H", frame[36:38])[0]))
                 sock.sendto(tcp_reset(frame, src_mac, src_ip, dst_ip), out)
