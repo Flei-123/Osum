@@ -1,0 +1,212 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.time
+import std.crypto.random
+import crypto.md4
+import crypto.hmac_md5
+import smb.pack
+
+export { Ntlm, ntlm_new, ntlm_free, negotiate_message, parse_challenge, authenticate_message,
+    SESSION_KEY_SIZE }
+
+const SESSION_KEY_SIZE: usize = 16
+const FLAGS_OFFER: u64 = 2684455445
+const FLAG_UNICODE: u64 = 1
+const FILETIME_EPOCH: u64 = 116444736000000000
+const AV_EOL: u64 = 0
+const AV_TIMESTAMP: u64 = 7
+
+struct Ntlm {
+    challenge: [u8; 8],
+    flags: u64,
+    target_info: rt.Buf,
+    has_timestamp: bool,
+    timestamp: u64,
+    session_key: [u8; 16],
+}
+
+fn ntlm_new() -> Ntlm {
+    return Ntlm { challenge: [0 as u8; 8], flags: 0, target_info: rt.buf_new(),
+        has_timestamp: false, timestamp: 0, session_key: [0 as u8; 16] }
+}
+
+fn ntlm_free(n: *mut Ntlm) {
+    rt.buf_free(&(*n).target_info)
+}
+
+fn field(b: *mut rt.Buf, at: usize, len: usize, off: usize) {
+    pack.set16(b, at, len as u64)
+    pack.set16(b, at + 2, len as u64)
+    pack.set32(b, at + 4, off as u64)
+}
+
+fn negotiate_message(out: *mut rt.Buf) {
+    rt.buf_clear(out)
+    var sig: [u8; 8] = "NTLMSSP\0"
+    pack.push_raw(out, (&sig[0]) as u64, 8)
+    pack.push32(out, 1)
+    pack.push32(out, FLAGS_OFFER)
+    pack.push_zero(out, 16)
+}
+
+fn parse_challenge(n: *mut Ntlm, msg: u64, len: usize) -> bool {
+    if len < 48 {
+        return false
+    }
+    var sig: [u8; 8] = "NTLMSSP\0"
+    var i: usize = 0
+    while i < 8 {
+        if rt.ld8(msg, i) != sig[i] {
+            return false
+        }
+        i = i + 1
+    }
+    if pack.get32(msg, 8) != 2 {
+        return false
+    }
+    (*n).flags = pack.get32(msg, 20)
+    i = 0
+    while i < 8 {
+        (*n).challenge[i] = rt.ld8(msg, 24 + i)
+        i = i + 1
+    }
+    rt.buf_clear(&(*n).target_info)
+    (*n).has_timestamp = false
+    if len >= 56 && ((*n).flags & 8388608) != 0 {
+        let tl: usize = pack.get16(msg, 40) as usize
+        let to: usize = pack.get32(msg, 44) as usize
+        if to + tl > len {
+            return false
+        }
+        pack.push_raw(&(*n).target_info, msg + to as u64, tl)
+        var at: usize = 0
+        while at + 4 <= tl {
+            let id: u64 = pack.get16(msg + to as u64, at)
+            let al: usize = pack.get16(msg + to as u64, at + 2) as usize
+            if id == AV_EOL || at + 4 + al > tl {
+                break
+            }
+            if id == AV_TIMESTAMP && al == 8 {
+                (*n).has_timestamp = true
+                (*n).timestamp = pack.get64(msg + to as u64, at + 4)
+            }
+            at = at + 4 + al
+        }
+    }
+    return true
+}
+
+fn nt_hash_of(pw: u64, plen: usize, out: u64) {
+    var wide: rt.Buf = rt.buf_new()
+    pack.push_utf16(&wide, pw, plen, false)
+    md4.md4(rt.buf_ptr(&wide), rt.buf_len(&wide), out)
+    rt.buf_free(&wide)
+}
+
+fn authenticate_message(n: *mut Ntlm, user: u64, ulen: usize, domain: u64, dlen: usize,
+    workstation: u64, wlen: usize, pw: u64, plen: usize, out: *mut rt.Buf) -> bool {
+    var nth: [u8; 16] = [0; 16]
+    nt_hash_of(pw, plen, (&nth[0]) as u64)
+    var ident: rt.Buf = rt.buf_new()
+    pack.push_utf16(&ident, user, ulen, true)
+    pack.push_utf16(&ident, domain, dlen, false)
+    var key: [u8; 16] = [0; 16]
+    hmac_md5.hmac_md5((&nth[0]) as u64, 16, rt.buf_ptr(&ident), rt.buf_len(&ident), (&key[0]) as u64)
+    rt.buf_free(&ident)
+
+    var cc: [u8; 8] = [0; 8]
+    if !random.random_bytes((&cc[0]) as u64, 8) {
+        return false
+    }
+    var time: u64 = 0
+    if (*n).has_timestamp {
+        time = (*n).timestamp
+    } else {
+        time = (time_now_ns() / 100) as u64 + FILETIME_EPOCH
+    }
+
+    var temp: rt.Buf = rt.buf_new()
+    pack.push32(&temp, 257)
+    pack.push32(&temp, 0)
+    pack.push64(&temp, time)
+    pack.push_raw(&temp, (&cc[0]) as u64, 8)
+    pack.push32(&temp, 0)
+    pack.push_raw(&temp, rt.buf_ptr(&(*n).target_info), rt.buf_len(&(*n).target_info))
+    pack.push32(&temp, 0)
+
+    var proof_in: rt.Buf = rt.buf_new()
+    pack.push_raw(&proof_in, (&(*n).challenge[0]) as u64, 8)
+    pack.push_raw(&proof_in, rt.buf_ptr(&temp), rt.buf_len(&temp))
+    var proof: [u8; 16] = [0; 16]
+    hmac_md5.hmac_md5((&key[0]) as u64, 16, rt.buf_ptr(&proof_in), rt.buf_len(&proof_in), (&proof[0]) as u64)
+    rt.buf_free(&proof_in)
+    hmac_md5.hmac_md5((&key[0]) as u64, 16, (&proof[0]) as u64, 16, (&(*n).session_key[0]) as u64)
+
+    var nt_resp: rt.Buf = rt.buf_new()
+    pack.push_raw(&nt_resp, (&proof[0]) as u64, 16)
+    pack.push_raw(&nt_resp, rt.buf_ptr(&temp), rt.buf_len(&temp))
+    rt.buf_free(&temp)
+
+    var lm_resp: [u8; 24] = [0; 24]
+    if !(*n).has_timestamp {
+        var lm_in: [u8; 16] = [0; 16]
+        var i: usize = 0
+        while i < 8 {
+            lm_in[i] = (*n).challenge[i]
+            lm_in[8 + i] = cc[i]
+            i = i + 1
+        }
+        var lm: [u8; 16] = [0; 16]
+        hmac_md5.hmac_md5((&key[0]) as u64, 16, (&lm_in[0]) as u64, 16, (&lm[0]) as u64)
+        i = 0
+        while i < 16 {
+            lm_resp[i] = lm[i]
+            i = i + 1
+        }
+        i = 0
+        while i < 8 {
+            lm_resp[16 + i] = cc[i]
+            i = i + 1
+        }
+    }
+
+    var dom_w: rt.Buf = rt.buf_new()
+    var usr_w: rt.Buf = rt.buf_new()
+    var wks_w: rt.Buf = rt.buf_new()
+    pack.push_utf16(&dom_w, domain, dlen, false)
+    pack.push_utf16(&usr_w, user, ulen, false)
+    pack.push_utf16(&wks_w, workstation, wlen, false)
+
+    rt.buf_clear(out)
+    var sig: [u8; 8] = "NTLMSSP\0"
+    pack.push_raw(out, (&sig[0]) as u64, 8)
+    pack.push32(out, 3)
+    pack.push_zero(out, 48)
+    let flags: u64 = (FLAGS_OFFER & (*n).flags) | FLAG_UNICODE
+    pack.push32(out, flags)
+    var off: usize = 64
+    field(out, 28, rt.buf_len(&dom_w), off)
+    pack.push_raw(out, rt.buf_ptr(&dom_w), rt.buf_len(&dom_w))
+    off = off + rt.buf_len(&dom_w)
+    field(out, 36, rt.buf_len(&usr_w), off)
+    pack.push_raw(out, rt.buf_ptr(&usr_w), rt.buf_len(&usr_w))
+    off = off + rt.buf_len(&usr_w)
+    field(out, 44, rt.buf_len(&wks_w), off)
+    pack.push_raw(out, rt.buf_ptr(&wks_w), rt.buf_len(&wks_w))
+    off = off + rt.buf_len(&wks_w)
+    field(out, 12, 24, off)
+    pack.push_raw(out, (&lm_resp[0]) as u64, 24)
+    off = off + 24
+    field(out, 20, rt.buf_len(&nt_resp), off)
+    pack.push_raw(out, rt.buf_ptr(&nt_resp), rt.buf_len(&nt_resp))
+    field(out, 52, 0, off + rt.buf_len(&nt_resp))
+    rt.buf_free(&dom_w)
+    rt.buf_free(&usr_w)
+    rt.buf_free(&wks_w)
+    rt.buf_free(&nt_resp)
+    return true
+}
+
+fn time_now_ns() -> i64 {
+    return time.now_unix_ns()
+}

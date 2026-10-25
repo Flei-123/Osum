@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+
+export { wrap_init, wrap_response, find_ntlm }
+
+fn len_size(n: usize) -> usize {
+    if n < 128 {
+        return 1
+    }
+    if n < 256 {
+        return 2
+    }
+    return 3
+}
+
+fn put_len(out: *mut rt.Buf, n: usize) {
+    if n < 128 {
+        rt.buf_push(out, n as u8)
+    } else if n < 256 {
+        rt.buf_push(out, 129 as u8)
+        rt.buf_push(out, n as u8)
+    } else {
+        rt.buf_push(out, 130 as u8)
+        rt.buf_push(out, (n >> 8) as u8)
+        rt.buf_push(out, (n & 255) as u8)
+    }
+}
+
+fn tlv_size(content: usize) -> usize {
+    return 1 + len_size(content) + content
+}
+
+fn put_header(out: *mut rt.Buf, tag: u8, content: usize) {
+    rt.buf_push(out, tag)
+    put_len(out, content)
+}
+
+fn wrap_init(token: u64, n: usize, out: *mut rt.Buf) {
+    rt.buf_clear(out)
+    let octets: usize = tlv_size(n)
+    let mech_token: usize = tlv_size(octets)
+    let mech_types: usize = 16
+    let seq: usize = mech_types + mech_token
+    let init: usize = tlv_size(seq)
+    let init_tagged: usize = tlv_size(init)
+    var oid: [u8; 8] = [6, 6, 43, 6, 1, 5, 5, 2]
+    var ntlm_oid: [u8; 12] = [6, 10, 43, 6, 1, 4, 1, 130, 55, 2, 2, 10]
+    put_header(out, 96 as u8, 8 + init_tagged)
+    rt.buf_push_bytes(out, (&oid[0]) as u64, 8)
+    put_header(out, 160 as u8, init)
+    put_header(out, 48 as u8, seq)
+    put_header(out, 160 as u8, 14)
+    put_header(out, 48 as u8, 12)
+    rt.buf_push_bytes(out, (&ntlm_oid[0]) as u64, 12)
+    put_header(out, 162 as u8, octets)
+    put_header(out, 4 as u8, n)
+    rt.buf_push_bytes(out, token, n)
+}
+
+fn wrap_response(token: u64, n: usize, out: *mut rt.Buf) {
+    rt.buf_clear(out)
+    let octets: usize = tlv_size(n)
+    let tagged: usize = tlv_size(octets)
+    let seq: usize = tlv_size(tagged)
+    put_header(out, 161 as u8, seq)
+    put_header(out, 48 as u8, tagged)
+    put_header(out, 162 as u8, octets)
+    put_header(out, 4 as u8, n)
+    rt.buf_push_bytes(out, token, n)
+}
+
+fn find_ntlm(p: u64, n: usize) -> usize {
+    var sig: [u8; 8] = "NTLMSSP\0"
+    var i: usize = 0
+    while i + 8 <= n {
+        var j: usize = 0
+        while j < 8 && rt.ld8(p, i + j) == sig[j] {
+            j = j + 1
+        }
+        if j == 8 {
+            return i
+        }
+        i = i + 1
+    }
+    return n
+}

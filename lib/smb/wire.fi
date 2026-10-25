@@ -1,0 +1,268 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.net
+import std.crypto.hmac
+import smb.pack
+
+export { Smb, smb_new, smb_free, request, last_status, status_error, body_ptr, body_len,
+    CMD_NEGOTIATE, CMD_SESSION_SETUP, CMD_LOGOFF, CMD_TREE_CONNECT, CMD_TREE_DISCONNECT,
+    CMD_CREATE, CMD_CLOSE, CMD_READ, CMD_WRITE, CMD_QUERY_DIRECTORY,
+    E_OK, E_CONNECT, E_IO, E_PROTO, E_AUTH, E_SHARE, E_NOTFOUND, E_DENIED, E_STATUS, E_SIGN,
+    E_ARG, E_TOOBIG, E_EXISTS,
+    NT_SUCCESS, NT_MORE_PROCESSING, NT_NO_MORE_FILES, NT_END_OF_FILE,
+    HEADER_SIZE }
+
+const HEADER_SIZE: usize = 64
+const FRAME_MAX: usize = 1048576
+const FLAG_SIGNED: u64 = 8
+const FLAG_ASYNC: u64 = 2
+const CREDITS_ASKED: u64 = 8
+
+const CMD_NEGOTIATE: u64 = 0
+const CMD_SESSION_SETUP: u64 = 1
+const CMD_LOGOFF: u64 = 2
+const CMD_TREE_CONNECT: u64 = 3
+const CMD_TREE_DISCONNECT: u64 = 4
+const CMD_CREATE: u64 = 5
+const CMD_CLOSE: u64 = 6
+const CMD_READ: u64 = 8
+const CMD_WRITE: u64 = 9
+const CMD_QUERY_DIRECTORY: u64 = 14
+
+const E_OK: u64 = 0
+const E_CONNECT: u64 = 1
+const E_IO: u64 = 2
+const E_PROTO: u64 = 3
+const E_AUTH: u64 = 4
+const E_SHARE: u64 = 5
+const E_NOTFOUND: u64 = 6
+const E_DENIED: u64 = 7
+const E_STATUS: u64 = 8
+const E_SIGN: u64 = 9
+const E_ARG: u64 = 10
+const E_TOOBIG: u64 = 11
+const E_EXISTS: u64 = 12
+
+const NT_SUCCESS: u64 = 0
+const NT_PENDING: u64 = 259
+const NT_MORE_PROCESSING: u64 = 3221225494
+const NT_NO_MORE_FILES: u64 = 2147483654
+const NT_END_OF_FILE: u64 = 3221225489
+
+struct Smb {
+    conn: net.Conn,
+    open: bool,
+    session_id: u64,
+    tree_id: u64,
+    message_id: u64,
+    signing: bool,
+    sign_wanted: bool,
+    sign_key: [u8; 16],
+    dialect: u64,
+    tx: rt.Buf,
+    rx: rt.Buf,
+    status: u64,
+    max_io: usize,
+}
+
+fn smb_new() -> Smb {
+    return Smb { conn: net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 },
+        open: false, session_id: 0, tree_id: 0, message_id: 0, signing: false, sign_wanted: false,
+        sign_key: [0 as u8; 16], dialect: 0, tx: rt.buf_new(), rx: rt.buf_new(), status: 0,
+        max_io: 61440 }
+}
+
+fn smb_free(s: *mut Smb) {
+    if (*s).open {
+        net.close(&(*s).conn)
+        (*s).open = false
+    }
+    rt.buf_free(&(*s).tx)
+    rt.buf_free(&(*s).rx)
+}
+
+fn last_status(s: *mut Smb) -> u64 {
+    return (*s).status
+}
+
+fn body_ptr(s: *mut Smb) -> u64 {
+    return rt.buf_ptr(&(*s).rx) + HEADER_SIZE as u64
+}
+
+fn body_len(s: *mut Smb) -> usize {
+    return rt.buf_len(&(*s).rx) - HEADER_SIZE
+}
+
+fn is_one_of(st: u64, list: *mut [u64; 8], n: usize) -> bool {
+    var i: usize = 0
+    while i < n {
+        if (*list)[i] == st {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn status_error(st: u64) -> u64 {
+    if st == NT_SUCCESS {
+        return E_OK
+    }
+    var auth: [u64; 8] = [0xC000006D, 0xC000006E, 0xC0000072, 0xC0000071, 0xC000006A, 0xC0000064,
+        0xC0000234, 0xC0000224]
+    if is_one_of(st, &auth, 8) {
+        return E_AUTH
+    }
+    if st == 0xC00000CC {
+        return E_SHARE
+    }
+    var missing: [u64; 8] = [0xC0000034, 0xC000003A, 0xC000000F, 0, 0, 0, 0, 0]
+    if is_one_of(st, &missing, 3) {
+        return E_NOTFOUND
+    }
+    var denied: [u64; 8] = [0xC0000022, 0xC000015B, 0xC0000061, 0, 0, 0, 0, 0]
+    if is_one_of(st, &denied, 3) {
+        return E_DENIED
+    }
+    if st == 0xC0000035 {
+        return E_EXISTS
+    }
+    return E_STATUS
+}
+
+fn io_fail(bad: *mut bool) -> usize {
+    *bad = true
+    return 0
+}
+
+fn begin(s: *mut Smb, cmd: u64) {
+    rt.buf_clear(&(*s).tx)
+    pack.push32(&(*s).tx, 0)
+    var magic: [u8; 4] = [254, 83, 77, 66]
+    pack.push_raw(&(*s).tx, (&magic[0]) as u64, 4)
+    pack.push16(&(*s).tx, 64)
+    pack.push16(&(*s).tx, 0)
+    pack.push32(&(*s).tx, 0)
+    pack.push16(&(*s).tx, cmd)
+    pack.push16(&(*s).tx, CREDITS_ASKED)
+    pack.push32(&(*s).tx, 0)
+    pack.push32(&(*s).tx, 0)
+    pack.push64(&(*s).tx, (*s).message_id)
+    pack.push32(&(*s).tx, 0)
+    pack.push32(&(*s).tx, (*s).tree_id & 4294967295 as u64)
+    pack.push64(&(*s).tx, (*s).session_id)
+    pack.push_zero(&(*s).tx, 16)
+}
+
+fn sign(s: *mut Smb, msg: u64, n: usize, out: u64) {
+    var mac: [u8; 32] = [0; 32]
+    hmac.hmac_sha256((&(*s).sign_key[0]) as u64, 16, msg, n, (&mac[0]) as u64)
+    var i: usize = 0
+    while i < 16 {
+        rt.st8(out, i, mac[i])
+        i = i + 1
+    }
+}
+
+fn send_frame(s: *mut Smb) -> bool {
+    let total: usize = rt.buf_len(&(*s).tx)
+    let msg: u64 = rt.buf_ptr(&(*s).tx) + 4
+    rt.st8(rt.buf_ptr(&(*s).tx), 0, 0 as u8)
+    rt.st8(rt.buf_ptr(&(*s).tx), 1, (((total - 4) >> 16) & 255) as u8)
+    rt.st8(rt.buf_ptr(&(*s).tx), 2, (((total - 4) >> 8) & 255) as u8)
+    rt.st8(rt.buf_ptr(&(*s).tx), 3, ((total - 4) & 255) as u8)
+    if (*s).signing {
+        pack.store32(msg, 16, pack.get32(msg, 16) | FLAG_SIGNED)
+        sign(s, msg, total - 4, msg + 48)
+    }
+    var bad: bool = false
+    let w: usize = net.write_all(&(*s).conn, rt.buf_ptr(&(*s).tx), total) catch io_fail(&bad)
+    return !bad
+}
+
+fn recv_frame(s: *mut Smb) -> u64 {
+    var head: [u8; 4] = [0; 4]
+    var bad: bool = false
+    let r: usize = net.read_full(&(*s).conn, (&head[0]) as u64, 4) catch io_fail(&bad)
+    if bad {
+        return E_IO
+    }
+    let n: usize = ((head[1] as usize) << 16) | ((head[2] as usize) << 8) | (head[3] as usize)
+    if head[0] != 0 as u8 || n < HEADER_SIZE {
+        return E_PROTO
+    }
+    if n > FRAME_MAX {
+        return E_TOOBIG
+    }
+    rt.buf_clear(&(*s).rx)
+    if !rt.buf_reserve(&(*s).rx, n) {
+        return E_TOOBIG
+    }
+    let r2: usize = net.read_full(&(*s).conn, rt.buf_ptr(&(*s).rx), n) catch io_fail(&bad)
+    if bad {
+        return E_IO
+    }
+    rt.buf_set_len(&(*s).rx, n)
+    return E_OK
+}
+
+fn verify(s: *mut Smb) -> bool {
+    let msg: u64 = rt.buf_ptr(&(*s).rx)
+    let n: usize = rt.buf_len(&(*s).rx)
+    if (pack.get32(msg, 16) & FLAG_SIGNED) == 0 {
+        return false
+    }
+    var received: [u8; 16] = [0; 16]
+    var i: usize = 0
+    while i < 16 {
+        received[i] = rt.ld8(msg, 48 + i)
+        rt.st8(msg, 48 + i, 0 as u8)
+        i = i + 1
+    }
+    var expected: [u8; 16] = [0; 16]
+    sign(s, msg, n, (&expected[0]) as u64)
+    var diff: u8 = 0 as u8
+    i = 0
+    while i < 16 {
+        diff = diff | (received[i] ^ expected[i])
+        rt.st8(msg, 48 + i, received[i])
+        i = i + 1
+    }
+    return diff == 0 as u8
+}
+
+fn request(s: *mut Smb, cmd: u64, body: u64, n: usize) -> u64 {
+    begin(s, cmd)
+    pack.push_raw(&(*s).tx, body, n)
+    if !send_frame(s) {
+        return E_IO
+    }
+    var answered: bool = false
+    var code: u64 = E_OK
+    while !answered {
+        code = recv_frame(s)
+        if code != E_OK {
+            return code
+        }
+        let msg: u64 = rt.buf_ptr(&(*s).rx)
+        if rt.ld8(msg, 0) != 254 as u8 || rt.ld8(msg, 1) != 83 as u8 {
+            return E_PROTO
+        }
+        (*s).status = pack.get32(msg, 8)
+        let async_pending: bool = (*s).status == NT_PENDING && (pack.get32(msg, 16) & FLAG_ASYNC) != 0
+        if !async_pending {
+            answered = true
+        }
+    }
+    let msg: u64 = rt.buf_ptr(&(*s).rx)
+    if pack.get64(msg, 24) != (*s).message_id {
+        return E_PROTO
+    }
+    (*s).message_id = (*s).message_id + 1
+    if (*s).signing && cmd != CMD_SESSION_SETUP {
+        if !verify(s) {
+            return E_SIGN
+        }
+    }
+    return E_OK
+}

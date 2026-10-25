@@ -1,0 +1,379 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.io
+import std.rt
+import std.net
+import std.crypto.sha256
+import libc.dns
+import smb.wire
+import smb.client
+import smb.files
+
+const DEFAULT_PORT: u32 = 445
+const IO_TIMEOUT_MS: u64 = 20000
+
+struct Opts {
+    port: u32,
+    user: u64,
+    password: u64,
+    domain: u64,
+    no_sign: bool,
+    host: u64,
+    share: u64,
+    cmd: u64,
+    arg1: u64,
+    arg2: u64,
+}
+
+fn eq(a: u64, lit: u64) -> bool {
+    var i: usize = 0
+    while true {
+        let x: u8 = rt.ld8(a, i)
+        let y: u8 = rt.ld8(lit, i)
+        if x != y {
+            return false
+        }
+        if x == 0 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn parse_dec(p: u64) -> u32 {
+    var v: u32 = 0
+    var i: usize = 0
+    while rt.ld8(p, i) >= 48 as u8 && rt.ld8(p, i) <= 57 as u8 {
+        v = v * 10 as u32 + (rt.ld8(p, i) - 48 as u8) as u32
+        i = i + 1
+    }
+    return v
+}
+
+fn parse_ipv4(p: u64, out: *mut u32) -> bool {
+    var parts: [u32; 4] = [0; 4]
+    var k: usize = 0
+    var v: u32 = 0
+    var digits: usize = 0
+    var i: usize = 0
+    while true {
+        let c: u8 = rt.ld8(p, i)
+        if c == 0 as u8 {
+            break
+        }
+        if c == 46 as u8 {
+            if digits == 0 || k >= 3 || v > 255 as u32 {
+                return false
+            }
+            parts[k] = v
+            k = k + 1
+            v = 0
+            digits = 0
+        } else if c >= 48 as u8 && c <= 57 as u8 {
+            v = v * 10 as u32 + (c - 48 as u8) as u32
+            digits = digits + 1
+        } else {
+            return false
+        }
+        i = i + 1
+    }
+    if k != 3 || digits == 0 || v > 255 as u32 {
+        return false
+    }
+    parts[3] = v
+    *out = net.ipv4(parts[0] as u8, parts[1] as u8, parts[2] as u8, parts[3] as u8)
+    return true
+}
+
+fn say(b: *mut rt.Buf) {
+    io.print_bytes(rt.buf_ptr(b), rt.buf_len(b))
+}
+
+fn error_name(code: u64) -> str {
+    if code == wire.E_CONNECT {
+        return "connect"
+    }
+    if code == wire.E_IO {
+        return "io"
+    }
+    if code == wire.E_PROTO {
+        return "proto"
+    }
+    if code == wire.E_AUTH {
+        return "auth"
+    }
+    if code == wire.E_SHARE {
+        return "share"
+    }
+    if code == wire.E_NOTFOUND {
+        return "notfound"
+    }
+    if code == wire.E_DENIED {
+        return "denied"
+    }
+    if code == wire.E_SIGN {
+        return "sign"
+    }
+    if code == wire.E_ARG {
+        return "arg"
+    }
+    if code == wire.E_TOOBIG {
+        return "toobig"
+    }
+    if code == wire.E_EXISTS {
+        return "exists"
+    }
+    return "status"
+}
+
+fn fail(s: *mut wire.Smb, stage: str, code: u64) -> i32 {
+    var b: rt.Buf = rt.buf_new()
+    io.print("smbctl: FAILED ")
+    io.print(stage)
+    io.print(" ")
+    io.print(error_name(code))
+    rt.buf_push(&b, 32 as u8)
+    rt.buf_push_hex_u64(&b, wire.last_status(s), 8)
+    rt.buf_push(&b, 10 as u8)
+    say(&b)
+    rt.buf_free(&b)
+    return 1
+}
+
+static mut LABEL: [u8; 8] = " sha256 "
+
+fn digest_label() -> u64 {
+    return (&LABEL[0]) as u64
+}
+
+fn push_hex(b: *mut rt.Buf, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        rt.buf_push_hex_u64(b, rt.ld8(p, i) as u64, 2)
+        i = i + 1
+    }
+}
+
+fn report(kind: str, total: u64, digest: u64) {
+    var b: rt.Buf = rt.buf_new()
+    io.print("smbctl: ")
+    io.print(kind)
+    io.print(" octets ")
+    rt.buf_push_dec_u64(&b, total)
+    rt.buf_push_bytes(&b, digest_label(), 8)
+    push_hex(&b, digest, 32)
+    rt.buf_push(&b, 10 as u8)
+    say(&b)
+    rt.buf_free(&b)
+}
+
+fn cmd_ls(s: *mut wire.Smb, o: *mut Opts) -> i32 {
+    var h: files.Handle = files.handle_new()
+    var path: u64 = (*o).arg1
+    var plen: usize = 0
+    if path != 0 {
+        plen = rt.c_length(path)
+    }
+    let code: u64 = files.open_dir(s, &h, path, plen)
+    if code != wire.E_OK {
+        return fail(s, "open", code)
+    }
+    var out: rt.Buf = rt.buf_new()
+    let lc: u64 = files.list_dir(s, &h, &out)
+    if lc != wire.E_OK {
+        rt.buf_free(&out)
+        return fail(s, "list", lc)
+    }
+    say(&out)
+    rt.buf_free(&out)
+    files.close(s, &h)
+    io.print("smbctl: ls ok\n")
+    return 0
+}
+
+fn cmd_get(s: *mut wire.Smb, o: *mut Opts) -> i32 {
+    if (*o).arg1 == 0 {
+        io.print("smbctl: get needs a remote path\n")
+        return 2
+    }
+    var h: files.Handle = files.handle_new()
+    let code: u64 = files.open_read(s, &h, (*o).arg1, rt.c_length((*o).arg1))
+    if code != wire.E_OK {
+        return fail(s, "open", code)
+    }
+    let local: u64 = (*o).arg2
+    if local != 0 {
+        if !io.write_file(local, 0, 0) {
+            io.print("smbctl: cannot create the local file\n")
+            return 1
+        }
+    }
+    var hash: sha256.Sha256 = sha256.sha256_new()
+    var chunk: rt.Buf = rt.buf_new()
+    var total: u64 = 0
+    var more: bool = true
+    while more {
+        rt.buf_clear(&chunk)
+        let rc: u64 = files.read_chunk(s, &h, total, (*s).max_io, &chunk)
+        if rc != wire.E_OK {
+            rt.buf_free(&chunk)
+            return fail(s, "read", rc)
+        }
+        let n: usize = rt.buf_len(&chunk)
+        if n == 0 {
+            more = false
+        } else {
+            sha256.sha256_update(&hash, rt.buf_ptr(&chunk), n)
+            if local != 0 {
+                if !io.append_file(local, rt.buf_ptr(&chunk), n) {
+                    io.print("smbctl: cannot write the local file\n")
+                    return 1
+                }
+            }
+            total = total + n as u64
+        }
+    }
+    rt.buf_free(&chunk)
+    files.close(s, &h)
+    var digest: [u8; 32] = [0; 32]
+    sha256.sha256_final(&hash, (&digest[0]) as u64)
+    report("get", total as u64, (&digest[0]) as u64)
+    return 0
+}
+
+fn cmd_put(s: *mut wire.Smb, o: *mut Opts) -> i32 {
+    if (*o).arg1 == 0 || (*o).arg2 == 0 {
+        io.print("smbctl: put needs a local and a remote path\n")
+        return 2
+    }
+    var data: rt.Buf = rt.buf_new()
+    if !io.read_file((*o).arg1, &data) {
+        io.print("smbctl: cannot read the local file\n")
+        return 1
+    }
+    var h: files.Handle = files.handle_new()
+    let code: u64 = files.open_write(s, &h, (*o).arg2, rt.c_length((*o).arg2))
+    if code != wire.E_OK {
+        rt.buf_free(&data)
+        return fail(s, "open", code)
+    }
+    let total: usize = rt.buf_len(&data)
+    var at: usize = 0
+    while at < total {
+        var n: usize = total - at
+        if n > (*s).max_io {
+            n = (*s).max_io
+        }
+        let wc: u64 = files.write_chunk(s, &h, at as u64, rt.buf_ptr(&data) + at as u64, n)
+        if wc != wire.E_OK {
+            rt.buf_free(&data)
+            return fail(s, "write", wc)
+        }
+        at = at + n
+    }
+    var digest: [u8; 32] = [0; 32]
+    sha256.sha256(rt.buf_ptr(&data), total, (&digest[0]) as u64)
+    rt.buf_free(&data)
+    files.close(s, &h)
+    report("put", total as u64, (&digest[0]) as u64)
+    return 0
+}
+
+fn run(s: *mut wire.Smb, o: *mut Opts) -> i32 {
+    var addr: u32 = 0
+    if !parse_ipv4((*o).host, &addr) {
+        let a4: u64 = dns.resolve_a((*o).host)
+        if a4 == 0 {
+            io.print("smbctl: cannot resolve the host\n")
+            return 1
+        }
+        addr = a4 as u32
+    }
+    var code: u64 = client.connect(s, addr, (*o).port as u16, IO_TIMEOUT_MS)
+    if code != wire.E_OK {
+        return fail(s, "connect", code)
+    }
+    if (*o).no_sign {
+        client.set_signing(client.SIGNING_OFF)
+    }
+    code = client.negotiate(s)
+    if code != wire.E_OK {
+        return fail(s, "negotiate", code)
+    }
+    code = client.login(s, (*o).user, rt.c_length((*o).user), (*o).domain, rt.c_length((*o).domain),
+        (*o).password, rt.c_length((*o).password))
+    if code != wire.E_OK {
+        return fail(s, "login", code)
+    }
+    code = client.tree_connect(s, (*o).host, rt.c_length((*o).host), (*o).share, rt.c_length((*o).share))
+    if code != wire.E_OK {
+        return fail(s, "tree", code)
+    }
+    var rc: i32 = 2
+    var c_ls: [u8; 3] = "ls\0"
+    var c_get: [u8; 4] = "get\0"
+    var c_put: [u8; 4] = "put\0"
+    if eq((*o).cmd, (&c_ls[0]) as u64) {
+        rc = cmd_ls(s, o)
+    } else if eq((*o).cmd, (&c_get[0]) as u64) {
+        rc = cmd_get(s, o)
+    } else if eq((*o).cmd, (&c_put[0]) as u64) {
+        rc = cmd_put(s, o)
+    } else {
+        io.print("smbctl: unknown command\n")
+    }
+    client.tree_disconnect(s)
+    client.logoff(s)
+    return rc
+}
+
+fn main(start: u64) -> i32 {
+    var o: Opts = Opts { port: DEFAULT_PORT, user: 0, password: 0, domain: 0, no_sign: false,
+        host: 0, share: 0, cmd: 0, arg1: 0, arg2: 0 }
+    let empty: [u8; 1] = [0]
+    o.domain = (&empty[0]) as u64
+    let argc: usize = rt.arg_count(start)
+    var positional: usize = 0
+    var i: usize = 1
+    while i < argc {
+        let a: u64 = rt.arg_ptr(start, i)
+        if rt.ld8(a, 0) == 45 as u8 && rt.c_length(a) == 2 && rt.ld8(a, 1) != 78 as u8 && i + 1 < argc {
+            let c: u8 = rt.ld8(a, 1)
+            i = i + 1
+            let v: u64 = rt.arg_ptr(start, i)
+            if c == 112 as u8 {
+                o.port = parse_dec(v)
+            } else if c == 117 as u8 {
+                o.user = v
+            } else if c == 119 as u8 {
+                o.password = v
+            } else if c == 100 as u8 {
+                o.domain = v
+            }
+        } else if rt.ld8(a, 0) == 45 as u8 && rt.c_length(a) == 2 && rt.ld8(a, 1) == 78 as u8 {
+            o.no_sign = true
+        } else {
+            if positional == 0 {
+                o.host = a
+            } else if positional == 1 {
+                o.share = a
+            } else if positional == 2 {
+                o.cmd = a
+            } else if positional == 3 {
+                o.arg1 = a
+            } else if positional == 4 {
+                o.arg2 = a
+            }
+            positional = positional + 1
+        }
+        i = i + 1
+    }
+    if o.host == 0 || o.share == 0 || o.cmd == 0 || o.user == 0 || o.password == 0 {
+        io.print("usage: smbctl [-p port] -u user -w password [-d domain] [-N] host share ls [path] | get remote [local] | put local remote\n")
+        return 2
+    }
+    var s: wire.Smb = wire.smb_new()
+    let rc: i32 = run(&s, &o)
+    wire.smb_free(&s)
+    return rc
+}

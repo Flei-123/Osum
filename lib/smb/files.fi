@@ -1,0 +1,294 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import smb.pack
+import smb.wire
+
+export { Handle, handle_new, open_dir, open_read, open_write, close, list_dir, read_chunk,
+    write_chunk, file_size, MODE_DIR, MODE_READ, MODE_WRITE }
+
+const MODE_DIR: u64 = 0
+const MODE_READ: u64 = 1
+const MODE_WRITE: u64 = 2
+const FILE_ID_SIZE: usize = 16
+
+struct Handle {
+    id: [u8; 16],
+    size: u64,
+    is_open: bool,
+}
+
+fn handle_new() -> Handle {
+    return Handle { id: [0 as u8; 16], size: 0, is_open: false }
+}
+
+fn file_size(h: *mut Handle) -> u64 {
+    return (*h).size
+}
+
+fn push_name(b: *mut rt.Buf, path: u64, n: usize) {
+    var i: usize = 0
+    var wide: rt.Buf = rt.buf_new()
+    pack.push_utf16(&wide, path, n, false)
+    var at: usize = 0
+    while at + 1 < rt.buf_len(&wide) {
+        if rt.ld8(rt.buf_ptr(&wide), at) == 47 as u8 && rt.ld8(rt.buf_ptr(&wide), at + 1) == 0 as u8 {
+            rt.st8(rt.buf_ptr(&wide), at, 92 as u8)
+        }
+        at = at + 2
+    }
+    pack.push_raw(b, rt.buf_ptr(&wide), rt.buf_len(&wide))
+    rt.buf_free(&wide)
+}
+
+fn trim_slashes(path: u64, n: usize, from: *mut usize, to: *mut usize) {
+    var a: usize = 0
+    var z: usize = n
+    while a < z && (rt.ld8(path, a) == 47 as u8 || rt.ld8(path, a) == 92 as u8) {
+        a = a + 1
+    }
+    while z > a && (rt.ld8(path, z - 1) == 47 as u8 || rt.ld8(path, z - 1) == 92 as u8) {
+        z = z - 1
+    }
+    *from = a
+    *to = z
+}
+
+fn open_path(s: *mut wire.Smb, h: *mut Handle, path: u64, n: usize, mode: u64) -> u64 {
+    var a: usize = 0
+    var z: usize = 0
+    trim_slashes(path, n, &a, &z)
+    var name: rt.Buf = rt.buf_new()
+    push_name(&name, path + a as u64, z - a)
+    var access: u64 = 1048705
+    var options: u64 = 1
+    var disposition: u64 = 1
+    var attrs: u64 = 0
+    if mode == MODE_READ {
+        access = 1048705
+        options = 64
+    } else if mode == MODE_WRITE {
+        access = 1048962
+        options = 64
+        disposition = 5
+        attrs = 128
+    }
+    var b: rt.Buf = rt.buf_new()
+    pack.push16(&b, 57)
+    rt.buf_push(&b, 0 as u8)
+    rt.buf_push(&b, 0 as u8)
+    pack.push32(&b, 2)
+    pack.push64(&b, 0)
+    pack.push64(&b, 0)
+    pack.push32(&b, access)
+    pack.push32(&b, attrs)
+    pack.push32(&b, 7)
+    pack.push32(&b, disposition)
+    pack.push32(&b, options)
+    pack.push16(&b, 120)
+    pack.push16(&b, rt.buf_len(&name) as u64)
+    pack.push32(&b, 0)
+    pack.push32(&b, 0)
+    if rt.buf_len(&name) == 0 {
+        rt.buf_push(&b, 0 as u8)
+    } else {
+        pack.push_raw(&b, rt.buf_ptr(&name), rt.buf_len(&name))
+    }
+    rt.buf_free(&name)
+    let code: u64 = wire.request(s, wire.CMD_CREATE, rt.buf_ptr(&b), rt.buf_len(&b))
+    rt.buf_free(&b)
+    if code != wire.E_OK {
+        return code
+    }
+    if (*s).status != wire.NT_SUCCESS {
+        return wire.status_error((*s).status)
+    }
+    if wire.body_len(s) < 88 {
+        return wire.E_PROTO
+    }
+    let body: u64 = wire.body_ptr(s)
+    (*h).size = pack.get64(body, 48)
+    var i: usize = 0
+    while i < FILE_ID_SIZE {
+        (*h).id[i] = rt.ld8(body, 64 + i)
+        i = i + 1
+    }
+    (*h).is_open = true
+    return wire.E_OK
+}
+
+fn open_dir(s: *mut wire.Smb, h: *mut Handle, path: u64, n: usize) -> u64 {
+    return open_path(s, h, path, n, MODE_DIR)
+}
+
+fn open_read(s: *mut wire.Smb, h: *mut Handle, path: u64, n: usize) -> u64 {
+    return open_path(s, h, path, n, MODE_READ)
+}
+
+fn open_write(s: *mut wire.Smb, h: *mut Handle, path: u64, n: usize) -> u64 {
+    return open_path(s, h, path, n, MODE_WRITE)
+}
+
+fn close(s: *mut wire.Smb, h: *mut Handle) -> u64 {
+    if !(*h).is_open {
+        return wire.E_OK
+    }
+    (*h).is_open = false
+    var b: rt.Buf = rt.buf_new()
+    pack.push16(&b, 24)
+    pack.push16(&b, 0)
+    pack.push32(&b, 0)
+    pack.push_raw(&b, (&(*h).id[0]) as u64, FILE_ID_SIZE)
+    let code: u64 = wire.request(s, wire.CMD_CLOSE, rt.buf_ptr(&b), rt.buf_len(&b))
+    rt.buf_free(&b)
+    if code != wire.E_OK {
+        return code
+    }
+    return wire.status_error((*s).status)
+}
+
+fn dir_query(s: *mut wire.Smb, h: *mut Handle, restart: bool) -> u64 {
+    var pattern: [u8; 1] = [42]
+    var wide: rt.Buf = rt.buf_new()
+    pack.push_utf16(&wide, (&pattern[0]) as u64, 1, false)
+    var b: rt.Buf = rt.buf_new()
+    pack.push16(&b, 33)
+    rt.buf_push(&b, 1 as u8)
+    if restart {
+        rt.buf_push(&b, 1 as u8)
+    } else {
+        rt.buf_push(&b, 0 as u8)
+    }
+    pack.push32(&b, 0)
+    pack.push_raw(&b, (&(*h).id[0]) as u64, FILE_ID_SIZE)
+    pack.push16(&b, 96)
+    pack.push16(&b, rt.buf_len(&wide) as u64)
+    pack.push32(&b, (*s).max_io as u64)
+    pack.push_raw(&b, rt.buf_ptr(&wide), rt.buf_len(&wide))
+    rt.buf_free(&wide)
+    let code: u64 = wire.request(s, wire.CMD_QUERY_DIRECTORY, rt.buf_ptr(&b), rt.buf_len(&b))
+    rt.buf_free(&b)
+    return code
+}
+
+fn list_dir(s: *mut wire.Smb, h: *mut Handle, out: *mut rt.Buf) -> u64 {
+    var restart: bool = true
+    var more: bool = true
+    while more {
+        let code: u64 = dir_query(s, h, restart)
+        restart = false
+        if code != wire.E_OK {
+            return code
+        }
+        if (*s).status == wire.NT_NO_MORE_FILES {
+            return wire.E_OK
+        }
+        if (*s).status != wire.NT_SUCCESS {
+            return wire.status_error((*s).status)
+        }
+        if wire.body_len(s) < 8 {
+            return wire.E_PROTO
+        }
+        let body: u64 = wire.body_ptr(s)
+        let off: usize = pack.get16(body, 2) as usize
+        let len: usize = pack.get32(body, 4) as usize
+        if off < wire.HEADER_SIZE || off - wire.HEADER_SIZE + len > wire.body_len(s) {
+            return wire.E_PROTO
+        }
+        let data: u64 = body + (off - wire.HEADER_SIZE) as u64
+        var at: usize = 0
+        var walking: bool = true
+        while walking {
+            if at + 64 > len {
+                return wire.E_PROTO
+            }
+            let next: usize = pack.get32(data, at) as usize
+            let size: u64 = pack.get64(data, at + 40)
+            let attrs: u64 = pack.get32(data, at + 56)
+            let nlen: usize = pack.get32(data, at + 60) as usize
+            if at + 64 + nlen > len {
+                return wire.E_PROTO
+            }
+            if (attrs & 16) != 0 {
+                rt.buf_push(out, 100 as u8)
+            } else {
+                rt.buf_push(out, 45 as u8)
+            }
+            rt.buf_push(out, 32 as u8)
+            rt.buf_push_dec_u64(out, size)
+            rt.buf_push(out, 32 as u8)
+            pack.utf16_to_utf8(data + (at + 64) as u64, nlen, out)
+            rt.buf_push(out, 10 as u8)
+            if next == 0 {
+                walking = false
+            } else {
+                at = at + next
+            }
+        }
+    }
+    return wire.E_OK
+}
+
+fn read_chunk(s: *mut wire.Smb, h: *mut Handle, offset: u64, want: usize, out: *mut rt.Buf) -> u64 {
+    var b: rt.Buf = rt.buf_new()
+    pack.push16(&b, 49)
+    rt.buf_push(&b, 80 as u8)
+    rt.buf_push(&b, 0 as u8)
+    pack.push32(&b, want as u64)
+    pack.push64(&b, offset)
+    pack.push_raw(&b, (&(*h).id[0]) as u64, FILE_ID_SIZE)
+    pack.push32(&b, 0)
+    pack.push32(&b, 0)
+    pack.push32(&b, 0)
+    pack.push16(&b, 0)
+    pack.push16(&b, 0)
+    rt.buf_push(&b, 0 as u8)
+    let code: u64 = wire.request(s, wire.CMD_READ, rt.buf_ptr(&b), rt.buf_len(&b))
+    rt.buf_free(&b)
+    if code != wire.E_OK {
+        return code
+    }
+    if (*s).status == wire.NT_END_OF_FILE {
+        return wire.E_OK
+    }
+    if (*s).status != wire.NT_SUCCESS {
+        return wire.status_error((*s).status)
+    }
+    if wire.body_len(s) < 16 {
+        return wire.E_PROTO
+    }
+    let body: u64 = wire.body_ptr(s)
+    let doff: usize = rt.ld8(body, 2) as usize
+    let dlen: usize = pack.get32(body, 4) as usize
+    if doff < wire.HEADER_SIZE || doff - wire.HEADER_SIZE + dlen > wire.body_len(s) || dlen > want {
+        return wire.E_PROTO
+    }
+    pack.push_raw(out, body + (doff - wire.HEADER_SIZE) as u64, dlen)
+    return wire.E_OK
+}
+
+fn write_chunk(s: *mut wire.Smb, h: *mut Handle, offset: u64, data: u64, n: usize) -> u64 {
+    var b: rt.Buf = rt.buf_new()
+    pack.push16(&b, 49)
+    pack.push16(&b, 112)
+    pack.push32(&b, n as u64)
+    pack.push64(&b, offset)
+    pack.push_raw(&b, (&(*h).id[0]) as u64, FILE_ID_SIZE)
+    pack.push32(&b, 0)
+    pack.push32(&b, 0)
+    pack.push16(&b, 0)
+    pack.push16(&b, 0)
+    pack.push32(&b, 0)
+    pack.push_raw(&b, data, n)
+    let code: u64 = wire.request(s, wire.CMD_WRITE, rt.buf_ptr(&b), rt.buf_len(&b))
+    rt.buf_free(&b)
+    if code != wire.E_OK {
+        return code
+    }
+    if (*s).status != wire.NT_SUCCESS {
+        return wire.status_error((*s).status)
+    }
+    if wire.body_len(s) < 8 || pack.get32(wire.body_ptr(s), 4) != n as u64 {
+        return wire.E_PROTO
+    }
+    return wire.E_OK
+}
