@@ -1,0 +1,451 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import msg
+import fuiscene
+import dtext
+import smb.url
+
+export {
+    WAIT_USER, WAIT_PASS, STATE_IDLE, STATE_OK, STATE_AUTH, STATE_ERROR,
+    is_url, parent_in_place, list, state, prompt, on_confirm,
+    entry_count, entry_name, entry_is_dir, entry_size,
+    fetch, local_copy, forget
+}
+
+const WAIT_USER: u64 = 21
+const WAIT_PASS: u64 = 22
+const STATE_IDLE: u64 = 0
+const STATE_OK: u64 = 1
+const STATE_AUTH: u64 = 2
+const STATE_ERROR: u64 = 3
+
+const MAX_ENTRIES: u64 = 4096
+const RAW_CAP: u64 = 262144
+const NAMES_CAP: u64 = 262144
+const NAME_CAP: u64 = 256
+const EXIT_AUTH: u64 = 3
+const EXIT_CONNECT: u64 = 4
+const EXIT_MISSING: u64 = 5
+const EXIT_DENIED: u64 = 6
+
+static mut raw: [u8; 262144] = [0 as u8; 262144]
+static mut names: [u8; 262144] = [0 as u8; 262144]
+static mut name_off: [u64; 4096] = [0 as u64; 4096]
+static mut kinds: [u64; 4096] = [0 as u64; 4096]
+static mut sizes: [u64; 4096] = [0 as u64; 4096]
+static mut n_entries: u64 = 0
+static mut names_used: u64 = 0
+
+static mut cur_state: u64 = 0
+static mut last_exit: u64 = 0
+static mut tried: bool = false
+static mut user: [u8; 64] = [0 as u8; 64]
+static mut password: [u8; 128] = [0 as u8; 128]
+static mut cred_host: [u8; 128] = [0 as u8; 128]
+static mut pending_host: [u8; 128] = [0 as u8; 128]
+static mut pending_user: [u8; 64] = [0 as u8; 64]
+
+static mut a_host: [u8; 128] = [0 as u8; 128]
+static mut a_share: [u8; 128] = [0 as u8; 128]
+static mut a_rest: [u8; 256] = [0 as u8; 256]
+static mut a_port: [u8; 12] = [0 as u8; 12]
+static mut a_out: [u8; 48] = [0 as u8; 48]
+static mut a_pw: [u8; 48] = [0 as u8; 48]
+static mut a_local: [u8; 200] = [0 as u8; 200]
+static mut copy_path: [u8; 200] = [0 as u8; 200]
+static mut label: [u8; 200] = [0 as u8; 200]
+static mut line_end: [u8; 2] = "\n\0"
+static mut argv: [u64; 20] = [0 as u64; 20]
+
+static mut p_smbctl: [u8; 14] = "/bin/smbctl\0\0\0"
+static mut n_smbctl: [u8; 7] = "smbctl\0"
+static mut f_u: [u8; 3] = "-u\0"
+static mut f_p: [u8; 3] = "-p\0"
+static mut f_o: [u8; 3] = "-o\0"
+static mut f_f: [u8; 3] = "-F\0"
+static mut c_shares: [u8; 7] = "shares\0"
+static mut c_ls: [u8; 3] = "ls\0"
+static mut c_get: [u8; 4] = "get\0"
+static mut t_out: [u8; 11] = "/tmp/smbl.\0"
+static mut t_pw: [u8; 11] = "/tmp/smbp.\0"
+static mut t_get: [u8; 11] = "/tmp/smbg.\0"
+static mut s_dot: [u8; 2] = ".\0"
+static mut s_dotdot: [u8; 3] = "..\0"
+static mut k_ok: [u8; 9] = "disks.ok\0"
+static mut k_cancel: [u8; 13] = "disks.cancel\0"
+static mut k_user_title: [u8; 24] = "explorer.smb.user.title\0"
+static mut k_user_label: [u8; 24] = "explorer.smb.user.label\0"
+static mut k_user_retry: [u8; 24] = "explorer.smb.user.retry\0"
+static mut k_pass_title: [u8; 24] = "explorer.smb.pass.title\0"
+static mut k_pass_label: [u8; 24] = "explorer.smb.pass.label\0"
+static mut k_err_title: [u8; 23] = "explorer.smb.err.title\0"
+static mut k_err_connect: [u8; 25] = "explorer.smb.err.connect\0"
+static mut k_err_missing: [u8; 25] = "explorer.smb.err.missing\0"
+static mut k_err_denied: [u8; 24] = "explorer.smb.err.denied\0"
+static mut k_err_other: [u8; 23] = "explorer.smb.err.other\0"
+
+fn byte_at(p: u64, i: u64) -> u8 {
+    return *((p + i) as *mut u8)
+}
+
+fn put_byte(p: u64, i: u64, v: u8) {
+    __mmio_write8((p + i) as *mut u8, v)
+}
+
+fn copy_str(dst: u64, src: u64, cap: u64) {
+    var i: u64 = 0
+    while i + 1 < cap && byte_at(src, i) != 0 as u8 {
+        put_byte(dst, i, byte_at(src, i))
+        i = i + 1
+    }
+    put_byte(dst, i, 0 as u8)
+}
+
+fn same_str(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        if byte_at(a, i) != byte_at(b, i) {
+            return false
+        }
+        if byte_at(a, i) == 0 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn is_url(p: u64) -> bool {
+    return url.is_url(p)
+}
+
+fn parent_in_place(p: u64) -> bool {
+    return url.parent_in_place(p)
+}
+
+fn state() -> u64 {
+    return cur_state
+}
+
+fn forget() {
+    put_byte((&user[0 as usize]) as u64, 0, 0 as u8)
+    put_byte((&password[0 as usize]) as u64, 0, 0 as u8)
+    put_byte((&cred_host[0 as usize]) as u64, 0, 0 as u8)
+}
+
+fn entry_count() -> u64 {
+    return n_entries
+}
+
+fn entry_name(i: u64) -> u64 {
+    return (&names[0 as usize]) as u64 + name_off[(i) as usize]
+}
+
+fn entry_is_dir(i: u64) -> bool {
+    return kinds[(i) as usize] == url.KIND_DIR
+}
+
+fn entry_size(i: u64) -> u64 {
+    return sizes[(i) as usize]
+}
+
+fn have_credentials(host: u64) -> bool {
+    return byte_at((&user[0 as usize]) as u64, 0) != 0 as u8
+        && same_str((&cred_host[0 as usize]) as u64, host)
+}
+
+fn pid_suffix(dst: u64, base: u64, cap: u64) {
+    copy_str(dst, base, cap)
+    let pid: u64 = ulib.sys(ulib.SYS_GETPID, 0, 0, 0)
+    let _e: u64 = dtext.put_n(dst, ulib.length(dst), pid)
+}
+
+fn write_password_file(path: u64) -> bool {
+    let fd: u64 = io.create(path)
+    if ulib.bad(fd) {
+        return false
+    }
+    let p: u64 = (&password[0 as usize]) as u64
+    let w: u64 = io.write_all(fd, p, ulib.length(p))
+    let nl: u64 = (&line_end[0 as usize]) as u64
+    let _w2: u64 = io.write_all(fd, nl, 1)
+    io.close(fd)
+    return !ulib.bad(w)
+}
+
+fn argv_push(n: u64, s: u64) -> u64 {
+    argv[(n) as usize] = s
+    return n + 1
+}
+
+fn base_args(p: u64, level: u64) -> u64 {
+    let _h: bool = url.host_of(p, (&a_host[0 as usize]) as u64, 128)
+    var n: u64 = 0
+    n = argv_push(n, (&n_smbctl[0 as usize]) as u64)
+    n = argv_push(n, (&f_u[0 as usize]) as u64)
+    n = argv_push(n, (&user[0 as usize]) as u64)
+    let port: u32 = url.port_of(p)
+    if port != 0 as u32 {
+        let _d: u64 = dtext.put_n((&a_port[0 as usize]) as u64, 0, port as u64)
+        n = argv_push(n, (&f_p[0 as usize]) as u64)
+        n = argv_push(n, (&a_port[0 as usize]) as u64)
+    }
+    n = argv_push(n, (&f_f[0 as usize]) as u64)
+    n = argv_push(n, (&a_pw[0 as usize]) as u64)
+    return n
+}
+
+fn run_client(n: u64) -> u64 {
+    let pid: u64 = ulib.spawn_user((&p_smbctl[0 as usize]) as u64, (&argv[0 as usize]) as u64, n)
+    if ulib.bad(pid) {
+        return 255
+    }
+    return ulib.wait_code(pid)
+}
+
+fn read_all(path: u64) -> u64 {
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var n: u64 = 0
+    var more: bool = true
+    while more {
+        let g: u64 = io.read(fd, (&raw[0 as usize]) as u64 + n, RAW_CAP - n)
+        if ulib.bad(g) || g == 0 {
+            more = false
+        } else {
+            n = n + g
+            if n >= RAW_CAP {
+                more = false
+            }
+        }
+    }
+    io.close(fd)
+    return n
+}
+
+fn add_entry(kind: u64, size: u64, name: u64, len: u64) {
+    if n_entries >= MAX_ENTRIES || names_used + len + 1 > NAMES_CAP {
+        return
+    }
+    if same_str(name, (&s_dot[0 as usize]) as u64) || same_str(name, (&s_dotdot[0 as usize]) as u64) {
+        return
+    }
+    copy_str((&names[0 as usize]) as u64 + names_used, name, NAMES_CAP - names_used)
+    name_off[(n_entries) as usize] = names_used
+    kinds[(n_entries) as usize] = kind
+    sizes[(n_entries) as usize] = size
+    names_used = names_used + len + 1
+    n_entries = n_entries + 1
+}
+
+fn parse_listing(total: u64, shares: bool) {
+    var r: url.Parsed = url.Parsed { kind: 0, size: 0, name_len: 0 }
+    var name: [u8; 256] = [0 as u8; 256]
+    let base: u64 = (&raw[0 as usize]) as u64
+    var at: u64 = 0
+    while at < total {
+        var e: u64 = at
+        while e < total && byte_at(base, e) != 10 as u8 {
+            e = e + 1
+        }
+        var ok: bool = false
+        if shares {
+            ok = url.parse_share_line(base + at, (e - at) as usize, (&name[0 as usize]) as u64, 256, &r)
+        } else {
+            ok = url.parse_ls_line(base + at, (e - at) as usize, (&name[0 as usize]) as u64, 256, &r)
+        }
+        if ok {
+            add_entry(r.kind, r.size, (&name[0 as usize]) as u64, r.name_len as u64)
+        }
+        at = e + 1
+    }
+}
+
+fn start_failed(host: u64, code: u64) {
+    last_exit = code
+    if code == EXIT_AUTH {
+        tried = true
+        cur_state = STATE_AUTH
+        copy_str((&pending_host[0 as usize]) as u64, host, 128)
+        put_byte((&password[0 as usize]) as u64, 0, 0 as u8)
+    } else {
+        cur_state = STATE_ERROR
+    }
+}
+
+fn need_login(host: u64) {
+    tried = false
+    cur_state = STATE_AUTH
+    last_exit = EXIT_AUTH
+    copy_str((&pending_host[0 as usize]) as u64, host, 128)
+}
+
+fn list(p: u64) -> u64 {
+    n_entries = 0
+    names_used = 0
+    cur_state = STATE_IDLE
+    let lv: u64 = url.level(p)
+    if lv == url.LEVEL_NONE || !url.host_of(p, (&a_host[0 as usize]) as u64, 128) {
+        cur_state = STATE_ERROR
+        return 0 - 1
+    }
+    let host: u64 = (&a_host[0 as usize]) as u64
+    if !have_credentials(host) {
+        need_login(host)
+        return 0 - 1
+    }
+    pid_suffix((&a_pw[0 as usize]) as u64, (&t_pw[0 as usize]) as u64, 48)
+    pid_suffix((&a_out[0 as usize]) as u64, (&t_out[0 as usize]) as u64, 48)
+    if !write_password_file((&a_pw[0 as usize]) as u64) {
+        cur_state = STATE_ERROR
+        return 0 - 1
+    }
+    var n: u64 = base_args(p, lv)
+    n = argv_push(n, (&f_o[0 as usize]) as u64)
+    n = argv_push(n, (&a_out[0 as usize]) as u64)
+    n = argv_push(n, host)
+    if lv == url.LEVEL_HOST {
+        n = argv_push(n, (&c_shares[0 as usize]) as u64)
+    } else {
+        let _s: bool = url.share_of(p, (&a_share[0 as usize]) as u64, 128)
+        let _r: bool = url.rest_of(p, (&a_rest[0 as usize]) as u64, 256)
+        n = argv_push(n, (&a_share[0 as usize]) as u64)
+        n = argv_push(n, (&c_ls[0 as usize]) as u64)
+        if byte_at((&a_rest[0 as usize]) as u64, 0) != 0 as u8 {
+            n = argv_push(n, (&a_rest[0 as usize]) as u64)
+        }
+    }
+    let code: u64 = run_client(n)
+    let _u: u64 = io.unlink((&a_pw[0 as usize]) as u64)
+    if code != 0 {
+        let _u2: u64 = io.unlink((&a_out[0 as usize]) as u64)
+        start_failed(host, code)
+        return 0 - 1
+    }
+    let total: u64 = read_all((&a_out[0 as usize]) as u64)
+    let _u3: u64 = io.unlink((&a_out[0 as usize]) as u64)
+    parse_listing(total, lv == url.LEVEL_HOST)
+    cur_state = STATE_OK
+    last_exit = 0
+    return n_entries
+}
+
+fn local_copy(p: u64) -> u64 {
+    var rest: [u8; 256] = [0 as u8; 256]
+    if !url.rest_of(p, (&rest[0 as usize]) as u64, 256) {
+        return 0
+    }
+    var at: u64 = ulib.length((&rest[0 as usize]) as u64)
+    var b: u64 = at
+    while b > 0 && byte_at((&rest[0 as usize]) as u64, b - 1) != 47 as u8 {
+        b = b - 1
+    }
+    pid_suffix((&copy_path[0 as usize]) as u64, (&t_get[0 as usize]) as u64, 200)
+    let end: u64 = ulib.length((&copy_path[0 as usize]) as u64)
+    put_byte((&copy_path[0 as usize]) as u64, end, 45 as u8)
+    put_byte((&copy_path[0 as usize]) as u64, end + 1, 0 as u8)
+    let _e: u64 = dtext.put((&copy_path[0 as usize]) as u64, end + 1, (&rest[0 as usize]) as u64 + b)
+    return (&copy_path[0 as usize]) as u64
+}
+
+fn fetch(p: u64) -> u64 {
+    cur_state = STATE_IDLE
+    if url.level(p) != url.LEVEL_SHARE || !url.host_of(p, (&a_host[0 as usize]) as u64, 128) {
+        cur_state = STATE_ERROR
+        return 0
+    }
+    let host: u64 = (&a_host[0 as usize]) as u64
+    if !have_credentials(host) {
+        need_login(host)
+        return 0
+    }
+    let local: u64 = local_copy(p)
+    if local == 0 {
+        cur_state = STATE_ERROR
+        return 0
+    }
+    copy_str((&a_local[0 as usize]) as u64, local, 200)
+    pid_suffix((&a_pw[0 as usize]) as u64, (&t_pw[0 as usize]) as u64, 48)
+    if !write_password_file((&a_pw[0 as usize]) as u64) {
+        cur_state = STATE_ERROR
+        return 0
+    }
+    var n: u64 = base_args(p, url.LEVEL_SHARE)
+    let _s: bool = url.share_of(p, (&a_share[0 as usize]) as u64, 128)
+    let _r: bool = url.rest_of(p, (&a_rest[0 as usize]) as u64, 256)
+    n = argv_push(n, host)
+    n = argv_push(n, (&a_share[0 as usize]) as u64)
+    n = argv_push(n, (&c_get[0 as usize]) as u64)
+    n = argv_push(n, (&a_rest[0 as usize]) as u64)
+    n = argv_push(n, (&a_local[0 as usize]) as u64)
+    let code: u64 = run_client(n)
+    let _u: u64 = io.unlink((&a_pw[0 as usize]) as u64)
+    if code != 0 {
+        let _u2: u64 = io.unlink((&a_local[0 as usize]) as u64)
+        start_failed(host, code)
+        return 0
+    }
+    cur_state = STATE_OK
+    return (&a_local[0 as usize]) as u64
+}
+
+fn open_user_dialog() {
+    var key: u64 = (&k_user_label[0 as usize]) as u64
+    if tried {
+        key = (&k_user_retry[0 as usize]) as u64
+    }
+    var at: u64 = dtext.put((&label[0 as usize]) as u64, 0, msg.get(key))
+    at = dtext.put((&label[0 as usize]) as u64, at, (&pending_host[0 as usize]) as u64)
+    fuiscene.dialog_entry(msg.get((&k_user_title[0 as usize]) as u64), (&label[0 as usize]) as u64,
+        (&user[0 as usize]) as u64, msg.get((&k_ok[0 as usize]) as u64), msg.get((&k_cancel[0 as usize]) as u64))
+}
+
+fn open_pass_dialog() {
+    var at: u64 = dtext.put((&label[0 as usize]) as u64, 0, msg.get((&k_pass_label[0 as usize]) as u64))
+    at = dtext.put((&label[0 as usize]) as u64, at, (&pending_user[0 as usize]) as u64)
+    fuiscene.dialog_entry_secret(msg.get((&k_pass_title[0 as usize]) as u64), (&label[0 as usize]) as u64, 0,
+        msg.get((&k_ok[0 as usize]) as u64), msg.get((&k_cancel[0 as usize]) as u64))
+}
+
+fn error_key() -> u64 {
+    if last_exit == EXIT_CONNECT {
+        return (&k_err_connect[0 as usize]) as u64
+    }
+    if last_exit == EXIT_MISSING {
+        return (&k_err_missing[0 as usize]) as u64
+    }
+    if last_exit == EXIT_DENIED {
+        return (&k_err_denied[0 as usize]) as u64
+    }
+    return (&k_err_other[0 as usize]) as u64
+}
+
+fn prompt() -> u64 {
+    if cur_state == STATE_AUTH {
+        open_user_dialog()
+        return WAIT_USER
+    }
+    if cur_state == STATE_ERROR {
+        fuiscene.dialog_open(msg.get((&k_err_title[0 as usize]) as u64), msg.get(error_key()),
+            msg.get((&k_ok[0 as usize]) as u64), 0)
+        cur_state = STATE_IDLE
+    }
+    return 0
+}
+
+fn on_confirm(code: u64) -> u64 {
+    if code == WAIT_USER {
+        copy_str((&pending_user[0 as usize]) as u64, fuiscene.dialog_entry_text(), 64)
+        open_pass_dialog()
+        return WAIT_PASS
+    }
+    copy_str((&password[0 as usize]) as u64, fuiscene.dialog_entry_text(), 128)
+    copy_str((&user[0 as usize]) as u64, (&pending_user[0 as usize]) as u64, 64)
+    copy_str((&cred_host[0 as usize]) as u64, (&pending_host[0 as usize]) as u64, 128)
+    return 0
+}

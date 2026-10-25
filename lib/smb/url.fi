@@ -1,0 +1,240 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+
+export {
+    Parsed, LEVEL_NONE, LEVEL_HOST, LEVEL_SHARE,
+    is_url, level, host_of, port_of, share_of, rest_of, parent_in_place,
+    parse_ls_line, parse_share_line, KIND_DIR, KIND_FILE, KIND_SKIP
+}
+
+const LEVEL_NONE: u64 = 0
+const LEVEL_HOST: u64 = 1
+const LEVEL_SHARE: u64 = 2
+const KIND_SKIP: u64 = 0
+const KIND_DIR: u64 = 1
+const KIND_FILE: u64 = 2
+
+struct Parsed {
+    kind: u64,
+    size: u64,
+    name_len: usize,
+}
+
+static mut PREFIX: [u8; 7] = "smb://\0"
+
+fn byte(p: u64, i: usize) -> u8 {
+    return rt.ld8(p, i)
+}
+
+fn is_url(p: u64) -> bool {
+    var i: usize = 0
+    while i < 6 {
+        if byte(p, i) != byte((&PREFIX[0]) as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn skip_authority_end(p: u64) -> usize {
+    var i: usize = 6
+    while byte(p, i) != 0 as u8 && byte(p, i) != 47 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+fn level(p: u64) -> u64 {
+    if !is_url(p) {
+        return LEVEL_NONE
+    }
+    let e: usize = skip_authority_end(p)
+    if byte(p, e) == 0 as u8 || byte(p, e + 1) == 0 as u8 {
+        return LEVEL_HOST
+    }
+    return LEVEL_SHARE
+}
+
+fn copy_range(p: u64, from: usize, to: usize, out: u64, cap: usize) -> bool {
+    if to < from || to - from + 1 > cap {
+        return false
+    }
+    var i: usize = from
+    while i < to {
+        rt.st8(out, i - from, byte(p, i))
+        i = i + 1
+    }
+    rt.st8(out, to - from, 0 as u8)
+    return true
+}
+
+fn host_end(p: u64) -> usize {
+    var i: usize = 6
+    let e: usize = skip_authority_end(p)
+    while i < e && byte(p, i) != 58 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+fn host_of(p: u64, out: u64, cap: usize) -> bool {
+    if !is_url(p) {
+        return false
+    }
+    let h: usize = host_end(p)
+    if h == 6 {
+        return false
+    }
+    return copy_range(p, 6, h, out, cap)
+}
+
+fn port_of(p: u64) -> u32 {
+    if !is_url(p) {
+        return 0 as u32
+    }
+    let h: usize = host_end(p)
+    let e: usize = skip_authority_end(p)
+    if h >= e {
+        return 0 as u32
+    }
+    var v: u32 = 0
+    var i: usize = h + 1
+    while i < e {
+        let c: u8 = byte(p, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return 0 as u32
+        }
+        v = v * 10 as u32 + (c - 48 as u8) as u32
+        i = i + 1
+    }
+    return v
+}
+
+fn share_end(p: u64) -> usize {
+    var i: usize = skip_authority_end(p) + 1
+    while byte(p, i) != 0 as u8 && byte(p, i) != 47 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+fn share_of(p: u64, out: u64, cap: usize) -> bool {
+    if level(p) != LEVEL_SHARE {
+        return false
+    }
+    let s: usize = skip_authority_end(p) + 1
+    return copy_range(p, s, share_end(p), out, cap)
+}
+
+fn rest_of(p: u64, out: u64, cap: usize) -> bool {
+    if level(p) != LEVEL_SHARE {
+        return false
+    }
+    var s: usize = share_end(p)
+    if byte(p, s) == 47 as u8 {
+        s = s + 1
+    }
+    var e: usize = s
+    while byte(p, e) != 0 as u8 {
+        e = e + 1
+    }
+    while e > s && byte(p, e - 1) == 47 as u8 {
+        e = e - 1
+    }
+    return copy_range(p, s, e, out, cap)
+}
+
+fn parent_in_place(p: u64) -> bool {
+    if !is_url(p) {
+        return false
+    }
+    var n: usize = rt.c_length(p)
+    while n > 6 && byte(p, n - 1) == 47 as u8 {
+        n = n - 1
+    }
+    let auth: usize = skip_authority_end(p)
+    if n <= auth {
+        rt.st8(p, 0, 47 as u8)
+        rt.st8(p, 1, 0 as u8)
+        return true
+    }
+    while n > auth + 1 && byte(p, n - 1) != 47 as u8 {
+        n = n - 1
+    }
+    if n > auth + 1 {
+        n = n - 1
+    }
+    if n <= auth + 1 {
+        n = auth
+    }
+    rt.st8(p, n, 0 as u8)
+    return true
+}
+
+fn is_digit(c: u8) -> bool {
+    return c >= 48 as u8 && c <= 57 as u8
+}
+
+fn copy_name(p: u64, from: usize, to: usize, out: u64, cap: usize, r: *mut Parsed) -> bool {
+    var e: usize = to
+    while e > from && (byte(p, e - 1) == 13 as u8 || byte(p, e - 1) == 10 as u8) {
+        e = e - 1
+    }
+    if e == from || !copy_range(p, from, e, out, cap) {
+        return false
+    }
+    (*r).name_len = e - from
+    return true
+}
+
+fn parse_ls_line(p: u64, n: usize, out: u64, cap: usize, r: *mut Parsed) -> bool {
+    (*r).kind = KIND_SKIP
+    (*r).size = 0
+    (*r).name_len = 0
+    if n < 5 || byte(p, 1) != 32 as u8 || !is_digit(byte(p, 2)) {
+        return false
+    }
+    let k: u8 = byte(p, 0)
+    if k == 100 as u8 {
+        (*r).kind = KIND_DIR
+    } else if k == 45 as u8 {
+        (*r).kind = KIND_FILE
+    } else {
+        return false
+    }
+    var i: usize = 2
+    var size: u64 = 0
+    while i < n && is_digit(byte(p, i)) {
+        size = size * 10 + (byte(p, i) - 48 as u8) as u64
+        i = i + 1
+    }
+    if i >= n || byte(p, i) != 32 as u8 {
+        (*r).kind = KIND_SKIP
+        return false
+    }
+    (*r).size = size
+    if !copy_name(p, i + 1, n, out, cap, r) {
+        (*r).kind = KIND_SKIP
+        return false
+    }
+    return true
+}
+
+fn parse_share_line(p: u64, n: usize, out: u64, cap: usize, r: *mut Parsed) -> bool {
+    (*r).kind = KIND_SKIP
+    (*r).size = 0
+    (*r).name_len = 0
+    if n < 3 || byte(p, 0) != 100 as u8 || byte(p, 1) != 32 as u8 {
+        return false
+    }
+    var e: usize = 2
+    while e < n && byte(p, e) != 9 as u8 && byte(p, e) != 10 as u8 && byte(p, e) != 13 as u8 {
+        e = e + 1
+    }
+    if e == 2 || byte(p, e - 1) == 36 as u8 {
+        return false
+    }
+    (*r).kind = KIND_DIR
+    return copy_name(p, 2, e, out, cap, r)
+}
