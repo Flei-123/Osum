@@ -70,14 +70,15 @@ run() {
         python3 -I tools/usbredir/usbdev.py --sock "$T/$n.sock" --profile "$prof" --net-local $((p+1)) --net-remote "$p" \
             $trig --unplug "$T/$n.unplug" --log "$T/$n.gadget" --max-secs 200 ${GARGS:-} &
         echo $! > "$T/$n.gpid"
-        extra="-chardev socket,id=r0,path=$T/$n.sock,server=on,wait=off -device usb-redir,chardev=r0"
+        extra="-chardev socket,id=r0,path=$T/$n.sock,server=on,wait=off -device usb-redir,chardev=r0${REDIR_BUS:+,bus=$REDIR_BUS}"
+        [ -n "${BEHIND_HUB:-}" ] && extra="-device usb-hub,bus=x0.0,port=1,id=h0 -chardev socket,id=r0,path=$T/$n.sock,server=on,wait=off -device usb-redir,chardev=r0,bus=x0.0,port=1.2"
     fi
     timeout 170 qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256 \
         -append "osum ${BASEW:-nokbd nosched noproc nofs noring3} $words ${XWORDS:-} nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
         -serial "file:$T/$n.txt" -display none -nic none -no-reboot -pidfile "$T/$n.qpid" -S \
         -monitor "unix:$T/$n.mon,server,nowait" \
         -drive "file=$T/d.img,format=raw,if=ide,index=0" \
-        -device qemu-xhci,id=x0 $extra \
+        -device qemu-xhci,id=x0 ${XHCI2:-} $extra \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
     local qp=$!
     bash tools/work/waitfor.sh -t 20 -i 1 file "$T/$n.mon" >/dev/null 2>&1
@@ -185,12 +186,38 @@ for c in $CASES; do
         chk chp "configuration seen" 'usb: ncfg=2 cfg=1 setcfg=1 rc=0'
         chk chp "interface vendor class" 'usb: iface=ff/ff/ff'
         chk chp "bring-up finished" 'usb: step=4 ok'
+        chk chp "debug counters line" 'usb: dbg starts=1 passes=1 unit=0 descs=1 rec=live'
+        chk chp "raw device descriptor" 'usb: dev18=1201.*861a9453'
+        chk chp "config header" 'usb: cfghdr c0 total='
+        chk chp "raw config descriptor" 'usb: cfg0=0902'
+        chk chp "parsed interface and endpoint list" 'usb: c0 i0 a0 ff/ff/ff n'
         chk chp "alt scan not needed, SET_INTERFACE sent and accepted" 'usb: alt=0 scan=0 setif=1'
         grep -aq 'set_alt_setting if=0 alt=0' "$T/chp.gadget" && ok "chp: gadget saw SET_INTERFACE alt 0" || bad "chp: gadget never saw SET_INTERFACE alt 0"
         chk chp "phy line with kick count" 'phy: bmcr=1000 bmsr=782d id=0e400141'
         chk chp "link up line" 'link: state=up'
         chk chp "usbnet counters" 'usbnet: ready mode=3 link=up'
         chk chp "dhcp line" 'dhcp: state='
+        ;;
+    ch336-hub)
+        BEHIND_HUB=1 GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run chh ch336 boot s_proc.sh
+        chk chh "bound to driver ch336 behind a hub" 'driver=ch336'
+        chk chh "usb line with id behind a hub" 'usb: ch336 id=1a86:5394'
+        chk chh "bring-up finished behind a hub" 'usb: step=4 ok'
+        chk chh "bulk endpoints found behind a hub" 'usb: ep in=[1-9]'
+        chk chh "usbnet ready behind a hub" 'usbnet: ready mode=3'
+        ;;
+    ch336-2hc)
+        XHCI2="-device qemu-xhci,id=x1" GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run ch2 ch336 boot s_proc.sh
+        chk ch2 "bound to driver ch336 with two controllers" 'driver=ch336'
+        chk ch2 "usb line with id with two controllers" 'usb: ch336 id=1a86:5394'
+        chk ch2 "bulk endpoints found with two controllers" 'usb: ep in=[1-9]'
+        ;;
+    ch336-lasthc)
+        XHCI2="-device qemu-xhci,id=x1" REDIR_BUS=x1.0 GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run chl2 ch336 boot s_proc.sh
+        chk chl2 "dongle on the last controller survives the controller choice" 'usb: dbg starts=[1-9] passes=2'
+        chk chl2 "dongle record still live" 'rec=live'
+        chk chl2 "bulk endpoints found" 'usb: ep in=[1-9]'
+        chk chl2 "usbnet ready" 'usbnet: ready mode=3'
         ;;
     ch336-intr)
         GARGS="--phy-boot down --intr link" BASEW="nokbd nosched vfs" run chi ch336 boot s_proc.sh

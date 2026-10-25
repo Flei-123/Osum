@@ -75,6 +75,7 @@ import usbnet.ax88772
 import usbnet.ax88772_drv
 import drv.net.usbnet
 import drv.usb.xhci
+import drv.usb.chdiag
 import drv.hid.kbd
 import drv.hid.hidrep
 import drv.hid.hidin
@@ -115,7 +116,7 @@ export {
     set_leds, led_service, beat_leds, leds_sent, leds_fail, leds_last,
     leds_try, kbd_dev, mouse_dev,
     dev_errs, dev_heal, dev_epstate, dev_slot, dev_intdci, heilungen, ch_diag,
-    CK_PRESENT, CK_VID, CK_PID, CK_SPEED, CK_ROUTE, CK_NCFG, CK_CFG, CK_RC, CK_CLASS, CK_SUB, CK_PROTO, CK_IFACE, CK_INDCI, CK_OUTDCI, CK_INT, CK_BULKMPS, CK_STEP, CK_RESULT, CK_SET, CK_ALT, CK_ALTSCAN, CK_SETIF,
+    CK_LIVE, CK_PRESENT, CK_VID, CK_PID, CK_SPEED, CK_ROUTE, CK_NCFG, CK_CFG, CK_RC, CK_CLASS, CK_SUB, CK_PROTO, CK_IFACE, CK_INDCI, CK_OUTDCI, CK_INT, CK_BULKMPS, CK_STEP, CK_RESULT, CK_SET, CK_ALT, CK_ALTSCAN, CK_SETIF,
     without_space,
     // Aufzaehlen NICHT mehr aus dem Zeitgeber.
     port_watch, hotplug_work, pending,
@@ -714,6 +715,7 @@ fn stage(state: u64) {
     // ausmacht; und der Bericht sagt fuer JEDEN Regler, was an seinen
     // Anschluessen steht, damit ein Mensch Tastatur und Maus notfalls
     // an denselben stecken kann.
+    chdiag.arm(state)
     let anzahl: u64 = xhci.count_hc(state)
     // ================================= RUNDE HIDPUNKTE: DER BESTE, NICHT DER ERSTE
     //
@@ -786,6 +788,8 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
     // aufgesetzt wird -- sonst liest ein laufender Regler weiter aus
     // Ringen, die gleich neu beschrieben werden.
     xhci.teardown(state)
+    chdiag.bump(state, chdiag.F_PASSES)
+    chdiag.set64(state, chdiag.F_UNIT, einheit)
     s(state, S_READY, 0)
     zero(state + UDEV_OFF, MAX_DEV * DEV_BYTES)
     s(state, S_NDEV, 0)
@@ -1148,7 +1152,9 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     tr(state, 10, slot)
     fund_flag(state, f, F_DESC)
     fund_id(state, f, dg(state, d, D_VID), dg(state, d, D_PID))
-    if !configure(state, d) {
+    let cfg_ok: bool = configure(state, d)
+    chdiag.set_active(state, false)
+    if !cfg_ok {
         tr(state, 13, 0)
         drop_dev(state, d)
         return false
@@ -1285,6 +1291,8 @@ fn punkte(state: u64) -> u64 {
                 }
             } else if k == DRV_HIDGEN {
                 p = p + 1
+            } else if k == DRV_CH336 || k == DRV_ECM || k == DRV_NCM || k == DRV_RNDIS || k == DRV_AX88772 {
+                p = p + 2
             }
         }
         d = d + 1
@@ -1480,6 +1488,12 @@ fn describe(state: u64, d: u64) -> bool {
     ds(state, d, D_VID, b16(buf, 8))
     ds(state, d, D_PID, b16(buf, 10))
     ds(state, d, D_NCFG, b8(buf, 17))
+    if ch397.supported(b16(buf, 8), b16(buf, 10)) {
+        chdiag.note_device(state, buf,
+            dg(state, d, D_SLOT) | (dg(state, d, D_SPEED) << 8) | (dg(state, d, D_ROUTE) << 16)
+            | (dg(state, d, D_PORT) << 40) | (dg(state, d, D_HUBPORT) << 48),
+            (b16(buf, 8) << 16) | b16(buf, 10))
+    }
     // RUNDE BLECHEINGABE: die Klasse des GERAETS (Oktett 4..6). Bei
     // einem Hub steht sie hier (09) und nicht erst in der
     // Schnittstelle; bei einem Verbundgeraet steht hier 0x00 und die
@@ -1529,8 +1543,10 @@ fn walk_configs(state: u64, d: u64, buf: u64) -> u64 {
             fs(state, f0 - 1, F_IFACES, b8(buf, 4))
         }
         zero(buf, 512)
-        if xhci.control(state, slot, 0x80, REQ_GET_DESCRIPTOR,
-            (D_CONFIGURATION << 8) | ci, 0, total, buf, true) < (total as i64) {
+        let got: i64 = xhci.control(state, slot, 0x80, REQ_GET_DESCRIPTOR,
+            (D_CONFIGURATION << 8) | ci, 0, total, buf, true)
+        chdiag.note_config(state, ci, total, got as u64, buf)
+        if got < (total as i64) {
             return 0
         }
         parse(state, d, buf, total)
@@ -1791,6 +1807,7 @@ const CK_SET: u64 = 18
 const CK_ALT: u64 = 19
 const CK_ALTSCAN: u64 = 20
 const CK_SETIF: u64 = 21
+const CK_LIVE: u64 = 22
 
 fn ch_diag(state: u64, key: u64) -> u64 {
     let dv: u64 = g(state, S_CHDEV)
@@ -1817,6 +1834,10 @@ fn ch_diag(state: u64, key: u64) -> u64 {
     if key == CK_SET { return g(state, S_CHSET) & 1 }
     if key == CK_ALT { return dg(state, d, D_DATAALT) }
     if key == CK_ALTSCAN { return (g(state, S_CHSET) >> 16) & 1 }
+    if key == CK_LIVE {
+        if dg(state, d, D_USED) != 0 && dg(state, d, D_VID) != 0 { return 1 }
+        return 2
+    }
     if key == CK_SETIF {
         let v: u64 = g(state, S_CHSET)
         if (v & CH_SETIF_SENT) == 0 { return 0 }
@@ -2799,6 +2820,11 @@ fn ch336_start(state: u64, d: u64) {
     var step: u64 = 1
     s(state, S_CHDEV, d + 1)
     s(state, S_CHSTEP, 1)
+    chdiag.bump(state, chdiag.F_STARTS)
+    chdiag.set64(state, chdiag.F_START, dg(state, d, D_INDCI) | (dg(state, d, D_OUTDCI) << 8)
+        | ((g(state, S_CHINT) & 255) << 16) | (dg(state, d, D_BULKMPS) << 24)
+        | (dg(state, d, D_IFACE) << 40) | (dg(state, d, D_DATAALT) << 48) | (dg(state, d, D_CONFIG) << 56))
+    chdiag.set64(state, chdiag.F_REC, (d + 1) | (slot << 8) | (dg(state, d, D_SPEED) << 16))
     ch_set_interface(state, d, slot)
     zero(buf, 64)
     var ok: bool = xhci.control(state, slot, 0xC0, ch397.REQ_INFO, 0, 0, 8, buf, true) >= 8
