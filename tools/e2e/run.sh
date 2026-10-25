@@ -125,7 +125,7 @@ dd if="$OUT/fatpart.img" of="$OUT/store.img" bs=512 seek=2048 conv=notrunc statu
 cp -f "$OUT/store.img" "$OUT/store-vorher.img"
 
 export ZWEITE_PLATTE="$OUT/store.img"
-rc=$(lauf sich platte "mount;mkdir /mnt/store;backup save /etc /mnt/store etc1;backup list /mnt/store;exit" 900)
+rc=$(lauf sich platte "echo \"unlock hdb\" > /dev/wlock;mount;mkdir /mnt/store;backup save /etc /mnt/store etc1;backup list /mnt/store;exit" 900)
 gleich "backup run: exit code" "$rc" "21"
 hat "$OUT/sich.txt" "etc1" "the store names the snapshot back"
 if cmp -s "$OUT/store.img" "$OUT/store-vorher.img"; then
@@ -141,7 +141,7 @@ hat "$OUT/mdir-store.txt" "S-ETC1" "and the snapshot named etc1"
 
 echo
 echo "== 8. one file back out of the backup =="
-rc=$(lauf hole platte "backup get /mnt/store etc1 /e2e.txt /zurueck.txt;cat /zurueck.txt;exit" 900)
+rc=$(lauf hole platte "echo \"unlock hdb\" > /dev/wlock;backup get /mnt/store etc1 /e2e.txt /zurueck.txt;cat /zurueck.txt;exit" 900)
 gleich "restore run: exit code" "$rc" "21"
 hat "$OUT/hole.txt" "e2e-was-here" "the file that came back out of the backup has its content"
 

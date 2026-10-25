@@ -268,7 +268,7 @@ cp --sparse=always "$TMPD/kaputt/kaputt-leerkarte.img" "$TMPD/rep.img"
 cp --sparse=always "$TMPD/j.img" "$TMPD/repboot.img"
 fsck2() { # abbild anhang ausgabe
     timeout 300 qemu-system-x86_64 -accel tcg -kernel "$TMPD/k.mb" -m 512 \
-        -append "osum vfs nokbd script=fsck $1 /dev/hdb;exit" \
+        -append "osum vfs nokbd nowlock script=fsck $1 /dev/hdb;exit" \
         -serial "file:$2" -display none -no-reboot \
         -drive "file=$TMPD/repboot.img,format=raw,if=ide,index=0" \
         -drive "file=$TMPD/rep.img,format=raw,if=ide,index=1" \
