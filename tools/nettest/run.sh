@@ -40,7 +40,7 @@ run() {
         -serial "file:$T/$n.txt" -display none -no-reboot -pidfile "$T/$n.pid" \
         -netdev "dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port=$p,remote.type=inet,remote.host=127.0.0.1,remote.port=$((p+1))" \
         -device virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc \
-        -drive "file=$T/d.img,format=raw,if=ide,index=0" \
+        -drive "file=$T/d.img,format=raw,if=ide,index=0,snapshot=on" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
     local qp=$!
     bash tools/work/waitfor.sh -t 130 -i 2 pid "$qp" >/dev/null 2>&1
