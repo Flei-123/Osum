@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import disks.table
+import disks.gptw
+import memdisk
+
+static mut scratch: [u8; 17408] = [0 as u8; 17408]
+static mut tab: [u8; 2312] = [0 as u8; 2312]
+static mut name_a: [u8; 2] = "a\0"
+static mut name_b: [u8; 2] = "b\0"
+
+fn sc() -> u64 {
+    return (&scratch[0]) as u64
+}
+
+fn state(pre: bool) -> str {
+    let t: u64 = (&tab[0]) as u64
+    let scheme: u64 = table.read_table(memdisk.read_sectors, memdisk.TOTAL, t, sc())
+    if scheme != table.SCH_GPT || table.count(t) != 2 || table.start_of(t, 0) != 40 || table.sectors_of(t, 1) != 800 {
+        return "none"
+    }
+    if table.sectors_of(t, 0) == 500 {
+        return "old"
+    }
+    if table.sectors_of(t, 0) == 300 {
+        return "new"
+    }
+    return "other"
+}
+
+fn line(name: str, rc: u64) {
+    memdisk.say("case ")
+    memdisk.say(name)
+    memdisk.say(" rc=")
+    memdisk.say_num(rc)
+    memdisk.say(" writes=")
+    memdisk.say_num(memdisk.writes())
+}
+
+fn finish(pre: str) {
+    memdisk.say(" pre=")
+    memdisk.say(pre)
+    memdisk.say(" state=")
+    memdisk.say(state(false))
+    memdisk.say("\n")
+}
+
+fn build() {
+    memdisk.wipe()
+    gptw.init(memdisk.write_sectors, memdisk.TOTAL, 7, sc())
+    gptw.create(memdisk.read_sectors, memdisk.write_sectors, memdisk.TOTAL, 40, 500, table.K_OFS, (&name_a[0]) as u64, 7, sc())
+    gptw.create(memdisk.read_sectors, memdisk.write_sectors, memdisk.TOTAL, 600, 800, table.K_EFI, (&name_b[0]) as u64, 7, sc())
+    var i: u64 = 34
+    while i < memdisk.TOTAL - 34 {
+        *((memdisk.ptr() + i * 512 + (i % 509)) as *mut u8) = ((i % 251) + 1) as u8
+        i = i + 1
+    }
+}
+
+fn do_resize(start: u64, sectors: u64) -> u64 {
+    return gptw.resize(memdisk.read_sectors, memdisk.write_sectors, memdisk.TOTAL, start, sectors, sc())
+}
+
+fn do_repair() -> u64 {
+    return gptw.repair(memdisk.read_sectors, memdisk.write_sectors, memdisk.TOTAL, sc())
+}
+
+fn fuzz() {
+    var k: u64 = 0
+    while k < 5 {
+        var t: u64 = 0
+        while t < 3 {
+            memdisk.restore()
+            memdisk.set_torn(t)
+            memdisk.set_limit(k)
+            let rc: u64 = do_resize(40, 300)
+            memdisk.set_limit(1000000)
+            memdisk.name_begin("n")
+            memdisk.name_num(k)
+            memdisk.name_num(t)
+            memdisk.dump()
+            line("n", rc)
+            finish("-")
+            var j: u64 = 0
+            while j < 4 {
+                memdisk.restore()
+                memdisk.set_torn(t)
+                memdisk.set_limit(k)
+                let rc1: u64 = do_resize(40, 300)
+                memdisk.set_limit(1000000)
+                var rcj: u64 = 0
+                if j < 3 {
+                    memdisk.set_limit(j)
+                    rcj = do_repair()
+                    memdisk.set_limit(1000000)
+                }
+                let pre: str = state(true)
+                let w: u64 = memdisk.writes()
+                let rc2: u64 = do_repair()
+                memdisk.name_begin("f")
+                memdisk.name_num(k)
+                memdisk.name_num(t)
+                memdisk.name_num(j)
+                memdisk.dump()
+                line("f", rc1)
+                memdisk.say(" repair1=")
+                memdisk.say_num(rcj)
+                memdisk.say(" repair2=")
+                memdisk.say_num(rc2)
+                memdisk.say(" k=")
+                memdisk.say_num(k)
+                memdisk.say(" t=")
+                memdisk.say_num(t)
+                memdisk.say(" j=")
+                memdisk.say_num(j)
+                let w2: u64 = memdisk.writes()
+                memdisk.set_limit(0)
+                let idem: u64 = do_repair()
+                memdisk.set_limit(1000000)
+                memdisk.say(" idem=")
+                memdisk.say_num(idem)
+                finish(pre)
+                j = j + 1
+            }
+            t = t + 1
+        }
+        k = k + 1
+    }
+}
+
+fn heal(name: str, lba: u64, off: u64, lba2: u64) {
+    memdisk.restore()
+    memdisk.flip(lba, off)
+    if lba2 != 0 {
+        memdisk.flip(lba2, off)
+    }
+    let pre: str = state(true)
+    let rc: u64 = do_repair()
+    memdisk.name_begin(name)
+    memdisk.dump()
+    line(name, rc)
+    finish(pre)
+}
+
+fn simple(name: str, start: u64, sectors: u64) {
+    memdisk.restore()
+    let rc: u64 = do_resize(start, sectors)
+    memdisk.name_begin(name)
+    memdisk.dump()
+    line(name, rc)
+    finish("-")
+}
+
+fn main() -> i32 {
+    memdisk.setup()
+    build()
+    memdisk.snapshot()
+    memdisk.name_begin("base")
+    memdisk.dump()
+    memdisk.say("base ")
+    memdisk.say(state(false))
+    memdisk.say("\n")
+    fuzz()
+    heal("h_phdr", 1, 40, 0)
+    heal("h_parr", 2, 8, 0)
+    heal("h_bhdr", memdisk.TOTAL - 1, 40, 0)
+    heal("h_barr", memdisk.TOTAL - 33, 8, 0)
+    heal("h_both", 1, 40, memdisk.TOTAL - 1)
+    memdisk.restore()
+    let rc0: u64 = do_repair()
+    memdisk.name_begin("h_clean")
+    memdisk.dump()
+    line("h_clean", rc0)
+    finish("-")
+    simple("r_shrink", 40, 300)
+    simple("r_grow", 40, 560)
+    simple("r_second", 600, 400)
+    simple("r_overlap", 40, 561)
+    simple("r_badstart", 41, 100)
+    simple("r_zero", 40, 0)
+    simple("r_range", 600, 1500)
+    simple("r_same", 40, 500)
+    memdisk.restore()
+    memdisk.flip(memdisk.TOTAL - 1, 40)
+    let rcn: u64 = do_resize(40, 300)
+    memdisk.name_begin("r_nobackup")
+    memdisk.dump()
+    line("r_nobackup", rcn)
+    finish("-")
+    let rcr: u64 = do_repair()
+    let rcs: u64 = do_resize(40, 300)
+    memdisk.name_begin("r_afterrepair")
+    memdisk.dump()
+    line("r_afterrepair", rcs)
+    finish("-")
+    memdisk.restore()
+    memdisk.wipe()
+    let rcz: u64 = do_resize(40, 300)
+    line("r_notable", rcz)
+    finish("-")
+    memdisk.flush_out()
+    return 0 as i32
+}

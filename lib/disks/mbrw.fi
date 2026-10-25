@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import disks.gptw
+
+export { resize }
+
+const ENT_OFF: u64 = 446
+const TYPE_PROTECTIVE: u64 = 238
+
+fn is_extended(t: u64) -> bool {
+    return t == 5 || t == 15 || t == 133
+}
+
+fn live(e: u64) -> bool {
+    return bytes.ld8(e, 4) != 0 && bytes.le32(e + 12) != 0
+}
+
+fn put_chs(e: u64, lba: u64) {
+    let cyl: u64 = lba / (255 * 63)
+    if cyl > 1023 {
+        bytes.st8(e, 254)
+        bytes.st8(e + 1, 255)
+        bytes.st8(e + 2, 255)
+        return
+    }
+    bytes.st8(e, (lba / 63) % 255)
+    bytes.st8(e + 1, (lba % 63 + 1) | ((cyl >> 8) << 6))
+    bytes.st8(e + 2, cyl & 255)
+}
+
+fn resize(read: fn(u64, u64, u64) -> u64, write: fn(u64, u64, u64) -> u64, total: u64, start: u64, sectors: u64,
+    scratch: u64) -> u64 {
+    if read(0, 1, scratch) != 0 {
+        return gptw.E_IO
+    }
+    if bytes.ld8(scratch, 510) != 85 || bytes.ld8(scratch, 511) != 170 {
+        return gptw.E_NOTABLE
+    }
+    var target: u64 = 4
+    var i: u64 = 0
+    while i < 4 {
+        let e: u64 = scratch + ENT_OFF + i * 16
+        if bytes.ld8(e, 4) == TYPE_PROTECTIVE {
+            return gptw.E_KIND
+        }
+        if live(e) && bytes.le32(e + 8) == start {
+            target = i
+        }
+        i = i + 1
+    }
+    if target == 4 {
+        return gptw.E_INDEX
+    }
+    let t: u64 = scratch + ENT_OFF + target * 16
+    if is_extended(bytes.ld8(t, 4)) {
+        return gptw.E_KIND
+    }
+    if sectors == 0 || sectors > 4294967295 || start + sectors > total {
+        return gptw.E_RANGE
+    }
+    let last: u64 = start + sectors - 1
+    i = 0
+    while i < 4 {
+        let e: u64 = scratch + ENT_OFF + i * 16
+        if i != target && live(e) {
+            let s: u64 = bytes.le32(e + 8)
+            let l: u64 = s + bytes.le32(e + 12) - 1
+            if start <= l && last >= s {
+                return gptw.E_OVERLAP
+            }
+        }
+        i = i + 1
+    }
+    if bytes.le32(t + 12) == sectors {
+        return gptw.E_OK
+    }
+    bytes.put32(t + 12, sectors)
+    put_chs(t + 5, last)
+    if write(0, 1, scratch) != 0 {
+        return gptw.E_IO
+    }
+    return gptw.E_OK
+}

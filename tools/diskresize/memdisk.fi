@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+
+export {
+    TOTAL, setup, snapshot, restore, wipe, read_sectors, write_sectors, set_limit, set_torn, writes, ptr, flip,
+    name_begin, name_num, dump, say, say_num, flush_out
+}
+
+const TOTAL: u64 = 2048
+
+static mut img: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut base: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut out: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut pathb: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut limit: u64 = 1000000
+static mut torn: u64 = 0
+static mut nwrites: u64 = 0
+
+fn alloc(b: *mut rt.Buf) {
+    rt.buf_clear(b)
+    rt.buf_reserve_or_die(b, (TOTAL * 512) as usize)
+    rt.mem_set(rt.buf_ptr(b), 0, (TOTAL * 512) as usize)
+    rt.buf_set_len(b, (TOTAL * 512) as usize)
+}
+
+fn setup() {
+    alloc(&img)
+    alloc(&base)
+}
+
+fn ptr() -> u64 {
+    return rt.buf_ptr(&img)
+}
+
+fn snapshot() {
+    rt.mem_copy(rt.buf_ptr(&base), rt.buf_ptr(&img), (TOTAL * 512) as usize)
+}
+
+fn restore() {
+    rt.mem_copy(rt.buf_ptr(&img), rt.buf_ptr(&base), (TOTAL * 512) as usize)
+    limit = 1000000
+    torn = 0
+    nwrites = 0
+}
+
+fn wipe() {
+    rt.mem_set(rt.buf_ptr(&img), 0, (TOTAL * 512) as usize)
+}
+
+fn set_limit(n: u64) {
+    limit = n
+    nwrites = 0
+}
+
+fn set_torn(t: u64) {
+    torn = t
+}
+
+fn writes() -> u64 {
+    return nwrites
+}
+
+fn flip(lba: u64, off: u64) {
+    let p: u64 = rt.buf_ptr(&img) + lba * 512 + off
+    *(p as *mut u8) = (*(p as *mut u8)) ^ 255
+}
+
+fn read_sectors(lba: u64, n: u64, dst: u64) -> u64 {
+    if (lba + n) * 512 > TOTAL * 512 {
+        return 1
+    }
+    rt.mem_copy(dst, rt.buf_ptr(&img) + lba * 512, (n * 512) as usize)
+    return 0
+}
+
+fn write_sectors(lba: u64, n: u64, src: u64) -> u64 {
+    if (lba + n) * 512 > TOTAL * 512 {
+        return 1
+    }
+    if nwrites >= limit {
+        let half: u64 = n / 2
+        if torn == 1 && n > 1 {
+            rt.mem_copy(rt.buf_ptr(&img) + lba * 512, src, (half * 512) as usize)
+        }
+        if torn == 2 && n > 1 {
+            rt.mem_copy(rt.buf_ptr(&img) + (lba + half) * 512, src + half * 512, ((n - half) * 512) as usize)
+        }
+        return 1
+    }
+    nwrites = nwrites + 1
+    rt.mem_copy(rt.buf_ptr(&img) + lba * 512, src, (n * 512) as usize)
+    return 0
+}
+
+fn name_begin(prefix: str) {
+    rt.buf_clear(&pathb)
+    rt.buf_push_bytes(&pathb, prefix.p as u64, prefix.n)
+}
+
+fn name_num(v: u64) {
+    rt.buf_push_dec_u64(&pathb, v)
+}
+
+fn dump() {
+    let ext: str = ".img"
+    rt.buf_push_bytes(&pathb, ext.p as u64, ext.n)
+    rt.buf_push(&pathb, 0 as u8)
+    rt.write_file(rt.buf_ptr(&pathb), rt.buf_ptr(&img), (TOTAL * 512) as usize)
+}
+
+fn say(s: str) {
+    rt.buf_push_bytes(&out, s.p as u64, s.n)
+}
+
+fn say_num(v: u64) {
+    rt.buf_push_dec_u64(&out, v)
+}
+
+fn flush_out() {
+    rt.write_everything(1, rt.buf_ptr(&out), rt.buf_len(&out))
+}

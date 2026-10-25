@@ -3,7 +3,7 @@ import disks.table
 import disks.bytes
 
 export {
-    init, create, remove, free_start, kind_known,
+    init, create, remove, resize, repair, load, commit, free_start, kind_known,
     SCRATCH, E_OK, E_NOTABLE, E_RANGE, E_OVERLAP, E_FULL, E_IO, E_KIND, E_NOBACKUP, E_INDEX, E_SIZE,
     ALIGN
 }
@@ -325,4 +325,131 @@ fn free_start(tab: u64, sectors: u64) -> u64 {
         }
     }
     return cand
+}
+
+fn resize(read: fn(u64, u64, u64) -> u64, write: fn(u64, u64, u64) -> u64, total: u64, start: u64, sectors: u64,
+    scratch: u64) -> u64 {
+    let rc: u64 = load(read, total, scratch)
+    if rc != E_OK {
+        return rc
+    }
+    let hdr: u64 = scratch
+    let arr: u64 = scratch + ARR_OFF
+    let nent: u64 = bytes.le32(hdr + 80)
+    if sectors == 0 || start + sectors - 1 > bytes.le64(hdr + 48) {
+        return E_RANGE
+    }
+    let last: u64 = start + sectors - 1
+    var target: u64 = nent
+    var i: u64 = 0
+    while i < nent {
+        let e: u64 = arr + i * ENT_SIZE
+        if slot_live(e) && bytes.le64(e + 32) == start {
+            target = i
+        }
+        i = i + 1
+    }
+    if target == nent {
+        return E_INDEX
+    }
+    i = 0
+    while i < nent {
+        let e: u64 = arr + i * ENT_SIZE
+        if i != target && slot_live(e) && start <= bytes.le64(e + 40) && last >= bytes.le64(e + 32) {
+            return E_OVERLAP
+        }
+        i = i + 1
+    }
+    let t: u64 = arr + target * ENT_SIZE
+    if bytes.le64(t + 40) == last {
+        return E_OK
+    }
+    bytes.put64(t + 40, last)
+    return commit(write, scratch)
+}
+
+fn side_read(read: fn(u64, u64, u64) -> u64, total: u64, lba: u64, alt: u64, h: u64, a: u64) -> u64 {
+    if read(lba, 1, h) != 0 {
+        return E_IO
+    }
+    if !header_ok(h) || bytes.le64(h + 24) != lba || bytes.le64(h + 32) != alt {
+        return E_NOTABLE
+    }
+    let nent: u64 = bytes.le32(h + 80)
+    if bytes.le32(h + 84) != ENT_SIZE || nent == 0 || nent > 128 {
+        return E_NOTABLE
+    }
+    let sectors: u64 = (nent * ENT_SIZE + 511) / 512
+    let at: u64 = bytes.le64(h + 72)
+    if at < 2 || at + sectors > total {
+        return E_NOTABLE
+    }
+    if read(at, sectors, a) != 0 {
+        return E_IO
+    }
+    if table.crc32(a, nent * ENT_SIZE) != bytes.le32(h + 88) {
+        return E_NOTABLE
+    }
+    return E_OK
+}
+
+fn mirror_header(dst: u64, src: u64, me: u64, alt: u64, entlba: u64) {
+    bytes.copy(dst, src, 512)
+    bytes.put64(dst + 24, me)
+    bytes.put64(dst + 32, alt)
+    bytes.put64(dst + 72, entlba)
+    header_crc(dst)
+}
+
+fn repair(read: fn(u64, u64, u64) -> u64, write: fn(u64, u64, u64) -> u64, total: u64, scratch: u64) -> u64 {
+    if total < 68 {
+        return E_SIZE
+    }
+    let hdr: u64 = scratch
+    let arr: u64 = scratch + ARR_OFF
+    let bhdr: u64 = scratch + BHDR_OFF
+    let rp: u64 = side_read(read, total, 1, total - 1, hdr, arr)
+    if rp == E_IO {
+        return E_IO
+    }
+    let rb: u64 = side_read(read, total, total - 1, 1, bhdr, arr)
+    if rb == E_IO {
+        return E_IO
+    }
+    if rb == E_OK {
+        if rp == E_OK && bytes.le32(hdr + 88) == bytes.le32(bhdr + 88) && bytes.le32(hdr + 80) == bytes.le32(bhdr + 80) {
+            return E_OK
+        }
+        let sectors: u64 = (bytes.le32(bhdr + 80) * ENT_SIZE + 511) / 512
+        if 2 + sectors > bytes.le64(bhdr + 40) {
+            return E_RANGE
+        }
+        if write(2, sectors, arr) != 0 {
+            return E_IO
+        }
+        mirror_header(hdr, bhdr, 1, total - 1, 2)
+        if write(1, 1, hdr) != 0 {
+            return E_IO
+        }
+        return E_OK
+    }
+    if rp != E_OK {
+        return E_NOTABLE
+    }
+    if side_read(read, total, 1, total - 1, hdr, arr) != E_OK {
+        return E_IO
+    }
+    let sectors: u64 = (bytes.le32(hdr + 80) * ENT_SIZE + 511) / 512
+    let at: u64 = total - 1 - sectors
+    if at <= bytes.le64(hdr + 48) {
+        return E_NOBACKUP
+    }
+    if write(at, sectors, arr) != 0 {
+        return E_IO
+    }
+    mirror_header(bhdr, hdr, total - 1, 1, at)
+    if write(total - 1, 1, bhdr) != 0 {
+        return E_IO
+    }
+    return E_OK
 }
