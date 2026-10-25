@@ -498,6 +498,7 @@ hat "$OUT/r1.after" "roots.pem.prev" "the previous store is kept as roots.pem.pr
 hatnicht "$OUT/r1.after" "trust roots not updated" "no failure message"
 hat "$OUT/r1.after" "00000400" "SYSVERSION grows to 400"
 hat "$OUT/r1.after" "system: up to date" "TLS still works against the new store (search after apply)"
+fresh_disk
 dienst "$OUT/feed-roots-bad" && ok "feed up (bad bundle hash)" || bad "feed does not start"
 rc=$(lauf r2 "ota system search;ota system apply;rootsctl check;ls /etc/ssl;ls /system/new;exit")
 sed -n '/^osum\$ ota system apply/,$p' "$OUT/r2.txt" > "$OUT/r2.after"
@@ -505,6 +506,7 @@ hat "$OUT/r2.after" "ota: trust roots not updated" "counter-proof: wrong bundle 
 hatnicht "$OUT/r2.after" "system: trust roots updated" "counter-proof: no success message"
 hat "$OUT/r2.after" "BLOCKS 1" "counter-proof: the store still holds 1 root"
 hatnicht "$OUT/r2.after" "roots.pem.prev" "counter-proof: no .prev written"
+fresh_disk
 dienst "$OUT/feed-roots-junk" && ok "feed up (unparsable block)" || bad "feed does not start"
 rc=$(lauf r3 "ota system search;ota system apply;rootsctl check;ls /etc/ssl;exit")
 sed -n '/^osum\$ ota system apply/,$p' "$OUT/r3.txt" > "$OUT/r3.after"
