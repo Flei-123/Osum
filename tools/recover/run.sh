@@ -10,7 +10,7 @@ export FIRNLIB="$ROOT/lib"
 OUT=${OUT:-$(mktemp -d)}
 mkdir -p "$OUT"
 export OUT
-trap 'rm -rf "$OUT"' EXIT
+trap '[ -n "${KEEP:-}" ] || rm -rf "$OUT"' EXIT
 
 pass=0
 fail=0
