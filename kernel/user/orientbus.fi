@@ -38,6 +38,7 @@ import ulib
 import libc.io
 import actwire
 import setschema
+import trusttext
 
 export { u_start }
 
@@ -153,6 +154,7 @@ const TK_LEN: u64 = 24
 const TK_PID: u64 = 32
 const TK_UID: u64 = 40
 const TK_CLIENT: u64 = 48 // 24 octets: the RESOLVED client (AB-003)
+const TK_PRINT: u64 = 72
 const TOK_BYTES: u64 = 1024
 static mut toks: [u8; 768] = [0 as u8; 768]
 static mut tokmem: [u8; 8192] = [0 as u8; 8192]
@@ -174,6 +176,7 @@ static mut undo_seq: u64 = 0
 static mut c_calls: u64 = 0
 static mut c_allow: u64 = 0
 static mut c_ask: u64 = 0
+static mut c_dup: u64 = 0
 static mut c_deny: u64 = 0
 static mut c_dry: u64 = 0
 static mut c_undo: u64 = 0
@@ -2589,6 +2592,35 @@ fn aj_poll() {
     }
 }
 
+fn reply_confirm(pid: u64, id: u64, tp: u64, np: u64, rlvl: u64, act: u64) {
+    var s_c: [u8; 9] = "confirm \0"
+    var s_lv: [u8; 8] = "\nlevel=\0"
+    var s_ds: [u8; 7] = "\ntext=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_c[0 as usize]) as u64)
+    actwire.ob_num(ld(tp, TK_NO))
+    actwire.ob_ch(32)
+    actwire.ob_str(np)
+    actwire.ob_str((&s_lv[0 as usize]) as u64)
+    actwire.ob_str(level_name(rlvl))
+    actwire.ob_str((&s_ds[0 as usize]) as u64)
+    actwire.ob_str(pl(ld(ac(act), AC_DESC)))
+    actwire.ob_ch(10)
+    reply_ob(pid, id)
+}
+
+fn tok_dup(cp: u64, uid: u64, print: u64) -> u64 {
+    var i: u64 = 0
+    while i < TOK_MAX {
+        if ld(tk(i), TK_USED) != 0 && ld(tk(i), TK_UID) == uid && ld(tk(i), TK_PRINT) == print
+            && actwire.str_eq(tk(i) + TK_CLIENT, cp) {
+            return i
+        }
+        i = i + 1
+    }
+    return actwire.NONE
+}
+
 fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
     undo: bool) {
     var name: [u8; 40] = [0 as u8; 40]
@@ -2685,6 +2717,13 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         // park the request and hand out a number; `act confirm` from the
         // user replays it (section 5.3)
         c_ask = c_ask + 1
+        let print: u64 = call_print(msg, np)
+        let dup: u64 = tok_dup(cp, uid, print)
+        if dup != actwire.NONE {
+            c_dup = c_dup + 1
+            reply_confirm(pid, id, tk(dup), np, rlvl, act)
+            return
+        }
         let len: u64 = actwire.slen(msg)
         var t: u64 = actwire.NONE
         var i: u64 = 0
@@ -2706,23 +2745,11 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         st(tp, TK_LEN, len)
         st(tp, TK_PID, pid)
         st(tp, TK_UID, uid)
+        st(tp, TK_PRINT, print)
         copyz(tp + TK_CLIENT, cp, 24)
         copyn(tkmem(t), msg, len, TOK_BYTES)
         tok_next = tok_next + 1
-        var s_c: [u8; 9] = "confirm \0"
-        var s_lv: [u8; 8] = "\nlevel=\0"
-        var s_ds: [u8; 7] = "\ntext=\0"
-        actwire.ob_reset()
-        actwire.ob_str((&s_c[0 as usize]) as u64)
-        actwire.ob_num(ld(tp, TK_NO))
-        actwire.ob_ch(32)
-        actwire.ob_str(np)
-        actwire.ob_str((&s_lv[0 as usize]) as u64)
-        actwire.ob_str(level_name(rlvl))
-        actwire.ob_str((&s_ds[0 as usize]) as u64)
-        actwire.ob_str(pl(ld(ac(act), AC_DESC)))
-        actwire.ob_ch(10)
-        reply_ob(pid, id)
+        reply_confirm(pid, id, tp, np, rlvl, act)
         audit(pid, uid, cp, vb, np, (&s_ask[0 as usize]) as u64,
             (&r_conf[0 as usize]) as u64, dry)
         // tell whoever shows confirmation dialogs
@@ -3502,6 +3529,8 @@ fn do_stat(pid: u64, id: u64) {
     stat_line((&k6[0 as usize]) as u64, c_allow)
     var k7: [u8; 7] = "asked=\0"
     stat_line((&k7[0 as usize]) as u64, c_ask)
+    var k7d: [u8; 11] = "duplicate=\0"
+    stat_line((&k7d[0 as usize]) as u64, c_dup)
     var k8: [u8; 8] = "denied=\0"
     stat_line((&k8[0 as usize]) as u64, c_deny)
     var k9: [u8; 5] = "dry=\0"
@@ -4367,8 +4396,8 @@ const WM_TRUST: u64 = 2129
 const TR_ASK: u64 = 0
 const TR_POLL: u64 = 1
 const TR_CANCEL: u64 = 2
-const TR_BYTES: u64 = 384
-static mut tr_text: [u8; 3072] = [0 as u8; 3072] // TOK_MAX x TR_BYTES
+const TR_BYTES: u64 = 640
+static mut tr_text: [u8; 5120] = [0 as u8; 5120] // TOK_MAX x TR_BYTES
 static mut tr_up: u64 = 0 // the token number on the screen, 0 = none
 static mut tr_retry: u64 = 0 // ticks: no screen, try again from then
 static mut c_trusted: u64 = 0 // calls answered in the dialog
@@ -4398,30 +4427,6 @@ fn tk_by_no(no: u64) -> u64 {
 static mut tk_dlg: [u8; 8] = [0 as u8; 8] // TOK_MAX: 1 = dialog only
 static mut tr_screen: bool = false // a dialog was shown at least once on this boot
 
-// the argument lines of a parked request ("key=value", not the @meta lines) as "\n  key=value"
-fn trusted_args(t: u64) {
-    let m: u64 = tkmem(t)
-    var at: u64 = actwire.line_end(m, 0)
-    var n: u64 = 0
-    var s_ind: [u8; 4] = "\n  \0"
-    while ld8(m, at) != 0 && n < 6 {
-        if ld8(m, at) == 10 {
-            at = at + 1
-        }
-        let e: u64 = actwire.line_end(m, at)
-        if e > at && ld8(m, at) != 64 {
-            actwire.ob_str((&s_ind[0 as usize]) as u64)
-            var j: u64 = at
-            while j < e && j < at + 60 {
-                actwire.ob_ch(ld8(m, j))
-                j = j + 1
-            }
-            n = n + 1
-        }
-        at = e
-    }
-}
-
 fn trusted_ask(no: u64, cp: u64, np: u64, lvl: u64, desc: u64, rlvl: u64) {
     let t: u64 = tk_by_no(no)
     if t == actwire.NONE {
@@ -4440,27 +4445,7 @@ fn trusted_ask(no: u64, cp: u64, np: u64, lvl: u64, desc: u64, rlvl: u64) {
         }
         tk_dlg[(t) as usize] = 1 as u8
     }
-    var s1: [u8; 17] = " will ausfuehren\0"
-    var s2: [u8; 11] = "\n  Aktion \0"
-    var s3: [u8; 11] = "   Stufe: \0"
-    var s4: [u8; 3] = "\n\n\0"
-    var s5: [u8; 15] = "\n\nAnfrage Nr. \0"
-    var s6: [u8; 31] = " -- verfaellt nach 60 Sekunden\0"
-    actwire.ob_reset()
-    actwire.ob_str(cp)
-    actwire.ob_str((&s1[0 as usize]) as u64)
-    actwire.ob_str((&s2[0 as usize]) as u64)
-    actwire.ob_str(np)
-    actwire.ob_str((&s3[0 as usize]) as u64)
-    actwire.ob_str(lvl)
-    trusted_args(t)
-    if desc != 0 && ld8(desc, 0) != 0 {
-        actwire.ob_str((&s4[0 as usize]) as u64)
-        actwire.ob_str(desc)
-    }
-    actwire.ob_str((&s5[0 as usize]) as u64)
-    actwire.ob_num(no)
-    actwire.ob_str((&s6[0 as usize]) as u64)
+    trusttext.build(tkmem(t), no, cp, np, lvl, desc)
     copyn(trt(t), actwire.ob_ptr(), actwire.ob_len(), TR_BYTES)
     actwire.ob_reset()
     trusted_poll()

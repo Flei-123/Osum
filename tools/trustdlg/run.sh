@@ -56,6 +56,9 @@ act call settings.set key=lock.idle value=900 --as helper
 sleep 14
 act call settings.get key=lock.idle
 echo ==TEND==
+act call settings.set key=lock.idle value=1200 --as helper
+act call settings.set key=lock.idle value=1200 --as helper
+echo ==T3END==
 act stat
 act stop
 echo ==FERTIG==
@@ -111,6 +114,8 @@ if waitn 60 2; then
     if [ -n "$FX" ] && [ -n "$FY" ]; then
         python3 tools/trustdlg/flicker.py "$SOCK" "$TMPD" "$FX" "$FY" "$FW" "$FH" 20 > "$TMPD/flicker.txt" 2>&1
     fi
+    key d; shot "$TMPD/2d-open.ppm"
+    key d
     key tab; shot "$TMPD/3-tab.ppm"        # focus -> Erlauben
     key ret
     sleep 2; shot "$TMPD/4-done.ppm"
@@ -131,7 +136,13 @@ if [ -z "$L" ]; then bad "no layout line (old dialog)"; else
   [ "${B1:-0}" -le "${H:-0}" ] && [ "${H:-0}" -lt "${BT:-0}" ] && ok "layout: body end $B1 <= hint $H < buttons $BT (no overlap)" || bad "layout overlaps: $L"
   [ "${BT:-0}" -lt $(( ${Y:-0} + ${HH:-0} )) ] && ok "buttons inside the dialog (bottom $((Y+HH)))" || bad "buttons outside the dialog: $L"
 fi
-part "$G" T1 T2 > "$TMPD/p1.txt"; part "$G" T2 TEND > "$TMPD/p2.txt"
+part "$G" T1 T2 > "$TMPD/p1.txt"; part "$G" T2 TEND > "$TMPD/p2.txt"; part "$G" TEND T3END > "$TMPD/p3.txt"
+has "$G" "wm: trusted dialog details open=1" "key D opens the details"
+has "$G" "wm: trusted dialog details open=0" "key D closes them again"
+has "$G" "wm: trusted dialog up no=" "dialog text parsed"
+ND=$(grep -ao 'confirm [0-9]*' "$TMPD/p3.txt" | sort -u | wc -l)
+[ "$ND" = 1 ] && ok "two identical parked calls share ONE token" || bad "identical calls got $ND tokens"
+has "$G" "duplicate=1" "act stat counts the folded duplicate"
 has "$G" "wm: trusted dialog answer=2" "Enter on the default focus = Ablehnen (no)"
 has "$TMPD/p1.txt" "value=300" "rejected: lock.idle stays 300"
 has "$G" "wm: trusted dialog answer=1" "Tab + Enter = Erlauben (yes)"
@@ -141,6 +152,6 @@ if [ -s "$TMPD/flicker.txt" ]; then
   O=$(echo "$FL" | sed -nE 's/.*odd=([0-9]+).*/\1/p'); S=$(echo "$FL" | sed -nE 's/.*samples=([0-9]+).*/\1/p')
   [ "${S:-0}" -ge 10 ] && [ "${O:-1}" -eq 0 ] && ok "no flicker: $S screendumps, dialog area identical" || bad "flicker / too few samples: $FL"
 else bad "no flicker measurement"; fi
-for f in 1-up 2-up 3-tab 4-done; do [ -s "$TMPD/$f.png" ] && ok "photo $TMPD/$f.png" || bad "no photo $f"; done
+for f in 1-up 2-up 2d-open 3-tab 4-done; do [ -s "$TMPD/$f.png" ] && ok "photo $TMPD/$f.png" || bad "no photo $f"; done
 echo "TRUSTDLG: $pass passed, $fail failed"
 [ "$fail" = 0 ]
