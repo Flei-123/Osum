@@ -38,13 +38,14 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 finish() { echo "CLASSES: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
 
 echo "== 1. build =="
-PROGS="sh cat echo"
+PROGS="sh cat echo netmeter"
 mkdir -p "$D/bin"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/b.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/b.txt"; finish; }
 ./tools/build-kernel.sh "$D/k0.img" --stufe 0 > "$D/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel"; tail -5 "$D/k.txt"; finish; }
 cat > "$D/s.sh" <<'EOS'
 echo ==DRIVERS==
 cat /proc/drivers
+netmeter 3
 echo ==END==
 EOS
 python3 tools/osum/mkfs.py build "$D/d.img" 20000 /lib/ \
@@ -122,6 +123,8 @@ has "$D/usbn.klar" "usb-net usb usb class=02 found=? state=bound err=- class=net
 has "$D/usbn.klar" "netdev: c0=usbnet" "usb-net: netdev picked usbnet"
 num "usb-net: class-calls net-eth counted" "$(grep -aoE '^# class-calls net-eth=[0-9]+' "$D/usbn.klar" | tail -1 | cut -d= -f2)" ge 5
 has "$D/usbnc.klar" "usb-net usb usb class=02 found=? state=failed err=init failed class=net-eth" "usb-net noclass: row failed with its reason"
+num "usb-net: tray link state (NG_LINK) is up" "$(grep -a '^netmeter: start' "$D/usbn.klar" | grep -aoE 'link=[0-9]+' | tail -1 | cut -d= -f2)" eq 1
+num "usb-net noclass: tray link state is down" "$(grep -a '^netmeter: start' "$D/usbnc.klar" | grep -aoE 'link=[0-9]+' | tail -1 | cut -d= -f2)" eq 0
 hasnot "$D/usbnc.klar" "# class-calls net-eth" "usb-net noclass: no dispatch counted"
 hasnot "$D/rtlno.klar" "r8169 pci 10ec:*/0200 found=1 state=bound" "noclass: r8169 row is not bound"
 has "$D/rtlno.klar" "r8169 pci 10ec:*/0200 found=1 state=failed err=init failed class=net-eth" "noclass: r8169 row failed with its reason"
@@ -196,4 +199,17 @@ for pair in e1000:e1000 virtio-net-pci:virtio-net; do
     got=$(ping_run "n-$kname" "noclass" "$model")
     num "$kname noclass: replies without a table" "$got" eq 0
 done
+echo "== 5. counter-proof: usbnet_class without link_up reports a down link =="
+MUT=kernel/drv/net/usbnet_class.fi
+cp "$MUT" "$D/usbnet_class.orig"
+trap 'cp "$D/usbnet_class.orig" "$MUT"; cleanup' EXIT
+sed -i '/o.link_up = usbnet.up_on/d' "$MUT"
+./tools/build-kernel.sh "$D/k1.img" --stufe 0 > "$D/k1.txt" 2>&1 && ok "mutated kernel builds" || { bad "mutated kernel"; tail -5 "$D/k1.txt"; }
+cp "$D/usbnet_class.orig" "$MUT"
+if [ -s "$D/k1.img" ]; then
+    mv "$D/k0.img" "$D/k0.keep"; mv "$D/k0.img.elf" "$D/k0.keep.elf" 2>/dev/null
+    cp "$D/k1.img" "$D/k0.img"
+    runvm usbmut "nic usbpoll" "${NETDEV[@]}" -device usb-net,netdev=n0,mac=52:54:00:aa:bb:cc
+    num "mutated kernel: tray link state is down (counter-proof)" "$(grep -a '^netmeter: start' "$D/usbmut.klar" | grep -aoE 'link=[0-9]+' | tail -1 | cut -d= -f2)" eq 0
+fi
 finish
