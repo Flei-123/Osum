@@ -76,7 +76,7 @@ run() {
     local acc=""
     [ "$OSUM_QEMU_ACCEL" = kvm ] && acc="-cpu host"
     timeout 240 $QEMU_X86 $acc -kernel "$2" -m 512 \
-        -append "osum nokbd vfs script=sh /t/s.sh;exit" \
+        -append "osum nokbd vfs nowlock script=sh /t/s.sh;exit" \
         -serial "file:$W/serial-$1.txt" -display none -no-reboot \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive "file=$W/live-$1.img,format=raw,if=ide,index=0" \
