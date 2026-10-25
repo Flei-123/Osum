@@ -10,7 +10,7 @@ ULD=kernel/user/user.ld
 PROGS="sh cat echo ls cp rm mkdir wc true false mount umount"
 OLDREF=${OLDREF:-}
 W=$(mktemp -d)
-trap 'rm -rf "$W"; [ -n "${OLDWT:-}" ] && git worktree remove --force "$OLDWT" 2>/dev/null' EXIT
+trap '[ -n "${KEEP:-}" ] && { mkdir -p "$KEEP"; cp "$W"/out-*.txt "$W"/*.log "$KEEP"/ 2>/dev/null; }; rm -rf "$W"; [ -n "${OLDWT:-}" ] && git worktree remove --force "$OLDWT" 2>/dev/null' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
