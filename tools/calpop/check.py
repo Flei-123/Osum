@@ -49,7 +49,7 @@ if len(picks) >= 2:
     say(tuple(int(v) for v in picks[-1]) == (ty, tm, td), "Today marks today: %s" % (picks[-1],))
 shuts = re.findall(r"calpop: shut (\w+)", ser)
 say(shuts[:2] == ["toggle", "outside"], "closed by a clock press and by an outside press (%s)" % shuts)
-print("  INFO  Esc closes the popup: %s (open issue, see roadmap)" % ("yes" if "esc" in shuts else "NO"))
+say("esc" in shuts, "Esc closes the popup, also after the entry field had the focus (%s)" % shuts)
 rects = dict((n_, tuple(int(v) for v in r)) for n_, *r in re.findall(r"calpop: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser))
 say(all(k in rects for k in ("prev", "next", "today", "cell")), "the popup reports its buttons (%s)" % sorted(rects))
 # geometry: the card lies above the bar and inside the screen
@@ -109,5 +109,28 @@ try:
     say(region_diff("05-today", "05a-event") >= 1, "the event line and entry repaint the card (%d %% differs)" % region_diff("05-today", "05a-event"))
 except OSError as e:
     say(False, "event pictures missing: %s" % e)
+cn = re.findall(r"calpop: contacts (\d+)", ser)
+say(len(cn) >= 2 and all(int(v) == 4 for v in cn), "every open reports the 4 seeded contacts (%s)" % cn)
+def ink(name, y0, y1):
+    wa, ha, da = load_ppm(os.path.join(out, name + ".ppm"))
+    base = da[(py + 2) * wa * 3 + (px + 2) * 3:(py + 2) * wa * 3 + (px + 2) * 3 + 3]
+    n = 0
+    for yy in range(max(y0, 0), min(y1, ha)):
+        for xx in range(px + 4, min(px + pw - 4, wa)):
+            o = (yy * wa + xx) * 3
+            if max(abs(da[o + c] - base[c]) for c in range(3)) > 90: n += 1
+    return n
+sk_ = max(pw // 296, 1)
+pad, gap, add_h, ct_h, ev_h = 10 * sk_, 4 * sk_, 36 * sk_, 26 * sk_, 26 * sk_
+ct_y1 = py + ph - pad - add_h - gap
+ct_y0 = ct_y1 - ct_h
+ev_y1 = ct_y0 - gap
+ev_y0 = ev_y1 - ev_h
+try:
+    ci, ei = ink("01-open", ct_y0, ct_y1), ink("01-open", ev_y0, ev_y1)
+    say(ci >= 40, "the contact line shows names inside its band (%d ink px)" % ci)
+    say(ei <= 4, "COUNTER-PROOF: the empty event line band right above has no ink, so the band test is not noise (%d ink px)" % ei)
+except OSError as e:
+    say(False, "open picture missing: %s" % e)
 print("RESULT ok=%d fail=%d" % (ok, fail))
 sys.exit(1 if fail else 0)
