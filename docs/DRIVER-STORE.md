@@ -47,7 +47,7 @@ Host tool: `mkpkg.py build <outdir> --name N --module M.omod --match "pci 1234:1
 - Everything runs in ring 0. A correctly signed but faulty module crashes the kernel (measured in `tools/module/run.sh` section 7). Signature proves origin, not correctness.
 - No IOMMU: a loaded driver can DMA anywhere (`DRIVER-ARCHITECTURE.md` D5/D6).
 - `rights=` is parsed and will be logged; **not enforced** for `.omod` yet (D4 open).
-- Deleting `/lib/omod.sperre` unlocks every banned module (K-014 open point: needs a minimum list in the kernel or in the OTA image).
+- Deleting `/lib/omod.sperre` unlocks everything on that list, but not the compiled-in floor (section 8).
 - A manifest signature binds only the manifest; the module is bound by its own signature. A validly signed old module paired with a new manifest is possible until the manifest carries the module signature hash (planned: `module-sig=` key).
 
 ## 5. Kernel part (built 24.10.2026, gate `tools/drvstore/run.sh`)
@@ -72,3 +72,12 @@ Host tool: `mkpkg.py build <outdir> --name N --module M.omod --match "pci 1234:1
 ## 7. Open
 
 USB/ACPI auto-bind (only PCI binds; USB/ACPI are listed), hot-plug rescan, rights enforcement besides `mmio` and `fw`, PS/2 mouse via store, `drvctl` has no live rescan (active after reboot).
+
+## 8. Trusted keys, revocation floor, reference counts (r16, 25.10.2026, gate `tools/drvpolicy/run.sh` 47/0)
+
+- `tools/module/mkpolicy.py` turns `tools/module/keys.default` (hex public keys, max 4) and `tools/module/banfloor.txt` (hex `.omod` signatures, max 64) into `lib/modpolicy/policydata.fi`. Kernel (`ldr/modpolicy.fi`, `module.signature_valid`) and `drvctl` (`drvpkg.verify_dir`) both read it through `lib/modpolicy/policyhex.fi`; a signature is valid if ANY listed key verifies it.
+- Delivery key: private seed `/root/.osum-secrets/osum-delivery.seed` (outside the repo), public key in `keys.default` and `keys.release`. Release procedure: copy `keys.release` over `keys.default`, run `python3 tools/module/mkpolicy.py lib/modpolicy/policydata.fi`; the development seed in the repo then signs nothing the kernel or `drvctl` accepts. The gate fails if the checked-in `policydata.fi` is stale.
+- `tools/build-kernel.sh --module-keys FILE --ban-floor FILE` builds a kernel with another policy (copy of `lib/`, build cache key includes it).
+- Floor: `check_banlist` tests the compiled-in floor before looking at `/lib/omod.sperre`. A floor module is refused (`gesperrt`) with no list on disk; deleting the list file cannot unlock it.
+- Reference counts: `module.ref/unref/refs_of`; the store takes one reference per device bound to a package module. `module.entladen` refuses (returns false, counter `busy_count`) while references exist. Word `drvunload` (bit 1204) makes the boot try to unload every store module, release its references, and unload again (`drvstore: unload <name> refused refs=N` then `ok`).
+- Still open: second driver slot class, hot unload from userland (`drvctl unload`), ref-holding by slot drivers (mouse) that are loaded outside the store.
