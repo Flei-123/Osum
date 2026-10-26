@@ -185,6 +185,7 @@ awk '/==U1==/{f=1} f&&/unload edudemo ok/{exit} f' "$D/ul1.klar" > "$D/ul1.befor
 awk '/unload edudemo ok/{f=1} f' "$D/ul1.klar" > "$D/ul1.after"
 has "$D/ul1.before" "drv=edudemo src=store bind=bound" "unload: driver bound before"
 has "$D/ul1.before" "store=on pkgs=8 valid=3 bound=1 failed=0" "unload: store counts before"
+[ -n "${DRVSTORE_DUMP:-}" ] && mkdir -p "$DRVSTORE_DUMP" && cp "$D"/ul*.klar "$DRVSTORE_DUMP"/
 has "$D/ul1.klar" "unload edudemo ok" "unload: package unloaded"
 has "$D/ul1.klar" "drvstore: ctl unload edudemo 0" "unload: kernel logged the request"
 hasnot "$D/ul1.after" "drv=edudemo src=store" "unload: device no longer shown as bound to the package"
