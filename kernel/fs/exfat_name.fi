@@ -1,0 +1,231 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+
+export { valid, unit_count, unit_at, hash, equal, upper16, MAX_UNITS, MAX_BYTES }
+
+const MAX_UNITS: u64 = 255
+const MAX_BYTES: u64 = 63
+
+fn upper_latin_ext_a(c: u64) -> u64 {
+    if c == 0x131 {
+        return 0x49
+    }
+    if c == 0x17F {
+        return 0x53
+    }
+    if c == 0x130 || c == 0x138 || c == 0x149 || c == 0x178 {
+        return c
+    }
+    if (c >= 0x100 && c <= 0x137) || (c >= 0x14A && c <= 0x177) {
+        if (c & 1) == 1 {
+            return c - 1
+        }
+        return c
+    }
+    if (c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E) {
+        if (c & 1) == 0 {
+            return c - 1
+        }
+        return c
+    }
+    return c
+}
+
+fn upper_greek(c: u64) -> u64 {
+    if c == 0x3AC {
+        return 0x386
+    }
+    if c >= 0x3AD && c <= 0x3AF {
+        return c - 37
+    }
+    if c == 0x3C2 {
+        return 0x3A3
+    }
+    if c >= 0x3B1 && c <= 0x3CB {
+        return c - 32
+    }
+    if c == 0x3CC {
+        return 0x38C
+    }
+    if c == 0x3CD || c == 0x3CE {
+        return c - 63
+    }
+    return c
+}
+
+fn upper16(c: u64) -> u64 {
+    if c < 0x80 {
+        if c >= 97 && c <= 122 {
+            return c - 32
+        }
+        return c
+    }
+    if c == 0xB5 {
+        return 0x39C
+    }
+    if c >= 0xE0 && c <= 0xFE && c != 0xF7 {
+        return c - 32
+    }
+    if c == 0xFF {
+        return 0x178
+    }
+    if c >= 0x100 && c <= 0x17F {
+        return upper_latin_ext_a(c)
+    }
+    if c >= 0x386 && c <= 0x3CE {
+        return upper_greek(c)
+    }
+    if c >= 0x430 && c <= 0x44F {
+        return c - 32
+    }
+    if c >= 0x450 && c <= 0x45F {
+        return c - 80
+    }
+    return c
+}
+
+fn cont(name: u64, i: u64) -> u64 {
+    let b: u64 = kstate.get8(name + i)
+    if (b & 0xC0) != 0x80 {
+        return 0x100
+    }
+    return b & 0x3F
+}
+
+fn decode(name: u64, pos: u64) -> u64 {
+    let b: u64 = kstate.get8(name + pos)
+    if b < 0x80 {
+        return (1 << 32) | b
+    }
+    if b >= 0xC2 && b <= 0xDF {
+        let c1: u64 = cont(name, pos + 1)
+        if c1 == 0x100 {
+            return 0
+        }
+        return (2 << 32) | ((b & 0x1F) << 6) | c1
+    }
+    if b >= 0xE0 && b <= 0xEF {
+        let c1: u64 = cont(name, pos + 1)
+        if c1 == 0x100 {
+            return 0
+        }
+        let c2: u64 = cont(name, pos + 2)
+        if c2 == 0x100 {
+            return 0
+        }
+        let cp: u64 = ((b & 0x0F) << 12) | (c1 << 6) | c2
+        if cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF) {
+            return 0
+        }
+        return (3 << 32) | cp
+    }
+    return 0
+}
+
+fn forbidden(c: u64) -> bool {
+    if c < 32 || c == 0x7F || c == 0xFFFE || c == 0xFFFF {
+        return true
+    }
+    return c == 34 || c == 42 || c == 47 || c == 58 || c == 60 || c == 62
+        || c == 63 || c == 92 || c == 124
+}
+
+fn unit_count(name: u64) -> u64 {
+    var pos: u64 = 0
+    var n: u64 = 0
+    while kstate.get8(name + pos) != 0 {
+        let d: u64 = decode(name, pos)
+        if d == 0 {
+            return 0
+        }
+        pos = pos + (d >> 32)
+        n = n + 1
+    }
+    return n
+}
+
+fn unit_at(name: u64, k: u64) -> u64 {
+    var pos: u64 = 0
+    var i: u64 = 0
+    while kstate.get8(name + pos) != 0 {
+        let d: u64 = decode(name, pos)
+        if d == 0 {
+            return 0
+        }
+        if i == k {
+            return d & 0xFFFFFFFF
+        }
+        pos = pos + (d >> 32)
+        i = i + 1
+    }
+    return 0
+}
+
+fn valid(name: u64) -> bool {
+    var pos: u64 = 0
+    var n: u64 = 0
+    while kstate.get8(name + pos) != 0 {
+        let d: u64 = decode(name, pos)
+        if d == 0 || forbidden(d & 0xFFFFFFFF) {
+            return false
+        }
+        pos = pos + (d >> 32)
+        n = n + 1
+        if pos > MAX_BYTES || n > MAX_UNITS {
+            return false
+        }
+    }
+    if n == 0 {
+        return false
+    }
+    if n == 1 && kstate.get8(name) == 46 {
+        return false
+    }
+    if n == 2 && kstate.get8(name) == 46 && kstate.get8(name + 1) == 46 {
+        return false
+    }
+    return true
+}
+
+fn ror16_add(h: u64, v: u64) -> u64 {
+    return ((((h << 15) | (h >> 1)) & 0xFFFF) + v) & 0xFFFF
+}
+
+fn hash(name: u64) -> u64 {
+    var pos: u64 = 0
+    var h: u64 = 0
+    while kstate.get8(name + pos) != 0 {
+        let d: u64 = decode(name, pos)
+        if d == 0 {
+            return h
+        }
+        let u: u64 = upper16(d & 0xFFFFFFFF)
+        h = ror16_add(h, u & 0xFF)
+        h = ror16_add(h, u >> 8)
+        pos = pos + (d >> 32)
+    }
+    return h
+}
+
+fn equal(a: u64, b: u64) -> bool {
+    var pa: u64 = 0
+    var pb: u64 = 0
+    while kstate.get8(a + pa) != 0 && kstate.get8(b + pb) != 0 {
+        var da: u64 = decode(a, pa)
+        var db: u64 = decode(b, pb)
+        if da == 0 {
+            da = (1 << 32) | kstate.get8(a + pa)
+        }
+        if db == 0 {
+            db = (1 << 32) | kstate.get8(b + pb)
+        }
+        if upper16(da & 0xFFFFFFFF) != upper16(db & 0xFFFFFFFF) {
+            return false
+        }
+        pa = pa + (da >> 32)
+        pb = pb + (db >> 32)
+    }
+    return kstate.get8(a + pa) == kstate.get8(b + pb)
+}

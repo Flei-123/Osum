@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+
+export {
+    clear, inquiry, test_unit_ready, request_sense, read_capacity10, read_capacity16,
+    read_blocks, write_blocks, sync_cache, stop_unit,
+    sense_key, sense_asc, sense_ascq, sense_response,
+    KEY_NOT_READY, KEY_MEDIUM_ERROR, KEY_ILLEGAL_REQUEST, KEY_UNIT_ATTENTION, KEY_DATA_PROTECT,
+    OP_INQUIRY, OP_TEST_UNIT_READY, OP_REQUEST_SENSE, OP_READ_CAPACITY10, OP_SERVICE_ACTION_IN16,
+    OP_READ10, OP_WRITE10, OP_READ16, OP_WRITE16, OP_SYNC_CACHE10, OP_START_STOP_UNIT,
+    SA_READ_CAPACITY16, CDB_MAX
+}
+
+const CDB_MAX: u64 = 16
+
+const OP_TEST_UNIT_READY: u64 = 0x00
+const OP_REQUEST_SENSE: u64 = 0x03
+const OP_INQUIRY: u64 = 0x12
+const OP_START_STOP_UNIT: u64 = 0x1B
+const OP_READ_CAPACITY10: u64 = 0x25
+const OP_READ10: u64 = 0x28
+const OP_WRITE10: u64 = 0x2A
+const OP_SYNC_CACHE10: u64 = 0x35
+const OP_READ16: u64 = 0x88
+const OP_WRITE16: u64 = 0x8A
+const OP_SERVICE_ACTION_IN16: u64 = 0x9E
+const SA_READ_CAPACITY16: u64 = 0x10
+
+const KEY_NOT_READY: u64 = 2
+const KEY_MEDIUM_ERROR: u64 = 3
+const KEY_ILLEGAL_REQUEST: u64 = 5
+const KEY_UNIT_ATTENTION: u64 = 6
+const KEY_DATA_PROTECT: u64 = 7
+
+fn put(p: u64, i: u64, v: u64) {
+    kstate.set8(p + i, (v & 0xFF) as u8)
+}
+
+fn put_be16(p: u64, i: u64, v: u64) {
+    put(p, i, v >> 8)
+    put(p, i + 1, v)
+}
+
+fn put_be32(p: u64, i: u64, v: u64) {
+    put(p, i, v >> 24)
+    put(p, i + 1, v >> 16)
+    put(p, i + 2, v >> 8)
+    put(p, i + 3, v)
+}
+
+fn put_be64(p: u64, i: u64, v: u64) {
+    put_be32(p, i, v >> 32)
+    put_be32(p, i + 4, v)
+}
+
+fn clear(p: u64) {
+    var i: u64 = 0
+    while i < CDB_MAX {
+        put(p, i, 0)
+        i = i + 1
+    }
+}
+
+fn inquiry(p: u64, alloc: u64) -> u64 {
+    clear(p)
+    put(p, 0, OP_INQUIRY)
+    put(p, 4, alloc)
+    return 6
+}
+
+fn test_unit_ready(p: u64) -> u64 {
+    clear(p)
+    put(p, 0, OP_TEST_UNIT_READY)
+    return 6
+}
+
+fn request_sense(p: u64, alloc: u64) -> u64 {
+    clear(p)
+    put(p, 0, OP_REQUEST_SENSE)
+    put(p, 4, alloc)
+    return 6
+}
+
+fn read_capacity10(p: u64) -> u64 {
+    clear(p)
+    put(p, 0, OP_READ_CAPACITY10)
+    return 10
+}
+
+fn read_capacity16(p: u64, alloc: u64) -> u64 {
+    clear(p)
+    put(p, 0, OP_SERVICE_ACTION_IN16)
+    put(p, 1, SA_READ_CAPACITY16)
+    put_be32(p, 10, alloc)
+    return 16
+}
+
+fn rw(p: u64, op10: u64, op16: u64, lba: u64, count: u64) -> u64 {
+    clear(p)
+    if lba + count > 0xFFFFFFFF || count > 0xFFFF {
+        put(p, 0, op16)
+        put_be64(p, 2, lba)
+        put_be32(p, 10, count)
+        return 16
+    }
+    put(p, 0, op10)
+    put_be32(p, 2, lba)
+    put_be16(p, 7, count)
+    return 10
+}
+
+fn read_blocks(p: u64, lba: u64, count: u64) -> u64 {
+    return rw(p, OP_READ10, OP_READ16, lba, count)
+}
+
+fn write_blocks(p: u64, lba: u64, count: u64) -> u64 {
+    return rw(p, OP_WRITE10, OP_WRITE16, lba, count)
+}
+
+fn sync_cache(p: u64) -> u64 {
+    clear(p)
+    put(p, 0, OP_SYNC_CACHE10)
+    return 10
+}
+
+fn stop_unit(p: u64) -> u64 {
+    clear(p)
+    put(p, 0, OP_START_STOP_UNIT)
+    return 6
+}
+
+fn sense_response(b: u64) -> u64 {
+    return kstate.get8(b) & 0x7F
+}
+
+fn sense_key(b: u64) -> u64 {
+    let code: u64 = sense_response(b)
+    if code != 0x70 && code != 0x71 {
+        return 0
+    }
+    return kstate.get8(b + 2) & 0x0F
+}
+
+fn sense_asc(b: u64) -> u64 {
+    return kstate.get8(b + 12)
+}
+
+fn sense_ascq(b: u64) -> u64 {
+    return kstate.get8(b + 13)
+}

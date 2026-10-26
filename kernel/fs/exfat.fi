@@ -27,7 +27,7 @@
 //         length), write/append/overwrite, create file/dir, delete,
 //         rename (also across directories), truncate, grow a directory.
 // CANNOT: sector size != 512; two FATs (TexFAT); a NEW name with chars
-//         outside printable ASCII (existing names are read fine);
+//         outside the BMP (kernel/fs/exfat_name.fi, 4-byte UTF-8 refused);
 //         growing a NoFatChain DIRECTORY (ENOSPC); a bitmap that is not
 //         contiguous; names longer than 63 bytes; timestamps in attr.
 //
@@ -41,6 +41,7 @@ import serial
 import block.blk
 import fs.mnt
 import fs.vfsops
+import fs.exfat_name
 import sched.time
 import sched.sched
 import sync.atomic
@@ -790,59 +791,15 @@ fn set_name(state: u64, count: u64, out: u64) -> u64 {
 }
 
 fn name_eq(a: u64, b: u64) -> bool {
-    var i: u64 = 0
-    while kstate.get8(a + i) != 0 && kstate.get8(b + i) != 0 {
-        if upper(kstate.get8(a + i)) != upper(kstate.get8(b + i)) {
-            return false
-        }
-        i = i + 1
-    }
-    return kstate.get8(a + i) == kstate.get8(b + i)
+    return exfat_name.equal(a, b)
 }
 
-// A name this driver is willing to CREATE: 1..63 printable ASCII, none of
-// the characters exFAT forbids.
 fn name_ok(name: u64) -> bool {
-    var n: u64 = 0
-    while kstate.get8(name + n) != 0 {
-        let c: u64 = kstate.get8(name + n)
-        if c < 32 || c > 126 {
-            return false
-        }
-        if c == 34 || c == 42 || c == 47 || c == 58 || c == 60 || c == 62
-            || c == 63 || c == 92 || c == 124 {
-            return false
-        }
-        n = n + 1
-        if n > 63 {
-            return false
-        }
-    }
-    if n == 0 {
-        return false
-    }
-    if n == 1 && kstate.get8(name) == 46 {
-        return false
-    }
-    if n == 2 && kstate.get8(name) == 46 && kstate.get8(name + 1) == 46 {
-        return false
-    }
-    return true
+    return exfat_name.valid(name)
 }
 
-// exFAT name hash over the up-cased UTF-16 name (ASCII here).
-fn name_hash(name: u64, len: u64) -> u64 {
-    var h: u64 = 0
-    var i: u64 = 0
-    while i < len {
-        let c: u64 = upper(kstate.get8(name + i))
-        h = (((h << 15) | (h >> 1)) & 0xFFFF) + c
-        h = h & 0xFFFF
-        h = (((h << 15) | (h >> 1)) & 0xFFFF) + 0
-        h = h & 0xFFFF
-        i = i + 1
-    }
-    return h
+fn name_hash(name: u64) -> u64 {
+    return exfat_name.hash(name)
 }
 
 // ------------------------------------------------------- time
@@ -1427,9 +1384,9 @@ fn dir_grow(state: u64, m: u64, d: u64) -> bool {
 // Returns the node, 0 on failure (no space).
 fn dir_add(state: u64, m: u64, d: u64, name: u64, first: u64, size: u64,
     vdl: u64, flags: u64) -> u64 {
-    var len: u64 = 0
-    while kstate.get8(name + len) != 0 {
-        len = len + 1
+    let len: u64 = exfat_name.unit_count(name)
+    if len == 0 {
+        return 0
     }
     let nname: u64 = (len + 14) / 15
     let k: u64 = 2 + nname
@@ -1499,7 +1456,7 @@ fn dir_add(state: u64, m: u64, d: u64, name: u64, first: u64, size: u64,
     }
     kstate.set8(p + 33, sf as u8)
     kstate.set8(p + 32 + 3, len as u8)
-    put16(p + 32 + 4, name_hash(name, len))
+    put16(p + 32 + 4, name_hash(name))
     put64(p + 32 + 8, vdl)
     put32(p + 32 + 20, first)
     put64(p + 32 + 24, size)
@@ -1511,7 +1468,7 @@ fn dir_add(state: u64, m: u64, d: u64, name: u64, first: u64, size: u64,
     i = 0
     while i < len {
         put16(p + 64 + (i / 15) * 32 + 2 + (i % 15) * 2,
-            kstate.get8(name + i))
+            exfat_name.unit_at(name, i))
         i = i + 1
     }
     if !set_store(state, m, df, dnf, dsz2, place, k) {

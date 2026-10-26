@@ -76,6 +76,7 @@ import usbnet.ax88772_drv
 import drv.net.usbnet
 import drv.net.usbvnic
 import drv.usb.xhci
+import usb.scsi
 import drv.usb.chdiag
 import drv.usb.usbdiag
 import drv.hid.kbd
@@ -93,7 +94,7 @@ export {
     // RUNDE HOTPLUG-2: dasselbe JE PLATZ. `i` ist der Platz in der
     // Liste der Massenspeicher und zugleich `blk.DEV_USB0 + i`.
     msc_ready_at, msc_blocks_at, msc_bsize_at, msc_read_at, msc_write_at,
-    msc_count, MAX_MSC,
+    msc_count, MAX_MSC, msc_sync_at,
     probe, unplug_check, unplug_now, keys, reports, enums, hotplugs, unplugs,
     // RUNDE HIDWEG: die Zahlen von `hidin`, durch diese Tuer. `kgui`
     // darf `hidin` NICHT einbinden -- hidin -> gfx -> kgui waere ein
@@ -3606,13 +3607,6 @@ fn be32(p: u64, i: u64) -> u64 {
         | b8(p, i + 3)
 }
 
-fn set_be32(p: u64, i: u64, v: u64) {
-    set8(p, i, v >> 24)
-    set8(p, i + 1, v >> 16)
-    set8(p, i + 2, v >> 8)
-    set8(p, i + 3, v)
-}
-
 // Ein Befehl. `cdb` steht schon im Befehlsblock ab Oktett 15; hier wird
 // nur der Kopf gefuellt, gesendet, Daten bewegt und die Quittung
 // geprueft. Rueckgabe: true, wenn das Geraet 0 gemeldet hat.
@@ -3666,15 +3660,31 @@ fn bot(state: u64, d: u64, cdb_len: u64, data: u64, dlen: u64,
             return false
         }
     }
-    if b8(csw, 0) != (CSW_SIG & 0xFF) || b8(csw, 1) != ((CSW_SIG >> 8) & 0xFF) {
+    if b8(csw, 0) != (CSW_SIG & 0xFF) || b8(csw, 1) != ((CSW_SIG >> 8) & 0xFF)
+        || b8(csw, 2) != ((CSW_SIG >> 16) & 0xFF) || b8(csw, 3) != ((CSW_SIG >> 24) & 0xFF)
+        || (b8(csw, 4) | (b8(csw, 5) << 8) | (b8(csw, 6) << 16) | (b8(csw, 7) << 24)) != tag {
         s(state, S_MSCERR, g(state, S_MSCERR) + 1)
+        reset_recovery(state, d)
         return false
     }
-    if b8(csw, 12) != 0 {
+    let status: u64 = b8(csw, 12)
+    if status == 2 {
+        s(state, S_MSCERR, g(state, S_MSCERR) + 1)
+        reset_recovery(state, d)
+        return false
+    }
+    if status != 0 {
         s(state, S_MSCERR, g(state, S_MSCERR) + 1)
         return false
     }
     return true
+}
+
+fn reset_recovery(state: u64, d: u64) {
+    let slot: u64 = dg(state, d, D_SLOT)
+    xhci.control(state, slot, 0x21, 0xFF, 0, dg(state, d, D_IFACE), 0, 0, false)
+    unstall(state, d, dg(state, d, D_INDCI))
+    unstall(state, d, dg(state, d, D_OUTDCI))
 }
 
 fn unstall(state: u64, d: u64, dci: u64) {
@@ -3712,11 +3722,9 @@ fn msc_start(state: u64, d: u64) -> bool {
     let buf: u64 = state + DESC_OFF
     // INQUIRY: 36 Oktett, und die Oktette 8..15 sind der Hersteller --
     // die einzige Stelle, an der ein Stick sagt, wer er ist.
-    zero(cdb(state), 16)
     zero(buf, 64)
-    set8(cdb(state), 0, 0x12)
-    set8(cdb(state), 4, 36)
-    if !bot(state, d, 6, buf, 36, true) {
+    let inq_cdb: u64 = scsi.inquiry(cdb(state), 36)
+    if !bot(state, d, inq_cdb, buf, 36, true) {
         return false
     }
     let inq_len: u64 = g(state, S_LASTDATA)
@@ -3726,9 +3734,8 @@ fn msc_start(state: u64, d: u64) -> bool {
     var tries: u64 = 0
     var up: bool = false
     while tries < 5 && !up {
-        zero(cdb(state), 16)
-        set8(cdb(state), 0, 0x00)
-        if bot(state, d, 6, 0, 0, false) {
+        let tur_cdb: u64 = scsi.test_unit_ready(cdb(state))
+        if bot(state, d, tur_cdb, 0, 0, false) {
             up = true
         } else {
             sense(state, d)
@@ -3745,14 +3752,22 @@ fn msc_start(state: u64, d: u64) -> bool {
     // deshalb eine Stunde gekostet haette, wenn ihn niemand gemeldet
     // haette.
     let cap: u64 = buf + 128
-    zero(cdb(state), 16)
     zero(cap, 32)
-    set8(cdb(state), 0, 0x25) // READ CAPACITY (10)
-    if !bot(state, d, 10, cap, 8, true) {
+    let cap_cdb: u64 = scsi.read_capacity10(cdb(state))
+    if !bot(state, d, cap_cdb, cap, 8, true) {
         return false
     }
-    let last: u64 = be32(cap, 0)
-    let bs: u64 = be32(cap, 4)
+    var last: u64 = be32(cap, 0)
+    var bs: u64 = be32(cap, 4)
+    if last == 0xFFFFFFFF {
+        zero(cap, 32)
+        let cap16_cdb: u64 = scsi.read_capacity16(cdb(state), 32)
+        if !bot(state, d, cap16_cdb, cap, 32, true) {
+            return false
+        }
+        last = (be32(cap, 0) << 32) | be32(cap, 4)
+        bs = be32(cap, 8)
+    }
     if bs != 512 {
         // Ehrlich statt still: `blk.fi` spricht 512 Oktett je Block,
         // und ein Stick mit 4096 waere ein anderer Treiber. Er wird
@@ -3785,13 +3800,31 @@ fn msc_start(state: u64, d: u64) -> bool {
     return true
 }
 
-fn sense(state: u64, d: u64) {
+fn sense(state: u64, d: u64) -> u64 {
     let buf: u64 = state + DESC_OFF + 256
-    zero(cdb(state), 16)
     zero(buf, 32)
-    set8(cdb(state), 0, 0x03)
-    set8(cdb(state), 4, 18)
-    bot(state, d, 6, buf, 18, true)
+    let sense_cdb: u64 = scsi.request_sense(cdb(state), 18)
+    if !bot(state, d, sense_cdb, buf, 18, true) {
+        return 0
+    }
+    return scsi.sense_key(buf)
+}
+
+fn msc_sync_at(state: u64, i: u64) -> bool {
+    var s_sync: [u8; 18] = "usb: msc sync ok=\0"
+    if !msc_ready_at(state, i) {
+        return false
+    }
+    let d: u64 = msc_dev_at(state, i)
+    let sync_cdb: u64 = scsi.sync_cache(cdb(state))
+    var done: bool = bot(state, d, sync_cdb, 0, 0, false)
+    if !done {
+        done = sense(state, d) == scsi.KEY_ILLEGAL_REQUEST
+    }
+    serial.puts((&s_sync[0]) as u64)
+    serial.dec(yes(done))
+    serial.nl()
+    return done
 }
 
 // Die zwei Zeilen, an denen `blk.fi` haengt. Ein Block, 512 Oktett, und
@@ -3807,12 +3840,8 @@ fn msc_read_at(state: u64, i: u64, lba: u64, dst: u64) -> bool {
     }
     let d: u64 = msc_dev_at(state, i)
     let tmp: u64 = state + BLK_OFF
-    zero(cdb(state), 16)
-    set8(cdb(state), 0, 0x28) // READ (10)
-    set_be32(cdb(state), 2, lba)
-    set8(cdb(state), 7, 0)
-    set8(cdb(state), 8, 1)
-    if !bot(state, d, 10, tmp, 512, true) {
+    let read_cdb: u64 = scsi.read_blocks(cdb(state), lba, 1)
+    if !bot(state, d, read_cdb, tmp, 512, true) {
         return false
     }
     copy(tmp, dst, 512)
@@ -3836,12 +3865,8 @@ fn msc_write_at(state: u64, i: u64, lba: u64, src: u64) -> bool {
     let d: u64 = msc_dev_at(state, i)
     let tmp: u64 = state + BLK_OFF
     copy(src, tmp, 512)
-    zero(cdb(state), 16)
-    set8(cdb(state), 0, 0x2A) // WRITE (10)
-    set_be32(cdb(state), 2, lba)
-    set8(cdb(state), 7, 0)
-    set8(cdb(state), 8, 1)
-    return bot(state, d, 10, tmp, 512, false)
+    let write_cdb: u64 = scsi.write_blocks(cdb(state), lba, 1)
+    return bot(state, d, write_cdb, tmp, 512, false)
 }
 
 fn copy(from: u64, to: u64, n: u64) {

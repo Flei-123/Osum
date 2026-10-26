@@ -83,6 +83,9 @@ import fs.vfs
 import fs.vfsops
 import fs.mnt
 import fs.fat
+import fs.exfat
+import block.fsdetect
+import block.wlock
 import bus.bus
 import lib.errno
 import lib.kutil
@@ -284,31 +287,7 @@ fn fs_erkennen(state: u64, dev: u64, first: u64) -> u64 {
     if !blk.read_on(state, dev, first, buf) {
         return FS_UNBEKANNT
     }
-    // Die Signatur am Ende. Ohne sie ist es kein Bootsektor, und alles
-    // Weitere waere geraten.
-    let sig0: u64 = kstate.get8(buf + 510)
-    let sig1: u64 = kstate.get8(buf + 511)
-    if sig0 == 0x55 && sig1 == 0xAA {
-        // Oktette je Sektor, kleinendig in 11..12.
-        let bps: u64 = kstate.get8(buf + 11) | (kstate.get8(buf + 12) << 8)
-        if bps == 512 || bps == 1024 || bps == 2048 || bps == 4096 {
-            // "FAT32   " ab Oktett 82.
-            if kstate.get8(buf + 82) == 70 && kstate.get8(buf + 83) == 65
-                && kstate.get8(buf + 84) == 84 && kstate.get8(buf + 85) == 51
-                && kstate.get8(buf + 86) == 50 {
-                return vfsops.FS_FAT
-            }
-            // Auch ein FAT16/FAT12 traegt seine Kennung, nur bei 54.
-            // Dieser Kern hat dafuer keinen Treiber -- also wird es
-            // ausdruecklich NICHT als FAT gemeldet, statt es
-            // einzuhaengen und beim ersten Verzeichnis zu scheitern.
-            if kstate.get8(buf + 54) == 70 && kstate.get8(buf + 55) == 65
-                && kstate.get8(buf + 56) == 84 {
-                return FS_UNBEKANNT
-            }
-        }
-    }
-    return FS_UNBEKANNT
+    return fsdetect.classify(buf)
 }
 
 // ------------------------------------------------- ein Platz in der Tafel
@@ -521,7 +500,7 @@ fn kommt(state: u64, dev: u64) -> u64 {
     serial.dec(fstyp)
 
     if fstyp == FS_UNBEKANNT {
-        // DER EHRLICHE AUSGANG. Ein Stick mit NTFS oder exFAT wird
+        // DER EHRLICHE AUSGANG. Ein Stick mit NTFS wird
         // NICHT eingehaengt und NICHT als Attrappe in die Tafel
         // gestellt -- er wird gemeldet und stehengelassen. Ein Eintrag
         // in der Seitenleiste, den niemand oeffnen kann, waere
@@ -571,6 +550,7 @@ fn kommt(state: u64, dev: u64) -> u64 {
         return MAX_TRAEGER
     }
     ts(state, i, T_MNT, m)
+    wlock.unlock(dev)
     s(state, S_N, g(state, S_N) + 1)
     melden(state, EV_KOMMT, i)
     return i
@@ -609,9 +589,12 @@ fn geht(state: u64, dev: u64) -> u64 {
             if mnt.used(state, m) && mnt.dev(state, m) == dev {
                 if mnt.fstype(state, m) == vfsops.FS_FAT {
                     fat.release(state, m)
+                } else if mnt.fstype(state, m) == vfsops.FS_EXFAT {
+                    exfat.release(state, m)
                 }
                 mnt.free(state, m)
             }
+            wlock.lock(dev)
             ts(state, i, T_USED, 0)
             ts(state, i, T_MNT, 0)
             if g(state, S_N) != 0 {
@@ -651,6 +634,7 @@ fn auswerfen(state: u64, i: u64) -> u64 {
         return errno.E_INVAL
     }
     let m: u64 = tg(state, i, T_MNT)
+    let dev_nr: u64 = tg(state, i, T_DEV)
     // Das Geraet ist noch da: JETZT wird geschrieben. `umount_index`
     // ruft `fat.sync` und danach `fat.release`.
     let rc: u64 = vfs.umount_index(state, m)
@@ -667,6 +651,8 @@ fn auswerfen(state: u64, i: u64) -> u64 {
         s(state, S_FEHLER, g(state, S_FEHLER) + 1)
         return rc
     }
+    let _flushed: bool = blk.flush_on(state, dev_nr)
+    wlock.lock(dev_nr)
     s(state, S_SYNCS, g(state, S_SYNCS) + 1)
     ts(state, i, T_USED, 0)
     ts(state, i, T_MNT, 0)
