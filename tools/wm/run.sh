@@ -174,6 +174,7 @@ foto() { # abbild kommandozeile ausgabe ppm [monitorbefehle]
     fi
     wait "$pid"
     RC=$?
+    if [ -n "${WM_KEEP:-}" ]; then cp "$ppm" "$aus" "$WM_KEEP/" 2>/dev/null; fi
     rm -f "$sock"
     return 0
 }

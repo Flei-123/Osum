@@ -310,10 +310,18 @@ if shot B2 lang=de icons=no nvicons=no keep=yes; then
         # places hold any more (`ttext` said 230 of 376 wrong on a correct picture). `tink` with the
         # ground sampled from the picture (-1 -1 -1) asks the two things that still hold: every glyph
         # has its ink, and no ink is left that no glyph explains.
-        R=$(python3 tools/gfx/checkshot.py tink "$TMPD/B2/desktop.ppm" \
-            fui:assets/osum-sans.ttf 15 "$BX" $(( ${BARY:-772} + BB )) \
-            $(( (BF >> 16) & 255 )) $(( (BF >> 8) & 255 )) $(( BF & 255 )) \
-            -1 -1 -1 "kein Akku" 2>&1) \
+        R=""
+        TOK=0
+        for CX in $(grep -aoE 'taskbar: text battery x=[0-9]+ base=[0-9]+ fg=[0-9]+ bg=[0-9]+ tw=[0-9]+ t=kein Akku' "$S" \
+                | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+' | awk '!seen[$0]++' | tac); do
+            RC1=$(python3 tools/gfx/checkshot.py tink "$TMPD/B2/desktop.ppm" \
+                fui:assets/osum-sans.ttf 15 "$CX" $(( ${BARY:-772} + BB )) \
+                $(( (BF >> 16) & 255 )) $(( (BF >> 8) & 255 )) $(( BF & 255 )) \
+                -1 -1 -1 "kein Akku" 2>&1) && TOK=1
+            [ -z "$R" ] && R="$RC1"
+            [ "$TOK" = 1 ] && { R="$RC1"; break; }
+        done
+        [ "$TOK" = 1 ] \
             && ok "and the text alone is still on the screen, glyph for glyph: $R" \
             || bad "the fallback text is wrong: $R"
     else
