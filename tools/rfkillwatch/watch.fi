@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import wlan.iwl_rfkill
+
+const GP_FREE: u64 = 0x08040005
+const GP_KILLED: u64 = 0x00040005
+
+static mut fails: u64 = 0
+
+fn report(ok: bool, id: u64) {
+    var buf: [u8; 8] = [0 as u8; 8]
+    var at: usize = 0
+    if ok {
+        buf[0] = 79 as u8
+        buf[1] = 75 as u8
+    } else {
+        buf[0] = 70 as u8
+        buf[1] = 65 as u8
+        fails = fails + 1
+    }
+    buf[2] = 32 as u8
+    buf[3] = (48 + (id / 10) % 10) as u8
+    buf[4] = (48 + id % 10) as u8
+    at = 5
+    io.print_line_bytes((&buf[0]) as u64, at)
+}
+
+fn main() -> i32 {
+
+    var w: iwl_rfkill.Watch = iwl_rfkill.watch_new()
+    var r: u64 = iwl_rfkill.watch_step(&w, GP_KILLED, 0)
+    report((r & iwl_rfkill.ACT_RETRY) == 0 && w.blocked == 1, 1)
+    r = iwl_rfkill.watch_step(&w, GP_FREE, 0)
+    report((r & iwl_rfkill.ACT_RETRY) != 0 && (r & iwl_rfkill.EV_RELEASED) != 0, 6)
+    r = iwl_rfkill.watch_step(&w, GP_FREE, 0)
+    report((r & iwl_rfkill.ACT_RETRY) != 0, 10)
+    iwl_rfkill.watch_retry_started(&w)
+    report(w.armed == 0 && w.retries == 1, 3)
+    r = iwl_rfkill.watch_step(&w, GP_FREE, 0)
+    report(r == 0, 4)
+    r = iwl_rfkill.watch_step(&w, GP_KILLED, 0)
+    report((r & iwl_rfkill.EV_ENGAGED) != 0, 5)
+    r = iwl_rfkill.watch_step(&w, GP_FREE, 0)
+    report((r & iwl_rfkill.ACT_RETRY) != 0 && w.changes == 3, 2)
+    report(w.changes == 3, 7)
+
+    var w2: iwl_rfkill.Watch = iwl_rfkill.watch_new()
+    r = iwl_rfkill.watch_step(&w2, GP_FREE, 1)
+    report((r & iwl_rfkill.ACT_RETRY) != 0, 8)
+
+    var w3: iwl_rfkill.Watch = iwl_rfkill.watch_new()
+    r = iwl_rfkill.watch_step(&w3, GP_FREE, 0)
+    report(r == 0, 9)
+
+    var w4: iwl_rfkill.Watch = iwl_rfkill.watch_new()
+    var k: u64 = 0
+    var last: u64 = 0
+    while k < 12 {
+        r = iwl_rfkill.watch_step(&w4, GP_KILLED, 0)
+        r = iwl_rfkill.watch_step(&w4, GP_FREE, 0)
+        if (r & iwl_rfkill.ACT_RETRY) != 0 {
+            iwl_rfkill.watch_retry_started(&w4)
+            last = last + 1
+        }
+        k = k + 1
+    }
+    report(last == iwl_rfkill.MAX_RETRIES && w4.retries == iwl_rfkill.MAX_RETRIES, 11)
+
+    report(iwl_rfkill.hw_set(GP_KILLED) && !iwl_rfkill.hw_set(GP_FREE), 12)
+    return fails as i32
+}

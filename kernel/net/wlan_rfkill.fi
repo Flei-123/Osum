@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import bus.pci
+import drv.net.iwl
+import net.wlan_auto
+import net.wlan_reload
+import wlan.iwl_probe
+import wlan.iwl_rfkill
+
+export { watch, blocked, changes, retries }
+
+const GP_NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut rk: [u64; 6] = [0 as u64; 6]
+
+fn handle() -> *mut iwl_rfkill.Watch { return (&rk[0]) as *mut iwl_rfkill.Watch }
+
+fn blocked() -> bool { return (*handle()).blocked != 0 }
+fn changes() -> u64 { return (*handle()).changes }
+fn retries() -> u64 { return (*handle()).retries }
+
+fn read_gp(state: u64) -> u64 {
+    let i: u64 = iwl.target_at(state, 0)
+    if i == pci.MAX_DEV { return GP_NONE }
+    var p: iwl_probe.Probe = iwl_probe.probe_new()
+    if iwl.probe_at(state, i, &p, false) != 0 { return GP_NONE }
+    return p.gp_cntrl
+}
+
+fn log_event(ev: u64) {
+    var s_on: [u8; 24] = "wlan: rfkill engaged\0\0\0\0"
+    var s_off: [u8; 24] = "wlan: rfkill released\0\0\0"
+    if (ev & iwl_rfkill.EV_ENGAGED) != 0 {
+        serial.puts((&s_on[0]) as u64)
+        serial.nl()
+    }
+    if (ev & iwl_rfkill.EV_RELEASED) != 0 {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+    }
+}
+
+fn watch(state: u64) {
+    if wlan_auto.driver_ready() { return }
+    let gp: u64 = read_gp(state)
+    if gp == GP_NONE { return }
+    let r: u64 = iwl_rfkill.watch_step(handle(), gp, iwl.boot_rfkill())
+    log_event(r)
+    if (r & iwl_rfkill.ACT_RETRY) != 0 && wlan_reload.retry(state) == 0 {
+        iwl_rfkill.watch_retry_started(handle())
+    }
+}

@@ -1,9 +1,57 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import wlan.iwl_w
 
-export { hw_set, render_state, GP_HW_RF_KILL_SW }
+export {
+    hw_set, render_state, GP_HW_RF_KILL_SW,
+    Watch, watch_new, watch_step, watch_retry_started, ACT_RETRY, EV_ENGAGED, EV_RELEASED, MAX_RETRIES
+}
 
 const GP_HW_RF_KILL_SW: u64 = 0x08000000
+const ACT_RETRY: u64 = 1
+const EV_ENGAGED: u64 = 2
+const EV_RELEASED: u64 = 4
+const MAX_RETRIES: u64 = 8
+
+struct Watch {
+    known: u64,
+    blocked: u64,
+    armed: u64,
+    changes: u64,
+    retries: u64,
+    gp: u64
+}
+
+fn watch_new() -> Watch {
+    var w: Watch = Watch { known: 0, blocked: 0, armed: 0, changes: 0, retries: 0, gp: 0 }
+    return w
+}
+
+fn watch_step(w: *mut Watch, gp: u64, boot_blocked: u64) -> u64 {
+    var out: u64 = 0
+    var now: u64 = 0
+    if hw_set(gp) { now = 1 }
+    (*w).gp = gp
+    if (*w).known == 0 {
+        (*w).known = 1
+        (*w).blocked = now
+        if now != 0 || boot_blocked != 0 { (*w).armed = 1 }
+    } else if now != (*w).blocked {
+        (*w).blocked = now
+        (*w).changes = (*w).changes + 1
+        if now != 0 { out = out | EV_ENGAGED } else { out = out | EV_RELEASED }
+    }
+    if now != 0 {
+        (*w).armed = 1
+        return out
+    }
+    if (*w).armed != 0 && (*w).retries < MAX_RETRIES { out = out | ACT_RETRY }
+    return out
+}
+
+fn watch_retry_started(w: *mut Watch) {
+    (*w).armed = 0
+    (*w).retries = (*w).retries + 1
+}
 
 fn hw_set(gp: u64) -> bool {
     return (gp & GP_HW_RF_KILL_SW) == 0
