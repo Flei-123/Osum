@@ -12,7 +12,7 @@ import gfx.vmode
 
 export {
     stage, set_percent, percent, step, on_notify, on_ext_key, on_key, hw_present, available, source, src_name,
-    k_of, set_k, render, selftest, SRC_NONE, SRC_ACPI, SRC_PWM, SRC_EC, SRC_SOFT
+    k_of, set_k, render, selftest, service, deferred, SRC_NONE, SRC_ACPI, SRC_PWM, SRC_EC, SRC_SOFT
 }
 
 const SRC_NONE: u64 = 0
@@ -58,6 +58,11 @@ static mut c_changes: u64 = 0
 static mut c_seeded: u64 = 0
 static mut c_last_notify: u64 = 0
 static mut c_fake: [u64; 128] = [0 as u64; 128]
+const PEND_SLOTS: u64 = 8
+static mut pend: [u64; 8] = [0 as u64; 8]
+static mut pend_put: u64 = 0
+static mut pend_get: u64 = 0
+static mut pend_dropped: u64 = 0
 
 // c_pwm_why: 0 = ok, 1 = no display device, 2 = BAR unusable, 3 = BAR not mapped, 4 = all-ones (device off/D3),
 // 5 = not enabled or implausible period, 6 = disabled by test word, 7 = too many write failures
@@ -426,6 +431,27 @@ fn on_notify(state: u64, code: u64) -> bool {
     return apply_action(state, act)
 }
 
+fn defer_action(act: u64) {
+    if pend_put - pend_get >= PEND_SLOTS {
+        pend_dropped = pend_dropped + 1
+        return
+    }
+    pend[(pend_put % PEND_SLOTS) as usize] = act
+    pend_put = pend_put + 1
+}
+
+fn deferred() -> u64 {
+    return pend_put - pend_get
+}
+
+fn service(state: u64) {
+    while pend_get != pend_put {
+        let act: u64 = pend[(pend_get % PEND_SLOTS) as usize]
+        pend_get = pend_get + 1
+        let _done: bool = apply_action(state, act)
+    }
+}
+
 fn on_key(state: u64, ext: bool, code: u64) -> bool {
     let act: u64 = hotkeys.key_action(state, ext, code)
     if act == hotkeys.ACT_NONE {
@@ -435,7 +461,8 @@ fn on_key(state: u64, ext: bool, code: u64) -> bool {
     if !hotkeys.accept(state, hotkeys.SRC_KEY) {
         return true
     }
-    return apply_action(state, act)
+    defer_action(act)
+    return true
 }
 
 fn on_ext_key(state: u64, code: u64) -> bool {
@@ -589,6 +616,7 @@ fn selftest(state: u64) {
     serial.nl()
     hotkeys.forget_last()
     on_ext_key(state, 0x6F)
+    service(state)
     serial.puts((&s_g[0]) as u64)
     serial.dec(percent(state))
     serial.nl()

@@ -57,6 +57,7 @@ import acpi.amlfail
 import acpi.amlskip
 import acpi.amlfield
 import acpi.amlsys
+import sync.atomic
 
 export {
     stage, dump, ready, gsi_for, gsi_or_line, why, route_count,
@@ -64,7 +65,7 @@ export {
     // RUNDE ACPI-EREIGNISSE: den Namensraum HALTEN statt verwerfen,
     // und einen einzelnen Knoten auswerten.
     ns_hold, ns_arena, hold_err, hold_bad, eval_node, eval_node_arg, eval_node_args, ns_bytes,
-    hold_report, snapshot_boot, fuzz_load
+    hold_report, snapshot_boot, fuzz_load, busy_refusals, guard_probe
 }
 
 const SNAP_FRAMES: u64 = 256
@@ -1484,28 +1485,62 @@ fn ns_drop(state: u64) {
 // der Schrittvorrat wird VOR JEDEM AUFRUF neu gesetzt. Ohne das waere
 // nach ein paar hundert Deckelklappen der Vorrat aufgebraucht und
 // `_LID` gaebe stillschweigend nichts mehr zurueck.
+static mut in_use: u64 = 0
+static mut refusals: u64 = 0
+
+fn busy_refusals() -> u64 {
+    return refusals
+}
+
+fn acquire() -> bool {
+    if atomic.cas((&in_use) as u64, 0, 1) != 0 {
+        refusals = refusals + 1
+        return false
+    }
+    return true
+}
+
+fn release() {
+    atomic.store((&in_use) as u64, 0)
+}
+
+fn guard_probe() -> bool {
+    let before: u64 = refusals
+    if !acquire() {
+        return false
+    }
+    let second: bool = acquire()
+    release()
+    let third: bool = acquire()
+    release()
+    return !second && third && refusals == before + 1
+}
+
 fn eval_node(state: u64, node: u64, dst: u64) -> bool {
     if node == amlns.NONE || node == 0 {
         return false
     }
-    if g(state, A_HOLD) == 0 {
+    if g(state, A_HOLD) == 0 || !acquire() {
         return false
     }
     amlev.budget_set(state, BUDGET)
     amlev.depth_reset(state)
     amlev.stack_base(state)
     amlns.err_set(state, amlns.ERR_OK)
-    return call0(state, node, dst)
+    let ok: bool = call0(state, node, dst)
+    release()
+    return ok
 }
 
 fn eval_node_arg(state: u64, node: u64, arg: u64, dst: u64) -> bool {
     if node == amlns.NONE || node == 0 {
         return false
     }
-    if g(state, A_HOLD) == 0 {
+    if g(state, A_HOLD) == 0 || !acquire() {
         return false
     }
     if amlns.node_kind(state, node) != amlns.NK_METHOD {
+        release()
         return false
     }
     amlev.budget_set(state, BUDGET)
@@ -1513,7 +1548,9 @@ fn eval_node_arg(state: u64, node: u64, arg: u64, dst: u64) -> bool {
     amlev.stack_base(state)
     amlns.err_set(state, amlns.ERR_OK)
     amlev.call_method(state, node, 1, arg, dst)
-    return amlns.err(state) == amlns.ERR_OK
+    let ok: bool = amlns.err(state) == amlns.ERR_OK
+    release()
+    return ok
 }
 
 // W-TOUCH4: a method with several arguments (argc objects of OBJ_BYTES at argsrc), e.g. _DSM(uuid, rev, func, pkg).
@@ -1521,10 +1558,11 @@ fn eval_node_args(state: u64, node: u64, argc: u64, argsrc: u64, dst: u64) -> bo
     if node == amlns.NONE || node == 0 {
         return false
     }
-    if g(state, A_HOLD) == 0 {
+    if g(state, A_HOLD) == 0 || !acquire() {
         return false
     }
     if amlns.node_kind(state, node) != amlns.NK_METHOD {
+        release()
         return false
     }
     amlev.budget_set(state, BUDGET)
@@ -1532,7 +1570,9 @@ fn eval_node_args(state: u64, node: u64, argc: u64, argsrc: u64, dst: u64) -> bo
     amlev.stack_base(state)
     amlns.err_set(state, amlns.ERR_OK)
     amlev.call_method(state, node, argc, argsrc, dst)
-    return amlns.err(state) == amlns.ERR_OK
+    let ok: bool = amlns.err(state) == amlns.ERR_OK
+    release()
+    return ok
 }
 
 fn evaluate_methods(state: u64, limit: u64) {

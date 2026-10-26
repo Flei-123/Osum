@@ -4,7 +4,7 @@ profile kernel
 import serial
 
 export {
-    configure, usable, sts_port, en_port, enable, disable, clear, is_set, is_armed, armed_count,
+    configure, usable, sts_port, en_port, enable, disable, clear, is_set, is_armed, armed_count, arm, finish, fail, failed, masked_total,
     byte_total, byte_bit0, byte_sts_port, byte_en_port, sts_at, en_at, scan, pending_count, pending_bit,
     strays, stray_last, stray_mask, selftest, BITS_MAX
 }
@@ -23,6 +23,9 @@ static mut blk1: u64 = 0
 static mut half1: u64 = 0
 static mut base1: u64 = 0
 static mut armed_words: [u64; 4] = [0 as u64; 4]
+static mut level_words: [u64; 4] = [0 as u64; 4]
+static mut mask_n: u64 = 0
+static mut fail_n: u64 = 0
 static mut pend: [u64; 256] = [0 as u64; 256]
 static mut pend_n: u64 = 0
 static mut stray_n: u64 = 0
@@ -37,8 +40,11 @@ fn configure(b0: u64, len0: u64, b1: u64, len1: u64, first1: u64) {
     var i: u64 = 0
     while i < WORDS {
         armed_words[i as usize] = 0
+        level_words[i as usize] = 0
         i = i + 1
     }
+    mask_n = 0
+    fail_n = 0
     pend_n = 0
     stray_n = 0
     stray_bit = 0xFFFF
@@ -100,6 +106,26 @@ fn is_armed(bit: u64) -> bool {
     return (armed_words[(bit / WORD_BITS) as usize] & (1 << (bit % WORD_BITS))) != 0
 }
 
+fn set_level(bit: u64, on: bool) {
+    if bit >= BITS_MAX {
+        return
+    }
+    let w: u64 = bit / WORD_BITS
+    let m: u64 = 1 << (bit % WORD_BITS)
+    if on {
+        level_words[w as usize] = level_words[w as usize] | m
+    } else {
+        level_words[w as usize] = level_words[w as usize] & ~m
+    }
+}
+
+fn is_level(bit: u64) -> bool {
+    if bit >= BITS_MAX {
+        return false
+    }
+    return (level_words[(bit / WORD_BITS) as usize] & (1 << (bit % WORD_BITS))) != 0
+}
+
 fn armed_count() -> u64 {
     var n: u64 = 0
     var b: u64 = 0
@@ -119,6 +145,36 @@ fn enable(bit: u64) {
     }
     wr(p, rd(p) | bit_mask(bit))
     set_armed(bit, true)
+}
+
+fn arm(bit: u64, level: bool) {
+    set_level(bit, level)
+    enable(bit)
+}
+
+fn failed() -> u64 {
+    return fail_n
+}
+
+fn masked_total() -> u64 {
+    return mask_n
+}
+
+fn finish(bit: u64) {
+    if !is_level(bit) {
+        return
+    }
+    clear(bit)
+    let p: u64 = en_port(bit)
+    if p != 0 {
+        wr(p, rd(p) | bit_mask(bit))
+    }
+}
+
+fn fail(bit: u64) {
+    fail_n = fail_n + 1
+    disable(bit)
+    clear(bit)
 }
 
 fn disable(bit: u64) {
@@ -197,6 +253,13 @@ fn armed_byte(bit0: u64) -> u64 {
     return (armed_words[(bit0 / WORD_BITS) as usize] >> (bit0 % WORD_BITS)) & BYTE_MASK
 }
 
+fn level_byte(bit0: u64) -> u64 {
+    if bit0 >= BITS_MAX {
+        return 0
+    }
+    return (level_words[(bit0 / WORD_BITS) as usize] >> (bit0 % WORD_BITS)) & BYTE_MASK
+}
+
 fn stray_mask(active: u64, armed: u64) -> u64 {
     return active & ~armed & BYTE_MASK
 }
@@ -240,19 +303,25 @@ fn scan() -> u64 {
                 let armed: u64 = armed_byte(bit0)
                 let mine: u64 = active & armed
                 let stray: u64 = stray_mask(active, armed)
-                if mine != 0 {
-                    wr(sp, mine)
-                    var k: u64 = 0
-                    while k < BITS_PER_BYTE {
-                        if (mine & (1 << k)) != 0 && pend_n < BITS_MAX {
-                            pend[pend_n as usize] = bit0 + k
-                            pend_n = pend_n + 1
-                        }
-                        k = k + 1
+                let lvl: u64 = mine & level_byte(bit0)
+                let edge: u64 = mine & ~lvl & BYTE_MASK
+                if edge != 0 {
+                    wr(sp, edge)
+                }
+                if lvl != 0 {
+                    wr(ep, rd(ep) & ~lvl)
+                    mask_n = mask_n + popcount(lvl)
+                }
+                var k: u64 = 0
+                while k < BITS_PER_BYTE {
+                    if (mine & (1 << k)) != 0 && pend_n < BITS_MAX {
+                        pend[pend_n as usize] = bit0 + k
+                        pend_n = pend_n + 1
                     }
+                    k = k + 1
                 }
                 if stray != 0 {
-                    wr(ep, en & ~stray)
+                    wr(ep, rd(ep) & ~stray)
                     wr(sp, stray)
                     stray_n = stray_n + popcount(stray)
                     stray_bit = bit0 + lowest_bit(stray)

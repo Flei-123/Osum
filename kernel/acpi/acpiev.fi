@@ -113,6 +113,7 @@ const KNOB_NOSTORM: u64 = 1
 const KNOB_NOSTRAY: u64 = 2
 const KNOB_NOOVR: u64 = 4
 const KNOB_STORMSIM: u64 = 8
+const KNOB_GPELEVEL: u64 = 16
 
 const EC_POLL_MS: u64 = 10
 const LIVE_PERIOD_MS: u64 = 500
@@ -525,6 +526,7 @@ fn read_knobs(state: u64) {
     var w_nostray: [u8; 11] = "noscistray\0"
     var w_noovr: [u8; 9] = "scinoovr\0"
     var w_stormsim: [u8; 9] = "scistorm\0"
+    var w_gpelevel: [u8; 9] = "scigpelv\0"
     var k: u64 = 0
     if cmdopt.has(state, (&w_nostorm[0]) as u64) {
         k = k | KNOB_NOSTORM
@@ -537,6 +539,9 @@ fn read_knobs(state: u64) {
     }
     if cmdopt.has(state, (&w_stormsim[0]) as u64) {
         k = k | KNOB_STORMSIM
+    }
+    if cmdopt.has(state, (&w_gpelevel[0]) as u64) {
+        k = k | KNOB_GPELEVEL
     }
     s(state, E_KNOBS, k)
 }
@@ -740,6 +745,7 @@ fn bonly_diag(state: u64) {
 }
 
 fn pump(state: u64) {
+    blchain.service(state)
     // GANZ OBEN, VOR JEDER BEDINGUNG. Ein Zaehler hinter der ersten
     // Wache misst nicht, ob die Funktion gerufen wird, sondern ob sie
     // durchkommt -- und genau das war beim Suchen der Unterschied
@@ -979,8 +985,30 @@ fn dump_diag(state: u64) {
     serial.puts((&diag_text[0]) as u64)
 }
 
+fn selftest_defer(state: u64) {
+    var w_defer: [u8; 9] = "scidefer\0"
+    var s_d: [u8; 22] = "acpiev: defer before=\0"
+    var s_q: [u8; 9] = " queued=\0"
+    var s_a: [u8; 8] = " after=\0"
+    if !cmdopt.has(state, (&w_defer[0]) as u64) {
+        return
+    }
+    let _set: u64 = blchain.set_percent(state, 50)
+    let _taken: bool = blchain.on_ext_key(state, 0x6F)
+    let before: u64 = blchain.percent(state)
+    let queued: u64 = blchain.deferred()
+    blchain.service(state)
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(before)
+    serial.puts((&s_q[0]) as u64)
+    serial.dec(queued)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(blchain.percent(state))
+    serial.nl()
+}
+
 fn selftest_ecrate(state: u64) {
-    var s_e: [u8; 24] = "acpiev: selbst ecrate p\0"
+    var s_e: [u8; 26] = "acpiev: selftest ecrate p\0"
     var s_p: [u8; 7] = "olls=\0\0"
     let before: u64 = hkdiag.get(hkdiag.EC_POLLS)
     var k: u64 = 0
@@ -995,12 +1023,21 @@ fn selftest_ecrate(state: u64) {
 }
 
 fn run_gpe(state: u64, idx: u64) {
-    run_node(state, meth_node(state, idx), true)
+    let bit: u64 = meth_bit(state, idx)
+    if run_node(state, meth_node(state, idx), true) {
+        gpe.finish(bit)
+        return
+    }
+    gpe.fail(bit)
+    var s_f: [u8; 19] = "acpiev: gpe off b=\0"
+    serial.puts((&s_f[0]) as u64)
+    serial.hex_width(bit, 2)
+    serial.nl()
 }
 
-fn run_node(state: u64, node: u64, refresh: bool) {
+fn run_node(state: u64, node: u64, refresh: bool) -> bool {
     if node == amlns.NONE {
-        return
+        return false
     }
     amlev.not_clear(state)
     amlev.depth_reset(state)
@@ -1014,7 +1051,7 @@ fn run_node(state: u64, node: u64, refresh: bool) {
         serial.hex_width(node, 4)
         serial.nl()
         amlns.err_set(state, amlns.ERR_OK)
-        return
+        return false
     }
     // Was hat sie gemeldet?
     let cnt: u64 = amlev.not_count(state)
@@ -1030,6 +1067,7 @@ fn run_node(state: u64, node: u64, refresh: bool) {
     if cnt == 0 && refresh {
         refresh_all(state)
     }
+    return true
 }
 
 fn service_ec(state: u64) {
@@ -1049,7 +1087,7 @@ fn service_ec(state: u64) {
             hkdiag.add(hkdiag.EC_QMISSING, 1)
         } else {
             hkdiag.add(hkdiag.EC_QRUN, 1)
-            run_node(state, node, false)
+            let _ran: bool = run_node(state, node, false)
         }
         n = n + 1
     }
@@ -1071,6 +1109,8 @@ fn sync_diag(state: u64) {
     scidiag.set(scidiag.S_STRAY_PM1, g(state, E_PM1STRAY))
     scidiag.set(scidiag.S_STRAY_GPE, g(state, E_GPESTRAY))
     scidiag.set(scidiag.S_ARMED, g(state, E_ARMED))
+    scidiag.set(scidiag.S_GPE_MASKED, gpe.masked_total())
+    scidiag.set(scidiag.S_GPE_FAILED, gpe.failed())
 }
 
 // Ein `Notify(Geraet, Code)` zuordnen. Der Code 0x80 heisst bei allen
@@ -1564,7 +1604,7 @@ fn stage(state: u64) {
             // Erst loeschen (es kann seit dem Start etwas anliegen),
             // dann freigeben.
             gpe.clear(bit)
-            gpe.enable(bit)
+            gpe.arm(bit, meth_art(state, i) == M_LEVEL || knob(state, KNOB_GPELEVEL))
             armed = armed + 1
         }
         i = i + 1
@@ -1941,8 +1981,8 @@ fn report(state: u64) {
 // Sorte Fehler, die man auf echtem Blech eine Woche lang sucht.
 
 fn selftest(state: u64) {
-    var s_n: [u8; 20] = "acpiev: selbst name\0"
-    var s_r: [u8; 19] = "acpiev: selbst reg\0"
+    var s_n: [u8; 22] = "acpiev: selftest name\0"
+    var s_r: [u8; 21] = "acpiev: selftest reg\0"
     var s_ok: [u8; 5] = " ok\0\0"
     var s_bad: [u8; 7] = " FEHL\0\0"
     var w1: [u8; 5] = "_L1B\0"
@@ -1985,10 +2025,19 @@ fn selftest(state: u64) {
     }
     serial.nl()
 
+    var s_gd: [u8; 23] = "acpiev: selftest guard\0"
+    serial.puts((&s_gd[0]) as u64)
+    if aml.guard_probe() {
+        serial.puts((&s_ok[0]) as u64)
+    } else {
+        serial.puts((&s_bad[0]) as u64)
+    }
+    serial.nl()
     selftest_xapc(state)
+    selftest_defer(state)
     dump_diag(state)
     selftest_ecrate(state)
-    var s_o: [u8; 19] = "acpiev: selbst opt\0"
+    var s_o: [u8; 21] = "acpiev: selftest opt\0"
     serial.puts((&s_o[0]) as u64)
     if cmdopt.selftest(state) {
         serial.puts((&s_ok[0]) as u64)

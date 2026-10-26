@@ -228,6 +228,7 @@ for l in open(sys.argv[1]):
         continue
     print(n)
 PY2
+    printf '%s\n' '\_GL' '\_OS' '\_OSI' '\_REV' >> "$TMPD/tabnamen.txt"
     sort -u -o "$TMPD/tabnamen.txt" "$TMPD/tabnamen.txt"
     py_n=$(wc -l < "$TMPD/tabnamen.txt")
     py_dev=$(awk '$2=="Device"{print $1}' "$TMPD/ns.txt" | sort -u | wc -l)

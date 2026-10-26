@@ -6,9 +6,9 @@ chk "SCI routed from the MADT override (irq gsi flags level low count)" \
     "irq=9 gsi=9 flags=0x000d level=1 low=0 ovr=5" \
     "irq=$(val "$route" irq) gsi=$(val "$route" gsi) flags=$(val "$route" flags) level=$(val "$route" level) low=$(val "$route" low) ovr=$(val "$route" ovr)"
 chk "I/O APIC entry: level, active high, vector 37" "0x00008025" "$(val "$(line route '^acpiev: ready=')" ioapic)"
-chk "diagnostic line scix" 1 "$(has route '^scix gsi=9 irq=9 flags=0x000d level=1 low=0 irqs=0 shared=0 empty=0 storms=0 masked=0 polls=0 stray_pm1=0 stray_gpe=0 stray_bit=65535 armed=2$')"
+chk "diagnostic line scix" 1 "$(has route '^scix gsi=9 irq=9 flags=0x000d level=1 low=0 irqs=0 shared=0 empty=0 storms=0 masked=0 polls=0 stray_pm1=0 stray_gpe=0 stray_bit=65535 armed=2 gpe_masked=0 gpe_failed=0$')"
 chk "diagnostic line scireg" 1 "$(has route '^scireg pm1sts=0x[0-9a-f]{4} pm1en=0x0100 gpests=0x[0-9a-f]{8},0x[0-9a-f]{8},0x[0-9a-f]{8},0x[0-9a-f]{8} gpeen=0x00000006,')"
-chk "GPE register selftest" 1 "$(has route '^acpiev: selbst reg ok')"
+chk "GPE register selftest" 1 "$(has route '^acpiev: selftest reg ok')"
 
 qrun "$K" ovrdump "osum amldump noring3 nofs"
 tool dumptab.py "$D/ovrdump.txt" APIC "$D/apic.bin"
@@ -77,4 +77,28 @@ chk "counter-proof noacpiev: press not reported" 0 "$(count nobutton 'ev taste')
 ECAML=tools/ecquery/asl/ec
 if [ ! -f $ECAML.aml ]; then iasl -p $ECAML $ECAML.asl > /dev/null 2>&1; fi
 qrun "$K" ecrate "osum acpiev evself ecsim noring3 nofs" -acpitable "file=$ECAML.aml"
-chk "EC polling is rate limited (polls in a burst of 2000 calls)" 1 "$(val "$(line ecrate '^acpiev: selbst ecrate ')" polls)"
+chk "EC polling is rate limited (polls in a burst of 2000 calls)" 1 "$(val "$(line ecrate '^acpiev: selftest ecrate ')" polls)"
+
+chk "evaluation guard refuses a second entry" 1 "$(has route '^acpiev: selftest guard ok')"
+
+gpe_hotplug() {
+    local name=$1 append=$2
+    qstart "$K" "$name" "$append"
+    qwaitfor "$name" 'acpiev: ready=' 300
+    sleep 2
+    qmon "$name" 'device_add e1000,id=hp0,bus=pci.0,addr=0x7'
+    qwaitexit "$name" 300
+}
+
+gpe_hotplug gpeedge "osum acpiev evdump evwait noring3 nofs"
+chk "PCI hotplug GPE (edge): method ran" 1 "$(has gpeedge '^acpiev: ev gpe b=0x01')"
+chk "PCI hotplug GPE (edge): never masked" 0 "$(val "$(lastline gpeedge '^scix ')" gpe_masked)"
+gpe_hotplug gpelevel "osum acpiev evdump evwait scigpelv noring3 nofs"
+chk "PCI hotplug GPE treated as level: method ran" 1 "$(has gpelevel '^acpiev: ev gpe b=0x01')"
+chk "level GPE: masked while pending" 1 "$(val "$(lastline gpelevel '^scix ')" gpe_masked)"
+chk "level GPE: enable bit back after the method" "0x00000006" "$(echo "$(lastline gpelevel '^scireg ')" | grep -oE 'gpeen=0x[0-9a-f]{8}' | sed 's/gpeen=//')"
+chk "level GPE: no failure" 0 "$(val "$(lastline gpelevel '^scix ')" gpe_failed)"
+
+qrun "$K" defer "osum acpiev evself blpch scidefer noring3 nofs"
+chk "brightness key from the interrupt path is queued, applied by the pump" "before=50 queued=1 after=60" \
+    "$(line defer '^acpiev: defer ' | sed -E 's/^acpiev: defer //')"
