@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import lib.kstate
+import serial
+import touchev.record
+
+export { CAP, push, render, pending, lost_total, pushed_total, reset, say }
+
+const CAP: u64 = 128
+const RING_WORDS: u64 = 386
+
+static mut ring: [u64; 386] = [0 as u64; 386]
+static mut r_first: u64 = 0
+static mut r_count: u64 = 0
+static mut r_lost: u64 = 0
+static mut r_lost_all: u64 = 0
+static mut r_seq: u64 = 0
+static mut r_pushed: u64 = 0
+
+fn base() -> u64 {
+    return (&ring[0]) as u64
+}
+
+fn reset() {
+    r_first = 0
+    r_count = 0
+    r_lost = 0
+    r_lost_all = 0
+    r_seq = 0
+    r_pushed = 0
+}
+
+fn pending() -> u64 { return r_count }
+fn lost_total() -> u64 { return r_lost_all }
+fn pushed_total() -> u64 { return r_pushed }
+
+fn push(type_: u64, slot: u64, device: u64, flags: u64, xn: u64, yn: u64, xp: u64, yp: u64,
+        pressure: u64, size: u64, time_ms: u64, a: i64, b: i64) {
+    if r_count >= CAP {
+        r_first = (r_first + 1) % CAP
+        r_count = r_count - 1
+        r_seq = r_seq + 1
+        r_lost = r_lost + 1
+        r_lost_all = r_lost_all + 1
+    }
+    let idx: u64 = (r_first + r_count) % CAP
+    record.put_record(base(), idx, type_, slot, device, flags, xn, yn, xp, yp, pressure, size, time_ms, a, b)
+    r_count = r_count + 1
+    r_pushed = r_pushed + 1
+}
+
+fn copy_record(dst: u64, src: u64) {
+    var w: u64 = 0
+    while w < record.RECORD_BYTES {
+        kstate.set(dst, w, kstate.get(src, w))
+        w = w + 8
+    }
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    var room: u64 = 0
+    if cap >= record.HEADER_BYTES {
+        room = (cap - record.HEADER_BYTES) / record.RECORD_BYTES
+    }
+    var n: u64 = r_count
+    if n > room {
+        n = room
+    }
+    record.put_header(out, n, r_lost, r_seq)
+    var i: u64 = 0
+    while i < n {
+        let src: u64 = base() + record.HEADER_BYTES + ((r_first + i) % CAP) * record.RECORD_BYTES
+        copy_record(out + record.HEADER_BYTES + i * record.RECORD_BYTES, src)
+        i = i + 1
+    }
+    r_first = (r_first + n) % CAP
+    r_count = r_count - n
+    r_seq = r_seq + n
+    r_lost = 0
+    return record.HEADER_BYTES + n * record.RECORD_BYTES
+}
+
+fn at(i: u64) -> u64 {
+    return (r_first + i) % CAP
+}
+
+fn sdec(v: i64) {
+    var m: [u8; 2] = "-\0"
+    if v < 0 {
+        serial.puts((&m[0]) as u64)
+        serial.dec((0 - v) as u64)
+    } else {
+        serial.dec(v as u64)
+    }
+}
+
+fn say_field(name: u64, v: u64) {
+    serial.puts(name)
+    serial.dec(v)
+}
+
+fn say(state: u64) -> u64 {
+    var k_h: [u8; 10] = "touchev: \0"
+    var k_s: [u8; 7] = " slot=\0"
+    var k_d: [u8; 6] = " dev=\0"
+    var k_f: [u8; 5] = " fl=\0"
+    var k_x: [u8; 4] = " x=\0"
+    var k_y: [u8; 4] = " y=\0"
+    var k_px: [u8; 5] = " px=\0"
+    var k_py: [u8; 5] = " py=\0"
+    var k_p: [u8; 4] = " p=\0"
+    var k_z: [u8; 5] = " sz=\0"
+    var k_ms: [u8; 4] = " t=\0"
+    var k_a: [u8; 4] = " a=\0"
+    var k_b: [u8; 4] = " b=\0"
+    var k_l: [u8; 15] = "touchev: lost=\0"
+    let b: u64 = base()
+    let n: u64 = r_count
+    var i: u64 = 0
+    while i < n {
+        serial.puts((&k_h[0]) as u64)
+        serial.dec(record.get_type(b, at(i)))
+        say_field((&k_s[0]) as u64, record.get_slot(b, at(i)))
+        say_field((&k_d[0]) as u64, record.get_device(b, at(i)))
+        say_field((&k_f[0]) as u64, record.get_flags(b, at(i)))
+        say_field((&k_x[0]) as u64, record.get_x_norm(b, at(i)))
+        say_field((&k_y[0]) as u64, record.get_y_norm(b, at(i)))
+        say_field((&k_px[0]) as u64, record.get_x_px(b, at(i)))
+        say_field((&k_py[0]) as u64, record.get_y_px(b, at(i)))
+        say_field((&k_p[0]) as u64, record.get_pressure(b, at(i)))
+        say_field((&k_z[0]) as u64, record.get_size(b, at(i)))
+        say_field((&k_ms[0]) as u64, record.get_time(b, at(i)))
+        serial.puts((&k_a[0]) as u64)
+        sdec(record.get_a(b, at(i)))
+        serial.puts((&k_b[0]) as u64)
+        sdec(record.get_b(b, at(i)))
+        serial.nl()
+        i = i + 1
+    }
+    serial.puts((&k_l[0]) as u64)
+    serial.dec(lost_total())
+    serial.nl()
+    return n
+}

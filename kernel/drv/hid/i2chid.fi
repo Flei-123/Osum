@@ -110,6 +110,12 @@ import acpi.acpi
 import acpi.aml
 import acpi.amlns
 import acpi.amlobj
+import drv.hid.inreg
+import drv.hid.hidmode
+import touchev.inmode
+import drv.hid.evring
+import drv.hid.corpusrun
+import touchev.quirk
 import drv.hid.hidrep
 import drv.hid.hidin
 import drv.hid.hidtest
@@ -480,10 +486,29 @@ fn is_lpss_id(dev: u64) -> bool {
     return false
 }
 
+const NO_READ: u64 = 0xFFFFFFFFFFFFFFFF
+const CAND_MAX: u64 = 8
+static mut cand_n: u64 = 0
+static mut cand_w: [u64; 40] = [0; 40]
+
+fn note_cand(bdf: u64, ids: u64, bar: u64, comp: u64, found: u64) {
+    if cand_n >= CAND_MAX {
+        return
+    }
+    let b: usize = (cand_n * 5) as usize
+    cand_w[b] = bdf
+    cand_w[b + 1] = ids
+    cand_w[b + 2] = bar
+    cand_w[b + 3] = comp
+    cand_w[b + 4] = found
+    cand_n = cand_n + 1
+}
+
 // ALL controllers: every PCI function of class 0C/80 or 11/80 or of an
 // Intel LPSS id with a memory BAR 0 whose IC_COMP_TYPE reads DW_MAGIC.
 // Word `i2cold` (counter-check) keeps only the first one, like before.
 fn find_ctrls(state: u64) -> u64 {
+    cand_n = 0
     let n: u64 = pci.count(state)
     var i: u64 = 0
     while i < n {
@@ -500,13 +525,18 @@ fn find_ctrls(state: u64) -> u64 {
         }
         if cand && !(kstate.mode_on(state, kstate.M_I2COLD) && nctrl() >= 1) {
             let bar: u64 = pci.bar(state, i, 0)
+            var comp: u64 = NO_READ
+            var found: u64 = 0
             if bar != 0 && !pci.bar_is_io(state, i, 0) {
                 let mm: u64 = bar & 0xFFFFFFFFFFFFFFF0
                 lpss_wake(state, i, mm)
-                if kstate.get32(mm + IC_COMP_TYPE) == DW_MAGIC {
+                comp = kstate.get32(mm + IC_COMP_TYPE)
+                if comp == DW_MAGIC {
                     add_ctrl(state, pci.get(state, i, pci.E_BDF), (ven << 16) | dev, mm)
+                    found = 1
                 }
             }
+            note_cand(pci.get(state, i, pci.E_BDF), (ven << 16) | dev, bar, comp, found)
         }
         i = i + 1
     }
@@ -836,7 +866,28 @@ fn versuche(state: u64, c: u64, adr: u64, reg: u64) -> bool {
     s(state, S_READY, 1)
     s(state, S_HDREG, reg)
     hidrep.say(state, slot)
+    let _q: u64 = inreg.register(slot, quirk.B_I2C, g(state, H_VID), g(state, H_PID))
+    set_modes(state, slot)
     return true
+}
+
+fn set_modes(state: u64, slot: u64) {
+    if (hidrep.kind(state, slot) & (hidrep.K_PAD | hidrep.K_TOUCH)) == 0 {
+        return
+    }
+    var pay: [u8; 64] = [0 as u8; 64]
+    var frame: [u8; 80] = [0 as u8; 80]
+    let n: u64 = hidmode.plan(state, slot)
+    var i: u64 = 0
+    while i < n {
+        let plen: u64 = hidmode.build(state, slot, i, (&pay[0]) as u64)
+        if plen > 0 {
+            let flen: u64 = inmode.i2c_set_report(g(state, H_CMDREG), g(state, H_DATAREG), hidmode.rid_at(i),
+                (&pay[0]) as u64, plen, (&frame[0]) as u64)
+            let _x: u64 = dw_xfer(state, (&frame[0]) as u64, flen, 0, 0)
+        }
+        i = i + 1
+    }
 }
 
 // NUR SPEZIFIKATION. Einen Eingabebericht abholen. Die ersten zwei
@@ -1504,6 +1555,12 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
     var k_fa: [u8; 7] = "fails=\0"
     var k_rp: [u8; 6] = "reps=\0"
     var k_hs: [u8; 4] = "hid\0"
+    var k_bs: [u8; 5] = "bus=\0"
+    var k_qk: [u8; 3] = "q=\0"
+    var k_cd: [u8; 5] = "cand\0"
+    var k_b0: [u8; 6] = "bar0=\0"
+    var k_cp: [u8; 6] = "comp=\0"
+    var k_ok: [u8; 4] = "ok=\0"
     var v_ok: [u8; 3] = "ok\0"
     var v_hung: [u8; 5] = "hung\0"
     var v_lost: [u8; 5] = "lost\0"
@@ -1613,9 +1670,39 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
             r_dec(sl)
             r_key((&k_kd[0]) as u64)
             r_dec(kd)
+            r_key((&k_vi[0]) as u64)
+            r_hex(inreg.vid(sl), 4)
+            r_key((&k_pi[0]) as u64)
+            r_hex(inreg.pid(sl), 4)
+            r_key((&k_bs[0]) as u64)
+            r_dec(inreg.bus(sl))
+            r_key((&k_qk[0]) as u64)
+            r_hex(inreg.flags(sl), 2)
             r_c(10)
         }
         sl = sl + 1
+    }
+    var cn: u64 = 0
+    while cn < cand_n {
+        let cb: usize = (cn * 5) as usize
+        r_s((&k_cd[0]) as u64)
+        r_dec(cn)
+        r_key((&k_bdf[0]) as u64)
+        r_hex(cand_w[cb], 6)
+        r_key((&k_id[0]) as u64)
+        r_hex(cand_w[cb + 1], 8)
+        r_key((&k_b0[0]) as u64)
+        r_hex(cand_w[cb + 2], 8)
+        r_key((&k_cp[0]) as u64)
+        if cand_w[cb + 3] == NO_READ {
+            r_s((&v_none[0]) as u64)
+        } else {
+            r_hex(cand_w[cb + 3], 8)
+        }
+        r_key((&k_ok[0]) as u64)
+        r_dec(cand_w[cb + 4])
+        r_c(10)
+        cn = cn + 1
     }
     return r_at
 }
@@ -2567,6 +2654,8 @@ fn simrun2(state: u64) {
         j = j + 1
     }
     hidin.touch_say(state)
+    let _tev: u64 = evring.say(state)
+    corpusrun.run(state)
     serial.puts((&s_i[0]) as u64)
     serial.dec(jt)
     serial.puts((&s_h[0]) as u64)

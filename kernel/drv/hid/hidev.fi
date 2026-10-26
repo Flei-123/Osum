@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import touchev.record
+import touchev.track
+import drv.hid.evring
+import drv.hid.inreg
+import drv.hid.hidmap
+
+export { reset, begin, end, pen, slot_px, slot_py, gesture, norm16 }
+
+const NORM_MAX: u64 = 65535
+
+static mut h_kind: [u64; 8] = [0; 8]
+static mut h_xlo: [u64; 8] = [0; 8]
+static mut h_xhi: [u64; 8] = [0; 8]
+static mut h_ylo: [u64; 8] = [0; 8]
+static mut h_yhi: [u64; 8] = [0; 8]
+static mut h_flags: [u64; 8] = [0; 8]
+static mut h_cfg: [u64; 8] = [0; 8]
+
+fn reset(dev: u64) {
+    if dev >= 8 {
+        return
+    }
+    track.reset(dev)
+    h_cfg[dev as usize] = 0
+}
+
+fn norm16(v: u64, hi: u64) -> u64 {
+    if hi == 0 {
+        return 0
+    }
+    if v >= hi {
+        return NORM_MAX
+    }
+    return (v * NORM_MAX) / hi
+}
+
+fn begin(dev: u64, kind: u64, now_ms: u64, xlo: u64, xhi: u64, ylo: u64, yhi: u64) {
+    let d: usize = dev as usize
+    let fl: u64 = inreg.flags(dev)
+    if h_cfg[d] == 0 || h_kind[d] != kind || h_xlo[d] != xlo || h_xhi[d] != xhi
+        || h_ylo[d] != ylo || h_yhi[d] != yhi || h_flags[d] != fl {
+        track.configure(dev, kind, xlo as i64, xhi as i64, ylo as i64, yhi as i64)
+        track.set_quirks(dev, fl)
+        h_kind[d] = kind
+        h_xlo[d] = xlo
+        h_xhi[d] = xhi
+        h_ylo[d] = ylo
+        h_yhi[d] = yhi
+        h_flags[d] = fl
+        h_cfg[d] = 1
+    }
+    track.begin(dev, now_ms)
+}
+
+fn publish(state: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let xn: u64 = track.ev_x(i)
+        let yn: u64 = track.ev_y(i)
+        var xp: u64 = 0
+        var yp: u64 = 0
+        if track.ev_device(i) != record.D_TOUCHPAD {
+            let pp: u64 = hidmap.tmap(state, xn, 0, NORM_MAX, yn, 0, NORM_MAX)
+            xp = pp >> 32
+            yp = pp & 0xFFFFFFFF
+        }
+        evring.push(track.ev_type(i), track.ev_slot(i), track.ev_device(i), track.ev_flags(i),
+            xn, yn, xp, yp, track.ev_pressure(i), track.ev_size(i), track.ev_time(i), 0, 0)
+        i = i + 1
+    }
+}
+
+fn end(state: u64, dev: u64) -> u64 {
+    let n: u64 = track.end(dev)
+    publish(state, n)
+    return n
+}
+
+fn pen(state: u64, dev: u64, in_range: u64, tip: u64, barrel: u64, eraser: u64, x: u64, y: u64, pressure: u64) -> u64 {
+    let n: u64 = track.pen(dev, in_range, tip, barrel, eraser, x as i64, y as i64, pressure)
+    publish(state, n)
+    return n
+}
+
+fn slot_px(state: u64, dev: u64, s: u64) -> u64 {
+    let pp: u64 = hidmap.tmap(state, track.slot_x(dev, s), 0, NORM_MAX, track.slot_y(dev, s), 0, NORM_MAX)
+    return pp >> 32
+}
+
+fn slot_py(state: u64, dev: u64, s: u64) -> u64 {
+    let pp: u64 = hidmap.tmap(state, track.slot_x(dev, s), 0, NORM_MAX, track.slot_y(dev, s), 0, NORM_MAX)
+    return pp & 0xFFFFFFFF
+}
+
+fn gesture(state: u64, device: u64, g: u64, x_px: u64, y_px: u64, a: i64, b: i64, now_ms: u64) {
+    let w: u64 = hidmap.scr_w(state)
+    let h: u64 = hidmap.scr_h(state)
+    var xn: u64 = (x_px * NORM_MAX) / (w - 1)
+    var yn: u64 = (y_px * NORM_MAX) / (h - 1)
+    if xn > NORM_MAX {
+        xn = NORM_MAX
+    }
+    if yn > NORM_MAX {
+        yn = NORM_MAX
+    }
+    evring.push(record.T_GESTURE, record.SLOT_NONE, device, g, xn, yn, x_px, y_px, 0, 0, now_ms, a, b)
+}

@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import lib.kstate
+import drv.hid.hidrep
+import touchev.inmode
+
+export { MAX_REPORTS, plan, rid_at, build }
+
+const MAX_REPORTS: u64 = 4
+const US_MODE: u64 = 0x52
+const US_SURFACE: u64 = 0x57
+const US_BUTTONS: u64 = 0x58
+const PAYLOAD_MAX: u64 = 64
+
+static mut m_n: u64 = 0
+static mut m_rid: [u64; 4] = [0; 4]
+
+fn wanted(page: u64, usage: u64) -> bool {
+    if page != hidrep.UP_DIGITIZER {
+        return false
+    }
+    return usage == US_MODE || usage == US_SURFACE || usage == US_BUTTONS
+}
+
+fn value_of(usage: u64) -> u64 {
+    if usage == US_MODE {
+        return inmode.MODE_PTP
+    }
+    return inmode.SWITCH_ON
+}
+
+fn known(rid: u64) -> bool {
+    var i: u64 = 0
+    while i < m_n {
+        if m_rid[i as usize] == rid {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn plan(state: u64, dev: u64) -> u64 {
+    m_n = 0
+    let nf: u64 = hidrep.fields(state, dev)
+    var i: u64 = 0
+    while i < nf {
+        let head: u64 = hidrep.f_head(state, dev, i)
+        if ((head >> 8) & 0xFF) == hidrep.KIND_FEAT {
+            let rid: u64 = head & 0xFF
+            let first: u64 = hidrep.f_usage(state, dev, i)
+            let cnt: u64 = hidrep.f_count(state, dev, i)
+            var c: u64 = 0
+            while c < cnt {
+                if wanted(hidrep.f_page(state, dev, i), first + c) && !known(rid) && m_n < MAX_REPORTS {
+                    m_rid[m_n as usize] = rid
+                    m_n = m_n + 1
+                }
+                c = c + 1
+            }
+        }
+        i = i + 1
+    }
+    return m_n
+}
+
+fn rid_at(i: u64) -> u64 {
+    if i >= m_n {
+        return 0
+    }
+    return m_rid[i as usize]
+}
+
+fn build(state: u64, dev: u64, i: u64, out: u64) -> u64 {
+    if i >= m_n {
+        return 0
+    }
+    let rid: u64 = m_rid[i as usize]
+    let len: u64 = hidrep.feat_bytes_of(state, dev, rid)
+    if len == 0 || len > PAYLOAD_MAX {
+        return 0
+    }
+    var k: u64 = 0
+    while k < len {
+        kstate.set8(out + k, 0 as u8)
+        k = k + 1
+    }
+    let nf: u64 = hidrep.fields(state, dev)
+    var f: u64 = 0
+    while f < nf {
+        let head: u64 = hidrep.f_head(state, dev, f)
+        if ((head >> 8) & 0xFF) == hidrep.KIND_FEAT && (head & 0xFF) == rid {
+            let first: u64 = hidrep.f_usage(state, dev, f)
+            let cnt: u64 = hidrep.f_count(state, dev, f)
+            let off: u64 = hidrep.f_bitoff(state, dev, f)
+            let sz: u64 = hidrep.f_bitsz(state, dev, f)
+            var c: u64 = 0
+            while c < cnt {
+                if wanted(hidrep.f_page(state, dev, f), first + c) {
+                    inmode.put_bits(out, off + c * sz, sz, value_of(first + c))
+                }
+                c = c + 1
+            }
+        }
+        f = f + 1
+    }
+    return len
+}

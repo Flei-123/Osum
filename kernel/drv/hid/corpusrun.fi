@@ -1,0 +1,141 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import lib.kstate
+import serial
+import drv.hid.hidrep
+import drv.hid.hidin
+import drv.hid.evring
+import drv.hid.inreg
+import drv.hid.corpusdata
+import drv.hid.hidmode
+import touchev.inmode
+import touchev.quirk
+
+export { run }
+
+const INPUTMODE_DEV: u64 = 3
+const I2C_CMDREG: u64 = 5
+const I2C_DATAREG: u64 = 6
+static mut fbuf: [u8; 80] = [0 as u8; 80]
+
+fn say_bytes(p: u64, n: u64) {
+    var sep: [u8; 2] = ",\0"
+    var k: u64 = 0
+    while k < n {
+        if k > 0 {
+            serial.puts((&sep[0]) as u64)
+        }
+        serial.dec(kstate.get8(p + k))
+        k = k + 1
+    }
+    serial.nl()
+}
+
+fn inmode_check(state: u64) {
+    var s_i: [u8; 20] = "corpus: inmode rid=\0"
+    var s_d: [u8; 7] = " data=\0"
+    var s_f: [u8; 13] = "corpus: i2c \0"
+    let raw: u64 = hidrep.raw_of(state, DEV)
+    let n: u64 = corpusdata.device_load(INPUTMODE_DEV, raw)
+    let _e: u64 = hidrep.parse(state, DEV, raw, n)
+    let count: u64 = hidmode.plan(state, DEV)
+    var i: u64 = 0
+    while i < count {
+        let plen: u64 = hidmode.build(state, DEV, i, (&rbuf[0]) as u64)
+        serial.puts((&s_i[0]) as u64)
+        serial.dec(hidmode.rid_at(i))
+        serial.puts((&s_d[0]) as u64)
+        say_bytes((&rbuf[0]) as u64, plen)
+        let flen: u64 = inmode.i2c_set_report(I2C_CMDREG, I2C_DATAREG, hidmode.rid_at(i), (&rbuf[0]) as u64, plen, (&fbuf[0]) as u64)
+        serial.puts((&s_f[0]) as u64)
+        say_bytes((&fbuf[0]) as u64, flen)
+        i = i + 1
+    }
+}
+
+const DEV: u64 = 0
+const START_MS: u64 = 100000
+const STEP_MS: u64 = 20
+const TOUCHPAD: u64 = 0
+const FAKE_VID: u64 = 0x1234
+
+static mut rbuf: [u8; 128] = [0 as u8; 128]
+
+fn marker(begin: bool, label: u64) {
+    var s_b: [u8; 15] = "corpus: begin \0"
+    var s_e: [u8; 13] = "corpus: end \0"
+    if begin {
+        serial.puts((&s_b[0]) as u64)
+    } else {
+        serial.puts((&s_e[0]) as u64)
+    }
+    serial.puts(label)
+    serial.nl()
+}
+
+fn play(state: u64, i: u64, bus: u64, vid: u64, pid: u64, label: u64) {
+    var s_p: [u8; 15] = "corpus: parse=\0"
+    var s_o: [u8; 17] = "corpus: reports=\0"
+    var s_k: [u8; 7] = " kind=\0"
+    var s_g: [u8; 7] = " okay=\0"
+    let raw: u64 = hidrep.raw_of(state, DEV)
+    let n: u64 = corpusdata.device_load(i, raw)
+    let err: u64 = hidrep.parse(state, DEV, raw, n)
+    hidin.reset_dev(state, DEV)
+    let _q: u64 = inreg.register(DEV, bus, vid, pid)
+    evring.reset()
+    marker(true, label)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(err)
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(hidrep.kind(state, DEV))
+    serial.nl()
+    var r: u64 = 0
+    var played: u64 = 0
+    var okay: u64 = 0
+    var now: u64 = START_MS
+    while r < corpusdata.report_count() {
+        if corpusdata.report_device(r) == i {
+            now = now + STEP_MS
+            hidin.set_vclk(state, now)
+            let len: u64 = corpusdata.report_load(r, (&rbuf[0]) as u64)
+            if hidin.report(state, DEV, (&rbuf[0]) as u64, len) {
+                okay = okay + 1
+            }
+            played = played + 1
+        }
+        r = r + 1
+    }
+    hidin.set_vclk(state, 0)
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(played)
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(okay)
+    serial.nl()
+    let _s: u64 = evring.say(state)
+    marker(false, label)
+}
+
+fn run(state: u64) {
+    var l_d0: [u8; 5] = "dev0\0"
+    var l_d1: [u8; 5] = "dev1\0"
+    var l_d2: [u8; 5] = "dev2\0"
+    var l_qi: [u8; 13] = "quirk-invert\0"
+    var l_qs: [u8; 13] = "quirk-single\0"
+    var l_qg: [u8; 13] = "quirk-ignore\0"
+    var l_pr: [u8; 6] = "prime\0"
+    hidin.stage(state)
+    play(state, 0, quirk.B_I2C, corpusdata.device_vid(0), corpusdata.device_pid(0), (&l_d0[0]) as u64)
+    play(state, 1, quirk.B_I2C, corpusdata.device_vid(1), corpusdata.device_pid(1), (&l_d1[0]) as u64)
+    play(state, 2, quirk.B_I2C, corpusdata.device_vid(2), corpusdata.device_pid(2), (&l_d2[0]) as u64)
+    let _a: u64 = quirk.add_row(quirk.B_VIRTUAL, FAKE_VID, 1, quirk.Q_INVERT_X | quirk.Q_INVERT_Y)
+    let _b: u64 = quirk.add_row(quirk.B_VIRTUAL, FAKE_VID, 2, quirk.Q_SINGLE_TOUCH)
+    let _c: u64 = quirk.add_row(quirk.B_VIRTUAL, FAKE_VID, 3, quirk.Q_IGNORE)
+    play(state, TOUCHPAD, quirk.B_VIRTUAL, FAKE_VID, 1, (&l_qi[0]) as u64)
+    play(state, TOUCHPAD, quirk.B_VIRTUAL, FAKE_VID, 2, (&l_qs[0]) as u64)
+    play(state, TOUCHPAD, quirk.B_VIRTUAL, FAKE_VID, 3, (&l_qg[0]) as u64)
+    inmode_check(state)
+    play(state, 1, quirk.B_I2C, corpusdata.device_vid(1), corpusdata.device_pid(1), (&l_pr[0]) as u64)
+}
