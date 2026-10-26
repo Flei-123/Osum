@@ -7,12 +7,12 @@
 #
 # Machine of the stick (tools/design/eh6.sh). The image carries a manifest with ONE extra entry (`explorer|Probe entry|/bin/true`).
 #   1. right click on the first table row: `explorer: ctxreg n=16` (15 built-in + the manifest row), `explorer: menurect`
-#   2. BEHAVIOUR UNCHANGED: the 15 old rows look exactly like before -- the menu picture of the old tree (BASE) is pixel-equal inside
-#      the rectangle of the first 15 rows (same click, same place, same labels)
+#   2. BEHAVIOUR UNCHANGED: the 15 old rows look exactly like without the manifest entry -- the menu picture of the same tree run
+#      WITHOUT /etc/ctxmenu.conf (ref) is pixel-equal inside the rectangle of the first 15 rows (same click, same labels)
 #   3. the manifest row (row 15): `explorer: ctx ext start 4096` (EXT_BASE) -- an app registered itself WITHOUT a change of shell code
 #   4. right click, Escape: the menu closes without a further pick
 #   5. right click, row 13 (Properties): `explorer: props` -- a built-in action still runs through ctx_wahl
-# COUNTER-PROOF: the tree before (BASE, default 8760f1af = main before r1352) has no registry menu: no `ctxreg n=`, the menu is one row (28 px) shorter,
+# COUNTER-PROOF: the tree before (BASE, default 8760f1af = main before r1352; it only serves this proof, not the pixel compare) has no registry menu: no `ctxreg n=`, the menu is one row (28 px) shorter,
 # and clicking where the probe row would be starts nothing.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -64,8 +64,9 @@ warte 4
 foto 04-props
 EOT
 
-run_tree() { # <tree> <out>
+run_tree() { # <tree> <out> [nomanifest]
     ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+      if [ "${3:-}" = nomanifest ]; then unset EH_ETC_EXTRA; fi
       DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" accel=kvm progs="$PROGS" \
         drehbuch="$TMPD/dreh.txt" > "$2/o.log" 2>&1 )
 }
@@ -96,26 +97,28 @@ print(n)
 PY
 }
 
-mkdir -p "$TMPD/new" "$TMPD/old"
+mkdir -p "$TMPD/new" "$TMPD/old" "$TMPD/ref"
 git worktree add --detach "$BT" "${BASE:-8760f1af}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
 # the old tree needs this tree's drive.py / eh6.sh (EH_ETC_EXTRA); the pictures and trace lines are what differ
 cp -f tools/design/drive.py "$BT/tools/design/drive.py"; cp -f tools/design/eh6.sh "$BT/tools/design/eh6.sh"
 run_tree "$ROOT" "$TMPD/new" &
 run_tree "$BT" "$TMPD/old" &
+run_tree "$ROOT" "$TMPD/ref" nomanifest &
 wait
-S="$TMPD/new/o/serial.txt"; SO="$TMPD/old/o/serial.txt"
+S="$TMPD/new/o/serial.txt"; SO="$TMPD/old/o/serial.txt"; SR="$TMPD/ref/o/serial.txt"
 if [ ! -s "$TMPD/new/o/04-props.ppm" ]; then
     bad "no pictures: $(tail -n 3 "$TMPD/new/o.log" | tr '\n' ' ')"
     echo "EXPLCTX: $pass passed, $fail failed"; exit 1
 fi
 if [ -n "${EXPLCTX_OUT:-}" ]; then
     mkdir -p "$EXPLCTX_OUT"; cp "$TMPD"/new/o/*.ppm "$EXPLCTX_OUT/" 2>/dev/null; cp "$S" "$EXPLCTX_OUT/serial.txt" 2>/dev/null
+    cp "$TMPD"/ref/o/01-menu.ppm "$EXPLCTX_OUT/ref-01-menu.ppm" 2>/dev/null; cp "$SR" "$EXPLCTX_OUT/ref-serial.txt" 2>/dev/null
     cp "$TMPD"/old/o/01-menu.ppm "$EXPLCTX_OUT/old-01-menu.ppm" 2>/dev/null; cp "$SO" "$EXPLCTX_OUT/old-serial.txt" 2>/dev/null
 fi
 
 grep -aq 'explorer: ctxreg n=16' "$S" && ok "item menu has 16 rows (15 built-in + the manifest entry)" || bad "no 'explorer: ctxreg n=16' ($(grep -a 'explorer: ctxreg' "$S" | head -1))"
 ml=$(grep -a '^explorer: menurect wx=' "$S" | head -1 | grep -a -o 'wx=[0-9]* wy=[0-9]* wh=[0-9]*')
-ho=$(grep -a '^explorer: menurect wx=' "$SO" | head -1 | grep -a -o 'wh=[0-9]*' | cut -d= -f2)
+ho=$(grep -a '^explorer: menurect wx=' "$SR" | head -1 | grep -a -o 'wh=[0-9]*' | cut -d= -f2)
 if [ -z "$ml" ]; then
     bad "no 'explorer: menurect' in the new tree"; mx=0; my=0; mh=0
 else
@@ -124,20 +127,20 @@ else
 fi
 if [ -n "$ho" ] && [ "$mh" -gt "$ho" ]; then
     d=$((mh - ho))
-    [ "$d" -ge 20 ] && [ "$d" -le 40 ] && ok "the new menu is one row taller than the old one ($mh vs $ho)" || bad "height differs by $d (new $mh, old $ho)"
+    [ "$d" -ge 20 ] && [ "$d" -le 40 ] && ok "the menu with the manifest entry is one row taller than the reference ($mh vs $ho)" || bad "height differs by $d (new $mh, old $ho)"
 else
     bad "heights not comparable (new $mh, old ${ho:-none})"
 fi
 # BEHAVIOUR UNCHANGED: the 15 old rows look as before. The longer menu is pushed up by the screen edge (new wy < old wy), so each picture is
 # read at its own menu origin; what may differ is the pointer sprite and the hover row (a few hundred pixels), not the labels.
-oml=$(grep -a '^explorer: menurect wx=' "$SO" | head -1 | grep -a -o 'wx=[0-9]* wy=[0-9]*')
-if [ -s "$TMPD/old/o/01-menu.ppm" ] && [ -n "$oml" ] && [ -n "$ho" ] && [ "$ho" -gt 20 ]; then
+oml=$(grep -a '^explorer: menurect wx=' "$SR" | head -1 | grep -a -o 'wx=[0-9]* wy=[0-9]*')
+if [ -s "$TMPD/ref/o/01-menu.ppm" ] && [ -n "$oml" ] && [ -n "$ho" ] && [ "$ho" -gt 20 ]; then
     ox=$(echo "$oml" | sed -E 's/wx=([0-9]+).*/\1/'); oy=$(echo "$oml" | sed -E 's/.*wy=([0-9]+)/\1/')
-    d=$(diffpix "$TMPD/new/o/01-menu.ppm" "$TMPD/old/o/01-menu.ppm" "$mx" "$my" 150 $((ho - 8)) "$ox" "$oy")
+    d=$(diffpix "$TMPD/new/o/01-menu.ppm" "$TMPD/ref/o/01-menu.ppm" "$mx" "$my" 150 $((ho - 8)) "$ox" "$oy")
     [ "$d" -le 700 ] && ok "the 15 old rows look as before ($d of $((150 * (ho - 8))) pixels differ: pointer + hover only)" \
         || bad "the old rows changed: $d pixels differ"
 else
-    bad "no old menu picture/rectangle to compare"
+    bad "no reference menu picture/rectangle to compare"
 fi
 grep -aq 'explorer: ctx ext start 4096' "$S" && ok "row 15 (manifest entry) picked: action EXT_BASE" || bad "no 'explorer: ctx ext start 4096'"
 n=$(grep -ac '^explorer: ctx ext start' "$S")

@@ -67,6 +67,7 @@ p4=$!
 wait $p1 $p2 $p3 $p4
 
 # 3. measure
+[ -n "${AA_OUT:-}" ] && { mkdir -p "$AA_OUT"; for r in new1 old1 new2 old2; do mkdir -p "$AA_OUT/$r"; cp "$TMPD/$r"/*.ppm "$TMPD/$r/serial.txt" "$AA_OUT/$r/" 2>/dev/null; done; }
 RADIUS=$(grep -E '^radius_window=' assets/shapes/osum.shape | head -1 | cut -d= -f2)
 RADIUS=${RADIUS:-12}
 # fields: name file regexp-for-rectangle corners
@@ -109,6 +110,5 @@ for sc in 1 2; do
     [ "$ob" -ge "$GATE_OLD" ] && ok "scale $sc counter-proof aa_old=1: bad=$ob (>= $GATE_OLD, red as it must be)" \
         || bad "scale $sc counter-proof aa_old=1: only bad=$ob, the test does not see the old drawing"
 done
-[ -n "${AA_OUT:-}" ] && { mkdir -p "$AA_OUT"; for r in new1 old1 new2 old2; do mkdir -p "$AA_OUT/$r"; cp "$TMPD/$r"/*.ppm "$TMPD/$r/serial.txt" "$AA_OUT/$r/" 2>/dev/null; done; }
 echo "AACORNER: $pass passed, $fail failed"
 [ "$fail" = 0 ]
