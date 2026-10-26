@@ -483,7 +483,7 @@ def vfactor(f, px, top):
     return rows / px_h
 
 
-def glyph(f, gid, px):
+def glyph(f, gid, px, hint=True):
     """kernel/user/fuiglyph.fi `glyph_into`, line for line."""
     sc16 = kern.scale_of(px, f.upm)
     adv = kern.f26(f.advance(gid), sc16)
@@ -494,11 +494,11 @@ def glyph(f, gid, px):
     bb = ol.bbox(gid)
     if bb is not None and bb[2] > bb[0] and bb[3] > bb[1]:
         x0, y0, x1, y1 = bb
-        vf = vfactor(f, px, y1)
+        vf = vfactor(f, px, y1) if hint else 1.0
         bx0 = int(_ffloor(float(x0) * sc))
         bx1 = int(_fceil(float(x1) * sc))
         by0 = int(_ffloor(float(y0) * sc * vf))
-        by1 = int(_fceil(float(y1) * sc * vf - 0.0001))
+        by1 = int(_fceil(float(y1) * sc * vf - (0.0001 if hint else 0.0)))
         w = bx1 - bx0
         h = by1 - by0
     if w < 0 or h < 0 or w > 256 or h > 256:

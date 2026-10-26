@@ -393,7 +393,7 @@ TINTE = os.environ.get("OSUM_TINTE", "fui")
 def raster(f, gid, px, tinte=None):
     if (tinte or TINTE) != "kern":
         import fuiraster  # noqa: E402  (imports this file)
-        g = fuiraster.glyph(f, gid, px)
+        g = fuiraster.glyph(f, gid, px, hint=False)
         if g is not None:
             return g
     return raster_kern(f, gid, px)
