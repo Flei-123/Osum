@@ -4,14 +4,75 @@
 //     import fui.trayaudio
 //     var b: rt.Buf = rt.buf_new()
 //     if trayaudio.mic_tooltip(&hub, &b) { ... rt.buf_ptr(&b) is NUL terminated: "Microphone in use by Computer-Phone" }
-//     trayaudio.volume_tooltip(&hub, hub.hub_default(&hub, hub.DIR_OUT), &b)   // "Lautsprecher: 50 %"
+//     trayaudio.volume_tooltip(&hub, hub.hub_default(&hub, hub.DIR_OUT), &b)   // "Speaker: 50 %"
 //
 // The mic indicator shows when a program captures (or the systemwide mute is on); it names WHO, because a
-// camera/mic light that does not say who is not worth much. Texts are German (UI language of OrientOS).
+// camera/mic light that does not say who is not worth much. Texts come from set_text slots (English defaults).
 import std.rt
 import audio.hub
 
-export { mic_tooltip, volume_tooltip, mic_indicator }
+export {
+    mic_tooltip, volume_tooltip, mic_indicator, set_text,
+    AX_MIC_MUTED, AX_MIC_BY, AX_AND, AX_MORE, AX_NO_DEVICE, AX_MUTED, AX_PCT
+}
+
+const AX_MIC_MUTED: u64 = 0
+const AX_MIC_BY: u64 = 1
+const AX_AND: u64 = 2
+const AX_MORE: u64 = 3
+const AX_NO_DEVICE: u64 = 4
+const AX_MUTED: u64 = 5
+const AX_PCT: u64 = 6
+const AX_COUNT: u64 = 7
+const AX_WIDTH: u64 = 48
+
+static mut atx: [u8; 336] = [0 as u8; 336]
+static mut atx_ready: u64 = 0
+
+static mut a_mic_muted: [u8; 17] = "Microphone muted\0"
+static mut a_mic_by: [u8; 21] = "Microphone in use by\0"
+static mut a_and: [u8; 4] = "and\0"
+static mut a_more: [u8; 5] = "more\0"
+static mut a_no_device: [u8; 16] = "No audio device\0"
+static mut a_muted: [u8; 6] = "muted\0"
+static mut a_pct: [u8; 2] = "%\0"
+
+fn copy_text(id: u64, src: u64) {
+    var i: u64 = 0
+    while i + 1 < AX_WIDTH && *((src + i) as *mut u8) != 0 as u8 {
+        atx[(id * AX_WIDTH + i) as usize] = *((src + i) as *mut u8)
+        i = i + 1
+    }
+    atx[(id * AX_WIDTH + i) as usize] = 0 as u8
+}
+
+fn load_defaults() {
+    atx_ready = 1
+    copy_text(AX_MIC_MUTED, (&a_mic_muted[0 as usize]) as u64)
+    copy_text(AX_MIC_BY, (&a_mic_by[0 as usize]) as u64)
+    copy_text(AX_AND, (&a_and[0 as usize]) as u64)
+    copy_text(AX_MORE, (&a_more[0 as usize]) as u64)
+    copy_text(AX_NO_DEVICE, (&a_no_device[0 as usize]) as u64)
+    copy_text(AX_MUTED, (&a_muted[0 as usize]) as u64)
+    copy_text(AX_PCT, (&a_pct[0 as usize]) as u64)
+}
+
+fn set_text(id: u64, src: u64) {
+    if id >= AX_COUNT || src == 0 {
+        return
+    }
+    if atx_ready == 0 {
+        load_defaults()
+    }
+    copy_text(id, src)
+}
+
+fn push_t(b: *mut rt.Buf, id: u64) {
+    if atx_ready == 0 {
+        load_defaults()
+    }
+    push_c(b, (&atx[(id * AX_WIDTH) as usize]) as u64)
+}
 
 fn push_c(b: *mut rt.Buf, p: u64) {
     var i: usize = 0
@@ -45,48 +106,57 @@ fn mic_tooltip(h: *mut hub.Hub, out: *mut rt.Buf) -> bool {
         return false
     }
     if state == 2 {
-        push_s(out, "Mikrofon ist stumm")
+        push_t(out, AX_MIC_MUTED)
         rt.buf_push(out, 0 as u8)
         return true
     }
     let n: usize = hub.hub_mic_app_count(h)
-    push_s(out, "Mikrofon wird verwendet von ")
+    push_t(out, AX_MIC_BY)
+    push_s(out, " ")
     push_c(out, hub.hub_mic_app_name(h, 0))
     if n == 2 {
-        push_s(out, " und ")
+        push_s(out, " ")
+        push_t(out, AX_AND)
+        push_s(out, " ")
         push_c(out, hub.hub_mic_app_name(h, 1))
     } else if n == 3 {
         push_s(out, ", ")
         push_c(out, hub.hub_mic_app_name(h, 1))
-        push_s(out, " und ")
+        push_s(out, " ")
+        push_t(out, AX_AND)
+        push_s(out, " ")
         push_c(out, hub.hub_mic_app_name(h, 2))
     } else if n > 3 {
         push_s(out, ", ")
         push_c(out, hub.hub_mic_app_name(h, 1))
-        push_s(out, " und ")
+        push_s(out, " ")
+        push_t(out, AX_AND)
+        push_s(out, " ")
         rt.buf_push_dec_u64(out, (n - 2) as u64)
-        push_s(out, " weiteren")
+        push_s(out, " ")
+        push_t(out, AX_MORE)
     }
     rt.buf_push(out, 0 as u8)
     return true
 }
 
-// "<device>: 50 %" or "<device>: stumm"; false when the device is unknown (no sound hardware).
+// "<device>: 50 %" or "<device>: muted"; false when the device is unknown (no sound hardware).
 fn volume_tooltip(h: *mut hub.Hub, dev: u64, out: *mut rt.Buf) -> bool {
     rt.buf_clear(out)
     let name: u64 = hub.hub_device_name(h, dev)
     if name == 0 {
-        push_s(out, "Kein Audiogerät")
+        push_t(out, AX_NO_DEVICE)
         rt.buf_push(out, 0 as u8)
         return false
     }
     push_c(out, name)
     push_s(out, ": ")
     if hub.hub_muted(h, dev) {
-        push_s(out, "stumm")
+        push_t(out, AX_MUTED)
     } else {
         rt.buf_push_dec_u64(out, hub.hub_volume(h, dev))
-        push_s(out, " %")
+        push_s(out, " ")
+        push_t(out, AX_PCT)
     }
     rt.buf_push(out, 0 as u8)
     return true
