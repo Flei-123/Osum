@@ -15,6 +15,10 @@ def lcg_image(w, h):
     return rows
 
 
+def smooth_image(w, h):
+    return [[((x // 3) * 255 // w + y * 255 // h + (x % 3) * 40) & 255 for x in range(w * 3)] for y in range(h)]
+
+
 def halve(rows, w, h):
     nw, nh = (w + 1) // 2, (h + 1) // 2
     out = []
@@ -30,6 +34,11 @@ def halve(rows, w, h):
                 row.append((s + 2) // 4)
         out.append(row)
     return out, nw, nh
+
+
+def quantize(rows, bits):
+    keep = (255 >> bits) ^ 255
+    return [[(v & keep) | (v >> (8 - bits)) for v in row] for row in rows]
 
 
 def read_png(path):
@@ -56,21 +65,46 @@ def read_png(path):
     rows = []
     for y in range(h):
         base = y * (1 + w * 3)
-        assert raw[base] == 0, 'filter'
-        rows.append(list(raw[base + 1:base + 1 + w * 3]))
+        ft = raw[base]
+        assert ft <= 4, 'filter'
+        cur = list(raw[base + 1:base + 1 + w * 3])
+        prev = rows[-1] if rows else [0] * (w * 3)
+        for i in range(w * 3):
+            a = cur[i - 3] if i >= 3 else 0
+            b = prev[i]
+            c = prev[i - 3] if i >= 3 else 0
+            if ft == 1:
+                p = a
+            elif ft == 2:
+                p = b
+            elif ft == 3:
+                p = (a + b) // 2
+            elif ft == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                p = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+            else:
+                p = 0
+            cur[i] = (cur[i] + p) & 255
+        rows.append(cur)
     return len(data), w, h, rows
 
 
 def main():
-    path, w, h, cap, steps = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+    path, w, h, cap, steps, quants, kind = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6]), sys.argv[7]
     size, pw, ph, rows = read_png(path)
-    exp = lcg_image(w, h)
+    exp = smooth_image(w, h) if kind == 'smooth' else lcg_image(w, h)
+    for bits in (2, 3)[:quants]:
+        exp = quantize(exp, bits)
     ew, eh = w, h
     for _ in range(steps):
         exp, ew, eh = halve(exp, ew, eh)
     assert (pw, ph) == (ew, eh), 'dims %dx%d expected %dx%d' % (pw, ph, ew, eh)
     assert rows == exp, 'pixels differ'
     assert cap == 0 or size <= cap, 'size %d over cap %d' % (size, cap)
+    if kind == 'smooth':
+        flat = b''.join(b'\0' + bytes(r) for r in rows)
+        base = len(zlib.compress(flat, 6))
+        assert size * 2 < base, 'filters save too little: %d vs %d unfiltered' % (size, base)
     print('%d %dx%d' % (size, pw, ph))
 
 

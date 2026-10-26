@@ -234,6 +234,12 @@ const SI_WIDTH: i64 = 1
 const SI_HEIGHT: i64 = 2
 const SI_ROWBYTES: i64 = 3
 const SI_CHUNKROWS: i64 = 5
+const SI_FRAMES: i64 = 14
+const SHOT_TRIES: i64 = 4
+const GRAB_OK: i32 = 0
+const GRAB_NO_PERMIT: i32 = 1
+const GRAB_INCOMPLETE: i32 = 2
+const SHOT_SETTLE_MS: u64 = 120
 const RESULT_CAP: usize = 2000000
 
 // RUNDE BRUECKE: die eingespeiste Eingabe (kernel/sys.fi, 1843).
@@ -2091,31 +2097,16 @@ fn cert_check(aus: *mut rt.Buf) -> bool {
 // die Reihenfolge der Karte schon zurecht). PNG-Farbart 2 will genau
 // das, mit einem Filteroktett je Zeile -- das setzt diese Schleife
 // davor, ohne die Zeile noch einmal anzufassen.
-fn photo_over_kernel(aus: *mut rt.Buf) -> bool {
-    let w: i64 = syscall(S_SHOT, SH_INFO, SI_WIDTH, 0, 0, 0, 0)
-    let h: i64 = syscall(S_SHOT, SH_INFO, SI_HEIGHT, 0, 0, 0, 0)
-    let rb: i64 = syscall(S_SHOT, SH_INFO, SI_ROWBYTES, 0, 0, 0, 0)
-    var zpc: i64 = syscall(S_SHOT, SH_INFO, SI_CHUNKROWS, 0, 0, 0, 0)
-    if w <= 0 || h <= 0 || rb <= 0 {
-        return ablehnen(aus, "the kernel reports no screen size")
-    }
-    if zpc <= 0 {
-        zpc = 1
-    }
-    // DER SCHEIN. Er wird hier ausgestellt und nicht frueher: zwischen
-    // Schein und erstem Band soll nichts liegen, was scheitern kann.
+fn grab_image(roh: *mut rt.Buf, hoehe: usize, zeile: usize, zpc: i64) -> i32 {
     let arm: i64 = syscall(S_SHOT, SH_ARM, 0, 0, 0, 0, 0)
     if arm < 0 {
-        return ablehnen(aus, "the kernel issues no permit (SH_ARM rejected)")
+        return GRAB_NO_PERMIT
     }
-    let breite: usize = w as usize
-    let hoehe: usize = h as usize
-    let zeile: usize = rb as usize
-    var band: rt.Buf = rt.buf_new()
     let bandzeilen: usize = zpc as usize
+    var band: rt.Buf = rt.buf_new()
     rt.buf_reserve(&band, bandzeilen * zeile)
     rt.buf_set_len(&band, bandzeilen * zeile)
-    var roh: rt.Buf = rt.buf_new()
+    rt.buf_clear(roh)
     var y: usize = 0
     var schief: bool = false
     while y < hoehe {
@@ -2136,21 +2127,54 @@ fn photo_over_kernel(aus: *mut rt.Buf) -> bool {
         }
         var i: usize = 0
         while i < kam {
-            // Filter 0 (None), dann die Zeile, wie der Kern sie gibt.
-            rt.buf_push(&roh, 0 as u8)
-            rt.buf_push_bytes(&roh, band.ptr + (i * zeile) as u64, zeile)
+            rt.buf_push(roh, 0 as u8)
+            rt.buf_push_bytes(roh, band.ptr + (i * zeile) as u64, zeile)
             i = i + 1
         }
         y = y + kam
     }
     rt.buf_free(&band)
     if schief {
-        // Den Schein zurueckgeben, damit kein halber offen bleibt.
         syscall(S_SHOT, SH_DROP, 0, 0, 0, 0, 0)
-        rt.buf_free(&roh)
-        return ablehnen(aus, "the kernel returned an incomplete image")
+        return GRAB_INCOMPLETE
     }
-    let gut: bool = fit.encode_within(aus, breite, hoehe, &roh, RESULT_CAP)
+    return GRAB_OK
+}
+
+fn photo_over_kernel(aus: *mut rt.Buf) -> bool {
+    let w: i64 = syscall(S_SHOT, SH_INFO, SI_WIDTH, 0, 0, 0, 0)
+    let h: i64 = syscall(S_SHOT, SH_INFO, SI_HEIGHT, 0, 0, 0, 0)
+    let rb: i64 = syscall(S_SHOT, SH_INFO, SI_ROWBYTES, 0, 0, 0, 0)
+    var zpc: i64 = syscall(S_SHOT, SH_INFO, SI_CHUNKROWS, 0, 0, 0, 0)
+    if w <= 0 || h <= 0 || rb <= 0 {
+        return ablehnen(aus, "the kernel reports no screen size")
+    }
+    if zpc <= 0 {
+        zpc = 1
+    }
+    var roh: rt.Buf = rt.buf_new()
+    var tries: i64 = 0
+    var stable: bool = false
+    while tries < SHOT_TRIES && !stable {
+        let f0: i64 = syscall(S_SHOT, SH_INFO, SI_FRAMES, 0, 0, 0, 0)
+        let got: i32 = grab_image(&roh, h as usize, rb as usize, zpc)
+        if got == GRAB_NO_PERMIT {
+            rt.buf_free(&roh)
+            return ablehnen(aus, "the kernel issues no permit (SH_ARM rejected)")
+        }
+        if got != GRAB_OK {
+            rt.buf_free(&roh)
+            return ablehnen(aus, "the kernel returned an incomplete image")
+        }
+        let f1: i64 = syscall(S_SHOT, SH_INFO, SI_FRAMES, 0, 0, 0, 0)
+        tries = tries + 1
+        if f0 < 0 || f0 == f1 {
+            stable = true
+        } else {
+            schlafe_ms(SHOT_SETTLE_MS)
+        }
+    }
+    let gut: bool = fit.encode_within(aus, w as usize, h as usize, &roh, RESULT_CAP)
     rt.buf_free(&roh)
     if !gut {
         return ablehnen(aus, "PNG encoding failed")

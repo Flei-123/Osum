@@ -18,7 +18,7 @@ else
 fi
 
 run_case() {
-    local name=$1 w=$2 h=$3 cap=$4 mode=$5 steps=$6 want=$7
+    local name=$1 w=$2 h=$3 cap=$4 mode=$5 steps=$6 want=$7 quants=${8:-0} kind=${9:-lcg}
     "$D/unit" "$D/$name.png" "$w" "$h" "$cap" "$mode"
     local rc=$?
     if [ "$rc" != "$want" ]; then
@@ -26,7 +26,7 @@ run_case() {
     fi
     [ "$want" != 0 ] && { ok "$name: refused as expected (exit $rc)"; return; }
     local res
-    if res=$(python3 -I tools/pngfit/check.py "$D/$name.png" "$w" "$h" "$cap" "$steps" 2>&1); then
+    if res=$(python3 -I tools/pngfit/check.py "$D/$name.png" "$w" "$h" "$cap" "$steps" "$quants" "$kind" 2>&1); then
         ok "$name: $res"
     else
         bad "$name: $(echo "$res" | tail -1)"
@@ -35,15 +35,19 @@ run_case() {
 
 run_case plain 320 200 0 plain 0 0
 run_case fit_keep 320 200 1000000 fit 0 0
-run_case fit_half 320 200 100000 fit 1 0
-run_case fit_odd 321 201 100000 fit 1 0
-run_case fit_quarter 320 200 20000 fit 2 0
+run_case fit_quant2 320 200 100000 fit 0 0 1
+run_case fit_quant3 320 200 75000 fit 0 0 2
+run_case fit_half 320 200 40000 fit 1 0 2
+run_case fit_odd 321 201 20000 fit 2 0 2
+run_case fit_quarter 320 200 20000 fit 2 0 2
+run_case smooth_full 320 200 0 smooth 0 0 0 smooth
+run_case smooth_keep 640 360 100000 smoothfit 0 0 0 smooth
 run_case fit_floor 320 200 2000 fit 0 1
 
 echo "== 2. counter-proof: the old path (no fitting) overshoots the wire limit =="
 plain=$(stat -c%s "$D/plain.png")
 if [ "$plain" -gt 100000 ]; then
-    ok "unfitted PNG is $plain bytes, over the 100000 cap (fitted: $(stat -c%s "$D/fit_half.png"))"
+    ok "unfitted PNG is $plain bytes, over the 100000 cap (fitted: $(stat -c%s "$D/fit_quant2.png"))"
 else
     bad "unfitted PNG only $plain bytes, the case does not exercise the cap"
 fi
