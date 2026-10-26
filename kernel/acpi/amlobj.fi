@@ -1,39 +1,38 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/amlobj.fi -- RUNDE AML, TEIL 2: OBJEKTE UND ADRESSRAEUME.
+// kernel/acpi/amlobj.fi -- AML ROUND, PART 2: OBJECTS AND ADDRESS SPACES.
 //
-// AML kennt fuenf Arten von Werten -- Ganzzahl, Zeichenkette, Puffer,
-// Paket und Verweis -- und die Sprache hat keine Typdeklarationen: was
-// ein Ausdruck liefert, entscheidet sich beim Auswerten. In einer
-// Sprache ohne Summentypen (Firn, Profil `kernel`) ist ein Wert deshalb
-// EIN PLATZ VON 24 OKTETTEN:
+// AML knows five kinds of values -- integer, string, buffer, package and
+// reference -- and the language has no type declarations: what an
+// expression yields is decided while it is evaluated. In a language
+// without sum types (Firn, profile `kernel`) a value is therefore ONE
+// SLOT OF 24 BYTES:
 //
-//   +0   die Art (OT_*)
-//   +8   v1 -- Ganzzahl: der Wert; Puffer/Zeichenkette: die Adresse;
-//        Paket: die Adresse der Elemente; Verweis: worauf
-//   +16  v2 -- Laenge beziehungsweise Elementzahl
+//   +0   the kind (OT_*)
+//   +8   v1 -- integer: the value; buffer/string: the address;
+//        package: the address of the elements; reference: the target
+//   +16  v2 -- length or element count
 //
-// Alle Plaetze liegen in der Arena (`amlns.heap_alloc`). Sie werden
-// NICHT einzeln freigegeben; der ganze Lauf geht am Stueck zurueck.
+// All slots live in the arena (`amlns.heap_alloc`). They are NOT freed
+// one by one; the whole run is given back at once.
 //
-// DER ZWEITE TEIL DIESER DATEI IST DER GEFAEHRLICHE. Eine
-// OperationRegion ist ein Fenster in echten Speicher, echte Tore oder
-// den PCI-Konfigurationsraum, und ein Feld darin ist ein Bitausschnitt.
-// Wer sich hier verrechnet, schreibt in ein Register, das er nicht
-// meint. Deshalb:
+// THE SECOND PART OF THIS FILE IS THE DANGEROUS ONE. An
+// OperationRegion is a window into real memory, real ports or PCI
+// configuration space, and a field inside it is a bit slice. A wrong
+// calculation here writes into a register that was not meant. Therefore:
 //
-//   * SystemMemory wird NUR gelesen und geschrieben, wenn die Adresse in
-//     dem Bereich liegt, den der Kernel identisch abgebildet hat. Die
-//     HPET-Region einer QEMU-DSDT liegt bei 0xFED00000 und faellt damit
-//     heraus -- es gibt einen definierten Fehler und keinen Seitenfehler.
-//   * SystemIO geht oktettweise ueber `serial.in8`/`out8`, bei
-//     DWordAcc ueber dieselben zwei Zeilen Assembler, die `pci.fi` seit
-//     Runde K2 benutzt. WordAcc gibt es nicht -- ein halbes Wort auf
-//     einem Tor ist nicht dasselbe wie zwei Oktette, und was man nicht
-//     messen kann, wird hier nicht behauptet.
-//   * PCI_Config nimmt die Nummer aus dem naechsten `_ADR` oberhalb der
-//     Region und die Busnummer aus dem naechsten `_BBN` (ohne eines:
-//     Bus 0). Genau so findet `\_SB.PRQ0` in QEMUs DSDT das
-//     PIIX3-Register 0x60 in 00:01.0.
+//   * SystemMemory is read and written ONLY when the address lies in the
+//     range the kernel has identity-mapped. The HPET region of a QEMU
+//     DSDT sits at 0xFED00000 and thereby falls out -- the result is a
+//     defined error and no page fault.
+//   * SystemIO goes byte by byte through `serial.in8`/`out8`, with
+//     DWordAcc through the same two lines of assembler that `pci.fi` has
+//     used since round K2. There is no WordAcc -- half a word on a port
+//     is not the same as two bytes, and what cannot be measured is not
+//     claimed here.
+//   * PCI_Config takes the number from the next `_ADR` above the region
+//     and the bus number from the next `_BBN` (without one: bus 0). That
+//     is how `\_SB.PRQ0` in QEMU's DSDT finds the PIIX3 register 0x60 in
+//     00:01.0.
 
 import lib.kstate
 import serial
@@ -60,9 +59,9 @@ const OT_INT: u64 = 1
 const OT_STR: u64 = 2
 const OT_BUF: u64 = 3
 const OT_PKG: u64 = 4
-const OT_REF_SLOT: u64 = 5 // v1 = Adresse eines Objektplatzes
-const OT_REF_NODE: u64 = 6 // v1 = Knotenindex
-const OT_REF_BYTE: u64 = 7 // v1 = Adresse eines Oktetts in einem Puffer
+const OT_REF_SLOT: u64 = 5 // v1 = address of an object slot
+const OT_REF_NODE: u64 = 6 // v1 = node index
+const OT_REF_BYTE: u64 = 7 // v1 = address of a byte in a buffer
 const OT_DEBUG: u64 = 8
 
 const RS_MEM: u64 = 0
@@ -70,7 +69,7 @@ const RS_IO: u64 = 1
 const RS_PCI: u64 = 2
 const RS_EC: u64 = 3
 
-// ------------------------------------------------------- ein Objektplatz
+// ------------------------------------------------------- an object slot
 
 fn otype(o: u64) -> u64 {
     return amlns.rd64(o)
@@ -108,7 +107,7 @@ fn ocopy(dst: u64, src: u64) {
     amlns.wr64(dst + 16, amlns.rd64(src + 16))
 }
 
-// Das i-te Element eines Pakets.
+// The i-th element of a package.
 fn pkg_at(o: u64, i: u64) -> u64 {
     return ov1(o) + i * OBJ_BYTES
 }
@@ -157,9 +156,9 @@ fn obj_pkg(state: u64, n: u64) -> u64 {
     return o
 }
 
-// -------------------------------------------------------- Wahr und Zahl
+// -------------------------------------------------------- truth and number
 
-// Was AML als "wahr" ansieht: alles ausser der Null.
+// What AML regards as "true": everything except zero.
 fn truth(o: u64) -> bool {
     if otype(o) == OT_INT {
         return ov1(o) != 0
@@ -170,10 +169,10 @@ fn truth(o: u64) -> bool {
     return false
 }
 
-// Eine Ganzzahl aus einem Objekt. Ein Puffer wird als Zahl gelesen
-// (kleinstwertiges Oktett zuerst, hoechstens acht) -- so will es die
-// Spezifikation fuer `ToInteger`, und so lesen alle Interpreter einen
-// Puffer im Zahlkontext.
+// An integer from an object. A buffer is read as a number (least
+// significant byte first, at most eight) -- the specification wants that
+// for `ToInteger`, and every interpreter reads a buffer that way in a
+// number context.
 fn to_int(o: u64) -> u64 {
     let t: u64 = otype(o)
     if t == OT_INT {
@@ -192,13 +191,12 @@ fn to_int(o: u64) -> u64 {
     return 0
 }
 
-// -------------------------------------------- eine Konstante ohne Kontext
+// -------------------------------------------- a constant without context
 //
-// `_ADR` und `_BBN` sind auf jeder Maschine konstante Zahlen. Um sie zu
-// lesen, wird der Auswerter nicht gebraucht -- und er DARF hier auch
-// nicht gebraucht werden, sonst haengt der Adressraum am Auswerter und
-// der Auswerter am Adressraum. Gibt 1 zurueck, wenn dort wirklich eine
-// Konstante stand.
+// `_ADR` and `_BBN` are constant numbers on every machine. Reading them
+// does not need the evaluator -- and it MUST NOT use it here, otherwise
+// the address space depends on the evaluator and the evaluator on the
+// address space. Returns 1 if a constant really was there.
 fn const_int(p: u64, out: u64) -> u64 {
     let op: u64 = amlns.rd8(p)
     if op == 0x00 {
@@ -233,10 +231,10 @@ fn const_int(p: u64, out: u64) -> u64 {
     return 0
 }
 
-// ---------------------------------------------------------- Tore, 32 Bit
+// ---------------------------------------------------------- ports, 32 bit
 //
-// Dieselben zwei Zeilen wie in `pci.fi` seit Runde K2. Ein Tor ist die
-// einzige Stelle, an der eine Sprache nicht weiterhilft.
+// The same two lines as in `pci.fi` since round K2. A port is the only
+// place where a language does not help.
 
 fn in32(port: u16) -> u64 {
     return asm("in eax, dx", out("rax"), in("dx") port) & 0xFFFFFFFF
@@ -246,10 +244,10 @@ fn out32(port: u16, value: u64) {
     asm("out dx, eax", in("dx") port, in("eax")(value & 0xFFFFFFFF) as u32)
 }
 
-// ------------------------------------------------------- die Bus-Nummer
+// ------------------------------------------------------- the bus number
 //
-// Die PCI-Nummer einer Region: vom Knoten der Region aufwaerts, bis ein
-// Geraet ein `_ADR` hat. `_ADR` ist Geraet << 16 | Funktion.
+// The PCI number of a region: from the region's node upwards until a
+// device has an `_ADR`. `_ADR` is device << 16 | function.
 fn adr_of(state: u64, node: u64) -> u64 {
     var w_adr: [u8; 5] = "_ADR\0"
     var w_bbn: [u8; 5] = "_BBN\0"
@@ -287,14 +285,14 @@ fn adr_of(state: u64, node: u64) -> u64 {
     if bus == 0xFFFFFFFF {
         bus = 0
     }
-    // bdf, wie `pci.fi` es will: Bus << 8 | Geraet << 3 | Funktion.
+    // bdf as `pci.fi` wants it: bus << 8 | device << 3 | function.
     return ((bus & 0xFF) << 8) | (((dev >> 16) & 0x1F) << 3) | (dev & 0x7)
 }
 
-// ------------------------------------------------ ein Oktett aus/in eine Region
+// ------------------------------------------------ a byte from/to a region
 //
-// Gibt 1 zurueck, wenn es ging. `space` ist die Art, `base` die
-// Basisadresse der Region, `off` der Versatz darin.
+// Returns 1 if it worked. `space` is the kind, `base` the base address of
+// the region, `off` the offset inside it.
 fn region_check(state: u64, space: u64, base: u64, len: u64) -> bool {
     if space == RS_IO {
         return base + len <= 0x10000
@@ -306,8 +304,8 @@ fn region_check(state: u64, space: u64, base: u64, len: u64) -> bool {
         return ecio.is_ready() && base + len <= 0x100
     }
     if space == RS_MEM {
-        // Nur, was der Kernel identisch abgebildet hat. Alles darueber
-        // waere ein Seitenfehler mit Ansage.
+        // Only what the kernel has identity-mapped. Anything above would be a
+        // page fault with an announcement.
         let gib: u64 = mem.mapped_gib(state)
         if gib == 0 {
             return false
@@ -410,15 +408,15 @@ fn reg_write32(state: u64, space: u64, node: u64, base: u64, off: u64,
     amlns.wr8(base + off + 3, (v >> 24) & 0xFF)
 }
 
-// ------------------------------------------------------------ ein Feld
+// ------------------------------------------------------------ a field
 //
-// `fnode` ist ein Knoten der Art NK_FIELD:
-//   a = Knoten der Region, b = Bitversatz, c = Bitbreite | Zugriff << 32.
+// `fnode` is a node of kind NK_FIELD:
+//   a = node of the region, b = bit offset, c = bit width | access << 32.
 //
-// DIESER INTERPRETER KANN FELDER BIS 64 BIT. Das deckt alles, was in
-// QEMUs DSDT vorkommt (8 und 32 Bit) und alles, was fuer `_PRT`,
-// `_STA` und `_CRS` gebraucht wird. Ein breiteres Feld gibt
-// ERR_REGION statt einer halben Zahl.
+// INTEGER ACCESS COVERS FIELDS UP TO 64 BITS. That is everything in
+// QEMU's DSDT (8 and 32 bits) and everything `_PRT`, `_STA` and `_CRS`
+// need. A wider field gives ERR_REGION here instead of half a number;
+// the buffer path (`field_read_wide`, `field_write_wide`) handles it.
 const CTX_FIELD: u64 = 0x80
 const FO_SPACE: u64 = 0
 const FO_BASE: u64 = 1
@@ -603,22 +601,22 @@ fn field_write_wide(state: u64, fnode: u64, src: u64, nbytes: u64) {
     }
 }
 
-// ------------------------------------------- Ressourcenbeschreibungen
+// ------------------------------------------- resource descriptors
 //
-// Was `_CRS` und `_PRS` zurueckgeben, ist ein Puffer voller
-// Beschreibungen: kurze (Bit 7 = 0, Art in Bit 6:3, Laenge in Bit 2:0)
-// und lange (Bit 7 = 1, Art in Bit 6:0, dann zwei Oktette Laenge). Fuer
-// diese Runde zaehlt genau eine Art davon -- die Unterbrechung:
+// What `_CRS` and `_PRS` return is a buffer full of descriptors: short
+// ones (bit 7 = 0, kind in bits 6:3, length in bits 2:0) and long ones
+// (bit 7 = 1, kind in bits 6:0, then two bytes of length). For this round
+// exactly one kind of them counts -- the interrupt:
 //
-//   0x22/0x23  IRQ, kurz: eine 16-Bit-Maske der moeglichen Leitungen
-//   0x89       Extended Interrupt, lang: eine Zahl der Eintraege und
-//              dahinter je vier Oktette GSI
+//   0x22/0x23  IRQ, short: a 16-bit mask of the possible lines
+//   0x89       Extended Interrupt, long: a count of entries and, after
+//              it, four bytes of GSI each
 //
-// QEMUs `_CRS` eines Link-Geraets ist genau ein 0x89 mit einem Eintrag,
-// und die vier Oktette bei Versatz 5 sind die Leitung, die die Firmware
-// in das PIIX3-Register geschrieben hat.
+// QEMU's `_CRS` of a link device is exactly one 0x89 with one entry, and
+// the four bytes at offset 5 are the line the firmware has written into
+// the PIIX3 register.
 
-// Wie viele Unterbrechungsnummern der Puffer nennt.
+// How many interrupt numbers the buffer names.
 fn res_irq_count(state: u64, at: u64, len: u64) -> u64 {
     var i: u64 = 0
     var n: u64 = 0
@@ -630,7 +628,7 @@ fn res_irq_count(state: u64, at: u64, len: u64) -> u64 {
         if (tag & 0x80) == 0 {
             let l: u64 = tag & 7
             let kind: u64 = (tag >> 3) & 0xF
-            if kind == 4 { // IRQ, kurz
+            if kind == 4 { // IRQ, short
                 let mask: u64 = amlns.rd16(at + i + 1)
                 var b: u64 = 0
                 while b < 16 {
@@ -652,7 +650,7 @@ fn res_irq_count(state: u64, at: u64, len: u64) -> u64 {
     return n
 }
 
-// Die k-te Unterbrechungsnummer, oder 0xFFFFFFFF.
+// The k-th interrupt number, or 0xFFFFFFFF.
 fn res_irq_at(state: u64, at: u64, len: u64, k: u64) -> u64 {
     var i: u64 = 0
     var seen: u64 = 0

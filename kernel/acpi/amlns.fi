@@ -1,41 +1,39 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/amlns.fi -- RUNDE AML, TEIL 1: DER NAMENSRAUM.
+// kernel/acpi/amlns.fi -- AML ROUND, PART 1: THE NAMESPACE.
 //
-// AML ist die Sprache, in der die Firmware ihre Geraete beschreibt. Sie
-// steht als Oktettstrom in der DSDT und in den SSDTs, und sie hat zwei
-// Haelften, die man auseinanderhalten muss:
+// AML is the language in which the firmware describes its devices. It
+// sits as a byte stream in the DSDT and in the SSDTs, and it has two
+// halves that must be kept apart:
 //
-//   * DIE ERKLAERENDE HAELFTE -- Scope, Device, Method, Name,
-//     OperationRegion, Field. Sie baut einen BAUM aus Namen auf, und
-//     jeder Name ist genau vier Zeichen lang. Das ist diese Datei.
-//   * DIE AUSFUEHRENDE HAELFTE -- Store, If, While, Add, Index. Sie
-//     laeuft erst, wenn jemand eine Methode aufruft. Das ist
-//     `kernel/aml.fi`.
+//   * THE DECLARATIVE HALF -- Scope, Device, Method, Name,
+//     OperationRegion, Field. It builds a TREE of names, and every name
+//     is exactly four characters long. That is this file.
+//   * THE EXECUTING HALF -- Store, If, While, Add, Index. It runs only
+//     when somebody calls a method. That is `kernel/acpi/aml.fi`.
 //
-// WARUM DER BAUM NICHT IN `kdata` LIEGT. Eine DSDT von QEMU ist 6476
-// Oktette lang und hat 360 Namen; die eines gewoehnlichen Laptops hat
-// das Zehnfache. Ein fester Bereich in `kdata` waere entweder zu klein
-// oder verschenkt eine Viertelmegabyte an jede Maschine, die ihn nicht
-// braucht. Also kommt der Baum aus dem Rahmenverwalter
-// (`mem.frame_run`) und geht nach Gebrauch dorthin zurueck -- und genau
-// das misst die Abnahme (`tools/aml/run.sh`, Zusage "kein Leck").
+// WHY THE TREE IS NOT IN `kdata`. A DSDT from QEMU is 6476 bytes long and
+// has 360 names; that of an ordinary laptop has ten times as many. A fixed
+// area in `kdata` would either be too small or waste a quarter megabyte on
+// every machine that does not need it. So the tree comes from the frame
+// allocator (`mem.frame_run`) and goes back there after use -- and that
+// is exactly what the acceptance run measures (`tools/aml/run.sh`,
+// assertion "no leak").
 //
-// EIN KNOTEN SIND 32 OKTETTE:
+// A NODE IS 32 BYTES:
 //
-//   +0   die vier Namensoktette als Wort ('P','R','Q','0')
-//   +4   der Elternknoten (Index, 16 Bit)
-//   +6   die Art (NK_*)
-//   +7   Zusatzbits -- bei einer Methode die Zahl der Argumente
-//   +8   a: Name -> Stelle im AML; Methode -> Anfang des Rumpfes;
-//           Region -> Basisadresse; Feld -> Knoten der Region
-//   +16  b: Methode -> Ende des Rumpfes; Region -> Laenge;
-//           Feld -> Bitversatz; Name -> zwischengespeichertes Objekt
-//   +24  c: Region -> Adressraum; Feld -> Bitbreite | Zugriffsart << 32
+//   +0   the four name bytes as a word ('P','R','Q','0')
+//   +4   the parent node (index, 16 bit)
+//   +6   the kind (NK_*)
+//   +7   extra bits -- for a method the number of arguments
+//   +8   a: name -> position in the AML; method -> start of the body;
+//           region -> base address; field -> node of the region
+//   +16  b: method -> end of the body; region -> length;
+//           field -> bit offset; name -> cached object
+//   +24  c: region -> address space; field -> bit width | access kind << 32
 //
-// Der Wurzelknoten ist Index 0 und heisst nichts ("\"). Jeder andere
-// Knoten hat einen Elternknoten, und weil ein Name vier Oktette hat,
-// ist der Vergleich zweier Namen EIN Wortvergleich und keine
-// Zeichenschleife.
+// The root node is index 0 and has no name ("\"). Every other node has a
+// parent, and because a name has four bytes, comparing two names is ONE
+// word comparison and not a character loop.
 
 import lib.kstate
 import serial
@@ -56,12 +54,13 @@ export {
     pkglen, seg_of, name_print
 }
 
-// "kein Knoten" -- 0 ist die Wurzel und damit ein gueltiger Index.
-// WIE GROSS DER NAMENSRAUM WERDEN DARF. 2048 Knoten sind 64 KiB; QEMUs
-// DSDT braucht 360. Die Arena ist 64 Rahmen = 256 KiB, also bleiben
-// 192 KiB Halde fuer Puffer, Pakete und Methodenrahmen. Beides steht
-// hier und nirgends sonst, und `tools/aml/run.sh` liest die Zahlen aus
-// dieser Datei, statt sie noch einmal aufzuschreiben.
+// "no node" -- 0 is the root and therefore a valid index.
+// HOW BIG THE NAMESPACE MAY GROW. 8192 nodes are 256 KiB; QEMU's DSDT
+// needs 360, the tables of the HP laptop about 5200. The arena is 256
+// frames = 1 MiB, so 768 KiB remain as heap for buffers, packages and
+// method frames. Both are stated here and nowhere else, and
+// `tools/aml/run.sh` reads the numbers from this file instead of writing
+// them down a second time.
 const NMAX: u64 = 8192
 const ARENA_FRAMES: u64 = 256
 
@@ -84,42 +83,42 @@ const NK_BUFFIELD: u64 = 12
 const NK_ALIAS: u64 = 13
 const ALIAS_HOPS: u64 = 8
 
-// Die Fehler. Jeder ist EINE Zahl, und jede Zahl hat genau einen Grund
-// -- ein Interpreter, der "hat nicht geklappt" sagt, ist auf echter
-// Hardware wertlos.
+// The errors. Each is ONE number, and each number has exactly one reason
+// -- an interpreter that says "did not work" is worthless on real
+// hardware.
 const ERR_OK: u64 = 0
-const ERR_NOMEM: u64 = 1 // kein Rahmenlauf zu bekommen
-const ERR_NODES: u64 = 2 // die Knotentafel ist voll
-const ERR_HEAP: u64 = 3 // die Halde des Interpreters ist voll
-const ERR_TRUNC: u64 = 4 // das AML hoert mitten in einem Objekt auf
-const ERR_OPCODE: u64 = 5 // ein Opcode, den dieser Interpreter nicht kennt
-const ERR_DEPTH: u64 = 6 // zu tief verschachtelt
-const ERR_BUDGET: u64 = 7 // die Schrittgrenze -- eine Schleife endet nicht
-const ERR_TYPE: u64 = 8 // ein Objekt der falschen Art
-const ERR_NOTFOUND: u64 = 9 // ein Name, den es nicht gibt
-const ERR_REGION: u64 = 10 // eine Adressraumart, die es hier nicht gibt
-const ERR_DIV0: u64 = 11 // Teilung durch null
-const ERR_NOPRT: u64 = 12 // kein _PRT gefunden
-const ERR_NODSDT: u64 = 13 // keine DSDT
-const ERR_ARG: u64 = 14 // Arg/Local ausserhalb des Rahmens
+const ERR_NOMEM: u64 = 1 // no frame run to be had
+const ERR_NODES: u64 = 2 // the node table is full
+const ERR_HEAP: u64 = 3 // the interpreter heap is full
+const ERR_TRUNC: u64 = 4 // the AML ends in the middle of an object
+const ERR_OPCODE: u64 = 5 // an opcode this interpreter does not know
+const ERR_DEPTH: u64 = 6 // nested too deeply
+const ERR_BUDGET: u64 = 7 // the step limit -- a loop does not end
+const ERR_TYPE: u64 = 8 // an object of the wrong kind
+const ERR_NOTFOUND: u64 = 9 // a name that does not exist
+const ERR_REGION: u64 = 10 // an address space kind that does not exist here
+const ERR_DIV0: u64 = 11 // division by zero
+const ERR_NOPRT: u64 = 12 // no _PRT found
+const ERR_NODSDT: u64 = 13 // no DSDT
+const ERR_ARG: u64 = 14 // Arg/Local outside the frame
 const ERR_FATAL: u64 = 15
 
-// ---------------------------------------------------- die Skalarplaetze
+// ---------------------------------------------------- the scalar slots
 //
-// Sie liegen in `kstate.AML_OFF`. Der Namensraum selbst liegt in der
-// Arena, deren Adresse hier steht.
+// They live in `kstate.AML_OFF`. The namespace itself lives in the
+// arena, whose address is stored here.
 
-const A_ARENA: u64 = 0 // Anfang des Rahmenlaufs, 0 = keiner
-const A_FRAMES: u64 = 8 // wie viele Rahmen er lang ist
-const A_NODES: u64 = 16 // wie viele Knoten belegt sind
-const A_HEAP: u64 = 24 // naechstes freies Oktett der Halde (absolut)
-const A_HEAPEND: u64 = 32 // hinter der Halde
-const A_ERR: u64 = 40 // der Fehler, siehe ERR_*
+const A_ARENA: u64 = 0 // start of the frame run, 0 = none
+const A_FRAMES: u64 = 8 // how many frames long it is
+const A_NODES: u64 = 16 // how many nodes are in use
+const A_HEAP: u64 = 24 // next free byte of the heap (absolute)
+const A_HEAPEND: u64 = 32 // end of the heap
+const A_ERR: u64 = 40 // the error, see ERR_*
 const SAVED_WORDS: u64 = 7
 const A_ERRCTX: u64 = 2816
 const A_ERRNODE: u64 = 2824
 const CTX_REGION: u64 = 0x100000
-const A_HEAPHI: u64 = 48 // Hoechststand der Halde
+const A_HEAPHI: u64 = 48 // high-water mark of the heap
 
 fn g(state: u64, off: u64) -> u64 {
     return kstate.get(state, kstate.AML_OFF + off)
@@ -133,8 +132,8 @@ fn err(state: u64) -> u64 {
     return g(state, A_ERR)
 }
 
-// DER ERSTE FEHLER BLEIBT STEHEN. Ein Fehler, der von einem spaeteren
-// ueberschrieben wird, sagt nichts mehr darueber, wo es angefangen hat.
+// THE FIRST ERROR STAYS. An error that is overwritten by a later one no
+// longer says where it started.
 fn err_set(state: u64, e: u64) {
     if g(state, A_ERR) == ERR_OK {
         s(state, A_ERR, e)
@@ -181,7 +180,7 @@ fn err_ctx_clear(state: u64) {
     s(state, A_ERRNODE, 0)
 }
 
-// --------------------------------------------------- Oktette und Woerter
+// --------------------------------------------------- bytes and words
 
 fn rd8(p: u64) -> u64 {
     return kstate.get8(p)
@@ -207,10 +206,10 @@ fn wr64(p: u64, v: u64) {
     __mmio_write64(p as *mut u64, v)
 }
 
-// Eine PkgLength. Die oberen zwei Bits des ersten Oktetts sagen, wie
-// viele Oktette noch folgen; bei null ist der Rest des ersten Oktetts
-// schon die ganze Laenge. Die Laenge ZAEHLT SICH SELBST MIT.
-// Gibt die Laenge zurueck und schreibt die Stelle dahinter nach `out`.
+// A PkgLength. The upper two bits of the first byte say how many bytes
+// follow; at zero the rest of the first byte is already the whole length.
+// The length COUNTS ITSELF.
+// Returns the length and writes the position behind it to `out`.
 fn pkglen(p: u64, out: u64) -> u64 {
     let lead: u64 = rd8(p)
     let extra: u64 = (lead >> 6) & 3
@@ -228,12 +227,12 @@ fn pkglen(p: u64, out: u64) -> u64 {
     return v
 }
 
-// Vier Namensoktette als ein Wort.
+// Four name bytes as one word.
 fn seg_of(p: u64) -> u64 {
     return rd8(p) | (rd8(p + 1) << 8) | (rd8(p + 2) << 16) | (rd8(p + 3) << 24)
 }
 
-// ------------------------------------------------------------ die Arena
+// ------------------------------------------------------------ the arena
 
 fn arena(state: u64) -> u64 {
     return g(state, A_ARENA)
@@ -302,8 +301,8 @@ fn set_c(state: u64, i: u64, v: u64) {
     wr64(node_at(state, i) + 24, v)
 }
 
-// Die Arena wird von `aml.fi` besorgt und hier eingetragen. `nmax` ist
-// die Zahl der Knotenplaetze; dahinter faengt die Halde an.
+// The arena is obtained by `aml.fi` and entered here. `nmax` is the
+// number of node slots; the heap starts behind them.
 fn root_reset(state: u64, base: u64, nmax: u64, end: u64) {
     s(state, A_ARENA, base)
     s(state, A_NODES, 1)
@@ -311,7 +310,7 @@ fn root_reset(state: u64, base: u64, nmax: u64, end: u64) {
     s(state, A_HEAPEND, end)
     s(state, A_HEAPHI, base + nmax * NODE_BYTES)
     s(state, A_ERR, ERR_OK)
-    // Der Wurzelknoten: kein Name, kein Elternknoten, Art Scope.
+    // The root node: no name, no parent, kind Scope.
     var i: u64 = 0
     while i < NODE_BYTES {
         wr8(base + i, 0)
@@ -320,13 +319,12 @@ fn root_reset(state: u64, base: u64, nmax: u64, end: u64) {
     wr8(base + 6, NK_SCOPE)
 }
 
-// --------------------------------------------------------------- Halde
+// --------------------------------------------------------------- heap
 //
-// EIN SCHIEBEZEIGER, KEIN FREIGEBEN. Der ganze Lauf wird am Stueck
-// zurueckgegeben; einzelne Objekte einzeln freizugeben waere eine
-// Verwaltung, die dieser Interpreter nicht braucht und deren
-// Lebensdauerfragen genau die Fehlerklasse sind, aus der 2023 die
-// meisten Kernel-Exploits kamen (siehe docs/HANDLE-STATUS.md).
+// A BUMP POINTER, NO FREEING. The whole run is given back at once; freeing
+// single objects one by one would be a bookkeeping this interpreter does
+// not need, and its lifetime questions are exactly the class of errors
+// that most kernel exploits of 2023 came from (see docs/HANDLE-STATUS.md).
 fn heap_alloc(state: u64, n: u64) -> u64 {
     let want: u64 = (n + 7) / 8 * 8
     let p: u64 = g(state, A_HEAP)
@@ -358,17 +356,17 @@ fn heap_high(state: u64) -> u64 {
     return g(state, A_HEAPHI) -% g(state, A_ARENA)
 }
 
-// Der Schiebezeiger zurueck auf einen frueheren Stand. Damit gibt ein
-// Methodenaufruf seinen Rahmen wieder her -- ein Stapel, kein Haufen.
+// The bump pointer back to an earlier state. With it a method call gives
+// its frame back -- a stack, not a pile.
 fn heap_reset(state: u64, p: u64) {
     if p >= g(state, A_ARENA) && p <= g(state, A_HEAP) {
         s(state, A_HEAP, p)
     }
 }
 
-// -------------------------------------------------- Kinder und Anlegen
+// -------------------------------------------------- children and creation
 
-// Das Kind mit diesem Namen, oder NONE.
+// The child with this name, or NONE.
 fn child(state: u64, parent: u64, name: u64) -> u64 {
     let n: u64 = nodes(state)
     var i: u64 = 1
@@ -383,8 +381,8 @@ fn child(state: u64, parent: u64, name: u64) -> u64 {
     return NONE
 }
 
-// Einen Knoten anlegen. Gibt den Index zurueck, oder NONE, wenn die
-// Tafel voll ist -- und dann steht ERR_NODES.
+// Create a node. Returns the index, or NONE if the table is full -- and
+// then ERR_NODES is set.
 fn add(state: u64, parent: u64, name: u64, kind: u64, nmax: u64) -> u64 {
     let n: u64 = nodes(state)
     if n >= nmax {
@@ -408,17 +406,16 @@ fn add(state: u64, parent: u64, name: u64, kind: u64, nmax: u64) -> u64 {
     return n
 }
 
-// ------------------------------------------------------- ein NameString
+// ------------------------------------------------------- a NameString
 //
-// DIE SUCHREGEL DER SPEZIFIKATION (Abschnitt 5.3). Ein einzelnes
-// Namenssegment ohne Praefix wird vom aktuellen Bereich AUFWAERTS bis zur
-// Wurzel gesucht -- deshalb findet `Return(IQCR(PRQ0))` in
-// `\_SB.LNKA._CRS` die Methode `\_SB.IQCR`. Ein Name mit '\' davor ist
-// absolut, ein Name mit '^' geht so viele Ebenen hoch, ein Name mit
-// mehreren Segmenten ist relativ zum aktuellen Bereich.
+// THE SEARCH RULE OF THE SPECIFICATION (section 5.3). A single name
+// segment without a prefix is searched from the current scope UPWARDS to
+// the root -- that is why `Return(IQCR(PRQ0))` in `\_SB.LNKA._CRS` finds
+// the method `\_SB.IQCR`. A name with '\' in front is absolute, a name
+// with '^' goes up that many levels, a name with several segments is
+// relative to the current scope.
 //
-// `out` bekommt die Stelle hinter dem Namen. Rueckgabe: der Knoten oder
-// NONE.
+// `out` receives the position behind the name. Returns: the node or NONE.
 fn walk(state: u64, scope: u64, p: u64, out: u64) -> u64 {
     var node: u64 = walk_raw(state, scope, p, out)
     var hops: u64 = 0
@@ -462,7 +459,7 @@ fn walk_raw(state: u64, scope: u64, p: u64, out: u64) -> u64 {
     if cnt == 0 {
         return base
     }
-    // Ein einzelnes Segment ohne Praefix: aufwaerts suchen.
+    // A single segment without a prefix: search upwards.
     if rooted == 0 && cnt == 1 {
         let want: u64 = seg_of(q)
         var b: u64 = base
@@ -477,16 +474,15 @@ fn walk_raw(state: u64, scope: u64, p: u64, out: u64) -> u64 {
             b = node_parent(state, b)
         }
     }
-    // Sonst: den Pfad von `base` aus hinuntergehen.
+    // Otherwise: walk down the path from `base`.
     var cur: u64 = base
     var i: u64 = 0
     var ok: u64 = 1
     while i < cnt {
         var hit: u64 = child(state, cur, seg_of(q + i * 4))
-        // Der ERSTE Schritt eines relativen Pfades darf aufwaerts
-        // gesucht werden -- das tun die anderen Interpreter auch, und
-        // ohne das findet `PCI0.S08` nichts, wenn der Bereich tiefer
-        // steht als `\_SB`.
+        // The FIRST step of a relative path may be searched upwards -- the other
+        // interpreters do that too, and without it `PCI0.S08` finds nothing when
+        // the scope sits deeper than `\_SB`.
         if hit == NONE && i == 0 && rooted == 0 {
             var b: u64 = cur
             while hit == NONE {
@@ -510,8 +506,8 @@ fn walk_raw(state: u64, scope: u64, p: u64, out: u64) -> u64 {
     return cur
 }
 
-// Wie `walk`, legt aber an, was fehlt. Der letzte Knoten bekommt `kind`,
-// die Zwischenknoten werden Bereiche.
+// Like `walk`, but creates what is missing. The last node gets `kind`,
+// the intermediate nodes become scopes.
 fn walk_create(state: u64, scope: u64, p: u64, out: u64, kind: u64,
     nmax: u64) -> u64 {
     var q: u64 = p
@@ -545,9 +541,9 @@ fn walk_create(state: u64, scope: u64, p: u64, out: u64, kind: u64,
     while i < cnt {
         let want: u64 = seg_of(q + i * 4)
         var hit: u64 = child(state, cur, want)
-        // Das ERSTE Segment eines relativen Pfades darf aufwaerts
-        // gefunden werden -- `Scope(\_SB.PCI0)` steht in QEMUs DSDT
-        // dreimal und meint jedes Mal denselben Knoten.
+        // The FIRST segment of a relative path may be found upwards --
+        // `Scope(\_SB.PCI0)` appears three times in QEMU's DSDT and means the
+        // same node every time.
         if hit == NONE {
             var k: u64 = kind
             if i + 1 < cnt {
@@ -564,12 +560,12 @@ fn walk_create(state: u64, scope: u64, p: u64, out: u64, kind: u64,
     return cur
 }
 
-// ------------------------------------------------------- Namen ausgeben
+// ------------------------------------------------------- printing names
 
 fn seg_print(v: u64) {
-    // Auffuellende Unterstriche am ENDE weglassen -- "PCI0" bleibt
-    // "PCI0", "_SB_" wird "_SB". Ein Unterstrich MITTEN im Namen ist
-    // ein Zeichen wie jedes andere und bleibt stehen.
+    // Leave out padding underscores at the END -- "PCI0" stays "PCI0",
+    // "_SB_" becomes "_SB". An underscore in the MIDDLE of a name is a
+    // character like any other and stays.
     var n: u64 = 4
     while n > 1 {
         if ((v >> ((n -% 1) * 8)) & 0xFF) != 95 {
@@ -584,8 +580,8 @@ fn seg_print(v: u64) {
     }
 }
 
-// Den vollen Pfad eines Knotens auf die Leitung. Rekursiv ueber die
-// Eltern -- die Tiefe eines ACPI-Namensraums ist einstellig.
+// The full path of a node onto the line. Recursive over the parents --
+// the depth of an ACPI namespace is a single digit.
 fn path_out(state: u64, i: u64) {
     if i == 0 {
         serial.put(92 as u8) // '\'

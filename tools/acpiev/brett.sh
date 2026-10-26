@@ -74,33 +74,32 @@
 #      Kerns, sondern eine Wache -- siehe den Kommentar in
 #      `gpe_sts_port`.
 #
-#   5. JETZT DIE HARDWARE BEDIENEN, und nach jedem Schritt die
-#      Berichtszeile ansehen (sie kommt mit `evdump` von selbst alle
-#      200 Durchlaeufe):
+#   5. NOW OPERATE THE HARDWARE, and after every step look at the
+#      report line (with `evdump` it comes by itself every 200 passes):
 #
-#      a) DECKEL ZUKLAPPEN.   Erwartet: eine Zeile
-#                             `acpiev: ev gpe b=0x..`, danach
-#                             `acpiev: deckel zu -- gesperrt`, und der
-#                             Sperrbildschirm auf dem Schirm.
-#                             `lid=` muss von 1 auf 0 springen.
-#      b) DECKEL AUFKLAPPEN.  `lid=` zurueck auf 1,
-#                             `acpiev: deckel auf`. NICHT entsperrt --
-#                             das ist Absicht.
-#      c) NETZTEIL ZIEHEN.    `ac=` von 1 auf 0, und `ev=` steigt.
-#      d) NETZTEIL STECKEN.   `ac=` zurueck auf 1.
-#      e) EINSCHALTTASTE KURZ DRUECKEN (nicht halten!).
-#                             `acpiev: ev taste`, `irqs=` steigt,
-#                             `sts=` hat Bit 8 (0x0100).
-#                             Das Energiemenue muss aufgehen.
-#      f) EINE VIERTELSTUNDE LAUFEN LASSEN, nichts tun.
-#                             `irqs=` darf NICHT ins Uferlose steigen.
-#                             DAS IST DIE STURM-PROBE: steigt sie um
-#                             Tausende je Sekunde, wird ein Statusbit
-#                             nicht geloescht, und genau davor warnt
-#                             `kernel/hw.fi` seit Runde BLECHVIER.
-#                             Dann: `noacpiev` auf die Kernelzeile,
-#                             und die `gpe b=`-Zeilen des Laufs
-#                             hierherschicken.
+#      a) CLOSE THE LID.      Expected: a line
+#                             `acpiev: ev gpe b=0x..`, then
+#                             `acpiev: lid closed -- locked`, and the
+#                             lock screen on the display.
+#                             `lid=` must jump from 1 to 0.
+#      b) OPEN THE LID.       `lid=` back to 1. NOT unlocked --
+#                             that is intended.
+#      c) UNPLUG THE ADAPTER. `ac=` from 1 to 0, and `ev=` rises.
+#      d) PLUG THE ADAPTER IN. `ac=` back to 1.
+#      e) PRESS THE POWER BUTTON SHORTLY (do not hold!).
+#                             `acpiev: ev taste`, `irqs=` rises,
+#                             `sts=` has bit 8 (0x0100).
+#                             The energy menu must open.
+#      f) LET IT RUN FOR A QUARTER OF AN HOUR, do nothing.
+#                             `irqs=` must NOT rise without bound.
+#                             THIS IS THE STORM PROBE: if it rises by
+#                             thousands per second, a status bit is
+#                             not being cleared, and `kernel/hw.fi`
+#                             has warned of exactly that since round
+#                             BLECHVIER.
+#                             Then: put `noacpiev` on the kernel line
+#                             and send the `gpe b=` lines of the run
+#                             here.
 #
 #   6. AKKU: `pct=` muss sich ueber die Zeit aendern und zur Anzeige
 #      des BIOS passen. Weicht es ab, ist `_BIF` schuld (die letzte

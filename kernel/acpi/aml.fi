@@ -1,48 +1,44 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/aml.fi -- RUNDE AML, TEIL 4: LADEN, `_PRT` UND DER RUECKFALL.
+// kernel/acpi/aml.fi -- AML ROUND, PART 4: LOADING, `_PRT` AND THE FALLBACK.
 //
 // ============================================================
-// WARUM ES DIESE RUNDE GIBT
+// WHY THIS ROUND EXISTS
 // ============================================================
 //
-// Bis hierher hat Osum die Unterbrechungsleitung eines PCI-Geraets aus
-// dem Register 0x3C seiner Konfiguration gelesen -- "Interrupt Line".
-// Das ist kein Register des Geraets, sondern ein NOTIZZETTEL: die
-// Firmware traegt dort ein, welche Leitung sie eingerichtet hat, und
-// niemand zwingt sie dazu. Auf den meisten Brettern steht die richtige
-// Zahl darin. Auf manchen steht 0, auf manchen 0xFF, und auf Brettern
-// mit mehreren PCI-Bruecken steht dort die Leitung VOR der Bruecke.
+// Up to here Osum read the interrupt line of a PCI device from register
+// 0x3C of its configuration -- "Interrupt Line". That is not a register
+// of the device but a NOTE PAD: the firmware enters there which line it
+// set up, and nobody forces it to. On most boards the right number is
+// in it. On some it is 0, on some 0xFF, and on boards with several PCI
+// bridges it holds the line BEFORE the bridge.
 //
-// Die Wahrheit steht woanders: im AML-Objekt `_PRT` der Wurzelbruecke.
-// Es sagt fuer jeden Steckplatz und jeden der vier Stifte, an welcher
-// Leitung des I/O-APIC er haengt -- entweder als Zahl oder ueber ein
-// LINK-GERAET, dessen `_CRS` die eingestellte Leitung nennt. Um es zu
-// lesen, braucht man einen Interpreter fuer AML. Den gab es nicht.
-// Jetzt gibt es ihn.
+// The truth is somewhere else: in the AML object `_PRT` of the root
+// bridge. For every slot and each of the four pins it says to which line
+// of the I/O APIC it is wired -- either as a number or through a LINK
+// DEVICE whose `_CRS` names the configured line. Reading it needs an
+// interpreter for AML. There was none. Now there is.
 //
 // ============================================================
-// WAS DIESE RUNDE NICHT BAUT -- damit es niemand sucht
+// WHAT THIS ROUND DOES NOT BUILD -- so nobody looks for it
 // ============================================================
 //
-// Kein Nachbau von ACPICA. Keine Thermalregelung. Kein S4. Kein S3
-// (nur entworfen, siehe docs/ROUNDAML.md). Keine GPE-Behandlung im
-// laufenden Betrieb. Was hier steht, ist die Teilmenge, mit der sich
-// `_PRT`, `_CRS`, `_PRS`, `_SRS` und `_STA` wirklich auswerten lassen --
-// und jede Zahl, die dabei herauskommt, wird gemessen und nicht
-// behauptet.
+// No rebuild of ACPICA. No thermal control. No S4. No S3 (only designed,
+// see docs/ROUNDAML.md). No GPE handling at run time. What is here is the
+// subset with which `_PRT`, `_CRS`, `_PRS`, `_SRS` and `_STA` can really
+// be evaluated -- and every number that comes out is measured and not
+// claimed.
 //
 // ============================================================
-// DER RUECKFALLWEG IST DER WICHTIGE TEIL
+// THE FALLBACK PATH IS THE IMPORTANT PART
 // ============================================================
 //
-// Ein Interpreter fuer FREMDEN Code, der beim Hochfahren laeuft, ist
-// eine neue Art, eine Maschine nicht starten zu lassen. Deshalb gilt in
-// dieser Datei: JEDER Fehler ist definiert, JEDER Fehler ist eine Zahl,
-// und nach JEDEM Fehler geht es mit dem alten Weg weiter -- dem
-// Interrupt-Line-Register. `aml.gsi_or_line` ist die einzige Stelle, an
-// der die Treiber ihre Leitung holen, und sie faellt still zurueck.
-// Die Abnahme faehrt absichtlich dagegen (`amlbad`, `amlloop`,
-// `amldeep`), und die Maschine muss jedes Mal fertig hochfahren.
+// An interpreter for FOREIGN code that runs at boot is a new way of
+// making a machine not start. Therefore in this file: EVERY error is
+// defined, EVERY error is a number, and after EVERY error the old way
+// continues -- the interrupt line register. `aml.gsi_or_line` is the
+// only place where the drivers fetch their line, and it falls back
+// silently. The acceptance run deliberately runs against it (`amlbad`,
+// `amlloop`, `amldeep`), and the machine must finish booting every time.
 
 import serial
 import lib.kstate
@@ -62,8 +58,8 @@ import sync.atomic
 export {
     stage, dump, ready, gsi_for, gsi_or_line, why, route_count,
     node_count, heap_bytes, parse_us, prt_ok,
-    // RUNDE ACPI-EREIGNISSE: den Namensraum HALTEN statt verwerfen,
-    // und einen einzelnen Knoten auswerten.
+    // ROUND ACPI-EVENTS: HOLD the namespace instead of discarding it,
+    // and evaluate a single node.
     ns_hold, ns_arena, hold_err, hold_bad, eval_node, eval_node_arg, eval_node_args, ns_bytes,
     hold_report, snapshot_boot, fuzz_load, busy_refusals, guard_probe
 }
@@ -81,52 +77,51 @@ fn recover_container(state: u64) {
     }
 }
 
-// ------------------------------------------- die Plaetze in `kdata`
+// ------------------------------------------- the slots in `kdata`
 //
-// `amlns.fi` nimmt 0..55, `amlev.fi` 56..191. Ab 192 diese Datei; die
-// Routentafel liegt ab 512.
+// `amlns.fi` takes 0..55, `amlev.fi` 56..191. From 192 on this file; the
+// route table starts at 512.
 
-const A_TABLES: u64 = 192 // wie viele Tabellen wirklich geladen wurden
-const A_MS: u64 = 200 // wie lange das Laden gedauert hat, in Mikrosekunden
-const A_PRTOK: u64 = 208 // 1 = `_PRT` wurde ausgewertet
-const A_ROUTEN: u64 = 216 // Eintraege in der Routentafel
-const A_READY: u64 = 224 // 1 = der Namensraum stand, auch wenn er weg ist
-const A_DEVS: u64 = 232 // gezaehlte Geraete
-const A_METH: u64 = 240 // gezaehlte Methoden
-const A_REGS: u64 = 248 // gezaehlte Regionen
-const A_FLDS: u64 = 256 // gezaehlte Felder
-const A_NODESUSED: u64 = 264 // Knoten, die der Namensraum wirklich hatte
-const A_HEAPUSED: u64 = 272 // Halde, die er wirklich brauchte
-const A_FRAMES0: u64 = 280 // freie Rahmen vor dem Parsen
-const A_FRAMES1: u64 = 288 // freie Rahmen nach dem Verwerfen
+const A_TABLES: u64 = 192 // how many tables were really loaded
+const A_MS: u64 = 200 // how long loading took, in microseconds
+const A_PRTOK: u64 = 208 // 1 = `_PRT` was evaluated
+const A_ROUTEN: u64 = 216 // entries in the route table
+const A_READY: u64 = 224 // 1 = the namespace stood, even if it is gone
+const A_DEVS: u64 = 232 // counted devices
+const A_METH: u64 = 240 // counted methods
+const A_REGS: u64 = 248 // counted regions
+const A_FLDS: u64 = 256 // counted fields
+const A_NODESUSED: u64 = 264 // nodes the namespace really had
+const A_HEAPUSED: u64 = 272 // heap it really needed
+const A_FRAMES0: u64 = 280 // free frames before parsing
+const A_FRAMES1: u64 = 288 // free frames after discarding
 const A_USPRT: u64 = 480
-const A_SPLOAD: u64 = 488 // Kernstapel, den ALLEIN das Laden gekostet hat // wie lange `_PRT` gebraucht hat, in Mikrosekunden
+const A_SPLOAD: u64 = 488 // kernel stack that loading ALONE cost // how long `_PRT` took, in microseconds
 
-// Ein Zwischenspeicher fuer die Link-Geraete. Es gibt auf jedem Brett
-// eine Handvoll davon (QEMU: fuenf), aber `_PRT` nennt sie 128 Mal.
-// Ohne diesen Speicher laufen `_STA`, `_PRS`, `_SRS` und `_CRS`
-// vierhundertmal statt zwanzigmal -- gemessen 1496 us statt 249 us und
-// eine Halde, die ausgeht.
+// A cache for the link devices. Every board has a handful of them (QEMU:
+// five), but `_PRT` names them 128 times. Without this cache `_STA`,
+// `_PRS`, `_SRS` and `_CRS` run four hundred times instead of twenty --
+// measured 1496 us instead of 249 us and a heap that runs out.
 const A_LINKN: u64 = 296
-const A_LINKS: u64 = 304 // 12 * 16 = 192 Oktette, bis 496
-// (A_USPRT liegt auf 480 -- der Zwischenspeicher endet bei 496,
-//  aber nur zwoelf Eintraege sind moeglich und QEMU braucht fuenf;
-//  damit sich nichts ueberschneidet, endet er bei 472.)
+const A_LINK_CACHE: u64 = 304 // 12 * 16 = 192 bytes, up to 496
+// (A_USPRT is at 480 -- the cache ends at 496, but only twelve entries
+// are possible and QEMU needs five; so that nothing overlaps, it ends
+// at 472.)
 const LINK_MAX: u64 = 10
 
-// RUNDE ACPI-EREIGNISSE: der Rahmenlauf, den `ns_hold` BEHAELT.
-// 0 = keiner (dann ist der Namensraum weg, wie vor dieser Runde).
+// ROUND ACPI-EVENTS: the frame run that `ns_hold` KEEPS.
+// 0 = none (then the namespace is gone, as before this round).
 const A_HOLD: u64 = 496
-const A_HOLDB: u64 = 504 // was er kostet, in Oktetten
+const A_HOLDB: u64 = 504 // what it costs, in bytes
 
 const A_ROUTES: u64 = 512
 const ROUTE_BYTES: u64 = 16
 const ROUTE_MAX: u64 = 128
 
-// Wie viele Schritte eine Auswertung hoechstens kosten darf. QEMUs
-// `_PRT` braucht rund 6000 (128 Durchlaeufe mit je gut vierzig Termen);
-// 400000 ist reichlich Luft und trotzdem eine Grenze, die eine nicht
-// endende Schleife in Sekundenbruchteilen erreicht.
+// How many steps an evaluation may cost at most. QEMU's `_PRT` needs
+// about 6000 (128 passes with a good forty terms each); 400000 is plenty
+// of air and still a bound that an endless loop reaches in a fraction of
+// a second.
 const BUDGET: u64 = 400000
 
 fn g(state: u64, off: u64) -> u64 {
@@ -165,10 +160,10 @@ fn prt_ok(state: u64) -> bool {
     return g(state, A_PRTOK) != 0
 }
 
-// ------------------------------------------------------ die Routentafel
+// ------------------------------------------------------ the route table
 //
-// Sie ueberlebt den Namensraum. Das ist der ganze Sinn: parsen, das
-// Ergebnis in vier Kilooktette schreiben, den Speicher zurueckgeben.
+// It survives the namespace. That is the whole point: parse, write the
+// result into four kilobytes, give the memory back.
 
 fn route_key(bus: u64, dev: u64, pin: u64) -> u64 {
     return (bus << 16) | (dev << 8) | pin
@@ -185,7 +180,7 @@ fn route_add(state: u64, bus: u64, dev: u64, pin: u64, gsi: u64) {
     s(state, A_ROUTEN, n + 1)
 }
 
-// Die Leitung fuer Steckplatz und Stift, oder 0xFFFFFFFF.
+// The line for slot and pin, or 0xFFFFFFFF.
 fn gsi_for(state: u64, bus: u64, dev: u64, pin: u64) -> u64 {
     if g(state, A_PRTOK) == 0 {
         return 0xFFFFFFFF
@@ -204,28 +199,28 @@ fn gsi_for(state: u64, bus: u64, dev: u64, pin: u64) -> u64 {
 }
 
 // ============================================================
-// DIE EINE STELLE, AN DER EIN TREIBER SEINE LEITUNG HOLT
+// THE ONE PLACE WHERE A DRIVER FETCHES ITS LINE
 // ============================================================
 //
-// `idx` ist der Platz des Geraets in `pci.fi`. Zuerst `_PRT`, dann das
-// Interrupt-Line-Register. Wer hier steht, sieht beide Zahlen -- und
-// wenn sie auseinandergehen, sagt es die serielle Leitung.
+// `idx` is the device's slot in `pci.fi`. First `_PRT`, then the
+// interrupt line register. Whoever stands here sees both numbers -- and
+// if they differ, the serial line says so.
 fn gsi_or_line(state: u64, idx: u64) -> u64 {
     let line: u64 = pci.get(state, idx, pci.E_IRQLINE)
     let bdf: u64 = pci.get(state, idx, pci.E_BDF)
     let pin: u64 = pci.get(state, idx, pci.E_IRQPIN)
     if pin == 0 || pin > 4 {
-        return line // das Geraet benutzt keinen Stift (MSI/MSI-X)
+        return line // the device uses no pin (MSI/MSI-X)
     }
     let from_aml: u64 = gsi_for(state, pci.bdf_bus(bdf), pci.bdf_dev(bdf),
         pin -% 1)
     if from_aml == 0xFFFFFFFF {
         return line
     }
-    // DIE GEGENPROBE ZU DIESER GANZEN RUNDE. Mit `amlwrong` wird die
-    // Leitung um eins verschoben eingetragen. Kommt der Vektor dann
-    // immer noch an, hat die Messung nichts gemessen -- dann liegt es
-    // an irgendetwas anderem, nur nicht an `_PRT`.
+    // THE COUNTER-PROOF FOR THIS WHOLE ROUND. With `amlwrong` the line is
+    // entered shifted by one. If the vector still arrives then, the
+    // measurement measured nothing -- then it is something else, just not
+    // `_PRT`.
     if kstate.mode_on(state, kstate.M_AMLWRONG) {
         return (from_aml + 1) % 24
     }
@@ -233,15 +228,14 @@ fn gsi_or_line(state: u64, idx: u64) -> u64 {
 }
 
 // ============================================================
-// TEIL 1: DIE ERKLAERUNGEN EINER TABELLE IN DEN BAUM
+// PART 1: THE DECLARATIONS OF A TABLE INTO THE TREE
 // ============================================================
 //
-// Auf dieser Ebene stehen NUR erklaerende Opcodes -- Scope, Device,
-// Method, Name, OperationRegion, Field und ihre Verwandten. Ein
-// Methodenrumpf wird NICHT gelesen, sondern uebersprungen: er ist erst
-// interessant, wenn ihn jemand aufruft, und ein Rumpf, den niemand
-// aufruft, darf ruhig Opcodes enthalten, die dieser Interpreter nicht
-// kennt.
+// On this level there are ONLY declarative opcodes -- Scope, Device,
+// Method, Name, OperationRegion, Field and their relatives. A method
+// body is NOT read but skipped: it only becomes interesting when someone
+// calls it, and a body that nobody calls may well contain opcodes this
+// interpreter does not know.
 
 fn load_createfield(state: u64, scope: u64, p: u64, c: u64) -> u64 {
     var out: [u64; 1] = [0 as u64; 1]
@@ -281,15 +275,15 @@ fn seg4(w: u64) -> u64 {
     return w
 }
 
-// Gibt die Stelle hinter der Erklaerung zurueck, oder 0 bei einem Fehler.
+// Returns the position behind the declaration, or 0 on an error.
 //
-// DIESE FUNKTION IST ABSICHTLICH KLEIN. Sie ist die einzige, die sich
-// selbst wieder erreicht (ueber `load_list`), also liegt ihr Rahmen bei
-// jeder Verschachtelungsstufe der DSDT noch einmal auf dem Kernstapel.
-// Alles, was Zwischenplaetze braucht, steht in `load_leaf` -- und das
-// ist keine Kosmetik: mit allen Zweigen in EINER Funktion kostete das
-// Laden von QEMUs DSDT gemessen 26592 Oktette Kernstapel, mit der
-// Aufteilung nur noch einen Bruchteil davon (siehe docs/ROUNDAML.md).
+// THIS FUNCTION IS DELIBERATELY SMALL. It is the only one that reaches
+// itself again (through `load_list`), so its frame lies on the kernel
+// stack once more for every nesting level of the DSDT. Everything that
+// needs temporary slots is in `load_leaf` -- and that is no cosmetics:
+// with all branches in ONE function, loading QEMU's DSDT cost a measured
+// 26592 bytes of kernel stack, with the split only a fraction of that
+// (see docs/ROUNDAML.md).
 const REGION_DEFERRED: u64 = 0x7FFFFFFFFFFFFFFF
 
 const NF_FIELD_NAME: u64 = 0x80
@@ -417,12 +411,12 @@ fn load_container(state: u64, scope: u64, p: u64, end: u64, e2: u64) -> u64 {
     return e
 }
 
-// Alles, was KEINEN eigenen Rumpf mit weiteren Erklaerungen hat.
+// Everything that has NO body of its own with further declarations.
 fn load_leaf(state: u64, scope: u64, p: u64, end: u64) -> u64 {
     let c: u64 = amlns.rd8(p)
     var out: [u64; 1] = [0 as u64; 1]
 
-    if c == 0x14 { // Method -- der Rumpf wird nur vermerkt
+    if c == 0x14 { // Method -- the body is only noted
         amlev.seen_mark(state, c)
         let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
         let e: u64 = p + 1 + ln
@@ -443,7 +437,7 @@ fn load_leaf(state: u64, scope: u64, p: u64, end: u64) -> u64 {
         s(state, A_METH, g(state, A_METH) + 1)
         return e
     }
-    if c == 0x08 { // Name -- der Wert wird erst beim Lesen gerechnet
+    if c == 0x08 { // Name -- the value is only computed when it is read
         amlev.seen_mark(state, c)
         let node: u64 = amlns.walk_create(state, scope, p + 1,
             (&out[0]) as u64, amlns.NK_NAME, amlns.NMAX)
@@ -465,7 +459,7 @@ fn load_leaf(state: u64, scope: u64, p: u64, end: u64) -> u64 {
         }
         return out[0]
     }
-    if c == 0x15 { // External -- eine Ankuendigung, kein Objekt
+    if c == 0x15 { // External -- an announcement, not an object
         let node: u64 = amlns.walk(state, scope, p + 1, (&out[0]) as u64)
         return out[0] + 2
     }
@@ -548,10 +542,9 @@ fn load_leaf(state: u64, scope: u64, p: u64, end: u64) -> u64 {
             return e
         }
         if e2 == 0x86 || e2 == 0x87 { // IndexField, BankField
-            // Angelegt wird nichts: ein Feld, das ueber ein anderes Feld
-            // geht, kann dieser Interpreter nicht lesen, und ein Knoten,
-            // der beim Lesen falsche Zahlen liefert, ist schlimmer als
-            // keiner. Der Bereich wird uebersprungen.
+            // Nothing is created: a field that goes over another field cannot be
+            // read by this interpreter, and a node that delivers wrong numbers when
+            // read is worse than none. The area is skipped.
             let ln: u64 = amlns.pkglen(p + 2, (&out[0]) as u64)
             return p + 2 + ln
         }
@@ -578,8 +571,8 @@ fn load_leaf(state: u64, scope: u64, p: u64, end: u64) -> u64 {
     return 0
 }
 
-// Ein Datenobjekt hinter einem `Name` ueberspringen, ohne es
-// auszuwerten. Nur die Formen, die als Name-Wert vorkommen duerfen.
+// Skip a data object behind a `Name` without evaluating it. Only the
+// forms that may occur as a name value.
 fn skip_data(state: u64, p: u64, end: u64) -> u64 {
     let c: u64 = amlns.rd8(p)
     if c == 0x00 || c == 0x01 || c == 0xFF {
@@ -642,10 +635,10 @@ fn load_list(state: u64, scope: u64, p: u64, end: u64) {
 }
 
 // ============================================================
-// TEIL 2: `_PRT` AUSWERTEN
+// PART 2: EVALUATING `_PRT`
 // ============================================================
 
-// Die Busnummer eines Wurzelknotens: `_BBN`, sonst 0.
+// The bus number of a root node: `_BBN`, otherwise 0.
 fn bbn_of(state: u64, node: u64) -> u64 {
     var w: [u8; 5] = "_BBN\0"
     let seg: u64 = amlns.seg_of((&w[0]) as u64)
@@ -660,7 +653,7 @@ fn bbn_of(state: u64, node: u64) -> u64 {
     return v[0]
 }
 
-// Eine Methode ohne Argumente aufrufen (oder einen Namen lesen).
+// Call a method without arguments (or read a name).
 fn call0(state: u64, node: u64, dst: u64) -> bool {
     if node == amlns.NONE {
         return false
@@ -685,8 +678,8 @@ fn link_cached(state: u64, link: u64) -> u64 {
     let n: u64 = g(state, A_LINKN)
     var i: u64 = 0
     while i < n {
-        if kstate.get(state, kstate.AML_OFF + A_LINKS + i * 16) == link + 1 {
-            return kstate.get(state, kstate.AML_OFF + A_LINKS + i * 16 + 8)
+        if kstate.get(state, kstate.AML_OFF + A_LINK_CACHE + i * 16) == link + 1 {
+            return kstate.get(state, kstate.AML_OFF + A_LINK_CACHE + i * 16 + 8)
         }
         i = i + 1
     }
@@ -698,13 +691,13 @@ fn link_cache(state: u64, link: u64, gsi: u64) {
     if n >= LINK_MAX {
         return
     }
-    kstate.set(state, kstate.AML_OFF + A_LINKS + n * 16, link + 1)
-    kstate.set(state, kstate.AML_OFF + A_LINKS + n * 16 + 8, gsi)
+    kstate.set(state, kstate.AML_OFF + A_LINK_CACHE + n * 16, link + 1)
+    kstate.set(state, kstate.AML_OFF + A_LINK_CACHE + n * 16 + 8, gsi)
     s(state, A_LINKN, n + 1)
 }
 
-// Die Leitung, die ein Link-Geraet gerade eingestellt hat.
-// 0xFFFFFFFF, wenn sie sich nicht ermitteln laesst.
+// The line that a link device has currently configured.
+// 0xFFFFFFFF if it cannot be determined.
 fn link_gsi(state: u64, link: u64) -> u64 {
     let seen: u64 = link_cached(state, link)
     if seen != 0xFFFFFFFE {
@@ -722,15 +715,15 @@ fn link_gsi_slow(state: u64, link: u64) -> u64 {
     var w_srs: [u8; 5] = "_SRS\0"
     var res: [u64; 3] = [0 as u64; 3]
 
-    // 1. Steht das Geraet ueberhaupt zur Verfuegung, und ist es
-    //    eingeschaltet? Bit 0 = vorhanden, Bit 1 = aktiviert.
+    // 1. Is the device available at all, and is it switched on?
+    //    Bit 0 = present, bit 1 = enabled.
     let sta: u64 = amlns.child(state, link, amlns.seg_of((&w_sta[0]) as u64))
     var enabled: u64 = 1
     if sta != amlns.NONE {
         if call0(state, sta, (&res[0]) as u64) {
             let v: u64 = amlobj.to_int((&res[0]) as u64)
             if (v & 1) == 0 {
-                return 0xFFFFFFFF // gar nicht vorhanden
+                return 0xFFFFFFFF // not present at all
             }
             if (v & 2) == 0 {
                 enabled = 0
@@ -738,10 +731,10 @@ fn link_gsi_slow(state: u64, link: u64) -> u64 {
         }
     }
 
-    // 2. Ist es nicht eingeschaltet, wird es eingeschaltet: die erste
-    //    Moeglichkeit aus `_PRS` ueber `_SRS` setzen. DAS ist der Fall,
-    //    fuer den es die Link-Geraete ueberhaupt gibt, und ohne ihn
-    //    bleibt eine Leitung auf einem echten Brett tot.
+    // 2. If it is not switched on, it is switched on: set the first
+    //    possibility from `_PRS` through `_SRS`. THAT is the case the link
+    //    devices exist for in the first place, and without it a line on a
+    //    real board stays dead.
     if enabled == 0 {
         let prs: u64 = amlns.child(state, link,
             amlns.seg_of((&w_prs[0]) as u64))
@@ -754,11 +747,9 @@ fn link_gsi_slow(state: u64, link: u64) -> u64 {
                     let ln: u64 = amlobj.ov2((&res[0]) as u64)
                     let want: u64 = amlobj.res_first_irq(state, at, ln)
                     if want != 0xFFFFFFFF {
-                        // `_SRS` bekommt einen Puffer in der Form von
-                        // `_PRS`, in dem genau EINE Leitung steht. Der
-                        // einfachste richtige Weg: den `_PRS`-Puffer
-                        // nehmen und die Auswahl darin auf die erste
-                        // Moeglichkeit einschraenken.
+                        // `_SRS` gets a buffer in the form of `_PRS` in which exactly ONE line
+                        // is stated. The simplest correct way: take the `_PRS` buffer and
+                        // restrict the choice in it to the first possibility.
                         srs_set(state, srs, (&res[0]) as u64, want)
                     }
                 }
@@ -766,7 +757,7 @@ fn link_gsi_slow(state: u64, link: u64) -> u64 {
         }
     }
 
-    // 3. Was steht jetzt in `_CRS`?
+    // 3. What is in `_CRS` now?
     let crs: u64 = amlns.child(state, link, amlns.seg_of((&w_crs[0]) as u64))
     if crs == amlns.NONE {
         return 0xFFFFFFFF
@@ -782,7 +773,7 @@ fn link_gsi_slow(state: u64, link: u64) -> u64 {
     return gsi
 }
 
-// `_SRS` mit einem Puffer aufrufen, der genau eine Leitung nennt.
+// Call `_SRS` with a buffer that names exactly one line.
 fn srs_set(state: u64, srs: u64, prsbuf: u64, want: u64) {
     let at: u64 = amlobj.ov1(prsbuf)
     let ln: u64 = amlobj.ov2(prsbuf)
@@ -796,9 +787,9 @@ fn srs_set(state: u64, srs: u64, prsbuf: u64, want: u64) {
         amlns.wr8(dst + i, amlns.rd8(at + i))
         i = i + 1
     }
-    // Die Auswahl einschraenken: bei der kurzen Form die Bitmaske auf
-    // die eine Leitung, bei der langen die Zahl der Eintraege auf eins
-    // und die erste Zahl auf `want`.
+    // Restrict the choice: in the short form the bit mask to the one line,
+    // in the long form the number of entries to one and the first number to
+    // `want`.
     var j: u64 = 0
     while j < ln {
         let tag: u64 = amlns.rd8(dst + j)
@@ -830,7 +821,7 @@ fn srs_set(state: u64, srs: u64, prsbuf: u64, want: u64) {
     amlev.call_method(state, srs, 1, (&arg[0]) as u64, (&res[0]) as u64)
 }
 
-// Alle `_PRT` im Baum durchgehen und die Routentafel fuellen.
+// Go through all `_PRT` in the tree and fill the route table.
 fn eval_prt(state: u64, loud: bool) {
     var w_prt: [u8; 5] = "_PRT\0"
     let seg: u64 = amlns.seg_of((&w_prt[0]) as u64)
@@ -892,9 +883,9 @@ fn eval_one_prt(state: u64, node: u64, loud: bool) {
                 linknode = amlobj.ov1(src)
                 gsi = link_gsi(state, linknode)
             } else {
-                // Kein Link-Geraet: die Leitung steht direkt im vierten
-                // Element. So sieht es auf jedem Brett aus, dessen
-                // Firmware den APIC-Fall fest verdrahtet hat.
+                // No link device: the line is stated directly in the fourth element.
+                // That is how it looks on every board whose firmware hard-wires the APIC
+                // case.
                 gsi = amlobj.to_int((&a3[0]) as u64)
             }
             if gsi != 0xFFFFFFFF && pin < 4 {
@@ -921,7 +912,7 @@ fn eval_one_prt(state: u64, node: u64, loud: bool) {
 }
 
 // ============================================================
-// TEIL 3: DIE STUFE
+// PART 3: THE STAGE
 // ============================================================
 
 fn arena_get(state: u64) -> u64 {
@@ -943,9 +934,9 @@ fn arena_put(state: u64, run: u64) {
     }
 }
 
-// Eine kaputte Kopie der DSDT: die Gegenprobe `amlbad`. Sie liegt auf
-// der Halde, damit die ECHTE Tabelle unangetastet bleibt -- `batt.fi`
-// und `power.fi` lesen sie danach noch.
+// A broken copy of the DSDT: the counter-proof `amlbad`. It lies on the
+// heap so that the REAL table stays untouched -- `batt.fi` and `power.fi`
+// still read it afterwards.
 fn broken_copy(state: u64, t: u64) -> u64 {
     let len: u64 = amlns.rd32(t + 4)
     var half: u64 = len / 2
@@ -962,8 +953,8 @@ fn broken_copy(state: u64, t: u64) -> u64 {
         amlns.wr8(at + i, amlns.rd8(t + i))
         i = i + 1
     }
-    // Die Laenge im Kopf luegt weiter -- genau das tut eine
-    // abgeschnittene Tabelle auf einem kaputten Brett auch.
+    // The length in the header keeps lying -- exactly what a truncated table
+    // on a broken board does too.
     return at
 }
 
@@ -1027,8 +1018,8 @@ fn load_all(state: u64, loud: bool) {
                     let cp: u64 = broken_copy(state, t)
                     if cp != 0 {
                         start = cp
-                        // die Laenge bleibt die ALTE -- der Parser
-                        // laeuft in nicht mehr vorhandene Oktette
+                        // the length stays the OLD one -- the parser runs into bytes that no
+                        // longer exist
                     }
                 }
                 if len > 36 {
@@ -1057,11 +1048,11 @@ fn load_all(state: u64, loud: bool) {
     }
 }
 
-// Die zwei Gegenproben, fuer die es in keiner echten DSDT etwas gibt:
-// eine Methode mit einer Schleife, die nicht endet, und eine, die sich
-// selbst aufruft. Beide werden hier als AML-Oktette HINGESCHRIEBEN --
-// das ist ehrlicher als eine SSDT von aussen, weil dann in der Abnahme
-// steht, welche Oktette gemeint sind.
+// The two counter-proofs for which there is nothing in any real DSDT: a
+// method with a loop that does not end, and one that calls itself. Both
+// are WRITTEN OUT here as AML bytes -- that is more honest than an SSDT
+// from outside, because then the acceptance run states which bytes are
+// meant.
 fn selftest_loop(state: u64) {
     var s_t: [u8; 16] = "aml: loop err=\0\0"
     // Method(TSTL, 0) { While(One) { } }
@@ -1075,9 +1066,9 @@ fn selftest_loop(state: u64) {
     code[6] = 0x00 as u8
     code[7] = 0xA2 as u8
     code[8] = 0x00 as u8
-    // Die PkgLength der Schleife und ihre Bedingung stehen dahinter --
-    // 0xA2 0x02 0x01 waeren drei Oktette; in ein Feld von neun passen
-    // sie nicht mehr, also wird der Rumpf gleich daneben gebaut.
+    // The PkgLength of the loop and its condition follow --
+    // 0xA2 0x02 0x01 would be three bytes; they no longer fit into a field of
+    // nine, so the body is built right next to it.
     var body: [u8; 3] = [0 as u8; 3]
     body[0] = 0xA2 as u8
     body[1] = 0x02 as u8
@@ -1102,7 +1093,7 @@ fn selftest_loop(state: u64) {
 
 fn selftest_deep(state: u64) {
     var s_t: [u8; 16] = "aml: deep err=\0\0"
-    // Method(TSTR, 0) { TSTR() } -- der Rumpf ist der eigene Name.
+    // Method(TSTR, 0) { TSTR() } -- the body is its own name.
     var nm: [u8; 5] = "TSTR\0"
     let node: u64 = amlns.add(state, 0, amlns.seg_of((&nm[0]) as u64),
         amlns.NK_METHOD, amlns.NMAX)
@@ -1172,10 +1163,10 @@ fn report(state: u64) {
     serial.nl()
 }
 
-// Welche Opcodes der Interpreter beim Lesen dieser Maschine wirklich
-// angefasst hat. `tools/aml/run.sh` haelt das gegen das Histogramm von
-// `tools/aml/disasm.py` -- das ist die Abdeckung, und sie ist gemessen
-// und nicht geschaetzt.
+// Which opcodes the interpreter really touched while reading this
+// machine. `tools/aml/run.sh` holds that against the histogram of
+// `tools/aml/disasm.py` -- that is the coverage, and it is measured and
+// not estimated.
 fn report_ops(state: u64) {
     var s_o: [u8; 9] = "aml: op \0"
     var s_e: [u8; 12] = "aml: extop \0"
@@ -1200,23 +1191,23 @@ fn report_ops(state: u64) {
 }
 
 // ============================================================
-// WAS DIESER INTERPRETER KANN -- die Liste, gegen die gemessen wird
+// WHAT THIS INTERPRETER CAN DO -- the list against which it is measured
 // ============================================================
 //
-// `tools/aml/run.sh` haelt sie gegen das Opcode-Histogramm, das
-// `tools/aml/disasm.py` UNABHAENGIG aus derselben DSDT zieht. Daraus
-// wird die Abdeckung: wie viele der Opcodes, die auf dieser Maschine
-// wirklich vorkommen, dieser Interpreter versteht.
+// `tools/aml/run.sh` holds it against the opcode histogram that
+// `tools/aml/disasm.py` draws INDEPENDENTLY from the same DSDT. That
+// gives the coverage: how many of the opcodes that really occur on this
+// machine this interpreter understands.
 //
-// Der Testlaeufer prueft AUSSERDEM, dass jeder Opcode, den der
-// Interpreter im Lauf WIRKLICH ANGEFASST hat (die `aml: op`-Zeilen),
-// auch in dieser Liste steht. Eine Liste, die von der Wirklichkeit
-// abweicht, faellt damit auf, statt die Abdeckung schoenzurechnen.
+// The test runner ALSO checks that every opcode the interpreter REALLY
+// TOUCHED during the run (the `aml: op` lines) is in this list too. A
+// list that deviates from reality is thereby noticed instead of
+// flattering the coverage.
 fn report_can(state: u64) {
     var s_c: [u8; 10] = "aml: can \0"
     var s_e: [u8; 13] = "aml: canext \0"
     var s_p: [u8; 14] = "aml: canpair \0"
-    // Die einfachen Opcodes. 0x60..0x67 sind Local0..7, 0x68..0x6E Arg0..6.
+    // The simple opcodes. 0x60..0x67 are Local0..7, 0x68..0x6E Arg0..6.
     var ops: [u8; 69] = [0 as u8; 69]
     ops[0] = 0x00 as u8
     ops[1] = 0x01 as u8
@@ -1289,7 +1280,7 @@ fn report_can(state: u64) {
         serial.nl()
         i = i + 1
     }
-    // Local0..7 und Arg0..6 einzeln, damit die Liste vollstaendig ist.
+    // Local0..7 and Arg0..6 individually, so that the list is complete.
     i = 0x60
     while i <= 0x6E {
         serial.puts((&s_c[0]) as u64)
@@ -1324,10 +1315,10 @@ fn report_can(state: u64) {
         serial.nl()
         i = i + 1
     }
-    // Die drei zusammengesetzten Vergleiche. In AML stehen sie als ZWEI
-    // Opcodes hintereinander (0x92 gefolgt von 0x93, 0x94 oder 0x95) --
-    // `LNotEqual`, `LLessEqual`, `LGreaterEqual`. Sie sind eigene
-    // Sprachformen und werden deshalb eigens gemeldet.
+    // The three compound comparisons. In AML they appear as TWO opcodes in a
+    // row (0x92 followed by 0x93, 0x94 or 0x95) -- `LNotEqual`,
+    // `LLessEqual`, `LGreaterEqual`. They are language forms of their own and
+    // are therefore reported separately.
     i = 0x93
     while i <= 0x95 {
         serial.puts((&s_p[0]) as u64)
@@ -1337,18 +1328,17 @@ fn report_can(state: u64) {
     }
 }
 
-// Der ganze Namensraum, ein Name je Zeile. Nur mit `amlprt`, weil das
-// bei QEMU 346 Zeilen sind -- und weil genau diese Liste es ist, die
-// `tools/aml/run.sh` gegen die unabhaengige Fassung in Python haelt.
+// The whole namespace, one name per line. Only with `amlprt`, because on
+// QEMU that is 350 lines -- and because exactly this list is what
+// `tools/aml/run.sh` holds against the independent version in Python.
 fn report_ns(state: u64) {
     var s_n: [u8; 9] = "aml: ns \0"
     var s_k: [u8; 3] = " \0\0"
     let n: u64 = amlns.nodes(state)
-    // AB NULL: die Wurzel `\` ist ein Knoten wie jeder andere, und die
-    // unabhaengige Fassung in Python fuehrt sie auch auf. Wer sie hier
-    // auslaesst, muss den Unterschied spaeter von Hand wegrechnen --
-    // und genau solche Korrekturen sind es, hinter denen sich ein
-    // echter Unterschied verstecken kann.
+    // FROM ZERO: the root `\` is a node like any other, and the independent
+    // version in Python lists it too. Whoever leaves it out here has to
+    // subtract the difference by hand later -- and exactly such corrections
+    // are what a real difference can hide behind.
     var i: u64 = 0
     while i < n {
         serial.puts((&s_n[0]) as u64)
@@ -1360,8 +1350,8 @@ fn report_ns(state: u64) {
     }
 }
 
-// Die Gegenueberstellung, um die es in dieser Runde geht: was sagt
-// `_PRT`, und was sagt das Register, das bis heute geglaubt wurde?
+// The comparison this round is about: what does `_PRT` say, and what
+// does the register say that was believed until today?
 fn report_devices(state: u64) {
     var s_d: [u8; 11] = "aml: gsi \0\0"
     var s_a: [u8; 6] = " aml=\0"
@@ -1398,32 +1388,29 @@ fn report_devices(state: u64) {
 }
 
 // ==================================================================
-// RUNDE ACPI-EREIGNISSE: DEN NAMENSRAUM HALTEN
+// ROUND ACPI-EVENTS: HOLDING THE NAMESPACE
 // ==================================================================
 //
-// `stage` baut den Namensraum, wertet `_PRT` aus und WIRFT IHN WEG --
-// 256 KiB fuer eine Routentafel von vier Kilooktetten zu behalten
-// waere ein Leck mit Ansage, und fuer `_PRT` wird er nie wieder
-// gebraucht.
+// `stage` builds the namespace, evaluates `_PRT` and THROWS IT AWAY --
+// keeping the 1 MiB arena for a route table of four kilobytes would be a leak
+// with an announcement, and `_PRT` never needs it again.
 //
-// Fuer die Ereignisse wird er gebraucht, und zwar dauernd: `_LID` und
-// `_BST` sind METHODEN, die bei jedem Deckelklappen und jedem
-// Akkuereignis neu laufen. Ohne Namensraum kein `_LID`.
+// The events do need it, and constantly: `_LID` and `_BST` are METHODS
+// that run again on every lid movement and every battery event. Without
+// a namespace there is no `_LID`.
 //
-// DIE ENTSCHEIDUNG, und sie ist eine Abwaegung und keine Selbst-
-// verstaendlichkeit: der Namensraum wird NUR GEHALTEN, WENN ES ETWAS
-// ZU HALTEN GIBT. `ns_hold` baut ihn auf, `acpiev.stage` sieht nach,
-// ob es einen Deckel, einen Akku, eine Taste oder eine GPE-Methode
-// gibt -- und wenn nicht, gibt `ns_drop` alles zurueck. Ein Server
-// ohne Deckel und ohne Akku zahlt damit kein Oktett, ein Laptop
-// bekommt volle Ereignisse. Gemessen wird beides
-// (`tools/acpiev/run.sh`, Abschnitt "was der Namensraum kostet").
+// THE DECISION, and it is a trade-off and not a matter of course: the
+// namespace is ONLY HELD IF THERE IS SOMETHING TO HOLD. `ns_hold` builds
+// it, `acpiev.stage` checks whether there is a lid, a battery, a button
+// or a GPE method -- and if not, `ns_drop` gives everything back. A
+// server without lid and without battery thereby pays not a single byte,
+// a laptop gets full events. Both are measured (`tools/acpiev/run.sh`,
+// section "what the namespace costs").
 //
-// Der zweite Aufbau kostet das, was der erste gekostet hat -- bei
-// QEMU 1358 us. Das ist einmal beim Start und nicht bei jedem
-// Ereignis; ihn stattdessen aus `stage` heraus zu behalten waere
-// schneller, wuerde aber bedeuten, dass `stage` die Entscheidung
-// trifft, bevor irgendwer weiss, ob es Ereignisgeraete gibt.
+// The second build costs what the first one cost -- 1358 us on QEMU.
+// That is once at boot and not on every event; keeping it from `stage`
+// instead would be faster but would mean that `stage` makes the decision
+// before anybody knows whether there are event devices.
 
 fn ns_arena(state: u64) -> u64 {
     return g(state, A_HOLD)
@@ -1433,8 +1420,8 @@ fn ns_bytes(state: u64) -> u64 {
     return g(state, A_HOLDB)
 }
 
-// Den Namensraum ein zweites Mal aufbauen und BEHALTEN. Gibt den
-// Rahmenlauf zurueck, oder 0.
+// Build the namespace a second time and HOLD it. Returns the frame run,
+// or 0.
 fn ns_hold(state: u64) -> u64 {
     if g(state, A_HOLD) != 0 {
         return g(state, A_HOLD)
@@ -1465,8 +1452,8 @@ fn ns_hold(state: u64) -> u64 {
     return run
 }
 
-// Ihn doch wieder hergeben. `acpiev.stage` ruft das, wenn es auf
-// dieser Maschine nichts zu behandeln gibt.
+// Give it back after all. `acpiev.stage` calls this when there is
+// nothing to handle on this machine.
 fn ns_drop(state: u64) {
     let run: u64 = g(state, A_HOLD)
     if run == 0 {
@@ -1477,14 +1464,14 @@ fn ns_drop(state: u64) {
     s(state, A_HOLDB, 0)
 }
 
-// EINEN KNOTEN AUSWERTEN. Fuer `_LID`, `_BST`, `_BIF`, `_PSR` und die
-// GPE-Methoden: ist es eine Methode, wird sie ohne Argumente
-// aufgerufen; ist es ein `Name`, wird sein Wert genommen.
+// EVALUATE A NODE. For `_LID`, `_BST`, `_BIF`, `_PSR` and the GPE
+// methods: if it is a method, it is called without arguments; if it is a
+// `Name`, its value is taken.
 //
-// Das ist `call0` mit einem oeffentlichen Namen und einem Unterschied:
-// der Schrittvorrat wird VOR JEDEM AUFRUF neu gesetzt. Ohne das waere
-// nach ein paar hundert Deckelklappen der Vorrat aufgebraucht und
-// `_LID` gaebe stillschweigend nichts mehr zurueck.
+// This is `call0` with a public name and one difference: the step budget
+// is reset BEFORE EVERY CALL. Without it the budget would be used up
+// after a few hundred lid movements and `_LID` would silently return
+// nothing any more.
 static mut in_use: u64 = 0
 static mut refusals: u64 = 0
 
@@ -1682,9 +1669,9 @@ fn stage(state: u64) {
     if kstate.mode_on(state, kstate.M_AMLDEEP) {
         selftest_deep(state)
     }
-    // DER NAMENSRAUM WIRD VERWORFEN. Alles, was danach noch gebraucht
-    // wird, steht in der Routentafel in `kdata` -- vier Kilooktette
-    // statt einer Viertelmegabyte, und zwar fuer immer.
+    // THE NAMESPACE IS DISCARDED. Everything that is still needed afterwards
+    // is in the route table in `kdata` -- four kilobytes instead of the whole
+    // arena, and for good.
     arena_put(state, run)
     let free1: u64 = mem.frames_free(state)
     s(state, A_FRAMES1, free1)
@@ -1698,7 +1685,7 @@ fn stage(state: u64) {
 }
 
 // ============================================================
-// DIE TABELLEN AUF DIE LEITUNG (fuer `tools/aml/disasm.py`)
+// THE TABLES ONTO THE LINE (for `tools/aml/disasm.py`)
 // ============================================================
 
 fn nibble(v: u64) -> u8 {

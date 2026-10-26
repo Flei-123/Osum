@@ -90,7 +90,7 @@ case "$WAS" in
         # Der Kern klappt den Deckel selbst zu (Wort `evlid`), weil
         # QEMU kein Deckelgeraet hat. Gewartet wird auf die Zeile.
         for _ in $(seq 1 200); do
-            grep -qa 'deckel zu' "$W/serial.txt" 2>/dev/null && break
+            grep -qa 'lid closed' "$W/serial.txt" 2>/dev/null && break
             sleep 0.1
         done
         sleep 4

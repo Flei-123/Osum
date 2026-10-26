@@ -121,16 +121,16 @@ const NS_PER_MS: u64 = 1000000
 const SCI_DEFAULT_LEVEL: bool = true
 const SCI_DEFAULT_LOW: bool = true
 
-// Warum es nicht laeuft.
+// Why it does not run.
 const WHY_OK: u64 = 0
 const WHY_NOFADT: u64 = 1
-const WHY_NOAML: u64 = 2 // der Interpreter steht nicht bereit
-const WHY_NONS: u64 = 3 // der Namensraum liess sich nicht halten
-const WHY_OFF: u64 = 4 // mit `noacpiev` abgeschaltet
-const WHY_NOSCI: u64 = 5 // die FADT nennt keine Leitung
+const WHY_NOAML: u64 = 2 // the interpreter is not ready
+const WHY_NONS: u64 = 3 // the namespace could not be held
+const WHY_OFF: u64 = 4 // switched off with `noacpiev`
+const WHY_NOSCI: u64 = 5 // the FADT names no line
 
-// Was sich geaendert hat. Ein Bitfeld, damit mehrere Aenderungen
-// zwischen zwei Abfragen nicht verlorengehen.
+// What has changed. A bit field, so that several changes between two
+// queries are not lost.
 const EV_NONE: u64 = 0
 const EV_BUTTON: u64 = 1
 const EV_LID: u64 = 2
@@ -141,11 +141,11 @@ const LID_OPEN: u64 = 1
 const LID_CLOSED: u64 = 0
 const LID_UNKNOWN: u64 = 2
 
-// Die Felder der FADT, die diese Datei braucht (ACPI 6.4, Tabelle 5.9).
-// `hw.fi` liest dieselbe Tabelle fuer andere Felder; die Offsets stehen
-// absichtlich zweimal, weil sie zu VERSCHIEDENEN Zwecken gelesen werden
-// und ein gemeinsamer Satz Konstanten die zwei Runden aneinanderbinden
-// wuerde, ohne dass eine davon etwas davon haette.
+// The FADT fields this file needs (ACPI 6.4, table 5.9).
+// `hw.fi` reads the same table for other fields; the offsets are
+// deliberately stated twice, because they are read for DIFFERENT purposes
+// and a shared set of constants would tie the two rounds together
+// without either of them gaining anything from it.
 const F_SCI_INT: u64 = 46
 const F_PM1A_EVT: u64 = 56
 const F_PM1B_EVT: u64 = 60
@@ -160,14 +160,13 @@ const F_ACPI_ENABLE: u64 = 52
 const F_PM1A_CNT: u64 = 64
 const F_PM1B_CNT: u64 = 68
 
-// Die festen Ereignisse in PM1x_STS (ACPI 6.4, Tabelle 4.17).
-// Dieselben Bits im Freigaberegister PM1x_EN. Es liegt eine halbe
-// Registerlaenge hinter dem Statusregister -- so steht es in der
-// Spezifikation, und deshalb wird PM1_EVT_LEN gelesen und nicht
-// geraten.
+// The fixed events in PM1x_STS (ACPI 6.4, table 4.17).
+// The same bits in the enable register PM1x_EN. It lies half a register
+// length behind the status register -- that is what the specification
+// says, and that is why PM1_EVT_LEN is read and not guessed.
 
-// Bit 0 von PM1x_CNT. 1 = die Ereignisse gehen als SCI an das
-// Betriebssystem, 0 = sie gehen als SMI an die Firmware.
+// Bit 0 of PM1x_CNT. 1 = the events go to the operating system as SCI,
+// 0 = they go to the firmware as SMI.
 const SCI_EN: u64 = 1
 
 fn g(state: u64, off: u64) -> u64 {
@@ -254,9 +253,8 @@ fn button_pending(state: u64) -> bool {
     return g(state, E_BTN) != 0
 }
 
-// Die Taste ABHOLEN: sie meldet sich EINMAL, und wer sie abholt, hat
-// sie. Ohne das Zuruecksetzen wuerde das Energiemenue in jedem
-// Durchlauf erneut aufgehen.
+// FETCHING the button: it reports ONCE, and whoever fetches it has it.
+// Without the reset the energy menu would open again in every pass.
 fn button_take(state: u64) -> bool {
     if g(state, E_BTN) == 0 {
         return false
@@ -269,10 +267,9 @@ fn changed(state: u64) -> u64 {
     return g(state, E_CHANGED)
 }
 
-// Dasselbe fuer die Aenderungen: lesen UND zuruecksetzen in einem
-// Schritt. Zwei getrennte Aufrufe waeren ein Wettlauf mit dem
-// Unterbrechungsbehandler -- zwischen `changed` und einem `clear`
-// koennte ein Ereignis liegen, das dann verlorenginge.
+// The same for the changes: read AND reset in one step. Two separate
+// calls would be a race with the interrupt handler -- between `changed`
+// and a `clear` an event could slip in that would then be lost.
 fn take_change(state: u64) -> u64 {
     let v: u64 = g(state, E_CHANGED)
     if v != 0 {
@@ -285,7 +282,7 @@ fn mark(state: u64, bit: u64) {
     s(state, E_CHANGED, g(state, E_CHANGED) | bit)
 }
 
-// ------------------------------------------------------ die Anschluesse
+// ------------------------------------------------------ the ports
 
 fn in8(port: u64) -> u64 {
     return serial.in8((port & 0xFFFF) as u16) as u64
@@ -300,30 +297,30 @@ fn in16(port: u64) -> u64 {
 }
 
 // ==================================================================
-// DIE GERAETE IM NAMENSRAUM FINDEN
+// FINDING THE DEVICES IN THE NAMESPACE
 // ==================================================================
 //
-// Gesucht wird ueber `_HID`, die Kennung, die die Spezifikation
-// vergibt. Sie steht als Zahl in der DSDT (EisaId("PNP0C0D") ist
-// 0x0D0CD041 -- die vier Buchstaben in fuenf Bit je Zeichen), oder
-// als Zeichenkette ("ACPI0003" fuer das Netzteil).
+// The search goes by `_HID`, the identifier the specification assigns.
+// It stands as a number in the DSDT (EisaId("PNP0C0D") is 0x0D0CD041 --
+// the four letters at five bits per character), or as a string
+// ("ACPI0003" for the adapter).
 //
-//   PNP0C0D  der Deckel
-//   PNP0C0C  die Einschalttaste
-//   PNP0C0A  der Akku
-//   ACPI0003 das Netzteil
+//   PNP0C0D  the lid
+//   PNP0C0C  the power button
+//   PNP0C0A  the battery
+//   ACPI0003 the adapter
 //
-// Die Zahlen sind die Kodierung aus ACPI 6.4 Abschnitt 5.6.7 und
-// stehen hier ausgerechnet, weil ein Kern zur Laufzeit nichts
-// auszurechnen hat, was schon feststeht. `tools/acpiev/hid.py`
-// rechnet dieselben Zahlen ein zweites Mal aus und vergleicht --
-// derselbe Griff wie bei `tools/aml/disasm.py`.
+// The numbers are the encoding from ACPI 6.4 section 5.6.7 and are
+// written out here because a kernel has nothing to calculate at run
+// time that is already known. `tools/acpiev/hid.py` calculates the same
+// numbers a second time and compares -- the same move as with
+// `tools/aml/disasm.py`.
 const HID_LID: u64 = 0x0D0CD041
 const HID_PWRB: u64 = 0x0C0CD041
 const HID_BATT: u64 = 0x0A0CD041
 const HID_EC: u64 = 0x090CD041
 
-// Ein Kindknoten mit diesem Namen, oder NONE.
+// A child node with this name, or NONE.
 fn child(state: u64, parent: u64, seg: u64) -> u64 {
     let n: u64 = amlns.nodes(state)
     var i: u64 = 1
@@ -337,7 +334,7 @@ fn child(state: u64, parent: u64, seg: u64) -> u64 {
     return amlns.NONE
 }
 
-// Der Wert eines `Name`-Knotens als Zahl. Fuer `_HID`.
+// The value of a `Name` node as a number. For `_HID`.
 fn name_int(state: u64, node: u64) -> u64 {
     if node == amlns.NONE {
         return 0
@@ -349,7 +346,7 @@ fn name_int(state: u64, node: u64) -> u64 {
     return amlobj.to_int((&r[0]) as u64)
 }
 
-// Ein Geraet mit dieser `_HID` suchen. Gibt den GERAETEKNOTEN zurueck.
+// Look for a device with this `_HID`. Returns the DEVICE NODE.
 fn find_hid(state: u64, want: u64) -> u64 {
     var w_hid: [u8; 5] = "_HID\0"
     let seg: u64 = amlns.seg_of((&w_hid[0]) as u64)
@@ -369,8 +366,8 @@ fn find_hid(state: u64, want: u64) -> u64 {
     return amlns.NONE
 }
 
-// Dasselbe ueber eine `_HID` als ZEICHENKETTE ("ACPI0003"). Das
-// Netzteil wird so geschrieben, und eine Zahl waere hier falsch.
+// The same through a `_HID` as a STRING ("ACPI0003"). The adapter is
+// written that way, and a number would be wrong here.
 fn find_hid_str(state: u64, txt: u64) -> u64 {
     var w_hid: [u8; 5] = "_HID\0"
     let seg: u64 = amlns.seg_of((&w_hid[0]) as u64)
@@ -412,12 +409,12 @@ fn streq(a: u64, b: u64) -> bool {
 }
 
 // ==================================================================
-// DIE GPE-METHODEN EINSAMMELN
+// COLLECTING THE GPE METHODS
 // ==================================================================
 //
-// Unter `\_GPE` stehen Methoden, deren NAME die Bitnummer traegt:
-// `_L1B` ist Bit 0x1B, pegelgesteuert; `_E03` ist Bit 0x03,
-// flankengesteuert. Zwei Hexziffern, und genau zwei.
+// Under `\_GPE` there are methods whose NAME carries the bit number:
+// `_L1B` is bit 0x1B, level triggered; `_E03` is bit 0x03, edge
+// triggered. Two hex digits, and exactly two.
 
 const M_LEVEL: u64 = 0
 const M_EDGE: u64 = 1
@@ -432,8 +429,8 @@ fn hexval(c: u64) -> u64 {
     return 0xFF
 }
 
-// Aus einem Namen wie `_L1B` die Bitnummer und die Art. Gibt 0xFFFF
-// zurueck, wenn der Name keine GPE-Methode ist.
+// From a name like `_L1B` the bit number and the kind. Returns 0xFFFF if
+// the name is not a GPE method.
 fn gpe_of_name(seg: u64) -> u64 {
     if (seg & 0xFF) != 0x5F { // '_'
         return 0xFFFF
@@ -485,7 +482,7 @@ fn meth_find(state: u64, bit: u64) -> u64 {
     return 0xFFFF
 }
 
-// Alle `_Lxx`/`_Exx` unter `\_GPE` einsammeln.
+// Collect all `_Lxx`/`_Exx` under `\_GPE`.
 fn collect_gpe(state: u64) {
     var w_gpe: [u8; 5] = "_GPE\0"
     let gseg: u64 = amlns.seg_of((&w_gpe[0]) as u64)
@@ -494,9 +491,9 @@ fn collect_gpe(state: u64) {
     var i: u64 = 1
     while i < n {
         if amlns.node_kind(state, i) == amlns.NK_METHOD && cnt < GPE_MAX {
-            // Der Elternknoten muss `\_GPE` heissen. Eine Methode
-            // `_L18` irgendwo sonst ist KEINE GPE-Methode -- und es
-            // gibt sie: manche Firmware nennt so ihre Hilfsroutinen.
+            // The parent node must be called `\_GPE`. A method `_L18` anywhere else
+            // is NOT a GPE method -- and such methods exist: some firmware names its
+            // helper routines that way.
             let par: u64 = amlns.node_parent(state, i)
             if par != amlns.NONE && amlns.node_name(state, par) == gseg {
                 let v: u64 = gpe_of_name(amlns.node_name(state, i))
@@ -746,10 +743,10 @@ fn bonly_diag(state: u64) {
 
 fn pump(state: u64) {
     blchain.service(state)
-    // GANZ OBEN, VOR JEDER BEDINGUNG. Ein Zaehler hinter der ersten
-    // Wache misst nicht, ob die Funktion gerufen wird, sondern ob sie
-    // durchkommt -- und genau das war beim Suchen der Unterschied
-    // zwischen "pumpn=0" und "die Zeilen stehen doch da".
+    // RIGHT AT THE TOP, BEFORE ANY CONDITION. A counter behind the first
+    // guard does not measure whether the function is called but whether it
+    // gets through -- and that was exactly the difference between "pumpn=0"
+    // and "the lines are there after all" while searching.
     s(state, E_PUMPN, g(state, E_PUMPN) + 1)
     if g(state, E_READY) != 1 {
         if g(state, E_BONLY) == 1 {
@@ -757,40 +754,39 @@ fn pump(state: u64) {
         }
         return
     }
-    // DIE TASTE. Sie ist ein FESTES Ereignis und haengt an keinem
-    // GPE-Bit; der Behandler hat sie nur vorgemerkt.
-    // GEMESSEN UND KORRIGIERT: hier stand `E_BTN == 1`, also das Wort,
-    // das `button_take` beim Abholen LOESCHT. Sobald ein Programm in
-    // Ring 3 die Taste abfragt -- die Leiste tut das jede Runde, der
-    // Starter auch --, war sie weg, bevor diese Zeile sie sehen
-    // konnte. In der Ausgabe stand dann `irqs=1 stsor=0x0101` (der
-    // Behandler HAT das Tastenbit gelesen) und trotzdem kein
-    // `ev taste`: die Meldung hing an einem Wort, das jemand anderes
-    // gerade abgeholt hatte.
+    // THE BUTTON. It is a FIXED event and hangs on no GPE bit; the handler
+    // has only noted it.
+    // MEASURED AND CORRECTED: here stood `E_BTN == 1`, that is the word that
+    // `button_take` CLEARS when fetching. As soon as a program in ring 3
+    // queries the button -- the bar does that every pass, the launcher too --
+    // it was gone before this line could see it. The output then showed
+    // `irqs=1 stsor=0x0101` (the handler HAS read the button bit) and still
+    // no `ev taste`: the message hung on a word that somebody else had just
+    // fetched.
     //
-    // Gezaehlt wird deshalb mit `E_BTNN`, und das loescht niemand.
+    // So it is counted with `E_BTNN`, and nobody clears that.
     if g(state, E_BTNN) != g(state, E_BTNSAID) {
         s(state, E_BTNSAID, g(state, E_BTNN))
         s(state, E_EVENTS, g(state, E_EVENTS) + 1)
         var s_b: [u8; 20] = "acpiev: ev taste\0\0\0\0"
         serial.puts((&s_b[0]) as u64)
         serial.nl()
-        // IMMER, nicht nur mit `evdump`: das ist DAS Ereignis dieser
-        // Runde, und diese Zeile ist die Abnahme.
+        // ALWAYS, not only with `evdump`: this is THE event of this round, and
+        // this line is the acceptance.
         report(state)
     }
 
-    // MIT `evdump` ALLE HUNDERT DURCHLAEUFE EINE ZEILE. Ohne das ist
-    // "es kommt nichts an" nicht von "der Behandler laeuft gar nicht"
-    // zu unterscheiden -- und genau diese zwei Faelle waren beim
-    // ersten Lauf dieser Runde zu trennen.
+    // WITH `evdump` ONE LINE EVERY HUNDRED PASSES. Without it, "nothing
+    // arrives" cannot be told from "the handler does not run at all" -- and
+    // exactly these two cases had to be separated on the first run of this
+    // round.
     if kstate.mode_on(state, kstate.M_EVDUMP) {
         s(state, E_TICK, g(state, E_TICK) + 1)
         if (g(state, E_TICK) % 200) == 0 {
-            // ROHES PM1a_STS, direkt vom Anschluss. Wenn hier Bit 8
-            // auftaucht, HAT QEMU die Taste gemeldet und es liegt am
-            // Interrupt; taucht es nie auf, hat QEMU sie gar nicht
-            // gemeldet. Das trennt die zwei Faelle.
+            // RAW PM1a_STS, straight from the port. If bit 8 shows up here, QEMU HAS
+            // reported the button and it is the interrupt that is at fault; if it
+            // never shows up, QEMU has not reported it at all. That separates the two
+            // cases.
             var s_rs: [u8; 16] = "acpiev: pm1sts=\0"
             var s_pk: [u8; 8] = " pumpn=\0"
             var s_ik: [u8; 7] = " irqs=\0"
@@ -806,23 +802,21 @@ fn pump(state: u64) {
             serial.nl()
         }
     }
-    // EINMAL melden, ob Unterbrechungen ueberhaupt AN sind. Ohne das
-    // ist "der SCI kommt nicht an" nicht von "dieser Kern nimmt gar
-    // keine Unterbrechungen an" zu unterscheiden -- und genau diese
-    // zwei Faelle waren im Schreibtischbetrieb zu trennen.
+    // Report ONCE whether interrupts are ON at all. Without it, "the SCI does
+    // not arrive" cannot be told from "this kernel accepts no interrupts at
+    // all" -- and exactly these two cases had to be separated in desktop
+    // operation.
     if g(state, E_IFSAID) == 0 {
         s(state, E_IFSAID, 1)
-        // NUR LESEN, NICHT sperren: die Fassungen in klog.fi und
-        // audio.fi haengen ein `cli` an, weil sie eine Sperre
-        // aufmachen. Hier soll nichts gesperrt werden.
+        // ONLY READ, do NOT lock: the versions in klog.fi and audio.fi append a
+        // `cli` because they open a lock. Nothing is to be locked here.
         let fl: u64 = asm("pushfq\npop rax", out("rax"))
         var s_if: [u8; 16] = "acpiev: rflags=\0"
         serial.puts((&s_if[0]) as u64)
         serial.hex_width(fl, 4)
-        // Und gleich der Eintrag im I/O-APIC UND das Freigaberegister,
-        // beide JETZT und nicht beim Aufsetzen. Wer beides zum
-        // richtigen Zeitpunkt liest, sieht, ob eine spaetere Runde sie
-        // wieder zugemacht hat.
+        // And at once the entry in the I/O APIC AND the enable register, both NOW
+        // and not at setup. Whoever reads both at the right time sees whether a
+        // later round has closed them again.
         var s_i2: [u8; 9] = " ioapic=\0"
         var s_p2: [u8; 8] = " pm1en=\0"
         var s_s2: [u8; 6] = " sts=\0"
@@ -834,22 +828,21 @@ fn pump(state: u64) {
         serial.hex_width(pm1.status(), 4)
         serial.nl()
     }
-    // ============================== RUNDE ACPI-EREIGNISSE: `evlid`
+    // ============================== ROUND ACPI-EVENTS: `evlid`
     //
-    // DEN DECKEL VON HAND ZUKLAPPEN, EINMAL, NACH EINER WEILE.
+    // CLOSING THE LID BY HAND, ONCE, AFTER A WHILE.
     //
-    // QEMU hat kein Deckelgeraet -- es gibt an dieser Maschine nichts,
-    // was das GPE-Bit ziehen wuerde. Fuer das BILD der Abnahme (der
-    // Sperrbildschirm muss kommen) braucht es aber einen Deckel, der
-    // sich schliesst, waehrend der Schreibtisch schon steht. Also
-    // zaehlt der Kern die Durchlaeufe und klappt ihn beim
-    // zweitausendsten zu -- das ist rund eine halbe Minute nach dem
-    // Start, lange nachdem alles gemalt ist.
+    // QEMU has no lid device -- there is nothing on this machine that would
+    // pull the GPE bit. For the PICTURE of the acceptance run (the lock
+    // screen must come) it needs a lid that closes while the desktop is
+    // already up, though. So the kernel counts the passes and closes it at
+    // the two-thousandth -- that is about half a minute after the start, long
+    // after everything has been painted.
     //
-    // WAS DAMIT NICHT GEMESSEN IST, steht wie ueberall in dieser Runde
-    // dabei: dass ein echtes Brett das Bit zieht. Gemessen ist alles
-    // dahinter -- die Methode, das `Notify`, `_LID`, und dass der
-    // Sperrbildschirm wirklich kommt.
+    // WHAT IS NOT MEASURED BY THIS stands here as everywhere in this round:
+    // that a real board pulls the bit. Everything behind it is measured --
+    // the method, the `Notify`, `_LID`, and that the lock screen really
+    // comes.
     if kstate.mode_on(state, kstate.M_EVLID) {
         s(state, E_LIDTICK, g(state, E_LIDTICK) + 1)
         if g(state, E_LIDTICK) == 2000 {
@@ -1043,9 +1036,8 @@ fn run_node(state: u64, node: u64, refresh: bool) -> bool {
     amlev.depth_reset(state)
     var r: [u64; 3] = [0 as u64; 3]
     if !aml.eval_node(state, node, (&r[0]) as u64) {
-        // Eine Methode, die scheitert, darf den Kern nicht aufhalten.
-        // Der Fehler steht im Protokoll, das Bit ist geloescht, die
-        // Maschine laeuft weiter.
+        // A method that fails must not stop the kernel. The error is in the log,
+        // the bit is cleared, the machine keeps running.
         var s_e: [u8; 22] = "acpiev: gpe fehler b=\0"
         serial.puts((&s_e[0]) as u64)
         serial.hex_width(node, 4)
@@ -1053,7 +1045,7 @@ fn run_node(state: u64, node: u64, refresh: bool) -> bool {
         amlns.err_set(state, amlns.ERR_OK)
         return false
     }
-    // Was hat sie gemeldet?
+    // What did it report?
     let cnt: u64 = amlev.not_count(state)
     var j: u64 = 0
     while j < cnt {
@@ -1061,9 +1053,9 @@ fn run_node(state: u64, node: u64, refresh: bool) -> bool {
             amlev.not_code(state, j))
         j = j + 1
     }
-    // KEIN `Notify`, aber ein Ereignis: manche Firmware verlaesst sich
-    // darauf, dass das Betriebssystem nach einem GPE ohnehin alles
-    // nachliest. Also wird nachgelesen, was zu dem Bit passt.
+    // NO `Notify`, but an event: some firmware relies on the operating system
+    // re-reading everything after a GPE anyway. So what belongs to the bit is
+    // re-read.
     if cnt == 0 && refresh {
         refresh_all(state)
     }
@@ -1113,9 +1105,8 @@ fn sync_diag(state: u64) {
     scidiag.set(scidiag.S_GPE_FAILED, gpe.failed())
 }
 
-// Ein `Notify(Geraet, Code)` zuordnen. Der Code 0x80 heisst bei allen
-// dreien "sieh nach", 0x81 beim Akku "die Beschreibung hat sich
-// geaendert".
+// Attribute a `Notify(device, code)`. The code 0x80 means "have a look"
+// for all three, 0x81 for the battery "the description has changed".
 fn handle_notify(state: u64, node: u64, code: u64) {
     hkdiag.add(hkdiag.NOTIFY_N, 1)
     hkdiag.set(hkdiag.NOTIFY_LAST, code)
@@ -1124,10 +1115,9 @@ fn handle_notify(state: u64, node: u64, code: u64) {
         return
     }
     if node == g(state, E_BATN) && node != amlns.NONE {
-        // 0x81 heisst "die Beschreibung hat sich geaendert" -- dann
-        // MUSS `_BIF` neu gelesen werden (ein getauschter Akku hat
-        // eine andere volle Ladung). Und wenn sie noch gar nicht
-        // bekannt ist, ebenfalls: siehe `refresh_all`.
+        // 0x81 means "the description has changed" -- then `_BIF` MUST be read
+        // again (a swapped battery has a different full charge). And if it is not
+        // known at all yet, likewise: see `refresh_all`.
         if code == 0x81 || g(state, E_FULL) == 0 {
             read_bif(state)
         }
@@ -1136,7 +1126,7 @@ fn handle_notify(state: u64, node: u64, code: u64) {
     }
     if node == g(state, E_ACDEV) && node != amlns.NONE {
         read_ac(state)
-        // Am Netz oder nicht aendert den Akkuzustand mit.
+        // Mains or not changes the battery state as well.
         read_bst(state)
         return
     }
@@ -1150,31 +1140,28 @@ fn handle_notify(state: u64, node: u64, code: u64) {
         return
     }
     hotkeys.notify_action(state, code)
-    // Ein Geraet, das wir nicht kennen. Kein Fehler -- ein Brett
-    // meldet auch Waermezonen und Steckplaetze.
+    // A device we do not know. Not an error -- a board also reports thermal
+    // zones and slots.
 }
 
 fn refresh_all(state: u64) {
     read_lid(state)
-    // `_BIF` ZUERST, UND ZWAR IMMER DANN, WENN DIE VOLLE LADUNG NOCH
-    // FEHLT.
+    // `_BIF` FIRST, AND ALWAYS WHEN THE FULL CHARGE IS STILL MISSING.
     //
-    // GEMESSEN UND KORRIGIERT. Die erste Fassung las `_BIF` nur bei
-    // `Notify(..., 0x81)` -- so steht es in der Spezifikation, und so
-    // ist es auch richtig: 0x80 heisst "der Zustand hat sich
-    // geaendert", 0x81 "die Beschreibung". Nur schickt kein Brett
-    // beim Start ein 0x81, und ohne `_BIF` gibt es keine letzte volle
-    // Ladung -- und ohne die keine Prozentzahl.
+    // MEASURED AND CORRECTED. The first version read `_BIF` only on
+    // `Notify(..., 0x81)` -- that is what the specification says, and it is
+    // also right: 0x80 means "the state has changed", 0x81 "the description".
+    // Only no board sends a 0x81 at start, and without `_BIF` there is no
+    // last full charge -- and without that no percentage.
     //
-    // In der Ausgabe sah das so aus, und es ist genau die Sorte
-    // Zahl, die eine Behauptung von einer Messung trennt:
+    // In the output it looked like this, and it is exactly the kind of
+    // number that separates a claim from a measurement:
     //
     //     acpiev: bst node=366 typ=4 n=4 rem=3850 full=0
     //
-    // `_BST` lief also, das Paket stimmte, die Restkapazitaet war auf
-    // das Oktett genau die, die die AML-Methode ausgerechnet hatte
-    // (77 * 50 = 3850) -- und die Prozentzahl blieb trotzdem 0, weil
-    // der Nenner fehlte.
+    // So `_BST` ran, the package was right, the remaining capacity was, to
+    // the byte, what the AML method had calculated (77 * 50 = 3850) -- and
+    // the percentage stayed 0 anyway, because the denominator was missing.
     if g(state, E_FULL) == 0 {
         read_bif(state)
     }
@@ -1182,12 +1169,12 @@ fn refresh_all(state: u64) {
     read_ac(state)
 }
 
-// ------------------------------------------------------ die Abfragen
+// ------------------------------------------------------ the queries
 
-// Das i-te Element eines Pakets als Zahl. Ein Paket, das kuerzer ist
-// als erwartet, gibt 0 -- eine Firmware, die `_BST` mit drei statt
-// vier Elementen zurueckgibt, darf den Kern nicht ueber das Ende des
-// Pakets hinauslesen lassen.
+// The i-th element of a package as a number. A package that is shorter
+// than expected gives 0 -- a firmware that returns `_BST` with three
+// instead of four elements must not make the kernel read beyond the end
+// of the package.
 fn pkg_int(state: u64, o: u64, i: u64) -> u64 {
     if amlobj.otype(o) != amlobj.OT_PKG {
         return 0
@@ -1219,33 +1206,30 @@ fn read_lid(state: u64) {
         let alt: u64 = g(state, E_LIDV)
         s(state, E_LIDV, v)
         mark(state, EV_LID)
-        // ================================ DECKEL ZU HEISST SPERREN
+        // ================================ LID CLOSED MEANS LOCK
         //
-        // Der Sperrbildschirm steht seit Runde ANMELDUNG; was fehlte,
-        // war jemand, der ihn beim Zuklappen anschaltet. Gesetzt wird
-        // GENAU DASSELBE Wort, das `idlelock` ueber den Systemaufruf
-        // 1870 (op 1) setzt -- kein zweiter Weg an der
-        // Kennwortpruefung vorbei, und kein zweiter Ort, an dem
-        // stuende, was "gesperrt" heisst.
+        // The lock screen has existed since round ANMELDUNG; what was missing was
+        // somebody who switches it on when the lid is closed. EXACTLY THE SAME
+        // word is set that `idlelock` sets through system call 1870 (op 1) -- no
+        // second way past the password check, and no second place where it would
+        // be written down what "locked" means.
         //
-        // NUR BEIM UEBERGANG AUF/ZU, und nur wenn vorher wirklich
-        // "auf" stand. `LID_UNKNOWN` ist der Zustand vor der ersten
-        // Abfrage; ein Brett, dessen Deckel beim Start zu ist (weil
-        // es an einem Bildschirm haengt und zugeklappt laeuft), darf
-        // davon nicht sofort gesperrt werden.
+        // ONLY ON THE TRANSITION OPEN/CLOSED, and only if it really said "open"
+        // before. `LID_UNKNOWN` is the state before the first query; a board whose
+        // lid is closed at boot (because it hangs on a monitor and runs closed)
+        // must not be locked at once because of that.
         if v == LID_CLOSED && alt == LID_OPEN {
             let sp: u64 = kstate.K11_OFF
             if kstate.get(state, sp + kstate.SP_ON) == 0 {
                 kstate.set(state, sp + kstate.SP_ON, 1)
                 kstate.add(state, sp + kstate.SP_LOCKS, 1)
-                var s_l: [u8; 32] = "acpiev: deckel zu -- gesperrt\0\0\0"
+                var s_l: [u8; 29] = "acpiev: lid closed -- locked\0"
                 serial.puts((&s_l[0]) as u64)
                 serial.nl()
             }
         }
-        // AUFGEKLAPPT WIRD NICHT ENTSPERRT. Ein Deckel, der aufsperrt,
-        // waere genau der zweite Weg an der Kennwortpruefung vorbei,
-        // den `idlelock.fi` in ihrem Kopf ausschliesst.
+        // OPENING DOES NOT UNLOCK. A lid that unlocks would be exactly the second
+        // way past the password check that `idlelock.fi` rules out in its header.
         if v == LID_OPEN && alt == LID_CLOSED {
             var s_a: [u8; 24] = "acpiev: deckel auf\0\0\0\0\0\0"
             serial.puts((&s_a[0]) as u64)
@@ -1270,10 +1254,10 @@ fn read_bif(state: u64) {
         return
     }
     s(state, E_BIFRET, 1)
-    // `_BIF` Package(13): Index 2 ist die letzte volle Ladung.
-    // `_BIX` Package(20+): dort ist es Index 3, weil vorne eine
-    // Revisionszahl steht. Unterschieden wird an der LAENGE -- das
-    // ist genau das, was die Spezifikation dafuer vorsieht.
+    // `_BIF` Package(13): index 2 is the last full charge.
+    // `_BIX` Package(20+): there it is index 3, because a revision number
+    // stands in front. They are told apart by the LENGTH -- that is exactly
+    // what the specification provides for it.
     let len: u64 = amlobj.ov2((&r[0]) as u64)
     var idx: u64 = 2
     if len >= 20 {
@@ -1322,7 +1306,7 @@ fn read_bst(state: u64) {
         return
     }
     s(state, E_BSTRET, 1)
-    // `_BST` Package(4): Zustand, Strom, Restkapazitaet, Spannung.
+    // `_BST` Package(4): state, rate, remaining capacity, voltage.
     let zust: u64 = pkg_int(state, (&r[0]) as u64, 0)
     let rem: u64 = pkg_int(state, (&r[0]) as u64, 2)
     if kstate.mode_on(state, kstate.M_EVDUMP) {
@@ -1373,64 +1357,61 @@ fn read_ac(state: u64) {
 }
 
 // ==================================================================
-// AUFSETZEN
+// SETUP
 // ==================================================================
 
 // ==================================================================
-// ACPI EINSCHALTEN -- DIE ZEILE, OHNE DIE NICHTS ANKOMMT
+// SWITCHING ON ACPI -- THE LINE WITHOUT WHICH NOTHING ARRIVES
 // ==================================================================
 //
-// GEMESSEN UND KORRIGIERT. Die erste Fassung dieser Runde trug die
-// SCI-Leitung ein, schaltete die GPE-Bits scharf, gab die
-// Einschalttaste frei -- und zaehlte nach `system_powerdown` am
-// QEMU-Monitor GENAU NULL Unterbrechungen (`irqs=0` in der
-// Berichtszeile, bei richtigem `pm1a=0x600`).
+// MEASURED AND CORRECTED. The first version of this round entered the SCI
+// line, armed the GPE bits, enabled the power button -- and after
+// `system_powerdown` at the QEMU monitor counted EXACTLY ZERO interrupts
+// (`irqs=0` in the report line, with a correct `pm1a=0x600`).
 //
-// Der Grund steht in ACPI 6.4 Abschnitt 16.3.2 und ist kein Fehler
-// im Code, sondern eine fehlende Zeile: EIN RECHNER STARTET IM
-// LEGACY-MODUS. Solange SCI_EN (Bit 0 von PM1a_CNT) nicht gesetzt
-// ist, gehen die Ereignisse NICHT an das Betriebssystem, sondern als
-// SMI an die Firmware -- die sie behandelt, wie sie will, und der
-// Kern bekommt nie etwas zu sehen. Der Weg vom Legacy- in den
-// ACPI-Modus ist EIN Schreibzugriff: der Wert aus dem FADT-Feld
-// ACPI_ENABLE auf den Anschluss aus SMI_CMD.
+// The reason is in ACPI 6.4 section 16.3.2 and is no bug in the code but
+// a missing line: A COMPUTER STARTS IN LEGACY MODE. As long as SCI_EN
+// (bit 0 of PM1a_CNT) is not set, the events do NOT go to the operating
+// system but as SMI to the firmware -- which handles them as it likes,
+// and the kernel never gets to see anything. The way from legacy to ACPI
+// mode is ONE write: the value of the FADT field ACPI_ENABLE to the port
+// from SMI_CMD.
 //
-// DANACH WIRD GEWARTET, und auch das steht in der Spezifikation:
-// die Umschaltung ist NICHT sofort fertig. Gewartet wird auf SCI_EN
-// selbst und nicht blind eine feste Zeit -- eine Firmware, die
-// langsamer ist als die geratene Frist, waere sonst genau der Fehler,
-// den man auf echtem Blech eine Woche sucht.
+// AFTERWARDS WE WAIT, and that too is in the specification: the switch is
+// NOT finished at once. The wait is for SCI_EN itself and not blindly for
+// a fixed time -- a firmware that is slower than the guessed deadline
+// would otherwise be exactly the bug one searches for a week on real
+// metal.
 //
-// SMI_CMD == 0 IST KEIN FEHLER. Die Spezifikation erlaubt es
-// ausdruecklich: dann gibt es keinen Legacy-Modus, die Maschine ist
-// schon im ACPI-Modus, und es ist nichts zu tun. QEMU mit `-machine
-// q35` ist so ein Fall, und jede Maschine, die nur ueber UEFI
-// startet, ebenfalls.
+// SMI_CMD == 0 IS NO ERROR. The specification explicitly allows it: then
+// there is no legacy mode, the machine is already in ACPI mode, and there
+// is nothing to do. QEMU with `-machine q35` is such a case, and so is
+// every machine that starts through UEFI only.
 fn acpi_mode_on(state: u64, facp: u64) -> u64 {
     let cnt: u64 = kstate.get32(facp + F_PM1A_CNT)
     if cnt == 0 {
         return 0
     }
     if (in16(cnt) & SCI_EN) != 0 {
-        return 1 // schon an
+        return 1 // already on
     }
     let smi: u64 = kstate.get32(facp + F_SMI_CMD)
     let val: u64 = kstate.get8(facp + F_ACPI_ENABLE)
     if smi == 0 {
-        return 2 // kein Legacy-Modus, nichts zu tun
+        return 2 // no legacy mode, nothing to do
     }
     out8(smi, val)
-    // Auf SCI_EN warten. Die Schleife ist grosszuegig (die
-    // Spezifikation nennt 3 Sekunden als Obergrenze fuer die
-    // Umschaltung), und sie bricht ab, sobald das Bit steht.
+    // Wait for SCI_EN. The loop is generous (the specification names 3
+    // seconds as the upper limit for the switch), and it ends as soon as the
+    // bit is set.
     var i: u64 = 0
     while i < 3000000 {
         if (in16(cnt) & SCI_EN) != 0 {
-            return 3 // umgeschaltet
+            return 3 // switched over
         }
         i = i + 1
     }
-    return 4 // geschrieben, aber das Bit kam nicht
+    return 4 // written, but the bit did not come
 }
 
 // The namespace could not be built (VirtualBox: unknown AML opcode), but the power button is a FIXED event and needs no
@@ -1521,8 +1502,8 @@ fn stage(state: u64) {
 
     cache_off(state, facp)
 
-    // Die Register aus der FADT. PM1x_EVT ist zweigeteilt: die erste
-    // Haelfte Status, die zweite Freigabe.
+    // The registers from the FADT. PM1x_EVT is in two halves: the first half
+    // status, the second enable.
     let evlen: u64 = kstate.get8(facp + F_PM1_EVT_LEN)
     s(state, E_EVLEN, evlen)
     s(state, E_PM1A, kstate.get32(facp + F_PM1A_EVT))
@@ -1533,9 +1514,9 @@ fn stage(state: u64) {
     read_knobs(state)
     let ovr: u64 = irqovr.parse(state)
     s(state, E_SCIOVR, ovr)
-    // ZUERST IN DEN ACPI-MODUS. Vor jeder anderen Zeile: solange die
-    // Maschine im Legacy-Modus steht, gehen alle Ereignisse an die
-    // Firmware, und alles Weitere hier waere umsonst.
+    // FIRST INTO ACPI MODE. Before any other line: as long as the machine is
+    // in legacy mode, all events go to the firmware, and everything else here
+    // would be in vain.
     s(state, E_MODE, acpi_mode_on(state, facp))
 
     let sci: u64 = kstate.get16(facp + F_SCI_INT)
@@ -1546,10 +1527,10 @@ fn stage(state: u64) {
         return
     }
 
-    // DER NAMENSRAUM. `aml.stage` hat ihn gebaut und wieder verworfen;
-    // hier wird er ein zweites Mal gebaut und BEHALTEN -- aber nur,
-    // wenn es etwas zu behandeln gibt. Ein Server ohne Deckel und
-    // ohne Akku zahlt so keine 256 KiB fuer nichts.
+    // THE NAMESPACE. `aml.stage` has built it and discarded it again; here it
+    // is built a second time and HELD -- but only if there is something to
+    // handle. A server without lid and without battery thereby pays no 1 MiB
+    // for nothing.
     var arena: u64 = 0
     if !kstate.mode_on(state, kstate.M_EVNOHOLD) {
         arena = aml.ns_hold(state)
@@ -1564,7 +1545,7 @@ fn stage(state: u64) {
     }
     s(state, E_ARENA, arena)
 
-    // Die Geraete suchen.
+    // Look for the devices.
     let lidd: u64 = find_hid(state, HID_LID)
     if lidd != amlns.NONE {
         s(state, E_LIDDEV, lidd)
@@ -1593,7 +1574,7 @@ fn stage(state: u64) {
         s(state, E_ACN, child(state, acd, amlns.seg_of((&w_psr[0]) as u64)))
     }
 
-    // Die GPE-Methoden einsammeln und GENAU DIE scharf schalten.
+    // Collect the GPE methods and arm EXACTLY THOSE.
     collect_gpe(state)
     let n: u64 = meth_n(state)
     var armed: u64 = 0
@@ -1601,8 +1582,7 @@ fn stage(state: u64) {
     while i < n {
         let bit: u64 = meth_bit(state, i)
         if gpe.sts_port(bit) != 0 {
-            // Erst loeschen (es kann seit dem Start etwas anliegen),
-            // dann freigeben.
+            // Clear first (something may be pending since boot), then enable.
             gpe.clear(bit)
             gpe.arm(bit, meth_art(state, i) == M_LEVEL || knob(state, KNOB_GPELEVEL))
             armed = armed + 1
@@ -1628,53 +1608,50 @@ fn stage(state: u64) {
         pm1.enable(pm1.TMR)
     }
 
-    // MIT `evfake` DEN NACHGEBAUTEN LAPTOP AUF EINEN SICHTBAREN
-    // STAND SETZEN. Ohne das steht in der Operationsregion des
-    // nachgebauten Laptops ueberall null -- also Deckel zu, null
-    // Prozent --, und jedes Bild dieser Runde zeigte einen leeren
-    // Akku. Die Zahl ist mit Bedacht krumm: 77 kann kein Vorgabewert
-    // und kein Zufall sein, sie steht so in `fake_set` und muss so in
-    // der Leiste stehen.
+    // WITH `evfake` SET THE REBUILT LAPTOP TO A VISIBLE STATE. Without that,
+    // the operation region of the rebuilt laptop is all zero -- that is lid
+    // closed, zero percent -- and every picture of this round showed an empty
+    // battery. The number is deliberately odd: 77 can be neither a default
+    // nor a coincidence, it stands that way in `fake_set` and must stand that
+    // way in the bar.
     if kstate.mode_on(state, kstate.M_EVFAKE) {
         fake_set(state, 1, 77, 1, 0)
     }
 
-    // Einmal alles lesen, damit die Taskleiste von Anfang an etwas
-    // anzuzeigen hat und nicht erst beim ersten Ereignis.
+    // Read everything once, so that the taskbar has something to show from
+    // the start and not only at the first event.
     refresh_all(state)
     report(state)
     report_route(state)
     amltest.run_if_asked(state)
 }
 
-// Der Vektor, auf dem der SCI meldet. Er steht in `trap.fi` noch
-// einmal; `tools/kernel/memmap.py` rechnet die Vektortafel nach und
-// faende zwei Namen auf einer Zahl.
+// The vector on which the SCI reports. It stands once more in `trap.fi`;
+// `tools/kernel/memmap.py` recalculates the vector table and would find
+// two names on one number.
 const VEC_SCI: u64 = 37
 
 // ==================================================================
-// DEN NACHGEBAUTEN LAPTOP BEDIENEN
+// OPERATING THE REBUILT LAPTOP
 // ==================================================================
 //
-// `tools/acpiev/asl/laptop.asl` legt seine Werte in eine
-// Operationsregion auf 0x9F00 (Deckel, Prozent, Zustand, Netzteil).
-// Auf einem echten Brett schreibt dort der eingebettete Controller;
-// an dieser Maschine gibt es keinen, und der QEMU-Monitor kann in den
-// Gastspeicher nicht SCHREIBEN (`xp` liest, `pmemsave` schreibt in
-// eine Datei, nicht umgekehrt).
+// `tools/acpiev/asl/laptop.asl` puts its values into an operation region
+// at 0x9F00 (lid, percentage, state, adapter). On a real board the
+// embedded controller writes there; on this machine there is none, and
+// the QEMU monitor cannot WRITE into guest memory (`xp` reads, `pmemsave`
+// writes into a file, not the other way round).
 //
-// Also setzt der Messlauf die Werte SELBST -- und das ist keine
-// Selbstbestaetigung, sondern genau die Trennung, auf die es
-// ankommt: HIER wird eine Zahl in einen SPEICHERPLATZ gelegt, und
-// gemessen wird, ob die AML-METHODE der Firmware sie findet, damit
-// RECHNET und das Ergebnis im richtigen Feld des richtigen Pakets
-// zurueckgibt. Zwischen der Zahl hier und der Zahl in
-// `acpiev.batt_percent` liegen `_BST`, ein `Multiply`, ein `Index`,
-// ein `Store`, das Auspacken des Pakets und die Prozentrechnung
-// gegen `_BIF`. Steht hier 77 und kommt hinten 77 heraus, hat der
-// Interpreter den ganzen Weg zurueckgelegt; schreibt jemand hier 40,
-// MUSS hinten 40 stehen. Das ist dasselbe Verhaeltnis wie zwischen
-// `tools/k18/ssdt.py` und `/bin/power`.
+// So the measurement run sets the values ITSELF -- and that is no
+// self-confirmation but exactly the separation that matters: HERE a
+// number is put into a MEMORY SLOT, and what is measured is whether the
+// firmware's AML METHOD finds it, CALCULATES with it and returns the
+// result in the right field of the right package. Between the number here
+// and the number in `acpiev.batt_percent` lie `_BST`, a `Multiply`, an
+// `Index`, a `Store`, the unpacking of the package and the percentage
+// calculation against `_BIF`. If 77 stands here and 77 comes out at the
+// back, the interpreter has covered the whole way; if somebody writes 40
+// here, 40 MUST stand at the back. That is the same relationship as
+// between `tools/k18/ssdt.py` and `/bin/power`.
 const LPST: u64 = 0x9F00
 
 fn fake_set(state: u64, lid: u64, pct: u64, zust: u64, ac: u64) {
@@ -1698,33 +1675,30 @@ fn fake_set(state: u64, lid: u64, pct: u64, zust: u64, ac: u64) {
 }
 
 // ==================================================================
-// EIN EREIGNIS VON HAND -- OHNE HARDWARE
+// AN EVENT BY HAND -- WITHOUT HARDWARE
 // ==================================================================
 //
-// WARUM ES DAS GIBT, und es ist eine Messung und keine Abkuerzung.
+// WHY THIS EXISTS, and it is a measurement and not a shortcut.
 //
-// QEMU 7.2 hat weder Deckel noch Akku (`-device battery` kam erst mit
-// 8.2, ein Deckelgeraet gibt es bis heute nicht). Es gibt also an
-// dieser Maschine NICHTS, was ein GPE-Bit fuer den Deckel ziehen
-// wuerde -- und das ist ein gueltiger Befund, der so im Bericht
-// steht.
+// QEMU 7.2 has neither lid nor battery (`-device battery` only came with
+// 8.2, a lid device does not exist to this day). So there is NOTHING on
+// this machine that would pull a GPE bit for the lid -- and that is a
+// valid finding that stands in the report as such.
 //
-// Was sich TROTZDEM messen laesst, ist alles HINTER dem Bit: die
-// GPE-Methode der Firmware ausfuehren, den `Notify`-Ring auswerten,
-// das gemeldete Geraet zuordnen, `_LID` oder `_BST` aufrufen und den
-// Wert uebernehmen. Das ist der ganze Weg bis auf die eine Leitung,
-// die kein Emulator zieht.
+// What can be measured ANYWAY is everything BEHIND the bit: executing the
+// firmware's GPE method, evaluating the `Notify` ring, attributing the
+// reported device, calling `_LID` or `_BST` and taking over the value.
+// That is the whole way except the one line that no emulator pulls.
 //
-// `ev_fake` fuehrt deshalb die Methode zu einem Bit aus, als waere
-// das Bit gekommen. Es UEBERSPRINGT den Behandler NICHT aus Bequem-
-// lichkeit -- der Behandler ist mit der Einschalttaste echt gemessen
-// (irqs=1, sts=0x0101) --, sondern weil an dieser Stelle die Hardware
-// fehlt und nur sie.
+// `ev_fake` therefore executes the method for a bit as if the bit had
+// come. It does NOT skip the handler for convenience -- the handler is
+// really measured with the power button (irqs=1, sts=0x0101) --, but
+// because at this point the hardware is missing and only that.
 //
-// WAS DAMIT NICHT GEMESSEN IST, und es gehoert in jeden Bericht
-// dieser Runde: dass ein echtes Brett das Bit wirklich zieht, dass es
-// das RICHTIGE Bit ist und dass das Loeschen den Sturm verhindert.
-// Dafuer gibt es `tools/acpiev/brett.sh`.
+// WHAT IS NOT MEASURED BY THIS, and it belongs in every report of this
+// round: that a real board really pulls the bit, that it is the RIGHT bit
+// and that clearing prevents the storm. `tools/acpiev/brett.sh` exists
+// for that.
 fn ev_fake(state: u64, bit: u64) -> bool {
     var s_f: [u8; 20] = "acpiev: fake gpe b=\0"
     let idx: u64 = meth_find(state, bit)
@@ -1742,9 +1716,9 @@ fn ev_fake(state: u64, bit: u64) -> bool {
     return true
 }
 
-// Alle Bits durchgehen, zu denen es eine Methode gibt. Fuer den
-// Messlauf: so laeuft JEDE GPE-Methode dieser Maschine einmal, und in
-// der Ausgabe steht, was jede gemeldet hat.
+// Go through all bits for which there is a method. For the measurement
+// run: so EVERY GPE method of this machine runs once, and the output says
+// what each one reported.
 fn fake_all(state: u64) {
     let n: u64 = meth_n(state)
     var i: u64 = 0
@@ -1781,60 +1755,60 @@ fn inject(state: u64, lid: u64, pct: u64, zust: u64, ac: u64) -> bool {
 }
 
 // ==================================================================
-// DER MESSLAUF -- WARTEN, BIS ETWAS PASSIERT
+// THE MEASUREMENT RUN -- WAITING UNTIL SOMETHING HAPPENS
 // ==================================================================
 //
-// WARUM ES DIESE FUNKTION GIBT, und sie ist kein Testgeruest, sondern
-// die Folge einer Messung.
+// WHY THIS FUNCTION EXISTS, and it is no test scaffold but the
+// consequence of a measurement.
 //
-// Der Kern dieser Abnahme laeuft mit `-device isa-debug-exit`: er
-// setzt auf, meldet und geht. Die Leerlaufaufgabe, in der `pump`
-// steht, kommt dabei NIE dran -- die Zeile `kernel: done` steht in
-// der Ausgabe, bevor der erste Zeitgeberschlag eine Aufgabe
-// auswaehlen konnte. Beim ersten Lauf dieser Runde sah das aus wie
-// "der SCI kommt nicht an" (irqs=0), und es war in Wahrheit "der
-// Kern war schon fertig, als die Taste gedrueckt wurde".
+// The kernel of this acceptance run runs with `-device isa-debug-exit`:
+// it sets up, reports and leaves. The idle task, in which `pump` stands,
+// NEVER gets its turn that way -- the line `kernel: done` is in the
+// output before the first timer tick could select a task. On the first
+// run of this round that looked like "the SCI does not arrive" (irqs=0),
+// and in truth it was "the kernel was already finished when the button
+// was pressed".
 //
-// `evwait` haelt den Kern deshalb GENAU SO LANGE an, wie die Messung
-// braucht, mit Unterbrechungen an, und pumpt in der Schleife. Das ist
-// dieselbe Bauart wie `sched.sleep` in den Messlaeufen anderer Runden.
+// `evwait` therefore keeps the kernel for EXACTLY as long as the
+// measurement needs, with interrupts on, and pumps in the loop. That is
+// the same construction as `sched.sleep` in the measurement runs of
+// other rounds.
 fn wait_loop(state: u64, ms: u64) {
     var s_w: [u8; 22] = "acpiev: warte ms=\0\0\0\0\0"
     serial.puts((&s_w[0]) as u64)
     serial.dec(ms)
     serial.nl()
-    // Unterbrechungen AN. Ohne diese Zeile wartet die Schleife auf
-    // etwas, das nie zugestellt wird.
+    // Interrupts ON. Without this line the loop waits for something that is
+    // never delivered.
     asm("sti")
-    // MIT `evfake` DEN NACHGEBAUTEN LAPTOP DURCHSPIELEN. Vier
-    // Schritte, und nach jedem steht in der Ausgabe, was der Kern
-    // daraus gemacht hat -- die REIHENFOLGE ist die Messung.
+    // WITH `evfake` PLAY THROUGH THE REBUILT LAPTOP. Four steps, and after
+    // each one the output says what the kernel made of it -- the ORDER is the
+    // measurement.
     if kstate.mode_on(state, kstate.M_EVFAKE) {
-        var s_1: [u8; 33] = "acpiev: --- 1 deckel auf, 77 %\0\0\0"
-        var s_2: [u8; 27] = "acpiev: --- 2 deckel ZU\0\0\0\0"
-        var s_3: [u8; 31] = "acpiev: --- 3 deckel auf, 40 %\0"
-        var s_4: [u8; 31] = "acpiev: --- 4 am netz, laedt\0\0\0"
-        // 1. Deckel offen, 77 Prozent, entlaedt, kein Netz.
+        var s_1: [u8; 29] = "acpiev: --- 1 lid open, 77 %\0"
+        var s_2: [u8; 25] = "acpiev: --- 2 lid CLOSED\0"
+        var s_3: [u8; 29] = "acpiev: --- 3 lid open, 40 %\0"
+        var s_4: [u8; 33] = "acpiev: --- 4 on mains, charging\0"
+        // 1. Lid open, 77 percent, discharging, no mains.
         serial.puts((&s_1[0]) as u64)
         serial.nl()
         fake_set(state, 1, 77, 1, 0)
         fake_all(state)
         report(state)
-        // 2. DECKEL ZU. Nur das Deckelbit ziehen -- so, wie es ein
-        //    echtes Brett taete.
+        // 2. LID CLOSED. Pull only the lid bit -- as a real board would.
         serial.puts((&s_2[0]) as u64)
         serial.nl()
         fake_set(state, 0, 77, 1, 0)
         let _a: bool = ev_fake(state, 3)
         report(state)
-        // 3. Deckel wieder auf, und der Akku ist gefallen.
+        // 3. Lid open again, and the battery has dropped.
         serial.puts((&s_3[0]) as u64)
         serial.nl()
         fake_set(state, 1, 40, 1, 0)
         let _b: bool = ev_fake(state, 3)
         let _c: bool = ev_fake(state, 4)
         report(state)
-        // 4. Netzteil eingesteckt: EINE Methode, ZWEI `Notify`.
+        // 4. Adapter plugged in: ONE method, TWO `Notify`.
         serial.puts((&s_4[0]) as u64)
         serial.nl()
         fake_set(state, 1, 41, 2, 1)
@@ -1842,14 +1816,14 @@ fn wait_loop(state: u64, ms: u64) {
         report(state)
     }
     let t0: u64 = time.mono_ns(state) / 1000000
-    var letzte: u64 = 0
+    var previous: u64 = 0
     while ((time.mono_ns(state) / 1000000) -% t0) < ms {
         pump(state)
-        // Jede Aenderung sofort melden, damit in der Abnahme die
-        // REIHENFOLGE steht und nicht nur der Endzustand.
+        // Report every change at once, so that the acceptance run shows the
+        // ORDER and not only the final state.
         let c: u64 = g(state, E_CHANGED)
-        if c != letzte {
-            letzte = c
+        if c != previous {
+            previous = c
             report(state)
         }
         asm("hlt")
@@ -1862,7 +1836,7 @@ fn wait_loop(state: u64, ms: u64) {
 }
 
 // ==================================================================
-// DER BERICHT
+// THE REPORT
 // ==================================================================
 
 fn report(state: u64) {
@@ -1947,8 +1921,8 @@ fn report(state: u64) {
     serial.dec(scistorm.empties())
     serial.nl()
 
-    // Die GPE-Methoden einzeln, damit in der Abnahme steht, WELCHE
-    // Bits scharf sind und nicht nur wie viele.
+    // The GPE methods one by one, so that the acceptance run shows WHICH bits
+    // are armed and not only how many.
     var s_e: [u8; 16] = "acpiev: gpe b=\0\0"
     var s_t: [u8; 7] = " art=\0\0"
     var s_o: [u8; 6] = " on=\0\0"
@@ -1971,14 +1945,14 @@ fn report(state: u64) {
 }
 
 // ==================================================================
-// DER SELBSTTEST
+// THE SELFTEST
 // ==================================================================
 //
-// Was sich OHNE die Hardware pruefen laesst, wird hier geprueft:
-// die Namensrechnung (`_L1B` -> Bit 0x1B, pegelgesteuert) und die
-// Registerrechnung (welches Oktett, welches Bit, welcher Block).
-// Beides sind reine Rechnungen, und beides waere ohne Test genau die
-// Sorte Fehler, die man auf echtem Blech eine Woche lang sucht.
+// What can be checked WITHOUT the hardware is checked here: the name
+// calculation (`_L1B` -> bit 0x1B, level triggered) and the register
+// calculation (which byte, which bit, which block). Both are pure
+// calculations, and both would be exactly the kind of bug one searches
+// for a week on real metal without a test.
 
 fn selftest(state: u64) {
     var s_n: [u8; 22] = "acpiev: selftest name\0"
@@ -1990,11 +1964,11 @@ fn selftest(state: u64) {
     var w3: [u8; 5] = "_LID\0"
     var w4: [u8; 5] = "_LFF\0"
 
-    // `_L1B` -> Bit 0x1B, Art LEVEL. `_E03` -> Bit 3, Art EDGE.
-    // `_LID` ist KEINE GPE-Methode ('I' ist keine Hexziffer) -- das
-    // ist die wichtigste der vier Zeilen, denn `_LID` steht in JEDER
-    // Laptop-DSDT, und wer es als GPE-Bit 0x1D liest, schaltet ein
-    // Bit scharf, das niemandem gehoert.
+    // `_L1B` -> bit 0x1B, kind LEVEL. `_E03` -> bit 3, kind EDGE.
+    // `_LID` is NOT a GPE method ('I' is no hex digit) -- that is the most
+    // important of the four lines, because `_LID` is in EVERY laptop DSDT,
+    // and whoever reads it as GPE bit 0x1D arms a bit that belongs to
+    // nobody.
     var gut: bool = true
     if gpe_of_name(amlns.seg_of((&w1[0]) as u64)) != ((0x1B << 1) | M_LEVEL) {
         gut = false

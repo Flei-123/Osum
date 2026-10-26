@@ -1,33 +1,31 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/amlev.fi -- RUNDE AML, TEIL 3: DIE AUSFUEHRUNG.
+// kernel/acpi/amlev.fi -- AML ROUND, PART 3: EXECUTION.
 //
-// Hier laeuft AML wirklich. Was diese Datei kann, ist genau das, was
-// gebraucht wird, um `_PRT`, `_CRS`, `_PRS`, `_SRS` und `_STA` auf einer
-// gewoehnlichen Maschine auszuwerten -- nicht mehr. Ein vollstaendiger
-// Nachbau von ACPICA ist AUSDRUECKLICH NICHT das Ziel dieser Runde; er
-// waere groesser als der uebrige Kernel und liesse sich mit dem, was
-// hier zur Verfuegung steht, nicht messen.
+// This is where AML really runs. What this file can do is exactly what
+// is needed to evaluate `_PRT`, `_CRS`, `_PRS`, `_SRS` and `_STA` on an
+// ordinary machine -- no more. A complete rebuild of ACPICA is EXPLICITLY
+// NOT the goal of this round; it would be larger than the rest of the
+// kernel and could not be measured with what is available here.
 //
-// ZWEI GRENZEN, DIE NICHT VERHANDELBAR SIND. Eine Firmware ist fremder
-// Code, den dieser Kernel ausfuehrt. Ohne Grenzen ist der erste
-// verschriebene Zaehler in einer While-Schleife ein Rechner, der beim
-// Hochfahren stehenbleibt, und die erste sich selbst aufrufende Methode
-// ein Stapelueberlauf im Kern.
+// TWO LIMITS THAT ARE NOT NEGOTIABLE. A firmware is foreign code that
+// this kernel executes. Without limits the first mistyped counter in a
+// While loop is a computer that stops at boot, and the first method that
+// calls itself is a stack overflow in the kernel.
 //
-//   BUDGET   Jeder ausgewertete Term kostet einen Schritt. Sind die
-//            Schritte alle, bricht die Auswertung mit ERR_BUDGET ab.
-//   TIEFE    Verschachtelung von Ausdruecken und Methodenaufrufen wird
-//            gezaehlt. Der Kernstapel ist 65536 Oktette gross
-//            (`kernel/arch/x86_64/boot.s`); DEPTH_MAX ist so gewaehlt,
-//            dass er nicht ausgeht, und die Abnahme faehrt dagegen.
+//   BUDGET   Every evaluated term costs one step. When the steps are
+//            used up, the evaluation aborts with ERR_BUDGET.
+//   DEPTH    Nesting of expressions and method calls is counted. The
+//            kernel stack is 65536 bytes (`kernel/arch/x86_64/boot.s`);
+//            DEPTH_MAX is chosen so that it does not run out, and the
+//            acceptance run runs against it.
 //
-// WO DIE ZWISCHENERGEBNISSE LIEGEN. NICHT auf der Halde. Jeder Aufrufer
-// von `ev` gibt einen Platz von 24 Oktetten mit, und der steht auf dem
-// Firn-Stapel (`var o: [u64; 3]`). Das ist kein Geiz: eine Schleife, die
-// nicht endet, wuerde sonst die Halde leerraeumen, bevor das Budget
-// greift -- und dann meldete die Abnahme "Halde voll", wo sie
-// "Endlosschleife" pruefen wollte. Auf die Halde kommt nur, was einen
-// Rumpf hat: Puffer, Pakete, Zeichenketten und die Rahmen der Methoden.
+// WHERE THE INTERMEDIATE RESULTS LIVE. NOT on the heap. Every caller of
+// `ev` passes a slot of 24 bytes, and it sits on the Firn stack
+// (`var o: [u64; 3]`). That is not stinginess: a loop that does not end
+// would otherwise empty the heap before the budget takes effect -- and
+// then the acceptance run would report "heap full" where it wanted to
+// check "endless loop". Only what has a body goes on the heap: buffers,
+// packages, strings and the frames of the methods.
 
 import lib.kstate
 import serial
@@ -47,84 +45,79 @@ export {
     FRAME_BYTES, DEPTH_MAX, CALL_MAX
 }
 
-// --------------------------------------------- die Plaetze in `kdata`
+// --------------------------------------------- the slots in `kdata`
 //
-// `amlns.fi` benutzt 0..55, diese Datei 56..191, `aml.fi` ab 192
-// (Routentafel 512..2560). Sie stehen in EINER Seite; wer eine
-// dazunimmt, traegt sie hier ein. RUNDE ACPI-EREIGNISSE nimmt
-// zusaetzlich 2560..2816 fuer den Notify-Ring -- HINTER der
-// Routentafel, siehe die Begruendung dort.
+// `amlns.fi` uses 0..55, this file 56..191, `aml.fi` from 192 on (route
+// table 512..2560). They live in ONE page; whoever adds one enters it
+// here. ROUND ACPI-EVENTS additionally takes 2560..2816 for the notify
+// ring -- BEHIND the route table, see the reasoning there.
 
 const A_DEPTH: u64 = 56
 const A_PERSIST: u64 = 2832
 const A_CALLS: u64 = 64
 const A_BUDGET: u64 = 72
-const A_LASTIF: u64 = 80 // war die Bedingung des letzten `If` wahr?
-const A_NOTIFY: u64 = 88 // wie oft `Notify` gesehen wurde
-const A_SP0: u64 = 96 // Stapelzeiger beim Betreten des Interpreters
+const A_LASTIF: u64 = 80 // was the condition of the last `If` true?
+const A_NOTIFY: u64 = 88 // how often `Notify` was seen
+const A_SP0: u64 = 96 // stack pointer when entering the interpreter
 const A_SPHI: u64 = 104
-const A_DEPTHHI: u64 = 112 // tiefste erreichte Verschachtelung // wie tief der Stapel dabei hoechstens war
+const A_DEPTHHI: u64 = 112 // deepest nesting reached // how deep the stack was at most
 
-const A_OPS: u64 = 128 // 4 Woerter: welche der 256 Opcodes vorkamen
-const A_EXT: u64 = 168 // 3 Woerter: dasselbe fuer 0x5B 0x00..0x8F
+const A_OPS: u64 = 128 // 4 words: which of the 256 opcodes occurred
+const A_EXT: u64 = 168 // 3 words: the same for 0x5B 0x00..0x8F
 
-// RUNDE ACPI-EREIGNISSE: WAS `Notify` GEMELDET HAT, und nicht nur
-// WIE OFT.
+// ROUND ACPI-EVENTS: WHAT `Notify` REPORTED, and not only HOW OFTEN.
 //
-// Bis hierher hat `ev_notify` einen Zaehler hochgesetzt und beide
-// Argumente weggeworfen. Fuer `_PRT` reichte das -- dort kommt gar
-// kein `Notify` vor. Fuer die Ereignisse IST es die Meldung: die
-// GPE-Methode `_L1B` der Firmware tut nichts anderes, als
-// `Notify(\_SB.BAT0, 0x80)` auszufuehren, und genau daran erkennt der
-// Kern, WELCHES Geraet sich gemeldet hat und WAS es sagen will
-// (0x80 = der Zustand hat sich geaendert, 0x81 = die Beschreibung).
+// Up to here `ev_notify` incremented a counter and threw both arguments
+// away. That was enough for `_PRT` -- there is no `Notify` in it at all.
+// For the events it IS the message: the firmware's GPE method `_L1B`
+// does nothing but execute `Notify(\_SB.BAT0, 0x80)`, and that is how
+// the kernel recognises WHICH device has reported and WHAT it wants to
+// say (0x80 = the state has changed, 0x81 = the description).
 //
-// Ein RING, kein einzelner Platz: eine einzige GPE-Methode darf
-// mehrere `Notify` hintereinander absetzen (`_L1B` oben meldet den
-// Akku zweimal und das Netzteil einmal), und wer nur den letzten
-// behaelt, verliert die anderen zwei.
-// WO DER RING LIEGT, und warum nicht bei 192.
+// A RING, not a single slot: one GPE method may issue several `Notify`
+// in a row (`_L1B` above reports the battery twice and the adapter once),
+// and whoever keeps only the last one loses the other two.
 //
-// Die Seite `kstate.AML_OFF` ist unter drei Dateien aufgeteilt:
-// `amlns.fi` 0..55, `amlev.fi` 56..191, `aml.fi` ab 192 -- und dessen
-// Routentafel steht auf 512 und ist 128 * 16 = 2048 Oktette lang, geht
-// also bis 2560. Ein Ring auf 200 haette MITTEN in die Skalare von
-// `aml.fi` geschrieben (A_PRTOK, A_ROUTEN, A_READY ...). Das ist
-// derselbe Fehler wie die Seitenkollisionen in `kstate.fi`, nur eine
-// Ebene tiefer, und er faellt nicht auf, weil kein Werkzeug die
-// Aufteilung INNERHALB einer Seite nachrechnet.
+// WHERE THE RING LIVES, and why not at 192.
 //
-// Der Ring liegt deshalb hinter der Routentafel: 2560..2816. Die Seite
-// ist 4096 Oktette gross (kstate.AML_MAX), es bleiben 1280 frei.
-const A_NOTN: u64 = 2560 // wie viele im Ring stehen
-const A_NOTR: u64 = 2568 // NOT_MAX * 16: Knoten, dann Code
+// The page `kstate.AML_OFF` is shared by three files: `amlns.fi` 0..55,
+// `amlev.fi` 56..191, `aml.fi` from 192 on -- and the latter's route
+// table sits at 512 and is 128 * 16 = 2048 bytes long, so it runs up to
+// 2560. A ring at 200 would have written INTO the scalars of `aml.fi`
+// (A_PRTOK, A_ROUTEN, A_READY ...). That is the same mistake as the page
+// collisions in `kstate.fi`, only one level deeper, and it goes unnoticed
+// because no tool recalculates the split INSIDE a page.
+//
+// The ring therefore lives behind the route table: 2560..2816. The page
+// is 4096 bytes (kstate.AML_MAX); behind the ring come the error context
+// of `amlns.fi` (2816..2831) and A_PERSIST (2832).
+const A_NOTN: u64 = 2560 // how many are in the ring
+const A_NOTR: u64 = 2568 // NOT_MAX * 16: nodes, then codes
 const NOT_MAX: u64 = 16
 
 const DEPTH_MAX: u64 = 64
 const CALL_MAX: u64 = 16
 
-// WIE VIEL KERNSTAPEL DER INTERPRETER VERBRAUCHEN DARF.
+// HOW MUCH KERNEL STACK THE INTERPRETER MAY USE.
 //
-// Die Zahl 48 oben ist eine Vorsichtsgrenze und KEINE Wache: wie viele
-// Oktette eine Verschachtelungsstufe wirklich kostet, entscheidet der
-// Uebersetzer, nicht der Quelltext. `ev_inner` hat zwei Dutzend
-// Zwischenplaetze zu je 24 Oktetten, und Firn legt sie im Rahmen an,
-// gleich welcher Zweig genommen wird.
+// The DEPTH_MAX above is a cautious limit and NOT a guard: how many
+// bytes a nesting level really costs is decided by the compiler, not by
+// the source text. `ev_inner` has two dozen temporary slots of 24 bytes,
+// and Firn allocates them in the frame whichever branch is taken.
 //
-// GEMESSEN, NICHT GERATEN: mit CALL_MAX 10 und DEPTH_MAX 48 hat der
-// Rekursionstest (`amldeep`) den Kernstapel von 65536 Oktetten
-// UEBERSCHRITTEN -- die Zeichenkette, die den Fehler melden sollte,
-// stand danach nicht mehr auf dem Stapel, und die Ausgabe brach mitten
-// im Wort ab. Also wird der Stapelzeiger SELBST gemessen: `stage`
-// merkt sich, wo er stand, und jede Verschachtelungsstufe rechnet nach,
-// wie weit sie sich davon entfernt hat. Wer die Grenze reisst, bekommt
-// ERR_DEPTH -- das ist derselbe definierte Fehler wie bei zu tiefer
-// Rekursion, und er kommt jetzt aus einer Messung.
+// MEASURED, NOT GUESSED: with CALL_MAX 10 and DEPTH_MAX 48 the recursion
+// test (`amldeep`) EXCEEDED the kernel stack of 65536 bytes -- the string
+// that was meant to report the error was no longer on the stack
+// afterwards, and the output broke off in the middle of a word. So the
+// stack pointer is measured ITSELF: `stage` remembers where it stood, and
+// every nesting level calculates how far it has moved away from it.
+// Whoever breaks the limit gets ERR_DEPTH -- the same defined error as
+// for too deep recursion, and it now comes from a measurement.
 const STACK_LIMIT: u64 = 57344
 
-// Ein Methodenrahmen. Sieben Argumente, acht Ortsvariablen, ein
-// Rueckgabeplatz und ein Steuerwort -- alles aneinander, damit ein
-// Rahmen EINE Zuteilung ist.
+// A method frame. Seven arguments, eight local variables, one return slot
+// and one control word -- all next to each other, so that a frame is ONE
+// allocation.
 const FRAME_BYTES: u64 = 400
 const F_SCOPE: u64 = 0
 const F_ARGS: u64 = 8 // 7 * 24
@@ -132,7 +125,7 @@ const F_LOCALS: u64 = 176 // 8 * 24
 const F_RET: u64 = 368
 const F_CTL: u64 = 392
 
-// Was das Steuerwort sagt.
+// What the control word says.
 const C_NONE: u64 = 0
 const C_RETURN: u64 = 1
 const C_BREAK: u64 = 2
@@ -152,26 +145,26 @@ fn budget_set(state: u64, n: u64) {
     s(state, A_CALLS, 0)
 }
 
-// Wo der Stapel steht. Das ist die einzige Zeile Assembler in dieser
-// Datei, und sie liest ein Register, das keine Sprache benennt.
+// Where the stack is. This is the only line of assembler in this file,
+// and it reads a register that no language names.
 fn sp_now() -> u64 {
     return asm("mov rax, rsp", out("rax"))
 }
 
-// Hier faengt der Interpreter an. Alles, was tiefer geht, wird von hier
-// aus gemessen.
+// This is where the interpreter starts. Everything that goes deeper is
+// measured from here.
 fn stack_base(state: u64) {
     s(state, A_SP0, sp_now())
     s(state, A_SPHI, 0)
 }
 
-// Wie viele Oktette Kernstapel der tiefste Punkt gekostet hat.
+// How many bytes of kernel stack the deepest point cost.
 fn stack_high(state: u64) -> u64 {
     return g(state, A_SPHI)
 }
 
-// Den Hoechststand zuruecksetzen -- damit sich messen laesst, WELCHER
-// Abschnitt den Stapel verbraucht: das Laden oder das Ausfuehren.
+// Reset the high-water mark -- so that it can be measured WHICH section
+// uses the stack: loading or executing.
 fn stack_clear(state: u64) {
     s(state, A_SPHI, 0)
 }
@@ -193,11 +186,12 @@ fn notifies(state: u64) -> u64 {
     return g(state, A_NOTIFY)
 }
 
-// ---------------------------------------- welche Opcodes vorkamen
+// ---------------------------------------- which opcodes occurred
 //
-// Nicht Zierde: die Abnahme rechnet die ABDECKUNG aus -- wie viele der
-// Opcodes, die in der DSDT dieser Maschine wirklich stehen, dieser
-// Interpreter kennt. Dazu muss er sagen koennen, welche er gesehen hat.
+// Not decoration: the acceptance run calculates the COVERAGE -- how many
+// of the opcodes that really occur in this machine's DSDT this
+// interpreter knows. For that it must be able to say which ones it has
+// seen.
 
 fn seen_mark(state: u64, op: u64) {
     let w: u64 = A_OPS + (op / 64) * 8
@@ -219,7 +213,7 @@ fn seen_ext(state: u64, op: u64) -> bool {
     return (g(state, w) & (1 << (op & 63))) != 0
 }
 
-// ------------------------------------------------------------ Rahmen
+// ------------------------------------------------------------ frame
 
 fn frame_new(state: u64) -> u64 {
     return amlns.heap_alloc(state, FRAME_BYTES)
@@ -253,10 +247,10 @@ fn frame_ctl_set(f: u64, v: u64) {
     amlns.wr64(f + F_CTL, v)
 }
 
-// ------------------------------------------------------ Buch fuehren
+// ------------------------------------------------------ bookkeeping
 
-// Ein Schritt. Gibt false zurueck, wenn das Budget alle ist -- und dann
-// steht ERR_BUDGET, und jede Schleife oben bricht ab.
+// One step. Returns false when the budget is used up -- and then
+// ERR_BUDGET is set, and every loop above aborts.
 fn step(state: u64) -> bool {
     let b: u64 = g(state, A_BUDGET)
     if b == 0 {
@@ -328,7 +322,7 @@ fn deref(state: u64, o: u64) {
     }
 }
 
-// Den Wert eines Knotens holen.
+// Fetch the value of a node.
 fn node_value(state: u64, node: u64, dst: u64) {
     if node == amlns.NONE {
         amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
@@ -342,9 +336,9 @@ fn node_value(state: u64, node: u64, dst: u64) {
             amlobj.ocopy(dst, cached)
             return
         }
-        // Noch nie gelesen: das AML hinter dem Namen auswerten und das
-        // Ergebnis merken. Ein `Name` ist konstant -- ein zweites Lesen
-        // muesste dasselbe ergeben, und die Halde ist nicht unendlich.
+        // Never read before: evaluate the AML behind the name and remember the
+        // result. A `Name` is constant -- a second read would have to give the
+        // same, and the heap is not infinite.
         let f: u64 = frame_new(state)
         if f == 0 {
             amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
@@ -381,15 +375,15 @@ fn node_value(state: u64, node: u64, dst: u64) {
         amlobj.oint(dst, buffield_read(state, node))
         return
     }
-    // Geraet, Bereich, Region, Mutex: der Knoten selbst ist der Wert.
+    // Device, scope, region, mutex: the node itself is the value.
     amlobj.oset(dst, amlobj.OT_REF_NODE, node, 0)
 }
 
-// ----------------------------------------------- Felder in einem Puffer
+// ----------------------------------------------- fields in a buffer
 //
-// `CreateDWordField(PRR0, 5, PRRI)` legt einen Namen an, der auf vier
-// Oktette IN EINEM PUFFER zeigt. Der Knoten haelt das Pufferobjekt, den
-// Bitversatz und die Bitbreite.
+// `CreateDWordField(PRR0, 5, PRRI)` creates a name that points to four
+// bytes INSIDE A BUFFER. The node holds the buffer object, the bit
+// offset and the bit width.
 fn buffield_read(state: u64, node: u64) -> u64 {
     let bo: u64 = amlns.node_a(state, node)
     let bit: u64 = amlns.node_b(state, node)
@@ -444,8 +438,7 @@ fn buffield_write(state: u64, node: u64, val: u64) {
 
 // --------------------------------------------------------------- Store
 
-// Ein Objekt in ein Ziel legen. `tgt` ist das, was `ev_target` geliefert
-// hat.
+// Put an object into a target. `tgt` is what `ev_target` has delivered.
 fn store_wide_field(state: u64, node: u64, src: u64) {
     let t: u64 = amlobj.otype(src)
     if t == amlobj.OT_BUF || t == amlobj.OT_STR {
@@ -459,7 +452,7 @@ fn store_wide_field(state: u64, node: u64, src: u64) {
 fn store_into(state: u64, src: u64, tgt: u64) {
     let t: u64 = amlobj.otype(tgt)
     if t == amlobj.OT_NONE {
-        return // Ziel war NullName: das Ergebnis wird verworfen
+        return // the target was NullName: the result is discarded
     }
     if t == amlobj.OT_REF_SLOT {
         amlobj.ocopy(amlobj.ov1(tgt), src)
@@ -507,18 +500,18 @@ fn store_into(state: u64, src: u64, tgt: u64) {
     amlns.err_set(state, amlns.ERR_TYPE)
 }
 
-// ------------------------------------------------------- ein Ziel lesen
+// ------------------------------------------------------- reading a target
 //
-// Ein Ziel ist KEIN Wert: `Store(Zero, Local0)` will den PLATZ von
-// Local0, nicht seinen Inhalt. Deshalb gibt es diese zweite Fassung von
-// `ev`, und deshalb liefert sie Verweise.
+// A target is NOT a value: `Store(Zero, Local0)` wants the SLOT of
+// Local0, not its contents. That is why there is this second version of
+// `ev`, and why it delivers references.
 fn ev_target(state: u64, f: u64, p: u64, dst: u64) -> u64 {
     if !step(state) {
         return 0
     }
     let c: u64 = amlns.rd8(p)
     if c == 0x00 {
-        // NullName -- "das Ergebnis interessiert nicht"
+        // NullName -- "the result does not matter"
         amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
         return p + 1
     }
@@ -537,11 +530,11 @@ fn ev_target(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         amlobj.oset(dst, amlobj.OT_DEBUG, 0, 0)
         return p + 2
     }
-    // Index, DerefOf, RefOf duerfen ebenfalls als Ziel stehen.
+    // Index, DerefOf, RefOf may also appear as a target.
     if c == 0x88 || c == 0x83 || c == 0x71 {
         return ev(state, f, p, dst)
     }
-    // Sonst: ein Name. Der PLATZ, nicht der Wert.
+    // Otherwise: a name. The SLOT, not the value.
     if c == 0x5C || c == 0x5E || c == 0x2E || c == 0x2F || c == 0x5F
         || (c >= 0x41 && c <= 0x5A) {
         var out: [u64; 1] = [0 as u64; 1]
@@ -556,8 +549,8 @@ fn ev_target(state: u64, f: u64, p: u64, dst: u64) -> u64 {
     return 0
 }
 
-// Ein Ziel lesen und gleich hineinschreiben. Das ist das dritte
-// Argument fast jedes Rechenbefehls (`Add(a, b, ZIEL)`).
+// Read a target and write into it at once. That is the third argument of
+// almost every arithmetic instruction (`Add(a, b, TARGET)`).
 fn ev_store_target(state: u64, f: u64, p: u64, val: u64) -> u64 {
     var t: [u64; 3] = [0 as u64; 3]
     let q: u64 = ev_target(state, f, p, (&t[0]) as u64)
@@ -568,9 +561,9 @@ fn ev_store_target(state: u64, f: u64, p: u64, val: u64) -> u64 {
     return q
 }
 
-// --------------------------------------------------- zwei Zahlen holen
+// --------------------------------------------------- fetching two numbers
 
-// Liest zwei TermArgs und legt sie als Zahlen nach a und b.
+// Reads two TermArgs and puts them as numbers into a and b.
 fn two_ints(state: u64, f: u64, p: u64, a: u64, b: u64) -> u64 {
     var x: [u64; 3] = [0 as u64; 3]
     var y: [u64; 3] = [0 as u64; 3]
@@ -589,8 +582,8 @@ fn two_ints(state: u64, f: u64, p: u64, a: u64, b: u64) -> u64 {
     return q
 }
 
-// AML rechnet modulo 2^64 und verschiebt um 64 oder mehr zu null. Beides
-// steht hier EINMAL, damit es nicht an zwoelf Stellen falsch ist.
+// AML calculates modulo 2^64 and shifting by 64 or more gives zero. Both
+// are stated ONCE here, so that they are not wrong in twelve places.
 fn shl(v: u64, n: u64) -> u64 {
     if n >= 64 {
         return 0
@@ -605,10 +598,10 @@ fn shr(v: u64, n: u64) -> u64 {
     return v >> n
 }
 
-// --------------------------------------------------- der Auswerter
+// --------------------------------------------------- the evaluator
 
-// Wertet EINEN Term ab `p` aus und legt das Ergebnis nach `dst`.
-// Rueckgabe: die Stelle dahinter, oder 0 bei einem Fehler.
+// Evaluates ONE term from `p` on and puts the result into `dst`.
+// Returns: the position behind it, or 0 on an error.
 fn ev(state: u64, f: u64, p: u64, dst: u64) -> u64 {
     if !step(state) {
         return 0
@@ -625,7 +618,7 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
     let c: u64 = amlns.rd8(p)
     amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
 
-    // ------------------------------------------------ Konstanten
+    // ------------------------------------------------ constants
     if c == 0x00 {
         seen_mark(state, c)
         amlobj.oint(dst, 0)
@@ -661,7 +654,7 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         amlobj.oint(dst, amlns.rd64(p + 1))
         return p + 9
     }
-    if c == 0x0D { // Zeichenkette
+    if c == 0x0D { // string
         seen_mark(state, c)
         var n: u64 = 0
         while amlns.rd8(p + 1 + n) != 0 {
@@ -671,7 +664,7 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         return p + 2 + n
     }
 
-    // ------------------------------------------------ Arg und Local
+    // ------------------------------------------------ Arg and Local
     if c >= 0x60 && c <= 0x67 {
         seen_mark(state, c)
         amlobj.ocopy(dst, frame_local(f, c -% 0x60))
@@ -683,7 +676,7 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         return p + 1
     }
 
-    // ------------------------------------------------ Puffer und Paket
+    // ------------------------------------------------ buffer and package
     if c == 0x11 {
         return ev_buffer(state, f, p, dst)
     }
@@ -691,11 +684,11 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         return ev_package(state, f, p, dst)
     }
 
-    // ------------------------------------------------ Steuerung
+    // ------------------------------------------------ control flow
     if c == 0xA0 {
         return ev_if(state, f, p)
     }
-    if c == 0xA1 { // Else ohne If davor: ueberspringen
+    if c == 0xA1 { // Else without a preceding If: skip
         seen_mark(state, c)
         return skip_pkg(p)
     }
@@ -726,7 +719,7 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         seen_mark(state, c)
         return p + 1
     }
-    if c == 0xCC { // BreakPoint -- fuer uns dasselbe wie Noop
+    if c == 0xCC { // BreakPoint -- the same as Noop for us
         seen_mark(state, c)
         return p + 1
     }
@@ -736,7 +729,7 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         return ev_store(state, f, p, dst, c)
     }
 
-    // ------------------------------------------------ Rechnen
+    // ------------------------------------------------ arithmetic
     if c == 0x72 || c == 0x74 || c == 0x77 || c == 0x79 || c == 0x7A
         || c == 0x7B || c == 0x7C || c == 0x7D || c == 0x7E || c == 0x7F
         || c == 0x85 {
@@ -752,7 +745,7 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         return ev_incdec(state, f, p, dst, c)
     }
 
-    // ------------------------------------------------ Vergleichen
+    // ------------------------------------------------ comparing
     if c == 0x90 || c == 0x91 || c == 0x93 || c == 0x94 || c == 0x95 {
         return ev_compare(state, f, p, dst, c, 0)
     }
@@ -766,7 +759,7 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         return ev_lnot(state, f, p, dst)
     }
 
-    // ------------------------------------------------ Verweise
+    // ------------------------------------------------ references
     if c == 0x88 {
         return ev_index(state, f, p, dst)
     }
@@ -787,12 +780,12 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         return ev_sizeof(state, f, p, dst, c)
     }
 
-    // ------------------------------------------------ Umwandeln
+    // ------------------------------------------------ converting
     if c == 0x96 || c == 0x99 || c == 0x97 || c == 0x98 {
         return ev_convert(state, f, p, dst, c)
     }
 
-    // ------------------------------------------------ Namen anlegen
+    // ------------------------------------------------ creating names
     if c == 0x08 {
         return ev_name(state, f, p)
     }
@@ -806,7 +799,7 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         return ev_notify(state, f, p)
     }
 
-    // ------------------------------------------------ erweiterte Opcodes
+    // ------------------------------------------------ extended opcodes
     if c == 0x5B {
         return ev_ext(state, f, p, dst)
     }
@@ -824,7 +817,7 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         return ev_mid(state, f, p, dst)
     }
 
-    // ------------------------------------------------ ein Name
+    // ------------------------------------------------ a name
     if c == 0x5C || c == 0x5E || c == 0x2E || c == 0x2F || c == 0x5F
         || (c >= 0x41 && c <= 0x5A) {
         return ev_namestring(state, f, p, dst)
@@ -835,21 +828,20 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
 }
 
 // ================================================================
-// DIE ZWEIGE, DIE ZWISCHENPLAETZE BRAUCHEN, ALS EIGENE FUNKTIONEN
+// THE BRANCHES THAT NEED TEMPORARY SLOTS, AS FUNCTIONS OF THEIR OWN
 // ================================================================
 //
-// WARUM SIE NICHT IN `ev_inner` STEHEN, wo sie hingehoeren wuerden.
-// Firn legt die Zwischenplaetze ALLER Zweige einer Funktion in EINEM
-// Rahmen an, gleich welcher Zweig genommen wird. `ev_inner` mit einem
-// Dutzend Plaetzen zu je 24 Oktetten kostete damit rund 1600 Oktette
-// Kernstapel JE VERSCHACHTELUNGSSTUFE -- gemessen mit der Stapelwache
-// oben: 52064 Oktette bei 48 Stufen, bei einem Kernstapel von 65536.
-// Das ist kein theoretisches Problem: der Rekursionstest `amldeep` hat
-// den Stapel wirklich ueberschrieben, und die Fehlermeldung, die das
-// haette sagen sollen, stand danach nicht mehr da.
+// WHY THEY ARE NOT IN `ev_inner`, where they would belong. Firn
+// allocates the temporary slots of ALL branches of a function in ONE
+// frame, whichever branch is taken. `ev_inner` with a dozen slots of 24
+// bytes each thereby cost about 1600 bytes of kernel stack PER NESTING
+// LEVEL -- measured with the stack guard above: 52064 bytes at 48
+// levels, with a kernel stack of 65536. That is no theoretical problem:
+// the recursion test `amldeep` really overwrote the stack, and the error
+// message that should have said so was no longer there afterwards.
 //
-// Aufgeteilt kostet eine Stufe nur noch den kleinen Rahmen von
-// `ev_inner` plus den EINEN Zweig, der wirklich genommen wird.
+// Split up, a level costs only the small frame of `ev_inner` plus the ONE
+// branch that is really taken.
 
 fn skip_pkg(p: u64) -> u64 {
     var out: [u64; 1] = [0 as u64; 1]
@@ -962,11 +954,11 @@ fn ev_sizeof(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
     return q
 }
 
-// RUNDE ACPI-EREIGNISSE: der Ring der Meldungen.
+// ROUND ACPI-EVENTS: the ring of the messages.
 //
-// `not_clear` VOR dem Ausfuehren einer GPE-Methode, danach `not_count`
-// und `not_node`/`not_code` je Eintrag -- so erfaehrt der Kern, was
-// die Firmware gemeldet hat.
+// `not_clear` BEFORE executing a GPE method, afterwards `not_count` and
+// `not_node`/`not_code` per entry -- that is how the kernel learns what
+// the firmware has reported.
 
 fn not_clear(state: u64) {
     s(state, A_NOTN, 0)
@@ -1007,11 +999,10 @@ fn ev_notify(state: u64, f: u64, p: u64) -> u64 {
     }
     s(state, A_NOTIFY, g(state, A_NOTIFY) + 1)
 
-    // WELCHES Geraet und WELCHER Code. Das erste Argument ist ein
-    // Verweis auf einen Knoten (`Notify(\_SB.LID0, 0x80)`); steht dort
-    // etwas anderes, wird der Eintrag mit NONE abgelegt und der Code
-    // trotzdem gemerkt -- eine Meldung, die der Kern nicht zuordnen
-    // kann, ist immer noch eine Meldung.
+    // WHICH device and WHICH code. The first argument is a reference to a
+    // node (`Notify(\_SB.LID0, 0x80)`); if something else stands there, the
+    // entry is stored with NONE and the code is remembered anyway -- a
+    // message that the kernel cannot attribute is still a message.
     var node: u64 = amlns.NONE
     if amlobj.otype((&a[0]) as u64) == amlobj.OT_REF_NODE {
         node = amlobj.ov1((&a[0]) as u64)
@@ -1023,14 +1014,14 @@ fn ev_notify(state: u64, f: u64, p: u64) -> u64 {
         s(state, A_NOTR + n * 16, node)
         s(state, A_NOTR + n * 16 + 8, code)
     }
-    // WEITERZAEHLEN, AUCH WENN DER RING VOLL IST. `not_count` deckelt
-    // beim Lesen; so steht in `A_NOTN` die WAHRE Zahl und ein
-    // Ueberlauf faellt in der Abnahme auf, statt still zu verschwinden.
+    // KEEP COUNTING EVEN IF THE RING IS FULL. `not_count` caps when reading;
+    // so `A_NOTN` holds the TRUE number and an overflow shows up in the
+    // acceptance run instead of silently disappearing.
     s(state, A_NOTN, n + 1)
     return q
 }
 
-// --------------------------------------------------------- die Teile
+// --------------------------------------------------------- the parts
 
 fn ev_buffer(state: u64, f: u64, p: u64, dst: u64) -> u64 {
     seen_mark(state, 0x11)
@@ -1354,7 +1345,7 @@ fn ev_convert(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
         }
         return ev_store_target(state, f, q, dst)
     }
-    // ToHexString und ToDecimalString: eine Zeichenkette auf der Halde.
+    // ToHexString and ToDecimalString: a string on the heap.
     let v: u64 = amlobj.to_int((&x[0]) as u64)
     let o: u64 = amlobj.obj_buf(state, 24)
     if o == 0 {
@@ -1395,10 +1386,10 @@ fn ev_convert(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
     return ev_store_target(state, f, q, dst)
 }
 
-// `Name(X, wert)` MITTEN IN EINER METHODE. Das gibt es wirklich: QEMUs
-// `IQCR` legt bei jedem Aufruf einen frischen Puffer `PRR0` an und
-// gibt ihn zurueck. Also wird der Knoten angelegt (oder
-// wiederverwendet) und sein Wert JEDES MAL neu gerechnet.
+// `Name(X, value)` IN THE MIDDLE OF A METHOD. That really exists: QEMU's
+// `IQCR` creates a fresh buffer `PRR0` on every call and returns it. So
+// the node is created (or reused) and its value is calculated AGAIN
+// EVERY TIME.
 fn ev_name(state: u64, f: u64, p: u64) -> u64 {
     seen_mark(state, 0x08)
     var out: [u64; 1] = [0 as u64; 1]
@@ -1441,10 +1432,9 @@ fn ev_createfield(state: u64, f: u64, p: u64, c: u64) -> u64 {
         amlns.err_set(state, amlns.ERR_TYPE)
         return 0
     }
-    // Das Pufferobjekt muss den Aufruf ueberleben -- also eine Kopie des
-    // OBJEKTS auf der Halde (nicht der Daten: die sollen dieselben
-    // bleiben, sonst schreibt das Feld in einen anderen Puffer als den,
-    // den die Methode zurueckgibt).
+    // The buffer object must survive the call -- so a copy of the OBJECT on
+    // the heap (not of the data: those are to stay the same, otherwise the
+    // field writes into a different buffer than the one the method returns).
     let keep: u64 = amlobj.obj_new(state)
     if keep == 0 {
         return 0
@@ -1465,7 +1455,7 @@ fn ev_createfield(state: u64, f: u64, p: u64, c: u64) -> u64 {
         width = 1
     }
     if c != 0x8D {
-        bit = bit * 8 // bei allen ausser CreateBitField ist es ein Oktettversatz
+        bit = bit * 8 // for all except CreateBitField it is a byte offset
     }
     var out: [u64; 1] = [0 as u64; 1]
     let node: u64 = amlns.walk_create(state, frame_scope(f), q,
@@ -1496,14 +1486,14 @@ fn ev_ext(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         amlobj.oint(dst, amlsys.timer_100ns(state))
         return p + 2
     }
-    if e == 0x23 { // Acquire: ein Interpreter, ein Faden -> immer sofort
+    if e == 0x23 { // Acquire: one interpreter, one thread -> always at once
         var t: [u64; 3] = [0 as u64; 3]
         let q: u64 = ev_target(state, f, p + 2, (&t[0]) as u64)
         if q == 0 {
             return 0
         }
         amlobj.oint(dst, 0)
-        return q + 2 // die zwei Oktette Zeitgrenze
+        return q + 2 // the two bytes of time limit
     }
     if e == 0x27 {
         var t: [u64; 3] = [0 as u64; 3]
@@ -1547,7 +1537,7 @@ fn ev_ext(state: u64, f: u64, p: u64, dst: u64) -> u64 {
             }
         }
         if ok == 0 {
-            // Der Name gibt es nicht -- das ist bei CondRefOf KEIN Fehler.
+            // The name does not exist -- with CondRefOf that is NOT an error.
             kstate.set(state, kstate.AML_OFF + 40, amlns.ERR_OK)
         }
         q = ev_store_target(state, f, q, (&t[0]) as u64)
@@ -1558,7 +1548,7 @@ fn ev_ext(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         }
         return q
     }
-    if e == 0x13 { // CreateField(quelle, bit, laenge, name)
+    if e == 0x13 { // CreateField(source, bit, length, name)
         var src: [u64; 3] = [0 as u64; 3]
         var bit: [u64; 3] = [0 as u64; 3]
         var len: [u64; 3] = [0 as u64; 3]
@@ -1595,9 +1585,8 @@ fn ev_ext(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         amlns.set_c(state, node, amlobj.to_int((&len[0]) as u64))
         return out[0]
     }
-    // Fatal, Load, Unload, LoadTable, ToBCD, FromBCD, Wait: nicht in
-    // dieser Runde. Ein definierter Fehler ist besser als eine Zahl,
-    // die niemand nachrechnen kann.
+    // Load, Unload, LoadTable and the other extended opcodes: not supported.
+    // A defined error is better than a number that nobody can recalculate.
     bad_op(state, f, 0x5B00 | e)
     return 0
 }
@@ -1816,7 +1805,7 @@ fn ev_field(state: u64, f: u64, p: u64) -> u64 {
     return end
 }
 
-// Ein Name im Ausdruck: entweder ein Methodenaufruf oder ein Wert.
+// A name in the expression: either a method call or a value.
 fn ev_namestring(state: u64, f: u64, p: u64, dst: u64) -> u64 {
     var out: [u64; 1] = [0 as u64; 1]
     let node: u64 = amlns.walk(state, frame_scope(f), p, (&out[0]) as u64)
@@ -1829,10 +1818,10 @@ fn ev_namestring(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         node_value(state, node, dst)
         return q
     }
-    // Ein Aufruf. Die Zahl der Argumente steht im Knoten -- ohne sie
-    // waere nicht zu erkennen, wo der Aufruf aufhoert.
+    // A call. The number of arguments is in the node -- without it one could
+    // not tell where the call ends.
     let argc: u64 = amlns.node_flags(state, node) & 7
-    var args: [u64; 21] = [0 as u64; 21] // 7 * 3 Woerter
+    var args: [u64; 21] = [0 as u64; 21] // 7 * 3 words
     var i: u64 = 0
     while i < argc {
         q = ev(state, f, q, (&args[(i * 3) as usize]) as u64)
@@ -1846,9 +1835,9 @@ fn ev_namestring(state: u64, f: u64, p: u64, dst: u64) -> u64 {
     return q
 }
 
-// -------------------------------------------------------- Aufrufen
+// -------------------------------------------------------- calling
 
-// Eine Methode ausfuehren. `argsrc` zeigt auf `argc` Objektplaetze.
+// Execute a method. `argsrc` points to `argc` object slots.
 fn call_method(state: u64, node: u64, argc: u64, argsrc: u64, dst: u64) {
     amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
     let native: u64 = amlns.node_c(state, node)
@@ -1862,14 +1851,13 @@ fn call_method(state: u64, node: u64, argc: u64, argsrc: u64, dst: u64) {
         return
     }
     s(state, A_CALLS, calls + 1)
-    // WO DIE HALDE STAND, BEVOR DIESER AUFRUF ETWAS GENOMMEN HAT.
-    // Gibt die Methode eine ZAHL zurueck und hat sie keinen neuen Namen
-    // angelegt, dann gehoert alles, was sie belegt hat, ihr allein --
-    // und der Schiebezeiger darf zurueck. Ohne das kostet jeder der
-    // vierhundert Aufrufe beim Auswerten von `_PRT` einen Rahmen von
-    // 400 Oktetten, und die Halde ist nach hundert Steckplaetzen leer
-    // (gemessen: 196296 statt 192 KiB, Fehler ERR_HEAP, 103 statt 128
-    // Eintraege in der Routentafel).
+    // WHERE THE HEAP STOOD BEFORE THIS CALL TOOK ANYTHING.
+    // If the method returns a NUMBER and has not created a new name, then
+    // everything it has used belongs to it alone -- and the bump pointer may
+    // go back. Without that, each of the four hundred calls while evaluating
+    // `_PRT` costs a frame of 400 bytes, and the heap is empty after a
+    // hundred slots (measured: 196296 instead of 192 KiB, error ERR_HEAP, 103
+    // instead of 128 entries in the route table).
     let mark: u64 = amlns.heap_mark(state)
     let nmark: u64 = amlns.nodes(state)
     let pmark: u64 = g(state, A_PERSIST)
@@ -1896,8 +1884,8 @@ fn call_method(state: u64, node: u64, argc: u64, argsrc: u64, dst: u64) {
     }
 }
 
-// Eine Folge von Termen. Haelt an, sobald `Return`, `Break` oder
-// `Continue` gesehen wurde oder ein Fehler steht.
+// A sequence of terms. Stops as soon as `Return`, `Break` or `Continue`
+// has been seen or an error is set.
 fn exec_list(state: u64, f: u64, p: u64, end: u64) {
     var i: u64 = p
     while i < end {
@@ -1912,7 +1900,7 @@ fn exec_list(state: u64, f: u64, p: u64, end: u64) {
         var q: u64 = 0
         if c == 0xA0 {
             q = ev(state, f, i, (&o[0]) as u64)
-            // Ein `Else` unmittelbar dahinter gehoert zu diesem `If`.
+            // An `Else` immediately behind belongs to this `If`.
             if q != 0 && q < end {
                 if amlns.rd8(q) == 0xA1 {
                     seen_mark(state, 0xA1)
