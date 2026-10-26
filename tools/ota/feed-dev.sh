@@ -24,6 +24,7 @@ IMGDIR=$1; NOTES=$2; shift 2
 DRY=0; PROGS=()
 for a in "$@"; do if [ "$a" = "--dry" ]; then DRY=1; else PROGS+=("$a"); fi; done
 FEED=/srv/store/osum
+CHANNEL=${CHANNEL:-dev}
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 git diff --quiet HEAD -- . || { echo "feed-dev: working tree not clean (commit first, the stand names the commit)"; exit 1; }
@@ -43,13 +44,13 @@ sums() { (cd "$FEED" && find aktuell v pakete register.json -type f -print0 | so
 BEFORE=$(sums)
 
 TARGET=$FEED
-if [ "$DRY" = 1 ]; then TARGET=$T/feed; mkdir -p "$TARGET/system"; cp -a "$FEED/system/dev" "$TARGET/system/dev" 2>/dev/null || true; fi
-ARGS=(--count "$COUNT" --gz --notes "$T/notes.txt" --name "OrientOS dev")
+if [ "$DRY" = 1 ]; then TARGET=$T/feed; mkdir -p "$TARGET/system"; cp -a "$FEED/system/$CHANNEL" "$TARGET/system/$CHANNEL" 2>/dev/null || true; fi
+ARGS=(--count "$COUNT" --gz --notes "$T/notes.txt" --name "OrientOS $CHANNEL")
 [ ${#PROGS[@]} -gt 0 ] && ARGS+=(--overlay "$T/ovl")
-bash tools/ota/publish-system.sh "$T/k" "$TARGET" dev "${ARGS[@]}"
+bash tools/ota/publish-system.sh "$T/k" "$TARGET" "$CHANNEL" "${ARGS[@]}"
 
-D=$TARGET/system/dev
-python3 -I - "$D" "$FEED/system/dev/schluessel.pub" <<'PYEOF'
+D=$TARGET/system/$CHANNEL
+python3 -I - "$D" "$FEED/aktuell/schluessel.pub" <<'PYEOF'
 import hashlib, importlib.util, os, sys
 d, pubf = sys.argv[1], sys.argv[2]
 sys.path.insert(0, "tools/ota")
