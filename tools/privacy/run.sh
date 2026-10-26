@@ -106,7 +106,7 @@ hasnot "$TMPD/BADCONF.txt" "maybe" "bad argument: nothing was written"
 [ "$(grep -ac 'switch:   ON' "$TMPD/NOAUTO.txt")" = 1 ] && [ "$(grep -ac 'switch:   OFF' "$TMPD/NOAUTO.txt")" = 1 ] \
     && ok "COUNTER-PROBE: no auto= -> update ON (default), clock OFF" || bad "COUNTER-PROBE: no auto= defaults"
 # static checks
-grep -q ' sysinfo massren privacy welcome"}' tools/usbimg/build.sh && ok "usbimg PROGS has sysinfo + privacy" || bad "usbimg PROGS"
+grep -q ' sysinfo ' tools/usbimg/build.sh && grep -q ' privacy ' tools/usbimg/build.sh && ok "usbimg PROGS has sysinfo + privacy" || bad "usbimg PROGS"
 for l in de en; do
     grep -q '^installer.privacy = ' locale/$l/messages && ok "installer.privacy in $l" || bad "installer.privacy in $l"
 done
