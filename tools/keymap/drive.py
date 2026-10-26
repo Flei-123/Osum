@@ -101,7 +101,7 @@ def main():
     s.silent("compose_armed", [("ctrl_r",)])
     s.silent("compose_first", [("o",)])
     s.step("compose_o_c", [("c",)], r"key: [^\n]* U\+00A9")
-    s.silent("menu_armed", [("menu",)])
+    s.silent("menu_armed", [("menu",), ("compose",)])
     s.silent("menu_compose_first", [("o",)])
     s.step("menu_compose_o_c", [("c",)], r"key: [^\n]* U\+00A9")
     s.exact("iso_key_less", [("less",)], r"key: <", 1)
