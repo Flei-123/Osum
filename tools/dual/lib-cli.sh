@@ -42,7 +42,7 @@ lauf() {
         printf 'kons\n\0\0' | dd of="$OUT/wurzel.img" bs=512 seek="$zblk" \
             conv=notrunc status=none
     fi
-    timeout "${LIMIT:-600}" $QEMU_X86 -m 512 \
+    timeout "${LIMIT:-600}" $QEMU_X86 -m "${QEMU_MEM:-512}" \
         -kernel "$BAU/osum.mb" \
         -append "osum vfs nokbd nosched noproc noring3 script=$arg;exit" \
         -serial "file:$ser" -display none -no-reboot \
