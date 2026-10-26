@@ -88,7 +88,7 @@ lauf() { # name zone-words script [limit]
     cat "$OUT/$1.rc" 2>/dev/null
 }
 
-sect() { case " ${TIME_SECTIONS:-2 3 4 5 6 7} " in *" $1 "*) return 0 ;; esac; return 1; }
+sect() { case " ${TIME_SECTIONS:-2 3 4 5 6 7 8} " in *" $1 "*) return 0 ;; esac; return 1; }
 
 for t in qemu-system-x86_64 python3; do
     command -v "$t" >/dev/null 2>&1 || { echo "TIME: uebersprungen, $t fehlt"; exit 0; }
@@ -247,6 +247,48 @@ rc=$(lauf t7rate "tz=60 tzrule=eu" "sntp $SERVER;date;exit" 300)
 hat "$OUT/t7rate.txt" "refused: kiss-o'-death RATE" "a RATE answer is recognised as such"
 hatnicht "$OUT/t7rate.txt" "sntp: clock set" "and sets nothing"
 ntp_aus
+fi
+
+if sect 8; then
+echo
+echo "== 8. the real pool, through QEMU's user network =="
+POOL_IPS=$(python3 - <<'PY'
+import socket, struct, time
+ips = []
+for n in range(4):
+    try:
+        ip = socket.gethostbyname("%d.pool.ntp.org" % n)
+    except OSError:
+        continue
+    if ip in ips:
+        continue
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(2)
+    try:
+        s.sendto(b"\x23" + b"\0" * 47, (ip, 123))
+        s.recvfrom(100)
+        ips.append(ip)
+    except OSError:
+        pass
+print(" ".join(ips))
+PY
+)
+set -- $POOL_IPS
+if [ "$#" -lt 2 ]; then
+    echo "  SKIP  no route to the public NTP pool from this host ($# usable servers)"
+else
+    rc=$(lauf t8pool "tz=60 tzrule=eu" "sntp -n $POOL_IPS;exit" 300)
+    gleich "t8pool: the machine comes up" "$rc" "21"
+    hat "$OUT/t8pool.txt" "sntp: from $1 offset=" "the first real pool server answers"
+    hat "$OUT/t8pool.txt" " sources agree" "the real servers agree with each other"
+    off=$(grep -a -o 'sources agree, offset_ms=-\?[0-9]*' "$OUT/t8pool.txt" | sed 's/.*offset_ms=//' | head -1)
+    case "$off" in
+        ""|*[!0-9-]*) bad "t8pool: no agreed offset in the output" ;;
+        *) off_abs=${off#-}
+           if [ "$off_abs" -le 7300000 ]; then ok "t8pool: offset to the real time is ${off} ms (the guest RTC is UTC read as local, so up to two hours are expected)"
+           else bad "t8pool: offset ${off} ms is implausible"; fi ;;
+    esac
+fi
 fi
 
 echo

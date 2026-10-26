@@ -1470,7 +1470,7 @@ else
     printf 'offset=60\nrule=eu\n' > "$OUT/time.conf"
     NTPAUTO=true
 fi
-printf '# /etc/ntp.conf -- the network clock (sntp boot)\n# server  host or host:port; auto  true/false; abstand  seconds between two checks\nserver=pool.ntp.org\nauto=%s\nabstand=43200\n' "$NTPAUTO" > "$OUT/ntp.conf"
+printf '# /etc/ntp.conf -- the network clock (sntp boot)\n# server  hosts or host:port, comma separated; minsources  servers that must agree; auto  true/false; abstand  seconds between two checks\nserver=0.pool.ntp.org,1.pool.ntp.org,2.pool.ntp.org,3.pool.ntp.org\nminsources=2\nauto=%s\nabstand=43200\n' "$NTPAUTO" > "$OUT/ntp.conf"
 ARGS+=("/etc/time.conf=$OUT/time.conf" "/etc/ntp.conf=$OUT/ntp.conf")
 # SETBROKER2 (r1279): the pointer and power settings. Both files belong to root and exist from the first
 # boot with the built-in defaults (no change in behaviour); the signed-in person cannot write them, the
