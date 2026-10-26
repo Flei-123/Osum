@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import bus.drvstore
+import serial
+
+export { command, status }
+
+const NAME_MAX: u64 = 23
+const RES_MAX: u64 = 95
+
+static mut result: [u8; 96] = [0 as u8; 96]
+static mut result_len: u64 = 0
+
+fn put_c(c: u64) {
+    if result_len < RES_MAX {
+        result[result_len as usize] = c as u8
+        result_len = result_len + 1
+    }
+}
+
+fn put_s(s: u64) {
+    var i: u64 = 0
+    while kstate.get8(s + i) != 0 {
+        put_c(kstate.get8(s + i))
+        i = i + 1
+    }
+}
+
+fn put_dec(v: u64) {
+    var tmp: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        put_c(48)
+        return
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        put_c(tmp[n as usize] as u64)
+    }
+}
+
+fn status(dst: u64) -> u64 {
+    var i: u64 = 0
+    while i < result_len {
+        kstate.set8(dst + i, result[i as usize])
+        i = i + 1
+    }
+    return result_len
+}
+
+fn name_char(c: u64) -> bool {
+    return (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45 || c == 95
+}
+
+fn fail_text() {
+    var s_bad: [u8; 12] = "error: bad\n\0"
+    result_len = 0
+    put_s((&s_bad[0]) as u64)
+}
+
+fn report(name: u64, code: u64) {
+    var s_pre: [u8; 8] = "unload \0"
+    var s_ok: [u8; 5] = " ok\n\0"
+    var s_none: [u8; 7] = " none\n\0"
+    var s_idle: [u8; 7] = " idle\n\0"
+    var s_busy: [u8; 12] = " busy refs=\0"
+    var s_log: [u8; 21] = "drvstore: ctl unload\0"
+    result_len = 0
+    put_s((&s_pre[0]) as u64)
+    put_s(name)
+    if code == drvstore.UL_OK {
+        put_s((&s_ok[0]) as u64)
+    } else if code == drvstore.UL_NONE {
+        put_s((&s_none[0]) as u64)
+    } else if code == drvstore.UL_IDLE {
+        put_s((&s_idle[0]) as u64)
+    } else {
+        put_s((&s_busy[0]) as u64)
+        put_dec(drvstore.last_refs())
+        put_c(10)
+    }
+    serial.puts((&s_log[0]) as u64)
+    serial.put(32 as u8)
+    serial.puts(name)
+    serial.put(32 as u8)
+    serial.dec(code)
+    serial.nl()
+}
+
+fn command(state: u64, buf: u64, len: u64) -> bool {
+    var c_unload: [u8; 8] = "unload \0"
+    var name: [u8; 24] = [0 as u8; 24]
+    var i: u64 = 0
+    while kstate.get8((&c_unload[0]) as u64 + i) != 0 {
+        if i >= len || kstate.get8(buf + i) != kstate.get8((&c_unload[0]) as u64 + i) {
+            fail_text()
+            return false
+        }
+        i = i + 1
+    }
+    var n: u64 = 0
+    while i < len && name_char(kstate.get8(buf + i)) && n < NAME_MAX {
+        name[n as usize] = kstate.get8(buf + i) as u8
+        n = n + 1
+        i = i + 1
+    }
+    var end: u64 = 10
+    if i < len {
+        end = kstate.get8(buf + i)
+    }
+    if n == 0 || (end != 10 && end != 0 && end != 13 && end != 32) {
+        fail_text()
+        return false
+    }
+    name[n as usize] = 0 as u8
+    report((&name[0]) as u64, drvstore.unload_pkg(state, (&name[0]) as u64))
+    return true
+}

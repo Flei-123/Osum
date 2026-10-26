@@ -17,9 +17,9 @@ export {
     init, enabled, pkg_total, pkg_valid, pkg_name, pkg_dir, pkg_status, pkg_loaded,
     pkg_bound, pkg_banned, pkg_version, pkg_rank, pkg_nmatch, pkg_kind, pkg_a, pkg_b,
     pkg_rec, bind_total, bind_pkg, bind_id, bind_result, bind_code,
-    find_bind, unload_test, best_pci, best_usb, best_acpi, bound_count, failed_count,
+    find_bind, unload_test, unload_pkg, last_refs, UL_OK, UL_NONE, UL_IDLE, UL_BUSY, best_pci, best_usb, best_acpi, bound_count, failed_count,
     CTX_OFF, ST_OK, ST_BANNED, X_SIG, X_ABI, X_NOMODULE, X_NOFILE, X_DENY,
-    BR_NONE, BR_BOUND, BR_FAILED, NONE
+    BR_NONE, BR_BOUND, BR_FAILED, BR_RELEASED, NONE
 }
 
 const MAXPKG: u64 = 16
@@ -46,6 +46,12 @@ const X_DENY: u64 = 24
 const BR_NONE: u64 = 0
 const BR_BOUND: u64 = 1
 const BR_FAILED: u64 = 2
+const BR_RELEASED: u64 = 3
+
+const UL_OK: u64 = 0
+const UL_NONE: u64 = 1
+const UL_IDLE: u64 = 2
+const UL_BUSY: u64 = 3
 
 const B_KIND: u64 = 0
 const B_ID: u64 = 1
@@ -70,6 +76,7 @@ static mut path_buf: [u8; 112] = [0 as u8; 112]
 static mut ent_buf: [u8; 64] = [0 as u8; 64]
 static mut n_bound: u64 = 0
 static mut n_failed: u64 = 0
+static mut held_refs: u64 = 0
 
 fn enabled() -> bool {
     return on != 0
@@ -546,6 +553,9 @@ fn bind_pci(state: u64, p: u64, idx: u64) {
         serial.puts((&s_ok[0]) as u64)
         mset(p, M_BOUND, mf(p, M_BOUND) + 1)
         module.ref(state, mf(p, M_LOADK))
+        if kstate.mode_on(state, kstate.M_DRVHOLD) {
+            module.ref(state, mf(p, M_LOADK))
+        }
     } else {
         serial.puts((&s_fail[0]) as u64)
         if mf(p, M_LOADK) == NO_LOAD {
@@ -616,6 +626,79 @@ fn report(state: u64) {
     serial.puts((&s_fl[0]) as u64)
     serial.dec(n_failed)
     serial.nl()
+}
+
+fn last_refs() -> u64 {
+    return held_refs
+}
+
+fn same_name(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(a + i) == kstate.get8(b + i) {
+        if kstate.get8(a + i) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn find_pkg(name: u64) -> u64 {
+    var p: u64 = 0
+    while p < npkg {
+        if mf(p, M_VALID) == 1 && same_name(drvinf.rec_name(rec_at(p)), name) {
+            return p
+        }
+        p = p + 1
+    }
+    return NONE
+}
+
+fn release_binds(p: u64) {
+    var i: u64 = 0
+    while i < nbind {
+        if bf(i, B_PKG) == p && bf(i, B_RESULT) == BR_BOUND {
+            binds[(i * B_FIELDS + B_RESULT) as usize] = BR_RELEASED
+            if n_bound > 0 {
+                n_bound = n_bound - 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn unload_pkg(state: u64, name: u64) -> u64 {
+    let p: u64 = find_pkg(name)
+    if p == NONE {
+        return UL_NONE
+    }
+    let k: u64 = mf(p, M_LOADK)
+    if k == NO_LOAD {
+        return UL_IDLE
+    }
+    let own: u64 = mf(p, M_BOUND)
+    held_refs = module.refs_of(state, k)
+    if held_refs > own {
+        return UL_BUSY
+    }
+    var n: u64 = own
+    while n > 0 {
+        module.unref(state, k)
+        n = n - 1
+    }
+    if !module.entladen(state, k) {
+        held_refs = module.refs_of(state, k)
+        n = own
+        while n > 0 {
+            module.ref(state, k)
+            n = n - 1
+        }
+        return UL_BUSY
+    }
+    release_binds(p)
+    mset(p, M_LOADK, NO_LOAD)
+    mset(p, M_BOUND, 0)
+    return UL_OK
 }
 
 fn unload_test(state: u64) {

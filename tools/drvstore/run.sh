@@ -162,6 +162,47 @@ has "$D/ctl2.klar" "drvstore: pkg newdrv ok" "ctl reboot: installed package scan
 hasnot "$D/ctl2.klar" "drvstore: pkg generic" "ctl reboot: removed package gone"
 hasnot "$D/ctl2.klar" "drvstore: pkg evil" "counter-proof ctl reboot: refused package absent"
 
+cat > "$D/u1.sh" <<'EOS'
+echo ==U1==
+cat /proc/drivers
+drvctl unload edudemo
+cat /proc/drivers
+drvctl unload edudemo
+drvctl unload lowrank
+drvctl unload nosuch
+drvctl unload BAD/NAME
+drvctl unload
+echo ==U1END==
+EOS
+mkimg ul1 $FILES "/t/u1.sh=$D/u1.sh"
+cp "$D/d-ul1.img" "$D/d-ul2.img"
+cp "$D/d-ul1.img" "$D/d-ul3.img"
+SCRIPT=/t/u1.sh runvm ul1 "" -device edu &
+SCRIPT=/t/u1.sh runvm ul2 drvhold -device edu &
+SCRIPT=/t/u1.sh runvm ul3 nostore -device edu &
+wait
+awk '/==U1==/{f=1} f&&/unload edudemo ok/{exit} f' "$D/ul1.klar" > "$D/ul1.before"
+awk '/unload edudemo ok/{f=1} f' "$D/ul1.klar" > "$D/ul1.after"
+has "$D/ul1.before" "drv=edudemo src=store bind=bound" "unload: driver bound before"
+has "$D/ul1.before" "store=on pkgs=8 valid=3 bound=1 failed=0" "unload: store counts before"
+has "$D/ul1.klar" "unload edudemo ok" "unload: package unloaded"
+has "$D/ul1.klar" "drvstore: ctl unload edudemo 0" "unload: kernel logged the request"
+hasnot "$D/ul1.after" "drv=edudemo src=store" "unload: device no longer shown as bound to the package"
+has "$D/ul1.after" "store=on pkgs=8 valid=3 bound=0 failed=0" "unload: bound count dropped to 0"
+has "$D/ul1.after" "unload edudemo idle" "unload: second unload says idle (nothing loaded)"
+has "$D/ul1.after" "unload lowrank idle" "unload: valid but never loaded package says idle"
+has "$D/ul1.after" "unload nosuch none" "unload: unknown package says none"
+has "$D/ul1.after" "drvctl: bad package name: BAD/NAME" "unload: path-like name refused in userland"
+has "$D/ul1.after" "usage: drvctl" "unload: missing name prints usage"
+hasnot "$D/ul1.klar" "EXCEPTION" "unload: no kernel exception"
+has "$D/ul2.klar" "unload edudemo busy refs=2" "hold: extra reference makes unload refuse"
+has "$D/ul2.klar" "drvstore: ctl unload edudemo 3" "hold: kernel logged the refusal"
+hasnot "$D/ul2.klar" "unload edudemo ok" "counter-proof hold: package not unloaded"
+has "$D/ul2.klar" "store=on pkgs=8 valid=3 bound=1 failed=0" "hold: still bound after refusal"
+hasnot "$D/ul2.klar" "EXCEPTION" "hold: no kernel exception"
+has "$D/ul3.klar" "unload edudemo none" "nostore: nothing to unload"
+hasnot "$D/ul3.klar" "unload edudemo ok" "counter-proof nostore: no unload without store"
+
 FWBLOB="OrientOS fw demo blob"
 FWHASH=c44a0725b6b3e2bad7103b68b309c068f5d4a0727f515c3f257c5c0f40f8eeee
 printf '%s\n' "$FWBLOB" > "$D/fw.good"

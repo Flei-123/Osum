@@ -20,6 +20,8 @@ static mut FILE: [u8; 192] = [0 as u8; 192]
 static mut DST: [u8; 192] = [0 as u8; 192]
 static mut VALUE: [u8; 96] = [0 as u8; 96]
 static mut BEST: [u8; 24] = [0 as u8; 24]
+static mut CMD: [u8; 40] = [0 as u8; 40]
+static mut REPLY: [u8; 96] = [0 as u8; 96]
 
 fn name_ptr(i: u64) -> u64 {
     return (&NAMES[0 as usize]) as u64 + i * NAME_BYTES
@@ -308,13 +310,53 @@ fn cmd_ban(name: u64) -> u64 {
     return 0
 }
 
+fn cmd_unload(name: u64) -> u64 {
+    var e_name: [u8; 27] = "drvctl: bad package name: \0"
+    var e_node: [u8; 28] = "drvctl: cannot open control\0"
+    var e_ref: [u8; 23] = "drvctl: unload refused\0"
+    var path: [u8; 12] = "/dev/drvctl\0"
+    var verb: [u8; 8] = "unload \0"
+    if !drvpkg.valid_name(name) {
+        return fail((&e_name[0 as usize]) as u64, name)
+    }
+    let cmd: u64 = (&CMD[0 as usize]) as u64
+    ulib.strcpy(cmd, (&verb[0 as usize]) as u64)
+    ulib.strcpy(cmd + 7, name)
+    let at: u64 = 7 + ulib.length(name)
+    *((cmd + at) as *mut u8) = 10 as u8
+    *((cmd + at + 1) as *mut u8) = 0 as u8
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, ulib.O_RDWR, 0)
+    if ulib.bad(fd) {
+        return fail((&e_node[0 as usize]) as u64, 0)
+    }
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, cmd, at + 1)
+    let reply: u64 = (&REPLY[0 as usize]) as u64
+    var got: u64 = 0
+    if !ulib.bad(w) {
+        got = ulib.sys(ulib.SYS_READ, fd, reply, 90)
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(got) || got == 0 {
+        return fail((&e_ref[0 as usize]) as u64, 0)
+    }
+    *((reply + got) as *mut u8) = 0 as u8
+    say(reply)
+    tools.ob_flush()
+    if got >= 4 && drvpkg.byte_at(reply + got - 4) == 32 && drvpkg.byte_at(reply + got - 3) == 111
+        && drvpkg.byte_at(reply + got - 2) == 107 {
+        return 0
+    }
+    return 1
+}
+
 fn u_start(args: u64) -> u64 {
-    var s_use: [u8; 78] = "usage: drvctl list | match <kind> <id> | install <dir> | remove <n> | ban <n>\0"
+    var s_use: [u8; 91] = "usage: drvctl list | match <kind> <id> | install <dir> | remove <n> | ban <n> | unload <n>\0"
     var w_list: [u8; 5] = "list\0"
     var w_match: [u8; 6] = "match\0"
     var w_install: [u8; 8] = "install\0"
     var w_remove: [u8; 7] = "remove\0"
     var w_ban: [u8; 4] = "ban\0"
+    var w_unload: [u8; 7] = "unload\0"
     let argc: u64 = ulib.arg_count(args)
     if argc >= 2 {
         let cmd: u64 = ulib.arg_at(args, 1)
@@ -332,6 +374,9 @@ fn u_start(args: u64) -> u64 {
         }
         if ulib.streq(cmd, (&w_ban[0 as usize]) as u64) && argc >= 3 {
             return cmd_ban(ulib.arg_at(args, 2))
+        }
+        if ulib.streq(cmd, (&w_unload[0 as usize]) as u64) && argc >= 3 {
+            return cmd_unload(ulib.arg_at(args, 2))
         }
     }
     ulib.esay_line((&s_use[0 as usize]) as u64, 0)
