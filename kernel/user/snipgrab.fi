@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import libc.io
+import wlibc
+
+export { init, grab_screen, dim_make, crop, window_at, screen_w, screen_h, pix, dim, hit_x, hit_y, hit_w, hit_h, roh, komp, ROHCAP, KOMPCAP }
+
+const SYS_DISPGET: u64 = 1810
+const DG_PITCH: u64 = 30
+const DG_BPP: u64 = 31
+const ROHCAP: u64 = 65536
+const KOMPCAP: u64 = 98304
+
+static mut s_pix: u64 = 0
+static mut s_dim: u64 = 0
+static mut s_out: u64 = 0
+static mut s_roh: u64 = 0
+static mut s_komp: u64 = 0
+static mut s_w: u64 = 0
+static mut s_h: u64 = 0
+static mut s_pitch: u64 = 0
+static mut s_bpp: u64 = 4
+static mut s_hx: u64 = 0
+static mut s_hy: u64 = 0
+static mut s_hw: u64 = 0
+static mut s_hh: u64 = 0
+
+fn pix() -> u64 {
+    return s_pix
+}
+
+fn dim() -> u64 {
+    return s_dim
+}
+
+fn roh() -> u64 {
+    return s_roh
+}
+
+fn komp() -> u64 {
+    return s_komp
+}
+
+fn screen_w() -> u64 {
+    return s_w
+}
+
+fn screen_h() -> u64 {
+    return s_h
+}
+
+fn hit_x() -> u64 {
+    return s_hx
+}
+
+fn hit_y() -> u64 {
+    return s_hy
+}
+
+fn hit_w() -> u64 {
+    return s_hw
+}
+
+fn hit_h() -> u64 {
+    return s_hh
+}
+
+fn map(bytes: u64) -> u64 {
+    let p: u64 = wlibc.map_surface(bytes)
+    if ulib.bad(p) {
+        return 0
+    }
+    return p
+}
+
+fn init() -> bool {
+    if !wlibc.start(false) {
+        return false
+    }
+    s_w = wlibc.screen_w()
+    s_h = wlibc.screen_h()
+    s_pitch = ulib.sys(SYS_DISPGET, DG_PITCH, 0, 0)
+    s_bpp = ulib.sys(SYS_DISPGET, DG_BPP, 0, 0) / 8
+    if ulib.bad(s_pitch) || s_pitch == 0 {
+        s_pitch = s_w * 4
+    }
+    if ulib.bad(s_bpp) || s_bpp == 0 || s_bpp > 4 {
+        s_bpp = 4
+    }
+    let bytes: u64 = s_w * s_h * 4
+    s_pix = map(bytes)
+    s_dim = map(bytes)
+    s_out = map(bytes)
+    s_roh = map(ROHCAP)
+    s_komp = map(KOMPCAP)
+    return s_pix != 0 && s_dim != 0 && s_out != 0 && s_roh != 0 && s_komp != 0
+}
+
+fn grab_screen() -> bool {
+    var dev: [u8; 8] = "/dev/fb\0"
+    var line: [u8; 8192] = [0 as u8; 8192]
+    let fd: u64 = io.open((&dev[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let lp: u64 = (&line[0 as usize]) as u64
+    var ok: bool = true
+    var r: u64 = 0
+    while r < s_h && ok {
+        var n: u64 = s_w * s_bpp
+        if n > 8192 {
+            n = 8192
+        }
+        if ulib.bad(io.seek(fd, r * s_pitch, 0)) || ulib.bad(io.read_full(fd, lp, n)) {
+            ok = false
+        } else {
+            var c: u64 = 0
+            while c < s_w && c * s_bpp + s_bpp <= n {
+                let s: u64 = lp + c * s_bpp
+                let b: u64 = (*((s) as *mut u8)) as u64
+                let g: u64 = (*((s + 1) as *mut u8)) as u64
+                let rd: u64 = (*((s + 2) as *mut u8)) as u64
+                __mmio_write32((s_pix + (r * s_w + c) * 4) as *mut u32,
+                    ((255 << 24) | (rd << 16) | (g << 8) | b) as u32)
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+    io.close(fd)
+    return ok
+}
+
+fn dim_make() {
+    let pairs: u64 = (s_w * s_h) / 2
+    var i: u64 = 0
+    while i < pairs {
+        let v: u64 = __mmio_read64((s_pix + i * 8) as *mut u64)
+        __mmio_write64((s_dim + i * 8) as *mut u64, ((v >> 1) & 0x7F7F7F7F7F7F7F7F) | 0xFF000000FF000000)
+        i = i + 1
+    }
+}
+
+fn crop(x: u64, y: u64, w: u64, h: u64) -> u64 {
+    if w == 0 || h == 0 || x + w > s_w || y + h > s_h {
+        return 0
+    }
+    var r: u64 = 0
+    while r < h {
+        ulib.copy(s_out + r * w * 4, s_pix + ((y + r) * s_w + x) * 4, w * 4)
+        r = r + 1
+    }
+    return s_out
+}
+
+fn window_at(px: u64, py: u64, skip: u64) -> bool {
+    var list: [u8; 2048] = [0 as u8; 2048]
+    let lp: u64 = (&list[0 as usize]) as u64
+    let n: u64 = wlibc.sys3w(wlibc.WM_LIST, lp, 16, 0)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    var found: bool = false
+    var i: u64 = 0
+    while i < n && i < 16 {
+        let e: u64 = lp + i * wlibc.WL_BYTES
+        let id: u64 = __mmio_read64((e + wlibc.WL_ID) as *mut u64)
+        let flags: u64 = __mmio_read64((e + wlibc.WL_FLAGS) as *mut u64)
+        let x: u64 = __mmio_read64((e + wlibc.WL_X) as *mut u64)
+        let y: u64 = __mmio_read64((e + wlibc.WL_Y) as *mut u64)
+        let w: u64 = __mmio_read64((e + wlibc.WL_W) as *mut u64)
+        let h: u64 = __mmio_read64((e + wlibc.WL_H) as *mut u64)
+        if id != skip && (flags & wlibc.F_HIDDEN) == 0 && px >= x && py >= y && px < x + w && py < y + h && w > 0 && h > 0 {
+            s_hx = x
+            s_hy = y
+            s_hw = w
+            s_hh = h
+            if s_hx + s_hw > s_w {
+                s_hw = s_w - s_hx
+            }
+            if s_hy + s_hh > s_h {
+                s_hh = s_h - s_hy
+            }
+            found = true
+        }
+        i = i + 1
+    }
+    return found
+}

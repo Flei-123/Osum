@@ -1,0 +1,466 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import fuiscene
+import wlibc
+import msg
+import snipgrab
+import snipsave
+
+export { u_start }
+
+const EV_KEY: u64 = 1
+const EV_DOWN: u64 = 2
+const EV_UP: u64 = 3
+const EV_MOVE: u64 = 4
+const KEY_ESC: u64 = 27
+
+const M_RECT: u64 = 0
+const M_WINDOW: u64 = 1
+const M_FULL: u64 = 2
+
+const K_RECT: u64 = 1
+const K_WINDOW: u64 = 2
+const K_FULL: u64 = 3
+const K_CLOSE: u64 = 4
+
+const ACT_NONE: u64 = 0
+const ACT_PICK: u64 = 1
+const ACT_CANCEL: u64 = 2
+
+static mut mode: u64 = 0
+static mut act: u64 = 0
+static mut dirty: bool = false
+static mut dragging: bool = false
+static mut has_sel: bool = false
+static mut ax: u64 = 0
+static mut ay: u64 = 0
+static mut cx: u64 = 0
+static mut cy: u64 = 0
+static mut rx: u64 = 0
+static mut ry: u64 = 0
+static mut rw: u64 = 0
+static mut rh: u64 = 0
+static mut bar_node: usize = 0
+static mut size_text: [u8; 32] = [0 as u8; 32]
+
+fn mn(a: u64, b: u64) -> u64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn mx(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn text_of(key: u64) -> u64 {
+    return msg.get(key)
+}
+
+static mut k_rect: [u8; 10] = "snip.rect\0"
+static mut k_win: [u8; 12] = "snip.window\0"
+static mut k_full: [u8; 10] = "snip.full\0"
+static mut k_close: [u8; 11] = "snip.close\0"
+static mut h_rect: [u8; 15] = "snip.hint.rect\0"
+static mut h_win: [u8; 17] = "snip.hint.window\0"
+static mut h_full: [u8; 15] = "snip.hint.full\0"
+
+fn build() {
+    let root: usize = fuiscene.root()
+    fuiscene.set_pad(root, 14)
+    let top: usize = fuiscene.row(root)
+    let left: usize = fuiscene.space(top, 0, 0)
+    fuiscene.set_grow(left, 1)
+    let card: usize = fuiscene.card(top)
+    bar_node = card
+    fuiscene.set_pad(card, 10)
+    fuiscene.set_gap(card, 8)
+    let right: usize = fuiscene.space(top, 0, 0)
+    fuiscene.set_grow(right, 1)
+    let line: usize = fuiscene.row(card)
+    fuiscene.set_gap(line, 8)
+    var i: u64 = 0
+    while i < 4 {
+        var key: u64 = K_RECT + i
+        var txt: u64 = text_of((&k_rect[0 as usize]) as u64)
+        if i == 1 {
+            txt = text_of((&k_win[0 as usize]) as u64)
+        } else if i == 2 {
+            txt = text_of((&k_full[0 as usize]) as u64)
+        } else if i == 3 {
+            txt = text_of((&k_close[0 as usize]) as u64)
+        }
+        var b: usize = 0
+        if i < 3 && mode == i {
+            b = fuiscene.button_main(line, txt, key)
+        } else {
+            b = fuiscene.button(line, txt, key)
+        }
+        fuiscene.set_size(b, 132, 36)
+        i = i + 1
+    }
+    var hint: u64 = text_of((&h_rect[0 as usize]) as u64)
+    if mode == M_WINDOW {
+        hint = text_of((&h_win[0 as usize]) as u64)
+    } else if mode == M_FULL {
+        hint = text_of((&h_full[0 as usize]) as u64)
+    }
+    let _l: usize = fuiscene.label(card, hint)
+}
+
+fn size_label(w: u64, h: u64) -> u64 {
+    var z: [u8; 24] = [0 as u8; 24]
+    var sep: [u8; 4] = " x \0"
+    let t: u64 = (&size_text[0 as usize]) as u64
+    let n1: u64 = ulib.digits(w, (&z[0 as usize]) as u64)
+    z[n1 as usize] = 0 as u8
+    ulib.strcpy(t, (&z[0 as usize]) as u64)
+    ulib.strcat(t, (&sep[0 as usize]) as u64)
+    let n2: u64 = ulib.digits(h, (&z[0 as usize]) as u64)
+    z[n2 as usize] = 0 as u8
+    ulib.strcat(t, (&z[0 as usize]) as u64)
+    return t
+}
+
+fn put_seg(dst: u64, src: u64, cw: u64, y: u64, a: u64, b: u64) {
+    if b > a {
+        ulib.copy(dst + (y * cw + a) * 4, src + (y * snipgrab.screen_w() + a) * 4, (b - a) * 4)
+    }
+}
+
+fn put_span(dst: u64, src: u64, cw: u64, y: u64, x0: u64, x1: u64) {
+    if x1 <= x0 {
+        return
+    }
+    let bx: u64 = fuiscene.node_x(bar_node)
+    let by: u64 = fuiscene.node_y(bar_node)
+    let bw: u64 = fuiscene.node_w(bar_node)
+    let bh: u64 = fuiscene.node_h(bar_node)
+    if y >= by && y < by + bh {
+        put_seg(dst, src, cw, y, x0, mn(x1, bx))
+        put_seg(dst, src, cw, y, mx(x0, bx + bw), x1)
+    } else {
+        put_seg(dst, src, cw, y, x0, x1)
+    }
+}
+
+fn overlay() {
+    let dst: u64 = fuiscene.canvas_px()
+    let sw: u64 = snipgrab.screen_w()
+    let sh: u64 = snipgrab.screen_h()
+    let cw: u64 = fuiscene.sp(fuiscene.width())
+    let ch: u64 = fuiscene.sp(fuiscene.height())
+    if dst == 0 || cw != sw || snipgrab.dim() == 0 {
+        return
+    }
+    let rows: u64 = mn(ch, sh)
+    var y: u64 = 0
+    while y < rows {
+        put_span(dst, snipgrab.dim(), cw, y, 0, sw)
+        y = y + 1
+    }
+    if !has_sel || rw == 0 || rh == 0 {
+        return
+    }
+    y = ry
+    while y < ry + rh && y < rows {
+        put_span(dst, snipgrab.pix(), cw, y, rx, mn(rx + rw, sw))
+        y = y + 1
+    }
+    fuiscene.cv_rgb(rx, ry, rw, 2, 0xFFFFFF)
+    fuiscene.cv_rgb(rx, mn(ry + rh, sh) - 2, rw, 2, 0xFFFFFF)
+    fuiscene.cv_rgb(rx, ry, 2, rh, 0xFFFFFF)
+    fuiscene.cv_rgb(mn(rx + rw, sw) - 2, ry, 2, rh, 0xFFFFFF)
+    let lbl: u64 = size_label(rw, rh)
+    let lw: u64 = fuiscene.sp(96)
+    let lh: u64 = fuiscene.sp(26)
+    var ly: u64 = ry + rh + 6
+    if ly + lh > sh {
+        ly = ry + 6
+    }
+    fuiscene.cv_round_a(rx, ly, lw, lh, 6, 0x000000, 200)
+    fuiscene.cv_text_rgb(rx + 8, ly + fuiscene.sp(18), lw, lbl, fuiscene.sp(14), false, 0xFFFFFF)
+}
+
+fn in_bar(x: u64, y: u64) -> bool {
+    let bx: u64 = fuiscene.node_x(bar_node)
+    let by: u64 = fuiscene.node_y(bar_node)
+    return x >= bx && y >= by && x < bx + fuiscene.node_w(bar_node) && y < by + fuiscene.node_h(bar_node)
+}
+
+fn set_rect_from_drag() {
+    rx = mn(ax, cx)
+    ry = mn(ay, cy)
+    rw = mx(ax, cx) - rx
+    rh = mx(ay, cy) - ry
+    has_sel = true
+}
+
+fn hover_window(x: u64, y: u64) {
+    if snipgrab.window_at(x, y, fuiscene.win_id()) {
+        if !has_sel || rx != snipgrab.hit_x() || ry != snipgrab.hit_y() || rw != snipgrab.hit_w() || rh != snipgrab.hit_h() {
+            rx = snipgrab.hit_x()
+            ry = snipgrab.hit_y()
+            rw = snipgrab.hit_w()
+            rh = snipgrab.hit_h()
+            has_sel = true
+            dirty = true
+        }
+    } else if has_sel {
+        has_sel = false
+        dirty = true
+    }
+}
+
+fn raw(kind: u64, x: u64, y: u64, btn: u64, key: u64) {
+    if kind == EV_KEY {
+        if key == KEY_ESC {
+            act = ACT_CANCEL
+            fuiscene.raw_take()
+        }
+        return
+    }
+    if kind != EV_DOWN && kind != EV_UP && kind != EV_MOVE {
+        return
+    }
+    if in_bar(x, y) && !dragging {
+        return
+    }
+    if mode == M_FULL {
+        fuiscene.raw_take()
+        return
+    }
+    fuiscene.raw_take()
+    if mode == M_WINDOW {
+        if kind == EV_MOVE {
+            hover_window(x, y)
+        } else if kind == EV_DOWN && has_sel {
+            act = ACT_PICK
+        }
+        return
+    }
+    if kind == EV_DOWN {
+        dragging = true
+        ax = x
+        ay = y
+        cx = x
+        cy = y
+        has_sel = false
+        dirty = true
+    } else if kind == EV_MOVE && dragging {
+        cx = x
+        cy = y
+        set_rect_from_drag()
+        dirty = true
+    } else if kind == EV_UP && dragging {
+        dragging = false
+        cx = x
+        cy = y
+        set_rect_from_drag()
+        dirty = true
+        if rw >= 4 && rh >= 4 {
+            act = ACT_PICK
+        } else {
+            has_sel = false
+        }
+    }
+}
+
+fn say_saved(path: u64, w: u64, h: u64) {
+    var s_ok: [u8; 14] = "snipt: saved \0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    ulib.say((&s_ok[0 as usize]) as u64)
+    ulib.say(path)
+    ulib.say((&s_w[0 as usize]) as u64)
+    ulib.sayn(w)
+    ulib.say((&s_h[0 as usize]) as u64)
+    ulib.sayn(h)
+    ulib.nl()
+}
+
+fn deliver(x: u64, y: u64, w: u64, h: u64, out: u64) -> bool {
+    var s_fail: [u8; 19] = "snipt: save failed\0"
+    let px: u64 = snipgrab.crop(x, y, w, h)
+    var path: u64 = out
+    if path == 0 {
+        path = snipsave.next_path()
+    }
+    if px == 0 || !snipsave.save_png(path, px, w, h) {
+        ulib.say((&s_fail[0 as usize]) as u64)
+        ulib.nl()
+        return false
+    }
+    snipsave.clipboard_put(path)
+    snipsave.toast(path)
+    say_saved(path, w, h)
+    return true
+}
+
+fn run_overlay() -> u64 {
+    var title: [u8; 14] = "Snipping tool\0"
+    var app: [u8; 6] = "snipt\0"
+    var s_bad: [u8; 19] = "snipt: no surface\0\0"
+    var s_ready: [u8; 14] = "snipt: ready\0\0"
+    var s_cancel: [u8; 16] = "snipt: cancel\0\0\0"
+    var s_mode: [u8; 13] = "snipt: mode \0"
+    let sw: u64 = snipgrab.screen_w()
+    let sh: u64 = snipgrab.screen_h()
+    snipgrab.dim_make()
+    var opened: bool = fuiscene.open_plain(0, 0, sw, sh, (&title[0 as usize]) as u64, wlibc.L_TOP, build)
+    if !opened {
+        opened = fuiscene.open_plain(0, 0, sw, sh, (&title[0 as usize]) as u64, wlibc.L_NORMAL, build)
+    }
+    if !opened {
+        ulib.say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    fuiscene.set_app((&app[0 as usize]) as u64)
+    fuiscene.set_raw(raw)
+    fuiscene.set_overlay(overlay)
+    var first: bool = true
+    var last_mode: u64 = mode
+    while fuiscene.alive() && act == ACT_NONE {
+        let key: u64 = fuiscene.pump()
+        if first {
+            first = false
+            fuiscene.focus_canvas()
+            ulib.say((&s_ready[0 as usize]) as u64)
+            ulib.nl()
+        }
+        if key == K_RECT || key == K_WINDOW {
+            mode = key - K_RECT
+            has_sel = false
+            dragging = false
+            dirty = true
+        } else if key == K_FULL {
+            mode = M_FULL
+            rx = 0
+            ry = 0
+            rw = sw
+            rh = sh
+            has_sel = true
+            act = ACT_PICK
+        } else if key == K_CLOSE {
+            act = ACT_CANCEL
+        }
+        if mode != last_mode {
+            last_mode = mode
+            ulib.say((&s_mode[0 as usize]) as u64)
+            ulib.sayn(mode)
+            ulib.nl()
+        }
+        if dirty {
+            dirty = false
+            fuiscene.refresh()
+        }
+    }
+    fuiscene.hide(true)
+    if act == ACT_PICK && has_sel {
+        if deliver(rx, ry, rw, rh, 0) {
+            return 0
+        }
+        return 1
+    }
+    ulib.say((&s_cancel[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var o_out: [u8; 3] = "-o\0"
+    var o_geo: [u8; 3] = "-g\0"
+    var o_quick: [u8; 3] = "-q\0"
+    var o_delay: [u8; 3] = "-v\0"
+    var o_mode: [u8; 3] = "-m\0"
+    var m_win: [u8; 7] = "window\0"
+    var m_full: [u8; 5] = "full\0"
+    var s_nomem: [u8; 17] = "snipt: no memory\0"
+    var s_nocap: [u8; 19] = "snipt: grab failed\0"
+    var s_range: [u8; 18] = "snipt: bad region\0"
+    let argc: u64 = ulib.arg_count(args)
+    var out: u64 = 0
+    var quick: bool = false
+    var geo: bool = false
+    var gx: u64 = 0
+    var gy: u64 = 0
+    var gw: u64 = 0
+    var gh: u64 = 0
+    var delay: u64 = 0
+    var a: u64 = 1
+    while a < argc {
+        let p: u64 = ulib.arg_at(args, a)
+        if ulib.streq(p, (&o_out[0 as usize]) as u64) && a + 1 < argc {
+            out = ulib.arg_at(args, a + 1)
+            a = a + 1
+        } else if ulib.streq(p, (&o_quick[0 as usize]) as u64) {
+            quick = true
+        } else if ulib.streq(p, (&o_geo[0 as usize]) as u64) && a + 4 < argc {
+            gx = ulib.to_num(ulib.arg_at(args, a + 1))
+            gy = ulib.to_num(ulib.arg_at(args, a + 2))
+            gw = ulib.to_num(ulib.arg_at(args, a + 3))
+            gh = ulib.to_num(ulib.arg_at(args, a + 4))
+            geo = true
+            a = a + 4
+        } else if ulib.streq(p, (&o_delay[0 as usize]) as u64) && a + 1 < argc {
+            delay = ulib.to_num(ulib.arg_at(args, a + 1))
+            a = a + 1
+        } else if ulib.streq(p, (&o_mode[0 as usize]) as u64) && a + 1 < argc {
+            let m: u64 = ulib.arg_at(args, a + 1)
+            if ulib.streq(m, (&m_win[0 as usize]) as u64) {
+                mode = M_WINDOW
+            } else if ulib.streq(m, (&m_full[0 as usize]) as u64) {
+                mode = M_FULL
+            }
+            a = a + 1
+        }
+        a = a + 1
+    }
+    let _mi: u64 = msg.init()
+    if !snipgrab.init() {
+        ulib.say((&s_nomem[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if delay > 0 {
+        let _s: u64 = ulib.sleep_ms(delay * 1000)
+    }
+    if !snipgrab.grab_screen() {
+        ulib.say((&s_nocap[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if geo || quick {
+        var x: u64 = 0
+        var y: u64 = 0
+        var w: u64 = snipgrab.screen_w()
+        var h: u64 = snipgrab.screen_h()
+        if geo {
+            x = gx
+            y = gy
+            w = gw
+            h = gh
+        }
+        if x + w > snipgrab.screen_w() || y + h > snipgrab.screen_h() || w == 0 || h == 0 {
+            ulib.say((&s_range[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        if deliver(x, y, w, h, out) {
+            return 0
+        }
+        return 1
+    }
+    return run_overlay()
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

@@ -308,7 +308,7 @@ orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysi
 # the public image has no chat server to reach: no JARVIS Mini binary there
 [ "$IMAGE_PROFILE" = personal ] || PROGS=${PROGS// jarvismini/}
 # W-MINI2: the Mini's screenshot key runs /bin/snip (personal stick only)
-if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PROGS="$PROGS snip" ;; esac; fi
+if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PROGS="$PROGS snip" ;; esac; case " $PROGS " in *" snipt "*) ;; *) PROGS="$PROGS snipt" ;; esac; fi
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -1601,7 +1601,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 PFLICHT="$PFLICHT /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
-[ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip"
+[ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip /bin/snipt"
 [ "${ROOT_SLIM:-0}" = 1 ] || [ "${BOOT_KERNEL_COPY:-0}" != 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
