@@ -1,0 +1,104 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+import pw
+import keymap.kbdnames
+
+export { read_from, write_to, apply_path, apply, save, current }
+
+const KEY_LEN: u64 = 16
+const SYS_KBD: u64 = 1703
+const KB_GET: u64 = 0
+const KB_SET: u64 = 1
+
+static mut conf_path: [u8; 19] = "/etc/keyboard.conf\0"
+static mut conf_key: [u8; 17] = "keyboard.layout=\0"
+static mut say_head: [u8; 16] = "kbdconf: apply \0"
+
+fn trim_end(p: u64) {
+    var n: u64 = ulib.length(p)
+    while n > 0 {
+        let c: u64 = (*((p + n - 1) as *mut u8)) as u64
+        if c != 32 && c != 13 && c != 9 {
+            return
+        }
+        __mmio_write8((p + n - 1) as *mut u8, 0 as u8)
+        n = n - 1
+    }
+}
+
+fn read_from(path: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return kbdnames.NONE
+    }
+    var ctx: [u8; 528] = [0 as u8; 528]
+    var line: [u8; 64] = [0 as u8; 64]
+    ulib.rd_init((&ctx[0]) as u64)
+    var found: u64 = kbdnames.NONE
+    var n: u64 = ulib.rd_line(fd, (&ctx[0]) as u64, (&line[0]) as u64, 64)
+    while n != ulib.EOF {
+        if ulib.strneq((&line[0]) as u64, (&conf_key[0]) as u64, KEY_LEN) {
+            trim_end((&line[0]) as u64)
+            found = kbdnames.id_of((&line[0]) as u64 + KEY_LEN)
+        }
+        n = ulib.rd_line(fd, (&ctx[0]) as u64, (&line[0]) as u64, 64)
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return found
+}
+
+fn write_to(path: u64, lay: u64) -> bool {
+    if lay >= kbdnames.COUNT {
+        return false
+    }
+    var buf: [u8; 32] = [0 as u8; 32]
+    var o: u64 = ulib.strcpy((&buf[0]) as u64, (&conf_key[0]) as u64)
+    var i: u64 = 0
+    while kbdnames.name_at(lay, i) != 0 && i < kbdnames.NAME_LEN {
+        buf[(o + i) as usize] = kbdnames.name_at(lay, i) as u8
+        i = i + 1
+    }
+    o = o + i
+    buf[o as usize] = 10 as u8
+    return pw.write_all(path, (&buf[0]) as u64, o + 1)
+}
+
+fn current() -> u64 {
+    let v: u64 = ulib.sys(SYS_KBD, KB_GET, 0, 0)
+    if ulib.bad(v) {
+        return kbdnames.NONE
+    }
+    return v
+}
+
+fn apply_path(path: u64) -> u64 {
+    let lay: u64 = read_from(path)
+    if lay == kbdnames.NONE {
+        return kbdnames.NONE
+    }
+    let rc: u64 = ulib.sys(SYS_KBD, KB_SET, lay, 0)
+    if ulib.bad(rc) {
+        return kbdnames.NONE
+    }
+    ulib.say((&say_head[0]) as u64)
+    var i: u64 = 0
+    while kbdnames.name_at(lay, i) != 0 && i < kbdnames.NAME_LEN {
+        var one: [u8; 2] = [0 as u8; 2]
+        one[0] = kbdnames.name_at(lay, i) as u8
+        ulib.say((&one[0]) as u64)
+        i = i + 1
+    }
+    ulib.nl()
+    return lay
+}
+
+fn apply() -> u64 {
+    return apply_path((&conf_path[0]) as u64)
+}
+
+fn save(lay: u64) -> bool {
+    return write_to((&conf_path[0]) as u64, lay)
+}

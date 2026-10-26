@@ -364,7 +364,7 @@ def build_parser():
     sp.add_argument("--action")
     sp.add_argument("--button")
     sp.add_argument("--delay-ms", type=int)
-    sp.add_argument("--layout", choices=["us", "de", "uk", "fr", "es", "it", "ru", "auto"], help="text: keyboard layout (default = the guest's own)")
+    sp.add_argument("--layout", choices=["us", "de", "uk", "fr", "es", "it", "ru", "us-intl", "de-at", "ch-de", "pt", "pt-br", "pl", "tr", "nl", "ch-fr", "se", "auto"], help="text: keyboard layout (default = the guest's own)")
     sp.add_argument("--rel", action="store_true", help="mouse: args are dx dy")
     sp.set_defaults(fn=cmd_input)
     sp = sub.add_parser("ps")

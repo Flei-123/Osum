@@ -1,0 +1,127 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+import pw
+import kbdconf
+import keymap.kbdnames
+
+export { u_start }
+
+const SYS_KBD: u64 = 1703
+const KB_GET: u64 = 0
+const KB_SET: u64 = 1
+const KB_COUNT: u64 = 2
+
+static mut passed: u64 = 0
+static mut failed: u64 = 0
+static mut tmp_path: [u8; 14] = "/kbdconft.tmp\0"
+static mut none_path: [u8; 14] = "/kbdconft.non\0"
+static mut raw_line: [u8; 22] = "keyboard.layout=xx\n\0\0\0"
+static mut s_ok: [u8; 14] = "kbdconft: ok \0"
+static mut s_bad: [u8; 16] = "kbdconft: FAIL \0"
+static mut s_sum: [u8; 16] = "kbdconft: pass=\0"
+static mut s_fail: [u8; 7] = " fail=\0"
+static mut n_count: [u8; 6] = "count\0"
+static mut n_set: [u8; 12] = "set and get\0"
+static mut n_reject: [u8; 7] = "reject\0"
+static mut n_round: [u8; 10] = "roundtrip\0"
+static mut n_missing: [u8; 13] = "missing file\0"
+static mut n_unknown: [u8; 13] = "unknown name\0"
+static mut n_apply: [u8; 20] = "apply a config file\0"
+static mut n_names: [u8; 10] = "names ids\0"
+
+fn check(name: u64, good: bool) {
+    if good {
+        passed = passed + 1
+        ulib.say((&s_ok[0]) as u64)
+    } else {
+        failed = failed + 1
+        ulib.say((&s_bad[0]) as u64)
+    }
+    ulib.say(name)
+    ulib.nl()
+}
+
+fn set_and_get_all() -> bool {
+    var lay: u64 = 0
+    while lay < kbdnames.COUNT {
+        if ulib.bad(ulib.sys(SYS_KBD, KB_SET, lay, 0)) {
+            return false
+        }
+        if ulib.sys(SYS_KBD, KB_GET, 0, 0) != lay {
+            return false
+        }
+        lay = lay + 1
+    }
+    return true
+}
+
+fn roundtrip_all() -> bool {
+    var lay: u64 = 0
+    while lay < kbdnames.COUNT {
+        if !kbdconf.write_to((&tmp_path[0]) as u64, lay) {
+            return false
+        }
+        if kbdconf.read_from((&tmp_path[0]) as u64) != lay {
+            return false
+        }
+        lay = lay + 1
+    }
+    return true
+}
+
+fn names_map_to_ids() -> bool {
+    var lay: u64 = 0
+    while lay < kbdnames.COUNT {
+        var word: [u8; 9] = [0 as u8; 9]
+        var i: u64 = 0
+        while kbdnames.name_at(lay, i) != 0 {
+            word[i as usize] = kbdnames.name_at(lay, i) as u8
+            i = i + 1
+        }
+        if kbdnames.id_of((&word[0]) as u64) != lay {
+            return false
+        }
+        lay = lay + 1
+    }
+    return true
+}
+
+fn apply_checks() -> bool {
+    if !kbdconf.write_to((&tmp_path[0]) as u64, 3) {
+        return false
+    }
+    if kbdconf.apply_path((&tmp_path[0]) as u64) != 3 || ulib.sys(SYS_KBD, KB_GET, 0, 0) != 3 {
+        return false
+    }
+    let before: u64 = ulib.sys(SYS_KBD, KB_GET, 0, 0)
+    let _w: bool = pw.write_all((&tmp_path[0]) as u64, (&raw_line[0]) as u64, 19)
+    return kbdconf.apply_path((&tmp_path[0]) as u64) == kbdnames.NONE && ulib.sys(SYS_KBD, KB_GET, 0, 0) == before
+}
+
+fn u_start(args: u64) -> u64 {
+    let _a: u64 = args
+    check((&n_count[0]) as u64, ulib.sys(SYS_KBD, KB_COUNT, 0, 0) == kbdnames.COUNT && kbdnames.COUNT >= 10)
+    check((&n_names[0]) as u64, names_map_to_ids())
+    check((&n_set[0]) as u64, set_and_get_all())
+    check((&n_reject[0]) as u64, ulib.bad(ulib.sys(SYS_KBD, KB_SET, kbdnames.COUNT, 0)))
+    check((&n_round[0]) as u64, roundtrip_all())
+    check((&n_missing[0]) as u64, kbdconf.read_from((&none_path[0]) as u64) == kbdnames.NONE)
+    let _w: bool = pw.write_all((&tmp_path[0]) as u64, (&raw_line[0]) as u64, 19)
+    check((&n_unknown[0]) as u64, kbdconf.read_from((&tmp_path[0]) as u64) == kbdnames.NONE)
+    check((&n_apply[0]) as u64, apply_checks())
+    let _r: u64 = ulib.sys(SYS_KBD, KB_SET, 0, 0)
+    let _u: u64 = ulib.sys(ulib.SYS_UNLINK, (&tmp_path[0]) as u64, 0, 0)
+    ulib.say((&s_sum[0]) as u64)
+    ulib.sayu(passed)
+    ulib.say((&s_fail[0]) as u64)
+    ulib.sayu(failed)
+    ulib.nl()
+    return failed
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
