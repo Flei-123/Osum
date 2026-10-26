@@ -23,7 +23,7 @@ run() {
     local disk=$1 ser=$2 args=$3 stop=$4 limit=$5
     : > "$ser"
     timeout "$limit" $QEMU_X86 -m 512 -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" \
-        -append "modfs osum vfs gfx wm wig wmdauer nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,$args" \
+        -append "modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1500 nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,$args" \
         -serial "file:$ser" -display none -no-reboot \
         -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32 \
         -drive "file=$disk,format=raw,if=ide,index=0" > "$ser.qemu" 2>&1 &

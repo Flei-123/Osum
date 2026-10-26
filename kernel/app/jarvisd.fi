@@ -338,6 +338,8 @@ static mut l_auflisten: [u8; 8192] = [0; 8192]
 static mut n_auflisten: usize = 0
 static mut l_befehl: [u8; 8192] = [0; 8192]
 static mut n_befehl: usize = 0
+static mut l_flag: [u8; 8192] = [0; 8192]
+static mut n_flag: usize = 0
 
 static mut laut: bool = false
 static mut konfpfad: [u8; 128] = [0; 128]
@@ -896,6 +898,7 @@ fn konf_leeren() {
     n_schreiben = 0
     n_auflisten = 0
     n_befehl = 0
+    n_flag = 0
     k_max_ausgabe = 65536
     k_max_datei = 262144
     k_befehl_ms = COMMAND_MS
@@ -924,6 +927,7 @@ fn conf_read() -> bool {
     var s_wurzeln: [u8; 6] = "roots\0"
     var s_befehle: [u8; 9] = "commands\0"
     var s_berl: [u8; 16] = "command_allowed\0"
+    var s_flag: [u8; 21] = "command_flag_allowed\0"
     var s_lesen: [u8; 5] = "read\0"
     var s_schr: [u8; 6] = "write\0"
     var s_aufl: [u8; 6] = "list\0\0"
@@ -1045,6 +1049,8 @@ fn conf_read() -> bool {
                     list_add((&l_auflisten[0]) as u64, &n_auflisten, wp, wl)
                 } else if ist(sp, sl, (&s_berl[0]) as u64) {
                     list_add((&l_befehl[0]) as u64, &n_befehl, wp, wl)
+                } else if ist(sp, sl, (&s_flag[0]) as u64) {
+                    list_add((&l_flag[0]) as u64, &n_flag, wp, wl)
                 }
             }
         }
@@ -1913,6 +1919,60 @@ fn nofork_builtin(prog: u64, pn: usize, a1: u64, a2: u64, a3: u64, aus: *mut rt.
     return false
 }
 
+fn flag_rules_for(prog: u64, pn: usize) -> bool {
+    var i: usize = 0
+    while i < n_flag {
+        let e: u64 = list_path((&l_flag[0]) as u64, i)
+        if rt.c_length(e) > pn && rt.ld8(e, pn) == 32 as u8 && eq(e, pn, prog, pn) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn flags_denied(zeile: u64, zn: usize, prog: u64, pn: usize) -> bool {
+    if !flag_rules_for(prog, pn) {
+        return false
+    }
+    var i: usize = pn
+    while i < zn {
+        while i < zn && rt.ld8(zeile, i) == 32 as u8 {
+            i = i + 1
+        }
+        if i >= zn {
+            break
+        }
+        let von: usize = i
+        while i < zn && rt.ld8(zeile, i) != 32 as u8 {
+            i = i + 1
+        }
+        let wn: usize = i - von
+        if rt.ld8(zeile, von) != 45 as u8 {
+            continue
+        }
+        if pn + 1 + wn >= MAXPFAD {
+            return true
+        }
+        var key: [u8; 128] = [0; 128]
+        var k: usize = 0
+        while k < pn {
+            key[k] = rt.ld8(prog, k)
+            k = k + 1
+        }
+        key[pn] = 32 as u8
+        k = 0
+        while k < wn {
+            key[pn + 1 + k] = rt.ld8(zeile, von + k)
+            k = k + 1
+        }
+        if !in_list((&l_flag[0]) as u64, n_flag, (&key[0]) as u64, pn + 1 + wn) {
+            return true
+        }
+    }
+    return false
+}
+
 fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     if !k_befehle {
         return ablehnen(aus, "`commands = no` in /etc/jarvis/permissions.conf")
@@ -1936,6 +1996,9 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     }
     if !in_list((&l_befehl[0]) as u64, n_befehl, prog, pn) {
         return ablehnen(aus, "program not allowed by `command_allowed` in /etc/jarvis/permissions.conf")
+    }
+    if flags_denied(zeile, zn, prog, pn) {
+        return ablehnen(aus, "option not allowed by `command_flag_allowed` in /etc/jarvis/permissions.conf (needs local confirmation)")
     }
     let anz: usize = arg_count(zeile, zn)
     if anz > 6 {
