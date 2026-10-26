@@ -29,7 +29,7 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 ULD=kernel/user/user.ld
-PROGS="sh cat echo ls cp rm rmdir mkdir mv wc shasum mount umount"
+PROGS="sh cat echo ls cp rm rmdir mkdir mv wc shasum mount umount sleep"
 PY="python3 -I tools/exfat/exfat.py"
 EXF=$ROOT/tools/exfat/exfat.py
 
@@ -165,6 +165,7 @@ run_case() { # cluster_bytes
         echo 'umount /mnt'
         echo 'echo "@@umount-rc=$?"'
         echo 'echo @@end'
+        echo 'sleep 2'
     } > "$S"
     python3 tools/osum/mkfs.py build "$TMPD/root.img" 20000 /bin/ /proc/ /dev/ /mnt/ /t/ $MKARGS \
         "/src.bin=$TMPD/src.bin" "/t/s.sh=$S" > "$TMPD/mkfs.log" 2>&1 \
