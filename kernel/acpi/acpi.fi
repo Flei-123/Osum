@@ -35,7 +35,8 @@
 import serial
 import lib.kstate
 
-export { find, cpus, total, ioapic_addr, lapic_addr, revision, oem, valid, table,
+export { snapshot, snap_count, snap_bytes, snap_skipped, snap_cap_bytes, rsdp_addr, rsdp_source, root_addr, root_width,
+    find, cpus, total, ioapic_addr, lapic_addr, revision, oem, valid, table,
     table_count, table_at,
     // RUNDE BLECHVIER: ab dem ersten Prozess nur noch das erste Gibioctet.
     only_first_give }
@@ -149,11 +150,13 @@ fn find_rsdp(state: u64) -> u64 {
         let base: u64 = seg * 16
         let hit: u64 = scan_for(base, base + 1024, w)
         if hit != 0 {
+            rsdp_src = 1
             return hit
         }
     }
     let alt: u64 = scan_for(BIOS_LOW, BIOS_HIGH, w)
     if alt != 0 {
+        rsdp_src = 2
         return alt
     }
     // ================================================ RUNDE BLECHVIER
@@ -179,7 +182,11 @@ fn find_rsdp(state: u64) -> u64 {
     // Typ 3 GENAU der ACPI-Reclaim-Speicher. Dort wird gesucht, und nur
     // dort -- ein Suchlauf ueber das ganze Gigabyte wuerde auch
     // Registerfenster anfassen.
-    return rsdp_off_map(state, w)
+    let mapped: u64 = rsdp_off_map(state, w)
+    if mapped != 0 {
+        rsdp_src = 3
+    }
+    return mapped
 }
 
 // Der RSDP steht auf einer 16-Oktett-Grenze. Gesucht wird in den
@@ -271,6 +278,15 @@ fn rsdp_off_map(state: u64, w: u64) -> u64 {
 // Das ist genau die Auflage dieser Runde: JEDE Schleife ueber fremde
 // Daten bekommt eine Grenze. Die Grenze ist, wie weit dieser Kern
 // wirklich abbildet.
+static mut rsdp_src: u64 = 0
+static mut snap_base: u64 = 0
+static mut snap_cap: u64 = 0
+static mut snap_used: u64 = 0
+static mut snap_n: u64 = 0
+static mut snap_skip: u64 = 0
+static mut snap_root: u64 = 0
+static mut snap_width: u64 = 0
+static mut snap_copy: [u64; 96] = [0 as u64; 96]
 static mut acpi_grenze: u64 = 0
 static mut acpi_eng: u64 = 0
 
@@ -395,6 +411,17 @@ fn table_in(root: u64, width: u64, want: u64) -> u64 {
 // Also wird derselbe Weg noch einmal gegangen -- vier Oktette Kennung
 // herein, ein Zeiger heraus, 0 = nicht da.
 fn table(state: u64, want: u64) -> u64 {
+    if snap_n != 0 {
+        var k: u64 = 1
+        while k < snap_n {
+            let c: u64 = snap_copy[k as usize]
+            if c != 0 && tag(c, want, 4) {
+                return c
+            }
+            k = k + 1
+        }
+        return 0
+    }
     limit_set(state)
     // RUNDE K13: WENN `find` NOCH NICHT GELAUFEN IST, wird der Zeiger
     // hier selbst gesucht. Das ist kein Luxus, sondern gemessen: die
@@ -615,6 +642,9 @@ fn root_of(state: u64, out_width: u64) -> u64 {
 }
 
 fn table_count(state: u64) -> u64 {
+    if snap_n != 0 {
+        return snap_n
+    }
     var width: u64 = 4
     let root: u64 = root_of(state, (&width) as u64)
     if root == 0 {
@@ -628,6 +658,12 @@ fn table_count(state: u64) -> u64 {
 }
 
 fn table_at(state: u64, i: u64) -> u64 {
+    if snap_n != 0 {
+        if i >= snap_n {
+            return 0
+        }
+        return snap_copy[i as usize]
+    }
     if i == 0 {
         var w_facp: [u8; 5] = "FACP\0"
         let fadt: u64 = table(state, (&w_facp[0]) as u64)
@@ -663,4 +699,79 @@ fn table_at(state: u64, i: u64) -> u64 {
         return 0
     }
     return t
+}
+
+
+fn copy_table(t: u64) -> u64 {
+    let len: u64 = kstate.get32(t + H_LENGTH)
+    let need: u64 = (len + 15) & 0xFFFFFFFFFFFFFFF0
+    if snap_used + need > snap_cap {
+        snap_skip = snap_skip + 1
+        return 0
+    }
+    let dst: u64 = snap_base + snap_used
+    var i: u64 = 0
+    while i < len {
+        kstate.set8(dst + i, kstate.get8(t + i) as u8)
+        i = i + 1
+    }
+    snap_used = snap_used + need
+    return dst
+}
+
+fn snapshot(state: u64, base: u64, cap: u64) {
+    if snap_n != 0 || base == 0 {
+        return
+    }
+    snap_base = base
+    snap_cap = cap
+    snap_used = 0
+    snap_skip = 0
+    var width: u64 = 4
+    snap_root = root_of(state, (&width) as u64)
+    snap_width = width
+    let total: u64 = table_count(state)
+    var i: u64 = 0
+    while i < total && i < 96 {
+        let t: u64 = table_at(state, i)
+        var c: u64 = 0
+        if t != 0 {
+            c = copy_table(t)
+        }
+        snap_copy[i as usize] = c
+        i = i + 1
+    }
+    snap_n = i
+}
+
+fn snap_count() -> u64 {
+    return snap_n
+}
+
+fn snap_bytes() -> u64 {
+    return snap_used
+}
+
+fn snap_skipped() -> u64 {
+    return snap_skip
+}
+
+fn snap_cap_bytes() -> u64 {
+    return snap_cap
+}
+
+fn rsdp_addr(state: u64) -> u64 {
+    return sget(state, S_RSDP)
+}
+
+fn rsdp_source() -> u64 {
+    return rsdp_src
+}
+
+fn root_addr() -> u64 {
+    return snap_root
+}
+
+fn root_width() -> u64 {
+    return snap_width
 }

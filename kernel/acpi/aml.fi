@@ -59,7 +59,69 @@ export {
     node_count, heap_bytes, parse_us, prt_ok,
     // RUNDE ACPI-EREIGNISSE: den Namensraum HALTEN statt verwerfen,
     // und einen einzelnen Knoten auswerten.
-    ns_hold, ns_arena, hold_err, hold_bad, eval_node, eval_node_arg, eval_node_args, ns_bytes
+    ns_hold, ns_arena, hold_err, hold_bad, eval_node, eval_node_arg, eval_node_args, ns_bytes,
+    fail_count, fail_sig, fail_off, fail_err, fail_bytes
+}
+
+const SNAP_FRAMES: u64 = 256
+const FAIL_MAX: u64 = 24
+static mut f_pos: u64 = 0
+static mut f_n: u64 = 0
+static mut cur_table: u64 = 0
+static mut cur_sig: u64 = 0
+static mut f_sig: [u64; 24] = [0 as u64; 24]
+static mut f_off: [u64; 24] = [0 as u64; 24]
+static mut f_err: [u64; 24] = [0 as u64; 24]
+static mut f_bytes: [u64; 24] = [0 as u64; 24]
+
+fn fail_count() -> u64 {
+    return f_n
+}
+
+fn fail_sig(i: u64) -> u64 {
+    return f_sig[i as usize]
+}
+
+fn fail_off(i: u64) -> u64 {
+    return f_off[i as usize]
+}
+
+fn fail_err(i: u64) -> u64 {
+    return f_err[i as usize]
+}
+
+fn fail_bytes(i: u64) -> u64 {
+    return f_bytes[i as usize]
+}
+
+fn fail_mark(pos: u64) {
+    if f_pos == 0 {
+        f_pos = pos
+    }
+}
+
+fn fail_commit(state: u64) {
+    if f_pos != 0 && f_n < FAIL_MAX {
+        let i: usize = f_n as usize
+        f_sig[i] = cur_sig
+        f_off[i] = f_pos - cur_table
+        f_err[i] = amlns.err(state)
+        f_bytes[i] = amlns.rd32(f_pos) | (amlns.rd32(f_pos + 4) << 32)
+        f_n = f_n + 1
+    }
+    f_pos = 0
+}
+
+fn recover_container(state: u64) {
+    if load_tolerant != 0 && amlns.err(state) != amlns.ERR_OK
+        && hold_tolerable(amlns.err(state)) {
+        fail_commit(state)
+        if h_err == 0 {
+            h_err = amlns.err(state)
+        }
+        h_bad = h_bad + 1
+        amlns.err_clear(state)
+    }
 }
 
 // ------------------------------------------- die Plaetze in `kdata`
@@ -224,6 +286,76 @@ fn gsi_or_line(state: u64, idx: u64) -> u64 {
 // aufruft, darf ruhig Opcodes enthalten, die dieser Interpreter nicht
 // kennt.
 
+fn skip_name(p: u64) -> u64 {
+    var q: u64 = p
+    let c0: u64 = amlns.rd8(q)
+    if c0 == 0x5C {
+        q = q + 1
+    } else {
+        while amlns.rd8(q) == 0x5E {
+            q = q + 1
+        }
+    }
+    let c: u64 = amlns.rd8(q)
+    if c == 0x00 {
+        return q + 1
+    }
+    if c == 0x2E {
+        return q + 9
+    }
+    if c == 0x2F {
+        return q + 2 + amlns.rd8(q + 1) * 4
+    }
+    return q + 4
+}
+
+fn skip_connect(p: u64) -> u64 {
+    if amlns.rd8(p) == 0x11 {
+        var out: [u64; 1] = [0 as u64; 1]
+        let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+        return p + 1 + ln
+    }
+    return skip_name(p)
+}
+
+fn is_name_lead(c: u64) -> bool {
+    return c == 0x5C || c == 0x5E || c == 0x2E || c == 0x2F || c == 0x5F
+        || (c >= 0x41 && c <= 0x5A)
+}
+
+fn load_createfield(state: u64, scope: u64, p: u64, c: u64) -> u64 {
+    var out: [u64; 1] = [0 as u64; 1]
+    var q: u64 = p + 1
+    if c == 0x5B {
+        q = p + 2
+    }
+    let f: u64 = amlev.frame_new(state)
+    if f == 0 {
+        return 0
+    }
+    amlev.frame_scope_set(f, scope)
+    var a: [u64; 3] = [0 as u64; 3]
+    var terms: u64 = 2
+    if c == 0x5B {
+        terms = 3
+    }
+    while terms > 0 {
+        q = amlev.ev(state, f, q, (&a[0]) as u64)
+        if q == 0 {
+            return 0
+        }
+        terms = terms - 1
+    }
+    let node: u64 = amlns.walk_create(state, scope, q, (&out[0]) as u64,
+        amlns.NK_NAME, amlns.NMAX)
+    if node != amlns.NONE {
+        amlns.set_kind(state, node, amlns.NK_NAME)
+        amlns.set_a(state, node, out[0])
+        amlns.set_b(state, node, 0)
+    }
+    return out[0]
+}
+
 fn seg4(w: u64) -> u64 {
     return w
 }
@@ -245,27 +377,27 @@ fn load_fields(state: u64, scope: u64, region: u64, flags: u64, p: u64,
             if c == 0x01 { // AccessField
                 i = i + 3
             } else {
-                if c == 0x02 { // ConnectField -- hier nicht unterstuetzt
-                    amlns.err_set(state, amlns.ERR_OPCODE)
-                    return
-                }
-                if c == 0x03 { // ExtendedAccessField
-                    i = i + 4
+                if c == 0x02 {
+                    i = skip_connect(i + 1)
                 } else {
-                    var out: [u64; 1] = [0 as u64; 1]
-                    let node: u64 = amlns.walk_create(state, scope, i,
-                        (&out[0]) as u64, amlns.NK_FIELD, amlns.NMAX)
-                    if node == amlns.NONE {
-                        return
+                    if c == 0x03 { // ExtendedAccessField
+                        i = i + 4
+                    } else {
+                        var out: [u64; 1] = [0 as u64; 1]
+                        let node: u64 = amlns.walk_create(state, scope, i,
+                            (&out[0]) as u64, amlns.NK_FIELD, amlns.NMAX)
+                        if node == amlns.NONE {
+                            return
+                        }
+                        let ln: u64 = amlns.pkglen(out[0], (&out[0]) as u64)
+                        amlns.set_kind(state, node, amlns.NK_FIELD)
+                        amlns.set_a(state, node, region)
+                        amlns.set_b(state, node, bit)
+                        amlns.set_c(state, node, ln | (acc << 32))
+                        s(state, A_FLDS, g(state, A_FLDS) + 1)
+                        bit = bit + ln
+                        i = out[0]
                     }
-                    let ln: u64 = amlns.pkglen(out[0], (&out[0]) as u64)
-                    amlns.set_kind(state, node, amlns.NK_FIELD)
-                    amlns.set_a(state, node, region)
-                    amlns.set_b(state, node, bit)
-                    amlns.set_c(state, node, ln | (acc << 32))
-                    s(state, A_FLDS, g(state, A_FLDS) + 1)
-                    bit = bit + ln
-                    i = out[0]
                 }
             }
         }
@@ -310,6 +442,7 @@ fn load_scope(state: u64, scope: u64, p: u64, end: u64) -> u64 {
         return 0
     }
     load_list(state, node, out[0], e)
+    recover_container(state)
     return e
 }
 
@@ -349,6 +482,7 @@ fn load_container(state: u64, scope: u64, p: u64, end: u64, e2: u64) -> u64 {
         body = body + 3 // SystemLevel, ResourceOrder
     }
     load_list(state, node, body, e)
+    recover_container(state)
     return e
 }
 
@@ -404,9 +538,33 @@ fn load_leaf(state: u64, scope: u64, p: u64, end: u64) -> u64 {
         let node: u64 = amlns.walk(state, scope, p + 1, (&out[0]) as u64)
         return out[0] + 2
     }
+    if c == 0xA0 || c == 0xA1 || c == 0xA2 {
+        let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+        let e: u64 = p + 1 + ln
+        if e > end {
+            amlns.err_set(state, amlns.ERR_TRUNC)
+            return 0
+        }
+        return e
+    }
+    if c == 0x8A || c == 0x8B || c == 0x8C || c == 0x8D || c == 0x8F {
+        return load_createfield(state, scope, p, c)
+    }
     if c == 0x5B {
         let e2: u64 = amlns.rd8(p + 1)
         amlev.seen_ext_mark(state, e2)
+        if e2 == 0x13 {
+            return load_createfield(state, scope, p, c)
+        }
+        if e2 == 0x88 {
+            var dq: u64 = skip_name(p + 2)
+            var dk: u64 = 0
+            while dk < 3 && dq != 0 {
+                dq = skip_data(state, dq, end)
+                dk = dk + 1
+            }
+            return dq
+        }
         if e2 == 0x80 { // OperationRegion
             let node: u64 = amlns.walk_create(state, scope, p + 2,
                 (&out[0]) as u64, amlns.NK_REGION, amlns.NMAX)
@@ -521,6 +679,9 @@ fn skip_data(state: u64, p: u64, end: u64) -> u64 {
     if c == 0x5B && amlns.rd8(p + 1) == 0x30 { // Revision
         return p + 2
     }
+    if is_name_lead(c) {
+        return skip_name(p)
+    }
     amlns.err_set(state, amlns.ERR_OPCODE)
     return 0
 }
@@ -532,7 +693,12 @@ fn load_list(state: u64, scope: u64, p: u64, end: u64) {
             return
         }
         let q: u64 = load_term(state, scope, i, end)
+        if amlns.err(state) != amlns.ERR_OK {
+            fail_mark(i)
+            return
+        }
         if q == 0 || q <= i {
+            fail_mark(i)
             if q <= i && amlns.err(state) == amlns.ERR_OK {
                 amlns.err_set(state, amlns.ERR_TRUNC)
             }
@@ -901,6 +1067,9 @@ fn load_all(state: u64, loud: bool) {
                 || sig == amlns.seg_of((&w_ssdt[0]) as u64) {
                 var start: u64 = t
                 var len: u64 = amlns.rd32(t + 4)
+                cur_table = t
+                cur_sig = sig
+                f_pos = 0
                 if kstate.mode_on(state, kstate.M_AMLBAD)
                     && sig == amlns.seg_of((&w_dsdt[0]) as u64) {
                     let cp: u64 = broken_copy(state, t)
@@ -916,6 +1085,7 @@ fn load_all(state: u64, loud: bool) {
                 done = done + 1
                 if amlns.err(state) != amlns.ERR_OK {
                     if load_tolerant != 0 && hold_tolerable(amlns.err(state)) {
+                        fail_commit(state)
                         if h_err == 0 {
                             h_err = amlns.err(state)
                         }
@@ -1327,6 +1497,7 @@ fn ns_hold(state: u64) -> u64 {
     }
     h_err = 0
     h_bad = 0
+    f_n = 0
     load_tolerant = 1
     load_all(state, false)
     load_tolerant = 0
@@ -1414,6 +1585,10 @@ fn stage(state: u64) {
     var s_off: [u8; 16] = "aml: abgestellt\0"
     var s_leak: [u8; 20] = "aml: frames vorher=\0"
     var s_leak2: [u8; 10] = " nachher=\0"
+    let snap: u64 = mem.frame_run(state, SNAP_FRAMES)
+    if snap != 0 {
+        acpi.snapshot(state, snap, SNAP_FRAMES * 4096)
+    }
     if kstate.mode_on(state, kstate.M_AMLDUMP) {
         dump(state)
     }
