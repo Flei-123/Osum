@@ -66,7 +66,7 @@ def lint(text):
                     errors.append("line %d: unknown right %s" % (no, r))
         if key == "fw" and not re.match(r"^[A-Za-z0-9._-]{1,31}:[0-9a-f]{64}$", value):
             errors.append("line %d: bad fw (name:sha256hex)" % no)
-        if key == "slot" and value != "mouse":
+        if key == "slot" and value not in ("mouse", "aux"):
             errors.append("line %d: unknown slot %s" % (no, value))
     for need in ("name", "version", "abi", "module"):
         if need not in seen:

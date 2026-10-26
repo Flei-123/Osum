@@ -248,5 +248,124 @@ has "$D/fw-nofw.klar" "drvstore: fw fwdemo error 3" "fw without manifest entry: 
 has "$D/fw-wronghash.klar" "drvstore: fw fwdemo error 5" "fw hash differs from module expectation: refused"
 has "$D/fw-missing.klar" "drvstore: fw fwdemo error 6" "fw file missing: reported"
 hasnot "$D/fw-good.klar" "EXCEPTION" "fw: no kernel exception"
+
+bash tools/module/build.sh "$D/auxdemo.omod" --quelle module/store/auxdemo.fi > "$D/ma.txt" 2>&1 && ok "auxdemo module builds and is signed" || { bad "auxdemo module"; tail -3 "$D/ma.txt"; }
+bash tools/module/build.sh "$D/auxrogue.omod" --quelle module/store/auxrogue.fi > "$D/mr.txt" 2>&1 && ok "auxrogue module builds and is signed" || { bad "auxrogue module"; tail -3 "$D/mr.txt"; }
+addpk() {
+    local root=$1 src=$2 n=$3
+    PKOUT="$PKOUT $root/$n/"
+    for f in $(ls "$src/$n"); do PKOUT="$PKOUT $root/$n/$f=$src/$n/$f"; done
+}
+mkdir -p "$D/pkaux" "$D/pkrogue" "$D/pkapp"
+python3 tools/drvstore/mkpkg.py build "$D/pkaux" --module "$D/auxdemo.omod" --name auxdemo --slot aux --match "pci 1234:11e8" > /dev/null
+python3 tools/drvstore/mkpkg.py build "$D/pkaux" --module "$D/auxdemo.omod" --name auxsecond --slot aux --match "pci 1b36:0005" > /dev/null
+python3 tools/drvstore/mkpkg.py build "$D/pkrogue" --module "$D/auxrogue.omod" --name rogue --slot aux --match "pci 1234:11e8" > /dev/null
+cat > "$D/sl1.sh" <<'EOS'
+echo ==SL1==
+drvctl slots
+drvctl aux 1 21
+drvctl aux 2 5
+drvctl aux 9 9
+drvctl aux x 1
+cat /proc/drivers
+drvctl unload auxdemo
+drvctl slots
+drvctl aux 1 21
+drvctl unload auxsecond
+echo ==SL1END==
+EOS
+PKOUT=""
+addpk /lib/drivers "$D/pkaux" auxdemo
+addpk /lib/drivers "$D/pkaux" auxsecond
+mkimg sl1 $PKOUT "/t/sl1.sh=$D/sl1.sh"
+cp "$D/d-sl1.img" "$D/d-sl2.img"
+PKOUT=""
+addpk /lib/drivers "$D/pkrogue" rogue
+mkimg rg $PKOUT "/t/sl1.sh=$D/sl1.sh"
+SCRIPT=/t/sl1.sh runvm sl1 "" -device edu -device pci-testdev &
+SCRIPT=/t/sl1.sh runvm sl2 nostore -device edu -device pci-testdev &
+SCRIPT=/t/sl1.sh runvm rg "" -device edu &
+wait
+has "$D/sl1.klar" "auxdemo: ready" "slot aux: module loaded and registered"
+has "$D/sl1.klar" "slots mouse=none aux=auxdemo" "slot aux: drvctl slots shows the owner"
+has "$D/sl1.klar" "aux 1 21 = 42" "slot aux: control call reaches the module (cmd 1)"
+has "$D/sl1.klar" "aux 2 5 = 12" "slot aux: control call reaches the module (cmd 2)"
+has "$D/sl1.klar" "aux 9 9 = 0" "slot aux: unknown command answered by the module"
+has "$D/sl1.klar" "drvstore: ctl aux 1 42" "slot aux: kernel logged the call"
+has "$D/sl1.klar" "drvctl: bad number: x" "slot aux: non-numeric argument refused in userland"
+has "$D/sl1.klar" "drv=auxdemo src=store bind=bound" "slot aux: /proc/drivers shows the bound driver"
+has "$D/sl1.klar" "drv=auxsecond src=store bind=failed" "slot aux: second package for the same slot not bound"
+has "$D/sl1.klar" "bind auxsecond -> " "slot aux: bind attempt logged for the second package"
+has "$D/sl1.klar" "slot busy" "slot aux: refusal reason is slot busy"
+has "$D/sl1.klar" "unload auxdemo ok" "slot aux: unload works"
+has "$D/sl1.klar" "unload auxsecond idle" "slot aux: refused package never loaded"
+awk '/unload auxdemo ok/{f=1} f' "$D/sl1.klar" > "$D/sl1.after"
+has "$D/sl1.after" "slots mouse=none aux=none" "slot aux: slot free after unload"
+has "$D/sl1.after" "aux none" "slot aux: control call without a module answers none"
+hasnot "$D/sl1.after" "aux 1 21 = 42" "counter-proof slot aux: no answer after unload"
+hasnot "$D/sl1.klar" "EXCEPTION" "slot aux: no kernel exception"
+has "$D/sl2.klar" "slots mouse=none aux=none" "nostore: slots empty"
+hasnot "$D/sl2.klar" "auxdemo: ready" "counter-proof nostore: aux module not loaded"
+has "$D/rg.klar" "auxrogue: foreign bind rc=4" "slot rule: bind into a foreign slot refused by the kernel"
+has "$D/rg.klar" "drv=rogue src=store bind=failed" "slot rule: module that grabs a foreign slot is not bound"
+has "$D/rg.klar" "slots mouse=none aux=none" "slot rule: mouse slot stays empty"
+hasnot "$D/rg.klar" "drv=rogue src=store bind=bound" "counter-proof slot rule: rogue never bound"
+hasnot "$D/rg.klar" "EXCEPTION" "slot rule: no kernel exception"
+
+python3 tools/drvstore/mkpkg.py build "$D/pkapp" --module "$MK" --name appdrv --rank 10 --match "pci 1234:11e8" --rights mmio > /dev/null
+python3 tools/drvstore/mkpkg.py build "$D/pkapp" --module "$MK" --name appevil --rank 99 --match "pci 1234:11e8" --bad-sig > /dev/null
+python3 tools/drvstore/mkpkg.py build "$D/pkapp" --module "$MK" --name ignored --rank 99 --match "pci 1234:11e8" --rights mmio > /dev/null
+python3 tools/drvstore/mkpkg.py build "$D/pkapp" --module "$MK" --name dupdrv --rank 5 --match "pci 1234:11e8" --rights mmio > /dev/null
+cat > "$D/ap1.sh" <<'EOS'
+echo ==AP1==
+drvctl list
+drvctl match pci 1234:11e8
+cat /proc/drivers
+drvctl remove appdrv
+drvctl unload appdrv
+cat /proc/drivers
+echo ==AP1END==
+EOS
+PKOUT=""
+addpk /apps/hello.osp/lib "$D/pkapp" appdrv
+addpk /apps/hello.osp/lib "$D/pkapp" appevil
+addpk /apps/hello.osp/lib "$D/pkapp" dupdrv
+addpk /apps/plain.prog/lib "$D/pkapp" ignored
+addpk /lib/drivers "$D/pkapp" dupdrv
+mkimg ap /apps/ /apps/hello.osp/ /apps/hello.osp/lib/ /apps/plain.prog/ /apps/plain.prog/lib/ $PKOUT "/t/ap1.sh=$D/ap1.sh"
+cp "$D/d-ap.img" "$D/d-apn.img"
+cp "$D/d-ap.img" "$D/d-apd.img"
+echo appdrv > "$D/deny2"
+PKOUT=""
+addpk /apps/hello.osp/lib "$D/pkapp" appdrv
+addpk /apps/hello.osp/lib "$D/pkapp" appevil
+addpk /apps/hello.osp/lib "$D/pkapp" dupdrv
+addpk /lib/drivers "$D/pkapp" dupdrv
+mkimg apd /apps/ /apps/hello.osp/ /apps/hello.osp/lib/ $PKOUT "/etc/drivers.deny=$D/deny2" "/t/ap1.sh=$D/ap1.sh"
+SCRIPT=/t/ap1.sh runvm ap "" -device edu &
+SCRIPT=/t/ap1.sh runvm apn nostore -device edu &
+SCRIPT=/t/ap1.sh runvm apd "" -device edu &
+wait
+has "$D/ap.klar" "drvstore: pkgs=4 valid=2" "apps: four packages scanned (one lib, three in the app)"
+has "$D/ap.klar" "drvstore: pkg appdrv ok app=hello.osp" "apps: good package from /apps/hello.osp/lib accepted"
+has "$D/ap.klar" "drvstore: pkg appevil rejected 20 app=hello.osp" "apps: bad signature in an app package rejected"
+has "$D/ap.klar" "drvstore: pkg dupdrv rejected 25 app=hello.osp" "apps: same name as a /lib/drivers package rejected"
+has "$D/ap.klar" "drvstore: pkg dupdrv ok" "apps: /lib/drivers package keeps the name"
+hasnot "$D/ap.klar" "pkg ignored" "apps: directories not ending in .osp are not scanned"
+has "$D/ap.klar" "drvstore: bind appdrv -> " "apps: app package binds (higher rank than the lib one)"
+has "$D/ap.klar" "edudemo: ven=4660 dev=4584" "apps: module from the app directory ran with the device context"
+has "$D/ap.klar" "drv=appdrv src=store bind=bound" "apps: /proc/drivers shows the app driver"
+has "$D/ap.klar" "pkg appdrv version=1 rank=10 sig=ok" "apps: drvctl list shows the app package"
+has "$D/ap.klar" "pkg appevil sig=bad" "apps: drvctl list shows the bad app package"
+has "$D/ap.klar" "packages=3 valid=2" "apps: drvctl list counts both roots"
+has "$D/ap.klar" "match appdrv spec=30 rank=10" "apps: drvctl match sees the app package"
+has "$D/ap.klar" "drvctl: no such package" "apps: drvctl remove does not touch app packages"
+has "$D/ap.klar" "unload appdrv ok" "apps: unload by name works for app packages"
+hasnot "$D/ap.klar" "EXCEPTION" "apps: no kernel exception"
+has "$D/apn.klar" "store=off" "nostore apps: store off"
+hasnot "$D/apn.klar" "drvstore:" "counter-proof nostore apps: nothing scanned"
+hasnot "$D/apn.klar" "src=store" "counter-proof nostore apps: nothing bound"
+has "$D/apd.klar" "drvstore: pkg appdrv ok banned app=hello.osp" "apps: deny list applies to app packages"
+has "$D/apd.klar" "drv=dupdrv src=store bind=bound" "apps: next package takes over after the ban"
 echo "DRVSTORE: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

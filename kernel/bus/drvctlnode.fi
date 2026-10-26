@@ -3,11 +3,14 @@ profile kernel
 
 import lib.kstate
 import bus.drvstore
+import ldr.auxslot
+import ldr.modidx
 import serial
 
 export { command, status }
 
 const NAME_MAX: u64 = 23
+const NO_NUM: u64 = 0xFFFFFFFFFFFFFFFF
 const RES_MAX: u64 = 95
 
 static mut result: [u8; 96] = [0 as u8; 96]
@@ -95,7 +98,105 @@ fn report(name: u64, code: u64) {
     serial.nl()
 }
 
+fn word_at(buf: u64, len: u64, at: u64, word: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(word + i) != 0 {
+        if at + i >= len || kstate.get8(buf + at + i) != kstate.get8(word + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn parse_num(buf: u64, len: u64, at: u64, out: u64) -> u64 {
+    var i: u64 = at
+    var v: u64 = 0
+    var digits: u64 = 0
+    while i < len && kstate.get8(buf + i) >= 48 && kstate.get8(buf + i) <= 57 && digits < 12 {
+        v = v * 10 + (kstate.get8(buf + i) - 48)
+        digits = digits + 1
+        i = i + 1
+    }
+    if digits == 0 {
+        return NO_NUM
+    }
+    kstate.set(out, 0, v)
+    return i
+}
+
+fn owner_or_none(slot: u64) {
+    var s_none: [u8; 5] = "none\0"
+    let who: u64 = drvstore.slot_owner(slot)
+    if who == 0 {
+        put_s((&s_none[0]) as u64)
+    } else {
+        put_s(who)
+    }
+}
+
+fn slots_report() -> bool {
+    var s_head: [u8; 13] = "slots mouse=\0"
+    var s_aux: [u8; 6] = " aux=\0"
+    result_len = 0
+    put_s((&s_head[0]) as u64)
+    owner_or_none(modidx.SLOT_MOUSE)
+    put_s((&s_aux[0]) as u64)
+    owner_or_none(modidx.SLOT_AUX)
+    put_c(10)
+    return true
+}
+
+fn aux_report(state: u64, buf: u64, len: u64, at: u64) -> bool {
+    var s_pre: [u8; 5] = "aux \0"
+    var s_eq: [u8; 4] = " = \0"
+    var s_none: [u8; 10] = "aux none\n\0"
+    var s_log: [u8; 20] = "drvstore: ctl aux \0\0"
+    var vals: [u64; 2] = [0 as u64; 2]
+    result_len = 0
+    let a: u64 = parse_num(buf, len, at, (&vals[0]) as u64)
+    if a == NO_NUM || a >= len || kstate.get8(buf + a) != 32 {
+        fail_text()
+        return false
+    }
+    let b: u64 = parse_num(buf, len, a + 1, ((&vals[0]) as u64) + 8)
+    if b == NO_NUM {
+        fail_text()
+        return false
+    }
+    if !auxslot.present(state) {
+        put_s((&s_none[0]) as u64)
+        return true
+    }
+    let r: u64 = auxslot.control(state, vals[0], vals[1])
+    put_s((&s_pre[0]) as u64)
+    put_dec(vals[0])
+    put_c(32)
+    put_dec(vals[1])
+    put_s((&s_eq[0]) as u64)
+    put_dec(r)
+    put_c(10)
+    serial.puts((&s_log[0]) as u64)
+    serial.dec(vals[0])
+    serial.put(32 as u8)
+    serial.dec(r)
+    serial.nl()
+    return true
+}
+
 fn command(state: u64, buf: u64, len: u64) -> bool {
+    var c_slots: [u8; 6] = "slots\0"
+    var c_aux: [u8; 5] = "aux \0"
+    if word_at(buf, len, 0, (&c_slots[0]) as u64) {
+        return slots_report()
+    }
+    if word_at(buf, len, 0, (&c_aux[0]) as u64) {
+        return aux_report(state, buf, len, 4)
+    }
+    return unload_command(state, buf, len)
+}
+
+fn unload_command(state: u64, buf: u64, len: u64) -> bool {
     var c_unload: [u8; 8] = "unload \0"
     var name: [u8; 24] = [0 as u8; 24]
     var i: u64 = 0

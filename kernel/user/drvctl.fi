@@ -12,10 +12,13 @@ export { u_start }
 
 const MAX_NAMES: u64 = 32
 const NAME_BYTES: u64 = 24
+const PATH_BYTES: u64 = 96
 
 static mut NAMES: [u8; 768] = [0 as u8; 768]
+static mut PATHS: [u8; 3072] = [0 as u8; 3072]
+static mut APPS: [u8; 192] = [0 as u8; 192]
 static mut ENTRY: [u8; 512] = [0 as u8; 512]
-static mut DIR: [u8; 64] = [0 as u8; 64]
+static mut DIR: [u8; 128] = [0 as u8; 128]
 static mut FILE: [u8; 192] = [0 as u8; 192]
 static mut DST: [u8; 192] = [0 as u8; 192]
 static mut VALUE: [u8; 96] = [0 as u8; 96]
@@ -25,6 +28,10 @@ static mut REPLY: [u8; 96] = [0 as u8; 96]
 
 fn name_ptr(i: u64) -> u64 {
     return (&NAMES[0 as usize]) as u64 + i * NAME_BYTES
+}
+
+fn path_ptr(i: u64) -> u64 {
+    return (&PATHS[0 as usize]) as u64 + i * PATH_BYTES
 }
 
 fn say(p: u64) {
@@ -37,13 +44,35 @@ fn fail(msg: u64, arg: u64) -> u64 {
     return 1
 }
 
-fn collect_names() -> u64 {
-    var root: [u8; 13] = "/lib/drivers\0"
-    let fd: u64 = io.dir_open((&root[0 as usize]) as u64)
-    if errno.failed(fd) {
-        return 0
+fn has_osp_suffix(name: u64) -> bool {
+    let n: u64 = ulib.length(name)
+    return n >= 5 && n < NAME_BYTES && drvpkg.byte_at(name + n - 4) == 46 && drvpkg.byte_at(name + n - 3) == 111
+        && drvpkg.byte_at(name + n - 2) == 115 && drvpkg.byte_at(name + n - 1) == 112
+}
+
+fn add_name(root: u64, name: u64, count: u64) -> u64 {
+    if count >= MAX_NAMES || ulib.length(name) >= NAME_BYTES {
+        return count
     }
-    var count: u64 = 0
+    var i: u64 = 0
+    while i < count {
+        if ulib.streq(name_ptr(i), name) {
+            return count
+        }
+        i = i + 1
+    }
+    ulib.strcpy(name_ptr(count), name)
+    drvpkg.join(path_ptr(count), root, name)
+    return count + 1
+}
+
+fn scan_root(root: u64, count_in: u64, only_osp: bool, out_in: u64) -> u64 {
+    var count: u64 = count_in
+    var out: u64 = out_in
+    let fd: u64 = io.dir_open(root)
+    if errno.failed(fd) {
+        return count
+    }
     var going: bool = true
     while going {
         let n: u64 = io.dir_read(fd, (&ENTRY[0 as usize]) as u64, 512)
@@ -54,20 +83,53 @@ fn collect_names() -> u64 {
             while at < n {
                 let rec: u64 = (&ENTRY[0 as usize]) as u64 + at
                 let name: u64 = io.dir_name(rec)
-                if io.dir_kind(rec) == io.DT_DIR && drvpkg.byte_at(name) != 46 && count < MAX_NAMES
-                    && ulib.length(name) < NAME_BYTES {
-                    ulib.strcpy(name_ptr(count), name)
-                    count = count + 1
+                if io.dir_kind(rec) == io.DT_DIR && drvpkg.byte_at(name) != 46 {
+                    if only_osp {
+                        if has_osp_suffix(name) && out < 8 {
+                            ulib.strcpy((&APPS[0 as usize]) as u64 + out * NAME_BYTES, name)
+                            out = out + 1
+                        }
+                    } else {
+                        count = add_name(root, name, count)
+                    }
                 }
                 at = at + io.dir_reclen(rec)
             }
         }
     }
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if only_osp {
+        return out
+    }
+    return count
+}
+
+fn collect_names() -> u64 {
+    var root: [u8; 13] = "/lib/drivers\0"
+    var apps: [u8; 6] = "/apps\0"
+    var libdir: [u8; 5] = "/lib\0"
+    var base: [u8; 96] = [0 as u8; 96]
+    var count: u64 = scan_root((&root[0 as usize]) as u64, 0, false, 0)
+    let napps: u64 = scan_root((&apps[0 as usize]) as u64, 0, true, 0)
+    var a: u64 = 0
+    while a < napps {
+        drvpkg.join((&base[0 as usize]) as u64, (&apps[0 as usize]) as u64, (&APPS[0 as usize]) as u64 + a * NAME_BYTES)
+        ulib.strcat((&base[0 as usize]) as u64, (&libdir[0 as usize]) as u64)
+        count = scan_root((&base[0 as usize]) as u64, count, false, 0)
+        a = a + 1
+    }
     return count
 }
 
 fn pkg_dir(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_NAMES {
+        if ulib.streq(name_ptr(i), name) {
+            ulib.strcpy((&DIR[0 as usize]) as u64, path_ptr(i))
+            return (&DIR[0 as usize]) as u64
+        }
+        i = i + 1
+    }
     var root: [u8; 13] = "/lib/drivers\0"
     drvpkg.join((&DIR[0 as usize]) as u64, (&root[0 as usize]) as u64, name)
     return (&DIR[0 as usize]) as u64
@@ -310,26 +372,15 @@ fn cmd_ban(name: u64) -> u64 {
     return 0
 }
 
-fn cmd_unload(name: u64) -> u64 {
-    var e_name: [u8; 27] = "drvctl: bad package name: \0"
+fn ctl_call(cmd: u64, len: u64) -> u64 {
     var e_node: [u8; 28] = "drvctl: cannot open control\0"
     var e_ref: [u8; 23] = "drvctl: unload refused\0"
     var path: [u8; 12] = "/dev/drvctl\0"
-    var verb: [u8; 8] = "unload \0"
-    if !drvpkg.valid_name(name) {
-        return fail((&e_name[0 as usize]) as u64, name)
-    }
-    let cmd: u64 = (&CMD[0 as usize]) as u64
-    ulib.strcpy(cmd, (&verb[0 as usize]) as u64)
-    ulib.strcpy(cmd + 7, name)
-    let at: u64 = 7 + ulib.length(name)
-    *((cmd + at) as *mut u8) = 10 as u8
-    *((cmd + at + 1) as *mut u8) = 0 as u8
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, ulib.O_RDWR, 0)
     if ulib.bad(fd) {
         return fail((&e_node[0 as usize]) as u64, 0)
     }
-    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, cmd, at + 1)
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, cmd, len)
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
     let reply: u64 = (&REPLY[0 as usize]) as u64
     var got: u64 = 0
@@ -346,21 +397,89 @@ fn cmd_unload(name: u64) -> u64 {
     *((reply + got) as *mut u8) = 0 as u8
     say(reply)
     tools.ob_flush()
-    if got >= 4 && drvpkg.byte_at(reply + got - 4) == 32 && drvpkg.byte_at(reply + got - 3) == 111
-        && drvpkg.byte_at(reply + got - 2) == 107 {
+    return 0
+}
+
+fn reply_ok() -> bool {
+    let reply: u64 = (&REPLY[0 as usize]) as u64
+    let got: u64 = ulib.length(reply)
+    return got >= 4 && drvpkg.byte_at(reply + got - 4) == 32 && drvpkg.byte_at(reply + got - 3) == 111
+        && drvpkg.byte_at(reply + got - 2) == 107
+}
+
+fn cmd_unload(name: u64) -> u64 {
+    var e_name: [u8; 27] = "drvctl: bad package name: \0"
+    var verb: [u8; 8] = "unload \0"
+    if !drvpkg.valid_name(name) {
+        return fail((&e_name[0 as usize]) as u64, name)
+    }
+    let cmd: u64 = (&CMD[0 as usize]) as u64
+    ulib.strcpy(cmd, (&verb[0 as usize]) as u64)
+    ulib.strcpy(cmd + 7, name)
+    let at: u64 = 7 + ulib.length(name)
+    *((cmd + at) as *mut u8) = 10 as u8
+    *((cmd + at + 1) as *mut u8) = 0 as u8
+    if ctl_call(cmd, at + 1) != 0 {
+        return 1
+    }
+    if reply_ok() {
         return 0
     }
     return 1
 }
 
+fn cmd_slots() -> u64 {
+    var verb: [u8; 7] = "slots\n\0"
+    return ctl_call((&verb[0 as usize]) as u64, 6)
+}
+
+fn digits_only(p: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    if n == 0 || n > 9 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = drvpkg.byte_at(p + i)
+        if c < 48 || c > 57 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn cmd_aux(a: u64, b: u64) -> u64 {
+    var e_num: [u8; 22] = "drvctl: bad number: \0\0"
+    var verb: [u8; 5] = "aux \0"
+    if !digits_only(a) {
+        return fail((&e_num[0 as usize]) as u64, a)
+    }
+    if !digits_only(b) {
+        return fail((&e_num[0 as usize]) as u64, b)
+    }
+    let cmd: u64 = (&CMD[0 as usize]) as u64
+    ulib.strcpy(cmd, (&verb[0 as usize]) as u64)
+    ulib.strcpy(cmd + 4, a)
+    var at: u64 = 4 + ulib.length(a)
+    *((cmd + at) as *mut u8) = 32 as u8
+    ulib.strcpy(cmd + at + 1, b)
+    at = at + 1 + ulib.length(b)
+    *((cmd + at) as *mut u8) = 10 as u8
+    *((cmd + at + 1) as *mut u8) = 0 as u8
+    return ctl_call(cmd, at + 1)
+}
+
 fn u_start(args: u64) -> u64 {
-    var s_use: [u8; 91] = "usage: drvctl list | match <kind> <id> | install <dir> | remove <n> | ban <n> | unload <n>\0"
+    var s_use: [u8; 117] = "usage: drvctl list | match <kind> <id> | install <dir> | remove <n> | ban <n> | unload <n> | slots | aux <cmd> <arg>\0"
     var w_list: [u8; 5] = "list\0"
     var w_match: [u8; 6] = "match\0"
     var w_install: [u8; 8] = "install\0"
     var w_remove: [u8; 7] = "remove\0"
     var w_ban: [u8; 4] = "ban\0"
     var w_unload: [u8; 7] = "unload\0"
+    var w_slots: [u8; 6] = "slots\0"
+    var w_aux: [u8; 4] = "aux\0"
     let argc: u64 = ulib.arg_count(args)
     if argc >= 2 {
         let cmd: u64 = ulib.arg_at(args, 1)
@@ -381,6 +500,12 @@ fn u_start(args: u64) -> u64 {
         }
         if ulib.streq(cmd, (&w_unload[0 as usize]) as u64) && argc >= 3 {
             return cmd_unload(ulib.arg_at(args, 2))
+        }
+        if ulib.streq(cmd, (&w_slots[0 as usize]) as u64) {
+            return cmd_slots()
+        }
+        if ulib.streq(cmd, (&w_aux[0 as usize]) as u64) && argc >= 4 {
+            return cmd_aux(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
         }
     }
     ulib.esay_line((&s_use[0 as usize]) as u64, 0)
