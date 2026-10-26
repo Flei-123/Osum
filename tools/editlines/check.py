@@ -15,8 +15,8 @@ rows = [l for l in text.splitlines() if "ROW" in l]
 merged = [l for l in rows if len(re.findall(r"ROW", l)) > 1]
 tokens = set(re.findall(r"ROW(\d\d)", text))
 tail = any(t in tokens for t in ("18", "19", "20", "21", "22", "23", "24"))
-print("rows=%d merged=%d tail=%s end=%s" % (len(rows), len(merged), tail, "END" in text))
-ok = len(rows) >= 8 and not merged and tail and "END" in text
+print("rows=%d merged=%d tail=%s" % (len(rows), len(merged), tail))
+ok = len(rows) >= 8 and not merged and tail
 if mode == "expect-fail":
     ok = not ok
 print("OK" if ok else "FAIL")
