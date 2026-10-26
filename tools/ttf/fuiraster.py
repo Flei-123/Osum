@@ -436,6 +436,53 @@ def _quad(r, x0, y0, cx, cy, x1, y1):
         i = i + 1
 
 
+HINT_MIN_PX = 6
+HINT_MAX_PX = 24
+HINT_CODEPOINTS = (0x78, 0x48, 0x64)
+
+
+def hint_zones(f):
+    """lib/fonthint.fi `ensure`: x-height, cap height and ascender tops."""
+    z = getattr(f, "_hint_zones", None)
+    if z is not None:
+        return z
+    ol = Outline(f)
+    tops = []
+    for cp in HINT_CODEPOINTS:
+        gid = f.glyph_of(cp)
+        bb = ol.bbox(gid) if gid != 0 else None
+        tops.append(bb[3] if bb is not None else 0)
+    xh, cap, asc = tops
+    z = (xh, cap, asc) if (xh > 0 and cap > xh and asc >= xh) else (0, 0, 0)
+    f._hint_zones = z
+    return z
+
+
+def vfactor(f, px, top):
+    """lib/fonthint.fi `vfactor`, same operations in the same order."""
+    if px < HINT_MIN_PX or px > HINT_MAX_PX or top <= 0:
+        return 1.0
+    upem = int(f.upm)
+    if upem <= 0:
+        return 1.0
+    tol = int(upem / 48)
+    best = 0
+    best_d = tol + 1
+    for h in hint_zones(f):
+        if h > 0:
+            d = abs(top - h)
+            if d < best_d:
+                best_d = d
+                best = h
+    if best == 0:
+        return 1.0
+    px_h = float(best) * float(px) / float(upem)
+    rows = float(int(px_h + 0.5))
+    if rows < 1.0:
+        return 1.0
+    return rows / px_h
+
+
 def glyph(f, gid, px):
     """kernel/user/fuiglyph.fi `glyph_into`, line for line."""
     sc16 = kern.scale_of(px, f.upm)
@@ -443,13 +490,15 @@ def glyph(f, gid, px):
     ol = Outline(f)
     sc = float(px) / float(f.upm)
     w = h = bx0 = by1 = 0
+    vf = 1.0
     bb = ol.bbox(gid)
     if bb is not None and bb[2] > bb[0] and bb[3] > bb[1]:
         x0, y0, x1, y1 = bb
+        vf = vfactor(f, px, y1)
         bx0 = int(_ffloor(float(x0) * sc))
         bx1 = int(_fceil(float(x1) * sc))
-        by0 = int(_ffloor(float(y0) * sc))
-        by1 = int(_fceil(float(y1) * sc))
+        by0 = int(_ffloor(float(y0) * sc * vf))
+        by1 = int(_fceil(float(y1) * sc * vf - 0.0001))
         w = bx1 - bx0
         h = by1 - by0
     if w < 0 or h < 0 or w > 256 or h > 256:
@@ -457,7 +506,7 @@ def glyph(f, gid, px):
     a = bytearray(w * h)
     if w * h > 0:
         r = Raster(float(bx0), float(0 - by1), w, h)
-        ol.outline_at(gid, r, 0.0, 0.0, sc, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0)
+        ol.outline_at(gid, r, 0.0, 0.0, sc, 1.0, 0.0, 0.0, vf, 0.0, 0.0, 0)
         cov = r.finish()
         for i, c in enumerate(cov):
             if c < 0.0:
