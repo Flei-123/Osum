@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import acpi.aml
+import acpi.amlns
+import acpi.amlobj
+import acpi.amlev
+
+export {
+    MAX_ZONES, STRIDE, LIMITS, DK_MIN, DK_MAX, DK_ZERO_C, CRIT_CONFIRM,
+    F_NODE, F_CRT, F_HOT, F_PSV, F_CUR, F_FLAGS, F_MIN, F_MAX, F_VALID, F_INVALID, F_ERRORS,
+    F_CRIT_RUN, F_HOT_EVENTS, F_PSV_EVENTS, F_ABSENT, F_LAST_RAW,
+    FL_HAVE, FL_ABSENT, FL_HOT, FL_PSV,
+    R_ABSENT, R_ERROR, R_INVALID, R_VALID,
+    EV_CRITICAL, EV_HOT, EV_PSV,
+    MODE_NEW, MODE_ON, MODE_OFF, MODE_NONE,
+    scan, count, get, path_ptr, sample, events, mode, set_mode, interval_ms, set_interval_ms
+}
+
+const MAX_ZONES: u64 = 24
+const STRIDE: u64 = 24
+const PATH_BYTES: u64 = 48
+const LIMITS: u64 = 3
+const DK_MIN: u64 = 2532
+const DK_MAX: u64 = 4732
+const DK_ZERO_C: u64 = 2732
+const CRIT_CONFIRM: u64 = 3
+const NOTIFY_TRIP_CHANGE: u64 = 0x81
+const STA_PRESENT: u64 = 1
+
+const F_NODE: u64 = 0
+const F_TMP_NODE: u64 = 1
+const F_STA_NODE: u64 = 2
+const F_CRT_NODE: u64 = 3
+const F_HOT_NODE: u64 = 4
+const F_PSV_NODE: u64 = 5
+const F_CRT: u64 = 6
+const F_HOT: u64 = 7
+const F_PSV: u64 = 8
+const F_CUR: u64 = 9
+const F_FLAGS: u64 = 10
+const F_MIN: u64 = 11
+const F_MAX: u64 = 12
+const F_VALID: u64 = 13
+const F_INVALID: u64 = 14
+const F_ERRORS: u64 = 15
+const F_CRIT_RUN: u64 = 16
+const F_HOT_EVENTS: u64 = 17
+const F_PSV_EVENTS: u64 = 18
+const F_ABSENT: u64 = 19
+const F_LAST_RAW: u64 = 20
+
+const FL_HAVE: u64 = 1
+const FL_ABSENT: u64 = 2
+const FL_HOT: u64 = 4
+const FL_PSV: u64 = 8
+const FL_STALE_LIMITS: u64 = 16
+
+const R_ABSENT: u64 = 0
+const R_ERROR: u64 = 1
+const R_INVALID: u64 = 2
+const R_VALID: u64 = 3
+
+const EV_CRITICAL: u64 = 1
+const EV_HOT: u64 = 2
+const EV_PSV: u64 = 4
+
+const MODE_NEW: u64 = 0
+const MODE_ON: u64 = 1
+const MODE_OFF: u64 = 2
+const MODE_NONE: u64 = 3
+
+static mut z_tab: [u64; 576] = [0 as u64; 576]
+static mut z_path: [u8; 1152] = [0 as u8; 1152]
+static mut z_n: u64 = 0
+static mut z_mode: u64 = 0
+static mut z_interval: u64 = 0
+static mut z_events: u64 = 0
+static mut z_value: u64 = 0
+
+fn count() -> u64 {
+    return z_n
+}
+
+fn mode() -> u64 {
+    return z_mode
+}
+
+fn set_mode(m: u64) {
+    z_mode = m
+}
+
+fn interval_ms() -> u64 {
+    return z_interval
+}
+
+fn set_interval_ms(v: u64) {
+    z_interval = v
+}
+
+fn events() -> u64 {
+    return z_events
+}
+
+fn get(z: u64, f: u64) -> u64 {
+    return z_tab[(z * STRIDE + f) as usize]
+}
+
+fn put(z: u64, f: u64, v: u64) {
+    z_tab[(z * STRIDE + f) as usize] = v
+}
+
+fn add(z: u64, f: u64, v: u64) {
+    put(z, f, get(z, f) + v)
+}
+
+fn path_ptr(z: u64) -> u64 {
+    return (&z_path[(z * PATH_BYTES) as usize]) as u64
+}
+
+fn clear_row(z: u64) {
+    var f: u64 = 0
+    while f < STRIDE {
+        put(z, f, 0)
+        f = f + 1
+    }
+}
+
+fn scan(state: u64) -> u64 {
+    var w_tmp: [u8; 5] = "_TMP\0"
+    var w_sta: [u8; 5] = "_STA\0"
+    var w_lim: [u8; 13] = "_CRT_HOT_PSV\0"
+    z_n = 0
+    let seg_tmp: u64 = amlns.seg_of((&w_tmp[0]) as u64)
+    let seg_sta: u64 = amlns.seg_of((&w_sta[0]) as u64)
+    let nodes: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < nodes && z_n < MAX_ZONES {
+        if amlns.node_kind(state, i) == amlns.NK_TZ {
+            let tmp: u64 = amlns.child(state, i, seg_tmp)
+            if tmp != amlns.NONE {
+                let z: u64 = z_n
+                clear_row(z)
+                put(z, F_NODE, i)
+                put(z, F_TMP_NODE, tmp)
+                put(z, F_STA_NODE, amlns.child(state, i, seg_sta))
+                var k: u64 = 0
+                while k < LIMITS {
+                    put(z, F_CRT_NODE + k, amlns.child(state, i, amlns.seg_of((&w_lim[(k * 4) as usize]) as u64)))
+                    k = k + 1
+                }
+                put(z, F_FLAGS, FL_STALE_LIMITS)
+                amlns.path_write(state, i, path_ptr(z), PATH_BYTES)
+                z_n = z_n + 1
+            }
+        }
+        i = i + 1
+    }
+    return z_n
+}
+
+fn eval_int(state: u64, node: u64) -> bool {
+    if node == amlns.NONE {
+        return false
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    amlns.err_clear(state)
+    if !aml.eval_node(state, node, (&r[0]) as u64) {
+        amlns.err_clear(state)
+        return false
+    }
+    let t: u64 = amlobj.otype((&r[0]) as u64)
+    if t != amlobj.OT_INT && t != amlobj.OT_BUF {
+        return false
+    }
+    z_value = amlobj.to_int((&r[0]) as u64)
+    return true
+}
+
+fn plausible(dk: u64) -> bool {
+    return dk >= DK_MIN && dk <= DK_MAX
+}
+
+fn read_limits(state: u64, z: u64) {
+    var k: u64 = 0
+    while k < LIMITS {
+        var v: u64 = 0
+        if eval_int(state, get(z, F_CRT_NODE + k)) && plausible(z_value) {
+            v = z_value
+        }
+        put(z, F_CRT + k, v)
+        k = k + 1
+    }
+    put(z, F_FLAGS, get(z, F_FLAGS) & (~FL_STALE_LIMITS))
+}
+
+fn present(state: u64, z: u64) -> bool {
+    if get(z, F_STA_NODE) == amlns.NONE {
+        return true
+    }
+    if !eval_int(state, get(z, F_STA_NODE)) {
+        return true
+    }
+    return (z_value & STA_PRESENT) != 0
+}
+
+fn drain_notifies(state: u64, z: u64) {
+    let n: u64 = amlev.not_count(state)
+    var j: u64 = 0
+    while j < n {
+        if amlev.not_node(state, j) == get(z, F_NODE) && amlev.not_code(state, j) == NOTIFY_TRIP_CHANGE {
+            put(z, F_FLAGS, get(z, F_FLAGS) | FL_STALE_LIMITS)
+        }
+        j = j + 1
+    }
+    amlev.not_clear(state)
+}
+
+fn track_flag(z: u64, flag: u64, limit_field: u64, event_field: u64, raw: u64, ev: u64) -> u64 {
+    let limit: u64 = get(z, limit_field)
+    if limit != 0 && raw >= limit {
+        if (get(z, F_FLAGS) & flag) == 0 {
+            put(z, F_FLAGS, get(z, F_FLAGS) | flag)
+            add(z, event_field, 1)
+            return ev
+        }
+        return 0
+    }
+    put(z, F_FLAGS, get(z, F_FLAGS) & (~flag))
+    return 0
+}
+
+fn record(z: u64, raw: u64) {
+    if get(z, F_VALID) == 0 || raw < get(z, F_MIN) {
+        put(z, F_MIN, raw)
+    }
+    if get(z, F_VALID) == 0 || raw > get(z, F_MAX) {
+        put(z, F_MAX, raw)
+    }
+    put(z, F_CUR, raw)
+    put(z, F_FLAGS, get(z, F_FLAGS) | FL_HAVE)
+    add(z, F_VALID, 1)
+}
+
+fn sample(state: u64, z: u64) -> u64 {
+    z_events = 0
+    if !present(state, z) {
+        put(z, F_FLAGS, get(z, F_FLAGS) | FL_ABSENT)
+        add(z, F_ABSENT, 1)
+        put(z, F_CRIT_RUN, 0)
+        return R_ABSENT
+    }
+    put(z, F_FLAGS, get(z, F_FLAGS) & (~FL_ABSENT))
+    if (get(z, F_FLAGS) & FL_STALE_LIMITS) != 0 {
+        read_limits(state, z)
+    }
+    amlev.not_clear(state)
+    let ok: bool = eval_int(state, get(z, F_TMP_NODE))
+    drain_notifies(state, z)
+    if !ok {
+        add(z, F_ERRORS, 1)
+        put(z, F_CRIT_RUN, 0)
+        return R_ERROR
+    }
+    let raw: u64 = z_value
+    put(z, F_LAST_RAW, raw)
+    if !plausible(raw) {
+        add(z, F_INVALID, 1)
+        put(z, F_CRIT_RUN, 0)
+        return R_INVALID
+    }
+    record(z, raw)
+    var ev: u64 = 0
+    ev = ev | track_flag(z, FL_HOT, F_HOT, F_HOT_EVENTS, raw, EV_HOT)
+    ev = ev | track_flag(z, FL_PSV, F_PSV, F_PSV_EVENTS, raw, EV_PSV)
+    let crt: u64 = get(z, F_CRT)
+    if crt != 0 && raw >= crt {
+        add(z, F_CRIT_RUN, 1)
+        if get(z, F_CRIT_RUN) == CRIT_CONFIRM {
+            ev = ev | EV_CRITICAL
+        }
+    } else {
+        put(z, F_CRIT_RUN, 0)
+    }
+    z_events = ev
+    return R_VALID
+}

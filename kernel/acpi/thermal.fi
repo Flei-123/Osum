@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import sched.time
+import acpi.aml
+import acpi.thermzone
+import acpi.thermview
+import acpi.thermsim
+import diag.cmdopt
+import fs.syncall
+import pwr.power
+
+export { poll, start }
+
+const NS_PER_MS: u64 = 1000000
+const MS_PER_S: u64 = 1000
+const DEFAULT_INTERVAL_MS: u64 = 2000
+const MIN_INTERVAL_MS: u64 = 100
+const MAX_INTERVAL_MS: u64 = 60000
+const MIN_SLOT_MS: u64 = 10
+const FIRST_POLL_DELAY_MS: u64 = 50
+const DUMP_BYTES: u64 = 4096
+
+static mut t_next: u64 = 0
+static mut t_slot: u64 = 0
+static mut t_cursor: u64 = 0
+static mut t_sim: u64 = 0
+static mut t_dump_ms: u64 = 0
+static mut t_dump_next: u64 = 0
+static mut t_dump: [u8; 4096] = [0 as u8; 4096]
+
+fn clamp_interval(v: u64) -> u64 {
+    if v < MIN_INTERVAL_MS {
+        return MIN_INTERVAL_MS
+    }
+    if v > MAX_INTERVAL_MS {
+        return MAX_INTERVAL_MS
+    }
+    return v
+}
+
+fn start(state: u64, now_ms: u64) {
+    var w_off: [u8; 10] = "nothermal\0"
+    var w_ms: [u8; 8] = "thermms\0"
+    var w_sim: [u8; 9] = "thermsim\0"
+    var w_dump: [u8; 10] = "thermdump\0"
+    var s_off: [u8; 24] = "thermal: off (option)\0\0\0"
+    var s_head: [u8; 16] = "thermal: zones=\0"
+    var s_int: [u8; 14] = " interval_ms=\0"
+    var s_zone: [u8; 15] = "thermal: zone \0"
+    if cmdopt.has(state, (&w_off[0]) as u64) {
+        thermzone.set_mode(thermzone.MODE_OFF)
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    let interval: u64 = clamp_interval(cmdopt.number(state, (&w_ms[0]) as u64, DEFAULT_INTERVAL_MS))
+    thermzone.set_interval_ms(interval)
+    let n: u64 = thermzone.scan(state)
+    if n == 0 {
+        thermzone.set_mode(thermzone.MODE_NONE)
+    } else {
+        thermzone.set_mode(thermzone.MODE_ON)
+    }
+    serial.puts((&s_head[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_int[0]) as u64)
+    serial.dec(interval)
+    serial.nl()
+    if n == 0 {
+        return
+    }
+    var z: u64 = 0
+    while z < n {
+        serial.puts((&s_zone[0]) as u64)
+        serial.puts(thermzone.path_ptr(z))
+        serial.nl()
+        z = z + 1
+    }
+    t_slot = interval / n
+    if t_slot < MIN_SLOT_MS {
+        t_slot = MIN_SLOT_MS
+    }
+    t_next = now_ms + FIRST_POLL_DELAY_MS
+    if cmdopt.has(state, (&w_sim[0]) as u64) {
+        t_sim = 1
+        thermsim.stage(state, now_ms)
+    }
+    t_dump_ms = cmdopt.number(state, (&w_dump[0]) as u64, 0) * MS_PER_S
+    t_dump_next = now_ms + t_dump_ms
+}
+
+fn dump(state: u64) {
+    var s_b: [u8; 21] = "thermal: dump begin\0\0"
+    var s_e: [u8; 19] = "thermal: dump end\0\0"
+    serial.puts((&s_b[0]) as u64)
+    serial.nl()
+    thermview.render(state, (&t_dump[0]) as u64, DUMP_BYTES)
+    serial.puts((&t_dump[0]) as u64)
+    serial.puts((&s_e[0]) as u64)
+    serial.nl()
+}
+
+fn power_off(state: u64) {
+    var s_sync: [u8; 29] = "thermal: filesystems synced\0\0"
+    var s_fail: [u8; 32] = "thermal: filesystem sync failed\0"
+    var s_down: [u8; 25] = "thermal: powering off\0\0\0\0"
+    if syncall.sync_all(state) {
+        serial.puts((&s_sync[0]) as u64)
+    } else {
+        serial.puts((&s_fail[0]) as u64)
+    }
+    serial.nl()
+    serial.puts((&s_down[0]) as u64)
+    serial.nl()
+    if !kstate.mode_on(state, kstate.M_NOACPI) {
+        power.acpi_off(state)
+    }
+    power.shutdown(power.EXIT_OK)
+}
+
+fn act(state: u64, z: u64) {
+    var l_crit: [u8; 9] = "CRITICAL\0"
+    var l_hot: [u8; 4] = "hot\0"
+    var l_psv: [u8; 8] = "passive\0"
+    let ev: u64 = thermzone.events()
+    if (ev & thermzone.EV_HOT) != 0 {
+        thermview.event_line((&l_hot[0]) as u64, z, thermzone.F_HOT)
+    }
+    if (ev & thermzone.EV_PSV) != 0 {
+        thermview.event_line((&l_psv[0]) as u64, z, thermzone.F_PSV)
+    }
+    if (ev & thermzone.EV_CRITICAL) != 0 {
+        thermview.event_line((&l_crit[0]) as u64, z, thermzone.F_CRT)
+        power_off(state)
+    }
+}
+
+fn poll(state: u64) {
+    let m: u64 = thermzone.mode()
+    if m == thermzone.MODE_OFF || m == thermzone.MODE_NONE {
+        return
+    }
+    if aml.ns_arena(state) == 0 {
+        return
+    }
+    let now: u64 = time.mono_ns(state) / NS_PER_MS
+    if m == thermzone.MODE_NEW {
+        start(state, now)
+        return
+    }
+    if t_sim != 0 {
+        thermsim.tick(now)
+    }
+    if t_dump_ms != 0 && now >= t_dump_next {
+        t_dump_next = now + t_dump_ms
+        dump(state)
+    }
+    if now < t_next {
+        return
+    }
+    let z: u64 = t_cursor
+    t_cursor = (z + 1) % thermzone.count()
+    t_next = now + t_slot
+    thermzone.sample(state, z)
+    act(state, z)
+}

@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import lib.procw
+import acpi.thermzone
+import pwr.pwr
+
+export { render, event_line, temp_text }
+
+const ASCII_ZERO: u64 = 48
+const ASCII_DOT: u64 = 46
+const ASCII_MINUS: u64 = 45
+const ASCII_N: u64 = 110
+const ASCII_A: u64 = 97
+const TEXT_BYTES: u64 = 16
+const DEC_DIGITS: u64 = 20
+
+fn emit(out: u64, at: u64, c: u64) -> u64 {
+    kstate.set8(out + at, c as u8)
+    return at + 1
+}
+
+fn emit_dec(out: u64, at: u64, v: u64) -> u64 {
+    var tmp: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0] = ASCII_ZERO as u8
+        n = 1
+    }
+    while x > 0 && n < DEC_DIGITS {
+        tmp[n as usize] = (ASCII_ZERO + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var w: u64 = at
+    while n > 0 {
+        n = n - 1
+        w = emit(out, w, tmp[n as usize] as u64)
+    }
+    return w
+}
+
+fn temp_text(dk: u64, out: u64) -> u64 {
+    var at: u64 = 0
+    if dk == 0 {
+        at = emit(out, at, ASCII_N)
+        at = emit(out, at, ASCII_A)
+        emit(out, at, 0)
+        return at
+    }
+    var tenths: u64 = 0
+    if dk >= thermzone.DK_ZERO_C {
+        tenths = dk - thermzone.DK_ZERO_C
+    } else {
+        tenths = thermzone.DK_ZERO_C - dk
+        at = emit(out, at, ASCII_MINUS)
+    }
+    at = emit_dec(out, at, tenths / 10)
+    at = emit(out, at, ASCII_DOT)
+    at = emit_dec(out, at, tenths % 10)
+    emit(out, at, 0)
+    return at
+}
+
+fn put_temp(dk: u64) {
+    var t: [u8; 16] = [0 as u8; 16]
+    temp_text(dk, (&t[0]) as u64)
+    procw.put_s((&t[0]) as u64)
+}
+
+fn put_kv(key: u64, dk: u64) {
+    procw.put_s(key)
+    put_temp(dk)
+}
+
+fn put_kn(key: u64, v: u64) {
+    procw.put_s(key)
+    procw.put_dec(v)
+}
+
+fn have(z: u64) -> bool {
+    return (thermzone.get(z, thermzone.F_FLAGS) & thermzone.FL_HAVE) != 0
+}
+
+fn zone_line(z: u64) {
+    var k_zone: [u8; 6] = "zone \0"
+    var k_temp: [u8; 9] = " temp_c=\0"
+    var k_crt: [u8; 8] = " crt_c=\0"
+    var k_hot: [u8; 8] = " hot_c=\0"
+    var k_psv: [u8; 8] = " psv_c=\0"
+    var k_min: [u8; 6] = " min=\0"
+    var k_max: [u8; 6] = " max=\0"
+    var k_valid: [u8; 8] = " valid=\0"
+    var k_invalid: [u8; 10] = " invalid=\0"
+    var k_errors: [u8; 9] = " errors=\0"
+    var k_hev: [u8; 13] = " hot_events=\0"
+    var k_pev: [u8; 13] = " psv_events=\0"
+    var k_pres: [u8; 10] = " present=\0"
+    procw.put_s((&k_zone[0]) as u64)
+    procw.put_s(thermzone.path_ptr(z))
+    var cur: u64 = 0
+    var lo: u64 = 0
+    var hi: u64 = 0
+    if have(z) {
+        cur = thermzone.get(z, thermzone.F_CUR)
+        lo = thermzone.get(z, thermzone.F_MIN)
+        hi = thermzone.get(z, thermzone.F_MAX)
+    }
+    put_kv((&k_temp[0]) as u64, cur)
+    put_kv((&k_crt[0]) as u64, thermzone.get(z, thermzone.F_CRT))
+    put_kv((&k_hot[0]) as u64, thermzone.get(z, thermzone.F_HOT))
+    put_kv((&k_psv[0]) as u64, thermzone.get(z, thermzone.F_PSV))
+    put_kv((&k_min[0]) as u64, lo)
+    put_kv((&k_max[0]) as u64, hi)
+    put_kn((&k_valid[0]) as u64, thermzone.get(z, thermzone.F_VALID))
+    put_kn((&k_invalid[0]) as u64, thermzone.get(z, thermzone.F_INVALID))
+    put_kn((&k_errors[0]) as u64, thermzone.get(z, thermzone.F_ERRORS))
+    put_kn((&k_hev[0]) as u64, thermzone.get(z, thermzone.F_HOT_EVENTS))
+    put_kn((&k_pev[0]) as u64, thermzone.get(z, thermzone.F_PSV_EVENTS))
+    var present: u64 = 1
+    if (thermzone.get(z, thermzone.F_FLAGS) & thermzone.FL_ABSENT) != 0 {
+        present = 0
+    }
+    put_kn((&k_pres[0]) as u64, present)
+    procw.put_c(10)
+}
+
+fn cpu_line(state: u64) {
+    var k_cpu: [u8; 12] = "cpu temp_c=\0"
+    var k_src: [u8; 12] = " source=msr\0"
+    procw.put_s((&k_cpu[0]) as u64)
+    var dk: u64 = 0
+    if pwr.temp_ok(state) {
+        dk = pwr.temp_c(state) * 10 + thermzone.DK_ZERO_C
+    }
+    put_temp(dk)
+    procw.put_s((&k_src[0]) as u64)
+    procw.put_c(10)
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    var s_off: [u8; 13] = "thermal off\n\0"
+    var s_nons: [u8; 26] = "thermal off no-namespace\n\0"
+    var k_head: [u8; 15] = "thermal zones=\0"
+    var k_int: [u8; 14] = " interval_ms=\0"
+    procw.begin(out, cap)
+    let m: u64 = thermzone.mode()
+    if m == thermzone.MODE_OFF {
+        procw.put_s((&s_off[0]) as u64)
+        return procw.used()
+    }
+    if m == thermzone.MODE_NEW {
+        procw.put_s((&s_nons[0]) as u64)
+        return procw.used()
+    }
+    procw.put_s((&k_head[0]) as u64)
+    procw.put_dec(thermzone.count())
+    procw.put_s((&k_int[0]) as u64)
+    procw.put_dec(thermzone.interval_ms())
+    procw.put_c(10)
+    var z: u64 = 0
+    while z < thermzone.count() {
+        zone_line(z)
+        z = z + 1
+    }
+    cpu_line(state)
+    return procw.used()
+}
+
+fn event_line(label: u64, z: u64, limit_field: u64) {
+    var s_pre: [u8; 10] = "thermal: \0"
+    var s_temp: [u8; 9] = " temp_c=\0"
+    var s_lim: [u8; 10] = " limit_c=\0"
+    var t: [u8; 16] = [0 as u8; 16]
+    serial.puts((&s_pre[0]) as u64)
+    serial.puts(label)
+    serial.put(32 as u8)
+    serial.puts(thermzone.path_ptr(z))
+    serial.puts((&s_temp[0]) as u64)
+    temp_text(thermzone.get(z, thermzone.F_CUR), (&t[0]) as u64)
+    serial.puts((&t[0]) as u64)
+    serial.puts((&s_lim[0]) as u64)
+    temp_text(thermzone.get(z, limit_field), (&t[0]) as u64)
+    serial.puts((&t[0]) as u64)
+    serial.nl()
+}

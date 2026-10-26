@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import diag.cmdopt
+
+export { stage, tick }
+
+const BASE: u64 = 0x9F40
+const DEFAULT_DK: u64 = 3032
+const CRIT_DK: u64 = 3900
+const DEFAULT_C: u64 = 45
+const STATUS_ON: u64 = 0x0F
+const STATUS_OFF: u64 = 0
+const ABSENT: u64 = 0xFFFFFFFF
+const EVENTS: u64 = 6
+const CELLS: u64 = 4
+const MS_PER_S: u64 = 1000
+const BYTE: u64 = 8
+const BYTE_MASK: u64 = 0xFF
+
+const CELL_A: u64 = 1
+const CELL_B: u64 = 2
+const CELL_C_VALUE: u64 = 4
+const CELL_C_STATUS: u64 = 8
+const CELLS_AB: u64 = 3
+
+static mut s_start: u64 = 0
+static mut s_at: [u64; 6] = [0 as u64; 6]
+static mut s_val: [u64; 6] = [0 as u64; 6]
+static mut s_mask: [u64; 6] = [0 as u64; 6]
+static mut s_done: [u64; 6] = [0 as u64; 6]
+static mut c_offset: [u64; 4] = [0, 2, 4, 5]
+static mut c_width: [u64; 4] = [2, 2, 1, 1]
+
+fn write_cell(cell: u64, v: u64) {
+    let p: u64 = BASE + c_offset[cell as usize]
+    kstate.set8(p, (v & BYTE_MASK) as u8)
+    if c_width[cell as usize] == 2 {
+        kstate.set8(p + 1, ((v >> BYTE) & BYTE_MASK) as u8)
+    }
+}
+
+fn write_mask(mask: u64, v: u64) {
+    var cell: u64 = 0
+    while cell < CELLS {
+        if (mask & (1 << cell)) != 0 {
+            write_cell(cell, v)
+        }
+        cell = cell + 1
+    }
+}
+
+fn arm(slot: u64, secs: u64, v: u64, mask: u64) {
+    if secs == ABSENT {
+        return
+    }
+    s_at[slot as usize] = secs * MS_PER_S
+    s_val[slot as usize] = v
+    s_mask[slot as usize] = mask
+    s_done[slot as usize] = 0
+}
+
+fn stage(state: u64, now_ms: u64) {
+    var w_temp: [u8; 10] = "thermtemp\0"
+    var w_crit: [u8; 10] = "thermcrit\0"
+    var w_critb: [u8; 11] = "thermcritb\0"
+    var w_t1: [u8; 8] = "thermt1\0"
+    var w_v1: [u8; 8] = "thermv1\0"
+    var w_t2: [u8; 8] = "thermt2\0"
+    var w_v2: [u8; 8] = "thermv2\0"
+    var w_abs: [u8; 12] = "thermabsent\0"
+    var w_cset: [u8; 10] = "thermcset\0"
+    var w_cval: [u8; 10] = "thermcval\0"
+    s_start = now_ms
+    var i: u64 = 0
+    while i < EVENTS {
+        s_done[i as usize] = 1
+        i = i + 1
+    }
+    write_mask(CELLS_AB, cmdopt.number(state, (&w_temp[0]) as u64, DEFAULT_DK))
+    write_mask(CELL_C_VALUE, DEFAULT_C)
+    write_mask(CELL_C_STATUS, STATUS_ON)
+    arm(0, cmdopt.number(state, (&w_crit[0]) as u64, ABSENT), CRIT_DK, CELL_A)
+    arm(1, cmdopt.number(state, (&w_critb[0]) as u64, ABSENT), CRIT_DK, CELL_B)
+    arm(2, cmdopt.number(state, (&w_t1[0]) as u64, ABSENT), cmdopt.number(state, (&w_v1[0]) as u64, 0), CELLS_AB)
+    arm(3, cmdopt.number(state, (&w_t2[0]) as u64, ABSENT), cmdopt.number(state, (&w_v2[0]) as u64, 0), CELLS_AB)
+    arm(4, cmdopt.number(state, (&w_abs[0]) as u64, ABSENT), STATUS_OFF, CELL_C_STATUS)
+    arm(5, cmdopt.number(state, (&w_cset[0]) as u64, ABSENT), cmdopt.number(state, (&w_cval[0]) as u64, DEFAULT_C), CELL_C_VALUE)
+}
+
+fn tick(now_ms: u64) {
+    let t: u64 = now_ms - s_start
+    var i: u64 = 0
+    while i < EVENTS {
+        if s_done[i as usize] == 0 && t >= s_at[i as usize] {
+            s_done[i as usize] = 1
+            write_mask(s_mask[i as usize], s_val[i as usize])
+        }
+        i = i + 1
+    }
+}
