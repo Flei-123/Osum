@@ -1,0 +1,478 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import touchgest.geom
+
+export {
+    MAX_DEV, MAX_CONTACT, MAX_EV,
+    EV_DOWN, EV_TAP, EV_LONG, EV_DRAG_BEGIN, EV_DRAG, EV_DRAG_END, EV_WHEEL, EV_SCROLL, EV_PINCH, EV_SWIPE,
+    P_IDLE, P_DOWN, P_DRAG, P_TWO, P_SCROLL, P_PINCH, P_SWIPE, P_DONE,
+    O_ENABLED, O_SLOP_PX, O_LONG_MS, O_DTAP_MS, O_DTAP_PX, O_WHEEL_PX, O_NATURAL, O_PINCH, O_PINCH_STEP_PX,
+    O_SWIPE, O_SWIPE_PX, O_HSCROLL, O_PALM_SIZE, O_LONG,
+    reset, set_opt, get_opt, begin, add_contact, end, tick,
+    ev_count, ev_kind, ev_a, ev_b, ev_c, fingers, in_touch, dragging, phase
+}
+
+const MAX_DEV: u64 = 4
+const MAX_CONTACT: u64 = 5
+const MAX_EV: u64 = 8
+const OPT_N: u64 = 16
+const TAP_CHAIN_MAX: u64 = 3
+const WHEEL_BURST: i64 = 4
+
+const EV_DOWN: u64 = 1
+const EV_TAP: u64 = 2
+const EV_LONG: u64 = 3
+const EV_DRAG_BEGIN: u64 = 4
+const EV_DRAG: u64 = 5
+const EV_DRAG_END: u64 = 6
+const EV_WHEEL: u64 = 7
+const EV_SCROLL: u64 = 8
+const EV_PINCH: u64 = 9
+const EV_SWIPE: u64 = 10
+
+const P_IDLE: u64 = 0
+const P_DOWN: u64 = 1
+const P_DRAG: u64 = 2
+const P_TWO: u64 = 3
+const P_SCROLL: u64 = 4
+const P_PINCH: u64 = 5
+const P_SWIPE: u64 = 6
+const P_DONE: u64 = 7
+
+const O_ENABLED: u64 = 1
+const O_SLOP_PX: u64 = 2
+const O_LONG_MS: u64 = 3
+const O_DTAP_MS: u64 = 4
+const O_DTAP_PX: u64 = 5
+const O_WHEEL_PX: u64 = 6
+const O_NATURAL: u64 = 7
+const O_PINCH: u64 = 8
+const O_PINCH_STEP_PX: u64 = 9
+const O_SWIPE: u64 = 10
+const O_SWIPE_PX: u64 = 11
+const O_HSCROLL: u64 = 12
+const O_PALM_SIZE: u64 = 13
+const O_LONG: u64 = 14
+
+static mut opt_default: [u64; 16] = [0, 1, 12, 650, 300, 32, 40, 0, 1, 48, 1, 120, 1, 0, 1, 0]
+static mut opt_max: [u64; 16] = [0, 1, 200, 5000, 2000, 400, 400, 1, 1, 400, 1, 1000, 1, 65535, 1, 0]
+static mut opt_min: [u64; 16] = [0, 0, 1, 100, 50, 1, 4, 0, 0, 4, 0, 16, 0, 0, 0, 0]
+
+static mut d_opt: [u64; 64] = [0; 64]
+static mut d_phase: [u64; 4] = [0; 4]
+static mut d_t0: [u64; 4] = [0; 4]
+static mut d_lead: [u64; 4] = [0; 4]
+static mut d_n: [u64; 4] = [0; 4]
+static mut d_maxn: [u64; 4] = [0; 4]
+static mut d_sx: [i64; 4] = [0; 4]
+static mut d_sy: [i64; 4] = [0; 4]
+static mut d_lx: [i64; 4] = [0; 4]
+static mut d_ly: [i64; 4] = [0; 4]
+static mut d_ax: [i64; 4] = [0; 4]
+static mut d_ay: [i64; 4] = [0; 4]
+static mut d_cx: [i64; 4] = [0; 4]
+static mut d_cy: [i64; 4] = [0; 4]
+static mut d_dist0: [i64; 4] = [0; 4]
+static mut d_distl: [i64; 4] = [0; 4]
+static mut d_accx: [i64; 4] = [0; 4]
+static mut d_accy: [i64; 4] = [0; 4]
+static mut d_pacc: [i64; 4] = [0; 4]
+static mut d_tap_t: [u64; 4] = [0; 4]
+static mut d_tap_x: [i64; 4] = [0; 4]
+static mut d_tap_y: [i64; 4] = [0; 4]
+static mut d_tap_n: [u64; 4] = [0; 4]
+
+static mut f_dev: u64 = 0
+static mut f_now: u64 = 0
+static mut f_n: u64 = 0
+static mut f_id: [u64; 5] = [0; 5]
+static mut f_x: [i64; 5] = [0; 5]
+static mut f_y: [i64; 5] = [0; 5]
+
+static mut e_n: u64 = 0
+static mut e_k: [u64; 8] = [0; 8]
+static mut e_a: [i64; 8] = [0; 8]
+static mut e_b: [i64; 8] = [0; 8]
+static mut e_c: [i64; 8] = [0; 8]
+
+fn reset(dev: u64) {
+    if dev >= MAX_DEV { return }
+    let d: usize = dev as usize
+    d_phase[d] = P_IDLE
+    d_n[d] = 0
+    d_maxn[d] = 0
+    d_accx[d] = 0
+    d_accy[d] = 0
+    d_pacc[d] = 0
+    d_tap_n[d] = 0
+    d_tap_t[d] = 0
+    e_n = 0
+}
+
+fn set_opt(dev: u64, opt: u64, val: u64) {
+    if dev >= MAX_DEV || opt == 0 || opt >= OPT_N { return }
+    var v: u64 = val
+    if v > opt_max[opt as usize] { v = opt_max[opt as usize] }
+    if v < opt_min[opt as usize] { v = opt_min[opt as usize] }
+    d_opt[(dev * OPT_N + opt) as usize] = v + 1
+}
+
+fn get_opt(dev: u64, opt: u64) -> u64 {
+    if dev >= MAX_DEV || opt == 0 || opt >= OPT_N { return 0 }
+    let v: u64 = d_opt[(dev * OPT_N + opt) as usize]
+    if v == 0 { return opt_default[opt as usize] }
+    return v - 1
+}
+
+fn opt_i(dev: u64, opt: u64) -> i64 {
+    return get_opt(dev, opt) as i64
+}
+
+fn begin(dev: u64, now: u64) {
+    f_dev = dev
+    f_now = now
+    f_n = 0
+    e_n = 0
+}
+
+fn add_contact(id: u64, x: i64, y: i64, size: u64) {
+    if f_n >= MAX_CONTACT { return }
+    let palm: u64 = get_opt(f_dev, O_PALM_SIZE)
+    if palm != 0 && size >= palm { return }
+    let i: usize = f_n as usize
+    f_id[i] = id
+    f_x[i] = x
+    f_y[i] = y
+    f_n = f_n + 1
+}
+
+fn emit(kind: u64, a: i64, b: i64, c: i64) {
+    if e_n >= MAX_EV { return }
+    let i: usize = e_n as usize
+    e_k[i] = kind
+    e_a[i] = a
+    e_b[i] = b
+    e_c[i] = c
+    e_n = e_n + 1
+}
+
+fn ev_count() -> u64 { return e_n }
+
+fn ev_kind(i: u64) -> u64 {
+    if i >= e_n { return 0 }
+    return e_k[i as usize]
+}
+
+fn ev_a(i: u64) -> i64 {
+    if i >= e_n { return 0 }
+    return e_a[i as usize]
+}
+
+fn ev_b(i: u64) -> i64 {
+    if i >= e_n { return 0 }
+    return e_b[i as usize]
+}
+
+fn ev_c(i: u64) -> i64 {
+    if i >= e_n { return 0 }
+    return e_c[i as usize]
+}
+
+fn fingers(dev: u64) -> u64 {
+    if dev >= MAX_DEV { return 0 }
+    return d_n[dev as usize]
+}
+
+fn phase(dev: u64) -> u64 {
+    if dev >= MAX_DEV { return P_IDLE }
+    return d_phase[dev as usize]
+}
+
+fn in_touch(dev: u64) -> bool {
+    return phase(dev) != P_IDLE
+}
+
+fn dragging(dev: u64) -> bool {
+    return phase(dev) == P_DRAG
+}
+
+fn lead_index() -> u64 {
+    let d: usize = f_dev as usize
+    var i: u64 = 0
+    while i < f_n {
+        if f_id[i as usize] == d_lead[d] { return i }
+        i = i + 1
+    }
+    return 0
+}
+
+fn centroid_x() -> i64 {
+    var s: i64 = 0
+    var i: u64 = 0
+    while i < f_n {
+        s = s + f_x[i as usize]
+        i = i + 1
+    }
+    return geom.sdiv(s, f_n as i64)
+}
+
+fn centroid_y() -> i64 {
+    var s: i64 = 0
+    var i: u64 = 0
+    while i < f_n {
+        s = s + f_y[i as usize]
+        i = i + 1
+    }
+    return geom.sdiv(s, f_n as i64)
+}
+
+fn spread() -> i64 {
+    if f_n < 2 { return 0 }
+    let dx: i64 = f_x[1] - f_x[0]
+    let dy: i64 = f_y[1] - f_y[0]
+    return geom.isqrt(dx * dx + dy * dy)
+}
+
+fn anchor(d: usize) {
+    d_ax[d] = centroid_x()
+    d_ay[d] = centroid_y()
+    d_cx[d] = d_ax[d]
+    d_cy[d] = d_ay[d]
+    d_dist0[d] = spread()
+    d_distl[d] = d_dist0[d]
+    d_accx[d] = 0
+    d_accy[d] = 0
+    d_pacc[d] = 0
+}
+
+fn start_phase(d: usize, n: u64) {
+    if n == 1 {
+        d_phase[d] = P_DOWN
+    } else if n == 2 {
+        d_phase[d] = P_TWO
+        anchor(d)
+    } else {
+        d_phase[d] = P_SWIPE
+        anchor(d)
+    }
+}
+
+fn tap_count(dev: u64, now: u64, x: i64, y: i64) -> u64 {
+    let d: usize = dev as usize
+    var n: u64 = 1
+    if d_tap_n[d] != 0 && now >= d_tap_t[d] && now - d_tap_t[d] <= get_opt(dev, O_DTAP_MS) {
+        let near: i64 = opt_i(dev, O_DTAP_PX)
+        if geom.absv(x - d_tap_x[d]) <= near && geom.absv(y - d_tap_y[d]) <= near {
+            n = d_tap_n[d] + 1
+            if n > TAP_CHAIN_MAX { n = 1 }
+        }
+    }
+    d_tap_n[d] = n
+    d_tap_t[d] = now
+    d_tap_x[d] = x
+    d_tap_y[d] = y
+    return n
+}
+
+fn finish(dev: u64, now: u64) {
+    let d: usize = dev as usize
+    let ph: u64 = d_phase[d]
+    if ph == P_DOWN {
+        if get_opt(dev, O_LONG) != 0 && now >= d_t0[d] + get_opt(dev, O_LONG_MS) {
+            emit(EV_LONG, d_lx[d], d_ly[d], 0)
+            d_tap_n[d] = 0
+        } else {
+            let c: u64 = tap_count(dev, now, d_lx[d], d_ly[d])
+            emit(EV_TAP, d_lx[d], d_ly[d], c as i64)
+        }
+    } else if ph == P_DRAG {
+        emit(EV_DRAG_END, d_lx[d], d_ly[d], 0)
+        d_tap_n[d] = 0
+    } else {
+        d_tap_n[d] = 0
+    }
+    d_phase[d] = P_IDLE
+    d_n[d] = 0
+    d_maxn[d] = 0
+}
+
+fn notches(dev: u64, acc: i64) -> i64 {
+    let step: i64 = opt_i(dev, O_WHEEL_PX)
+    var q: i64 = geom.sdiv(acc, step)
+    if q > WHEEL_BURST { q = WHEEL_BURST }
+    if q < 0 - WHEEL_BURST { q = 0 - WHEEL_BURST }
+    return q
+}
+
+fn scroll_frame(dev: u64, d: usize, dcx: i64, dcy: i64) {
+    if dcx == 0 && dcy == 0 { return }
+    emit(EV_SCROLL, dcx, dcy, 0)
+    var hv: i64 = 0
+    var vv: i64 = 0
+    if geom.absv(dcx) > geom.absv(dcy) {
+        if get_opt(dev, O_HSCROLL) != 0 { d_accx[d] = d_accx[d] + dcx }
+    } else {
+        d_accy[d] = d_accy[d] + dcy
+    }
+    let step: i64 = opt_i(dev, O_WHEEL_PX)
+    let qx: i64 = notches(dev, d_accx[d])
+    let qy: i64 = notches(dev, d_accy[d])
+    d_accx[d] = d_accx[d] - qx * step
+    d_accy[d] = d_accy[d] - qy * step
+    hv = 0 - qx
+    vv = 0 - qy
+    if get_opt(dev, O_NATURAL) != 0 {
+        hv = 0 - hv
+        vv = 0 - vv
+    }
+    if hv != 0 || vv != 0 { emit(EV_WHEEL, hv, vv, 0) }
+}
+
+fn pinch_frame(dev: u64, d: usize, dd: i64) {
+    if dd == 0 { return }
+    d_pacc[d] = d_pacc[d] + dd
+    let step: i64 = opt_i(dev, O_PINCH_STEP_PX)
+    var q: i64 = geom.sdiv(d_pacc[d], step)
+    if q > WHEEL_BURST { q = WHEEL_BURST }
+    if q < 0 - WHEEL_BURST { q = 0 - WHEEL_BURST }
+    d_pacc[d] = d_pacc[d] - q * step
+    emit(EV_PINCH, dd, q, 0)
+}
+
+fn two_fingers(dev: u64, d: usize) {
+    let cx: i64 = centroid_x()
+    let cy: i64 = centroid_y()
+    let dist: i64 = spread()
+    if d_phase[d] == P_TWO {
+        let mc: i64 = geom.absv(cx - d_ax[d]) + geom.absv(cy - d_ay[d])
+        let md: i64 = geom.absv(dist - d_dist0[d])
+        let slop: i64 = opt_i(dev, O_SLOP_PX)
+        if mc < slop && md < slop {
+            d_cx[d] = cx
+            d_cy[d] = cy
+            d_distl[d] = dist
+            return
+        }
+        if get_opt(dev, O_PINCH) != 0 && md > mc * 2 {
+            d_phase[d] = P_PINCH
+            d_distl[d] = d_dist0[d]
+        } else {
+            d_phase[d] = P_SCROLL
+            d_cx[d] = d_ax[d]
+            d_cy[d] = d_ay[d]
+        }
+    }
+    if d_phase[d] == P_SCROLL {
+        scroll_frame(dev, d, cx - d_cx[d], cy - d_cy[d])
+    } else {
+        pinch_frame(dev, d, dist - d_distl[d])
+    }
+    d_cx[d] = cx
+    d_cy[d] = cy
+    d_distl[d] = dist
+}
+
+fn swipe_frame(dev: u64, d: usize) {
+    if d_phase[d] != P_SWIPE || get_opt(dev, O_SWIPE) == 0 { return }
+    let dx: i64 = centroid_x() - d_ax[d]
+    let dy: i64 = centroid_y() - d_ay[d]
+    let need: i64 = opt_i(dev, O_SWIPE_PX)
+    var dir: u64 = 0
+    if geom.absv(dx) >= geom.absv(dy) {
+        if dx <= 0 - need { dir = 1 }
+        if dx >= need { dir = 2 }
+    } else {
+        if dy <= 0 - need { dir = 3 }
+        if dy >= need { dir = 4 }
+    }
+    if dir != 0 {
+        emit(EV_SWIPE, dir as i64, f_n as i64, 0)
+        d_phase[d] = P_DONE
+    }
+}
+
+fn end(dev: u64) {
+    if dev != f_dev || dev >= MAX_DEV { return }
+    let d: usize = dev as usize
+    let now: u64 = f_now
+    if get_opt(dev, O_ENABLED) == 0 {
+        if d_phase[d] != P_IDLE { finish(dev, now) }
+        e_n = 0
+        return
+    }
+    let n: u64 = f_n
+    if n == 0 {
+        if d_phase[d] != P_IDLE { finish(dev, now) }
+        return
+    }
+    if d_phase[d] == P_IDLE {
+        d_t0[d] = now
+        d_maxn[d] = n
+            d_lead[d] = f_id[0]
+        d_sx[d] = f_x[0]
+        d_sy[d] = f_y[0]
+        d_lx[d] = f_x[0]
+        d_ly[d] = f_y[0]
+        start_phase(d, n)
+        if n == 1 { emit(EV_DOWN, f_x[0], f_y[0], 0) }
+        d_n[d] = n
+        return
+    }
+    d_n[d] = n
+    if n > d_maxn[d] { d_maxn[d] = n }
+    let ph: u64 = d_phase[d]
+    if ph == P_DOWN {
+        if n >= 2 {
+            start_phase(d, n)
+            return
+        }
+        d_lead[d] = f_id[0]
+        d_lx[d] = f_x[0]
+        d_ly[d] = f_y[0]
+        let slop: i64 = opt_i(dev, O_SLOP_PX)
+        if geom.absv(d_lx[d] - d_sx[d]) > slop || geom.absv(d_ly[d] - d_sy[d]) > slop {
+            d_phase[d] = P_DRAG
+            emit(EV_DRAG_BEGIN, d_sx[d], d_sy[d], 0)
+            emit(EV_DRAG, d_lx[d], d_ly[d], 0)
+        }
+        return
+    }
+    if ph == P_DRAG {
+        let li: u64 = lead_index()
+        d_lead[d] = f_id[li as usize]
+        d_lx[d] = f_x[li as usize]
+        d_ly[d] = f_y[li as usize]
+        emit(EV_DRAG, d_lx[d], d_ly[d], 0)
+        return
+    }
+    if ph == P_TWO || ph == P_SCROLL || ph == P_PINCH {
+        if n == 2 {
+            two_fingers(dev, d)
+        } else if n >= 3 {
+            start_phase(d, n)
+        } else {
+            d_phase[d] = P_DONE
+        }
+        return
+    }
+    if ph == P_SWIPE {
+        if n >= 3 {
+            swipe_frame(dev, d)
+        } else {
+            d_phase[d] = P_DONE
+        }
+    }
+}
+
+fn tick(dev: u64, now: u64) -> u64 {
+    e_n = 0
+    if dev >= MAX_DEV { return 0 }
+    let d: usize = dev as usize
+    if get_opt(dev, O_ENABLED) == 0 || get_opt(dev, O_LONG) == 0 { return 0 }
+    if d_phase[d] == P_DOWN && d_n[d] == 1 && now >= d_t0[d] + get_opt(dev, O_LONG_MS) {
+        d_phase[d] = P_DONE
+        d_tap_n[d] = 0
+        emit(EV_LONG, d_lx[d], d_ly[d], 0)
+    }
+    return e_n
+}
