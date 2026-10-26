@@ -1,0 +1,440 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import touchev.record
+import touchev.quirk
+
+export {
+    MAX_DEV, MAX_SLOT, MAX_EV,
+    reset, configure, set_quirks, set_screen,
+    begin, add, end, pen,
+    ev_count, ev_type, ev_slot, ev_device, ev_flags,
+    ev_x, ev_y, ev_x_px, ev_y_px, ev_pressure, ev_size, ev_time,
+    lost_events, contacts, active_slots,
+    slot_used, slot_id, slot_x, slot_y, slot_pressure, slot_size, slot_flags
+}
+
+const MAX_DEV: u64 = 8
+const MAX_SLOT: u64 = 10
+const MAX_EV: u64 = 16
+const NORM_MAX: i64 = 65535
+const NO_SLOT: u64 = 0xFF
+const TOTAL_SLOTS: usize = 80
+
+static mut d_kind: [u64; 8] = [1; 8]
+static mut d_xmin: [i64; 8] = [0; 8]
+static mut d_xmax: [i64; 8] = [65535; 8]
+static mut d_ymin: [i64; 8] = [0; 8]
+static mut d_ymax: [i64; 8] = [65535; 8]
+static mut d_quirks: [u64; 8] = [0; 8]
+static mut d_w: [i64; 8] = [65536; 8]
+static mut d_h: [i64; 8] = [65536; 8]
+static mut d_lost: [u64; 8] = [0; 8]
+
+static mut s_used: [u64; 80] = [0; 80]
+static mut s_id: [u64; 80] = [0; 80]
+static mut s_x: [u64; 80] = [0; 80]
+static mut s_y: [u64; 80] = [0; 80]
+static mut s_p: [u64; 80] = [0; 80]
+static mut s_sz: [u64; 80] = [0; 80]
+static mut s_fl: [u64; 80] = [0; 80]
+static mut s_seen: [u64; 80] = [0; 80]
+static mut s_fk: [u64; 80] = [0; 80]
+
+static mut p_state: [u64; 8] = [0; 8]
+static mut p_x: [u64; 8] = [0; 8]
+static mut p_y: [u64; 8] = [0; 8]
+static mut p_p: [u64; 8] = [0; 8]
+static mut p_fl: [u64; 8] = [0; 8]
+
+static mut f_dev: u64 = 0
+static mut f_now: u64 = 0
+static mut f_calls: u64 = 0
+static mut f_n: u64 = 0
+static mut f_id: [u64; 10] = [0; 10]
+static mut f_x: [u64; 10] = [0; 10]
+static mut f_y: [u64; 10] = [0; 10]
+static mut f_p: [u64; 10] = [0; 10]
+static mut f_sz: [u64; 10] = [0; 10]
+static mut f_fl: [u64; 10] = [0; 10]
+static mut f_slot: [u64; 10] = [0; 10]
+
+static mut e_n: u64 = 0
+static mut e_type: [u64; 16] = [0; 16]
+static mut e_slot: [u64; 16] = [0; 16]
+static mut e_dev: [u64; 16] = [0; 16]
+static mut e_fl: [u64; 16] = [0; 16]
+static mut e_x: [u64; 16] = [0; 16]
+static mut e_y: [u64; 16] = [0; 16]
+static mut e_p: [u64; 16] = [0; 16]
+static mut e_sz: [u64; 16] = [0; 16]
+static mut e_t: [u64; 16] = [0; 16]
+
+fn si(dev: u64, slot: u64) -> usize { return (dev * MAX_SLOT + slot) as usize }
+
+fn clamp16(v: u64) -> u64 {
+    if v > 65535 { return 65535 }
+    return v
+}
+
+fn norm(v: i64, lo: i64, hi: i64) -> u64 {
+    if hi <= lo { return 0 }
+    var c: i64 = v
+    if c < lo { c = lo }
+    if c > hi { c = hi }
+    return (((c - lo) * NORM_MAX) / (hi - lo)) as u64
+}
+
+fn to_px(n: u64, size: i64) -> u64 {
+    if size <= 1 { return 0 }
+    return (((n as i64) * (size - 1)) / NORM_MAX) as u64
+}
+
+fn map_x(dev: u64, rx: i64, ry: i64) -> u64 {
+    var n: u64 = 0
+    if (d_quirks[dev as usize] & quirk.Q_SWAP_XY) != 0 {
+        n = norm(ry, d_ymin[dev as usize], d_ymax[dev as usize])
+    } else {
+        n = norm(rx, d_xmin[dev as usize], d_xmax[dev as usize])
+    }
+    if (d_quirks[dev as usize] & quirk.Q_INVERT_X) != 0 { return 65535 - n }
+    return n
+}
+
+fn map_y(dev: u64, rx: i64, ry: i64) -> u64 {
+    var n: u64 = 0
+    if (d_quirks[dev as usize] & quirk.Q_SWAP_XY) != 0 {
+        n = norm(rx, d_xmin[dev as usize], d_xmax[dev as usize])
+    } else {
+        n = norm(ry, d_ymin[dev as usize], d_ymax[dev as usize])
+    }
+    if (d_quirks[dev as usize] & quirk.Q_INVERT_Y) != 0 { return 65535 - n }
+    return n
+}
+
+fn emit(dev: u64, type_: u64, slot: u64, device: u64, flags: u64, x: u64, y: u64, p: u64, sz: u64) {
+    if e_n >= MAX_EV {
+        d_lost[dev as usize] = d_lost[dev as usize] + 1
+        return
+    }
+    let i: usize = e_n as usize
+    e_type[i] = type_
+    e_slot[i] = slot
+    e_dev[i] = device
+    e_fl[i] = flags
+    e_x[i] = x
+    e_y[i] = y
+    e_p[i] = p
+    e_sz[i] = sz
+    e_t[i] = f_now
+    e_n = e_n + 1
+}
+
+fn clear_dev(dev: u64) {
+    var s: u64 = 0
+    while s < MAX_SLOT {
+        let k: usize = si(dev, s)
+        s_used[k] = 0
+        s_id[k] = 0
+        s_x[k] = 0
+        s_y[k] = 0
+        s_p[k] = 0
+        s_sz[k] = 0
+        s_fl[k] = 0
+        s_seen[k] = 0
+        s_fk[k] = 0
+        s = s + 1
+    }
+}
+
+fn reset(dev: u64) {
+    if dev >= MAX_DEV { return }
+    let d: usize = dev as usize
+    clear_dev(dev)
+    d_kind[d] = record.D_TOUCHSCREEN
+    d_xmin[d] = 0
+    d_xmax[d] = NORM_MAX
+    d_ymin[d] = 0
+    d_ymax[d] = NORM_MAX
+    d_quirks[d] = 0
+    d_w[d] = 65536
+    d_h[d] = 65536
+    d_lost[d] = 0
+    p_state[d] = 0
+    p_x[d] = 0
+    p_y[d] = 0
+    p_p[d] = 0
+    p_fl[d] = 0
+    e_n = 0
+    f_n = 0
+}
+
+fn configure(dev: u64, device_kind: u64, xmin: i64, xmax: i64, ymin: i64, ymax: i64) {
+    if dev >= MAX_DEV { return }
+    let d: usize = dev as usize
+    d_kind[d] = device_kind
+    d_xmin[d] = xmin
+    d_xmax[d] = xmax
+    d_ymin[d] = ymin
+    d_ymax[d] = ymax
+}
+
+fn set_quirks(dev: u64, flags: u64) {
+    if dev >= MAX_DEV { return }
+    d_quirks[dev as usize] = flags
+}
+
+fn set_screen(dev: u64, w: i64, h: i64) {
+    if dev >= MAX_DEV { return }
+    d_w[dev as usize] = w
+    d_h[dev as usize] = h
+}
+
+fn begin(dev: u64, now_ms: u64) {
+    f_dev = dev
+    f_now = now_ms
+    f_calls = 0
+    f_n = 0
+    e_n = 0
+}
+
+fn frame_has(id: u64) -> bool {
+    var k: u64 = 0
+    while k < f_n {
+        if f_id[k as usize] == id { return true }
+        k = k + 1
+    }
+    return false
+}
+
+fn add(id: u64, raw_x: i64, raw_y: i64, tip: u64, confident: u64, pressure: u64, size: u64) {
+    if f_dev >= MAX_DEV { return }
+    let dev: u64 = f_dev
+    let call: u64 = f_calls
+    f_calls = f_calls + 1
+    if (d_quirks[dev as usize] & quirk.Q_SINGLE_TOUCH) != 0 && call > 0 { return }
+    if tip == 0 { return }
+    if f_n >= MAX_SLOT { return }
+    if frame_has(id) { return }
+    var fl: u64 = 0
+    if confident == 0 && (d_quirks[dev as usize] & quirk.Q_NO_CONFIDENCE) == 0 { fl = record.F_PALM }
+    let k: usize = f_n as usize
+    f_id[k] = id
+    f_x[k] = map_x(dev, raw_x, raw_y)
+    f_y[k] = map_y(dev, raw_x, raw_y)
+    f_p[k] = clamp16(pressure)
+    f_sz[k] = clamp16(size)
+    f_fl[k] = fl
+    f_slot[k] = NO_SLOT
+    f_n = f_n + 1
+}
+
+fn find_slot(dev: u64, id: u64) -> u64 {
+    var s: u64 = 0
+    while s < MAX_SLOT {
+        let k: usize = si(dev, s)
+        if s_used[k] != 0 && s_id[k] == id { return s }
+        s = s + 1
+    }
+    return NO_SLOT
+}
+
+fn free_slot(dev: u64) -> u64 {
+    var s: u64 = 0
+    while s < MAX_SLOT {
+        if s_used[si(dev, s)] == 0 { return s }
+        s = s + 1
+    }
+    return NO_SLOT
+}
+
+fn emit_slot(dev: u64, type_: u64, s: u64) {
+    let k: usize = si(dev, s)
+    emit(dev, type_, s, d_kind[dev as usize], s_fl[k], s_x[k], s_y[k], s_p[k], s_sz[k])
+}
+
+fn end(dev: u64) -> u64 {
+    e_n = 0
+    if dev >= MAX_DEV { return 0 }
+    if (d_quirks[dev as usize] & quirk.Q_IGNORE) != 0 { return 0 }
+    var s: u64 = 0
+    while s < MAX_SLOT {
+        s_seen[si(dev, s)] = 0
+        s = s + 1
+    }
+    var k: u64 = 0
+    while k < f_n {
+        let found: u64 = find_slot(dev, f_id[k as usize])
+        f_slot[k as usize] = found
+        if found != NO_SLOT {
+            s_seen[si(dev, found)] = 1
+            s_fk[si(dev, found)] = k
+        }
+        k = k + 1
+    }
+    s = 0
+    while s < MAX_SLOT {
+        let i: usize = si(dev, s)
+        if s_used[i] != 0 && s_seen[i] == 0 {
+            emit_slot(dev, record.T_UP, s)
+            s_used[i] = 0
+        }
+        s = s + 1
+    }
+    k = 0
+    while k < f_n {
+        if f_slot[k as usize] == NO_SLOT {
+            let ns: u64 = free_slot(dev)
+            if ns != NO_SLOT {
+                let i: usize = si(dev, ns)
+                s_used[i] = 1
+                s_id[i] = f_id[k as usize]
+                s_x[i] = f_x[k as usize]
+                s_y[i] = f_y[k as usize]
+                s_p[i] = f_p[k as usize]
+                s_sz[i] = f_sz[k as usize]
+                s_fl[i] = f_fl[k as usize]
+                s_seen[i] = 2
+                f_slot[k as usize] = ns
+                emit_slot(dev, record.T_DOWN, ns)
+            }
+        }
+        k = k + 1
+    }
+    s = 0
+    while s < MAX_SLOT {
+        let i: usize = si(dev, s)
+        if s_used[i] != 0 && s_seen[i] == 1 {
+            let fk: usize = s_fk[i] as usize
+            if s_x[i] != f_x[fk] || s_y[i] != f_y[fk] || s_p[i] != f_p[fk] || s_sz[i] != f_sz[fk] || s_fl[i] != f_fl[fk] {
+                s_x[i] = f_x[fk]
+                s_y[i] = f_y[fk]
+                s_p[i] = f_p[fk]
+                s_sz[i] = f_sz[fk]
+                s_fl[i] = f_fl[fk]
+                emit_slot(dev, record.T_MOVE, s)
+            }
+        }
+        s = s + 1
+    }
+    return e_n
+}
+
+fn pen(dev: u64, in_range: u64, tip: u64, barrel: u64, eraser: u64, raw_x: i64, raw_y: i64, pressure: u64) -> u64 {
+    e_n = 0
+    if dev >= MAX_DEV { return 0 }
+    let d: usize = dev as usize
+    if (d_quirks[d] & quirk.Q_IGNORE) != 0 { return 0 }
+    if in_range == 0 {
+        if p_state[d] != 0 {
+            emit(dev, record.T_UP, 0, record.D_PEN, p_fl[d], p_x[d], p_y[d], 0, 0)
+            p_state[d] = 0
+        }
+        return e_n
+    }
+    var fl: u64 = 0
+    var pr: u64 = 0
+    if tip != 0 { pr = clamp16(pressure) } else { fl = record.F_HOVER }
+    if barrel != 0 { fl = fl | record.F_BARREL }
+    if eraser != 0 { fl = fl | record.F_ERASER }
+    let x: u64 = map_x(dev, raw_x, raw_y)
+    let y: u64 = map_y(dev, raw_x, raw_y)
+    if p_state[d] == 0 {
+        p_state[d] = 1
+        p_x[d] = x
+        p_y[d] = y
+        p_p[d] = pr
+        p_fl[d] = fl
+        emit(dev, record.T_DOWN, 0, record.D_PEN, fl, x, y, pr, 0)
+        return e_n
+    }
+    if p_x[d] != x || p_y[d] != y || p_p[d] != pr || p_fl[d] != fl {
+        p_x[d] = x
+        p_y[d] = y
+        p_p[d] = pr
+        p_fl[d] = fl
+        emit(dev, record.T_MOVE, 0, record.D_PEN, fl, x, y, pr, 0)
+    }
+    return e_n
+}
+
+fn ev_count() -> u64 { return e_n }
+fn ev_type(i: u64) -> u64 { if i >= e_n { return 0 }; return e_type[i as usize] }
+fn ev_slot(i: u64) -> u64 { if i >= e_n { return NO_SLOT }; return e_slot[i as usize] }
+fn ev_device(i: u64) -> u64 { if i >= e_n { return 0 }; return e_dev[i as usize] }
+fn ev_flags(i: u64) -> u64 { if i >= e_n { return 0 }; return e_fl[i as usize] }
+fn ev_x(i: u64) -> u64 { if i >= e_n { return 0 }; return e_x[i as usize] }
+fn ev_y(i: u64) -> u64 { if i >= e_n { return 0 }; return e_y[i as usize] }
+fn ev_pressure(i: u64) -> u64 { if i >= e_n { return 0 }; return e_p[i as usize] }
+fn ev_size(i: u64) -> u64 { if i >= e_n { return 0 }; return e_sz[i as usize] }
+fn ev_time(i: u64) -> u64 { if i >= e_n { return 0 }; return e_t[i as usize] }
+
+fn ev_x_px(i: u64) -> u64 {
+    if i >= e_n { return 0 }
+    return to_px(e_x[i as usize], d_w[f_dev as usize])
+}
+
+fn ev_y_px(i: u64) -> u64 {
+    if i >= e_n { return 0 }
+    return to_px(e_y[i as usize], d_h[f_dev as usize])
+}
+
+fn lost_events(dev: u64) -> u64 {
+    if dev >= MAX_DEV { return 0 }
+    return d_lost[dev as usize]
+}
+
+fn contacts(dev: u64) -> u64 {
+    if dev >= MAX_DEV { return 0 }
+    var n: u64 = 0
+    var s: u64 = 0
+    while s < MAX_SLOT {
+        if s_used[si(dev, s)] != 0 { n = n + 1 }
+        s = s + 1
+    }
+    return n
+}
+
+fn active_slots(dev: u64) -> u64 {
+    if dev >= MAX_DEV { return 0 }
+    var m: u64 = 0
+    var s: u64 = 0
+    while s < MAX_SLOT {
+        if s_used[si(dev, s)] != 0 { m = m | (1 << s) }
+        s = s + 1
+    }
+    return m
+}
+
+fn slot_used(dev: u64, s: u64) -> bool {
+    if dev >= MAX_DEV || s >= MAX_SLOT { return false }
+    return s_used[si(dev, s)] != 0
+}
+
+fn slot_id(dev: u64, s: u64) -> u64 {
+    if !slot_used(dev, s) { return 0 }
+    return s_id[si(dev, s)]
+}
+
+fn slot_x(dev: u64, s: u64) -> u64 {
+    if !slot_used(dev, s) { return 0 }
+    return s_x[si(dev, s)]
+}
+
+fn slot_y(dev: u64, s: u64) -> u64 {
+    if !slot_used(dev, s) { return 0 }
+    return s_y[si(dev, s)]
+}
+
+fn slot_pressure(dev: u64, s: u64) -> u64 {
+    if !slot_used(dev, s) { return 0 }
+    return s_p[si(dev, s)]
+}
+
+fn slot_size(dev: u64, s: u64) -> u64 {
+    if !slot_used(dev, s) { return 0 }
+    return s_sz[si(dev, s)]
+}
+
+fn slot_flags(dev: u64, s: u64) -> u64 {
+    if !slot_used(dev, s) { return 0 }
+    return s_fl[si(dev, s)]
+}

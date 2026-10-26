@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: GPL-2.0-only
+export {
+    B_ANY, B_USB, B_I2C, B_BT, B_VIRTUAL, B_FREE, ID_ANY, NO_ROW,
+    Q_SWAP_XY, Q_INVERT_X, Q_INVERT_Y, Q_NO_CONFIDENCE, Q_SINGLE_TOUCH, Q_IGNORE, Q_NO_PALM,
+    ROW_CAP,
+    row_count, row_bus, row_vid, row_pid, row_flags,
+    lookup, lookup_row, add_row, drop_row, duplicate_rows
+}
+
+const B_ANY: u64 = 0
+const B_USB: u64 = 1
+const B_I2C: u64 = 2
+const B_BT: u64 = 3
+const B_VIRTUAL: u64 = 4
+const B_FREE: u64 = 0xFF
+
+const ID_ANY: u64 = 0xFFFF
+const NO_ROW: u64 = 0xFFFF
+
+const Q_SWAP_XY: u64 = 1
+const Q_INVERT_X: u64 = 2
+const Q_INVERT_Y: u64 = 4
+const Q_NO_CONFIDENCE: u64 = 8
+const Q_SINGLE_TOUCH: u64 = 16
+const Q_IGNORE: u64 = 32
+const Q_NO_PALM: u64 = 64
+
+const ROW_CAP: u64 = 16
+const ROW_WORDS: u64 = 4
+
+static mut ROWS: [u64; 64] = [
+    0, 0x045e, 0x0c32, 16,
+    0, 0x045e, 0x09af, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0,
+    0xFF, 0, 0, 0
+]
+
+fn word(row: u64, w: u64) -> u64 {
+    return ROWS[(row * ROW_WORDS + w) as usize]
+}
+
+fn used(row: u64) -> bool {
+    if row >= ROW_CAP { return false }
+    return word(row, 0) != B_FREE
+}
+
+fn row_bus(row: u64) -> u64 { return word(row, 0) }
+fn row_vid(row: u64) -> u64 { return word(row, 1) }
+fn row_pid(row: u64) -> u64 { return word(row, 2) }
+fn row_flags(row: u64) -> u64 { return word(row, 3) }
+
+fn row_count() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < ROW_CAP {
+        if used(i) { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+fn matches(row: u64, bus: u64, vid: u64, pid: u64) -> bool {
+    if !used(row) { return false }
+    if word(row, 0) != B_ANY && word(row, 0) != bus { return false }
+    if word(row, 1) != ID_ANY && word(row, 1) != vid { return false }
+    if word(row, 2) != ID_ANY && word(row, 2) != pid { return false }
+    return true
+}
+
+fn specificity(row: u64) -> u64 {
+    var s: u64 = 0
+    if word(row, 0) != B_ANY { s = s + 1 }
+    if word(row, 1) != ID_ANY { s = s + 1 }
+    if word(row, 2) != ID_ANY { s = s + 1 }
+    return s
+}
+
+fn lookup(bus: u64, vid: u64, pid: u64) -> u64 {
+    var flags: u64 = 0
+    var i: u64 = 0
+    while i < ROW_CAP {
+        if matches(i, bus, vid, pid) { flags = flags | word(i, 3) }
+        i = i + 1
+    }
+    return flags
+}
+
+fn lookup_row(bus: u64, vid: u64, pid: u64) -> u64 {
+    var best: u64 = NO_ROW
+    var best_s: u64 = 0
+    var i: u64 = 0
+    while i < ROW_CAP {
+        if matches(i, bus, vid, pid) {
+            let s: u64 = specificity(i)
+            if best == NO_ROW || s > best_s {
+                best = i
+                best_s = s
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn same_key(a: u64, bus: u64, vid: u64, pid: u64) -> bool {
+    return word(a, 0) == bus && word(a, 1) == vid && word(a, 2) == pid
+}
+
+fn add_row(bus: u64, vid: u64, pid: u64, flags: u64) -> u64 {
+    if bus >= B_FREE { return NO_ROW }
+    var i: u64 = 0
+    var free: u64 = NO_ROW
+    while i < ROW_CAP {
+        if used(i) {
+            if same_key(i, bus, vid, pid) { return NO_ROW }
+        } else if free == NO_ROW {
+            free = i
+        }
+        i = i + 1
+    }
+    if free == NO_ROW { return NO_ROW }
+    ROWS[(free * ROW_WORDS) as usize] = bus
+    ROWS[(free * ROW_WORDS + 1) as usize] = vid
+    ROWS[(free * ROW_WORDS + 2) as usize] = pid
+    ROWS[(free * ROW_WORDS + 3) as usize] = flags
+    return free
+}
+
+fn drop_row(row: u64) {
+    if row >= ROW_CAP { return }
+    let base: usize = (row * ROW_WORDS) as usize
+    ROWS[base] = B_FREE
+    ROWS[base + 1] = 0
+    ROWS[base + 2] = 0
+    ROWS[base + 3] = 0
+}
+
+fn duplicate_rows() -> u64 {
+    var dup: u64 = 0
+    var i: u64 = 0
+    while i < ROW_CAP {
+        if used(i) {
+            var j: u64 = i + 1
+            while j < ROW_CAP {
+                if used(j) && same_key(i, word(j, 0), word(j, 1), word(j, 2)) { dup = dup + 1 }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return dup
+}

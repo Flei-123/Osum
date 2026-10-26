@@ -1,0 +1,580 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import touchev.record
+import touchev.quirk
+import touchev.track
+import touchev.api
+import touchev.inmode
+
+static mut sb: [u8; 2048] = [0; 2048]
+static mut sc: [u8; 2048] = [0; 2048]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn pb() -> u64 { return (&sb[0]) as u64 }
+fn pc() -> u64 { return (&sc[0]) as u64 }
+fn rb(i: usize) -> u64 { return (sb[i]) as u64 }
+
+fn zero_buf() {
+    var i: usize = 0
+    while i < 2048 {
+        sb[i] = 0
+        sc[i] = 0
+        i = i + 1
+    }
+}
+
+fn test_record() {
+    zero_buf()
+    chk("record: sizes are 16 and 24", record.HEADER_BYTES == 16 && record.RECORD_BYTES == 24)
+    chk("record: zeroed buffer has no magic", !record.magic_ok(pb()))
+    record.put_header(pb(), 7, 0xFFFFFFFF, 0x12345678)
+    chk("record: magic_ok after put_header", record.magic_ok(pb()))
+    chk("record: magic bytes spell TEV1", rb(0) == 0x54 && rb(1) == 0x45 && rb(2) == 0x56 && rb(3) == 0x31)
+    chk("record: header count", record.header_count(pb()) == 7)
+    chk("record: header dropped 0xFFFFFFFF", record.header_dropped(pb()) == 0xFFFFFFFF)
+    chk("record: header seq", record.header_seq(pb()) == 0x12345678)
+    chk("record: header count little endian at offset 4", rb(4) == 7 && rb(5) == 0)
+    chk("record: header seq little endian at offset 12", rb(12) == 0x78 && rb(15) == 0x12)
+
+    record.put_record(pb(), 0, record.T_GESTURE, 9, record.D_PEN, 0xFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFFFFFF, -1, -32768)
+    chk("record: type", record.get_type(pb(), 0) == record.T_GESTURE)
+    chk("record: slot", record.get_slot(pb(), 0) == 9)
+    chk("record: device", record.get_device(pb(), 0) == record.D_PEN)
+    chk("record: flags 0xFF", record.get_flags(pb(), 0) == 0xFF)
+    chk("record: x_norm 0xFFFF", record.get_x_norm(pb(), 0) == 0xFFFF)
+    chk("record: y_norm 0xFFFF", record.get_y_norm(pb(), 0) == 0xFFFF)
+    chk("record: x_px 0xFFFF", record.get_x_px(pb(), 0) == 0xFFFF)
+    chk("record: y_px 0xFFFF", record.get_y_px(pb(), 0) == 0xFFFF)
+    chk("record: pressure 0xFFFF", record.get_pressure(pb(), 0) == 0xFFFF)
+    chk("record: size 0xFFFF", record.get_size(pb(), 0) == 0xFFFF)
+    chk("record: time 0xFFFFFFFF", record.get_time(pb(), 0) == 0xFFFFFFFF)
+    chk("record: a = -1 survives", record.get_a(pb(), 0) == -1)
+    chk("record: b = -32768 survives", record.get_b(pb(), 0) == -32768)
+
+    record.put_record(pb(), 1, record.T_DOWN, 0, record.D_TOUCHSCREEN, 0, 0x1234, 0x5678, 0x9ABC, 0xDEF0, 0x0102, 0x0304, 0x0A0B0C0D, 32767, 5)
+    chk("record: record 1 type", record.get_type(pb(), 1) == record.T_DOWN)
+    chk("record: record 1 x_norm", record.get_x_norm(pb(), 1) == 0x1234)
+    chk("record: record 1 y_norm", record.get_y_norm(pb(), 1) == 0x5678)
+    chk("record: record 1 x_px", record.get_x_px(pb(), 1) == 0x9ABC)
+    chk("record: record 1 y_px", record.get_y_px(pb(), 1) == 0xDEF0)
+    chk("record: record 1 pressure", record.get_pressure(pb(), 1) == 0x0102)
+    chk("record: record 1 size", record.get_size(pb(), 1) == 0x0304)
+    chk("record: record 1 time", record.get_time(pb(), 1) == 0x0A0B0C0D)
+    chk("record: record 1 a = 32767", record.get_a(pb(), 1) == 32767)
+    chk("record: record 1 b = 5", record.get_b(pb(), 1) == 5)
+    chk("record: record 0 untouched by record 1", record.get_x_norm(pb(), 0) == 0xFFFF && record.get_b(pb(), 0) == -32768 && record.get_time(pb(), 0) == 0xFFFFFFFF)
+    chk("record: header untouched by records", record.header_count(pb()) == 7 && record.header_seq(pb()) == 0x12345678)
+    chk("record: x_norm bytes at offset 16+24+4", rb(44) == 0x34 && rb(45) == 0x12)
+    chk("record: time bytes at offset 16+24+16", rb(56) == 0x0D && rb(59) == 0x0A)
+    chk("record: snapshot_bytes(3) = 88", record.snapshot_bytes(3) == 88)
+    chk("record: gesture constants are 1..8", record.G_TAP == 1 && record.G_LONG == 2 && record.G_DRAG_BEGIN == 3 && record.G_DRAG == 4 && record.G_DRAG_END == 5 && record.G_SCROLL == 6 && record.G_PINCH == 7 && record.G_SWIPE == 8)
+    chk("record: flag constants are bits 0..3", record.F_PALM == 1 && record.F_BARREL == 2 && record.F_ERASER == 4 && record.F_HOVER == 8)
+}
+
+fn setup(dev: u64) {
+    track.reset(dev)
+    track.configure(dev, record.D_TOUCHSCREEN, 0, 1000, 0, 500)
+}
+
+fn one(dev: u64, now: u64, id: u64, x: i64, y: i64) -> u64 {
+    track.begin(dev, now)
+    track.add(id, x, y, 1, 1, 0, 0)
+    return track.end(dev)
+}
+
+fn two(dev: u64, now: u64, ida: u64, xa: i64, ya: i64, idb: u64, xb: i64, yb: i64) -> u64 {
+    track.begin(dev, now)
+    track.add(ida, xa, ya, 1, 1, 0, 0)
+    track.add(idb, xb, yb, 1, 1, 0, 0)
+    return track.end(dev)
+}
+
+fn none(dev: u64, now: u64) -> u64 {
+    track.begin(dev, now)
+    return track.end(dev)
+}
+
+fn test_tracker_basic() {
+    setup(0)
+    var n: u64 = one(0, 100, 5, 500, 250)
+    chk("track: first contact gives one event", n == 1 && track.ev_count() == 1)
+    chk("track: first contact is DOWN", track.ev_type(0) == record.T_DOWN)
+    chk("track: first contact slot 0", track.ev_slot(0) == 0)
+    chk("track: device kind is touchscreen", track.ev_device(0) == record.D_TOUCHSCREEN)
+    chk("track: DOWN carries the frame time", track.ev_time(0) == 100)
+    chk("track: x_norm of 500 in 0..1000", track.ev_x(0) == 32767)
+    chk("track: y_norm of 250 in 0..500", track.ev_y(0) == 32767)
+    chk("track: one contact counted", track.contacts(0) == 1 && track.active_slots(0) == 1)
+
+    n = one(0, 110, 5, 500, 250)
+    chk("track: unchanged contact gives no event", n == 0 && track.ev_count() == 0)
+    n = one(0, 120, 5, 1000, 250)
+    chk("track: moved contact gives one MOVE", n == 1 && track.ev_type(0) == record.T_MOVE && track.ev_slot(0) == 0)
+    chk("track: MOVE position is the new one", track.ev_x(0) == 65535 && track.ev_y(0) == 32767 && track.ev_time(0) == 120)
+    n = none(0, 130)
+    chk("track: contact gone gives one UP", n == 1 && track.ev_type(0) == record.T_UP && track.ev_slot(0) == 0)
+    chk("track: UP is at the last position", track.ev_x(0) == 65535 && track.ev_y(0) == 32767)
+    chk("track: no contacts after UP", track.contacts(0) == 0 && track.active_slots(0) == 0)
+    n = none(0, 140)
+    chk("track: empty frame after UP gives nothing", n == 0)
+
+    setup(0)
+    n = one(0, 0, 3, 100, 100)
+    n = track.ev_count()
+    var m: u64 = 0
+    track.begin(0, 10)
+    track.add(3, 100, 100, 1, 1, 700, 0)
+    m = track.end(0)
+    chk("track: pressure change gives MOVE", m == 1 && track.ev_type(0) == record.T_MOVE && track.ev_pressure(0) == 700)
+    track.begin(0, 20)
+    track.add(3, 100, 100, 1, 1, 700, 30)
+    m = track.end(0)
+    chk("track: size change gives MOVE", m == 1 && track.ev_size(0) == 30)
+    track.begin(0, 30)
+    track.add(3, 100, 100, 1, 1, 70000, 30)
+    m = track.end(0)
+    chk("track: pressure is clamped to 16 bit", m == 1 && track.ev_pressure(0) == 65535)
+
+    setup(0)
+    n = one(0, 0, 3, 100, 100)
+    track.begin(0, 10)
+    track.add(3, 100, 100, 0, 1, 0, 0)
+    n = track.end(0)
+    chk("track: tip=0 counts as released", n == 1 && track.ev_type(0) == record.T_UP && track.contacts(0) == 0)
+    n = one(0, 20, 3, 100, 100)
+    chk("track: released id can come back as DOWN", n == 1 && track.ev_type(0) == record.T_DOWN)
+    track.begin(0, 30)
+    track.add(8, 100, 100, 0, 1, 0, 0)
+    n = track.end(0)
+    chk("track: other id with tip=0 still releases the known one", n == 1 && track.ev_type(0) == record.T_UP && track.contacts(0) == 0)
+}
+
+fn test_tracker_slots() {
+    setup(0)
+    var n: u64 = two(0, 0, 5, 100, 100, 9, 800, 400)
+    chk("track: two new ids give two DOWN", n == 2 && track.ev_type(0) == record.T_DOWN && track.ev_type(1) == record.T_DOWN)
+    chk("track: slots 0 and 1 in frame order", track.ev_slot(0) == 0 && track.ev_slot(1) == 1)
+    chk("track: two contacts mask 3", track.contacts(0) == 2 && track.active_slots(0) == 3)
+    n = two(0, 10, 9, 800, 400, 5, 100, 100)
+    chk("track: swapped report order gives no event", n == 0)
+    n = two(0, 20, 9, 900, 400, 5, 100, 100)
+    chk("track: only the moved id gives MOVE", n == 1 && track.ev_type(0) == record.T_MOVE && track.ev_slot(0) == 1)
+    n = two(0, 30, 9, 900, 400, 5, 300, 100)
+    chk("track: the other id moves on slot 0", n == 1 && track.ev_slot(0) == 0)
+    n = one(0, 40, 9, 900, 400)
+    chk("track: lifting id 5 frees slot 0 only", n == 1 && track.ev_type(0) == record.T_UP && track.ev_slot(0) == 0 && track.active_slots(0) == 2)
+    n = two(0, 50, 9, 900, 400, 12, 10, 10)
+    chk("track: new id takes the lowest free slot", n == 1 && track.ev_type(0) == record.T_DOWN && track.ev_slot(0) == 0)
+
+    setup(0)
+    n = two(0, 0, 1, 100, 100, 2, 200, 200)
+    track.begin(0, 10)
+    track.add(2, 250, 200, 1, 1, 0, 0)
+    track.add(3, 700, 300, 1, 1, 0, 0)
+    n = track.end(0)
+    chk("track: mixed frame gives three events", n == 3 && track.ev_count() == 3)
+    chk("track: mixed frame order is UP, DOWN, MOVE", n == 3 && track.ev_type(0) == record.T_UP && track.ev_type(1) == record.T_DOWN && track.ev_type(2) == record.T_MOVE)
+    chk("track: UP names slot 0, DOWN reuses it, MOVE is slot 1", track.ev_slot(0) == 0 && track.ev_slot(1) == 0 && track.ev_slot(2) == 1)
+
+    setup(0)
+    var k: u64 = 0
+    track.begin(0, 0)
+    while k < 11 {
+        track.add(100 + k, (k as i64) * 50, 100, 1, 1, 0, 0)
+        k = k + 1
+    }
+    n = track.end(0)
+    chk("track: at most 10 contacts per device", n == 10 && track.contacts(0) == 10 && track.active_slots(0) == 1023)
+
+    track.begin(0, 10)
+    k = 0
+    while k < 10 {
+        track.add(200 + k, (k as i64) * 50, 100, 1, 1, 0, 0)
+        k = k + 1
+    }
+    n = track.end(0)
+    chk("track: more events than the cap are cut at 16", n == 16 && track.ev_count() == 16)
+    chk("track: cut events are counted", track.lost_events(0) == 4)
+
+    setup(1)
+    setup(0)
+    n = one(0, 0, 1, 500, 250)
+    n = one(1, 0, 1, 100, 100)
+    chk("track: devices keep separate slots", track.contacts(0) == 1 && track.contacts(1) == 1)
+    n = none(1, 10)
+    chk("track: lifting on device 1 leaves device 0", track.contacts(0) == 1 && track.contacts(1) == 0)
+    chk("track: device out of range ends with 0", track.end(4) == 0 && track.contacts(4) == 0 && track.active_slots(4) == 0)
+    track.reset(0)
+    chk("track: reset drops all contacts", track.contacts(0) == 0)
+    chk("track: ev_type outside the frame is 0", track.ev_type(15) == 0 && track.ev_slot(15) == 0xFF)
+}
+
+fn test_tracker_palm() {
+    setup(0)
+    track.begin(0, 0)
+    track.add(1, 100, 100, 1, 0, 0, 0)
+    var n: u64 = track.end(0)
+    chk("palm: confident=0 stays reported", n == 1 && track.ev_type(0) == record.T_DOWN)
+    chk("palm: confident=0 sets F_PALM", (track.ev_flags(0) & record.F_PALM) != 0)
+    track.begin(0, 10)
+    track.add(1, 100, 100, 1, 1, 0, 0)
+    n = track.end(0)
+    chk("palm: regained confidence gives MOVE without palm", n == 1 && track.ev_type(0) == record.T_MOVE && (track.ev_flags(0) & record.F_PALM) == 0)
+    n = one(0, 20, 2, 300, 300)
+    chk("palm: confident contact has no F_PALM", (track.ev_flags(0) & record.F_PALM) == 0)
+
+    setup(0)
+    track.set_quirks(0, quirk.Q_NO_CONFIDENCE)
+    track.begin(0, 0)
+    track.add(1, 100, 100, 1, 0, 0, 0)
+    n = track.end(0)
+    chk("palm: NO_CONFIDENCE ignores confident=0", n == 1 && (track.ev_flags(0) & record.F_PALM) == 0)
+}
+
+fn test_tracker_norm() {
+    setup(0)
+    track.configure(0, record.D_TOUCHSCREEN, 100, 1100, 0, 500)
+    var n: u64 = one(0, 0, 1, 100, 0)
+    chk("norm: range minimum is 0", track.ev_x(0) == 0 && track.ev_y(0) == 0)
+    n = one(0, 1, 1, 1100, 500)
+    chk("norm: range maximum is 65535", track.ev_x(0) == 65535 && track.ev_y(0) == 65535)
+    n = one(0, 2, 1, 600, 250)
+    chk("norm: middle is 32767", track.ev_x(0) == 32767 && track.ev_y(0) == 32767)
+    n = one(0, 3, 1, 5000, 9000)
+    chk("norm: above the range clamps to 65535", track.ev_x(0) == 65535 && track.ev_y(0) == 65535)
+    n = one(0, 4, 1, 0 - 50, 0 - 10)
+    chk("norm: below the range clamps to 0", track.ev_x(0) == 0 && track.ev_y(0) == 0)
+    n = one(0, 5, 1, 350, 125)
+    chk("norm: quarter is 16383", track.ev_x(0) == 16383 && track.ev_y(0) == 16383)
+
+    setup(0)
+    track.configure(0, record.D_TOUCHSCREEN, 500, 500, 700, 100)
+    n = one(0, 0, 1, 500, 300)
+    chk("norm: empty or reversed range gives 0", track.ev_x(0) == 0 && track.ev_y(0) == 0)
+
+    setup(0)
+    track.configure(0, record.D_TOUCHSCREEN, 0, 4000000000, 0, 1)
+    n = one(0, 0, 1, 4000000000, 1)
+    chk("norm: 64 bit intermediates for large ranges", track.ev_x(0) == 65535 && track.ev_y(0) == 65535)
+
+    setup(0)
+    track.reset(0)
+    n = one(0, 0, 1, 65535, 0)
+    chk("norm: default range is 0..65535 identity", track.ev_x(0) == 65535 && track.ev_y(0) == 0)
+
+    setup(0)
+    track.set_screen(0, 1920, 1080)
+    n = one(0, 0, 1, 1000, 500)
+    chk("px: full scale maps to the last pixel", track.ev_x_px(0) == 1919 && track.ev_y_px(0) == 1079)
+    n = one(0, 1, 1, 0, 0)
+    chk("px: origin maps to pixel 0", track.ev_x_px(0) == 0 && track.ev_y_px(0) == 0)
+    n = one(0, 2, 1, 500, 250)
+    chk("px: middle maps to the middle pixel", track.ev_x_px(0) == 959 && track.ev_y_px(0) == 539)
+}
+
+fn test_tracker_quirks() {
+    setup(0)
+    track.set_quirks(0, quirk.Q_SWAP_XY)
+    var n: u64 = one(0, 0, 1, 1000, 0)
+    chk("quirk SWAP_XY: x takes the y axis with its range", track.ev_x(0) == 0 && track.ev_y(0) == 65535)
+    n = one(0, 1, 1, 0, 500)
+    chk("quirk SWAP_XY: y takes the x axis with its range", track.ev_x(0) == 65535 && track.ev_y(0) == 0)
+
+    setup(0)
+    track.set_quirks(0, quirk.Q_INVERT_X)
+    n = one(0, 0, 1, 0, 0)
+    chk("quirk INVERT_X: x mirrored, y untouched", track.ev_x(0) == 65535 && track.ev_y(0) == 0)
+    n = one(0, 1, 1, 1000, 500)
+    chk("quirk INVERT_X: maximum maps to 0", track.ev_x(0) == 0 && track.ev_y(0) == 65535)
+
+    setup(0)
+    track.set_quirks(0, quirk.Q_INVERT_Y)
+    n = one(0, 0, 1, 0, 0)
+    chk("quirk INVERT_Y: y mirrored, x untouched", track.ev_x(0) == 0 && track.ev_y(0) == 65535)
+
+    setup(0)
+    track.set_quirks(0, quirk.Q_SWAP_XY | quirk.Q_INVERT_X)
+    n = one(0, 0, 1, 1000, 0)
+    chk("quirk SWAP_XY + INVERT_X: invert acts on the output axis", track.ev_x(0) == 65535 && track.ev_y(0) == 65535)
+
+    setup(0)
+    track.set_quirks(0, quirk.Q_SINGLE_TOUCH)
+    n = two(0, 0, 4, 100, 100, 5, 800, 400)
+    chk("quirk SINGLE_TOUCH: only the first contact counts", n == 1 && track.contacts(0) == 1 && track.ev_slot(0) == 0)
+    n = two(0, 10, 5, 800, 400, 4, 100, 100)
+    chk("quirk SINGLE_TOUCH: a new first contact replaces the old one", n == 2 && track.ev_type(0) == record.T_UP && track.ev_type(1) == record.T_DOWN)
+
+    setup(0)
+    track.set_quirks(0, quirk.Q_IGNORE)
+    n = one(0, 0, 1, 500, 250)
+    chk("quirk IGNORE: nothing is tracked", n == 0 && track.contacts(0) == 0)
+    track.set_quirks(0, 0)
+    n = one(0, 10, 1, 500, 250)
+    chk("quirk none: the same device tracks again", n == 1)
+
+    setup(0)
+    track.set_quirks(0, quirk.Q_NO_PALM)
+    track.begin(0, 0)
+    track.add(1, 100, 100, 1, 0, 0, 0)
+    n = track.end(0)
+    chk("quirk NO_PALM is not a tracker flag: palm still reported", n == 1 && (track.ev_flags(0) & record.F_PALM) != 0)
+}
+
+fn test_pen() {
+    track.reset(2)
+    track.configure(2, record.D_PEN, 0, 1000, 0, 500)
+    track.begin(2, 1000)
+    var n: u64 = track.pen(2, 1, 0, 0, 0, 500, 250, 0)
+    chk("pen: entering range gives DOWN", n == 1 && track.ev_type(0) == record.T_DOWN)
+    chk("pen: hover sets F_HOVER", (track.ev_flags(0) & record.F_HOVER) != 0)
+    chk("pen: events are on slot 0, device pen", track.ev_slot(0) == 0 && track.ev_device(0) == record.D_PEN)
+    chk("pen: position is normalized", track.ev_x(0) == 32767 && track.ev_y(0) == 32767 && track.ev_pressure(0) == 0)
+    chk("pen: event time comes from begin", track.ev_time(0) == 1000)
+    track.begin(2, 1010)
+    n = track.pen(2, 1, 0, 0, 0, 500, 250, 0)
+    chk("pen: unchanged hover gives no event", n == 0)
+    track.begin(2, 1020)
+    n = track.pen(2, 1, 1, 0, 0, 500, 250, 800)
+    chk("pen: tip down gives MOVE with pressure", n == 1 && track.ev_type(0) == record.T_MOVE && track.ev_pressure(0) == 800)
+    chk("pen: tip down clears F_HOVER", (track.ev_flags(0) & record.F_HOVER) == 0)
+    track.begin(2, 1030)
+    n = track.pen(2, 1, 1, 0, 0, 600, 250, 900)
+    chk("pen: drawing gives MOVE", n == 1 && track.ev_type(0) == record.T_MOVE && track.ev_pressure(0) == 900)
+    track.begin(2, 1040)
+    n = track.pen(2, 1, 1, 1, 0, 600, 250, 900)
+    chk("pen: barrel sets F_BARREL", n == 1 && (track.ev_flags(0) & record.F_BARREL) != 0)
+    track.begin(2, 1050)
+    n = track.pen(2, 1, 1, 0, 1, 600, 250, 900)
+    chk("pen: eraser sets F_ERASER and drops barrel", n == 1 && (track.ev_flags(0) & record.F_ERASER) != 0 && (track.ev_flags(0) & record.F_BARREL) == 0)
+    track.begin(2, 1060)
+    n = track.pen(2, 1, 0, 0, 0, 600, 250, 0)
+    chk("pen: release back to hover gives MOVE with F_HOVER", n == 1 && track.ev_type(0) == record.T_MOVE && (track.ev_flags(0) & record.F_HOVER) != 0 && track.ev_pressure(0) == 0)
+    track.begin(2, 1070)
+    n = track.pen(2, 0, 0, 0, 0, 0, 0, 0)
+    chk("pen: leaving range gives UP at the last position", n == 1 && track.ev_type(0) == record.T_UP && track.ev_x(0) == 39321)
+    track.begin(2, 1080)
+    n = track.pen(2, 0, 0, 0, 0, 0, 0, 0)
+    chk("pen: staying out of range gives nothing", n == 0)
+    track.begin(2, 1090)
+    n = track.pen(2, 1, 1, 0, 0, 100, 100, 50)
+    chk("pen: entering with tip down is DOWN without hover", n == 1 && track.ev_type(0) == record.T_DOWN && (track.ev_flags(0) & record.F_HOVER) == 0 && track.ev_pressure(0) == 50)
+    chk("pen: pen state does not create finger contacts", track.contacts(2) == 0)
+    track.set_quirks(2, quirk.Q_INVERT_Y)
+    track.reset(2)
+    track.configure(2, record.D_PEN, 0, 1000, 0, 500)
+    track.set_quirks(2, quirk.Q_INVERT_Y)
+    track.begin(2, 5)
+    n = track.pen(2, 1, 0, 0, 0, 0, 0, 0)
+    chk("pen: quirks apply to the pen axes", track.ev_x(0) == 0 && track.ev_y(0) == 65535)
+}
+
+fn test_quirk() {
+    chk("quirk: flag constants", quirk.Q_SWAP_XY == 1 && quirk.Q_INVERT_X == 2 && quirk.Q_INVERT_Y == 4 && quirk.Q_NO_CONFIDENCE == 8 && quirk.Q_SINGLE_TOUCH == 16 && quirk.Q_IGNORE == 32 && quirk.Q_NO_PALM == 64)
+    chk("quirk: bus constants", quirk.B_ANY == 0 && quirk.B_USB == 1 && quirk.B_I2C == 2 && quirk.B_BT == 3 && quirk.B_VIRTUAL == 4)
+    chk("quirk: start rows exist", quirk.row_count() >= 2)
+    chk("quirk: 045e:0c32 gives SINGLE_TOUCH on any bus", quirk.lookup(quirk.B_USB, 0x045e, 0x0c32) == quirk.Q_SINGLE_TOUCH && quirk.lookup(quirk.B_VIRTUAL, 0x045e, 0x0c32) == quirk.Q_SINGLE_TOUCH && quirk.lookup(quirk.B_I2C, 0x045e, 0x0c32) == quirk.Q_SINGLE_TOUCH)
+    chk("quirk: 045e:09af has a row", quirk.lookup_row(quirk.B_I2C, 0x045e, 0x09af) != quirk.NO_ROW)
+    chk("quirk: 045e:09af has no flags", quirk.lookup(quirk.B_I2C, 0x045e, 0x09af) == 0)
+    chk("quirk: 045e:0c32 row is found", quirk.lookup_row(quirk.B_USB, 0x045e, 0x0c32) != quirk.NO_ROW)
+    chk("quirk: unknown device gives 0 flags", quirk.lookup(quirk.B_USB, 0x1234, 0x5678) == 0)
+    chk("quirk: unknown device gives no row", quirk.lookup_row(quirk.B_USB, 0x1234, 0x5678) == quirk.NO_ROW)
+    chk("quirk: same vid, other pid is unknown", quirk.lookup(quirk.B_USB, 0x045e, 0x0001) == 0)
+    chk("quirk: no duplicate (bus, vid, pid) rows", quirk.duplicate_rows() == 0)
+    chk("quirk: row accessors return the table", quirk.row_vid(quirk.lookup_row(0, 0x045e, 0x0c32)) == 0x045e && quirk.row_pid(quirk.lookup_row(0, 0x045e, 0x0c32)) == 0x0c32 && quirk.row_flags(quirk.lookup_row(0, 0x045e, 0x0c32)) == quirk.Q_SINGLE_TOUCH)
+
+    let base: u64 = quirk.row_count()
+    let wild: u64 = quirk.add_row(quirk.B_ANY, 0x045e, quirk.ID_ANY, quirk.Q_NO_PALM)
+    chk("quirk: add_row takes a free line", wild != quirk.NO_ROW && quirk.row_count() == base + 1)
+    chk("quirk: vendor wildcard matches every pid", quirk.lookup(quirk.B_USB, 0x045e, 0x7777) == quirk.Q_NO_PALM)
+    chk("quirk: wildcard flags are ORed into specific rows", quirk.lookup(quirk.B_USB, 0x045e, 0x0c32) == (quirk.Q_SINGLE_TOUCH | quirk.Q_NO_PALM))
+    chk("quirk: lookup_row prefers the specific row", quirk.lookup_row(quirk.B_USB, 0x045e, 0x0c32) != wild)
+    chk("quirk: lookup_row falls back to the wildcard row", quirk.lookup_row(quirk.B_USB, 0x045e, 0x7777) == wild)
+    let spec: u64 = quirk.add_row(quirk.B_I2C, 0x045e, 0x0c32, quirk.Q_SWAP_XY)
+    chk("quirk: bus specific row adds its flag on that bus", quirk.lookup(quirk.B_I2C, 0x045e, 0x0c32) == (quirk.Q_SINGLE_TOUCH | quirk.Q_NO_PALM | quirk.Q_SWAP_XY))
+    chk("quirk: bus specific row stays off other buses", quirk.lookup(quirk.B_USB, 0x045e, 0x0c32) == (quirk.Q_SINGLE_TOUCH | quirk.Q_NO_PALM))
+    chk("quirk: lookup_row prefers the most specific row", quirk.lookup_row(quirk.B_I2C, 0x045e, 0x0c32) == spec)
+    chk("quirk: duplicate key is rejected", quirk.add_row(quirk.B_I2C, 0x045e, 0x0c32, quirk.Q_IGNORE) == quirk.NO_ROW)
+    chk("quirk: reserved bus value is rejected", quirk.add_row(quirk.B_FREE, 1, 2, 0) == quirk.NO_ROW)
+    chk("quirk: still no duplicates after adds", quirk.duplicate_rows() == 0)
+    let anyvid: u64 = quirk.add_row(quirk.B_ANY, quirk.ID_ANY, 0x4242, quirk.Q_IGNORE)
+    chk("quirk: vid wildcard matches any vendor", quirk.lookup(quirk.B_USB, 0x1111, 0x4242) == quirk.Q_IGNORE && quirk.lookup(quirk.B_BT, 0x2222, 0x4242) == quirk.Q_IGNORE)
+    chk("quirk: vid wildcard still needs the pid", quirk.lookup(quirk.B_USB, 0x1111, 0x4243) == 0)
+    chk("quirk: pid wildcard still needs the vid", quirk.lookup(quirk.B_USB, 0x0999, 0x7777) == 0)
+    quirk.drop_row(anyvid)
+    quirk.drop_row(spec)
+    quirk.drop_row(wild)
+    chk("quirk: drop_row restores the table", quirk.row_count() == base && quirk.lookup(quirk.B_I2C, 0x045e, 0x0c32) == quirk.Q_SINGLE_TOUCH)
+    chk("quirk: dropped line is free again", quirk.add_row(quirk.B_BT, 1, 1, 0) == wild || quirk.row_count() == base + 1)
+
+    var added: u64 = 0
+    var v: u64 = 100
+    while quirk.add_row(quirk.B_USB, v, v, 0) != quirk.NO_ROW {
+        added = added + 1
+        v = v + 1
+    }
+    chk("quirk: table is full at ROW_CAP", quirk.row_count() == quirk.ROW_CAP)
+    chk("quirk: a full table rejects more rows", quirk.add_row(quirk.B_USB, 9000, 9000, 0) == quirk.NO_ROW)
+    var r: u64 = 0
+    while r < quirk.ROW_CAP {
+        if quirk.row_bus(r) == quirk.B_USB && quirk.row_vid(r) >= 100 && quirk.row_vid(r) < 100 + added { quirk.drop_row(r) }
+        if quirk.row_bus(r) == quirk.B_BT && quirk.row_vid(r) == 1 { quirk.drop_row(r) }
+        r = r + 1
+    }
+    chk("quirk: test rows removed again", quirk.row_count() == base)
+}
+
+fn snap3() {
+    zero_buf()
+    record.put_header(pb(), 3, 0, 40)
+    record.put_record(pb(), 0, record.T_DOWN, 1, record.D_TOUCHSCREEN, 0, 1000, 2000, 30, 40, 50, 60, 70, 0, 0)
+    record.put_record(pb(), 1, record.T_GESTURE, 0xFF, record.D_TOUCHPAD, record.G_SCROLL, 0, 0, 0, 0, 0, 0, 80, -12, 34)
+    record.put_record(pb(), 2, record.T_MOVE, 1, record.D_TOUCHSCREEN, 0, 1100, 2100, 31, 41, 51, 61, 90, 0, 0)
+}
+
+fn test_api() {
+    chk("api: poll before open is false", !api.poll())
+    chk("api: refill before open is false", !api.refill_from(pb(), 88))
+    chk("api: open succeeds", api.open() && api.is_open())
+    snap3()
+    chk("api: valid snapshot is accepted", api.refill_from(pb(), 88))
+    chk("api: three records pending", api.pending() == 3)
+    chk("api: no current event before poll", api.ev_type() == 0 && api.ev_x() == 0 && api.ev_a() == 0)
+    chk("api: first poll is true", api.poll())
+    chk("api: first record is DOWN", api.ev_type() == record.T_DOWN && api.ev_slot() == 1 && api.ev_device() == record.D_TOUCHSCREEN)
+    chk("api: first record fields", api.ev_x() == 1000 && api.ev_y() == 2000 && api.ev_x_px() == 30 && api.ev_y_px() == 40 && api.ev_pressure() == 50 && api.ev_size() == 60 && api.ev_time() == 70 && api.ev_flags() == 0)
+    chk("api: second poll is true", api.poll())
+    chk("api: second record is the gesture", api.ev_type() == record.T_GESTURE && api.ev_flags() == record.G_SCROLL && api.ev_device() == record.D_TOUCHPAD)
+    chk("api: gesture arguments keep their sign", api.gesture_a() == -12 && api.gesture_b() == 34 && api.ev_a() == -12 && api.ev_b() == 34)
+    chk("api: third poll is the MOVE", api.poll() && api.ev_type() == record.T_MOVE && api.ev_x() == 1100 && api.ev_time() == 90)
+    chk("api: fourth poll is false", !api.poll())
+    chk("api: no current event after the end", api.ev_type() == 0)
+    chk("api: nothing pending after reading all", api.pending() == 0 && api.dropped() == 0)
+
+    snap3()
+    chk("api: refill again", api.refill_from(pb(), 88))
+    chk("api: next_gesture skips raw events", api.next_gesture() == record.G_SCROLL)
+    chk("api: next_gesture arguments", api.gesture_a() == -12 && api.gesture_b() == 34)
+    chk("api: next_gesture without more gestures is 0", api.next_gesture() == 0)
+    chk("api: next_gesture consumed the raw events", api.pending() == 0)
+
+    zero_buf()
+    record.put_header(pb(), 0, 0, 100)
+    chk("api: empty snapshot is accepted", api.refill_from(pb(), 16))
+    chk("api: empty snapshot polls false", !api.poll() && api.pending() == 0)
+
+    zero_buf()
+    record.put_header(pb(), 3, 0, 0)
+    sb[0] = 0x58
+    chk("api: wrong magic is rejected", !api.refill_from(pb(), 88))
+    chk("api: wrong magic is counted", api.bad_snapshots() == 1)
+    snap3()
+    chk("api: snapshot shorter than the header is rejected", !api.refill_from(pb(), 8))
+    chk("api: truncated snapshot is rejected", !api.refill_from(pb(), 87))
+    chk("api: truncated snapshots are counted", api.bad_snapshots() == 3)
+    chk("api: exact length is accepted", api.refill_from(pb(), 88))
+    chk("api: longer buffer is accepted", api.refill_from(pb(), 400))
+    zero_buf()
+    record.put_header(pb(), 129, 0, 0)
+    chk("api: count above the buffer capacity is rejected", !api.refill_from(pb(), 4000))
+    chk("api: bad snapshot leaves the good one readable", api.pending() == 3 && api.poll() && api.ev_type() == record.T_DOWN)
+
+    snap3()
+    record.put_header(pb(), 3, 5, 40)
+    let before: u64 = api.dropped()
+    chk("api: refill with unread records and header dropped", api.refill_from(pb(), 88))
+    chk("api: dropped adds the header count and the unread rest", api.dropped() - before == 5 + 2)
+    chk("api: seq is not needed to poll", api.poll())
+
+    chk("api: open resets counters", api.open() && api.dropped() == 0 && api.bad_snapshots() == 0 && api.pending() == 0)
+    snap3()
+    chk("api: snapshot after reopen", api.refill_from(pb(), 88) && api.poll())
+    api.close()
+    chk("api: close stops polling", !api.is_open() && !api.poll() && api.pending() == 0)
+    chk("api: close hides the current event", api.ev_type() == 0)
+}
+
+fn test_slots() {
+    track.reset(5)
+    track.configure(5, record.D_TOUCHSCREEN, 0, 1000, 0, 1000)
+    track.begin(5, 10)
+    track.add(7, 500, 250, 1, 1, 300, 20)
+    track.add(9, 1000, 0, 1, 0, 0, 0)
+    track.end(5)
+    chk("slots: two contacts are used", track.slot_used(5, 0) && track.slot_used(5, 1) && !track.slot_used(5, 2))
+    chk("slots: ids are the hardware ids", track.slot_id(5, 0) == 7 && track.slot_id(5, 1) == 9)
+    chk("slots: normalized position", track.slot_x(5, 0) == 32767 && track.slot_y(5, 0) == 16383)
+    chk("slots: right edge is 65535", track.slot_x(5, 1) == 65535 && track.slot_y(5, 1) == 0)
+    chk("slots: pressure and size", track.slot_pressure(5, 0) == 300 && track.slot_size(5, 0) == 20)
+    chk("slots: palm flag is visible", track.slot_flags(5, 1) == record.F_PALM && track.slot_flags(5, 0) == 0)
+    chk("slots: device 5 is a valid device", track.MAX_DEV == 8)
+    chk("slots: unused slot reads 0", track.slot_x(5, 4) == 0 && track.slot_id(5, 4) == 0)
+    chk("slots: out of range reads false", !track.slot_used(9, 0) && !track.slot_used(5, 10))
+    track.begin(5, 20)
+    track.add(9, 1000, 0, 1, 1, 0, 0)
+    track.end(5)
+    chk("slots: lifted contact frees its slot", !track.slot_used(5, 0) && track.slot_used(5, 1))
+    chk("slots: other device untouched", !track.slot_used(4, 0))
+    track.begin(4, 30)
+    track.add(1, 10, 10, 1, 1, 0, 0)
+    track.end(4)
+    chk("slots: devices keep separate slots", track.slot_used(4, 0) && track.slot_id(4, 0) == 1 && track.slot_id(5, 1) == 9)
+    track.reset(5)
+    track.reset(4)
+}
+
+fn test_inmode() {
+    zero_buf()
+    sc[0] = 3
+    sb[100] = 0
+    let n: u64 = inmode.i2c_set_report(5, 6, 7, pc(), 1, pb())
+    chk("inmode: i2c frame length for report 7", n == 10)
+    chk("inmode: command register little endian", rb(0) == 5 && rb(1) == 0)
+    chk("inmode: type feature and report id in byte 2", rb(2) == 0x37)
+    chk("inmode: opcode SET_REPORT in byte 3", rb(3) == 3)
+    chk("inmode: data register", rb(4) == 6 && rb(5) == 0)
+    chk("inmode: size counts length bytes, report id and payload", rb(6) == 4 && rb(7) == 0)
+    chk("inmode: report id then payload", rb(8) == 7 && rb(9) == 3)
+    sc[0] = 1
+    sc[1] = 2
+    let m: u64 = inmode.i2c_set_report(0x1234, 0x5678, 16, pc(), 2, pb())
+    chk("inmode: long report id: frame length", m == 12)
+    chk("inmode: long report id: low nibble 15 and id after the opcode", rb(2) == 0x3F && rb(3) == 3 && rb(4) == 16)
+    chk("inmode: long report id: registers", rb(0) == 0x34 && rb(1) == 0x12 && rb(5) == 0x78 && rb(6) == 0x56)
+    chk("inmode: long report id: size 5 and payload", rb(7) == 5 && rb(8) == 0 && rb(9) == 16 && rb(10) == 1 && rb(11) == 2)
+    sc[0] = 9
+    let z: u64 = inmode.i2c_set_report(5, 6, 0, pc(), 1, pb())
+    chk("inmode: report id 0 sends no id byte", z == 9 && rb(2) == 0x30 && rb(6) == 3 && rb(8) == 9)
+    chk("inmode: usb wValue is feature type and report id", inmode.usb_wvalue(7) == 0x0307 && inmode.usb_wvalue(0) == 0x0300)
+    zero_buf()
+    inmode.put_bits(pb(), 0, 8, 3)
+    chk("inmode: put_bits writes a byte", rb(0) == 3)
+    inmode.put_bits(pb(), 9, 3, 5)
+    chk("inmode: put_bits crosses no byte it does not need", rb(1) == 0x0A && rb(2) == 0)
+    inmode.put_bits(pb(), 14, 4, 15)
+    chk("inmode: put_bits crosses a byte border", rb(1) == 0xCA && rb(2) == 3)
+    chk("inmode: constants", inmode.MODE_PTP == 3 && inmode.SWITCH_ON == 1 && inmode.REPORT_FEATURE == 3)
+}
+
+fn main() -> i32 {
+    test_record()
+    test_tracker_basic()
+    test_tracker_slots()
+    test_tracker_palm()
+    test_tracker_norm()
+    test_tracker_quirks()
+    test_pen()
+    test_quirk()
+    test_api()
+    test_slots()
+    test_inmode()
+    return 0
+}
