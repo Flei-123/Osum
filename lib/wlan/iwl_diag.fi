@@ -10,7 +10,7 @@ import wlan.iwl_irqdiag
 import wlan.iwl_irqpoll
 
 export {
-    Diag, diag_new, diag_phase, diag_fail, diag_hw, diag_fw, diag_cmd, diag_notif, diag_rings, diag_nvm, diag_calib,
+    Diag, diag_new, diag_phase, diag_fail, diag_hw, diag_fw, diag_cmd, diag_notif, diag_rings, diag_nvm, diag_calib, diag_calib_seen, diag_calib_bad, diag_calib_drops,
     diag_armed, diag_render, diag_more, phase_name, err_text, diag_mark, diag_snap, diag_snap2, diag_alive, diag_pm, diag_pci, diag_own, diag_fhfail, diag_fwmiss, diag_trace, diag_rx, diag_x2, diag_poll, diag_irq, diag_ipoll, diag_irq_text, step_name,
     ST_NONE, ST_FW_FILE, ST_FW_PARSE, ST_DMA, ST_POWER_INIT, ST_CQ_INIT, ST_FH_INIT, ST_ALIVE_INIT, ST_NVM, ST_INIT_STOP,
     ST_POWER_RT, ST_FH_RT, ST_ALIVE_RT, ST_RT_STAGE, ST_INIT_IMG,
@@ -67,6 +67,16 @@ struct Diag {
     calib_n: u64,
     calib_bytes: u64,
     replayed: u64,
+    cp_seen: u64,
+    cp_bytes: u64,
+    cp_max: u64,
+    cp_drops: u64,
+    cp_bad: u64,
+    cp_rc: i64,
+    cp_plen: u64,
+    cp_type: u64,
+    cp_dlen: u64,
+    cp_hex: [u8; 32],
     last_cmd: u64,
     last_notif: u64,
     cmds: u64,
@@ -120,7 +130,7 @@ struct Diag {
 fn diag_new() -> Diag {
     var d: Diag = Diag {
         phase: 0, failed_at: 0, armed: 0, init_alive: 0, rt_alive: 0, err: 0, hw_rev: 0, rf_id: 0, fw_ver: 0, fw_size: 0,
-        nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, last_cmd: 0, last_notif: 0,
+        nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, cp_seen: 0, cp_bytes: 0, cp_max: 0, cp_drops: 0, cp_bad: 0, cp_rc: 0, cp_plen: 0, cp_type: 0, cp_dlen: 0, cp_hex: [0 as u8; 32], last_cmd: 0, last_notif: 0,
         cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32],
         step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, own_valid: 0, own_hwif: 0, own_mbox: 0, own_rc: 0, alive_valid: 0, alive: [0; 16], pm_valid: 0, pm: [0; 16], tr_valid: 0, tr: [0; 192], rx_valid: 0, rx: [0; 26], x2_valid: 0, x2: [0; 136], poll_valid: 0, poll: [0; 360], irq_valid: 0, irq: [0; 48], ipoll_valid: 0, ipoll: [0; 320], miss: [0 as u8; 64]
     }
@@ -332,6 +342,32 @@ fn diag_calib(d: *mut Diag, n: u64, bytes: u64, replayed: u64) {
     (*d).replayed = replayed
 }
 
+fn diag_calib_seen(d: *mut Diag, plen: u64) {
+    (*d).cp_seen = (*d).cp_seen + 1
+    (*d).cp_bytes = (*d).cp_bytes + plen
+    if plen > (*d).cp_max { (*d).cp_max = plen }
+}
+
+fn diag_calib_drops(d: *mut Diag, n: u64) {
+    (*d).cp_drops = n
+}
+
+fn diag_calib_bad(d: *mut Diag, rc: i64, pkt: u64, plen: u64) {
+    (*d).cp_bad = 1
+    (*d).cp_rc = rc
+    (*d).cp_plen = plen
+    (*d).cp_type = 0
+    (*d).cp_dlen = 0
+    if plen >= 2 { (*d).cp_type = iwl_le.ld16(pkt, 0) }
+    if plen >= 4 { (*d).cp_dlen = iwl_le.ld16(pkt, 2) }
+    var i: u64 = 0
+    while i < 32 {
+        (*d).cp_hex[i as usize] = 0 as u8
+        if i < plen { (*d).cp_hex[i as usize] = iwl_le.ld8(pkt, i) as u8 }
+        i = i + 1
+    }
+}
+
 fn diag_armed(d: *mut Diag, on: bool) {
     if on { (*d).armed = 1 } else { (*d).armed = 0 }
 }
@@ -438,6 +474,7 @@ fn err_text(code: i64, out: u64) {
     var e69: [u8; 22] = "NVM section too short\0"
     var e23: [u8; 24] = "NIC not ready (prepare)\0"
     var e70: [u8; 16] = "command too big\0"
+    var e71: [u8; 21] = "calibration type bad\0"
     var ex: [u8; 8] = "unknown\0"
     var src: u64 = (&ex[0]) as u64
     if code == 0 { src = (&e0[0]) as u64 }
@@ -470,6 +507,7 @@ fn err_text(code: i64, out: u64) {
     if code == -68 { src = (&e68[0]) as u64 }
     if code == -69 { src = (&e69[0]) as u64 }
     if code == -70 { src = (&e70[0]) as u64 }
+    if code == -71 { src = (&e71[0]) as u64 }
     var i: u64 = 0
     while iwl_le.ld8(src, i) != 0 {
         iwl_le.st8(out, i, iwl_le.ld8(src, i))
@@ -750,8 +788,47 @@ fn render_fail(w: *mut iwl_w.W, d: *mut Diag) {
     }
 }
 
+fn render_calibpkt(w: *mut iwl_w.W, d: *mut Diag) {
+    var k_a: [u8; 16] = "calibpkt: seen=\0"
+    var k_b: [u8; 8] = " bytes=\0"
+    var k_m: [u8; 6] = " max=\0"
+    var k_d: [u8; 8] = " drops=\0"
+    var k_bad: [u8; 20] = "calibpkt_bad: rc=\0\0\0"
+    var k_pl: [u8; 7] = " plen=\0"
+    var k_ty: [u8; 7] = " type=\0"
+    var k_dl: [u8; 6] = " len=\0"
+    var k_hx: [u8; 6] = " hex=\0"
+    if (*d).cp_seen == 0 && (*d).cp_bad == 0 { return }
+    iwl_w.w_s(w, (&k_a[0]) as u64)
+    iwl_w.w_dec(w, (*d).cp_seen)
+    iwl_w.w_s(w, (&k_b[0]) as u64)
+    iwl_w.w_dec(w, (*d).cp_bytes)
+    iwl_w.w_s(w, (&k_m[0]) as u64)
+    iwl_w.w_dec(w, (*d).cp_max)
+    iwl_w.w_s(w, (&k_d[0]) as u64)
+    iwl_w.w_dec(w, (*d).cp_drops)
+    iwl_w.w_nl(w)
+    if (*d).cp_bad == 0 { return }
+    iwl_w.w_s(w, (&k_bad[0]) as u64)
+    iwl_w.w_int(w, (*d).cp_rc)
+    iwl_w.w_s(w, (&k_pl[0]) as u64)
+    iwl_w.w_dec(w, (*d).cp_plen)
+    iwl_w.w_s(w, (&k_ty[0]) as u64)
+    iwl_w.w_dec(w, (*d).cp_type)
+    iwl_w.w_s(w, (&k_dl[0]) as u64)
+    iwl_w.w_dec(w, (*d).cp_dlen)
+    iwl_w.w_s(w, (&k_hx[0]) as u64)
+    var i: u64 = 0
+    while i < 32 {
+        iwl_w.w_hex(w, (*d).cp_hex[i as usize] as u64, 2)
+        i = i + 1
+    }
+    iwl_w.w_nl(w)
+}
+
 fn diag_more(d: *mut Diag, a: u64, cap: u64) -> u64 {
     var w: iwl_w.W = iwl_w.W { a: a, cap: cap, n: 0 }
+    render_calibpkt(&w, d)
     if (*d).x2_valid != 0 && iwl_rxexp_tab.has_data((&(*d).x2[0]) as u64) {
         iwl_rxexp_tab.render(&w, (&(*d).x2[0]) as u64)
     }

@@ -10,7 +10,7 @@ import drv.net.iwl_faketx
 import wlan.iwl_mvm_txq
 
 export {
-    doorbell, alive, alive_forced, reset, rx_enabled, set_norx, set_silent, set_knobs, cmds, rx_pkts, rx_drops, tx_ok, tx_bad, last_cmd, set_ap, ap_on, last_uid, phydb_cmds, nvm_reads, init_completes, FAKE_SCD_BASE
+    doorbell, alive, alive_forced, reset, rx_enabled, set_norx, set_silent, set_knobs, set_bigcal, phydb_bytes, phydb_bad, cmds, rx_pkts, rx_drops, tx_ok, tx_bad, last_cmd, set_ap, ap_on, last_uid, phydb_cmds, nvm_reads, init_completes, FAKE_SCD_BASE
 }
 
 const FAKE_SCD_BASE: u64 = 0x00800000
@@ -41,6 +41,9 @@ const S_Q4MSK: u64 = 0x24A0
 const S_TXOK: u64 = 0x24A8
 const S_TXBAD: u64 = 0x24B0
 const S_SILENT: u64 = 0x24F0
+const S_BIGCAL: u64 = 0x2508
+const S_PHYBYTES: u64 = 0x2510
+const S_PHYBAD: u64 = 0x2518
 const CMD_TX: u64 = 0x1C
 const CMD_ADD_STA: u64 = 0x18
 const CMD_SCD_CFG: u64 = 0x1D
@@ -94,6 +97,7 @@ fn tx_bad(ctx: u64) -> u64 { return g(ctx, S_TXBAD) }
 fn last_cmd(ctx: u64) -> u64 { return g(ctx, S_LASTCMD) }
 fn last_uid(ctx: u64) -> u64 { return g(ctx, S_LASTUID) }
 fn set_norx(ctx: u64, on: u64) { s(ctx, S_NORX, on) }
+fn set_bigcal(ctx: u64, on: u64) { s(ctx, S_BIGCAL, on) }
 fn set_silent(ctx: u64, on: u64) { s(ctx, S_SILENT, on) }
 fn set_knobs(ctx: u64, nonvm: u64, noinitc: u64, noalive: u64, badnvm: u64) {
     s(ctx, S_NONVM, nonvm)
@@ -107,6 +111,8 @@ fn set_ap(ctx: u64, on: u64) {
 }
 fn ap_on(ctx: u64) -> bool { return g(ctx, S_AP) != 0 }
 fn phydb_cmds(ctx: u64) -> u64 { return g(ctx, S_PHYDB) }
+fn phydb_bytes(ctx: u64) -> u64 { return g(ctx, S_PHYBYTES) }
+fn phydb_bad(ctx: u64) -> u64 { return g(ctx, S_PHYBAD) }
 fn nvm_reads(ctx: u64) -> u64 { return g(ctx, S_NVMRD) }
 fn init_completes(ctx: u64) -> u64 { return g(ctx, S_INITC) }
 
@@ -304,6 +310,37 @@ fn put_calib(ctx: u64, typ: u64, len: u64) {
     rx_commit(ctx)
 }
 
+fn put_calib_id(ctx: u64, typ: u64, id: u64, len: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 4 + len, CMD_CALIB_RES, SEQ_RX_FRAME)
+    iwl_le.zero(rb + 8, 4 + len)
+    iwl_le.st16(rb, 8, typ)
+    iwl_le.st16(rb, 10, len)
+    var i: u64 = 0
+    while i < len {
+        iwl_le.st8(rb, 12 + i, (typ * 31 + id * 7 + i) & 0xFF)
+        i = i + 1
+    }
+    if typ >= 3 { iwl_le.st16(rb, 12, id) }
+    rx_commit(ctx)
+}
+
+fn put_big_calib(ctx: u64) {
+    put_calib_id(ctx, 1, 0, 20)
+    put_calib_id(ctx, 2, 0, 2600)
+    var i: u64 = 0
+    while i < 4 {
+        put_calib_id(ctx, 3, i, 1312)
+        i = i + 1
+    }
+    i = 0
+    while i < 9 {
+        put_calib_id(ctx, 4, i, 52)
+        i = i + 1
+    }
+}
+
 fn put_init_complete(ctx: u64) {
     let rb: u64 = rx_begin(ctx)
     if rb == 0 { return }
@@ -316,11 +353,35 @@ fn put_init_complete(ctx: u64) {
 fn after_phy_cfg(ctx: u64, tb0: u64) {
     if g(ctx, S_PHASE) != 1 { return }
     if iwl_le.ld32(tb0, 4) == 0 || iwl_le.ld32(tb0, 8) == 0 { return }
-    put_calib(ctx, 1, 4)
-    put_calib(ctx, 2, 8)
-    put_calib(ctx, 3, 6)
-    put_calib(ctx, 4, 6)
+    if g(ctx, S_BIGCAL) != 0 {
+        put_big_calib(ctx)
+    } else {
+        put_calib(ctx, 1, 4)
+        put_calib(ctx, 2, 8)
+        put_calib(ctx, 3, 6)
+        put_calib(ctx, 4, 6)
+    }
     if g(ctx, S_NOINITC) == 0 { put_init_complete(ctx) }
+}
+
+fn check_phydb(ctx: u64, tb0: u64, total: u64) {
+    let typ: u64 = iwl_le.ld16(tb0, 4)
+    let len: u64 = iwl_le.ld16(tb0, 6)
+    s(ctx, S_PHYBYTES, g(ctx, S_PHYBYTES) + len)
+    if g(ctx, S_BIGCAL) == 0 { return }
+    if 8 + len != total { s(ctx, S_PHYBAD, g(ctx, S_PHYBAD) + 1) }
+    if 8 + len != total { return }
+    var id: u64 = 0
+    if typ >= 3 { id = iwl_le.ld16(tb0, 8) }
+    var i: u64 = 0
+    var bad: bool = false
+    while i < len {
+        var want: u64 = (typ * 31 + id * 7 + i) & 0xFF
+        if typ >= 3 && i < 2 { want = (id >> (8 * i)) & 0xFF }
+        if iwl_le.ld8(tb0, 8 + i) != want { bad = true }
+        i = i + 1
+    }
+    if bad { s(ctx, S_PHYBAD, g(ctx, S_PHYBAD) + 1) }
 }
 
 fn one_tfd(ctx: u64, ring: u64, idx: u64) {
@@ -344,7 +405,12 @@ fn one_tfd(ctx: u64, ring: u64, idx: u64) {
     } else {
         put_status(ctx, cmd, seq)
     }
-    if cmd == CMD_PHY_DB { s(ctx, S_PHYDB, g(ctx, S_PHYDB) + 1) }
+    if cmd == CMD_PHY_DB {
+        s(ctx, S_PHYDB, g(ctx, S_PHYDB) + 1)
+        var total_p: u64 = l0
+        if n == 2 { total_p = l0 + (iwl_le.ld16(t, 14) >> 4) }
+        check_phydb(ctx, tb0, total_p)
+    }
     if cmd == CMD_PHY_CFG { after_phy_cfg(ctx, tb0) }
     if cmd == CMD_SCAN_REQ_UMAC {
         let uid: u64 = iwl_le.ld32(tb0, 8)
