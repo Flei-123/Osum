@@ -94,10 +94,13 @@ if cfg == "hd":
         return b"".join(img[1][((y + j) * img[0] + x) * 3:((y + j) * img[0] + x + w) * 3] for j in range(h))
 
     rect = None
-    for r in reports:
-        if "tabq" in r and "tabl" in r:
-            rect = r
-            break
+    try:
+        flog = open(os.path.join(outdir, "fahren.log"), "rb").read().decode("latin1")
+    except OSError:
+        flog = ""
+    hits = re.findall(r"fahreauf srecttabl -> \d+,\d+\s+\(rect (\d+),(\d+) (\d+)x(\d+)\)", flog)
+    if hits:
+        rect = {"tabl": tuple(int(v) for v in hits[-1])}
 
     def mean(img, x, y, w, h):
         n = 0
