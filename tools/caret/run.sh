@@ -37,7 +37,7 @@ PY
 if [ -n "${CARET_F12:-}" ]; then   # diagnosis: window server counters before/after the burst (wm: shared ... shdmg=)
     printf 'warte 6\ntippe ab\nwarte 1\ntaste f12\nwarte 0.5\nserie idle 300 blink\nwarte 0.5\ntaste f12\nwarte 1\nfoto done\n' > "$TMPD/book"
 else
-printf 'warte 6\ntippe ab\nwarte 1\nserie idle 300 blink\nwarte 1\nserie key:c 25 k1\nwarte 2\nserie key:d 25 k2\nwarte 1\nserie key:e 25 k3\ntaste tab\nwarte 0.3\nserie idle 30 nf\nwarte 1\nfoto done\n' > "$TMPD/book"
+printf 'warte 6\ntippe ab\nwarte 1\nserie idle 300 blink\nwarte 1\nserie key:c 40 k1 15\nwarte 2\nserie key:d 40 k2 15\nwarte 1\nserie key:e 40 k3 15\ntaste tab\nwarte 0.3\nserie idle 30 nf\nwarte 1\nfoto done\n' > "$TMPD/book"
 fi
 
 for c in ${CASES:-glogin noblink caretold}; do
