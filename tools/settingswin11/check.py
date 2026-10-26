@@ -15,9 +15,11 @@ for ln in txt.splitlines():
     if not m:
         continue
     n = m.group(1)
-    if n == "waa" or cur is None:
+    if n == "waa":
         cur = {}
         reports.append(cur)
+    if cur is None:
+        continue
     cur[n] = tuple(int(m.group(i)) for i in range(2, 6))
 
 fails = []
