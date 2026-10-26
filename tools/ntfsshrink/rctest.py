@@ -389,7 +389,7 @@ def journal_tests(count):
         g = call("j", IMG, "r", S)
         if g["code"] != "0" or g["present"] != "0":
             fail("journal: damaged magic must read as absent: %r" % g)
-        for name, sector in (("state 0", journal_sector(0)), ("state 3", journal_sector(3)), ("version 2", journal_sector(1, ver=2)),
+        for name, sector in (("state 0", journal_sector(0)), ("state 4", journal_sector(4)), ("version 2", journal_sector(1, ver=2)),
                              ("patch len 377", journal_sector(1, plen=377)), ("bad crc", journal_sector(1, crc_ok=False))):
             im2 = bytearray(raw); im2[S * 512:(S + 1) * 512] = sector
             open(IMG, "wb").write(im2)

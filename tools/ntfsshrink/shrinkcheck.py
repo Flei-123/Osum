@@ -12,6 +12,7 @@ def le(b, o, n):
 
 def main():
     disk, scheme, base, old_psize, new_psize, orig_part, hashdir, unit, checkpy = sys.argv[1:10]
+    reloc = len(sys.argv) > 10 and sys.argv[10] == "reloc"
     base, old_psize, new_psize = int(base), int(old_psize), int(new_psize)
     bad = []
 
@@ -69,8 +70,13 @@ def main():
         d = (((c_new + 7) // 8) + 7) // 8 * 8
         lo = c_new // 8
         need("bitmap length", len(mine) == d)
-        need("bitmap below new end", mine[:lo] == orig[:lo])
-        need("bitmap padding equals ntfsresize", rs[lo:d] == mine[lo:d])
+        if reloc:
+            lim = c_new - (16777216 + spc * 512 - 1) // (spc * 512)
+            need("no allocation in the reserve", not any(mine[b // 8] >> (b % 8) & 1 for b in range(lim, c_new)))
+        else:
+            need("bitmap below new end", mine[:lo] == orig[:lo])
+        plo = (c_new + 7) // 8 if reloc else lo
+        need("bitmap padding equals ntfsresize", rs[plo:d] == mine[plo:d])
         need("padding bits set", all(mine[b // 8] >> (b % 8) & 1 for b in range(c_new, 8 * d)))
         uo = os.path.join(tmp, "unit.out")
         with open(uo, "w") as f:

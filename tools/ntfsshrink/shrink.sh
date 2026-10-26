@@ -126,7 +126,7 @@ PY
 T=$(cat "$D/gpt4k.target")
 PS=$(cat "$D/gpt4k.psize")
 MIN=$(info_of "$D/gpt4k.disk" min_sectors)
-refuse2 "target 8 sectors below the minimum (end region too full)" 9 $((MIN - 8)) none
+refuse2 "target inside the 16 MiB reserve (no room even after relocation)" 9 8192 none
 refuse2 "target equal to the partition" 14 "$PS" none
 refuse2 "target larger than the partition" 10 $((PS + 8)) none
 refuse2 "target below 1 MiB" 10 1000 none

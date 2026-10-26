@@ -254,6 +254,7 @@ mutcase "hibernation verdict dropped" 's/    return codes.E_HIBERNATED/    retur
 
 . tools/ntfsshrink/shrink.sh
 . tools/ntfsshrink/reloc.sh
+. tools/ntfsshrink/relocfull.sh
 
 echo "NTFSSHRINK: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

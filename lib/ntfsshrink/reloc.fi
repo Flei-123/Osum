@@ -1,0 +1,419 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import disks.bytes
+import ntfsshrink.codes
+import ntfsshrink.runs
+import ntfsshrink.vol
+import ntfsshrink.rec
+import ntfsshrink.steps
+import ntfsshrink.balloc
+import ntfsshrink.mpatch
+import ntfsshrink.rjournal
+
+export { Ctx, ctx_at, relocate, recover, fixed_end, alloc_total, RELOC_BYTES }
+
+const RELOC_BYTES: u64 = 41984
+const COPY_SECTORS: u64 = 64
+const MFT_SELF: u64 = 0
+const MFT_MIRROR: u64 = 1
+const MFT_BITMAP: u64 = 6
+const MFT_BADCLUS: u64 = 8
+const FLAG_IN_USE: u64 = 1
+
+struct Ctx {
+    rb_raw: u64,
+    rb_rec: u64,
+    jbuf: u64,
+    sbuf: u64,
+    cbuf: u64,
+    bp: u64,
+    be: u64,
+    limit: u64
+}
+
+fn ctx_at(p: u64) -> Ctx {
+    var c: Ctx = Ctx {
+        rb_raw: p, rb_rec: p + 4096, jbuf: p + 8192, sbuf: p + 8704, cbuf: p + 9216, bp: 0, be: 0, limit: 0
+    }
+    return c
+}
+
+fn load_bitmap(v: *mut vol.Vol, c: *mut Ctx) -> u64 {
+    let r: u64 = rec.mft_read(v, MFT_BITMAP, (*c).rb_raw, (*c).rb_rec)
+    if r != codes.E_OK {
+        return r
+    }
+    let da: u64 = rec.attr_find((*c).rb_rec, (*v).rec_size, rec.AT_DATA, 0)
+    var re: u64 = 0
+    let rp: u64 = if da != 0 { rec.attr_runs(da, &re) } else { 0 }
+    if rp == 0 {
+        return codes.E_CORRUPT
+    }
+    (*c).bp = rp
+    (*c).be = re
+    return codes.E_OK
+}
+
+fn next_beyond(v: *mut vol.Vol, rec_p: u64, limit: u64, skip: u64, rp_o: *mut u64, re_o: *mut u64, k_o: *mut u64,
+    len_o: *mut u64, lcn_o: *mut u64) -> bool {
+    var a: u64 = bytes.le16(rec_p + 20)
+    let used: u64 = bytes.le32(rec_p + 24)
+    if used > (*v).rec_size || a < 42 {
+        return false
+    }
+    var seen: u64 = 0
+    while a + 16 <= used {
+        if bytes.le32(rec_p + a) == rec.AT_END {
+            return false
+        }
+        let alen: u64 = bytes.le32(rec_p + a + 4)
+        if alen < 16 || (alen & 7) != 0 || a + alen > used {
+            return false
+        }
+        if bytes.ld8(rec_p + a, 8) != 0 {
+            var re: u64 = 0
+            let rp: u64 = rec.attr_runs(rec_p + a, &re)
+            if rp != 0 {
+                var it: runs.RunIt = runs.it_new()
+                runs.it_init(&it, rp, re)
+                var k: u64 = 0
+                while runs.next(&it) {
+                    if it.sparse == 0 && it.lcn + it.len > limit {
+                        if seen == skip {
+                            *rp_o = rp
+                            *re_o = re
+                            *k_o = k
+                            *len_o = it.len
+                            *lcn_o = it.lcn
+                            return true
+                        }
+                        seen = seen + 1
+                    }
+                    k = k + 1
+                }
+            }
+        }
+        a = a + alen
+    }
+    return false
+}
+
+fn max_end(v: *mut vol.Vol, rec_p: u64) -> u64 {
+    var a: u64 = bytes.le16(rec_p + 20)
+    let used: u64 = bytes.le32(rec_p + 24)
+    var top: u64 = 0
+    if used > (*v).rec_size || a < 42 {
+        return 0
+    }
+    while a + 16 <= used {
+        if bytes.le32(rec_p + a) == rec.AT_END {
+            return top
+        }
+        let alen: u64 = bytes.le32(rec_p + a + 4)
+        if alen < 16 || (alen & 7) != 0 || a + alen > used {
+            return top
+        }
+        if bytes.ld8(rec_p + a, 8) != 0 {
+            var re: u64 = 0
+            let rp: u64 = rec.attr_runs(rec_p + a, &re)
+            if rp != 0 {
+                var it: runs.RunIt = runs.it_new()
+                runs.it_init(&it, rp, re)
+                while runs.next(&it) {
+                    if it.sparse == 0 && it.lcn + it.len > top {
+                        top = it.lcn + it.len
+                    }
+                }
+            }
+        }
+        a = a + alen
+    }
+    return top
+}
+
+fn fixed_end(v: *mut vol.Vol, b: *mut steps.Bufs, out: *mut u64) -> u64 {
+    var top: u64 = 0
+    var i: u64 = 0
+    while i < 2 {
+        let n: u64 = if i == 0 { MFT_SELF } else { MFT_BITMAP }
+        let r: u64 = rec.mft_read(v, n, (*b).raw, (*b).rec)
+        if r != codes.E_OK {
+            return r
+        }
+        let e: u64 = max_end(v, (*b).rec)
+        if e > top {
+            top = e
+        }
+        i = i + 1
+    }
+    *out = top
+    return codes.E_OK
+}
+
+fn alloc_total(v: *mut vol.Vol, b: *mut steps.Bufs, out: *mut u64) -> u64 {
+    var r: u64 = rec.mft_read(v, MFT_BITMAP, (*b).raw, (*b).rec)
+    if r != codes.E_OK {
+        return r
+    }
+    let da: u64 = rec.attr_find((*b).rec, (*v).rec_size, rec.AT_DATA, 0)
+    var re: u64 = 0
+    let rp: u64 = if da != 0 { rec.attr_runs(da, &re) } else { 0 }
+    if rp == 0 {
+        return codes.E_CORRUPT
+    }
+    return balloc.count_set(v, rp, re, 0, (*v).clusters, (*b).sec, out)
+}
+
+fn copy_clusters(v: *mut vol.Vol, c: *mut Ctx, src: u64, dst: u64, len: u64) -> u64 {
+    let total: u64 = len * (*v).spc
+    let s0: u64 = src * (*v).spc
+    let d0: u64 = dst * (*v).spc
+    var done: u64 = 0
+    while done < total {
+        let n: u64 = if total - done < COPY_SECTORS { total - done } else { COPY_SECTORS }
+        var r: u64 = vol.vread(v, s0 + done, n, (*c).cbuf)
+        if r != codes.E_OK {
+            return r
+        }
+        r = vol.vwrite(v, d0 + done, n, (*c).cbuf)
+        if r != codes.E_OK {
+            return r
+        }
+        done = done + n
+    }
+    return codes.E_OK
+}
+
+fn set_mirror_boot(v: *mut vol.Vol, b: *mut steps.Bufs, lcn: u64) -> u64 {
+    let r: u64 = vol.vread(v, 0, 1, (*b).sec)
+    if r != codes.E_OK {
+        return r
+    }
+    bytes.put64((*b).sec + 56, lcn)
+    return vol.vwrite(v, 0, 1, (*b).sec)
+}
+
+fn commit_unit(v: *mut vol.Vol, b: *mut steps.Bufs, c: *mut Ctx, j: *mut rjournal.Journal) -> u64 {
+    var r: u64 = rec.mft_read(v, (*j).rec_no, (*b).raw, (*b).rec)
+    if r != codes.E_OK {
+        return r
+    }
+    if (*j).rec_no == MFT_MIRROR {
+        (*v).mirr_lcn = (*j).dst
+    }
+    mpatch.apply((*b).rec, &(*j).patch)
+    r = steps.write_record(v, b, (*j).rec_no)
+    if r != codes.E_OK {
+        return r
+    }
+    if (*j).rec_no == MFT_MIRROR {
+        r = set_mirror_boot(v, b, (*j).dst)
+        if r != codes.E_OK {
+            return r
+        }
+    }
+    return balloc.set_range(v, (*c).bp, (*c).be, (*j).src, (*j).len, false, (*c).sbuf)
+}
+
+fn move_run(v: *mut vol.Vol, b: *mut steps.Bufs, c: *mut Ctx, n: u64, rp: u64, re: u64, k: u64, src: u64,
+    len: u64) -> u64 {
+    var dst: u64 = 0
+    var r: u64 = balloc.find_free(v, (*c).bp, (*c).be, (*c).limit, len, 0, (*c).sbuf, &dst)
+    if r == codes.E_RANGE {
+        return codes.E_NO_SPACE
+    }
+    if r != codes.E_OK {
+        return r
+    }
+    var j: rjournal.Journal = rjournal.journal_new()
+    r = mpatch.build((*b).rec, rp, re, k, dst, &j.patch)
+    if r != codes.E_OK {
+        return r
+    }
+    j.state = rjournal.ST_UNIT
+    j.rec_no = n
+    j.patch_off = j.patch.off
+    j.patch_len = j.patch.len
+    j.src = src
+    j.dst = dst
+    j.len = len
+    r = rjournal.write(v, (*c).jbuf, &j)
+    if r != codes.E_OK {
+        return r
+    }
+    r = balloc.set_range(v, (*c).bp, (*c).be, dst, len, true, (*c).sbuf)
+    if r != codes.E_OK {
+        return r
+    }
+    r = copy_clusters(v, c, src, dst, len)
+    if r != codes.E_OK {
+        return r
+    }
+    j.state = rjournal.ST_COPIED
+    r = rjournal.write(v, (*c).jbuf, &j)
+    if r != codes.E_OK {
+        return r
+    }
+    r = commit_unit(v, b, c, &j)
+    if r != codes.E_OK {
+        return r
+    }
+    var idle: rjournal.Journal = rjournal.journal_new()
+    idle.state = rjournal.ST_SESSION
+    return rjournal.write(v, (*c).jbuf, &idle)
+}
+
+fn visit(v: *mut vol.Vol, b: *mut steps.Bufs, c: *mut Ctx, n: u64, mode: u64, need: *mut u64) -> u64 {
+    if n == MFT_BADCLUS {
+        return codes.E_OK
+    }
+    var skip: u64 = 0
+    while true {
+        var rp: u64 = 0
+        var re: u64 = 0
+        var k: u64 = 0
+        var len: u64 = 0
+        var lcn: u64 = 0
+        if !next_beyond(v, (*b).rec, (*c).limit, skip, &rp, &re, &k, &len, &lcn) {
+            return codes.E_OK
+        }
+        if n == MFT_SELF || n == MFT_BITMAP {
+            return codes.E_UNMOVABLE
+        }
+        if mode == 0 {
+            if (*c).limit <= len {
+                return codes.E_NO_SPACE
+            }
+            var probe: mpatch.Patch = mpatch.patch_new()
+            let r: u64 = mpatch.build((*b).rec, rp, re, k, (*c).limit - len, &probe)
+            if r != codes.E_OK {
+                return r
+            }
+            *need = *need + len
+            skip = skip + 1
+        } else {
+            let r: u64 = move_run(v, b, c, n, rp, re, k, lcn, len)
+            if r != codes.E_OK {
+                return r
+            }
+        }
+    }
+    return codes.E_OK
+}
+
+fn scan(v: *mut vol.Vol, b: *mut steps.Bufs, c: *mut Ctx, mode: u64, need: *mut u64) -> u64 {
+    let nrec: u64 = (*v).mft_size / (*v).rec_size
+    var n: u64 = 0
+    while n < nrec {
+        let r: u64 = rec.mft_read(v, n, (*b).raw, (*b).rec)
+        if r == codes.E_OK && (bytes.le16((*b).rec + 22) & FLAG_IN_USE) != 0 {
+            let q: u64 = visit(v, b, c, n, mode, need)
+            if q != codes.E_OK {
+                return q
+            }
+        } else if r != codes.E_OK && r != codes.E_CORRUPT {
+            return r
+        }
+        n = n + 1
+    }
+    return codes.E_OK
+}
+
+fn relocate(v: *mut vol.Vol, b: *mut steps.Bufs, c: *mut Ctx, limit: u64) -> u64 {
+    (*c).limit = limit
+    var r: u64 = load_bitmap(v, c)
+    if r != codes.E_OK {
+        return r
+    }
+    var need: u64 = 0
+    r = scan(v, b, c, 0, &need)
+    if r != codes.E_OK {
+        return r
+    }
+    if need == 0 {
+        return codes.E_OK
+    }
+    var held: u64 = 0
+    r = balloc.count_set(v, (*c).bp, (*c).be, 0, limit, (*c).sbuf, &held)
+    if r != codes.E_OK {
+        return r
+    }
+    if limit - held < need {
+        return codes.E_NO_SPACE
+    }
+    var j: rjournal.Journal = rjournal.journal_new()
+    j.state = rjournal.ST_SESSION
+    r = rjournal.write(v, (*c).jbuf, &j)
+    if r != codes.E_OK {
+        return r
+    }
+    var res: u64 = steps.set_dirty(v, b, true)
+    var moved: u64 = 0
+    if res == codes.E_OK {
+        res = scan(v, b, c, 1, &moved)
+    }
+    if res == codes.E_OK {
+        var top: u64 = 0
+        res = steps.used_end(v, b, &top)
+        if res == codes.E_OK && top > limit {
+            res = codes.E_NO_SPACE
+        }
+    }
+    var tail: u64 = steps.set_dirty(v, b, false)
+    if tail == codes.E_OK {
+        tail = rjournal.close_session(v, (*c).jbuf)
+    }
+    if res == codes.E_OK {
+        return tail
+    }
+    return res
+}
+
+fn recover(v: *mut vol.Vol, b: *mut steps.Bufs, c: *mut Ctx, done: *mut u64) -> u64 {
+    *done = 0
+    var j: rjournal.Journal = rjournal.journal_new()
+    var present: u64 = 0
+    var r: u64 = rjournal.read(v, (*c).jbuf, &j, &present)
+    if r != codes.E_OK {
+        return r
+    }
+    if present == 0 {
+        return codes.E_OK
+    }
+    if j.serial != (*v).serial {
+        return codes.E_CORRUPT
+    }
+    r = rec.mft_load(v, (*b).raw, (*b).rec)
+    if r != codes.E_OK {
+        return r
+    }
+    if j.state != rjournal.ST_SESSION {
+        r = load_bitmap(v, c)
+        if r != codes.E_OK {
+            return r
+        }
+    }
+    if j.state == rjournal.ST_UNIT {
+        r = balloc.set_range(v, (*c).bp, (*c).be, j.dst, j.len, false, (*c).sbuf)
+        if r != codes.E_OK {
+            return r
+        }
+    }
+    if j.state == rjournal.ST_COPIED {
+        if j.patch_off + j.patch_len > (*v).rec_size {
+            return codes.E_CORRUPT
+        }
+        r = commit_unit(v, b, c, &j)
+        if r != codes.E_OK {
+            return r
+        }
+    }
+    r = steps.set_dirty(v, b, false)
+    if r != codes.E_OK {
+        return r
+    }
+    r = rjournal.close_session(v, (*c).jbuf)
+    if r == codes.E_OK {
+        *done = 1
+    }
+    return r
+}

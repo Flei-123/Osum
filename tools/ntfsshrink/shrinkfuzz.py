@@ -50,6 +50,8 @@ def main():
             boot = open(t, "rb").read((base + 1) * 512)[base * 512:]
             s_now = int.from_bytes(boot[0x28:0x30], "little")
             if s_now == old_s:
+                if "reloc" in modes:
+                    sh(exe, t, "c", str(base), t)
                 why = old_volume_ok(t)
                 if why:
                     return "k=%d tear=%d: old volume damaged before commit (%s)" % (k, tear, why)

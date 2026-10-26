@@ -24,7 +24,7 @@ MUTATIONS = [
     ("mpatch", "two's complement off by one", "mpatch.fi", "(18446744073709551615 - (b - a)) + 1", "(18446744073709551615 - (b - a))", True),
     ("mpatch", "sparse runs between k and next dropped", "mpatch.fi", "bytes.copy(d + w, end_k, mid_len)\n    w = w + mid_len", "w = w + 0", True),
     ("rjournal", "crc not checked", "rjournal.fi", "if table.crc32(buf, CRC_AT) != bytes.le32(buf + CRC_AT) {", "if false {", True),
-    ("rjournal", "state not validated", "rjournal.fi", "(state != ST_SESSION && state != ST_UNIT) || plen", "plen", True),
+    ("rjournal", "state not validated", "rjournal.fi", "(state < ST_SESSION || state > ST_COPIED) || plen", "plen", True),
     ("rjournal", "patch length not validated", "rjournal.fi", "|| plen > mpatch.PATCH_MAX {", "{", True),
     ("rjournal", "version not checked", "rjournal.fi", "bytes.le32(buf + 8) != VERSION {", "false {", True),
     ("rjournal", "close restores the wrong sector", "rjournal.fi", "var r: u64 = vol.vread(v, 0, 1, buf)", "var r: u64 = vol.vread(v, 1, 1, buf)", True),

@@ -7,6 +7,8 @@ import ntfsshrink.intent
 import ntfsshrink.ptab
 import ntfsshrink.steps
 import ntfsshrink.checks
+import ntfsshrink.reloc
+import ntfsshrink.balloc
 
 export { Info, info_new, info, check, pending_at, run, recover, SCRATCH_BYTES, RESERVE_BYTES, MIN_SECTORS }
 
@@ -16,7 +18,8 @@ const O_BOOT: u64 = 45056
 const O_INT: u64 = 46080
 const O_PTAB: u64 = 49152
 const O_WORK: u64 = 90112
-const SCRATCH_BYTES: u64 = 118784
+const O_RELOC: u64 = 118784
+const SCRATCH_BYTES: u64 = 160768
 
 struct Info {
     psize: u64,
@@ -26,11 +29,15 @@ struct Info {
     cb: u64,
     used_end: u64,
     reserve: u64,
-    min_sectors: u64
+    min_sectors: u64,
+    alloc_clusters: u64,
+    fixed_end: u64,
+    packed_sectors: u64
 }
 
 fn info_new() -> Info {
-    var i: Info = Info { psize: 0, sectors: 0, clusters: 0, spc: 0, cb: 0, used_end: 0, reserve: 0, min_sectors: 0 }
+    var i: Info = Info { psize: 0, sectors: 0, clusters: 0, spc: 0, cb: 0, used_end: 0, reserve: 0, min_sectors: 0,
+        alloc_clusters: 0, fixed_end: 0, packed_sectors: 0 }
     return i
 }
 
@@ -79,6 +86,15 @@ fn info(rd: fn(u64, u64, u64) -> u64, total: u64, base: u64, scratch: u64, out: 
     (*out).used_end = used
     (*out).reserve = reserve_clusters(v.cb)
     (*out).min_sectors = (used + reserve_clusters(v.cb)) * v.spc + 1
+    (*out).packed_sectors = (*out).min_sectors
+    var alloc: u64 = 0
+    var fixed: u64 = 0
+    if reloc.alloc_total(&v, &b, &alloc) == codes.E_OK && reloc.fixed_end(&v, &b, &fixed) == codes.E_OK {
+        let floor: u64 = if alloc > fixed { alloc } else { fixed }
+        (*out).alloc_clusters = alloc
+        (*out).fixed_end = fixed
+        (*out).packed_sectors = (floor + reserve_clusters(v.cb)) * v.spc + 1
+    }
     return codes.E_OK
 }
 
@@ -95,6 +111,9 @@ fn pending_at(rd: fn(u64, u64, u64) -> u64, total: u64, base: u64, scratch: u64)
     var v: vol.Vol = vol.vol_new()
     if open_vol(rd, deny, total, base, scratch, &v) != codes.E_OK {
         return false
+    }
+    if v.jslot != 0 {
+        return true
     }
     var it: intent.Intent = intent.intent_new()
     return pending(&v, scratch, &it)
@@ -153,11 +172,18 @@ fn recover(rd: fn(u64, u64, u64) -> u64, wr: fn(u64, u64, u64) -> u64, total: u6
     if r != codes.E_OK {
         return r
     }
+    var b: steps.Bufs = steps.bufs_at(scratch)
+    var cx: reloc.Ctx = reloc.ctx_at(scratch + O_RELOC)
+    var did: u64 = 0
+    r = reloc.recover(&v, &b, &cx, &did)
+    if r != codes.E_OK {
+        return r
+    }
+    *state = did
     var it: intent.Intent = intent.intent_new()
     if !pending(&v, scratch, &it) {
         return codes.E_OK
     }
-    var b: steps.Bufs = steps.bufs_at(scratch)
     r = rec.mft_load(&v, b.raw, b.rec)
     if r != codes.E_OK {
         return r
@@ -202,12 +228,27 @@ fn run(rd: fn(u64, u64, u64) -> u64, wr: fn(u64, u64, u64) -> u64, total: u64, b
     if r != codes.E_OK {
         return r
     }
-    if used + reserve_clusters(v.cb) > c_new {
-        return codes.E_NO_SPACE
-    }
     r = checks.check_all(&v, 0, scratch + O_WORK)
     if r != codes.E_OK {
         return r
+    }
+    let rc: u64 = reserve_clusters(v.cb)
+    if used + rc > c_new {
+        if c_new <= rc {
+            return codes.E_NO_SPACE
+        }
+        var cx: reloc.Ctx = reloc.ctx_at(scratch + O_RELOC)
+        r = reloc.relocate(&v, &b, &cx, c_new - rc)
+        if r != codes.E_OK {
+            return r
+        }
+        r = steps.used_end(&v, &b, &used)
+        if r != codes.E_OK {
+            return r
+        }
+        if used + rc > c_new {
+            return codes.E_NO_SPACE
+        }
     }
     r = steps.write_boot(&v, b.sec, s_new, s_new)
     if r != codes.E_OK {
