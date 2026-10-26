@@ -20,7 +20,7 @@ export {
     pkg_rec, pkg_origin, pkg_app, bind_total, bind_pkg, bind_id, bind_result, bind_code,
     find_bind, unload_test, unload_pkg, load_pkg, last_loaded, last_refs, UL_OK, UL_NONE, UL_IDLE, UL_BUSY, UL_LOADED, UL_NODEV, best_pci, best_usb, best_acpi, bound_count, failed_count,
     CTX_OFF, ST_OK, ST_BANNED, X_SIG, X_ABI, X_NOMODULE, X_NOFILE, X_DENY,
-    BR_NONE, BR_BOUND, BR_FAILED, BR_RELEASED, NONE, slot_owner, slot_of, X_DUP, X_SLOTBUSY
+    BR_NONE, BR_BOUND, BR_FAILED, BR_RELEASED, NONE, slot_owner, slot_of, X_DUP, X_SLOTBUSY, testmode_on, pkg_unsigned
 }
 
 const MAXPKG: u64 = 16
@@ -35,7 +35,8 @@ const M_BOUND: u64 = 3
 const M_BANNED: u64 = 4
 const M_LOADRC: u64 = 5
 const M_ORIGIN: u64 = 6
-const M_FIELDS: u64 = 7
+const M_UNSIGNED: u64 = 7
+const M_FIELDS: u64 = 8
 
 const ST_OK: u64 = 0
 const ST_BANNED: u64 = 30
@@ -71,7 +72,9 @@ const B_FIELDS: u64 = 5
 const NO_LOAD: u64 = 99
 
 static mut records: [u8; 6912] = [0 as u8; 6912]
-static mut meta: [u64; 112] = [0 as u64; 112]
+static mut meta: [u64; 128] = [0 as u64; 128]
+static mut testmode: u64 = 0
+static mut last_unsigned: u64 = 0
 static mut app_names: [u8; 192] = [0 as u8; 192]
 static mut napps: u64 = 0
 static mut dirs: [u8; 384] = [0 as u8; 384]
@@ -88,6 +91,14 @@ static mut n_bound: u64 = 0
 static mut n_failed: u64 = 0
 static mut held_refs: u64 = 0
 static mut loaded_now: u64 = 0
+
+fn testmode_on() -> bool {
+    return testmode != 0
+}
+
+fn pkg_unsigned(i: u64) -> bool {
+    return i < npkg && mf(i, M_UNSIGNED) == 1
+}
 
 fn enabled() -> bool {
     return on != 0
@@ -286,16 +297,18 @@ fn load_pkg_files(state: u64, origin: u64, dir: u64) -> u64 {
     if !drvfw.read_all(state, ino, (&inf_buf[0]) as u64, size) {
         return X_NOFILE
     }
+    last_unsigned = 0
     pkg_path(origin, dir, (&f_sig[0]) as u64)
     let sino: u64 = fs.path(state, (&path_buf[0]) as u64)
-    if sino == 0 || fs.inode_size(state, sino) != 64 {
-        return X_SIG
+    var sig_good: bool = false
+    if sino != 0 && fs.inode_size(state, sino) == 64 && drvfw.read_all(state, sino, (&sig_buf[0]) as u64, 64) {
+        sig_good = module.signature_valid(state, (&inf_buf[0]) as u64, size, (&sig_buf[0]) as u64)
     }
-    if !drvfw.read_all(state, sino, (&sig_buf[0]) as u64, 64) {
-        return X_SIG
-    }
-    if !module.signature_valid(state, (&inf_buf[0]) as u64, size, (&sig_buf[0]) as u64) {
-        return X_SIG
+    if !sig_good {
+        if testmode == 0 {
+            return X_SIG
+        }
+        last_unsigned = 1
     }
     return size
 }
@@ -363,6 +376,7 @@ fn scan_one(state: u64, origin: u64, name: u64) {
     }
     mset(i, M_VALID, 1)
     mset(i, M_STATUS, ST_OK)
+    mset(i, M_UNSIGNED, last_unsigned)
 }
 
 fn apply_deny(state: u64) {
@@ -478,7 +492,37 @@ fn scan_apps(state: u64) {
     }
 }
 
+fn read_testmode(state: u64) {
+    var f_conf: [u8; 19] = "/etc/drvstore.conf\0"
+    var key: [u8; 12] = "testmode=1\0\0"
+    testmode = 0
+    let ino: u64 = fs.path(state, (&f_conf[0]) as u64)
+    if ino == 0 {
+        return
+    }
+    var size: u64 = fs.inode_size(state, ino)
+    if size < 10 || size > 1024 {
+        return
+    }
+    if !drvfw.read_all(state, ino, (&deny_buf[0]) as u64, size) {
+        return
+    }
+    var at: u64 = 0
+    while at + 10 <= size {
+        var k: u64 = 0
+        while k < 10 && deny_buf[(at + k) as usize] == key[k as usize] {
+            k = k + 1
+        }
+        if k == 10 && (at == 0 || deny_buf[(at - 1) as usize] == 10 as u8) {
+            testmode = 1
+        }
+        at = at + 1
+    }
+}
+
 fn scan(state: u64) {
+    read_testmode(state)
+    module.set_test_mode(testmode)
     var d: [u8; 13] = "/lib/drivers\0"
     let dir: u64 = fs.path(state, (&d[0]) as u64)
     if dir != 0 {
@@ -735,9 +779,11 @@ fn report(state: u64) {
     var s_head: [u8; 16] = "drvstore: pkgs=\0"
     var s_valid: [u8; 8] = " valid=\0"
     var s_pkg: [u8; 15] = "drvstore: pkg \0"
+    var s_tm: [u8; 23] = "drvstore: testmode=on\n\0"
     var s_ok: [u8; 3] = "ok\0"
     var s_bad: [u8; 10] = "rejected \0"
     var s_ban: [u8; 8] = " banned\0"
+    var s_uns: [u8; 11] = " unsigned\0\0"
     var s_app: [u8; 6] = " app=\0"
     var s_sum: [u8; 17] = "drvstore: bound=\0"
     var s_fl: [u8; 9] = " failed=\0"
@@ -754,6 +800,9 @@ fn report(state: u64) {
     serial.puts((&s_valid[0]) as u64)
     serial.dec(valid)
     serial.nl()
+    if testmode != 0 {
+        serial.puts((&s_tm[0]) as u64)
+    }
     p = 0
     while p < npkg {
         serial.puts((&s_pkg[0]) as u64)
@@ -763,6 +812,9 @@ fn report(state: u64) {
             serial.puts((&s_ok[0]) as u64)
             if mf(p, M_BANNED) != 0 {
                 serial.puts((&s_ban[0]) as u64)
+            }
+            if mf(p, M_UNSIGNED) == 1 {
+                serial.puts((&s_uns[0]) as u64)
             }
         } else {
             serial.puts((&s_bad[0]) as u64)

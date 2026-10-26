@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+import fuiscene
+
+export { init, step, is_on }
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const MARK_W: u64 = 270
+const MARK_H: u64 = 28
+const PAD: u64 = 8
+const POLL_TICKS: u64 = 50
+const RAW_MAX: u64 = 512
+
+static mut mark_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut mark_h: u64 = 0
+static mut on_: u64 = 0
+static mut last_poll: u64 = 0
+static mut raw: [u8; 512] = [0 as u8; 512]
+static mut t_title: [u8; 9] = "testmark\0"
+static mut p_conf: [u8; 19] = "/etc/drvstore.conf\0"
+static mut k_flag: [u8; 11] = "testmode=1\0"
+static mut s_text: [u8; 31] = "Test mode: unsigned drivers on\0"
+static mut s_shown: [u8; 17] = "testmark: shown\0\0"
+static mut s_fail: [u8; 24] = "testmark: no window\0\0\0\0\0"
+static mut s_hidden: [u8; 18] = "testmark: hidden\0\0"
+
+fn sk() -> u64 {
+    return wlibc.ui_scale()
+}
+
+fn is_on() -> bool {
+    return on_ != 0
+}
+
+fn read_flag() -> u64 {
+    var n: u64 = 0
+    __mmio_write8((&raw[0 as usize]) as u64 as *mut u8, 0 as u8)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var going: bool = true
+    while going && n < RAW_MAX - 1 {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, ((&raw[0 as usize]) as u64) + n, RAW_MAX - 1 - n)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            n = n + got
+        }
+    }
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    __mmio_write8((((&raw[0 as usize]) as u64) + n) as *mut u8, 0 as u8)
+    if ulib.find((&raw[0 as usize]) as u64, (&k_flag[0 as usize]) as u64) == ulib.EOF {
+        return 0
+    }
+    return 1
+}
+
+fn mark_draw(x: u64, y: u64, w: u64, h: u64) {
+    let r: u64 = wlibc.win_round(w, h)
+    var ri: u64 = 0
+    if r > 1 {
+        ri = r - 1
+    }
+    fuiscene.cv_round_rgb(x, y, w, h, 0, wlibc.theme(wlibc.T_LINE))
+    fuiscene.cv_round_rgb(x + 1, y + 1, w - 2, h - 2, ri, wlibc.theme(wlibc.T_MENU))
+    let pad: u64 = PAD * sk()
+    let asc: u64 = wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
+    var tw: u64 = 0
+    if w > 2 * pad {
+        tw = w - 2 * pad
+    }
+    fuiscene.cv_text_rgb(x + pad, y + (h - wlibc.px_ui()) / 2 + asc, tw, (&s_text[0 as usize]) as u64,
+        wlibc.px_ui(), true, wlibc.theme(wlibc.T_ACCENT))
+}
+
+fn build_mark() {
+    let root: usize = fuiscene.root()
+    fuiscene.set_pad(root, 0)
+    fuiscene.set_gap(root, 0)
+    let _c: usize = fuiscene.canvas(root, 0, MARK_W, MARK_H, mark_draw)
+}
+
+fn paint() {
+    let _s: bool = fuiscene.win_select(mark_win)
+    fuiscene.refresh()
+    fuiscene.touch()
+    let _u: bool = fuiscene.win_select(0)
+    var n: u64 = 0
+    while n < 3 {
+        let _k: u64 = fuiscene.pump_aux(mark_win)
+        n = n + 1
+    }
+}
+
+fn init() -> bool {
+    mark_win = fuiscene.win_open_plain(0, 0, MARK_W * sk(), MARK_H * sk(),
+        (&t_title[0 as usize]) as u64, wlibc.L_TIP, build_mark)
+    if mark_win == fuiscene.BADWIN {
+        mark_win = NONE
+        let _f: u64 = ulib.say((&s_fail[0 as usize]) as u64)
+        ulib.nl()
+        return false
+    }
+    let _s: bool = fuiscene.win_select(mark_win)
+    mark_h = fuiscene.handle()
+    let _v: u64 = wlibc.win_state(mark_h, wlibc.WS_HIDDEN, 1)
+    let _u: bool = fuiscene.win_select(0)
+    return true
+}
+
+fn show() {
+    let ow: u64 = MARK_W * sk()
+    let right: u64 = wlibc.head_bx() + wlibc.head_bw()
+    var ox: u64 = 0
+    if right > ow + 8 * sk() {
+        ox = right - ow - 8 * sk()
+    }
+    paint()
+    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, mark_h, (ox << 16) | (8 * sk()), 0)
+    let _v: u64 = wlibc.win_state(mark_h, wlibc.WS_HIDDEN, 0)
+    on_ = 1
+    let _s: u64 = ulib.say((&s_shown[0 as usize]) as u64)
+    ulib.nl()
+}
+
+fn hide() {
+    let _v: u64 = wlibc.win_state(mark_h, wlibc.WS_HIDDEN, 1)
+    on_ = 0
+    let _s: u64 = ulib.say((&s_hidden[0 as usize]) as u64)
+    ulib.nl()
+}
+
+fn step() -> bool {
+    if mark_win == NONE {
+        return false
+    }
+    let t: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    if last_poll != 0 && t >= last_poll && t - last_poll < POLL_TICKS {
+        return false
+    }
+    last_poll = t
+    let flag: u64 = read_flag()
+    if flag != 0 && on_ == 0 {
+        show()
+        return true
+    }
+    if flag == 0 && on_ != 0 {
+        hide()
+        return true
+    }
+    return false
+}
