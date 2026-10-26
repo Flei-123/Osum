@@ -1,73 +1,99 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/rand.fi -- Runde K9: Zufall, der einer ist.
-//
-// WARUM DAS EINE VORAUSSETZUNG IST UND KEINE ZIERDE. Runde K8 baut in
-// diesem Repo gerade den Netzwerkstapel. Eine TCP-Verbindung waehlt ihre
-// Anfangsfolgenummer, und waehlt sie ein Kernel vorhersagbar, kann jeder,
-// der die Nummer erraet, Oktette in eine fremde Verbindung schieben (RFC
-// 6528, und der Angriff ist von 1985). Alles, was spaeter TLS heissen
-// soll, faengt an derselben Stelle an. Ein Betriebssystem ohne brauchbaren
-// Zufall kann kein Netz und keine Kryptographie -- deshalb steht dieser
-// Baustein in derselben Runde wie Signale und Terminals.
-//
-// DER AUFBAU IST DER UEBLICHE UND HAT ZWEI HAELFTEN:
-//
-//   DER SAMMLER. Zufall entsteht nicht im Rechenwerk. Er kommt aus
-//   Ereignissen, deren genauer Zeitpunkt niemand vorhersagt: wann der
-//   Zeitgeber schlaegt (gemessen am Zyklenzaehler, dessen niedrige Bits
-//   von Cache, Speicherbus und Wirtsmaschine abhaengen), wann eine Taste
-//   kommt, wann die Platte fertig ist. Jedes solche Ereignis wird in
-//   einen Sammler von 64 Oktetten eingeruehrt (`stir`). Dazu, WO ES SIE
-//   GIBT, `RDSEED` und `RDRAND` -- die Rauschquelle im Prozessor. Sie
-//   werden nicht ALLEIN benutzt: wer ihr allein traut, hat eine
-//   Zufallsquelle, die er nicht nachpruefen kann.
-//
-//   DER GENERATOR. Aus dem Sammler wird ein Schluessel, und aus dem
-//   Schluessel ein Strom: ChaCha20, dieselbe Konstruktion, die Linux seit
-//   4.8 fuer `/dev/urandom` benutzt. Zwanzig Runden aus Addition,
-//   Exklusiv-Oder und Rotation, mehr ist es nicht -- und genau deshalb
-//   laesst es sich in einer Sprache ohne Bibliothek hinschreiben und
-//   nachlesen. Nach `RESEED` Oktetten wird neu geschluesselt, damit ein
-//   einmal ausgelesener Zustand nicht die ganze Laufzeit verraet.
-//
-// DIE ARITHMETIK-FALLE. ChaCha rechnet MODULO 2^32. In Firn panicken `+`
-// und `*` bei Ueberlauf; jede Addition hier ist deshalb `+%` mit
-// anschliessender Maske, jede Multiplikation im Sammler `*%`. Das ist
-// keine Nachlaessigkeit -- die Umdeutung IST die Definition der Chiffre.
-//
-// DIE GEGENPROBE STEHT MIT IM CODE. Mit `fixedrand` auf der
-// Kommandozeile liefert `bytes` fuer immer dasselbe Oktett. Die
-// statistische Pruefung in `tools/unix/run.sh` MUSS daran scheitern --
-// eine Pruefung, die auch einen festverdrahteten Strom durchwinkt, prueft
-// nichts.
+profile kernel
 
 import lib.kstate
 import sched.time
+import sync.atomic
+import entropy.pool
+import entropy.drbg
+import entropy.health
 
 export {
-    init, seed, bytes, stir, ready, hardware, seed_hex, fixed_set,
-    RESEED
+    init, configure, settle, poll, seed, bytes, stir, mix, credit_seed, export_seed,
+    ready, hardware, seed_hex, fixed_set, stat, RESEED, READY_UNITS, UNITS_PER_BIT, SEED_FILE_BITS,
+    JIT_OFF, JIT_ON, JIT_STUCK,
+    S_UNITS_CPU, S_UNITS_JITTER, S_UNITS_SEED, S_UNITS_IRQ, S_JIT_SAMPLES, S_JIT_FAILS,
+    S_IRQ_SAMPLES, S_IRQ_FAILS, S_GENERATION, S_RESEEDS, S_CPU_CAPS, S_TRUST_CPU,
+    S_JIT_MODE, S_READY_TSC, S_MIXED_BYTES, S_BYTES_OUT, S_PENDING_BITS,
 }
 
-// Die Plaetze im eigenen Bereich (`kstate.RAND_OFF`).
-const K_KEY: u64 = 0 // acht Woerter zu 32 Bit, je ein Wort je Platz
-const K_CTR: u64 = 64 // der Blockzaehler
-const K_NONCE: u64 = 72 // drei Woerter zu 32 Bit
-const K_POOL: u64 = 96 // der Sammler, acht Woerter zu 64 Bit
-const K_POS: u64 = 160 // verbrauchte Oktette des Blocks
-const K_LEFT: u64 = 168 // Oktette bis zur naechsten Schluesselung
-const K_BLOCK: u64 = 192 // 64 Oktette Schluesselstrom
-const K_SEED0: u64 = 256 // die ersten 16 Oktette ueberhaupt (Bericht)
-const K_WORK: u64 = 320 // sechzehn Arbeitswoerter
-const K_ORIG: u64 = 448 // und ihr Ausgangszustand
+const K_RING: u64 = 96
+const K_REPORT: u64 = 256
+const RING_WORDS: u64 = 8
+const WORD: u64 = 8
+const REPORT_BYTES: u64 = 16
 
 const M32: u64 = 0xFFFFFFFF
-const BLOCK: u64 = 64
-const RESEED: u64 = 4096 // Oktette zwischen zwei Schluesselungen
-
-// Der Goldene-Schnitt-Multiplikator aus splitmix64. Ungerade, also
-// umkehrbar modulo 2^64 -- er verliert keine Information, er verteilt sie.
 const GOLD: u64 = 0x9E3779B97F4A7C15
+const RESEED: u64 = 4096
+
+const UNITS_PER_BIT: u64 = 16
+const READY_BITS: u64 = 256
+const READY_UNITS: u64 = READY_BITS * UNITS_PER_BIT
+const CPU_SEED_BITS: u64 = 256
+const CPU_RAND_BITS: u64 = 128
+const SEED_FILE_BITS: u64 = 128
+const IRQ_CAP_BITS: u64 = 64
+const IRQ_EVENTS_PER_UNIT: u64 = 8
+const JITTER_SAMPLES_PER_UNIT: u64 = 2
+const JITTER_BATCH: u64 = 1024
+const JITTER_WORK: u64 = 12
+const JITTER_MEM_WORDS: u64 = 64
+const JITTER_MEM_MASK: u64 = 63
+const JITTER_FLUSH_WORDS: u64 = 32
+const JITTER_SAMPLE_MASK: u64 = 0xFFFF
+const JITTER_STUCK_VALUE: u64 = 0x2A2A
+const JITTER_INIT_BATCHES: u64 = 24
+const SETTLE_BATCHES: u64 = 48
+const RDSEED_WORDS: u64 = 4
+const RDRAND_WORDS: u64 = 4
+const HW_RETRIES: u64 = 16
+const CPUID_LEAF7_RDSEED: u64 = 0x40000
+const CPUID_LEAF1_RDRAND: u64 = 0x40000000
+const IRQ_SAMPLE_MASK: u64 = 0xFFF
+const MIX_BLOCK_BYTES: u64 = 256
+const SEED_BYTES: u64 = 64
+const KEY_BYTES: u64 = 32
+
+const JIT_OFF: u64 = 0
+const JIT_ON: u64 = 1
+const JIT_STUCK: u64 = 2
+
+const S_UNITS_CPU: u64 = 0
+const S_UNITS_JITTER: u64 = 1
+const S_UNITS_SEED: u64 = 2
+const S_UNITS_IRQ: u64 = 3
+const S_JIT_SAMPLES: u64 = 4
+const S_JIT_FAILS: u64 = 5
+const S_IRQ_SAMPLES: u64 = 6
+const S_IRQ_FAILS: u64 = 7
+const S_GENERATION: u64 = 8
+const S_RESEEDS: u64 = 9
+const S_CPU_CAPS: u64 = 10
+const S_TRUST_CPU: u64 = 11
+const S_JIT_MODE: u64 = 12
+const S_READY_TSC: u64 = 13
+const S_MIXED_BYTES: u64 = 14
+const S_BYTES_OUT: u64 = 15
+const S_PENDING_BITS: u64 = 16
+
+static mut POOL: pool.Pool = pool.Pool { chain: [0; 32], mixed: 0, extracts: 0 }
+static mut DRBG: drbg.Drbg = drbg.Drbg { key: [0; 32], generation: 0, since_reseed: 0 }
+static mut HEALTH_JIT: health.Health = health.Health { rct_value: 0, rct_run: 0, apt_value: 0, apt_seen: 0, apt_hits: 0, samples: 0, failures: 0 }
+static mut HEALTH_IRQ: health.Health = health.Health { rct_value: 0, rct_run: 0, apt_value: 0, apt_seen: 0, apt_hits: 0, samples: 0, failures: 0 }
+static mut JIT_MEM: [u64; 64] = [0; 64]
+static mut LOCK: u64 = 0
+static mut units_cpu: u64 = 0
+static mut units_jitter: u64 = 0
+static mut units_seed: u64 = 0
+static mut units_irq: u64 = 0
+static mut irq_events: u64 = 0
+static mut irq_last: u64 = 0
+static mut reseeds: u64 = 0
+static mut cpu_caps: u64 = 0
+static mut trust_cpu: u64 = 1
+static mut jit_mode: u64 = 1
+static mut ready_tsc: u64 = 0
 
 fn base(state: u64) -> u64 {
     return state + kstate.RAND_OFF
@@ -81,269 +107,329 @@ fn wset(p: u64, v: u64) {
     __mmio_write64(p as *mut u64, v)
 }
 
-// ------------------------------------------------------------ der Sammler
-
-// Ein Ereignis in den Sammler. Wird aus dem Zeitgeber- und dem
-// Tastaturunterbrecher aufgerufen, also mit abgeschalteten Unterbrechungen
-// und moeglicherweise auf mehreren Kernen gleichzeitig. Ein Wettlauf hier
-// kostet Entropie und zerstoert nichts -- ein Sammler ist kein Zaehler,
-// der stimmen muss, sondern ein Topf, der voll genug sein soll.
-fn stir(state: u64, v: u64) {
-    let n: u64 = kstate.add(state, kstate.RAND_STIRS, 1)
-    let p: u64 = base(state) + K_POOL + (n % 8) * 8
-    var w: u64 = wget(p)
-    w = (w ^ v) *% GOLD
-    w = w ^ (w >> 29)
-    w = w +% (v << 13)
-    wset(p, w)
+fn lock_take() {
+    while atomic.cas((&LOCK) as u64, 0, 1) != 0 {
+        atomic.pause()
+    }
 }
 
-// ------------------------------------------------------- die Rauschquelle
-
-// Hat dieser Prozessor RDSEED (CPUID Blatt 7, EBX Bit 18) oder RDRAND
-// (Blatt 1, ECX Bit 30)? Gefragt statt angenommen: `rdrand` auf einem
-// Prozessor, der es nicht kennt, ist ein ungueltiger Befehl und damit ein
-// #UD im Kernel. `cpuid` schreibt ebx, und ebx ist das eine Register, das
-// diese Sprache nicht herausgibt -- es traegt den Rahmen. Retten und
-// zurueckholen ist der ehrliche Weg; nach ebx wird ueber rax gefragt.
-fn has_rdseed() -> bool {
-    var b: u64 = 0
-    asm("push rbx\nmov eax, 7\nxor ecx, ecx\ncpuid\nmov rax, rbx\npop rbx",
-        out("rax") & b, clobber("rcx"), clobber("rdx"))
-    return (b & 0x40000) != 0
+fn lock_give() {
+    atomic.store((&LOCK) as u64, 0)
 }
 
-fn has_rdrand() -> bool {
-    var c: u64 = 0
-    asm("push rbx\nmov eax, 1\ncpuid\nmov rax, rcx\npop rbx",
-        out("rax") & c, clobber("rcx"), clobber("rdx"))
-    return (c & 0x40000000) != 0
-}
-
-// Ein Wort aus der Rauschquelle, oder 0. `rdrand` setzt das Uebertragsbit,
-// wenn der Wert gueltig ist; `setc` holt es heraus, ohne dass ein Sprung
-// im Vorlagentext stehen muss.
-fn rdrand64() -> u64 {
-    var v: u64 = 0
-    var ok: u64 = 0
-    asm("xor edx, edx\nrdrand rax\nsetc dl", out("rax") & v, out("rdx") & ok)
-    if ok == 0 {
-        return 0
+fn units_total() -> u64 {
+    var irq: u64 = atomic.load((&units_irq) as u64)
+    let cap: u64 = IRQ_CAP_BITS * UNITS_PER_BIT
+    if irq > cap {
+        irq = cap
     }
-    return v
-}
-
-fn rdseed64() -> u64 {
-    var v: u64 = 0
-    var ok: u64 = 0
-    asm("xor edx, edx\nrdseed rax\nsetc dl", out("rax") & v, out("rdx") & ok)
-    if ok == 0 {
-        return 0
-    }
-    return v
-}
-
-fn hardware(state: u64) -> u64 {
-    return kstate.get(state, kstate.RAND_HW)
-}
-
-// --------------------------------------------------------------- ChaCha20
-
-fn rot32(x: u64, n: u64) -> u64 {
-    return ((x << n) | (x >> (32 - n))) & M32
-}
-
-// Die Viertelrunde, auf sechzehn Woertern im Datenbereich. Jede Addition
-// ist `+%` mit Maske: die Chiffre rechnet modulo 2^32, und die gepruefte
-// Addition dieser Sprache wuerde bei der ersten Uebertragung stehen
-// bleiben.
-fn qround(p: u64, ai: u64, bi: u64, ci: u64, di: u64) {
-    var a: u64 = wget(p + ai * 8)
-    var b: u64 = wget(p + bi * 8)
-    var c: u64 = wget(p + ci * 8)
-    var d: u64 = wget(p + di * 8)
-    a = (a +% b) & M32
-    d = rot32(d ^ a, 16)
-    c = (c +% d) & M32
-    b = rot32(b ^ c, 12)
-    a = (a +% b) & M32
-    d = rot32(d ^ a, 8)
-    c = (c +% d) & M32
-    b = rot32(b ^ c, 7)
-    wset(p + ai * 8, a)
-    wset(p + bi * 8, b)
-    wset(p + ci * 8, c)
-    wset(p + di * 8, d)
-}
-
-// Ein Block Schluesselstrom aus Schluessel, Zaehler und Nonce.
-fn make_block(state: u64) {
-    let bs: u64 = base(state)
-    let w: u64 = bs + K_WORK
-    let o: u64 = bs + K_ORIG
-    // "expand 32-byte k" -- die vier Konstanten der Chiffre.
-    wset(w, 0x61707865)
-    wset(w + 8, 0x3320646E)
-    wset(w + 16, 0x79622D32)
-    wset(w + 24, 0x6B206574)
-    var i: u64 = 0
-    while i < 8 {
-        wset(w + (4 + i) * 8, wget(bs + K_KEY + i * 8) & M32)
-        i = i + 1
-    }
-    let ctr: u64 = wget(bs + K_CTR)
-    wset(w + 12 * 8, ctr & M32)
-    wset(w + 13 * 8, wget(bs + K_NONCE) & M32)
-    wset(w + 14 * 8, wget(bs + K_NONCE + 8) & M32)
-    wset(w + 15 * 8, wget(bs + K_NONCE + 16) & M32)
-    i = 0
-    while i < 16 {
-        wset(o + i * 8, wget(w + i * 8))
-        i = i + 1
-    }
-    // Zehn Doppelrunden = zwanzig Runden.
-    var r: u64 = 0
-    while r < 10 {
-        qround(w, 0, 4, 8, 12)
-        qround(w, 1, 5, 9, 13)
-        qround(w, 2, 6, 10, 14)
-        qround(w, 3, 7, 11, 15)
-        qround(w, 0, 5, 10, 15)
-        qround(w, 1, 6, 11, 12)
-        qround(w, 2, 7, 8, 13)
-        qround(w, 3, 4, 9, 14)
-        r = r + 1
-    }
-    // Ausgangszustand dazu, dann als Oktette in der kleinen Reihenfolge.
-    i = 0
-    while i < 16 {
-        let v: u64 = (wget(w + i * 8) +% wget(o + i * 8)) & M32
-        kstate.set8(bs + K_BLOCK + i * 4 + 0, (v & 255) as u8)
-        kstate.set8(bs + K_BLOCK + i * 4 + 1, ((v >> 8) & 255) as u8)
-        kstate.set8(bs + K_BLOCK + i * 4 + 2, ((v >> 16) & 255) as u8)
-        kstate.set8(bs + K_BLOCK + i * 4 + 3, ((v >> 24) & 255) as u8)
-        i = i + 1
-    }
-    wset(bs + K_CTR, (ctr +% 1) & 0xFFFFFFFFFFFFFFFF)
-    wset(bs + K_POS, 0)
-}
-
-// ----------------------------------------------------------- schluesseln
-
-// Aus dem Sammler wird ein Schluessel. Was hineingeht: die acht Woerter
-// des Sammlers, der Zyklenzaehler JETZT (seine niedrigen Bits sind das,
-// was zwischen zwei Laeufen wirklich verschieden ist), die Wandzeit des
-// Starts, die Zahl der bisherigen Ereignisse -- und die Rauschquelle des
-// Prozessors, WO ES SIE GIBT.
-fn seed(state: u64) {
-    let bs: u64 = base(state)
-    var hw: u64 = 0
-    var seedok: bool = false
-    var randok: bool = false
-    if has_rdseed() {
-        seedok = true
-        hw = 1
-    }
-    if has_rdrand() {
-        randok = true
-        hw = 1
-    }
-    kstate.set(state, kstate.RAND_HW, hw)
-    var i: u64 = 0
-    while i < 8 {
-        var v: u64 = wget(bs + K_POOL + i * 8)
-        v = v ^ time.tsc()
-        v = (v +% kstate.get(state, kstate.TIME_BOOT)) *% GOLD
-        v = v ^ (v >> 31)
-        v = v ^ (kstate.get(state, kstate.RAND_STIRS) << (i & 31))
-        if seedok {
-            v = v ^ rdseed64()
-        }
-        if randok {
-            v = v ^ rdrand64()
-        }
-        // Beide Haelften des 64-Bit-Wertes in das 32-Bit-Wort falten --
-        // nichts von der gesammelten Entropie wird weggeworfen.
-        wset(bs + K_KEY + i * 8, (v ^ (v >> 32)) & M32)
-        i = i + 1
-    }
-    wset(bs + K_CTR, 0)
-    wset(bs + K_NONCE, time.tsc() & M32)
-    wset(bs + K_NONCE + 8, (time.tsc() >> 17) & M32)
-    wset(bs + K_NONCE + 16, kstate.get(state, kstate.TIME_BOOT) & M32)
-    // Einmal durchlaufen und den Ausgang als neuen Schluessel nehmen. Das
-    // ist die uebliche "fast key erasure": der Schluessel, aus dem der
-    // erste ausgegebene Block kommt, ist nicht mehr derselbe, aus dem der
-    // Sammler ihn gemacht hat -- wer den Sammler kennt, kennt den Strom
-    // trotzdem nicht.
-    make_block(state)
-    i = 0
-    while i < 8 {
-        var v: u64 = 0
-        var k: u64 = 0
-        while k < 4 {
-            v = v | (kstate.get8(bs + K_BLOCK + i * 4 + k) << (k * 8))
-            k = k + 1
-        }
-        wset(bs + K_KEY + i * 8, v & M32)
-        i = i + 1
-    }
-    wset(bs + K_CTR, 0)
-    wset(bs + K_LEFT, RESEED)
-    make_block(state)
-    if kstate.get(state, kstate.RAND_READY) == 0 {
-        // Die ersten sechzehn Oktette werden aufgehoben, damit der Lauf
-        // sie melden kann. Zwei Laeufe, die dieselben sechzehn Oktette
-        // melden, haetten denselben Zufall -- und das ist die Gegenprobe
-        // "keine Wiederholung ueber Neustarts hinweg".
-        var j: u64 = 0
-        while j < 16 {
-            kstate.set8(bs + K_SEED0 + j, kstate.get8(bs + K_BLOCK + j) as u8)
-            j = j + 1
-        }
-    }
-    kstate.set(state, kstate.RAND_READY, 1)
-}
-
-fn init(state: u64) {
-    let bs: u64 = base(state)
-    var i: u64 = 0
-    while i < 8 {
-        wset(bs + K_POOL + i * 8, 0)
-        i = i + 1
-    }
-    kstate.set(state, kstate.RAND_READY, 0)
-    kstate.set(state, kstate.RAND_STIRS, 0)
-    kstate.set(state, kstate.RAND_BYTES, 0)
-    wset(bs + K_POS, BLOCK)
-    wset(bs + K_LEFT, 0)
+    return atomic.load((&units_cpu) as u64) + atomic.load((&units_jitter) as u64)
+        + atomic.load((&units_seed) as u64) + irq
 }
 
 fn ready(state: u64) -> u64 {
     return kstate.get(state, kstate.RAND_READY)
 }
 
-// Die Gegenprobe von der Kommandozeile aus einschalten.
+fn hardware(state: u64) -> u64 {
+    return kstate.get(state, kstate.RAND_HW)
+}
+
+fn has_rdseed() -> bool {
+    var b: u64 = 0
+    asm("push rbx\nmov eax, 7\nxor ecx, ecx\ncpuid\nmov rax, rbx\npop rbx",
+        out("rax") & b, clobber("rcx"), clobber("rdx"))
+    return (b & CPUID_LEAF7_RDSEED) != 0
+}
+
+fn has_rdrand() -> bool {
+    var c: u64 = 0
+    asm("push rbx\nmov eax, 1\ncpuid\nmov rax, rcx\npop rbx",
+        out("rax") & c, clobber("rcx"), clobber("rdx"))
+    return (c & CPUID_LEAF1_RDRAND) != 0
+}
+
+fn rdrand64(out: u64) -> bool {
+    var v: u64 = 0
+    var ok: u64 = 0
+    asm("xor edx, edx\nrdrand rax\nsetc dl", out("rax") & v, out("rdx") & ok)
+    if ok == 0 {
+        return false
+    }
+    wset(out, v)
+    return true
+}
+
+fn rdseed64(out: u64) -> bool {
+    var v: u64 = 0
+    var ok: u64 = 0
+    asm("xor edx, edx\nrdseed rax\nsetc dl", out("rax") & v, out("rdx") & ok)
+    if ok == 0 {
+        return false
+    }
+    wset(out, v)
+    return true
+}
+
+fn hw_words(use_seed: bool, dst: u64, words: u64) -> u64 {
+    var got: u64 = 0
+    var tries: u64 = 0
+    while got < words && tries < words * HW_RETRIES {
+        var ok: bool = false
+        if use_seed {
+            ok = rdseed64(dst + got * WORD)
+        } else {
+            ok = rdrand64(dst + got * WORD)
+        }
+        if ok {
+            got = got + 1
+        }
+        tries = tries + 1
+    }
+    return got
+}
+
+fn fold_ring(state: u64) {
+    var extra: [u64; 4] = [0; 4]
+    extra[0] = time.tsc()
+    extra[1] = kstate.get(state, kstate.TIME_BOOT)
+    extra[2] = kstate.get(state, kstate.RAND_STIRS)
+    extra[3] = kstate.get(state, kstate.TICKS)
+    pool.pool_mix(&POOL, base(state) + K_RING, (RING_WORDS * WORD) as usize)
+    pool.pool_mix(&POOL, (&extra[0]) as u64, (4 * WORD) as usize)
+}
+
+fn mix_cpu_words(state: u64) {
+    var w: [u64; 2] = [0; 2]
+    if cpu_caps != 0 && hw_words(false, (&w[0]) as u64, 2) == 2 {
+        pool.pool_mix(&POOL, (&w[0]) as u64, (2 * WORD) as usize)
+    }
+    w[0] = 0
+    w[1] = 0
+}
+
+fn reseed_from_pool(state: u64) {
+    var seed32: [u8; 32] = [0; 32]
+    fold_ring(state)
+    mix_cpu_words(state)
+    pool.pool_extract(&POOL, (&seed32[0]) as u64)
+    drbg.drbg_reseed(&DRBG, (&seed32[0]) as u64)
+    var i: usize = 0
+    while i < 32 {
+        seed32[i] = 0
+        i = i + 1
+    }
+    reseeds = reseeds + 1
+}
+
+fn try_ready(state: u64) -> bool {
+    if kstate.get(state, kstate.RAND_READY) != 0 {
+        return true
+    }
+    if units_total() < READY_UNITS {
+        return false
+    }
+    lock_take()
+    if kstate.get(state, kstate.RAND_READY) == 0 {
+        reseed_from_pool(state)
+        drbg.drbg_generate(&DRBG, base(state) + K_REPORT, REPORT_BYTES as usize)
+        ready_tsc = time.tsc()
+        kstate.set(state, kstate.RAND_READY, 1)
+    }
+    lock_give()
+    return true
+}
+
+fn seed_cpu(state: u64) {
+    var w: [u64; 4] = [0; 4]
+    var caps: u64 = 0
+    var units: u64 = 0
+    if has_rdseed() {
+        caps = caps | 2
+    }
+    if has_rdrand() {
+        caps = caps | 1
+    }
+    cpu_caps = caps
+    kstate.set(state, kstate.RAND_HW, 0)
+    if caps != 0 {
+        kstate.set(state, kstate.RAND_HW, 1)
+    }
+    lock_take()
+    if (caps & 2) != 0 && hw_words(true, (&w[0]) as u64, RDSEED_WORDS) == RDSEED_WORDS {
+        pool.pool_mix(&POOL, (&w[0]) as u64, (RDSEED_WORDS * WORD) as usize)
+        units = CPU_SEED_BITS * UNITS_PER_BIT
+    } else if (caps & 1) != 0 && hw_words(false, (&w[0]) as u64, RDRAND_WORDS) == RDRAND_WORDS {
+        pool.pool_mix(&POOL, (&w[0]) as u64, (RDRAND_WORDS * WORD) as usize)
+        units = CPU_RAND_BITS * UNITS_PER_BIT
+    }
+    lock_give()
+    var i: usize = 0
+    while i < 4 {
+        w[i] = 0
+        i = i + 1
+    }
+    if trust_cpu != 0 {
+        atomic.store((&units_cpu) as u64, units)
+    }
+}
+
+fn jitter_batch(samples: u64) {
+    var good: u64 = 0
+    var tainted: bool = false
+    var acc: u64 = time.tsc()
+    var block: [u64; 32] = [0; 32]
+    var fill: u64 = 0
+    var i: u64 = 0
+    lock_take()
+    while i < samples {
+        let t0: u64 = time.tsc()
+        var k: u64 = 0
+        while k < JITTER_WORK {
+            acc = (acc ^ JIT_MEM[((acc >> 7) & JITTER_MEM_MASK) as usize]) *% GOLD
+            JIT_MEM[((acc >> 13) & JITTER_MEM_MASK) as usize] = acc
+            k = k + 1
+        }
+        var delta: u64 = time.tsc() -% t0
+        if jit_mode == JIT_STUCK {
+            delta = JITTER_STUCK_VALUE
+        }
+        block[fill as usize] = delta
+        fill = fill + 1
+        if health.health_feed(&HEALTH_JIT, delta & JITTER_SAMPLE_MASK) {
+            good = good + 1
+        } else {
+            tainted = true
+        }
+        if fill == JITTER_FLUSH_WORDS {
+            pool.pool_mix(&POOL, (&block[0]) as u64, (MIX_BLOCK_BYTES) as usize)
+            fill = 0
+        }
+        i = i + 1
+    }
+    if fill > 0 {
+        pool.pool_mix(&POOL, (&block[0]) as u64, (fill * WORD) as usize)
+    }
+    lock_give()
+    if !tainted {
+        atomic.fetch_add((&units_jitter) as u64, good / JITTER_SAMPLES_PER_UNIT)
+    }
+}
+
+fn configure(state: u64, trust: u64, jitter: u64) {
+    trust_cpu = trust
+    jit_mode = jitter
+}
+
+fn init(state: u64) {
+    let b: u64 = base(state)
+    var i: u64 = 0
+    while i < RING_WORDS {
+        wset(b + K_RING + i * WORD, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < REPORT_BYTES {
+        kstate.set8(b + K_REPORT + i, 0 as u8)
+        i = i + 1
+    }
+    kstate.set(state, kstate.RAND_READY, 0)
+    kstate.set(state, kstate.RAND_STIRS, 0)
+    kstate.set(state, kstate.RAND_BYTES, 0)
+    atomic.store((&units_cpu) as u64, 0)
+    atomic.store((&units_jitter) as u64, 0)
+    atomic.store((&units_seed) as u64, 0)
+    atomic.store((&units_irq) as u64, 0)
+    seed_cpu(state)
+    if jit_mode != JIT_OFF {
+        var batch: u64 = 0
+        while batch < JITTER_INIT_BATCHES && units_total() < READY_UNITS {
+            jitter_batch(JITTER_BATCH)
+            batch = batch + 1
+        }
+    }
+    let _r: bool = try_ready(state)
+}
+
+fn poll(state: u64) {
+    if kstate.get(state, kstate.RAND_READY) != 0 {
+        return
+    }
+    if jit_mode != JIT_OFF {
+        jitter_batch(JITTER_BATCH)
+    }
+    let _r: bool = try_ready(state)
+}
+
+fn settle(state: u64) -> bool {
+    var batch: u64 = 0
+    while batch < SETTLE_BATCHES && kstate.get(state, kstate.RAND_READY) == 0 && jit_mode != JIT_OFF {
+        poll(state)
+        batch = batch + 1
+    }
+    return kstate.get(state, kstate.RAND_READY) != 0
+}
+
+fn seed(state: u64) {
+    poll(state)
+}
+
+fn stir(state: u64, v: u64) {
+    let n: u64 = kstate.add(state, kstate.RAND_STIRS, 1)
+    let p: u64 = base(state) + K_RING + (n % RING_WORDS) * WORD
+    var w: u64 = wget(p)
+    w = (w ^ v) *% GOLD
+    w = w ^ (w >> 29)
+    w = w +% (v << 13)
+    wset(p, w)
+    let sample: u64 = (v -% irq_last) & IRQ_SAMPLE_MASK
+    irq_last = v
+    if health.health_feed(&HEALTH_IRQ, sample) {
+        irq_events = irq_events + 1
+        if irq_events % IRQ_EVENTS_PER_UNIT == 0 {
+            atomic.fetch_add((&units_irq) as u64, 1)
+        }
+    }
+}
+
+fn mix(state: u64, src: u64, n: u64) {
+    lock_take()
+    pool.pool_mix(&POOL, src, (n as usize) as usize)
+    lock_give()
+    kstate.add(state, kstate.RAND_STIRS, 1)
+}
+
+fn credit_seed(state: u64, src: u64, n: u64, bits: u64) {
+    mix(state, src, n)
+    atomic.fetch_add((&units_seed) as u64, bits * UNITS_PER_BIT)
+    let _r: bool = try_ready(state)
+}
+
+fn export_seed(state: u64, dst: u64) -> bool {
+    lock_take()
+    let strong: bool = kstate.get(state, kstate.RAND_READY) != 0 || atomic.load((&units_seed) as u64) != 0
+    if kstate.get(state, kstate.RAND_READY) != 0 {
+        drbg.drbg_generate(&DRBG, dst, SEED_BYTES as usize)
+    } else {
+        pool.pool_extract(&POOL, dst)
+        pool.pool_extract(&POOL, dst + KEY_BYTES)
+    }
+    lock_give()
+    return strong
+}
+
 fn fixed_set(state: u64, v: u64) {
     kstate.set(state, kstate.RAND_FIXED, v)
 }
 
-// Die ersten sechzehn Oktette des ersten Blocks, als Oktett Nummer `i`.
 fn seed_hex(state: u64, i: u64) -> u64 {
-    if i >= 16 {
+    if i >= REPORT_BYTES {
         return 0
     }
-    return kstate.get8(base(state) + K_SEED0 + i)
+    return kstate.get8(base(state) + K_REPORT + i)
 }
 
-// ----------------------------------------------------------- die Ausgabe
-
-// `n` Oktette in einen Puffer DES KERNELS. Der Weg nach Ring 3 geht durch
-// `sys.fi` -- diese Datei kennt keine Adressraeume und soll keine kennen.
 fn bytes(state: u64, dst: u64, n: u64) -> u64 {
-    // DIE GEGENPROBE. Mit `fixedrand` ist jedes Oktett 0x5A. Alles andere
-    // an diesem Kernel bleibt, wie es ist -- nur der Strom ist keiner
-    // mehr, und die statistische Pruefung muss das merken.
     if kstate.get(state, kstate.RAND_FIXED) != 0 {
         var f: u64 = 0
         while f < n {
@@ -354,33 +440,76 @@ fn bytes(state: u64, dst: u64, n: u64) -> u64 {
         return n
     }
     if kstate.get(state, kstate.RAND_READY) == 0 {
-        seed(state)
-    }
-    let bs: u64 = base(state)
-    var i: u64 = 0
-    while i < n {
-        var pos: u64 = wget(bs + K_POS)
-        if pos >= BLOCK {
-            let left: u64 = wget(bs + K_LEFT)
-            if left == 0 {
-                // Neu schluesseln, und vorher noch einmal ruehren: der
-                // Zyklenzaehler jetzt ist wieder etwas, das vorher
-                // niemand wusste.
-                stir(state, time.tsc())
-                seed(state)
-            } else {
-                make_block(state)
-            }
-            pos = wget(bs + K_POS)
+        poll(state)
+        if kstate.get(state, kstate.RAND_READY) == 0 {
+            return 0
         }
-        kstate.set8(dst + i, kstate.get8(bs + K_BLOCK + pos) as u8)
-        wset(bs + K_POS, pos + 1)
-        let left: u64 = wget(bs + K_LEFT)
-        if left > 0 {
-            wset(bs + K_LEFT, left - 1)
-        }
-        i = i + 1
     }
+    lock_take()
+    if DRBG.since_reseed >= RESEED {
+        reseed_from_pool(state)
+    }
+    drbg.drbg_generate(&DRBG, dst, n as usize)
+    lock_give()
     kstate.add(state, kstate.RAND_BYTES, n)
     return n
+}
+
+fn stat(state: u64, which: u64) -> u64 {
+    if which == S_UNITS_CPU {
+        return atomic.load((&units_cpu) as u64)
+    }
+    if which == S_UNITS_JITTER {
+        return atomic.load((&units_jitter) as u64)
+    }
+    if which == S_UNITS_SEED {
+        return atomic.load((&units_seed) as u64)
+    }
+    if which == S_UNITS_IRQ {
+        return atomic.load((&units_irq) as u64)
+    }
+    if which == S_JIT_SAMPLES {
+        return HEALTH_JIT.samples
+    }
+    if which == S_JIT_FAILS {
+        return HEALTH_JIT.failures
+    }
+    if which == S_IRQ_SAMPLES {
+        return HEALTH_IRQ.samples
+    }
+    if which == S_IRQ_FAILS {
+        return HEALTH_IRQ.failures
+    }
+    if which == S_GENERATION {
+        return DRBG.generation
+    }
+    if which == S_RESEEDS {
+        return reseeds
+    }
+    if which == S_CPU_CAPS {
+        return cpu_caps
+    }
+    if which == S_TRUST_CPU {
+        return trust_cpu
+    }
+    if which == S_JIT_MODE {
+        return jit_mode
+    }
+    if which == S_READY_TSC {
+        return ready_tsc
+    }
+    if which == S_MIXED_BYTES {
+        return POOL.mixed
+    }
+    if which == S_BYTES_OUT {
+        return kstate.get(state, kstate.RAND_BYTES)
+    }
+    if which == S_PENDING_BITS {
+        let total: u64 = units_total()
+        if total >= READY_UNITS {
+            return 0
+        }
+        return (READY_UNITS - total) / UNITS_PER_BIT
+    }
+    return 0
 }

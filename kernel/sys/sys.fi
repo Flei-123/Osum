@@ -68,6 +68,8 @@ import sched.clockstate
 import tz.rules
 import ntp.abi
 import sched.rand
+import sched.randwait
+import sched.randseed
 import drv.con.tty
 
 import net.inet
@@ -3361,7 +3363,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_time(state, me, a0)
     }
     if number == SYS_GETRANDOM {
-        return do_getrandom(state, me, a0, a1)
+        return do_getrandom(state, me, a0, a1, a2)
     }
     if number == SYS_OSUM_PTY {
         return do_openpty(state, me, a0)
@@ -9562,10 +9564,18 @@ fn do_time(state: u64, me: u64, out: u64) -> u64 {
 
 // ------------------------------------------------- ROUND K9: der Zufall
 
+const GRND_NONBLOCK: u64 = 1
+const GRND_RANDOM: u64 = 2
+const GRND_INSECURE: u64 = 4
+const GRND_KNOWN: u64 = 7
+
 // `getrandom(buf, len, flags)`. Ueber den Zwischenpuffer des
 // Datenbereichs, so wie jeder andere Weg nach Ring 3 -- der Generator
 // kennt keine Adressraeume und soll keine kennen.
-fn do_getrandom(state: u64, me: u64, buf: u64, want: u64) -> u64 {
+fn do_getrandom(state: u64, me: u64, buf: u64, want: u64, flags: u64) -> u64 {
+    if (flags & GRND_KNOWN) != flags {
+        return neg(errno.E_INVAL)
+    }
     var len: u64 = want
     if len > MAX_IO {
         len = MAX_IO
@@ -9576,8 +9586,13 @@ fn do_getrandom(state: u64, me: u64, buf: u64, want: u64) -> u64 {
     if len == 0 {
         return 0
     }
+    if !randwait.wait_ready(state, (flags & (GRND_NONBLOCK | GRND_INSECURE)) != 0) {
+        return neg(errno.E_AGAIN)
+    }
     let bounce: u64 = blockb(state)
-    rand.bytes(state, bounce, len)
+    if rand.bytes(state, bounce, len) != len {
+        return neg(errno.E_AGAIN)
+    }
     if !copy_out(state, me, buf, bounce, len) {
         return neg(errno.E_FAULT)
     }
@@ -16965,6 +16980,7 @@ fn do_reboot(state: u64, me: u64, cmd: u64) -> u64 {
         return neg(errno.E_NOSYS)
     }
     var s_off: [u8; 20] = "power: init sagt ab\0"
+    let _seed_saved: bool = randseed.save(state)
     // DER BERICHT ZUERST. Nach der naechsten Zeile gibt es die Maschine
     // nicht mehr; was hier nicht steht, steht nirgends.
     perm.report(state)

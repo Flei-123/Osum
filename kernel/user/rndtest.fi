@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.kcall
+
+export { u_start }
+
+const CHUNK: u64 = 4096
+const LINE_BYTES: u64 = 64
+const RESULT_BAD: u64 = 0xFFFFFFFFFFFFF000
+const O_WRITE_ONLY: u64 = 1
+
+static mut A_HEX: [u8; 4] = "hex\0"
+static mut A_WRITE: [u8; 6] = "write\0"
+static mut A_PEEK: [u8; 5] = "peek\0"
+static mut SPACE: [u8; 2] = " \0"
+static mut A_DUMP: [u8; 5] = "dump\0"
+static mut A_BENCH: [u8; 6] = "bench\0"
+static mut M_BENCH: [u8; 11] = "RND bench \0"
+static mut TS: [u8; 16] = [0 as u8; 16]
+static mut A_NONBLOCK: [u8; 9] = "nonblock\0"
+static mut A_BADFLAG: [u8; 8] = "badflag\0"
+static mut P_RANDOM: [u8; 12] = "/dev/random\0"
+static mut M_RET: [u8; 15] = "RND getrandom \0"
+static mut M_LINE: [u8; 5] = "RND \0"
+static mut M_WROTE: [u8; 11] = "RND wrote \0"
+static mut BUF: [u8; 4096] = [0 as u8; 4096]
+static mut LINE: [u8; 140] = [0 as u8; 140]
+
+fn nib(v: u64) -> u64 {
+    if v < 10 {
+        return 48 + v
+    }
+    return 87 + v
+}
+
+fn put_line(from: u64, n: u64) {
+    ulib.say((&M_LINE[0]) as u64)
+    var i: u64 = 0
+    let l: u64 = (&LINE[0]) as u64
+    while i < n {
+        let b: u64 = (*((from + i) as *mut u8)) as u64
+        *((l + i * 2) as *mut u8) = nib(b >> 4) as u8
+        *((l + i * 2 + 1) as *mut u8) = nib(b & 15) as u8
+        i = i + 1
+    }
+    ulib.put(l, n * 2)
+    ulib.nl()
+}
+
+fn cmd_hex(total: u64, flags: u64) -> u64 {
+    var left: u64 = total
+    let b: u64 = (&BUF[0]) as u64
+    while left > 0 {
+        var n: u64 = left
+        if n > CHUNK {
+            n = CHUNK
+        }
+        let r: u64 = kcall.sys3(kcall.SYS_GETRANDOM, b, n, flags)
+        if r > RESULT_BAD {
+            ulib.say((&M_RET[0]) as u64)
+            ulib.sayn(r)
+            ulib.nl()
+            return 1
+        }
+        var at: u64 = 0
+        while at < r {
+            var m: u64 = r - at
+            if m > LINE_BYTES {
+                m = LINE_BYTES
+            }
+            put_line(b + at, m)
+            at = at + m
+        }
+        left = left - r
+    }
+    return 0
+}
+
+fn cmd_peek(flags: u64) -> u64 {
+    let r: u64 = kcall.sys3(kcall.SYS_GETRANDOM, (&BUF[0]) as u64, 16, flags)
+    ulib.say((&M_RET[0]) as u64)
+    ulib.sayn(r)
+    ulib.nl()
+    return 0
+}
+
+fn mono_ns() -> u64 {
+    let t: u64 = (&TS[0]) as u64
+    kcall.sys2(kcall.SYS_CLOCK_GETTIME, 1, t)
+    return (*(t as *mut u64)) * 1000000000 + *((t + 8) as *mut u64)
+}
+
+fn cmd_bench(total: u64) -> u64 {
+    let b: u64 = (&BUF[0]) as u64
+    let t0: u64 = mono_ns()
+    var left: u64 = total
+    while left > 0 {
+        var n: u64 = left
+        if n > CHUNK {
+            n = CHUNK
+        }
+        let r: u64 = kcall.sys3(kcall.SYS_GETRANDOM, b, n, 0)
+        if r > RESULT_BAD || r == 0 {
+            return 1
+        }
+        left = left - r
+    }
+    let t1: u64 = mono_ns()
+    ulib.say((&M_BENCH[0]) as u64)
+    ulib.sayu(total)
+    ulib.put((&SPACE[0]) as u64, 1)
+    ulib.sayu(t1 - t0)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_dump(path: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return 1
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&BUF[0]) as u64, CHUNK)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) {
+        return 1
+    }
+    var at: u64 = 0
+    while at < n {
+        var m: u64 = n - at
+        if m > LINE_BYTES {
+            m = LINE_BYTES
+        }
+        put_line((&BUF[0]) as u64 + at, m)
+        at = at + m
+    }
+    return 0
+}
+
+fn cmd_write() -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_RANDOM[0]) as u64, O_WRITE_ONLY, 0)
+    if ulib.bad(fd) {
+        return 1
+    }
+    var i: u64 = 0
+    while i < 64 {
+        BUF[i as usize] = ((i * 7 + 3) & 255) as u8
+        i = i + 1
+    }
+    let n: u64 = ulib.sys(ulib.SYS_WRITE, fd, (&BUF[0]) as u64, 64)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    ulib.say((&M_WROTE[0]) as u64)
+    ulib.sayn(n)
+    ulib.nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        return 2
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(cmd, (&A_HEX[0]) as u64) {
+        var total: u64 = 1024
+        var flags: u64 = 0
+        if argc > 2 {
+            total = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        if argc > 3 && ulib.streq(ulib.arg_at(args, 3), (&A_NONBLOCK[0]) as u64) {
+            flags = 1
+        }
+        return cmd_hex(total, flags)
+    }
+    if ulib.streq(cmd, (&A_PEEK[0]) as u64) {
+        var flags: u64 = 1
+        if argc > 2 && ulib.streq(ulib.arg_at(args, 2), (&A_BADFLAG[0]) as u64) {
+            flags = 64
+        }
+        return cmd_peek(flags)
+    }
+    if ulib.streq(cmd, (&A_WRITE[0]) as u64) {
+        return cmd_write()
+    }
+    if ulib.streq(cmd, (&A_BENCH[0]) as u64) && argc > 2 {
+        return cmd_bench(ulib.to_num(ulib.arg_at(args, 2)))
+    }
+    if ulib.streq(cmd, (&A_DUMP[0]) as u64) && argc > 2 {
+        return cmd_dump(ulib.arg_at(args, 2))
+    }
+    return 2
+}

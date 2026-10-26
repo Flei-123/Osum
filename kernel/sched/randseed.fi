@@ -1,0 +1,127 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import crypto.blake2s
+import entropy.seedfile
+import fs.fixedfile
+import fs.mnt
+import sched.rand
+
+export { boot, save, status_text, counter, saved }
+
+const ST_UNTOUCHED: u64 = 0
+const ST_NO_FS: u64 = 1
+const ST_ABSENT: u64 = 2
+const ST_LOADED: u64 = 3
+const ST_INVALID: u64 = 4
+const ST_RAM_ROOT: u64 = 5
+const ROOT_MOUNT: u64 = 0
+const NO_DEVICE: u64 = 0
+
+static mut P_FILE: [u8; 17] = "/system/RANDSEED\0"
+static mut KEY_LABEL: [u8; 20] = "osum-randseed-key-v1"
+static mut T_UNTOUCHED: [u8; 10] = "untouched\0"
+static mut T_NO_FS: [u8; 14] = "no-filesystem\0"
+static mut T_ABSENT: [u8; 7] = "absent\0"
+static mut T_LOADED: [u8; 7] = "loaded\0"
+static mut T_INVALID: [u8; 8] = "invalid\0"
+static mut T_RAM: [u8; 31] = "ram-root-not-persistent-no-use\0"
+static mut load_state: u64 = 0
+static mut file_counter: u64 = 0
+static mut was_saved: u64 = 0
+
+fn status_text() -> u64 {
+    if load_state == ST_NO_FS {
+        return (&T_NO_FS[0]) as u64
+    }
+    if load_state == ST_ABSENT {
+        return (&T_ABSENT[0]) as u64
+    }
+    if load_state == ST_LOADED {
+        return (&T_LOADED[0]) as u64
+    }
+    if load_state == ST_INVALID {
+        return (&T_INVALID[0]) as u64
+    }
+    if load_state == ST_RAM_ROOT {
+        return (&T_RAM[0]) as u64
+    }
+    return (&T_UNTOUCHED[0]) as u64
+}
+
+fn counter() -> u64 {
+    return file_counter
+}
+
+fn saved() -> u64 {
+    return was_saved
+}
+
+fn derive_key(out: u64) {
+    let _ok: bool = blake2s.blake2s((&KEY_LABEL[0]) as u64, 20, out)
+}
+
+fn root_is_ram(state: u64) -> bool {
+    return mnt.dev(state, ROOT_MOUNT) == NO_DEVICE
+}
+
+fn save(state: u64) -> bool {
+    if kstate.get(state, kstate.FS_READY) == 0 || root_is_ram(state) {
+        return false
+    }
+    var seed: [u8; 64] = [0 as u8; 64]
+    var key: [u8; 32] = [0 as u8; 32]
+    var file: [u8; 112] = [0 as u8; 112]
+    derive_key((&key[0]) as u64)
+    if !rand.export_seed(state, (&seed[0]) as u64) {
+        return false
+    }
+    file_counter = file_counter + 1
+    let ok: bool = seedfile.seedfile_encode(file_counter, (&seed[0]) as u64, (&key[0]) as u64, (&file[0]) as u64)
+        && fixedfile.write(state, (&P_FILE[0]) as u64, (&file[0]) as u64, seedfile.SEEDFILE_SIZE as u64)
+    var i: u64 = 0
+    while i < 64 {
+        seed[i as usize] = 0
+        i = i + 1
+    }
+    if ok {
+        was_saved = 1
+    }
+    return ok
+}
+
+fn boot(state: u64) {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        load_state = ST_NO_FS
+        return
+    }
+    var seed: [u8; 64] = [0 as u8; 64]
+    var key: [u8; 32] = [0 as u8; 32]
+    var file: [u8; 112] = [0 as u8; 112]
+    var counter_in: u64 = 0
+    derive_key((&key[0]) as u64)
+    let n: u64 = fixedfile.read(state, (&P_FILE[0]) as u64, (&file[0]) as u64, seedfile.SEEDFILE_SIZE as u64)
+    let ram: bool = root_is_ram(state)
+    if n == 0 {
+        load_state = ST_ABSENT
+    } else if !seedfile.seedfile_decode((&file[0]) as u64, n as usize, (&key[0]) as u64,
+        (&seed[0]) as u64, (&counter_in) as u64) {
+        load_state = ST_INVALID
+    } else if ram {
+        rand.mix(state, (&seed[0]) as u64, 64)
+    } else {
+        load_state = ST_LOADED
+        file_counter = counter_in
+        rand.credit_seed(state, (&seed[0]) as u64, 64, rand.SEED_FILE_BITS)
+    }
+    if ram {
+        load_state = ST_RAM_ROOT
+    }
+    var i: u64 = 0
+    while i < 64 {
+        seed[i as usize] = 0
+        i = i + 1
+    }
+    let _s: bool = save(state)
+}
