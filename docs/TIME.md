@@ -126,6 +126,8 @@ Not covered: a `rtc` state clock that is plausible but wrong is judged by the ce
 with the zone (`SETTZ` argument bits 9 and 10, `lib/ntp/abi.fi`); while nobody has set the clock the kernel
 re-reads the chip's raw value in the new convention (`time.set_rtc_utc`). The settings program keeps the line when
 it rewrites the zone. The boot word `rtcutc` still works; the config wins once `sntp boot` has run.
+`rtc_write` reads the chip back after writing and only then reports `rtc_set=1` in `/proc/clock` (a board that ignores the
+write shows `rtc_set=0`).
 
 ### Zones: rules are a table now
 
