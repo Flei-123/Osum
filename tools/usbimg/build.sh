@@ -964,6 +964,7 @@ abstand=3600
 auto=true
 frist=120
 EOFOTA
+    [ "${HP_STICK:-0}" = 1 ] && echo "kanal=dev" >> "$OUT/ota.conf"
 fi
 sagen "ota.conf    quelle=$(grep -a '^quelle=' "$OUT/ota.conf" | head -1 | cut -d= -f2-)"
 
