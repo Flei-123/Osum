@@ -59,7 +59,7 @@ export {
     node_count, heap_bytes, parse_us, prt_ok,
     // RUNDE ACPI-EREIGNISSE: den Namensraum HALTEN statt verwerfen,
     // und einen einzelnen Knoten auswerten.
-    ns_hold, ns_arena, eval_node, eval_node_arg, eval_node_args, ns_bytes
+    ns_hold, ns_arena, hold_err, hold_bad, eval_node, eval_node_arg, eval_node_args, ns_bytes
 }
 
 // ------------------------------------------- die Plaetze in `kdata`
@@ -867,6 +867,26 @@ fn broken_copy(state: u64, t: u64) -> u64 {
     return at
 }
 
+static mut h_err: u64 = 0
+static mut h_bad: u64 = 0
+static mut load_tolerant: u64 = 0
+
+const HOLD_MIN_NODES: u64 = 16
+
+fn hold_tolerable(e: u64) -> bool {
+    return e == amlns.ERR_NODES || e == amlns.ERR_HEAP || e == amlns.ERR_TRUNC
+        || e == amlns.ERR_OPCODE || e == amlns.ERR_TYPE || e == amlns.ERR_NOTFOUND
+        || e == amlns.ERR_ARG || e == amlns.ERR_DEPTH
+}
+
+fn hold_err() -> u64 {
+    return h_err
+}
+
+fn hold_bad() -> u64 {
+    return h_bad
+}
+
 fn load_all(state: u64, loud: bool) {
     var w_dsdt: [u8; 5] = "DSDT\0"
     var w_ssdt: [u8; 5] = "SSDT\0"
@@ -895,9 +915,15 @@ fn load_all(state: u64, loud: bool) {
                 }
                 done = done + 1
                 if amlns.err(state) != amlns.ERR_OK {
-                    // Eine kaputte Tabelle haelt die naechste nicht auf.
-                    // Der erste Fehler bleibt trotzdem stehen.
-                    i = n
+                    if load_tolerant != 0 && hold_tolerable(amlns.err(state)) {
+                        if h_err == 0 {
+                            h_err = amlns.err(state)
+                        }
+                        h_bad = h_bad + 1
+                        amlns.err_clear(state)
+                    } else {
+                        i = n
+                    }
                 }
             }
         }
@@ -1299,8 +1325,12 @@ fn ns_hold(state: u64) -> u64 {
     if run == 0 {
         return 0
     }
+    h_err = 0
+    h_bad = 0
+    load_tolerant = 1
     load_all(state, false)
-    if amlns.err(state) != amlns.ERR_OK {
+    load_tolerant = 0
+    if amlns.err(state) != amlns.ERR_OK || amlns.nodes(state) < HOLD_MIN_NODES {
         arena_put(state, run)
         return 0
     }
