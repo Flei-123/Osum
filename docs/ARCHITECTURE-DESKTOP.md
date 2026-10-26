@@ -98,7 +98,7 @@ Consequences (all tested in a scratch tree):
 
 Target layout (`kernel/user/`):
 ```
-base/      ulib msg nv pw grp sha tools nidx appdir act* image gif jpeg flate inflate unix template instkonto ...   (50 files)
+base/      ulib msg nv pw grp sha tools nidx appdir act* image gif jpeg flate inflate unix template instaccount ...   (50 files)
 toolkit/   wlibc wlib fuib fuiglyph fuiapp fuiscene fuied winopts winfloat backdrop                              (10)
 services/  orientbus odbd settingsd stored social sshd wayd wmd powerd hotkeyd wmplug dhcp sntp svc rpcd init ota opk ...  (38)
 shell/     desktop taskbar launcher glogin login signin lock idlelock barpop traypop calpop taskview notifc qs runbox welcome ... (25)

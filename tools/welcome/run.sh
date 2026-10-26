@@ -40,7 +40,7 @@ done
 grep -q 'privacy welcome[ "]' tools/usbimg/build.sh && ok "usbimg PROGS has welcome" || bad "usbimg PROGS"
 grep -q '/apps/welcome.osp/start' tools/usbimg/build.sh && ok "usbimg PFLICHT has the bundle" || bad "usbimg PFLICHT"
 grep -q 'welcome_start()' kernel/user/desktop.fi && ok "desktop starts the welcome window" || bad "desktop hook"
-grep -q 'welcome.conf' kernel/user/instkonto.fi && ok "installer writes /etc/welcome.conf" || bad "installer hook"
+grep -q 'welcome.conf' kernel/user/instaccount.fi && ok "installer writes /etc/welcome.conf" || bad "installer hook"
 # ---- part A
 mkdir -p "$TMPD/bin"
 PROGS="sh cat echo welcome"
