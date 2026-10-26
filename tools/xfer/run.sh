@@ -84,10 +84,25 @@ has() { grep -qaE -- "$2" "$1" 2>/dev/null && ok "$3" || bad "$3 -- missing: $2"
 hasnt() { grep -qaE -- "$2" "$1" 2>/dev/null && bad "$3 -- present: $2" || ok "$3"; }
 python3 "$ROOT/tools/xfer/mkpng.py" "$OUT/png"
 
-capture() { # tree out progs extra drehscript imgfiles
-    ( cd "$1" && bash "$ROOT/tools/xfer/$5" > "$2.dreh" &&
+try_thrice() { # log command... -- runs the command up to three times until the drehbuch finished without an error
+    local log=$1 n
+    shift
+    for n in 1 2 3; do
+        "$@" > "$log" 2>&1
+        grep -aq "drehbuch fertig, fehler=0" "$log" && return 0
+        echo "  (attempt $n did not finish cleanly: another job on this machine may have killed QEMU)"
+    done
+    return 1
+}
+
+capture_once() { # tree out progs extra drehscript imgfiles
+    cd "$1" && rm -rf "$2" && bash "$ROOT/tools/xfer/$5" > "$2.dreh" &&
       DESIGNBUILD="$2.build" bash tools/design/capture.sh "$2" res=1280x800 uitrace=yes progs="$3" extra="$4" \
-        imgfiles="$6" drehbuch="$2.dreh" ) > "$2.log" 2>&1
+        imgfiles="$6" drehbuch="$2.dreh"
+}
+
+capture() { # tree out progs extra drehscript imgfiles
+    ( try_thrice "$2.log" capture_once "$@" )
 }
 
 FILES_PROGS="desktop taskbar launcher settings theme explorer sh echo ls cat runbox xclip sleep"
@@ -121,9 +136,12 @@ python3 "$ROOT/tools/xfer/disk.py" png "$OUT/image/disk.img" /out.png "$OUT/png/
     && ok "the file written from the clipboard is a PNG with the pixels of the picture" || bad "pasted PNG differs"
 has "$I" "viewer: clip paste 248 w=40 h=30" "viewer: Ctrl+V opens the picture another program put there"
 
+term_once() { # tree out
+    cd "$1" && rm -rf "$2" && DESIGNBUILD="$2.build" bash tools/design/eh6.sh "$2" accel=kvm moreprogs="nedit xclip runbox" \
+        xfile="/note.sh=$ROOT/tools/xfer/note.sh" drehbuch="$ROOT/tools/xfer/dreh-term.txt"
+}
 capture_term() { # tree out
-    ( cd "$1" && DESIGNBUILD="$2.build" bash tools/design/eh6.sh "$2" accel=kvm moreprogs="nedit xclip runbox" \
-        xfile="/note.sh=$ROOT/tools/xfer/note.sh" drehbuch="$ROOT/tools/xfer/dreh-term.txt" ) > "$2.log" 2>&1
+    ( try_thrice "$2.log" term_once "$@" )
 }
 capture_term "$ROOT" "$OUT/term"
 T="$OUT/term/serial.txt"

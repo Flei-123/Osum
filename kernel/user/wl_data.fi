@@ -19,8 +19,8 @@
 //              (3 s limit) and puts it into the OrientOS clipboard (bus clip_set, type text) -- a native program can paste it.
 //   SYS -> WL  every tick the newest clipboard item is read; a new one (sequence number) that this process did not set is a SYS
 //              selection and goes to the focused clients.
-// The system clipboard keeps at most 192 octets inline (kernel/bus/bus.fi INLINE_MAX); a longer WL text reaches other Wayland
-// clients whole (client to client) but is cut at 192 octets in the system clipboard. Text only (T_TEXT).
+// The system clipboard keeps text up to TEXT_MAX (4096) octets through the transfer service (kernel/user/xfer.fi); a longer WL
+// text reaches other Wayland clients whole (client to client) but is cut at TEXT_MAX in the system clipboard. Text only (text/plain).
 //
 // NOTHING BLOCKS: every descriptor is polled with a zero timeout before it is read or written; a client that never answers is
 // dropped after 3 seconds; a client that dies empties the selection it owned (client_gone). drag and drop is NOT built:
@@ -48,12 +48,12 @@ const MS: u64 = 4 // sources per client
 const MM: u64 = 4 // mime types per source
 const ML: u64 = 48 // octets per mime type, with the zero
 const MO: u64 = 4 // offers per client
-const TEXT_MAX: u64 = 192
+const TEXT_MAX: u64 = 4096
+const STRIDE: u64 = 4104
 const XFER_TICKS: u64 = 300 // 3 s
 
 const SEL_NONE: u64 = 0
 const SEL_WL: u64 = 1
-const GET_TEXT: u64 = 0x10000
 const SEL_SYS: u64 = 2
 
 const SYS_LOCK: u64 = 1870
@@ -100,13 +100,13 @@ static mut xi_k: [u64; 4] = [0 as u64; 4]
 static mut xi_gen: [u64; 4] = [0 as u64; 4]
 static mut xi_len: [u64; 4] = [0 as u64; 4]
 static mut xi_t0: [u64; 4] = [0 as u64; 4]
-static mut xi_buf: [u8; 800] = [0 as u8; 800] // 4 * 200
+static mut xi_buf: [u8; 16416] = [0 as u8; 16416]
 // transfers: system clipboard text -> client's pipe
 static mut xo_fd: [u64; 4] = [0 as u64; 4]
 static mut xo_len: [u64; 4] = [0 as u64; 4]
 static mut xo_off: [u64; 4] = [0 as u64; 4]
 static mut xo_t0: [u64; 4] = [0 as u64; 4]
-static mut xo_buf: [u8; 800] = [0 as u8; 800]
+static mut xo_buf: [u8; 16416] = [0 as u8; 16416]
 
 // queues for wayd.fi
 static mut nq_n: u64 = 0
@@ -121,8 +121,7 @@ static mut fm_buf: [u8; 512] = [0 as u8; 512] // 4 * 128
 
 static mut pf: [u64; 1] = [0 as u64; 1]
 static mut pp: [u64; 1] = [0 as u64; 1]
-static mut cl_buf: [u8; 200] = [0 as u8; 200]
-static mut cl_meta: [u64; 6] = [0 as u64; 6]
+static mut cl_buf: [u8; 4104] = [0 as u8; 4104]
 
 static mut n_sets: u64 = 0
 static mut n_receives: u64 = 0
@@ -503,7 +502,7 @@ fn settle_lazy_fetch(len: u64) {
     if wrote > TEXT_MAX {
         wrote = TEXT_MAX
     }
-    bus5(14, (&cl_buf[0 as usize]) as u64, wrote, 0, 0)
+    let _f: u64 = xfer.fill(xfer.SEL_CLIPBOARD, xfer.MIME_TEXT, (&cl_buf[0 as usize]) as u64, wrote)
     n_lazy_fills = n_lazy_fills + 1
     lazy_gen = 0
     lazy_fetch = 0
@@ -656,7 +655,7 @@ fn on_offer(c: u64, id: u64, op: u64, argp: u64, fd: u64) {
         }
         var b: u64 = 0
         while b < sys_len {
-            xo_buf[(x * 200 + b) as usize] = cl_buf[b as usize]
+            xo_buf[(x * STRIDE + b) as usize] = cl_buf[b as usize]
             b = b + 1
         }
         xo_fd[x as usize] = fd
@@ -675,15 +674,15 @@ fn read_sys_text() {
     if bus_ok == 0 || lazy_gen != 0 {
         return
     }
-    let n: u64 = bus5(11, GET_TEXT, (&cl_buf[0 as usize]) as u64, TEXT_MAX, (&cl_meta[0 as usize]) as u64)
-    if ulib.failed(n) || n == 0 || n > TEXT_MAX {
+    var n: u64 = xfer.try_get(xfer.SEL_CLIPBOARD, 0, xfer.MIME_TEXT, (&cl_buf[0 as usize]) as u64, TEXT_MAX)
+    if ulib.failed(n) || n == 0 {
         return
     }
-    if (cl_meta[0 as usize] & 1) == 0 {
-        return // not text
+    if n > TEXT_MAX {
+        n = TEXT_MAX
     }
     sys_len = n
-    sys_seq_now = cl_meta[5 as usize]
+    sys_seq_now = xfer.seq(xfer.SEL_CLIPBOARD, 0)
 }
 
 // Put text from cl_buf (n octets) into the system clipboard.
@@ -691,7 +690,7 @@ fn mirror_out(n: u64) {
     if bus_ok == 0 || n == 0 {
         return
     }
-    let r: u64 = bus5(10, 1, (&cl_buf[0 as usize]) as u64, n, 0)
+    let r: u64 = xfer.set(xfer.SEL_CLIPBOARD, xfer.MIME_TEXT, (&cl_buf[0 as usize]) as u64, n)
     if ulib.failed(r) {
         return
     }
@@ -724,7 +723,7 @@ fn watch_system() {
         return
     }
     sys_seen = sys_seq_now
-    if cl_meta[1 as usize] == own_pid {
+    if xfer.owner(xfer.SEL_CLIPBOARD, 0) == own_pid {
         return
     }
     // a change made by someone else: it is the selection now; a Wayland source that owned it is told
@@ -754,9 +753,9 @@ fn tick() {
                 if xi_len[x as usize] < TEXT_MAX {
                     room = TEXT_MAX - xi_len[x as usize]
                 }
-                var tmp: [u8; 64] = [0 as u8; 64]
-                var want: u64 = 64
-                if room != 0 && room < 64 {
+                var tmp: [u8; 512] = [0 as u8; 512]
+                var want: u64 = 512
+                if room != 0 && room < 512 {
                     want = room
                 }
                 let n: u64 = ulib.sys(0, fd, (&tmp[0 as usize]) as u64, want)
@@ -765,7 +764,7 @@ fn tick() {
                 } else if room != 0 {
                     var b: u64 = 0
                     while b < n {
-                        xi_buf[(x * 200 + xi_len[x as usize] + b) as usize] = tmp[b as usize]
+                        xi_buf[(x * STRIDE + xi_len[x as usize] + b) as usize] = tmp[b as usize]
                         b = b + 1
                     }
                     xi_len[x as usize] = xi_len[x as usize] + n
@@ -786,14 +785,14 @@ fn tick() {
                 if lazy_gen != 0 && xi_gen[x as usize] == lazy_gen {
                     var b3: u64 = 0
                     while b3 < xi_len[x as usize] {
-                        cl_buf[b3 as usize] = xi_buf[(x * 200 + b3) as usize]
+                        cl_buf[b3 as usize] = xi_buf[(x * STRIDE + b3) as usize]
                         b3 = b3 + 1
                     }
                     settle_lazy_fetch(xi_len[x as usize])
                 } else if sel_kind == SEL_WL && sel_gen == xi_gen[x as usize] && xi_len[x as usize] != 0 {
                     var b2: u64 = 0
                     while b2 < xi_len[x as usize] {
-                        cl_buf[b2 as usize] = xi_buf[(x * 200 + b2) as usize]
+                        cl_buf[b2 as usize] = xi_buf[(x * STRIDE + b2) as usize]
                         b2 = b2 + 1
                     }
                     mirror_out(xi_len[x as usize])
@@ -810,7 +809,7 @@ fn tick() {
             } else {
                 if (rev2 & 4) != 0 {
                     let left: u64 = xo_len[x as usize] - xo_off[x as usize]
-                    let n2: u64 = ulib.sys(1, fd2, (&xo_buf[(x * 200 + xo_off[x as usize]) as usize]) as u64, left)
+                    let n2: u64 = ulib.sys(1, fd2, (&xo_buf[(x * STRIDE + xo_off[x as usize]) as usize]) as u64, left)
                     if !ulib.failed(n2) {
                         xo_off[x as usize] = xo_off[x as usize] + n2
                     }

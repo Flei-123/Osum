@@ -15,7 +15,7 @@ export {
     INLINE_MAX, SIZE_MAX, AGAIN,
     available, bus5, stat, is_error, byte_at,
     mime_of, mime_name, mime_index, mime_custom,
-    set, set_text, set_file, get_to_file, offer, fill, get, get_text, get_files, clear, promote,
+    set, set_text, set_file, get_to_file, offer, fill, get, try_get, get_text, get_files, clear, promote,
     count, types, have, length, owner, seq, flags, negotiate,
     provide, unprovide, pump, flush, wanted_sel, wanted_mime, waiting_for,
     drag_start, drag_offer, drag_get, drag_active, drag_types, drag_end,
@@ -390,7 +390,7 @@ fn flush() {
     }
 }
 
-fn get(sel: u64, back: u64, mime: u64, dst: u64, max: u64) -> u64 {
+fn try_get(sel: u64, back: u64, mime: u64, dst: u64, max: u64) -> u64 {
     let tp: u64 = ctz(mime) + 1
     var meta: [u64; 6] = [0 as u64; 6]
     let mp: u64 = (&meta[0 as usize]) as u64
@@ -398,17 +398,9 @@ fn get(sel: u64, back: u64, mime: u64, dst: u64, max: u64) -> u64 {
     if window > INLINE_MAX {
         window = INLINE_MAX
     }
-    var tries: u64 = 0
     var attempts: u64 = 0
     while attempts < 4 {
-        var r: u64 = raw_get(sel, back, tp, dst, window, mp)
-        while r == AGAIN && tries < WAIT_POLLS {
-            if pump() == 0 {
-                sleep_ms(WAIT_MS)
-            }
-            tries = tries + 1
-            r = raw_get(sel, back, tp, dst, window, mp)
-        }
+        let r: u64 = raw_get(sel, back, tp, dst, window, mp)
         if is_error(r) {
             return r
         }
@@ -421,19 +413,29 @@ fn get(sel: u64, back: u64, mime: u64, dst: u64, max: u64) -> u64 {
         if take > max {
             take = max
         }
+        var ok: bool = true
         if take > 0 {
-            let got: u64 = bus5(OP_SEGIO, (seg1 - 1), 0, dst, take)
-            if is_error(got) {
-                attempts = attempts + 1
-                continue
-            }
+            ok = !is_error(bus5(OP_SEGIO, (seg1 - 1), 0, dst, take))
         }
-        if raw_info(sel, back, INFO_SEQ) == meta[5 as usize] {
+        if ok && raw_info(sel, back, INFO_SEQ) == meta[5 as usize] {
             return len
         }
         attempts = attempts + 1
     }
     return AGAIN
+}
+
+fn get(sel: u64, back: u64, mime: u64, dst: u64, max: u64) -> u64 {
+    var r: u64 = try_get(sel, back, mime, dst, max)
+    var tries: u64 = 0
+    while r == AGAIN && tries < WAIT_POLLS {
+        if pump() == 0 {
+            sleep_ms(WAIT_MS)
+        }
+        tries = tries + 1
+        r = try_get(sel, back, mime, dst, max)
+    }
+    return r
 }
 
 fn set_file(sel: u64, mask: u64, path: u64) -> u64 {
