@@ -151,7 +151,8 @@
 import std.io
 import std.rt
 import std.net
-import std.deflate
+import pngfit.png
+import pngfit.fit
 import tls.tls
 import tls.x509
 // RUNDE MERGE-11: der Weg ueber 443 braucht einen Namen, keine Zahl.
@@ -233,6 +234,7 @@ const SI_WIDTH: i64 = 1
 const SI_HEIGHT: i64 = 2
 const SI_ROWBYTES: i64 = 3
 const SI_CHUNKROWS: i64 = 5
+const RESULT_CAP: usize = 2000000
 
 // RUNDE BRUECKE: die eingespeiste Eingabe (kernel/sys.fi, 1843).
 //
@@ -2072,32 +2074,6 @@ fn cert_check(aus: *mut rt.Buf) -> bool {
     return true
 }
 
-// PNG, Farbart 2 (RGB, 8 Bit). Der Datenstrom ist zlib, und den kann
-// `std.deflate` wirklich packen -- die Zahl in `docs/BRIDGE.md` ist
-// gemessen und nicht geschaetzt.
-fn png_chunk(aus: *mut rt.Buf, art: u64, inhalt: u64, n: usize) {
-    var laenge: [u8; 4] = [0; 4]
-    rt.st8((&laenge[0]) as u64, 0, ((n >> 24) & 255) as u8)
-    rt.st8((&laenge[0]) as u64, 1, ((n >> 16) & 255) as u8)
-    rt.st8((&laenge[0]) as u64, 2, ((n >> 8) & 255) as u8)
-    rt.st8((&laenge[0]) as u64, 3, (n & 255) as u8)
-    rt.buf_push_bytes(aus, (&laenge[0]) as u64, 4)
-    var mit: rt.Buf = rt.buf_new()
-    rt.buf_push_bytes(&mit, art, 4)
-    if n > 0 {
-        rt.buf_push_bytes(&mit, inhalt, n)
-    }
-    rt.buf_push_bytes(aus, mit.ptr, mit.len)
-    let c: u32 = deflate.crc32(mit.ptr, mit.len)
-    var cb: [u8; 4] = [0; 4]
-    rt.st8((&cb[0]) as u64, 0, ((c >> 24) & 255 as u32) as u8)
-    rt.st8((&cb[0]) as u64, 1, ((c >> 16) & 255 as u32) as u8)
-    rt.st8((&cb[0]) as u64, 2, ((c >> 8) & 255 as u32) as u8)
-    rt.st8((&cb[0]) as u64, 3, (c & 255 as u32) as u8)
-    rt.buf_push_bytes(aus, (&cb[0]) as u64, 4)
-    rt.buf_free(&mit)
-}
-
 // DAS BILDSCHIRMFOTO UEBER DEN KERN (Runde FEEDBACK, Nummer 1841).
 //
 // Der Weg, den docs/BRIDGE.md als den richtigen bezeichnet und den
@@ -2174,7 +2150,7 @@ fn photo_over_kernel(aus: *mut rt.Buf) -> bool {
         rt.buf_free(&roh)
         return ablehnen(aus, "the kernel returned an incomplete image")
     }
-    let gut: bool = png_bauen(aus, breite, hoehe, &roh)
+    let gut: bool = fit.encode_within(aus, breite, hoehe, &roh, RESULT_CAP)
     rt.buf_free(&roh)
     if !gut {
         return ablehnen(aus, "PNG encoding failed")
@@ -2353,56 +2329,11 @@ fn do_screenshot(aus: *mut rt.Buf) -> bool {
         rt.buf_free(&roh)
         return ablehnen(aus, "cannot read the whole framebuffer")
     }
-    let gut: bool = png_bauen(aus, breite, hoehe, &roh)
+    let gut: bool = fit.encode_within(aus, breite, hoehe, &roh, RESULT_CAP)
     rt.buf_free(&roh)
     if !gut {
         return ablehnen(aus, "PNG encoding failed")
     }
-    return true
-}
-
-// Aus zeilenweise gefilterten RGB-Oktetten ein PNG. `roh` traegt je
-// Zeile ein Filteroktett (0) und danach 3*breite Oktette R,G,B -- genau
-// das, was RFC 2083 fuer Farbart 2 verlangt.
-fn png_bauen(aus: *mut rt.Buf, breite: usize, hoehe: usize,
-    roh: *mut rt.Buf) -> bool {
-    var idat: rt.Buf = rt.buf_new()
-    var pfehl: bool = false
-    let gepackt: usize = deflate.zlib_compress((*roh).ptr, (*roh).len,
-        6 as usize, &idat) catch | e | fail_len(&pfehl)
-    if pfehl {
-        rt.buf_free(&idat)
-        return false
-    }
-    rt.buf_clear(aus)
-    var sig: [u8; 8] = [0; 8]
-    rt.st8((&sig[0]) as u64, 0, 137 as u8)
-    rt.st8((&sig[0]) as u64, 1, 80 as u8)
-    rt.st8((&sig[0]) as u64, 2, 78 as u8)
-    rt.st8((&sig[0]) as u64, 3, 71 as u8)
-    rt.st8((&sig[0]) as u64, 4, 13 as u8)
-    rt.st8((&sig[0]) as u64, 5, 10 as u8)
-    rt.st8((&sig[0]) as u64, 6, 26 as u8)
-    rt.st8((&sig[0]) as u64, 7, 10 as u8)
-    rt.buf_push_bytes(aus, (&sig[0]) as u64, 8)
-    var ihdr: [u8; 13] = [0; 13]
-    rt.st8((&ihdr[0]) as u64, 0, ((breite >> 24) & 255) as u8)
-    rt.st8((&ihdr[0]) as u64, 1, ((breite >> 16) & 255) as u8)
-    rt.st8((&ihdr[0]) as u64, 2, ((breite >> 8) & 255) as u8)
-    rt.st8((&ihdr[0]) as u64, 3, (breite & 255) as u8)
-    rt.st8((&ihdr[0]) as u64, 4, ((hoehe >> 24) & 255) as u8)
-    rt.st8((&ihdr[0]) as u64, 5, ((hoehe >> 16) & 255) as u8)
-    rt.st8((&ihdr[0]) as u64, 6, ((hoehe >> 8) & 255) as u8)
-    rt.st8((&ihdr[0]) as u64, 7, (hoehe & 255) as u8)
-    rt.st8((&ihdr[0]) as u64, 8, 8 as u8) // Bit je Anteil
-    rt.st8((&ihdr[0]) as u64, 9, 2 as u8) // Farbart 2 = RGB
-    var n_ihdr: [u8; 5] = "IHDR\0"
-    var n_idat: [u8; 5] = "IDAT\0"
-    var n_iend: [u8; 5] = "IEND\0"
-    png_chunk(aus, (&n_ihdr[0]) as u64, (&ihdr[0]) as u64, 13 as usize)
-    png_chunk(aus, (&n_idat[0]) as u64, idat.ptr, idat.len)
-    png_chunk(aus, (&n_iend[0]) as u64, 0, 0 as usize)
-    rt.buf_free(&idat)
     return true
 }
 
@@ -2427,7 +2358,7 @@ fn bildprobe() -> i32 {
         y = y + 1
     }
     var aus: rt.Buf = rt.buf_new()
-    let gut: bool = png_bauen(&aus, breite, hoehe, &roh)
+    let gut: bool = png.encode(&aus, breite, hoehe, &roh)
     rt.buf_free(&roh)
     if !gut {
         sag("bild: gescheitert\n")
@@ -2907,6 +2838,9 @@ fn bediene(d: *mut Wire) -> bool {
             gut = do_input(arg1.ptr, arg1.len, &aus)
         } else {
             gut = ablehnen(&aus, "unknown request kind")
+        }
+        if gut && aus.len > RESULT_CAP {
+            gut = ablehnen(&aus, "result larger than the wire limit")
         }
         if gut {
             notiere(artp, artn, "ok", arg1.ptr, arg1.len)

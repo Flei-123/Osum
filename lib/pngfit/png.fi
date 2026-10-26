@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.deflate
+
+export { encode }
+
+const COLOR_RGB: u8 = 2 as u8
+const BIT_DEPTH: u8 = 8 as u8
+
+fn mark_failed(failed: *mut bool) -> usize {
+    *failed = true
+    return 0 as usize
+}
+
+fn put_be32(p: u64, off: usize, v: usize) {
+    rt.st8(p, off, ((v >> 24) & 255) as u8)
+    rt.st8(p, off + 1, ((v >> 16) & 255) as u8)
+    rt.st8(p, off + 2, ((v >> 8) & 255) as u8)
+    rt.st8(p, off + 3, (v & 255) as u8)
+}
+
+fn chunk(out: *mut rt.Buf, kind: u64, body: u64, n: usize) {
+    var len4: [u8; 4] = [0; 4]
+    put_be32((&len4[0]) as u64, 0, n)
+    rt.buf_push_bytes(out, (&len4[0]) as u64, 4)
+    var tagged: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&tagged, kind, 4)
+    if n > 0 {
+        rt.buf_push_bytes(&tagged, body, n)
+    }
+    rt.buf_push_bytes(out, tagged.ptr, tagged.len)
+    let c: u32 = deflate.crc32(tagged.ptr, tagged.len)
+    var crc4: [u8; 4] = [0; 4]
+    put_be32((&crc4[0]) as u64, 0, c as usize)
+    rt.buf_push_bytes(out, (&crc4[0]) as u64, 4)
+    rt.buf_free(&tagged)
+}
+
+fn encode(out: *mut rt.Buf, width: usize, height: usize, raw: *mut rt.Buf) -> bool {
+    var idat: rt.Buf = rt.buf_new()
+    var failed: bool = false
+    let packed: usize = deflate.zlib_compress((*raw).ptr, (*raw).len,
+        6 as usize, &idat) catch | e | mark_failed(&failed)
+    if failed {
+        rt.buf_free(&idat)
+        return false
+    }
+    rt.buf_clear(out)
+    var sig: [u8; 8] = [0; 8]
+    rt.st8((&sig[0]) as u64, 0, 137 as u8)
+    rt.st8((&sig[0]) as u64, 1, 80 as u8)
+    rt.st8((&sig[0]) as u64, 2, 78 as u8)
+    rt.st8((&sig[0]) as u64, 3, 71 as u8)
+    rt.st8((&sig[0]) as u64, 4, 13 as u8)
+    rt.st8((&sig[0]) as u64, 5, 10 as u8)
+    rt.st8((&sig[0]) as u64, 6, 26 as u8)
+    rt.st8((&sig[0]) as u64, 7, 10 as u8)
+    rt.buf_push_bytes(out, (&sig[0]) as u64, 8)
+    var ihdr: [u8; 13] = [0; 13]
+    put_be32((&ihdr[0]) as u64, 0, width)
+    put_be32((&ihdr[0]) as u64, 4, height)
+    rt.st8((&ihdr[0]) as u64, 8, BIT_DEPTH)
+    rt.st8((&ihdr[0]) as u64, 9, COLOR_RGB)
+    var tag_ihdr: [u8; 5] = "IHDR\0"
+    var tag_idat: [u8; 5] = "IDAT\0"
+    var tag_iend: [u8; 5] = "IEND\0"
+    chunk(out, (&tag_ihdr[0]) as u64, (&ihdr[0]) as u64, 13 as usize)
+    chunk(out, (&tag_idat[0]) as u64, idat.ptr, idat.len)
+    chunk(out, (&tag_iend[0]) as u64, 0, 0 as usize)
+    rt.buf_free(&idat)
+    return true
+}
