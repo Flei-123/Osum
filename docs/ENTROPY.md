@@ -22,8 +22,13 @@
 - `/proc/random` (`randview.fi`): state, credited bits and bits per source, the CPU flags, jitter mode/samples/failures, interrupt samples/failures, pool octets, generator generation and reseeds, octets issued, seed file state and counter. The boot log (word `unix`) prints the same in one `rand:` line.
 - `rndtest` (user program): `hex N [nonblock]`, `peek [badflag]`, `write`, `dump <file>` for the gates.
 
-### Measured (see `tools/entropy/kernel.sh`)
-Numbers are in the commit message of the merge; the gate checks: 1 MiB statistics (chi-square, monobit, runs, serial correlation, entropy, repeated blocks) on Haswell (RDRAND), Broadwell (RDSEED) and qemu64 (jitter only); the battery rejects five bad streams; two boots differ; no source -> `-EAGAIN` and not-initialised; stuck jitter earns no credit; `randnotrustcpu`; `fixedrand` rejected; /dev/random write earns no credit; seed file absent/loaded/replaced/damaged; RAM root.
+### Measured (QEMU/KVM, AMD EPYC host, `tools/entropy/kernel.sh`: 53 passed, 0 failed)
+- 1 MiB from the running kernel passes chi-square, monobit, runs, serial correlation, entropy (> 7.999 bit/octet) and the repeated-block check on Haswell (RDRAND), Broadwell (RDSEED) and qemu64 (no CPU generator: the jitter alone). The same battery rejects five synthetic bad streams and the `fixedrand` stream.
+- Time from the clock start to "initialised": Broadwell 0.16 ms (RDSEED credits 256 bits at once), Haswell about 10 ms (60 ms in one earlier run; RDRAND 128 bits + 4096 jitter samples), qemu64 about 26 ms (8192 jitter samples).
+- `getrandom` throughput for 4 MiB in 4096 octet requests: 11-13 MB/s now, 7 MB/s before (old collector + in-kstate ChaCha20). 36 further 1 MiB runs on three CPU models all ended cleanly; one earlier run of the gate saw QEMU stop mid-output with exit code 0 and was not reproduced.
+- Counter-proofs: no source -> `-EAGAIN`, `not-initialised`, no output bytes; stuck jitter -> health failures counted (478..3830 per boot), no credit; `randnotrustcpu` -> 0 CPU bits; /dev/random write -> no credit; unknown flags -> `-EINVAL`.
+- Seed file: absent -> written; loaded with 128 bits; replaced at every boot (three different files in three boots); damaged -> refused; RAM root -> `ram-root-not-persistent-no-use`, nothing written.
+- No regression: `tools/unix/run.sh` 106 passed / 1 failed (the same failure as on the old main: signal 64), `tools/krypto/run.sh` 60/1 (same as old main: `check-ui.sh`), `tools/tunnel/run.sh` 16/0 on the second run (the first run lost one ping under load).
 
 ### Honest limits
 - Credit values are policy, not proof. The jitter harvester's 1 bit per 32 samples is a conservative assumption, not a measured min-entropy; under emulation the TSC may be coarser than on real hardware (the health tests are the guard).
