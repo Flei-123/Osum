@@ -23,6 +23,8 @@
 #   ==INV1==     anna sees OrientOS's invite and says yes; then she invites
 #                justin into Counter-Strike 2
 import base64, hashlib, hmac, json, os, re, subprocess, sys, time, urllib.request
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import marke
 
 def b64(b): return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
 
@@ -104,12 +106,12 @@ def watch(port, secret, serial, out):
             done.add("c1")
             p = justin_seen_by_anna(port, t)
             say(p.get("praesenz") == "dnd" and p.get("status_text") == "Im Spiel",
-                f"anna sees justin 'do not disturb' with 'Im Spiel' (set on OrientOS): {p.get('praesenz')!r} {p.get('status_text')!r}")
+                f"anna sees justin 'do not disturb' with 'Im Spiel' (set on {marke.PRODUKT}): {p.get('praesenz')!r} {p.get('status_text')!r}")
             say((p.get("aktivitaet") or {}).get("name") == "Counter-Strike 2",
-                f"anna sees what the game on OrientOS said it plays: {(p.get('aktivitaet') or {}).get('name')!r}")
+                f"anna sees what the game on {marke.PRODUKT} said it plays: {(p.get('aktivitaet') or {}).get('name')!r}")
             st, j = api(port, t["justin"], "/api/kontakte/liste")
             rel = {i.get("konto"): i.get("status") for i in j.get("items", [])}
-            say(rel.get("u_CARLA") == "freunde", f"carla is justin's friend in the book (accepted on OrientOS): {rel.get('u_CARLA')!r}")
+            say(rel.get("u_CARLA") == "freunde", f"carla is justin's friend in the book (accepted on {marke.PRODUKT}): {rel.get('u_CARLA')!r}")
             say(rel.get("u_DORA") in (None, "", "keiner"), f"the request to dora is withdrawn: {rel.get('u_DORA')!r}")
         if "==BERTON==" in s and "b" not in done:
             done.add("b")
@@ -119,14 +121,14 @@ def watch(port, secret, serial, out):
             done.add("c2")
             p = justin_seen_by_anna(port, t)
             say(p.get("praesenz") == "offline" and not p.get("aktivitaet"),
-                f"justin went invisible on OrientOS: anna sees offline and no game: {p.get('praesenz')!r} {p.get('aktivitaet')!r}")
+                f"justin went invisible on {marke.PRODUKT}: anna sees offline and no game: {p.get('praesenz')!r} {p.get('aktivitaet')!r}")
         rp = os.environ.get("SOCIAL_RELAY_PORT", "")
         aid = os.environ.get("SOCIAL_ANNA_ID", "")
         if "==PAIR==" in s and "pair" not in done:
             m = re.search(r"==PAIR==.*?\ncode=(\d{4} \d{4})", s, re.S)
             if m:
                 done.add("pair")
-                st, j = api(port, t["justin"], "/api/kontakte/koppeln", {"code": m.group(1), "label": "OrientOS"})
+                st, j = api(port, t["justin"], "/api/kontakte/koppeln", {"code": m.group(1), "label": marke.PRODUKT})
                 say(st == 200, f"justin typed the guest's code into his profile: {st}")
         if "==KEY==" in s and "key" not in done:
             m = re.search(r"==KEY==.*?\n([0-9a-f]{128})\s*\n", s, re.S)
@@ -136,9 +138,9 @@ def watch(port, secret, serial, out):
         if "==MSG1==" in s and "msg" not in done and "key" in done:
             done.add("msg")
             rc, out = fc("recv", rp, aid)
-            say("Hallo Anna, aus OrientOS" in out, f"anna's FirnChat client reads what OrientOS wrote: {out.strip()[-120:]!r}")
+            say("Hallo Anna, vom Gast" in out, f"anna's FirnChat client reads what {marke.PRODUKT} wrote: {out.strip()[-120:]!r}")
             rc2, out2 = fc("send", keypub, "Servus Justin, hier Anna", rp, aid)
-            say(rc2 == 0, f"anna answers from her client to the OrientOS device: rc={rc2} {out2.strip()[-80:]!r}")
+            say(rc2 == 0, f"anna answers from her client to the {marke.PRODUKT} device: rc={rc2} {out2.strip()[-80:]!r}")
         if "==INV1==" in s and "inv" not in done:
             done.add("inv")
             st, j = api(port, t["anna"], "/api/kontakte/einladungen")
@@ -168,7 +170,7 @@ def watch(port, secret, serial, out):
                     seen_at = time.time() - t_send
                     break
                 time.sleep(0.1)
-            say(seen_at is not None and seen_at < 5, f"the push reached OrientOS in {seen_at if seen_at is None else round(seen_at, 1)} s (poll is off)")
+            say(seen_at is not None and seen_at < 5, f"the push reached {marke.PRODUKT} in {seen_at if seen_at is None else round(seen_at, 1)} s (poll is off)")
         if "==FERTIG==" in s or ("inv" in done and "c2" in done and "push" in done):
             break
         time.sleep(0.2)

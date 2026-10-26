@@ -117,7 +117,7 @@ def font_aus_firn(pfad):
 
 
 def font_aus_rust(pfad):
-    """Die Glyphentabelle aus OrientOS' kernel/src/drivers/font.rs."""
+    """Die Glyphentabelle aus kernel/src/drivers/font.rs des alten Rust-Kerns."""
     quelle = open(pfad, "r", encoding="utf-8").read()
     zeilen = re.findall(r"\[((?:0x[0-9a-fA-F]{2},\s*){15}0x[0-9a-fA-F]{2})\]",
                         quelle)

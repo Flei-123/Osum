@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/dual/fremdplatte.sh -- EINE PLATTE, AUF DER SCHON JEMAND WOHNT.
 #
@@ -172,7 +173,7 @@ FREI_MIB=$(( (FREI_ENDE - FREI_START + 1) / 2048 ))
 
 echo "   ESP       Sektor $ESP_START..$ESP_ENDE   ($ESP_MIB MiB)"
 echo "   Daten     Sektor $DATEN_START..$DATEN_ENDE   ($DATEN_MIB MiB)"
-echo "   FREI      Sektor $FREI_START..$FREI_ENDE   ($FREI_MIB MiB)  <- hier soll OrientOS hin"
+echo "   FREI      Sektor $FREI_START..$FREI_ENDE   ($FREI_MIB MiB)  <- hier soll ${MARKE_PRODUKT} hin"
 echo "   Summen    $SUMMEN"
 sed 's/^/     /' "$SUMMEN"
 exit 0

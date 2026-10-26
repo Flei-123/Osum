@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/suspend/run.sh -- DIE ABNAHME DER RUNDE SUSPEND (K-018).
 #
@@ -365,8 +366,8 @@ fi
 # entsteht, UND ihre Groesse.
 mkdir -p "$TMPD/usb"
 if bash tools/usbimg/build.sh "$TMPD/usb" > "$TMPD/usb.txt" 2>&1 \
-   && [ -f "$TMPD/usb/orientos-usb.img" ]; then
-    USZ=$(stat -c%s "$TMPD/usb/orientos-usb.img")
+   && [ -f "$TMPD/usb/${MARKE_DATEI}-usb.img" ]; then
+    USZ=$(stat -c%s "$TMPD/usb/${MARKE_DATEI}-usb.img")
     if [ "$USZ" -gt $((4 * 1024 * 1024)) ]; then
         ok "tools/usbimg/build.sh baut das Abbild ($USZ Oktette)"
     else

@@ -276,7 +276,7 @@ static void sysclip_get(const char *tag, int wait)
 static void kb_key(void *d, struct wl_keyboard *k, uint32_t s, uint32_t t, uint32_t key, uint32_t st)
 {
     say("key serial=%u key=%u state=%u", s, key, st);
-    if (st == 1 && key == 67) { /* F9: a NATIVE copy: the OrientOS clipboard is set by this process through the bus system call */
+    if (st == 1 && key == 67) { /* F9: a NATIVE copy: the system clipboard is set by this process through the bus system call */
         const char *txt = "native-says-hi";
         long r = syscall(SYS_OSUM_BUS, 10, 1, txt, (long)strlen(txt), 0, 0);
         say("native clip_set r=%ld", r);

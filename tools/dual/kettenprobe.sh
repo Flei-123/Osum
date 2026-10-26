@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/dual/kettenprobe.sh -- STARTET DER ZWEITE EINTRAG WIRKLICH DAS
 # FREMDE SYSTEM?
@@ -106,9 +107,9 @@ else
 fi
 # Gegenprobe: OrientOS darf NICHT gestartet sein.
 if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qa 'desk: start'; then
-    bad "es hat OrientOS gestartet statt des fremden Systems"
+    bad "es hat ${MARKE_PRODUKT} gestartet statt des fremden Systems"
 else
-    ok "OrientOS wurde NICHT gestartet -- es war wirklich der zweite Eintrag"
+    ok "${MARKE_PRODUKT} wurde NICHT gestartet -- es war wirklich der zweite Eintrag"
 fi
 
 printf '\n=======================================================\n'

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/usbhid/desktop.sh -- OHCI tablet on the REAL desktop (stick image, QEMU pci-ohci + usb-tablet). The QEMU cases of run.sh use the
 # ehcitest window, which has its own loop; VirtualBox's default tablet sat on the OHCI and the desktop (window server loop) never polled
@@ -17,12 +18,12 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 SETTLE=${SETTLE:-8}
 if [ -n "${IMG:-}" ]; then
     IMAGE=$IMG
-elif [ -n "${STICK_DIR:-}" ] && [ -f "$STICK_DIR/orientos-usb.img" ]; then
-    IMAGE=$STICK_DIR/orientos-usb.img
+elif [ -n "${STICK_DIR:-}" ] && [ -f "$STICK_DIR/${MARKE_DATEI}-usb.img" ]; then
+    IMAGE=$STICK_DIR/"${MARKE_DATEI}-usb".img
 else
     mkdir -p "$T/build"
     PARTTAB=mbr bash tools/usbimg/build.sh "$T/build" >"$T/build.log" 2>&1 || { echo "stick build failed"; tail -15 "$T/build.log"; exit 1; }
-    IMAGE=$T/build/orientos-usb.img
+    IMAGE=$T/build/"${MARKE_DATEI}-usb".img
 fi
 KVM=(-accel tcg)
 [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)

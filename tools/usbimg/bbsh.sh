@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/usbimg/bbsh.sh -- LC-006 gate: busybox is /bin/sh in the personal image, so musl system()/popen() work.
 #   /root/jarvis/bin/heavy bash tools/usbimg/bbsh.sh
@@ -51,8 +52,8 @@ CMDS=("/bin/sh -c 'echo AB'" "/bin/sh -c 'exit 7'; echo rc7" "/bin/t_proc" "echo
 run() {  # $1 = BBSH value, $2 = dir
     mkdir -p "$2"
     BBSH=$1 USBIMG_EXTRA="/bin/t_proc=$D/t_proc${3:-}" IMAGE_PROFILE=personal bash tools/usbimg/build.sh "$2" > "$2/build.log" 2>&1 || { bad "image build BBSH=$1 failed (see $2/build.log)"; tail -5 "$2/build.log"; return 1; }
-    python3 -I "$D/boot.py" "$2/orientos-usb.img" "$2" "${CMDS[@]}" > "$2/boot.log" 2>&1
-    rm -f "$2/orientos-usb.img" "$2/osum-usb.img" "$2/root.img"
+    python3 -I "$D/boot.py" "$2/${MARKE_DATEI}-usb.img" "$2" "${CMDS[@]}" > "$2/boot.log" 2>&1
+    rm -f "$2/${MARKE_DATEI}-usb.img" "$2/osum-usb.img" "$2/root.img"
 }
 echo "== 1. BBSH=1: busybox is /bin/sh =="
 run 1 "$D/on" && {

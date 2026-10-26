@@ -88,7 +88,7 @@ fi
 # Pruefsumme nicht stimmt, will man SEHEN koennen, an welcher Stelle --
 # und ein Muster aus `seq` laesst sich lesen.
 echo "bild: den Baum bauen ..."
-printf 'hallo aus orientos\n' > "$BAUM/hallo.txt"
+printf 'hallo aus dem Gast\n' > "$BAUM/hallo.txt"
 : > "$BAUM/leer.bin"
 # GENAU DIE ZAHL VON OKTETTEN, DIE DASTEHT. `seq ... | head -c N` gibt
 # WENIGER als N, sobald der Zahlenvorrat vorher endet -- gemessen:

@@ -84,7 +84,7 @@ if idx and idu:
 ok(any(re.match(r"Wheel lines=3$", l) for l in seg("wheel-up")), "toolbar 'Rad hoch' -> Wheel lines=3")
 ok(any(re.match(r"Wheel lines=-3$", l) for l in seg("wheel-down")), "toolbar 'Rad runter' -> Wheel lines=-3")
 hw = [l for l in seg("wheel-hw") if l.startswith("Wheel")]
-info("hardware wheel (QEMU mouse_move dz) reaches the host: %s %s" % ("yes" if hw else "NO -- OrientOS gives the wheel to no app (ps2m sums it, no event)", hw[:2]))
+info("hardware wheel (QEMU mouse_move dz) reaches the host: %s %s" % ("yes" if hw else "NO -- Osum gives the wheel to no app (ps2m sums it, no event)", hw[:2]))
 
 print("== scaling (window size) ==")
 views = re.findall(r"fvviewer: rect name=view x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)", ser)

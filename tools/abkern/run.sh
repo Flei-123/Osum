@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/abkern/run.sh -- r104: KERNEL A/B, option 2 (docs/AB-KERNEL.md).
 #
@@ -46,13 +47,13 @@ conf_write() { # file script mode
         [ "$3" = two ] && echo "default_entry: 2"
         echo "verbose: yes"
         echo
-        echo "/OrientOS A"
+        echo "/${MARKE_PRODUKT} A"
         echo "    protocol: multiboot1"
         echo "    path: boot():/osum.mb"
         echo "    cmdline: $cl"
         if [ "$3" = two ]; then
             echo
-            echo "/OrientOS B"
+            echo "/${MARKE_PRODUKT} B"
             echo "    protocol: multiboot1"
             echo "    path: boot():/osum.mb"
             echo "    cmdline: $cl"

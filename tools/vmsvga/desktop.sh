@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/vmsvga/desktop.sh -- VMSVGA driver on the REAL desktop (stick image, Limine, -smp 4, -vga vmware), 16.10.2026.
 #
@@ -21,12 +22,12 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 chk() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 ROUNDS=${ROUNDS:-6}
 
-if [ -n "${STICK_DIR:-}" ] && [ -f "$STICK_DIR/orientos-usb.img" ]; then
-    IMG=$STICK_DIR/orientos-usb.img
+if [ -n "${STICK_DIR:-}" ] && [ -f "$STICK_DIR/${MARKE_DATEI}-usb.img" ]; then
+    IMG=$STICK_DIR/"${MARKE_DATEI}-usb".img
 else
     mkdir -p "$T/build"
     PARTTAB=mbr bash tools/usbimg/build.sh "$T/build" >"$T/build.log" 2>&1 || { echo "stick build failed"; tail -15 "$T/build.log"; exit 1; }
-    IMG=$T/build/orientos-usb.img
+    IMG=$T/build/"${MARKE_DATEI}-usb".img
 fi
 
 KVM=(-accel tcg)

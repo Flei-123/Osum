@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/operation/store.sh -- RUNDE MERGE-5: DIE UPDATE-KETTE GEGEN EINEN
 # ECHTEN, OEFFENTLICH ERREICHBAREN AUSLIEFERUNGSPLATZ.
@@ -176,7 +177,7 @@ if [ -d "$STORE_REPO/bau/repo" ]; then
     # umschreiben. Dann wird nur nachgesehen, dass sie WIRKLICH dasteht.
     ( cd "$STORE_REPO" && python3 werkzeug/store --repo bau/repo add \
         "$OUT/pak/hallo-2.opk" \
-        --beschreibung "Beispielpaket der Runde MERGE-5 (OrientOS/Osum)." \
+        --beschreibung "Beispielpaket der Runde MERGE-5 (${MARKE_PRODUKT}/Osum)." \
         >> "$OUT/store.log" 2>&1 ) && NEUZUGANG=1 || NEUZUGANG=0
     ( cd "$STORE_REPO" && python3 werkzeug/store --repo bau/repo publish \
         "$STORE_DIR" >> "$OUT/store.log" 2>&1 ) \

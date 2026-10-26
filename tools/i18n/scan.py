@@ -46,6 +46,8 @@
 import os
 import re
 import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import marke
 
 # Woerter, die in diesem Baum wirklich als Oberflaechentext standen.
 WOERTER = [
@@ -173,7 +175,7 @@ def erlaubt(text):
     # im KERN, und der Kern hat keinen Katalog: sein Text ist fest und
     # deutsch (J/N sind die Tasten). Er steht hier BEWUSST, nicht aus
     # Versehen.
-    if t.startswith("OrientOS - Bestaetigung"):
+    if t.startswith(marke.PRODUKT + " - Bestaetigung"):
         return True
     # "modus=", "offset=", " x=", " fg=" -- ein Schluessel oder ein Feld.
     if re.match(r"^[ ]?[a-z0-9_]+=", t):

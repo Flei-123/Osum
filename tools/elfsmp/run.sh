@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/elfsmp/run.sh -- r334: THE ELF LOADER IS SMP-SAFE.
 #
@@ -33,7 +34,7 @@ if UITRACE=1 PARTTAB=mbr bash tools/usbimg/build.sh "$TMPD/b" > "$TMPD/build.log
 else
     tail -15 "$TMPD/build.log"; bad "the build failed"; echo "ELFSMP: $pass passed, $fail failed"; exit 1
 fi
-IMG="$TMPD/b/orientos-usb.img"
+IMG="$TMPD/b/${MARKE_DATEI}-usb.img"
 KVM=(-accel tcg)
 [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 

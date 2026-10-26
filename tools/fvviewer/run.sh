@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/fvviewer/run.sh -- FreeViewer viewer libs (M1 part): host gate.
 #   1. lib/net/ws.fi against Python `websockets` (normal + 1-octet reads)
@@ -106,7 +107,7 @@ else
     echo "  SKIP  app run against the Rust test host: need FV_BIN ($FVBIN), node, a built app. Nothing is claimed."
 fi
 if [ -x "$FVBIN" ] && command -v qemu-system-x86_64 >/dev/null && command -v node >/dev/null && [ "${FVV_QEMU:-1}" = 1 ]; then
-    echo "  == app inside OrientOS (QEMU, test host on 10.0.2.2) =="
+    echo "  == app inside ${MARKE_PRODUKT} (QEMU, test host on 10.0.2.2) =="
     HWNET_PROGS="sh ls cat echo dhcp" bash tools/hwnet/build.sh "$D/s0" 0 > "$D/b0.txt" 2>&1 && ok "kernel + userland built" \
         || { bad "kernel/userland build"; tail -5 "$D/b0.txt"; }
     if vendor/firn/bin/firnc -c --profile=app -o "$D/fvv.o" kernel/user/fvviewer.fi > "$D/fvv2.err" 2>&1 \
@@ -125,11 +126,11 @@ if [ -x "$FVBIN" ] && command -v qemu-system-x86_64 >/dev/null && command -v nod
             -drive "file=$D/disk.img,format=raw,if=ide,index=0" -netdev user,id=n0 -device e1000,netdev=n0 \
             -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
         grep -a -E '^\s+(ok|FAIL)|FVV:|code' "$D/vm.txt" | head -14 | sed 's/^/        /'
-        grep -aq "FVV: .* 0 FAIL" "$D/vm.txt" && ok "OrientOS: password mode, all checks (Argon2id 19 MiB, JPEG, tiles, ping, click)" \
-            || bad "OrientOS: fvviewer -t failed -- serial tail: $(tail -c 300 "$D/vm.txt" | tr '\n' ' ')"
+        grep -aq "FVV: .* 0 FAIL" "$D/vm.txt" && ok "${MARKE_PRODUKT}: password mode, all checks (Argon2id 19 MiB, JPEG, tiles, ping, click)" \
+            || bad "${MARKE_PRODUKT}: fvviewer -t failed -- serial tail: $(tail -c 300 "$D/vm.txt" | tr '\n' ' ')"
         sleep 1
-        grep -q "TESTHOST input: MouseButton button=0 down=true" "$D/th.log" && ok "OrientOS: the test host logged the click from the guest" \
-            || bad "OrientOS: no click in the test host log"
+        grep -q "TESTHOST input: MouseButton button=0 down=true" "$D/th.log" && ok "${MARKE_PRODUKT}: the test host logged the click from the guest" \
+            || bad "${MARKE_PRODUKT}: no click in the test host log"
         stop_th
     fi
 else

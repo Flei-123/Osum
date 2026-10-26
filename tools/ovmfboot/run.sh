@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # OVMF stick boot gate (HP-12 / HP-4, r1521): the stick must boot to the login screen under UEFI
 # (OVMF, q35 and i440fx, usb-storage like the real HP), the ACPI scan must find the RSDP, and
 # there must be no exception. Counter-proofs: word `acpiold` (old scan) must crash with
@@ -30,7 +31,7 @@ if [ -n "${STICK_IMG:-}" ]; then
     cp "$STICK_IMG" "$D/stick.img"
 else
     bash tools/usbimg/build.sh "$D/build" > "$D/build.txt" 2>&1 || { tail -5 "$D/build.txt"; echo "OVMFBOOT: stick build failed"; exit 1; }
-    mv "$D/build/orientos-usb.img" "$D/stick.img"
+    mv "$D/build/${MARKE_DATEI}-usb.img" "$D/stick.img"
 fi
 if [ -n "${KERNEL:-}" ]; then cp "$KERNEL" "$D/osum.mb"; else
     bash tools/build-kernel.sh "$D/osum.mb" --stufe 0 > "$D/kb.txt" 2>&1 || { tail -5 "$D/kb.txt"; echo "OVMFBOOT: kernel build failed"; exit 1; }

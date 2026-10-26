@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -60,9 +61,9 @@ run "$OUT/pristine.img" "$OUT/v.txt" "reuse" '^installer: view esp=' 300
 rows=$(field "$OUT/v.txt" rows); re=$(field "$OUT/v.txt" reuse); beside=$(field "$OUT/v.txt" beside); art=$(field "$OUT/v.txt" art)
 printf '        rows=%s reuse=%s beside=%s\n        art=%s\n' "$rows" "$re" "$beside" "$art"
 [ "$rows" = 5 ] && ok "5 partitions listed" || bad "rows=$rows"
-[ "$re" = 1 ] && ok "reinstall enabled with OrientOS row selected" || bad "reuse=$re"
+[ "$re" = 1 ] && ok "reinstall enabled with ${MARKE_PRODUKT} row selected" || bad "reuse=$re"
 [ "$beside" = 0 ] && ok "beside stays disabled (gap below 32 MiB)" || bad "beside=$beside"
-case "$art" in *"OrientOS"*) ok "type column names OrientOS" ;; *) bad "art=$art" ;; esac
+case "$art" in *"${MARKE_PRODUKT}"*) ok "type column names ${MARKE_PRODUKT}" ;; *) bad "art=$art" ;; esac
 [ "$(sha256sum < "$OUT/pristine.img" | cut -d' ' -f1)" = "$sum0" ] && ok "disk byte-identical after viewing" || bad "view wrote to the disk"
 
 echo "== 3. reinstall over #5 =="
@@ -99,7 +100,7 @@ sgdisk -v "$OUT/del.img" 2>&1 | grep -q 'No problems found' && ok "sgdisk -v cle
 
 echo "== 5. counter-proof: OSUM leftover below 32 MiB is refused =="
 mkdir -p "$OUT/s"
-bash tools/gptview/mkhp.sh "$OUT/s" 0 8 && ok "disk with 8 MiB OrientOS leftover" || bad "small disk"
+bash tools/gptview/mkhp.sh "$OUT/s" 0 8 && ok "disk with 8 MiB ${MARKE_PRODUKT} leftover" || bad "small disk"
 ss=$(sha256sum < "$OUT/s/disk.img" | cut -d' ' -f1)
 run "$OUT/s/disk.img" "$OUT/n.txt" "reuse,now" '^installer: \(BESIDE_NO\|done\|ERROR\)' 120
 tr -d '\000' < "$OUT/n.txt" | grep -aq '^installer: BESIDE_NO' && ok "install refused" || bad "install not refused"

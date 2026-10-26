@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Check one BENCHJSON payload (schema 1) printed by `bench --json` inside OrientOS.
+"""Check one BENCHJSON payload (schema 1) printed by `bench --json` inside Osum.
 
 usage: check_inos.py <file-with-json> [--show] [--allow-unknown-commit] [--require-cores]
 (--allow-unknown-commit: the fast gate image has no build stamp, /proc/version carries no hash)

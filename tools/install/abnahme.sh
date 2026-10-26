@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/install/abnahme.sh -- DIE KETTE, DIE P-001 WIRKLICH ABNIMMT.
 #
@@ -377,7 +378,7 @@ platte_lauf() { # <name> <skript> <limit>
         echo "timeout: 0"
         echo "verbose: yes"
         echo
-        echo "/OrientOS"
+        echo "/${MARKE_PRODUKT}"
         echo "    protocol: multiboot1"
         echo "    path: boot():/osum.mb"
         if [ -n "$skript" ]; then

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/disks/run.sh -- THE DISK MANAGER, READ SIDE (docs/DISKS.md stage D-0).
 #
@@ -75,7 +76,7 @@ for n in gpt mbr badcrc; do
 done
 S="$D/vm-gpt/serial.txt"
 grep -qa '^  1 start=2048 sectors=2048 kind=efi name=EFI' "$S" && ok "gpt: partition 1 is the EFI partition" || bad "gpt: partition 1 wrong"
-grep -qa '^  2 start=4096 sectors=16384 kind=ofs name=OrientOS' "$S" && ok "gpt: partition 2 is OrientOS (ofs)" || bad "gpt: partition 2 wrong"
+grep -qa '^  2 start=4096 sectors=16384 kind=ofs name='"${MARKE_PRODUKT}"'' "$S" && ok "gpt: partition 2 is ${MARKE_PRODUKT} (ofs)" || bad "gpt: partition 2 wrong"
 grep -qa '^  3 start=20480 sectors=8192 kind=basic name=data' "$S" && ok "gpt: partition 3 is data (basic)" || bad "gpt: partition 3 wrong"
 S="$D/vm-mbr/serial.txt"
 grep -qa '^  1 start=2048 sectors=8192 kind=fat32' "$S" && ok "mbr: partition 1 is fat32" || bad "mbr: partition 1 wrong"

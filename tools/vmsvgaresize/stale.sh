@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/vmsvgaresize/stale.sh -- 800x600 on a host whose BYTES_PER_LINE register stays STALE after a mode set (VirtualBox, measured with
 # z10c: 800x600 kept 4096 instead of 3200 -> every row shifted, "line garbage"). Kernel word `vmsvgastale` emulates the stale register
@@ -13,7 +14,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 if [ -z "${IMG:-}" ] && [ -z "${STICK_DIR:-}" ]; then
     mkdir -p "$T/build"
     PARTTAB=mbr bash tools/usbimg/build.sh "$T/build" >"$T/build.log" 2>&1 || { echo "stick build failed"; tail -15 "$T/build.log"; exit 1; }
-    IMG=$T/build/orientos-usb.img
+    IMG=$T/build/"${MARKE_DATEI}-usb".img
 fi
 export IMG STICK_DIR
 export SIZES=1280x720,800x600,1024x768,800x600

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""straceset.py -- summarise a `strace -f` log of a real Linux run (the reference for what OrientOS must offer).
+"""straceset.py -- summarise a `strace -f` log of a real Linux run (the reference for what Osum must offer).
 
   strace -f -qq -o app.strace -s 80 <cmd>
   python3 tools/linuxapps/straceset.py app.strace [--after <exec path substring>] [--files out.txt] [--top N]

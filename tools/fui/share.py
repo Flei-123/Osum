@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fui/share.py [<repo root>] -- how much of OrientOS's GUI is a fUi scene tree (measured, not estimated).
+"""tools/fui/share.py [<repo root>] -- how much of Osum's GUI is a fUi scene tree (measured, not estimated).
 
 Prints one line per GUI part: source lines, how the window is built, the number of fuiscene calls and of direct pixel painting calls.
 Classes: SCENE = window is `fuiscene.open*`; PARTIAL = scene host plus an own painting routine; OWN = own painting only (fUi painter or

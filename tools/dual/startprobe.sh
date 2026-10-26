@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/dual/startprobe.sh -- STARTET DIE PLATTE WIRKLICH? UND ZEIGT DAS
 # MENUE BEIDE SYSTEME?
@@ -76,9 +77,9 @@ echo "== das Bootmenue, wie es auf dem Schirm steht"
 if [ -s "$OUT/menue.png" ]; then
     tesseract "$OUT/menue.png" - 2>/dev/null | grep -v '^\s*$' | head -12 | sed 's/^/        /'
     TXT=$(tesseract "$OUT/menue.png" - 2>/dev/null)
-    echo "$TXT" | grep -qi 'orientos' \
-        && ok "OrientOS steht im Bootmenue AUF DEM SCHIRM" \
-        || bad "OrientOS steht nicht im Menue"
+    echo "$TXT" | grep -qi "$MARKE_PRODUKT" \
+        && ok "${MARKE_PRODUKT} steht im Bootmenue AUF DEM SCHIRM" \
+        || bad "${MARKE_PRODUKT} steht nicht im Menue"
     echo "$TXT" | grep -qi 'windows' \
         && ok "DAS FREMDE SYSTEM STEHT IM BOOTMENUE AUF DEM SCHIRM" \
         || bad "das fremde System steht nicht im Menue"
@@ -93,9 +94,9 @@ echo
 echo "== was danach auf der seriellen Leitung steht"
 tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -aE '^(osum|wm|init|desk):' | head -12 | sed 's/^/        /'
 if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qaE '^(osum|wm|desk):'; then
-    ok "ORIENTOS STARTET VON DER PLATTE"
+    ok "${MARKE_PRODUKT^^} STARTET VON DER PLATTE"
 else
-    bad "OrientOS ist nicht gestartet"
+    bad "${MARKE_PRODUKT} ist nicht gestartet"
 fi
 # UND ES FINDET SEINE WURZEL AUF DER NEU ANGELEGTEN PARTITION.
 # `wm: rootpart=` nennt die Nummer und den ersten Sektor -- genau die

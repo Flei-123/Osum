@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -241,7 +242,7 @@ hasnot "$D/rl2.klar" "load edudemo ok" "counter-proof hold: no load after a refu
 has "$D/rl3.klar" "load edudemo none" "nostore: nothing to load"
 hasnot "$D/rl3.klar" "load edudemo ok" "counter-proof nostore: no load without store"
 
-FWBLOB="OrientOS fw demo blob"
+FWBLOB="${MARKE_PRODUKT} fw demo blob"
 FWHASH=c44a0725b6b3e2bad7103b68b309c068f5d4a0727f515c3f257c5c0f40f8eeee
 printf '%s\n' "$FWBLOB" > "$D/fw.good"
 printf 'tampered fw demo blob\n' > "$D/fw.bad"

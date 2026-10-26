@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/odb/loop.sh -- agent round trip (ODB) on a FULL image in QEMU: boot, wait for the agent, then N rounds of
 # ping / info / exec / push+pull / ps / shot / login / desktop check / start Terminal / type a command / read it back /
@@ -28,7 +29,7 @@ while [ $# -gt 0 ]; do
         *) echo "unknown option $1"; sed -n 2,12p "$0"; exit 2 ;;
     esac
 done
-[ -f "$IMG" ] || { echo "loop: --image <orientos-usb.img of an ODB=1 build> required"; exit 2; }
+[ -f "$IMG" ] || { echo "loop: --image <${MARKE_DATEI}-usb.img of an ODB=1 build> required"; exit 2; }
 [ -s "$TOKEN" ] || { echo "loop: token file $TOKEN missing (tools/vbox/run.sh odb-token)"; exit 2; }
 command -v qemu-system-x86_64 >/dev/null || { echo "loop: no qemu"; exit 2; }
 

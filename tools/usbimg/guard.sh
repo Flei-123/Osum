@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/usbimg/guard.sh -- ROUND LIVE: THE WATCHMAN OF THE DOWNLOAD FOLDER.
 #
@@ -48,12 +49,12 @@ for f in "$DL"/*.img.xz "$DL"/*.img; do
 done
 
 # The "newest" link must point at something that is there and fit.
-ziel=$(readlink "$DL/orientos-usb-neuestes.img.xz" 2>/dev/null || true)
+ziel=$(readlink "$DL/${MARKE_DATEI}-usb-neuestes.img.xz" 2>/dev/null || true)
 if [ -z "$ziel" ] || [ ! -f "$DL/$ziel" ]; then
-    neu=$(ls -t "$DL"/orientos-usb-*-live.img.xz 2>/dev/null | head -1)
+    neu=$(ls -t "$DL"/"${MARKE_DATEI}-usb"-*-live.img.xz 2>/dev/null | head -1)
     if [ -n "$neu" ]; then
-        ln -sfn "$(basename "$neu")" "$DL/orientos-usb-neuestes.img.xz"
-        ln -sfn "$(basename "$neu").sha256" "$DL/orientos-usb-neuestes.img.xz.sha256"
+        ln -sfn "$(basename "$neu")" "$DL/${MARKE_DATEI}-usb-neuestes.img.xz"
+        ln -sfn "$(basename "$neu").sha256" "$DL/${MARKE_DATEI}-usb-neuestes.img.xz.sha256"
         say "neuestes -> $(basename "$neu")"
     fi
 fi

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/fullhd/run.sh -- r1226: Full HD (1920x1080 / 1920x1200 / 1366x768 / 1024x768) on the vmware card: the desktop AND the taskbar fill the
 # WHOLE screen, and the stride (pitch) is width*4. Boss bug: "vmsvga draws only a small rectangle at 1920x1080/1920x1200, 1024x768 works"
@@ -26,12 +27,12 @@ cat "$T/self.txt"
 [ "$rc" = 0 ] && ok "judge: full picture green, small-rectangle + shifted-bar pictures red" || bad "judge selftest (rc=$rc)"
 if [ -n "${IMG:-}" ]; then
     IMAGE=$IMG
-elif [ -n "${STICK_DIR:-}" ] && [ -f "$STICK_DIR/orientos-usb.img" ]; then
-    IMAGE=$STICK_DIR/orientos-usb.img
+elif [ -n "${STICK_DIR:-}" ] && [ -f "$STICK_DIR/${MARKE_DATEI}-usb.img" ]; then
+    IMAGE=$STICK_DIR/"${MARKE_DATEI}-usb".img
 else
     mkdir -p "$T/build"
     PARTTAB=mbr bash tools/usbimg/build.sh "$T/build" >"$T/build.log" 2>&1 || { echo "stick build failed"; tail -15 "$T/build.log"; exit 1; }
-    IMAGE=$T/build/orientos-usb.img
+    IMAGE=$T/build/"${MARKE_DATEI}-usb".img
 fi
 KVM=(-accel tcg)
 [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)

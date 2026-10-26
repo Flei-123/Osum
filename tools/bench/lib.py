@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/bench/lib.py -- helpers of the OrientOS benchmark runner (run.sh / gate.sh / vbox.sh).
+"""tools/bench/lib.py -- helpers of the Osum benchmark runner (run.sh / gate.sh / vbox.sh).
 
   lib.py waitline <file> <regex> <t0_epoch> <timeout_s>   poll a log, print ms since t0 when the regex matches (exit 1 on timeout)
   lib.py procstat <pid> <seconds>                         print "rss_mb=.. cpu_pct=.." (qemu CPU share of one core over the window)

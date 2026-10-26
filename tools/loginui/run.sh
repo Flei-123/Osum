@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/loginui/run.sh -- ROUND LOGIN-2: THE LOGIN SCREEN, AS JUSTIN USES IT.
 #
@@ -60,7 +61,7 @@ ende() {
 }
 
 # ------------------------------------------------------------------ build
-if [ ! -f "$BUILD/orientos-usb.img" ]; then
+if [ ! -f "$BUILD/${MARKE_DATEI}-usb.img" ]; then
     kopf "0. build the stick (UITRACE=1 UIBLINK=1, MBR like the 9020)"
     mkdir -p "$BUILD"
     if UITRACE=1 UIBLINK=1 PARTTAB=mbr bash tools/usbimg/build.sh "$BUILD" \
@@ -72,7 +73,7 @@ if [ ! -f "$BUILD/orientos-usb.img" ]; then
 else
     kopf "0. the existing build is used: $BUILD"
 fi
-IMG="$BUILD/orientos-usb.img"
+IMG="$BUILD/${MARKE_DATEI}-usb.img"
 
 # ------------------------------------------------------ C. static checks
 kopf "C. the kernel side (source)"

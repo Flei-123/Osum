@@ -9,6 +9,8 @@
 # The script connects, answers the usbredir hello and (after the trigger file appears) presents the device.
 # Ethernet frames go over UDP datagrams to a helper QEMU (slirp router: DHCP, DNS, NAT) -- see usbredir/run.sh.
 import argparse, os, socket, struct, sys, time, select
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import marke
 
 T_HELLO, T_CONNECT, T_DISCONNECT, T_RESET, T_IFINFO, T_EPINFO, T_SETCFG, T_GETCFG, T_CFGSTAT, T_SETALT, \
     T_GETALT, T_ALTSTAT, T_ISOSTART, T_ISOSTOP, T_ISOSTAT, T_INTSTART, T_INTSTOP, T_INTSTAT = range(18)
@@ -49,7 +51,7 @@ def sdesc(text):
     return bytes([2 + len(b), 3]) + b
 
 
-STRINGS = {1: 'OrientOS Lab', 2: 'Tether Gadget', 3: '0123456789', 4: ''.join('%02X' % x for x in MAC), 5: 'ADB'}
+STRINGS = {1: marke.PRODUKT + ' Lab', 2: 'Tether Gadget', 3: '0123456789', 4: ''.join('%02X' % x for x in MAC), 5: 'ADB'}
 
 
 def ep_desc(addr, attr, mps, ival):

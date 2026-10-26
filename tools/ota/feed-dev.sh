@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/ota/feed-dev.sh -- publish the CURRENT checkout as the next stand of the live feed
 # system/dev (https://store.fleitec.com/osum/system/dev) and verify it. Recipe of docs/OTA-FEED.md
@@ -45,7 +46,7 @@ BEFORE=$(sums)
 
 TARGET=$FEED
 if [ "$DRY" = 1 ]; then TARGET=$T/feed; mkdir -p "$TARGET/system"; cp -a "$FEED/system/$CHANNEL" "$TARGET/system/$CHANNEL" 2>/dev/null || true; fi
-ARGS=(--count "$COUNT" --gz --notes "$T/notes.txt" --name "OrientOS $CHANNEL")
+ARGS=(--count "$COUNT" --gz --notes "$T/notes.txt" --name "${MARKE_PRODUKT} $CHANNEL")
 [ ${#PROGS[@]} -gt 0 ] && ARGS+=(--overlay "$T/ovl")
 bash tools/ota/publish-system.sh "$T/k" "$TARGET" "$CHANNEL" "${ARGS[@]}"
 

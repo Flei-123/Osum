@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -14,7 +15,7 @@ bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
 if [ -z "$IMG" ]; then
     mkdir -p "$T/img"
     ODB=1 IMAGE_ID=taskbarmem bash tools/usbimg/build.sh "$T/img" > "$T/build.log" 2>&1 || { tail -5 "$T/build.log"; echo "image build failed"; exit 1; }
-    IMG="$T/img/orientos-usb.img"
+    IMG="$T/img/${MARKE_DATEI}-usb.img"
     OUTDIR="$T/img"
 fi
 O="python3 -I tools/odbc/odbc.py --port unix:$T/odb.sock --token-file ${ODB_TOKEN_FILE:-/root/abbilder/odb.token}"

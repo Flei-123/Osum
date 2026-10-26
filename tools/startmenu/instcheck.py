@@ -5,6 +5,8 @@
 import re
 import sys
 import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import marke
 
 fails = 0
 
@@ -24,9 +26,9 @@ def check(cond, msg):
 stick = serial(sys.argv[1])
 disk = serial(sys.argv[2])
 check("launcher: " in stick and "launcher: " in disk, "both machines booted the start menu")
-pat = r"launcher: treffer i=\d+ name=\[Install OrientOS\] exec="
-check(re.search(pat, stick) is not None, "stick: the search 'install' finds Install OrientOS (counter-proof)")
-check(re.search(pat, disk) is None, "installed disk (/etc/installed): the search finds no Install OrientOS")
+pat = r"launcher: treffer i=\d+ name=\[Install " + re.escape(marke.PRODUKT) + r"\] exec="
+check(re.search(pat, stick) is not None, "stick: the search 'install' finds Install " + marke.PRODUKT + " (counter-proof)")
+check(re.search(pat, disk) is None, "installed disk (/etc/installed): the search finds no Install " + marke.PRODUKT)
 pat_n = r"launcher: suche \[install\] treffer=\d+ apps=(\d+)"
 m = re.findall(pat_n, stick)
 check(bool(m) and int(m[-1]) >= 1, "stick: the search reports apps>=1 (%s)" % (m[-1] if m else "no report"))

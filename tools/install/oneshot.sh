@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/install/oneshot.sh -- EINEN Lauf machen, zum Iterieren.
 #
@@ -138,7 +139,7 @@ else
             echo "timeout: 0"
             echo "verbose: yes"
             echo
-            echo "/OrientOS"
+            echo "/${MARKE_PRODUKT}"
             echo "    protocol: multiboot1"
             echo "    path: boot():/osum.mb"
             ZL="osum vfs nokbd nosched noproc nofs noring3"

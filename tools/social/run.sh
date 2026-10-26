@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/social/run.sh -- THE SOCIAL LAYER ON ORIENT-BUS, MEASURED.
 #
@@ -247,7 +248,7 @@ echo rc=$?
 echo ==KEY==
 cat /etc/social/fleitec.conf.key
 echo ==SEND==
-act call social.messages.send id=fleitec:u_ANNA "text=Hallo Anna, aus OrientOS"
+act call social.messages.send id=fleitec:u_ANNA "text=Hallo Anna, vom Gast"
 echo rc=$?
 act call social.messages.send id=fleitec:u_ANNA "text=zweite Zeile" --as app:spam
 echo rc=$?
@@ -489,10 +490,10 @@ grep -aq "^state=ok" "$TMPD/p.txt" && grep -aq "^account=u_JUSTIN" "$TMPD/p.txt"
 
 echo "== 10. chat"
 part "$A" SEND MSG1 > "$TMPD/p.txt"
-grep -aq "^devices=1" "$TMPD/p.txt" && ok "OrientOS -> anna: sealed for her one device" || bad "send: $(head -4 "$TMPD/p.txt")"
+grep -aq "^devices=1" "$TMPD/p.txt" && ok "${MARKE_PRODUKT} -> anna: sealed for her one device" || bad "send: $(head -4 "$TMPD/p.txt")"
 grep -aq "^confirm [0-9]* social.messages.send" "$TMPD/p.txt" && ok "an app writing in my name is parked for the user" || bad "app send was not parked"
 part "$A" GOT READ > "$TMPD/p.txt"
-grep -aq "|out|1|Hallo Anna, aus OrientOS" "$TMPD/p.txt" && ok "the conversation keeps what I wrote (out)" || bad "no out line"
+grep -aq "|out|1|Hallo Anna, vom Gast" "$TMPD/p.txt" && ok "the conversation keeps what I wrote (out)" || bad "no out line"
 grep -aq "|in|0|Servus Justin, hier Anna" "$TMPD/p.txt" && ok "anna's answer from her FirnChat client came in (in, unread)" || bad "no answer: $(grep -a message "$TMPD/p.txt" | head)"
 grep -aq "^contact.[0-9]=fleitec:u_ANNA|1" "$TMPD/p.txt" && ok "unread: 1 from anna" || bad "unread: $(grep -a contact "$TMPD/p.txt")"
 part "$A" READ BELL > "$TMPD/p.txt"
@@ -510,7 +511,7 @@ grep -aq "^m	zoe	[0-9]*	out	Hi Zoe" "$TMPD/p.txt" && ok "lan2:zoe -> lan2's own 
 
 echo "== 11. invites"
 part "$A" INVITE INV1 > "$TMPD/p.txt"
-grep -aq "^invite=fleitec:[0-9a-f]\{16\}" "$TMPD/p.txt" && ok "OrientOS invites anna into Minecraft (an invite id)" || bad "invite: $(grep -av '^elf' "$TMPD/p.txt" | head -5)"
+grep -aq "^invite=fleitec:[0-9a-f]\{16\}" "$TMPD/p.txt" && ok "${MARKE_PRODUKT} invites anna into Minecraft (an invite id)" || bad "invite: $(grep -av '^elf' "$TMPD/p.txt" | head -5)"
 part "$A" INVLIST ANSWER > "$TMPD/p.txt"
 grep -aq "|fleitec:u_ANNA|out|invite|accepted|[0-9]*|mc://10.0.2.15:25565|Minecraft" "$TMPD/p.txt" \
     && ok "anna said yes on the server: accepted" || bad "invite list: $(grep -a invite "$TMPD/p.txt" | head)"
@@ -593,7 +594,7 @@ st, j = host.api(int(sys.argv[1]), host.people(sys.argv[2])["justin"], "/api/kon
 print(next((i.get("status") for i in j.get("items", []) if i.get("konto") == "u_DORA"), "none"))
 PY
 )
-[ "$DREL" = freunde ] && ok "on the server dora is justin's friend now (accepted on OrientOS)" || bad "dora on the server: $DREL"
+[ "$DREL" = freunde ] && ok "on the server dora is justin's friend now (accepted on ${MARKE_PRODUKT})" || bad "dora on the server: $DREL"
 [ "$(grep -a 'freunde: tab=' "$B" | tail -1 | sed 's/.*tab=\([0-9]\).* ein=\([0-9]*\).*/\1 \2/')" = "0 1" ] \
     && ok "the bar starts on Online (anna is there), one request left (oma, local)" || bad "start tab: $(grep -a 'freunde: tab=' "$B" | tail -1)"
 grep -aq "freunde: gesendet=1" "$B" && ok "the bar wrote into the chat (social.messages.send)" || bad "the bar did not send: $(grep -a 'freunde:' "$B" | head -4)"

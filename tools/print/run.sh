@@ -31,6 +31,7 @@
 # Call:  bash tools/print/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/marke-env.sh
 ROOT=$(pwd)
 
 pass=0; fail=0
@@ -101,7 +102,7 @@ gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>/dev/null || bad "bridge.c"
 python3 - "$TMPD" <<'PY'
 import sys, os
 d = sys.argv[1]
-lines = ["Drucktest OrientOS -- Seite eins",
+lines = ["Drucktest " + os.environ["MARKE_PRODUKT"] + " -- Seite eins",
          "Grüße aus Österreich: äöü ß, Übel Ärger Öfen",
          "",
          "The quick brown fox jumps over the lazy dog 0123456789"]

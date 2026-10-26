@@ -23,6 +23,7 @@
 # Verwendung:  bash tools/install/build.sh [ausgabeverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/marke-env.sh
 . tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
@@ -157,11 +158,11 @@ fi
 # KEIN `modfs` darin: es gibt kein Boot-Modul mehr, die Wurzel liegt auf
 # der Partition. Genau das ist der Nachweis dieser Runde -- derselbe Kern,
 # eine andere Herkunft der Wurzel.
-cat > "$OUT/limine.conf" <<'EOF'
+cat > "$OUT/limine.conf" <<EOF
 timeout: 0
 verbose: yes
 
-/OrientOS
+/${MARKE_PRODUKT}
     protocol: multiboot1
     path: boot():/osum.mb
     cmdline: osum vfs nokbd nosched noproc nofs noring3

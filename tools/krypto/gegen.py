@@ -5,7 +5,7 @@
 Der wichtigste Punkt des Auftrags dieser Runde, woertlich: "Eine
 Krypto-Umsetzung, die nur gegen sich selbst getestet ist, ist wertlos."
 
-Dieses Programm ist die UNABHAENGIGE Umsetzung. Es kennt von OrientOS
+Dieses Programm ist die UNABHAENGIGE Umsetzung. Es kennt von Osum
 nichts als das AUFGESCHRIEBENE FORMAT -- den Aufbau des Kopfsatzes aus
 dem Kopf von `kernel/crypto/krypto.fi` -- und rechnet alles andere mit fremdem
 Werkzeug:
@@ -17,13 +17,13 @@ Werkzeug:
 
 Es wird in BEIDE Richtungen gemessen:
 
-    lies     was OrientOS geschrieben hat, mit fremdem Werkzeug
+    lies     was Osum geschrieben hat, mit fremdem Werkzeug
              aufmachen -- Kopfsatz pruefen, Schluesselplatz auspacken,
              Sektoren entschluesseln, Dateien nachrechnen.
     schreib  einen Traeger, den NUR dieses Programm angelegt hat, und
-             OrientOS muss ihn aufmachen koennen.
+             Osum muss ihn aufmachen koennen.
 
-Die zweite Richtung ist die schaerfere: sie faellt aus, sobald OrientOS
+Die zweite Richtung ist die schaerfere: sie faellt aus, sobald Osum
 irgendwo etwas anderes rechnet als die Norm -- auch dann, wenn es mit
 sich selbst einig bleibt.
 
@@ -155,7 +155,7 @@ def hauptschluessel(hdr, pw):
 # --------------------------------------------------------------- lies
 
 def cmd_lies(pfad, pw):
-    """Was OrientOS geschrieben hat, mit fremdem Werkzeug aufmachen."""
+    """Was Osum geschrieben hat, mit fremdem Werkzeug aufmachen."""
     d = open(pfad, "rb").read()
     hdr = d[:HDR_SECTORS * SECTOR]
     k, mk, wo = hauptschluessel(hdr, pw)
@@ -187,7 +187,7 @@ def cmd_lies(pfad, pw):
 def cmd_schreib(pfad, pw, t=1, m=64, p=1, bloecke=8192):
     """EINEN TRAEGER ANLEGEN, DEN NUR DIESES PROGRAMM GESCHRIEBEN HAT.
 
-    Das ist die schaerfere Richtung der Gegenprobe: OrientOS muss einen
+    Das ist die schaerfere Richtung der Gegenprobe: Osum muss einen
     Kopfsatz aufmachen koennen, den es nie gesehen hat, mit einem
     Hauptschluessel, den es nicht gezogen hat, und einem Salz aus
     `os.urandom`.
@@ -279,7 +279,7 @@ def cmd_roh(pfad):
 # ---------------------------------------------------------- vektoren
 
 def cmd_vektoren(orakel):
-    """Die Rechnung von OrientOS gegen die Normen und gegen OpenSSL.
+    """Die Rechnung von Osum gegen die Normen und gegen OpenSSL.
 
     Gibt eine Zeile je Gruppe: "<name> <gut>/<gesamt>".
     """
@@ -400,12 +400,12 @@ def cmd_vektoren(orakel):
 
 # ---------------------------------------------------------- baum
 #
-# DER SCHAERFSTE EINZELNE PUNKT DIESER RUNDE: die DATEIEN, die OrientOS
+# DER SCHAERFSTE EINZELNE PUNKT DIESER RUNDE: die DATEIEN, die Osum
 # auf den verschluesselten Traeger geschrieben hat, hier mit fremdem
 # Werkzeug wieder herausholen.
 #
 # Dieses Programm kennt dafuer zwei aufgeschriebene Formate und keinen
-# Zeilentext von OrientOS: den Kopfsatz (oben) und den Aufbau von OFS
+# Zeilentext von Osum: den Kopfsatz (oben) und den Aufbau von OFS
 # (Superblock, Inode, Verzeichnis) aus `kernel/fs.fi`. Alles dazwischen
 # -- Argon2id, XTS, die Sektorrechnung -- ist fremdes Werkzeug.
 #

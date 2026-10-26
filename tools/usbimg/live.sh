@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/usbimg/live.sh -- ROUND LIVE: THE ACCEPTANCE OF THE PUBLIC STICK.
 #
@@ -50,11 +51,11 @@ KVM=()
 
 echo "== 0. the public image =="
 BAU=${BAU:-$TMPD/bau}
-if [ -z "${SCHNELL:-}" ] || [ ! -f "$BAU/orientos-usb.img" ]; then
+if [ -z "${SCHNELL:-}" ] || [ ! -f "$BAU/${MARKE_DATEI}-usb.img" ]; then
     IMAGE_PROFILE=public PARTTAB=${PARTTAB:-mbr} bash tools/usbimg/build.sh "$BAU" \
         > "$TMPD/build.txt" 2>&1 || { tail -20 "$TMPD/build.txt"; echo "LIVE: build failed"; exit 1; }
 fi
-IMG="$BAU/orientos-usb.img"
+IMG="$BAU/${MARKE_DATEI}-usb.img"
 [ -f "$IMG" ] && ok "public image built: $(stat -c%s "$IMG") octets" || { bad "no $IMG"; exit 1; }
 
 echo "== 1. what is in it =="

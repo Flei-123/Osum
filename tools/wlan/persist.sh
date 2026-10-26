@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/wlan/persist.sh -- W-WLAN16a gate: /etc/wlan.conf survives a restart of the live stick (root = RAM module).
 #   bash tools/wlan/persist.sh <build-dir> [old-build-dir]
@@ -10,7 +11,7 @@ cd "$(dirname "$0")/../.."
 B=${1:?build dir}
 GEG=0
 [ -n "${2:-}" ] && { B=$2; GEG=1; }
-[ -f "$B/orientos-usb.img" ] || { echo "FAIL: $B/orientos-usb.img missing"; exit 1; }
+[ -f "$B/${MARKE_DATEI}-usb.img" ] || { echo "FAIL: $B/${MARKE_DATEI}-usb.img missing"; exit 1; }
 OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
 [ -f "$OVMF_CODE" ] && [ -f "$OVMF_VARS" ] || { echo "FAIL: OVMF firmware missing"; exit 1; }
@@ -28,7 +29,7 @@ xchk() {
 }
 KVM=(); [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 OFF=$((2048*512))
-cp "$B/orientos-usb.img" "$W/stick.img"
+cp "$B/${MARKE_DATEI}-usb.img" "$W/stick.img"
 mcopy -i "$W/stick.img@@$OFF" ::limine.conf "$W/limine.conf" || { echo "FAIL: mcopy limine.conf"; exit 1; }
 sed 's/^timeout: .*/timeout: 1/' "$W/limine.conf" > "$W/l_norm.conf"
 mcopy -i "$W/stick.img@@$OFF" -o "$W/l_norm.conf" ::limine.conf

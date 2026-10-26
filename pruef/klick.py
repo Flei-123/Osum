@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""klick.py -- OrientOS wie ein Mensch bedienen (Runde DURCHKLICK).
+"""klick.py -- das System wie ein Mensch bedienen (Runde DURCHKLICK).
 
     Ein Werkzeug fuer den QEMU-Monitor: Maus an einen ORT fahren,
     klicken, tippen, fotografieren.

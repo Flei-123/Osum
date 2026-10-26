@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """VM test of the new jarvisd (keepalive, supervisor, watchdog, info) against the LIVE bridge with the vm-device key."""
 import json, os, subprocess, sys, time, urllib.request, shutil, socket
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import marke
 K = open("/srv/bruecke/verwalter.key").read().strip()
 DEV = "osum-3807242d1d62"
 W = "/root/dellw/bwvm"
@@ -50,7 +52,7 @@ def wait(cond, t, step=2):
     return None
 
 before = warum().get("sitzungen_seit_status", 0)
-shutil.copy("/root/dellw/bw/orientos-usb.img", W + "/stick.img")
+shutil.copy("/root/dellw/bw/%s-usb.img" % marke.DATEI, W + "/stick.img")
 for f in ("ser.txt", "mon.sock", "vars.fd"):
     try: os.remove(W + "/" + f)
     except OSError: pass

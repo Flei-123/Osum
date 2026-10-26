@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/privacy/run.sh -- E4: WHO CALLS HOME? (/bin/privacy), MEASURED.
 #
@@ -85,7 +86,7 @@ tr -cd '\11\12\15\40-\176' < "$TMPD/o.txt" > "$TMPD/o.klar"
 for s in "R1 UOFF" "UOFF R2" "R2 UON" "UON COFF" "COFF R3" "R3 BAD" "BAD BADCONF" "BADCONF NOAUTO" "NOAUTO END"; do
     set -- $s; part "$TMPD/o.klar" "$1" "$2" > "$TMPD/$1.txt"
 done
-has "$TMPD/R1.txt" "OrientOS privacy report" "report: header"
+has "$TMPD/R1.txt" "${MARKE_PRODUKT} privacy report" "report: header"
 has "$TMPD/R1.txt" "telemetry:    none" "report: telemetry is none"
 has "$TMPD/R1.txt" "account:      not required" "report: no account needed"
 has "$TMPD/R1.txt" "https://updates.example.test/feed" "report: update source comes from /etc/ota.conf"

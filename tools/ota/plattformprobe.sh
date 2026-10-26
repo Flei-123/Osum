@@ -100,7 +100,7 @@ cat > "$OUT/daten.rezept" <<EOF
 name=daten
 fassung=1.0.0
 titel=Daten
-info=Kein ELF -- passt auf jede OrientOS-Maschine
+info=Kein ELF -- passt auf jede Maschine
 keys=daten
 handle=konsole
 datei=nutzlast $OUT/daten.txt

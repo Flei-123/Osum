@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/ota/run.sh -- RUNDE OTA: EIN UPDATE, DAS DAS GERAET SICH SELBST
 # UEBER DAS NETZ HOLT -- UND DIE SECHS ARTEN, AUF DIE ES SCHIEFGEHEN
@@ -758,7 +759,7 @@ while [ "$i" -lt "$SCHUESSE" ]; do
     cp -f /usr/share/OVMF/OVMF_VARS.fd "$OUT/e.vars.fd" 2>/dev/null || true
     {
         echo "timeout: 0"; echo "verbose: yes"; echo
-        echo "/OrientOS"; echo "    protocol: multiboot1"
+        echo "/${MARKE_PRODUKT}"; echo "    protocol: multiboot1"
         echo "    path: boot():/osum.mb"
         echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 $NETZ script=ota apply;exit"
     } > "$OUT/e.conf"

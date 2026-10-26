@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
-IMG=${1:?usage: run.sh <ODB=1 orientos-usb.img> [settle_s]}
+IMG=${1:?usage: run.sh <ODB=1 "${MARKE_DATEI}-usb".img> [settle_s]}
 SETTLE=${2:-25}
 TOKEN=${ODB_TOKEN_FILE:-/root/abbilder/odb.token}
 MAX_PX=${SHOTFID_MAX_PX:-3000}

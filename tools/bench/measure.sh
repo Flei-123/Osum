@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/bench/measure.sh -- OrientOS benchmark runner (QEMU/KVM, host side). Boss goal: brutally lightweight and fast.
 #
@@ -37,7 +38,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 export QEMU_DRIVE=$DRIVE   # ahci = DMA like real SATA; ide makes SeaBIOS read Limine's 70 MB by port I/O (+13 s that real hardware never sees)
-[ -f "$IMG" ] || { echo "bench: --image <ODB=1 orientos-usb.img> required"; exit 2; }
+[ -f "$IMG" ] || { echo "bench: --image <ODB=1 ${MARKE_DATEI}-usb.img> required"; exit 2; }
 [ -s "$TOKEN" ] || { echo "bench: token file $TOKEN missing"; exit 2; }
 command -v qemu-system-x86_64 >/dev/null || { echo "bench: no qemu"; exit 2; }
 [ -n "$COMMIT" ] || COMMIT=$(git rev-parse --short=8 HEAD)

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/fvcrypto/run.sh -- gate for the FreeViewer viewer crypto (lib/fv/crypto.fi,
 # lib/crypto/gcm.fi) and for the path to the relay (DNS + TLS 1.3 from OrientOS).
@@ -59,7 +60,7 @@ fi
 
 command -v qemu-system-x86_64 >/dev/null || { echo "FVCRYPTO: $pass passed, $fail failed (no qemu-system)"; [ $fail -eq 0 ]; exit; }
 
-echo "== 3. OrientOS: build kernel, userland, fvt and fetch =="
+echo "== 3. ${MARKE_PRODUKT}: build kernel, userland, fvt and fetch =="
 HWNET_PROGS="sh ls cat echo dhcp host" bash tools/hwnet/build.sh "$TMPD/s0" 0 > "$TMPD/b0.txt" 2>&1 \
     || { bad "kernel/userland build"; tail -5 "$TMPD/b0.txt"; echo "FVCRYPTO: $pass passed, $fail failed"; exit 1; }
 ok "kernel + sh ls cat echo dhcp host built"
@@ -93,16 +94,16 @@ run_vm() { # <script> <out> <timeout> <net 0|1>
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 }
 
-echo "== 3b. OrientOS ring 3: fvt selftest (Argon2id 19 MiB) =="
+echo "== 3b. ${MARKE_PRODUKT} ring 3: fvt selftest (Argon2id 19 MiB) =="
 run_vm "fvt selftest" "$TMPD/vm1.txt" 240 0
 grep -a -E '^\s+(ok|FAIL)|FVT:|timing|aes path' "$TMPD/vm1.txt" | sed 's/^/        /'
 grep -aq 'FVT: .* 0 FAIL' "$TMPD/vm1.txt" \
-    && ok "selftest inside OrientOS: all known answers equal (Argon2id with 19 MiB works in user space)" \
-    || bad "selftest inside OrientOS failed -- see lines above / serial: $(tail -c 300 "$TMPD/vm1.txt" | tr '\n' ' ')"
+    && ok "selftest inside ${MARKE_PRODUKT}: all known answers equal (Argon2id with 19 MiB works in user space)" \
+    || bad "selftest inside ${MARKE_PRODUKT} failed -- see lines above / serial: $(tail -c 300 "$TMPD/vm1.txt" | tr '\n' ' ')"
 
 [ "${FVC_NET:-1}" = 0 ] && { echo "FVCRYPTO: $pass passed, $fail failed"; [ $fail -eq 0 ]; exit; }
 
-echo "== 4. OrientOS: DNS + TLS 1.3 to $HOSTN =="
+echo "== 4. ${MARKE_PRODUKT}: DNS + TLS 1.3 to $HOSTN =="
 if ! curl -s -m 8 -o /dev/null "https://$HOSTN/fv/health"; then
     note "SKIPPED: this machine cannot reach $HOSTN. Nothing is claimed."
 else

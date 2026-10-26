@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/wayland/input.sh -- ROUND WAYLAND-INPUT: KEYBOARD, POINTER AND CLIPBOARD OF wayd, with a real libwayland client.
 #
@@ -312,7 +313,7 @@ has "$sb" "kb enter" "B got the focus"
 has "$sb" "offer mime=text/plain;charset=utf-8" "B: wl_data_offer.offer text/plain;charset=utf-8 (A's source)"
 has "$sb" "paste=hello-from-A" "B received the text THROUGH A (receive with a descriptor, source.send): hello-from-A"
 has "$(L A)" "source send mime=text/plain;charset=utf-8 wrote=12" "A: wl_data_source.send reached it with a descriptor and A wrote 12 octets"
-has "$sb" "sysclip=hello-from-A" "WL -> SYSTEM: the OrientOS clipboard holds A's text (read by a native system call)"
+has "$sb" "sysclip=hello-from-A" "WL -> SYSTEM: the ${MARKE_PRODUKT} clipboard holds A's text (read by a native system call)"
 lz=$(grep -a 'sysclip first=' <<< "$sb" | head -1)
 fz=$(grep -a 'sysclip foreignfill=' <<< "$sb" | head -1)
 f0=$(sed -E 's/.*fills0=(-?[0-9]+).*/\1/' <<< "$fz")

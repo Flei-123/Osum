@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/usbimg/release.sh -- ROUND LIVE: THE TWO STICKS, AND WHERE EACH GOES.
 #
@@ -52,7 +53,7 @@ public)
     env -u JARVIS_CONF -u JARVIS_DEVICE_KEY -u PW_JUSTIN -u PW_ROOT IMAGE_PROFILE=public PARTTAB=mbr \
         bash tools/usbimg/build.sh "$BAU" > "$BAU.log" 2>&1 \
         || { tail -20 "$BAU.log" >&2; fehler "build failed"; }
-    IMG="$BAU/orientos-usb.img"
+    IMG="$BAU/${MARKE_DATEI}-usb.img"
     python3 tools/usbimg/pubcheck.py "$IMG" || fehler "pubcheck: the boot root is not fit"
     # And the copy on partition 2, which /bin/install finds on a machine
     # whose controller can read the stick.
@@ -67,16 +68,16 @@ print(struct.unpack('<I', d[446+16+8:446+16+12])[0])")
             || { grep -E 'FAIL|LIVE:' "$BAU/live.log" >&2; fehler "live.sh failed"; }
         grep 'LIVE:' "$BAU/live.log"
     fi
-    NAME="orientos-usb-$STAMP-$REV-live.img.xz"
+    NAME="${MARKE_DATEI}-usb-$STAMP-$REV-live.img.xz"
     mkdir -p "$PUB_DIR"
     [ -e "$PUB_DIR/$NAME" ] && fehler "$PUB_DIR/$NAME exists already"
     xz -T0 -9 -c "$IMG" > "$PUB_DIR/$NAME.part" || fehler "xz failed"
     mv "$PUB_DIR/$NAME.part" "$PUB_DIR/$NAME"
     (cd "$PUB_DIR" && sha256sum "$NAME" > "$NAME.sha256")
-    ln -sfn "$NAME" "$PUB_DIR/orientos-usb-neuestes.img.xz"
-    ln -sfn "$NAME.sha256" "$PUB_DIR/orientos-usb-neuestes.img.xz.sha256"
+    ln -sfn "$NAME" "$PUB_DIR/${MARKE_DATEI}-usb-neuestes.img.xz"
+    ln -sfn "$NAME.sha256" "$PUB_DIR/${MARKE_DATEI}-usb-neuestes.img.xz.sha256"
     echo "public: $PUB_DIR/$NAME ($(stat -c%s "$PUB_DIR/$NAME") octets)"
-    echo "        https://store.fleitec.com/abbilder/orientos-usb-neuestes.img.xz -> $NAME"
+    echo "        https://store.fleitec.com/abbilder/${MARKE_DATEI}-usb-neuestes.img.xz -> $NAME"
     ;;
 personal)
     case "$(readlink -f "$PERSONAL_DIR")/" in
@@ -86,9 +87,9 @@ personal)
     rm -rf "$BAU"
     IMAGE_PROFILE=personal PARTTAB=mbr bash tools/usbimg/build.sh "$BAU" > "$BAU.log" 2>&1 \
         || { tail -20 "$BAU.log" >&2; fehler "build failed"; }
-    NAME="orientos-usb-$STAMP-$REV-personal.img.xz"
+    NAME="${MARKE_DATEI}-usb-$STAMP-$REV-personal.img.xz"
     mkdir -p "$PERSONAL_DIR"
-    xz -T0 -9 -c "$BAU/orientos-usb.img" > "$PERSONAL_DIR/$NAME" || fehler "xz failed"
+    xz -T0 -9 -c "$BAU/${MARKE_DATEI}-usb.img" > "$PERSONAL_DIR/$NAME" || fehler "xz failed"
     (cd "$PERSONAL_DIR" && sha256sum "$NAME" > "$NAME.sha256")
     echo "personal: $PERSONAL_DIR/$NAME (not public -- hand it over directly)"
     ;;

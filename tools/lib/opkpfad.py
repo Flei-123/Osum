@@ -6,11 +6,11 @@ Prints ONE path. Order:
 
   1. $OPK, if set (the caller knows best).
   2. /root/orientos-install/pkg/opk.py, if it still exists (the old
-     default; that folder was only a git WORKTREE of the OrientOS repo
+     default; that folder was only a git WORKTREE of the product repo
      and was removed in the cleanup of 21.09.2026 -- since then
      ota, install, module, loader and dynlader failed with
      "can't open file .../opk.py" before measuring anything).
-  3. `pkg/opk.py` from the OrientOS repo at ref $ORIENTOS_REF (default
+  3. `pkg/opk.py` from the product repo at ref $ORIENTOS_REF (default
      `main`), read with `git show` and cached under ~/.cache/osum/ by
      its blob hash. `git show` and not the checked-out file: the repo's
      working copy sits on whatever branch someone is working on, and a

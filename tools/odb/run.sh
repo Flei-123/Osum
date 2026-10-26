@@ -18,6 +18,7 @@
 #   ODB_KEEP=<dir> bash tools/odb/run.sh   keep the build (kernel, programs) in <dir> for reuse
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/marke-env.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -144,7 +145,7 @@ if [ -n "${ODB_HOLD:-}" ]; then   # dev mode: keep the guest up for manual odbc 
 fi
 od info >"$TMPD/info.txt" 2>&1; rc=$?
 is "info exit code" "$rc" "0"
-grep -qi "orientos\|osum" "$TMPD/info.txt" && ok "info names the os" || { bad "info: no os name"; head -8 "$TMPD/info.txt"; }
+grep -qi "${MARKE_PRODUKT}\|osum" "$TMPD/info.txt" && ok "info names the os" || { bad "info: no os name"; head -8 "$TMPD/info.txt"; }
 note "$(head -6 "$TMPD/info.txt" | tr '\n' ' ')"
 ncpu=$(sed -n 's/^cpus=//p' "$TMPD/info.txt" | head -1)
 # The fast image boots with `-kernel` and no firmware tables: CS_COUNT ("cores the firmware reported") is 0 there. The desktop image

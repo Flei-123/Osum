@@ -9,13 +9,13 @@ Paketzeile eine sechste Spalte:
 
 und `plattform` ist eines dieser Woerter:
 
-    osum-x86_64     fuer OrientOS auf x86-64
-    osum-aarch64    fuer OrientOS auf AArch64
-    osum-any        fuer jede OrientOS-Maschine (Daten, Skripte, Vorlagen)
+    osum-x86_64     fuer Osum auf x86-64
+    osum-aarch64    fuer Osum auf AArch64
+    osum-any        fuer jede Osum-Maschine (Daten, Skripte, Vorlagen)
 
 Dieselben Woerter benutzt der Katalog des Speichers (`index.json`,
 /root/orientstore, Feld `ziele`), damit ein Telefon und ein
-OrientOS-Rechner mit EINEM Vokabular arbeiten.
+Osum-Rechner mit EINEM Vokabular arbeiten.
 
 WOHER DAS WORT KOMMT, in dieser Reihenfolge:
 
@@ -28,7 +28,7 @@ WOHER DAS WORT KOMMT, in dieser Reihenfolge:
      heute weder `arch=` noch `plattform=`;
   4. kein ELF: `osum-any`.
 
-Ein ELF fuer eine Maschine, die OrientOS nicht kennt, ist ein FEHLER
+Ein ELF fuer eine Maschine, die Osum nicht kennt, ist ein FEHLER
 und keine Vermutung -- das Werkzeug bricht ab und sagt, welche Zahl es
 gelesen hat.
 
@@ -116,7 +116,7 @@ def plattform_von_roh(roh, name="?"):
     fremd = [w for w in woerter if w.startswith("elf-")]
     if fremd:
         raise SystemExit("plattform: %s traegt ein ELF fuer eine Maschine, "
-                         "die OrientOS nicht kennt (e_machine %s)"
+                         "die Osum nicht kennt (e_machine %s)"
                          % (name, ", ".join(w[4:] for w in fremd)))
     if len(woerter) > 1:
         raise SystemExit("plattform: %s traegt ELF-Dateien fuer MEHRERE "

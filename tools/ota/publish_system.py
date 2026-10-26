@@ -45,6 +45,8 @@ import gzip, hashlib, os, re, shutil, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import veroeffentlichen as vf  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import marke
 
 
 def main():
@@ -125,7 +127,7 @@ def main():
     nname = "CHANGES-%d.txt" % count
     open(os.path.join(out, nname), "wb").write(ntext)
     lines = ["system\t%d\t%s\t%s\t%s" % (count, commit, opt["--min-from"],
-                                          opt["--name"] or "OrientOS"),
+                                          opt["--name"] or marke.PRODUKT),
              "sysfile\tkernel\t%s\t%d\t%s" % (khash, len(data), kname),
              "sysfile\tnotes\t%s\t%d\t%s" % (hashlib.sha256(ntext).hexdigest(),
                                              len(ntext), nname)]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/preview/axpng.py -- host preview of an OrientOS window: the a11y tree
+"""tools/preview/axpng.py -- host preview of an Osum window: the a11y tree
 dump (`act call a11y.tree window=<title>`) rendered to a PNG, no VM needed.
 
   python3 tools/preview/axpng.py <dump.txt> -o out.png [--window TITLE] [--dark]

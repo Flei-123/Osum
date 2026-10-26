@@ -1007,7 +1007,7 @@ lauf "8. vier Prozessoren, und die Sperre, die einen Kernel daraus macht (tools/
 lauf "9. ein Userland: eine Shell, 25 Werkzeuge, Roehren und Umlenkung (tools/userland/run.sh, Runde K6)" \
      tools/userland/run.sh userland '^USERLAND:|the whole userland in octets|the biggest program|programs loaded off the disk'
 
-lauf "10. Handles statt Umgebungsautoritaet: die Capability-Schicht aus OrientOS (tools/caps/run.sh)" \
+lauf "10. Handles statt Umgebungsautoritaet: die Capability-Schicht aus Osum (tools/caps/run.sh)" \
      tools/caps/run.sh caps '^CAPS: |^        \(\.utext'
 
 lauf "10b. die Lebensdauer vor der Asynchronitaet: Handles mit Verweiszaehler, Generation und Abbruch-Token (tools/handle/run.sh, Runde HANDLE)" \
@@ -1683,7 +1683,7 @@ lauf "55. the social layer: social.* actions on orient-bus, providers behind one
 # /bin/melder is the OrientOS backend of the Melder interface v1 and a small
 # core -- a running game becomes social.activity.set on the bus, the privacy
 # switch is social.privacy.set; no token, no HTTP.
-lauf "55b. the Melder on OrientOS: backend v1 (hello/detect/games/privacy/autostart/report) and core, reporting as bus actions (tools/melder/run.sh, r135)" \
+lauf "55b. the Melder on the OS: backend v1 (hello/detect/games/privacy/autostart/report) and core, reporting as bus actions (tools/melder/run.sh, r135)" \
      tools/melder/run.sh melder '^MELDER: |^== |^  OK    |^  FAIL  '
 
 # 55c. RIGHTS PER APP AND PRIVACY OF THE SOCIAL SERVICE (r30): scopes

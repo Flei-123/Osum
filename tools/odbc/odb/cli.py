@@ -321,7 +321,7 @@ def cmd_serve(ns):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="odbc", description="OrientOS debug bridge client")
+    p = argparse.ArgumentParser(prog="odbc", description="Osum debug bridge client")
     p.add_argument("--port", "-p", help="pipe:\\\\.\\pipe\\odb | tcp:h:p | unix:path | tty:/dev/pts/N | com:COM3 ($ODB_PORT)")
     p.add_argument("--token", help="auth token ($ODB_TOKEN)")
     p.add_argument("--token-file", help="file with the token ($ODB_TOKEN_FILE)")

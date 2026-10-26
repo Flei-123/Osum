@@ -63,7 +63,7 @@ echo "== 1. das Modul bauen und signieren =="
 bash tools/module/build.sh "$OUT/ps2maus.omod" --name ps2maus --abi 1 \
     | sed 's/^/   /' || exit 1
 
-echo "== 2. daraus ein OrientOS-Paket =="
+echo "== 2. daraus ein Paket =="
 cat > "$OUT/ps2maus.rezept" <<REZEPT
 # Der Treiber fuer das Zeigegeraet am 8042, als NACHLADBARES Kernmodul.
 #

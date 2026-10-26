@@ -9,10 +9,10 @@ static void activate(GtkApplication *app, gpointer u) {
     (void)u;
     puts("GTK4-ACTIVATE");
     GtkWidget *win = gtk_application_window_new(app);
-    gtk_window_set_title(GTK_WINDOW(win), "OrientOS GTK4");
+    gtk_window_set_title(GTK_WINDOW(win), "Osum GTK4");
     gtk_window_set_default_size(GTK_WINDOW(win), 420, 220);
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-    gtk_box_append(GTK_BOX(box), gtk_label_new("Hello from GTK4 on OrientOS"));
+    gtk_box_append(GTK_BOX(box), gtk_label_new("Hello from GTK4 on Osum"));
     gtk_box_append(GTK_BOX(box), gtk_button_new_with_label("Button"));
     gtk_window_set_child(GTK_WINDOW(win), box);
     gtk_window_present(GTK_WINDOW(win));
@@ -20,7 +20,7 @@ static void activate(GtkApplication *app, gpointer u) {
     g_timeout_add_seconds(getenv("GTK_HELLO_SECS") ? atoi(getenv("GTK_HELLO_SECS")) : 20, quit_cb, app);
 }
 int main(int argc, char **argv) {
-    GtkApplication *app = gtk_application_new("org.orientos.hello", G_APPLICATION_NON_UNIQUE);
+    GtkApplication *app = gtk_application_new("org.osum.hello", G_APPLICATION_NON_UNIQUE);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
     int st = g_application_run(G_APPLICATION(app), argc, argv);
     printf("GTK4-EXIT %d\n", st);

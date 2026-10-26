@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/mail/gui.sh <outdir> -- QEMU GUI session of the Mail window (called by tools/mail/app.sh gui).
 #
@@ -81,7 +82,7 @@ want() { # name file regex
 }
 
 # ---------------------------------------------------------------- stage A
-TXT_TO="max@example.org"; TXT_SUBJ="Gruss"; TXT_BODY="Hallo aus OrientOS"
+TXT_TO="max@example.org"; TXT_SUBJ="Gruss"; TXT_BODY="Hallo aus ${MARKE_PRODUKT}"
 BODY_A=$(cat <<SCR
 warteaufmuss 'mail: folders rc=0 n=2' || 120
 warteaufmuss 'mail: list rc=0 n=3' || 90

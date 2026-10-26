@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/krypto/run.sh -- DIE ABNAHME DER RUNDE KRYPTO (K-019).
 #
@@ -384,14 +385,14 @@ num "der Wirt liest ALLE vier Dateien aus dem Geheimtext" "${g:-0}" eq 4
     > "$TMPD/g3.txt" 2>&1
 hat "$TMPD/g3.txt" "schrieb:" "der Wirt legt einen eigenen Traeger an"
 lauf f1 "$TMPD/f.img" "osum nopwr kryptoauf kryptofs kryptobaum kryptopw=fremdpw $KP"
-ksagt "$TMPD/f1.txt" "auf"      1 "OrientOS macht den FREMDEN Kopfsatz auf"
+ksagt "$TMPD/f1.txt" "auf"      1 "${MARKE_PRODUKT} macht den FREMDEN Kopfsatz auf"
 ksagt "$TMPD/f1.txt" "fsformat" 1 "und legt sein Dateisystem darauf an"
 ksagt "$TMPD/f1.txt" "baum"     4 "und schreibt die vier Dateien"
 # Und der Kreis schliesst sich: der Wirt liest sie wieder.
 "$PY" tools/krypto/gegen.py baum "$TMPD/f.img" fremdpw > "$TMPD/g4.txt" 2>&1
 sed 's/^/        /' "$TMPD/g4.txt"
 g=$(grep -a -m1 'baum: gut=' "$TMPD/g4.txt" | grep -oE 'gut=[0-9]+' | cut -d= -f2)
-num "der Wirt liest zurueck, was OrientOS auf SEINEN Traeger schrieb" \
+num "der Wirt liest zurueck, was ${MARKE_PRODUKT} auf SEINEN Traeger schrieb" \
     "${g:-0}" eq 4
 
 # Und die falsche Passphrase scheitert auch beim Wirt.

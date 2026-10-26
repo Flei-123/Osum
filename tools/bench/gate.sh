@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/bench/gate.sh -- performance regression gate (budgets in tools/bench/budgets.json; regression = red).
 #
@@ -54,7 +55,7 @@ case $MODE in
             ( export ODB=1 PARTTAB=mbr FS_BLOCKS=122880 JARVIS_DEVICE_KEY=$ABB/vm-device.key JARVIS_CONF=$ABB/justin-permissions.conf \
                      IMAGE_ID="bench-$$" ODB_TOKEN_FILE=$TOKEN
               bash tools/usbimg/build.sh "$D/img" > "$D/build.log" 2>&1 ) || { tail -10 "$D/build.log"; bad "ODB=1 image build"; fin; }
-            IMG=$D/img/orientos-usb.img
+            IMG=$D/img/"${MARKE_DATEI}-usb".img
         fi
         bash tools/bench/measure.sh --image "$IMG" --runs 3 --portio $UIARG --out "$D/res" --commit gate 2>&1 | tail -30
         [ -s "$D/res/gate.json" ] && check "$D/res/gate.json" || bad "no result from run.sh" ;;

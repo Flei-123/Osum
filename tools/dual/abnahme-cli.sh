@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/dual/abnahme-cli.sh -- DIE ABNAHME OHNE FENSTERSERVER.
 #
@@ -206,11 +207,11 @@ grep -qi 'BCD' "$OUT/esp-fremd.txt" \
     && ok "die fremde Datei BCD in der ESP ist noch da" \
     || bad "die fremde Datei BCD ist verschwunden"
 
-mdir -i "$OUT/platte.img@@$ESPOFF" ::/EFI/orientos > "$OUT/esp-osum.txt" 2>&1
+mdir -i "$OUT/platte.img@@$ESPOFF" ::"/EFI/${MARKE_KURZ}" > "$OUT/esp-osum.txt" 2>&1
 sed 's/^/        /' "$OUT/esp-osum.txt" | head -8
 grep -qi 'osum' "$OUT/esp-osum.txt" \
-    && ok "OrientOS liegt in seinem eigenen Verzeichnis /EFI/orientos" \
-    || bad "unter /EFI/orientos liegt nichts"
+    && ok "${MARKE_PRODUKT} liegt in seinem eigenen Verzeichnis /EFI/${MARKE_KURZ}" \
+    || bad "unter /EFI/${MARKE_KURZ} liegt nichts"
 
 # ==================================================================
 titel "6. ist die GPT gueltig? -- mit FREMDEN Augen gelesen"
@@ -239,9 +240,9 @@ titel "7. bietet das Bootmenue beide Systeme an?"
 # ==================================================================
 mtype -i "$OUT/platte.img@@$ESPOFF" ::/limine.conf > "$OUT/limine.txt" 2>&1
 sed 's/^/        /' "$OUT/limine.txt" | head -14
-grep -qi 'OrientOS' "$OUT/limine.txt" \
-    && ok "das Bootmenue hat einen Eintrag fuer OrientOS" \
-    || bad "im Bootmenue fehlt OrientOS"
+grep -qi "${MARKE_PRODUKT}" "$OUT/limine.txt" \
+    && ok "das Bootmenue hat einen Eintrag fuer ${MARKE_PRODUKT}" \
+    || bad "im Bootmenue fehlt ${MARKE_PRODUKT}"
 if grep -qi 'efi_chainload' "$OUT/limine.txt" && grep -qi 'bootmgfw' "$OUT/limine.txt"; then
     ok "DAS BOOTMENUE HAT EINEN EINTRAG FUER DAS FREMDE SYSTEM (Kettenstart)"
 else

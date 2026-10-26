@@ -79,7 +79,7 @@ def main():
     t.append("//   tools/brand/startimage.py assets/marke "
              "kernel/user/brand_start.fi\n")
     t.append("//\n")
-    t.append("// Das Startzeichen von OrientOS als Bildpunkte, in\n")
+    t.append("// Das Startzeichen von Osum als Bildpunkte, in\n")
     t.append("// mehreren Groessen, je Bildpunkt ein Wort 0xAARRGGBB.\n")
     t.append("// Warum es hier\n")
     t.append("// steht und nicht in der Symbolschrift oder in einer Datei,\n")

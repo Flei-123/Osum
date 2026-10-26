@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/sysinfo/run.sh -- E1: THE SYSTEM REPORT (/bin/sysinfo), MEASURED.
 #
@@ -113,7 +114,7 @@ hasnot "$TMPD/rep.txt" "8c1b2f4e" "the UUID is NOT in the report"
 hasnot "$TMPD/rep.txt" "fingerprint" "no fingerprint in the report"
 has "$TMPD/rep.txt" "identity lines left out of this report:" "the report says that identity lines were left out"
 has "$TMPD/hw.txt" "SECRET-SERIAL-4711" "COUNTER-PROBE: hwid -r prints the serial in the same guest"
-has "$TMPD/file.txt" "OrientOS system report" "redirected: the report is a file (export)"
+has "$TMPD/file.txt" "${MARKE_PRODUKT} system report" "redirected: the report is a file (export)"
 hasnot "$TMPD/file.txt" "SECRET-SERIAL-4711" "the exported file has no serial either"
 has "$TMPD/pci.txt" "0300 1234:1111" "/proc/pci: the QEMU VGA adapter (class 0300, 1234:1111)"
 has "$TMPD/pci.txt" "0600 8086:1237" "/proc/pci: the host bridge (class 0600, 8086:1237)"
@@ -128,7 +129,7 @@ awk '/^== gpu ==/{f=1;next} /^== pci ==/{f=0} f' "$TMPD/rep.txt" | grep -v '^$' 
 has "$TMPD/gpu.txt" "0300 1234:1111" "report gpu section: the display adapter"
 hasnot "$TMPD/gpu.txt" "0600 8086:1237" "report gpu section: ONLY display controllers (no host bridge)"
 has "$TMPD/rep.txt" "boot_mode: BIOS" "report: firmware section shows the boot mode"
-has "$TMPD/hwc.txt" "OrientOS hardware check" "hwcheck: header"
+has "$TMPD/hwc.txt" "${MARKE_PRODUKT} hardware check" "hwcheck: header"
 has "$TMPD/hwc.txt" "display: ok 0300 1234:1111" "hwcheck: the QEMU VGA is the display"
 has "$TMPD/hwc.txt" "keyboard: ok usb" "hwcheck: the usb-kbd is the keyboard"
 has "$TMPD/hwc.txt" "audio: missing" "hwcheck: no audio device in this VM -> missing (not invented)"

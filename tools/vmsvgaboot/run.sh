@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/vmsvgaboot/run.sh -- W-C3: the screen is fitted to the host at BOOT and the UI scale follows the final size.
 # QEMU never sends a host hint, so the kernel word `vmsvgaboot` plays 2400x1400 through kgui.host_boot_fit (the same call a VirtualBox
@@ -17,12 +18,12 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 if [ -n "${IMG:-}" ]; then
     IMAGE=$IMG
-elif [ -n "${STICK_DIR:-}" ] && [ -f "$STICK_DIR/orientos-usb.img" ]; then
-    IMAGE=$STICK_DIR/orientos-usb.img
+elif [ -n "${STICK_DIR:-}" ] && [ -f "$STICK_DIR/${MARKE_DATEI}-usb.img" ]; then
+    IMAGE=$STICK_DIR/"${MARKE_DATEI}-usb".img
 else
     mkdir -p "$T/build"
     PARTTAB=mbr bash tools/usbimg/build.sh "$T/build" >"$T/build.log" 2>&1 || { echo "stick build failed"; tail -15 "$T/build.log"; exit 1; }
-    IMAGE=$T/build/orientos-usb.img
+    IMAGE=$T/build/"${MARKE_DATEI}-usb".img
 fi
 KVM=(-accel tcg)
 [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)

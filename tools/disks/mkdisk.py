@@ -14,6 +14,8 @@ import os
 import struct
 import sys
 import zlib
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import marke
 
 SECT = 512
 TOTAL = 16 * 1024 * 1024 // SECT
@@ -57,7 +59,7 @@ def gpt():
     struct.pack_into("<II", img, 446 + 8, 1, TOTAL - 1)
     img[510] = 0x55
     img[511] = 0xAA
-    parts = [(ESP, 2048, 2048 + 2048 - 1, "EFI"), (OFS, 4096, 4096 + 16384 - 1, "OrientOS"),
+    parts = [(ESP, 2048, 2048 + 2048 - 1, "EFI"), (OFS, 4096, 4096 + 16384 - 1, marke.PRODUKT),
              (BASIC, 4096 + 16384, 4096 + 16384 + 8192 - 1, "data")]
     arr = bytearray(128 * 128)
     for i, (tg, a, b, n) in enumerate(parts):

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/odbloop/run.sh -- NIGHTLY GATE WRAPPER for tools/odb/loop.sh (ODB round trip on a FULL image, QEMU).
 #
@@ -31,7 +32,7 @@ if [ -z "$IMG" ]; then
     ( export ODB=1 PARTTAB=mbr FS_BLOCKS=122880 JARVIS_DEVICE_KEY=$ABB/vm-device.key JARVIS_CONF=$ABB/justin-permissions.conf \
              IMAGE_ID="odbloop-$$" ODB_TOKEN_FILE=$TOKEN
       bash tools/usbimg/build.sh "$D/img" > "$D/build.log" 2>&1 ) || { tail -15 "$D/build.log"; bad "ODB=1 image build"; fin; }
-    IMG=$D/img/orientos-usb.img
+    IMG=$D/img/"${MARKE_DATEI}-usb".img
     [ -s "$IMG" ] && ok "ODB=1 image built ($(du -m "$IMG" | cut -f1) MiB)" || { bad "no image after build"; fin; }
 fi
 

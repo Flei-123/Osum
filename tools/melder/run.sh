@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/melder/run.sh -- THE MELDER ON ORIENTOS (r135), MEASURED.
 #
@@ -225,9 +226,9 @@ grep -qa '==FERTIG==' "$A" || { bad "the guest script did not reach its end"; ta
 
 echo "== 2. the interface =="
 part "$A" HELLO UNSUP > "$TMPD/p.txt"
-has "$TMPD/p.txt" "backend${T}orientos${T}1" "hello: backend orientos 1"
+has "$TMPD/p.txt" "backend${T}orientos${T}1" "hello: backend id 1"
 has "$TMPD/p.txt" "os${T}l" "hello: os l"
-has "$TMPD/p.txt" "caps${T}detect report privacy autostart games" "hello: caps (no identity: no token on OrientOS)"
+has "$TMPD/p.txt" "caps${T}detect report privacy autostart games" "hello: caps (no identity: no token on ${MARKE_PRODUKT})"
 has "$TMPD/p.txt" "ok 3" "hello ends with ok 3"
 has "$TMPD/p.txt" "rc=0" "hello: exit 0"
 part "$A" UNSUP GAMES > "$TMPD/p.txt"

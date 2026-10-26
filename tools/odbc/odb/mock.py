@@ -56,7 +56,7 @@ class MockAgent:
         self.rnd = random.Random(4711)
         self.allow = set(allow.split(",")) if allow else None
         self.fs = dict(files or {})
-        self.fs.setdefault("/etc/motd", b"welcome to mock OrientOS\n")
+        self.fs.setdefault("/etc/motd", b"welcome to mock Osum\n")
         self.inputs, self.log, self.rebooted, self.killed = [], [], None, []
         self.procs = {1: "init", 7: "taskbar", 12: "desktop", 40: "odbd"}
         self.crashes = {"c1": b"panic: mock crash dump\n"}
@@ -152,7 +152,7 @@ class MockAgent:
             self.nonce = os.urandom(16)
             self.authed = False
             return self.resp(tr, fr.id, [
-                ("ver", 1), ("agent", "odbd"), ("agentver", 1), ("os", "OrientOS"), ("kernel", "mock-1"),
+                ("ver", 1), ("agent", "odbd"), ("agentver", 1), ("os", "MockOS"), ("kernel", "mock-1"),
                 ("features", FEATURES), ("maxchunk", self.maxchunk), ("window", self.window),
                 ("maxpayload", 65536), ("auth", "token"), ("nonce", self.nonce.hex())])
         if cmd == "auth":
@@ -189,7 +189,7 @@ class MockAgent:
 
     # ---- commands (run in a job thread) ------------------------------------
     def cmd_info(self, tr, j):
-        self.resp(tr, j.fid, [("os", "OrientOS"), ("kernel", "mock-1"), ("uptime_ms", 123456), ("cpus", 2),
+        self.resp(tr, j.fid, [("os", "MockOS"), ("kernel", "mock-1"), ("uptime_ms", 123456), ("cpus", 2),
                               ("mem_total_kb", 4194304), ("mem_free_kb", 3000000), ("idle_pct", 97),
                               ("idle_core", "0:98"), ("idle_core", "1:96"), ("procs", len(self.procs)),
                               ("screen", "1024x768"), ("time_unix", int(time.time()))])

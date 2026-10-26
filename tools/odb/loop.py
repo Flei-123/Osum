@@ -28,6 +28,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "odbc"))
 from odb import img as IMG            # noqa: E402
 from odb import proto                 # noqa: E402
 from odb.client import Session, read_token_file   # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import marke
 
 PASSWORD = "startkennwort"
 # fractions of the screen: (x, y) of the Terminal icon in the taskbar; (x, y, w, h) of the Terminal window
@@ -151,7 +153,7 @@ def main():
 
         def st_info():
             r = s.request("info", {}, timeout=20)
-            return r.get("os") == "OrientOS", "cpus=%s mem_free=%d MiB idle=%s%% overruns=%s" % (
+            return r.get("os") == marke.PRODUKT, "cpus=%s mem_free=%d MiB idle=%s%% overruns=%s" % (
                 r.get("cpus"), r.geti("mem_free_kb", 0) // 1024, r.get("idle_pct"), r.get("uart_overruns"))
         R.step("info", st_info)
 
