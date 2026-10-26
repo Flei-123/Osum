@@ -48,18 +48,27 @@ def fields(count, slots):
     return " ".join(parts)
 
 
-def main():
-    os.makedirs(OUT, exist_ok=True)
-    with open(os.path.join(OUT, NAME + ".desc.hex"), "w") as f:
-        f.write(descriptor().hex() + "\n")
+def build():
     lines = ["# Synthetic hybrid-mode touch screen: 2 contact slots per report, Contact Count = frame total in the first report, 0 in the continuation.",
              "# Format: <device> <name> <hex> | fields: <decoded values>"]
     for i, (count, slots) in enumerate(FRAMES):
         lines.append("%s r%d %s | fields: %s" % (NAME, i + 1, report(count, slots).hex(), fields(count, slots)))
-    with open(os.path.join(OUT, "reports.txt"), "w") as f:
-        f.write("\n".join(lines) + "\n")
+    return {NAME + ".desc.hex": descriptor().hex() + "\n", "reports.txt": "\n".join(lines) + "\n"}
+
+
+def main(argv):
+    files = build()
+    if len(argv) > 1 and argv[1] == "--check":
+        stale = [n for n, t in files.items() if not os.path.exists(os.path.join(OUT, n)) or open(os.path.join(OUT, n)).read() != t]
+        print("synthetic data is up to date" if not stale else "synthetic data is stale: " + ", ".join(stale))
+        return 1 if stale else 0
+    os.makedirs(OUT, exist_ok=True)
+    for n, t in files.items():
+        with open(os.path.join(OUT, n), "w") as f:
+            f.write(t)
     print("wrote", OUT)
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv))

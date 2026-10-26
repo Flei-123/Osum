@@ -25,6 +25,7 @@ echo "== 2. corpus =="
 sub corpus python3 -I tools/input/check_corpus.py
 sub corpus-selftest python3 -I tools/input/check_corpus.py --selftest
 sub corpus-kernel-data python3 -I tools/input/corpus_kernel.py check-gen
+sub synthetic-data python3 -I tools/input/synthetic.py --check
 
 echo "== 3. kernel =="
 IMG=${INPUT_IMG:-}
