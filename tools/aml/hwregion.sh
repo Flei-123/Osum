@@ -17,7 +17,7 @@ if [ -z "$K" ]; then
     bash tools/build-kernel.sh "$K" >/dev/null 2>&1 || { echo "kernel build failed"; exit 1; }
 fi
 
-for n in hwregion hwregion2; do
+for n in hwregion hwregion2 hwfail; do
     iasl -oa -p "$TMPD/$n" tools/aml/asl/$n.asl >/dev/null 2>&1 || { echo "iasl failed: $n"; exit 1; }
 done
 
@@ -56,6 +56,14 @@ added=$((nodes - base_nodes))
 run "$TMPD/only1.txt" -acpitable "sig=SSDT,rev=2,oem_id=OSUM,oem_table_id=HWREG1,file=$TMPD/hwregion.aml"
 l1=$(hold_line "$TMPD/only1.txt")
 [ "$(field "$l1" e)" = "0" ] && ok "forward operand into a table that never arrives stays deferred" || bad "single table: $l1"
+
+run "$TMPD/bad.txt" -acpitable "sig=SSDT,rev=2,oem_id=OSUM,oem_table_id=HWFAIL,file=$TMPD/hwfail.aml"
+bl=$(hold_line "$TMPD/bad.txt")
+fl=$(grep -a -m1 '^amlfail:' "$TMPD/bad.txt" | tr -d '\r\000')
+echo "    $bl"
+echo "    $fl" | cut -c1-200
+[ "$(field "$bl" bad)" = "1" ] && ok "unresolvable field region counted as one bad table" || bad "failing table run: $bl"
+echo "$fl" | grep -q 'SSDT off=[0-9]* e=9 path=[^ ]*F1 ctx=[0-9a-f]\{32,\}' && ok "failure line carries scope path and context bytes" || bad "failure line incomplete: $fl"
 
 echo "AML hwregion: $pass ok, $fail failed"
 [ "$fail" -eq 0 ]

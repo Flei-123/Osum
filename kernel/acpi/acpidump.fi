@@ -1,0 +1,138 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import acpi.acpi
+import acpi.amlns
+
+export { read, size }
+
+const LINE_BYTES: u64 = 74
+const DATA_BYTES: u64 = 32
+
+fn is_aml(t: u64) -> bool {
+    var w_dsdt: [u8; 5] = "DSDT\0"
+    var w_ssdt: [u8; 5] = "SSDT\0"
+    let sg: u64 = amlns.seg_of(t)
+    return sg == amlns.seg_of((&w_dsdt[0]) as u64) || sg == amlns.seg_of((&w_ssdt[0]) as u64)
+}
+
+fn table_lines(t: u64) -> u64 {
+    return 1 + (amlns.rd32(t + 4) + DATA_BYTES - 1) / DATA_BYTES
+}
+
+fn total_lines(state: u64) -> u64 {
+    let n: u64 = acpi.table_count(state)
+    var total: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let t: u64 = acpi.table_at(state, i)
+        if t != 0 && is_aml(t) {
+            total = total + table_lines(t)
+        }
+        i = i + 1
+    }
+    return total
+}
+
+fn size(state: u64) -> u64 {
+    return total_lines(state) * LINE_BYTES
+}
+
+fn hex_digit(v: u64) -> u8 {
+    if v < 10 {
+        return (48 + v) as u8
+    }
+    return (87 + v) as u8
+}
+
+fn put_hex(lb: u64, at: u64, v: u64, digits: u64) {
+    var k: u64 = 0
+    while k < digits {
+        let d: u64 = (v >> ((digits - 1 - k) * 4)) & 15
+        amlns.wr8(lb + at + k, hex_digit(d) as u64)
+        k = k + 1
+    }
+}
+
+fn header_line(lb: u64, t: u64, idx: u64) {
+    var k: u64 = 0
+    while k < LINE_BYTES - 1 {
+        amlns.wr8(lb + k, 32)
+        k = k + 1
+    }
+    amlns.wr8(lb, 35)
+    var j: u64 = 0
+    while j < 4 {
+        amlns.wr8(lb + 2 + j, amlns.rd8(t + j))
+        j = j + 1
+    }
+    amlns.wr8(lb + 7, 108)
+    amlns.wr8(lb + 8, 101)
+    amlns.wr8(lb + 9, 110)
+    amlns.wr8(lb + 10, 61)
+    put_hex(lb, 11, amlns.rd32(t + 4), 8)
+    amlns.wr8(lb + 20, 105)
+    amlns.wr8(lb + 21, 100)
+    amlns.wr8(lb + 22, 120)
+    amlns.wr8(lb + 23, 61)
+    put_hex(lb, 24, idx, 2)
+    amlns.wr8(lb + LINE_BYTES - 1, 10)
+}
+
+fn data_line(lb: u64, t: u64, row: u64) {
+    var k: u64 = 0
+    while k < LINE_BYTES - 1 {
+        amlns.wr8(lb + k, 32)
+        k = k + 1
+    }
+    let base: u64 = row * DATA_BYTES
+    let len: u64 = amlns.rd32(t + 4)
+    put_hex(lb, 0, base, 8)
+    var j: u64 = 0
+    while j < DATA_BYTES && base + j < len {
+        put_hex(lb, 9 + j * 2, amlns.rd8(t + base + j), 2)
+        j = j + 1
+    }
+    amlns.wr8(lb + LINE_BYTES - 1, 10)
+}
+
+fn render_line(state: u64, want: u64, lb: u64) -> bool {
+    let n: u64 = acpi.table_count(state)
+    var first: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let t: u64 = acpi.table_at(state, i)
+        if t != 0 && is_aml(t) {
+            let lines: u64 = table_lines(t)
+            if want < first + lines {
+                let row: u64 = want - first
+                if row == 0 {
+                    header_line(lb, t, i)
+                } else {
+                    data_line(lb, t, row - 1)
+                }
+                return true
+            }
+            first = first + lines
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn read(state: u64, off: u64, dst: u64, len: u64) -> u64 {
+    var lb: [u8; 80] = [0 as u8; 80]
+    var done: u64 = 0
+    var cached: u64 = 0xFFFFFFFFFFFFFFFF
+    while done < len {
+        let pos: u64 = off + done
+        let line: u64 = pos / LINE_BYTES
+        if line != cached {
+            if !render_line(state, line, (&lb[0]) as u64) {
+                return done
+            }
+            cached = line
+        }
+        amlns.wr8(dst + done, lb[(pos % LINE_BYTES) as usize] as u64)
+        done = done + 1
+    }
+    return done
+}
