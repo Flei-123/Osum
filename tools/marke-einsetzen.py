@@ -9,6 +9,7 @@ import brandvalues
 import brandrender
 
 FIELDS = brandvalues.FIELDS
+STATICS = {"PRODUKT": "s_product", "KERN": "s_core", "HERSTELLER": "s_vendor", "KURZ": "s_slug", "WEB": "s_web", "FEED": "s_feed"}
 
 
 def literal(text, length):
@@ -31,7 +32,7 @@ def write(path, text):
 def set_brand(path, values):
     s = read(path)
     for key, expected in FIELDS.items():
-        name = "s_" + key.lower()
+        name = STATICS[key]
         pattern = re.compile(
             r'(static mut %s: \[u8; (\d+)\] = )"[^"]*"' % re.escape(name))
         m = pattern.search(s)
@@ -44,8 +45,8 @@ def set_brand(path, values):
                      % (name, n, expected))
         s = pattern.sub(lambda mm: mm.group(1) + literal(values[key], n), s, 1)
     for key in FIELDS:
-        rest = re.search(r'static mut s_%s: \[u8; \d+\] = "([^"]*)"'
-                         % key.lower(), s)
+        rest = re.search(r'static mut %s: \[u8; \d+\] = "([^"]*)"'
+                         % STATICS[key], s)
         if rest and "?" in rest.group(1):
             sys.exit("kernel/lib/brand.fi: %s is still a placeholder" % key)
     write(path, s)
@@ -97,7 +98,7 @@ def patch_kernel(argv):
     image_id = argv[3] if len(argv) == 4 else "dev"
     values = brandvalues.load(conf)
     set_brand(find(tree, "brand.fi"), values)
-    line = set_version(find(tree, "version.fi"), values["KURZ"], commit)
+    line = set_version(find(tree, "version.fi"), values["KERN"].lower().replace(" ", ""), commit)
     print("marke: image id '%s'" % set_image(find(tree, "version.fi"), image_id))
     print("marke: PRODUKT=%s KERN=%s HERSTELLER=%s KURZ=%s"
           % (values["PRODUKT"], values["KERN"], values["HERSTELLER"],
