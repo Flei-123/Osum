@@ -4,6 +4,11 @@ Runde SYSTEMBUS, Zweig `systembus`. Dieses Dokument beschreibt die
 Systemrufe, das Typmodell und die Grenzen — und zwar so, wie sie
 gemessen sind, nicht wie sie gedacht waren.
 
+> **Stand Oktober 2026:** Zwischenablage, Primaerauswahl und Ziehplatz sind jetzt drei Faecher EINES Dienstes
+> (`kernel/bus/slots.fi`, API `kernel/user/xfer.fi`) mit typisierten, verzoegerten Eintraegen und Nutzlasten bis 2 MiB.
+> Die Beschreibung dazu steht in `docs/TRANSFER.md`; die Abschnitte unten beschreiben den Bus selbst
+> (Dienste, Nachrichten, Segmente, Benachrichtigungen).
+
 ## Warum es ihn gibt
 
 Die Wegkarte (`/root/osum-roadmap/ROADMAP.md`, A3) nennt den Systembus
@@ -55,22 +60,29 @@ zweiundzwanzig nicht.
 | 7 | `SEGNEW` | Seiten | Segmentnummer |
 | 8 | `SEGMAP` | Segment | Adresse in Ring 3 |
 | 9 | `SEGDROP` | Segment | 0 |
-| 10 | `CLIPSET` | Typen, Puffer, n, Segment | 0 |
-| 11 | `CLIPGET` | zurueck, Puffer, max, Kopf | Oktette |
-| 12 | `CLIPINFO` | zurueck, was | Zahl |
-| 13 | `OFFER` | Typen | 0 |
-| 14 | `FILL` | Puffer, n, Segment | 0 |
+| 10 | `CLIPSET` | Typen, Puffer, n, Segment+1 \| Fach << 8 | 0 |
+| 11 | `CLIPGET` | zurueck \| Fach << 8 \| (Typ+1) << 16, Puffer, max, Kopf | Oktette |
+| 12 | `CLIPINFO` | zurueck \| Fach << 8, was | Zahl |
+| 13 | `OFFER` | Typen, Fach | 0 |
+| 14 | `FILL` | Puffer, n, Segment+1, (Typ+1) \| Fach << 8 | 0 |
 | 15 | `DRAGSET` | Typen, Puffer, n, Segment | 0 |
 | 16 | `DRAGGET` | Puffer, max, Kopf | Oktette |
-| 17 | `DRAGCLEAR` | — | 0 |
+| 17 | `DRAGCLEAR` | 0 = Ziehplatz, sonst Fach+1 | 0 |
 | 18 | `DRAGINFO` | was | Zahl |
 | 19 | `NOTIPOST` | Dringlichkeit, Puffer, n | 0 |
 | 20 | `NOTIGET` | zurueck, Puffer, max | Oktette |
 | 21 | `NOTIINFO` | was, zurueck | Zahl |
 | 22 | `STAT` | welcher | Zaehler |
+| 23 | `NOTIPEEK` | zurueck, Puffer, max | Oktette |
+| 24 | `MIME` | Name, n | Typbit (32..39) |
+| 25 | `MIMENAME` | Typbit, Puffer, max | Laenge |
+| 26 | `SEGIO` | Segment \| schreiben << 8, Offset, Puffer, n | n |
+| 27 | `PROMOTE` | zurueck | 0 |
 
 `CLIPINFO was`: 0 = Typen, 1 = Laenge, 2 = Besitzer-pid, 3 = Zahl der
-Verlaufsplaetze, sonst = Zustandsflags des obersten Eintrags.
+Verlaufsplaetze, 4 = Zustandsflags, 5 = gehaltene Typen, 6 = laufende Nummer,
+7 = was der Aufrufer als Besitzer liefern soll, 8 = unerfuellte Angebote des Aufrufers.
+Fach: 0 Zwischenablage, 1 Primaerauswahl, 2 Ziehplatz (`docs/TRANSFER.md`).
 `DRAGINFO was`: 0 = laeuft eine Ziehbewegung, 1 = Typen.
 `NOTIINFO was`: 0 = wieviele, 1 = wieviele UNGELESEN, 2 = Laenge,
 3 = Dringlichkeit.

@@ -46,6 +46,8 @@ needs no source change.
   contacts, calendar, notes, image/PDF/media viewers, screenshots.
 - The Certus web browser as an ordinary ring-3 program
   (`assets/apps/certus.osp`).
+- One transfer service for clipboard (history with Win+V), primary selection and drag-and-drop: typed items,
+  lazy handover, payloads up to 2 MiB, files as `text/uri-list` (`docs/TRANSFER.md`).
 - Package store, application bundles (`*.osp`), over-the-air updates and a
   backup tool with deduplication.
 - Installer that writes a bootable system to a disk, and a live mode that
