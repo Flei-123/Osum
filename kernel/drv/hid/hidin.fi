@@ -63,6 +63,7 @@ import gfx.gfx
 import drv.hid.hidrep
 import drv.hid.hidbits
 import drv.hid.hidcontact
+import drv.hid.hidframe
 import drv.hid.hidmap
 import drv.hid.hidev
 import drv.hid.evring
@@ -311,6 +312,7 @@ fn reset_dev(state: u64, dev: u64) {
     gest.reset(dev)
     direct.reset(gest_dev(dev))
     hidev.reset(dev)
+    hidframe.drop_dev(dev)
 }
 
 fn ist_neg(v: u64) -> bool {
@@ -974,10 +976,10 @@ fn touch(state: u64, dev: u64, rid: u64, p: u64, art: u64) -> bool {
     if (art & hidrep.K_PEN) != 0 && !hidcontact.has_id() && !hidcontact.has_count() {
         return touch_pen(state, dev)
     }
-    var grenze: u64 = nc
-    if hidcontact.has_count() && hidcontact.reported() < nc {
-        grenze = hidcontact.reported()
+    if !hidframe.push(dev, nc) {
+        return true
     }
+    let grenze: u64 = hidframe.count(dev)
     let gd: u64 = gest_dev(dev)
     td_dev[gd as usize] = dev
     let now: u64 = gest_now(state)
@@ -985,16 +987,13 @@ fn touch(state: u64, dev: u64, rid: u64, p: u64, art: u64) -> bool {
     hidev.begin(dev, record.D_TOUCHSCREEN, now, xlo, xhi, ylo, yhi)
     var k: u64 = 0
     while k < grenze {
-        if hidcontact.tip(k) != 0 {
+        if hidframe.tip(dev, k) != 0 {
             n = n + 1
         }
-        var id: u64 = k
-        if hidcontact.has_id() {
-            id = hidcontact.contact_id(k)
-        }
-        track.add(id, hidcontact.x(k) as i64, hidcontact.y(k) as i64, hidcontact.tip(k), hidcontact.confident(k),
-            hidev.norm16(hidcontact.pressure(k), hidcontact.pressure_hi()),
-            hidev.norm16(hidcontact.width(k), hidcontact.width_hi()))
+        track.add(hidframe.id(dev, k), hidframe.x(dev, k) as i64, hidframe.y(dev, k) as i64, hidframe.tip(dev, k),
+            hidframe.confident(dev, k),
+            hidev.norm16(hidframe.pressure(dev, k), hidcontact.pressure_hi()),
+            hidev.norm16(hidframe.width(dev, k), hidcontact.width_hi()))
         k = k + 1
     }
     let _e: u64 = hidev.end(state, dev)
@@ -1339,35 +1338,28 @@ fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
     var cx: [u64; 5] = [0 as u64; 5]
     var cy: [u64; 5] = [0 as u64; 5]
     var conf: [u64; 5] = [1 as u64; 5]
-    var nc: u64 = hidcontact.extract(state, dev, rid, p)
-    if nc > MAX_CONTACTS {
-        nc = MAX_CONTACTS
-    }
-    var q0: u64 = 0
-    while q0 < nc {
-        tip[q0 as usize] = hidcontact.tip(q0)
-        cid[q0 as usize] = hidcontact.contact_id(q0)
-        cx[q0 as usize] = hidcontact.x(q0)
-        cy[q0 as usize] = hidcontact.y(q0)
-        conf[q0 as usize] = hidcontact.confident(q0)
-        q0 = q0 + 1
-    }
-    let gemeldet: u64 = hidcontact.reported()
-    let hat_zahl: bool = hidcontact.has_count()
+    let nc: u64 = hidcontact.extract(state, dev, rid, p)
     let maxx: u64 = hidcontact.x_hi()
     let maxy: u64 = hidcontact.y_hi()
     var btn: u64 = hidcontact.buttons()
-
-    // Wie viele Finger liegen wirklich auf. Das Feld Kontaktzahl sagt,
-    // wie viele der Plaetze in DIESEM Bericht gefuellt sind -- ein
-    // Touchpad mit mehr Fingern als Plaetzen schickt mehrere Berichte
-    // hintereinander. Ohne das Feld werden die Spitzenschalter gezaehlt.
+    if !hidframe.push(dev, nc) {
+        return true
+    }
+    var grenze: u64 = hidframe.count(dev)
+    if grenze > MAX_CONTACTS {
+        grenze = MAX_CONTACTS
+    }
+    var q0: u64 = 0
+    while q0 < grenze {
+        tip[q0 as usize] = hidframe.tip(dev, q0)
+        cid[q0 as usize] = hidframe.id(dev, q0)
+        cx[q0 as usize] = hidframe.x(dev, q0)
+        cy[q0 as usize] = hidframe.y(dev, q0)
+        conf[q0 as usize] = hidframe.confident(dev, q0)
+        q0 = q0 + 1
+    }
     var n: u64 = 0
     var k: u64 = 0
-    var grenze: u64 = nc
-    if hat_zahl && gemeldet < nc {
-        grenze = gemeldet
-    }
     while k < grenze {
         if tip[k as usize] != 0 {
             n = n + 1

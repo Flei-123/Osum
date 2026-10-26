@@ -10,7 +10,7 @@ Ist-Stand only. "Measured" = a gate in this tree ran it (QEMU/KVM, synthetic or 
 | Registry | `kernel/drv/hid/inreg.fi`, rows in `lib/touchev/quirk.fi` | per slot: bus, vid, pid, quirk flags |
 | Input mode | `kernel/drv/hid/hidmode.fi`, `lib/touchev/inmode.fi` | a Windows Precision Touchpad starts in mouse mode: the descriptor's Device Mode (digitizer 0x52) and Surface/Button switch (0x57, 0x58) feature fields are set (3 and 1) with SET_REPORT after the descriptor is parsed: I2C command-register frame, USB class request `0x21 0x09`, wValue `0x03<id>` |
 | Descriptor parser | `kernel/drv/hid/hidrep.fi` (+ reference parser `tools/hid/descs.py`) | descriptor -> field table (page, usage, bit offset, size, range), kind (kbd, mouse, pad, touch, pen) |
-| Report -> contacts | `kernel/drv/hid/hidbits.fi`, `hidcontact.fi` | one digitizer report -> a frame of contacts (tip, confidence, id, x, y, pressure, width, height, count, buttons) |
+| Report -> contacts | `kernel/drv/hid/hidbits.fi`, `hidcontact.fi`, `hidframe.fi` | one digitizer report -> contacts (tip, confidence, id, x, y, pressure, width, height, count, buttons); `hidframe` joins the reports of one frame when Contact Count is larger than the slots of a report (hybrid mode: first report carries the total, continuation reports carry 0) |
 | Tracker | `kernel/drv/hid/hidev.fi` -> `lib/touchev/track.fi` | slots, DOWN/MOVE/UP, x/y normalized to 0..65535, quirks (swap, invert, single touch, palm) |
 | Event ring | `kernel/drv/hid/evring.fi`, `/proc/touchev` (`kernel/fs/procfs.fi`) | 128 normalized records; a read drains them |
 | Gestures | touch screen: `lib/touchgest/direct.fi`; touch pad: `lib/touchgest/gest.fi`; shared `lib/touchgest/geom.fi` | tap, double tap, long press, drag, scroll, pinch, 3/4-finger swipe, palm rejection; every threshold is an option |
@@ -65,7 +65,7 @@ Touch pad options (`lib/touchgest/gest.fi`) come from `/etc/touchpad.conf` (`tpc
     0, 0x045e, 0x0c32, 16,
 ```
 
-Flags: 1 swap x/y, 2 invert x, 4 invert y, 8 ignore confidence, 16 single touch, 32 ignore device, 64 no palm. All matching rows are OR-ed. `quirk.add_row` does the same at run time. `/proc/inputdevs` shows the result per slot: `hid4 kind=16 vid=0x.. pid=0x.. bus=2 q=0x..`.
+Flags: 1 swap x/y, 2 invert x, 4 invert y, 8 ignore confidence, 16 single touch, 32 ignore device, 64 no palm. All matching rows are OR-ed. A row applies to every HID collection of that vid:pid (the Surface touch screen and pen share 045e:0c32). `quirk.add_row` does the same at run time. `/proc/inputdevs` shows the result per slot: `hid4 kind=16 vid=0x.. pid=0x.. bus=2 q=0x..`.
 
 ## 6. Add a transport (under 20 lines)
 
@@ -89,6 +89,7 @@ Measured (gate `tools/input/run.sh`, QEMU/KVM):
 - Touch screen kernel traces after moving the gesture logic into `direct.fi`: byte-identical to the old inline code (36 lines, `touchsim`).
 - Surface Laptop 4 capture (`tools/input/corpus/holo-laptop-3`, 2026-10-26, see 8): the three synthesized descriptors parse in the kernel parser (kind pad / touch / pen) and the example reports produce exactly the events an independent Python model computes (`tools/input/corpus_kernel.py`), including the three quirk experiments.
 - Input mode: for the Surface descriptors the kernel plans two feature reports (id 7 payload `03`, id 8 payload `03`) and builds I2C frames that equal an independent model of the HID-over-I2C SET_REPORT format (`corpus: inmode` / `corpus: i2c` lines).
+- Hybrid mode: a synthetic touch screen with 2 contact slots per report and 3 contacts per frame produces the events of the joined frame only (`tools/input/synthetic.py`, 7 events).
 - Ring-3 demo app reads `/proc/touchev` through the API; the second read finds the ring drained (`tools/input/e2e.sh`).
 
 Not measured:

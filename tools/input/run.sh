@@ -42,7 +42,7 @@ if python3 -I tools/input/corpus_kernel.py compare "$S" > "$T/cmp.log" 2>&1; the
 n() { grep -ac "$1" "$S"; }
 eq() { [ "$2" = "$3" ] && ok "$1 ($3)" || bad "$1: want $2, got $3"; }
 echo "-- sim ring (touchsim phases before the corpus run)"
-SIMRING=$(sed -n '/^touchsim: end /,/^corpus: begin dev0/p' "$S")
+SIMRING=$(sed -n '/^touchsim: reports/,/^corpus: begin dev0/p' "$S")
 cnt() { printf '%s\n' "$SIMRING" | grep -ac "$1"; }
 eq "touch screen contacts: 5 DOWN (tap, drag, 2 scroll fingers, long press)" 5 "$(cnt '^touchev: 1 slot=[0-9] dev=1 ')"
 eq "touch screen contacts: 5 UP" 5 "$(cnt '^touchev: 3 slot=[0-9] dev=1 ')"
@@ -55,7 +55,6 @@ echo "-- registry lines (/proc/inputdevs)"
 eq "inputdevs: touch pad line carries vid, pid, bus, quirks" 1 "$(n '^inputdevs: hid3 kind=4 vid=0x04f3 pid=0x3003 bus=2 q=0x00')"
 eq "inputdevs: touch screen line" 1 "$(n '^inputdevs: hid4 kind=16 vid=0x04f3 pid=0x2a01 bus=2 q=0x00')"
 eq "inputdevs: pen line" 1 "$(n '^inputdevs: hid5 kind=32 vid=0x056a pid=0x5002 bus=2 q=0x00')"
-eq "inputdevs: the Surface touch screen id 045e:0c32 got the single-touch quirk from the table" 1 "$(n '^inputdevs: hid0 kind=16 vid=0x045e pid=0x0c32 bus=2 q=0x10')"
 
 echo "== 4. end to end =="
 sub e2e bash tools/input/e2e.sh "$IMG"

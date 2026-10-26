@@ -17,7 +17,11 @@ DEVICES = [
     ("touchscreen-045e-0c32", 0x045E, 0x0C32, 1, 0),
     ("pen-045e-0c32", 0x045E, 0x0C32, 3, 0),
     ("inputmode-045e-09af", 0x045E, 0x09AF, 0, 0),
+    ("hybrid-touch", 0x1234, 0x0010, 1, 0),
 ]
+HYBRID = "hybrid-touch"
+HYBRID_SLOTS = 2
+SYNTHETIC = os.path.join(HERE, "corpus", "synthetic")
 INPUTMODE = "inputmode-045e-09af"
 I2C_CMDREG = 5
 I2C_DATAREG = 6
@@ -39,7 +43,8 @@ IGNORE_PID = 0x0003
 
 
 def read_hex(name):
-    with open(os.path.join(CORPUS, name + ".desc.hex")) as f:
+    base = SYNTHETIC if name == HYBRID else CORPUS
+    with open(os.path.join(base, name + ".desc.hex")) as f:
         return bytes.fromhex(f.read().strip())
 
 
@@ -74,12 +79,39 @@ def inmode_expected():
 def input_reports():
     with open(os.path.join(CORPUS, "reports.txt")) as f:
         lines = reportfile.parse_file(f.read())
+    with open(os.path.join(SYNTHETIC, "reports.txt")) as f:
+        lines += reportfile.parse_file(f.read())
     result = {}
     for line in lines:
         if line.name.startswith("feat-"):
             continue
         result.setdefault(line.device, []).append(line)
     return result
+
+
+def hybrid_frames(lines):
+    frames = []
+    open_frame = None
+    left = 0
+    for line in lines:
+        v = line.values
+        slots = [(v["contact%d.id" % i], v["contact%d.x" % i], v["contact%d.y" % i], v["contact%d.tip" % i], 1)
+                 for i in range(HYBRID_SLOTS)]
+        count = v["count"]
+        if open_frame is not None and count == 0:
+            take = min(HYBRID_SLOTS, left)
+            open_frame += slots[:take]
+            left -= take
+            if left == 0:
+                frames.append(open_frame)
+                open_frame = None
+        elif count > HYBRID_SLOTS:
+            open_frame = slots[:]
+            left = count - HYBRID_SLOTS
+        else:
+            open_frame = None
+            frames.append(slots[:count])
+    return frames
 
 
 def pack_words(data):
@@ -227,6 +259,7 @@ RANGES = {
     "touchpad-045e-09af": (0, 2227, 0, 1459),
     "touchscreen-045e-0c32": (0, 32767, 0, 32767),
     "pen-045e-0c32": (0, 9600, 0, 7200),
+    "hybrid-touch": (0, 4095, 0, 4095),
 }
 
 
@@ -331,14 +364,21 @@ def expected_lines(flags=0, only=None):
         name, vid, pid, kind, _ = d
         if only and name != only:
             continue
+        if name == INPUTMODE:
+            continue
         tr = Tracker(kind, RANGES[name], flags)
         now = START_MS
-        for line in reports[name]:
-            now += STEP_MS
-            if kind == 3:
-                evs = tr.pen(line.values, now)
-            else:
-                evs = tr.frame(contacts_of(name, line.values), now)
+        if name == HYBRID:
+            batches = [tr.frame(f, START_MS) for f in hybrid_frames(reports[name])]
+        else:
+            batches = []
+            for line in reports[name]:
+                now += STEP_MS
+                if kind == 3:
+                    batches.append(tr.pen(line.values, now))
+                else:
+                    batches.append(tr.frame(contacts_of(name, line.values), now))
+        for evs in batches:
             for e in evs:
                 typ, slot, fl, nx, ny, t = e[:6]
                 pr = e[6] if len(e) > 6 else 0
@@ -354,6 +394,7 @@ def expected_lines(flags=0, only=None):
 
 def parse_serial(path):
     sections = {}
+    quirks = {}
     current = None
     with open(path, "rb") as f:
         for raw in f:
@@ -363,6 +404,10 @@ def parse_serial(path):
                 current = m.group(1)
                 sections.setdefault(current, [])
                 continue
+            m = re.match(r"^corpus: q=(\d+)", text)
+            if m and current is not None:
+                quirks[current] = int(m.group(1))
+                continue
             m = re.match(r"^corpus: end (\S+)", text)
             if m:
                 current = None
@@ -371,7 +416,7 @@ def parse_serial(path):
                 m2 = re.match(r"^touchev: (\d+) slot=(\d+) dev=(\d+) fl=(\d+) x=(\d+) y=(\d+) px=(\d+) py=(\d+) p=(\d+) sz=(\d+) t=(\d+) a=(-?\d+) b=(-?\d+)$", text)
                 if m2:
                     sections[current].append(m2.groups())
-    return sections
+    return sections, quirks
 
 
 def parse_inmode(path):
@@ -394,7 +439,7 @@ def kernel_raw(section):
 
 
 def compare(path):
-    sections = parse_serial(path)
+    sections, quirks = parse_serial(path)
     ok = 0
     bad = 0
 
@@ -409,6 +454,10 @@ def compare(path):
         else:
             bad += 1
             print("FAIL %s" % label)
+            if not isinstance(want, list):
+                print("   want %s" % (want,))
+                print("   got  %s" % (got,))
+                return
             for i in range(max(len(want), len(got))):
                 w = want[i] if i < len(want) else "-"
                 g = got[i] if i < len(got) else "-"
@@ -433,6 +482,9 @@ def compare(path):
     check("quirk row single_touch keeps only the first contact", want, got)
     got = kernel_raw(sections.get("quirk-ignore", []))
     check("quirk row ignore drops every report", [], got)
+    check("registry quirk flags per run equal the table rows",
+          {"dev0": 0, "dev1": Q_SINGLE_TOUCH, "dev2": Q_SINGLE_TOUCH, "dev4": 0, "quirk-invert": FAKE_FLAGS,
+           "quirk-single": Q_SINGLE_TOUCH, "quirk-ignore": Q_IGNORE}, {k: v for k, v in quirks.items() if k != "prime"})
     check("input mode feature reports and their I2C frames equal the spec model", inmode_expected(), parse_inmode(path))
     gest = [g for g in sections.get("dev1", []) if int(g[0]) == 4]
     flags = sorted(set(int(g[3]) for g in gest))
