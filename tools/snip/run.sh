@@ -93,9 +93,7 @@ bash "$B" "$OUT/b" kbd=yes warten=3 extra="wighalt=75" progs="$PROGS" \
     mon="sendkey meta_l-shift-s" mon="warte 25" > "$OUT/b.log" 2>&1
 S="$OUT/b/serial.txt"
 has "$S" "hk: super+S" "driver latched Win+Shift+S"
-has "$S" "snip: ready" "region window is up"
-G=$(grep -a 'snip: geom w=' "$S" | head -1 | sed 's/.*w=//' | cut -d' ' -f1 | tr -dc '0-9')
-num "region window covers the screen (width)" "$G" ge 1200
+has "$S" "snipt: ready" "region overlay is up (tools/snipt/run.sh covers the rest)"
 
 echo
 echo "== 4. region by geometry =="
