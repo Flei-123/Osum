@@ -8,6 +8,7 @@ VARIANTS = {
     "tail512": dict(cs=512, filler=24, small=40, holes=0, big=700000),
     "tail64k": dict(cs=65536, filler=30, small=12, holes=0, big=700000),
     "frag4k": dict(cs=4096, filler=30, small=24, holes=24, big=700000),
+    "inst4k": dict(cs=4096, filler=90, filler2=62, small=30, holes=0, big=700000),
     "fuzz4k": dict(cs=4096, filler=16, small=6, holes=8, big=200000),
 }
 
@@ -41,6 +42,8 @@ def main():
                 f.write(data)
 
     put("filler.bin", rnd.randbytes(cfg["filler"] * 1048576), final=False)
+    if cfg.get("filler2"):
+        put("filler2.bin", rnd.randbytes(cfg["filler2"] * 1048576), final=False)
     for i in range(1, cfg["small"] + 1):
         put("s%d.dat" % i, rnd.randbytes(700 + i * 37 + rnd.randrange(600)))
     put("big.bin", rnd.randbytes(cfg["big"]))
@@ -52,6 +55,8 @@ def main():
             put("p%d.dat" % i, rnd.randbytes(600))
         put("frag.bin", rnd.randbytes(n * 40000))
     put("filler.bin", b"x", final=False)
+    if cfg.get("filler2"):
+        put("filler2.bin", b"x", final=False)
     print("ok")
 
 

@@ -12,7 +12,7 @@ import ntfsshrink.ptab
 export {
     bind, parse_dec, recover_pending, scan, run_shrink, free_target, new_size_for,
     offer_part, offer_base, offer_psize, offer_free, offer_cluster_kib,
-    refusal, refusal_key, key_offer, key_go, key_ask_title, key_ask_text, key_busy, key_done, key_fail,
+    overall_pct, refusal, refusal_key, key_offer, key_go, key_ask_title, key_ask_text, key_busy, key_done, key_fail,
     S_NONE, S_OFFER, S_REFUSED, ALIGN, MIN_FREE, WANT_FREE
 }
 
@@ -59,6 +59,7 @@ static mut K_E_TABLE: [u8; 17] = "shrink.err.table\0"
 static mut K_E_CMPLX: [u8; 17] = "shrink.err.cmplx\0"
 static mut K_E_BAD: [u8; 15] = "shrink.err.bad\0"
 static mut K_E_DONE: [u8; 16] = "shrink.err.done\0"
+static mut K_E_MOVE: [u8; 16] = "shrink.err.move\0"
 static mut K_E_NONE: [u8; 16] = "shrink.err.none\0"
 
 fn dev_rd(lba: u64, n: u64, dst: u64) -> u64 {
@@ -195,8 +196,8 @@ fn consider(i: u64) {
     }
     var free: u64 = 0
     if r == codes.E_OK {
-        if inf.psize > inf.min_sectors {
-            free = inf.psize - inf.min_sectors
+        if inf.psize > inf.packed_sectors {
+            free = inf.psize - inf.packed_sectors
         }
         if free < MIN_FREE {
             r = codes.E_NO_SPACE
@@ -242,7 +243,7 @@ fn scan() -> u64 {
     return S_NONE
 }
 
-fn run_shrink(free: u64) -> u64 {
+fn run_shrink(free: u64, prog: fn(u64, u64) -> u64) -> u64 {
     if o_part == 0 || free < MIN_FREE || free > o_free {
         return codes.E_RANGE
     }
@@ -250,10 +251,23 @@ fn run_shrink(free: u64) -> u64 {
         return codes.E_IO
     }
     let ns: u64 = new_size_for(o_base, o_psize, free)
-    let r: u64 = shrink.run(dev_rd, dev_wr, total, o_base, ns, scratch())
+    let r: u64 = shrink.run(dev_rd, dev_wr, total, o_base, ns, scratch(), prog)
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
     wunlock.relock()
     return r
+}
+
+fn overall_pct(phase: u64, pct: u64) -> u64 {
+    if phase == 0 {
+        return pct / 5
+    }
+    if phase == 1 {
+        return 20 + pct * 8 / 10
+    }
+    if phase == 2 {
+        return 100
+    }
+    return 0
 }
 
 fn offer_part() -> u64 {
@@ -319,6 +333,9 @@ fn refusal_key(code: u64) -> u64 {
     }
     if code == codes.E_BADCLUS {
         return (&K_E_BAD[0 as usize]) as u64
+    }
+    if code == codes.E_UNMOVABLE {
+        return (&K_E_MOVE[0 as usize]) as u64
     }
     if code == codes.E_DONE {
         return (&K_E_DONE[0 as usize]) as u64

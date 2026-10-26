@@ -206,5 +206,33 @@ recover_case() {
 recover_case rec_intent intent "intent present, GPT still valid"
 recover_case rec_torn torn "GPT torn mid-write"
 
+echo "== 8. data beyond the target end: relocation, progress, packed size =="
+python3 -I tools/ntfsshrink/endmake.py "$OUT" inst4k "$NTFS_SECT" >/dev/null && ok "end-placed NTFS built (filler freed, data behind $((NTFS_SECT / 2048 - FREE_MIB)) MiB)" || bad "endmake inst4k"
+mv "$OUT/inst4k.part" "$OUT/endp.part"
+cp "$OUT/pristine.img" "$OUT/reloc.img"
+splice "$OUT/reloc.img" "$OUT/endp.part"
+ntfsfix -n "$OUT/endp.part" >/dev/null 2>&1 && ok "end-placed NTFS is clean" || bad "end-placed NTFS not clean"
+python3 -I tools/shrinkinst/check.py "$OUT/reloc.img" "$EXPECT" "$OUT/inst4k.files" > "$OUT/reloc.pre" 2>&1
+[ "$(head -1 "$OUT/reloc.pre")" != ALLOK ] && ok "oracle rejects the end-placed disk before the shrink" || bad "oracle accepted the unshrunk end-placed disk"
+run_qemu reloc "$OUT/reloc.img" "dualcli /dev/hdb --free $FREE_MIB --ja --name hdb;exit"
+serial_lines "$OUT/reloc.txt" 24
+grep -aq '^dual: shresult=0' "$OUT/reloc.txt" && ok "shrink with relocation reports success" || bad "relocating shrink failed ($(grep -a '^dual: sh' "$OUT/reloc.txt" | tr '\n' ' ' | cut -c1-120))"
+tr -d '\000' < "$OUT/reloc.txt" | grep -a '^dual: shprog ' | awk '{print $3}' > "$OUT/prog.txt"
+if [ "$(wc -l < "$OUT/prog.txt")" -ge 4 ] && sort -n -c "$OUT/prog.txt" 2>/dev/null && [ "$(tail -1 "$OUT/prog.txt")" = 100 ]; then ok "progress lines rise monotonically to 100 ($(tr '\n' ' ' < "$OUT/prog.txt"))"; else bad "progress lines: $(tr '\n' ' ' < "$OUT/prog.txt")"; fi
+grep -aq '^dual: fertig' "$OUT/reloc.txt" && ok "installation finished after the relocating shrink" || bad "installation not finished after relocation"
+res=$(python3 -I tools/shrinkinst/check.py "$OUT/reloc.img" "$EXPECT" "$OUT/inst4k.files" --installed 2>&1)
+[ "$res" = ALLOK ] && ok "host oracle: relocated data, mirror, all file hashes, ntfsresize/ntfsfix clean" || bad "host oracle: $(echo "$res" | tr '\n' ';' | cut -c1-300)"
+cp "$OUT/reloc.img" "$OUT/relocflip.img"
+python3 -I - "$OUT/relocflip.img" "$NTFS_START" "$OUT/inst4k.files/big.bin" <<'PY'
+import sys
+f = open(sys.argv[1], 'r+b'); base = int(sys.argv[2]) * 512
+head = open(sys.argv[3], 'rb').read(64)
+f.seek(base); data = f.read(150 * 1048576); at = data.find(head)
+assert at >= 0
+f.seek(base + at + 50); b = f.read(1); f.seek(base + at + 50); f.write(bytes([b[0] ^ 255])); f.close()
+PY
+res=$(python3 -I tools/shrinkinst/check.py "$OUT/relocflip.img" "$EXPECT" "$OUT/inst4k.files" --installed 2>&1)
+[ "$res" != ALLOK ] && ok "a flipped byte in relocated data is detected" || bad "oracle missed a flipped byte in relocated data"
+rm -f "$OUT/reloc.img" "$OUT/relocflip.img" "$OUT/endp.part"
 echo "SHRINKINST: $pass passed, $fail failed"
 [ "$fail" = 0 ]

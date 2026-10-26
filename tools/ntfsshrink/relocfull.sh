@@ -71,3 +71,34 @@ open(p, "w").write(s)
 PY
 if FIRNLIB="$D/mutlib" "$FIRNC" -o "$D/mutfz" tools/ntfsshrink/shrinkhost.fi > "$D/mut.log" 2>&1; then rfuzz "$D/mutfz" "commit marker never written" red; else bad "fuzz mutation build"; fi
 rm -rf "$D/mutlib" "$D/mutfz"
+echo "== 17. packed size and progress reports =="
+pkv() { awk -F= -v k="$2" '$1 == k { print $2 }' "$1"; }
+pinfo() { "$1" "$D/tail4k.pre" i 2048 x > "$D/pinfo.out" 2>&1; }
+pinfo "$SHC"
+MINS=$(pkv "$D/pinfo.out" min_sectors); PACK=$(pkv "$D/pinfo.out" packed_sectors); TGT=$(cat "$D/tail4k.target")
+if [ -n "$MINS" ] && [ -n "$PACK" ] && [ "$PACK" -lt "$MINS" ] && [ "$PACK" -le "$TGT" ] && [ "$MINS" -gt "$TGT" ]; then
+    ok "end-placed volume: packed_sectors $PACK <= target $TGT < used_end estimate $MINS"
+else
+    bad "packed_sectors $PACK vs target $TGT vs min_sectors $MINS"
+fi
+PR="$D/tail4k.run"
+[ "$(pkv "$PR" prog_regress)" = 0 ] && [ "$(pkv "$PR" prog_final)" = 100 ] && ok "progress never goes backwards inside a phase and ends at 100" || bad "progress regress/final: $(pkv "$PR" prog_regress)/$(pkv "$PR" prog_final)"
+[ "$(pkv "$PR" prog_scan_max)" -ge 90 ] && [ "$(pkv "$PR" prog_move_max)" -ge 90 ] && ok "scan phase reached $(pkv "$PR" prog_scan_max) %, move phase $(pkv "$PR" prog_move_max) % ($(pkv "$PR" prog_calls) calls)" || bad "progress phases: $(pkv "$PR" prog_scan_max)/$(pkv "$PR" prog_move_max)"
+pmut() {
+    local label=$1 expr=$2 file=$3 check=$4
+    rm -rf "$D/mutlib"; cp -r lib "$D/mutlib"
+    sed -i "$expr" "$D/mutlib/ntfsshrink/$file"
+    if cmp -s "lib/ntfsshrink/$file" "$D/mutlib/ntfsshrink/$file"; then bad "mutation '$label' did not change the source"; return; fi
+    if ! FIRNLIB="$D/mutlib" "$FIRNC" -o "$D/mutexe" tools/ntfsshrink/shrinkhost.fi > "$D/mut.log" 2>&1; then bad "mutation '$label' does not build"; return; fi
+    cp "$D/tail4k.pre" "$D/m.disk"
+    "$D/mutexe" "$D/m.disk" r 2048 "$D/m.disk" "$TGT" > "$D/m.out" 2>&1
+    "$D/mutexe" "$D/tail4k.pre" i 2048 x > "$D/m.info" 2>&1
+    case $check in
+        scan) [ "$(pkv "$D/m.out" prog_scan_max)" -ge 90 ] && bad "mutation '$label' was not detected" || ok "progress mutation '$label' detected" ;;
+        pack) [ "$(pkv "$D/m.info" packed_sectors)" -lt "$(pkv "$D/m.info" min_sectors)" ] && bad "mutation '$label' was not detected" || ok "packed-size mutation '$label' detected" ;;
+    esac
+    rm -f "$D/m.disk" "$D/mutexe"
+}
+pmut "scan never reports" 's|            prog(mode, n \* 100 / nrec)|            n = n + 0|' reloc.fi scan
+pmut "packed size ignores allocation" 's|(\*out).packed_sectors = (floor + reserve_clusters(v.cb)) \* v.spc + 1|(*out).packed_sectors = (*out).min_sectors|' shrink.fi pack
+rm -rf "$D/mutlib"
