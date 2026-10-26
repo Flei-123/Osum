@@ -108,5 +108,5 @@ with a mutated copy of the tree each (no adoption, no lazy handover, no release)
 * `cliphist` shows non-text entries as `[mime]` rows, no thumbnails.
 * A lazy offer whose owner exits before anybody pasted is lost, except where the program calls `xfer.flush()` at exit
   (the viewer does).
-* Wayland long text (above 192 octets) is covered by the unit-level slot tests only; `tools/wayland/input.sh` still sends
+* Wayland long text (above 192 octets) has no test of its own; `tools/wayland/input.sh` still sends
   short texts.
