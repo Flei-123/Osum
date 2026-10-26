@@ -97,3 +97,16 @@ Writing the clipboard or the primary selection (set and offer) needs `P_CLIP_WRI
 `tools/xfer/run.sh`: console part (`guest.sh` + `check.py`: round trips from 100 octets to 2 MiB with FNV sums, lazy
 counters, types, custom types, primary, ring, uri-list, drag next to notifications, leak check) and three counter-probes
 with a mutated copy of the tree each (no adoption, no lazy handover, no release).
+
+## Open
+
+* Drag and drop moves paths only (explorer to explorer, editor, terminal); text or image drags between programs and
+  Wayland drag and drop are not built. The slot, the types and the lazy handover are ready for it.
+* The primary selection is set by the fUi text areas and the terminal. The older text area in `wlib.fi` (`K_TEXTAREA`)
+  still copies to the clipboard only.
+* Wayland clients see text only (up to 4096 octets); images and file lists stay inside the native programs.
+* `cliphist` shows non-text entries as `[mime]` rows, no thumbnails.
+* A lazy offer whose owner exits before anybody pasted is lost, except where the program calls `xfer.flush()` at exit
+  (the viewer does).
+* Wayland long text (above 192 octets) is covered by the unit-level slot tests only; `tools/wayland/input.sh` still sends
+  short texts.
