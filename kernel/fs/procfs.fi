@@ -94,6 +94,7 @@ import drv.usb.xhci
 import drv.usb.chdiag
 import diag.hwdiag
 import acpi.acpi
+import diag.mmaptrace
 import acpi.acpidev
 import acpi.dmar
 import pwr.blchain
@@ -237,7 +238,8 @@ const F_LIMITS: u64 = 6
 const F_CGROUP: u64 = 7
 const F_EXE: u64 = 8 // symlink: the program the task was started from
 const F_CWD: u64 = 9 // symlink: its working directory
-const F_LAST: u64 = 9
+const F_MMAPLOG: u64 = 10
+const F_LAST: u64 = 10
 
 const BUF_MAX: u64 = 4000 // von 4096; der Rest ist Luft fuer die letzte Zeile
 
@@ -3243,6 +3245,57 @@ fn limit_line(state: u64, at: u64, label: u64, soft: u64, unit: u64) -> u64 {
     return w_nl(state, p)
 }
 
+fn make_mmaplog(state: u64, t: u64) -> u64 {
+    var h: [u8; 40] = "kind len rip caller1 caller2 count\0\0\0\0\0\0"
+    var lost: [u8; 7] = "lost: \0"
+    var p: u64 = w_str(state, 0, (&h[0]) as u64)
+    p = w_nl(state, p)
+    var taken: [u8; 256] = [0 as u8; 256]
+    var guard: u64 = 0
+    while guard < 24 && p < BUF_MAX - 90 {
+        guard = guard + 1
+        var best: u64 = 0xFFFFFFFFFFFFFFFF
+        var best_count: u64 = 0
+        var i: u64 = 0
+        let n: u64 = mmaptrace.size()
+        while i < n {
+            if mmaptrace.field(i, mmaptrace.F_SLOT) == t {
+                let c: u64 = mmaptrace.field(i, mmaptrace.F_COUNT)
+                if c > best_count && taken[(i) as usize] == 0 as u8 {
+                    best = i
+                    best_count = c
+                }
+            }
+            i = i + 1
+        }
+        if best == 0xFFFFFFFFFFFFFFFF {
+            guard = 24
+        } else {
+            if mmaptrace.field(best, mmaptrace.F_KIND) == mmaptrace.KIND_MAP {
+                p = w_ch(state, p, 109)
+            } else {
+                p = w_ch(state, p, 117)
+            }
+            p = w_ch(state, p, 32)
+            p = w_num(state, p, mmaptrace.field(best, mmaptrace.F_LEN))
+            p = w_ch(state, p, 32)
+            p = w_hexn(state, p, mmaptrace.field(best, mmaptrace.F_RIP), 8)
+            p = w_ch(state, p, 32)
+            p = w_hexn(state, p, mmaptrace.field(best, mmaptrace.F_CALLER1), 8)
+            p = w_ch(state, p, 32)
+            p = w_hexn(state, p, mmaptrace.field(best, mmaptrace.F_CALLER2), 8)
+            p = w_ch(state, p, 32)
+            p = w_num(state, p, best_count)
+            p = w_nl(state, p)
+            taken[(best) as usize] = 1 as u8
+        }
+    }
+    p = w_str(state, p, (&lost[0]) as u64)
+    p = w_num(state, p, mmaptrace.overflow())
+    p = w_nl(state, p)
+    return p
+}
+
 fn make_limits(state: u64, t: u64) -> u64 {
     var h: [u8; 74] = "Limit                     Soft Limit           Hard Limit           Units\0"
     var l1: [u8; 27] = "Max open files            \0"
@@ -3556,6 +3609,9 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == F_LIMITS {
             return make_limits(state, slot)
         }
+        if sub == F_MMAPLOG {
+            return make_mmaplog(state, slot)
+        }
         if sub == F_CGROUP {
             return make_cgroup(state)
         }
@@ -3767,6 +3823,10 @@ fn pidfile_of(name: u64) -> u64 {
     var cg: [u8; 7] = "cgroup\0"
     var ex: [u8; 4] = "exe\0"
     var cw: [u8; 4] = "cwd\0"
+    var ml: [u8; 8] = "mmaplog\0"
+    if streq(name, (&ml[0]) as u64) {
+        return F_MMAPLOG
+    }
     if streq(name, (&ex[0]) as u64) {
         return F_EXE
     }
@@ -4054,8 +4114,11 @@ fn pidfile_name(state: u64, sub: u64, out: u64) {
     var cg2: [u8; 7] = "cgroup\0"
     var ex2: [u8; 4] = "exe\0"
     var cw2: [u8; 4] = "cwd\0"
+    var ml2: [u8; 8] = "mmaplog\0"
     var src: u64 = (&a[0]) as u64
-    if sub == F_EXE {
+    if sub == F_MMAPLOG {
+        src = (&ml2[0]) as u64
+    } else if sub == F_EXE {
         src = (&ex2[0]) as u64
     } else if sub == F_CWD {
         src = (&cw2[0]) as u64

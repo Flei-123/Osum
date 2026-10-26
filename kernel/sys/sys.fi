@@ -98,6 +98,7 @@ import pwr.s3
 import pwr.pwr
 import pwr.batt
 import acpi.acpiev
+import diag.mmaptrace
 
 // RUNDE K14: die VFS-Schicht. `vfs` zieht die Treiber mit herein;
 // `mnt` ist die Einhaengetafel, `devfs` wird an genau einer Stelle
@@ -2604,6 +2605,30 @@ fn entry(number: u64, frame: u64, state: u64) -> u64 {
     return r
 }
 
+fn trace_user_word(state: u64, me: u64, addr: u64) -> u64 {
+    var w: u64 = 0
+    if addr < 0x1000 || (addr & 7) != 0 {
+        return 0
+    }
+    if !copy_in(state, me, (&w) as u64, addr, 8) {
+        return 0
+    }
+    return w
+}
+
+fn trace_site(state: u64, me: u64, frame: u64, kind: u64, len: u64) {
+    let rbp: u64 = fget(frame, F_RBP)
+    let c1: u64 = trace_user_word(state, me, rbp + 8)
+    var c2: u64 = 0
+    if c1 != 0 {
+        let up: u64 = trace_user_word(state, me, rbp)
+        if up > rbp {
+            c2 = trace_user_word(state, me, up + 8)
+        }
+    }
+    mmaptrace.note(me, kind, len, fget(frame, F_RIP), c1, c2)
+}
+
 fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     kstate.add(state, kstate.SYSCALLS, 1)
     stall.sys_note(number, sched.current(state))
@@ -3056,6 +3081,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
             unixsock.vm_lock(state, me)
             let mar: u64 = do_map(state, me, a0, a1, a2, a3, a4, a5)
             unixsock.vm_unlock(state, me)
+            trace_site(state, me, frame, mmaptrace.KIND_MAP, a1)
             vm_oom_after(state)
             return mar
         }
@@ -3066,6 +3092,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         unixsock.vm_lock(state, me)
         let umr: u64 = do_unmap(state, me, a0, a1)
         unixsock.vm_unlock(state, me)
+        trace_site(state, me, frame, mmaptrace.KIND_UNMAP, a1)
         return umr
     }
     if number == SYS_GETPID {
