@@ -606,6 +606,38 @@ hat "$G.3.bin" "truncated, max_output reached" "und die Kuerzung steht in der An
 [ "$(status_von 4)" = ok ] && ok "und danach laeuft der Helfer weiter (die kleine Datei kommt)" \
                            || bad "nach den Grenzfaellen antwortet er nicht mehr"
 
+echo "== 9b. command_flag_allowed: options per command =="
+sed 's|command_allowed = /bin/echo|command_allowed = /bin/echo\ncommand_flag_allowed = /bin/echo -n|' \
+    "$TMPD/voll.conf" > "$TMPD/flag.conf"
+abbild "$TMPD/flag.img" "$TMPD/flag.conf" "/var/jarvis/gruss.txt=$TMPD/gruss.txt"
+abbild "$TMPD/noflag.img" "$TMPD/voll.conf" "/var/jarvis/gruss.txt=$TMPD/gruss.txt"
+cat > "$TMPD/auf-flag.txt" <<'AUF'
+befehl|/bin/echo plain|
+befehl|/bin/echo -n listed|
+befehl|/bin/echo -x unlisted|
+befehl|/bin/echo plain -n|
+befehl|/bin/echo -nn|
+AUF
+draht_auf
+gegenstelle_an good "$TMPD/auf-flag.txt" "$TMPD/g9b.log"
+lauf_mit_netz "$TMPD/flag.img" "jarvisd -1 -t 60000;exit" "$TMPD/r9b.txt" 220
+gegenstelle_aus
+draht_zu
+G="$TMPD/g9b.log"
+[ "$(status_von 1)" = ok ] && ok "no option: allowed" || bad "no option: $(grep -a '^ANTWORT 1 ' "$G")"
+[ "$(status_von 2)" = ok ] && ok "listed option -n: allowed" || bad "listed option: $(grep -a '^ANTWORT 2 ' "$G")"
+[ "$(status_von 3)" = nein ] && ok "unlisted option -x: rejected" || bad "unlisted option: $(grep -a '^ANTWORT 3 ' "$G")"
+hat "$G.3.bin" "command_flag_allowed" "the reason names command_flag_allowed"
+[ "$(status_von 4)" = ok ] && ok "listed option in a later position: allowed" || bad "later option: $(grep -a '^ANTWORT 4 ' "$G")"
+[ "$(status_von 5)" = nein ] && ok "-nn is not -n: rejected" || bad "-nn: $(grep -a '^ANTWORT 5 ' "$G")"
+draht_auf
+gegenstelle_an good "$TMPD/auf-flag.txt" "$TMPD/g9c.log"
+lauf_mit_netz "$TMPD/noflag.img" "jarvisd -1 -t 60000;exit" "$TMPD/r9c.txt" 220
+gegenstelle_aus
+draht_zu
+G="$TMPD/g9c.log"
+[ "$(status_von 3)" = ok ] && ok "counter-proof: without command_flag_allowed -x passes" || bad "counter-proof: $(grep -a '^ANTWORT 3 ' "$G")"
+
 # =====================================================================
 echo "== 10. ZUSAGE (f): kein Netz beim Start =="
 # =====================================================================
