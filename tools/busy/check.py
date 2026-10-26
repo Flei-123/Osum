@@ -46,16 +46,17 @@ for bx in (b1, b2):
 def fill_width(img):
     x0, x1 = 64, 60 + 640 * sc - 4
     y0, y1 = 500, 420 + 420 * sc - 4
-    r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
-    blue = ((b - r) > 80) & (b > 150)
+    y1 = min(y1, img.shape[0] - 52 * sc)
+    blue = (img.max(axis=2) - img.min(axis=2)) > 60
     sub = np.zeros_like(blue)
     sub[y0:y1, x0:x1] = blue[y0:y1, x0:x1]
-    rows = sub.sum(axis=1)
-    y = int(rows.argmax())
-    if rows[y] < 8 * sc:
-        return 0
-    xs = np.nonzero(sub[y])[0]
-    return int(xs.max() - xs.min() + 1)
+    best = 0
+    for y in range(y0, y1):
+        run = 0
+        for v in sub[y, x0:x1]:
+            run = run + 1 if v else 0
+            best = max(best, run)
+    return best if best >= 8 * sc else 0
 
 
 for name, pct in (("pct-000", 0), ("pct-030", 30), ("pct-070", 70), ("pct-100", 100)):
