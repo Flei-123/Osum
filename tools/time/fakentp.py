@@ -4,9 +4,10 @@
 
     fakentp.py --port 12300 --log f --time 2026-10-02T12:00:00Z [more times...]
                 [--mode ok|spoof|kod|rate|li3|short|wrongmode]
-                [--now-offset-ms N]
+                [--now-offset-ms N] [--per N]
 
-Every request is answered with the NEXT time of the list (the last one
+Every group of --per requests (default 4: /bin/sntp asks each server four
+times in a burst) is answered with the NEXT time of the list (the last one
 repeats). Modes are the faulty answers the client must refuse:
 
     ok         a good answer (mode 4, stratum 2, originate echoed)
@@ -40,6 +41,7 @@ def main():
     log = None
     mode = "ok"
     now_offset_ms = None
+    per = 4
     times = []
     a = sys.argv[1:]
     i = 0
@@ -50,6 +52,8 @@ def main():
             log = a[i + 1]; i += 2
         elif a[i] == "--mode":
             mode = a[i + 1]; i += 2
+        elif a[i] == "--per":
+            per = int(a[i + 1]); i += 2
         elif a[i] == "--now-offset-ms":
             now_offset_ms = float(a[i + 1]); i += 2
         elif a[i] == "--time":
@@ -70,7 +74,7 @@ def main():
         data, addr = s.recvfrom(512)
         if len(data) < 48:
             continue
-        t = times[min(n, len(times) - 1)]
+        t = times[min(n // per, len(times) - 1)]
         frac = 0
         if now_offset_ms is not None:
             real = time.time() + now_offset_ms / 1000.0
