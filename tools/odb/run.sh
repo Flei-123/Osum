@@ -51,19 +51,10 @@ if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL="-accel kvm"; else ACCEL="-acc
 B=${ODB_KEEP:-$TMPD/b}
 mkdir -p "$B"
 echo "== 1. build: kernel + $(echo $PROGS | wc -w) programs =="
+as --64 -o "$B/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s"
 if [ ! -f "$B/k0.mb" ]; then
-    for f in boot isr switch smp hv; do
-        as --64 -o "$B/$f.o" "kernel/arch/x86_64/$f.s" 2>/dev/null || bad "$f.s does not assemble"
-    done
-    as --64 -o "$B/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s"
-    "$FIRNC" kernel/kmain.fi -o "$B/k.o" >"$B/e" 2>&1 && "$FIRNC" kernel/uprog.fi -o "$B/u.o" >>"$B/e" 2>&1 \
-        || { bad "kernel does not compile"; head -8 "$B/e"; echo "ODB: $pass passed, $fail failed"; exit 1; }
-    ld -n -T "$LDSCRIPT" --defsym=KERNEL_MAIN="_F0.kernel_main" --defsym=KERNEL_TRAP="_F0.trap__entry" \
-        --defsym=KERNEL_SYSCALL="_F0.sys__entry" --defsym=KERNEL_TASK_MAIN="_F0.tasks__main" \
-        --defsym=KERNEL_USER_START="_F0.proc__user_start" --defsym=KERNEL_AP_MAIN="_F0.smp__ap_main" \
-        --defsym=USER_MAIN="_F0.u_enter" -o "$B/k.elf" "$B/boot.o" "$B/isr.o" "$B/switch.o" "$B/smp.o" "$B/hv.o" \
-        "$B/k.o" "$B/u.o" 2>"$B/ld.err" || { bad "ld kernel"; head -5 "$B/ld.err"; exit 1; }
-    objcopy -O elf32-i386 "$B/k.elf" "$B/k0.mb" 2>/dev/null
+    ./tools/build-kernel.sh "$B/k0.mb" --stufe 0 >"$B/e" 2>&1 \
+        || { bad "kernel does not compile"; tail -8 "$B/e"; echo "ODB: $pass passed, $fail failed"; exit 1; }
 fi
 for p in $PROGS; do
     [ -f "$B/$p.elf" ] && continue
