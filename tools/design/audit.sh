@@ -41,6 +41,7 @@ shape=osum
 # r402: `startstyle=list` puts /etc/startmenu.conf (`style=list`) on the image: the OLD list window
 # of the start menu (the runs that measure the list's rows); empty = the Windows 11 window
 startstyle=
+sidebar=flat
 # r402: `shadow=on` writes the window shadow switch into /etc/theme.conf (default: off, as shipped)
 shadow=
 # RUNDE 32: die Spur ist AUS, solange niemand sie verlangt -- siehe die
@@ -134,6 +135,7 @@ for a in "$@"; do
         bar=*) bar=${a#*=} ;;
         scheme=*) scheme=${a#*=} ;;
         startstyle=*) startstyle=${a#*=} ;;
+        sidebar=*) sidebar=${a#*=} ;;
         shadow=*) shadow=${a#*=} ;;
         mode=*) mode=${a#*=} ;;
         res=*) res=${a#*=} ;;
@@ -362,6 +364,10 @@ if [ "${fps:-off}" = on ] || [ "${mon:-off}" = on ]; then
     [ "${fps:-off}" = on ] && printf 'fps=true\n' >> "$OUT/mouse.conf"
     [ "${mon:-off}" = on ] && printf 'mon=true\n' >> "$OUT/mouse.conf"
     ARGS+=("/etc/mouse.conf=$OUT/mouse.conf@0644")
+fi
+if [ "$sidebar" = flat ]; then
+    printf 'flat\n' > "$OUT/setflat"
+    ARGS+=("/etc/setflat=$OUT/setflat@0644")
 fi
 if [ "$startstyle" = list ]; then
     printf 'style=list\n' > "$OUT/startmenu.conf"
