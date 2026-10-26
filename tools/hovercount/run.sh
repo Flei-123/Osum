@@ -84,15 +84,18 @@ else
 fi
 python3 -I - "$TMPD/c/o/00-end.ppm" "$TMPD/c/crop.png" <<'PY'
 import sys
-from PIL import Image
+from PIL import Image, ImageOps
 im = Image.open(sys.argv[1]).convert("L")
-im = im.resize((im.width * 2, im.height * 2))
-im.save(sys.argv[2])
+im = ImageOps.invert(im.crop((40, 140, 1180, 620)))
+im.resize((im.width * 3, im.height * 3)).save(sys.argv[2])
 PY
-txt=$(tesseract "$TMPD/c/crop.png" - 2>/dev/null | tr -s ' \n' ' ')
+txt=$(tesseract "$TMPD/c/crop.png" - --psm 6 2>/dev/null)
 [ -n "${HOVERCOUNT_OUT:-}" ] && cp "$TMPD/c/o/00-end.ppm" "$HOVERCOUNT_OUT/c-end.ppm" 2>/dev/null
-echo "$txt" | grep -qi "hover.in" && ok "C: /proc/frames shows frames.hover.in" || bad "C: frames.hover.in not on screen: $(echo "$txt" | cut -c1-200)"
-echo "$txt" | grep -qi "hover.popped" && ok "C: /proc/frames shows frames.hover.popped" || bad "C: frames.hover.popped not on screen"
+cval() { echo "$txt" | grep -i "hover\. *$1 " | head -1 | grep -o '[0-9]*$'; }
+pc=$(cval popped); wc=$(cval win); tc=$(cval term)
+[ -n "$pc" ] && [ "$pc" -gt 0 ] && ok "C: /proc/frames frames.hover.popped=$pc" || bad "C: frames.hover.popped not readable on screen"
+[ -n "$wc" ] && [ "$wc" -gt 0 ] && ok "C: /proc/frames frames.hover.win=$wc" || bad "C: frames.hover.win not readable on screen"
+[ -n "$tc" ] && ok "C: /proc/frames frames.hover.term=$tc" || bad "C: frames.hover.term not readable on screen"
 grep -aiqE 'panic|kernel fault|exception' "$SA" && bad "A: panic on the serial line" || ok "A: 0 panics"
 echo "HOVERCOUNT: $pass passed, $fail failed"
 [ "$fail" = 0 ]
