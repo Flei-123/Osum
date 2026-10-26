@@ -15,6 +15,7 @@ else
     OUT=$(mktemp -d)
     trap 'rm -rf "$OUT"' EXIT
 fi
+CASES=${CASES:-ABCD}
 LIMINE=${LIMINE_DIR:-/root/jarvis/projects/u_DiS4in7esMF1/orientos/vendor/limine}
 
 ok=0; bad=0
@@ -26,11 +27,11 @@ check() { local what=$1; shift; if "$@"; then pass "$what"; else fail "$what"; f
 [ -f "$BAU/osum.mb" ] && [ -f "$BAU/root.img" ] || { echo "== $BAU lacks osum.mb or root.img" >&2; exit 1; }
 [ -f "$LIMINE/BOOTX64.EFI" ] || { echo "== $LIMINE/BOOTX64.EFI missing" >&2; exit 1; }
 
-DISK_MIB=480
+DISK_MIB=280
 ESP_MIB=100
 MSR_MIB=16
-NTFS_MIB=150
-REC_MIB=50
+NTFS_MIB=60
+REC_MIB=30
 
 part_range() {
     local img=$1 n=$2 first last
@@ -95,6 +96,10 @@ make_disk() {
     printf 'foreign recovery' | dd of="$img" bs=512 seek="$rec_start" conv=notrunc status=none
 }
 
+case_enabled() {
+    [[ "$CASES" == *"$1"* ]]
+}
+
 serial_text() {
     tr -d '\000' < "$1" 2>/dev/null
 }
@@ -135,6 +140,7 @@ assert_common() {
     check "sgdisk finds no problems" bash -c 'sgdisk -v "$1" 2>&1 | grep -q "No problems found"' _ "$img"
 }
 
+case_enabled A && {
 title "A. existing \\EFI\\BOOT\\BOOTX64.EFI must survive"
 make_disk "$OUT/a.img" 1
 BEFORE_A=$(foreign_sums "$OUT/a.img")
@@ -142,7 +148,9 @@ install_into "$OUT/a.img" "$OUT/ser-a.txt" "$BAU"
 assert_common "$OUT/a.img" "$OUT/ser-a.txt" "$BEFORE_A"
 esp_get "$OUT/a.img" /EFI/BOOT/BOOTX64.EFI "$OUT/fallback.out"
 check "existing \\EFI\\BOOT\\BOOTX64.EFI byte-identical" cmp -s "$OUT/fallback.out" "$OUT/fallback.orig"
+}
 
+case_enabled B && {
 title "B. no \\EFI\\BOOT\\BOOTX64.EFI -> it is created"
 make_disk "$OUT/b.img" 0
 BEFORE_B=$(foreign_sums "$OUT/b.img")
@@ -151,7 +159,9 @@ install_into "$OUT/b.img" "$OUT/ser-b.txt" "$BAU"
 assert_common "$OUT/b.img" "$OUT/ser-b.txt" "$BEFORE_B"
 esp_get "$OUT/b.img" /EFI/BOOT/BOOTX64.EFI "$OUT/created.out"
 check "\\EFI\\BOOT\\BOOTX64.EFI created and equals Limine" cmp -s "$OUT/created.out" "$LIMINE/BOOTX64.EFI"
+}
 
+case_enabled C && {
 title "C. dialog texts"
 for lang in en de; do
     for key in dual.boot.title dual.boot.a dual.boot.b dual.boot.c dual.boot.d dual.boot.title2; do
@@ -159,8 +169,9 @@ for lang in en de; do
     done
 done
 check "dialog text is built from the brand path, not hardcoded" grep -q 'bootcfg.loader_display()' kernel/user/bootnote.fi
+}
 
-if [ -n "$OLD" ]; then
+if case_enabled D && [ -n "$OLD" ]; then
     title "D. counter-proof: old build overwrites \\EFI\\BOOT\\BOOTX64.EFI"
     make_disk "$OUT/c.img" 1
     install_into "$OUT/c.img" "$OUT/ser-c.txt" "$OLD"
