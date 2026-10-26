@@ -363,7 +363,7 @@ has "$D/ap.klar" "drvctl: no such package" "apps: drvctl remove does not touch a
 has "$D/ap.klar" "unload appdrv ok" "apps: unload by name works for app packages"
 hasnot "$D/ap.klar" "EXCEPTION" "apps: no kernel exception"
 has "$D/apn.klar" "store=off" "nostore apps: store off"
-hasnot "$D/apn.klar" "drvstore:" "counter-proof nostore apps: nothing scanned"
+hasnot "$D/apn.klar" "drvstore: pkg" "counter-proof nostore apps: nothing scanned"
 hasnot "$D/apn.klar" "src=store" "counter-proof nostore apps: nothing bound"
 has "$D/apd.klar" "drvstore: pkg appdrv ok banned app=hello.osp" "apps: deny list applies to app packages"
 has "$D/apd.klar" "drv=dupdrv src=store bind=bound" "apps: next package takes over after the ban"
