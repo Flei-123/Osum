@@ -45,14 +45,8 @@
 //   4. DIE RECHTE ALT-TASTE IST ALTGR und ist die dritte Ebene der
 //      deutschen Belegung.
 //
-// WAS DIESE RUNDE NICHT BAUT, und es steht auch in docs/I18N.md:
-// TOTE TASTEN. Auf einer deutschen Tastatur sind `^`, `´` und `` ` ``
-// tot -- sie warten auf den naechsten Buchstaben und setzen den Akzent
-// darauf (`´` dann `e` gibt `e` mit Akzent). Hier geben sie das
-// Akzentzeichen SOFORT aus. Das ist ehrlicher als ein halbes
-// Zustandsautomat: wer die franzoesischen Buchstaben braucht, braucht
-// auch eine franzoesische Belegung, und die ist eine eigene Runde. Die
-// Zeichen selbst sind in der Schrift und lassen sich einfuegen.
+// Dead keys, compose and the caps lock behaviour live in kbdinput.fi, kbddead.fi,
+// kbdcompose.fi and kbdmap.fi; the layouts are the generated data of kbdlay.fi.
 
 import serial
 import lib.kstate
@@ -61,7 +55,9 @@ import gfx.gfx
 import utf8
 import sched.time
 import ui.ax
-import drv.hid.kbdlay
+import drv.hid.kbdmap
+import keymap.kbdnames
+import drv.hid.kbdinput
 import ipc.tip
 import pwr.blchain
 import pwr.hkdiag
@@ -93,7 +89,7 @@ const L_FR: u64 = 3
 const L_ES: u64 = 4
 const L_IT: u64 = 5
 const L_RU: u64 = 6
-const LAYOUTS: u64 = 7
+const LAYOUTS: u64 = kbdnames.COUNT
 
 // Vector 33. Reading the data port acknowledges the key to the keyboard
 // -- without it the controller delivers nothing more.
@@ -389,6 +385,11 @@ fn on_code_inner(state: u64, code: u64) {
         say_hotkey(336)
         return
     }
+    if ext == 1 && code == 0x5D {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        kbdinput.compose_key()
+        return
+    }
     if ext == 1 && code < 0x80 {
         if blchain.on_ext_key(state, code) {
             kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
@@ -410,12 +411,18 @@ fn on_code_inner(state: u64, code: u64) {
         return
     }
     if code == 0x1D {
+        if ext == 1 {
+            kbdinput.rctrl_down()
+        }
         kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 1)
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         mod_down(state)
         return
     }
     if code == 0x9D {
+        if ext == 1 {
+            let _armed: bool = kbdinput.rctrl_up()
+        }
         if !mod_up(state, 2) {
             kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 0)
         }
@@ -505,6 +512,7 @@ fn on_code_inner(state: u64, code: u64) {
     // dann war es eine Kombination und kein Startknopf.
     if code < 0x80 {
         super_rein = 0
+        kbdinput.other_key()
     }
     kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
     if code >= 0x80 {
@@ -559,9 +567,11 @@ fn on_code_inner(state: u64, code: u64) {
     // deren Ring und die Belegung liesse sich nie umschalten.
     if code == 0x26 && kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1
         && kstate.get(state, kstate.K11_OFF + kstate.KB_OLD) == 1 {
-        let l: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT)
-        set_layout(state, (l + 1) % LAYOUTS)
-        say_layout(kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT))
+        cycle_layout(state)
+        return
+    }
+    if code == 0x39 && kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) == 1 {
+        cycle_layout(state)
         return
     }
     // RUNDE TILING: MIT ALT IST DIE TASTE EIN KUERZEL UND KEINE EINGABE.
@@ -835,12 +845,28 @@ fn on_code_inner(state: u64, code: u64) {
         return
     }
     // RUNDE I18N: EIN CODEPUNKT, nicht ein Oktett.
-    var c: u64 = code_of(kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT),
-        code,
-        kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1,
-        kstate.get(state, kstate.K11_OFF + kstate.KB_ALTGR) == 1)
+    let lay_now: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT)
+    let shift_now: bool = kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1
+    let altgr_now: bool = kstate.get(state, kstate.K11_OFF + kstate.KB_ALTGR) == 1
+    let typing: bool = kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 0
+        && kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) == 0
+    let caps_now: bool = typing && (lock_bits & LK_CAPS) != 0
+    var c: u64 = code_for(lay_now, code, shift_now, altgr_now, caps_now)
     if c == 0 {
         return
+    }
+    if typing {
+        let fed: u64 = kbdinput.feed_key(lay_now, code, shift_now, altgr_now, caps_now, c)
+        if fed == 0 {
+            return
+        }
+        let tail: u64 = fed >> 24
+        if tail != 0 {
+            emit(state, fed & 0xFFFFFF)
+            c = tail
+        } else {
+            c = fed
+        }
     }
     if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
         // r1014: Ctrl+Shift+C / Ctrl+Shift+V (and Ctrl+C while a terminal selection stands) belong to the terminal window
@@ -1160,7 +1186,14 @@ fn set_layout(state: u64, n: u64) -> bool {
     }
     kstate.set(state, kstate.K11_OFF + kstate.KB_LAYOUT, n)
     kstate.add(state, kstate.K11_OFF + kstate.KB_SWITCH, 1)
+    kbdinput.reset()
     return true
+}
+
+fn cycle_layout(state: u64) {
+    let l: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT)
+    let _ok: bool = set_layout(state, (l + 1) % LAYOUTS)
+    say_layout(kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT))
 }
 
 // ABTASTCODE -> CODEPUNKT.
@@ -1169,41 +1202,21 @@ fn set_layout(state: u64, n: u64) -> bool {
 // `altgr` sind die beiden Ebenen ueber der Grundebene; STRG wird
 // NACHHER angewandt (im Aufrufer), weil STRG-A auf jeder Belegung 1 ist.
 fn code_of(lay: u64, code: u64, shift: bool, altgr: bool) -> u64 {
-    // Die drei Tasten, die auf JEDER Belegung dasselbe tun und die
-    // seit Runde K1 bzw. K15 festliegen.
+    return code_for(lay, code, shift, altgr, false)
+}
+
+fn code_for(lay: u64, code: u64, shift: bool, altgr: bool, caps: bool) -> u64 {
     if code == 14 {
-        return 8 // Rueckschritt
+        return 8
     }
     if code == 15 {
-        return 9 // Tabulator
+        return 9
     }
     if code == 72 {
-        return 14 // die Pfeiltaste nach oben, Runde K6
+        return 14
     }
-    if lay == L_DE {
-        return de_code(code, shift, altgr)
-    }
-    // r-keyboard layouts UK/FR/ES/IT/RU: generated tables (kbdlay.fi, from xkb);
-    // 0 = "same as the US table"
-    if lay >= L_UK {
-        if altgr {
-            let a: u64 = kbdlay.altgr(lay, code)
-            if a != 0 {
-                return a
-            }
-        }
-        if shift {
-            let sv: u64 = kbdlay.shift(lay, code)
-            if sv != 0 {
-                return sv
-            }
-            return (shifted(code)) as u64
-        }
-        let pv: u64 = kbdlay.plain(lay, code)
-        if pv != 0 {
-            return pv
-        }
-        return (translate(code)) as u64
+    if kbdmap.has_slot(code) {
+        return kbdmap.char_of(lay, code, shift, altgr, caps)
     }
     if shift {
         return (shifted(code)) as u64
@@ -1423,211 +1436,6 @@ fn hot_take(state: u64) -> u64 {
     return (m << 8) | c
 }
 
-// ------------------------------------------- DIE DEUTSCHE BELEGUNG
-//
-// Sie steht als KETTE VON ABFRAGEN und nicht als Tabelle, und dafuer
-// gibt es einen Grund, der aus der Sprache kommt: eine Tabelle waere
-// `[u8; 58]` und damit ein Oktett je Platz -- ein `u` mit zwei Punkten
-// ist U+00FC und passt hinein, ein Eurozeichen (U+20AC) nicht. Ein Feld
-// aus `u64` liesse sich in Stufe 0 nicht als Literal schreiben. Also
-// Abfragen; der Uebersetzer macht daraus dieselbe Sprungkette wie aus
-// jedem anderen `if`.
-//
-// Was von der amerikanischen Belegung UNVERAENDERT bleibt, steht nicht
-// noch einmal hier: Buchstaben ausser Y und Z, die Ziffern, Leertaste,
-// Eingabe, Rueckschritt, Tabulator. Diese Funktion behandelt genau die
-// Tasten, die anders liegen -- und faellt fuer alles andere auf die
-// amerikanische Tabelle zurueck.
-//
-// AUFTEILUNG DER EBENEN:
-//   Grundebene    y und z vertauscht, die drei Umlaute, ss, die
-//                 Interpunktion der unteren Reihe
-//   Umschalt      die Grossbuchstaben dazu, die Zeichen der oberen Reihe
-//   AltGr         @ (Q), Euro (E), die geschweiften und eckigen
-//                 Klammern (7 8 9 0 ss), der senkrechte Strich und die
-//                 Tilde
-fn de_code(code: u64, shift: bool, altgr: bool) -> u64 {
-    if altgr {
-        return de_altgr(code)
-    }
-    if shift {
-        return de_shift(code)
-    }
-    return de_plain(code)
-}
-
-// Die Grundebene.
-fn de_plain(code: u64) -> u64 {
-    // Y und Z sind vertauscht -- das Z, das QWERTZ seinen Namen gibt.
-    if code == 0x15 {
-        return 122 // z, wo auf der amerikanischen Belegung y liegt
-    }
-    if code == 0x2C {
-        return 121 // y, wo dort z liegt
-    }
-    // Die obere Zahlenreihe endet anders: ss und ein Akzent.
-    if code == 0x0C {
-        return 0x00DF // scharfes s
-    }
-    if code == 0x0D {
-        return 0x00B4 // Akkut, NICHT tot -- siehe Kopf dieser Datei
-    }
-    // Die drei Umlaute -- der ganze Grund, warum es diese Belegung gibt.
-    if code == 0x1A {
-        return 0x00FC // u mit zwei Punkten
-    }
-    if code == 0x27 {
-        return 0x00F6 // o mit zwei Punkten
-    }
-    if code == 0x28 {
-        return 0x00E4 // a mit zwei Punkten
-    }
-    // Der Rest der Interpunktion.
-    if code == 0x1B {
-        return 43 // +
-    }
-    if code == 0x29 {
-        return 94 // ^, ebenfalls nicht tot
-    }
-    if code == 0x2B {
-        return 35 // #
-    }
-    if code == 0x33 {
-        return 44 // ,
-    }
-    if code == 0x34 {
-        return 46 // .
-    }
-    if code == 0x35 {
-        return 45 // -
-    }
-    if code == 0x56 {
-        return 60 // <, die Taste neben der linken Umschalttaste
-    }
-    return (translate(code)) as u64
-}
-
-// Mit Umschalt.
-fn de_shift(code: u64) -> u64 {
-    if code == 0x15 {
-        return 90 // Z
-    }
-    if code == 0x2C {
-        return 89 // Y
-    }
-    // Die obere Reihe. Sie hat mit der amerikanischen nichts gemein.
-    if code == 0x02 {
-        return 33 // !
-    }
-    if code == 0x03 {
-        return 34 // "
-    }
-    if code == 0x04 {
-        return 0x00A7 // Paragraphenzeichen
-    }
-    if code == 0x05 {
-        return 36 // $
-    }
-    if code == 0x06 {
-        return 37 // %
-    }
-    if code == 0x07 {
-        return 38 // &
-    }
-    if code == 0x08 {
-        return 47 // /
-    }
-    if code == 0x09 {
-        return 40 // (
-    }
-    if code == 0x0A {
-        return 41 // )
-    }
-    if code == 0x0B {
-        return 61 // =
-    }
-    if code == 0x0C {
-        return 63 // ?
-    }
-    if code == 0x0D {
-        return 96 // Gravis, nicht tot
-    }
-    if code == 0x1A {
-        return 0x00DC // U mit zwei Punkten
-    }
-    if code == 0x27 {
-        return 0x00D6 // O mit zwei Punkten
-    }
-    if code == 0x28 {
-        return 0x00C4 // A mit zwei Punkten
-    }
-    if code == 0x1B {
-        return 42 // *
-    }
-    if code == 0x29 {
-        return 0x00B0 // Gradzeichen
-    }
-    if code == 0x2B {
-        return 39 // '
-    }
-    if code == 0x33 {
-        return 59 // ;
-    }
-    if code == 0x34 {
-        return 58 // :
-    }
-    if code == 0x35 {
-        return 95 // _
-    }
-    if code == 0x56 {
-        return 62 // >
-    }
-    return (shifted(code)) as u64
-}
-
-// Die dritte Ebene. Ohne sie hat eine deutsche Tastatur kein
-// Klammeraffenzeichen und keine geschweifte Klammer -- also weder eine
-// Postanschrift noch einen Programmtext.
-fn de_altgr(code: u64) -> u64 {
-    if code == 0x10 {
-        return 64 // @ auf Q
-    }
-    if code == 0x12 {
-        return 0x20AC // Eurozeichen auf E
-    }
-    if code == 0x03 {
-        return 0x00B2 // hochgestellte Zwei
-    }
-    if code == 0x04 {
-        return 0x00B3 // hochgestellte Drei
-    }
-    if code == 0x08 {
-        return 123 // {
-    }
-    if code == 0x09 {
-        return 91 // [
-    }
-    if code == 0x0A {
-        return 93 // ]
-    }
-    if code == 0x0B {
-        return 125 // }
-    }
-    if code == 0x0C {
-        return 92 // Rueckstrich
-    }
-    if code == 0x1B {
-        return 126 // Tilde
-    }
-    if code == 0x32 {
-        return 0x00B5 // My auf M
-    }
-    if code == 0x56 {
-        return 124 // senkrechter Strich
-    }
-    return 0
-}
-
 // --------------------------------------------------------- die Meldung
 
 fn say_key(c: u64) {
@@ -1698,32 +1506,11 @@ fn hex4(v: u64) {
 fn say_layout(n: u64) {
     var label: [u8; 14] = "kbd: layout=\0\0"
     serial.puts((&label[0]) as u64)
-    var nm: [u8; 3] = "us\0"
-    if n == L_DE {
-        nm[0 as usize] = 100 as u8 // 'd'
-        nm[1 as usize] = 101 as u8 // 'e'
+    var i: u64 = 0
+    while i < kbdnames.NAME_LEN && kbdnames.name_at(n, i) != 0 {
+        serial.put(kbdnames.name_at(n, i) as u8)
+        i = i + 1
     }
-    if n == L_UK {
-        nm[0 as usize] = 117 as u8 // 'u'
-        nm[1 as usize] = 107 as u8 // 'k'
-    }
-    if n == L_FR {
-        nm[0 as usize] = 102 as u8 // 'f'
-        nm[1 as usize] = 114 as u8 // 'r'
-    }
-    if n == L_ES {
-        nm[0 as usize] = 101 as u8 // 'e'
-        nm[1 as usize] = 115 as u8 // 's'
-    }
-    if n == L_IT {
-        nm[0 as usize] = 105 as u8 // 'i'
-        nm[1 as usize] = 116 as u8 // 't'
-    }
-    if n == L_RU {
-        nm[0 as usize] = 114 as u8 // 'r'
-        nm[1 as usize] = 117 as u8 // 'u'
-    }
-    serial.puts((&nm[0]) as u64)
     serial.nl()
 }
 
