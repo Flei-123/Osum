@@ -74,6 +74,7 @@ import usbnet.ch397
 import usbnet.ax88772
 import usbnet.ax88772_drv
 import drv.net.usbnet
+import drv.net.usbvnic
 import drv.usb.xhci
 import drv.usb.chdiag
 import drv.usb.usbdiag
@@ -103,7 +104,7 @@ export {
     rangtest, rangtest_max,
     // RUNDE HIDPUNKTE: die Punktzahl je Regler und die getroffene Wahl.
     punkte, pkt_get, choice,
-    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM, DRV_RNDIS, DRV_NCM, DRV_CH336, DRV_AX88772,
+    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM, DRV_RNDIS, DRV_NCM, DRV_CH336, DRV_AX88772, DRV_AX88179, DRV_RTL8153,
     // ============================== RUNDE BLECHEINGABE
     // Was der Kern WIRKLICH sieht -- fuer den Bericht auf dem Schirm.
     // Justin kann nur fotografieren; eine Diagnose auf der seriellen
@@ -478,6 +479,8 @@ const DRV_NCM: u64 = 9
 const DRV_CH336: u64 = 10
 // r1607: ASIX AX88772/772B (0B95:7720/772A/772B/7E2B): vendor-class function taken by id, bring-up in `ax88772_start`; unverified on silicon.
 const DRV_AX88772: u64 = 11
+const DRV_AX88179: u64 = 12
+const DRV_RTL8153: u64 = 13
 const S_AXOK: u64 = 0x1D0 // 1 = a vendor-class interface may be picked in `wanted` (ASIX dongle)
 // Scratch cells of the USB state page (inside the 0x200 bytes that `stage` clears).
 const S_RNDISOK: u64 = 0x1E0 // 1 = RNDIS control interfaces may be picked in `wanted`
@@ -1362,7 +1365,8 @@ fn punkte(state: u64) -> u64 {
                 }
             } else if k == DRV_HIDGEN {
                 p = p + 1
-            } else if k == DRV_CH336 || k == DRV_ECM || k == DRV_NCM || k == DRV_RNDIS || k == DRV_AX88772 {
+            } else if k == DRV_CH336 || k == DRV_ECM || k == DRV_NCM || k == DRV_RNDIS || k == DRV_AX88772
+                || k == DRV_AX88179 || k == DRV_RTL8153 {
                 p = p + 2
             }
         }
@@ -1419,6 +1423,16 @@ fn drv_name(k: u64) {
     var s_c: [u8; 4] = "ncm\0"
     var s_w: [u8; 6] = "ch336\0"
     var s_ax: [u8; 8] = "ax88772\0"
+    var s_a9: [u8; 8] = "ax88179\0"
+    var s_rt: [u8; 8] = "rtl8153\0"
+    if k == DRV_AX88179 {
+        serial.puts((&s_a9[0]) as u64)
+        return
+    }
+    if k == DRV_RTL8153 {
+        serial.puts((&s_rt[0]) as u64)
+        return
+    }
     if k == DRV_CH336 {
         serial.puts((&s_w[0]) as u64)
         return
@@ -1639,11 +1653,12 @@ fn configure(state: u64, d: u64) -> bool {
         s(state, S_CHOK, 1)
     }
     let ax: bool = ax88772.supported(dg(state, d, D_VID), dg(state, d, D_PID))
-    if ax {
+    let vchip: u64 = usbvnic.chip_for(dg(state, d, D_VID), dg(state, d, D_PID))
+    if ax || vchip != usbvnic.CHIP_NONE {
         s(state, S_AXOK, 1)
     }
     let noecm0: u64 = g(state, S_NOECM)
-    let prefer_vendor: bool = ch397.supported(dg(state, d, D_VID), dg(state, d, D_PID))
+    let prefer_vendor: bool = ch397.supported(dg(state, d, D_VID), dg(state, d, D_PID)) || vchip != usbvnic.CHIP_NONE
     if prefer_vendor {
         s(state, S_NOECM, 1)
     }
@@ -1665,6 +1680,10 @@ fn configure(state: u64, d: u64) -> bool {
         ds(state, d, D_INTDCI, 0)
         if ax {
             ds(state, d, D_DRIVER, DRV_AX88772)
+        } else if vchip == usbvnic.CHIP_AX88179 {
+            ds(state, d, D_DRIVER, DRV_AX88179)
+        } else if vchip == usbvnic.CHIP_RTL8153 {
+            ds(state, d, D_DRIVER, DRV_RTL8153)
         }
     }
     if dg(state, d, D_DRIVER) == DRV_NONE && g(state, S_RNDISOK) == 0 {
@@ -2578,6 +2597,11 @@ fn bind(state: u64, d: u64) {
     }
     if k == DRV_AX88772 {
         ax88772_start(state, d)
+        return
+    }
+    if k == DRV_AX88179 || k == DRV_RTL8153 {
+        usbvnic.start(state, k - DRV_AX88772, dg(state, d, D_SLOT), dg(state, d, D_INDCI), dg(state, d, D_OUTDCI),
+            dg(state, d, D_BULKMPS), dg(state, d, D_SPEED), state + DESC_OFF)
         return
     }
     if k == DRV_ISOTEST {

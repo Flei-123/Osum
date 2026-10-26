@@ -1,0 +1,309 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import usbnet.rtl8153
+import usbnet.le
+
+export {
+    bringup, link_sync, STEP_VERSION, STEP_USB_CTRL, STEP_MAC, STEP_PLAUSIBLE, STEP_PHY_POWER, STEP_UP, STEP_EXTRA, STEP_AUTONEG,
+    LINK_UNKNOWN, AUTOLOAD_TRIES, AUTOLOAD_PAUSE_US
+}
+
+const STEP_VERSION: u64 = 1
+const STEP_PHY_POWER: u64 = 2
+const STEP_USB_CTRL: u64 = 3
+const STEP_MAC: u64 = 4
+const STEP_PLAUSIBLE: u64 = 5
+const STEP_UP: u64 = 6
+const STEP_EXTRA: u64 = 7
+const STEP_AUTONEG: u64 = 8
+const LINK_UNKNOWN: u64 = 0xFF
+const AUTOLOAD_TRIES: u64 = 100
+const AUTOLOAD_PAUSE_US: u64 = 20000
+const POLL_PAUSE_US: u64 = 1500
+const POLL_TRIES: u64 = 1000
+const RESET_PAUSE_US: u64 = 100
+const ERR: u64 = 0x8000000000000000
+
+fn rd32(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64) -> u64 {
+    le.zero(b, 8)
+    if c(s, sl, 0xC0, rtl8153.REQ_REGS, addr & 0xFFFC, ty, 4, b) < 4 { return ERR }
+    return le.get32(b, 0)
+}
+
+fn wr_m(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64, mask: u64, v: u64) -> bool {
+    le.put32(b, 0, v)
+    return c(s, sl, 0x40, rtl8153.REQ_REGS, addr & 0xFFFC, ty | mask | (mask << 4), 4, b) >= 0
+}
+
+fn rd16(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64) -> u64 {
+    let d: u64 = rd32(s, sl, c, b, ty, addr)
+    if d == ERR { return ERR }
+    return (d >> ((addr & 2) * 8)) & 0xFFFF
+}
+
+fn rd8(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64) -> u64 {
+    let d: u64 = rd32(s, sl, c, b, ty, addr)
+    if d == ERR { return ERR }
+    return (d >> ((addr & 3) * 8)) & 0xFF
+}
+
+fn wr32(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64, v: u64) -> bool {
+    return wr_m(s, sl, c, b, ty, addr, 0xF, v)
+}
+
+fn wr16(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64, v: u64) -> bool {
+    let sh: u64 = addr & 2
+    return wr_m(s, sl, c, b, ty, addr, 0x3 << sh, (v & 0xFFFF) << (sh * 8))
+}
+
+fn wr8(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64, v: u64) -> bool {
+    let sh: u64 = addr & 3
+    return wr_m(s, sl, c, b, ty, addr, 0x1 << sh, (v & 0xFF) << (sh * 8))
+}
+
+fn set16(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64, bits: u64) -> bool {
+    let v: u64 = rd16(s, sl, c, b, ty, addr)
+    if v == ERR { return false }
+    return wr16(s, sl, c, b, ty, addr, v | bits)
+}
+
+fn clr16(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64, bits: u64) -> bool {
+    let v: u64 = rd16(s, sl, c, b, ty, addr)
+    if v == ERR { return false }
+    return wr16(s, sl, c, b, ty, addr, v & ~bits)
+}
+
+fn w0w1_16(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64, clr: u64, set: u64) -> bool {
+    let v: u64 = rd16(s, sl, c, b, ty, addr)
+    if v == ERR { return false }
+    return wr16(s, sl, c, b, ty, addr, (v & ~clr) | set)
+}
+
+fn set8(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64, bits: u64) -> bool {
+    let v: u64 = rd8(s, sl, c, b, ty, addr)
+    if v == ERR { return false }
+    return wr8(s, sl, c, b, ty, addr, v | bits)
+}
+
+fn clr8(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64, bits: u64) -> bool {
+    let v: u64 = rd8(s, sl, c, b, ty, addr)
+    if v == ERR { return false }
+    return wr8(s, sl, c, b, ty, addr, v & ~bits)
+}
+
+fn clr32(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, ty: u64, addr: u64, bits: u64) -> bool {
+    let v: u64 = rd32(s, sl, c, b, ty, addr)
+    if v == ERR { return false }
+    return wr32(s, sl, c, b, ty, addr, v & ~bits)
+}
+
+fn ocp_rd(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, addr: u64) -> u64 {
+    if !wr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_OCP_GPHY_BASE, addr & 0xF000) { return ERR }
+    return rd16(s, sl, c, b, rtl8153.MCU_PLA, (addr & 0x0FFF) | 0xB000)
+}
+
+fn ocp_wr(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, addr: u64, v: u64) -> bool {
+    if !wr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_OCP_GPHY_BASE, addr & 0xF000) { return false }
+    return wr16(s, sl, c, b, rtl8153.MCU_PLA, (addr & 0x0FFF) | 0xB000, v)
+}
+
+fn mdio_rd(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, reg: u64) -> u64 {
+    return ocp_rd(s, sl, c, b, rtl8153.ocp_index(reg))
+}
+
+fn mdio_wr(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, reg: u64, v: u64) -> bool {
+    return ocp_wr(s, sl, c, b, rtl8153.ocp_index(reg), v)
+}
+
+fn wait_link_list(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, dl: fn(u64, u64), b: u64) {
+    var i: u64 = 0
+    while i < POLL_TRIES {
+        let v: u64 = rd8(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_OOB_CTRL)
+        if v != ERR && (v & rtl8153.LINK_LIST_READY) != 0 { return }
+        dl(s, POLL_PAUSE_US)
+        i = i + 1
+    }
+}
+
+fn nic_reset(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, dl: fn(u64, u64), b: u64) -> bool {
+    if !wr8(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_CR, rtl8153.CR_RST) { return false }
+    var i: u64 = 0
+    while i < POLL_TRIES {
+        let v: u64 = rd8(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_CR)
+        if v != ERR && (v & rtl8153.CR_RST) == 0 { return true }
+        dl(s, RESET_PAUSE_US)
+        i = i + 1
+    }
+    return true
+}
+
+fn teredo_off(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, family: u64) -> bool {
+    if family == rtl8153.FAMILY_8153B {
+        if !wr8(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_TEREDO_CFG, 0xFF) { return false }
+    } else {
+        if !clr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_TEREDO_CFG, rtl8153.TEREDO_CLEAR_OLD) { return false }
+    }
+    if !wr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_WDT6_CTRL, rtl8153.WDT6_SET_MODE) { return false }
+    if !wr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_REALWOW_TIMER, 0) { return false }
+    return wr32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_TEREDO_TIMER, 0)
+}
+
+fn bmu_reset(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64) -> bool {
+    if !clr8(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_BMU_RESET, rtl8153.BMU_RESET_BOTH) { return false }
+    return set8(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_BMU_RESET, rtl8153.BMU_RESET_BOTH)
+}
+
+fn oob_exit(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, dl: fn(u64, u64), b: u64) -> bool {
+    if !clr8(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_OOB_CTRL, rtl8153.NOW_IS_OOB) { return false }
+    if !clr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_SFF_STS_7, rtl8153.MCU_BORW_EN) { return false }
+    wait_link_list(s, sl, c, dl, b)
+    if !set16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_SFF_STS_7, rtl8153.RE_INIT_LL) { return false }
+    wait_link_list(s, sl, c, dl, b)
+    return true
+}
+
+fn first_init_8153(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, dl: fn(u64, u64), b: u64, family: u64) -> bool {
+    if !set16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_MISC_1, rtl8153.RXDY_GATED_EN) { return false }
+    if !teredo_off(s, sl, c, b, family) { return false }
+    if !clr32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RCR, rtl8153.RCR_ACPT_ALL) { return false }
+    if !nic_reset(s, sl, c, dl, b) { return false }
+    if !bmu_reset(s, sl, c, b) { return false }
+    if !oob_exit(s, sl, c, dl, b) { return false }
+    if !clr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_CPCR, rtl8153.CPCR_RX_VLAN) { return false }
+    if !wr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RMS, rtl8153.RMS_DEFAULT) { return false }
+    if !wr8(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_MTPS, rtl8153.MTPS_JUMBO) { return false }
+    if !set16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_TCR0, rtl8153.TCR0_AUTO_FIFO) { return false }
+    if !nic_reset(s, sl, c, dl, b) { return false }
+    if !wr32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RXFIFO_CTRL0, rtl8153.RXFIFO_THR1_NORMAL) { return false }
+    if !wr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RXFIFO_CTRL1, rtl8153.RXFIFO_THR2_NORMAL) { return false }
+    if !wr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RXFIFO_CTRL2, rtl8153.RXFIFO_THR3_NORMAL) { return false }
+    return wr32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_TXFIFO_CTRL, rtl8153.TXFIFO_THR_NORMAL2)
+}
+
+fn exit_oob_8152(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, dl: fn(u64, u64), b: u64, usb_speed: u64) -> bool {
+    if !clr32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RCR, rtl8153.RCR_ACPT_ALL) { return false }
+    if !set16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_MISC_1, rtl8153.RXDY_GATED_EN) { return false }
+    if !teredo_off(s, sl, c, b, rtl8153.FAMILY_8152) { return false }
+    if !wr8(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_CRWECR, 0) { return false }
+    if !wr8(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_CR, 0) { return false }
+    if !oob_exit(s, sl, c, dl, b) { return false }
+    if !nic_reset(s, sl, c, dl, b) { return false }
+    if !wr32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RXFIFO_CTRL0, rtl8153.RXFIFO_THR1_NORMAL) { return false }
+    var t2: u64 = rtl8153.RXFIFO_THR2_HIGH
+    var t3: u64 = rtl8153.RXFIFO_THR3_HIGH
+    if usb_speed < 3 {
+        t2 = rtl8153.RXFIFO_THR2_FULL
+        t3 = rtl8153.RXFIFO_THR3_FULL
+    }
+    if !wr32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RXFIFO_CTRL1, t2) { return false }
+    if !wr32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RXFIFO_CTRL2, t3) { return false }
+    if !wr32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_TXFIFO_CTRL, rtl8153.TXFIFO_THR_NORMAL2) { return false }
+    if !wr8(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_TX_AGG, rtl8153.TX_AGG_MAX_THRESHOLD) { return false }
+    if !wr32(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_RX_BUF_TH, rtl8153.RX_THR_HIGH) { return false }
+    if !wr32(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_TX_DMA, rtl8153.TX_DMA_DEFAULT) { return false }
+    if !clr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_CPCR, rtl8153.CPCR_RX_VLAN) { return false }
+    if !wr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RMS, rtl8153.RMS_DEFAULT) { return false }
+    return set16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_TCR0, rtl8153.TCR0_AUTO_FIFO)
+}
+
+fn autoneg(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, family: u64) -> bool {
+    let adv: u64 = mdio_rd(s, sl, c, b, rtl8153.MII_ADVERTISE)
+    if adv == ERR { return false }
+    if !mdio_wr(s, sl, c, b, rtl8153.MII_ADVERTISE, adv | rtl8153.ADVERTISE_ALL) { return false }
+    if family != rtl8153.FAMILY_8152 {
+        let g: u64 = mdio_rd(s, sl, c, b, rtl8153.MII_CTRL1000)
+        if g == ERR { return false }
+        if !mdio_wr(s, sl, c, b, rtl8153.MII_CTRL1000, g | rtl8153.CTRL1000_FULL) { return false }
+    }
+    return mdio_wr(s, sl, c, b, rtl8153.MII_BMCR, rtl8153.BMCR_ANENABLE_RESTART)
+}
+
+fn bringup(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, dl: fn(u64, u64), b: u64,
+    usb_speed: u64, step: *mut u64, fam: *mut u64) -> u64 {
+    *step = STEP_VERSION
+    let t0: u64 = rd32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_TCR0)
+    if t0 == ERR { return 0 }
+    let family: u64 = rtl8153.family_of(t0)
+    *fam = family
+    if family == rtl8153.FAMILY_NONE { return 0 }
+    var i: u64 = 0
+    while i < AUTOLOAD_TRIES {
+        let v: u64 = rd16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_BOOT_CTRL)
+        if v != ERR && (v & rtl8153.AUTOLOAD_DONE) != 0 { i = AUTOLOAD_TRIES } else {
+            dl(s, AUTOLOAD_PAUSE_US)
+            i = i + 1
+        }
+    }
+    *step = STEP_PHY_POWER
+    let bmcr: u64 = mdio_rd(s, sl, c, b, rtl8153.MII_BMCR)
+    if bmcr == ERR { return 0 }
+    if (bmcr & rtl8153.BMCR_PDOWN) != 0 {
+        if !mdio_wr(s, sl, c, b, rtl8153.MII_BMCR, bmcr & ~rtl8153.BMCR_PDOWN) { return 0 }
+    }
+    *step = STEP_USB_CTRL
+    if !clr16(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_USB_CTRL, rtl8153.RX_AGG_DISABLE | rtl8153.RX_ZERO_EN) { return 0 }
+    *step = STEP_MAC
+    let lo: u64 = rd32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_IDR)
+    let hi: u64 = rd32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_IDR + 4)
+    if lo == ERR || hi == ERR { return 0 }
+    let mac: u64 = lo | ((hi & 0xFFFF) << 32)
+    *step = STEP_PLAUSIBLE
+    if mac == 0 || (mac & 1) != 0 { return 0 }
+    *step = STEP_UP
+    if family == rtl8153.FAMILY_8152 {
+        if !exit_oob_8152(s, sl, c, dl, b, usb_speed) { return 0 }
+    } else {
+        if !first_init_8153(s, sl, c, dl, b, family) { return 0 }
+    }
+    *step = STEP_EXTRA
+    if family == rtl8153.FAMILY_8153B {
+        if !wr16(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_MSC_TIMER, rtl8153.MSC_TIMER_VALUE) { return 0 }
+        if !wr32(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_RX_BUF_TH, rtl8153.RX_THR_B) { return 0 }
+        if !clr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_MAC_PWR_CTRL3, rtl8153.MCU_SPDWN_EN) { return 0 }
+    }
+    *step = STEP_AUTONEG
+    if !autoneg(s, sl, c, b, family) { return 0 }
+    *step = 0
+    return mac
+}
+
+fn enable(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, family: u64, usb_speed: u64, phystatus: u64) -> bool {
+    if family != rtl8153.FAMILY_8152 {
+        let coal: u64 = rtl8153.aggr_timer(family, usb_speed)
+        if !wr16(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_RX_EARLY_TIMEOUT, rtl8153.early_timeout(family, usb_speed)) { return false }
+        if family == rtl8153.FAMILY_8153B {
+            if !wr16(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_RX_EXTRA_AGGR_TMR, coal) { return false }
+        }
+        if !wr16(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_RX_EARLY_SIZE, rtl8153.early_size(family)) { return false }
+        let cls: u64 = rtl8153.link_class(phystatus)
+        var ifg: u64 = rtl8153.IFG_96NS
+        if cls != rtl8153.LINK_1000 && !rtl8153.link_full(phystatus) { ifg = rtl8153.IFG_144NS }
+        if !w0w1_16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_TCR1, rtl8153.IFG_MASK, ifg) { return false }
+    }
+    if !clr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_FMC, rtl8153.FMC_FCR_MCU_EN) { return false }
+    if !set16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_FMC, rtl8153.FMC_FCR_MCU_EN) { return false }
+    if !set8(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_CR, rtl8153.CR_RE | rtl8153.CR_TE) { return false }
+    if family == rtl8153.FAMILY_8153B {
+        if !wr8(s, sl, c, b, rtl8153.MCU_USB, rtl8153.USB_UPT_RXDMA_OWN, rtl8153.OWN_UPDATE_CLEAR) { return false }
+    }
+    if !clr16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_MISC_1, rtl8153.RXDY_GATED_EN) { return false }
+    var i: u64 = 0
+    while i < 8 {
+        le.st8(b, i, 0xFF)
+        i = i + 1
+    }
+    if c(s, sl, 0x40, rtl8153.REQ_REGS, rtl8153.PLA_MAR, rtl8153.MCU_PLA | 0xFF, 8, b) < 0 { return false }
+    let rcr: u64 = rd32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RCR)
+    if rcr == ERR { return false }
+    return wr32(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_RCR, (rcr & ~rtl8153.RCR_ACPT_ALL) | rtl8153.RCR_DEFAULT)
+}
+
+fn link_sync(s: u64, sl: u64, c: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, b: u64, family: u64, usb_speed: u64, prev: u64) -> u64 {
+    let ph: u64 = rd16(s, sl, c, b, rtl8153.MCU_PLA, rtl8153.PLA_PHYSTATUS)
+    if ph == ERR { return prev }
+    let cls: u64 = rtl8153.link_class(ph)
+    if cls == prev { return prev }
+    if cls != rtl8153.LINK_DOWN {
+        if !enable(s, sl, c, b, family, usb_speed, ph) { return prev }
+    }
+    return cls
+}

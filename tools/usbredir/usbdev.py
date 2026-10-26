@@ -32,6 +32,11 @@ ap.add_argument('--max-secs', type=int, default=240)
 ap.add_argument('--phy-boot', default='down')
 ap.add_argument('--phy-deaf', action='store_true')
 ap.add_argument('--intr', default='off')
+ap.add_argument('--link', default='up')
+ap.add_argument('--usb', default='ss')
+ap.add_argument('--rtl-family', default='8153a')
+ap.add_argument('--speed', type=int, default=2)
+ap.add_argument('--inject', type=int, default=0)
 A = ap.parse_args()
 MAC = bytes(int(x, 16) for x in A.mac.split(':'))
 LOGF = open(A.log, 'w') if A.log else sys.stderr
@@ -103,6 +108,10 @@ def vendor_alt_ifaces():
             dict(n=0, alt=1, cls=0xFF, sub=0xFF, proto=0xFF, eps=[(INT_IN, 3, 16, 1), (BULK_IN, 2, 512, 0), (BULK_OUT, 2, 512, 0)])]
 
 
+def nic_ifaces():
+    return [dict(n=0, alt=0, cls=0xFF, sub=0xFF, proto=0x00, eps=[(INT_IN, 3, 8, 11), (BULK_IN, 2, 512, 0), (BULK_OUT, 2, 512, 0)])]
+
+
 def ecm_ifaces(first):
     ci = first
     di = first + 1
@@ -149,6 +158,15 @@ PROFILES['android-ncm'] = dict(kind='ncm', vid=0x18D1, pid=0x4EE8, dcls=0, multi
 PROFILES['ch336'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[vendor_ifaces(), ecm_ifaces(0)])
 PROFILES['ch336-alt1'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[vendor_alt_ifaces(), ecm_ifaces(0)])
 PROFILES['ch336-ecmfirst'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[ecm_ifaces(0), vendor_ifaces()])
+PROFILES['ax88179'] = dict(kind='ax179', vid=0x0B95, pid=0x1790, dcls=0, multi=1, cfgs=[nic_ifaces(), ecm_ifaces(0)])
+PROFILES['ax88179-multi'] = dict(kind='ax179', vid=0x0B95, pid=0x1790, dcls=0, multi=3, cfgs=[nic_ifaces(), ecm_ifaces(0)])
+PROFILES['ax88178a'] = dict(kind='ax179', vid=0x0B95, pid=0x178A, dcls=0, multi=1, cfgs=[nic_ifaces(), ecm_ifaces(0)])
+PROFILES['rtl8153'] = dict(kind='rtl', vid=0x0BDA, pid=0x8153, dcls=0, multi=1, cfgs=[nic_ifaces(), ecm_ifaces(0)])
+PROFILES['rtl8153-multi'] = dict(kind='rtl', vid=0x0BDA, pid=0x8153, dcls=0, multi=3, cfgs=[nic_ifaces(), ecm_ifaces(0)])
+PROFILES['rtl8152'] = dict(kind='rtl', vid=0x0BDA, pid=0x8152, dcls=0, multi=1, cfgs=[nic_ifaces(), ecm_ifaces(0)])
+PROFILES['ax88179-ecmfirst'] = dict(kind='ax179', vid=0x0B95, pid=0x1790, dcls=0, multi=1, cfgs=[ecm_ifaces(0), nic_ifaces()])
+PROFILES['ax-unknown'] = dict(kind='ax179', vid=0x0B95, pid=0x9999, dcls=0, multi=1, cfgs=[nic_ifaces(), ecm_ifaces(0)])
+PROFILES['rtl-unknown'] = dict(kind='rtl', vid=0x0BDA, pid=0x8199, dcls=0, multi=1, cfgs=[nic_ifaces(), ecm_ifaces(0)])
 PROF = PROFILES[A.profile]
 KIND = PROF['kind']
 CFGS = [build_cfg(i + 1, c) for i, c in enumerate(PROF['cfgs'])]
@@ -193,7 +211,14 @@ class Link:
 LINK = Link()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ch336model import Ch336Model
+from ax179model import Ax179Model
+from rtl8153model import Rtl8153Model
 CH = Ch336Model(MAC, A.phy_boot, lambda s: log(s), not A.phy_deaf) if PROF['kind'] == 'ch336' else None
+VN = None
+if PROF['kind'] == 'ax179':
+    VN = Ax179Model(MAC, lambda s: log(s), A.link, A.usb, PROF['multi'])
+elif PROF['kind'] == 'rtl':
+    VN = Rtl8153Model(MAC, lambda s: log(s), A.rtl_family, A.link, PROF['multi'])
 STAT = dict(tx=0, rx=0)
 
 
@@ -262,6 +287,7 @@ class Dev:
         self.got_hello = False
         self.intr_last = None
         self.intr_t = 0.0
+        self.injected = False
 
     def tx(self, typ, rid, payload=b''):
         self.sock.setblocking(True)
@@ -273,7 +299,7 @@ class Dev:
         self.cfg = 1
         self.alt = {}
         self.send_info()
-        self.tx(T_CONNECT, 0, bytes([2, PROF['dcls'], 0, 0]) + u16(PROF['vid']) + u16(PROF['pid']) + u16(0x0310))
+        self.tx(T_CONNECT, 0, bytes([A.speed, PROF['dcls'], 0, 0]) + u16(PROF['vid']) + u16(PROF['pid']) + u16(0x0310))
         log('device_connect profile=%s' % A.profile)
 
     def active_ifaces(self):
@@ -355,6 +381,10 @@ class Dev:
             out = CH.control(rt, req, val, idx, data, ln)
             if out is not None:
                 return self.ctl_reply(rid, h, 0, out)
+        if VN is not None:
+            out = VN.control(rt, req, val, idx, data, ln)
+            if out is not None:
+                return self.ctl_reply(rid, h, 0, out)
         log('ctl STALL rt=%02x req=%02x val=%04x idx=%04x' % (rt, req, val, idx))
         return self.ctl_reply(rid, h, 4)
 
@@ -390,6 +420,8 @@ class Dev:
             frames = rndis_unwrap(data)
         elif KIND == 'ch336':
             frames = CH.unwrap_out(data)
+        elif VN is not None:
+            frames = VN.unwrap_out(data)
         else:
             frames = [data]
         if KIND == 'ch336' and not CH.started:
@@ -399,15 +431,24 @@ class Dev:
             LINK.send(f)
 
     def pack_in(self):
-        n = PROF['multi'] if KIND == 'ncm' else 1
+        n = PROF['multi'] if KIND in ('ncm', 'ax179', 'rtl') else 1
+        if KIND == 'rtl' and not VN.aggregate():
+            n = 1
         take = []
         if KIND == 'ch336' and not CH.started:
             LINK.to_guest.clear()
+        if VN is not None and not VN.can_rx():
+            LINK.to_guest.clear()
+            return None
         while LINK.to_guest and len(take) < n:
             take.append(LINK.to_guest.pop(0))
         if not take:
             return None
         STAT['rx'] += len(take)
+        if VN is not None:
+            if len(take) > 1:
+                log('pack n=%d' % len(take))
+            log('rx total %d' % STAT['rx'])
         if KIND == 'ncm':
             self.seq += 1
             return ntb_wrap(take, self.seq)
@@ -415,9 +456,22 @@ class Dev:
             return rndis_pkt(take[0])
         if KIND == 'ch336':
             return CH.wrap_in(take[0])
+        if VN is not None:
+            return VN.wrap_in(take)
         return take[0]
 
+    def inject_burst(self):
+        if not A.inject or self.injected or VN is None or not VN.can_rx():
+            return
+        self.injected = True
+        for i in range(A.inject):
+            body = bytes((i * 7 + k) & 255 for k in range(46 + i * 3))
+            LINK.to_guest.append(b'\xff' * 6 + bytes([0x02, 0xAA, 0xBB, 0xCC, 0xDD, i]) + b'\x88\xb5' + body)
+        log('inject %d frames' % A.inject)
+
     def serve_in(self):
+        if self.pend_in:
+            self.inject_burst()
         while self.pend_in and LINK.to_guest:
             rid, ep, ln = self.pend_in.pop(0)
             b = self.pack_in()
@@ -560,6 +614,8 @@ def main():
             d.serve_in()
             d.serve_intr()
     log('stats tx=%d rx=%d ctrl=%d' % (STAT['tx'], STAT['rx'], d.n_ctrl))
+    if VN is not None:
+        log('model violations=%d bad_tx=%d' % (VN.violations, VN.bad_tx))
 
 
 main()

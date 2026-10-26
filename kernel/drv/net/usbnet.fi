@@ -45,10 +45,15 @@ import usbnet.rndis
 import usbnet.ncm
 import usbnet.ch397
 import usbnet.ax88772
+import usbnet.ax88179
+import usbnet.ax88179_drv
+import usbnet.rtl8153
+import usbnet.rtl8153_drv
+import usbnet.le
 import drv.net.ch336
 
 export {
-    attach, attach_rndis, attach_ncm, attach_ch336, attach_ax88772, detach, unplug_slot, link_on, keepalives, exists, present_on, ready_on, up_on, mac_at_on,
+    attach, attach_rndis, attach_ncm, attach_ch336, attach_ax88772, attach_ax88179, attach_rtl8153, detach, unplug_slot, link_on, keepalives, exists, present_on, ready_on, up_on, mac_at_on,
     rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
     rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
     errors, err_kind, err_cc, MAX_UNITS, FRAME_MAX, ch_bringup, mode_get, tx_diag, ch_link, ch_bmsr, ch_cfg, ch_fw, ch_changes, ch_phy, ch_intr
@@ -103,6 +108,20 @@ const C_TXFAIL: u64 = 0x1E8
 const C_TXHALT: u64 = 0x1F0
 const C_TXEPST: u64 = 0x1F8
 const CH_BASE: u64 = 0x2800
+const C_BIG: u64 = 0x400
+const C_RXN: u64 = 0x408
+const C_RXIDX: u64 = 0x410
+const C_FAM: u64 = 0x418
+const C_USBSPD: u64 = 0x420
+const C_VLINK: u64 = 0x428
+const C_VNEXT: u64 = 0x430
+const RES_OFF: u64 = 0x440
+const RES2_OFF: u64 = 0x480
+const BIG_FRAMES: u64 = 16
+const VHOUSE_FAST: u64 = 100
+const VHOUSE_SLOW: u64 = 300
+const MODE_AX179: u64 = 5
+const MODE_RTL: u64 = 6
 const CMD_OFF: u64 = 0x200
 const RSP_OFF: u64 = 0x300
 const HOUSE_TICKS: u64 = 300
@@ -205,6 +224,27 @@ fn attach_ax88772(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac:
     return attach_mode(state, slot, indci, outdci, mps, mac, 4)
 }
 
+fn attach_ax88179(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64, speed: u64) -> bool {
+    if !attach_mode(state, slot, indci, outdci, mps, mac, MODE_AX179) {
+        return false
+    }
+    cs(state, C_USBSPD, speed)
+    vlink_reset(state)
+    vhouse(state)
+    return true
+}
+
+fn attach_rtl8153(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64, family: u64, speed: u64) -> bool {
+    if !attach_mode(state, slot, indci, outdci, mps, mac, MODE_RTL) {
+        return false
+    }
+    cs(state, C_FAM, family)
+    cs(state, C_USBSPD, speed)
+    vlink_reset(state)
+    vhouse(state)
+    return true
+}
+
 // r811: the NCM function (already configured by usb.fi): `div/rem/align/outmax` are the device's NTB OUT rules.
 fn attach_ncm(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64,
     div: u64, rem: u64, align: u64, outmax: u64) -> bool {
@@ -219,9 +259,35 @@ fn attach_ncm(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64
     return true
 }
 
+fn big_alloc(state: u64) -> bool {
+    if cg(state, C_BIG) != 0 {
+        return true
+    }
+    let r: u64 = mem.frame_run(state, BIG_FRAMES)
+    if r == 0 {
+        return false
+    }
+    var base: u64 = r
+    let up: u64 = (r + 0xFFFF) & 0xFFFFFFFFFFFF0000
+    if up + ax88179.RX_BUF_MAX <= r + BIG_FRAMES * 4096 {
+        base = up
+    }
+    cs(state, C_BIG, base)
+    return true
+}
+
+fn say_second() {
+    var s_two: [u8; 31] = "usbnet: second adapter ignored\0"
+    say((&s_two[0]) as u64)
+}
+
 fn attach_mode(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64,
     mode: u64) -> bool {
     var b: u64 = blk(state)
+    if b != 0 && cg(state, C_READY) != 0 && cg(state, C_SLOT) != slot {
+        say_second()
+        return false
+    }
     if b == 0 {
         b = mem.frame_run(state, 3)
         if b == 0 {
@@ -262,12 +328,42 @@ fn attach_mode(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u6
         return false
     }
     cs(state, C_SEQ, xhci.ep_seq(state, i))
-    cs(state, C_READY, 1)
-    var rxa: u64 = b + RXA_OFF
-    if mode == 3 {
-        rxa = b + CH_BASE
+    cs(state, C_RXN, 0)
+    cs(state, C_RXIDX, 0)
+    if mode >= MODE_AX179 {
+        if !big_alloc(state) {
+            return false
+        }
+        cs(state, C_RXN, big_len(mode))
     }
-    return xhci.int_queue(state, slot, indci, rxa, RXBUF)
+    cs(state, C_READY, 1)
+    return xhci.int_queue(state, slot, indci, rx_base(state), rx_len(state))
+}
+
+fn big_len(mode: u64) -> u64 {
+    if mode == MODE_AX179 {
+        return ax88179.RX_BUF_MAX
+    }
+    return rtl8153.RX_BUF_MAX
+}
+
+fn rx_len(state: u64) -> u64 {
+    let n: u64 = cg(state, C_RXN)
+    if n == 0 {
+        return RXBUF
+    }
+    return n
+}
+
+fn rx_base(state: u64) -> u64 {
+    let m: u64 = cg(state, C_MODE)
+    if m >= MODE_AX179 {
+        return cg(state, C_BIG)
+    }
+    if m == 3 {
+        return blk(state) + CH_BASE
+    }
+    return blk(state) + RXA_OFF
 }
 
 fn detach(state: u64) {
@@ -435,11 +531,7 @@ fn mac_at_on(state: u64, u: u64, i: u64) -> u64 {
 }
 
 fn requeue(state: u64) {
-    var rxa: u64 = blk(state) + RXA_OFF
-    if cg(state, C_MODE) == 3 {
-        rxa = blk(state) + CH_BASE
-    }
-    xhci.int_queue(state, cg(state, C_SLOT), cg(state, C_IN), rxa, RXBUF)
+    xhci.int_queue(state, cg(state, C_SLOT), cg(state, C_IN), rx_base(state), rx_len(state))
 }
 
 fn mode_get(state: u64) -> u64 { return cg(state, C_MODE) }
@@ -497,6 +589,7 @@ fn poll_on(state: u64, u: u64) -> bool {
         house(state)
     }
     ch_house(state)
+    vhouse(state)
     if cg(state, C_HOLD) != 0 {
         return false
     }
@@ -520,10 +613,17 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         house(state)
     }
     ch_house(state)
+    vhouse(state)
     if cg(state, C_HOLD) != 0 {
         return 0
     }
     if cg(state, C_RXLEN) != 0 {
+        if cg(state, C_MODE) == MODE_AX179 {
+            return axge_next(state, frame, slot)
+        }
+        if cg(state, C_MODE) == MODE_RTL {
+            return rtl_next(state, frame, slot)
+        }
         if cg(state, C_MODE) == 2 {
             return ncm_next(state, frame, slot)
         }
@@ -553,11 +653,22 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         requeue(state)
         return 0
     }
-    if resid >= RXBUF {
+    if resid >= rx_len(state) {
         requeue(state)
         return 0
     }
-    let n: u64 = RXBUF - resid
+    let n: u64 = rx_len(state) - resid
+    if cg(state, C_MODE) == MODE_AX179 {
+        cs(state, C_RXOFF, 0)
+        cs(state, C_RXIDX, 0)
+        cs(state, C_RXLEN, n)
+        return axge_next(state, frame, slot)
+    }
+    if cg(state, C_MODE) == MODE_RTL {
+        cs(state, C_RXOFF, 0)
+        cs(state, C_RXLEN, n)
+        return rtl_next(state, frame, slot)
+    }
     if cg(state, C_MODE) == 1 {
         cs(state, C_RXOFF, 0)
         cs(state, C_RXLEN, n)
@@ -758,6 +869,155 @@ fn ax_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     return fl
 }
 
+fn vctl(state: u64, slot: u64, bm: u64, req: u64, value: u64, index: u64, len: u64, buf: u64) -> i64 {
+    return xhci.control(state, slot, bm, req, value, index, len, buf, bm >= 0x80)
+}
+
+fn vlink_reset(state: u64) {
+    cs(state, C_VLINK, 0xFF)
+    cs(state, C_VNEXT, 0)
+    cs(state, C_LINK, 0)
+}
+
+fn vlink_note(state: u64, cls: u64) {
+    var s_dn: [u8; 18] = "usbnet: link down\0"
+    var s_up: [u8; 17] = "usbnet: link up \0"
+    if cls == 0 {
+        cs(state, C_LINK, 2)
+        say((&s_dn[0]) as u64)
+        return
+    }
+    cs(state, C_LINK, 1)
+    serial.puts((&s_up[0]) as u64)
+    if cls == 3 {
+        serial.dec(1000)
+    } else if cls == 2 {
+        serial.dec(100)
+    } else {
+        serial.dec(10)
+    }
+    serial.nl()
+}
+
+fn vhouse(state: u64) {
+    let mode: u64 = cg(state, C_MODE)
+    if mode != MODE_AX179 && mode != MODE_RTL {
+        return
+    }
+    let now: u64 = ticks(state)
+    if now < cg(state, C_VNEXT) {
+        return
+    }
+    let prev: u64 = cg(state, C_VLINK)
+    let buf: u64 = blk(state) + CMD_OFF
+    let slot: u64 = cg(state, C_SLOT)
+    var cls: u64 = prev
+    if mode == MODE_AX179 {
+        cls = ax88179_drv.link_sync(state, slot, vctl, buf, prev)
+    } else {
+        cls = rtl8153_drv.link_sync(state, slot, vctl, buf, cg(state, C_FAM), cg(state, C_USBSPD), prev)
+    }
+    cs(state, C_VLINK, cls)
+    if cls != prev {
+        vlink_note(state, cls)
+    }
+    if cls == 0 || cls == 0xFF {
+        cs(state, C_VNEXT, now + VHOUSE_FAST)
+    } else {
+        cs(state, C_VNEXT, now + VHOUSE_SLOW)
+    }
+}
+
+fn rx_finish(state: u64) {
+    cs(state, C_RXLEN, 0)
+    requeue(state)
+}
+
+fn rx_deliver(state: u64, fo: u64, fl: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    let b: u64 = blk(state)
+    copy(b + HOLD_OFF, cg(state, C_BIG) + fo, fl)
+    cs(state, C_HOLD, 1)
+    cs(state, C_RXP, cg(state, C_RXP) + 1)
+    cs(state, C_RXB, cg(state, C_RXB) + fl)
+    *frame = b + HOLD_OFF
+    *slot = 0
+    return fl
+}
+
+fn axge_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    let b: u64 = blk(state)
+    let p: u64 = cg(state, C_BIG)
+    let len: u64 = cg(state, C_RXLEN)
+    let res: u64 = b + RES_OFF
+    var off: u64 = cg(state, C_RXOFF)
+    var idx: u64 = cg(state, C_RXIDX)
+    var guard: u64 = 0
+    while guard < 256 {
+        guard = guard + 1
+        let st: u64 = ax88179.rx_step(p, len, off, idx, res)
+        if st == ax88179.rx_status_frame() || st == ax88179.rx_status_skip() {
+            off = le.get64(res, 0)
+            idx = le.get64(res, 8)
+            if st == ax88179.rx_status_skip() {
+                err_note(state, 7)
+            } else {
+                let fo: u64 = le.get64(res, 16)
+                let fl: u64 = le.get64(res, 24)
+                cs(state, C_RXOFF, off)
+                cs(state, C_RXIDX, idx)
+                let n: u64 = rx_deliver(state, fo, fl, frame, slot)
+                let nx: u64 = ax88179.rx_step(p, len, off, idx, b + RES2_OFF)
+                if nx == ax88179.rx_status_end() || nx == ax88179.rx_status_bad() {
+                    rx_finish(state)
+                }
+                return n
+            }
+        } else {
+            if st == ax88179.rx_status_bad() {
+                err_note(state, 7)
+            }
+            rx_finish(state)
+            return 0
+        }
+    }
+    rx_finish(state)
+    return 0
+}
+
+fn rtl_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    let b: u64 = blk(state)
+    let p: u64 = cg(state, C_BIG)
+    let len: u64 = cg(state, C_RXLEN)
+    let res: u64 = b + RES_OFF
+    var off: u64 = cg(state, C_RXOFF)
+    var guard: u64 = 0
+    while guard < 256 {
+        guard = guard + 1
+        let st: u64 = rtl8153.rx_step(p, len, off, res)
+        if st == rtl8153.rx_status_frame() || st == rtl8153.rx_status_skip() {
+            off = le.get64(res, 0)
+            if st == rtl8153.rx_status_skip() {
+                err_note(state, 7)
+            } else {
+                let fo: u64 = le.get64(res, 16)
+                let fl: u64 = le.get64(res, 24)
+                cs(state, C_RXOFF, off)
+                let n: u64 = rx_deliver(state, fo, fl, frame, slot)
+                let nx: u64 = rtl8153.rx_step(p, len, off, b + RES2_OFF)
+                if nx == rtl8153.rx_status_end() || nx == rtl8153.rx_status_bad() {
+                    rx_finish(state)
+                }
+                return n
+            }
+        } else {
+            rx_finish(state)
+            return 0
+        }
+    }
+    rx_finish(state)
+    return 0
+}
+
 fn rx_recycle_on(state: u64, u: u64, id: u64) {
     cs(state, C_HOLD, 0)
 }
@@ -785,6 +1045,18 @@ fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
         }
     } else if cg(state, C_MODE) == 4 {
         tn = ax88772.tx_wrap(src, n as usize, b + TX_OFF) as u64
+        if tn == 0 {
+            cs(state, C_DROP, cg(state, C_DROP) + 1)
+            return false
+        }
+    } else if cg(state, C_MODE) == MODE_AX179 {
+        tn = ax88179.tx_wrap(src, n, cg(state, C_MPS), b + TX_OFF)
+        if tn == 0 {
+            cs(state, C_DROP, cg(state, C_DROP) + 1)
+            return false
+        }
+    } else if cg(state, C_MODE) == MODE_RTL {
+        tn = rtl8153.tx_wrap(src, n, b + TX_OFF)
         if tn == 0 {
             cs(state, C_DROP, cg(state, C_DROP) + 1)
             return false

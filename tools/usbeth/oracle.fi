@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import usbnet.ax88179
+import usbnet.rtl8153
+
+static mut fr: [u8; 2048] = [0; 2048]
+static mut wr: [u8; 8192] = [0; 8192]
+static mut rs: [u64; 8] = [0; 8]
+
+fn chk(name: str, cond: bool) {
+    if cond { io.print("OK   ") } else { io.print("FAIL ") }
+    io.print_line(name)
+}
+
+fn pf() -> u64 { return (&fr[0]) as u64 }
+fn pw() -> u64 { return (&wr[0]) as u64 }
+fn pr() -> u64 { return (&rs[0]) as u64 }
+
+fn b(i: usize) -> u64 { return (wr[i]) as u64 }
+
+fn fill(n: usize) {
+    var i: usize = 0
+    while i < n { fr[i] = ((i * 7 + 3) & 255) as u8; i = i + 1 }
+}
+
+fn clear_wr() {
+    var i: usize = 0
+    while i < 8192 { wr[i] = 0; i = i + 1 }
+}
+
+fn w32(pos: usize, v: u64) {
+    wr[pos] = (v & 255) as u8
+    wr[pos + 1] = ((v >> 8) & 255) as u8
+    wr[pos + 2] = ((v >> 16) & 255) as u8
+    wr[pos + 3] = ((v >> 24) & 255) as u8
+}
+
+fn res(i: usize) -> u64 { return rs[i] }
+
+fn ax_pad8(v: usize) -> usize { return (v + 7) & 0xFFF8 }
+
+fn ax_build(lens: [u64; 4], n: usize, flags: [u64; 4]) -> usize {
+    clear_wr()
+    var pos: usize = 0
+    var i: usize = 0
+    while i < n {
+        let pl: usize = lens[i] as usize
+        var k: usize = 0
+        while k < pl { wr[pos + k] = ((i * 31 + k) & 255) as u8; k = k + 1 }
+        pos = pos + ax_pad8(pl)
+        i = i + 1
+    }
+    let hoff: usize = pos
+    i = 0
+    while i < n {
+        w32(pos, (lens[i] << 16) | flags[i])
+        w32(pos + 4, 0x80000000)
+        pos = pos + 8
+        i = i + 1
+    }
+    pos = pos + 4
+    w32(pos, ((2 * n) as u64) | ((hoff as u64) << 16))
+    return pos + 4
+}
+
+fn main() -> i32 {
+    chk("ax179 supported: 0B95:1790", ax88179.supported(0x0B95, 0x1790))
+    chk("ax179 supported: 0B95:178A", ax88179.supported(0x0B95, 0x178A))
+    chk("ax179 supported: Cypress GX3 04B4:3610", ax88179.supported(0x04B4, 0x3610))
+    chk("ax179 supported: Allied Telesis 07C9:0010", ax88179.supported(0x07C9, 0x0010))
+    chk("ax179 refused: AX88772 0B95:7720", !ax88179.supported(0x0B95, 0x7720))
+    chk("ax179 refused: other vendor", !ax88179.supported(0x1A86, 0x1790))
+    chk("ax179 refused: Realtek", !ax88179.supported(0x0BDA, 0x8153))
+
+    fill(100)
+    var t: u64 = ax88179.tx_wrap(pf(), 100, 512, pw())
+    chk("ax179 tx: total = 8 + 100", t == 108)
+    chk("ax179 tx: header 1 = length LE 64 00 00 00", b(0) == 0x64 && b(1) == 0 && b(2) == 0 && b(3) == 0)
+    chk("ax179 tx: header 2 = 0 (no mss, no padding flag)", b(4) == 0 && b(5) == 0 && b(6) == 0 && b(7) == 0)
+    chk("ax179 tx: payload at offset 8", b(8) == 3 && b(9) == 10 && b(107) == ((99 * 7 + 3) & 255) as u64)
+    fill(504)
+    t = ax88179.tx_wrap(pf(), 504, 512, pw())
+    chk("ax179 tx: 504 + 8 = 512 sets the padding flag 00 80 00 80", b(4) == 0 && b(5) == 0x80 && b(6) == 0 && b(7) == 0x80)
+    chk("ax179 tx: padding flag adds one zero octet", t == 513 && b(512) == 0)
+    fill(1016)
+    chk("ax179 tx: 1016 + 8 = 1024 pads with packet size 1024", ax88179.tx_wrap(pf(), 1016, 1024, pw()) == 1025)
+    fill(100)
+    chk("ax179 tx: 100 + 8 with packet size 108 pads", ax88179.tx_wrap(pf(), 100, 108, pw()) == 109)
+    chk("ax179 tx: packet size 0 never pads", ax88179.tx_wrap(pf(), 504, 0, pw()) == 512)
+    chk("ax179 tx: empty frame refused", ax88179.tx_wrap(pf(), 0, 512, pw()) == 0)
+    chk("ax179 tx: 1537 octets refused", ax88179.tx_wrap(pf(), 1537, 512, pw()) == 0)
+    fill(1536)
+    chk("ax179 tx: 1536 octets accepted", ax88179.tx_wrap(pf(), 1536, 512, pw()) == 1544)
+
+    var lens: [u64; 4] = [62, 63, 102, 0]
+    var fl: [u64; 4] = [0, 0, 0, 0]
+    var len: usize = ax_build(lens, 3, fl)
+    chk("ax179 rx: padded(62) = 64, padded(63) = 64, padded(102) = 104", ax88179.padded(62) == 64 && ax88179.padded(63) == 64 && ax88179.padded(102) == 104)
+    chk("ax179 rx: padding is to 8 octets: padded(64) = 64, padded(65) = 72, padded(66) = 72, padded(72) = 72", ax88179.padded(64) == 64 && ax88179.padded(65) == 72 && ax88179.padded(66) == 72 && ax88179.padded(72) == 72)
+    var st: u64 = ax88179.rx_step(pw(), len as u64, 0, 0, pr())
+    chk("ax179 rx: first entry is a frame", st == ax88179.rx_status_frame())
+    chk("ax179 rx: frame offset 2 (IP alignment header skipped), length 60", res(2) == 2 && res(3) == 60)
+    chk("ax179 rx: next data offset 64, next entry index 1 (the dummy entry)", res(0) == 64 && res(1) == 1)
+    st = ax88179.rx_step(pw(), len as u64, res(0), res(1), pr())
+    chk("ax179 rx: second frame at 66, length 61, next offset 128", st == ax88179.rx_status_frame() && res(2) == 66 && res(3) == 61 && res(0) == 128 && res(1) == 3)
+    st = ax88179.rx_step(pw(), len as u64, res(0), res(1), pr())
+    chk("ax179 rx: third frame at 130, length 100, next offset 232", st == ax88179.rx_status_frame() && res(2) == 130 && res(3) == 100 && res(0) == 232 && res(1) == 5)
+    st = ax88179.rx_step(pw(), len as u64, res(0), res(1), pr())
+    chk("ax179 rx: after the third frame the transfer ends", st == ax88179.rx_status_end())
+
+    fl = [0x20000000, 0, 0, 0]
+    len = ax_build(lens, 2, fl)
+    st = ax88179.rx_step(pw(), len as u64, 0, 0, pr())
+    chk("ax179 rx: CRC error entry is skipped, cursor advances to 64 / entry 1", st == ax88179.rx_status_skip() && res(0) == 64 && res(1) == 1)
+    st = ax88179.rx_step(pw(), len as u64, res(0), res(1), pr())
+    chk("ax179 rx: frame behind a skipped entry is found at 66", st == ax88179.rx_status_frame() && res(2) == 66 && res(3) == 61)
+
+    fl = [0x80000000, 0, 0, 0]
+    len = ax_build(lens, 2, fl)
+    st = ax88179.rx_step(pw(), len as u64, 0, 0, pr())
+    chk("ax179 rx: drop error entry is skipped", st == ax88179.rx_status_skip())
+
+    var runt: [u64; 4] = [15, 62, 0, 0]
+    fl = [0, 0, 0, 0]
+    len = ax_build(runt, 2, fl)
+    st = ax88179.rx_step(pw(), len as u64, 0, 0, pr())
+    chk("ax179 rx: entry shorter than 2 + 14 is skipped", st == ax88179.rx_status_skip())
+    var big: [u64; 4] = [1539, 62, 0, 0]
+    len = ax_build(big, 2, fl)
+    st = ax88179.rx_step(pw(), len as u64, 0, 0, pr())
+    chk("ax179 rx: entry above 1536 + 2 is skipped", st == ax88179.rx_status_skip())
+
+    len = ax_build(lens, 3, fl)
+    st = ax88179.rx_step(pw(), (len - 8) as u64, 0, 0, pr())
+    chk("ax179 rx: transfer cut inside the metadata is refused (end)", st == ax88179.rx_status_end())
+    st = ax88179.rx_step(pw(), 3, 0, 0, pr())
+    chk("ax179 rx: shorter than the 4 octet trailer is refused", st == ax88179.rx_status_end())
+    clear_wr()
+    w32(0, 0)
+    st = ax88179.rx_step(pw(), 4, 0, 0, pr())
+    chk("ax179 rx: zero entry count is the end", st == ax88179.rx_status_end())
+    len = ax_build(lens, 3, fl)
+    w32(len - 4, 8 | (((len - 4 - 28) as u64) << 16))
+    st = ax88179.rx_step(pw(), len as u64, 0, 0, pr())
+    chk("ax179 rx: entry array running into the trailer is refused", st == ax88179.rx_status_end())
+    len = ax_build(lens, 3, fl)
+    w32(len - 4, 6 | (0xFFF0 << 16))
+    st = ax88179.rx_step(pw(), len as u64, 0, 0, pr())
+    chk("ax179 rx: entry array offset beyond the transfer is refused", st == ax88179.rx_status_end())
+    var over: [u64; 4] = [62, 0, 0, 0]
+    len = ax_build(over, 1, fl)
+    var bigmeta: u64 = (1500 << 16)
+    w32(ax_pad8(62), bigmeta)
+    st = ax88179.rx_step(pw(), len as u64, 0, 0, pr())
+    chk("ax179 rx: entry whose padded length exceeds the data area is refused (bad)", st == ax88179.rx_status_bad())
+    var dummy: [u64; 4] = [0, 62, 0, 0]
+    len = ax_build(dummy, 2, fl)
+    st = ax88179.rx_step(pw(), len as u64, 0, 0, pr())
+    chk("ax179 rx: zero length entries are skipped silently", st == ax88179.rx_status_end() || st == ax88179.rx_status_frame())
+
+    chk("ax179 link: PHYSR 0 = down", ax88179.link_class(0) == ax88179.LINK_DOWN)
+    chk("ax179 link: 0xA400 (giga, full, link) = 1000", ax88179.link_class(0xA400) == ax88179.LINK_1000)
+    chk("ax179 link: 0x6400 = 100", ax88179.link_class(0x6400) == ax88179.LINK_100)
+    chk("ax179 link: 0x2400 = 10", ax88179.link_class(0x2400) == ax88179.LINK_10)
+    chk("ax179 link: giga bits without the link bit = down", ax88179.link_class(0xA000) == ax88179.LINK_DOWN)
+    chk("ax179 medium: giga full = 0x013B", ax88179.medium_for(0xA400) == 0x013B)
+    chk("ax179 medium: 100 full = 0x0332", ax88179.medium_for(0x6400) == 0x0332)
+    chk("ax179 medium: 100 half = 0x0330", ax88179.medium_for(0x4400) == 0x0330)
+    chk("ax179 medium: 10 full = 0x0132", ax88179.medium_for(0x2400) == 0x0132)
+    chk("ax179 bulk-in row 0 = 07 4F 00 12 FF", ax88179.bulkin_row(0) == 0xFF12004F07)
+    chk("ax179 bulk-in row 1 = 07 20 03 16 FF", ax88179.bulkin_row(1) == 0xFF16032007)
+    chk("ax179 bulk-in row 2 = 07 AE 07 18 FF", ax88179.bulkin_row(2) == 0xFF1807AE07)
+    chk("ax179 bulk-in row 3 = 07 CC 4C 18 08", ax88179.bulkin_row(3) == 0x08184CCC07)
+    chk("ax179 bulk-in select: giga on SuperSpeed = 0", ax88179.bulkin_sel(3, 4) == 0)
+    chk("ax179 bulk-in select: giga on HighSpeed = 1", ax88179.bulkin_sel(3, 2) == 1)
+    chk("ax179 bulk-in select: giga on full speed = 3", ax88179.bulkin_sel(3, 0) == 3)
+    chk("ax179 bulk-in select: 100 on HighSpeed = 2", ax88179.bulkin_sel(2, 2) == 2)
+    chk("ax179 bulk-in select: 100 on full speed = 3", ax88179.bulkin_sel(2, 0) == 3)
+    chk("ax179 bulk-in select: 10 = 3", ax88179.bulkin_sel(1, 4) == 3)
+    chk("ax179 bulk-in sizes 20480 / 24576 / 26624 / 26624", ax88179.bulkin_len(0) == 20480 && ax88179.bulkin_len(1) == 24576 && ax88179.bulkin_len(2) == 26624 && ax88179.bulkin_len(3) == 26624)
+    chk("ax179 bulk-in sizes fit the receive buffer", ax88179.bulkin_len(2) <= ax88179.RX_BUF_MAX && ax88179.bulkin_len(3) <= ax88179.RX_BUF_MAX)
+
+    chk("rtl supported: 0BDA:8153", rtl8153.supported(0x0BDA, 0x8153))
+    chk("rtl supported: 0BDA:8152", rtl8153.supported(0x0BDA, 0x8152))
+    chk("rtl supported: Microsoft 045E:07AB", rtl8153.supported(0x045E, 0x07AB))
+    chk("rtl refused: ASIX", !rtl8153.supported(0x0B95, 0x1790))
+    chk("rtl refused: 0BDA:8156 (2.5G, other init)", !rtl8153.supported(0x0BDA, 0x8156))
+    chk("rtl family: 0x5C10 -> 8153A", rtl8153.family_of(0x5C100000) == rtl8153.FAMILY_8153A)
+    chk("rtl family: 0x5C00 / 0x5C20 / 0x5C30 -> 8153A", rtl8153.family_of(0x5C000000) == rtl8153.FAMILY_8153A && rtl8153.family_of(0x5C200000) == rtl8153.FAMILY_8153A && rtl8153.family_of(0x5C300000) == rtl8153.FAMILY_8153A)
+    chk("rtl family: 0x4C00 / 0x4C10 -> 8152", rtl8153.family_of(0x4C000000) == rtl8153.FAMILY_8152 && rtl8153.family_of(0x4C100000) == rtl8153.FAMILY_8152)
+    chk("rtl family: 0x6000 / 0x6010 -> 8153B", rtl8153.family_of(0x60000000) == rtl8153.FAMILY_8153B && rtl8153.family_of(0x60100000) == rtl8153.FAMILY_8153B)
+    chk("rtl family: version mask ignores the low nibble and the low word", rtl8153.family_of(0x5C1F1234) == rtl8153.FAMILY_8153A)
+    chk("rtl family: 0x7410 -> none", rtl8153.family_of(0x74100000) == rtl8153.FAMILY_NONE)
+    chk("rtl family: 0x4800 (RTL_VER_07) -> none", rtl8153.family_of(0x48000000) == rtl8153.FAMILY_NONE)
+
+    fill(100)
+    t = rtl8153.tx_wrap(pf(), 100, pw())
+    chk("rtl tx: total = 8 + 100", t == 108)
+    chk("rtl tx: opts1 = len | FS | LS = 64 00 00 C0", b(0) == 0x64 && b(1) == 0 && b(2) == 0 && b(3) == 0xC0)
+    chk("rtl tx: opts2 = 0", b(4) == 0 && b(5) == 0 && b(6) == 0 && b(7) == 0)
+    chk("rtl tx: payload at offset 8", b(8) == 3 && b(107) == ((99 * 7 + 3) & 255) as u64)
+    chk("rtl tx: empty frame refused", rtl8153.tx_wrap(pf(), 0, pw()) == 0)
+    chk("rtl tx: 1537 octets refused", rtl8153.tx_wrap(pf(), 1537, pw()) == 0)
+
+    clear_wr()
+    var pos: usize = 0
+    var sizes: [u64; 3] = [60, 61, 100]
+    var i: usize = 0
+    while i < 3 {
+        let pk: u64 = sizes[i] + 4
+        w32(pos, pk)
+        var k: usize = 0
+        while k < (pk as usize) { wr[pos + 24 + k] = ((i * 17 + k) & 255) as u8; k = k + 1 }
+        pos = (pos + 24 + (pk as usize) + 7) & 0xFFF8
+        i = i + 1
+    }
+    st = rtl8153.rx_step(pw(), 1000, 0, pr())
+    chk("rtl rx: first frame at 24, length 60 (FCS removed), next descriptor at 88", st == rtl8153.rx_status_frame() && res(2) == 24 && res(3) == 60 && res(0) == 88)
+    st = rtl8153.rx_step(pw(), 1000, res(0), pr())
+    chk("rtl rx: second frame at 112, length 61, next descriptor 8 aligned at 184", st == rtl8153.rx_status_frame() && res(2) == 112 && res(3) == 61 && res(0) == 184)
+    st = rtl8153.rx_step(pw(), 1000, res(0), pr())
+    chk("rtl rx: third frame at 208, length 100", st == rtl8153.rx_status_frame() && res(2) == 208 && res(3) == 100)
+    st = rtl8153.rx_step(pw(), 1000, res(0), pr())
+    chk("rtl rx: empty tail ends the transfer", st == rtl8153.rx_status_end())
+    st = rtl8153.rx_step(pw(), 150, 88, pr())
+    chk("rtl rx: frame running past the transfer ends it", st == rtl8153.rx_status_end())
+    st = rtl8153.rx_step(pw(), 24, 0, pr())
+    chk("rtl rx: descriptor without payload ends the transfer", st == rtl8153.rx_status_end())
+    st = rtl8153.rx_step(pw(), 10, 0, pr())
+    chk("rtl rx: transfer shorter than a descriptor ends", st == rtl8153.rx_status_end())
+    clear_wr()
+    w32(0, 59)
+    st = rtl8153.rx_step(pw(), 200, 0, pr())
+    chk("rtl rx: packet length below 60 (with FCS) ends the transfer", st == rtl8153.rx_status_end())
+    w32(0, 1541 + 4)
+    st = rtl8153.rx_step(pw(), 2000, 0, pr())
+    chk("rtl rx: frame above 1536 is skipped, cursor advances", st == rtl8153.rx_status_skip() && res(0) == ((24 + 1545 + 7) & 0xFFF8))
+
+    chk("rtl link: PHYSTATUS 0 = down", rtl8153.link_class(0) == rtl8153.LINK_DOWN)
+    chk("rtl link: 0x13 (1000, link, full) = 1000", rtl8153.link_class(0x13) == rtl8153.LINK_1000)
+    chk("rtl link: 0x0B = 100", rtl8153.link_class(0x0B) == rtl8153.LINK_100)
+    chk("rtl link: 0x07 = 10", rtl8153.link_class(0x07) == rtl8153.LINK_10)
+    chk("rtl link: speed bits without the link bit = down", rtl8153.link_class(0x11) == rtl8153.LINK_DOWN)
+    chk("rtl link: full duplex bit", rtl8153.link_full(0x13) && !rtl8153.link_full(0x12))
+    chk("rtl early size: 8153A (16384 - 1554) / 4 = 3707", rtl8153.early_size(rtl8153.FAMILY_8153A) == 3707)
+    chk("rtl early size: 8153B (16384 - 1554) / 8 = 1853", rtl8153.early_size(rtl8153.FAMILY_8153B) == 1853)
+    chk("rtl early timeout: 8153A high speed 250000 / 8", rtl8153.early_timeout(rtl8153.FAMILY_8153A, 3) == 31250)
+    chk("rtl early timeout: 8153A super speed 85000 / 8", rtl8153.early_timeout(rtl8153.FAMILY_8153A, 4) == 10625)
+    chk("rtl early timeout: 8153A full speed 524280 / 8", rtl8153.early_timeout(rtl8153.FAMILY_8153A, 1) == 65535)
+    chk("rtl early timeout: 8153B fixed 128 / 8", rtl8153.early_timeout(rtl8153.FAMILY_8153B, 3) == 16)
+    chk("rtl aggregation timer: 8153B 15000", rtl8153.aggr_timer(rtl8153.FAMILY_8153B, 4) == 15000)
+    chk("rtl ocp index: reg 0 = 0xA400, reg 4 = 0xA408, reg 9 = 0xA412", rtl8153.ocp_index(0) == 0xA400 && rtl8153.ocp_index(4) == 0xA408 && rtl8153.ocp_index(9) == 0xA412)
+    chk("rtl request: GET_REGS/SET_REGS = 5, PLA 0x0100, USB 0", rtl8153.REQ_REGS == 5 && rtl8153.MCU_PLA == 0x0100 && rtl8153.MCU_USB == 0)
+    return 0
+}

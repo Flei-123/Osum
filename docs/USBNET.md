@@ -5,6 +5,7 @@
 | CDC-ECM | -- (raw Ethernet on bulk) | `tools/usbecm` (QEMU end to end) | `kernel/drv/net/usbnet.fi` |
 | RNDIS | `lib/usbnet/rndis.fi` (`tools/usbnet/run.sh`) | `tools/usbrndis` (QEMU end to end, word `rndisonly`) | `kernel/drv/net/usbnet.fi` (mode 1) + bring-up `rndis_start` in `kernel/usb/usb.fi` |
 | CDC-NCM | `lib/usbnet/ncm.fi` (`tools/ncm/run.sh`, 74 checks incl. static wiring) | -- (no NCM model in QEMU; real phone/dongle needed) | `kernel/drv/net/usbnet.fi` (mode 2) + bring-up `ncm_start` in `kernel/usb/usb.fi` |
+| ASIX AX88179, Realtek RTL8152/8153 | `lib/usbnet/ax88179*.fi`, `rtl8153*.fi` | `tools/usbeth` (emulated chips, see `docs/USB-ETHERNET.md`) | `kernel/drv/net/usbnet.fi` (modes 5, 6) + `kernel/drv/net/usbvnic.fi` |
 
 RNDIS driver (r811, done):
 1. `usb.fi` `wanted`/`driver_for`: class 02/02/ff (QEMU), E0/01/03 (Android) and EF/04/01 -> `DRV_RNDIS`. `configure` walks the

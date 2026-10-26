@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import drv.usb.xhci
+import drv.net.usbnet
+import usbnet.ax88179
+import usbnet.ax88179_drv
+import usbnet.rtl8153
+import usbnet.rtl8153_drv
+
+export { chip_for, start, CHIP_NONE, CHIP_AX88179, CHIP_RTL8153, STEP_ATTACH }
+
+const CHIP_NONE: u64 = 0
+const CHIP_AX88179: u64 = 1
+const CHIP_RTL8153: u64 = 2
+const STEP_ATTACH: u64 = 20
+
+fn chip_for(vid: u64, pid: u64) -> u64 {
+    if ax88179.supported(vid, pid) {
+        return CHIP_AX88179
+    }
+    if rtl8153.supported(vid, pid) {
+        return CHIP_RTL8153
+    }
+    return CHIP_NONE
+}
+
+fn ctl(state: u64, slot: u64, bm: u64, req: u64, value: u64, index: u64, len: u64, buf: u64) -> i64 {
+    return xhci.control(state, slot, bm, req, value, index, len, buf, bm >= 0x80)
+}
+
+fn pause(state: u64, us: u64) {
+    xhci.udelay(state, us)
+}
+
+fn hex2(v: u64) {
+    var i: u64 = 2
+    while i > 0 {
+        i = i - 1
+        let x: u64 = (v >> (i * 4)) & 15
+        if x < 10 {
+            serial.put((48 + x) as u8)
+        } else {
+            serial.put((87 + x) as u8)
+        }
+    }
+}
+
+fn put_name(chip: u64) {
+    var s_ax: [u8; 9] = "ax88179 \0"
+    var s_rt: [u8; 9] = "rtl8153 \0"
+    if chip == CHIP_AX88179 {
+        serial.puts((&s_ax[0]) as u64)
+    } else {
+        serial.puts((&s_rt[0]) as u64)
+    }
+}
+
+fn report_fail(chip: u64, step: u64) {
+    var s_pre: [u8; 6] = "usb: \0"
+    var s_bad: [u8; 8] = "failed \0"
+    var s_step: [u8; 6] = "step=\0"
+    serial.puts((&s_pre[0]) as u64)
+    put_name(chip)
+    serial.puts((&s_bad[0]) as u64)
+    serial.puts((&s_step[0]) as u64)
+    serial.dec(step)
+    serial.nl()
+}
+
+fn report_mac(chip: u64, mac: u64) {
+    var s_pre: [u8; 6] = "usb: \0"
+    serial.puts((&s_pre[0]) as u64)
+    put_name(chip)
+    hex2(mac & 0xFF)
+    var q: u64 = 1
+    while q < 6 {
+        serial.put(58 as u8)
+        hex2((mac >> (q * 8)) & 0xFF)
+        q = q + 1
+    }
+    serial.nl()
+}
+
+fn start(state: u64, chip: u64, slot: u64, indci: u64, outdci: u64, mps: u64, speed: u64, scratch: u64) {
+    var step: u64 = 0
+    var mac: u64 = 0
+    var fam: u64 = 0
+    if chip == CHIP_AX88179 {
+        mac = ax88179_drv.bringup(state, slot, ctl, pause, scratch, &step)
+    } else {
+        mac = rtl8153_drv.bringup(state, slot, ctl, pause, scratch, speed, &step, &fam)
+    }
+    var ok: bool = mac != 0
+    if ok {
+        step = STEP_ATTACH
+        if chip == CHIP_AX88179 {
+            ok = usbnet.attach_ax88179(state, slot, indci, outdci, mps, mac, speed)
+        } else {
+            ok = usbnet.attach_rtl8153(state, slot, indci, outdci, mps, mac, fam, speed)
+        }
+    }
+    if !ok {
+        report_fail(chip, step)
+        return
+    }
+    report_mac(chip, mac)
+}

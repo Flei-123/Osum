@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import usbnet.ax88179
+import usbnet.le
+
+export {
+    bringup, link_sync, STEP_PWR, STEP_IPRL, STEP_CLK, STEP_MAC, STEP_PLAUSIBLE, STEP_MAC_WRITE, STEP_QCTRL, STEP_WATER_HIGH,
+    STEP_WATER_LOW, STEP_RXCOE, STEP_TXCOE, STEP_RXCTL, STEP_MONITOR, STEP_MEDIUM, STEP_PHY_RESTART,
+    IPRL_PAUSE_US, CLK_PAUSE_US, LINK_UNKNOWN
+}
+
+const STEP_PWR: u64 = 1
+const STEP_IPRL: u64 = 2
+const STEP_CLK: u64 = 3
+const STEP_MAC: u64 = 4
+const STEP_PLAUSIBLE: u64 = 5
+const STEP_MAC_WRITE: u64 = 6
+const STEP_QCTRL: u64 = 7
+const STEP_WATER_HIGH: u64 = 8
+const STEP_WATER_LOW: u64 = 9
+const STEP_RXCOE: u64 = 10
+const STEP_TXCOE: u64 = 11
+const STEP_RXCTL: u64 = 12
+const STEP_MONITOR: u64 = 13
+const STEP_MEDIUM: u64 = 14
+const STEP_PHY_RESTART: u64 = 15
+const IPRL_PAUSE_US: u64 = 500000
+const CLK_PAUSE_US: u64 = 200000
+const LINK_UNKNOWN: u64 = 0xFF
+const ERR: u64 = 0x8000000000000000
+
+fn mac_write(state: u64, slot: u64, ctl: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, buf: u64,
+    reg: u64, size: u64, v: u64) -> bool {
+    var i: u64 = 0
+    while i < size {
+        le.st8(buf, i, v >> (i * 8))
+        i = i + 1
+    }
+    return ctl(state, slot, 0x40, ax88179.ACCESS_MAC, reg, size, size, buf) >= 0
+}
+
+fn mac_read(state: u64, slot: u64, ctl: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, buf: u64,
+    reg: u64, size: u64) -> u64 {
+    le.zero(buf, 8)
+    if ctl(state, slot, 0xC0, ax88179.ACCESS_MAC, reg, size, size, buf) < (size as i64) { return ERR }
+    return le.get64(buf, 0)
+}
+
+fn phy_read(state: u64, slot: u64, ctl: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, buf: u64, reg: u64) -> u64 {
+    le.zero(buf, 8)
+    if ctl(state, slot, 0xC0, ax88179.ACCESS_PHY, ax88179.PHY_ID, reg, 2, buf) < 2 { return ERR }
+    return le.get16(buf, 0)
+}
+
+fn phy_write(state: u64, slot: u64, ctl: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, buf: u64, reg: u64, v: u64) -> bool {
+    le.put16(buf, 0, v)
+    return ctl(state, slot, 0x40, ax88179.ACCESS_PHY, ax88179.PHY_ID, reg, 2, buf) >= 0
+}
+
+fn bringup(state: u64, slot: u64, ctl: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64,
+    delay: fn(u64, u64), buf: u64, step: *mut u64) -> u64 {
+    *step = STEP_PWR
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_PHYPWR, 2, 0) { return 0 }
+    *step = STEP_IPRL
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_PHYPWR, 2, ax88179.PHYPWR_IPRL) { return 0 }
+    delay(state, IPRL_PAUSE_US)
+    *step = STEP_CLK
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_CLK, 1, ax88179.CLK_ACS_BCS) { return 0 }
+    delay(state, CLK_PAUSE_US)
+    *step = STEP_MAC
+    let raw: u64 = mac_read(state, slot, ctl, buf, ax88179.REG_NODE_ID, 6)
+    if raw == ERR { return 0 }
+    let mac: u64 = raw & 0xFFFFFFFFFFFF
+    *step = STEP_PLAUSIBLE
+    if mac == 0 || (mac & 1) != 0 { return 0 }
+    *step = STEP_MAC_WRITE
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_NODE_ID, 6, mac) { return 0 }
+    *step = STEP_QCTRL
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_QCTRL, 5, ax88179.bulkin_row(0)) { return 0 }
+    *step = STEP_WATER_HIGH
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_WATER_HIGH, 1, ax88179.WATER_HIGH) { return 0 }
+    *step = STEP_WATER_LOW
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_WATER_LOW, 1, ax88179.WATER_LOW) { return 0 }
+    *step = STEP_RXCOE
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_RXCOE, 1, ax88179.RXCOE_ALL) { return 0 }
+    *step = STEP_TXCOE
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_TXCOE, 1, ax88179.TXCOE_ALL) { return 0 }
+    *step = STEP_RXCTL
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_RX_CTL, 2, ax88179.RX_CTL_RUN) { return 0 }
+    *step = STEP_MONITOR
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_MONITOR, 1, ax88179.MONITOR_DEFAULT) { return 0 }
+    *step = STEP_MEDIUM
+    if !mac_write(state, slot, ctl, buf, ax88179.REG_MEDIUM, 2, ax88179.MEDIUM_DEFAULT) { return 0 }
+    *step = STEP_PHY_RESTART
+    let bmcr: u64 = phy_read(state, slot, ctl, buf, ax88179.PHY_BMCR)
+    if bmcr != ERR && (bmcr & ax88179.BMCR_ANENABLE) != 0 {
+        if !phy_write(state, slot, ctl, buf, ax88179.PHY_BMCR, bmcr | ax88179.BMCR_ANRESTART) { return 0 }
+    }
+    *step = 0
+    return mac
+}
+
+fn link_sync(state: u64, slot: u64, ctl: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> i64, buf: u64, prev: u64) -> u64 {
+    let physr: u64 = phy_read(state, slot, ctl, buf, ax88179.PHY_PHYSR)
+    if physr == ERR { return prev }
+    let cls: u64 = ax88179.link_class(physr)
+    if cls == prev { return prev }
+    if cls != ax88179.LINK_DOWN {
+        var usb_link: u64 = mac_read(state, slot, ctl, buf, ax88179.REG_LINK_STATUS, 1)
+        if usb_link == ERR { usb_link = 0 }
+        let sel: u64 = ax88179.bulkin_sel(cls, usb_link)
+        if !mac_write(state, slot, ctl, buf, ax88179.REG_QCTRL, 5, ax88179.bulkin_row(sel)) { return prev }
+        if !mac_write(state, slot, ctl, buf, ax88179.REG_MEDIUM, 2, ax88179.medium_for(physr)) { return prev }
+    }
+    return cls
+}
