@@ -11,6 +11,7 @@
 #                       Schreibtisch (Taskleiste, Kontrollzentrum)
 #     script=<befehl>   im Gast eine Befehlszeile statt einer Oberflaeche
 #     mode=light|dark   Farbschema
+#     lang=de|en        system and user language
 #     shape=modern|classic
 #     smp=<n>           wie viele Prozessorkerne QEMU gibt
 #     click=<x,y,...>   Klicks ueber den QEMU-Monitor (tools/themestore/click.py)
@@ -58,6 +59,7 @@ if [ -z "${OSUM_ACCEL:-}" ] && [ -w /dev/kvm ]; then accel=kvm; fi
 last=60
 progs="desktop taskbar settings launcher theme explorer taskmgr sh echo ls cat sleep ps kill top"
 extra=""
+lang=de
 second=""
 flaky=""
 svcstate=""
@@ -78,6 +80,7 @@ for a in "$@"; do
         last=*) last=${a#*=} ;;
         progs=*) progs=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
+        lang=*) lang=${a#*=} ;;
         second=*) second=${a#*=} ;;
         flaky=*) flaky=${a#*=} ;;
         svcstate=*) svcstate=${a#*=} ;;
@@ -131,9 +134,9 @@ printf '# taskbar.conf -- tools/toolbench/build.sh\nedge=bottom\nheight=28\nwidt
 printf '# /etc/theme.conf\nscheme=day\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
     "$mode" "$shape" > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
-printf '# /etc/locale.conf\nlang=de\n' > "$OUT/locale.conf"
+printf '# /etc/locale.conf\nlang=%s\n' "$lang" > "$OUT/locale.conf"
 printf 'root:x:0:0:root:/users/osum:/bin/sh\n' > "$OUT/passwd"
-printf '%s\n' de > "$OUT/userlocale"
+printf '%s\n' "$lang" > "$OUT/userlocale"
 
 # 18.10.2026: 32768 -> 65536 blocks (32 MiB): the 15 programs outgrew 16 MiB (mkfs: the disk is full).
 # RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).

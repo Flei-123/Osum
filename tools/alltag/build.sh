@@ -48,6 +48,7 @@ shift || true
 preset=""
 scheme=day
 mode=light
+lang=de
 shape=modern
 accent=""
 edge=bottom
@@ -92,6 +93,7 @@ for a in "$@"; do
         preset=*) preset=${a#*=} ;;
         scheme=*) scheme=${a#*=} ;;
         mode=*) mode=${a#*=} ;;
+        lang=*) lang=${a#*=} ;;
         shape=*) shape=${a#*=} ;;
         accent=*) accent=${a#*=} ;;
         edge=*) edge=${a#*=} ;;
@@ -204,7 +206,7 @@ printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=%s\nshape=%s\nlight_start=
     "$scheme" "$mode" "$accent" "$shape" > "$OUT/theme.conf"
 [ -n "$themeline" ] && printf '%s\n' "$themeline" >> "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
-printf '# /etc/locale.conf\nlang=de\n' > "$OUT/locale.conf"
+printf '# /etc/locale.conf\nlang=%s\n' "$lang" > "$OUT/locale.conf"
 if [ "$account" = yes ]; then
     printf 'root:x:0:0:root:/users/%s:/bin/sh\n' "$user" > "$OUT/passwd"
 else
@@ -214,7 +216,7 @@ else
     # can actually build.
     printf 'nobody:x:65534:65534:nobody:/:/bin/sh\n' > "$OUT/passwd"
 fi
-printf '%s\n' de > "$OUT/userlocale"
+printf '%s\n' "$lang" > "$OUT/userlocale"
 # r373: a whole /etc/passwd from outside (the sign-in screen's tests need
 # accounts with uid >= 1000): passwdfile=<host path>
 [ -n "$passwdfile" ] && cp -f "$passwdfile" "$OUT/passwd"

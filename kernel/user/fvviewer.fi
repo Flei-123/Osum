@@ -9,7 +9,7 @@
 // ask mode: the host user confirms and the 4 digit session code is shown BIG while waiting --
 // compare it with the code on the host (the host proves nothing else, roadmap r5). Connect:
 // libc.dns -> wss://freeviewer.fleitec.com/fv/ws (TLS 1.3, /etc/ssl/roots.pem) -> relay pairing
-// -> handshake (Argon2id ~19 MiB, blocking: the status says "Verbinde..." first). Then the
+// -> handshake (Argon2id ~19 MiB, blocking: the status says "fvv.status.connecting" first). Then the
 // picture is a fUi image widget (Frame/Tiles composited into one ARGB buffer, scaled into
 // the window), pointer + keys go through fuiscene.set_raw (lib/fv/input.fi), the clipboard
 // is synced both ways (wlibc.clip_put / clip_take, max 256 KiB), Ping/Pong gives the rtt,
@@ -37,6 +37,7 @@
 profile app
 
 import ulib
+import msg
 import wlib
 import wlibc
 import fuiapp
@@ -461,7 +462,7 @@ fn run_test(start: u64) -> i32 {
 // ================================================================== window mode (fUi)
 
 const ST_FORM: u64 = 0
-const ST_CONNECT: u64 = 1 // blocking work is due (the status "Verbinde..." was painted first)
+const ST_CONNECT: u64 = 1 // blocking work is due (the status "fvv.status.connecting" was painted first)
 const ST_WAIT: u64 = 2 // handshake sent: password check / the host user decides
 const ST_LIVE: u64 = 3
 
@@ -492,7 +493,7 @@ static mut retry_n: u64 = 0
 static mut retry_at: u64 = 0
 static mut ask_mode: bool = false
 static mut ever_live: bool = false // a session of this run was live: only then it is rebuilt by itself
-static mut can_retry: bool = false // the form shows a "Wiederholen" button (last try failed, ID + password still there)
+static mut can_retry: bool = false // the form shows a "fvv.btn.retry" button (last try failed, ID + password still there)
 static mut cd_shown: u64 = 0 // seconds shown in the reconnect countdown (repaint once per second)
 static mut last_kind: u64 = 0
 
@@ -647,9 +648,10 @@ fn trn(v: u64) {
 
 fn pool(slot: u64, s: str) -> u64 {
     let base: u64 = (&POOL[0]) as u64 + slot * 128
+    let src: u64 = lookup(s)
     var i: u64 = 0
-    while i < (s.n as u64) && i < 127 {
-        rt.st8(base, i as usize, rt.ld8(s.p as u64, i as usize))
+    while i < 127 && rt.ld8(src, i as usize) != 0 as u8 {
+        rt.st8(base, i as usize, rt.ld8(src, i as usize))
         i = i + 1
     }
     rt.st8(base, i as usize, 0 as u8)
@@ -661,7 +663,7 @@ fn st_begin() {
     STATUS[0] = 0 as u8
 }
 
-fn st_str(s: str) {
+fn st_raw(s: str) {
     var i: u64 = 0
     while i < (s.n as u64) && STLEN < 180 {
         STATUS[STLEN as usize] = rt.ld8(s.p as u64, i as usize)
@@ -669,6 +671,22 @@ fn st_str(s: str) {
         i = i + 1
     }
     STATUS[STLEN as usize] = 0 as u8
+}
+
+static mut KEYB: [u8; 64] = [0; 64]
+
+fn lookup(s: str) -> u64 {
+    var i: u64 = 0
+    while i < (s.n as u64) && i < 63 {
+        rt.st8((&KEYB[0]) as u64, i as usize, rt.ld8(s.p as u64, i as usize))
+        i = i + 1
+    }
+    rt.st8((&KEYB[0]) as u64, i as usize, 0 as u8)
+    return msg.get((&KEYB[0]) as u64)
+}
+
+fn st_str(s: str) {
+    st_cstr(lookup(s))
 }
 
 fn st_cstr(p: u64) {
@@ -713,19 +731,20 @@ fn copy_c(dst: u64, cap: u64, src: u64) {
 
 // what happened, in words a person understands (kinds: lib/fv/retry.fi)
 fn kind_text(kind: u64, cl: *mut client.Client) {
-    if kind == retry.KIND_NETWORK { st_str("Keine Verbindung - Netzwerk oder Relay nicht erreichbar") }
-    else if kind == retry.KIND_TLS { st_str("Sichere Verbindung fehlgeschlagen (Zertifikat/Uhrzeit?)") }
-    else if kind == retry.KIND_UPGRADE { st_str("Das Relay hat die Verbindung abgelehnt") }
-    else if kind == retry.KIND_OFFLINE { st_str("Host ist offline - FreeViewer dort nicht gestartet?") }
-    else if kind == retry.KIND_BUSY { st_str("Host ist besetzt - ein anderer Viewer ist verbunden") }
-    else if kind == retry.KIND_WRONGPW { st_str("Falsches Passwort") }
-    else if kind == retry.KIND_DECLINED { st_str("Der Host hat die Verbindung abgelehnt") }
-    else if kind == retry.KIND_GONE { st_str("Der Host hat die Sitzung beendet") }
-    else if kind == retry.KIND_PROTOCOL { st_str("Protokollfehler - Host und Viewer passen nicht zusammen") }
-    else if kind == retry.KIND_MEM { st_str("Zu wenig Speicher") }
-    else if kind == retry.KIND_DNS { st_str("Relay-Name nicht aufloesbar - Netzwerk pruefen") }
+    if kind == retry.KIND_NETWORK { st_str("fvv.err.network") }
+    else if kind == retry.KIND_TLS { st_str("fvv.err.tls") }
+    else if kind == retry.KIND_UPGRADE { st_str("fvv.err.upgrade") }
+    else if kind == retry.KIND_OFFLINE { st_str("fvv.err.offline") }
+    else if kind == retry.KIND_BUSY { st_str("fvv.err.busy") }
+    else if kind == retry.KIND_WRONGPW { st_str("fvv.err.wrongpw") }
+    else if kind == retry.KIND_DECLINED { st_str("fvv.err.declined") }
+    else if kind == retry.KIND_GONE { st_str("fvv.err.gone") }
+    else if kind == retry.KIND_PROTOCOL { st_str("fvv.err.protocol") }
+    else if kind == retry.KIND_MEM { st_str("fvv.err.mem") }
+    else if kind == retry.KIND_DNS { st_str("fvv.err.dns") }
     else {
-        st_str("Relay: ")
+        st_str("fvv.err.relay")
+        st_raw(" ")
         st_cstr((&(*cl).errtxt[0]) as u64)
     }
 }
@@ -744,12 +763,12 @@ fn build() {
     let col: usize = fuiscene.root()
     if st == ST_LIVE {
         let bar: usize = fuiscene.row(col)
-        let _b1: usize = fuiscene.button(bar, pool(0, "Strg+Alt+Entf"), K_CAD)
-        let _b2: usize = fuiscene.button(bar, pool(1, "Win"), K_WIN)
-        let _b3: usize = fuiscene.button(bar, pool(2, "Alt+Tab"), K_ALTTAB)
-        let _b4: usize = fuiscene.button(bar, pool(3, "Rad hoch"), K_UP)
-        let _b5: usize = fuiscene.button(bar, pool(4, "Rad runter"), K_DOWN)
-        let _b6: usize = fuiscene.button(bar, pool(5, "Trennen"), K_BYE)
+        let _b1: usize = fuiscene.button(bar, pool(0, "fvv.btn.cad"), K_CAD)
+        let _b2: usize = fuiscene.button(bar, pool(1, "fvv.btn.win"), K_WIN)
+        let _b3: usize = fuiscene.button(bar, pool(2, "fvv.btn.alttab"), K_ALTTAB)
+        let _b4: usize = fuiscene.button(bar, pool(3, "fvv.btn.wheelup"), K_UP)
+        let _b5: usize = fuiscene.button(bar, pool(4, "fvv.btn.wheeldown"), K_DOWN)
+        let _b6: usize = fuiscene.button(bar, pool(5, "fvv.btn.disconnect"), K_BYE)
         var w: u64 = fuiscene.width()
         var h: u64 = fuiscene.height()
         if w > 24 { w = w - 24 } else { w = 100 }
@@ -758,24 +777,24 @@ fn build() {
         let _sl: usize = fuiscene.label(col, (&STATUS[0]) as u64)
         return
     }
-    let _t: usize = fuiscene.label(col, pool(6, "FreeViewer - Fernzugriff"))
-    let _l1: usize = fuiscene.label(col, pool(7, "Host-ID"))
+    let _t: usize = fuiscene.label(col, pool(6, "fvv.title"))
+    let _l1: usize = fuiscene.label(col, pool(7, "fvv.label.hostid"))
     let _e1: usize = fuiscene.entry(col, K_ID, 300, (&IDBUF[0]) as u64)
-    let _l2: usize = fuiscene.label(col, pool(8, "Passwort (leer = Ask-Modus, Host bestaetigt)"))
+    let _l2: usize = fuiscene.label(col, pool(8, "fvv.label.password"))
     let _e2: usize = fuiscene.entry(col, K_PW, 300, (&PWBUF[0]) as u64)
     fuiscene.entry_secret(K_PW, true)
     if st == ST_FORM {
-        let _go: usize = fuiscene.button_main(col, pool(9, "Verbinden"), K_GO)
+        let _go: usize = fuiscene.button_main(col, pool(9, "fvv.btn.connect"), K_GO)
         if can_retry {
-            let _rt: usize = fuiscene.button(col, pool(12, "Wiederholen"), K_RETRY)
+            let _rt: usize = fuiscene.button(col, pool(12, "fvv.btn.retry"), K_RETRY)
         }
     }
     if st == ST_CONNECT && retry_n > 0 {
-        let _cn: usize = fuiscene.button(col, pool(13, "Abbrechen"), K_CANCEL)
+        let _cn: usize = fuiscene.button(col, pool(13, "fvv.btn.cancel"), K_CANCEL)
     }
     let _sl: usize = fuiscene.label(col, (&STATUS[0]) as u64)
     if st == ST_WAIT && ask_mode {
-        let _l3: usize = fuiscene.label(col, pool(10, "Sitzungscode - muss auf dem Host gleich sein:"))
+        let _l3: usize = fuiscene.label(col, pool(10, "fvv.label.sascode"))
         let _sp: usize = fuiscene.ghost_space(col, 300, 80)
     }
 }
@@ -964,7 +983,7 @@ fn go_live(cl: *mut client.Client) {
     n = proto.enc_needkey(g_obuf)
     send_m(cl, n)
     st_begin()
-    st_str("Verbunden")
+    st_str("fvv.live")
     t_live_at = fuiapp.now_ms()
     // the clipboard self test runs once per process (t_clip_state starts at 0): a reconnect must not replay it
     t_click_at = 0
@@ -986,13 +1005,18 @@ fn wall_seconds() -> u64 {
 fn countdown_text(cl: *mut client.Client, left: u64) {
     st_begin()
     kind_text(last_kind, cl)
-    st_str(" - neuer Versuch ")
+    st_raw(" - ")
+    st_str("fvv.retry.new")
+    st_raw(" ")
     st_dec(retry_n)
-    st_str("/")
+    st_raw("/")
     st_dec(retry.MAX_RECONNECTS)
-    st_str(" in ")
+    st_raw(" ")
+    st_str("fvv.retry.in")
+    st_raw(" ")
     st_dec(left)
-    st_str(" s")
+    st_raw(" ")
+    st_str("fvv.retry.sec")
 }
 
 // the connection ended (live session lost, or a connect / handshake step failed). Same rules as the Rust
@@ -1036,9 +1060,12 @@ fn lose(cl: *mut client.Client) {
         st = ST_FORM
         st_begin()
         if ever_live && retry_n >= retry.MAX_RECONNECTS && retry.retryable(kind) {
-            st_str("Aufgegeben nach ")
+            st_str("fvv.gaveup.after")
+            st_raw(" ")
             st_dec(retry.MAX_RECONNECTS)
-            st_str(" Versuchen - ")
+            st_raw(" ")
+            st_str("fvv.gaveup.tries")
+            st_raw(" - ")
         }
         kind_text(kind, cl)
         can_retry = retry.retryable(kind)
@@ -1506,11 +1533,16 @@ fn live_tick(cl: *mut client.Client) -> bool {
         fps_n = 0
         fps_at = now
         st_begin()
-        st_str("Verbunden - ")
+        st_str("fvv.live")
+        st_raw(" - ")
         st_dec(fps)
-        st_str(" Bilder/s, Latenz ")
+        st_raw(" ")
+        st_str("fvv.fps")
+        st_raw(", ")
+        st_str("fvv.latency")
+        st_raw(" ")
         st_dec(rtt_ms)
-        st_str(" ms")
+        st_raw(" ms")
         fuiscene.refresh()
         if TEST_ON {
             tr("live fps=")
@@ -1593,7 +1625,7 @@ fn start_connect() {
     copy_c((&PWBUF[0]) as u64, 128, fuiscene.entry_text(K_PW))
     if rt.c_length((&IDBUF[0]) as u64) == 0 {
         st_begin()
-        st_str("Bitte die Host-ID eintragen")
+        st_str("fvv.status.needid")
         fuiscene.refresh()
         return
     }
@@ -1611,7 +1643,7 @@ fn start_connect() {
     retry_at = 0
     retry_n = 0
     st_begin()
-    st_str("Verbinde...")
+    st_str("fvv.status.connecting")
     fuiscene.refresh()
 }
 
@@ -1638,11 +1670,11 @@ fn gui() -> i32 {
     load_test_target()
     st_begin()
     if TEST_ON {
-        st_str("TESTMODUS (Gate): lokaler Relay statt freeviewer.fleitec.com")
+        st_str("fvv.status.testmode")
     } else {
-        st_str("Bereit")
+        st_str("fvv.status.ready")
     }
-    if !fuiscene.open(80, 50, 860, 640, pool(11, "FreeViewer"), build) {
+    if !fuiscene.open(80, 50, 860, 640, pool(11, "fvv.window"), build) {
         return 2
     }
     if TEST_ON {
@@ -1696,7 +1728,7 @@ fn gui() -> i32 {
                 st = ST_FORM
                 ever_live = false
                 st_begin()
-                st_str("Getrennt")
+                st_str("fvv.status.disconnected")
                 fuiscene.refresh()
                 continue
             }
@@ -1704,7 +1736,7 @@ fn gui() -> i32 {
                 lose(&cl)
             }
         } else if st == ST_CONNECT {
-            // painted twice first ("Verbinde..." must be visible), then the blocking part
+            // painted twice first ("fvv.status.connecting" must be visible), then the blocking part
             let tnow: u64 = fuiapp.now_ms()
             if retry_n > 0 && key == K_CANCEL {
                 // the person gives up while the countdown runs
@@ -1714,7 +1746,7 @@ fn gui() -> i32 {
                 can_retry = true
                 st = ST_FORM
                 st_begin()
-                st_str("Abgebrochen")
+                st_str("fvv.status.cancelled")
                 if TEST_ON { tr("reconnect cancelled\n") }
                 fuiscene.refresh()
             } else if retry_at != 0 && tnow < retry_at {
@@ -1734,11 +1766,14 @@ fn gui() -> i32 {
                 retry_at = 0
                 st_delay = 2
                 st_begin()
-                st_str("Verbinde neu (Versuch ")
+                st_str("fvv.reconnecting")
+                st_raw(" (")
+                st_str("fvv.attempt")
+                st_raw(" ")
                 st_dec(retry_n)
-                st_str("/")
+                st_raw("/")
                 st_dec(retry.MAX_RECONNECTS)
-                st_str(")...")
+                st_raw(")...")
                 fuiscene.refresh()
             } else if st_delay > 0 {
                 st_delay = st_delay - 1
@@ -1751,9 +1786,9 @@ fn gui() -> i32 {
                     client.cl_set_timeout(&cl, 40)
                     st_begin()
                     if ask_mode {
-                        st_str("Warte auf Bestaetigung am Host...")
+                        st_str("fvv.status.waitconfirm")
                     } else {
-                        st_str("Pruefe Passwort...")
+                        st_str("fvv.status.checkpw")
                     }
                     fuiscene.refresh()
                 } else {
