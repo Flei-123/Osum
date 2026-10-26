@@ -1,0 +1,180 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/busy.fi -- the standard message box, spinner, progress and "run with a busy dialog" API (docs/BUSY.md).
+profile app
+
+import ulib
+import fuiapp
+import fuiscene
+import msg
+
+export {
+    alert, confirm, spinner, progress, tick, run, close, is_open, cancelled, report, report_text, last_error,
+    RUN_OK, RUN_CANCELLED, RUN_TIMEOUT, RUN_NO_WINDOW, RUN_ERROR,
+    STEP_MORE, STEP_DONE,
+    PCT_INDETERMINATE,
+}
+
+const RUN_OK: u64 = 0
+const RUN_CANCELLED: u64 = 1
+const RUN_TIMEOUT: u64 = 2
+const RUN_NO_WINDOW: u64 = 3
+const RUN_ERROR: u64 = 4
+
+const STEP_MORE: u64 = 0
+const STEP_DONE: u64 = 1
+
+const PCT_INDETERMINATE: i64 = -1
+
+static mut k_ok: [u8; 10] = "dialog.ok\0"
+static mut k_cancel: [u8; 14] = "dialog.cancel\0"
+
+static mut g_active: bool = false
+static mut g_cancelable: bool = false
+static mut g_error: u64 = 0
+
+fn label_ok() -> u64 {
+    return msg.get((&k_ok[0 as usize]) as u64)
+}
+
+fn label_cancel() -> u64 {
+    return msg.get((&k_cancel[0 as usize]) as u64)
+}
+
+fn modal(title: u64, text: u64, b1: u64, b2: u64) -> u64 {
+    if !fuiscene.alive() {
+        return 0
+    }
+    fuiscene.dialog_open(title, text, b1, b2)
+    var res: u64 = 0
+    while fuiscene.alive() && fuiscene.dialog_is_open() {
+        let k: u64 = fuiscene.pump()
+        if k == fuiscene.KEY_DIALOG {
+            res = fuiscene.dialog_result()
+            break
+        }
+    }
+    return res
+}
+
+fn alert(title: u64, text: u64) {
+    let _r: u64 = modal(title, text, label_ok(), 0)
+}
+
+fn confirm(title: u64, text: u64) -> bool {
+    return modal(title, text, label_ok(), label_cancel()) == 1
+}
+
+fn open_busy(title: u64, text: u64, pct: i64, cancelable: bool) {
+    if pct < 0 {
+        fuiscene.dialog_busy(title, text)
+        fuiscene.dialog_progress(fuiscene.PCT_INDET)
+    } else {
+        fuiscene.dialog_busy(title, text)
+        fuiscene.dialog_progress(pct as u64)
+    }
+    if cancelable {
+        fuiscene.dialog_cancel(label_cancel())
+    }
+    g_active = true
+    g_cancelable = cancelable
+}
+
+fn spinner(title: u64, text: u64, cancelable: bool) {
+    fuiscene.dialog_spin(title, text)
+    if cancelable {
+        fuiscene.dialog_cancel(label_cancel())
+    }
+    g_active = true
+    g_cancelable = cancelable
+    fuiscene.repaint_now()
+}
+
+fn is_open() -> bool {
+    return g_active && fuiscene.dialog_is_open() && fuiscene.dialog_kind() == 3
+}
+
+fn cancelled() -> bool {
+    return fuiscene.dialog_cancel_asked()
+}
+
+fn report(pct: i64) {
+    if pct < 0 {
+        fuiscene.dialog_progress(fuiscene.PCT_INDET)
+    } else if pct > 100 {
+        fuiscene.dialog_progress(100)
+    } else {
+        fuiscene.dialog_progress(pct as u64)
+    }
+}
+
+fn report_text(text: u64) {
+    fuiscene.dialog_set_text(text)
+}
+
+fn tick() -> bool {
+    let _k: u64 = fuiscene.pump()
+    return fuiscene.dialog_cancel_asked()
+}
+
+fn progress(title: u64, text: u64, pct: i64, cancelable: bool) -> bool {
+    if !fuiscene.alive() {
+        return false
+    }
+    if !is_open() {
+        open_busy(title, text, pct, cancelable)
+    } else {
+        report_text(text)
+        report(pct)
+    }
+    fuiscene.repaint_now()
+    return tick()
+}
+
+fn close() {
+    if g_active {
+        fuiscene.dialog_close()
+        g_active = false
+        g_cancelable = false
+        fuiscene.repaint_now()
+    }
+}
+
+fn last_error() -> u64 {
+    return g_error
+}
+
+fn run(title: u64, text: u64, step: fn(u64) -> u64, ud: u64, timeout_ms: u64, cancelable: bool) -> u64 {
+    if !fuiscene.alive() {
+        return RUN_NO_WINDOW
+    }
+    g_error = 0
+    spinner(title, text, cancelable)
+    let start: u64 = fuiapp.now_ms()
+    var result: u64 = RUN_OK
+    while true {
+        if timeout_ms != 0 && fuiapp.now_ms() >= start + timeout_ms {
+            result = RUN_TIMEOUT
+            break
+        }
+        if cancelable && fuiscene.dialog_cancel_asked() {
+            result = RUN_CANCELLED
+            break
+        }
+        let r: u64 = step(ud)
+        if r == STEP_DONE {
+            break
+        }
+        if r != STEP_MORE {
+            g_error = r
+            result = RUN_ERROR
+            break
+        }
+        let _c: bool = tick()
+        if !fuiscene.alive() {
+            result = RUN_NO_WINDOW
+            break
+        }
+    }
+    close()
+    return result
+}
