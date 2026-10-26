@@ -445,6 +445,9 @@ echo "== 8. die Seite Darstellung passt ins Fenster -- alle Seiten =="
 bash tools/themestore/build.sh "$TMPD/set" extra='einst' uitrace=yes keep=yes \
     > "$TMPD/set.log" 2>&1
 SE="$TMPD/set/serial.txt"
+bash tools/themestore/build.sh "$TMPD/setflat" extra='einst' uitrace=yes sidebar=flat \
+    > "$TMPD/setflat.log" 2>&1
+SEF="$TMPD/setflat/serial.txt"
 WH=$(grep -ao 'name=win x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' "$SE" | tail -1 \
      | grep -oE 'h=[0-9]+' | cut -d= -f2)
 num "das Fenster ist so hoch wie der Arbeitsbereich zulaesst" "${WH:-0}" ge 560
@@ -649,7 +652,7 @@ num "und kein Reiter wird ausserhalb der Leiste gemalt" "$TABOUT" eq 0
 # gemeldete Name Zeichen fuer Zeichen gegen locale/de/messages
 # gehalten -- die Datei, aus der das Programm ihn holt. Ungleich ist
 # rot, und zwar fuer jeden einzelnen Reiter.
-TABNAME=$(python3 - "$SE" locale/de/messages <<'PY'
+TABNAME=$(python3 - "$SEF" locale/de/messages <<'PY'
 import re, sys
 txt = open(sys.argv[1], 'rb').read().decode('latin1')
 soll = []
@@ -942,7 +945,7 @@ done
 # passt, macht jede Aussage ueber "gekuerzt" wertlos -- und genau
 # diese zwei Zahlen benutzt tools/themestore/shotcheck.py, um eine
 # stille Kuerzung von einem kurzen Namen zu unterscheiden.
-TABNV=$(python3 - locale/de/messages "$SE" <<'PY'
+TABNV=$(python3 - locale/de/messages "$SEF" <<'PY'
 import re, sys
 want = []
 for zeile in open(sys.argv[1], 'rb').read().decode('utf-8').splitlines():

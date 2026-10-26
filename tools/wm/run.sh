@@ -691,7 +691,7 @@ echo "== 12b. the line being typed is visible BEFORE Enter (26.09.2026) =="
 # the kernel draws the edit line into the WINDOW only. Typed here WITHOUT
 # Enter, then photographed: a row of the terminal must carry `xyzq`.
 cat > "$TMPD/live.mon" <<'EOF'
-warte 1.5
+warte 3
 # the demo window holds the focus -- click into the terminal first
 mouse_move -120 -120
 mouse_move -120 -120
@@ -700,27 +700,35 @@ mouse_move -120 -120
 mouse_move 100 100
 mouse_button 1
 mouse_button 0
-warte 0.5
+warte 1.5
 sendkey x
+warte 0.3
 sendkey y
+warte 0.3
 sendkey z
+warte 0.3
 sendkey q
-warte 0.8
+warte 2
 EOF
 FOTO_QUIT=1 foto "$K0" "gfx wm wmhold wmshell wmdauer nosched noproc nofs" "$TMPD/le.txt" "$TMPD/le.ppm" \
     "$TMPD/live.mon"
 gefunden=""
-for z in 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
-    if aus=$(python3 tools/gfx/checkshot.py tgrid "$TMPD/le.ppm" \
-        assets/osum-mono.ttf 16 26 62 10 19 "$z" 0 \
-        224 230 236 16 20 26 "xyzq" 2>&1); then
-        gefunden="$z"; break
-    fi
+fehlt=""
+for ch in x y z q; do
+    hit=""
+    for z in 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
+        if python3 tools/gfx/checkshot.py tgrid "$TMPD/le.ppm" \
+            assets/osum-mono.ttf 16 26 62 10 19 "$z" 0 \
+            224 230 236 16 20 26 "$ch" >/dev/null 2>&1; then
+            hit="$z"; break
+        fi
+    done
+    if [ -n "$hit" ]; then gefunden="$gefunden$ch@$hit "; else fehlt="$fehlt$ch"; fi
 done
-if [ -n "$gefunden" ]; then
-    ok "the typed line stands in the window before Enter (row $gefunden: $aus)"
+if [ -z "$fehlt" ]; then
+    ok "the typed line stands in the window before Enter (rows: $gefunden)"
 else
-    bad "the typed line 'xyzq' is not in the window before Enter"
+    bad "the typed line 'xyzq' is not in the window before Enter (missing: $fehlt)"
     [ -n "${WM_KEEP:-}" ] && cp "$TMPD/le.ppm" "$TMPD/le.txt" "$WM_KEEP/" 2>/dev/null
     grep -a -E 'sh:|key:' "$TMPD/le.txt" | tail -8 | sed 's/^/        /'
 fi

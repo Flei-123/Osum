@@ -84,6 +84,7 @@ extra=""
 accel=${OSUM_ACCEL:-tcg}
 if [ -z "${OSUM_ACCEL:-}" ] && [ -w /dev/kvm ]; then accel=kvm; fi
 uitrace=no
+sidebar=tree
 clicks=""
 xscheme=""
 xfiles=""
@@ -114,6 +115,7 @@ for a in "$@"; do
         accel=*) accel=${a#*=} ;;
         keep=*) keep=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
+        sidebar=*) sidebar=${a#*=} ;;
         xscheme=*) xscheme=${a#*=} ;;
         xfile=*) xfiles="$xfiles ${a#*=}" ;;
         click=*) clicks="$clicks ${a#*=}" ;;
@@ -254,6 +256,10 @@ ARGS+=(/etc/
 if [ "$uitrace" = yes ]; then
     printf 'on\n' > "$OUT/uitrace"
     ARGS+=("/etc/uitrace=$OUT/uitrace@0644")
+fi
+if [ "$sidebar" = flat ]; then
+    printf 'flat\n' > "$OUT/setflat"
+    ARGS+=("/etc/setflat=$OUT/setflat@0644")
 fi
 # ROUND GLAS: THE PICTURE UNDER THE BAR.
 #
