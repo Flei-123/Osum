@@ -24,9 +24,9 @@ step "counter-proof: scanner flags a German literal" python3 tools/i18naudit/che
 step "counter-proof: key check flags an unknown key" python3 tools/i18naudit/check.py keyprobe
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-git show HEAD:kernel/user/mail.fi > "$tmp/mail.fi"
-echo "$tmp/mail.fi" > "$tmp/list"
-expect_fail "counter-proof: the unconverted mail.fi is rejected" python3 tools/i18naudit/check.py scan "$tmp/list"
+cp tools/i18naudit/german_fixture.txt "$tmp/fixture.fi"
+echo "$tmp/fixture.fi" > "$tmp/list"
+expect_fail "counter-proof: a file with German literals is rejected" python3 tools/i18naudit/check.py scan "$tmp/list"
 
 echo "i18naudit: $pass ok, $fail fail"
 [ "$fail" = 0 ]
