@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import instkern
+import bootcfg
+
+export {
+    mount, unmount, place_files, verify_files, commit, menu_entries, fallback_created,
+    E_NONE, E_KERNEL, E_LOADER, E_FALLBACK, E_CONF, E_REMOUNT, E_VERIFY_KERNEL, E_VERIFY_LOADER, E_VERIFY_CONF
+}
+
+const E_NONE: u64 = 0
+const E_KERNEL: u64 = 61
+const E_LOADER: u64 = 62
+const E_FALLBACK: u64 = 63
+const E_CONF: u64 = 64
+const E_REMOUNT: u64 = 68
+const E_VERIFY_KERNEL: u64 = 65
+const E_VERIFY_LOADER: u64 = 66
+const E_VERIFY_CONF: u64 = 67
+
+static mut p_efi: [u8; 6] = "/efi\0\0"
+static mut p_efi_efi: [u8; 10] = "/efi/EFI\0\0"
+static mut p_efi_boot: [u8; 16] = "/efi/EFI/BOOT\0\0\0"
+static mut p_fallback: [u8; 28] = "/efi/EFI/BOOT/BOOTX64.EFI\0\0\0"
+static mut p_conf: [u8; 20] = "/efi/limine.conf\0\0\0\0"
+static mut p_foreign: [u8; 40] = "/efi/EFI/Microsoft/Boot/bootmgfw.efi\0\0\0\0"
+static mut p_src_loader: [u8; 20] = "/boot/BOOTX64.EFI\0\0\0"
+static mut t_vfat: [u8; 6] = "vfat\0\0"
+static mut m_verified: [u8; 15] = "boot: verified\0"
+static mut conf_buf: [u8; 2048] = [0 as u8; 2048]
+
+static mut g_menu: u64 = 0
+static mut g_fallback_created: bool = false
+static mut g_kind: u64 = 0
+
+
+fn menu_entries() -> u64 {
+    return g_menu
+}
+
+fn fallback_created() -> bool {
+    return g_fallback_created
+}
+
+fn file_exists(p: u64) -> bool {
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, p, 0, 0)
+    if ulib.bad(f) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return true
+}
+
+fn mount(dev: u64) -> bool {
+    ulib.sys(ulib.SYS_MKDIR, (&p_efi[0 as usize]) as u64, 0, 0)
+    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT, dev,
+        (&p_efi[0 as usize]) as u64,
+        (&t_vfat[0 as usize]) as u64, 0)
+    return !ulib.bad(m)
+}
+
+fn unmount() {
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_UMOUNT2, (&p_efi[0 as usize]) as u64, 0, 0)
+}
+
+fn write_all(f: u64, text: u64) -> bool {
+    let n: u64 = ulib.length(text)
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, f, text, n)
+    return !ulib.bad(w) && w == n
+}
+
+fn write_conf(kind: u64) -> u64 {
+    let foreign: bool = file_exists((&p_foreign[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_UNLINK, (&p_conf[0 as usize]) as u64, 0, 0)
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64, ulib.O_MAKE, 0)
+    if ulib.bad(f) {
+        return 0
+    }
+    if !write_all(f, bootcfg.dual_text(kind)) {
+        ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+        return 0
+    }
+    var entries: u64 = 1
+    if foreign {
+        if !write_all(f, bootcfg.foreign_text()) {
+            ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+            return 0
+        }
+        entries = 2
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return entries
+}
+
+fn place_files(kind: u64) -> u64 {
+    g_kind = kind
+    g_fallback_created = false
+    ulib.sys(ulib.SYS_MKDIR, (&p_efi_efi[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, bootcfg.efi_dir(), 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&p_efi_boot[0 as usize]) as u64, 0, 0)
+    if !instkern.copy_file(instkern.kernel_source(), bootcfg.efi_kernel()) {
+        return E_KERNEL
+    }
+    if !instkern.copy_file((&p_src_loader[0 as usize]) as u64, bootcfg.efi_loader()) {
+        return E_LOADER
+    }
+    if !file_exists((&p_fallback[0 as usize]) as u64) {
+        if !instkern.copy_file((&p_src_loader[0 as usize]) as u64,
+            (&p_fallback[0 as usize]) as u64) {
+            return E_FALLBACK
+        }
+        g_fallback_created = true
+    }
+    g_menu = write_conf(kind)
+    if g_menu == 0 {
+        return E_CONF
+    }
+    return E_NONE
+}
+
+fn read_conf() -> u64 {
+    ulib.fill((&conf_buf[0 as usize]) as u64, 0, 2048)
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64, 0, 0)
+    if ulib.bad(f) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    var total: u64 = 0
+    var more: bool = true
+    while more && total < 2047 {
+        let n: u64 = ulib.sys(ulib.SYS_READ, f, (&conf_buf[0 as usize]) as u64 + total, 2047 - total)
+        if ulib.bad(n) || n == 0 {
+            more = false
+        } else {
+            total = total + n
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return total
+}
+
+fn same_bytes(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if __mmio_read8((a + i) as *mut u8) != __mmio_read8((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn conf_matches() -> bool {
+    let have: u64 = read_conf()
+    let head: u64 = bootcfg.dual_text(g_kind)
+    let head_len: u64 = ulib.length(head)
+    var want: u64 = head_len
+    if g_menu == 2 {
+        want = head_len + ulib.length(bootcfg.foreign_text())
+    }
+    if have != want {
+        return false
+    }
+    let base: u64 = (&conf_buf[0 as usize]) as u64
+    if !same_bytes(base, head, head_len) {
+        return false
+    }
+    if g_menu == 2 {
+        return same_bytes(base + head_len, bootcfg.foreign_text(), want - head_len)
+    }
+    return true
+}
+
+fn verify_files() -> u64 {
+    if !instkern.files_equal(instkern.kernel_source(), bootcfg.efi_kernel()) {
+        return E_VERIFY_KERNEL
+    }
+    if !instkern.files_equal((&p_src_loader[0 as usize]) as u64, bootcfg.efi_loader()) {
+        return E_VERIFY_LOADER
+    }
+    if g_fallback_created && !instkern.files_equal((&p_src_loader[0 as usize]) as u64,
+        (&p_fallback[0 as usize]) as u64) {
+        return E_VERIFY_LOADER
+    }
+    if !conf_matches() {
+        return E_VERIFY_CONF
+    }
+    return E_NONE
+}
+
+fn commit(dev: u64) -> u64 {
+    unmount()
+    if !mount(dev) {
+        return E_REMOUNT
+    }
+    let r: u64 = verify_files()
+    unmount()
+    if r == E_NONE {
+        ulib.say((&m_verified[0 as usize]) as u64)
+        ulib.nl()
+    }
+    return r
+}

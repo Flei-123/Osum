@@ -8,6 +8,9 @@ import fuiscene
 import msg
 import instkern
 import bootcfg
+import bootdual
+import bootnote
+import bootlog
 import instrun
 import instlog
 import busy
@@ -1787,91 +1790,25 @@ fn esp_name(dev: u64) {
     }
 }
 
-static mut p_foreign_bm: [u8; 40] = "/efi/EFI/Microsoft/Boot/bootmgfw.efi\0\0\0\0"
-
-fn file_exists(path: u64) -> bool {
-    let f: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
-    if ulib.bad(f) {
-        return false
-    }
-    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
-    return true
-}
-
-fn start_file_dual() -> u64 {
-    let foreign: bool = file_exists(ptr((&p_foreign_bm[0 as usize]) as u64))
-    ulib.sys(ulib.SYS_UNLINK, ptr((&p_efi_lim[0 as usize]) as u64), 0, 0)
-    let f: u64 = ulib.sys(ulib.SYS_OPEN,
-        ptr((&p_efi_lim[0 as usize]) as u64), ulib.O_MAKE, 0)
-    if ulib.bad(f) {
-        return 0
-    }
-    let dual: u64 = bootcfg.dual_text(bootcfg.KIND_INSTALLER)
-    let n1: u64 = ulib.length(dual)
-    let w1: u64 = ulib.sys(ulib.SYS_WRITE, f, dual, n1)
-    if ulib.bad(w1) || w1 != n1 {
-        ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
-        return 0
-    }
-    var how_many: u64 = 1
-    if foreign {
-        let n2: u64 = ulib.length(bootcfg.foreign_text())
-        let w2: u64 = ulib.sys(ulib.SYS_WRITE, f, bootcfg.foreign_text(), n2)
-        if ulib.bad(w2) || w2 != n2 {
-            ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
-            return 0
-        }
-        how_many = 2
-    }
-    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
-    return how_many
-}
-
 fn bootloader_dual() -> bool {
-    ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi[0 as usize]) as u64), 0, 0)
-    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT,
-        ptr((&d_esp[0 as usize]) as u64),
-        ptr((&p_efi[0 as usize]) as u64),
-        ptr((&t_vfat[0 as usize]) as u64), 0)
-    if ulib.bad(m) {
+    if !bootdual.mount(ptr((&d_esp[0 as usize]) as u64)) {
         report_at(60)
         return false
     }
-
-    ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi_efi[0 as usize]) as u64), 0, 0)
-    ulib.sys(ulib.SYS_MKDIR, bootcfg.efi_dir(), 0, 0)
-
-    ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi_boot[0 as usize]) as u64), 0, 0)
-    var succeeded: bool = true
-    if !instkern.copy_file(instkern.kernel_source(),
-        bootcfg.efi_kernel()) {
-        report_at(61)
-        succeeded = false
+    var code: u64 = bootdual.place_files(bootcfg.KIND_INSTALLER)
+    say(ptr((&m_d_menu[0 as usize]) as u64))
+    ulib.sayu(bootdual.menu_entries())
+    ulib.nl()
+    if code == bootdual.E_NONE {
+        code = bootdual.commit(ptr((&d_esp[0 as usize]) as u64))
+    } else {
+        bootdual.unmount()
     }
-    if succeeded && !instkern.copy_file(ptr((&p_src_ldr[0 as usize]) as u64),
-        bootcfg.efi_loader()) {
-        report_at(62)
-        succeeded = false
+    if code != bootdual.E_NONE {
+        report_at(code)
+        return false
     }
-
-    if succeeded && !instkern.copy_file(ptr((&p_src_ldr[0 as usize]) as u64),
-        ptr((&p_efi_ldr[0 as usize]) as u64)) {
-        report_at(63)
-        succeeded = false
-    }
-    if succeeded {
-        let how_many: u64 = start_file_dual()
-        say(ptr((&m_d_menu[0 as usize]) as u64))
-        ulib.sayu(how_many)
-        ulib.nl()
-        if how_many == 0 {
-            report_at(64)
-            succeeded = false
-        }
-    }
-    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
-    ulib.sys(ulib.SYS_UMOUNT2, ptr((&p_efi[0 as usize]) as u64), 0, 0)
-    return succeeded
+    return true
 }
 
 fn bootloader() -> bool {
@@ -2279,6 +2216,13 @@ fn u_start(args: u64) -> u64 {
             build_step()
             fuiscene.refresh()
             question = 0
+            if finished == 1 && which_way != 0 {
+                if immediately {
+                    bootlog.log_hint()
+                } else {
+                    bootnote.announce()
+                }
+            }
             if immediately {
                 return 0
             }

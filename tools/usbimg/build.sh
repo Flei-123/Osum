@@ -1900,6 +1900,19 @@ PYLIVE
     grep -q "^/Install $MARKE_PRODUKT\$" "$OUT/limine.conf" \
         || fehler "der Menueeintrag 'Install $MARKE_PRODUKT' fehlt"
 fi
+BOOTREG_EFI=""
+if [ -z "${OSUM_NO_BOOTREG:-}" ] && [ -f tools/bootreg/build.sh ]; then
+    bash tools/bootreg/build.sh "$OUT/bootreg" > "$OUT/bootreg.log" 2>&1 \
+        || { cat "$OUT/bootreg.log" >&2; fehler "bootreg.efi could not be built"; }
+    BOOTREG_EFI="$OUT/bootreg/bootreg.efi"
+    [ -s "$BOOTREG_EFI" ] || fehler "bootreg.efi is missing after the build"
+    python3 -I tools/marke/bootreg_cfg.py "$MARKE_KURZ" "$MARKE_PRODUKT" "$OUT/bootreg.cfg" \
+        || fehler "bootreg.cfg could not be written"
+    printf '\n/Register %s in firmware boot menu\n    protocol: efi_chainload\n    path: boot():/EFI/BOOT/bootreg.efi\n' \
+        "$MARKE_PRODUKT" >> "$OUT/limine.conf"
+else
+    sagen "bootreg     skipped (no tools/bootreg/build.sh or OSUM_NO_BOOTREG set): the stick has no register entry"
+fi
 # 24.09.2026: no comment lines on the stick (see section 6).
 if grep -qE '^[[:space:]]*#' "$OUT/limine.conf"; then
     fehler "limine.conf enthaelt Kommentarzeilen -- die gehoeren nach docs/STICK-MENUE.md"
@@ -2005,6 +2018,10 @@ mkfs.vfat -F 32 -h "$P1_ANF" -n OSUMEFI "$OUT/esp.img" > "$OUT/vfat.log" 2>&1 \
 mmd -i "$OUT/esp.img" ::/EFI ::/EFI/BOOT ::/boot 2>/dev/null
 mcopy -i "$OUT/esp.img" "$LIMINE/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI || fehler "mcopy BOOTX64"
 mcopy -i "$OUT/esp.img" "$LIMINE/limine-bios.sys" ::/limine-bios.sys || fehler "mcopy bios.sys"
+if [ -n "$BOOTREG_EFI" ]; then
+    mcopy -i "$OUT/esp.img" "$BOOTREG_EFI" ::/EFI/BOOT/bootreg.efi || fehler "mcopy bootreg.efi"
+    mcopy -i "$OUT/esp.img" "$OUT/bootreg.cfg" ::/EFI/BOOT/bootreg.cfg || fehler "mcopy bootreg.cfg"
+fi
 mcopy -i "$OUT/esp.img" "$OUT/limine.conf" ::/limine.conf || fehler "mcopy conf"
 mcopy -i "$OUT/esp.img" "$OUT/limine.conf" ::/boot/limine.conf || fehler "mcopy conf2"
 mcopy -i "$OUT/esp.img" "$OUT/osum.mb" ::/osum.mb || fehler "mcopy kern"

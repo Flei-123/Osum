@@ -5,6 +5,8 @@ profile kernel
 import ulib
 import instkern
 import bootcfg
+import bootdual
+import bootlog
 import dualkern
 import wunlock
 import shrinkflow
@@ -128,95 +130,33 @@ fn esp_name(dev: u64, nr: u64) -> u64 {
     return p
 }
 
-static mut P_EFI: [u8; 6] = "/efi\0\0"
-static mut P_EFI_EFI: [u8; 10] = "/efi/EFI\0\0"
-static mut P_EFI_BOOT: [u8; 16] = "/efi/EFI/BOOT\0\0\0"
-static mut P_EFI_LDR: [u8; 26] = "/efi/EFI/BOOT/BOOTX64.EFI\0"
-static mut P_EFI_LIM: [u8; 17] = "/efi/limine.conf\0"
-static mut P_FOREIGN: [u8; 37] = "/efi/EFI/Microsoft/Boot/bootmgfw.efi\0"
-static mut P_SRC_KERN: [u8; 14] = "/boot/osum.mb\0"
-static mut P_SRC_LDR: [u8; 18] = "/boot/BOOTX64.EFI\0"
-static mut T_VFAT: [u8; 5] = "vfat\0"
-
 static mut S_MENU: [u8; 13] = "dual: menu=\0\0"
+static mut S_BOOT_ERR: [u8; 18] = "dual: boot-error=\0"
 static mut S_SOURCE: [u8; 15] = "dual: source=\0\0"
 static mut S_SRC_REASON: [u8; 19] = "dual: srcreason=\0\0\0"
 static mut S_SRC_SECT: [u8; 16] = "dual: srcsect=\0\0"
 
-fn file_exists(path: u64) -> bool {
-    let f: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
-    if ulib.bad(f) {
-        return false
-    }
-    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
-    return true
-}
-
-fn start_file() -> u64 {
-    let foreign: bool = file_exists((&P_FOREIGN[0 as usize]) as u64)
-    ulib.sys(ulib.SYS_UNLINK, (&P_EFI_LIM[0 as usize]) as u64, 0, 0)
-    let f: u64 = ulib.sys(ulib.SYS_OPEN, (&P_EFI_LIM[0 as usize]) as u64,
-        ulib.O_MAKE, 0)
-    if ulib.bad(f) {
-        return 0
-    }
-    let dual: u64 = bootcfg.dual_text(bootcfg.KIND_CLI)
-    let n1: u64 = ulib.length(dual)
-    let w1: u64 = ulib.sys(ulib.SYS_WRITE, f, dual, n1)
-    if ulib.bad(w1) || w1 != n1 {
-        ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
-        return 0
-    }
-    var how_many: u64 = 1
-    if foreign {
-        let n2: u64 = ulib.length(bootcfg.foreign_text())
-        let w2: u64 = ulib.sys(ulib.SYS_WRITE, f, bootcfg.foreign_text(), n2)
-        if ulib.bad(w2) || w2 != n2 {
-            ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
-            return 0
-        }
-        how_many = 2
-    }
-    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
-    return how_many
-}
-
 fn bootloader(espdev: u64) -> bool {
-    ulib.sys(ulib.SYS_MKDIR, (&P_EFI[0 as usize]) as u64, 0, 0)
-    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT, espdev,
-        (&P_EFI[0 as usize]) as u64, (&T_VFAT[0 as usize]) as u64, 0)
-    if ulib.bad(m) {
+    if !bootdual.mount(espdev) {
         return false
     }
-
-    ulib.sys(ulib.SYS_MKDIR, (&P_EFI_EFI[0 as usize]) as u64, 0, 0)
-    ulib.sys(ulib.SYS_MKDIR, bootcfg.efi_dir(), 0, 0)
-    ulib.sys(ulib.SYS_MKDIR, (&P_EFI_BOOT[0 as usize]) as u64, 0, 0)
-    var succeeded: bool = true
-    if !instkern.copy_file(instkern.kernel_source(),
-        bootcfg.efi_kernel()) {
-        succeeded = false
+    var code: u64 = bootdual.place_files(bootcfg.KIND_CLI)
+    ulib.say((&S_MENU[0 as usize]) as u64)
+    ulib.sayu(bootdual.menu_entries())
+    ulib.nl()
+    if code == bootdual.E_NONE {
+        code = bootdual.commit(espdev)
+    } else {
+        bootdual.unmount()
     }
-    if succeeded && !instkern.copy_file((&P_SRC_LDR[0 as usize]) as u64,
-        bootcfg.efi_loader()) {
-        succeeded = false
-    }
-    if succeeded && !instkern.copy_file((&P_SRC_LDR[0 as usize]) as u64,
-        (&P_EFI_LDR[0 as usize]) as u64) {
-        succeeded = false
-    }
-    if succeeded {
-        let w: u64 = start_file()
-        ulib.say((&S_MENU[0 as usize]) as u64)
-        ulib.sayu(w)
+    if code != bootdual.E_NONE {
+        ulib.say((&S_BOOT_ERR[0 as usize]) as u64)
+        ulib.sayu(code)
         ulib.nl()
-        if w == 0 {
-            succeeded = false
-        }
+        return false
     }
-    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
-    ulib.sys(ulib.SYS_UMOUNT2, (&P_EFI[0 as usize]) as u64, 0, 0)
-    return succeeded
+    bootlog.log_hint()
+    return true
 }
 
 fn shrink_progress(phase: u64, pct: u64) -> u64 {
