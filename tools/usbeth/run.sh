@@ -92,8 +92,9 @@ host_checks() {
         sed -i "$expr" "$T/mut/usbnet/$file"
         cmp -s "lib/usbnet/$file" "$T/mut/usbnet/$file" && { bad "mutation '$name' changed nothing"; return; }
         if ! FIRNLIB="$T/mut" "$FIRNC" tools/usbeth/oracle.fi -o "$T/oracle-m" > "$T/m.err" 2>&1; then bad "mutation '$name' does not build"; return; fi
-        "$T/oracle-m" > "$T/m.txt" 2>&1
-        if grep -q '^FAIL' "$T/m.txt"; then ok "counter-proof: oracle goes red without '$name' ($(grep -c '^FAIL' "$T/m.txt") promises fail)"
+        { "$T/oracle-m" > "$T/m.txt" 2>&1; } 2>/dev/null
+        mrc=$?
+        if grep -q '^FAIL' "$T/m.txt" || [ "$mrc" != 0 ]; then ok "counter-proof: oracle goes red without '$name' ($(grep -c '^FAIL' "$T/m.txt") promises fail, exit $mrc)"
         else bad "counter-proof: oracle stays green without '$name'"; fi
     }
     mutate "ax179 padding flag" ax88179.fi 's/h2 = 0x80008000/h2 = 0/'
@@ -143,7 +144,7 @@ for c in $CASES; do
         printf 'aufzeile k17: hold\nmonitor device_add usb-net,id=devn1,netdev=n0,mac=52:54:00:12:34:99\naufzeile driver=%s\nmonitor device_del devn1\naufzeile usbnet: detached\nmonitor device_add usb-net,id=devn2,netdev=n0,mac=52:54:00:12:34:98\naufzeile k17: free\n' "$drv" > "$T/plan-$c.txt"
         hotadd "$c" "$words" "$T/plan-$c.txt"
         H="$T/$c.klar"
-        [ "$(grep -ac "driver=$drv" "$H")" = 2 ] && ok "$c: bound to $drv twice (add, remove, add again)" || bad "$c: driver=$drv seen $(grep -ac "driver=$drv" "$H") times"
+        [ "$(grep -ac "class=[0-9a-f:]* driver=$drv" "$H")" = 2 ] && ok "$c: bound to $drv twice (add, remove, add again)" || bad "$c: bound to $drv $(grep -ac "class=[0-9a-f:]* driver=$drv" "$H") times"
         grep -aq 'usbnet: detached' "$H" && ok "$c: device_del noticed" || bad "$c: device_del not noticed"
         grep -aq "$(if [ "$drv" = ecm ]; then echo 'usb: ecm 52:54:00:12:34:98'; else echo 'usb: rndis 52:54:00:12:34:98'; fi)" "$H" && ok "$c: the second device (MAC ...98) was taken after the first was removed" || bad "$c: second device not taken"
         grep -aq 'dhcp: ack ip=10.0.2.15' "$H" && ok "$c: DHCP lease over the re-added device" || bad "$c: no lease"
