@@ -36,7 +36,7 @@ German words are still understood; data stays: `<root>/.papierkorb`, `/etc/papie
 (test.sh section 58) keeps the counts from growing; `count.py --diff <base>` checks new lines.
 
 STILL GERMAN (next steps): `papierkorb`, `dispctl` console lines, `drucke`, `hurt` (an English word -- stays),
-`instkonto` (module), the kernel log (`/bin/log`: "Karte gefunden", ...), comments and identifiers
+the kernel log (`/bin/log`: "Karte gefunden", ...), comments and identifiers
 inside the sources (see tools/english for the identifier renamer).
 
 KEPT GERMAN ON PURPOSE (data formats, not commands -- renaming breaks signed or persisted data):
