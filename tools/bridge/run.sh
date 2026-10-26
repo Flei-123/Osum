@@ -638,6 +638,41 @@ draht_zu
 G="$TMPD/g9c.log"
 [ "$(status_von 3)" = ok ] && ok "counter-proof: without command_flag_allowed -x passes" || bad "counter-proof: $(grep -a '^ANTWORT 3 ' "$G")"
 
+echo "== 9c. command_sub_allowed: subcommands per command =="
+sed 's|command_allowed = /bin/echo|command_allowed = /bin/echo\ncommand_sub_allowed = /bin/echo list\ncommand_sub_allowed = /bin/echo status|' \
+    "$TMPD/voll.conf" > "$TMPD/sub.conf"
+abbild "$TMPD/sub.img" "$TMPD/sub.conf" "/var/jarvis/gruss.txt=$TMPD/gruss.txt"
+cat > "$TMPD/auf-sub.txt" <<'AUF'
+befehl|/bin/echo list|
+befehl|/bin/echo status x|
+befehl|/bin/echo ban|
+befehl|/bin/echo -n list|
+befehl|/bin/echo -n ban|
+befehl|/bin/echo|
+befehl|/bin/echo lists|
+AUF
+draht_auf
+gegenstelle_an good "$TMPD/auf-sub.txt" "$TMPD/g9d.log"
+lauf_mit_netz "$TMPD/sub.img" "jarvisd -1 -t 60000;exit" "$TMPD/r9d.txt" 220
+gegenstelle_aus
+draht_zu
+G="$TMPD/g9d.log"
+[ "$(status_von 1)" = ok ] && ok "listed subcommand: allowed" || bad "listed subcommand: $(grep -a '^ANTWORT 1 ' "$G")"
+[ "$(status_von 2)" = ok ] && ok "second listed subcommand with an argument: allowed" || bad "second subcommand: $(grep -a '^ANTWORT 2 ' "$G")"
+[ "$(status_von 3)" = nein ] && ok "unlisted subcommand: rejected" || bad "unlisted subcommand: $(grep -a '^ANTWORT 3 ' "$G")"
+hat "$G.3.bin" "command_sub_allowed" "the reason names command_sub_allowed"
+[ "$(status_von 4)" = ok ] && ok "option before a listed subcommand: allowed" || bad "option + listed: $(grep -a '^ANTWORT 4 ' "$G")"
+[ "$(status_von 5)" = nein ] && ok "option before an unlisted subcommand: rejected" || bad "option + unlisted: $(grep -a '^ANTWORT 5 ' "$G")"
+[ "$(status_von 6)" = nein ] && ok "no subcommand at all: rejected" || bad "bare command: $(grep -a '^ANTWORT 6 ' "$G")"
+[ "$(status_von 7)" = nein ] && ok "list is not lists: rejected" || bad "prefix subcommand: $(grep -a '^ANTWORT 7 ' "$G")"
+draht_auf
+gegenstelle_an good "$TMPD/auf-sub.txt" "$TMPD/g9e.log"
+lauf_mit_netz "$TMPD/noflag.img" "jarvisd -1 -t 60000;exit" "$TMPD/r9e.txt" 220
+gegenstelle_aus
+draht_zu
+G="$TMPD/g9e.log"
+[ "$(status_von 3)" = ok ] && ok "counter-proof: without command_sub_allowed any subcommand passes" || bad "counter-proof: $(grep -a '^ANTWORT 3 ' "$G")"
+
 # =====================================================================
 echo "== 10. ZUSAGE (f): kein Netz beim Start =="
 # =====================================================================

@@ -204,6 +204,43 @@ hasnot "$D/ul2.klar" "EXCEPTION" "hold: no kernel exception"
 has "$D/ul3.klar" "unload edudemo none" "nostore: nothing to unload"
 hasnot "$D/ul3.klar" "unload edudemo ok" "counter-proof nostore: no unload without store"
 
+cat > "$D/r1.sh" <<'EOS'
+echo ==R1==
+drvctl load edudemo
+drvctl reload edudemo
+cat /proc/drivers
+drvctl unload edudemo
+drvctl load edudemo
+drvctl load edudemo
+drvctl load nosuch
+drvctl reload nosuch
+drvctl load BAD/NAME
+drvctl load
+echo ==R1END==
+EOS
+mkimg rl1 $FILES "/t/r1.sh=$D/r1.sh"
+cp "$D/d-rl1.img" "$D/d-rl2.img"
+cp "$D/d-rl1.img" "$D/d-rl3.img"
+SCRIPT=/t/r1.sh runvm rl1 "" -device edu &
+SCRIPT=/t/r1.sh runvm rl2 drvhold -device edu &
+SCRIPT=/t/r1.sh runvm rl3 nostore -device edu &
+wait
+has "$D/rl1.klar" "load edudemo loaded" "reload: load of an already bound package says loaded"
+has "$D/rl1.klar" "unload edudemo ok" "reload: reload unloads first"
+has "$D/rl1.klar" "load edudemo ok bound=1" "reload: package bound again"
+has "$D/rl1.klar" "drvstore: ctl load edudemo 0" "reload: kernel logged the load"
+has "$D/rl1.klar" "load nosuch none" "reload: unknown package says none"
+has "$D/rl1.klar" "drvctl: bad package name: BAD/NAME" "reload: path-like name refused in userland"
+has "$D/rl1.klar" "usage: drvctl" "reload: missing name prints usage"
+[ "$(grep -ac 'edudemo: ven=' "$D/rl1.klar")" -ge 3 ] && ok "reload: module init ran again after each load" || bad "reload: module init count $(grep -ac 'edudemo: ven=' "$D/rl1.klar")"
+[ "$(grep -ac 'drv=edudemo src=store bind=bound' "$D/rl1.klar")" -ge 1 ] && ok "reload: device bound after reload" || bad "reload: device not bound after reload"
+has "$D/rl1.klar" "store=on pkgs=8 valid=3 bound=1 failed=0" "reload: counts back to one bound"
+hasnot "$D/rl1.klar" "EXCEPTION" "reload: no kernel exception"
+has "$D/rl2.klar" "unload edudemo busy refs=2" "hold: reload refuses while references are held"
+hasnot "$D/rl2.klar" "load edudemo ok" "counter-proof hold: no load after a refused unload"
+has "$D/rl3.klar" "load edudemo none" "nostore: nothing to load"
+hasnot "$D/rl3.klar" "load edudemo ok" "counter-proof nostore: no load without store"
+
 FWBLOB="OrientOS fw demo blob"
 FWHASH=c44a0725b6b3e2bad7103b68b309c068f5d4a0727f515c3f257c5c0f40f8eeee
 printf '%s\n' "$FWBLOB" > "$D/fw.good"
