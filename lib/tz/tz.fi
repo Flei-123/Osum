@@ -2,7 +2,7 @@
 // lib/tz/tz.fi -- time zones for OrientOS (N-004, r20).
 //
 // WHAT THIS IS
-//   Pure arithmetic + a small generated table (`zonedata.fi`, 79 zones). One
+//   Pure arithmetic + a small generated table (`zonedata.fi`). One
 //   function answers "what is the offset from UTC at this instant" for a zone
 //   described by a STANDARD offset and a summer-time RULE; the kernel
 //   (`kernel/sched/time.fi`), the file times (`expmodell.fi`) and the settings
@@ -17,34 +17,31 @@
 //   system call boundary (`SYS_OSUM_SETTZ`, rule argument bit 8 = west).
 //
 // RULES (the instants are those of the CURRENT law; no history before 2007)
-//   0 none    1 EU   last Sun Mar 01:00 UTC -> last Sun Oct 01:00 UTC
-//   2 US/CA   2nd Sun Mar 02:00 standard -> 1st Sun Nov 02:00 daylight (01:00 standard)
-//   3 AU(S)   1st Sun Oct 02:00 standard -> 1st Sun Apr 03:00 daylight (southern)
-//   4 NZ      last Sun Sep 02:00 standard -> 1st Sun Apr 03:00 daylight (southern)
+//   One row per rule in lib/tz/rules.fi: the first <weekday> on or after a day of a
+//   month, at a time given in UTC or local standard time. EU, US/CA, AU (south),
+//   NZ (south), Chile (south), Cuba, Israel, Egypt.
 //
 // HONEST
-//   * Only zones whose offsets the four rules reproduce for 2024..2040 are in the
+//   * Only zones whose offsets the rules reproduce for 2024..2040 are in the
 //     table (tools/tz/gen.py classifies every candidate against IANA tzdata and
-//     refuses the rest: Santiago, Havana, Jerusalem, Cairo, Casablanca).
+//     refuses the rest: Casablanca, whose offset follows Ramadan).
 //   * No history (a file from 2005 uses today's rule) and no leap-second or
 //     "permanent DST" legislation that is not yet in force.
 //   * Measured by tools/tz/run.sh against Python's zoneinfo (IANA tzdata).
 
 export {
-    R_NONE, R_EU, R_US, R_AU, R_NZ, RULE_MAX, NONE_ZONE,
+    NONE_ZONE,
     to_wrapped, magnitude, is_west, rule_of_arg, west_bit,
     dst_active, offset_min,
     zone_count, zone_region, zone_name, zone_base, zone_rule,
     region_n, zone_in_region, zone_find, zone_by_name,
 }
 import tz.zonedata
+import tz.rules
 
-const R_NONE: u64 = 0
-const R_EU: u64 = 1
-const R_US: u64 = 2
-const R_AU: u64 = 3
-const R_NZ: u64 = 4
-const RULE_MAX: u64 = 4
+const SECS_PER_DAY: u64 = 86400
+const SECS_PER_MIN: u64 = 60
+const DAYS_PER_WEEK: u64 = 7
 const NONE_ZONE: u64 = 0xffffffff
 
 // ---------------------------------------------------------------- signed minutes
@@ -118,50 +115,43 @@ fn weekday(days: u64) -> u64 {
     return (days +% 4) % 7
 }
 
-// the last Sunday of a month that has `mlen` days, as a day count
-fn last_sunday(y: u64, m: u64, mlen: u64) -> u64 {
-    let last: u64 = days_from_civil(y, m, mlen)
-    return last -% weekday(last)
-}
-
-// the n-th Sunday (1 = first) of a month
-fn nth_sunday(y: u64, m: u64, n: u64) -> u64 {
-    let first: u64 = days_from_civil(y, m, 1)
-    let w: u64 = weekday(first)
-    var s: u64 = first
-    if w != 0 {
-        s = first +% (7 -% w)
-    }
-    return s +% (7 *% (n -% 1))
-}
-
 // ---------------------------------------------------------------- the rules
 // Is summer time in force at this instant (UTC seconds)? `base` = wrapped
-// standard offset in minutes (the US/AU/NZ changeovers are local times).
+// standard offset in minutes. Every rule is a row of lib/tz/rules.fi.
+fn on_or_after(y: u64, month: u64, dom: u64, wd: u64) -> u64 {
+    let first: u64 = days_from_civil(y, month, dom)
+    return first +% ((wd +% DAYS_PER_WEEK -% weekday(first)) % DAYS_PER_WEEK)
+}
+
+fn boundary(y: u64, base: u64, rule: u64, end: bool) -> u64 {
+    var f: u64 = rules.F_START_MONTH
+    if end {
+        f = rules.F_END_MONTH
+    }
+    let month: u64 = rules.rule_field(rule, f)
+    let dom: u64 = rules.rule_field(rule, f + 1)
+    let wd: u64 = rules.rule_field(rule, f + 2)
+    let secs: u64 = rules.rule_field(rule, f + 3)
+    let ref: u64 = rules.rule_field(rule, f + 4)
+    var t: u64 = (on_or_after(y, month, dom, wd) *% SECS_PER_DAY) +% secs
+    if ref == rules.REF_STANDARD {
+        t = t -% (base *% SECS_PER_MIN)
+    }
+    return t
+}
+
 fn dst_active(utc: u64, base: u64, rule: u64) -> bool {
-    if rule == R_NONE || rule > RULE_MAX {
+    if rule == rules.R_NONE || rule > rules.RULE_MAX {
         return false
     }
-    if rule == R_EU {
-        let y: u64 = year_of_days(utc / 86400)
-        let a: u64 = (last_sunday(y, 3, 31) *% 86400) +% 3600
-        let b: u64 = (last_sunday(y, 10, 31) *% 86400) +% 3600
-        return utc >= a && utc < b
+    let ls: u64 = utc +% (base *% SECS_PER_MIN)
+    let y: u64 = year_of_days(ls / SECS_PER_DAY)
+    let a: u64 = boundary(y, base, rule, false)
+    let b: u64 = boundary(y, base, rule, true)
+    if rules.rule_field(rule, rules.F_SOUTH) != 0 {
+        return utc >= a || utc < b
     }
-    let ls: u64 = utc +% (base *% 60) // local standard time
-    let y: u64 = year_of_days(ls / 86400)
-    if rule == R_US {
-        let a: u64 = (nth_sunday(y, 3, 2) *% 86400) +% 7200
-        let b: u64 = (nth_sunday(y, 11, 1) *% 86400) +% 3600
-        return ls >= a && ls < b
-    }
-    let end: u64 = (nth_sunday(y, 4, 1) *% 86400) +% 7200
-    if rule == R_AU {
-        let a: u64 = (nth_sunday(y, 10, 1) *% 86400) +% 7200
-        return ls >= a || ls < end
-    }
-    let a: u64 = (last_sunday(y, 9, 30) *% 86400) +% 7200
-    return ls >= a || ls < end
+    return utc >= a && utc < b
 }
 
 // the total offset (wrapped signed minutes) at the instant

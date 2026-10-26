@@ -47,6 +47,8 @@ import serial
 import lib.kstate
 import sync.atomic
 import tz.tz
+import tz.rules
+import sched.clockslew
 
 export {
     init, calibrate, mono_ns, real_ns, boot_sec, rtc_field, tsc, khz,
@@ -55,7 +57,7 @@ export {
     tz_min, set_tz, now_local,
     // DAILY-DRIVER: summer time by rule, setting the clock.
     tz_base, tz_rule_get, set_tz_rule, eu_dst, set_utc, rtc_write,
-    epoch_of, days_from_civil, now_sec, split,
+    epoch_of, days_from_civil, now_sec, split, set_utc_ns, slew_by, slew_remaining,
     // DD-12: clock across S3.
     suspend_mark, resume_fix,
     CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_PROCESS, CLOCK_THREAD,
@@ -89,6 +91,7 @@ const R_MIN: u64 = 4
 const R_SEC: u64 = 5
 
 const NS_PER_SEC: u64 = 1000000000
+const SLEW_LIMIT_NS: u64 = 2000000000000
 const TICK_HZ: u64 = 100
 const TICK_NS: u64 = 10000000 // eine Marke bei 100 Hz
 
@@ -373,7 +376,8 @@ fn mono_ns(state: u64) -> u64 {
 // damit deren Aufloesung, und sie erbt NICHT das Springen einer Uhr, die
 // bei jedem Aufruf neu aus dem CMOS gelesen wuerde.
 fn real_ns(state: u64) -> u64 {
-    return (kstate.get(state, kstate.TIME_BOOT) *% NS_PER_SEC) +% mono_ns(state)
+    let mono: u64 = mono_ns(state)
+    return (kstate.get(state, kstate.TIME_BOOT) *% NS_PER_SEC) +% mono +% clockslew.offset_ns(mono)
 }
 
 fn now_sec(state: u64) -> u64 {
@@ -492,7 +496,7 @@ fn base_w() -> u64 {
 // `arg` = rule | (west << 8), the same word SYS_OSUM_SETTZ carries. A bad rule is ignored.
 fn set_tz_rule(state: u64, arg: u64) {
     let r: u64 = tz.rule_of_arg(arg)
-    if r <= tz.RULE_MAX {
+    if r <= rules.RULE_MAX {
         tz_rule = r
         tz_west = tz.west_bit(arg)
     }
@@ -539,7 +543,15 @@ fn tz_min(state: u64) -> u64 {
 
 // `rtcutc` auf der Kommandozeile: die Uhr im Baustein ist UTC.
 fn set_rtc_utc(state: u64, an: u64) {
+    if rtc_ist_utc == an {
+        return
+    }
     rtc_ist_utc = an
+    if clock_moved != 0 || rtc_roh == 0 {
+        return
+    }
+    tz_done = 0
+    tz_anwenden(state)
 }
 
 fn rtc_utc(state: u64) -> u64 {
@@ -613,21 +625,49 @@ fn tz_anwenden(state: u64) {
 // Sanity bounds: a clock set to the year 1970 or 2200 by a bug would
 // break every certificate check at once, so the call refuses it.
 fn set_utc(state: u64, utc: u64) -> bool {
-    if utc < 1704067200 || utc > 4102444800 {
+    return set_utc_ns(state, utc, 0)
+}
+
+fn set_utc_ns(state: u64, utc: u64, nsec: u64) -> bool {
+    if utc < 1704067200 || utc > 4102444800 || nsec >= NS_PER_SEC {
         return false
     }
-    let up: u64 = mono_ns(state) / NS_PER_SEC
-    if up > utc {
+    let mono: u64 = mono_ns(state)
+    if mono / NS_PER_SEC > utc {
         return false
     }
     let before: u64 = now_sec(state)
-    kstate.set(state, kstate.TIME_BOOT, utc -% up)
+    let boot_ns: u64 = ((utc *% NS_PER_SEC) +% nsec) -% mono
+    kstate.set(state, kstate.TIME_BOOT, boot_ns / NS_PER_SEC)
+    clockslew.rebase(mono, boot_ns % NS_PER_SEC)
+    note_sync(utc, utc -% before)
+    return true
+}
+
+fn note_sync(utc: u64, delta: u64) {
     clock_moved = 1
     sync_n = sync_n + 1
     sync_last = utc
-    sync_delta = utc -% before
+    sync_delta = delta
     sync_rtc = 0
+}
+
+fn slew_by(state: u64, delta_ns: u64) -> bool {
+    let a: u64 = clockslew.magnitude(delta_ns)
+    if a > SLEW_LIMIT_NS {
+        return false
+    }
+    clockslew.begin(mono_ns(state), delta_ns)
+    var secs: u64 = a / NS_PER_SEC
+    if clockslew.negative(delta_ns) {
+        secs = 0 -% secs
+    }
+    note_sync(now_sec(state), secs)
     return true
+}
+
+fn slew_remaining(state: u64) -> u64 {
+    return clockslew.remaining_ns(mono_ns(state))
 }
 
 fn cmos_w(reg: u64, v: u64) {

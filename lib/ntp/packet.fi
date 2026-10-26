@@ -1,0 +1,220 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+export {
+    PACKET_LEN, NONCE_LEN, OFF_TRANSMIT, OFF_ORIGIN, OFF_RECEIVE,
+    ST_OK, ST_SHORT, ST_MODE, ST_VERSION, ST_UNSYNC, ST_NONCE, ST_ZERO_TX, ST_ORDER,
+    ST_ROOT, ST_KOD_RATE, ST_KOD_DENY, ST_KOD_OTHER,
+    Reply,
+    reply_new, build_request, parse_reply, unix_secs_of, offset_ns, delay_ns,
+    kod_code_of, status_is_kod,
+}
+
+const PACKET_LEN: usize = 48
+const NONCE_LEN: usize = 8
+const OFF_ORIGIN: usize = 24
+const OFF_RECEIVE: usize = 32
+const OFF_TRANSMIT: usize = 40
+const OFF_ROOT_DELAY: usize = 4
+const OFF_ROOT_DISP: usize = 8
+const OFF_REFID: usize = 12
+
+const NTP_UNIX_SECS: u64 = 2208988800
+const ERA_SECS: u64 = 4294967296
+const NS_PER_SEC: u64 = 1000000000
+const REQUEST_LI_VN_MODE: u8 = 0x23
+const MODE_MASK: u8 = 7
+const MODE_SERVER: u8 = 4
+const VERSION_MIN: u8 = 3
+const VERSION_MAX: u8 = 4
+const LI_UNSYNC: u8 = 3
+const STRATUM_KOD: u8 = 0
+const STRATUM_MAX: u8 = 15
+const ROOT_DISTANCE_MAX_NS: u64 = 1500000000
+const SHORT_FRAC_BITS: u64 = 16
+
+const ST_OK: u32 = 0
+const ST_SHORT: u32 = 1
+const ST_MODE: u32 = 2
+const ST_VERSION: u32 = 3
+const ST_UNSYNC: u32 = 4
+const ST_NONCE: u32 = 5
+const ST_ZERO_TX: u32 = 6
+const ST_ORDER: u32 = 7
+const ST_ROOT: u32 = 8
+const ST_KOD_RATE: u32 = 9
+const ST_KOD_DENY: u32 = 10
+const ST_KOD_OTHER: u32 = 11
+
+const KOD_RATE: u32 = 0x52415445
+const KOD_DENY: u32 = 0x44454E59
+const KOD_RSTR: u32 = 0x52535452
+
+struct Reply {
+    stratum: u32,
+    leap: u32,
+    version: u32,
+    refid: u32,
+    root_distance_ns: u64,
+    receive_ns: u64,
+    transmit_ns: u64,
+}
+
+fn reply_new() -> Reply {
+    return Reply { stratum: 0, leap: 0, version: 0, refid: 0, root_distance_ns: 0,
+        receive_ns: 0, transmit_ns: 0 }
+}
+
+fn ld8(p: u64, i: usize) -> u64 {
+    return (*((p + i as u64) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: usize, v: u64) {
+    *((p + i as u64) as *mut u8) = (v & 255) as u8
+}
+
+fn be32(p: u64, off: usize) -> u64 {
+    return (ld8(p, off) << 24) | (ld8(p, off + 1) << 16) | (ld8(p, off + 2) << 8) | ld8(p, off + 3)
+}
+
+fn pivot_distance(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a - b
+    }
+    return b - a
+}
+
+fn unix_secs_of(ntp_secs: u64, pivot_unix: u64) -> u64 {
+    var best: u64 = 0
+    var best_d: u64 = 0xFFFFFFFFFFFFFFFF
+    var era: u64 = 0
+    while era < 3 {
+        let total: u64 = ntp_secs + era * ERA_SECS
+        if total >= NTP_UNIX_SECS {
+            let cand: u64 = total - NTP_UNIX_SECS
+            let d: u64 = pivot_distance(cand, pivot_unix)
+            if d < best_d {
+                best_d = d
+                best = cand
+            }
+        }
+        era = era + 1
+    }
+    return best
+}
+
+fn timestamp_ns(p: u64, off: usize, pivot_unix: u64) -> u64 {
+    let secs: u64 = unix_secs_of(be32(p, off), pivot_unix)
+    let frac: u64 = be32(p, off + 4)
+    return secs * NS_PER_SEC + ((frac * NS_PER_SEC) >> 32)
+}
+
+fn short_ns(v: u64) -> u64 {
+    let whole: u64 = v >> SHORT_FRAC_BITS
+    let frac: u64 = v & ((1 << SHORT_FRAC_BITS) - 1)
+    return whole * NS_PER_SEC + ((frac * NS_PER_SEC) >> SHORT_FRAC_BITS)
+}
+
+fn build_request(dst: u64, nonce: u64) {
+    var i: usize = 0
+    while i < PACKET_LEN {
+        st8(dst, i, 0)
+        i = i + 1
+    }
+    st8(dst, 0, REQUEST_LI_VN_MODE as u64)
+    i = 0
+    while i < NONCE_LEN {
+        st8(dst, OFF_TRANSMIT + i, ld8(nonce, i))
+        i = i + 1
+    }
+}
+
+fn kod_code_of(p: u64) -> u32 {
+    return be32(p, OFF_REFID) as u32
+}
+
+fn status_is_kod(st: u32) -> bool {
+    return st == ST_KOD_RATE || st == ST_KOD_DENY || st == ST_KOD_OTHER
+}
+
+fn kod_status(p: u64) -> u32 {
+    let code: u32 = kod_code_of(p)
+    if code == KOD_RATE {
+        return ST_KOD_RATE
+    }
+    if code == KOD_DENY || code == KOD_RSTR {
+        return ST_KOD_DENY
+    }
+    return ST_KOD_OTHER
+}
+
+fn parse_reply(p: u64, n: usize, nonce: u64, pivot_unix: u64, out: *mut Reply) -> u32 {
+    if n < PACKET_LEN {
+        return ST_SHORT
+    }
+    let b0: u8 = ld8(p, 0) as u8
+    if (b0 & MODE_MASK) != MODE_SERVER {
+        return ST_MODE
+    }
+    let version: u8 = ((b0 >> 3) & 7) as u8
+    if version < VERSION_MIN || version > VERSION_MAX {
+        return ST_VERSION
+    }
+    let stratum: u8 = ld8(p, 1) as u8
+    let leap: u8 = (b0 >> 6) as u8
+    var i: usize = 0
+    var echoed: bool = true
+    while i < NONCE_LEN {
+        if ld8(p, OFF_ORIGIN + i) != ld8(nonce, i) {
+            echoed = false
+        }
+        i = i + 1
+    }
+    if !echoed {
+        return ST_NONCE
+    }
+    if stratum == STRATUM_KOD {
+        return kod_status(p)
+    }
+    if leap == LI_UNSYNC || stratum > STRATUM_MAX {
+        return ST_UNSYNC
+    }
+    let tx: u64 = timestamp_ns(p, OFF_TRANSMIT, pivot_unix)
+    let rx: u64 = timestamp_ns(p, OFF_RECEIVE, pivot_unix)
+    if be32(p, OFF_TRANSMIT) == 0 && be32(p, OFF_TRANSMIT + 4) == 0 {
+        return ST_ZERO_TX
+    }
+    if tx < rx {
+        return ST_ORDER
+    }
+    let root: u64 = short_ns(be32(p, OFF_ROOT_DELAY)) / 2 + short_ns(be32(p, OFF_ROOT_DISP))
+    if root > ROOT_DISTANCE_MAX_NS {
+        return ST_ROOT
+    }
+    (*out).stratum = stratum as u32
+    (*out).leap = leap as u32
+    (*out).version = version as u32
+    (*out).refid = be32(p, OFF_REFID) as u32
+    (*out).root_distance_ns = root
+    (*out).receive_ns = rx
+    (*out).transmit_ns = tx
+    return ST_OK
+}
+
+fn diff_ns(a: u64, b: u64) -> i64 {
+    if a >= b {
+        return (a - b) as i64
+    }
+    return 0 - ((b - a) as i64)
+}
+
+fn offset_ns(t1: u64, t2: u64, t3: u64, t4: u64) -> i64 {
+    return (diff_ns(t2, t1) + diff_ns(t3, t4)) / 2
+}
+
+fn delay_ns(t1: u64, t2: u64, t3: u64, t4: u64) -> i64 {
+    let d: i64 = diff_ns(t4, t1) - diff_ns(t3, t2)
+    if d < 0 {
+        return 0
+    }
+    return d
+}

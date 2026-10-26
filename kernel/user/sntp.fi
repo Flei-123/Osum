@@ -1,96 +1,106 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/sntp.fi -- DAILY-DRIVER: the clock from the network, and the
-// zone from /etc/time.conf.
-//
-//     sntp [-n] [host[:port]]   ask one time server once; set the clock
-//                               (root only) unless -n; without a host the
-//                               one in /etc/ntp.conf
-//     sntp boot                 the service: apply /etc/time.conf (offset,
-//                               rule) to the kernel, then -- with
-//                               auto=true in /etc/ntp.conf -- set the clock
-//                               as soon as the network is there and again
-//                               every `abstand` seconds
-//
-// WHY: the certificate check of the update path (and of every https
-// request) uses the clock. A machine with an empty CMOS battery, or one
-// that Windows left on the wrong zone, takes every valid certificate for
-// invalid and then cannot even update itself.
-//
-// WHAT THE PACKET GETS RIGHT (RFC 4330, the client half):
-//   * mode 3, version 4; the transmit field carries 8 RANDOM octets, and
-//     the answer must echo them in its originate field -- an off-path
-//     forger would have to guess 64 bits (the same reasoning as the
-//     random source port of the resolver, lib/libc/dns.fi)
-//   * the source port is random and really bound
-//   * an answer from another address or port is counted and thrown away,
-//     and the wait goes on
-//   * refused: mode other than 4, stratum 0 (kiss-o'-death), leap
-//     indicator 3 (the server's own clock is unsynchronised), a zero
-//     transmit time, a time before 2024 or after 2100
-//   * half the round trip is added; no more precision is claimed than
-//     whole seconds (what the kernel's clock_settime takes)
-// WHAT IT DOES NOT DO: authenticate. NTP without NTS can be forged by
-// whoever sits on the path; the bounds above stop nonsense, not an
-// attacker who sends a plausible wrong time. The kernel's set_utc refuses
-// anything outside 2024..2100 as well.
 profile kernel
 
 import ulib
 import libc.dns
 import libc.kcall
+import ntp.client
+import ntp.packet
+import ntp.select
+import ntp.policy
+import ntp.bounds
+import tz.rules
+import ntp.abi
 
 export { u_start }
 
-const AF_INET: u64 = 2
-const SOCK_DGRAM: u64 = 2
-const SOCK_NONBLOCK: u64 = 2048
-const SA_BYTES: u64 = 16
-const NTP_UNIX: u64 = 2208988800 // seconds from 1900 to 1970
 const NOT_YET: u64 = 0xFFFFFFFFFFFFFFFF
+const BAD_RESULT: u64 = 0xFFFFFFFFFFFFF000
+const NTP_PORT: u64 = 123
+const NS_PER_SEC: u64 = 1000000000
+const NS_PER_MS: i64 = 1000000
+const NS_PER_US: i64 = 1000
+const CLOCK_REALTIME: u64 = 0
+const MAX_SOURCES: u64 = 4
+const BURST_SAMPLES: u64 = 4
+const BURST_SPACING_MS: u64 = 100
+const DEFAULT_MIN_SOURCES: u64 = 2
+const CONF_MAX: u64 = 1024
+const HOST_MAX: u64 = 128
+const LIST_MAX: u64 = 256
+const MAX_PORT: u64 = 65535
+const HOST_COPY_MAX: u64 = 120
+const ABSTAND_MIN: u64 = 60
+const ABSTAND_DEFAULT: u64 = 43200
+const FAIL_ROUND_FAILED: u64 = 12
+const SEC_PER_MIN: u64 = 60
+const STATUS_WAITING: u64 = 87
+const STATUS_SYNCED: u64 = 83
+const STATUS_FAILED: u64 = 70
+const RC_OK: u64 = 0
+const RC_ERROR: u64 = 1
+const RC_NO_ANSWER: u64 = 2
+const RC_RATE_LIMITED: u64 = 3
 
+static mut DEFAULT_SERVERS: [u8; 60] = "0.pool.ntp.org,1.pool.ntp.org,2.pool.ntp.org,3.pool.ntp.org\0"
+static mut M_AUTO_OFF: [u8; 29] = "sntp: automatic time is off\n\0"
+static mut M_PREFIX: [u8; 7] = "sntp: \0"
+static mut M_ZONE_OFFSET: [u8; 19] = "sntp: zone offset=\0"
+static mut M_WAITING: [u8; 31] = "sntp: waiting for the network\n\0"
+static mut M_DISAGREE: [u8; 59] = "sntp: sources disagree, no clock change (no valid answer)\n\0"
+static mut M_OFFSET_WORD: [u8; 14] = "sntp: offset \0"
+static mut M_NO_ANSWER: [u8; 23] = "sntp: no valid answer\n\0"
+static mut M_FROM: [u8; 12] = "sntp: from \0"
+static mut M_SETTIME_REFUSED: [u8; 30] = "sntp: clock_settime refused: \0"
+static mut M_SLEWED_BY: [u8; 23] = "sntp: clock slewed by \0"
+static mut M_CLOCK_SET: [u8; 17] = "sntp: clock set\n\0"
+static mut M_LEFT_ALONE: [u8; 44] = "sntp: clock left alone (-n or within 1 ms)\n\0"
+static mut M_NO_RESOLVE_HOST: [u8; 27] = "sntp: cannot resolve host\n\0"
+static mut M_NO_RESOLVE: [u8; 22] = "sntp: cannot resolve \0"
+static mut M_ADJTIMEX_REFUSED: [u8; 25] = "sntp: adjtimex refused: \0"
+static mut M_S_OFFSET_MS: [u8; 13] = "s offset_ms=\0"
+static mut M_PANIC: [u8; 38] = "s is beyond the panic limit, refused\n\0"
+static mut M_MS_STRATUM: [u8; 12] = "ms stratum=\0"
+static mut M_MINUS: [u8; 2] = "-\0"
+static mut M_US_NL: [u8; 5] = " us\n\0"
+static mut M_AGREE: [u8; 27] = " sources agree, offset_ms=\0"
+static mut M_RULE: [u8; 7] = " rule=\0"
+static mut M_RTT: [u8; 6] = " rtt=\0"
+static mut M_REFUSED: [u8; 11] = " refused: \0"
+static mut M_OFFSET_EQ: [u8; 9] = " offset=\0"
+static mut M_OF: [u8; 5] = " of \0"
 static mut P_NTP: [u8; 14] = "/etc/ntp.conf\0"
 static mut P_TZ: [u8; 15] = "/etc/time.conf\0"
+static mut P_STATE: [u8; 20] = "/system/clock.stand\0"
 static mut K_SERVER: [u8; 8] = "server=\0"
 static mut K_AUTO: [u8; 6] = "auto=\0"
 static mut K_ABST: [u8; 9] = "abstand=\0"
+static mut K_MINSRC: [u8; 12] = "minsources=\0"
 static mut K_OFFSET: [u8; 8] = "offset=\0"
 static mut K_RULE: [u8; 6] = "rule=\0"
+static mut K_RTC: [u8; 5] = "rtc=\0"
 static mut V_TRUE: [u8; 5] = "true\0"
 static mut V_JA: [u8; 3] = "ja\0"
-static mut V_EU: [u8; 3] = "eu\0"
-static mut V_US: [u8; 3] = "us\0"
-static mut V_AU: [u8; 3] = "au\0"
-static mut V_NZ: [u8; 3] = "nz\0"
+static mut V_UTC: [u8; 4] = "utc\0"
+static mut V_LOCAL: [u8; 6] = "local\0"
 static mut C_NEIN: [u8; 3] = "-n\0"
+static mut C_FORCE: [u8; 3] = "-f\0"
 static mut C_BOOT: [u8; 5] = "boot\0"
-static mut D_SERVER: [u8; 13] = "pool.ntp.org\0"
-
-static mut S_USE: [u8; 40] = "usage: sntp [-n] [host[:port]] | boot\n\0\0"
-static mut S_OK: [u8; 12] = "sntp: from \0"
-static mut S_OFF: [u8; 12] = " offset=\0\0\0\0"
-static mut S_RTT: [u8; 6] = " rtt=\0"
-static mut S_MS: [u8; 3] = "ms\0"
-static mut S_SET: [u8; 16] = "sntp: clock set\0"
-static mut S_KEEP: [u8; 38] = "sntp: clock left alone (-n or < 1 s)\0\0"
-static mut S_FAIL_SET: [u8; 30] = "sntp: clock_settime refused: \0"
-static mut S_NOHOST: [u8; 26] = "sntp: cannot resolve host\0"
-static mut S_NOANS: [u8; 24] = "sntp: no valid answer\0\0\0"
-static mut S_NOSOCK: [u8; 20] = "sntp: no socket\0\0\0\0\0"
-static mut S_TZ: [u8; 22] = "sntp: zone offset=\0\0\0\0"
-static mut S_RULE: [u8; 8] = " rule=\0\0"
-static mut S_AUS: [u8; 32] = "sntp: automatic time is off\0\0\0\0\0"
-static mut S_WAIT: [u8; 33] = "sntp: waiting for the network\0\0\0\0"
 
 static mut CONF: [u8; 1024] = [0 as u8; 1024]
 static mut conf_len: u64 = 0
 static mut HOST: [u8; 128] = [0 as u8; 128]
-static mut WERT: [u8; 128] = [0 as u8; 128]
-static mut QB: [u8; 64] = [0 as u8; 64]
-static mut RB: [u8; 128] = [0 as u8; 128]
-static mut SA: [u8; 16] = [0 as u8; 16]
-static mut SL: [u8; 8] = [0 as u8; 8]
+static mut LIST: [u8; 256] = [0 as u8; 256]
+static mut VALUE: [u8; 128] = [0 as u8; 128]
+static mut TIMEX: [u8; 208] = [0 as u8; 208]
 static mut TS: [u8; 16] = [0 as u8; 16]
-static mut RND: [u8; 8] = [0 as u8; 8]
+static mut OFFSETS: [i64; 8] = [0; 8]
+static mut DELAYS: [i64; 8] = [0; 8]
+static mut SEEN_IP: [u64; 8] = [0; 8]
+static mut sample_n: u64 = 0
+static mut rate_limited: bool = false
+static mut min_sources: u64 = 2
+static mut force: bool = false
 
 fn g8(p: u64) -> u64 {
     return (*(p as *mut u8)) as u64
@@ -100,12 +110,21 @@ fn p8(p: u64, v: u64) {
     __mmio_write8(p as *mut u8, (v & 255) as u8)
 }
 
-fn say(t: u64) {
-    ulib.say(t)
+fn bad(v: u64) -> bool {
+    return v > BAD_RESULT
 }
 
-fn bad(v: u64) -> bool {
-    return v > 0xFFFFFFFFFFFFF000
+fn say_c(p: u64) {
+    ulib.say(p)
+}
+
+fn say_signed(v: i64) {
+    if v < 0 {
+        say_c((&M_MINUS[0 as usize]) as u64)
+        ulib.sayu((0 - v) as u64)
+    } else {
+        ulib.sayu(v as u64)
+    }
 }
 
 fn len(p: u64) -> u64 {
@@ -116,25 +135,12 @@ fn len(p: u64) -> u64 {
     return n
 }
 
-// a signed number, for an offset that may be negative
-fn say_signed(v: u64) {
-    if v > 0x7FFFFFFFFFFFFFFF {
-        var m: [u8; 2] = "-\0"
-        say((&m[0 as usize]) as u64)
-        ulib.sayu(0 -% v)
-    } else {
-        ulib.sayu(v)
-    }
-}
-
-// ---------------------------------------------------------- files
-
-fn file_read(pfad: u64, puffer: u64, max: u64) -> u64 {
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+fn file_read(path: u64, buffer: u64, max: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
     if ulib.bad(fd) {
         return NOT_YET
     }
-    let n: u64 = ulib.sys(ulib.SYS_READ, fd, puffer, max)
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, buffer, max)
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
     if ulib.bad(n) {
         return NOT_YET
@@ -142,8 +148,8 @@ fn file_read(pfad: u64, puffer: u64, max: u64) -> u64 {
     return n
 }
 
-fn conf_load(pfad: u64) -> bool {
-    let n: u64 = file_read(pfad, (&CONF[0 as usize]) as u64, 1023)
+fn conf_load(path: u64) -> bool {
+    let n: u64 = file_read(path, (&CONF[0 as usize]) as u64, CONF_MAX - 1)
     if n == NOT_YET {
         conf_len = 0
         return false
@@ -153,7 +159,6 @@ fn conf_load(pfad: u64) -> bool {
     return true
 }
 
-// `key=value` per line; the value to `out`
 fn conf_value(key: u64, out: u64, max: u64) -> bool {
     let c: u64 = (&CONF[0 as usize]) as u64
     let kl: u64 = len(key)
@@ -163,8 +168,7 @@ fn conf_value(key: u64, out: u64, max: u64) -> bool {
             if i + kl <= conf_len && ulib.strneq(c + i, key, kl) {
                 var k: u64 = 0
                 var j: u64 = i + kl
-                while j < conf_len && g8(c + j) != 10 && g8(c + j) != 13
-                    && k + 1 < max {
+                while j < conf_len && g8(c + j) != 10 && g8(c + j) != 13 && k + 1 < max {
                     p8(out + k, g8(c + j))
                     k = k + 1
                     j = j + 1
@@ -179,59 +183,6 @@ fn conf_value(key: u64, out: u64, max: u64) -> bool {
     return false
 }
 
-// --------------------------------------------------------- network
-
-fn sa_build(sa: u64, a: u64, port: u64) {
-    var i: u64 = 0
-    while i < SA_BYTES {
-        p8(sa + i, 0)
-        i = i + 1
-    }
-    p8(sa, AF_INET)
-    p8(sa + 2, (port >> 8) & 255)
-    p8(sa + 3, port & 255)
-    p8(sa + 4, (a >> 24) & 255)
-    p8(sa + 5, (a >> 16) & 255)
-    p8(sa + 6, (a >> 8) & 255)
-    p8(sa + 7, a & 255)
-}
-
-fn sa_ip(sa: u64) -> u64 {
-    return (g8(sa + 4) << 24) | (g8(sa + 5) << 16) | (g8(sa + 6) << 8)
-        | g8(sa + 7)
-}
-
-fn sa_port(sa: u64) -> u64 {
-    return (g8(sa + 2) << 8) | g8(sa + 3)
-}
-
-fn now_ms() -> u64 {
-    let r: u64 = kcall.sys2(kcall.SYS_CLOCK_GETTIME, 1, (&TS[0 as usize]) as u64)
-    if bad(r) {
-        return 0
-    }
-    let t: u64 = (&TS[0 as usize]) as u64
-    return (*(t as *mut u64)) * 1000 + (*((t + 8) as *mut u64)) / 1000000
-}
-
-// the wall clock in whole seconds (UTC)
-fn wall_sec() -> u64 {
-    let r: u64 = kcall.sys2(kcall.SYS_CLOCK_GETTIME, 0, (&TS[0 as usize]) as u64)
-    if bad(r) {
-        return 0
-    }
-    return *((&TS[0 as usize]) as u64 as *mut u64)
-}
-
-fn sleep_ms(ms: u64) {
-    var t: [u8; 16] = [0 as u8; 16]
-    let p: u64 = (&t[0 as usize]) as u64
-    *(p as *mut u64) = ms / 1000
-    *((p + 8) as *mut u64) = (ms % 1000) * 1000000
-    kcall.sys2(kcall.SYS_NANOSLEEP, p, 0)
-}
-
-// `a.b.c.d` -> address, 0 if it is not one
 fn dotted(p: u64) -> u64 {
     var v: u64 = 0
     var part: u64 = 0
@@ -262,18 +213,17 @@ fn dotted(p: u64) -> u64 {
     return (v << 8) | part
 }
 
-// "host" or "host:port" -> HOST and the port
 fn split_host(arg: u64) -> u64 {
-    var port: u64 = 123
+    var port: u64 = NTP_PORT
     var i: u64 = 0
-    while g8(arg + i) != 0 && g8(arg + i) != 58 && i < 120 {
+    while g8(arg + i) != 0 && g8(arg + i) != 58 && i < HOST_COPY_MAX {
         p8((&HOST[0 as usize]) as u64 + i, g8(arg + i))
         i = i + 1
     }
     p8((&HOST[0 as usize]) as u64 + i, 0)
     if g8(arg + i) == 58 {
         let q: u64 = ulib.to_num(arg + i + 1)
-        if q > 0 && q < 65536 {
+        if q > 0 && q <= MAX_PORT {
             port = q
         }
     }
@@ -285,258 +235,20 @@ fn address_of_host() -> u64 {
     if d != 0 {
         return d
     }
-    // Re-read /etc/resolv.conf on EVERY attempt: the service starts next to
-    // /bin/dhcp, usually before the lease, and a resolver that found no
-    // nameserver once would keep saying so (same fix as jarvisd, 27.09.2026).
     let _c: u64 = dns.conf_load()
     return dns.resolve_a((&HOST[0 as usize]) as u64)
 }
 
-// One question to `ip:port`. Returns 0 and the UTC seconds (rounded, with
-// half the round trip added) in `*secs` and the round trip in `*rtt`;
-// 1 = no socket, 2 = no valid answer in time.
-fn query(ip: u64, port: u64, secs: u64, rtt: u64) -> u64 {
-    let fd: u64 = kcall.sys3(kcall.SYS_SOCKET, AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0)
-    if bad(fd) {
-        return 1
-    }
-    // a random, really bound source port (the kernel's own counter would
-    // be guessable)
-    var bound: bool = false
-    var t: u64 = 0
-    while t < 8 && !bound {
-        var pr: [u8; 2] = [0 as u8; 2]
-        if bad(kcall.sys3(kcall.SYS_GETRANDOM, (&pr[0 as usize]) as u64, 2, 0)) {
-            kcall.sys1(kcall.SYS_CLOSE, fd)
-            return 1
-        }
-        let cand: u64 = 1024 + (((g8((&pr[0 as usize]) as u64) << 8)
-            | g8((&pr[0 as usize]) as u64 + 1)) % 64512)
-        var sa: [u8; 16] = [0 as u8; 16]
-        sa_build((&sa[0 as usize]) as u64, 0, cand)
-        if !bad(kcall.sys3(kcall.SYS_BIND, fd, (&sa[0 as usize]) as u64, SA_BYTES)) {
-            bound = true
-        }
-        t = t + 1
-    }
-    if !bound {
-        kcall.sys1(kcall.SYS_CLOSE, fd)
-        return 1
-    }
-    // the request: LI 0, VN 4, mode 3; the transmit field is the nonce
-    var i: u64 = 0
-    while i < 48 {
-        p8((&QB[0 as usize]) as u64 + i, 0)
-        i = i + 1
-    }
-    p8((&QB[0 as usize]) as u64, 0x23)
-    if bad(kcall.sys3(kcall.SYS_GETRANDOM, (&RND[0 as usize]) as u64, 8, 0)) {
-        kcall.sys1(kcall.SYS_CLOSE, fd)
-        return 1
-    }
-    i = 0
-    while i < 8 {
-        p8((&QB[0 as usize]) as u64 + 40 + i, g8((&RND[0 as usize]) as u64 + i))
-        i = i + 1
-    }
-    var dst: [u8; 16] = [0 as u8; 16]
-    sa_build((&dst[0 as usize]) as u64, ip, port)
-    let t0: u64 = now_ms()
-    if bad(kcall.sock_send(fd, (&QB[0 as usize]) as u64, 48,
-        (&dst[0 as usize]) as u64, SA_BYTES)) {
-        kcall.sys1(kcall.SYS_CLOSE, fd)
-        return 1
-    }
-    var result: u64 = 2
-    var waiting: bool = true
-    while waiting {
-        var j: u64 = 0
-        p8((&SL[0 as usize]) as u64, 16)
-        while j < 7 {
-            p8((&SL[0 as usize]) as u64 + 1 + j, 0)
-            j = j + 1
-        }
-        let r: u64 = kcall.sock_recv(fd, (&RB[0 as usize]) as u64, 128,
-            (&SA[0 as usize]) as u64, (&SL[0 as usize]) as u64)
-        if !bad(r) && r >= 48 {
-            let rb: u64 = (&RB[0 as usize]) as u64
-            let von: u64 = sa_ip((&SA[0 as usize]) as u64)
-            let vp: u64 = sa_port((&SA[0 as usize]) as u64)
-            var passt: bool = von == ip && vp == port
-            // mode 4 (server), stratum 1..15, leap indicator not 3
-            if passt && ((g8(rb) & 7) != 4 || g8(rb + 1) == 0
-                || g8(rb + 1) > 15 || (g8(rb) >> 6) == 3) {
-                passt = false
-            }
-            // the originate field must echo our nonce
-            var k: u64 = 0
-            while passt && k < 8 {
-                if g8(rb + 24 + k) != g8((&RND[0 as usize]) as u64 + k) {
-                    passt = false
-                }
-                k = k + 1
-            }
-            if passt {
-                let sec: u64 = (g8(rb + 40) << 24) | (g8(rb + 41) << 16)
-                    | (g8(rb + 42) << 8) | g8(rb + 43)
-                let frac: u64 = (g8(rb + 44) << 24) | (g8(rb + 45) << 16)
-                    | (g8(rb + 46) << 8) | g8(rb + 47)
-                // NTP's seconds are 32 bits since 1900: the era changes on
-                // 7 February 2036. Values below 2^31 are read as era 1
-                // (2036..2104), the rest as era 0 (1968..2036); the kernel
-                // refuses what lies outside 2024..2100 either way.
-                var sec_era: u64 = sec
-                if sec_era < 0x80000000 {
-                    sec_era = sec_era + 0x100000000
-                }
-                if sec_era > NTP_UNIX {
-                    let rt: u64 = now_ms() -% t0
-                    // fraction in ms, plus half the round trip
-                    let ms: u64 = ((frac * 1000) >> 32) + rt / 2
-                    *(secs as *mut u64) = (sec_era - NTP_UNIX) + ms / 1000
-                    *(rtt as *mut u64) = rt
-                    result = 0
-                    waiting = false
-                }
-            }
-        }
-        if waiting && now_ms() -% t0 > 3000 {
-            waiting = false
-        }
-        if waiting {
-            sleep_ms(2)
-        }
-    }
-    kcall.sys1(kcall.SYS_CLOSE, fd)
-    return result
+fn realtime_ns() -> u64 {
+    return client.realtime_ns()
 }
-
-// ----------------------------------------------------------- commands
-
-// one pass: ask, report, set
-fn sync_once(arg: u64, set: bool) -> u64 {
-    let port: u64 = split_host(arg)
-    let ip: u64 = address_of_host()
-    if ip == 0 {
-        say((&S_NOHOST[0 as usize]) as u64)
-        ulib.nl()
-        return 2
-    }
-    var secs: u64 = 0
-    var rtt: u64 = 0
-    var tries: u64 = 0
-    var rc: u64 = 2
-    while tries < 3 && rc == 2 {
-        rc = query(ip, port, (&secs) as u64, (&rtt) as u64)
-        tries = tries + 1
-    }
-    if rc == 1 {
-        say((&S_NOSOCK[0 as usize]) as u64)
-        ulib.nl()
-        return 1
-    }
-    if rc != 0 {
-        say((&S_NOANS[0 as usize]) as u64)
-        ulib.nl()
-        return 2
-    }
-    let jetzt: u64 = wall_sec()
-    let off: u64 = secs -% jetzt
-    say((&S_OK[0 as usize]) as u64)
-    say((&HOST[0 as usize]) as u64)
-    say((&S_OFF[0 as usize]) as u64)
-    say_signed(off)
-    var s_s: [u8; 2] = "s\0"
-    say((&s_s[0 as usize]) as u64)
-    say((&S_RTT[0 as usize]) as u64)
-    ulib.sayu(rtt)
-    say((&S_MS[0 as usize]) as u64)
-    ulib.nl()
-    var diff: u64 = off
-    if off > 0x7FFFFFFFFFFFFFFF {
-        diff = 0 -% off
-    }
-    if !set || diff < 1 {
-        say((&S_KEEP[0 as usize]) as u64)
-        ulib.nl()
-        if set {
-            status_set(83) // 'S': asked and the clock was already right
-        }
-        return 0
-    }
-    *((&TS[0 as usize]) as u64 as *mut u64) = secs
-    *(((&TS[0 as usize]) as u64 + 8) as *mut u64) = 0
-    let r: u64 = kcall.sys2(kcall.SYS_CLOCK_SETTIME, 0, (&TS[0 as usize]) as u64)
-    if bad(r) {
-        say((&S_FAIL_SET[0 as usize]) as u64)
-        ulib.sayu(0 -% r)
-        ulib.nl()
-        return 1
-    }
-    say((&S_SET[0 as usize]) as u64)
-    ulib.nl()
-    status_set(83) // 'S'
-    return 0
-}
-
-// /etc/time.conf -> the kernel's zone
-fn zone_apply() {
-    if !conf_load((&P_TZ[0 as usize]) as u64) {
-        return
-    }
-    var off: [u8; 16] = [0 as u8; 16]
-    var rule: [u8; 16] = [0 as u8; 16]
-    let has: bool = conf_value((&K_OFFSET[0 as usize]) as u64,
-        (&off[0 as usize]) as u64, 16)
-    let _r: bool = conf_value((&K_RULE[0 as usize]) as u64,
-        (&rule[0 as usize]) as u64, 16)
-    if !has {
-        return
-    }
-    // N-004: `offset=-300` (west of Greenwich) and `rule=eu|us|au|nz` (lib/tz/tz.fi);
-    // the system call takes the magnitude and rule | (west << 8)
-    var minutes: u64 = 0
-    var rl: u64 = 0
-    if (off[0 as usize]) == 45 as u8 {
-        minutes = ulib.to_num((&off[1 as usize]) as u64)
-        rl = 256
-    } else {
-        minutes = ulib.to_num((&off[0 as usize]) as u64)
-    }
-    if ulib.streq((&rule[0 as usize]) as u64, (&V_EU[0 as usize]) as u64) {
-        rl = rl | 1
-    } else if ulib.streq((&rule[0 as usize]) as u64, (&V_US[0 as usize]) as u64) {
-        rl = rl | 2
-    } else if ulib.streq((&rule[0 as usize]) as u64, (&V_AU[0 as usize]) as u64) {
-        rl = rl | 3
-    } else if ulib.streq((&rule[0 as usize]) as u64, (&V_NZ[0 as usize]) as u64) {
-        rl = rl | 4
-    }
-    let r: u64 = kcall.sys2(kcall.SYS_OSUM_SETTZ, minutes, rl)
-    if !bad(r) {
-        say((&S_TZ[0 as usize]) as u64)
-        ulib.sayu(minutes)
-        say((&S_RULE[0 as usize]) as u64)
-        ulib.sayu(rl)
-        ulib.nl()
-    }
-}
-
-// ------------------------------------------------------ status file
-//
-// /system/clock.stand: ONE line, first letter = state, then the wall clock
-// (UTC seconds) of the last change. W = waiting for the first sync, S =
-// synced, F = still no sync after two minutes. The taskbar shows a "?" next
-// to the clock only while the letter is F (r1063: not during W), and `ota` reads it to search again
-// as soon as the clock is right. No file = no network clock on this image.
-static mut P_STATE: [u8; 21] = "/system/clock.stand\0\0"
 
 fn status_set(letter: u64) {
     var b: [u8; 40] = [0 as u8; 40]
     let o: u64 = (&b[0 as usize]) as u64
     p8(o, letter)
     p8(o + 1, 32)
-    let n: u64 = ulib.digits(wall_sec(), o + 2)
+    let n: u64 = ulib.digits(realtime_ns() / NS_PER_SEC, o + 2)
     p8(o + 2 + n, 10)
     p8(o + 3 + n, 0)
     ulib.sys(ulib.SYS_UNLINK, (&P_STATE[0 as usize]) as u64, 0, 0)
@@ -548,74 +260,382 @@ fn status_set(letter: u64) {
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
 }
 
+fn list_set_default() {
+    ulib.strcpy((&LIST[0 as usize]) as u64, (&DEFAULT_SERVERS[0 as usize]) as u64)
+}
+
+fn list_from_conf() {
+    if !conf_load((&P_NTP[0 as usize]) as u64) {
+        list_set_default()
+        return
+    }
+    if !conf_value((&K_SERVER[0 as usize]) as u64, (&LIST[0 as usize]) as u64, LIST_MAX)
+        || g8((&LIST[0 as usize]) as u64) == 0 {
+        list_set_default()
+    }
+    min_sources = DEFAULT_MIN_SOURCES
+    if conf_value((&K_MINSRC[0 as usize]) as u64, (&VALUE[0 as usize]) as u64, HOST_MAX) {
+        let m: u64 = ulib.to_num((&VALUE[0 as usize]) as u64)
+        if m >= 1 && m <= MAX_SOURCES {
+            min_sources = m
+        }
+    }
+}
+
+fn list_from_args(args: u64, first: u64, argc: u64) -> bool {
+    var at: u64 = 0
+    var i: u64 = first
+    var any: bool = false
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&C_NEIN[0 as usize]) as u64) || ulib.streq(a, (&C_FORCE[0 as usize]) as u64) {
+            i = i + 1
+            continue
+        }
+        let n: u64 = len(a)
+        if at + n + 2 >= LIST_MAX {
+            break
+        }
+        if any {
+            p8((&LIST[0 as usize]) as u64 + at, 44)
+            at = at + 1
+        }
+        var k: u64 = 0
+        while k < n {
+            p8((&LIST[0 as usize]) as u64 + at + k, g8(a + k))
+            k = k + 1
+        }
+        at = at + n
+        any = true
+        i = i + 1
+    }
+    p8((&LIST[0 as usize]) as u64 + at, 0)
+    return any
+}
+
+fn list_next(pos: u64) -> u64 {
+    let l: u64 = (&LIST[0 as usize]) as u64
+    var i: u64 = pos
+    var k: u64 = 0
+    while g8(l + i) != 0 && g8(l + i) != 44 && k < HOST_COPY_MAX {
+        p8((&VALUE[0 as usize]) as u64 + k, g8(l + i))
+        k = k + 1
+        i = i + 1
+    }
+    p8((&VALUE[0 as usize]) as u64 + k, 0)
+    if g8(l + i) == 44 {
+        i = i + 1
+    }
+    return i
+}
+
+fn already_seen(ip: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if SEEN_IP[i as usize] == ip {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn report_source(ip: u64, a: client.Answer) {
+    say_c((&M_FROM[0 as usize]) as u64)
+    say_c((&HOST[0 as usize]) as u64)
+    say_c((&M_OFFSET_EQ[0 as usize]) as u64)
+    say_signed(a.offset_ns / (NS_PER_SEC as i64))
+    say_c((&M_S_OFFSET_MS[0 as usize]) as u64)
+    say_signed(a.offset_ns / NS_PER_MS)
+    say_c((&M_RTT[0 as usize]) as u64)
+    say_signed(a.delay_ns / NS_PER_MS)
+    say_c((&M_MS_STRATUM[0 as usize]) as u64)
+    ulib.sayu(a.stratum as u64)
+    ulib.nl()
+}
+
+fn report_refused(st: u32) {
+    say_c((&M_PREFIX[0 as usize]) as u64)
+    say_c((&HOST[0 as usize]) as u64)
+    say_c((&M_REFUSED[0 as usize]) as u64)
+    say_c(client.status_text(st))
+    ulib.nl()
+}
+
+fn gather() -> u64 {
+    sample_n = 0
+    rate_limited = false
+    var resolved: u64 = 0
+    var pos: u64 = 0
+    var names: u64 = 0
+    while g8((&LIST[0 as usize]) as u64 + pos) != 0 && resolved < MAX_SOURCES {
+        pos = list_next(pos)
+        let port: u64 = split_host((&VALUE[0 as usize]) as u64)
+        let ip: u64 = address_of_host()
+        names = names + 1
+        if ip == 0 {
+            say_c((&M_NO_RESOLVE[0 as usize]) as u64)
+            say_c((&HOST[0 as usize]) as u64)
+            ulib.nl()
+            continue
+        }
+        let key: u64 = (ip << 16) | port
+        if already_seen(key, resolved) {
+            continue
+        }
+        SEEN_IP[resolved as usize] = key
+        resolved = resolved + 1
+        var best: client.Answer = client.answer_new()
+        var have: bool = false
+        var st: u32 = client.NET_TIMEOUT
+        var shot: u64 = 0
+        while shot < BURST_SAMPLES {
+            var answer: client.Answer = client.answer_new()
+            st = client.query(ip, port, &answer)
+            if st == packet.ST_OK {
+                if !have || answer.delay_ns < best.delay_ns {
+                    best = answer
+                    have = true
+                }
+            } else if st != client.NET_BAD_DELAY && st != client.NET_IMPLAUSIBLE {
+                break
+            }
+            shot = shot + 1
+            ulib.sleep_ms(BURST_SPACING_MS)
+        }
+        if have {
+            report_source(ip, best)
+            OFFSETS[sample_n as usize] = best.offset_ns
+            DELAYS[sample_n as usize] = best.delay_ns
+            sample_n = sample_n + 1
+        } else {
+            report_refused(st)
+            if st == packet.ST_KOD_RATE {
+                rate_limited = true
+            }
+        }
+    }
+    return resolved
+}
+
+fn clear_timex() {
+    var i: u64 = 0
+    while i < abi.TIMEX_BYTES {
+        p8((&TIMEX[0 as usize]) as u64 + i, 0)
+        i = i + 1
+    }
+}
+
+fn clock_synced() -> bool {
+    clear_timex()
+    return kcall.sys1(kcall.SYS_ADJTIMEX, (&TIMEX[0 as usize]) as u64) == 0
+}
+
+fn slew_clock(offset_ns: i64) -> u64 {
+    clear_timex()
+    let t: u64 = (&TIMEX[0 as usize]) as u64
+    *(t as *mut u32) = abi.ADJ_OFFSET_SINGLESHOT as u32
+    *((t + abi.TIMEX_OFFSET) as *mut i64) = offset_ns / NS_PER_US
+    return kcall.sys1(kcall.SYS_ADJTIMEX, t)
+}
+
+fn step_clock(offset_ns: i64) -> u64 {
+    let now: u64 = realtime_ns()
+    var target: u64 = now + (offset_ns as u64)
+    if offset_ns < 0 {
+        target = now - ((0 - offset_ns) as u64)
+    }
+    let ts: u64 = (&TS[0 as usize]) as u64
+    *(ts as *mut u64) = target / NS_PER_SEC
+    *((ts + 8) as *mut u64) = target % NS_PER_SEC
+    return kcall.sys2(kcall.SYS_CLOCK_SETTIME, CLOCK_REALTIME, ts)
+}
+
+fn apply(offset_ns: i64, set: bool) -> u64 {
+    let synced: bool = clock_synced()
+    var act: u32 = policy.decide(offset_ns, synced)
+    if act == policy.ACT_REFUSE && force {
+        act = policy.ACT_STEP
+    }
+    if act == policy.ACT_REFUSE {
+        say_c((&M_OFFSET_WORD[0 as usize]) as u64)
+        say_signed(offset_ns / (NS_PER_SEC as i64))
+        say_c((&M_PANIC[0 as usize]) as u64)
+        return RC_NO_ANSWER
+    }
+    if !set || act == policy.ACT_IGNORE {
+        say_c((&M_LEFT_ALONE[0 as usize]) as u64)
+        if set {
+            status_set(STATUS_SYNCED)
+        }
+        return RC_OK
+    }
+    if act == policy.ACT_SLEW {
+        let r: u64 = slew_clock(offset_ns)
+        if bad(r) {
+            say_c((&M_ADJTIMEX_REFUSED[0 as usize]) as u64)
+            ulib.sayu(0 - r)
+            ulib.nl()
+            return RC_ERROR
+        }
+        say_c((&M_SLEWED_BY[0 as usize]) as u64)
+        say_signed(offset_ns / NS_PER_US)
+        say_c((&M_US_NL[0 as usize]) as u64)
+        status_set(STATUS_SYNCED)
+        return RC_OK
+    }
+    let r: u64 = step_clock(offset_ns)
+    if bad(r) {
+        say_c((&M_SETTIME_REFUSED[0 as usize]) as u64)
+        ulib.sayu(0 - r)
+        ulib.nl()
+        return RC_ERROR
+    }
+    say_c((&M_CLOCK_SET[0 as usize]) as u64)
+    status_set(STATUS_SYNCED)
+    return RC_OK
+}
+
+fn sync_once(set: bool) -> u64 {
+    let resolved: u64 = gather()
+    if resolved == 0 {
+        say_c((&M_NO_RESOLVE_HOST[0 as usize]) as u64)
+        return RC_NO_ANSWER
+    }
+    var need: u64 = min_sources
+    if need > resolved {
+        need = resolved
+    }
+    var samples: [select.Sample; 8] = [select.sample_new(); 8]
+    var k: u64 = 0
+    while k < sample_n {
+        samples[k as usize].offset_ns = OFFSETS[k as usize]
+        samples[k as usize].delay_ns = DELAYS[k as usize]
+        k = k + 1
+    }
+    var sel: select.Selection = select.selection_new()
+    let st: u32 = select.select(&samples, sample_n as usize, need as usize, policy.TOLERANCE_NS, &sel)
+    if st == select.SEL_TOO_FEW || sample_n == 0 {
+        say_c((&M_NO_ANSWER[0 as usize]) as u64)
+        if rate_limited {
+            return RC_RATE_LIMITED
+        }
+        return RC_NO_ANSWER
+    }
+    if st == select.SEL_NO_QUORUM {
+        say_c((&M_DISAGREE[0 as usize]) as u64)
+        return RC_NO_ANSWER
+    }
+    if sample_n > 1 {
+        say_c((&M_PREFIX[0 as usize]) as u64)
+        ulib.sayu(sel.agreeing as u64)
+        say_c((&M_OF[0 as usize]) as u64)
+        ulib.sayu(sample_n)
+        say_c((&M_AGREE[0 as usize]) as u64)
+        say_signed(sel.offset_ns / NS_PER_MS)
+        ulib.nl()
+    }
+    return apply(sel.offset_ns, set)
+}
+
+fn zone_apply() {
+    if !conf_load((&P_TZ[0 as usize]) as u64) {
+        return
+    }
+    var off: [u8; 16] = [0 as u8; 16]
+    var rule: [u8; 16] = [0 as u8; 16]
+    var rtc: [u8; 16] = [0 as u8; 16]
+    let has: bool = conf_value((&K_OFFSET[0 as usize]) as u64, (&off[0 as usize]) as u64, 16)
+    let _r: bool = conf_value((&K_RULE[0 as usize]) as u64, (&rule[0 as usize]) as u64, 16)
+    let has_rtc: bool = conf_value((&K_RTC[0 as usize]) as u64, (&rtc[0 as usize]) as u64, 16)
+    if !has {
+        return
+    }
+    var minutes: u64 = 0
+    var arg: u64 = 0
+    if (off[0 as usize]) == 45 as u8 {
+        minutes = ulib.to_num((&off[1 as usize]) as u64)
+        arg = abi.SETTZ_WEST_BIT
+    } else {
+        minutes = ulib.to_num((&off[0 as usize]) as u64)
+    }
+    arg = arg | rules.rule_by_name((&rule[0 as usize]) as u64)
+    if has_rtc {
+        if ulib.streq((&rtc[0 as usize]) as u64, (&V_UTC[0 as usize]) as u64) {
+            arg = arg | abi.SETTZ_RTC_SET_BIT | abi.SETTZ_RTC_UTC_BIT
+        } else if ulib.streq((&rtc[0 as usize]) as u64, (&V_LOCAL[0 as usize]) as u64) {
+            arg = arg | abi.SETTZ_RTC_SET_BIT
+        }
+    }
+    let r: u64 = kcall.sys2(kcall.SYS_OSUM_SETTZ, minutes, arg)
+    if !bad(r) {
+        say_c((&M_ZONE_OFFSET[0 as usize]) as u64)
+        ulib.sayu(minutes)
+        say_c((&M_RULE[0 as usize]) as u64)
+        ulib.sayu(arg)
+        ulib.nl()
+    }
+}
+
+fn sleep_seconds(n: u64) {
+    var w: u64 = 0
+    while w < n {
+        ulib.sleep_ms(1000)
+        w = w + 1
+    }
+}
+
 fn cmd_boot() -> u64 {
     zone_apply()
     if !conf_load((&P_NTP[0 as usize]) as u64) {
-        say((&S_AUS[0 as usize]) as u64)
-        ulib.nl()
+        say_c((&M_AUTO_OFF[0 as usize]) as u64)
         return 0
     }
     var auto: [u8; 16] = [0 as u8; 16]
-    let has: bool = conf_value((&K_AUTO[0 as usize]) as u64,
-        (&auto[0 as usize]) as u64, 16)
+    let has: bool = conf_value((&K_AUTO[0 as usize]) as u64, (&auto[0 as usize]) as u64, 16)
     if !has || !(ulib.streq((&auto[0 as usize]) as u64, (&V_TRUE[0 as usize]) as u64)
         || ulib.streq((&auto[0 as usize]) as u64, (&V_JA[0 as usize]) as u64)) {
-        say((&S_AUS[0 as usize]) as u64)
-        ulib.nl()
+        say_c((&M_AUTO_OFF[0 as usize]) as u64)
         return 0
     }
-    var abst: [u8; 16] = [0 as u8; 16]
-    var abstand: u64 = 43200
-    if conf_value((&K_ABST[0 as usize]) as u64, (&abst[0 as usize]) as u64, 16) {
-        let a: u64 = ulib.to_num((&abst[0 as usize]) as u64)
-        if a >= 60 {
+    var abstand: u64 = ABSTAND_DEFAULT
+    if conf_value((&K_ABST[0 as usize]) as u64, (&VALUE[0 as usize]) as u64, HOST_MAX) {
+        let a: u64 = ulib.to_num((&VALUE[0 as usize]) as u64)
+        if a >= ABSTAND_MIN {
             abstand = a
         }
     }
-    var server: [u8; 128] = [0 as u8; 128]
-    if !conf_value((&K_SERVER[0 as usize]) as u64, (&server[0 as usize]) as u64, 128)
-        || server[0 as usize] == 0 as u8 {
-        ulib.strcpy((&server[0 as usize]) as u64, (&D_SERVER[0 as usize]) as u64)
+    if abstand > policy.MAX_POLL_S {
+        abstand = policy.MAX_POLL_S
     }
-    // Schedule (Justin, 04.10.2026): at once when the service starts, then
-    // every 10 s for a minute, every 30 s for the next minute, every 5 min
-    // until it works -- and when it works, once an hour (never longer than
-    // `abstand` from /etc/ntp.conf). The service NEVER ends.
-    if abstand > 3600 {
-        abstand = 3600
-    }
-    status_set(87) // 'W'
+    list_from_conf()
+    status_set(STATUS_WAITING)
     var round: u64 = 0
     var synced: bool = false
+    var backoff: u64 = 0
     while true {
         var wait_s: u64 = 0
-        if sync_once((&server[0 as usize]) as u64, true) == 0 {
-            status_set(83) // 'S'
+        let rc: u64 = sync_once(true)
+        if rc == RC_OK {
+            status_set(STATUS_SYNCED)
             synced = true
             round = 0
+            backoff = 0
             wait_s = abstand
+        } else if rc == RC_RATE_LIMITED {
+            backoff = policy.kod_delay_s(backoff)
+            wait_s = backoff
         } else {
             if round == 0 {
-                say((&S_WAIT[0 as usize]) as u64)
-                ulib.nl()
+                say_c((&M_WAITING[0 as usize]) as u64)
             }
             round = round + 1
-            if round == 12 && !synced {
-                status_set(70) // 'F'
+            if round == FAIL_ROUND_FAILED && !synced {
+                status_set(STATUS_FAILED)
             }
-            if round <= 6 {
-                wait_s = 10
-            } else if round <= 12 {
-                wait_s = 30
-            } else {
-                wait_s = 300
-            }
+            wait_s = policy.retry_delay_s(round)
         }
-        var w: u64 = 0
-        while w < wait_s {
-            ulib.sleep_ms(1000)
-            w = w + 1
-        }
+        sleep_seconds(wait_s)
     }
     return 0
 }
@@ -623,7 +643,6 @@ fn cmd_boot() -> u64 {
 fn u_start(args: u64) -> u64 {
     let argc: u64 = ulib.arg_count(args)
     var set: bool = true
-    var host: u64 = 0
     var i: u64 = 1
     while i < argc {
         let a: u64 = ulib.arg_at(args, i)
@@ -632,21 +651,22 @@ fn u_start(args: u64) -> u64 {
         }
         if ulib.streq(a, (&C_NEIN[0 as usize]) as u64) {
             set = false
-        } else {
-            host = a
+        }
+        if ulib.streq(a, (&C_FORCE[0 as usize]) as u64) {
+            force = true
         }
         i = i + 1
     }
-    var server: [u8; 128] = [0 as u8; 128]
-    if host == 0 {
-        if conf_load((&P_NTP[0 as usize]) as u64) {
-            let _s: bool = conf_value((&K_SERVER[0 as usize]) as u64,
-                (&server[0 as usize]) as u64, 128)
+    min_sources = DEFAULT_MIN_SOURCES
+    if !list_from_args(args, 1, argc) {
+        list_from_conf()
+    } else if conf_load((&P_NTP[0 as usize]) as u64) {
+        if conf_value((&K_MINSRC[0 as usize]) as u64, (&VALUE[0 as usize]) as u64, HOST_MAX) {
+            let m: u64 = ulib.to_num((&VALUE[0 as usize]) as u64)
+            if m >= 1 && m <= MAX_SOURCES {
+                min_sources = m
+            }
         }
-        if server[0 as usize] == 0 as u8 {
-            ulib.strcpy((&server[0 as usize]) as u64, (&D_SERVER[0 as usize]) as u64)
-        }
-        host = (&server[0 as usize]) as u64
     }
-    return sync_once(host, set)
+    return sync_once(set)
 }

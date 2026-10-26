@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: GPL-2.0-only
+export {
+    MAX_SAMPLES, SEL_OK, SEL_TOO_FEW, SEL_NO_QUORUM,
+    Sample, Selection,
+    sample_new, selection_new, select,
+}
+
+const MAX_SAMPLES: usize = 8
+const SEL_OK: u32 = 0
+const SEL_TOO_FEW: u32 = 1
+const SEL_NO_QUORUM: u32 = 2
+
+struct Sample {
+    offset_ns: i64,
+    delay_ns: i64,
+}
+
+struct Selection {
+    offset_ns: i64,
+    delay_ns: i64,
+    agreeing: u32,
+    total: u32,
+    spread_ns: i64,
+}
+
+fn sample_new() -> Sample {
+    return Sample { offset_ns: 0, delay_ns: 0 }
+}
+
+fn selection_new() -> Selection {
+    return Selection { offset_ns: 0, delay_ns: 0, agreeing: 0, total: 0, spread_ns: 0 }
+}
+
+fn sort_by_offset(s: *mut [Sample; 8], n: usize) {
+    var i: usize = 1
+    while i < n {
+        let key: Sample = (*s)[i]
+        var j: usize = i
+        while j > 0 && (*s)[j - 1].offset_ns > key.offset_ns {
+            (*s)[j] = (*s)[j - 1]
+            j = j - 1
+        }
+        (*s)[j] = key
+        i = i + 1
+    }
+}
+
+fn select(samples: *mut [Sample; 8], n: usize, min_agree: usize, tol_ns: i64,
+    out: *mut Selection) -> u32 {
+    (*out).total = n as u32
+    (*out).agreeing = 0
+    if n == 0 || n < min_agree || n > MAX_SAMPLES {
+        return SEL_TOO_FEW
+    }
+    sort_by_offset(samples, n)
+    var best_start: usize = 0
+    var best_len: usize = 0
+    var i: usize = 0
+    while i < n {
+        var j: usize = i
+        while j + 1 < n && (*samples)[j + 1].offset_ns - (*samples)[i].offset_ns <= tol_ns {
+            j = j + 1
+        }
+        let len: usize = j - i + 1
+        if len > best_len {
+            best_len = len
+            best_start = i
+        }
+        i = i + 1
+    }
+    if best_len < min_agree || best_len * 2 <= n {
+        return SEL_NO_QUORUM
+    }
+    let mid: usize = best_start + best_len / 2
+    var med: i64 = (*samples)[mid].offset_ns
+    if best_len % 2 == 0 {
+        med = ((*samples)[mid - 1].offset_ns + (*samples)[mid].offset_ns) / 2
+    }
+    var min_delay: i64 = (*samples)[best_start].delay_ns
+    var k: usize = best_start
+    while k < best_start + best_len {
+        if (*samples)[k].delay_ns < min_delay {
+            min_delay = (*samples)[k].delay_ns
+        }
+        k = k + 1
+    }
+    (*out).offset_ns = med
+    (*out).delay_ns = min_delay
+    (*out).agreeing = best_len as u32
+    (*out).spread_ns = (*samples)[best_start + best_len - 1].offset_ns - (*samples)[best_start].offset_ns
+    return SEL_OK
+}

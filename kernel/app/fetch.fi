@@ -76,6 +76,7 @@ import std.crypto.sha256
 import tls.tls
 import tls.x509
 import tls.roots
+import tls.clockgate
 // RUNDE BETRIEB: DERSELBE AUFLOESER WIE IN `/bin/ota`, und das ist kein
 // Zufall, sondern der Grund, warum er in `lib/libc/` liegt und nicht in
 // einem der beiden Programme. `libc/dns.fi` und `libc/dnswire.fi`
@@ -155,6 +156,10 @@ fn reason(out: *mut rt.Buf, r: u32) {
     }
     if r == x509.V_NOT_YET {
         io.print("fetch: verify REFUSED not_yet_valid\n")
+        return
+    }
+    if r == x509.V_CLOCK {
+        io.print("fetch: verify REFUSED clock_not_set\n")
         return
     }
     if r == x509.V_NAME {
@@ -691,7 +696,7 @@ fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
         num_line(out, "fetch: roots ", taken as u64)
         var rs: roots.RootStats = roots.stats_new()
         var keepb: rt.Buf = rt.buf_new()
-        roots.roots_scan(storebuf.ptr, storebuf.len, now_seconds(), 2592000 as u64, &rs, &keepb)
+        roots.roots_scan(storebuf.ptr, storebuf.len, clockgate.now_raw(), 2592000 as u64, &rs, &keepb)
         rt.buf_free(&keepb)
         if rs.expired > 0 {
             var wl: rt.Buf = rt.buf_new()
@@ -717,7 +722,11 @@ fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
     }
 
     var t: tls.Tls = tls.tls_new()
-    let oki: bool = tls.tls_init(&t, c, &store, name, namelen, now_seconds())
+    let trusted_now: u64 = clockgate.now_trusted()
+    if trusted_now == 0 {
+        io.print("fetch: WARNING the clock is not set -- certificates cannot be checked\n")
+    }
+    let oki: bool = tls.tls_init(&t, c, &store, name, namelen, trusted_now)
     var failed: bool = false
     let ok: bool = tls.tls_handshake(&t)
     catch | e | tls.tls_fail_into(out, e, &failed)
@@ -839,8 +848,3 @@ fn fail_len(bad: *mut bool) -> usize {
 // not uptime. Osum reads the CMOS clock once at boot (kernel/time.fi)
 // and counts on from there, so this is the machine's real date -- which
 // is exactly what decides whether a certificate is expired.
-fn now_seconds() -> u64 {
-    var ts: [i64; 2] = [0; 2]
-    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
-    return ts[0] as u64
-}

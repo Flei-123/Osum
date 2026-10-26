@@ -68,6 +68,7 @@ profile app
 import ulib
 import libc.io
 import tz.tz
+import tz.rules
 // RUNDE O-NETZUI: der Ping-Socket fuer die Antwortzeit zum Gateway.
 // Derselbe Weg, den `/bin/ping` geht -- und dieselbe Schicht wie
 // `libc.io` daneben, also kein Griff nach oben.
@@ -6228,6 +6229,40 @@ fn zc_list(r: u64) -> u64 {
     }
     zc_items[(at) as usize] = 0 as u8
     return (&zc_items[0 as usize]) as u64
+}
+
+static mut zc_rtc_utc: [u8; 8] = "rtc=utc\0"
+static mut zc_rtc_local: [u8; 10] = "rtc=local\0"
+static mut zc_rtc_utc_line: [u8; 9] = "rtc=utc\n\0"
+static mut zc_rtc_local_line: [u8; 11] = "rtc=local\n\0"
+
+fn zc_has_line(n: u64, text: u64) -> bool {
+    let l: u64 = ulib.length(text)
+    var i: u64 = 0
+    while i + l <= n {
+        if (i == 0 || zc_zbuf[((i - 1)) as usize] == 10 as u8)
+            && ulib.strneq((&zc_zbuf[0 as usize]) as u64 + i, text, l)
+            && (i + l == n || zc_zbuf[((i + l)) as usize] == 10 as u8 || zc_zbuf[((i + l)) as usize] == 13 as u8) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// keeps the `rtc=utc|local` line of /etc/time.conf when the zone choice rewrites the file
+fn zc_rtc_keep(dst: u64, at: u64) -> u64 {
+    let n: u64 = file_read((&zc_conf[0 as usize]) as u64, (&zc_zbuf[0 as usize]) as u64, 199)
+    if ulib.bad(n) {
+        return at
+    }
+    if zc_has_line(n, (&zc_rtc_utc[0 as usize]) as u64) {
+        return text_an(dst, at, (&zc_rtc_utc_line[0 as usize]) as u64)
+    }
+    if zc_has_line(n, (&zc_rtc_local[0 as usize]) as u64) {
+        return text_an(dst, at, (&zc_rtc_local_line[0 as usize]) as u64)
+    }
+    return at
 }
 
 // the zone the two choices stand on (a global index in lib/tz, or NONE_ZONE)
@@ -12444,26 +12479,15 @@ fn u_start(args: u64) -> u64 {
                         (&k_nl[0 as usize]) as u64)
                     // the rule line (`eu|us|au|nz` = summer time by that law) and the city name;
                     // the kernel is told at once
-                    var k_rule_eu: [u8; 9] = "rule=eu\n\0"
-                    var k_rule_us: [u8; 9] = "rule=us\n\0"
-                    var k_rule_au: [u8; 9] = "rule=au\n\0"
-                    var k_rule_nz: [u8; 9] = "rule=nz\n\0"
-                    var k_rule_no: [u8; 11] = "rule=none\n\0"
+                    var k_rule_eq: [u8; 6] = "rule=\0"
                     var k_zone_eq: [u8; 6] = "zone=\0"
-                    if zrule == 1 {
-                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_eu[0 as usize]) as u64)
-                    } else if zrule == 2 {
-                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_us[0 as usize]) as u64)
-                    } else if zrule == 3 {
-                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_au[0 as usize]) as u64)
-                    } else if zrule == 4 {
-                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_nz[0 as usize]) as u64)
-                    } else {
-                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_no[0 as usize]) as u64)
-                    }
+                    a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_eq[0 as usize]) as u64)
+                    a4 = text_an((&buf2[0 as usize]) as u64, a4, rules.rule_name(zrule))
+                    a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_nl[0 as usize]) as u64)
                     a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_zone_eq[0 as usize]) as u64)
                     a4 = text_an((&buf2[0 as usize]) as u64, a4, (&zn[0 as usize]) as u64)
                     a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_nl[0 as usize]) as u64)
+                    a4 = zc_rtc_keep((&buf2[0 as usize]) as u64, a4)
                     let _tz: u64 = ulib.sys(1971, zmag, zrule | (zwest << 8), 0)
                     let _w4: bool = file_write(
                         (&t_time[0 as usize]) as u64,

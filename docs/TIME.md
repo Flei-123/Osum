@@ -72,3 +72,76 @@ may set the clock): offset to the true time on main vs fixed -- RTC local
 `sntp boot` retries: at once, then every 10 s for a minute, every 30 s for the
 next minute, every 5 minutes until it works (the Dell log shows the first
 try failing with `cannot resolve host` before the lease and the sync later).
+
+## N-003 / N-004 / B-003 / R-007 -- the clock state, the network clock v2, rules as a table (26.10.2026)
+
+### The clock state ("time not set") and TLS
+
+The kernel knows three states (`kernel/sched/clockstate.fi`, shown in `/proc/clock` as
+`clock state=unset|rtc|set`):
+
+| state | meaning |
+| --- | --- |
+| `unset` | the wall clock is below the floor (`lib/ntp/bounds.fi`, 2026-10-01) or above 2100: a dead battery, a reset RTC. Nobody ever set the clock. |
+| `rtc` | the value came from the hardware clock and is plausible. Not verified by anything. |
+| `set` | somebody set it: `clock_settime`, `adjtimex`, `sntp`. |
+
+`clock_gettime(16)` (`CLOCK_CHECKED`, `lib/ntp/abi.fi`) is `CLOCK_REALTIME` that answers `-ENODATA` while the state
+is `unset`. All TLS callers take the time from `lib/tls/clockgate.fi` (`now_trusted()`), which turns that into `0`,
+and `x509.verify_chain` with `now == 0` refuses with `V_CLOCK` (`fetch: verify REFUSED clock_not_set`) -- it does
+not compare certificate dates against a clock the kernel knows is void, and it never skips the check. The taskbar
+shows its `?` next to the time while the state is `unset` (as before while the network clock service has failed).
+The floor is a constant: raise it with the build date when images are cut; a too-low floor only weakens the
+check, a too-high one would refuse good clocks.
+
+Not covered: a `rtc` state clock that is plausible but wrong is judged by the certificate dates only (measured:
+`tools/time/tls.sh` cases B and C, "not yet valid" and "expired", then fixed by one `sntp`).
+
+### The network clock v2 (`kernel/user/sntp.fi`, `lib/ntp/`)
+
+* Pure parts in `lib/ntp/` (packet build/validate, offset and delay from the four timestamps, source selection,
+  step/slew policy), checked against a Python model by `tools/ntp/run.sh`; the socket part is `lib/ntp/client.fi`.
+* NTP era from a pivot (the floor), not from "below 2^31"; a server time before the floor or after 2100 is
+  not plausible and refused before anything is set.
+* Four samples per server (`BURST_SAMPLES`), the one with the smallest delay wins -- the first query of a boot
+  waits for ARP and showed 935 ms round trip and a 459 ms wrong offset before this (measured).
+* Several servers: `server=a,b,c` in `/etc/ntp.conf` (default `0..3.pool.ntp.org`), up to four distinct
+  addresses. The largest group of offsets within 1 s of each other must hold at least `minsources=` (default 2,
+  never more than the number of resolved sources) and a strict majority; its median is used. One liar among
+  three is outvoted, two sources that disagree move nothing. A single configured server is accepted alone.
+* Policy (`lib/ntp/policy.fi`): below 1 ms nothing; up to 128 ms the clock is slewed (`adjtimex`,
+  `ADJ_OFFSET_SINGLESHOT`, 500 ppm in `kernel/sched/clockslew.fi`); above, stepped to the nanosecond
+  (`clock_settime` takes `tv_nsec` now); a step beyond 1000 s is only taken while the clock was never set
+  (first sync of a machine with a dead battery) -- an already synchronised clock is not dragged away
+  (`sntp -f` forces it). `adjtimex` mode 0 returns `TIME_ERROR` until the clock was set, which is how `sntp` learns it.
+* Kiss-o'-death: `RATE` doubles the interval of the service (64 s .. 3600 s), `DENY`/`RSTR` drop the answer; the
+  retry schedule (10 s, 30 s, 5 min) is in `policy.fi`. Output keeps `sntp: from <host> offset=<s>s` and adds
+  `offset_ms=`.
+* NOT done: authentication (NTS, RFC 8915). The majority rule and the plausibility bounds stop nonsense and a
+  single forger; an attacker on the path who answers for ALL sources can still send a plausible wrong time.
+
+### The hardware clock convention per setting (B-003)
+
+`/etc/time.conf` takes `rtc=utc` or `rtc=local` next to `offset=`/`rule=`. `sntp boot` passes it to the kernel
+with the zone (`SETTZ` argument bits 9 and 10, `lib/ntp/abi.fi`); while nobody has set the clock the kernel
+re-reads the chip's raw value in the new convention (`time.set_rtc_utc`). The settings program keeps the line when
+it rewrites the zone. The boot word `rtcutc` still works; the config wins once `sntp boot` has run.
+
+### Zones: rules are a table now
+
+`lib/tz/rules.fi` holds one row per rule (month, first day of the search window, weekday, time, UTC or local
+standard reference, hemisphere): EU, US/CA, AU, NZ, Chile, Cuba, Israel, Egypt. `lib/tz/tz.fi` has one
+interpreter instead of one branch per rule. `tools/tz/gen.py` classifies every zone against IANA tzdata and
+refuses what no rule reproduces: 83 zones now (Santiago, Havana, Jerusalem, Cairo added), Casablanca stays out
+(its offset follows Ramadan). `rule=<name>` in `/etc/time.conf` and `/proc/clock` use `rules.rule_name`.
+
+### Measured
+
+* `tools/ntp/run.sh` (host): 61 checks, 0 failed (random packets/sample sets against a Python model).
+* `tools/tz/run.sh`: 83 zones x 4,294,637 instants equal IANA tzdata.
+* `tools/time/run.sh`, `boot.sh`, `tls.sh` (QEMU): see the commit message for the numbers.
+* After a step the offset to the server is -1 ms (before: up to a second); a 10.8 ms offset is slewed and half of it
+  is left after 11 s (kernel `slew_ns`).
+* Found, not fixed: in QEMU/KVM the guest clock runs about 0.09 % (~900 ppm) slow against the host (the TSC is
+  calibrated against the 100 Hz tick over 200 ms, `time.calibrate`). The hourly sync bounds it to a few seconds.
+  A PM-timer window or an NTP frequency correction would fix it.

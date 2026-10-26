@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.kcall
+import ntp.packet
+import ntp.bounds
+
+export {
+    Answer, answer_new, NET_NO_SOCKET, NET_TIMEOUT, NET_BAD_DELAY, NET_IMPLAUSIBLE,
+    query, realtime_ns, status_text,
+}
+
+const AF_INET: u64 = 2
+const SOCK_DGRAM: u64 = 2
+const SOCK_NONBLOCK: u64 = 2048
+const SA_BYTES: u64 = 16
+const CLOCK_REALTIME: u64 = 0
+const CLOCK_MONOTONIC: u64 = 1
+const NS_PER_SEC: u64 = 1000000000
+const PORT_MIN: u64 = 1024
+const PORT_SPAN: u64 = 64512
+const BIND_TRIES: u64 = 8
+const WAIT_MS: u64 = 2000
+const POLL_MS: u64 = 2
+const MS_PER_SEC: u64 = 1000
+const NS_PER_MS: u64 = 1000000
+const RECV_MAX: u64 = 128
+const MAX_DELAY_NS: i64 = 2000000000
+const BAD_RESULT: u64 = 0xFFFFFFFFFFFFF000
+const NET_NO_SOCKET: u32 = 100
+const NET_TIMEOUT: u32 = 101
+const NET_BAD_DELAY: u32 = 102
+const NET_IMPLAUSIBLE: u32 = 103
+
+struct Answer {
+    offset_ns: i64,
+    delay_ns: i64,
+    stratum: u32,
+    status: u32,
+}
+
+fn answer_new() -> Answer {
+    return Answer { offset_ns: 0, delay_ns: 0, stratum: 0, status: 0 }
+}
+
+static mut REQUEST: [u8; 48] = [0 as u8; 48]
+static mut RECEIVED: [u8; 128] = [0 as u8; 128]
+static mut FROM: [u8; 16] = [0 as u8; 16]
+static mut FROM_LEN: [u8; 8] = [0 as u8; 8]
+static mut STAMP: [u8; 16] = [0 as u8; 16]
+static mut NONCE: [u8; 8] = [0 as u8; 8]
+
+fn g8(p: u64) -> u64 {
+    return (*(p as *mut u8)) as u64
+}
+
+fn p8(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, (v & 255) as u8)
+}
+
+fn failed(v: u64) -> bool {
+    return v > BAD_RESULT
+}
+
+fn realtime_ns() -> u64 {
+    let ts: u64 = (&STAMP[0 as usize]) as u64
+    if failed(kcall.sys2(kcall.SYS_CLOCK_GETTIME, CLOCK_REALTIME, ts)) {
+        return 0
+    }
+    return (*(ts as *mut u64)) * NS_PER_SEC + *((ts + 8) as *mut u64)
+}
+
+fn monotonic_ns() -> u64 {
+    let ts: u64 = (&STAMP[0 as usize]) as u64
+    if failed(kcall.sys2(kcall.SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, ts)) {
+        return 0
+    }
+    return (*(ts as *mut u64)) * NS_PER_SEC + *((ts + 8) as *mut u64)
+}
+
+fn sleep_ms(ms: u64) {
+    var t: [u8; 16] = [0 as u8; 16]
+    let p: u64 = (&t[0 as usize]) as u64
+    *(p as *mut u64) = ms / MS_PER_SEC
+    *((p + 8) as *mut u64) = (ms % MS_PER_SEC) * NS_PER_MS
+    kcall.sys2(kcall.SYS_NANOSLEEP, p, 0)
+}
+
+fn sockaddr_build(sa: u64, ip: u64, port: u64) {
+    var i: u64 = 0
+    while i < SA_BYTES {
+        p8(sa + i, 0)
+        i = i + 1
+    }
+    p8(sa, AF_INET)
+    p8(sa + 2, (port >> 8) & 255)
+    p8(sa + 3, port & 255)
+    p8(sa + 4, (ip >> 24) & 255)
+    p8(sa + 5, (ip >> 16) & 255)
+    p8(sa + 6, (ip >> 8) & 255)
+    p8(sa + 7, ip & 255)
+}
+
+fn sockaddr_ip(sa: u64) -> u64 {
+    return (g8(sa + 4) << 24) | (g8(sa + 5) << 16) | (g8(sa + 6) << 8) | g8(sa + 7)
+}
+
+fn sockaddr_port(sa: u64) -> u64 {
+    return (g8(sa + 2) << 8) | g8(sa + 3)
+}
+
+fn open_bound_socket() -> u64 {
+    let fd: u64 = kcall.sys3(kcall.SYS_SOCKET, AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0)
+    if failed(fd) {
+        return fd
+    }
+    var tries: u64 = 0
+    while tries < BIND_TRIES {
+        var pr: [u8; 2] = [0 as u8; 2]
+        if failed(kcall.sys3(kcall.SYS_GETRANDOM, (&pr[0 as usize]) as u64, 2, 0)) {
+            break
+        }
+        let port: u64 = PORT_MIN + (((g8((&pr[0 as usize]) as u64) << 8) | g8((&pr[0 as usize]) as u64 + 1)) % PORT_SPAN)
+        var sa: [u8; 16] = [0 as u8; 16]
+        sockaddr_build((&sa[0 as usize]) as u64, 0, port)
+        if !failed(kcall.sys3(kcall.SYS_BIND, fd, (&sa[0 as usize]) as u64, SA_BYTES)) {
+            return fd
+        }
+        tries = tries + 1
+    }
+    kcall.sys1(kcall.SYS_CLOSE, fd)
+    return BAD_RESULT + 1
+}
+
+fn nonce_fill() -> bool {
+    return !failed(kcall.sys3(kcall.SYS_GETRANDOM, (&NONCE[0 as usize]) as u64, packet.NONCE_LEN as u64, 0))
+}
+
+fn receive_one(fd: u64) -> u64 {
+    var j: u64 = 0
+    p8((&FROM_LEN[0 as usize]) as u64, SA_BYTES)
+    while j < 7 {
+        p8((&FROM_LEN[0 as usize]) as u64 + 1 + j, 0)
+        j = j + 1
+    }
+    return kcall.sock_recv(fd, (&RECEIVED[0 as usize]) as u64, RECV_MAX,
+        (&FROM[0 as usize]) as u64, (&FROM_LEN[0 as usize]) as u64)
+}
+
+static mut M_0: [u8; 3] = "ok\0"
+static mut M_1: [u8; 13] = "short packet\0"
+static mut M_2: [u8; 11] = "wrong mode\0"
+static mut M_3: [u8; 14] = "wrong version\0"
+static mut M_4: [u8; 22] = "server unsynchronised\0"
+static mut M_5: [u8; 17] = "nonce not echoed\0"
+static mut M_6: [u8; 19] = "zero transmit time\0"
+static mut M_7: [u8; 24] = "transmit before receive\0"
+static mut M_8: [u8; 24] = "root distance too large\0"
+static mut M_9: [u8; 19] = "kiss-o'-death RATE\0"
+static mut M_10: [u8; 19] = "kiss-o'-death DENY\0"
+static mut M_11: [u8; 14] = "kiss-o'-death\0"
+static mut M_12: [u8; 10] = "no socket\0"
+static mut M_13: [u8; 10] = "no answer\0"
+static mut M_14: [u8; 20] = "round trip too long\0"
+static mut M_DEFAULT: [u8; 19] = "time not plausible\0"
+
+fn status_text(st: u32) -> u64 {
+    if st == packet.ST_OK {
+        return (&M_0[0 as usize]) as u64
+    }
+    if st == packet.ST_SHORT {
+        return (&M_1[0 as usize]) as u64
+    }
+    if st == packet.ST_MODE {
+        return (&M_2[0 as usize]) as u64
+    }
+    if st == packet.ST_VERSION {
+        return (&M_3[0 as usize]) as u64
+    }
+    if st == packet.ST_UNSYNC {
+        return (&M_4[0 as usize]) as u64
+    }
+    if st == packet.ST_NONCE {
+        return (&M_5[0 as usize]) as u64
+    }
+    if st == packet.ST_ZERO_TX {
+        return (&M_6[0 as usize]) as u64
+    }
+    if st == packet.ST_ORDER {
+        return (&M_7[0 as usize]) as u64
+    }
+    if st == packet.ST_ROOT {
+        return (&M_8[0 as usize]) as u64
+    }
+    if st == packet.ST_KOD_RATE {
+        return (&M_9[0 as usize]) as u64
+    }
+    if st == packet.ST_KOD_DENY {
+        return (&M_10[0 as usize]) as u64
+    }
+    if st == packet.ST_KOD_OTHER {
+        return (&M_11[0 as usize]) as u64
+    }
+    if st == NET_NO_SOCKET {
+        return (&M_12[0 as usize]) as u64
+    }
+    if st == NET_TIMEOUT {
+        return (&M_13[0 as usize]) as u64
+    }
+    if st == NET_BAD_DELAY {
+        return (&M_14[0 as usize]) as u64
+    }
+    return (&M_DEFAULT[0 as usize]) as u64
+}
+
+fn query(ip: u64, port: u64, out: *mut Answer) -> u32 {
+    let fd: u64 = open_bound_socket()
+    if failed(fd) {
+        return NET_NO_SOCKET
+    }
+    if !nonce_fill() {
+        kcall.sys1(kcall.SYS_CLOSE, fd)
+        return NET_NO_SOCKET
+    }
+    let req: u64 = (&REQUEST[0 as usize]) as u64
+    packet.build_request(req, (&NONCE[0 as usize]) as u64)
+    var dst: [u8; 16] = [0 as u8; 16]
+    sockaddr_build((&dst[0 as usize]) as u64, ip, port)
+    let t1: u64 = realtime_ns()
+    let started: u64 = monotonic_ns()
+    var result: u32 = NET_TIMEOUT
+    if failed(kcall.sock_send(fd, req, packet.PACKET_LEN as u64, (&dst[0 as usize]) as u64, SA_BYTES)) {
+        kcall.sys1(kcall.SYS_CLOSE, fd)
+        return NET_NO_SOCKET
+    }
+    var done: bool = false
+    while !done {
+        let r: u64 = receive_one(fd)
+        if !failed(r) && r >= packet.PACKET_LEN as u64
+            && sockaddr_ip((&FROM[0 as usize]) as u64) == ip
+            && sockaddr_port((&FROM[0 as usize]) as u64) == port {
+            let t4: u64 = realtime_ns()
+            var reply: packet.Reply = packet.reply_new()
+            let st: u32 = packet.parse_reply((&RECEIVED[0 as usize]) as u64, r as usize,
+                (&NONCE[0 as usize]) as u64, bounds.FLOOR_UTC, &reply)
+            if st != packet.ST_OK {
+                result = st
+                if packet.status_is_kod(st) {
+                    done = true
+                }
+            } else {
+                let delay: i64 = packet.delay_ns(t1, reply.receive_ns, reply.transmit_ns, t4)
+                if delay > MAX_DELAY_NS {
+                    result = NET_BAD_DELAY
+                } else if reply.transmit_ns / NS_PER_SEC < bounds.FLOOR_UTC
+                    || reply.transmit_ns / NS_PER_SEC > bounds.CEILING_UTC {
+                    result = NET_IMPLAUSIBLE
+                } else {
+                    (*out).offset_ns = packet.offset_ns(t1, reply.receive_ns, reply.transmit_ns, t4)
+                    (*out).delay_ns = delay
+                    (*out).stratum = reply.stratum
+                    result = packet.ST_OK
+                    done = true
+                }
+            }
+        }
+        if !done {
+            if monotonic_ns() -% started >= WAIT_MS * NS_PER_MS {
+                done = true
+            } else {
+                sleep_ms(POLL_MS)
+            }
+        }
+    }
+    kcall.sys1(kcall.SYS_CLOSE, fd)
+    (*out).status = result
+    return result
+}

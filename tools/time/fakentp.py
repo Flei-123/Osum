@@ -3,17 +3,22 @@
 """tools/time/fakentp.py -- an NTP server that says what the test wants.
 
     fakentp.py --port 12300 --log f --time 2026-10-02T12:00:00Z [more times...]
-                [--mode ok|spoof|kod|li3|short|wrongmode]
+                [--mode ok|spoof|kod|rate|li3|short|wrongmode]
+                [--now-offset-ms N]
 
 Every request is answered with the NEXT time of the list (the last one
 repeats). Modes are the faulty answers the client must refuse:
 
     ok         a good answer (mode 4, stratum 2, originate echoed)
     spoof      the originate field is NOT the client's nonce
-    kod        stratum 0 (kiss-o'-death)
+    kod        stratum 0 (kiss-o'-death, code LOCL)
+    rate       stratum 0 with the kiss code RATE
     li3        leap indicator 3 (server clock unsynchronised)
     short      a 40-octet packet
     wrongmode  mode 3 instead of 4
+
+--now-offset-ms answers with the host's real time plus N milliseconds
+(fractions included) instead of the list.
 
 The log gets one line per request: `REQ n time=<unix> mode=<mode>`.
 """
@@ -34,6 +39,7 @@ def main():
     port = 12300
     log = None
     mode = "ok"
+    now_offset_ms = None
     times = []
     a = sys.argv[1:]
     i = 0
@@ -44,6 +50,8 @@ def main():
             log = a[i + 1]; i += 2
         elif a[i] == "--mode":
             mode = a[i + 1]; i += 2
+        elif a[i] == "--now-offset-ms":
+            now_offset_ms = float(a[i + 1]); i += 2
         elif a[i] == "--time":
             i += 1
             while i < len(a) and not a[i].startswith("--"):
@@ -63,10 +71,19 @@ def main():
         if len(data) < 48:
             continue
         t = times[min(n, len(times) - 1)]
+        frac = 0
+        if now_offset_ms is not None:
+            real = time.time() + now_offset_ms / 1000.0
+            t = int(real)
+            frac = int((real - t) * (1 << 32))
         n += 1
         li, vn, md, st = 0, 4, 4, 2
+        refid = 0x4C4F434C
         if mode == "kod":
             st = 0
+        if mode == "rate":
+            st = 0
+            refid = 0x52415445
         if mode == "li3":
             li = 3
         if mode == "wrongmode":
@@ -77,8 +94,8 @@ def main():
             origin = bytes(b ^ 0xFF for b in origin)
         secs = (t + NTP_UNIX) & 0xFFFFFFFF  # 32 bits: era 1 starts in 2036
         pkt = struct.pack("!BBBb", first, st, 6, -20) + struct.pack("!II", 0, 0) \
-            + struct.pack("!I", 0x4C4F434C) + struct.pack("!II", secs, 0) \
-            + origin + struct.pack("!II", secs, 0) + struct.pack("!II", secs, 0)
+            + struct.pack("!I", refid) + struct.pack("!II", secs, 0) \
+            + origin + struct.pack("!II", secs, frac) + struct.pack("!II", secs, frac)
         if mode == "short":
             pkt = pkt[:40]
         s.sendto(pkt, addr)

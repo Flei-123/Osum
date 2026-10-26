@@ -64,6 +64,9 @@ import pwr.pmon
 
 import sched.signal
 import sched.time
+import sched.clockstate
+import tz.rules
+import ntp.abi
 import sched.rand
 import drv.con.tty
 
@@ -144,7 +147,7 @@ export {
     SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_RT_SIGRETURN, SYS_IOCTL,
     SYS_PAUSE, SYS_ALARM, SYS_CLONE, SYS_KILL, SYS_GETTIMEOFDAY,
     SYS_SETPGID, SYS_GETPGRP, SYS_SETSID, SYS_GETPGID, SYS_RT_SIGPENDING,
-    SYS_TIME, SYS_FUTEX, SYS_GETTID, SYS_CLOCK_GETTIME, SYS_CLOCK_SETTIME, SYS_OSUM_SETTZ, SYS_CLOCK_GETRES,
+    SYS_TIME, SYS_FUTEX, SYS_GETTID, SYS_CLOCK_GETTIME, SYS_CLOCK_SETTIME, SYS_OSUM_SETTZ, SYS_CLOCK_GETRES, SYS_ADJTIMEX,
     SYS_CLOCK_NANOSLEEP, SYS_TGKILL, SYS_GETRANDOM,
     SYS_UNAME, SYS_PRCTL, SYS_MPROTECT,
     SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
@@ -382,6 +385,7 @@ const SYS_FUTEX: u64 = 202
 const SYS_GETTID: u64 = 186
 // DAILY-DRIVER: setting the clock (Linux 227) and the zone (Osum 1971)
 const SYS_CLOCK_SETTIME: u64 = 227
+const SYS_ADJTIMEX: u64 = 159
 const SYS_OSUM_SETTZ: u64 = 1971 // (minutes, rule) -> 0 or -E
 const SYS_CLOCK_GETTIME: u64 = 228
 const SYS_CLOCK_GETRES: u64 = 229
@@ -3337,6 +3341,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_CLOCK_SETTIME {
         return do_clock_settime(state, me, a0, a1)
+    }
+    if number == SYS_ADJTIMEX {
+        return do_adjtimex(state, me, a0)
     }
     if number == SYS_OSUM_SETTZ {
         return do_settz(state, me, a0, a1)
@@ -9405,11 +9412,50 @@ fn do_clock_settime(state: u64, me: u64, clk: u64, tp: u64) -> u64 {
     if nsec >= 1000000000 {
         return neg(errno.E_INVAL)
     }
-    if !time.set_utc(state, sec) {
+    if !time.set_utc_ns(state, sec, nsec) {
         return neg(errno.E_INVAL)
     }
     let _w: bool = time.rtc_write(state)
     return 0
+}
+
+const NS_PER_USEC: u64 = 1000
+
+// adjtimex(2), the part adjtime(3) needs: ADJ_OFFSET_SINGLESHOT slews the
+// clock by `offset` microseconds (root only); mode 0 only reads. The rest of
+// the structure is left alone.
+fn do_adjtimex(state: u64, me: u64, tx: u64) -> u64 {
+    if !proc.user_ok(state, me, tx, abi.TIMEX_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    let modes: u64 = user_word32(state, me, tx + abi.TIMEX_MODES)
+    if modes != 0 {
+        if !perm.is_root(state, me) {
+            return neg(errno.E_PERM)
+        }
+        if modes != abi.ADJ_OFFSET_SINGLESHOT {
+            return neg(errno.E_INVAL)
+        }
+        let offset_us: u64 = user_word(state, me, tx + abi.TIMEX_OFFSET)
+        if !time.slew_by(state, offset_us *% NS_PER_USEC) {
+            return neg(errno.E_INVAL)
+        }
+    }
+    let left_ns: u64 = time.slew_remaining(state)
+    var left_us: u64 = left_ns / NS_PER_USEC
+    if left_ns > 0x7FFFFFFFFFFFFFFF {
+        left_us = 0 -% ((0 -% left_ns) / NS_PER_USEC)
+    }
+    let now_ns: u64 = time.real_ns(state)
+    if !put64(state, me, tx + abi.TIMEX_OFFSET, left_us)
+        || !put64(state, me, tx + abi.TIMEX_TIME_SEC, now_ns / time.NS_PER_SEC)
+        || !put64(state, me, tx + abi.TIMEX_TIME_USEC, (now_ns % time.NS_PER_SEC) / NS_PER_USEC) {
+        return neg(errno.E_FAULT)
+    }
+    if clockstate.state_of(state) == clockstate.CS_SET {
+        return 0
+    }
+    return abi.TIME_ERROR
 }
 
 // DAILY-DRIVER: the zone as the display shows it. (standard offset in
@@ -9417,13 +9463,16 @@ fn do_clock_settime(state: u64, me: u64, clk: u64, tp: u64) -> u64 {
 // it changes how the clock is SHOWN, never the time itself -- like the
 // zone choice of the settings window, which runs as the user.
 fn do_settz(state: u64, me: u64, minutes: u64, rule: u64) -> u64 {
-    // N-004: `rule` = rule id (0 none, 1 EU, 2 US, 3 AU, 4 NZ) | (west << 8);
+    // N-004: `rule` = rule id (lib/tz/rules.fi) | (west << 8) | rtc flags;
     // `minutes` is the magnitude of the standard offset
-    if minutes > 1440 || (rule & 255) > 4 || rule > 511 {
+    if minutes > 1440 || (rule & abi.SETTZ_RULE_MASK) > rules.RULE_MAX || rule > abi.SETTZ_ARG_MAX {
         return neg(errno.E_INVAL)
     }
     time.set_tz(state, minutes)
-    time.set_tz_rule(state, rule)
+    time.set_tz_rule(state, rule & (abi.SETTZ_RULE_MASK | abi.SETTZ_WEST_BIT))
+    if (rule & abi.SETTZ_RTC_SET_BIT) != 0 {
+        time.set_rtc_utc(state, (rule & abi.SETTZ_RTC_UTC_BIT) / abi.SETTZ_RTC_UTC_BIT)
+    }
     // r544: a boot line without `tz=` leaves the hardware clock unconverted;
     // the first zone that arrives (sntp boot from /etc/time.conf) does it,
     // once, as long as nobody has set the clock
@@ -9431,7 +9480,14 @@ fn do_settz(state: u64, me: u64, minutes: u64, rule: u64) -> u64 {
     return 0
 }
 
-fn do_clock_gettime(state: u64, me: u64, clk: u64, tp: u64) -> u64 {
+fn do_clock_gettime(state: u64, me: u64, clk_arg: u64, tp: u64) -> u64 {
+    var clk: u64 = clk_arg
+    if clk == abi.CLOCK_CHECKED {
+        if !clockstate.trusted(state) {
+            return neg(errno.E_NODATA)
+        }
+        clk = time.CLOCK_REALTIME
+    }
     if clk > time.CLOCK_MAX {
         return neg(errno.E_INVAL)
     }

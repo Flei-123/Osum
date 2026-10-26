@@ -93,7 +93,7 @@ check() {
     esac
 }
 
-want() { case " ${CASES:-A B C D E F G H I J K L M} " in *" $1 "*) return 0 ;; esac; return 1; }
+want() { case " ${CASES:-A B C D E F G H I J K L M N O P} " in *" $1 "*) return 0 ;; esac; return 1; }
 
 # the convention (tools/time docs, ECHTHARDWARE-1): without `rtcutc` the
 # hardware clock holds LOCAL time, as Windows keeps it. A and E-G are the
@@ -159,6 +159,31 @@ case "$LOCAL" in
     *) bad "M: after sntp '$LOCAL', expected 12:1.." ;;
 esac
 proc_has M '^sync n=1 last utc 2026-10-25 11:1.:.. delta=-36[0-9][0-9] rtc_set=1' "records the sync: delta about -3600 s, RTC written back"; fi
+
+if want N; then echo "== N  RTC UTC 09:00, NO rtcutc on the boot line, rtc=utc in /etc/time.conf: sntp boot switches the reading =="
+SCRIPT="date;echo offset=60 > /etc/time.conf;echo rule=eu >> /etc/time.conf;echo rtc=utc >> /etc/time.conf;sntp boot;date;cat /proc/clock;exit" WHICH="tail -1" \
+run N 2026-10-11T09:00:00 "" 2026-10-11T09:00:00Z
+case "$LOCAL" in
+    "2026-10-11 11:0"*) ok "N: after sntp boot the clock says 11:0.. (the UTC chip read as UTC, summer time +2 h)" ;;
+    *) bad "N: after sntp boot '$LOCAL', expected 11:0.." ;;
+esac
+proc_has N '^rtc 2026-10-11 09:00:.. mode=utc frame=utc' "reports mode=utc after the setting"; fi
+if want O; then echo "== O  RTC local 11:00, rtc=local in /etc/time.conf: the same as the default =="
+SCRIPT="date;echo offset=60 > /etc/time.conf;echo rule=eu >> /etc/time.conf;echo rtc=local >> /etc/time.conf;sntp boot;date;cat /proc/clock;exit" WHICH="tail -1" \
+run O 2026-10-11T11:00:00 "" 2026-10-11T09:00:00Z
+case "$LOCAL" in
+    "2026-10-11 11:0"*) ok "O: after sntp boot the clock says 11:0.. (local chip, converted once)" ;;
+    *) bad "O: after sntp boot '$LOCAL', expected 11:0.." ;;
+esac
+proc_has O '^rtc 2026-10-11 11:00:.. mode=local frame=summer' "reports mode=local and the summer frame"; fi
+if want P; then echo "== P  RTC UTC 09:00 + rtcutc on the boot line, rtc=local in /etc/time.conf: the config overrides the boot line =="
+SCRIPT="date;echo offset=60 > /etc/time.conf;echo rule=eu >> /etc/time.conf;echo rtc=local >> /etc/time.conf;sntp boot;date;cat /proc/clock;exit" WHICH="tail -1" \
+run P 2026-10-11T09:00:00 "tz=60 tzrule=eu rtcutc" 2026-10-11T09:00:00Z
+case "$LOCAL" in
+    "2026-10-11 09:0"*) ok "P: the config says local, so the chip's 09:00 is read as local time (the setting wins)" ;;
+    *) bad "P: after sntp boot '$LOCAL', expected 09:0.." ;;
+esac
+proc_has P 'mode=local' "reports mode=local"; fi
 
 echo
 echo "=================================================================="
