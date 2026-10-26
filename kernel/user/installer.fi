@@ -95,6 +95,9 @@ import wlibc
 import fuiscene
 import msg
 import instkern
+import instrun
+import instlog
+import busy
 import instkonto
 import dualkern
 import wunlock
@@ -208,6 +211,22 @@ static mut schrittzeile: [u8; 200] = [0 as u8; 200]
 // was auf der Platte liegt, ist jede Entscheidung darueber, wohin
 // OrientOS soll, geraten. Die Tafel wird mit `dualkern.tafel_lesen`
 // gelesen -- mit beiden Pruefsummen, wie `part.fi` es im Kern tut.
+static mut sel_part: u64 = 0xFFFFFFFFFFFFFFFF
+static mut sel_start: u64 = 0
+static mut sel_end: u64 = 0
+static mut askbuf: [u8; 240] = [0 as u8; 240]
+static mut k_re_tab: [u8; 14] = "re.tab.reuse\0\0"
+static mut k_re_go: [u8; 12] = "re.go.reuse\0"
+static mut k_re_del: [u8; 10] = "re.delete\0"
+static mut k_re_head: [u8; 10] = "re.head\0\0\0"
+static mut k_re_none: [u8; 10] = "re.none\0\0\0"
+static mut k_re_ask_t: [u8; 13] = "re.ask.title\0"
+static mut k_re_ask_a: [u8; 11] = "re.ask.pre\0"
+static mut k_re_ask_b: [u8; 12] = "re.ask.post\0"
+static mut k_re_del_t: [u8; 13] = "re.del.title\0"
+static mut k_re_del_b: [u8; 12] = "re.del.post\0"
+static mut m_re_sel: [u8; 22] = "installer: reuse sel=\0"
+static mut m_re_del: [u8; 23] = "installer: delete part\0"
 static mut welcher_weg: u64 = 0 // 0 = ganze Platte, 1 = daneben
 // Die Zeilen der Partitionstabelle, wieder als EIN Text.
 static mut pblob: [u8; 1024] = [0 as u8; 1024]
@@ -403,6 +422,10 @@ static mut a_zwei: [u8; 7] = "second\0"
 // NUR FUER DEN LAEUFER: den Reiter "daneben" waehlen. Ein Mensch klickt
 // den Reiter an -- das ist derselbe Weg durch denselben Code, nur ohne
 // Maus. Gebraucht wird er fuer tools/dual/abnahme.sh.
+static mut a_rmleft: [u8; 7] = "rmleft\0"
+static mut m_deleted: [u8; 20] = "installer: deleted=\0"
+static mut a_reuse: [u8; 6] = "reuse\0"
+static mut m_view_reuse: [u8; 23] = "installer: view reuse=\0"
 static mut a_neben: [u8; 7] = "beside\0"
 
 // ------------------------------------------------------- Kleinigkeiten
@@ -919,6 +942,13 @@ fn view_dump() {
     say(ptr((&m_view_beside[0 as usize]) as u64))
     ulib.sayu(d_moeglich)
     ulib.nl()
+    say(ptr((&m_view_reuse[0 as usize]) as u64))
+    if reuse_ok() {
+        ulib.sayu(1)
+    } else {
+        ulib.sayu(0)
+    }
+    ulib.nl()
     say(ptr((&m_view_art[0 as usize]) as u64))
     if d_gelesen != 0 && dualkern.gpt_pruefen() {
         var ai: u64 = 0
@@ -939,6 +969,7 @@ fn view_dump() {
 }
 
 fn ansicht_neu() {
+    sel_part = 0xFFFFFFFFFFFFFFFF
     ptabelle_bauen()
     dzeilen_bauen()
     view_dump()
@@ -1343,12 +1374,85 @@ fn weg_moeglich() -> bool {
     if welcher_weg == 1 {
         return d_moeglich >= 1
     }
+    if welcher_weg == 2 {
+        return reuse_ok()
+    }
     return true
+}
+
+fn auto_pick() {
+    var i: u64 = 0
+    while i < dualkern.anz() && d_gelesen != 0 {
+        if dualkern.osum_ziel(i) {
+            sel_pick(i)
+            return
+        }
+        i = i + 1
+    }
+}
+
+fn reuse_ok() -> bool {
+    if d_gelesen == 0 || !dualkern.gpt_pruefen() {
+        return false
+    }
+    if d_esp_idx >= dualkern.anz() {
+        return false
+    }
+    return dualkern.osum_ziel(sel_part)
+}
+
+fn sel_is_osum() -> bool {
+    if d_gelesen == 0 || !dualkern.gpt_pruefen() {
+        return false
+    }
+    return sel_part < dualkern.anz() && dualkern.p_typ(sel_part) == dualkern.T_OSUM
+}
+
+fn sel_pick(idx: u64) {
+    sel_part = 0xFFFFFFFFFFFFFFFF
+    if d_gelesen != 0 && dualkern.gpt_pruefen() && idx < dualkern.anz() {
+        sel_part = idx
+        sel_start = dualkern.p_start(idx)
+        sel_end = dualkern.p_ende(idx)
+        say(ptr((&m_re_sel[0 as usize]) as u64))
+        ulib.sayu(idx + 1)
+        ulib.nl()
+    }
+}
+
+fn sel_ask_text() {
+    b_start((&askbuf[0 as usize]) as u64, 240)
+    b_s(msg.get(ptr((&k_re_ask_a[0 as usize]) as u64)))
+    var k: u64 = 0
+    var more: bool = true
+    while k < 35 && more {
+        let ch: u64 = dualkern.p_name_ch(sel_part, k)
+        if ch == 0 {
+            more = false
+        } else {
+            b_c(ch)
+            k = k + 1
+        }
+    }
+    b_c(32)
+    b_c(40)
+    b_n((sel_end - sel_start + 1) / 2048)
+    b_c(32)
+    b_c(77)
+    b_c(105)
+    b_c(66)
+    b_c(41)
+    b_c(32)
+    b_s(msg.get(ptr((&k_re_ask_b[0 as usize]) as u64)))
+    b_ende()
 }
 
 // Die Aufschrift des Knopfes. Sie sagt, was gleich passiert -- und auf
 // den beiden Reitern passiert etwas Verschiedenes.
 fn weg_knopftext() -> u64 {
+    if welcher_weg == 2 {
+        return msg.get(ptr((&k_re_go[0 as usize]) as u64))
+    }
     if welcher_weg == 1 && d_moeglich == 2 {
         return msg.get(shrinkflow.key_go())
     }
@@ -1398,7 +1502,13 @@ fn status_bauen() {
         // auf dem Reiter "daneben" schlicht FALSCH -- und eine falsche
         // Warnung ist schlimmer als keine: wer sie einmal als Unsinn
         // erkannt hat, liest die naechste nicht mehr.
-        if welcher_weg == 1 {
+        if welcher_weg == 2 {
+            b_s(msg.get(ptr((&k_re_head[0 as usize]) as u64)))
+            if !reuse_ok() {
+                b_c(32)
+                b_s(msg.get(ptr((&k_re_none[0 as usize]) as u64)))
+            }
+        } else if welcher_weg == 1 {
             b_s(msg.get(ptr((&k_d_nhead[0 as usize]) as u64)))
         } else {
             b_s(msg.get(ptr((&k_warn[0 as usize]) as u64)))
@@ -1506,6 +1616,7 @@ fn installieren_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
 
     // ---- 1. die Partitionstafel
     melde_schritt(wschritt, instkern.S_GPT)
+    instrun.start_clock()
     // r309: Limine's BIOS stages go into the same write when the image
     // carries /boot/limine-hdd.bin (UEFI-only otherwise)
     instkern.bios_laden()
@@ -1516,6 +1627,7 @@ fn installieren_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
         return false
     }
 
+    let _lg: bool = instlog.open(zfd, sekt, instkern.plan_esp_start())
     // ---- 2. die EFI-Partition
     melde_schritt(wschritt, instkern.S_ESP)
     if !instkern.fat32_create(zfd, instkern.plan_esp_start(), espsek) {
@@ -1544,7 +1656,8 @@ fn installieren_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
         ulib.nl()
         cry_off = instkern.crypt_off()
     }
-    if !instkern.copy_root_from(zfd, qfd, ofs_start + cry_off, qsekt) {
+    if !instrun.copy_pumped(zfd, qfd, ofs_start + cry_off, qsekt) {
+        busy.close()
         wo(3)
         instkern.crypt_end()
         crypt_wipe()
@@ -1555,7 +1668,8 @@ fn installieren_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
 
     // ---- 4. das Dateisystem auf die Partition vergroessern
     melde_schritt(wschritt, instkern.S_WACHSEN)
-    if instkern.wachsen(zfd, ofs_start + cry_off, ofs_bloecke - cry_off) == 0 {
+    if instrun.grow_pumped(zfd, ofs_start + cry_off, ofs_bloecke - cry_off) == 0 {
+        busy.close()
         wo(4)
         instkern.crypt_end()
         crypt_wipe()
@@ -1566,11 +1680,13 @@ fn installieren_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
     instkern.crypt_end()
     crypt_wipe()
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    instlog.close()
     ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
     ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
 
     // ---- 5. der Bootlader auf die EFI-Partition
     melde_schritt(wschritt, instkern.S_BOOT)
+    instrun.show_boot()
     esp_name(dev)
     // Der gebaute Name auf der Leitung -- damit eine Messung sieht,
     // WELCHE Partition eingehaengt wird, und nicht nur, dass eine
@@ -1579,9 +1695,11 @@ fn installieren_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
     say(ptr((&d_esp[0 as usize]) as u64))
     ulib.nl()
     if !bootlader() {
+        busy.close()
         wo(5)
         return false
     }
+    busy.close()
     return true
 }
 
@@ -1701,6 +1819,7 @@ fn installieren_daneben_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
         return false
     }
     d_neue_nr = nr
+    let _lg: bool = instlog.open(zfd, sekt, first_start())
     say(ptr((&m_d_neu[0 as usize]) as u64))
     luft()
     ulib.sayu(nr)
@@ -1712,7 +1831,8 @@ fn installieren_daneben_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
 
     // ---- 2. das System kopieren. Der lange Teil.
     melde_schritt(wschritt, instkern.S_KOPIE)
-    if !instkern.copy_root_from(zfd, qfd, von, qsekt) {
+    if !instrun.copy_pumped(zfd, qfd, von, qsekt) {
+        busy.close()
         wo(79)
         ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
@@ -1721,18 +1841,21 @@ fn installieren_daneben_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
 
     // ---- 3. das Dateisystem auf den ganzen Bereich vergroessern.
     melde_schritt(wschritt, instkern.S_WACHSEN)
-    if instkern.wachsen(zfd, von, bis - von + 1) == 0 {
+    if instrun.grow_pumped(zfd, von, bis - von + 1) == 0 {
+        busy.close()
         wo(80)
         ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
         return false
     }
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    instlog.close()
     ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
     ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
 
     // ---- 4. die Dateien in die FREMDE EFI-Partition, und das Menue.
     melde_schritt(wschritt, instkern.S_BOOT)
+    instrun.show_boot()
     // Der Name der fremden EFI-Partition: das Geraet plus ihre Nummer
     // aus der Tafel. NICHT "1" -- auf einer Platte mit Windows ist die
     // ESP zwar meist die erste, aber "meist" ist keine Zusage.
@@ -1741,9 +1864,179 @@ fn installieren_daneben_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
     say(ptr((&d_esp[0 as usize]) as u64))
     ulib.nl()
     if !bootlader_dual() {
+        busy.close()
         return false
     }
+    busy.close()
     return true
+}
+
+fn first_start() -> u64 {
+    var lo: u64 = 0xFFFFFFFFFFFFFFFF
+    var i: u64 = 0
+    while i < dualkern.anz() {
+        if dualkern.p_start(i) < lo {
+            lo = dualkern.p_start(i)
+        }
+        i = i + 1
+    }
+    return lo
+}
+
+fn installieren_osum(dev: u64, wstat: u64, wschritt: u64) -> bool {
+    if wunlock.protected(dev) {
+        return false
+    }
+    if !wunlock.unlock(dev) {
+        return false
+    }
+    instrun.start_clock()
+    let ok: bool = installieren_osum_raw(dev, wstat, wschritt)
+    instlog.close()
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    wunlock.relock()
+    return ok
+}
+
+fn find_target() -> u64 {
+    var i: u64 = 0
+    while i < dualkern.anz() {
+        if dualkern.p_start(i) == sel_start && dualkern.p_ende(i) == sel_end && dualkern.osum_ziel(i) {
+            return i
+        }
+        i = i + 1
+    }
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+fn close_two(a: u64, b: u64) {
+    ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
+}
+
+fn installieren_osum_raw(dev: u64, wstat: u64, wschritt: u64) -> bool {
+    let qfd: u64 = ulib.sys(ulib.SYS_OPEN, ptr((&d_quelle[0 as usize]) as u64), 0, 0)
+    if ulib.bad(qfd) {
+        wo(70)
+        return false
+    }
+    if instkern.quelle_pruefen(qfd) == 0 {
+        wo(71)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    let qsekt: u64 = ulib.size_of(ptr((&d_quelle[0 as usize]) as u64)) / instkern.BS
+    if !konto_schreiben() {
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    let zfd: u64 = ulib.sys(ulib.SYS_OPEN, dev, ulib.O_RDWR, 0)
+    if ulib.bad(zfd) {
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        wo(72)
+        return false
+    }
+    let sekt: u64 = ulib.size_of(dev) / instkern.BS
+    let n: u64 = dualkern.tafel_lesen(zfd, sekt)
+    if n == 0 || !dualkern.gpt_pruefen() {
+        wo(73)
+        close_two(zfd, qfd)
+        return false
+    }
+    let ti: u64 = find_target()
+    if ti >= dualkern.anz() {
+        wo(81)
+        close_two(zfd, qfd)
+        return false
+    }
+    let espi: u64 = dualkern.esp_finden()
+    if espi >= dualkern.anz() || !dualkern.esp_gross_genug(espi) {
+        wo(75)
+        close_two(zfd, qfd)
+        return false
+    }
+    let von: u64 = dualkern.p_start(ti)
+    let bis: u64 = dualkern.p_ende(ti)
+    if bis - von + 1 < qsekt {
+        wo(77)
+        close_two(zfd, qfd)
+        return false
+    }
+    melde_schritt(wschritt, instkern.S_GPT)
+    d_neue_nr = dualkern.p_nr(ti)
+    let _lg: bool = instlog.open(zfd, sekt, first_start())
+    say(ptr((&m_d_neu[0 as usize]) as u64))
+    luft()
+    ulib.sayu(d_neue_nr)
+    luft()
+    ulib.sayu(von)
+    luft()
+    ulib.sayu(bis)
+    ulib.nl()
+    melde_schritt(wschritt, instkern.S_KOPIE)
+    if !instrun.copy_pumped(zfd, qfd, von, qsekt) {
+        busy.close()
+        wo(79)
+        close_two(zfd, qfd)
+        return false
+    }
+    melde_schritt(wschritt, instkern.S_WACHSEN)
+    if instrun.grow_pumped(zfd, von, bis - von + 1) == 0 {
+        busy.close()
+        wo(80)
+        close_two(zfd, qfd)
+        return false
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    instlog.close()
+    close_two(zfd, qfd)
+    melde_schritt(wschritt, instkern.S_BOOT)
+    instrun.show_boot()
+    esp_name_nr(dev, dualkern.p_nr(espi))
+    say(ptr((&m_esp[0 as usize]) as u64))
+    say(ptr((&d_esp[0 as usize]) as u64))
+    ulib.nl()
+    let ok: bool = bootlader_dual()
+    busy.close()
+    return ok
+}
+
+fn delete_leftover(dev: u64) -> bool {
+    if wunlock.protected(dev) {
+        return false
+    }
+    if !wunlock.unlock(dev) {
+        return false
+    }
+    say(ptr((&m_re_del[0 as usize]) as u64))
+    ulib.nl()
+    var ok: bool = false
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, dev, ulib.O_RDWR, 0)
+    if !ulib.bad(fd) {
+        let sekt: u64 = ulib.size_of(dev) / instkern.BS
+        if dualkern.tafel_lesen(fd, sekt) != 0 && dualkern.gpt_pruefen() {
+            let ti: u64 = find_target_any()
+            if ti < dualkern.anz() {
+                ok = dualkern.eintrag_loeschen(fd, ti)
+            }
+        }
+        ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    }
+    wunlock.relock()
+    tafel_holen(dev)
+    return ok
+}
+
+fn find_target_any() -> u64 {
+    var i: u64 = 0
+    while i < dualkern.anz() {
+        if dualkern.p_start(i) == sel_start && dualkern.p_ende(i) == sel_end && dualkern.p_typ(i) == dualkern.T_OSUM {
+            return i
+        }
+        i = i + 1
+    }
+    return 0xFFFFFFFFFFFFFFFF
 }
 
 // AN WELCHER STELLE ES ABGEBROCHEN IST. `fehler_bei()` sagt, WAS
@@ -2107,6 +2400,8 @@ fn arg_hat(args: u64, was: u64) -> bool {
 const K_TTAB: u64 = 1
 const K_TAB0: u64 = 10
 const K_TAB1: u64 = 11
+const K_TAB2: u64 = 12
+const K_DEL: u64 = 13
 const K_PTAB: u64 = 3
 const K_SUCH: u64 = 4
 const K_GO: u64 = 5
@@ -2127,8 +2422,9 @@ fn build() {
         K_TAB0, welcher_weg == 0)
     let _r1: usize = fuiscene.tab(reiter, msg.get(ptr((&k_d_tneben[0 as usize]) as u64)),
         K_TAB1, welcher_weg == 1)
-    // Die Partitionsansicht gehoert dem zweiten Reiter.
-    if welcher_weg == 1 {
+    let _r2: usize = fuiscene.tab(reiter, msg.get(ptr((&k_re_tab[0 as usize]) as u64)),
+        K_TAB2, welcher_weg == 2)
+    if welcher_weg >= 1 {
         let _p: usize = fuiscene.table_blob(col, K_PTAB, BW - 16, 152, PCOL,
             (&pblob[0 as usize]) as u64)
         let _f: usize = fuiscene.label(col, (&freizeile[0 as usize]) as u64)
@@ -2195,9 +2491,20 @@ fn build() {
     var w_go: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), t_go,
         ulib.length(t_go)) + 40
     w_go = (w_go + 3) / 4 * 4
+    let t_del: u64 = msg.get(ptr((&k_re_del[0 as usize]) as u64))
+    var w_del: u64 = 0
+    if welcher_weg == 2 {
+        w_del = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), t_del, ulib.length(t_del)) + 40
+        w_del = (w_del + 3) / 4 * 4 + 8
+    }
     let bar: usize = fuiscene.row(col)
     fuiscene.set_gap(bar, 8)
-    let _sp: usize = fuiscene.space(bar, BW - 16 - w_such - w_go - 16, 4)
+    let _sp: usize = fuiscene.space(bar, BW - 16 - w_such - w_go - w_del - 16, 4)
+    if welcher_weg == 2 {
+        let bd: usize = fuiscene.button(bar, t_del, K_DEL)
+        fuiscene.set_size(bd, w_del - 8, 36)
+        fuiscene.set_enabled(bd, laeuft == 0 && sel_is_osum())
+    }
     let bs: usize = fuiscene.button(bar, t_such, K_SUCH)
     fuiscene.set_size(bs, w_such, 36)
     // Der Knopf ist aus, solange nichts gewaehlt ist. Ein Knopf, der
@@ -2243,6 +2550,7 @@ fn u_start(args: u64) -> u64 {
     let sofort: bool = arg_hat(args, ptr((&a_ja[0 as usize]) as u64))
     let zweite: bool = arg_hat(args, ptr((&a_zwei[0 as usize]) as u64))
     let daneben: bool = arg_hat(args, ptr((&a_neben[0 as usize]) as u64))
+    let reuse: bool = arg_hat(args, ptr((&a_reuse[0 as usize]) as u64))
 
     // DAILY-DRIVER (r172): the account needs root (it rewrites /etc/shadow and
     // chowns): the boot-menu entry "Install OrientOS" is root, a window started
@@ -2268,10 +2576,16 @@ fn u_start(args: u64) -> u64 {
     if daneben {
         welcher_weg = 1
     }
+    if reuse {
+        welcher_weg = 2
+    }
     platten_suchen()
     if p_anz == 1 {
         gewaehlt = 0
         tafel_holen(nptr(0))
+        if reuse {
+            auto_pick()
+        }
     }
     tabelle_bauen()
     reiter_bauen()
@@ -2366,6 +2680,9 @@ fn u_start(args: u64) -> u64 {
             // Die Tafel gehoert zu DIESER Platte -- die Vorauswahl oben
             // hat sie nur dann gelesen, wenn es genau eine Platte gab.
             tafel_holen(nptr(gewaehlt))
+            if reuse {
+                auto_pick()
+            }
             ptabelle_bauen()
             dzeilen_bauen()
             fuiscene.table_set_blob(K_PTAB, (&pblob[0 as usize]) as u64)
@@ -2379,6 +2696,22 @@ fn u_start(args: u64) -> u64 {
                 let _sh: bool = shrink_now(nptr(gewaehlt))
                 ansicht_neu()
                 let _k3: u64 = fuiscene.pump()
+            }
+            if welcher_weg == 2 && !reuse_ok() {
+                say(ptr((&m_d_nein[0 as usize]) as u64))
+                ulib.nl()
+                return 0
+            }
+            if welcher_weg == 2 && arg_hat(args, ptr((&a_rmleft[0 as usize]) as u64)) {
+                var del_ok: u64 = 0
+                if delete_leftover(nptr(gewaehlt)) {
+                    del_ok = 1
+                }
+                ansicht_neu()
+                say(ptr((&m_deleted[0 as usize]) as u64))
+                ulib.sayu(del_ok)
+                ulib.nl()
+                return 0
             }
             if welcher_weg == 1 && d_moeglich != 1 {
                 say(ptr((&m_d_nein[0 as usize]) as u64))
@@ -2411,7 +2744,9 @@ fn u_start(args: u64) -> u64 {
             // in dieser Runde geht -- alles davor ist Anzeige, alles
             // dahinter ist dieselbe Meldung.
             var gut: bool = false
-            if welcher_weg == 1 {
+            if welcher_weg == 2 {
+                gut = installieren_osum(nptr(gewaehlt), 0, 0)
+            } else if welcher_weg == 1 {
                 gut = installieren_daneben(nptr(gewaehlt), 0, 0)
             } else {
                 gut = installieren(nptr(gewaehlt), 0, 0)
@@ -2486,8 +2821,31 @@ fn u_start(args: u64) -> u64 {
             status_bauen()
             wahl_zeigen()
             fuiscene.refresh()
+        } else if id == K_PTAB {
+            sel_pick(fuiscene.table_sel(K_PTAB))
+            status_bauen()
+            fuiscene.refresh()
+        } else if id == K_DEL && sel_is_osum() && laeuft == 0 {
+            frage = 5
+            sel_ask_text()
+            fuiscene.dialog_open(
+                msg.get(ptr((&k_re_del_t[0 as usize]) as u64)),
+                (&askbuf[0 as usize]) as u64,
+                ptr((&t_ja[0 as usize]) as u64),
+                ptr((&t_nein[0 as usize]) as u64))
         } else if id == K_GO && weg_moeglich() && laeuft == 0 {
-            if welcher_weg == 1 && d_moeglich == 2 {
+            if welcher_weg == 2 {
+                frage = 4
+                sel_ask_text()
+                fuiscene.dialog_open(
+                    msg.get(ptr((&k_re_ask_t[0 as usize]) as u64)),
+                    (&askbuf[0 as usize]) as u64,
+                    ptr((&t_ja[0 as usize]) as u64),
+                    ptr((&t_nein[0 as usize]) as u64))
+                say(ptr((&m_ask[0 as usize]) as u64))
+                ulib.sayu(4)
+                ulib.nl()
+            } else if welcher_weg == 1 && d_moeglich == 2 {
                 frage = 3
                 d_shrink_fail = 0
                 shrink_ask_text()
@@ -2547,6 +2905,7 @@ fn u_start(args: u64) -> u64 {
                 // Programm, das beim Start jede Platte durchliest,
                 // haelt den Menschen auf.
                 d_shrink_fail = 0
+                sel_part = 0xFFFFFFFFFFFFFFFF
                 tafel_holen(nptr(gewaehlt))
                 ptabelle_bauen()
                 dzeilen_bauen()
@@ -2554,7 +2913,7 @@ fn u_start(args: u64) -> u64 {
                 status_bauen()
                 fuiscene.refresh()
             }
-        } else if id == K_TAB0 || id == K_TAB1 {
+        } else if id == K_TAB0 || id == K_TAB1 || id == K_TAB2 {
             // DER WEG WIRD GEWECHSELT.
             welcher_weg = id - K_TAB0
             say(ptr((&m_d_weg[0 as usize]) as u64))
@@ -2593,6 +2952,13 @@ fn u_start(args: u64) -> u64 {
                 say(ptr((&m_ask[0 as usize]) as u64))
                 ulib.sayu(2)
                 ulib.nl()
+            } else if ja && frage == 4 {
+                los = true
+                frage = 2
+            } else if ja && frage == 5 {
+                frage = 0
+                delete_leftover(nptr(gewaehlt))
+                ansicht_neu()
             } else if ja && frage == 2 {
                 // Beide Fragen mit Ja: es wird geschrieben (oben).
                 los = true

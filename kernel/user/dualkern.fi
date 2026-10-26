@@ -80,7 +80,7 @@ export {
     T_UNBEKANNT, T_ESP, T_DATEN, T_LINUX, T_OSUM, T_MSR, T_RECOVERY,
     luecke_suchen, luecke_start, luecke_ende,
     esp_finden, esp_gross_genug, ESP_MIND,
-    neben_schreiben, frei_index,
+    neben_schreiben, frei_index, osum_ziel, eintrag_loeschen, p_nr,
     gpt_pruefen, sekt_gesamt,
     D_KEIN, D_KEINEGPT, D_KAPUTT, D_VOLL, D_ENG, D_KEINEESP, D_ESPKLEIN,
     D_SCHREIBEN, D_LESEN, D_HSIZE, D_HCRC, D_ESIZE, D_COUNT, D_TCRC,
@@ -875,6 +875,13 @@ fn neben_schreiben(fd: u64, von: u64, bis: u64) -> u64 {
         return 0
     }
 
+    if !tafel_siegeln(fd, p) {
+        return 0
+    }
+    return slot + 1
+}
+
+fn tafel_siegeln(fd: u64, p: u64) -> bool {
     // ---- die Pruefsumme ueber die GANZE Tafel, neu.
     let gesamt: u64 = g_anzahl * g_esize
     var c: u64 = 0xFFFFFFFF
@@ -883,7 +890,7 @@ fn neben_schreiben(fd: u64, von: u64, bis: u64) -> u64 {
     while done < gesamt {
         if !instkern.lese(fd, lba, p, BS) {
             st_grund = D_LESEN
-            return 0
+            return false
         }
         var chunk: u64 = BS
         if gesamt - done < BS {
@@ -895,15 +902,9 @@ fn neben_schreiben(fd: u64, von: u64, bis: u64) -> u64 {
     }
     let tcrc: u64 = (c ^ 0xFFFFFFFF) & 0xFFFFFFFF
 
-    // ---- die beiden Koepfe. Jeder traegt die neue Tafelsumme und
-    // danach seine eigene, in dieser Reihenfolge.
-    //
-    // Der Kopf wird GELESEN und nur an zwei Feldern geaendert. Alles
-    // andere -- die Plattenkennung, die Fassungsnummer, die Grenzen --
-    // bleibt so, wie das fremde Werkzeug es geschrieben hat.
     if !instkern.lese(fd, 1, p, BS) {
         st_grund = D_LESEN
-        return 0
+        return false
     }
     let hsize: u64 = g32(p + 12)
     p32(p + 88, tcrc)
@@ -911,11 +912,11 @@ fn neben_schreiben(fd: u64, von: u64, bis: u64) -> u64 {
     p32(p + 16, crc_of(p, hsize))
     if !instkern.schreibe(fd, 1, p, BS) {
         st_grund = D_SCHREIBEN
-        return 0
+        return false
     }
     if !instkern.lese(fd, g_sekt - 1, p, BS) {
         st_grund = D_LESEN
-        return 0
+        return false
     }
     let hsize2: u64 = g32(p + 12)
     p32(p + 88, tcrc)
@@ -923,7 +924,62 @@ fn neben_schreiben(fd: u64, von: u64, bis: u64) -> u64 {
     p32(p + 16, crc_of(p, hsize2))
     if !instkern.schreibe(fd, g_sekt - 1, p, BS) {
         st_grund = D_SCHREIBEN
+        return false
+    }
+    return true
+}
+
+fn osum_ziel(i: u64) -> bool {
+    if i >= e_anz {
+        return false
+    }
+    if e_typ[(i) as usize] != T_OSUM {
+        return false
+    }
+    return e_ende[(i) as usize] - e_start[(i) as usize] + 1 >= MIND_WURZEL
+}
+
+fn eintrag_loeschen(fd: u64, i: u64) -> bool {
+    st_grund = D_KEIN
+    if i >= e_anz || e_typ[(i) as usize] != T_OSUM {
+        st_grund = D_ENG
+        return false
+    }
+    let p: u64 = (&SE[0 as usize]) as u64
+    let slot: u64 = e_slot[(i) as usize]
+    let pro: u64 = BS / g_esize
+    let sek_nr: u64 = slot / pro
+    let insek: u64 = slot % pro
+    if !instkern.lese(fd, g_tafel + sek_nr, p, BS) {
+        st_grund = D_LESEN
+        return false
+    }
+    let e: u64 = p + insek * g_esize
+    if typ_von(e) != T_OSUM || g64(e + 32) != e_start[(i) as usize] {
+        st_grund = D_ENG
+        return false
+    }
+    var k: u64 = 0
+    while k < g_esize {
+        p8(e + k, 0)
+        k = k + 1
+    }
+    let sich_tafel: u64 = g_sekt - 1 - ENTSECT
+    if !instkern.schreibe(fd, sich_tafel + sek_nr, p, BS) {
+        st_grund = D_SCHREIBEN
+        return false
+    }
+    if !instkern.schreibe(fd, g_tafel + sek_nr, p, BS) {
+        st_grund = D_SCHREIBEN
+        return false
+    }
+    return tafel_siegeln(fd, p)
+}
+
+fn p_nr(i: u64) -> u64 {
+    if i >= e_anz {
         return 0
     }
-    return slot + 1
+    return e_slot[(i) as usize] + 1
 }
+
