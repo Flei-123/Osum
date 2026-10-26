@@ -77,7 +77,7 @@ build_proof() {
     local out=${BRANDCHECK_OUT:-$TMPD/build}
     mkdir -p "$out"
     if [ -z "${BRANDCHECK_OUT:-}" ]; then
-        export OSUM_MARKE_PRODUKT=TestMarke OSUM_MARKE_KURZ=tmarke
+        export OSUM_MARKE_PRODUKT=TestMarke OSUM_MARKE_KURZ=tmarke OSUM_MARKE_WEB=https://tmarke.example
         if ! IMAGE_ID=brandcheck bash tools/usbimg/build.sh "$out" > "$TMPD/build.log" 2>&1; then
             bad "image build failed: $(tail -3 "$TMPD/build.log" | tr '\n' ' ')"
             return
@@ -86,7 +86,7 @@ build_proof() {
     ok "image built with brand TestMarke"
     local img=$out/testmarke-usb.img
     [ -f "$img" ] && ok "image file is testmarke-usb.img" || bad "image file name not derived from the brand: $(ls "$out" | head -5 | tr '\n' ' ')"
-    strings -a "$img" | grep -q 'TestMarke' && ok "image carries the brand TestMarke (positive control)" || bad "image does not contain TestMarke"
+    [ "$(strings -a "$img" | grep -c 'TestMarke')" -gt 0 ] && ok "image carries the brand TestMarke (positive control)" || bad "image does not contain TestMarke"
     grep -q 'TestMarke' "$out/limine.conf" && ok "limine config carries TestMarke (positive control)" || bad "limine.conf does not contain TestMarke"
     if artifact_hits "$out"; then
         ok "no OrientOS / XoffiOS string in kernel, image, limine config and rendered locale"
