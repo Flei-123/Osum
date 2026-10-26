@@ -8,9 +8,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
-OUT=${1:-/root/nodmg2/inst}
-W=$(mktemp -d /root/nodmg2/gate.XXXXXX)
+W=$(mktemp -d)
 trap '[ -n "${NODMG_KEEP:-}" ] || rm -rf "$W"' EXIT
+OUT=${1:-}
+if [ -z "$OUT" ]; then
+    OUT="$W/inst"
+    bash tools/install/build.sh "$OUT" > "$W/build.log" 2>&1 || { echo "FAIL build: $(tail -n 3 "$W/build.log" | tr '\n' ' ')"; echo "nodmg gate: 0/1 OK/FAIL"; exit 1; }
+fi
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "OK   $*"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL $*"; }

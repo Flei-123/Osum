@@ -75,6 +75,9 @@ ia=$(field "$la" in); pa=$(field "$la" pushed); oa=$(field "$la" popped); wa=$(f
 [ -n "$wa" ] && [ "$wa" -gt 0 ] && ok "A: last target window recorded (win=$wa)" || bad "A: win='$wa'"
 cyc=$(field "$(grep -a '^frames: total=' "$SA" | tail -1 | sed 's/total=/ total=/')" note_cyc)
 [ -n "$cyc" ] && [ "$cyc" -le "$MAXCYC" ] && ok "A: frame counter cost $cyc cycles (<= $MAXCYC)" || bad "A: note_cyc '$cyc'"
+[ -n "$pa" ] && [ -n "$ia" ] && [ "$pa" -le $((ia + ${HOVERCOUNT_SLACK:-8})) ] && ok "A: pushed ($pa) <= in ($ia) + ${HOVERCOUNT_SLACK:-8} (no duplicate E_MOVE for a still pointer)" || bad "A: pushed '$pa' far above in '$ia' (duplicate E_MOVE pushes)"
+pb=$(field "$lb" pushed)
+[ -z "$lb" ] || [ "${pb:-0}" -le ${HOVERCOUNT_SLACK:-8} ] && ok "B: still pointer pushes ${pb:-0} E_MOVE (<= ${HOVERCOUNT_SLACK:-8})" || bad "B: still pointer pushed '$pb' E_MOVE"
 ib=$(field "$lb" in)
 echo "  INFO  A in=$ia pushed=$pa popped=$oa win=$wa / B in=${ib:-none}"
 if [ -n "$lb" ]; then
