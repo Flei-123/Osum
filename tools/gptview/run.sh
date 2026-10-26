@@ -26,7 +26,7 @@ view() {
     local bau=$1 disk=$2 ser=$3
     rm -f "$ser"; : > "$ser"
     timeout 600 $QEMU_X86 -m 512 -kernel "$bau/osum.mb" -initrd "$bau/root.img" \
-        -append "modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1400 nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,beside" \
+        -append "modfs osum vfs gfx wm wig wmdauer nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,beside" \
         -serial "file:$ser" -display none -no-reboot \
         -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32 \
         -drive "file=$disk,format=raw,if=ide,index=0" > "$ser.qemu" 2>&1 &
