@@ -96,6 +96,9 @@ import os
 import struct
 import sys
 
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "marke"))
+import brandrender as brand_render
+
 BS = 512
 MAGIC = 0x4F53554D2D4F4653  # "OSUM-OFS"
 INODE_SIZE = 128
@@ -1020,8 +1023,8 @@ def main(argv):
             fs.addfile(path, b"")  # eine leere Datei: ein Name, kein Block
             continue
         with open(host, "rb") as f:
-            fs.addfile(path, f.read(),
-                       0o755 if mode is None else mode, uid, gid)
+            payload = brand_render.render_for_image(f.read(), host)
+        fs.addfile(path, payload, 0o755 if mode is None else mode, uid, gid)
     with open(image, "wb") as f:
         f.write(fs.d)
         # RUNDE OFS3: der Rest der Platte ist ein LOCH. Er liest sich als

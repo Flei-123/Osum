@@ -195,7 +195,7 @@ def main(argv):
         marke = os.path.join(arbeit, "SYSTEM")
         if not os.path.exists(marke):
             with open(marke, "w") as f:
-                f.write("shipped with the OrientOS image; see docs/ACTION-BUS.md 5.2\n")
+                f.write("shipped with the {{PRODUCT}} image; see docs/ACTION-BUS.md 5.2\n")
         zeilen.append("%s/SYSTEM=%s" % (ziel, marke))
         zeilen.append("%s/data/" % ziel)
         zeilen.append("%s/data/README=%s"

@@ -134,6 +134,12 @@ mkdir -p "$OUT"
 # abgeleitet, nicht gespeichert.
 . tools/lib/marke.sh
 marke_laden . || fehler "marke.conf laesst sich nicht lesen"
+RENDERED="$OUT/rendered"
+rm -rf "$RENDERED"
+for r_ in locale assets/shapes assets/apps; do
+    marke_render "$r_" "$RENDERED/$r_" > /dev/null \
+        || fehler "brand placeholders in $r_ could not be rendered"
+done
 
 # ============================================ ROUND LIVE: TWO IMAGES
 #
@@ -985,7 +991,7 @@ printf '%08d\n' "${OTA_FASSUNG:-0}" > "$OUT/FASSUNG"
 SYS_BUILD=${SYS_BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 0)}
 SYS_COMMIT=$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
 printf '%08d\n' "$SYS_BUILD" > "$OUT/SYSVERSION"
-printf 'OrientOS build %s (%s) %s\n' "$SYS_BUILD" "$SYS_COMMIT" "$(date -u +%Y-%m-%dT%H:%MZ)" > "$OUT/osversion"
+printf '%s build %s (%s) %s\n' "$MARKE_PRODUKT" "$SYS_BUILD" "$SYS_COMMIT" "$(date -u +%Y-%m-%dT%H:%MZ)" > "$OUT/osversion"
 
 # ------------------------------------------- RUNDE STICK: DIE BRUECKE
 #
@@ -1176,7 +1182,7 @@ for s_ in assets/schemes/*.scheme; do
     ARGS+=("/etc/schemas/$(basename "$s_" .scheme)=$s_")
 done
 ARGS+=(/etc/shapes/)
-for s_ in assets/shapes/*.shape; do
+for s_ in "$RENDERED"/assets/shapes/*.shape; do
     ARGS+=("/etc/shapes/$(basename "$s_" .shape)=$s_")
 done
 ARGS+=(/etc/themes/)
@@ -1186,8 +1192,8 @@ done
 ARGS+=(/etc/netview/)
 for q in $SYMBOLE; do ARGS+=("/etc/netview/$q=$OUT/icons/$q"); done
 ARGS+=(/usr/ /usr/share/ /usr/share/locale/
-       /usr/share/locale/en/ "/usr/share/locale/en/messages=locale/en/messages"
-       /usr/share/locale/de/ "/usr/share/locale/de/messages=locale/de/messages")
+       /usr/share/locale/en/ "/usr/share/locale/en/messages=$RENDERED/locale/en/messages"
+       /usr/share/locale/de/ "/usr/share/locale/de/messages=$RENDERED/locale/de/messages")
 # ============================================== RUNDE LOGIND
 # DIE HEIMATVERZEICHNISSE -- /etc/passwd VERSPRACH EINES, DAS ES NICHT
 # GAB.
@@ -1521,7 +1527,7 @@ case " $PROGS " in *" term "*) TERM_START=/bin/term ;; esac
 while read -r z; do
     [ "$z" = "/apps/terminal.osp/start@/bin/sh" ] && z="/apps/terminal.osp/start@$TERM_START"
     ARGS+=("$z")
-done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel" nur="$PROGS")
+done < <(python3 tools/k15/bundle.py "$RENDERED/assets/apps" "$OUT/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 # W-IMG2 (r921): JARVIS Mini + the global hotkey helper. Personal stick only (the box needs the chat server).
 #   /bin/hotkeyd   started by the desktop autostart line `hotkey` (only when /etc/hotkeys.conf exists)
