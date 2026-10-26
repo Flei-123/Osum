@@ -33,7 +33,7 @@ done
 mkdir -p "$OUT"
 
 if [[ $STUFE == 0 ]]; then CC=${FIRNC:-vendor/firn/bin/firnc}
-else CC=${FIRNC1:-vendor/firn/bin/firnc1}; fi
+else CC=${FIRNC1:-vendor/firn/bin/firnc1}; OPTL="$OPTL1"; fi
 
 # Die Oberflaeche dieser Runde plus das, was ein Abbild sonst braucht.
 PROGS="desktop taskbar settings launcher explorer i18nt \

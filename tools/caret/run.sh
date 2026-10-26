@@ -48,7 +48,7 @@ for c in ${CASES:-glogin noblink caretold}; do
     esac
     echo "== case $c =="
     OSUM_ACCEL=${OSUM_ACCEL:-kvm} bash tools/alltag/build.sh "$TMPD/$c" kbd=yes uitrace=$tr warten=6 res=800x600 uiscale=1 bloecke=32768 \
-        extra="wigapp=/bin/glogin wighalt=60" progs="glogin theme sh echo ls cat" xfile=/etc/shadow="$TMPD/shadow" \
+        extra="wigapp=/bin/glogin wighalt=200" progs="glogin theme sh echo ls cat" xfile=/etc/shadow="$TMPD/shadow" \
         xfile=/etc/wallpaper=assets/wallpaper-sea.osym passwdfile="$TMPD/passwd" "${xo[@]}" drive="$TMPD/book" > "$TMPD/$c.log" 2>&1
     if [ ! -f "$TMPD/$c/serial.txt" ] || [ ! -f "$TMPD/$c/blink-000.ppm" ]; then bad "case $c: no frames (build or boot failed)"; tail -3 "$TMPD/$c.log"; continue; fi
     if [ -n "${CARET_F12:-}" ]; then grep -a "^wm: \|wm: shared\|wm: composites\|wm: flush\|wlib: caret\|fui: paint" "$TMPD/$c/serial.txt" | cut -c1-200 | tail -${CARET_F12}; fi

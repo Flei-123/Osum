@@ -179,12 +179,12 @@ PROGS="widgetdemo explorer launcher locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s laesst sich nicht assemblieren"
 baue() { # stufe
-    local s=$1 cc p rc=0
-    if [ "$s" = 0 ]; then cc=vendor/firn/bin/firnc; else cc=vendor/firn/bin/firnc1; fi
+    local s=$1 cc p rc=0 opt="$OPTL"
+    if [ "$s" = 0 ]; then cc=vendor/firn/bin/firnc; else cc=vendor/firn/bin/firnc1; opt="$OPTL1"; fi
     for p in $PROGS; do
         UPROF=""; UCRT="$TMPD/crt.o"
         grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-        "$cc" $UPROF $OPTL -c "kernel/user/$p.fi" -o "$TMPD/$p$s.o" > "$TMPD/e$p$s" 2>&1 || {
+        "$cc" $UPROF $opt -c "kernel/user/$p.fi" -o "$TMPD/$p$s.o" > "$TMPD/e$p$s" 2>&1 || {
             bad "firnc$s uebersetzt $p.fi nicht"
             sed 's/^/        /' "$TMPD/e$p$s" | head -8
             rc=1
