@@ -3,7 +3,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-APPS=${APPS:-"calc explorer taskmgr mail fvviewer charmap cliphist disks storage trashbin nedit welcome powermon netmon runbox"}
+APPS=${APPS:-"calc explorer taskmgr charmap cliphist disks storage trashbin nedit welcome powermon netmon runbox"}
 LUMA_LIMIT=${LUMA_LIMIT:-55}
 ABSENT=${ABSENT:-"Abbrechen,Datei,Hilfe,Löschen,Beenden,Bearbeiten,Ansicht,Speichern,Schließen,Öffnen,Rechner,Fehler,Verbinden,Konto,Nachricht,Ordner,Prozesse,Papierkorb,Sprache,Zurück"}
 KEEP=${KEEP:-/tmp/darkaudit}
