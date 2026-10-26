@@ -28,7 +28,8 @@ def data(n, seed):
 
 def build(secs):
     """secs: list of (addr_or_separator, bytes)."""
-    b = hdr() + tlv(18, u32(0x11)) + tlv(27, u32(2))
+    b = hdr() + tlv(18, u32(0x11)) + tlv(27, u32(2)) + tlv(23, u32(0x00330018))
+    b += tlv(22, u32(1) + u32(0x1b8e00db) + u32(0)) + tlv(22, u32(0) + u32(0x088e10db) + u32(0x0b02909b))
     for a, d in secs:
         b += tlv(19, u32(a) + d)
     return b

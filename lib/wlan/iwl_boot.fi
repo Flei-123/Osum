@@ -22,6 +22,7 @@ const E_CMD_BIG: i64 = -70
 
 const HDR: u64 = 4
 const NVM_CHUNK: u64 = 2048
+const MAX_POLLS: u64 = 4096
 const NVM_SECS: u64 = 6
 const MAO_SEC: u64 = 11
 
@@ -40,6 +41,7 @@ struct Boot {
     rx: u64,
     rx_cap: u64,
     polls: u64,
+    wait_ms: u64,
     nvm: u64,
     nvm_cap: u64,
     nvm_len: u64,
@@ -68,7 +70,7 @@ fn xport_none() -> Xport {
 
 fn boot_new(cmd: u64, cmd_cap: u64, rx: u64, rx_cap: u64, nvm: u64, nvm_cap: u64, pool: u64, pool_cap: u64) -> Boot {
     var b: Boot = Boot {
-        x: xport_none(), cmd: cmd, cmd_cap: cmd_cap, rx: rx, rx_cap: rx_cap, polls: 64, nvm: nvm, nvm_cap: nvm_cap, nvm_len: 0, mao_off: 0, mao_len: 0,
+        x: xport_none(), cmd: cmd, cmd_cap: cmd_cap, rx: rx, rx_cap: rx_cap, polls: 64, wait_ms: 0, nvm: nvm, nvm_cap: nvm_cap, nvm_len: 0, mao_off: 0, mao_len: 0,
         qid: 0, seq: 0, tx_ant: 3, phy_cfg: 0, ev_trig: 0, fl_trig: 0, rt_ev_trig: 0, rt_fl_trig: 0, require: 0,
         db: iwl_phydb.phydb_new(pool, pool_cap)
     }
@@ -85,8 +87,13 @@ fn send_cmd(b: *mut Boot, d: *mut iwl_diag.Diag, len: u64) -> i64 {
 }
 
 fn wait_for(b: *mut Boot, d: *mut iwl_diag.Diag, want: u64) -> i64 {
+    return wait_until(b, d, want, 0)
+}
+
+fn wait_until(b: *mut Boot, d: *mut iwl_diag.Diag, want: u64, span_ms: u64) -> i64 {
     var i: u64 = 0
-    while i < (*b).polls {
+    let t0: u64 = stage_now(b)
+    while i < (*b).polls || (span_ms != 0 && i < MAX_POLLS && stage_now(b) - t0 < span_ms) {
         let x: Xport = (*b).x
         let r: i64 = x.recv(x.ctx, (*b).rx, (*b).rx_cap)
         if r < 0 { return E_RX }
@@ -191,7 +198,7 @@ fn init_stage(b: *mut Boot, d: *mut iwl_diag.Diag) -> i64 {
     iwl_diag.diag_phase(d, iwl_diag.PH_INIT_COMPLETE, stage_now(b))
     rc = cfg_cmds(b, d, (*b).ev_trig, (*b).fl_trig)
     if rc == 0 {
-        let r: i64 = wait_for(b, d, iwl_mvm.CMD_INIT_COMPLETE)
+        let r: i64 = wait_until(b, d, iwl_mvm.CMD_INIT_COMPLETE, (*b).wait_ms)
         if r < 0 { rc = r }
     }
     iwl_diag.diag_calib(d, iwl_phydb.phydb_count(&(*b).db), iwl_phydb.phydb_bytes(&(*b).db), 0)
