@@ -93,7 +93,7 @@ class Fahrer:
         self.serial = serial
         self.out = out
         self.s = None
-        bis = time.time() + 20.0
+        bis = time.time() + 120.0
         while time.time() < bis:
             try:
                 s = socket.socket(socket.AF_UNIX)
