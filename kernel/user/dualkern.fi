@@ -76,8 +76,8 @@ import ulib
 import instkern
 
 export {
-    tafel_lesen, anz, p_start, p_ende, p_typ, p_name_ch,
-    T_UNBEKANNT, T_ESP, T_DATEN, T_LINUX, T_OSUM,
+    tafel_lesen, anz, p_start, p_ende, p_typ, p_name_ch, p_fve, luecke_groesste, MIND_WURZEL,
+    T_UNBEKANNT, T_ESP, T_DATEN, T_LINUX, T_OSUM, T_MSR, T_RECOVERY,
     luecke_suchen, luecke_start, luecke_ende,
     esp_finden, esp_gross_genug, ESP_MIND,
     neben_schreiben, frei_index,
@@ -140,6 +140,8 @@ const T_ESP: u64 = 1
 const T_DATEN: u64 = 2
 const T_LINUX: u64 = 3
 const T_OSUM: u64 = 4
+const T_MSR: u64 = 5
+const T_RECOVERY: u64 = 6
 
 // Wieviele Eintraege diese Datei haelt. Die Tafel hat 128; ein Mensch
 // sieht auf einem Rechner nie so viele, und sechzehn ist die Zahl, mit
@@ -169,6 +171,8 @@ const MIND_WURZEL: u64 = 65536 // 32 MiB in Sektoren
 static mut e_start: [u64; 16] = [0 as u64; 16]
 static mut e_ende: [u64; 16] = [0 as u64; 16]
 static mut e_typ: [u64; 16] = [0 as u64; 16]
+static mut e_fve: [u64; 16] = [0 as u64; 16]
+static mut l_max: u64 = 0
 static mut e_slot: [u64; 16] = [0 as u64; 16]  // die Nummer in der Tafel
 static mut e_name: [u8; 576] = [0 as u8; 576]  // 16 * 36 Zeichen
 static mut e_anz: u64 = 0
@@ -207,6 +211,17 @@ fn p_ende(i: u64) -> u64 {
         return 0
     }
     return e_ende[(i) as usize]
+}
+
+fn p_fve(i: u64) -> bool {
+    if i >= e_anz {
+        return false
+    }
+    return e_fve[(i) as usize] != 0
+}
+
+fn luecke_groesste() -> u64 {
+    return l_max
 }
 
 fn p_typ(i: u64) -> u64 {
@@ -430,6 +445,12 @@ fn typ_von(p: u64) -> u64 {
     if guid_gleich(p, (&ofs[0]) as u64) {
         return T_OSUM
     }
+    if g64(p) == 0x4DB80B5CE3C9E316 && g64(p + 8) == 0xAE1502F02DF97D81 {
+        return T_MSR
+    }
+    if g64(p) == 0x4D4006D1DE94BBA4 && g64(p + 8) == 0xACD67901D5BF6AA1 {
+        return T_RECOVERY
+    }
     return T_UNBEKANNT
 }
 
@@ -554,11 +575,28 @@ fn tafel_lesen_raw(fd: u64, sekt: u64) -> u64 {
     return e_anz
 }
 
+fn mark_fve(fd: u64) {
+    let p: u64 = (&SE[0 as usize]) as u64
+    var i: u64 = 0
+    while i < e_anz {
+        e_fve[(i) as usize] = 0
+        if e_typ[(i) as usize] == T_DATEN {
+            if instkern.lese(fd, e_start[(i) as usize], p, BS) {
+                if g64(p + 3) == 0x2D53462D4556462D {
+                    e_fve[(i) as usize] = 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
 fn tafel_lesen(fd: u64, sekt: u64) -> u64 {
     st_gpt_ok = 0
     let n: u64 = tafel_lesen_raw(fd, sekt)
     if st_grund == D_KEIN {
         st_gpt_ok = 1
+        mark_fve(fd)
     }
     return n
 }
@@ -587,6 +625,7 @@ fn gpt_pruefen() -> bool {
 fn luecke_suchen(mind: u64) -> bool {
     l_start = 0
     l_ende = 0
+    l_max = 0
     var beste: u64 = 0
     // Die moeglichen Anfaenge durchgehen.
     var k: u64 = 0
@@ -630,6 +669,9 @@ fn luecke_suchen(mind: u64) -> bool {
         }
         if bis > von {
             let gross: u64 = bis - von + 1
+            if gross > l_max {
+                l_max = gross
+            }
             if gross >= mind && gross > beste {
                 beste = gross
                 l_start = von

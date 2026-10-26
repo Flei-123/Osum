@@ -119,7 +119,7 @@ const PCOL: u64 = 5
 // OBERFLAECHE -- `tools/design/messen.py` zaehlt genau sie.
 const BW: u64 = 720
 // DAILY-DRIVER (r172): room for the account rows (name, two passwords, hint).
-const BH: u64 = 712
+const BH: u64 = 728
 
 // Die Schritte, die der Balken abbildet. Sie sind dieselben Zahlen wie
 // in `instkern` (S_GPT..S_FERTIG) und stehen hier NICHT noch einmal als
@@ -214,6 +214,8 @@ static mut pblob: [u8; 1024] = [0 as u8; 1024]
 static mut pspalten: [u64; 5] = [0 as u64; 5]
 static mut freizeile: [u8; 200] = [0 as u8; 200]
 static mut espzeile: [u8; 200] = [0 as u8; 200]
+static mut statzeile: [u8; 200] = [0 as u8; 200]
+static mut d_gap_max: u64 = 0
 // Was die Tafel hergegeben hat. 0 = noch nicht gelesen.
 static mut d_gelesen: u64 = 0
 static mut d_frei_von: u64 = 0
@@ -343,6 +345,11 @@ static mut k_a_daten: [u8; 16] = "dual.art.daten\0\0"
 static mut k_a_linux: [u8; 16] = "dual.art.linux\0\0"
 static mut k_a_osum: [u8; 15] = "dual.art.osum\0\0"
 static mut k_a_frei: [u8; 15] = "dual.art.frei\0\0"
+static mut k_a_msr: [u8; 14] = "dual.art.msr\0\0"
+static mut k_a_rec: [u8; 19] = "dual.art.recovery\0\0"
+static mut k_a_bl: [u8; 20] = "dual.art.bitlocker\0\0"
+static mut k_d_ffund: [u8; 16] = "dual.frei.fund\0\0"
+static mut k_d_fnoet: [u8; 18] = "dual.frei.noetig\0\0"
 static mut k_a_unb: [u8; 20] = "dual.art.unbekannt\0\0"
 
 // Die Mitschnitte. Sie gehen auf die SERIELLE LEITUNG und nie auf den
@@ -355,6 +362,10 @@ static mut m_ready: [u8; 20] = "installer: ready n=\0"
 static mut m_view_rows: [u8; 22] = "installer: view rows=\0"
 static mut m_view_free: [u8; 22] = "installer: view free=\0"
 static mut m_view_esp: [u8; 21] = "installer: view esp=\0"
+static mut m_view_stat: [u8; 22] = "installer: view stat=\0"
+static mut m_view_beside: [u8; 24] = "installer: view beside=\0"
+static mut m_view_art: [u8; 21] = "installer: view art=\0"
+static mut m_view_semi: [u8; 2] = ";\0"
 static mut m_disk: [u8; 17] = "installer: disk \0"
 static mut m_pick: [u8; 18] = "installer: picked\0"
 static mut m_ask: [u8; 16] = "installer: ask=\0"
@@ -791,7 +802,15 @@ fn tafel_holen_fd(fd: u64, sekt: u64) {
         ulib.nl()
         i = i + 1
     }
-    // Der freie Platz.
+    let e: u64 = dualkern.esp_finden()
+    var esp_ok: bool = false
+    if e < dualkern.anz() && dualkern.esp_gross_genug(e) {
+        esp_ok = true
+        d_esp_idx = e
+        say(ptr((&m_d_espi[0 as usize]) as u64))
+        ulib.sayu(e + 1)
+        ulib.nl()
+    }
     var gap: bool = false
     if dualkern.luecke_suchen(65536) {
         gap = true
@@ -811,25 +830,14 @@ fn tafel_holen_fd(fd: u64, sekt: u64) {
         luft()
         ulib.sayu(shrinkflow.offer_free())
         ulib.nl()
-        if d_shrink != shrinkflow.S_OFFER {
-            return
-        }
     }
-    // Die fremde EFI-Partition.
-    let e: u64 = dualkern.esp_finden()
-    if e >= dualkern.anz() {
+    d_gap_max = dualkern.luecke_groesste()
+    if !esp_ok {
         return
     }
-    if !dualkern.esp_gross_genug(e) {
-        return
-    }
-    d_esp_idx = e
-    say(ptr((&m_d_espi[0 as usize]) as u64))
-    ulib.sayu(e + 1)
-    ulib.nl()
     if gap {
         d_moeglich = 1
-    } else {
+    } else if d_shrink == shrinkflow.S_OFFER {
         d_moeglich = 2
     }
 }
@@ -905,6 +913,26 @@ fn view_dump() {
     say(ptr((&m_view_free[0 as usize]) as u64))
     say((&freizeile[0 as usize]) as u64)
     ulib.nl()
+    say(ptr((&m_view_stat[0 as usize]) as u64))
+    say((&statzeile[0 as usize]) as u64)
+    ulib.nl()
+    say(ptr((&m_view_beside[0 as usize]) as u64))
+    ulib.sayu(d_moeglich)
+    ulib.nl()
+    say(ptr((&m_view_art[0 as usize]) as u64))
+    if d_gelesen != 0 && dualkern.gpt_pruefen() {
+        var ai: u64 = 0
+        while ai < dualkern.anz() {
+            if dualkern.p_fve(ai) {
+                say(msg.get(ptr((&k_a_bl[0 as usize]) as u64)))
+            } else {
+                say(art_text(dualkern.p_typ(ai)))
+            }
+            say(ptr((&m_view_semi[0 as usize]) as u64))
+            ai = ai + 1
+        }
+    }
+    ulib.nl()
     say(ptr((&m_view_esp[0 as usize]) as u64))
     say((&espzeile[0 as usize]) as u64)
     ulib.nl()
@@ -921,6 +949,12 @@ fn ansicht_neu() {
 
 // Der Name einer Art, aus dem Katalog.
 fn art_text(t: u64) -> u64 {
+    if t == dualkern.T_MSR {
+        return msg.get(ptr((&k_a_msr[0 as usize]) as u64))
+    }
+    if t == dualkern.T_RECOVERY {
+        return msg.get(ptr((&k_a_rec[0 as usize]) as u64))
+    }
     if t == dualkern.T_ESP {
         return msg.get(ptr((&k_a_esp[0 as usize]) as u64))
     }
@@ -960,7 +994,11 @@ fn ptabelle_bauen() {
         b_c(105) // 'i'
         b_c(66) // 'B'
         b_c(9)
-        b_s(art_text(dualkern.p_typ(i)))
+        if dualkern.p_fve(i) {
+            b_s(msg.get(ptr((&k_a_bl[0 as usize]) as u64)))
+        } else {
+            b_s(art_text(dualkern.p_typ(i)))
+        }
         b_c(9)
         // Der Name aus der Tafel, Zeichen fuer Zeichen.
         var k: u64 = 0
@@ -1000,6 +1038,26 @@ fn ptabelle_bauen() {
 
 // Die beiden Zeilen unter der Partitionsansicht: was mit dem freien
 // Platz passiert, und welche EFI-Partition mitbenutzt wird.
+fn b_sizes() {
+    b_c(32)
+    b_s(msg.get(ptr((&k_d_ffund[0 as usize]) as u64)))
+    b_c(32)
+    b_n(d_gap_max / 2048)
+    b_c(32)
+    b_c(77)
+    b_c(105)
+    b_c(66)
+    b_c(44)
+    b_c(32)
+    b_s(msg.get(ptr((&k_d_fnoet[0 as usize]) as u64)))
+    b_c(32)
+    b_n(dualkern.MIND_WURZEL / 2048)
+    b_c(32)
+    b_c(77)
+    b_c(105)
+    b_c(66)
+}
+
 fn dzeilen_bauen() {
     b_start((&freizeile[0 as usize]) as u64, 200)
     if d_gelesen == 0 {
@@ -1036,11 +1094,11 @@ fn dzeilen_bauen() {
         b_ende()
     } else if d_frei_bis <= d_frei_von && d_shrink == shrinkflow.S_REFUSED {
         b_s(msg.get(ptr((&k_d_fkein[0 as usize]) as u64)))
-        b_c(32)
-        b_s(msg.get(shrinkflow.refusal_key(shrinkflow.refusal())))
+        b_sizes()
         b_ende()
     } else if d_frei_bis <= d_frei_von {
         b_s(msg.get(ptr((&k_d_fkein[0 as usize]) as u64)))
+        b_sizes()
         b_c(32)
         b_s(msg.get(ptr((&k_d_fmehr[0 as usize]) as u64)))
         b_ende()
@@ -1054,6 +1112,13 @@ fn dzeilen_bauen() {
         b_c(66)
         b_ende()
     }
+
+    b_start((&statzeile[0 as usize]) as u64, 200)
+    if d_gelesen != 0 && dualkern.gpt_pruefen() && d_frei_bis <= d_frei_von
+        && d_shrink_fail == 0 && d_shrink == shrinkflow.S_REFUSED {
+        b_s(msg.get(shrinkflow.refusal_key(shrinkflow.refusal())))
+    }
+    b_ende()
 
     b_start((&espzeile[0 as usize]) as u64, 200)
     if d_gelesen == 0 || !dualkern.gpt_pruefen() {
@@ -2064,9 +2129,10 @@ fn build() {
         K_TAB1, welcher_weg == 1)
     // Die Partitionsansicht gehoert dem zweiten Reiter.
     if welcher_weg == 1 {
-        let _p: usize = fuiscene.table_blob(col, K_PTAB, BW - 16, 100, PCOL,
+        let _p: usize = fuiscene.table_blob(col, K_PTAB, BW - 16, 152, PCOL,
             (&pblob[0 as usize]) as u64)
         let _f: usize = fuiscene.label(col, (&freizeile[0 as usize]) as u64)
+        let _st: usize = fuiscene.label(col, (&statzeile[0 as usize]) as u64)
         let _e: usize = fuiscene.label(col, (&espzeile[0 as usize]) as u64)
     }
     let _s: usize = fuiscene.label(col, (&zeile[0 as usize]) as u64)

@@ -73,6 +73,33 @@ printf '        rows=%s\n        free=%s\n        esp=%s\n' "$rows" "$free" "$es
 case "$free" in "Freier Platz:"*) ok "gap disk: free space shown" ;; *) bad "gap disk free line: $free" ;; esac
 case "$esp" in "Vorhandene EFI-Partition wird mitbenutzt:"*) ok "gap disk: ESP line" ;; *) bad "gap disk ESP line: $esp" ;; esac
 
+echo "== 2b. HP layout (ESP named Basic data partition, MSR, BitLocker C:, recovery) =="
+mkdir -p "$OUT/h0" "$OUT/h1"
+bash tools/gptview/mkhp.sh "$OUT/h0" 0 && ok "HP-like disk without free gap" || { bad "disk h0"; echo "GPTVIEW: $pass passed, $fail failed"; exit 1; }
+bash tools/gptview/mkhp.sh "$OUT/h1" 64 && ok "HP-like disk with 64 MiB free behind" || { bad "disk h1"; echo "GPTVIEW: $pass passed, $fail failed"; exit 1; }
+hsum=$(sha256sum < "$OUT/h0/disk.img" | cut -d' ' -f1)
+view "$BAU" "$OUT/h0/disk.img" "$OUT/sh0.txt"
+rows=$(field "$OUT/sh0.txt" rows); free=$(field "$OUT/sh0.txt" free); esp=$(field "$OUT/sh0.txt" esp)
+stat=$(field "$OUT/sh0.txt" stat); beside=$(field "$OUT/sh0.txt" beside); art=$(field "$OUT/sh0.txt" art)
+printf '        rows=%s\n        art=%s\n        free=%s\n        stat=%s\n        esp=%s\n        beside=%s\n' "$rows" "$art" "$free" "$stat" "$esp" "$beside"
+[ "$rows" = 4 ] && ok "HP: all 4 partitions listed" || bad "HP rows=$rows"
+[ "$art" = "EFI-System;MS-reserviert;BitLocker;Wiederherstellung;" ] && ok "HP: type names EFI / MSR / BitLocker / Recovery" || bad "HP art=$art"
+case "$stat" in "BitLocker ist aktiv: In Windows (Datentr"*"C: verkleinern"*) ok "HP: BitLocker line names the Disk Management way" ;; *) bad "HP hint line: $stat" ;; esac
+case "$free" in "Kein ausreichend freier Platz auf dieser Platte. Frei gefunden: "[01]" MiB, nötig mindestens: 32 MiB") ok "HP: found/needed sizes shown" ;; *) bad "HP free line: $free" ;; esac
+case "$esp" in "Vorhandene EFI-Partition wird mitbenutzt:"*) ok "HP: ESP is found despite refused shrink" ;; *) bad "HP ESP line: $esp" ;; esac
+case "$free$esp" in *"Keine EFI-Systempartition"*) bad "HP: false 'no ESP' text" ;; *) ok "HP: no false 'no ESP' text" ;; esac
+[ "$beside" = 0 ] && ok "HP: beside stays off without a gap" || bad "HP beside=$beside"
+[ "$(sha256sum < "$OUT/h0/disk.img" | cut -d' ' -f1)" = "$hsum" ] && ok "HP disk byte-identical after viewing" || bad "HP disk changed"
+view "$BAU" "$OUT/h1/disk.img" "$OUT/sh1.txt"
+rows=$(field "$OUT/sh1.txt" rows); free=$(field "$OUT/sh1.txt" free); esp=$(field "$OUT/sh1.txt" esp)
+stat=$(field "$OUT/sh1.txt" stat); beside=$(field "$OUT/sh1.txt" beside)
+printf '        rows=%s\n        free=%s\n        stat=%s\n        esp=%s\n        beside=%s\n' "$rows" "$free" "$stat" "$esp" "$beside"
+[ "$rows" = 4 ] && ok "HP gap: 4 rows" || bad "HP gap rows=$rows"
+case "$free" in "Freier Platz: 6"[0-9]" MiB"*) ok "HP gap: free space shown" ;; *) bad "HP gap free line: $free" ;; esac
+[ -z "$stat" ] && ok "HP gap: no shortage line" || bad "HP gap stat=$stat"
+case "$esp" in "Vorhandene EFI-Partition wird mitbenutzt:"*) ok "HP gap: existing ESP shared" ;; *) bad "HP gap ESP line: $esp" ;; esac
+[ "$beside" = 1 ] && ok "HP gap: beside enabled" || bad "HP gap beside=$beside"
+
 echo "== 3. counter-proof: old gpt_pruefen =="
 mkdir -p "$OUT/old"
 tar --exclude=.git -cf - . | tar -xf - -C "$OUT/old"
