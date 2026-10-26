@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import crypto.blake2s
+import crypto.chacha
+
+export { Drbg, drbg_new, drbg_reseed, drbg_generate, DRBG_KEY, DRBG_BLOCK }
+
+const DRBG_KEY: usize = 32
+const DRBG_BLOCK: usize = 64
+const DRBG_NONCE: usize = 12
+const DRBG_FIRST_COUNTER: u32 = 1
+
+struct Drbg {
+    key: [u8; 32],
+    generation: u64,
+    since_reseed: u64
+}
+
+fn drbg_new() -> Drbg {
+    return Drbg { key: [0; 32], generation: 0, since_reseed: 0 }
+}
+
+fn drbg_nonce(d: *mut Drbg, nonce: u64) {
+    var i: usize = 0
+    while i < DRBG_NONCE {
+        *((nonce + i as u64) as *mut u8) = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        *((nonce + i as u64) as *mut u8) = (((*d).generation >> ((i as u64) * 8)) & 255) as u8
+        i = i + 1
+    }
+}
+
+fn drbg_reseed(d: *mut Drbg, seed: u64) {
+    var s: blake2s.Blake2s = blake2s.blake2s_new()
+    var next: [u8; 32] = [0; 32]
+    blake2s.blake2s_update(&s, (&(*d).key[0]) as u64, DRBG_KEY)
+    blake2s.blake2s_update(&s, seed, DRBG_KEY)
+    blake2s.blake2s_final(&s, (&next[0]) as u64)
+    var i: usize = 0
+    while i < DRBG_KEY {
+        (*d).key[i] = next[i]
+        next[i] = 0
+        i = i + 1
+    }
+    (*d).generation = (*d).generation + 1
+    (*d).since_reseed = 0
+}
+
+fn drbg_generate(d: *mut Drbg, out: u64, n: usize) {
+    var nonce: [u8; 12] = [0; 12]
+    var first: [u8; 64] = [0; 64]
+    var block: [u8; 64] = [0; 64]
+    var request_key: [u8; 32] = [0; 32]
+    drbg_nonce(d, (&nonce[0]) as u64)
+    chacha.chacha20_block((&(*d).key[0]) as u64, (&nonce[0]) as u64, 0, (&first[0]) as u64)
+    var i: usize = 0
+    while i < DRBG_KEY {
+        (*d).key[i] = first[i]
+        request_key[i] = first[DRBG_KEY + i]
+        i = i + 1
+    }
+    var done: usize = 0
+    var counter: u32 = DRBG_FIRST_COUNTER
+    while done < n {
+        chacha.chacha20_block((&request_key[0]) as u64, (&nonce[0]) as u64, counter, (&block[0]) as u64)
+        var take: usize = n - done
+        if take > DRBG_BLOCK {
+            take = DRBG_BLOCK
+        }
+        i = 0
+        while i < take {
+            *((out + (done + i) as u64) as *mut u8) = block[i]
+            i = i + 1
+        }
+        done = done + take
+        counter = counter + 1
+    }
+    i = 0
+    while i < DRBG_BLOCK {
+        first[i] = 0
+        block[i] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < DRBG_KEY {
+        request_key[i] = 0
+        i = i + 1
+    }
+    (*d).since_reseed = (*d).since_reseed + n as u64
+}

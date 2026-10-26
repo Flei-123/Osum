@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import crypto.chacha
+import entropy.health
+import entropy.pool
+import entropy.drbg
+import entropy.seedfile
+
+const OUT_MAX: usize = 70000
+
+static mut outbuf: [u8; 70000] = [0; 70000]
+
+fn le(p: u64, at: usize, n: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < n {
+        v = v | (rt.ld8(p, at + i) as u64) << ((i as u64) * 8)
+        i = i + 1
+    }
+    return v
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) {
+        return 1
+    }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    let out: u64 = (&outbuf[0]) as u64
+    var pl: pool.Pool = pool.pool_new()
+    var dg: drbg.Drbg = drbg.drbg_new()
+    var hl: health.Health = health.health_new()
+    var at: usize = 0
+    while at < n {
+        let op: u64 = rt.ld8(p, at) as u64
+        at = at + 1
+        if op == 67 {
+            chacha.chacha20_block(p + at as u64, p + (at + 32) as u64, le(p, at + 44, 4) as u32, out)
+            at = at + 48
+            io.print_bytes(out, 64)
+        } else if op == 77 {
+            let len: usize = le(p, at, 2) as usize
+            pool.pool_mix(&pl, p + (at + 2) as u64, len)
+            at = at + 2 + len
+        } else if op == 88 {
+            pool.pool_extract(&pl, out)
+            io.print_bytes(out, 32)
+        } else if op == 82 {
+            drbg.drbg_reseed(&dg, p + at as u64)
+            at = at + 32
+        } else if op == 71 {
+            let len: usize = le(p, at, 2) as usize
+            at = at + 2
+            drbg.drbg_generate(&dg, out, len)
+            io.print_bytes(out, len)
+        } else if op == 72 {
+            var ok: u8 = 0
+            if health.health_feed(&hl, rt.ld8(p, at) as u64) {
+                ok = 1
+            }
+            rt.st8(out, 0, ok)
+            at = at + 1
+            io.print_bytes(out, 1)
+        } else if op == 90 {
+            var i: usize = 0
+            while i < 8 {
+                rt.st8(out, i, ((hl.failures >> ((i as u64) * 8)) & 255) as u8)
+                i = i + 1
+            }
+            io.print_bytes(out, 8)
+        } else if op == 69 {
+            let ok: bool = seedfile.seedfile_encode(le(p, at, 8), p + (at + 8) as u64,
+                p + (at + 72) as u64, out)
+            at = at + 104
+            if ok {
+                io.print_bytes(out, seedfile.SEEDFILE_SIZE)
+            }
+        } else if op == 68 {
+            var ctr: u64 = 0
+            let ok: bool = seedfile.seedfile_decode(p + at as u64, seedfile.SEEDFILE_SIZE,
+                p + (at + 112) as u64, out + 1, (&ctr) as u64)
+            at = at + 144
+            var i: usize = 0
+            while i < 8 {
+                rt.st8(out, 65 + i, ((ctr >> ((i as u64) * 8)) & 255) as u8)
+                i = i + 1
+            }
+            var f: u8 = 0
+            if ok {
+                f = 1
+            }
+            rt.st8(out, 0, f)
+            io.print_bytes(out, 73)
+        } else {
+            return 2
+        }
+    }
+    rt.buf_free(&inp)
+    return 0
+}
