@@ -1,0 +1,699 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/bus/slots.fi -- the transfer slots of the system bus: clipboard history ring, primary selection, drag payload.
+// One item format, one set of functions, a typed lazy handover and big payloads in adopted segments.
+profile kernel
+
+import lib.kstate
+import sched.sched
+import bus.bus
+
+export {
+    SEL_CLIP, SEL_PRIMARY, SEL_DRAG, SEL_COUNT,
+    init, forget_task, set, offer, fill, get, clear, promote,
+    count, types_of, have_of, length_of, owner_of, seq_of, flags_of, wanted_for,
+    mime_id, mime_name, put_kernel, get_kernel, KGET_AGAIN,
+    drag_active, drag_types, drag_get, drag_clear
+}
+
+const SEL_CLIP: u64 = 0
+const SEL_PRIMARY: u64 = 1
+const SEL_DRAG: u64 = 2
+const SEL_COUNT: u64 = 3
+
+const KGET_AGAIN: u64 = 0xFFFFFFFFFFFFFFFF
+const MIME_CUSTOM_BASE: u64 = 32
+const MIME_NAME_MAX: u64 = 31
+const MIME_NAME_MIN: u64 = 3
+
+fn lowest_bit(mask: u64) -> u64 {
+    var i: u64 = 0
+    while i < 64 {
+        if ((mask >> i) & 1) != 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return 64
+}
+
+fn slot_base(state: u64, sel: u64) -> u64 {
+    if sel == SEL_PRIMARY {
+        return state + kstate.BUS_OFF + bus.PRIMARY
+    }
+    return state + kstate.BUS_OFF + bus.DRAG
+}
+
+fn ring_pos(state: u64, back: u64) -> u64 {
+    let len: u64 = bus.b(state, bus.S_HISTLEN)
+    if back >= len {
+        return bus.HIST_MAX
+    }
+    let nxt: u64 = bus.b(state, bus.S_HISTNEXT)
+    return (nxt + bus.HIST_MAX - 1 - back) % bus.HIST_MAX
+}
+
+fn item_of(state: u64, sel: u64, back: u64) -> u64 {
+    if sel == SEL_CLIP {
+        let i: u64 = ring_pos(state, back)
+        if i >= bus.HIST_MAX {
+            return 0
+        }
+        return bus.hist_addr(state, i)
+    }
+    if back != 0 {
+        return 0
+    }
+    let a: u64 = slot_base(state, sel)
+    if bus.item_get(a, bus.I_SEQ) == 0 {
+        return 0
+    }
+    return a
+}
+
+fn next_slot(state: u64, sel: u64) -> u64 {
+    if sel == SEL_CLIP {
+        return bus.hist_addr(state, bus.b(state, bus.S_HISTNEXT))
+    }
+    return slot_base(state, sel)
+}
+
+fn commit(state: u64, sel: u64) {
+    if sel != SEL_CLIP {
+        return
+    }
+    let nxt: u64 = bus.b(state, bus.S_HISTNEXT)
+    bus.sb(state, bus.S_HISTNEXT, (nxt + 1) % bus.HIST_MAX)
+    if bus.b(state, bus.S_HISTLEN) < bus.HIST_MAX {
+        bus.sb(state, bus.S_HISTLEN, bus.b(state, bus.S_HISTLEN) + 1)
+    }
+}
+
+fn old_seg(a: u64) -> u64 {
+    if bus.item_get(a, bus.I_SEQ) != 0 && (bus.item_get(a, bus.I_FLAGS) & bus.F_ADOPT) != 0 {
+        return bus.item_get(a, bus.I_SEG)
+    }
+    return 0
+}
+
+fn release(state: u64, seg1: u64) {
+    if seg1 != 0 {
+        bus.seg_release(state, seg1 - 1)
+    }
+}
+
+fn write_item(a: u64, seq: u64, pid: u64, uid: u64, types: u64, have: u64, len: u64, seg1: u64, flags: u64,
+    data: u64) {
+    bus.item_set(a, bus.I_SEQ, seq)
+    bus.item_set(a, bus.I_PID, pid)
+    bus.item_set(a, bus.I_UID, uid)
+    bus.item_set(a, bus.I_TYPES, types)
+    bus.item_set(a, bus.I_LEN, len)
+    bus.item_set(a, bus.I_SEG, seg1)
+    bus.item_set(a, bus.I_FLAGS, flags)
+    bus.item_set(a, bus.I_PRIO, have)
+    var k: u64 = 0
+    while k < bus.INLINE_MAX {
+        var c: u64 = 0
+        if k < len && data != 0 {
+            c = kstate.get8(data + k)
+        }
+        kstate.set8(a + bus.I_DATA + k, c as u8)
+        k = k + 1
+    }
+}
+
+fn copy_item(dst: u64, src: u64) {
+    var k: u64 = 0
+    while k < bus.HIST_BYTES {
+        kstate.set(dst, k, kstate.get(src, k))
+        k = k + 8
+    }
+}
+
+fn ring_remove(state: u64, back: u64) {
+    let len: u64 = bus.b(state, bus.S_HISTLEN)
+    if back >= len {
+        return
+    }
+    var k: u64 = back
+    while k + 1 < len {
+        copy_item(item_of(state, SEL_CLIP, k), item_of(state, SEL_CLIP, k + 1))
+        k = k + 1
+    }
+    bus.item_set(item_of(state, SEL_CLIP, len - 1), bus.I_SEQ, 0)
+    bus.sb(state, bus.S_HISTLEN, len - 1)
+}
+
+fn settle_item(a: u64) {
+    bus.item_set(a, bus.I_TYPES, bus.item_get(a, bus.I_PRIO))
+    bus.item_set(a, bus.I_FLAGS, bus.item_get(a, bus.I_FLAGS) & ~(bus.F_LAZY | bus.F_WANTED | bus.WANT_MASK))
+}
+
+fn settle_ring(state: u64, pid: u64, all: bool) {
+    var k: u64 = 0
+    while k < bus.b(state, bus.S_HISTLEN) {
+        let a: u64 = item_of(state, SEL_CLIP, k)
+        if (bus.item_get(a, bus.I_FLAGS) & bus.F_LAZY) != 0 && (all || bus.item_get(a, bus.I_PID) == pid) {
+            if bus.item_get(a, bus.I_PRIO) != 0 {
+                settle_item(a)
+                k = k + 1
+            } else {
+                ring_remove(state, k)
+            }
+        } else {
+            k = k + 1
+        }
+    }
+}
+
+fn init(state: u64) {
+    var i: u64 = 0
+    while i < bus.HIST_MAX {
+        bus.item_set(bus.hist_addr(state, i), bus.I_SEQ, 0)
+        i = i + 1
+    }
+    bus.item_set(slot_base(state, SEL_PRIMARY), bus.I_SEQ, 0)
+    bus.item_set(slot_base(state, SEL_DRAG), bus.I_SEQ, 0)
+    bus.sb(state, bus.S_HISTLEN, 0)
+    bus.sb(state, bus.S_HISTNEXT, 0)
+    i = 0
+    while i < bus.MIME_MAX {
+        kstate.set8(state + kstate.BUS_OFF + bus.MIMES + i * bus.MIME_BYTES, 0)
+        i = i + 1
+    }
+}
+
+fn check_blob(state: u64, task: u64, len: u64, seg1: u64) -> u64 {
+    if seg1 == 0 {
+        if len > bus.INLINE_MAX {
+            return bus.err(bus.E_INVAL)
+        }
+        return bus.E_OK
+    }
+    let id: u64 = seg1 - 1
+    if id >= bus.SEG_MAX || len == 0 || len > bus.SEG_PAGES_MAX * 4096 {
+        return bus.err(bus.E_INVAL)
+    }
+    if bus.seg_pages(state, id) * 4096 < len {
+        return bus.err(bus.E_INVAL)
+    }
+    return bus.seg_adopt(state, task, id)
+}
+
+fn is_error(r: u64) -> bool {
+    return r != bus.E_OK
+}
+
+fn blob_flags(seg1: u64) -> u64 {
+    if seg1 != 0 {
+        return bus.F_ADOPT
+    }
+    return 0
+}
+
+fn set(state: u64, task: u64, sel: u64, types: u64, len: u64, seg1: u64, data: u64) -> u64 {
+    if sel >= SEL_COUNT || types == 0 || (types & ~bus.T_ANY) != 0 {
+        return bus.err(bus.E_INVAL)
+    }
+    let ok: u64 = check_blob(state, task, len, seg1)
+    if is_error(ok) {
+        return ok
+    }
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    let uid: u64 = sched.tget(state, task, sched.T_UID)
+    bus.take(state)
+    if sel == SEL_CLIP {
+        settle_ring(state, 0, true)
+    }
+    let a: u64 = next_slot(state, sel)
+    let old: u64 = old_seg(a)
+    write_item(a, bus.seq_next(state), pid, uid, types, types, len, seg1, blob_flags(seg1), data)
+    commit(state, sel)
+    if sel == SEL_CLIP {
+        bus.bump(state, bus.S_CLIPSETS)
+    } else if sel == SEL_PRIMARY {
+        bus.bump(state, bus.S_PRIMSETS)
+    } else {
+        bus.bump(state, bus.S_DRAGS)
+    }
+    bus.give(state)
+    release(state, old)
+    return bus.E_OK
+}
+
+fn offer(state: u64, task: u64, sel: u64, types: u64) -> u64 {
+    if sel >= SEL_COUNT || types == 0 || (types & ~bus.T_ANY) != 0 {
+        return bus.err(bus.E_INVAL)
+    }
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    let uid: u64 = sched.tget(state, task, sched.T_UID)
+    bus.take(state)
+    if sel == SEL_CLIP {
+        settle_ring(state, 0, true)
+    }
+    let a: u64 = next_slot(state, sel)
+    let old: u64 = old_seg(a)
+    write_item(a, bus.seq_next(state), pid, uid, types, 0, 0, 0, bus.F_LAZY, 0)
+    commit(state, sel)
+    bus.bump(state, bus.S_OFFERS)
+    bus.give(state)
+    release(state, old)
+    return bus.E_OK
+}
+
+fn fill(state: u64, task: u64, sel: u64, typeplus: u64, len: u64, seg1: u64, data: u64) -> u64 {
+    if sel >= SEL_COUNT {
+        return bus.err(bus.E_INVAL)
+    }
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    bus.take(state)
+    let a: u64 = item_of(state, sel, 0)
+    if a == 0 {
+        bus.give(state)
+        return bus.err(bus.E_EMPTY)
+    }
+    let fl: u64 = bus.item_get(a, bus.I_FLAGS)
+    if (fl & bus.F_LAZY) == 0 {
+        bus.give(state)
+        return bus.err(bus.E_INVAL)
+    }
+    if bus.item_get(a, bus.I_PID) != pid {
+        bus.bump(state, bus.S_DENIED)
+        bus.give(state)
+        return bus.err(bus.E_DENIED)
+    }
+    var t: u64 = typeplus
+    if t == 0 {
+        t = (fl & bus.WANT_MASK) >> bus.WANT_SHIFT
+    }
+    if t == 0 {
+        t = lowest_bit(bus.item_get(a, bus.I_TYPES)) + 1
+    }
+    if t > 64 || ((bus.item_get(a, bus.I_TYPES) >> (t - 1)) & 1) == 0 {
+        bus.give(state)
+        return bus.err(bus.E_NOENT)
+    }
+    bus.give(state)
+    let ok: u64 = check_blob(state, task, len, seg1)
+    if is_error(ok) {
+        return ok
+    }
+    bus.take(state)
+    let b: u64 = item_of(state, sel, 0)
+    if b != a || bus.item_get(b, bus.I_PID) != pid || (bus.item_get(b, bus.I_FLAGS) & bus.F_LAZY) == 0 {
+        bus.give(state)
+        release(state, seg1)
+        return bus.err(bus.E_AGAIN)
+    }
+    let old: u64 = old_seg(a)
+    bus.item_set(a, bus.I_LEN, len)
+    bus.item_set(a, bus.I_SEG, seg1)
+    bus.item_set(a, bus.I_PRIO, 1 << (t - 1))
+    bus.item_set(a, bus.I_FLAGS, (bus.item_get(a, bus.I_FLAGS) & ~(bus.F_WANTED | bus.WANT_MASK | bus.F_ADOPT))
+        | blob_flags(seg1))
+    var k: u64 = 0
+    while k < bus.INLINE_MAX {
+        var c: u64 = 0
+        if k < len && data != 0 {
+            c = kstate.get8(data + k)
+        }
+        kstate.set8(a + bus.I_DATA + k, c as u8)
+        k = k + 1
+    }
+    bus.bump(state, bus.S_FILLS)
+    bus.give(state)
+    release(state, old)
+    return bus.E_OK
+}
+
+fn get(state: u64, sel: u64, back: u64, wantplus: u64, out: u64, max: u64, meta: u64) -> u64 {
+    if sel >= SEL_COUNT || wantplus > 64 {
+        return bus.err(bus.E_INVAL)
+    }
+    bus.take(state)
+    let a: u64 = item_of(state, sel, back)
+    if a == 0 {
+        bus.give(state)
+        return bus.err(bus.E_EMPTY)
+    }
+    let types: u64 = bus.item_get(a, bus.I_TYPES)
+    var t: u64 = wantplus
+    if t == 0 {
+        t = lowest_bit(types) + 1
+    }
+    if t > 64 || ((types >> (t - 1)) & 1) == 0 {
+        bus.give(state)
+        return bus.err(bus.E_NOENT)
+    }
+    let bit: u64 = 1 << (t - 1)
+    if (bus.item_get(a, bus.I_PRIO) & bit) == 0 {
+        let fl: u64 = bus.item_get(a, bus.I_FLAGS)
+        if (fl & bus.F_LAZY) == 0 {
+            bus.give(state)
+            return bus.err(bus.E_NOENT)
+        }
+        bus.item_set(a, bus.I_FLAGS, (fl & ~bus.WANT_MASK) | bus.F_WANTED | (t << bus.WANT_SHIFT))
+        bus.give(state)
+        return bus.err(bus.E_AGAIN)
+    }
+    let len: u64 = bus.item_get(a, bus.I_LEN)
+    if meta != 0 {
+        kstate.set(meta, 0, types)
+        kstate.set(meta, 8, bus.item_get(a, bus.I_PID))
+        kstate.set(meta, 16, bus.item_get(a, bus.I_UID))
+        kstate.set(meta, 24, bus.item_get(a, bus.I_SEG))
+        kstate.set(meta, 32, len)
+        kstate.set(meta, 40, bus.item_get(a, bus.I_SEQ))
+    }
+    var n: u64 = len
+    if n > max {
+        n = max
+    }
+    if n > bus.INLINE_MAX {
+        n = bus.INLINE_MAX
+    }
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(out + k, kstate.get8(a + bus.I_DATA + k) as u8)
+        k = k + 1
+    }
+    bus.bump(state, bus.S_CLIPGETS)
+    bus.give(state)
+    return n
+}
+
+fn clear(state: u64, sel: u64) -> u64 {
+    if sel >= SEL_COUNT {
+        return bus.err(bus.E_INVAL)
+    }
+    if sel == SEL_CLIP {
+        bus.take(state)
+        let h: u64 = item_of(state, SEL_CLIP, 0)
+        var gone: u64 = 0
+        if h != 0 {
+            gone = old_seg(h)
+            ring_remove(state, 0)
+        }
+        bus.give(state)
+        release(state, gone)
+        return bus.E_OK
+    }
+    bus.take(state)
+    let a: u64 = item_of(state, sel, 0)
+    var old: u64 = 0
+    if a != 0 {
+        old = old_seg(a)
+        bus.item_set(a, bus.I_SEQ, 0)
+    }
+    bus.give(state)
+    release(state, old)
+    return bus.E_OK
+}
+
+fn promote(state: u64, back: u64) -> u64 {
+    var tmp: [u8; 256] = [0 as u8; 256]
+    let tp: u64 = (&tmp[0 as usize]) as u64
+    bus.take(state)
+    let a: u64 = item_of(state, SEL_CLIP, back)
+    if a == 0 {
+        bus.give(state)
+        return bus.err(bus.E_EMPTY)
+    }
+    if bus.item_get(a, bus.I_PRIO) == 0 {
+        bus.give(state)
+        return bus.err(bus.E_INVAL)
+    }
+    if back == 0 {
+        bus.give(state)
+        return bus.E_OK
+    }
+    copy_item(tp, a)
+    ring_remove(state, back)
+    let dst: u64 = next_slot(state, SEL_CLIP)
+    copy_item(dst, tp)
+    bus.item_set(dst, bus.I_SEQ, bus.seq_next(state))
+    commit(state, SEL_CLIP)
+    bus.give(state)
+    return bus.E_OK
+}
+
+fn field_of(state: u64, sel: u64, back: u64, f: u64) -> u64 {
+    if sel >= SEL_COUNT {
+        return 0
+    }
+    bus.take(state)
+    let a: u64 = item_of(state, sel, back)
+    var v: u64 = 0
+    if a != 0 {
+        v = bus.item_get(a, f)
+    }
+    bus.give(state)
+    return v
+}
+
+fn count(state: u64, sel: u64) -> u64 {
+    if sel == SEL_CLIP {
+        return bus.b(state, bus.S_HISTLEN)
+    }
+    if sel >= SEL_COUNT {
+        return 0
+    }
+    if bus.item_get(slot_base(state, sel), bus.I_SEQ) == 0 {
+        return 0
+    }
+    return 1
+}
+
+fn types_of(state: u64, sel: u64, back: u64) -> u64 {
+    return field_of(state, sel, back, bus.I_TYPES)
+}
+
+fn have_of(state: u64, sel: u64, back: u64) -> u64 {
+    return field_of(state, sel, back, bus.I_PRIO)
+}
+
+fn length_of(state: u64, sel: u64, back: u64) -> u64 {
+    return field_of(state, sel, back, bus.I_LEN)
+}
+
+fn owner_of(state: u64, sel: u64, back: u64) -> u64 {
+    return field_of(state, sel, back, bus.I_PID)
+}
+
+fn seq_of(state: u64, sel: u64, back: u64) -> u64 {
+    return field_of(state, sel, back, bus.I_SEQ)
+}
+
+fn flags_of(state: u64, sel: u64, back: u64) -> u64 {
+    return field_of(state, sel, back, bus.I_FLAGS)
+}
+
+fn wanted_for(state: u64, task: u64, any: bool) -> u64 {
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    var sel: u64 = 0
+    var found: u64 = 0
+    bus.take(state)
+    while sel < SEL_COUNT && found == 0 {
+        let a: u64 = item_of(state, sel, 0)
+        if a != 0 && bus.item_get(a, bus.I_PID) == pid {
+            let fl: u64 = bus.item_get(a, bus.I_FLAGS)
+            if any {
+                if (fl & bus.F_LAZY) != 0 && bus.item_get(a, bus.I_PRIO) == 0 {
+                    found = ((sel + 1) << 8) | (lowest_bit(bus.item_get(a, bus.I_TYPES)) + 1)
+                }
+            } else if (fl & (bus.F_LAZY | bus.F_WANTED)) == (bus.F_LAZY | bus.F_WANTED) {
+                found = ((sel + 1) << 8) | ((fl & bus.WANT_MASK) >> bus.WANT_SHIFT)
+            }
+        }
+        sel = sel + 1
+    }
+    bus.give(state)
+    return found
+}
+
+fn forget_task(state: u64, pid: u64) {
+    bus.take(state)
+    settle_ring(state, pid, false)
+    bus.give(state)
+    var sel: u64 = SEL_PRIMARY
+    while sel < SEL_COUNT {
+        bus.take(state)
+        let a: u64 = item_of(state, sel, 0)
+        var old: u64 = 0
+        if a != 0 && bus.item_get(a, bus.I_PID) == pid {
+            if sel == SEL_DRAG || ((bus.item_get(a, bus.I_FLAGS) & bus.F_LAZY) != 0 && bus.item_get(a, bus.I_PRIO) == 0) {
+                old = old_seg(a)
+                bus.item_set(a, bus.I_SEQ, 0)
+            } else if (bus.item_get(a, bus.I_FLAGS) & bus.F_LAZY) != 0 {
+                settle_item(a)
+            }
+        }
+        bus.give(state)
+        release(state, old)
+        sel = sel + 1
+    }
+}
+
+fn mime_slot(state: u64, k: u64) -> u64 {
+    return state + kstate.BUS_OFF + bus.MIMES + k * bus.MIME_BYTES
+}
+
+fn mime_same(slot: u64, name: u64, n: u64) -> bool {
+    if kstate.get8(slot) != n {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(slot + 1 + i) != kstate.get8(name + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn mime_valid(name: u64, n: u64) -> bool {
+    if n < MIME_NAME_MIN || n > MIME_NAME_MAX {
+        return false
+    }
+    var slash: bool = false
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = kstate.get8(name + i)
+        if c <= 32 || c >= 127 {
+            return false
+        }
+        if c == 47 {
+            slash = true
+        }
+        i = i + 1
+    }
+    return slash
+}
+
+fn mime_id(state: u64, name: u64, n: u64) -> u64 {
+    if !mime_valid(name, n) {
+        return bus.err(bus.E_INVAL)
+    }
+    bus.take(state)
+    var free: u64 = bus.MIME_MAX
+    var k: u64 = 0
+    while k < bus.MIME_MAX {
+        let s: u64 = mime_slot(state, k)
+        if kstate.get8(s) == 0 {
+            if free == bus.MIME_MAX {
+                free = k
+            }
+        } else if mime_same(s, name, n) {
+            bus.give(state)
+            return MIME_CUSTOM_BASE + k
+        }
+        k = k + 1
+    }
+    if free == bus.MIME_MAX {
+        bus.give(state)
+        return bus.err(bus.E_FULL)
+    }
+    let s: u64 = mime_slot(state, free)
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(s + 1 + i, kstate.get8(name + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(s, n as u8)
+    bus.bump(state, bus.S_MIMES)
+    bus.give(state)
+    return MIME_CUSTOM_BASE + free
+}
+
+fn mime_name(state: u64, idx: u64, out: u64, max: u64) -> u64 {
+    if idx < MIME_CUSTOM_BASE || idx >= MIME_CUSTOM_BASE + bus.MIME_MAX {
+        return bus.err(bus.E_INVAL)
+    }
+    bus.take(state)
+    let s: u64 = mime_slot(state, idx - MIME_CUSTOM_BASE)
+    let n: u64 = kstate.get8(s)
+    if n == 0 {
+        bus.give(state)
+        return bus.err(bus.E_NOENT)
+    }
+    var m: u64 = n
+    if m > max {
+        m = max
+    }
+    var i: u64 = 0
+    while i < m {
+        kstate.set8(out + i, kstate.get8(s + 1 + i) as u8)
+        i = i + 1
+    }
+    bus.give(state)
+    return n
+}
+
+fn drag_active(state: u64) -> u64 {
+    return count(state, SEL_DRAG)
+}
+
+fn drag_types(state: u64) -> u64 {
+    return types_of(state, SEL_DRAG, 0)
+}
+
+fn drag_get(state: u64, out: u64, max: u64, meta: u64) -> u64 {
+    return get(state, SEL_DRAG, 0, 0, out, max, meta)
+}
+
+fn drag_clear(state: u64) -> u64 {
+    return clear(state, SEL_DRAG)
+}
+
+fn put_kernel(state: u64, task: u64, sel: u64, types: u64, p: u64, n: u64) -> u64 {
+    if n <= bus.INLINE_MAX {
+        return set(state, task, sel, types, n, 0, p)
+    }
+    let id: u64 = bus.seg_new(state, task, (n + 4095) / 4096)
+    if id >= bus.SEG_MAX {
+        return id
+    }
+    let base: u64 = bus.seg_frame(state, id, 0)
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(base + k, kstate.get8(p + k) as u8)
+        k = k + 1
+    }
+    let r: u64 = set(state, task, sel, types, n, id + 1, p)
+    if is_error(r) {
+        let _d: u64 = bus.seg_drop(state, task, id)
+    }
+    return r
+}
+
+fn get_kernel(state: u64, sel: u64, back: u64, wantplus: u64, out: u64, max: u64) -> u64 {
+    var meta: [u64; 6] = [0 as u64; 6]
+    let mp: u64 = (&meta[0]) as u64
+    let n: u64 = get(state, sel, back, wantplus, out, max, mp)
+    if n == (0 -% bus.E_AGAIN) {
+        return KGET_AGAIN
+    }
+    if n > 0x8000000000000000 {
+        return 0
+    }
+    let len: u64 = kstate.get(mp, 32)
+    let seg1: u64 = kstate.get(mp, 24)
+    if seg1 == 0 || len <= n {
+        return n
+    }
+    let base: u64 = bus.seg_frame(state, seg1 - 1, 0)
+    if base == 0 {
+        return n
+    }
+    var m: u64 = len
+    if m > max {
+        m = max
+    }
+    var k: u64 = 0
+    while k < m {
+        kstate.set8(out + k, kstate.get8(base + k) as u8)
+        k = k + 1
+    }
+    return m
+}

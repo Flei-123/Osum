@@ -84,6 +84,7 @@ import net.ebpfhook
 import ipc.share
 import net.wg
 import bus.bus
+import bus.slots
 import bus.pcidbg
 import drv.net.iwl_dbg
 import net.wlan_reload
@@ -2236,6 +2237,10 @@ const BUS_STAT: u64 = 22 // (welcher) -> Zaehler
 // BUS_NOTIINFO und schrieb damit direkt auf einen Nutzerzeiger --
 // gemessen kam dort nichts an, und die Karte ging nie auf.
 const BUS_NOTIPEEK: u64 = 23 // (zurueck, puffer, max) -> n
+const BUS_MIME: u64 = 24 // (name, n) -> bit index
+const BUS_MIMENAME: u64 = 25 // (bit index, puffer, max) -> n
+const BUS_SEGIO: u64 = 26 // (segment | write << 8, offset, puffer, n) -> n
+const BUS_PROMOTE: u64 = 27 // (zurueck) -> 0
 
 const SYS_OSUM_WGSET: u64 = 1951 // (feld, zeiger, anzahl) -> 0 oder -E
 
@@ -17320,10 +17325,25 @@ fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
     }
     // W-APPRIGHTS AR-2: clipboard write / read and notification post need the grant for an app (label app:<name>);
     // the person's own tools and system bundles (no label) are not gated. Checked HERE, at the kernel door.
-    if op == BUS_CLIPSET && !policy.label_allows(origin.at(state, me), policy.P_CLIP_WRITE) {
+    var xsel: u64 = 0
+    if op == BUS_CLIPSET {
+        xsel = (a4 >> 8) & 0xFF
+    }
+    if op == BUS_CLIPGET || op == BUS_CLIPINFO {
+        xsel = (a1 >> 8) & 0xFF
+    }
+    if op == BUS_OFFER {
+        xsel = a2
+    }
+    if op == BUS_FILL {
+        xsel = (a4 >> 8) & 0xFF
+    }
+    if (op == BUS_CLIPSET || op == BUS_OFFER) && xsel != slots.SEL_DRAG
+        && !policy.label_allows(origin.at(state, me), policy.P_CLIP_WRITE) {
         return neg(errno.E_ACCES)
     }
-    if op == BUS_CLIPGET && !policy.label_allows(origin.at(state, me), policy.P_CLIP_READ) {
+    if op == BUS_CLIPGET && xsel != slots.SEL_DRAG
+        && !policy.label_allows(origin.at(state, me), policy.P_CLIP_READ) {
         return neg(errno.E_ACCES)
     }
     if op == BUS_NOTIPOST && !policy.label_allows(origin.at(state, me), policy.P_NOTIFY) {
@@ -17385,14 +17405,24 @@ fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
         if op == BUS_PUB {
             return bus.pub(state, me, a1, n, p)
         }
-        if op == BUS_CLIPSET {
-            return bus.clip_set(state, me, a1, n, a4, p)
+        var real: u64 = 0
+        if op == BUS_CLIPSET || op == BUS_DRAGSET {
+            real = a3
         }
         if op == BUS_FILL {
-            return bus.fill(state, me, n, a3, p)
+            real = a2
+        }
+        if real > 192 && (op == BUS_CLIPSET || op == BUS_DRAGSET) && (a4 & 0xFF) == 0 {
+            real = 192
+        }
+        if op == BUS_CLIPSET {
+            return slots.set(state, me, xsel, a1, real, a4 & 0xFF, p)
+        }
+        if op == BUS_FILL {
+            return slots.fill(state, me, xsel, a4 & 0xFF, real, a3, p)
         }
         if op == BUS_DRAGSET {
-            return bus.drag_set(state, me, a1, n, a4, p)
+            return slots.set(state, me, slots.SEL_DRAG, a1, real, a4 & 0xFF, p)
         }
         return bus.noti_post(state, me, a1, n, p)
     }
@@ -17474,10 +17504,10 @@ fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
             }
         }
         if op == BUS_CLIPGET {
-            got = bus.clip_get(state, me, a1, bp, max, mp)
+            got = slots.get(state, xsel, a1 & 0xFF, (a1 >> 16) & 0xFF, bp, max, mp)
         }
         if op == BUS_DRAGGET {
-            got = bus.drag_get(state, bp, max, mp)
+            got = slots.drag_get(state, bp, max, mp)
         }
         if op == BUS_NOTIGET {
             got = bus.noti_get(state, a1, bp, max)
@@ -17515,31 +17545,105 @@ fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
         return bus.sub(state, me, a1)
     }
     if op == BUS_OFFER {
-        return bus.offer(state, me, a1)
+        return slots.offer(state, me, xsel, a1)
     }
     if op == BUS_DRAGCLEAR {
-        return bus.drag_clear(state)
+        if a1 != 0 {
+            return slots.clear(state, a1 - 1)
+        }
+        return slots.drag_clear(state)
     }
     if op == BUS_CLIPINFO {
+        let ib: u64 = a1 & 0xFF
         if a2 == 0 {
-            return bus.clip_types(state, a1)
+            return slots.types_of(state, xsel, ib)
         }
         if a2 == 1 {
-            return bus.clip_len(state, a1)
+            return slots.length_of(state, xsel, ib)
         }
         if a2 == 2 {
-            return bus.clip_owner(state, a1)
+            return slots.owner_of(state, xsel, ib)
         }
         if a2 == 3 {
-            return bus.clip_count(state)
+            return slots.count(state, xsel)
         }
-        return bus.offer_state(state)
+        if a2 == 5 {
+            return slots.have_of(state, xsel, ib)
+        }
+        if a2 == 6 {
+            return slots.seq_of(state, xsel, ib)
+        }
+        if a2 == 7 {
+            return slots.wanted_for(state, me, false)
+        }
+        if a2 == 8 {
+            return slots.wanted_for(state, me, true)
+        }
+        return slots.flags_of(state, xsel, ib)
     }
     if op == BUS_DRAGINFO {
         if a1 == 0 {
-            return bus.drag_active(state)
+            return slots.drag_active(state)
         }
-        return bus.drag_types(state)
+        return slots.drag_types(state)
+    }
+    if op == BUS_PROMOTE {
+        return slots.promote(state, a1)
+    }
+    if op == BUS_MIME || op == BUS_MIMENAME {
+        var mn: [u8; 32] = [0 as u8; 32]
+        let mp: u64 = (&mn[0]) as u64
+        if op == BUS_MIME {
+            if a2 == 0 || a2 > 31 {
+                return neg(errno.E_INVAL)
+            }
+            if !copy_in(state, me, mp, a1, a2) {
+                return neg(errno.E_FAULT)
+            }
+            return slots.mime_id(state, mp, a2)
+        }
+        var want: u64 = a3
+        if want > 31 {
+            want = 31
+        }
+        let got: u64 = slots.mime_name(state, a1, mp, want)
+        if got > 0x8000000000000000 {
+            return got as i64 as u64
+        }
+        var shown: u64 = got
+        if shown > want {
+            shown = want
+        }
+        if shown > 0 && !copy_out(state, me, a2, mp, shown) {
+            return neg(errno.E_FAULT)
+        }
+        return got
+    }
+    if op == BUS_SEGIO {
+        let sid: u64 = a1 & 0xFF
+        let wr: bool = ((a1 >> 8) & 1) == 1
+        var done: u64 = 0
+        while done < a4 {
+            var chunk: u64 = a4 - done
+            if chunk > 4096 {
+                chunk = 4096
+            }
+            let span: u64 = bus.seg_span(state, me, sid, wr, a2 + done, chunk)
+            if span == 0 {
+                return neg(errno.E_INVAL)
+            }
+            if wr {
+                if !copy_in(state, me, span, a3 + done, chunk) {
+                    return neg(errno.E_FAULT)
+                }
+            } else {
+                if !copy_out(state, me, a3 + done, span, chunk) {
+                    return neg(errno.E_FAULT)
+                }
+            }
+            done = done + chunk
+        }
+        return done
     }
     if op == BUS_NOTIINFO {
         if a1 == 0 {

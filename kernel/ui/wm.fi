@@ -79,6 +79,7 @@ import ecke
 import drv.hid.ps2m
 import drv.hid.kbd // W-INPUTHANG: kbd.rescue (watchdog look at the keyboard byte)
 import drv.hid.ptrcfg // W-E: the debug.fps switch
+import bus.slots
 import bus.bus // W-DND: the drag slot (a drag runs while the slot holds a payload)
 import sched.time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
 import arch.arch
@@ -203,7 +204,7 @@ export {
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
     kachelbar,
     tt_is_bg, tt_want_spawn, tt_cancel, tt_src, tt_join, tt_free_done,
-    term_page, term_key, term_paste_done, tkicks_pub, term_copy_take, term_paste_take, tcur_toggles_pub, tcur_shown_pub, tcopies_pub, tpastes_pub, on_screen_resize, win_tabbed, tiled, tile_focus_state, tile_nodes_all, tile_leaves_all, tile_tree_tag,
+    term_page, term_key, term_paste_done, term_primary_take, term_paste_sel, tkicks_pub, term_copy_take, term_paste_take, tcur_toggles_pub, tcur_shown_pub, tcopies_pub, tpastes_pub, on_screen_resize, win_tabbed, tiled, tile_focus_state, tile_nodes_all, tile_leaves_all, tile_tree_tag,
     MAX_WIN, K_RAW, K_TERM, title_h, border, grip, max_w, max_h,
     title_clipped, title_missing,
     set_uiscale, uisc, messleiste,
@@ -15119,7 +15120,7 @@ fn hwheel_out(state: u64, x: u64, y: u64) {
 const MOUSE_PRESSED_OFF: u64 = 0x0B8
 
 // ============================================================ W-DND
-// DRAG AND DROP IN THE WINDOW SERVER. The payload lives on the bus (`bus.drag_*`: the source puts it there when a
+// DRAG AND DROP IN THE WINDOW SERVER. The payload lives on the bus (`slots.drag_*`: the source puts it there when a
 // drag starts, a target takes it on release). A drag RUNS while the left button is down and the slot is full. What the
 // server adds:
 //   - hover-raise: ~600 ms over a background window raises it (and gives it the focus), so one can drop there; the
@@ -15167,8 +15168,8 @@ fn dnd_hover(state: u64, i: u64, btn: u64) {
     dh_prev = left
     if left != 0 && was == 0 {
         // a new press: a payload nobody took is stale
-        if bus.drag_active(state) != 0 {
-            let _c: u64 = bus.drag_clear(state)
+        if slots.drag_active(state) != 0 {
+            let _c: u64 = slots.drag_clear(state)
         }
         dh_live = 0
         dh_win = 0
@@ -15188,8 +15189,8 @@ fn dnd_hover(state: u64, i: u64, btn: u64) {
         }
         dh_src = 0
         if was != 0 && dh_live != 0 && i < MAX_WIN && valid(state, i) && darf(state, i)
-            && wg(state, i, W_KIND) == K_TERM && bus.drag_active(state) != 0
-            && (bus.drag_types(state) & bus.T_PATH) != 0 {
+            && wg(state, i, W_KIND) == K_TERM && slots.drag_active(state) != 0
+            && (slots.drag_types(state) & bus.T_PATH) != 0 {
             let t: u64 = tty_of(state, i)
             if t != NO_TTY {
                 dh_tty = t + 1
@@ -15201,7 +15202,7 @@ fn dnd_hover(state: u64, i: u64, btn: u64) {
         dh_raised = 0
         return
     }
-    if bus.drag_active(state) == 0 {
+    if slots.drag_active(state) == 0 {
         dh_live = 0
         dh_win = 0
         dh_raised = 0
@@ -15243,10 +15244,10 @@ fn dnd_tick(state: u64) {
 
 // Esc while a drag runs: the payload goes, the release drops nothing. True = the key is consumed.
 fn dnd_cancel(state: u64) -> bool {
-    if dh_prev == 0 || bus.drag_active(state) == 0 {
+    if dh_prev == 0 || slots.drag_active(state) == 0 {
         return false
     }
-    let _c: u64 = bus.drag_clear(state)
+    let _c: u64 = slots.drag_clear(state)
     dh_live = 0
     dh_win = 0
     dh_raised = 0
@@ -15266,8 +15267,8 @@ fn dnd_take_paste(state: u64, out: u64, max: u64) -> u64 {
     if max < 4 {
         return 0
     }
-    var n: u64 = bus.drag_get(state, out, max - 2, 0)
-    let _c: u64 = bus.drag_clear(state)
+    var n: u64 = slots.drag_get(state, out, max - 2, 0)
+    let _c: u64 = slots.drag_clear(state)
     if n == 0 || n >= max - 2 {
         return 0
     }
@@ -17560,6 +17561,46 @@ fn term_paste_take(state: u64) -> u64 {
     return t
 }
 
+static mut tp_buf: [u8; 4096] = [0 as u8; 4096]
+static mut tp_cn: [u64; 1] = [0 as u64; 1]
+static mut tc_psel: [u64; 1] = [0 as u64; 1]
+
+fn tsel_primary(state: u64, i: u64) {
+    let n: u64 = tsel_text(state, i)
+    if n == 0 {
+        return
+    }
+    var k: u64 = 0
+    while k < n {
+        tp_buf[(k) as usize] = tc_buf[(k) as usize]
+        k = k + 1
+    }
+    tp_cn[0] = n
+}
+
+fn term_primary_take(state: u64, out: u64, max: u64) -> u64 {
+    var n: u64 = tp_cn[0]
+    if n == 0 {
+        return 0
+    }
+    tp_cn[0] = 0
+    if n > max {
+        n = max
+    }
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(out + k, tp_buf[(k) as usize])
+        k = k + 1
+    }
+    return n
+}
+
+fn term_paste_sel(state: u64) -> u64 {
+    let v: u64 = tc_psel[0]
+    tc_psel[0] = 0
+    return v
+}
+
 fn tcopies_pub() -> u64 {
     return tc_copies[0]
 }
@@ -17666,6 +17707,7 @@ fn term_mouse(state: u64, i: u64, kind: u64, lx: u64, ly: u64, btn: u64) {
             tc_sel[(i) as usize] = 0
         } else {
             tc_sel[(i) as usize] = 2
+            tsel_primary(state, i)
         }
         return
     }
@@ -17680,6 +17722,7 @@ fn term_mouse(state: u64, i: u64, kind: u64, lx: u64, ly: u64, btn: u64) {
     }
     if kind == 4 {
         tpaste_ask(state, i)
+        tc_psel[0] = 1
     }
 }
 

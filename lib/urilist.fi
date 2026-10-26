@@ -1,0 +1,199 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/urilist.fi -- text/uri-list: file:// and smb:// URIs to paths and back, list building and walking.
+// Pure functions on raw octets, shared by the kernel (terminal paste) and by Ring 3 (xfer).
+profile kernel
+
+export { to_path, from_path, list_add, list_next, list_to_plain, PATH_MAX }
+
+const PATH_MAX: u64 = 512
+
+static mut p_file: [u8; 8] = "file://\0"
+static mut p_local: [u8; 11] = "localhost/\0"
+static mut p_smb: [u8; 7] = "smb://\0"
+static mut hexdigits: [u8; 17] = "0123456789ABCDEF\0"
+
+fn at(p: u64) -> u64 {
+    return (__mmio_read8(p as *mut u8)) as u64
+}
+
+fn put(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, v as u8)
+}
+
+fn text_len(p: u64) -> u64 {
+    var n: u64 = 0
+    while at(p + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn starts(p: u64, n: u64, prefix: u64, pn: u64) -> bool {
+    if n < pn {
+        return false
+    }
+    var i: u64 = 0
+    while i < pn {
+        if at(p + i) != at(prefix + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn hex_val(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return 16
+}
+
+fn to_path(uri: u64, n: u64, out: u64, max: u64) -> u64 {
+    var from: u64 = 0
+    var local: bool = false
+    if starts(uri, n, (&p_file[0 as usize]) as u64, 7) {
+        from = 7
+        local = true
+        if starts(uri + 7, n - 7, (&p_local[0 as usize]) as u64, 10) {
+            from = 16
+        } else if from < n && at(uri + from) != 47 {
+            return 0
+        }
+    } else if !starts(uri, n, (&p_smb[0 as usize]) as u64, 6) {
+        return 0
+    }
+    var o: u64 = 0
+    while from < n && o + 1 < max {
+        var c: u64 = at(uri + from)
+        if c == 37 && from + 2 < n {
+            let h: u64 = hex_val(at(uri + from + 1))
+            let l: u64 = hex_val(at(uri + from + 2))
+            if h < 16 && l < 16 {
+                c = h * 16 + l
+                from = from + 2
+            }
+        }
+        put(out + o, c)
+        o = o + 1
+        from = from + 1
+    }
+    put(out + o, 0)
+    if local && o == 0 {
+        return 0
+    }
+    return o
+}
+
+fn unreserved(c: u64) -> bool {
+    if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) {
+        return true
+    }
+    return c == 45 || c == 46 || c == 95 || c == 126 || c == 47 || c == 58
+}
+
+fn from_path(path: u64, out: u64, max: u64) -> u64 {
+    var o: u64 = 0
+    var i: u64 = 0
+    let n: u64 = text_len(path)
+    if !starts(path, n, (&p_smb[0 as usize]) as u64, 6) {
+        while o < 7 && o + 1 < max {
+            put(out + o, at((&p_file[0 as usize]) as u64 + o))
+            o = o + 1
+        }
+    }
+    let digits: u64 = (&hexdigits[0 as usize]) as u64
+    while i < n {
+        let c: u64 = at(path + i)
+        if unreserved(c) {
+            if o + 1 >= max {
+                return 0
+            }
+            put(out + o, c)
+            o = o + 1
+        } else {
+            if o + 3 >= max {
+                return 0
+            }
+            put(out + o, 37)
+            put(out + o + 1, at(digits + (c >> 4)))
+            put(out + o + 2, at(digits + (c & 15)))
+            o = o + 3
+        }
+        i = i + 1
+    }
+    put(out + o, 0)
+    return o
+}
+
+fn list_add(list: u64, pos: u64, max: u64, path: u64) -> u64 {
+    if pos + 3 >= max {
+        return 0
+    }
+    let n: u64 = from_path(path, list + pos, max - pos - 2)
+    if n == 0 {
+        return 0
+    }
+    put(list + pos + n, 13)
+    put(list + pos + n + 1, 10)
+    return pos + n + 2
+}
+
+fn list_next(list: u64, n: u64, pos: u64, out: u64, max: u64) -> u64 {
+    var p: u64 = pos
+    while p < n {
+        var e: u64 = p
+        while e < n && at(list + e) != 10 && at(list + e) != 13 {
+            e = e + 1
+        }
+        var next: u64 = e
+        while next < n && (at(list + next) == 10 || at(list + next) == 13) {
+            next = next + 1
+        }
+        if e > p && at(list + p) != 35 {
+            if to_path(list + p, e - p, out, max) != 0 {
+                return next
+            }
+        }
+        p = next
+    }
+    return 0
+}
+
+fn list_to_plain(buf: u64, n: u64, max: u64) -> u64 {
+    var tmp: [u8; 512] = [0 as u8; 512]
+    let tp: u64 = (&tmp[0 as usize]) as u64
+    var pos: u64 = 0
+    var o: u64 = 0
+    var first: bool = true
+    var scan: u64 = n
+    if scan > max {
+        scan = max
+    }
+    while true {
+        let nx: u64 = list_next(buf, scan, pos, tp, PATH_MAX)
+        if nx == 0 {
+            break
+        }
+        let pl: u64 = text_len(tp)
+        if !first {
+            put(buf + o, 10)
+            o = o + 1
+        }
+        first = false
+        var k: u64 = 0
+        while k < pl {
+            put(buf + o, at(tp + k))
+            o = o + 1
+            k = k + 1
+        }
+        pos = nx
+    }
+    return o
+}

@@ -1,0 +1,748 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/xclip.fi -- command line door to the transfer service (clipboard, primary selection, drag payload).
+//
+//   xclip put   [-s sel] [-t mime] text...        eager set of a text
+//   xclip gen   [-s sel] [-t mime] -g N           eager set of N generated octets (prints their FNV-1a sum)
+//   xclip offer [-s sel] -t mime[,mime] [-g N] [-w text] [-k K] [-m MS]
+//                                                 lazy offer; serves K fills (default 1), at most MS ms (default 20000)
+//   xclip get   [-s sel] [-b back] [-t mime]      one representation: size and FNV-1a sum
+//   xclip text  [-s sel] [-b back]                text with the file-list fallback
+//   xclip types [-s sel] [-b back]                the offered mime mask and the held mask
+//   xclip uris  [-s sel] [-b back]                a file list as paths, one per line
+//   xclip puturis [-s sel] path...                a file list as text/uri-list
+//   xclip putfile [-s sel] [-t mime] path         eager set of a file's octets (FNV-1a sum printed)
+//   xclip getfile [-s sel] [-b back] [-t mime] path
+//                                                 one representation written to a file (FNV-1a sum printed)
+//   xclip noti  post text | peek                  notification ring (shares the bus page with the drag slot)
+//   xclip mime  name                              the bit of a mime type (registered on first use)
+//   xclip clear [-s sel]                          empties the slot
+//   xclip stat                                    the counters of the service
+//
+// sel = clipboard (default), primary, drag. Every result is one line starting with `xclip:`.
+profile kernel
+
+import ulib
+import libc.io
+import xfer
+import urilist
+
+export { u_start }
+
+const BUF_MAX: u64 = 2101248
+const FNV_OFFSET: u64 = 0xcbf29ce484222325
+const FNV_PRIME: u64 = 0x100000001b3
+
+static mut buf: [u8; 2101248] = [0 as u8; 2101248]
+static mut name_buf: [u8; 64] = [0 as u8; 64]
+static mut gen_len: u64 = 0
+static mut serve_text: u64 = 0
+static mut served: u64 = 0
+
+static mut s_pre: [u8; 8] = "xclip: \0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_eq: [u8; 2] = "=\0"
+
+static mut lbuf: [u8; 192] = [0 as u8; 192]
+static mut lpos: u64 = 0
+
+fn b_str(text: u64) {
+    var i: u64 = 0
+    while xfer.byte_at(text + i) != 0 && lpos < 180 {
+        lbuf[lpos as usize] = xfer.byte_at(text + i) as u8
+        lpos = lpos + 1
+        i = i + 1
+    }
+}
+
+fn b_dec(v: u64) {
+    var tmp: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 && lpos < 180 {
+        n = n - 1
+        lbuf[lpos as usize] = tmp[n as usize]
+        lpos = lpos + 1
+    }
+}
+
+fn b_hex(v: u64) {
+    var i: u64 = 0
+    while i < 16 && lpos < 180 {
+        let d: u64 = (v >> ((15 - i) * 4)) & 15
+        if d < 10 {
+            lbuf[lpos as usize] = (48 + d) as u8
+        } else {
+            lbuf[lpos as usize] = (87 + d) as u8
+        }
+        lpos = lpos + 1
+        i = i + 1
+    }
+}
+
+fn b_emit() {
+    lbuf[lpos as usize] = 10 as u8
+    lbuf[(lpos + 1) as usize] = 0 as u8
+    ulib.say((&lbuf[0 as usize]) as u64)
+    lpos = 0
+}
+
+fn say_kv(key: u64, v: u64) {
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say(key)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    ulib.sayu(v)
+}
+
+fn say_hex(v: u64) {
+    var digits: [u8; 17] = [0 as u8; 17]
+    var i: u64 = 0
+    while i < 16 {
+        let d: u64 = (v >> ((15 - i) * 4)) & 15
+        if d < 10 {
+            digits[i as usize] = (48 + d) as u8
+        } else {
+            digits[i as usize] = (87 + d) as u8
+        }
+        i = i + 1
+    }
+    ulib.say((&digits[0 as usize]) as u64)
+}
+
+fn line(word: u64) {
+    ulib.say((&s_pre[0 as usize]) as u64)
+    ulib.say(word)
+}
+
+fn fnv(p: u64, n: u64) -> u64 {
+    var h: u64 = FNV_OFFSET
+    var i: u64 = 0
+    while i < n {
+        h = (h ^ xfer.byte_at(p + i)) *% FNV_PRIME
+        i = i + 1
+    }
+    return h
+}
+
+fn pattern(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        *((p + i) as *mut u8) = ((i * 31 + (i >> 8) * 7 + 13) & 255) as u8
+        i = i + 1
+    }
+}
+
+fn sel_of(name: u64) -> u64 {
+    var s_primary: [u8; 8] = "primary\0"
+    var s_drag: [u8; 5] = "drag\0"
+    if ulib.streq(name, (&s_primary[0 as usize]) as u64) {
+        return xfer.SEL_PRIMARY
+    }
+    if ulib.streq(name, (&s_drag[0 as usize]) as u64) {
+        return xfer.SEL_DRAG
+    }
+    return xfer.SEL_CLIPBOARD
+}
+
+fn find_opt(args: u64, argc: u64, flag: u64) -> u64 {
+    var i: u64 = 2
+    while i + 1 < argc {
+        if ulib.streq(ulib.arg_at(args, i), flag) {
+            return ulib.arg_at(args, i + 1)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn num_opt(args: u64, argc: u64, flag: u64, dflt: u64) -> u64 {
+    let v: u64 = find_opt(args, argc, flag)
+    if v == 0 {
+        return dflt
+    }
+    return ulib.to_num(v)
+}
+
+fn mime_opt(args: u64, argc: u64) -> u64 {
+    var f_t: [u8; 3] = "-t\0"
+    var dflt: [u8; 11] = "text/plain\0"
+    var v: u64 = find_opt(args, argc, (&f_t[0 as usize]) as u64)
+    if v == 0 {
+        v = (&dflt[0 as usize]) as u64
+    }
+    return mime_mask(v)
+}
+
+fn mime_mask(list: u64) -> u64 {
+    var mask: u64 = 0
+    var start: u64 = 0
+    var i: u64 = 0
+    while true {
+        let c: u64 = xfer.byte_at(list + i)
+        if c == 44 || c == 0 {
+            if i > start {
+                mask = mask | xfer.mime_of(list + start, i - start)
+            }
+            start = i + 1
+            if c == 0 {
+                break
+            }
+        }
+        i = i + 1
+    }
+    return mask
+}
+
+fn provider(sel: u64, mime: u64) -> u64 {
+    var n: u64 = gen_len
+    let p: u64 = (&buf[0 as usize]) as u64
+    if serve_text != 0 {
+        n = ulib.length(serve_text)
+        var k: u64 = 0
+        while k < n {
+            *((p + k) as *mut u8) = *((serve_text + k) as *mut u8)
+            k = k + 1
+        }
+    } else {
+        pattern(p, n)
+    }
+    let r: u64 = xfer.fill(sel, mime, p, n)
+    var s_w: [u8; 20] = "xclip: wanted mime=\0"
+    var s_n: [u8; 4] = " n=\0"
+    var s_f: [u8; 6] = " sum=\0"
+    var s_bad: [u8; 6] = " fail\0"
+    b_str((&s_w[0 as usize]) as u64)
+    b_dec(mime)
+    b_str((&s_n[0 as usize]) as u64)
+    b_dec(n)
+    b_str((&s_f[0 as usize]) as u64)
+    b_hex(fnv((&buf[0 as usize]) as u64, n))
+    if xfer.is_error(r) {
+        b_str((&s_bad[0 as usize]) as u64)
+    }
+    lbuf[lpos as usize] = 0 as u8
+    b_emit()
+    served = served + 1
+    return 0
+}
+
+fn cmd_put(args: u64, argc: u64, sel: u64) -> u64 {
+    var s_put: [u8; 4] = "put\0"
+    var s_n: [u8; 2] = "n\0"
+    var s_rc: [u8; 3] = "rc\0"
+    let mime: u64 = mime_opt(args, argc)
+    let p: u64 = (&buf[0 as usize]) as u64
+    var n: u64 = 0
+    var i: u64 = 2
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if *(a as *mut u8) == 45 && i + 1 < argc {
+            i = i + 2
+            continue
+        }
+        if n > 0 {
+            *((p + n) as *mut u8) = 32
+            n = n + 1
+        }
+        let l: u64 = ulib.length(a)
+        var k: u64 = 0
+        while k < l && n < BUF_MAX - 2 {
+            *((p + n) as *mut u8) = *((a + k) as *mut u8)
+            n = n + 1
+            k = k + 1
+        }
+        i = i + 1
+    }
+    let r: u64 = xfer.set(sel, mime, p, n)
+    var f_m: [u8; 3] = "-m\0"
+    let hold: u64 = num_opt(args, argc, (&f_m[0 as usize]) as u64, 0)
+    line((&s_put[0 as usize]) as u64)
+    say_kv((&s_n[0 as usize]) as u64, n)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&s_rc[0 as usize]) as u64)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    if xfer.is_error(r) {
+        ulib.sayn(0 -% r)
+        ulib.nl()
+        return 1
+    }
+    ulib.sayu(0)
+    ulib.nl()
+    if hold != 0 {
+        ulib.sleep_ms(hold)
+    }
+    return 0
+}
+
+fn cmd_gen(args: u64, argc: u64, sel: u64) -> u64 {
+    var s_gen: [u8; 4] = "gen\0"
+    var s_n: [u8; 2] = "n\0"
+    var s_sum: [u8; 4] = "sum\0"
+    var s_rc: [u8; 3] = "rc\0"
+    var f_g0: [u8; 3] = "-g\0"
+    let n: u64 = num_opt(args, argc, (&f_g0[0 as usize]) as u64, 0)
+    let mime: u64 = mime_opt(args, argc)
+    let p: u64 = (&buf[0 as usize]) as u64
+    if n > xfer.SIZE_MAX {
+        var s_big: [u8; 7] = "toobig\0"
+        line((&s_big[0 as usize]) as u64)
+        say_kv((&s_n[0 as usize]) as u64, n)
+        ulib.nl()
+        return 1
+    }
+    pattern(p, n)
+    let r: u64 = xfer.set(sel, mime, p, n)
+    line((&s_gen[0 as usize]) as u64)
+    say_kv((&s_n[0 as usize]) as u64, n)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&s_sum[0 as usize]) as u64)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    say_hex(fnv(p, n))
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&s_rc[0 as usize]) as u64)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    if xfer.is_error(r) {
+        ulib.sayn(0 -% r)
+        ulib.nl()
+        return 1
+    }
+    ulib.sayu(0)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_offer(args: u64, argc: u64, sel: u64) -> u64 {
+    var s_off: [u8; 8] = "offered\0"
+    var s_mask: [u8; 5] = "mask\0"
+    var s_done: [u8; 7] = "served\0"
+    var k_n: [u8; 2] = "n\0"
+    var f_g: [u8; 3] = "-g\0"
+    var f_w: [u8; 3] = "-w\0"
+    var f_k: [u8; 3] = "-k\0"
+    var f_m: [u8; 3] = "-m\0"
+    let mask: u64 = mime_opt(args, argc)
+    gen_len = num_opt(args, argc, (&f_g[0 as usize]) as u64, 0)
+    serve_text = find_opt(args, argc, (&f_w[0 as usize]) as u64)
+    let want: u64 = num_opt(args, argc, (&f_k[0 as usize]) as u64, 1)
+    let limit_ms: u64 = num_opt(args, argc, (&f_m[0 as usize]) as u64, 20000)
+    if gen_len > xfer.SIZE_MAX {
+        return 1
+    }
+    xfer.provide(sel, provider)
+    let r: u64 = xfer.offer(sel, mask)
+    line((&s_off[0 as usize]) as u64)
+    say_kv((&s_mask[0 as usize]) as u64, mask)
+    ulib.nl()
+    if xfer.is_error(r) {
+        return 1
+    }
+    var waited: u64 = 0
+    while served < want && waited < limit_ms {
+        if xfer.pump() == 0 {
+            ulib.sleep_ms(5)
+            waited = waited + 5
+        }
+    }
+    line((&s_done[0 as usize]) as u64)
+    say_kv((&k_n[0 as usize]) as u64, served)
+    ulib.nl()
+    if served < want {
+        return 1
+    }
+    return 0
+}
+
+fn cmd_get(args: u64, argc: u64, sel: u64) -> u64 {
+    var s_got: [u8; 4] = "got\0"
+    var s_n: [u8; 2] = "n\0"
+    var s_sum: [u8; 4] = "sum\0"
+    var s_err: [u8; 10] = "get fail \0"
+    var f_b: [u8; 3] = "-b\0"
+    let back: u64 = num_opt(args, argc, (&f_b[0 as usize]) as u64, 0)
+    let mime: u64 = mime_opt(args, argc)
+    let p: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = xfer.get(sel, back, mime, p, BUF_MAX - 8)
+    if xfer.is_error(n) {
+        line((&s_err[0 as usize]) as u64)
+        ulib.sayn(0 -% n)
+        ulib.nl()
+        return 1
+    }
+    line((&s_got[0 as usize]) as u64)
+    say_kv((&s_n[0 as usize]) as u64, n)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&s_sum[0 as usize]) as u64)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    say_hex(fnv(p, n))
+    ulib.nl()
+    return 0
+}
+
+fn cmd_text(args: u64, argc: u64, sel: u64) -> u64 {
+    var s_text: [u8; 5] = "text\0"
+    var s_n: [u8; 2] = "n\0"
+    var s_err: [u8; 11] = "text fail \0"
+    var f_b: [u8; 3] = "-b\0"
+    let back: u64 = num_opt(args, argc, (&f_b[0 as usize]) as u64, 0)
+    let p: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = xfer.get_text(sel, back, p, BUF_MAX - 8)
+    if xfer.is_error(n) {
+        line((&s_err[0 as usize]) as u64)
+        ulib.sayn(0 -% n)
+        ulib.nl()
+        return 1
+    }
+    *((p + n) as *mut u8) = 0
+    line((&s_text[0 as usize]) as u64)
+    say_kv((&s_n[0 as usize]) as u64, n)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    if n < 400 {
+        ulib.say(p)
+    }
+    ulib.nl()
+    return 0
+}
+
+fn cmd_types(args: u64, argc: u64, sel: u64) -> u64 {
+    var s_t: [u8; 6] = "types\0"
+    var s_m: [u8; 5] = "mask\0"
+    var s_h: [u8; 5] = "have\0"
+    var s_c: [u8; 6] = "count\0"
+    var s_o: [u8; 6] = "owner\0"
+    var f_b: [u8; 3] = "-b\0"
+    let back: u64 = num_opt(args, argc, (&f_b[0 as usize]) as u64, 0)
+    line((&s_t[0 as usize]) as u64)
+    say_kv((&s_m[0 as usize]) as u64, xfer.types(sel, back))
+    say_kv((&s_h[0 as usize]) as u64, xfer.have(sel, back))
+    say_kv((&s_c[0 as usize]) as u64, xfer.count(sel))
+    say_kv((&s_o[0 as usize]) as u64, xfer.owner(sel, back))
+    ulib.nl()
+    return 0
+}
+
+fn cmd_uris(args: u64, argc: u64, sel: u64) -> u64 {
+    var s_u: [u8; 5] = "uri \0"
+    var s_n: [u8; 8] = "uris n=\0"
+    var f_b: [u8; 3] = "-b\0"
+    let back: u64 = num_opt(args, argc, (&f_b[0 as usize]) as u64, 0)
+    let p: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = xfer.get_files(sel, back, p, 60000)
+    if xfer.is_error(n) {
+        return 1
+    }
+    var out: [u8; 512] = [0 as u8; 512]
+    var pos: u64 = 0
+    var count: u64 = 0
+    while true {
+        let nx: u64 = urilist.list_next(p, n, pos, (&out[0 as usize]) as u64, 512)
+        if nx == 0 {
+            break
+        }
+        line((&s_u[0 as usize]) as u64)
+        ulib.say((&out[0 as usize]) as u64)
+        ulib.nl()
+        count = count + 1
+        pos = nx
+    }
+    line((&s_n[0 as usize]) as u64)
+    ulib.sayu(count)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_puturis(args: u64, argc: u64, sel: u64) -> u64 {
+    var s_p: [u8; 8] = "puturis\0"
+    var s_n: [u8; 2] = "n\0"
+    let p: u64 = (&buf[0 as usize]) as u64
+    var at: u64 = 0
+    var i: u64 = 2
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if *(a as *mut u8) == 45 && i + 1 < argc {
+            i = i + 2
+            continue
+        }
+        at = urilist.list_add(p, at, 60000, a)
+        i = i + 1
+    }
+    let r: u64 = xfer.set(sel, xfer.MIME_URIS, p, at)
+    line((&s_p[0 as usize]) as u64)
+    say_kv((&s_n[0 as usize]) as u64, at)
+    ulib.nl()
+    if xfer.is_error(r) {
+        return 1
+    }
+    return 0
+}
+
+fn file_sum(path: u64) -> u64 {
+    var chunk: [u8; 4096] = [0 as u8; 4096]
+    let cp: u64 = (&chunk[0 as usize]) as u64
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var h: u64 = FNV_OFFSET
+    while true {
+        let g: u64 = io.read(fd, cp, 4096)
+        if ulib.bad(g) || g == 0 {
+            break
+        }
+        var i: u64 = 0
+        while i < g {
+            h = (h ^ xfer.byte_at(cp + i)) *% FNV_PRIME
+            i = i + 1
+        }
+    }
+    let _c: u64 = io.close(fd)
+    return h
+}
+
+fn path_arg(args: u64, argc: u64) -> u64 {
+    var i: u64 = 2
+    var last: u64 = 0
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if xfer.byte_at(a) == 45 && i + 1 < argc {
+            i = i + 2
+            continue
+        }
+        last = a
+        i = i + 1
+    }
+    return last
+}
+
+fn cmd_putfile(args: u64, argc: u64, sel: u64) -> u64 {
+    var s_p: [u8; 8] = "putfile\0"
+    var s_n: [u8; 2] = "n\0"
+    var s_sum: [u8; 4] = "sum\0"
+    var s_rc: [u8; 3] = "rc\0"
+    let path: u64 = path_arg(args, argc)
+    let r: u64 = xfer.set_file(sel, mime_opt(args, argc), path)
+    line((&s_p[0 as usize]) as u64)
+    say_kv((&s_n[0 as usize]) as u64, r)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&s_sum[0 as usize]) as u64)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    say_hex(file_sum(path))
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&s_rc[0 as usize]) as u64)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    if xfer.is_error(r) {
+        ulib.sayu(0 -% r)
+        ulib.nl()
+        return 1
+    }
+    ulib.sayu(0)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_getfile(args: u64, argc: u64, sel: u64) -> u64 {
+    var s_g: [u8; 8] = "getfile\0"
+    var s_n: [u8; 2] = "n\0"
+    var s_sum: [u8; 4] = "sum\0"
+    var s_rc: [u8; 3] = "rc\0"
+    var f_b: [u8; 3] = "-b\0"
+    let back: u64 = num_opt(args, argc, (&f_b[0 as usize]) as u64, 0)
+    let path: u64 = path_arg(args, argc)
+    let r: u64 = xfer.get_to_file(sel, back, mime_opt(args, argc), path)
+    line((&s_g[0 as usize]) as u64)
+    say_kv((&s_n[0 as usize]) as u64, r)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&s_sum[0 as usize]) as u64)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    say_hex(file_sum(path))
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&s_rc[0 as usize]) as u64)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    if xfer.is_error(r) {
+        ulib.sayu(0 -% r)
+        ulib.nl()
+        return 1
+    }
+    ulib.sayu(0)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_noti(args: u64, argc: u64) -> u64 {
+    var s_n: [u8; 5] = "noti\0"
+    var s_post: [u8; 5] = "post\0"
+    var s_cnt: [u8; 6] = "count\0"
+    var s_len: [u8; 4] = "len\0"
+    if argc < 3 {
+        return 1
+    }
+    let sub: u64 = ulib.arg_at(args, 2)
+    if ulib.streq(sub, (&s_post[0 as usize]) as u64) && argc >= 4 {
+        let t: u64 = ulib.arg_at(args, 3)
+        let r: u64 = ulib.noti_post(1, t, ulib.length(t))
+        line((&s_n[0 as usize]) as u64)
+        say_kv((&s_post[0 as usize]) as u64, r)
+        ulib.nl()
+        return 0
+    }
+    var out: [u8; 130] = [0 as u8; 130]
+    let n: u64 = ulib.noti_take(0, (&out[0 as usize]) as u64, 126)
+    out[n as usize] = 0 as u8
+    line((&s_n[0 as usize]) as u64)
+    say_kv((&s_cnt[0 as usize]) as u64, ulib.noti_count())
+    say_kv((&s_len[0 as usize]) as u64, n)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&out[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_mime(args: u64, argc: u64) -> u64 {
+    var s_m: [u8; 6] = "mime \0"
+    var s_mask: [u8; 5] = "mask\0"
+    if argc < 3 {
+        return 1
+    }
+    let name: u64 = ulib.arg_at(args, 2)
+    let mask: u64 = xfer.mime_of(name, ulib.length(name))
+    line((&s_m[0 as usize]) as u64)
+    ulib.say(name)
+    say_kv((&s_mask[0 as usize]) as u64, mask)
+    var back: [u8; 64] = [0 as u8; 64]
+    let n: u64 = xfer.mime_name(mask, (&back[0 as usize]) as u64, 64)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&back[0 as usize]) as u64)
+    ulib.nl()
+    if mask == 0 || n == 0 {
+        return 1
+    }
+    return 0
+}
+
+fn cmd_stat() -> u64 {
+    var s_s: [u8; 5] = "stat\0"
+    var k_off: [u8; 7] = "offers\0"
+    var k_fil: [u8; 6] = "fills\0"
+    var k_set: [u8; 8] = "clipset\0"
+    var k_get: [u8; 8] = "clipget\0"
+    var k_pri: [u8; 8] = "primset\0"
+    var k_sio: [u8; 6] = "segio\0"
+    var k_ado: [u8; 8] = "adopted\0"
+    var k_fre: [u8; 6] = "freed\0"
+    var k_mim: [u8; 6] = "mimes\0"
+    var k_seg: [u8; 5] = "segs\0"
+    var k_drg: [u8; 6] = "drags\0"
+    line((&s_s[0 as usize]) as u64)
+    say_kv((&k_off[0 as usize]) as u64, xfer.stat(xfer.ST_OFFERS))
+    say_kv((&k_fil[0 as usize]) as u64, xfer.stat(xfer.ST_FILLS))
+    say_kv((&k_set[0 as usize]) as u64, xfer.stat(xfer.ST_CLIPSETS))
+    say_kv((&k_get[0 as usize]) as u64, xfer.stat(xfer.ST_CLIPGETS))
+    say_kv((&k_pri[0 as usize]) as u64, xfer.stat(xfer.ST_PRIMSETS))
+    say_kv((&k_sio[0 as usize]) as u64, xfer.stat(xfer.ST_SEGIO))
+    say_kv((&k_ado[0 as usize]) as u64, xfer.stat(xfer.ST_ADOPTED))
+    say_kv((&k_fre[0 as usize]) as u64, xfer.stat(xfer.ST_FREED))
+    say_kv((&k_mim[0 as usize]) as u64, xfer.stat(xfer.ST_MIMES))
+    say_kv((&k_seg[0 as usize]) as u64, xfer.stat(xfer.ST_SEGS))
+    say_kv((&k_drg[0 as usize]) as u64, xfer.stat(xfer.ST_DRAGS))
+    ulib.nl()
+    return 0
+}
+
+fn cmd_clear(sel: u64) -> u64 {
+    var s_c: [u8; 6] = "clear\0"
+    line((&s_c[0 as usize]) as u64)
+    var guard: u64 = 0
+    while xfer.count(sel) != 0 && guard < 64 {
+        let _r: u64 = xfer.clear(sel)
+        guard = guard + 1
+    }
+    ulib.nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 24] = "xclip: usage: see head\0\0"
+    var c_put: [u8; 4] = "put\0"
+    var c_gen: [u8; 4] = "gen\0"
+    var c_offer: [u8; 6] = "offer\0"
+    var c_get: [u8; 4] = "get\0"
+    var c_text: [u8; 5] = "text\0"
+    var c_types: [u8; 6] = "types\0"
+    var c_uris: [u8; 5] = "uris\0"
+    var c_puturis: [u8; 8] = "puturis\0"
+    var c_mime: [u8; 5] = "mime\0"
+    var c_putfile: [u8; 8] = "putfile\0"
+    var c_getfile: [u8; 8] = "getfile\0"
+    var c_noti: [u8; 5] = "noti\0"
+    var c_clear: [u8; 6] = "clear\0"
+    var c_stat: [u8; 5] = "stat\0"
+    var f_s: [u8; 3] = "-s\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.say((&s_use[0 as usize]) as u64)
+        ulib.nl()
+        return 2
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    var sel: u64 = xfer.SEL_CLIPBOARD
+    let sname: u64 = find_opt(args, argc, (&f_s[0 as usize]) as u64)
+    if sname != 0 {
+        sel = sel_of(sname)
+    }
+    if ulib.streq(cmd, (&c_put[0 as usize]) as u64) {
+        return cmd_put(args, argc, sel)
+    }
+    if ulib.streq(cmd, (&c_gen[0 as usize]) as u64) {
+        return cmd_gen(args, argc, sel)
+    }
+    if ulib.streq(cmd, (&c_offer[0 as usize]) as u64) {
+        return cmd_offer(args, argc, sel)
+    }
+    if ulib.streq(cmd, (&c_get[0 as usize]) as u64) {
+        return cmd_get(args, argc, sel)
+    }
+    if ulib.streq(cmd, (&c_text[0 as usize]) as u64) {
+        return cmd_text(args, argc, sel)
+    }
+    if ulib.streq(cmd, (&c_types[0 as usize]) as u64) {
+        return cmd_types(args, argc, sel)
+    }
+    if ulib.streq(cmd, (&c_uris[0 as usize]) as u64) {
+        return cmd_uris(args, argc, sel)
+    }
+    if ulib.streq(cmd, (&c_puturis[0 as usize]) as u64) {
+        return cmd_puturis(args, argc, sel)
+    }
+    if ulib.streq(cmd, (&c_putfile[0 as usize]) as u64) {
+        return cmd_putfile(args, argc, sel)
+    }
+    if ulib.streq(cmd, (&c_getfile[0 as usize]) as u64) {
+        return cmd_getfile(args, argc, sel)
+    }
+    if ulib.streq(cmd, (&c_noti[0 as usize]) as u64) {
+        return cmd_noti(args, argc)
+    }
+    if ulib.streq(cmd, (&c_mime[0 as usize]) as u64) {
+        return cmd_mime(args, argc)
+    }
+    if ulib.streq(cmd, (&c_clear[0 as usize]) as u64) {
+        return cmd_clear(sel)
+    }
+    if ulib.streq(cmd, (&c_stat[0 as usize]) as u64) {
+        return cmd_stat()
+    }
+    ulib.say((&s_use[0 as usize]) as u64)
+    ulib.nl()
+    return 2
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

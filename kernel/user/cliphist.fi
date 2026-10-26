@@ -20,6 +20,7 @@
 profile app
 
 import ulib
+import xfer
 import fuiscene
 import msg
 import wlib
@@ -41,6 +42,8 @@ static mut k_close: [u8; 15] = "cliphist.close\0"
 static mut rows_txt: [u8; 2048] = [0 as u8; 2048] // ROWS * 200 would be 2000; slot = 200
 static mut rows_len: [u64; 10] = [0 as u64; 10]
 static mut rows_typ: [u64; 10] = [0 as u64; 10]
+static mut rows_kind: [u64; 10] = [0 as u64; 10]
+static mut rows_back: [u64; 10] = [0 as u64; 10]
 static mut rows_lbl: [u8; 1024] = [0 as u8; 1024] // slot = 100: "N  " + SHOW + "..." + NUL
 static mut shown: u64 = 0
 static mut ring_n: u64 = 0
@@ -75,6 +78,14 @@ fn load() {
     ring_n = ulib.clip_count()
     var back: u64 = 0
     while back < ring_n && shown < ROWS {
+        let kinds: u64 = xfer.types(xfer.SEL_CLIPBOARD, back)
+        if (kinds & (xfer.MIME_TEXT | xfer.MIME_PATH | xfer.MIME_URIS)) == 0 {
+            if kinds != 0 {
+                add_opaque(back, kinds)
+            }
+            back = back + 1
+            continue
+        }
         let n: u64 = ulib.clip_hist_take(back, (&buf[0 as usize]) as u64, TXT - 1)
         var dup: bool = false
         if n == 0 {
@@ -97,11 +108,36 @@ fn load() {
             *((t + n) as *mut u8) = 0 as u8
             rows_len[(shown) as usize] = n
             rows_typ[(shown) as usize] = ulib.clip_typ(back)
+            rows_kind[(shown) as usize] = 0
+            if (kinds & ~xfer.MIME_TEXT) != 0 {
+                rows_kind[(shown) as usize] = 1
+            }
+            rows_back[(shown) as usize] = back
             make_label(shown)
             shown = shown + 1
         }
         back = back + 1
     }
+}
+
+fn add_opaque(back: u64, kinds: u64) {
+    let t: u64 = txt_slot(shown)
+    var name: [u8; 64] = [0 as u8; 64]
+    let nl: u64 = xfer.mime_name(1 << xfer.mime_index(kinds), (&name[0 as usize]) as u64, 64)
+    *(t as *mut u8) = 91 as u8
+    var k: u64 = 0
+    while k < nl && k < 150 {
+        *((t + 1 + k) as *mut u8) = name[k as usize]
+        k = k + 1
+    }
+    *((t + 1 + k) as *mut u8) = 93 as u8
+    *((t + 2 + k) as *mut u8) = 0 as u8
+    rows_len[(shown) as usize] = k + 2
+    rows_typ[(shown) as usize] = kinds
+    rows_kind[(shown) as usize] = 1
+    rows_back[(shown) as usize] = back
+    make_label(shown)
+    shown = shown + 1
 }
 
 // "N  preview": line breaks and tabs become blanks, a text longer than SHOW ends in "...".
@@ -182,7 +218,11 @@ fn pick(i: u64) {
     if typ == 0 {
         typ = ulib.BT_TEXT
     }
-    let _r: u64 = ulib.clip_put(typ, txt_slot(i), rows_len[(i) as usize])
+    if rows_kind[(i) as usize] == 1 {
+        let _p: u64 = xfer.promote(rows_back[(i) as usize])
+    } else {
+        let _r: u64 = ulib.clip_put(typ, txt_slot(i), rows_len[(i) as usize])
+    }
     let n: u64 = ulib.clip_hist_take(0, (&buf[0 as usize]) as u64, TXT - 1)
     buf[(n) as usize] = 0 as u8
     ulib.say((&s_head[0 as usize]) as u64)

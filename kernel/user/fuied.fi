@@ -18,6 +18,7 @@ import ulib
 import wlibc
 import wlib
 import utf8
+import xfer
 import fuiapp
 import fuiglyph
 import fui.render
@@ -25,7 +26,7 @@ import fui.theme
 import fui.painter
 
 export {
-    ed_new, ed_size, ed_key, ed_key_mod, ed_paint, ed_hit, ed_press, ed_drag, ed_wheel,
+    ed_new, ed_size, ed_key, ed_key_mod, ed_paint, ed_hit, ed_press, ed_drag, ed_release, ed_middle, ed_wheel,
     ed_scroll_hit, ta_text_set, ta_text_get, ta_text_len, ta_leeren,
     ta_zeilen, ta_zeile, ta_spalte, ta_geaendert, ta_sauber, ta_eol,
     ta_eol_set, ta_lang, ta_nurlesen, ta_gehe, ta_waehle, ta_zeile_p,
@@ -1093,9 +1094,9 @@ fn ta_key(t: u64, k: u64) {
 
 // ---------------------------------------------------- die Zwischenablage
 
-fn ta_clip_put(t: u64) {
+fn ta_sel_text(t: u64) -> u64 {
     if !ta_has_sel(t) {
-        return
+        return 0
     }
     let a: u64 = ta_sel_first(t)
     let b: u64 = ta_sel_last(t)
@@ -1103,12 +1104,11 @@ fn ta_clip_put(t: u64) {
     let ax: u64 = a & 0xFFFFFFFF
     let by: u64 = b >> 32
     let bx: u64 = b & 0xFFFFFFFF
-    // Ein Puffer fuer die Auswahl. Er wird einmal geholt und behalten.
     if ta_clipbuf == 0 {
         ta_clipbuf = wlibc.map_surface(TA_CLIP)
         if ulib.bad(ta_clipbuf) {
             ta_clipbuf = 0
-            return
+            return 0
         }
     }
     var at: u64 = 0
@@ -1135,7 +1135,23 @@ fn ta_clip_put(t: u64) {
         }
         y = y + 1
     }
+    return at
+}
+
+fn ta_clip_put(t: u64) {
+    let at: u64 = ta_sel_text(t)
+    if at == 0 {
+        return
+    }
     let _r: u64 = wlibc.clip_put(ta_clipbuf, at)
+}
+
+fn ta_primary_put(t: u64) {
+    let at: u64 = ta_sel_text(t)
+    if at == 0 {
+        return
+    }
+    let _r: u64 = xfer.set(xfer.SEL_PRIMARY, xfer.MIME_TEXT, ta_clipbuf, at)
 }
 
 fn ta_clip_take(t: u64) {
@@ -1940,6 +1956,47 @@ fn ed_drag(t: u64, nx: u64, ny: u64, mx: u64, my: u64) {
     ed_hit(t, nx, ny, mx, my)
     tas(t, TS_AY, ay)
     tas(t, TS_AX, ax)
+}
+
+// The button went up: a standing selection becomes the primary selection.
+fn ed_release(t: u64) {
+    if t >= TA_MAX {
+        return
+    }
+    ta_primary_put(t)
+}
+
+// Middle click: the caret goes to the click and the primary selection (else the clipboard) is inserted there.
+fn ed_middle(t: u64, nx: u64, ny: u64, mx: u64, my: u64) {
+    if t >= TA_MAX || tag(t, TS_RO) != 0 {
+        return
+    }
+    if ta_clipbuf == 0 {
+        ta_clipbuf = wlibc.map_surface(TA_CLIP)
+        if ulib.bad(ta_clipbuf) {
+            ta_clipbuf = 0
+            return
+        }
+    }
+    var n: u64 = 0
+    if xfer.count(xfer.SEL_PRIMARY) != 0 {
+        n = xfer.get_text(xfer.SEL_PRIMARY, 0, ta_clipbuf, TA_CLIP - 1)
+        if ulib.bad(n) || n > TA_CLIP - 1 {
+            n = 0
+        }
+    }
+    if n == 0 {
+        n = wlibc.clip_take(ta_clipbuf, TA_CLIP - 1)
+    }
+    if n == 0 {
+        return
+    }
+    ed_hit(t, nx, ny, mx, my)
+    ta_sel_clear(t)
+    ta_push_undo(t)
+    ta_insert(t, ta_clipbuf, n)
+    tas(t, TS_DIRTY, 1)
+    ta_follow(t)
 }
 
 // The wheel / a click on the scroll bar track: scroll to a fraction.

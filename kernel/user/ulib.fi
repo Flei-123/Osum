@@ -46,6 +46,7 @@ import libc.kcall
 import libc.errno
 import libc.text
 import libc.io
+import xfer
 
 export {
     ignore_children, sys, say, put, sayn, sayu, say_line, nl, length, streq, word, digits,
@@ -1166,17 +1167,19 @@ const BT_IMAGE: u64 = 8
 const BT_FILES: u64 = 16
 
 fn bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
-    return asm("syscall", out("rax"), in("rax") SYS_BUS, in("rdi") op,
-        in("rsi") a1, in("rdx") a2, in("r10") a3, in("r8") a4, in("r9") 0,
-        clobber("rcx"), clobber("r11"), clobber("memory"))
+    return xfer.bus5(op, a1, a2, a3, a4)
 }
 
 fn bus_da() -> bool {
-    return !bad(bus5(12, 0, 3, 0, 0))
+    return xfer.available()
 }
 
 fn clip_put(typen: u64, p: u64, n: u64) -> u64 {
-    return bus5(10, typen, p, n, 0)
+    let r: u64 = xfer.set(xfer.SEL_CLIPBOARD, typen, p, n)
+    if bad(r) {
+        return r
+    }
+    return 0
 }
 
 const CLIP_AGAIN: u64 = 0xFFFFFFFFFFFFFFFA
@@ -1184,21 +1187,23 @@ const LAZY_POLLS: u64 = 40
 const LAZY_POLL_MS: u64 = 10
 
 fn clip_offer(typen: u64) -> u64 {
-    return bus5(13, typen, 0, 0, 0)
+    return xfer.offer(xfer.SEL_CLIPBOARD, typen)
 }
 
 fn clip_fill(p: u64, n: u64) -> u64 {
-    return bus5(14, p, n, 0, 0)
+    let r: u64 = xfer.fill(xfer.SEL_CLIPBOARD, 1 << xfer.mime_index(xfer.types(xfer.SEL_CLIPBOARD, 0)), p, n)
+    if bad(r) {
+        return r
+    }
+    return 0
 }
 
 fn clip_pending() -> bool {
-    let f: u64 = bus5(12, 0, 4, 0, 0)
-    return !bad(f) && (f & 1) != 0
+    return (xfer.flags(xfer.SEL_CLIPBOARD, 0) & 1) != 0
 }
 
 fn clip_wanted() -> bool {
-    let f: u64 = bus5(12, 0, 4, 0, 0)
-    return !bad(f) && (f & 3) == 3
+    return (xfer.flags(xfer.SEL_CLIPBOARD, 0) & 3) == 3
 }
 
 fn clip_take(p: u64, max: u64) -> u64 {
@@ -1206,68 +1211,53 @@ fn clip_take(p: u64, max: u64) -> u64 {
 }
 
 fn clip_hist_take(back: u64, p: u64, max: u64) -> u64 {
-    var n: u64 = bus5(11, back, p, max, 0)
-    var tries: u64 = 0
-    while n == CLIP_AGAIN && tries < LAZY_POLLS {
-        sleep_ms(LAZY_POLL_MS)
-        n = bus5(11, back, p, max, 0)
-        tries = tries + 1
-    }
+    let n: u64 = xfer.get_text(xfer.SEL_CLIPBOARD, back, p, max)
     if bad(n) {
         return 0
+    }
+    if n > max {
+        return max
     }
     return n
 }
 
 fn clip_count() -> u64 {
-    let n: u64 = bus5(12, 0, 3, 0, 0)
-    if bad(n) {
-        return 0
-    }
-    return n
+    return xfer.count(xfer.SEL_CLIPBOARD)
 }
 
 fn clip_typ(back: u64) -> u64 {
-    let n: u64 = bus5(12, back, 0, 0, 0)
-    if bad(n) {
-        return 0
-    }
-    return n
+    return xfer.types(xfer.SEL_CLIPBOARD, back)
 }
 
 fn clip_owner(back: u64) -> u64 {
-    let n: u64 = bus5(12, back, 2, 0, 0)
-    if bad(n) {
-        return 0
-    }
-    return n
+    return xfer.owner(xfer.SEL_CLIPBOARD, back)
 }
 
 fn drag_take(p: u64, max: u64) -> u64 {
-    let n: u64 = bus5(16, p, max, 0, 0)
+    let mime: u64 = xfer.negotiate(xfer.SEL_DRAG, 0, 0xFFFFFFFFFFFFFFFF)
+    if mime == 0 {
+        return 0
+    }
+    let n: u64 = xfer.drag_get(mime, p, max)
     if bad(n) {
         return 0
+    }
+    if n > max {
+        return max
     }
     return n
 }
 
-// Traegt der Ziehplatz einen PFAD? Ein Ziehen mit blossem Text ist
-// keine Datei, und ein Editor, der ihn trotzdem zu oeffnen versucht,
-// legt eine Datei mit einem Satz als Namen an.
 fn drag_type_path() -> u64 {
-    let t: u64 = bus5(18, 1, 0, 0, 0)
-    if bad(t) {
-        return 0
-    }
-    return t & BT_PATH
+    return xfer.drag_types() & BT_PATH
 }
 
 fn drag_an() -> bool {
-    return bus5(18, 0, 0, 0, 0) == 1
+    return xfer.drag_active()
 }
 
 fn drag_drop() -> u64 {
-    return bus5(17, 0, 0, 0, 0)
+    return xfer.drag_end()
 }
 
 fn noti_post(dringlich: u64, p: u64, n: u64) -> u64 {

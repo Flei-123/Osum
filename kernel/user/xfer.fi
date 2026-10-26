@@ -1,0 +1,670 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/xfer.fi -- the one transfer API for programs: clipboard, primary selection and drag payload.
+// Typed items (MIME bits), lazy handover (offer now, fill when somebody pastes), big payloads through adopted
+// segments, file lists as text/uri-list. Every program, terminal or window, goes through this file.
+profile kernel
+
+import libc.kcall
+import libc.errno
+import libc.io
+import urilist
+
+export {
+    SEL_CLIPBOARD, SEL_PRIMARY, SEL_DRAG,
+    MIME_TEXT, MIME_PATH, MIME_HTML, MIME_PNG, MIME_URIS, MIME_ANY_KNOWN,
+    INLINE_MAX, SIZE_MAX, AGAIN,
+    available, bus5, stat, is_error, byte_at,
+    mime_of, mime_name, mime_index, mime_custom,
+    set, set_text, set_file, get_to_file, offer, fill, get, get_text, get_files, clear, promote,
+    count, types, have, length, owner, seq, flags, negotiate,
+    provide, unprovide, pump, flush, wanted_sel, wanted_mime, waiting_for,
+    drag_start, drag_offer, drag_get, drag_active, drag_types, drag_end,
+    ST_OFFERS, ST_FILLS, ST_CLIPSETS, ST_CLIPGETS, ST_PRIMSETS, ST_SEGIO, ST_ADOPTED, ST_FREED, ST_MIMES,
+    ST_SEGS, ST_SEGPAGES, ST_DRAGS
+}
+
+const SYS_BUS: u64 = 1960
+
+const OP_SEGNEW: u64 = 7
+const OP_SEGDROP: u64 = 9
+const OP_SET: u64 = 10
+const OP_GET: u64 = 11
+const OP_INFO: u64 = 12
+const OP_OFFER: u64 = 13
+const OP_FILL: u64 = 14
+const OP_CLEAR: u64 = 17
+const OP_STAT: u64 = 22
+const OP_MIME: u64 = 24
+const OP_MIMENAME: u64 = 25
+const OP_SEGIO: u64 = 26
+const OP_PROMOTE: u64 = 27
+
+const INFO_TYPES: u64 = 0
+const INFO_LEN: u64 = 1
+const INFO_OWNER: u64 = 2
+const INFO_COUNT: u64 = 3
+const INFO_FLAGS: u64 = 4
+const INFO_HAVE: u64 = 5
+const INFO_SEQ: u64 = 6
+const INFO_WANTED: u64 = 7
+const INFO_UNFILLED: u64 = 8
+
+const SEL_CLIPBOARD: u64 = 0
+const SEL_PRIMARY: u64 = 1
+const SEL_DRAG: u64 = 2
+
+const MIME_TEXT: u64 = 1
+const MIME_PATH: u64 = 2
+const MIME_HTML: u64 = 4
+const MIME_PNG: u64 = 8
+const MIME_URIS: u64 = 16
+const MIME_ANY_KNOWN: u64 = 31
+
+const INLINE_MAX: u64 = 192
+const SIZE_MAX: u64 = 2097152
+const AGAIN: u64 = 0xFFFFFFFFFFFFFFFA
+const E_INVAL: u64 = 0xFFFFFFFFFFFFFFFC
+const E_NOENT: u64 = 0xFFFFFFFFFFFFFFFE
+const WAIT_POLLS: u64 = 300
+const WAIT_MS: u64 = 10
+const CUSTOM_BASE: u64 = 32
+
+const ST_SEGS: u64 = 0x40
+const ST_SEGPAGES: u64 = 0x48
+const ST_CLIPSETS: u64 = 0x50
+const ST_CLIPGETS: u64 = 0x58
+const ST_OFFERS: u64 = 0x60
+const ST_FILLS: u64 = 0x68
+const ST_DRAGS: u64 = 0x70
+const ST_PRIMSETS: u64 = 0xC0
+const ST_SEGIO: u64 = 0xC8
+const ST_ADOPTED: u64 = 0xD0
+const ST_FREED: u64 = 0xD8
+const ST_MIMES: u64 = 0xE0
+
+static mut providers: [u64; 3] = [0 as u64; 3]
+static mut providing: u64 = 0
+
+fn bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") SYS_BUS, in("rdi") op,
+        in("rsi") a1, in("rdx") a2, in("r10") a3, in("r8") a4, in("r9") 0,
+        clobber("rcx"), clobber("r11"), clobber("memory"))
+}
+
+fn is_error(v: u64) -> bool {
+    return errno.is_error(v)
+}
+
+fn sleep_ms(ms: u64) {
+    var ts: [u64; 2] = [0 as u64; 2]
+    ts[0 as usize] = ms / 1000
+    ts[1 as usize] = (ms % 1000) * 1000000
+    let _r: u64 = kcall.sys2(35, (&ts[0 as usize]) as u64, 0)
+}
+
+fn available() -> bool {
+    return !is_error(bus5(OP_INFO, 0, INFO_COUNT, 0, 0))
+}
+
+fn stat(which: u64) -> u64 {
+    let v: u64 = bus5(OP_STAT, which, 0, 0, 0)
+    if is_error(v) {
+        return 0
+    }
+    return v
+}
+
+fn ctz(mask: u64) -> u64 {
+    var i: u64 = 0
+    while i < 64 {
+        if ((mask >> i) & 1) != 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return 64
+}
+
+fn same_bytes(a: u64, an: u64, b: u64, bn: u64) -> bool {
+    if an != bn {
+        return false
+    }
+    var i: u64 = 0
+    while i < an {
+        if *((a + i) as *mut u8) != *((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn byte_at(p: u64) -> u64 {
+    let b: u8 = *(p as *mut u8)
+    return b as u64
+}
+
+fn cstr_len(p: u64) -> u64 {
+    var n: u64 = 0
+    while *((p + n) as *mut u8) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+static mut n_text: [u8; 11] = "text/plain\0"
+static mut n_path: [u8; 17] = "text/x-osum-path\0"
+static mut n_html: [u8; 10] = "text/html\0"
+static mut n_png: [u8; 10] = "image/png\0"
+static mut n_uris: [u8; 14] = "text/uri-list\0"
+
+fn known_name(i: u64) -> u64 {
+    if i == 0 {
+        return (&n_text[0 as usize]) as u64
+    }
+    if i == 1 {
+        return (&n_path[0 as usize]) as u64
+    }
+    if i == 2 {
+        return (&n_html[0 as usize]) as u64
+    }
+    if i == 3 {
+        return (&n_png[0 as usize]) as u64
+    }
+    if i == 4 {
+        return (&n_uris[0 as usize]) as u64
+    }
+    return 0
+}
+
+fn name_core_len(p: u64, n: u64) -> u64 {
+    var k: u64 = 0
+    while k < n && *((p + k) as *mut u8) != 59 {
+        k = k + 1
+    }
+    while k > 0 && *((p + k - 1) as *mut u8) == 32 {
+        k = k - 1
+    }
+    return k
+}
+
+fn mime_custom(p: u64, n: u64) -> u64 {
+    let r: u64 = bus5(OP_MIME, p, n, 0, 0)
+    if is_error(r) {
+        return 0
+    }
+    return 1 << r
+}
+
+fn mime_of(p: u64, n: u64) -> u64 {
+    let core: u64 = name_core_len(p, n)
+    var i: u64 = 0
+    while i < 5 {
+        let k: u64 = known_name(i)
+        if same_bytes(p, core, k, cstr_len(k)) {
+            return 1 << i
+        }
+        i = i + 1
+    }
+    return mime_custom(p, core)
+}
+
+fn mime_index(mask: u64) -> u64 {
+    return ctz(mask)
+}
+
+fn mime_name(mask: u64, out: u64, max: u64) -> u64 {
+    let i: u64 = ctz(mask)
+    if i >= 64 || max == 0 {
+        return 0
+    }
+    var n: u64 = 0
+    if i < 5 {
+        let k: u64 = known_name(i)
+        let kn: u64 = cstr_len(k)
+        while n < kn && n + 1 < max {
+            *((out + n) as *mut u8) = *((k + n) as *mut u8)
+            n = n + 1
+        }
+    } else if i >= CUSTOM_BASE {
+        let r: u64 = bus5(OP_MIMENAME, i, out, max - 1, 0)
+        if !is_error(r) {
+            n = r
+            if n + 1 > max {
+                n = max - 1
+            }
+        }
+    }
+    *((out + n) as *mut u8) = 0
+    return n
+}
+
+fn raw_set(sel: u64, mask: u64, p: u64, n: u64, seg1: u64) -> u64 {
+    return bus5(OP_SET, mask, p, n, seg1 | (sel << 8))
+}
+
+fn raw_fill(sel: u64, typeplus: u64, p: u64, n: u64, seg1: u64) -> u64 {
+    return bus5(OP_FILL, p, n, seg1, typeplus | (sel << 8))
+}
+
+fn raw_get(sel: u64, back: u64, typeplus: u64, out: u64, max: u64, meta: u64) -> u64 {
+    return bus5(OP_GET, back | (sel << 8) | (typeplus << 16), out, max, meta)
+}
+
+fn raw_info(sel: u64, back: u64, what: u64) -> u64 {
+    let v: u64 = bus5(OP_INFO, back | (sel << 8), what, 0, 0)
+    if is_error(v) {
+        return 0
+    }
+    return v
+}
+
+fn seg_drop(id: u64) {
+    let _r: u64 = bus5(OP_SEGDROP, id, 0, 0, 0)
+}
+
+fn blob_segment(p: u64, n: u64) -> u64 {
+    let id: u64 = bus5(OP_SEGNEW, (n + 4095) / 4096, 0, 0, 0)
+    if is_error(id) {
+        return id
+    }
+    let w: u64 = bus5(OP_SEGIO, id | (1 << 8), 0, p, n)
+    if is_error(w) {
+        seg_drop(id)
+        return w
+    }
+    return id + 1
+}
+
+fn set(sel: u64, mask: u64, p: u64, n: u64) -> u64 {
+    if n > SIZE_MAX {
+        return E_INVAL
+    }
+    var seg1: u64 = 0
+    if n > INLINE_MAX {
+        seg1 = blob_segment(p, n)
+        if is_error(seg1) {
+            return seg1
+        }
+    }
+    let rc: u64 = raw_set(sel, mask, p, n, seg1)
+    if is_error(rc) {
+        if seg1 != 0 {
+            seg_drop(seg1 - 1)
+        }
+        return rc
+    }
+    return n
+}
+
+fn set_text(p: u64, n: u64) -> u64 {
+    return set(SEL_CLIPBOARD, MIME_TEXT, p, n)
+}
+
+fn offer(sel: u64, mask: u64) -> u64 {
+    return bus5(OP_OFFER, mask, sel, 0, 0)
+}
+
+fn fill(sel: u64, mime: u64, p: u64, n: u64) -> u64 {
+    if n > SIZE_MAX {
+        return E_INVAL
+    }
+    var seg1: u64 = 0
+    if n > INLINE_MAX {
+        seg1 = blob_segment(p, n)
+        if is_error(seg1) {
+            return seg1
+        }
+    }
+    let rc: u64 = raw_fill(sel, ctz(mime) + 1, p, n, seg1)
+    if is_error(rc) {
+        if seg1 != 0 {
+            seg_drop(seg1 - 1)
+        }
+        return rc
+    }
+    return n
+}
+
+fn wanted_sel(w: u64) -> u64 {
+    return (w >> 8) - 1
+}
+
+fn wanted_mime(w: u64) -> u64 {
+    return 1 << ((w & 0xFF) - 1)
+}
+
+fn waiting_for() -> u64 {
+    return raw_info(0, 0, INFO_WANTED)
+}
+
+fn provide(sel: u64, f: fn(u64, u64) -> u64) {
+    if sel < 3 {
+        providers[sel as usize] = f as u64
+        providing = providing | (1 << sel)
+    }
+}
+
+fn unprovide(sel: u64) {
+    if sel < 3 {
+        providers[sel as usize] = 0
+        providing = providing & ~(1 << sel)
+    }
+}
+
+fn serve(w: u64) {
+    let sel: u64 = wanted_sel(w)
+    let mime: u64 = wanted_mime(w)
+    if sel >= 3 || providers[sel as usize] == 0 {
+        let _e: u64 = fill(sel, mime, 0, 0)
+        return
+    }
+    let f: fn(u64, u64) -> u64 = providers[sel as usize] as fn(u64, u64) -> u64
+    let _r: u64 = f(sel, mime)
+}
+
+fn pump() -> u64 {
+    if providing == 0 {
+        return 0
+    }
+    let w: u64 = waiting_for()
+    if w == 0 {
+        return 0
+    }
+    serve(w)
+    return 1
+}
+
+fn flush() {
+    if providing == 0 {
+        return
+    }
+    var guard: u64 = 0
+    while guard < 3 {
+        let w: u64 = raw_info(0, 0, INFO_UNFILLED)
+        if w == 0 {
+            return
+        }
+        serve(w)
+        guard = guard + 1
+    }
+}
+
+fn get(sel: u64, back: u64, mime: u64, dst: u64, max: u64) -> u64 {
+    let tp: u64 = ctz(mime) + 1
+    var meta: [u64; 6] = [0 as u64; 6]
+    let mp: u64 = (&meta[0 as usize]) as u64
+    var window: u64 = max
+    if window > INLINE_MAX {
+        window = INLINE_MAX
+    }
+    var tries: u64 = 0
+    var attempts: u64 = 0
+    while attempts < 4 {
+        var r: u64 = raw_get(sel, back, tp, dst, window, mp)
+        while r == AGAIN && tries < WAIT_POLLS {
+            if pump() == 0 {
+                sleep_ms(WAIT_MS)
+            }
+            tries = tries + 1
+            r = raw_get(sel, back, tp, dst, window, mp)
+        }
+        if is_error(r) {
+            return r
+        }
+        let len: u64 = meta[4 as usize]
+        let seg1: u64 = meta[3 as usize]
+        if seg1 == 0 {
+            return len
+        }
+        var take: u64 = len
+        if take > max {
+            take = max
+        }
+        if take > 0 {
+            let got: u64 = bus5(OP_SEGIO, (seg1 - 1), 0, dst, take)
+            if is_error(got) {
+                attempts = attempts + 1
+                continue
+            }
+        }
+        if raw_info(sel, back, INFO_SEQ) == meta[5 as usize] {
+            return len
+        }
+        attempts = attempts + 1
+    }
+    return AGAIN
+}
+
+fn set_file(sel: u64, mask: u64, path: u64) -> u64 {
+    let size: u64 = io.size_of(path)
+    if is_error(size) || size > SIZE_MAX {
+        return E_INVAL
+    }
+    let fd: u64 = io.open(path, 0)
+    if is_error(fd) {
+        return fd
+    }
+    var head: [u8; 192] = [0 as u8; 192]
+    var chunk: [u8; 4096] = [0 as u8; 4096]
+    let cp: u64 = (&chunk[0 as usize]) as u64
+    var seg1: u64 = 0
+    if size > INLINE_MAX {
+        let id: u64 = bus5(OP_SEGNEW, (size + 4095) / 4096, 0, 0, 0)
+        if is_error(id) {
+            let _c: u64 = io.close(fd)
+            return id
+        }
+        seg1 = id + 1
+    }
+    var done: u64 = 0
+    var failed: u64 = 0
+    while done < size && failed == 0 {
+        var want: u64 = size - done
+        if want > 4096 {
+            want = 4096
+        }
+        let got: u64 = io.read_full(fd, cp, want)
+        if is_error(got) || got != want {
+            failed = E_INVAL
+        } else {
+            var k: u64 = 0
+            while k < got && done + k < INLINE_MAX {
+                head[(done + k) as usize] = chunk[k as usize]
+                k = k + 1
+            }
+            if seg1 != 0 {
+                let w: u64 = bus5(OP_SEGIO, (seg1 - 1) | (1 << 8), done, cp, got)
+                if is_error(w) {
+                    failed = w
+                }
+            }
+            done = done + got
+        }
+    }
+    let _c2: u64 = io.close(fd)
+    if failed == 0 {
+        let rc: u64 = raw_set(sel, mask, (&head[0 as usize]) as u64, size, seg1)
+        if !is_error(rc) {
+            return size
+        }
+        failed = rc
+    }
+    if seg1 != 0 {
+        seg_drop(seg1 - 1)
+    }
+    return failed
+}
+
+fn get_to_file(sel: u64, back: u64, mime: u64, path: u64) -> u64 {
+    var meta: [u64; 6] = [0 as u64; 6]
+    var head: [u8; 192] = [0 as u8; 192]
+    var chunk: [u8; 4096] = [0 as u8; 4096]
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let hp: u64 = (&head[0 as usize]) as u64
+    let cp: u64 = (&chunk[0 as usize]) as u64
+    var r: u64 = raw_get(sel, back, ctz(mime) + 1, hp, INLINE_MAX, mp)
+    var tries: u64 = 0
+    while r == AGAIN && tries < WAIT_POLLS {
+        if pump() == 0 {
+            sleep_ms(WAIT_MS)
+        }
+        tries = tries + 1
+        r = raw_get(sel, back, ctz(mime) + 1, hp, INLINE_MAX, mp)
+    }
+    if is_error(r) {
+        return r
+    }
+    let len: u64 = meta[4 as usize]
+    let seg1: u64 = meta[3 as usize]
+    let fd: u64 = io.create(path)
+    if is_error(fd) {
+        return fd
+    }
+    var done: u64 = 0
+    var failed: u64 = 0
+    if seg1 == 0 {
+        let w: u64 = io.write_all(fd, hp, len)
+        if is_error(w) || w != len {
+            failed = E_INVAL
+        }
+        done = len
+    }
+    while done < len && failed == 0 {
+        var part: u64 = len - done
+        if part > 4096 {
+            part = 4096
+        }
+        let g: u64 = bus5(OP_SEGIO, seg1 - 1, done, cp, part)
+        if is_error(g) {
+            failed = g
+        } else {
+            let w2: u64 = io.write_all(fd, cp, part)
+            if is_error(w2) || w2 != part {
+                failed = E_INVAL
+            }
+            done = done + part
+        }
+    }
+    let _c: u64 = io.close(fd)
+    if failed == 0 && raw_info(sel, back, INFO_SEQ) != meta[5 as usize] {
+        failed = AGAIN
+    }
+    if failed != 0 {
+        return failed
+    }
+    return len
+}
+
+fn types(sel: u64, back: u64) -> u64 {
+    return raw_info(sel, back, INFO_TYPES)
+}
+
+fn have(sel: u64, back: u64) -> u64 {
+    return raw_info(sel, back, INFO_HAVE)
+}
+
+fn length(sel: u64, back: u64) -> u64 {
+    return raw_info(sel, back, INFO_LEN)
+}
+
+fn owner(sel: u64, back: u64) -> u64 {
+    return raw_info(sel, back, INFO_OWNER)
+}
+
+fn seq(sel: u64, back: u64) -> u64 {
+    return raw_info(sel, back, INFO_SEQ)
+}
+
+fn flags(sel: u64, back: u64) -> u64 {
+    return raw_info(sel, back, INFO_FLAGS)
+}
+
+fn count(sel: u64) -> u64 {
+    return raw_info(sel, 0, INFO_COUNT)
+}
+
+fn negotiate(sel: u64, back: u64, accept: u64) -> u64 {
+    let both: u64 = types(sel, back) & accept
+    if both == 0 {
+        return 0
+    }
+    return 1 << ctz(both)
+}
+
+fn promote(back: u64) -> u64 {
+    return bus5(OP_PROMOTE, back, 0, 0, 0)
+}
+
+fn clear(sel: u64) -> u64 {
+    return bus5(OP_CLEAR, sel + 1, 0, 0, 0)
+}
+
+fn get_text(sel: u64, back: u64, dst: u64, max: u64) -> u64 {
+    let have_types: u64 = types(sel, back)
+    if (have_types & MIME_TEXT) != 0 {
+        return get(sel, back, MIME_TEXT, dst, max)
+    }
+    if (have_types & MIME_PATH) != 0 {
+        return get(sel, back, MIME_PATH, dst, max)
+    }
+    if (have_types & MIME_URIS) != 0 {
+        let n: u64 = get(sel, back, MIME_URIS, dst, max)
+        if is_error(n) {
+            return n
+        }
+        var m: u64 = n
+        if m > max {
+            m = max
+        }
+        return urilist.list_to_plain(dst, m, max)
+    }
+    return E_NOENT
+}
+
+fn get_files(sel: u64, back: u64, dst: u64, max: u64) -> u64 {
+    let have_types: u64 = types(sel, back)
+    if (have_types & MIME_URIS) != 0 {
+        return get(sel, back, MIME_URIS, dst, max)
+    }
+    if (have_types & MIME_PATH) != 0 {
+        let n: u64 = get(sel, back, MIME_PATH, dst, max - 20)
+        if is_error(n) {
+            return n
+        }
+        var tmp: [u8; 520] = [0 as u8; 520]
+        let tp: u64 = (&tmp[0 as usize]) as u64
+        var k: u64 = 0
+        while k < n && k < 512 {
+            *((tp + k) as *mut u8) = *((dst + k) as *mut u8)
+            k = k + 1
+        }
+        *((tp + k) as *mut u8) = 0
+        return urilist.list_add(dst, 0, max, tp)
+    }
+    return E_NOENT
+}
+
+fn drag_start(mask: u64, p: u64, n: u64) -> u64 {
+    return set(SEL_DRAG, mask, p, n)
+}
+
+fn drag_offer(mask: u64) -> u64 {
+    return offer(SEL_DRAG, mask)
+}
+
+fn drag_get(mime: u64, dst: u64, max: u64) -> u64 {
+    return get(SEL_DRAG, 0, mime, dst, max)
+}
+
+fn drag_active() -> bool {
+    return count(SEL_DRAG) != 0
+}
+
+fn drag_types() -> u64 {
+    return types(SEL_DRAG, 0)
+}
+
+fn drag_end() -> u64 {
+    return clear(SEL_DRAG)
+}

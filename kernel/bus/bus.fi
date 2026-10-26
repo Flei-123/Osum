@@ -108,14 +108,17 @@ export {
     init, forget_task,
     reg, find, send, recv, sub, pub,
     seg_new, seg_map, seg_drop, seg_pages, seg_frame, seg_owner,
-    clip_set, clip_get, clip_types, clip_count, clip_len, clip_owner,
-    offer, fill, offer_types, offer_state,
-    drag_set, drag_get, drag_types, drag_clear, drag_active,
+    seg_adopt, seg_release, seg_span,
+    take, give, b, sb, bump, seq_next, err, hist_addr, item_get, item_set,
     noti_post, noti_get, noti_peek, noti_count, noti_total, noti_len,
     noti_prio,
     noti_seen,
     stat,
     T_TEXT, T_PATH, T_HTML, T_IMAGE, T_FILES, T_ANY,
+    I_SEQ, I_PID, I_UID, I_TYPES, I_LEN, I_SEG, I_FLAGS, I_PRIO, I_DATA,
+    F_LAZY, F_WANTED, F_ADOPT, WANT_SHIFT, WANT_MASK,
+    HIST_BYTES, ADOPT_PID, PRIMARY, DRAG, MIMES, MIME_BYTES, MIME_MAX,
+    S_HISTNEXT, S_PRIMSETS, S_SEGIO, S_ADOPTED, S_FREED, S_MIMES,
     A_ANY, A_SAMEUID, A_ROOT,
     E_OK, E_FULL, E_NOENT, E_DENIED, E_INVAL, E_EMPTY, E_AGAIN,
     S_REGS, S_SENDS, S_RECVS, S_DENIED, S_PUBS, S_DELIVERS, S_DROPS,
@@ -145,9 +148,12 @@ const SEG_MAX: u64 = 64
 const HIST: u64 = 0x6100
 const HIST_BYTES: u64 = 256
 const HIST_MAX: u64 = 20
-const OFFER: u64 = 0x7500
-const DRAG: u64 = 0x7560
+const DRAG: u64 = 0x7500
 const NOTIS: u64 = 0x7600
+const PRIMARY: u64 = 0x7E00
+const MIMES: u64 = 0x7F00
+const MIME_BYTES: u64 = 32
+const MIME_MAX: u64 = 8
 // ==================================================== RUNDE DREI (S-006)
 // 128 STATT 64 -- WEIL BEI 64 KEIN EINZIGES ZEICHEN TEXT HINEINPASSTE.
 //
@@ -214,6 +220,11 @@ const S_SEQ: u64 = 0xA0 // laufende Nummer, nie zurueckgesetzt
 const S_NOTINEXT: u64 = 0xA8
 const S_NOTILEN: u64 = 0xB0
 const S_READY: u64 = 0xB8
+const S_PRIMSETS: u64 = 0xC0
+const S_SEGIO: u64 = 0xC8
+const S_ADOPTED: u64 = 0xD0
+const S_FREED: u64 = 0xD8
+const S_MIMES: u64 = 0xE0
 
 // ------------------------------------------------------- ein Dienstplatz
 
@@ -270,9 +281,13 @@ const I_FLAGS: u64 = 48
 const I_PRIO: u64 = 56
 const I_DATA: u64 = 64
 
-const F_LAZY: u64 = 1 // angeboten, noch nicht eingeloest
+const F_LAZY: u64 = 1
 const F_WANTED: u64 = 2
 const F_SEEN: u64 = 2
+const F_ADOPT: u64 = 4
+const WANT_SHIFT: u64 = 8
+const WANT_MASK: u64 = 0xFF00
+const ADOPT_PID: u64 = 0xFFFFFFFF
 
 // ------------------------------------------------------------ die Typen
 //
@@ -284,9 +299,9 @@ const F_SEEN: u64 = 2
 const T_TEXT: u64 = 1 // text/plain
 const T_PATH: u64 = 2 // text/uri-list, ein Pfad
 const T_HTML: u64 = 4 // text/html
-const T_IMAGE: u64 = 8 // image/*
-const T_FILES: u64 = 16 // text/uri-list, mehrere
-const T_ANY: u64 = 31
+const T_IMAGE: u64 = 8 // image/png
+const T_FILES: u64 = 16 // text/uri-list
+const T_ANY: u64 = 0xFF000000FF
 
 // ----------------------------------------------------------- die Rechte
 
@@ -434,20 +449,11 @@ fn init(state: u64) {
         i = i + 1
     }
     i = 0
-    while i < HIST_MAX {
-        item_set(hist_addr(state, i), I_SEQ, 0)
-        i = i + 1
-    }
-    i = 0
     while i < NOTI_MAX {
         item_set(state + kstate.BUS_OFF + NOTIS + i * NOTI_BYTES, I_SEQ, 0)
         i = i + 1
     }
-    item_set(state + kstate.BUS_OFF + OFFER, I_SEQ, 0)
-    item_set(state + kstate.BUS_OFF + DRAG, I_SEQ, 0)
     sb(state, S_LOCK, 0)
-    sb(state, S_HISTLEN, 0)
-    sb(state, S_HISTNEXT, 0)
     sb(state, S_SEQ, 1)
     sb(state, S_NOTINEXT, 0)
     sb(state, S_NOTILEN, 0)
@@ -1013,327 +1019,70 @@ fn seg_drop(state: u64, task: u64, id: u64) -> u64 {
     return E_OK
 }
 
-// ================================================== DIE ZWISCHENABLAGE
-//
-// Ein Ring von zwanzig Plaetzen. Der neueste ist Nummer 0 von aussen
-// gesehen; drinnen laeuft `S_HISTNEXT` vorwaerts und `idx_of` rechnet
-// das um. Win+V ist genau diese Umrechnung und sonst nichts.
-fn idx_of(state: u64, back: u64) -> u64 {
-    let len: u64 = b(state, S_HISTLEN)
-    if back >= len {
-        return HIST_MAX
-    }
-    let nxt: u64 = b(state, S_HISTNEXT)
-    // nxt zeigt auf den naechsten freien; der neueste liegt davor.
-    return (nxt + HIST_MAX - 1 - back) % HIST_MAX
-}
-
-fn put_item(a: u64, seq: u64, pid: u64, uid: u64, types: u64, len: u64,
-    seg: u64, flags: u64, prio: u64, data: u64) {
-    item_set(a, I_SEQ, seq)
-    item_set(a, I_PID, pid)
-    item_set(a, I_UID, uid)
-    item_set(a, I_TYPES, types)
-    item_set(a, I_LEN, len)
-    item_set(a, I_SEG, seg)
-    item_set(a, I_FLAGS, flags)
-    item_set(a, I_PRIO, prio)
-    var k: u64 = 0
-    while k < INLINE_MAX {
-        var c: u64 = 0
-        if k < len && data != 0 {
-            c = kstate.get8(data + k)
-        }
-        kstate.set8(a + I_DATA + k, c as u8)
-        k = k + 1
-    }
-}
-
-fn settle_lazy(state: u64) {
-    var i: u64 = 0
-    while i < HIST_MAX {
-        let a: u64 = hist_addr(state, i)
-        if item_get(a, I_SEQ) != 0 && (item_get(a, I_FLAGS) & F_LAZY) != 0 {
-            item_set(a, I_FLAGS, 0)
-            item_set(a, I_LEN, 0)
-        }
-        i = i + 1
-    }
-}
-
-// Die Zwischenablage setzen. `data` ist KERNELSPEICHER (der Aufrufer hat
-// geholt), `seg` ist 0 oder ein Segment fuer das Grosse.
-fn clip_set(state: u64, task: u64, types: u64, len: u64, seg: u64,
-    data: u64) -> u64 {
-    if types == 0 || (types & ~T_ANY) != 0 {
-        return err(E_INVAL)
-    }
-    if seg == 0 && len > INLINE_MAX {
-        return err(E_INVAL)
-    }
-    if seg != 0 && seg >= SEG_MAX {
+// ================================================ SEGMENT HANDOVER
+fn seg_adopt(state: u64, task: u64, id: u64) -> u64 {
+    if id >= SEG_MAX {
         return err(E_INVAL)
     }
     let pid: u64 = sched.tget(state, task, sched.T_PID)
-    let uid: u64 = sched.tget(state, task, sched.T_UID)
     take(state)
-    settle_lazy(state)
-    let nxt: u64 = b(state, S_HISTNEXT)
-    var l: u64 = len
-    if seg == 0 && l > INLINE_MAX {
-        l = INLINE_MAX
-    }
-    put_item(hist_addr(state, nxt), seq_next(state), pid, uid, types, l,
-        seg, 0, 0, data)
-    sb(state, S_HISTNEXT, (nxt + 1) % HIST_MAX)
-    if b(state, S_HISTLEN) < HIST_MAX {
-        sb(state, S_HISTLEN, b(state, S_HISTLEN) + 1)
-    }
-    bump(state, S_CLIPSETS)
-    give(state)
-    return E_OK
-}
-
-// Lesen. `back` = 0 ist der neueste, 1 der davor -- der Verlauf.
-// Rueckgabe: Zahl der Oktette, oder -E_AGAIN wenn der Eintrag nur
-// ANGEBOTEN ist und der Besitzer erst noch liefern muss.
-fn clip_get(state: u64, task: u64, back: u64, out: u64, max: u64,
-    meta: u64) -> u64 {
-    take(state)
-    let i: u64 = idx_of(state, back)
-    if i >= HIST_MAX {
+    if seg_at(state, id, G_USED) == 0 {
         give(state)
-        return err(E_EMPTY)
+        return err(E_NOENT)
     }
-    let a: u64 = hist_addr(state, i)
-    if (item_get(a, I_FLAGS) & F_LAZY) != 0 {
-        item_set(a, I_FLAGS, item_get(a, I_FLAGS) | F_WANTED)
-        give(state)
-        return err(E_AGAIN)
-    }
-    let len: u64 = item_get(a, I_LEN)
-    if meta != 0 {
-        kstate.set(meta, 0, item_get(a, I_TYPES))
-        kstate.set(meta, 8, item_get(a, I_PID))
-        kstate.set(meta, 16, item_get(a, I_UID))
-        kstate.set(meta, 24, item_get(a, I_SEG))
-        kstate.set(meta, 32, len)
-        kstate.set(meta, 40, item_get(a, I_SEQ))
-    }
-    var n: u64 = len
-    if n > max {
-        n = max
-    }
-    if n > INLINE_MAX {
-        n = INLINE_MAX
-    }
-    var k: u64 = 0
-    while k < n {
-        kstate.set8(out + k, kstate.get8(a + I_DATA + k) as u8)
-        k = k + 1
-    }
-    bump(state, S_CLIPGETS)
-    give(state)
-    return n
-}
-
-fn clip_count(state: u64) -> u64 {
-    return b(state, S_HISTLEN)
-}
-
-fn clip_types(state: u64, back: u64) -> u64 {
-    take(state)
-    let i: u64 = idx_of(state, back)
-    if i >= HIST_MAX {
-        give(state)
-        return 0
-    }
-    let t: u64 = item_get(hist_addr(state, i), I_TYPES)
-    give(state)
-    return t
-}
-
-fn clip_len(state: u64, back: u64) -> u64 {
-    take(state)
-    let i: u64 = idx_of(state, back)
-    if i >= HIST_MAX {
-        give(state)
-        return 0
-    }
-    let l: u64 = item_get(hist_addr(state, i), I_LEN)
-    give(state)
-    return l
-}
-
-fn clip_owner(state: u64, back: u64) -> u64 {
-    take(state)
-    let i: u64 = idx_of(state, back)
-    if i >= HIST_MAX {
-        give(state)
-        return 0
-    }
-    let p: u64 = item_get(hist_addr(state, i), I_PID)
-    give(state)
-    return p
-}
-
-// ============================================== VERZOEGERTE UEBERGABE
-//
-// Ein Programm, das ein grosses Bild kopiert, will es nicht kopieren,
-// solange niemand einfuegt. Also meldet es nur die TYPEN an (`offer`),
-// und der erste `clip_get` bekommt -E_AGAIN und legt dem Besitzer eine
-// Nachricht in den Eingang. Der antwortet mit `fill`, und der naechste
-// `clip_get` liefert. Das ist X11s ICCCM in drei Funktionen und ohne
-// den Zeitstempel-Tanz.
-fn offer(state: u64, task: u64, types: u64) -> u64 {
-    if types == 0 || (types & ~T_ANY) != 0 {
-        return err(E_INVAL)
-    }
-    let pid: u64 = sched.tget(state, task, sched.T_PID)
-    let uid: u64 = sched.tget(state, task, sched.T_UID)
-    take(state)
-    settle_lazy(state)
-    let nxt: u64 = b(state, S_HISTNEXT)
-    put_item(hist_addr(state, nxt), seq_next(state), pid, uid, types, 0, 0,
-        F_LAZY, 0, 0)
-    sb(state, S_HISTNEXT, (nxt + 1) % HIST_MAX)
-    if b(state, S_HISTLEN) < HIST_MAX {
-        sb(state, S_HISTLEN, b(state, S_HISTLEN) + 1)
-    }
-    bump(state, S_OFFERS)
-    give(state)
-    return E_OK
-}
-
-fn fill(state: u64, task: u64, len: u64, seg: u64, data: u64) -> u64 {
-    let pid: u64 = sched.tget(state, task, sched.T_PID)
-    take(state)
-    let i: u64 = idx_of(state, 0)
-    if i >= HIST_MAX {
-        give(state)
-        return err(E_EMPTY)
-    }
-    let a: u64 = hist_addr(state, i)
-    if (item_get(a, I_FLAGS) & F_LAZY) == 0 {
-        give(state)
-        return err(E_INVAL)
-    }
-    if item_get(a, I_PID) != pid {
+    if seg_at(state, id, G_OWNER) != pid {
         bump(state, S_DENIED)
         give(state)
         return err(E_DENIED)
     }
-    var l: u64 = len
-    if seg == 0 && l > INLINE_MAX {
-        l = INLINE_MAX
-    }
-    item_set(a, I_LEN, l)
-    item_set(a, I_SEG, seg)
-    item_set(a, I_FLAGS, 0)
-    var k: u64 = 0
-    while k < INLINE_MAX {
-        var c: u64 = 0
-        if k < l && data != 0 {
-            c = kstate.get8(data + k)
-        }
-        kstate.set8(a + I_DATA + k, c as u8)
-        k = k + 1
-    }
-    bump(state, S_FILLS)
+    seg_set(state, id, G_OWNER, ADOPT_PID)
+    bump(state, S_ADOPTED)
     give(state)
     return E_OK
 }
 
-fn offer_types(state: u64) -> u64 {
-    return clip_types(state, 0)
-}
-
-fn offer_state(state: u64) -> u64 {
+fn seg_release(state: u64, id: u64) {
+    if id >= SEG_MAX {
+        return
+    }
     take(state)
-    let i: u64 = idx_of(state, 0)
-    if i >= HIST_MAX {
+    if seg_at(state, id, G_USED) == 0 || seg_at(state, id, G_OWNER) != ADOPT_PID {
         give(state)
-        return 0
+        return
     }
-    let f: u64 = item_get(hist_addr(state, i), I_FLAGS)
+    let f: u64 = seg_at(state, id, G_FRAME)
+    let n: u64 = seg_at(state, id, G_PAGES)
+    seg_set(state, id, G_USED, 0)
+    bump(state, S_FREED)
     give(state)
-    return f
+    mem.frame_free_run(state, f, n)
 }
 
-// ====================================================== DRAG-AND-DROP
-//
-// DASSELBE Format, EIN Platz statt zwanzig, und ein Zustand mehr: eine
-// Ziehbewegung laeuft oder sie laeuft nicht. Der Explorer setzt beim
-// Druecken der Taste `drag_set(T_PATH, "/pfad")`, der Editor fragt beim
-// Loslassen `drag_get` und oeffnet, was drin steht. Dass hier kein
-// zweites Modell steht, ist der ganze Punkt von Entscheidung 2 der
-// Wegkarte.
-fn drag_set(state: u64, task: u64, types: u64, len: u64, seg: u64,
-    data: u64) -> u64 {
-    if types == 0 || (types & ~T_ANY) != 0 {
-        return err(E_INVAL)
-    }
-    if seg == 0 && len > INLINE_MAX {
-        return err(E_INVAL)
+fn seg_span(state: u64, task: u64, id: u64, write: bool, off: u64, n: u64) -> u64 {
+    if id >= SEG_MAX || n == 0 {
+        return 0
     }
     let pid: u64 = sched.tget(state, task, sched.T_PID)
     let uid: u64 = sched.tget(state, task, sched.T_UID)
     take(state)
-    put_item(state + kstate.BUS_OFF + DRAG, seq_next(state), pid, uid,
-        types, len, seg, 0, 0, data)
-    bump(state, S_DRAGS)
-    give(state)
-    return E_OK
-}
-
-fn drag_get(state: u64, out: u64, max: u64, meta: u64) -> u64 {
-    take(state)
-    let a: u64 = state + kstate.BUS_OFF + DRAG
-    if item_get(a, I_SEQ) == 0 {
+    if seg_at(state, id, G_USED) == 0 {
         give(state)
-        return err(E_EMPTY)
-    }
-    let len: u64 = item_get(a, I_LEN)
-    if meta != 0 {
-        kstate.set(meta, 0, item_get(a, I_TYPES))
-        kstate.set(meta, 8, item_get(a, I_PID))
-        kstate.set(meta, 16, item_get(a, I_UID))
-        kstate.set(meta, 24, item_get(a, I_SEG))
-        kstate.set(meta, 32, len)
-        kstate.set(meta, 40, item_get(a, I_SEQ))
-    }
-    var n: u64 = len
-    if n > max {
-        n = max
-    }
-    if n > INLINE_MAX {
-        n = INLINE_MAX
-    }
-    var k: u64 = 0
-    while k < n {
-        kstate.set8(out + k, kstate.get8(a + I_DATA + k) as u8)
-        k = k + 1
-    }
-    give(state)
-    return n
-}
-
-fn drag_types(state: u64) -> u64 {
-    return item_get(state + kstate.BUS_OFF + DRAG, I_TYPES)
-}
-
-fn drag_active(state: u64) -> u64 {
-    if item_get(state + kstate.BUS_OFF + DRAG, I_SEQ) == 0 {
         return 0
     }
-    return 1
-}
-
-fn drag_clear(state: u64) -> u64 {
-    take(state)
-    item_set(state + kstate.BUS_OFF + DRAG, I_SEQ, 0)
+    let owner: u64 = seg_at(state, id, G_OWNER)
+    var allowed: bool = owner == pid
+    if !write && (owner == ADOPT_PID || uid == 0) {
+        allowed = true
+    }
+    let size: u64 = seg_at(state, id, G_PAGES) * 4096
+    if !allowed || off >= size || n > size - off {
+        give(state)
+        return 0
+    }
+    let base: u64 = seg_at(state, id, G_FRAME) + off
+    kstate.add(state, kstate.BUS_OFF + S_SEGIO, n)
     give(state)
-    return E_OK
+    return base
 }
 
 // =================================================== BENACHRICHTIGUNGEN
@@ -1566,21 +1315,6 @@ fn forget_task(state: u64, task: u64, pid: u64) {
         }
         i = i + 1
     }
-    // Ein unerfuelltes Angebot dieser Aufgabe ist wertlos.
-    i = 0
-    while i < HIST_MAX {
-        let a: u64 = hist_addr(state, i)
-        if item_get(a, I_SEQ) != 0 && item_get(a, I_PID) == pid
-            && (item_get(a, I_FLAGS) & F_LAZY) != 0 {
-            item_set(a, I_SEQ, 0)
-            item_set(a, I_FLAGS, 0)
-            item_set(a, I_LEN, 0)
-        }
-        i = i + 1
-    }
-    if item_get(state + kstate.BUS_OFF + DRAG, I_PID) == pid {
-        item_set(state + kstate.BUS_OFF + DRAG, I_SEQ, 0)
-    }
     give(state)
 }
 
@@ -1589,7 +1323,7 @@ fn stat(state: u64, which: u64) -> u64 {
     if which == S_HISTLEN {
         return b(state, S_HISTLEN)
     }
-    if which > 0xC0 {
+    if which > 0xF8 {
         return 0
     }
     return b(state, which)

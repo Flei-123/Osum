@@ -31,6 +31,8 @@ import ulib
 import libc.io
 import libc.errno
 import wlib
+import xfer
+import urilist
 import fileop
 import expsmb
 import trash
@@ -39,7 +41,7 @@ import bulkren.plan
 export {
     MAXLIST, MAXUNDO,
     list_clear, list_add, list_num, list_at,
-    copy_remember, schnitt_an, einfuegen, clipboard_num, ablage_at,
+    copy_remember, stage, load_from_bus, schnitt_an, einfuegen, clipboard_num, ablage_at,
     umbenennen, in_korb, endgueltig,
     undo_last, undo_num, undo_art, undo_name,
     U_UMBENANNT, U_VERSCHOBEN, U_KORB, U_DIMS,
@@ -184,46 +186,97 @@ fn schnitt_an() -> bool {
     return ist_schnitt != 0
 }
 
-// Strg+C / Strg+X: die Auswahl auf den Bus. Der Text ist die Liste der
-// Pfade, mit "\n" getrennt -- CT_FILES, und bei genau einem Pfad
-// zusaetzlich CT_PATH.
-fn copy_remember(schnitt: bool) -> u64 {
-    var text: [u8; 4096] = [0 as u8; 4096]
-    var tp: u64 = 0
+static mut xbuf: [u8; 65536] = [0 as u8; 65536]
+static mut xpath: [u8; 512] = [0 as u8; 512]
+static mut x_cut: u64 = 0
+static mut x_seq: u64 = 0
+static mut n_cut_name: [u8; 22] = "application/x-osum-cut"
+
+fn cut_mask() -> u64 {
+    if x_cut == 0 {
+        x_cut = xfer.mime_of((&n_cut_name[(0) as usize]) as u64, 22)
+    }
+    return x_cut
+}
+
+fn stage(schnitt: bool) {
     n_ablage = 0
     var i: u64 = 0
     while i < n_liste {
-        let q: u64 = list_at(i)
-        ulib.strncpy(p_at((&ablage[(0) as usize]) as u64, n_ablage), q,
-            PFADB - 1)
+        ulib.strncpy(p_at((&ablage[(0) as usize]) as u64, n_ablage), list_at(i), PFADB - 1)
         n_ablage = n_ablage + 1
-        var k: u64 = 0
-        while (__mmio_read8((q + k) as *mut u8)) != 0 as u8 && tp < 4090 {
-            text[(tp) as usize] = __mmio_read8((q + k) as *mut u8)
-            tp = tp + 1
-            k = k + 1
+        i = i + 1
+    }
+    ist_schnitt = 0
+    if schnitt {
+        ist_schnitt = 1
+    }
+}
+
+fn load_from_bus() -> u64 {
+    if !xfer.available() {
+        return n_ablage
+    }
+    n_ablage = 0
+    ist_schnitt = 0
+    x_seq = 0
+    let kinds: u64 = xfer.types(xfer.SEL_CLIPBOARD, 0)
+    if (kinds & (xfer.MIME_URIS | xfer.MIME_PATH)) == 0 {
+        return 0
+    }
+    let n: u64 = xfer.get_files(xfer.SEL_CLIPBOARD, 0, (&xbuf[(0) as usize]) as u64, 65000)
+    if ulib.bad(n) || n > 65000 {
+        return 0
+    }
+    var pos: u64 = 0
+    while n_ablage < MAXLIST {
+        let nx: u64 = urilist.list_next((&xbuf[(0) as usize]) as u64, n, pos, (&xpath[(0) as usize]) as u64, 512)
+        if nx == 0 {
+            break
         }
-        if i + 1 < n_liste && tp < 4090 {
-            text[(tp) as usize] = 10 as u8
-            tp = tp + 1
+        ulib.strncpy(p_at((&ablage[(0) as usize]) as u64, n_ablage), (&xpath[(0) as usize]) as u64, PFADB - 1)
+        n_ablage = n_ablage + 1
+        pos = nx
+    }
+    if (kinds & cut_mask()) != 0 {
+        ist_schnitt = 1
+    }
+    x_seq = xfer.seq(xfer.SEL_CLIPBOARD, 0)
+    return n_ablage
+}
+
+fn drop_cut_entry() {
+    if x_seq != 0 && xfer.seq(xfer.SEL_CLIPBOARD, 0) == x_seq {
+        let _c: u64 = xfer.clear(xfer.SEL_CLIPBOARD)
+    }
+    x_seq = 0
+}
+
+// Strg+C / Strg+X: the selection goes to the bus as text/uri-list; a cut carries the application/x-osum-cut flag.
+fn copy_remember(schnitt: bool) -> u64 {
+    stage(schnitt)
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < n_ablage {
+        at = urilist.list_add((&xbuf[(0) as usize]) as u64, at, 65536, ablage_at(i))
+        if at == 0 {
+            break
         }
         i = i + 1
     }
-    text[(tp) as usize] = 0 as u8
-    if schnitt {
-        ist_schnitt = 1
-    } else {
-        ist_schnitt = 0
+    var rc: u64 = 0
+    if at != 0 {
+        var kinds: u64 = xfer.MIME_URIS
+        if schnitt {
+            kinds = kinds | cut_mask()
+        }
+        let r: u64 = xfer.set(xfer.SEL_CLIPBOARD, kinds, (&xbuf[(0) as usize]) as u64, at)
+        if ulib.bad(r) {
+            rc = r
+        } else {
+            x_seq = xfer.seq(xfer.SEL_CLIPBOARD, 0)
+        }
     }
-    var typen: u64 = wlib.CT_FILES
-    if n_ablage == 1 {
-        typen = wlib.CT_FILES | wlib.CT_PATH | wlib.CT_TEXT
-    }
-    let rc: u64 = wlib.clip_put_typ(typen, (&text[(0) as usize]) as u64, tp)
-    // Die Belegzeile nennt BEIDE Zahlen getrennt: wie viele Pfade auf
-    // dem Bus liegen, ob es ein Schnitt war, und was der Bus sagte.
-    // Vorher stand `ist_schnitt` hinter `rc=` -- eine Zahl, die wie ein
-    // Fehler aussah und keiner war.
     ulib.say((&s_clip[(0) as usize]) as u64)
     ulib.sayn(n_ablage)
     ulib.say((&s_lz[(0) as usize]) as u64)
@@ -574,6 +627,7 @@ fn einfuegen(zielordner: u64) -> u64 {
         // liegen noch an ihrem Platz und sollen einfuegbar bleiben.
         n_ablage = 0
         ist_schnitt = 0
+        drop_cut_entry()
     }
     rc_letzt = fehler
     melde_paste(fehler)

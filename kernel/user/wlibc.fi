@@ -42,6 +42,7 @@
 profile kernel
 
 import ulib
+import xfer
 import libc.io
 import icons
 import utf8
@@ -241,15 +242,7 @@ const BUS_SEND_OP: u64 = 3
 const BUS_RECV_OP: u64 = 4
 const BUS_SUB_OP: u64 = 5
 const BUS_PUB_OP: u64 = 6
-const BUS_CLIPSET_OP: u64 = 10
 const CLIP_WIG_MAX: u64 = 4096 // CLIP_MAX of kernel/ui/wig.fi (the wig clipboard)
-const CLIP_BUS_INLINE: u64 = 192 // what one bus clipboard item keeps inline (INLINE_MAX in kernel/bus/bus.fi)
-const BUS_CLIPGET_OP: u64 = 11
-const BUS_CLIPINFO_OP: u64 = 12
-const BUS_DRAGSET_OP: u64 = 15
-const BUS_DRAGGET_OP: u64 = 16
-const BUS_DRAGCLEAR_OP: u64 = 17
-const BUS_DRAGINFO_OP: u64 = 18
 const BUS_NOTIPOST_OP: u64 = 19
 const BUS_NOTIGET_OP: u64 = 20
 const BUS_NOTIINFO_OP: u64 = 21
@@ -2864,160 +2857,89 @@ fn cursor_shape(s: u64) {
 // einbrechen.
 
 fn bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
-    return asm("syscall", out("rax"), in("rax") SYS_OSUM_BUS, in("rdi") op,
-        in("rsi") a1, in("rdx") a2, in("r10") a3, in("r8") a4, in("r9") 0,
-        clobber("rcx"), clobber("r11"), clobber("memory"))
+    return xfer.bus5(op, a1, a2, a3, a4)
 }
 
-// Gibt es den Bus in diesem Kern? Ein Ruf, der nichts tut: die Zahl der
-// Verlaufsplaetze. Kommt ein Fehler, laeuft der Kern mit `nobus`, und
-// jede Anwendung faellt auf die alte Zwischenablage zurueck.
 fn bus_da() -> bool {
-    return !ulib.bad(bus5(BUS_CLIPINFO_OP, 0, 3, 0, 0))
+    return xfer.available()
 }
 
 fn clip_put(p: u64, n: u64) -> u64 {
     return clip_put_typ(BT_TEXT, p, n)
 }
 
-// MIT TYP. Derselbe Text kann Text UND Pfad sein -- der Explorer legt
-// einen Dateinamen ab, der Editor liest ihn als Text, und beide haben
-// recht. Genau dafuer ist der erste Wert eine Maske.
 fn clip_put_typ(typen: u64, p: u64, n: u64) -> u64 {
     if s_noclip != 0 {
         return 0
     }
-    if n > CLIP_BUS_INLINE {
-        // The bus keeps only CLIP_BUS_INLINE octets inline (it cuts longer text SILENTLY). Longer text goes to the
-        // wig clipboard (4096 octets) in full; the bus gets the head so history/typ stay current, and clip_hist_take
-        // sees "full inline item" and then reads the long text from the wig clipboard.
-        // the syscall refuses n > CLIP_WIG_MAX (-ERANGE): cut here, the caller learns the kept length from the return
+    if !xfer.available() {
         var wn: u64 = n
         if wn > CLIP_WIG_MAX {
             wn = CLIP_WIG_MAX
         }
-        let w: u64 = sys3w(WIG_CLIPSET, p, wn, 0)
-        bus5(BUS_CLIPSET_OP, typen, p, CLIP_BUS_INLINE, 0)
-        if ulib.bad(w) {
-            return CLIP_BUS_INLINE
-        }
-        return w
+        return sys3w(WIG_CLIPSET, p, wn, 0)
     }
-    let r: u64 = bus5(BUS_CLIPSET_OP, typen, p, n, 0)
-    if !ulib.bad(r) {
-        return n
+    let r: u64 = xfer.set(xfer.SEL_CLIPBOARD, typen, p, n)
+    if ulib.bad(r) {
+        return 0
     }
-    return sys3w(WIG_CLIPSET, p, n, 0)
+    return r
 }
 
 fn clip_take(p: u64, max: u64) -> u64 {
     return clip_hist_take(0, p, max)
 }
 
-// `zurueck` 0 ist das Neueste, 1 das davor -- der Verlauf, und Win+V
-// ist genau diese Zahl und sonst nichts.
 fn clip_hist_take(back: u64, p: u64, max: u64) -> u64 {
     if s_noclip != 0 {
         return 0
     }
-    var n: u64 = bus5(BUS_CLIPGET_OP, back, p, max, 0)
-    var tries: u64 = 0
-    while n == ulib.CLIP_AGAIN && tries < ulib.LAZY_POLLS {
-        ulib.sleep_ms(ulib.LAZY_POLL_MS)
-        n = bus5(BUS_CLIPGET_OP, back, p, max, 0)
-        tries = tries + 1
-    }
-    if !ulib.bad(n) {
-        if n == CLIP_BUS_INLINE && back == 0 && max > CLIP_BUS_INLINE {
-            // a full inline item may be the head of a longer text kept by the wig clipboard: use it only if its
-            // first CLIP_BUS_INLINE octets are exactly what the bus holds (else the wig text is stale)
-            var head: [u8; 192] = [0 as u8; 192]
-            var k: u64 = 0
-            while k < n {
-                head[k as usize] = *((p + k) as *mut u8)
-                k = k + 1
-            }
-            let w: u64 = sys3w(WIG_CLIPGET, p, max, 0)
-            if !ulib.bad(w) && w > n {
-                var same: bool = true
-                k = 0
-                while k < n {
-                    if *((p + k) as *mut u8) != head[k as usize] {
-                        same = false
-                    }
-                    k = k + 1
-                }
-                if same {
-                    return w
-                }
-            }
-            k = 0
-            while k < n {
-                *((p + k) as *mut u8) = head[k as usize]
-                k = k + 1
-            }
+    if !xfer.available() {
+        if back != 0 {
+            return 0
         }
-        return n
+        let m: u64 = sys3w(WIG_CLIPGET, p, max, 0)
+        if ulib.bad(m) {
+            return 0
+        }
+        return m
     }
-    if back != 0 {
+    let n: u64 = xfer.get_text(xfer.SEL_CLIPBOARD, back, p, max)
+    if ulib.bad(n) {
         return 0
     }
-    let m: u64 = sys3w(WIG_CLIPGET, p, max, 0)
-    if ulib.bad(m) {
-        return 0
+    if n > max {
+        return max
     }
-    return m
+    return n
 }
 
 fn clip_hist_count() -> u64 {
-    let n: u64 = bus5(BUS_CLIPINFO_OP, 0, 3, 0, 0)
-    if ulib.bad(n) {
-        return 0
-    }
-    return n
+    return xfer.count(xfer.SEL_CLIPBOARD)
 }
 
 fn clip_hist_typ(back: u64) -> u64 {
-    let n: u64 = bus5(BUS_CLIPINFO_OP, back, 0, 0, 0)
-    if ulib.bad(n) {
-        return 0
-    }
-    return n
+    return xfer.types(xfer.SEL_CLIPBOARD, back)
 }
 
 fn clip_hist_owner(back: u64) -> u64 {
-    let n: u64 = bus5(BUS_CLIPINFO_OP, back, 2, 0, 0)
-    if ulib.bad(n) {
-        return 0
-    }
-    return n
+    return xfer.owner(xfer.SEL_CLIPBOARD, back)
 }
 
-// ------------------------------------------------------ Drag-and-Drop
-//
-// DASSELBE MODELL, EIN PLATZ. Der Explorer legt beim Ziehen einen Pfad
-// ab, der Editor fragt beim Loslassen danach. Dass das keine zweite
-// Ablage ist, sondern dieselben Felder, ist die Entscheidung 2 der
-// Wegkarte -- und der Grund, warum diese vier Funktionen zusammen
-// kuerzer sind als eine eigene Ablage waere.
 fn drag_put(typen: u64, p: u64, n: u64) -> u64 {
-    return bus5(BUS_DRAGSET_OP, typen, p, n, 0)
+    return xfer.drag_start(typen, p, n)
 }
 
 fn drag_take(p: u64, max: u64) -> u64 {
-    let n: u64 = bus5(BUS_DRAGGET_OP, p, max, 0, 0)
-    if ulib.bad(n) {
-        return 0
-    }
-    return n
+    return ulib.drag_take(p, max)
 }
 
 fn drag_an() -> bool {
-    return bus5(BUS_DRAGINFO_OP, 0, 0, 0, 0) == 1
+    return xfer.drag_active()
 }
 
 fn drag_drop() -> u64 {
-    return bus5(BUS_DRAGCLEAR_OP, 0, 0, 0, 0)
+    return xfer.drag_end()
 }
 
 // --------------------------------------------------- Benachrichtigungen
