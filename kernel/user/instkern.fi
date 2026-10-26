@@ -45,7 +45,8 @@ import dcrypt
 export {
     crypt_begin, crypt_end, crypt_off, crypt_active,
     BS, AUSRICHT, ESP_STD,
-    lese, schreibe, ist_ofs, wachsen, kopiere, kernel_source,
+    lese, schreibe, ist_ofs, wachsen, grow_begin, grow_step, grow_position, copy_begin, copy_step, copy_position, fail_with,
+    COPY_MORE, COPY_DONE, COPY_ERROR, GROW_MORE, GROW_DONE, GROW_ERROR, F_ABORT, F_TIMEOUT, kopiere, kernel_source,
     gpt_schreiben, bios_laden, bios_da, fat32_create, wurzel_kopieren, copy_root_from,
     plan_esp_start, plan_esp_ende, plan_ofs_start, plan_ofs_ende,
     plan_passt, quelle_pruefen,
@@ -78,6 +79,15 @@ const F_SCHREIBEN: u64 = 3
 const F_KEINOFS: u64 = 4
 const F_KLEIN: u64 = 5
 const F_KARTE: u64 = 6
+const F_ABORT: u64 = 7
+const F_TIMEOUT: u64 = 8
+
+const COPY_MORE: u64 = 0
+const COPY_DONE: u64 = 1
+const COPY_ERROR: u64 = 2
+const GROW_MORE: u64 = 0
+const GROW_DONE: u64 = 1
+const GROW_ERROR: u64 = 2
 
 static mut st_schritt: u64 = 0
 static mut st_promille: u64 = 0
@@ -97,6 +107,10 @@ fn fortschritt() -> u64 {
 
 fn fehler_bei() -> u64 {
     return st_fehler
+}
+
+fn fail_with(code: u64) {
+    st_fehler = code
 }
 
 static mut SEK: [u8; 512] = [0 as u8; 512]
@@ -726,7 +740,13 @@ fn ist_ofs(at: u64) -> bool {
 // ganzen Baum zeigte danach auf einen anderen Block. Dann sagt dieses
 // Programm nein, statt ein Dateisystem zu bauen, das sich selbst nicht
 // mehr findet.
-fn wachsen(fd: u64, start: u64, neu: u64) -> u64 {
+static mut gr_fd: u64 = 0
+static mut gr_start: u64 = 0
+static mut gr_pos: u64 = 0
+static mut gr_from: u64 = 0
+static mut gr_to: u64 = 0
+
+fn grow_begin(fd: u64, start: u64, neu: u64) -> u64 {
     let p: u64 = (&SEK[0 as usize]) as u64
     if !lese(fd, start, p, BS) {
         return 0
@@ -744,6 +764,11 @@ fn wachsen(fd: u64, start: u64, neu: u64) -> u64 {
     if ziel > deckt {
         ziel = deckt
     }
+    gr_fd = fd
+    gr_start = start
+    gr_from = alt
+    gr_pos = alt
+    gr_to = alt
     if ziel <= alt {
         return alt
     }
@@ -751,28 +776,58 @@ fn wachsen(fd: u64, start: u64, neu: u64) -> u64 {
     if !schreibe(fd, start, p, BS) {
         return 0
     }
-    // Die Bits. Sektorweise, damit kein Puffer von 64 KiB noetig ist.
-    var b: u64 = alt
-    while b < ziel {
-        let kb: u64 = 1 + b / (BS * 8)
-        let inb: u64 = b % (BS * 8)
-        let sek: u64 = inb / (BS * 8) // immer 0, steht hier der Klarheit halber
-        if !lese(fd, start + kb + sek, p, BS) {
-            return 0
+    gr_to = ziel
+    return ziel
+}
+
+fn grow_step(max_maps: u64) -> u64 {
+    let p: u64 = (&SEK[0 as usize]) as u64
+    var maps: u64 = 0
+    while gr_pos < gr_to && maps < max_maps {
+        let kb: u64 = 1 + gr_pos / (BS * 8)
+        if !lese(gr_fd, gr_start + kb, p, BS) {
+            return GROW_ERROR
         }
-        // Alles, was in DIESEN Kartenblock faellt, in einem Zug.
-        var ende: u64 = (kb - 1 + 1) * BS * 8
-        if ende > ziel {
-            ende = ziel
+        var ende: u64 = kb * BS * 8
+        if ende > gr_to {
+            ende = gr_to
         }
-        while b < ende {
-            let bit: u64 = b % (BS * 8)
+        while gr_pos < ende {
+            let bit: u64 = gr_pos % (BS * 8)
             let at: u64 = p + bit / 8
             p8(at, g8(at) & (255 ^ (1 << (bit % 8))))
-            b = b + 1
+            gr_pos = gr_pos + 1
         }
-        if !schreibe(fd, start + kb, p, BS) {
+        if !schreibe(gr_fd, gr_start + kb, p, BS) {
+            return GROW_ERROR
+        }
+        maps = maps + 1
+    }
+    if gr_to > gr_from {
+        st_promille = ((gr_pos - gr_from) * 1000) / (gr_to - gr_from)
+    }
+    if gr_pos >= gr_to {
+        return GROW_DONE
+    }
+    return GROW_MORE
+}
+
+fn grow_position() -> u64 {
+    return gr_pos
+}
+
+fn wachsen(fd: u64, start: u64, neu: u64) -> u64 {
+    let ziel: u64 = grow_begin(fd, start, neu)
+    if ziel == 0 {
+        return 0
+    }
+    while true {
+        let r: u64 = grow_step(64)
+        if r == GROW_ERROR {
             return 0
+        }
+        if r == GROW_DONE {
+            break
         }
     }
     return ziel
@@ -1181,29 +1236,65 @@ fn wurzel_kopieren(zfd: u64, qfd: u64, espsek: u64, qsekt: u64) -> bool {
 // `wurzel_kopieren` ist nur noch der Aufruf mit der alten Rechnung.
 // EINE Kopierschleife, zwei Aufrufer -- dieselbe Entscheidung wie bei
 // der Partitionstafel, und aus demselben Grund.
-fn copy_root_from(zfd: u64, qfd: u64, ofs_start: u64, qsekt: u64) -> bool {
+static mut cp_zfd: u64 = 0
+static mut cp_qfd: u64 = 0
+static mut cp_start: u64 = 0
+static mut cp_total: u64 = 0
+static mut cp_pos: u64 = 0
+
+fn copy_begin(zfd: u64, qfd: u64, ofs_start: u64, qsekt: u64) {
     st_schritt = S_KOPIE
     st_promille = 0
+    cp_zfd = zfd
+    cp_qfd = qfd
+    cp_start = ofs_start
+    cp_total = qsekt
+    cp_pos = 0
+}
+
+fn copy_step(max_chunks: u64) -> u64 {
     let puffer: u64 = (&KOP[0 as usize]) as u64
     let schritt: u64 = 8192 / BS
-    var b: u64 = 0
-    while b < qsekt {
+    var chunks: u64 = 0
+    while cp_pos < cp_total && chunks < max_chunks {
         var n: u64 = schritt
-        if b + n > qsekt {
-            n = qsekt - b
+        if cp_pos + n > cp_total {
+            n = cp_total - cp_pos
         }
-        if !lese(qfd, b, puffer, n * BS) {
+        if !lese(cp_qfd, cp_pos, puffer, n * BS) {
+            return COPY_ERROR
+        }
+        if !schreibe_geprueft(cp_zfd, cp_start + cp_pos, puffer, n * BS) {
+            return COPY_ERROR
+        }
+        cp_pos = cp_pos + n
+        chunks = chunks + 1
+    }
+    if cp_total > 0 {
+        st_promille = (cp_pos * 1000) / cp_total
+    }
+    if cp_pos >= cp_total {
+        st_promille = 1000
+        return COPY_DONE
+    }
+    return COPY_MORE
+}
+
+fn copy_position() -> u64 {
+    return cp_pos
+}
+
+fn copy_root_from(zfd: u64, qfd: u64, ofs_start: u64, qsekt: u64) -> bool {
+    copy_begin(zfd, qfd, ofs_start, qsekt)
+    while true {
+        let r: u64 = copy_step(256)
+        if r == COPY_ERROR {
             return false
         }
-        if !schreibe_geprueft(zfd, ofs_start + b, puffer, n * BS) {
-            return false
-        }
-        b = b + n
-        if qsekt > 0 {
-            st_promille = (b * 1000) / qsekt
+        if r == COPY_DONE {
+            break
         }
     }
-    st_promille = 1000
     return true
 }
 

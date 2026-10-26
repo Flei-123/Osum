@@ -1,0 +1,337 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import instkern
+
+export {
+    open, close, active, line, line_n, last, set_clock,
+    load, text, text_len, last_text, seq, reset_reader,
+    SLOT_CURRENT, SLOT_PREVIOUS, LOG_LBA, REGION_SECTORS
+}
+
+const BS: u64 = 512
+const LOG_LBA: u64 = 40
+const SLOT_SECTORS: u64 = 16
+const REGION_SECTORS: u64 = 32
+const SLOT_CURRENT: u64 = 0
+const SLOT_PREVIOUS: u64 = 1
+const DATA_BYTES: u64 = 7680
+const MAGIC: u64 = 0x474C534F
+const LAST_OFF: u64 = 64
+const LAST_MAX: u64 = 128
+const MIN_FIRST_START: u64 = 72
+
+static mut BUF: [u8; 7680] = [0 as u8; 7680]
+static mut HDR: [u8; 512] = [0 as u8; 512]
+static mut TMP: [u8; 8192] = [0 as u8; 8192]
+static mut g_fd: u64 = 0
+static mut g_on: bool = false
+static mut g_len: u64 = 0
+static mut g_seq: u64 = 0
+static mut g_clock: u64 = 0
+static mut g_flushed: u64 = 0
+static mut g_la: u64 = 0
+static mut g_lb: u64 = 0
+
+fn p8(at: u64, v: u64) {
+    __mmio_write8((at) as *mut u8, v as u8)
+}
+
+fn g8(at: u64) -> u64 {
+    return (*((at) as *mut u8)) as u64
+}
+
+fn put32(at: u64, v: u64) {
+    p8(at, v & 255)
+    p8(at + 1, (v >> 8) & 255)
+    p8(at + 2, (v >> 16) & 255)
+    p8(at + 3, (v >> 24) & 255)
+}
+
+fn get32(at: u64) -> u64 {
+    return g8(at) | (g8(at + 1) << 8) | (g8(at + 2) << 16) | (g8(at + 3) << 24)
+}
+
+fn zero(at: u64, n: u64) {
+    ulib.fill(at, 0, n)
+}
+
+fn is_zero(at: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if g8(at + i) != 0 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn slot_lba(slot: u64) -> u64 {
+    return LOG_LBA + slot * SLOT_SECTORS
+}
+
+fn hdr_ptr() -> u64 {
+    return (&HDR[0 as usize]) as u64
+}
+
+fn buf_ptr() -> u64 {
+    return (&BUF[0 as usize]) as u64
+}
+
+fn tmp_ptr() -> u64 {
+    return (&TMP[0 as usize]) as u64
+}
+
+fn slot_valid(fd: u64, slot: u64) -> u64 {
+    if !instkern.lese(fd, slot_lba(slot), hdr_ptr(), BS) {
+        return 2
+    }
+    if get32(hdr_ptr()) == MAGIC {
+        return 1
+    }
+    if !instkern.lese(fd, slot_lba(slot), tmp_ptr(), SLOT_SECTORS * BS) {
+        return 2
+    }
+    if is_zero(tmp_ptr(), SLOT_SECTORS * BS) {
+        return 0
+    }
+    return 2
+}
+
+fn write_header(last_p: u64) {
+    zero(hdr_ptr(), BS)
+    put32(hdr_ptr(), MAGIC)
+    put32(hdr_ptr() + 4, 1)
+    put32(hdr_ptr() + 8, g_len)
+    put32(hdr_ptr() + 12, g_seq)
+    put32(hdr_ptr() + 16, g_la & 0xFFFFFFFF)
+    put32(hdr_ptr() + 20, g_la >> 32)
+    put32(hdr_ptr() + 24, g_lb & 0xFFFFFFFF)
+    put32(hdr_ptr() + 28, g_lb >> 32)
+    if last_p != 0 {
+        ulib.copy(hdr_ptr() + LAST_OFF, last_p, LAST_MAX - 1)
+    }
+}
+
+static mut g_last: [u8; 128] = [0 as u8; 128]
+
+fn flush_header() {
+    if !g_on {
+        return
+    }
+    write_header((&g_last[0 as usize]) as u64)
+    let _w: bool = instkern.schreibe(g_fd, slot_lba(SLOT_CURRENT), hdr_ptr(), BS)
+}
+
+fn flush_data() {
+    if !g_on {
+        return
+    }
+    var first: u64 = g_flushed / BS
+    let lastsec: u64 = g_len / BS
+    while first <= lastsec && first < SLOT_SECTORS - 1 {
+        let _w: bool = instkern.schreibe(g_fd, slot_lba(SLOT_CURRENT) + 1 + first, buf_ptr() + first * BS, BS)
+        first = first + 1
+    }
+    g_flushed = g_len
+    flush_header()
+}
+
+fn open(fd: u64, total: u64, first_start: u64) -> bool {
+    g_on = false
+    if total < 4096 || first_start < MIN_FIRST_START {
+        return false
+    }
+    let a: u64 = slot_valid(fd, SLOT_CURRENT)
+    let b: u64 = slot_valid(fd, SLOT_PREVIOUS)
+    if a == 2 || b == 2 {
+        return false
+    }
+    g_seq = 1
+    if a == 1 {
+        if !instkern.lese(fd, slot_lba(SLOT_CURRENT), tmp_ptr(), SLOT_SECTORS * BS) {
+            return false
+        }
+        g_seq = get32(tmp_ptr() + 12) + 1
+        if !instkern.schreibe(fd, slot_lba(SLOT_PREVIOUS), tmp_ptr(), SLOT_SECTORS * BS) {
+            return false
+        }
+    }
+    g_fd = fd
+    g_len = 0
+    g_flushed = 0
+    zero(buf_ptr(), DATA_BYTES)
+    zero((&g_last[0 as usize]) as u64, LAST_MAX)
+    g_on = true
+    zero(tmp_ptr(), SLOT_SECTORS * BS)
+    let _z: bool = instkern.schreibe(fd, slot_lba(SLOT_CURRENT), tmp_ptr(), SLOT_SECTORS * BS)
+    flush_header()
+    return true
+}
+
+fn active() -> bool {
+    return g_on
+}
+
+fn set_clock(ms: u64) {
+    g_clock = ms
+}
+
+fn put_byte(c: u64) {
+    if g_len < DATA_BYTES {
+        BUF[g_len as usize] = c as u8
+        g_len = g_len + 1
+    }
+}
+
+fn put_str(p: u64) {
+    var i: u64 = 0
+    while true {
+        let c: u64 = g8(p + i)
+        if c == 0 {
+            break
+        }
+        put_byte(c)
+        i = i + 1
+    }
+}
+
+fn put_num(v: u64) {
+    var digits: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        put_byte(48)
+        return
+    }
+    while x > 0 {
+        digits[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        put_byte(digits[n as usize] as u64)
+    }
+}
+
+fn line(msg: u64) {
+    line_n(msg, 0, 0)
+}
+
+fn line_n(msg: u64, a: u64, b: u64) {
+    if !g_on {
+        return
+    }
+    put_byte(91)
+    put_num(g_clock)
+    put_byte(93)
+    put_byte(32)
+    put_str(msg)
+    if a != 0 || b != 0 {
+        put_byte(32)
+        put_num(a)
+        put_byte(32)
+        put_num(b)
+    }
+    put_byte(10)
+    flush_data()
+}
+
+fn last(msg: u64, a: u64, b: u64) {
+    if !g_on {
+        return
+    }
+    let dst: u64 = (&g_last[0 as usize]) as u64
+    zero(dst, LAST_MAX)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 70 {
+        let c: u64 = g8(msg + i)
+        if c == 0 {
+            break
+        }
+        p8(dst + n, c)
+        n = n + 1
+        i = i + 1
+    }
+    p8(dst + n, 32)
+    n = n + 1
+    var digits: [u8; 24] = [0 as u8; 24]
+    var d: u64 = 0
+    var x: u64 = g_clock
+    if x == 0 {
+        digits[0 as usize] = 48 as u8
+        d = 1
+    }
+    while x > 0 {
+        digits[d as usize] = (48 + x % 10) as u8
+        x = x / 10
+        d = d + 1
+    }
+    while d > 0 {
+        d = d - 1
+        p8(dst + n, digits[d as usize] as u64)
+        n = n + 1
+    }
+    g_la = a
+    g_lb = b
+    flush_header()
+}
+
+fn close() {
+    if g_on {
+        flush_data()
+    }
+    g_on = false
+}
+
+static mut r_len: u64 = 0
+static mut r_seq: u64 = 0
+static mut R_BUF: [u8; 7681] = [0 as u8; 7681]
+static mut R_LAST: [u8; 129] = [0 as u8; 129]
+
+fn reset_reader() {
+    r_len = 0
+    r_seq = 0
+}
+
+fn load(fd: u64, slot: u64) -> bool {
+    r_len = 0
+    r_seq = 0
+    if !instkern.lese(fd, slot_lba(slot), tmp_ptr(), SLOT_SECTORS * BS) {
+        return false
+    }
+    if get32(tmp_ptr()) != MAGIC {
+        return false
+    }
+    var n: u64 = get32(tmp_ptr() + 8)
+    if n > DATA_BYTES {
+        n = DATA_BYTES
+    }
+    r_seq = get32(tmp_ptr() + 12)
+    ulib.copy((&R_BUF[0 as usize]) as u64, tmp_ptr() + BS, n)
+    R_BUF[n as usize] = 0 as u8
+    ulib.copy((&R_LAST[0 as usize]) as u64, tmp_ptr() + LAST_OFF, LAST_MAX)
+    R_LAST[LAST_MAX as usize] = 0 as u8
+    r_len = n
+    return true
+}
+
+fn text() -> u64 {
+    return (&R_BUF[0 as usize]) as u64
+}
+
+fn text_len() -> u64 {
+    return r_len
+}
+
+fn last_text() -> u64 {
+    return (&R_LAST[0 as usize]) as u64
+}
+
+fn seq() -> u64 {
+    return r_seq
+}

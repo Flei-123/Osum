@@ -1,0 +1,195 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import instkern
+import instlog
+import dualkern
+
+export { report }
+
+const BS: u64 = 512
+const PROBE_STRIDE: u64 = 4096
+const PROBE_MAX_SECTORS: u64 = 1048576
+static mut SB: [u8; 512] = [0 as u8; 512]
+static mut PR: [u8; 512] = [0 as u8; 512]
+
+static mut s_sectors: [u8; 15] = "info: sectors=\0"
+static mut s_table: [u8; 13] = "info: table=\0"
+static mut s_part: [u8; 12] = "info: part \0"
+static mut s_ofs: [u8; 17] = "info: osum part \0"
+static mut s_noofs: [u8; 25] = "info: osum part not-ofs \0"
+static mut s_log: [u8; 16] = "info: log slot \0"
+static mut s_last: [u8; 17] = "info: log last: \0"
+static mut s_nolog: [u8; 22] = "info: no install log \0"
+static mut s_text: [u8; 23] = "info: log text follows\0"
+static mut s_end: [u8; 19] = "info: log text end\0"
+static mut s_keep: [u8; 12] = "info: keep \0"
+static mut s_leftover: [u8; 26] = "info: leftover-candidate \0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_blocks: [u8; 13] = " ofs_blocks=\0"
+static mut s_span: [u8; 15] = " span_sectors=\0"
+static mut s_grown: [u8; 8] = " grown=\0"
+static mut s_reach: [u8; 17] = " data_reach_mib=\0"
+static mut s_probes: [u8; 17] = " probes_nonzero=\0"
+static mut s_seq: [u8; 6] = " seq=\0"
+static mut s_len: [u8; 6] = " len=\0"
+static mut s_recovery: [u8; 22] = "recovery-do-not-touch\0"
+static mut s_esp: [u8; 17] = "esp-do-not-touch\0"
+static mut s_windows: [u8; 21] = "foreign-do-not-touch\0"
+static mut s_ownpart: [u8; 26] = "orientos-reinstall-target\0"
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn sp() {
+    say((&s_sp[0 as usize]) as u64)
+}
+
+fn g8(at: u64) -> u64 {
+    return (*((at) as *mut u8)) as u64
+}
+
+fn g64(at: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        v = v | (g8(at + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+fn nonzero(p: u64) -> bool {
+    var i: u64 = 0
+    while i < BS {
+        if g8(p + i) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn probe_ofs(fd: u64, i: u64) {
+    let start: u64 = dualkern.p_start(i)
+    let span: u64 = dualkern.p_ende(i) - start + 1
+    let sb: u64 = (&SB[0 as usize]) as u64
+    ulib.say((&s_ofs[0 as usize]) as u64)
+    ulib.sayu(i + 1)
+    if !instkern.lese(fd, start, sb, BS) || !instkern.ist_ofs(sb) {
+        ulib.say((&s_span[0 as usize]) as u64)
+        ulib.sayu(span)
+        ulib.say((&s_grown[0 as usize]) as u64)
+        ulib.sayu(0)
+        ulib.say((&s_blocks[0 as usize]) as u64)
+        ulib.sayu(0)
+        ulib.nl()
+        return
+    }
+    let blocks: u64 = g64(sb + 16)
+    ulib.say((&s_blocks[0 as usize]) as u64)
+    ulib.sayu(blocks)
+    ulib.say((&s_span[0 as usize]) as u64)
+    ulib.sayu(span)
+    ulib.say((&s_grown[0 as usize]) as u64)
+    if blocks >= span {
+        ulib.sayu(1)
+    } else {
+        ulib.sayu(0)
+    }
+    var reach: u64 = 0
+    var hits: u64 = 0
+    var off: u64 = 0
+    let pr: u64 = (&PR[0 as usize]) as u64
+    var limit: u64 = span
+    if limit > PROBE_MAX_SECTORS {
+        limit = PROBE_MAX_SECTORS
+    }
+    while off < limit {
+        if instkern.lese(fd, start + off, pr, BS) && nonzero(pr) {
+            reach = off
+            hits = hits + 1
+        }
+        off = off + PROBE_STRIDE
+    }
+    ulib.say((&s_reach[0 as usize]) as u64)
+    ulib.sayu(reach / 2048)
+    ulib.say((&s_probes[0 as usize]) as u64)
+    ulib.sayu(hits)
+    ulib.nl()
+}
+
+fn classify(t: u64) -> u64 {
+    if t == dualkern.T_RECOVERY {
+        return (&s_recovery[0 as usize]) as u64
+    }
+    if t == dualkern.T_ESP {
+        return (&s_esp[0 as usize]) as u64
+    }
+    if t == dualkern.T_OSUM {
+        return (&s_ownpart[0 as usize]) as u64
+    }
+    return (&s_windows[0 as usize]) as u64
+}
+
+fn show_log(fd: u64, slot: u64) {
+    ulib.say((&s_log[0 as usize]) as u64)
+    ulib.sayu(slot)
+    if !instlog.load(fd, slot) {
+        ulib.say((&s_nolog[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    ulib.say((&s_seq[0 as usize]) as u64)
+    ulib.sayu(instlog.seq())
+    ulib.say((&s_len[0 as usize]) as u64)
+    ulib.sayu(instlog.text_len())
+    ulib.nl()
+    ulib.say((&s_last[0 as usize]) as u64)
+    ulib.say(instlog.last_text())
+    ulib.nl()
+    ulib.say((&s_text[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say(instlog.text())
+    ulib.say((&s_end[0 as usize]) as u64)
+    ulib.nl()
+}
+
+fn report(fd: u64, sekt: u64) -> u64 {
+    ulib.say((&s_sectors[0 as usize]) as u64)
+    ulib.sayu(sekt)
+    ulib.nl()
+    let n: u64 = dualkern.tafel_lesen(fd, sekt)
+    if n == 0 || !dualkern.gpt_pruefen() {
+        return 1
+    }
+    var i: u64 = 0
+    while i < n {
+        ulib.say((&s_part[0 as usize]) as u64)
+        ulib.sayu(i + 1)
+        sp()
+        ulib.sayu(dualkern.p_start(i))
+        sp()
+        ulib.sayu(dualkern.p_ende(i))
+        sp()
+        ulib.sayu((dualkern.p_ende(i) - dualkern.p_start(i) + 1) / 2048)
+        sp()
+        ulib.sayu(dualkern.p_typ(i))
+        sp()
+        say(classify(dualkern.p_typ(i)))
+        ulib.nl()
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        if dualkern.p_typ(i) == dualkern.T_OSUM {
+            probe_ofs(fd, i)
+        }
+        i = i + 1
+    }
+    show_log(fd, instlog.SLOT_CURRENT)
+    show_log(fd, instlog.SLOT_PREVIOUS)
+    return 0
+}

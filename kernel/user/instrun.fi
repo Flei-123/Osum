@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import fuiapp
+import msg
+import busy
+import instkern
+import instlog
+
+export { copy_pumped, grow_pumped, start_clock, elapsed, show_boot, PHASE_COPY, PHASE_GROW }
+
+const PHASE_COPY: u64 = 1
+const PHASE_GROW: u64 = 2
+const COPY_TIMEOUT_MS: u64 = 5400000
+const GROW_TIMEOUT_MS: u64 = 1800000
+const UI_INTERVAL_MS: u64 = 80
+const LOG_INTERVAL_MS: u64 = 2000
+const COPY_CHUNKS_PER_TURN: u64 = 8
+const GROW_MAPS_PER_TURN: u64 = 4
+
+static mut g_t0: u64 = 0
+
+static mut k_title: [u8; 21] = "installer.busy.title\0"
+static mut k_copy: [u8; 20] = "installer.busy.copy\0"
+static mut k_grow: [u8; 20] = "installer.busy.grow\0"
+static mut k_boot: [u8; 20] = "installer.busy.boot\0"
+static mut m_copy_begin: [u8; 25] = "copy begin sectors start\0"
+static mut m_copy_end: [u8; 18] = "copy done sectors\0"
+static mut m_copy_pos: [u8; 24] = "copy at sector permille\0"
+static mut m_grow_begin: [u8; 18] = "grow begin blocks\0"
+static mut m_grow_end: [u8; 17] = "grow done blocks\0"
+static mut m_grow_pos: [u8; 23] = "grow at block permille\0"
+static mut m_abort: [u8; 26] = "cancelled by user in step\0"
+static mut m_timeout: [u8; 16] = "timeout in step\0"
+static mut m_err: [u8; 23] = "I/O error code in step\0"
+static mut m_phase_copy: [u8; 5] = "copy\0"
+static mut m_phase_grow: [u8; 5] = "grow\0"
+
+fn start_clock() {
+    g_t0 = fuiapp.now_ms()
+    instlog.set_clock(0)
+}
+
+fn elapsed() -> u64 {
+    let n: u64 = fuiapp.now_ms()
+    instlog.set_clock(n - g_t0)
+    return n - g_t0
+}
+
+fn show_boot() {
+    let _c: bool = busy.progress(msg.get((&k_title[0 as usize]) as u64), msg.get((&k_boot[0 as usize]) as u64), busy.PCT_INDETERMINATE, false)
+}
+
+fn finish(code: u64, phase_msg: u64, a: u64) -> bool {
+    instkern.fail_with(code)
+    var m: u64 = (&m_err[0 as usize]) as u64
+    if code == instkern.F_ABORT {
+        m = (&m_abort[0 as usize]) as u64
+    } else if code == instkern.F_TIMEOUT {
+        m = (&m_timeout[0 as usize]) as u64
+    }
+    instlog.line_n(m, phase_msg, a)
+    return false
+}
+
+fn copy_pumped(zfd: u64, qfd: u64, start: u64, qsekt: u64) -> bool {
+    let t0: u64 = elapsed()
+    instkern.copy_begin(zfd, qfd, start, qsekt)
+    instlog.line_n((&m_copy_begin[0 as usize]) as u64, qsekt, start)
+    var last_ui: u64 = 0
+    var last_log: u64 = t0
+    let text_key: u64 = (&k_copy[0 as usize]) as u64
+    let ok0: bool = busy.progress(msg.get((&k_title[0 as usize]) as u64), msg.get(text_key), 0 as i64, true)
+    if ok0 {
+        return finish(instkern.F_ABORT, PHASE_COPY, 0)
+    }
+    while true {
+        let now: u64 = elapsed()
+        if now - t0 > COPY_TIMEOUT_MS {
+            return finish(instkern.F_TIMEOUT, PHASE_COPY, instkern.copy_position())
+        }
+        let r: u64 = instkern.copy_step(COPY_CHUNKS_PER_TURN)
+        if r == instkern.COPY_ERROR {
+            return finish(instkern.fehler_bei(), PHASE_COPY, instkern.copy_position())
+        }
+        if r == instkern.COPY_DONE {
+            break
+        }
+        if now - last_ui >= UI_INTERVAL_MS {
+            last_ui = now
+            let pct: i64 = (instkern.fortschritt() / 10) as i64
+            if busy.progress(msg.get((&k_title[0 as usize]) as u64), msg.get(text_key), pct, true) {
+                return finish(instkern.F_ABORT, PHASE_COPY, instkern.copy_position())
+            }
+        }
+        if now - last_log >= LOG_INTERVAL_MS {
+            last_log = now
+            instlog.last((&m_copy_pos[0 as usize]) as u64, instkern.copy_position(), instkern.fortschritt())
+        }
+    }
+    instlog.line_n((&m_copy_end[0 as usize]) as u64, qsekt, elapsed())
+    return true
+}
+
+fn grow_pumped(fd: u64, start: u64, neu: u64) -> u64 {
+    let t0: u64 = elapsed()
+    let target: u64 = instkern.grow_begin(fd, start, neu)
+    if target == 0 {
+        let _f: bool = finish(instkern.F_SCHREIBEN, PHASE_GROW, 0)
+        return 0
+    }
+    instlog.line_n((&m_grow_begin[0 as usize]) as u64, target, start)
+    var last_ui: u64 = 0
+    var last_log: u64 = t0
+    let text_key: u64 = (&k_grow[0 as usize]) as u64
+    while true {
+        let now: u64 = elapsed()
+        if now - t0 > GROW_TIMEOUT_MS {
+            let _f: bool = finish(instkern.F_TIMEOUT, PHASE_GROW, instkern.grow_position())
+            return 0
+        }
+        let r: u64 = instkern.grow_step(GROW_MAPS_PER_TURN)
+        if r == instkern.GROW_ERROR {
+            let _f: bool = finish(instkern.F_SCHREIBEN, PHASE_GROW, instkern.grow_position())
+            return 0
+        }
+        if r == instkern.GROW_DONE {
+            break
+        }
+        if now - last_ui >= UI_INTERVAL_MS {
+            last_ui = now
+            let pct: i64 = (instkern.fortschritt() / 10) as i64
+            if busy.progress(msg.get((&k_title[0 as usize]) as u64), msg.get(text_key), pct, true) {
+                let _f: bool = finish(instkern.F_ABORT, PHASE_GROW, instkern.grow_position())
+                return 0
+            }
+        }
+        if now - last_log >= LOG_INTERVAL_MS {
+            last_log = now
+            instlog.last((&m_grow_pos[0 as usize]) as u64, instkern.grow_position(), instkern.fortschritt())
+        }
+    }
+    instlog.line_n((&m_grow_end[0 as usize]) as u64, target, elapsed())
+    return target
+}
