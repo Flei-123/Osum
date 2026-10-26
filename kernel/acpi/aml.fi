@@ -53,6 +53,8 @@ import arch.x86_64.apic
 import acpi.amlns
 import acpi.amlobj
 import acpi.amlev
+import acpi.amlfail
+import acpi.amlskip
 
 export {
     stage, dump, ready, gsi_for, gsi_or_line, why, route_count,
@@ -60,62 +62,14 @@ export {
     // RUNDE ACPI-EREIGNISSE: den Namensraum HALTEN statt verwerfen,
     // und einen einzelnen Knoten auswerten.
     ns_hold, ns_arena, hold_err, hold_bad, eval_node, eval_node_arg, eval_node_args, ns_bytes,
-    fail_count, fail_sig, fail_off, fail_err, fail_bytes
+    hold_report
 }
 
 const SNAP_FRAMES: u64 = 256
-const FAIL_MAX: u64 = 24
-static mut f_pos: u64 = 0
-static mut f_n: u64 = 0
-static mut cur_table: u64 = 0
-static mut cur_sig: u64 = 0
-static mut f_sig: [u64; 24] = [0 as u64; 24]
-static mut f_off: [u64; 24] = [0 as u64; 24]
-static mut f_err: [u64; 24] = [0 as u64; 24]
-static mut f_bytes: [u64; 24] = [0 as u64; 24]
-
-fn fail_count() -> u64 {
-    return f_n
-}
-
-fn fail_sig(i: u64) -> u64 {
-    return f_sig[i as usize]
-}
-
-fn fail_off(i: u64) -> u64 {
-    return f_off[i as usize]
-}
-
-fn fail_err(i: u64) -> u64 {
-    return f_err[i as usize]
-}
-
-fn fail_bytes(i: u64) -> u64 {
-    return f_bytes[i as usize]
-}
-
-fn fail_mark(pos: u64) {
-    if f_pos == 0 {
-        f_pos = pos
-    }
-}
-
-fn fail_commit(state: u64) {
-    if f_pos != 0 && f_n < FAIL_MAX {
-        let i: usize = f_n as usize
-        f_sig[i] = cur_sig
-        f_off[i] = f_pos - cur_table
-        f_err[i] = amlns.err(state)
-        f_bytes[i] = amlns.rd32(f_pos) | (amlns.rd32(f_pos + 4) << 32)
-        f_n = f_n + 1
-    }
-    f_pos = 0
-}
-
 fn recover_container(state: u64) {
     if load_tolerant != 0 && amlns.err(state) != amlns.ERR_OK
         && hold_tolerable(amlns.err(state)) {
-        fail_commit(state)
+        amlfail.commit(state)
         if h_err == 0 {
             h_err = amlns.err(state)
         }
@@ -286,41 +240,13 @@ fn gsi_or_line(state: u64, idx: u64) -> u64 {
 // aufruft, darf ruhig Opcodes enthalten, die dieser Interpreter nicht
 // kennt.
 
-fn skip_name(p: u64) -> u64 {
-    var q: u64 = p
-    let c0: u64 = amlns.rd8(q)
-    if c0 == 0x5C {
-        q = q + 1
-    } else {
-        while amlns.rd8(q) == 0x5E {
-            q = q + 1
-        }
-    }
-    let c: u64 = amlns.rd8(q)
-    if c == 0x00 {
-        return q + 1
-    }
-    if c == 0x2E {
-        return q + 9
-    }
-    if c == 0x2F {
-        return q + 2 + amlns.rd8(q + 1) * 4
-    }
-    return q + 4
-}
-
 fn skip_connect(p: u64) -> u64 {
     if amlns.rd8(p) == 0x11 {
         var out: [u64; 1] = [0 as u64; 1]
         let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
         return p + 1 + ln
     }
-    return skip_name(p)
-}
-
-fn is_name_lead(c: u64) -> bool {
-    return c == 0x5C || c == 0x5E || c == 0x2E || c == 0x2F || c == 0x5F
-        || (c >= 0x41 && c <= 0x5A)
+    return amlskip.skip_name(p)
 }
 
 fn load_createfield(state: u64, scope: u64, p: u64, c: u64) -> u64 {
@@ -350,6 +276,7 @@ fn load_createfield(state: u64, scope: u64, p: u64, c: u64) -> u64 {
         amlns.NK_NAME, amlns.NMAX)
     if node != amlns.NONE {
         amlns.set_kind(state, node, amlns.NK_NAME)
+        amlns.set_flags(state, node, NF_FIELD_NAME)
         amlns.set_a(state, node, out[0])
         amlns.set_b(state, node, 0)
     }
@@ -415,8 +342,10 @@ fn load_fields(state: u64, scope: u64, region: u64, flags: u64, p: u64,
 // Aufteilung nur noch einen Bruchteil davon (siehe docs/ROUNDAML.md).
 const REGION_DEFERRED: u64 = 0x7FFFFFFFFFFFFFFF
 
+const NF_FIELD_NAME: u64 = 0x80
+
 fn region_arg_deferred(state: u64, scope: u64, p: u64) -> bool {
-    if !is_name_lead(amlns.rd8(p)) {
+    if !amlskip.is_name_lead(amlns.rd8(p)) {
         return false
     }
     var out: [u64; 1] = [0 as u64; 1]
@@ -424,7 +353,45 @@ fn region_arg_deferred(state: u64, scope: u64, p: u64) -> bool {
     if n == amlns.NONE {
         return true
     }
-    return amlns.node_kind(state, n) == amlns.NK_FIELD
+    let k: u64 = amlns.node_kind(state, n)
+    if k == amlns.NK_FIELD || k == amlns.NK_BUFFIELD {
+        return true
+    }
+    return k == amlns.NK_NAME && (amlns.node_flags(state, n) & NF_FIELD_NAME) != 0
+}
+
+fn region_operand_tolerable(e: u64) -> bool {
+    return e == amlns.ERR_OPCODE || e == amlns.ERR_TYPE || e == amlns.ERR_NOTFOUND
+        || e == amlns.ERR_ARG || e == amlns.ERR_DEPTH || e == amlns.ERR_TRUNC
+        || e == amlns.ERR_REGION || e == amlns.ERR_DIV0
+}
+
+fn region_operand(state: u64, f: u64, scope: u64, q: u64, out: u64) -> u64 {
+    if region_arg_deferred(state, scope, q) {
+        amlfail.defer_add()
+        amlns.wr64(out, REGION_DEFERRED)
+        return amlskip.term(state, scope, q)
+    }
+    var a: [u64; 3] = [0 as u64; 3]
+    let nq: u64 = amlev.ev(state, f, q, (&a[0]) as u64)
+    if nq != 0 {
+        amlev.deref(state, (&a[0]) as u64)
+        if amlns.err(state) == amlns.ERR_OK {
+            amlns.wr64(out, amlobj.to_int((&a[0]) as u64))
+            return nq
+        }
+    }
+    if !region_operand_tolerable(amlns.err(state)) {
+        return 0
+    }
+    let sk: u64 = amlskip.term(state, scope, q)
+    if sk == 0 {
+        return 0
+    }
+    amlns.err_clear(state)
+    amlfail.fallback_add()
+    amlns.wr64(out, REGION_DEFERRED)
+    return sk
 }
 
 fn load_term(state: u64, scope: u64, p: u64, end: u64) -> u64 {
@@ -571,7 +538,7 @@ fn load_leaf(state: u64, scope: u64, p: u64, end: u64) -> u64 {
             return load_createfield(state, scope, p, c)
         }
         if e2 == 0x88 {
-            var dq: u64 = skip_name(p + 2)
+            var dq: u64 = amlskip.skip_name(p + 2)
             var dk: u64 = 0
             while dk < 3 && dq != 0 {
                 dq = skip_data(state, dq, end)
@@ -592,33 +559,23 @@ fn load_leaf(state: u64, scope: u64, p: u64, end: u64) -> u64 {
                 return 0
             }
             amlev.frame_scope_set(f, scope)
-            var a: [u64; 3] = [0 as u64; 3]
-            var b: [u64; 3] = [0 as u64; 3]
-            var av: u64 = REGION_DEFERRED
-            var bv: u64 = 0
-            if region_arg_deferred(state, scope, q) {
-                q = skip_name(q)
-            } else {
-                q = amlev.ev(state, f, q, (&a[0]) as u64)
-                if q == 0 {
-                    return 0
-                }
-                amlev.deref(state, (&a[0]) as u64)
-                av = amlobj.to_int((&a[0]) as u64)
+            var av: [u64; 1] = [0 as u64; 1]
+            var bv: [u64; 1] = [0 as u64; 1]
+            q = region_operand(state, f, scope, q, (&av[0]) as u64)
+            if q == 0 {
+                return 0
             }
-            if region_arg_deferred(state, scope, q) {
-                q = skip_name(q)
-            } else {
-                q = amlev.ev(state, f, q, (&b[0]) as u64)
-                if q == 0 {
-                    return 0
-                }
-                amlev.deref(state, (&b[0]) as u64)
-                bv = amlobj.to_int((&b[0]) as u64)
+            q = region_operand(state, f, scope, q, (&bv[0]) as u64)
+            if q == 0 {
+                return 0
+            }
+            if bv[0] == REGION_DEFERRED {
+                av[0] = REGION_DEFERRED
+                bv[0] = 0
             }
             amlns.set_kind(state, node, amlns.NK_REGION)
-            amlns.set_a(state, node, av)
-            amlns.set_b(state, node, bv)
+            amlns.set_a(state, node, av[0])
+            amlns.set_b(state, node, bv[0])
             amlns.set_c(state, node, space)
             s(state, A_REGS, g(state, A_REGS) + 1)
             return q
@@ -705,8 +662,8 @@ fn skip_data(state: u64, p: u64, end: u64) -> u64 {
     if c == 0x5B && amlns.rd8(p + 1) == 0x30 { // Revision
         return p + 2
     }
-    if is_name_lead(c) {
-        return skip_name(p)
+    if amlskip.is_name_lead(c) {
+        return amlskip.skip_name(p)
     }
     amlns.err_set(state, amlns.ERR_OPCODE)
     return 0
@@ -720,11 +677,11 @@ fn load_list(state: u64, scope: u64, p: u64, end: u64) {
         }
         let q: u64 = load_term(state, scope, i, end)
         if amlns.err(state) != amlns.ERR_OK {
-            fail_mark(i)
+            amlfail.mark(i, scope)
             return
         }
         if q == 0 || q <= i {
-            fail_mark(i)
+            amlfail.mark(i, scope)
             if q <= i && amlns.err(state) == amlns.ERR_OK {
                 amlns.err_set(state, amlns.ERR_TRUNC)
             }
@@ -1071,6 +1028,26 @@ fn hold_tolerable(e: u64) -> bool {
         || e == amlns.ERR_ARG || e == amlns.ERR_DEPTH
 }
 
+fn hold_report(state: u64) {
+    var s_head: [u8; 12] = "amlhold: e=\0"
+    var s_bad: [u8; 6] = " bad=\0"
+    var s_nodes: [u8; 8] = " nodes=\0"
+    var s_defer: [u8; 8] = " defer=\0"
+    var s_skip: [u8; 7] = " skip=\0"
+    serial.puts((&s_head[0]) as u64)
+    serial.dec(h_err)
+    serial.puts((&s_bad[0]) as u64)
+    serial.dec(h_bad)
+    serial.puts((&s_nodes[0]) as u64)
+    serial.dec(amlns.nodes(state))
+    serial.puts((&s_defer[0]) as u64)
+    serial.dec(amlfail.defer_count())
+    serial.puts((&s_skip[0]) as u64)
+    serial.dec(amlfail.fallback_count())
+    serial.nl()
+    amlfail.report_serial()
+}
+
 fn hold_err() -> u64 {
     return h_err
 }
@@ -1093,9 +1070,7 @@ fn load_all(state: u64, loud: bool) {
                 || sig == amlns.seg_of((&w_ssdt[0]) as u64) {
                 var start: u64 = t
                 var len: u64 = amlns.rd32(t + 4)
-                cur_table = t
-                cur_sig = sig
-                f_pos = 0
+                amlfail.begin(t, sig, len)
                 if kstate.mode_on(state, kstate.M_AMLBAD)
                     && sig == amlns.seg_of((&w_dsdt[0]) as u64) {
                     let cp: u64 = broken_copy(state, t)
@@ -1111,7 +1086,7 @@ fn load_all(state: u64, loud: bool) {
                 done = done + 1
                 if amlns.err(state) != amlns.ERR_OK {
                     if load_tolerant != 0 && hold_tolerable(amlns.err(state)) {
-                        fail_commit(state)
+                        amlfail.commit(state)
                         if h_err == 0 {
                             h_err = amlns.err(state)
                         }
@@ -1523,10 +1498,13 @@ fn ns_hold(state: u64) -> u64 {
     }
     h_err = 0
     h_bad = 0
-    f_n = 0
+    amlfail.clear()
     load_tolerant = 1
     load_all(state, false)
     load_tolerant = 0
+    if kstate.mode_on(state, kstate.M_AML) {
+        hold_report(state)
+    }
     if amlns.err(state) != amlns.ERR_OK || amlns.nodes(state) < HOLD_MIN_NODES {
         arena_put(state, run)
         return 0

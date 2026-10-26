@@ -1,0 +1,225 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import serial
+import acpi.amlns
+
+export {
+    begin, mark, commit, clear, count, sig, off, err, ctx_len, ctx_byte,
+    path_len, path_byte, defer_add, defer_count, fallback_add, fallback_count,
+    report_serial
+}
+
+const MAX: u64 = 24
+const CTX_BYTES: u64 = 48
+const CTX_BEFORE: u64 = 16
+const PATH_BYTES: u64 = 64
+const PATH_DEPTH: u64 = 12
+
+static mut pos: u64 = 0
+static mut scope_mark: u64 = 0
+static mut n: u64 = 0
+static mut deferred: u64 = 0
+static mut fallbacks: u64 = 0
+static mut cur_table: u64 = 0
+static mut cur_sig: u64 = 0
+static mut cur_len: u64 = 0
+static mut f_sig: [u64; 24] = [0 as u64; 24]
+static mut f_off: [u64; 24] = [0 as u64; 24]
+static mut f_err: [u64; 24] = [0 as u64; 24]
+static mut f_ctx_len: [u64; 24] = [0 as u64; 24]
+static mut f_path_len: [u64; 24] = [0 as u64; 24]
+static mut f_ctx: [u8; 1152] = [0 as u8; 1152]
+static mut f_path: [u8; 1536] = [0 as u8; 1536]
+
+fn clear() {
+    pos = 0
+    n = 0
+    deferred = 0
+    fallbacks = 0
+}
+
+fn begin(table: u64, signature: u64, len: u64) {
+    cur_table = table
+    cur_sig = signature
+    cur_len = len
+    pos = 0
+}
+
+fn mark(at: u64, scope: u64) {
+    if pos == 0 {
+        pos = at
+        scope_mark = scope
+    }
+}
+
+fn count() -> u64 {
+    return n
+}
+
+fn sig(i: u64) -> u64 {
+    return f_sig[i as usize]
+}
+
+fn off(i: u64) -> u64 {
+    return f_off[i as usize]
+}
+
+fn err(i: u64) -> u64 {
+    return f_err[i as usize]
+}
+
+fn ctx_len(i: u64) -> u64 {
+    return f_ctx_len[i as usize]
+}
+
+fn ctx_byte(i: u64, k: u64) -> u64 {
+    return f_ctx[(i * CTX_BYTES + k) as usize] as u64
+}
+
+fn path_len(i: u64) -> u64 {
+    return f_path_len[i as usize]
+}
+
+fn path_byte(i: u64, k: u64) -> u64 {
+    return f_path[(i * PATH_BYTES + k) as usize] as u64
+}
+
+fn defer_add() {
+    deferred = deferred + 1
+}
+
+fn fallback_add() {
+    fallbacks = fallbacks + 1
+}
+
+fn fallback_count() -> u64 {
+    return fallbacks
+}
+
+fn defer_count() -> u64 {
+    return deferred
+}
+
+fn path_store(state: u64, slot: u64, scope: u64) {
+    var segs: [u64; 12] = [0 as u64; 12]
+    var depth: u64 = 0
+    var node: u64 = scope
+    while node != 0 && node != amlns.NONE && depth < PATH_DEPTH {
+        segs[depth as usize] = amlns.node_name(state, node)
+        depth = depth + 1
+        node = amlns.node_parent(state, node)
+    }
+    let base: u64 = slot * PATH_BYTES
+    var w: u64 = 0
+    f_path[(base + w) as usize] = 92 as u8
+    w = w + 1
+    var d: u64 = depth
+    while d > 0 {
+        d = d - 1
+        let v: u64 = segs[d as usize]
+        var len: u64 = 4
+        while len > 1 && ((v >> ((len - 1) * 8)) & 0xFF) == 95 {
+            len = len - 1
+        }
+        if w + len + 1 >= PATH_BYTES {
+            break
+        }
+        var c: u64 = 0
+        while c < len {
+            f_path[(base + w) as usize] = ((v >> (c * 8)) & 0xFF) as u8
+            w = w + 1
+            c = c + 1
+        }
+        if d > 0 {
+            f_path[(base + w) as usize] = 46 as u8
+            w = w + 1
+        }
+    }
+    f_path_len[slot as usize] = w
+}
+
+fn ctx_store(slot: u64, at: u64) {
+    var start: u64 = at
+    if at - cur_table >= CTX_BEFORE {
+        start = at - CTX_BEFORE
+    } else {
+        start = cur_table
+    }
+    var end: u64 = start + CTX_BYTES
+    if end > cur_table + cur_len {
+        end = cur_table + cur_len
+    }
+    var len: u64 = 0
+    if end > start {
+        len = end - start
+    }
+    var k: u64 = 0
+    while k < len {
+        f_ctx[(slot * CTX_BYTES + k) as usize] = amlns.rd8(start + k) as u8
+        k = k + 1
+    }
+    f_ctx_len[slot as usize] = len
+    f_off[slot as usize] = at - cur_table
+}
+
+fn commit(state: u64) {
+    if pos != 0 && n < MAX {
+        let i: u64 = n
+        f_sig[i as usize] = cur_sig
+        f_err[i as usize] = amlns.err(state)
+        ctx_store(i, pos)
+        path_store(state, i, scope_mark)
+        n = n + 1
+    }
+    pos = 0
+}
+
+fn hex2(v: u64) {
+    var hi: u64 = (v >> 4) & 15
+    var lo: u64 = v & 15
+    if hi < 10 {
+        serial.put((48 + hi) as u8)
+    } else {
+        serial.put((87 + hi) as u8)
+    }
+    if lo < 10 {
+        serial.put((48 + lo) as u8)
+    } else {
+        serial.put((87 + lo) as u8)
+    }
+}
+
+fn report_serial() {
+    var s_head: [u8; 10] = "amlfail: \0"
+    var s_off: [u8; 6] = " off=\0"
+    var s_e: [u8; 4] = " e=\0"
+    var s_path: [u8; 7] = " path=\0"
+    var s_ctx: [u8; 6] = " ctx=\0"
+    var i: u64 = 0
+    while i < n {
+        serial.puts((&s_head[0]) as u64)
+        let sg: u64 = f_sig[i as usize]
+        var j: u64 = 0
+        while j < 4 {
+            serial.put(((sg >> (j * 8)) & 0xFF) as u8)
+            j = j + 1
+        }
+        serial.puts((&s_off[0]) as u64)
+        serial.dec(f_off[i as usize])
+        serial.puts((&s_e[0]) as u64)
+        serial.dec(f_err[i as usize])
+        serial.puts((&s_path[0]) as u64)
+        var k: u64 = 0
+        while k < f_path_len[i as usize] {
+            serial.put(f_path[(i * PATH_BYTES + k) as usize])
+            k = k + 1
+        }
+        serial.puts((&s_ctx[0]) as u64)
+        k = 0
+        while k < f_ctx_len[i as usize] {
+            hex2(f_ctx[(i * CTX_BYTES + k) as usize] as u64)
+            k = k + 1
+        }
+        serial.nl()
+        i = i + 1
+    }
+}

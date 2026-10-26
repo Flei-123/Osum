@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import acpi.amlns
+
+export { skip_name, is_name_lead, term }
+
+const MAX_DEPTH: u64 = 24
+
+fn is_name_lead(c: u64) -> bool {
+    return c == 0x5C || c == 0x5E || c == 0x2E || c == 0x2F || c == 0x5F
+        || (c >= 0x41 && c <= 0x5A)
+}
+
+fn skip_name(p: u64) -> u64 {
+    var q: u64 = p
+    let c0: u64 = amlns.rd8(q)
+    if c0 == 0x5C {
+        q = q + 1
+    } else {
+        while amlns.rd8(q) == 0x5E {
+            q = q + 1
+        }
+    }
+    let c: u64 = amlns.rd8(q)
+    if c == 0x00 {
+        return q + 1
+    }
+    if c == 0x2E {
+        return q + 9
+    }
+    if c == 0x2F {
+        return q + 2 + amlns.rd8(q + 1) * 4
+    }
+    return q + 4
+}
+
+fn pkg_end(p: u64) -> u64 {
+    var out: [u64; 1] = [0 as u64; 1]
+    let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+    return p + 1 + ln
+}
+
+fn string_end(p: u64) -> u64 {
+    var n: u64 = 0
+    while n < 4096 && amlns.rd8(p + 1 + n) != 0 {
+        n = n + 1
+    }
+    return p + 2 + n
+}
+
+fn arity(c: u64) -> u64 {
+    if c == 0x72 || c == 0x73 || c == 0x74 || c == 0x77 || c == 0x79 || c == 0x7A
+        || c == 0x7B || c == 0x7C || c == 0x7D || c == 0x7E || c == 0x7F
+        || c == 0x85 || c == 0x88 {
+        return 3
+    }
+    if c == 0x78 {
+        return 4
+    }
+    if c == 0x80 || c == 0x81 || c == 0x82 || c == 0x96 || c == 0x97 || c == 0x98
+        || c == 0x99 || c == 0x9D {
+        return 2
+    }
+    if c == 0x90 || c == 0x91 || c == 0x93 || c == 0x94 || c == 0x95 {
+        return 2
+    }
+    if c == 0x83 || c == 0x92 || c == 0x87 || c == 0x71 || c == 0x75 || c == 0x76 {
+        return 1
+    }
+    if c == 0x70 {
+        return 2
+    }
+    if c == 0x9C {
+        return 3
+    }
+    if c == 0x9E {
+        return 4
+    }
+    return 0
+}
+
+fn operator_args(state: u64, scope: u64, p: u64, n: u64, depth: u64) -> u64 {
+    var q: u64 = p + 1
+    var k: u64 = 0
+    while k < n && q != 0 {
+        q = term_at(state, scope, q, depth + 1)
+        k = k + 1
+    }
+    return q
+}
+
+fn ext_args(state: u64, scope: u64, p: u64, depth: u64) -> u64 {
+    let e: u64 = amlns.rd8(p + 1)
+    if e == 0x30 || e == 0x31 || e == 0x33 {
+        return p + 2
+    }
+    if e == 0x12 {
+        var q: u64 = term_at(state, scope, p + 2, depth + 1)
+        if q == 0 {
+            return 0
+        }
+        return term_at(state, scope, q, depth + 1)
+    }
+    if e == 0x28 || e == 0x29 {
+        var q: u64 = term_at(state, scope, p + 2, depth + 1)
+        if q == 0 {
+            return 0
+        }
+        return term_at(state, scope, q, depth + 1)
+    }
+    return 0
+}
+
+fn call_end(state: u64, scope: u64, p: u64, depth: u64) -> u64 {
+    var out: [u64; 1] = [0 as u64; 1]
+    let node: u64 = amlns.walk(state, scope, p, (&out[0]) as u64)
+    var q: u64 = skip_name(p)
+    if node == amlns.NONE || amlns.node_kind(state, node) != amlns.NK_METHOD {
+        return q
+    }
+    var argc: u64 = amlns.node_flags(state, node) & 7
+    while argc > 0 && q != 0 {
+        q = term_at(state, scope, q, depth + 1)
+        argc = argc - 1
+    }
+    return q
+}
+
+fn term_at(state: u64, scope: u64, p: u64, depth: u64) -> u64 {
+    if depth > MAX_DEPTH {
+        return 0
+    }
+    let c: u64 = amlns.rd8(p)
+    if c == 0x00 || c == 0x01 || c == 0xFF {
+        return p + 1
+    }
+    if c == 0x0A {
+        return p + 2
+    }
+    if c == 0x0B {
+        return p + 3
+    }
+    if c == 0x0C {
+        return p + 5
+    }
+    if c == 0x0E {
+        return p + 9
+    }
+    if c == 0x0D {
+        return string_end(p)
+    }
+    if c == 0x11 || c == 0x12 || c == 0x13 {
+        return pkg_end(p)
+    }
+    if c >= 0x60 && c <= 0x6E {
+        return p + 1
+    }
+    if is_name_lead(c) {
+        return call_end(state, scope, p, depth)
+    }
+    if c == 0x5B {
+        return ext_args(state, scope, p, depth)
+    }
+    let n: u64 = arity(c)
+    if n > 0 {
+        return operator_args(state, scope, p, n, depth)
+    }
+    return 0
+}
+
+fn term(state: u64, scope: u64, p: u64) -> u64 {
+    return term_at(state, scope, p, 0)
+}
