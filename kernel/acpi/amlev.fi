@@ -33,6 +33,9 @@ import lib.kstate
 import serial
 import acpi.amlns
 import acpi.amlobj
+import acpi.amlstr
+import acpi.amlsys
+import acpi.amlfield
 
 export {
     ev, ev_target, exec_list, call_method, store_into, deref,
@@ -53,6 +56,7 @@ export {
 // Routentafel, siehe die Begruendung dort.
 
 const A_DEPTH: u64 = 56
+const A_PERSIST: u64 = 2832
 const A_CALLS: u64 = 64
 const A_BUDGET: u64 = 72
 const A_LASTIF: u64 = 80 // war die Bedingung des letzten `If` wahr?
@@ -96,8 +100,8 @@ const A_NOTN: u64 = 2560 // wie viele im Ring stehen
 const A_NOTR: u64 = 2568 // NOT_MAX * 16: Knoten, dann Code
 const NOT_MAX: u64 = 16
 
-const DEPTH_MAX: u64 = 32
-const CALL_MAX: u64 = 8
+const DEPTH_MAX: u64 = 64
+const CALL_MAX: u64 = 16
 
 // WIE VIEL KERNSTAPEL DER INTERPRETER VERBRAUCHEN DARF.
 //
@@ -295,13 +299,19 @@ fn leave(state: u64) {
     }
 }
 
+fn persist(state: u64) {
+    s(state, A_PERSIST, g(state, A_PERSIST) + 1)
+}
+
 fn bad(state: u64) -> bool {
     return amlns.err(state) != amlns.ERR_OK
 }
 
-// ------------------------------------------------------- Verweise aufloesen
+fn bad_op(state: u64, f: u64, op: u64) {
+    amlns.err_note(state, op, frame_scope(f))
+    amlns.err_set(state, amlns.ERR_OPCODE)
+}
 
-// Aus einem Verweis den Wert machen. Arbeitet an Ort und Stelle.
 fn deref(state: u64, o: u64) {
     let t: u64 = amlobj.otype(o)
     if t == amlobj.OT_REF_SLOT {
@@ -347,11 +357,23 @@ fn node_value(state: u64, node: u64, dst: u64) {
             return
         }
         ev(state, f, amlns.node_a(state, node), o)
+        persist(state)
         amlns.set_b(state, node, o)
         amlobj.ocopy(dst, o)
         return
     }
     if k == amlns.NK_FIELD {
+        let width: u64 = amlobj.field_bits(state, node)
+        if width > amlobj.NARROW_BITS {
+            let o: u64 = amlobj.obj_buf(state, (width + 7) / 8)
+            if o == 0 {
+                amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
+                return
+            }
+            amlobj.field_read_wide(state, node, amlobj.ov1(o), amlobj.ov2(o))
+            amlobj.ocopy(dst, o)
+            return
+        }
         amlobj.oint(dst, amlobj.field_read(state, node))
         return
     }
@@ -424,6 +446,16 @@ fn buffield_write(state: u64, node: u64, val: u64) {
 
 // Ein Objekt in ein Ziel legen. `tgt` ist das, was `ev_target` geliefert
 // hat.
+fn store_wide_field(state: u64, node: u64, src: u64) {
+    let t: u64 = amlobj.otype(src)
+    if t == amlobj.OT_BUF || t == amlobj.OT_STR {
+        amlobj.field_write_wide(state, node, amlobj.ov1(src), amlobj.ov2(src))
+        return
+    }
+    var raw: [u64; 1] = [amlobj.to_int(src)]
+    amlobj.field_write_wide(state, node, (&raw[0]) as u64, 8)
+}
+
 fn store_into(state: u64, src: u64, tgt: u64) {
     let t: u64 = amlobj.otype(tgt)
     if t == amlobj.OT_NONE {
@@ -451,6 +483,10 @@ fn store_into(state: u64, src: u64, tgt: u64) {
     }
     let k: u64 = amlns.node_kind(state, node)
     if k == amlns.NK_FIELD {
+        if amlobj.field_bits(state, node) > amlobj.NARROW_BITS {
+            store_wide_field(state, node, src)
+            return
+        }
         amlobj.field_write(state, node, amlobj.to_int(src))
         return
     }
@@ -464,6 +500,7 @@ fn store_into(state: u64, src: u64, tgt: u64) {
             return
         }
         amlobj.ocopy(o, src)
+        persist(state)
         amlns.set_b(state, node, o)
         return
     }
@@ -515,7 +552,7 @@ fn ev_target(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         }
         return out[0]
     }
-    amlns.err_set(state, amlns.ERR_OPCODE)
+    bad_op(state, f, c)
     return 0
 }
 
@@ -774,13 +811,26 @@ fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         return ev_ext(state, f, p, dst)
     }
 
+    if c == 0x73 || c == 0x84 {
+        return ev_concat(state, f, p, dst, c)
+    }
+    if c == 0x89 {
+        return ev_match(state, f, p, dst)
+    }
+    if c == 0x9C {
+        return ev_tostring(state, f, p, dst)
+    }
+    if c == 0x9E {
+        return ev_mid(state, f, p, dst)
+    }
+
     // ------------------------------------------------ ein Name
     if c == 0x5C || c == 0x5E || c == 0x2E || c == 0x2F || c == 0x5F
         || (c >= 0x41 && c <= 0x5A) {
         return ev_namestring(state, f, p, dst)
     }
 
-    amlns.err_set(state, amlns.ERR_OPCODE)
+    bad_op(state, f, c)
     return 0
 }
 
@@ -1204,16 +1254,23 @@ fn ev_compare(state: u64, f: u64, p: u64, dst: u64, c: u64,
         if c == 0x91 {
             r = amlobj.truth((&x[0]) as u64) || amlobj.truth((&y[0]) as u64)
         } else {
-            let a: u64 = amlobj.to_int((&x[0]) as u64)
-            let b: u64 = amlobj.to_int((&y[0]) as u64)
-            if c == 0x93 {
-                r = a == b
-            }
-            if c == 0x94 {
-                r = a > b
-            }
-            if c == 0x95 {
-                r = a < b
+            let t: u64 = amlobj.otype((&x[0]) as u64)
+            if t == amlobj.OT_STR || t == amlobj.OT_BUF {
+                let ord: u64 = amlstr.order((&x[0]) as u64, (&y[0]) as u64)
+                r = (c == 0x93 && ord == amlstr.ORDER_EQUAL) || (c == 0x94 && ord == amlstr.ORDER_GREATER)
+                    || (c == 0x95 && ord == amlstr.ORDER_LESS)
+            } else {
+                let a: u64 = amlobj.to_int((&x[0]) as u64)
+                let b: u64 = amlobj.to_int((&y[0]) as u64)
+                if c == 0x93 {
+                    r = a == b
+                }
+                if c == 0x94 {
+                    r = a > b
+                }
+                if c == 0x95 {
+                    r = a < b
+                }
             }
         }
     }
@@ -1276,7 +1333,7 @@ fn ev_convert(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
     }
     deref(state, (&x[0]) as u64)
     if c == 0x99 { // ToInteger
-        amlobj.oint(dst, amlobj.to_int((&x[0]) as u64))
+        amlobj.oint(dst, amlstr.str_to_int((&x[0]) as u64))
         return ev_store_target(state, f, q, dst)
     }
     if c == 0x96 { // ToBuffer
@@ -1360,6 +1417,7 @@ fn ev_name(state: u64, f: u64, p: u64) -> u64 {
     if q == 0 {
         return 0
     }
+    persist(state)
     amlns.set_b(state, node, o)
     return q
 }
@@ -1415,6 +1473,7 @@ fn ev_createfield(state: u64, f: u64, p: u64, c: u64) -> u64 {
     if node == amlns.NONE {
         return 0
     }
+    persist(state)
     amlns.set_kind(state, node, amlns.NK_BUFFIELD)
     amlns.set_a(state, node, keep)
     amlns.set_b(state, node, bit)
@@ -1433,8 +1492,8 @@ fn ev_ext(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         amlobj.oint(dst, 2)
         return p + 2
     }
-    if e == 0x33 { // Timer -- 100ns-Einheiten. Wir haben keine; null.
-        amlobj.oint(dst, 0)
+    if e == 0x33 {
+        amlobj.oint(dst, amlsys.timer_100ns(state))
         return p + 2
     }
     if e == 0x23 { // Acquire: ein Interpreter, ein Faden -> immer sofort
@@ -1446,13 +1505,34 @@ fn ev_ext(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         amlobj.oint(dst, 0)
         return q + 2 // die zwei Oktette Zeitgrenze
     }
-    if e == 0x27 || e == 0x24 || e == 0x26 { // Release, Signal, Reset
+    if e == 0x27 {
         var t: [u64; 3] = [0 as u64; 3]
         return ev_target(state, f, p + 2, (&t[0]) as u64)
     }
-    if e == 0x21 || e == 0x22 { // Stall, Sleep -- ohne Uhr: nur lesen
+    if e == 0x24 || e == 0x26 {
+        return ev_event_op(state, f, p, e)
+    }
+    if e == 0x25 {
+        return ev_wait(state, f, p, dst)
+    }
+    if e == 0x21 {
+        return ev_stall(state, f, p)
+    }
+    if e == 0x22 {
         var t: [u64; 3] = [0 as u64; 3]
         return ev(state, f, p + 2, (&t[0]) as u64)
+    }
+    if e == 0x28 || e == 0x29 {
+        return ev_bcd(state, f, p, dst, e)
+    }
+    if e == 0x32 {
+        return ev_fatal(state, f, p)
+    }
+    if e == 0x80 {
+        return ev_opregion(state, f, p)
+    }
+    if e == 0x81 {
+        return ev_field(state, f, p)
     }
     if e == 0x12 { // CondRefOf
         var t: [u64; 3] = [0 as u64; 3]
@@ -1508,6 +1588,7 @@ fn ev_ext(state: u64, f: u64, p: u64, dst: u64) -> u64 {
         if node == amlns.NONE {
             return 0
         }
+        persist(state)
         amlns.set_kind(state, node, amlns.NK_BUFFIELD)
         amlns.set_a(state, node, keep)
         amlns.set_b(state, node, amlobj.to_int((&bit[0]) as u64))
@@ -1517,8 +1598,222 @@ fn ev_ext(state: u64, f: u64, p: u64, dst: u64) -> u64 {
     // Fatal, Load, Unload, LoadTable, ToBCD, FromBCD, Wait: nicht in
     // dieser Runde. Ein definierter Fehler ist besser als eine Zahl,
     // die niemand nachrechnen kann.
-    amlns.err_set(state, amlns.ERR_OPCODE)
+    bad_op(state, f, 0x5B00 | e)
     return 0
+}
+
+fn ev_term_value(state: u64, f: u64, p: u64, out: u64) -> u64 {
+    let q: u64 = ev(state, f, p, out)
+    if q == 0 {
+        return 0
+    }
+    deref(state, out)
+    return q
+}
+
+fn ev_concat(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
+    seen_mark(state, c)
+    var a: [u64; 3] = [0 as u64; 3]
+    var b: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev_term_value(state, f, p + 1, (&a[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    q = ev_term_value(state, f, q, (&b[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    var ok: bool = false
+    if c == 0x73 {
+        ok = amlstr.concat(state, (&a[0]) as u64, (&b[0]) as u64, dst)
+    } else {
+        ok = amlstr.concat_res(state, (&a[0]) as u64, (&b[0]) as u64, dst)
+    }
+    if !ok {
+        return 0
+    }
+    return ev_store_target(state, f, q, dst)
+}
+
+fn ev_match(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    seen_mark(state, 0x89)
+    var pkg: [u64; 3] = [0 as u64; 3]
+    var v1: [u64; 3] = [0 as u64; 3]
+    var v2: [u64; 3] = [0 as u64; 3]
+    var st: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev_term_value(state, f, p + 1, (&pkg[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    let op1: u64 = amlns.rd8(q)
+    q = ev_term_value(state, f, q + 1, (&v1[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    let op2: u64 = amlns.rd8(q)
+    q = ev_term_value(state, f, q + 1, (&v2[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    q = ev_term_value(state, f, q, (&st[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    amlobj.oint(dst, amlstr.match_find((&pkg[0]) as u64, op1, amlobj.to_int((&v1[0]) as u64),
+        op2, amlobj.to_int((&v2[0]) as u64), amlobj.to_int((&st[0]) as u64)))
+    return q
+}
+
+fn ev_tostring(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    seen_mark(state, 0x9C)
+    var src: [u64; 3] = [0 as u64; 3]
+    var len: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev_term_value(state, f, p + 1, (&src[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    q = ev_term_value(state, f, q, (&len[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    if !amlstr.to_string(state, (&src[0]) as u64, amlobj.to_int((&len[0]) as u64), dst) {
+        return 0
+    }
+    return ev_store_target(state, f, q, dst)
+}
+
+fn ev_mid(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    seen_mark(state, 0x9E)
+    var src: [u64; 3] = [0 as u64; 3]
+    var idx: [u64; 3] = [0 as u64; 3]
+    var len: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev_term_value(state, f, p + 1, (&src[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    q = ev_term_value(state, f, q, (&idx[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    q = ev_term_value(state, f, q, (&len[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    if !amlstr.mid(state, (&src[0]) as u64, amlobj.to_int((&idx[0]) as u64),
+        amlobj.to_int((&len[0]) as u64), dst) {
+        return 0
+    }
+    return ev_store_target(state, f, q, dst)
+}
+
+fn ev_event_op(state: u64, f: u64, p: u64, e: u64) -> u64 {
+    var t: [u64; 3] = [0 as u64; 3]
+    let q: u64 = ev_target(state, f, p + 2, (&t[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    if amlobj.otype((&t[0]) as u64) == amlobj.OT_REF_NODE {
+        if e == 0x24 {
+            amlsys.event_signal(state, amlobj.ov1((&t[0]) as u64))
+        } else {
+            amlsys.event_reset(state, amlobj.ov1((&t[0]) as u64))
+        }
+    }
+    return q
+}
+
+fn ev_wait(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    var t: [u64; 3] = [0 as u64; 3]
+    var w: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev_target(state, f, p + 2, (&t[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    q = ev_term_value(state, f, q, (&w[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    var node: u64 = amlns.NONE
+    if amlobj.otype((&t[0]) as u64) == amlobj.OT_REF_NODE {
+        node = amlobj.ov1((&t[0]) as u64)
+    }
+    amlobj.oint(dst, amlsys.event_wait(state, node))
+    return q
+}
+
+fn ev_stall(state: u64, f: u64, p: u64) -> u64 {
+    var t: [u64; 3] = [0 as u64; 3]
+    let q: u64 = ev_term_value(state, f, p + 2, (&t[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    amlsys.stall_us(state, amlobj.to_int((&t[0]) as u64))
+    return q
+}
+
+fn ev_bcd(state: u64, f: u64, p: u64, dst: u64, e: u64) -> u64 {
+    var x: [u64; 3] = [0 as u64; 3]
+    let q: u64 = ev_term_value(state, f, p + 2, (&x[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    let v: u64 = amlobj.to_int((&x[0]) as u64)
+    if e == 0x29 {
+        amlobj.oint(dst, amlstr.to_bcd(v))
+    } else {
+        amlobj.oint(dst, amlstr.from_bcd(v))
+    }
+    return ev_store_target(state, f, q, dst)
+}
+
+fn ev_fatal(state: u64, f: u64, p: u64) -> u64 {
+    var t: [u64; 3] = [0 as u64; 3]
+    let q: u64 = ev_term_value(state, f, p + 7, (&t[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    amlns.err_note(state, 0x5B32, frame_scope(f))
+    amlns.err_set(state, amlns.ERR_FATAL)
+    return q
+}
+
+fn ev_opregion(state: u64, f: u64, p: u64) -> u64 {
+    var out: [u64; 1] = [0 as u64; 1]
+    var base: [u64; 3] = [0 as u64; 3]
+    var len: [u64; 3] = [0 as u64; 3]
+    let node: u64 = amlns.walk_create(state, frame_scope(f), p + 2, (&out[0]) as u64,
+        amlns.NK_REGION, amlns.NMAX)
+    if node == amlns.NONE {
+        return 0
+    }
+    let space: u64 = amlns.rd8(out[0])
+    var q: u64 = ev_term_value(state, f, out[0] + 1, (&base[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    q = ev_term_value(state, f, q, (&len[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    amlns.set_kind(state, node, amlns.NK_REGION)
+    amlns.set_a(state, node, amlobj.to_int((&base[0]) as u64))
+    amlns.set_b(state, node, amlobj.to_int((&len[0]) as u64))
+    amlns.set_c(state, node, space)
+    return q
+}
+
+fn ev_field(state: u64, f: u64, p: u64) -> u64 {
+    var out: [u64; 1] = [0 as u64; 1]
+    let ln: u64 = amlns.pkglen(p + 2, (&out[0]) as u64)
+    let end: u64 = p + 2 + ln
+    let region: u64 = amlns.walk(state, frame_scope(f), out[0], (&out[0]) as u64)
+    if region == amlns.NONE {
+        amlns.err_set(state, amlns.ERR_NOTFOUND)
+        return 0
+    }
+    let flags: u64 = amlns.rd8(out[0])
+    let _made: u64 = amlfield.create(state, frame_scope(f), region, flags, out[0] + 1, end)
+    return end
 }
 
 // Ein Name im Ausdruck: entweder ein Methodenaufruf oder ein Wert.
@@ -1556,6 +1851,11 @@ fn ev_namestring(state: u64, f: u64, p: u64, dst: u64) -> u64 {
 // Eine Methode ausfuehren. `argsrc` zeigt auf `argc` Objektplaetze.
 fn call_method(state: u64, node: u64, argc: u64, argsrc: u64, dst: u64) {
     amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
+    let native: u64 = amlns.node_c(state, node)
+    if native != 0 {
+        amlsys.native(state, native, argc, argsrc, dst)
+        return
+    }
     let calls: u64 = g(state, A_CALLS)
     if calls >= CALL_MAX {
         amlns.err_set(state, amlns.ERR_DEPTH)
@@ -1572,6 +1872,7 @@ fn call_method(state: u64, node: u64, argc: u64, argsrc: u64, dst: u64) {
     // Eintraege in der Routentafel).
     let mark: u64 = amlns.heap_mark(state)
     let nmark: u64 = amlns.nodes(state)
+    let pmark: u64 = g(state, A_PERSIST)
     let f: u64 = frame_new(state)
     if f == 0 {
         s(state, A_CALLS, calls)
@@ -1590,7 +1891,7 @@ fn call_method(state: u64, node: u64, argc: u64, argsrc: u64, dst: u64) {
     s(state, A_CALLS, calls)
     let t: u64 = amlobj.otype(dst)
     if (t == amlobj.OT_NONE || t == amlobj.OT_INT)
-        && amlns.nodes(state) == nmark {
+        && amlns.nodes(state) == nmark && g(state, A_PERSIST) == pmark {
         amlns.heap_reset(state, mark)
     }
 }

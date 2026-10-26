@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import acpi.amlns
+import acpi.amlskip
+
+export { create, skip_connect }
+
+const FIELD_RESERVED: u64 = 0x00
+const FIELD_ACCESS: u64 = 0x01
+const FIELD_CONNECT: u64 = 0x02
+const FIELD_EXT_ACCESS: u64 = 0x03
+const ACCESS_FIELD_BYTES: u64 = 3
+const EXT_ACCESS_BYTES: u64 = 4
+const BUFFER_OP: u64 = 0x11
+const ACCESS_MASK: u64 = 0xF
+const ACCESS_SHIFT: u64 = 32
+
+fn skip_connect(p: u64) -> u64 {
+    if amlns.rd8(p) == BUFFER_OP {
+        var out: [u64; 1] = [0 as u64; 1]
+        let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+        return p + 1 + ln
+    }
+    return amlskip.skip_name(p)
+}
+
+fn create(state: u64, scope: u64, region: u64, flags: u64, p: u64, end: u64) -> u64 {
+    var i: u64 = p
+    var bit: u64 = 0
+    var made: u64 = 0
+    let acc: u64 = flags & ACCESS_MASK
+    while i < end {
+        let c: u64 = amlns.rd8(i)
+        var out: [u64; 1] = [0 as u64; 1]
+        if c == FIELD_RESERVED {
+            let ln: u64 = amlns.pkglen(i + 1, (&out[0]) as u64)
+            bit = bit + ln
+            i = out[0]
+        } else if c == FIELD_ACCESS {
+            i = i + ACCESS_FIELD_BYTES
+        } else if c == FIELD_CONNECT {
+            i = skip_connect(i + 1)
+        } else if c == FIELD_EXT_ACCESS {
+            i = i + EXT_ACCESS_BYTES
+        } else {
+            let node: u64 = amlns.walk_create(state, scope, i, (&out[0]) as u64, amlns.NK_FIELD, amlns.NMAX)
+            if node == amlns.NONE {
+                return made
+            }
+            let ln: u64 = amlns.pkglen(out[0], (&out[0]) as u64)
+            amlns.set_kind(state, node, amlns.NK_FIELD)
+            amlns.set_a(state, node, region)
+            amlns.set_b(state, node, bit)
+            amlns.set_c(state, node, ln | (acc << ACCESS_SHIFT))
+            made = made + 1
+            bit = bit + ln
+            i = out[0]
+        }
+    }
+    return made
+}

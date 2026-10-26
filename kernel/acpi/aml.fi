@@ -55,6 +55,8 @@ import acpi.amlobj
 import acpi.amlev
 import acpi.amlfail
 import acpi.amlskip
+import acpi.amlfield
+import acpi.amlsys
 
 export {
     stage, dump, ready, gsi_for, gsi_or_line, why, route_count,
@@ -62,7 +64,7 @@ export {
     // RUNDE ACPI-EREIGNISSE: den Namensraum HALTEN statt verwerfen,
     // und einen einzelnen Knoten auswerten.
     ns_hold, ns_arena, hold_err, hold_bad, eval_node, eval_node_arg, eval_node_args, ns_bytes,
-    hold_report
+    hold_report, snapshot_boot, fuzz_load
 }
 
 const SNAP_FRAMES: u64 = 256
@@ -240,15 +242,6 @@ fn gsi_or_line(state: u64, idx: u64) -> u64 {
 // aufruft, darf ruhig Opcodes enthalten, die dieser Interpreter nicht
 // kennt.
 
-fn skip_connect(p: u64) -> u64 {
-    if amlns.rd8(p) == 0x11 {
-        var out: [u64; 1] = [0 as u64; 1]
-        let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
-        return p + 1 + ln
-    }
-    return amlskip.skip_name(p)
-}
-
 fn load_createfield(state: u64, scope: u64, p: u64, c: u64) -> u64 {
     var out: [u64; 1] = [0 as u64; 1]
     var q: u64 = p + 1
@@ -285,50 +278,6 @@ fn load_createfield(state: u64, scope: u64, p: u64, c: u64) -> u64 {
 
 fn seg4(w: u64) -> u64 {
     return w
-}
-
-// Der Kopf einer Feldliste: Zugriffsart in Bit 3:0 der Flaggen.
-fn load_fields(state: u64, scope: u64, region: u64, flags: u64, p: u64,
-    end: u64) {
-    var i: u64 = p
-    var bit: u64 = 0
-    let acc: u64 = flags & 0xF
-    while i < end {
-        let c: u64 = amlns.rd8(i)
-        if c == 0x00 { // ReservedField -- nur Platz
-            var out: [u64; 1] = [0 as u64; 1]
-            let ln: u64 = amlns.pkglen(i + 1, (&out[0]) as u64)
-            bit = bit + ln
-            i = out[0]
-        } else {
-            if c == 0x01 { // AccessField
-                i = i + 3
-            } else {
-                if c == 0x02 {
-                    i = skip_connect(i + 1)
-                } else {
-                    if c == 0x03 { // ExtendedAccessField
-                        i = i + 4
-                    } else {
-                        var out: [u64; 1] = [0 as u64; 1]
-                        let node: u64 = amlns.walk_create(state, scope, i,
-                            (&out[0]) as u64, amlns.NK_FIELD, amlns.NMAX)
-                        if node == amlns.NONE {
-                            return
-                        }
-                        let ln: u64 = amlns.pkglen(out[0], (&out[0]) as u64)
-                        amlns.set_kind(state, node, amlns.NK_FIELD)
-                        amlns.set_a(state, node, region)
-                        amlns.set_b(state, node, bit)
-                        amlns.set_c(state, node, ln | (acc << 32))
-                        s(state, A_FLDS, g(state, A_FLDS) + 1)
-                        bit = bit + ln
-                        i = out[0]
-                    }
-                }
-            }
-        }
-    }
 }
 
 // Gibt die Stelle hinter der Erklaerung zurueck, oder 0 bei einem Fehler.
@@ -594,7 +543,7 @@ fn load_leaf(state: u64, scope: u64, p: u64, end: u64) -> u64 {
                 return e
             }
             let flags: u64 = amlns.rd8(out[0])
-            load_fields(state, scope, region, flags, out[0] + 1, e)
+            s(state, A_FLDS, g(state, A_FLDS) + amlfield.create(state, scope, region, flags, out[0] + 1, e))
             return e
         }
         if e2 == 0x86 || e2 == 0x87 { // IndexField, BankField
@@ -982,6 +931,7 @@ fn arena_get(state: u64) -> u64 {
     }
     amlns.root_reset(state, run, amlns.NMAX,
         run + amlns.ARENA_FRAMES * 4096)
+    amlsys.install(state)
     amlev.budget_set(state, BUDGET)
     return run
 }
@@ -1585,14 +1535,65 @@ fn eval_node_args(state: u64, node: u64, argc: u64, argsrc: u64, dst: u64) -> bo
     return amlns.err(state) == amlns.ERR_OK
 }
 
-fn stage(state: u64) {
-    var s_off: [u8; 16] = "aml: abgestellt\0"
-    var s_leak: [u8; 20] = "aml: frames vorher=\0"
-    var s_leak2: [u8; 10] = " nachher=\0"
+fn evaluate_methods(state: u64, limit: u64) {
+    let n: u64 = amlns.nodes(state)
+    var done: u64 = 0
+    var i: u64 = 1
+    amlobj.set_read_only(true)
+    while i < n && done < limit {
+        if amlns.node_kind(state, i) == amlns.NK_METHOD && (amlns.node_flags(state, i) & 7) == 0 {
+            var r: [u64; 3] = [0 as u64; 3]
+            amlev.budget_set(state, BUDGET)
+            amlev.depth_reset(state)
+            amlev.stack_base(state)
+            amlns.err_clear(state)
+            let _ok: bool = call0(state, i, (&r[0]) as u64)
+            done = done + 1
+        }
+        i = i + 1
+    }
+    amlobj.set_read_only(false)
+}
+
+fn fuzz_load(state: u64, start: u64, len: u64, evals: u64) -> u64 {
+    var saved: [u64; 7] = [0 as u64; 7]
+    amlns.save(state, (&saved[0]) as u64)
+    let tolerant: u64 = load_tolerant
+    load_tolerant = 1
+    var result: u64 = amlns.ERR_NOMEM
+    let run: u64 = arena_get(state)
+    if run != 0 {
+        amlev.stack_base(state)
+        amlns.err_clear(state)
+        if len > 36 {
+            load_list(state, 0, start + 36, start + len)
+        }
+        result = amlns.err(state)
+        amlns.err_clear(state)
+        evaluate_methods(state, evals)
+        amlns.err_clear(state)
+        arena_put(state, run)
+    }
+    load_tolerant = tolerant
+    amlns.restore(state, (&saved[0]) as u64)
+    return result
+}
+
+fn snapshot_boot(state: u64) {
+    if acpi.snap_count() != 0 {
+        return
+    }
     let snap: u64 = mem.frame_run(state, SNAP_FRAMES)
     if snap != 0 {
         acpi.snapshot(state, snap, SNAP_FRAMES * 4096)
     }
+}
+
+fn stage(state: u64) {
+    var s_off: [u8; 16] = "aml: abgestellt\0"
+    var s_leak: [u8; 20] = "aml: frames vorher=\0"
+    var s_leak2: [u8; 10] = " nachher=\0"
+    snapshot_boot(state)
     if kstate.mode_on(state, kstate.M_AMLDUMP) {
         dump(state)
     }

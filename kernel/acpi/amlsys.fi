@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import acpi.amlns
+import acpi.amlobj
+import sched.time
+import arch.x86_64.apic
+
+export { install, native, timer_100ns, stall_us, event_signal, event_reset, event_wait, NATIVE_OSI }
+
+const NATIVE_OSI: u64 = 1
+const NK_ROOT: u64 = 0
+const OSI_YES: u64 = 0xFFFFFFFFFFFFFFFF
+const OSI_NO: u64 = 0
+const WAIT_TIMEOUT: u64 = 0xFFFFFFFFFFFFFFFF
+const WAIT_SIGNALED: u64 = 0
+const REVISION: u64 = 2
+const OP_BYTE: u64 = 0x0A
+const OP_STRING: u64 = 0x0D
+const NS_PER_TICK: u64 = 100
+const STALL_MAX_US: u64 = 100
+const US_PER_SEC: u64 = 1000000
+const OS_NAME_BYTES: u64 = 20
+const OSI_TABLE_BYTES: u64 = 288
+
+static mut osi_table: [u8; 288] = "Module Device\0Processor Device\03.0 _SCP Extensions\0Processor Aggregator Device\0Windows 2000\0Windows 2001\0Windows 2001 SP1\0Windows 2001 SP2\0Windows 2001.1\0Windows 2001.1 SP1\0Windows 2006\0Windows 2006 SP1\0Windows 2006 SP2\0Windows 2006.1\0Windows 2009\0Windows 2012\0Windows 2013\0Windows 2015\0\0"
+static mut os_name: [u8; 21] = "Microsoft Windows NT\0"
+
+fn heap_aml_int(state: u64, v: u64) -> u64 {
+    let p: u64 = amlns.heap_alloc(state, 2)
+    if p == 0 {
+        return 0
+    }
+    amlns.wr8(p, OP_BYTE)
+    amlns.wr8(p + 1, v)
+    return p
+}
+
+fn heap_aml_string(state: u64, text: u64, n: u64) -> u64 {
+    let p: u64 = amlns.heap_alloc(state, n + 2)
+    if p == 0 {
+        return 0
+    }
+    amlns.wr8(p, OP_STRING)
+    var i: u64 = 0
+    while i < n {
+        amlns.wr8(p + 1 + i, amlns.rd8(text + i))
+        i = i + 1
+    }
+    amlns.wr8(p + 1 + n, 0)
+    return p
+}
+
+fn add_node(state: u64, name: u64, kind: u64) -> u64 {
+    let node: u64 = amlns.add(state, NK_ROOT, name, kind, amlns.NMAX)
+    if node != amlns.NONE {
+        amlns.set_kind(state, node, kind)
+    }
+    return node
+}
+
+fn install(state: u64) {
+    var w_osi: [u8; 4] = "_OSI"
+    var w_gl: [u8; 4] = "_GL_"
+    var w_os: [u8; 4] = "_OS_"
+    var w_rev: [u8; 4] = "_REV"
+    let osi: u64 = add_node(state, amlns.seg_of((&w_osi[0]) as u64), amlns.NK_METHOD)
+    if osi != amlns.NONE {
+        amlns.set_flags(state, osi, 1)
+        amlns.set_c(state, osi, NATIVE_OSI)
+    }
+    let _gl: u64 = add_node(state, amlns.seg_of((&w_gl[0]) as u64), amlns.NK_MUTEX)
+    let os: u64 = add_node(state, amlns.seg_of((&w_os[0]) as u64), amlns.NK_NAME)
+    if os != amlns.NONE {
+        amlns.set_a(state, os, heap_aml_string(state, (&os_name[0]) as u64, OS_NAME_BYTES))
+    }
+    let rev: u64 = add_node(state, amlns.seg_of((&w_rev[0]) as u64), amlns.NK_NAME)
+    if rev != amlns.NONE {
+        amlns.set_a(state, rev, heap_aml_int(state, REVISION))
+    }
+}
+
+fn osi_supported(text: u64, n: u64) -> bool {
+    var at: u64 = 0
+    while at < OSI_TABLE_BYTES && osi_table[at as usize] != 0 {
+        var len: u64 = 0
+        while osi_table[(at + len) as usize] != 0 {
+            len = len + 1
+        }
+        if len == n {
+            var same: bool = true
+            var i: u64 = 0
+            while i < n {
+                if osi_table[(at + i) as usize] as u64 != amlns.rd8(text + i) {
+                    same = false
+                }
+                i = i + 1
+            }
+            if same {
+                return true
+            }
+        }
+        at = at + len + 1
+    }
+    return false
+}
+
+fn native(state: u64, id: u64, argc: u64, argsrc: u64, dst: u64) {
+    amlobj.oint(dst, OSI_NO)
+    if id == NATIVE_OSI && argc >= 1 && amlobj.otype(argsrc) == amlobj.OT_STR {
+        if osi_supported(amlobj.ov1(argsrc), amlobj.ov2(argsrc)) {
+            amlobj.oint(dst, OSI_YES)
+        }
+    }
+}
+
+fn timer_100ns(state: u64) -> u64 {
+    return time.mono_ns(state) / NS_PER_TICK
+}
+
+fn stall_us(state: u64, us: u64) {
+    var want: u64 = us
+    if want > STALL_MAX_US {
+        want = STALL_MAX_US
+    }
+    let per_us: u64 = apic.tsc_hz(state) / US_PER_SEC
+    if per_us == 0 {
+        return
+    }
+    let t0: u64 = apic.tsc()
+    while ((apic.tsc() -% t0) / per_us) < want {
+    }
+}
+
+fn event_signal(state: u64, node: u64) {
+    if node != amlns.NONE && amlns.node_kind(state, node) == amlns.NK_EVENT {
+        amlns.set_a(state, node, amlns.node_a(state, node) + 1)
+    }
+}
+
+fn event_reset(state: u64, node: u64) {
+    if node != amlns.NONE && amlns.node_kind(state, node) == amlns.NK_EVENT {
+        amlns.set_a(state, node, 0)
+    }
+}
+
+fn event_wait(state: u64, node: u64) -> u64 {
+    if node != amlns.NONE && amlns.node_kind(state, node) == amlns.NK_EVENT {
+        let n: u64 = amlns.node_a(state, node)
+        if n != 0 {
+            amlns.set_a(state, node, n - 1)
+            return WAIT_SIGNALED
+        }
+    }
+    return WAIT_TIMEOUT
+}

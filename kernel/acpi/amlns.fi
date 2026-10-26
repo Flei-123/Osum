@@ -49,9 +49,9 @@ export {
     set_kind, set_flags, set_a, set_b, set_c,
     root_reset, child, add, walk, walk_create, path_out, path_write,
     heap_alloc, heap_used, heap_reset, heap_high, heap_mark,
-    err, err_set, err_clear, ERR_OK, ERR_NOMEM, ERR_NODES, ERR_HEAP, ERR_TRUNC,
+    err, err_set, err_clear, save, restore, SAVED_WORDS, err_note, err_ctx, err_node, err_ctx_clear, CTX_REGION, ERR_OK, ERR_NOMEM, ERR_NODES, ERR_HEAP, ERR_TRUNC,
     ERR_OPCODE, ERR_DEPTH, ERR_BUDGET, ERR_TYPE, ERR_NOTFOUND,
-    ERR_REGION, ERR_DIV0, ERR_NOPRT, ERR_NODSDT, ERR_ARG,
+    ERR_REGION, ERR_DIV0, ERR_NOPRT, ERR_NODSDT, ERR_ARG, ERR_FATAL,
     rd8, rd16, rd32, rd64, wr8, wr64,
     pkglen, seg_of, name_print
 }
@@ -82,6 +82,7 @@ const NK_TZ: u64 = 10
 const NK_POWER: u64 = 11
 const NK_BUFFIELD: u64 = 12
 const NK_ALIAS: u64 = 13
+const ALIAS_HOPS: u64 = 8
 
 // Die Fehler. Jeder ist EINE Zahl, und jede Zahl hat genau einen Grund
 // -- ein Interpreter, der "hat nicht geklappt" sagt, ist auf echter
@@ -101,6 +102,7 @@ const ERR_DIV0: u64 = 11 // Teilung durch null
 const ERR_NOPRT: u64 = 12 // kein _PRT gefunden
 const ERR_NODSDT: u64 = 13 // keine DSDT
 const ERR_ARG: u64 = 14 // Arg/Local ausserhalb des Rahmens
+const ERR_FATAL: u64 = 15
 
 // ---------------------------------------------------- die Skalarplaetze
 //
@@ -113,6 +115,10 @@ const A_NODES: u64 = 16 // wie viele Knoten belegt sind
 const A_HEAP: u64 = 24 // naechstes freies Oktett der Halde (absolut)
 const A_HEAPEND: u64 = 32 // hinter der Halde
 const A_ERR: u64 = 40 // der Fehler, siehe ERR_*
+const SAVED_WORDS: u64 = 7
+const A_ERRCTX: u64 = 2816
+const A_ERRNODE: u64 = 2824
+const CTX_REGION: u64 = 0x100000
 const A_HEAPHI: u64 = 48 // Hoechststand der Halde
 
 fn g(state: u64, off: u64) -> u64 {
@@ -135,8 +141,44 @@ fn err_set(state: u64, e: u64) {
     }
 }
 
+fn save(state: u64, out: u64) {
+    var i: u64 = 0
+    while i < SAVED_WORDS {
+        wr64(out + i * 8, g(state, i * 8))
+        i = i + 1
+    }
+}
+
+fn restore(state: u64, from: u64) {
+    var i: u64 = 0
+    while i < SAVED_WORDS {
+        s(state, i * 8, rd64(from + i * 8))
+        i = i + 1
+    }
+}
+
 fn err_clear(state: u64) {
     s(state, A_ERR, ERR_OK)
+}
+
+fn err_note(state: u64, ctx: u64, node: u64) {
+    if g(state, A_ERR) == ERR_OK {
+        s(state, A_ERRCTX, ctx)
+        s(state, A_ERRNODE, node)
+    }
+}
+
+fn err_ctx(state: u64) -> u64 {
+    return g(state, A_ERRCTX)
+}
+
+fn err_node(state: u64) -> u64 {
+    return g(state, A_ERRNODE)
+}
+
+fn err_ctx_clear(state: u64) {
+    s(state, A_ERRCTX, 0)
+    s(state, A_ERRNODE, 0)
 }
 
 // --------------------------------------------------- Oktette und Woerter
@@ -378,6 +420,16 @@ fn add(state: u64, parent: u64, name: u64, kind: u64, nmax: u64) -> u64 {
 // `out` bekommt die Stelle hinter dem Namen. Rueckgabe: der Knoten oder
 // NONE.
 fn walk(state: u64, scope: u64, p: u64, out: u64) -> u64 {
+    var node: u64 = walk_raw(state, scope, p, out)
+    var hops: u64 = 0
+    while node != NONE && node_kind(state, node) == NK_ALIAS && hops < ALIAS_HOPS {
+        node = node_a(state, node)
+        hops = hops + 1
+    }
+    return node
+}
+
+fn walk_raw(state: u64, scope: u64, p: u64, out: u64) -> u64 {
     var q: u64 = p
     var base: u64 = scope
     var rooted: u64 = 0

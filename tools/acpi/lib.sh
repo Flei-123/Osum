@@ -139,3 +139,34 @@ lines_of() {
 tool() {
     python3 -I "tools/acpi/$@"
 }
+
+table_args() {
+    TABLE_ARGS=()
+    local f
+    for f in "$1"/*.aml; do
+        TABLE_ARGS+=(-acpitable "file=$f")
+    done
+}
+
+corpus_tables() {
+    local machine=$1
+    rm -rf "$D/prep-$machine"
+    python3 -I tools/acpi/prep_corpus.py "tools/acpi/real/$machine" "$D/prep-$machine" > /dev/null
+    table_args "$D/prep-$machine"
+}
+
+sweep_line() {
+    line "$1" "^amlsweep: $2 n="
+}
+
+sweep_full() {
+    local l n ok
+    l=$(sweep_line "$1" "$2")
+    n=$(val "$l" n)
+    ok=$(val "$l" ok)
+    if [ -n "$n" ] && [ "$n" = "$ok" ]; then echo "$n/$n"; else echo "${ok:-none}/${n:-none}"; fi
+}
+
+asl_conform() {
+    iasl -oa -p "$D/conform" tools/acpi/asl/conform.asl > /dev/null 2>&1 && [ -f "$D/conform.aml" ]
+}

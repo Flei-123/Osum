@@ -14,7 +14,11 @@ current description.
 | `amlobj.fi` | AML objects, operation regions (SystemMemory, SystemIO, PCI_Config, EmbeddedControl), fields, resource descriptors |
 | `amlev.fi` | execution: terms, control flow, method calls, limits (steps, depth, stack) |
 | `amlskip.fi`, `amlfail.fi` | tolerant loading: structural skipping of unevaluable operands, failure diagnostics |
-| `aml.fi` | table loading, `_PRT` evaluation, namespace hold, evaluation entry points (`eval_node*`) |
+| `aml.fi` | table loading, `_PRT` evaluation, namespace hold, evaluation entry points (`eval_node*`), snapshot at boot |
+| `amlstr.fi` | string, buffer and BCD terms: `Concatenate`, `ConcatenateResTemplate`, `Mid`, `ToString`, `Match`, `ToBCD`, `FromBCD`, string compare, string to integer |
+| `amlsys.fi` | predefined objects (`\_OSI` native method, `\_OS_`, `\_REV`, `\_GL_`), `Timer`, `Stall`, event counters (`Wait`, `Signal`, `Reset`) |
+| `amlfield.fi` | field list creation, shared by the loader and by `Field` terms executed inside methods |
+| `amlsweep.fi`, `amlconf.fi`, `amlfuzz.fi`, `amltest.fi` | test harness inside the kernel: method sweep, conformance runner, load fuzzer, dispatcher by command line word |
 | `pm1.fi` | PM1a/PM1b fixed event registers (status, enable, clear) |
 | `gpe.fi` | GPE blocks: ports, armed set, status scan, stray GPE disarming |
 | `scistorm.fi` | storm guard bookkeeping: empty SCI entries, mask decision, polling cadence |
@@ -27,6 +31,23 @@ current description.
 | `dmar.fi` | DMAR table report |
 
 `kernel/diag/cmdopt.fi` reads kernel command line words and numbers for test knobs (no kstate mode bits needed).
+
+## AML interpreter: what it executes
+
+Terms: arithmetic and logic, comparisons (integers, strings, buffers), `Index`/`DerefOf`/`RefOf`/`CondRefOf`, `Store` and
+all conversions, `If`/`Else`/`While`/`Break`/`Continue`/`Return`, method calls (up to 7 arguments, 16 nested calls, 64
+nested terms, stack guard), `Name`/`Alias`/`CreateXField`/`OperationRegion`/`Field` also inside methods, `Mutex`/`Event`
+(single execution context: `Acquire` succeeds at once, `Wait` consumes a signal or times out), `Notify`, `Timer`,
+`Stall` (up to 100 us), `Fatal` (ends the method with `ERR_FATAL`).
+
+Operation regions: SystemMemory (identity-mapped memory), SystemIO, PCI_Config, EmbeddedControl. Fields of any width: up
+to 64 bits read as integers, wider fields read and write as buffers.
+
+Not supported, ends the method with a defined error: `Load`, `Unload`, `LoadTable`, `IndexField`, `BankField`, other
+address spaces. `Sleep` reads its operand and does not delay.
+
+Safety nets: every error is a number (`amlns.ERR_*`) with the failing opcode or region recorded; the loader is tolerant per
+container; method results never keep heap memory that a name or field refers to.
 
 ## Boot flow
 
@@ -85,6 +106,34 @@ EC events are polled every 10 ms (`ecio.poll_query` was called thousands of time
 | `noscistorm` | counter-proof: no storm guard |
 | `scinoovr` | counter-proof: ignore MADT overrides (level, active low) |
 | `ecsim`, `noec` | EC software model, EC driver off |
+
+## Real firmware replay and the method sweep
+
+`tools/acpi/prep_corpus.py` turns a machine directory of `tools/acpi/real/` into `-acpitable` files (a table above 65535 bytes
+is cut at term boundaries, containers are split into `Scope` pieces). With the word `amlsweep` the kernel evaluates, after
+all `_INI` methods, every method of the kinds `_STA _CRS _PRS _BIF _BIX _BST _PSR _LID _TMP _CRT _HOT _PSV _BCL _BQC _PRW _DOD
+_PCL _PTS _WAK _TZP _DCK _EJ0 _Qxx _Lxx _Exx` (writes are blocked) and prints per kind how many ran and how many failed, which
+error, and the first failing path with the opcode or region that caused it. The replay needs `-m 4096` so the firmware's NVS
+addresses are RAM.
+
+Measured with the sweep on the previous interpreter (HP tables, 26.10.2026): seven failures on `ConcatenateResTemplate`,
+four on `Concatenate`, one `Match`, one `OperationRegion` executed inside a method, `\_SB.PAGD._STA` failing on the missing
+`_OSI`. With the current interpreter the replay of the HP, Surface and AMD tables ends with no unsupported opcode; all
+battery, backlight query and thermal-limit methods of the HP that do not depend on firmware memory run.
+
+Remaining failures in the replay are data, not code: methods that read NVS or MMIO regions whose address the firmware
+computes at boot (base 0xFFFFFFFF in QEMU) and thermal methods that need earlier initialisation.
+
+## Conformance suite
+
+`tools/acpi/asl/conform.asl` (compiled with `iasl -oa`, no constant folding) holds self-checking methods `Txxx` that return
+0 on success; `amlconf` runs them and reports `pass`/`fail`; the method `TBAD` fails on purpose.
+
+## Fuzzing
+
+`amlfuzz=N` loads N copies of the firmware tables with `amlfuzzmut` (default 3) random byte edits (flip, replace, insert,
+cut) in a scratch arena, evaluates up to 24 methods of each result with writes blocked, frees the arena and checks that no
+frame leaked. `amlfuzzseed` selects the sequence. Result line: `amlfuzz: iters=N leaked=0 e<code>=count ...`.
 
 ## Gate
 

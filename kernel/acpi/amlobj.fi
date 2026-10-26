@@ -48,9 +48,9 @@ export {
     otype, ov1, ov2, oset, oint, ocopy, obuf, opkg, pkg_at,
     obj_new, obj_int, obj_buf, obj_pkg,
     const_int, truth, to_int,
-    field_read, field_write, region_check,
+    field_read, field_write, field_read_wide, field_write_wide, field_bits, NARROW_BITS, region_check,
     RS_MEM, RS_IO, RS_PCI, RS_EC,
-    res_first_irq, res_irq_count, res_irq_at
+    res_first_irq, res_irq_count, res_irq_at, set_read_only, blocked_writes
 }
 
 const OBJ_BYTES: u64 = 24
@@ -330,8 +330,30 @@ fn reg_read8(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
     return amlns.rd8(base + off)
 }
 
+static mut read_only: bool = false
+static mut blocked: u64 = 0
+
+fn set_read_only(on: bool) {
+    read_only = on
+}
+
+fn blocked_writes() -> u64 {
+    return blocked
+}
+
+fn write_blocked(space: u64) -> bool {
+    if read_only && space != RS_EC {
+        blocked = blocked + 1
+        return true
+    }
+    return false
+}
+
 fn reg_write8(state: u64, space: u64, node: u64, base: u64, off: u64,
     v: u64) {
+    if write_blocked(space) {
+        return
+    }
     if space == RS_EC {
         ecio.write_reg((base + off) & 0xFF, v & 0xFF)
         return
@@ -363,6 +385,9 @@ fn reg_read32(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
 
 fn reg_write32(state: u64, space: u64, node: u64, base: u64, off: u64,
     v: u64) {
+    if write_blocked(space) {
+        return
+    }
     if space == RS_EC {
         var k: u64 = 0
         while k < 4 {
@@ -394,27 +419,65 @@ fn reg_write32(state: u64, space: u64, node: u64, base: u64, off: u64,
 // QEMUs DSDT vorkommt (8 und 32 Bit) und alles, was fuer `_PRT`,
 // `_STA` und `_CRS` gebraucht wird. Ein breiteres Feld gibt
 // ERR_REGION statt einer halben Zahl.
-fn field_read(state: u64, fnode: u64) -> u64 {
+const CTX_FIELD: u64 = 0x80
+const FO_SPACE: u64 = 0
+const FO_BASE: u64 = 1
+const FO_REGION: u64 = 2
+const FO_BITOFF: u64 = 3
+const FO_BITS: u64 = 4
+const FO_ACC: u64 = 5
+const NARROW_BITS: u64 = 64
+const ACC_DWORD: u64 = 3
+const DWORD_BITS: u64 = 32
+const ACC_SHIFT: u64 = 32
+const ACC_MASK: u64 = 0xF
+const WIDTH_MASK: u64 = 0xFFFFFFFF
+
+fn field_open(state: u64, fnode: u64, out: u64) -> bool {
     let rnode: u64 = amlns.node_a(state, fnode)
-    let bitoff: u64 = amlns.node_b(state, fnode)
     let c: u64 = amlns.node_c(state, fnode)
-    let bits: u64 = c & 0xFFFFFFFF
-    let acc: u64 = (c >> 32) & 0xF
-    if bits == 0 || bits > 64 {
+    let bits: u64 = c & WIDTH_MASK
+    if bits == 0 {
+        amlns.err_note(state, amlns.CTX_REGION | CTX_FIELD, fnode)
         amlns.err_set(state, amlns.ERR_REGION)
-        return 0
+        return false
     }
     let space: u64 = amlns.node_c(state, rnode)
     let base: u64 = amlns.node_a(state, rnode)
-    let rlen: u64 = amlns.node_b(state, rnode)
-    if !region_check(state, space, base, rlen) {
+    if !region_check(state, space, base, amlns.node_b(state, rnode)) {
+        amlns.err_note(state, amlns.CTX_REGION | space, rnode)
+        amlns.err_set(state, amlns.ERR_REGION)
+        return false
+    }
+    amlns.wr64(out + FO_SPACE * 8, space)
+    amlns.wr64(out + FO_BASE * 8, base)
+    amlns.wr64(out + FO_REGION * 8, rnode)
+    amlns.wr64(out + FO_BITOFF * 8, amlns.node_b(state, fnode))
+    amlns.wr64(out + FO_BITS * 8, bits)
+    amlns.wr64(out + FO_ACC * 8, (c >> ACC_SHIFT) & ACC_MASK)
+    return true
+}
+
+fn field_bits(state: u64, fnode: u64) -> u64 {
+    return amlns.node_c(state, fnode) & WIDTH_MASK
+}
+
+fn field_read(state: u64, fnode: u64) -> u64 {
+    var g: [u64; 6] = [0 as u64; 6]
+    if field_bits(state, fnode) > NARROW_BITS {
+        amlns.err_note(state, amlns.CTX_REGION | CTX_FIELD, fnode)
         amlns.err_set(state, amlns.ERR_REGION)
         return 0
     }
-    // DWordAcc und ein Feld, das genau auf einem Wort sitzt: EIN
-    // 32-Bit-Zugriff. Das ist nicht Bequemlichkeit -- ein Register, das
-    // erst beim vierten Oktett wirkt, wird oktettweise falsch gelesen.
-    if acc == 3 && bits == 32 && (bitoff & 31) == 0 {
+    if !field_open(state, fnode, (&g[0]) as u64) {
+        return 0
+    }
+    let space: u64 = g[FO_SPACE as usize]
+    let base: u64 = g[FO_BASE as usize]
+    let rnode: u64 = g[FO_REGION as usize]
+    let bitoff: u64 = g[FO_BITOFF as usize]
+    let bits: u64 = g[FO_BITS as usize]
+    if g[FO_ACC as usize] == ACC_DWORD && bits == DWORD_BITS && (bitoff & 31) == 0 {
         return reg_read32(state, space, rnode, base, bitoff / 8)
     }
     var v: u64 = 0
@@ -436,23 +499,21 @@ fn field_read(state: u64, fnode: u64) -> u64 {
 }
 
 fn field_write(state: u64, fnode: u64, val: u64) {
-    let rnode: u64 = amlns.node_a(state, fnode)
-    let bitoff: u64 = amlns.node_b(state, fnode)
-    let c: u64 = amlns.node_c(state, fnode)
-    let bits: u64 = c & 0xFFFFFFFF
-    let acc: u64 = (c >> 32) & 0xF
-    if bits == 0 || bits > 64 {
+    var g: [u64; 6] = [0 as u64; 6]
+    if field_bits(state, fnode) > NARROW_BITS {
+        amlns.err_note(state, amlns.CTX_REGION | CTX_FIELD, fnode)
         amlns.err_set(state, amlns.ERR_REGION)
         return
     }
-    let space: u64 = amlns.node_c(state, rnode)
-    let base: u64 = amlns.node_a(state, rnode)
-    let rlen: u64 = amlns.node_b(state, rnode)
-    if !region_check(state, space, base, rlen) {
-        amlns.err_set(state, amlns.ERR_REGION)
+    if !field_open(state, fnode, (&g[0]) as u64) {
         return
     }
-    if acc == 3 && bits == 32 && (bitoff & 31) == 0 {
+    let space: u64 = g[FO_SPACE as usize]
+    let base: u64 = g[FO_BASE as usize]
+    let rnode: u64 = g[FO_REGION as usize]
+    let bitoff: u64 = g[FO_BITOFF as usize]
+    let bits: u64 = g[FO_BITS as usize]
+    if g[FO_ACC as usize] == ACC_DWORD && bits == DWORD_BITS && (bitoff & 31) == 0 {
         reg_write32(state, space, rnode, base, bitoff / 8, val)
         return
     }
@@ -466,14 +527,77 @@ fn field_write(state: u64, fnode: u64, val: u64) {
         }
         let mask: u64 = ((1 << take) -% 1) << lo
         var byte: u64 = 0
-        // Nur lesen, wenn nicht das ganze Oktett ersetzt wird -- ein
-        // Lesezugriff auf ein Register, das beim Lesen etwas tut, ist
-        // ein Nebeneffekt, den niemand bestellt hat.
         if mask != 0xFF {
             byte = reg_read8(state, space, rnode, base, b / 8)
         }
         byte = (byte & (0xFF -% mask)) | ((((val >> done) << lo)) & mask)
         reg_write8(state, space, rnode, base, b / 8, byte)
+        done = done + take
+        b = b + take
+    }
+}
+
+fn field_read_wide(state: u64, fnode: u64, dst: u64, nbytes: u64) {
+    var g: [u64; 6] = [0 as u64; 6]
+    var i: u64 = 0
+    while i < nbytes {
+        amlns.wr8(dst + i, 0)
+        i = i + 1
+    }
+    if !field_open(state, fnode, (&g[0]) as u64) {
+        return
+    }
+    let bits: u64 = g[FO_BITS as usize]
+    var got: u64 = 0
+    var b: u64 = g[FO_BITOFF as usize]
+    while got < bits && got / 8 < nbytes {
+        let byte: u64 = reg_read8(state, g[FO_SPACE as usize], g[FO_REGION as usize], g[FO_BASE as usize], b / 8)
+        let lo: u64 = b & 7
+        var take: u64 = 8 -% lo
+        if take > bits -% got {
+            take = bits -% got
+        }
+        let chunk: u64 = (byte >> lo) & ((1 << take) -% 1)
+        let at: u64 = dst + got / 8
+        let pos: u64 = got & 7
+        amlns.wr8(at, amlns.rd8(at) | ((chunk << pos) & 0xFF))
+        if pos + take > 8 && got / 8 + 1 < nbytes {
+            amlns.wr8(at + 1, amlns.rd8(at + 1) | (chunk >> (8 -% pos)))
+        }
+        got = got + take
+        b = b + take
+    }
+}
+
+fn field_write_wide(state: u64, fnode: u64, src: u64, nbytes: u64) {
+    var g: [u64; 6] = [0 as u64; 6]
+    if !field_open(state, fnode, (&g[0]) as u64) {
+        return
+    }
+    let bits: u64 = g[FO_BITS as usize]
+    var done: u64 = 0
+    var b: u64 = g[FO_BITOFF as usize]
+    while done < bits {
+        let lo: u64 = b & 7
+        var take: u64 = 8 -% lo
+        if take > bits -% done {
+            take = bits -% done
+        }
+        var bitsrc: u64 = 0
+        if done / 8 < nbytes {
+            let pos: u64 = done & 7
+            bitsrc = amlns.rd8(src + done / 8) >> pos
+            if pos + take > 8 && done / 8 + 1 < nbytes {
+                bitsrc = bitsrc | (amlns.rd8(src + done / 8 + 1) << (8 -% pos))
+            }
+        }
+        let mask: u64 = ((1 << take) -% 1) << lo
+        var byte: u64 = 0
+        if mask != 0xFF {
+            byte = reg_read8(state, g[FO_SPACE as usize], g[FO_REGION as usize], g[FO_BASE as usize], b / 8)
+        }
+        byte = (byte & (0xFF -% mask)) | ((bitsrc << lo) & mask)
+        reg_write8(state, g[FO_SPACE as usize], g[FO_REGION as usize], g[FO_BASE as usize], b / 8, byte)
         done = done + take
         b = b + take
     }

@@ -294,7 +294,7 @@ class Aml:
             elems = []
             while j < end:
                 sub = []
-                j = self.term(j, scope, sub, allow_name_data=True)
+                j = self.termarg(j, scope, sub)
                 elems.append(sub[0] if sub else "?")
             out.append(head + "{" + ", ".join(elems) + "}")
             return end
@@ -333,6 +333,16 @@ class Aml:
                 self.errors.append("%s: %s" % (full, e))
             out.append("Method(%s, %d)" % (full, flags & 7))
             return end
+        if c == 0x15:                    # External
+            self.note(c)
+            nm, j = self.namestring(i + 1)
+            kind = self.u8(j)
+            argc = self.u8(j + 1)
+            full = join(scope, nm)
+            if kind == 8 and full not in self.methods:
+                self.methods[full] = argc
+            out.append("External(%s)" % full)
+            return j + 2
         if c == 0x08:                    # Name
             self.note(c)
             nm, j = self.namestring(i + 1)
@@ -625,6 +635,12 @@ def collect_methods(body, methods, scope="\\"):
                     j += 3
                 walk(j, i + 2 + ln, join(scope, nm))
                 i = i + 2 + ln
+                continue
+            if c == 0x15:
+                nm, j = p.namestring(i + 1)
+                if p.u8(j) == 8:
+                    methods.setdefault(join(scope, nm), p.u8(j + 1))
+                i = j + 2
                 continue
             # alles andere: ueberspringen ist nicht moeglich, ohne es zu
             # lesen -- also einen vollen Term lesen und wegwerfen.

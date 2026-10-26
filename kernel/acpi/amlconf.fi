@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import acpi.amlns
+import acpi.amlobj
+import acpi.aml
+
+export { run }
+
+const FIRST_LETTER: u64 = 84
+const NAME_SHIFT: u64 = 0
+const NO_ARGS: u64 = 0
+const ARG_MASK: u64 = 7
+
+fn find_suite(state: u64) -> u64 {
+    var w_suite: [u8; 4] = "CNFM"
+    let seg: u64 = amlns.seg_of((&w_suite[0]) as u64)
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_name(state, i) == seg && amlns.node_parent(state, i) == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return amlns.NONE
+}
+
+fn is_test(state: u64, node: u64, suite: u64) -> bool {
+    if amlns.node_parent(state, node) != suite || amlns.node_kind(state, node) != amlns.NK_METHOD {
+        return false
+    }
+    if (amlns.node_flags(state, node) & ARG_MASK) != NO_ARGS {
+        return false
+    }
+    return (amlns.node_name(state, node) & 0xFF) == FIRST_LETTER
+}
+
+fn print_failure(state: u64, node: u64, ret: u64, err: u64) {
+    var s_f: [u8; 15] = "amlconf: fail \0"
+    var s_r: [u8; 6] = " ret=\0"
+    var s_e: [u8; 4] = " e=\0"
+    serial.puts((&s_f[0]) as u64)
+    amlns.name_print(amlns.node_name(state, node))
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(ret)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(err)
+    serial.nl()
+}
+
+fn run(state: u64) {
+    var s_p: [u8; 15] = "amlconf: pass=\0"
+    var s_f: [u8; 7] = " fail=\0"
+    var s_n: [u8; 17] = "amlconf: no suite"
+    let suite: u64 = find_suite(state)
+    if suite == amlns.NONE {
+        serial.puts((&s_n[0]) as u64)
+        serial.nl()
+        return
+    }
+    var pass: u64 = 0
+    var fail: u64 = 0
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if is_test(state, i, suite) {
+            var r: [u64; 3] = [0 as u64; 3]
+            let ok: bool = aml.eval_node(state, i, (&r[0]) as u64)
+            let ret: u64 = amlobj.to_int((&r[0]) as u64)
+            if ok && ret == 0 {
+                pass = pass + 1
+            } else {
+                fail = fail + 1
+                print_failure(state, i, ret, amlns.err(state))
+                amlns.err_clear(state)
+            }
+        }
+        i = i + 1
+    }
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(pass)
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(fail)
+    serial.nl()
+}

@@ -16,12 +16,18 @@ const CMD_READ: u64 = 0x80
 const CMD_WRITE: u64 = 0x81
 const CMD_QUERY: u64 = 0x84
 const SPIN: u64 = 200000
+const FAIL_LIMIT: u64 = 2
+const BACKOFF_FIRST: u64 = 400
+const BACKOFF_MAX: u64 = 51200
 
 static mut data_port: u64 = 0x62
 static mut cmd_port: u64 = 0x66
 static mut ready_flag: bool = false
 static mut sim_on: bool = false
 static mut busy: u64 = 0
+static mut fail_run: u64 = 0
+static mut backoff: u64 = 0
+static mut backoff_len: u64 = 0
 static mut sim_regs: [u8; 256] = [0 as u8; 256]
 static mut sim_queue: [u8; 16] = [0 as u8; 16]
 static mut sim_qn: u64 = 0
@@ -34,6 +40,7 @@ static mut sim_obf: bool = false
 fn configure(data: u64, cmd: u64) {
     data_port = data
     cmd_port = cmd
+    backoff_len = BACKOFF_FIRST
     ready_flag = true
 }
 
@@ -160,12 +167,37 @@ fn drain() {
     }
 }
 
+fn available() -> bool {
+    if backoff == 0 {
+        return true
+    }
+    backoff = backoff - 1
+    return false
+}
+
+fn note_result(ok: bool) {
+    if ok {
+        fail_run = 0
+        backoff_len = BACKOFF_FIRST
+        return
+    }
+    fail_run = fail_run + 1
+    if fail_run >= FAIL_LIMIT {
+        backoff = backoff_len
+        fail_run = 0
+        if backoff_len < BACKOFF_MAX {
+            backoff_len = backoff_len * 2
+        }
+    }
+}
+
 fn read_reg(addr: u64) -> u64 {
-    if !ready_flag {
+    if !ready_flag || !available() {
         return 0
     }
     busy = busy + 1
     var v: u64 = 0
+    var ok: bool = false
     drain()
     if wait_clear(ST_IBF) {
         pout(cmd_port, CMD_READ)
@@ -173,19 +205,22 @@ fn read_reg(addr: u64) -> u64 {
             pout(data_port, addr)
             if wait_set(ST_OBF) {
                 v = pin(data_port)
+                ok = true
             }
         }
     }
+    note_result(ok)
     hkdiag.add(hkdiag.EC_READS, 1)
     busy = busy - 1
     return v
 }
 
 fn write_reg(addr: u64, v: u64) {
-    if !ready_flag {
+    if !ready_flag || !available() {
         return
     }
     busy = busy + 1
+    var ok: bool = false
     drain()
     if wait_clear(ST_IBF) {
         pout(cmd_port, CMD_WRITE)
@@ -193,28 +228,32 @@ fn write_reg(addr: u64, v: u64) {
             pout(data_port, addr)
             if wait_clear(ST_IBF) {
                 pout(data_port, v)
-                let _w: bool = wait_clear(ST_IBF)
+                ok = wait_clear(ST_IBF)
             }
         }
     }
+    note_result(ok)
     hkdiag.add(hkdiag.EC_WRITES, 1)
     busy = busy - 1
 }
 
 fn query() -> u64 {
     var q: u64 = 0
+    var ok: bool = false
     if wait_clear(ST_IBF) {
         pout(cmd_port, CMD_QUERY)
         if wait_set(ST_OBF) {
             q = pin(data_port)
+            ok = true
         }
     }
+    note_result(ok)
     hkdiag.add(hkdiag.EC_QUERIES, 1)
     return q
 }
 
 fn poll_query() -> u64 {
-    if !ready_flag || busy != 0 {
+    if !ready_flag || busy != 0 || !available() {
         return NO_QUERY
     }
     let st: u64 = pin(cmd_port)

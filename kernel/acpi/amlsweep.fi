@@ -1,0 +1,310 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import acpi.amlns
+import acpi.amlobj
+import acpi.aml
+import arch.x86_64.apic
+
+export { run }
+
+const KINDS: u64 = 26
+const KIND_INI: u64 = 14
+const PSEUDO_Q: u64 = 23
+const PSEUDO_L: u64 = 24
+const PSEUDO_E: u64 = 25
+const CODES: u64 = 16
+const SEG_BYTES: u64 = 4
+const NOT_LISTED: u64 = 0xFFFF
+const OPS_MAX: u64 = 32
+const SLOW_MS: u64 = 50
+const US_PER_MS: u64 = 1000
+const US_PER_SEC: u64 = 1000000
+const ARG_BRIGHTNESS: u64 = 50
+const ARG_SLEEP_STATE: u64 = 5
+const ARG_NONE: u64 = 0
+const PREFIX_MASK: u64 = 0xFFFF
+const PREFIX_Q: u64 = 0x515F
+const PREFIX_L: u64 = 0x4C5F
+const PREFIX_E: u64 = 0x455F
+const HEX_DIGIT_A: u64 = 65
+const HEX_DIGIT_F: u64 = 70
+const DEC_DIGIT_0: u64 = 48
+const DEC_DIGIT_9: u64 = 57
+
+static mut names: [u8; 104] = "_STA_CRS_PRS_BIF_BIX_BST_PSR_LID_TMP_CRT_HOT_PSV_BCL_BQC_INI_PRW_DOD_PCL_PTS_WAK_TZP_DCK_EJ0_Q___L___E__"
+static mut segs: [u64; 26] = [0 as u64; 26]
+static mut total: [u64; 26] = [0 as u64; 26]
+static mut passed: [u64; 26] = [0 as u64; 26]
+static mut fails: [u64; 416] = [0 as u64; 416]
+static mut first_node: [u64; 416] = [0 as u64; 416]
+static mut first_ctx: [u64; 416] = [0 as u64; 416]
+static mut first_ctx_node: [u64; 416] = [0 as u64; 416]
+static mut op_code: [u64; 32] = [0 as u64; 32]
+static mut op_count: [u64; 32] = [0 as u64; 32]
+static mut op_node: [u64; 32] = [0 as u64; 32]
+static mut op_used: u64 = 0
+
+fn load_segs() {
+    var k: u64 = 0
+    while k < KINDS {
+        segs[k as usize] = amlns.seg_of((&names[(k * SEG_BYTES) as usize]) as u64)
+        k = k + 1
+    }
+}
+
+fn is_hex_digit(c: u64) -> bool {
+    return (c >= DEC_DIGIT_0 && c <= DEC_DIGIT_9) || (c >= HEX_DIGIT_A && c <= HEX_DIGIT_F)
+}
+
+fn pseudo_of(seg: u64) -> u64 {
+    let hi: u64 = (seg >> 16) & 0xFFFF
+    if !is_hex_digit(hi & 0xFF) || !is_hex_digit(hi >> 8) {
+        return NOT_LISTED
+    }
+    let prefix: u64 = seg & PREFIX_MASK
+    if prefix == PREFIX_Q {
+        return PSEUDO_Q
+    }
+    if prefix == PREFIX_L {
+        return PSEUDO_L
+    }
+    if prefix == PREFIX_E {
+        return PSEUDO_E
+    }
+    return NOT_LISTED
+}
+
+fn kind_of(seg: u64) -> u64 {
+    var k: u64 = 0
+    while k < PSEUDO_Q {
+        if segs[k as usize] == seg {
+            return k
+        }
+        k = k + 1
+    }
+    return pseudo_of(seg)
+}
+
+fn argument_for(seg: u64) -> u64 {
+    var w_bcm: [u8; 4] = "_BCM"
+    var w_pts: [u8; 4] = "_PTS"
+    if seg == amlns.seg_of((&w_bcm[0]) as u64) {
+        return ARG_BRIGHTNESS
+    }
+    if seg == amlns.seg_of((&w_pts[0]) as u64) {
+        return ARG_SLEEP_STATE
+    }
+    return ARG_NONE
+}
+
+fn print_name(kind: u64) {
+    var j: u64 = 0
+    while j < SEG_BYTES {
+        serial.put(names[(kind * SEG_BYTES + j) as usize])
+        j = j + 1
+    }
+}
+
+fn report_slow(state: u64, node: u64, kind: u64, ms: u64) {
+    var s_m: [u8; 10] = "amlsweep:\0"
+    var s_s: [u8; 6] = " slow\0"
+    var s_t: [u8; 5] = " ms=\0"
+    var s_a: [u8; 5] = " at=\0"
+    serial.puts((&s_m[0]) as u64)
+    serial.puts((&s_s[0]) as u64)
+    serial.put(32 as u8)
+    print_name(kind)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(ms)
+    serial.puts((&s_a[0]) as u64)
+    amlns.path_out(state, node)
+    serial.nl()
+}
+
+fn note_opcode(ctx: u64, node: u64) {
+    var i: u64 = 0
+    while i < op_used {
+        if op_code[i as usize] == ctx {
+            op_count[i as usize] = op_count[i as usize] + 1
+            return
+        }
+        i = i + 1
+    }
+    if op_used < OPS_MAX {
+        op_code[op_used as usize] = ctx
+        op_count[op_used as usize] = 1
+        op_node[op_used as usize] = node
+        op_used = op_used + 1
+    }
+}
+
+fn call(state: u64, node: u64, argc: u64, arg: u64, dst: u64) -> bool {
+    if argc == 0 {
+        return aml.eval_node(state, node, dst)
+    }
+    var a: [u64; 3] = [0 as u64; 3]
+    amlobj.oint((&a[0]) as u64, arg)
+    return aml.eval_node_arg(state, node, (&a[0]) as u64, dst)
+}
+
+fn record_failure(state: u64, node: u64, kind: u64) {
+    var code: u64 = amlns.err(state)
+    if code >= CODES {
+        code = CODES - 1
+    }
+    let slot: u64 = kind * CODES + code
+    if fails[slot as usize] == 0 {
+        first_node[slot as usize] = node
+        first_ctx[slot as usize] = amlns.err_ctx(state)
+        first_ctx_node[slot as usize] = amlns.err_node(state)
+    }
+    fails[slot as usize] = fails[slot as usize] + 1
+    if code == amlns.ERR_OPCODE {
+        note_opcode(amlns.err_ctx(state), node)
+    }
+}
+
+fn evaluate(state: u64, node: u64, kind: u64) {
+    var r: [u64; 3] = [0 as u64; 3]
+    amlns.err_ctx_clear(state)
+    total[kind as usize] = total[kind as usize] + 1
+    let argc: u64 = amlns.node_flags(state, node) & 7
+    let t0: u64 = apic.tsc()
+    let ok: bool = call(state, node, argc, argument_for(amlns.node_name(state, node)), (&r[0]) as u64)
+    let per_us: u64 = apic.tsc_hz(state) / US_PER_SEC
+    if per_us != 0 {
+        let ms: u64 = ((apic.tsc() -% t0) / per_us) / US_PER_MS
+        if ms >= SLOW_MS {
+            report_slow(state, node, kind, ms)
+        }
+    }
+    if ok {
+        passed[kind as usize] = passed[kind as usize] + 1
+        return
+    }
+    record_failure(state, node, kind)
+    amlns.err_clear(state)
+}
+
+fn print_context(state: u64, slot: u64) {
+    var s_i: [u8; 5] = " in=\0"
+    var s_b: [u8; 7] = " base=\0"
+    var s_l: [u8; 6] = " len=\0"
+    let ctx: u64 = first_ctx[slot as usize]
+    if ctx == 0 {
+        return
+    }
+    let node: u64 = first_ctx_node[slot as usize]
+    serial.puts((&s_i[0]) as u64)
+    amlns.path_out(state, node)
+    if ctx >= amlns.CTX_REGION {
+        serial.puts((&s_b[0]) as u64)
+        serial.hex_width(amlns.node_a(state, node), 8)
+        serial.puts((&s_l[0]) as u64)
+        serial.hex_width(amlns.node_b(state, node), 4)
+    }
+}
+
+fn print_kind(state: u64, kind: u64) {
+    var s_m: [u8; 11] = "amlsweep: \0"
+    var s_n: [u8; 4] = " n=\0"
+    var s_p: [u8; 5] = " ok=\0"
+    var s_e: [u8; 3] = " e\0"
+    var s_f: [u8; 9] = "first e=\0"
+    var s_o: [u8; 6] = " ctx=\0"
+    var s_t: [u8; 5] = " at=\0"
+    serial.puts((&s_m[0]) as u64)
+    print_name(kind)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(total[kind as usize])
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(passed[kind as usize])
+    var c: u64 = 1
+    while c < CODES {
+        let n: u64 = fails[(kind * CODES + c) as usize]
+        if n != 0 {
+            serial.puts((&s_e[0]) as u64)
+            serial.dec(c)
+            serial.put(61 as u8)
+            serial.dec(n)
+        }
+        c = c + 1
+    }
+    serial.nl()
+    c = 1
+    while c < CODES {
+        let slot: u64 = kind * CODES + c
+        if fails[slot as usize] != 0 {
+            serial.puts((&s_m[0]) as u64)
+            print_name(kind)
+            serial.put(32 as u8)
+            serial.puts((&s_f[0]) as u64)
+            serial.dec(c)
+            serial.puts((&s_o[0]) as u64)
+            serial.hex_width(first_ctx[slot as usize], 6)
+            serial.puts((&s_t[0]) as u64)
+            amlns.path_out(state, first_node[slot as usize])
+            print_context(state, slot)
+            serial.nl()
+        }
+        c = c + 1
+    }
+}
+
+fn print_opcodes(state: u64) {
+    var s_m: [u8; 17] = "amlsweep: opcode\0"
+    var s_n: [u8; 4] = " n=\0"
+    var s_t: [u8; 5] = " at=\0"
+    var i: u64 = 0
+    while i < op_used {
+        serial.puts((&s_m[0]) as u64)
+        serial.put(32 as u8)
+        serial.hex_width(op_code[i as usize], 4)
+        serial.puts((&s_n[0]) as u64)
+        serial.dec(op_count[i as usize])
+        serial.puts((&s_t[0]) as u64)
+        amlns.path_out(state, op_node[i as usize])
+        serial.nl()
+        i = i + 1
+    }
+}
+
+fn pass(state: u64, init_only: bool) {
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_kind(state, i) == amlns.NK_METHOD && (amlns.node_flags(state, i) & 7) <= 1 {
+            let k: u64 = kind_of(amlns.node_name(state, i))
+            if k != NOT_LISTED && ((k == KIND_INI) == init_only) {
+                evaluate(state, i, k)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn run(state: u64) {
+    var s_b: [u8; 25] = "amlsweep: blocked writes\0"
+    var s_d: [u8; 15] = "amlsweep: done\0"
+    load_segs()
+    amlobj.set_read_only(true)
+    pass(state, true)
+    pass(state, false)
+    amlobj.set_read_only(false)
+    var k: u64 = 0
+    while k < KINDS {
+        if total[k as usize] != 0 {
+            print_kind(state, k)
+        }
+        k = k + 1
+    }
+    print_opcodes(state)
+    serial.puts((&s_b[0]) as u64)
+    serial.put(61 as u8)
+    serial.dec(amlobj.blocked_writes())
+    serial.nl()
+    serial.puts((&s_d[0]) as u64)
+    serial.nl()
+}

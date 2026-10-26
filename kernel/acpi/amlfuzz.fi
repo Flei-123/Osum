@@ -1,0 +1,184 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import mm.mem
+import acpi.acpi
+import acpi.amlns
+import acpi.aml
+import diag.cmdopt
+
+export { run }
+
+const ERR_BUCKETS: u64 = 16
+const SCRATCH_FRAMES: u64 = 40
+const FRAME_BYTES: u64 = 4096
+const HEADER_BYTES: u64 = 36
+const DEFAULT_MUTATIONS: u64 = 3
+const DEFAULT_SEED: u64 = 1
+const EVAL_METHODS: u64 = 24
+const MUTATION_KINDS: u64 = 5
+const PICK_COUNT: u64 = 8
+const SIG_MASK: u64 = 0xFFFFFFFF
+const SIG_DSDT: u64 = 0x54445344
+const SIG_SSDT: u64 = 0x54445353
+
+static mut rng_state: u64 = 1
+static mut outcome: [u64; 16] = [0 as u64; 16]
+static mut picks: [u8; 8] = [0x00, 0xFF, 0x0A, 0x5B, 0x14, 0xA0, 0x10, 0x82]
+
+fn next_random() -> u64 {
+    var x: u64 = rng_state
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    rng_state = x
+    return x
+}
+
+fn copy_table(src: u64, dst: u64, len: u64) {
+    var i: u64 = 0
+    while i < len {
+        amlns.wr8(dst + i, amlns.rd8(src + i))
+        i = i + 1
+    }
+}
+
+fn mutate_once(buf: u64, len: u64) -> u64 {
+    let span: u64 = len - HEADER_BYTES
+    let at: u64 = HEADER_BYTES + next_random() % span
+    let kind: u64 = next_random() % MUTATION_KINDS
+    if kind == 0 {
+        amlns.wr8(at, next_random() & 0xFF)
+        return len
+    }
+    if kind == 1 {
+        amlns.wr8(at, picks[(next_random() % PICK_COUNT) as usize] as u64)
+        return len
+    }
+    if kind == 2 {
+        amlns.wr8(at, amlns.rd8(at) ^ (1 << (next_random() % 8)))
+        return len
+    }
+    if kind == 3 {
+        var i: u64 = len - 1
+        while i > at {
+            amlns.wr8(buf + i, amlns.rd8(buf + i - 1))
+            i = i - 1
+        }
+        amlns.wr8(at, next_random() & 0xFF)
+        return len
+    }
+    var cut: u64 = next_random() % (len / 4 + 1)
+    if cut >= span {
+        cut = 0
+    }
+    return len - cut
+}
+
+fn eligible(t: u64) -> bool {
+    if t == 0 {
+        return false
+    }
+    let sig: u64 = amlns.rd32(t) & SIG_MASK
+    return (sig == SIG_DSDT || sig == SIG_SSDT) && amlns.rd32(t + 4) > HEADER_BYTES + 64
+        && amlns.rd32(t + 4) <= SCRATCH_FRAMES * FRAME_BYTES - FRAME_BYTES
+}
+
+fn pick_table(state: u64, k: u64) -> u64 {
+    let n: u64 = acpi.table_count(state)
+    var seen: u64 = 0
+    var i: u64 = 0
+    var found: u64 = 0
+    var total: u64 = 0
+    while i < n {
+        if eligible(acpi.table_at(state, i)) {
+            total = total + 1
+        }
+        i = i + 1
+    }
+    if total == 0 {
+        return 0
+    }
+    let want: u64 = k % total
+    i = 0
+    while i < n {
+        let t: u64 = acpi.table_at(state, i)
+        if eligible(t) {
+            if seen == want {
+                found = t
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return found
+}
+
+fn print_summary(iters: u64, leaked: u64) {
+    var s_a: [u8; 16] = "amlfuzz: iters=\0"
+    var s_l: [u8; 9] = " leaked=\0"
+    var s_e: [u8; 3] = " e\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(iters)
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(leaked)
+    var c: u64 = 0
+    while c < ERR_BUCKETS {
+        if outcome[c as usize] != 0 {
+            serial.puts((&s_e[0]) as u64)
+            serial.dec(c)
+            serial.put(61 as u8)
+            serial.dec(outcome[c as usize])
+        }
+        c = c + 1
+    }
+    serial.nl()
+}
+
+fn run(state: u64) {
+    var w_iters: [u8; 8] = "amlfuzz\0"
+    var w_seed: [u8; 12] = "amlfuzzseed\0"
+    var w_mut: [u8; 11] = "amlfuzzmut\0"
+    var s_d: [u8; 14] = "amlfuzz: done\0"
+    let iters: u64 = cmdopt.number(state, (&w_iters[0]) as u64, 0)
+    if iters == 0 {
+        return
+    }
+    rng_state = cmdopt.number(state, (&w_seed[0]) as u64, DEFAULT_SEED) * 2654435761 + 88172645463325252
+    let muts: u64 = cmdopt.number(state, (&w_mut[0]) as u64, DEFAULT_MUTATIONS)
+    let scratch: u64 = mem.frame_run(state, SCRATCH_FRAMES)
+    if scratch == 0 {
+        return
+    }
+    let free0: u64 = mem.frames_free(state)
+    var done: u64 = 0
+    while done < iters {
+        let src: u64 = pick_table(state, done)
+        if src == 0 {
+            break
+        }
+        var len: u64 = amlns.rd32(src + 4)
+        copy_table(src, scratch, len)
+        var m: u64 = 0
+        while m < muts {
+            len = mutate_once(scratch, len)
+            m = m + 1
+        }
+        var e: u64 = aml.fuzz_load(state, scratch, len, EVAL_METHODS)
+        if e >= ERR_BUCKETS {
+            e = ERR_BUCKETS - 1
+        }
+        outcome[e as usize] = outcome[e as usize] + 1
+        done = done + 1
+    }
+    let free1: u64 = mem.frames_free(state)
+    mem.frame_free_run(state, scratch, SCRATCH_FRAMES)
+    var leaked: u64 = 0
+    if free1 < free0 {
+        leaked = free0 - free1
+    }
+    print_summary(done, leaked)
+    serial.puts((&s_d[0]) as u64)
+    serial.nl()
+}
