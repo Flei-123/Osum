@@ -29,6 +29,14 @@ current description.
 | `acpidev.fi` | `/proc/acpi` |
 | `acpidump.fi` | `/proc/acpidump` (every table as hex rows) |
 | `dmar.fi` | DMAR table report |
+| `thermzone.fi` | thermal zone table (flat array, stride 24, at most 24 zones) and `sample()`: `_TMP`, `_CRT`, `_HOT`, `_PSV`, `_STA` of one zone |
+| `thermal.fi` | zone scheduler and critical action: `poll(state)` runs once per `acpiev.pump` |
+| `thermview.fi` | `/proc/thermal` and serial rendering of the zones |
+| `thermsim.fi` | test values for simulated zones (written to 0x9F40) |
+| `kernel/fs/syncall.fi` | `sync_all(state)`: FAT, exFAT and `blk.flush`; used by `sys.do_sync` and by the critical shutdown |
+| `kernel/bus/ecam.fi` | MCFG parser, bus/device/function to address, windowed access to extended config space |
+| `kernel/bus/pcie.fi` | `/proc/pcie` |
+| `kernel/bus/ecamdiag.fi` | ECAM boot stage and test hooks |
 
 `kernel/diag/cmdopt.fi` reads kernel command line words and numbers for test knobs (no kstate mode bits needed).
 
@@ -82,6 +90,22 @@ Handler `acpiev.irq` (`service`):
 EC events are polled every 10 ms (`ecio.poll_query` was called thousands of times per second before; the HP showed
 `polls=59782176` in 3043 s).
 
+## Evaluation guard and deferred work
+
+AML runs in one execution context. `aml.eval_node*` take a guard (`acquire`/`release`, atomic compare-and-swap): a second
+entry while a method runs is refused, counted (`aml.busy_refusals`) and returns false instead of corrupting the running
+call. The interrupt handler never evaluates AML.
+
+Brightness key presses (`blchain.on_key`, `blchain.on_ext_key`) come from the keyboard interrupt path. They are queued (8
+slots, overflow counted) and applied by `blchain.service`, which `acpiev.pump` calls first in every round, so no keyboard
+interrupt runs AML (`_BCM` can take milliseconds on real firmware).
+
+## Level-triggered GPEs
+
+`_Lxx` methods are level GPEs, `_Exx` edge GPEs (`gpe.arm(bit, level)`). `gpe.scan` clears the status of edge GPEs at once.
+A level GPE is masked (enable bit off) while its method runs; `gpe.finish` clears the status and enables it again, `gpe.fail`
+disarms a GPE whose method failed. Counters appear as `gpe_masked` and `gpe_failed` in `scix`.
+
 ## Diagnostics
 
 - `/proc/acpi`: `rsdp`, `tables`, `aml_hold`, device list, then `scix` (routing, counters), `scireg` (live PM1 and GPE
@@ -106,6 +130,12 @@ EC events are polled every 10 ms (`ecio.poll_query` was called thousands of time
 | `noscistorm` | counter-proof: no storm guard |
 | `scinoovr` | counter-proof: ignore MADT overrides (level, active low) |
 | `ecsim`, `noec` | EC software model, EC driver off |
+| `scigpelv` | test: treat every armed GPE as level triggered |
+| `scidefer` | selftest of the deferred brightness key queue |
+| `amlsweep`, `amlconf`, `amlfuzz=N` | method sweep, conformance run, load fuzzer (see below) |
+| `nothermal`, `thermms=<ms>`, `thermdump=<s>` | thermal polling off, poll interval (100..60000 ms), periodic dump |
+| `thermsim`, `thermtemp=<dK>`, `thermcrit=<s>`, `thermcritb=<s>`, `thermabsent=<s>`, `thermcset=<s>` + `thermcval=<C>` | simulated zones for the thermal gate (needs `evwait`) |
+| `noecam`, `ecamself`, `ecamcmp`, `ecamcaps`, `ecamhold`, `ecamaml`, `ecamproc` | ECAM off, selftest, compare with port I/O, capability walk, window hold, AML `PCI_Config` check, `/proc/pcie` check |
 
 ## Real firmware replay and the method sweep
 
@@ -135,10 +165,52 @@ computes at boot (base 0xFFFFFFFF in QEMU) and thermal methods that need earlier
 cut) in a scratch arena, evaluates up to 24 methods of each result with writes blocked, frees the arena and checks that no
 frame leaked. `amlfuzzseed` selects the sequence. Result line: `amlfuzz: iters=N leaked=0 e<code>=count ...`.
 
+## Thermal zones
+
+`thermzone` finds every `ThermalZone` object of the namespace that has a `_TMP`. `thermal.poll` reads one zone per slot
+(interval divided by the number of zones, at least 10 ms; default 2000 ms per zone), rate limited by `time.mono_ns`. Valid
+readings are 2532..4732 dK (offset 2732 as in `pwr`); 0, 0xFFFF and values below 2532 count as `invalid` and never as a
+temperature. A `Notify` 0x81 on a zone makes the next read refresh `_CRT`, `_HOT`, `_PSV`; `_STA` = 0 marks a zone absent.
+
+- `_TMP >= _CRT` in 3 valid readings in a row: `CRITICAL`, `sync_all`, `power.acpi_off`.
+- `_HOT` and `_PSV`: one message per crossing, no action.
+- A zone without `_CRT` never causes an action.
+
+`/proc/thermal`: header `thermal zones=N interval_ms=M`, one line per zone (`zone <path> temp_c= crt_c= hot_c= psv_c=
+min= max= valid= invalid= errors= hot_events= psv_events= present=`), then `cpu temp_c=<x> source=msr`; `thermal off` when
+disabled (`thermal off no-namespace` without a namespace).
+
+Measured in QEMU with simulated zones (`tools/acpi/asl/thermal.asl`): critical zone powers the machine off cleanly (exit 0),
+zone without `_CRT` at 116.8 C keeps running, `nothermal` leaves the other events ready. Not measured on real hardware: the
+HP DSDT has 9 zones with EC backed `_TMP` but is larger than the QEMU table limit; the Surface DSDT has no `_TMP` at all
+(its zones are `_DSM` based, `thermal` finds none). `pwr.PW_TZRAW` is not fed from ACPI yet, so the 80 C throttling does
+not see the zone temperatures.
+
+## PCIe configuration space (ECAM)
+
+`ecam.fi` parses the MCFG from the boot snapshot into a static table (at most 8 entries) and maps the 2 MiB block that holds
+a configuration address through one shared uncached window (claimed on first use, remapped when needed, `invlpg`, access
+under a lock with interrupts off). Addresses outside every entry read 0xFFFFFFFF. `pci.fi` sends offsets below 256 to port
+I/O and offsets from 256 to ECAM, and walks extended capabilities (`ext_cap_find`, `ext_cap_offsets`, loop guard at 480
+entries). AML `PCI_Config` regions use the same path, so a region at 0x100 reads extended space.
+
+`/proc/pcie`: header with base, segment and bus range, then one line per function with extended capabilities, for example
+`pcie 00:03.0 ext=0001@100v2,000d@148v1`. A default boot prints only the header and claims no window.
+
+Measured in QEMU q35 (base 0xb0000000, buses 0-255): ECAM bytes equal port bytes on all 10 devices, the capability lists
+equal an independent Python walk over the raw bytes, four window moves keep the data, a write through ECAM is readable
+through the port and restored. Counter-proofs: `-machine pc` has no MCFG and boots with the same device list, `noecam` has
+no `pcie` lines. The MCFG of the Surface Laptop 4 (one entry, base 0xe0000000) matches the independent parser; multiple
+segments are covered by synthetic tables only. `pci.fi` knows segment 0 only.
+
 ## Gate
 
 `bash tools/acpi/run.sh [--only name,...]` runs `tools/acpi/sections/NN-name.sh`; `ACPI_IMG=<kernel>` reuses an image,
 `ACPI_BASE_IMG=<older kernel>` is for before/after lines. Helpers are in `tools/acpi/lib.sh`.
+
+Related gates that exercise this code: `aml` (namespace against an independent Python parser), `acpibl` (backlight methods),
+`ecquery` (EC `_Qxx` path), `battery`, `blchain` and `fnkeys` (brightness keys), `power` (lid, battery, AC policy), `hwinv`
+(device inventory), `boot`, `hotplug`, `pci`.
 
 Real firmware tables live in `tools/acpi/real/` (see the README there). QEMU takes tables up to 65535 bytes through
 `-acpitable`; `tools/acpi/retag.py` renames the signature (e.g. `XAPC`) so the kernel parses a real MADT next to its own.
