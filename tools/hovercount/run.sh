@@ -46,7 +46,7 @@ EOT
 
 run_one() { # <name> <script> <extra>
     mkdir -p "$TMPD/$1"
-    ( EH_MKFS_EXTRA="/proc/" DESIGNBUILD="$TMPD/$1/build" bash tools/design/eh6.sh "$TMPD/$1/o" res=1280x800 accel=kvm tafel=nein "moreprogs=term grep" "extra=vfs lang=en $3" \
+    ( EH_MKFS_EXTRA="/proc/" DESIGNBUILD="$TMPD/$1/build" bash tools/design/eh6.sh "$TMPD/$1/o" res=1280x800 accel=kvm tafel=nein moreprogs=term "extra=vfs lang=en $3" \
         drehbuch="$2" > "$TMPD/$1/o.log" 2>&1 )
     rm -rf "$TMPD/$1/build"
 }
