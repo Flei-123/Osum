@@ -108,7 +108,7 @@ import arch.x86_64.apic
 
 export {
     stage, pump, irq, shared, ready, why, sci_gsi, gpe_armed, events, wakeups,
-    lid_state, lid_present, batt_percent, batt_state, batt_present,
+    lid_state, lid_present, batt_percent, batt_valid, batt_raw_full, batt_raw_rem, batt_full, batt_bif_status, batt_bst_status, batt_state, batt_present,
     ac_online, button_pending, button_take, take_change, changed,
     EV_NONE, EV_BUTTON, EV_LID, EV_BATT, EV_AC,
     LID_OPEN, LID_CLOSED, LID_UNKNOWN,
@@ -181,6 +181,11 @@ const E_CPM1A: u64 = 1200
 const E_CPM1B: u64 = 1208
 const E_CTYPA: u64 = 1216
 const E_CTYPB: u64 = 1224
+const E_BVALID: u64 = 1232
+const E_RAWFULL: u64 = 1240
+const E_RAWREM: u64 = 1248
+const E_BIFRET: u64 = 1256
+const E_BSTRET: u64 = 1264
 const BONLY_STORM: u64 = 64 // empty SCI entries in a row before the line is masked
 const E_BTNN: u64 = 1144 // wie oft die Taste gedrueckt wurde (unabholbar)
 const E_STSOR: u64 = 1136 // ODER ueber alle je gelesenen sts
@@ -291,6 +296,30 @@ fn lid_present(state: u64) -> bool {
 
 fn batt_present(state: u64) -> bool {
     return g(state, E_BATOK) == 1
+}
+
+fn batt_valid(state: u64) -> bool {
+    return g(state, E_BVALID) == 1
+}
+
+fn batt_raw_full(state: u64) -> u64 {
+    return g(state, E_RAWFULL)
+}
+
+fn batt_raw_rem(state: u64) -> u64 {
+    return g(state, E_RAWREM)
+}
+
+fn batt_full(state: u64) -> u64 {
+    return g(state, E_FULL)
+}
+
+fn batt_bif_status(state: u64) -> u64 {
+    return g(state, E_BIFRET)
+}
+
+fn batt_bst_status(state: u64) -> u64 {
+    return g(state, E_BSTRET)
 }
 
 fn batt_percent(state: u64) -> u64 {
@@ -1217,12 +1246,15 @@ fn read_bif(state: u64) {
     }
     var r: [u64; 3] = [0 as u64; 3]
     if !aml.eval_node(state, m, (&r[0]) as u64) {
+        s(state, E_BIFRET, 2)
         amlns.err_set(state, amlns.ERR_OK)
         return
     }
     if amlobj.otype((&r[0]) as u64) != amlobj.OT_PKG {
+        s(state, E_BIFRET, 3)
         return
     }
+    s(state, E_BIFRET, 1)
     // `_BIF` Package(13): Index 2 ist die letzte volle Ladung.
     // `_BIX` Package(20+): dort ist es Index 3, weil vorne eine
     // Revisionszahl steht. Unterschieden wird an der LAENGE -- das
@@ -1233,6 +1265,7 @@ fn read_bif(state: u64) {
         idx = 3
     }
     let full: u64 = pkg_int(state, (&r[0]) as u64, idx)
+    s(state, E_RAWFULL, full)
     if full != 0 && full != 0xFFFFFFFF {
         s(state, E_FULL, full)
     }
@@ -1256,6 +1289,7 @@ fn read_bst(state: u64) {
     }
     var r: [u64; 3] = [0 as u64; 3]
     if !aml.eval_node(state, m, (&r[0]) as u64) {
+        s(state, E_BSTRET, 2)
         amlns.err_set(state, amlns.ERR_OK)
         return
     }
@@ -1266,11 +1300,13 @@ fn read_bst(state: u64) {
         serial.dec(amlobj.ov2((&r[0]) as u64))
     }
     if amlobj.otype((&r[0]) as u64) != amlobj.OT_PKG {
+        s(state, E_BSTRET, 3)
         if kstate.mode_on(state, kstate.M_EVDUMP) {
             serial.nl()
         }
         return
     }
+    s(state, E_BSTRET, 1)
     // `_BST` Package(4): Zustand, Strom, Restkapazitaet, Spannung.
     let zust: u64 = pkg_int(state, (&r[0]) as u64, 0)
     let rem: u64 = pkg_int(state, (&r[0]) as u64, 2)
@@ -1282,17 +1318,21 @@ fn read_bst(state: u64) {
         serial.nl()
     }
     let full: u64 = g(state, E_FULL)
-    var pct: u64 = g(state, E_PCT)
-    if full != 0 && rem != 0xFFFFFFFF {
+    s(state, E_RAWREM, rem)
+    var pct: u64 = 0
+    var valid: u64 = 0
+    if full != 0 && full != 0xFFFFFFFF && rem != 0xFFFFFFFF {
+        valid = 1
         pct = (rem * 100) / full
         if pct > 100 {
             pct = 100
         }
     }
-    if zust != g(state, E_BSTATE) || pct != g(state, E_PCT) {
+    if zust != g(state, E_BSTATE) || pct != g(state, E_PCT) || valid != g(state, E_BVALID) {
         s(state, E_BSTATE, zust)
         s(state, E_REM, rem)
         s(state, E_PCT, pct)
+        s(state, E_BVALID, valid)
         mark(state, EV_BATT)
     }
 }

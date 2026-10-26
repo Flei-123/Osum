@@ -26,7 +26,7 @@ if FIRNLIB="$PWD/lib" $FC --profile=app tools/power/host.fi -o "$T/host" > "$T/h
     grep '^FAIL' "$T/host.out" | head -20
     n=$(grep -c '^ok' "$T/host.out")
     [ "$hrc" = 0 ] && ok "host.fi: $(tail -1 "$T/host.out")" || bad "host.fi: $(tail -1 "$T/host.out")"
-    [ "$n" -ge 36 ] && ok "at least 36 checks ran ($n)" || bad "only $n checks ran"
+    [ "$n" -ge 40 ] && ok "at least 40 checks ran ($n)" || bad "only $n checks ran"
 else
     bad "host.fi does not build"; grep -v '^warning' "$T/host.build" | head -20
 fi

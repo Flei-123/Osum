@@ -245,6 +245,7 @@ const PL_MAXPLUG: u64 = 1
 const SYS_PWRGET: u64 = 1750
 const PG_BATPRESENT: u64 = 24
 const PG_BATPERCENT: u64 = 25
+const PG_BATVALID: u64 = 56
 // ROUND LOOK: bit 1 is the ACPI _BST charging bit. Same number as in
 // kernel/sys.fi and kernel/user/power.fi -- the numbers are the
 // interface to ring 3 and this bar does not invent a second one.
@@ -557,7 +558,7 @@ fn snd_icon() -> u64 {
 }
 
 fn bat_icon() -> u64 {
-    if bat_have == 0 {
+    if bat_have == 0 || bat_unknown != 0 {
         return icons.BATTERY_ABSENT
     }
     // r782: the state comes from fui.traypower (the same model `powerd status` prints). On mains and full
@@ -596,7 +597,7 @@ fn snd_colour() -> u64 {
 }
 
 fn bat_colour() -> u64 {
-    if bat_have == 0 {
+    if bat_have == 0 || bat_unknown != 0 {
         return wlibc.theme(wlibc.T_DIM)
     }
     if bat_chg == 0 && bat_pct < 10 {
@@ -845,6 +846,9 @@ static mut net_state: u64 = 0
 // there is none.
 static mut bat_have: u64 = 0
 static mut bat_pct: u64 = 0
+static mut bat_unknown: u64 = 0
+static mut kb_unk: [u8; 21] = "tray.battery.unknown\0"
+static mut bat_unk_txt: [u8; 2] = "?\0"
 static mut bat_chg: u64 = 0
 // r782: `PG_AC`, the mains adapter. With bat_have/bat_pct/bat_chg it is the whole input of fui.traypower.
 static mut bat_ac: u64 = 0
@@ -2914,10 +2918,11 @@ fn tray_texts_sync() {
     traypower.set_text(traypower.TX_PLUGGED, msg.get((&kb_plug[0 as usize]) as u64))
     traypower.set_text(traypower.TX_LOW, msg.get((&kb_low[0 as usize]) as u64))
     traypower.set_text(traypower.TX_CRITICAL, msg.get((&kb_crit[0 as usize]) as u64))
+    traypower.set_text(traypower.TX_UNKNOWN, msg.get((&kb_unk[0 as usize]) as u64))
 }
 
 fn bat_warn_check() {
-    if bat_have == 0 {
+    if bat_have == 0 || bat_unknown != 0 {
         bat_warned = 0
         return
     }
@@ -3023,6 +3028,7 @@ fn status_build() -> bool {
     bat_pct = 0
     bat_chg = 0
     bat_ac = 0
+    bat_unknown = 0
     let acv: u64 = demo_pwr(PG_AC)
     if !ulib.bad(acv) && acv != 0 {
         bat_ac = 1
@@ -3050,8 +3056,17 @@ fn status_build() -> bool {
         }
     } else {
         bat_have = 1
+        let bv: u64 = demo_pwr(PG_BATVALID)
         let pc: u64 = demo_pwr(PG_BATPERCENT)
-        if ulib.bad(pc) {
+        if !ulib.bad(bv) && bv == 0 {
+            bat_unknown = 1
+            bat_warned = 0
+            var at_u: u64 = 0
+            if !glyphs_ok() {
+                at_u = text_at_p(a, 0, s_ak)
+            }
+            let _qu: u64 = text_at_p(a, at_u, (&bat_unk_txt[0 as usize]) as u64)
+        } else if ulib.bad(pc) {
             let _q: u64 = text_at_p(a, 0, s_kA)
         } else {
             bat_pct = pc
@@ -6908,7 +6923,11 @@ fn hover_text(m: u64) -> u64 {
     if m == 903 {
         // r782: "Akku 77 %, wird geladen" etc. out of the same model as the glyph
         tray_texts_sync()
-        let _n: u64 = traypower.tooltip(bat_have, bat_pct, bat_chg, bat_ac,
+        var bat_ok: u64 = 1
+        if bat_unknown != 0 {
+            bat_ok = 0
+        }
+        let _n: u64 = traypower.tooltip_valid(bat_have, bat_ok, bat_pct, bat_chg, bat_ac,
             (&bat_tip[0 as usize]) as u64, 96)
         return (&bat_tip[0 as usize]) as u64
     }
