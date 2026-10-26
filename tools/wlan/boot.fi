@@ -6,11 +6,11 @@ import wlan.iwl_boot
 import wlan.iwl_diag
 import wlan.iwl_phydb
 
-static mut line: [u8; 1024] = [0; 1024]
+static mut line: [u8; 8192] = [0; 8192]
 static mut ln: u64 = 0
-static mut q: [u8; 8192] = [0; 8192]
-static mut qoff: [u64; 16] = [0; 16]
-static mut qlen: [u64; 16] = [0; 16]
+static mut q: [u8; 16384] = [0; 16384]
+static mut qoff: [u64; 32] = [0; 32]
+static mut qlen: [u64; 32] = [0; 32]
 static mut qhead: u64 = 0
 static mut qtail: u64 = 0
 static mut qfill: u64 = 0
@@ -119,6 +119,24 @@ fn calib(typ: u64, len: u64, seed: u64, id: u64, has_id: bool) {
     pkt_end(a, 8 + len)
 }
 
+fn calib_observed() {
+    var seen: [u8; 28] = [7, 0, 0, 0, 0, 0, 0, 0, 0x2a, 0x14, 0, 0, 0x28, 0x48, 0, 0, 0x26, 0x78, 0, 0, 0x06, 0xb4, 0, 0, 0x04, 0xe0, 0, 0]
+    let a: u64 = pkt_begin(0x6B)
+    let base: u64 = (&q[0]) as u64 + a
+    iwl_le.st16(base, 4, 5)
+    iwl_le.st16(base, 6, 2056)
+    var i: u64 = 0
+    while i < 2056 {
+        if i < 28 {
+            iwl_le.st8(base, 8 + i, seen[i as usize] as u64)
+        } else {
+            iwl_le.st8(base, 8 + i, 0x60 + i)
+        }
+        i = i + 1
+    }
+    pkt_end(a, 8 + 2056)
+}
+
 fn sec_size(s: u64) -> u64 {
     if s == 1 { return 3000 }
     if s == 3 { return 100 }
@@ -174,9 +192,11 @@ fn fake_send(ctx: u64, a: u64, n: u64) -> i64 {
         pkt_end(u, 8)
         calib(1, 8, 0x10, 0, false)
         calib(2, 10, 0x20, 0, false)
-        calib(3, 6, 0x40, 1, true)
-        calib(3, 6, 0x50, 0, true)
+        calib(4, 6, 0x40, 1, true)
+        calib(4, 6, 0x50, 0, true)
         calib(2, 12, 0x30, 0, false)
+        calib(3, 6, 0x70, 0, false)
+        calib_observed()
         if fmode != 2 {
             let c: u64 = pkt_begin(0x04)
             pkt_end(c, 8)
@@ -243,6 +263,7 @@ fn scenario(name: u64, mode: u64, present: u64, require: u64, nvm_cap: u64, pool
     reset(mode)
     var d: iwl_diag.Diag = iwl_diag.diag_new()
     var b: iwl_boot.Boot = iwl_boot.boot_new((&cmdbuf[0]) as u64, 4096, (&rxbuf[0]) as u64, 4096, (&nvmbuf[0]) as u64, nvm_cap, (&pool[0]) as u64, pool_cap)
+    if mode == 7 { iwl_phydb.phydb_set_legacy(&b.db, 1) }
     b.phy_cfg = 0x00330F00
     b.ev_trig = 1
     b.fl_trig = 2
@@ -308,20 +329,28 @@ fn scenario(name: u64, mode: u64, present: u64, require: u64, nvm_cap: u64, pool
             k = k + 1
         }
         let n: u64 = iwl_diag.diag_render(&d, (&rbuf[0]) as u64, 2048)
-        var s: u64 = 0
-        var i: u64 = 0
-        while i < n {
-            if i == 0 || iwl_le.ld8((&rbuf[0]) as u64, i - 1) == 10 {
-                put_s((&k_d[0]) as u64)
-            }
-            line[ln as usize] = rbuf[i as usize]
-            if rbuf[i as usize] == 10 {
-                flush()
-            } else {
-                ln = ln + 1
-            }
-            i = i + 1
+        dump_lines(n)
+    }
+    if dump || mode == 7 {
+        let n: u64 = iwl_diag.diag_more(&d, (&rbuf[0]) as u64, 2048)
+        dump_lines(n)
+    }
+}
+
+fn dump_lines(n: u64) {
+    var k_d: [u8; 3] = "D \0"
+    var i: u64 = 0
+    while i < n {
+        if i == 0 || iwl_le.ld8((&rbuf[0]) as u64, i - 1) == 10 {
+            put_s((&k_d[0]) as u64)
         }
+        line[ln as usize] = rbuf[i as usize]
+        if rbuf[i as usize] == 10 {
+            flush()
+        } else {
+            ln = ln + 1
+        }
+        i = i + 1
     }
 }
 
@@ -342,6 +371,7 @@ fn main() -> i32 {
     var i: [u8; 8] = "nvmfull\0"
     var j: [u8; 9] = "poolfull\0"
     var k: [u8; 8] = "offbad\0\0"
+    var l: [u8; 8] = "oldtype\0"
     scenario((&a[0]) as u64, 0, 1, 0, 8192, 4096, true)
     scenario((&b[0]) as u64, 0, 0, 0, 8192, 4096, false)
     scenario((&c[0]) as u64, 0, 0, 1, 8192, 4096, true)
@@ -353,5 +383,6 @@ fn main() -> i32 {
     scenario((&i[0]) as u64, 0, 1, 0, 3000, 4096, false)
     scenario((&j[0]) as u64, 0, 1, 0, 8192, 20, false)
     scenario((&k[0]) as u64, 6, 1, 0, 8192, 4096, false)
+    scenario((&l[0]) as u64, 7, 1, 0, 8192, 4096, false)
     return 0
 }

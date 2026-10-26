@@ -3,7 +3,8 @@ import wlan.iwl_le
 
 export {
     PhyDb, phydb_new, phydb_add, phydb_count, phydb_bytes, phydb_order, phydb_type, phydb_len, phydb_data,
-    CMD_CALIB_RES, CMD_PHY_DB, PD_CFG, PD_CALIB_NCH, PD_CALIB_PAPD, PD_CALIB_TXP,
+    phydb_set_legacy, phydb_skipped, phydb_skip_type, phydb_skip_len, phydb_stores,
+    CMD_CALIB_RES, CMD_PHY_DB, PD_CFG, PD_CALIB_NCH, PD_UNUSED, PD_CALIB_PAPD, PD_CALIB_TXP, PD_MAX,
     E_PD_FULL, E_PD_SHORT, E_PD_TYPE
 }
 
@@ -11,8 +12,12 @@ const CMD_CALIB_RES: u64 = 0x6B
 const CMD_PHY_DB: u64 = 0x6C
 const PD_CFG: u64 = 1
 const PD_CALIB_NCH: u64 = 2
-const PD_CALIB_PAPD: u64 = 3
-const PD_CALIB_TXP: u64 = 4
+const PD_UNUSED: u64 = 3
+const PD_CALIB_PAPD: u64 = 4
+const PD_CALIB_TXP: u64 = 5
+const PD_MAX: u64 = 6
+const LEGACY_PAPD: u64 = 3
+const LEGACY_TXP: u64 = 4
 
 const E_PD_FULL: i64 = -66
 const E_PD_SHORT: i64 = -67
@@ -25,6 +30,10 @@ struct PhyDb {
     cap: u64,
     used: u64,
     n: u64,
+    legacy: u64,
+    skipped: u64,
+    skip_type: u64,
+    skip_len: u64,
     typ: [u64; 48],
     id: [u64; 48],
     off: [u64; 48],
@@ -32,7 +41,7 @@ struct PhyDb {
 }
 
 fn phydb_new(pool: u64, cap: u64) -> PhyDb {
-    var db: PhyDb = PhyDb { pool: pool, cap: cap, used: 0, n: 0, typ: [0; 48], id: [0; 48], off: [0; 48], len: [0; 48] }
+    var db: PhyDb = PhyDb { pool: pool, cap: cap, used: 0, n: 0, legacy: 0, skipped: 0, skip_type: 0, skip_len: 0, typ: [0; 48], id: [0; 48], off: [0; 48], len: [0; 48] }
     return db
 }
 
@@ -45,14 +54,32 @@ fn find(db: *mut PhyDb, typ: u64, id: u64) -> u64 {
     return MAX_ENT
 }
 
+fn phydb_set_legacy(db: *mut PhyDb, on: u64) { (*db).legacy = on }
+
+fn has_id(db: *mut PhyDb, typ: u64) -> bool {
+    if (*db).legacy != 0 { return typ == LEGACY_PAPD || typ == LEGACY_TXP }
+    return typ == PD_CALIB_PAPD || typ == PD_CALIB_TXP
+}
+
+fn phydb_stores(db: *mut PhyDb, typ: u64) -> bool {
+    if (*db).legacy != 0 { return typ >= PD_CFG && typ <= LEGACY_TXP }
+    return typ == PD_CFG || typ == PD_CALIB_NCH || typ == PD_CALIB_PAPD || typ == PD_CALIB_TXP
+}
+
 fn phydb_add(db: *mut PhyDb, p: u64, plen: u64) -> i64 {
     if plen < 4 { return E_PD_SHORT }
     let typ: u64 = iwl_le.ld16(p, 0)
     let len: u64 = iwl_le.ld16(p, 2)
-    if typ < PD_CFG || typ > PD_CALIB_TXP { return E_PD_TYPE }
+    if !phydb_stores(db, typ) {
+        if (*db).legacy != 0 { return E_PD_TYPE }
+        (*db).skipped = (*db).skipped + 1
+        (*db).skip_type = typ
+        (*db).skip_len = len
+        return 1
+    }
     if 4 + len > plen { return E_PD_SHORT }
     var id: u64 = 0
-    if typ == PD_CALIB_PAPD || typ == PD_CALIB_TXP {
+    if has_id(db, typ) {
         if len < 2 { return E_PD_SHORT }
         id = iwl_le.ld16(p, 4)
     }
@@ -73,6 +100,9 @@ fn phydb_add(db: *mut PhyDb, p: u64, plen: u64) -> i64 {
 }
 
 fn phydb_count(db: *mut PhyDb) -> u64 { return (*db).n }
+fn phydb_skipped(db: *mut PhyDb) -> u64 { return (*db).skipped }
+fn phydb_skip_type(db: *mut PhyDb) -> u64 { return (*db).skip_type }
+fn phydb_skip_len(db: *mut PhyDb) -> u64 { return (*db).skip_len }
 
 fn phydb_bytes(db: *mut PhyDb) -> u64 {
     var s: u64 = 0
