@@ -53,7 +53,7 @@ $HEAVY bash tools/design/eh6.sh "$TMPD/o0" res=1280x800 accel=kvm nurbau=ja prog
 
 # 2. four runs, each its own heavy job
 run_one() {  # name scale extra
-    $HEAVY bash tools/design/eh6.sh "$TMPD/$1" res=1280x800 accel=kvm uiscale=$2 progs="$PROGS" \
+    $HEAVY bash tools/design/eh6.sh "$TMPD/$1" res=1280x800 accel=kvm uiscale=$2 tafel=nein progs="$PROGS" \
         drehbuch="$SCENE" themeextra="$3" > "$TMPD/$1.log" 2>&1
 }
 run_one new1 1 "" &
