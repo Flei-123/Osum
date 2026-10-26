@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import acpi.acpi
+
+export {
+    parse, parse_table, count, irq_at, gsi_for, flags_for, is_level, is_low, SRC_MAX
+}
+
+const SRC_MAX: u64 = 16
+const MADT_LENGTH: u64 = 4
+const MADT_ENTRIES: u64 = 44
+const ENTRY_OVERRIDE: u64 = 2
+const OVERRIDE_BYTES: u64 = 10
+const O_SOURCE: u64 = 3
+const O_GSI: u64 = 4
+const O_FLAGS: u64 = 8
+const POLARITY_MASK: u64 = 3
+const POLARITY_HIGH: u64 = 1
+const POLARITY_LOW: u64 = 3
+const TRIGGER_SHIFT: u64 = 2
+const TRIGGER_MASK: u64 = 3
+const TRIGGER_EDGE: u64 = 1
+const TRIGGER_LEVEL: u64 = 3
+
+static mut found: u64 = 0
+static mut o_irq: [u64; 16] = [0 as u64; 16]
+static mut o_gsi: [u64; 16] = [0 as u64; 16]
+static mut o_flags: [u64; 16] = [0 as u64; 16]
+
+fn count() -> u64 {
+    return found
+}
+
+fn irq_at(i: u64) -> u64 {
+    if i >= found {
+        return 0
+    }
+    return o_irq[i as usize]
+}
+
+fn parse_table(madt: u64) -> u64 {
+    found = 0
+    if madt == 0 {
+        return 0
+    }
+    let end: u64 = madt + kstate.get32(madt + MADT_LENGTH)
+    var at: u64 = madt + MADT_ENTRIES
+    while at + 2 <= end {
+        let len: u64 = kstate.get8(at + 1)
+        if len < 2 || at + len > end {
+            break
+        }
+        if kstate.get8(at) == ENTRY_OVERRIDE && len >= OVERRIDE_BYTES && found < SRC_MAX {
+            o_irq[found as usize] = kstate.get8(at + O_SOURCE)
+            o_gsi[found as usize] = kstate.get32(at + O_GSI)
+            o_flags[found as usize] = kstate.get16(at + O_FLAGS)
+            found = found + 1
+        }
+        at = at + len
+    }
+    return found
+}
+
+fn parse(state: u64) -> u64 {
+    var w_madt: [u8; 5] = "APIC\0"
+    return parse_table(acpi.table(state, (&w_madt[0]) as u64))
+}
+
+fn slot_of(irq: u64) -> u64 {
+    var i: u64 = 0
+    while i < found {
+        if o_irq[i as usize] == irq {
+            return i
+        }
+        i = i + 1
+    }
+    return SRC_MAX
+}
+
+fn gsi_for(irq: u64) -> u64 {
+    let k: u64 = slot_of(irq)
+    if k == SRC_MAX {
+        return irq
+    }
+    return o_gsi[k as usize]
+}
+
+fn flags_for(irq: u64) -> u64 {
+    let k: u64 = slot_of(irq)
+    if k == SRC_MAX {
+        return 0
+    }
+    return o_flags[k as usize]
+}
+
+fn is_level(flags: u64, fallback: bool) -> bool {
+    let t: u64 = (flags >> TRIGGER_SHIFT) & TRIGGER_MASK
+    if t == TRIGGER_LEVEL {
+        return true
+    }
+    if t == TRIGGER_EDGE {
+        return false
+    }
+    return fallback
+}
+
+fn is_low(flags: u64, fallback: bool) -> bool {
+    let p: u64 = flags & POLARITY_MASK
+    if p == POLARITY_LOW {
+        return true
+    }
+    if p == POLARITY_HIGH {
+        return false
+    }
+    return fallback
+}

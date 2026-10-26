@@ -1,0 +1,161 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.procw
+import acpi.pm1
+import acpi.gpe
+import acpi.scistorm
+
+export {
+    set, snapshot, render,
+    S_GSI, S_IRQ, S_FLAGS, S_LEVEL, S_LOW, S_IRQS, S_SHARED, S_STRAY_PM1, S_STRAY_GPE, S_ARMED
+}
+
+const S_GSI: u64 = 0
+const S_IRQ: u64 = 1
+const S_FLAGS: u64 = 2
+const S_LEVEL: u64 = 3
+const S_LOW: u64 = 4
+const S_IRQS: u64 = 5
+const S_SHARED: u64 = 6
+const S_STRAY_PM1: u64 = 7
+const S_STRAY_GPE: u64 = 8
+const S_ARMED: u64 = 9
+const SLOTS: u64 = 10
+const REG_DWORDS: u64 = 4
+const BYTES_PER_DWORD: u64 = 4
+const BITS_PER_BYTE: u64 = 8
+const PM1_DIGITS: u64 = 4
+const DWORD_DIGITS: u64 = 8
+const EMPTY_BIT: u64 = 0xFFFF
+
+static mut vals: [u64; 10] = [0 as u64; 10]
+static mut snap_valid: u64 = 0
+static mut snap_pm1_sts: u64 = 0
+static mut snap_pm1_en: u64 = 0
+static mut snap_entry: u64 = 0
+static mut snap_sts: [u64; 4] = [0 as u64; 4]
+static mut snap_en: [u64; 4] = [0 as u64; 4]
+
+fn set(slot: u64, v: u64) {
+    if slot < SLOTS {
+        vals[slot as usize] = v
+    }
+}
+
+fn dword_of(first: u64, enable: bool) -> u64 {
+    var v: u64 = 0
+    var b: u64 = 0
+    while b < BYTES_PER_DWORD {
+        let i: u64 = first * BYTES_PER_DWORD + b
+        if enable {
+            v = v | (gpe.en_at(i) << (b * BITS_PER_BYTE))
+        } else {
+            v = v | (gpe.sts_at(i) << (b * BITS_PER_BYTE))
+        }
+        b = b + 1
+    }
+    return v
+}
+
+fn snapshot(entry: u64) {
+    snap_pm1_sts = pm1.status()
+    snap_pm1_en = pm1.enabled()
+    snap_entry = entry
+    var k: u64 = 0
+    while k < REG_DWORDS {
+        snap_sts[k as usize] = dword_of(k, false)
+        snap_en[k as usize] = dword_of(k, true)
+        k = k + 1
+    }
+    snap_valid = 1
+}
+
+fn key(k: u64) {
+    var names: [u8; 130] = "gsi\0irq\0flags\0level\0low\0irqs\0shared\0empty\0storms\0masked\0polls\0stray_pm1\0stray_gpe\0stray_bit\0armed\0pm1sts\0pm1en\0entry\0gpests\0gpeen\0"
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < k {
+        while names[at as usize] != 0 {
+            at = at + 1
+        }
+        at = at + 1
+        i = i + 1
+    }
+    procw.put_c(32)
+    while names[at as usize] != 0 {
+        procw.put_c(names[at as usize] as u64)
+        at = at + 1
+    }
+    procw.put_c(61)
+}
+
+fn dec(k: u64, v: u64) {
+    key(k)
+    procw.put_dec(v)
+}
+
+fn hex(k: u64, v: u64, digits: u64) {
+    key(k)
+    procw.put_hex(v, digits)
+}
+
+fn dwords(k: u64, live: bool, enable: bool) {
+    key(k)
+    var i: u64 = 0
+    while i < REG_DWORDS {
+        if i != 0 {
+            procw.put_c(44)
+        }
+        if live {
+            procw.put_hex(dword_of(i, enable), DWORD_DIGITS)
+        } else if enable {
+            procw.put_hex(snap_en[i as usize], DWORD_DIGITS)
+        } else {
+            procw.put_hex(snap_sts[i as usize], DWORD_DIGITS)
+        }
+        i = i + 1
+    }
+}
+
+fn render() {
+    var t_x: [u8; 5] = "scix\0"
+    var t_r: [u8; 7] = "scireg\0"
+    var t_s: [u8; 8] = "scisnap\0"
+    procw.put_s((&t_x[0]) as u64)
+    dec(0, vals[S_GSI as usize])
+    dec(1, vals[S_IRQ as usize])
+    hex(2, vals[S_FLAGS as usize], PM1_DIGITS)
+    dec(3, vals[S_LEVEL as usize])
+    dec(4, vals[S_LOW as usize])
+    dec(5, vals[S_IRQS as usize])
+    dec(6, vals[S_SHARED as usize])
+    dec(7, scistorm.empties())
+    dec(8, scistorm.storms())
+    var m: u64 = 0
+    if scistorm.masked() {
+        m = 1
+    }
+    dec(9, m)
+    dec(10, scistorm.polls())
+    dec(11, vals[S_STRAY_PM1 as usize])
+    dec(12, vals[S_STRAY_GPE as usize])
+    dec(13, gpe.stray_last())
+    dec(14, vals[S_ARMED as usize])
+    procw.put_c(10)
+    procw.put_s((&t_r[0]) as u64)
+    hex(15, pm1.status(), PM1_DIGITS)
+    hex(16, pm1.enabled(), PM1_DIGITS)
+    dwords(18, true, false)
+    dwords(19, true, true)
+    procw.put_c(10)
+    if snap_valid != 0 {
+        procw.put_s((&t_s[0]) as u64)
+        hex(15, snap_pm1_sts, PM1_DIGITS)
+        hex(16, snap_pm1_en, PM1_DIGITS)
+        hex(17, snap_entry, DWORD_DIGITS)
+        dwords(18, false, false)
+        dwords(19, false, true)
+        procw.put_c(10)
+    }
+}

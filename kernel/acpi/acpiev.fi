@@ -1,90 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/acpiev.fi -- RUNDE ACPI-EREIGNISSE: DER WEG VOM KNOPF ZUM KERN.
-//
-// ==================================================================
-// WAS VORHER DA WAR UND WAS GEFEHLT HAT
-// ==================================================================
-//
-// Osum konnte sich seit Runde K13 ABSCHALTEN: `power.acpi_off` liest
-// die FADT, sucht `_S5_` in der DSDT und schreibt den Schlafwert in
-// PM1a_CNT. Der Weg vom Knopf zum Ausschalten war fertig.
-//
-// Was fehlte, ist der Weg VOM HARDWARE-EREIGNIS ZUM KNOPF. Wer auf
-// einem Laptop die Einschalttaste drueckt, schaltet damit NICHTS ab --
-// er zieht eine Leitung, den SCI (System Control Interrupt). Was
-// danach passiert, ist Sache des Betriebssystems, und wenn es nichts
-// tut, passiert nichts. Deshalb liess sich Osum bisher nur ueber das
-// Startmenue herunterfahren.
-//
-// Schlimmer noch, und es steht seit Runde BLECHVIER in `kernel/hw.fi`:
-// weil dieser Kern die GPE-Methoden nicht ausfuehren KONNTE, hat er
-// beim Start ALLE GPE-Bits abgeschaltet. Das war richtig -- ein
-// Ereignis, dessen Statusbit nie geloescht wird, haelt die Leitung
-// dauerhaft gezogen und die Maschine steht in einem
-// Unterbrechungssturm. Aber es heisst eben auch: kein Deckel, keine
-// Taste, kein Akku.
-//
-// Diese Datei dreht das um. Sie schaltet GENAU DIE GPE-Bits wieder
-// ein, fuer die es eine `_Lxx`/`_Exx`-Methode in der DSDT gibt, und
-// behandelt sie so, wie die Spezifikation es vorschreibt.
-//
-// ==================================================================
-// DER WEG, SCHRITT FUER SCHRITT (ACPI 6.4, Kapitel 4.8 und 5.6.4)
-// ==================================================================
-//
-//  1. Die FADT nennt SCI_INT -- die Unterbrechungsleitung, auf der
-//     alles ankommt. Sie ist PEGELGESTEUERT und LOW-AKTIV, und sie
-//     wird geteilt. Auf den meisten Brettern ist es GSI 9.
-//
-//  2. Ein Ereignis setzt ein Bit. Es gibt zwei Sorten:
-//
-//     DIE FESTEN EREIGNISSE stehen in PM1a_STS/PM1b_STS an fest
-//     vergebenen Stellen. Bit 8 ist PWRBTN_STS -- die Einschalttaste.
-//     Sie braucht KEIN AML: die Spezifikation sagt, welches Bit es
-//     ist. Genau deshalb funktioniert die Taste in dieser Runde auch
-//     auf QEMU, wo es weder Deckel noch Akku gibt.
-//
-//     DIE ALLGEMEINEN EREIGNISSE (GPE) stehen in GPE0_STS/GPE1_STS,
-//     ein Bit je Leitung, und was sie BEDEUTEN, weiss nur die
-//     Firmware. Sie hinterlegt zu Bit n eine Methode `\_GPE._Lnn`
-//     (pegelgesteuert) oder `\_GPE._Enn` (flankengesteuert), und die
-//     auszufuehren ist der ganze Zweck des AML-Interpreters hier.
-//
-//  3. Die Methode meldet mit `Notify(Geraet, Code)`, was los ist.
-//     `Notify(\_SB.LID0, 0x80)` heisst: sieh beim Deckel nach.
-//     `Notify(\_SB.BAT0, 0x80)` heisst: der Akkustand hat sich
-//     geaendert. Erst DANN fragt der Kern `_LID` oder `_BST` ab --
-//     das Ereignis sagt nur, DASS sich etwas geaendert hat.
-//
-//  4. Das Statusbit wird geloescht (RW1C: eine Eins loescht). Bei
-//     einem `_Lxx` MUSS das passieren, sonst zieht die Leitung
-//     sofort wieder -- der Sturm aus Punkt 2 von BLECHVIER.
-//
-// ==================================================================
-// DIE REIHENFOLGE, AN DER MAN SICH SCHNEIDET
-// ==================================================================
-//
-// ERST das Statusbit loeschen, DANN die Methode ausfuehren. Andersherum
-// geht ein Ereignis verloren, das waehrend der Methode eintrifft: die
-// Methode laeuft, das Geraet setzt das Bit erneut, die Methode ist
-// fertig, der Kern loescht -- und damit auch das neue Ereignis. Bei
-// einem Deckel, den man schnell zu- und wieder aufklappt, ist das der
-// Unterschied zwischen "gesperrt" und "gesperrt und bleibt gesperrt".
-//
-// ==================================================================
-// WAS HIER NICHT LAEUFT
-// ==================================================================
-//
-// DIE METHODE LAEUFT NICHT IM UNTERBRECHUNGSBEHANDLER. AML darf
-// `Sleep` aufrufen, einen Mutex nehmen und ueber den Embedded
-// Controller lesen, der mit Wartezeiten von Millisekunden antwortet.
-// Das alles im Behandler zu tun, waere ein Kern, der bei jedem
-// Deckelklappen stehenbleibt. Der Behandler tut deshalb genau drei
-// Dinge -- lesen, loeschen, vormerken -- und weckt die Arbeit; die
-// Methode laeuft danach im normalen Betrieb (`pump`).
-//
-// Das ist derselbe Aufbau wie beim Netz (`netdev.irq` nimmt nur ab,
-// die Aufgabe dreht die Kurbel) und beim Ton.
 
 import serial
 import lib.kstate
@@ -103,6 +17,12 @@ import acpi.ecio
 import acpi.ecsim
 import acpi.thermal
 import acpi.aml
+import acpi.pm1
+import acpi.gpe
+import acpi.irqovr
+import acpi.scistorm
+import acpi.scidiag
+import lib.procw
 import sched.time
 import arch.arch
 import arch.x86_64.apic
@@ -114,71 +34,46 @@ export {
     ac_online, button_pending, button_take, take_change, changed,
     EV_NONE, EV_BUTTON, EV_LID, EV_BATT, EV_AC,
     LID_OPEN, LID_CLOSED, LID_UNKNOWN,
-    report, selftest, wait_loop, ev_fake, fake_all, inject
+    report, selftest, wait_loop, ev_fake, fake_all, inject,
+    irqs, sci_masked, sci_gsi_flags
 }
 
-// ---------------------------------------------- die Plaetze in `kdata`
-//
-// Diese Datei hat eine EIGENE Seite (`kstate.ACPIEV_OFF`). Sie teilt
-// sich die Seite des Interpreters NICHT: dort ist es seit dieser Runde
-// schon eng (amlns 0..55, amlev 56..191 und 2560..2816, aml 192..2560),
-// und ein weiterer Mitbenutzer waere der naechste Fehler dieser Art.
-
-const E_READY: u64 = 0 // 1 = aufgesetzt
-const E_WHY: u64 = 8 // warum nicht, siehe WHY_*
-const E_SCI: u64 = 16 // die Leitung aus der FADT
-const E_PM1A: u64 = 24 // PM1a_STS (das Statusregister, nicht CNT)
+const E_READY: u64 = 0
+const E_WHY: u64 = 8
+const E_SCI: u64 = 16
+const E_PM1A: u64 = 24
 const E_PM1B: u64 = 32
-const E_GPE0: u64 = 40 // Anschrift des ersten GPE-Blocks
-const E_GPE0L: u64 = 48 // seine Laenge in Oktetten (Status + Freigabe)
-const E_GPE1: u64 = 56
-const E_GPE1L: u64 = 64
-const E_GPE1B: u64 = 72 // die Bitnummer, bei der Block 1 anfaengt
-const E_ARMED: u64 = 80 // wie viele GPE-Bits scharf geschaltet sind
-const E_EVENTS: u64 = 88 // wie viele Ereignisse behandelt wurden
-const E_WAKE: u64 = 96 // wie oft der Behandler die Arbeit geweckt hat
-const E_PEND: u64 = 104 // Bitfeld: was der Behandler vorgemerkt hat
-const E_BTN: u64 = 112 // die Taste wartet auf Behandlung
-const E_CHANGED: u64 = 120 // Bitfeld: was sich geaendert hat (EV_*)
-
-// Der Deckel.
-const E_LIDN: u64 = 128 // Knoten von `_LID`, NONE = keiner
-const E_LIDDEV: u64 = 136 // sein Geraeteknoten (fuer Notify-Zuordnung)
-const E_LIDV: u64 = 144 // sein letzter Wert
-
-// Der Akku.
-const E_BATN: u64 = 152 // Geraeteknoten des Akkus
-const E_BSTN: u64 = 160 // Knoten von `_BST`
-const E_BIFN: u64 = 168 // Knoten von `_BIF`
-const E_FULL: u64 = 176 // letzte volle Ladung aus `_BIF`
-const E_REM: u64 = 184 // Restkapazitaet aus `_BST`
-const E_BSTATE: u64 = 192 // Zustandswort aus `_BST`
-const E_PCT: u64 = 200 // ausgerechneter Ladestand, 0..100
-const E_BATOK: u64 = 208 // 1 = es gibt einen Akku
-
-// Das Netzteil.
-const E_ACN: u64 = 216 // Knoten von `_PSR`
+const E_ARMED: u64 = 80
+const E_EVENTS: u64 = 88
+const E_WAKE: u64 = 96
+const E_PEND: u64 = 104
+const E_BTN: u64 = 112
+const E_CHANGED: u64 = 120
+const E_LIDN: u64 = 128
+const E_LIDDEV: u64 = 136
+const E_LIDV: u64 = 144
+const E_BATN: u64 = 152
+const E_BSTN: u64 = 160
+const E_BIFN: u64 = 168
+const E_FULL: u64 = 176
+const E_REM: u64 = 184
+const E_BSTATE: u64 = 192
+const E_PCT: u64 = 200
+const E_BATOK: u64 = 208
+const E_ACN: u64 = 216
 const E_ACDEV: u64 = 224
-const E_ACV: u64 = 232 // 1 = am Netz
-
-// Die Einschalttaste als GERAET (PNP0C0C). Sie braucht das nicht --
-// das feste Ereignis reicht --, aber ihr Knoten sagt, ob das Brett
-// ueberhaupt eine hat.
+const E_ACV: u64 = 232
 const E_BTNDEV: u64 = 304
-
-// Der Namensraum, den diese Runde AM LEBEN LAESST.
-const E_ARENA: u64 = 240 // 0 = keiner (dann ist alles hier tot)
-
-// Die scharf geschalteten GPE-Bits, damit `report` sie nennen kann.
-const E_BTNSAID: u64 = 248 // schon gemeldet? (damit es EINMAL kommt)
-const E_EVLEN: u64 = 1104 // PM1_EVT_LEN aus der FADT
-const E_MODE: u64 = 320 // was acpi_mode_on gemeldet hat
-const E_BONLY: u64 = 1152 // 1 = button-only mode (namespace failed, the fixed power button still works)
-const E_BEMPTY: u64 = 1160 // button-only: consecutive SCI entries that found no PM1 event
-const E_BMASKED: u64 = 1168 // button-only: 1 = the SCI line was masked by the storm guard
-const E_BSEEN: u64 = 1176 // button-only: irq count at the last diagnostic line
-const E_SHARED: u64 = 1184 // SCI deliveries that arrived on a device vector (shared line)
-const E_COK: u64 = 1192 // shutdown values cached at boot for power.acpi_off (mirrors power.C_*)
+const E_ARENA: u64 = 240
+const E_BTNSAID: u64 = 248
+const E_EVLEN: u64 = 1104
+const E_MODE: u64 = 320
+const E_BONLY: u64 = 1152
+const E_BEMPTY: u64 = 1160
+const E_BMASKED: u64 = 1168
+const E_BSEEN: u64 = 1176
+const E_SHARED: u64 = 1184
+const E_COK: u64 = 1192
 const E_CPM1A: u64 = 1200
 const E_CPM1B: u64 = 1208
 const E_CTYPA: u64 = 1216
@@ -188,21 +83,41 @@ const E_RAWFULL: u64 = 1240
 const E_RAWREM: u64 = 1248
 const E_BIFRET: u64 = 1256
 const E_BSTRET: u64 = 1264
-const BONLY_STORM: u64 = 64 // empty SCI entries in a row before the line is masked
-const E_BTNN: u64 = 1144 // wie oft die Taste gedrueckt wurde (unabholbar)
-const E_STSOR: u64 = 1136 // ODER ueber alle je gelesenen sts
-const E_PUMPN: u64 = 1128 // wie oft `pump` gelaufen ist
-const E_IFSAID: u64 = 1120 // schon gemeldet, ob IF steht?
-const E_LIDTICK: u64 = 1112 // Durchlaeufe bis zum Deckel (`evlid`)
-const E_TICK: u64 = 312 // Durchlaeufe von `pump`, nur fuer evdump
-const E_IRQN: u64 = 288 // wie oft der SCI-Behandler ueberhaupt lief
-const E_LASTSTS: u64 = 296 // was zuletzt in PM1x_STS stand
-const E_GBITS: u64 = 256 // 4 Woerter = 256 Bits
-
-// Die Tafel der GPE-Methoden: je Eintrag Bitnummer, Knoten, Art.
-const E_MN: u64 = 328 // wie viele
-const E_MTAB: u64 = 336 // GPE_MAX * 24
+const E_KNOBS: u64 = 1272
+const E_STORMLOG: u64 = 1280
+const E_PM1STRAY: u64 = 1288
+const E_STRAYBITS: u64 = 1296
+const E_SCIFLAGS: u64 = 1304
+const E_SCILEVEL: u64 = 1312
+const E_SCILOW: u64 = 1320
+const E_ECNEXT: u64 = 1328
+const E_LIVENEXT: u64 = 1336
+const E_SCIIRQ: u64 = 1344
+const E_GPESTRAY: u64 = 1352
+const E_SCIOVR: u64 = 1360
+const BONLY_STORM: u64 = 64
+const E_BTNN: u64 = 1144
+const E_STSOR: u64 = 1136
+const E_PUMPN: u64 = 1128
+const E_IFSAID: u64 = 1120
+const E_LIDTICK: u64 = 1112
+const E_TICK: u64 = 312
+const E_IRQN: u64 = 288
+const E_LASTSTS: u64 = 296
+const E_MN: u64 = 328
+const E_MTAB: u64 = 336
 const GPE_MAX: u64 = 32
+
+const KNOB_NOSTORM: u64 = 1
+const KNOB_NOSTRAY: u64 = 2
+const KNOB_NOOVR: u64 = 4
+const KNOB_STORMSIM: u64 = 8
+
+const EC_POLL_MS: u64 = 10
+const LIVE_PERIOD_MS: u64 = 500
+const NS_PER_MS: u64 = 1000000
+const SCI_DEFAULT_LEVEL: bool = true
+const SCI_DEFAULT_LOW: bool = true
 
 // Warum es nicht laeuft.
 const WHY_OK: u64 = 0
@@ -244,13 +159,10 @@ const F_PM1A_CNT: u64 = 64
 const F_PM1B_CNT: u64 = 68
 
 // Die festen Ereignisse in PM1x_STS (ACPI 6.4, Tabelle 4.17).
-const PM1_PWRBTN: u64 = 256 // Bit 8
-const PM1_SLPBTN: u64 = 512 // Bit 9
 // Dieselben Bits im Freigaberegister PM1x_EN. Es liegt eine halbe
 // Registerlaenge hinter dem Statusregister -- so steht es in der
 // Spezifikation, und deshalb wird PM1_EVT_LEN gelesen und nicht
 // geraten.
-const PM1_RTC: u64 = 1024 // Bit 10
 
 // Bit 0 von PM1x_CNT. 1 = die Ereignisse gehen als SCI an das
 // Betriebssystem, 0 = sie gehen als SMI an die Firmware.
@@ -382,27 +294,7 @@ fn out8(port: u64, v: u64) {
 }
 
 fn in16(port: u64) -> u64 {
-    return in16w(port)
-}
-
-// EIN ECHTER 16-BIT-ZUGRIFF. Die erste Fassung dieser Runde hat ein
-// Wort als ZWEI Oktette geschrieben -- und GEMESSEN: an PM1a_EN
-// (Anschluss 0x602 unter QEMU) kam davon nichts an. Zurueckgelesen
-// stand dort weiter 0x0000, und ohne das Freigabebit zieht die
-// Einschalttaste den SCI nicht. Die Register des Energieverwalters
-// sind WORTBREIT, und ein Chipsatz darf zwei Oktettzugriffe
-// verwerfen; die Spezifikation (ACPI 6.4, 4.8.3) beschreibt sie als
-// 16-Bit-Register, nicht als zwei Oktette.
-fn in16w(port: u64) -> u64 {
     return arch.dev_in16((port & 0xFFFF) as u16) as u64
-}
-
-fn out16w(port: u64, v: u64) {
-    arch.dev_out16((port & 0xFFFF) as u16, (v & 0xFFFF) as u16)
-}
-
-fn out16(port: u64, v: u64) {
-    out16w(port, v)
 }
 
 // ==================================================================
@@ -619,98 +511,112 @@ fn collect_gpe(state: u64) {
     s(state, E_MN, cnt)
 }
 
-// ==================================================================
-// DIE GPE-REGISTER
-// ==================================================================
-//
-// Ein Block ist zweigeteilt: die erste Haelfte Status, die zweite
-// Freigabe, je ein Oktett fuer acht Bits. Block 1 faengt nicht bei
-// Bit 0 an, sondern bei GPE1_BASE aus der FADT.
-
-// In welchem Block liegt das Bit, und wo genau? Gibt die Anschrift des
-// Statusoktetts zurueck, oder 0.
-fn gpe_sts_port(state: u64, bit: u64) -> u64 {
-    let b0: u64 = g(state, E_GPE0)
-    let l0: u64 = g(state, E_GPE0L) / 2
-    if b0 != 0 && bit < l0 * 8 {
-        return b0 + bit / 8
-    }
-    let b1: u64 = g(state, E_GPE1)
-    let l1: u64 = g(state, E_GPE1L) / 2
-    let base: u64 = g(state, E_GPE1B)
-    if b1 != 0 && bit >= base && bit < base + l1 * 8 {
-        return b1 + (bit - base) / 8
-    }
-    return 0
+fn now_ms(state: u64) -> u64 {
+    return time.mono_ns(state) / NS_PER_MS
 }
 
-fn gpe_en_port(state: u64, bit: u64) -> u64 {
-    let b0: u64 = g(state, E_GPE0)
-    let l0: u64 = g(state, E_GPE0L) / 2
-    if b0 != 0 && bit < l0 * 8 {
-        return b0 + l0 + bit / 8
-    }
-    let b1: u64 = g(state, E_GPE1)
-    let l1: u64 = g(state, E_GPE1L) / 2
-    let base: u64 = g(state, E_GPE1B)
-    if b1 != 0 && bit >= base && bit < base + l1 * 8 {
-        return b1 + l1 + (bit - base) / 8
-    }
-    return 0
+fn knob(state: u64, mask: u64) -> bool {
+    return (g(state, E_KNOBS) & mask) != 0
 }
 
-fn gpe_enable(state: u64, bit: u64) {
-    let p: u64 = gpe_en_port(state, bit)
-    if p == 0 {
-        return
+fn read_knobs(state: u64) {
+    var w_nostorm: [u8; 11] = "noscistorm\0"
+    var w_nostray: [u8; 11] = "noscistray\0"
+    var w_noovr: [u8; 9] = "scinoovr\0"
+    var w_stormsim: [u8; 9] = "scistorm\0"
+    var k: u64 = 0
+    if cmdopt.has(state, (&w_nostorm[0]) as u64) {
+        k = k | KNOB_NOSTORM
     }
-    out8(p, in8(p) | (1 << (bit & 7)))
-    let w: u64 = E_GBITS + (bit / 64) * 8
-    s(state, w, g(state, w) | (1 << (bit & 63)))
+    if cmdopt.has(state, (&w_nostray[0]) as u64) {
+        k = k | KNOB_NOSTRAY
+    }
+    if cmdopt.has(state, (&w_noovr[0]) as u64) {
+        k = k | KNOB_NOOVR
+    }
+    if cmdopt.has(state, (&w_stormsim[0]) as u64) {
+        k = k | KNOB_STORMSIM
+    }
+    s(state, E_KNOBS, k)
 }
 
-fn gpe_clear(state: u64, bit: u64) {
-    let p: u64 = gpe_sts_port(state, bit)
-    if p == 0 {
-        return
-    }
-    out8(p, 1 << (bit & 7)) // RW1C
+fn button_press(state: u64) {
+    s(state, E_BTN, 1)
+    s(state, E_BTNN, g(state, E_BTNN) + 1)
+    mark(state, EV_BUTTON)
 }
 
-fn gpe_is_set(state: u64, bit: u64) -> bool {
-    let p: u64 = gpe_sts_port(state, bit)
-    if p == 0 {
+fn pend_method(state: u64, bit: u64) -> bool {
+    let i: u64 = meth_find(state, bit)
+    if i == 0xFFFF {
         return false
     }
-    return (in8(p) & (1 << (bit & 7))) != 0
+    let w: u64 = E_PEND + (i / 64) * 8
+    s(state, w, g(state, w) | (1 << (i & 63)))
+    hkdiag.add(hkdiag.GPE_FIRED, 1)
+    return true
 }
 
-fn gpe_armed_bit(state: u64, bit: u64) -> bool {
-    let w: u64 = E_GBITS + (bit / 64) * 8
-    return (g(state, w) & (1 << (bit & 63))) != 0
+fn service_pm1(state: u64) -> bool {
+    var found: bool = false
+    let sts: u64 = pm1.status()
+    let en: u64 = pm1.enabled()
+    s(state, E_LASTSTS, sts)
+    s(state, E_STSOR, g(state, E_STSOR) | sts)
+    if (sts & pm1.PWRBTN) != 0 {
+        pm1.clear(pm1.PWRBTN)
+        button_press(state)
+        found = true
+    }
+    let quiet_bits: u64 = sts & (pm1.SLPBTN | pm1.RTC)
+    if quiet_bits != 0 {
+        pm1.clear(quiet_bits)
+        found = true
+    }
+    let stray: u64 = sts & en & ~pm1.BUTTON_BITS
+    if stray != 0 && !knob(state, KNOB_NOSTRAY) {
+        pm1.clear(stray)
+        pm1.disable(stray)
+        s(state, E_PM1STRAY, g(state, E_PM1STRAY) + 1)
+        s(state, E_STRAYBITS, g(state, E_STRAYBITS) | stray)
+        found = true
+    }
+    return found
 }
 
-// ==================================================================
-// DER UNTERBRECHUNGSBEHANDLER
-// ==================================================================
-//
-// Kurz, und er fuehrt KEIN AML aus. Er liest die Statusregister,
-// loescht, was er gefunden hat, merkt es vor und ist fertig. Alles
-// Weitere macht `pump`.
+fn service_gpe(state: u64) -> bool {
+    if !gpe.usable() {
+        return false
+    }
+    let before: u64 = gpe.strays()
+    let n: u64 = gpe.scan()
+    var found: bool = false
+    var k: u64 = 0
+    while k < n {
+        if pend_method(state, gpe.pending_bit(k)) {
+            found = true
+        }
+        k = k + 1
+    }
+    if gpe.strays() != before {
+        s(state, E_GPESTRAY, gpe.strays())
+        found = true
+    }
+    return found
+}
 
-// Button-only SCI handler: PM1 only, no GPE table walk, no pump work, no namespace. Every status bit that is set is
-// cleared (RW1C), and a line that keeps firing without any PM1 status is masked so a wrong level or polarity cannot
-// freeze the machine.
+fn service(state: u64) -> bool {
+    let pm: bool = service_pm1(state)
+    let ge: bool = service_gpe(state)
+    if pm || ge {
+        s(state, E_WAKE, g(state, E_WAKE) + 1)
+        return true
+    }
+    return false
+}
+
 fn irq_button_only(state: u64, guard: bool) {
-    let pa: u64 = g(state, E_PM1A)
-    let pb: u64 = g(state, E_PM1B)
-    var sts: u64 = 0
-    if pa != 0 {
-        sts = sts | in16(pa)
-    }
-    if pb != 0 {
-        sts = sts | in16(pb)
-    }
+    let sts: u64 = pm1.status()
     s(state, E_LASTSTS, sts)
     s(state, E_STSOR, g(state, E_STSOR) | sts)
     if sts == 0 {
@@ -723,24 +629,45 @@ fn irq_button_only(state: u64, guard: bool) {
         return
     }
     s(state, E_BEMPTY, 0)
-    if pa != 0 {
-        out16(pa, sts)
-    }
-    if pb != 0 {
-        out16(pb, sts)
-    }
-    if (sts & PM1_PWRBTN) != 0 {
-        s(state, E_BTN, 1)
-        s(state, E_BTNN, g(state, E_BTNN) + 1)
-        mark(state, EV_BUTTON)
+    pm1.clear(sts)
+    if (sts & pm1.PWRBTN) != 0 {
+        button_press(state)
         s(state, E_WAKE, g(state, E_WAKE) + 1)
     }
 }
 
-// The SCI shares its line with PCI devices on some machines (VirtualBox: the network card sits on GSI 9 and its driver
-// rewrites the redirection entry to its own vector). The SCI then arrives on a device vector, and a device handler that
-// never reads PM1 leaves the level line asserted forever. Called on every device vector: if that vector now owns the
-// SCI line, run the PM1 handler too (no storm guard here, the device legitimately fires on the same line).
+fn capture_storm(state: u64) {
+    scidiag.snapshot(apic.gsi_entry(state, g(state, E_SCI)))
+}
+
+fn storm_cut(state: u64) {
+    capture_storm(state)
+    apic.mask_gsi(state, g(state, E_SCI))
+    scistorm.set_masked(now_ms(state))
+    s(state, E_STORMLOG, 1)
+}
+
+fn irq_entry(state: u64, guard: bool) {
+    s(state, E_IRQN, g(state, E_IRQN) + 1)
+    if g(state, E_READY) != 1 {
+        if g(state, E_BONLY) == 1 {
+            irq_button_only(state, guard)
+        }
+        return
+    }
+    if service(state) {
+        scistorm.quiet()
+        return
+    }
+    if guard && !knob(state, KNOB_NOSTORM) && scistorm.empty() {
+        storm_cut(state)
+    }
+}
+
+fn irq(state: u64) {
+    irq_entry(state, true)
+}
+
 fn shared(state: u64, vector: u64) {
     let ready: u64 = g(state, E_READY)
     if ready != 1 && g(state, E_BONLY) != 1 {
@@ -751,105 +678,23 @@ fn shared(state: u64, vector: u64) {
     }
     s(state, E_SHARED, g(state, E_SHARED) + 1)
     if ready == 1 {
-        irq(state)
+        irq_entry(state, false)
     } else {
         irq_button_only(state, false)
     }
 }
 
-fn irq(state: u64) {
-    s(state, E_IRQN, g(state, E_IRQN) + 1)
-    if g(state, E_READY) != 1 {
-        if g(state, E_BONLY) == 1 {
-            irq_button_only(state, true)
-        }
-        return
-    }
-    var etwas: bool = false
-
-    // 1. Die festen Ereignisse. PM1a und PM1b werden ODER-verknuepft
-    //    gelesen -- die Spezifikation sagt ausdruecklich, dass ein
-    //    Ereignis in einem der beiden Register stehen darf.
-    let pa: u64 = g(state, E_PM1A)
-    let pb: u64 = g(state, E_PM1B)
-    var sts: u64 = 0
-    if pa != 0 {
-        sts = sts | in16(pa)
-    }
-    if pb != 0 {
-        sts = sts | in16(pb)
-    }
-    // JEDEN EINTRITT FESTHALTEN, auch den mit sts=0: ein Behandler,
-    // der lief und nichts fand, ist ein anderer Befund als einer, der
-    // nicht lief.
-    s(state, E_LASTSTS, sts)
-    s(state, E_STSOR, g(state, E_STSOR) | sts)
-    if (sts & PM1_PWRBTN) != 0 {
-        // LOESCHEN, BEVOR gehandelt wird. Das Bit ist RW1C.
-        if pa != 0 {
-            out16(pa, PM1_PWRBTN)
-        }
-        if pb != 0 {
-            out16(pb, PM1_PWRBTN)
-        }
-        s(state, E_BTN, 1)
-        s(state, E_BTNN, g(state, E_BTNN) + 1)
-        mark(state, EV_BUTTON)
-        etwas = true
-    }
-    if (sts & PM1_SLPBTN) != 0 {
-        if pa != 0 {
-            out16(pa, PM1_SLPBTN)
-        }
-        if pb != 0 {
-            out16(pb, PM1_SLPBTN)
-        }
-        etwas = true
-    }
-    if (sts & PM1_RTC) != 0 {
-        // Nicht unsere Baustelle, aber das Bit MUSS weg -- sonst
-        // zieht die Leitung weiter. Genau der Sturm aus BLECHVIER.
-        if pa != 0 {
-            out16(pa, PM1_RTC)
-        }
-        if pb != 0 {
-            out16(pb, PM1_RTC)
-        }
-        etwas = true
-    }
-
-    // 2. Die GPE-Bits. Nur die, die wir scharf geschaltet haben --
-    //    fuer alles andere gibt es keine Methode, und ein Bit ohne
-    //    Behandlung waere wieder der Sturm.
-    let n: u64 = meth_n(state)
-    var i: u64 = 0
-    while i < n {
-        let bit: u64 = meth_bit(state, i)
-        if gpe_armed_bit(state, bit) && gpe_is_set(state, bit) {
-            // ERST LOESCHEN, DANN VORMERKEN. Die Begruendung steht
-            // oben im Kopf: andersherum geht ein Ereignis verloren,
-            // das waehrend der Behandlung eintrifft.
-            gpe_clear(state, bit)
-            let w: u64 = E_PEND + (i / 64) * 8
-            s(state, w, g(state, w) | (1 << (i & 63)))
-            hkdiag.add(hkdiag.GPE_FIRED, 1)
-            etwas = true
-        }
-        i = i + 1
-    }
-
-    if etwas {
-        s(state, E_WAKE, g(state, E_WAKE) + 1)
-    }
+fn irqs(state: u64) -> u64 {
+    return g(state, E_IRQN)
 }
 
-// ==================================================================
-// DIE ARBEIT -- hier laeuft AML
-// ==================================================================
-//
-// `pump` gehoert in den normalen Betrieb und NICHT in den Behandler.
-// Sie fuehrt die vorgemerkten GPE-Methoden aus, liest den Notify-Ring
-// und fragt danach das Geraet ab, das sich gemeldet hat.
+fn sci_masked(state: u64) -> bool {
+    return scistorm.masked() || g(state, E_BMASKED) == 1
+}
+
+fn sci_gsi_flags(state: u64) -> u64 {
+    return g(state, E_SCIFLAGS)
+}
 
 // Button-only diagnostics from task context (never from the handler): a line every 5 s and one on every change of the
 // entry count, so the counters are on the serial line BEFORE a press as well as after it.
@@ -887,7 +732,7 @@ fn bonly_diag(state: u64) {
     serial.puts((&s_g[0]) as u64)
     serial.hex_width(apic.gsi_entry(state, g(state, E_SCI)), 8)
     serial.puts((&s_h[0]) as u64)
-    serial.hex_width(in16(g(state, E_PM1A)), 4)
+    serial.hex_width(pm1.status(), 4)
     serial.puts((&s_sh[0]) as u64)
     serial.dec(g(state, E_SHARED))
     serial.nl()
@@ -943,9 +788,7 @@ fn pump(state: u64) {
             var s_pk: [u8; 8] = " pumpn=\0"
             var s_ik: [u8; 7] = " irqs=\0"
             serial.puts((&s_rs[0]) as u64)
-            if g(state, E_PM1A) != 0 {
-                serial.hex_width(in16(g(state, E_PM1A)), 4)
-            }
+            serial.hex_width(pm1.status(), 4)
             serial.puts((&s_pk[0]) as u64)
             serial.dec(g(state, E_PUMPN))
             serial.puts((&s_ik[0]) as u64)
@@ -979,13 +822,9 @@ fn pump(state: u64) {
         serial.puts((&s_i2[0]) as u64)
         serial.hex_width(apic.gsi_entry(state, g(state, E_SCI)), 8)
         serial.puts((&s_p2[0]) as u64)
-        if g(state, E_PM1A) != 0 && g(state, E_EVLEN) != 0 {
-            serial.hex_width(in16(g(state, E_PM1A) + g(state, E_EVLEN) / 2), 4)
-        }
+        serial.hex_width(pm1.enabled(), 4)
         serial.puts((&s_s2[0]) as u64)
-        if g(state, E_PM1A) != 0 {
-            serial.hex_width(in16(g(state, E_PM1A)), 4)
-        }
+        serial.hex_width(pm1.status(), 4)
         serial.nl()
     }
     // ============================== RUNDE ACPI-EREIGNISSE: `evlid`
@@ -1011,6 +850,7 @@ fn pump(state: u64) {
             let _l: bool = ev_fake(state, 3)
         }
     }
+    poll_masked(state)
     let n: u64 = meth_n(state)
     var i: u64 = 0
     while i < n {
@@ -1031,10 +871,126 @@ fn pump(state: u64) {
     }
     service_ec(state)
     sync_diag(state)
+    report_storm(state)
     thermal.poll(state)
     if kstate.mode_on(state, kstate.M_ECSIM) {
         ecsim.tick(state, g(state, E_PUMPN))
     }
+}
+
+fn poll_masked(state: u64) {
+    if !scistorm.masked() {
+        return
+    }
+    if scistorm.poll_due(now_ms(state)) {
+        if service(state) {
+            scistorm.quiet()
+        }
+    }
+}
+
+fn report_storm(state: u64) {
+    if g(state, E_STORMLOG) == 0 {
+        return
+    }
+    s(state, E_STORMLOG, 0)
+    var s_a: [u8; 23] = "acpiev: sci storm gsi=\0"
+    var s_b: [u8; 9] = " empty=\0\0"
+    var s_c: [u8; 8] = " irqs=\0\0"
+    var s_d: [u8; 8] = " entry=\0"
+    var s_e: [u8; 9] = " pm1sts=\0"
+    var s_f: [u8; 9] = " pm1en=\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(g(state, E_SCI))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(scistorm.empties())
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(g(state, E_IRQN))
+    serial.puts((&s_d[0]) as u64)
+    serial.hex_width(apic.gsi_entry(state, g(state, E_SCI)), 8)
+    serial.puts((&s_e[0]) as u64)
+    serial.hex_width(pm1.status(), 4)
+    serial.puts((&s_f[0]) as u64)
+    serial.hex_width(pm1.enabled(), 4)
+    serial.nl()
+}
+
+fn print_override(prefix: u64, irq: u64, gsi: u64, flags: u64) {
+    var s_i: [u8; 6] = " irq=\0"
+    var s_g: [u8; 6] = " gsi=\0"
+    var s_f: [u8; 8] = " flags=\0"
+    serial.puts(prefix)
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(irq)
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(gsi)
+    serial.puts((&s_f[0]) as u64)
+    serial.hex_width(flags, 4)
+}
+
+fn report_route(state: u64) {
+    var s_r: [u8; 14] = "acpiev: route\0"
+    var s_l: [u8; 8] = " level=\0"
+    var s_w: [u8; 6] = " low=\0"
+    var s_o: [u8; 6] = " ovr=\0"
+    var s_p: [u8; 14] = "acpiev: ovr\0\0\0"
+    print_override((&s_r[0]) as u64, g(state, E_SCIIRQ), g(state, E_SCI), g(state, E_SCIFLAGS))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(g(state, E_SCILEVEL))
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(g(state, E_SCILOW))
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(g(state, E_SCIOVR))
+    serial.nl()
+    var k: u64 = 0
+    while k < irqovr.count() {
+        let irq: u64 = irqovr.irq_at(k)
+        print_override((&s_p[0]) as u64, irq, irqovr.gsi_for(irq), irqovr.flags_for(irq))
+        serial.nl()
+        k = k + 1
+    }
+}
+
+fn selftest_xapc(state: u64) {
+    var w_x: [u8; 5] = "XAPC\0"
+    var s_p: [u8; 15] = "acpiev: xapc\0\0\0"
+    let t: u64 = acpi.table(state, (&w_x[0]) as u64)
+    if t == 0 {
+        return
+    }
+    let n: u64 = irqovr.parse_table(t)
+    var k: u64 = 0
+    while k < n {
+        let irq: u64 = irqovr.irq_at(k)
+        print_override((&s_p[0]) as u64, irq, irqovr.gsi_for(irq), irqovr.flags_for(irq))
+        serial.nl()
+        k = k + 1
+    }
+    let _o: u64 = irqovr.parse(state)
+}
+
+static mut diag_text: [u8; 1024] = [0 as u8; 1024]
+
+fn dump_diag(state: u64) {
+    sync_diag(state)
+    procw.begin((&diag_text[0]) as u64, 1024)
+    scidiag.render()
+    serial.puts((&diag_text[0]) as u64)
+}
+
+fn selftest_ecrate(state: u64) {
+    var s_e: [u8; 24] = "acpiev: selbst ecrate p\0"
+    var s_p: [u8; 7] = "olls=\0\0"
+    let before: u64 = hkdiag.get(hkdiag.EC_POLLS)
+    var k: u64 = 0
+    while k < 2000 {
+        service_ec(state)
+        k = k + 1
+    }
+    serial.puts((&s_e[0]) as u64)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(hkdiag.get(hkdiag.EC_POLLS) - before)
+    serial.nl()
 }
 
 fn run_gpe(state: u64, idx: u64) {
@@ -1076,6 +1032,11 @@ fn run_node(state: u64, node: u64, refresh: bool) {
 }
 
 fn service_ec(state: u64) {
+    let now: u64 = now_ms(state)
+    if now < g(state, E_ECNEXT) {
+        return
+    }
+    s(state, E_ECNEXT, now + EC_POLL_MS)
     var n: u64 = 0
     while n < 8 {
         let q: u64 = ecio.poll_query()
@@ -1099,6 +1060,16 @@ fn sync_diag(state: u64) {
     hkdiag.set(hkdiag.SCI_WAKE, g(state, E_WAKE))
     hkdiag.set(hkdiag.SCI_EVENTS, g(state, E_EVENTS))
     hkdiag.set(hkdiag.GPE_ARMED, g(state, E_ARMED))
+    scidiag.set(scidiag.S_GSI, g(state, E_SCI))
+    scidiag.set(scidiag.S_IRQ, g(state, E_SCIIRQ))
+    scidiag.set(scidiag.S_FLAGS, g(state, E_SCIFLAGS))
+    scidiag.set(scidiag.S_LEVEL, g(state, E_SCILEVEL))
+    scidiag.set(scidiag.S_LOW, g(state, E_SCILOW))
+    scidiag.set(scidiag.S_IRQS, g(state, E_IRQN))
+    scidiag.set(scidiag.S_SHARED, g(state, E_SHARED))
+    scidiag.set(scidiag.S_STRAY_PM1, g(state, E_PM1STRAY))
+    scidiag.set(scidiag.S_STRAY_GPE, g(state, E_GPESTRAY))
+    scidiag.set(scidiag.S_ARMED, g(state, E_ARMED))
 }
 
 // Ein `Notify(Geraet, Code)` zuordnen. Der Code 0x80 heisst bei allen
@@ -1423,23 +1394,38 @@ fn acpi_mode_on(state: u64, facp: u64) -> u64 {
 
 // The namespace could not be built (VirtualBox: unknown AML opcode), but the power button is a FIXED event and needs no
 // AML: arm PM1 PWRBTN and route the SCI so that `button_take` works. READY stays 0, so pump and every AML user stay off.
+fn route_sci(state: u64, irq: u64) {
+    var flags: u64 = 0
+    var gsi: u64 = irq
+    if !knob(state, KNOB_NOOVR) {
+        flags = irqovr.flags_for(irq)
+        gsi = irqovr.gsi_for(irq)
+    }
+    let level: bool = irqovr.is_level(flags, SCI_DEFAULT_LEVEL)
+    let low: bool = irqovr.is_low(flags, SCI_DEFAULT_LOW)
+    s(state, E_SCIIRQ, irq)
+    s(state, E_SCI, gsi)
+    s(state, E_SCIFLAGS, flags)
+    s(state, E_SCILEVEL, bool_word(level))
+    s(state, E_SCILOW, bool_word(low))
+    apic.route(state, gsi, VEC_SCI, apic.id(state), level, low)
+}
+
+fn bool_word(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
 fn arm_button_only(state: u64) {
-    let pa: u64 = g(state, E_PM1A)
-    let pb: u64 = g(state, E_PM1B)
-    let halb: u64 = g(state, E_EVLEN) / 2
-    if (pa == 0 && pb == 0) || halb == 0 {
+    if !pm1.usable() {
         return
     }
-    if pa != 0 {
-        out16(pa, PM1_PWRBTN | PM1_SLPBTN)
-        out16(pa + halb, in16(pa + halb) | PM1_PWRBTN)
-    }
-    if pb != 0 {
-        out16(pb, PM1_PWRBTN | PM1_SLPBTN)
-        out16(pb + halb, in16(pb + halb) | PM1_PWRBTN)
-    }
+    pm1.clear(pm1.PWRBTN | pm1.SLPBTN)
+    pm1.enable(pm1.PWRBTN)
     s(state, E_BONLY, 1)
-    apic.route(state, g(state, E_SCI), VEC_SCI, apic.id(state), true, true)
+    route_sci(state, g(state, E_SCI))
 }
 
 // Cache what power.acpi_off needs while the tables are still reachable.
@@ -1500,11 +1486,12 @@ fn stage(state: u64) {
     s(state, E_EVLEN, evlen)
     s(state, E_PM1A, kstate.get32(facp + F_PM1A_EVT))
     s(state, E_PM1B, kstate.get32(facp + F_PM1B_EVT))
-    s(state, E_GPE0, kstate.get32(facp + F_GPE0))
-    s(state, E_GPE0L, kstate.get8(facp + F_GPE0_LEN))
-    s(state, E_GPE1, kstate.get32(facp + F_GPE1))
-    s(state, E_GPE1L, kstate.get8(facp + F_GPE1_LEN))
-    s(state, E_GPE1B, kstate.get8(facp + F_GPE1_BASE))
+    pm1.configure(g(state, E_PM1A), g(state, E_PM1B), evlen)
+    gpe.configure(kstate.get32(facp + F_GPE0), kstate.get8(facp + F_GPE0_LEN),
+        kstate.get32(facp + F_GPE1), kstate.get8(facp + F_GPE1_LEN), kstate.get8(facp + F_GPE1_BASE))
+    read_knobs(state)
+    let ovr: u64 = irqovr.parse(state)
+    s(state, E_SCIOVR, ovr)
     // ZUERST IN DEN ACPI-MODUS. Vor jeder anderen Zeile: solange die
     // Maschine im Legacy-Modus steht, gehen alle Ereignisse an die
     // Firmware, und alles Weitere hier waere umsonst.
@@ -1572,11 +1559,11 @@ fn stage(state: u64) {
     var i: u64 = 0
     while i < n {
         let bit: u64 = meth_bit(state, i)
-        if gpe_sts_port(state, bit) != 0 {
+        if gpe.sts_port(bit) != 0 {
             // Erst loeschen (es kann seit dem Start etwas anliegen),
             // dann freigeben.
-            gpe_clear(state, bit)
-            gpe_enable(state, bit)
+            gpe.clear(bit)
+            gpe.enable(bit)
             armed = armed + 1
         }
         i = i + 1
@@ -1589,28 +1576,16 @@ fn stage(state: u64) {
     ec.setup(state, ecd)
     ec.scan_hw(state)
 
-    // Die Einschalttaste freigeben. Sie ist ein FESTES Ereignis und
-    // haengt an keinem GPE-Bit.
-    let pa: u64 = g(state, E_PM1A)
-    let pb: u64 = g(state, E_PM1B)
-    let halb: u64 = evlen / 2
-    if pa != 0 && halb != 0 {
-        out16(pa, PM1_PWRBTN | PM1_SLPBTN) // anliegendes loeschen
-        out16(pa + halb, in16(pa + halb) | PM1_PWRBTN)
+    if pm1.usable() {
+        pm1.clear(pm1.PWRBTN | pm1.SLPBTN)
+        pm1.enable(pm1.PWRBTN)
     }
-    if pb != 0 && halb != 0 {
-        out16(pb, PM1_PWRBTN | PM1_SLPBTN)
-        out16(pb + halb, in16(pb + halb) | PM1_PWRBTN)
-    }
-
-    // Die Leitung in den I/O-APIC. Der SCI ist PEGELGESTEUERT und
-    // LOW-AKTIV -- das steht so in ACPI 6.4 Abschnitt 5.2.9 und ist
-    // nicht verhandelbar: als Flanke eingetragen geht das zweite
-    // Ereignis verloren, weil die Leitung noch gezogen ist.
-    apic.route(state, sci, VEC_SCI, apic.id(state), true, true)
-
     s(state, E_READY, 1)
     s(state, E_WHY, WHY_OK)
+    route_sci(state, sci)
+    if knob(state, KNOB_STORMSIM) {
+        pm1.enable(pm1.TMR)
+    }
 
     // MIT `evfake` DEN NACHGEBAUTEN LAPTOP AUF EINEN SICHTBAREN
     // STAND SETZEN. Ohne das steht in der Operationsregion des
@@ -1627,6 +1602,7 @@ fn stage(state: u64) {
     // anzuzeigen hat und nicht erst beim ersten Ereignis.
     refresh_all(state)
     report(state)
+    report_route(state)
 }
 
 // Der Vektor, auf dem der SCI meldet. Er steht in `trap.fi` noch
@@ -1840,6 +1816,7 @@ fn wait_loop(state: u64, ms: u64) {
     serial.dec(0)
     serial.nl()
     report(state)
+    dump_diag(state)
 }
 
 // ==================================================================
@@ -1891,11 +1868,7 @@ fn report(state: u64) {
     serial.puts((&s_pp[0]) as u64)
     serial.hex_width(g(state, E_PM1A), 4)
     serial.puts((&s_en[0]) as u64)
-    var pe: u64 = 0
-    if g(state, E_PM1A) != 0 && g(state, E_EVLEN) != 0 {
-        pe = in16(g(state, E_PM1A) + g(state, E_EVLEN) / 2)
-    }
-    serial.hex_width(pe, 4)
+    serial.hex_width(pm1.enabled(), 4)
     serial.puts((&s_le[0]) as u64)
     serial.dec(g(state, E_EVLEN))
     serial.puts((&s_io[0]) as u64)
@@ -1912,6 +1885,24 @@ fn report(state: u64) {
         hat = 1
     }
     serial.dec(hat)
+    var s_sy: [u8; 8] = " stray=\0"
+    var s_gy: [u8; 9] = " gstray=\0"
+    var s_ms: [u8; 9] = " masked=\0"
+    var s_sm: [u8; 9] = " storms=\0"
+    var s_po: [u8; 8] = " polls=\0"
+    var s_em: [u8; 8] = " empty=\0"
+    serial.puts((&s_sy[0]) as u64)
+    serial.dec(g(state, E_PM1STRAY))
+    serial.puts((&s_gy[0]) as u64)
+    serial.dec(g(state, E_GPESTRAY))
+    serial.puts((&s_ms[0]) as u64)
+    serial.dec(bool_word(scistorm.masked()))
+    serial.puts((&s_sm[0]) as u64)
+    serial.dec(scistorm.storms())
+    serial.puts((&s_po[0]) as u64)
+    serial.dec(scistorm.polls())
+    serial.puts((&s_em[0]) as u64)
+    serial.dec(scistorm.empties())
     serial.nl()
 
     // Die GPE-Methoden einzeln, damit in der Abnahme steht, WELCHE
@@ -1928,7 +1919,7 @@ fn report(state: u64) {
         serial.dec(meth_art(state, i))
         serial.puts((&s_o[0]) as u64)
         var on: u64 = 0
-        if gpe_armed_bit(state, meth_bit(state, i)) {
+        if gpe.is_armed(meth_bit(state, i)) {
             on = 1
         }
         serial.dec(on)
@@ -1983,34 +1974,7 @@ fn selftest(state: u64) {
     }
     serial.nl()
 
-    // Die Registerrechnung. Ein Block bei 0x600, 4 Oktett lang (also
-    // 2 Status + 2 Freigabe, 16 Bits), und ein zweiter bei 0x700 ab
-    // Bit 32.
-    let a0: u64 = g(state, E_GPE0)
-    let a0l: u64 = g(state, E_GPE0L)
-    let a1: u64 = g(state, E_GPE1)
-    let a1l: u64 = g(state, E_GPE1L)
-    let a1b: u64 = g(state, E_GPE1B)
-    s(state, E_GPE0, 0x600)
-    s(state, E_GPE0L, 4)
-    s(state, E_GPE1, 0x700)
-    s(state, E_GPE1L, 4)
-    s(state, E_GPE1B, 32)
-    var g2: bool = true
-    if gpe_sts_port(state, 0) != 0x600 { g2 = false }
-    if gpe_en_port(state, 0) != 0x602 { g2 = false }
-    if gpe_sts_port(state, 9) != 0x601 { g2 = false }
-    if gpe_en_port(state, 9) != 0x603 { g2 = false }
-    if gpe_sts_port(state, 32) != 0x700 { g2 = false }
-    if gpe_en_port(state, 32) != 0x702 { g2 = false }
-    if gpe_sts_port(state, 41) != 0x701 { g2 = false }
-    // Ein Bit, das in KEINEN Block faellt, muss 0 geben.
-    if gpe_sts_port(state, 200) != 0 { g2 = false }
-    s(state, E_GPE0, a0)
-    s(state, E_GPE0L, a0l)
-    s(state, E_GPE1, a1)
-    s(state, E_GPE1L, a1l)
-    s(state, E_GPE1B, a1b)
+    var g2: bool = gpe.selftest()
     serial.puts((&s_r[0]) as u64)
     if g2 {
         serial.puts((&s_ok[0]) as u64)
@@ -2019,6 +1983,9 @@ fn selftest(state: u64) {
     }
     serial.nl()
 
+    selftest_xapc(state)
+    dump_diag(state)
+    selftest_ecrate(state)
     var s_o: [u8; 19] = "acpiev: selbst opt\0"
     serial.puts((&s_o[0]) as u64)
     if cmdopt.selftest(state) {

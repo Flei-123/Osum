@@ -127,3 +127,15 @@ acpi_summary() {
     echo "acpi: $ok ok, $fail fail"
     [ "$fail" -eq 0 ]
 }
+
+lastline() {
+    grep -aE -- "$2" "$D/$1.txt" 2>/dev/null | tail -1 | tr -d '\r\000'
+}
+
+lines_of() {
+    grep -aE -- "$2" "$D/$1.txt" 2>/dev/null | tr -d '\r\000'
+}
+
+tool() {
+    python3 -I "tools/acpi/$@"
+}

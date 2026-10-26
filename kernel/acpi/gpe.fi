@@ -1,0 +1,323 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+
+export {
+    configure, usable, sts_port, en_port, enable, disable, clear, is_set, is_armed, armed_count,
+    byte_total, byte_bit0, byte_sts_port, byte_en_port, sts_at, en_at, scan, pending_count, pending_bit,
+    strays, stray_last, stray_mask, selftest, BITS_MAX
+}
+
+const BITS_MAX: u64 = 256
+const BITS_PER_BYTE: u64 = 8
+const WORD_BITS: u64 = 64
+const WORDS: u64 = 4
+const BYTE_MASK: u64 = 0xFF
+const PORT_MASK: u64 = 0xFFFF
+const HALVES: u64 = 2
+
+static mut blk0: u64 = 0
+static mut half0: u64 = 0
+static mut blk1: u64 = 0
+static mut half1: u64 = 0
+static mut base1: u64 = 0
+static mut armed_words: [u64; 4] = [0 as u64; 4]
+static mut pend: [u64; 256] = [0 as u64; 256]
+static mut pend_n: u64 = 0
+static mut stray_n: u64 = 0
+static mut stray_bit: u64 = 0xFFFF
+
+fn configure(b0: u64, len0: u64, b1: u64, len1: u64, first1: u64) {
+    blk0 = b0
+    half0 = len0 / HALVES
+    blk1 = b1
+    half1 = len1 / HALVES
+    base1 = first1
+    var i: u64 = 0
+    while i < WORDS {
+        armed_words[i as usize] = 0
+        i = i + 1
+    }
+    pend_n = 0
+    stray_n = 0
+    stray_bit = 0xFFFF
+}
+
+fn usable() -> bool {
+    return (blk0 != 0 && half0 != 0) || (blk1 != 0 && half1 != 0)
+}
+
+fn sts_port(bit: u64) -> u64 {
+    if blk0 != 0 && bit < half0 * BITS_PER_BYTE {
+        return blk0 + bit / BITS_PER_BYTE
+    }
+    if blk1 != 0 && bit >= base1 && bit < base1 + half1 * BITS_PER_BYTE {
+        return blk1 + (bit - base1) / BITS_PER_BYTE
+    }
+    return 0
+}
+
+fn en_port(bit: u64) -> u64 {
+    if blk0 != 0 && bit < half0 * BITS_PER_BYTE {
+        return blk0 + half0 + bit / BITS_PER_BYTE
+    }
+    if blk1 != 0 && bit >= base1 && bit < base1 + half1 * BITS_PER_BYTE {
+        return blk1 + half1 + (bit - base1) / BITS_PER_BYTE
+    }
+    return 0
+}
+
+fn rd(port: u64) -> u64 {
+    return serial.in8((port & PORT_MASK) as u16) as u64
+}
+
+fn wr(port: u64, v: u64) {
+    serial.out8((port & PORT_MASK) as u16, (v & BYTE_MASK) as u8)
+}
+
+fn bit_mask(bit: u64) -> u64 {
+    return 1 << (bit % BITS_PER_BYTE)
+}
+
+fn set_armed(bit: u64, on: bool) {
+    if bit >= BITS_MAX {
+        return
+    }
+    let w: u64 = bit / WORD_BITS
+    let m: u64 = 1 << (bit % WORD_BITS)
+    if on {
+        armed_words[w as usize] = armed_words[w as usize] | m
+    } else {
+        armed_words[w as usize] = armed_words[w as usize] & ~m
+    }
+}
+
+fn is_armed(bit: u64) -> bool {
+    if bit >= BITS_MAX {
+        return false
+    }
+    return (armed_words[(bit / WORD_BITS) as usize] & (1 << (bit % WORD_BITS))) != 0
+}
+
+fn armed_count() -> u64 {
+    var n: u64 = 0
+    var b: u64 = 0
+    while b < BITS_MAX {
+        if is_armed(b) {
+            n = n + 1
+        }
+        b = b + 1
+    }
+    return n
+}
+
+fn enable(bit: u64) {
+    let p: u64 = en_port(bit)
+    if p == 0 {
+        return
+    }
+    wr(p, rd(p) | bit_mask(bit))
+    set_armed(bit, true)
+}
+
+fn disable(bit: u64) {
+    let p: u64 = en_port(bit)
+    if p == 0 {
+        return
+    }
+    wr(p, rd(p) & ~bit_mask(bit))
+    set_armed(bit, false)
+}
+
+fn clear(bit: u64) {
+    let p: u64 = sts_port(bit)
+    if p == 0 {
+        return
+    }
+    wr(p, bit_mask(bit))
+}
+
+fn is_set(bit: u64) -> bool {
+    let p: u64 = sts_port(bit)
+    if p == 0 {
+        return false
+    }
+    return (rd(p) & bit_mask(bit)) != 0
+}
+
+fn byte_total() -> u64 {
+    var n: u64 = 0
+    if blk0 != 0 {
+        n = n + half0
+    }
+    if blk1 != 0 {
+        n = n + half1
+    }
+    return n
+}
+
+fn byte_bit0(i: u64) -> u64 {
+    if blk0 != 0 && i < half0 {
+        return i * BITS_PER_BYTE
+    }
+    var k: u64 = i
+    if blk0 != 0 {
+        k = i - half0
+    }
+    return base1 + k * BITS_PER_BYTE
+}
+
+fn byte_sts_port(i: u64) -> u64 {
+    return sts_port(byte_bit0(i))
+}
+
+fn byte_en_port(i: u64) -> u64 {
+    return en_port(byte_bit0(i))
+}
+
+fn sts_at(i: u64) -> u64 {
+    if i >= byte_total() {
+        return 0
+    }
+    return rd(byte_sts_port(i))
+}
+
+fn en_at(i: u64) -> u64 {
+    if i >= byte_total() {
+        return 0
+    }
+    return rd(byte_en_port(i))
+}
+
+fn armed_byte(bit0: u64) -> u64 {
+    if bit0 >= BITS_MAX {
+        return 0
+    }
+    return (armed_words[(bit0 / WORD_BITS) as usize] >> (bit0 % WORD_BITS)) & BYTE_MASK
+}
+
+fn stray_mask(active: u64, armed: u64) -> u64 {
+    return active & ~armed & BYTE_MASK
+}
+
+fn lowest_bit(mask: u64) -> u64 {
+    var k: u64 = 0
+    while k < BITS_PER_BYTE {
+        if (mask & (1 << k)) != 0 {
+            return k
+        }
+        k = k + 1
+    }
+    return BITS_PER_BYTE
+}
+
+fn popcount(mask: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < BITS_PER_BYTE {
+        if (mask & (1 << k)) != 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn scan() -> u64 {
+    pend_n = 0
+    var i: u64 = 0
+    let total: u64 = byte_total()
+    while i < total {
+        let sp: u64 = byte_sts_port(i)
+        let sts: u64 = rd(sp)
+        if sts != 0 {
+            let ep: u64 = byte_en_port(i)
+            let en: u64 = rd(ep)
+            let active: u64 = sts & en
+            if active != 0 {
+                let bit0: u64 = byte_bit0(i)
+                let armed: u64 = armed_byte(bit0)
+                let mine: u64 = active & armed
+                let stray: u64 = stray_mask(active, armed)
+                if mine != 0 {
+                    wr(sp, mine)
+                    var k: u64 = 0
+                    while k < BITS_PER_BYTE {
+                        if (mine & (1 << k)) != 0 && pend_n < BITS_MAX {
+                            pend[pend_n as usize] = bit0 + k
+                            pend_n = pend_n + 1
+                        }
+                        k = k + 1
+                    }
+                }
+                if stray != 0 {
+                    wr(ep, en & ~stray)
+                    wr(sp, stray)
+                    stray_n = stray_n + popcount(stray)
+                    stray_bit = bit0 + lowest_bit(stray)
+                }
+            }
+        }
+        i = i + 1
+    }
+    return pend_n
+}
+
+fn pending_count() -> u64 {
+    return pend_n
+}
+
+fn pending_bit(k: u64) -> u64 {
+    if k >= pend_n {
+        return 0xFFFF
+    }
+    return pend[k as usize]
+}
+
+fn strays() -> u64 {
+    return stray_n
+}
+
+fn stray_last() -> u64 {
+    return stray_bit
+}
+
+fn selftest() -> bool {
+    var good: bool = true
+    let sv0: u64 = blk0
+    let sh0: u64 = half0
+    let sv1: u64 = blk1
+    let sh1: u64 = half1
+    let sb1: u64 = base1
+    blk0 = 0x600
+    half0 = 2
+    blk1 = 0x700
+    half1 = 2
+    base1 = 32
+    if sts_port(0) != 0x600 { good = false }
+    if en_port(0) != 0x602 { good = false }
+    if sts_port(9) != 0x601 { good = false }
+    if en_port(9) != 0x603 { good = false }
+    if sts_port(32) != 0x700 { good = false }
+    if en_port(32) != 0x702 { good = false }
+    if sts_port(41) != 0x701 { good = false }
+    if sts_port(200) != 0 { good = false }
+    if byte_total() != 4 { good = false }
+    if byte_bit0(0) != 0 { good = false }
+    if byte_bit0(1) != 8 { good = false }
+    if byte_bit0(2) != 32 { good = false }
+    if byte_bit0(3) != 40 { good = false }
+    if byte_sts_port(3) != 0x701 { good = false }
+    if byte_en_port(2) != 0x702 { good = false }
+    if stray_mask(0xA5, 0x21) != 0x84 { good = false }
+    if stray_mask(0x21, 0x21) != 0 { good = false }
+    if popcount(0xB4) != 4 { good = false }
+    if lowest_bit(0x28) != 3 { good = false }
+    blk0 = sv0
+    half0 = sh0
+    blk1 = sv1
+    half1 = sh1
+    base1 = sb1
+    return good
+}
