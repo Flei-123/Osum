@@ -87,7 +87,7 @@ echo "== 5. recovery onto the blank disk =="
 rc=$(lauf rec iso "ls /data;mount;recover /dev/hda /mnt/store snap1 --ja --into /data;exit" 1500)
 gleich "recover run: exit code" "$rc" "21"
 hat "$OUT/rec.txt" "recover: backup verified" "backup verified first"
-hat "$OUT/rec.txt" "install: fertig" "system installed on the blank disk"
+hat "$OUT/rec.txt" "install: done" "system installed on the blank disk"
 hat "$OUT/rec.txt" "recover: next, boot the new disk, mount the store and run: backup restore /mnt/store snap1 /data" "the restore step is announced"
 hat "$OUT/rec.txt" "recover: done" "recover finished"
 nicht "$OUT/rec.txt" "recover: install failed" "no install failure"

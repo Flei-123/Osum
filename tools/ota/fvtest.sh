@@ -160,9 +160,9 @@ ZMIB=$(( $(stat -c%s "$OUT/ziel.img") / 1048576 ))
 rm -f "$OUT/ziel.img"; head -c $((ZMIB * 1048576)) /dev/zero > "$OUT/ziel.img"
 OUT="$OUT" bash tools/install/oneshot.sh dinst iso "install /dev/hda --ja;exit" 900 > /dev/null 2>&1
 sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/dinst.txt" 2>/dev/null
-hat "$OUT/dinst.txt" "install: fertig" "install /dev/hda finished"
-hatnicht "$OUT/dinst.txt" "install: FEHLER" "installer reports no error"
-if grep -qaF "install: fertig" "$OUT/dinst.txt"; then
+hat "$OUT/dinst.txt" "install: done" "install /dev/hda finished"
+hatnicht "$OUT/dinst.txt" "install: ERROR" "installer reports no error"
+if grep -qaF "install: done" "$OUT/dinst.txt"; then
     lauf_p d0 "opk install /fv/fvviewer-1.0.0.opk;sh /start.sh;opk list;exit" 600 > /dev/null
     hat "$OUT/d0.txt" "opk: installed fvviewer" "disk: fvviewer 1.0.0 installed"
     hat "$OUT/d0.txt" "usage: fvviewer -t" "disk: the app starts"

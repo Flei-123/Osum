@@ -100,7 +100,7 @@ run_qemu main "$OUT/main.img" "dualcli /dev/hdb --free $FREE_MIB --ja --name hdb
 serial_lines "$OUT/main.txt" 24
 grep -aq '^dual: shresult=0' "$OUT/main.txt" && ok "shrink reports success" || bad "shrink did not report success"
 grep -aq '^dual: shrunk ' "$OUT/main.txt" && ok "table re-read after the shrink" || bad "no re-read of the table"
-grep -aq '^dual: fertig' "$OUT/main.txt" && ok "installation finished in the freed space" || bad "installation not finished"
+grep -aq '^dual: done' "$OUT/main.txt" && ok "installation finished in the freed space" || bad "installation not finished"
 res=$(python3 -I tools/shrinkinst/check.py "$OUT/main.img" "$EXPECT" "$HF" --installed 2>&1)
 [ "$res" = ALLOK ] && ok "host oracle: sgdisk -v, partition end = target, ntfsresize -i, ntfsfix -n, flags clean, $(ls "$HF" | wc -l) file hashes, partition 3 OSUM behind it" || bad "host oracle: $(echo "$res" | tr '\n' ';')"
 mdir -i "$OUT/main.img@@$((ESP_START * 512))" ::/EFI/Microsoft/Boot > "$OUT/esp-list.txt" 2>&1
@@ -135,7 +135,7 @@ refuse_case() {
     run_qemu "$name" "$OUT/$name.img" "dualcli /dev/hdb --free $FREE_MIB --ja --name hdb;exit"
     serial_lines "$OUT/$name.txt" 6
     if grep -aq "^dual: shrefuse $want\$" "$OUT/$name.txt"; then ok "$label -> shrefuse $want"; else bad "$label: expected shrefuse $want"; fi
-    if grep -aq '^dual: fertig' "$OUT/$name.txt"; then bad "$label: installed anyway"; else ok "$label: no installation"; fi
+    if grep -aq '^dual: done' "$OUT/$name.txt"; then bad "$label: installed anyway"; else ok "$label: no installation"; fi
     if [ "$(sha "$OUT/$name.img")" = "$before" ]; then ok "$label: disk byte-identical"; else bad "$label: disk changed"; fi
     rm -f "$OUT/$name.img"
 }
@@ -219,7 +219,7 @@ serial_lines "$OUT/reloc.txt" 24
 grep -aq '^dual: shresult=0' "$OUT/reloc.txt" && ok "shrink with relocation reports success" || bad "relocating shrink failed ($(grep -a '^dual: sh' "$OUT/reloc.txt" | tr '\n' ' ' | cut -c1-120))"
 tr -d '\000' < "$OUT/reloc.txt" | grep -a '^dual: shprog ' | awk '{print $3}' > "$OUT/prog.txt"
 if [ "$(wc -l < "$OUT/prog.txt")" -ge 4 ] && sort -n -c "$OUT/prog.txt" 2>/dev/null && [ "$(tail -1 "$OUT/prog.txt")" = 100 ]; then ok "progress lines rise monotonically to 100 ($(tr '\n' ' ' < "$OUT/prog.txt"))"; else bad "progress lines: $(tr '\n' ' ' < "$OUT/prog.txt")"; fi
-grep -aq '^dual: fertig' "$OUT/reloc.txt" && ok "installation finished after the relocating shrink" || bad "installation not finished after relocation"
+grep -aq '^dual: done' "$OUT/reloc.txt" && ok "installation finished after the relocating shrink" || bad "installation not finished after relocation"
 res=$(python3 -I tools/shrinkinst/check.py "$OUT/reloc.img" "$EXPECT" "$OUT/inst4k.files" --installed 2>&1)
 [ "$res" = ALLOK ] && ok "host oracle: relocated data, mirror, all file hashes, ntfsresize/ntfsfix clean" || bad "host oracle: $(echo "$res" | tr '\n' ';' | cut -c1-300)"
 cp "$OUT/reloc.img" "$OUT/relocflip.img"

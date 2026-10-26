@@ -143,7 +143,7 @@ neue_platte
 cp -f "$OUT/ziel.img" "$OUT/leer.img"
 rc=$(lauf trocken iso "install /dev/hda;exit" 600)
 gleich "Probelauf: Beendigungscode" "$rc" "21"
-hat "$OUT/trocken.txt" "install: Probelauf" "der Probelauf sagt, dass er nichts schreibt"
+hat "$OUT/trocken.txt" "install: dry run" "der Probelauf sagt, dass er nichts schreibt"
 if cmp -s "$OUT/ziel.img" "$OUT/leer.img"; then
     ok "GEGENPROBE: ohne --ja ist die Platte Oktett fuer Oktett unberuehrt"
 else
@@ -154,9 +154,9 @@ rc=$(lauf inst iso "install /dev/hda --ja;exit" 900)
 gleich "Installation: Beendigungscode" "$rc" "21"
 hat "$OUT/inst.txt" "install: gpt ok" "GPT geschrieben"
 hat "$OUT/inst.txt" "install: fat32 ok" "FAT32 angelegt"
-hat "$OUT/inst.txt" "install: fertig" "die Installation meldet sich fertig"
-kop=$(grep -aoE 'install: kopiert=[0-9]+' "$OUT/inst.txt" | sed 's/.*=//')
-gro=$(grep -aoE 'install: gewachsen=[0-9]+' "$OUT/inst.txt" | sed 's/.*=//')
+hat "$OUT/inst.txt" "install: done" "die Installation meldet sich fertig"
+kop=$(grep -aoE 'install: copied=[0-9]+' "$OUT/inst.txt" | sed 's/.*=//')
+gro=$(grep -aoE 'install: grown=[0-9]+' "$OUT/inst.txt" | sed 's/.*=//')
 num "kopierte Sektoren" "$kop" ge 8192
 num "Wurzeldateisystem gewachsen auf" "$gro" ge 400000
 sek=$(grep -aoE 'ata0 sectors=[0-9]+' "$OUT/inst.txt" | head -1 | sed 's/.*=//')

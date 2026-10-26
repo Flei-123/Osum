@@ -270,8 +270,8 @@ head -c $((96 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
 OUT="$OUT" bash tools/install/oneshot.sh inst iso \
     "install /dev/hda --ja;exit" 900 > /dev/null 2>&1
 gleich "der Installer ist durchgelaufen" "$(cat "$OUT/inst.rc" 2>/dev/null)" "21"
-grep -qa 'install: fertig' "$OUT/inst.txt" \
-    && ok "und sagt es auch" || bad "'install: fertig' fehlt"
+grep -qa 'install: done' "$OUT/inst.txt" \
+    && ok "und sagt es auch" || bad "'install: done' fehlt"
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
 
 # =====================================================================

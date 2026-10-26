@@ -40,7 +40,7 @@ lines() { tr -d '\000' < "$1" 2>/dev/null | grep -a '^dual:' | head -8 | sed 's/
 cp "$OUT/base.img" "$OUT/clean.img"
 run_qemu clean "$OUT/clean.img"
 lines "$OUT/clean.txt"
-grep -aq '^dual: tafel=2' "$OUT/clean.txt" && ok "clean disk: table read, 2 partitions" || bad "clean disk not read"
+grep -aq '^dual: table=2' "$OUT/clean.txt" && ok "clean disk: table read, 2 partitions" || bad "clean disk not read"
 grep -aq '^dual: gpt ' "$OUT/clean.txt" && bad "clean disk reports a GPT problem" || ok "clean disk: no GPT problem reported"
 
 for c in hsize hcrc esize count tcrc; do
@@ -50,7 +50,7 @@ for c in hsize hcrc esize count tcrc; do
     run_qemu "$c" "$OUT/$c.img"
     lines "$OUT/$c.txt"
     if tr -d '\000' < "$OUT/$c.txt" | grep -aqxF "$want"; then ok "$c: exact reason and values: $want"; else bad "$c: expected '$want'"; fi
-    if grep -aq 'dual: gpt kaputt' "$OUT/$c.txt"; then bad "$c: generic message still used"; else ok "$c: no generic message"; fi
+    if grep -aq 'dual: gpt broken' "$OUT/$c.txt"; then bad "$c: generic message still used"; else ok "$c: no generic message"; fi
     [ "$(sha256sum < "$OUT/$c.img" | cut -d' ' -f1)" = "$sum" ] && ok "$c: disk byte-identical after the probe" || bad "$c: disk changed"
 done
 

@@ -135,7 +135,7 @@ PROBE_VOR=$(sha256sum < "$OUT/probe.img" | cut -d' ' -f1)
 lauf "$OUT/probe.img" "dualcli /dev/hdb --quelle /dev/hda" "$OUT/ser-probe.txt"
 tr -d '\000' < "$OUT/ser-probe.txt" 2>/dev/null | grep -a '^dual:' | head -12 | sed 's/^/        /'
 
-grep -qa 'dual: tafel=2' "$OUT/ser-probe.txt" \
+grep -qa 'dual: table=2' "$OUT/ser-probe.txt" \
     && ok "es liest die fremde Tafel: 2 Partitionen" \
     || bad "die fremde Tafel wurde nicht gelesen"
 # Die ESP ist Partition 1, Typ 1 (T_ESP); die Daten sind Typ 2.
@@ -145,13 +145,13 @@ grep -qa "dual: part 1 $ESP_START $((ESP_START+ESP_SEK-1)) 1" "$OUT/ser-probe.tx
 grep -qa "dual: part 2 $DAT_START $((DAT_START+DAT_SEK-1)) 2" "$OUT/ser-probe.txt" \
     && ok "Partition 2 richtig erkannt: Sektor $DAT_START..$((DAT_START+DAT_SEK-1)), Art Daten" \
     || bad "Partition 2 wurde nicht richtig gelesen"
-grep -qa "dual: frei $((DAT_START+DAT_SEK))" "$OUT/ser-probe.txt" \
+grep -qa "dual: free $((DAT_START+DAT_SEK))" "$OUT/ser-probe.txt" \
     && ok "der freie Bereich wurde gefunden (ab Sektor $((DAT_START+DAT_SEK)))" \
     || bad "der freie Bereich wurde nicht gefunden"
 grep -qa 'dual: esp=1' "$OUT/ser-probe.txt" \
     && ok "die vorhandene EFI-Partition wurde gefunden" \
     || bad "die vorhandene EFI-Partition wurde nicht gefunden"
-grep -qa 'dual: probelauf, ende' "$OUT/ser-probe.txt" \
+grep -qa 'dual: dry run, ende' "$OUT/ser-probe.txt" \
     && ok "der Probelauf hoert vor dem ersten Schreibzugriff auf" \
     || bad "der Probelauf ist nicht sauber zu Ende gekommen"
 
@@ -169,16 +169,16 @@ titel "3. wirklich installieren -- in den freien Platz"
 lauf "$OUT/platte.img" "dualcli /dev/hdb --quelle /dev/hda --ja --name hdb" "$OUT/ser.txt"
 tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -a '^dual:' | head -20 | sed 's/^/        /'
 
-grep -qa 'dual: neu p3' "$OUT/ser.txt" \
+grep -qa 'dual: new p3' "$OUT/ser.txt" \
     && ok "es hat einen neuen Eintrag als Partition 3 ergaenzt" \
     || bad "es wurde kein dritter Partitionseintrag angelegt"
-grep -qa 'dual: kopiert' "$OUT/ser.txt" \
+grep -qa 'dual: copied' "$OUT/ser.txt" \
     && ok "die Wurzel wurde in den freien Bereich kopiert" \
     || bad "die Wurzel wurde nicht kopiert"
-grep -qa 'dual: menue=2' "$OUT/ser.txt" \
+grep -qa 'dual: menu=2' "$OUT/ser.txt" \
     && ok "das Bootmenue wurde mit ZWEI Eintraegen geschrieben" \
     || bad "das Bootmenue hat nicht zwei Eintraege"
-grep -qa 'dual: fertig' "$OUT/ser.txt" \
+grep -qa 'dual: done' "$OUT/ser.txt" \
     && ok "die Installation meldet sich fertig" \
     || bad "die Installation ist nicht fertig geworden"
 
@@ -265,12 +265,12 @@ sgdisk -p "$OUT/eng.img" 2>&1 | tail -4 | sed 's/^/        /'
 lauf "$OUT/eng.img" "dualcli /dev/hdb --quelle /dev/hda --ja --name hdb" "$OUT/ser-eng.txt"
 tr -d '\000' < "$OUT/ser-eng.txt" 2>/dev/null | grep -a '^dual:' | head -8 | sed 's/^/        /'
 
-if grep -qa 'dual: zu wenig' "$OUT/ser-eng.txt"; then
+if grep -qa 'dual: too little' "$OUT/ser-eng.txt"; then
     ok "es bricht mit einer klaren Meldung ab: zu wenig freier Platz"
 else
     bad "es hat den fehlenden Platz nicht gemeldet"
 fi
-grep -qa 'dual: fertig' "$OUT/ser-eng.txt" \
+grep -qa 'dual: done' "$OUT/ser-eng.txt" \
     && bad "es hat trotz fehlenden Platzes installiert" \
     || ok "es hat NICHT installiert"
 

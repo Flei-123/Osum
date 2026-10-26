@@ -1,41 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/instkern.fi -- RUNDE INSTALLER (P-001): DIE MASCHINE, DIE
-// DAS SYSTEM AUF EINE PLATTE SCHREIBT -- EINMAL, FUER BEIDE BEDIENWEGE.
-//
-// WARUM ES DIESE DATEI GIBT, und das ist der ganze Punkt dieser Runde.
-//
-// `install.fi` konnte seit Runde INSTALL alles, was eine Installation
-// ausmacht: Schutz-MBR, GPT mit beiden Pruefsummen, EFI-Partition mit
-// FAT32, das Wurzeldateisystem umziehen und wachsen lassen, den
-// Bootlader eintragen. Gemessen mit 70 Zusagen, und die Platte startet
-// danach ueber OVMF ohne `-kernel` und ohne Modul.
-//
-// Was es NICHT hatte, ist ein Weg dorthin, den ein Mensch findet.
-// `install /dev/hda --ja` auf einer Kommandozeile ist kein
-// Installationsweg fuer jemanden, der gerade einen Stick gebootet hat;
-// OFFEN.md fuehrt das als `P-001` mit Prioritaet 1.
-//
-// DER FALSCHE WEG WAERE GEWESEN, die Oberflaeche danebenzustellen und
-// die Schreibarbeit dort noch einmal zu tippen. Dann gaebe es ZWEI
-// Stellen, an denen eine GPT-Pruefsumme gerechnet wird, und die zweite
-// waere die, die beim naechsten Formatwechsel vergessen wird. Deshalb
-// ist der Maschinenteil hier herausgezogen und hat GENAU ZWEI Aufrufer:
-//
-//   kernel/user/install.fi     die Kommandozeile (unveraendert in dem,
-//                              was sie tut -- sie ruft jetzt hierher)
-//   kernel/user/installer.fi   die Oberflaeche (Runde INSTALLER)
-//
-// WAS HIER ANDERS IST ALS IN DER VORLAGE: die Maschine SAGT, wo sie
-// steht. `schritt_nr()` und `schritt_von()` zaehlen mit, und
-// `fortschritt()` gibt Promille des laengsten Teils (des Kopierens)
-// zurueck. Die Kommandozeile ignoriert das; die Oberflaeche malt einen
-// Balken daraus. Ein Installationsprogramm, das minutenlang nichts
-// sagt, ist von einem abgestuerzten nicht zu unterscheiden -- und das
-// Kopieren dauert hier wirklich Minuten.
-//
-// KEIN EIGENER SYSTEMAUFRUF, wie schon in der Vorlage: `/dev/hda` ist
-// seit K14 eine Datei mit `lseek`/`read`/`write`, und mehr braucht es
-// nicht.
 
 profile kernel
 
@@ -44,41 +7,31 @@ import dcrypt
 
 export {
     crypt_begin, crypt_end, crypt_off, crypt_active,
-    BS, AUSRICHT, ESP_STD,
-    lese, schreibe, ist_ofs, wachsen, grow_begin, grow_step, grow_position, copy_begin, copy_step, copy_position, fail_with,
-    COPY_MORE, COPY_DONE, COPY_ERROR, GROW_MORE, GROW_DONE, GROW_ERROR, F_ABORT, F_TIMEOUT, kopiere, kernel_source,
-    gpt_schreiben, bios_laden, bios_da, fat32_create, wurzel_kopieren, copy_root_from,
-    plan_esp_start, plan_esp_ende, plan_ofs_start, plan_ofs_ende,
-    plan_passt, quelle_pruefen,
-    schritt_nr, schritt_von, fortschritt, fehler_bei, nachgeschrieben,
-    F_KEIN, F_OEFFNEN, F_LESEN, F_SCHREIBEN, F_KEINOFS, F_KLEIN, F_KARTE,
-    S_GPT, S_ESP, S_KOPIE, S_WACHSEN, S_BOOT, S_FERTIG
+    BS, ALIGNMENT, ESP_DEFAULT,
+    read_at, write_at, is_ofs, grow, grow_begin, grow_step, grow_position, copy_begin, copy_step, copy_position, fail_with,
+    COPY_MORE, COPY_DONE, COPY_ERROR, GROW_MORE, GROW_DONE, GROW_ERROR, F_ABORT, F_TIMEOUT, copy_file, kernel_source,
+    gpt_write, bios_load, bios_present, fat32_create, copy_root, copy_root_from,
+    plan_esp_start, plan_esp_end, plan_ofs_start, plan_ofs_end,
+    plan_fits, check_source,
+    step_nr, step_count, progress_permille, error_at, rewritten,
+    F_NONE, F_OPEN, F_READ, F_WRITE, F_NO_OFS, F_SMALL, F_MAP,
+    S_GPT, S_ESP, S_COPY, S_GROW, S_BOOT, S_DONE
 }
 
-// ====================================================== DER FORTSCHRITT
-//
-// Fuenf Schritte, und sie heissen hier wie in der Oberflaeche. Die
-// Zahlen sind die REIHENFOLGE und nicht die Dauer: Schritt 3 (kopieren)
-// ist laenger als die vier anderen zusammen, und genau deshalb hat er
-// zusaetzlich `fortschritt()` in Promille.
 const S_GPT: u64 = 1
 const S_ESP: u64 = 2
-const S_KOPIE: u64 = 3
-const S_WACHSEN: u64 = 4
+const S_COPY: u64 = 3
+const S_GROW: u64 = 4
 const S_BOOT: u64 = 5
-const S_FERTIG: u64 = 6
+const S_DONE: u64 = 6
 
-// Die Fehlergruende. Sie sind ZAHLEN und keine Texte: den Text sucht
-// der Aufrufer in seiner Sprache heraus (locale/*/messages). Ein
-// Fehlertext, der aus der Maschine kommt, waere auf jedem System
-// dieselbe Sprache.
-const F_KEIN: u64 = 0
-const F_OEFFNEN: u64 = 1
-const F_LESEN: u64 = 2
-const F_SCHREIBEN: u64 = 3
-const F_KEINOFS: u64 = 4
-const F_KLEIN: u64 = 5
-const F_KARTE: u64 = 6
+const F_NONE: u64 = 0
+const F_OPEN: u64 = 1
+const F_READ: u64 = 2
+const F_WRITE: u64 = 3
+const F_NO_OFS: u64 = 4
+const F_SMALL: u64 = 5
+const F_MAP: u64 = 6
 const F_ABORT: u64 = 7
 const F_TIMEOUT: u64 = 8
 
@@ -89,57 +42,36 @@ const GROW_MORE: u64 = 0
 const GROW_DONE: u64 = 1
 const GROW_ERROR: u64 = 2
 
-static mut st_schritt: u64 = 0
-static mut st_promille: u64 = 0
-static mut st_fehler: u64 = 0
+static mut st_step: u64 = 0
+static mut st_permille: u64 = 0
+static mut st_error: u64 = 0
 
-fn schritt_nr() -> u64 {
-    return st_schritt
+fn step_nr() -> u64 {
+    return st_step
 }
 
-fn schritt_von() -> u64 {
-    return S_FERTIG
+fn step_count() -> u64 {
+    return S_DONE
 }
 
-fn fortschritt() -> u64 {
-    return st_promille
+fn progress_permille() -> u64 {
+    return st_permille
 }
 
-fn fehler_bei() -> u64 {
-    return st_fehler
+fn error_at() -> u64 {
+    return st_error
 }
 
 fn fail_with(code: u64) {
-    st_fehler = code
+    st_error = code
 }
 
-static mut SEK: [u8; 512] = [0 as u8; 512]
-static mut SEK2: [u8; 512] = [0 as u8; 512]
-static mut KOP: [u8; 8192] = [0 as u8; 8192]
-// Read-back buffer for the verification (see `schreibe_geprueft`).
-static mut KOP2: [u8; 8192] = [0 as u8; 8192]
+static mut SECTOR_BUF: [u8; 512] = [0 as u8; 512]
+static mut SECTOR_BUF2: [u8; 512] = [0 as u8; 512]
+static mut COPY_BUF: [u8; 8192] = [0 as u8; 8192]
 
-// ===================================================== LEGACY-BIOS BOOT
-//
-// r309 (03.10.2026): the installed disk used to boot through UEFI only; the
-// protective MBR had no boot code and SeaBIOS stopped at "Booting from Hard
-// Disk...". Limine's BIOS stages are embedded EXACTLY the way
-// `limine bios-install` does it for a GPT disk without a BIOS boot partition
-// (vendor limine.c, bios_install(), "Attempting GPT embedding"):
-//
-//   * sector 0       stage 1 (the first 512 bytes of limine-bios-hdd.bin),
-//                    bytes 440..509 are the protective MBR, the four fields
-//                    at 0x1a4 say where the two halves of stage 2 lie
-//   * stage 2 half A at the END of the primary partition entry array
-//   * stage 2 half B at the END of the backup partition entry array
-//   * the entry arrays are SHORTER (only the sectors before the halves), and
-//     both headers carry the new entry count and the CRC32 over the shorter
-//     array -- the same code that writes the tables writes them.
-//
-// `limine-bios-hdd.bin` is read from the running root (`/boot/limine-hdd.bin`,
-// tools/usbimg/build.sh puts it there); without it nothing changes and the
-// disk is UEFI-only as before. `limine-bios.sys` (stage 3) is copied onto the
-// EFI partition by the caller.
+static mut COPY_BUF2: [u8; 8192] = [0 as u8; 8192]
+
 const BIOSMAX: u64 = 32768
 static mut BIOSBIN: [u8; 32768] = [0 as u8; 32768]
 static mut bios_n: u64 = 0
@@ -148,19 +80,13 @@ static mut g_entries: u64 = 128
 static mut g_entsect: u64 = 32
 
 const BS: u64 = 512
-// Wo die erste Partition anfaengt. 2048 Sektoren = 1 MiB, die Zahl, die
-// jedes Werkzeug seit 2009 nimmt: sie geht auf jede Loeschgruppe eines
-// Flashspeichers auf.
-const AUSRICHT: u64 = 2048
-// Die Eintragstafel von GPT: 128 Eintraege zu 128 Oktetten = 16384
-// Oktette = 32 Sektoren. Beides steht so in der Beschreibung, und
-// `part.fi` rechnet mit den Zahlen aus dem Kopf und nicht mit diesen --
-// wer hier etwas anderes hinschreibt, faellt dort auf.
+
+const ALIGNMENT: u64 = 2048
+
 const ENTRIES: u64 = 128
 const ENTSIZE: u64 = 128
 const ENTSECT: u64 = 32
-const ESP_STD: u64 = 70000 // 34 MiB -- knapp ueber den 65525 Verbaenden, ab denen FAT32 FAT32 ist
-// --------------------------------------------------------- Kleinigkeiten
+const ESP_DEFAULT: u64 = 70000
 
 fn p8(at: u64, v: u64) {
     __mmio_write8((at) as *mut u8, v as u8)
@@ -195,15 +121,10 @@ fn g64(at: u64) -> u64 {
     return g32(at) | (g32(at + 4) << 32)
 }
 
-fn nullen(at: u64, n: u64) {
+fn zero_fill(at: u64, n: u64) {
     ulib.fill(at, 0, n)
 }
 
-// CRC32, IEEE 802.3, reflektiert -- dieselbe Rechnung wie in
-// `kernel/bootmod.fi` und in `part.fi`, und das ist Absicht: die Summe,
-// die dieses Programm schreibt, wird von genau dieser Rechnung wieder
-// gelesen. Waeren es zwei verschiedene, wuerde die Platte beim naechsten
-// Start abgelehnt -- und das ist auch schon die Gegenprobe.
 fn crc_start() -> u64 {
     return 0xFFFFFFFF
 }
@@ -215,8 +136,8 @@ fn crc_feed(seed: u64, p: u64, len: u64) -> u64 {
         crc = crc ^ g8(p + i)
         var k: u64 = 0
         while k < 8 {
-            let maske: u64 = 0 -% (crc & 1)
-            crc = (crc >> 1) ^ (0xEDB88320 & maske)
+            let mask: u64 = 0 -% (crc & 1)
+            crc = (crc >> 1) ^ (0xEDB88320 & mask)
             k = k + 1
         }
         i = i + 1
@@ -232,19 +153,17 @@ fn crc_of(p: u64, len: u64) -> u64 {
     return crc_end(crc_feed(crc_start(), p, len))
 }
 
-// --------------------------------------------------------- die Platte
-
-fn raw_lese(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+fn raw_read(fd: u64, lba: u64, at: u64, n: u64) -> bool {
     let w: u64 = ulib.sys(ulib.SYS_SEEK, fd, lba * BS, ulib.SEEK_SET)
     if ulib.bad(w) {
-        st_fehler = F_LESEN
+        st_error = F_READ
         return false
     }
     var got: u64 = 0
     while got < n {
         let r: u64 = ulib.sys(ulib.SYS_READ, fd, at + got, n - got)
         if ulib.bad(r) || r == 0 {
-            st_fehler = F_LESEN
+            st_error = F_READ
             return false
         }
         got = got + r
@@ -252,17 +171,17 @@ fn raw_lese(fd: u64, lba: u64, at: u64, n: u64) -> bool {
     return true
 }
 
-fn raw_schreibe(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+fn raw_write(fd: u64, lba: u64, at: u64, n: u64) -> bool {
     let w: u64 = ulib.sys(ulib.SYS_SEEK, fd, lba * BS, ulib.SEEK_SET)
     if ulib.bad(w) {
-        st_fehler = F_SCHREIBEN
+        st_error = F_WRITE
         return false
     }
     var done: u64 = 0
     while done < n {
         let r: u64 = ulib.sys(ulib.SYS_WRITE, fd, at + done, n - done)
         if ulib.bad(r) || r == 0 {
-            st_fehler = F_SCHREIBEN
+            st_error = F_WRITE
             return false
         }
         done = done + r
@@ -270,14 +189,6 @@ fn raw_schreibe(fd: u64, lba: u64, at: u64, n: u64) -> bool {
     return true
 }
 
-
-
-// ============================================ K-019: ENCRYPTED ROOT PARTITION
-//
-// When `crypt_begin` has run, every access to sectors [cry_data, cry_end) goes
-// through XTS-AES-256 (tweak = sector number relative to cry_data). Everything
-// above (copy loop, grow, read-back compare) is unchanged: it sees plaintext.
-// The 8 header sectors in front of cry_data are written raw by `crypt_begin`.
 static mut cry_on: u64 = 0
 static mut cry_data: u64 = 0
 static mut cry_end: u64 = 0
@@ -287,7 +198,6 @@ fn crypt_active() -> bool {
     return cry_on == 1
 }
 
-// Number of sectors the header takes in front of the file system (0 = no encryption).
 fn crypt_off() -> u64 {
     if cry_on == 1 {
         return dcrypt.HDR_SECTORS
@@ -295,23 +205,20 @@ fn crypt_off() -> u64 {
     return 0
 }
 
-// Switch the layer off again (a second install in the same window must not inherit it).
 fn crypt_end() {
     cry_on = 0
 }
 
-// Start encryption for the partition [start, start+count). Writes the header,
-// proves slot 0 opens with the passphrase, then switches the layer on.
 fn crypt_begin(fd: u64, start: u64, count: u64, pw: u64, pwlen: u64) -> bool {
     if !dcrypt.setup(pw, pwlen, dcrypt.DEF_T, dcrypt.DEF_M, dcrypt.DEF_P, count) {
-        st_fehler = F_SCHREIBEN
+        st_error = F_WRITE
         return false
     }
     if !dcrypt.verify_pass(pw, pwlen) {
-        st_fehler = F_SCHREIBEN
+        st_error = F_WRITE
         return false
     }
-    if !raw_schreibe(fd, start, dcrypt.header_ptr(), dcrypt.HDR_SECTORS * BS) {
+    if !raw_write(fd, start, dcrypt.header_ptr(), dcrypt.HDR_SECTORS * BS) {
         return false
     }
     cry_data = start + dcrypt.HDR_SECTORS
@@ -320,7 +227,7 @@ fn crypt_begin(fd: u64, start: u64, count: u64, pw: u64, pwlen: u64) -> bool {
     return true
 }
 
-fn lese(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+fn read_at(fd: u64, lba: u64, at: u64, n: u64) -> bool {
     if cry_on == 1 && lba >= cry_data && lba < cry_end {
         let sc: u64 = (&CRYSC[0 as usize]) as u64
         var done: u64 = 0
@@ -329,21 +236,21 @@ fn lese(fd: u64, lba: u64, at: u64, n: u64) -> bool {
             if c > 8192 {
                 c = 8192
             }
-            if !raw_lese(fd, lba + done / BS, sc, c) {
+            if !raw_read(fd, lba + done / BS, sc, c) {
                 return false
             }
             if !dcrypt.dec_sectors(lba + done / BS - cry_data, sc, at + done, c / BS) {
-                st_fehler = F_LESEN
+                st_error = F_READ
                 return false
             }
             done = done + c
         }
         return true
     }
-    return raw_lese(fd, lba, at, n)
+    return raw_read(fd, lba, at, n)
 }
 
-fn schreibe(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+fn write_at(fd: u64, lba: u64, at: u64, n: u64) -> bool {
     if cry_on == 1 && lba >= cry_data && lba < cry_end {
         let sc: u64 = (&CRYSC[0 as usize]) as u64
         var done: u64 = 0
@@ -353,29 +260,20 @@ fn schreibe(fd: u64, lba: u64, at: u64, n: u64) -> bool {
                 c = 8192
             }
             if !dcrypt.enc_sectors(lba + done / BS - cry_data, at + done, sc, c / BS) {
-                st_fehler = F_SCHREIBEN
+                st_error = F_WRITE
                 return false
             }
-            if !raw_schreibe(fd, lba + done / BS, sc, c) {
+            if !raw_write(fd, lba + done / BS, sc, c) {
                 return false
             }
             done = done + c
         }
         return true
     }
-    return raw_schreibe(fd, lba, at, n)
+    return raw_write(fd, lba, at, n)
 }
 
-// ============================================= WRITE, READ BACK, COMPARE
-//
-// Installing onto a SATA disk (QEMU q35, 27.09.2026) left files on the
-// ESP with the right size and scattered runs of zeros (always from octet
-// 16 of a sector, about 128 octets) -- the disk then rebooted in a loop
-// and nobody saw why. Whatever the cause below this program, an
-// installer must not report "done" for a disk that does not boot. So
-// every chunk is read back and compared, and written again if it
-// differs (up to five times); only then does the copy go on.
-fn gleich(p: u64, q: u64, n: u64) -> bool {
+fn bytes_equal(p: u64, q: u64, n: u64) -> bool {
     var i: u64 = 0
     while i < n {
         if g8(p + i) != g8(q + i) {
@@ -386,37 +284,31 @@ fn gleich(p: u64, q: u64, n: u64) -> bool {
     return true
 }
 
-static mut st_nachgeschrieben: u64 = 0
-fn nachgeschrieben() -> u64 {
-    return st_nachgeschrieben
+static mut st_rewritten: u64 = 0
+fn rewritten() -> u64 {
+    return st_rewritten
 }
 
-fn schreibe_geprueft(fd: u64, lba: u64, at: u64, n: u64) -> bool {
-    let rb: u64 = (&KOP2[0 as usize]) as u64
-    var versuch: u64 = 0
-    while versuch < 5 {
-        if !schreibe(fd, lba, at, n) {
+fn write_checked(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+    let rb: u64 = (&COPY_BUF2[0 as usize]) as u64
+    var attempt: u64 = 0
+    while attempt < 5 {
+        if !write_at(fd, lba, at, n) {
             return false
         }
-        if n <= 8192 && lese(fd, lba, rb, n) && gleich(at, rb, n) {
+        if n <= 8192 && read_at(fd, lba, rb, n) && bytes_equal(at, rb, n) {
             return true
         }
         if n > 8192 {
             return true
         }
-        st_nachgeschrieben = st_nachgeschrieben + 1
-        versuch = versuch + 1
+        st_rewritten = st_rewritten + 1
+        attempt = attempt + 1
     }
-    st_fehler = F_SCHREIBEN
+    st_error = F_WRITE
     return false
 }
 
-// ------------------------------------------------------------ die GUIDs
-
-// Die Typkennung der EFI-Partition: C12A7328-F81F-11D2-BA4B-00A0C93EC93B,
-// die ersten drei Felder kleinendig. Dieselben sechzehn Oktette stehen in
-// `kernel/part.fi`; sie muessen es, denn die eine Seite schreibt und die
-// andere liest.
 fn guid_esp(at: u64) {
     p8(at + 0, 0x28)
     p8(at + 1, 0x73)
@@ -436,7 +328,6 @@ fn guid_esp(at: u64) {
     p8(at + 15, 0x3B)
 }
 
-// 4F53554D-4F46-5301-8E75-6D6F72694F53 -- "OSUM" "OF" 01, unsere eigene.
 fn guid_ofs(at: u64) {
     p8(at + 0, 0x4D)
     p8(at + 1, 0x55)
@@ -456,123 +347,99 @@ fn guid_ofs(at: u64) {
     p8(at + 15, 0x53)
 }
 
-// Eine Kennung, die diese eine Partition von jeder anderen unterscheidet.
-// Ein Zufallsgenerator waere hier ein zweiter Weg, an dem etwas
-// schiefgehen kann; genommen wird `/dev/random` des Systems, und wenn es
-// nichts hergibt, eine Kennung aus Zaehlern. Sie muss EINZIG sein, nicht
-// unvorhersagbar.
 fn guid_own(at: u64, nr: u64) {
     guid_ofs(at)
-    p8(at + 6, 0x40 | (nr & 15)) // Fassung 4 in den oberen Bits
+    p8(at + 6, 0x40 | (nr & 15))
     p32(at + 12, 0x53464F00 | nr)
 }
 
-// ------------------------------------------------- GPT schreiben
-
-// Die Eintragstafel steht NICHT im Speicher. Sie ist 16 KiB gross, und
-// dieses Programm haelt sie sektorweise: Sektor 0 traegt die beiden
-// Eintraege, die 31 anderen sind Null. Die Pruefsumme laeuft in
-// derselben Reihenfolge darueber, in der sie auf der Platte liegt --
-// fortgeschrieben statt gesammelt, genau wie `part.fi` es beim Lesen
-// tut.
-fn tafel_sektor(nr: u64, esp_start: u64, esp_ende: u64, ofs_start: u64,
-    ofs_ende: u64) {
-    let p: u64 = (&SEK2[0 as usize]) as u64
-    nullen(p, BS)
+fn table_sector(nr: u64, esp_start: u64, esp_end: u64, ofs_start: u64,
+    ofs_end: u64) {
+    let p: u64 = (&SECTOR_BUF2[0 as usize]) as u64
+    zero_fill(p, BS)
     if nr != 0 {
         return
     }
-    // Eintrag 0: die EFI-Partition.
+
     guid_esp(p + 0)
     guid_own(p + 16, 1)
     p64(p + 32, esp_start)
-    p64(p + 40, esp_ende)
+    p64(p + 40, esp_end)
     p64(p + 48, 0)
-    // Der Name steht in UTF-16, kleinendig. "EFI"
+
     p16(p + 56, 69)
     p16(p + 58, 70)
     p16(p + 60, 73)
-    // Eintrag 1: die Wurzel.
+
     guid_ofs(p + 128)
     guid_own(p + 144, 2)
     p64(p + 160, ofs_start)
-    p64(p + 168, ofs_ende)
+    p64(p + 168, ofs_end)
     p64(p + 176, 0)
-    // "OSUM"
+
     p16(p + 184, 79)
     p16(p + 186, 83)
     p16(p + 188, 85)
     p16(p + 190, 77)
 }
 
-fn tafel_crc(esp_start: u64, esp_ende: u64, ofs_start: u64,
-    ofs_ende: u64) -> u64 {
+fn table_crc(esp_start: u64, esp_end: u64, ofs_start: u64,
+    ofs_end: u64) -> u64 {
     var c: u64 = crc_start()
     var i: u64 = 0
     while i < g_entsect {
-        tafel_sektor(i, esp_start, esp_ende, ofs_start, ofs_ende)
-        c = crc_feed(c, (&SEK2[0 as usize]) as u64, BS)
+        table_sector(i, esp_start, esp_end, ofs_start, ofs_end)
+        c = crc_feed(c, (&SECTOR_BUF2[0 as usize]) as u64, BS)
         i = i + 1
     }
     return crc_end(c)
 }
 
-fn header(at: u64, meine: u64, andere: u64, tafel: u64, ersteb: u64,
-    letzteb: u64, tcrc: u64) {
-    nullen(at, BS)
-    p8(at + 0, 69)  // 'E'
-    p8(at + 1, 70)  // 'F'
-    p8(at + 2, 73)  // 'I'
-    p8(at + 3, 32)  // ' '
-    p8(at + 4, 80)  // 'P'
-    p8(at + 5, 65)  // 'A'
-    p8(at + 6, 82)  // 'R'
-    p8(at + 7, 84)  // 'T'
+fn header(at: u64, mine: u64, other: u64, table: u64, first_block: u64,
+    last_block: u64, tcrc: u64) {
+    zero_fill(at, BS)
+    p8(at + 0, 69)
+    p8(at + 1, 70)
+    p8(at + 2, 73)
+    p8(at + 3, 32)
+    p8(at + 4, 80)
+    p8(at + 5, 65)
+    p8(at + 6, 82)
+    p8(at + 7, 84)
     p32(at + 8, 0x00010000)
     p32(at + 12, 92)
-    p32(at + 16, 0) // die eigene Summe, erst 0
+    p32(at + 16, 0)
     p32(at + 20, 0)
-    p64(at + 24, meine)
-    p64(at + 32, andere)
-    p64(at + 40, ersteb)
-    p64(at + 48, letzteb)
+    p64(at + 24, mine)
+    p64(at + 32, other)
+    p64(at + 40, first_block)
+    p64(at + 48, last_block)
     guid_own(at + 56, 3)
-    p64(at + 72, tafel)
+    p64(at + 72, table)
     p32(at + 80, g_entries)
     p32(at + 84, ENTSIZE)
     p32(at + 88, tcrc)
-    // Und JETZT die Summe ueber die 92 Oktette, mit dem Feld auf Null.
-    // Die Reihenfolge ist nicht Geschmack: rechnet man sie vorher,
-    // rechnet man ueber ein Feld, das man gleich noch aendert.
+
     p32(at + 16, crc_of(at, 92))
 }
 
-// ------------------------------------------------------ FAT32 anlegen
-
-// Die Groesse der Zuordnungstafel, nach Microsofts eigener Formel
-// (fatgen103.doc, Abschnitt "Determination of FAT type"). Sie steht hier
-// als Rechnung und nicht als Zahl, weil sie von der Partitionsgroesse
-// abhaengt -- und weil `fat.fi` beim Einhaengen aus GENAU diesen Feldern
-// wieder ausrechnet, wo die Daten anfangen. Eine Zahl, die um eins
-// danebenliegt, faellt dort sofort auf.
-fn fat_size(gesamt: u64, reserviert: u64, spc: u64, nfat: u64) -> u64 {
-    let t1: u64 = gesamt - reserviert
+fn fat_size(total_size: u64, reserved: u64, spc: u64, nfat: u64) -> u64 {
+    let t1: u64 = total_size - reserved
     let t2: u64 = (256 * spc + nfat) / 2
     return (t1 + t2 - 1) / t2
 }
 
-fn fat32_create(fd: u64, start: u64, gesamt: u64) -> bool {
+fn fat32_create(fd: u64, start: u64, total_size: u64) -> bool {
     let spc: u64 = 1
-    let reserviert: u64 = 32
+    let reserved: u64 = 32
     let nfat: u64 = 2
-    let fatsz: u64 = fat_size(gesamt, reserviert, spc, nfat)
-    let p: u64 = (&SEK[0 as usize]) as u64
-    nullen(p, BS)
+    let fatsz: u64 = fat_size(total_size, reserved, spc, nfat)
+    let p: u64 = (&SECTOR_BUF[0 as usize]) as u64
+    zero_fill(p, BS)
     p8(p + 0, 0xEB)
     p8(p + 1, 0x58)
     p8(p + 2, 0x90)
-    // "MSWIN4.1" -- die Zeichenkette, die jede Beschreibung empfiehlt,
-    // weil manche Firmware auf sie sieht.
+
     p8(p + 3, 77)
     p8(p + 4, 83)
     p8(p + 5, 87)
@@ -583,27 +450,26 @@ fn fat32_create(fd: u64, start: u64, gesamt: u64) -> bool {
     p8(p + 10, 49)
     p16(p + 11, BS)
     p8(p + 13, spc)
-    p16(p + 14, reserviert)
+    p16(p + 14, reserved)
     p8(p + 16, nfat)
-    p16(p + 17, 0) // FAT32: keine feste Wurzeltafel
+    p16(p + 17, 0)
     p16(p + 19, 0)
     p8(p + 21, 0xF8)
-    p16(p + 22, 0) // FAT32: fatsz16 MUSS null sein
+    p16(p + 22, 0)
     p16(p + 24, 32)
     p16(p + 26, 8)
     p32(p + 28, start)
-    p32(p + 32, gesamt)
+    p32(p + 32, total_size)
     p32(p + 36, fatsz)
     p16(p + 40, 0)
     p16(p + 42, 0)
-    p32(p + 44, 2) // die Wurzel liegt im Verband 2
-    p16(p + 48, 1) // FSInfo im Sektor 1
-    p16(p + 50, 6) // Sicherung des Startsektors im Sektor 6
+    p32(p + 44, 2)
+    p16(p + 48, 1)
+    p16(p + 50, 6)
     p8(p + 64, 0x80)
     p8(p + 66, 0x29)
     p32(p + 67, 0x4F53554D)
-    // Der Datentraegername, elf Zeichen mit Leerzeichen aufgefuellt:
-    // "OSUM EFI   "
+
     p8(p + 71, 79)
     p8(p + 72, 83)
     p8(p + 73, 85)
@@ -615,7 +481,7 @@ fn fat32_create(fd: u64, start: u64, gesamt: u64) -> bool {
     p8(p + 79, 32)
     p8(p + 80, 32)
     p8(p + 81, 32)
-    // "FAT32   "
+
     p8(p + 82, 70)
     p8(p + 83, 65)
     p8(p + 84, 84)
@@ -626,63 +492,51 @@ fn fat32_create(fd: u64, start: u64, gesamt: u64) -> bool {
     p8(p + 89, 32)
     p8(p + 510, 0x55)
     p8(p + 511, 0xAA)
-    if !schreibe(fd, start, p, BS) {
+    if !write_at(fd, start, p, BS) {
         return false
     }
-    if !schreibe(fd, start + 6, p, BS) {
+    if !write_at(fd, start + 6, p, BS) {
         return false
     }
-    // Die FSInfo-Seite. `fat.fi` liest daraus die Zahl der freien
-    // Verbaende beim Einhaengen; steht dort Unsinn, rechnet es selbst
-    // nach -- aber dann liest es die ganze Tafel, und das ist der
-    // langsame Weg, den Runde K14 ausdruecklich abgeschafft hat.
-    let daten: u64 = reserviert + nfat * fatsz
-    let verbaende: u64 = (gesamt - daten) / spc
-    nullen(p, BS)
+
+    let data: u64 = reserved + nfat * fatsz
+    let volumes: u64 = (total_size - data) / spc
+    zero_fill(p, BS)
     p32(p + 0, 0x41615252)
     p32(p + 484, 0x61417272)
-    p32(p + 488, verbaende - 1) // der Wurzelverband ist schon weg
+    p32(p + 488, volumes - 1)
     p32(p + 492, 3)
     p8(p + 510, 0x55)
     p8(p + 511, 0xAA)
-    if !schreibe(fd, start + 1, p, BS) {
+    if !write_at(fd, start + 1, p, BS) {
         return false
     }
-    if !schreibe(fd, start + 7, p, BS) {
+    if !write_at(fd, start + 7, p, BS) {
         return false
     }
-    // Die Zuordnungstafeln. Der erste Sektor traegt die drei
-    // Sondereintraege, alle anderen sind Null -- und sie MUESSEN Null
-    // sein: was auf der Platte stand, waeren sonst Verbandsnummern.
+
     var f: u64 = 0
     while f < nfat {
-        let fatlba: u64 = start + reserviert + f * fatsz
-        nullen(p, BS)
+        let fatlba: u64 = start + reserved + f * fatsz
+        zero_fill(p, BS)
         p32(p + 0, 0x0FFFFFF8)
         p32(p + 4, 0x0FFFFFFF)
-        p32(p + 8, 0x0FFFFFFF) // Verband 2: die Wurzel, ein Verband lang
-        if !schreibe(fd, fatlba, p, BS) {
+        p32(p + 8, 0x0FFFFFFF)
+        if !write_at(fd, fatlba, p, BS) {
             return false
         }
-        nullen(p, BS)
+        zero_fill(p, BS)
         var k: u64 = 1
         while k < fatsz {
-            if !schreibe(fd, fatlba + k, p, BS) {
+            if !write_at(fd, fatlba + k, p, BS) {
                 return false
             }
             k = k + 1
         }
         f = f + 1
     }
-    // Der Wurzelverband. Er ist leer bis auf EINEN Eintrag: den
-    // Datentraegernamen. Der steht bei FAT32 nicht nur im Startsektor,
-    // sondern noch einmal als Verzeichniseintrag mit dem Merkmal
-    // ATTR_VOLUME_ID (0x08) -- so schreibt es `mkfs.vfat`, und `fsck.fat`
-    // beanstandet es, wenn er fehlt ("Label in boot sector [...] but
-    // there is no volume label in root directory"). Ein Dateisystem, an
-    // dem das fremde Pruefwerkzeug etwas auszusetzen hat, ist nicht
-    // fertig.
-    nullen(p, BS)
+
+    zero_fill(p, BS)
     p8(p + 0, 79)
     p8(p + 1, 83)
     p8(p + 2, 85)
@@ -695,13 +549,13 @@ fn fat32_create(fd: u64, start: u64, gesamt: u64) -> bool {
     p8(p + 9, 32)
     p8(p + 10, 32)
     p8(p + 11, 0x08)
-    if !schreibe(fd, start + daten, p, BS) {
+    if !write_at(fd, start + data, p, BS) {
         return false
     }
-    nullen(p, BS)
+    zero_fill(p, BS)
     var c: u64 = 1
     while c < spc {
-        if !schreibe(fd, start + daten + c, p, BS) {
+        if !write_at(fd, start + data + c, p, BS) {
             return false
         }
         c = c + 1
@@ -709,12 +563,6 @@ fn fat32_create(fd: u64, start: u64, gesamt: u64) -> bool {
     return true
 }
 
-// --------------------------------------------- das Dateisystem umziehen
-
-// Die Felder des OFS-Superblocks. Dieselben Zahlen wie in
-// `kernel/fs.fi` und in `tools/osum/mkfs.py`; das ist die DRITTE
-// Umsetzung derselben Beschreibung, und genau deshalb faellt es auf,
-// wenn eine der drei sich irrt.
 const SB_MAGIC: u64 = 0
 const SB_BLOCKS: u64 = 16
 const SB_INODES: u64 = 24
@@ -722,89 +570,78 @@ const SB_BITMAP: u64 = 32
 const SB_ITABLE: u64 = 40
 const SB_DATA: u64 = 48
 const SB_BITBLOCKS: u64 = 72
-const MAGIC_LO: u64 = 0x2D4F4653 // "-OFS"
-const MAGIC_HI: u64 = 0x4F53554D // "OSUM"
+const MAGIC_LO: u64 = 0x2D4F4653
+const MAGIC_HI: u64 = 0x4F53554D
 
-fn ist_ofs(at: u64) -> bool {
+fn is_ofs(at: u64) -> bool {
     return g32(at + SB_MAGIC) == MAGIC_LO && g32(at + SB_MAGIC + 4) == MAGIC_HI
 }
 
-// Das Wachsen. Es ist genau zwei Dinge, und beide sind umkehrbar, wenn
-// man den alten Superblock noch hat:
-//
-//   1. die neue Blockzahl in den Superblock,
-//   2. die Bits von der alten bis zur neuen Zahl freimachen.
-//
-// Es geht NUR, wenn die Karte schon gross genug ist. Ist sie es nicht,
-// muesste die Inodetabelle nach hinten wandern, und jede Inodenummer im
-// ganzen Baum zeigte danach auf einen anderen Block. Dann sagt dieses
-// Programm nein, statt ein Dateisystem zu bauen, das sich selbst nicht
-// mehr findet.
 static mut gr_fd: u64 = 0
 static mut gr_start: u64 = 0
 static mut gr_pos: u64 = 0
 static mut gr_from: u64 = 0
 static mut gr_to: u64 = 0
 
-fn grow_begin(fd: u64, start: u64, neu: u64) -> u64 {
-    let p: u64 = (&SEK[0 as usize]) as u64
-    if !lese(fd, start, p, BS) {
+fn grow_begin(fd: u64, start: u64, new_size: u64) -> u64 {
+    let p: u64 = (&SECTOR_BUF[0 as usize]) as u64
+    if !read_at(fd, start, p, BS) {
         return 0
     }
-    if !ist_ofs(p) {
+    if !is_ofs(p) {
         return 0
     }
-    let alt: u64 = g64(p + SB_BLOCKS)
-    var karten: u64 = g64(p + SB_BITBLOCKS)
-    if karten == 0 {
-        karten = 1
+    let old_blocks: u64 = g64(p + SB_BLOCKS)
+    var map_blocks: u64 = g64(p + SB_BITBLOCKS)
+    if map_blocks == 0 {
+        map_blocks = 1
     }
-    let deckt: u64 = karten * BS * 8
-    var ziel: u64 = neu
-    if ziel > deckt {
-        ziel = deckt
+    let covers: u64 = map_blocks * BS * 8
+    var dest_buf: u64 = new_size
+    if dest_buf > covers {
+        dest_buf = covers
     }
     gr_fd = fd
     gr_start = start
-    gr_from = alt
-    gr_pos = alt
-    gr_to = alt
-    if ziel <= alt {
-        return alt
+    gr_from = old_blocks
+    gr_pos = old_blocks
+    gr_to = old_blocks
+    if dest_buf <= old_blocks {
+        return old_blocks
     }
-    p64(p + SB_BLOCKS, ziel)
-    if !schreibe(fd, start, p, BS) {
+    p64(p + SB_BLOCKS, dest_buf)
+    if !write_at(fd, start, p, BS) {
         return 0
     }
-    gr_to = ziel
-    return ziel
+    gr_to = dest_buf
+    return dest_buf
 }
 
 fn grow_step(max_maps: u64) -> u64 {
-    let p: u64 = (&SEK[0 as usize]) as u64
+    let p: u64 = (&SECTOR_BUF[0 as usize]) as u64
     var maps: u64 = 0
     while gr_pos < gr_to && maps < max_maps {
         let kb: u64 = 1 + gr_pos / (BS * 8)
-        if !lese(gr_fd, gr_start + kb, p, BS) {
+        if !read_at(gr_fd, gr_start + kb, p, BS) {
             return GROW_ERROR
         }
-        var ende: u64 = kb * BS * 8
-        if ende > gr_to {
-            ende = gr_to
+        var end_pos: u64 = kb * BS * 8
+        if end_pos > gr_to {
+            end_pos = gr_to
         }
-        while gr_pos < ende {
+        while gr_pos < end_pos {
             let bit: u64 = gr_pos % (BS * 8)
             let at: u64 = p + bit / 8
             p8(at, g8(at) & (255 ^ (1 << (bit % 8))))
             gr_pos = gr_pos + 1
         }
-        if !schreibe(gr_fd, gr_start + kb, p, BS) {
+        if !write_at(gr_fd, gr_start + kb, p, BS) {
             return GROW_ERROR
         }
         maps = maps + 1
     }
     if gr_to > gr_from {
-        st_promille = ((gr_pos - gr_from) * 1000) / (gr_to - gr_from)
+        st_permille = ((gr_pos - gr_from) * 1000) / (gr_to - gr_from)
     }
     if gr_pos >= gr_to {
         return GROW_DONE
@@ -816,9 +653,9 @@ fn grow_position() -> u64 {
     return gr_pos
 }
 
-fn wachsen(fd: u64, start: u64, neu: u64) -> u64 {
-    let ziel: u64 = grow_begin(fd, start, neu)
-    if ziel == 0 {
+fn grow(fd: u64, start: u64, new_size: u64) -> u64 {
+    let dest_buf: u64 = grow_begin(fd, start, new_size)
+    if dest_buf == 0 {
         return 0
     }
     while true {
@@ -830,100 +667,89 @@ fn wachsen(fd: u64, start: u64, neu: u64) -> u64 {
             break
         }
     }
-    return ziel
+    return dest_buf
 }
 
-// ================================================== KERNEL SOURCE (r1223)
-//
-// The installer copies the kernel image onto the target's EFI partition.
-// The standard image carries no kernel copy in its root any more (9.4 MB of
-// RAM and load time): the stick holds osum.mb in the root of its own EFI
-// partition. `kern_quelle()` returns the path to copy from: /boot/osum.mb
-// when the root has it (images built with BOOT_KERNEL_COPY=1, QEMU -kernel
-// boots), else the first FAT partition among the usual boot disks that has
-// /osum.mb, mounted at /bootsrc. When nothing is found the old path is
-// returned, so the copy fails with the usual message.
-static mut p_kq_boot: [u8; 16] = "/boot/osum.mb\0\0\0"
-static mut p_kq_src: [u8; 20] = "/bootsrc/osum.mb\0\0\0\0"
-static mut p_kq_mnt: [u8; 10] = "/bootsrc\0\0"
-static mut p_kq_vfat: [u8; 6] = "vfat\0\0"
-static mut p_kq_d0: [u8; 10] = "/dev/hda1\0"
-static mut p_kq_d1: [u8; 10] = "/dev/sda1\0"
-static mut p_kq_d2: [u8; 10] = "/dev/hdb1\0"
-static mut p_kq_d3: [u8; 10] = "/dev/sdb1\0"
-static mut p_kq_d4: [u8; 12] = "/dev/nvme01\0"
+static mut p_ksrc_boot: [u8; 16] = "/boot/osum.mb\0\0\0"
+static mut p_ksrc_src: [u8; 20] = "/bootsrc/osum.mb\0\0\0\0"
+static mut p_ksrc_mnt: [u8; 10] = "/bootsrc\0\0"
+static mut p_ksrc_vfat: [u8; 6] = "vfat\0\0"
+static mut p_ksrc_d0: [u8; 10] = "/dev/hda1\0"
+static mut p_ksrc_d1: [u8; 10] = "/dev/sda1\0"
+static mut p_ksrc_d2: [u8; 10] = "/dev/hdb1\0"
+static mut p_ksrc_d3: [u8; 10] = "/dev/sdb1\0"
+static mut p_ksrc_d4: [u8; 12] = "/dev/nvme01\0"
 
-fn kq_try(dev: u64) -> bool {
+fn ksrc_try(dev: u64) -> bool {
     let m: u64 = ulib.sys4(ulib.SYS_VMOUNT, dev,
-        (&p_kq_mnt[0 as usize]) as u64, (&p_kq_vfat[0 as usize]) as u64, ulib.MNT_RDONLY)
+        (&p_ksrc_mnt[0 as usize]) as u64, (&p_ksrc_vfat[0 as usize]) as u64, ulib.MNT_RDONLY)
     if ulib.bad(m) {
         return false
     }
-    let b: u64 = ulib.sys(ulib.SYS_OPEN, (&p_kq_src[0 as usize]) as u64, 0, 0)
+    let b: u64 = ulib.sys(ulib.SYS_OPEN, (&p_ksrc_src[0 as usize]) as u64, 0, 0)
     if !ulib.bad(b) {
         ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
         return true
     }
-    ulib.sys(ulib.SYS_UMOUNT2, (&p_kq_mnt[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_UMOUNT2, (&p_ksrc_mnt[0 as usize]) as u64, 0, 0)
     return false
 }
 
 fn kernel_source() -> u64 {
-    let a: u64 = ulib.sys(ulib.SYS_OPEN, (&p_kq_boot[0 as usize]) as u64, 0, 0)
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, (&p_ksrc_boot[0 as usize]) as u64, 0, 0)
     if !ulib.bad(a) {
         ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
-        return (&p_kq_boot[0 as usize]) as u64
+        return (&p_ksrc_boot[0 as usize]) as u64
     }
-    ulib.sys(ulib.SYS_MKDIR, (&p_kq_mnt[0 as usize]) as u64, 0, 0)
-    if kq_try((&p_kq_d0[0 as usize]) as u64) || kq_try((&p_kq_d1[0 as usize]) as u64)
-        || kq_try((&p_kq_d2[0 as usize]) as u64) || kq_try((&p_kq_d3[0 as usize]) as u64)
-        || kq_try((&p_kq_d4[0 as usize]) as u64) {
-        return (&p_kq_src[0 as usize]) as u64
+    ulib.sys(ulib.SYS_MKDIR, (&p_ksrc_mnt[0 as usize]) as u64, 0, 0)
+    if ksrc_try((&p_ksrc_d0[0 as usize]) as u64) || ksrc_try((&p_ksrc_d1[0 as usize]) as u64)
+        || ksrc_try((&p_ksrc_d2[0 as usize]) as u64) || ksrc_try((&p_ksrc_d3[0 as usize]) as u64)
+        || ksrc_try((&p_ksrc_d4[0 as usize]) as u64) {
+        return (&p_ksrc_src[0 as usize]) as u64
     }
-    return (&p_kq_boot[0 as usize]) as u64
+    return (&p_ksrc_boot[0 as usize]) as u64
 }
 
-// Copy, then compare the target with the source; again if they differ.
-fn kopiere(von: u64, move_to: u64) -> bool {
-    var versuch: u64 = 0
-    while versuch < 3 {
-        if !kopiere_einmal(von, move_to) {
+fn copy_file(src_path: u64, move_to: u64) -> bool {
+    var attempt: u64 = 0
+    while attempt < 3 {
+        if !copy_file_once(src_path, move_to) {
             return false
         }
-        if dateien_gleich(von, move_to) {
+        if files_equal(src_path, move_to) {
             return true
         }
-        st_nachgeschrieben = st_nachgeschrieben + 1
-        versuch = versuch + 1
+        st_rewritten = st_rewritten + 1
+        attempt = attempt + 1
     }
     return false
 }
 
-fn dateien_gleich(von: u64, nach: u64) -> bool {
-    let a: u64 = ulib.sys(ulib.SYS_OPEN, von, 0, 0)
+fn files_equal(src_path: u64, dst_path: u64) -> bool {
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, src_path, 0, 0)
     if ulib.bad(a) {
         return false
     }
-    let b: u64 = ulib.sys(ulib.SYS_OPEN, nach, 0, 0)
+    let b: u64 = ulib.sys(ulib.SYS_OPEN, dst_path, 0, 0)
     if ulib.bad(b) {
         ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
         return false
     }
-    let pa: u64 = (&KOP[0 as usize]) as u64
-    let pb: u64 = (&KOP2[0 as usize]) as u64
-    var gut: bool = true
-    var weiter: bool = true
-    while weiter {
+    let pa: u64 = (&COPY_BUF[0 as usize]) as u64
+    let pb: u64 = (&COPY_BUF2[0 as usize]) as u64
+    var succeeded: bool = true
+    var keep_going: bool = true
+    while keep_going {
         let n: u64 = ulib.sys(ulib.SYS_READ, a, pa, 8192)
         if ulib.bad(n) {
-            gut = false
-            weiter = false
+            succeeded = false
+            keep_going = false
         } else if n == 0 {
             let m0: u64 = ulib.sys(ulib.SYS_READ, b, pb, 1)
             if ulib.bad(m0) || m0 != 0 {
-                gut = false
+                succeeded = false
             }
-            weiter = false
+            keep_going = false
         } else {
             var m: u64 = 0
             while m < n {
@@ -934,19 +760,19 @@ fn dateien_gleich(von: u64, nach: u64) -> bool {
                     m = m + r
                 }
             }
-            if m != n || !gleich(pa, pb, n) {
-                gut = false
-                weiter = false
+            if m != n || !bytes_equal(pa, pb, n) {
+                succeeded = false
+                keep_going = false
             }
         }
     }
     ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
     ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
-    return gut
+    return succeeded
 }
 
-fn kopiere_einmal(von: u64, move_to: u64) -> bool {
-    let a: u64 = ulib.sys(ulib.SYS_OPEN, von, 0, 0)
+fn copy_file_once(src_path: u64, move_to: u64) -> bool {
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, src_path, 0, 0)
     if ulib.bad(a) {
         return false
     }
@@ -956,22 +782,21 @@ fn kopiere_einmal(von: u64, move_to: u64) -> bool {
         ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
         return false
     }
-    let puffer: u64 = (&KOP[0 as usize]) as u64
-    var gut: bool = true
-    var weiter: bool = true
-    while weiter {
-        let n: u64 = ulib.sys(ulib.SYS_READ, a, puffer, 8192)
+    let buffer: u64 = (&COPY_BUF[0 as usize]) as u64
+    var succeeded: bool = true
+    var keep_going: bool = true
+    while keep_going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, a, buffer, 8192)
         if ulib.bad(n) || n == 0 {
-            weiter = false
+            keep_going = false
         } else {
-            // A write may be short (the FAT32 file layer takes at most one
-            // page per call): loop until the whole chunk is written.
+
             var off: u64 = 0
             while off < n {
-                let w: u64 = ulib.sys(ulib.SYS_WRITE, b, puffer + off, n - off)
+                let w: u64 = ulib.sys(ulib.SYS_WRITE, b, buffer + off, n - off)
                 if ulib.bad(w) || w == 0 {
-                    gut = false
-                    weiter = false
+                    succeeded = false
+                    keep_going = false
                     off = n
                 } else {
                     off = off + w
@@ -981,59 +806,34 @@ fn kopiere_einmal(von: u64, move_to: u64) -> bool {
     }
     ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
     ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
-    return gut
+    return succeeded
 }
-
-// ================================================== DER BAUPLAN
-//
-// Wo die beiden Partitionen zu liegen kommen. Es ist dieselbe Rechnung
-// wie in der Vorlage, nur an EINER Stelle statt in zwei Programmen --
-// die Oberflaeche muss sie zeigen koennen, BEVOR etwas geschrieben
-// wird ("das wird ueberschrieben"), und die Kommandozeile druckt sie
-// im Probelauf.
-//
-// Die letzten 33 Sektoren gehoeren der Sicherung von GPT: der
-// Sicherungskopf liegt im ALLERLETZTEN, die Sicherungstafel in den 32
-// davor. Wer sie ueberschreibt, hat eine Platte mit einem Kopf, dem
-// niemand mehr glaubt.
 
 fn plan_esp_start() -> u64 {
-    return AUSRICHT
+    return ALIGNMENT
 }
 
-fn plan_esp_ende(espsek: u64) -> u64 {
-    return AUSRICHT + espsek - 1
+fn plan_esp_end(esp_sector: u64) -> u64 {
+    return ALIGNMENT + esp_sector - 1
 }
 
-fn plan_ofs_start(espsek: u64) -> u64 {
-    return plan_esp_ende(espsek) + 1
+fn plan_ofs_start(esp_sector: u64) -> u64 {
+    return plan_esp_end(esp_sector) + 1
 }
 
-fn plan_ofs_ende(sekt: u64) -> u64 {
-    return sekt - 34
+fn plan_ofs_end(sect_count: u64) -> u64 {
+    return sect_count - 34
 }
 
-// Passt das ueberhaupt auf die Platte? 4096 Sektoren (2 MiB) ist das
-// Mindeste, was hinter der EFI-Partition noch Sinn ergibt -- darunter
-// waere die Wurzel kleiner als der Kern, der daraufsoll.
-fn plan_passt(sekt: u64, espsek: u64) -> bool {
-    if sekt < AUSRICHT + espsek + 4096 {
-        st_fehler = F_KLEIN
+fn plan_fits(sect_count: u64, esp_sector: u64) -> bool {
+    if sect_count < ALIGNMENT + esp_sector + 4096 {
+        st_error = F_SMALL
         return false
     }
     return true
 }
 
-// ================================================== GPT SCHREIBEN
-//
-// Schutz-MBR, beide Eintragstafeln, beide Koepfe. Herausgezogen aus
-// `u_start` der Vorlage, Wort fuer Wort -- was sich geaendert hat, ist
-// nur, dass der Grund eines Fehlschlags in `st_fehler` landet statt auf
-// der seriellen Leitung.
-// Read /boot/limine-hdd.bin into BIOSBIN. True when it is a plausible boot
-// sector plus stage 2; false (and bios_n = 0) otherwise -- then the disk is
-// written UEFI-only, exactly as before r309.
-fn bios_laden() -> bool {
+fn bios_load() -> bool {
     bios_n = 0
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_bios_hdd[0 as usize]) as u64, 0, 0)
     if ulib.bad(fd) {
@@ -1041,18 +841,17 @@ fn bios_laden() -> bool {
     }
     let buf: u64 = (&BIOSBIN[0 as usize]) as u64
     var n: u64 = 0
-    var weiter: bool = true
-    while weiter && n < BIOSMAX {
+    var keep_going: bool = true
+    while keep_going && n < BIOSMAX {
         let r: u64 = ulib.sys(ulib.SYS_READ, fd, buf + n, BIOSMAX - n)
         if ulib.bad(r) || r == 0 {
-            weiter = false
+            keep_going = false
         } else {
             n = n + r
         }
     }
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    // a boot sector (0x55AA) plus at least a few stage-2 sectors, and it must
-    // have fitted into the buffer with room to spare
+
     if n < 2048 || n >= BIOSMAX {
         return false
     }
@@ -1063,31 +862,23 @@ fn bios_laden() -> bool {
     return true
 }
 
-fn bios_da() -> bool {
+fn bios_present() -> bool {
     return bios_n != 0
 }
 
-// ================================================== GPT SCHREIBEN
-//
-// Protective MBR, both entry arrays, both headers -- and, when
-// `bios_laden()` found limine-bios-hdd.bin, Limine's BIOS stages (see the
-// comment at BIOSBIN). Taken from `u_start` of the template word for word;
-// what changed is that the reason of a failure lands in `st_fehler` instead of
-// the serial line.
-fn gpt_schreiben(zfd: u64, sekt: u64, espsek: u64) -> bool {
-    st_schritt = S_GPT
-    let erste_b: u64 = 2 + ENTSECT
-    let letzte_b: u64 = plan_ofs_ende(sekt)
+fn gpt_write(dst_fd: u64, sect_count: u64, esp_sector: u64) -> bool {
+    st_step = S_GPT
+    let first_block: u64 = 2 + ENTSECT
+    let last_block: u64 = plan_ofs_end(sect_count)
     let esp_start: u64 = plan_esp_start()
-    let esp_ende: u64 = plan_esp_ende(espsek)
-    let ofs_start: u64 = plan_ofs_start(espsek)
-    let ofs_ende: u64 = letzte_b
+    let esp_end: u64 = plan_esp_end(esp_sector)
+    let ofs_start: u64 = plan_ofs_start(esp_sector)
+    let ofs_end: u64 = last_block
 
-    // ---- the BIOS stages: where do the two halves of stage 2 go?
     var s2_size: u64 = 0
     var size_a: u64 = 0
     var size_b: u64 = 0
-    var loc_a: u64 = 0 // sector numbers
+    var loc_a: u64 = 0
     var loc_b: u64 = 0
     g_entries = ENTRIES
     g_entsect = ENTSECT
@@ -1100,8 +891,8 @@ fn gpt_schreiben(zfd: u64, sekt: u64, espsek: u64) -> bool {
         }
         size_b = (sects / 2) * 512
         loc_a = 2 + ENTSECT - size_a / 512
-        loc_b = sekt - 33 + ENTSECT - size_b / 512
-        // the shorter entry array: only the sectors in front of half A
+        loc_b = sect_count - 33 + ENTSECT - size_b / 512
+
         g_entsect = loc_a - 2
         g_entries = g_entsect * (BS / ENTSIZE)
         if g_entsect < 2 || size_a / 512 + 2 > ENTSECT {
@@ -1111,46 +902,44 @@ fn gpt_schreiben(zfd: u64, sekt: u64, espsek: u64) -> bool {
         }
     }
 
-    // ---- the entry arrays, twice, and the two headers
-    let tcrc: u64 = tafel_crc(esp_start, esp_ende, ofs_start, ofs_ende)
+    let tcrc: u64 = table_crc(esp_start, esp_end, ofs_start, ofs_end)
     var k: u64 = 0
     while k < g_entsect {
-        tafel_sektor(k, esp_start, esp_ende, ofs_start, ofs_ende)
-        let q: u64 = (&SEK2[0 as usize]) as u64
-        if !schreibe(zfd, 2 + k, q, BS) {
+        table_sector(k, esp_start, esp_end, ofs_start, ofs_end)
+        let q: u64 = (&SECTOR_BUF2[0 as usize]) as u64
+        if !write_at(dst_fd, 2 + k, q, BS) {
             return false
         }
-        if !schreibe(zfd, sekt - 33 + k, q, BS) {
+        if !write_at(dst_fd, sect_count - 33 + k, q, BS) {
             return false
         }
         k = k + 1
     }
-    let p: u64 = (&SEK[0 as usize]) as u64
-    header(p, 1, sekt - 1, 2, erste_b, letzte_b, tcrc)
-    if !schreibe(zfd, 1, p, BS) {
+    let p: u64 = (&SECTOR_BUF[0 as usize]) as u64
+    header(p, 1, sect_count - 1, 2, first_block, last_block, tcrc)
+    if !write_at(dst_fd, 1, p, BS) {
         return false
     }
-    header(p, sekt - 1, 1, sekt - 33, erste_b, letzte_b, tcrc)
-    if !schreibe(zfd, sekt - 1, p, BS) {
+    header(p, sect_count - 1, 1, sect_count - 33, first_block, last_block, tcrc)
+    if !write_at(dst_fd, sect_count - 1, p, BS) {
         return false
     }
 
-    // ---- stage 2 (BIOS), in the tail of both entry arrays
     if bios_n != 0 {
         let b: u64 = (&BIOSBIN[0 as usize]) as u64
         var i: u64 = 0
         while i < size_a / 512 {
-            if !schreibe(zfd, loc_a + i, b + 512 + i * 512, BS) {
+            if !write_at(dst_fd, loc_a + i, b + 512 + i * 512, BS) {
                 return false
             }
             i = i + 1
         }
-        // half B: the rest of stage 2, the last sector zero-padded
+
         let rest_b: u64 = s2_size - size_a
         var j: u64 = 0
         while j * 512 < rest_b {
-            let q: u64 = (&SEK2[0 as usize]) as u64
-            nullen(q, BS)
+            let q: u64 = (&SECTOR_BUF2[0 as usize]) as u64
+            zero_fill(q, BS)
             var m: u64 = rest_b - j * 512
             if m > 512 {
                 m = 512
@@ -1160,15 +949,14 @@ fn gpt_schreiben(zfd: u64, sekt: u64, espsek: u64) -> bool {
                 p8(q + t, g8(b + 512 + size_a + j * 512 + t))
                 t = t + 1
             }
-            if !schreibe(zfd, loc_b + j, q, BS) {
+            if !write_at(dst_fd, loc_b + j, q, BS) {
                 return false
             }
             j = j + 1
         }
     }
 
-    // ---- sector 0: stage 1 (when BIOS) + the protective MBR
-    nullen(p, BS)
+    zero_fill(p, BS)
     if bios_n != 0 {
         let b: u64 = (&BIOSBIN[0 as usize]) as u64
         var c: u64 = 0
@@ -1176,13 +964,12 @@ fn gpt_schreiben(zfd: u64, sekt: u64, espsek: u64) -> bool {
             p8(p + c, g8(b + c))
             c = c + 1
         }
-        // where the two halves of stage 2 lie (little endian, 0x1a4)
+
         p16(p + 0x1a4, size_a)
         p16(p + 0x1a4 + 2, size_b)
         p64(p + 0x1a4 + 4, loc_a * BS)
         p64(p + 0x1a4 + 12, loc_b * BS)
-        // bytes 218..223 (timestamp) and 440..509 (disk id + table) stay zero
-        // like on a fresh disk
+
         var z: u64 = 440
         while z < 510 {
             p8(p + z, 0)
@@ -1199,82 +986,62 @@ fn gpt_schreiben(zfd: u64, sekt: u64, espsek: u64) -> bool {
     p8(p + 446 + 6, 0xFF)
     p8(p + 446 + 7, 0xFF)
     p32(p + 446 + 8, 1)
-    var rest: u64 = sekt - 1
+    var rest: u64 = sect_count - 1
     if rest > 0xFFFFFFFF {
         rest = 0xFFFFFFFF
     }
     p32(p + 446 + 12, rest)
     p8(p + 510, 0x55)
     p8(p + 511, 0xAA)
-    if !schreibe(zfd, 0, p, BS) {
+    if !write_at(dst_fd, 0, p, BS) {
         return false
     }
     return true
 }
 
-// ================================================== DIE WURZEL UMZIEHEN
-//
-// Block fuer Block aus der Quelle (dem Boot-Modul) in die
-// Wurzelpartition. Das Modul IST ein OFS-Dateisystem; es zu kopieren
-// ist kein Umbau, sondern ein Umzug.
-//
-// DAS IST DER LANGE TEIL. Deshalb wird hier -- und nur hier --
-// `st_promille` mitgefuehrt: die Oberflaeche liest es zwischen zwei
-// Bloecken und malt einen Balken daraus.
-fn wurzel_kopieren(zfd: u64, qfd: u64, espsek: u64, qsekt: u64) -> bool {
-    return copy_root_from(zfd, qfd, plan_ofs_start(espsek), qsekt)
+fn copy_root(dst_fd: u64, src_fd: u64, esp_sector: u64, src_sect: u64) -> bool {
+    return copy_root_from(dst_fd, src_fd, plan_ofs_start(esp_sector), src_sect)
 }
 
-// DASSELBE, NUR AN EINEN FREI GEWAEHLTEN ANFANG (Runde DUALBOOT).
-//
-// Der Weg "ganze Platte" weiss, wo die Wurzel anfaengt: gleich hinter
-// der EFI-Partition, die er selbst angelegt hat. Der Weg "daneben"
-// weiss es NICHT -- dort liegt die Wurzel in einer Luecke, die irgendwo
-// auf der Platte sein kann.
-//
-// Deshalb ist der Anfangssektor jetzt ein Argument, und
-// `wurzel_kopieren` ist nur noch der Aufruf mit der alten Rechnung.
-// EINE Kopierschleife, zwei Aufrufer -- dieselbe Entscheidung wie bei
-// der Partitionstafel, und aus demselben Grund.
 static mut cp_zfd: u64 = 0
 static mut cp_qfd: u64 = 0
 static mut cp_start: u64 = 0
 static mut cp_total: u64 = 0
 static mut cp_pos: u64 = 0
 
-fn copy_begin(zfd: u64, qfd: u64, ofs_start: u64, qsekt: u64) {
-    st_schritt = S_KOPIE
-    st_promille = 0
-    cp_zfd = zfd
-    cp_qfd = qfd
+fn copy_begin(dst_fd: u64, src_fd: u64, ofs_start: u64, src_sect: u64) {
+    st_step = S_COPY
+    st_permille = 0
+    cp_zfd = dst_fd
+    cp_qfd = src_fd
     cp_start = ofs_start
-    cp_total = qsekt
+    cp_total = src_sect
     cp_pos = 0
 }
 
 fn copy_step(max_chunks: u64) -> u64 {
-    let puffer: u64 = (&KOP[0 as usize]) as u64
-    let schritt: u64 = 8192 / BS
+    let buffer: u64 = (&COPY_BUF[0 as usize]) as u64
+    let stride: u64 = 8192 / BS
     var chunks: u64 = 0
     while cp_pos < cp_total && chunks < max_chunks {
-        var n: u64 = schritt
+        var n: u64 = stride
         if cp_pos + n > cp_total {
             n = cp_total - cp_pos
         }
-        if !lese(cp_qfd, cp_pos, puffer, n * BS) {
+        if !read_at(cp_qfd, cp_pos, buffer, n * BS) {
             return COPY_ERROR
         }
-        if !schreibe_geprueft(cp_zfd, cp_start + cp_pos, puffer, n * BS) {
+        if !write_checked(cp_zfd, cp_start + cp_pos, buffer, n * BS) {
             return COPY_ERROR
         }
         cp_pos = cp_pos + n
         chunks = chunks + 1
     }
     if cp_total > 0 {
-        st_promille = (cp_pos * 1000) / cp_total
+        st_permille = (cp_pos * 1000) / cp_total
     }
     if cp_pos >= cp_total {
-        st_promille = 1000
+        st_permille = 1000
         return COPY_DONE
     }
     return COPY_MORE
@@ -1284,8 +1051,8 @@ fn copy_position() -> u64 {
     return cp_pos
 }
 
-fn copy_root_from(zfd: u64, qfd: u64, ofs_start: u64, qsekt: u64) -> bool {
-    copy_begin(zfd, qfd, ofs_start, qsekt)
+fn copy_root_from(dst_fd: u64, src_fd: u64, ofs_start: u64, src_sect: u64) -> bool {
+    copy_begin(dst_fd, src_fd, ofs_start, src_sect)
     while true {
         let r: u64 = copy_step(256)
         if r == COPY_ERROR {
@@ -1298,30 +1065,19 @@ fn copy_root_from(zfd: u64, qfd: u64, ofs_start: u64, qsekt: u64) -> bool {
     return true
 }
 
-// ================================================== DIE QUELLE PRUEFEN
-//
-// Ist das, was kopiert werden soll, ueberhaupt ein OFS -- und wieviel
-// Kartenvorrat bringt es mit? Beide Aufrufer brauchen genau diese zwei
-// Zahlen, BEVOR irgendetwas geschrieben wird: ein
-// Installationsprogramm, das erst die Zielplatte loescht und dann
-// merkt, dass es nichts zu kopieren hat, ist kein
-// Installationsprogramm.
-//
-// Rueckgabe: die Zahl der Kartenbloecke der Quelle (mindestens 1), oder
-// 0, wenn es kein OFS ist. `fehler_bei()` sagt dann, woran es lag.
-fn quelle_pruefen(qfd: u64) -> u64 {
-    let p: u64 = (&SEK[0 as usize]) as u64
-    if !lese(qfd, 0, p, BS) {
-        st_fehler = F_LESEN
+fn check_source(src_fd: u64) -> u64 {
+    let p: u64 = (&SECTOR_BUF[0 as usize]) as u64
+    if !read_at(src_fd, 0, p, BS) {
+        st_error = F_READ
         return 0
     }
-    if !ist_ofs(p) {
-        st_fehler = F_KEINOFS
+    if !is_ofs(p) {
+        st_error = F_NO_OFS
         return 0
     }
-    var qkarten: u64 = g64(p + SB_BITBLOCKS)
-    if qkarten == 0 {
-        qkarten = 1
+    var src_map_blocks: u64 = g64(p + SB_BITBLOCKS)
+    if src_map_blocks == 0 {
+        src_map_blocks = 1
     }
-    return qkarten
+    return src_map_blocks
 }

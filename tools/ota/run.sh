@@ -319,7 +319,7 @@ head -c $((ZIEL_MIB * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
 OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --ja;exit" 900 \
     > /dev/null 2>&1
 gleich "die Installation auf die leere Platte" "$(cat "$OUT/inst.rc")" "21"
-hat "$OUT/inst.txt" "install: fertig" "der Installer meldet sich fertig"
+hat "$OUT/inst.txt" "install: done" "der Installer meldet sich fertig"
 
 # Fassung 1 einspielen und bestaetigen -- das ist der Ausgangszustand
 # jedes weiteren Falls.

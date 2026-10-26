@@ -74,7 +74,7 @@ rc=$(lauf inst iso "install /dev/hda --ja;exit" 900)
 gleich "installer exit code" "$rc" "21"
 hat "$OUT/inst.txt" "install: gpt ok" "the GPT is written"
 hat "$OUT/inst.txt" "install: fat32 ok" "the EFI partition carries FAT32"
-hat "$OUT/inst.txt" "install: fertig" "the installer says it is done"
+hat "$OUT/inst.txt" "install: done" "the installer says it is done"
 grep -aE '^install: (kopiert|gewachsen)' "$OUT/inst.txt" | sed 's/^/        /'
 
 echo

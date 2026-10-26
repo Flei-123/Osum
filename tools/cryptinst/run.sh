@@ -16,8 +16,8 @@ bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
 bash tools/install/build.sh "$OUT" > "$OUT/bauen.log" 2>&1 || { echo "build failed"; tail -5 "$OUT/bauen.log"; exit 1; }
 PW=geheim123
 bash tools/install/oneshot.sh inst iso "install /dev/hda --ja --crypt $PW;exit" 900 > /dev/null 2>&1
-grep -aq "install: verschluesselt" "$OUT/inst.txt" && ok "installer reports encryption" || bad "installer reports encryption"
-grep -aq "install: fertig" "$OUT/inst.txt" && ok "installation finished" || bad "installation finished"
+grep -aq "install: encrypted" "$OUT/inst.txt" && ok "installer reports encryption" || bad "installer reports encryption"
+grep -aq "install: done" "$OUT/inst.txt" && ok "installation finished" || bad "installation finished"
 # host view: header magic somewhere in the root partition, no plaintext OFS magic / known strings
 python3 - "$OUT/ziel.img" <<'PY' && ok "host: OSUMCRYPT header present, '/etc/passwd' text absent" || bad "host view of the disk"
 import sys

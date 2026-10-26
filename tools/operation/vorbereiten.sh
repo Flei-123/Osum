@@ -86,7 +86,7 @@ rm -f "$OUT/ziel.img"
 head -c $((96 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
 OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --ja;exit" 900 \
     > /dev/null 2>&1
-echo "   installer rc=$(cat "$OUT/inst.rc" 2>/dev/null) $(grep -ac 'install: fertig' "$OUT/inst.txt")"
+echo "   installer rc=$(cat "$OUT/inst.rc" 2>/dev/null) $(grep -ac 'install: done' "$OUT/inst.txt")"
 
 echo "== 6. ein Startlauf -- kommt die Maschine hoch, steht das Netz"
 OTA_NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0" OUT="$OUT" \

@@ -109,7 +109,7 @@ p = sys.argv[1]
 s = open(p, encoding='latin-1').read()
 a = "    return st_gpt_ok == 1\n"
 assert a in s
-open(p, 'w', encoding='latin-1').write(s.replace(a, "    return st_grund == D_KEIN\n", 1))
+open(p, 'w', encoding='latin-1').write(s.replace(a, "    return st_reason == D_NONE\n", 1))
 PY
 build "$OUT/old" "$OUT/oldbau" && ok "old image built" || { bad "old image"; tail -n 5 "$OUT/oldbau.log"; }
 view "$OUT/oldbau" "$OUT/d0/disk.img" "$OUT/o0.txt"
