@@ -110,7 +110,9 @@ ESP_MIB=${ESP_MIB:-96}
 # 19.10.2026 (benchd, r1223/r1224): 122880 -> 98304 blocks (48 MiB). The whole root.img is loaded as a boot module and stays in RAM
 # (live stick), free blocks included. Without the /boot kernel copy and with the programs built without the heuristic inliner
 # the personal image uses ~32 MiB, so 48 MiB still leaves ~16 MiB free (before: 2.4 MiB free in 60 MiB) and saves 12 MiB of RAM and load.
-FS_BLOCKS=${FS_BLOCKS:-98304}
+FS_BLOCKS_DEFAULT=98304
+[ "${BOOT_KERNEL_COPY:-0}" = 1 ] && FS_BLOCKS_DEFAULT=114688
+FS_BLOCKS=${FS_BLOCKS:-$FS_BLOCKS_DEFAULT}
 [ "${ROOT_SLIM:-0}" = 1 ] && FS_BLOCKS=${FS_BLOCKS_SLIM:-78000}   # see ROOT_SLIM below
 FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
