@@ -1,0 +1,263 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import acpi.acpi
+import arch.arch
+import arch.x86_64.apic
+import diag.cmdopt
+import bus.pci
+import bus.ecam
+import bus.pcie
+import acpi.aml
+import acpi.amlns
+import acpi.amlobj
+
+export { stage, aml_probe }
+
+const DUMP_BYTES: u64 = 8192
+const DWORD_BYTES: u64 = 4
+const HOP_FAR_BUS: u64 = 0xE0
+const BDF_BUS_SHIFT: u64 = 8
+const PROBE_OFFSET: u64 = 0x3C
+const PROBE_BYTE_MASK: u64 = 0xFF
+const PROBE_PATTERN: u64 = 0xA5
+const MCFG_LENGTH_OFFSET: u64 = 4
+const PROBE_AML_BDF: u64 = 0x18
+const PROBE_AML_OFFSET: u64 = 0x100
+const CHAR_DASH: u8 = 45 as u8
+const CHAR_COLON: u8 = 58 as u8
+const CHAR_DOT: u8 = 46 as u8
+
+static mut dump_buf: [u8; 8192] = [0 as u8; 8192]
+
+fn put_bdf(bdf: u64) {
+    pci.hexn(pci.bdf_bus(bdf), 2)
+    serial.put(CHAR_COLON)
+    pci.hexn(pci.bdf_dev(bdf), 2)
+    serial.put(CHAR_DOT)
+    pci.hexn(pci.bdf_fn(bdf), 1)
+}
+
+fn show_buffer(n: u64) {
+    dump_buf[n as usize] = 0 as u8
+    serial.puts((&dump_buf[0]) as u64)
+}
+
+fn show_status(state: u64) {
+    show_buffer(pcie.render_status(state, (&dump_buf[0]) as u64, DUMP_BYTES))
+}
+
+fn show_all(state: u64) {
+    show_buffer(pcie.render(state, (&dump_buf[0]) as u64, DUMP_BYTES))
+}
+
+fn self_check(state: u64) {
+    var w_sig: [u8; 5] = "XMCF\0"
+    var k_missing: [u8; 24] = "ecamself: no XMCF table\0"
+    var k_table: [u8; 22] = "ecamself: table=XMCF \0"
+    var k_length: [u8; 9] = "length=\0\0"
+    var k_entries: [u8; 10] = " entries=\0"
+    var k_entry: [u8; 17] = "ecamself: entry=\0"
+    var k_base: [u8; 7] = " base=\0"
+    var k_seg: [u8; 10] = " segment=\0"
+    var k_bus: [u8; 6] = " bus=\0"
+    var k_usable: [u8; 9] = " usable=\0"
+    let t: u64 = acpi.table(state, (&w_sig[0]) as u64)
+    if t == 0 {
+        serial.puts((&k_missing[0]) as u64)
+        serial.nl()
+        return
+    }
+    let n: u64 = ecam.table_entries(t)
+    serial.puts((&k_table[0]) as u64)
+    serial.puts((&k_length[0]) as u64)
+    serial.dec(kstate.get32(t + MCFG_LENGTH_OFFSET))
+    serial.puts((&k_entries[0]) as u64)
+    serial.dec(n)
+    serial.nl()
+    var i: u64 = 0
+    while i < n {
+        serial.puts((&k_entry[0]) as u64)
+        serial.dec(i)
+        serial.puts((&k_base[0]) as u64)
+        serial.hex(ecam.table_base(t, i))
+        serial.puts((&k_seg[0]) as u64)
+        serial.dec(ecam.table_segment(t, i))
+        serial.puts((&k_bus[0]) as u64)
+        serial.dec(ecam.table_first(t, i))
+        serial.put(CHAR_DASH)
+        serial.dec(ecam.table_last(t, i))
+        serial.puts((&k_usable[0]) as u64)
+        var usable: u64 = 0
+        if ecam.entry_usable(t, i) {
+            usable = 1
+        }
+        serial.dec(usable)
+        serial.nl()
+        i = i + 1
+    }
+}
+
+fn same_legacy_space(bdf: u64) -> bool {
+    var off: u64 = 0
+    while off < pci.LEGACY_CFG_SIZE {
+        if ecam.read32(bdf, off) != pci.cfg_read32(bdf, off) {
+            return false
+        }
+        off = off + DWORD_BYTES
+    }
+    return true
+}
+
+fn compare_all(state: u64) {
+    var k_dev: [u8; 14] = "ecamcmp: dev=\0"
+    var k_same: [u8; 7] = " same=\0"
+    var k_total: [u8; 18] = "ecamcmp: devices=\0"
+    var k_equal: [u8; 8] = " equal=\0"
+    let n: u64 = pci.count(state)
+    var equal: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let bdf: u64 = pci.get(state, i, pci.E_BDF)
+        var same: u64 = 0
+        if same_legacy_space(bdf) {
+            same = 1
+            equal = equal + 1
+        }
+        serial.puts((&k_dev[0]) as u64)
+        put_bdf(bdf)
+        serial.puts((&k_same[0]) as u64)
+        serial.dec(same)
+        serial.nl()
+        i = i + 1
+    }
+    serial.puts((&k_total[0]) as u64)
+    serial.dec(n)
+    serial.puts((&k_equal[0]) as u64)
+    serial.dec(equal)
+    serial.nl()
+}
+
+fn hop_check(state: u64) {
+    var k_hop: [u8; 17] = "ecamcmp: hop ok=\0"
+    var k_ret: [u8; 14] = " retargets=\0\0\0"
+    let first: u64 = pci.get(state, 0, pci.E_BDF)
+    let before: u64 = ecam.read32(first, 0)
+    ecam.read32(HOP_FAR_BUS << BDF_BUS_SHIFT, 0)
+    let after: u64 = ecam.read32(first, 0)
+    var ok: u64 = 0
+    if before == after && before != ecam.ALL_ONES && before == pci.cfg_read32(first, 0) {
+        ok = 1
+    }
+    serial.puts((&k_hop[0]) as u64)
+    serial.dec(ok)
+    serial.puts((&k_ret[0]) as u64)
+    serial.dec(ecam.retargets())
+    serial.nl()
+}
+
+fn write_check(state: u64) {
+    var k_write: [u8; 19] = "ecamcmp: write ok=\0"
+    let bdf: u64 = pci.get(state, 0, pci.E_BDF)
+    let old: u64 = pci.cfg_read32(bdf, PROBE_OFFSET)
+    let probe: u64 = (old & (~PROBE_BYTE_MASK)) | PROBE_PATTERN
+    ecam.write32(bdf, PROBE_OFFSET, probe)
+    let by_port: u64 = pci.cfg_read32(bdf, PROBE_OFFSET)
+    ecam.write32(bdf, PROBE_OFFSET, old)
+    let restored: u64 = pci.cfg_read32(bdf, PROBE_OFFSET)
+    var ok: u64 = 0
+    if (by_port & PROBE_BYTE_MASK) == PROBE_PATTERN && restored == old {
+        ok = 1
+    }
+    serial.puts((&k_write[0]) as u64)
+    serial.dec(ok)
+    serial.nl()
+}
+
+fn window_line(state: u64) {
+    var k_win: [u8; 23] = "ecamcmp: windows used=\0"
+    serial.puts((&k_win[0]) as u64)
+    serial.dec(apic.window_slots(state))
+    serial.nl()
+}
+
+fn stage(state: u64) {
+    var w_off: [u8; 7] = "noecam\0"
+    var w_self: [u8; 9] = "ecamself\0"
+    var w_cmp: [u8; 8] = "ecamcmp\0"
+    var w_caps: [u8; 9] = "ecamcaps\0"
+    var w_hold: [u8; 9] = "ecamhold\0"
+    var k_off: [u8; 31] = "ecam present=0 disabled=noecam\0"
+    if cmdopt.has(state, (&w_off[0]) as u64) {
+        serial.puts((&k_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    ecam.init(state)
+    ecam.bind(apic.window_claim, apic.window_point)
+    show_status(state)
+    if cmdopt.has(state, (&w_self[0]) as u64) {
+        self_check(state)
+    }
+    if ecam.present() && cmdopt.has(state, (&w_cmp[0]) as u64) {
+        compare_all(state)
+        hop_check(state)
+        write_check(state)
+        window_line(state)
+    }
+    if cmdopt.has(state, (&w_caps[0]) as u64) {
+        show_all(state)
+        if ecam.present() {
+            window_line(state)
+        }
+    }
+    if cmdopt.has(state, (&w_hold[0]) as u64) {
+        while true {
+            arch.pause()
+        }
+    }
+}
+
+fn find_node(state: u64, name: u64) -> u64 {
+    let want: u64 = amlns.seg_of(name)
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_name(state, i) == want {
+            return i
+        }
+        i = i + 1
+    }
+    return amlns.NONE
+}
+
+fn aml_probe(state: u64) {
+    var w_word: [u8; 8] = "ecamaml\0"
+    var w_method: [u8; 5] = "AERH\0"
+    var k_none: [u8; 19] = "ecamaml: no method\0"
+    var k_fail: [u8; 21] = "ecamaml: eval failed\0"
+    var k_aml: [u8; 14] = "ecamaml: aml=\0"
+    var k_direct: [u8; 9] = " direct=\0"
+    if !cmdopt.has(state, (&w_word[0]) as u64) {
+        return
+    }
+    let node: u64 = find_node(state, (&w_method[0]) as u64)
+    if node == amlns.NONE {
+        serial.puts((&k_none[0]) as u64)
+        serial.nl()
+        return
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, node, (&r[0]) as u64) {
+        serial.puts((&k_fail[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&k_aml[0]) as u64)
+    serial.hex(amlobj.to_int((&r[0]) as u64))
+    serial.puts((&k_direct[0]) as u64)
+    serial.hex(pci.cfg_read32(PROBE_AML_BDF, PROBE_AML_OFFSET))
+    serial.nl()
+}

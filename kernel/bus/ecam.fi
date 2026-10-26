@@ -1,0 +1,265 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import acpi.acpi
+import arch.arch
+import sync.atomic
+
+export {
+    init, bind, present, bound, covers, entries, entry_base, entry_segment,
+    entry_first, entry_last, read32, write32, read32_at, write32_at,
+    table_entries, entry_usable, retargets, table_base, table_segment, table_first, table_last,
+    ALL_ONES, CONFIG_SIZE
+}
+
+const MCFG_LENGTH: u64 = 4
+const MCFG_FIRST_ENTRY: u64 = 44
+const MCFG_ENTRY_BYTES: u64 = 16
+const ENTRY_BASE: u64 = 0
+const ENTRY_SEGMENT: u64 = 8
+const ENTRY_FIRST_BUS: u64 = 10
+const ENTRY_LAST_BUS: u64 = 11
+
+const MAX_ENTRIES: u64 = 8
+const BUS_SHIFT: u64 = 20
+const BDF_TO_ECAM_SHIFT: u64 = 12
+const BDF_BUS_SHIFT: u64 = 8
+const BUS_ALIGN_MASK: u64 = 0xFFFFF
+const BLOCK_BYTES: u64 = 0x200000
+const CONFIG_SIZE: u64 = 4096
+const DWORD_MASK: u64 = 0xFFC
+const ALL_ONES: u64 = 0xFFFFFFFF
+const ADDRESS_MAX: u64 = 0xFFFFFFFFFFFFFFFF
+const NOT_FOUND: u64 = 0xFFFFFFFFFFFFFFFF
+const NO_BLOCK: u64 = 0xFFFFFFFFFFFFFFFF
+const LOCK_FREE: u64 = 0
+const LOCK_HELD: u64 = 1
+
+static mut a_base: [u64; 8] = [0 as u64; 8]
+static mut a_segment: [u64; 8] = [0 as u64; 8]
+static mut a_first: [u64; 8] = [0 as u64; 8]
+static mut a_last: [u64; 8] = [0 as u64; 8]
+static mut a_count: u64 = 0
+static mut g_state: u64 = 0
+static mut win_virt: u64 = 0
+static mut win_block: u64 = NO_BLOCK
+static mut win_lock: [u64; 1] = [0 as u64; 1]
+static mut claim_addr: u64 = 0
+static mut point_addr: u64 = 0
+static mut is_bound: bool = false
+static mut retarget_count: u64 = 0
+
+fn u16_at(p: u64) -> u64 {
+    return kstate.get8(p) | (kstate.get8(p + 1) << 8)
+}
+
+fn table_entries(t: u64) -> u64 {
+    let len: u64 = kstate.get32(t + MCFG_LENGTH)
+    if len < MCFG_FIRST_ENTRY {
+        return 0
+    }
+    return (len - MCFG_FIRST_ENTRY) / MCFG_ENTRY_BYTES
+}
+
+fn entry_at(t: u64, i: u64) -> u64 {
+    return t + MCFG_FIRST_ENTRY + i * MCFG_ENTRY_BYTES
+}
+
+fn table_base(t: u64, i: u64) -> u64 {
+    return __mmio_read64((entry_at(t, i) + ENTRY_BASE) as *mut u64)
+}
+
+fn table_segment(t: u64, i: u64) -> u64 {
+    return u16_at(entry_at(t, i) + ENTRY_SEGMENT)
+}
+
+fn table_first(t: u64, i: u64) -> u64 {
+    return kstate.get8(entry_at(t, i) + ENTRY_FIRST_BUS)
+}
+
+fn table_last(t: u64, i: u64) -> u64 {
+    return kstate.get8(entry_at(t, i) + ENTRY_LAST_BUS)
+}
+
+fn entry_usable(t: u64, i: u64) -> bool {
+    return usable(table_base(t, i), table_first(t, i), table_last(t, i))
+}
+
+fn retargets() -> u64 {
+    return retarget_count
+}
+
+fn usable(base: u64, first: u64, last: u64) -> bool {
+    if base == 0 || (base & BUS_ALIGN_MASK) != 0 || last < first {
+        return false
+    }
+    let span: u64 = (last - first + 1) << BUS_SHIFT
+    return span <= ADDRESS_MAX - base
+}
+
+fn init(state: u64) -> u64 {
+    var sig: [u8; 5] = "MCFG\0"
+    g_state = state
+    a_count = 0
+    let t: u64 = acpi.table(state, (&sig[0]) as u64)
+    if t == 0 {
+        return 0
+    }
+    let n: u64 = table_entries(t)
+    var i: u64 = 0
+    while i < n && a_count < MAX_ENTRIES {
+        let base: u64 = table_base(t, i)
+        let first: u64 = table_first(t, i)
+        let last: u64 = table_last(t, i)
+        if usable(base, first, last) {
+            a_base[a_count as usize] = base
+            a_segment[a_count as usize] = table_segment(t, i)
+            a_first[a_count as usize] = first
+            a_last[a_count as usize] = last
+            a_count = a_count + 1
+        }
+        i = i + 1
+    }
+    return a_count
+}
+
+fn bind(claim: fn(u64, u64) -> u64, point: fn(u64, u64, u64) -> u64) {
+    claim_addr = claim as u64
+    point_addr = point as u64
+    is_bound = true
+}
+
+fn present() -> bool {
+    return a_count != 0
+}
+
+fn bound() -> bool {
+    return is_bound
+}
+
+fn entries() -> u64 {
+    return a_count
+}
+
+fn entry_base(i: u64) -> u64 {
+    return a_base[i as usize]
+}
+
+fn entry_segment(i: u64) -> u64 {
+    return a_segment[i as usize]
+}
+
+fn entry_first(i: u64) -> u64 {
+    return a_first[i as usize]
+}
+
+fn entry_last(i: u64) -> u64 {
+    return a_last[i as usize]
+}
+
+fn find_entry(segment: u64, bus: u64) -> u64 {
+    var i: u64 = 0
+    while i < a_count {
+        if a_segment[i as usize] == segment && bus >= a_first[i as usize] && bus <= a_last[i as usize] {
+            return i
+        }
+        i = i + 1
+    }
+    return NOT_FOUND
+}
+
+fn covers(segment: u64, bus: u64) -> bool {
+    return find_entry(segment, bus) != NOT_FOUND
+}
+
+fn phys_of(segment: u64, bdf: u64, off: u64) -> u64 {
+    if off >= CONFIG_SIZE {
+        return NOT_FOUND
+    }
+    let bus: u64 = (bdf >> BDF_BUS_SHIFT) & 0xFF
+    let i: u64 = find_entry(segment, bus)
+    if i == NOT_FOUND {
+        return NOT_FOUND
+    }
+    let rel: u64 = (bdf & 0xFFFF) - (a_first[i as usize] << BDF_BUS_SHIFT)
+    return a_base[i as usize] + (rel << BDF_TO_ECAM_SHIFT) + (off & DWORD_MASK)
+}
+
+fn lock_take() {
+    let p: u64 = (&win_lock[0]) as u64
+    while atomic.cas(p, LOCK_FREE, LOCK_HELD) != LOCK_FREE {
+        atomic.pause()
+    }
+}
+
+fn lock_give() {
+    atomic.store((&win_lock[0]) as u64, LOCK_FREE)
+}
+
+fn window_for(phys: u64) -> u64 {
+    let block: u64 = phys & (~(BLOCK_BYTES - 1))
+    if win_virt == 0 {
+        let claim: fn(u64, u64) -> u64 = claim_addr as fn(u64, u64) -> u64
+        win_virt = claim(g_state, block)
+        if win_virt == 0 {
+            return 0
+        }
+        win_block = block
+    }
+    if win_block != block {
+        let point: fn(u64, u64, u64) -> u64 = point_addr as fn(u64, u64, u64) -> u64
+        if point(g_state, win_virt, block) == 0 {
+            return 0
+        }
+        win_block = block
+        retarget_count = retarget_count + 1
+    }
+    arch.tlb_flush_page(win_virt)
+    return win_virt + (phys - block)
+}
+
+fn access(phys: u64, write: bool, value: u64) -> u64 {
+    var result: u64 = ALL_ONES
+    if !is_bound {
+        return result
+    }
+    let flags: u64 = arch.irq_save()
+    lock_take()
+    let va: u64 = window_for(phys)
+    if va != 0 {
+        if write {
+            __mmio_write32(va as *mut u32, value as u32)
+            result = 0
+        } else {
+            result = __mmio_read32(va as *mut u32) as u64
+        }
+    }
+    lock_give()
+    arch.irq_restore(flags)
+    return result
+}
+
+fn read32_at(segment: u64, bdf: u64, off: u64) -> u64 {
+    let phys: u64 = phys_of(segment, bdf, off)
+    if phys == NOT_FOUND {
+        return ALL_ONES
+    }
+    return access(phys, false, 0)
+}
+
+fn write32_at(segment: u64, bdf: u64, off: u64, value: u64) {
+    let phys: u64 = phys_of(segment, bdf, off)
+    if phys == NOT_FOUND {
+        return
+    }
+    access(phys, true, value & ALL_ONES)
+}
+
+fn read32(bdf: u64, off: u64) -> u64 {
+    return read32_at(0, bdf, off)
+}
+
+fn write32(bdf: u64, off: u64, value: u64) {
+    write32_at(0, bdf, off, value)
+}

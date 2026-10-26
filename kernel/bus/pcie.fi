@@ -1,0 +1,144 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.procw
+import bus.pci
+import bus.ecam
+
+export { render, render_status }
+
+const BUS_DIGITS: u64 = 2
+const DEV_DIGITS: u64 = 2
+const ID_DIGITS: u64 = 4
+const MAX_LISTED: u64 = 32
+const OFFSET_DIGITS: u64 = 3
+const WIDE_ADDRESS: u64 = 0x100000000
+const NARROW_DIGITS: u64 = 8
+const WIDE_DIGITS: u64 = 16
+const DEC_BASE: u64 = 10
+const CHAR_COLON: u64 = 58
+const CHAR_DOT: u64 = 46
+const CHAR_COMMA: u64 = 44
+const CHAR_AT: u64 = 64
+const CHAR_DASH: u64 = 45
+const CHAR_V: u64 = 118
+const CHAR_NEWLINE: u64 = 10
+const DIGIT_LETTER_BASE: u64 = 87
+const DIGIT_ZERO: u64 = 48
+const NIBBLE_BITS: u64 = 4
+const NIBBLE_MASK: u64 = 15
+
+fn put_hexn(v: u64, digits: u64) {
+    var i: u64 = digits
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * NIBBLE_BITS)) & NIBBLE_MASK
+        if d < DEC_BASE {
+            procw.put_c(DIGIT_ZERO + d)
+        } else {
+            procw.put_c(DIGIT_LETTER_BASE + d)
+        }
+    }
+}
+
+fn put_bdf(bdf: u64) {
+    put_hexn(pci.bdf_bus(bdf), BUS_DIGITS)
+    procw.put_c(CHAR_COLON)
+    put_hexn(pci.bdf_dev(bdf), DEV_DIGITS)
+    procw.put_c(CHAR_DOT)
+    put_hexn(pci.bdf_fn(bdf), 1)
+}
+
+fn render_header(state: u64) {
+    var k_head: [u8; 14] = "ecam present=\0"
+    var k_entries: [u8; 10] = " entries=\0"
+    var k_entry: [u8; 12] = "ecam entry=\0"
+    var k_base: [u8; 7] = " base=\0"
+    var k_seg: [u8; 10] = " segment=\0"
+    var k_bus: [u8; 6] = " bus=\0"
+    procw.put_s((&k_head[0]) as u64)
+    var present: u64 = 0
+    if ecam.present() {
+        present = 1
+    }
+    procw.put_dec(present)
+    procw.put_s((&k_entries[0]) as u64)
+    procw.put_dec(ecam.entries())
+    procw.put_c(CHAR_NEWLINE)
+    var i: u64 = 0
+    while i < ecam.entries() {
+        let base: u64 = ecam.entry_base(i)
+        var digits: u64 = NARROW_DIGITS
+        if base >= WIDE_ADDRESS {
+            digits = WIDE_DIGITS
+        }
+        procw.put_s((&k_entry[0]) as u64)
+        procw.put_dec(i)
+        procw.put_s((&k_base[0]) as u64)
+        procw.put_hex(base, digits)
+        procw.put_s((&k_seg[0]) as u64)
+        procw.put_dec(ecam.entry_segment(i))
+        procw.put_s((&k_bus[0]) as u64)
+        procw.put_dec(ecam.entry_first(i))
+        procw.put_c(CHAR_DASH)
+        procw.put_dec(ecam.entry_last(i))
+        procw.put_c(CHAR_NEWLINE)
+        i = i + 1
+    }
+}
+
+fn put_cap(bdf: u64, off: u64) {
+    let h: u64 = pci.cfg_read32(bdf, off)
+    put_hexn(pci.ext_cap_id(h), ID_DIGITS)
+    procw.put_c(CHAR_AT)
+    put_hexn(off, OFFSET_DIGITS)
+    procw.put_c(CHAR_V)
+    procw.put_dec(pci.ext_cap_version(h))
+}
+
+fn render_function(bdf: u64) {
+    var k_pcie: [u8; 6] = "pcie \0"
+    var k_ext: [u8; 6] = " ext=\0"
+    var offsets: [u64; 32] = [0 as u64; 32]
+    let n: u64 = pci.ext_cap_offsets(bdf, (&offsets[0]) as u64, MAX_LISTED)
+    if n == 0 {
+        return
+    }
+    procw.put_s((&k_pcie[0]) as u64)
+    put_bdf(bdf)
+    procw.put_s((&k_ext[0]) as u64)
+    var i: u64 = 0
+    while i < n {
+        if i > 0 {
+            procw.put_c(CHAR_COMMA)
+        }
+        put_cap(bdf, offsets[i as usize])
+        i = i + 1
+    }
+    procw.put_c(CHAR_NEWLINE)
+}
+
+fn render_caps(state: u64) {
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        if pci.get(state, i, pci.E_EXPRESS) != 0 {
+            render_function(pci.get(state, i, pci.E_BDF))
+        }
+        i = i + 1
+    }
+}
+
+fn render_status(state: u64, out: u64, cap: u64) -> u64 {
+    procw.begin(out, cap)
+    render_header(state)
+    return procw.used()
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    procw.begin(out, cap)
+    render_header(state)
+    render_caps(state)
+    return procw.used()
+}

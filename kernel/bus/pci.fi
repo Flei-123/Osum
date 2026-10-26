@@ -42,16 +42,19 @@
 
 import serial
 import lib.kstate
+import bus.ecam
 
 export {
     scan, count, get, list, find_class, find_bdf,
     bar, bar_size, bar_flags, bar_is_io,
     enable_master, disable_master, master_on, cap_find,
+    ext_cap_find, ext_cap_offsets, ext_cap_id, ext_cap_version, has_express,
+    LEGACY_CFG_SIZE, EXT_CAP_START, CAP_EXPRESS,
     cfg_read32, cfg_write32, cfg_read16, cfg_write16, cfg_read8,
     cfg_write8,
     hexn, bdf_bus, bdf_dev, bdf_fn,
     E_BDF, E_VENDOR, E_DEVICE, E_CLASS, E_SUBCLASS, E_PROGIF, E_HDR,
-    E_IRQLINE, E_IRQPIN, E_MSI, E_MSIX, E_BARS,
+    E_IRQLINE, E_IRQPIN, E_MSI, E_MSIX, E_EXPRESS, E_BARS,
     K2_OFF, K2_SCALARS, TABLE_OFF, ENTRY_BYTES, MAX_DEV,
     CAP_MSI, CAP_MSIX,
     CLASS_STORAGE, SUB_IDE, SUB_SATA, SUB_RAID, SUB_NVM, PROGIF_AHCI, PROGIF_NVME,
@@ -82,6 +85,7 @@ const E_IRQLINE: u64 = 56
 const E_IRQPIN: u64 = 64
 const E_MSI: u64 = 72 // offset of the capability, 0 = none
 const E_MSIX: u64 = 80
+const E_EXPRESS: u64 = 88
 // Six BARs of three words each: address, size, the low four flag bits.
 const E_BARS: u64 = 96
 
@@ -112,6 +116,17 @@ const CMD_MASTER: u64 = 0x4
 
 const CAP_MSI: u64 = 0x05
 const CAP_MSIX: u64 = 0x11
+const CAP_EXPRESS: u64 = 0x10
+
+const LEGACY_CFG_SIZE: u64 = 0x100
+const EXT_CAP_START: u64 = 0x100
+const EXT_CAP_MAX: u64 = 480
+const EXT_CAP_ID_MASK: u64 = 0xFFFF
+const EXT_CAP_VERSION_SHIFT: u64 = 16
+const EXT_CAP_VERSION_MASK: u64 = 0xF
+const EXT_CAP_NEXT_SHIFT: u64 = 20
+const EXT_CAP_NEXT_MASK: u64 = 0xFFC
+const CFG_DWORD_ALL_ONES: u64 = 0xFFFFFFFF
 
 const CLASS_STORAGE: u64 = 0x01
 const SUB_IDE: u64 = 0x01
@@ -161,11 +176,18 @@ fn bdf_fn(bdf: u64) -> u64 {
 }
 
 fn cfg_read32(bdf: u64, off: u64) -> u64 {
+    if off >= LEGACY_CFG_SIZE {
+        return ecam.read32(bdf, off)
+    }
     out32(ADDR_PORT, addr_of(bdf, off))
     return in32(DATA_PORT)
 }
 
 fn cfg_write32(bdf: u64, off: u64, v: u64) {
+    if off >= LEGACY_CFG_SIZE {
+        ecam.write32(bdf, off, v)
+        return
+    }
     out32(ADDR_PORT, addr_of(bdf, off))
     out32(DATA_PORT, v & 0xFFFFFFFF)
 }
@@ -319,6 +341,7 @@ fn record(state: u64, bdf: u64) {
     eset(e, E_IRQPIN, cfg_read8(bdf, CFG_IRQPIN))
     eset(e, E_MSI, cap_find(bdf, CAP_MSI))
     eset(e, E_MSIX, cap_find(bdf, CAP_MSIX))
+    eset(e, E_EXPRESS, cap_find(bdf, CAP_EXPRESS))
     var nbars: u64 = 6
     if (hdr & 0x7F) != 0 {
         nbars = 2 // a bridge has two of them and a lot of bus numbers
@@ -413,6 +436,66 @@ fn cap_find(bdf: u64, want: u64) -> u64 {
         }
         off = cfg_read8(bdf, off + 1) & 0xFC
         guard = guard + 1
+    }
+    return 0
+}
+
+// ----------------------------------------- extended capabilities
+
+fn ext_cap_header_ok(h: u64) -> bool {
+    return h != 0 && h != CFG_DWORD_ALL_ONES
+}
+
+fn ext_cap_id(h: u64) -> u64 {
+    return h & EXT_CAP_ID_MASK
+}
+
+fn ext_cap_version(h: u64) -> u64 {
+    return (h >> EXT_CAP_VERSION_SHIFT) & EXT_CAP_VERSION_MASK
+}
+
+fn ext_cap_next(h: u64) -> u64 {
+    return (h >> EXT_CAP_NEXT_SHIFT) & EXT_CAP_NEXT_MASK
+}
+
+fn ext_cap_offsets(bdf: u64, out: u64, max: u64) -> u64 {
+    if !ecam.present() {
+        return 0
+    }
+    var off: u64 = EXT_CAP_START
+    var seen: u64 = 0
+    while off >= EXT_CAP_START && seen < EXT_CAP_MAX && seen < max {
+        let h: u64 = cfg_read32(bdf, off)
+        if !ext_cap_header_ok(h) {
+            return seen
+        }
+        __mmio_write64((out + seen * 8) as *mut u64, off)
+        off = ext_cap_next(h)
+        seen = seen + 1
+    }
+    return seen
+}
+
+fn has_express(bdf: u64) -> bool {
+    return cap_find(bdf, CAP_EXPRESS) != 0
+}
+
+fn ext_cap_find(bdf: u64, want: u64) -> u64 {
+    if !ecam.present() || !has_express(bdf) {
+        return 0
+    }
+    var off: u64 = EXT_CAP_START
+    var seen: u64 = 0
+    while off >= EXT_CAP_START && seen < EXT_CAP_MAX {
+        let h: u64 = cfg_read32(bdf, off)
+        if !ext_cap_header_ok(h) {
+            return 0
+        }
+        if ext_cap_id(h) == want {
+            return off
+        }
+        off = ext_cap_next(h)
+        seen = seen + 1
     }
     return 0
 }

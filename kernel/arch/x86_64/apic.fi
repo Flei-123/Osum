@@ -59,7 +59,7 @@ import bus.pci
 
 export {
     present, init, active, hz, id,
-    eoi, timer_start, timer_rate, timer_stop, map_device, window_slots, lapic_phys,
+    eoi, timer_start, timer_rate, timer_stop, map_device, window_claim, window_point, window_slots, lapic_phys,
     // RUNDE BLECHVIER: die Gegenprobe mit dem ACPI-Zeitgeber.
     tsc_gegen_pm, win_pde, pde_at,
     route, mask_gsi, ioapic_entries, gsi_entry, pic_off,
@@ -192,6 +192,7 @@ const WIN_SLOTS: u64 = 16
 const WIN_FIRST: u64 = 496
 const WIN_VIRT: u64 = 496 * 0x200000
 const HUGE_SIZE: u64 = 0x200000
+const WIN_CLAIMED: u64 = 0xFFFFFFFFFFFFFFFF
 const S_WIN: u64 = 0x080 // SIXTEEN words now: which physical block sits in slot i
 
 // The page directory of the first gigabyte -- the one `boot.s` filled and
@@ -206,6 +207,13 @@ fn kernel_pd(state: u64) -> u64 {
         return 0
     }
     return __mmio_read64(pdpt as *mut u64) & ADDR_MASK
+}
+
+fn window_install(pd: u64, i: u64, block: u64) {
+    __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64,
+        block | PAGE_PRESENT | PAGE_WRITE | PAGE_PCD | PAGE_PWT | PAGE_HUGE)
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
 }
 
 // Makes the 2 MiB block that holds `phys` readable and writable at an
@@ -230,19 +238,47 @@ fn map_device(state: u64, phys: u64) -> u64 {
     i = 0
     while i < WIN_SLOTS {
         if kstate.get(state, pci.K2_SCALARS + S_WIN + i * 8) == 0 {
-            __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64,
-                block | PAGE_PRESENT | PAGE_WRITE | PAGE_PCD | PAGE_PWT
-                | PAGE_HUGE)
+            window_install(pd, i, block)
             kstate.set(state, pci.K2_SCALARS + S_WIN + i * 8, block + 1)
-            // The processor caches translations; a changed table without
-            // a flush is a table nobody reads.
-            let c: u64 = asm("mov rax, cr3", out("rax"))
-            asm("mov cr3, rax", in("rax") c)
             return WIN_VIRT + i * HUGE_SIZE + inner
         }
         i = i + 1
     }
     return 0
+}
+
+fn window_claim(state: u64, phys: u64) -> u64 {
+    let block: u64 = phys & (~(HUGE_SIZE - 1))
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < WIN_SLOTS {
+        if kstate.get(state, pci.K2_SCALARS + S_WIN + i * 8) == 0 {
+            window_install(pd, i, block)
+            kstate.set(state, pci.K2_SCALARS + S_WIN + i * 8, WIN_CLAIMED)
+            return WIN_VIRT + i * HUGE_SIZE
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn window_point(state: u64, virt: u64, phys: u64) -> u64 {
+    if virt < WIN_VIRT {
+        return 0
+    }
+    let i: u64 = (virt - WIN_VIRT) / HUGE_SIZE
+    if i >= WIN_SLOTS || kstate.get(state, pci.K2_SCALARS + S_WIN + i * 8) != WIN_CLAIMED {
+        return 0
+    }
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return 0
+    }
+    window_install(pd, i, phys & (~(HUGE_SIZE - 1)))
+    return 1
 }
 
 // ================================================== RUNDE BLECHVIER
