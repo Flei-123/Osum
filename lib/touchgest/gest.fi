@@ -50,7 +50,7 @@ export {
     M_OFF, M_APPS, M_DESKTOPS,
     reset, configure, set_edge, set_palm_size, set_tap_ms, note_key,
     set_opt, get_opt, swipe_action, out_buttons, dragging, momentum_on,
-    slop, swipe_len,
+    slop, swipe_len, edge_on,
     begin, add_contact, end, tick,
     ev_count, ev_kind, ev_a, ev_b, fingers, palms, in_touch
 }
@@ -99,6 +99,9 @@ const MOM_WINDOW_MS: u64 = 90
 
 const TYPING_MS: u64 = 300
 
+const EDGE_RIM_PCT: i64 = 4
+const EDGE_CROSS_MS: i64 = 1500
+
 // ---- per device configuration
 static mut d_w: [i64; 4] = [1000; 4]
 static mut d_h: [i64; 4] = [700; 4]
@@ -122,6 +125,12 @@ static mut d_mom: [u64; 4] = [0; 4]
 static mut d_mom_t: [u64; 4] = [0; 4]
 static mut d_mrx: [i64; 4] = [0; 4]
 static mut d_mry: [i64; 4] = [0; 4]
+static mut d_em: [u64; 4] = [0; 4]
+static mut d_emx: [i64; 4] = [0; 4]
+static mut d_emy: [i64; 4] = [0; 4]
+static mut d_emt: [u64; 4] = [0; 4]
+static mut d_emrx: [i64; 4] = [0; 4]
+static mut d_emry: [i64; 4] = [0; 4]
 
 // ---- per device state
 static mut d_last_key: [u64; 4] = [0; 4]
@@ -212,6 +221,7 @@ fn reset(dev: u64) {
     d_vy[d] = 0
     d_scrolling[d] = 0
     d_mom[d] = 0
+    d_em[d] = 0
     var s: u64 = 0
     while s < MAX_CONTACT {
         c_used[(dev * MAX_CONTACT + s) as usize] = 0
@@ -307,6 +317,50 @@ fn dragging(dev: u64) -> bool {
     return d_drag[dev as usize] != 0
 }
 
+fn edge_on(dev: u64) -> bool {
+    if dev >= MAX_DEV { return false }
+    return d_em[dev as usize] != 0
+}
+
+fn edge_set(d: usize, ex: i64, ey: i64, now: u64) {
+    if ex == 0 && ey == 0 {
+        d_em[d] = 0
+        return
+    }
+    if d_em[d] == 0 {
+        d_em[d] = 1
+        d_emt[d] = now
+        d_emrx[d] = 0
+        d_emry[d] = 0
+    }
+    d_emx[d] = ex
+    d_emy[d] = ey
+}
+
+fn edge_dir(pos: i64, size: i64, move_d: i64, slop_v: i64) -> i64 {
+    let rim: i64 = size * EDGE_RIM_PCT / 100
+    var dir: i64 = 0
+    if pos <= rim { dir = 0 - 1 } else if pos >= size - rim { dir = 1 }
+    if dir != 0 && dir * move_d < 0 && absv(move_d) > slop_v / 4 { dir = 0 }
+    return dir
+}
+
+fn edge_tick(dev: u64, now: u64) -> u64 {
+    let d: usize = dev as usize
+    if now <= d_emt[d] { return 0 }
+    var dt: i64 = (now - d_emt[d]) as i64
+    d_emt[d] = now
+    if dt > 100 { dt = 100 }
+    let tx: i64 = d_emx[d] * d_w[d] * dt + d_emrx[d]
+    let ty: i64 = d_emy[d] * d_h[d] * dt + d_emry[d]
+    let qx: i64 = sdiv(tx, EDGE_CROSS_MS)
+    let qy: i64 = sdiv(ty, EDGE_CROSS_MS)
+    d_emrx[d] = tx - qx * EDGE_CROSS_MS
+    d_emry[d] = ty - qy * EDGE_CROSS_MS
+    if qx != 0 || qy != 0 { emit(EV_MOVE, qx, qy) }
+    return e_n
+}
+
 fn momentum_on(dev: u64) -> bool {
     if dev >= MAX_DEV { return false }
     return d_mom[dev as usize] != 0
@@ -392,6 +446,7 @@ fn tick(dev: u64, now: u64) -> u64 {
     e_n = 0
     if dev >= MAX_DEV { return 0 }
     let d: usize = dev as usize
+    if d_em[d] != 0 { return edge_tick(dev, now) }
     if d_mom[d] == 0 { return 0 }
     if now <= d_mom_t[d] { return 0 }
     var dt: i64 = (now - d_mom_t[d]) as i64
@@ -611,6 +666,7 @@ fn end(dev: u64, pressed: u64) {
     }
     d_nact[d] = n
     d_npalm[d] = np
+    if n != 1 { d_em[d] = 0 }
 
     if (buttons & 1) != 0 && (d_pbtn[d] & 1) == 0 {
         d_bmap[d] = 0
@@ -685,6 +741,7 @@ fn end(dev: u64, pressed: u64) {
     if d_sess[d] == 0 {
         d_sess[d] = 1
         d_mom[d] = 0
+        d_em[d] = 0
         d_scrolling[d] = 0
         d_cand[d] = 0
         if get_opt(dev, O_DRAG) != 0 && d_haveclick[d] != 0 && now >= d_lastclick[d]
@@ -729,6 +786,11 @@ fn end(dev: u64, pressed: u64) {
         let dy: i64 = y - c_ly[k]
         c_lx[k] = x
         c_ly[k] = y
+        if c_edge[k] == 0 && ((d_pbtn[d] & 1) != 0 || d_drag[d] != 0) {
+            edge_set(d, edge_dir(x, d_w[d], dx, sl2), edge_dir(y, d_h[d], dy, sl2), now)
+        } else {
+            d_em[d] = 0
+        }
         if c_edge[k] == 1 {
             if dy != 0 { emit_scroll(dev, now, 0, dy) }
         } else if c_edge[k] == 2 {

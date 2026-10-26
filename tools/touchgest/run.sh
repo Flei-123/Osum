@@ -99,6 +99,10 @@ mutate swipeagain  's/if d_fired\[d\] == 0 {/if true {/'
 mutate noedge      's/if c_edge\[k\] == 1 {/if false {/'
 mutate rightclick  's/emit(EV_CLICK, 2, 0)/emit(EV_CLICK, 1, 0)/'
 mutate nobutton    's/d_btn\[d\] == 0 \&\&//'
+mutate noedgemotion 's/if qx != 0 || qy != 0 { emit(EV_MOVE, qx, qy) }//'
+mutate edgeheld    's/if c_edge\[k\] == 0 \&\& ((d_pbtn\[d\] \& 1) != 0 || d_drag\[d\] != 0) {/if c_edge[k] == 0 {/'
+mutate edgeinward  's/dir \* move_d < 0 \&\& absv(move_d) > slop_v \/ 4/false/'
+mutate edgeliftoff 's/if n != 1 { d_em\[d\] = 0 }//'
 mutate onedev      's/let d: usize = dev as usize/let d: usize = 0/g'
 
 O2=tools/touchgest/oracle2.fi
