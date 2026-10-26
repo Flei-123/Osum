@@ -1760,6 +1760,11 @@ lauf "63. the terminal window: the editor's control sequences are executed, the 
 lauf "64. Wayland input and clipboard: keymap, focus, keys, pointer, wl_data_device, bridge to the system clipboard (tools/wayland/input.sh, round WAYLAND-INPUT)" \
      tools/wayland/input.sh wlinput '^WL-INPUT: |^== |^  OK    |^  FAIL  '
 
+# 65. R-015: touch screen, touch pad and pen as layers: HID contacts, tracker with quirks, event ring (/proc/touchev), gesture machines
+# (lib/touchgest), the app API (lib/touchev) and a Surface Laptop 4 capture replayed through the kernel parser; counter-proofs in each lib gate.
+lauf "65. Input stack: contacts, tracker, quirks, ring, gestures, app API, HOLO-LAPTOP-3 corpus (tools/input/run.sh, R-015)" \
+     tools/input/run.sh input '^  OK    |^  FAIL  |^input: '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

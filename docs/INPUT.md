@@ -8,6 +8,7 @@ Ist-Stand only. "Measured" = a gate in this tree ran it (QEMU/KVM, synthetic or 
 |---|---|---|
 | Transport | `kernel/usb/usb.fi` (USB HID class), `kernel/drv/hid/i2chid.fi` (HID over I2C: DesignWare/LPSS via PCI, ACPI `PNP0C50` via AML or byte search) | get the report descriptor and the input reports; register the device |
 | Registry | `kernel/drv/hid/inreg.fi`, rows in `lib/touchev/quirk.fi` | per slot: bus, vid, pid, quirk flags |
+| Input mode | `kernel/drv/hid/hidmode.fi`, `lib/touchev/inmode.fi` | a Windows Precision Touchpad starts in mouse mode: the descriptor's Device Mode (digitizer 0x52) and Surface/Button switch (0x57, 0x58) feature fields are set (3 and 1) with SET_REPORT after the descriptor is parsed: I2C command-register frame, USB class request `0x21 0x09`, wValue `0x03<id>` |
 | Descriptor parser | `kernel/drv/hid/hidrep.fi` (+ reference parser `tools/hid/descs.py`) | descriptor -> field table (page, usage, bit offset, size, range), kind (kbd, mouse, pad, touch, pen) |
 | Report -> contacts | `kernel/drv/hid/hidbits.fi`, `hidcontact.fi` | one digitizer report -> a frame of contacts (tip, confidence, id, x, y, pressure, width, height, count, buttons) |
 | Tracker | `kernel/drv/hid/hidev.fi` -> `lib/touchev/track.fi` | slots, DOWN/MOVE/UP, x/y normalized to 0..65535, quirks (swap, invert, single touch, palm) |
@@ -87,9 +88,11 @@ Measured (gate `tools/input/run.sh`, QEMU/KVM):
 - `lib/touchev`: 264 promises, 0 errors.
 - Touch screen kernel traces after moving the gesture logic into `direct.fi`: byte-identical to the old inline code (36 lines, `touchsim`).
 - Surface Laptop 4 capture (`tools/input/corpus/holo-laptop-3`, 2026-10-26, see 8): the three synthesized descriptors parse in the kernel parser (kind pad / touch / pen) and the example reports produce exactly the events an independent Python model computes (`tools/input/corpus_kernel.py`), including the three quirk experiments.
+- Input mode: for the Surface descriptors the kernel plans two feature reports (id 7 payload `03`, id 8 payload `03`) and builds I2C frames that equal an independent model of the HID-over-I2C SET_REPORT format (`corpus: inmode` / `corpus: i2c` lines).
 - Ring-3 demo app reads `/proc/touchev` through the API; the second read finds the ring drained (`tools/input/e2e.sh`).
 
 Not measured:
+- Any real device accepting the input-mode SET_REPORT (I2C write and USB control transfer are spec-only, like the rest of the I2C-HID register path).
 - Any real touch screen, touch pad or pen on OrientOS. The timing of taps and long presses on real hardware is unknown.
 - The descriptors of the corpus are synthesized from HidP capabilities, not the raw descriptors of the device (Windows does not expose them to user mode).
 - Pressure/size normalization with real devices; palm rejection beyond the HID confidence bit; touch screen settings page.
