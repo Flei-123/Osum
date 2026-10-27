@@ -1,0 +1,407 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import mm.mem
+import gfx.fb
+import diag.cmdopt
+import serial
+
+export { parse, mode, set_mode, rendering, frozen, bug_is, due, begin, finish, compare, compare_refs, card_compare, blur_scratch, report, stat, count, count_add, set_last, MODE_OFF, MODE_SAMPLE, MODE_ALL, ST_CHECKS, ST_BAD, ST_UNSTABLE, ST_PENDING, ST_SKIPPED, ST_PX, ST_CARD_CHECKS, ST_CARD_BAD, ST_X0, ST_Y0, ST_X1, ST_Y1, ST_WIN, ST_US, ST_MODE, ST_RENDERS, ST_FIRST_X, ST_FIRST_Y, STAT_COUNT, cmp_get, CMP_BAD, CMP_PEND, CMP_X0, CMP_Y0, CMP_X1, CMP_Y1, CMP_FX, CMP_FY, CMP_WANT, CMP_GOT, ref_addr }
+
+const MODE_OFF: u64 = 0
+const MODE_SAMPLE: u64 = 1
+const MODE_ALL: u64 = 2
+const SAMPLE_EVERY: u64 = 24
+const PAIR_MASK: u64 = 0x00FFFFFF00FFFFFF
+const PIXEL_MASK: u64 = 0x00FFFFFF
+const NO_MIN: u64 = 0xFFFFFFFF
+
+const ST_CHECKS: u64 = 0
+const ST_BAD: u64 = 1
+const ST_UNSTABLE: u64 = 2
+const ST_PENDING: u64 = 3
+const ST_SKIPPED: u64 = 4
+const ST_PX: u64 = 5
+const ST_CARD_CHECKS: u64 = 6
+const ST_CARD_BAD: u64 = 7
+const ST_X0: u64 = 8
+const ST_Y0: u64 = 9
+const ST_X1: u64 = 10
+const ST_Y1: u64 = 11
+const ST_WIN: u64 = 12
+const ST_US: u64 = 13
+const ST_MODE: u64 = 14
+const ST_RENDERS: u64 = 15
+const ST_FIRST_X: u64 = 16
+const ST_FIRST_Y: u64 = 17
+const STAT_COUNT: u64 = 18
+
+const CMP_BAD: u64 = 0
+const CMP_PEND: u64 = 1
+const CMP_X0: u64 = 2
+const CMP_Y0: u64 = 3
+const CMP_X1: u64 = 4
+const CMP_Y1: u64 = 5
+const CMP_FX: u64 = 6
+const CMP_FY: u64 = 7
+const CMP_WANT: u64 = 8
+const CMP_GOT: u64 = 9
+const CMP_COUNT: u64 = 10
+
+static mut g_mode: u64 = 0
+static mut g_freeze: u64 = 0
+static mut g_frozen: u64 = 0
+static mut g_bug: u64 = 0
+static mut g_render: u64 = 0
+static mut g_tick: u64 = 0
+static mut g_ref: [u64; 2] = [0 as u64; 2]
+static mut g_ref_frames: [u64; 2] = [0 as u64; 2]
+static mut g_blur: u64 = 0
+static mut g_blur_frames: u64 = 0
+static mut g_saved_draw: u64 = 0
+static mut g_saved_lo: u64 = 0
+static mut g_saved_hi: u64 = 0
+static mut g_stat: [u64; 18] = [0 as u64; 18]
+static mut g_cmp: [u64; 10] = [0 as u64; 10]
+
+static mut w_all: [u8; 15] = "pixelguard=all\0"
+static mut w_on: [u8; 11] = "pixelguard\0"
+static mut w_freeze: [u8; 9] = "pgfreeze\0"
+static mut w_bug: [u8; 6] = "pgbug\0"
+static mut t_bad: [u8; 23] = "pixelguard: BAD level=\0"
+static mut t_px: [u8; 5] = " px=\0"
+static mut t_bbox: [u8; 7] = " bbox=\0"
+static mut t_win: [u8; 6] = " win=\0"
+static mut t_first: [u8; 8] = " first=\0"
+static mut t_want: [u8; 7] = " want=\0"
+static mut t_got: [u8; 6] = " got=\0"
+static mut t_waddr: [u8; 12] = " want_addr=\0"
+static mut t_gaddr: [u8; 11] = " got_addr=\0"
+static mut t_pitch: [u8; 8] = " pitch=\0"
+static mut t_w: [u8; 4] = " w=\0"
+static mut t_h: [u8; 4] = " h=\0"
+static mut t_frozen: [u8; 19] = "pixelguard: frozen\0"
+static mut t_nomem: [u8; 52] = "pixelguard: no memory for the reference buffer, off\0"
+static mut t_on: [u8; 21] = "pixelguard: on mode=\0"
+static mut t_bugn: [u8; 6] = " bug=\0"
+
+fn rd64(a: u64) -> u64 {
+    return __mmio_read64(a as *mut u64)
+}
+
+fn rd32(a: u64) -> u64 {
+    return __mmio_read32(a as *mut u32) as u64
+}
+
+fn parse(state: u64) {
+    g_mode = MODE_OFF
+    if cmdopt.has(state, (&w_all[0]) as u64) {
+        g_mode = MODE_ALL
+    } else if cmdopt.has(state, (&w_on[0]) as u64) {
+        g_mode = MODE_SAMPLE
+    }
+    g_freeze = 0
+    if cmdopt.has(state, (&w_freeze[0]) as u64) {
+        g_freeze = 1
+    }
+    g_bug = cmdopt.number(state, (&w_bug[0]) as u64, 0)
+    if g_mode != MODE_OFF {
+        serial.puts((&t_on[0]) as u64)
+        serial.dec(g_mode)
+        serial.puts((&t_bugn[0]) as u64)
+        serial.dec(g_bug)
+        serial.nl()
+    }
+}
+
+fn mode() -> u64 {
+    return g_mode
+}
+
+fn set_mode(m: u64) {
+    g_mode = m
+    g_frozen = 0
+}
+
+fn rendering() -> bool {
+    return g_render != 0
+}
+
+fn frozen() -> bool {
+    return g_frozen != 0
+}
+
+fn bug_is(n: u64) -> bool {
+    return g_bug == n && g_mode != MODE_OFF
+}
+
+fn stat(k: u64) -> u64 {
+    if k >= STAT_COUNT {
+        return 0
+    }
+    if k == ST_MODE {
+        return g_mode
+    }
+    return g_stat[k as usize]
+}
+
+fn count(k: u64) {
+    if k < STAT_COUNT {
+        g_stat[k as usize] = g_stat[k as usize] + 1
+    }
+}
+
+fn count_add(k: u64, v: u64) {
+    if k < STAT_COUNT {
+        g_stat[k as usize] = g_stat[k as usize] + v
+    }
+}
+
+fn set_last(k: u64, v: u64) {
+    if k < STAT_COUNT {
+        g_stat[k as usize] = v
+    }
+}
+
+fn cmp_get(k: u64) -> u64 {
+    if k >= CMP_COUNT {
+        return 0
+    }
+    return g_cmp[k as usize]
+}
+
+fn ref_addr(slot: u64) -> u64 {
+    if slot >= 2 {
+        return 0
+    }
+    return g_ref[slot as usize]
+}
+
+fn due(state: u64, painted: u64) -> bool {
+    if g_mode == MODE_OFF || g_frozen != 0 || painted == 0 {
+        return false
+    }
+    if g_mode == MODE_SAMPLE {
+        g_tick = g_tick + 1
+        if g_tick % SAMPLE_EVERY != 0 {
+            return false
+        }
+    }
+    return true
+}
+
+fn slot_buffer(state: u64, slot: u64) -> u64 {
+    let frames: u64 = (fb.bytes(state) + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+    let s: usize = slot as usize
+    if g_ref[s] != 0 && g_ref_frames[s] == frames {
+        return g_ref[s]
+    }
+    if g_ref[s] != 0 {
+        mem.frame_free_run(state, g_ref[s], g_ref_frames[s])
+        g_ref[s] = 0
+        g_ref_frames[s] = 0
+    }
+    let p: u64 = mem.frame_run(state, frames)
+    if p == 0 {
+        g_mode = MODE_OFF
+        serial.puts((&t_nomem[0]) as u64)
+        serial.nl()
+        return 0
+    }
+    g_ref[s] = p
+    g_ref_frames[s] = frames
+    return p
+}
+
+fn begin(state: u64, slot: u64) -> bool {
+    if slot >= 2 {
+        return false
+    }
+    let p: u64 = slot_buffer(state, slot)
+    if p == 0 {
+        return false
+    }
+    g_saved_draw = fb.draw_at(state)
+    g_saved_lo = fb.dirty_lo(state)
+    g_saved_hi = fb.dirty_hi(state)
+    fb.draw_set(state, p)
+    g_render = 1
+    g_stat[ST_RENDERS as usize] = g_stat[ST_RENDERS as usize] + 1
+    return true
+}
+
+fn finish(state: u64) {
+    fb.draw_set(state, g_saved_draw)
+    fb.dirty_put(state, g_saved_lo, g_saved_hi)
+    g_render = 0
+}
+
+fn blur_scratch(state: u64, bytes: u64) -> u64 {
+    let frames: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+    if g_blur != 0 && g_blur_frames >= frames {
+        return g_blur
+    }
+    if g_blur != 0 {
+        mem.frame_free_run(state, g_blur, g_blur_frames)
+        g_blur = 0
+        g_blur_frames = 0
+    }
+    let p: u64 = mem.frame_run(state, frames)
+    if p == 0 {
+        return 0
+    }
+    g_blur = p
+    g_blur_frames = frames
+    return p
+}
+
+fn note_px(ra: u64, rb: u64, x: u64, y: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) {
+    let va: u64 = rd32(ra + x * 4) & PIXEL_MASK
+    let vb: u64 = rd32(rb + x * 4) & PIXEL_MASK
+    if va == vb {
+        return
+    }
+    if x >= bx0 && x < bx1 && y >= by0 && y < by1 {
+        g_cmp[CMP_PEND as usize] = g_cmp[CMP_PEND as usize] + 1
+        return
+    }
+    if g_cmp[CMP_BAD as usize] == 0 {
+        g_cmp[CMP_FX as usize] = x
+        g_cmp[CMP_FY as usize] = y
+        g_cmp[CMP_WANT as usize] = va
+        g_cmp[CMP_GOT as usize] = vb
+    }
+    g_cmp[CMP_BAD as usize] = g_cmp[CMP_BAD as usize] + 1
+    if x < g_cmp[CMP_X0 as usize] {
+        g_cmp[CMP_X0 as usize] = x
+    }
+    if y < g_cmp[CMP_Y0 as usize] {
+        g_cmp[CMP_Y0 as usize] = y
+    }
+    if x + 1 > g_cmp[CMP_X1 as usize] {
+        g_cmp[CMP_X1 as usize] = x + 1
+    }
+    if y + 1 > g_cmp[CMP_Y1 as usize] {
+        g_cmp[CMP_Y1 as usize] = y + 1
+    }
+}
+
+fn scan(a: u64, b: u64, w: u64, h: u64, pitch: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64 {
+    var k: u64 = 0
+    while k < CMP_COUNT {
+        g_cmp[k as usize] = 0
+        k = k + 1
+    }
+    g_cmp[CMP_X0 as usize] = NO_MIN
+    g_cmp[CMP_Y0 as usize] = NO_MIN
+    var y: u64 = 0
+    while y < h {
+        let ra: u64 = a + y * pitch
+        let rb: u64 = b + y * pitch
+        var x: u64 = 0
+        while x + 2 <= w {
+            if (rd64(ra + x * 4) & PAIR_MASK) != (rd64(rb + x * 4) & PAIR_MASK) {
+                note_px(ra, rb, x, y, bx0, by0, bx1, by1)
+                note_px(ra, rb, x + 1, y, bx0, by0, bx1, by1)
+            }
+            x = x + 2
+        }
+        if x < w {
+            note_px(ra, rb, x, y, bx0, by0, bx1, by1)
+        }
+        y = y + 1
+    }
+    return g_cmp[CMP_BAD as usize]
+}
+
+fn compare(state: u64, slot: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64 {
+    if slot >= 2 || g_ref[slot as usize] == 0 || fb.back(state) == 0 {
+        return 0
+    }
+    return scan(g_ref[slot as usize], fb.back(state), fb.width(state), fb.height(state), fb.pitch(state), bx0, by0, bx1, by1)
+}
+
+fn card_compare(state: u64) -> u64 {
+    if fb.addr(state) == 0 || fb.back(state) == 0 {
+        return 0
+    }
+    return scan(fb.back(state), fb.addr(state), fb.width(state), fb.height(state), fb.pitch(state), 0, 0, 0, 0)
+}
+
+fn compare_refs(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
+    if g_ref[0] == 0 || g_ref[1] == 0 {
+        return 0
+    }
+    let pitch: u64 = fb.pitch(state)
+    var n: u64 = 0
+    var y: u64 = y0
+    while y < y1 {
+        var x: u64 = x0
+        while x < x1 {
+            if (rd32(g_ref[0] + y * pitch + x * 4) & PIXEL_MASK) != (rd32(g_ref[1] + y * pitch + x * 4) & PIXEL_MASK) {
+                n = n + 1
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return n
+}
+
+fn report(state: u64, level: u64, win: u64, want_addr: u64, got_addr: u64) {
+    g_stat[ST_BAD as usize] = g_stat[ST_BAD as usize] + 1
+    if level == 1 {
+        g_stat[ST_CARD_BAD as usize] = g_stat[ST_CARD_BAD as usize] + 1
+    }
+    g_stat[ST_PX as usize] = g_stat[ST_PX as usize] + g_cmp[CMP_BAD as usize]
+    g_stat[ST_X0 as usize] = g_cmp[CMP_X0 as usize]
+    g_stat[ST_Y0 as usize] = g_cmp[CMP_Y0 as usize]
+    g_stat[ST_X1 as usize] = g_cmp[CMP_X1 as usize]
+    g_stat[ST_Y1 as usize] = g_cmp[CMP_Y1 as usize]
+    g_stat[ST_FIRST_X as usize] = g_cmp[CMP_FX as usize]
+    g_stat[ST_FIRST_Y as usize] = g_cmp[CMP_FY as usize]
+    g_stat[ST_WIN as usize] = win
+    serial.puts((&t_bad[0]) as u64)
+    if level == 1 {
+        serial.put(66 as u8)
+    } else {
+        serial.put(65 as u8)
+    }
+    serial.puts((&t_px[0]) as u64)
+    serial.dec(g_cmp[CMP_BAD as usize])
+    serial.puts((&t_bbox[0]) as u64)
+    serial.dec(g_cmp[CMP_X0 as usize])
+    serial.put(44 as u8)
+    serial.dec(g_cmp[CMP_Y0 as usize])
+    serial.put(44 as u8)
+    serial.dec(g_cmp[CMP_X1 as usize])
+    serial.put(44 as u8)
+    serial.dec(g_cmp[CMP_Y1 as usize])
+    serial.puts((&t_win[0]) as u64)
+    serial.dec(win)
+    serial.puts((&t_first[0]) as u64)
+    serial.dec(g_cmp[CMP_FX as usize])
+    serial.put(44 as u8)
+    serial.dec(g_cmp[CMP_FY as usize])
+    serial.puts((&t_want[0]) as u64)
+    serial.hex(g_cmp[CMP_WANT as usize])
+    serial.puts((&t_got[0]) as u64)
+    serial.hex(g_cmp[CMP_GOT as usize])
+    serial.puts((&t_waddr[0]) as u64)
+    serial.hex(want_addr)
+    serial.puts((&t_gaddr[0]) as u64)
+    serial.hex(got_addr)
+    serial.puts((&t_pitch[0]) as u64)
+    serial.dec(fb.pitch(state))
+    serial.puts((&t_w[0]) as u64)
+    serial.dec(fb.width(state))
+    serial.puts((&t_h[0]) as u64)
+    serial.dec(fb.height(state))
+    serial.nl()
+    if g_freeze != 0 && g_frozen == 0 {
+        g_frozen = 1
+        serial.puts((&t_frozen[0]) as u64)
+        serial.nl()
+    }
+}
