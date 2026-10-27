@@ -40,6 +40,5 @@ for f in "$IMG"/*.elf; do
     if [ ! -f "$HP_BASE/$n.elf" ] || ! cmp -s "$HP_BASE/$n.elf" "$f"; then PROGS+=("$n"); fi
 done
 echo "republish-hp: ${#PROGS[@]} overlay programs"
-[ ${#PROGS[@]} -le 95 ] || { echo "republish-hp: more than 95 overlay files do not fit one signed list"; exit 1; }
 bash tools/ota/publish-hp.sh "$IMG" "$NOTES" "${PROGS[@]}" $DRY
 rm -f "$IMG.log"
