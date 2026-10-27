@@ -87,6 +87,7 @@ import ui.tile
 import ui.wmplug
 import ui.ax
 import ui.frameprof
+import ui.pixelguard
 import gfx.cursor
 import drv.gpu.vgpu
 import drv.gpu.vmsvga
@@ -3116,6 +3117,7 @@ fn bild_say_reset(state: u64) {
     serial.dec(fb.bm(state, fb.S_RM_OUT))
     serial.nl()
     beam.say(state)
+    pixelguard.say()
     fb.flush_reset(state)
 }
 
@@ -3736,6 +3738,14 @@ fn rgn_take(state: u64, out: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64
             i = i + 1
         }
         ss(state, S_RSAVED, gs(state, S_RSAVED) + (box_area - area))
+        if pixelguard.bug_is(5) && n >= 2 {
+            var bk: u64 = 0
+            while bk < 4 {
+                __mmio_write64((out + (4 + bk) * 8) as *mut u64, __mmio_read64((out + ((n - 1) * 4 + bk) * 8) as *mut u64))
+                bk = bk + 1
+            }
+            n = n - 1
+        }
     }
     region.region_clear(r)
     ss(state, S_RBAD, 0)
@@ -9140,16 +9150,138 @@ fn ph_add(state: u64, slot: u64, t0: u64, t1: u64) {
     ss(state, slot, gs(state, slot) + ph_us(state, t0, t1))
 }
 
+fn pg_window_at(state: u64, x: u64, y: u64) -> u64 {
+    var z: u64 = gs(state, S_COUNT)
+    while z > 0 {
+        z = z - 1
+        let i: u64 = at_z(state, z)
+        if i < MAX_WIN && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
+            let wx: i64 = win_x(state, i)
+            let wy: i64 = win_y(state, i)
+            if (x as i64) >= wx && (x as i64) < wx + outer_w(state, i) as i64
+                && (y as i64) >= wy && (y as i64) < wy + outer_h(state, i) as i64 {
+                return i + 1
+            }
+        }
+    }
+    return 0
+}
+
+fn pg_ready(state: u64) -> bool {
+    if ax.mag(state) || fb.transformed(state) || fb.on_vgpu(state) || fb.flip_on(state) {
+        return false
+    }
+    if fb.back(state) == 0 || fb.draw_at(state) != fb.back(state) {
+        return false
+    }
+    if gs(state, S_VSYNC) != 0 || cp_on(state) {
+        return false
+    }
+    return true
+}
+
+fn pg_render(state: u64, slot: u64) -> bool {
+    if !pixelguard.begin(state, slot) {
+        return false
+    }
+    compose_rect(state, 0, 0, gs(state, S_SW), gs(state, S_SH), 0)
+    pixelguard.finish(state)
+    return true
+}
+
+fn pg_box(state: u64, out: u64) {
+    var k: u64 = 0
+    while k < 4 {
+        __mmio_write64((out + k * 8) as *mut u64, 0 as u64)
+        k = k + 1
+    }
+    if gs(state, S_DON) != 0 {
+        __mmio_write64(out as *mut u64, gs(state, S_DX0))
+        __mmio_write64((out + 8) as *mut u64, gs(state, S_DY0))
+        __mmio_write64((out + 16) as *mut u64, gs(state, S_DX1))
+        __mmio_write64((out + 24) as *mut u64, gs(state, S_DY1))
+    }
+}
+
+fn pg_compare(state: u64, slot: u64) -> u64 {
+    var bx: [u64; 4] = [0 as u64; 4]
+    pg_box(state, (&bx[0]) as u64)
+    return pixelguard.compare(state, slot, bx[0], bx[1], bx[2], bx[3])
+}
+
+fn pg_check(state: u64, painted: u64) {
+    if !pixelguard.due(state, painted) {
+        return
+    }
+    if !pg_ready(state) {
+        pixelguard.count(pixelguard.ST_SKIPPED)
+        return
+    }
+    let t0: u64 = time.tsc()
+    let pl: u64 = gs(state, S_PL_ON)
+    let zf: u64 = gs(state, S_ZFLAG)
+    let p0: u64 = gs(state, S_PH_BG)
+    let p1: u64 = gs(state, S_PH_WIN)
+    let p2: u64 = gs(state, S_PH_DRAG)
+    let p3: u64 = gs(state, S_PH_TOP)
+    let p4: u64 = gs(state, S_PH_PEND)
+    let p5: u64 = gs(state, S_PH_BLUR)
+    let p6: u64 = gs(state, S_PH_GLASS)
+    let p7: u64 = gs(state, S_PH_SHADOW)
+    ss(state, S_PL_ON, 0)
+    if pg_render(state, 0) {
+        pixelguard.count(pixelguard.ST_CHECKS)
+        let bad: u64 = pg_compare(state, 0)
+        if bad != 0 {
+            if pg_render(state, 1) {
+                let bad2: u64 = pg_compare(state, 1)
+                if bad2 == 0 {
+                    pixelguard.count(pixelguard.ST_PENDING)
+                } else if pixelguard.compare_refs(state, pixelguard.cmp_get(pixelguard.CMP_X0), pixelguard.cmp_get(pixelguard.CMP_Y0),
+                    pixelguard.cmp_get(pixelguard.CMP_X1), pixelguard.cmp_get(pixelguard.CMP_Y1)) != 0 {
+                    pixelguard.count(pixelguard.ST_UNSTABLE)
+                } else {
+                    let win: u64 = pg_window_at(state, pixelguard.cmp_get(pixelguard.CMP_FX), pixelguard.cmp_get(pixelguard.CMP_FY))
+                    pixelguard.report(state, 0, win, pixelguard.ref_addr(1), fb.back(state))
+                }
+            }
+        }
+    }
+    if !fb.stripe(state) {
+        pixelguard.count(pixelguard.ST_CARD_CHECKS)
+        if pixelguard.card_compare(state) != 0 {
+            let cwin: u64 = pg_window_at(state, pixelguard.cmp_get(pixelguard.CMP_FX), pixelguard.cmp_get(pixelguard.CMP_FY))
+            pixelguard.report(state, 1, cwin, fb.back(state), fb.addr(state))
+        }
+    }
+    ss(state, S_PL_ON, pl)
+    ss(state, S_ZFLAG, zf)
+    ss(state, S_PH_BG, p0)
+    ss(state, S_PH_WIN, p1)
+    ss(state, S_PH_DRAG, p2)
+    ss(state, S_PH_TOP, p3)
+    ss(state, S_PH_PEND, p4)
+    ss(state, S_PH_BLUR, p5)
+    ss(state, S_PH_GLASS, p6)
+    ss(state, S_PH_SHADOW, p7)
+    pixelguard.set_last(pixelguard.ST_US, time_us(state, time.tsc() - t0))
+}
+
 fn compose(state: u64) -> u64 {
     let lk: u64 = state + kstate.WM_OFF + S_CLOCK
     let alt: u64 = __atomic_swap(lk as *mut u64, 0 as u64, 1 as u64)
     if alt != 0 {
         return 0
     }
+    if pixelguard.frozen() {
+        arch.atomic_store(lk, 0)
+        return 0
+    }
     screen_follow(state)
     cp_watch(state)
     tab_publish(state)
     let r: u64 = compose_one(state)
+    pg_check(state, r)
     cp_kick(state)
     arch.atomic_store(lk, 0)
     return r
@@ -9176,7 +9308,11 @@ fn flush_box(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
         fb.dirty(state, y0, y1)
         fb.flush(state)
     } else {
-        fb.flush_region(state, x0, y0, x1 - x0, y1 - y0)
+        var fw: u64 = x1 - x0
+        if pixelguard.bug_is(4) && fw > 1 {
+            fw = fw - 1
+        }
+        fb.flush_region(state, x0, y0, fw, y1 - y0)
     }
     let t1: u64 = time.tsc()
     if gs(state, S_PL_ON) != 0 {
@@ -9269,7 +9405,11 @@ fn flush_many(state: u64, rs: u64, n: u64) {
             beam.wait(state, x0, y0, x1 - x0, y1 - y0)
             let ta: u64 = time.tsc()
             let oa: u64 = fb.tx_octets(state)
-            fb.flush_rect(state, x0, y0, x1 - x0, y1 - y0)
+            var fw: u64 = x1 - x0
+            if pixelguard.bug_is(4) && fw > 1 {
+                fw = fw - 1
+            }
+            fb.flush_rect(state, x0, y0, fw, y1 - y0)
             if gs(state, S_PL_ON) != 0 {
                 pl_record(state, 0, x0, y0, x1, y1, ta, 0)
             }
@@ -9527,6 +9667,9 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
         serial.dec(by1)
         serial.nl()
     }
+    if pixelguard.rendering() {
+        return (x1 - x0) * (y1 - y0)
+    }
     if gs(state, S_VSYNC) != 0 {
         pend_add(state, x0, y0, x1, y1)
         ss(state, S_SKIPPED, gs(state, S_SKIPPED) + 1)
@@ -9620,8 +9763,12 @@ fn compose_one(state: u64) -> u64 {
             if collect {
                 outp = (&rs[(ri * 4) as usize]) as u64
             }
+            var rx1: u64 = rs[(ri * 4 + 2) as usize]
+            if pixelguard.bug_is(1) && rx1 > rs[(ri * 4) as usize] + 1 {
+                rx1 = rx1 - 1
+            }
             painted = painted + compose_rect(state, rs[(ri * 4) as usize], rs[(ri * 4 + 1) as usize],
-                rs[(ri * 4 + 2) as usize], rs[(ri * 4 + 3) as usize], outp)
+                rx1, rs[(ri * 4 + 3) as usize], outp)
             ri = ri + 1
         }
         if collect {
@@ -10783,7 +10930,7 @@ fn blur_mix(farbe: u64, ton: u64, tint: u64, amp: u64, x: u64,
 // Schneidet das Schmutzrechteck die gespeicherte Flaeche? Dann ist sie
 // hin. Aufgerufen aus `damage`, also aus JEDER Aenderungsmeldung.
 fn blur_touch(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
-    if skip == BT_ALL {
+    if skip == BT_ALL || pixelguard.bug_is(2) {
         return
     }
     // a change made by window `skip - 1` can only spoil the blur of a window ABOVE it: a blur is made from what lies under its
@@ -11320,7 +11467,11 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
     //
     // Dasselbe Fenster, dasselbe Rechteck, derselbe Schmutzzaehler --
     // dann steht auf dem Platz noch genau das Bild, das hier hingehoert.
-    let tr: u64 = blur_slot(state, i, x0 as u64, y0 as u64, w, h)
+    let refm: bool = pixelguard.rendering()
+    var tr: u64 = BC_N
+    if !refm {
+        tr = blur_slot(state, i, x0 as u64, y0 as u64, w, h)
+    }
     if tr < BC_N && gs(state, S_BC_AUS) == 0
         && gs(state, S_BC_HIT + tr * 8) == gs(state, S_BC_GEN + tr * 8) {
         let bq: u64 = gs(state, S_BC_BUF) +% tr *% ein
@@ -11361,10 +11512,18 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
     // Kein Treffer: entweder gibt es den Platz schon (dann wird er
     // ueberschrieben) oder es braucht einen neuen.
     var sl: u64 = tr
-    if sl >= BC_N {
-        sl = blur_freier(state)
+    var b: u64 = 0
+    if refm {
+        b = pixelguard.blur_scratch(state, bytes)
+        if b == 0 {
+            return
+        }
+    } else {
+        if sl >= BC_N {
+            sl = blur_freier(state)
+        }
+        b = gs(state, S_BC_BUF) +% sl *% ein
     }
-    let b: u64 = gs(state, S_BC_BUF) +% sl *% ein
     // ------------------------------------------------ gerechnet
     let t0: u64 = time.tsc()
     // 1. den Hintergrund aus dem ZWEITPUFFER holen. Hier steht schon
@@ -11581,6 +11740,9 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
         ry = ry + 1
     }
     // 4. den Speicher anschreiben -- mit dem Zaehlerstand VON JETZT.
+    if refm {
+        return
+    }
     ss(state, S_BC_WIN + sl * 8, i + 1)
     ss(state, S_BC_X + sl * 8, x0 as u64)
     ss(state, S_BC_Y + sl * 8, y0 as u64)
@@ -15388,8 +15550,10 @@ fn on_mouse_btn(state: u64, btn: u64) {
             ss(state, S_CURY, ny)
             hwcur_bewegen(state)
         } else {
-            damage_ex(state, ox as i64 - gx as i64, oy as i64 - gy as i64,
-                (ox + gw) as i64 - gx as i64, (oy + gw) as i64 - gy as i64, BT_ALL)
+            if !pixelguard.bug_is(3) {
+                damage_ex(state, ox as i64 - gx as i64, oy as i64 - gy as i64,
+                    (ox + gw) as i64 - gx as i64, (oy + gw) as i64 - gy as i64, BT_ALL)
+            }
             ss(state, S_CURX, nx)
             ss(state, S_CURY, ny)
             damage_ex(state, nx as i64 - gx as i64, ny as i64 - gy as i64,
