@@ -4,7 +4,7 @@ cd "$(dirname "$0")/../.."
 export FIRNLIB=$PWD/lib
 OUT=${1:?output dir}
 SMP=${SMP:-4}
-MB=${MB:-8}
+MB=${MB:-2}
 SZ=${SZ:-65536}
 N=${N:-4}
 MEM=${MEM:-8192}
