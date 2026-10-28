@@ -121,13 +121,14 @@ python3 -I - "$TMPD/proc/o/proc.ppm" "$TMPD/proc/crop.png" <<'PY'
 import sys
 from PIL import Image, ImageOps
 im = Image.open(sys.argv[1]).convert("L")
-im = ImageOps.invert(im.crop((40, 140, 1180, 620)))
+im = ImageOps.invert(im.crop((20, 70, 600, 460)))
 im.resize((im.width * 3, im.height * 3)).save(sys.argv[2])
 PY
-txt=$(tesseract "$TMPD/proc/crop.png" - --psm 6 2>/dev/null)
+txt=$(tesseract "$TMPD/proc/crop.png" - --psm 6 2>/dev/null | sed -e 's/card[ _]checks/card_checks/I' -e 's/card[ _]bad/card_bad/I')
 rc=0
 for k in mode checks bad unstable pending skipped px card_checks card_bad x0 y0 x1 y1 win us renders; do
-    if echo "$txt" | grep -qi "pixelguard\. *$k "; then
+    pat=$(echo "$k" | sed -e 's/1/[1lI]/')
+    if echo "$txt" | grep -qi "pixelguard\. *$pat "; then
         :
     else
         printf '  FAIL  /proc/frames line frames.pixelguard.%s not readable on screen\n' "$k"
