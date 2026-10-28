@@ -5,6 +5,7 @@
 #   baseline the HP was installed with (HP_BASE, default hp-stick33), publish kernel + overlay to the dev feed
 #   (tools/ota/publish-hp.sh) and clean up. Afterwards the HP only needs `/bin/ota system apply restart`.
 #   Env: HP_BASE=<image dir of the installed baseline>  HP_REF=<git ref, default origin/main>
+#        HP_ONLY="a b c" limits the overlay to the listed programs (small first step for a slow bridge)
 #        HP_KEEP_IMAGE=1 keeps the built image dir.  Run directly (not via heavy) when the heavy queue hangs.
 set -euo pipefail
 REPO=${OSUM_MAIN_CHECKOUT:-/root/jarvis/projects/u_DiS4in7esMF1/osum}
@@ -40,6 +41,7 @@ for f in "$IMG"/*.elf; do
     n=$(basename "$f" .elf)
     [ "$n" = "osum.mb" ] && continue
     [ -s "$f" ] || continue
+    if [ -n "${HP_ONLY:-}" ]; then case " $HP_ONLY " in *" $n "*) ;; *) continue ;; esac; fi
     if [ ! -f "$HP_BASE/$n.elf" ] || ! cmp -s "$HP_BASE/$n.elf" "$f"; then PROGS+=("$n"); fi
 done
 while read -r dest rel; do
