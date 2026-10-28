@@ -19,7 +19,10 @@ for stage in ${STAGES:-F3 F4 F5}; do
         STAGE_ENV=()
         [ "$stage" = F5 ] && STAGE_ENV=(env GUI=1 "EXTRA=/etc/fx3.sh=$PWD/tools/linuxapps/guest-fx3-window.sh@755" "KARGS=gfx disp wm wmdauer wmshell osum vfs bus fremdtrace script=sh /etc/fx.sh;exit")
         BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-900} "${STAGE_ENV[@]}" bash tools/linuxapps/run.sh "$WD" "${GUEST[$stage]}" "$OUT/$stage" > "$OUT/$stage.log" 2>&1
-        if grep -qaF -- "${MARK[$stage]}" "$OUT/$stage/ser.clean" 2>/dev/null; then got=green; first=""; else
+        if [ "$stage" = F5 ]; then verdict=$(python3 -I tools/linuxapps/f5check.py "$OUT/$stage/ser.clean" 2>&1); else verdict=""; fi
+        if [ "$stage" = F5 ] && [ "${verdict%% *}" = green ]; then got=green; first=""
+        elif [ "$stage" = F5 ]; then first="$verdict"
+        elif grep -qaF -- "${MARK[$stage]}" "$OUT/$stage/ser.clean" 2>/dev/null; then got=green; first=""; else
             first=$(grep -a -m1 -E '^sys: (ERR|ENOSYS)|Error|error|fault' "$OUT/$stage/ser.clean" 2>/dev/null)
             [ -n "$first" ] || first="no marker and no error line"
         fi

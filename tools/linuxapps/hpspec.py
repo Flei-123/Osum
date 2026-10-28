@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import sys
 
 KEEP_PREFIXES = ("/usr/", "/var/cache/fontconfig", "/etc/fonts", "/etc/gtk-3.0", "/etc/xdg")
@@ -12,6 +13,28 @@ def spec_path(line):
         if idx > 0:
             return line[:idx]
     return line
+
+
+def find_fx_root(lines):
+    for line in lines:
+        if line.startswith("/usr/lib/libgdk_pixbuf-2.0.so.0.") and "=" in line:
+            host = line.split("=", 1)[1].split("@", 1)[0]
+            idx = host.find("/usr/lib/")
+            if idx > 0:
+                return host[:idx]
+    return None
+
+
+def pixbuf_extras(lines):
+    fx_root = find_fx_root(lines)
+    if fx_root is None:
+        print("hpspec: WARNING no custom libgdk_pixbuf in spec")
+        return []
+    cache = os.path.join(fx_root, "usr/share/mime/mime.cache")
+    if not os.path.isfile(cache):
+        print("hpspec: WARNING no mime.cache under %s" % fx_root)
+        return []
+    return ["/usr/share/mime/@755", "/usr/share/mime/mime.cache=%s@644" % cache]
 
 
 def main(argv):
@@ -28,6 +51,7 @@ def main(argv):
             continue
         elif path.startswith(KEEP_PREFIXES) or path in ("/etc/fonts/", "/etc/gtk-3.0/", "/etc/xdg/", "/var/cache/", "/var/cache/fontconfig/"):
             out.append(line)
+    out.extend(extra for extra in pixbuf_extras(out) if extra not in out)
     out.append("/bin/fxrun=%s@755" % launcher)
     open(spec_out, "w", encoding="utf-8").write("\n".join(out) + "\n")
     print("hpspec: %d entries" % len(out))
