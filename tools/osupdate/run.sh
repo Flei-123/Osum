@@ -544,8 +544,8 @@ hat "$OUT/a2.txt" "ABS-CONF-NEW" "absolute file survives the reboot"
 hat "$OUT/a2.txt" "AFTER-REBOOT" "the syslink survives the reboot"
 hat "$OUT/a2.txt" "system: up to date" "search says up to date"
 fresh_disk
-rc=$(lauf a3 "/apps/gate.osp/start NOPE;cat /etc/gate.conf;exit")
-hatnicht "$OUT/a3.txt" "NOPE" "counter-proof: without the update no start link answers"
+rc=$(lauf a3 "ls /apps/gate.osp;cat /etc/gate.conf;exit")
+hatnicht "$OUT/a3.txt" "start" "counter-proof: without the update no start link exists"
 hatnicht "$OUT/a3.txt" "ABS-CONF-NEW" "counter-proof: without the update no /etc/gate.conf"
 printf 'x\n' > "$OUT/ovl-abs/etc/Bad Name"
 mkdir -p "$OUT/ovl-abs/root"; printf 'x\n' > "$OUT/ovl-abs/root/evil"
