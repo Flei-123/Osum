@@ -40,6 +40,8 @@ import mm.mem
 import bus.pci
 import acpi.amlns
 import acpi.ecio
+import acpi.acpi
+import arch.x86_64.apic
 
 export {
     OT_NONE, OT_INT, OT_STR, OT_BUF, OT_PKG, OT_REF_SLOT, OT_REF_NODE,
@@ -49,7 +51,8 @@ export {
     const_int, truth, to_int,
     field_read, field_write, field_read_wide, field_write_wide, field_bits, NARROW_BITS, region_check,
     RS_MEM, RS_IO, RS_PCI, RS_EC,
-    res_first_irq, res_irq_count, res_irq_at, set_read_only, blocked_writes
+    res_first_irq, res_irq_count, res_irq_at, set_read_only, blocked_writes,
+    mem_unmapped, mem_window_uses
 }
 
 const OBJ_BYTES: u64 = 24
@@ -315,6 +318,54 @@ fn region_check(state: u64, space: u64, base: u64, len: u64) -> bool {
     return false
 }
 
+const MEM_DIRECT_LIMIT: u64 = 0x3E000000
+static mut mem_miss: u64 = 0
+static mut mem_win: u64 = 0
+
+fn mem_unmapped() -> u64 {
+    return mem_miss
+}
+
+fn mem_window_uses() -> u64 {
+    return mem_win
+}
+
+fn mem_va(state: u64, phys: u64) -> u64 {
+    if phys < MEM_DIRECT_LIMIT {
+        return phys
+    }
+    if phys < 0x40000000 || acpi.confined() {
+        let v: u64 = apic.map_device(state, phys)
+        if v == 0 {
+            if mem_miss == 0 {
+                var s_nw: [u8; 34] = "aml: no window for region access\n\0"
+                serial.puts((&s_nw[0]) as u64)
+            }
+            mem_miss = mem_miss + 1
+            return 0
+        }
+        mem_win = mem_win + 1
+        return v
+    }
+    return phys
+}
+
+fn mem_rd8(state: u64, phys: u64) -> u64 {
+    let v: u64 = mem_va(state, phys)
+    if v == 0 {
+        return 0
+    }
+    return amlns.rd8(v)
+}
+
+fn mem_wr8(state: u64, phys: u64, val: u64) {
+    let v: u64 = mem_va(state, phys)
+    if v == 0 {
+        return
+    }
+    amlns.wr8(v, val)
+}
+
 fn reg_read8(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
     if space == RS_EC {
         return ecio.read_reg((base + off) & 0xFF)
@@ -325,7 +376,7 @@ fn reg_read8(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
     if space == RS_PCI {
         return pci.cfg_read8(adr_of(state, node), base + off)
     }
-    return amlns.rd8(base + off)
+    return mem_rd8(state, base + off)
 }
 
 static mut read_only: bool = false
@@ -364,7 +415,7 @@ fn reg_write8(state: u64, space: u64, node: u64, base: u64, off: u64,
         pci.cfg_write8(adr_of(state, node), base + off, v)
         return
     }
-    amlns.wr8(base + off, v)
+    mem_wr8(state, base + off, v)
 }
 
 fn reg_read32(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
@@ -378,7 +429,8 @@ fn reg_read32(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
     if space == RS_PCI {
         return pci.cfg_read32(adr_of(state, node), base + off)
     }
-    return amlns.rd32(base + off)
+    return mem_rd8(state, base + off) | (mem_rd8(state, base + off + 1) << 8)
+        | (mem_rd8(state, base + off + 2) << 16) | (mem_rd8(state, base + off + 3) << 24)
 }
 
 fn reg_write32(state: u64, space: u64, node: u64, base: u64, off: u64,
@@ -402,10 +454,10 @@ fn reg_write32(state: u64, space: u64, node: u64, base: u64, off: u64,
         pci.cfg_write32(adr_of(state, node), base + off, v)
         return
     }
-    amlns.wr8(base + off, v & 0xFF)
-    amlns.wr8(base + off + 1, (v >> 8) & 0xFF)
-    amlns.wr8(base + off + 2, (v >> 16) & 0xFF)
-    amlns.wr8(base + off + 3, (v >> 24) & 0xFF)
+    mem_wr8(state, base + off, v & 0xFF)
+    mem_wr8(state, base + off + 1, (v >> 8) & 0xFF)
+    mem_wr8(state, base + off + 2, (v >> 16) & 0xFF)
+    mem_wr8(state, base + off + 3, (v >> 24) & 0xFF)
 }
 
 // ------------------------------------------------------------ a field
