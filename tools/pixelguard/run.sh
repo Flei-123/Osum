@@ -127,8 +127,8 @@ PY
 txt=$(tesseract "$TMPD/proc/crop.png" - --psm 6 2>/dev/null | sed -e 's/card[ _]checks/card_checks/I' -e 's/card[ _]bad/card_bad/I')
 rc=0
 for k in mode checks bad unstable pending skipped px card_checks card_bad x0 y0 x1 y1 win us renders; do
-    pat=$(echo "$k" | sed -e 's/1/[1lI]/')
-    if echo "$txt" | grep -qi "pixelguard\. *$pat "; then
+    pat=$(echo "$k" | sed -e 's/1/[1lI]+/')
+    if echo "$txt" | grep -qiE "pixelguard\. *$pat "; then
         :
     else
         printf '  FAIL  /proc/frames line frames.pixelguard.%s not readable on screen\n' "$k"
