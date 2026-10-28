@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+export { arm, new_len, R_OK, R_NO_ENTRY, R_NO_PATH, R_DEFAULT, R_B_PLACE, R_FULL }
+
+const R_OK: u64 = 0
+const R_NO_ENTRY: u64 = 1
+const R_NO_PATH: u64 = 2
+const R_DEFAULT: u64 = 3
+const R_B_PLACE: u64 = 4
+const R_FULL: u64 = 5
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut produced: u64 = 0
+static mut full: bool = false
+
+static mut k_default: [u8; 15] = "default_entry:\0"
+static mut k_default_two: [u8; 17] = "default_entry: 2\0"
+static mut k_path_a: [u8; 22] = "path: boot():/osum.mb\0"
+static mut k_path_b: [u8; 24] = "path: boot():/osum-b.mb\0"
+static mut k_suffix: [u8; 10] = " (update)\0"
+static mut k_nl: [u8; 2] = "\n\0"
+
+fn g8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+fn p8(p: u64, v: u64) {
+    __mmio_write8((p) as *mut u8, v as u8)
+}
+
+fn lit_len(lit: u64) -> u64 {
+    var n: u64 = 0
+    while g8(lit + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn starts(a: u64, i: u64, n: u64, lit: u64) -> bool {
+    let l: u64 = lit_len(lit)
+    if i + l > n {
+        return false
+    }
+    var k: u64 = 0
+    while k < l {
+        if g8(a + i + k) != g8(lit + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn line_end(a: u64, i: u64, n: u64) -> u64 {
+    var j: u64 = i
+    while j < n && g8(a + j) != 10 && g8(a + j) != 13 {
+        j = j + 1
+    }
+    return j
+}
+
+fn next_line(a: u64, i: u64, n: u64) -> u64 {
+    var j: u64 = i
+    while j < n && g8(a + j) != 10 {
+        j = j + 1
+    }
+    if j < n {
+        j = j + 1
+    }
+    return j
+}
+
+fn copy(dst: u64, cap: u64, w: u64, src: u64, cnt: u64) -> u64 {
+    if w + cnt + 1 > cap {
+        full = true
+        return w
+    }
+    var k: u64 = 0
+    while k < cnt {
+        p8(dst + w + k, g8(src + k))
+        k = k + 1
+    }
+    return w + cnt
+}
+
+fn path_line(a: u64, from: u64, to: u64, lit: u64) -> u64 {
+    var i: u64 = from
+    while i < to {
+        var j: u64 = i
+        while j < to && (g8(a + j) == 32 || g8(a + j) == 9) {
+            j = j + 1
+        }
+        if starts(a, j, to, lit) {
+            let e: u64 = j + lit_len(lit)
+            if e == to || g8(a + e) == 10 || g8(a + e) == 13 {
+                return j
+            }
+        }
+        i = next_line(a, i, to)
+    }
+    return NONE
+}
+
+fn entry_start(a: u64, from: u64, n: u64) -> u64 {
+    var i: u64 = from
+    while i < n {
+        if g8(a + i) == 47 {
+            return i
+        }
+        i = next_line(a, i, n)
+    }
+    return NONE
+}
+
+fn default_line(a: u64, to: u64) -> u64 {
+    var i: u64 = 0
+    while i < to {
+        if starts(a, i, to, (&k_default[0 as usize]) as u64) {
+            return i
+        }
+        i = next_line(a, i, to)
+    }
+    return NONE
+}
+
+fn default_value_ok(a: u64, d: u64, to: u64) -> bool {
+    var j: u64 = d + lit_len((&k_default[0 as usize]) as u64)
+    while j < to && (g8(a + j) == 32 || g8(a + j) == 9) {
+        j = j + 1
+    }
+    if j >= to {
+        return false
+    }
+    let c: u64 = g8(a + j)
+    if c != 49 && c != 50 {
+        return false
+    }
+    let e: u64 = j + 1
+    return e >= to || g8(a + e) == 10 || g8(a + e) == 13 || g8(a + e) == 32
+}
+
+fn ends_blank(a: u64, e: u64) -> bool {
+    if e >= 2 && g8(a + e - 1) == 10 && g8(a + e - 2) == 10 {
+        return true
+    }
+    return e >= 3 && g8(a + e - 1) == 10 && g8(a + e - 2) == 13 && g8(a + e - 3) == 10
+}
+
+fn emit_update_entry(dst: u64, cap: u64, w0: u64, a: u64, es: u64, ee: u64, pp: u64) -> u64 {
+    var w: u64 = w0
+    if g8(a + ee - 1) != 10 {
+        w = copy(dst, cap, w, (&k_nl[0 as usize]) as u64, 1)
+    }
+    if !ends_blank(a, ee) {
+        w = copy(dst, cap, w, (&k_nl[0 as usize]) as u64, 1)
+    }
+    let te: u64 = line_end(a, es, ee)
+    w = copy(dst, cap, w, a + es, te - es)
+    w = copy(dst, cap, w, (&k_suffix[0 as usize]) as u64, lit_len((&k_suffix[0 as usize]) as u64))
+    w = copy(dst, cap, w, a + te, pp - te)
+    w = copy(dst, cap, w, (&k_path_b[0 as usize]) as u64, lit_len((&k_path_b[0 as usize]) as u64))
+    let pe: u64 = pp + lit_len((&k_path_a[0 as usize]) as u64)
+    w = copy(dst, cap, w, a + pe, ee - pe)
+    return w
+}
+
+fn new_len() -> u64 {
+    return produced
+}
+
+fn arm(a: u64, n: u64, dst: u64, cap: u64) -> u64 {
+    produced = 0
+    full = false
+    if n == 0 || cap < 64 {
+        return R_NO_ENTRY
+    }
+    let es: u64 = entry_start(a, 0, n)
+    if es == NONE || (es + 1 < n && g8(a + es + 1) == 47) {
+        return R_NO_ENTRY
+    }
+    var ee: u64 = entry_start(a, next_line(a, es, n), n)
+    if ee == NONE {
+        ee = n
+    }
+    let pp: u64 = path_line(a, es, ee, (&k_path_a[0 as usize]) as u64)
+    if pp == NONE {
+        return R_NO_PATH
+    }
+    let d: u64 = default_line(a, es)
+    if d != NONE && !default_value_ok(a, d, es) {
+        return R_DEFAULT
+    }
+    let bp: u64 = path_line(a, 0, n, (&k_path_b[0 as usize]) as u64)
+    let has_b: bool = bp != NONE
+    if has_b {
+        var e3: u64 = entry_start(a, next_line(a, ee, n), n)
+        if e3 == NONE {
+            e3 = n
+        }
+        if ee >= n || bp < ee || bp >= e3 || (ee + 1 < n && g8(a + ee + 1) == 47) {
+            return R_B_PLACE
+        }
+    }
+    var w: u64 = 0
+    var from: u64 = 0
+    if d == NONE {
+        w = copy(dst, cap, w, (&k_default_two[0 as usize]) as u64, 16)
+        w = copy(dst, cap, w, (&k_nl[0 as usize]) as u64, 1)
+    } else {
+        w = copy(dst, cap, w, a, d)
+        w = copy(dst, cap, w, (&k_default_two[0 as usize]) as u64, 16)
+        from = line_end(a, d, n)
+    }
+    w = copy(dst, cap, w, a + from, ee - from)
+    if !has_b {
+        w = emit_update_entry(dst, cap, w, a, es, ee, pp)
+    }
+    w = copy(dst, cap, w, a + ee, n - ee)
+    if full {
+        return R_FULL
+    }
+    p8(dst + w, 0)
+    produced = w
+    return R_OK
+}
