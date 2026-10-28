@@ -27,6 +27,7 @@
 #      overlay in WITHOUT a trial, restart or slot B; version grows at once, a running `launcher` is ended
 #      (shell supervisor restarts it), old backups gone; counter-proof: section 2 (other kernel = slot B)
 #  13. trust-root delivery (sysfile roots): rootsctl apply from the signed list; counter-proofs wrong hash, junk block
+#  14. absolute overlay targets (/etc, /usr/share), syslink of /apps/<x>.osp/start to a new /bin file, reboot, counter-proofs
 # Sections 2 and 5 run with the gzip feed (kernel + overlay files as .gz, streaming gunzip on the
 # device): the trial boot sees the new /bin files, confirm drops the backups, a lost trial restores them.
 # OSU_SECS="8 9" runs only the listed sections (1 always runs); OSU_ONLY7=1 = "7".
@@ -513,6 +514,42 @@ sed -n '/^osum\$ ota system apply/,$p' "$OUT/r3.txt" > "$OUT/r3.after"
 hat "$OUT/r3.after" "rootsctl: refused" "counter-proof: a bundle with an unparsable block is refused by rootsctl"
 hat "$OUT/r3.after" "ota: trust roots not updated" "counter-proof: reported"
 hat "$OUT/r3.after" "BLOCKS 1" "counter-proof: the store still holds 1 root"
+dienst_aus
+
+fi
+
+if want 14; then
+echo "== 14. absolute overlay targets + syslink: /etc, /usr/share, /apps/<x>.osp/start as a link of a new /bin file =="
+fresh_disk
+rm -rf "$OUT/ovl-abs"; mkdir -p "$OUT/ovl-abs/etc" "$OUT/ovl-abs/usr/share/gate"
+[ -f "$OUT/bin/echo" ] && cp "$OUT/bin/echo" "$OUT/ovl-abs/gate-abs" || bad "no built echo for the link target"
+printf 'ABS-CONF-NEW\n' > "$OUT/ovl-abs/etc/gate.conf"
+printf 'ABS-SHARE-NEW\n' > "$OUT/ovl-abs/usr/share/gate/msg.txt"
+printf '/apps/gate.osp/start /bin/gate-abs\n' > "$OUT/abs.links"
+pubt "$OUT/img-old" "$OUT/feed-abs" dev --count 500 --overlay "$OUT/ovl-abs" --links "$OUT/abs.links" --gz && ok "abs feed: build 500, 3 overlay files, 1 syslink" || { cat "$OUT/pub.log"; bad "publish abs"; }
+grep -qa "^syslink" "$OUT/feed-abs/system/dev/VERZEICHNIS" && ok "list carries the syslink line" || bad "list lacks the syslink line"
+grep -aq "/etc/gate.conf" "$OUT/feed-abs/system/dev/VERZEICHNIS" && ok "list carries the absolute /etc target" || bad "list lacks the absolute target"
+dienst "$OUT/feed-abs" && ok "feed up" || bad "feed does not start"
+rc=$(lauf a1 "ota system search;ota system apply;cat /etc/gate.conf;cat /usr/share/gate/msg.txt;/apps/gate.osp/start LINK-WORKS;gate-abs BIN-WORKS;cat /system/SYSVERSION;ota system status;exit")
+sed -n '/^osum\$ ota system apply/,$p' "$OUT/a1.txt" > "$OUT/a1.after"
+hat "$OUT/a1.after" "system: applied, no restart needed" "apply says applied"
+hat "$OUT/a1.after" "ABS-CONF-NEW" "/etc/gate.conf written"
+hat "$OUT/a1.after" "ABS-SHARE-NEW" "/usr/share/gate/msg.txt written"
+hat "$OUT/a1.after" "LINK-WORKS" "/apps/gate.osp/start runs the new /bin file"
+hat "$OUT/a1.after" "BIN-WORKS" "/bin/gate-abs runs"
+hat "$OUT/a1.after" "00000500" "SYSVERSION is 500"
+hat "$OUT/a1.after" "system: overlay committed" "overlay committed"
+rc=$(lauf a2 "cat /etc/gate.conf;/apps/gate.osp/start AFTER-REBOOT;ota system search;exit" keep)
+hat "$OUT/a2.txt" "ABS-CONF-NEW" "absolute file survives the reboot"
+hat "$OUT/a2.txt" "AFTER-REBOOT" "the syslink survives the reboot"
+hat "$OUT/a2.txt" "system: up to date" "search says up to date"
+fresh_disk
+rc=$(lauf a3 "/apps/gate.osp/start NOPE;cat /etc/gate.conf;exit")
+hatnicht "$OUT/a3.txt" "NOPE" "counter-proof: without the update no start link answers"
+hatnicht "$OUT/a3.txt" "ABS-CONF-NEW" "counter-proof: without the update no /etc/gate.conf"
+printf 'x\n' > "$OUT/ovl-abs/etc/Bad Name"
+mkdir -p "$OUT/ovl-abs/root"; printf 'x\n' > "$OUT/ovl-abs/root/evil"
+pubt "$OUT/img-old" "$OUT/feed-abs-bad" dev --count 501 --overlay "$OUT/ovl-abs" --gz && bad "publisher accepted /root and a name with a space" || ok "counter-proof: publisher refuses /root and a bad name"
 dienst_aus
 
 fi
