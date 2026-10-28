@@ -11,10 +11,14 @@ import drv.net.iwl_faketx
 import wlan.iwl_mvm_txq
 
 export {
-    doorbell, alive, alive_forced, reset, rx_enabled, set_norx, set_silent, set_knobs, set_bigcal, phydb_bytes, phydb_bad, cmds, rx_pkts, rx_drops, tx_ok, tx_bad, last_cmd, set_ap, ap_on, last_uid, phydb_cmds, nvm_reads, init_completes, FAKE_SCD_BASE
+    doorbell, alive, alive_forced, reset, rx_enabled, set_norx, set_silent, set_knobs, set_bigcal, phydb_bytes, phydb_bad, cmds, rx_pkts, rx_drops, tx_ok, tx_bad, last_cmd, set_ap, ap_on, last_uid, phydb_cmds, nvm_reads, init_completes, err_word, FAKE_SCD_BASE
 }
 
 const FAKE_SCD_BASE: u64 = 0x00800000
+const FAKE_ERR_PTR: u64 = 0x00800200
+const FAKE_ERR_ID: u64 = 0x71
+const S_ERRTAB: u64 = 0x2820
+const ERR_DWORDS: u64 = 24
 
 const S_ACCESS: u64 = 0x2000
 const S_VIOL: u64 = 0x2018
@@ -265,8 +269,37 @@ fn alive_forced(ctx: u64) {
     iwl_le.zero(rb + 8, 64)
     iwl_le.st16(rb, 8, 0xCAFE)
     iwl_le.st32(rb, 8 + 36, 0x00ABCDE0)
+    iwl_le.st32(rb, 8 + 20, FAKE_ERR_PTR)
     iwl_le.st32(rb, 8 + 40, FAKE_SCD_BASE)
     rx_commit(ctx)
+}
+
+fn err_slot(d: u64) -> u64 {
+    if d == 0 { return 0 }
+    if d == 1 { return 1 }
+    if d == 4 { return 2 }
+    if d == 5 { return 3 }
+    if d == 7 { return 4 }
+    if d == 8 { return 5 }
+    if d == 23 { return 6 }
+    return 7
+}
+
+fn err_word(ctx: u64, raddr: u64) -> u64 {
+    if raddr < FAKE_ERR_PTR || raddr >= FAKE_ERR_PTR + ERR_DWORDS * 4 { return 0 }
+    let k: u64 = err_slot((raddr - FAKE_ERR_PTR) / 4)
+    if k == 7 { return 0 }
+    return g(ctx, S_ERRTAB + k * 8)
+}
+
+fn err_fill(ctx: u64, tb0: u64, len: u64) {
+    s(ctx, S_ERRTAB, 1)
+    s(ctx, S_ERRTAB + 8, FAKE_ERR_ID)
+    s(ctx, S_ERRTAB + 16, 0xB10C0002)
+    s(ctx, S_ERRTAB + 24, 0x11C00001)
+    s(ctx, S_ERRTAB + 32, iwl_le.ld8(tb0, 0))
+    s(ctx, S_ERRTAB + 40, len)
+    s(ctx, S_ERRTAB + 48, iwl_le.ld32(tb0, 0))
 }
 
 fn put_nvm(ctx: u64, req: u64, seq: u64) {
@@ -410,7 +443,7 @@ fn one_tfd(ctx: u64, ring: u64, idx: u64) {
     if cmd == CMD_NVM_ACCESS {
         if g(ctx, S_NONVM) == 0 { put_nvm(ctx, tb0, seq) }
     } else if cmd == CMD_PHY_CONTEXT {
-        if iwl_fakephy.check(tb0, total_x) { put_status(ctx, cmd, seq) }
+        if iwl_fakephy.check(tb0, total_x) { put_status(ctx, cmd, seq) } else { err_fill(ctx, tb0, total_x) }
     } else {
         put_status(ctx, cmd, seq)
     }

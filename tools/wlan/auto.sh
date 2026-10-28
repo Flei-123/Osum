@@ -102,6 +102,7 @@ hasnot "$C" 'fakefw: tx bad' "W-WLAN19: no malformed TX descriptor"
 hasnot "$C" 'fakefw: addsta q4 missing' "W-WLAN19: queue mask never missing"
 has "$C" 'fakefw: phy ok ch=1 band=1 tx=3 rx=5126' "W-WLAN22: PHY_CONTEXT_CMD is the 36-octet v1 layout (band, channel, width, ctrl_pos octets), 2.4 GHz channel 1"
 hasnot "$C" 'fakefw: phy bad' "W-WLAN22: the fake firmware phy check never fails"
+hasnot "$C" 'diag: fwerr' "W-WLAN4: no firmware error table captured in the normal case"
 
 printf 'echo ==START==\nsleep 6\ncat /proc/wlan\necho ==END==\n' > "$T/s.sh"
 for ctl in "d iwloldscan 'bad length' a" "e iwloldslot 'bad length' a" "f iwloldssid 'ssid bitmap missing' c"; do
@@ -141,6 +142,7 @@ has "$T/ph.klar" 'fakefw: phy bad length' "iwloldphy: fake firmware names the wr
 hasnot "$T/ph.klar" 'fakefw: phy ok' "iwloldphy: no PHY context accepted"
 hasnot "$T/ph.klar" 'fakefw: scan ok' "iwloldphy: no scan after the silent PHY_CONTEXT"
 hasnot "$T/ph.klar" 'fakeap: m4 ok' "iwloldphy: no handshake"
+has "$T/ph.klar" 'diag: fwerr ptr=0x800200 valid=0x1 id=0x71 blink2=0xb10c0002 ilink1=0x11c00001 data1=0x8 data2=0x' "W-WLAN4: firmware error table read through HBUS 0x40C/0x41C (PHY_CONTEXT)"
 
 pmkfield() { grep -aoE "wlan: pmk steps [0-9]+ max_us [0-9]+" "$1" | head -1 | awk -v f="$2" '{print (f=="steps") ? $4 : $6}'; }
 cs=$(pmkfield "$C" steps); cm=$(pmkfield "$C" max)
