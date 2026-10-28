@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import bus.pci
+import arch.arch
+import arch.x86_64.apic
+
+export {
+    probe, kind, base, abase, lpc_id, smbus_id, nr_phys, nr_bit, why,
+    noreboot_on, noreboot_clear, noreboot_set,
+    KIND_NONE, KIND_ICH, KIND_SPT,
+    WHY_OK, WHY_NOT_INTEL, WHY_UNKNOWN_CHIP, WHY_NO_IO_BASE, WHY_NO_RCBA, WHY_TCO_DISABLED, WHY_P2SB_LOCKED, WHY_NO_WINDOW
+}
+
+const KIND_NONE: u64 = 0
+const KIND_ICH: u64 = 1
+const KIND_SPT: u64 = 2
+
+const WHY_OK: u64 = 0
+const WHY_NOT_INTEL: u64 = 1
+const WHY_UNKNOWN_CHIP: u64 = 2
+const WHY_NO_IO_BASE: u64 = 3
+const WHY_NO_RCBA: u64 = 4
+const WHY_TCO_DISABLED: u64 = 5
+const WHY_P2SB_LOCKED: u64 = 6
+const WHY_NO_WINDOW: u64 = 7
+
+const BDF_LPC: u64 = 0xF8
+const BDF_P2SB: u64 = 0xF9
+const BDF_PMC: u64 = 0xFA
+const BDF_SMBUS: u64 = 0xFC
+
+const ICH_PMBASE: u64 = 0x40
+const ICH_ACPI_CNTL: u64 = 0x44
+const ICH_ACPI_EN: u64 = 0x80
+const ICH_RCBA: u64 = 0xF0
+const ICH_TCO_OFF: u64 = 0x60
+const ICH_GCS_OFF: u64 = 0x3410
+const ICH_NO_REBOOT: u64 = 0x20
+
+const SPT_TCOBASE: u64 = 0x50
+const SPT_TCOCTL: u64 = 0x54
+const SPT_TCOCTL_EN: u64 = 0x100
+const SPT_PMC_ABASE: u64 = 0x40
+const SPT_P2SB_CTRL_HI: u64 = 0xE1
+const SPT_P2SB_HIDE: u64 = 0x01
+const SPT_P2SB_BAR_LO: u64 = 0x10
+const SPT_P2SB_BAR_HI: u64 = 0x14
+const SPT_SMBCTRL: u64 = 0xC6000C
+const SPT_NO_REBOOT: u64 = 0x02
+
+const VENDOR_INTEL: u64 = 0x8086
+const ICH_IDS: u64 = 16
+const SPT_IDS: u64 = 4
+
+static mut ich_lpc_ids: [u64; 16] = [0x2918 as u64, 0x2916 as u64, 0x2914 as u64, 0x2912 as u64, 0x2910 as u64,
+    0x3A18 as u64, 0x3A16 as u64, 0x3A14 as u64, 0x1C44 as u64, 0x1C49 as u64, 0x1E55 as u64, 0x1E57 as u64,
+    0x8C4E as u64, 0x9C43 as u64, 0x8CC4 as u64, 0x9CC3 as u64]
+static mut spt_smbus_ids: [u64; 4] = [0x9D23 as u64, 0xA123 as u64, 0xA2A3 as u64, 0x9DA3 as u64]
+
+static mut c_kind: u64 = 0
+static mut c_base: u64 = 0
+static mut c_abase: u64 = 0
+static mut c_lpc: u64 = 0
+static mut c_smbus: u64 = 0
+static mut c_nr_phys: u64 = 0
+static mut c_nr_va: u64 = 0
+static mut c_nr_bit: u64 = 0
+static mut c_why: u64 = 0
+
+fn kind() -> u64 {
+    return c_kind
+}
+
+fn base() -> u64 {
+    return c_base
+}
+
+fn abase() -> u64 {
+    return c_abase
+}
+
+fn lpc_id() -> u64 {
+    return c_lpc
+}
+
+fn smbus_id() -> u64 {
+    return c_smbus
+}
+
+fn nr_phys() -> u64 {
+    return c_nr_phys
+}
+
+fn nr_bit() -> u64 {
+    return c_nr_bit
+}
+
+fn why() -> u64 {
+    return c_why
+}
+
+fn ich_listed(id: u64) -> bool {
+    var i: u64 = 0
+    while i < ICH_IDS {
+        if ich_lpc_ids[i as usize] == id {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn spt_listed(id: u64) -> bool {
+    var i: u64 = 0
+    while i < SPT_IDS {
+        if spt_smbus_ids[i as usize] == id {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn fail(w: u64) -> u64 {
+    c_why = w
+    c_kind = KIND_NONE
+    return KIND_NONE
+}
+
+fn probe(state: u64) -> u64 {
+    c_lpc = pci.cfg_read32(BDF_LPC, 0)
+    c_smbus = pci.cfg_read32(BDF_SMBUS, 0)
+    if (c_lpc & 0xFFFF) != VENDOR_INTEL {
+        return fail(WHY_NOT_INTEL)
+    }
+    if (c_smbus & 0xFFFF) == VENDOR_INTEL && spt_listed(c_smbus >> 16) {
+        return probe_spt(state)
+    }
+    if ich_listed(c_lpc >> 16) {
+        return probe_ich(state)
+    }
+    return fail(WHY_UNKNOWN_CHIP)
+}
+
+fn probe_ich(state: u64) -> u64 {
+    let pm: u64 = pci.cfg_read32(BDF_LPC, ICH_PMBASE) & 0xFF80
+    c_abase = pm
+    if pm == 0 || (pci.cfg_read8(BDF_LPC, ICH_ACPI_CNTL) & ICH_ACPI_EN) == 0 {
+        return fail(WHY_NO_IO_BASE)
+    }
+    let rcba: u64 = pci.cfg_read32(BDF_LPC, ICH_RCBA)
+    if (rcba & 1) == 0 {
+        return fail(WHY_NO_RCBA)
+    }
+    c_nr_phys = (rcba & 0xFFFFC000) + ICH_GCS_OFF
+    c_nr_va = apic.map_device(state, c_nr_phys)
+    if c_nr_va == 0 {
+        return fail(WHY_NO_WINDOW)
+    }
+    c_nr_bit = ICH_NO_REBOOT
+    c_base = pm + ICH_TCO_OFF
+    c_kind = KIND_ICH
+    c_why = WHY_OK
+    return c_kind
+}
+
+fn p2sb_bar() -> u64 {
+    let ctl: u64 = pci.cfg_read8(BDF_P2SB, SPT_P2SB_CTRL_HI)
+    pci.cfg_write8(BDF_P2SB, SPT_P2SB_CTRL_HI, ctl & (~SPT_P2SB_HIDE) & 0xFF)
+    let lo: u64 = pci.cfg_read32(BDF_P2SB, SPT_P2SB_BAR_LO)
+    let hi: u64 = pci.cfg_read32(BDF_P2SB, SPT_P2SB_BAR_HI)
+    pci.cfg_write8(BDF_P2SB, SPT_P2SB_CTRL_HI, ctl)
+    if lo == 0xFFFFFFFF || (lo & 0xFFFFFFF0) == 0 {
+        return 0
+    }
+    return (hi << 32) | (lo & 0xFFFFFFF0)
+}
+
+fn probe_spt(state: u64) -> u64 {
+    c_abase = pci.cfg_read32(BDF_PMC, SPT_PMC_ABASE) & 0xFF00
+    let tb: u64 = pci.cfg_read32(BDF_SMBUS, SPT_TCOBASE) & 0xFFE0
+    if tb == 0 {
+        return fail(WHY_NO_IO_BASE)
+    }
+    c_base = tb
+    if (pci.cfg_read32(BDF_SMBUS, SPT_TCOCTL) & SPT_TCOCTL_EN) == 0 {
+        return fail(WHY_TCO_DISABLED)
+    }
+    let sb: u64 = p2sb_bar()
+    if sb == 0 {
+        return fail(WHY_P2SB_LOCKED)
+    }
+    c_nr_phys = sb + SPT_SMBCTRL
+    c_nr_va = apic.map_device(state, c_nr_phys)
+    if c_nr_va == 0 {
+        return fail(WHY_NO_WINDOW)
+    }
+    c_nr_bit = SPT_NO_REBOOT
+    c_kind = KIND_SPT
+    c_why = WHY_OK
+    return c_kind
+}
+
+fn rd() -> u64 {
+    return arch.dev_read32(c_nr_va) as u64
+}
+
+fn wr(v: u64) {
+    arch.dev_write32(c_nr_va, (v & 0xFFFFFFFF) as u32)
+}
+
+fn noreboot_on() -> bool {
+    if c_nr_va == 0 {
+        return true
+    }
+    return (rd() & c_nr_bit) != 0
+}
+
+fn noreboot_clear() -> bool {
+    if c_nr_va == 0 {
+        return false
+    }
+    wr(rd() & (~c_nr_bit))
+    return !noreboot_on()
+}
+
+fn noreboot_set() -> bool {
+    if c_nr_va == 0 {
+        return false
+    }
+    wr(rd() | c_nr_bit)
+    return noreboot_on()
+}

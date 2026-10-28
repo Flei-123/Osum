@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.procw
+import drv.wdt.wdt
+import drv.wdt.tco
+import drv.wdt.tcochip
+import ipc.perm
+import sched.sched
+
+export { render, render_hang }
+
+static mut K_STATE: [u8; 6] = "state\0"
+static mut K_CHIP: [u8; 5] = "chip\0"
+static mut K_LPC: [u8; 4] = "lpc\0"
+static mut K_SMBUS: [u8; 6] = "smbus\0"
+static mut K_WHY: [u8; 4] = "why\0"
+static mut K_BASE: [u8; 9] = "tco_base\0"
+static mut K_ABASE: [u8; 6] = "abase\0"
+static mut K_NRREG: [u8; 13] = "noreboot_reg\0"
+static mut K_NRBIT: [u8; 13] = "noreboot_bit\0"
+static mut K_NR: [u8; 9] = "noreboot\0"
+static mut K_HALT: [u8; 7] = "halted\0"
+static mut K_LOCK: [u8; 7] = "locked\0"
+static mut K_TMO: [u8; 10] = "timeout_s\0"
+static mut K_TMR: [u8; 10] = "tmr_ticks\0"
+static mut K_CNT: [u8; 10] = "count_now\0"
+static mut K_WIN: [u8; 14] = "user_window_s\0"
+static mut K_FEEDS: [u8; 6] = "feeds\0"
+static mut K_STARVE: [u8; 8] = "starved\0"
+static mut K_AGE: [u8; 20] = "last_feed_age_ticks\0"
+static mut K_LAST: [u8; 10] = "last_boot\0"
+static mut K_BLIND: [u8; 6] = "blind\0"
+static mut K_RULE: [u8; 5] = "rule\0"
+static mut V_RULE: [u8; 66] = "feed_if_switches_moved_and_syscalls_moved_within_user_window_cpu0\0"
+static mut V_OFF: [u8; 4] = "off\0"
+static mut V_ABSENT: [u8; 7] = "absent\0"
+static mut V_FAILED: [u8; 7] = "failed\0"
+static mut V_ARMED: [u8; 6] = "armed\0"
+static mut V_PAUSED: [u8; 7] = "paused\0"
+static mut V_PANIC: [u8; 6] = "panic\0"
+static mut V_NONE: [u8; 5] = "none\0"
+static mut V_ICH: [u8; 4] = "ich\0"
+static mut V_SPT: [u8; 4] = "spt\0"
+static mut V_WD: [u8; 9] = "watchdog\0"
+static mut V_NORM: [u8; 7] = "normal\0"
+static mut V_HANG: [u8; 43] = "hang requested: cpu0 stops feeding (cli)\n\0\0"
+static mut V_NOHANG: [u8; 40] = "refused: not root or watchdog not armed\0"
+
+fn state_text(s: u64) -> u64 {
+    if s == wdt.ST_ARMED {
+        return (&V_ARMED[0]) as u64
+    }
+    if s == wdt.ST_PAUSED {
+        return (&V_PAUSED[0]) as u64
+    }
+    if s == wdt.ST_PANIC {
+        return (&V_PANIC[0]) as u64
+    }
+    if s == wdt.ST_FAILED {
+        return (&V_FAILED[0]) as u64
+    }
+    if s == wdt.ST_ABSENT {
+        return (&V_ABSENT[0]) as u64
+    }
+    return (&V_OFF[0]) as u64
+}
+
+fn chip_text(k: u64) -> u64 {
+    if k == tcochip.KIND_ICH {
+        return (&V_ICH[0]) as u64
+    }
+    if k == tcochip.KIND_SPT {
+        return (&V_SPT[0]) as u64
+    }
+    return (&V_NONE[0]) as u64
+}
+
+fn flag(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    procw.begin(out, cap)
+    let s: u64 = wdt.st()
+    procw.line_text((&K_STATE[0]) as u64, state_text(s))
+    procw.line_text((&K_CHIP[0]) as u64, chip_text(tcochip.kind()))
+    procw.line_hex((&K_LPC[0]) as u64, tcochip.lpc_id(), 8)
+    procw.line_hex((&K_SMBUS[0]) as u64, tcochip.smbus_id(), 8)
+    procw.line_num((&K_WHY[0]) as u64, tcochip.why())
+    procw.line_hex((&K_BASE[0]) as u64, tcochip.base(), 4)
+    procw.line_hex((&K_ABASE[0]) as u64, tcochip.abase(), 4)
+    procw.line_hex((&K_NRREG[0]) as u64, tcochip.nr_phys(), 8)
+    procw.line_hex((&K_NRBIT[0]) as u64, tcochip.nr_bit(), 2)
+    let live: bool = s == wdt.ST_ARMED || s == wdt.ST_PAUSED || s == wdt.ST_PANIC
+    if live {
+        let b: u64 = tcochip.base()
+        procw.line_num((&K_NR[0]) as u64, flag(tcochip.noreboot_on()))
+        procw.line_num((&K_HALT[0]) as u64, flag(tco.halted(b)))
+        procw.line_num((&K_LOCK[0]) as u64, flag(tco.locked(b)))
+        procw.line_num((&K_CNT[0]) as u64, tco.count(b))
+    }
+    procw.line_num((&K_TMO[0]) as u64, tco.seconds_of(wdt.tmr_ticks()))
+    procw.line_num((&K_TMR[0]) as u64, wdt.tmr_ticks())
+    procw.line_num((&K_WIN[0]) as u64, wdt.user_window_s())
+    procw.line_num((&K_FEEDS[0]) as u64, wdt.feeds())
+    procw.line_num((&K_STARVE[0]) as u64, wdt.starved())
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    var age: u64 = 0
+    if now > wdt.last_feed() {
+        age = now - wdt.last_feed()
+    }
+    procw.line_num((&K_AGE[0]) as u64, age)
+    if wdt.watchdog_reset_seen() {
+        procw.line_text((&K_LAST[0]) as u64, (&V_WD[0]) as u64)
+    } else {
+        procw.line_text((&K_LAST[0]) as u64, (&V_NORM[0]) as u64)
+    }
+    procw.line_num((&K_BLIND[0]) as u64, flag(wdt.blind()))
+    procw.line_text((&K_RULE[0]) as u64, (&V_RULE[0]) as u64)
+    return procw.used()
+}
+
+fn render_hang(state: u64, out: u64, cap: u64) -> u64 {
+    procw.begin(out, cap)
+    if perm.is_root(state, sched.current(state)) && wdt.request_hang() {
+        procw.put_s((&V_HANG[0]) as u64)
+    } else {
+        procw.put_s((&V_NOHANG[0]) as u64)
+        procw.put_c(10)
+    }
+    return procw.used()
+}

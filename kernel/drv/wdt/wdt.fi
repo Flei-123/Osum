@@ -1,0 +1,343 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import serial
+import diag.cmdopt
+import drv.wdt.tco
+import drv.wdt.tcochip
+
+export {
+    stage, tick, sys_hook, on_panic, request_hang, pause, resume,
+    st, timeout_s, tmr_ticks, feeds, starved, last_feed, user_window_s, hang_requested, blind, watchdog_reset_seen, count_now,
+    ST_OFF, ST_ABSENT, ST_FAILED, ST_ARMED, ST_PAUSED, ST_PANIC,
+    DEFAULT_TIMEOUT_S
+}
+
+const ST_OFF: u64 = 0
+const ST_ABSENT: u64 = 1
+const ST_FAILED: u64 = 2
+const ST_ARMED: u64 = 3
+const ST_PAUSED: u64 = 4
+const ST_PANIC: u64 = 5
+
+const HZ: u64 = 100
+const DEFAULT_TIMEOUT_S: u64 = 60
+const MIN_TIMEOUT_S: u64 = 6
+const MAX_TIMEOUT_S: u64 = 600
+const CHECK_TICKS: u64 = 100
+const BOOT_GRACE_TICKS: u64 = 30000
+const MIN_USER_WINDOW_S: u64 = 5
+const MAX_USER_WINDOW_S: u64 = 30
+
+static mut w_state: u64 = 0
+static mut w_timeout: u64 = 0
+static mut w_tmr: u64 = 0
+static mut w_feeds: u64 = 0
+static mut w_starved: u64 = 0
+static mut w_last_feed: u64 = 0
+static mut w_last_check: u64 = 0
+static mut w_last_sys: u64 = 0
+static mut w_last_sw: u64 = 0
+static mut w_sys_moved_at: u64 = 0
+static mut w_window: u64 = 0
+static mut w_blind: u64 = 0
+static mut w_hang_at: u64 = 0
+static mut w_spin_at: u64 = 0
+static mut w_panic_at: u64 = 0
+static mut w_hang_req: u64 = 0
+static mut w_wdt_reset: u64 = 0
+static mut w_said_starve: u64 = 0
+
+static mut k_wdt: [u8; 4] = "wdt\0"
+static mut k_nowdt: [u8; 6] = "nowdt\0"
+static mut k_hang: [u8; 8] = "wdthang\0"
+static mut k_spin: [u8; 8] = "wdtspin\0"
+static mut k_panic: [u8; 9] = "wdtpanic\0"
+static mut k_blind: [u8; 9] = "wdtblind\0"
+
+static mut s_off: [u8; 18] = "wdt: off by word\n\0"
+static mut s_absent: [u8; 19] = "wdt: absent, why=\0\0"
+static mut s_armed: [u8; 18] = "wdt: armed chip=\0\0"
+static mut s_base: [u8; 7] = " base=\0"
+static mut s_tmo: [u8; 12] = " timeout_s=\0"
+static mut s_tmr: [u8; 6] = " tmr=\0"
+static mut s_win: [u8; 15] = " user_window=\0\0"
+static mut s_last: [u8; 13] = " last_boot=\0\0"
+static mut s_wd: [u8; 9] = "watchdog\0"
+static mut s_norm: [u8; 7] = "normal\0"
+static mut s_failed: [u8; 18] = "wdt: failed step=\0"
+static mut s_starve: [u8; 50] = "wdt: no progress (syscalls/switches), not feeding\0"
+static mut s_hang: [u8; 37] = "wdt: planted hang (cli; hlt) on cpu0\0"
+static mut s_spin: [u8; 43] = "wdt: planted spin, syscalls stop answering\0"
+static mut s_panic: [u8; 26] = "wdt: planted kernel fault\0"
+static mut s_pause: [u8; 13] = "wdt: paused\n\0"
+static mut s_resume: [u8; 14] = "wdt: resumed\n\0"
+
+fn st() -> u64 {
+    return w_state
+}
+
+fn timeout_s() -> u64 {
+    return w_timeout
+}
+
+fn tmr_ticks() -> u64 {
+    return w_tmr
+}
+
+fn feeds() -> u64 {
+    return w_feeds
+}
+
+fn starved() -> u64 {
+    return w_starved
+}
+
+fn last_feed() -> u64 {
+    return w_last_feed
+}
+
+fn user_window_s() -> u64 {
+    return w_window
+}
+
+fn hang_requested() -> bool {
+    return w_hang_req != 0
+}
+
+fn blind() -> bool {
+    return w_blind != 0
+}
+
+fn watchdog_reset_seen() -> bool {
+    return w_wdt_reset != 0
+}
+
+fn count_now() -> u64 {
+    if w_state != ST_ARMED && w_state != ST_PAUSED {
+        return 0
+    }
+    return tco.count(tcochip.base())
+}
+
+fn seconds_word(state: u64, w: u64) -> u64 {
+    return cmdopt.number(state, w, 0) * HZ
+}
+
+fn words(state: u64) -> bool {
+    if cmdopt.has(state, (&k_nowdt[0]) as u64) {
+        return false
+    }
+    w_timeout = DEFAULT_TIMEOUT_S
+    if cmdopt.has(state, (&k_wdt[0]) as u64) {
+        let v: u64 = cmdopt.number(state, (&k_wdt[0]) as u64, 0)
+        if v == 0 {
+            return false
+        }
+        w_timeout = v
+    }
+    if w_timeout < MIN_TIMEOUT_S {
+        w_timeout = MIN_TIMEOUT_S
+    }
+    if w_timeout > MAX_TIMEOUT_S {
+        w_timeout = MAX_TIMEOUT_S
+    }
+    w_window = w_timeout / 2
+    if w_window < MIN_USER_WINDOW_S {
+        w_window = MIN_USER_WINDOW_S
+    }
+    if w_window > MAX_USER_WINDOW_S {
+        w_window = MAX_USER_WINDOW_S
+    }
+    w_hang_at = seconds_word(state, (&k_hang[0]) as u64)
+    w_spin_at = seconds_word(state, (&k_spin[0]) as u64)
+    w_panic_at = seconds_word(state, (&k_panic[0]) as u64)
+    if cmdopt.has(state, (&k_blind[0]) as u64) {
+        w_blind = 1
+    }
+    return true
+}
+
+fn failed(step: u64) {
+    w_state = ST_FAILED
+    serial.puts((&s_failed[0]) as u64)
+    serial.dec(step)
+    serial.nl()
+}
+
+fn stage(state: u64) {
+    if !words(state) {
+        w_state = ST_OFF
+        serial.puts((&s_off[0]) as u64)
+        return
+    }
+    if tcochip.probe(state) == tcochip.KIND_NONE {
+        w_state = ST_ABSENT
+        serial.puts((&s_absent[0]) as u64)
+        serial.dec(tcochip.why())
+        serial.nl()
+        return
+    }
+    let b: u64 = tcochip.base()
+    if tco.second_timeout_seen(b) {
+        w_wdt_reset = 1
+    }
+    tco.clear_status(b)
+    w_tmr = tco.ticks_for(w_timeout)
+    if !tco.set_ticks(b, w_tmr) {
+        failed(1)
+        return
+    }
+    tco.reload(b)
+    if !tcochip.noreboot_clear() {
+        failed(2)
+        return
+    }
+    if !tco.run(b) {
+        failed(3)
+        return
+    }
+    tco.reload(b)
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    w_last_feed = now
+    w_last_check = now
+    w_state = ST_ARMED
+    serial.puts((&s_armed[0]) as u64)
+    serial.dec(tcochip.kind())
+    serial.puts((&s_base[0]) as u64)
+    serial.hex(b)
+    serial.puts((&s_tmo[0]) as u64)
+    serial.dec(tco.seconds_of(w_tmr))
+    serial.puts((&s_tmr[0]) as u64)
+    serial.dec(w_tmr)
+    serial.puts((&s_win[0]) as u64)
+    serial.dec(w_window)
+    serial.puts((&s_last[0]) as u64)
+    if w_wdt_reset != 0 {
+        serial.puts((&s_wd[0]) as u64)
+    } else {
+        serial.puts((&s_norm[0]) as u64)
+    }
+    serial.nl()
+}
+
+fn planted_hang() {
+    serial.puts((&s_hang[0]) as u64)
+    serial.nl()
+    asm("cli")
+    while true {
+        asm("hlt")
+    }
+}
+
+fn planted_fault() {
+    serial.puts((&s_panic[0]) as u64)
+    serial.nl()
+    w_panic_at = 0
+    __mmio_write64(0x00007FFFFFFF0000 as *mut u64, 1)
+}
+
+fn userspace_alive(now: u64, sys: u64) -> bool {
+    if sys == 0 {
+        return now < BOOT_GRACE_TICKS
+    }
+    return now - w_sys_moved_at <= w_window * HZ
+}
+
+fn tick(state: u64) {
+    if w_state != ST_ARMED {
+        return
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if w_hang_req != 0 || (w_hang_at != 0 && now >= w_hang_at) {
+        planted_hang()
+    }
+    if w_panic_at != 0 && now >= w_panic_at {
+        planted_fault()
+    }
+    if now - w_last_check < CHECK_TICKS {
+        return
+    }
+    w_last_check = now
+    let sys: u64 = kstate.get(state, kstate.SYSCALLS)
+    let sw: u64 = kstate.get(state, kstate.SWITCHES)
+    let scheduler_moved: bool = sw != w_last_sw
+    if sys != w_last_sys && scheduler_moved {
+        w_sys_moved_at = now
+    }
+    w_last_sys = sys
+    w_last_sw = sw
+    if w_blind != 0 || (scheduler_moved && userspace_alive(now, sys)) {
+        tco.reload(tcochip.base())
+        w_feeds = w_feeds + 1
+        w_last_feed = now
+        w_said_starve = 0
+        return
+    }
+    w_starved = w_starved + 1
+    if w_said_starve == 0 {
+        w_said_starve = 1
+        serial.puts((&s_starve[0]) as u64)
+        serial.nl()
+    }
+}
+
+fn sys_hook(state: u64) {
+    if w_spin_at == 0 || w_state != ST_ARMED {
+        return
+    }
+    if kstate.get(state, kstate.TICKS) < w_spin_at {
+        return
+    }
+    if w_spin_at != 1 {
+        w_spin_at = 1
+        serial.puts((&s_spin[0]) as u64)
+        serial.nl()
+    }
+    while true {
+        asm("sti")
+        asm("pause")
+    }
+}
+
+fn on_panic() {
+    if w_state == ST_ARMED {
+        w_state = ST_PANIC
+    }
+}
+
+fn request_hang() -> bool {
+    if w_state != ST_ARMED {
+        return false
+    }
+    w_hang_req = 1
+    return true
+}
+
+fn pause(state: u64) {
+    if w_state != ST_ARMED {
+        return
+    }
+    let _h: bool = tco.halt(tcochip.base())
+    w_state = ST_PAUSED
+    serial.puts((&s_pause[0]) as u64)
+}
+
+fn resume(state: u64) {
+    if w_state != ST_PAUSED {
+        return
+    }
+    let b: u64 = tcochip.base()
+    tco.clear_status(b)
+    let _t: bool = tco.set_ticks(b, w_tmr)
+    let _n: bool = tcochip.noreboot_clear()
+    tco.reload(b)
+    let _r: bool = tco.run(b)
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    w_last_check = now
+    w_sys_moved_at = now
+    w_last_feed = now
+    w_state = ST_ARMED
+    serial.puts((&s_resume[0]) as u64)
+}
