@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import net.httpsink
+
+export { Dest, dest_new, dest_feed, dest_close }
+
+const SYS_OPEN: i64 = 2
+const SYS_CLOSE: i64 = 3
+const SYS_LSEEK: i64 = 8
+const O_WRITE_CREATE: i64 = 65
+const O_WRITE_TRUNC: i64 = 577
+const SEEK_END: i64 = 2
+const FILE_MODE: i64 = 420
+const FLUSH_AT: usize = 65536
+
+struct Dest {
+    sink: httpsink.Sink,
+    wbuf: rt.Buf,
+    path: u64,
+    append: bool,
+    fd: i64,
+    opened: bool,
+    write_failed: bool,
+    open_failed: bool,
+    flushed: u64,
+}
+
+fn dest_new(path: u64, append: bool) -> Dest {
+    return Dest {
+        sink: httpsink.sink_new(),
+        wbuf: rt.buf_new(),
+        path: path,
+        append: append,
+        fd: -1,
+        opened: false,
+        write_failed: false,
+        open_failed: false,
+        flushed: 0,
+    }
+}
+
+fn dest_open(d: *mut Dest) {
+    var flags: i64 = O_WRITE_TRUNC
+    if (*d).append {
+        flags = O_WRITE_CREATE
+    }
+    let fd: i64 = syscall(SYS_OPEN, (*d).path as i64, flags, FILE_MODE, 0, 0, 0)
+    if fd < 0 {
+        (*d).open_failed = true
+        return
+    }
+    if (*d).append {
+        syscall(SYS_LSEEK, fd, 0, SEEK_END, 0, 0, 0)
+    }
+    (*d).fd = fd
+    (*d).opened = true
+}
+
+fn dest_flush(d: *mut Dest) {
+    if (*d).wbuf.len == 0 {
+        return
+    }
+    if (*d).fd >= 0 && !(*d).write_failed {
+        if rt.write_everything((*d).fd, (*d).wbuf.ptr, (*d).wbuf.len) {
+            (*d).flushed = (*d).flushed + (*d).wbuf.len as u64
+        } else {
+            (*d).write_failed = true
+        }
+    }
+    rt.buf_clear(&(*d).wbuf)
+}
+
+fn dest_feed(d: *mut Dest, p: u64, n: usize) {
+    httpsink.sink_feed(&(*d).sink, p, n, &(*d).wbuf)
+    if (*d).path == 0 {
+        rt.buf_clear(&(*d).wbuf)
+        return
+    }
+    if (*d).fd < 0 && !(*d).open_failed && (*d).sink.phase == httpsink.PHASE_BODY {
+        dest_open(d)
+    }
+    if (*d).wbuf.len >= FLUSH_AT {
+        dest_flush(d)
+    }
+}
+
+fn dest_close(d: *mut Dest) -> bool {
+    dest_flush(d)
+    if (*d).fd >= 0 {
+        syscall(SYS_CLOSE, (*d).fd, 0, 0, 0, 0, 0)
+        (*d).fd = -1
+    }
+    rt.buf_free(&(*d).wbuf)
+    return (*d).opened && !(*d).write_failed
+}

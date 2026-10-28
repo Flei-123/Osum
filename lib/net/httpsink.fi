@@ -1,0 +1,222 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.crypto.sha256
+
+export { Sink, sink_new, sink_feed, sink_raw_digest, sink_body_digest,
+    HEAD_KEEP, PHASE_HEAD, PHASE_BODY, PHASE_BAD }
+
+const HDR_CAP: usize = 8192
+const HEAD_KEEP: usize = 240
+
+const PHASE_HEAD: u64 = 0
+const PHASE_BODY: u64 = 1
+const PHASE_BAD: u64 = 2
+
+const CK_SIZE: u64 = 0
+const CK_EXT: u64 = 1
+const CK_DATA: u64 = 2
+const CK_CRLF: u64 = 3
+const CK_DONE: u64 = 4
+
+struct Sink {
+    phase: u64,
+    chunked: bool,
+    framing_bad: bool,
+    ck_state: u64,
+    ck_len: u64,
+    ck_digits: u64,
+    ck_remain: u64,
+    hdr: [u8; 8192],
+    hdr_len: usize,
+    head: [u8; 240],
+    head_len: usize,
+    raw_octets: u64,
+    body_octets: u64,
+    raw: sha256.Sha256,
+    body: sha256.Sha256,
+}
+
+fn sink_new() -> Sink {
+    return Sink {
+        phase: PHASE_HEAD,
+        chunked: false,
+        framing_bad: false,
+        ck_state: CK_SIZE,
+        ck_len: 0,
+        ck_digits: 0,
+        ck_remain: 0,
+        hdr: [0 as u8; 8192],
+        hdr_len: 0,
+        head: [0 as u8; 240],
+        head_len: 0,
+        raw_octets: 0,
+        body_octets: 0,
+        raw: sha256.sha256_new(),
+        body: sha256.sha256_new(),
+    }
+}
+
+fn is_hex(c: u8) -> bool {
+    if c >= 48 as u8 && c <= 57 as u8 { return true }
+    if c >= 97 as u8 && c <= 102 as u8 { return true }
+    if c >= 65 as u8 && c <= 70 as u8 { return true }
+    return false
+}
+
+fn hex_val(c: u8) -> u64 {
+    if c >= 48 as u8 && c <= 57 as u8 { return (c - 48 as u8) as u64 }
+    if c >= 97 as u8 && c <= 102 as u8 { return (c - 87 as u8) as u64 }
+    return (c - 55 as u8) as u64
+}
+
+fn lower(c: u8) -> u8 {
+    if c >= 65 as u8 && c <= 90 as u8 {
+        return c + 32 as u8
+    }
+    return c
+}
+
+fn has_chunked(s: *mut Sink) -> bool {
+    var w: [u8; 8] = "chunked\0"
+    let n: usize = (*s).hdr_len
+    if n < 7 {
+        return false
+    }
+    var i: usize = 0
+    while i + 7 <= n {
+        var k: usize = 0
+        var same: bool = true
+        while k < 7 {
+            if lower((*s).hdr[i + k]) != w[k] {
+                same = false
+                k = 7
+            } else {
+                k = k + 1
+            }
+        }
+        if same {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn emit(s: *mut Sink, out: *mut rt.Buf, p: u64, n: usize) {
+    if n == 0 {
+        return
+    }
+    rt.buf_push_bytes(out, p, n)
+    sha256.sha256_update(&(*s).body, p, n)
+    (*s).body_octets = (*s).body_octets + n as u64
+}
+
+fn feed_chunked(s: *mut Sink, out: *mut rt.Buf, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        let st: u64 = (*s).ck_state
+        if st == CK_DONE {
+            return
+        }
+        if st == CK_DATA {
+            var take: usize = n - i
+            if (take as u64) > (*s).ck_remain {
+                take = (*s).ck_remain as usize
+            }
+            emit(s, out, p + i as u64, take)
+            (*s).ck_remain = (*s).ck_remain - take as u64
+            i = i + take
+            if (*s).ck_remain == 0 {
+                (*s).ck_state = CK_CRLF
+            }
+        } else {
+            let c: u8 = rt.ld8(p, i)
+            i = i + 1
+            if st == CK_SIZE {
+                if is_hex(c) {
+                    (*s).ck_len = (*s).ck_len * 16 + hex_val(c)
+                    (*s).ck_digits = (*s).ck_digits + 1
+                } else if (*s).ck_digits == 0 {
+                    (*s).framing_bad = true
+                    (*s).ck_state = CK_DONE
+                } else if c == 10 as u8 {
+                    if (*s).ck_len == 0 {
+                        (*s).ck_state = CK_DONE
+                    } else {
+                        (*s).ck_remain = (*s).ck_len
+                        (*s).ck_state = CK_DATA
+                    }
+                    (*s).ck_len = 0
+                    (*s).ck_digits = 0
+                } else {
+                    (*s).ck_state = CK_EXT
+                }
+            } else if st == CK_EXT {
+                if c == 10 as u8 {
+                    if (*s).ck_len == 0 {
+                        (*s).ck_state = CK_DONE
+                    } else {
+                        (*s).ck_remain = (*s).ck_len
+                        (*s).ck_state = CK_DATA
+                    }
+                    (*s).ck_len = 0
+                    (*s).ck_digits = 0
+                }
+            } else if st == CK_CRLF {
+                if c == 10 as u8 {
+                    (*s).ck_state = CK_SIZE
+                }
+            }
+        }
+    }
+}
+
+fn head_done(s: *mut Sink) -> bool {
+    let n: usize = (*s).hdr_len
+    if n < 4 {
+        return false
+    }
+    return (*s).hdr[n - 4] == 13 as u8 && (*s).hdr[n - 3] == 10 as u8
+        && (*s).hdr[n - 2] == 13 as u8 && (*s).hdr[n - 1] == 10 as u8
+}
+
+fn sink_feed(s: *mut Sink, p: u64, n: usize, out: *mut rt.Buf) {
+    sha256.sha256_update(&(*s).raw, p, n)
+    var k: usize = 0
+    while k < n && (*s).head_len < HEAD_KEEP {
+        (*s).head[(*s).head_len] = rt.ld8(p, k)
+        (*s).head_len = (*s).head_len + 1
+        k = k + 1
+    }
+    (*s).raw_octets = (*s).raw_octets + n as u64
+    var i: usize = 0
+    while i < n && (*s).phase == PHASE_HEAD {
+        if (*s).hdr_len >= HDR_CAP {
+            (*s).phase = PHASE_BAD
+        } else {
+            (*s).hdr[(*s).hdr_len] = rt.ld8(p, i)
+            (*s).hdr_len = (*s).hdr_len + 1
+            i = i + 1
+            if head_done(s) {
+                (*s).phase = PHASE_BODY
+                (*s).chunked = has_chunked(s)
+            }
+        }
+    }
+    if (*s).phase != PHASE_BODY || i >= n {
+        return
+    }
+    if (*s).chunked {
+        feed_chunked(s, out, p + i as u64, n - i)
+    } else {
+        emit(s, out, p + i as u64, n - i)
+    }
+}
+
+fn sink_raw_digest(s: *mut Sink, out: u64) {
+    sha256.sha256_final(&(*s).raw, out)
+}
+
+fn sink_body_digest(s: *mut Sink, out: u64) {
+    sha256.sha256_final(&(*s).body, out)
+}

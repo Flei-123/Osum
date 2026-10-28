@@ -77,6 +77,8 @@ import tls.tls
 import tls.x509
 import tls.roots
 import tls.clockgate
+import net.httpfile
+import net.httpsink
 // RUNDE BETRIEB: DERSELBE AUFLOESER WIE IN `/bin/ota`, und das ist kein
 // Zufall, sondern der Grund, warum er in `lib/libc/` liegt und nicht in
 // einem der beiden Programme. `libc/dns.fi` und `libc/dnswire.fi`
@@ -90,7 +92,6 @@ import tls.clockgate
 import libc.dns
 
 const CHUNK: usize = 4096
-const SHOW: usize = 240 // octets of the body that are printed by default
 
 fn put(out: *mut rt.Buf, p: u64, n: usize) {
     rt.buf_push_bytes(out, p, n)
@@ -206,31 +207,6 @@ fn reason(out: *mut rt.Buf, r: u32) {
 // Wiederaufnahme, und sie braucht auf dieser Seite genau diese zwei
 // Zeilen -- die Arbeit steckt darin, dass der Aufrufer den Streuwert
 // des GANZEN Ergebnisses prueft und nicht den der beiden Haelften.
-const SYS_OPEN2: i64 = 2
-const SYS_CLOSE2: i64 = 3
-const SYS_LSEEK2: i64 = 8
-const O_WRITE_CREATE: i64 = 65   // O_WRONLY | O_CREAT
-const O_WRITE_TRUNC: i64 = 577   // O_WRONLY | O_CREAT | O_TRUNC
-const SEEK_END2: i64 = 2
-const RECHTE2: i64 = 420         // 0644
-
-fn body_out(path: u64, p: u64, n: usize, anhaengen: bool) -> bool {
-    var flags: i64 = O_WRITE_TRUNC
-    if anhaengen {
-        flags = O_WRITE_CREATE
-    }
-    let fd: i64 = syscall(SYS_OPEN2, path as i64, flags, RECHTE2, 0, 0, 0)
-    if fd < 0 {
-        return false
-    }
-    if anhaengen {
-        syscall(SYS_LSEEK2, fd, 0, SEEK_END2, 0, 0, 0)
-    }
-    let ok: bool = rt.write_everything(fd, p, n)
-    syscall(SYS_CLOSE2, fd, 0, 0, 0, 0, 0)
-    return ok
-}
-
 // Die Nummer der Antwort: die drei Ziffern hinter `HTTP/1.x `. Ein
 // Aufrufer, der wiederaufnimmt, muss 206 von 200 unterscheiden koennen --
 // eine Gegenstelle, die `Range` nicht kann, schickt 200 und den GANZEN
@@ -268,91 +244,6 @@ fn parse_dec_u64(p: u64, n: usize) -> u64 {
         i = i + 1
     }
     return v
-}
-
-// ------------------------------------------------------ chunked bodies
-//
-// HTTP/1.1 answers of unknown length arrive in pieces, each with its
-// length in hexadecimal in front of it and a zero-length piece at the
-// end (RFC 9112, 7.1). Cloudflare answers example.com that way, and a
-// client that does not undo it reports twelve octets more than the page
-// has and a digest that matches nothing. MEASURED: 571 octets against
-// curl's 559, and the two digests differed until this function existed.
-fn is_hex(c: u8) -> bool {
-    if c >= 48 as u8 && c <= 57 as u8 { return true }
-    if c >= 97 as u8 && c <= 102 as u8 { return true }
-    if c >= 65 as u8 && c <= 70 as u8 { return true }
-    return false
-}
-
-fn hex_val(c: u8) -> u64 {
-    if c >= 48 as u8 && c <= 57 as u8 { return (c - 48 as u8) as u64 }
-    if c >= 97 as u8 && c <= 102 as u8 { return (c - 87 as u8) as u64 }
-    return (c - 55 as u8) as u64
-}
-
-// Case-insensitive search for a word in `p[0..n)`.
-fn contains_word(p: u64, n: usize, w: u64, wn: usize) -> bool {
-    if wn == 0 || n < wn {
-        return false
-    }
-    var i: usize = 0
-    while i + wn <= n {
-        var k: usize = 0
-        var same: bool = true
-        while k < wn {
-            var a: u8 = rt.ld8(p, i + k)
-            var b: u8 = rt.ld8(w, k)
-            if a >= 65 as u8 && a <= 90 as u8 { a = a + 32 as u8 }
-            if b >= 65 as u8 && b <= 90 as u8 { b = b + 32 as u8 }
-            if a != b {
-                same = false
-                k = wn
-            } else {
-                k = k + 1
-            }
-        }
-        if same {
-            return true
-        }
-        i = i + 1
-    }
-    return false
-}
-
-fn dechunk(src: u64, n: usize, out: *mut rt.Buf) -> bool {
-    var i: usize = 0
-    while i < n {
-        var len: u64 = 0
-        var digits: usize = 0
-        while i < n && is_hex(rt.ld8(src, i)) {
-            len = len * 16 + hex_val(rt.ld8(src, i))
-            digits = digits + 1
-            i = i + 1
-        }
-        if digits == 0 {
-            return false
-        }
-        // the rest of the line (a chunk extension is allowed and ignored)
-        while i < n && rt.ld8(src, i) != 10 as u8 {
-            i = i + 1
-        }
-        i = i + 1
-        if len == 0 {
-            return true
-        }
-        if i + len as usize > n {
-            return false
-        }
-        rt.buf_push_bytes(out, src + i as u64, len as usize)
-        i = i + len as usize
-        // the CRLF after the piece
-        while i < n && rt.ld8(src, i) != 10 as u8 {
-            i = i + 1
-        }
-        i = i + 1
-    }
-    return false
 }
 
 // ------------------------------------------------------------ the URL
@@ -589,75 +480,42 @@ fn main(start: u64) -> i32 {
     }
     let okt: bool = net.set_timeout(&c, 20000 as u64) catch false
 
-    var body: rt.Buf = rt.buf_new()
+    var dest: httpfile.Dest = httpfile.dest_new(outfile, anhaengen || von > 0)
     var status: i32 = 0
     if secure {
-        status = over_tls(&c, &out, &body, name, namelen, path, pathlen,
+        status = over_tls(&c, &out, &dest, name, namelen, path, pathlen,
             roots, insecure, von)
     } else {
-        status = plain(&c, &out, &body, name, namelen, path, pathlen, von)
+        status = plain(&c, &out, &dest, name, namelen, path, pathlen, von)
     }
     net.close(&c)
+    let okf: bool = httpfile.dest_close(&dest)
     if status != 0 {
         return status
     }
 
-    // ------------------------------------------------------ the report
-    num_line(&out, "fetch: octets ", body.len as u64)
+    num_line(&out, "fetch: octets ", dest.sink.raw_octets)
     var dg: [u8; 32] = [0; 32]
-    sha256.sha256(body.ptr, body.len, (&dg[0]) as u64)
+    httpsink.sink_raw_digest(&dest.sink, (&dg[0]) as u64)
     hex_line(&out, "fetch: sha256 ", (&dg[0]) as u64, 32)
-    // THE BODY ON ITS OWN, because that is the part that can be held
-    // against another program. The whole response carries a `Date`
-    // header, so its digest differs from `curl`'s by construction; the
-    // octets after the empty line do not. This is the number that says
-    // "the same page came out of both".
-    var hend: usize = 0
-    var found: bool = false
-    while hend + 3 < body.len {
-        if rt.ld8(body.ptr, hend) == 13 as u8
-            && rt.ld8(body.ptr, hend + 1) == 10 as u8
-            && rt.ld8(body.ptr, hend + 2) == 13 as u8
-            && rt.ld8(body.ptr, hend + 3) == 10 as u8 {
-            found = true
-            break
+    if dest.sink.phase == httpsink.PHASE_BODY {
+        if dest.sink.chunked && !dest.sink.framing_bad {
+            num_line(&out, "fetch: chunked ", 1)
         }
-        hend = hend + 1
-    }
-    // RUNDE OTA: `bp`/`bn` sind der RUMPF -- das, was `-o` schreibt und
-    // was ein Aufrufer gegen einen Streuwert haelt. Vor dieser Runde gab
-    // es diese beiden Groessen nicht als solche; der Rumpf wurde nur
-    // gemessen und dann weggeworfen.
-    var bp: u64 = body.ptr
-    var bn: usize = body.len
-    var dec: rt.Buf = rt.buf_new()
-    if found {
-        let boff: usize = hend + 4
-        let blen: usize = body.len - boff
-        bp = body.ptr + boff as u64
-        bn = blen
-        var w_chunked: [u8; 8] = "chunked\0"
-        if contains_word(body.ptr, hend, (&w_chunked[0]) as u64, 7) {
-            if dechunk(body.ptr + boff as u64, blen, &dec) {
-                bp = dec.ptr
-                bn = dec.len
-                num_line(&out, "fetch: chunked ", 1)
-            }
-        }
-        num_line(&out, "fetch: body ", bn as u64)
+        num_line(&out, "fetch: body ", dest.sink.body_octets)
         var bd: [u8; 32] = [0; 32]
-        sha256.sha256(bp, bn, (&bd[0]) as u64)
+        httpsink.sink_body_digest(&dest.sink, (&bd[0]) as u64)
         hex_line(&out, "fetch: bodysha ", (&bd[0]) as u64, 32)
     }
     var e: usize = 0
-    while e < body.len && rt.ld8(body.ptr, e) != 13 as u8
-        && rt.ld8(body.ptr, e) != 10 as u8 {
+    while e < dest.sink.head_len && dest.sink.head[e] != 13 as u8
+        && dest.sink.head[e] != 10 as u8 {
         e = e + 1
     }
-    text_line(&out, "fetch: status ", body.ptr, e)
-    num_line(&out, "fetch: code ", status_code(body.ptr, e))
+    let headp: u64 = (&dest.sink.head[0]) as u64
+    text_line(&out, "fetch: status ", headp, e)
+    num_line(&out, "fetch: code ", status_code(headp, e))
     if outfile != 0 {
-        let okf: bool = body_out(outfile, bp, bn, anhaengen || von > 0)
         if okf {
             io.print("fetch: written\n")
         } else {
@@ -665,22 +523,16 @@ fn main(start: u64) -> i32 {
         }
     }
     if !quiet {
-        var show: usize = body.len
-        if show > SHOW {
-            show = SHOW
-        }
-        rt.write_everything(1, body.ptr, show)
+        rt.write_everything(1, headp, dest.sink.head_len)
         io.print("\n")
     }
-    rt.buf_free(&dec)
-    rt.buf_free(&body)
     rt.buf_free(&out)
     return 0
 }
 
 // --------------------------------------------------------- over TLS
 
-fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
+fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, dest: *mut httpfile.Dest,
     name: u64, namelen: usize, path: u64, pathlen: usize, roots: u64,
     insecure: bool, von: u64) -> i32 {
     var storebuf: rt.Buf = rt.buf_new()
@@ -763,7 +615,7 @@ fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
         if rerr || n == 0 {
             break
         }
-        rt.buf_push_bytes(body, (&chunk[0]) as u64, n)
+        httpfile.dest_feed(dest, (&chunk[0]) as u64, n)
     }
     num_line(out, "fetch: records_in ", tls.tls_records_in(&t) as u64)
     num_line(out, "fetch: records_out ", tls.tls_records_out(&t) as u64)
@@ -779,7 +631,7 @@ fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
 // two is one word in the url and not a second program. It is also what
 // makes the round's measurement honest: the same octets, once in the
 // clear and once through the record layer.
-fn plain(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
+fn plain(c: *mut net.Conn, out: *mut rt.Buf, dest: *mut httpfile.Dest,
     name: u64, namelen: usize, path: u64, pathlen: usize, von: u64) -> i32 {
     var req: rt.Buf = rt.buf_new()
     request(&req, name, namelen, path, pathlen, von)
@@ -798,7 +650,7 @@ fn plain(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
         if rerr || n == 0 {
             break
         }
-        rt.buf_push_bytes(body, (&chunk[0]) as u64, n)
+        httpfile.dest_feed(dest, (&chunk[0]) as u64, n)
     }
     return 0
 }
