@@ -36,9 +36,8 @@ shoot() {
 shoot_term() {
     local name=$1 plan=$2 extra=$3
     mkdir -p "$TMPD/$name"
-    EH_MKFS_EXTRA="/proc/" DESIGNBUILD="$TMPD/$name/build" bash tools/design/eh6.sh "$TMPD/$name/o" res=1280x800 accel=kvm tafel=nein moreprogs=term \
+    EH_MKFS_EXTRA="/proc/" DESIGNBUILD="$BUILD" bash tools/design/eh6.sh "$TMPD/$name/o" res=1280x800 accel=kvm tafel=nein moreprogs=term \
         "extra=vfs lang=en $extra" drehbuch="$plan" > "$TMPD/$name/o.log" 2>&1
-    rm -rf "$TMPD/$name/build"
     if [ -n "$KEEP" ]; then
         mkdir -p "$KEEP/$name"
         cp "$TMPD/$name/o/serial.txt" "$KEEP/$name/" 2>/dev/null
