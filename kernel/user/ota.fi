@@ -2623,6 +2623,19 @@ static mut E_SU_WHY_ENTRY: [u8; 25] = "no top-level first entry\0"
 static mut E_SU_WHY_PATH: [u8; 40] = "first entry has no path boot():/osum.mb\0"
 static mut E_SU_WHY_DEF: [u8; 23] = "default_entry is not 1\0"
 static mut E_SU_WHY_BPOS: [u8; 32] = "entry B is not the second entry\0"
+static mut P_SU_AST: [u8; 18] = "/system/sys.apply\0"
+static mut P_SU_ALOG: [u8; 21] = "/system/sys.applylog\0"
+static mut W_SU_BG: [u8; 3] = "bg\0"
+static mut W_SU_ARUN: [u8; 14] = "state=running\0"
+static mut W_SU_ARUNL: [u8; 15] = "state=running\n\0"
+static mut W_SU_ADONE: [u8; 12] = "state=done\n\0"
+static mut W_SU_AFAIL: [u8; 14] = "state=failed\n\0"
+static mut S_SU_BGGO: [u8; 66] = "system: apply started in the background, watch: ota system status\0"
+static mut S_SU_BGBUSY: [u8; 65] = "system: an apply is already running (state in /system/sys.apply)\0"
+static mut S_SU_ASTATE: [u8; 15] = "system: apply \0"
+static mut S_SU_ALOGH: [u8; 19] = "system: apply log:\0"
+static mut su_bg: bool = false
+static mut E_SU_BGFORK: [u8; 42] = "ota: could not start the background apply\0"
 static mut SU_CIN: [u8; 24576] = [0 as u8; 24576]
 static mut SU_COUT: [u8; 28672] = [0 as u8; 28672]
 static mut E_SU_CONFW: [u8; 33] = "ota: could not write limine.conf\0"
@@ -3864,6 +3877,9 @@ fn cmd_sys_apply(restart: bool) -> u64 {
     if restart {
         ulib.say((&S_SU_RESTARTING[0 as usize]) as u64)
         ulib.nl()
+        if su_bg {
+            su_astate_write((&W_SU_ADONE[0 as usize]) as u64)
+        }
         ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
         ulib.sleep_ms(500)
         ulib.sys(SYS_REBOOT, RB_RESTART, 0, 0)
@@ -3976,6 +3992,72 @@ fn su_finish() -> u64 {
     return 0
 }
 
+fn su_astate_write(t: u64) {
+    file_write((&P_SU_AST[0 as usize]) as u64, t, len(t))
+}
+
+fn su_bg_running() -> bool {
+    let a: u64 = (&SYSB3[0 as usize]) as u64
+    let n: u64 = file_read((&P_SU_AST[0 as usize]) as u64, a, 60)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 13 {
+        return false
+    }
+    p8(a + n, 0)
+    return su_prefix(a, (&W_SU_ARUN[0 as usize]) as u64)
+}
+
+fn cmd_sys_detached(restart: bool) -> u64 {
+    if su_bg_running() {
+        ulib.say((&S_SU_BGBUSY[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    su_astate_write((&W_SU_ARUNL[0 as usize]) as u64)
+    let child: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if ulib.bad(child) {
+        su_astate_write((&W_SU_AFAIL[0 as usize]) as u64)
+        return err((&E_SU_BGFORK[0 as usize]) as u64, 0)
+    }
+    if child != 0 {
+        ulib.say((&S_SU_BGGO[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_SU_ALOG[0 as usize]) as u64, ulib.O_MAKE, 0)
+    ulib.sys(ulib.SYS_CLOSE, 0, 0, 0)
+    if !ulib.bad(fd) {
+        ulib.sys(ulib.SYS_DUP2, fd, 1, 0)
+        ulib.sys(ulib.SYS_DUP2, fd, 2, 0)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    }
+    su_bg = true
+    let r: u64 = cmd_sys_apply(restart)
+    if r == 0 {
+        su_astate_write((&W_SU_ADONE[0 as usize]) as u64)
+    } else {
+        su_astate_write((&W_SU_AFAIL[0 as usize]) as u64)
+    }
+    return r
+}
+
+fn su_apply_report() {
+    let a: u64 = (&SYSB2[0 as usize]) as u64
+    let n: u64 = file_read((&P_SU_AST[0 as usize]) as u64, a, 60)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 7 {
+        return
+    }
+    p8(a + n, 0)
+    ulib.say((&S_SU_ASTATE[0 as usize]) as u64)
+    ulib.say(a + 6)
+    let m: u64 = file_read((&P_SU_ALOG[0 as usize]) as u64, a, 900)
+    if m != 0xFFFFFFFFFFFFFFFF && m > 0 {
+        p8(a + m, 0)
+        ulib.say((&S_SU_ALOGH[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say(a)
+    }
+}
+
 fn cmd_sys_status() -> u64 {
     sagn((&S_SU_HERE[0 as usize]) as u64, num9_read((&P_SU_VER[0 as usize]) as u64))
     let n: u64 = file_read((&P_SU_OSVER[0 as usize]) as u64, (&SYSB[0 as usize]) as u64, 200)
@@ -3993,6 +4075,7 @@ fn cmd_sys_status() -> u64 {
         ulib.say((&S_SU_NOPEND[0 as usize]) as u64)
         ulib.nl()
     }
+    su_apply_report()
     return 0
 }
 
@@ -4006,8 +4089,19 @@ fn cmd_sys(args: u64, argc: u64) -> u64 {
     }
     if ulib.streq(sub, (&C_EIN[0 as usize]) as u64) {
         var rs: bool = false
-        if argc >= 4 && ulib.streq(ulib.arg_at(args, 3), (&W_SU_RESTART[0 as usize]) as u64) {
-            rs = true
+        var bg: bool = false
+        var k: u64 = 3
+        while k < argc {
+            if ulib.streq(ulib.arg_at(args, k), (&W_SU_RESTART[0 as usize]) as u64) {
+                rs = true
+            }
+            if ulib.streq(ulib.arg_at(args, k), (&W_SU_BG[0 as usize]) as u64) {
+                bg = true
+            }
+            k = k + 1
+        }
+        if bg {
+            return cmd_sys_detached(rs)
         }
         return cmd_sys_apply(rs)
     }
