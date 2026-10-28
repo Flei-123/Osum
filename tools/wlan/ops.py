@@ -78,8 +78,8 @@ def check_seq(hw):
     ok(rc[1:7] == ["0"] * 6 and rc[7] == "30", "all operations returned 0, send returned 30")
     ok(rc[9] == ("2" if hw else "0") and rc[11] == ("1" if hw else "0"), "keys sent / ccmp flag as %s mode" % mode)
     phy_add, mac_add, bind, scfg, sta, mac_mod, scan, phy_mod = c[:8]
-    ok(le(phy_add, 4 + 4, 4) == 1 and le(phy_add, 4 + 16, 4) == 1, "PHY_CONTEXT add, channel 1")
-    ok(le(phy_mod, 4 + 4, 4) == 2 and le(phy_mod, 4 + 16, 4) == 6 and phy_mod[4 + 20] == 1, "PHY_CONTEXT modify channel 6 2.4 GHz")
+    ok(le(phy_add, 4 + 4, 4) == 1 and phy_add[4 + 17] == 1 and phy_add[4 + 16] == 1 and len(phy_add) == 4 + 36, "PHY_CONTEXT add, v1 layout 36 octets, 2.4 GHz channel 1")
+    ok(le(phy_mod, 4 + 4, 4) == 2 and phy_mod[4 + 17] == 6 and phy_mod[4 + 16] == 1, "PHY_CONTEXT modify channel 6 2.4 GHz")
     ok(le(mac_add, 4 + 8, 4) == 5 and mac_add[4 + 16:4 + 22] == MAC, "MAC_CONTEXT add: BSS station, own address")
     ok(mac_mod[4 + 24:4 + 30] == BSSID and le(mac_mod, 4 + 4, 4) == 2, "MAC_CONTEXT modify carries the BSSID")
     ok(le(bind, 4 + 20, 4) == 0 and le(bind, 4 + 8, 4) == 0, "BINDING add links MAC 0 and PHY 0")

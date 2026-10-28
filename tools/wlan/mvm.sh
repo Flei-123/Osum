@@ -26,6 +26,8 @@ mut() { # sed-expr description [module]
 }
 mut 's/const CMD_NVM_ACCESS: u64 = 0x88/const CMD_NVM_ACCESS: u64 = 0x89/' "NVM command id"
 mut 's/st32(a, HDR + 4, mac_id_color)/st32(a, HDR + 8, mac_id_color)/' "ADD_STA mac_id_n_color offset"
+mut 's/st8(a, HDR + 17, channel)/st8(a, HDR + 16, channel)/' "PHY_CONTEXT channel octet offset"
+mut 's/return HDR + 36/return HDR + 40/' "PHY_CONTEXT length"
 mut 's/var fl: u64 = 2 |/var fl: u64 = 3 |/' "CCMP cipher flag"
 mut 's/iwl_le.st32(a, h + 8, mac_type)/iwl_le.st32(a, h + 12, mac_type)/' "MAC_CONTEXT mac_type offset" iwl_mvm_ctx.fi
 mut 's/const MAC_UNION_LEN: u64 = 48/const MAC_UNION_LEN: u64 = 44/' "MAC_CONTEXT union size" iwl_mvm_ctx.fi
