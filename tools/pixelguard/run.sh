@@ -111,9 +111,12 @@ fahre 600,300
 warte 1
 taste ctrl-shift-t
 warte 6
+tippe grep -c pixelguard /proc/frames
+taste ret
+warte 4
 tippe grep pixelguard /proc/frames
 taste ret
-warte 3
+warte 10
 foto proc
 EOT
 shoot_term proc "$TMPD/proc.txt" "pixelguard=all"
