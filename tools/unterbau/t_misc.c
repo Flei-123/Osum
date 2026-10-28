@@ -14,6 +14,8 @@
 #include <sys/times.h>
 #include <sys/utsname.h>
 #include <sys/file.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <dirent.h>
@@ -116,5 +118,15 @@ int main(void)
     errno = 0; char *rp = realpath("/tmp/../tmp", 0); CHECKC("realpath", rp != 0);
     errno = 0; CHECKC("setlocale_c", 1);
     errno = 0; time_t tt = time(0); struct tm tmv; CHECKC("localtime_r", localtime_r(&tt, &tmv) != 0);
+    {
+        int sv[2], pp[2], avail = -1;
+        errno = 0; CHECKC("fionread_socketpair_open", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        errno = 0; CHECKC("fionread_socketpair_empty", ioctl(sv[0], FIONREAD, &avail) == 0 && avail == 0);
+        errno = 0; CHECKC("fionread_socketpair_write", write(sv[1], "hello", 5) == 5);
+        avail = -1; errno = 0; CHECKC("fionread_socketpair_count", ioctl(sv[0], FIONREAD, &avail) == 0 && avail == 5);
+        errno = 0; CHECKC("fionread_pipe_open", pipe(pp) == 0);
+        errno = 0; CHECKC("fionread_pipe_write", write(pp[1], "abc", 3) == 3);
+        avail = -1; errno = 0; CHECKC("fionread_pipe_count", ioctl(pp[0], FIONREAD, &avail) == 0 && avail == 3);
+    }
     return 0;
 }

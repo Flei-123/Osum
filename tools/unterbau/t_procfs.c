@@ -39,6 +39,8 @@ int main(void)
     if (n > 0) {
         unsigned long long cu = 0, cn = 0, cs = 0, ci = 0;
         CHECK("stat_cpu_line", sscanf(b, "cpu %llu %llu %llu %llu", &cu, &cn, &cs, &ci) == 4, "first line is not a Linux cpu line: %.40s", b);
+        const char *bt = strstr(b, "\nbtime ");
+        CHECK("stat_btime", bt && strtoull(bt + 7, NULL, 10) > 1000000000ULL, "no plausible btime line in /proc/stat");
     }
     errno = 0; n = slurp("/proc/self/status", b, sizeof b);
     CHECKC("self_status_open", n > 0);
