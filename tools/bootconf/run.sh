@@ -27,6 +27,9 @@ printf "default_entry: 1\n\n/Prod\n    protocol: multiboot1\n    path: boot():/E
 printf "default_entry: 3\n\n/Prod\n$ENTRY" > "$T/c/def3.conf"
 printf "default_entry: 1\n\n//Sub\n$ENTRY" > "$T/c/sub.conf"
 printf "timeout: 5\n" > "$T/c/noentry.conf"
+printf "timeout: 5\ndefault_entry: 1\n\n/Prod\n    protocol: multiboot1\n    path: boot():/EFI/prod/osum.mb\n    cmdline: a\n\n/Windows Boot Manager\n    protocol: efi_chainload\n    path: boot():/EFI/Microsoft/Boot/bootmgfw.efi\n" > "$T/c/espdir.conf"
+printf "default_entry: 1\n\n/Prod\n    protocol: multiboot1\n    path: boot():/EFI/prod/osum.mb\n    cmdline: a\n\n/Prod (update)\n    protocol: multiboot1\n    path: boot():/EFI/prod/osum-b.mb\n    cmdline: a\n\n/Windows Boot Manager\n    protocol: efi_chainload\n    path: boot():/EFI/Microsoft/Boot/bootmgfw.efi\n" > "$T/c/espdirb.conf"
+printf "default_entry: 1\n\n/Prod\n    protocol: multiboot1\n    path: boot():/EFI/prod/osum.mb\n\n/Other\n    protocol: multiboot1\n    path: boot():/EFI/zzz/osum-b.mb\n" > "$T/c/espdirx.conf"
 cp tools/bootconf/hp-limine.conf "$T/c/hp.conf"
 python3 - "$T/c" <<'PY'
 import sys
@@ -35,7 +38,7 @@ t = open(d + "/hp.conf", encoding="latin1").read()
 t = t.replace("default_entry: 1\n", "default_entry: 1\n", 1)
 open(d + "/hp2.conf", "w", encoding="latin1").write(t.replace("\n/Advanced\n", "\n/Advanced\n", 1) + "\n/Windows Boot Manager\n    protocol: efi_chainload\n    path: boot():/EFI/Microsoft/Boot/bootmgfw.efi\n")
 PY
-CASES="single nodef dual crlf noeol hasb badb otherpath def3 sub noentry hp hp2"
+CASES="single nodef dual crlf noeol hasb badb otherpath def3 sub noentry espdir espdirb espdirx hp hp2"
 FILES=(); for c in $CASES; do FILES+=("/t/$c.conf=$T/c/$c.conf"); done
 : > "$T/o.all"
 ACC=tcg; [ -e /dev/kvm ] && ACC=kvm
@@ -62,7 +65,7 @@ done
 cp "$T/o.all" "$T/o.txt"
 tr -cd '\11\12\15\40-\176' < "$T/o.txt" | tr -d '\r' > "$T/o.klar"
 cp "$T/o.klar" "${BOOTCONF_OUT:-/dev/null}" 2>/dev/null
-nxt() { local seen=0 r=""; for c in $CASES END1 END2 END3 END4 END5; do [ $seen = 1 ] && { r=$c; break; }; [ "$c" = "$1" ] && seen=1; done; echo "$r"; }
+nxt() { local seen=0 r=""; for c in $CASES END1 END2 END3 END4 END5 END6 END7 END8; do [ $seen = 1 ] && { r=$c; break; }; [ "$c" = "$1" ] && seen=1; done; echo "$r"; }
 for c in $CASES; do
     n=$(nxt $c)
     awk -v a="==$c==" -v b="==$n==" 'index($0,a)==1{f=1;next} index($0,b)==1{f=0} f' "$T/o.klar" > "$T/p.$c"

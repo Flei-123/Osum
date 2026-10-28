@@ -2,8 +2,7 @@ import hashlib
 import re
 import sys
 
-PATH_A = "path: boot():/osum.mb"
-PATH_B = "path: boot():/osum-b.mb"
+PRE = "path: boot():"
 
 
 def lines_of(text):
@@ -18,9 +17,12 @@ def reference(text):
     first = starts[0]
     end = starts[1] if len(starts) > 1 else len(lines)
     block = lines[first:end]
-    idx = [i for i, l in enumerate(block) if l.strip(" \t\r\n") == PATH_A and l.lstrip(" \t").startswith(PATH_A)]
+    idx = [i for i, l in enumerate(block) if re.fullmatch(re.escape(PRE) + r"(.{0,89}?)/osum\.mb", l.strip(" \t\r\n")) and l.lstrip(" \t").startswith(PRE)]
     if not idx:
         return 2, None
+    kdir = re.fullmatch(re.escape(PRE) + r"(.*)/osum\.mb", block[idx[0]].strip(" \t\r\n")).group(1)
+    PATH_A = PRE + kdir + "/osum.mb"
+    PATH_B = PRE + kdir + "/osum-b.mb"
     head = lines[:first]
     d = [i for i, l in enumerate(head) if l.startswith("default_entry:")]
     if d:
@@ -51,7 +53,7 @@ def reference(text):
         t = re.match(r"([^\r\n]*)(.*)$", b[0], re.S)
         b[0] = t.group(1) + " (update)" + t.group(2)
         k = idx[0]
-        pos = b[k].index(PATH_A)
+        pos = b[k].index(PRE)
         b[k] = b[k][:pos] + PATH_B + b[k][pos + len(PATH_A):]
         out += b
     out += lines[end:]

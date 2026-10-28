@@ -2559,8 +2559,10 @@ static mut P_SU_CONF: [u8; 20] = "/sysesp/limine.conf\0"
 static mut P_SU_NEW: [u8; 18] = "/sysesp/limine.nw\0"
 // 32 KiB copy buffer: one write call per 64 sectors instead of one per 8
 static mut SU_BIG: [u8; 32768] = [0 as u8; 32768]
-static mut P_SU_KB: [u8; 18] = "/sysesp/osum-b.mb\0"
-static mut P_SU_KA: [u8; 16] = "/sysesp/osum.mb\0"
+static mut P_SU_KB: [u8; 128] = [0 as u8; 128]
+static mut P_SU_KA: [u8; 128] = [0 as u8; 128]
+static mut S_SU_LEAF_A: [u8; 9] = "/osum.mb\0"
+static mut S_SU_LEAF_B: [u8; 11] = "/osum-b.mb\0"
 static mut P_PROCVER: [u8; 14] = "/proc/version\0"
 static mut D_SU_HDA1: [u8; 10] = "/dev/hda1\0"
 static mut D_SU_SDA1: [u8; 10] = "/dev/sda1\0"
@@ -3003,12 +3005,39 @@ fn su_esp_try(dev: u64) -> bool {
 }
 
 // The ESP is partition 1 of the boot disk: IDE (hda), AHCI (sda) or NVMe.
+fn su_paths_set(dir: u64) {
+    var w: u64 = ulib.strcpy((&P_SU_KA[0 as usize]) as u64, (&P_SU_MNT[0 as usize]) as u64)
+    w = w + ulib.strcpy((&P_SU_KA[0 as usize]) as u64 + w, dir)
+    ulib.strcpy((&P_SU_KA[0 as usize]) as u64 + w, (&S_SU_LEAF_A[0 as usize]) as u64)
+    var v: u64 = ulib.strcpy((&P_SU_KB[0 as usize]) as u64, (&P_SU_MNT[0 as usize]) as u64)
+    v = v + ulib.strcpy((&P_SU_KB[0 as usize]) as u64 + v, dir)
+    ulib.strcpy((&P_SU_KB[0 as usize]) as u64 + v, (&S_SU_LEAF_B[0 as usize]) as u64)
+}
+
+fn su_paths_resolve() {
+    let a: u64 = (&SU_CIN[0 as usize]) as u64
+    let n: u64 = file_read((&P_SU_CONF[0 as usize]) as u64, a, 24000)
+    if n != 0xFFFFFFFFFFFFFFFF && n != 0 && n < 24000 {
+        p8(a + n, 0)
+        if bootconf.resolve(a, n) {
+            su_paths_set(bootconf.kernel_dir())
+            return
+        }
+    }
+    var empty: [u8; 2] = "\0\0"
+    su_paths_set((&empty[0 as usize]) as u64)
+}
+
 fn su_esp_open() -> bool {
     ulib.sys(ulib.SYS_MKDIR, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
     // order matters: mounting /dev/hda1 on a machine without an IDE disk stalls for minutes
-    return su_esp_try((&D_SU_SDA1[0 as usize]) as u64)
+    let ok: bool = su_esp_try((&D_SU_SDA1[0 as usize]) as u64)
         || su_esp_try((&D_SU_NVME1[0 as usize]) as u64)
         || su_esp_try((&D_SU_HDA1[0 as usize]) as u64)
+    if ok {
+        su_paths_resolve()
+    }
+    return ok
 }
 
 fn su_esp_close() {

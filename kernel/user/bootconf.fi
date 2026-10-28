@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 profile kernel
 
-export { arm, new_len, R_OK, R_NO_ENTRY, R_NO_PATH, R_DEFAULT, R_B_PLACE, R_FULL }
+export { arm, resolve, kernel_dir, new_len, R_OK, R_NO_ENTRY, R_NO_PATH, R_DEFAULT, R_B_PLACE, R_FULL }
 
 const R_OK: u64 = 0
 const R_NO_ENTRY: u64 = 1
@@ -16,8 +16,11 @@ static mut full: bool = false
 
 static mut k_default: [u8; 15] = "default_entry:\0"
 static mut k_default_two: [u8; 17] = "default_entry: 2\0"
-static mut k_path_a: [u8; 22] = "path: boot():/osum.mb\0"
-static mut k_path_b: [u8; 24] = "path: boot():/osum-b.mb\0"
+static mut k_path_pre: [u8; 14] = "path: boot():\0"
+static mut k_leaf_a: [u8; 9] = "/osum.mb\0"
+static mut k_leaf_b: [u8; 11] = "/osum-b.mb\0"
+static mut dir_buf: [u8; 96] = [0 as u8; 96]
+static mut dir_len: u64 = 0
 static mut k_suffix: [u8; 10] = " (update)\0"
 static mut k_nl: [u8; 2] = "\n\0"
 
@@ -84,22 +87,84 @@ fn copy(dst: u64, cap: u64, w: u64, src: u64, cnt: u64) -> u64 {
     return w + cnt
 }
 
-fn path_line(a: u64, from: u64, to: u64, lit: u64) -> u64 {
+fn kernel_dir() -> u64 {
+    return (&dir_buf[0 as usize]) as u64
+}
+
+fn ends_with(a: u64, e: u64, lit: u64) -> bool {
+    let l: u64 = lit_len(lit)
+    if e < l {
+        return false
+    }
+    var k: u64 = 0
+    while k < l {
+        if g8(a + e - l + k) != g8(lit + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn path_line(a: u64, from: u64, to: u64, leaf: u64, want_dir: bool) -> u64 {
+    let pre: u64 = lit_len((&k_path_pre[0 as usize]) as u64)
+    let ll: u64 = lit_len(leaf)
     var i: u64 = from
     while i < to {
         var j: u64 = i
         while j < to && (g8(a + j) == 32 || g8(a + j) == 9) {
             j = j + 1
         }
-        if starts(a, j, to, lit) {
-            let e: u64 = j + lit_len(lit)
-            if e == to || g8(a + e) == 10 || g8(a + e) == 13 {
-                return j
+        if starts(a, j, to, (&k_path_pre[0 as usize]) as u64) {
+            let e: u64 = line_end(a, j, to)
+            if e >= j + pre + ll && ends_with(a, e, leaf) {
+                let dl: u64 = e - ll - (j + pre)
+                if dl < 90 {
+                    if !want_dir {
+                        var same: bool = dl == dir_len
+                        var k: u64 = 0
+                        while same && k < dl {
+                            if g8(a + j + pre + k) != g8(kernel_dir() + k) {
+                                same = false
+                            }
+                            k = k + 1
+                        }
+                        if same {
+                            return j
+                        }
+                    } else {
+                        var k: u64 = 0
+                        while k < dl {
+                            p8(kernel_dir() + k, g8(a + j + pre + k))
+                            k = k + 1
+                        }
+                        p8(kernel_dir() + dl, 0)
+                        dir_len = dl
+                        return j
+                    }
+                }
             }
         }
         i = next_line(a, i, to)
     }
     return NONE
+}
+
+fn resolve(a: u64, n: u64) -> bool {
+    dir_len = 0
+    p8(kernel_dir(), 0)
+    if n == 0 {
+        return false
+    }
+    let es: u64 = entry_start(a, 0, n)
+    if es == NONE || (es + 1 < n && g8(a + es + 1) == 47) {
+        return false
+    }
+    var ee: u64 = entry_start(a, next_line(a, es, n), n)
+    if ee == NONE {
+        ee = n
+    }
+    return path_line(a, es, ee, (&k_leaf_a[0 as usize]) as u64, true) != NONE
 }
 
 fn entry_start(a: u64, from: u64, n: u64) -> u64 {
@@ -159,8 +224,10 @@ fn emit_update_entry(dst: u64, cap: u64, w0: u64, a: u64, es: u64, ee: u64, pp: 
     w = copy(dst, cap, w, a + es, te - es)
     w = copy(dst, cap, w, (&k_suffix[0 as usize]) as u64, lit_len((&k_suffix[0 as usize]) as u64))
     w = copy(dst, cap, w, a + te, pp - te)
-    w = copy(dst, cap, w, (&k_path_b[0 as usize]) as u64, lit_len((&k_path_b[0 as usize]) as u64))
-    let pe: u64 = pp + lit_len((&k_path_a[0 as usize]) as u64)
+    w = copy(dst, cap, w, (&k_path_pre[0 as usize]) as u64, lit_len((&k_path_pre[0 as usize]) as u64))
+    w = copy(dst, cap, w, kernel_dir(), dir_len)
+    w = copy(dst, cap, w, (&k_leaf_b[0 as usize]) as u64, lit_len((&k_leaf_b[0 as usize]) as u64))
+    let pe: u64 = line_end(a, pp, ee)
     w = copy(dst, cap, w, a + pe, ee - pe)
     return w
 }
@@ -183,7 +250,7 @@ fn arm(a: u64, n: u64, dst: u64, cap: u64) -> u64 {
     if ee == NONE {
         ee = n
     }
-    let pp: u64 = path_line(a, es, ee, (&k_path_a[0 as usize]) as u64)
+    let pp: u64 = path_line(a, es, ee, (&k_leaf_a[0 as usize]) as u64, true)
     if pp == NONE {
         return R_NO_PATH
     }
@@ -191,7 +258,7 @@ fn arm(a: u64, n: u64, dst: u64, cap: u64) -> u64 {
     if d != NONE && !default_value_ok(a, d, es) {
         return R_DEFAULT
     }
-    let bp: u64 = path_line(a, 0, n, (&k_path_b[0 as usize]) as u64)
+    let bp: u64 = path_line(a, 0, n, (&k_leaf_b[0 as usize]) as u64, false)
     let has_b: bool = bp != NONE
     if has_b {
         var e3: u64 = entry_start(a, next_line(a, ee, n), n)

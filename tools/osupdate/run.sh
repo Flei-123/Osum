@@ -606,6 +606,47 @@ hatnicht "$OUT/bg3.txt" "BG-NEW-CONTENT" "counter-proof: nothing installed by th
 dienst_aus
 fi
 
+if want 16; then
+echo "== 16. dual-boot ESP: kernel in a subfolder, Windows entry second -> slot B beside it, Windows entry untouched =="
+fresh_disk
+dienst "$OUT/feed-good" && ok "feed up" || bad "feed does not start"
+rc=$(lauf d0 "exit")
+esp_get osum.mb > "$OUT/d.kernel"
+esp_get limine.conf > "$OUT/d.conf0"
+mmd -i "$ESP" ::/EFI ::/EFI/prod 2>/dev/null
+mcopy -o -i "$ESP" "$OUT/d.kernel" ::/EFI/prod/osum.mb
+mdel -i "$ESP" ::/osum.mb
+python3 - "$OUT/d.conf0" "$OUT/d.conf" <<'PYEOF'
+import sys
+t = open(sys.argv[1], encoding="latin1").read().replace("boot():/osum.mb", "boot():/EFI/prod/osum.mb")
+if not t.endswith("\n"):
+    t += "\n"
+t += "\n/Windows Boot Manager\n    protocol: efi_chainload\n    path: boot():/EFI/Microsoft/Boot/bootmgfw.efi\n"
+open(sys.argv[2], "w", encoding="latin1").write(t)
+PYEOF
+esp_put "$OUT/d.conf" limine.conf
+esp_get limine.conf | sed -n '/^\/Windows Boot Manager/,$p' > "$OUT/d.win0"
+rc=$(lauf d1 "ota system apply restart;exit" keep)
+hat "$OUT/d1.txt" "system: staged in slot B" "apply stages slot B in the subfolder layout"
+esp_has EFI/prod/osum-b.mb && ok "slot B lives beside slot A (EFI/prod/osum-b.mb)" || bad "no EFI/prod/osum-b.mb"
+esp_has osum-b.mb && bad "slot B landed in the ESP root" || ok "nothing written to the ESP root"
+gleich "slot B hash == signed hash" "$(esp_sha EFI/prod/osum-b.mb)" "$KSHA"
+gleich "slot A untouched" "$(esp_sha EFI/prod/osum.mb)" "$OLDSHA"
+gleich "limine default_entry is 2" "$(conf_default)" "2"
+esp_get limine.conf | grep -qa 'path: boot():/EFI/prod/osum-b.mb' && ok "entry B points at EFI/prod/osum-b.mb" || bad "entry B path wrong"
+esp_get limine.conf | sed -n '/^\/Windows Boot Manager/,$p' > "$OUT/d.win1"
+cmp -s "$OUT/d.win0" "$OUT/d.win1" && ok "Windows entry byte-identical" || bad "Windows entry changed"
+rc=$(lauf d2 "ota system status;exit" keep)
+gleich "trial boot runs the NEW kernel" "$(commit_of "$OUT/d2.txt")" "$NEW"
+rc=$(lauf d3 "ota system confirm;ota system status;exit" keep)
+hat "$OUT/d3.txt" "system: new kernel confirmed and promoted to slot A" "confirm promotes B -> A in the subfolder"
+gleich "slot A == new kernel" "$(esp_sha EFI/prod/osum.mb)" "$KSHA"
+gleich "limine default_entry back to 1" "$(conf_default)" "1"
+esp_get limine.conf | sed -n '/^\/Windows Boot Manager/,$p' > "$OUT/d.win2"
+cmp -s "$OUT/d.win0" "$OUT/d.win2" && ok "Windows entry still byte-identical after confirm" || bad "Windows entry changed by confirm"
+dienst_aus
+fi
+
 echo
 echo "osupdate: $pass/$fail OK/FAIL"
 [ "$fail" = 0 ]
