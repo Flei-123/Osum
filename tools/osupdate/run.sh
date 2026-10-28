@@ -28,6 +28,7 @@
 #      (shell supervisor restarts it), old backups gone; counter-proof: section 2 (other kernel = slot B)
 #  13. trust-root delivery (sysfile roots): rootsctl apply from the signed list; counter-proofs wrong hash, junk block
 #  14. absolute overlay targets (/etc, /usr/share), syslink of /apps/<x>.osp/start to a new /bin file, reboot, counter-proofs
+#  15. detached apply (apply bg): running/done/failed state + log, second call refused, stale state released, force
 # Sections 2 and 5 run with the gzip feed (kernel + overlay files as .gz, streaming gunzip on the
 # device): the trial boot sees the new /bin files, confirm drops the backups, a lost trial restores them.
 # OSU_SECS="8 9" runs only the listed sections (1 always runs); OSU_ONLY7=1 = "7".
@@ -552,6 +553,57 @@ mkdir -p "$OUT/ovl-abs/root"; printf 'x\n' > "$OUT/ovl-abs/root/evil"
 pubt "$OUT/img-old" "$OUT/feed-abs-bad" dev --count 501 --overlay "$OUT/ovl-abs" --gz && bad "publisher accepted /root and a name with a space" || ok "counter-proof: publisher refuses /root and a bad name"
 dienst_aus
 
+fi
+
+if want 15; then
+echo "== 15. detached apply (ota system apply bg): running/done/failed, second call refused, stale state released, force =="
+fresh_disk
+rm -rf "$OUT/ovl-bg"; mkdir -p "$OUT/ovl-bg"
+printf 'BG-NEW-CONTENT\n' > "$OUT/ovl-bg/gate-bg.txt"
+head -c 3000000 /dev/urandom > "$OUT/ovl-bg/gate-bgbig.bin"
+pubt "$OUT/img-old" "$OUT/feed-bg" dev --count 600 --overlay "$OUT/ovl-bg" --gz && ok "bg feed: build 600, kernel identical to slot A, 3 MB incompressible overlay file" || { cat "$OUT/pub.log"; bad "publish bg"; }
+dienst "$OUT/feed-bg" && ok "feed up" || bad "feed does not start"
+rc=$(lauf g1 "ota system apply bg;echo ==SECOND;ota system apply bg;echo ==STATE1;cat /system/sys.apply;echo ==PS;ps;echo ==WAIT;sleep 30;echo ==STATE2;cat /system/sys.apply;echo ==LOG;cat /system/sys.applylog;echo ==FILE;cat /bin/gate-bg.txt;cat /system/SYSVERSION;echo ==STATUS;ota system status;exit")
+sed -n '/^osum\$ ota system apply bg/,/==STATE1/p' "$OUT/g1.txt" > "$OUT/g1.start"
+sed -n '/^==STATE1/,/^==PS/p' "$OUT/g1.txt" > "$OUT/g1.state1"
+sed -n '/^==PS/,/^==WAIT/p' "$OUT/g1.txt" > "$OUT/g1.ps"
+sed -n '/^==STATE2/,/^==LOG/p' "$OUT/g1.txt" > "$OUT/g1.state2"
+sed -n '/^==LOG/,/^==FILE/p' "$OUT/g1.txt" > "$OUT/g1.log"
+sed -n '/^==FILE/,$p' "$OUT/g1.txt" > "$OUT/g1.after"
+hat "$OUT/g1.start" "system: apply started in the background" "first call returns at once and starts the apply in the background"
+hat "$OUT/g1.start" "system: an apply is already running" "second call during the run is refused"
+hat "$OUT/g1.state1" "state=running pid=" "state file says running and carries the task id"
+PIDG=$(grep -ao 'state=running pid=[0-9]*' "$OUT/g1.state1" | head -1 | sed 's/.*pid=//')
+[ -n "$PIDG" ] && grep -aEq "^ *$PIDG +[0-9]+ +[a-z]+ +user .* ota\\s*$" "$OUT/g1.ps" && ok "ps shows the task $PIDG named ota" || bad "no ota task with the pid from the state file ($PIDG)"
+hat "$OUT/g1.state2" "state=done" "after the run the state is done"
+hat "$OUT/g1.log" "system: applied, no restart needed" "log carries the apply output"
+hat "$OUT/g1.after" "BG-NEW-CONTENT" "the new /bin file is there"
+hat "$OUT/g1.after" "00000600" "SYSVERSION is 600"
+hat "$OUT/g1.after" "system: apply done" "ota system status shows the finished apply"
+hat "$OUT/g1.after" "system: apply log:" "ota system status shows the log"
+hatnicht "$OUT/g1.after" "is stale" "finished state is not reported as stale"
+rc=$(lauf g2 "echo state=running > /system/sys.apply;ota system apply bg;echo ==CASE2;echo state=running pid=9999999 > /system/sys.apply;ota system status;echo ==CASE2B;ota system apply bg;sleep 15;cat /system/sys.apply;echo ==CASE3;echo state=running > /system/sys.apply;ota system apply bg force;sleep 15;cat /system/sys.apply;echo ==END;exit" keep)
+sed -n '/^osum\$ echo state=running > /,/^==CASE2$/{p;/^==CASE2$/q}' "$OUT/g2.txt" > "$OUT/g2.c1"
+sed -n '/^==CASE2$/,/^==CASE2B/p' "$OUT/g2.txt" > "$OUT/g2.c2"
+sed -n '/^==CASE2B/,/^==CASE3/p' "$OUT/g2.txt" > "$OUT/g2.c2b"
+sed -n '/^==CASE3/,/^==END/p' "$OUT/g2.txt" > "$OUT/g2.c3"
+hat "$OUT/g2.c1" "system: an apply is already running" "a running state without a task id is respected (refused)"
+hatnicht "$OUT/g2.c1" "started in the background" "refused call starts nothing"
+hat "$OUT/g2.c2" "is stale" "status reports a running state whose task is gone as stale"
+hat "$OUT/g2.c2b" "the previous apply died" "stale state is released by the next call"
+hat "$OUT/g2.c2b" "started in the background" "after the stale release the apply starts"
+grep -aEq "state=(done|failed)" "$OUT/g2.c2b" && ok "released run ends in a final state" || bad "released run never left state=running"
+hat "$OUT/g2.c3" "started in the background" "force starts despite a running state"
+grep -aEq "state=(done|failed)" "$OUT/g2.c3" && ok "forced run ends in a final state" || bad "forced run never left state=running"
+dienst "$OUT/feed-badsig" || bad "feed does not start"
+fresh_disk
+rc=$(lauf bg3 "ota system apply bg;sleep 15;echo ==RAW;cat /system/sys.apply;echo ==STATE;cat /system/sys.apply;echo ==LOG;cat /system/sys.applylog;echo ==FILE;cat /bin/gate-bg.txt;echo ==STATUS;ota system status;exit")
+sed -n '/^==STATE/,/^==LOG/p' "$OUT/bg3.txt" > "$OUT/bg3.state"
+sed -n '/^==LOG/,/^==FILE/p' "$OUT/bg3.txt" > "$OUT/bg3.log"
+hat "$OUT/bg3.state" "state=failed" "a failing apply (bad signature) ends in state=failed"
+[ "$(wc -c < "$OUT/bg3.log")" -gt 40 ] && ok "failure text is in the log" || bad "log of the failed apply is empty"
+hatnicht "$OUT/bg3.txt" "BG-NEW-CONTENT" "counter-proof: nothing installed by the failed apply"
+dienst_aus
 fi
 
 echo

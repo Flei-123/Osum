@@ -2635,6 +2635,10 @@ static mut S_SU_BGBUSY: [u8; 65] = "system: an apply is already running (state i
 static mut S_SU_ASTATE: [u8; 15] = "system: apply \0"
 static mut S_SU_ALOGH: [u8; 19] = "system: apply log:\0"
 static mut su_bg: bool = false
+static mut W_SU_APID: [u8; 19] = "state=running pid=\0"
+static mut W_SU_FORCE: [u8; 6] = "force\0"
+static mut S_SU_STALE: [u8; 64] = "system: the previous apply died, its running state was released\0"
+static mut S_SU_STALENOTE: [u8; 80] = "system: apply state is stale (the task is gone), use: ota system apply bg force\0"
 static mut E_SU_BGFORK: [u8; 42] = "ota: could not start the background apply\0"
 static mut SU_CIN: [u8; 24576] = [0 as u8; 24576]
 static mut SU_COUT: [u8; 28672] = [0 as u8; 28672]
@@ -3996,7 +4000,50 @@ fn su_astate_write(t: u64) {
     file_write((&P_SU_AST[0 as usize]) as u64, t, len(t))
 }
 
-fn su_bg_running() -> bool {
+fn su_task_alive(pid: u64) -> bool {
+    let me: u64 = ulib.sys(ulib.SYS_GETPID, 0, 0, 0)
+    if pid == 0 || pid == me {
+        return false
+    }
+    var i: u64 = 0
+    while i < 128 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 && st != 5 {
+            if ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0) == pid {
+                let n0: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME0, 0)
+                let n1: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME1, 0)
+                return n0 == 0x61746f && n1 == 0
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn su_bg_pid() -> u64 {
+    let a: u64 = (&SYSB3[0 as usize]) as u64
+    let n: u64 = file_read((&P_SU_AST[0 as usize]) as u64, a, 60)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 19 {
+        return 0
+    }
+    p8(a + n, 0)
+    if !su_prefix(a, (&W_SU_APID[0 as usize]) as u64) {
+        return 0
+    }
+    var v: u64 = 0
+    var i: u64 = 18
+    while i < n {
+        let ch: u64 = g8(a + i)
+        if ch < 48 || ch > 57 {
+            return v
+        }
+        v = v * 10 + (ch - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn su_bg_marked() -> bool {
     let a: u64 = (&SYSB3[0 as usize]) as u64
     let n: u64 = file_read((&P_SU_AST[0 as usize]) as u64, a, 60)
     if n == 0xFFFFFFFFFFFFFFFF || n < 13 {
@@ -4006,11 +4053,34 @@ fn su_bg_running() -> bool {
     return su_prefix(a, (&W_SU_ARUN[0 as usize]) as u64)
 }
 
-fn cmd_sys_detached(restart: bool) -> u64 {
-    if su_bg_running() {
-        ulib.say((&S_SU_BGBUSY[0 as usize]) as u64)
+fn su_bg_running() -> bool {
+    if !su_bg_marked() {
+        return false
+    }
+    let pid: u64 = su_bg_pid()
+    if pid == 0 {
+        return true
+    }
+    return su_task_alive(pid)
+}
+
+fn su_astate_write_pid() {
+    var b: [u8; 48] = [0 as u8; 48]
+    ulib.strcat((&b[0 as usize]) as u64, (&W_SU_APID[0 as usize]) as u64)
+    num_at((&b[0 as usize]) as u64, ulib.sys(ulib.SYS_GETPID, 0, 0, 0))
+    ulib.strcat((&b[0 as usize]) as u64, (&W_SU_NL[0 as usize]) as u64)
+    su_astate_write((&b[0 as usize]) as u64)
+}
+
+fn cmd_sys_detached(restart: bool, force: bool) -> u64 {
+    if su_bg_marked() {
+        if su_bg_running() && !force {
+            ulib.say((&S_SU_BGBUSY[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        ulib.say((&S_SU_STALE[0 as usize]) as u64)
         ulib.nl()
-        return 1
     }
     su_astate_write((&W_SU_ARUNL[0 as usize]) as u64)
     let child: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
@@ -4023,6 +4093,7 @@ fn cmd_sys_detached(restart: bool) -> u64 {
         ulib.nl()
         return 0
     }
+    su_astate_write_pid()
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_SU_ALOG[0 as usize]) as u64, ulib.O_MAKE, 0)
     ulib.sys(ulib.SYS_CLOSE, 0, 0, 0)
     if !ulib.bad(fd) {
@@ -4049,6 +4120,10 @@ fn su_apply_report() {
     p8(a + n, 0)
     ulib.say((&S_SU_ASTATE[0 as usize]) as u64)
     ulib.say(a + 6)
+    if su_bg_marked() && !su_bg_running() {
+        ulib.say((&S_SU_STALENOTE[0 as usize]) as u64)
+        ulib.nl()
+    }
     let m: u64 = file_read((&P_SU_ALOG[0 as usize]) as u64, a, 900)
     if m != 0xFFFFFFFFFFFFFFFF && m > 0 {
         p8(a + m, 0)
@@ -4090,6 +4165,7 @@ fn cmd_sys(args: u64, argc: u64) -> u64 {
     if ulib.streq(sub, (&C_EIN[0 as usize]) as u64) {
         var rs: bool = false
         var bg: bool = false
+        var force: bool = false
         var k: u64 = 3
         while k < argc {
             if ulib.streq(ulib.arg_at(args, k), (&W_SU_RESTART[0 as usize]) as u64) {
@@ -4098,10 +4174,13 @@ fn cmd_sys(args: u64, argc: u64) -> u64 {
             if ulib.streq(ulib.arg_at(args, k), (&W_SU_BG[0 as usize]) as u64) {
                 bg = true
             }
+            if ulib.streq(ulib.arg_at(args, k), (&W_SU_FORCE[0 as usize]) as u64) {
+                force = true
+            }
             k = k + 1
         }
         if bg {
-            return cmd_sys_detached(rs)
+            return cmd_sys_detached(rs, force)
         }
         return cmd_sys_apply(rs)
     }

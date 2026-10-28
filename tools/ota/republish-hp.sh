@@ -7,6 +7,7 @@
 #   Env: HP_BASE=<image dir of the installed baseline>  HP_REF=<git ref, default origin/main>
 #        HP_ONLY="a b c" limits the overlay to the listed programs (small first step for a slow bridge)
 #        HP_NO_EXTRAS=1 drops the absolute-path files (a device with an old ota refuses them: first step only /bin)
+#        HP_SAME_KERNEL=1 publishes the kernel of HP_BASE (what the HP runs): the HP applies the overlay live, no trial boot
 #        HP_KEEP_IMAGE=1 keeps the built image dir.  Run directly (not via heavy) when the heavy queue hangs.
 set -euo pipefail
 REPO=${OSUM_MAIN_CHECKOUT:-/root/jarvis/projects/u_DiS4in7esMF1/osum}
@@ -57,5 +58,6 @@ python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${PROGS[*]} term" \
     | sed -n 's|^\(/apps/[A-Za-z0-9._-]*/start\)@\(/bin/[A-Za-z0-9._-]*\)$|\1 \2|p' > "$LINKS"
 rm -rf "$EXTRA.bundle"
 echo "republish-hp: ${#PROGS[@]} overlay programs, $(wc -l < "$LINKS") app links"
+[ -n "${HP_SAME_KERNEL:-}" ] && export FEED_KERNEL="$HP_BASE/osum.mb"
 OVL_EXTRA_DIR="$EXTRA" OVL_LINKS="$LINKS" bash tools/ota/publish-hp.sh "$IMG" "$NOTES" "${PROGS[@]}" $DRY
 rm -f "$IMG.log"

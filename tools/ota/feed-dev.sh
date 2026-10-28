@@ -14,6 +14,8 @@
 # OVL_EXTRA_DIR     optional dir copied into the overlay as is: top-level files are /bin names, subdirectories
 #                   are absolute destinations (apps/x.osp/start -> /apps/x.osp/start, etc/..., usr/share/...).
 # OVL_LINKS         optional file of "<dest> /bin/<name>" lines: <dest> becomes a second name of the new /bin file.
+# FEED_KERNEL      optional: publish this osum.mb instead of building one (a kernel byte-identical to the
+#                   installed slot A makes the device apply the overlay live, without a trial boot).
 # --dry             build + sign into a temp copy of the feed and verify, publish nothing.
 #
 # Steps: kernel via build-kernel.sh (--stufe 0) into a dir that holds ONLY osum.mb (a root.img there adds a
@@ -36,7 +38,11 @@ COUNT=$(git rev-list --count HEAD)
 
 bash vendor/firn/fetch-firnc.sh > /dev/null
 mkdir -p "$T/k" "$T/ovl"
-bash tools/build-kernel.sh "$T/k/osum.mb" --stufe 0 > "$T/k.log" 2>&1 || { tail -5 "$T/k.log"; exit 1; }
+if [ -n "${FEED_KERNEL:-}" ]; then
+    cp "$FEED_KERNEL" "$T/k/osum.mb"
+else
+    bash tools/build-kernel.sh "$T/k/osum.mb" --stufe 0 > "$T/k.log" 2>&1 || { tail -5 "$T/k.log"; exit 1; }
+fi
 for p in "${PROGS[@]}"; do
     [ -s "$IMGDIR/$p.elf" ] || { echo "feed-dev: $IMGDIR/$p.elf missing"; exit 1; }
     cp "$IMGDIR/$p.elf" "$T/ovl/$p"
