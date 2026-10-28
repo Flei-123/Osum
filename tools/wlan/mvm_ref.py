@@ -12,6 +12,9 @@ def sta_key(q, slot, sta, off, keyid, mc):
 out = {}
 out['nvm'] = hdr(0x88, 9, 3) + struct.pack('<BBHHH', 0, 0, 5, 0x120, 0x200)
 out['phy'] = hdr(0x6a, 9, 4) + struct.pack('<III', 0x00330F00, 0xFFFFFFFF, 1)
+out['pc3'] = hdr(0x6a, 9, 4) + struct.pack('<IIIIIII', 0x00330F00, 0xFFFFFFFF, 1, 0, 0, 0, 0)
+out['sfc'] = hdr(0xd1, 9, 12) + struct.pack('<III', 3, 4096, 8192) + struct.pack('<10I', *([1000000] * 10)) + struct.pack('<10I', *([400, 160] * 5))
+out['btc'] = hdr(0x9b, 9, 13) + struct.pack('<II', 1, 0x14)
 out['ant'] = hdr(0x98, 9, 5) + struct.pack('<I', 3)
 out['ctx'] = hdr(0x08, 0, 6) + struct.pack('<IIII', 1 | (2 << 8), 1, 0, 0) + struct.pack('<BBBB', 1, 6, 0, 0) + struct.pack('<IIII', 3, 0x1406, 0, 0)
 out['ctw'] = hdr(0x08, 0, 17) + struct.pack('<IIII', 1 | (2 << 8), 1, 0, 0) + struct.pack('<IBBBB', 6, 1, 0, 0, 0) + struct.pack('<IIII', 3, 0x1406, 0, 0)
@@ -41,5 +44,5 @@ out['sr7'] = hdr(0x0d, 0, 16) + head7 + chcfg + tail
 out['sab'] = hdr(0x0e, 0, 14) + struct.pack('<II', 5, 0)
 txc = struct.pack('<HHIIIBBBB', 30, 0, 0x8 | 0x2000, 0, 0x4001, 1, 0, 0, 0) + key + struct.pack('<IIIBBBBHH', 0, 0xFFFF, 0x34ABCD00, 0x12, 15, 7, 0, 0, 0)
 out['tx'] = hdr(0x1c, 2, 15) + txc + frame
-for k in ['nvm', 'phy', 'ant', 'ctx', 'ctw', 'sta', 'key', 'gkey', 'mac', 'bnd', 'scf', 'srq', 'sr7', 'sab', 'tx']:
+for k in ['nvm', 'phy', 'pc3', 'sfc', 'btc', 'ant', 'ctx', 'ctw', 'sta', 'key', 'gkey', 'mac', 'bnd', 'scf', 'srq', 'sr7', 'sab', 'tx']:
     print(k, out[k].hex())

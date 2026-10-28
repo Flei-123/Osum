@@ -56,6 +56,8 @@ struct Boot {
     rt_ev_trig: u64,
     rt_fl_trig: u64,
     require: u64,
+    phy_ver: u64,
+    old_init: u64,
     db: iwl_phydb.PhyDb
 }
 
@@ -71,7 +73,7 @@ fn xport_none() -> Xport {
 fn boot_new(cmd: u64, cmd_cap: u64, rx: u64, rx_cap: u64, nvm: u64, nvm_cap: u64, pool: u64, pool_cap: u64) -> Boot {
     var b: Boot = Boot {
         x: xport_none(), cmd: cmd, cmd_cap: cmd_cap, rx: rx, rx_cap: rx_cap, polls: 64, wait_ms: 0, nvm: nvm, nvm_cap: nvm_cap, nvm_len: 0, mao_off: 0, mao_len: 0,
-        qid: 0, seq: 0, tx_ant: 3, phy_cfg: 0, ev_trig: 0, fl_trig: 0, rt_ev_trig: 0, rt_fl_trig: 0, require: 0,
+        qid: 0, seq: 0, tx_ant: 3, phy_cfg: 0, ev_trig: 0, fl_trig: 0, rt_ev_trig: 0, rt_fl_trig: 0, require: 0, phy_ver: 1, old_init: 0,
         db: iwl_phydb.phydb_new(pool, pool_cap)
     }
     return b
@@ -175,7 +177,31 @@ fn cfg_cmds(b: *mut Boot, d: *mut iwl_diag.Diag, ev: u64, fl: u64) -> i64 {
     var n: u64 = iwl_mvm.mvm_tx_ant((*b).cmd, (*b).qid, (*b).seq & 0xFF, (*b).tx_ant)
     var rc: i64 = send_cmd(b, d, n)
     if rc != 0 { return rc }
-    n = iwl_mvm.mvm_phy_cfg((*b).cmd, (*b).qid, (*b).seq & 0xFF, (*b).phy_cfg, ev, fl)
+    return phy_cfg_cmd(b, d, ev, fl)
+}
+
+fn phy_cfg_cmd(b: *mut Boot, d: *mut iwl_diag.Diag, ev: u64, fl: u64) -> i64 {
+    var n: u64 = 0
+    if (*b).phy_ver == 3 {
+        n = iwl_mvm.mvm_phy_cfg_v3((*b).cmd, (*b).qid, (*b).seq & 0xFF, (*b).phy_cfg, ev, fl)
+    } else {
+        n = iwl_mvm.mvm_phy_cfg((*b).cmd, (*b).qid, (*b).seq & 0xFF, (*b).phy_cfg, ev, fl)
+    }
+    return send_cmd(b, d, n)
+}
+
+fn rt_pre_cmds(b: *mut Boot, d: *mut iwl_diag.Diag) -> i64 {
+    var n: u64 = iwl_mvm.mvm_sf_cfg((*b).cmd, (*b).qid, (*b).seq & 0xFF)
+    var rc: i64 = send_cmd(b, d, n)
+    if rc != 0 { return rc }
+    n = iwl_mvm.mvm_tx_ant((*b).cmd, (*b).qid, (*b).seq & 0xFF, (*b).tx_ant)
+    return send_cmd(b, d, n)
+}
+
+fn rt_post_cmds(b: *mut Boot, d: *mut iwl_diag.Diag) -> i64 {
+    var rc: i64 = phy_cfg_cmd(b, d, (*b).rt_ev_trig, (*b).rt_fl_trig)
+    if rc != 0 { return rc }
+    let n: u64 = iwl_mvm.mvm_bt_cfg((*b).cmd, (*b).qid, (*b).seq & 0xFF)
     return send_cmd(b, d, n)
 }
 
@@ -238,12 +264,14 @@ fn rt_stage(b: *mut Boot, d: *mut iwl_diag.Diag) -> i64 {
     let total: u64 = iwl_phydb.phydb_count(&(*b).db)
     var k: u64 = 0
     var rc: i64 = 0
+    if (*b).old_init == 0 { rc = rt_pre_cmds(b, d) }
     while k < total && rc == 0 {
         rc = replay_one(b, d, iwl_phydb.phydb_order(&(*b).db, k))
         if rc == 0 { k = k + 1 }
     }
     iwl_diag.diag_calib(d, total, iwl_phydb.phydb_bytes(&(*b).db), k)
-    if rc == 0 { rc = cfg_cmds(b, d, (*b).rt_ev_trig, (*b).rt_fl_trig) }
+    if rc == 0 && (*b).old_init != 0 { rc = cfg_cmds(b, d, (*b).rt_ev_trig, (*b).rt_fl_trig) }
+    if rc == 0 && (*b).old_init == 0 { rc = rt_post_cmds(b, d) }
     if rc != 0 {
         iwl_diag.diag_fail(d, rc, stage_now(b))
         return rc

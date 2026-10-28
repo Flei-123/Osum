@@ -17,8 +17,20 @@ export {
 const FAKE_SCD_BASE: u64 = 0x00800000
 const FAKE_ERR_PTR: u64 = 0x00800200
 const FAKE_ERR_ID: u64 = 0x71
+const FAKE_UMAC_PTR: u64 = 0x00800300
+const FAKE_UMAC_ID: u64 = 0x7A
+const UMAC_DWORDS: u64 = 16
 const S_ERRTAB: u64 = 0x2820
+const S_UERRTAB: u64 = 0x2870
 const ERR_DWORDS: u64 = 24
+const S_RTSF: u64 = 0x2520
+const S_RTANT: u64 = 0x2528
+const S_BTCFG: u64 = 0x2530
+const CMD_SF_CFG: u64 = 0xD1
+const CMD_TX_ANT_CFG: u64 = 0x98
+const CMD_BT_CONFIG: u64 = 0x9B
+const PHY_CFG_V1_TOTAL: u64 = 16
+const PHY_CFG_V3_TOTAL: u64 = 32
 
 const S_ACCESS: u64 = 0x2000
 const S_VIOL: u64 = 0x2018
@@ -258,6 +270,9 @@ fn put_scan_complete(ctx: u64, uid: u64) {
 
 fn alive(ctx: u64) {
     s(ctx, S_PHASE, g(ctx, S_PHASE) + 1)
+    s(ctx, S_RTSF, 0)
+    s(ctx, S_RTANT, 0)
+    s(ctx, S_BTCFG, 0)
     if g(ctx, S_NOALIVE) != 0 { return }
     alive_forced(ctx)
 }
@@ -270,6 +285,7 @@ fn alive_forced(ctx: u64) {
     iwl_le.st16(rb, 8, 0xCAFE)
     iwl_le.st32(rb, 8 + 36, 0x00ABCDE0)
     iwl_le.st32(rb, 8 + 20, FAKE_ERR_PTR)
+    iwl_le.st32(rb, 8 + 60, FAKE_UMAC_PTR)
     iwl_le.st32(rb, 8 + 40, FAKE_SCD_BASE)
     rx_commit(ctx)
 }
@@ -285,7 +301,23 @@ fn err_slot(d: u64) -> u64 {
     return 7
 }
 
+fn umac_slot(d: u64) -> u64 {
+    if d == 0 { return 0 }
+    if d == 1 { return 1 }
+    if d == 3 { return 2 }
+    if d == 4 { return 3 }
+    if d == 6 { return 4 }
+    if d == 7 { return 5 }
+    if d == 13 { return 6 }
+    return 7
+}
+
 fn err_word(ctx: u64, raddr: u64) -> u64 {
+    if raddr >= FAKE_UMAC_PTR && raddr < FAKE_UMAC_PTR + UMAC_DWORDS * 4 {
+        let u: u64 = umac_slot((raddr - FAKE_UMAC_PTR) / 4)
+        if u == 7 { return 0 }
+        return g(ctx, S_UERRTAB + u * 8)
+    }
     if raddr < FAKE_ERR_PTR || raddr >= FAKE_ERR_PTR + ERR_DWORDS * 4 { return 0 }
     let k: u64 = err_slot((raddr - FAKE_ERR_PTR) / 4)
     if k == 7 { return 0 }
@@ -300,6 +332,23 @@ fn err_fill(ctx: u64, tb0: u64, len: u64) {
     s(ctx, S_ERRTAB + 32, iwl_le.ld8(tb0, 0))
     s(ctx, S_ERRTAB + 40, len)
     s(ctx, S_ERRTAB + 48, iwl_le.ld32(tb0, 0))
+    s(ctx, S_UERRTAB, 1)
+    s(ctx, S_UERRTAB + 8, FAKE_UMAC_ID)
+    s(ctx, S_UERRTAB + 16, 0xB10C0003)
+    s(ctx, S_UERRTAB + 24, 0x11C00002)
+    s(ctx, S_UERRTAB + 32, iwl_le.ld8(tb0, 0))
+    s(ctx, S_UERRTAB + 40, len)
+    s(ctx, S_UERRTAB + 48, iwl_le.ld32(tb0, 0))
+}
+
+fn phy_cfg_ok(ctx: u64, tb0: u64, total: u64) -> bool {
+    let phase: u64 = g(ctx, S_PHASE)
+    if phase == 0 { return true }
+    if total != PHY_CFG_V1_TOTAL && total != PHY_CFG_V3_TOTAL { return false }
+    let cfg: u64 = iwl_le.ld32(tb0, 4)
+    if ((cfg >> 16) & 0xF) == 0 || ((cfg >> 20) & 0xF) == 0 { return false }
+    if phase >= 2 && (g(ctx, S_RTSF) == 0 || g(ctx, S_RTANT) == 0) { return false }
+    return true
 }
 
 fn put_nvm(ctx: u64, req: u64, seq: u64) {
@@ -444,16 +493,21 @@ fn one_tfd(ctx: u64, ring: u64, idx: u64) {
         if g(ctx, S_NONVM) == 0 { put_nvm(ctx, tb0, seq) }
     } else if cmd == CMD_PHY_CONTEXT {
         if iwl_fakephy.check(tb0, total_x) { put_status(ctx, cmd, seq) } else { err_fill(ctx, tb0, total_x) }
+    } else if cmd == CMD_PHY_CFG {
+        if phy_cfg_ok(ctx, tb0, total_x) { put_status(ctx, cmd, seq) } else { err_fill(ctx, tb0, total_x) }
     } else {
         put_status(ctx, cmd, seq)
     }
+    if cmd == CMD_SF_CFG && g(ctx, S_PHASE) >= 2 { s(ctx, S_RTSF, 1) }
+    if cmd == CMD_TX_ANT_CFG && g(ctx, S_PHASE) >= 2 { s(ctx, S_RTANT, 1) }
+    if cmd == CMD_BT_CONFIG { s(ctx, S_BTCFG, 1) }
     if cmd == CMD_PHY_DB {
         s(ctx, S_PHYDB, g(ctx, S_PHYDB) + 1)
         var total_p: u64 = l0
         if n == 2 { total_p = l0 + (iwl_le.ld16(t, 14) >> 4) }
         check_phydb(ctx, tb0, total_p)
     }
-    if cmd == CMD_PHY_CFG { after_phy_cfg(ctx, tb0) }
+    if cmd == CMD_PHY_CFG && phy_cfg_ok(ctx, tb0, total_x) { after_phy_cfg(ctx, tb0) }
     if cmd == CMD_SCAN_REQ_UMAC {
         let uid: u64 = iwl_le.ld32(tb0, 8)
         s(ctx, S_LASTUID, uid)

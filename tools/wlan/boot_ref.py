@@ -37,6 +37,10 @@ def expected():
     slot += 1
     cmds.append(hdr(0x6A, slot) + struct.pack("<III", 0x00330F00, 1, 2))
     slot += 1
+    cmds.append(hdr(0xD1, slot) + struct.pack("<III", 3, 4096, 8192) + struct.pack("<10I", *([1000000] * 10)) + struct.pack("<10I", *([400, 160] * 5)))
+    slot += 1
+    cmds.append(hdr(0x98, slot) + struct.pack("<I", 3))
+    slot += 1
     cfg = bytes((0x10 + i) & 255 for i in range(8))
     nch = bytes((0x30 + i) & 255 for i in range(12))
     papd1 = struct.pack("<H", 1) + bytes((0x40 + i) & 255 for i in range(2, 6))
@@ -46,9 +50,9 @@ def expected():
     for typ, data in ((1, cfg), (2, nch), (4, papd0), (4, papd1), (5, txp)):
         cmds.append(hdr(0x6C, slot) + struct.pack("<HH", typ, len(data)) + data)
         slot += 1
-    cmds.append(hdr(0x98, slot) + struct.pack("<I", 3))
-    slot += 1
     cmds.append(hdr(0x6A, slot) + struct.pack("<III", 0x00330F00, 0, 4))
+    slot += 1
+    cmds.append(hdr(0x9B, slot) + struct.pack("<II", 1, 0x14))
     return cmds, nvm, len(cfg) + len(nch) + len(papd0) + len(papd1) + len(txp)
 
 cmds, nvm, cb = expected()
