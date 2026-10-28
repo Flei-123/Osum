@@ -71,7 +71,11 @@ named `<prog>.elf` into a flat overlay dir, runs `publish-system.sh ... --count 
 after. The working tree must be clean (the stand names the commit). `count` only grows; devices refuse
 `count <= SYSVERSION`.
 
-Limits to know: the overlay covers `/bin` only. Files under `/etc` (e.g. `etc/actions.d/settings.actions` of SETBROKER2),
-the Limine config (5 s menu timeout) and root-owned data files (`mouse.conf`, `power.conf`) change only with a new
+Absolute targets: files in subdirectories of the overlay dir (`DIR/etc/x`, `DIR/usr/share/..`, `DIR/lib/..`, `DIR/apps/<x>.osp/..`) are
+swapped to that absolute path (journalled, restored on a lost trial); `--links FILE` (`<dest> /bin/<name>` per line) makes `<dest>`
+a hard link of the new /bin file (`/apps/<x>.osp/start`). Gate: `tools/osupdate/run.sh` section 14. For single programs without a feed
+use `jarvisctl swap <src> <dst>` / `swap --undo <dst>` (gate `tools/ctlswap/run.sh`).
+
+Limits to know: the Limine config (5 s menu timeout) and root-owned data files (`mouse.conf`, `power.conf`) change only with a new
 full image (`tools/vbox/run.sh build` -> `publish` -> laptop `bossswap.ps1`). A program that imports `wlibc` is
 functionally changed by r1277 (`platte_ink`), but overlaying every GUI program does not fit a 60 MiB root.
