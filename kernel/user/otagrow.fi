@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import dbgio
+
+export { run }
+
+const OP_INFO: u64 = 15
+const OP_STEP: u64 = 16
+const GI_STATE: u64 = 0
+const GI_PERMILLE: u64 = 1
+const GI_TOTAL: u64 = 2
+const GI_DEVICE: u64 = 3
+const GI_INODES: u64 = 4
+const GI_EXTINODES: u64 = 6
+const STEP_BLOCKS: u64 = 256
+const R_MORE: u64 = 0
+const R_DONE: u64 = 1
+const ST_NONE: u64 = 0
+const ST_DONE: u64 = 3
+
+static mut S_STATE: [u8; 13] = "grow: state \0"
+static mut S_FS: [u8; 17] = "grow: fs blocks \0"
+static mut S_DEV: [u8; 21] = "grow: device blocks \0"
+static mut S_INO: [u8; 14] = "grow: inodes \0"
+static mut S_EXT: [u8; 18] = "grow: ext inodes \0"
+static mut S_PROG: [u8; 16] = "grow: permille \0"
+static mut S_DONE: [u8; 11] = "grow: done\0"
+static mut S_NONE: [u8; 19] = "grow: not possible\0"
+static mut S_IO: [u8; 14] = "grow: failed \0"
+static mut S_BG: [u8; 28] = "grow: started in background\0"
+static mut S_LOGP: [u8; 16] = "/tmp/fsgrow.log\0"
+static mut W_STATUS: [u8; 7] = "status\0"
+static mut W_BG: [u8; 3] = "bg\0"
+
+fn info(what: u64) -> u64 {
+    return dbgio.call(OP_INFO, what, 0, 0, 0)
+}
+
+fn line(t: u64, v: u64) {
+    ulib.say(t)
+    ulib.sayu(v)
+    ulib.nl()
+}
+
+fn report() {
+    line((&S_STATE[0 as usize]) as u64, info(GI_STATE))
+    line((&S_FS[0 as usize]) as u64, info(GI_TOTAL))
+    line((&S_DEV[0 as usize]) as u64, info(GI_DEVICE))
+    line((&S_INO[0 as usize]) as u64, info(GI_INODES))
+    line((&S_EXT[0 as usize]) as u64, info(GI_EXTINODES))
+}
+
+fn drive() -> u64 {
+    let st: u64 = info(GI_STATE)
+    if st == ST_DONE {
+        ulib.say((&S_DONE[0 as usize]) as u64)
+        ulib.nl()
+        report()
+        return 0
+    }
+    if st == ST_NONE {
+        ulib.say((&S_NONE[0 as usize]) as u64)
+        ulib.nl()
+        report()
+        return 1
+    }
+    var shown: u64 = 100
+    while true {
+        let r: u64 = dbgio.call(OP_STEP, STEP_BLOCKS, 0, 0, 0)
+        if r == R_DONE {
+            break
+        }
+        if r != R_MORE {
+            line((&S_IO[0 as usize]) as u64, r)
+            return 1
+        }
+        let p: u64 = info(GI_PERMILLE) / 100
+        if p != shown {
+            shown = p
+            line((&S_PROG[0 as usize]) as u64, p * 100)
+        }
+    }
+    ulib.say((&S_DONE[0 as usize]) as u64)
+    ulib.nl()
+    report()
+    return 0
+}
+
+fn detach() -> u64 {
+    let child: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if ulib.bad(child) {
+        return 1
+    }
+    if child != 0 {
+        ulib.say((&S_BG[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&S_LOGP[0 as usize]) as u64, ulib.O_MAKE, 0)
+    ulib.sys(ulib.SYS_CLOSE, 0, 0, 0)
+    if !ulib.bad(fd) {
+        ulib.sys(ulib.SYS_DUP2, fd, 1, 0)
+        ulib.sys(ulib.SYS_DUP2, fd, 2, 0)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    }
+    return drive()
+}
+
+fn run(args: u64, argc: u64, first: u64) -> u64 {
+    if argc > first && ulib.streq(ulib.arg_at(args, first), (&W_STATUS[0 as usize]) as u64) {
+        report()
+        return 0
+    }
+    if argc > first && ulib.streq(ulib.arg_at(args, first), (&W_BG[0 as usize]) as u64) {
+        return detach()
+    }
+    return drive()
+}

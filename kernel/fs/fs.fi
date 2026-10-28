@@ -112,12 +112,15 @@ import fs.nidx
 // gibt noch nichts zu schuetzen) und der erste Superblockzugriff von
 // `mount` (er kommt VOR der Wiederherstellung).
 import fs.ofsj
+import fs.ofsext
 // RUNDE OFS3: die Uhr. Ohne sie waeren die drei Zeitstempel im Inode
 // drei Nullen, und das waere derselbe Zustand wie vorher, nur mit mehr
 // Platz dafuer.
 import sched.time
 
 export {
+    buf_sb, buf_zz, zero, get64, put64, geom_ext, geom_total, base_cover,
+    base_inodes, ext_inodes, inodes_per_block, bm_blocks,
     set_size, format, mount, path, create_path, unlink_path, entry_at, dir_entries,
     inode_type, inode_size, read_at, write_at, file_truncate, root,
     free_blocks, used_inodes, MAGIC, T_FILE, T_DIR, DIRENT,
@@ -264,7 +267,7 @@ const G_BMSTART: u64 = 16 // erster Block der Karte
 const G_BMBLOCKS: u64 = 24 // wie viele Bloecke die Karte hat
 const G_ITABLE: u64 = 32 // erster Block der Inodetabelle
 const G_ISIZE: u64 = 40 // Oktette je Inode
-const G_IPB: u64 = 48 // Inodes je Block
+const G_IHINT: u64 = 48
 const G_DIRENT: u64 = 56 // Oktette je Verzeichniseintrag
 const G_NAMELEN: u64 = 64 // Oktette fuer den Namen darin
 // DER MERKER DES BLOCKZUTEILERS, und er ist kein Schmuck. `block_alloc`
@@ -285,13 +288,42 @@ const G_TOTAL: u64 = 80
 // Bereich (`kstate.FSG_OFF`, 128 Oktette, davon jetzt 96 belegt).
 const G_JSTART: u64 = 88
 const G_JBLOCKS: u64 = 96
+const G_XBM: u64 = 104
+const G_XIT: u64 = 112
+const G_XIN: u64 = 120
 
-fn inode_count(state: u64) -> u64 {
+fn base_inodes(state: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.FSG_OFF + G_INODES)
     if n == 0 {
         return INODE_COUNT
     }
     return n
+}
+
+fn ext_inodes(state: u64) -> u64 {
+    return kstate.get(state, kstate.FSG_OFF + G_XIN)
+}
+
+fn inode_count(state: u64) -> u64 {
+    return base_inodes(state) + ext_inodes(state)
+}
+
+fn geom_ext(state: u64, xbm: u64, xit: u64, xin: u64) {
+    kstate.set(state, kstate.FSG_OFF + G_XBM, xbm)
+    kstate.set(state, kstate.FSG_OFF + G_XIT, xit)
+    kstate.set(state, kstate.FSG_OFF + G_XIN, xin)
+}
+
+fn ext_bm_blocks(state: u64) -> u64 {
+    if kstate.get(state, kstate.FSG_OFF + G_XBM) == 0 {
+        return 0
+    }
+    let total: u64 = kstate.get(state, kstate.FSG_OFF + G_TOTAL)
+    let cover: u64 = base_cover(state)
+    if total <= cover {
+        return 0
+    }
+    return ofsext.bm_blocks_for(total - cover)
 }
 
 fn data_start(state: u64) -> u64 {
@@ -385,11 +417,7 @@ fn inode_bytes(state: u64) -> u64 {
 }
 
 fn inodes_per_block(state: u64) -> u64 {
-    let v: u64 = kstate.get(state, kstate.FSG_OFF + G_IPB)
-    if v == 0 {
-        return INODES_PER_BLOCK
-    }
-    return v
+    return BS / inode_bytes(state)
 }
 
 fn dirent_size(state: u64) -> u64 {
@@ -410,13 +438,14 @@ fn name_len(state: u64) -> u64 {
 
 // Die ganze Geometrie auf einmal. `mount` und `format` sind die einzigen
 // zwei Stellen, die sie schreiben.
-fn geom3(state: u64, bms: u64, bmb: u64, itab: u64, isz: u64, ipb: u64,
+fn geom3(state: u64, bms: u64, bmb: u64, itab: u64, isz: u64,
     dent: u64, nlen: u64) {
     kstate.set(state, kstate.FSG_OFF + G_BMSTART, bms)
     kstate.set(state, kstate.FSG_OFF + G_BMBLOCKS, bmb)
     kstate.set(state, kstate.FSG_OFF + G_ITABLE, itab)
     kstate.set(state, kstate.FSG_OFF + G_ISIZE, isz)
-    kstate.set(state, kstate.FSG_OFF + G_IPB, ipb)
+    kstate.set(state, kstate.FSG_OFF + G_IHINT, 0)
+    geom_ext(state, 0, 0, 0)
     kstate.set(state, kstate.FSG_OFF + G_DIRENT, dent)
     kstate.set(state, kstate.FSG_OFF + G_NAMELEN, nlen)
     kstate.set(state, kstate.FSG_OFF + G_HINT, 0)
@@ -424,8 +453,12 @@ fn geom3(state: u64, bms: u64, bmb: u64, itab: u64, isz: u64, ipb: u64,
 
 // Wie viele Bloecke dieses Abbild ueberhaupt verwalten KANN -- die Karte
 // setzt die Grenze, und sie ist die Zahl, um die es dieser Runde geht.
-fn max_blocks(state: u64) -> u64 {
+fn base_cover(state: u64) -> u64 {
     return bm_blocks(state) * BITS_PER_BLOCK
+}
+
+fn max_blocks(state: u64) -> u64 {
+    return (bm_blocks(state) + ext_bm_blocks(state)) * BITS_PER_BLOCK
 }
 
 // Wie gross eine Datei in diesem Abbild hoechstens wird. Acht direkte
@@ -945,12 +978,24 @@ fn set_meta(state: u64, ino: u64, mode: u64, uid: u64, gid: u64) -> bool {
 // mehrblockigen Karte und ein Inode ist 256 Oktette, also passen zwei in
 // einen Block. Wer hier eine Konstante stehenliesse, laese in einem
 // Abbild der Fassung 3 jede zweite Datei als ihren Nachbarn.
+fn inode_slot(state: u64, ino: u64) -> u64 {
+    let base: u64 = base_inodes(state)
+    if ino <= base {
+        return ino - 1
+    }
+    return ino - 1 - base
+}
+
 fn inode_block_of(state: u64, ino: u64) -> u64 {
-    return itable(state) + (ino - 1) / inodes_per_block(state)
+    let slot: u64 = inode_slot(state, ino) / inodes_per_block(state)
+    if ino <= base_inodes(state) {
+        return itable(state) + slot
+    }
+    return kstate.get(state, kstate.FSG_OFF + G_XIT) + slot
 }
 
 fn inode_off(state: u64, ino: u64) -> u64 {
-    return ((ino - 1) % inodes_per_block(state)) * inode_bytes(state)
+    return (inode_slot(state, ino) % inodes_per_block(state)) * inode_bytes(state)
 }
 
 // ==================================================== RUNDE VIELKERN 3
@@ -1129,35 +1174,57 @@ fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
     return ok
 }
 
-fn inode_alloc(state: u64, kind: u64) -> u64 {
-    var ino: u64 = 1
-    let letzte: u64 = inode_count(state)
-    while ino <= letzte {
+fn inode_scan_free(state: u64, from: u64, to: u64) -> u64 {
+    var ino: u64 = from
+    while ino <= to {
         if inode_get(state, ino, I_TYPE) == T_FREE {
-            if inode_init(state, ino, kind) {
-                return ino
-            }
-            return 0
+            return ino
         }
         ino = ino + 1
     }
     return 0
 }
 
+fn inode_alloc(state: u64, kind: u64) -> u64 {
+    let last: u64 = inode_count(state)
+    var start: u64 = kstate.get(state, kstate.FSG_OFF + G_IHINT)
+    if start < 1 || start > last {
+        start = 1
+    }
+    var ino: u64 = inode_scan_free(state, start, last)
+    if ino == 0 && start > 1 {
+        ino = inode_scan_free(state, 1, start - 1)
+    }
+    if ino == 0 {
+        return 0
+    }
+    if !inode_init(state, ino, kind) {
+        return 0
+    }
+    kstate.set(state, kstate.FSG_OFF + G_IHINT, ino + 1)
+    return ino
+}
+
+fn inode_release(state: u64, ino: u64) -> bool {
+    let hint: u64 = kstate.get(state, kstate.FSG_OFF + G_IHINT)
+    if hint != 0 && ino < hint {
+        kstate.set(state, kstate.FSG_OFF + G_IHINT, ino)
+    }
+    return inode_set(state, ino, I_TYPE, T_FREE)
+}
+
 // EIN BLOCK JE VIER INODES UND NICHT EIN BLOCK JE INODE. Mit 128 Inodes
 // war der Unterschied nicht zu merken; mit 4096 sind es 4096 Leseaufrufe
 // gegen 1024 fuer dieselbe Antwort, und `df` ruft das.
-fn used_inodes(state: u64) -> u64 {
-    let flags: u64 = enter(state)
-    let letzte: u64 = inode_count(state)
+fn used_in_region(state: u64, first: u64, count: u64) -> u64 {
     var n: u64 = 0
     var b: u64 = 0
     let ipb: u64 = inodes_per_block(state)
     let isz: u64 = inode_bytes(state)
-    while b * ipb < letzte {
-        if ofsj.read(state, itable(state) + b, buf_in(state)) {
+    while b * ipb < count {
+        if ofsj.read(state, first + b, buf_in(state)) {
             var k: u64 = 0
-            while k < ipb && b * ipb + k < letzte {
+            while k < ipb && b * ipb + k < count {
                 if get64(buf_in(state) + k * isz + I_TYPE) != T_FREE {
                     n = n + 1
                 }
@@ -1166,6 +1233,14 @@ fn used_inodes(state: u64) -> u64 {
         }
         b = b + 1
     }
+    return n
+}
+
+fn used_inodes(state: u64) -> u64 {
+    let flags: u64 = enter(state)
+    let n: u64 = used_in_region(state, itable(state), base_inodes(state))
+        + used_in_region(state, kstate.get(state, kstate.FSG_OFF + G_XIT),
+            ext_inodes(state))
     leave(state, flags)
     return n
 }
@@ -1179,7 +1254,11 @@ fn used_inodes(state: u64) -> u64 {
 // `k * 4096` bis `k * 4096 + 4095`. Nichts sonst aendert sich: ein Bit
 // ist ein Block, gesetzt heisst belegt.
 fn bm_block_of(state: u64, b: u64) -> u64 {
-    return bm_start(state) + b / BITS_PER_BLOCK
+    let cover: u64 = base_cover(state)
+    if b < cover {
+        return bm_start(state) + b / BITS_PER_BLOCK
+    }
+    return kstate.get(state, kstate.FSG_OFF + G_XBM) + (b - cover) / BITS_PER_BLOCK
 }
 
 // Der Versatz des Oktetts INNERHALB seines Kartenblocks. Ohne das `%`
@@ -2588,13 +2667,13 @@ fn create_path(state: u64, p: u64, kind: u64) -> u64 {
     }
     if kind == T_DIR {
         if !dir_init(state, ino, dir) {
-            inode_set(state, ino, I_TYPE, T_FREE)
+            inode_release(state, ino)
             leave(state, flags)
             return 0
         }
     }
     if !dir_add(state, dir, name, ino) {
-        inode_set(state, ino, I_TYPE, T_FREE)
+        inode_release(state, ino)
         leave(state, flags)
         return 0
     }
@@ -2728,7 +2807,7 @@ fn unlink_path(state: u64, p: u64) -> bool {
         return true
     }
     file_truncate(state, ino)
-    inode_set(state, ino, I_TYPE, T_FREE)
+    inode_release(state, ino)
     inode_set(state, ino, I_NLINK, 0)
     dir_remove(state, dir, name)
     leave(state, flags)
@@ -2794,7 +2873,7 @@ fn rename_path(state: u64, from: u64, to: u64) -> u64 {
             inode_set(state, ex, I_NLINK, exnl - 1)
         } else {
             file_truncate(state, ex)
-            inode_set(state, ex, I_TYPE, T_FREE)
+            inode_release(state, ex)
             inode_set(state, ex, I_NLINK, 0)
         }
         dir_remove(state, ndir, newname)
@@ -2957,7 +3036,7 @@ fn format_as(state: u64, v: u64, inodes: u64) -> bool {
         leave(state, flags)
         return false
     }
-    geom3(state, bms, bmb, itab, isz, ipb, dent, nlen)
+    geom3(state, bms, bmb, itab, isz, dent, nlen)
     geom(state, inodes, ds)
     geom_j(state, js, jb)
     // RUNDE INSTALL: was frisch formatiert wird, ist genau so gross wie
@@ -3239,7 +3318,7 @@ fn mount(state: u64) -> bool {
         return false
     }
     let ipb2: u64 = BS / isz
-    geom3(state, bms2, bmb, get64(buf_sb(state) + SB_ITABLE), isz, ipb2,
+    geom3(state, bms2, bmb, get64(buf_sb(state) + SB_ITABLE), isz,
         dent, nlen)
     // RUNDE K15: DIE GEOMETRIE KOMMT AUS DEM SUPERBLOCK und nicht mehr
     // aus zwei Konstanten. Was nicht zusammenpasst, wird NICHT
@@ -3273,13 +3352,27 @@ fn mount(state: u64) -> bool {
     if tot == 0 || tot > blk.blocks(state) {
         tot = blk.blocks(state)
     }
+    if get64(buf_sb(state) + ofsext.SB_XVER) != 0 {
+        let xblocks: u64 = get64(buf_sb(state) + ofsext.SB_XBLOCKS)
+        let xbm: u64 = get64(buf_sb(state) + ofsext.SB_XBMSTART)
+        let xit: u64 = get64(buf_sb(state) + ofsext.SB_XITSTART)
+        let xin: u64 = get64(buf_sb(state) + ofsext.SB_XINODES)
+        if !ofsext.valid(bmb * BITS_PER_BLOCK, get64(buf_sb(state) + SB_BLOCKS),
+            blk.blocks(state), ipb2, xblocks, xbm, xit, xin) {
+            geom3(state, BITMAP_BLOCK, 1, INODE_START, INODE_SIZE, DIRENT, NAME_LEN)
+            leave(state, flags)
+            return false
+        }
+        geom_ext(state, xbm, xit, xin)
+        tot = xblocks
+    }
     geom_total(state, tot)
     let r: u64 = get64(buf_sb(state) + SB_ROOT)
     if inode_get(state, r, I_TYPE) != T_DIR {
         geom(state, INODE_COUNT, DATA_START)
         geom_total(state, 0)
         geom3(state, BITMAP_BLOCK, 1, INODE_START, INODE_SIZE,
-            INODES_PER_BLOCK, DIRENT, NAME_LEN)
+            DIRENT, NAME_LEN)
         leave(state, flags)
         return false
     }

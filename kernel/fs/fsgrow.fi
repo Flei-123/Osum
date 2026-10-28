@@ -1,0 +1,217 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import block.blk
+import fs.fs
+import fs.ofsj
+import fs.ofsext
+
+export { step, info, ST_NONE, ST_READY, ST_RUNNING, ST_DONE, R_MORE, R_DONE, R_BAD, R_IO,
+    GI_STATE, GI_PERMILLE, GI_TOTAL, GI_DEVICE, GI_INODES, GI_TARGET, GI_EXTINODES }
+
+const ST_NONE: u64 = 0
+const ST_READY: u64 = 1
+const ST_RUNNING: u64 = 2
+const ST_DONE: u64 = 3
+
+const R_MORE: u64 = 0
+const R_DONE: u64 = 1
+const R_BAD: u64 = 2
+const R_IO: u64 = 3
+
+const GI_STATE: u64 = 0
+const GI_PERMILLE: u64 = 1
+const GI_TOTAL: u64 = 2
+const GI_DEVICE: u64 = 3
+const GI_INODES: u64 = 4
+const GI_TARGET: u64 = 5
+const GI_EXTINODES: u64 = 6
+
+const BITS_PER_BLOCK: u64 = 4096
+
+fn set_bit(p: u64, bit: u64) {
+    let at: u64 = p + bit / 8
+    kstate.set8(at, (kstate.get8(at) | (1 << (bit % 8))) as u8)
+}
+
+fn set_range(p: u64, from: u64, to: u64) {
+    var a: u64 = from
+    while a < to && a % 8 != 0 {
+        set_bit(p, a)
+        a = a + 1
+    }
+    while a + 8 <= to {
+        kstate.set8(p + a / 8, 255 as u8)
+        a = a + 8
+    }
+    while a < to {
+        set_bit(p, a)
+        a = a + 1
+    }
+}
+
+fn fill_bitmap(p: u64, index: u64, meta: u64, span: u64) {
+    let lo: u64 = index * BITS_PER_BLOCK
+    let hi: u64 = lo + BITS_PER_BLOCK
+    if meta > lo {
+        var e: u64 = meta - lo
+        if e > BITS_PER_BLOCK {
+            e = BITS_PER_BLOCK
+        }
+        set_range(p, 0, e)
+    }
+    if span < hi {
+        var b: u64 = 0
+        if span > lo {
+            b = span - lo
+        }
+        set_range(p, b, BITS_PER_BLOCK)
+    }
+}
+
+fn plan_target(state: u64, sb: u64) -> u64 {
+    return fs.get64(sb + ofsext.SB_XPLAN)
+}
+
+fn eligible_now(state: u64, sb: u64) -> bool {
+    if fs.get64(sb + ofsext.SB_VERSION) < fs.OFS_V3 {
+        return false
+    }
+    return ofsext.eligible(fs.base_cover(state), fs.get64(sb + ofsext.SB_BLOCKS),
+        blk.blocks(state), fs.inodes_per_block(state))
+}
+
+fn state_locked(state: u64, sb: u64) -> u64 {
+    if fs.get64(sb + ofsext.SB_XVER) != 0 {
+        return ST_DONE
+    }
+    if plan_target(state, sb) != 0 {
+        return ST_RUNNING
+    }
+    if eligible_now(state, sb) {
+        return ST_READY
+    }
+    return ST_NONE
+}
+
+fn permille_locked(state: u64, sb: u64) -> u64 {
+    let st: u64 = state_locked(state, sb)
+    if st == ST_DONE {
+        return 1000
+    }
+    let target: u64 = plan_target(state, sb)
+    if st != ST_RUNNING || target <= fs.base_cover(state) {
+        return 0
+    }
+    let span: u64 = target - fs.base_cover(state)
+    let ipb: u64 = fs.inodes_per_block(state)
+    let meta: u64 = ofsext.meta_blocks(span, ipb)
+    return fs.get64(sb + ofsext.SB_XCURSOR) * 1000 / meta
+}
+
+fn info(state: u64, what: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return 0
+    }
+    let flags: u64 = fs.enter(state)
+    let sb: u64 = fs.buf_sb(state)
+    var v: u64 = 0
+    if ofsj.read(state, 0, sb) {
+        if what == GI_STATE {
+            v = state_locked(state, sb)
+        } else if what == GI_PERMILLE {
+            v = permille_locked(state, sb)
+        } else if what == GI_TOTAL {
+            v = fs.total_blocks(state)
+        } else if what == GI_DEVICE {
+            v = blk.blocks(state)
+        } else if what == GI_INODES {
+            v = fs.base_inodes(state) + fs.ext_inodes(state)
+        } else if what == GI_TARGET {
+            v = plan_target(state, sb)
+        } else if what == GI_EXTINODES {
+            v = fs.ext_inodes(state)
+        }
+    }
+    fs.leave(state, flags)
+    return v
+}
+
+fn step_locked(state: u64, budget: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return R_BAD
+    }
+    let sb: u64 = fs.buf_sb(state)
+    if !ofsj.read(state, 0, sb) {
+        return R_IO
+    }
+    let st: u64 = state_locked(state, sb)
+    if st == ST_DONE {
+        return R_DONE
+    }
+    if st == ST_NONE {
+        return R_BAD
+    }
+    let cover: u64 = fs.base_cover(state)
+    let dev: u64 = blk.blocks(state)
+    let ipb: u64 = fs.inodes_per_block(state)
+    var target: u64 = plan_target(state, sb)
+    if st == ST_READY {
+        target = dev
+        fs.put64(sb + ofsext.SB_XPLAN, target)
+        fs.put64(sb + ofsext.SB_XCURSOR, 0)
+        if !ofsj.write(state, 0, sb) {
+            return R_IO
+        }
+    }
+    if target > dev || target <= cover {
+        return R_BAD
+    }
+    let span: u64 = target - cover
+    let nbm: u64 = ofsext.bm_blocks_for(span)
+    let xin: u64 = ofsext.plan_inodes(span, ipb)
+    let meta: u64 = nbm + ofsext.it_blocks_for(xin, ipb)
+    var cursor: u64 = fs.get64(sb + ofsext.SB_XCURSOR)
+    let scratch: u64 = fs.buf_zz(state)
+    var done: u64 = 0
+    while cursor < meta && done < budget {
+        fs.zero(scratch, 512)
+        if cursor < nbm {
+            fill_bitmap(scratch, cursor, meta, span)
+        }
+        if !blk.write(state, cover + cursor, scratch) {
+            return R_IO
+        }
+        cursor = cursor + 1
+        done = done + 1
+    }
+    blk.flush(state)
+    if cursor < meta {
+        fs.put64(sb + ofsext.SB_XCURSOR, cursor)
+        if !ofsj.write(state, 0, sb) {
+            return R_IO
+        }
+        return R_MORE
+    }
+    fs.put64(sb + ofsext.SB_XVER, 1)
+    fs.put64(sb + ofsext.SB_XBLOCKS, target)
+    fs.put64(sb + ofsext.SB_XBMSTART, cover)
+    fs.put64(sb + ofsext.SB_XITSTART, cover + nbm)
+    fs.put64(sb + ofsext.SB_XINODES, xin)
+    fs.put64(sb + ofsext.SB_XPLAN, 0)
+    fs.put64(sb + ofsext.SB_XCURSOR, 0)
+    if !ofsj.write(state, 0, sb) {
+        return R_IO
+    }
+    fs.geom_ext(state, cover, cover + nbm, xin)
+    fs.geom_total(state, target)
+    return R_DONE
+}
+
+fn step(state: u64, budget: u64) -> u64 {
+    let flags: u64 = fs.enter(state)
+    let r: u64 = step_locked(state, budget)
+    fs.leave(state, flags)
+    return r
+}
