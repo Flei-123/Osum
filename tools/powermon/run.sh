@@ -178,7 +178,7 @@ pmmax=$(grep -aE '^const PMON_MAX' kernel/lib/kstate.fi | sed 's/.*= //')
 # reports a failure every time somebody else lands first.
 [ -n "$pmoff" ] && ok "the kdata pages of this round stand in kstate.fi: $pmoff" \
                 || bad "PMON_OFF is missing from kernel/lib/kstate.fi"
-same "how many of them" "0x5000" "$pmmax"
+same "how many of them" "0x8000" "$pmmax"
 
 # THE MAP CHECKER is the only thing that can see a collision that stands
 # in no shared line of text.
