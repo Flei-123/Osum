@@ -2654,13 +2654,23 @@ static mut E_SU_OVLSW: [u8; 53] = "ota: overlay install failed, previous files r
 static mut S_SU_OVLN: [u8; 33] = "system: overlay files verified: \0"
 static mut S_SU_OVLREST: [u8; 56] = "system: overlay restored (previous /bin files are back)\0"
 static mut S_SU_OVLDROP: [u8; 26] = "system: overlay committed\0"
-static mut OVLJ: [u8; 6144] = [0 as u8; 6144]
+static mut W_SU_TAB: [u8; 2] = "\t\0"
+static mut OVLJ: [u8; 8192] = [0 as u8; 8192]
+static mut P_AL_APPS: [u8; 7] = "/apps/\0"
+static mut P_AL_ETC: [u8; 6] = "/etc/\0"
+static mut P_AL_USR: [u8; 12] = "/usr/share/\0"
+static mut P_AL_LIB: [u8; 6] = "/lib/\0"
+static mut P_AL_BIN: [u8; 6] = "/bin/\0"
+static mut P_AL_START: [u8; 7] = "/start\0"
+static mut SU_L_LINK: [u8; 9] = "syslink\t\0"
+static mut SU_LDST: [u8; 64] = [0 as u8; 64]
+static mut SU_LTGT: [u8; 64] = [0 as u8; 64]
 static mut SU_PA: [u8; 160] = [0 as u8; 160]
 static mut SU_PB: [u8; 160] = [0 as u8; 160]
 static mut SU_PC: [u8; 160] = [0 as u8; 160]
 static mut SU_OHEX: [u8; 72] = [0 as u8; 72]
 static mut SU_OSRV: [u8; 128] = [0 as u8; 128]
-static mut SU_ONAME: [u8; 64] = [0 as u8; 64]
+static mut SU_ONAME: [u8; 136] = [0 as u8; 136]
 static mut SU_GHEX: [u8; 72] = [0 as u8; 72]
 static mut SU_GFILE: [u8; 128] = [0 as u8; 128]
 static mut su_glen: u64 = 0
@@ -3227,7 +3237,41 @@ fn su_join(out: u64, dir: u64, name: u64) {
 }
 
 // Letters, digits, `.`, `-`, `_`; no leading dot; at most 60. The name ends up in a path.
+fn su_path_ok(pn: u64) -> bool {
+    let n: u64 = len(pn)
+    if n < 6 || n > 60 {
+        return false
+    }
+    let allowed: bool = su_prefix(pn, (&P_AL_APPS[0 as usize]) as u64)
+        || su_prefix(pn, (&P_AL_ETC[0 as usize]) as u64)
+        || su_prefix(pn, (&P_AL_USR[0 as usize]) as u64)
+        || su_prefix(pn, (&P_AL_LIB[0 as usize]) as u64)
+    if !allowed {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = g8(pn + i)
+        let good: bool = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+            || c == 46 || c == 45 || c == 95 || c == 47
+        if !good {
+            return false
+        }
+        if i + 1 < n {
+            let d: u64 = g8(pn + i + 1)
+            if (c == 46 && d == 46) || (c == 47 && d == 47) {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return g8(pn + n - 1) != 47
+}
+
 fn su_name_ok(pn: u64) -> bool {
+    if g8(pn) == 47 {
+        return su_path_ok(pn)
+    }
     let n: u64 = len(pn)
     if n == 0 || n > 60 || g8(pn) == 46 {
         return false
@@ -3243,6 +3287,78 @@ fn su_name_ok(pn: u64) -> bool {
         i = i + 1
     }
     return true
+}
+
+fn su_dest(out: u64, nm: u64) {
+    if g8(nm) == 47 {
+        ulib.strcpy(out, nm)
+    } else {
+        su_join(out, (&P_BIN[0 as usize]) as u64, nm)
+    }
+}
+
+fn su_flat(out: u64, dir: u64, nm: u64) {
+    if g8(nm) != 47 {
+        su_join(out, dir, nm)
+        return
+    }
+    ulib.strcpy(out, dir)
+    slash(out)
+    var o: u64 = len(out)
+    var i: u64 = 1
+    while g8(nm + i) != 0 {
+        var c: u64 = g8(nm + i)
+        if c == 47 {
+            c = 64
+        }
+        p8(out + o, c)
+        o = o + 1
+        i = i + 1
+    }
+    p8(out + o, 0)
+}
+
+fn su_is_exec(nm: u64) -> bool {
+    if g8(nm) != 47 {
+        return true
+    }
+    let n: u64 = len(nm)
+    return n > 6 && ulib.streq(nm + n - 6, (&P_AL_START[0 as usize]) as u64)
+}
+
+fn su_mkparents(pth: u64) {
+    var i: u64 = 1
+    while g8(pth + i) != 0 {
+        if g8(pth + i) == 47 {
+            p8(pth + i, 0)
+            ulib.sys(ulib.SYS_MKDIR, pth, 0, 0)
+            p8(pth + i, 47)
+        }
+        i = i + 1
+    }
+}
+
+fn su_link_ok(dst: u64, tgt: u64) -> bool {
+    if g8(dst) != 47 || !su_path_ok(dst) {
+        return false
+    }
+    if !su_prefix(tgt, (&P_AL_BIN[0 as usize]) as u64) {
+        return false
+    }
+    return su_name_ok(tgt + 5) && g8(tgt + 5) != 47
+}
+
+fn su_link_line(k: u64) -> u64 {
+    let f: u64 = line_from((&SU_L_LINK[0 as usize]) as u64, 8, k)
+    if f == 0 {
+        return 0
+    }
+    let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
+    p8((&SU_LDST[0 as usize]) as u64, 0)
+    p8((&SU_LTGT[0 as usize]) as u64, 0)
+    field(f, e, 0, (&SU_LDST[0 as usize]) as u64, 60)
+    field(f, e, 1, (&SU_LTGT[0 as usize]) as u64, 60)
+    return 1
 }
 
 // The sysgz line for `key` (a /bin name or `kernel`) -> SU_GHEX / su_glen / SU_GFILE.
@@ -3350,7 +3466,7 @@ fn su_ovl_clean_new() {
     var k: u64 = 0
     while su_ovl_line(k) != 0 {
         if su_name_ok((&SU_ONAME[0 as usize]) as u64) {
-            su_join((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
+            su_flat((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
                 (&SU_ONAME[0 as usize]) as u64)
             remove((&SU_PA[0 as usize]) as u64)
         }
@@ -3385,7 +3501,7 @@ fn su_ovl_stage() -> bool {
             err((&E_SU_OVLBAD[0 as usize]) as u64, 0)
             good = false
         } else {
-            su_join((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
+            su_flat((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
                 (&SU_ONAME[0 as usize]) as u64)
             if !su_fetch_item((&SU_ONAME[0 as usize]) as u64, (&SU_OSRV[0 as usize]) as u64,
                 su_olen, (&SU_OHEX[0 as usize]) as u64, (&SU_PA[0 as usize]) as u64) {
@@ -3393,10 +3509,22 @@ fn su_ovl_stage() -> bool {
                 good = false
             } else {
                 // the fetched file is created without the execute bit; /bin entries must stay runnable (0755)
-                ulib.sys(SYS_CHMOD, (&SU_PA[0 as usize]) as u64, 493, 0)
+                var mode: u64 = 420
+                if su_is_exec((&SU_ONAME[0 as usize]) as u64) {
+                    mode = 493
+                }
+                ulib.sys(SYS_CHMOD, (&SU_PA[0 as usize]) as u64, mode, 0)
             }
         }
         k = k + 1
+    }
+    var q2: u64 = 0
+    while good && su_link_line(q2) != 0 {
+        if !su_link_ok((&SU_LDST[0 as usize]) as u64, (&SU_LTGT[0 as usize]) as u64) {
+            err((&E_SU_OVLBAD[0 as usize]) as u64, 0)
+            good = false
+        }
+        q2 = q2 + 1
     }
     if !good {
         su_ovl_clean_new()
@@ -3410,11 +3538,10 @@ fn su_ovl_journal() -> bool {
     p8(j, 0)
     var k: u64 = 0
     while su_ovl_line(k) != 0 {
-        if len(j) + len((&SU_ONAME[0 as usize]) as u64) + 3 > 6000 {
+        if len(j) + len((&SU_ONAME[0 as usize]) as u64) + 3 > 7900 {
             return false
         }
-        su_join((&SU_PC[0 as usize]) as u64, (&P_BIN[0 as usize]) as u64,
-            (&SU_ONAME[0 as usize]) as u64)
+        su_dest((&SU_PC[0 as usize]) as u64, (&SU_ONAME[0 as usize]) as u64)
         var d: [u8; 2] = "0\0"
         if su_exists((&SU_PC[0 as usize]) as u64) {
             d[0 as usize] = 49 as u8
@@ -3424,13 +3551,29 @@ fn su_ovl_journal() -> bool {
         ulib.strcat(j, (&W_SU_NL[0 as usize]) as u64)
         k = k + 1
     }
+    var lk: u64 = 0
+    while su_link_line(lk) != 0 {
+        if len(j) + 140 > 7900 {
+            return false
+        }
+        var d2: [u8; 2] = "N\0"
+        if su_exists((&SU_LDST[0 as usize]) as u64) {
+            d2[0 as usize] = 76 as u8
+        }
+        ulib.strcat(j, (&d2[0 as usize]) as u64)
+        ulib.strcat(j, (&SU_LDST[0 as usize]) as u64)
+        ulib.strcat(j, (&W_SU_TAB[0 as usize]) as u64)
+        ulib.strcat(j, (&SU_LTGT[0 as usize]) as u64)
+        ulib.strcat(j, (&W_SU_NL[0 as usize]) as u64)
+        lk = lk + 1
+    }
     return file_write((&P_SU_OVL[0 as usize]) as u64, j, len(j))
 }
 
 // Walk the journal. op 1 = swap in, 2 = restore, 3 = drop the backups. false = a step failed.
 fn su_ovl_each(op: u64) -> bool {
     let j: u64 = (&OVLJ[0 as usize]) as u64
-    let n: u64 = file_read((&P_SU_OVL[0 as usize]) as u64, j, 6000)
+    let n: u64 = file_read((&P_SU_OVL[0 as usize]) as u64, j, 8000)
     if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
         return true
     }
@@ -3441,7 +3584,7 @@ fn su_ovl_each(op: u64) -> bool {
         let had: u64 = g8(j + i)
         var m: u64 = 0
         i = i + 1
-        while i < n && g8(j + i) != 10 && m < 60 {
+        while i < n && g8(j + i) != 10 && m < 130 {
             p8((&SU_ONAME[0 as usize]) as u64 + m, g8(j + i))
             m = m + 1
             i = i + 1
@@ -3451,17 +3594,39 @@ fn su_ovl_each(op: u64) -> bool {
             i = i + 1
         }
         i = i + 1
-        if su_name_ok((&SU_ONAME[0 as usize]) as u64) {
-            su_join((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
+        if had == 76 || had == 78 {
+            var t: u64 = 0
+            while g8((&SU_ONAME[0 as usize]) as u64 + t) != 0 && g8((&SU_ONAME[0 as usize]) as u64 + t) != 9 {
+                t = t + 1
+            }
+            if g8((&SU_ONAME[0 as usize]) as u64 + t) == 9 {
+                p8((&SU_ONAME[0 as usize]) as u64 + t, 0)
+                ulib.strcpy((&SU_PA[0 as usize]) as u64, (&SU_ONAME[0 as usize]) as u64)
+                ulib.strcpy((&SU_PB[0 as usize]) as u64, (&SU_ONAME[0 as usize]) as u64 + t + 1)
+                if su_link_ok((&SU_PA[0 as usize]) as u64, (&SU_PB[0 as usize]) as u64) {
+                    if op == 1 {
+                        su_mkparents((&SU_PA[0 as usize]) as u64)
+                        remove((&SU_PA[0 as usize]) as u64)
+                        ulib.sys(ulib.SYS_LINK, (&SU_PB[0 as usize]) as u64, (&SU_PA[0 as usize]) as u64, 0)
+                    } else if op == 2 {
+                        remove((&SU_PA[0 as usize]) as u64)
+                        if had == 76 {
+                            ulib.sys(ulib.SYS_LINK, (&SU_PB[0 as usize]) as u64, (&SU_PA[0 as usize]) as u64, 0)
+                        }
+                    }
+                }
+            }
+        } else if su_name_ok((&SU_ONAME[0 as usize]) as u64) {
+            su_flat((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
                 (&SU_ONAME[0 as usize]) as u64)
-            su_join((&SU_PB[0 as usize]) as u64, (&P_SU_OLDD[0 as usize]) as u64,
+            su_flat((&SU_PB[0 as usize]) as u64, (&P_SU_OLDD[0 as usize]) as u64,
                 (&SU_ONAME[0 as usize]) as u64)
-            su_join((&SU_PC[0 as usize]) as u64, (&P_BIN[0 as usize]) as u64,
-                (&SU_ONAME[0 as usize]) as u64)
+            su_dest((&SU_PC[0 as usize]) as u64, (&SU_ONAME[0 as usize]) as u64)
             let pa: u64 = (&SU_PA[0 as usize]) as u64
             let pb: u64 = (&SU_PB[0 as usize]) as u64
             let pc: u64 = (&SU_PC[0 as usize]) as u64
             if op == 1 {
+                su_mkparents(pc)
                 if had == 49 {
                     remove(pb)
                     if ulib.bad(ulib.sys(ulib.SYS_RENAME, pc, pb, 0)) {

@@ -28,6 +28,10 @@ SELFUPDATE stage 2 (docs/SELFUPDATE.md):
                   sysfile <TAB> file <TAB> sha256 <TAB> octets <TAB> f<count>-<name> <TAB> <name>
                 (name = letters, digits . - _ ; empty files are refused). The device fetches each file,
                 checks the hash, and swaps them into /bin together with the kernel trial.
+                Files in subdirectories are absolute-path entries: DIR/apps/x.osp/start -> /apps/x.osp/start
+                (allowed roots: apps etc usr/share lib; at most 60 characters).
+--links FILE    one `syslink <TAB> <dest> <TAB> /bin/<name>` line per line "<dest> /bin/<name>" of FILE: after
+                the swap <dest> is a second name (hard link) of the new /bin file.
 --gz            gzip transport (r1246): also publish <file>.gz of the kernel and of every overlay file
                   sysgz <TAB> <kernel|name> <TAB> sha256(gz) <TAB> octets(gz) <TAB> <file>.gz
                 The raw files stay (stage-1 clients and the fallback); `sysfile` hashes are those of the
@@ -48,6 +52,8 @@ import veroeffentlichen as vf  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import marke
 
+PATH_OK = re.compile(r"/(apps|etc|usr/share|lib)/[A-Za-z0-9._/-]+")
+
 
 def main():
     a = sys.argv[1:]
@@ -55,7 +61,7 @@ def main():
         raise SystemExit(__doc__)
     img, feed, chan = a[0], a[1], a[2]
     opt = {"--bund": None, "--key": None, "--count": None, "--min-from": "0", "--notes": None,
-           "--name": "", "--overlay": None, "--roots": None}
+           "--name": "", "--overlay": None, "--roots": None, "--links": None}
     flags = set()
     i = 3
     while i < len(a):
@@ -106,16 +112,34 @@ def main():
     ovl_lines = []
     ovl_files = []
     if ovl_dir:
-        for fn in sorted(os.listdir(ovl_dir)):
-            fp = os.path.join(ovl_dir, fn)
-            if not os.path.isfile(fp):
-                continue
-            if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,59}", fn):
+        entries = []
+        for base, dirs, names in os.walk(ovl_dir):
+            dirs.sort()
+            for n in sorted(names):
+                rel = os.path.relpath(os.path.join(base, n), ovl_dir).replace(os.sep, "/")
+                entries.append(rel if "/" not in rel else "/" + rel)
+        entries.sort(key=lambda e: (e.startswith("/"), e))
+        for fn in entries:
+            fp = os.path.join(ovl_dir, fn.lstrip("/"))
+            if fn.startswith("/"):
+                if not PATH_OK.fullmatch(fn) or len(fn) > 60 or ".." in fn or "//" in fn:
+                    raise SystemExit("overlay path not allowed: %r" % fn)
+            elif not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,59}", fn):
                 raise SystemExit("overlay name not allowed: %r" % fn)
             raw = open(fp, "rb").read()
             if not raw:
                 raise SystemExit("overlay file is empty: %s" % fn)
             ovl_files.append((fn, raw))
+    link_lines = []
+    if opt["--links"]:
+        for ln in open(opt["--links"]).read().splitlines():
+            parts = ln.split()
+            if not parts:
+                continue
+            if len(parts) != 2 or not PATH_OK.fullmatch(parts[0]) or len(parts[0]) > 60 \
+                    or not re.fullmatch(r"/bin/[A-Za-z0-9_-][A-Za-z0-9._-]{0,50}", parts[1]):
+                raise SystemExit("bad link line: %r" % ln)
+            link_lines.append("syslink\t%s\t%s" % (parts[0], parts[1]))
     roots_raw = None
     if opt["--roots"]:
         roots_raw = open(opt["--roots"], "rb").read()
@@ -132,7 +156,7 @@ def main():
              "sysfile\tnotes\t%s\t%d\t%s" % (hashlib.sha256(ntext).hexdigest(),
                                              len(ntext), nname)]
     for i, (fn, raw) in enumerate(ovl_files):
-        srv = "f%d-%s" % (count, fn)
+        srv = "f%d-%s" % (count, fn.lstrip("/").replace("/", "_"))
         open(os.path.join(out, srv), "wb").write(raw)
         oh = hashlib.sha256(raw).hexdigest()
         if "--bad-ovl-hash" in flags and i == 0:
@@ -140,6 +164,7 @@ def main():
         lines.append("sysfile\tfile\t%s\t%d\t%s\t%s" % (oh, len(raw), srv, fn))
         if want_gz:
             gz_make(fn, srv, raw, bad_gz)
+    lines.extend(link_lines)
     if roots_raw is not None:
         srv = "f%d-roots.pem" % count
         open(os.path.join(out, srv), "wb").write(roots_raw)

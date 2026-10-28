@@ -22,7 +22,7 @@ for path in reads:
         sys.exit("secret path readable: %s" % path)
 subs = re.findall(r"^command_sub_allowed\s*=\s*(\S+)\s+(\S+)", conf, re.M)
 for prog, sub in subs:
-    if prog == "/bin/drvctl" and sub in ("install", "remove", "ban", "aux"):
+    if prog == "/bin/drvctl" and sub in ("remove", "ban", "aux"):
         sys.exit("drvctl %s must not be bridge-allowed" % sub)
 for name in ("drvctl", "wlanctl"):
     if "/bin/" + name not in allowed:

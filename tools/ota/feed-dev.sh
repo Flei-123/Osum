@@ -11,6 +11,9 @@
 #                   tools/usbimg/build.sh <dir>` of THIS checkout (via /root/jarvis/bin/heavy); it holds <prog>.elf.
 # prog ...          the /bin programs that changed since the stand the devices run (the overlay, flat, as
 #                   <prog>.elf; each ~0.5 MB gz, the device must have the space for the final sizes).
+# OVL_EXTRA_DIR     optional dir copied into the overlay as is: top-level files are /bin names, subdirectories
+#                   are absolute destinations (apps/x.osp/start -> /apps/x.osp/start, etc/..., usr/share/...).
+# OVL_LINKS         optional file of "<dest> /bin/<name>" lines: <dest> becomes a second name of the new /bin file.
 # --dry             build + sign into a temp copy of the feed and verify, publish nothing.
 #
 # Steps: kernel via build-kernel.sh (--stufe 0) into a dir that holds ONLY osum.mb (a root.img there adds a
@@ -38,6 +41,7 @@ for p in "${PROGS[@]}"; do
     [ -s "$IMGDIR/$p.elf" ] || { echo "feed-dev: $IMGDIR/$p.elf missing"; exit 1; }
     cp "$IMGDIR/$p.elf" "$T/ovl/$p"
 done
+if [ -n "${OVL_EXTRA_DIR:-}" ]; then cp -a "$OVL_EXTRA_DIR/." "$T/ovl/"; fi
 printf '%s\n' "$NOTES" > "$T/notes.txt"
 
 # checksums of the package feed BEFORE (must be identical after)
@@ -47,7 +51,8 @@ BEFORE=$(sums)
 TARGET=$FEED
 if [ "$DRY" = 1 ]; then TARGET=$T/feed; mkdir -p "$TARGET/system"; cp -a "$FEED/system/$CHANNEL" "$TARGET/system/$CHANNEL" 2>/dev/null || true; fi
 ARGS=(--count "$COUNT" --gz --notes "$T/notes.txt" --name "${MARKE_PRODUKT} $CHANNEL")
-[ ${#PROGS[@]} -gt 0 ] && ARGS+=(--overlay "$T/ovl")
+if [ -n "$(ls -A "$T/ovl")" ]; then ARGS+=(--overlay "$T/ovl"); fi
+if [ -n "${OVL_LINKS:-}" ]; then ARGS+=(--links "$OVL_LINKS"); fi
 bash tools/ota/publish-system.sh "$T/k" "$TARGET" "$CHANNEL" "${ARGS[@]}"
 
 D=$TARGET/system/$CHANNEL

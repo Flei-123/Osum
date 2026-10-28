@@ -33,12 +33,26 @@ COUNT=$(git rev-list --count HEAD)
 echo "republish-hp: $(git rev-parse --short HEAD) count $COUNT"
 IMAGE_ID=hp-feed HP_STICK=1 bash tools/usbimg/build.sh "$IMG" > "$IMG.log" 2>&1 || { tail -20 "$IMG.log"; exit 1; }
 PROGS=()
+EXTRA=$(mktemp -d)
+LINKS=$(mktemp)
+trap 'cleanup; rm -rf "$EXTRA" "$LINKS"' EXIT
 for f in "$IMG"/*.elf; do
     n=$(basename "$f" .elf)
     [ "$n" = "osum.mb" ] && continue
     [ -s "$f" ] || continue
     if [ ! -f "$HP_BASE/$n.elf" ] || ! cmp -s "$HP_BASE/$n.elf" "$f"; then PROGS+=("$n"); fi
 done
-echo "republish-hp: ${#PROGS[@]} overlay programs"
-bash tools/ota/publish-hp.sh "$IMG" "$NOTES" "${PROGS[@]}" $DRY
+while read -r dest rel; do
+    [ -s "$IMG/$rel" ] || continue
+    if [ ! -f "$HP_BASE/$rel" ] || ! cmp -s "$HP_BASE/$rel" "$IMG/$rel"; then
+        mkdir -p "$EXTRA/$(dirname "${dest#/}")"
+        cp "$IMG/$rel" "$EXTRA/${dest#/}"
+        echo "republish-hp: extra $dest"
+    fi
+done < tools/ota/overlay-extras.txt
+python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${PROGS[*]} term" \
+    | sed -n 's|^\(/apps/[A-Za-z0-9._-]*/start\)@\(/bin/[A-Za-z0-9._-]*\)$|\1 \2|p' > "$LINKS"
+rm -rf "$EXTRA.bundle"
+echo "republish-hp: ${#PROGS[@]} overlay programs, $(wc -l < "$LINKS") app links"
+OVL_EXTRA_DIR="$EXTRA" OVL_LINKS="$LINKS" bash tools/ota/publish-hp.sh "$IMG" "$NOTES" "${PROGS[@]}" $DRY
 rm -f "$IMG.log"

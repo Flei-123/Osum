@@ -1,0 +1,335 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import sha
+
+export { do_swap }
+
+const SW_CHMOD: u64 = 90
+const SW_MAX: u64 = 16777216
+const SW_FAIL: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut SW_NEW: [u8; 176] = [0 as u8; 176]
+static mut SW_OLD: [u8; 176] = [0 as u8; 176]
+static mut SW_BUF: [u8; 4096] = [0 as u8; 4096]
+static mut SW_DIG: [u8; 32] = [0 as u8; 32]
+static mut SW_HEX: [u8; 72] = [0 as u8; 72]
+static mut SW_HEX2: [u8; 72] = [0 as u8; 72]
+static mut SW_P_TMP: [u8; 6] = "/tmp/\0"
+static mut SW_P_VAR: [u8; 13] = "/var/jarvis/\0"
+static mut SW_P_BIN: [u8; 6] = "/bin/\0"
+static mut SW_P_APPS: [u8; 7] = "/apps/\0"
+static mut SW_S_OSP: [u8; 5] = ".osp\0"
+static mut SW_S_OLD: [u8; 5] = ".old\0"
+static mut SW_S_NEW: [u8; 5] = ".new\0"
+static mut SW_S_UNDO: [u8; 7] = "--undo\0"
+static mut M_USAGE: [u8; 54] = "usage: jarvisctl swap <src> <dst> | swap --undo <dst>\0"
+static mut M_SRC_BAD: [u8; 76] = "swap: refused: source must be a plain file path under /tmp/ or /var/jarvis/\0"
+static mut M_DST_BAD: [u8; 71] = "swap: refused: destination must be /bin/<name> or /apps/<x>.osp/<name>\0"
+static mut M_SRC_OPEN: [u8; 66] = "swap: cannot read the source file (missing, empty or over 16 MiB)\0"
+static mut M_WRITE: [u8; 56] = "swap: cannot write the new file next to the destination\0"
+static mut M_RENAME: [u8; 48] = "swap: rename failed, destination left as it was\0"
+static mut M_VERIFY: [u8; 59] = "swap: verify failed (hash differs), previous file restored\0"
+static mut M_NOOLD: [u8; 61] = "swap: nothing to undo (no .old file next to the destination)\0"
+static mut M_UNDO_FAIL: [u8; 18] = "swap: undo failed\0"
+static mut M_OK: [u8; 10] = "swap: ok \0"
+static mut M_BYTES: [u8; 15] = " bytes sha256 \0"
+static mut M_KEPT: [u8; 29] = "swap: previous file kept as \0"
+static mut M_NONE: [u8; 53] = "swap: destination was new, there is no previous file\0"
+static mut M_UNDONE: [u8; 36] = "swap: undone, previous file is back\0"
+static mut M_ARROW: [u8; 5] = " -> \0"
+static mut SW_S_SP: [u8; 2] = " \0"
+
+fn sw_at(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn sw_has(p: u64, lit: u64) -> bool {
+    return ulib.strneq(p, lit, ulib.length(lit))
+}
+
+fn sw_ends(p: u64, lit: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    let m: u64 = ulib.length(lit)
+    return n >= m && ulib.streq(p + n - m, lit)
+}
+
+fn sw_char_ok(c: u64) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 46 || c == 45 || c == 95
+}
+
+fn sw_name_ok(p: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    if n == 0 || n > 60 || sw_at(p, 0) == 46 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if !sw_char_ok(sw_at(p, i)) {
+            return false
+        }
+        i = i + 1
+    }
+    return !sw_ends(p, (&SW_S_OLD[0 as usize]) as u64) && !sw_ends(p, (&SW_S_NEW[0 as usize]) as u64)
+}
+
+fn sw_src_ok(p: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    if n < 6 || n > 150 {
+        return false
+    }
+    if !sw_has(p, (&SW_P_TMP[0 as usize]) as u64) && !sw_has(p, (&SW_P_VAR[0 as usize]) as u64) {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = sw_at(p, i)
+        if !sw_char_ok(c) && c != 47 {
+            return false
+        }
+        if i + 1 < n {
+            let d: u64 = sw_at(p, i + 1)
+            if (c == 46 && d == 46) || (c == 47 && d == 47) {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return sw_at(p, n - 1) != 47
+}
+
+fn sw_dst_ok(p: u64) -> bool {
+    if ulib.length(p) > 150 {
+        return false
+    }
+    if sw_has(p, (&SW_P_BIN[0 as usize]) as u64) {
+        return sw_name_ok(p + 5)
+    }
+    if !sw_has(p, (&SW_P_APPS[0 as usize]) as u64) {
+        return false
+    }
+    var i: u64 = 6
+    while sw_at(p, i) != 0 && sw_at(p, i) != 47 {
+        if !sw_char_ok(sw_at(p, i)) {
+            return false
+        }
+        i = i + 1
+    }
+    if sw_at(p, i) != 47 || i == 6 || sw_at(p, 6) == 46 {
+        return false
+    }
+    var dir: [u8; 80] = [0 as u8; 80]
+    var k: u64 = 6
+    while k < i {
+        dir[(k - 6) as usize] = sw_at(p, k) as u8
+        k = k + 1
+    }
+    dir[(i - 6) as usize] = 0 as u8
+    if !sw_ends((&dir[0 as usize]) as u64, (&SW_S_OSP[0 as usize]) as u64) {
+        return false
+    }
+    return sw_name_ok(p + i + 1)
+}
+
+fn sw_exists(p: u64) -> bool {
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, p, 0, 0)
+    if ulib.bad(f) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return true
+}
+
+fn sw_suffix(out: u64, p: u64, suf: u64) {
+    ulib.strcpy(out, p)
+    ulib.strcpy(out + ulib.length(p), suf)
+}
+
+fn sw_hash(p: u64, hex: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, p, 0, 0)
+    if ulib.bad(fd) {
+        return SW_FAIL
+    }
+    sha.begin()
+    var total: u64 = 0
+    var go: bool = true
+    while go {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, (&SW_BUF[0 as usize]) as u64, 4096)
+        if ulib.bad(r) || r == 0 {
+            go = false
+        } else {
+            sha.update((&SW_BUF[0 as usize]) as u64, r)
+            total = total + r
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    sha.finish((&SW_DIG[0 as usize]) as u64)
+    sha.hex_out((&SW_DIG[0 as usize]) as u64, 32, hex)
+    return total
+}
+
+fn sw_copy(src: u64, dst: u64) -> bool {
+    let fi: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
+    if ulib.bad(fi) {
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, dst, 0, 0)
+    let fo: u64 = ulib.sys(ulib.SYS_OPEN, dst, ulib.O_MAKE, 0)
+    if ulib.bad(fo) {
+        ulib.sys(ulib.SYS_CLOSE, fi, 0, 0)
+        return false
+    }
+    var good: bool = true
+    var go: bool = true
+    while go {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fi, (&SW_BUF[0 as usize]) as u64, 4096)
+        if ulib.bad(r) {
+            good = false
+            go = false
+        } else if r == 0 {
+            go = false
+        } else {
+            var w: u64 = 0
+            while w < r && good {
+                let x: u64 = ulib.sys(ulib.SYS_WRITE, fo, (&SW_BUF[0 as usize]) as u64 + w, r - w)
+                if ulib.bad(x) || x == 0 {
+                    good = false
+                } else {
+                    w = w + x
+                }
+            }
+            if !good {
+                go = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fi, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, fo, 0, 0)
+    if good {
+        ulib.sys(SW_CHMOD, dst, 493, 0)
+        ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    } else {
+        ulib.sys(ulib.SYS_UNLINK, dst, 0, 0)
+    }
+    return good
+}
+
+fn sw_fail(msg: u64) -> u64 {
+    ulib.esay_line(msg, 0)
+    return 1
+}
+
+fn sw_report(dst: u64, size: u64, hex: u64) {
+    ulib.say((&M_OK[0 as usize]) as u64)
+    ulib.say(dst)
+    ulib.say((&SW_S_SP[0 as usize]) as u64)
+    ulib.sayu(size)
+    ulib.say((&M_BYTES[0 as usize]) as u64)
+    ulib.say(hex)
+    ulib.nl()
+}
+
+fn sw_do(src: u64, dst: u64) -> u64 {
+    if !sw_src_ok(src) {
+        return sw_fail((&M_SRC_BAD[0 as usize]) as u64)
+    }
+    if !sw_dst_ok(dst) {
+        return sw_fail((&M_DST_BAD[0 as usize]) as u64)
+    }
+    let n_src: u64 = sw_hash(src, (&SW_HEX[0 as usize]) as u64)
+    if n_src == SW_FAIL || n_src == 0 || n_src > SW_MAX {
+        return sw_fail((&M_SRC_OPEN[0 as usize]) as u64)
+    }
+    let tmp: u64 = (&SW_NEW[0 as usize]) as u64
+    let old: u64 = (&SW_OLD[0 as usize]) as u64
+    sw_suffix(tmp, dst, (&SW_S_NEW[0 as usize]) as u64)
+    sw_suffix(old, dst, (&SW_S_OLD[0 as usize]) as u64)
+    if !sw_copy(src, tmp) {
+        return sw_fail((&M_WRITE[0 as usize]) as u64)
+    }
+    let n_tmp: u64 = sw_hash(tmp, (&SW_HEX2[0 as usize]) as u64)
+    if n_tmp != n_src || !ulib.streq((&SW_HEX[0 as usize]) as u64, (&SW_HEX2[0 as usize]) as u64) {
+        ulib.sys(ulib.SYS_UNLINK, tmp, 0, 0)
+        return sw_fail((&M_VERIFY[0 as usize]) as u64)
+    }
+    let had: bool = sw_exists(dst)
+    if had {
+        ulib.sys(ulib.SYS_UNLINK, old, 0, 0)
+        if ulib.bad(ulib.sys(ulib.SYS_RENAME, dst, old, 0)) {
+            ulib.sys(ulib.SYS_UNLINK, tmp, 0, 0)
+            return sw_fail((&M_RENAME[0 as usize]) as u64)
+        }
+    }
+    if ulib.bad(ulib.sys(ulib.SYS_RENAME, tmp, dst, 0)) {
+        if had {
+            ulib.sys(ulib.SYS_RENAME, old, dst, 0)
+        }
+        ulib.sys(ulib.SYS_UNLINK, tmp, 0, 0)
+        return sw_fail((&M_RENAME[0 as usize]) as u64)
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    let n_dst: u64 = sw_hash(dst, (&SW_HEX2[0 as usize]) as u64)
+    if n_dst != n_src || !ulib.streq((&SW_HEX[0 as usize]) as u64, (&SW_HEX2[0 as usize]) as u64) {
+        ulib.sys(ulib.SYS_UNLINK, dst, 0, 0)
+        if had {
+            ulib.sys(ulib.SYS_RENAME, old, dst, 0)
+        }
+        return sw_fail((&M_VERIFY[0 as usize]) as u64)
+    }
+    sw_report(dst, n_dst, (&SW_HEX2[0 as usize]) as u64)
+    if had {
+        ulib.say((&M_KEPT[0 as usize]) as u64)
+        ulib.say(old)
+        ulib.nl()
+    } else {
+        ulib.say((&M_NONE[0 as usize]) as u64)
+        ulib.nl()
+    }
+    return 0
+}
+
+fn sw_undo(dst: u64) -> u64 {
+    if !sw_dst_ok(dst) {
+        return sw_fail((&M_DST_BAD[0 as usize]) as u64)
+    }
+    let tmp: u64 = (&SW_NEW[0 as usize]) as u64
+    let old: u64 = (&SW_OLD[0 as usize]) as u64
+    sw_suffix(tmp, dst, (&SW_S_NEW[0 as usize]) as u64)
+    sw_suffix(old, dst, (&SW_S_OLD[0 as usize]) as u64)
+    if !sw_exists(old) {
+        return sw_fail((&M_NOOLD[0 as usize]) as u64)
+    }
+    ulib.sys(ulib.SYS_UNLINK, tmp, 0, 0)
+    let had: bool = sw_exists(dst)
+    if had {
+        if ulib.bad(ulib.sys(ulib.SYS_RENAME, dst, tmp, 0)) {
+            return sw_fail((&M_UNDO_FAIL[0 as usize]) as u64)
+        }
+    }
+    if ulib.bad(ulib.sys(ulib.SYS_RENAME, old, dst, 0)) {
+        if had {
+            ulib.sys(ulib.SYS_RENAME, tmp, dst, 0)
+        }
+        return sw_fail((&M_UNDO_FAIL[0 as usize]) as u64)
+    }
+    if had {
+        ulib.sys(ulib.SYS_UNLINK, tmp, 0, 0)
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    let n: u64 = sw_hash(dst, (&SW_HEX[0 as usize]) as u64)
+    ulib.say((&M_UNDONE[0 as usize]) as u64)
+    ulib.nl()
+    sw_report(dst, n, (&SW_HEX[0 as usize]) as u64)
+    return 0
+}
+
+fn do_swap(args: u64, argc: u64) -> u64 {
+    if argc == 4 && ulib.streq(ulib.arg_at(args, 2), (&SW_S_UNDO[0 as usize]) as u64) {
+        return sw_undo(ulib.arg_at(args, 3))
+    }
+    if argc == 4 {
+        return sw_do(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+    }
+    return sw_fail((&M_USAGE[0 as usize]) as u64)
+}
