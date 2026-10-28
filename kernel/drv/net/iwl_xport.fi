@@ -9,7 +9,7 @@ import wlan.iwl_le
 import wlan.iwl_mvm_txq
 import wlan.iwl_fwcaps
 
-export { XCtx, xctx_new, xctx_fast, xport_make, tr_submit, tr_poll, E_XP_NOCQ }
+export { XCtx, xp_last_cmd, xp_last_len, xp_last_w0, xp_last_err, xp_sent, xctx_new, xctx_fast, xport_make, tr_submit, tr_poll, E_XP_NOCQ }
 
 const E_XP_NOCQ: i64 = -80
 const PEND_CAP: u64 = 4096
@@ -25,12 +25,16 @@ struct XCtx {
     pend: u64,
     pend_len: u64,
     last_err: i64,
+    last_cmd: u64,
+    last_len: u64,
+    last_w0: u64,
+    sent: u64,
     budget_ms: u64,
     spin_max: u64
 }
 
 fn xctx_new(state: u64, cq: u64, p: u64, pend: u64) -> XCtx {
-    var x: XCtx = XCtx { state: state, cq: cq, p: p, pend: pend, pend_len: 0, last_err: 0, budget_ms: RECV_BUDGET_MS, spin_max: RECV_SPIN_MAX }
+    var x: XCtx = XCtx { state: state, cq: cq, p: p, pend: pend, pend_len: 0, last_err: 0, last_cmd: 0, last_len: 0, last_w0: 0, sent: 0, budget_ms: RECV_BUDGET_MS, spin_max: RECV_SPIN_MAX }
     return x
 }
 
@@ -48,6 +52,10 @@ fn xp_send(ctx: u64, a: u64, n: u64) -> i64 {
     let x: *mut XCtx = ctx as *mut XCtx
     if (*x).cq == 0 { return E_XP_NOCQ }
     (*x).pend_len = 0
+    (*x).sent = (*x).sent + 1
+    (*x).last_cmd = iwl_le.ld8(a, 0)
+    (*x).last_len = 0
+    (*x).last_w0 = 0
     let cq: *mut iwl_cmdq.Cq = (*x).cq as *mut iwl_cmdq.Cq
     if iwl_le.ld8(a, 0) == iwl_cmdq.CMD_TX_DATA && iwl_cmdq.cq_dq_on(cq) {
         let d: i64 = iwl_cmdq.cq_dq_send(cq, (*x).p as *mut iwl_probe.Probe, a, n)
@@ -60,6 +68,8 @@ fn xp_send(ctx: u64, a: u64, n: u64) -> i64 {
         return r
     }
     (*x).pend_len = r as u64
+    (*x).last_len = r as u64
+    if r >= 8 { (*x).last_w0 = iwl_le.ld32((*x).pend, 4) }
     if iwl_le.ld8(a, 0) == iwl_fwcaps.CMD_SCD_QUEUE_CFG { scd_track(cq, a, n) }
     return 0
 }
@@ -104,3 +114,10 @@ fn xport_make(x: *mut XCtx) -> iwl_boot.Xport {
 fn tr_submit(ctx: u64, a: u64, n: usize) -> i64 { return xp_send(ctx, a, n as u64) }
 
 fn tr_poll(ctx: u64, a: u64, n: usize) -> i64 { return xp_recv(ctx, a, n as u64) }
+
+
+fn xp_last_cmd(x: *mut XCtx) -> u64 { return (*x).last_cmd }
+fn xp_last_len(x: *mut XCtx) -> u64 { return (*x).last_len }
+fn xp_last_w0(x: *mut XCtx) -> u64 { return (*x).last_w0 }
+fn xp_last_err(x: *mut XCtx) -> i64 { return (*x).last_err }
+fn xp_sent(x: *mut XCtx) -> u64 { return (*x).sent }

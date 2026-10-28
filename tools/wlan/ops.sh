@@ -28,5 +28,6 @@ mut 's/iwl_le.st8(out, 81 + i, mic\[i as usize\] as u64)/iwl_le.st8(out, 82 + i,
 mut 's/iwl_le.st16(out, 26, 1)/iwl_le.st16(out, 26, 2)/' "auth sequence number" mgmt.fi
 mut 's/RATE_6M_OFDM, STA_AP, sec,/RATE_6M_OFDM, STA_BCAST, sec,/' "TX station id" iwl_ops.fi
 mut 's/(\*o).rssi = 0 - (best as i64)/(*o).rssi = (best as i64)/' "RSSI sign" iwl_ops.fi
+mut 's/    (\*o).fail_step = step/    (*o).fail_step = 0/' "failed setup step not recorded" iwl_ops.fi
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

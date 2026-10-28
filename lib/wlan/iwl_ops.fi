@@ -15,6 +15,8 @@ export {
     ops_peer_add, ops_peer_remove, ops_associated, ops_poll_one, ops_rssi, ops_rx_channel,
     ops_keys_sent, ops_cmd_count, ops_set_hw_crypto, ops_set_queues, ops_set_address,
     ops_default_channels, ops_set_caps, ops_caps,
+    ops_fail_step, ops_fail_rc, ops_fail_cmd, ops_ok_steps,
+    STEP_NONE, STEP_PHY_CTX, STEP_MAC_CTX, STEP_BINDING, STEP_SCAN_CFG, STEP_SCAN_REQ,
     SCAN_IDLE, SCAN_RUNNING, SCAN_DONE, SCAN_ABORTED,
     E_OPS_STATE, E_OPS_FW, E_OPS_ARGS, STA_AP, MAX_CHANNELS
 }
@@ -23,6 +25,13 @@ const SCAN_IDLE: u64 = 0
 const SCAN_RUNNING: u64 = 1
 const SCAN_DONE: u64 = 2
 const SCAN_ABORTED: u64 = 3
+
+const STEP_NONE: u64 = 0
+const STEP_PHY_CTX: u64 = 1
+const STEP_MAC_CTX: u64 = 2
+const STEP_BINDING: u64 = 3
+const STEP_SCAN_CFG: u64 = 4
+const STEP_SCAN_REQ: u64 = 5
 
 const E_OPS_STATE: i64 = -60
 const E_OPS_FW: i64 = -61
@@ -68,6 +77,10 @@ struct Mvm {
     rx_channel: u64,
     cmds: u64,
     keys_sent: u64,
+    fail_step: u64,
+    fail_rc: i64,
+    fail_cmd: u64,
+    ok_steps: u64,
     caps: [u64; 16],
     cmd: [u8; 2600],
     rx: [u8; 2600]
@@ -84,6 +97,7 @@ fn mvm_new() -> Mvm {
         ctx_ready: false, peer_added: false, queue_msk: iwl_mvm_txq.QUEUE_MSK_LEGACY,
         scan_state: 0, scan_uid: 0, scan_status: 0,
         rssi: 0, rx_channel: 0, cmds: 0, keys_sent: 0,
+        fail_step: 0, fail_rc: 0, fail_cmd: 0, ok_steps: 0,
         caps: [0; 16], cmd: [0; 2600], rx: [0; 2600]
     }
     iwl_fwcaps.caps_default((&o.caps[0]) as *mut u64)
@@ -109,6 +123,25 @@ fn ops_rssi(o: *mut Mvm) -> i64 { return (*o).rssi }
 fn ops_rx_channel(o: *mut Mvm) -> u64 { return (*o).rx_channel }
 fn ops_keys_sent(o: *mut Mvm) -> u64 { return (*o).keys_sent }
 fn ops_cmd_count(o: *mut Mvm) -> u64 { return (*o).cmds }
+fn ops_fail_step(o: *mut Mvm) -> u64 { return (*o).fail_step }
+fn ops_fail_rc(o: *mut Mvm) -> i64 { return (*o).fail_rc }
+fn ops_fail_cmd(o: *mut Mvm) -> u64 { return (*o).fail_cmd }
+fn ops_ok_steps(o: *mut Mvm) -> u64 { return (*o).ok_steps }
+
+fn step_result(o: *mut Mvm, step: u64, r: i64) -> i64 {
+    if r < 0 {
+        (*o).fail_step = step
+        (*o).fail_rc = r
+        (*o).fail_cmd = iwl_le.ld8(cmd_addr(o), 0)
+        return r
+    }
+    (*o).ok_steps = (*o).ok_steps | (1 << step)
+    if (*o).fail_step == step {
+        (*o).fail_step = 0
+        (*o).fail_rc = 0
+    }
+    return r
+}
 
 fn ops_set_address(o: *mut Mvm, mac: u64) {
     var i: usize = 0
@@ -196,13 +229,13 @@ fn scan_cfg_cmd(o: *mut Mvm) -> i64 {
 }
 
 fn ops_setup(o: *mut Mvm) -> i64 {
-    var r: i64 = phy_cmd(o, 1, (*o).channel)
+    var r: i64 = step_result(o, STEP_PHY_CTX, phy_cmd(o, 1, (*o).channel))
     if r < 0 { return r }
-    r = mac_cmd(o, iwl_mvm_ctx.CTXT_ADD, false, 0)
+    r = step_result(o, STEP_MAC_CTX, mac_cmd(o, iwl_mvm_ctx.CTXT_ADD, false, 0))
     if r < 0 { return r }
-    r = bind_cmd(o)
+    r = step_result(o, STEP_BINDING, bind_cmd(o))
     if r < 0 { return r }
-    r = scan_cfg_cmd(o)
+    r = step_result(o, STEP_SCAN_CFG, scan_cfg_cmd(o))
     if r < 0 { return r }
     (*o).ctx_ready = true
     return 0
@@ -295,7 +328,7 @@ fn ops_scan_start(o: *mut Mvm, ssid: u64, ssid_len: u64) -> i64 {
     iwl_mvm_scan.mvm_scan_tail_at(a, head + (slots * iwl_mvm_scan.SCAN_CHAN_LEN), 0, 0, 1, (&preq[0]) as u64, 24, 10, 10, 0, ssid, ssid_len)
     (*o).scan_state = SCAN_RUNNING
     (*o).scan_status = 0
-    let r: i64 = submit(o, len)
+    let r: i64 = step_result(o, STEP_SCAN_REQ, submit(o, len))
     if r < 0 { (*o).scan_state = SCAN_IDLE }
     return r
 }

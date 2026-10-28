@@ -74,6 +74,7 @@ has "$T/sec.txt" 'connected' "connect reports connected"
 has "$T/sec.txt" 'ip=192.168.77.50' "connect prints the DHCP lease"
 sec PROC
 has "$T/sec.txt" 'auto=up rc=0' "proc shows auto=up"
+has "$T/sec.txt" 'diag: step=none err=0 cmd=0x0 ok=0x3e' "proc diag line: no failed step, all five steps ok"
 sec CONF
 has "$T/sec.txt" 'ssid OrientFake' "conf holds the ssid"
 sec FORGET

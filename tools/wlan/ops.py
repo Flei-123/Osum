@@ -168,8 +168,21 @@ def check_parse():
 
 
 check_build()
+def check_diag():
+    print("== setup failure diagnosis ==")
+    expect = [(1, 0x08, 0x00), (2, 0x28, 0x02), (3, 0x2B, 0x06), (4, 0x0C, 0x0E)]
+    out = run(["failstep %d" % i for i in range(5)])
+    for i, (step, cmd, okm) in enumerate(expect):
+        f = out[i].split(" ")
+        ok(f[:2] == ["failstep", "rc"] and f[2] == "-70" and f[4] == str(step) and f[6] == "-70" and f[8] == str(cmd) and f[10] == str(okm),
+           "command %d failing is reported as step %d cmd %d: %s" % (i, step, cmd, out[i]))
+    f = out[4].split(" ")
+    ok(f[2] == "0" and f[4] == "0" and f[6] == "0" and f[10] == "30", "all steps ok: no failed step, ok mask 0x1e: " + out[4])
+
+
 check_seq(True)
 check_seq(False)
+check_diag()
 check_eapol()
 check_parse()
 print("RESULT pass=%d fail=%d" % (PASS, FAIL))

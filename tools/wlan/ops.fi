@@ -16,6 +16,7 @@ static mut rxq: [u8; 1200] = [0; 1200]
 static mut rxq_len: [usize; 4] = [0; 4]
 static mut rxq_n: usize = 0
 static mut rxq_at: usize = 0
+static mut fail_at: i64 = -1
 static mut f0: [u8; 2048] = [0; 2048]
 static mut f1: [u8; 2048] = [0; 2048]
 static mut f2: [u8; 2048] = [0; 2048]
@@ -115,6 +116,7 @@ fn word_is(line: u64, len: usize, at: *mut usize, w: str) -> bool {
 }
 
 fn t_submit(ctx: u64, buf: u64, len: usize) -> i64 {
+    if fail_at >= 0 && log_n as i64 == fail_at { return -70 }
     if log_n >= LOG_MAX || len > LOG_SLOT { return -1 }
     var i: usize = 0
     while i < len {
@@ -241,8 +243,39 @@ fn seq_cmd(hw: bool) {
     temit()
 }
 
+fn fail_step_cmd(at_cmd: i64) {
+    var g: device.Device = device.device_new()
+    var o: iwl_ops.Mvm = iwl_ops.mvm_new()
+    var mac: [u8; 6] = [2, 0, 0, 0, 1, 0]
+    iwl_ops.ops_set_address(&o, (&mac[0]) as u64)
+    log_n = 0
+    rxq_n = 0
+    rxq_at = 0
+    fail_at = at_cmd
+    if !iwl_ops.ops_attach(&g, &o, 0, t_submit, t_poll) { tlit("attach fail"); temit(); return }
+    let r: i64 = iwl_ops.ops_setup(&o)
+    fail_at = -1
+    tlit("failstep rc ")
+    tsigned(r)
+    tlit(" step ")
+    tnum(iwl_ops.ops_fail_step(&o))
+    tlit(" err ")
+    tsigned(iwl_ops.ops_fail_rc(&o))
+    tlit(" cmd ")
+    tnum(iwl_ops.ops_fail_cmd(&o))
+    tlit(" ok ")
+    tnum(iwl_ops.ops_ok_steps(&o))
+    temit()
+}
+
 fn run_line(line: u64, len: usize) {
     var at: usize = 0
+    if word_is(line, len, &at, "failstep") {
+        let n: i64 = field_num(line, len, &at)
+        if n < 0 { tlit("fail"); temit(); return }
+        fail_step_cmd(n)
+        return
+    }
     if word_is(line, len, &at, "seqsw") { seq_cmd(false); return }
     if word_is(line, len, &at, "seqhw") { seq_cmd(true); return }
     if word_is(line, len, &at, "build") {
