@@ -793,16 +793,24 @@ fn renew_once(unicast: bool, give_up_ms: u64) -> u64 {
     return got
 }
 
-// Sleep <secs> seconds in pieces the kernel accepts (it refuses > 60 s).
+static mut link_lost: u64 = 0
+static mut link_cycled: u64 = 0
+
+fn link_watch() {
+    if ng(NG_LINKX) == 0 {
+        link_lost = 1
+    } else if link_lost != 0 {
+        link_lost = 0
+        link_cycled = 1
+    }
+}
+
 fn sleep_secs(secs: u64) {
     var left: u64 = secs
-    while left > 0 {
-        var piece: u64 = left
-        if piece > 30 {
-            piece = 30
-        }
-        ulib.sleep_ms(piece * 1000)
-        left = left - piece
+    while left > 0 && link_cycled == 0 {
+        ulib.sleep_ms(1000)
+        link_watch()
+        left = left - 1
     }
 }
 
@@ -814,6 +822,7 @@ fn renew_loop(t1_test: u64) -> u64 {
     var s_r3: [u8; 32] = "dhcp: renewal failed, rebinding\0"
     var s_r4: [u8; 32] = "dhcp: lease lost, starting over\0"
     var s_r5: [u8; 22] = "dhcp: server said NAK\0"
+    var s_r6: [u8; 33] = "dhcp: link cycled, starting over\0"
     while true {
         let lease: u64 = o_lease
         if lease == 0 || lease == 0xFFFFFFFF {
@@ -835,6 +844,12 @@ fn renew_loop(t1_test: u64) -> u64 {
         ulib.sayn(t1)
         ulib.nl()
         sleep_secs(t1)
+        if link_cycled != 0 {
+            link_cycled = 0
+            say((&s_r6[0 as usize]) as u64)
+            ulib.nl()
+            return 0
+        }
         // RENEWING until T2, with a pause that grows between the attempts
         var spent: u64 = t1
         var got: u64 = 0
@@ -848,6 +863,12 @@ fn renew_loop(t1_test: u64) -> u64 {
                 }
                 if wait > 0 {
                     sleep_secs(wait)
+                }
+                if link_cycled != 0 {
+                    link_cycled = 0
+                    say((&s_r6[0 as usize]) as u64)
+                    ulib.nl()
+                    return 0
                 }
                 spent = spent + wait + 4
                 if gap < 64 {
@@ -868,6 +889,12 @@ fn renew_loop(t1_test: u64) -> u64 {
                 got = renew_once(false, 4000)
                 if got == 0 {
                     sleep_secs(gap)
+                    if link_cycled != 0 {
+                        link_cycled = 0
+                        say((&s_r6[0 as usize]) as u64)
+                        ulib.nl()
+                        return 0
+                    }
                     spent = spent + gap + 4
                     if gap < 64 {
                         gap = gap * 2

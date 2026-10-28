@@ -1151,6 +1151,24 @@ fn lq() -> u64 {
     return (&q_usb[0]) as u64
 }
 
+fn slot_owned(state: u64, slot: u64) -> bool {
+    var d: u64 = 0
+    while d < MAX_DEV {
+        if dg(state, d, D_USED) != 0 && dg(state, d, D_SLOT) == slot {
+            return true
+        }
+        d = d + 1
+    }
+    return false
+}
+
+fn net_reclaim(state: u64) {
+    let owner: u64 = usbnet.owner_slot(state)
+    if owner != 0 && !slot_owned(state, owner) {
+        usbnet.unplug_slot(state, owner)
+    }
+}
+
 fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     hubport: u64, mitspeed: bool, vorspeed: u64) -> bool {
     var l_rst: [u8; 42] = "Anschluss lässt sich nicht zurücksetzen\0"
@@ -1164,6 +1182,7 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     var s_slot: [u8; 7] = " slot=\0"
     var s_rt: [u8; 8] = " route=\0"
 
+    net_reclaim(state)
     usbdiag.set_cur(usbdiag.cur_hc(), rootport)
     var speed: u64 = vorspeed
     if !mitspeed {
@@ -3905,43 +3924,54 @@ fn unplug_check(state: u64) {
     }
 }
 
-fn gone(state: u64, p: u64) {
+fn unplug_dev(state: u64, d: u64) {
     var s_gone: [u8; 18] = "usb: unplug port=\0"
     var s_drv: [u8; 9] = " driver=\0"
+    serial.puts((&s_gone[0]) as u64)
+    serial.dec(dg(state, d, D_PORT))
+    serial.puts((&s_drv[0]) as u64)
+    drv_name(dg(state, d, D_DRIVER))
+    serial.nl()
+    if g(state, S_KBD) == d + 1 {
+        s(state, S_KBD, 0)
+    }
+    if g(state, S_MOUSE) == d + 1 {
+        s(state, S_MOUSE, 0)
+    }
+    let mi: u64 = msc_slot_of_dev(state, d)
+    if mi < MAX_MSC {
+        msc_slot_set(state, mi, 0)
+        ds(state, d, D_MSCBLK, 0)
+        ds(state, d, D_MSCBS, 0)
+        s(state, S_MSCWEG, g(state, S_MSCWEG) + 1)
+    }
+    usbnet.unplug_slot(state, dg(state, d, D_SLOT))
+    drop_dev(state, d)
+    s(state, S_NDEV, g(state, S_NDEV) - 1)
+    s(state, S_UNPLUGS, g(state, S_UNPLUGS) + 1)
+}
+
+fn unplug_below(state: u64, slot: u64) {
+    var d: u64 = 0
+    while d < MAX_DEV {
+        if dg(state, d, D_USED) != 0 && dg(state, d, D_PARENT) == slot {
+            let child: u64 = dg(state, d, D_SLOT)
+            let is_hub: bool = dg(state, d, D_DRIVER) == DRV_HUB
+            unplug_dev(state, d)
+            if is_hub {
+                unplug_below(state, child)
+            }
+        }
+        d = d + 1
+    }
+}
+
+fn gone(state: u64, p: u64) {
     unmark(state, p)
     var d: u64 = 0
     while d < MAX_DEV {
         if dg(state, d, D_USED) != 0 && dg(state, d, D_PORT) == p {
-            serial.puts((&s_gone[0]) as u64)
-            serial.dec(p)
-            serial.puts((&s_drv[0]) as u64)
-            drv_name(dg(state, d, D_DRIVER))
-            serial.nl()
-            if g(state, S_KBD) == d + 1 {
-                s(state, S_KBD, 0)
-            }
-            if g(state, S_MOUSE) == d + 1 {
-                s(state, S_MOUSE, 0)
-            }
-            // RUNDE HOTPLUG-2: den Platz DIESES Geraets raeumen, nicht
-            // "den" Massenspeicher. Die anderen Sticks bleiben, wo sie
-            // sind -- ihre Platznummer ist die Blockgeraetenummer, an
-            // der `wechsel.fi` ihre Einhaengung festhaelt.
-            let mi: u64 = msc_slot_of_dev(state, d)
-            if mi < MAX_MSC {
-                msc_slot_set(state, mi, 0)
-                ds(state, d, D_MSCBLK, 0)
-                ds(state, d, D_MSCBS, 0)
-                // RUNDE HOTPLUG: die FALLENDE Flanke. Sie wird hier
-                // gezaehlt und nicht in `hotplug_work`, weil `gone`
-                // auch aus `unplug_now` (der Gegenprobe) gerufen wird
-                // -- beide Wege muessen dasselbe melden.
-                s(state, S_MSCWEG, g(state, S_MSCWEG) + 1)
-            }
-            usbnet.unplug_slot(state, dg(state, d, D_SLOT))
-            drop_dev(state, d)
-            s(state, S_NDEV, g(state, S_NDEV) - 1)
-            s(state, S_UNPLUGS, g(state, S_UNPLUGS) + 1)
+            unplug_dev(state, d)
         }
         d = d + 1
     }
@@ -4679,14 +4709,50 @@ fn hub_feature(state: u64, d: u64, setzen: bool, merkmal: u64,
 }
 
 // wPortStatus in den unteren 16 Bit, wPortChange in den oberen.
-fn hub_port_status(state: u64, d: u64, port: u64) -> u64 {
+const HUB_STATUS_ERR: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn hub_port_read(state: u64, d: u64, port: u64) -> u64 {
     let p: u64 = state + HUB_OFF + 32
     zero(p, 8)
     if xhci.control(state, dg(state, d, D_SLOT), 0xA3, REQ_GET_STATUS,
         0, port, 4, p, true) < 4 {
-        return 0
+        return HUB_STATUS_ERR
     }
     return b16(p, 0) | (b16(p, 2) << 16)
+}
+
+fn hub_port_status(state: u64, d: u64, port: u64) -> u64 {
+    let v: u64 = hub_port_read(state, d, port)
+    if v == HUB_STATUS_ERR {
+        return 0
+    }
+    return v
+}
+
+fn hub_child_at(state: u64, d: u64, p: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_DEV {
+        if dg(state, i, D_USED) != 0 && dg(state, i, D_PARENT) == dg(state, d, D_SLOT)
+            && dg(state, i, D_HUBPORT) == p {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn hub_child_gone(state: u64, d: u64, p: u64) {
+    let c: u64 = hub_child_at(state, d, p)
+    if c == 0 {
+        return
+    }
+    let child: u64 = c - 1
+    let slot: u64 = dg(state, child, D_SLOT)
+    let is_hub: bool = dg(state, child, D_DRIVER) == DRV_HUB
+    unplug_dev(state, child)
+    if is_hub {
+        unplug_below(state, slot)
+    }
 }
 
 // Aus dem Anschlusszustand die Geschwindigkeit, in der Zaehlweise des
@@ -4856,6 +4922,15 @@ fn hub_rescan_ports(state: u64, d: u64) {
     let hidx: u64 = usbdiag.info(xhci.unit(state), usbdiag.I_HUBS) - 1
     var p: u64 = 1
     while p <= n {
+        if hub_child_present(state, d, p) {
+            let live: u64 = hub_port_read(state, d, p)
+            if live != HUB_STATUS_ERR && (live & 1) == 0 {
+                if (live & (1 << 16)) != 0 {
+                    hub_feature(state, d, false, PF_C_CONNECTION, p)
+                }
+                hub_child_gone(state, d, p)
+            }
+        }
         if !hub_child_present(state, d, p) && g(state, S_HUBTRY) < HUB_TRY_MAX {
             let st: u64 = hub_port_status(state, d, p)
             if (st & (1 << 16)) != 0 {
