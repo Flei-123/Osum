@@ -8,6 +8,8 @@
 #        HP_ONLY="a b c" limits the overlay to the listed programs (small first step for a slow bridge)
 #        HP_NO_EXTRAS=1 drops the absolute-path files (a device with an old ota refuses them: first step only /bin)
 #        HP_SAME_KERNEL=1 publishes the kernel of HP_BASE (what the HP runs): the HP applies the overlay live, no trial boot
+#        HP_FX_PACK=<dir from tools/linuxapps/hppack.py> adds usr/share/xfx/{firefox.tar,install.sh,start.sh} to the overlay (HP_ONLY must then list wayd tar);
+#                   the HP needs a root of >= 1 GiB (HP_STICK=1 images since ba9f4ee5), the apply refuses cleanly below 2x the size
 #        HP_KEEP_IMAGE=1 keeps the built image dir.  Run directly (not via heavy) when the heavy queue hangs.
 set -euo pipefail
 REPO=${OSUM_MAIN_CHECKOUT:-/root/jarvis/projects/u_DiS4in7esMF1/osum}
@@ -54,6 +56,12 @@ while read -r dest rel; do
         echo "republish-hp: extra $dest"
     fi
 done < <([ -n "${HP_NO_EXTRAS:-}" ] || cat tools/ota/overlay-extras.txt)
+if [ -n "${HP_FX_PACK:-}" ]; then
+    mkdir -p "$EXTRA/usr/share/xfx"
+    cp "$HP_FX_PACK/firefox.tar" "$EXTRA/usr/share/xfx/firefox.tar"
+    cp assets/xfx/install.sh assets/xfx/start.sh "$EXTRA/usr/share/xfx/"
+    echo "republish-hp: firefox pack $(stat -c%s "$HP_FX_PACK/firefox.tar") octets"
+fi
 python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${PROGS[*]} term" \
     | sed -n 's|^\(/apps/[A-Za-z0-9._-]*/start\)@\(/bin/[A-Za-z0-9._-]*\)$|\1 \2|p' > "$LINKS"
 rm -rf "$EXTRA.bundle"
