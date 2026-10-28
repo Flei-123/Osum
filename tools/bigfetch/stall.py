@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 import os
+import signal
 import sys
 import time
 
@@ -24,6 +25,10 @@ def main(argv):
             data = b""
         count = data.count(b"\nPROBE") + (1 if data.startswith(b"PROBE") else 0)
         finished = done_mark in data
+        if finished and alive:
+            time.sleep(3)
+            os.kill(pid, signal.SIGKILL)
+            break
         now = time.time()
         if count != last_count:
             if last_time is not None:

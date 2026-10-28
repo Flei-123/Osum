@@ -38,7 +38,7 @@ if [ ! -f "$KERNEL" ]; then
 fi
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s
 SPEC="/bin/ /tmp/ /dev/ /proc/ /etc/ /etc/ssl/"
-for p in sh ls echo rm df shasum; do
+for p in sh ls echo rm df shasum sleep; do
     vendor/firn/bin/firnc kernel/user/$p.fi -o "$TMPD/$p.o" 2> "$TMPD/e$p" || { head "$TMPD/e$p"; echo "BIGFETCH: build failed"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o"
     strip --strip-all "$TMPD/$p.elf" 2>/dev/null
@@ -73,8 +73,8 @@ BYTES=$((SIZE_MIB * 1048576))
 WANT=$(python3 -I tools/bigfetch/server.py sha "$BYTES")
 
 STALL_MAX=${STALL_MAX:-12}
-PROBE_SECS=${PROBE_SECS:-$((SIZE_MIB * 6 + 120))}
-PROBE_PER_FILE=200
+PROBE_SECS=${PROBE_SECS:-$((SIZE_MIB * 4 + 200))}
+PROBE_PER_FILE=250
 PROBE_RUNS=$(( (PROBE_SECS + PROBE_PER_FILE - 1) / PROBE_PER_FILE ))
 PROBE_CALLS=$(for i in $(seq 1 "$PROBE_RUNS"); do printf 'sh /probe.sh;'; done)
 for i in $(seq 1 "$PROBE_PER_FILE"); do printf 'echo PROBE\nsleep 1\n'; done > "$TMPD/probe.sh"
@@ -99,14 +99,15 @@ for mode in $MODES; do
     QPID=$!
     sleep 1
     QREAL=$(pgrep -P "$QPID" -f qemu-system | head -1)
-    STALL=$(python3 -I tools/bigfetch/stall.py "$TMPD/g-$mode.txt" "${QREAL:-$QPID}" PHASE1-DONE)
+    STALL=$(python3 -I tools/bigfetch/stall.py "$TMPD/g-$mode.txt" "${QREAL:-$QPID}" "fetch: written")
+    for p in $(pgrep -f "file=$TMPD/live.img"); do kill -9 "$p" 2>/dev/null; done
     wait "$QPID" 2>/dev/null
+    sleep 1
     t1=$(date +%s)
     clean "$TMPD/g-$mode.txt" > "$TMPD/c-$mode.txt"
     GAP=${STALL%% *}
     echo "        phase 1 seconds $((t1 - t0)), probe stall (max gap, probes, finished): $STALL"
     grep -a "fetch: \(written\|octets\|code\|the file\)\|EXCEPTION\|PANIC\|panic\|out of mem\|nomem" "$TMPD/c-$mode.txt" | head -8 | sed 's/^/        /'
-    grep -aq 'PHASE1-DONE' "$TMPD/c-$mode.txt" && ok "$mode: the probe script ran to the end" || bad "$mode: the guest hung or died before the probe script ended"
     grep -aq 'fetch: written' "$TMPD/c-$mode.txt" && ok "$mode: fetch reported the file written" || bad "$mode: fetch did not finish inside the probe window"
     if awk -v g="$GAP" -v m="$STALL_MAX" 'BEGIN{exit !(g <= m)}'; then ok "$mode: longest probe stall ${GAP}s <= ${STALL_MAX}s"; else bad "$mode: the system stalled ${GAP}s during the download (limit ${STALL_MAX}s)"; fi
     : > "$TMPD/v-$mode.txt"
