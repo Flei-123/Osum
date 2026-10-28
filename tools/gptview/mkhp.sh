@@ -3,6 +3,7 @@ set -uo pipefail
 OUT=${1:?output dir}
 GAP_MIB=${2:-0}
 OSUM_MIB=${3:-0}
+FILL_MIB=${4:-$OSUM_MIB}
 OSUM_SECT=$((OSUM_MIB * 2048))
 ESP_START=2048
 ESP_SECT=409600
@@ -30,7 +31,7 @@ dd if=/dev/zero of="$OUT/esp.part" bs=512 count="$ESP_SECT" status=none
 mkfs.vfat -F 32 -n SYSTEM "$OUT/esp.part" >/dev/null 2>&1
 if [ "$OSUM_MIB" -gt 0 ]; then
     sgdisk -n "5:$OSUM_START:$((OSUM_START + OSUM_SECT - 1))" -t 5:4F53554D-4F46-5301-8E75-6D6F72694F53 -c 5:OSUM "$OUT/disk.img" >/dev/null 2>&1
-    head -c $((OSUM_MIB * 1048576)) /dev/urandom > "$OUT/osum.part"
+    head -c $((FILL_MIB * 1048576)) /dev/urandom > "$OUT/osum.part"
     dd if="$OUT/osum.part" of="$OUT/disk.img" bs=512 seek="$OSUM_START" conv=notrunc status=none
     rm -f "$OUT/osum.part"
 fi

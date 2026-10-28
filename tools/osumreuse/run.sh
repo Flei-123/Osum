@@ -65,6 +65,12 @@ printf '        rows=%s reuse=%s beside=%s\n        art=%s\n' "$rows" "$re" "$be
 [ "$beside" = 0 ] && ok "beside stays disabled (gap below 32 MiB)" || bad "beside=$beside"
 case "$art" in *"${MARKE_PRODUKT}"*) ok "type column names ${MARKE_PRODUKT}" ;; *) bad "art=$art" ;; esac
 [ "$(sha256sum < "$OUT/pristine.img" | cut -d' ' -f1)" = "$sum0" ] && ok "disk byte-identical after viewing" || bad "view wrote to the disk"
+shown=$(field "$OUT/v.txt" freeshown)
+[ "$shown" = 0 ] && ok "free-space rows hidden on the reinstall tab (no space needed)" || bad "freeshown=$shown on reinstall tab"
+run "$OUT/pristine.img" "$OUT/vb.txt" "beside" '^installer: view esp=' 300
+shown_b=$(field "$OUT/vb.txt" freeshown); free_b=$(field "$OUT/vb.txt" free)
+[ "$shown_b" = 1 ] && ok "counter-proof: free-space rows shown on the beside tab" || bad "freeshown=$shown_b on beside tab"
+[ -n "$free_b" ] && ok "counter-proof: beside tab still reports the missing gap" || bad "beside free row empty"
 
 echo "== 3. reinstall over #5 =="
 cp "$OUT/pristine.img" "$OUT/main.img"
