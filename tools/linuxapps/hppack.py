@@ -35,7 +35,7 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def write_tar(files, out_path):
+def write_tar(files, links, out_path):
     with tarfile.open(out_path, "w", format=tarfile.USTAR_FORMAT) as tar:
         for dest, host, mode in files:
             info = tar.gettarinfo(host, arcname=dest.lstrip("/"))
@@ -44,6 +44,14 @@ def write_tar(files, out_path):
             info.uname = info.gname = ""
             with open(host, "rb") as handle:
                 tar.addfile(info, handle)
+        for dest, target in links:
+            info = tarfile.TarInfo(dest.lstrip("/"))
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            info.mode, info.mtime = 0o777, FIXED_MTIME
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            tar.addfile(info)
 
 
 def write_gzip(src, dst):
@@ -87,7 +95,7 @@ def main(argv):
         write_base_spec(argv[4], packed, os.path.join(out_dir, "base.spec"))
     tar_path = os.path.join(out_dir, "firefox.tar")
     gz_path = tar_path + ".gz"
-    write_tar(files, tar_path)
+    write_tar(files, links, tar_path)
     write_gzip(tar_path, gz_path)
     with open(os.path.join(out_dir, "firefox.links"), "w", encoding="utf-8") as handle:
         handle.writelines("%s %s\n" % pair for pair in links)
