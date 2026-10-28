@@ -56,6 +56,7 @@ import wlan.iwl_diag_fe
 import wlan.iwl_fwerr
 import wlan.iwl_boot
 import wlan.iwl_phydb
+import wlan.iwl_paging
 import crypto.sha256
 import drv.net.iwl_fake
 import drv.net.iwl_fakeap
@@ -112,13 +113,15 @@ const ERR_NODEV: i64 = -20 // index is not a target function
 const ERR_MAP: i64 = -21 // apic.map_device found no window
 
 static mut held_addr: u64 = 0
+static mut paging_region: u64 = 0
+static mut paging_pages: u64 = 0
 static mut boot_rk: u64 = 0
 
 fn boot_rfkill() -> u64 { return boot_rk }
 
 static mut diag_d: iwl_diag.Diag = iwl_diag.Diag {
     phase: 0, failed_at: 0, armed: 0, init_alive: 0, rt_alive: 0, err: 0, hw_rev: 0, rf_id: 0, fw_ver: 0, fw_size: 0,
-    nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, cp_seen: 0, cp_bytes: 0, cp_max: 0, cp_drops: 0, cp_bad: 0, cp_rc: 0, cp_plen: 0, cp_type: 0, cp_dlen: 0, cp_skip: 0, cp_skip_type: 0, cp_skip_len: 0, cp_hex: [0 as u8; 32], last_cmd: 0, last_notif: 0, send_rc: 0, send_cmd: 0, lm: iwl_diag_fe.FeCopy { state: 0, ptr: 0, w: [0; 7] }, um: iwl_diag_fe.FeCopy { state: 0, ptr: 0, w: [0; 7] },
+    nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, pg_n: 0, pg_last: 0, pg_rc: 0, calib_bytes: 0, replayed: 0, cp_seen: 0, cp_bytes: 0, cp_max: 0, cp_drops: 0, cp_bad: 0, cp_rc: 0, cp_plen: 0, cp_type: 0, cp_dlen: 0, cp_skip: 0, cp_skip_type: 0, cp_skip_len: 0, cp_hex: [0 as u8; 32], last_cmd: 0, last_notif: 0, send_rc: 0, send_cmd: 0, lm: iwl_diag_fe.FeCopy { state: 0, ptr: 0, w: [0; 7] }, um: iwl_diag_fe.FeCopy { state: 0, ptr: 0, w: [0; 7] },
     cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32],
     step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, own_valid: 0, own_hwif: 0, own_mbox: 0, own_rc: 0, alive_valid: 0, alive: [0; 16], pm_valid: 0, pm: [0; 16], tr_valid: 0, tr: [0; 192], rx_valid: 0, rx: [0; 26], x2_valid: 0, x2: [0; 136], poll_valid: 0, poll: [0; 360], irq_valid: 0, irq: [0; 48], ipoll_valid: 0, ipoll: [0; 320], miss: [0 as u8; 64]
 }
@@ -694,6 +697,31 @@ fn run_experiments(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, b
     return r
 }
 
+fn paging_prepare(state: u64, f: *mut iwl_fw.FwInfo, blob: u64, bt: *mut iwl_boot.Boot) {
+    var pl: iwl_paging.Plan = iwl_paging.plan_new()
+    var rc: i64 = iwl_paging.plan_make(f, &pl)
+    if rc == iwl_paging.PLAN_NONE { return }
+    if rc == 0 {
+        let need: u64 = iwl_paging.plan_pages(&pl)
+        if paging_pages < need {
+            paging_region = dma_pages(state, need)
+            paging_pages = 0
+            if paging_region != 0 { paging_pages = need }
+        }
+        if paging_pages < need { rc = E_FW_MEM }
+    }
+    if rc != 0 {
+        iwl_diag.diag_paging(&diag_d, 0, 0, rc)
+        return
+    }
+    iwl_paging.plan_fill(&pl, blob, paging_region)
+    (*bt).pg_n = pl.n_blk
+    (*bt).pg_last = pl.last_pages
+    (*bt).pg_css = paging_region
+    (*bt).pg_blk = iwl_paging.plan_blk_base(paging_region)
+    iwl_diag.diag_paging(&diag_d, pl.n_blk, pl.last_pages, 0)
+}
+
 #[allow_escape]
 fn b2_phase(state: u64, lph: u64, aph: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, bounce: u64, bsize: u64, tl: u64, ta: u64, cq: *mut iwl_cmdq.Cq, scratch: u64) -> i64 {
     var s_by: [u8; 8] = " bytes=\0"
@@ -877,6 +905,7 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
         iwl_pwr.int_disable(p)
     } else {
         mark(iwl_diag.ST_RT_STAGE)
+        paging_prepare(state, f, blob, &bt)
         r = iwl_boot.rt_stage(&bt, &diag_d)
         if r != 0 {
             b2_line((&t_xe[0]) as u64, xc.last_err)

@@ -31,6 +31,8 @@ mut 's/return HDR + 36/return HDR + 40/' "PHY_CONTEXT length"
 mut 's/const PHY_CFG_V3_LEN: u64 = 28/const PHY_CFG_V3_LEN: u64 = 24/' "PHY_CONFIGURATION_CMD v3 length"
 mut 's/const SF_INIT_OFF: u64 = 3/const SF_INIT_OFF: u64 = 2/' "SF_CFG state"
 mut 's/st32(a, HDR + 52 + k \* 4, SF_AGING_DEF)/st32(a, HDR + 56 + k * 4, SF_AGING_DEF)/' "SF_CFG full-on timeout offset"
+mut 's/const BLOCK_SHIFT: u64 = 15/const BLOCK_SHIFT: u64 = 14/' "FW_PAGING_BLOCK_CMD block size" iwl_paging.fi
+mut 's/const FLAG_SECURED: u64 = 0x200/const FLAG_SECURED: u64 = 0x400/' "FW_PAGING_BLOCK_CMD flags" iwl_paging.fi
 mut 's/const BT_MODS_DEFAULT: u64 = 0x14/const BT_MODS_DEFAULT: u64 = 0x04/' "BT_CONFIG enabled modules"
 mut 's/var fl: u64 = 2 |/var fl: u64 = 3 |/' "CCMP cipher flag"
 mut 's/iwl_le.st32(a, h + 8, mac_type)/iwl_le.st32(a, h + 12, mac_type)/' "MAC_CONTEXT mac_type offset" iwl_mvm_ctx.fi

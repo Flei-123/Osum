@@ -1,0 +1,105 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_buf
+import wlan.iwl_le
+import wlan.iwl_fw
+
+export {
+    Plan, plan_new, plan_make, plan_pages, plan_blk_base, plan_fill, paging_cmd,
+    CMD_FW_PAGING_BLOCK, PAGING_CMD_LEN, PAGE_SIZE, BLOCK_SIZE, PLAN_NONE, E_PG_SIZE, E_PG_LAYOUT
+}
+
+const CMD_FW_PAGING_BLOCK: u64 = 0x4F
+const PAGE_SIZE: u64 = 4096
+const BLOCK_PAGES: u64 = 8
+const BLOCK_SIZE: u64 = 32768
+const BLOCK_SHIFT: u64 = 15
+const PAGE_SHIFT: u64 = 12
+const MAX_IMAGE: u64 = 1048576
+const FLAG_ENABLED: u64 = 0x100
+const FLAG_SECURED: u64 = 0x200
+const ADDR_SLOTS: u64 = 33
+const PAGING_CMD_LEN: u64 = 12 + 4 * 33
+const HDR: u64 = iwl_buf.HDR
+
+const PLAN_NONE: i64 = 1
+const E_PG_SIZE: i64 = -90
+const E_PG_LAYOUT: i64 = -91
+
+struct Plan {
+    n_blk: u64,
+    last_pages: u64,
+    css_off: u64,
+    css_len: u64,
+    data_off: u64,
+    data_len: u64
+}
+
+fn plan_new() -> Plan {
+    var p: Plan = Plan { n_blk: 0, last_pages: 0, css_off: 0, css_len: 0, data_off: 0, data_len: 0 }
+    return p
+}
+
+fn plan_make(f: *mut iwl_fw.FwInfo, p: *mut Plan) -> i64 {
+    let size: u64 = (*f).paging_size
+    if size == 0 { return PLAN_NONE }
+    if size > MAX_IMAGE || (size & (PAGE_SIZE - 1)) != 0 { return E_PG_SIZE }
+    var seen: u64 = 0
+    var i: usize = 0
+    let n: usize = iwl_fw.fw_sec_count(f, iwl_fw.IMG_RT)
+    while i < n {
+        if iwl_fw.fw_sec_kind(f, iwl_fw.IMG_RT, i) == iwl_fw.KIND_PAGING {
+            if seen == 0 {
+                (*p).css_off = iwl_fw.fw_sec_off(f, iwl_fw.IMG_RT, i)
+                (*p).css_len = iwl_fw.fw_sec_len(f, iwl_fw.IMG_RT, i)
+            } else if seen == 1 {
+                (*p).data_off = iwl_fw.fw_sec_off(f, iwl_fw.IMG_RT, i)
+                (*p).data_len = iwl_fw.fw_sec_len(f, iwl_fw.IMG_RT, i)
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    if seen < 2 { return E_PG_LAYOUT }
+    if (*p).css_len > PAGE_SIZE || (*p).data_len != size { return E_PG_LAYOUT }
+    let pages: u64 = size / PAGE_SIZE
+    (*p).n_blk = (pages + BLOCK_PAGES - 1) / BLOCK_PAGES
+    (*p).last_pages = pages - BLOCK_PAGES * ((*p).n_blk - 1)
+    return 0
+}
+
+fn plan_pages(p: *mut Plan) -> u64 {
+    return 1 + BLOCK_PAGES * ((*p).n_blk + 1)
+}
+
+fn plan_blk_base(region: u64) -> u64 {
+    return (region + PAGE_SIZE + BLOCK_SIZE - 1) & ~(BLOCK_SIZE - 1)
+}
+
+fn plan_fill(p: *mut Plan, blob: u64, region: u64) {
+    iwl_le.zero(region, PAGE_SIZE)
+    iwl_le.copy(region, blob + (*p).css_off, (*p).css_len)
+    let base: u64 = plan_blk_base(region)
+    var k: u64 = 0
+    while k < (*p).n_blk {
+        var len: u64 = BLOCK_SIZE
+        if k + 1 == (*p).n_blk { len = (*p).last_pages * PAGE_SIZE }
+        iwl_le.zero(base + k * BLOCK_SIZE, BLOCK_SIZE)
+        iwl_le.copy(base + k * BLOCK_SIZE, blob + (*p).data_off + k * BLOCK_SIZE, len)
+        k = k + 1
+    }
+}
+
+fn paging_cmd(a: u64, qid: u64, slot: u64, n_blk: u64, last_pages: u64, css_phys: u64, blk_phys: u64) -> u64 {
+    iwl_le.zero(a, HDR + PAGING_CMD_LEN)
+    iwl_buf.hdr(a, CMD_FW_PAGING_BLOCK, qid, slot)
+    iwl_le.st32(a, HDR, FLAG_SECURED | FLAG_ENABLED | last_pages)
+    iwl_le.st32(a, HDR + 4, BLOCK_SHIFT)
+    iwl_le.st32(a, HDR + 8, n_blk)
+    iwl_le.st32(a, HDR + 12, css_phys >> PAGE_SHIFT)
+    var k: u64 = 0
+    while k < n_blk && k + 1 < ADDR_SLOTS {
+        iwl_le.st32(a, HDR + 16 + 4 * k, (blk_phys + k * BLOCK_SIZE) >> PAGE_SHIFT)
+        k = k + 1
+    }
+    return HDR + PAGING_CMD_LEN
+}
