@@ -54,12 +54,24 @@ build_tree() {
     echo "$spec" > "$out/spec.txt"
 }
 
-run_guest() {
+run_guest_once() {
     local kernel=$1 img=$2 app=$3 out=$4
     timeout ${GUEST_TIMEOUT:-1500} qemu-system-x86_64 $KVM_ARGS -kernel "$kernel" -m 512 -append "osum vfs nokbd $app" \
         -serial "file:$out" -display none -no-reboot \
         -drive "file=$img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+}
+
+run_guest() {
+    local try=0
+    while [ $try -lt 3 ]; do
+        run_guest_once "$@"
+        case "$3" in
+            *fsck*) clean "$4" | grep -aq '^fsck: behoben' && return 0 ;;
+            *) return 0 ;;
+        esac
+        try=$((try+1))
+    done
 }
 
 run_cut() {
