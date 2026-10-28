@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# Usage: bash tools/power/s5safe.sh [new-kernel.img] [old-kernel.img]
+# Usage: bash tools/s5safe/* [new-kernel.img] [old-kernel.img]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
