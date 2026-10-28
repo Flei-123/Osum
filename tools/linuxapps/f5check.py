@@ -7,6 +7,7 @@ MIN_SPAN_MS = int(os.environ.get("FX_MIN_SPAN_MS", "30000"))
 STAMP = re.compile(rb"^\[\s*(\d+)\.\d+\]")
 BAD_MARKERS = (b"MOZ_CRASH", b"Redirecting call to abort", b"Gtk:ERROR", b"Segmentation fault")
 MAIN_PROCESS = re.compile(rb"^\s*\d+\s+\S+\s+\d+:\d+\s+/usr/lib/firefox/firefox --no-remote")
+CONTENT_PROCESS = re.compile(rb"^\s*\d+\s+\S+\s+\d+:\d+\s+/usr/lib/firefox/firefox -contentproc")
 COMMIT = re.compile(rb"wl_surface#\d+\.commit\(\)")
 
 
@@ -37,6 +38,8 @@ def verdict(path):
     ps_block = section(lines, b"FX3 ps:", b"FX3 log:")
     if not any(MAIN_PROCESS.match(l) for l in ps_block):
         return "red", "firefox main process gone"
+    if os.environ.get("FX_REQUIRE_CONTENT") == "1" and not any(CONTENT_PROCESS.match(l) for l in ps_block):
+        return "red", "no firefox -contentproc process alive"
     log_block = section(lines, b"FX3 first:", b"FX-END")
     stamps = [int(m.group(1)) for m in (STAMP.match(l) for l in log_block) if m]
     if len(stamps) < 2:

@@ -6,7 +6,7 @@ echo 'user_pref("browser.shell.checkDefaultBrowser", false);' >> /tmp/p/user.js
 echo "FX3 begin firefox window"
 /usr/lib/firefox/firefox --no-remote --profile /tmp/p about:blank > /tmp/fx3.log 2>&1 &
 sleep ${FX3_WAIT:-240}
-echo "FX3 ps: $(busybox ps 2>&1 | head -30)"
+echo "FX3 ps: $(busybox ps 2>&1 | busybox grep -v '{[^}]*}.*firefox' | head -40)"
 echo "FX3 log:"
 busybox head -${FX3_HEAD:-60} /tmp/fx3.log
 echo "FX3 first:"
