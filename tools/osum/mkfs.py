@@ -92,6 +92,7 @@ gesichert" zu pruefen: nicht ein Mitschnitt ueber eine serielle Leitung,
 sondern der Inhalt der Platte. Runde K11 misst den Editor damit.
 """
 
+import mmap
 import os
 import struct
 import sys
@@ -150,7 +151,9 @@ SB = dict(MAGIC=0, BSIZE=8, BLOCKS=16, INODES=24, BITMAP=32, ITABLE=40,
           # Bloecke es hat. Eine Null heisst "kein Journal", und
           # damit sagt jede Platte von vor dieser Runde von
           # selbst das Richtige.
-          JSTART=104, JBLOCKS=112)
+          JSTART=104, JBLOCKS=112,
+          XVER=120, XBLOCKS=128, XBMSTART=136, XITSTART=144, XINODES=152,
+          XPLAN=160, XCURSOR=168)
 # `kernel/ofsj.fi::BLOCKS_NEEDED` -- 1 Kopf + 8 Zieltafel + 512
 # Nutzlast + 1 Bestaetigung. Die ZWEITE Umsetzung derselben Zahl.
 J_BLOCKS = 522
@@ -219,6 +222,10 @@ class Fs:
         self.d = bytearray(min(blocks, self.data_start + 64) * BS)
         self.root = 1
         self._hint = self.data_start
+        self.xblocks = 0
+        self.xbm = 0
+        self.xit = 0
+        self.xin = 0
 
     # Dafuer sorgen, dass Block `b` im Puffer liegt.
     def _deck(self, b):
@@ -252,6 +259,11 @@ class Fs:
     # ist die ganze Aenderung -- und ohne es zeigte die Rechnung bei
     # Block 4096 in den naechsten Kartenblock hinein.
     def _bm_at(self, b):
+        cover = self.bmblocks * BITS_PER_BLOCK
+        if self.xblocks and b >= cover:
+            x = b - cover
+            return ((self.xbm + x // BITS_PER_BLOCK) * BS
+                    + (x % BITS_PER_BLOCK) // 8)
         return ((self.bmstart + b // BITS_PER_BLOCK) * BS
                 + (b % BITS_PER_BLOCK) // 8)
 
@@ -330,9 +342,13 @@ class Fs:
 
     # ------------------------------------------------------------ inodes
     def inode_at(self, ino):
-        if ino < 1 or ino > self.inodes:
+        if ino < 1 or ino > self.inodes + self.xin:
             raise SystemExit("mkfs: inode %d is outside the table (%d)"
-                             % (ino, self.inodes))
+                             % (ino, self.inodes + self.xin))
+        if ino > self.inodes:
+            slot = ino - 1 - self.inodes
+            return ((self.xit + slot // self.ipb) * BS
+                    + (slot % self.ipb) * self.isize)
         return ((self.itable + (ino - 1) // self.ipb) * BS
                 + ((ino - 1) % self.ipb) * self.isize)
 
@@ -366,7 +382,7 @@ class Fs:
         raise SystemExit("mkfs: no inode left (%d in the table)" % self.inodes)
 
     def used_inodes(self):
-        return sum(1 for i in range(1, self.inodes + 1)
+        return sum(1 for i in range(1, self.inodes + self.xin + 1)
                    if self.iget(i, I_TYPE) != T_FREE)
 
     # ------------------------------------------------------------- files
@@ -765,9 +781,15 @@ class Fs:
 # zweiten K15-Nachtrag auch; eine der beiden Umsetzungen, die es nicht
 # taete, waere der Fehler, gegen den es die zweite ueberhaupt gibt.
 def load(path):
-    raw = open(path, "rb").read()
+    with open(path, "rb") as fh:
+        raw = fh.read(BS)
     if len(raw) < BS:
         return None
+    size = os.path.getsize(path)
+    xver = struct.unpack_from("<Q", raw, SB["XVER"])[0]
+    if xver:
+        return load_ext(path, size)
+    raw = open(path, "rb").read()
     inodes = struct.unpack_from("<Q", raw, SB["INODES"])[0] or INODE_COUNT
     version = struct.unpack_from("<Q", raw, SB["VERSION"])[0] or OFS_V2
     # RUNDE OFS3: die Geometrie kommt aus dem SUPERBLOCK und nicht aus
@@ -803,6 +825,34 @@ def load(path):
     fs.root = fs.g64(SB["ROOT"])
     # RUNDE K13: die Fassung steht im Superblock; eine 0 heisst 1.
     fs.version = fs.g64(SB["VERSION"]) or OFS_V1
+    return fs
+
+
+def load_ext(path, size):
+    fh = open(path, "rb")
+    mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
+    g = lambda k: struct.unpack_from("<Q", mm, SB[k])[0]
+    if g("MAGIC") != MAGIC:
+        return None
+    version = g("VERSION") or OFS_V2
+    fs = Fs(max(g("BLOCKS"), g("DATA") + 8), version, g("INODES") or INODE_COUNT,
+            0, g("BMBLOCKS") or 1)
+    fs.d = mm
+    fs.bmstart = g("BITMAP") or 1
+    fs.bmblocks = g("BMBLOCKS") or 1
+    fs.itable = g("ITABLE")
+    if version >= OFS_V3:
+        fs.isize = g("ISIZE")
+        fs.ipb = BS // fs.isize
+        fs.dirent = g("DIRENT")
+        fs.namelen = g("NAMELEN")
+    fs.data_start = g("DATA")
+    fs.root = g("ROOT")
+    fs.xblocks = g("XBLOCKS")
+    fs.xbm = g("XBMSTART")
+    fs.xit = g("XITSTART")
+    fs.xin = g("XINODES")
+    fs.blocks = fs.xblocks
     return fs
 
 
@@ -846,9 +896,14 @@ def main(argv):
                     m, u, g = fs.get_meta(ino)
                     print("%s %o %d %d" % (path, m, u, g))
             return 0
-        print("blocks=%d free=%d inodes=%d/%d version=%d maxfile=%d"
-              % (fs.g64(SB["BLOCKS"]), fs.free_blocks(), fs.used_inodes(),
-                 fs.inodes, fs.version, fs.max_file()))
+        line = ("blocks=%d free=%d inodes=%d/%d version=%d maxfile=%d"
+                % (fs.xblocks or fs.g64(SB["BLOCKS"]), fs.free_blocks(),
+                   fs.used_inodes(), fs.inodes + fs.xin, fs.version,
+                   fs.max_file()))
+        if fs.xblocks:
+            line += (" ext=1 baseblocks=%d xinodes=%d xbm=%d xit=%d"
+                     % (fs.g64(SB["BLOCKS"]), fs.xin, fs.xbm, fs.xit))
+        print(line)
         for line in fs.tree():
             print(line)
         return 0

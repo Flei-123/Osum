@@ -1,0 +1,227 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.kcall
+
+export { u_start }
+
+const CHUNK: u64 = 4096
+const MIB_CHUNKS: u64 = 256
+
+static mut buf: [u8; 4096] = [0 as u8; 4096]
+static mut chk: [u8; 4096] = [0 as u8; 4096]
+static mut digits: [u8; 24] = [0 as u8; 24]
+static mut path: [u8; 96] = [0 as u8; 96]
+
+fn report(name: u64, value: u64) {
+    var head: [u8; 11] = "growfill: \0"
+    var eq: [u8; 4] = " = \0"
+    ulib.say((&head[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&eq[0 as usize]) as u64)
+    ulib.sayu(value)
+    ulib.nl()
+}
+
+fn read_num(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    var c: u64 = __mmio_read8((p + i) as *mut u8) as u64
+    while c >= 48 && c <= 57 {
+        v = v * 10 + (c - 48)
+        i = i + 1
+        c = __mmio_read8((p + i) as *mut u8) as u64
+    }
+    return v
+}
+
+fn put_num(v: u64) -> u64 {
+    var count: u64 = 0
+    var y: u64 = v
+    if v == 0 {
+        count = 1
+    }
+    while y > 0 {
+        count = count + 1
+        y = y / 10
+    }
+    var x: u64 = v
+    var i: u64 = count
+    while i > 0 {
+        digits[(i - 1) as usize] = (48 + (x % 10)) as u8
+        x = x / 10
+        i = i - 1
+    }
+    digits[(count) as usize] = 0 as u8
+    return count
+}
+
+fn build_path(dir: u64, index: u64) {
+    var n: u64 = 0
+    var c: u64 = __mmio_read8((dir + n) as *mut u8) as u64
+    while c != 0 {
+        path[(n) as usize] = c as u8
+        n = n + 1
+        c = __mmio_read8((dir + n) as *mut u8) as u64
+    }
+    path[(n) as usize] = 47 as u8
+    n = n + 1
+    path[(n) as usize] = 102 as u8
+    n = n + 1
+    let d: u64 = put_num(index)
+    var i: u64 = 0
+    while i < d {
+        path[(n + i) as usize] = digits[(i) as usize]
+        i = i + 1
+    }
+    path[(n + d) as usize] = 0 as u8
+}
+
+fn pattern(chunk: u64, i: u64) -> u64 {
+    return ((chunk *% 31) +% (i *% 7) +% 3) % 251
+}
+
+fn fill(target: u64, chunk: u64) {
+    var i: u64 = 0
+    while i < CHUNK {
+        __mmio_write8((target + i) as *mut u8, pattern(chunk, i) as u8)
+        i = i + 1
+    }
+}
+
+fn big_write(file: u64, mib: u64) -> u64 {
+    let fd: u64 = io.create(file)
+    if errno.failed(fd) {
+        return 0
+    }
+    var chunk: u64 = 0
+    let total: u64 = mib * MIB_CHUNKS
+    while chunk < total {
+        fill((&buf[0 as usize]) as u64, chunk)
+        let n: u64 = io.write_all(fd, (&buf[0 as usize]) as u64, CHUNK)
+        if errno.failed(n) {
+            io.close(fd)
+            return chunk * CHUNK
+        }
+        chunk = chunk + 1
+    }
+    io.close(fd)
+    return chunk * CHUNK
+}
+
+fn big_check(file: u64, mib: u64) -> u64 {
+    let fd: u64 = io.open(file, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return 0xFFFFFFFF
+    }
+    var bad: u64 = 0
+    var chunk: u64 = 0
+    let total: u64 = mib * MIB_CHUNKS
+    while chunk < total {
+        let n: u64 = io.read_full(fd, (&chk[0 as usize]) as u64, CHUNK)
+        if errno.failed(n) || n != CHUNK {
+            bad = bad + 1
+            chunk = total
+        } else {
+            fill((&buf[0 as usize]) as u64, chunk)
+            var i: u64 = 0
+            var same: bool = true
+            while i < CHUNK && same {
+                if chk[(i) as usize] != buf[(i) as usize] {
+                    same = false
+                }
+                i = i + 1
+            }
+            if !same {
+                bad = bad + 1
+            }
+            chunk = chunk + 1
+        }
+    }
+    io.close(fd)
+    return bad
+}
+
+fn many_write(dir: u64, count: u64) -> u64 {
+    io.make_dir(dir)
+    var made: u64 = 0
+    var k: u64 = 0
+    while k < count {
+        build_path(dir, k)
+        let fd: u64 = io.create((&path[0 as usize]) as u64)
+        if !errno.failed(fd) {
+            fill((&buf[0 as usize]) as u64, k)
+            let n: u64 = io.write_all(fd, (&buf[0 as usize]) as u64, 96)
+            if !errno.failed(n) {
+                made = made + 1
+            }
+            io.close(fd)
+        }
+        k = k + 1
+    }
+    return made
+}
+
+fn many_check(dir: u64, count: u64) -> u64 {
+    var bad: u64 = 0
+    var k: u64 = 0
+    while k < count {
+        build_path(dir, k)
+        let fd: u64 = io.open((&path[0 as usize]) as u64, kcall.O_RDONLY)
+        if errno.failed(fd) {
+            bad = bad + 1
+        } else {
+            let n: u64 = io.read_full(fd, (&chk[0 as usize]) as u64, 96)
+            fill((&buf[0 as usize]) as u64, k)
+            var i: u64 = 0
+            var same: bool = !errno.failed(n) && n == 96
+            while i < 96 && same {
+                if chk[(i) as usize] != buf[(i) as usize] {
+                    same = false
+                }
+                i = i + 1
+            }
+            if !same {
+                bad = bad + 1
+            }
+            io.close(fd)
+        }
+        k = k + 1
+    }
+    return bad
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_big: [u8; 4] = "big\0"
+    var w_bigcheck: [u8; 9] = "bigcheck\0"
+    var w_many: [u8; 5] = "many\0"
+    var w_manycheck: [u8; 10] = "manycheck\0"
+    var n_wrote: [u8; 6] = "wrote\0"
+    var n_bad: [u8; 4] = "bad\0"
+    if ulib.arg_count(args) < 4 {
+        return 2
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    let target: u64 = ulib.arg_at(args, 2)
+    let amount: u64 = read_num(ulib.arg_at(args, 3))
+    if ulib.streq(cmd, (&w_big[0 as usize]) as u64) {
+        report((&n_wrote[0 as usize]) as u64, big_write(target, amount))
+        return 0
+    }
+    if ulib.streq(cmd, (&w_bigcheck[0 as usize]) as u64) {
+        report((&n_bad[0 as usize]) as u64, big_check(target, amount))
+        return 0
+    }
+    if ulib.streq(cmd, (&w_many[0 as usize]) as u64) {
+        report((&n_wrote[0 as usize]) as u64, many_write(target, amount))
+        return 0
+    }
+    if ulib.streq(cmd, (&w_manycheck[0 as usize]) as u64) {
+        report((&n_bad[0 as usize]) as u64, many_check(target, amount))
+        return 0
+    }
+    return 2
+}
