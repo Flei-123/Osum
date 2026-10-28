@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+
+export { NONE, TTL_TICKS, find, store, read }
+
+const SLOTS: u64 = 8
+const SLOT_BYTES: u64 = 4096
+const NONE: u64 = 0xFFFF
+const TTL_TICKS: u64 = 200
+
+static mut snap_data: [u8; 32768] = [0; 32768]
+static mut snap_node: [u64; 8] = [0; 8]
+static mut snap_len: [u64; 8] = [0; 8]
+static mut snap_at: [u64; 8] = [0; 8]
+static mut snap_used: [u64; 8] = [0; 8]
+
+fn find(node: u64, now: u64) -> u64 {
+    var s: u64 = 0
+    while s < SLOTS {
+        if snap_used[s as usize] != 0 && snap_node[s as usize] == node && now - snap_at[s as usize] < TTL_TICKS {
+            return s
+        }
+        s = s + 1
+    }
+    return NONE
+}
+
+fn victim(node: u64) -> u64 {
+    var best: u64 = 0
+    var s: u64 = 0
+    while s < SLOTS {
+        if snap_used[s as usize] == 0 {
+            return s
+        }
+        if snap_node[s as usize] == node {
+            return s
+        }
+        if snap_at[s as usize] < snap_at[best as usize] {
+            best = s
+        }
+        s = s + 1
+    }
+    return best
+}
+
+fn store(node: u64, now: u64, src: u64, len: u64) {
+    var n: u64 = len
+    if n > SLOT_BYTES {
+        n = SLOT_BYTES
+    }
+    let s: u64 = victim(node)
+    var i: u64 = 0
+    while i < n {
+        snap_data[(s * SLOT_BYTES + i) as usize] = kstate.get8(src + i) as u8
+        i = i + 1
+    }
+    snap_node[s as usize] = node
+    snap_len[s as usize] = n
+    snap_at[s as usize] = now
+    snap_used[s as usize] = 1
+}
+
+fn read(slot: u64, off: u64, dst: u64, len: u64) -> u64 {
+    let have: u64 = snap_len[slot as usize]
+    if off >= have {
+        return 0
+    }
+    var want: u64 = len
+    if off + want > have {
+        want = have - off
+    }
+    var i: u64 = 0
+    while i < want {
+        kstate.set8(dst + i, snap_data[(slot * SLOT_BYTES + off + i) as usize])
+        i = i + 1
+    }
+    return want
+}
