@@ -92,6 +92,27 @@ class Bild:
         passt = max(1, (self.data - self.itable)) * self.ipb
         if self.inodes > passt:
             self.inodes = passt
+        self.xin = 0
+        self.xit = 0
+        self.xbm = 0
+        self.cover = (g(mkfs.SB["BMBLOCKS"]) or 1) * mkfs.BITS_PER_BLOCK
+        self.hole_lo = 0
+        self.hole_hi = 0
+        if g(mkfs.SB["XVER"]):
+            self.xin = g(mkfs.SB["XINODES"])
+            self.xit = g(mkfs.SB["XITSTART"])
+            self.xbm = g(mkfs.SB["XBMSTART"])
+            self.hole_lo = self.blocks
+            self.hole_hi = self.xit + (self.xin + self.ipb - 1) // self.ipb
+            self.blocks = min(g(mkfs.SB["XBLOCKS"]), self.geraet)
+
+    def total_inodes(self):
+        return self.inodes + self.xin
+
+    def valid(self, p):
+        if p < self.data or p >= self.blocks:
+            return False
+        return not (self.hole_lo <= p < self.hole_hi)
 
     def blk(self, n):
         self.f.seek(n * BS)
@@ -105,6 +126,11 @@ class Bild:
         # `ino - 1`: die Tabelle faengt bei Nummer EINS an, es gibt
         # keinen Platz null -- `kernel/fs.fi::inode_block_of` rechnet
         # genauso.
+        if self.xin and ino > self.inodes:
+            slot = ino - 1 - self.inodes
+            b = self.blk(self.xit + slot // self.ipb)
+            o = (slot % self.ipb) * self.isize
+            return b[o:o + self.isize]
         b = self.blk(self.itable + (ino - 1) // self.ipb)
         o = ((ino - 1) % self.ipb) * self.isize
         return b[o:o + self.isize]
@@ -114,6 +140,10 @@ class Bild:
         return int.from_bytes(d[feld:feld + 8], "little")
 
     def bit(self, b):
+        if self.xin and b >= self.cover:
+            x = b - self.cover
+            blk = self.blk(self.xbm + x // mkfs.BITS_PER_BLOCK)
+            return (blk[(x % mkfs.BITS_PER_BLOCK) // 8] >> (x % 8)) & 1
         blk = self.blk(self.bmstart + b // mkfs.BITS_PER_BLOCK)
         return (blk[(b % mkfs.BITS_PER_BLOCK) // 8] >> (b % 8)) & 1
 
@@ -134,7 +164,7 @@ class Bild:
             if not p:
                 return
             aus.append(p)
-            if p < self.data or p >= self.blocks:
+            if not self.valid(p):
                 return
             if aus.count(p) > 1:
                 # SCHON EINMAL DA. Ein Zeigerblock, der auf sich selbst
@@ -167,7 +197,7 @@ class Bild:
             return int.from_bytes(d[at:at + 8], "little")
 
         def im(p):
-            return p if self.data <= p < self.blocks else 0
+            return p if self.valid(p) else 0
 
         def zeig(b, k):
             if not b:
@@ -256,7 +286,9 @@ def struktur(bild):
     gesehen = bytearray(bild.blocks)
     for b in range(min(bild.data, bild.blocks)):
         gesehen[b] = 1
-    for ino in range(1, bild.inodes + 1):
+    for b in range(bild.hole_lo, min(bild.hole_hi, bild.blocks)):
+        gesehen[b] = 1
+    for ino in range(1, bild.total_inodes() + 1):
         art = bild.ig(ino, mkfs.I_TYPE)
         if art == 0:
             continue
@@ -267,7 +299,7 @@ def struktur(bild):
         if art == mkfs.T_DIR:
             z["dirs"] += 1
         for p in bild.bloecke(ino):
-            if p < bild.data or p >= bild.blocks:
+            if not bild.valid(p):
                 z["ausser"] += 1
             elif gesehen[p]:
                 z["doppelt"] += 1
@@ -275,6 +307,8 @@ def struktur(bild):
                 gesehen[p] = 1
                 z["bloecke"] += 1
     for b in range(bild.data, bild.blocks):
+        if bild.hole_lo <= b < bild.hole_hi:
+            continue
         bit = bild.bit(b)
         if bit and not gesehen[b]:
             z["verloren"] += 1
@@ -287,7 +321,7 @@ def struktur(bild):
     while stapel:
         d = stapel.pop()
         for kind, name in bild.eintraege(d):
-            if kind > bild.inodes or bild.ig(kind, mkfs.I_TYPE) == 0:
+            if kind > bild.total_inodes() or bild.ig(kind, mkfs.I_TYPE) == 0:
                 z["totlinks"] += 1
             elif bild.ig(kind, mkfs.I_TYPE) == mkfs.T_DIR:
                 if kind not in besucht:
