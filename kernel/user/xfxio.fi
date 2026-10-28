@@ -1,0 +1,100 @@
+profile kernel
+
+import ulib
+
+export { msg, is_root, read_text, write_text, exists, num_text, pid_field, store_pid, env_put, now_ms }
+
+const SYS_GETEUID: u64 = 107
+const SYS_CLOCK_GETTIME: u64 = 228
+const FMODE: u64 = 420
+static mut P_SP: [u8; 2] = " \0"
+
+fn msg(s: u64) {
+    ulib.say(s)
+    ulib.nl()
+}
+
+fn is_root() -> bool {
+    return ulib.sys(SYS_GETEUID, 0, 0, 0) == 0
+}
+
+fn now_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    ulib.sys(SYS_CLOCK_GETTIME, 1, (&ts[0 as usize]) as u64, 0)
+    return ts[0] * 1000 + ts[1] / 1000000
+}
+
+fn read_text(path: u64, buf: u64, max: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return ulib.EOF
+    }
+    var got: u64 = 0
+    var going: bool = true
+    while going && got + 1 < max {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, buf + got, max - 1 - got)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            got = got + n
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    __mmio_write8((buf + got) as *mut u8, 0 as u8)
+    return got
+}
+
+fn write_text(path: u64, text: u64, flags: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, flags, FMODE)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = ulib.length(text)
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, text, n)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return !ulib.bad(w)
+}
+
+fn exists(path: u64) -> bool {
+    return !ulib.bad(ulib.size_of(path))
+}
+
+fn num_text(v: u64, out: u64) {
+    let n: u64 = ulib.digits(v, out)
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+}
+
+fn pid_field(path: u64, idx: u64) -> u64 {
+    var b: [u8; 64] = [0 as u8; 64]
+    if read_text(path, (&b[0 as usize]) as u64, 64) == ulib.EOF {
+        return 0
+    }
+    var p: u64 = 0
+    var f: u64 = 0
+    while f < idx {
+        while b[p as usize] != 32 as u8 && b[p as usize] != 0 as u8 {
+            p = p + 1
+        }
+        if b[p as usize] == 0 as u8 {
+            return 0
+        }
+        p = p + 1
+        f = f + 1
+    }
+    return ulib.to_num((&b[0 as usize]) as u64 + p)
+}
+
+fn store_pid(path: u64, pid: u64, uid: u64) {
+    var b: [u8; 64] = [0 as u8; 64]
+    var t: [u8; 24] = [0 as u8; 24]
+    num_text(pid, (&b[0 as usize]) as u64)
+    ulib.strcat((&b[0 as usize]) as u64, (&P_SP[0 as usize]) as u64)
+    num_text(uid, (&t[0 as usize]) as u64)
+    ulib.strcat((&b[0 as usize]) as u64, (&t[0 as usize]) as u64)
+    write_text(path, (&b[0 as usize]) as u64, ulib.O_MAKE)
+}
+
+fn env_put(buf: u64, at: u64, s: u64) -> u64 {
+    let n: u64 = ulib.strncpy(buf + at, s, 200)
+    return at + n + 1
+}

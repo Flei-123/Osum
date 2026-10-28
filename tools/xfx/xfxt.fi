@@ -1,0 +1,216 @@
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_SETUID: u64 = 105
+const SYS_SETGID: u64 = 106
+const SYS_GETEUID: u64 = 107
+const SYS_CLOCK_GETTIME: u64 = 228
+const SYS_SESSION: u64 = 1870
+
+fn out(label: u64, value: u64) {
+    ulib.say(label)
+    ulib.sayu(value)
+    ulib.nl()
+}
+
+fn word(label: u64, text: u64) {
+    ulib.say(label)
+    ulib.say(text)
+    ulib.nl()
+}
+
+fn read_head(path: u64, buf: u64, max: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return ulib.EOF
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, buf, max - 1)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) {
+        return ulib.EOF
+    }
+    __mmio_write8((buf + n) as *mut u8, 0 as u8)
+    return n
+}
+
+fn cmd_sess(args: u64) -> u64 {
+    let r: u64 = ulib.sys(SYS_SESSION, 7, ulib.to_num(ulib.arg_at(args, 2)), 0)
+    var l: [u8; 15] = "xfxt: sess rc=\0"
+    out((&l[0 as usize]) as u64, r)
+    return 0
+}
+
+fn cmd_exists(args: u64) -> u64 {
+    var l: [u8; 14] = "xfxt: exists=\0"
+    var y: [u8; 4] = "yes\0"
+    var n: [u8; 3] = "no\0"
+    if ulib.bad(ulib.size_of(ulib.arg_at(args, 2))) {
+        word((&l[0 as usize]) as u64, (&n[0 as usize]) as u64)
+    } else {
+        word((&l[0 as usize]) as u64, (&y[0 as usize]) as u64)
+    }
+    return 0
+}
+
+fn cmd_size(args: u64) -> u64 {
+    var l: [u8; 12] = "xfxt: size=\0"
+    out((&l[0 as usize]) as u64, ulib.size_of(ulib.arg_at(args, 2)))
+    return 0
+}
+
+fn cmd_waitfor(args: u64) -> u64 {
+    var l: [u8; 15] = "xfxt: waitfor=\0"
+    var ok: [u8; 3] = "ok\0"
+    var to: [u8; 8] = "timeout\0"
+    var b: [u8; 128] = [0 as u8; 128]
+    let want: u64 = ulib.arg_at(args, 3)
+    let tries: u64 = ulib.to_num(ulib.arg_at(args, 4)) * 4
+    var i: u64 = 0
+    while i < tries {
+        if read_head(ulib.arg_at(args, 2), (&b[0 as usize]) as u64, 128) != ulib.EOF
+            && ulib.strneq((&b[0 as usize]) as u64, want, ulib.length(want)) {
+            word((&l[0 as usize]) as u64, (&ok[0 as usize]) as u64)
+            return 0
+        }
+        ulib.sleep_ms(250)
+        i = i + 1
+    }
+    word((&l[0 as usize]) as u64, (&to[0 as usize]) as u64)
+    return 1
+}
+
+fn cmd_procs() -> u64 {
+    var l: [u8; 12] = "xfxt: proc \0"
+    var u: [u8; 6] = " uid=\0"
+    var i: u64 = 0
+    while i < 128 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 && st != 5 && st != 9 {
+            var nm: [u8; 9] = [0 as u8; 9]
+            let n0: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME0, 0)
+            var k: u64 = 0
+            while k < 8 {
+                nm[k as usize] = ((n0 >> (k * 8)) & 255) as u8
+                k = k + 1
+            }
+            ulib.say((&l[0 as usize]) as u64)
+            ulib.say((&nm[0 as usize]) as u64)
+            ulib.say((&u[0 as usize]) as u64)
+            ulib.sayu(ulib.sys(ulib.SYS_PSTAT, i, ulib.P_UID, 0))
+            ulib.nl()
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn cmd_asuser(args: u64) -> u64 {
+    var l: [u8; 17] = "xfxt: asuser rc=\0"
+    var e: [u8; 20] = "xfxt: setuid failed\0"
+    let uid: u64 = ulib.to_num(ulib.arg_at(args, 2))
+    let argc: u64 = ulib.arg_count(args)
+    let kid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if kid == 0 {
+        ulib.sys(SYS_SETGID, uid, 0, 0)
+        if ulib.bad(ulib.sys(SYS_SETUID, uid, 0, 0)) || ulib.sys(SYS_GETEUID, 0, 0, 0) != uid {
+            ulib.say((&e[0 as usize]) as u64)
+            ulib.nl()
+            ulib.sys(ulib.SYS_EXIT, 99, 0, 0)
+        }
+        var av: [u64; 6] = [0 as u64; 6]
+        var j: u64 = 3
+        while j < argc && j < 8 {
+            av[(j - 3) as usize] = ulib.arg_at(args, j)
+            j = j + 1
+        }
+        ulib.sys(ulib.SYS_EXEC, ulib.arg_at(args, 3), (&av[0 as usize]) as u64, argc - 3)
+        ulib.sys(ulib.SYS_EXIT, 98, 0, 0)
+    }
+    out((&l[0 as usize]) as u64, ulib.wait_code(kid))
+    return 0
+}
+
+fn cmd_canwrite(args: u64) -> u64 {
+    var l: [u8; 16] = "xfxt: canwrite=\0"
+    var y: [u8; 4] = "yes\0"
+    var n: [u8; 3] = "no\0"
+    var d: [u8; 2] = "x\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, ulib.arg_at(args, 2), ulib.O_MAKE, 420)
+    if ulib.bad(fd) {
+        word((&l[0 as usize]) as u64, (&n[0 as usize]) as u64)
+        return 0
+    }
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, (&d[0 as usize]) as u64, 1)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(w) {
+        word((&l[0 as usize]) as u64, (&n[0 as usize]) as u64)
+    } else {
+        word((&l[0 as usize]) as u64, (&y[0 as usize]) as u64)
+    }
+    return 0
+}
+
+fn cmd_euid() -> u64 {
+    var l: [u8; 12] = "xfxt: euid=\0"
+    out((&l[0 as usize]) as u64, ulib.sys(SYS_GETEUID, 0, 0, 0))
+    return 0
+}
+
+fn now_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    ulib.sys(SYS_CLOCK_GETTIME, 1, (&ts[0 as usize]) as u64, 0)
+    return ts[0] * 1000 + ts[1] / 1000000
+}
+
+fn cmd_clock() -> u64 {
+    var l: [u8; 10] = "xfxt: ms=\0"
+    out((&l[0 as usize]) as u64, now_ms())
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_sess: [u8; 5] = "sess\0"
+    var w_ex: [u8; 7] = "exists\0"
+    var w_size: [u8; 5] = "size\0"
+    var w_wait: [u8; 8] = "waitfor\0"
+    var w_procs: [u8; 6] = "procs\0"
+    var w_as: [u8; 7] = "asuser\0"
+    var w_cw: [u8; 9] = "canwrite\0"
+    var w_eu: [u8; 5] = "euid\0"
+    var w_clk: [u8; 6] = "clock\0"
+    if ulib.arg_count(args) < 2 {
+        return 2
+    }
+    let a: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(a, (&w_sess[0 as usize]) as u64) {
+        return cmd_sess(args)
+    }
+    if ulib.streq(a, (&w_ex[0 as usize]) as u64) {
+        return cmd_exists(args)
+    }
+    if ulib.streq(a, (&w_size[0 as usize]) as u64) {
+        return cmd_size(args)
+    }
+    if ulib.streq(a, (&w_wait[0 as usize]) as u64) {
+        return cmd_waitfor(args)
+    }
+    if ulib.streq(a, (&w_procs[0 as usize]) as u64) {
+        return cmd_procs()
+    }
+    if ulib.streq(a, (&w_as[0 as usize]) as u64) {
+        return cmd_asuser(args)
+    }
+    if ulib.streq(a, (&w_cw[0 as usize]) as u64) {
+        return cmd_canwrite(args)
+    }
+    if ulib.streq(a, (&w_eu[0 as usize]) as u64) {
+        return cmd_euid()
+    }
+    if ulib.streq(a, (&w_clk[0 as usize]) as u64) {
+        return cmd_clock()
+    }
+    return 2
+}

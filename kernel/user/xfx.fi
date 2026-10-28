@@ -1,608 +1,18 @@
 profile kernel
 
 import ulib
-import sha
-import pw
-import grp
+import xfxio
+import xfxpath
+import xfxproc
+import xfxpack
+import xfxrun
 
 export { u_start }
-
-const SYS_SETUID: u64 = 105
-const SYS_SETGID: u64 = 106
-const SYS_GETEUID: u64 = 107
-const SYS_CHOWN: u64 = 92
-const SYS_CHMOD: u64 = 90
-const O_LOG: u64 = 1089
-const FMODE: u64 = 420
-const DMODE: u64 = 448
-static mut P_TAR: [u8; 27] = "/usr/share/xfx/firefox.tar\0"
-static mut P_MAN: [u8; 32] = "/usr/share/xfx/firefox.manifest\0"
-static mut P_JS: [u8; 23] = "/usr/share/xfx/user.js\0"
-static mut P_MARK: [u8; 25] = "/usr/share/xfx/installed\0"
-static mut P_FX: [u8; 25] = "/usr/lib/firefox/firefox\0"
-static mut P_LOG: [u8; 17] = "/var/log/xfx.log\0"
-static mut P_STATE: [u8; 17] = "/run/xfx.install\0"
-static mut P_PIDW: [u8; 14] = "/run/xfx.wayd\0"
-static mut P_PIDF: [u8; 17] = "/run/xfx.firefox\0"
-static mut P_WAYD: [u8; 10] = "/bin/wayd\0"
-static mut P_TARBIN: [u8; 9] = "/bin/tar\0"
-static mut P_ROOT: [u8; 2] = "/\0"
-static mut P_SP: [u8; 2] = " \0"
-static mut N_WAYD: [u8; 5] = "wayd\0"
-static mut N_FX: [u8; 8] = "firefox\0"
-static mut w_idle: [u8; 5] = "idle\0"
-static mut w_run: [u8; 8] = "running\0"
-static mut w_done: [u8; 5] = "done\0"
-static mut w_fail: [u8; 7] = "failed\0"
-static mut chunk: [u8; 65536] = [0 as u8; 65536]
-
-fn msg(s: u64) {
-    ulib.say(s)
-    ulib.nl()
-}
-
-fn is_root() -> bool {
-    return ulib.sys(SYS_GETEUID, 0, 0, 0) == 0
-}
-
-fn read_text(path: u64, buf: u64, max: u64) -> u64 {
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
-    if ulib.bad(fd) {
-        return ulib.EOF
-    }
-    var got: u64 = 0
-    var going: bool = true
-    while going && got + 1 < max {
-        let n: u64 = ulib.sys(ulib.SYS_READ, fd, buf + got, max - 1 - got)
-        if n == 0 || ulib.bad(n) {
-            going = false
-        } else {
-            got = got + n
-        }
-    }
-    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    __mmio_write8((buf + got) as *mut u8, 0 as u8)
-    return got
-}
-
-fn write_text(path: u64, text: u64, flags: u64) -> bool {
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, flags, FMODE)
-    if ulib.bad(fd) {
-        return false
-    }
-    let n: u64 = ulib.length(text)
-    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, text, n)
-    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    return !ulib.bad(w)
-}
-
-fn exists(path: u64) -> bool {
-    return !ulib.bad(ulib.size_of(path))
-}
-
-fn num_text(v: u64, out: u64) {
-    let n: u64 = ulib.digits(v, out)
-    __mmio_write8((out + n) as *mut u8, 0 as u8)
-}
-
-fn find_slot(pid: u64) -> u64 {
-    if pid == 0 {
-        return ulib.EOF
-    }
-    var i: u64 = 0
-    while i < 128 {
-        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
-        if !ulib.bad(st) && st != 0 && st != 5 && st != 9 {
-            if ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0) == pid {
-                return i
-            }
-        }
-        i = i + 1
-    }
-    return ulib.EOF
-}
-
-fn proc_ok(pid: u64, want: u64) -> bool {
-    let slot: u64 = find_slot(pid)
-    if slot == ulib.EOF {
-        return false
-    }
-    let n0: u64 = ulib.sys(ulib.SYS_PSTAT, slot, ulib.P_NAME0, 0)
-    var k: u64 = 0
-    while *((want + k) as *mut u8) != 0 as u8 {
-        if k >= 8 || ((n0 >> (k * 8)) & 255) != (*((want + k) as *mut u8)) as u64 {
-            return false
-        }
-        k = k + 1
-    }
-    return k >= 8 || ((n0 >> (k * 8)) & 255) == 0
-}
-
-fn proc_uid(pid: u64) -> u64 {
-    let slot: u64 = find_slot(pid)
-    if slot == ulib.EOF {
-        return ulib.EOF
-    }
-    return ulib.sys(ulib.SYS_PSTAT, slot, ulib.P_UID, 0)
-}
-
-fn pid_field(path: u64, idx: u64) -> u64 {
-    var b: [u8; 64] = [0 as u8; 64]
-    if read_text(path, (&b[0 as usize]) as u64, 64) == ulib.EOF {
-        return 0
-    }
-    var p: u64 = 0
-    if idx == 1 {
-        while b[p as usize] != 32 as u8 && b[p as usize] != 0 as u8 {
-            p = p + 1
-        }
-        if b[p as usize] == 0 as u8 {
-            return 0
-        }
-        p = p + 1
-    }
-    return ulib.to_num((&b[0 as usize]) as u64 + p)
-}
-
-fn store_pid(path: u64, pid: u64, uid: u64) {
-    var b: [u8; 64] = [0 as u8; 64]
-    var t: [u8; 24] = [0 as u8; 24]
-    num_text(pid, (&b[0 as usize]) as u64)
-    ulib.strcat((&b[0 as usize]) as u64, (&P_SP[0 as usize]) as u64)
-    num_text(uid, (&t[0 as usize]) as u64)
-    ulib.strcat((&b[0 as usize]) as u64, (&t[0 as usize]) as u64)
-    write_text(path, (&b[0 as usize]) as u64, ulib.O_MAKE)
-}
-
-fn manifest(hex: u64) -> u64 {
-    var b: [u8; 1024] = [0 as u8; 1024]
-    let n: u64 = read_text((&P_MAN[0 as usize]) as u64, (&b[0 as usize]) as u64, 900)
-    if n == ulib.EOF {
-        return ulib.EOF
-    }
-    var i: u64 = 0
-    while i < n {
-        if (i == 0 || b[(i - 1) as usize] == 10 as u8) && b[i as usize] == 116 as u8
-            && b[(i + 1) as usize] == 97 as u8 && b[(i + 2) as usize] == 114 as u8
-            && b[(i + 3) as usize] == 32 as u8 {
-            var p: u64 = i + 4
-            let size: u64 = ulib.to_num((&b[0 as usize]) as u64 + p)
-            while b[p as usize] >= 48 as u8 && b[p as usize] <= 57 as u8 {
-                p = p + 1
-            }
-            p = p + 1
-            var k: u64 = 0
-            while k < 64 {
-                let c: u8 = b[(p + k) as usize]
-                if !((c >= 48 as u8 && c <= 57 as u8) || (c >= 97 as u8 && c <= 102 as u8)) {
-                    return ulib.EOF
-                }
-                __mmio_write8((hex + k) as *mut u8, c)
-                k = k + 1
-            }
-            __mmio_write8((hex + 64) as *mut u8, 0 as u8)
-            return size
-        }
-        i = i + 1
-    }
-    return ulib.EOF
-}
-
-fn file_sha(path: u64, hex: u64) -> u64 {
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
-    if ulib.bad(fd) {
-        return ulib.EOF
-    }
-    var dig: [u8; 32] = [0 as u8; 32]
-    var total: u64 = 0
-    var going: bool = true
-    sha.begin()
-    while going {
-        let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&chunk[0 as usize]) as u64, 65536)
-        if n == 0 || ulib.bad(n) {
-            going = false
-        } else {
-            sha.update((&chunk[0 as usize]) as u64, n)
-            total = total + n
-        }
-    }
-    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    sha.finish((&dig[0 as usize]) as u64)
-    sha.hex_out((&dig[0 as usize]) as u64, 32, hex)
-    return total
-}
-
-fn installed() -> bool {
-    var m: [u8; 80] = [0 as u8; 80]
-    if read_text((&P_MARK[0 as usize]) as u64, (&m[0 as usize]) as u64, 80) < 64 {
-        return false
-    }
-    return exists((&P_FX[0 as usize]) as u64)
-}
-
-fn install_work() -> u64 {
-    var e_man: [u8; 35] = "xfx: manifest missing or malformed\0"
-    var e_pack: [u8; 18] = "xfx: pack missing\0"
-    var e_size: [u8; 37] = "xfx: pack size differs from manifest\0"
-    var e_sha: [u8; 40] = "xfx: sha256 mismatch, nothing extracted\0"
-    var e_tar: [u8; 23] = "xfx: extraction failed\0"
-    var e_bin: [u8; 45] = "xfx: firefox binary missing after extraction\0"
-    var m_have: [u8; 23] = "xfx: already installed\0"
-    var m_ok: [u8; 27] = "xfx: sha256 ok, extracting\0"
-    var m_done: [u8; 18] = "xfx: install done\0"
-    var a_tar: [u8; 4] = "tar\0"
-    var a_xf: [u8; 4] = "-xf\0"
-    var want: [u8; 72] = [0 as u8; 72]
-    var have: [u8; 72] = [0 as u8; 72]
-    var mk: [u8; 80] = [0 as u8; 80]
-    let wsize: u64 = manifest((&want[0 as usize]) as u64)
-    if wsize == ulib.EOF {
-        msg((&e_man[0 as usize]) as u64)
-        return 1
-    }
-    if read_text((&P_MARK[0 as usize]) as u64, (&mk[0 as usize]) as u64, 80) >= 64 && ulib.strneq((&mk[0 as usize]) as u64, (&want[0 as usize]) as u64, 64) && exists((&P_FX[0 as usize]) as u64) {
-        msg((&m_have[0 as usize]) as u64)
-        return 0
-    }
-    let tsize: u64 = ulib.size_of((&P_TAR[0 as usize]) as u64)
-    if ulib.bad(tsize) {
-        msg((&e_pack[0 as usize]) as u64)
-        return 1
-    }
-    if tsize != wsize {
-        msg((&e_size[0 as usize]) as u64)
-        return 1
-    }
-    file_sha((&P_TAR[0 as usize]) as u64, (&have[0 as usize]) as u64)
-    if !ulib.streq((&have[0 as usize]) as u64, (&want[0 as usize]) as u64) {
-        msg((&e_sha[0 as usize]) as u64)
-        return 1
-    }
-    msg((&m_ok[0 as usize]) as u64)
-    ulib.sys(ulib.SYS_CHDIR, (&P_ROOT[0 as usize]) as u64, 0, 0)
-    var argv: [u64; 4] = [0 as u64; 4]
-    argv[0] = (&a_tar[0 as usize]) as u64
-    argv[1] = (&a_xf[0 as usize]) as u64
-    argv[2] = (&P_TAR[0 as usize]) as u64
-    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&P_TARBIN[0 as usize]) as u64, (&argv[0 as usize]) as u64, 3)
-    if ulib.bad(pid) || ulib.wait_code(pid) != 0 {
-        msg((&e_tar[0 as usize]) as u64)
-        return 1
-    }
-    if !exists((&P_FX[0 as usize]) as u64) {
-        msg((&e_bin[0 as usize]) as u64)
-        return 1
-    }
-    write_text((&P_MARK[0 as usize]) as u64, (&want[0 as usize]) as u64, ulib.O_MAKE)
-    ulib.sys(ulib.SYS_UNLINK, (&P_TAR[0 as usize]) as u64, 0, 0)
-    msg((&m_done[0 as usize]) as u64)
-    return 0
-}
-
-fn state_word() -> u64 {
-    var b: [u8; 48] = [0 as u8; 48]
-    if read_text((&P_STATE[0 as usize]) as u64, (&b[0 as usize]) as u64, 48) == ulib.EOF {
-        return (&w_idle[0 as usize]) as u64
-    }
-    if b[0 as usize] == 114 as u8 {
-        if find_slot(pid_field((&P_STATE[0 as usize]) as u64, 1)) != ulib.EOF {
-            return (&w_run[0 as usize]) as u64
-        }
-        return (&w_fail[0 as usize]) as u64
-    }
-    if b[0 as usize] == 100 as u8 {
-        return (&w_done[0 as usize]) as u64
-    }
-    return (&w_fail[0 as usize]) as u64
-}
-
-fn install_start() -> u64 {
-    var e_root: [u8; 15] = "xfx: root only\0"
-    var e_busy: [u8; 29] = "xfx: install already running\0"
-    var e_fork: [u8; 17] = "xfx: cannot fork\0"
-    var m_bg: [u8; 43] = "xfx: install started, log /var/log/xfx.log\0"
-    var s_run: [u8; 9] = "running \0"
-    var s_runw: [u8; 8] = "running\0"
-    var s_done: [u8; 5] = "done\0"
-    var s_fail: [u8; 7] = "failed\0"
-    if !is_root() {
-        msg((&e_root[0 as usize]) as u64)
-        return 1
-    }
-    if ulib.streq(state_word(), (&s_runw[0 as usize]) as u64) {
-        msg((&e_busy[0 as usize]) as u64)
-        return 1
-    }
-    ulib.sys(ulib.SYS_UNLINK, (&P_STATE[0 as usize]) as u64, 0, 0)
-    let kid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
-    if ulib.bad(kid) {
-        msg((&e_fork[0 as usize]) as u64)
-        return 1
-    }
-    if kid != 0 {
-        var i: u64 = 0
-        while i < 40 && !exists((&P_STATE[0 as usize]) as u64) {
-            ulib.sleep_ms(50)
-            i = i + 1
-        }
-        msg((&m_bg[0 as usize]) as u64)
-        return 0
-    }
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_LOG[0 as usize]) as u64, O_LOG, FMODE)
-    ulib.sys(ulib.SYS_CLOSE, 0, 0, 0)
-    if !ulib.bad(fd) {
-        ulib.sys(ulib.SYS_DUP2, fd, 1, 0)
-        ulib.sys(ulib.SYS_DUP2, fd, 2, 0)
-        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    }
-    var t: [u8; 48] = [0 as u8; 48]
-    var n: [u8; 24] = [0 as u8; 24]
-    ulib.strcpy((&t[0 as usize]) as u64, (&s_run[0 as usize]) as u64)
-    num_text(ulib.sys(ulib.SYS_GETPID, 0, 0, 0), (&n[0 as usize]) as u64)
-    ulib.strcat((&t[0 as usize]) as u64, (&n[0 as usize]) as u64)
-    write_text((&P_STATE[0 as usize]) as u64, (&t[0 as usize]) as u64, ulib.O_MAKE)
-    let rc: u64 = install_work()
-    if rc == 0 {
-        write_text((&P_STATE[0 as usize]) as u64, (&s_done[0 as usize]) as u64, ulib.O_MAKE)
-    } else {
-        write_text((&P_STATE[0 as usize]) as u64, (&s_fail[0 as usize]) as u64, ulib.O_MAKE)
-    }
-    return rc
-}
-
-fn env_put(buf: u64, at: u64, s: u64) -> u64 {
-    let n: u64 = ulib.strncpy(buf + at, s, 200)
-    return at + n + 1
-}
-
-fn kill_pid(path: u64, want: u64) {
-    let pid: u64 = pid_field(path, 0)
-    if proc_ok(pid, want) {
-        ulib.sys(ulib.SYS_KILL, pid, 143, 0)
-        var i: u64 = 0
-        while i < 30 && find_slot(pid) != ulib.EOF {
-            ulib.sleep_ms(100)
-            i = i + 1
-        }
-    }
-    ulib.sys(ulib.SYS_UNLINK, path, 0, 0)
-}
-
-fn sock_path(uid: u64, out: u64) {
-    var p_run: [u8; 10] = "/run/xfx-\0"
-    var p_sock: [u8; 11] = "/wayland-0\0"
-    var t: [u8; 24] = [0 as u8; 24]
-    ulib.strcpy(out, (&p_run[0 as usize]) as u64)
-    num_text(uid, (&t[0 as usize]) as u64)
-    ulib.strcat(out, (&t[0 as usize]) as u64)
-    ulib.strcat(out, (&p_sock[0 as usize]) as u64)
-}
-
-fn prep_child(name: u64, uid: u64, gid: u64, home: u64) -> u64 {
-    var s_x: [u8; 6] = "/.xfx\0"
-    var s_p: [u8; 9] = "/profile\0"
-    var s_j: [u8; 9] = "/user.js\0"
-    var d1: [u8; 200] = [0 as u8; 200]
-    var d2: [u8; 224] = [0 as u8; 224]
-    var js: [u8; 240] = [0 as u8; 240]
-    var buf: [u8; 4096] = [0 as u8; 4096]
-    grp.initgroups(name)
-    ulib.sys(SYS_SETGID, gid, 0, 0)
-    if ulib.bad(ulib.sys(SYS_SETUID, uid, 0, 0)) || ulib.sys(SYS_GETEUID, 0, 0, 0) != uid {
-        return 3
-    }
-    ulib.strcpy((&d1[0 as usize]) as u64, home)
-    ulib.strcat((&d1[0 as usize]) as u64, (&s_x[0 as usize]) as u64)
-    ulib.sys(ulib.SYS_MKDIR, (&d1[0 as usize]) as u64, DMODE, 0)
-    if !ulib.is_dir((&d1[0 as usize]) as u64) {
-        return 4
-    }
-    ulib.strcpy((&d2[0 as usize]) as u64, (&d1[0 as usize]) as u64)
-    ulib.strcat((&d2[0 as usize]) as u64, (&s_p[0 as usize]) as u64)
-    ulib.sys(ulib.SYS_MKDIR, (&d2[0 as usize]) as u64, DMODE, 0)
-    if !ulib.is_dir((&d2[0 as usize]) as u64) {
-        return 4
-    }
-    ulib.strcpy((&js[0 as usize]) as u64, (&d2[0 as usize]) as u64)
-    ulib.strcat((&js[0 as usize]) as u64, (&s_j[0 as usize]) as u64)
-    if read_text((&P_JS[0 as usize]) as u64, (&buf[0 as usize]) as u64, 4096) == ulib.EOF {
-        return 5
-    }
-    if !write_text((&js[0 as usize]) as u64, (&buf[0 as usize]) as u64, ulib.O_MAKE) {
-        return 6
-    }
-    return 0
-}
-
-fn start() -> u64 {
-    var e_root: [u8; 15] = "xfx: root only\0"
-    var e_inst: [u8; 19] = "xfx: not installed\0"
-    var e_run: [u8; 21] = "xfx: already running\0"
-    var e_ses: [u8; 34] = "xfx: no desktop session, refusing\0"
-    var e_gid: [u8; 31] = "xfx: session user has no group\0"
-    var e_prep: [u8; 37] = "xfx: cannot prepare the user profile\0"
-    var e_spawn: [u8; 18] = "xfx: cannot start\0"
-    var e_sock: [u8; 26] = "xfx: wayd did not come up\0"
-    var e_dead: [u8; 48] = "xfx: firefox exited early, see /var/log/xfx.log\0"
-    var e_uid: [u8; 56] = "xfx: firefox is not running as the session user, killed\0"
-    var m_ok: [u8; 14] = "xfx: started \0"
-    var k_uid: [u8; 5] = "uid=\0"
-    var k_home: [u8; 6] = "HOME=\0"
-    var k_xdg: [u8; 17] = "XDG_RUNTIME_DIR=\0"
-    var k_way: [u8; 17] = "WAYLAND_DISPLAY=\0"
-    var s_prof: [u8; 14] = "/.xfx/profile\0"
-    var p_run: [u8; 10] = "/run/xfx-\0"
-    var a_nr: [u8; 12] = "--no-remote\0"
-    var a_pr: [u8; 10] = "--profile\0"
-    var a_bl: [u8; 12] = "about:blank\0"
-    var a_wd: [u8; 5] = "wayd\0"
-    var a_ms: [u8; 11] = "2000000000\0"
-    var a_z: [u8; 2] = "0\0"
-    var f1: [u8; 21] = "MOZ_ENABLE_WAYLAND=1\0"
-    var f2: [u8; 20] = "GDK_BACKEND=wayland\0"
-    var f3: [u8; 30] = "MOZ_DISABLE_CONTENT_SANDBOX=1\0"
-    var f4: [u8; 28] = "MOZ_CRASHREPORTER_DISABLE=1\0"
-    var f5: [u8; 26] = "MOZ_DISABLE_RDD_SANDBOX=1\0"
-    var f6: [u8; 26] = "MOZ_DISABLE_GMP_SANDBOX=1\0"
-    var f7: [u8; 38] = "FONTCONFIG_FILE=/etc/fonts/fonts.conf\0"
-    if !is_root() {
-        msg((&e_root[0 as usize]) as u64)
-        return 1
-    }
-    if !installed() {
-        msg((&e_inst[0 as usize]) as u64)
-        return 1
-    }
-    if proc_ok(pid_field((&P_PIDF[0 as usize]) as u64, 0), (&N_FX[0 as usize]) as u64) {
-        msg((&e_run[0 as usize]) as u64)
-        return 1
-    }
-    var name: [u8; 64] = [0 as u8; 64]
-    var home: [u8; 120] = [0 as u8; 120]
-    let uid: u64 = ulib.session_owner()
-    if uid == 0 || !pw.name_of_uid(uid, (&name[0 as usize]) as u64, 64) || !pw.home_of_name((&name[0 as usize]) as u64, (&home[0 as usize]) as u64, 120) || home[0 as usize] != 47 as u8 {
-        msg((&e_ses[0 as usize]) as u64)
-        return 1
-    }
-    let gid: u64 = pw.gid_of_name((&name[0 as usize]) as u64)
-    if gid == ulib.EOF {
-        msg((&e_gid[0 as usize]) as u64)
-        return 1
-    }
-    var rd: [u8; 48] = [0 as u8; 48]
-    var sock: [u8; 80] = [0 as u8; 80]
-    var t: [u8; 24] = [0 as u8; 24]
-    ulib.strcpy((&rd[0 as usize]) as u64, (&p_run[0 as usize]) as u64)
-    num_text(uid, (&t[0 as usize]) as u64)
-    ulib.strcat((&rd[0 as usize]) as u64, (&t[0 as usize]) as u64)
-    ulib.sys(ulib.SYS_MKDIR, (&rd[0 as usize]) as u64, DMODE, 0)
-    ulib.sys(SYS_CHOWN, (&rd[0 as usize]) as u64, uid, gid)
-    ulib.sys(SYS_CHMOD, (&rd[0 as usize]) as u64, DMODE, 0)
-    sock_path(uid, (&sock[0 as usize]) as u64)
-    ulib.sys(ulib.SYS_UNLINK, (&sock[0 as usize]) as u64, 0, 0)
-    let pk: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
-    if pk == 0 {
-        ulib.sys(ulib.SYS_EXIT, prep_child((&name[0 as usize]) as u64, uid, gid, (&home[0 as usize]) as u64), 0, 0)
-    }
-    if ulib.bad(pk) || ulib.wait_code(pk) != 0 {
-        msg((&e_prep[0 as usize]) as u64)
-        return 1
-    }
-    var env: [u8; 1024] = [0 as u8; 1024]
-    var kv: [u8; 240] = [0 as u8; 240]
-    var at: u64 = 0
-    ulib.strcpy((&kv[0 as usize]) as u64, (&k_home[0 as usize]) as u64)
-    ulib.strcat((&kv[0 as usize]) as u64, (&home[0 as usize]) as u64)
-    at = env_put((&env[0 as usize]) as u64, at, (&kv[0 as usize]) as u64)
-    ulib.strcpy((&kv[0 as usize]) as u64, (&k_xdg[0 as usize]) as u64)
-    ulib.strcat((&kv[0 as usize]) as u64, (&rd[0 as usize]) as u64)
-    at = env_put((&env[0 as usize]) as u64, at, (&kv[0 as usize]) as u64)
-    ulib.strcpy((&kv[0 as usize]) as u64, (&k_way[0 as usize]) as u64)
-    ulib.strcat((&kv[0 as usize]) as u64, (&sock[0 as usize]) as u64)
-    at = env_put((&env[0 as usize]) as u64, at, (&kv[0 as usize]) as u64)
-    at = env_put((&env[0 as usize]) as u64, at, (&f1[0 as usize]) as u64)
-    at = env_put((&env[0 as usize]) as u64, at, (&f2[0 as usize]) as u64)
-    at = env_put((&env[0 as usize]) as u64, at, (&f3[0 as usize]) as u64)
-    at = env_put((&env[0 as usize]) as u64, at, (&f4[0 as usize]) as u64)
-    at = env_put((&env[0 as usize]) as u64, at, (&f5[0 as usize]) as u64)
-    at = env_put((&env[0 as usize]) as u64, at, (&f6[0 as usize]) as u64)
-    at = env_put((&env[0 as usize]) as u64, at, (&f7[0 as usize]) as u64)
-    var prof: [u8; 240] = [0 as u8; 240]
-    ulib.strcpy((&prof[0 as usize]) as u64, (&home[0 as usize]) as u64)
-    ulib.strcat((&prof[0 as usize]) as u64, (&s_prof[0 as usize]) as u64)
-    let s1: u64 = ulib.sys(ulib.SYS_DUP, 1, 0, 0)
-    let s2: u64 = ulib.sys(ulib.SYS_DUP, 2, 0, 0)
-    let lf: u64 = ulib.sys(ulib.SYS_OPEN, (&P_LOG[0 as usize]) as u64, O_LOG, FMODE)
-    if !ulib.bad(lf) {
-        ulib.sys(ulib.SYS_DUP2, lf, 1, 0)
-        ulib.sys(ulib.SYS_DUP2, lf, 2, 0)
-        ulib.sys(ulib.SYS_CLOSE, lf, 0, 0)
-    }
-    ulib.set_env((&env[0 as usize]) as u64, at)
-    var wv: [u64; 5] = [0 as u64; 5]
-    wv[0] = (&a_wd[0 as usize]) as u64
-    wv[1] = (&sock[0 as usize]) as u64
-    wv[2] = (&a_ms[0 as usize]) as u64
-    wv[3] = (&a_z[0 as usize]) as u64
-    let wpid: u64 = ulib.spawn_user((&P_WAYD[0 as usize]) as u64, (&wv[0 as usize]) as u64, 4)
-    var up: bool = false
-    var fpid: u64 = ulib.EOF
-    if !ulib.bad(wpid) {
-        var i: u64 = 0
-        while i < 80 && !up {
-            up = exists((&sock[0 as usize]) as u64)
-            if !up {
-                ulib.sleep_ms(100)
-            }
-            i = i + 1
-        }
-        if up {
-            var fv: [u64; 6] = [0 as u64; 6]
-            fv[0] = (&P_FX[0 as usize]) as u64
-            fv[1] = (&a_nr[0 as usize]) as u64
-            fv[2] = (&a_pr[0 as usize]) as u64
-            fv[3] = (&prof[0 as usize]) as u64
-            fv[4] = (&a_bl[0 as usize]) as u64
-            fpid = ulib.spawn_user((&P_FX[0 as usize]) as u64, (&fv[0 as usize]) as u64, 5)
-        }
-    }
-    ulib.set_env(0, 0)
-    ulib.sys(ulib.SYS_DUP2, s1, 1, 0)
-    ulib.sys(ulib.SYS_DUP2, s2, 2, 0)
-    ulib.sys(ulib.SYS_CLOSE, s1, 0, 0)
-    ulib.sys(ulib.SYS_CLOSE, s2, 0, 0)
-    if ulib.bad(wpid) || ulib.bad(fpid) {
-        if !ulib.bad(wpid) {
-            ulib.sys(ulib.SYS_KILL, wpid, 143, 0)
-            msg((&e_sock[0 as usize]) as u64)
-        } else {
-            msg((&e_spawn[0 as usize]) as u64)
-        }
-        return 1
-    }
-    ulib.sleep_ms(1500)
-    if find_slot(fpid) == ulib.EOF {
-        ulib.sys(ulib.SYS_KILL, wpid, 143, 0)
-        msg((&e_dead[0 as usize]) as u64)
-        return 1
-    }
-    if proc_uid(fpid) != uid || proc_uid(wpid) != uid {
-        ulib.sys(ulib.SYS_KILL, fpid, 143, 0)
-        ulib.sys(ulib.SYS_KILL, wpid, 143, 0)
-        msg((&e_uid[0 as usize]) as u64)
-        return 1
-    }
-    store_pid((&P_PIDW[0 as usize]) as u64, wpid, uid)
-    store_pid((&P_PIDF[0 as usize]) as u64, fpid, uid)
-    ulib.say((&m_ok[0 as usize]) as u64)
-    ulib.say((&k_uid[0 as usize]) as u64)
-    ulib.sayu(uid)
-    ulib.nl()
-    return 0
-}
-
-fn stop() -> u64 {
-    var e_root: [u8; 15] = "xfx: root only\0"
-    var m_stop: [u8; 13] = "xfx: stopped\0"
-    var sock: [u8; 80] = [0 as u8; 80]
-    if !is_root() {
-        msg((&e_root[0 as usize]) as u64)
-        return 1
-    }
-    let uid: u64 = pid_field((&P_PIDW[0 as usize]) as u64, 1)
-    kill_pid((&P_PIDF[0 as usize]) as u64, (&N_FX[0 as usize]) as u64)
-    kill_pid((&P_PIDW[0 as usize]) as u64, (&N_WAYD[0 as usize]) as u64)
-    if uid != 0 {
-        sock_path(uid, (&sock[0 as usize]) as u64)
-        ulib.sys(ulib.SYS_UNLINK, (&sock[0 as usize]) as u64, 0, 0)
-    }
-    msg((&m_stop[0 as usize]) as u64)
-    return 0
-}
 
 fn status() -> u64 {
     var l_inst: [u8; 16] = "xfx: installed=\0"
     var l_ins: [u8; 9] = "install=\0"
+    var l_pct: [u8; 5] = "pct=\0"
     var l_fx: [u8; 9] = "firefox=\0"
     var l_pid: [u8; 5] = "pid=\0"
     var l_uid: [u8; 5] = "uid=\0"
@@ -611,7 +21,7 @@ fn status() -> u64 {
     var r: [u8; 8] = "running\0"
     var s: [u8; 8] = "stopped\0"
     var sp: [u8; 2] = " \0"
-    if installed() {
+    if xfxpack.installed() {
         ulib.say((&l_inst[0 as usize]) as u64)
         ulib.say((&y[0 as usize]) as u64)
     } else {
@@ -620,18 +30,23 @@ fn status() -> u64 {
     }
     ulib.say((&sp[0 as usize]) as u64)
     ulib.say((&l_ins[0 as usize]) as u64)
-    ulib.say(state_word())
+    ulib.say(xfxpack.state_word())
+    if ulib.streq(xfxpack.state_word(), (&r[0 as usize]) as u64) {
+        ulib.say((&sp[0 as usize]) as u64)
+        ulib.say((&l_pct[0 as usize]) as u64)
+        ulib.sayu(xfxpack.state_pct())
+    }
     ulib.say((&sp[0 as usize]) as u64)
     ulib.say((&l_fx[0 as usize]) as u64)
-    let pid: u64 = pid_field((&P_PIDF[0 as usize]) as u64, 0)
-    if proc_ok(pid, (&N_FX[0 as usize]) as u64) {
+    let pid: u64 = xfxio.pid_field(xfxpath.p_pidf(), 0)
+    if xfxproc.proc_ok(pid, xfxpath.n_fx()) {
         ulib.say((&r[0 as usize]) as u64)
         ulib.say((&sp[0 as usize]) as u64)
         ulib.say((&l_pid[0 as usize]) as u64)
         ulib.sayu(pid)
         ulib.say((&sp[0 as usize]) as u64)
         ulib.say((&l_uid[0 as usize]) as u64)
-        ulib.sayu(proc_uid(pid))
+        ulib.sayu(xfxproc.proc_uid(pid))
     } else {
         ulib.say((&s[0 as usize]) as u64)
     }
@@ -646,22 +61,22 @@ fn u_start(args: u64) -> u64 {
     var w_sp: [u8; 5] = "stop\0"
     var w_ss: [u8; 7] = "status\0"
     if ulib.arg_count(args) != 2 {
-        msg((&use[0 as usize]) as u64)
+        xfxio.msg((&use[0 as usize]) as u64)
         return 2
     }
     let a: u64 = ulib.arg_at(args, 1)
     if ulib.streq(a, (&w_i[0 as usize]) as u64) {
-        return install_start()
+        return xfxpack.install_start()
     }
     if ulib.streq(a, (&w_st[0 as usize]) as u64) {
-        return start()
+        return xfxrun.start()
     }
     if ulib.streq(a, (&w_sp[0 as usize]) as u64) {
-        return stop()
+        return xfxrun.stop()
     }
     if ulib.streq(a, (&w_ss[0 as usize]) as u64) {
         return status()
     }
-    msg((&use[0 as usize]) as u64)
+    xfxio.msg((&use[0 as usize]) as u64)
     return 2
 }
