@@ -65,7 +65,7 @@ LT=$(val new ls_etc_s); LTO=$(val old ls_etc_s)
 [ "${ER:-999}" -le 40 ]   && ok "new: exec of /bin/echo = $ER disk reads (<= 40)"   || bad "new: echo reads ${ER:-?}"
 [ "${LR:-999}" -le 150 ]  && ok "new: ls /etc = $LR disk reads (<= 150)"            || bad "new: ls reads ${LR:-?}"
 awk -v t="${LT:-999}" 'BEGIN{exit !(t<=3)}' && ok "new: ls /etc in ${LT} s at $IOPS IOPS (<= 3 s)" || bad "new: ls time ${LT:-?}"
-[ "${WF:-999}" -le $(( ${WW:-0} / 2 )) ] && ok "new: flushes per file create $WF (writes $WW): journal barriers only" || bad "new: flushes $WF vs writes $WW"
+[ "${WF:-999}" -le $(( ${WFO:-0} / 2 )) ] && ok "new: flushes per file create $WF (control $WFO, writes $WW): journal barriers only" || bad "new: flushes $WF vs control $WFO (writes $WW)"
 [ "$(val new keys_in_line)" = "15" ] && ok "new: all 15 typed keys arrived during disk load" || bad "new: keys $(val new keys_in_line)/15"
 [ "${OR:-0}" -ge 500 ]   && ok "control: exec of echo = $OR disk reads (>= 500)"   || bad "control: echo reads ${OR:-?} (the control sample must show the old path)"
 [ "${LO:-0}" -ge 1000 ]  && ok "control: ls /etc = $LO disk reads (>= 1000)"       || bad "control: ls reads ${LO:-?}"

@@ -46,11 +46,12 @@ import libc.errno
 export { u_start }
 
 const BLK: u64 = 512
+const IOB: u64 = 65536
 const MAXD: u64 = 8
 const PATH: u64 = 256
 
 static mut head: [u8; 512] = [0 as u8; 512]
-static mut data: [u8; 512] = [0 as u8; 512]
+static mut data: [u8; 65536] = [0 as u8; 65536]
 static mut ents: [u8; 4096] = [0 as u8; 4096]
 static mut path: [u8; 256] = [0 as u8; 256]
 static mut link_target: [u8; 128] = [0 as u8; 128]
@@ -208,22 +209,30 @@ fn pack_file(fs_path: u64, name: u64) {
     }
     var left: u64 = sz
     while left > 0 {
-        var i: u64 = 0
-        while i < BLK {
-            data[(i) as usize] = 0 as u8
-            i = i + 1
-        }
-        var want: u64 = BLK
-        if left < BLK {
+        var want: u64 = IOB
+        if left < IOB {
             want = left
         }
-        let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&data[0 as usize]) as u64,
-            want)
-        if ulib.bad(n) || n == 0 {
+        let n: u64 = read_full_fd(fd, (&data[0 as usize]) as u64, want)
+        if n == 0 {
             left = 0
         } else {
-            write_block((&data[0 as usize]) as u64)
-            left = left - n
+            let padded: u64 = (n + BLK - 1) / BLK * BLK
+            var i: u64 = n
+            while i < padded {
+                data[(i) as usize] = 0 as u8
+                i = i + 1
+            }
+            let w: u64 = ulib.sys(ulib.SYS_WRITE, afd,
+                (&data[0 as usize]) as u64, padded)
+            if ulib.bad(w) || w != padded {
+                code = 2
+                left = 0
+            } else if n < want {
+                left = 0
+            } else {
+                left = left - n
+            }
         }
     }
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
@@ -440,19 +449,31 @@ fn u_start(args: u64) -> u64 {
                                 skip(size)
                             } else {
                                 var left: u64 = size
-                                while left > 0 {
+                                var rem: u64 = (size + BLK - 1) / BLK * BLK
+                                while rem > 0 {
+                                    var take: u64 = IOB
+                                    if rem < IOB {
+                                        take = rem
+                                    }
                                     let r: u64 = read_full(
-                                        (&data[0 as usize]) as u64, BLK)
-                                    if r != BLK {
-                                        left = 0
+                                        (&data[0 as usize]) as u64, take)
+                                    if r != take {
+                                        rem = 0
                                     } else {
-                                        var w: u64 = BLK
-                                        if left < BLK {
+                                        var w: u64 = take
+                                        if left < w {
                                             w = left
                                         }
-                                        ulib.sys(ulib.SYS_WRITE, out,
-                                            (&data[0 as usize]) as u64, w)
+                                        if w > 0 {
+                                            let done: u64 = ulib.sys(
+                                                ulib.SYS_WRITE, out,
+                                                (&data[0 as usize]) as u64, w)
+                                            if ulib.bad(done) || done != w {
+                                                code = 2
+                                            }
+                                        }
                                         left = left - w
+                                        rem = rem - take
                                     }
                                 }
                                 ulib.sys(ulib.SYS_CLOSE, out, 0, 0)
@@ -476,9 +497,13 @@ fn u_start(args: u64) -> u64 {
 // Datei zu Ende ist -- ein tar-Kopf ueber zwei Leseaufrufe hinweg waere
 // sonst zerrissen.
 fn read_full(p: u64, n: u64) -> u64 {
+    return read_full_fd(afd, p, n)
+}
+
+fn read_full_fd(fd: u64, p: u64, n: u64) -> u64 {
     var got: u64 = 0
     while got < n {
-        let r: u64 = ulib.sys(ulib.SYS_READ, afd, p + got, n - got)
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, p + got, n - got)
         if ulib.bad(r) || r == 0 {
             return got
         }
@@ -488,15 +513,17 @@ fn read_full(p: u64, n: u64) -> u64 {
 }
 
 fn skip(size: u64) {
-    var left: u64 = size
-    while left > 0 {
-        let r: u64 = read_full((&data[0 as usize]) as u64, BLK)
-        if r != BLK {
-            left = 0
-        } else if left < BLK {
-            left = 0
+    var rem: u64 = (size + BLK - 1) / BLK * BLK
+    while rem > 0 {
+        var take: u64 = IOB
+        if rem < IOB {
+            take = rem
+        }
+        let r: u64 = read_full((&data[0 as usize]) as u64, take)
+        if r != take {
+            rem = 0
         } else {
-            left = left - BLK
+            rem = rem - take
         }
     }
 }

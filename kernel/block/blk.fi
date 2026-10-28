@@ -1491,7 +1491,7 @@ fn wb_flush(state: u64) -> bool {
                 e = e + 1
             }
             let dv: u64 = (m >> 48) & 0x7FFF
-            if !ata_write_run_twice(m & WB_LBA_MASK, wb_data(state, sl), e - sl, dv == DEV_ATA1) {
+            if !wb_write_out(state, dv, m & WB_LBA_MASK, wb_data(state, sl), e - sl) {
                 ok = false
             }
             var j: u64 = sl
@@ -1548,7 +1548,7 @@ fn wb_put(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     if old != 0 && old != key {
         // r728: only the colliding sector goes out (one command), the rest of the table stays.
         let odv: u64 = (old >> 48) & 0x7FFF
-        if !ata_write_run_twice(old & WB_LBA_MASK, wb_data(state, sl), 1, odv == DEV_ATA1) {
+        if !wb_write_out(state, odv, old & WB_LBA_MASK, wb_data(state, sl), 1) {
             return false
         }
         wb_meta_set(state, sl, 0)
@@ -1674,6 +1674,7 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
         // nicht zurechtkommt, gibt es -- und dann ist ein langsamer
         // Lauf besser als gar keiner.
         if dev == DEV_AHCI {
+            wb_flush(state)
             return ahci.read_block(state, lba, dst)
         }
         return ata_read_twice(lba, dst, slave)
@@ -1864,7 +1865,7 @@ fn write_raw(state: u64, lba: u64, src: u64) -> bool {
     let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
     cache_drop(state, kstate.get(state, kstate.DISK_DEV), abs)
     let wdv: u64 = kstate.get(state, kstate.DISK_DEV)
-    if (wdv == DEV_ATA || wdv == DEV_ATA1) && wb_active(state) {
+    if (wdv == DEV_ATA || wdv == DEV_ATA1 || wdv == DEV_AHCI) && wb_active(state) {
         return wb_put(state, wdv, abs, src)
     }
     if kstate.get(state, kstate.DISK_DEV) == DEV_ATA {
@@ -1887,6 +1888,46 @@ fn write_raw(state: u64, lba: u64, src: u64) -> bool {
     return true
 }
 
+const AHCI_RUN_SECTORS: u64 = 56
+
+fn ahci_write_abs(state: u64, abs: u64, src: u64, n: u64) -> bool {
+    var done: u64 = 0
+    while done < n {
+        var c: u64 = n - done
+        if c > AHCI_RUN_SECTORS {
+            c = AHCI_RUN_SECTORS
+        }
+        var j: u64 = 0
+        while j < c {
+            cache_drop(state, DEV_AHCI, abs + done + j)
+            j = j + 1
+        }
+        if !ahci.write_many(state, abs + done, c, src + done * BLOCK_SIZE) {
+            var k: u64 = 0
+            while k < c {
+                if !ahci.write_block(state, abs + done + k,
+                    src + (done + k) * BLOCK_SIZE) {
+                    return false
+                }
+                k = k + 1
+            }
+        }
+        done = done + c
+    }
+    return true
+}
+
+fn ahci_write_run(state: u64, lba: u64, src: u64, n: u64) -> bool {
+    return ahci_write_abs(state, lba + kstate.get(state, kstate.DISK_FIRST), src, n)
+}
+
+fn wb_write_out(state: u64, dv: u64, lba: u64, src: u64, n: u64) -> bool {
+    if dv == DEV_AHCI {
+        return ahci_write_abs(state, lba, src, n)
+    }
+    return ata_write_run_twice(lba, src, n, dv == DEV_ATA1)
+}
+
 // r728: write n consecutive sectors (volume-relative lba). Plain ATA gets
 // multi-sector commands (the read-ahead cache is dropped for the range);
 // every other path (encryption, AHCI, NVMe, USB, RAM) stays sector by
@@ -1897,6 +1938,10 @@ fn write_run(state: u64, lba: u64, src: u64, n: u64) -> bool {
         return true
     }
     let dv: u64 = kstate.get(state, kstate.DISK_DEV)
+    if dv == DEV_AHCI && !krypto.active(state) && lba + n <= blocks(state)
+        && !kstate.mode_on(state, kstate.M_AHCISLOW) {
+        return ahci_write_run(state, lba, src, n)
+    }
     if krypto.active(state) || (dv != DEV_ATA && dv != DEV_ATA1) {
         var k: u64 = 0
         while k < n {
