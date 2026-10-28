@@ -71,7 +71,7 @@ echo "  Programme: $(echo $PROGS | wc -w)"
 #
 # Das ist ein BESTEHENDER Fehler und keiner dieser Runde -- die
 # Gegenprobe mit dem unveraenderten explorer.fi aus main stirbt
-# genauso (siehe docs/HOTPLUG.md, "Was dabei aufgefallen ist").
+# genauso (siehe docs/HOTPLUG-MEDIA.md, "Was dabei aufgefallen ist").
 # Hier wird er umgangen, nicht behoben: diese Runde baut den
 # Wechseldatentraeger, nicht den Dateimanager.
 python3 tools/k15/tree.py "$ARB/baum" > "$ARB/baum.log" 2>&1 \

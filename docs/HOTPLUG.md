@@ -1,306 +1,129 @@
-# Runde HOTPLUG — der Wechseldatenträger
+# HOTPLUG — inventory and unified device-event design (W-HOTPLUG, 28.10.2026)
 
-Zweig `hotplug`, abgezweigt von `main` (ae381a3), Arbeitsbaum
-`/root/os-hotplug`. Nicht gemergt.
+Roadmap H-001..H-004 (r2196-r2199). Base: main `2979af73`. Every row below was read from the tree. The older per-case report (removable media, 2026-09) is `docs/HOTPLUG-MEDIA.md`.
 
-Auftrag: Punkte **P-005** (kein Geräte-/Hotplug-Manager) und **P-006**
-(kein Weg, einen USB-Stick zur Laufzeit einzubinden) der Offenliste,
-beide Priorität 1.
+Tick rate: 100 Hz (`time.TICK_HZ`), so `% 25` = 250 ms.
 
----
+## 1. Inventory
 
-## Zuerst: die Offenliste war veraltet
+| # | Class | File : function | Trigger | On add | On remove |
+|---|---|---|---|---|---|
+| 1 | USB root port | `kernel/arch/x86_64/trap.fi` (timer, BSP only, `% 25` ticks) -> `usb.port_watch` | **Poll**, 250 ms: PORTSC change bit read per root port | marks port in `S_PEND` bitmap (no work in IRQ) | same, `S_PEND` |
+| 2 | xHCI Port Status Change event | `drv/usb/xhci.fi : handle` (`T_PORT_EVENT`) | **IRQ** (event ring) | only counts `S_PORTEV`; **nobody acts on it** | same |
+| 3 | USB enumerate/teardown worker | `usb/usb.fi : hotplug_work` (task context) | called from desktop loops: `ui/kgui.fi` (3 sites), `kmain.fi` (console loop); runs only if `S_PEND` or `S_HUBDUE` set | `mark` + `attach` (reset, descriptors, class bind) | `gone` -> `unplug_dev` |
+| 4 | USB hub children | `usb/usb.fi : hub_rescan` / `hub_rescan_ports` / `hub_child_gone` | **Poll**: `usbdiag.rescan_due` sets `S_HUBDUE` every 2 s for the first 60 s after `t0`, then every 10 s; hub port status read over control pipe | `hub_probe_port` | `hub_child_gone` -> `unplug_dev` (+ `unplug_below` for nested hubs) |
+| 5 | Root ports missed by PSC | `usb.port_watch` with `usbdiag.rescan_due` | **Poll** (same 2 s / 10 s): connected but not marked -> `S_PEND` | attach | n/a |
+| 6 | USB mass storage add | `usb.fi : attach` -> `S_MSCGEN` +1 ; `block/wechsel.fi : kommt` via `kmain/kgui : wechsel_schritt` | counter comparison in desktop loop (poll of a counter) | assign slot in `S_MSCTAB`, probe partitions, mount `/medien/usbN`, `bus.noti_post` text `usb+ <path>` | `unplug_dev` -> `S_MSCWEG` +1 -> `wechsel.geht`: unmount, `usb-` notification |
+| 7 | Eject button | `block/wechsel.fi : auswerfen`, `user/eject.fi`, `SYS_WECHSEL` (`WX_EJECT`) | user action | n/a | sync + unmount, `usb^` notification |
+| 8 | USB NIC add | `usb/usb.fi : attach*` -> `drv/net/usbnet.fi : attach/attach_rndis/attach_ncm/attach_ch336/attach_ax88772/...` ; `net/netdev.fi : late_usb` | `late_usb` polled from the same desktop loops (only if no card exists yet) | `netdev.probe` + `netsvc.stage`, DHCP | n/a |
+| 9 | USB NIC remove | `usb.fi : unplug_dev` -> `usbnet.unplug_slot`; `usb.fi : net_reclaim` (called at every `attach_at`) | from item 3/4 | n/a | card marked not-ready, counters stay; `net_reclaim` frees the owner slot if its device is gone (fix r2185) |
+| 10 | DHCP link cycle | `user/dhcp.fi : link_watch` / `link_cycled` | **Poll** of `link_up_on` while waiting | restart DHCP when link came back | `link_lost` |
+| 11 | RNDIS link state | `usbnet.fi : link_set` (`usbnet: rndis link up/down`) | RNDIS status interrupt IN | link up/down log | same |
+| 12 | Display (virtio-gpu) | `drv/gpu/vgpu.fi : ereignis_pruefen` called from `gfx/gfx.fi : gpu_event` (idle task) | **Poll** of `G_EVENTS_READ` (device-driven `EVENT_DISPLAY`); not from timer because `GET_DISPLAY_INFO` waits | `vgpu.relayout` (extend) or follow host size via `vmode` ; `wm.heads_sync` | head scanout switched off, same path |
+| 13 | Display (VMSVGA/VBox) | `drv/gpu/vmsvga.fi : host_pending` (`VMM_EVENT_DISPLAY`), `gfx.fi : gpu_event` | **Poll**, rate limited | `vmode.follow_host` | n/a |
+| 14 | Display test bed | `vgpu.hot_toggle`, `wm.hd_demo` (`hdhot`) | boot word | forced head flip | forced head flip |
+| 15 | Real HDMI/DP, EDID on HW | — | **none**: no i915/amdgpu driver (G-012) | — | — |
+| 16 | HDA headphone jack | `drv/snd/hda.fi` : `GCTL_UNSOL` constant only; `V_GET_PINSENSE` used by the HDMI report only | **none**: unsolicited responses never enabled, jack state never sensed | — | — |
+| 17 | AHCI/SATA/NVMe | `drv/blk/ahci.fi` (PCS repair at init only) | **none** at run time (no PxIS.PCS / CPDS handling) | — | — |
+| 18 | PCI / PCIe | `bus/pci.fi` scan at boot; `diag/hw.fi` comment lists PCIe hotplug as a planned ACPI purpose event | **none** | — | — |
+| 19 | ACPI events | `acpi/acpiev.fi` (lid, AC adapter `Notify`, battery) | SCI IRQ | `lid_state`, `ac_online`, battery -> taskbar | same |
+| 20 | Driver Store binding | `bus/drvstore.fi : bind_all` (from `init`), `bind_pci`, `best_pci`, `best_usb`, `best_simple`, `best_acpi` | **boot only**; `best_usb` exists but has no caller | — | `release_binds` / `unload_pkg` only on `drvctl` command |
+| 21 | Class layer | `bus/drvclass.fi` (`CLS_NET_ETH ... CLS_CAMERA`, hit counters), `drv/net/netclass.fi`, `block/blockclass.fi` | static tables | — | — |
+| 22 | Ring 3 notification | `bus/bus.fi : noti_post` (text), consumed by `user/taskbar.fi` toast via `wlibc.noti_peek` | bus counter polled by taskbar | text toast `usb+ ...` | `usb- ...` |
+| 23 | Ring 3 media table | `SYS_WECHSEL` 1704 (`WX_COUNT/DEV/MNT/BLOCKS/PATHCH/EVENTS/KOMMT/GEHT/AUS`), Explorer `carrier_read`, `/proc` mnt stat | Explorer re-reads on F5 / timer | drive appears | drive disappears |
+| 24 | Diagnostics | `drv/usb/usbdiag.fi : event/log`, `fs/procusb.fi` (`/proc/usb`), gates `tools/hotplug`, `tools/usbhot` | — | PSC ring (`ev_port/ev_psc`) | same |
+| 25 | Wi-Fi | `net/wlan_net.fi`, `drv/net/iwl*.fi` | PCI device bound once | — | — |
 
-Der Auftrag sagte, es gebe „keinen Hotplug-Manager“ und „0 Treffer für
-mount im Explorer“. Die Bestandsaufnahme hat etwas anderes ergeben, und
-das gehört an den Anfang, weil es den Zuschnitt dieser Runde bestimmt:
+Findings that drive the design:
 
-| Was der Auftrag vermutete | Was wirklich dastand |
+- **No kernel-wide event concept.** Each source has its own counter (`S_MSCGEN`, `S_MSCWEG`, `S_HOTPLUGS`, `S_PENDN`, `vgpu.S_EREIG`, `usbnet` link) and each consumer re-polls the counter it knows.
+- **The only Ring 3 path is a free-text notification** (`usb+ /medien/usb0`). It carries no class, no id, no add/remove/change type; the taskbar cannot tell a NIC from a stick.
+- **USB NIC add has no event at all**: it is noticed through `netdev.late_usb` polling (item 8), which is why a dongle plugged after boot only worked after the r2185 fixes.
+- **The xHCI PSC interrupt is already delivered and ignored** (item 2); the 250 ms timer poll does the work.
+- **Driver Store binds at boot only** (item 20). `best_usb` has no caller, so no USB class module can be bound at add time.
+- **HDA jack, SATA, PCIe: no run-time detection exists.**
+
+## 2. Design
+
+### 2.1 Event structure (`kernel/bus/uevent.fi`)
+
+Fixed 64-byte record, all fields `u64`:
+
+| Offset | Field | Meaning |
+|---|---|---|
+| 0 | `seq` | global sequence, starts at 1, never wraps in practice |
+| 8 | `tick` | `kstate.TICKS` at post time |
+| 16 | `action` | `ACT_ADD=1`, `ACT_REMOVE=2`, `ACT_CHANGE=3` |
+| 24 | `class` | `drvclass.CLS_*` (`NET_ETH`, `NET_WLAN`, `BLOCK`, `AUDIO`, `INPUT`, `DISPLAY`, `SERIAL`, `CAMERA`) plus `CLS_TYPEC=9`, `CLS_JACK=10` (appended; `CLS_COUNT` grows) |
+| 32 | `bus` | `BUS_USB=1`, `BUS_PCI=2`, `BUS_HDA=3`, `BUS_DISPLAY=4`, `BUS_ACPI=5`, `BUS_UCSI=6` |
+| 40 | `ids` | `vid<<16 | pid` for USB, `ven<<16 | dev` for PCI, else 0 |
+| 48 | `path` | bus-specific location: USB `root_port<<16 | route`, PCI bdf, HDA `cad<<8 | nid`, display head number |
+| 56 | `arg` | class-specific: block `DEV_USB0+n`, net card index, display `w<<16 | h`, jack `1 = plugged` |
+
+Text form (serial log, `/proc/uevent`): `uevent: <seq> <add|remove|change> class=<name> bus=<name> ids=<vvvv:pppp> path=<hex> arg=<hex>`.
+
+### 2.2 Queue in the kernel
+
+- One global ring `static mut` in `uevent.fi`: 64 records (4 KiB), index `seq % 64`. Producers never block; overwrite counted in `dropped`.
+- `post(action, class, bus, ids, path, arg) -> seq` is IRQ-safe: fills the slot, then publishes `seq` last (single writer per call under the same short `take`/release spinlock idiom as `bus.noti_post`). Allowed from IRQ and from task context; **no allocation, no waiting**.
+- Event sources do the same split as today: the IRQ/timer only marks, the task-context worker (`hotplug_work`) does the slow work and then posts the event. The event is posted AFTER the state change (device usable on add; already torn down on remove), so a subscriber that reacts sees the final state.
+- Consumers keep their own cursor (`next_seq`); `read(cursor, out) -> n` copies records with `seq >= cursor`, reports a gap if `cursor` is older than `seq - 64`.
+
+### 2.3 Subscription API
+
+| Consumer | Mechanism |
 |---|---|
-| kein Hotplug-Manager | `usb.port_watch` (im Zeitgeber) + `usb.hotplug_work` (in der Schreibtischschleife) seit Runde BLECHEINGABE — **fertig** |
-| kein USB-Massenspeicher | `usb.fi`, 3456 Zeilen, volles Bulk-Only-Transport: CBW/CSW, INQUIRY, TEST UNIT READY, READ(10)/WRITE(10), STALL-Behandlung — **fertig** |
-| keine Partitionserkennung | `part.fi`, MBR **und** GPT samt CRC-Prüfung — **fertig** |
-| kein Einhängen | `vfs.mount_at` / `umount_index`, Einhängetafel `mnt.fi` mit `M_OPENS` — **fertig** |
-| Explorer kennt keine Datenträger | `exporte.carrier_read()` liest sie **live** aus `SYS_MNTSTAT` — **fertig** |
-
-**Die wirkliche Lücke war genau eine Stelle:** `kmain.usb_mount` hängte
-den Stick **einmal beim Start** ein, und nur unter dem Kommandozeilenwort
-`usbstick`. Ein Stick, der zur Laufzeit kam, wurde aufgezählt — und dann
-vergessen. Es fehlte nicht der Treiber und nicht das Dateisystem,
-sondern die **Naht dazwischen**.
-
----
-
-## Was gebaut wurde
-
-### `kernel/wechsel.fi` (neu, ~560 Zeilen)
-
-Die Naht zwischen zwei Schichten, die einander nicht kennen dürfen:
-`usb.fi` darf nichts von Dateisystemen wissen (Zusage der Runde K17,
-gemessen in `tools/k17/run.sh` Abschnitt 1), `vfs.fi` nichts von USB.
-
-* `kommt(dev)` — Partitionstafel lesen, Dateisystem **am Inhalt**
-  erkennen, unter `/medien/usbN` einhängen, Ereignis auf den Systembus.
-* `geht(dev)` — der Notfall. Räumt die Tafel, **ohne zu schreiben**.
-* `auswerfen(i)` — der geordnete Weg. Schreibt zuerst, sagt E_BUSY, wenn
-  noch etwas offen ist.
-* Acht Plätze, jeder mit eigener Gerätenummer, eigenem Pfad, eigenem
-  Dateisystemtyp.
-
-### Die Flanken statt eines Rückrufs
-
-`usb.fi` zählt zwei neue Zahlen: `S_MSCGEN` (+1, sobald ein
-Massenspeicher **bereit** ist — nach INQUIRY und TEST UNIT READY, nicht
-vorher) und `S_MSCWEG` (+1 in `gone`, also auch über die Gegenprobe
-`unplug_now`). Wer sie liest, vergleicht sie mit seinem letzten Stand.
-
-Ein Funktionszeiger aus `usb.fi` in die Schicht darüber wäre derselbe
-Kreis im Modulgraphen, nur verschleiert. **Eine Zahl kennt niemanden.**
-
-### Aufruf 1704 und `/bin/auswerfen`
-
-Ein Feld je Aufruf, kein Zeiger in den Kern — dieselbe Bauart wie
-`SYS_MNTSTAT` (1700). `WX_EJECT` gibt den **positiven** errno zurück,
-damit die Oberfläche `E_BUSY` benennen kann statt nur „ging nicht“.
-
-`auswerfen` ohne Argument zeigt, was steckt — samt der Zahl der offenen
-Deskriptoren. Die Zahl, wegen der der Knopf gleich nein sagen wird,
-gehört auf den Schirm, **bevor** jemand drückt.
-
-### Der Knopf im Explorer
-
-Neben „Aktualisieren“ und nicht in einem Menü: Auswerfen ist der einzige
-Weg, einen Stick ohne Datenverlust loszuwerden, und einen Knopf, den man
-suchen muss, drückt niemand — dann zieht der Mensch einfach. Vier
-Antworten in der Statuszeile, `E_BUSY` mit eigenem Satz („noch etwas
-geöffnet“), weil das keine Störung ist, sondern eine Bitte.
-
-Oberfläche über `wlib`/fUi, `tools/check-ui.sh` bleibt grün.
-
----
-
-## Datenverlust: zwei Wege hinaus, und sie sind verschieden
-
-Das ist der Kern der Runde und der Grund, warum `geht` nicht über
-`vfs.umount_index` läuft:
-
-**Auswerfen** ist der geordnete Weg. `vfs.umount_index` ruft `fat.sync`
-**vor** `fat.release` — aber nur, wenn die Prüfung auf offene
-Deskriptoren (`mnt.opens != 0` → E_BUSY) vorher durchging. Ein
-Auswerfen, das die Daten schreibt und dann E_BUSY meldet, hätte die
-Datei eines anderen Prozesses halb geschrieben.
-
-**Abziehen** ist der Notfall. Das Gerät ist schon weg; hier ist nichts
-mehr zu retten und auch nichts mehr zu schreiben. **Wer jetzt noch
-`fat.sync` riefe, schriebe in ein Loch.** Die Einhängung wird roh aus
-der Tafel genommen. Ein Datenverlust ist das nicht — die Daten waren in
-dem Augenblick verloren, in dem die Hand am Stecker zog. Was dieser
-Zweig verhindert, ist der **zweite** Schaden: ein Kern, der auf ein
-totes Gerät schreibt und dabei stirbt.
-
-## Das Dateisystem wird am Inhalt erkannt, nicht am Typoktett
-
-Das Typoktett einer MBR-Tafel (0x0B, 0x0C) ist eine **Behauptung** des
-Formatierers. Sie stimmt meistens und ist deshalb gefährlich: wer ihr
-glaubt, hängt irgendwann ein NTFS als FAT32 ein und schreibt in eine
-Struktur, die er nicht versteht.
-
-`fs_erkennen` liest den Bootsektor: Signatur 0x55AA, Oktette je Sektor
-als Zweierpotenz zwischen 512 und 4096, „FAT32“ ab Oktett 82. Ein FAT16
-(Kennung bei Oktett 54) wird **ausdrücklich abgelehnt** statt eingehängt
-und beim ersten Verzeichnis fallengelassen.
-
----
-
-## Die Abnahme
-
-`bash tools/hotplug/run.sh` — **33 Zusagen, 0 rot.**
-
-Gemessen wird mit `device_add usb-storage` / `device_del` über den
-QEMU-Monitor: dieselbe Hardwareänderung, die eine Hand am Stecker macht.
-`tools/k17/run.sh` misst einen Stick, der **beim Start schon steckt** —
-das misst das Aufzählen, und beim Start ist das Dateisystem noch nicht da.
-
-| Abschnitt | was |
-|---|---|
-| 2 | Anstecken im Betrieb: `wechsel: kommt … fs=4 mount=1`, `fat: spc=1 clusters=92726`, `hotplugs=1` |
-| 3 | `ls` sieht die Datei des Wirts, `cat` liest sie, Osum schreibt eine eigene, `auswerfen` → rc=0 |
-| 4 | Abziehen **ohne** Auswerfen: `wechsel: geht`, kein panic, kein EXCEPTION, Kern beendet sich mit 21 |
-| 5 | zwei Sticks — die Grenze, ehrlich gemessen (siehe unten) |
-| 6 | FAT16: aufgezählt, **nicht** eingehängt, kein Absturz |
-
-**Die Zusage, auf die es ankommt, ist nicht „kein Fehler gemeldet“:**
-nach dem Auswerfen liest **der Wirt** mit `mtools` nach — `osum.txt`,
-14 Oktette, Inhalt `osum-war-hier`, und `fsck.fat` findet keinen Schaden.
-Das ist Punkt 4 aus K17, auf das Auswerfen angewandt.
-
----
-
-## Was dabei aufgefallen ist
-
-Vier Befunde, die nur ein echter Lauf zutage fördert:
-
-**1. `usb_hold` stand vor dem Dateisystem.** Der Haltepunkt der
-Kernläufe lag in `usb_stage`, also vor `k14_setup`. Ein Stick, der
-während des Haltens kam, konnte gar nicht eingehängt werden:
-`vfs.ready` war noch falsch. Gemessen: `hotplugs=1 devices=1` (das
-Gerät war da, 98304 Blöcke), und keine einzige `wechsel:`-Zeile.
-
-**2. Zwei Warteschleifen arbeiteten nicht.** `usb_hold` rief
-`hotplug_work` überhaupt nicht; `hold_a_moment` und die
-`wighalt`-Schleife in `kgui.fi` warteten leer bzw. nur mit `wm.poll`.
-`port_watch` legt den Anschlusswechsel im Zeitgeber ab, und niemand
-holte ihn wieder: `events=1`, `hotplugs=0`, und zwei Bildschirmfotos,
-die sich Oktett für Oktett glichen.
-
-**3. `vfs.ready` ist im grafischen Lauf falsch.** Mit `wigfiles` hängt
-der Fensterserver die Wurzel selbst über `fs.fi` ein (`wm: mount=1`),
-und die VFS-Schicht darüber bleibt unberührt. Gemessen: `kgui: wechsel
-gen=1 weg=1 vfs=0` — der Stick war da, die Flanke kam an, und es gab
-keine Tafel, in die er gepasst hätte. `wechsel.kommt` zieht sie jetzt
-nach.
-
-**4. `/medien/usbN` muss es geben, bevor eingehängt wird.** `/medien`
-legt `k14_setup` an (und `wechsel.kommt` notfalls selbst); den
-Unterordner kann dort niemand anlegen, weil niemand weiß, wie viele
-Sticks kommen.
-
-### Ein bestehender Fehler, der nicht dieser Runde gehört
-
-Der **Dateimanager stirbt** beim Aufbau der Seitenleiste, wenn das
-Abbild die Orte unter `/data` nicht als Ordner trägt:
-
-```
-k15: start /bin/explorer  pid=2
-user fault: pid=3  vector=14  err=0x5  cr2=0x0  -- process killed
-```
-
-Ein Lesezugriff auf Adresse 0, im Rückverfolger `ulib__strncpy`, gerufen
-aus `exporte.entry` → `kuerzen`. **Die Gegenprobe mit dem unveränderten
-`explorer.fi` aus `main` (ae381a3) stirbt genauso** — der Fehler ist
-älter als diese Runde und wird hier nur benannt, nicht behoben.
-`tools/k15/run.sh` fällt er nicht auf, weil es mit `tools/k15/tree.py`
-einen vollständigen `/data`-Baum anlegt.
-
-Wer das aufnimmt: `exporte.entry` kopiert den Pfad (`kuerzen` →
-`strncpy`), **bevor** es mit `nurwenn_da` prüft, ob es ihn gibt; und
-`trash.korb_von` liefert einen Pfad, dessen Wurzel es nicht geben muss.
-Richtig wäre, den Zeiger auf 0 zu prüfen, bevor kopiert wird.
-
----
-
-## Die Grenze, die bleibt: zwei Sticks
-
-Zwei Sticks werden **beide aufgezählt** (`devices=2`, `hotplugs=2` — der
-USB-Baum kann es), aber nur **einer** wird eingehängt.
-
-Der Grund liegt unter dieser Runde: `usb.fi` hält den Massenspeicher in
-**einer** Zelle (`S_MSC`), `usb.msc_read`/`msc_write` nehmen **keine**
-Gerätenummer entgegen, und `blk.fi` hat genau ein `DEV_USB`. Der zweite
-Stick wäre derselbe `DEV_USB` — die Naht lehnt ihn deshalb ausdrücklich
-ab („dev schon in der Tafel“). Die Alternative wäre ein zweiter Eintrag,
-der auf die Blöcke des **ersten** zeigt: eine Attrappe in der
-Seitenleiste, die beim ersten Klick die falschen Daten zeigt.
-
-**Lieber ein Träger weniger als ein falscher.**
-
-Was fehlt, damit es geht: eine Gerätenummer je Massenspeicher in
-`usb.fi` (`S_MSC` als Tafel statt als Zelle), `msc_read(state, dev, lba,
-dst)` und `DEV_USB0..DEV_USBn` in `blk.fi`. Das ist eine eigene Runde
-und berührt drei Schichten.
-
-## Was sonst offen bleibt
-
-* **Der Auswurfknopf ist nicht fotografiert.** Er ist gebaut, übersetzt
-  und gelinkt (`check-ui.sh` grün), aber der Dateimanager startet in
-  diesem Baum nicht bis zum Fenster (siehe der bestehende Fehler oben).
-  Fotografiert ist stattdessen derselbe Weg eine Schicht tiefer und auf
-  demselben Schreibtisch — siehe „Die Bilder“.
-* **Kamera, Drucker, Monitorwechsel** (die anderen Nutzer von P-006)
-  sind nicht angefasst. Der Gerätemanager trägt jetzt Massenspeicher;
-  eine Kamera ist eine eigene Geräteklasse.
-* **Das Ereignis auf dem Bus wird von niemandem abonniert.** Der Kern
-  schickt es (`bus.noti_post`, sichtbar in der Leiste); der Explorer
-  baut seine Seitenleiste noch beim Aktualisieren neu auf, statt auf die
-  Meldung zu hören.
-
-### Keine Regression
-
-`bash tools/k17/run.sh` — **156 passed, 2 failed**, und das sind
-**dieselben zwei** wie in der Grundlinie vor dieser Runde, Oktett für
-Oktett (eine Zeitmessung am Tastenweg und ihre Gegenprobe; beide hängen
-an der Last der Maschine, nicht an dieser Runde).
-
-Dazwischen lag ein Fehler, den erst der Lauf gezeigt hat: der
-Haltepunkt `usb_hold` ist in dieser Runde **zweimal** an die falsche
-Stelle gewandert.
-
-* **Vor `osum`** (wo er herkam): die Wurzel steht noch nicht, ein im
-  Betrieb gesteckter Stick wird aufgezählt und nie eingehängt.
-* **Nach `osum`**: die Shell ist schon **durchgelaufen**. Im Mitschnitt
-  steht `sh: ready` in Zeile 126, `sh: bye` in 164 und `k17: hold` in
-  188 — Abschnitt 3 der Abnahme fiel, und zwar zu Recht.
-
-Richtig ist **in** `osum`, hinter `usb_mount` und vor dem ersten
-Prozess: dort ist die Wurzel eingehängt, `/medien` liegt da, und es
-läuft noch niemand. Dazu ein Rückfall hinter `osum` in `kernel_main`,
-weil `osum` an drei Stellen früh zurückkehrt — eine davon ist das
-fehlende Wort `osum` selbst, und genau damit fährt der Mauslauf von
-K17. `usb_hold` hält deshalb **genau einmal** (`hold_getan`).
-
----
-
-## Die Bilder
-
-`bash tools/hotplug/bild-term.sh` — drei Bildschirmfotos aus **einer**
-laufenden Maschine, `docs/shots/hotplug/`:
-
-| Bild | was darauf steht |
-|---|---|
-| `10-vorher.png` | `auswerfen` → „kein Wechseldatenträger da“ |
-| `20-steckt.png` | nach `device_add`: `ls /medien/usb0` zeigt `host.txt`, `auswerfen` zeigt die Tafel: `0  /medien/usb0  96256  0` |
-| `30-danach.png` | nach `auswerfen 0`: „ausgeworfen: /medien/usb0“, danach wieder „kein Wechseldatenträger da“ |
-
-Fotografiert wird ein **Terminalfenster auf dem Schreibtisch**
-(`wmshell`) und nicht der Dateimanager — der stirbt in diesem Baum aus
-einem Grund, der älter ist als diese Runde. Es ist derselbe Weg:
-dasselbe `/bin/auswerfen`, derselbe Aufruf 1704, dieselbe Tafel des
-Kerns, die auch die Seitenleiste liest.
-
-**Der Unterschied ist die Zusage, nicht das einzelne Bild.** In Zahlen,
-gemessen mit `pruef/bildpruef.py` und einem Punktvergleich über den
-Fensterinhalt (x 27..560, y 63..425):
-
-```
-10-vorher:  10767 helle Punkte (Text)
-20-steckt:   8670
-30-danach:   7541
-Unterschied 10 gegen 20:  Rechteck (27,63)-(555,422)
-Unterschied 20 gegen 30:  Rechteck (26,63)-(425,419)
-```
-
-Ein einzelnes Bild mit einer Zeile darauf könnte immer dagestanden
-haben; drei verschiedene Bilder aus einem Lauf können es nicht.
-
----
-
-## Dateien
-
-| Datei | was |
-|---|---|
-| `kernel/wechsel.fi` | **neu** — die Naht, 8 Plätze, kommt/geht/auswerfen |
-| `kernel/usb.fi` | zwei Flankenzähler, `msc_gen`/`msc_weg` |
-| `kernel/kgui.fi` | `wechsel_schritt` in drei Schleifen |
-| `kernel/kmain.fi` | `/medien`, `wechsel.init`, `usb_hold` verschoben |
-| `kernel/sys.fi` | Aufruf 1704, `wechsel_call` |
-| `kernel/kstate.fi` | `WECHSEL_OFF` 0xF1000 |
-| `kernel/user/auswerfen.fi` | **neu** — `/bin/auswerfen` |
-| `kernel/user/explorer.fi` | der Auswurfknopf |
-| `kernel/user/ulib.fi` | `SYS_WECHSEL` und die Felder |
-| `tools/hotplug/run.sh` | **neu** — die Abnahme, 33/0 |
-| `tools/hotplug/monitor.py` | **neu** — `device_add`/`device_del` |
-| `tools/hotplug/lauf.sh` | **neu** — ein Lauf mit Drehbuch |
-| `tools/hotplug/bild-term.sh` | **neu** — die drei Bilder |
-| `tools/hotplug/bilder.sh` | **neu** — der Versuch im Dateimanager |
-| `tools/kernel/memmap.py` | `WECHSEL` in der Karte |
-| `locale/{de,en}/messages` | die fünf Texte des Knopfes |
+| Kernel drivers / managers | `uevent.subscribe(class_mask, handler)` — table of 8 handlers called synchronously from the posting worker (task context only; IRQ posts are queued and drained by `uevent.dispatch(state)` from the desktop loop and `kmain` console loop, next to `hotplug_work`). Handlers: Driver Store binder, `wechsel`, `netdev`, audio route, `wm.heads_sync`. |
+| Ring 3 (Explorer, taskbar, tray, settings) | (1) `/proc/uevent`: text ring snapshot, cursor in the open file so `read` returns only new lines; (2) Action Bus / RPC topic `device.event` carrying the same text line; (3) the existing text notification stays for the toast (`usb+ ...`), generated FROM the event by `wechsel` as today until Ring 3 renders from the topic. No new syscall in the MVP. |
+| Tests / gates | serial line `uevent: ...` printed by `post` when word `uevlog` is set; `/proc/uevent` read from the guest. |
+
+### 2.4 Class -> Driver Store tables
+
+The bind step moves from boot-only to event-driven:
+
+| Class | Event source | Match function (exists) | Bind | Release on remove |
+|---|---|---|---|---|
+| `NET_ETH` (USB NIC) | USB attach in `hotplug_work` | `drvstore.best_usb(vid, pid)` (no caller today) then built-in `usbnet.attach_*` chain as fallback | `usbnet.attach*` / store module | `usbnet.unplug_slot` + `net_reclaim`, then `netdev` re-probe |
+| `BLOCK` (USB MSC) | USB attach | built-in `usbmsc_class` ; store lookup for exotic bridges | `wechsel.kommt` mounts | `wechsel.geht` unmounts |
+| `NET_WLAN` (USB Wi-Fi dongle) | USB attach | `best_usb` | store module | `drvstore.release_binds` |
+| `DISPLAY` | vgpu EVENT_DISPLAY / VMSVGA hint (later: HPD + EDID) | static | `vgpu.relayout` | head off, `wm.heads_sync` |
+| `AUDIO` (jack) | HDA unsolicited response (new) | pin config / `V_GET_PINSENSE` | `audio.set_route(headphone\|speaker)` | route back to speaker |
+| `INPUT` | USB attach (HID) | `usb.fi` class bind | `usb.S_KBD/S_MOUSE` | cleared in `unplug_dev` |
+| PCI (`best_pci`) | PCIe hotplug (future) | `best_pci` | `bind_pci` | `release_binds` |
+
+Rule: the binder is ONE subscriber (`drvstore.on_uevent`) that handles `ADD` by running the class' match function and `REMOVE` by `release_binds`. Chip drivers do not call each other.
+
+### 2.5 Sources: interrupt first, poll with budget
+
+| Source | Target trigger | Fallback / budget |
+|---|---|---|
+| xHCI root ports | `T_PORT_EVENT` in `xhci.handle` sets `S_PEND` bit directly (extend the existing handler with the port id from TRB bits 31:24) | keep the 250 ms PSC read as safety net (1 MMIO read per port) |
+| USB hubs | hub status-change interrupt endpoint (bitmap IN, one transfer per hub) sets `S_HUBDUE` for that hub | keep 2 s / 10 s rescan as net |
+| HDA jack | enable `GCTL_UNSOL`, set unsolicited response on the jack pin (`SET_UNSOLICITED_RESPONSE 0xF08`), RIRB handler decodes tag -> `post(CHANGE, JACK)`; sense via `V_GET_PINSENSE` | QEMU `intel-hda` has no jack: gate injects through a test word |
+| Display | EVENT_DISPLAY / host hint via `gpu_event` (idle task) | real HW: HPD IRQ + EDID read when a GPU driver exists (G-012) |
+| UCSI (USB-C alt mode) | ACPI `Notify` on the UCSI device in `acpiev.fi` -> `post(CHANGE, TYPEC)` | not present on HP EliteBook x360 1030 G2 in the current tree; no work until probed on HW |
+| SATA/NVMe | AHCI `PxIS.PCS`/`CPDS` | skipped: not needed for the Boss targets |
+
+### 2.6 Migration of the existing single cases
+
+| Step | Change | Risk |
+|---|---|---|
+| M1 | Add `uevent.fi` (ring, post, text, `/proc/uevent`). No behaviour change. | none |
+| M2 | `usb.fi : attach_at` end -> `post(ADD, BLOCK/NET_ETH/INPUT)`; `unplug_dev` -> `post(REMOVE, ...)` with `vid/pid/port`. | low (log + ring only) |
+| M3 | `wechsel` and `netdev.late_usb` become subscribers of `uevent` instead of polling `S_MSCGEN/S_MSCWEG` / `usbnet.exists`; counters stay for gates. | medium |
+| M4 | `drvstore.on_uevent` binds `best_usb`; unload on REMOVE. | medium (needs a USB module in the store; none exists yet) |
+| M5 | `vgpu`/`vmsvga` post `CHANGE DISPLAY` from `gpu_event`; `wm.heads_sync` subscribes. | low |
+| M6 | xHCI PSC IRQ marks `S_PEND` directly; timer poll stays. | medium (IRQ context rules) |
+| M7 | HDA unsolicited jack + audio route switch. | medium (needs HW proof) |
+| M8 | Ring 3: Action Bus topic `device.event`, taskbar/Explorer/netview subscribe; remove the text parsing of `usb+`. | medium |
+
+### 2.7 Gates
+
+- `tools/hotplug/events.sh` (new): QEMU monitor series, per class: USB stick `device_add/device_del` x3, USB NIC (`usb-net`) x3 on root port and behind a hub; checks serial `uevent:` lines (add/remove pairs, strictly increasing `seq`, correct class/ids), `/proc/uevent` content from the guest, counter `dropped=0`. Counter-proof: old kernel (`nouevent`) prints none.
+- Existing gates stay green: `tools/usbhot/replug.sh`, `tools/usbhot/run.sh`, `tools/hotplug/run.sh`.
+- HDMI/jack/real dongle/real stick: only provable on the HP. One bundled `project_needs` after the build exists.
+
+## 3. Status of this document
+
+- Phase 1 (inventory) and phase 2 (design): done in this file.
+- Phase 3 (MVP M1+M2): see the worker report `reports/20261028-W-HOTPLUG.md` for what was built and measured.

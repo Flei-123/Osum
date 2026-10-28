@@ -1,0 +1,246 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import lib.procw
+import bus.drvclass
+
+export {
+    ACT_ADD, ACT_REMOVE, ACT_CHANGE,
+    BUS_USB, BUS_PCI, BUS_HDA, BUS_DISPLAY, BUS_ACPI,
+    RING, post, total, get, render
+}
+
+const RING: u64 = 64
+const FIELDS: u64 = 8
+
+const F_SEQ: u64 = 0
+const F_TICK: u64 = 1
+const F_ACTION: u64 = 2
+const F_CLASS: u64 = 3
+const F_BUS: u64 = 4
+const F_IDS: u64 = 5
+const F_PATH: u64 = 6
+const F_ARG: u64 = 7
+
+const ACT_ADD: u64 = 1
+const ACT_REMOVE: u64 = 2
+const ACT_CHANGE: u64 = 3
+
+const BUS_USB: u64 = 1
+const BUS_PCI: u64 = 2
+const BUS_HDA: u64 = 3
+const BUS_DISPLAY: u64 = 4
+const BUS_ACPI: u64 = 5
+
+const SINK_PROC: u64 = 0
+const SINK_SERIAL: u64 = 1
+
+static mut ring: [u64; 512] = [0 as u64; 512]
+static mut seq_n: u64 = 0
+static mut sink: u64 = 0
+
+static mut T_HEAD: [u8; 9] = "uevent: \0"
+static mut T_TOTAL: [u8; 14] = "uevent total=\0"
+static mut T_CLASS: [u8; 8] = " class=\0"
+static mut T_BUS: [u8; 6] = " bus=\0"
+static mut T_IDS: [u8; 6] = " ids=\0"
+static mut T_PATH: [u8; 7] = " path=\0"
+static mut T_ARG: [u8; 6] = " arg=\0"
+static mut T_TICK: [u8; 7] = " tick=\0"
+static mut N_ADD: [u8; 4] = "add\0"
+static mut N_REMOVE: [u8; 7] = "remove\0"
+static mut N_CHANGE: [u8; 7] = "change\0"
+static mut N_UNKNOWN: [u8; 8] = "unknown\0"
+static mut N_NET: [u8; 8] = "net-eth\0"
+static mut N_WLAN: [u8; 9] = "net-wlan\0"
+static mut N_BLOCK: [u8; 6] = "block\0"
+static mut N_AUDIO: [u8; 6] = "audio\0"
+static mut N_INPUT: [u8; 6] = "input\0"
+static mut N_DISPLAY: [u8; 8] = "display\0"
+static mut N_SERIAL: [u8; 7] = "serial\0"
+static mut N_CAMERA: [u8; 7] = "camera\0"
+static mut N_USB: [u8; 4] = "usb\0"
+static mut N_PCI: [u8; 4] = "pci\0"
+static mut N_HDA: [u8; 4] = "hda\0"
+static mut N_DISP: [u8; 8] = "display\0"
+static mut N_ACPI: [u8; 5] = "acpi\0"
+
+fn at(seq: u64, f: u64) -> usize {
+    return (((seq - 1) % RING) * FIELDS + f) as usize
+}
+
+fn total() -> u64 {
+    return seq_n
+}
+
+fn get(seq: u64, f: u64) -> u64 {
+    if seq == 0 || seq > seq_n || seq_n - seq >= RING {
+        return 0
+    }
+    return ring[at(seq, f)]
+}
+
+fn out_s(p: u64) {
+    if sink == SINK_SERIAL {
+        serial.puts(p)
+    } else {
+        procw.put_s(p)
+    }
+}
+
+fn out_d(v: u64) {
+    if sink == SINK_SERIAL {
+        serial.dec(v)
+    } else {
+        procw.put_dec(v)
+    }
+}
+
+fn out_h(v: u64, digits: u64) {
+    var i: u64 = digits
+    while i > 0 {
+        i = i - 1
+        let n: u64 = (v >> (i * 4)) & 15
+        if n < 10 {
+            out_c(48 + n)
+        } else {
+            out_c(87 + n)
+        }
+    }
+}
+
+fn out_c(c: u64) {
+    if sink == SINK_SERIAL {
+        serial.put(c as u8)
+    } else {
+        procw.put_c(c)
+    }
+}
+
+fn out_nl() {
+    if sink == SINK_SERIAL {
+        serial.nl()
+    } else {
+        procw.put_c(10)
+    }
+}
+
+fn action_name(a: u64) -> u64 {
+    if a == ACT_ADD {
+        return (&N_ADD[0]) as u64
+    }
+    if a == ACT_REMOVE {
+        return (&N_REMOVE[0]) as u64
+    }
+    if a == ACT_CHANGE {
+        return (&N_CHANGE[0]) as u64
+    }
+    return (&N_UNKNOWN[0]) as u64
+}
+
+fn class_name(c: u64) -> u64 {
+    if c == drvclass.CLS_NET_ETH {
+        return (&N_NET[0]) as u64
+    }
+    if c == drvclass.CLS_NET_WLAN {
+        return (&N_WLAN[0]) as u64
+    }
+    if c == drvclass.CLS_BLOCK {
+        return (&N_BLOCK[0]) as u64
+    }
+    if c == drvclass.CLS_AUDIO {
+        return (&N_AUDIO[0]) as u64
+    }
+    if c == drvclass.CLS_INPUT {
+        return (&N_INPUT[0]) as u64
+    }
+    if c == drvclass.CLS_DISPLAY {
+        return (&N_DISPLAY[0]) as u64
+    }
+    if c == drvclass.CLS_SERIAL {
+        return (&N_SERIAL[0]) as u64
+    }
+    if c == drvclass.CLS_CAMERA {
+        return (&N_CAMERA[0]) as u64
+    }
+    return (&N_UNKNOWN[0]) as u64
+}
+
+fn bus_name(b: u64) -> u64 {
+    if b == BUS_USB {
+        return (&N_USB[0]) as u64
+    }
+    if b == BUS_PCI {
+        return (&N_PCI[0]) as u64
+    }
+    if b == BUS_HDA {
+        return (&N_HDA[0]) as u64
+    }
+    if b == BUS_DISPLAY {
+        return (&N_DISP[0]) as u64
+    }
+    if b == BUS_ACPI {
+        return (&N_ACPI[0]) as u64
+    }
+    return (&N_UNKNOWN[0]) as u64
+}
+
+fn line(seq: u64) {
+    out_s((&T_HEAD[0]) as u64)
+    out_d(seq)
+    out_c(32)
+    out_s(action_name(ring[at(seq, F_ACTION)]))
+    out_s((&T_CLASS[0]) as u64)
+    out_s(class_name(ring[at(seq, F_CLASS)]))
+    out_s((&T_BUS[0]) as u64)
+    out_s(bus_name(ring[at(seq, F_BUS)]))
+    out_s((&T_IDS[0]) as u64)
+    let ids: u64 = ring[at(seq, F_IDS)]
+    out_h((ids >> 16) & 0xFFFF, 4)
+    out_c(58)
+    out_h(ids & 0xFFFF, 4)
+    out_s((&T_PATH[0]) as u64)
+    out_h(ring[at(seq, F_PATH)], 8)
+    out_s((&T_ARG[0]) as u64)
+    out_d(ring[at(seq, F_ARG)])
+    out_s((&T_TICK[0]) as u64)
+    out_d(ring[at(seq, F_TICK)])
+    out_nl()
+}
+
+fn post(state: u64, action: u64, cls: u64, bus: u64, ids: u64, path: u64, arg: u64) -> u64 {
+    seq_n = seq_n + 1
+    let seq: u64 = seq_n
+    ring[at(seq, F_ACTION)] = action
+    ring[at(seq, F_CLASS)] = cls
+    ring[at(seq, F_BUS)] = bus
+    ring[at(seq, F_IDS)] = ids
+    ring[at(seq, F_PATH)] = path
+    ring[at(seq, F_ARG)] = arg
+    ring[at(seq, F_TICK)] = kstate.get(state, kstate.TICKS)
+    ring[at(seq, F_SEQ)] = seq
+    sink = SINK_SERIAL
+    line(seq)
+    sink = SINK_PROC
+    return seq
+}
+
+fn render(out: u64, cap: u64) -> u64 {
+    sink = SINK_PROC
+    procw.begin(out, cap)
+    out_s((&T_TOTAL[0]) as u64)
+    out_d(seq_n)
+    out_nl()
+    var first: u64 = 1
+    if seq_n > RING {
+        first = seq_n - RING + 1
+    }
+    var q: u64 = first
+    while seq_n != 0 && q <= seq_n {
+        line(q)
+        q = q + 1
+    }
+    return procw.used()
+}

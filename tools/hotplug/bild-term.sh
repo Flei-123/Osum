@@ -7,7 +7,7 @@
 # WARUM NICHT IM DATEIMANAGER: der stirbt in diesem Baum beim Aufbau
 # seiner Seitenleiste, und zwar SEIT VOR DIESER RUNDE -- die Gegenprobe
 # mit dem unveraenderten `explorer.fi` aus `main` stirbt genauso
-# (docs/HOTPLUG.md, "Ein bestehender Fehler"). Ein Bild von einem
+# (docs/HOTPLUG-MEDIA.md, "Ein bestehender Fehler"). Ein Bild von einem
 # Programm, das nicht laeuft, gibt es nicht.
 #
 # Was stattdessen fotografiert wird, ist derselbe Weg eine Schicht

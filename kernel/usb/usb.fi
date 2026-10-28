@@ -79,6 +79,8 @@ import drv.usb.xhci
 import usb.scsi
 import drv.usb.chdiag
 import drv.usb.usbdiag
+import bus.uevent
+import bus.drvclass
 import drv.hid.kbd
 import drv.hid.inreg
 import drv.hid.hidmode
@@ -1308,6 +1310,7 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     serial.puts((&s_drv[0]) as u64)
     drv_name(dg(state, d, D_DRIVER))
     serial.nl()
+    post_event(state, d, uevent.ACT_ADD)
     wlan_melden(dg(state, d, D_VID), dg(state, d, D_PID))
     return true
 }
@@ -3924,6 +3927,30 @@ fn unplug_check(state: u64) {
     }
 }
 
+fn event_class(drv: u64) -> u64 {
+    if drv == DRV_MSC {
+        return drvclass.CLS_BLOCK
+    }
+    if drv == DRV_ECM || drv == DRV_RNDIS || drv == DRV_NCM || drv == DRV_CH336
+        || drv == DRV_AX88772 || drv == DRV_AX88179 || drv == DRV_RTL8153 {
+        return drvclass.CLS_NET_ETH
+    }
+    if drv == DRV_KBD || drv == DRV_MOUSE || drv == DRV_HIDGEN {
+        return drvclass.CLS_INPUT
+    }
+    return drvclass.CLS_NONE
+}
+
+fn post_event(state: u64, d: u64, action: u64) {
+    let cls: u64 = event_class(dg(state, d, D_DRIVER))
+    if cls == drvclass.CLS_NONE {
+        return
+    }
+    let ids: u64 = (dg(state, d, D_VID) << 16) | (dg(state, d, D_PID) & 0xFFFF)
+    let path: u64 = (dg(state, d, D_PORT) << 20) | (dg(state, d, D_ROUTE) & 0xFFFFF)
+    let _q: u64 = uevent.post(state, action, cls, uevent.BUS_USB, ids, path, dg(state, d, D_SLOT))
+}
+
 fn unplug_dev(state: u64, d: u64) {
     var s_gone: [u8; 18] = "usb: unplug port=\0"
     var s_drv: [u8; 9] = " driver=\0"
@@ -3946,6 +3973,7 @@ fn unplug_dev(state: u64, d: u64) {
         s(state, S_MSCWEG, g(state, S_MSCWEG) + 1)
     }
     usbnet.unplug_slot(state, dg(state, d, D_SLOT))
+    post_event(state, d, uevent.ACT_REMOVE)
     drop_dev(state, d)
     s(state, S_NDEV, g(state, S_NDEV) - 1)
     s(state, S_UNPLUGS, g(state, S_UNPLUGS) + 1)

@@ -40,7 +40,7 @@ Evidence key: **REAL** = physical machine, **QEMU** = QEMU device model, **FAKE*
 | Loadable modules | `.omod` loader prototype: ELF `ET_REL`, Ed25519, ABI number, 25 failure reasons. One slot used (PS/2 mouse). Gate `tools/module/run.sh` 74/0 | `kernel/ldr/module.fi` (1189), `docs/RUNDE-MODUL.md` |
 | Bus enumeration | PCI scan table (`pci.scan`, entries with vendor/device/class/BARs/MSI/MSI-X cap offsets), USB enumeration, ACPI namespace walk. **Each driver has its own `supports()` / class check**; no common match table | `kernel/bus/pci.fi`, `usb.fi` `DRV_*` constants, `netdev.fi` `KIND_*` |
 | Binding | NIC: fixed `KIND_*` table in `netdev.fi`; USB: `DRV_*` per device; block: `rootsel.fi` order NVMe > AHCI > USB > IDE | files above |
-| Hot-plug | USB only (`usb.port_watch`, `wechsel.fi`, `/medien/usbN`, 8 slots). PCI hot-plug: none | `docs/HOTPLUG.md` |
+| Hot-plug | USB only (`usb.port_watch`, `wechsel.fi`, `/medien/usbN`, 8 slots). PCI hot-plug: none | `docs/HOTPLUG-MEDIA.md` |
 | DMA / IOMMU | Physical addresses given straight to devices. **No IOMMU code**: `kernel/diag/hw.fi` only reads AMD IVRS (measure, no repair). No Intel DMAR/VT-d parser exists | `hw.fi` ~l. 1275; `grep DMAR kernel` = comment only |
 | Interrupts | MSI-X > MSI > legacy IOAPIC pin; `usb: hcN melde=msi-x|msi|intx`. Polling fallback. Gate `eingabe:` status line | `BLECH-BEREIT.md` §5, `pci.fi` `E_MSI`/`E_MSIX` |
 | Firmware loading | VFS lookup `/lib/firmware/intel/iwlwifi/...` by PCI id (`iwl_fwsel.dev_path`), TLV parse (`iwl_fw.fi`). Blobs never checked in; SHA-256 pin only. No generic API | `iwl.fi` header, `PLAN-8000-LOADER.md` |
