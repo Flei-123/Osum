@@ -33,7 +33,7 @@ printf '::sysinit:/bin/sh /etc/fx.sh\n::shutdown:/bin/true\n' > "$OUT/inittab"
 # the spec comes from the Alpine root; replace its inittab and add the guest script
 grep -v '^/etc/inittab' "$SPEC" > "$OUT/spec.txt"
 if [ -n "${GUI:-}" ]; then
-    GUI_PROGS="sh sleep echo cat ls wayd"
+    GUI_PROGS="sh sleep echo cat ls wayd ${GUI_EXTRA:-}"
     mkdir -p "$OUT/bin" "$OUT/km"
     bash tools/sync/build.sh "$OUT/bin" 0 $GUI_PROGS > "$OUT/progs.log" 2>&1 || { echo "LINUXAPPS: gui programs failed"; tail -5 "$OUT/progs.log"; exit 1; }
     python3 tools/wayland/genkeys.py --keymaps "$OUT/km" > "$OUT/keys.log" 2>&1 || { echo "LINUXAPPS: keymaps failed"; tail -5 "$OUT/keys.log"; exit 1; }

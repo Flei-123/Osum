@@ -1,0 +1,24 @@
+HOME=/root
+XDG_RUNTIME_DIR=/tmp
+WAYLAND_DISPLAY=/tmp/wayland-0
+MOZ_ENABLE_WAYLAND=1
+GDK_BACKEND=wayland
+MOZ_DISABLE_CONTENT_SANDBOX=1
+MOZ_CRASHREPORTER_DISABLE=1
+MOZ_DISABLE_RDD_SANDBOX=1
+MOZ_DISABLE_GMP_SANDBOX=1
+FONTCONFIG_FILE=/etc/fonts/fonts.conf
+export HOME
+export XDG_RUNTIME_DIR
+export WAYLAND_DISPLAY
+export MOZ_ENABLE_WAYLAND
+export GDK_BACKEND
+export MOZ_DISABLE_CONTENT_SANDBOX
+export MOZ_CRASHREPORTER_DISABLE
+export MOZ_DISABLE_RDD_SANDBOX
+export MOZ_DISABLE_GMP_SANDBOX
+export FONTCONFIG_FILE
+wayd /tmp/wayland-0 2000000000 0 &
+sleep 3
+/usr/lib/firefox/firefox --no-remote --profile /var/xfx/profile about:blank > /tmp/firefox.log 2>&1 &
+echo FXSTART launched
