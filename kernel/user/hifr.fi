@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const PROT_RW: u64 = 3
+const MAP_ANON_PRIV: u64 = 34
+const SYS_MMAP: u64 = 9
+const PAGE: u64 = 4096
+const MIB: u64 = 1048576
+
+fn map_anon(bytes: u64) -> u64 {
+    let no: u64 = 0 -% 1
+    return asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
+        in("rsi") bytes, in("rdx") PROT_RW, in("r10") MAP_ANON_PRIV,
+        in("r8") no, in("r9") 0, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+}
+
+fn stamp(page: u64) -> u64 {
+    return (page % 251) + 1
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 19] = "usage: hifr <MiB>\n\0"
+    var s_map: [u8; 18] = "hifr: map failed\n\0"
+    var s_touch: [u8; 15] = "hifr: touched \0"
+    var s_bad: [u8; 17] = "hifr: mismatch \0\0"
+    var s_wr: [u8; 15] = "HIFR-WRITE-OK\n\0"
+    var s_pat: [u8; 8] = "/t/pat\0\0"
+    var s_rd: [u8; 15] = "hifr: read ok\n\0"
+    var s_rf: [u8; 17] = "hifr: read bad \0\0"
+    var s_end: [u8; 12] = "hifr: end\n\0\0"
+
+    if ulib.arg_count(args) < 2 {
+        ulib.say((&s_use[0]) as u64)
+        return 1
+    }
+    let mib: u64 = ulib.to_num(ulib.arg_at(args, 1))
+    let bytes: u64 = mib * MIB
+    let base: u64 = map_anon(bytes)
+    if ulib.failed(base) || base == 0 {
+        ulib.say((&s_map[0]) as u64)
+        return 1
+    }
+    let pages: u64 = bytes / PAGE
+    var i: u64 = 0
+    while i < pages {
+        __mmio_write8((base + i * PAGE) as *mut u8, stamp(i) as u8)
+        i = i + 1
+    }
+    var wrong: u64 = 0
+    i = 0
+    while i < pages {
+        if (__mmio_read8((base + i * PAGE) as *mut u8) as u64) != stamp(i) {
+            wrong = wrong + 1
+        }
+        i = i + 1
+    }
+    if wrong != 0 {
+        ulib.say_line((&s_bad[0]) as u64, wrong)
+        return 1
+    }
+    ulib.say_line((&s_touch[0]) as u64, pages)
+
+    let last: u64 = base + (pages - 1) * PAGE
+    let n: u64 = ulib.length((&s_wr[0]) as u64)
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8((last + 64 + k) as *mut u8, __mmio_read8(((&s_wr[0]) as u64 + k) as *mut u8))
+        k = k + 1
+    }
+    ulib.put(last + 64, n)
+
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&s_pat[0]) as u64, 0, 0)
+    if ulib.failed(fd) {
+        ulib.say_line((&s_rf[0]) as u64, fd)
+        return 1
+    }
+    let got: u64 = ulib.sys(ulib.SYS_READ, fd, last + 256, 7)
+    let c0: u64 = __mmio_read8((last + 256) as *mut u8) as u64
+    let c6: u64 = __mmio_read8((last + 262) as *mut u8) as u64
+    if got == 7 && c0 == 80 && c6 == 78 {
+        ulib.say((&s_rd[0]) as u64)
+    } else {
+        ulib.say_line((&s_rf[0]) as u64, got)
+    }
+    ulib.say((&s_end[0]) as u64)
+    return 0
+}
