@@ -176,6 +176,9 @@ def check_diag():
         f = out[i].split(" ")
         ok(f[:2] == ["failstep", "rc"] and f[2] == "-70" and f[4] == str(step) and f[6] == "-70" and f[8] == str(cmd) and f[10] == str(okm),
            "command %d failing is reported as step %d cmd %d: %s" % (i, step, cmd, out[i]))
+    for i in range(5):
+        f = out[i].split(" ")
+        ok(f[12] == "0" and f[14] == "4", "setup retry after failure at command %d resends only the missing steps (4 commands total): %s" % (i, out[i]))
     f = out[4].split(" ")
     ok(f[2] == "0" and f[4] == "0" and f[6] == "0" and f[10] == "30", "all steps ok: no failed step, ok mask 0x1e: " + out[4])
 
