@@ -100,8 +100,8 @@ has "$C" 'fakefw: addsta q4 ok' "W-WLAN19: ADD_STA carries tfd_queue_msk BIT(4)"
 has "$C" 'fakefw: tx ok q4' "W-WLAN19: data frames go through DQA queue 4 (seq, scratch pointer, byte-count table)"
 hasnot "$C" 'fakefw: tx bad' "W-WLAN19: no malformed TX descriptor"
 hasnot "$C" 'fakefw: addsta q4 missing' "W-WLAN19: queue mask never missing"
-has "$C" 'fakefw: phy ok ch=1 band=1 tx=3 rx=5126' "W-WLAN20: PHY_CONTEXT_CMD is the 36-octet v1 layout (band, channel, width, ctrl_pos octets), 2.4 GHz channel 1"
-hasnot "$C" 'fakefw: phy bad' "W-WLAN20: the fake firmware phy check never fails"
+has "$C" 'fakefw: phy ok ch=1 band=1 tx=3 rx=5126' "W-WLAN22: PHY_CONTEXT_CMD is the 36-octet v1 layout (band, channel, width, ctrl_pos octets), 2.4 GHz channel 1"
+hasnot "$C" 'fakefw: phy bad' "W-WLAN22: the fake firmware phy check never fails"
 
 printf 'echo ==START==\nsleep 6\ncat /proc/wlan\necho ==END==\n' > "$T/s.sh"
 for ctl in "d iwloldscan 'bad length' a" "e iwloldslot 'bad length' a" "f iwloldssid 'ssid bitmap missing' c"; do
@@ -134,13 +134,13 @@ has "$T/h.klar" 'fakefw: addsta q4 missing' "iwloldtxq: ADD_STA without the queu
 hasnot "$T/h.klar" 'fakeap: m4 ok' "iwloldtxq: no handshake without data TX"
 hasnot "$T/h.klar" 'fakefw: tx ok q4' "iwloldtxq: no accepted DQA frame"
 
-echo "-- i: counter-proof iwloldphy (40-octet PHY_CONTEXT_CMD with a 32-bit channel, silent firmware as on the HP)"
-image i "$T/good.conf" || { bad "image i"; }
-run i "iwlfhtest iwlfhbind iwloldphy"
-has "$T/i.klar" 'fakefw: phy bad length' "iwloldphy: fake firmware names the wrong PHY_CONTEXT length"
-hasnot "$T/i.klar" 'fakefw: phy ok' "iwloldphy: no PHY context accepted"
-hasnot "$T/i.klar" 'fakefw: scan ok' "iwloldphy: no scan after the silent PHY_CONTEXT"
-hasnot "$T/i.klar" 'fakeap: m4 ok' "iwloldphy: no handshake"
+echo "-- ph: counter-proof iwloldphy (40-octet PHY_CONTEXT_CMD with a 32-bit channel, silent firmware as on the HP)"
+image ph "$T/good.conf" || { bad "image ph"; }
+run ph "iwlfhtest iwlfhbind iwloldphy"
+has "$T/ph.klar" 'fakefw: phy bad length' "iwloldphy: fake firmware names the wrong PHY_CONTEXT length"
+hasnot "$T/ph.klar" 'fakefw: phy ok' "iwloldphy: no PHY context accepted"
+hasnot "$T/ph.klar" 'fakefw: scan ok' "iwloldphy: no scan after the silent PHY_CONTEXT"
+hasnot "$T/ph.klar" 'fakeap: m4 ok' "iwloldphy: no handshake"
 
 pmkfield() { grep -aoE "wlan: pmk steps [0-9]+ max_us [0-9]+" "$1" | head -1 | awk -v f="$2" '{print (f=="steps") ? $4 : $6}'; }
 cs=$(pmkfield "$C" steps); cm=$(pmkfield "$C" max)
