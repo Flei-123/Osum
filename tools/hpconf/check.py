@@ -31,4 +31,11 @@ for name in ("drvctl", "wlanctl"):
         sys.exit("/bin/%s has no command_sub_allowed rule (all subcommands would pass)" % name)
     if name not in build:
         sys.exit("%s is not built into the stick" % name)
+for shell in ("/bin/sh", "/bin/busybox", "/bin/tar", "/bin/su", "/bin/wayd"):
+    if shell in allowed:
+        sys.exit("%s must not be bridge-allowed (free root execution)" % shell)
+if "/bin/xfx" not in allowed:
+    sys.exit("/bin/xfx is not in command_allowed")
+if sorted(s for p, s in subs if p == "/bin/xfx") != ["install", "start", "status", "stop"]:
+    sys.exit("/bin/xfx must allow exactly install, start, stop, status")
 print("ok")

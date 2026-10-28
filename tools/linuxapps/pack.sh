@@ -8,7 +8,7 @@ python3 -I tools/linuxapps/hpspec.py "$WD/fxrun/spec.txt" "$OUT/hp.spec" "$PWD/t
 mkdir -p "$OUT/km"
 python3 tools/wayland/genkeys.py --keymaps "$OUT/km" > "$OUT/keys.log" 2>&1 || { tail -5 "$OUT/keys.log"; exit 1; }
 python3 -I tools/linuxapps/hppack.py "$OUT/hp.spec" "$OUT/pack" --base-spec "$WD/fxrun/spec.txt" \
-    --extra "/var/xfx/profile/user.js=$PWD/assets/xfx/user.js@644" \
+    --extra "/usr/share/xfx/user.js=$PWD/assets/xfx/user.js@644" \
     --extra "/usr/share/wayd/keymap-us.xkb=$OUT/km/keymap-us.xkb@644" --extra "/usr/share/wayd/keymap-de.xkb=$OUT/km/keymap-de.xkb@644" > "$OUT/pack.log" 2>&1 || { cat "$OUT/pack.log"; exit 1; }
 cat "$OUT/pack.log"
 export SPEC="$OUT/pack/base.spec" GUI=1 GUI_EXTRA=tar DRIVE=ahci
