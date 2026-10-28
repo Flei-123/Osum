@@ -52,6 +52,8 @@ import wlan.iwl_pwr
 import wlan.iwl_fh8000
 import wlan.iwl_pin
 import wlan.iwl_diag
+import wlan.iwl_diag_fe
+import wlan.iwl_fwerr
 import wlan.iwl_boot
 import wlan.iwl_phydb
 import crypto.sha256
@@ -116,7 +118,7 @@ fn boot_rfkill() -> u64 { return boot_rk }
 
 static mut diag_d: iwl_diag.Diag = iwl_diag.Diag {
     phase: 0, failed_at: 0, armed: 0, init_alive: 0, rt_alive: 0, err: 0, hw_rev: 0, rf_id: 0, fw_ver: 0, fw_size: 0,
-    nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, cp_seen: 0, cp_bytes: 0, cp_max: 0, cp_drops: 0, cp_bad: 0, cp_rc: 0, cp_plen: 0, cp_type: 0, cp_dlen: 0, cp_skip: 0, cp_skip_type: 0, cp_skip_len: 0, cp_hex: [0 as u8; 32], last_cmd: 0, last_notif: 0,
+    nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, cp_seen: 0, cp_bytes: 0, cp_max: 0, cp_drops: 0, cp_bad: 0, cp_rc: 0, cp_plen: 0, cp_type: 0, cp_dlen: 0, cp_skip: 0, cp_skip_type: 0, cp_skip_len: 0, cp_hex: [0 as u8; 32], last_cmd: 0, last_notif: 0, send_rc: 0, send_cmd: 0, lm: iwl_diag_fe.FeCopy { state: 0, ptr: 0, w: [0; 7] }, um: iwl_diag_fe.FeCopy { state: 0, ptr: 0, w: [0; 7] },
     cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32],
     step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, own_valid: 0, own_hwif: 0, own_mbox: 0, own_rc: 0, alive_valid: 0, alive: [0; 16], pm_valid: 0, pm: [0; 16], tr_valid: 0, tr: [0; 192], rx_valid: 0, rx: [0; 26], x2_valid: 0, x2: [0; 136], poll_valid: 0, poll: [0; 360], irq_valid: 0, irq: [0; 48], ipoll_valid: 0, ipoll: [0; 320], miss: [0 as u8; 64]
 }
@@ -207,6 +209,28 @@ fn diag_take_snaps() {
     if snap_bdf != 0 {
         iwl_diag.diag_pci(&diag_d, pci.cfg_read16(snap_bdf, CFG_COMMAND), snap_bar, snap_bar_size)
     }
+}
+
+fn rt_variant(state: u64) -> u64 {
+    var v: u64 = 0
+    if kstate.mode_on(state, kstate.M_IWLRT0) { v = v | 1 }
+    if kstate.mode_on(state, kstate.M_IWLRT1) { v = v | 2 }
+    if kstate.mode_on(state, kstate.M_IWLRT2) { v = v | 4 }
+    return v
+}
+
+fn capture_fw_tables(x: *mut iwl_xport.XCtx) {
+    var buf: [u64; 8] = [0 as u64; 8]
+    if snap_p != 0 {
+        iwl_xport.xp_capture(x)
+        let lm: *mut iwl_fwerr.FwErr = iwl_xport.xp_fwerr(x)
+        iwl_xport.xp_words(lm, (&buf[0]) as u64)
+        iwl_diag.diag_tables(&diag_d, 0, iwl_fwerr.fwerr_ptr(lm), iwl_fwerr.fwerr_count(lm) != 0, (&buf[0]) as u64)
+        let um: *mut iwl_fwerr.FwErr = iwl_xport.xp_umac(x)
+        iwl_xport.xp_words(um, (&buf[0]) as u64)
+        iwl_diag.diag_tables(&diag_d, 1, iwl_fwerr.fwerr_ptr(um), iwl_fwerr.fwerr_count(um) != 0, (&buf[0]) as u64)
+    }
+    diag_take_snaps()
 }
 
 fn diag_bad(state: u64, code: i64) {
@@ -802,6 +826,7 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
     bt.rt_fl_trig = iwl_fw.fw_calib_fl(f, iwl_fw.CALIB_REGULAR)
     if iwl_fw.fw_tx_ant(f) != 0 { bt.tx_ant = iwl_fw.fw_tx_ant(f) }
     if iwl_fw.fw_cmd_ver(f, 0x6A) == 3 { bt.phy_ver = 3 }
+    bt.rt_var = rt_variant(state)
     if kstate.mode_on(state, kstate.M_IWLOLDINIT) { bt.old_init = 1 }
     let _i1: i64 = iwl_cq.cq_stage_init(state, cq, p)
     r = b2_phase(state, iwl_diag.PH_FW_LOAD_INIT, iwl_diag.PH_INIT_ALIVE, p, f, blob, iwl_fw.IMG_INIT, bounce, bsize, (&t_il[0]) as u64, (&t_ia[0]) as u64, cq, scratch)
@@ -816,6 +841,7 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
     b2_line((&t_sm[0]) as u64, r)
     if r != 0 { b2_line((&t_xe[0]) as u64, xc.last_err) }
     if r != 0 {
+        capture_fw_tables(&xc)
         iwl_pwr.int_disable(p)
         return r
     }
@@ -852,6 +878,10 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
     } else {
         mark(iwl_diag.ST_RT_STAGE)
         r = iwl_boot.rt_stage(&bt, &diag_d)
+        if r != 0 {
+            b2_line((&t_xe[0]) as u64, xc.last_err)
+            capture_fw_tables(&xc)
+        }
     }
     return r
 }

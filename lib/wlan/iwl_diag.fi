@@ -8,9 +8,10 @@ import wlan.iwl_rxexp_tab
 import wlan.iwl_rfkill
 import wlan.iwl_irqdiag
 import wlan.iwl_irqpoll
+import wlan.iwl_diag_fe
 
 export {
-    Diag, diag_new, diag_phase, diag_fail, diag_hw, diag_fw, diag_cmd, diag_notif, diag_rings, diag_nvm, diag_calib, diag_calib_seen, diag_calib_skip, diag_calib_bad, diag_calib_drops,
+    Diag, diag_new, diag_phase, diag_fail, diag_hw, diag_fw, diag_cmd, diag_send, diag_tables, diag_notif, diag_rings, diag_nvm, diag_calib, diag_calib_seen, diag_calib_skip, diag_calib_bad, diag_calib_drops,
     diag_armed, diag_render, diag_more, phase_name, err_text, diag_mark, diag_snap, diag_snap2, diag_alive, diag_pm, diag_pci, diag_own, diag_fhfail, diag_fwmiss, diag_trace, diag_rx, diag_x2, diag_poll, diag_irq, diag_ipoll, diag_irq_text, step_name,
     ST_NONE, ST_FW_FILE, ST_FW_PARSE, ST_DMA, ST_POWER_INIT, ST_CQ_INIT, ST_FH_INIT, ST_ALIVE_INIT, ST_NVM, ST_INIT_STOP,
     ST_POWER_RT, ST_FH_RT, ST_ALIVE_RT, ST_RT_STAGE, ST_INIT_IMG,
@@ -82,6 +83,10 @@ struct Diag {
     cp_hex: [u8; 32],
     last_cmd: u64,
     last_notif: u64,
+    send_rc: i64,
+    send_cmd: u64,
+    lm: iwl_diag_fe.FeCopy,
+    um: iwl_diag_fe.FeCopy,
     cmds: u64,
     notifs: u64,
     rx_head: u64,
@@ -133,7 +138,7 @@ struct Diag {
 fn diag_new() -> Diag {
     var d: Diag = Diag {
         phase: 0, failed_at: 0, armed: 0, init_alive: 0, rt_alive: 0, err: 0, hw_rev: 0, rf_id: 0, fw_ver: 0, fw_size: 0,
-        nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, cp_seen: 0, cp_bytes: 0, cp_max: 0, cp_drops: 0, cp_bad: 0, cp_rc: 0, cp_plen: 0, cp_type: 0, cp_dlen: 0, cp_skip: 0, cp_skip_type: 0, cp_skip_len: 0, cp_hex: [0 as u8; 32], last_cmd: 0, last_notif: 0,
+        nvm_state: 0, nvm_bytes: 0, nvm_secs: 0, calib_n: 0, calib_bytes: 0, replayed: 0, cp_seen: 0, cp_bytes: 0, cp_max: 0, cp_drops: 0, cp_bad: 0, cp_rc: 0, cp_plen: 0, cp_type: 0, cp_dlen: 0, cp_skip: 0, cp_skip_type: 0, cp_skip_len: 0, cp_hex: [0 as u8; 32], last_cmd: 0, last_notif: 0, send_rc: 0, send_cmd: 0, lm: iwl_diag_fe.fe_copy_new(), um: iwl_diag_fe.fe_copy_new(),
         cmds: 0, notifs: 0, rx_head: 0, tx_head: 0, seen: 0, t: [0; 10], fw_name: [0 as u8; 64], fw_sha: [0 as u8; 32],
         step: 0, fail_step: 0, snapped: 0, regs: [0; 8], fh_sec: 0, fh_chunks: 0, fh_bytes: 0, fh_valid: 0, fh_dst: 0, fh_phys: 0, fh_cnt: 0, snapped2: 0, regs2: [0; 8], pci_valid: 0, pci_cmd: 0, pci_bar: 0, pci_size: 0, own_valid: 0, own_hwif: 0, own_mbox: 0, own_rc: 0, alive_valid: 0, alive: [0; 16], pm_valid: 0, pm: [0; 16], tr_valid: 0, tr: [0; 192], rx_valid: 0, rx: [0; 26], x2_valid: 0, x2: [0; 136], poll_valid: 0, poll: [0; 360], irq_valid: 0, irq: [0; 48], ipoll_valid: 0, ipoll: [0; 320], miss: [0 as u8; 64]
     }
@@ -321,6 +326,21 @@ fn diag_fw(d: *mut Diag, name: u64, ver: u64, size: u64, sha: u64) {
 fn diag_cmd(d: *mut Diag, id: u64) {
     (*d).last_cmd = id
     (*d).cmds = (*d).cmds + 1
+}
+
+fn diag_send(d: *mut Diag, rc: i64, cmd: u64) {
+    if (*d).send_cmd == 0 {
+        (*d).send_rc = rc
+        (*d).send_cmd = cmd
+    }
+}
+
+fn diag_tables(d: *mut Diag, which: u64, ptr: u64, got: bool, src: u64) {
+    if which == 0 {
+        iwl_diag_fe.fe_copy_set(&(*d).lm, ptr, got, src)
+    } else {
+        iwl_diag_fe.fe_copy_set(&(*d).um, ptr, got, src)
+    }
 }
 
 fn diag_notif(d: *mut Diag, id: u64) {
@@ -623,6 +643,11 @@ fn render_fail(w: *mut iwl_w.W, d: *mut Diag) {
     iwl_w.w_s(w, (&k_rc[0]) as u64)
     iwl_w.w_int(w, (*d).err)
     iwl_w.w_nl(w)
+    if (*d).send_cmd != 0 { iwl_diag_fe.fe_send_render(w, (*d).send_rc, (*d).send_cmd) }
+    var k_lm: [u8; 17] = "fail_lmac ptr=0x "
+    var k_um: [u8; 17] = "fail_umac ptr=0x "
+    iwl_diag_fe.fe_render(w, (&k_lm[0]) as u64, &(*d).lm)
+    iwl_diag_fe.fe_render(w, (&k_um[0]) as u64, &(*d).um)
     if (*d).rx_valid != 0 {
         iwl_rxscan.render(w, (&(*d).rx[0]) as u64)
     }

@@ -11,7 +11,7 @@ import wlan.iwl_mvm_txq
 import wlan.iwl_fwcaps
 import wlan.iwl_fwerr
 
-export { XCtx, xp_last_cmd, xp_last_len, xp_last_w0, xp_last_err, xp_sent, xp_fwerr, xp_umac, xctx_new, xctx_fast, xport_make, tr_submit, tr_poll, E_XP_NOCQ }
+export { XCtx, xp_last_cmd, xp_last_len, xp_last_w0, xp_last_err, xp_sent, xp_fwerr, xp_umac, xp_capture, xp_words, xctx_new, xctx_fast, xport_make, tr_submit, tr_poll, E_XP_NOCQ }
 
 const E_XP_NOCQ: i64 = -80
 const PEND_CAP: u64 = 4096
@@ -73,11 +73,8 @@ fn xp_send(ctx: u64, a: u64, n: u64) -> i64 {
         r = iwl_cmdq.cq_send((*x).cq as *mut iwl_cmdq.Cq, (*x).p as *mut iwl_probe.Probe, a, n, (*x).pend, PEND_CAP)
         tries = tries + 1
     }
-    if r == iwl_cmdq.E_CQ_TIMEOUT && iwl_fwerr.fwerr_count(&(*x).fe) == 0 {
-        iwl_fwerr.fwerr_capture((*x).p as *mut iwl_probe.Probe, iwl_cmdq.cq_err_ptr(cq), &(*x).fe)
-        iwl_fwerr.fwerr_capture_umac((*x).p as *mut iwl_probe.Probe, iwl_cmdq.cq_uerr_ptr(cq), &(*x).fu)
-    }
     if r < 0 {
+        xp_capture(x)
         (*x).last_err = r
         return r
     }
@@ -86,6 +83,25 @@ fn xp_send(ctx: u64, a: u64, n: u64) -> i64 {
     if r >= 8 { (*x).last_w0 = iwl_le.ld32((*x).pend, 4) }
     if iwl_le.ld8(a, 0) == iwl_fwcaps.CMD_SCD_QUEUE_CFG { scd_track(cq, a, n) }
     return 0
+}
+
+fn xp_capture(x: *mut XCtx) {
+    if (*x).cq == 0 || (*x).p == 0 { return }
+    let cq: *mut iwl_cmdq.Cq = (*x).cq as *mut iwl_cmdq.Cq
+    if iwl_fwerr.fwerr_count(&(*x).fe) == 0 {
+        let _a: bool = iwl_fwerr.fwerr_capture((*x).p as *mut iwl_probe.Probe, iwl_cmdq.cq_err_ptr(cq), &(*x).fe)
+    }
+    if iwl_fwerr.fwerr_count(&(*x).fu) == 0 {
+        let _b: bool = iwl_fwerr.fwerr_capture_umac((*x).p as *mut iwl_probe.Probe, iwl_cmdq.cq_uerr_ptr(cq), &(*x).fu)
+    }
+}
+
+fn xp_words(e: *mut iwl_fwerr.FwErr, out: u64) {
+    var i: u64 = 0
+    while i < 7 {
+        *((out + i * 8) as *mut u64) = iwl_fwerr.fwerr_word(e, i)
+        i = i + 1
+    }
 }
 
 fn scd_track(cq: *mut iwl_cmdq.Cq, a: u64, n: u64) {

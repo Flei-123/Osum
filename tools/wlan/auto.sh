@@ -153,6 +153,21 @@ hasnot "$T/oi.klar" 'phase=ready' "iwloldinit: driver never ready"
 hasnot "$T/oi.klar" 'fakeap: m4 ok' "iwloldinit: no handshake"
 has "$T/oi.klar" 'init nvm' "iwloldinit: boot line present"
 has "$C" 'phase=ready' "W-WLAN5: Linux RT order (SF_CFG, TX_ANT, PHY_DB, PHY_CFG, BT_CONFIG) is accepted by the fake firmware"
+has "$T/oi.klar" 'fail_send=-70 cmd=0x6a' "W-WLAN6: boot failure keeps the real send rc (-70) and the command (PHY_CFG), not only -61"
+has "$T/oi.klar" 'fail_lmac ptr=0x00800200 valid=0x00000001 id=0x00000071' "W-WLAN6: LMAC table captured on a RT-stage failure"
+has "$T/oi.klar" 'fail_umac ptr=0x00800300 valid=0x00000001 id=0x0000007a' "W-WLAN6: UMAC table captured on a RT-stage failure"
+has "$T/oi.klar" 'fail_regs=' "W-WLAN6: CSR snapshot taken on a RT-stage failure"
+
+echo "-- rv1/rv3: RT order variants via iwlrt=N (1 = no SF_CFG, 3 = PHY_CFG before PHY_DB)"
+image rv1 "$T/good.conf" || { bad "image rv1"; }
+run rv1 "iwlfhtest iwlfhbind iwlrt=1"
+hasnot "$T/rv1.klar" 'phase=ready' "iwlrt=1: fake firmware stays silent without SF_CFG"
+has "$T/rv1.klar" 'fail_send=-70 cmd=0x6a' "iwlrt=1: PHY_CFG is the failing command"
+has "$T/rv1.klar" 'fail_lmac ptr=0x00800200' "iwlrt=1: LMAC table printed"
+image rv3 "$T/good.conf" || { bad "image rv3"; }
+run rv3 "iwlfhtest iwlfhbind iwlrt=3"
+has "$T/rv3.klar" 'phase=ready' "iwlrt=3: PHY_CFG before PHY_DB is a working variant"
+has "$T/rv3.klar" 'fakeap: m4 ok' "iwlrt=3: join completes"
 
 pmkfield() { grep -aoE "wlan: pmk steps [0-9]+ max_us [0-9]+" "$1" | head -1 | awk -v f="$2" '{print (f=="steps") ? $4 : $6}'; }
 cs=$(pmkfield "$C" steps); cm=$(pmkfield "$C" max)
