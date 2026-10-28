@@ -8,7 +8,9 @@
 # <guest-script> is run by Alpine's busybox init as the sysinit line (/etc/fx.sh); everything it prints goes to the serial log.
 # Env: KERNEL=<k0.img|osum.mb> (default: builds stufe 0), MEM (MiB, 3072), TMO (s, 600), BLOCKS (512-byte blocks, 900000), DRIVE (ide|ahci),
 #      KARGS (default "osum vfs nokbd nosched noproc nofs fremdtrace"), SMP (1), DONE (marker the guest prints at the end, FX-END),
-#      SPEC (an existing mkroot spec; default <workdir>/fxrun/spec.txt), KEEP=1 (keep the disk image).
+#      SPEC (an existing mkroot spec; default <workdir>/fxrun/spec.txt), KEEP=1 (keep the disk image),
+#      GUI=1 (replace busybox sh/sleep/echo/cat/ls by the Osum programs, add wayd, fonts and keymaps: the guest script is then an Osum-sh script),
+#      EXTRA="/guest/path=host/path@755 ..." (more spec entries).
 # Result: <outdir>/ser.txt (raw serial), <outdir>/ser.clean, <outdir>/summary.txt (ENOSYS numbers, failing mem calls, user faults, guest markers).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -26,11 +28,27 @@ if [ -z "${KERNEL:-}" ]; then
     ./tools/build-kernel.sh "$OUT/k0.img" --stufe 0 > "$OUT/kernel.log" 2>&1 || { echo "LINUXAPPS: kernel build failed"; tail -5 "$OUT/kernel.log"; exit 1; }
     KERNEL=$OUT/k0.img
 fi
-mapfile -t SP < "$SPEC"
 cp "$GS" "$OUT/fx.sh"
 printf '::sysinit:/bin/sh /etc/fx.sh\n::shutdown:/bin/true\n' > "$OUT/inittab"
 # the spec comes from the Alpine root; replace its inittab and add the guest script
-grep -v '^/etc/inittab' "$SPEC" > "$OUT/spec.txt"; mapfile -t SP < "$OUT/spec.txt"
+grep -v '^/etc/inittab' "$SPEC" > "$OUT/spec.txt"
+if [ -n "${GUI:-}" ]; then
+    GUI_PROGS="sh sleep echo cat ls wayd"
+    mkdir -p "$OUT/bin" "$OUT/km"
+    bash tools/sync/build.sh "$OUT/bin" 0 $GUI_PROGS > "$OUT/progs.log" 2>&1 || { echo "LINUXAPPS: gui programs failed"; tail -5 "$OUT/progs.log"; exit 1; }
+    python3 tools/wayland/genkeys.py --keymaps "$OUT/km" > "$OUT/keys.log" 2>&1 || { echo "LINUXAPPS: keymaps failed"; tail -5 "$OUT/keys.log"; exit 1; }
+    grep -v -E "^/bin/($(echo $GUI_PROGS | tr ' ' '|'))(=|->)" "$OUT/spec.txt" > "$OUT/spec.gui" && mv "$OUT/spec.gui" "$OUT/spec.txt"
+    for p in $GUI_PROGS; do echo "/bin/$p=$OUT/bin/$p.elf@755" >> "$OUT/spec.txt"; done
+    for d in /lib/ /usr/share/wayd/; do grep -qxF "$d@755" "$OUT/spec.txt" || echo "$d@755" >> "$OUT/spec.txt"; done
+    {
+        echo "/lib/mono.ttf=assets/osum-mono.ttf"; echo "/lib/sans.ttf=assets/osum-sans.ttf"
+        [ -f assets/osum-icons.ttf ] && echo "/lib/icons.ttf=assets/osum-icons.ttf"
+        [ -f assets/osum-sans-bold.ttf ] && echo "/lib/bold.ttf=assets/osum-sans-bold.ttf"
+        echo "/usr/share/wayd/keymap-us.xkb=$OUT/km/keymap-us.xkb"; echo "/usr/share/wayd/keymap-de.xkb=$OUT/km/keymap-de.xkb"
+    } >> "$OUT/spec.txt"
+fi
+for e in ${EXTRA:-}; do echo "$e" >> "$OUT/spec.txt"; done
+mapfile -t SP < "$OUT/spec.txt"
 python3 tools/osum/mkfs.py build "$OUT/disk.img" "$BLOCKS" --v3 --inodes=${INODES:-4096} "${SP[@]}" "/etc/fx.sh=$OUT/fx.sh@755" "/etc/inittab=$OUT/inittab" > "$OUT/mkfs.log" 2>&1 \
     || { echo "LINUXAPPS: mkfs failed"; tail -5 "$OUT/mkfs.log"; exit 1; }
 echo "LINUXAPPS: disk $(stat -c%s "$OUT/disk.img") bytes, kernel $KERNEL"
