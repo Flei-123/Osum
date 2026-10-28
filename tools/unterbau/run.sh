@@ -25,6 +25,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$*"; }
 QEMU=${QEMU_X86:-qemu-system-x86_64}
 KVM=(); [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
+[ -z "${NOKVM:-}" ] || KVM=()
 SMP=${SMP:-1}
 TMO=${TMO:-150}
 export FIRNLIB="$ROOT/lib"
@@ -115,9 +116,12 @@ run_all() { # run_all <kernel> <disk> <tag>
     for t in $TESTS; do
         local ka="" na=""
         [ "$t" = t_events ] && { ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0 -device virtio-net-pci,netdev=n0"; }
-        KARGS="$ka" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
+        local t0=$SECONDS tv="TMO_$t"
+        TMO=${!tv:-$TMO} KARGS="$ka" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
+        local el=$((SECONDS-t0))
         grep -a '^T ' "$D/$3-$t.ser" 2>/dev/null | awk '!seen[$2]++' > "$D/$3-$t.res" || : > "$D/$3-$t.res"
-        printf '        %-12s %3d checks   (qemu rc=%s)\n' "$t" "$(wc -l < "$D/$3-$t.res")" "$rc"
+        printf '        %-12s %3d checks   (qemu rc=%s, %ss)\n' "$t" "$(wc -l < "$D/$3-$t.res")" "$rc" "$el"
+        [ "$rc" = 124 ] && printf '        TIMEOUT %s after %ss (limit %s)\n' "$t" "$el" "${!tv:-$TMO}"
     done
     cat "$D"/$3-t_*.res 2>/dev/null | sed 's/^T //' > "$D/$3.all"
 }
