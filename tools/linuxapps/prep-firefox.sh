@@ -22,3 +22,4 @@ for n in fxver fxshot; do python3 -I "$HERE/straceset.py" $n.strace --after /usr
 python3 -I "$HERE/mkroot.py" fx-root fxrun/spec.txt --base --files fxver.files --files fxshot.files --tree /usr/lib/firefox --tree /usr/share/fonts \
   --tree /usr/share/fontconfig --tree /usr/share/icu --tree /usr/share/X11/xkb --tree /usr/share/glib-2.0 --tree /var/cache/fontconfig \
   --skip /usr/lib/libLLVM.so.22.1 --skip /usr/lib/libgallium-26.1.6.so
+bash "$HERE/prep-pixbuf.sh" "$WD"

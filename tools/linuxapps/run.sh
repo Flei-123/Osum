@@ -47,6 +47,10 @@ if [ -n "${GUI:-}" ]; then
         echo "/usr/share/wayd/keymap-us.xkb=$OUT/km/keymap-us.xkb"; echo "/usr/share/wayd/keymap-de.xkb=$OUT/km/keymap-de.xkb"
     } >> "$OUT/spec.txt"
 fi
+if [ -f "$WD/fx-root/usr/share/mime/mime.cache" ]; then
+    grep -qxF "/usr/share/mime/@755" "$OUT/spec.txt" || { grep -qxF "/usr/share/@755" "$OUT/spec.txt" || echo "/usr/share/@755" >> "$OUT/spec.txt"; echo "/usr/share/mime/@755" >> "$OUT/spec.txt"; }
+    grep -q "^/usr/share/mime/mime.cache=" "$OUT/spec.txt" || echo "/usr/share/mime/mime.cache=$WD/fx-root/usr/share/mime/mime.cache@644" >> "$OUT/spec.txt"
+fi
 for e in ${EXTRA:-}; do echo "$e" >> "$OUT/spec.txt"; done
 mapfile -t SP < "$OUT/spec.txt"
 python3 tools/osum/mkfs.py build "$OUT/disk.img" "$BLOCKS" --v3 --inodes=${INODES:-4096} "${SP[@]}" "/etc/fx.sh=$OUT/fx.sh@755" "/etc/inittab=$OUT/inittab" > "$OUT/mkfs.log" 2>&1 \

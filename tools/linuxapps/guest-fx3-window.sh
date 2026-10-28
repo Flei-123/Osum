@@ -10,6 +10,6 @@ echo "FX3 ps: $(busybox ps 2>&1 | head -30)"
 echo "FX3 log:"
 busybox head -${FX3_HEAD:-60} /tmp/fx3.log
 echo "FX3 tail:"
-busybox tail -${FX3_TAIL:-0} /tmp/fx3.log
+busybox tail -${FX3_TAIL:-80} /tmp/fx3.log
 busybox ls -la /tmp/wayland-0 /var/crash 2>&1 | busybox head
 echo FX-END
