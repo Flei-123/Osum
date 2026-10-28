@@ -22,8 +22,8 @@ int main(void)
     t_emit("fds_per_process", n >= 256 ? "PASS" : "FAIL", "%d descriptors open at once (errno %d); a browser wants >= 256", n, e);
 
     /* threads alive at once */
-    pthread_t th[120]; int t = 0;
-    for (; t < 120; t++) if (pthread_create(&th[t], 0, sleeper, 0)) break;
+    pthread_t th[200]; int t = 0;
+    for (; t < 200; t++) if (pthread_create(&th[t], 0, sleeper, 0)) break;
     int te = errno;
     for (int i = 0; i < t; i++) pthread_join(th[i], 0);
     t_emit("threads_at_once", t >= 64 ? "PASS" : "FAIL", "%d threads alive at once (errno %d); a browser wants >= 64", t, te);
