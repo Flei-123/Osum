@@ -6,6 +6,7 @@
 #   (tools/ota/publish-hp.sh) and clean up. Afterwards the HP only needs `/bin/ota system apply restart`.
 #   Env: HP_BASE=<image dir of the installed baseline>  HP_REF=<git ref, default origin/main>
 #        HP_ONLY="a b c" limits the overlay to the listed programs (small first step for a slow bridge)
+#        HP_NO_EXTRAS=1 drops the absolute-path files (a device with an old ota refuses them: first step only /bin)
 #        HP_KEEP_IMAGE=1 keeps the built image dir.  Run directly (not via heavy) when the heavy queue hangs.
 set -euo pipefail
 REPO=${OSUM_MAIN_CHECKOUT:-/root/jarvis/projects/u_DiS4in7esMF1/osum}
@@ -51,7 +52,7 @@ while read -r dest rel; do
         cp "$IMG/$rel" "$EXTRA/${dest#/}"
         echo "republish-hp: extra $dest"
     fi
-done < tools/ota/overlay-extras.txt
+done < <([ -n "${HP_NO_EXTRAS:-}" ] || cat tools/ota/overlay-extras.txt)
 python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${PROGS[*]} term" \
     | sed -n 's|^\(/apps/[A-Za-z0-9._-]*/start\)@\(/bin/[A-Za-z0-9._-]*\)$|\1 \2|p' > "$LINKS"
 rm -rf "$EXTRA.bundle"
