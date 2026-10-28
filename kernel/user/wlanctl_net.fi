@@ -1,0 +1,347 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import tools
+import dbgio
+
+export { cmd_scan, cmd_connect, cmd_forget }
+
+const PROC_CAP: u64 = 4000
+const SCAN_POLLS: u64 = 25
+const JOIN_POLLS: u64 = 120
+const POLL_MS: u64 = 1000
+const SSID_MAX: u64 = 32
+const PSK_MIN: u64 = 8
+const PSK_MAX: u64 = 63
+const CONF_MODE: u64 = 384
+const SYS_CHMOD: u64 = 90
+
+static mut NET_PROC: [u8; 4096] = [0 as u8; 4096]
+static mut NET_CONF: [u8; 160] = [0 as u8; 160]
+
+fn net_read_proc() -> u64 {
+    var path: [u8; 11] = "/proc/wlan\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        NET_PROC[0 as usize] = 0 as u8
+        return 0
+    }
+    var n: u64 = 0
+    var going: bool = true
+    while going && n < PROC_CAP {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, (&NET_PROC[0 as usize]) as u64 + n, 512)
+        if r == 0 || ulib.bad(r) {
+            going = false
+        } else {
+            n = n + r
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    NET_PROC[n as usize] = 0 as u8
+    return n
+}
+
+fn net_find(n: u64, key: u64) -> u64 {
+    return net_find_from(0, key)
+}
+
+fn net_number_at(at: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = at
+    while NET_PROC[i as usize] >= 48 as u8 && NET_PROC[i as usize] <= 57 as u8 {
+        v = v * 10 + (NET_PROC[i as usize] as u64 - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn net_put_line(at: u64) {
+    var i: u64 = at
+    while NET_PROC[i as usize] != 0 as u8 && NET_PROC[i as usize] != 10 as u8 {
+        tools.ob_byte(NET_PROC[i as usize] as u64)
+        i = i + 1
+    }
+    tools.ob_nl()
+}
+
+fn net_scan_seq(n: u64) -> u64 {
+    var k: [u8; 11] = "scan: seq=\0"
+    let at: u64 = net_find(n, (&k[0 as usize]) as u64)
+    if at == 0 {
+        return 0 - 1
+    }
+    return net_number_at(at)
+}
+
+fn net_auto_is(n: u64, word: u64) -> bool {
+    var k: [u8; 6] = "auto=\0"
+    let at: u64 = net_find(n, (&k[0 as usize]) as u64)
+    if at == 0 {
+        return false
+    }
+    let wl: u64 = ulib.length(word)
+    var j: u64 = 0
+    while j < wl {
+        if NET_PROC[(at + j) as usize] != *((word + j) as *mut u8) {
+            return false
+        }
+        j = j + 1
+    }
+    return NET_PROC[(at + wl) as usize] == 32 as u8
+}
+
+fn net_put_nets(n: u64) -> u64 {
+    var k: [u8; 5] = "net \0"
+    var found: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let at: u64 = net_find_from(i, (&k[0 as usize]) as u64)
+        if at == 0 {
+            return found
+        }
+        net_put_line(at)
+        found = found + 1
+        i = at
+    }
+    return found
+}
+
+fn net_find_from(from: u64, key: u64) -> u64 {
+    let kl: u64 = ulib.length(key)
+    var i: u64 = from
+    while NET_PROC[i as usize] != 0 as u8 {
+        if (i == 0 || NET_PROC[(i - 1) as usize] == 10 as u8) {
+            var j: u64 = 0
+            while j < kl && NET_PROC[(i + j) as usize] == *((key + j) as *mut u8) {
+                j = j + 1
+            }
+            if j == kl {
+                return i + kl
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn net_ready() -> bool {
+    var k: [u8; 12] = "phase=ready\0"
+    let n: u64 = net_read_proc()
+    return net_find(n, (&k[0 as usize]) as u64) != 0
+}
+
+fn net_fail(msg: u64) -> u64 {
+    var name: [u8; 10] = "wlanctl: \0"
+    tools.ob_str((&name[0 as usize]) as u64)
+    tools.ob_str(msg)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 1
+}
+
+fn cmd_scan() -> u64 {
+    var s_name: [u8; 8] = "wlanctl\0"
+    var s_nodrv: [u8; 34] = "driver not ready (no phase=ready)\0"
+    var s_cached: [u8; 66] = "scan not refreshed (link up or scan running): showing last result\0"
+    var s_none: [u8; 12] = "no networks\0"
+    var s_hdr: [u8; 7] = "scan: \0"
+    if !net_ready() {
+        return net_fail((&s_nodrv[0 as usize]) as u64)
+    }
+    var n: u64 = net_read_proc()
+    let seq0: u64 = net_scan_seq(n)
+    let r: u64 = dbgio.call(dbgio.OP_WLAN_SCAN, 0, 0, 0, 0)
+    if ulib.bad(r) {
+        dbgio.put_error((&s_name[0 as usize]) as u64, r)
+        return 1
+    }
+    var polls: u64 = 0
+    var fresh: bool = false
+    while polls < SCAN_POLLS && !fresh {
+        let _s: u64 = ulib.sleep_ms(POLL_MS)
+        n = net_read_proc()
+        if net_scan_seq(n) != seq0 {
+            fresh = true
+        }
+        polls = polls + 1
+    }
+    var k_scan: [u8; 7] = "scan: \0"
+    let sat: u64 = net_find(n, (&k_scan[0 as usize]) as u64)
+    if sat != 0 {
+        tools.ob_str((&s_hdr[0 as usize]) as u64)
+        net_put_line(sat)
+    }
+    if !fresh {
+        tools.ob_str((&s_cached[0 as usize]) as u64)
+        tools.ob_nl()
+    }
+    let found: u64 = net_put_nets(n)
+    if found == 0 {
+        tools.ob_str((&s_none[0 as usize]) as u64)
+        tools.ob_nl()
+    }
+    tools.ob_flush()
+    if fresh {
+        return 0
+    }
+    return 1
+}
+
+fn net_wipe_conf() {
+    var i: u64 = 0
+    while i < 160 {
+        NET_CONF[i as usize] = 0 as u8
+        i = i + 1
+    }
+}
+
+fn net_conf_put(at: u64, p: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = at
+    while *((p + i) as *mut u8) != 0 as u8 {
+        NET_CONF[o as usize] = *((p + i) as *mut u8)
+        o = o + 1
+        i = i + 1
+    }
+    return o
+}
+
+fn net_valid_text(p: u64) -> bool {
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 {
+        let c: u8 = *((p + i) as *mut u8)
+        if c < 32 as u8 || c == 127 as u8 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn net_write_conf(ssid: u64, psk: u64) -> u64 {
+    var path: [u8; 15] = "/etc/wlan.conf\0"
+    var k_ssid: [u8; 6] = "ssid \0"
+    var k_psk: [u8; 5] = "psk \0"
+    net_wipe_conf()
+    var at: u64 = net_conf_put(0, (&k_ssid[0 as usize]) as u64)
+    at = net_conf_put(at, ssid)
+    NET_CONF[at as usize] = 10 as u8
+    at = at + 1
+    at = net_conf_put(at, (&k_psk[0 as usize]) as u64)
+    at = net_conf_put(at, psk)
+    NET_CONF[at as usize] = 10 as u8
+    at = at + 1
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        net_wipe_conf()
+        return fd
+    }
+    var done: u64 = 0
+    while done < at {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, (&NET_CONF[0 as usize]) as u64 + done, at - done)
+        if ulib.bad(w) || w == 0 {
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            net_wipe_conf()
+            return 0 - 1
+        }
+        done = done + w
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    net_wipe_conf()
+    let m: u64 = ulib.sys(SYS_CHMOD, (&path[0 as usize]) as u64, CONF_MODE, 0)
+    if ulib.bad(m) {
+        ulib.sys(ulib.SYS_UNLINK, (&path[0 as usize]) as u64, 0, 0)
+        return m
+    }
+    return 0
+}
+
+fn net_put_ip_lines(n: u64) {
+    var k: [u8; 4] = "ip=\0"
+    let at: u64 = net_find(n, (&k[0 as usize]) as u64)
+    if at != 0 {
+        net_put_line(at - 3)
+    }
+}
+
+fn cmd_connect(args: u64) -> u64 {
+    var s_name: [u8; 8] = "wlanctl\0"
+    var s_use: [u8; 39] = "usage: wlanctl connect SSID PASSPHRASE\0"
+    var s_bad_ssid: [u8; 40] = "SSID must be 1..32 printable characters\0"
+    var s_bad_psk: [u8; 46] = "passphrase must be 8..63 printable characters\0"
+    var s_nodrv: [u8; 34] = "driver not ready (no phase=ready)\0"
+    var s_write: [u8; 28] = "cannot write /etc/wlan.conf\0"
+    var s_up: [u8; 10] = "connected\0"
+    var s_fail: [u8; 16] = "not connected: \0"
+    var s_up_word: [u8; 3] = "up\0"
+    if ulib.arg_count(args) != 4 {
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 2
+    }
+    let ssid: u64 = ulib.arg_at(args, 2)
+    let psk: u64 = ulib.arg_at(args, 3)
+    let sl: u64 = ulib.length(ssid)
+    let pl: u64 = ulib.length(psk)
+    if sl == 0 || sl > SSID_MAX || !net_valid_text(ssid) {
+        return net_fail((&s_bad_ssid[0 as usize]) as u64)
+    }
+    if pl < PSK_MIN || pl > PSK_MAX || !net_valid_text(psk) {
+        return net_fail((&s_bad_psk[0 as usize]) as u64)
+    }
+    if !net_ready() {
+        return net_fail((&s_nodrv[0 as usize]) as u64)
+    }
+    if ulib.bad(net_write_conf(ssid, psk)) {
+        return net_fail((&s_write[0 as usize]) as u64)
+    }
+    let r: u64 = dbgio.call(dbgio.OP_WLAN_REJOIN, 0, 0, 0, 0)
+    if ulib.bad(r) {
+        dbgio.put_error((&s_name[0 as usize]) as u64, r)
+        return 1
+    }
+    var polls: u64 = 0
+    var up: bool = false
+    var n: u64 = 0
+    while polls < JOIN_POLLS && !up {
+        let _s: u64 = ulib.sleep_ms(POLL_MS)
+        n = net_read_proc()
+        if net_auto_is(n, (&s_up_word[0 as usize]) as u64) {
+            up = true
+        }
+        polls = polls + 1
+    }
+    var k_auto: [u8; 6] = "auto=\0"
+    let at: u64 = net_find(n, (&k_auto[0 as usize]) as u64)
+    if up {
+        tools.ob_str((&s_up[0 as usize]) as u64)
+        tools.ob_nl()
+        net_put_ip_lines(n)
+        tools.ob_flush()
+        return 0
+    }
+    tools.ob_str((&s_fail[0 as usize]) as u64)
+    if at != 0 {
+        net_put_line(at - 5)
+    } else {
+        tools.ob_nl()
+    }
+    tools.ob_flush()
+    return 1
+}
+
+fn cmd_forget() -> u64 {
+    var s_name: [u8; 8] = "wlanctl\0"
+    var path: [u8; 15] = "/etc/wlan.conf\0"
+    var s_ok: [u8; 10] = "forgotten\0"
+    let _u: u64 = ulib.sys(ulib.SYS_UNLINK, (&path[0 as usize]) as u64, 0, 0)
+    let r: u64 = dbgio.call(dbgio.OP_WLAN_REJOIN, 0, 0, 0, 0)
+    if ulib.bad(r) {
+        dbgio.put_error((&s_name[0 as usize]) as u64, r)
+        return 1
+    }
+    tools.ob_str((&s_ok[0 as usize]) as u64)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
