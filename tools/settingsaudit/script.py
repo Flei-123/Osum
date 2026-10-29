@@ -27,10 +27,12 @@ def parent_uri(uri):
     return scheme + "://" + segments[0]
 
 
-def drehbuch(pages, yres):
+def drehbuch(pages, yres, only=None):
     by_uri = {uri: page for page, uri in pages.items()}
     lines = ["warte 12", "klick 24,%d" % (yres - 20), "warte 3", "klickauf start_Settings", "warte 12", "foto 00-start"]
     for page in sorted(pages):
+        if only is not None and page not in only:
+            continue
         parent = parent_uri(pages[page])
         if parent in by_uri:
             lines += ["klicksuche %s %s" % (tab_name(by_uri[parent]), SIDEBAR_POINT), "warte 2"]
@@ -40,7 +42,8 @@ def drehbuch(pages, yres):
 
 
 def main():
-    sys.stdout.write(drehbuch(parse_pagemap(sys.argv[1]), int(sys.argv[2])))
+    only = {int(v) for v in sys.argv[3].split(",")} if len(sys.argv) > 3 and sys.argv[3] else None
+    sys.stdout.write(drehbuch(parse_pagemap(sys.argv[1]), int(sys.argv[2]), only))
 
 
 if __name__ == "__main__":
