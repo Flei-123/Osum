@@ -50,14 +50,16 @@ open(sys.argv[1], "wb").write(bytes(out[:n]))
 PYEOF
 SHA=$(sha256sum "$W/src.bin" | cut -d' ' -f1)
 
-# FAT32 with 512-byte clusters (worst case for the chain walk), 16 MiB
-dd if=/dev/null of="$W/fat.fs" bs=1M seek=16 2>/dev/null
+# FAT32 with 512-byte clusters (worst case for the chain walk), 40 MiB (FAT32 needs more than 65525 clusters)
+dd if=/dev/null of="$W/fat.fs" bs=1M seek=40 2>/dev/null
 mkfs.fat -F 32 -s 1 "$W/fat.fs" >/dev/null 2>&1 || { echo "mkfs.fat failed"; exit 1; }
-dd if=/dev/null of="$W/disk.img" bs=1M seek=18 2>/dev/null
+dd if=/dev/null of="$W/disk.img" bs=1M seek=42 2>/dev/null
 printf 'label: dos\nstart=2048, type=c\n' | sfdisk "$W/disk.img" >/dev/null 2>&1
 dd if="$W/fat.fs" of="$W/disk.img" bs=512 seek=2048 conv=notrunc status=none
 
 cat > "$W/s.sh" <<'SEOF'
+echo "unlock hdb" > /dev/wlock
+umount /mnt
 mount /dev/hdb1 /mnt vfat
 echo "@@mount-rc=$?"
 cptempo /src.bin /mnt/a.bin
