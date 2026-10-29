@@ -205,7 +205,7 @@ zahl() { printf '%s' "$1" | grep -oE " $2=[0-9]+" | head -1 | sed 's/.*=//'; }
 # Die Farbe an einer Stelle, als "r g b" -- die Leistenfarbe wird nicht
 # getippt, sondern aus der Ecke des Kastens GELESEN. Ein fest getippter
 # Wert waere nach dem naechsten Farbschema falsch.
-pfarbe() { python3 tools/gfx/checkshot.py punkt "$1" "$2" "$3" 2>/dev/null; }
+pfarbe() { python3 tools/gfx/checkshot.py pixel "$1" "$2" "$3" 2>/dev/null; }
 
 # Wie viele Bildpunkte eines Rechtecks sind zwischen ZWEI Bildern
 # verschieden? `checkshot.py` vergleicht ein Bild gegen eine FARBE; hier
@@ -258,16 +258,16 @@ else
     fi
     # Und dieselbe Stelle noch einmal mit tools/gfx/checkshot.py, damit
     # die Zahl aus einem Programm kommt, das nicht diesem Modul gehoert.
-    aus=$(python3 tools/gfx/checkshot.py punkt "$SHOTS/widget-aus.ppm" "$cx" "$cy" 2>&1)
-    an=$(python3 tools/gfx/checkshot.py punkt "$SHOTS/widget-an.ppm" "$cx" "$cy" 2>&1)
+    aus=$(python3 tools/gfx/checkshot.py pixel "$SHOTS/widget-aus.ppm" "$cx" "$cy" 2>&1)
+    an=$(python3 tools/gfx/checkshot.py pixel "$SHOTS/widget-an.ppm" "$cx" "$cy" 2>&1)
     if [ "$aus" != "$an" ]; then
-        ok "checkshot punkt ($cx,$cy): aus=[$aus] an=[$an] -- verschieden"
+        ok "checkshot pixel ($cx,$cy): aus=[$aus] an=[$an] -- verschieden"
     else
-        bad "checkshot punkt ($cx,$cy): beide [$an] -- kein Unterschied an der Mitte"
+        bad "checkshot pixel ($cx,$cy): beide [$an] -- kein Unterschied an der Mitte"
     fi
     # Die Tinte im Kasten, gegen die Leistenfarbe gezaehlt: mit Widget
     # stehen dort Buchstaben, ohne Widget nicht.
-    it=$(python3 tools/gfx/checkshot.py flaeche "$SHOTS/widget-an.ppm" \
+    it=$(python3 tools/gfx/checkshot.py area "$SHOTS/widget-an.ppm" \
         "$((gx+px))" "$((gy+py))" "$pw" "$ph" $(pfarbe "$SHOTS/widget-an.ppm" "$((gx+px+1))" "$((gy+py+1))") 2>&1 \
         | grep -oE '^[0-9]+')
     if [ "${it:-0}" -gt 20 ]; then
@@ -297,7 +297,7 @@ else
     # dem Abmelden malt die Leiste an dieser Stelle ihren eigenen
     # Verlauf, und der ist nicht die Farbe, die vorher im Kasten stand.
     # Mit der alten Farbe gemessen waere hinterher ALLES "Tinte".
-    it2=$(python3 tools/gfx/checkshot.py flaeche "$SHOTS/widget-aus-laufzeit.ppm" \
+    it2=$(python3 tools/gfx/checkshot.py area "$SHOTS/widget-aus-laufzeit.ppm" \
         "$((gx+px))" "$((gy+py))" "$pw" "$ph" \
         $(pfarbe "$SHOTS/widget-aus-laufzeit.ppm" "$((gx+px+1))" "$((gy+py+1))") 2>&1 \
         | grep -oE '^[0-9]+')

@@ -4,7 +4,7 @@
 
     count.py <ppm> <x> <y> <w> <h> <r> <g> <b>
 
-`checkshot.py flaeche` verlangt, dass ALLE Bildpunkte des Rechtecks die
+`checkshot.py area` verlangt, dass ALLE Bildpunkte des Rechtecks die
 Farbe haben; hier geht es um das Gegenteil: WIE VIELE sind es?  Das ist
 die Form, in der sich ein Haken in einem Kaestchen messen laesst -- er
 ist kein volles Rechteck, er ist ein Strich, und die Zusage lautet

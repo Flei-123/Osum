@@ -23,14 +23,14 @@ benutzt Teil A, und dieselben nennt tools/desktop/run.sh.
 
   umlaut.py <serial> <ppm> <fenstertitel> <text> [toleranz] [--kette] [--ink]
 
-RUNDE UMLAUT2: `--kette` misst mit `checkshot tkette` statt `ttext`.
-Beide vergleichen jeden Tintenpunkt gegen dieselbe Rasterung; `tkette`
+RUNDE UMLAUT2: `--kette` misst mit `checkshot tchain` statt `ttext`.
+Beide vergleichen jeden Tintenpunkt gegen dieselbe Rasterung; `tchain`
 baut die Zeile aber ERST Buchstabe fuer Buchstabe auf, bevor es
 vergleicht, und erwartet damit das Richtige, wo zwei Umrisse einander
 ueberlappen. Bei "Akzentfarbe unverändert übernommen" sind das 8 von
-1567 Punkten -- `ttext` nennt sie falsch, `tkette` nicht, und das Bild
+1567 Punkten -- `ttext` nennt sie falsch, `tchain` nicht, und das Bild
 ist beide Male dasselbe und richtig. Die Messung wird dadurch strenger
-und nicht weicher: `tkette` prueft zusaetzlich die Reihenfolge des
+und nicht weicher: `tchain` prueft zusaetzlich die Reihenfolge des
 Mischens (siehe tools/gfx/checkshot.py).
 
 Eine Zeile, rc=0 wenn kein Bildpunkt abweicht.
@@ -378,7 +378,7 @@ def main(argv):
 
     r = subprocess.run(
         ["python3", "tools/gfx/checkshot.py",
-         "tink" if ink else ("tkette" if kette else "ttext"), ppm,
+         "tink" if ink else ("tchain" if kette else "ttext"), ppm,
          # ROUND FUI-TEXT: window text is Ring 3 text, drawn by fUi.
          "fui:assets/osum-sans.ttf", str(px), str(ax), str(ay)]
         + rgb(fg) + rgb(bg) + [text, tol],

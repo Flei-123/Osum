@@ -44,7 +44,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht da sein" || ok "$3"; }
-punkt() { python3 tools/gfx/checkshot.py punkt "$1" "$2" "$3" 2>/dev/null; }
+punkt() { python3 tools/gfx/checkshot.py pixel "$1" "$2" "$3" 2>/dev/null; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "REGEL: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
@@ -186,7 +186,7 @@ has "$TMPD/kurz.klar" "x=230 y=70 w=340 h=430 flaeche=2 sichtbar=1"     "die Reg
 
 echo "== 6. die zwei Fotos, maschinell auseinandergehalten =="
 for f in mit ohne; do
-    [ -s "$TMPD/$f.ppm" ] && ok "Foto $f.ppm ($(python3 tools/gfx/checkshot.py groesse "$TMPD/$f.ppm"))" \
+    [ -s "$TMPD/$f.ppm" ] && ok "Foto $f.ppm ($(python3 tools/gfx/checkshot.py size "$TMPD/$f.ppm"))" \
         || bad "kein Foto fuer den Lauf $f"
 done
 if [ -s "$TMPD/mit.ppm" ] && [ -s "$TMPD/ohne.ppm" ]; then

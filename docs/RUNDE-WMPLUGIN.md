@@ -351,7 +351,7 @@ OK  und die Leiste malt den Widget-Text
 OK  genau EINE Anmeldung (wmplug: reg uhr) -- kein Prozessneustart
 OK  und der Fensterserver lief durch (genau ein 'wm: hold')
 OK  im Widget-Kasten unterscheiden sich 2184 Bildpunkte zwischen vorher und nachher
-OK  checkshot punkt (632,572): vor dem Gewaehren [30 41 59], danach [38 48 60]
+OK  checkshot pixel (632,572): vor dem Gewaehren [30 41 59], danach [38 48 60]
 OK  im Widget-Kasten stehen nach dem Einschalten 391 Bildpunkte Tinte
 ```
 
@@ -891,7 +891,7 @@ w= h=` plus `taskbar: geom`), nicht aus dem Skript:
 
 ```
 das Plugin-Feld der Leiste steht bei x=624 y=2 w=92 h=26, Mitte (670,585)
-checkshot punkt (670,585): vorher [38 48 60], nach dem Absturz [30 41 59]
+checkshot pixel (670,585): vorher [38 48 60], nach dem Absturz [30 41 59]
 ```
 
 Vorher die Farbe des Widgetkastens, nachher die nackte Leiste: das Feld

@@ -775,22 +775,22 @@ def cmd_rect(a):
 
 
 COMMANDS = {
-    "groesse": cmd_size,
-    "punkt": cmd_pixel,
-    "flaeche": cmd_area,
-    "nichtleer": cmd_nonblank,
+    "size": cmd_size,
+    "pixel": cmd_pixel,
+    "area": cmd_area,
+    "nonblank": cmd_nonblank,
     "text": cmd_text,
-    "konsole": cmd_console,
-    "finde": cmd_find,
+    "console": cmd_console,
+    "find": cmd_find,
     "font": cmd_font,
-    "lesen": cmd_read,
+    "read": cmd_read,
     "ttext": cmd_ttext,
-    "tkette": cmd_tchain,
-    "trechts": cmd_tright,
+    "tchain": cmd_tchain,
+    "tright": cmd_tright,
     "tink": cmd_tink,
     "tgrid": cmd_tgrid,
-    "glatt": cmd_smooth,
-    "rechteck": cmd_rect,
+    "smooth": cmd_smooth,
+    "rect": cmd_rect,
 }
 
 

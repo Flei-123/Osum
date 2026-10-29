@@ -118,7 +118,7 @@ dann fotografieren:
 
 ```bash
 python3 tools/gfx/screenshot.py /tmp/mon.sock /tmp/bild.ppm 25
-python3 tools/gfx/checkshot.py groesse /tmp/bild.ppm     # -> 800 600
+python3 tools/gfx/checkshot.py size /tmp/bild.ppm     # -> 800 600
 ```
 
 ### Die Modusworte dieser Runde

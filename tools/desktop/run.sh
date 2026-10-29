@@ -24,7 +24,7 @@
 #      the position and the two colours are taken from what the
 #      APPLICATION reported, and every inked pixel of every glyph is
 #      recomputed in the picture against a second, independent
-#      rasterization (`tools/gfx/checkshot.py tkette`). A vertical bar is
+#      rasterization (`tools/gfx/checkshot.py tchain`). A vertical bar is
 #      where this matters most: it is the place where a lazy
 #      implementation clips the text instead of wrapping it, and clipped
 #      text passes an area test and fails this one.
@@ -398,7 +398,7 @@ check_text() { # log ppm mark
         text=$(printf '%s' "$line" | sed 's/^.* t=//')
         [ -z "$text" ] && continue
         tried=$((tried + 1))
-        aus=$(python3 tools/gfx/checkshot.py tkette "$ppm" "$SANS_INK" 15 \
+        aus=$(python3 tools/gfx/checkshot.py tchain "$ppm" "$SANS_INK" 15 \
             "$((x + gx))" "$((base + gy))" \
             $(rgb "$fg") $(rgb "$bg") "$text" 2>&1)
         if [ $? -eq 0 ]; then

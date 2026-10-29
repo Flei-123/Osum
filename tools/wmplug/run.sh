@@ -317,14 +317,14 @@ k_segv=$(zahl "$S" '^wmplug: bilanz' 'kicks')
 # was hier geprueft wird: laeuft der Schreibtisch WEITER?
 if [ -s "$TMPD/segv-2.ppm" ]; then
     cp -f "$TMPD/segv-2.ppm" "$SHOTS/nach-absturz.ppm"
-    masse=$(python3 tools/gfx/checkshot.py groesse "$TMPD/segv-2.ppm" 2>/dev/null)
+    masse=$(python3 tools/gfx/checkshot.py size "$TMPD/segv-2.ppm" 2>/dev/null)
     [ "$masse" = "800 600" ] \
         && ok "Foto nach dem Absturz: 800x600, der Bildmodus steht noch" \
         || bad "das Foto nach dem Absturz misst '$masse' statt '800 600'"
     # NICHT NUR "ein Bild kam an": auf dem Schirm muss auch etwas zu
     # sehen sein. Ein schwarzes Bild waere genau der Fall, den diese
     # Runde ausschliessen will -- Plugin tot, Schreibtisch tot.
-    nl=$(python3 tools/gfx/checkshot.py nichtleer "$TMPD/segv-2.ppm" 0 0 800 600 2>/dev/null \
+    nl=$(python3 tools/gfx/checkshot.py nonblank "$TMPD/segv-2.ppm" 0 0 800 600 2>/dev/null \
          | grep -oE '[0-9]+' | head -1)
     if [ -n "${nl:-}" ] && [ "$nl" -gt 100000 ] 2>/dev/null; then
         ok "und $nl von 480000 Bildpunkten sind nicht schwarz -- der Schreibtisch malt"
@@ -362,12 +362,12 @@ if [ -n "${bx:-}" ] && [ -n "${bw:-}" ] && [ -s "$TMPD/segv.ppm" ] \
     cx=$((tgx + bx + bw / 2)); cy=$((tgy + by + bh / 2))
     ok "das Plugin-Feld der Leiste steht bei x=$bx y=$by w=$bw h=$bh, Mitte ($cx,$cy)"
     cp -f "$TMPD/segv.ppm" "$SHOTS/vor-absturz.ppm"
-    f1=$(python3 tools/gfx/checkshot.py punkt "$TMPD/segv.ppm" "$cx" "$cy" 2>&1)
-    f2=$(python3 tools/gfx/checkshot.py punkt "$TMPD/segv-2.ppm" "$cx" "$cy" 2>&1)
+    f1=$(python3 tools/gfx/checkshot.py pixel "$TMPD/segv.ppm" "$cx" "$cy" 2>&1)
+    f2=$(python3 tools/gfx/checkshot.py pixel "$TMPD/segv-2.ppm" "$cx" "$cy" 2>&1)
     if [ "$f1" != "$f2" ]; then
-        ok "checkshot punkt ($cx,$cy): vorher [$f1], nach dem Absturz [$f2] -- verschieden"
+        ok "checkshot pixel ($cx,$cy): vorher [$f1], nach dem Absturz [$f2] -- verschieden"
     else
-        bad "checkshot punkt ($cx,$cy): vorher und nachher beide [$f1]"
+        bad "checkshot pixel ($cx,$cy): vorher und nachher beide [$f1]"
     fi
     python3 -c "from PIL import Image; Image.open('$SHOTS/vor-absturz.ppm').save('$SHOTS/vor-absturz.png')" \
         2>/dev/null && rm -f "$SHOTS/vor-absturz.ppm"
@@ -649,12 +649,12 @@ PYD
         bad "vorher und nachher unterscheiden sich im Kasten nur in ${dz:-0} Bildpunkten"
     fi
     if [ "${dx:-0}" -ge 0 ] && [ "${dx:--1}" != "-1" ]; then
-        v1=$(python3 tools/gfx/checkshot.py punkt "$TMPD/spaet.ppm" "$dx" "$dy" 2>&1)
-        v2=$(python3 tools/gfx/checkshot.py punkt "$TMPD/spaet-2.ppm" "$dx" "$dy" 2>&1)
+        v1=$(python3 tools/gfx/checkshot.py pixel "$TMPD/spaet.ppm" "$dx" "$dy" 2>&1)
+        v2=$(python3 tools/gfx/checkshot.py pixel "$TMPD/spaet-2.ppm" "$dx" "$dy" 2>&1)
         if [ "$v1" != "$v2" ]; then
-            ok "checkshot punkt ($dx,$dy): vor dem Gewaehren [$v1], danach [$v2] -- verschieden"
+            ok "checkshot pixel ($dx,$dy): vor dem Gewaehren [$v1], danach [$v2] -- verschieden"
         else
-            bad "checkshot punkt ($dx,$dy): beide [$v1]"
+            bad "checkshot pixel ($dx,$dy): beide [$v1]"
         fi
     else
         bad "kein einziger verschiedener Bildpunkt im Kasten -- das Einschalten hat nichts bewirkt"
@@ -662,9 +662,9 @@ PYD
     # Und die Tinte im Kasten: NACH dem Einschalten stehen dort
     # Buchstaben, vorher nicht. Die Vergleichsfarbe wird aus dem Bild
     # GELESEN (eine Ecke des Kastens), nicht getippt.
-    ecke2=$(python3 tools/gfx/checkshot.py punkt "$TMPD/spaet-2.ppm" \
+    ecke2=$(python3 tools/gfx/checkshot.py pixel "$TMPD/spaet-2.ppm" \
         "$((gx+px+1))" "$((gy+py+1))" 2>/dev/null)
-    tinte=$(python3 tools/gfx/checkshot.py flaeche "$TMPD/spaet-2.ppm" \
+    tinte=$(python3 tools/gfx/checkshot.py area "$TMPD/spaet-2.ppm" \
         "$((gx+px))" "$((gy+py))" "$pw" "$ph" $ecke2 2>&1 | grep -oE '^[0-9]+')
     if [ "${tinte:-0}" -gt 20 ]; then
         ok "im Widget-Kasten stehen nach dem Einschalten $tinte Bildpunkte Tinte"
@@ -847,19 +847,19 @@ elif [ -s "$SHOTS/regel-mit-recht.png" ] && [ -s "$SHOTS/regel-ohne-recht.png" ]
      && regel_ppm "$SHOTS/regel-ohne-recht.png" "$TMPD/rohne.ppm"; then
     # (500,300) liegt im zentrierten Fenster (230..570) und ausserhalb
     # des unveraenderten (80..420); (120,300) genau andersherum.
-    a=$(python3 tools/gfx/checkshot.py punkt "$TMPD/rmit.ppm" 500 300 2>&1)
-    b=$(python3 tools/gfx/checkshot.py punkt "$TMPD/rohne.ppm" 500 300 2>&1)
-    c=$(python3 tools/gfx/checkshot.py punkt "$TMPD/rohne.ppm" 120 300 2>&1)
-    d=$(python3 tools/gfx/checkshot.py punkt "$TMPD/rmit.ppm" 120 300 2>&1)
+    a=$(python3 tools/gfx/checkshot.py pixel "$TMPD/rmit.ppm" 500 300 2>&1)
+    b=$(python3 tools/gfx/checkshot.py pixel "$TMPD/rohne.ppm" 500 300 2>&1)
+    c=$(python3 tools/gfx/checkshot.py pixel "$TMPD/rohne.ppm" 120 300 2>&1)
+    d=$(python3 tools/gfx/checkshot.py pixel "$TMPD/rmit.ppm" 120 300 2>&1)
     [ "$a" != "$b" ] \
-        && ok "checkshot punkt (500,300): mit Recht [$a], ohne Recht [$b] -- verschieden" \
-        || bad "checkshot punkt (500,300): beide [$a] -- die Regel ist im Bild nicht zu sehen"
+        && ok "checkshot pixel (500,300): mit Recht [$a], ohne Recht [$b] -- verschieden" \
+        || bad "checkshot pixel (500,300): beide [$a] -- die Regel ist im Bild nicht zu sehen"
     [ "$a" = "$c" ] \
         && ok "und dieselbe Fensterfarbe steht ohne Recht bei (120,300): [$c] -- das Fenster ist gewandert" \
         || bad "die Fensterfarbe wanderte nicht mit: [$a] gegen [$c]"
     [ "$d" != "$c" ] \
-        && ok "checkshot punkt (120,300): mit Recht [$d], ohne Recht [$c] -- verschieden" \
-        || bad "checkshot punkt (120,300): beide [$c]"
+        && ok "checkshot pixel (120,300): mit Recht [$d], ohne Recht [$c] -- verschieden" \
+        || bad "checkshot pixel (120,300): beide [$c]"
 else
     bad "die zwei Regelbilder liegen nicht als PNG in $SHOTS (oder PIL fehlt)"
 fi

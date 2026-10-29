@@ -39,7 +39,7 @@ abweichenden Zellen **einzeln, mit Soll und erkanntem Ist** — das Ist
 wird gegen alle 95 Glyphen des Zeichensatzes gehalten, nicht geraten.
 Dazu kam der Unterbefehl `lesen`: das Bild zurück in Text.
 
-    $ python3 tools/gfx/checkshot.py lesen pat.ppm kernel/font.fi 13 4
+    $ python3 tools/gfx/checkshot.py read pat.ppm kernel/font.fi 13 4
     800x600, 100 Spalten, 37 Zeilen
      13 |                                                ##                   |
      14 |      7             01234                                            |

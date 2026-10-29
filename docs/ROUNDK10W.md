@@ -448,7 +448,7 @@ Und die Gegenprobe zum Prüfer selbst: dieselbe Rechnung auf eine **leere**
 Rasterzeile geht *nicht* auf, und sie sagt auch warum —
 `1413 falsch -- LEER: O S U M K 1 0 W I N D O W S E R V E R 0 1 2 3`.
 
-Dazu `checkshot.py glatt`: wie viele Bildpunkte eines Rechtecks sind **weder**
+Dazu `checkshot.py smooth`: wie viele Bildpunkte eines Rechtecks sind **weder**
 Vorder- **noch** Hintergrundfarbe? Eine Rasterung ohne Kantenglättung hat
 davon keinen einzigen und ginge durch alles oben hindurch.
 

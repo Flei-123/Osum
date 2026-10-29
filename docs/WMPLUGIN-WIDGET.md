@@ -64,8 +64,8 @@ Stelle.
 | Vergleich | Rechnung | Zahl |
 |-----------|----------|------|
 | `widget-an` gegen `widget-aus` (zwei Laeufe) | verschiedene Punkte im Kasten | **3432 von 3432** |
-| dieselbe Mitte (652,585), `checkshot.py punkt` | aus `30 41 59` / an `38 48 60` | verschieden |
-| Tinte im Kasten (AN), `checkshot.py flaeche` | gegen die Kastenfarbe | **604** |
+| dieselbe Mitte (652,585), `checkshot.py pixel` | aus `30 41 59` / an `38 48 60` | verschieden |
+| Tinte im Kasten (AN), `checkshot.py area` | gegen die Kastenfarbe | **604** |
 | `widget-an` gegen `widget-aus-laufzeit` (EIN Lauf) | verschiedene Punkte | **3432** |
 | Tinte im Kasten nach dem Abmelden | gegen die Kastenfarbe | **0** |
 

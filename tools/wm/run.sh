@@ -383,22 +383,22 @@ has "$TMPD/w.txt" "wm: term win=0  cols=56  rows=20  cell=10x19" \
     "das Terminalfenster hat ein Raster von 56x20 Zellen zu 10x19"
 wn=$(zahl2 "$TMPD/w.txt" 'wm: windows=[0-9]+')
 num "zwei Fenster: das Terminal und die Anwendung aus Ring 3" "$wn" eq 2
-schau "das Foto ist 800x600" groesse "$TMPD/w.ppm" 800 600
+schau "das Foto ist 800x600" size "$TMPD/w.ppm" 800 600
 # DIE GEOMETRIE: der Rahmen des Fensters aus Ring 3 liegt auf den
 # Bildpunkt da, wo der Server ihn fuehrt -- 264x174 bei (420,330), und
 # einen Bildpunkt daneben ist er NICHT.
 schau "der Rahmen des Fensters aus Ring 3 liegt bildpunktgenau" \
-    rechteck "$TMPD/w.ppm" 420 330 264 174 76 154 232
+    rect "$TMPD/w.ppm" 420 330 264 174 76 154 232
 # DIE STAPELREIHENFOLGE: an einer Stelle, die BEIDE Fenster bedecken,
 # gewinnt das obere.  Das ist die ganze Zusage in einem Rechteck.
 # Die Flaeche, die RING 3 in sein Fenster gemalt hat (0x101820), an einer
 # Stelle, an der darunter das Terminalfenster liegt.
 schau "an der Ueberschneidung steht das OBERE Fenster" \
-    flaeche "$TMPD/w.ppm" 430 353 100 6 16 24 32
+    area "$TMPD/w.ppm" 430 353 100 6 16 24 32
 schau_nicht "und NICHT die Flaeche des unteren" \
-    flaeche "$TMPD/w.ppm" 430 353 100 6 16 20 26
+    area "$TMPD/w.ppm" 430 353 100 6 16 20 26
 schau "der Hintergrund neben den Fenstern gehoert dem Server" \
-    flaeche "$TMPD/w.ppm" 700 60 80 80 30 42 56
+    area "$TMPD/w.ppm" 700 60 80 80 30 42 56
 # Der Zeiger: die Spitze steht in der Mitte, und der Umriss ist schwarz.
 gsi=$(grep -aoE 'gsi=0x[0-9a-f]+' "$TMPD/w.txt" | head -1 | sed 's/.*=//')
 if [ "$gsi" = "0x2e" ]; then
@@ -410,11 +410,11 @@ fi
 # not the old black outline with a white fill: at the tip the picture is no longer the
 # background, two points inside it is black.
 schau_nicht "die Spitze des Zeigers steht in der Bildmitte (dort ist nicht mehr der Hintergrund)" \
-    punkt "$TMPD/w.ppm" 399 299 30 42 56
+    pixel "$TMPD/w.ppm" 399 299 30 42 56
 # W-CURSOR: the pointer stands over the terminal window's client grid, so it is the text bar (I-beam,
 # rim white, stem black): the stem is two points wide at x 398-399, white rim at x 400.
 schau "und zwei Bildpunkte tiefer ist die Textmarke schwarz gefuellt (Zeiger ueber dem Terminalraster)" \
-    punkt "$TMPD/w.ppm" 398 301 0 0 0
+    pixel "$TMPD/w.ppm" 398 301 0 0 0
 
 echo "== 7. der Text im Fenster, bildpunktgenau gegen den zweiten Rasterer =="
 # NICHT Flaeche gegen Flaeche.  Je Zeichen die gesetzten Bildpunkte, und
@@ -434,19 +434,19 @@ schau "Zeile 1 des Terminalfensters" \
 # than this runner said (the title inset grew; red on main before this
 # round, measured on the screenshot: 0 wrong at x+5, 2 or more elsewhere).
 schau "der Titel des Fensters aus Ring 3, mit Unterschneidung" \
-    tkette "$TMPD/w.ppm" assets/osum-sans.ttf 15 432 348 255 255 255 \
+    tchain "$TMPD/w.ppm" assets/osum-sans.ttf 15 432 348 255 255 255 \
     28 78 126 "Klick mich"
 schau "der Titel des Terminalfensters, unbeleuchtet" \
-    tkette "$TMPD/w.ppm" assets/osum-sans.ttf 15 36 58 144 156 168 \
+    tchain "$TMPD/w.ppm" assets/osum-sans.ttf 15 36 58 144 156 168 \
     44 56 72 "Terminal -- sh"
 # ... and it IS fUi's ink: the kernel's old 4x4 samples do NOT match.
 schau_nicht "GEGENPROBE: der Titel ist NICHT mehr die alte Kern-Tinte" \
-    tkette "$TMPD/w.ppm" kern:assets/osum-sans.ttf 15 36 55 144 156 168 \
+    tchain "$TMPD/w.ppm" kern:assets/osum-sans.ttf 15 36 55 144 156 168 \
     44 56 72 "Terminal -- sh"
 # IST ES WIRKLICH EINE KANTENGLAETTUNG?  Eine Rasterung ohne Glaettung
 # haette KEINE Zwischenstufe und ginge durch alles oben hindurch.
 schau "der Text ist wirklich kantengeglaettet" \
-    glatt "$TMPD/w.ppm" 26 62 280 20 224 230 236 16 20 26 100
+    smooth "$TMPD/w.ppm" 26 62 280 20 224 230 236 16 20 26 100
 # Und die Gegenprobe zum Pruefer: an einer Stelle, an der kein Text
 # steht, findet er keinen.
 schau_nicht "wo kein Text steht, geht dieselbe Rechnung NICHT auf" \
@@ -491,12 +491,12 @@ has "$TMPD/k.txt" "wclick: down 78,48" \
     "der Klick kommt in Ring 3 an, mit den Koordinaten IM Fenster"
 # Und was die Anwendung daraufhin gemalt hat, steht im Foto -- genau da.
 schau "der Fleck, den Ring 3 auf den Klick hin gemalt hat" \
-    flaeche "$TMPD/k.ppm" 500 400 8 8 255 192 32
+    area "$TMPD/k.ppm" 500 400 8 8 255 192 32
 schau_nicht "und einen Bildpunkt daneben ist er nicht" \
-    punkt "$TMPD/k.ppm" 499 400 255 192 32
+    pixel "$TMPD/k.ppm" 499 400 255 192 32
 # Die Gegenprobe: OHNE Klick gibt es den Fleck nicht.
 schau_nicht "ohne Klick ist der Fleck NICHT da" \
-    flaeche "$TMPD/w.ppm" 500 400 8 8 255 192 32
+    area "$TMPD/w.ppm" 500 400 8 8 255 192 32
 hasnot "$TMPD/w.txt" "wclick: down" "und in Ring 3 kommt dann auch nichts an"
 # Und ein Klick auf den HINTERGRUND geht an kein Fenster.
 cat > "$TMPD/leer.mon" <<'EOF'
@@ -549,11 +549,11 @@ num "der Kern beendet sich sauber" "$RC" eq 21
 # innerhalb des Fensters --, dann 120 nach links oben: das Fenster steht
 # jetzt bei (300,210).
 schau "das Fenster steht nach dem Ziehen an der neuen Stelle" \
-    rechteck "$TMPD/z.ppm" 300 210 264 174 76 154 232
+    rect "$TMPD/z.ppm" 300 210 264 174 76 154 232
 schau_nicht "und an der alten NICHT mehr" \
-    rechteck "$TMPD/z.ppm" 420 330 264 174 76 154 232
+    rect "$TMPD/z.ppm" 420 330 264 174 76 154 232
 schau "der Titel ist mitgewandert, bildpunktgenau" \
-    tkette "$TMPD/z.ppm" assets/osum-sans.ttf 15 312 228 255 255 255 \
+    tchain "$TMPD/z.ppm" assets/osum-sans.ttf 15 312 228 255 255 255 \
     28 78 126 "Klick mich"
 # Und das Schliessfeld: es sitzt rechts oben im Rahmen.  Nach dem
 # Verschieben liegt es bei (300 + 264 - 2 - 14 - 3, 210 + 4) = (545,214).
@@ -581,13 +581,13 @@ num "nach dem Klick auf das Schliessfeld bleibt EIN Fenster" "$wn2" eq 1
 wnv=$(grep -aoE 'wmafter: n=[0-9]+' "$TMPD/w.txt" | tail -1 | sed 's/.*=//')
 num "ohne den Klick bleiben es zwei" "$wnv" eq 2
 schau_nicht "der Rahmen des geschlossenen Fensters ist weg" \
-    rechteck "$TMPD/c.ppm" 420 330 264 174 76 154 232
+    rect "$TMPD/c.ppm" 420 330 264 174 76 154 232
 # UND DAS IST DIE ZUSAGE UEBER DIE WIEDERHERSTELLUNG: da, wo das Fenster
 # war, steht jetzt wieder das, was darunter lag -- kein Gespenst.
 schau "wo das Fenster war, steht wieder der Hintergrund des Servers" \
-    flaeche "$TMPD/c.ppm" 600 460 60 40 30 42 56
+    area "$TMPD/c.ppm" 600 460 60 40 30 42 56
 schau "und wo es das Terminalfenster verdeckte, steht wieder dessen Flaeche" \
-    flaeche "$TMPD/c.ppm" 440 400 100 30 16 20 26
+    area "$TMPD/c.ppm" 440 400 100 30 16 20 26
 
 echo "== 10. der Eingabefokus =="
 cat > "$TMPD/tasten.mon" <<'EOF'
@@ -751,7 +751,7 @@ foto "$K0" "gfx wm wmhold nomouse $GRUND" "$TMPD/nm.txt" "$TMPD/nm.ppm"
 has "$TMPD/nm.txt" "mouse: kein Zeiger" "mit 'nomouse' gibt es kein Zeigegeraet"
 has "$TMPD/nm.txt" "cursor=0" "und der Server malt keinen"
 schau_nicht "im Bild steht an der Zeigerstelle KEIN Zeiger" \
-    punkt "$TMPD/nm.ppm" 400 301 255 255 255
+    pixel "$TMPD/nm.ppm" 400 301 255 255 255
 schau "das Terminalfenster steht trotzdem da" \
     tgrid "$TMPD/nm.ppm" assets/osum-mono.ttf 16 26 62 10 19 0 0 \
     224 230 236 16 20 26 "$MARKE_PRODUKT K10 WM 0123"

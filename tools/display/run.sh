@@ -372,8 +372,8 @@ echo "== 5. der Wechsel zur Laufzeit, im Bild =="
 # VORHER: 800x600, das Pruefbild von Runde K7.
 foto vorher "gfx disp nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber" "$RC" eq 21
-schau "VORHER: das Foto ist 800x600" groesse "$TMPD/vorher.ppm" 800 600
-schau "VORHER: Feld 1 ist reines Rot" flaeche "$TMPD/vorher.ppm" 0 0 100 100 255 0 0
+schau "VORHER: das Foto ist 800x600" size "$TMPD/vorher.ppm" 800 600
+schau "VORHER: Feld 1 ist reines Rot" area "$TMPD/vorher.ppm" 0 0 100 100 255 0 0
 schau "VORHER: die Textzeile steht bildpunktgenau" \
     text "$TMPD/vorher.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 
@@ -392,15 +392,15 @@ us=$(echo "$sw" | grep -ao 'us=[0-9]*' | sed 's/us=//')
 # UND DAS FOTO. Das ist die eigentliche Zusage: nicht "der Kernel sagt
 # 1024x768", sondern "QEMU zeigt 1024x768".
 schau "NACHHER: das Foto ist 1024x768 -- der Modus wurde WIRKLICH gewechselt" \
-    groesse "$TMPD/nachher.ppm" 1024 768
+    size "$TMPD/nachher.ppm" 1024 768
 schau "NACHHER: das Pruefbild ist neu gezeichnet, Feld 1 ist wieder rot" \
-    flaeche "$TMPD/nachher.ppm" 0 0 100 100 255 0 0
-schau "NACHHER: Feld 4 ist weiss" flaeche "$TMPD/nachher.ppm" 300 0 100 100 255 255 255
+    area "$TMPD/nachher.ppm" 0 0 100 100 255 0 0
+schau "NACHHER: Feld 4 ist weiss" area "$TMPD/nachher.ppm" 300 0 100 100 255 255 255
 schau "NACHHER: die Textzeile steht bildpunktgenau im NEUEN Modus" \
     text "$TMPD/nachher.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 schau "NACHHER: die Ecke bei (1023,767) gibt es jetzt und sie ist schwarz" \
-    punkt "$TMPD/nachher.ppm" 1023 767 0 0 0
-schau_nicht "VORHER gab es diese Ecke NICHT" punkt "$TMPD/vorher.ppm" 1023 767 0 0 0
+    pixel "$TMPD/nachher.ppm" 1023 767 0 0 0
+schau_nicht "VORHER gab es diese Ecke NICHT" pixel "$TMPD/vorher.ppm" 1023 767 0 0 0
 
 # UND ZURUECK. Zwei Wechsel in EINEM Lauf -- der Rueckweg ist der Fall,
 # in dem Fensterplaetze frei werden statt belegt zu werden.
@@ -410,7 +410,7 @@ Z="$TMPD/zurueck.txt"
 hat "$Z" "disp: switch 1024x768 -> 800x600" "der Rueckweg steht im Mitschnitt"
 swz=$(grep -a -m1 '^disp: sw=' "$Z" | grep -ao 'sw=[0-9]*' | sed 's/sw=//')
 gleich "zwei Wechsel in einem Lauf" "2" "$swz"
-schau "ZURUECK: das Foto ist wieder 800x600" groesse "$TMPD/zurueck.ppm" 800 600
+schau "ZURUECK: das Foto ist wieder 800x600" size "$TMPD/zurueck.ppm" 800 600
 schau "ZURUECK: und das Pruefbild steht wieder da" \
     text "$TMPD/zurueck.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 
@@ -430,15 +430,15 @@ num "der Zaehler der abgelehnten Wechsel steht" "$fb_" ge 1
 swb=$(grep -a -m1 '^disp: sw=' "$S" | grep -ao 'sw=[0-9]*' | sed 's/sw=//')
 gleich "und KEIN Wechsel hat stattgefunden" "0" "$swb"
 # DIE EIGENTLICHE ZUSAGE DIESES ABSCHNITTS: das Bild ist noch da.
-schau "das Foto ist 800x600 -- der Bildmodus steht noch" groesse "$TMPD/schlecht.ppm" 800 600
+schau "das Foto ist 800x600 -- der Bildmodus steht noch" size "$TMPD/schlecht.ppm" 800 600
 schau "Feld 1 ist rot -- der Bildschirm ist NICHT schwarz" \
-    flaeche "$TMPD/schlecht.ppm" 0 0 100 100 255 0 0
+    area "$TMPD/schlecht.ppm" 0 0 100 100 255 0 0
 schau "und die Textzeile steht bildpunktgenau da, als waere nichts gewesen" \
     text "$TMPD/schlecht.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 # Und die Gegenprobe zum Foto selbst: ein SCHWARZES Bild haette diese
 # Stellen nicht.
 schau_nicht "ein schwarzer Schirm haette hier kein Rot" \
-    flaeche "$TMPD/schlecht.ppm" 0 0 100 100 0 0 0
+    area "$TMPD/schlecht.ppm" 0 0 100 100 0 0 0
 
 # ============================================== 7. die Frist
 
@@ -473,16 +473,16 @@ hat "$D" "disp: rot=90" "der Kernel meldet die Vierteldrehung"
 hat "$D" "img=600x800" "das BILD ist danach 600x800 ..."
 hat "$D" "panel=800x600" "... und die TAFEL bleibt 800x600"
 schau "das Foto ist 800x600 -- gedreht wird beim Uebertragen, nicht in der Karte" \
-    groesse "$TMPD/dreh.ppm" 800 600
+    size "$TMPD/dreh.ppm" 800 600
 # Das Pruefbild hat vier Farbfelder in der obersten Bildzeile. Um 90 Grad
 # im Uhrzeigersinn gedreht liegen sie in der RECHTEN Spalte, von oben
 # nach unten. Ein Bildpunkt aus Feld 1 (rot, Bildkoordinate 50,50) liegt
 # danach bei Tafel(800-1-50, 50) = (749,50).
 schau "Feld 1 (rot) liegt nach der Drehung rechts oben" \
-    punkt "$TMPD/dreh.ppm" 749 50 255 0 0
-schau "Feld 2 (gruen) liegt darunter" punkt "$TMPD/dreh.ppm" 749 150 0 255 0
+    pixel "$TMPD/dreh.ppm" 749 50 255 0 0
+schau "Feld 2 (gruen) liegt darunter" pixel "$TMPD/dreh.ppm" 749 150 0 255 0
 schau_nicht "und links oben, wo es UNGEDREHT laege, ist es nicht" \
-    punkt "$TMPD/dreh.ppm" 50 50 255 0 0
+    pixel "$TMPD/dreh.ppm" 50 50 255 0 0
 
 # ============================================== 9. die Kosten
 

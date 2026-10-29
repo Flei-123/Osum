@@ -292,17 +292,17 @@ hasnot "$DF" "/etc/schemata" "und kein Pfad wurde eingedeutscht"
 ex=$(feld "$EF" 5 x); eb=$(feld "$EF" 5 base)
 dx=$(feld "$DF" 5 x); db=$(feld "$DF" 5 base)
 schau "der englische Knopf steht bildpunktgenau da" \
-    tkette "$TMPD/en/en.ppm" "$SANS_INK" 15 $((CX + ex)) $((CY + eb)) \
+    tchain "$TMPD/en/en.ppm" "$SANS_INK" 15 $((CX + ex)) $((CY + eb)) \
     230 230 230 57 64 74 "Apply" 8
 schau "DER DEUTSCHE KNOPF AUCH -- MIT ECHTEM UMLAUT" \
-    tkette "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + dx)) $((CY + db)) \
+    tchain "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + dx)) $((CY + db)) \
     230 230 230 57 64 74 "Übernehmen" 8
 schau_nicht "und die Ersatzschreibung 'Uebernehmen' steht dort NICHT" \
-    tkette "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + dx)) $((CY + db)) \
+    tchain "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + dx)) $((CY + db)) \
     230 230 230 57 64 74 "Uebernehmen" 8
 lx=$(feld "$DF" 1 x); lb=$(feld "$DF" 1 base)
 schau "der uebersetzte Satz mit dem unuebersetzten Pfad steht auf dem Schirm" \
-    tkette "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + lx)) $((CY + lb)) \
+    tchain "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + lx)) $((CY + lb)) \
     230 230 230 30 34 40 "Farbschema (aus /etc/schemas):" 8
 
 # Die Taskleiste -- ein ANDERER Prozess, dieselbe Sprache.
@@ -399,12 +399,12 @@ else
         wx=$(zeile_von "$W" 2 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
         wb=$(zeile_von "$W" 2 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
         schau "der umgestellte Knopf steht bildpunktgenau auf dem Schirm" \
-            tkette "$TMPD/en/wechsel.ppm" "$SANS_INK" 15 $((CX + wx)) $((CY + wb)) \
+            tchain "$TMPD/en/wechsel.ppm" "$SANS_INK" 15 $((CX + wx)) $((CY + wb)) \
             230 230 230 57 64 74 "Übernehmen" 8
         nx=$(grep -a 'taskbar: text net' "$W" | tail -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
         nb=$(grep -a 'taskbar: text net' "$W" | tail -1 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
         schau "und die umgestellte Taskleiste auch" \
-            tkette "$TMPD/en/wechsel.ppm" "$SANS_INK" 15 "$nx" $((572 + nb)) \
+            tchain "$TMPD/en/wechsel.ppm" "$SANS_INK" 15 "$nx" $((572 + nb)) \
             230 230 230 42 47 55 "kein Netz" 8
         # DIE WAHL IST GESCHRIEBEN -- unter dem BENUTZER und nicht unter
         # /etc/. Nachgelesen aus dem Abbild, nicht aus einem Mitschnitt.

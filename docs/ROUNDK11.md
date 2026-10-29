@@ -317,7 +317,7 @@ warum es keine Behauptung ist:
 2. **Beide Ausgabewege zeigen dasselbe.** Derselbe Lauf schreibt auf die
    serielle Leitung *und* auf den Bildschirm. Der Mitschnitt geht durch
    ein Terminal in Python (`tools/k11/vt.py`), das Bildschirmfoto durch
-   den Zeichensatzleser aus Runde K7B (`tools/gfx/checkshot.py lesen`) — und
+   den Zeichensatzleser aus Runde K7B (`tools/gfx/checkshot.py read`) — und
    der Mitschnitt wird **im selben Augenblick** festgehalten wie das Foto,
    sonst vergleicht man zwei Zeitpunkte miteinander.
 3. **Fehlerfälle**: Datei gibt es nicht, Verzeichnis statt Datei, kein

@@ -62,39 +62,39 @@ echo "== 2. 1920x1080, pitch == width*4 =="
 shot plain "$BASE"
 has "$TMPD/plain.txt" "fb: 1920x1080x32 +pitch=7680" "plain: pitch 7680"
 has "$TMPD/plain.txt" "fb: order panel=1 +swz=0" "plain: BGRX panel, no conversion"
-look "plain: shot is 1920x1080" groesse "$TMPD/plain.ppm" 1920 1080
+look "plain: shot is 1920x1080" size "$TMPD/plain.ppm" 1920 1080
 fields_ok plain "$TMPD/plain.ppm"
 
 echo "== 3. 1920x1080, pitch 8192 (card stride wider than the picture) =="
 shot wide "$BASE fbvirt=2048"
 has "$TMPD/wide.txt" "fb: 1920x1080x32 +pitch=8192" "wide: kernel measured pitch 8192"
-look "wide: shot is 1920x1080" groesse "$TMPD/wide.ppm" 1920 1080
+look "wide: shot is 1920x1080" size "$TMPD/wide.ppm" 1920 1080
 fields_ok wide "$TMPD/wide.ppm"
 
 echo "== 4. counter-proof: kernel assumes pitch = width*4 on the wide card =="
 shot widebad "$BASE fbvirt=2048 fbnopitch"
 has "$TMPD/widebad.txt" "fb: 1920x1080x32 +pitch=7680" "widebad: kernel really used 7680"
-lookno "widebad: red field is torn" flaeche "$TMPD/widebad.ppm" 0 0 100 100 255 0 0
+lookno "widebad: red field is torn" area "$TMPD/widebad.ppm" 0 0 100 100 255 0 0
 
 echo "== 5. RGBX panel (R at byte 0): canonical colours are converted =="
 shot rgbx "$BASE fbrgb"
 has "$TMPD/rgbx.txt" "fb: order panel=2 +swz=1" "rgbx: panel order 2, conversion on"
-look "rgbx: red literal lands in byte 0 (card reads blue)" flaeche "$TMPD/rgbx.ppm" 500 0 100 100 0 0 255
-look "rgbx: blue literal lands in byte 2 (card reads red)" flaeche "$TMPD/rgbx.ppm" 700 0 100 100 255 0 0
-look "rgbx: green literal unchanged" flaeche "$TMPD/rgbx.ppm" 600 0 100 100 0 255 0
-look "rgbx: mixed literal swapped" flaeche "$TMPD/rgbx.ppm" 800 0 100 100 48 32 16
-look "rgbx: console field follows the same order" flaeche "$TMPD/rgbx.ppm" 0 0 100 100 0 0 255
+look "rgbx: red literal lands in byte 0 (card reads blue)" area "$TMPD/rgbx.ppm" 500 0 100 100 0 0 255
+look "rgbx: blue literal lands in byte 2 (card reads red)" area "$TMPD/rgbx.ppm" 700 0 100 100 255 0 0
+look "rgbx: green literal unchanged" area "$TMPD/rgbx.ppm" 600 0 100 100 0 255 0
+look "rgbx: mixed literal swapped" area "$TMPD/rgbx.ppm" 800 0 100 100 48 32 16
+look "rgbx: console field follows the same order" area "$TMPD/rgbx.ppm" 0 0 100 100 0 0 255
 
 echo "== 6. counter-proof: RGBX panel without conversion =="
 shot rgbxraw "$BASE fbrgb fbnoswz"
 has "$TMPD/rgbxraw.txt" "fb: order panel=2 +swz=0" "rgbxraw: conversion off"
-look "rgbxraw: literal red stays in byte 2 (wrong on a real RGBX panel)" flaeche "$TMPD/rgbxraw.ppm" 500 0 100 100 255 0 0
+look "rgbxraw: literal red stays in byte 2 (wrong on a real RGBX panel)" area "$TMPD/rgbxraw.ppm" 500 0 100 100 255 0 0
 
 echo "== 7. RGBX with wide pitch together =="
 shot both "$BASE fbrgb fbvirt=2048"
 has "$TMPD/both.txt" "fb: 1920x1080x32 +pitch=8192" "both: pitch 8192"
-look "both: red literal converted" flaeche "$TMPD/both.ppm" 500 0 100 100 0 0 255
-look "both: mixed literal converted" flaeche "$TMPD/both.ppm" 800 0 100 100 48 32 16
+look "both: red literal converted" area "$TMPD/both.ppm" 500 0 100 100 0 0 255
+look "both: mixed literal converted" area "$TMPD/both.ppm" 800 0 100 100 48 32 16
 
 echo "FBFMT: $pass ok, $fail failed"
 [ "$fail" -eq 0 ]

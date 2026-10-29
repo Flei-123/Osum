@@ -17,7 +17,7 @@
 #      serielle Leitung UND auf den Bildschirm. Der Mitschnitt geht durch
 #      ein Terminal in Python (`tools/k11/vt.py`), das Bildschirmfoto
 #      durch den Zeichensatzleser aus Runde K7B
-#      (`tools/gfx/checkshot.py lesen`). Die beiden Bilder muessen
+#      (`tools/gfx/checkshot.py read`). Die beiden Bilder muessen
 #      uebereinstimmen.
 #   3. JEDES WERKZEUG GEGEN SEIN LINUX-GEGENSTUECK. Dieselben Eingaben,
 #      dieselbe Ausgabe, Oktett fuer Oktett. Wo bewusst abgewichen wird,
@@ -769,10 +769,10 @@ grep -qa '\^O Write' "$TMPD/edA.vt" \
     || bad "die Tastenzeile fehlt"
 
 # Und dasselbe Bild aus einem echten BILDSCHIRMFOTO, Zelle fuer Zelle
-# gegen den Zeichensatz gerechnet (`tools/gfx/checkshot.py lesen`, Runde K7B).
+# gegen den Zeichensatz gerechnet (`tools/gfx/checkshot.py read`, Runde K7B).
 if [ -s "$TMPD/edA.ppm" ]; then
     ok "das Bildschirmfoto steht ($(stat -c%s "$TMPD/edA.ppm") Oktette)"
-    python3 tools/gfx/checkshot.py lesen "$TMPD/edA.ppm" kernel/gfx/font.fi \
+    python3 tools/gfx/checkshot.py read "$TMPD/edA.ppm" kernel/gfx/font.fi \
         > "$TMPD/edA.schirm" 2>&1
     sed -n 's/^ *[0-9]\+ |\(.*\)|$/\1/p' "$TMPD/edA.schirm" | sed 's/ *$//' \
         > "$TMPD/edA.schirm.txt"
@@ -928,7 +928,7 @@ tipp_lauf gegE "$TMPD/d0.img" \
     "edit: ready" \
     warte:0.5 "foto:$TMPD/kein.ppm" ctrl-x
 if [ -s "$TMPD/kein.ppm" ]; then
-    python3 tools/gfx/checkshot.py groesse "$TMPD/kein.ppm" 800 600 >/dev/null 2>&1 \
+    python3 tools/gfx/checkshot.py size "$TMPD/kein.ppm" 800 600 >/dev/null 2>&1 \
         && bad "GEGENPROBE: ohne 'gfx' gibt es trotzdem 800x600" \
         || ok "GEGENPROBE: ohne 'gfx' ist der Bildmodus nicht gesetzt"
 else

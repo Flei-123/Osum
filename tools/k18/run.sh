@@ -139,7 +139,7 @@ number_in() { # datei name
     grep -aE "^const $2: u64 = [0-9]+" "$1" | head -1 \
         | sed -E 's/^const [A-Za-z0-9_]+: u64 = ([0-9]+).*/\1/'
 }
-punkt() { python3 tools/gfx/checkshot.py punkt "$@" 2>/dev/null; }
+punkt() { python3 tools/gfx/checkshot.py pixel "$@" 2>/dev/null; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then

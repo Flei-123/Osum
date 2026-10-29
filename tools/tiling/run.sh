@@ -311,7 +311,7 @@ echo "== 7. die Fotos: Teilung, Reiter, Drehung =="
 foto "$K0" "gfx wm tile tileshot wmhold $GRUND" "$TMPD/g.txt" "$TMPD/g.ppm" "$DISK"
 num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/g.txt" "wm: hold" "der Kern haelt fuer das Foto still"
-schau "das Foto ist 800x600" groesse "$TMPD/g.ppm" 800 600
+schau "das Foto ist 800x600" size "$TMPD/g.ppm" 800 600
 # DIE VIER KACHELN.  Der Baum hat sie ausgerechnet, die serielle Leitung
 # meldet dieselben Zahlen, und das Bild zeigt sie an genau der Stelle.
 has "$TMPD/g.txt" "tile: win=1 0,0 400x300" "Fenster 1 liegt oben links (400x300)"
@@ -319,15 +319,15 @@ has "$TMPD/g.txt" "tile: win=2 400,0 400x300" "Fenster 2 oben rechts"
 has "$TMPD/g.txt" "tile: win=3 400,300 400x300" "Fenster 3 unten rechts"
 has "$TMPD/g.txt" "tile: win=4 0,300 400x300" "Fenster 4 unten links"
 schau "und im Bild ist Fenster 1 wirklich rot" \
-    flaeche "$TMPD/g.ppm" 2 22 396 276 192 48 48
-schau "Fenster 2 gruen" flaeche "$TMPD/g.ppm" 402 22 396 276 48 176 80
-schau "Fenster 3 blau" flaeche "$TMPD/g.ppm" 402 322 396 276 48 96 224
-schau "Fenster 4 gelb" flaeche "$TMPD/g.ppm" 2 322 396 276 224 192 48
+    area "$TMPD/g.ppm" 2 22 396 276 192 48 48
+schau "Fenster 2 gruen" area "$TMPD/g.ppm" 402 22 396 276 48 176 80
+schau "Fenster 3 blau" area "$TMPD/g.ppm" 402 322 396 276 48 96 224
+schau "Fenster 4 gelb" area "$TMPD/g.ppm" 2 322 396 276 224 192 48
 # KEINE LUECKE.  Die Zusage des ganzen Systems in einem Bildpunkt: an der
 # Naht zwischen zwei Kacheln steht Fensterrahmen und NICHT der
 # Hintergrund des Servers (0x1E2A38).
 schau_nicht "an der Naht der vier Kacheln liegt keine Luecke" \
-    punkt "$TMPD/g.ppm" 399 299 30 42 56
+    pixel "$TMPD/g.ppm" 399 299 30 42 56
 foto "$K0" "gfx wm tile tileshot tiletabs wmhold $GRUND" "$TMPD/tb.txt" \
     "$TMPD/tb.ppm" "$DISK"
 num "der Kern beendet sich sauber" "$RC" eq 21
@@ -338,9 +338,9 @@ has "$TMPD/tb.txt" "tile: win=1 0,22 800x578" \
 # Der Zeiger steht in der Bildmitte und ist zwoelf mal achtzehn
 # Bildpunkte gross -- die Probeflaeche bleibt darueber.
 schau "der sichtbare Reiter fuellt die Flaeche unter der Zeile" \
-    flaeche "$TMPD/tb.ppm" 2 44 796 200 224 192 48
+    area "$TMPD/tb.ppm" 2 44 796 200 224 192 48
 schau "der vierte Reiter ist der aktive (helle Leiste rechts oben)" \
-    flaeche "$TMPD/tb.ppm" 700 5 60 12 28 78 126
+    area "$TMPD/tb.ppm" 700 5 60 12 28 78 126
 # RUNDE MERGE: DIE FARBE STEHT NICHT MEHR IM LAEUFER. Der Reiterhinter-
 # grund war 0x222C38, weil diese Runde ihn so in `kernel/wm.fi`
 # hineingeschrieben hatte -- und genau das hat Runde THEME verboten
@@ -353,9 +353,9 @@ DKT=$(sed -n '/fn deco_fallback/,/^}/p' kernel/ui/wm.fi \
 DKT=${DKT:-0x002C3848}
 dkr=$(( (DKT >> 16) & 255 )); dkg=$(( (DKT >> 8) & 255 )); dkb=$(( DKT & 255 ))
 schau "der erste ist es nicht (dunkle Leiste links oben, DK_TITLE)" \
-    flaeche "$TMPD/tb.ppm" 100 5 60 12 $dkr $dkg $dkb
+    area "$TMPD/tb.ppm" 100 5 60 12 $dkr $dkg $dkb
 schau_nicht "und in der Reiterzeile steht Text, nicht nur Farbe" \
-    flaeche "$TMPD/tb.ppm" 606 4 40 16 28 78 126
+    area "$TMPD/tb.ppm" 606 4 40 16 28 78 126
 foto "$K0" "gfx wm tile tileshot tilerot wmhold $GRUND" "$TMPD/rt.txt" \
     "$TMPD/rt.ppm" "$DISK"
 num "der Kern beendet sich sauber" "$RC" eq 21
@@ -365,11 +365,11 @@ num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/rt.txt" "tile: win=4 0,0 400x300" "nach der Drehung liegt Fenster 4 oben links"
 has "$TMPD/rt.txt" "tile: win=1 400,0 400x300" "und Fenster 1 oben rechts"
 schau "im Bild ist oben links jetzt gelb" \
-    flaeche "$TMPD/rt.ppm" 2 22 396 276 224 192 48
+    area "$TMPD/rt.ppm" 2 22 396 276 224 192 48
 schau "und oben rechts rot" \
-    flaeche "$TMPD/rt.ppm" 402 22 396 276 192 48 48
+    area "$TMPD/rt.ppm" 402 22 396 276 192 48 48
 schau_nicht "die Farben sind also WIRKLICH gewandert" \
-    flaeche "$TMPD/rt.ppm" 2 22 396 276 192 48 48
+    area "$TMPD/rt.ppm" 2 22 396 276 192 48 48
 
 echo "== 8. die Tastenbelegung: eine Datei, kein Quelltext =="
 bd=$(feld "$TMPD/t.txt" 'tile: binds=[0-9]+')

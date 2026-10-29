@@ -309,13 +309,13 @@ hat "$E" "panel=1400x1050" "die Tafel steht auf den eingegebenen Zahlen"
 # UND DAS FOTO. Das ist die Zusage: nicht "der Kernel sagt 1400x1050",
 # sondern "QEMU zeigt 1400 x 1050 Bildpunkte".
 schau "das Foto ist 1400x1050 -- der Modus steht WIRKLICH" \
-    groesse "$TMPD/eigen.ppm" 1400 1050
+    size "$TMPD/eigen.ppm" 1400 1050
 schau "das Pruefbild ist neu gezeichnet, Feld 1 ist rot" \
-    flaeche "$TMPD/eigen.ppm" 0 0 100 100 255 0 0
+    area "$TMPD/eigen.ppm" 0 0 100 100 255 0 0
 schau "die Textzeile steht bildpunktgenau im eigenen Modus" \
     text "$TMPD/eigen.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 schau "die Ecke bei (1399,1049) gibt es und sie ist schwarz" \
-    punkt "$TMPD/eigen.ppm" 1399 1049 0 0 0
+    pixel "$TMPD/eigen.ppm" 1399 1049 0 0 0
 gleich "die Zusagen der Runde DISPLAY stehen unveraendert" "15" \
     "$(grep -ao 'disp: selftest [0-9]*' "$E" | head -1 | grep -o '[0-9]*$')"
 gleich "und die neun eigenen dieser Runde" "9" \
@@ -377,13 +377,13 @@ hat "$S" "panel=800x600" "nach drei abgelehnten Anfragen steht die Tafel unverae
 gleich "und KEIN Wechsel hat stattgefunden" "0" \
     "$(grep -a -m1 '^disp: sw=' "$S" | grep -ao 'sw=[0-9]*' | sed 's/sw=//')"
 schau "das Foto ist 800x600 -- der Bildmodus steht noch" \
-    groesse "$TMPD/schranken.ppm" 800 600
+    size "$TMPD/schranken.ppm" 800 600
 schau "Feld 1 ist rot -- der Bildschirm ist NICHT schwarz" \
-    flaeche "$TMPD/schranken.ppm" 0 0 100 100 255 0 0
+    area "$TMPD/schranken.ppm" 0 0 100 100 255 0 0
 schau "und die Textzeile steht bildpunktgenau da, als waere nichts gewesen" \
     text "$TMPD/schranken.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 schau_nicht "ein schwarzer Schirm haette hier kein Rot" \
-    flaeche "$TMPD/schranken.ppm" 0 0 100 100 0 0 0
+    area "$TMPD/schranken.ppm" 0 0 100 100 0 0 0
 behalte "$TMPD/schranken.ppm" abgelehnt-800x600
 
 echo "== 4b. dieselbe Zahl an eine KLEINERE Karte =="
@@ -443,7 +443,7 @@ cf2=$(grep -a -m2 '^disp: confirm pend=' "$Z" | tail -1)
 gleich "nach Ablauf ist sie weg" "0" "$(echo "$cf2" | grep -ao 'pend=[0-9]*' | sed 's/pend=//')"
 gleich "und der Kernel hat zurueckgeschaltet" "1" \
     "$(echo "$cf2" | grep -ao 'after=[0-9]*' | sed 's/after=//')"
-schau "das Foto zeigt wieder 800x600" groesse "$TMPD/zurueck.ppm" 800 600
+schau "das Foto zeigt wieder 800x600" size "$TMPD/zurueck.ppm" 800 600
 schau "und das Pruefbild steht darin" \
     text "$TMPD/zurueck.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 behalte "$TMPD/zurueck.ppm" nach-der-frist-800x600

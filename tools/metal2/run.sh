@@ -34,7 +34,7 @@
 #      ein Klick auf die Schreibtischflaeche, danach 20 Tasten in das
 #      Terminal. Zusagen: VERL 0 und Zeile 4 GRUEN, TK 0, jeder Klick
 #      kommt an (gesendet == K == kl), der Titel "Terminal -- sh" steht
-#      BILDPUNKTGENAU im Foto (checkshot.py tkette), das Terminal traegt
+#      BILDPUNKTGENAU im Foto (checkshot.py tchain), das Terminal traegt
 #      keine langen Messzeilen, die `taskbar:`-Zeilen stehen weiter auf
 #      der Leitung, keine Tafelzeile ist zu lang (LG 0).
 #   B. KERNSTROM 1000 Hz. `mausflut=1000` erzeugt die Pakete IM KERN --
@@ -162,7 +162,7 @@ tf=$(printf '%s' "$F" | sed -n 's/.* tf=\(0x[0-9a-f]*\).*/\1/p')
 tg=$(printf '%s' "$F" | sed -n 's/.* tg=\(0x[0-9a-f]*\).*/\1/p')
 rgb() { python3 -c "v=int('$1',16); print((v>>16)&255,(v>>8)&255,v&255)"; }
 if [ -n "$tx" ] && [ -f "$A/shot.ppm" ]; then
-    aus=$(python3 tools/gfx/checkshot.py tkette "$A/shot.ppm" assets/osum-sans.ttf \
+    aus=$(python3 tools/gfx/checkshot.py tchain "$A/shot.ppm" assets/osum-sans.ttf \
         "$tp" "$tx" "$tb" $(rgb "$tf") $(rgb "$tg") "Terminal -- sh" 2>&1)
     if [ $? -eq 0 ]; then
         ok "der Titel 'Terminal -- sh' steht vollstaendig im Bild bei $tx,$tb -- $aus"

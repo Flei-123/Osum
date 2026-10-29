@@ -241,7 +241,7 @@ pruef_text() {
     text=${zeile#*t=}
     gleich "the application reports the text '$marke'" "$soll" "$text"
     schau "'$soll' is in the window pixel-exact ($marke)" \
-        tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + x)) $((CY + base)) \
+        tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + x)) $((CY + base)) \
         $(rgb "$fg") $(rgb "$bg") "$soll"
 }
 pruef_text kopf "OSUM K15 WIDGETS"
@@ -256,26 +256,26 @@ RSEL=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" sel)
 RSFG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" selfg)
 num "the row height of the list" "$ZH" eq 20
 schau "row 0 of the list, in the SELECTION COLOUR" \
-    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB)) \
+    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB)) \
     $RSFG $RSEL "alpha"
 i=1
 for wort in beta gamma delta epsilon; do
     schau "row $i of the list" \
-        tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + i * ZH)) \
+        tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + i * ZH)) \
         $RFG $RBG "$wort"
     i=$((i + 1))
 done
 schau_nicht "the same checker does NOT pass with the WRONG text" \
-    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + ZH)) \
+    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + ZH)) \
     $RFG $RBG "gamma"
 schau_nicht "nor at a place where there is no text" \
-    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + 8 * ZH)) \
+    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + 8 * ZH)) \
     $RFG $RBG "alpha"
 schau_nicht "nor with the wrong background colour" \
-    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + ZH)) \
+    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + ZH)) \
     $RFG 0 0 0 "beta"
 schau "the library text is really anti-aliased" \
-    glatt "$TMPD/ruhe.ppm" $((CX + RX)) $((CY + RB - 14)) 120 60 \
+    smooth "$TMPD/ruhe.ppm" $((CX + RX)) $((CY + RB - 14)) 120 60 \
     $RFG $RBG 100
 
 echo "== 5. the widgets stand where the layout put them =="
@@ -286,18 +286,18 @@ TAY=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' ay=[0-9]
 TAW=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' w=[0-9]+' | sed 's/.*=//')
 TAH=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' h=[0-9]+' | sed 's/.*=//')
 schau "the focus ring lies pixel-exact around the active tab" \
-    rechteck "$TMPD/ruhe.ppm" "${TAX:-0}" "${TAY:-0}" "${TAW:-0}" "${TAH:-0}" 255 192 32
+    rect "$TMPD/ruhe.ppm" "${TAX:-0}" "${TAY:-0}" "${TAW:-0}" "${TAH:-0}" 255 192 32
 schau_nicht "and NOT around the whole tab bar" \
-    rechteck "$TMPD/ruhe.ppm" $((CX + FX)) $((CY + FY)) "$FW" "$FH" 255 192 32
+    rect "$TMPD/ruhe.ppm" $((CX + FX)) $((CY + FY)) "$FW" "$FH" 255 192 32
 BX=$(rect "$TMPD/ruhe.txt" widgetdemo 5 x); BY=$(rect "$TMPD/ruhe.txt" widgetdemo 5 y)
 BBW=$(rect "$TMPD/ruhe.txt" widgetdemo 5 w); BBH=$(rect "$TMPD/ruhe.txt" widgetdemo 5 h)
 schau_nicht "and there is none around the button that does NOT have it" \
-    rechteck "$TMPD/ruhe.ppm" $((CX + BX)) $((CY + BY)) "$BBW" "$BBH" 255 192 32
+    rect "$TMPD/ruhe.ppm" $((CX + BX)) $((CY + BY)) "$BBW" "$BBH" 255 192 32
 schau "the button area has the colour from /etc/theme (btn=3a4a5e)" \
-    flaeche "$TMPD/ruhe.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 58 74 94
+    area "$TMPD/ruhe.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 58 74 94
 EX=$(rect "$TMPD/ruhe.txt" widgetdemo 3 x); EY=$(rect "$TMPD/ruhe.txt" widgetdemo 3 y)
 schau "the text field has its own area" \
-    flaeche "$TMPD/ruhe.ppm" $((CX + EX + 300)) $((CY + EY + 6)) 60 10 18 24 32
+    area "$TMPD/ruhe.ppm" $((CX + EX + 300)) $((CY + EY + 6)) 60 10 18 24 32
 
 echo "== 6. operate: real clicks from the QEMU monitor =="
 mitte() {
@@ -396,16 +396,16 @@ EFG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: text e1" fg)
 EBASE=$(feld "$TMPD/ruhe.txt" "widgetdemo: text e1" base)
 E1TX=$(feld "$TMPD/ruhe.txt" "widgetdemo: text e1" x)
 schau "and it is in the second field pixel-exact" \
-    tkette "$TMPD/tast.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
+    tchain "$TMPD/tast.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
     $EFG $EBG "Kopiermich-ab"
 schau_nicht "in the run WITHOUT key presses there is NOTHING" \
-    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
+    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
     $EFG $EBG "Kopiermich-ab"
 foto noclip "gfx wm wig wignoclip wmhold wiglong $GRUND" "$M"
 e2n=$(python3 tools/k15/fields.py "$TMPD/noclip.txt" e2)
 gleich "with 'noclip' ONLY the typed text arrives" "-ab" "$e2n"
 schau_nicht "and the pasted text is then not in the picture" \
-    tkette "$TMPD/noclip.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
+    tchain "$TMPD/noclip.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
     $EFG $EBG "Kopiermich-ab"
 M="$TMPD/tab.mon"; : > "$M"
 zeiger "$M" "$E1X" $((CY + E1Y + E1H / 2))
@@ -427,11 +427,11 @@ gleich "after the tab key one types into the NEXT field" "xy" "$e2t"
 e1t=$(python3 tools/k15/fields.py "$TMPD/tabkey.txt" e1)
 gleich "and the previous one is unchanged" "Kopiermich" "$e1t"
 schau "the focus ring moved along -- it now surrounds the second field" \
-    rechteck "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 4 x))) \
+    rect "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 4 x))) \
     $((CY + E2Y)) $(rect "$TMPD/ruhe.txt" widgetdemo 4 w) \
     $(rect "$TMPD/ruhe.txt" widgetdemo 4 h) 255 192 32
 schau_nicht "and NO longer around the first" \
-    rechteck "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 3 x))) \
+    rect "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 3 x))) \
     $((CY + E1Y)) $(rect "$TMPD/ruhe.txt" widgetdemo 3 w) "$E1H" 255 192 32
 
 echo "== 8. menus and dialogs -- own windows at the server =="
@@ -466,17 +466,17 @@ MASC=$(python3 -c "import sys; sys.path.insert(0,'tools/ttf'); import raster; pr
 i=0
 for punkt in Öffnen Umbenennen Entfernen; do
     schau "menu item $i is in the menu window pixel-exact: '$punkt'" \
-        tkette "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + 8)) \
+        tchain "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + 8)) \
         $((MNY + 4 + MASC + i * MZH)) $(rgb "$UIFG") $(rgb "$MENUBG") "$punkt" 96
     i=$((i + 1))
 done
 schau "the frame of the menu window is pixel-exact" \
-    rechteck "$TMPD/pop.ppm" "$MNX" "$MNY" "$MNW" "$MNH" 92 200 255
+    rect "$TMPD/pop.ppm" "$MNX" "$MNY" "$MNW" "$MNH" 92 200 255
 schau_nicht "without the right button there is NO menu" \
-    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((MNX + 8)) \
+    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((MNX + 8)) \
     $((MNY + 4 + MASC)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 schau_nicht "and another word is not there even at tolerance 64" \
-    tkette "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + 8)) \
+    tchain "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + 8)) \
     $((MNY + 4 + MASC)) $(rgb "$UIFG") $(rgb "$MENUBG") "Schuetzen" 128
 M="$TMPD/popw.mon"; : > "$M"
 zeiger "$M" "$POPX" "$POPY"
@@ -496,7 +496,7 @@ has "$TMPD/popw.txt" "widgetdemo: fired id=11 kind=8" "a click on a menu item re
 mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menues)
 num "and the menu fired exactly ONCE" "$mn" ge 1
 schau_nicht "afterwards the menu window is gone again" \
-    tkette "$TMPD/popw.ppm" "$SANS_INK" 15 $((MNX + 8)) \
+    tchain "$TMPD/popw.ppm" "$SANS_INK" 15 $((MNX + 8)) \
     $((MNY + 4 + MASC)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 
 DEL=$(mitte 9)
@@ -516,13 +516,13 @@ SCRW=$(grep -aoE '^wm: [0-9]+x[0-9]+' "$TMPD/dlg.txt" | head -1 | sed 's/wm: //;
 SCRH=$(grep -aoE '^wm: [0-9]+x[0-9]+' "$TMPD/dlg.txt" | head -1 | sed 's/.*x//')
 DLX=$(( (${SCRW:-0} - DW) / 2 )); DLY=$(( (${SCRH:-0} - DH) / 2 ))
 schau "and it is centred on the screen, pixel-exact" \
-    rechteck "$TMPD/dlg.ppm" "$DLX" "$DLY" $((DW + 4)) $((DH + 24)) 76 154 232
+    rect "$TMPD/dlg.ppm" "$DLX" "$DLY" $((DW + 4)) $((DH + 24)) 76 154 232
 DTX=$(feld "$TMPD/dlg.txt" "widgetdemo: text dlg" x)
 DTB=$(feld "$TMPD/dlg.txt" "widgetdemo: text dlg" base)
 DTF=$(frgb "$TMPD/dlg.txt" "widgetdemo: text dlg" fg)
 DTG=$(frgb "$TMPD/dlg.txt" "widgetdemo: text dlg" bg)
 schau "its question is in it, per character" \
-    tkette "$TMPD/dlg.ppm" "$SANS_INK" 15 $((DLX + BORDER + DTX)) \
+    tchain "$TMPD/dlg.ppm" "$SANS_INK" 15 $((DLX + BORDER + DTX)) \
     $((DLY + TITLE + DTB)) $DTF $DTG "Neuer Name"
 OKX=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'x=[0-9]+' | sed 's/.*=//')
 OKY=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'y=[0-9]+' | sed 's/.*=//')
@@ -546,7 +546,7 @@ has "$TMPD/dlgok.txt" "widgetdemo: dlg state=2" "the dialog is confirmed with OK
 dt=$(grep -a 'widgetdemo: dlg state=2' "$TMPD/dlgok.txt" | tail -1 | sed 's/.*text=//')
 gleich "and the text is the one it was opened with" "Kopiermich" "$dt"
 schau_nicht "afterwards the dialog window is gone too" \
-    rechteck "$TMPD/dlgok.ppm" "$DLX" "$DLY" $((DW + 4)) $((DH + 24)) 76 154 232
+    rect "$TMPD/dlgok.ppm" "$DLX" "$DLY" $((DW + 4)) $((DH + 24)) 76 154 232
 
 echo "== 9. the file manager: /bin/explorer against the disk =="
 foto files "gfx wm wigfiles wmhold wiglong $GRUND"
@@ -585,42 +585,42 @@ if [ "${#SP[@]}" -lt 4 ]; then
     SP=(0 0 0 0)
 fi
 schau "the header row: the first column is called 'Name'" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TKOPF)) \
+    tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TKOPF)) \
     $TDIM $THBG "Name" $ETOL
 SZR=$((${SP[3]} + 72))
 schau "the second column is called 'Date modified'" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) $((FCY + TKOPF)) \
+    tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) $((FCY + TKOPF)) \
     $TDIM $THBG "Date modified" $ETOL
 schau "the third 'Type'" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TKOPF)) \
+    tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TKOPF)) \
     $TDIM $THBG "Type" $ETOL
 schau "and the fourth 'Size', right-aligned" \
-    trechts "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + SZR)) $((FCY + TKOPF)) \
+    tright "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + SZR)) $((FCY + TKOPF)) \
     $TDIM $THBG "Size" $ETOL
 zeile=0
 while IFS=$'\t' read -r name gr kind; do
     y=$((FCY + TB + zeile * TZH))
     if [ "$zeile" = 0 ]; then vg="$TSFG"; hg="$TSEL"; else vg="$TFG"; hg="$TBG"; fi
     schau "row $zeile of the table: '$name'" \
-        tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) "$y" $vg $hg "$name" $ETOL
+        tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) "$y" $vg $hg "$name" $ETOL
     if [ "$kind" != "d" ] && [ "$zeile" != 0 ]; then
         schau "and its size in column 4, right-aligned: $(python3 tools/k15/sizetext.py "$gr")" \
-            trechts "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + SZR)) "$y" \
+            tright "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + SZR)) "$y" \
             $TDIM $hg "$(python3 tools/k15/sizetext.py "$gr")" $ETOL
     fi
     zeile=$((zeile + 1))
 done < "$TMPD/baum/soll.txt"
 schau "the kind of a directory" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB)) \
+    tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB)) \
     $TSFG $TSEL "Folder" $ETOL
 schau "and that of a text file" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB + 2 * TZH)) \
+    tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB + 2 * TZH)) \
     $TDIM $TBG "Text" $ETOL
 schau_nicht "and a DIFFERENT kind fails" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB + 2 * TZH)) \
+    tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB + 2 * TZH)) \
     $TDIM $TBG "Program" $ETOL
 schau "the Date modified column shows two dashes -- OFS has no timestamp" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) $((FCY + TB + 2 * TZH)) \
+    tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) $((FCY + TB + 2 * TZH)) \
     $TDIM $TBG "--" $ETOL
 
 echo "== 9b. enter, sort, create =="
@@ -640,10 +640,10 @@ has "$TMPD/fdbl.txt" "explorer: cd /data/bilder" "the double click enters the di
 n2=$(grep -a '^explorer: cd' "$TMPD/fdbl.txt" | tail -1 | grep -oE 'n=[0-9]+' | sed 's/.*=//')
 num "and it holds two files" "$n2" eq 2
 schau "the first of them is in the picture" \
-    tkette "$TMPD/fdbl.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB)) \
+    tchain "$TMPD/fdbl.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB)) \
     $TSFG $TSEL "blau.ppm" $ETOL
 schau_nicht "and the old content is NO longer there" \
-    tkette "$TMPD/fdbl.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB)) \
+    tchain "$TMPD/fdbl.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB)) \
     $TSFG $TSEL "bilder" $ETOL
 SX=$((FCX + ${SP[3]} + 20)); SY=$((FCY + TKOPF - 6))
 M="$TMPD/fsort.mon"; : > "$M"
@@ -659,10 +659,10 @@ has "$TMPD/fsort.txt" "explorer: op" "a click on the header row re-sorts"
 sb=$(grep -a '^explorer: op' "$TMPD/fsort.txt" | tail -1 | grep -oE 'w=[0-9]+' | sed 's/.*=//')
 num "by key 1 (size, column 4)" "$sb" eq 1
 schau "sorted by size the empty file comes first among the files" \
-    tkette "$TMPD/fsort.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB + 2 * TZH)) \
+    tchain "$TMPD/fsort.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB + 2 * TZH)) \
     $TFG $TBG "delta.txt" $ETOL
 schau_nicht "sorted by name something else stood there" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB + 2 * TZH)) \
+    tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB + 2 * TZH)) \
     $TFG $TBG "delta.txt" $ETOL
 PXC=$((TX + 100)); PYC=$((TB + 2 * TZH - 6))
 POPH=$((15 * 28 + 8))
@@ -786,11 +786,11 @@ cp -f "$TMPD/disk2.img" "$TMPD/disk.img"
 foto theme2 "gfx wm wig wmhold wiglong $GRUND"
 cp -f "$TMPD/disk1.img" "$TMPD/disk.img"
 schau "with btn=804020 in the file the button has THIS colour" \
-    flaeche "$TMPD/theme2.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 128 64 32
+    area "$TMPD/theme2.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 128 64 32
 schau_nicht "and then NOT the previous one" \
-    flaeche "$TMPD/theme2.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 58 74 94
+    area "$TMPD/theme2.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 58 74 94
 schau "and the text on it is blended against the new ground" \
-    tkette "$TMPD/theme2.ppm" "$SANS_INK" 15 $((CX + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" x))) \
+    tchain "$TMPD/theme2.ppm" "$SANS_INK" 15 $((CX + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" x))) \
     $((CY + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" base))) \
     $(rgb "$UIFG") 128 64 32 "Knopf"
 
@@ -808,13 +808,13 @@ sh0=$(feld "$TMPD/ruhe.txt" "wig: blits" shape)
 num "otherwise it stays the arrow" "$sh0" eq 0
 BY0=$((CY + E1Y + E1H / 2))
 schau "the middle of the bar is at the pointer and is black" \
-    punkt "$TMPD/beam.ppm" "$E1X" "$BY0" 0 0 0
+    pixel "$TMPD/beam.ppm" "$E1X" "$BY0" 0 0 0
 schau "and its edge is white" \
-    punkt "$TMPD/beam.ppm" $((E1X + 1)) "$BY0" 255 255 255
+    pixel "$TMPD/beam.ppm" $((E1X + 1)) "$BY0" 255 255 255
 schau_nicht "and three pixels further right there is nothing of the pointer" \
-    punkt "$TMPD/beam.ppm" $((E1X + 4)) "$BY0" 255 255 255
+    pixel "$TMPD/beam.ppm" $((E1X + 4)) "$BY0" 255 255 255
 schau_nicht "without a text field underneath there is no bar (the arrow)" \
-    punkt "$TMPD/ruhe.ppm" "$E1X" "$BY0" 0 0 0
+    pixel "$TMPD/ruhe.ppm" "$E1X" "$BY0" 0 0 0
 
 echo "== 14. the name, the second name and discoverability =="
 aus=$(python3 tools/k15/noname.py kernel/user/explorer.fi "File Explorer" 2>&1)
@@ -840,10 +840,10 @@ has "$TMPD/files.txt" "explorer: name [File Explorer] aus [explorer.osp]" \
     "and the program fetches it from the bundle"
 if [ -z "$STRIP" ]; then
 schau "the display name is in the title bar pixel-exact" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 18)) \
+    tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 18)) \
     255 255 255 28 78 126 "File Explorer" 96 $((FWY + 21))
 schau_nicht "and another name is NOT there" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 18)) \
+    tchain "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 18)) \
     255 255 255 28 78 126 "Dateimanager" 96 $((FWY + 21))
 else
 ok "the title bar of the file manager is its tab strip (no server title, r454; measured in tools/tabstrip)"
@@ -957,19 +957,19 @@ set -- $(zeile_farben "$EDI")
 EDFG="$1 $2 $3"; EDBG="$4 $5 $6"; EDDF="$7 $8 $9"
 set --
 schau "the file manager row: its name, bold, per character" \
-    tkette "$TMPD/start.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + FEI * SZH)) \
+    tchain "$TMPD/start.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + FEI * SZH)) \
     $FEFG $FEBG "File Explorer" 96
 schau "and below it its description, in caption size" \
-    tkette "$TMPD/start.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + FEI * SZH + SZH / 2)) \
+    tchain "$TMPD/start.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + FEI * SZH + SZH / 2)) \
     $FEDF $FEBG "View files and folders" 96
 schau "and that of the terminal" \
-    tkette "$TMPD/start.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + EDI * SZH)) \
+    tchain "$TMPD/start.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + EDI * SZH)) \
     $EDFG $EDBG "Terminal" 96
 schau "with its description" \
-    tkette "$TMPD/start.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + EDI * SZH + SZH / 2)) \
+    tchain "$TMPD/start.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + EDI * SZH + SZH / 2)) \
     $EDDF $EDBG "A command prompt with a shell" 96
 schau_nicht "the name is NOT there in the regular weight (the counter-proof to the bold)" \
-    tkette "$TMPD/start.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB + FEI * SZH)) \
+    tchain "$TMPD/start.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB + FEI * SZH)) \
     $FEFG $FEBG "File Explorer" 96
 sym() { echo "$TMPD/buendel/$1.osp.symbol"; }
 ICS=16
@@ -1024,13 +1024,13 @@ case "$tf" in
     *) bad "the hit is not the file manager: $tf" ;;
 esac
 schau "in the picture it is in row 0 of the hit list" \
-    tkette "$TMPD/suche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    tchain "$TMPD/suche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "File Explorer" 96
 schau "with its description below" \
-    tkette "$TMPD/suche.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + SZH / 2)) \
+    tchain "$TMPD/suche.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + SZH / 2)) \
     $SSFG $SSEL "View files and folders" 96
 schau_nicht "and row 1 holds nothing more" \
-    tkette "$TMPD/suche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
+    tchain "$TMPD/suche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
     $SFG $SBG "Terminal" 96
 foto nokeys "gfx wm wigstart wignokeys wmhold wiglong $GRUND" "$M"
 has "$TMPD/nokeys.txt" "launcher: suche [ordner] treffer=0 apps=0" \
@@ -1038,7 +1038,7 @@ has "$TMPD/nokeys.txt" "launcher: suche [ordner] treffer=0 apps=0" \
 has "$TMPD/nokeys.txt" "launcher: apps=$soll" \
     "although the same directory with the same $soll programs was read"
 schau_nicht "and the picture then shows no row either" \
-    tkette "$TMPD/nokeys.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    tchain "$TMPD/nokeys.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "File Explorer" 96
 suchmon "$TMPD/unsinn.mon" 1.0 q u a s t e
 foto unsinn "gfx wm wigstart wmhold wiglong $GRUND" "$TMPD/unsinn.mon"
@@ -1175,10 +1175,10 @@ grep -q '^/data/bilder/blau.ppm ' "$TMPD/disk.ls" \
     && ok "which the image really carries at this place" \
     || bad "/data/bilder/blau.ppm is not in the image at all"
 schau "and in the picture its name is in row 0 of the hit list, bold, per character" \
-    tkette "$TMPD/dsuche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    tchain "$TMPD/dsuche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "blau.ppm" 96
 schau "and below it the folder it lies in" \
-    tkette "$TMPD/dsuche.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + SZH / 2)) \
+    tchain "$TMPD/dsuche.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + SZH / 2)) \
     $SSFG $SSEL "/data/bilder" 96
 DIX=$(feld "$TMPD/dsuche.txt" "launcher: index" n)
 num "the launcher built an index over this many names for it" "$DIX" ge 40
@@ -1190,7 +1190,7 @@ has "$TMPD/noidx.txt" "launcher: index n=0" \
 has "$TMPD/noidx.txt" "launcher: apps=$soll" \
     "although the same application directory with the same $soll bundles was read"
 schau_nicht "and the picture then shows no file either" \
-    tkette "$TMPD/noidx.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    tchain "$TMPD/noidx.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "blau.ppm" 96
 
 echo "== 15d. and the old images are the old ones, octet by octet =="
