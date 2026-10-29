@@ -162,7 +162,7 @@ def main():
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
-    nodes = parse(open(a.dump, "rb").read().decode("latin-1"))
+    nodes = parse(open(a.dump, "rb").read().decode("utf-8", errors="replace"))
     if a.list:
         for w in windows(nodes):
             print(f'win{w["win"]} {w["x"]},{w["y"]} {w["w"]}x{w["h"]} "{w["name"]}"')
@@ -172,7 +172,7 @@ def main():
         print("no window" + (f' matching "{a.window}"' if a.window else "") + " in dump", file=sys.stderr)
         return 1
     if a.json:
-        json.dump(ns, sys.stdout, indent=1)
+        json.dump(ns, sys.stdout, indent=1, ensure_ascii=False)
         print()
     if a.out:
         render(win, ns, "dark" if a.dark else "light", a.scale).save(a.out)

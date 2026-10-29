@@ -2579,20 +2579,26 @@ done
 # nicht aus einer abgemessenen Zahl.
 bash tools/themestore/build.sh "$TMPD/rvor" extra='einst' uitrace=yes \
     keep=yes radius=4 > "$TMPD/rvor.log" 2>&1
-# r399: the sliders are the four rectangles 160 wide (the first one is the corner radius);
-# their y moves with the layout of the page, so they are found by their width and not by a row
+TABL=$(grep -a 'wlib: tab i=21 ' "$TMPD/rvor/serial.txt" | tail -1)
+TABX=$(printf '%s' "$TABL" | grep -oE ' ax=[0-9]+' | grep -oE '[0-9]+')
+TABY=$(printf '%s' "$TABL" | grep -oE ' ay=[0-9]+' | grep -oE '[0-9]+')
+TABW=$(printf '%s' "$TABL" | grep -oE ' w=[0-9]+' | grep -oE '[0-9]+')
+TABH=$(printf '%s' "$TABL" | grep -oE ' h=[0-9]+' | grep -oE '[0-9]+')
+TCX=$(( ${TABX:-30} + ${TABW:-232} / 2 ))
+TCY=$(( ${TABY:-191} + ${TABH:-30} / 2 ))
+bash tools/themestore/build.sh "$TMPD/rtab" extra='einst' uitrace=yes \
+    keep=yes radius=4 click="$TCX,$TCY" click="$TCX,$TCY" \
+    > "$TMPD/rtab.log" 2>&1
 SL=$(grep -ao 'settings: rect name=[a-z]* x=[0-9]* y=[0-9]* w=160 h=[0-9]*' \
-     "$TMPD/rvor/serial.txt" | tail -4 | head -1)
+     "$TMPD/rtab/serial.txt" | tail -2 | head -1)
 SLX=$(printf '%s' "$SL" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
 SLY=$(printf '%s' "$SL" | grep -oE ' y=[0-9]+' | grep -oE '[0-9]+')
 SLW=$(printf '%s' "$SL" | grep -oE ' w=[0-9]+' | grep -oE '[0-9]+')
-# Fensterinneres: 22 nach rechts (Rahmen) und 25 nach unten (Rahmen
-# und Titel), wie es die Reiterzeile selbst meldet (x=16 -> ax=38).
-CX=$(( ${SLX:-316} + 22 + (${SLW:-428} * 2 / 3) ))
+CX=$(( ${SLX:-747} + 22 + (${SLW:-160} * 2 / 3) ))
 SLH=$(printf '%s' "$SL" | grep -oE ' h=[0-9]+' | grep -oE '[0-9]+')
-CY=$(( ${SLY:-408} + 25 + ${SLH:-24} / 2 ))
+CY=$(( ${SLY:-202} + 25 + ${SLH:-20} / 2 ))
 bash tools/themestore/build.sh "$TMPD/rklick" extra='einst' uitrace=yes \
-    keep=yes radius=4 click="$CX,$CY" click="$CX,$CY" \
+    keep=yes radius=4 click="$TCX,$TCY" click="$TCX,$TCY" click="$CX,$CY" click="$CX,$CY" \
     > "$TMPD/rklick.log" 2>&1
 RNEU=$(grep -a 'settings: glas radius=' "$TMPD/rklick/serial.txt" | tail -1 \
        | grep -oE 'radius=[0-9]+' | cut -d= -f2)

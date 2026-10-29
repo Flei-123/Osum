@@ -128,7 +128,7 @@ while [ $i -lt 1000 ]; do
 done
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 wait "$QPID" 2>/dev/null
-tr -cd '\11\12\15\40-\176' < "$TMPD/ser.txt" > "$TMPD/ser.klar"
+tr -cd '\11\12\15\40-\176\200-\377' < "$TMPD/ser.txt" > "$TMPD/ser.klar"
 perl -0pi -e 's/wm: fen i=[^\n]*? tka=\d+\r?\n//g' "$TMPD/ser.klar"
 G="$TMPD/ser.klar"
 

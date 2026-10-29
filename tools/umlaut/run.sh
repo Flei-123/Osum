@@ -440,6 +440,7 @@ if foto speicher "append=gfx wm wig wigspeicher wmhold wiglong nokbd nosched nop
         "der Speicher-Dialog ist oben"
     glyphen speicher "Speicher" "Größe" 3
     glyphen speicher "Speicher" "Größte Dateien" 3
+    glyphen speicher "Speicher" "Löschen"
 
     # DIE SPALTEN, AM BILD NACHGERECHNET. `speicher.fi` setzt die
     # Breiten in BILDPUNKTEN (lspalten 210/100/74, rspalten 210/100);
