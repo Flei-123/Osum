@@ -5,7 +5,7 @@
 #   /root/jarvis/bin/heavy bash tools/settingsaudit/run.sh [<outdir>] [mode=light|dark] [scale=1|2]
 #
 # It boots the design-audit machine (tools/design/audit.sh), opens Settings, clicks every sidebar page
-# (rect names srecttab* = pages; child pages are opened through their parent page first), types a search that matches nothing, takes a picture each time and
+# (rect names srecttab* = pages; `klicksuche` scrolls the sidebar until the tab has a rectangle; child pages are opened through their parent page first), types a search that matches nothing, takes a picture each time and
 # prints the per-page control count of the scene tree (tools/settingsaudit/runtime.py).
 # Pass `halt=900` (20 pages need more than the default 420 s). The outdir keeps serial.txt and the *.ppm pictures;
 # convert them for docs with `python3 -I tools/settingsaudit/ppm2png.py <outdir> docs/img/settings 60`.

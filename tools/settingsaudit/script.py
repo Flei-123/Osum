@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 import sys
 
+SIDEBAR_POINT = "140,300"
 LABELS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
@@ -32,8 +33,8 @@ def drehbuch(pages, yres):
     for page in sorted(pages):
         parent = parent_uri(pages[page])
         if parent in by_uri:
-            lines += ["klickauf " + tab_name(by_uri[parent]), "warte 2"]
-        lines += ["klickauf " + tab_name(page), "warte 2", "foto page-" + LABELS[page]]
+            lines += ["klicksuche %s %s" % (tab_name(by_uri[parent]), SIDEBAR_POINT), "warte 2"]
+        lines += ["klicksuche %s %s" % (tab_name(page), SIDEBAR_POINT), "warte 2", "foto page-" + LABELS[page]]
     lines += ["taste ctrl-f", "tippe zzzz", "warte 2", "foto search-empty"]
     return "\n".join(lines) + "\n"
 

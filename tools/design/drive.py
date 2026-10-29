@@ -1305,6 +1305,31 @@ def main():
             f.fahre_nahe(x, y)
             print("fahreauf %s -> %d,%d  (rect %d,%d %dx%d)"
                   % (arg, x, y, r[0], r[1], r[2], r[3]))
+        elif b == "klicksuche":
+            name, px, py = arg.split()[0], *(int(v) for v in arg.split()[1].split(","))
+            f.fahre_nahe(px, py)
+            time.sleep(0.5)
+            r = f.rechteck(name)
+            tries = 0
+            while r is None and tries < 30:
+                step = -3
+                if tries == 15:
+                    for _ in range(45):
+                        f.cmd("mouse_move 0 0 1")
+                        time.sleep(0.05)
+                for _ in range(abs(step)):
+                    f.cmd("mouse_move 0 0 %d" % (1 if step > 0 else -1))
+                    time.sleep(0.12)
+                time.sleep(0.6)
+                r = f.rechteck(name)
+                tries += 1
+            if r is None:
+                print("klicksuche %s -> KEIN RECHTECK GEMELDET" % name)
+                fehler += 1
+                continue
+            x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
+            print("klicksuche %s -> %d,%d  (rect %d,%d %dx%d, %d scrolls)" % (name, x, y, r[0], r[1], r[2], r[3], tries))
+            f.klick(x, y, 1)
         elif b in ("klickauf", "doppelauf", "rklickauf", "mklickauf"):
             r = f.rechteck(arg)
             # r837: under load the window needs a moment after the opening click to report its

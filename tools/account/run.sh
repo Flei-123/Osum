@@ -226,7 +226,7 @@ TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | sed 's/^[^=]*=//' | grep
 # Seiten von Paketen (/apps/<app>.prog/SETTINGS) stehen NICHT in settings.tabs, sie kommen aus dem Katalog.
 # 31 (touchpad tab added) -- two catalogue lines (settings.tabs, settings.tabs2) because one value holds at most 191 octets (msg VALW 192)
 TABS_LINES=$(grep -ac '^settings.tabs' locale/de/messages)
-num "Reiter in settings.tabs + settings.tabs2 (deutsch)" "$((TABS_DE + TABS_LINES))" eq 31
+num "Reiter in settings.tabs, tabs2 + tabs3 (deutsch)" "$((TABS_DE + TABS_LINES))" eq 33
 
 # ======================================================================
 echo "== 3. der Aufbau: Kern, Userland, Zertifikat, Attrappe =="
