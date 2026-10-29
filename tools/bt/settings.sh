@@ -42,8 +42,9 @@ nochk() { grep -aq -- "$3" "$T/$1.klar" && bad "$1: $2 (found: $3)" || ok "$1: $
 count() { grep -ac -- "$2" "$1" 2>/dev/null; true; }
 
 : > "$T/g.trig"
-python3 -I tools/usbredir/usbdev.py --sock "$T/g.sock" --profile btdongle --trigger "$T/g.trig" --unplug "$T/g.unplug" \
-    --log "$T/g.gadget" --max-secs 300 --bt normal &
+( while [ ! -S "$T/g.sock" ]; do sleep 0.2; done
+  exec python3 -I tools/usbredir/usbdev.py --sock "$T/g.sock" --profile btdongle --trigger "$T/g.trig" --unplug "$T/g.unplug" \
+    --log "$T/g.gadget" --max-secs 300 --bt normal ) &
 echo $! > "$T/g.pid"
 XDEV="-device qemu-xhci,id=x0 -chardev socket,id=r0,path=$T/g.sock,server=on,wait=off -device usb-redir,chardev=r0"
 run_audit full "$T/full.txt" "$XDEV"
