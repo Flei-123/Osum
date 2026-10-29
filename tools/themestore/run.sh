@@ -2663,8 +2663,8 @@ has "$TLOG" "wm: termgitter win=" \
     "der Kern nennt das Zellenraster des Terminals (Lage, Zelle, Aufsteiger)"
 UM=$(python3 tools/look/umlaut.py "$TLOG" "$TPPM" --gitter=1,1 \
      'KEIN EINZIGES GERÄT!' 2>&1 | head -1)
-UF=$(printf '%s' "$UM" | grep -oE '[0-9]+ falsch' | grep -oE '^[0-9]+')
-UT=$(printf '%s' "$UM" | grep -oE '[0-9]+ Tintenpunkte' | grep -oE '^[0-9]+')
+UF=$(printf '%s' "$UM" | grep -oE '[0-9]+ wrong' | grep -oE '^[0-9]+')
+UT=$(printf '%s' "$UM" | grep -oE '[0-9]+ ink pixels' | grep -oE '^[0-9]+')
 num "das Ä im Terminal ist bildpunktgenau gerastert (falsche Punkte)" \
     "${UF:-99}" eq 0
 num "und es ist ueberhaupt Tinte gemessen worden" "${UT:-0}" ge 500

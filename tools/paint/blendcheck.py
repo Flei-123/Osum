@@ -120,7 +120,7 @@ QUELLEN = [
     ("kernel/ui/wm.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
     ("kernel/user/wlibc.fi",
      "return (src *% a +% dst *% ia +% 127) / 255"),
-    ("tools/gfx/checkshot.py", "(alt[k] * ia + neu[k] * a + 127) // 255"),
+    ("tools/gfx/checkshot.py", "(old[k] * ia + new[k] * a + 127) // 255"),
     ("tools/icons/sheet.py", "+ 127"),
 ]
 

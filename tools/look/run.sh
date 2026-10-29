@@ -117,7 +117,7 @@ if shot A user=- icons=yes lang=de uitrace=yes extra=launchervis keep=yes; then
             $(( (BGV >> 16) & 255 )) $(( (BGV >> 8) & 255 )) $(( BGV & 255 )) "Ausführen" 60 2>&1)
         echo "        $R"
         case "$R" in
-            *", 0 ohne"*) ok "'Ausführen' is on the screen, every glyph with its shape" ;;
+            *", 0 without"*) ok "'Ausführen' is on the screen, every glyph with its shape" ;;
             *) bad "the umlaut word does not match a second rasterisation" ;;
         esac
     else

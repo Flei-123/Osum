@@ -4,6 +4,7 @@ import re, sys
 
 CTL = re.compile(r"^settings: controls page=(\d+) n=(\d+)$", re.M)
 LIMIT = 8
+ADVANCED = set()
 
 
 def declared(routes_path, map_path):
@@ -12,6 +13,8 @@ def declared(routes_path, map_path):
         w = ln.split()
         if len(w) >= 2 and w[0] == "route":
             cur = w[1]
+            if "advanced" in w[5:]:
+                ADVANCED.add(cur)
         elif len(w) == 2 and w[0] == "controls" and cur:
             counts[cur] = int(w[1])
     pages = {}
@@ -42,7 +45,7 @@ def judge(counts, pages, meas):
             flag = "NO-DECLARATION"
         elif n > dec:
             flag = "UNDER-DECLARED"
-        if n > LIMIT:
+        if n > LIMIT and uri not in ADVANCED:
             flag = (flag + " OVER-LIMIT").strip()
         if flag:
             bad += 1

@@ -1,178 +1,108 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-"""tools/gfx/checkshot.py -- ein Bildschirmfoto MASCHINELL pruefen.
-
-Ein Test, der nur sagt "der Kernel ist nicht abgestuerzt", beweist ueber
-einen Bildschirm gar nichts.  Deshalb macht `tools/gfx/run.sh` echte
-Bildschirmfotos ueber den QEMU-Monitor (`screendump`, das Ergebnis ist ein
-PPM in P6), und dieses Programm rechnet sie nach:
-
-  groesse    Breite und Hoehe -- der Beweis, dass der Bildmodus wirklich
-             gesetzt wurde.  Ohne Grafik zeigt dieselbe Maschine 720x400
-             (VGA-Textmodus), mit Grafik 800x600.
-  punkt      die Farbe an einer Stelle.
-  flaeche    wie viele Bildpunkte eines Rechtecks NICHT die erwartete
-             Farbe haben.
-  nichtleer  wie viele Bildpunkte eines Rechtecks nicht schwarz sind.
-  text       eine Textzeile BILDPUNKTGENAU gegen den Zeichensatz -- nicht
-             "da ist irgendwas hell", sondern: an jeder der 128 Stellen
-             jeder Glyphe steht Vorder- oder Hintergrundfarbe, so wie die
-             Bitmaske es sagt.
-  finde      wie `konsole`, aber fuer EINE gesuchte Zeile -- damit im
-             Fehlerfall dasteht, WELCHE Zeile nicht stimmt.
-  konsole    das GANZE Bild gegen den seriellen Mitschnitt.  Der
-             Mitschnitt wird durch dieselbe Zustandsmaschine geschickt,
-             die `fb.putc` ist (Umbruch am Zeilenende, Rollen, Tabulator,
-             Ruecktaste), das Ergebnis mit dem Zeichensatz gemalt und
-             Bildpunkt fuer Bildpunkt verglichen.  DAS ist die Zusage
-             "beide Ausgaben zeigen dasselbe".
-  font       der Zeichensatz in kernel/gfx/font.fi gegen die Rust-Vorlage, aus
-             der er portiert wurde.
-  ttext      eine Zeile ECHTER Schrift (TrueType, kantengeglaettet) --
-             gegen `tools/ttf/raster.py`, die zweite Fassung des
-             Rasterers aus `kernel/gfx/ttf.fi`.
-  tgrid      dasselbe fuer ein ZEICHENRASTER (ein Terminalfenster).
-  glatt      ist es wirklich eine Kantenglaettung? Zaehlt die
-             Zwischenstufen -- eine Rasterung ohne Glaettung hat keine.
-  rechteck   ein Fensterrahmen: die vier Kanten in der Farbe, einen
-             Bildpunkt daneben nicht.
-  lesen      das Bild ZURUECK IN TEXT: jede Zelle wird gegen alle 95
-             Glyphen gehalten und der Buchstabe ausgegeben, der dort
-             wirklich steht.  Damit sieht man, was der Bildschirm zeigt,
-             statt nur zu erfahren, wie viele Bildpunkte falsch sind.
-
-RUNDE K7B: `text`, `konsole` und `finde` melden im Fehlerfall nicht mehr
-nur eine Zahl, sondern JEDE abweichende Zelle mit Soll und Ist -- und das
-Ist wird gegen den Zeichensatz erkannt, nicht geraten.  Genau das hat den
-Fehler dieser Runde gefunden: auf dem Schirm standen nur noch '7',
-'01234' und ':', also ausschliesslich Zeichen unter 0x40, waehrend jeder
-Buchstabe leer blieb.  Aus "410 von 3200 Bildpunkten falsch" liest das
-niemand heraus; aus "soll 'O', ist ' '" liest es jeder.
-
-Der Zeichensatz wird IMMER aus `kernel/gfx/font.fi` gelesen, nie aus einer
-Kopie: geprueft werden soll der, der im Kernel steht.
-
-Jeder Unterbefehl schreibt EINE Zeile und gibt 0 zurueck, wenn alles
-stimmt, sonst 1.
-"""
 import re
 import sys
 
 
-# ------------------------------------------------------------------ PPM
-
-def ppm_lesen(pfad):
-    """P6 -- das schreibt QEMUs `screendump`."""
-    roh = open(pfad, "rb").read()
-    if not roh.startswith(b"P6"):
-        raise ValueError("kein P6-PPM: %s" % pfad)
-    felder = []
+def read_ppm(path):
+    raw = open(path, "rb").read()
+    if not raw.startswith(b"P6"):
+        raise ValueError("not a P6 PPM: %s" % path)
+    fields = []
     i = 2
-    while len(felder) < 3:
-        while i < len(roh) and roh[i:i + 1].isspace():
+    while len(fields) < 3:
+        while i < len(raw) and raw[i:i + 1].isspace():
             i += 1
-        if roh[i:i + 1] == b"#":
-            while i < len(roh) and roh[i] != 0x0A:
+        if raw[i:i + 1] == b"#":
+            while i < len(raw) and raw[i] != 0x0A:
                 i += 1
             continue
         j = i
-        while j < len(roh) and not roh[j:j + 1].isspace():
+        while j < len(raw) and not raw[j:j + 1].isspace():
             j += 1
-        felder.append(int(roh[i:j]))
+        fields.append(int(raw[i:j]))
         i = j
-    i += 1  # das eine Trennzeichen hinter dem Hoechstwert
-    b, h, _ = felder
-    return b, h, roh[i:i + b * h * 3]
+    i += 1
+    b, h, _ = fields
+    return b, h, raw[i:i + b * h * 3]
 
 
-class Bild:
-    def __init__(self, pfad):
-        self.b, self.h, self.d = ppm_lesen(pfad)
+class Image:
+    def __init__(self, path):
+        self.b, self.h, self.d = read_ppm(path)
 
-    def punkt(self, x, y):
+    def pixel(self, x, y):
         if x < 0 or y < 0 or x >= self.b or y >= self.h:
             return None
         o = (y * self.b + x) * 3
         return (self.d[o], self.d[o + 1], self.d[o + 2])
 
 
-# ----------------------------------------------------------- Zeichensatz
-
-ERSTES = 0x20
-LETZTES = 0x7E
-HOCH = 16
-BREIT = 8
+FIRST = 0x20
+LAST = 0x7E
+HEIGHT = 16
+WIDTH = 8
 
 
-def font_aus_firn(pfad):
-    """Die zehn b"..."-Stuecke aus kernel/gfx/font.fi, in ihrer Reihenfolge."""
-    quelle = open(pfad, "r", encoding="utf-8").read()
-    stuecke = re.findall(r'var b: \[u8; \d+\] = b"((?:\\x[0-9a-fA-F]{2})+)"',
-                         quelle)
-    daten = bytearray()
-    for s in stuecke:
-        daten += bytes(int(v, 16)
+def font_from_firn(path):
+    source = open(path, "r", encoding="utf-8").read()
+    pieces = re.findall(r'var b: \[u8; \d+\] = b"((?:\\x[0-9a-fA-F]{2})+)"',
+                         source)
+    data = bytearray()
+    for s in pieces:
+        data += bytes(int(v, 16)
                        for v in re.findall(r"\\x([0-9a-fA-F]{2})", s))
-    return bytes(daten)
+    return bytes(data)
 
 
-def font_aus_rust(pfad):
-    """Die Glyphentabelle aus kernel/src/drivers/font.rs des alten Rust-Kerns."""
-    quelle = open(pfad, "r", encoding="utf-8").read()
-    zeilen = re.findall(r"\[((?:0x[0-9a-fA-F]{2},\s*){15}0x[0-9a-fA-F]{2})\]",
-                        quelle)
-    daten = bytearray()
-    for z in zeilen:
-        daten += bytes(int(v, 16)
+def font_from_rust(path):
+    source = open(path, "r", encoding="utf-8").read()
+    rows = re.findall(r"\[((?:0x[0-9a-fA-F]{2},\s*){15}0x[0-9a-fA-F]{2})\]",
+                        source)
+    data = bytearray()
+    for z in rows:
+        data += bytes(int(v, 16)
                        for v in re.findall(r"0x([0-9a-fA-F]{2})", z))
-    return bytes(daten)
+    return bytes(data)
 
 
-def glyphe(font, zeichen):
-    c = zeichen
-    if c < ERSTES or c > LETZTES:
-        c = 0x3F  # '?', genau wie `font.row`
-    i = (c - ERSTES) * HOCH
-    return font[i:i + HOCH]
+def glyph(font, char):
+    c = char
+    if c < FIRST or c > LAST:
+        c = 0x3F
+    i = (c - FIRST) * HEIGHT
+    return font[i:i + HEIGHT]
 
 
-# ---------------------------------------------------- die Konsole in Klein
-#
-# Eine Nachbildung von `fb.putc`, Zeichen fuer Zeichen dieselben
-# Entscheidungen.  Ergebnis ist ein Raster aus Zellen; eine Zelle ist
-# entweder leer (nie beschrieben, also Hintergrund) oder ein Zeichen.
-
-class Konsole:
-    def __init__(self, spalten, zeilen):
-        self.sp = spalten
-        self.ze = zeilen
-        self.gitter = [[None] * spalten for _ in range(zeilen)]
+class Console:
+    def __init__(self, columns, rows):
+        self.cols = columns
+        self.rows = rows
+        self.grid = [[None] * columns for _ in range(rows)]
         self.x = 0
         self.y = 0
 
-    def rollen(self):
-        self.gitter.pop(0)
-        self.gitter.append([None] * self.sp)
+    def scroll(self):
+        self.grid.pop(0)
+        self.grid.append([None] * self.cols)
 
-    def umbruch(self):
+    def wrap(self):
         self.x = 0
         self.y += 1
-        if self.y >= self.ze:
-            self.rollen()
-            self.y = self.ze - 1
+        if self.y >= self.rows:
+            self.scroll()
+            self.y = self.rows - 1
 
-    def weiter(self):
+    def advance(self):
         self.x += 1
-        if self.x >= self.sp:
-            self.umbruch()
+        if self.x >= self.cols:
+            self.wrap()
 
-    def zeichen(self, c):
-        self.gitter[self.y][self.x] = c
-        self.weiter()
+    def char(self, c):
+        self.grid[self.y][self.x] = c
+        self.advance()
 
     def put(self, c):
         if c == 10:
-            self.umbruch()
+            self.wrap()
             return
         if c == 13:
             self.x = 0
@@ -180,412 +110,332 @@ class Konsole:
         if c == 8:
             if self.x > 0:
                 self.x -= 1
-                self.gitter[self.y][self.x] = 32
+                self.grid[self.y][self.x] = 32
             return
         if c == 9:
             for _ in range(8 - (self.x & 7)):
-                self.zeichen(32)
+                self.char(32)
             return
-        self.zeichen(c)
+        self.char(c)
 
-    def text(self, oktette):
-        for c in oktette:
+    def text(self, octets):
+        for c in octets:
             self.put(c)
 
 
-# ----------------------------------------------------------- Unterbefehle
-
-VG = (200, 208, 216)   # 0xC8 0xD0 0xD8 -- die Vordergrundfarbe von `fb.init`
-HG = (0, 0, 0)
+FG = (200, 208, 216)
+BG = (0, 0, 0)
 
 
-def farbe_von(args, i):
+def color_at(args, i):
     return (int(args[i]), int(args[i + 1]), int(args[i + 2]))
 
 
-def zeile_pruefen(bild, font, zeile, spalte, text, vg, hg):
-    falsch = 0
-    gesamt = 0
-    for k, zeichen in enumerate(text):
-        g = glyphe(font, zeichen)
-        for r in range(HOCH):
+def check_row(image, font, row, column, text, fg, bg):
+    wrong = 0
+    total = 0
+    for k, char in enumerate(text):
+        g = glyph(font, char)
+        for r in range(HEIGHT):
             bits = g[r]
-            for c in range(BREIT):
-                x = (spalte + k) * BREIT + c
-                y = zeile * HOCH + r
-                soll = vg if (bits >> (7 - c)) & 1 else hg
-                gesamt += 1
-                if bild.punkt(x, y) != soll:
-                    falsch += 1
-    return gesamt, falsch
+            for c in range(WIDTH):
+                x = (column + k) * WIDTH + c
+                y = row * HEIGHT + r
+                expected = fg if (bits >> (7 - c)) & 1 else bg
+                total += 1
+                if image.pixel(x, y) != expected:
+                    wrong += 1
+    return total, wrong
 
 
-def erkennen(bild, font, zy, zx, vg=None, hg=None):
-    """Welches Zeichen steht WIRKLICH in dieser Zelle?
-
-    Die Zelle wird gegen alle 95 Glyphen des Zeichensatzes gehalten; der
-    mit den wenigsten Abweichungen gewinnt.  Zurueck kommt (Zeichen,
-    Abweichungen) -- ist die zweite Zahl 0, steht dort genau diese Glyphe,
-    sonst ist es das aehnlichste und die Zelle ist etwas anderes.
-    """
-    vg = VG if vg is None else vg
-    hg = HG if hg is None else hg
-    bestes = None
-    bestf = 1 << 30
-    for c in range(ERSTES, LETZTES + 1):
-        _, f = zeile_pruefen(bild, font, zy, zx, bytes([c]), vg, hg)
-        if f < bestf:
-            bestf = f
-            bestes = c
+def recognize(image, font, row_y, col_x, fg=None, bg=None):
+    fg = FG if fg is None else fg
+    bg = BG if bg is None else bg
+    best = None
+    best_diff = 1 << 30
+    for c in range(FIRST, LAST + 1):
+        _, f = check_row(image, font, row_y, col_x, bytes([c]), fg, bg)
+        if f < best_diff:
+            best_diff = f
+            best = c
             if f == 0:
                 break
-    return bestes, bestf
+    return best, best_diff
 
 
-def sichtbar(c):
+def visible(c):
     if c is None:
         return "?"
     if c == 0x20:
-        return "_"  # ein Leerzeichen soll man im Bericht sehen
+        return "_"
     return chr(c)
 
 
-HOECHSTENS = 16  # so viele abweichende Zellen werden einzeln genannt
+MAX_REPORTED = 16
 
 
-def bericht(bild, font, faelle, vg=None, hg=None):
-    """Die abweichenden Zellen EINZELN nennen, mit Soll und erkanntem Ist.
-
-    `faelle` ist eine Liste (zeile, spalte, sollzeichen).  Ausgegeben wird
-    nur, was wirklich abweicht.
-    """
-    schlecht = []
-    for zy, zx, soll in faelle:
-        _, f = zeile_pruefen(bild, font, zy, zx, bytes([soll]), vg or VG,
-                             hg or HG)
+def report(image, font, cases, fg=None, bg=None):
+    bad_cells = []
+    for row_y, col_x, expected in cases:
+        _, f = check_row(image, font, row_y, col_x, bytes([expected]), fg or FG,
+                             bg or BG)
         if f:
-            ist, iff = erkennen(bild, font, zy, zx, vg, hg)
-            schlecht.append((zy, zx, soll, ist, iff, f))
-    if not schlecht:
+            actual, actual_diff = recognize(image, font, row_y, col_x, fg, bg)
+            bad_cells.append((row_y, col_x, expected, actual, actual_diff, f))
+    if not bad_cells:
         return
-    print("  %d abweichende Zellen:" % len(schlecht))
-    for zy, zx, soll, ist, iff, f in schlecht[:HOECHSTENS]:
-        wie = "'%s'" % sichtbar(ist) if iff == 0 else \
-              "etwas anderes (am naechsten '%s', %d Bildpunkte daneben)" \
-              % (sichtbar(ist), iff)
-        print("    Zeile %d Spalte %d: soll '%s' (0x%02X), ist %s"
-              " -- %d Bildpunkte falsch"
-              % (zy, zx, sichtbar(soll), soll, wie, f))
-    if len(schlecht) > HOECHSTENS:
-        print("    ... und %d weitere" % (len(schlecht) - HOECHSTENS))
+    print("  %d differing cells:" % len(bad_cells))
+    for row_y, col_x, expected, actual, actual_diff, f in bad_cells[:MAX_REPORTED]:
+        how = "'%s'" % visible(actual) if actual_diff == 0 else \
+              "something else (closest '%s', %d pixels off)" \
+              % (visible(actual), actual_diff)
+        print("    row %d column %d: expected '%s' (0x%02X), actual %s"
+              " -- %d pixels wrong"
+              % (row_y, col_x, visible(expected), expected, how, f))
+    if len(bad_cells) > MAX_REPORTED:
+        print("    ... and %d more" % (len(bad_cells) - MAX_REPORTED))
 
 
-def cmd_groesse(a):
-    bild = Bild(a[0])
-    print("%d %d" % (bild.b, bild.h))
-    if len(a) >= 3 and (bild.b, bild.h) != (int(a[1]), int(a[2])):
+def cmd_size(a):
+    image = Image(a[0])
+    print("%d %d" % (image.b, image.h))
+    if len(a) >= 3 and (image.b, image.h) != (int(a[1]), int(a[2])):
         return 1
     return 0
 
 
-def cmd_punkt(a):
-    bild = Bild(a[0])
-    p = bild.punkt(int(a[1]), int(a[2]))
+def cmd_pixel(a):
+    image = Image(a[0])
+    p = image.pixel(int(a[1]), int(a[2]))
     if p is None:
-        print("ausserhalb des Bildes")
+        print("outside the image")
         return 1
     print("%d %d %d" % p)
-    if len(a) >= 6 and p != farbe_von(a, 3):
+    if len(a) >= 6 and p != color_at(a, 3):
         return 1
     return 0
 
 
-def cmd_flaeche(a):
-    bild = Bild(a[0])
+def cmd_area(a):
+    image = Image(a[0])
     x, y, b, h = (int(v) for v in a[1:5])
-    soll = farbe_von(a, 5)
-    falsch = 0
+    expected = color_at(a, 5)
+    wrong = 0
     for yy in range(y, y + h):
         for xx in range(x, x + b):
-            if bild.punkt(xx, yy) != soll:
-                falsch += 1
-    print("%d von %d Bildpunkten falsch" % (falsch, b * h))
-    return 0 if falsch == 0 else 1
+            if image.pixel(xx, yy) != expected:
+                wrong += 1
+    print("%d of %d pixels wrong" % (wrong, b * h))
+    return 0 if wrong == 0 else 1
 
 
-def cmd_nichtleer(a):
-    bild = Bild(a[0])
+def cmd_nonblank(a):
+    image = Image(a[0])
     x, y, b, h = (int(v) for v in a[1:5])
     n = 0
     for yy in range(y, y + h):
         for xx in range(x, x + b):
-            p = bild.punkt(xx, yy)
-            if p is not None and p != HG:
+            p = image.pixel(xx, yy)
+            if p is not None and p != BG:
                 n += 1
     print("%d" % n)
     return 0 if n >= (int(a[5]) if len(a) >= 6 else 0) else 1
 
 
 def cmd_text(a):
-    # text <ppm> <font.fi> <zeile> <spalte> <text> [vgR vgG vgB hgR hgG hgB]
-    bild = Bild(a[0])
-    font = font_aus_firn(a[1])
+    image = Image(a[0])
+    font = font_from_firn(a[1])
     text = a[4].encode("ascii", "replace")
-    vg = farbe_von(a, 5) if len(a) >= 8 else VG
-    hg = farbe_von(a, 8) if len(a) >= 11 else HG
-    zeile, spalte = int(a[2]), int(a[3])
-    gesamt, falsch = zeile_pruefen(bild, font, zeile, spalte, text, vg, hg)
-    print("%d Bildpunkte geprueft, %d falsch" % (gesamt, falsch))
-    if falsch:
-        bericht(bild, font,
-                [(zeile, spalte + k, c) for k, c in enumerate(text)], vg, hg)
-    return 0 if falsch == 0 else 1
+    fg = color_at(a, 5) if len(a) >= 8 else FG
+    bg = color_at(a, 8) if len(a) >= 11 else BG
+    row, column = int(a[2]), int(a[3])
+    total, wrong = check_row(image, font, row, column, text, fg, bg)
+    print("%d pixels checked, %d wrong" % (total, wrong))
+    if wrong:
+        report(image, font,
+                [(row, column + k, c) for k, c in enumerate(text)], fg, bg)
+    return 0 if wrong == 0 else 1
 
 
-def cmd_konsole(a):
-    # konsole <ppm> <font.fi> <seriell> <startmarke> <endmarke> [minzellen]
-    bild = Bild(a[0])
-    font = font_aus_firn(a[1])
-    roh = open(a[2], "rb").read()
-    minzellen = int(a[5]) if len(a) >= 6 else 500
+def cmd_console(a):
+    image = Image(a[0])
+    font = font_from_firn(a[1])
+    raw = open(a[2], "rb").read()
+    min_cells = int(a[5]) if len(a) >= 6 else 500
 
-    i = roh.find(a[3].encode())
+    i = raw.find(a[3].encode())
     if i < 0:
-        print("Startmarke '%s' fehlt im Mitschnitt" % a[3])
+        print("start marker '%s' missing in the capture" % a[3])
         return 1
-    j = roh.find(a[4].encode(), i)
+    j = raw.find(a[4].encode(), i)
     if j < 0:
-        print("Endmarke '%s' fehlt im Mitschnitt" % a[4])
+        print("end marker '%s' missing in the capture" % a[4])
         return 1
-    j = roh.find(b"\n", j)
-    j = len(roh) if j < 0 else j + 1
+    j = raw.find(b"\n", j)
+    j = len(raw) if j < 0 else j + 1
 
-    k = Konsole(bild.b // BREIT, bild.h // HOCH)
-    k.text(roh[i:j])
+    k = Console(image.b // WIDTH, image.h // HEIGHT)
+    k.text(raw[i:j])
 
-    falsch = 0
-    gesamt = 0
-    zellen = 0
-    faelle = []
-    for zy in range(k.ze):
-        for zx in range(k.sp):
-            c = k.gitter[zy][zx]
+    wrong = 0
+    total = 0
+    cells = 0
+    cases = []
+    for row_y in range(k.rows):
+        for col_x in range(k.cols):
+            c = k.grid[row_y][col_x]
             if c is None:
                 continue
-            zellen += 1
-            faelle.append((zy, zx, c))
-            g, f = zeile_pruefen(bild, font, zy, zx, bytes([c]), VG, HG)
-            gesamt += g
-            falsch += f
-    print("%d Zellen, %d Bildpunkte, %d falsch" % (zellen, gesamt, falsch))
-    if zellen < minzellen:
-        print("  zu wenige Zellen -- der Mitschnitt kam nicht auf den Schirm")
+            cells += 1
+            cases.append((row_y, col_x, c))
+            g, f = check_row(image, font, row_y, col_x, bytes([c]), FG, BG)
+            total += g
+            wrong += f
+    print("%d cells, %d pixels, %d wrong" % (cells, total, wrong))
+    if cells < min_cells:
+        print("  too few cells -- the capture did not reach the screen")
         return 1
-    if falsch:
-        bericht(bild, font, faelle)
-    return 0 if falsch == 0 else 1
+    if wrong:
+        report(image, font, cases)
+    return 0 if wrong == 0 else 1
 
 
-def cmd_finde(a):
-    """finde <ppm> <font.fi> <seriell> <start> <ende> <text>
+def cmd_find(a):
+    image = Image(a[0])
+    font = font_from_firn(a[1])
+    raw = open(a[2], "rb").read()
+    needle = a[5].encode()
 
-    Wie `konsole`, aber fuer EINE Zeile: der Mitschnitt wird durch
-    dieselbe Zustandsmaschine geschickt, in dem Ergebnis die Zeile mit dem
-    gesuchten Text gesucht -- und GENAU DIESE Zeile dann bildpunktgenau
-    gegen das Foto gehalten.  So steht im Fehlerfall da, WELCHE Zeile
-    nicht stimmt, statt nur "irgendwo im Bild".
-    """
-    bild = Bild(a[0])
-    font = font_aus_firn(a[1])
-    roh = open(a[2], "rb").read()
-    gesucht = a[5].encode()
-
-    i = roh.find(a[3].encode())
+    i = raw.find(a[3].encode())
     if i < 0:
-        print("Startmarke '%s' fehlt im Mitschnitt" % a[3])
+        print("start marker '%s' missing in the capture" % a[3])
         return 1
-    j = roh.find(a[4].encode(), i)
+    j = raw.find(a[4].encode(), i)
     if j < 0:
-        print("Endmarke '%s' fehlt im Mitschnitt" % a[4])
+        print("end marker '%s' missing in the capture" % a[4])
         return 1
-    j = roh.find(b"\n", j)
-    j = len(roh) if j < 0 else j + 1
+    j = raw.find(b"\n", j)
+    j = len(raw) if j < 0 else j + 1
 
-    k = Konsole(bild.b // BREIT, bild.h // HOCH)
-    k.text(roh[i:j])
+    k = Console(image.b // WIDTH, image.h // HEIGHT)
+    k.text(raw[i:j])
 
-    for zy in range(k.ze):
-        zeile = bytes((c if c is not None else 32) for c in k.gitter[zy])
-        p = zeile.find(gesucht)
+    for row_y in range(k.rows):
+        row = bytes((c if c is not None else 32) for c in k.grid[row_y])
+        p = row.find(needle)
         if p >= 0:
-            g, f = zeile_pruefen(bild, font, zy, p, gesucht, VG, HG)
-            print("Zeile %d, Spalte %d: %d Bildpunkte, %d falsch"
-                  % (zy, p, g, f))
+            g, f = check_row(image, font, row_y, p, needle, FG, BG)
+            print("row %d, column %d: %d pixels, %d wrong"
+                  % (row_y, p, g, f))
             if f:
-                bericht(bild, font,
-                        [(zy, p + i, c) for i, c in enumerate(gesucht)])
+                report(image, font,
+                        [(row_y, p + i, c) for i, c in enumerate(needle)])
             return 0 if f == 0 else 1
-    print("'%s' steht nicht auf dem nachgebildeten Bildschirm" % a[5])
+    print("'%s' is not on the reconstructed screen" % a[5])
     return 1
 
 
 def cmd_font(a):
-    # font <font.fi> [font.rs]
-    fi = font_aus_firn(a[0])
-    soll = (LETZTES - ERSTES + 1) * HOCH
-    if len(fi) != soll:
-        print("kernel/gfx/font.fi hat %d Oktette, erwartet %d" % (len(fi), soll))
+    fi = font_from_firn(a[0])
+    expected = (LAST - FIRST + 1) * HEIGHT
+    if len(fi) != expected:
+        print("kernel/gfx/font.fi has %d octets, expected %d" % (len(fi), expected))
         return 1
     if len(a) < 2:
-        print("%d Oktette, 95 Glyphen (Vorlage nicht vorhanden)" % len(fi))
+        print("%d octets, 95 glyphs (reference missing)" % len(fi))
         return 0
-    rs = font_aus_rust(a[1])
-    if len(rs) != len(fi):
-        print("Vorlage %d Oktette, Portierung %d" % (len(rs), len(fi)))
+    rust_font = font_from_rust(a[1])
+    if len(rust_font) != len(fi):
+        print("reference %d octets, port %d" % (len(rust_font), len(fi)))
         return 1
-    anders = sum(1 for x, y in zip(fi, rs) if x != y)
-    print("%d Oktette gegen die Rust-Vorlage, %d verschieden"
-          % (len(fi), anders))
-    return 0 if anders == 0 else 1
+    differing = sum(1 for x, y in zip(fi, rust_font) if x != y)
+    print("%d octets against the Rust reference, %d different"
+          % (len(fi), differing))
+    return 0 if differing == 0 else 1
 
 
-def cmd_lesen(a):
-    """lesen <ppm> <font.fi> [zeile [zeilen]]
-
-    Das Bild zurueck in Text.  Jede Zelle wird gegen alle Glyphen
-    gehalten: passt genau eine, steht sie da; ist die Zelle ganz schwarz,
-    steht ein Leerzeichen; ist etwas anderes darin (Farbfelder, Linien),
-    steht '#'; passt keine Glyphe, steht '~'.
-
-    Das ist das Werkzeug, mit dem man ANSIEHT, was auf dem Schirm steht,
-    statt Bildpunkte zu zaehlen.
-    """
-    bild = Bild(a[0])
-    font = font_aus_firn(a[1])
-    von = int(a[2]) if len(a) >= 3 else 0
-    anzahl = int(a[3]) if len(a) >= 4 else bild.h // HOCH - von
-    muster = {}
-    for c in range(ERSTES, LETZTES + 1):
-        muster.setdefault(bytes(glyphe(font, c)), c)
-    print("%dx%d, %d Spalten, %d Zeilen"
-          % (bild.b, bild.h, bild.b // BREIT, bild.h // HOCH))
-    for zy in range(von, min(von + anzahl, bild.h // HOCH)):
-        zeile = []
-        for zx in range(bild.b // BREIT):
+def cmd_read(a):
+    image = Image(a[0])
+    font = font_from_firn(a[1])
+    start = int(a[2]) if len(a) >= 3 else 0
+    count = int(a[3]) if len(a) >= 4 else image.h // HEIGHT - start
+    patterns = {}
+    for c in range(FIRST, LAST + 1):
+        patterns.setdefault(bytes(glyph(font, c)), c)
+    print("%dx%d, %d columns, %d rows"
+          % (image.b, image.h, image.b // WIDTH, image.h // HEIGHT))
+    for row_y in range(start, min(start + count, image.h // HEIGHT)):
+        row = []
+        for col_x in range(image.b // WIDTH):
             bits = []
-            fremd = False
-            for r in range(HOCH):
+            foreign = False
+            for r in range(HEIGHT):
                 v = 0
-                for c in range(BREIT):
-                    p = bild.punkt(zx * BREIT + c, zy * HOCH + r)
-                    if p == VG:
+                for c in range(WIDTH):
+                    p = image.pixel(col_x * WIDTH + c, row_y * HEIGHT + r)
+                    if p == FG:
                         v |= 1 << (7 - c)
-                    elif p != HG:
-                        fremd = True
+                    elif p != BG:
+                        foreign = True
                 bits.append(v)
-            if fremd:
-                zeile.append("#")
-            elif bytes(bits) in muster:
-                zeile.append(chr(muster[bytes(bits)]))
+            if foreign:
+                row.append("#")
+            elif bytes(bits) in patterns:
+                row.append(chr(patterns[bytes(bits)]))
             elif any(bits):
-                zeile.append("~")
+                row.append("~")
             else:
-                zeile.append(" ")
-        print("%3d |%s|" % (zy, "".join(zeile)))
+                row.append(" ")
+        print("%3d |%s|" % (row_y, "".join(row)))
     return 0
 
 
-
-# ---------------------------------------------- RUNDE K10: echte Schriften
-#
-# Der 8x16-Zeichensatz aus Runde K7 ist eine Bitmaske: ein Bildpunkt ist
-# an oder aus, und `text` oben vergleicht ihn Bit fuer Bit.  Bei einer
-# KANTENGEGLAETTETEN Schrift gibt es das nicht mehr -- es gibt
-# Zwischenstufen, und die haengen an einem Algorithmus.  Also wird gegen
-# den Algorithmus geprueft: `tools/ttf/raster.py` ist die zweite Fassung
-# des Rasterers aus `kernel/ttf.fi`, und beide muessen dasselbe liefern.
-#
-# UND DIE LEHRE AUS RUNDE K7B STEHT HIER IM MITTELPUNKT.  Dort schien
-# Text zu 87 Prozent zu stimmen, waehrend in Wahrheit JEDER BUCHSTABE
-# fehlte -- die 87 Prozent waren schwarzer Hintergrund.  Deshalb zaehlt
-# dieser Pruefer nicht Bildpunkte gegen die Flaeche, sondern:
-#
-#   * je Zeichen die GESETZTEN Bildpunkte (Deckkraft > 0) der Vorlage,
-#   * wie viele davon im Bild wirklich stehen,
-#   * und er FAELLT, wenn ein Zeichen mit Umriss im Bild keine Tinte hat.
-#
-# Ein leeres Rechteck geht hier nicht durch, egal wie gross es ist.
-
-def _raster_laden():
+def _load_raster():
     import os
-    hier = os.path.dirname(os.path.abspath(__file__))
-    sys.path.insert(0, os.path.join(hier, "..", "ttf"))
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.join(here, "..", "ttf"))
     import raster
-    return _Zwei(raster)
+    return _InkChooser(raster)
 
 
-class _Zwei:
-    """ROUND FUI-TEXT: TWO INKS, CHOSEN BY THE CALLER, NEVER GUESSED.
-
-    Ring 3 text is drawn by fUi since this round (kernel/user/fuiglyph.fi),
-    the window server's own text still by the kernel.  The caller says
-    which one it expects by writing `fui:` in front of the font path
-    (`fui:assets/osum-sans.ttf`); without it the kernel's ink is
-    expected, as before.  Both comparisons stay exact -- a check that
-    accepted either ink would no longer prove who drew the picture."""
+class _InkChooser:
 
     def __init__(self, raster):
         self.r = raster
 
-    def Schrift(self, pfad, px):
-        if pfad.startswith("fui:"):
+    def Schrift(self, path, px):
+        if path.startswith("fui:"):
             import fuiraster
-            return fuiraster.Schrift(pfad[4:], px)
-        return self.r.Schrift(pfad, px)
+            return fuiraster.Schrift(path[4:], px)
+        return self.r.Schrift(path, px)
 
 
-def mische(alt, neu, a):
-    """Dieselbe Zeile wie `fb.blend`, `wm.blend` und `wlibc.blend`.
-
-    RUNDE PAINT: hier stand `// 255` -- abschneiden.  Der Kern rundet
-    seit dieser Runde kaufmaennisch, weil abschneiden gegen die exakte
-    Rechnung auf 8 164 890 von 16 777 216 Tripeln (a, src, dst) um eins
-    danebenliegt, also auf 48.67 Prozent von ihnen.  `(num + 127) // 255`
-    ist auf allen 16.7 Millionen exakt und gleich dem, was der Kern mit
-    `(t + (t >> 8)) >> 8` rechnet -- nachgewiesen in
-    tools/paint/blendcheck.py, das genau diese Gleichheit prueft.
-    """
+def blend(old, new, a):
     if a == 0:
-        return alt
+        return old
     if a >= 255:
-        return neu
+        return new
     ia = 255 - a
-    return tuple((alt[k] * ia + neu[k] * a + 127) // 255 for k in range(3))
+    return tuple((old[k] * ia + new[k] * a + 127) // 255 for k in range(3))
 
 
-def _pruefe_glyphen(bild, schrift, stellen, grund_y, vg, hg, toleranz,
-                    breite=0):
-    """stellen: [(zeichen, x_in_bildpunkten, y_grundlinie)] -- prueft jede.
-
-    Gibt (zeichen_geprueft, tinte_geprueft, tinte_falsch, leere_zeichen,
-          bericht)."""
-    zeichen = 0
-    tinte = 0
-    falsch = 0
-    leer = []
-    schlecht = []
-    for (c, gx, gy) in stellen:
-        g = schrift.glyphe(c)
+def _check_glyphs(image, face, places, baseline_y, fg, bg, tolerance,
+                    width=0):
+    char = 0
+    ink_count = 0
+    wrong = 0
+    empty = []
+    bad_cells = []
+    for (c, gx, gy) in places:
+        g = face.glyphe(c)
         if g.w == 0 or g.h == 0:
-            continue                      # Leerzeichen haben keinen Umriss
-        # Im Zeichenraster wird auf die ZELLE beschnitten -- genau so,
-        # wie `wm.draw_glyph_clip` es tut.
-        lo = gx if breite else None
-        hi = gx + breite if breite else None
-        zeichen += 1
-        gesetzt = 0
-        getroffen = 0
-        schlimm = 0
+            continue
+        lo = gx if width else None
+        hi = gx + width if width else None
+        char += 1
+        set_count = 0
+        hit = 0
+        bad_count = 0
         for r in range(g.h):
             for k in range(g.w):
                 a = g.punkt(k, r)
@@ -595,24 +445,19 @@ def _pruefe_glyphen(bild, schrift, stellen, grund_y, vg, hg, toleranz,
                 py = gy - g.oben + r
                 if lo is not None and (px < lo or px >= hi):
                     continue
-                gesetzt += 1
-                soll = mische(hg, vg, a)
-                ist = bild.punkt(px, py)
-                if ist is None:
-                    schlimm += 1
+                set_count += 1
+                expected = blend(bg, fg, a)
+                actual = image.pixel(px, py)
+                if actual is None:
+                    bad_count += 1
                     continue
-                if max(abs(ist[j] - soll[j]) for j in range(3)) <= toleranz:
-                    getroffen += 1
+                if max(abs(actual[j] - expected[j]) for j in range(3)) <= tolerance:
+                    hit += 1
                 else:
-                    schlimm += 1
-        tinte += gesetzt
-        falsch += schlimm
-        # DIE ZUSAGE GEGEN DEN SCHWARZEN HINTERGRUND: hat die Stelle im
-        # BILD ueberhaupt Tinte?  Ein Zeichen, dessen Vorlage sechzig
-        # gesetzte Bildpunkte hat und im Bild keinen einzigen vom
-        # Hintergrund verschiedenen, ist nicht "zu 87 Prozent richtig",
-        # sondern gar nicht da.
-        ink_im_bild = 0
+                    bad_count += 1
+        ink_count += set_count
+        wrong += bad_count
+        ink_in_image = 0
         for r in range(g.h):
             for k in range(g.w):
                 if g.punkt(k, r) == 0:
@@ -620,59 +465,32 @@ def _pruefe_glyphen(bild, schrift, stellen, grund_y, vg, hg, toleranz,
                 if lo is not None:
                     if gx + g.links + k < lo or gx + g.links + k >= hi:
                         continue
-                ist = bild.punkt(gx + g.links + k, gy - g.oben + r)
-                if ist is not None and ist != hg:
-                    ink_im_bild += 1
-        if gesetzt > 0 and ink_im_bild == 0:
-            leer.append(sichtbar(c))
-        if schlimm and len(schlecht) < 8:
-            schlecht.append("'%s' bei x=%d: %d von %d Tintenpunkten falsch"
-                            % (sichtbar(c), gx, schlimm, gesetzt))
-    return zeichen, tinte, falsch, leer, schlecht
+                actual = image.pixel(gx + g.links + k, gy - g.oben + r)
+                if actual is not None and actual != bg:
+                    ink_in_image += 1
+        if set_count > 0 and ink_in_image == 0:
+            empty.append(visible(c))
+        if bad_count and len(bad_cells) < 8:
+            bad_cells.append("'%s' at x=%d: %d of %d ink pixels wrong"
+                            % (visible(c), gx, bad_count, set_count))
+    return char, ink_count, wrong, empty, bad_cells
 
 
-def cmd_tkette(a):
-    """tkette <ppm> <ttf> <px> <x> <grundlinie> <vg r g b> <hg r g b> <text>
-
-    WIE `ttext`, ABER MIT DER RICHTIGEN ERWARTUNG AN UEBERLAPPENDEN
-    UMRISSEN -- und das ist keine Aufweichung, sondern das Gegenteil.
-
-    `ttext` rechnet je Zeichen `mische(hintergrund, vordergrund, deckung)`
-    und setzt damit voraus, dass unter jedem Bildpunkt eines Buchstabens
-    der reine Hintergrund liegt.  Das stimmt fast immer und bei eng
-    unterschnittenen Paaren NICHT: die Umrisse von 'a' und 'r' in
-    "Start" ueberschneiden sich um einen Bildpunkt, und dort mischt
-    JEDER Rasterer -- Osum, FreeType, Cairo -- den zweiten Buchstaben
-    auf den bereits gemischten ersten.  Gemessen am 27.08.2026: 4 von
-    200 Tintenpunkten in "Start", und `ttext` nannte sie falsch, obwohl
-    das Bild richtig war.
-
-    Diese Fassung baut deshalb ERST die ganze Zeile so auf, wie sie
-    aufgebaut werden MUSS -- Buchstabe fuer Buchstabe auf das Ergebnis
-    des vorigen --, und vergleicht DANN je Zeichen.  Die Toleranz bleibt
-    null, die Zusage "jedes Zeichen hat Tinte" bleibt, und der Vergleich
-    wird strenger statt weicher: er prueft jetzt auch die Reihenfolge
-    des Mischens."""
-    raster = _raster_laden()
-    bild = Bild(a[0])
-    schrift = raster.Schrift(a[1], int(a[2]))
+def cmd_tchain(a):
+    raster = _load_raster()
+    image = Image(a[0])
+    face = raster.Schrift(a[1], int(a[2]))
     x, y = int(a[3]), int(a[4])
-    vg = (int(a[5]), int(a[6]), int(a[7]))
-    hg = (int(a[8]), int(a[9]), int(a[10]))
+    fg = (int(a[5]), int(a[6]), int(a[7]))
+    bg = (int(a[8]), int(a[9]), int(a[10]))
     text = a[11]
     tol = int(a[12]) if len(a) > 12 else 0
-    # DELL ROUND 04.10.2026: optional 14th argument `ymax`: ink rows at or below
-    # this screen row are not compared. A title whose ink is centred in a bar
-    # of 20 rows has its descenders reach the last row of the bar, where the
-    # frame line is painted over them.
     ymax = int(a[13]) if len(a) > 13 else None
-    stellen = [(c, x + (dx >> 6), y) for (c, dx) in schrift.stellen(text)]
+    places = [(c, x + (dx >> 6), y) for (c, dx) in face.stellen(text)]
 
-    # 1. Die Zeile aufbauen, so wie sie gemalt wird: ein Woerterbuch
-    #    (x, y) -> Farbe, das mit dem Hintergrund anfaengt.
-    soll = {}
-    for (c, gx, gy) in stellen:
-        g = schrift.glyphe(c)
+    expected = {}
+    for (c, gx, gy) in places:
+        g = face.glyphe(c)
         if g.w == 0 or g.h == 0:
             continue
         for r in range(g.h):
@@ -682,22 +500,20 @@ def cmd_tkette(a):
                     continue
                 px = gx + g.links + k
                 py = gy - g.oben + r
-                soll[(px, py)] = mische(soll.get((px, py), hg), vg, d)
+                expected[(px, py)] = blend(expected.get((px, py), bg), fg, d)
 
-    # 2. Je Zeichen vergleichen -- und je Zeichen die Tinte im Bild
-    #    zaehlen, genau wie `ttext`.
-    zeichen = 0
-    tinte = 0
-    falsch = 0
-    leer = []
-    schlecht = []
-    for (c, gx, gy) in stellen:
-        g = schrift.glyphe(c)
+    char = 0
+    ink_count = 0
+    wrong = 0
+    empty = []
+    bad_cells = []
+    for (c, gx, gy) in places:
+        g = face.glyphe(c)
         if g.w == 0 or g.h == 0:
             continue
-        zeichen += 1
-        gesetzt = 0
-        schlimm = 0
+        char += 1
+        set_count = 0
+        bad_count = 0
         ink = 0
         for r in range(g.h):
             for k in range(g.w):
@@ -707,88 +523,79 @@ def cmd_tkette(a):
                 py = gy - g.oben + r
                 if ymax is not None and py >= ymax:
                     continue
-                gesetzt += 1
-                ist = bild.punkt(px, py)
-                if ist is None:
-                    schlimm += 1
+                set_count += 1
+                actual = image.pixel(px, py)
+                if actual is None:
+                    bad_count += 1
                     continue
-                if ist != hg:
+                if actual != bg:
                     ink += 1
-                w = soll[(px, py)]
-                if max(abs(ist[j] - w[j]) for j in range(3)) > tol:
-                    schlimm += 1
-        tinte += gesetzt
-        falsch += schlimm
-        if gesetzt > 0 and ink == 0:
-            leer.append(sichtbar(c))
-        if schlimm and len(schlecht) < 8:
-            schlecht.append("'%s' bei x=%d: %d von %d Tintenpunkten falsch"
-                            % (sichtbar(c), gx, schlimm, gesetzt))
-    print("%d Zeichen, %d Tintenpunkte geprueft, %d falsch"
-          % (zeichen, tinte, falsch), end="")
-    if leer:
-        print(" -- LEER: %s" % " ".join(leer))
+                w = expected[(px, py)]
+                if max(abs(actual[j] - w[j]) for j in range(3)) > tol:
+                    bad_count += 1
+        ink_count += set_count
+        wrong += bad_count
+        if set_count > 0 and ink == 0:
+            empty.append(visible(c))
+        if bad_count and len(bad_cells) < 8:
+            bad_cells.append("'%s' at x=%d: %d of %d ink pixels wrong"
+                            % (visible(c), gx, bad_count, set_count))
+    print("%d chars, %d ink pixels checked, %d wrong"
+          % (char, ink_count, wrong), end="")
+    if empty:
+        print(" -- EMPTY: %s" % " ".join(empty))
         return 1
-    if falsch:
+    if wrong:
         print()
-        for z in schlecht:
+        for z in bad_cells:
             print("    " + z)
         return 1
     print("")
     return 0
 
 
-def cmd_trechts(a):
-    """trechts <ppm> <ttf> <px> <rechts> <grundlinie> <vg r g b> <hg r g b> <text> [tol [ymax]]
-
-    LIKE `tkette`, BUT THE TEXT ENDS AT `rechts` (a right-aligned cell: the size column of the file manager).
-    The left edge is `rechts` minus the width of the line; the host rounds the width to whole pixels, so
-    an offset of one pixel either way is tried before the check says no."""
-    raster = _raster_laden()
-    schrift = raster.Schrift(a[1], int(a[2]))
+def cmd_tright(a):
+    raster = _load_raster()
+    face = raster.Schrift(a[1], int(a[2]))
     text = a[11]
-    breite = schrift.laufweite(text) >> 6
-    letzte = None
+    width = face.laufweite(text) >> 6
+    last = None
     import io
     import contextlib
     for off in (0, -1, 1, -2, 2):
         b = list(a)
-        b[3] = str(int(a[3]) - breite + off)
+        b[3] = str(int(a[3]) - width + off)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = cmd_tkette(b)
-        letzte = (rc, buf.getvalue())
+            rc = cmd_tchain(b)
+        last = (rc, buf.getvalue())
         if rc == 0:
-            print(letzte[1], end="")
+            print(last[1], end="")
             return 0
-    print(letzte[1], end="")
-    return letzte[0]
+    print(last[1], end="")
+    return last[0]
 
 
 def cmd_ttext(a):
-    """ttext <ppm> <ttf> <px> <x> <grundlinie> <vg r g b> <hg r g b> <text>
-
-    Eine Zeile freien Textes -- Laufweite und Unterschneidung aus der
-    Schrift, so wie der Fensterserver sie setzt."""
-    raster = _raster_laden()
-    bild = Bild(a[0])
-    schrift = raster.Schrift(a[1], int(a[2]))
+    raster = _load_raster()
+    image = Image(a[0])
+    face = raster.Schrift(a[1], int(a[2]))
     x, y = int(a[3]), int(a[4])
-    vg = (int(a[5]), int(a[6]), int(a[7]))
-    hg = (int(a[8]), int(a[9]), int(a[10]))
+    fg = (int(a[5]), int(a[6]), int(a[7]))
+    bg = (int(a[8]), int(a[9]), int(a[10]))
     text = a[11]
     tol = int(a[12]) if len(a) > 12 else 0
-    stellen = [(c, x + (dx >> 6), y) for (c, dx) in schrift.stellen(text)]
-    n, tinte, falsch, leer, schlecht = _pruefe_glyphen(
-        bild, schrift, stellen, y, vg, hg, tol)
-    print("%d Zeichen, %d Tintenpunkte geprueft, %d falsch"
-          % (n, tinte, falsch), end="")
-    if leer:
-        print(" -- LEER: %s" % " ".join(leer))
+    places = [(c, x + (dx >> 6), y) for (c, dx) in face.stellen(text)]
+    n, ink_count, wrong, empty, bad_cells = _check_glyphs(
+        image, face, places, y, fg, bg, tol)
+    print("%d chars, %d ink pixels checked, %d wrong"
+          % (n, ink_count, wrong), end="")
+    if empty:
+        print(" -- EMPTY: %s" % " ".join(empty))
         return 1
-    if falsch:
+    if wrong:
         print()
-        for z in schlecht:
+        for z in bad_cells:
             print("    " + z)
         return 1
     print("")
@@ -796,89 +603,62 @@ def cmd_ttext(a):
 
 
 def cmd_tink(a):
-    """tink <ppm> <ttf> <px> <x> <grundlinie> <vg r g b> <hg r g b> <text> [min%]
-
-    The TOLERANT proof for text that fUi's scene host paints with
-    `painter.text`. That draws a string as ONE run at a fractional pen
-    position, so its glyphs do not sit on the whole-pixel places that
-    `ttext` (the layout of the window server and of wlibc) assumes: every
-    ink pixel of a long word is then "wrong" by a fraction of a pixel and
-    `ttext` says 437 of 473. What can be asked of such text is two things.
-
-    RECALL: for each glyph the best place within +-2 px across and +-1 px
-    up/down is searched, and at least `min%` (default 70) of its strong
-    ink pixels must be ink (a colour clearly away from the ground) in the
-    picture. A missing or wrong glyph (no 'ue', a box, the transliteration)
-    fails this; a sub-pixel drift does not.
-
-    PRECISION (added with the fallback-text check): recall alone passes ANY
-    word of similar density ("no battery" for "kein Akku"), so the other
-    direction is asked too: at least 75 % of the picture's ink pixels in the
-    word's box must lie within 1 px of the ink of a glyph at the place where
-    it was found. Ink that no glyph explains means the picture shows
-    something else."""
-    raster = _raster_laden()
-    bild = Bild(a[0])
-    schrift = raster.Schrift(a[1], int(a[2]))
+    raster = _load_raster()
+    image = Image(a[0])
+    face = raster.Schrift(a[1], int(a[2]))
     x, y = int(a[3]), int(a[4])
-    vg = (int(a[5]), int(a[6]), int(a[7]))
-    hg = (int(a[8]), int(a[9]), int(a[10]))
-    if hg[0] < 0:
-        # -1 -1 -1: the ground is TRANSLUCENT (glass bar), so the reported
-        # background colour is not what is on the screen -- sample it just
-        # left of the word, mid height
-        hg = bild.punkt(x - 2, y - 5)
+    fg = (int(a[5]), int(a[6]), int(a[7]))
+    bg = (int(a[8]), int(a[9]), int(a[10]))
+    if bg[0] < 0:
+        bg = image.pixel(x - 2, y - 5)
     text = a[11]
-    mindest = int(a[12]) / 100.0 if len(a) > 12 else 0.70
-    zeichen = 0
-    schwach = []
-    versatz = 0
-    erklaert = set()
+    min_share = int(a[12]) / 100.0 if len(a) > 12 else 0.70
+    char = 0
+    weak = []
+    drift = 0
+    explained = set()
     x0 = x1 = y0 = y1 = None
-    for (c, dx) in schrift.stellen(text):
-        g = schrift.glyphe(c)
+    for (c, dx) in face.stellen(text):
+        g = face.glyphe(c)
         if g.w == 0 or g.h == 0:
             continue
-        punkte = []
+        points = []
         for r in range(g.h):
             for k in range(g.w):
                 if g.punkt(k, r) >= 160:
-                    punkte.append((k, r))
-        if not punkte:
+                    points.append((k, r))
+        if not points:
             continue
-        zeichen += 1
-        bester = 0.0
-        beste_x = versatz
-        beste_y = 0
-        # The drift between the whole-pixel layout and the run's fractional
-        # one ADDS UP along a long word; the search window follows it: +-2 px
-        # around the place where the previous glyph was found.
+        char += 1
+        best_share = 0.0
+        best_dx = drift
+        best_dy = 0
         for ddy in (0, -1, 1):
-            for ddx in range(versatz - 2, versatz + 3):
+            for ddx in range(drift - 2, drift + 3):
                 gx = x + (dx >> 6) + ddx
                 gy = y + ddy
-                treffer = 0
-                for (k, r) in punkte:
-                    ist = bild.punkt(gx + g.links + k, gy - g.oben + r)
-                    if ist is None:
+                hits = 0
+                for (k, r) in points:
+                    actual = image.pixel(gx + g.links + k, gy - g.oben + r)
+                    if actual is None:
                         continue
-                    if sum(abs(ist[j] - hg[j]) for j in range(3)) >= 90:
-                        treffer += 1
-                anteil = treffer / len(punkte)
-                if anteil > bester:
-                    bester = anteil
-                    beste_x = ddx
-                    beste_y = ddy
-        if bester >= mindest:
-            versatz = beste_x
-        if bester < mindest:
-            schwach.append("'%s' %d%%" % (sichtbar(c), int(bester * 100)))
-        gx = x + (dx >> 6) + beste_x
-        gy = y + beste_y
+                    if sum(abs(actual[j] - bg[j]) for j in range(3)) >= 90:
+                        hits += 1
+                share = hits / len(points)
+                if share > best_share:
+                    best_share = share
+                    best_dx = ddx
+                    best_dy = ddy
+        if best_share >= min_share:
+            drift = best_dx
+        if best_share < min_share:
+            weak.append("'%s' %d%%" % (visible(c), int(best_share * 100)))
+        gx = x + (dx >> 6) + best_dx
+        gy = y + best_dy
         for r in range(g.h):
             for k in range(g.w):
                 if g.punkt(k, r) >= 40:
-                    erklaert.add((gx + g.links + k, gy - g.oben + r))
+                    explained.add((gx + g.links + k, gy - g.oben + r))
         left = gx + g.links
         if x0 is None or left < x0:
             x0 = left
@@ -889,160 +669,139 @@ def cmd_tink(a):
             y0 = top
         if y1 is None or top + g.h > y1:
             y1 = top + g.h
-    print("%d Zeichen, %d ohne ihre Tinte (tolerant)" % (zeichen, len(schwach)),
+    print("%d chars, %d without ink (tolerant)" % (char, len(weak)),
           end="")
-    # precision: picture ink inside the word's box that no glyph explains
-    fremd = 0
-    gesamt = 0
+    foreign = 0
+    total = 0
     if x0 is not None:
         for py in range(y0 - 1, y1 + 1):
             for px in range(x0 - 1, x1 + 2):
-                ist = bild.punkt(px, py)
-                if ist is None:
+                actual = image.pixel(px, py)
+                if actual is None:
                     continue
-                if sum(abs(ist[j] - hg[j]) for j in range(3)) < 90:
+                if sum(abs(actual[j] - bg[j]) for j in range(3)) < 90:
                     continue
-                gesamt += 1
-                if not any((px + i, py + j) in erklaert
+                total += 1
+                if not any((px + i, py + j) in explained
                            for i in (-1, 0, 1) for j in (-1, 0, 1)):
-                    fremd += 1
-    if gesamt:
-        print(", %d von %d Tintenpunkten ohne Glyphe" % (fremd, gesamt), end="")
-    if schwach:
-        print(" -- " + " ".join(schwach))
+                    foreign += 1
+    if total:
+        print(", %d of %d ink pixels without glyph" % (foreign, total), end="")
+    if weak:
+        print(" -- " + " ".join(weak))
         return 1
-    if gesamt and fremd * 4 > gesamt:
-        print(" -- zu viel fremde Tinte")
+    if total and foreign * 4 > total:
+        print(" -- too much foreign ink")
         return 1
     print("")
     return 0
 
 
 def cmd_tgrid(a):
-    """tgrid <ppm> <ttf> <px> <x0> <y0> <zellw> <zellh> <zeile> <spalte>
-             <vg r g b> <hg r g b> <text>
-
-    Ein Zeichenraster -- so, wie ein Terminalfenster es setzt: Spalte c
-    beginnt bei x0 + c * zellw, die Grundlinie von Zeile r liegt bei
-    y0 + r * zellh + Aufsteiger."""
-    raster = _raster_laden()
-    bild = Bild(a[0])
-    schrift = raster.Schrift(a[1], int(a[2]))
+    raster = _load_raster()
+    image = Image(a[0])
+    face = raster.Schrift(a[1], int(a[2]))
     x0, y0 = int(a[3]), int(a[4])
-    zw, zh = int(a[5]), int(a[6])
-    zeile, spalte = int(a[7]), int(a[8])
-    vg = (int(a[9]), int(a[10]), int(a[11]))
-    hg = (int(a[12]), int(a[13]), int(a[14]))
+    cell_w, cell_h = int(a[5]), int(a[6])
+    row, column = int(a[7]), int(a[8])
+    fg = (int(a[9]), int(a[10]), int(a[11]))
+    bg = (int(a[12]), int(a[13]), int(a[14]))
     text = a[15]
     tol = int(a[16]) if len(a) > 16 else 0
-    grund = y0 + zeile * zh + schrift.aufsteiger()
-    stellen = [(ord(ch), x0 + (spalte + i) * zw, grund)
+    baseline = y0 + row * cell_h + face.aufsteiger()
+    places = [(ord(ch), x0 + (column + i) * cell_w, baseline)
                for i, ch in enumerate(text)]
-    n, tinte, falsch, leer, schlecht = _pruefe_glyphen(
-        bild, schrift, stellen, grund, vg, hg, tol, zw)
-    print("Zeile %d ab Spalte %d: %d Zeichen, %d Tintenpunkte, %d falsch"
-          % (zeile, spalte, n, tinte, falsch), end="")
-    if leer:
-        print(" -- LEER: %s" % " ".join(leer))
+    n, ink_count, wrong, empty, bad_cells = _check_glyphs(
+        image, face, places, baseline, fg, bg, tol, cell_w)
+    print("row %d from column %d: %d chars, %d ink pixels, %d wrong"
+          % (row, column, n, ink_count, wrong), end="")
+    if empty:
+        print(" -- EMPTY: %s" % " ".join(empty))
         return 1
-    if falsch:
+    if wrong:
         print()
-        for z in schlecht:
+        for z in bad_cells:
             print("    " + z)
         return 1
     print("")
     return 0
 
 
-def cmd_glatt(a):
-    """glatt <ppm> <x> <y> <w> <h> <vg r g b> <hg r g b> [mindestens]
-
-    IST ES WIRKLICH EINE KANTENGLAETTUNG?  Zaehlt die Bildpunkte des
-    Rechtecks, die WEDER Vorder- NOCH Hintergrundfarbe haben, also
-    Zwischenstufen sind.  Eine Rasterung ohne Glaettung hat davon keinen
-    einzigen -- und wuerde durch jede Zusage gehen, die nur "da steht
-    Text" prueft."""
-    bild = Bild(a[0])
+def cmd_smooth(a):
+    image = Image(a[0])
     x, y, w, h = int(a[1]), int(a[2]), int(a[3]), int(a[4])
-    vg = (int(a[5]), int(a[6]), int(a[7]))
-    hg = (int(a[8]), int(a[9]), int(a[10]))
-    mind = int(a[11]) if len(a) > 11 else 1
-    zwischen = 0
-    ganz = 0
+    fg = (int(a[5]), int(a[6]), int(a[7]))
+    bg = (int(a[8]), int(a[9]), int(a[10]))
+    minimum = int(a[11]) if len(a) > 11 else 1
+    between = 0
+    total = 0
     for py in range(y, y + h):
         for px in range(x, x + w):
-            p = bild.punkt(px, py)
+            p = image.pixel(px, py)
             if p is None:
                 continue
-            ganz += 1
-            if p != vg and p != hg:
-                zwischen += 1
-    print("%d von %d Bildpunkten sind Zwischenstufen (mindestens %d)"
-          % (zwischen, ganz, mind))
-    return 0 if zwischen >= mind else 1
+            total += 1
+            if p != fg and p != bg:
+                between += 1
+    print("%d of %d pixels are intermediate levels (minimum %d)"
+          % (between, total, minimum))
+    return 0 if between >= minimum else 1
 
 
-def cmd_rechteck(a):
-    """rechteck <ppm> <x> <y> <w> <h> <r g b>
-
-    Ein Rahmen: die vier Kanten des Rechtecks haben die Farbe, und einen
-    Bildpunkt AUSSERHALB hat sie nicht.  Damit laesst sich nachrechnen,
-    dass ein Fenster wirklich an der Stelle und in der Groesse liegt, an
-    der der Server es fuehrt."""
-    bild = Bild(a[0])
+def cmd_rect(a):
+    image = Image(a[0])
     x, y, w, h = int(a[1]), int(a[2]), int(a[3]), int(a[4])
-    farbe = (int(a[5]), int(a[6]), int(a[7]))
-    falsch = 0
-    ganz = 0
+    color = (int(a[5]), int(a[6]), int(a[7]))
+    wrong = 0
+    total = 0
     for px in range(x, x + w):
         for py in (y, y + h - 1):
-            ganz += 1
-            if bild.punkt(px, py) != farbe:
-                falsch += 1
+            total += 1
+            if image.pixel(px, py) != color:
+                wrong += 1
     for py in range(y, y + h):
         for px in (x, x + w - 1):
-            ganz += 1
-            if bild.punkt(px, py) != farbe:
-                falsch += 1
-    aussen = 0
+            total += 1
+            if image.pixel(px, py) != color:
+                wrong += 1
+    outside = 0
     for px in range(x - 1, x + w + 1):
         for py in (y - 1, y + h):
-            if bild.punkt(px, py) == farbe:
-                aussen += 1
-    print("Rahmen %dx%d bei (%d,%d): %d von %d Kantenpunkten falsch, "
-          "%d Treffer eine Reihe daneben" % (w, h, x, y, falsch, ganz, aussen))
-    return 0 if falsch == 0 and aussen == 0 else 1
+            if image.pixel(px, py) == color:
+                outside += 1
+    print("frame %dx%d at (%d,%d): %d of %d edge pixels wrong, "
+          "%d hits one row outside" % (w, h, x, y, wrong, total, outside))
+    return 0 if wrong == 0 and outside == 0 else 1
 
 
-
-BEFEHLE = {
-    "groesse": cmd_groesse,
-    "punkt": cmd_punkt,
-    "flaeche": cmd_flaeche,
-    "nichtleer": cmd_nichtleer,
+COMMANDS = {
+    "groesse": cmd_size,
+    "punkt": cmd_pixel,
+    "flaeche": cmd_area,
+    "nichtleer": cmd_nonblank,
     "text": cmd_text,
-    "konsole": cmd_konsole,
-    "finde": cmd_finde,
+    "konsole": cmd_console,
+    "finde": cmd_find,
     "font": cmd_font,
-    "lesen": cmd_lesen,
+    "lesen": cmd_read,
     "ttext": cmd_ttext,
-    "tkette": cmd_tkette,
-    "trechts": cmd_trechts,
+    "tkette": cmd_tchain,
+    "trechts": cmd_tright,
     "tink": cmd_tink,
     "tgrid": cmd_tgrid,
-    "glatt": cmd_glatt,
-    "rechteck": cmd_rechteck,
+    "glatt": cmd_smooth,
+    "rechteck": cmd_rect,
 }
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in BEFEHLE:
-        print(__doc__)
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        print("usage: checkshot.py <" + "|".join(COMMANDS) + "> <args>")
         return 2
     try:
-        return BEFEHLE[sys.argv[1]](sys.argv[2:])
-    except Exception as e:  # ein Fehler hier ist ein FEHLGESCHLAGENER Test
-        print("FEHLER: %s" % e)
+        return COMMANDS[sys.argv[1]](sys.argv[2:])
+    except Exception as e:
+        print("ERROR: %s" % e)
         return 1
 
 

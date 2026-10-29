@@ -385,9 +385,9 @@ glyphen() {
         ok "$kopf"
         return
     fi
-    n=$(printf '%s' "$kopf" | sed -n 's/.* \([0-9]*\) falsch.*/\1/p')
+    n=$(printf '%s' "$kopf" | sed -n 's/.* \([0-9]*\) wrong.*/\1/p')
     if [ -n "$n" ] && [ "$n" -le "$erlaubt" ] \
-       && ! printf '%s' "$aus" | grep -q 'LEER'; then
+       && ! printf '%s' "$aus" | grep -q 'EMPTY'; then
         ok "$kopf (erlaubt sind $erlaubt)"
     else
         bad "$name: '$text' -- $(printf '%s' "$aus" | head -2 | tr '\n' ' ')"
