@@ -95,8 +95,9 @@ UM=(
   "Kopfhörer, Mäuse, Tastaturen und andere Funkgeräte verbinden."
   "Nach Geräten suchen"
 )
+sed 's/wm: hold//' "$T/de/serial.txt" > "$T/de/serial-nohold.txt"
 for u in "${UM[@]}"; do
-    out=$(python3 -I tools/look/umlaut.py "$T/de/serial.txt" "$T/de/bt-de.ppm" Einstellungen "$u" --ink 2>&1 | tail -n 1)
+    out=$(python3 -I tools/look/umlaut.py "$T/de/serial-nohold.txt" "$T/de/bt-de.ppm" Einstellungen "$u" --ink 2>&1 | tail -n 1)
     echo "$out" | grep -q '0 falsch\|rc=0\|: 0 ' && ok "de: ink '$u'" || bad "de: ink '$u' ($out)"
 done
 fi
