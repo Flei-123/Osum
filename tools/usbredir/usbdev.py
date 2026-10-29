@@ -32,6 +32,7 @@ ap.add_argument('--max-secs', type=int, default=240)
 ap.add_argument('--phy-boot', default='down')
 ap.add_argument('--phy-deaf', action='store_true')
 ap.add_argument('--intr', default='off')
+ap.add_argument('--bt', default='normal')
 ap.add_argument('--link', default='up')
 ap.add_argument('--usb', default='ss')
 ap.add_argument('--rtl-family', default='8153a')
@@ -108,6 +109,10 @@ def vendor_alt_ifaces():
             dict(n=0, alt=1, cls=0xFF, sub=0xFF, proto=0xFF, eps=[(INT_IN, 3, 16, 1), (BULK_IN, 2, 512, 0), (BULK_OUT, 2, 512, 0)])]
 
 
+def bt_ifaces(proto):
+    return [dict(n=0, alt=0, cls=0xE0, sub=0x01, proto=proto, eps=[(INT_IN, 3, 16, 1), (BULK_IN, 2, 64, 0), (0x02, 2, 64, 0)])]
+
+
 def nic_ifaces():
     return [dict(n=0, alt=0, cls=0xFF, sub=0xFF, proto=0x00, eps=[(INT_IN, 3, 8, 11), (BULK_IN, 2, 512, 0), (BULK_OUT, 2, 512, 0)])]
 
@@ -158,6 +163,8 @@ PROFILES['android-ncm'] = dict(kind='ncm', vid=0x18D1, pid=0x4EE8, dcls=0, multi
 PROFILES['ch336'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[vendor_ifaces(), ecm_ifaces(0)])
 PROFILES['ch336-alt1'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[vendor_alt_ifaces(), ecm_ifaces(0)])
 PROFILES['ch336-ecmfirst'] = dict(kind='ch336', vid=0x1A86, pid=0x5394, dcls=0, multi=1, cfgs=[ecm_ifaces(0), vendor_ifaces()])
+PROFILES['btdongle'] = dict(kind='bt', vid=0x0A12, pid=0x0001, dcls=0xE0, multi=1, cfgs=[bt_ifaces(1)])
+PROFILES['btdongle-badclass'] = dict(kind='bt', vid=0x0A12, pid=0x0001, dcls=0xE0, multi=1, cfgs=[bt_ifaces(2)])
 PROFILES['ax88179'] = dict(kind='ax179', vid=0x0B95, pid=0x1790, dcls=0, multi=1, cfgs=[nic_ifaces(), ecm_ifaces(0)])
 PROFILES['ax88179-multi'] = dict(kind='ax179', vid=0x0B95, pid=0x1790, dcls=0, multi=3, cfgs=[nic_ifaces(), ecm_ifaces(0)])
 PROFILES['ax88178a'] = dict(kind='ax179', vid=0x0B95, pid=0x178A, dcls=0, multi=1, cfgs=[nic_ifaces(), ecm_ifaces(0)])
@@ -213,7 +220,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ch336model import Ch336Model
 from ax179model import Ax179Model
 from rtl8153model import Rtl8153Model
+from btmodel import BtModel
 CH = Ch336Model(MAC, A.phy_boot, lambda s: log(s), not A.phy_deaf) if PROF['kind'] == 'ch336' else None
+BT = BtModel(lambda s: log(s), A.bt) if PROF['kind'] == 'bt' else None
 VN = None
 if PROF['kind'] == 'ax179':
     VN = Ax179Model(MAC, lambda s: log(s), A.link, A.usb, PROF['multi'])
@@ -381,6 +390,10 @@ class Dev:
             out = CH.control(rt, req, val, idx, data, ln)
             if out is not None:
                 return self.ctl_reply(rid, h, 0, out)
+        if BT is not None:
+            out = BT.control(rt, req, val, idx, data, ln)
+            if out is not None:
+                return self.ctl_reply(rid, h, 0, out)
         if VN is not None:
             out = VN.control(rt, req, val, idx, data, ln)
             if out is not None:
@@ -480,7 +493,15 @@ class Dev:
                 return
             self.tx(T_BULK, rid, struct.pack('<BBHIH', ep, 0, len(b) & 0xFFFF, 0, len(b) >> 16) + b)
 
+    def serve_bt_intr(self):
+        if INT_IN not in self.int_rx:
+            return
+        for chunk in BT.packets(16):
+            self.tx(T_INTERRUPT, 0, struct.pack('<BBH', INT_IN, 0, len(chunk)) + chunk)
+
     def serve_intr(self):
+        if BT is not None:
+            return self.serve_bt_intr()
         if KIND != 'ch336' or INT_IN not in self.int_rx:
             return
         pkt = CH.intr_packet(A.intr)
@@ -614,6 +635,8 @@ def main():
             d.serve_in()
             d.serve_intr()
     log('stats tx=%d rx=%d ctrl=%d' % (STAT['tx'], STAT['rx'], d.n_ctrl))
+    if BT is not None:
+        log('bt violations=%d commands=%d scanning=%d' % (BT.violations, len(BT.cmds), int(BT.scanning)))
     if VN is not None:
         log('model violations=%d bad_tx=%d' % (VN.violations, VN.bad_tx))
 
