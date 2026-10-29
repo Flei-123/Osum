@@ -5,6 +5,7 @@ import lib.kstate
 import serial
 import arch.cpu
 import arch.msr
+import arch.safemem
 import arch.x86_64.apic
 import sched.sched
 import sync.atomic
@@ -46,6 +47,7 @@ const MSR_GLOBAL_CTRL: u64 = 0x38F
 const MSR_GLOBAL_OVF: u64 = 0x390
 const EVT_CYCLES: u64 = 0x53003C
 const PERIOD_LOW: u64 = 0x80000000
+const PERIOD_MIN: u64 = 20000
 
 static mut s_taken: [u64; 8] = [0 as u64; 8]
 static mut s_rip: [u64; 8] = [0 as u64; 8]
@@ -67,6 +69,8 @@ static mut p_ctr: u64 = MSR_PMC0
 static mut p_evt: u64 = EVT_CYCLES
 static mut p_armed: [u64; 8] = [0 as u64; 8]
 static mut w_nopmu: [u8; 6] = "nopmu\0"
+static mut w_period: [u8; 10] = "nmiperiod\0"
+static mut p_period: u64 = PERIOD_LOW
 
 static mut lock_names: [u8; 72] = "sched\0\0\0frame\0\0\0fs\0\0\0\0\0\0console\0stress\0\0boot\0\0\0\0net\0\0\0\0\0proc\0\0\0\0gui\0\0\0\0\0"
 
@@ -120,28 +124,8 @@ fn trace(state: u64, c: u64, rsp: u64, rbp: u64) {
     if hi <= KERN_LO || rsp < KERN_LO {
         return
     }
-    var fp: u64 = rbp
-    var n: u64 = 0
-    while n < TRACE_MAX {
-        if fp < rsp || fp >= rsp + KSTACK_SPAN || fp % 8 != 0 {
-            s_tn[c as usize] = n
-            return
-        }
-        let ret: u64 = __mmio_read64((fp + 8) as *mut u64)
-        if ret < KERN_LO || ret >= hi {
-            s_tn[c as usize] = n
-            return
-        }
-        s_trace[(c * TRACE_MAX + n) as usize] = ret
-        n = n + 1
-        let next: u64 = __mmio_read64(fp as *mut u64)
-        if next <= fp {
-            s_tn[c as usize] = n
-            return
-        }
-        fp = next
-    }
-    s_tn[c as usize] = n
+    s_tn[c as usize] = safemem.chain(state, rsp, rbp, KSTACK_SPAN, KERN_LO, hi,
+        (&s_trace[(c * TRACE_MAX) as usize]) as u64, TRACE_MAX)
 }
 
 fn snap(state: u64, c: u64, frame: u64) {
@@ -401,6 +385,10 @@ fn probe_amd(state: u64) -> bool {
 
 fn pmu_probe(state: u64) {
     p_ver = 0
+    p_period = cmdopt.number(state, (&w_period[0]) as u64, PERIOD_LOW)
+    if p_period < PERIOD_MIN || p_period > PERIOD_LOW {
+        p_period = PERIOD_LOW
+    }
     if cmdopt.has(state, (&w_nopmu[0]) as u64) {
         return
     }
@@ -423,9 +411,9 @@ fn pmu_version() -> u64 {
 }
 
 fn pmu_load(state: u64) {
-    var start: u64 = PERIOD_LOW
+    var start: u64 = (1 << 32) - p_period
     if p_amd != 0 {
-        start = (1 << AMD_WIDTH) - PERIOD_LOW
+        start = (1 << AMD_WIDTH) - p_period
     }
     let _w: bool = msr.wr(state, p_ctr, start)
     let base: u64 = apic.window(state)

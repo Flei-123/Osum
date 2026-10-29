@@ -44,6 +44,7 @@ import sched.signal
 import fs.evfd
 import sched.proc
 import arch.msr
+import arch.safemem
 import arch.arch
 import fpu
 import klog
@@ -218,6 +219,13 @@ fn entry(frame: u64, state: u64) {
         // `on_nm` antwortet false, wenn nicht traege gefahren wird --
         // dann ist ein #NM wirklich ein Fehler und faellt weiter durch
         // bis `report`, so wie seit Runde 59.
+        if vector == 14 && (word(frame, F_CS) & 3) == 0 {
+            let pfix: u64 = msr.catch_rip(state, word(frame, F_RIP))
+            if pfix != 0 {
+                __mmio_write64((frame + F_RIP) as *mut u64, pfix)
+                return
+            }
+        }
         if vector == NM_VECTOR {
             if fpu.on_nm(state, sched.fpu_area(state, sched.current(state))) {
                 return
@@ -1038,24 +1046,9 @@ const ART_KETTE: u64 = 1
 const ART_SCAN: u64 = 2
 static mut kspur_art: u64 = 0
 
-fn kspur_kette(rsp: u64, rbp: u64, hi: u64) {
-    var fp: u64 = rbp
-    while kspur_n < SPUR_MAX {
-        if fp < rsp || fp >= rsp + KSTACK_SPAN || fp % 8 != 0 {
-            return
-        }
-        let ret: u64 = __mmio_read64((fp + 8) as *mut u64)
-        if ret < KERN_LO || ret >= hi {
-            return
-        }
-        kspur[kspur_n as usize] = ret
-        kspur_n = kspur_n + 1
-        let next: u64 = __mmio_read64(fp as *mut u64)
-        if next <= fp {
-            return
-        }
-        fp = next
-    }
+fn kspur_kette(state: u64, rsp: u64, rbp: u64, hi: u64) {
+    kspur_n = safemem.chain(state, rsp, rbp, KSTACK_SPAN, KERN_LO, hi,
+        (&kspur[0]) as u64, SPUR_MAX)
 }
 
 fn kspur_bauen(state: u64, rsp: u64, rbp: u64) {
@@ -1082,7 +1075,7 @@ fn kspur_bauen(state: u64, rsp: u64, rbp: u64) {
     // die Gegenprobe in tools/protocol/run.sh vergleicht beide Wege an
     // DERSELBEN Panik.
     if !kstate.mode_on(state, kstate.M_STAPELSCAN) {
-        kspur_kette(rsp, rbp, hi)
+        kspur_kette(state, rsp, rbp, hi)
         if kspur_n > 0 {
             kspur_art = ART_KETTE
             return
@@ -1091,7 +1084,10 @@ fn kspur_bauen(state: u64, rsp: u64, rbp: u64) {
     kspur_art = ART_SCAN
     var i: u64 = 0
     while i < 512 && kspur_n < SPUR_MAX {
-        let v: u64 = __mmio_read64((rsp + i * 8) as *mut u64)
+        var v: u64 = 0
+        if !safemem.read64(state, rsp + i * 8, (&v) as u64) {
+            return
+        }
         if v >= KERN_LO && v < hi {
             kspur[kspur_n as usize] = v
             kspur_n = kspur_n + 1
