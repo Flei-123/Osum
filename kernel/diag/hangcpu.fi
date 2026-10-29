@@ -14,9 +14,9 @@ import diag.crash
 import lib.ksymtab
 
 export {
-    word, self_index, snap, snap_here, taken, reset_snaps, gather,
+    word, self_index, cpus, snap, snap_here, taken, reset_snaps, gather,
     write_locks, write_cpu, say_serial,
-    pmu_probe, pmu_arm, pmu_overflowed, pmu_ready, pmu_version,
+    pmu_probe, pmu_arm, pmu_overflowed, pmu_ready, pmu_version, pmu_amd,
     F_RIP, F_CS, F_RFLAGS, F_RSP, F_RBP
 }
 
@@ -31,12 +31,17 @@ const TRACE_MAX: u64 = 12
 const NAME_MAX: u64 = 16
 const KERN_LO: u64 = 0x100000
 const KSTACK_SPAN: u64 = 0x40000
-const R_ID: u64 = 0x20
 const R_LVT_PERF: u64 = 0x340
 const LVT_NMI: u64 = 0x400
 
 const MSR_PMC0: u64 = 0xC1
 const MSR_EVTSEL0: u64 = 0x186
+const MSR_AMD_EVTSEL0: u64 = 0xC0010000
+const MSR_AMD_CTR0: u64 = 0xC0010004
+const AMD_EBX: u64 = 0x68747541
+const AMD_WIDTH: u64 = 48
+const AMD_VERSION: u64 = 1
+const EVT_AMD_CYCLES: u64 = 0x530076
 const MSR_GLOBAL_CTRL: u64 = 0x38F
 const MSR_GLOBAL_OVF: u64 = 0x390
 const EVT_CYCLES: u64 = 0x53003C
@@ -56,6 +61,10 @@ static mut s_name: [u8; 128] = [0 as u8; 128]
 
 static mut p_ver: u64 = 0
 static mut p_width: u64 = 0
+static mut p_amd: u64 = 0
+static mut p_sel: u64 = MSR_EVTSEL0
+static mut p_ctr: u64 = MSR_PMC0
+static mut p_evt: u64 = EVT_CYCLES
 static mut p_armed: [u64; 8] = [0 as u64; 8]
 static mut w_nopmu: [u8; 6] = "nopmu\0"
 
@@ -66,20 +75,18 @@ fn word(frame: u64, off: u64) -> u64 {
 }
 
 fn self_index(state: u64) -> u64 {
-    let base: u64 = cpu.lapic_base(state)
+    return cpu.here(state)
+}
+
+fn cpus(state: u64) -> u64 {
     let n: u64 = cpu.count(state)
-    if base == 0 || n <= 1 {
-        return 0
+    if n == 0 {
+        return 1
     }
-    let apid: u64 = (kstate.get32(base + R_ID) >> 24) & 0xFF
-    var i: u64 = 0
-    while i < n {
-        if cpu.get(state, i, cpu.C_APICID) == apid {
-            return i
-        }
-        i = i + 1
+    if n > NCPU {
+        return NCPU
     }
-    return NCPU
+    return n
 }
 
 fn taken(c: u64) -> bool {
@@ -297,7 +304,7 @@ fn say_serial(state: u64) {
     var s_r: [u8; 6] = " rip \0"
     var s_w: [u8; 7] = " lock \0"
     var s_n: [u8; 7] = " task \0"
-    let n: u64 = cpu.count(state)
+    let n: u64 = cpus(state)
     var c: u64 = 0
     while c < n && c < NCPU {
         if s_taken[c as usize] != 0 {
@@ -336,10 +343,16 @@ fn cpuid_max() -> u64 {
     return v & 0xFFFFFFFF
 }
 
-fn pmu_probe(state: u64) {
-    p_ver = 0
-    if cmdopt.has(state, (&w_nopmu[0]) as u64) || cpuid_max() < 0xA {
-        return
+fn cpuid_vendor_ebx() -> u64 {
+    var v: u64 = 0
+    asm("push rbx\nxor ecx, ecx\ncpuid\nmov rax, rbx\npop rbx", in("rax") 0, out("rax") & v,
+        clobber("rcx"), clobber("rdx"))
+    return v & 0xFFFFFFFF
+}
+
+fn probe_intel() -> bool {
+    if cpuid_max() < 0xA {
+        return false
     }
     let a: u64 = cpuid_a(0)
     let b: u64 = cpuid_a(1)
@@ -348,14 +361,46 @@ fn pmu_probe(state: u64) {
     let width: u64 = (a >> 16) & 0xFF
     let blen: u64 = (a >> 24) & 0xFF
     if ver == 0 || ncnt == 0 || width < 32 || blen == 0 || (b & 1) != 0 {
-        return
+        return false
     }
     p_width = width
     p_ver = ver
+    return true
+}
+
+fn probe_amd(state: u64) -> bool {
+    if cpuid_vendor_ebx() != AMD_EBX {
+        return false
+    }
+    if !msr.wr(state, MSR_AMD_EVTSEL0, 0) || !msr.wr(state, MSR_AMD_CTR0, 0) {
+        return false
+    }
+    p_amd = 1
+    p_sel = MSR_AMD_EVTSEL0
+    p_ctr = MSR_AMD_CTR0
+    p_evt = EVT_AMD_CYCLES
+    p_width = AMD_WIDTH
+    p_ver = AMD_VERSION
+    return true
+}
+
+fn pmu_probe(state: u64) {
+    p_ver = 0
+    if cmdopt.has(state, (&w_nopmu[0]) as u64) {
+        return
+    }
+    if probe_intel() {
+        return
+    }
+    let _a: bool = probe_amd(state)
 }
 
 fn pmu_ready() -> bool {
     return p_ver != 0
+}
+
+fn pmu_amd() -> bool {
+    return p_amd != 0
 }
 
 fn pmu_version() -> u64 {
@@ -363,8 +408,12 @@ fn pmu_version() -> u64 {
 }
 
 fn pmu_load(state: u64) {
-    let _w: bool = msr.wr(state, MSR_PMC0, PERIOD_LOW)
-    let base: u64 = cpu.lapic_base(state)
+    var start: u64 = PERIOD_LOW
+    if p_amd != 0 {
+        start = (1 << AMD_WIDTH) - PERIOD_LOW
+    }
+    let _w: bool = msr.wr(state, p_ctr, start)
+    let base: u64 = apic.window(state)
     if base != 0 {
         __mmio_write32((base + R_LVT_PERF) as *mut u32, LVT_NMI as u32)
     }
@@ -375,27 +424,27 @@ fn pmu_arm(state: u64, c: u64) {
         return
     }
     p_armed[c as usize] = 1
-    if !msr.wr(state, MSR_EVTSEL0, 0) {
+    if !msr.wr(state, p_sel, 0) {
         p_armed[c as usize] = 2
         return
     }
     pmu_load(state)
-    if p_ver >= 2 {
+    if p_amd == 0 && p_ver >= 2 {
         let g: u64 = msr.rd0(state, MSR_GLOBAL_CTRL)
         let _g: bool = msr.wr(state, MSR_GLOBAL_CTRL, g | 1)
     }
-    let _e: bool = msr.wr(state, MSR_EVTSEL0, EVT_CYCLES)
+    let _e: bool = msr.wr(state, p_sel, p_evt)
 }
 
 fn pmu_overflowed(state: u64, c: u64) -> bool {
     if p_ver == 0 || c >= NCPU || p_armed[c as usize] != 1 {
         return false
     }
-    let v: u64 = msr.rd0(state, MSR_PMC0)
+    let v: u64 = msr.rd0(state, p_ctr)
     if ((v >> (p_width - 1)) & 1) != 0 {
         return false
     }
-    if p_ver >= 2 {
+    if p_amd == 0 && p_ver >= 2 {
         let _o: bool = msr.wr(state, MSR_GLOBAL_OVF, 1)
     }
     pmu_load(state)

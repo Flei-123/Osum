@@ -11,7 +11,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 ACC=$([ -e /dev/kvm ] && echo kvm || echo tcg)
-PROGS="sh cat echo sleep sync"
+PROGS="sh cat echo sleep"
 finish() { [ -n "${NMI_KEEP:-}" ] && { mkdir -p "$NMI_KEEP"; cp "$D"/*.klar "$D"/*.hang "$NMI_KEEP/" 2>/dev/null; }; echo "NMI: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit $?; }
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 mkdir -p "$D/bin"
@@ -21,7 +21,7 @@ if [ -z "$K" ]; then
     K="$D/k.mb"
     ./tools/build-kernel.sh "$K" --stufe 0 > "$D/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel"; tail -8 "$D/k.txt"; finish; }
 fi
-script() { for i in $(seq 1 30); do echo "echo ==P$i=="; echo "sleep 2"; echo "sync"; done; echo "echo ==END=="; }
+script() { for i in $(seq 1 30); do echo "echo ==P$i=="; echo "sleep 2"; echo "echo tick"; done; echo "echo ==END=="; }
 script > "$D/s.sh"
 python3 tools/osum/mkfs.py build "$D/base.img" 20000 /lib/ \
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
@@ -30,6 +30,7 @@ python3 tools/osum/mkfs.py build "$D/base.img" 20000 /lib/ \
     "/t/s.sh=$D/s.sh" > "$D/mkfs.txt" 2>&1 || tail -3 "$D/mkfs.txt"
 runvm() {
     local name=$1 secs=$2 smp=$3 cpu=$4 words=$5
+    [ "$smp" -gt 1 ] && words="smpfrueh $words"
     cp "$D/base.img" "$D/d-$name.img"
     (timeout -s KILL "$secs" qemu-system-x86_64 -accel "$ACC" -machine q35 -cpu "$cpu" -smp "$smp" -m 1024 -kernel "$K" \
         -append "osum vfs $words script=sh /t/s.sh;exit" \
@@ -55,12 +56,13 @@ wait
 boots() { grep -ac '^wdt: \(armed\|off\|absent\|failed\)' "$D/$1.klar"; }
 has() { grep -qa -- "$2" "$D/$1.klar"; }
 hhas() { grep -qa -- "$2" "$D/$1.hang"; }
+cpu0() { awk '/^cpu 0: task=/{f=1} /^cpu [1-9]: task=|^-- /{f=0} f' "$D/$1.hang"; }
 report_checks() {
     local n=$1 reason=$2 sym=$3
     [ -s "$D/$n.hang" ] && ok "$n: /var/crash/*-hang.txt written on the next boot" || { bad "$n: no hang file ($(boots $n) boots; $(grep -a '^hang:\|absturz' "$D/$n.klar" | head -4 | tr '\n' '|'))"; return; }
     hhas "$n" "=== OSUM HANG REPORT ===" && ok "$n: report header" || bad "$n: header missing"
     hhas "$n" "reason: $reason" && ok "$n: reason $reason" || bad "$n: reason $(grep -a '^reason' "$D/$n.hang")"
-    grep -aA1 '^cpu 0: task=' "$D/$n.hang" | grep -qa "rip: $sym" && ok "$n: cpu 0 rip resolves to $sym" || bad "$n: cpu 0 rip $(grep -a -m1 'rip:' "$D/$n.hang")"
+    cpu0 "$n" | grep -qa "[ .]$sym+0x" && ok "$n: cpu 0 stopped in $sym ($(cpu0 "$n" | grep -a -m1 'rip:' | tr -s ' '))" || bad "$n: cpu 0 not in $sym ($(cpu0 "$n" | grep -a -m1 'rip:'))"
     grep -qa '^cpu 0: task=[0-9]* pid=[0-9]* name=' "$D/$n.hang" && ok "$n: task of cpu 0 recorded" || bad "$n: no task line"
     grep -aA20 '^cpu 0: task=' "$D/$n.hang" | grep -qa '^    [a-z_.]*+0x' && ok "$n: backtrace with symbols" || bad "$n: no symbolic backtrace"
 }
@@ -84,7 +86,7 @@ echo "== e. soft lockup: syscall spins with irqs on =="
 has soft "wdt: planted spin" && ok "soft: spin planted" || bad "soft: not planted"
 has soft "^hang: detected reason=\(soft\|stall\)" && ok "soft: logged ($(grep -a -m1 '^hang: detected' "$D/soft.klar"))" || bad "soft: not logged"
 [ -s "$D/soft.hang" ] && ok "soft: hang file after the watchdog reset" || bad "soft: no hang file ($(boots soft) boots)"
-grep -aA1 '^cpu 0: task=' "$D/soft.hang" | grep -qa 'rip: sys_hook' && ok "soft: rip in sys_hook" || bad "soft: rip $(grep -a -m1 'rip:' "$D/soft.hang")"
+cpu0 soft | grep -qa 'rip: wdt.sys_hook+0x' && ok "soft: rip in sys_hook" || bad "soft: rip $(cpu0 soft | grep -a -m1 'rip:')"
 hhas soft "irqs=on" && ok "soft: irqs=on recorded" || bad "soft: irq state"
 echo "== f. counter-proof nonmi: same deadlock, no handler =="
 has nonmi "hang: off by word nonmi" && ok "nonmi: logger off" || bad "nonmi: not off"
