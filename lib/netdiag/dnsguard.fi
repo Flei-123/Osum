@@ -1,0 +1,165 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.kcall
+import netdiag.txt
+
+export { ensure, R_OK, R_REPAIRED, R_FAILED }
+
+const R_OK: u64 = 0
+const R_REPAIRED: u64 = 1
+const R_FAILED: u64 = 2
+const BAD: u64 = 0xFFFFFFFFFFFFF000
+const IN_MAX: u64 = 1023
+const OUT_MAX: u64 = 760
+const FLAGS_WRITE: u64 = 577
+const FILE_MODE: u64 = 420
+
+static mut PATH_RESOLV: [u8; 17] = "/etc/resolv.conf\0"
+static mut W_NS: [u8; 11] = "nameserver\0"
+static mut W_FB: [u8; 9] = "fallback\0"
+static mut S_NS_LINE: [u8; 12] = "nameserver \0"
+static mut S_FB_LINE: [u8; 10] = "fallback \0"
+static mut DEFAULT_PRIMARY: [u8; 8] = "1.1.1.1\0"
+static mut DEFAULT_SECONDARY: [u8; 8] = "8.8.8.8\0"
+static mut IN_BUF: [u8; 1024] = [0 as u8; 1024]
+static mut OUT_BUF: [u8; 768] = [0 as u8; 768]
+
+fn in_p() -> u64 {
+    return (&IN_BUF[0 as usize]) as u64
+}
+
+fn out_p() -> u64 {
+    return (&OUT_BUF[0 as usize]) as u64
+}
+
+fn load() -> u64 {
+    let fd: u64 = kcall.sys3(kcall.SYS_OPEN, (&PATH_RESOLV[0 as usize]) as u64, 0, 0)
+    if fd > BAD {
+        return 0
+    }
+    var n: u64 = 0
+    while n < IN_MAX {
+        let r: u64 = kcall.sys3(kcall.SYS_READ, fd, in_p() + n, IN_MAX - n)
+        if r > BAD || r == 0 {
+            break
+        }
+        n = n + r
+    }
+    kcall.sys1(kcall.SYS_CLOSE, fd)
+    return n
+}
+
+fn line_end(n: u64, i: u64) -> u64 {
+    var e: u64 = i
+    while e < n && txt.ld8(in_p(), e) != 10 {
+        e = e + 1
+    }
+    return e
+}
+
+fn word_at(i: u64, e: u64, w: u64, wlen: u64) -> bool {
+    if i + wlen >= e {
+        return false
+    }
+    var k: u64 = 0
+    while k < wlen {
+        if txt.ld8(in_p(), i + k) != txt.ld8(w, k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn has_address(i: u64, e: u64) -> bool {
+    var k: u64 = i
+    while k < e && (txt.ld8(in_p(), k) == 32 || txt.ld8(in_p(), k) == 9) {
+        k = k + 1
+    }
+    return k < e && txt.ld8(in_p(), k) >= 48 && txt.ld8(in_p(), k) <= 57
+}
+
+fn count_servers(n: u64, word: u64, wlen: u64) -> u64 {
+    var count: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = line_end(n, i)
+        if word_at(i, e, word, wlen) && has_address(i + wlen, e) {
+            count = count + 1
+        }
+        i = e + 1
+    }
+    return count
+}
+
+fn add_line(at: u64, head: u64, v: u64) -> u64 {
+    var a: u64 = txt.str_at(out_p(), at, OUT_MAX, head)
+    a = txt.ip_at(out_p(), a, OUT_MAX, v)
+    return txt.byte_at(out_p(), a, OUT_MAX, 10)
+}
+
+fn add_text_line(at: u64, head: u64, tail: u64) -> u64 {
+    var a: u64 = txt.str_at(out_p(), at, OUT_MAX, head)
+    a = txt.str_at(out_p(), a, OUT_MAX, tail)
+    return txt.byte_at(out_p(), a, OUT_MAX, 10)
+}
+
+fn copy_kept(n: u64, at: u64, drop_ns: bool) -> u64 {
+    var a: u64 = at
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = line_end(n, i)
+        let is_ns: bool = word_at(i, e, (&W_NS[0 as usize]) as u64, 10)
+        if e > i && !(drop_ns && is_ns) && a + (e - i) + 1 < OUT_MAX {
+            var k: u64 = i
+            while k < e {
+                a = txt.byte_at(out_p(), a, OUT_MAX, txt.ld8(in_p(), k))
+                k = k + 1
+            }
+            a = txt.byte_at(out_p(), a, OUT_MAX, 10)
+        }
+        i = e + 1
+    }
+    return a
+}
+
+fn ensure(dns1: u64, dns2: u64, dns3: u64, want_fallback: bool) -> u64 {
+    let n: u64 = load()
+    let servers: u64 = count_servers(n, (&W_NS[0 as usize]) as u64, 10)
+    let fallbacks: u64 = count_servers(n, (&W_FB[0 as usize]) as u64, 8)
+    if servers > 0 && (fallbacks > 0 || !want_fallback) {
+        return R_OK
+    }
+    var at: u64 = 0
+    if servers > 0 {
+        at = copy_kept(n, 0, false)
+    } else {
+        if dns1 != 0 || dns2 != 0 || dns3 != 0 {
+            if dns1 != 0 {
+                at = add_line(at, (&S_NS_LINE[0 as usize]) as u64, dns1)
+            }
+            if dns2 != 0 {
+                at = add_line(at, (&S_NS_LINE[0 as usize]) as u64, dns2)
+            }
+            if dns3 != 0 {
+                at = add_line(at, (&S_NS_LINE[0 as usize]) as u64, dns3)
+            }
+        } else {
+            at = add_text_line(at, (&S_NS_LINE[0 as usize]) as u64, (&DEFAULT_PRIMARY[0 as usize]) as u64)
+            at = add_text_line(at, (&S_NS_LINE[0 as usize]) as u64, (&DEFAULT_SECONDARY[0 as usize]) as u64)
+        }
+        at = copy_kept(n, at, true)
+    }
+    if fallbacks == 0 && want_fallback {
+        at = add_text_line(at, (&S_FB_LINE[0 as usize]) as u64, (&DEFAULT_PRIMARY[0 as usize]) as u64)
+    }
+    let fd: u64 = kcall.sys3(kcall.SYS_OPEN, (&PATH_RESOLV[0 as usize]) as u64, FLAGS_WRITE, FILE_MODE)
+    if fd > BAD {
+        return R_FAILED
+    }
+    let w: u64 = kcall.sys3(kcall.SYS_WRITE, fd, out_p(), at)
+    kcall.sys1(kcall.SYS_CLOSE, fd)
+    if w > BAD || w != at {
+        return R_FAILED
+    }
+    return R_REPAIRED
+}

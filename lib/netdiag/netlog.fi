@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.kcall
+import netdiag.txt
+
+export { begin, text, num, ip, end }
+
+const LINE_MAX: u64 = 220
+const ROTATE_AT: u64 = 24576
+const CLOCK_REALTIME: u64 = 0
+const CLOCK_MONOTONIC: u64 = 1
+const FLAGS_APPEND: u64 = 1089
+const FLAGS_TRUNC: u64 = 577
+const FILE_MODE: u64 = 420
+const BAD: u64 = 0xFFFFFFFFFFFFF000
+
+static mut PATH_NET_LOG: [u8; 17] = "/var/log/net.log\0"
+static mut S_TIME: [u8; 3] = "t=\0"
+static mut S_UP: [u8; 5] = " up=\0"
+static mut LINE: [u8; 224] = [0 as u8; 224]
+static mut LEN: u64 = 0
+static mut WRITTEN: u64 = 0
+static mut STAMP: [u8; 16] = [0 as u8; 16]
+
+fn line_p() -> u64 {
+    return (&LINE[0 as usize]) as u64
+}
+
+fn clock_secs(which: u64) -> u64 {
+    let r: u64 = kcall.sys2(kcall.SYS_CLOCK_GETTIME, which, (&STAMP[0 as usize]) as u64)
+    if r > BAD {
+        return 0
+    }
+    return txt.ld8((&STAMP[0 as usize]) as u64, 0) | (txt.ld8((&STAMP[0 as usize]) as u64, 1) << 8)
+        | (txt.ld8((&STAMP[0 as usize]) as u64, 2) << 16) | (txt.ld8((&STAMP[0 as usize]) as u64, 3) << 24)
+        | (txt.ld8((&STAMP[0 as usize]) as u64, 4) << 32)
+}
+
+fn begin(tag: u64) {
+    LEN = txt.str_at(line_p(), 0, LINE_MAX, (&S_TIME[0 as usize]) as u64)
+    LEN = txt.dec_at(line_p(), LEN, LINE_MAX, clock_secs(CLOCK_REALTIME))
+    LEN = txt.str_at(line_p(), LEN, LINE_MAX, (&S_UP[0 as usize]) as u64)
+    LEN = txt.dec_at(line_p(), LEN, LINE_MAX, clock_secs(CLOCK_MONOTONIC))
+    LEN = txt.byte_at(line_p(), LEN, LINE_MAX, 32)
+    LEN = txt.str_at(line_p(), LEN, LINE_MAX, tag)
+}
+
+fn key(k: u64) {
+    LEN = txt.byte_at(line_p(), LEN, LINE_MAX, 32)
+    LEN = txt.str_at(line_p(), LEN, LINE_MAX, k)
+    LEN = txt.byte_at(line_p(), LEN, LINE_MAX, 61)
+}
+
+fn text(k: u64, val: u64) {
+    key(k)
+    LEN = txt.str_at(line_p(), LEN, LINE_MAX, val)
+}
+
+fn num(k: u64, v: u64) {
+    key(k)
+    LEN = txt.dec_at(line_p(), LEN, LINE_MAX, v)
+}
+
+fn ip(k: u64, v: u64) {
+    key(k)
+    LEN = txt.ip_at(line_p(), LEN, LINE_MAX, v)
+}
+
+fn end() {
+    LEN = txt.byte_at(line_p(), LEN, 224, 10)
+    var flags: u64 = FLAGS_APPEND
+    if WRITTEN >= ROTATE_AT {
+        flags = FLAGS_TRUNC
+        WRITTEN = 0
+    }
+    let fd: u64 = kcall.sys3(kcall.SYS_OPEN, (&PATH_NET_LOG[0 as usize]) as u64, flags, FILE_MODE)
+    if fd > BAD {
+        LEN = 0
+        return
+    }
+    let w: u64 = kcall.sys3(kcall.SYS_WRITE, fd, line_p(), LEN)
+    kcall.sys1(kcall.SYS_CLOSE, fd)
+    if w <= BAD {
+        WRITTEN = WRITTEN + w
+    }
+    LEN = 0
+}

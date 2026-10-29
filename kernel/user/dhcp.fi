@@ -52,9 +52,13 @@ profile kernel
 
 import ulib
 import libc.net
+import netdiag.netlog
+import netdiag.dnsguard
+import netdiag.helperstate
 
 export { u_start }
 
+const RETRY: u64 = 0xFFFF
 const SYS_NETGET: u64 = 1300
 const SYS_NETSET: u64 = 1301
 // RUNDE ECHTHARDWARE-1: der Fortschritt geht in den Kern, damit die
@@ -796,12 +800,119 @@ fn renew_once(unicast: bool, give_up_ms: u64) -> u64 {
 static mut link_lost: u64 = 0
 static mut link_cycled: u64 = 0
 
+static mut anlauf: u64 = 0
+static mut link_seen: u64 = 2
+static mut keep_secs: u64 = 0
+static mut LOG_LINK_UP: [u8; 8] = "link-up\0"
+static mut LOG_LINK_DOWN: [u8; 10] = "link-down\0"
+static mut LOG_LINK_RESTART: [u8; 13] = "link-restart\0"
+static mut LOG_LEASE: [u8; 6] = "lease\0"
+static mut LOG_STATUS: [u8; 7] = "status\0"
+static mut LOG_CONF_FAIL: [u8; 10] = "conf-fail\0"
+static mut LOG_RESOLV_FAIL: [u8; 12] = "resolv-fail\0"
+static mut LOG_DNS_FIXED: [u8; 10] = "dns-fixed\0"
+static mut LOG_DNS_FAIL: [u8; 9] = "dns-fail\0"
+static mut LOG_RETRY: [u8; 6] = "retry\0"
+static mut LOG_RENEWED: [u8; 8] = "renewed\0"
+static mut LOG_RENEW_FAIL: [u8; 13] = "renew-failed\0"
+static mut LOG_LEASE_LOST: [u8; 11] = "lease-lost\0"
+static mut LOG_START: [u8; 6] = "start\0"
+static mut K_IP: [u8; 3] = "ip\0"
+static mut K_LINK: [u8; 5] = "link\0"
+static mut K_LEASE: [u8; 6] = "lease\0"
+static mut K_DNS: [u8; 4] = "dns\0"
+static mut K_ATTEMPT: [u8; 8] = "attempt\0"
+static mut K_WAIT: [u8; 5] = "wait\0"
+static mut K_JARVISD: [u8; 8] = "jarvisd\0"
+static mut K_AGE: [u8; 4] = "age\0"
+static mut V_UP: [u8; 3] = "up\0"
+static mut V_DOWN: [u8; 5] = "down\0"
+static mut V_STALE: [u8; 6] = "stale\0"
+static mut V_OK: [u8; 3] = "ok\0"
+static mut V_NONE: [u8; 5] = "none\0"
+
+fn log_event(tag: u64) {
+    netlog.begin(tag)
+    netlog.ip((&K_IP[0 as usize]) as u64, ng(NG_IP))
+    netlog.num((&K_LINK[0 as usize]) as u64, ng(NG_LINKX))
+    netlog.end()
+}
+
+fn log_lease(tag: u64) {
+    netlog.begin(tag)
+    netlog.ip((&K_IP[0 as usize]) as u64, o_ip)
+    netlog.num((&K_LEASE[0 as usize]) as u64, o_lease)
+    netlog.ip((&K_DNS[0 as usize]) as u64, o_dns1)
+    netlog.end()
+}
+
+fn log_status() {
+    netlog.begin((&LOG_STATUS[0 as usize]) as u64)
+    netlog.ip((&K_IP[0 as usize]) as u64, ng(NG_IP))
+    netlog.num((&K_LINK[0 as usize]) as u64, ng(NG_LINKX))
+    netlog.num((&K_LEASE[0 as usize]) as u64, o_lease)
+    netlog.ip((&K_DNS[0 as usize]) as u64, o_dns1)
+    let age: u64 = helperstate.alive_age_secs(ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0))
+    if age == helperstate.NONE {
+        netlog.text((&K_JARVISD[0 as usize]) as u64, (&V_NONE[0 as usize]) as u64)
+    } else {
+        var verdict: u64 = (&V_OK[0 as usize]) as u64
+        if age > 180 {
+            verdict = (&V_STALE[0 as usize]) as u64
+        }
+        netlog.text((&K_JARVISD[0 as usize]) as u64, verdict)
+        netlog.num((&K_AGE[0 as usize]) as u64, age)
+    }
+    netlog.end()
+}
+
+fn dns_keep(want_fallback: bool) {
+    let r: u64 = dnsguard.ensure(o_dns1, o_dns2, o_dns3, want_fallback)
+    if r == dnsguard.R_REPAIRED {
+        log_event((&LOG_DNS_FIXED[0 as usize]) as u64)
+    } else if r == dnsguard.R_FAILED {
+        log_event((&LOG_DNS_FAIL[0 as usize]) as u64)
+    }
+}
+
+fn later(dauer: u64) -> u64 {
+    if dauer == 0 {
+        return 1
+    }
+    var wait_s: u64 = 60
+    if anlauf < 4 {
+        wait_s = 5 << anlauf
+    }
+    anlauf = anlauf + 1
+    netlog.begin((&LOG_RETRY[0 as usize]) as u64)
+    netlog.num((&K_ATTEMPT[0 as usize]) as u64, anlauf)
+    netlog.num((&K_WAIT[0 as usize]) as u64, wait_s)
+    netlog.end()
+    ulib.sleep_ms(wait_s * 1000)
+    return RETRY
+}
+
 fn link_watch() {
-    if ng(NG_LINKX) == 0 {
+    let up: u64 = ng(NG_LINKX)
+    if up == 0 {
         link_lost = 1
     } else if link_lost != 0 {
         link_lost = 0
         link_cycled = 1
+    }
+    var now_up: u64 = 0
+    if up != 0 {
+        now_up = 1
+    }
+    if now_up != link_seen {
+        if link_seen != 2 {
+            if now_up == 1 {
+                log_event((&LOG_LINK_UP[0 as usize]) as u64)
+            } else {
+                log_event((&LOG_LINK_DOWN[0 as usize]) as u64)
+            }
+        }
+        link_seen = now_up
     }
 }
 
@@ -810,6 +921,13 @@ fn sleep_secs(secs: u64) {
     while left > 0 && link_cycled == 0 {
         ulib.sleep_ms(1000)
         link_watch()
+        keep_secs = keep_secs + 1
+        if keep_secs % 10 == 0 {
+            dns_keep(false)
+        }
+        if keep_secs % 60 == 0 {
+            log_status()
+        }
         left = left - 1
     }
 }
@@ -826,7 +944,12 @@ fn renew_loop(t1_test: u64) -> u64 {
     while true {
         let lease: u64 = o_lease
         if lease == 0 || lease == 0xFFFFFFFF {
-            return 1
+            while link_cycled == 0 {
+                sleep_secs(60)
+            }
+            link_cycled = 0
+            log_event((&LOG_LINK_RESTART[0 as usize]) as u64)
+            return 0
         }
         var t1: u64 = lease / 2
         var t2: u64 = lease * 7 / 8
@@ -880,6 +1003,7 @@ fn renew_loop(t1_test: u64) -> u64 {
         if got == 0 {
             say((&s_r3[0 as usize]) as u64)
             ulib.nl()
+            log_event((&LOG_RENEW_FAIL[0 as usize]) as u64)
             var end: u64 = lease
             if t1_test != 0 {
                 end = t1_test * 3
@@ -906,6 +1030,7 @@ fn renew_loop(t1_test: u64) -> u64 {
             say((&s_r2[0 as usize]) as u64)
             ulib.sayn(o_lease)
             ulib.nl()
+            log_lease((&LOG_RENEWED[0 as usize]) as u64)
         } else {
             if got == 6 {
                 say((&s_r5[0 as usize]) as u64)
@@ -913,19 +1038,16 @@ fn renew_loop(t1_test: u64) -> u64 {
             }
             say((&s_r4[0 as usize]) as u64)
             ulib.nl()
+            log_event((&LOG_LEASE_LOST[0 as usize]) as u64)
             return 0
         }
     }
     return 0
 }
 
-// RUNDE ECHTHARDWARE-6: der wievielte Anlauf. Statisch, weil
-// `u_start` sich fuer den naechsten Anlauf selbst ruft -- eine lokale
-// Variable waere bei jedem Anlauf wieder null und der Abstand nie
-// groesser als fuenf Sekunden.
-static mut anlauf: u64 = 0
 
-fn u_start(args: u64) -> u64 {
+
+fn run_once(args: u64) -> u64 {
     var s_no: [u8; 26] = "dhcp: kein Netz im Kernel\0"
     var s_ns: [u8; 26] = "dhcp: kein Socket, errno \0"
     var s_nb: [u8; 34] = "dhcp: bind 68 schlug fehl, errno \0"
@@ -1070,7 +1192,7 @@ fn u_start(args: u64) -> u64 {
             ulib.sayn(wn)
             ulib.nl()
             ulib.sleep_ms(wn * 1000)
-            return u_start(args)
+            return RETRY
         }
         return 1
     }
@@ -1105,7 +1227,7 @@ fn u_start(args: u64) -> u64 {
         say((&s_ns[0 as usize]) as u64)
         ulib.sayn(0 -% fd)
         ulib.nl()
-        return 1
+        return later(dauer)
     }
     let bf: u64 = net.bind_port(fd, PORT_C)
     if net.failed(bf) {
@@ -1117,7 +1239,7 @@ fn u_start(args: u64) -> u64 {
         ulib.nl()
         status()
         net.close(fd)
-        return 1
+        return later(dauer)
     }
     say((&s_go[0 as usize]) as u64)
     ulib.sayn(xid)
@@ -1206,7 +1328,7 @@ fn u_start(args: u64) -> u64 {
             ulib.sayn(w)
             ulib.nl()
             ulib.sleep_ms(w * 1000)
-            return u_start(args)
+            return RETRY
         }
         return 1
     }
@@ -1268,8 +1390,9 @@ fn u_start(args: u64) -> u64 {
         ulib.sayn(runde)
         say((&s_ve[0 as usize]) as u64)
         ulib.nl()
-        return 1
+        return later(dauer)
     }
+    anlauf = 0
     melde(D_ST, 4) // ACK -- die Adresse steht
     sag_ip((&s_ak[0 as usize]) as u64, o_ip)
     say((&s_ls[0 as usize]) as u64)
@@ -1285,7 +1408,7 @@ fn u_start(args: u64) -> u64 {
         say((&s_er[0 as usize]) as u64)
         ulib.sayn(0 -% rc)
         ulib.nl()
-        return 1
+        return later(dauer)
     }
     sag_ip((&s_se[0 as usize]) as u64, ulib.sys(SYS_NETGET, NG_IP, 0, 0))
     ulib.nl()
@@ -1330,20 +1453,23 @@ fn u_start(args: u64) -> u64 {
     if ulib.bad(fdc) {
         say((&s_cn[0 as usize]) as u64)
         ulib.nl()
-        return 1
+        log_event((&LOG_CONF_FAIL[0 as usize]) as u64)
+    } else {
+        let gw2: u64 = ulib.sys(ulib.SYS_WRITE, fdc, c, at)
+        let _cl: u64 = ulib.sys(ulib.SYS_CLOSE, fdc, 0, 0)
+        say((&s_cf[0 as usize]) as u64)
+        ulib.sayn(gw2)
+        ulib.nl()
     }
-    let gw2: u64 = ulib.sys(ulib.SYS_WRITE, fdc, c, at)
-    let _cl: u64 = ulib.sys(ulib.SYS_CLOSE, fdc, 0, 0)
-    say((&s_cf[0 as usize]) as u64)
-    ulib.sayn(gw2)
-    ulib.nl()
+    log_lease((&LOG_LEASE[0 as usize]) as u64)
 
     // 4. RUNDE BETRIEB: der Nameserver nach /etc/resolv.conf.
     if o_dns1 == 0 {
         say((&s_rn[0 as usize]) as u64)
         ulib.nl()
+        dns_keep(true)
         if dauer != 0 && renew_loop(t1_test) == 0 {
-            return u_start(args)
+            return RETRY
         }
         return 0
     }
@@ -1351,8 +1477,9 @@ fn u_start(args: u64) -> u64 {
         (&k_ns[0 as usize]) as u64, (&k_fb[0 as usize]) as u64,
         (&k_nl[0 as usize]) as u64)
     if rw == 0 {
-        return 1
+        log_event((&LOG_RESOLV_FAIL[0 as usize]) as u64)
     }
+    dns_keep(true)
     melde(4, o_dns1)
     melde(5, o_dns2)
     melde(6, o_dns3)
@@ -1368,7 +1495,18 @@ fn u_start(args: u64) -> u64 {
     ulib.nl()
     // DELL STABILITY: stay and keep the lease (see `renew_loop`)
     if dauer != 0 && renew_loop(t1_test) == 0 {
-        return u_start(args)
+        return RETRY
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    log_event((&LOG_START[0 as usize]) as u64)
+    while true {
+        let r: u64 = run_once(args)
+        if r != RETRY {
+            return r
+        }
     }
     return 0
 }
