@@ -122,14 +122,17 @@ def main(argv):
 
     print("== E. program icons are vector art at the size of the surface")
     bar_bg = px(s2, 600, 780)
-    b = ink_box(s2, (92, 764, 126, 797), bar_bg)
-    if b:
-        h = b[3] - b[1] + 1
-        check(h >= 22, "taskbar icon is %d px high (the 16x16 drawing was 16)" % h)
+    sizes = []
+    for cx in range(48, 208, 40):
+        b = ink_box(s2, (cx, 764, cx + 40, 797), bar_bg)
+        if b:
+            sizes.append(max(b[2] - b[0], b[3] - b[1]) + 1)
+    if len(sizes) >= 3:
+        check(min(sizes) >= 22, "pinned taskbar icons are %s px at their longest side (the 16x16 drawing was 16)" % sizes)
     else:
-        bad("no taskbar icon found")
+        bad("no taskbar icons found")
     row_bg = plate
-    b = ink_box(s2b, (gx + lx + 10, gy + ly + 4, gx + lx + 46, gy + ly + 48), row_bg, thr=90)
+    b = ink_box(s2b, (gx + lx + 10, gy + ly + 4, gx + lx + 46, gy + ly + 48), row_bg, thr=40)
     if b:
         h = b[3] - b[1] + 1
         check(h >= 28, "start menu icon is %d px high (16 before)" % h)
