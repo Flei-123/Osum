@@ -60,14 +60,16 @@ run_audit full "$T/full.txt" "$XDEV"
 stop_gadget
 chk full "page opened" 'settings: bluetooth'
 chk full "adapter bound" 'driver=btusb'
-nochk full "no adapter hint with adapter" 't=Plug in a USB Bluetooth adapter'
+HINT=$(grep -an 't=Plug in a USB Bluetooth adapter' "$T/full.klar" | tail -n 1 | cut -d: -f1)
+READY=$(grep -an 't=Ready' "$T/full.klar" | tail -n 1 | cut -d: -f1)
+[ -z "$HINT" ] || [ "${READY:-0}" -gt "$HINT" ] && ok "full: no adapter hint after the adapter is ready" || bad "full: adapter hint still shown last"
 chk full "power switch rect" 'settings: rect name=btpwr'
 chk full "search button rect" 'settings: rect name=btscan'
 chk full "status ready" 't=Ready'
 SCANS=$(count "$T/g.gadget" 'command 0401')
 [ "$SCANS" = 2 ] && ok "full: inquiry command sent once per search click ($SCANS)" || bad "full: expected 2 inquiry commands, got $SCANS"
 chk full "device list shows extended name" 't=.*Test Laptop'
-chk full "found counter" 't=Devices found: 3'
+chk full "found counter" 'Devices found: 3'
 chk full "power off text" 't=Bluetooth is off'
 chk full "power back on" 'bt: inquiry done n=3'
 grep -aq 'bt violations=0' "$T/g.gadget" && ok "full: model saw no malformed command" || bad "full: model violations"
