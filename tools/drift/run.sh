@@ -24,8 +24,8 @@ mn=$(sed -n 's/.*min=\([0-9]*\).*/\1/p' "$TMPD/diff.txt" | head -1)
 [ "${mn:-0}" -gt 500 ] \
     && ok "typing changed the menu in every sampled cycle (min ${mn} px)" \
     || bad "the menu took no keys in some sampled cycle (min ${mn:-0} px)"
-n=$(grep -ac 'panic' "$D/serial.txt")
-[ "$n" -eq 0 ] && ok "no panic on the serial line" || bad "$n panic lines"
+n=$(grep -acE 'panic|\*\*\* EXCEPTION|\*\*\* fault' "$D/serial.txt")
+[ "$n" -eq 0 ] && ok "no panic or exception on the serial line" || bad "$n panic/exception lines"
 
 echo "== counter-proof: the detector flags a drifting log =="
 python3 - "$TMPD/doctored.log" <<'PY'
