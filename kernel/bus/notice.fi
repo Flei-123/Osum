@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import bus.bus
+import bus.drvclass
+
+export { device, crash_text, crash, kind_of, K_NONE }
+
+const K_NONE: u64 = 0
+const ACT_ADD: u64 = 1
+const ACT_REMOVE: u64 = 2
+const BUS_USB: u64 = 1
+const BUS_HDA: u64 = 3
+const BUS_DISPLAY: u64 = 4
+const BUS_ACPI: u64 = 5
+const PRIO_INFO: u64 = 1
+const PRIO_ERROR: u64 = 2
+const TEXT_MAX: u64 = 60
+const NAME_MAX: u64 = 24
+
+static mut k_input: [u8; 6] = "input\0"
+static mut k_audio: [u8; 6] = "audio\0"
+static mut k_net: [u8; 4] = "net\0"
+static mut k_camera: [u8; 7] = "camera\0"
+static mut k_serial: [u8; 7] = "serial\0"
+static mut k_usb: [u8; 4] = "usb\0"
+static mut k_jack: [u8; 5] = "jack\0"
+static mut k_screen: [u8; 7] = "screen\0"
+static mut k_typec: [u8; 6] = "typec\0"
+static mut t_crash: [u8; 7] = "crash \0"
+
+fn kind_of(busid: u64, cls: u64) -> u64 {
+    if busid == BUS_HDA {
+        return (&k_jack[0]) as u64
+    }
+    if busid == BUS_DISPLAY {
+        return (&k_screen[0]) as u64
+    }
+    if busid == BUS_ACPI {
+        return (&k_typec[0]) as u64
+    }
+    if busid != BUS_USB {
+        return K_NONE
+    }
+    if cls == drvclass.CLS_BLOCK {
+        return K_NONE
+    }
+    if cls == drvclass.CLS_INPUT {
+        return (&k_input[0]) as u64
+    }
+    if cls == drvclass.CLS_AUDIO {
+        return (&k_audio[0]) as u64
+    }
+    if cls == drvclass.CLS_NET_ETH || cls == drvclass.CLS_NET_WLAN {
+        return (&k_net[0]) as u64
+    }
+    if cls == drvclass.CLS_CAMERA {
+        return (&k_camera[0]) as u64
+    }
+    if cls == drvclass.CLS_SERIAL {
+        return (&k_serial[0]) as u64
+    }
+    return (&k_usb[0]) as u64
+}
+
+fn put_cstr(buf: u64, at: u64, src: u64, cap: u64) -> u64 {
+    var n: u64 = at
+    var k: u64 = 0
+    while n < cap {
+        let c: u64 = __mmio_read8((src + k) as *mut u8) as u64
+        if c == 0 {
+            return n
+        }
+        __mmio_write8((buf + n) as *mut u8, c as u8)
+        n = n + 1
+        k = k + 1
+    }
+    return n
+}
+
+fn device(state: u64, action: u64, cls: u64, busid: u64) {
+    if action != ACT_ADD && action != ACT_REMOVE {
+        return
+    }
+    let kind: u64 = kind_of(busid, cls)
+    if kind == K_NONE {
+        return
+    }
+    var txt: [u8; 60] = [0 as u8; 60]
+    let base: u64 = (&txt[0]) as u64
+    __mmio_write8(base as *mut u8, 101 as u8)
+    __mmio_write8((base + 1) as *mut u8, 118 as u8)
+    var sign: u64 = 43
+    if action == ACT_REMOVE {
+        sign = 45
+    }
+    __mmio_write8((base + 2) as *mut u8, sign as u8)
+    __mmio_write8((base + 3) as *mut u8, 32 as u8)
+    let n: u64 = put_cstr(base, 4, kind, TEXT_MAX - 1)
+    __mmio_write8((base + n) as *mut u8, 0 as u8)
+    let _r: u64 = bus.noti_post(state, 0, PRIO_INFO, n, base)
+}
+
+fn crash_text(out: u64, name: u64) -> u64 {
+    var n: u64 = put_cstr(out, 0, (&t_crash[0]) as u64, TEXT_MAX - 1)
+    var k: u64 = 0
+    while k < NAME_MAX && n < TEXT_MAX - 1 {
+        let c: u64 = __mmio_read8((name + k) as *mut u8) as u64
+        if c == 0 {
+            k = NAME_MAX
+        } else {
+            __mmio_write8((out + n) as *mut u8, c as u8)
+            n = n + 1
+            k = k + 1
+        }
+    }
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+    return n
+}
+
+fn crash(state: u64, name: u64) {
+    var txt: [u8; 60] = [0 as u8; 60]
+    let n: u64 = crash_text((&txt[0]) as u64, name)
+    let _r: u64 = bus.noti_post(state, 0, PRIO_ERROR, n, (&txt[0]) as u64)
+}

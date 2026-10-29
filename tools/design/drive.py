@@ -1710,7 +1710,7 @@ def main():
                      # US-Belegung (`lang=en`, so faehrt der Stick):
                      # der Doppelpunkt liegt auf Umschalt+Semikolon.
                      ":": "shift-semicolon", ";": "semicolon",
-                     "=": "equal", "?": "shift-slash",
+                     "=": "equal", "+": "shift-equal", "?": "shift-slash",
                      "&": "shift-7", "%": "shift-5", "@": "shift-2"}
             # a doubled letter ("ss" in testpass123) is lost at 0.12 s (measured, FreeViewer gui_input gate)
             if any(arg[i] == arg[i + 1] for i in range(len(arg) - 1)):

@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import msg
+
+export { render, humanize }
+
+const KEY_MAX: u64 = 40
+const SCRATCH: u64 = 128
+
+static mut scratch: [u8; 128] = [0 as u8; 128]
+
+static mut k_pre: [u8; 6] = "note.\0"
+static mut k_in: [u8; 4] = ".in\0"
+static mut k_out: [u8; 5] = ".out\0"
+static mut k_media: [u8; 12] = "note.media.\0"
+static mut k_crash: [u8; 11] = "note.crash\0"
+static mut k_eject: [u8; 6] = "eject\0"
+
+fn rd(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn wr(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, v as u8)
+}
+
+fn put(out: u64, at: u64, cap: u64, src: u64, n: u64) -> u64 {
+    var w: u64 = at
+    var k: u64 = 0
+    while k < n && w + 1 < cap {
+        wr(out, w, rd(src, k))
+        w = w + 1
+        k = k + 1
+    }
+    return w
+}
+
+fn cstr_len(p: u64) -> u64 {
+    var n: u64 = 0
+    while rd(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn finish(out: u64, at: u64) -> u64 {
+    wr(out, at, 0)
+    return at
+}
+
+fn lookup(key: u64) -> u64 {
+    let t: u64 = msg.get(key)
+    if t == key {
+        return 0
+    }
+    return t
+}
+
+fn render_event(src: u64, n: u64, out: u64, cap: u64) -> u64 {
+    var key: [u8; 40] = [0 as u8; 40]
+    let kp: u64 = (&key[0]) as u64
+    var at: u64 = put(kp, 0, KEY_MAX, (&k_pre[0]) as u64, 5)
+    var k: u64 = 4
+    while k < n && rd(src, k) != 0 && rd(src, k) != 32 {
+        at = put(kp, at, KEY_MAX - 5, src + k, 1)
+        k = k + 1
+    }
+    if rd(src, 2) == 43 {
+        at = put(kp, at, KEY_MAX, (&k_in[0]) as u64, 3)
+    } else {
+        at = put(kp, at, KEY_MAX, (&k_out[0]) as u64, 4)
+    }
+    let _z: u64 = finish(kp, at)
+    let t: u64 = lookup(kp)
+    if t == 0 {
+        return 0
+    }
+    return finish(out, put(out, 0, cap, t, cstr_len(t)))
+}
+
+fn render_media(src: u64, n: u64, out: u64, cap: u64) -> u64 {
+    var key: [u8; 40] = [0 as u8; 40]
+    let kp: u64 = (&key[0]) as u64
+    var at: u64 = put(kp, 0, KEY_MAX, (&k_media[0]) as u64, 11)
+    let sign: u64 = rd(src, 3)
+    if sign == 43 {
+        at = put(kp, at, KEY_MAX, (&k_in[0]) as u64 + 1, 2)
+    } else if sign == 45 {
+        at = put(kp, at, KEY_MAX, (&k_out[0]) as u64 + 1, 3)
+    } else {
+        at = put(kp, at, KEY_MAX, (&k_eject[0]) as u64, 5)
+    }
+    let _z: u64 = finish(kp, at)
+    let t: u64 = lookup(kp)
+    if t == 0 {
+        return 0
+    }
+    var w: u64 = put(out, 0, cap, t, cstr_len(t))
+    var last: u64 = 5
+    var k: u64 = 5
+    while k < n && rd(src, k) != 0 {
+        if rd(src, k) == 47 {
+            last = k + 1
+        }
+        k = k + 1
+    }
+    if last < n {
+        wr(out, w, 32)
+        wr(out, w + 1, 40)
+        w = put(out, w + 2, cap - 2, src + last, n - last)
+        wr(out, w, 41)
+        w = w + 1
+    }
+    return finish(out, w)
+}
+
+fn render_crash(src: u64, n: u64, out: u64, cap: u64) -> u64 {
+    let t: u64 = lookup((&k_crash[0]) as u64)
+    if t == 0 || n <= 6 {
+        return 0
+    }
+    var w: u64 = put(out, 0, cap, src + 6, n - 6)
+    wr(out, w, 32)
+    w = put(out, w + 1, cap, t, cstr_len(t))
+    return finish(out, w)
+}
+
+fn render(src: u64, n: u64, out: u64, cap: u64) -> u64 {
+    if n > 4 && rd(src, 0) == 101 && rd(src, 1) == 118 && (rd(src, 2) == 43 || rd(src, 2) == 45) && rd(src, 3) == 32 {
+        return render_event(src, n, out, cap)
+    }
+    if n > 5 && rd(src, 0) == 117 && rd(src, 1) == 115 && rd(src, 2) == 98 && rd(src, 4) == 32 {
+        return render_media(src, n, out, cap)
+    }
+    if n > 6 && rd(src, 0) == 99 && rd(src, 1) == 114 && rd(src, 2) == 97 && rd(src, 3) == 115 && rd(src, 4) == 104 && rd(src, 5) == 32 {
+        return render_crash(src, n, out, cap)
+    }
+    return 0
+}
+
+fn humanize(buf: u64, n: u64, cap: u64) -> u64 {
+    let sp: u64 = (&scratch[0]) as u64
+    let m: u64 = render(buf, n, sp, SCRATCH)
+    if m == 0 {
+        return n
+    }
+    var w: u64 = put(buf, 0, cap, sp, m)
+    wr(buf, w, 0)
+    return w
+}
