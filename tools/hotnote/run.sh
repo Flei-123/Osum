@@ -9,6 +9,7 @@
 # 2. `notify "usb+ /medien/usb0"` (what the kernel posts for a stick) reads "USB drive connected (usb0)".
 # 3. A program that dies on a null write (/bin/segv): toast "segv stopped unexpectedly".
 # 4. The notification centre lists the same sentences, not the codes.
+# 5. Actions: a click on a toast opens its source; a stick row has Eject, a crash row View report.
 # COUNTER-PROOF: no raw "ev+ " / "usb+ " / "crash " text reaches a toast line.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -60,6 +61,34 @@ foto 03-bell
 klickauf ncrow0
 warte 6
 foto 04-act
+klickauf tbbtn0
+warte 3
+tippe notify usb+ /medien/usb1
+taste ret
+warteauf 'taskbar: toast .USB drive connected .usb1.' || 30
+klickauf toast
+warte 5
+foto 05-toast
+klickauf tbbtn0
+warte 3
+tippe segv
+taste ret
+warte 8
+klickauf glocke
+warte 4
+klickauf ncsec0
+warte 5
+foto 06-sec
+klickauf tbbtn0
+warte 3
+tippe notify usb+ /medien/usb0
+taste ret
+warte 4
+klickauf glocke
+warte 4
+klickauf ncsec0
+warte 5
+foto 07-eject
 DEOF
 bash tools/design/eh6.sh "$TMPD/o" res=1280x800 accel=kvm progs="$PROGS" \
     drehbuch="$TMPD/dreh.txt" > "$TMPD/o.log" 2>&1
@@ -76,6 +105,10 @@ t 'USB drive connected (usb0, 14.5 GB)' && ok "stick toast with drive name and s
 t 'Logitech keyboard or mouse connected' && ok "vendor name plus kind" || bad "no vendor toast"
 grep -aq 'notifc: row [0-9]* prio=1 text=Display connected (x2)' "$S" && ok "bell groups equal neighbours" || bad "bell did not group"
 grep -aq 'notifc: act row=0 path=/var/crash' "$S" && ok "clicking the crash row opens the report folder" || bad "row click did not act"
+grep -aq 'notifc: toast act path=/medien/usb1' "$S" && ok "clicking the toast opens its source" || bad "toast click did not act"
+[ "$(grep -ac 'notifc: act row=0 path=/var/crash' "$S")" -ge 2 ] && ok "View report button opens the report folder" || bad "View report button did not act"
+grep -aq 'notifc: eject row=0 path=/medien/usb0 rc=' "$S" && ok "Eject button runs the eject" || bad "Eject button did not act"
+t 'Eject failed' && ok "failed eject says so in a toast" || bad "no eject failure toast"
 grep -aq 'taskbar: toast \[segv stopped unexpectedly\]' "$S" && ok "crash toast names the program" || bad "no crash toast"
 if grep -aq 'taskbar: toast \[\(ev[+-] \|usb[+-^] \|crash \)' "$S"; then
     bad "raw bus code reached a toast: $(grep -a 'taskbar: toast \[\(ev[+-] \|usb[+-^] \|crash \)' "$S" | head -1)"

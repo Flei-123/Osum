@@ -61,6 +61,8 @@ Namen fuer `klickauf`:
     frect<N>        Widget N des Dateimanagers (explorer: rect id=N)
     fdrect<N>       widget N of the friends bar (freunde: rect id=N)
     ncrow<N>        row N of the notification card (notifc: open n= x= y= w= h=, rows 28 design points high)
+    ncsec<N>        the action button of row N (Eject / View report), right end of the row
+    toast           the toast on screen (taskbar: toast [..] x= y= w= h=)
     wlnth<K>x<I>    widget number I (0 first) of kind K in the newest report of the welcome window
     fdnth<K>x<I>    widget number I (0 first, -1 last) of kind K in the newest report of the friends bar
 """
@@ -839,6 +841,18 @@ class Fahrer:
             ox, oy, ow = int(m.group(1)), int(m.group(2)), int(m.group(3))
             k = ow / 400.0
             return (ox + int(10 * k), oy + int((38 + 32 * int(name[5:])) * k), int((400 - 20) * k), int(28 * k))
+        if name.startswith("ncsec") and name[5:].isdigit():
+            m = letzte(r"notifc: open n=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
+                return None
+            ox, oy, ow = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            k = ow / 400.0
+            return (ox + int((400 - 10 - 96) * k), oy + int((38 + 32 * int(name[5:])) * k), int(96 * k), int(28 * k))
+        if name == "toast":
+            m = letzte(r"taskbar: toast \[.*\] x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
+                return None
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name == "glocke":
             m = letzte(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:

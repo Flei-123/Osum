@@ -17,7 +17,11 @@
 //   step()           once per turn of the bar's loop; true when something changed
 //   is_open(), hit()
 //
+// Each row may carry a second button: Eject (a stick that was plugged in) or View report
+// (a crash). A click on the toast runs the same action as the row's main button.
 // Serial lines (read by tools/features/run.sh):
+//   notifc: eject row=<i> path=<p> rc=<n>
+//   notifc: toast act path=<p>
 //   notifc: open n=<rows> x= y= w= h=
 //   notifc: row <i> prio=<p> text=<text>
 //   notifc: clear n=<entries marked read>
@@ -29,9 +33,10 @@ import ulib
 import wlibc
 import wlib
 import notetext
+import msg
 import fuiscene
 
-export { init, anchor, toggle, step, is_open, hit, shown, set_bell }
+export { init, anchor, toggle, step, is_open, hit, shown, set_bell, act_newest }
 
 const NC_MAXR: u64 = 8
 const ROW_BYTES: u64 = 96
@@ -40,6 +45,12 @@ const KEY_ROW: u64 = 310
 const ARG_BYTES: u64 = 24
 const ACT_NONE: u64 = 0
 const ACT_FOLDER: u64 = 1
+const SEC_NONE: u64 = 0
+const SEC_EJECT: u64 = 1
+const SEC_REPORT: u64 = 2
+const KEY_SEC: u64 = 330
+const SEC_W: u64 = 96
+const RC_BUSY: u64 = 16
 const CARD_W: u64 = 400 // design points
 const ROW_H: u64 = 28
 const HEAD_H: u64 = 24
@@ -59,7 +70,9 @@ static mut row_txt: [u8; 768] = [0 as u8; 768] // NC_MAXR x ROW_BYTES
 static mut row_pri: [u64; 8] = [0 as u64; 8]
 static mut row_cnt: [u64; 8] = [0 as u64; 8]
 static mut row_act: [u64; 8] = [0 as u64; 8]
+static mut row_sec: [u64; 8] = [0 as u64; 8]
 static mut row_arg: [u8; 192] = [0 as u8; 192]
+static mut toast_arg: [u8; 24] = [0 as u8; 24]
 static mut raw_buf: [u8; 96] = [0 as u8; 96]
 static mut hum_buf: [u8; 96] = [0 as u8; 96]
 static mut p_explorer: [u8; 14] = "/bin/explorer\0"
@@ -67,6 +80,13 @@ static mut p_crashdir: [u8; 11] = "/var/crash\0"
 static mut s_act: [u8; 17] = "notifc: act row=\0"
 static mut s_actp: [u8; 7] = " path=\0"
 static mut s_grp: [u8; 4] = " (x\0"
+static mut s_ej: [u8; 19] = "notifc: eject row=\0"
+static mut s_rc: [u8; 5] = " rc=\0"
+static mut s_toast: [u8; 19] = "notifc: toast act \0"
+static mut k_sec_eject: [u8; 16] = "notif.act.eject\0"
+static mut k_sec_report: [u8; 17] = "notif.act.report\0"
+static mut k_eject_busy: [u8; 16] = "note.eject.busy\0"
+static mut k_eject_fail: [u8; 16] = "note.eject.fail\0"
 static mut px_: u64 = 0
 static mut py_: u64 = 0
 // the bell's rectangle on the bar (a press on it is the toggle's business, never an "outside" press)
@@ -128,6 +148,13 @@ fn card_h() -> u64 {
     return h
 }
 
+fn sec_label(kind: u64) -> u64 {
+    if kind == SEC_EJECT {
+        return msg.get((&k_sec_eject[0 as usize]) as u64)
+    }
+    return msg.get((&k_sec_report[0 as usize]) as u64)
+}
+
 fn build() {
     let r: usize = fuiscene.root()
     fuiscene.set_gap(r, GAPP)
@@ -140,12 +167,24 @@ fn build() {
     }
     var i: u64 = 0
     while i < n_rows {
+        var host: usize = r
+        var main_w: u64 = CARD_W - 2 * PADP
+        if row_sec[i as usize] != SEC_NONE {
+            host = fuiscene.row(r)
+            fuiscene.set_gap(host, GAPP)
+            fuiscene.set_size(host, CARD_W - 2 * PADP, ROW_H)
+            main_w = main_w - SEC_W - GAPP
+        }
         if row_act[i as usize] != ACT_NONE {
-            let rb: usize = fuiscene.button(r, (&row_txt[0 as usize]) as u64 + i * ROW_BYTES, KEY_ROW + i)
-            fuiscene.set_size(rb, CARD_W - 2 * PADP, ROW_H)
+            let rb: usize = fuiscene.button(host, (&row_txt[0 as usize]) as u64 + i * ROW_BYTES, KEY_ROW + i)
+            fuiscene.set_size(rb, main_w, ROW_H)
         } else {
-            let l: usize = fuiscene.label(r, (&row_txt[0 as usize]) as u64 + i * ROW_BYTES)
-            fuiscene.set_size(l, CARD_W - 2 * PADP, ROW_H)
+            let l: usize = fuiscene.label(host, (&row_txt[0 as usize]) as u64 + i * ROW_BYTES)
+            fuiscene.set_size(l, main_w, ROW_H)
+        }
+        if row_sec[i as usize] != SEC_NONE {
+            let sb: usize = fuiscene.button(host, sec_label(row_sec[i as usize]), KEY_SEC + i)
+            fuiscene.set_size(sb, SEC_W, ROW_H)
         }
         i = i + 1
     }
@@ -168,15 +207,24 @@ fn visible() -> u64 {
     return n
 }
 
-fn classify(raw: u64, n: u64, row: u64) {
-    row_act[row as usize] = ACT_NONE
-    let dst: u64 = (&row_arg[0 as usize]) as u64 + row * ARG_BYTES
-    if n > 5 && __mmio_read8(raw as *mut u8) as u64 == 117 && __mmio_read8((raw + 1) as *mut u8) as u64 == 115
-        && __mmio_read8((raw + 2) as *mut u8) as u64 == 98 && __mmio_read8((raw + 4) as *mut u8) as u64 == 32 {
+fn rd8(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn is_media(raw: u64, n: u64) -> bool {
+    return n > 5 && rd8(raw, 0) == 117 && rd8(raw, 1) == 115 && rd8(raw, 2) == 98 && rd8(raw, 4) == 32
+}
+
+fn is_crash(raw: u64, n: u64) -> bool {
+    return n > 6 && rd8(raw, 0) == 99 && rd8(raw, 1) == 114 && rd8(raw, 5) == 32
+}
+
+fn classify(raw: u64, n: u64, dst: u64) -> u64 {
+    if is_media(raw, n) {
         var k: u64 = 0
         var more: bool = true
         while more && k + 5 < n && k + 1 < ARG_BYTES {
-            let c: u64 = __mmio_read8((raw + 5 + k) as *mut u8) as u64
+            let c: u64 = rd8(raw, 5 + k)
             if c == 32 || c == 0 {
                 more = false
             } else {
@@ -185,21 +233,34 @@ fn classify(raw: u64, n: u64, row: u64) {
             }
         }
         __mmio_write8((dst + k) as *mut u8, 0 as u8)
-        if k > 0 && __mmio_read8((raw + 3) as *mut u8) as u64 != 45 {
-            row_act[row as usize] = ACT_FOLDER
+        if k > 0 && rd8(raw, 3) != 45 {
+            return ACT_FOLDER
         }
-        return
+        return ACT_NONE
     }
-    if n > 6 && __mmio_read8(raw as *mut u8) as u64 == 99 && __mmio_read8((raw + 1) as *mut u8) as u64 == 114
-        && __mmio_read8((raw + 5) as *mut u8) as u64 == 32 {
+    if is_crash(raw, n) {
         var k: u64 = 0
         while k < 10 {
-            __mmio_write8((dst + k) as *mut u8, __mmio_read8(((&p_crashdir[0 as usize]) as u64 + k) as *mut u8))
+            __mmio_write8((dst + k) as *mut u8, rd8((&p_crashdir[0 as usize]) as u64, k) as u8)
             k = k + 1
         }
         __mmio_write8((dst + 10) as *mut u8, 0 as u8)
-        row_act[row as usize] = ACT_FOLDER
+        return ACT_FOLDER
     }
+    return ACT_NONE
+}
+
+fn secondary(raw: u64, n: u64, act: u64) -> u64 {
+    if act != ACT_FOLDER {
+        return SEC_NONE
+    }
+    if is_media(raw, n) && rd8(raw, 3) == 43 {
+        return SEC_EJECT
+    }
+    if is_crash(raw, n) {
+        return SEC_REPORT
+    }
+    return SEC_NONE
 }
 
 fn same_text(a: u64, b: u64) -> bool {
@@ -288,7 +349,9 @@ fn read_rows() {
                 __mmio_write8(p as *mut u8, 45 as u8)
             }
             __mmio_write8((p + 1) as *mut u8, 32 as u8)
-            classify(raw, n, slot)
+            let act: u64 = classify(raw, n, (&row_arg[0 as usize]) as u64 + slot * ARG_BYTES)
+            row_act[slot as usize] = act
+            row_sec[slot as usize] = secondary(raw, n, act)
             n_rows = n_rows + 1
         }
         i = i + 1
@@ -302,20 +365,94 @@ fn read_rows() {
     }
 }
 
+fn spawn_explorer(path: u64) {
+    var av: [u64; 2] = [0 as u64; 2]
+    av[0 as usize] = (&p_explorer[0 as usize]) as u64
+    av[1 as usize] = path
+    let _pid: u64 = ulib.spawn_app((&p_explorer[0 as usize]) as u64, (&av[0 as usize]) as u64, 2)
+}
+
 fn act_row(i: u64) {
     if i >= n_rows || row_act[i as usize] != ACT_FOLDER {
         return
     }
     let path: u64 = (&row_arg[0 as usize]) as u64 + i * ARG_BYTES
-    var av: [u64; 2] = [0 as u64; 2]
-    av[0 as usize] = (&p_explorer[0 as usize]) as u64
-    av[1 as usize] = path
     say((&s_act[0 as usize]) as u64)
     sayn(i)
     say((&s_actp[0 as usize]) as u64)
     say(path)
     nl()
-    let _pid: u64 = ulib.spawn_app((&p_explorer[0 as usize]) as u64, (&av[0 as usize]) as u64, 2)
+    spawn_explorer(path)
+}
+
+fn act_newest() -> bool {
+    let raw: u64 = (&raw_buf[0 as usize]) as u64
+    var n: u64 = wlibc.noti_peek(0, raw, ROW_BYTES - 4)
+    if n > ROW_BYTES - 4 {
+        n = ROW_BYTES - 4
+    }
+    __mmio_write8((raw + n) as *mut u8, 0 as u8)
+    let path: u64 = (&toast_arg[0 as usize]) as u64
+    if n == 0 || classify(raw, n, path) != ACT_FOLDER {
+        return false
+    }
+    say((&s_toast[0 as usize]) as u64)
+    say((&s_actp[0 as usize]) as u64 + 1)
+    say(path)
+    nl()
+    spawn_explorer(path)
+    return true
+}
+
+fn carrier_of(path: u64) -> u64 {
+    var i: u64 = 0
+    while i < ulib.WX_MAX {
+        var pf: [u8; 24] = [0 as u8; 24]
+        var n: u64 = 0
+        while n < 23 {
+            let c: u64 = ulib.sys(ulib.SYS_WECHSEL, ulib.WX_PATHCH, i, n)
+            pf[n as usize] = c as u8
+            if c == 0 {
+                n = 23
+            } else {
+                n = n + 1
+            }
+        }
+        pf[23] = 0 as u8
+        if ulib.streq((&pf[0 as usize]) as u64, path) {
+            return i
+        }
+        i = i + 1
+    }
+    return ulib.WX_MAX
+}
+
+fn eject_row(i: u64) {
+    if i >= n_rows || row_sec[i as usize] != SEC_EJECT {
+        return
+    }
+    let path: u64 = (&row_arg[0 as usize]) as u64 + i * ARG_BYTES
+    let tr: u64 = carrier_of(path)
+    var rc: u64 = 0xFFFF
+    if tr < ulib.WX_MAX {
+        rc = ulib.sys(ulib.SYS_WECHSEL, ulib.WX_EJECT, tr, 0)
+    }
+    say((&s_ej[0 as usize]) as u64)
+    sayn(i)
+    say((&s_actp[0 as usize]) as u64)
+    say(path)
+    say((&s_rc[0 as usize]) as u64)
+    sayn(rc)
+    nl()
+    if rc == 0 {
+        return
+    }
+    var key: u64 = (&k_eject_fail[0 as usize]) as u64
+    if rc == RC_BUSY {
+        key = (&k_eject_busy[0 as usize]) as u64
+    }
+    let t: u64 = msg.get(key)
+    let _r: u64 = ulib.noti_post(2, t, ulib.length(t))
 }
 
 fn init() -> bool {
@@ -512,6 +649,16 @@ fn step() -> bool {
     if key >= KEY_ROW && key < KEY_ROW + NC_MAXR {
         act_row(key - KEY_ROW)
         shut((&s_bell[0 as usize]) as u64)
+        return true
+    }
+    if key >= KEY_SEC && key < KEY_SEC + NC_MAXR {
+        let i: u64 = key - KEY_SEC
+        if i < n_rows && row_sec[i as usize] == SEC_EJECT {
+            eject_row(i)
+        } else {
+            act_row(i)
+            shut((&s_bell[0 as usize]) as u64)
+        }
         return true
     }
     if open_ == 0 {
