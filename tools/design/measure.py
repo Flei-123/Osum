@@ -56,7 +56,7 @@ def wallpaper_blockiness(path):
     return same / tot
 
 
-def corner_halo(menu_png, base_png, x0=8, y0=300, r=12):
+def corner_halo(menu_png, base_png, x0=8, y0=300, r=8):
     m = Image.open(menu_png).convert("RGB")
     b = Image.open(base_png).convert("RGB")
     mp, bp = m.load(), b.load()

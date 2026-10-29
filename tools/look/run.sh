@@ -418,11 +418,10 @@ done
 # and probes THAT corner. What is being asked is the shape axis and
 # nothing else:
 #
-#   classic  no card, no radius -- eight pixels of window surface on
-#            the diagonal, 0 antialiased, and that is the WHOLE claim:
-#            `classic` draws no corner here.
-#   modern   `wlib.card` with radius_panel = 12 -- the diagonal crosses
-#            surface, an antialiased step, and the card face.
+#   classic  radius_panel = 8 (Windows 11 corner, same as modern) -- two
+#            surface pixels, one antialiased step, then the card face.
+#   modern   `wlib.card` with radius_panel = 8 -- the same arc, the same
+#            diagonal: two surface pixels, one antialiased, five face.
 #
 # The numbers below came out of that probe on the night pair.
 # THE COLOURS: the scene host paints the card LIGHTER than the window (surface-
@@ -430,9 +429,9 @@ done
 # `face` = the card (30 41 59) and `bg` = the window surface (15 23 42) here.
 # Numbers measured on the card of the Settings page (night): `classic` is square
 # -- no background pixel on the diagonal; the ONE pixel that is neither face nor
-# background is the 1 px border ring (fUi's card has one). `modern` (radius 12):
-# three surface pixels, two blended, three face.
-for v in "classic 0 1" "modern 3 2"; do
+# background is the 1 px border ring (fUi's card has one). both styles (radius 8):
+# two surface pixels, one blended, five face.
+for v in "classic 2 1" "modern 2 1"; do
     set -- $v
     # the corner of the CARD of the left column (the Settings page reports it
     # as `kartel`; `wab` is the list INSIDE the card)
