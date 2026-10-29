@@ -1,0 +1,212 @@
+profile kernel
+
+import lib.kstate
+import serial
+import block.blk
+import fs.fs
+
+export { prepare, ready, save, valid, data, take, discard, SLOT_BLOCKS, CAPACITY }
+
+const SLOT_BLOCKS: u64 = 16
+const BS: u64 = 512
+const HDR: u64 = 32
+const CAPACITY: u64 = 8160
+const MAGIC: u64 = 0x31544F4C53474E48
+const FNV_OFF: u64 = 0xCBF29CE484222325
+const FNV_PRIME: u64 = 0x100000001B3
+
+static mut sl_ready: u64 = 0
+static mut sl_lba: [u64; 16] = [0 as u64; 16]
+static mut sl_blk: [u8; 512] = [0 as u8; 512]
+static mut sl_zero: [u8; 512] = [0 as u8; 512]
+static mut sl_len: u64 = 0
+static mut sl_data: [u8; 8160] = [0 as u8; 8160]
+
+static mut p_var: [u8; 5] = "/var\0"
+static mut p_dir: [u8; 11] = "/var/crash\0"
+static mut p_slot: [u8; 20] = "/var/crash/hangslot\0"
+static mut s_on: [u8; 21] = "hangslot: ready lba=\0"
+static mut s_saved: [u8; 23] = "hangslot: saved bytes \0"
+static mut s_fail: [u8; 24] = "hangslot: write failed\0\0"
+
+fn ready() -> bool {
+    return sl_ready != 0
+}
+
+fn ensure_dir(state: u64, p: u64) -> bool {
+    if fs.path(state, p) != 0 {
+        return true
+    }
+    return fs.create_path(state, p, fs.T_DIR) != 0
+}
+
+fn prepare(state: u64) {
+    sl_ready = 0
+    if !fs.ready(state) {
+        return
+    }
+    if !ensure_dir(state, (&p_var[0]) as u64) || !ensure_dir(state, (&p_dir[0]) as u64) {
+        return
+    }
+    let name: u64 = (&p_slot[0]) as u64
+    var ino: u64 = fs.path(state, name)
+    if ino == 0 {
+        ino = fs.create_path(state, name, fs.T_FILE)
+    }
+    if ino == 0 {
+        return
+    }
+    var k: u64 = 0
+    if fs.inode_size(state, ino) < SLOT_BLOCKS * BS {
+        while k < SLOT_BLOCKS {
+            if fs.write_at(state, ino, k * BS, (&sl_zero[0]) as u64, BS) != BS {
+                return
+            }
+            k = k + 1
+        }
+    }
+    k = 0
+    while k < SLOT_BLOCKS {
+        let l: u64 = fs.block_of(state, ino, k)
+        if l == 0 {
+            return
+        }
+        sl_lba[k as usize] = l
+        k = k + 1
+    }
+    sl_ready = 1
+    serial.puts((&s_on[0]) as u64)
+    serial.dec(sl_lba[0])
+    serial.nl()
+}
+
+fn sum(p: u64, n: u64) -> u64 {
+    var h: u64 = FNV_OFF
+    var i: u64 = 0
+    while i < n {
+        h = (h ^ kstate.get8(p + i)) *% FNV_PRIME
+        i = i + 1
+    }
+    return h
+}
+
+fn put64(p: u64, v: u64) {
+    __mmio_write64(p as *mut u64, v)
+}
+
+fn get64(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn fill(src: u64, n: u64, k: u64) {
+    let b: u64 = (&sl_blk[0]) as u64
+    var i: u64 = 0
+    while i < BS {
+        kstate.set8(b + i, 0 as u8)
+        i = i + 1
+    }
+    var start: u64 = k * BS
+    var at: u64 = 0
+    if k == 0 {
+        put64(b, MAGIC)
+        put64(b + 8, n)
+        put64(b + 16, sum(src, n))
+        at = HDR
+    } else {
+        start = start - HDR
+    }
+    while at < BS && start < n {
+        kstate.set8(b + at, kstate.get8(src + start) as u8)
+        at = at + 1
+        start = start + 1
+    }
+}
+
+fn blocks_for(n: u64) -> u64 {
+    return (HDR + n + BS - 1) / BS
+}
+
+fn save(state: u64, src: u64, len: u64) -> bool {
+    if sl_ready == 0 {
+        return false
+    }
+    var n: u64 = len
+    if n > CAPACITY {
+        n = CAPACITY
+    }
+    let m: u64 = blocks_for(n)
+    var k: u64 = m
+    while k > 0 {
+        k = k - 1
+        fill(src, n, k)
+        if !blk.write(state, sl_lba[k as usize], (&sl_blk[0]) as u64) {
+            serial.puts((&s_fail[0]) as u64)
+            serial.nl()
+            return false
+        }
+    }
+    let _f: bool = blk.flush(state)
+    serial.puts((&s_saved[0]) as u64)
+    serial.dec(n)
+    serial.nl()
+    return true
+}
+
+fn valid(state: u64) -> bool {
+    sl_len = 0
+    if sl_ready == 0 {
+        return false
+    }
+    let b: u64 = (&sl_blk[0]) as u64
+    if !blk.read(state, sl_lba[0], b) || get64(b) != MAGIC {
+        return false
+    }
+    let n: u64 = get64(b + 8)
+    let want: u64 = get64(b + 16)
+    if n == 0 || n > CAPACITY {
+        return false
+    }
+    let d: u64 = (&sl_data[0]) as u64
+    var got: u64 = 0
+    var i: u64 = HDR
+    while i < BS && got < n {
+        kstate.set8(d + got, kstate.get8(b + i) as u8)
+        got = got + 1
+        i = i + 1
+    }
+    var k: u64 = 1
+    while got < n && k < SLOT_BLOCKS {
+        if !blk.read(state, sl_lba[k as usize], b) {
+            return false
+        }
+        i = 0
+        while i < BS && got < n {
+            kstate.set8(d + got, kstate.get8(b + i) as u8)
+            got = got + 1
+            i = i + 1
+        }
+        k = k + 1
+    }
+    if sum(d, n) != want {
+        return false
+    }
+    sl_len = n
+    return true
+}
+
+fn data() -> u64 {
+    return (&sl_data[0]) as u64
+}
+
+fn take() -> u64 {
+    return sl_len
+}
+
+fn discard(state: u64) {
+    if sl_ready == 0 {
+        return
+    }
+    let _w: bool = blk.write(state, sl_lba[0], (&sl_zero[0]) as u64)
+    let _f: bool = blk.flush(state)
+    sl_len = 0
+}

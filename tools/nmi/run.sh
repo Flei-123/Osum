@@ -47,6 +47,7 @@ runvm() {
 SK="Skylake-Client,pmu=on"
 runvm lock 90 2 "$SK" "wdt=10 wdtlock=15" &
 runvm cspin 90 2 "$SK" "wdt=10 wdtcspin=15" &
+runvm ramloss 90 2 "$SK" "wdt=10 wdtcspin=15 nmiramloss" &
 runvm pmu1 90 1 "$SK" "wdt=10 wdtcspin=15" &
 runvm halt 90 2 "$SK" "wdt=10 wdthang=15" &
 runvm soft 110 2 "$SK" "wdt=20 wdtspin=15" &
@@ -87,6 +88,12 @@ hhas lock "irqs=off" && ok "lock: irqs=off recorded" || bad "lock: irq state mis
 echo "== b. spin with irqs off on cpu0, 2 cpus =="
 report_checks cspin hard planted_cspin
 grep -a 'hang: detected' "$D/cspin.klar" | head -1 | grep -q 'cpu=0' && ok "cspin: culprit cpu 0" || bad "cspin: culprit $(grep -a -m1 'hang: detected' "$D/cspin.klar")"
+echo "== b2. RAM report lost across the reset (real hardware): report comes from the disk slot =="
+has ramloss "^hangslot: ready lba=" && ok "ramloss: slot prepared at boot" || bad "ramloss: no slot ($(grep -a -m1 hangslot "$D/ramloss.klar"))"
+has ramloss "^hangslot: saved bytes [1-9]" && ok "ramloss: report written to the slot before the reset" || bad "ramloss: slot not written"
+hhas ramloss "snapshot: from disk slot" && ok "ramloss: hang file built from the disk slot" || bad "ramloss: $(grep -a -m1 '^snapshot' "$D/ramloss.hang")"
+report_checks ramloss hard planted_cspin
+sv=$(grep -ac '^hangslot: saved' "$D/ramloss.klar"); fl=$(grep -ac 'snapshot: from disk slot' "$D/ramloss.hang"); [ "$fl" -ge 1 ] && [ "$fl" -ge $((sv - 1)) ] && ok "ramloss: every saved slot became a hang file ($sv saves, $fl files)" || bad "ramloss: $sv saves, $fl files from the slot"
 echo "== c. spin with irqs off, ONE cpu: only the PMU NMI can see it =="
 has pmu1 "^hang: on .* pmu=[1-9]" && ok "pmu1: PMU found" || bad "pmu1: no PMU ($(grep -a -m1 '^hang: on' "$D/pmu1.klar"))"
 has pmu1 "^hang: detected reason=hard-self" && ok "pmu1: detected by the PMU NMI (hard-self)" || bad "pmu1: not detected"

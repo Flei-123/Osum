@@ -9,6 +9,7 @@ import drv.wdt.tcochip
 import sync.atomic
 import diag.crash
 import diag.wdtmark
+import diag.hangslot
 import klog
 
 export {
@@ -86,6 +87,7 @@ static mut s_rp_s: [u8; 9] = "source: \0"
 static mut s_rp_t: [u8; 4] = "tco\0"
 static mut s_rp_f: [u8; 7] = "freeze\0"
 static mut s_rp_p: [u8; 8] = "planted\0"
+static mut s_rp_d: [u8; 26] = "snapshot: from disk slot\n\0"
 static mut s_rp_n: [u8; 65] = "snapshot: none (RAM report did not survive or was never taken)\n\0\0"
 
 static mut k_wdt: [u8; 4] = "wdt\0"
@@ -528,7 +530,12 @@ fn boot_report(state: u64) {
     klog.sayh(state, klog.L_INFO, (&s_ev_src[0]) as u64, (&s_ev_d[0]) as u64, w_ev_sts2)
     klog.sayn(state, klog.L_INFO, (&s_ev_src[0]) as u64, (&s_ev_e[0]) as u64, w_last)
     klog.sayn(state, klog.L_INFO, (&s_ev_src[0]) as u64, (&s_ev_f[0]) as u64, w_detail)
-    if w_last != LB_WATCHDOG || crash.rescued() {
+    hangslot.prepare(state)
+    let have: bool = hangslot.valid(state)
+    if crash.rescued() || (w_last != LB_WATCHDOG && !have) {
+        if have {
+            hangslot.discard(state)
+        }
         return
     }
     crash.hang_begin(state, crash.KIND_HANG)
@@ -549,6 +556,14 @@ fn boot_report(state: u64) {
         crash.p_dec(w_info)
         crash.p_nl()
     }
-    crash.p_str((&s_rp_n[0]) as u64)
+    if have {
+        crash.p_str((&s_rp_d[0]) as u64)
+        crash.p_bytes(hangslot.data(), hangslot.take())
+    } else {
+        crash.p_str((&s_rp_n[0]) as u64)
+    }
     let _w: bool = crash.hang_file(state)
+    if have {
+        hangslot.discard(state)
+    }
 }
