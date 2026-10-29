@@ -52,6 +52,15 @@ runvm halt 90 2 "$SK" "wdt=10 wdthang=15" &
 runvm soft 110 2 "$SK" "wdt=20 wdtspin=15" &
 runvm nonmi 75 2 "$SK" "wdt=10 wdtlock=15 nonmi" &
 runvm idle 70 2 "$SK" "" &
+desk() {
+    local img="${NMI_IMG:-}"
+    if [ -z "$img" ]; then
+        IMAGE_ID=nmigate bash tools/usbimg/build.sh "$D/img" > "$D/img.txt" 2>&1
+        img="$D/img/xoffios-usb.img"
+    fi
+    [ -f "$img" ] && NMI_SMP=4 bash tools/nmi/desktop.sh "$img" "$D/desk.klar" "${NMI_DESK_S:-60}"
+}
+desk &
 wait
 boots() { grep -ac '^wdt: \(armed\|off\|absent\|failed\)' "$D/$1.klar"; }
 has() { grep -qa -- "$2" "$D/$1.klar"; }
@@ -97,4 +106,15 @@ echo "== g. no false alarm in a normal run =="
 has idle "==P20==" && ok "idle: script runs" || bad "idle: script stuck"
 has idle "^hang: detected" && bad "idle: false alarm $(grep -a -m1 '^hang: detected' "$D/idle.klar")" || ok "idle: no false alarm"
 [ "$(boots idle)" = 1 ] && ok "idle: one boot" || bad "idle: $(boots idle) boots"
+echo "== h. desktop image, 4 cpus, PMU on: login and ${NMI_DESK_S:-60} s on the desktop without a crash =="
+if [ ! -s "$D/desk.klar" ]; then
+    bad "desk: no serial log ($(tail -2 "$D/img.txt" 2>/dev/null | tr '\n' '|'))"
+else
+    has desk "^hang: on .* pmu=[1-9]" && ok "desk: logger on with PMU" || bad "desk: $(grep -a -m1 '^hang:' "$D/desk.klar")"
+    grep -q '^logged-in 1' "$D/desk.klar.steps" && ok "desk: logged in" || bad "desk: login failed ($(tr '\n' ' ' < "$D/desk.klar.steps"))"
+    grep -q '^settled 1' "$D/desk.klar.steps" && ok "desk: desktop survived the settle time" || bad "desk: did not settle"
+    n=$(grep -ac 'EXCEPTION\|ABSTURZ' "$D/desk.klar"); [ "$n" = 0 ] && ok "desk: no crash" || bad "desk: $n crash lines ($(grep -a -m1 'EXCEPTION' "$D/desk.klar"))"
+    has desk "^hang: detected" && bad "desk: false alarm $(grep -a -m1 '^hang: detected' "$D/desk.klar")" || ok "desk: no false alarm"
+    [ "$(boots desk)" = 1 ] && ok "desk: one boot" || bad "desk: $(boots desk) boots"
+fi
 finish
