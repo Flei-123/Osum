@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/settingsaudit/run.sh -- settings audit: one screenshot per page for ALL 20 pages (a..t) + serial trace for runtime.py.
+# tools/settingsaudit/run.sh -- settings audit: one screenshot per page for ALL 32 pages + serial trace for runtime.py.
 #
 #   /root/jarvis/bin/heavy bash tools/settingsaudit/run.sh [<outdir>] [mode=light|dark] [scale=1|2]
 #
@@ -32,6 +32,8 @@ for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
   echo "klickauf srecttab27"; echo "warte 2"; echo "foto page-B"
   echo "klickauf srecttab28"; echo "warte 2"; echo "foto page-C"
   echo "klickauf srecttab29"; echo "warte 2"; echo "foto page-D"
+  echo "klickauf srecttab30"; echo "warte 2"; echo "foto page-E"
+  echo "klickauf srecttab31"; echo "warte 2"; echo "foto page-F"
   echo "taste ctrl-f"; echo "tippe zzzz"; echo "warte 2"; echo "foto search-empty"
 } > "$DREH"
 bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=420 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1

@@ -45,7 +45,7 @@ def main():
         rows.append((i, len(page), ov))
     # build 0 = initial window, builds 1..20 = sidebar clicks a..t (PAGE_IDS), the rest = search typing (empty result)
     ids = ["appearance", "screen", "time", "network", "users", "netview", "language", "presets", "accounts", "sync",
-           "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects", "wifi", "usbnet", "scheme", "accent", "password", "pin", "transfer", "sound"]
+           "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects", "wifi", "usbnet", "scheme", "accent", "password", "pin", "transfer", "sound", "touchpad", "bluetooth"]
     bad = 0
     for i, n, ov in rows:
         name = "(initial)" if i == 0 else (ids[i - 1] if i - 1 < len(ids) else "(search)")
