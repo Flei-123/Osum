@@ -40,6 +40,33 @@ static mut k_t3: [u8; 11] = "welcome.t3\0"
 static mut k_show: [u8; 13] = "welcome.show\0"
 static mut k_set: [u8; 13] = "welcome.sett\0"
 static mut k_close: [u8; 14] = "welcome.close\0"
+static mut k_open: [u8; 13] = "welcome.open\0"
+static mut k_st_lang: [u8; 18] = "welcome.step.lang\0"
+static mut k_st_net: [u8; 17] = "welcome.step.net\0"
+static mut k_st_upd: [u8; 17] = "welcome.step.upd\0"
+static mut k_st_disp: [u8; 18] = "welcome.step.disp\0"
+static mut k_v_de: [u8; 13] = "welcome.v.de\0"
+static mut k_v_en: [u8; 13] = "welcome.v.en\0"
+static mut k_n_ok: [u8; 15] = "welcome.net.ok\0"
+static mut k_n_none: [u8; 17] = "welcome.net.none\0"
+static mut k_n_noip: [u8; 17] = "welcome.net.noip\0"
+static mut k_n_nogw: [u8; 17] = "welcome.net.nogw\0"
+static mut k_u_hint: [u8; 17] = "welcome.upd.hint\0"
+static mut k_d_hint: [u8; 18] = "welcome.disp.hint\0"
+
+const K_STEP: u64 = 10
+const STEPS: u64 = 4
+const STEP_BUF: u64 = 128
+const PAGE_DISPLAY: u64 = 1
+const PAGE_NETWORK: u64 = 3
+const PAGE_LANGUAGE: u64 = 6
+const PAGE_UPDATE: u64 = 14
+const SYS_NETGET: u64 = 1300
+const NG_STATE: u64 = 8
+const STEPS_MIN_HEIGHT: u64 = 400
+static mut st_text: [u8; 512] = [0 as u8; 512]
+static mut st_page: [u64; 4] = [0 as u64; 4]
+static mut st_arg: [u8; 24] = [0 as u8; 24]
 
 static mut show_now: bool = false
 
@@ -128,7 +155,7 @@ static mut nd_head: usize = 0
 static mut nd_bar: usize = 0
 
 // The boxes of the root column in order (the overlap check of `say_layout` walks them).
-static mut col_nodes: [usize; 8] = [0 as usize; 8]
+static mut col_nodes: [usize; 16] = [0 as usize; 16]
 static mut col_n: u64 = 0
 
 // Counter-proof switch of the gate (`l=1` in /etc/welcome.conf): the old layout (fixed one-line paragraph heights, squeezing).
@@ -138,7 +165,7 @@ fn keep(i: usize) -> usize {
     if !legacy {
         fuiscene.set_noshrink(i)
     }
-    if col_n < 8 {
+    if col_n < 16 {
         col_nodes[(col_n) as usize] = i
         col_n = col_n + 1
     }
@@ -156,10 +183,93 @@ fn para(col: usize, key: u64) -> usize {
     return keep(i)
 }
 
+fn rb(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn put(buf: u64, at: u64, src: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = at
+    while rb(src, i) != 0 && o + 1 < STEP_BUF {
+        __mmio_write8((buf + o) as *mut u8, rb(src, i) as u8)
+        i = i + 1
+        o = o + 1
+    }
+    __mmio_write8((buf + o) as *mut u8, 0 as u8)
+    return o
+}
+
+fn net_key() -> u64 {
+    let st: u64 = ulib.sys(SYS_NETGET, NG_STATE, 0, 0)
+    if ulib.bad(st) || st == 0 {
+        return (&k_n_none[0 as usize]) as u64
+    }
+    if st == 1 {
+        return (&k_n_noip[0 as usize]) as u64
+    }
+    if st == 2 {
+        return (&k_n_nogw[0 as usize]) as u64
+    }
+    return (&k_n_ok[0 as usize]) as u64
+}
+
+fn lang_key() -> u64 {
+    if rb(msg.lang(), 0) == 100 {
+        return (&k_v_de[0 as usize]) as u64
+    }
+    return (&k_v_en[0 as usize]) as u64
+}
+
+fn step(col: usize, idx: u64, title_key: u64, value_key: u64, page: u64) {
+    let buf: u64 = (&st_text[0 as usize]) as u64 + idx * STEP_BUF
+    var at: u64 = put(buf, 0, msg.get(title_key))
+    var sep: [u8; 3] = ": \0"
+    at = put(buf, at, (&sep[0 as usize]) as u64)
+    at = put(buf, at, msg.get(value_key))
+    st_page[(idx) as usize] = page
+    let r: usize = keep(fuiscene.row(col))
+    fuiscene.set_gap(r, 8)
+    let l: usize = fuiscene.label(r, buf)
+    fuiscene.set_grow(l, 1)
+    let b: usize = fuiscene.button(r, msg.get((&k_open[0 as usize]) as u64), K_STEP + idx)
+    fuiscene.set_noshrink(b)
+    fuiscene.set_size(b, 110, 32)
+}
+
+fn build_steps(col: usize) {
+    step(col, 0, (&k_st_lang[0 as usize]) as u64, lang_key(), PAGE_LANGUAGE)
+    step(col, 1, (&k_st_net[0 as usize]) as u64, net_key(), PAGE_NETWORK)
+    step(col, 2, (&k_st_upd[0 as usize]) as u64, (&k_u_hint[0 as usize]) as u64, PAGE_UPDATE)
+    step(col, 3, (&k_st_disp[0 as usize]) as u64, (&k_d_hint[0 as usize]) as u64, PAGE_DISPLAY)
+}
+
+fn open_page(page: u64) {
+    var head: [u8; 6] = "page=\0"
+    var argv: [u64; 2] = [0 as u64; 2]
+    let a: u64 = (&st_arg[0 as usize]) as u64
+    var at: u64 = 0
+    while at < 5 {
+        __mmio_write8((a + at) as *mut u8, head[(at) as usize])
+        at = at + 1
+    }
+    if page >= 10 {
+        __mmio_write8((a + at) as *mut u8, (48 + page / 10) as u8)
+        at = at + 1
+    }
+    __mmio_write8((a + at) as *mut u8, (48 + page % 10) as u8)
+    __mmio_write8((a + at + 1) as *mut u8, 0 as u8)
+    argv[(0) as usize] = (&A_SET[0 as usize]) as u64
+    argv[(1) as usize] = a
+    let _p: u64 = ulib.sys(ulib.SYS_EXEC, (&P_SET[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2)
+}
+
 fn build() {
     let col: usize = fuiscene.root()
     col_n = 0
     nd_head = keep(fuiscene.label(col, msg.get((&k_head[0 as usize]) as u64)))
+    if fuiscene.height() >= STEPS_MIN_HEIGHT {
+        build_steps(col)
+    }
     if tier < 3 {
         let _a: usize = para(col, (&k_t1[0 as usize]) as u64)
     }
@@ -240,7 +350,7 @@ fn u_gui() -> u64 {
         ww = 520
     }
     if wh < 80 {
-        wh = 330
+        wh = 480
     }
     if !fuiscene.open(160, 120, ww, wh, msg.get((&k_title[0 as usize]) as u64), build) {
         say((&s_bad[0 as usize]) as u64)
@@ -272,6 +382,16 @@ fn u_gui() -> u64 {
         if first {
             first = false
             fuiscene.say_rects((&s_nm[0 as usize]) as u64)
+            var s_geo: [u8; 23] = "welcome: geom x=160 y=\0"
+            var s_geo_w: [u8; 4] = " w=\0"
+            var s_geo_h: [u8; 4] = " h=\0"
+            say((&s_geo[0 as usize]) as u64)
+            ulib.sayu(120)
+            say((&s_geo_w[0 as usize]) as u64)
+            ulib.sayu(ww)
+            say((&s_geo_h[0 as usize]) as u64)
+            ulib.sayu(wh)
+            ulib.nl()
             say((&s_go[0 as usize]) as u64)
             ulib.nl()
         }
@@ -291,6 +411,16 @@ fn u_gui() -> u64 {
             argv[(0) as usize] = (&A_SET[0 as usize]) as u64
             let _p: u64 = ulib.sys(ulib.SYS_EXEC, (&P_SET[0 as usize]) as u64, (&argv[0 as usize]) as u64, 1)
             fuiscene.quit()
+        } else if key >= K_STEP && key < K_STEP + STEPS {
+            var s_step: [u8; 16] = "welcome: step \0\0"
+            var s_pg: [u8; 7] = " page=\0"
+            say((&s_step[0 as usize]) as u64)
+            ulib.sayu(key - K_STEP)
+            say((&s_pg[0 as usize]) as u64)
+            ulib.sayu(st_page[(key - K_STEP) as usize])
+            ulib.nl()
+            open_page(st_page[(key - K_STEP) as usize])
+            fuiscene.refresh()
         } else if key == K_CLOSE {
             fuiscene.quit()
         }

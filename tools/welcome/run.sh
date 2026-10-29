@@ -105,7 +105,7 @@ bash tools/design/audit.sh "$W" accel=kvm uitrace=yes halt=300 \
 S="$W/serial.txt"
 has "$S" "welcome: ready" "audit machine: the desktop started the welcome window by itself"
 n=$(grep -ac '^welcome: rect ' "$S" 2>/dev/null; true)
-[ "$n" = 3 ] && ok "window has 3 touchable controls (check box + 2 buttons)" || bad "controls reported: $n"
+[ "$n" = 7 ] && ok "window has 7 touchable controls (4 step buttons + check box + 2 buttons)" || bad "controls reported: $n"
 # NOT CHECKED (open, r849 note): toggling the check box by key/click in the GUI. A bare `space` does not
 # reach the box (focus is not on it); the switch itself is covered by part A (`welcome show on|off`).
 c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
@@ -132,5 +132,28 @@ echo "  small : $L1"; echo "  normal: $L2"; echo "  old   : $L3"
 [ -n "$L2" ] && [ "$(lay_num "$L2" overlap)" = 0 ] && [ "$(lay_num "$L2" tier)" = 0 ] && ok "520x330: all three paragraphs, no overlap" || bad "520x330 ($L2)"
 [ -n "$L2" ] && [ "$(lay_num "$L2" bottom)" -le "$(lay_num "$L2" win)" ] 2>/dev/null && ok "520x330: the button bar ends inside the window" || bad "520x330: bar outside ($L2)"
 [ -n "$L3" ] && [ "$(lay_num "$L3" overlap)" -ge 1 ] 2>/dev/null && ok "COUNTER-PROOF: the old layout (l=1) overlaps at 520x330" || bad "counter-proof: old layout did not overlap ($L3)"
+L4=$(run_size steps 520 480 0)
+echo "  steps : $L4"
+[ -n "$L4" ] && [ "$(lay_num "$L4" overlap)" = 0 ] && ok "520x480: step rows and paragraphs do not overlap" || bad "520x480: overlap ($L4)"
+[ -n "$L4" ] && [ "$(lay_num "$L4" bottom)" -le "$(lay_num "$L4" win)" ] 2>/dev/null && ok "520x480: the button bar ends inside the window" || bad "520x480: bar outside ($L4)"
+# ---- part D: the step buttons open Settings on the right page (click measured from the reported rects)
+D="$W-steps"
+printf 'show=ja\n' > "$D.conf"
+{
+  echo "warteauf 'welcome: ready' || 240"
+  echo "warte 3"
+  echo "klickauf wlnth2x1"
+  echo "warteauf 'settings: ready' || 120"
+  echo "warte 2"
+  echo "foto 01-after-click"
+} > "$D.book"
+DESIGNBUILD="$D-build" AUDIT_MKFS_EXTRA="/etc/ /etc/welcome.conf=$D.conf" \
+    bash tools/design/audit.sh "$D" accel=kvm uitrace=yes halt=300 \
+    progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme welcome" drehbuch="$D.book" > "$D.log" 2>&1
+has "$D/serial.txt" "welcome: step 1 page=3" "network step button reported its page"
+has "$D/serial.txt" "settings: ready" "Settings window opened after the click"
+c=$(grep -acE 'ABSTURZ|EXCEPTION' "$D/serial.txt" 2>/dev/null; true)
+[ "$c" = 0 ] && ok "no crash after the click" || bad "crash lines after click: $c"
+mkdir -p /tmp/welcome-last; cp "$D/01-after-click.ppm" /tmp/welcome-last/ 2>/dev/null; rm -rf "$D" "$D-build" "$D.conf" "$D.book" "$D.log"
 echo "WELCOME: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

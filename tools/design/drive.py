@@ -60,6 +60,7 @@ Namen fuer `klickauf`:
     srect<NAME>     Widget NAME der Einstellungen (settings: rect name=)
     frect<N>        Widget N des Dateimanagers (explorer: rect id=N)
     fdrect<N>       widget N of the friends bar (freunde: rect id=N)
+    wlnth<K>x<I>    widget number I (0 first) of kind K in the newest report of the welcome window
     fdnth<K>x<I>    widget number I (0 first, -1 last) of kind K in the newest report of the friends bar
 """
 import faulthandler
@@ -1103,6 +1104,20 @@ class Fahrer:
                 fa, fb = name[6:].split("x")
                 return (o[0] + rx + rw_ * int(fa) // 100, o[1] + ry + rh_ * int(fb) // 100, 0, 0)
             return (o[0] + rx, o[1] + ry, rw_, rh_)
+        if name.startswith("wlnth"):
+            kind, idx = (int(v) for v in name[5:].split("x"))
+            rows = [tuple(int(v) for v in g) for g in re.findall(
+                r"welcome: rect id=(\d+) kind=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t)]
+            start = 0
+            for i in range(1, len(rows)):
+                if rows[i][0] <= rows[i - 1][0]:
+                    start = i
+            batch = [r for r in rows[start:] if r[1] == kind]
+            o = self.fenster("welcome")
+            if o is None or not -len(batch) <= idx < len(batch):
+                return None
+            r = batch[idx]
+            return (o[0] + r[2], o[1] + r[3], r[4], r[5])
         if name.startswith("fdnth"):
             kind, idx = (int(v) for v in name[5:].split("x"))
             rows = [tuple(int(v) for v in g) for g in re.findall(
