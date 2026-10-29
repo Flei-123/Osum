@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import bt.hci
+
+static mut buf: [u8; 64] = [0; 64]
+static mut tab: [u8; 136] = [0; 136]
+static mut txt: [u8; 24] = [0; 24]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn pb() -> u64 { return (&buf[0]) as u64 }
+fn pt() -> u64 { return (&tab[0]) as u64 }
+fn px() -> u64 { return (&txt[0]) as u64 }
+
+fn b(i: u64, v: u64) { buf[i as usize] = (v & 255) as u8 }
+
+fn main() -> i32 {
+    let n: u64 = hci.build_command(pb(), hci.OP_RESET, 0, 0)
+    chk("reset is 3 octets 03 0c 00", n == 3 && buf[0] == 3 && buf[1] == 0x0C && buf[2] == 0)
+    let m: u64 = hci.build_inquiry(pb(), hci.GIAC_LAP, 8, 0)
+    chk("inquiry is 8 octets with GIAC", m == 8 && buf[0] == 1 && buf[1] == 4 && buf[2] == 5 && buf[3] == 0x33 && buf[4] == 0x8B && buf[5] == 0x9E && buf[6] == 8)
+    chk("init step 3 sets inquiry mode 1", hci.build_init(pb(), 3) == 4 && buf[3] == 1)
+    chk("init step 4 does not exist", hci.build_init(pb(), 4) == 0)
+    b(0, 0x0E)
+    b(1, 10)
+    b(2, 1)
+    b(3, 9)
+    b(4, 0x10)
+    b(5, 0)
+    b(6, 0x11)
+    b(7, 0x22)
+    b(8, 0x33)
+    b(9, 0x44)
+    b(10, 0x55)
+    b(11, 0x66)
+    chk("event ok", hci.event_ok(pb(), 12) && !hci.event_ok(pb(), 11))
+    chk("cc opcode and status", hci.cc_opcode(pb()) == hci.OP_READ_BD_ADDR && hci.cc_status(pb()) == 0)
+    let l: u64 = hci.fmt_addr(px(), hci.cc_result(pb()) + 0)
+    chk("addr formats reversed", l == 17 && txt[0] == 0x36 && txt[1] == 0x36 && txt[2] == 58 && txt[15] == 0x31 && txt[16] == 0x31)
+    b(0, 0x22)
+    b(1, 15)
+    b(2, 1)
+    var i: u64 = 0
+    while i < 6 {
+        b(3 + i, 0xA0 + i)
+        i = i + 1
+    }
+    b(9, 1)
+    b(10, 0)
+    b(11, 0x04)
+    b(12, 0x04)
+    b(13, 0x20)
+    b(14, 0)
+    b(15, 0)
+    b(16, 0xC4)
+    chk("rssi inquiry ok", hci.inq_ok(pb()) && hci.inq_count(pb()) == 1)
+    chk("cod audio", hci.cod_kind(hci.inq_cod(pb(), 0)) == hci.KIND_AUDIO)
+    chk("rssi negative", hci.signed_rssi(hci.inq_rssi(pb(), 0)) == 0 - 60)
+    b(2, 3)
+    chk("count beyond length rejected", !hci.inq_ok(pb()))
+    b(2, 1)
+    hci.tab_clear(pt(), 4)
+    let i0: u64 = hci.tab_add(pt(), 4, hci.inq_addr(pb(), 0), hci.inq_cod(pb(), 0), hci.inq_rssi(pb(), 0), 0, 0)
+    let i1: u64 = hci.tab_add(pt(), 4, hci.inq_addr(pb(), 0), 0, hci.RSSI_NONE, pb() + 3, 4)
+    chk("dedupe by address", i0 == 0 && i1 == 0 && hci.tab_count(pt()) == 1)
+    chk("name stored", tab[8 + 7] == 4)
+    chk("cap enforced", hci.tab_add(pt(), 1, pb() + 20, 0, 0, 0, 0) == 0xFFFFFFFF)
+    b(0, 5)
+    b(1, 9)
+    b(2, 0x41)
+    b(3, 0x42)
+    b(4, 0x43)
+    b(5, 0x44)
+    chk("eir name", hci.eir_name(pb(), 6, px(), 8) == 4 && txt[0] == 0x41 && txt[3] == 0x44)
+    return 0
+}
