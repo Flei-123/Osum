@@ -113,6 +113,10 @@ def main():
         good("entry_at and entry_slot refuse a too small cap")
     else:
         fail("cap guard missing in fs.fi (%d of 2)" % guards)
+    if re.search(r"dent > ENTRY_MAX && dent <= BS \{[^}]*return false", fs_text) and "dent > ENTRY_MAX ||" in fs_text:
+        good("mount refuses a directory entry size above ENTRY_MAX")
+    else:
+        fail("mount does not bound the directory entry size by ENTRY_MAX")
     windows = k14_windows(scope, paths)
     sites = 0
     for path in paths:
