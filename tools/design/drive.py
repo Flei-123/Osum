@@ -1229,8 +1229,9 @@ def main():
         elif b == "warteneu":
             st = arg.split("||")
             muster = st[0].strip().strip("'\"")
+            t0 = time.time()
             ok = f.warteneu(muster, float(st[1]) if len(st) > 1 else 25.0)
-            print("warteneu %s -> %s" % (muster, "da" if ok else "NICHT DA"))
+            print("warteneu %s -> %s (%.2f s)" % (muster, "da" if ok else "NICHT DA", time.time() - t0))
             if not ok:
                 fehler += 1
         elif b in ("warteauf", "warteaufmuss"):
