@@ -952,7 +952,7 @@ schau "the Date modified column shows two dashes -- OFS has no timestamp" \
     tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) $((FCY + TB + 2 * TZH)) \
     $TDIM $TBG "--" $ETOL
 
-echo "== 9b. hineingehen, sortieren, anlegen =="
+echo "== 9b. enter, sort, create =="
 # Doppelklick auf Zeile 0 -- das ist ein Verzeichnis, also wird es
 # geoeffnet, und danach steht ETWAS ANDERES in der Tabelle.
 DX=$((FCX + TX + 60)); DY=$((FCY + TB - 8))
@@ -1254,7 +1254,7 @@ grep -q '^name=File Explorer' assets/apps/explorer.osp/INFO \
     && ok "sondern in assets/apps/explorer.osp/INFO" \
     || bad "assets/apps/explorer.osp/INFO fuehrt keinen Anzeigenamen"
 has "$TMPD/files.txt" "explorer: name [File Explorer] aus [explorer.osp]" \
-    "und das Programm holt ihn aus dem Buendel"
+    "and the program fetches it from the bundle"
 # UND ER STEHT IN DER TITELLEISTE. Die malt der FENSTERSERVER -- damit
 # ist der ganze Weg gemessen: Datei auf der Platte, Ring 3, WM_CREATE,
 # Titelleiste, Bildpunkte.
@@ -1385,7 +1385,7 @@ done
 gb=$(grep -c '^/apps/[a-z]*\.osp/$' "$TMPD/disk.ls")
 num "so viele Buendel liegen unter /apps" "$gb" eq "$soll"
 hasnot "$TMPD/disk.ls" "/usr/share/apps" \
-    "und der alte Ort ist weg -- eine Beschreibung, zwei Orte, waeren einer zu viel"
+    "and the old place is gone -- one description, two places, would be one too many"
 # THE START MENU IS A BORDERLESS PANEL NOW (round FUI-WIN11: layer 4,
 # deco=0, bottom left above the taskbar). Its place is READ from the WM
 # and not assumed -- the old 190,110 plus border and title bar belonged
@@ -1511,9 +1511,9 @@ M="$TMPD/suche.mon"
 suchmon "$M" 1.0 o r d n e r
 foto suche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
 has "$TMPD/suche.txt" "launcher: suche [ordner] treffer=1 apps=1" \
-    "getippt 'ordner': GENAU EIN Treffer, und es ist ein Programm"
+    "typed 'ordner': EXACTLY ONE hit, and it is a program"
 has "$TMPD/start.txt" "launcher: name [Search]" \
-    "auch der Starter holt seinen eigenen Namen aus den Daten"
+    "the launcher also fetches its own name from the data"
 tf=$(grep -aA1 'launcher: suche \[ordner\]' "$TMPD/suche.txt" | grep -a 'name=' | tail -1)
 case "$tf" in
     *"name=[File Explorer]"*) ok "the hit is the file manager" ;;
@@ -1533,9 +1533,9 @@ schau_nicht "and row 1 holds nothing more" \
 # Tastendruecke, dieselben Dateien, nur OHNE das Feld `keys`.
 foto nokeys "gfx wm wigstart wignokeys wmhold wiglong $GRUND" "$M"
 has "$TMPD/nokeys.txt" "launcher: suche [ordner] treffer=0 apps=0" \
-    "OHNE die Schluesselwoerter findet 'ordner' NICHTS"
+    "WITHOUT the keywords 'ordner' finds NOTHING"
 has "$TMPD/nokeys.txt" "launcher: apps=$soll" \
-    "obwohl dasselbe Verzeichnis mit denselben $soll Programmen gelesen wurde"
+    "although the same directory with the same $soll programs was read"
 schau_nicht "and the picture then shows no row either" \
     tkette "$TMPD/nokeys.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "File Explorer" 96
@@ -1544,7 +1544,7 @@ schau_nicht "and the picture then shows no row either" \
 suchmon "$TMPD/unsinn.mon" 1.0 q u a s t e
 foto unsinn "gfx wm wigstart wmhold wiglong $GRUND" "$TMPD/unsinn.mon"
 has "$TMPD/unsinn.txt" "launcher: suche [quaste] treffer=0 apps=0   dateien=0" \
-    "ein Wort, das nirgends steht, findet NICHTS -- kein Programm und keine Datei"
+    "a word that is nowhere finds NOTHING -- no program and no file"
 grep -qi 'quaste' assets/apps/*.osp/INFO \
     && bad "'quaste' is in an INFO after all" \
     || ok "and 'quaste' is really in no INFO"
@@ -1642,14 +1642,14 @@ echo "        -> build $GB_U us, one search $GI_1 us (ten measured: $GI_U us)"
 num "3. THE COUNTER-PROOF: the tree walk sees the same names" "$GW_G" eq "$GB_N"
 gleich "and it finds EXACTLY THE SAME number of hits" "$GI_T" "$GW_T"
 has "$TMPD/gkupfer.txt" "ungleich=0" \
-    "und DIESELBEN NAMEN -- sortiert, Oktett fuer Oktett verglichen"
+    "and THE SAME NAMES -- sorted, compared octet by octet"
 num "and the index is many times faster" \
     $((GW_U / (GI_1 + 1))) ge 20
 echo "        -> tree walk $GW_U us, search in the index $GI_1 us"
 SOLLK=$(grep '^kupfer ' "$TMPD/gross/erwartet" | awk '{print $2}')
 num "and both find as many as the image list gives" "$GI_T" eq "$SOLLK"
 has "$TMPD/gkupfer.txt" "locate: pfad /data/kupfer" \
-    "und der Treffer traegt seinen ganzen Pfad, aus den Elternnummern gebaut"
+    "and the hit carries its whole path, built from the parent numbers"
 
 gross gviele "locate -m 07"
 SOLL7=$(grep '^07 ' "$TMPD/gross/erwartet" | awk '{print $2}')
@@ -1666,9 +1666,9 @@ gross gquaste "locate -m quaste"
 SOLLQ=$(grep '^quaste ' "$TMPD/gross/erwartet" | awk '{print $2}')
 num "the image list knows 'quaste' this often" "$SOLLQ" eq 0
 has "$TMPD/gquaste.txt" "locate: index [quaste] treffer=0" \
-    "5. der Index findet 'quaste' NICHT"
+    "5. the index does NOT find 'quaste'"
 has "$TMPD/gquaste.txt" "locate: baum [quaste] treffer=0" \
-    "und der Baumdurchlauf auch nicht"
+    "and neither does the tree walk"
 Q_G=$(gfeld "$TMPD/gquaste.txt" 'locate: baum' 'gesehen')
 num "although it looked at all $Q_G names" "$Q_G" eq "$GB_N"
 
@@ -1680,11 +1680,11 @@ echo "== 15b. the journal: create, rename, delete -- without a rebuild =="
 gross gjrnl "locate -j kupfer"
 num "the kernel exits cleanly" "$RC" eq 21
 has "$TMPD/gjrnl.txt" "schritt=1  zwiebel=1  apfel=0" \
-    "nach dem Anlegen findet der Index die neue Datei"
+    "after creating, the index finds the new file"
 has "$TMPD/gjrnl.txt" "schritt=3  zwiebel=0  apfel=1" \
-    "nach dem Umbenennen den NEUEN Namen und den alten nicht mehr"
+    "after renaming the NEW name and no longer the old one"
 has "$TMPD/gjrnl.txt" "schritt=4  zwiebel=0  apfel=0" \
-    "und nach dem Loeschen keinen von beiden"
+    "and after deleting neither of them"
 J_N1=$(grep -a 'schritt=1 ' "$TMPD/gjrnl.txt" | grep -oE 'namen=[0-9]+' | sed 's/.*=//')
 J_N4=$(grep -a 'schritt=4 ' "$TMPD/gjrnl.txt" | grep -oE 'namen=[0-9]+' | sed 's/.*=//')
 num "the index gained one name" $((J_N1 - GB_N)) eq 1
@@ -1701,9 +1701,9 @@ num "exactly ONE build in the whole run, and only the journal after that" "$nb" 
 # dass oben wirklich das Journal gewirkt hat und nicht ein Zufall.
 gross gnojrnl "locate -n kupfer"
 has "$TMPD/gnojrnl.txt" "schritt=1  zwiebel=0  apfel=0" \
-    "OHNE das Journal weiss der Index von der neuen Datei nichts"
+    "WITHOUT the journal the index knows nothing of the new file"
 has "$TMPD/gnojrnl.txt" "schritt=4  zwiebel=0  apfel=0" \
-    "und von den anderen beiden Schritten auch nicht"
+    "nor of the other two steps"
 N_N4=$(grep -a 'schritt=4 ' "$TMPD/gnojrnl.txt" | grep -oE 'namen=[0-9]+' | sed 's/.*=//')
 num "its name list never changed" "$N_N4" eq "$GB_N"
 N_S=$(grep -a 'schritt=4 ' "$TMPD/gnojrnl.txt" | grep -oE 'gezogen=[0-9]+' | sed 's/.*=//')
@@ -1724,9 +1724,9 @@ M="$TMPD/dsuche.mon"
 suchmon "$M" 1.2 b l a u
 foto dsuche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
 has "$TMPD/dsuche.txt" "launcher: suche [blau] treffer=1 apps=0   dateien=1" \
-    "getippt 'blau': ein Treffer, und er ist KEIN Programm, sondern eine Datei"
+    "typed 'blau': one hit, and it is NOT a program but a file"
 has "$TMPD/dsuche.txt" "launcher: datei i=0 name=[/data/bilder/blau.ppm]" \
-    "und es ist die Datei, die wirklich dort liegt"
+    "and it is the file that really lies there"
 grep -q '^/data/bilder/blau.ppm ' "$TMPD/disk.ls" \
     && ok "which the image really carries at this place" \
     || bad "/data/bilder/blau.ppm is not in the image at all"
@@ -1745,11 +1745,11 @@ num "the launcher built an index over this many names for it" "$DIX" ge 40
 # Treffer oben WIRKLICH aus dem Index kam und nicht aus der Programmliste.
 foto noidx "gfx wm wigstart wignoidx wmhold wiglong $GRUND" "$M"
 has "$TMPD/noidx.txt" "launcher: suche [blau] treffer=0 apps=0   dateien=0" \
-    "OHNE den Namensindex findet 'blau' NICHTS"
+    "WITHOUT the name index 'blau' finds NOTHING"
 has "$TMPD/noidx.txt" "launcher: index n=0" \
     "weil gar keiner gebaut wurde"
 has "$TMPD/noidx.txt" "launcher: apps=$soll" \
-    "obwohl dasselbe Anwendungsverzeichnis mit denselben $soll Buendeln gelesen wurde"
+    "although the same application directory with the same $soll bundles was read"
 schau_nicht "and the picture then shows no file either" \
     tkette "$TMPD/noidx.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "blau.ppm" 96
@@ -1781,7 +1781,7 @@ grep -q 'data=1026' "$TMPD/gmkfs.txt" \
 # Und der Kernel liest beides -- das kleine Abbild hat jeder Lauf oben
 # eingehaengt, das grosse jeder Lauf dieses Abschnitts.
 has "$TMPD/gkupfer.txt" "osum: mount=1" \
-    "und derselbe Kernel haengt beide ein, ohne eine Zeile Unterschied"
+    "and the same kernel mounts both, without a line of difference"
 
 
 echo
