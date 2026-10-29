@@ -35,7 +35,7 @@ run_audit() {
     local lang_arg=${4:-}
     local n=$1 script=$2 extra=$3
     mkdir -p "$T/$n"
-    AUDIT_PROC=1 AUDIT_QEMU_EXTRA="$extra" bash tools/design/audit.sh "$T/$n" accel=kvm fs=an uitrace=yes halt=120 $lang_arg extra="usb usbpoll" drehbuch="$script" > "$T/$n.log" 2>&1
+    AUDIT_PROC=1 AUDIT_QEMU_EXTRA="$extra" bash tools/design/audit.sh "$T/$n" accel=kvm fs=an uitrace=yes halt=${BT_HALT:-300} $lang_arg extra="usb usbpoll" drehbuch="$script" > "$T/$n.log" 2>&1
     tr -cd '\11\12\15\40-\176' < "$T/$n/serial.txt" > "$T/$n.klar"
 }
 chk() { grep -aq -- "$3" "$T/$1.klar" && ok "$1: $2" || bad "$1: $2 (missing: $3)"; }
