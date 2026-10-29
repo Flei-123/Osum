@@ -63,6 +63,7 @@ warte 6
 foto 04-act
 klickauf tbbtn0
 warte 3
+fahre 1148,31
 tippe notify usb+ /medien/usb1
 taste ret
 warteauf 'taskbar: toast .USB drive connected .usb1.' || 30

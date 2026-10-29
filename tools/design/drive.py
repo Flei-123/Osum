@@ -197,7 +197,7 @@ class Fahrer:
     # Mit `nahe` wird vom ZULETZT bekannten Punkt aus relativ gefahren.
     # Das setzt voraus, dass die Buchfuehrung stimmt -- sie tut es,
     # solange nur diese Klasse den Zeiger bewegt.
-    def klick_nahe(self, x, y, mal=1, taste=1):
+    def klick_nahe(self, x, y, mal=1, taste=1, halten=0.05):
         dx, dy = x - self.x, y - self.y
         while dx or dy:
             sx = max(-120, min(120, dx))
@@ -209,7 +209,7 @@ class Fahrer:
         time.sleep(0.35)
         for _ in range(mal):
             self.cmd("mouse_button %d" % taste)
-            time.sleep(0.05)
+            time.sleep(halten)
             self.cmd("mouse_button 0")
         time.sleep(1.2)
 
@@ -329,7 +329,7 @@ class Fahrer:
         out.append((nm, cx, cy, "end"))
         return out
 
-    def klick(self, x, y, mal=1, taste=1, halten=0.05):
+    def klick(self, x, y, mal=1, taste=1):
         self.fahre(x, y)
         time.sleep(0.35)
         for i in range(mal):
@@ -352,7 +352,7 @@ class Fahrer:
             # NICHT geschlafen. Die Umlaufzeit des Monitors ist schon
             # mehr Abstand, als ein Mensch je erzeugt.
             if mal == 1:
-                time.sleep(halten)
+                time.sleep(0.05)
             self.cmd("mouse_button 0")
         time.sleep(1.2)
 
@@ -1364,8 +1364,10 @@ def main():
                 f.klick(x, y, 1, taste=2)
             elif b == "mklickauf":
                 f.klick(x, y, 1, taste=4)   # r529: the middle button (bit 2)
+            elif arg == "toast":
+                f.klick_nahe(x, y, 1, 1, 0.15)
             else:
-                f.klick(x, y, 2 if b == "doppelauf" else 1, halten=0.3 if arg == "toast" else 0.05)
+                f.klick(x, y, 2 if b == "doppelauf" else 1)
         # RUNDE ECHTHARDWARE-3: `ziehe <x0>,<y0> <x1>,<y1>` und
         # `zieheauf <name> <dx>,<dy>` -- die Bewegung bei gedrueckter
         # Taste, ohne die sich weder die Fenstergroesse noch ein
