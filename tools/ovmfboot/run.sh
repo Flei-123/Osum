@@ -40,6 +40,10 @@ OFF=$((2048*512))
 mcopy -i "$D/stick.img@@$OFF" -o "$D/osum.mb" ::osum.mb || { echo "OVMFBOOT: mcopy kernel"; exit 1; }
 mcopy -i "$D/stick.img@@$OFF" ::limine.conf "$D/limine.conf" || { echo "OVMFBOOT: mcopy limine.conf"; exit 1; }
 sed 's/^timeout: .*/timeout: 1/' "$D/limine.conf" > "$D/l_norm.conf"
+if [ "${LOADER:-limine}" = osboot ]; then
+    bash tools/bootloader/build.sh "$D/BOOTX64.EFI" > "$D/osb.txt" 2>&1 || { cat "$D/osb.txt"; echo "OVMFBOOT: osboot build failed"; exit 1; }
+    mcopy -i "$D/stick.img@@$OFF" -o "$D/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI || { echo "OVMFBOOT: mcopy osboot"; exit 1; }
+fi
 sed '0,/cmdline: /s//cmdline: acpiold /' "$D/l_norm.conf" > "$D/l_old.conf"
 
 # boot name machine firmware(uefi|bios) conf
@@ -55,6 +59,10 @@ boot() {
     esac
     cp "$D/stick.img" "$D/$name.img"
     mcopy -i "$D/$name.img@@$OFF" -o "$conf" ::limine.conf
+    if [ "${LOADER:-limine}" = osboot ]; then
+        python3 tools/bootloader/mkcfg.py "$conf" "$D/$name.cfg" --timeout 0 > /dev/null
+        mcopy -i "$D/$name.img@@$OFF" -o "$D/$name.cfg" ::osboot.cfg
+    fi
     local fwargs=()
     if [ "$fw" = uefi ]; then
         cp "$OVMF_VARS" "$D/$name.vars"
@@ -75,6 +83,9 @@ check_good() { # name label
     grep -aq "EXCEPTION" "$t" && bad "$2: kernel exception: $(grep -a 'EXCEPTION' "$t" | head -1)" || ok "$2: no exception"
     grep -aq "^smp: cpus=[0-9]*  acpi=1" "$t" && ok "$2: ACPI found (smp: acpi=1)" || bad "$2: smp: acpi=1 missing"
     grep -aq "glogin: rect" "$t" && ok "$2: login screen reached" || bad "$2: login screen not reached"
+    if [ "${LOADER:-limine}" = osboot ] && grep -aq "BdsDxe" "$t"; then
+        grep -aq "osboot: start " "$t" && ok "$2: started by osboot" || bad "$2: osboot did not start the kernel"
+    fi
 }
 check_clean() { # name label: no fault, panic or halt lines
     local t="$D/$1.txt"
