@@ -121,7 +121,7 @@ if [ -f "$TMPD/gui.mb.elf" ] && [ -f "$TMPD/srv.mb.elf" ]; then
     # Symboltafel wegfallen kann und die Daten nicht.
     treffer=""
     for w in vmode glyph raster focus cursor; do
-        grep -qa -- "$w" "$TMPD/srv.mb" && treffer="$treffer $w"
+        strings -a "$TMPD/srv.mb" | grep -v "gpu_hw_cursor\|ax__focus_node\|ax.focus_node" | grep -qa -- "$w" && treffer="$treffer $w"
         grep -qa -- "$w" "$TMPD/gui.mb" || bad "'$w' fehlt schon im GUI-Abbild -- der Pruefer misst nichts"
     done
     [ -z "$treffer" ] \

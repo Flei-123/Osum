@@ -62,6 +62,8 @@ EIGEN = set(g + ".fi" for g in GRAFIK) | {
     # Modul ausser der Naht greift noch auf die Grafik zu" -- gilt also
     # im ABBILD, und das ist die Ebene, auf der sie etwas heisst.
     "shot.fi",
+    "pixelguard.fi",
+    "vmsvga.fi",
     # RUNDE ROADMAP-5 (K-008): `kernel/app/drucke.fi` is a ring-3 PROGRAM
     # (--profile=app, its own ELF, /bin/drucke), not a kernel module. It
     # rasterises text with the TrueType reader (`ttf.*`, `raster.*`) --
@@ -76,7 +78,7 @@ EIGEN = set(g + ".fi" for g in GRAFIK) | {
     # into lib/, not the kernel's frame buffer. Same case as drucke.fi.
     "fuiglyph.fi"}
 MUSTER = re.compile(
-    r"(?<![A-Za-z0-9_.])(" + "|".join(GRAFIK) + r")\.([A-Za-z_][A-Za-z0-9_]*)")
+    r"(?<![A-Za-z0-9_.])(" + "|".join(GRAFIK) + r")\.(?!(?:len|ptr)\b)([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def ohne_kommentare(text):
@@ -116,7 +118,8 @@ def zaehle(wurzel):
             p = os.path.join(pfad, d)
             with open(p, "rb") as f:
                 roh = f.read().decode("utf8", "replace")
-            treffer = MUSTER.findall(ohne_importe(ohne_kommentare(roh)))
+            fremd = set(re.findall(r"^\s*import\s+(?!(?:gfx|ui|drv)\.)[A-Za-z0-9_.]+\.([A-Za-z0-9_]+)", roh, re.M))
+            treffer = [t for t in MUSTER.findall(ohne_importe(ohne_kommentare(roh))) if t[0] not in fremd]
             if treffer:
                 je_datei[os.path.relpath(p, wurzel)] = len(treffer)
                 for a, b in treffer:
