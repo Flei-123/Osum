@@ -285,6 +285,7 @@ df_stack_bottom:
     .skip 16384
     .globl df_stack_top
 df_stack_top:
+    .skip 32768
 
     /* r348 (06.10.2026): THE `syscall` STACK IS ALSO THE RING-3 INTERRUPT STACK OF THE
      * BOOT TASK (`sched.set_kernel_stack(vector 61)` writes it into TSS.rsp0 and

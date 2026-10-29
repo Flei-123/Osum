@@ -22,12 +22,15 @@ import serial
 import lib.kstate
 
 export {
-    build, tss_install, pic_remap, pic_mask, pic_eoi, pit_init,
+    NMI_STACK_BYTES, nmi_flat, build, tss_install, pic_remap, pic_mask, pic_eoi, pit_init,
     enable, disable, halt, ARMED
 }
 
 // How many vectors `isr.s` provides.
 const ARMED: u64 = 48
+const NMI_VECTOR: u64 = 2
+const NMI_STACK_BYTES: u64 = 32768
+const V_NMI_FLAT: u64 = 77
 
 // ------------------------------------------------------------- the IDT
 
@@ -56,6 +59,9 @@ fn build(state: u64, vectors: u64) -> u64 {
             if v == 8 {
                 ist = 1 // #DF on its own stack
             }
+            if v == NMI_VECTOR {
+                ist = 2
+            }
             gate(idt, v, __mmio_read64((vectors + v * 8) as *mut u64), ist, 0)
         } else {
             // Not present: a vector without a handler must not jump
@@ -75,10 +81,16 @@ fn build(state: u64, vectors: u64) -> u64 {
 
 // ------------------------------------------------------------- the TSS
 
+fn nmi_flat(state: u64) {
+    let vectors: u64 = kstate.get(state, kstate.VECTORS)
+    gate(state + kstate.IDT_OFF, NMI_VECTOR,
+        __mmio_read64((vectors + V_NMI_FLAT * 8) as *mut u64), 0, 0)
+}
+
 // Writes the TSS descriptor into the GDT (slot 0x30, see boot.s), fills
 // the TSS and loads it. `rsp0` is the stack the processor switches to
 // when an interrupt arrives in ring 3; `ist1` the one for #DF.
-fn tss_install(gdt: u64, tss: u64, rsp0: u64, ist1: u64) {
+fn tss_install(gdt: u64, tss: u64, rsp0: u64, ist1: u64, gsbase: u64) {
     // .bss is not necessarily zeroed by a boot loader.
     var i: u64 = 0
     while i < 104 {
@@ -87,6 +99,10 @@ fn tss_install(gdt: u64, tss: u64, rsp0: u64, ist1: u64) {
     }
     __mmio_write64((tss + 4) as *mut u64, rsp0)
     __mmio_write64((tss + 36) as *mut u64, ist1)
+    let ist2: u64 = ist1 + NMI_STACK_BYTES - 16
+    __mmio_write64(ist2 as *mut u64, gsbase)
+    __mmio_write64((ist2 + 8) as *mut u64, 0)
+    __mmio_write64((tss + 44) as *mut u64, ist2)
     // I/O map base behind the end of the segment = no I/O permission map.
     __mmio_write16((tss + 102) as *mut u16, 104 as u16)
 
