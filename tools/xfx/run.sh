@@ -260,7 +260,7 @@ run_case() {
         drive="-drive file=$TMPD/live-$name.img,format=raw,if=ide,index=0"
     fi
     timeout "$limit" qemu-system-x86_64 $ACCEL -kernel "$TMPD/k0.img" -m 512 \
-        -append "osum $BASIS script=sh /t/run.sh" -serial "file:$TMPD/$name.txt" -display none -no-reboot \
+        -append "osum $BASIS ${XFX_EXTRA:-} script=sh /t/run.sh" -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         $drive -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     RC=$?
     [ -n "${XFX_KEEP:-}" ] && cp "$TMPD/$name.txt" "$XFX_KEEP/" 2>/dev/null

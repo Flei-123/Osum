@@ -1338,6 +1338,30 @@ fn suche(state: u64, von: u64, bis: u64) -> u64 {
     return 0
 }
 
+const FB_NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut fb_on: u64 = 0
+static mut fb_kb: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn free_flush(state: u64) -> bool {
+    if fb_kb == FB_NONE {
+        return true
+    }
+    let kb: u64 = fb_kb
+    fb_kb = FB_NONE
+    return ofsj.write(state, kb, buf_bm(state))
+}
+
+fn free_batch_begin() {
+    fb_on = 1
+    fb_kb = FB_NONE
+}
+
+fn free_batch_end(state: u64) {
+    let _ok: bool = free_flush(state)
+    fb_on = 0
+}
+
 fn block_free(state: u64, b: u64) {
     if b < data_start(state) || b >= total_blocks(state) {
         return
@@ -1346,14 +1370,21 @@ fn block_free(state: u64, b: u64) {
         return
     }
     let kb: u64 = bm_block_of(state, b)
-    if !ofsj.read(state, kb, buf_bm(state)) {
+    if fb_on != 0 {
+        if fb_kb != kb {
+            if !free_flush(state) || !ofsj.read(state, kb, buf_bm(state)) {
+                return
+            }
+            fb_kb = kb
+        }
+    } else if !ofsj.read(state, kb, buf_bm(state)) {
         return
     }
     let p: u64 = buf_bm(state) + bm_byte(b)
     kstate.set8(p, (kstate.get8(p) & (255 ^ (1 << (b % 8)))) as u8)
-    ofsj.write(state, kb, buf_bm(state))
-    // Der naechste Fund darf hier anfangen: ein gerade freigegebener
-    // Block ist der beste Kandidat, den es gibt.
+    if fb_on == 0 {
+        ofsj.write(state, kb, buf_bm(state))
+    }
     if b < kstate.get(state, kstate.FSG_OFF + G_HINT) {
         kstate.set(state, kstate.FSG_OFF + G_HINT, b)
     }
@@ -1684,6 +1715,7 @@ fn file_truncate(state: u64, ino: u64) {
     // gehoert damit unter dieselbe Sperre wie alles andere, was Bloecke
     // in diese Puffer holt.
     let vk_flags: u64 = enter(state)
+    free_batch_begin()
     var i: u64 = 0
     let dn: u64 = directs(state)
     while i < dn {
@@ -1768,6 +1800,7 @@ fn file_truncate(state: u64, ino: u64) {
     // damit der Groessenindex dieselbe Null sieht wie der Inode. Eine
     // Datei, die abgeschnitten wird, ohne dass der Index es erfaehrt,
     // waere in `du` fuer immer so gross wie vorher.
+    free_batch_end(state)
     size_write(state, ino, 0, false)
     leave(state, vk_flags)
 }
