@@ -62,7 +62,7 @@ warteauf 'dhcp: renewing lease' || 240
 warte 45
 EOT
 DESIGNBUILD="$SV/build" bash tools/design/eh6.sh "$SV/o" res=1280x800 accel=$ACC netz=ja tafel=nein \
-    progs="desktop taskbar settings launcher sh echo ls cat ps sleep kill dhcp" drehbuch="$T/dreh_sv.txt" > "$SV/o.log" 2>&1
+    progs="desktop taskbar settings launcher explorer netview taskmgr edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc find du chmod id whoami touch true false sleep kill sort uniq dhcp" drehbuch="$T/dreh_sv.txt" > "$SV/o.log" 2>&1
 SS="$SV/o/serial.txt"
 LC_ALL=C tr -cd '\11\12\15\40-\176' < "$SS" > "$SV/s.klar" 2>/dev/null
 check "supervisor start: daemon enters the renewal loop" "$([ "$(grep -ac 'dhcp: renewing lease, t1=' "$SV/s.klar")" -ge 1 ] && echo 1 || echo 0)"
