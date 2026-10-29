@@ -595,6 +595,7 @@ KEINE_KDATA = {
     ("mnt.fi", "MNT_OFF"),      # in K14_OFF
     ("part.fi", "PART_OFF"),    # in K14_OFF
     ("part.fi", "SECT_OFF"),    # in K14_OFF
+    ("ofs.fi", "SCRATCH_OFF"),  # in K14_OFF
     ("fat.fi", "SB_OFF"),       # in FAT_OFF
     ("fat.fi", "NODE_OFF"),     # in FAT_OFF
     ("fat.fi", "CACHE_OFF"),    # in FAT_OFF (r208 chain cache)
