@@ -11,13 +11,18 @@ with the `waa` rect (first node). Per build it counts controls, checks overlaps 
 import re, sys
 
 R = re.compile(r"settings: rect name=(\w+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)")
+C = re.compile(r"settings: controls page=(\d+) n=\d+")
 def main():
     path = sys.argv[1]
     limit = int(sys.argv[sys.argv.index("--limit") + 1]) if "--limit" in sys.argv else 12
     md = "--md" in sys.argv
-    builds, cur = [], None
+    builds, cur, owner = [], None, []
     win = None
     for ln in open(path, encoding="latin1", errors="replace"):
+        c = C.search(ln)
+        if c and owner:
+            owner[-1] = int(c.group(1))
+            continue
         m = R.search(ln)
         if not m:
             continue
@@ -30,6 +35,7 @@ def main():
         if n == "waa":
             cur = []
             builds.append(cur)
+            owner.append(None)
         if cur is not None:
             cur.append((n, x, y, w, h))
     rows = []
@@ -45,14 +51,14 @@ def main():
         rows.append((i, len(page), ov))
     # build 0 = initial window, builds 1..20 = sidebar clicks a..t (PAGE_IDS), the rest = search typing (empty result)
     ids = ["appearance", "screen", "time", "network", "users", "netview", "language", "presets", "accounts", "sync",
-           "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects", "wifi", "usbnet", "scheme", "accent", "password", "pin", "transfer", "sound", "touchpad", "bluetooth"]
+           "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects", "wifi", "usbnet", "scheme", "accent", "password", "pin", "transfer", "sound", "touchpad", "bluetooth", "monitors"]
     bad = 0
     for i, n, ov in rows:
-        name = "(initial)" if i == 0 else (ids[i - 1] if i - 1 < len(ids) else "(search)")
+        name = "(initial)" if i == 0 else (ids[owner[i]] if owner[i] is not None and owner[i] < len(ids) else "(search)")
         print(f"build {i:2d} {name:11s}: page controls={n:3d} overlaps={ov}")
-        if ov or (0 < i <= len(ids) and n > limit):
+        if ov or (owner[i] is not None and n > limit):
             bad += 1
-    pg = [r for r in rows[1:len(ids) + 1]]
+    pg = [r for r in rows[1:] if owner[r[0]] is not None]
     print(f"pages={len(pg)} over_limit({limit})={sum(1 for r in pg if r[1] > limit)} max={max((r[1] for r in pg), default=0)} sum={sum(r[1] for r in pg)}")
     if "--check" in sys.argv and bad:
         sys.exit(1)
