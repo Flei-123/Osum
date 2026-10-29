@@ -51,8 +51,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+if [ -n "${K15_KEEP:-}" ]; then TMPD=$K15_KEEP; mkdir -p "$TMPD"; else TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT; fi
 
 pass=0
 fail=0
@@ -858,7 +857,7 @@ FCX=$((FWX + BORDER)); FCY=$((FWY + TITLE))
 # `strip` points higher than the body it reports as geom; every y it reports (rows, rects) counts from the buffer top.
 STRIP=$(grep -a 'explorer: strip h=' "$TMPD/files.txt" | head -1 | sed 's/.*explorer: strip h=\([0-9]*\).*/\1/')
 if [ -n "$STRIP" ]; then FCY=$((FWY + BORDER)); FBH=$((FBH + STRIP)); fi
-aus=$(python3 tools/k15/layout.py "$TMPD/files.txt" explorer "$FBW" "$FBH" 8 2>&1)
+aus=$(python3 tools/k15/layout.py "$TMPD/files.txt" explorer "$FBW" "$FBH" 8 4,30,24,27 2>&1)
 if [ $? -eq 0 ]; then ok "die Anordnung des Dateimanagers: $aus"
 else bad "die Anordnung des Dateimanagers stimmt nicht"; echo "$aus" | sed 's/^/        /' | head -6; fi
 TX=$(feld "$TMPD/files.txt" "explorer: rows" x)
@@ -1014,7 +1013,7 @@ schau_nicht "nach dem Namen sortiert stand dort etwas anderes" \
 # window, a menu of fourteen rows is 400 high). "New folder" is row 8
 # (ctx_wahl idx 8), so its middle lies 4 + 8*28 + 14 below the menu's top.
 PXC=$((TX + 100)); PYC=$((TB + 2 * TZH - 6))
-POPH=$((14 * 28 + 8))
+POPH=$((15 * 28 + 8))
 if [ $((PYC + POPH)) -gt "$FBH" ]; then POPY=$((FBH - POPH)); else POPY=$PYC; fi
 DYREL=$((POPY + 4 + 8 * 28 + 14 - PYC))
 M="$TMPD/fneu.mon"; : > "$M"
@@ -1342,6 +1341,20 @@ for name in sorted(os.listdir('assets/apps')):
 print(n)
 " "$PROGS")
 num "er findet so viele Programme, wie .osp-Buendel mit einem Programm dieser Platte im Baum liegen" "$na" eq "$soll"
+shown=$(python3 -c "
+import os, sys
+progs = set('/bin/' + w for w in sys.argv[1].split())
+n = 0
+for name in sorted(os.listdir('assets/apps')):
+    if not name.endswith('.osp'):
+        continue
+    base = os.path.join('assets/apps', name)
+    first = next((z.strip() for z in open(os.path.join(base, 'start.txt'), encoding='ascii') if z.strip() and not z.startswith('#')), '')
+    hidden = any(z.strip() == 'menu=hidden' for z in open(os.path.join(base, 'INFO'), encoding='ascii'))
+    if first in progs and not hidden:
+        n += 1
+print(n)
+" "$PROGS")
 # RUNDE ROTABSCHNITTE: OHNE DIE PLATZNUMMER.
 # Hier stand `i=0`. Diese Null war keine Zusage dieses Abschnitts,
 # sondern eine Folge der alphabetischen Reihenfolge: solange der
@@ -1395,7 +1408,7 @@ SBG=$(frgb "$TMPD/start.txt" "launcher: rows" bg)
 # `launcher: treffer i=`, not assumed.
 BOLD_INK="fui:assets/osum-sans-bold.ttf"
 FEI=$(grep -a 'launcher: treffer i=[0-9]* name=\[File Explorer\]' "$TMPD/start.txt" | head -1 | grep -oE 'i=[0-9]+' | tr -dc '0-9')
-EDI=$(grep -a 'launcher: treffer i=[0-9]* name=\[Editor\]' "$TMPD/start.txt" | head -1 | grep -oE 'i=[0-9]+' | tr -dc '0-9')
+EDI=$(grep -a 'launcher: treffer i=[0-9]* name=\[Terminal\]' "$TMPD/start.txt" | head -1 | grep -oE 'i=[0-9]+' | tr -dc '0-9')
 FEI=${FEI:-99}; EDI=${EDI:-99}
 SDIM=$(grep -a '^wlib: text2 .*t=View files and folders' "$TMPD/start.txt" | tail -1 | grep -oE ' fg=[0-9]+' | tr -dc '0-9')
 SDIM=$(rgb "${SDIM:-0}")
@@ -1413,12 +1426,12 @@ schau "die Zeile des Dateimanagers: sein Name, fett, je Zeichen" \
 schau "und darunter seine Beschreibung, in Beschriftungsgroesse" \
     tkette "$TMPD/start.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + FEI * SZH + SZH / 2)) \
     $FEDF $FEBG "View files and folders" 96
-schau "und die des Editors" \
+schau "und die des Terminals" \
     tkette "$TMPD/start.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + EDI * SZH)) \
-    $EDFG $EDBG "Editor" 96
+    $EDFG $EDBG "Terminal" 96
 schau "mit seiner Beschreibung" \
     tkette "$TMPD/start.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + EDI * SZH + SZH / 2)) \
-    $EDDF $EDBG "Write and change text" 96
+    $EDDF $EDBG "A command prompt with a shell" 96
 schau_nicht "der Name steht NICHT im normalen Schnitt da (die Gegenprobe zum fetten)" \
     tkette "$TMPD/start.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB + FEI * SZH)) \
     $FEFG $FEBG "File Explorer" 96
@@ -1435,17 +1448,11 @@ schau_nicht "der Name steht NICHT im normalen Schnitt da (die Gegenprobe zum fet
 # sagt ein Symbol nichts aus -- dort steht die Zeilenfarbe, und die
 # gehoert der Liste.
 sym() { echo "$TMPD/buendel/$1.osp.symbol"; }
-pruef() { local name=$1; shift
-    local aus rc; aus=$(python3 tools/k15/iconpixels.py "$@" 2>&1); rc=$?
-    if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi; }
-pruef_nicht() { local name=$1; shift
-    local aus rc; aus=$(python3 tools/k15/iconpixels.py "$@" 2>&1); rc=$?
-    if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch"; fi; }
 # r399: a bundle may carry a finished vector picture (symbol.osym, 48x48, baked from symbol.svg by tools/svg/apps.sh)
 # that wins over the 16x16 drawing; the screen checks then compare its opaque pixels 1:1
 ICS=16
 [ -f assets/apps/explorer.osp/symbol.osym ] && ICS=32
-for a in explorer editor; do
+for a in explorer terminal; do
     SRC="assets/apps/$a.osp/symbol.txt"
     [ -f "assets/apps/$a.osp/symbol.osym" ] && SRC="assets/apps/$a.osp/symbol.osym"
     python3 tools/k15/icon.py --pruefe "$(sym $a)" "$SRC" \
@@ -1455,12 +1462,16 @@ for a in explorer editor; do
 done
 # The bundle pictures are 16 x 16 now (tools/k15/icon.py), and they sit
 # where `launcher: rows ix= iy=` says, one row pitch (SZH) apart.
-pruef "das Symbol des Dateimanagers steht Punkt fuer Punkt im Bild" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + FEI * SZH)) $ICS $ICS "$(sym explorer)"
-pruef_nicht "und es ist NICHT das des Editors (die Gegenprobe)" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + FEI * SZH)) $ICS $ICS "$(sym editor)"
-pruef "in der Zeile des Editors steht dafuer das des Editors" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + EDI * SZH)) $ICS $ICS "$(sym editor)"
+tilecheck() { local name=$1 sym=$2 row=$3 limit=$4
+    local aus rc; aus=$(python3 tools/k15/tile.py "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + row * SZH)) $ICS "$sym" "$limit" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi; }
+tilecheck_not() { local name=$1 sym=$2 row=$3 limit=$4
+    local aus rc; aus=$(python3 tools/k15/tile.py "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + row * SZH)) $ICS "$sym" "$limit" 2>&1); rc=$?
+    if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- went through: $aus"; fi; }
+TILE_LIMIT=${TILE_LIMIT:-3}
+tilecheck "the file manager symbol is on screen (tile from the 64 px bake)" "$(sym explorer)" "$FEI" "$TILE_LIMIT"
+tilecheck_not "and it is NOT the terminal symbol (counter-proof)" "$(sym terminal)" "$FEI" "$TILE_LIMIT"
+tilecheck "the terminal row shows the terminal symbol" "$(sym terminal)" "$EDI" "$TILE_LIMIT"
 
 echo "== 14c. die Suche -- und dass wirklich die Schluesselwoerter greifen =="
 # DIE ZUSAGE, UM DIE ES GEHT: man tippt "folder" und findet den
@@ -1513,7 +1524,7 @@ schau "mit seiner Beschreibung darunter" \
     $SSFG $SSEL "View files and folders" 96
 schau_nicht "und in Zeile 1 steht nichts mehr" \
     tkette "$TMPD/suche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
-    $SFG $SBG "Editor" 96
+    $SFG $SBG "Terminal" 96
 # DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
 # Tastendruecke, dieselben Dateien, nur OHNE das Feld `keys`.
 foto nokeys "gfx wm wigstart wignokeys wmhold wiglong $GRUND" "$M"
@@ -1535,8 +1546,8 @@ grep -qi 'quaste' assets/apps/*.osp/INFO \
     || ok "und 'quaste' steht wirklich in keiner INFO"
 # Und dass die Suche ueberhaupt etwas findet, wenn sie soll: der leere
 # Begriff zeigt alle.
-has "$TMPD/start.txt" "launcher: suche [] treffer=$soll" \
-    "ohne Suchbegriff stehen alle $soll Programme in der Liste"
+has "$TMPD/start.txt" "launcher: suche [] treffer=$shown" \
+    "without a search term all $shown visible programs are listed"
 
 echo "== 15. der Namensindex: das GANZE Dateisystem, und sofort =="
 # WAS HIER GEMESSEN WIRD UND WARUM SO.

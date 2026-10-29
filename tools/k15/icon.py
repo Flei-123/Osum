@@ -173,10 +173,13 @@ def zurueck(pfad):
 def main(argv):
     if len(argv) >= 4 and argv[1] == "--pruefe" and argv[3].endswith(".osym"):
         # r399: the bundle carries a finished picture; the image must hold the SAME octets
-        if open(argv[2], "rb").read() == open(argv[3], "rb").read():
-            print("symbol.osym, %d Oktette, gleich" % len(open(argv[3], "rb").read()))
+        import os
+        import symjoin
+        want = symjoin.joined(os.path.dirname(argv[3]) or ".")
+        if open(argv[2], "rb").read() == want:
+            print("symbol.osym, %d Oktette, gleich" % len(want))
             return 0
-        print("symbol: das Abbild traegt nicht die Oktette von %s" % argv[3])
+        print("symbol: das Abbild traegt nicht die Oktette von %s (mit den Reihenbildern)" % argv[3])
         return 1
     if len(argv) >= 4 and argv[1] == "--pruefe":
         w, h, bild = zurueck(argv[2])

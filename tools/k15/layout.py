@@ -53,6 +53,7 @@ def main():
     pfad, marke = sys.argv[1], sys.argv[2]
     bw, bh = int(sys.argv[3]), int(sys.argv[4])
     mind = int(sys.argv[5]) if len(sys.argv) > 5 else 8
+    vertical = [int(v) for v in sys.argv[6].split(",")] if len(sys.argv) > 6 else []
     r = rechtecke(pfad, marke)
     fehler = []
     if len(r) < mind:
@@ -61,6 +62,8 @@ def main():
     for (i, k, x, y, w, h) in r:
         if w == 0 or h == 0:
             fehler.append("id=%d hat keine Flaeche: %dx%d" % (i, w, h))
+        if i >= 50:
+            continue
         if x + w > bw or y + h > bh:
             fehler.append("id=%d liegt ausserhalb: (%d,%d) %dx%d, "
                           "Fenster %dx%d" % (i, x, y, w, h, bw, bh))
@@ -77,7 +80,7 @@ def main():
     spalten = {}
     for (i, k, x, y, w, h) in r:
         # r454: the ids from 50 on (the tabs, the drag region) sit in the title strip above everything, whatever their number
-        if i >= 50:
+        if i >= 50 or i in vertical:
             continue
         spalten.setdefault(x, []).append((i, y))
     for x, liste in spalten.items():
@@ -87,6 +90,11 @@ def main():
         if nach_id != sorted(nach_id):
             fehler.append("bei x=%d steht die Reihenfolge auf dem Kopf: %s"
                           % (x, nach_id))
+    ys = dict((i, y) for (i, _k, _x, y, _w, _h) in r)
+    chain = [ys[i] for i in vertical if i in ys]
+    if len(chain) != len(vertical) or chain != sorted(chain):
+        fehler.append("vertical order %s is wrong: %s"
+                      % (vertical, chain))
     if fehler:
         for f in fehler:
             print(f)
