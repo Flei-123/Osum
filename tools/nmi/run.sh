@@ -52,6 +52,8 @@ runvm halt 90 2 "$SK" "wdt=10 wdthang=15" &
 runvm soft 110 2 "$SK" "wdt=20 wdtspin=15" &
 runvm nonmi 75 2 "$SK" "wdt=10 wdtlock=15 nonmi" &
 runvm idle 70 2 "$SK" "" &
+runvm csts 75 2 "$SK" "wdt=10 wdtlock=15 nonmi wdtnosts" &
+runvm cunc 75 2 "$SK" "wdt=10 wdtlock=15 nonmi wdtnosts wdtnomark" &
 desk() {
     local img="${NMI_IMG:-}"
     if [ -z "$img" ]; then
@@ -100,8 +102,17 @@ hhas soft "irqs=on" && ok "soft: irqs=on recorded" || bad "soft: irq state"
 echo "== f. counter-proof nonmi: same deadlock, no handler =="
 has nonmi "hang: off by word nonmi" && ok "nonmi: logger off" || bad "nonmi: not off"
 [ "$(boots nonmi)" -ge 2 ] && ok "nonmi: watchdog still resets ($(boots nonmi) boots)" || bad "nonmi: no reset"
-[ ! -s "$D/nonmi.hang" ] && ok "nonmi: no hang file (cause lost without the handler)" || bad "nonmi: hang file exists"
+! grep -qa '^cpu 0: task=' "$D/nonmi.hang" && ok "nonmi: no snapshot (cause lost without the handler)" || bad "nonmi: snapshot exists"
+hhas nonmi "snapshot: none" && ok "nonmi: minimal report names the lost snapshot" || bad "nonmi: no minimal report ($(head -c 200 "$D/nonmi.hang" | tr '\n' '|'))"
 has nonmi "^hang: detected" && bad "nonmi: detected although off" || ok "nonmi: nothing detected"
+lastboots() { grep -a '^wdt: armed' "$D/$1.klar" | sed -n 's/.*last_boot=\([a-z]*\).*/\1/p' | tr '\n' ' '; }
+echo "== f2. last_boot after the reset =="
+[ "$(lastboots halt)" = "normal watchdog " ] && ok "halt: last_boot normal then watchdog" || bad "halt: last_boot sequence '$(lastboots halt)'"
+[ "$(lastboots nonmi | cut -d' ' -f1-2)" = "normal watchdog" ] && ok "nonmi: last_boot watchdog from the TCO status" || bad "nonmi: last_boot '$(lastboots nonmi)'"
+[ "$(lastboots csts | cut -d' ' -f1-2)" = "normal watchdog" ] && ok "csts: last_boot watchdog from the CMOS mark alone (TCO bits ignored)" || bad "csts: last_boot '$(lastboots csts)'"
+hhas csts "source: planted" && ok "csts: minimal hang report names the planted source" || bad "csts: report $(head -c 200 "$D/csts.hang" | tr '\n' '|')"
+[ "$(lastboots cunc | cut -d' ' -f1-2)" = "normal unclean" ] && ok "cunc: unmarked reset without TCO bits reads unclean" || bad "cunc: last_boot '$(lastboots cunc)'"
+[ "$(lastboots idle)" = "normal " ] && ok "idle: last_boot normal" || bad "idle: last_boot '$(lastboots idle)'"
 echo "== g. no false alarm in a normal run =="
 has idle "==P20==" && ok "idle: script runs" || bad "idle: script stuck"
 has idle "^hang: detected" && bad "idle: false alarm $(grep -a -m1 '^hang: detected' "$D/idle.klar")" || ok "idle: no false alarm"
