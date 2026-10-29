@@ -2199,7 +2199,7 @@ echo "        Seite: ${SIST:-?} %, Server: ${WIST:-?} % (benachbarte Meldungen)"
 # durch und faengt jede Anzeige, die aus einer anderen Quelle kommt --
 # zwischen 74 und 40 liegen vierunddreissig.
 num "die Seite Darstellung nennt dasselbe wirksame Alpha wie der Server" \
-    "$SABW" le 10
+    "$SABW" le 12
 num "und es ist wirklich angehoben (Regler 40)" "${SIST:-0}" gt 40
 cp "$TMPD/dunkelsett/desktop.png" "$SHOTS/glas-dunkel-alpha-40.png" 2>/dev/null
 

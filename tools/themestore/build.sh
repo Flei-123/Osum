@@ -459,6 +459,15 @@ if [ -n "$clicks" ]; then
     done
 fi
 if [ -z "$script" ] && [ "$shot" = yes ]; then
+    if [ "$uitrace" = yes ]; then
+        k=0
+        while [ $k -lt 80 ]; do
+            grep -qaE 'taskbar: text clock .*fg=[0-9]+' "$OUT/serial.txt" 2>/dev/null && break
+            kill -0 "$PID" 2>/dev/null || break
+            sleep 0.5; k=$((k+1))
+        done
+        sleep 0.5
+    fi
     python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 \
         > "$OUT/shot.log" 2>&1
 fi
