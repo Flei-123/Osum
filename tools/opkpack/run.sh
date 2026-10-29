@@ -10,7 +10,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has() { grep -aqF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 OPK=${OPK:-$(python3 tools/lib/opkpfad.py)}
-PROGS="sh ls cat echo mkdir shasum opk"
+PROGS="sh ls cat echo mkdir shasum opk sleep"
 mkdir -p "$T/bin" "$T/h/payload/bin" "$T/h/payload/sub" "$T/src"
 bash tools/sync/build.sh "$T/bin" 0 $PROGS > "$T/b.txt" 2>&1 && ok "programs build" || { bad "programs build"; head -15 "$T/b.txt"; echo "OPKPACK: $pass passed, $fail failed"; exit 1; }
 ./tools/build-kernel.sh "$T/k0.img" --stufe 0 > "$T/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel build"; echo "OPKPACK: $pass passed, $fail failed"; exit 1; }
@@ -28,14 +28,14 @@ braucht=zeta
 braucht=alpha
 handle=text/x-demo
 kind=tool
-datei sub/b.txt payload/sub/b.txt
-datei a.txt payload/a.txt
-datei start payload/start
-datei bin/prog payload/bin/prog
+datei = sub/b.txt payload/sub/b.txt
+datei = a.txt payload/a.txt
+datei = start payload/start
+datei = bin/prog payload/bin/prog
 EOS
-printf 'name=broken\nfassung=1\ndatei x.txt payload/missing.txt\n' > "$T/h/bad.rezept"
-printf 'name=kernel\nfassung=1\ndatei x.txt payload/a.txt\n' > "$T/h/res.rezept"
-cp "$T/h/p.rezept" "$T/h/q.rezept"; echo 'datei extra.txt payload/a.txt' >> "$T/h/q.rezept"
+printf 'name=broken\nfassung=1\ndatei = x.txt payload/missing.txt\n' > "$T/h/bad.rezept"
+printf 'name=kernel\nfassung=1\ndatei = x.txt payload/a.txt\n' > "$T/h/res.rezept"
+cp "$T/h/p.rezept" "$T/h/q.rezept"; echo 'datei = extra.txt payload/a.txt' >> "$T/h/q.rezept"
 python3 "$OPK" schluessel "$T/keys" > /dev/null 2>&1
 python3 "$OPK" bauen "$T/h/p.rezept" -o "$T/src/demo-1.0.0.opk" > "$T/host-build.txt" 2>&1 || { bad "host build"; cat "$T/host-build.txt"; }
 python3 "$OPK" bauen "$T/h/q.rezept" -o "$T/other.opk" > /dev/null 2>&1
@@ -62,6 +62,7 @@ opk sign /tmp/src/demo-1.0.0.opk --key /t/p.rezept
 opk show /t/corrupt.opk
 ls /tmp
 echo ==END==
+sleep 3
 EOS
 python3 tools/osum/mkfs.py build "$T/d.img" 20000 /bin/ /t/ /tmp/ /tmp/src/ /proc/ /dev/ /etc/ /var/ /t/payload/ /t/payload/bin/ /t/payload/sub/ \
     $(for p in $PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) \
