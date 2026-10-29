@@ -13,7 +13,7 @@ export DESIGNBUILD="$TMPD/build"
 
 python3 tools/drift/gen.py "$CYCLES" "$SHOT_EVERY" > "$TMPD/script.txt"
 echo "== one session, $CYCLES start-menu cycles =="
-bash tools/design/eh6.sh "$TMPD/run" res=1920x1080 accel=kvm drehbuch="$TMPD/script.txt" > "$TMPD/run.log" 2>&1
+bash tools/design/eh6.sh "$TMPD/run" res=1920x1080 accel=kvm drehbuch="$TMPD/script.txt" extra="${DRIFT_EXTRA:-}" > "$TMPD/run.log" 2>&1
 D="$TMPD/run"
 python3 tools/drift/check.py summary "$D/fahren.log" 2.0 1.5 | tee "$TMPD/sum.txt" | sed 's/^/        /'
 grep -q 'verdict=stable' "$TMPD/sum.txt" \

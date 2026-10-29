@@ -54,7 +54,19 @@ isr\num:
 
     isr_plain 0                 /* #DE divide error */
     isr_plain 1
-    isr_plain 2
+
+    .globl isr2
+isr2:
+    pushq $0
+    pushq $2
+    jmp isr_paranoid
+
+    .globl isr2_flat
+isr2_flat:
+    pushq $0
+    pushq $2
+    jmp isr_common
+
     isr_plain 3
     isr_plain 4
     isr_plain 5
@@ -100,6 +112,66 @@ isr\num:
     isr_plain 45
     isr_plain 46
     isr_plain 47
+
+isr_paranoid:
+    pushq %rax
+    pushq %rcx
+    pushq %rdx
+    movl $0xC0000101, %ecx
+    rdmsr
+    shlq $32, %rdx
+    orq %rdx, %rax
+    cmpq 80(%rsp), %rax
+    popq %rdx
+    popq %rcx
+    popq %rax
+    pushq %rax
+    pushq %rcx
+    pushq %rdx
+    pushq %rbx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movl $0, %r12d
+    je 1f
+    swapgs
+    movl $1, %r12d
+1:
+    movq %rsp, %rdi
+    movq $kdata, %rsi
+    movq %rsp, %rbx
+    andq $-16, %rsp
+    call KERNEL_TRAP
+    movq %rbx, %rsp
+    testq %r12, %r12
+    jz 2f
+    swapgs
+2:
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rdi
+    popq %rsi
+    popq %rbp
+    popq %rbx
+    popq %rdx
+    popq %rcx
+    popq %rax
+    addq $16, %rsp
+    iretq
 
 isr_common:
     testb $3, 24(%rsp)
@@ -488,6 +560,17 @@ msr_read_safe:
     popfq
     ret
 
+    .globl mem_read_safe
+mem_read_safe:
+.Lmem_rd_insn:
+    movq (%rdi), %rax
+    movq %rax, (%rsi)
+    movl $0, %eax
+    ret
+.Lmem_rd_fix:
+    movl $1, %eax
+    ret
+
     .globl msr_write_safe
 msr_write_safe:
     pushfq
@@ -520,6 +603,7 @@ msr_write_safe:
 msr_fixups:
     .quad .Lmsr_rd_insn, .Lmsr_rd_fix
     .quad .Lmsr_wr_insn, .Lmsr_wr_fix
+    .quad .Lmem_rd_insn, .Lmem_rd_fix
     .quad 0, 0
 
     .section .rodata
@@ -585,6 +669,8 @@ vectors:
 
     /* K-004: the way back from S3 (end of kernel/arch/x86_64/smp.s). */
     .quad s3_vectors                /* 75: pwr/s3.fi */
+    .quad mem_read_safe             /* 76: arch/safemem.fi */
+    .quad isr2_flat                 /* 77: idt.nmi_flat */
 
     .section .bss, "aw", @nobits
     .align 8
