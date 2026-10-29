@@ -541,6 +541,21 @@ grep -qa "^206 hallo-2.opk" "$OUT/srv.log" \
     || bad "(c) keine 206 -- es wurde nicht wiederaufgenommen"
 dienst_aus
 
+dienst "$OUT/netz2" --kurz "hallo-2.opk:20000" || bad "server"
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf c3a "ota apply;exit")
+hatnicht "$OUT/c3a.txt" "opk: installed" "(c3) first attempt against the cutting server fails"
+dienst_aus
+dienst "$OUT/netz2" --norange || bad "server"
+rc=$(lauf c3b "ota apply;opk list;exit")
+hat "$OUT/c3b.txt" "ota: hash ok hallo-2.opk" "(c3) server without Range: the package arrives complete"
+hat "$OUT/c3b.txt" "opk: installed hallo" "(c3) and it is installed"
+grep -qa "^200 hallo-2.opk von 0 " "$OUT/srv.log" \
+    && ok "(c3) the server answered 200 from offset 0 (restart, no garbage appended)" \
+    || bad "(c3) no full 200 answer in the server log"
+hatnicht "$OUT/c3b.txt" "wrong length" "(c3) no wrong-length failure after the restart"
+dienst_aus
+
 # ---- (f) der Platz reicht nicht
 #
 # WIE DIE PLATTE ZU KLEIN WIRD, und warum nicht andersherum. Versucht

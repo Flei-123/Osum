@@ -65,6 +65,7 @@ import threading
 import time
 
 WURZEL = "."
+NORANGE = False
 ABBRUCH = {}
 KURZ = {}
 LOG = None
@@ -144,7 +145,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
         gesamt = os.path.getsize(datei)
         von = 0
         teil = False
-        r = self.headers.get("Range")
+        r = None if NORANGE else self.headers.get("Range")
         if r and r.startswith("bytes="):
             stueck = r[6:].split("-")[0].strip()
             if stueck.isdigit():
@@ -225,7 +226,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    global WURZEL, LOG, EINMAL
+    global WURZEL, LOG, EINMAL, NORANGE
     port = 8443
     cert = key = None
     pid = None
@@ -258,6 +259,8 @@ def main():
             i += 1
             n, _, o = sys.argv[i].partition(":")
             KURZ[n] = int(o)
+        elif a == "--norange":
+            NORANGE = True
         elif a == "--einmal":
             EINMAL = True
         else:
