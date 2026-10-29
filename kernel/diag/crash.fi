@@ -77,11 +77,22 @@ import diag.safe
 export {
     init, open, brand_delete, knall,
     kern_bericht, prog_bericht, last_file, ram_retten, set_volatile,
-    doppel_check,
+    doppel_check, hang_begin, hang_store, hang_forget, p_str, p_dec, p_hex, p_nl, p_addr,
+    KIND_PANIC, KIND_HANG, KIND_SOFT, rescued,
     A_KERN, A_PROG, geschrieben, versucht, gescheitert
 }
 
 const A_KERN: u64 = 0
+const KIND_PANIC: u64 = 0
+const KIND_HANG: u64 = 1
+const KIND_SOFT: u64 = 2
+static mut ram_kind: u64 = 0
+static mut file_kind: u64 = 0
+static mut rescued_n: u64 = 0
+
+fn rescued() -> bool {
+    return rescued_n != 0
+}
 const A_PROG: u64 = 1
 
 // Der Puffer, in dem ein Bericht entsteht. Er ist ein `static mut` und
@@ -402,6 +413,7 @@ fn protokoll(state: u64, n: u64) {
 fn filename(state: u64) -> u64 {
     var pre: [u8; 12] = "/var/crash/\0"
     var suf: [u8; 5] = ".txt\0"
+    var hsuf: [u8; 10] = "-hang.txt\0"
     let p: u64 = (&name_buf[0 as usize]) as u64
     var n: u64 = 0
     var i: u64 = 0
@@ -428,8 +440,12 @@ fn filename(state: u64) -> u64 {
         m = m - 1
     }
     i = 0
-    while kstate.get8((&suf[0 as usize]) as u64 + i) != 0 {
-        kstate.set8(p + n, kstate.get8((&suf[0 as usize]) as u64 + i) as u8)
+    var sp: u64 = (&suf[0 as usize]) as u64
+    if file_kind != KIND_PANIC {
+        sp = (&hsuf[0 as usize]) as u64
+    }
+    while kstate.get8(sp + i) != 0 {
+        kstate.set8(p + n, kstate.get8(sp + i) as u8)
         n = n + 1
         i = i + 1
     }
@@ -671,6 +687,7 @@ fn band_write(b: u64) {
     }
     __mmio_write64((b + 8) as *mut u64, buf_n)
     __mmio_write64((b + 16) as *mut u64, ram_sum(b + RAM_HDR, buf_n))
+    __mmio_write64((b + 24) as *mut u64, ram_kind)
     __mmio_write64(b as *mut u64, RAM_MAGIC)
 }
 
@@ -781,6 +798,11 @@ fn ram_retten(state: u64) -> u64 {
         return 0
     }
     let n: u64 = __mmio_read64((found + 8) as *mut u64)
+    rescued_n = 1
+    file_kind = __mmio_read64((found + 24) as *mut u64)
+    if file_kind > KIND_SOFT {
+        file_kind = KIND_PANIC
+    }
     i = 0
     while i < n {
         buf[i as usize] = kstate.get8(found + RAM_HDR + i) as u8
@@ -789,13 +811,47 @@ fn ram_retten(state: u64) -> u64 {
     buf_n = n
     serial.puts((&s_ok[0 as usize]) as u64)
     serial.nl()
-    if ablegen(state) {
+    let ok: bool = ablegen(state)
+    file_kind = KIND_PANIC
+    if ok {
         ram_loeschen()
         return 1
     }
-    // Die Platte will auch jetzt nicht: der Bericht BLEIBT im Speicher
-    // und wird beim naechsten Start wieder angeboten.
     return 0
+}
+
+fn hang_begin(state: u64, kind: u64) {
+    var s_h: [u8; 25] = "=== OSUM HANG REPORT ===\0"
+    var s_f: [u8; 10] = "version: \0"
+    var s_z: [u8; 7] = "time: \0"
+    buf_n = 0
+    ram_kind = kind
+    p_str((&s_h[0]) as u64)
+    p_nl()
+    p_str((&s_f[0]) as u64)
+    p_str(version.text())
+    p_nl()
+    p_str((&s_z[0]) as u64)
+    p_dec(time.now_sec(state))
+    p_nl()
+}
+
+fn hang_store(state: u64) -> u64 {
+    protokoll(state, 30)
+    ram_sichern()
+    ram_kind = KIND_PANIC
+    return buf_n
+}
+
+fn hang_forget() {
+    var i: u64 = 0
+    while i < BANDS {
+        let b: u64 = band(i)
+        if b != 0 && band_state(b) == 1 && __mmio_read64((b + 24) as *mut u64) == KIND_SOFT {
+            __mmio_write64(b as *mut u64, 0)
+        }
+        i = i + 1
+    }
 }
 
 fn kern_bericht(state: u64, regs: u64, rip: u64, cs: u64, flg: u64,

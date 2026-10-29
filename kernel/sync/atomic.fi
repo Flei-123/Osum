@@ -52,7 +52,7 @@ import arch.arch
 export {
     cas, fetch_add, fetch_sub, load, store, pause, barrier,
     lock_init, lock_take, lock_give, lock_try, lock_owner,
-    lock_takes, lock_spins, lock_total_spins,
+    lock_takes, lock_spins, lock_total_spins, lock_waiting,
     off, mask, set_off,
     L_SCHED, L_FRAME, L_FS, L_CONSOLE, L_STRESS, L_BOOT, L_NET, L_PROC, L_GUI
 }
@@ -156,6 +156,16 @@ const SPINS: u64 = 16 // turns of the waiting loop spent on it
 // A processor that waits this long says so on the serial line (once per
 // wait). Saying so beats a run that dies at the time limit with no output.
 const STUCK: u64 = 60000000
+const WAIT_CPUS: u64 = 8
+
+static mut waiting: [u64; 8] = [0 as u64; 8]
+
+fn lock_waiting(c: u64) -> u64 {
+    if c >= WAIT_CPUS {
+        return 0
+    }
+    return waiting[c as usize]
+}
 
 fn slot(state: u64, id: u64) -> u64 {
     return state + kstate.LOCK_OFF + id * kstate.LOCK_BYTES
@@ -199,6 +209,9 @@ fn lock_take(state: u64, id: u64, who: u64) {
     let a: u64 = slot(state, id)
     var spins: u64 = 0
     while cas(a + OWNER, 0, who + 1) != 0 {
+        if spins == 0 && who < WAIT_CPUS {
+            waiting[who as usize] = id + 1
+        }
         pause()
         spins = spins + 1
         if spins == STUCK {
@@ -208,6 +221,9 @@ fn lock_take(state: u64, id: u64, who: u64) {
     fetch_add(a + TAKES, 1)
     if spins > 0 {
         fetch_add(a + SPINS, spins)
+        if who < WAIT_CPUS {
+            waiting[who as usize] = 0
+        }
     }
 }
 

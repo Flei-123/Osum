@@ -1,0 +1,364 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import serial
+import klog
+import arch.cpu
+import arch.x86_64.apic
+import pwr.power
+import diag.cmdopt
+import diag.crash
+import diag.hangcpu
+import drv.wdt.wdt
+
+export {
+    init, beat, nmi, stall, dumps, nmis, pmu_on, last_reason, hard_s, soft_s,
+    R_NONE, R_HARD_PEER, R_HARD_SELF, R_SOFT, R_STALL
+}
+
+const R_NONE: u64 = 0
+const R_HARD_PEER: u64 = 1
+const R_HARD_SELF: u64 = 2
+const R_SOFT: u64 = 3
+const R_STALL: u64 = 4
+
+const NCPU: u64 = 8
+const HARD_DEFAULT_S: u64 = 10
+const SOFT_DEFAULT_S: u64 = 20
+const GATHER_MS: u64 = 300
+
+static mut h_on: u64 = 0
+static mut h_hard_s: u64 = HARD_DEFAULT_S
+static mut h_soft_s: u64 = SOFT_DEFAULT_S
+static mut h_reset: u64 = 1
+static mut h_owner: [u64; 1] = [0 as u64; 1]
+static mut h_req: u64 = 0
+static mut h_dumps: u64 = 0
+static mut h_nmis: u64 = 0
+static mut h_reason: u64 = 0
+static mut h_soft_live: u64 = 0
+static mut h_soft_cpu: u64 = 0
+static mut hb_tsc: [u64; 8] = [0 as u64; 8]
+static mut k_task: [u64; 8] = [0 as u64; 8]
+static mut k_since: [u64; 8] = [0 as u64; 8]
+
+static mut w_nonmi: [u8; 6] = "nonmi\0"
+static mut w_hard: [u8; 8] = "nmihard\0"
+static mut w_soft: [u8; 8] = "nmisoft\0"
+static mut w_noreset: [u8; 12] = "nminoreset\0\0"
+
+static mut s_off: [u8; 24] = "hang: off by word nonmi\0"
+static mut s_on: [u8; 15] = "hang: on hard=\0"
+static mut s_soft: [u8; 7] = " soft=\0"
+static mut s_pmu: [u8; 6] = " pmu=\0"
+static mut s_det: [u8; 22] = "hang: detected reason\0"
+static mut s_cpu: [u8; 6] = " cpu=\0"
+static mut s_saved: [u8; 25] = "hang: report saved bytes\0"
+static mut s_reset: [u8; 25] = "hang: resetting the box\0\0"
+static mut s_over: [u8; 30] = "hang: soft lockup ended after\0"
+static mut s_src: [u8; 5] = "hang\0"
+static mut s_lk: [u8; 23] = "soft lockup on cpu, s=\0"
+
+static mut r_names: [u8; 60] = "none\0\0\0\0\0\0\0\0hard-peer\0\0\0hard-self\0\0\0soft\0\0\0\0\0\0\0\0stall\0\0\0\0\0\0\0"
+
+fn dumps() -> u64 {
+    return h_dumps
+}
+
+fn nmis() -> u64 {
+    return h_nmis
+}
+
+fn pmu_on() -> bool {
+    return hangcpu.pmu_ready()
+}
+
+fn last_reason() -> u64 {
+    return h_reason
+}
+
+fn hard_s() -> u64 {
+    return h_hard_s
+}
+
+fn soft_s() -> u64 {
+    return h_soft_s
+}
+
+fn reason_name(r: u64) -> u64 {
+    var x: u64 = r
+    if x > R_STALL {
+        x = R_NONE
+    }
+    return (&r_names[0]) as u64 + x * 12
+}
+
+fn init(state: u64) {
+    if cmdopt.has(state, (&w_nonmi[0]) as u64) {
+        h_on = 0
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    h_hard_s = HARD_DEFAULT_S
+    h_soft_s = SOFT_DEFAULT_S
+    if wdt.st() == wdt.ST_ARMED {
+        let t: u64 = wdt.timeout_s()
+        if t / 3 < h_hard_s {
+            h_hard_s = t / 3
+        }
+        if t / 2 < h_soft_s {
+            h_soft_s = t / 2
+        }
+    }
+    h_hard_s = cmdopt.number(state, (&w_hard[0]) as u64, h_hard_s)
+    h_soft_s = cmdopt.number(state, (&w_soft[0]) as u64, h_soft_s)
+    if h_hard_s < 2 {
+        h_hard_s = 2
+    }
+    if h_soft_s < 2 {
+        h_soft_s = 2
+    }
+    if cmdopt.has(state, (&w_noreset[0]) as u64) {
+        h_reset = 0
+    }
+    hangcpu.pmu_probe(state)
+    h_on = 1
+    serial.puts((&s_on[0]) as u64)
+    serial.dec(h_hard_s)
+    serial.puts((&s_soft[0]) as u64)
+    serial.dec(h_soft_s)
+    serial.puts((&s_pmu[0]) as u64)
+    serial.dec(hangcpu.pmu_version())
+    serial.nl()
+}
+
+fn paused() -> bool {
+    return wdt.st() == wdt.ST_PAUSED
+}
+
+fn hz(state: u64) -> u64 {
+    var f: u64 = apic.tsc_hz(state)
+    if f < 100000000 || f > 10000000000 {
+        f = 2000000000
+    }
+    return f
+}
+
+fn beat(state: u64, frame: u64) {
+    if h_on == 0 {
+        return
+    }
+    let me: u64 = hangcpu.self_index(state)
+    if me >= NCPU {
+        return
+    }
+    let now: u64 = apic.tsc()
+    if paused() {
+        clear_beats()
+        return
+    }
+    hb_tsc[me as usize] = now
+    hangcpu.pmu_arm(state, me)
+    if h_req != 0 {
+        return
+    }
+    peer_check(state, me, frame, now)
+    soft_check(state, me, frame, now)
+}
+
+fn clear_beats() {
+    var i: u64 = 0
+    while i < NCPU {
+        hb_tsc[i as usize] = 0
+        k_since[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn peer_check(state: u64, me: u64, frame: u64, now: u64) {
+    let lim: u64 = h_hard_s * hz(state)
+    let n: u64 = cpu.count(state)
+    var d: u64 = 0
+    while d < n && d < NCPU {
+        let t: u64 = hb_tsc[d as usize]
+        if d != me && t != 0 && now > t && now - t > lim && cpu.online(state, d)
+                && cpu.get(state, d, cpu.C_PARKED) == 0 {
+            trigger(state, R_HARD_PEER, d, me, frame)
+            return
+        }
+        d = d + 1
+    }
+}
+
+fn soft_check(state: u64, me: u64, frame: u64, now: u64) {
+    let cur: u64 = cpu.get(state, me, cpu.C_CUR)
+    let idle: u64 = cpu.get(state, me, cpu.C_IDLE)
+    let ring0: bool = (hangcpu.word(frame, hangcpu.F_CS) & 3) == 0
+    if !ring0 || cur == idle || cur != k_task[me as usize] {
+        k_task[me as usize] = cur
+        k_since[me as usize] = now
+        if h_soft_live != 0 && h_soft_cpu == me {
+            soft_over(state, me)
+        }
+        return
+    }
+    if k_since[me as usize] == 0 {
+        k_since[me as usize] = now
+        return
+    }
+    if h_soft_live == 0 && now - k_since[me as usize] > h_soft_s * hz(state) {
+        h_soft_live = 1
+        h_soft_cpu = me
+        klog.sayn(state, klog.L_ERROR, (&s_src[0]) as u64, (&s_lk[0]) as u64, h_soft_s)
+        trigger(state, R_SOFT, me, me, frame)
+    }
+}
+
+fn soft_over(state: u64, me: u64) {
+    h_soft_live = 0
+    crash.hang_forget()
+    serial.puts((&s_over[0]) as u64)
+    serial.puts((&s_cpu[0]) as u64)
+    serial.dec(me)
+    serial.nl()
+}
+
+fn stall(state: u64, starving: bool) {
+    if h_on == 0 || h_req != 0 {
+        return
+    }
+    if !starving {
+        if h_soft_live != 0 && h_soft_cpu == NCPU {
+            soft_over(state, NCPU)
+        }
+        return
+    }
+    if h_soft_live != 0 {
+        return
+    }
+    let me: u64 = hangcpu.self_index(state)
+    h_soft_live = 1
+    h_soft_cpu = NCPU
+    trigger(state, R_STALL, me, me, 0)
+}
+
+fn nmi(state: u64, frame: u64) -> bool {
+    if h_on == 0 {
+        return false
+    }
+    h_nmis = h_nmis + 1
+    let me: u64 = hangcpu.self_index(state)
+    if me >= NCPU {
+        return false
+    }
+    let mine: bool = hangcpu.pmu_overflowed(state, me)
+    if h_req != 0 && !hangcpu.taken(me) {
+        hangcpu.snap(state, me, frame)
+        return true
+    }
+    if !mine {
+        return h_req != 0
+    }
+    if paused() || h_req != 0 {
+        return true
+    }
+    let now: u64 = apic.tsc()
+    let t: u64 = hb_tsc[me as usize]
+    if t != 0 && now > t && now - t > h_hard_s * hz(state) {
+        trigger(state, R_HARD_SELF, me, me, frame)
+        return true
+    }
+    peer_check(state, me, frame, now)
+    return true
+}
+
+fn trigger(state: u64, reason: u64, culprit: u64, me: u64, frame: u64) {
+    let owner: u64 = __atomic_swap((&h_owner[0]) as u64 as *mut u64, 0, me + 1)
+    if owner != 0 {
+        return
+    }
+    hangcpu.reset_snaps()
+    h_reason = reason
+    if frame != 0 {
+        hangcpu.snap(state, me, frame)
+    } else {
+        hangcpu.snap_here(state, me)
+    }
+    h_req = reason
+    serial.puts((&s_det[0]) as u64)
+    serial.put(61 as u8)
+    serial.puts(reason_name(reason))
+    serial.puts((&s_cpu[0]) as u64)
+    serial.dec(culprit)
+    serial.nl()
+    if cpu.count(state) > 1 && apic.active(state) {
+        apic.ipi(state, 0, 0xC4400)
+    }
+    hangcpu.gather(state, hz(state) / 1000 * GATHER_MS)
+    write_report(state, reason, culprit, me)
+    h_dumps = h_dumps + 1
+    let hard: bool = reason == R_HARD_PEER || reason == R_HARD_SELF
+    if hard && h_reset != 0 {
+        serial.puts((&s_reset[0]) as u64)
+        serial.nl()
+        let _r: bool = power.acpi_reset(state)
+        power.halt_forever()
+    }
+    h_req = 0
+    __atomic_swap((&h_owner[0]) as u64 as *mut u64, me + 1, 0)
+}
+
+fn write_report(state: u64, reason: u64, culprit: u64, me: u64) {
+    var s_r: [u8; 9] = "reason: \0"
+    var s_c: [u8; 10] = "culprit: \0"
+    var s_d: [u8; 14] = "detected-by: \0"
+    var s_t: [u8; 12] = "threshold: \0"
+    var s_s: [u8; 3] = "s\n\0"
+    var kind: u64 = crash.KIND_HANG
+    if reason == R_SOFT || reason == R_STALL {
+        kind = crash.KIND_SOFT
+    }
+    crash.hang_begin(state, kind)
+    crash.p_str((&s_r[0]) as u64)
+    crash.p_str(reason_name(reason))
+    crash.p_nl()
+    crash.p_str((&s_c[0]) as u64)
+    crash.p_str((&s_cpu[1]) as u64)
+    crash.p_dec(culprit)
+    crash.p_nl()
+    crash.p_str((&s_d[0]) as u64)
+    crash.p_str((&s_cpu[1]) as u64)
+    crash.p_dec(me)
+    crash.p_nl()
+    crash.p_str((&s_t[0]) as u64)
+    if kind == crash.KIND_HANG {
+        crash.p_dec(h_hard_s)
+    } else {
+        crash.p_dec(h_soft_s)
+    }
+    crash.p_str((&s_s[0]) as u64)
+    hangcpu.write_locks(state)
+    let n: u64 = cpu.count(state)
+    var c: u64 = 0
+    while c < n && c < NCPU {
+        hangcpu.write_cpu(state, c, now_age(state, c))
+        c = c + 1
+    }
+    let bytes: u64 = crash.hang_store(state)
+    serial.puts((&s_saved[0]) as u64)
+    serial.put(32 as u8)
+    serial.dec(bytes)
+    serial.nl()
+    hangcpu.say_serial(state)
+}
+
+fn now_age(state: u64, c: u64) -> u64 {
+    let t: u64 = hb_tsc[c as usize]
+    let now: u64 = apic.tsc()
+    if t == 0 || now < t {
+        return 0
+    }
+    return (now - t) / (hz(state) / 1000)
+}

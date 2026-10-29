@@ -1,0 +1,403 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import serial
+import arch.cpu
+import arch.msr
+import arch.x86_64.apic
+import sched.sched
+import sync.atomic
+import pwr.pmon
+import diag.cmdopt
+import diag.crash
+import lib.ksymtab
+
+export {
+    word, self_index, snap, snap_here, taken, reset_snaps, gather,
+    write_locks, write_cpu, say_serial,
+    pmu_probe, pmu_arm, pmu_overflowed, pmu_ready, pmu_version,
+    F_RIP, F_CS, F_RFLAGS, F_RSP, F_RBP
+}
+
+const F_RIP: u64 = 136
+const F_CS: u64 = 144
+const F_RFLAGS: u64 = 152
+const F_RSP: u64 = 160
+const F_RBP: u64 = 80
+
+const NCPU: u64 = 8
+const TRACE_MAX: u64 = 12
+const NAME_MAX: u64 = 16
+const KERN_LO: u64 = 0x100000
+const KSTACK_SPAN: u64 = 0x40000
+const R_ID: u64 = 0x20
+const R_LVT_PERF: u64 = 0x340
+const LVT_NMI: u64 = 0x400
+
+const MSR_PMC0: u64 = 0xC1
+const MSR_EVTSEL0: u64 = 0x186
+const MSR_GLOBAL_CTRL: u64 = 0x38F
+const MSR_GLOBAL_OVF: u64 = 0x390
+const EVT_CYCLES: u64 = 0x53003C
+const PERIOD_LOW: u64 = 0x80000000
+
+static mut s_taken: [u64; 8] = [0 as u64; 8]
+static mut s_rip: [u64; 8] = [0 as u64; 8]
+static mut s_cs: [u64; 8] = [0 as u64; 8]
+static mut s_flg: [u64; 8] = [0 as u64; 8]
+static mut s_rsp: [u64; 8] = [0 as u64; 8]
+static mut s_task: [u64; 8] = [0 as u64; 8]
+static mut s_pid: [u64; 8] = [0 as u64; 8]
+static mut s_wait: [u64; 8] = [0 as u64; 8]
+static mut s_tn: [u64; 8] = [0 as u64; 8]
+static mut s_trace: [u64; 96] = [0 as u64; 96]
+static mut s_name: [u8; 128] = [0 as u8; 128]
+
+static mut p_ver: u64 = 0
+static mut p_width: u64 = 0
+static mut p_armed: [u64; 8] = [0 as u64; 8]
+static mut w_nopmu: [u8; 6] = "nopmu\0"
+
+static mut lock_names: [u8; 72] = "sched\0\0\0frame\0\0\0fs\0\0\0\0\0\0console\0stress\0\0boot\0\0\0\0net\0\0\0\0\0proc\0\0\0\0gui\0\0\0\0\0"
+
+fn word(frame: u64, off: u64) -> u64 {
+    return __mmio_read64((frame + off) as *mut u64)
+}
+
+fn self_index(state: u64) -> u64 {
+    let base: u64 = cpu.lapic_base(state)
+    let n: u64 = cpu.count(state)
+    if base == 0 || n <= 1 {
+        return 0
+    }
+    let apid: u64 = (kstate.get32(base + R_ID) >> 24) & 0xFF
+    var i: u64 = 0
+    while i < n {
+        if cpu.get(state, i, cpu.C_APICID) == apid {
+            return i
+        }
+        i = i + 1
+    }
+    return NCPU
+}
+
+fn taken(c: u64) -> bool {
+    return s_taken[c as usize] != 0
+}
+
+fn reset_snaps() {
+    var i: u64 = 0
+    while i < NCPU {
+        s_taken[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn snap_task(state: u64, c: u64) {
+    let cur: u64 = cpu.get(state, c, cpu.C_CUR)
+    s_task[c as usize] = cur
+    s_pid[c as usize] = sched.tget(state, cur, sched.T_PID)
+    s_wait[c as usize] = atomic.lock_waiting(c)
+    var k: u64 = 0
+    while k < NAME_MAX - 1 && pmon.name_at(state, cur, k) != 0 {
+        s_name[(c * NAME_MAX + k) as usize] = (pmon.name_at(state, cur, k) & 0xFF) as u8
+        k = k + 1
+    }
+    s_name[(c * NAME_MAX + k) as usize] = 0 as u8
+}
+
+fn trace(state: u64, c: u64, rsp: u64, rbp: u64) {
+    s_tn[c as usize] = 0
+    var hi: u64 = kstate.get(state, kstate.KERNEL_END)
+    if hi <= KERN_LO || rsp < KERN_LO {
+        return
+    }
+    var fp: u64 = rbp
+    var n: u64 = 0
+    while n < TRACE_MAX {
+        if fp < rsp || fp >= rsp + KSTACK_SPAN || fp % 8 != 0 {
+            s_tn[c as usize] = n
+            return
+        }
+        let ret: u64 = __mmio_read64((fp + 8) as *mut u64)
+        if ret < KERN_LO || ret >= hi {
+            s_tn[c as usize] = n
+            return
+        }
+        s_trace[(c * TRACE_MAX + n) as usize] = ret
+        n = n + 1
+        let next: u64 = __mmio_read64(fp as *mut u64)
+        if next <= fp {
+            s_tn[c as usize] = n
+            return
+        }
+        fp = next
+    }
+    s_tn[c as usize] = n
+}
+
+fn snap(state: u64, c: u64, frame: u64) {
+    if c >= NCPU {
+        return
+    }
+    s_rip[c as usize] = word(frame, F_RIP)
+    s_cs[c as usize] = word(frame, F_CS)
+    s_flg[c as usize] = word(frame, F_RFLAGS)
+    s_rsp[c as usize] = word(frame, F_RSP)
+    snap_task(state, c)
+    if (word(frame, F_CS) & 3) == 0 {
+        trace(state, c, word(frame, F_RSP), word(frame, F_RBP))
+    } else {
+        s_tn[c as usize] = 0
+    }
+    __atomic_swap((&s_taken[c as usize]) as u64 as *mut u64, 0, 1)
+}
+
+fn snap_here(state: u64, c: u64) {
+    if c >= NCPU {
+        return
+    }
+    let rsp: u64 = asm("mov rax, rsp", out("rax"))
+    let rbp: u64 = asm("mov rax, rbp", out("rax"))
+    s_rip[c as usize] = 0
+    s_cs[c as usize] = 8
+    s_flg[c as usize] = 0
+    s_rsp[c as usize] = rsp
+    snap_task(state, c)
+    trace(state, c, rsp, rbp)
+    __atomic_swap((&s_taken[c as usize]) as u64 as *mut u64, 0, 1)
+}
+
+fn gather(state: u64, cycles: u64) {
+    let t0: u64 = apic.tsc()
+    let n: u64 = cpu.count(state)
+    while apic.tsc() - t0 < cycles {
+        var all: bool = true
+        var c: u64 = 0
+        while c < n && c < NCPU {
+            if cpu.online(state, c) && s_taken[c as usize] == 0 {
+                all = false
+            }
+            c = c + 1
+        }
+        if all {
+            return
+        }
+        asm("pause")
+    }
+}
+
+fn lock_name(id: u64) -> u64 {
+    if id >= 9 {
+        return 0
+    }
+    return (&lock_names[0]) as u64 + id * 8
+}
+
+fn write_locks(state: u64) {
+    var s_h: [u8; 7] = "locks:\0"
+    var s_l: [u8; 8] = "  lock \0"
+    var s_by: [u8; 16] = " held-by cpu=\0\0\0"
+    var s_none: [u8; 8] = " (none)\0"
+    crash.p_str((&s_h[0]) as u64)
+    var any: bool = false
+    var i: u64 = 0
+    while i < kstate.LOCK_COUNT {
+        let o: u64 = atomic.lock_owner(state, i)
+        if o != 0 {
+            if !any {
+                crash.p_nl()
+            }
+            any = true
+            crash.p_str((&s_l[0]) as u64)
+            crash.p_str(lock_name(i))
+            crash.p_str((&s_by[0]) as u64)
+            crash.p_dec(o - 1)
+            crash.p_nl()
+        }
+        i = i + 1
+    }
+    if !any {
+        crash.p_str((&s_none[0]) as u64)
+        crash.p_nl()
+    }
+}
+
+fn write_cpu(state: u64, c: u64, age_ms: u64) {
+    var s_c: [u8; 5] = "cpu \0"
+    var s_ns: [u8; 23] = ": no snapshot (no NMI)\0"
+    var s_t: [u8; 8] = ": task=\0"
+    var s_p: [u8; 6] = " pid=\0"
+    var s_n: [u8; 7] = " name=\0"
+    var s_age: [u8; 15] = " last-tick-ms=\0"
+    var s_r: [u8; 8] = "  rip: \0"
+    var s_f: [u8; 9] = "  rsp=\0\0\0"
+    var s_fl: [u8; 9] = " rflags=\0"
+    var s_if: [u8; 7] = " irqs=\0"
+    var s_on: [u8; 3] = "on\0"
+    var s_off: [u8; 4] = "off\0"
+    var s_ring: [u8; 7] = " ring=\0"
+    var s_w: [u8; 20] = "  waiting-for-lock \0"
+    var s_tr: [u8; 9] = "  trace:\0"
+    var s_e: [u8; 5] = "    \0"
+    crash.p_str((&s_c[0]) as u64)
+    crash.p_dec(c)
+    if s_taken[c as usize] == 0 {
+        crash.p_str((&s_ns[0]) as u64)
+        crash.p_str((&s_age[0]) as u64)
+        crash.p_dec(age_ms)
+        crash.p_nl()
+        return
+    }
+    crash.p_str((&s_t[0]) as u64)
+    crash.p_dec(s_task[c as usize])
+    crash.p_str((&s_p[0]) as u64)
+    crash.p_dec(s_pid[c as usize])
+    crash.p_str((&s_n[0]) as u64)
+    crash.p_str((&s_name[0]) as u64 + c * NAME_MAX)
+    crash.p_str((&s_age[0]) as u64)
+    crash.p_dec(age_ms)
+    crash.p_nl()
+    crash.p_str((&s_r[0]) as u64)
+    crash.p_addr(s_rip[c as usize])
+    crash.p_nl()
+    crash.p_str((&s_f[0]) as u64)
+    crash.p_hex(s_rsp[c as usize], 16)
+    crash.p_str((&s_fl[0]) as u64)
+    crash.p_hex(s_flg[c as usize], 8)
+    crash.p_str((&s_if[0]) as u64)
+    if (s_flg[c as usize] & 0x200) != 0 {
+        crash.p_str((&s_on[0]) as u64)
+    } else {
+        crash.p_str((&s_off[0]) as u64)
+    }
+    crash.p_str((&s_ring[0]) as u64)
+    crash.p_dec(s_cs[c as usize] & 3)
+    crash.p_nl()
+    let w: u64 = s_wait[c as usize]
+    if w != 0 {
+        crash.p_str((&s_w[0]) as u64)
+        crash.p_str(lock_name(w - 1))
+        crash.p_nl()
+    }
+    crash.p_str((&s_tr[0]) as u64)
+    crash.p_nl()
+    var i: u64 = 0
+    while i < s_tn[c as usize] {
+        crash.p_str((&s_e[0]) as u64)
+        crash.p_addr(s_trace[(c * TRACE_MAX + i) as usize])
+        crash.p_nl()
+        i = i + 1
+    }
+}
+
+fn say_serial(state: u64) {
+    var s_h: [u8; 10] = "hang: cpu\0"
+    var s_r: [u8; 6] = " rip \0"
+    var s_w: [u8; 7] = " lock \0"
+    var s_n: [u8; 7] = " task \0"
+    let n: u64 = cpu.count(state)
+    var c: u64 = 0
+    while c < n && c < NCPU {
+        if s_taken[c as usize] != 0 {
+            serial.puts((&s_h[0]) as u64)
+            serial.dec(c)
+            serial.puts((&s_n[0]) as u64)
+            serial.puts((&s_name[0]) as u64 + c * NAME_MAX)
+            if s_wait[c as usize] != 0 {
+                serial.puts((&s_w[0]) as u64)
+                serial.puts(lock_name(s_wait[c as usize] - 1))
+            }
+            serial.puts((&s_r[0]) as u64)
+            ksymtab.say_addr(s_rip[c as usize])
+            serial.nl()
+        }
+        c = c + 1
+    }
+}
+
+fn cpuid_a(reg: u64) -> u64 {
+    var v: u64 = 0
+    if reg == 0 {
+        asm("push rbx\nxor ecx, ecx\ncpuid\npop rbx", in("rax") 0xA, out("rax") & v,
+            clobber("rcx"), clobber("rdx"))
+    } else {
+        asm("push rbx\nxor ecx, ecx\ncpuid\nmov rax, rbx\npop rbx", in("rax") 0xA,
+            out("rax") & v, clobber("rcx"), clobber("rdx"))
+    }
+    return v & 0xFFFFFFFF
+}
+
+fn cpuid_max() -> u64 {
+    var v: u64 = 0
+    asm("push rbx\nxor ecx, ecx\ncpuid\npop rbx", in("rax") 0, out("rax") & v,
+        clobber("rcx"), clobber("rdx"))
+    return v & 0xFFFFFFFF
+}
+
+fn pmu_probe(state: u64) {
+    p_ver = 0
+    if cmdopt.has(state, (&w_nopmu[0]) as u64) || cpuid_max() < 0xA {
+        return
+    }
+    let a: u64 = cpuid_a(0)
+    let b: u64 = cpuid_a(1)
+    let ver: u64 = a & 0xFF
+    let ncnt: u64 = (a >> 8) & 0xFF
+    let width: u64 = (a >> 16) & 0xFF
+    let blen: u64 = (a >> 24) & 0xFF
+    if ver == 0 || ncnt == 0 || width < 32 || blen == 0 || (b & 1) != 0 {
+        return
+    }
+    p_width = width
+    p_ver = ver
+}
+
+fn pmu_ready() -> bool {
+    return p_ver != 0
+}
+
+fn pmu_version() -> u64 {
+    return p_ver
+}
+
+fn pmu_load(state: u64) {
+    let _w: bool = msr.wr(state, MSR_PMC0, PERIOD_LOW)
+    let base: u64 = cpu.lapic_base(state)
+    if base != 0 {
+        __mmio_write32((base + R_LVT_PERF) as *mut u32, LVT_NMI as u32)
+    }
+}
+
+fn pmu_arm(state: u64, c: u64) {
+    if p_ver == 0 || c >= NCPU || p_armed[c as usize] != 0 {
+        return
+    }
+    p_armed[c as usize] = 1
+    if !msr.wr(state, MSR_EVTSEL0, 0) {
+        p_armed[c as usize] = 2
+        return
+    }
+    pmu_load(state)
+    if p_ver >= 2 {
+        let g: u64 = msr.rd0(state, MSR_GLOBAL_CTRL)
+        let _g: bool = msr.wr(state, MSR_GLOBAL_CTRL, g | 1)
+    }
+    let _e: bool = msr.wr(state, MSR_EVTSEL0, EVT_CYCLES)
+}
+
+fn pmu_overflowed(state: u64, c: u64) -> bool {
+    if p_ver == 0 || c >= NCPU || p_armed[c as usize] != 1 {
+        return false
+    }
+    let v: u64 = msr.rd0(state, MSR_PMC0)
+    if ((v >> (p_width - 1)) & 1) != 0 {
+        return false
+    }
+    if p_ver >= 2 {
+        let _o: bool = msr.wr(state, MSR_GLOBAL_OVF, 1)
+    }
+    pmu_load(state)
+    return true
+}

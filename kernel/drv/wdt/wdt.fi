@@ -6,9 +6,11 @@ import serial
 import diag.cmdopt
 import drv.wdt.tco
 import drv.wdt.tcochip
+import sync.atomic
+import diag.crash
 
 export {
-    stage, tick, sys_hook, on_panic, request_hang, pause, resume,
+    stage, tick, sys_hook, on_panic, request_hang, pause, resume, starving,
     st, timeout_s, tmr_ticks, feeds, starved, last_feed, user_window_s, hang_requested, blind, watchdog_reset_seen, count_now,
     ST_OFF, ST_ABSENT, ST_FAILED, ST_ARMED, ST_PAUSED, ST_PANIC,
     DEFAULT_TIMEOUT_S
@@ -48,6 +50,8 @@ static mut w_panic_at: u64 = 0
 static mut w_hang_req: u64 = 0
 static mut w_wdt_reset: u64 = 0
 static mut w_said_starve: u64 = 0
+static mut w_cspin_at: u64 = 0
+static mut w_lock_at: u64 = 0
 
 static mut k_wdt: [u8; 4] = "wdt\0"
 static mut k_nowdt: [u8; 6] = "nowdt\0"
@@ -55,6 +59,8 @@ static mut k_hang: [u8; 8] = "wdthang\0"
 static mut k_spin: [u8; 8] = "wdtspin\0"
 static mut k_panic: [u8; 9] = "wdtpanic\0"
 static mut k_blind: [u8; 9] = "wdtblind\0"
+static mut k_cspin: [u8; 9] = "wdtcspin\0"
+static mut k_lock: [u8; 8] = "wdtlock\0"
 
 static mut s_off: [u8; 18] = "wdt: off by word\n\0"
 static mut s_absent: [u8; 19] = "wdt: absent, why=\0\0"
@@ -71,6 +77,8 @@ static mut s_starve: [u8; 50] = "wdt: no progress (syscalls/switches), not feedi
 static mut s_hang: [u8; 37] = "wdt: planted hang (cli; hlt) on cpu0\0"
 static mut s_spin: [u8; 43] = "wdt: planted spin, syscalls stop answering\0"
 static mut s_panic: [u8; 26] = "wdt: planted kernel fault\0"
+static mut s_cspin: [u8; 37] = "wdt: planted spin with irqs off cpu0\0"
+static mut s_lock: [u8; 37] = "wdt: planted lock deadlock (stress)\0\0"
 static mut s_pause: [u8; 13] = "wdt: paused\n\0"
 static mut s_resume: [u8; 14] = "wdt: resumed\n\0"
 
@@ -100,6 +108,10 @@ fn last_feed() -> u64 {
 
 fn user_window_s() -> u64 {
     return w_window
+}
+
+fn starving() -> bool {
+    return w_said_starve != 0
 }
 
 fn hang_requested() -> bool {
@@ -153,6 +165,8 @@ fn words(state: u64) -> bool {
     w_hang_at = seconds_word(state, (&k_hang[0]) as u64)
     w_spin_at = seconds_word(state, (&k_spin[0]) as u64)
     w_panic_at = seconds_word(state, (&k_panic[0]) as u64)
+    w_cspin_at = seconds_word(state, (&k_cspin[0]) as u64)
+    w_lock_at = seconds_word(state, (&k_lock[0]) as u64)
     if cmdopt.has(state, (&k_blind[0]) as u64) {
         w_blind = 1
     }
@@ -231,6 +245,23 @@ fn planted_hang() {
     }
 }
 
+fn planted_cspin() {
+    serial.puts((&s_cspin[0]) as u64)
+    serial.nl()
+    asm("cli")
+    while true {
+        asm("pause")
+    }
+}
+
+fn planted_lock(state: u64) {
+    serial.puts((&s_lock[0]) as u64)
+    serial.nl()
+    asm("cli")
+    atomic.lock_take(state, atomic.L_STRESS, 0)
+    atomic.lock_take(state, atomic.L_STRESS, 0)
+}
+
 fn planted_fault() {
     serial.puts((&s_panic[0]) as u64)
     serial.nl()
@@ -250,11 +281,26 @@ fn tick(state: u64) {
         return
     }
     let now: u64 = kstate.get(state, kstate.TICKS)
-    if w_hang_req != 0 || (w_hang_at != 0 && now >= w_hang_at) {
+    if w_hang_req != 0 {
+        planted_hang()
+    }
+    if crash.rescued() {
+        w_hang_at = 0
+        w_cspin_at = 0
+        w_lock_at = 0
+    }
+    if w_hang_at != 0 && now >= w_hang_at {
         planted_hang()
     }
     if w_panic_at != 0 && now >= w_panic_at {
         planted_fault()
+    }
+    if w_cspin_at != 0 && now >= w_cspin_at {
+        planted_cspin()
+    }
+    if w_lock_at != 0 && now >= w_lock_at {
+        w_lock_at = 0
+        planted_lock(state)
     }
     if now - w_last_check < CHECK_TICKS {
         return
@@ -284,7 +330,7 @@ fn tick(state: u64) {
 }
 
 fn sys_hook(state: u64) {
-    if w_spin_at == 0 || w_state != ST_ARMED {
+    if w_spin_at == 0 || w_state != ST_ARMED || crash.rescued() {
         return
     }
     if kstate.get(state, kstate.TICKS) < w_spin_at {
