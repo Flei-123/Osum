@@ -36,6 +36,10 @@ export { init, anchor, toggle, step, is_open, hit, shown, set_bell }
 const NC_MAXR: u64 = 8
 const ROW_BYTES: u64 = 96
 const KEY_CLEAR: u64 = 300
+const KEY_ROW: u64 = 310
+const ARG_BYTES: u64 = 24
+const ACT_NONE: u64 = 0
+const ACT_FOLDER: u64 = 1
 const CARD_W: u64 = 400 // design points
 const ROW_H: u64 = 28
 const HEAD_H: u64 = 24
@@ -53,6 +57,16 @@ static mut base_: u64 = 0 // noti_total() at the last "Clear all"
 static mut seen_total: u64 = 0 // noti_total() when the list was last built
 static mut row_txt: [u8; 768] = [0 as u8; 768] // NC_MAXR x ROW_BYTES
 static mut row_pri: [u64; 8] = [0 as u64; 8]
+static mut row_cnt: [u64; 8] = [0 as u64; 8]
+static mut row_act: [u64; 8] = [0 as u64; 8]
+static mut row_arg: [u8; 192] = [0 as u8; 192]
+static mut raw_buf: [u8; 96] = [0 as u8; 96]
+static mut hum_buf: [u8; 96] = [0 as u8; 96]
+static mut p_explorer: [u8; 14] = "/bin/explorer\0"
+static mut p_crashdir: [u8; 11] = "/var/crash\0"
+static mut s_act: [u8; 17] = "notifc: act row=\0"
+static mut s_actp: [u8; 7] = " path=\0"
+static mut s_grp: [u8; 4] = " (x\0"
 static mut px_: u64 = 0
 static mut py_: u64 = 0
 // the bell's rectangle on the bar (a press on it is the toggle's business, never an "outside" press)
@@ -126,8 +140,13 @@ fn build() {
     }
     var i: u64 = 0
     while i < n_rows {
-        let l: usize = fuiscene.label(r, (&row_txt[0 as usize]) as u64 + i * ROW_BYTES)
-        fuiscene.set_size(l, CARD_W - 2 * PADP, ROW_H)
+        if row_act[i as usize] != ACT_NONE {
+            let rb: usize = fuiscene.button(r, (&row_txt[0 as usize]) as u64 + i * ROW_BYTES, KEY_ROW + i)
+            fuiscene.set_size(rb, CARD_W - 2 * PADP, ROW_H)
+        } else {
+            let l: usize = fuiscene.label(r, (&row_txt[0 as usize]) as u64 + i * ROW_BYTES)
+            fuiscene.set_size(l, CARD_W - 2 * PADP, ROW_H)
+        }
         i = i + 1
     }
     let b: usize = fuiscene.button(r, (&t_clear[0 as usize]) as u64, KEY_CLEAR)
@@ -146,37 +165,157 @@ fn visible() -> u64 {
     if since < n {
         n = since
     }
-    if n > NC_MAXR {
-        n = NC_MAXR
-    }
     return n
+}
+
+fn classify(raw: u64, n: u64, row: u64) {
+    row_act[row as usize] = ACT_NONE
+    let dst: u64 = (&row_arg[0 as usize]) as u64 + row * ARG_BYTES
+    if n > 5 && __mmio_read8(raw as *mut u8) as u64 == 117 && __mmio_read8((raw + 1) as *mut u8) as u64 == 115
+        && __mmio_read8((raw + 2) as *mut u8) as u64 == 98 && __mmio_read8((raw + 4) as *mut u8) as u64 == 32 {
+        var k: u64 = 0
+        var more: bool = true
+        while more && k + 5 < n && k + 1 < ARG_BYTES {
+            let c: u64 = __mmio_read8((raw + 5 + k) as *mut u8) as u64
+            if c == 32 || c == 0 {
+                more = false
+            } else {
+                __mmio_write8((dst + k) as *mut u8, c as u8)
+                k = k + 1
+            }
+        }
+        __mmio_write8((dst + k) as *mut u8, 0 as u8)
+        if k > 0 && __mmio_read8((raw + 3) as *mut u8) as u64 != 45 {
+            row_act[row as usize] = ACT_FOLDER
+        }
+        return
+    }
+    if n > 6 && __mmio_read8(raw as *mut u8) as u64 == 99 && __mmio_read8((raw + 1) as *mut u8) as u64 == 114
+        && __mmio_read8((raw + 5) as *mut u8) as u64 == 32 {
+        var k: u64 = 0
+        while k < 10 {
+            __mmio_write8((dst + k) as *mut u8, __mmio_read8(((&p_crashdir[0 as usize]) as u64 + k) as *mut u8))
+            k = k + 1
+        }
+        __mmio_write8((dst + 10) as *mut u8, 0 as u8)
+        row_act[row as usize] = ACT_FOLDER
+    }
+}
+
+fn same_text(a: u64, b: u64) -> bool {
+    var k: u64 = 0
+    while k < ROW_BYTES - 2 {
+        let ca: u64 = __mmio_read8((a + k) as *mut u8) as u64
+        if ca != __mmio_read8((b + k) as *mut u8) as u64 {
+            return false
+        }
+        if ca == 0 {
+            return true
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn append_count(p: u64, cnt: u64) {
+    var n: u64 = 0
+    while n < ROW_BYTES - 12 && __mmio_read8((p + n) as *mut u8) as u64 != 0 {
+        n = n + 1
+    }
+    var k: u64 = 0
+    while k < 3 {
+        __mmio_write8((p + n + k) as *mut u8, __mmio_read8(((&s_grp[0 as usize]) as u64 + k) as *mut u8))
+        k = k + 1
+    }
+    n = n + 3
+    var div: u64 = 100
+    while div > 1 && cnt / div == 0 {
+        div = div / 10
+    }
+    while div > 0 {
+        __mmio_write8((p + n) as *mut u8, (48 + (cnt / div) % 10) as u8)
+        n = n + 1
+        div = div / 10
+    }
+    __mmio_write8((p + n) as *mut u8, 41 as u8)
+    __mmio_write8((p + n + 1) as *mut u8, 0 as u8)
 }
 
 // Read the newest entries WITHOUT marking them read (`noti_peek`): looking at the list
 // is not the same as having dealt with it, the bell keeps its count until "Clear all".
+// Neighbouring entries that read the same are one row with a count.
 fn read_rows() {
-    n_rows = visible()
+    let raw_n: u64 = visible()
     seen_total = wlibc.noti_total()
+    n_rows = 0
     var i: u64 = 0
-    while i < n_rows {
-        let p: u64 = (&row_txt[0 as usize]) as u64 + i * ROW_BYTES
-        let n: u64 = wlibc.noti_peek(i, p + 2, ROW_BYTES - 4)
-        var pr: u64 = wlibc.noti_prio(i)
-        row_pri[i as usize] = pr
-        if pr >= 2 {
-            __mmio_write8(p as *mut u8, 33 as u8) // "!"
-        } else {
-            __mmio_write8(p as *mut u8, 45 as u8) // "-"
+    while i < raw_n {
+        let raw: u64 = (&raw_buf[0 as usize]) as u64
+        var n: u64 = wlibc.noti_peek(i, raw, ROW_BYTES - 4)
+        if n > ROW_BYTES - 4 {
+            n = ROW_BYTES - 4
         }
-        __mmio_write8((p + 1) as *mut u8, 32 as u8)
-        var m: u64 = n
-        if m > ROW_BYTES - 4 {
-            m = ROW_BYTES - 4
+        __mmio_write8((raw + n) as *mut u8, 0 as u8)
+        let pr: u64 = wlibc.noti_prio(i)
+        let slot: u64 = n_rows
+        let hum: u64 = (&hum_buf[0 as usize]) as u64
+        var k: u64 = 0
+        while k <= n {
+            __mmio_write8((hum + k) as *mut u8, __mmio_read8((raw + k) as *mut u8))
+            k = k + 1
         }
-        __mmio_write8((p + 2 + m) as *mut u8, 0 as u8)
-        let _hn: u64 = notetext.humanize(p + 2, m, ROW_BYTES - 4)
+        let _hn: u64 = notetext.humanize(hum, n, ROW_BYTES - 4)
+        if n_rows > 0 && same_text(hum, (&row_txt[0 as usize]) as u64 + (n_rows - 1) * ROW_BYTES + 2)
+            && row_pri[(n_rows - 1) as usize] == pr {
+            row_cnt[(n_rows - 1) as usize] = row_cnt[(n_rows - 1) as usize] + 1
+        } else if n_rows < NC_MAXR {
+            let p: u64 = (&row_txt[0 as usize]) as u64 + slot * ROW_BYTES
+            k = 0
+            while k < ROW_BYTES - 2 {
+                let c: u64 = __mmio_read8((hum + k) as *mut u8) as u64
+                __mmio_write8((p + 2 + k) as *mut u8, c as u8)
+                if c == 0 {
+                    k = ROW_BYTES
+                } else {
+                    k = k + 1
+                }
+            }
+            row_pri[slot as usize] = pr
+            row_cnt[slot as usize] = 1
+            if pr >= 2 {
+                __mmio_write8(p as *mut u8, 33 as u8)
+            } else {
+                __mmio_write8(p as *mut u8, 45 as u8)
+            }
+            __mmio_write8((p + 1) as *mut u8, 32 as u8)
+            classify(raw, n, slot)
+            n_rows = n_rows + 1
+        }
         i = i + 1
     }
+    var r: u64 = 0
+    while r < n_rows {
+        if row_cnt[r as usize] > 1 {
+            append_count((&row_txt[0 as usize]) as u64 + r * ROW_BYTES + 2, row_cnt[r as usize])
+        }
+        r = r + 1
+    }
+}
+
+fn act_row(i: u64) {
+    if i >= n_rows || row_act[i as usize] != ACT_FOLDER {
+        return
+    }
+    let path: u64 = (&row_arg[0 as usize]) as u64 + i * ARG_BYTES
+    var av: [u64; 2] = [0 as u64; 2]
+    av[0 as usize] = (&p_explorer[0 as usize]) as u64
+    av[1 as usize] = path
+    say((&s_act[0 as usize]) as u64)
+    sayn(i)
+    say((&s_actp[0 as usize]) as u64)
+    say(path)
+    nl()
+    let _pid: u64 = ulib.spawn_app((&p_explorer[0 as usize]) as u64, (&av[0 as usize]) as u64, 2)
 }
 
 fn init() -> bool {
@@ -368,6 +507,11 @@ fn step() -> bool {
     let key: u64 = fuiscene.pump_aux(nc_win)
     if key == KEY_CLEAR {
         clear_all()
+        return true
+    }
+    if key >= KEY_ROW && key < KEY_ROW + NC_MAXR {
+        act_row(key - KEY_ROW)
+        shut((&s_bell[0 as usize]) as u64)
         return true
     }
     if open_ == 0 {

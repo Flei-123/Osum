@@ -38,6 +38,15 @@ warte 5
 tippe notify ev+ jack
 taste ret
 warte 5
+tippe notify usb+ /medien/usb0 14900
+taste ret
+warte 5
+tippe notify ev+ input 046d:c077
+taste ret
+warte 5
+tippe notify ev+ screen
+taste ret
+warte 5
 tippe notify ev+ screen
 taste ret
 warte 5
@@ -45,6 +54,12 @@ tippe segv
 taste ret
 warte 8
 foto 02-crash
+klickauf glocke
+warte 4
+foto 03-bell
+klickauf ncrow0
+warte 6
+foto 04-act
 DEOF
 bash tools/design/eh6.sh "$TMPD/o" res=1280x800 accel=kvm progs="$PROGS" \
     drehbuch="$TMPD/dreh.txt" > "$TMPD/o.log" 2>&1
@@ -52,11 +67,15 @@ S="$TMPD/o/serial.txt"
 if [ -n "${HOTNOTE_OUT:-}" ]; then mkdir -p "$HOTNOTE_OUT"; cp "$TMPD"/o/*.ppm "$S" "$HOTNOTE_OUT/" 2>/dev/null; fi
 if [ ! -s "$S" ]; then bad "no serial output: $(tail -n 3 "$TMPD/o.log" | tr '\n' ' ')"; echo "HOTNOTE: $pass passed, $fail failed"; exit 1; fi
 t() { grep -aq "taskbar: toast \[$1\]" "$S"; }
-t 'Keyboard or mouse connected' && ok "keyboard plug-in toast" || bad "no 'Keyboard or mouse connected' toast"
-t 'Keyboard or mouse disconnected' && ok "keyboard unplug toast" || bad "no 'Keyboard or mouse disconnected' toast"
+t 'QEMU keyboard connected' && ok "keyboard plug-in toast names the device" || bad "no 'QEMU keyboard connected' toast"
+t 'QEMU keyboard disconnected' && ok "keyboard unplug toast names the device" || bad "no 'QEMU keyboard disconnected' toast"
 t 'USB drive connected (usb0)' && ok "stick toast with drive name" || bad "no 'USB drive connected (usb0)' toast"
 t 'Headphones or microphone plugged in' && ok "jack toast" || bad "no jack toast"
 t 'Display connected' && ok "display toast" || bad "no display toast"
+t 'USB drive connected (usb0, 14.5 GB)' && ok "stick toast with drive name and size" || bad "no stick size toast"
+t 'Logitech keyboard or mouse connected' && ok "vendor name plus kind" || bad "no vendor toast"
+grep -aq 'notifc: row [0-9]* prio=1 text=Display connected (x2)' "$S" && ok "bell groups equal neighbours" || bad "bell did not group"
+grep -aq 'notifc: act row=0 path=/var/crash' "$S" && ok "clicking the crash row opens the report folder" || bad "row click did not act"
 grep -aq 'taskbar: toast \[segv stopped unexpectedly\]' "$S" && ok "crash toast names the program" || bad "no crash toast"
 if grep -aq 'taskbar: toast \[\(ev[+-] \|usb[+-^] \|crash \)' "$S"; then
     bad "raw bus code reached a toast: $(grep -a 'taskbar: toast \[\(ev[+-] \|usb[+-^] \|crash \)' "$S" | head -1)"

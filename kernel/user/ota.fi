@@ -447,7 +447,20 @@ fn sagt(t: u64, s: u64) {
     ulib.nl()
 }
 
+static mut last_err: [u8; 64] = [0 as u8; 64]
+static mut W_SU_REASON: [u8; 8] = "reason=\0"
+
+fn err_remember(t: u64) {
+    var i: u64 = 0
+    while i < 63 && __mmio_read8((t + i) as *mut u8) as u64 != 0 {
+        __mmio_write8(((&last_err[0 as usize]) as u64 + i) as *mut u8, __mmio_read8((t + i) as *mut u8))
+        i = i + 1
+    }
+    __mmio_write8(((&last_err[0 as usize]) as u64 + i) as *mut u8, 0 as u8)
+}
+
 fn err(t: u64, was: u64) -> u64 {
+    err_remember(t)
     ulib.eput(t)
     if was != 0 {
         ulib.eput(was)
@@ -2889,6 +2902,11 @@ fn su_stand_write(phase: u64) {
     ulib.strcat(o, (&W_SU_PH[0 as usize]) as u64)
     ulib.strcat(o, phase)
     ulib.strcat(o, (&W_SU_NL[0 as usize]) as u64)
+    if __mmio_read8(phase as *mut u8) as u64 == 102 && last_err[0 as usize] != 0 as u8 {
+        ulib.strcat(o, (&W_SU_REASON[0 as usize]) as u64)
+        ulib.strcat(o, (&last_err[0 as usize]) as u64)
+        ulib.strcat(o, (&W_SU_NL[0 as usize]) as u64)
+    }
     file_write((&P_SU_STAND[0 as usize]) as u64, o, len(o))
 }
 
@@ -3836,6 +3854,15 @@ fn su_roots_apply() {
 
 // ------------------------------------------------ apply
 fn cmd_sys_apply(restart: bool) -> u64 {
+    last_err[0 as usize] = 0 as u8
+    let r: u64 = sys_apply_steps(restart)
+    if r != 0 && last_err[0 as usize] != 0 as u8 {
+        su_stand_write((&W_SU_FAILW[0 as usize]) as u64)
+    }
+    return r
+}
+
+fn sys_apply_steps(restart: bool) -> u64 {
     if in_erprobung() || su_pending() {
         return err((&E_SU_TRIAL[0 as usize]) as u64, 0)
     }

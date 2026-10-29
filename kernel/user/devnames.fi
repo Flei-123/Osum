@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+export { lookup, KIND_MAX }
+
+const KIND_MAX: u64 = 40
+
+static mut registry: [u8; 719] = "0627:0001=QEMU keyboard;0627:0002=QEMU mouse;0627:0003=QEMU tablet;0627=QEMU;046d=Logitech;045e=Microsoft;05ac=Apple;0781=SanDisk;0951=Kingston;04e8=Samsung;0bda=Realtek;1532=Razer;1b1c=Corsair;17ef=Lenovo;03f0=HP;413c=Dell;054c=Sony;047f=Plantronics;0b0e=Jabra;041e=Creative;046a=Cherry;058f=Alcor;0930=Toshiba;1058=WD;0bc2=Seagate;291a=Anker;2357=TP-Link;0b05=ASUS;04f2=Chicony;13d3=IMC;0c45=Sonix;1a2c=China Resource;258a=Sino Wealth;8087=Intel;0a5c=Broadcom;18d1=Google;2109=VIA;0424=Microchip;1d6b=Linux Foundation;0cf3=Qualcomm Atheros;148f=Ralink;0e8d=MediaTek;1a86=QinHeng;067b=Prolific;0403=FTDI;10c4=Silicon Labs;056a=Wacom;04d9=Holtek;1bcf=Sunplus;0bb4=HTC;22b8=Motorola;12d1=Huawei;2717=Xiaomi;1949=Amazon;\0"
+
+fn rd(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn wr(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, v as u8)
+}
+
+fn hex_val(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 16
+}
+
+fn parse_ids(src: u64, n: u64) -> u64 {
+    if n < 9 || rd(src, 4) != 58 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < 9 {
+        if k != 4 {
+            let h: u64 = hex_val(rd(src, k))
+            if h > 15 {
+                return 0xFFFFFFFFFFFFFFFF
+            }
+            v = (v << 4) | h
+        }
+        k = k + 1
+    }
+    return v
+}
+
+fn key_matches(entry: u64, key_len: u64, src: u64, want: u64) -> bool {
+    if key_len != want {
+        return false
+    }
+    var k: u64 = 0
+    while k < want {
+        let a: u64 = rd(entry, k)
+        let b: u64 = rd(src, k)
+        var la: u64 = a
+        var lb: u64 = b
+        if la >= 65 && la <= 70 {
+            la = la + 32
+        }
+        if lb >= 65 && lb <= 70 {
+            lb = lb + 32
+        }
+        if la != lb {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn copy_name(entry: u64, from: u64, out: u64, cap: u64) -> u64 {
+    var w: u64 = 0
+    var k: u64 = from
+    while rd(entry, k) != 59 && rd(entry, k) != 0 && w + 1 < cap {
+        wr(out, w, rd(entry, k))
+        w = w + 1
+        k = k + 1
+    }
+    wr(out, w, 0)
+    return w
+}
+
+fn find(src: u64, want: u64, out: u64, cap: u64) -> u64 {
+    let base: u64 = (&registry[0]) as u64
+    var p: u64 = 0
+    while rd(base, p) != 0 {
+        var kl: u64 = 0
+        while rd(base, p + kl) != 61 && rd(base, p + kl) != 0 {
+            kl = kl + 1
+        }
+        if rd(base, p + kl) == 0 {
+            return 0
+        }
+        if key_matches(base + p, kl, src, want) {
+            return copy_name(base + p, kl + 1, out, cap)
+        }
+        p = p + kl + 1
+        while rd(base, p) != 59 && rd(base, p) != 0 {
+            p = p + 1
+        }
+        if rd(base, p) == 59 {
+            p = p + 1
+        }
+    }
+    return 0
+}
+
+fn lookup(ids: u64, n: u64, out: u64, cap: u64) -> u64 {
+    if parse_ids(ids, n) == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    if find(ids, 9, out, cap) > 0 {
+        return 2
+    }
+    if find(ids, 4, out, cap) > 0 {
+        return 1
+    }
+    return 0
+}

@@ -2,6 +2,7 @@
 profile kernel
 
 import msg
+import devnames
 
 export { render, humanize }
 
@@ -16,6 +17,11 @@ static mut k_out: [u8; 5] = ".out\0"
 static mut k_media: [u8; 12] = "note.media.\0"
 static mut k_crash: [u8; 11] = "note.crash\0"
 static mut k_eject: [u8; 6] = "eject\0"
+static mut k_kind: [u8; 11] = "note.kind.\0"
+static mut k_named_in: [u8; 14] = "note.named.in\0"
+static mut k_named_out: [u8; 15] = "note.named.out\0"
+static mut k_mb: [u8; 4] = " MB\0"
+static mut k_gb: [u8; 4] = " GB\0"
 
 fn rd(p: u64, i: u64) -> u64 {
     return __mmio_read8((p + i) as *mut u8) as u64
@@ -57,15 +63,60 @@ fn lookup(key: u64) -> u64 {
     return t
 }
 
+fn event_kind_end(src: u64, n: u64) -> u64 {
+    var k: u64 = 4
+    while k < n && rd(src, k) != 0 && rd(src, k) != 32 {
+        k = k + 1
+    }
+    return k
+}
+
+fn render_named(src: u64, n: u64, kind_end: u64, out: u64, cap: u64) -> u64 {
+    if kind_end + 10 > n || rd(src, kind_end) != 32 {
+        return 0
+    }
+    var name: [u8; 40] = [0 as u8; 40]
+    let np: u64 = (&name[0]) as u64
+    let level: u64 = devnames.lookup(src + kind_end + 1, n - kind_end - 1, np, 40)
+    if level == 0 {
+        return 0
+    }
+    var w: u64 = put(out, 0, cap, np, cstr_len(np))
+    if level == 1 {
+        var key: [u8; 40] = [0 as u8; 40]
+        let kp: u64 = (&key[0]) as u64
+        var at: u64 = put(kp, 0, KEY_MAX, (&k_kind[0]) as u64, 10)
+        at = put(kp, at, KEY_MAX - 4, src + 4, kind_end - 4)
+        let _z: u64 = finish(kp, at)
+        let kt: u64 = lookup(kp)
+        if kt != 0 {
+            wr(out, w, 32)
+            w = put(out, w + 1, cap, kt, cstr_len(kt))
+        }
+    }
+    var tail: u64 = (&k_named_in[0]) as u64
+    if rd(src, 2) != 43 {
+        tail = (&k_named_out[0]) as u64
+    }
+    let tt: u64 = lookup(tail)
+    if tt == 0 {
+        return 0
+    }
+    wr(out, w, 32)
+    w = put(out, w + 1, cap, tt, cstr_len(tt))
+    return finish(out, w)
+}
+
 fn render_event(src: u64, n: u64, out: u64, cap: u64) -> u64 {
+    let kind_end: u64 = event_kind_end(src, n)
+    let named: u64 = render_named(src, n, kind_end, out, cap)
+    if named != 0 {
+        return named
+    }
     var key: [u8; 40] = [0 as u8; 40]
     let kp: u64 = (&key[0]) as u64
     var at: u64 = put(kp, 0, KEY_MAX, (&k_pre[0]) as u64, 5)
-    var k: u64 = 4
-    while k < n && rd(src, k) != 0 && rd(src, k) != 32 {
-        at = put(kp, at, KEY_MAX - 5, src + k, 1)
-        k = k + 1
-    }
+    at = put(kp, at, KEY_MAX - 5, src + 4, kind_end - 4)
     if rd(src, 2) == 43 {
         at = put(kp, at, KEY_MAX, (&k_in[0]) as u64, 3)
     } else {
@@ -77,6 +128,32 @@ fn render_event(src: u64, n: u64, out: u64, cap: u64) -> u64 {
         return 0
     }
     return finish(out, put(out, 0, cap, t, cstr_len(t)))
+}
+
+fn put_dec(out: u64, at: u64, cap: u64, v: u64) -> u64 {
+    var div: u64 = 1000000000
+    while div > 1 && v / div == 0 {
+        div = div / 10
+    }
+    var w: u64 = at
+    while div > 0 && w + 1 < cap {
+        wr(out, w, 48 + (v / div) % 10)
+        w = w + 1
+        div = div / 10
+    }
+    return w
+}
+
+fn put_size(out: u64, at: u64, cap: u64, mib: u64) -> u64 {
+    if mib < 1024 {
+        let w: u64 = put_dec(out, at, cap, mib)
+        return put(out, w, cap, (&k_mb[0]) as u64, 3)
+    }
+    let tenths: u64 = mib * 10 / 1024
+    var w: u64 = put_dec(out, at, cap, tenths / 10)
+    wr(out, w, 46)
+    w = put_dec(out, w + 1, cap, tenths % 10)
+    return put(out, w, cap, (&k_gb[0]) as u64, 3)
 }
 
 fn render_media(src: u64, n: u64, out: u64, cap: u64) -> u64 {
@@ -98,17 +175,30 @@ fn render_media(src: u64, n: u64, out: u64, cap: u64) -> u64 {
     }
     var w: u64 = put(out, 0, cap, t, cstr_len(t))
     var last: u64 = 5
+    var end: u64 = 5
     var k: u64 = 5
-    while k < n && rd(src, k) != 0 {
+    while k < n && rd(src, k) != 0 && rd(src, k) != 32 {
         if rd(src, k) == 47 {
             last = k + 1
         }
         k = k + 1
+        end = k
     }
-    if last < n {
+    var mib: u64 = 0
+    var sz: u64 = end + 1
+    while sz < n && rd(src, sz) >= 48 && rd(src, sz) <= 57 {
+        mib = mib * 10 + rd(src, sz) - 48
+        sz = sz + 1
+    }
+    if last < end {
         wr(out, w, 32)
         wr(out, w + 1, 40)
-        w = put(out, w + 2, cap - 2, src + last, n - last)
+        w = put(out, w + 2, cap - 2, src + last, end - last)
+        if mib > 0 {
+            wr(out, w, 44)
+            wr(out, w + 1, 32)
+            w = put_size(out, w + 2, cap - 2, mib)
+        }
         wr(out, w, 41)
         w = w + 1
     }
