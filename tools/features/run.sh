@@ -6,8 +6,8 @@
 #
 # 1. NOTIFICATION CENTRE (kernel/user/notifc.fi), on the machine of the stick (tools/design/eh6.sh):
 #      two `notify` posts in the terminal -> the bell (`taskbar: field noti`) -> a click on it opens
-#      the card with both rows, newest first (`notifc: open n=2`, `row 0 ... second message`)
-#      -> Tab + Enter on "Clear all" empties it (`notifc: clear n=2`, `open n=0`) -> Escape closes
+#      the card with both rows, newest first (`notifc: open n>=2`, `row 0 ... second message`)
+#      -> Tab + Enter on "Clear all" empties it (`notifc: clear n>=2`, `open n=0`) -> Escape closes
 #      -> a third post -> the bell comes back, its card lists ONLY the third (the base line works,
 #      `open n=1`) -> a click on the bell closes it (`notifc: shut bell`).
 #      The pictures 01-open / 02-cleared / 03-open2 differ from the bare desktop inside the card.
