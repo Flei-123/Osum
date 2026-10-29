@@ -41,7 +41,7 @@ import subprocess
 import sys
 
 BORDER = 2
-TITLE = 22
+TITLE = int(os.environ.get("UMLAUT_TITLE", "22"))
 
 WIN = re.compile(
     rb"wm: win nr=\d+ id=\d+ z=\d+ layer=\d+ hidden=(\d+) deco=(\d+) "
