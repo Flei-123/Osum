@@ -50,8 +50,8 @@ assert (b["role"], b["x"], b["y"], b["w"], b["h"], b["act"]) == ("button", 8, 20
 assert "selected" in by["Eins"]["flags"] and by["Eins"]["role"] == "tab"
 assert by["Passwort"]["role"] == "password" and "protected" in by["Passwort"]["flags"]
 EOF
-$AX $FX --window Mehrfenster --json | grep -q '"Zurueck!"' && bad "window 700 shows nodes of window 701" || ok "windows are kept apart (Mehrfenster has no Zurueck!)"
-$AX $FX --window Zweit --json | grep -q '"Zurueck!"' && ok "second window has its own tree" || bad "Zweit tree missing"
+$AX $FX --window Mehrfenster --json | grep -q '"Zurück!"' && bad "window 700 shows nodes of window 701" || ok "windows are kept apart (Mehrfenster has no Zurück!)"
+$AX $FX --window Zweit --json | grep -q '"Zurück!"' && ok "second window has its own tree" || bad "Zweit tree missing"
 
 echo "== 2. render + pixel check =="
 $AX $FX --window Szenenbaum -o "$T/a.png" > /dev/null && ok "PNG written" || bad "render failed"

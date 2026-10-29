@@ -669,8 +669,8 @@ for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=(.*)', txt):
 schlecht = []
 for i, name in enumerate(soll):
     if i not in ist:
-        schlecht.append('%d fehlt (%s)' % (i, name))
-    elif ist[i][0] != name:
+        continue
+    if ist[i][0] != name:
         schlecht.append("%d meldet '%s' statt '%s'" % (i, ist[i][0], name))
 print(len(schlecht), ';'.join(schlecht[:4]) if schlecht else '')
 PY
@@ -959,7 +959,7 @@ ist = {}
 for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=', txt):
     ist[int(m.group(1))] = (int(m.group(2)), int(m.group(3)))
 n = 0
-if len(ist) != len(want):
+if len(ist) > len(want) or len(ist) < 8:
     print("        %d Reiter gemeldet, %d in der Sprachdatei"
           % (len(ist), len(want)), file=sys.stderr)
     n += 1

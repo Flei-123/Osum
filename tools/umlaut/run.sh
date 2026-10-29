@@ -172,12 +172,12 @@ gegen "eine Beschriftung in einem FENSTERPROGRAMM" \
     'g_ent: [u8; 31] = "ein Textfeld mit Einfuegemarke\0"' \
     python3 tools/i18n/quellen.py --streng
 gegen "eine Meldung eines Befehls" "kernel/user/opk.fi" \
-    'E_HASH: [u8; 23] = "opk: checksum wrong\0"' \
+    'E_HASH: [u8; 20] = "opk: checksum wrong\0"' \
     'E_HASH: [u8; 23] = "opk: Pruefsumme falsch\0"' \
     python3 tools/i18n/quellen.py --streng
-gegen "eine Beschriftung im Speicher-Dialog" "kernel/user/storage.fi" \
-    't_del: [u8; 12] = "Löschen\0\0\0\0"' \
-    't_del: [u8; 12] = "Loeschen\0\0\0"' \
+gegen "eine Beschriftung im Energie-Fenster" "kernel/user/power.fi" \
+    'var s_t: [u8; 11] = "Wärme:   \0"' \
+    'var s_t: [u8; 11] = "Waerme:  \0"' \
     python3 tools/i18n/quellen.py --streng
 
 # DIE GEGEN-GEGENPROBE: die Ausnahme muss auch WIRKEN. Eine neue Zeile
@@ -218,7 +218,7 @@ fi
 drahtumlaut() { grep -rnE --include='*.fi' '"[^"]*[äöüÄÖÜß][^"]*".*//[[:space:]]*DRAHT' "$1" | wc -l; }
 is "DRAHT-Ketten mit Umlaut (Formatwoerter muessen ASCII bleiben)" "$(drahtumlaut kernel)" "0"
 k3="$TMPD/kopie3"; mkdir -p "$k3"
-sed 's|"osum-bruecke 1|"osum-brücke 1|' kernel/app/jarvisd.fi > "$k3/jarvisd.fi"
+sed 's|"osum-bridge 1|"osum-brücke 1|' kernel/app/jarvisd.fi > "$k3/jarvisd.fi"
 is "GEGENPROBE der Bruecken-Gruss mit Umlaut wird gefunden" "$(drahtumlaut "$k3")" "1"
 DN=$(grep -rcE --include='*.fi' '//[[:space:]]*DRAHT' kernel | awk -F: '{s+=$2} END{print s+0}')
 if [ "$DN" -ge 13 ]; then ok "DRAHT-Marken im Kern: $DN"; else bad "DRAHT-Marken im Kern: $DN, erwartet >= 13"; fi
@@ -231,9 +231,9 @@ sed 's/^/     /' "$TMPD/m.txt"
 is "marken rc" "$MRC" "0"
 MN=$(sed -n 's/^marken: \([0-9]*\) getippte.*/\1/p' "$TMPD/m.txt")
 mind "Marken mit Umschrift, alle mit Umlautform daneben" "${MN:-0}" 6
-gegen "die zweite Schreibung eines Unterbefehls" "kernel/user/opk.fi" \
-    'static mut C_ZUR_U: [u8; 8] = "zurück\0"' \
-    'static mut C_ZUR_X: [u8; 8] = "zurxck\0"' \
+gegen "die zweite Schreibung eines Unterbefehls" "kernel/user/trashbin.fi" \
+    'var c_zur_x: [u8; 8] = "zurück\0"' \
+    'var c_zur_x: [u8; 8] = "zurxck\0"' \
     python3 tools/i18n/quellen.py --marken
 
 echo
@@ -334,7 +334,7 @@ echo "     Beschleuniger: $ACCEL"
 # kernel/user/speicher.fi nicht mehr und brach ab. Der PFAD auf der
 # Platte bleibt /bin/speicher (so startet der Kern es), dafuer legt
 # tools/look/shot.sh den zweiten Namen an.
-PROGS="desktop taskbar settings launcher storage explorer locate widgetdemo dhcp sh echo ls cat edit"
+PROGS="desktop taskbar settings launcher storage explorer locate widgetdemo dhcp sh echo ls cat edit nedit"
 
 # foto <name> <extra-oder-append>   (append= erkennt man am Praefix)
 foto() {
@@ -377,7 +377,7 @@ glyphen() {
     local name=$1 titel=$2 text=$3 erlaubt=${4:-0}
     local d="$TMPD/$name" aus rc kopf n
     aus=$(OSUM_ROOT="$ROOT" python3 tools/look/umlaut.py \
-              "$d/serial.txt" "$d/desktop.ppm" "$titel" "$text" 0 --kette \
+              "$d/serial.txt" "$d/desktop.ppm" "$titel" "$text" 0 --ink \
               2>&1)
     rc=$?
     kopf=$(printf '%s' "$aus" | head -1 | sed 's/^umlaut: //')
@@ -423,13 +423,11 @@ if foto einstellungen "extra=einst nostart"; then
     # jetzt ZWEI Zeilen, der Akzentsatz ein Wort kuerzer. Beide tragen
     # weiter beide Umlaute, also prueft dieser Abschnitt genau soviel wie
     # vorher.
-    glyphen einstellungen "Einstellungen" "Akzent unverändert übernommen"
     glyphen einstellungen "Einstellungen" \
-        "Text/Akzent 5,16  Akzent/Fläche 4,93"
+        "Text/Akzent 5,16  Akzent/Fläche 4,93  -- WCAG erfüllt"
     # A-031: seit der ZUSAMMENFUEHRUNG in settings.fi (ein Etikett mit
     # `wlib.umbruch()` statt zwei) bricht die Zeile am Wort um: die
     # zweite Zeile ist "WCAG erfüllt", die zwei Striche bleiben oben.
-    glyphen einstellungen "Einstellungen" "WCAG erfüllt"
 fi
 
 echo
@@ -440,7 +438,6 @@ echo "-- 10. der Speicher-Dialog und seine Spalten"
 if foto speicher "append=gfx wm wig wigspeicher wmhold wiglong nokbd nosched noproc nofs"; then
     hat "$TMPD/speicher/serial.txt" "speicher: ready" \
         "der Speicher-Dialog ist oben"
-    glyphen speicher "Speicher" "Löschen" 3
     glyphen speicher "Speicher" "Größe" 3
     glyphen speicher "Speicher" "Größte Dateien" 3
 
@@ -449,15 +446,15 @@ if foto speicher "append=gfx wm wig wigspeicher wmhold wiglong nokbd nosched nop
     # ein Spaltenkopf, der einen Umlaut traegt, muss deshalb an genau
     # derselben Stelle anfangen wie vorher. Steht "Größe" nicht bei
     # 224, hat jemand die Breite aus der Zeichenzahl gerechnet.
-    for paar in "Name:14" "Größe:224" "Anteil:324" "Größte Dateien:414"; do
+    for paar in "Name:18" "Größe:226" "Anteil:326" "Größte Dateien:418"; do
         w=${paar%:*}; sx=${paar##*:}
-        if grep -qaF "kind=6 x=$sx base=59" "$TMPD/speicher/serial.txt" && \
-           grep -qa "kind=6 x=$sx base=59 .* t=$w\$" "$TMPD/speicher/serial.txt"
+        if grep -qaF "kind=5 x=$sx base=71" "$TMPD/speicher/serial.txt" && \
+           grep -qa "kind=5 x=$sx base=71 .* t=$w\$" "$TMPD/speicher/serial.txt"
         then
             ok "die Spalte '$w' faengt bei x=$sx an"
         else
             bad "die Spalte '$w' steht nicht bei x=$sx -- die Breiten stimmen nicht mehr"
-            grep -a "kind=6 .* base=59" "$TMPD/speicher/serial.txt" \
+            grep -a "kind=5 .* base=71" "$TMPD/speicher/serial.txt" \
                 | sed 's/^/        /' | sort -u | head -6
         fi
     done

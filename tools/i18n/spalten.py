@@ -121,6 +121,11 @@ def oktette(roh):
     while i < len(roh):
         if roh[i] == '\\':
             n += 1
+            m = UNI.match(roh, i)
+            if m:
+                n += len(chr(int(m.group(1), 16)).encode('utf-8')) - 1
+                i = m.end()
+                continue
             if (i + 3 < len(roh) and roh[i + 1] == 'x'
                     and roh[i + 2] in HEX and roh[i + 3] in HEX):
                 i += 4
@@ -132,7 +137,8 @@ def oktette(roh):
     return n
 
 
-HEX = '0123456789abcdefABCDEF' 
+HEX = '0123456789abcdefABCDEF'
+UNI = re.compile(r'\\u\{([0-9a-fA-F]+)\}') 
 
 
 def ketten(pfad):

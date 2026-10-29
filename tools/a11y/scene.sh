@@ -80,9 +80,9 @@ act call a11y.tree window=Mehrfenster
 echo ==M-TREE-B==
 act call a11y.tree window=Zweit
 echo ==M-PRESS==
-act call a11y.press name=Zurueck! window=Zweit
+act call a11y.press name=Zurück! window=Zweit
 sleep 6
-act call a11y.press name=Zurueck! window=Zweit
+act call a11y.press name=Zurück! window=Zweit
 sleep 6
 echo ==M-A==
 act call a11y.tree window=Mehrfenster
@@ -170,12 +170,12 @@ grep -qaF '"Mehrfenster"' "$TMPD/p.txt" && ok "the first window is there, named 
 grep -qaF '"Klicks: 0"' "$TMPD/p.txt" && ok "... with its own tree (label Klicks: 0)" || bad "window 1 tree: $(head -6 "$TMPD/p.txt" | tr '\n' '|')"
 part "$G" M-TREE-B M-PRESS > "$TMPD/p.txt"
 grep -qaF '"Zweit"' "$TMPD/p.txt" && ok "the second window is there, named by its title" || bad "no window Zweit"
-grep -qaE '=button .*"Zurueck!"' "$TMPD/p.txt" && ok "... its own tree: button Zurueck!" || bad "window 2 button: $(head -6 "$TMPD/p.txt" | tr '\n' '|')"
-grep -qaF '"Zaehler: 0"' "$TMPD/p.txt" && ok "... and its label Zaehler: 0" || bad "window 2 label missing"
+grep -qaE '=button .*"Zurück!"' "$TMPD/p.txt" && ok "... its own tree: button Zurück!" || bad "window 2 button: $(head -6 "$TMPD/p.txt" | tr '\n' '|')"
+grep -qaF '"Zähler: 0"' "$TMPD/p.txt" && ok "... and its label Zähler: 0" || bad "window 2 label missing"
 part "$G" M-A M-B > "$TMPD/p.txt"
 grep -qaF '"Klicks: 2"' "$TMPD/p.txt" && ok "two presses in window 2 reach the program and change the label of window 1 (Klicks: 2)" || bad "window 1 after the presses: $(grep -a 'Klicks' "$TMPD/p.txt" | head -2)"
 part "$G" M-B M-END > "$TMPD/p.txt"
-grep -qaF '"Zaehler: 2"' "$TMPD/p.txt" && ok "... and the label of window 2 itself (Zaehler: 2)" || bad "window 2 after the presses: $(grep -a 'Zaehler' "$TMPD/p.txt" | head -2)"
+grep -qaF '"Zähler: 2"' "$TMPD/p.txt" && ok "... and the label of window 2 itself (Zähler: 2)" || bad "window 2 after the presses: $(grep -a 'Zähler' "$TMPD/p.txt" | head -2)"
 
 echo
 echo "A11Y-SCENE: $pass passed, $fail failed   (workdir $TMPD)"

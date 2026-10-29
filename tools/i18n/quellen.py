@@ -83,8 +83,12 @@ def inhalt_von(roh):
 PFAD = re.compile(r'(?<![A-Za-z0-9_])/[A-Za-z0-9_./+-]+')
 
 
+FLAGGE = re.compile(r'(?<![A-Za-z0-9_-])--[a-z][a-z0-9-]*')
+
+
 def ohne_pfade(t):
-    return PFAD.sub(lambda m: ' ' * len(m.group(0)), t)
+    t = PFAD.sub(lambda m: ' ' * len(m.group(0)), t)
+    return FLAGGE.sub(lambda m: ' ' * len(m.group(0)), t)
 
 
 def sieht_aus_wie_name(t):
