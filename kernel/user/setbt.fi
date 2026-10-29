@@ -1,0 +1,375 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import ulib
+import libc.io
+import msg
+import fuiscene
+import navview
+
+export { K_POWER, K_SCAN, K_BAR, owns, load, tick, page, click }
+
+const K_POWER: u64 = 154
+const K_SCAN: u64 = 155
+const K_BAR: u64 = 153
+
+const ST_NONE: u64 = 0
+const ST_READY: u64 = 1
+const ST_SCAN: u64 = 2
+
+const SHOW: u64 = 6
+const SLOT: u64 = 72
+const PCAP: u64 = 1600
+
+static mut k_power: [u8; 25] = "settings.bluetooth.power\0"
+static mut k_scan: [u8; 24] = "settings.bluetooth.scan\0"
+static mut k_searching: [u8; 29] = "settings.bluetooth.searching\0"
+static mut k_off: [u8; 23] = "settings.bluetooth.off\0"
+static mut k_ready: [u8; 25] = "settings.bluetooth.ready\0"
+static mut k_found: [u8; 25] = "settings.bluetooth.found\0"
+static mut k_empty: [u8; 25] = "settings.bluetooth.empty\0"
+static mut k_note: [u8; 24] = "settings.bluetooth.note\0"
+static mut k_none: [u8; 24] = "settings.bluetooth.none\0"
+static mut k_hint: [u8; 24] = "settings.bluetooth.hint\0"
+static mut k_c_audio: [u8; 31] = "settings.bluetooth.class.audio\0"
+static mut k_c_phone: [u8; 31] = "settings.bluetooth.class.phone\0"
+static mut k_c_computer: [u8; 34] = "settings.bluetooth.class.computer\0"
+static mut k_c_input: [u8; 31] = "settings.bluetooth.class.input\0"
+static mut k_c_other: [u8; 31] = "settings.bluetooth.class.other\0"
+static mut k_c_unknown: [u8; 33] = "settings.bluetooth.class.unknown\0"
+static mut w_audio: [u8; 6] = "audio\0"
+static mut w_phone: [u8; 6] = "phone\0"
+static mut w_computer: [u8; 9] = "computer\0"
+static mut w_input: [u8; 6] = "input\0"
+static mut w_other: [u8; 6] = "other\0"
+static mut w_unknown: [u8; 8] = "unknown\0"
+static mut p_proc: [u8; 16] = "/proc/bluetooth\0"
+static mut p_ctl: [u8; 11] = "/dev/btctl\0"
+static mut c_on: [u8; 10] = "power on\n\0"
+static mut c_off: [u8; 11] = "power off\n\0"
+static mut c_scan: [u8; 6] = "scan\n\0"
+static mut t_power: [u8; 7] = "power \0"
+static mut t_state: [u8; 7] = "state \0"
+static mut t_dev: [u8; 5] = "dev \0"
+static mut t_sep: [u8; 4] = " - \0"
+static mut t_gap: [u8; 3] = "  \0"
+static mut t_dbm: [u8; 5] = " dBm\0"
+static mut t_sp: [u8; 2] = " \0"
+
+static mut pbuf: [u8; 1600] = [0 as u8; 1600]
+static mut dev_text: [u8; 432] = [0 as u8; 432]
+static mut stat_text: [u8; 96] = [0 as u8; 96]
+static mut tmp_tok: [u8; 24] = [0 as u8; 24]
+static mut state_v: u64 = 0
+static mut power_v: u64 = 1
+static mut total_v: u64 = 0
+static mut shown_v: u64 = 0
+static mut sig_v: u64 = 0
+static mut last_tick: u64 = 0
+
+fn base() -> u64 {
+    return (&pbuf[0 as usize]) as u64
+}
+
+fn rd(i: u64) -> u64 {
+    return __mmio_read8((base() + i) as *mut u8) as u64
+}
+
+fn owns(id: u64) -> bool {
+    return id == K_POWER || id == K_SCAN
+}
+
+fn starts(i: u64, e: u64, lit: u64) -> u64 {
+    var k: u64 = 0
+    while __mmio_read8((lit + k) as *mut u8) != 0 as u8 {
+        if i + k >= e || rd(i + k) != (__mmio_read8((lit + k) as *mut u8) as u64) {
+            return 0
+        }
+        k = k + 1
+    }
+    return k
+}
+
+fn line_end(i: u64, n: u64) -> u64 {
+    var e: u64 = i
+    while e < n && rd(e) != 10 {
+        e = e + 1
+    }
+    return e
+}
+
+fn put_c(slot: u64, at: u64, c: u64) -> u64 {
+    if at + 1 >= SLOT {
+        return at
+    }
+    dev_text[(slot * SLOT + at) as usize] = c as u8
+    return at + 1
+}
+
+fn put_lit(slot: u64, at: u64, lit: u64) -> u64 {
+    var a: u64 = at
+    var k: u64 = 0
+    while __mmio_read8((lit + k) as *mut u8) != 0 as u8 {
+        a = put_c(slot, a, __mmio_read8((lit + k) as *mut u8) as u64)
+        k = k + 1
+    }
+    return a
+}
+
+fn put_range(slot: u64, at: u64, from: u64, to: u64) -> u64 {
+    var a: u64 = at
+    var k: u64 = from
+    while k < to {
+        a = put_c(slot, a, rd(k))
+        k = k + 1
+    }
+    return a
+}
+
+fn token_end(i: u64, e: u64) -> u64 {
+    var t: u64 = i
+    while t < e && rd(t) != 32 {
+        t = t + 1
+    }
+    return t
+}
+
+fn class_text(i: u64, e: u64) -> u64 {
+    var k: u64 = 0
+    while i + k < e && k < 23 {
+        tmp_tok[k as usize] = rd(i + k) as u8
+        k = k + 1
+    }
+    tmp_tok[k as usize] = 0 as u8
+    let t: u64 = (&tmp_tok[0 as usize]) as u64
+    if ulib.streq(t, (&w_audio[0 as usize]) as u64) {
+        return msg.get((&k_c_audio[0 as usize]) as u64)
+    }
+    if ulib.streq(t, (&w_phone[0 as usize]) as u64) {
+        return msg.get((&k_c_phone[0 as usize]) as u64)
+    }
+    if ulib.streq(t, (&w_computer[0 as usize]) as u64) {
+        return msg.get((&k_c_computer[0 as usize]) as u64)
+    }
+    if ulib.streq(t, (&w_input[0 as usize]) as u64) {
+        return msg.get((&k_c_input[0 as usize]) as u64)
+    }
+    if ulib.streq(t, (&w_other[0 as usize]) as u64) {
+        return msg.get((&k_c_other[0 as usize]) as u64)
+    }
+    return msg.get((&k_c_unknown[0 as usize]) as u64)
+}
+
+fn terminate(slot: u64, at: u64) {
+    dev_text[(slot * SLOT + at) as usize] = 0 as u8
+}
+
+fn parse_device(i: u64, e: u64) {
+    if shown_v >= SHOW {
+        return
+    }
+    let slot: u64 = shown_v
+    let addr: u64 = i
+    let addr_end: u64 = i + 17
+    if addr_end + 1 >= e {
+        return
+    }
+    let rs: u64 = addr_end + 1
+    let re: u64 = token_end(rs, e)
+    let cs: u64 = re + 1
+    let ce: u64 = token_end(cs, e)
+    var ns: u64 = ce + 1
+    if ns > e {
+        ns = e
+    }
+    var named: bool = ns < e
+    if named && starts(ns, e, (&w_unknown[0 as usize]) as u64) == 7 && ns + 7 == e {
+        named = false
+    }
+    var at: u64 = 0
+    if named {
+        at = put_range(slot, at, ns, e)
+    } else {
+        at = put_range(slot, at, addr, addr_end)
+    }
+    at = put_lit(slot, at, (&t_gap[0 as usize]) as u64)
+    at = put_lit(slot, at, class_text(cs, ce))
+    if !(re == rs + 1 && rd(rs) == 63) {
+        at = put_lit(slot, at, (&t_gap[0 as usize]) as u64)
+        at = put_range(slot, at, rs, re)
+        at = put_lit(slot, at, (&t_dbm[0 as usize]) as u64)
+    }
+    terminate(slot, at)
+    shown_v = shown_v + 1
+}
+
+fn parse_line(i: u64, e: u64) {
+    var k: u64 = starts(i, e, (&t_power[0 as usize]) as u64)
+    if k != 0 {
+        if rd(i + k) == 111 && rd(i + k + 1) == 110 {
+            power_v = 1
+        } else {
+            power_v = 0
+        }
+        return
+    }
+    k = starts(i, e, (&t_state[0 as usize]) as u64)
+    if k != 0 {
+        let c: u64 = rd(i + k)
+        if c == 114 {
+            state_v = ST_READY
+        } else if c == 115 {
+            state_v = ST_SCAN
+        } else {
+            state_v = ST_NONE
+        }
+        return
+    }
+    k = starts(i, e, (&t_dev[0 as usize]) as u64)
+    if k != 0 {
+        total_v = total_v + 1
+        parse_device(i + k, e)
+    }
+}
+
+fn num_at(p: u64, at: u64, v: u64) -> u64 {
+    var d: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        d[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 && n < 20 {
+        d[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var a: u64 = at
+    while n > 0 {
+        n = n - 1
+        __mmio_write8((p + a) as *mut u8, d[n as usize])
+        a = a + 1
+    }
+    return a
+}
+
+fn copy_to(p: u64, at: u64, src: u64) -> u64 {
+    var a: u64 = at
+    var k: u64 = 0
+    while __mmio_read8((src + k) as *mut u8) != 0 as u8 && a < 90 {
+        __mmio_write8((p + a) as *mut u8, __mmio_read8((src + k) as *mut u8))
+        a = a + 1
+        k = k + 1
+    }
+    __mmio_write8((p + a) as *mut u8, 0 as u8)
+    return a
+}
+
+fn build_status() {
+    let p: u64 = (&stat_text[0 as usize]) as u64
+    var key: u64 = (&k_ready[0 as usize]) as u64
+    if power_v == 0 {
+        key = (&k_off[0 as usize]) as u64
+    } else if state_v == ST_SCAN {
+        key = (&k_searching[0 as usize]) as u64
+    }
+    var at: u64 = copy_to(p, 0, msg.get(key))
+    if power_v != 0 {
+        at = copy_to(p, at, (&t_sep[0 as usize]) as u64)
+        at = copy_to(p, at, msg.get((&k_found[0 as usize]) as u64))
+        at = copy_to(p, at, (&t_sp[0 as usize]) as u64)
+        at = num_at(p, at, total_v)
+        __mmio_write8((p + at) as *mut u8, 0 as u8)
+    }
+}
+
+fn load() -> bool {
+    state_v = ST_NONE
+    power_v = 1
+    total_v = 0
+    shown_v = 0
+    var n: u64 = 0
+    let fd: u64 = io.open((&p_proc[0 as usize]) as u64, 0)
+    if !ulib.bad(fd) {
+        let r: u64 = io.read_full(fd, base(), PCAP - 1)
+        io.close(fd)
+        if !ulib.bad(r) {
+            n = r
+        }
+    }
+    __mmio_write8((base() + n) as *mut u8, 0 as u8)
+    var sig: u64 = 7
+    var i: u64 = 0
+    while i < n {
+        sig = sig * 31 + rd(i)
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let e: u64 = line_end(i, n)
+        parse_line(i, e)
+        i = e + 1
+    }
+    build_status()
+    let changed: bool = sig != sig_v
+    sig_v = sig
+    return changed
+}
+
+fn tick(now: u64) -> bool {
+    if now < last_tick + 100 {
+        return false
+    }
+    last_tick = now
+    return load()
+}
+
+fn bar_cb(x: u64, y: u64, w: u64, h: u64) {
+    navview.infobar_paint(x, y, w, h, navview.IB_WARN, msg.get((&k_none[0 as usize]) as u64))
+}
+
+fn page(left: usize) {
+    let _n0: usize = fuiscene.label(left, msg.get((&k_note[0 as usize]) as u64))
+    if state_v == ST_NONE {
+        let _n1: usize = navview.infobar(left, K_BAR, 40, bar_cb)
+        let _n2: usize = fuiscene.label(left, msg.get((&k_hint[0 as usize]) as u64))
+        return
+    }
+    let _n3: usize = fuiscene.toggle(left, msg.get((&k_power[0 as usize]) as u64), K_POWER, power_v != 0)
+    if power_v == 0 {
+        let _n4: usize = fuiscene.label(left, (&stat_text[0 as usize]) as u64)
+        return
+    }
+    let _n5: usize = fuiscene.button(left, msg.get((&k_scan[0 as usize]) as u64), K_SCAN)
+    let _n6: usize = fuiscene.label(left, (&stat_text[0 as usize]) as u64)
+    if shown_v == 0 {
+        let _n7: usize = fuiscene.label_muted(left, msg.get((&k_empty[0 as usize]) as u64))
+        return
+    }
+    var d: u64 = 0
+    while d < shown_v {
+        let _n8: usize = fuiscene.label(left, (&dev_text[(d * SLOT) as usize]) as u64)
+        d = d + 1
+    }
+}
+
+fn send(cmd: u64) {
+    let fd: u64 = io.open((&p_ctl[0 as usize]) as u64, 1)
+    if ulib.bad(fd) {
+        return
+    }
+    let _w: u64 = io.write_all(fd, cmd, ulib.length(cmd))
+    io.close(fd)
+}
+
+fn click(id: u64) {
+    if id == K_POWER {
+        if (fuiscene.value_of(K_POWER) as u64) != 0 {
+            send((&c_on[0 as usize]) as u64)
+        } else {
+            send((&c_off[0 as usize]) as u64)
+        }
+    } else if id == K_SCAN {
+        send((&c_scan[0 as usize]) as u64)
+    }
+    let _c: bool = load()
+}
