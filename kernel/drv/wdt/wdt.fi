@@ -8,12 +8,14 @@ import drv.wdt.tco
 import drv.wdt.tcochip
 import sync.atomic
 import diag.crash
+import diag.wdtmark
+import klog
 
 export {
     stage, tick, sys_hook, on_panic, request_hang, pause, resume, starved_s,
-    st, timeout_s, tmr_ticks, feeds, starved, last_feed, user_window_s, hang_requested, blind, watchdog_reset_seen, count_now,
+    st, timeout_s, tmr_ticks, feeds, starved, last_feed, user_window_s, hang_requested, blind, watchdog_reset_seen, count_now, boot_report, mark_clean, mark_freeze, last_boot, last_detail, last_info,
     ST_OFF, ST_ABSENT, ST_FAILED, ST_ARMED, ST_PAUSED, ST_PANIC,
-    DEFAULT_TIMEOUT_S
+    DEFAULT_TIMEOUT_S, LB_NORMAL, LB_WATCHDOG, LB_UNCLEAN, LB_PANIC, LD_NONE, LD_TCO, LD_FREEZE, LD_PLANTED
 }
 
 const ST_OFF: u64 = 0
@@ -23,6 +25,14 @@ const ST_ARMED: u64 = 3
 const ST_PAUSED: u64 = 4
 const ST_PANIC: u64 = 5
 
+const LB_NORMAL: u64 = 0
+const LB_WATCHDOG: u64 = 1
+const LB_UNCLEAN: u64 = 2
+const LB_PANIC: u64 = 3
+const LD_NONE: u64 = 0
+const LD_TCO: u64 = 1
+const LD_FREEZE: u64 = 2
+const LD_PLANTED: u64 = 3
 const HZ: u64 = 100
 const DEFAULT_TIMEOUT_S: u64 = 60
 const MIN_TIMEOUT_S: u64 = 6
@@ -52,6 +62,31 @@ static mut w_wdt_reset: u64 = 0
 static mut w_said_starve: u64 = 0
 static mut w_cspin_at: u64 = 0
 static mut w_lock_at: u64 = 0
+static mut w_last: u64 = 0
+static mut w_detail: u64 = 0
+static mut w_info: u64 = 0
+static mut w_ev_sts1: u64 = 0
+static mut w_ev_sts2: u64 = 0
+static mut w_ev_prev: u64 = 255
+static mut w_ignore_sts: u64 = 0
+static mut w_no_mark: u64 = 0
+static mut k_nosts: [u8; 10] = "wdtnosts\0\0"
+static mut k_nomark: [u8; 10] = "wdtnomark\0"
+static mut s_ev_src: [u8; 4] = "wdt\0"
+static mut s_ev_a: [u8; 15] = "evidence prev=\0"
+static mut s_ev_b: [u8; 15] = "evidence info=\0"
+static mut s_ev_c: [u8; 15] = "evidence sts1=\0"
+static mut s_ev_d: [u8; 15] = "evidence sts2=\0"
+static mut s_ev_e: [u8; 15] = "evidence last=\0"
+static mut s_ev_f: [u8; 17] = "evidence detail=\0"
+static mut s_rp_r: [u8; 9] = "reason: \0"
+static mut s_rp_w: [u8; 10] = "watchdog\0\0"
+static mut s_rp_c: [u8; 15] = "culprit-code: \0"
+static mut s_rp_s: [u8; 9] = "source: \0"
+static mut s_rp_t: [u8; 4] = "tco\0"
+static mut s_rp_f: [u8; 7] = "freeze\0"
+static mut s_rp_p: [u8; 8] = "planted\0"
+static mut s_rp_n: [u8; 65] = "snapshot: none (RAM report did not survive or was never taken)\n\0\0"
 
 static mut k_wdt: [u8; 4] = "wdt\0"
 static mut k_nowdt: [u8; 6] = "nowdt\0"
@@ -72,6 +107,8 @@ static mut s_win: [u8; 15] = " user_window=\0\0"
 static mut s_last: [u8; 13] = " last_boot=\0\0"
 static mut s_wd: [u8; 9] = "watchdog\0"
 static mut s_norm: [u8; 7] = "normal\0"
+static mut s_unc: [u8; 8] = "unclean\0"
+static mut s_pan: [u8; 6] = "panic\0"
 static mut s_failed: [u8; 18] = "wdt: failed step=\0"
 static mut s_starve: [u8; 50] = "wdt: no progress (syscalls/switches), not feeding\0"
 static mut s_hang: [u8; 37] = "wdt: planted hang (cli; hlt) on cpu0\0"
@@ -187,13 +224,83 @@ fn failed(step: u64) {
     serial.nl()
 }
 
+fn classify(tco_seen: bool) {
+    let p: u64 = w_ev_prev
+    w_last = LB_NORMAL
+    w_detail = LD_NONE
+    if tco_seen {
+        w_last = LB_WATCHDOG
+        w_detail = LD_TCO
+    }
+    if p == wdtmark.ST_PLANTED {
+        w_last = LB_WATCHDOG
+        w_detail = LD_PLANTED
+    }
+    if p == wdtmark.ST_FREEZE {
+        w_last = LB_WATCHDOG
+        w_detail = LD_FREEZE
+    }
+    if p == wdtmark.ST_PANIC {
+        w_last = LB_PANIC
+        w_detail = LD_NONE
+    }
+    if p == wdtmark.ST_ARMED && w_last == LB_NORMAL {
+        w_last = LB_UNCLEAN
+    }
+    w_wdt_reset = 0
+    if w_last == LB_WATCHDOG {
+        w_wdt_reset = 1
+    }
+}
+
+fn planted_mark() {
+    if w_no_mark == 0 {
+        wdtmark.mark(wdtmark.ST_PLANTED, 0)
+    }
+}
+
+fn mark_clean() {
+    wdtmark.mark(wdtmark.ST_CLEAN, 0)
+}
+
+fn mark_freeze(reason: u64, culprit: u64) {
+    if w_no_mark == 0 {
+        wdtmark.mark(wdtmark.ST_FREEZE, reason * 16 + (culprit & 15))
+    }
+}
+
+fn last_boot() -> u64 {
+    return w_last
+}
+
+fn last_detail() -> u64 {
+    return w_detail
+}
+
+fn last_info() -> u64 {
+    return w_info
+}
+
 fn stage(state: u64) {
+    wdtmark.load()
+    w_ev_prev = wdtmark.prev_state()
+    w_info = wdtmark.prev_info()
+    if cmdopt.has(state, (&k_nosts[0]) as u64) {
+        w_ignore_sts = 1
+    }
+    if cmdopt.has(state, (&k_nomark[0]) as u64) {
+        w_no_mark = 1
+    }
     if !words(state) {
+        classify(false)
+        wdtmark.mark(wdtmark.ST_CLEAN, 0)
         w_state = ST_OFF
         serial.puts((&s_off[0]) as u64)
         return
     }
     if tcochip.probe(state) == tcochip.KIND_NONE {
+        classify(false)
+        wdtmark.mark(wdtmark.ST_CLEAN, 0)
         w_state = ST_ABSENT
         serial.puts((&s_absent[0]) as u64)
         serial.dec(tcochip.why())
@@ -201,9 +308,17 @@ fn stage(state: u64) {
         return
     }
     let b: u64 = tcochip.base()
-    if tco.second_timeout_seen(b) {
-        w_wdt_reset = 1
+    w_ev_sts1 = tco.sts1(b)
+    w_ev_sts2 = tco.sts2(b)
+    var seen: bool = tco.second_timeout_seen(b)
+    if tco.first_timeout_seen(b) && w_ev_prev != wdtmark.ST_CLEAN {
+        seen = true
     }
+    if w_ignore_sts != 0 {
+        seen = false
+    }
+    classify(seen)
+    wdtmark.mark(wdtmark.ST_CLEAN, 0)
     tco.clear_status(b)
     w_tmr = tco.ticks_for(w_timeout)
     if !tco.set_ticks(b, w_tmr) {
@@ -224,6 +339,7 @@ fn stage(state: u64) {
     w_last_feed = now
     w_last_check = now
     w_state = ST_ARMED
+    wdtmark.mark(wdtmark.ST_ARMED, 0)
     serial.puts((&s_armed[0]) as u64)
     serial.dec(tcochip.kind())
     serial.puts((&s_base[0]) as u64)
@@ -235,8 +351,12 @@ fn stage(state: u64) {
     serial.puts((&s_win[0]) as u64)
     serial.dec(w_window)
     serial.puts((&s_last[0]) as u64)
-    if w_wdt_reset != 0 {
+    if w_last == LB_WATCHDOG {
         serial.puts((&s_wd[0]) as u64)
+    } else if w_last == LB_UNCLEAN {
+        serial.puts((&s_unc[0]) as u64)
+    } else if w_last == LB_PANIC {
+        serial.puts((&s_pan[0]) as u64)
     } else {
         serial.puts((&s_norm[0]) as u64)
     }
@@ -244,6 +364,7 @@ fn stage(state: u64) {
 }
 
 fn planted_hang() {
+    planted_mark()
     serial.puts((&s_hang[0]) as u64)
     serial.nl()
     asm("cli")
@@ -253,6 +374,7 @@ fn planted_hang() {
 }
 
 fn planted_cspin() {
+    planted_mark()
     serial.puts((&s_cspin[0]) as u64)
     serial.nl()
     asm("cli")
@@ -262,6 +384,7 @@ fn planted_cspin() {
 }
 
 fn planted_lock(state: u64) {
+    planted_mark()
     serial.puts((&s_lock[0]) as u64)
     serial.nl()
     asm("cli")
@@ -270,6 +393,7 @@ fn planted_lock(state: u64) {
 }
 
 fn planted_fault() {
+    planted_mark()
     serial.puts((&s_panic[0]) as u64)
     serial.nl()
     w_panic_at = 0
@@ -345,6 +469,7 @@ fn sys_hook(state: u64) {
     }
     if w_spin_at != 1 {
         w_spin_at = 1
+        planted_mark()
         serial.puts((&s_spin[0]) as u64)
         serial.nl()
     }
@@ -355,6 +480,7 @@ fn sys_hook(state: u64) {
 }
 
 fn on_panic() {
+    wdtmark.mark(wdtmark.ST_PANIC, 0)
     if w_state == ST_ARMED {
         w_state = ST_PANIC
     }
@@ -393,4 +519,36 @@ fn resume(state: u64) {
     w_last_feed = now
     w_state = ST_ARMED
     serial.puts((&s_resume[0]) as u64)
+}
+
+fn boot_report(state: u64) {
+    klog.sayn(state, klog.L_INFO, (&s_ev_src[0]) as u64, (&s_ev_a[0]) as u64, w_ev_prev)
+    klog.sayn(state, klog.L_INFO, (&s_ev_src[0]) as u64, (&s_ev_b[0]) as u64, w_info)
+    klog.sayh(state, klog.L_INFO, (&s_ev_src[0]) as u64, (&s_ev_c[0]) as u64, w_ev_sts1)
+    klog.sayh(state, klog.L_INFO, (&s_ev_src[0]) as u64, (&s_ev_d[0]) as u64, w_ev_sts2)
+    klog.sayn(state, klog.L_INFO, (&s_ev_src[0]) as u64, (&s_ev_e[0]) as u64, w_last)
+    klog.sayn(state, klog.L_INFO, (&s_ev_src[0]) as u64, (&s_ev_f[0]) as u64, w_detail)
+    if w_last != LB_WATCHDOG || crash.rescued() {
+        return
+    }
+    crash.hang_begin(state, crash.KIND_HANG)
+    crash.p_str((&s_rp_r[0]) as u64)
+    crash.p_str((&s_rp_w[0]) as u64)
+    crash.p_nl()
+    crash.p_str((&s_rp_s[0]) as u64)
+    if w_detail == LD_FREEZE {
+        crash.p_str((&s_rp_f[0]) as u64)
+    } else if w_detail == LD_PLANTED {
+        crash.p_str((&s_rp_p[0]) as u64)
+    } else {
+        crash.p_str((&s_rp_t[0]) as u64)
+    }
+    crash.p_nl()
+    if w_detail == LD_FREEZE {
+        crash.p_str((&s_rp_c[0]) as u64)
+        crash.p_dec(w_info)
+        crash.p_nl()
+    }
+    crash.p_str((&s_rp_n[0]) as u64)
+    let _w: bool = crash.hang_file(state)
 }
