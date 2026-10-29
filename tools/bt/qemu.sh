@@ -6,7 +6,7 @@ source "$HERE/tools/usbredir/common.sh"
 BASEW="nokbd nosched vfs"
 printf 'echo ==START==\nsleep 2\ncat /proc/bluetooth\necho scan > /dev/btctl\nsleep 4\ncat /proc/bluetooth\ncat /dev/btctl\necho ==END==\n' > "$T/bt.sh"
 printf 'echo ==START==\nsleep 2\necho power off > /dev/btctl\necho scan > /dev/btctl\nsleep 2\ncat /proc/bluetooth\necho ==END==\n' > "$T/bt_off.sh"
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
+python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ /dev/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
     /t/bt.sh="$T/bt.sh" /t/bt_off.sh="$T/bt_off.sh" > "$T/mkfs2.txt" 2>&1 || { tail "$T/mkfs2.txt"; exit 1; }
 for c in $CASES; do
