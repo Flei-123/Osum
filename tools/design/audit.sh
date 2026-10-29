@@ -611,6 +611,7 @@ fi
     -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
     "${ZWEITE[@]}" \
     "${TONDEV[@]}" \
+    ${AUDIT_QEMU_EXTRA:-} \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 ) &
 PID=$!
 i=0
