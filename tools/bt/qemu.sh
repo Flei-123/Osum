@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
-CASES="${*:-scan none badclass poweroff}"
+CASES="${*:-scan none badclass poweroff bgpump hotplug unplug}"
 source "$HERE/tools/usbredir/common.sh"
 BASEW="nokbd nosched vfs"
 printf 'echo ==START==\nsleep 2\ncat /proc/bluetooth\necho scan > /dev/btctl\nsleep 4\ncat /proc/bluetooth\ncat /dev/btctl\necho ==END==\n' > "$T/bt.sh"
 printf 'echo ==START==\nsleep 2\necho power off > /dev/btctl\necho scan > /dev/btctl\nsleep 2\ncat /proc/bluetooth\necho ==END==\n' > "$T/bt_off.sh"
+printf 'echo ==START==\nsleep 1\necho scan > /dev/btctl\nsleep 5\necho ==END==\n' > "$T/bt_bg.sh"
+printf 'echo ==START==\nsleep 10\ncat /proc/bluetooth\necho scan > /dev/btctl\nsleep 4\ncat /proc/bluetooth\necho ==END==\n' > "$T/bt_hot.sh"
+printf 'echo ==START==\nsleep 1\ncat /proc/bluetooth\ncat /dev/btctl\necho ==END==\n' > "$T/bt_unp.sh"
 python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ /dev/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
-    /t/bt.sh="$T/bt.sh" /t/bt_off.sh="$T/bt_off.sh" > "$T/mkfs2.txt" 2>&1 || { tail "$T/mkfs2.txt"; exit 1; }
+    /t/bt.sh="$T/bt.sh" /t/bt_off.sh="$T/bt_off.sh" /t/bt_bg.sh="$T/bt_bg.sh" /t/bt_hot.sh="$T/bt_hot.sh" /t/bt_unp.sh="$T/bt_unp.sh" > "$T/mkfs2.txt" 2>&1 || { tail "$T/mkfs2.txt"; exit 1; }
 for c in $CASES; do
     case "$c" in
     scan)
@@ -47,6 +50,25 @@ for c in $CASES; do
         chk btp "no devices while off" 'devices 0'
         grep -aq 'command 0401' "$T/btp.gadget" && bad "btp: inquiry sent while off" || ok "btp: no inquiry command sent while off"
         panics btp
+        ;;
+    bgpump)
+        run btg btdongle boot bt_bg.sh
+        chk btg "inquiry finished without any proc read" 'bt: inquiry done n=3'
+        panics btg
+        ;;
+    hotplug)
+        GARGS="--bt normal" run bth btdongle hot bt_hot.sh
+        chk bth "bound after boot" 'driver=btusb'
+        chk bth "reset ok" 'bt: hci reset ok'
+        chk bth "three devices after hotplug" 'devices 3'
+        panics bth
+        ;;
+    unplug)
+        GARGS="--bt normal" REPLUG_WAIT='command 0c45' run btu btdongle replug bt_unp.sh
+        chk btu "bound" 'driver=btusb'
+        chk btu "detach noticed" 'bt: detached'
+        chk btu "state none after unplug" 'state none'
+        panics btu
         ;;
     esac
 done
