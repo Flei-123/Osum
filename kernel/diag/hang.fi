@@ -13,7 +13,7 @@ import diag.hangcpu
 import drv.wdt.wdt
 
 export {
-    init, beat, nmi, stall, dumps, nmis, pmu_on, last_reason, hard_s, soft_s,
+    init, beat, nmi, stall, dumps, nmis, late_nmis, pmu_on, last_reason, hard_s, soft_s,
     R_NONE, R_HARD_PEER, R_HARD_SELF, R_SOFT, R_STALL
 }
 
@@ -27,6 +27,7 @@ const NCPU: u64 = 8
 const HARD_DEFAULT_S: u64 = 10
 const SOFT_DEFAULT_S: u64 = 20
 const GATHER_MS: u64 = 300
+const LATE_PMI_MS: u64 = 100
 
 static mut h_on: u64 = 0
 static mut h_hard_s: u64 = HARD_DEFAULT_S
@@ -36,6 +37,8 @@ static mut h_owner: [u64; 1] = [0 as u64; 1]
 static mut h_req: u64 = 0
 static mut h_dumps: u64 = 0
 static mut h_nmis: u64 = 0
+static mut h_late: u64 = 0
+static mut pmi_tsc: [u64; 8] = [0 as u64; 8]
 static mut h_reason: u64 = 0
 static mut h_soft_live: u64 = 0
 static mut h_soft_cpu: u64 = 0
@@ -58,6 +61,7 @@ static mut s_cpu: [u8; 6] = " cpu=\0"
 static mut s_saved: [u8; 25] = "hang: report saved bytes\0"
 static mut s_reset: [u8; 25] = "hang: resetting the box\0\0"
 static mut s_over: [u8; 24] = "hang: soft lockup ended\0"
+static mut s_late: [u8; 37] = "hang: late pmu nmi absorbed on cpu \0\0"
 static mut s_src: [u8; 5] = "hang\0"
 static mut s_lk: [u8; 23] = "soft lockup on cpu, s=\0"
 
@@ -69,6 +73,10 @@ fn dumps() -> u64 {
 
 fn nmis() -> u64 {
     return h_nmis
+}
+
+fn late_nmis() -> u64 {
+    return h_late
 }
 
 fn pmu_on() -> bool {
@@ -257,24 +265,41 @@ fn nmi(state: u64, frame: u64) -> bool {
     if me >= NCPU {
         return false
     }
+    let now: u64 = apic.tsc()
     let mine: bool = hangcpu.pmu_overflowed(state, me)
+    if mine {
+        pmi_tsc[me as usize] = now
+    }
     if h_req != 0 && !hangcpu.taken(me) {
         hangcpu.snap(state, me, frame)
         return true
     }
     if !mine {
-        return h_req != 0
+        return h_req != 0 || late_pmi(state, me, now)
     }
     if paused() || h_req != 0 {
         return true
     }
-    let now: u64 = apic.tsc()
     let t: u64 = hb_tsc[me as usize]
     if t != 0 && now > t && now - t > h_hard_s * hz(state) {
         trigger(state, R_HARD_SELF, me, me, frame)
         return true
     }
     peer_check(state, me, frame, now)
+    return true
+}
+
+fn late_pmi(state: u64, me: u64, now: u64) -> bool {
+    let t: u64 = pmi_tsc[me as usize]
+    if !hangcpu.pmu_ready() || t == 0 || now < t || now - t > hz(state) / 1000 * LATE_PMI_MS {
+        return false
+    }
+    h_late = h_late + 1
+    if h_late == 1 {
+        serial.puts((&s_late[0]) as u64)
+        serial.dec(me)
+        serial.nl()
+    }
     return true
 }
 
