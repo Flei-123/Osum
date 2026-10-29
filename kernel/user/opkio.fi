@@ -1,0 +1,326 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import sha
+import libc.io
+import libc.errno
+
+export {
+    g8, p8, g16, g64, put_le, str_lt, str_len, norm_path, join_path,
+    read_file, write_file, file_exists, open_read, read_some, close_fd,
+    sink_hash, sink_write, sink_end, emit, emit_header, sink_digest,
+    dir_names, NAME_MAX, HDR,
+}
+
+const NAME_MAX: u64 = 96
+const HDR: u64 = 64
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut sink_mode: u64 = 0
+static mut sink_fd: u64 = 0
+static mut sink_ok: bool = true
+static mut dig: [u8; 32] = [0 as u8; 32]
+static mut chunk: [u8; 8192] = [0 as u8; 8192]
+static mut dent: [u8; 1024] = [0 as u8; 1024]
+
+fn g8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+fn p8(p: u64, v: u64) {
+    __mmio_write8((p) as *mut u8, v as u8)
+}
+
+fn g16(p: u64) -> u64 {
+    return g8(p) | (g8(p + 1) << 8)
+}
+
+fn g64(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        v = v | (g8(p + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+fn put_le(p: u64, v: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        p8(p + i, (v >> (i * 8)) & 255)
+        i = i + 1
+    }
+}
+
+fn str_len(p: u64) -> u64 {
+    var n: u64 = 0
+    while g8(p + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn str_lt(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let x: u64 = g8(a + i)
+        let y: u64 = g8(b + i)
+        if x != y {
+            return x < y
+        }
+        if x == 0 {
+            return false
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn norm_path(inp: u64, out: u64, max: u64) -> bool {
+    let absolute: bool = g8(inp) == 47
+    var segs: [u8; 4096] = [0 as u8; 4096]
+    var starts: [u64; 64] = [0 as u64; 64]
+    var count: u64 = 0
+    var used: u64 = 0
+    var i: u64 = 0
+    let n: u64 = str_len(inp)
+    while i <= n {
+        var j: u64 = i
+        while j < n && g8(inp + j) != 47 {
+            j = j + 1
+        }
+        let l: u64 = j - i
+        var skip: bool = l == 0
+        if l == 1 && g8(inp + i) == 46 {
+            skip = true
+        }
+        if !skip {
+            if l == 2 && g8(inp + i) == 46 && g8(inp + i + 1) == 46 && count > 0 {
+                count = count - 1
+                used = starts[count as usize]
+            } else {
+                if count >= 63 || used + l + 1 >= 4096 {
+                    return false
+                }
+                starts[count as usize] = used
+                var k: u64 = 0
+                while k < l {
+                    segs[(used + k) as usize] = g8(inp + i + k) as u8
+                    k = k + 1
+                }
+                segs[(used + l) as usize] = 0 as u8
+                used = used + l + 1
+                count = count + 1
+            }
+        }
+        i = j + 1
+    }
+    var o: u64 = 0
+    if absolute {
+        p8(out, 47)
+        o = 1
+    }
+    var s: u64 = 0
+    while s < count {
+        let seg: u64 = (&segs[starts[s as usize] as usize]) as u64
+        let l: u64 = str_len(seg)
+        if o + l + 2 >= max {
+            return false
+        }
+        if s > 0 {
+            p8(out + o, 47)
+            o = o + 1
+        }
+        var k: u64 = 0
+        while k < l {
+            p8(out + o + k, g8(seg + k))
+            k = k + 1
+        }
+        o = o + l
+        s = s + 1
+    }
+    p8(out + o, 0)
+    return true
+}
+
+fn join_path(base: u64, rel: u64, out: u64, max: u64) -> bool {
+    var tmp: [u8; 512] = [0 as u8; 512]
+    if g8(rel) == 47 || g8(base) == 0 {
+        if str_len(rel) >= 511 {
+            return false
+        }
+        ulib.strcpy((&tmp[0 as usize]) as u64, rel)
+    } else {
+        if str_len(base) + str_len(rel) + 2 >= 511 {
+            return false
+        }
+        ulib.strcpy((&tmp[0 as usize]) as u64, base)
+        var sl: [u8; 2] = "/\0"
+        ulib.strcat((&tmp[0 as usize]) as u64, (&sl[0 as usize]) as u64)
+        ulib.strcat((&tmp[0 as usize]) as u64, rel)
+    }
+    return norm_path((&tmp[0 as usize]) as u64, out, max)
+}
+
+fn open_read(path: u64) -> u64 {
+    return ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+}
+
+fn close_fd(fd: u64) {
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
+fn read_some(fd: u64, buf: u64, max: u64) -> u64 {
+    let r: u64 = ulib.sys(ulib.SYS_READ, fd, buf, max)
+    if ulib.bad(r) {
+        return NONE
+    }
+    return r
+}
+
+fn file_exists(path: u64) -> bool {
+    let fd: u64 = open_read(path)
+    if ulib.bad(fd) {
+        return false
+    }
+    close_fd(fd)
+    return true
+}
+
+fn read_file(path: u64, buf: u64, max: u64) -> u64 {
+    let fd: u64 = open_read(path)
+    if ulib.bad(fd) {
+        return NONE
+    }
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, buf + n, max - n)
+        if ulib.bad(r) || r == 0 {
+            going = false
+        } else {
+            n = n + r
+            if n >= max {
+                going = false
+            }
+        }
+    }
+    close_fd(fd)
+    return n
+}
+
+fn write_all(fd: u64, buf: u64, len: u64) -> bool {
+    var n: u64 = 0
+    while n < len {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, buf + n, len - n)
+        if ulib.bad(w) || w == 0 {
+            return false
+        }
+        n = n + w
+    }
+    return true
+}
+
+fn write_file(path: u64, buf: u64, len: u64) -> bool {
+    ulib.sys(ulib.SYS_UNLINK, path, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let ok: bool = write_all(fd, buf, len)
+    close_fd(fd)
+    return ok
+}
+
+fn sink_hash() {
+    sink_mode = 1
+    sink_ok = true
+    sha.begin()
+}
+
+fn sink_write(path: u64) -> bool {
+    sink_mode = 2
+    sink_ok = true
+    ulib.sys(ulib.SYS_UNLINK, path, 0, 0)
+    sink_fd = ulib.sys(ulib.SYS_OPEN, path, ulib.O_MAKE, 0)
+    return !ulib.bad(sink_fd)
+}
+
+fn emit(p: u64, n: u64) {
+    if sink_mode == 1 {
+        sha.update(p, n)
+    } else if sink_mode == 2 {
+        if !write_all(sink_fd, p, n) {
+            sink_ok = false
+        }
+    }
+}
+
+fn emit_header(p: u64, n: u64) {
+    if sink_mode == 2 {
+        emit(p, n)
+    }
+}
+
+fn sink_digest(out: u64) {
+    sha.finish(out)
+}
+
+fn sink_end() -> bool {
+    if sink_mode == 2 {
+        close_fd(sink_fd)
+    }
+    sink_mode = 0
+    return sink_ok
+}
+
+fn dir_names(path: u64, out: u64, stride: u64, max: u64, suffix: u64) -> u64 {
+    let fd: u64 = io.dir_open(path)
+    if errno.failed(fd) {
+        return NONE
+    }
+    var count: u64 = 0
+    let sl: u64 = str_len(suffix)
+    var going: bool = true
+    while going {
+        let n: u64 = io.dir_read(fd, (&dent[0 as usize]) as u64, 1024)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&dent[0 as usize]) as u64 + at
+                let name: u64 = io.dir_name(rec)
+                let nl: u64 = str_len(name)
+                if nl > sl && nl < stride && io.dir_kind(rec) != io.DT_DIR {
+                    var same: bool = true
+                    var k: u64 = 0
+                    while k < sl {
+                        if g8(name + nl - sl + k) != g8(suffix + k) {
+                            same = false
+                        }
+                        k = k + 1
+                    }
+                    if same {
+                        if count >= max {
+                            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+                            return NONE
+                        }
+                        ulib.strcpy(out + count * stride, name)
+                        count = count + 1
+                    }
+                }
+                let rl: u64 = g16(rec + 16)
+                if rl == 0 {
+                    at = n
+                } else {
+                    at = at + rl
+                }
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return count
+}

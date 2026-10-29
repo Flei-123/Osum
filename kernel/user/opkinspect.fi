@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import sha
+import opkio
+
+export { load_package, meta_get, meta_len, show }
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut DIG: [u8; 32] = [0 as u8; 32]
+static mut HEXB: [u8; 72] = [0 as u8; 72]
+
+fn fail(msg: u64, arg: u64) -> u64 {
+    ulib.eput(msg)
+    if arg != 0 {
+        ulib.eput(arg)
+    }
+    var nl: [u8; 2] = "\n\0"
+    ulib.eput((&nl[0 as usize]) as u64)
+    return 0
+}
+
+fn meta_len(buf: u64) -> u64 {
+    return opkio.g64(buf + 8)
+}
+
+fn load_package(path: u64, buf: u64, cap: u64) -> u64 {
+    let n: u64 = opkio.read_file(path, buf, cap)
+    if n == NONE {
+        var m: [u8; 20] = "opk: not readable: \0"
+        return fail((&m[0 as usize]) as u64, path)
+    }
+    if n >= cap {
+        var m: [u8; 41] = "opk: the package does not fit the buffer\0"
+        return fail((&m[0 as usize]) as u64, 0)
+    }
+    var magic: [u8; 9] = "OPKG0001\0"
+    if n < 64 || !ulib.strneq(buf, (&magic[0 as usize]) as u64, 8) {
+        var m: [u8; 22] = "opk: not an OPKG file\0"
+        return fail((&m[0 as usize]) as u64, path)
+    }
+    let ml: u64 = opkio.g64(buf + 8)
+    let dl: u64 = opkio.g64(buf + 16)
+    if ml > n || dl > n || 64 + ml + dl != n {
+        var m: [u8; 40] = "opk: lengths in the header do not match\0"
+        return fail((&m[0 as usize]) as u64, path)
+    }
+    sha.hash(buf + 64, ml + dl, (&DIG[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < 32 {
+        if opkio.g8((&DIG[0 as usize]) as u64 + i) != opkio.g8(buf + 24 + i) {
+            var m: [u8; 20] = "opk: checksum wrong\0"
+            return fail((&m[0 as usize]) as u64, path)
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn meta_get(buf: u64, key: u64, out: u64, max: u64) -> bool {
+    let ml: u64 = opkio.g64(buf + 8)
+    let meta: u64 = buf + 64
+    let kl: u64 = opkio.str_len(key)
+    var i: u64 = 0
+    while i < ml {
+        var hit: bool = i + kl < ml && opkio.g8(meta + i + kl) == 61
+        var k: u64 = 0
+        while hit && k < kl {
+            if opkio.g8(meta + i + k) != opkio.g8(key + k) {
+                hit = false
+            }
+            k = k + 1
+        }
+        if hit {
+            var o: u64 = 0
+            var p: u64 = i + kl + 1
+            while p < ml && opkio.g8(meta + p) != 10 && o + 1 < max {
+                opkio.p8(out + o, opkio.g8(meta + p))
+                o = o + 1
+                p = p + 1
+            }
+            opkio.p8(out + o, 0)
+            return true
+        }
+        while i < ml && opkio.g8(meta + i) != 10 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn say_octal(v: u64) {
+    var digits: [u8; 8] = [0 as u8; 8]
+    var n: u64 = 0
+    var x: u64 = v
+    while x > 0 || n == 0 {
+        digits[n as usize] = (48 + (x & 7)) as u8
+        x = x >> 3
+        n = n + 1
+    }
+    var out: [u8; 9] = [0 as u8; 9]
+    var k: u64 = 0
+    while k < n {
+        out[k as usize] = digits[(n - 1 - k) as usize]
+        k = k + 1
+    }
+    ulib.say((&out[0 as usize]) as u64)
+}
+
+fn say_field(buf: u64, key: u64) {
+    var v: [u8; 256] = [0 as u8; 256]
+    var sp: [u8; 2] = " \0"
+    ulib.say(key)
+    ulib.say((&sp[0 as usize]) as u64)
+    if meta_get(buf, key, (&v[0 as usize]) as u64, 256) {
+        ulib.say((&v[0 as usize]) as u64)
+    }
+    ulib.nl()
+}
+
+fn say_list(buf: u64, key: u64) {
+    let ml: u64 = opkio.g64(buf + 8)
+    let meta: u64 = buf + 64
+    let kl: u64 = opkio.str_len(key)
+    var sp: [u8; 2] = " \0"
+    var i: u64 = 0
+    while i < ml {
+        var hit: bool = i + kl < ml && opkio.g8(meta + i + kl) == 61
+        var k: u64 = 0
+        while hit && k < kl {
+            if opkio.g8(meta + i + k) != opkio.g8(key + k) {
+                hit = false
+            }
+            k = k + 1
+        }
+        if hit {
+            ulib.say(key)
+            ulib.say((&sp[0 as usize]) as u64)
+            var p: u64 = i + kl + 1
+            while p < ml && opkio.g8(meta + p) != 10 {
+                var c: [u8; 2] = [0 as u8; 2]
+                c[0] = opkio.g8(meta + p) as u8
+                ulib.say((&c[0 as usize]) as u64)
+                p = p + 1
+            }
+            ulib.nl()
+        }
+        while i < ml && opkio.g8(meta + i) != 10 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+}
+
+fn show(path: u64, buf: u64, cap: u64) -> u64 {
+    let n: u64 = load_package(path, buf, cap)
+    if n == 0 {
+        return 1
+    }
+    let ml: u64 = opkio.g64(buf + 8)
+    let dl: u64 = opkio.g64(buf + 16)
+    var sp: [u8; 3] = "  \0"
+    sha.hex_out((&DIG[0 as usize]) as u64, 32, (&HEXB[0 as usize]) as u64)
+    var s_hash: [u8; 6] = "hash \0"
+    ulib.say((&s_hash[0 as usize]) as u64)
+    ulib.say((&HEXB[0 as usize]) as u64)
+    ulib.nl()
+    var s_size: [u8; 6] = "size \0"
+    ulib.say((&s_size[0 as usize]) as u64)
+    ulib.sayu(n)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(ml)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(dl)
+    ulib.nl()
+    var k_name: [u8; 5] = "name\0"
+    var k_fass: [u8; 8] = "fassung\0"
+    var k_titel: [u8; 6] = "titel\0"
+    var k_info: [u8; 5] = "info\0"
+    var k_keys: [u8; 5] = "keys\0"
+    var k_arch: [u8; 5] = "arch\0"
+    var k_need: [u8; 8] = "braucht\0"
+    var k_hand: [u8; 7] = "handle\0"
+    say_field(buf, (&k_name[0 as usize]) as u64)
+    say_field(buf, (&k_fass[0 as usize]) as u64)
+    say_field(buf, (&k_titel[0 as usize]) as u64)
+    say_field(buf, (&k_info[0 as usize]) as u64)
+    say_field(buf, (&k_keys[0 as usize]) as u64)
+    say_field(buf, (&k_arch[0 as usize]) as u64)
+    say_list(buf, (&k_need[0 as usize]) as u64)
+    say_list(buf, (&k_hand[0 as usize]) as u64)
+    let data: u64 = buf + 64 + ml
+    var at: u64 = 0
+    while at + 13 <= dl {
+        let typ: u64 = opkio.g8(data + at)
+        let mode: u64 = opkio.g16(data + at + 1)
+        let nl: u64 = opkio.g16(data + at + 3)
+        if at + 5 + nl + 8 > dl {
+            var m: [u8; 40] = "opk: the archive is cut off in the data\0"
+            ulib.eput((&m[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        let size: u64 = opkio.g64(data + at + 5 + nl)
+        var nm: [u8; 129] = [0 as u8; 129]
+        var q: u64 = 0
+        while q < nl && q < 128 {
+            nm[q as usize] = opkio.g8(data + at + 5 + q) as u8
+            q = q + 1
+        }
+        ulib.say((&sp[0 as usize]) as u64)
+        var tc: [u8; 2] = [0 as u8; 2]
+        tc[0] = typ as u8
+        ulib.say((&tc[0 as usize]) as u64)
+        ulib.say((&sp[0 as usize]) as u64)
+        say_octal(mode)
+        ulib.say((&sp[0 as usize]) as u64)
+        ulib.sayu(size)
+        ulib.say((&sp[0 as usize]) as u64)
+        ulib.say((&nm[0 as usize]) as u64)
+        ulib.nl()
+        at = at + 5 + nl + 8 + size
+    }
+    return 0
+}

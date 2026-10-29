@@ -1,0 +1,525 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import sha
+import opkio
+import opkrecipe
+
+export { build }
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const MAX_ENT: u64 = 1024
+const ENT_NAME_LEN: u64 = 128
+const KIND_DIR: u64 = 1
+const KIND_FILE: u64 = 0
+const EM_386: u64 = 3
+const EM_X86_64: u64 = 62
+const EM_AARCH64: u64 = 183
+const EM_BAD: u64 = 65535
+
+static mut ENT_NAME: [u8; 131072] = [0 as u8; 131072]
+static mut ENT_KIND: [u64; 1024] = [0 as u64; 1024]
+static mut ENT_SRC: [u64; 1024] = [0 as u64; 1024]
+static mut ENT_SIZE: [u64; 1024] = [0 as u64; 1024]
+static mut ORD: [u64; 1024] = [0 as u64; 1024]
+static mut n_ent: u64 = 0
+static mut MACH: [u64; 4] = [0 as u64; 4]
+static mut MACH_FILE: [u64; 4] = [0 as u64; 4]
+static mut n_mach: u64 = 0
+static mut META: [u8; 16384] = [0 as u8; 16384]
+static mut mlen: u64 = 0
+static mut dlen: u64 = 0
+static mut stream_ok: bool = true
+static mut CH: [u8; 8192] = [0 as u8; 8192]
+static mut EH: [u8; 160] = [0 as u8; 160]
+static mut HDRB: [u8; 64] = [0 as u8; 64]
+static mut DIG: [u8; 32] = [0 as u8; 32]
+static mut HEXB: [u8; 72] = [0 as u8; 72]
+static mut BASE: [u8; 256] = [0 as u8; 256]
+
+fn fail(msg: u64, arg: u64) -> bool {
+    ulib.eput(msg)
+    if arg != 0 {
+        ulib.eput(arg)
+    }
+    var nl: [u8; 2] = "\n\0"
+    ulib.eput((&nl[0 as usize]) as u64)
+    return false
+}
+
+fn ent_name(i: u64) -> u64 {
+    return (&ENT_NAME[(i * ENT_NAME_LEN) as usize]) as u64
+}
+
+fn find_ent(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < n_ent {
+        if ulib.streq(ent_name(i), name) {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn add_ent(name: u64, kind: u64, src: u64) -> bool {
+    let at: u64 = find_ent(name)
+    if at != NONE {
+        if ENT_KIND[at as usize] != kind {
+            var m: [u8; 45] = "opk: a path is both a file and a directory: \0"
+            return fail((&m[0 as usize]) as u64, name)
+        }
+        ENT_SRC[at as usize] = src
+        return true
+    }
+    if n_ent >= MAX_ENT {
+        var m: [u8; 32] = "opk: too many archive entries\0\0\0"
+        return fail((&m[0 as usize]) as u64, 0)
+    }
+    ulib.strcpy(ent_name(n_ent), name)
+    ENT_KIND[n_ent as usize] = kind
+    ENT_SRC[n_ent as usize] = src
+    n_ent = n_ent + 1
+    return true
+}
+
+fn dest_ok(name: u64) -> bool {
+    if opkio.g8(name) == 0 || opkio.g8(name) == 47 {
+        return false
+    }
+    if opkio.g8(name) == 46 && opkio.g8(name + 1) == 46
+        && (opkio.g8(name + 2) == 0 || opkio.g8(name + 2) == 47) {
+        return false
+    }
+    return true
+}
+
+fn collect() -> bool {
+    n_ent = 0
+    var i: u64 = 0
+    while i < opkrecipe.file_count() {
+        var name: [u8; 256] = [0 as u8; 256]
+        if !opkio.norm_path(opkrecipe.file_dest(i), (&name[0 as usize]) as u64, 256)
+            || !dest_ok((&name[0 as usize]) as u64) {
+            var m: [u8; 33] = "opk: bad destination in recipe: \0"
+            return fail((&m[0 as usize]) as u64, opkrecipe.file_dest(i))
+        }
+        if opkio.str_len((&name[0 as usize]) as u64) >= ENT_NAME_LEN {
+            var m: [u8; 33] = "opk: destination path too long: \0"
+            return fail((&m[0 as usize]) as u64, opkrecipe.file_dest(i))
+        }
+        var k: u64 = 0
+        while opkio.g8((&name[0 as usize]) as u64 + k) != 0 {
+            if name[k as usize] == 47 as u8 {
+                name[k as usize] = 0 as u8
+                if !add_ent((&name[0 as usize]) as u64, KIND_DIR, NONE) {
+                    return false
+                }
+                name[k as usize] = 47 as u8
+            }
+            k = k + 1
+        }
+        if !add_ent((&name[0 as usize]) as u64, KIND_FILE, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn src_path(recipe_index: u64, out: u64) -> bool {
+    return opkio.join_path((&BASE[0 as usize]) as u64,
+        opkrecipe.file_src(recipe_index), out, 512)
+}
+
+fn note_machine(m: u64, name: u64) {
+    var i: u64 = 0
+    while i < n_mach {
+        if MACH[i as usize] == m {
+            return
+        }
+        i = i + 1
+    }
+    if n_mach < 4 {
+        MACH[n_mach as usize] = m
+        MACH_FILE[n_mach as usize] = name
+        n_mach = n_mach + 1
+    }
+}
+
+fn scan_files() -> bool {
+    n_mach = 0
+    dlen = 0
+    var i: u64 = 0
+    while i < n_ent {
+        let nl: u64 = opkio.str_len(ent_name(i))
+        dlen = dlen + 1 + 2 + 2 + nl + 8
+        if ENT_KIND[i as usize] == KIND_FILE {
+            var path: [u8; 512] = [0 as u8; 512]
+            if !src_path(ENT_SRC[i as usize], (&path[0 as usize]) as u64) {
+                var m: [u8; 28] = "opk: source path too long: \0"
+                return fail((&m[0 as usize]) as u64,
+                    opkrecipe.file_src(ENT_SRC[i as usize]))
+            }
+            let sz: u64 = ulib.size_of((&path[0 as usize]) as u64)
+            if ulib.bad(sz) {
+                var m: [u8; 39] = "opk: the recipe names a missing file: \0"
+                return fail((&m[0 as usize]) as u64,
+                    opkrecipe.file_src(ENT_SRC[i as usize]))
+            }
+            ENT_SIZE[i as usize] = sz
+            dlen = dlen + sz
+            if sz >= 20 {
+                let fd: u64 = opkio.open_read((&path[0 as usize]) as u64)
+                if ulib.bad(fd) {
+                    var m: [u8; 39] = "opk: the recipe names a missing file: \0"
+                    return fail((&m[0 as usize]) as u64, (&path[0 as usize]) as u64)
+                }
+                let n: u64 = opkio.read_some(fd, (&CH[0 as usize]) as u64, 20)
+                opkio.close_fd(fd)
+                if n == 20 && CH[0] == 0x7f as u8 && CH[1] == 0x45 as u8
+                    && CH[2] == 0x4c as u8 && CH[3] == 0x46 as u8 {
+                    var m: u64 = EM_BAD
+                    if CH[5] == 1 as u8 {
+                        m = opkio.g16((&CH[18 as usize]) as u64)
+                    }
+                    note_machine(m, ent_name(i))
+                }
+            }
+        } else {
+            ENT_SIZE[i as usize] = 0
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn machine_name(m: u64) -> u64 {
+    if m == EM_386 || m == EM_X86_64 {
+        return 1
+    }
+    if m == EM_AARCH64 {
+        return 2
+    }
+    return 0
+}
+
+fn decide_arch() -> bool {
+    var s_x86: [u8; 7] = "x86_64\0"
+    var s_a64: [u8; 8] = "aarch64\0"
+    var s_any: [u8; 4] = "any\0"
+    var s_arch: [u8; 5] = "arch\0"
+    let said: u64 = opkrecipe.field((&s_arch[0 as usize]) as u64)
+    var declared: u64 = 0
+    if said != 0 && opkio.g8(said) != 0 {
+        declared = said
+    }
+    if n_mach > 1 {
+        var m: [u8; 51] = "opk: the package holds code for several machines: \0"
+        return fail((&m[0 as usize]) as u64, MACH_FILE[0])
+    }
+    if n_mach == 0 {
+        if declared != 0 && !ulib.streq(declared, (&s_any[0 as usize]) as u64) {
+            if !ulib.streq(declared, (&s_x86[0 as usize]) as u64)
+                && !ulib.streq(declared, (&s_a64[0 as usize]) as u64) {
+                var m: [u8; 38] = "opk: the recipe declares a bad arch: \0"
+                return fail((&m[0 as usize]) as u64, declared)
+            }
+            return opkrecipe.set_field((&s_arch[0 as usize]) as u64, declared)
+        }
+        return opkrecipe.set_field((&s_arch[0 as usize]) as u64,
+            (&s_any[0 as usize]) as u64)
+    }
+    let kind: u64 = machine_name(MACH[0])
+    if kind == 0 {
+        var m: [u8; 48] = "opk: an ELF file has a machine without a name: \0"
+        return fail((&m[0 as usize]) as u64, MACH_FILE[0])
+    }
+    var measured: u64 = (&s_x86[0 as usize]) as u64
+    if kind == 2 {
+        measured = (&s_a64[0 as usize]) as u64
+    }
+    if declared != 0 && !ulib.streq(declared, measured) {
+        var m: [u8; 51] = "opk: the recipe arch and the ELF octets disagree: \0"
+        return fail((&m[0 as usize]) as u64, MACH_FILE[0])
+    }
+    return opkrecipe.set_field((&s_arch[0 as usize]) as u64, measured)
+}
+
+fn meta_put(s: u64) -> bool {
+    let n: u64 = opkio.str_len(s)
+    if mlen + n + 1 >= 16384 {
+        return false
+    }
+    ulib.copy((&META[mlen as usize]) as u64, s, n)
+    mlen = mlen + n
+    return true
+}
+
+fn meta_line(k: u64, v: u64) -> bool {
+    var eq: [u8; 2] = "=\0"
+    var nl: [u8; 2] = "\n\0"
+    return meta_put(k) && meta_put((&eq[0 as usize]) as u64) && meta_put(v)
+        && meta_put((&nl[0 as usize]) as u64)
+}
+
+fn is_base_field(k: u64) -> bool {
+    var names: [u8; 31] = "name\0fassung\0titel\0info\0keys\0\0\0"
+    var at: u64 = 0
+    while opkio.g8((&names[0 as usize]) as u64 + at) != 0 {
+        if ulib.streq(k, (&names[at as usize]) as u64) {
+            return true
+        }
+        at = at + opkio.str_len((&names[at as usize]) as u64) + 1
+    }
+    return false
+}
+
+fn list_item(which: u64, i: u64) -> u64 {
+    if which == 0 {
+        return opkrecipe.need_at(i)
+    }
+    return opkrecipe.handle_at(i)
+}
+
+fn emit_sorted(which: u64, count: u64, key: u64) -> bool {
+    var order: [u64; 64] = [0 as u64; 64]
+    var i: u64 = 0
+    while i < count {
+        var j: u64 = i
+        while j > 0 && opkio.str_lt(list_item(which, i), list_item(which, order[(j - 1) as usize])) {
+            order[j as usize] = order[(j - 1) as usize]
+            j = j - 1
+        }
+        order[j as usize] = i
+        i = i + 1
+    }
+    i = 0
+    while i < count {
+        if !meta_line(key, list_item(which, order[i as usize])) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn build_meta() -> bool {
+    mlen = 0
+    var names: [u8; 31] = "name\0fassung\0titel\0info\0keys\0\0\0"
+    var empty: [u8; 1] = "\0"
+    var at: u64 = 0
+    while opkio.g8((&names[0 as usize]) as u64 + at) != 0 {
+        var v: u64 = opkrecipe.field((&names[at as usize]) as u64)
+        if v == 0 {
+            v = (&empty[0 as usize]) as u64
+        }
+        if !meta_line((&names[at as usize]) as u64, v) {
+            return false
+        }
+        at = at + opkio.str_len((&names[at as usize]) as u64) + 1
+    }
+    var s_need: [u8; 8] = "braucht\0"
+    var s_hand: [u8; 7] = "handle\0"
+    if !emit_sorted(0, opkrecipe.need_count(), (&s_need[0 as usize]) as u64) {
+        return false
+    }
+    if !emit_sorted(1, opkrecipe.handle_count(), (&s_hand[0 as usize]) as u64) {
+        return false
+    }
+    var order: [u64; 48] = [0 as u64; 48]
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < opkrecipe.field_count() {
+        if !is_base_field(opkrecipe.field_key(i)) {
+            var j: u64 = n
+            while j > 0 && opkio.str_lt(opkrecipe.field_key(i),
+                opkrecipe.field_key(order[(j - 1) as usize])) {
+                order[j as usize] = order[(j - 1) as usize]
+                j = j - 1
+            }
+            order[j as usize] = i
+            n = n + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        if !meta_line(opkrecipe.field_key(order[i as usize]),
+            opkrecipe.field_val(order[i as usize])) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn sort_entries() {
+    var i: u64 = 0
+    while i < n_ent {
+        var j: u64 = i
+        while j > 0 && opkio.str_lt(ent_name(i), ent_name(ORD[(j - 1) as usize])) {
+            ORD[j as usize] = ORD[(j - 1) as usize]
+            j = j - 1
+        }
+        ORD[j as usize] = i
+        i = i + 1
+    }
+}
+
+fn stream_file(e: u64) {
+    var path: [u8; 512] = [0 as u8; 512]
+    src_path(ENT_SRC[e as usize], (&path[0 as usize]) as u64)
+    let fd: u64 = opkio.open_read((&path[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        stream_ok = false
+        return
+    }
+    var total: u64 = 0
+    var going: bool = true
+    while going {
+        let r: u64 = opkio.read_some(fd, (&CH[0 as usize]) as u64, 8192)
+        if r == NONE {
+            stream_ok = false
+            going = false
+        } else if r == 0 {
+            going = false
+        } else {
+            opkio.emit((&CH[0 as usize]) as u64, r)
+            total = total + r
+        }
+    }
+    opkio.close_fd(fd)
+    if total != ENT_SIZE[e as usize] {
+        stream_ok = false
+    }
+}
+
+fn stream_all() {
+    opkio.emit((&META[0 as usize]) as u64, mlen)
+    var i: u64 = 0
+    while i < n_ent {
+        let e: u64 = ORD[i as usize]
+        let nl: u64 = opkio.str_len(ent_name(e))
+        var mode: u64 = 420
+        var typ: u64 = 102
+        if ENT_KIND[e as usize] == KIND_DIR {
+            typ = 100
+            mode = 493
+        } else {
+            let base: u64 = ulib.base_name(ent_name(e))
+            var s_start: [u8; 6] = "start\0"
+            if ulib.streq(base, (&s_start[0 as usize]) as u64) {
+                mode = 493
+            }
+        }
+        opkio.p8((&EH[0 as usize]) as u64, typ)
+        opkio.put_le((&EH[1 as usize]) as u64, mode, 2)
+        opkio.put_le((&EH[3 as usize]) as u64, nl, 2)
+        ulib.copy((&EH[5 as usize]) as u64, ent_name(e), nl)
+        opkio.put_le((&EH[(5 + nl) as usize]) as u64, ENT_SIZE[e as usize], 8)
+        opkio.emit((&EH[0 as usize]) as u64, 5 + nl + 8)
+        if ENT_KIND[e as usize] == KIND_FILE {
+            stream_file(e)
+        }
+        i = i + 1
+    }
+}
+
+fn set_base(recipe: u64) {
+    var i: u64 = opkio.str_len(recipe)
+    while i > 0 && opkio.g8(recipe + i - 1) != 47 {
+        i = i - 1
+    }
+    if i == 0 {
+        BASE[0] = 0 as u8
+        return
+    }
+    ulib.copy((&BASE[0 as usize]) as u64, recipe, i - 1)
+    BASE[(i - 1) as usize] = 0 as u8
+    if i == 1 {
+        BASE[0] = 47 as u8
+        BASE[1] = 0 as u8
+    }
+}
+
+fn reserved(name: u64) -> bool {
+    var list: [u8; 54] = "account\0app\0arch\0kernel\0pref\0setting\0source\0\0\0\0\0\0\0\0\0\0\0"
+    var at: u64 = 0
+    while opkio.g8((&list[0 as usize]) as u64 + at) != 0 {
+        if ulib.streq(name, (&list[at as usize]) as u64) {
+            return true
+        }
+        at = at + opkio.str_len((&list[at as usize]) as u64) + 1
+    }
+    return false
+}
+
+fn build(recipe: u64, out: u64) -> u64 {
+    if !opkrecipe.load(recipe) {
+        var m: [u8; 41] = "opk: the recipe cannot be read or parsed\0"
+        fail((&m[0 as usize]) as u64, 0)
+        return 1
+    }
+    var s_name: [u8; 5] = "name\0"
+    let name: u64 = opkrecipe.field((&s_name[0 as usize]) as u64)
+    if name == 0 || opkio.g8(name) == 0 {
+        var m: [u8; 28] = "opk: the recipe has no name\0"
+        fail((&m[0 as usize]) as u64, 0)
+        return 1
+    }
+    if reserved(name) {
+        var m: [u8; 42] = "opk: this name is a reserved PLAN type: \0\0"
+        fail((&m[0 as usize]) as u64, name)
+        return 1
+    }
+    set_base(recipe)
+    if !collect() || !scan_files() || !decide_arch() || !build_meta() {
+        return 1
+    }
+    sort_entries()
+    stream_ok = true
+    opkio.sink_hash()
+    stream_all()
+    opkio.sink_digest((&DIG[0 as usize]) as u64)
+    opkio.sink_end()
+    if !stream_ok {
+        var m: [u8; 41] = "opk: a source file changed while reading\0"
+        fail((&m[0 as usize]) as u64, 0)
+        return 1
+    }
+    ulib.fill((&HDRB[0 as usize]) as u64, 0, 64)
+    var magic: [u8; 9] = "OPKG0001\0"
+    ulib.copy((&HDRB[0 as usize]) as u64, (&magic[0 as usize]) as u64, 8)
+    opkio.put_le((&HDRB[8 as usize]) as u64, mlen, 8)
+    opkio.put_le((&HDRB[16 as usize]) as u64, dlen, 8)
+    ulib.copy((&HDRB[24 as usize]) as u64, (&DIG[0 as usize]) as u64, 32)
+    if !opkio.sink_write(out) {
+        var m: [u8; 29] = "opk: cannot write the output\0"
+        fail((&m[0 as usize]) as u64, out)
+        return 1
+    }
+    opkio.emit_header((&HDRB[0 as usize]) as u64, 64)
+    stream_all()
+    if !opkio.sink_end() || !stream_ok {
+        var m: [u8; 31] = "opk: writing the output failed\0"
+        fail((&m[0 as usize]) as u64, out)
+        return 1
+    }
+    sha.hex_out((&DIG[0 as usize]) as u64, 32, (&HEXB[0 as usize]) as u64)
+    var sp: [u8; 2] = " \0"
+    var s_fass: [u8; 8] = "fassung\0"
+    var s_arch: [u8; 5] = "arch\0"
+    ulib.say(name)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.say(opkrecipe.field((&s_fass[0 as usize]) as u64))
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.say(opkrecipe.field((&s_arch[0 as usize]) as u64))
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(64 + mlen + dlen)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.say((&HEXB[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}

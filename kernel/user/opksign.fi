@@ -1,0 +1,229 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import sha
+import crypto.ed25519
+import opkio
+import opkinspect
+
+export { sign_package, make_source }
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const MAX_PKGS: u64 = 128
+const PKG_NAME_LEN: u64 = 96
+
+static mut SEED: [u8; 32] = [0 as u8; 32]
+static mut PUBK: [u8; 32] = [0 as u8; 32]
+static mut SIG: [u8; 64] = [0 as u8; 64]
+static mut NAMES: [u8; 12288] = [0 as u8; 12288]
+static mut INDEX: [u8; 65536] = [0 as u8; 65536]
+static mut HEXB: [u8; 72] = [0 as u8; 72]
+static mut DIG: [u8; 32] = [0 as u8; 32]
+
+fn fail(msg: u64, arg: u64) -> u64 {
+    ulib.eput(msg)
+    if arg != 0 {
+        ulib.eput(arg)
+    }
+    var nl: [u8; 2] = "\n\0"
+    ulib.eput((&nl[0 as usize]) as u64)
+    return 1
+}
+
+fn read_seed(path: u64) -> bool {
+    let n: u64 = opkio.read_file(path, (&SEED[0 as usize]) as u64, 33)
+    if n != 32 {
+        var m: [u8; 46] = "opk: the key file must hold exactly 32 octets\0"
+        fail((&m[0 as usize]) as u64, path)
+        return false
+    }
+    return true
+}
+
+fn sign_buffer(msg: u64, len: u64) -> bool {
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        var m: [u8; 33] = "opk: Ed25519 could not be set up\0"
+        fail((&m[0 as usize]) as u64, 0)
+        return false
+    }
+    if !ed25519.ed25519_public(&c, (&SEED[0 as usize]) as u64, (&PUBK[0 as usize]) as u64) {
+        return false
+    }
+    if !ed25519.ed25519_sign(&c, (&SEED[0 as usize]) as u64, msg, len as usize,
+        (&SIG[0 as usize]) as u64) {
+        return false
+    }
+    return ed25519.ed25519_verify(&c, (&PUBK[0 as usize]) as u64, msg, len as usize,
+        (&SIG[0 as usize]) as u64)
+}
+
+fn sig_path(path: u64, suffix: u64, out: u64) -> bool {
+    if opkio.str_len(path) + opkio.str_len(suffix) >= 250 {
+        return false
+    }
+    ulib.strcpy(out, path)
+    ulib.strcat(out, suffix)
+    return true
+}
+
+fn sign_package(pkg: u64, keyfile: u64, buf: u64, cap: u64) -> u64 {
+    if !read_seed(keyfile) {
+        return 1
+    }
+    let n: u64 = opkinspect.load_package(pkg, buf, cap)
+    if n == 0 {
+        return 1
+    }
+    if !sign_buffer(buf, n) {
+        var m: [u8; 28] = "opk: signing failed or the\0\0"
+        return fail((&m[0 as usize]) as u64, 0)
+    }
+    var ext: [u8; 5] = ".sig\0"
+    var out: [u8; 256] = [0 as u8; 256]
+    if !sig_path(pkg, (&ext[0 as usize]) as u64, (&out[0 as usize]) as u64)
+        || !opkio.write_file((&out[0 as usize]) as u64, (&SIG[0 as usize]) as u64, 64) {
+        var m: [u8; 29] = "opk: cannot write the .sig: \0"
+        return fail((&m[0 as usize]) as u64, (&out[0 as usize]) as u64)
+    }
+    var s_ok: [u8; 9] = "signed: \0"
+    ulib.say((&s_ok[0 as usize]) as u64)
+    ulib.say((&out[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn put_text(pos: u64, s: u64) -> u64 {
+    let n: u64 = opkio.str_len(s)
+    if pos + n + 1 >= 65536 {
+        return NONE
+    }
+    ulib.copy((&INDEX[pos as usize]) as u64, s, n)
+    return pos + n
+}
+
+fn put_char(pos: u64, c: u64) -> u64 {
+    if pos + 2 >= 65536 {
+        return NONE
+    }
+    INDEX[pos as usize] = c as u8
+    return pos + 1
+}
+
+fn add_line(pos: u64, dir: u64, name: u64, buf: u64, cap: u64) -> u64 {
+    var path: [u8; 256] = [0 as u8; 256]
+    if opkio.str_len(dir) + opkio.str_len(name) + 2 >= 255 {
+        return NONE
+    }
+    ulib.strcpy((&path[0 as usize]) as u64, dir)
+    var sl: [u8; 2] = "/\0"
+    ulib.strcat((&path[0 as usize]) as u64, (&sl[0 as usize]) as u64)
+    ulib.strcat((&path[0 as usize]) as u64, name)
+    let n: u64 = opkinspect.load_package((&path[0 as usize]) as u64, buf, cap)
+    if n == 0 {
+        return NONE
+    }
+    sha.hash(buf + 64, n - 64, (&DIG[0 as usize]) as u64)
+    sha.hex_out((&DIG[0 as usize]) as u64, 32, (&HEXB[0 as usize]) as u64)
+    var v: [u8; 256] = [0 as u8; 256]
+    var k_name: [u8; 5] = "name\0"
+    var k_fass: [u8; 8] = "fassung\0"
+    var k_arch: [u8; 5] = "arch\0"
+    var dash: [u8; 2] = "-\0"
+    var p: u64 = pos
+    if !opkinspect.meta_get(buf, (&k_name[0 as usize]) as u64, (&v[0 as usize]) as u64, 256) {
+        var m: [u8; 29] = "opk: the package has no name\0"
+        fail((&m[0 as usize]) as u64, name)
+        return NONE
+    }
+    p = put_text(p, (&v[0 as usize]) as u64)
+    p = put_char(p, 9)
+    if opkinspect.meta_get(buf, (&k_fass[0 as usize]) as u64, (&v[0 as usize]) as u64, 256) {
+        p = put_text(p, (&v[0 as usize]) as u64)
+    } else {
+        p = put_text(p, (&dash[0 as usize]) as u64)
+    }
+    p = put_char(p, 9)
+    p = put_text(p, (&HEXB[0 as usize]) as u64)
+    p = put_char(p, 9)
+    var num: [u8; 24] = [0 as u8; 24]
+    ulib.digits(n, (&num[0 as usize]) as u64)
+    p = put_text(p, (&num[0 as usize]) as u64)
+    p = put_char(p, 9)
+    p = put_text(p, name)
+    p = put_char(p, 9)
+    v[0] = 0 as u8
+    opkinspect.meta_get(buf, (&k_arch[0 as usize]) as u64, (&v[0 as usize]) as u64, 256)
+    p = put_text(p, (&v[0 as usize]) as u64)
+    p = put_char(p, 10)
+    return p
+}
+
+fn make_source(dir: u64, keyfile: u64, buf: u64, cap: u64) -> u64 {
+    var ext: [u8; 5] = ".opk\0"
+    let count: u64 = opkio.dir_names(dir, (&NAMES[0 as usize]) as u64, PKG_NAME_LEN,
+        MAX_PKGS, (&ext[0 as usize]) as u64)
+    if count == NONE {
+        var m: [u8; 29] = "opk: cannot list directory: \0"
+        return fail((&m[0 as usize]) as u64, dir)
+    }
+    var order: [u64; 128] = [0 as u64; 128]
+    var i: u64 = 0
+    while i < count {
+        var j: u64 = i
+        while j > 0 && opkio.str_lt((&NAMES[(i * PKG_NAME_LEN) as usize]) as u64,
+            (&NAMES[(order[(j - 1) as usize] * PKG_NAME_LEN) as usize]) as u64) {
+            order[j as usize] = order[(j - 1) as usize]
+            j = j - 1
+        }
+        order[j as usize] = i
+        i = i + 1
+    }
+    var pos: u64 = 0
+    i = 0
+    while i < count {
+        pos = add_line(pos, dir, (&NAMES[(order[i as usize] * PKG_NAME_LEN) as usize]) as u64, buf, cap)
+        if pos == NONE {
+            return 1
+        }
+        i = i + 1
+    }
+    var name: [u8; 256] = [0 as u8; 256]
+    var s_index: [u8; 7] = "/INDEX\0"
+    if !sig_path(dir, (&s_index[0 as usize]) as u64, (&name[0 as usize]) as u64)
+        || !opkio.write_file((&name[0 as usize]) as u64, (&INDEX[0 as usize]) as u64, pos) {
+        var m: [u8; 26] = "opk: cannot write INDEX: \0"
+        return fail((&m[0 as usize]) as u64, (&name[0 as usize]) as u64)
+    }
+    var s_n: [u8; 16] = "INDEX entries: \0"
+    ulib.say((&s_n[0 as usize]) as u64)
+    ulib.sayu(count)
+    ulib.nl()
+    if keyfile == 0 {
+        return 0
+    }
+    if !read_seed(keyfile) {
+        return 1
+    }
+    if !sign_buffer((&INDEX[0 as usize]) as u64, pos) {
+        var m: [u8; 20] = "opk: signing failed\0"
+        return fail((&m[0 as usize]) as u64, 0)
+    }
+    var s_sig: [u8; 11] = "/INDEX.sig\0"
+    var s_pub: [u8; 17] = "/oeffentlich.key\0"
+    if !sig_path(dir, (&s_sig[0 as usize]) as u64, (&name[0 as usize]) as u64)
+        || !opkio.write_file((&name[0 as usize]) as u64, (&SIG[0 as usize]) as u64, 64) {
+        var m: [u8; 30] = "opk: cannot write INDEX.sig: \0"
+        return fail((&m[0 as usize]) as u64, (&name[0 as usize]) as u64)
+    }
+    if !sig_path(dir, (&s_pub[0 as usize]) as u64, (&name[0 as usize]) as u64)
+        || !opkio.write_file((&name[0 as usize]) as u64, (&PUBK[0 as usize]) as u64, 32) {
+        var m: [u8; 30] = "opk: cannot write the pub key\0"
+        return fail((&m[0 as usize]) as u64, (&name[0 as usize]) as u64)
+    }
+    var s_done: [u8; 22] = "INDEX.sig written: ok\0"
+    ulib.say((&s_done[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}

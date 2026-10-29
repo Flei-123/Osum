@@ -1,0 +1,233 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import opkio
+
+export {
+    load, field_count, field_key, field_val, field, set_field,
+    need_count, need_at, handle_count, handle_at,
+    file_count, file_dest, file_src,
+}
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const MAX_FIELDS: u64 = 48
+const MAX_LIST: u64 = 64
+const MAX_FILES: u64 = 512
+const KEY_LEN: u64 = 32
+const VAL_LEN: u64 = 256
+const ITEM_LEN: u64 = 96
+const DEST_LEN: u64 = 128
+const SRC_LEN: u64 = 256
+
+static mut RAW: [u8; 65536] = [0 as u8; 65536]
+static mut F_KEY: [u8; 1536] = [0 as u8; 1536]
+static mut F_VAL: [u8; 12288] = [0 as u8; 12288]
+static mut NEEDS: [u8; 6144] = [0 as u8; 6144]
+static mut HANDLES: [u8; 6144] = [0 as u8; 6144]
+static mut DESTS: [u8; 65536] = [0 as u8; 65536]
+static mut SRCS: [u8; 131072] = [0 as u8; 131072]
+static mut n_fields: u64 = 0
+static mut n_needs: u64 = 0
+static mut n_handles: u64 = 0
+static mut n_files: u64 = 0
+
+fn is_space(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 13 || c == 10
+}
+
+fn trim(p: u64) -> u64 {
+    var n: u64 = opkio.str_len(p)
+    while n > 0 && is_space(opkio.g8(p + n - 1)) {
+        n = n - 1
+        opkio.p8(p + n, 0)
+    }
+    var s: u64 = 0
+    while is_space(opkio.g8(p + s)) {
+        s = s + 1
+    }
+    return p + s
+}
+
+fn find_field(key: u64) -> u64 {
+    var i: u64 = 0
+    while i < n_fields {
+        if ulib.streq((&F_KEY[(i * KEY_LEN) as usize]) as u64, key) {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn set_field(key: u64, val: u64) -> bool {
+    if opkio.str_len(key) >= KEY_LEN || opkio.str_len(val) >= VAL_LEN {
+        return false
+    }
+    var i: u64 = find_field(key)
+    if i == NONE {
+        if n_fields >= MAX_FIELDS {
+            return false
+        }
+        i = n_fields
+        n_fields = n_fields + 1
+        ulib.strcpy((&F_KEY[(i * KEY_LEN) as usize]) as u64, key)
+    }
+    ulib.strcpy((&F_VAL[(i * VAL_LEN) as usize]) as u64, val)
+    return true
+}
+
+fn field(key: u64) -> u64 {
+    let i: u64 = find_field(key)
+    if i == NONE {
+        return 0
+    }
+    return (&F_VAL[(i * VAL_LEN) as usize]) as u64
+}
+
+fn field_count() -> u64 {
+    return n_fields
+}
+
+fn field_key(i: u64) -> u64 {
+    return (&F_KEY[(i * KEY_LEN) as usize]) as u64
+}
+
+fn field_val(i: u64) -> u64 {
+    return (&F_VAL[(i * VAL_LEN) as usize]) as u64
+}
+
+fn need_count() -> u64 {
+    return n_needs
+}
+
+fn need_at(i: u64) -> u64 {
+    return (&NEEDS[(i * ITEM_LEN) as usize]) as u64
+}
+
+fn handle_count() -> u64 {
+    return n_handles
+}
+
+fn handle_at(i: u64) -> u64 {
+    return (&HANDLES[(i * ITEM_LEN) as usize]) as u64
+}
+
+fn file_count() -> u64 {
+    return n_files
+}
+
+fn file_dest(i: u64) -> u64 {
+    return (&DESTS[(i * DEST_LEN) as usize]) as u64
+}
+
+fn file_src(i: u64) -> u64 {
+    return (&SRCS[(i * SRC_LEN) as usize]) as u64
+}
+
+fn add_item(table: u64, count: u64, v: u64) -> bool {
+    if count >= MAX_LIST || opkio.str_len(v) >= ITEM_LEN {
+        return false
+    }
+    ulib.strcpy(table + count * ITEM_LEN, v)
+    return true
+}
+
+fn add_file(v: u64) -> bool {
+    if n_files >= MAX_FILES {
+        return false
+    }
+    var cut: u64 = 0
+    while opkio.g8(v + cut) != 0 && opkio.g8(v + cut) != 32 {
+        cut = cut + 1
+    }
+    if opkio.g8(v + cut) == 0 {
+        return false
+    }
+    opkio.p8(v + cut, 0)
+    let dest: u64 = trim(v)
+    let src: u64 = trim(v + cut + 1)
+    if opkio.str_len(dest) >= DEST_LEN || opkio.str_len(src) >= SRC_LEN
+        || opkio.str_len(src) == 0 {
+        return false
+    }
+    ulib.strcpy((&DESTS[(n_files * DEST_LEN) as usize]) as u64, dest)
+    ulib.strcpy((&SRCS[(n_files * SRC_LEN) as usize]) as u64, src)
+    n_files = n_files + 1
+    return true
+}
+
+fn parse_line(line: u64) -> bool {
+    var i: u64 = 0
+    while opkio.g8(line + i) != 0 {
+        if opkio.g8(line + i) == 35 {
+            opkio.p8(line + i, 0)
+        } else {
+            i = i + 1
+        }
+    }
+    let z: u64 = trim(line)
+    if opkio.g8(z) == 0 {
+        return true
+    }
+    var eq: u64 = 0
+    while opkio.g8(z + eq) != 0 && opkio.g8(z + eq) != 61 {
+        eq = eq + 1
+    }
+    var v: u64 = z + eq
+    if opkio.g8(z + eq) == 61 {
+        opkio.p8(z + eq, 0)
+        v = z + eq + 1
+    }
+    let k: u64 = trim(z)
+    let val: u64 = trim(v)
+    if opkio.g8(k) == 0 {
+        return true
+    }
+    var s_file: [u8; 6] = "datei\0"
+    var s_need: [u8; 8] = "braucht\0"
+    var s_hand: [u8; 7] = "handle\0"
+    if ulib.streq(k, (&s_file[0 as usize]) as u64) {
+        return add_file(val)
+    }
+    if ulib.streq(k, (&s_need[0 as usize]) as u64) {
+        if !add_item((&NEEDS[0 as usize]) as u64, n_needs, val) {
+            return false
+        }
+        n_needs = n_needs + 1
+        return true
+    }
+    if ulib.streq(k, (&s_hand[0 as usize]) as u64) {
+        if !add_item((&HANDLES[0 as usize]) as u64, n_handles, val) {
+            return false
+        }
+        n_handles = n_handles + 1
+        return true
+    }
+    return set_field(k, val)
+}
+
+fn load(path: u64) -> bool {
+    n_fields = 0
+    n_needs = 0
+    n_handles = 0
+    n_files = 0
+    let n: u64 = opkio.read_file(path, (&RAW[0 as usize]) as u64, 65535)
+    if n == NONE || n >= 65535 {
+        return false
+    }
+    RAW[n as usize] = 0 as u8
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && RAW[e as usize] != 10 {
+            e = e + 1
+        }
+        RAW[e as usize] = 0 as u8
+        if !parse_line((&RAW[at as usize]) as u64) {
+            return false
+        }
+        at = e + 1
+    }
+    return true
+}
