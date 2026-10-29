@@ -1023,7 +1023,7 @@ for p in $PRESETS; do
     f="$TMPD/s-$p/serial.txt"
     [ -s "$f" ] || { BARBAD=$((BARBAD+1)); continue; }
     want=$(grep -aE '^edge=' "assets/themes/$p.preset" | cut -d= -f2)
-    got=$(grep -a 'taskbar: conf ' "$f" | tail -1 | grep -oE 'ename=[a-z]+' | cut -d= -f2)
+    got=$(grep -a 'taskbar: conf ' "$f" | grep -aE 'ename=[a-z]+' | tail -1 | grep -oE 'ename=[a-z]+' | cut -d= -f2)
     [ "$want" = "$got" ] || { echo "        $p: Leiste $got statt $want"; BARBAD=$((BARBAD+1)); }
 done
 num "in jeder Aufnahme sitzt die Leiste an der Kante, die die Vorlage nennt" "$BARBAD" eq 0
