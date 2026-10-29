@@ -43,7 +43,7 @@ export {
     init, create, start, schedule, on_tick, yield_now, sleep_ticks, idle_wait,
     tote_schlaefe,
     exit_task, reap, claim_zombie, reap_claimed, S_REAPING, lock_gone,
-    kill_current, wake_pid, wait_sleep, find_pid, current, tget, tset, task_at,
+    kill_current, wake_pid, wait_sleep, stopped_child, stop_claim, find_pid, current, tget, tset, task_at,
     stack_high, STACK_PAINT,
     // RUNDE LEISTE: die Waechterseite unter jedem Kernstapel.
     guard_faults, guard_last_pid, guard_last_depth, guard_broken,
@@ -2721,7 +2721,7 @@ fn sleep_ticks(state: u64, ticks: u64) {
 // running here, a third core picked it up with the stack pointer of its LAST
 // switch, and two cores ran on one kernel stack -- #GP/#DF at garbage return
 // addresses right after a script started a program (VM, 4 cores: every time).
-fn wait_sleep(state: u64, want: u64) {
+fn wait_sleep(state: u64, want: u64, untraced: u64) {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
     let cur: u64 = current(state)
@@ -2736,12 +2736,51 @@ fn wait_sleep(state: u64, want: u64) {
             irq_restore(flags)
             return
         }
+        if untraced != 0 && tget(state, i, T_PARENT) == cur && (want == 0 || tget(state, i, T_PID) == want)
+            && stop_unreported(tget(state, i, T_STOPSIG)) {
+            atomic.lock_give(state, atomic.L_SCHED)
+            irq_restore(flags)
+            return
+        }
         i = i + 1
     }
     tset(state, cur, T_WAITPID, want)
     tset(state, cur, T_STATE, S_WAIT)
     schedule_locked(state)
     irq_restore(flags)
+}
+
+const STOP_REPORTED: u64 = 256
+
+fn stop_unreported(stopsig: u64) -> bool {
+    return stopsig != 0 && (stopsig & STOP_REPORTED) == 0
+}
+
+fn stopped_child(state: u64, me: u64, want: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        if tget(state, i, T_PARENT) == me && (want == 0 || tget(state, i, T_PID) == want)
+            && stop_unreported(tget(state, i, T_STOPSIG)) {
+            return i
+        }
+        i = i + 1
+    }
+    return kstate.MAX_TASKS
+}
+
+fn stop_claim(state: u64, task: u64) -> u64 {
+    let flags: u64 = irq_save()
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    let sig: u64 = tget(state, task, T_STOPSIG)
+    var claimed: u64 = 0
+    if stop_unreported(sig) {
+        tset(state, task, T_STOPSIG, sig | STOP_REPORTED)
+        claimed = sig
+    }
+    atomic.lock_give(state, atomic.L_SCHED)
+    irq_restore(flags)
+    return claimed
 }
 
 // SIGSTOP & co: S_STOP and the switch under one hold of L_SCHED. `contbit`

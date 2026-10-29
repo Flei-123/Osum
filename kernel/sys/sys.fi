@@ -2309,6 +2309,7 @@ const SEEK_CUR: u64 = 1
 const SEEK_END: u64 = 2
 
 const WNOHANG: u64 = 1
+const WUNTRACED: u64 = 2
 
 // ROUNDE K7: die beiden anderen Schutzbits. `mmap` auf /dev/fb liest
 // PROT_WRITE, um zu entscheiden, ob die Kachel beschreibbar wird.
@@ -8192,7 +8193,7 @@ fn do_waitid(state: u64, me: u64, idtype: u64, id: u64, info: u64, options: u64)
     var child: u64 = find_zombie_child(state, me, want)
     var nowait_rounds: u64 = 0
     while child >= kstate.MAX_TASKS && (options & 0x1000000) != 0 && (options & 1) == 0 && nowait_rounds < 100000 && find_child(state, me, want) < kstate.MAX_TASKS {
-        sched.wait_sleep(state, want)
+        sched.wait_sleep(state, want, 0)
         nowait_rounds = nowait_rounds + 1
         child = find_zombie_child(state, me, want)
     }
@@ -10846,11 +10847,26 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
             }
             return who
         }
+        if (options & WUNTRACED) != 0 {
+            let stopped: u64 = sched.stopped_child(state, me, want)
+            if stopped < kstate.MAX_TASKS {
+                let who: u64 = sched.tget(state, stopped, sched.T_PID)
+                let sig: u64 = sched.stop_claim(state, stopped)
+                if sig != 0 {
+                    if status != 0 {
+                        if !put32(state, me, status, (sig << 8) | 127) {
+                            return neg(errno.E_FAULT)
+                        }
+                    }
+                    return who
+                }
+            }
+        }
         if (options & WNOHANG) != 0 {
             return 0
         }
         // State and switch under one lock hold -- see sched.wait_sleep.
-        sched.wait_sleep(state, want)
+        sched.wait_sleep(state, want, options & WUNTRACED)
         rounds = rounds + 1
     }
     return neg(errno.E_CHILD)
