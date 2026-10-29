@@ -46,6 +46,9 @@ def ppm(name):
         return None
 
 
+ok(len(re.findall(r"explorer: new window=\d+", ser)) >= 1, "Ctrl+N starts a new file manager window (explorer: new window=)")
+ok(len(re.findall(r"explorer: strip h=", ser)) >= 2, "the new window paints its own title strip as well")
+
 # ---------------------------------------------------------------- the dumps of the window list
 dumps = ser.split("wm: fenliste")[1:]
 

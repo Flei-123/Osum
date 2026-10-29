@@ -550,7 +550,7 @@ taste esc
 warte 1
 foto 03-explorer
 # --- ein Dialog aus dem Dateimanager
-taste ctrl-n
+taste ctrl-shift-n
 warte 3
 foto 04-dialog
 taste esc

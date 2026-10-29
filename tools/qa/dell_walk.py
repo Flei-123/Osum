@@ -44,7 +44,7 @@ APPS = [
     dict(id="settings", osp="settings", name="Settings", term="settings", bin="settings", prog="settings settingsd",
          acts=["warte 3", "klick_body", "foto {id}-3-body", "taste tab", "warte 1", "foto {id}-4-tab"]),
     dict(id="explorer", osp="explorer", name="File Explorer", term="explorer", bin="explorer", prog="explorer",
-         acts=["warte 3", "taste ctrl-n", "warte 3", "foto {id}-3-dialog", "taste esc", "warte 2",
+         acts=["warte 3", "taste ctrl-shift-n", "warte 3", "foto {id}-3-dialog", "taste esc", "warte 2",
                "foto {id}-4-dialog-zu"]),
     dict(id="terminal", osp="terminal", name="Terminal", term="terminal", bin="sh", prog="sh ls ps echo cat",
          acts=["warte 3", "klick_body", "tippe ls", "taste ret", "warte 2", "tippe ps", "taste ret",
