@@ -329,7 +329,7 @@ class Fahrer:
         out.append((nm, cx, cy, "end"))
         return out
 
-    def klick(self, x, y, mal=1, taste=1):
+    def klick(self, x, y, mal=1, taste=1, halten=0.05):
         self.fahre(x, y)
         time.sleep(0.35)
         for i in range(mal):
@@ -352,7 +352,7 @@ class Fahrer:
             # NICHT geschlafen. Die Umlaufzeit des Monitors ist schon
             # mehr Abstand, als ein Mensch je erzeugt.
             if mal == 1:
-                time.sleep(0.05)
+                time.sleep(halten)
             self.cmd("mouse_button 0")
         time.sleep(1.2)
 
@@ -1365,7 +1365,7 @@ def main():
             elif b == "mklickauf":
                 f.klick(x, y, 1, taste=4)   # r529: the middle button (bit 2)
             else:
-                f.klick(x, y, 2 if b == "doppelauf" else 1)
+                f.klick(x, y, 2 if b == "doppelauf" else 1, halten=0.3 if arg == "toast" else 0.05)
         # RUNDE ECHTHARDWARE-3: `ziehe <x0>,<y0> <x1>,<y1>` und
         # `zieheauf <name> <dx>,<dy>` -- die Bewegung bei gedrueckter
         # Taste, ohne die sich weder die Fenstergroesse noch ein
