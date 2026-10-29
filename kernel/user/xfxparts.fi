@@ -1,0 +1,73 @@
+profile kernel
+
+import ulib
+import xfxio
+import xfxpath
+
+export { present, assemble }
+
+const FMODE: u64 = 420
+const MAX_PARTS: u64 = 900
+const NUM_AT: u64 = 31
+static mut P_PART: [u8; 32] = "/usr/share/xfx/firefox.tar.part\0"
+
+fn part_name(n: u64, out: u64) {
+    ulib.strcpy(out, (&P_PART[0 as usize]) as u64)
+    __mmio_write8((out + NUM_AT) as *mut u8, (48 + n / 100 % 10) as u8)
+    __mmio_write8((out + NUM_AT + 1) as *mut u8, (48 + n / 10 % 10) as u8)
+    __mmio_write8((out + NUM_AT + 2) as *mut u8, (48 + n % 10) as u8)
+    __mmio_write8((out + NUM_AT + 3) as *mut u8, 0 as u8)
+}
+
+fn present() -> bool {
+    var p: [u8; 40] = [0 as u8; 40]
+    part_name(0, (&p[0 as usize]) as u64)
+    return xfxio.exists((&p[0 as usize]) as u64)
+}
+
+fn copy_part(src: u64, dst: u64, buf: u64, cap: u64) -> bool {
+    var good: bool = true
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, src, buf, cap)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else if ulib.sys(ulib.SYS_WRITE, dst, buf, n) != n {
+            good = false
+            going = false
+        }
+    }
+    return good
+}
+
+fn assemble(buf: u64, cap: u64) -> u64 {
+    var p: [u8; 40] = [0 as u8; 40]
+    let out: u64 = ulib.sys(ulib.SYS_OPEN, xfxpath.p_tar(), ulib.O_MAKE, FMODE)
+    if ulib.bad(out) {
+        return ulib.EOF
+    }
+    var n: u64 = 0
+    var good: bool = true
+    var going: bool = true
+    while going && n < MAX_PARTS {
+        part_name(n, (&p[0 as usize]) as u64)
+        let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p[0 as usize]) as u64, 0, 0)
+        if ulib.bad(fd) {
+            going = false
+        } else {
+            good = copy_part(fd, out, buf, cap)
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            if good {
+                ulib.sys(ulib.SYS_UNLINK, (&p[0 as usize]) as u64, 0, 0)
+                n = n + 1
+            } else {
+                going = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, out, 0, 0)
+    if !good || n == 0 {
+        return ulib.EOF
+    }
+    return n
+}

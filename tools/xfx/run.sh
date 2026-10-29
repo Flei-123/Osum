@@ -90,6 +90,10 @@ def manifest(path, out, flip=False):
     open(out, "w").write("files 2\nlinks 0\ntar %d %s\ngz 0 %s\n" % (os.path.getsize(path), s, "0" * 64))
 
 make_tar(d + "/good.tar", 0)
+raw = open(d + "/good.tar", "rb").read()
+cuts = [0, len(raw) // 3 + 7, 2 * len(raw) // 3 + 11, len(raw)]
+for k in range(3):
+    open(d + "/good.part%03d" % k, "wb").write(raw[cuts[k]:cuts[k + 1]])
 make_tar(d + "/big.tar", big)
 manifest(d + "/good.tar", d + "/good.manifest")
 manifest(d + "/good.tar", d + "/bad.manifest", True)
@@ -198,6 +202,16 @@ done
 SPEC="$SPEC /bin/wayd=$TMPD/xfxstub.elf"
 BASE="$SPEC /etc/passwd=$TMPD/passwd@644:0:0 /etc/group=$TMPD/group@644:0:0 /usr/share/xfx/user.js=$TMPD/user.js@644:0:0"
 
+build_parts_img() {
+    local name=$1 script=$2 plist=""
+    shift 2
+    for k in "$@"; do plist="$plist /usr/share/xfx/firefox.tar.part$k=$TMPD/good.part$k@644:0:0"; done
+    python3 tools/osum/mkfs.py build "$TMPD/$name.img" 16384 $DIRS $BASE $plist \
+        "/usr/share/xfx/firefox.manifest=$TMPD/good.manifest@644:0:0" \
+        "/t/run.sh=$TMPD/$script@644:0:0" > "$TMPD/mkfs-$name.txt" 2>&1 \
+        && ok "image $name built" || { bad "mkfs fails for $name"; head -5 "$TMPD/mkfs-$name.txt"; }
+}
+
 build_img() {
     local name=$1 tar=$2 man=$3 script=$4 blocks=$5
     python3 tools/osum/mkfs.py build "$TMPD/$name.img" "$blocks" $DIRS $BASE \
@@ -205,9 +219,36 @@ build_img() {
         "/t/run.sh=$TMPD/$script@644:0:0" > "$TMPD/mkfs-$name.txt" 2>&1 \
         && ok "image $name built" || { bad "mkfs fails for $name"; head -5 "$TMPD/mkfs-$name.txt"; }
 }
+cat > "$TMPD/parts.sh" <<'SCRIPT'
+echo @@parts
+/bin/xfx install
+/bin/xfxt waitfor /run/xfx.install done 120
+/bin/xfx status
+/bin/xfxt exists /usr/lib/firefox/firefox
+/bin/xfxt exists /usr/share/xfx/firefox.tar
+/bin/xfxt exists /usr/share/xfx/firefox.tar.part000
+/bin/xfxt exists /usr/share/xfx/firefox.tar.part001
+/bin/xfxt exists /usr/share/xfx/firefox.tar.part002
+cat /var/log/xfx.log
+echo @@end
+SCRIPT
+
+cat > "$TMPD/gap.sh" <<'SCRIPT'
+echo @@gap
+/bin/xfx install
+/bin/xfxt waitfor /run/xfx.install failed 120
+/bin/xfx status
+/bin/xfxt exists /usr/lib/firefox/firefox
+/bin/xfxt exists /usr/share/xfx/installed
+cat /var/log/xfx.log
+echo @@end
+SCRIPT
+
 build_img main good.tar good.manifest main.sh 16384
 build_img bad good.tar bad.manifest bad.sh 16384
 build_img big big.tar big.manifest big.sh $(( BIG_MIB * 2 * 2 * 1024 + 32768 ))
+build_parts_img parts parts.sh 000 001 002
+build_parts_img gap gap.sh 000 002
 
 BASIS="nokbd nosched noproc nofs noring3 vfs"
 run_case() {
@@ -278,6 +319,26 @@ has "$B" bad 'sha256 mismatch, nothing extracted' "mismatch reported"
 has "$B" bad 'installed=no install=failed' "status failed, not installed"
 [ "$(seg "$B" bad | grep -ac 'exists=no')" = 3 ] && ok "nothing extracted (no binary, no /usr/lib, no marker)" || bad "something was extracted"
 has "$B" bad 'not installed' "start refused after failed install"
+
+echo "== 4b. split pack =="
+run_case parts 300
+P="$TMPD/parts.txt"
+grep -qa '^@@end' "$P" && ok "parts: script ran to the end" || bad "parts: script did not finish"
+has "$P" parts 'waitfor=ok' "parts: install reaches done"
+has "$P" parts 'installed=yes install=done' "parts: status after install"
+has "$P" parts 'parts joined in' "parts: joined message logged"
+has "$P" parts 'sha256 ok, extracting' "parts: joined tar matches the manifest sha"
+[ "$(seg "$P" parts | grep -ac 'exists=yes')" = 1 ] && ok "parts: only the firefox binary exists afterwards" || bad "parts: wrong set of files left (tar or parts remain)"
+[ "$(seg "$P" parts | grep -ac 'exists=no')" = 4 ] && ok "parts: tar and all three parts removed" || bad "parts: tar or parts still present"
+
+echo "== 4c. missing part =="
+run_case gap 300
+Q="$TMPD/gap.txt"
+grep -qa '^@@end' "$Q" && ok "gap: script ran to the end" || bad "gap: script did not finish"
+has "$Q" gap 'waitfor=ok' "gap: install ends in failed"
+has "$Q" gap 'installed=no install=failed' "gap: status failed, not installed"
+has "$Q" gap 'pack size differs from manifest' "gap: short pack refused by size"
+[ "$(seg "$Q" gap | grep -ac 'exists=no')" = 2 ] && ok "gap: nothing extracted" || bad "gap: something was extracted"
 fi
 
 echo "== 5. hashing speed =="
