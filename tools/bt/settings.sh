@@ -85,7 +85,7 @@ grep -aiq 'panic\|exception\|#PF\|#GP\|#UD' "$T/none.klar" && bad "none: panic/e
 
 fi
 if want de; then
-printf '%s' "$SCRIPT_COMMON" > "$T/de.txt"
+printf '%s' "${SCRIPT_COMMON//start_Settings/start_Einstellungen}" > "$T/de.txt"
 printf 'klickauf srectbtscan\nwarte 8\nfoto bt-de\n' >> "$T/de.txt"
 start_gadget
 run_audit de "$T/de.txt" "$XDEV" lang=de
