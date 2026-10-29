@@ -1,0 +1,183 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.procw
+import usbnet.le
+import bt.hci
+import drv.bt.btusb
+
+export { render, status, command }
+
+static mut k_power: [u8; 7] = "power \0"
+static mut k_state: [u8; 7] = "state \0"
+static mut k_ctrl: [u8; 12] = "controller \0"
+static mut k_hci: [u8; 5] = "hci \0"
+static mut k_mfr: [u8; 14] = "manufacturer \0"
+static mut k_devs: [u8; 9] = "devices \0"
+static mut k_dev: [u8; 5] = "dev \0"
+static mut k_scans: [u8; 7] = "scans \0"
+static mut k_events: [u8; 8] = "events \0"
+static mut k_errors: [u8; 8] = "errors \0"
+static mut v_on: [u8; 3] = "on\0"
+static mut v_off: [u8; 4] = "off\0"
+static mut v_none: [u8; 5] = "none\0"
+static mut v_ready: [u8; 6] = "ready\0"
+static mut v_scan: [u8; 9] = "scanning\0"
+static mut v_other: [u8; 6] = "other\0"
+static mut v_computer: [u8; 9] = "computer\0"
+static mut v_phone: [u8; 6] = "phone\0"
+static mut v_audio: [u8; 6] = "audio\0"
+static mut v_input: [u8; 6] = "input\0"
+static mut v_unknown: [u8; 8] = "unknown\0"
+static mut v_none_addr: [u8; 18] = "00:00:00:00:00:00\0"
+
+fn put(p: *mut u8) {
+    procw.put_s(p as u64)
+}
+
+fn power_text() -> u64 {
+    if btusb.powered() {
+        return (&v_on[0]) as u64
+    }
+    return (&v_off[0]) as u64
+}
+
+fn state_text() -> u64 {
+    if !btusb.attached() {
+        return (&v_none[0]) as u64
+    }
+    if btusb.scanning() {
+        return (&v_scan[0]) as u64
+    }
+    return (&v_ready[0]) as u64
+}
+
+fn kind_text(kind: u64) -> u64 {
+    if kind == hci.KIND_COMPUTER {
+        return (&v_computer[0]) as u64
+    }
+    if kind == hci.KIND_PHONE {
+        return (&v_phone[0]) as u64
+    }
+    if kind == hci.KIND_AUDIO {
+        return (&v_audio[0]) as u64
+    }
+    if kind == hci.KIND_INPUT {
+        return (&v_input[0]) as u64
+    }
+    return (&v_other[0]) as u64
+}
+
+fn put_addr_of(addr: u64) {
+    var tmp: [u8; 24] = [0 as u8; 24]
+    let _n: u64 = hci.fmt_addr((&tmp[0]) as u64, addr)
+    procw.put_s((&tmp[0]) as u64)
+}
+
+fn put_ctrl_addr() {
+    var raw: [u8; 8] = [0 as u8; 8]
+    var i: u64 = 0
+    while i < 6 {
+        le.st8((&raw[0]) as u64, i, btusb.controller_addr() >> (i * 8))
+        i = i + 1
+    }
+    put_addr_of((&raw[0]) as u64)
+}
+
+fn put_rssi(raw: u64) {
+    if raw == 0 {
+        procw.put_c(63)
+        return
+    }
+    let v: i64 = hci.signed_rssi(raw)
+    if v < 0 {
+        procw.put_c(45)
+        procw.put_dec((0 - v) as u64)
+    } else {
+        procw.put_dec(v as u64)
+    }
+}
+
+fn put_name(rec: u64) {
+    let n: u64 = le.ld8(rec, hci.REC_NLEN)
+    if n == 0 {
+        put((&v_unknown[0]) as *mut u8)
+        return
+    }
+    procw.put_s(rec + hci.REC_NAME)
+}
+
+fn put_device(rec: u64) {
+    put((&k_dev[0]) as *mut u8)
+    put_addr_of(rec)
+    procw.put_c(32)
+    put_rssi(le.ld8(rec, hci.REC_RSSI))
+    procw.put_c(32)
+    procw.put_s(kind_text(hci.cod_kind(le.get32(rec, hci.REC_COD))))
+    procw.put_c(32)
+    put_name(rec)
+    procw.put_c(10)
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    btusb.pump(state)
+    procw.begin(out, cap)
+    put((&k_power[0]) as *mut u8)
+    procw.put_s(power_text())
+    procw.put_c(10)
+    put((&k_state[0]) as *mut u8)
+    procw.put_s(state_text())
+    procw.put_c(10)
+    put((&k_ctrl[0]) as *mut u8)
+    if btusb.ready() {
+        put_ctrl_addr()
+    } else {
+        put((&v_none_addr[0]) as *mut u8)
+    }
+    procw.put_c(10)
+    put((&k_hci[0]) as *mut u8)
+    procw.put_dec(btusb.hci_ver())
+    procw.put_c(10)
+    put((&k_mfr[0]) as *mut u8)
+    procw.put_hex(btusb.manufacturer(), 4)
+    procw.put_c(10)
+    put((&k_scans[0]) as *mut u8)
+    procw.put_dec(btusb.scans_started())
+    procw.put_c(10)
+    put((&k_events[0]) as *mut u8)
+    procw.put_dec(btusb.events_seen())
+    procw.put_c(10)
+    put((&k_errors[0]) as *mut u8)
+    procw.put_dec(btusb.event_errors())
+    procw.put_c(10)
+    let n: u64 = hci.tab_count(btusb.table())
+    put((&k_devs[0]) as *mut u8)
+    procw.put_dec(n)
+    procw.put_c(10)
+    var i: u64 = 0
+    while i < n {
+        put_device(hci.tab_rec(btusb.table(), i))
+        i = i + 1
+    }
+    return procw.used()
+}
+
+fn status(state: u64, out: u64) -> u64 {
+    btusb.pump(state)
+    procw.begin(out, 96)
+    put((&k_power[0]) as *mut u8)
+    procw.put_s(power_text())
+    procw.put_c(32)
+    put((&k_state[0]) as *mut u8)
+    procw.put_s(state_text())
+    procw.put_c(32)
+    put((&k_devs[0]) as *mut u8)
+    procw.put_dec(hci.tab_count(btusb.table()))
+    procw.put_c(10)
+    return procw.used()
+}
+
+fn command(state: u64, p: u64, n: u64) -> bool {
+    return btusb.command(state, p, n) == btusb.CMD_OK
+}

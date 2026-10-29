@@ -76,6 +76,7 @@ import usbnet.ax88772_drv
 import drv.net.usbnet
 import drv.net.usbvnic
 import drv.usb.xhci
+import drv.bt.btusb
 import usb.scsi
 import drv.usb.chdiag
 import drv.usb.usbdiag
@@ -111,7 +112,7 @@ export {
     rangtest, rangtest_max,
     // RUNDE HIDPUNKTE: die Punktzahl je Regler und die getroffene Wahl.
     punkte, pkt_get, choice,
-    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM, DRV_RNDIS, DRV_NCM, DRV_CH336, DRV_AX88772, DRV_AX88179, DRV_RTL8153,
+    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM, DRV_RNDIS, DRV_NCM, DRV_CH336, DRV_AX88772, DRV_AX88179, DRV_RTL8153, DRV_BT,
     // ============================== RUNDE BLECHEINGABE
     // Was der Kern WIRKLICH sieht -- fuer den Bericht auf dem Schirm.
     // Justin kann nur fotografieren; eine Diagnose auf der seriellen
@@ -488,6 +489,7 @@ const DRV_CH336: u64 = 10
 const DRV_AX88772: u64 = 11
 const DRV_AX88179: u64 = 12
 const DRV_RTL8153: u64 = 13
+const DRV_BT: u64 = 14
 const S_AXOK: u64 = 0x1D0 // 1 = a vendor-class interface may be picked in `wanted` (ASIX dongle)
 // Scratch cells of the USB state page (inside the 0x200 bytes that `stage` clears).
 const S_RNDISOK: u64 = 0x1E0 // 1 = RNDIS control interfaces may be picked in `wanted`
@@ -1449,11 +1451,16 @@ fn drv_name(k: u64) {
     var s_i: [u8; 5] = "isoc\0"
     var s_c: [u8; 4] = "ncm\0"
     var s_w: [u8; 6] = "ch336\0"
+    var s_bt: [u8; 6] = "btusb\0"
     var s_ax: [u8; 8] = "ax88772\0"
     var s_a9: [u8; 8] = "ax88179\0"
     var s_rt: [u8; 8] = "rtl8153\0"
     if k == DRV_AX88179 {
         serial.puts((&s_a9[0]) as u64)
+        return
+    }
+    if k == DRV_BT {
+        serial.puts((&s_bt[0]) as u64)
         return
     }
     if k == DRV_RTL8153 {
@@ -2246,6 +2253,9 @@ fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
         }
         return sub == 6 && g(state, S_NOECM) == 0
     }
+    if cls == 0xE0 && sub == 1 && pro == 1 {
+        return true
+    }
     // r811: RNDIS control interface of Android (E0/01/03) and of Windows-compatible gadgets (EF/04/01).
     if (cls == 0xE0 && sub == 1 && pro == 3) || (cls == 0xEF && sub == 4 && pro == 1) {
         return g(state, S_RNDISOK) != 0
@@ -2287,6 +2297,9 @@ fn driver_for(cls: u64, sub: u64, pro: u64) -> u64 {
     if (cls == CLS_CDC && sub == 2 && pro == 0xFF) || (cls == 0xE0 && sub == 1 && pro == 3)
         || (cls == 0xEF && sub == 4 && pro == 1) {
         return DRV_RNDIS
+    }
+    if cls == 0xE0 && sub == 1 && pro == 1 {
+        return DRV_BT
     }
     if cls == 0xFF {
         return DRV_CH336
@@ -2622,6 +2635,10 @@ fn bind(state: u64, d: u64) {
         ch336_start(state, d)
         return
     }
+    if k == DRV_BT {
+        bt_start(state, d)
+        return
+    }
     if k == DRV_AX88772 {
         ax88772_start(state, d)
         return
@@ -2932,6 +2949,15 @@ fn rndis_start(state: u64, d: u64) {
 // give the chip info and the MAC; the bulk pipes come from the interface descriptor (`parse`). HYPOTHESIS: the
 // register map is from one out-of-tree driver and not yet confirmed on a real chip, so nothing is written to the chip.
 // Serial lines: `usb: ch336 info=<8 octets>`, `usb: ch336 <mac>`, or `usb: ch336 failed step=N` (1 info, 2 mac, 3 attach).
+fn bt_start(state: u64, d: u64) {
+    let dci: u64 = dg(state, d, D_INTDCI)
+    ds(state, d, D_INTDCI, 0)
+    if dci == 0 {
+        return
+    }
+    let _ok: bool = btusb.attach(state, dg(state, d, D_SLOT), dci)
+}
+
 fn ch336_start(state: u64, d: u64) {
     var s_bad: [u8; 18] = "usb: ch336 failed\0"
     var s_step: [u8; 7] = "step=\0\0"
@@ -3973,6 +3999,7 @@ fn unplug_dev(state: u64, d: u64) {
         s(state, S_MSCWEG, g(state, S_MSCWEG) + 1)
     }
     usbnet.unplug_slot(state, dg(state, d, D_SLOT))
+    btusb.unplug_slot(state, dg(state, d, D_SLOT))
     post_event(state, d, uevent.ACT_REMOVE)
     drop_dev(state, d)
     s(state, S_NDEV, g(state, S_NDEV) - 1)

@@ -1,0 +1,478 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import serial
+import lib.kstate
+import mm.mem
+import drv.usb.xhci
+import usbnet.le
+import bt.hci
+
+export {
+    attach, unplug_slot, pump, command, attached, ready, powered, scanning, controller_addr, hci_ver,
+    manufacturer, table, TAB_CAP, scans_started, scans_done, events_seen, event_errors, init_step,
+    CMD_OK, CMD_BAD, CMD_OFF, CMD_FAIL, CMD_NONE
+}
+
+const TAB_CAP: u64 = 16
+const CMD_OK: u64 = 0
+const CMD_BAD: u64 = 1
+const CMD_OFF: u64 = 2
+const CMD_FAIL: u64 = 3
+const CMD_NONE: u64 = 4
+
+const F_CMD: u64 = 0x000
+const F_EVT: u64 = 0x040
+const F_RES: u64 = 0x140
+const EVT_LEN: u64 = 256
+const RES_LEN: u64 = 64
+const EIR_AT: u64 = 17
+const WAIT_TRIES: u64 = 3000
+const INQ_LENGTH: u64 = 5
+const INQ_MAX: u64 = 0
+
+const C_FRAME: u64 = 0
+const C_SLOT: u64 = 1
+const C_DCI: u64 = 2
+const C_ATTACHED: u64 = 3
+const C_READY: u64 = 4
+const C_POWER: u64 = 5
+const C_SCAN: u64 = 6
+const C_ADDR: u64 = 7
+const C_HCIVER: u64 = 8
+const C_MFR: u64 = 9
+const C_SEQ: u64 = 10
+const C_BUSY: u64 = 11
+const C_CCSEQ: u64 = 12
+const C_CCOP: u64 = 13
+const C_CCST: u64 = 14
+const C_CSSEQ: u64 = 15
+const C_CSOP: u64 = 16
+const C_CSST: u64 = 17
+const C_SCANS: u64 = 18
+const C_DONE: u64 = 19
+const C_EVENTS: u64 = 20
+const C_ERRS: u64 = 21
+const C_STEP: u64 = 22
+
+static mut bt_st: [u64; 24] = [0 as u64; 24]
+static mut bt_tab: [u64; 66] = [0 as u64; 66]
+static mut bt_name: [u8; 24] = [0 as u8; 24]
+
+static mut t_reset: [u8; 17] = "bt: hci reset ok\0"
+static mut t_addr: [u8; 10] = "bt: addr \0"
+static mut t_ver: [u8; 17] = "bt: version hci=\0"
+static mut t_mfr: [u8; 8] = " mfr=0x\0"
+static mut t_fail: [u8; 22] = "bt: init failed step=\0"
+static mut t_gone: [u8; 13] = "bt: detached\0"
+static mut t_two: [u8; 30] = "bt: second controller ignored\0"
+
+static mut w_power: [u8; 6] = "power\0"
+static mut w_on: [u8; 3] = "on\0"
+static mut w_off: [u8; 4] = "off\0"
+static mut w_scan: [u8; 5] = "scan\0"
+static mut w_cancel: [u8; 7] = "cancel\0"
+static mut w_clear: [u8; 6] = "clear\0"
+
+fn cg(i: u64) -> u64 {
+    return bt_st[i as usize]
+}
+
+fn cs(i: u64, v: u64) {
+    bt_st[i as usize] = v
+}
+
+fn table() -> u64 {
+    return (&bt_tab[0]) as u64
+}
+
+fn attached() -> bool {
+    return cg(C_ATTACHED) != 0
+}
+
+fn ready() -> bool {
+    return cg(C_ATTACHED) != 0 && cg(C_READY) != 0
+}
+
+fn powered() -> bool {
+    return cg(C_POWER) != 0
+}
+
+fn scanning() -> bool {
+    return cg(C_SCAN) != 0
+}
+
+fn controller_addr() -> u64 {
+    return cg(C_ADDR)
+}
+
+fn hci_ver() -> u64 {
+    return cg(C_HCIVER)
+}
+
+fn manufacturer() -> u64 {
+    return cg(C_MFR)
+}
+
+fn scans_started() -> u64 {
+    return cg(C_SCANS)
+}
+
+fn scans_done() -> u64 {
+    return cg(C_DONE)
+}
+
+fn events_seen() -> u64 {
+    return cg(C_EVENTS)
+}
+
+fn event_errors() -> u64 {
+    return cg(C_ERRS)
+}
+
+fn init_step() -> u64 {
+    return cg(C_STEP)
+}
+
+fn frame() -> u64 {
+    return cg(C_FRAME)
+}
+
+fn copy_res(ev: u64, n: u64) {
+    var m: u64 = n
+    if m > RES_LEN {
+        m = RES_LEN
+    }
+    var i: u64 = 0
+    while i < m {
+        le.st8(frame(), F_RES + i, le.ld8(ev, i))
+        i = i + 1
+    }
+}
+
+fn on_inquiry_rows(ev: u64) {
+    if !hci.inq_ok(ev) {
+        cs(C_ERRS, cg(C_ERRS) + 1)
+        return
+    }
+    var i: u64 = 0
+    let n: u64 = hci.inq_count(ev)
+    while i < n {
+        let _r: u64 = hci.tab_add(table(), TAB_CAP, hci.inq_addr(ev, i), hci.inq_cod(ev, i), hci.inq_rssi(ev, i), 0, 0)
+        i = i + 1
+    }
+}
+
+fn on_extended(ev: u64, n: u64) {
+    if !hci.inq_ok(ev) {
+        cs(C_ERRS, cg(C_ERRS) + 1)
+        return
+    }
+    var m: u64 = 0
+    if n > EIR_AT {
+        m = hci.eir_name(hci.inq_eir(ev), n - EIR_AT, (&bt_name[0]) as u64, hci.NAME_MAX)
+    }
+    let _r: u64 = hci.tab_add(table(), TAB_CAP, hci.inq_addr(ev, 0), hci.inq_cod(ev, 0), hci.inq_rssi(ev, 0),
+        (&bt_name[0]) as u64, m)
+}
+
+fn handle_event(ev: u64, n: u64) {
+    if !hci.event_ok(ev, n) {
+        cs(C_ERRS, cg(C_ERRS) + 1)
+        return
+    }
+    cs(C_EVENTS, cg(C_EVENTS) + 1)
+    let code: u64 = hci.event_code(ev)
+    if code == hci.EV_COMMAND_COMPLETE {
+        copy_res(ev, n)
+        cs(C_CCOP, hci.cc_opcode(ev))
+        cs(C_CCST, hci.cc_status(ev))
+        cs(C_CCSEQ, cg(C_CCSEQ) + 1)
+    } else if code == hci.EV_COMMAND_STATUS {
+        let op: u64 = hci.cs_opcode(ev)
+        let st: u64 = hci.cs_status(ev)
+        cs(C_CSOP, op)
+        cs(C_CSST, st)
+        cs(C_CSSEQ, cg(C_CSSEQ) + 1)
+        if op == hci.OP_INQUIRY && st != 0 {
+            cs(C_SCAN, 0)
+        }
+    } else if code == hci.EV_INQUIRY_RESULT || code == hci.EV_INQUIRY_RSSI {
+        on_inquiry_rows(ev)
+    } else if code == hci.EV_EXTENDED_INQUIRY {
+        on_extended(ev, n)
+    } else if code == hci.EV_INQUIRY_COMPLETE {
+        cs(C_SCAN, 0)
+        cs(C_DONE, cg(C_DONE) + 1)
+    }
+}
+
+fn requeue(state: u64) {
+    let _q: bool = xhci.int_queue(state, cg(C_SLOT), cg(C_DCI), frame() + F_EVT, EVT_LEN)
+}
+
+fn pump(state: u64) {
+    if cg(C_ATTACHED) == 0 || cg(C_BUSY) != 0 {
+        return
+    }
+    cs(C_BUSY, 1)
+    let _d: u64 = xhci.drain(state)
+    let i: u64 = xhci.ep_find(state, cg(C_SLOT), cg(C_DCI))
+    if i < xhci.MAX_EP {
+        let seq: u64 = xhci.ep_seq(state, i)
+        if seq != cg(C_SEQ) {
+            cs(C_SEQ, seq)
+            let cc: u64 = xhci.ep_code(state, i)
+            if cc == xhci.CC_SUCCESS || cc == xhci.CC_SHORT {
+                let resid: u64 = xhci.ep_resid(state, i)
+                var n: u64 = 0
+                if resid <= EVT_LEN {
+                    n = EVT_LEN - resid
+                }
+                handle_event(frame() + F_EVT, n)
+            } else {
+                cs(C_ERRS, cg(C_ERRS) + 1)
+            }
+            requeue(state)
+        }
+    }
+    cs(C_BUSY, 0)
+}
+
+fn send(state: u64, n: u64) -> bool {
+    if n == 0 {
+        return false
+    }
+    return xhci.control(state, cg(C_SLOT), 0x20, 0, 0, 0, n, frame() + F_CMD, false) >= 0
+}
+
+fn wait_cc(state: u64, op: u64, seq0: u64) -> u64 {
+    var seen: u64 = seq0
+    var tries: u64 = 0
+    while tries < WAIT_TRIES {
+        pump(state)
+        if cg(C_CCSEQ) != seen {
+            seen = cg(C_CCSEQ)
+            if cg(C_CCOP) == op {
+                return cg(C_CCST)
+            }
+        }
+        xhci.udelay(state, 1000)
+        tries = tries + 1
+    }
+    return 0x100
+}
+
+fn wait_cs(state: u64, op: u64, seq0: u64) -> u64 {
+    var seen: u64 = seq0
+    var tries: u64 = 0
+    while tries < WAIT_TRIES {
+        pump(state)
+        if cg(C_CSSEQ) != seen {
+            seen = cg(C_CSSEQ)
+            if cg(C_CSOP) == op {
+                return cg(C_CSST)
+            }
+        }
+        xhci.udelay(state, 1000)
+        tries = tries + 1
+    }
+    return 0x100
+}
+
+fn init_command(state: u64, step: u64) -> bool {
+    let n: u64 = hci.build_init(frame() + F_CMD, step)
+    let seq0: u64 = cg(C_CCSEQ)
+    if !send(state, n) {
+        return false
+    }
+    return wait_cc(state, hci.init_opcode(step), seq0) == 0
+}
+
+fn store_addr() {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        v = v | (le.ld8(frame(), F_RES + 6 + i) << (i * 8))
+        i = i + 1
+    }
+    cs(C_ADDR, v)
+}
+
+fn say_addr() {
+    var tmp: [u8; 24] = [0 as u8; 24]
+    var raw: [u8; 8] = [0 as u8; 8]
+    var i: u64 = 0
+    while i < 6 {
+        le.st8((&raw[0]) as u64, i, cg(C_ADDR) >> (i * 8))
+        i = i + 1
+    }
+    let _n: u64 = hci.fmt_addr((&tmp[0]) as u64, (&raw[0]) as u64)
+    serial.puts((&t_addr[0]) as u64)
+    serial.puts((&tmp[0]) as u64)
+    serial.nl()
+}
+
+fn attach(state: u64, slot: u64, dci: u64) -> bool {
+    if cg(C_ATTACHED) != 0 {
+        serial.puts((&t_two[0]) as u64)
+        serial.nl()
+        return false
+    }
+    if cg(C_FRAME) == 0 {
+        let f: u64 = mem.frame_run(state, 1)
+        if f == 0 {
+            return false
+        }
+        cs(C_FRAME, f)
+    }
+    le.zero(frame(), 4096)
+    hci.tab_clear(table(), TAB_CAP)
+    cs(C_SLOT, slot)
+    cs(C_DCI, dci)
+    cs(C_SEQ, 0)
+    cs(C_BUSY, 0)
+    cs(C_READY, 0)
+    cs(C_SCAN, 0)
+    cs(C_POWER, 1)
+    cs(C_CCSEQ, 0)
+    cs(C_CSSEQ, 0)
+    cs(C_ATTACHED, 1)
+    let i: u64 = xhci.ep_find(state, slot, dci)
+    if i < xhci.MAX_EP {
+        cs(C_SEQ, xhci.ep_seq(state, i))
+    }
+    requeue(state)
+    var step: u64 = 0
+    var ok: bool = true
+    while ok && step < hci.INIT_STEPS {
+        cs(C_STEP, step)
+        ok = init_command(state, step)
+        if ok && step == 1 {
+            cs(C_HCIVER, hci.version_hci(frame() + F_RES))
+            cs(C_MFR, hci.version_manufacturer(frame() + F_RES))
+        }
+        if ok && step == 2 {
+            store_addr()
+        }
+        if ok {
+            step = step + 1
+        }
+    }
+    if !ok {
+        serial.puts((&t_fail[0]) as u64)
+        serial.dec(step)
+        serial.nl()
+        cs(C_ATTACHED, 0)
+        return false
+    }
+    cs(C_STEP, hci.INIT_STEPS)
+    cs(C_READY, 1)
+    serial.puts((&t_reset[0]) as u64)
+    serial.nl()
+    say_addr()
+    serial.puts((&t_ver[0]) as u64)
+    serial.dec(cg(C_HCIVER))
+    serial.puts((&t_mfr[0]) as u64)
+    serial.hex(cg(C_MFR))
+    serial.nl()
+    return true
+}
+
+fn unplug_slot(state: u64, slot: u64) {
+    if cg(C_ATTACHED) == 0 || cg(C_SLOT) != slot {
+        return
+    }
+    cs(C_ATTACHED, 0)
+    cs(C_READY, 0)
+    cs(C_SCAN, 0)
+    serial.puts((&t_gone[0]) as u64)
+    serial.nl()
+}
+
+fn start_scan(state: u64) -> u64 {
+    if cg(C_ATTACHED) == 0 || cg(C_READY) == 0 {
+        return CMD_NONE
+    }
+    if cg(C_POWER) == 0 {
+        return CMD_OFF
+    }
+    if cg(C_SCAN) != 0 {
+        return CMD_OK
+    }
+    hci.tab_clear(table(), TAB_CAP)
+    let n: u64 = hci.build_inquiry(frame() + F_CMD, hci.GIAC_LAP, INQ_LENGTH, INQ_MAX)
+    let seq0: u64 = cg(C_CSSEQ)
+    cs(C_SCAN, 1)
+    if !send(state, n) {
+        cs(C_SCAN, 0)
+        return CMD_FAIL
+    }
+    cs(C_SCANS, cg(C_SCANS) + 1)
+    if wait_cs(state, hci.OP_INQUIRY, seq0) != 0 {
+        cs(C_SCAN, 0)
+        return CMD_FAIL
+    }
+    return CMD_OK
+}
+
+fn cancel_scan(state: u64) -> u64 {
+    if cg(C_ATTACHED) == 0 || cg(C_READY) == 0 {
+        return CMD_NONE
+    }
+    if cg(C_SCAN) == 0 {
+        return CMD_OK
+    }
+    let n: u64 = hci.build_inquiry_cancel(frame() + F_CMD)
+    let seq0: u64 = cg(C_CCSEQ)
+    cs(C_SCAN, 0)
+    if !send(state, n) {
+        return CMD_FAIL
+    }
+    if wait_cc(state, hci.OP_INQUIRY_CANCEL, seq0) != 0 {
+        return CMD_FAIL
+    }
+    return CMD_OK
+}
+
+fn word_is(p: u64, n: u64, at: u64, w: u64, wl: u64) -> bool {
+    if at + wl > n {
+        return false
+    }
+    var i: u64 = 0
+    while i < wl {
+        if le.ld8(p, at + i) != le.ld8(w, i) {
+            return false
+        }
+        i = i + 1
+    }
+    if at + wl < n {
+        let c: u64 = le.ld8(p, at + wl)
+        return c == 10 || c == 32 || c == 0 || c == 13
+    }
+    return true
+}
+
+fn command(state: u64, p: u64, n: u64) -> u64 {
+    if word_is(p, n, 0, (&w_scan[0]) as u64, 4) {
+        return start_scan(state)
+    }
+    if word_is(p, n, 0, (&w_cancel[0]) as u64, 6) {
+        return cancel_scan(state)
+    }
+    if word_is(p, n, 0, (&w_clear[0]) as u64, 5) {
+        hci.tab_clear(table(), TAB_CAP)
+        return CMD_OK
+    }
+    if word_is(p, n, 0, (&w_power[0]) as u64, 5) {
+        if word_is(p, n, 6, (&w_on[0]) as u64, 2) {
+            cs(C_POWER, 1)
+            return CMD_OK
+        }
+        if word_is(p, n, 6, (&w_off[0]) as u64, 3) {
+            let _c: u64 = cancel_scan(state)
+            cs(C_POWER, 0)
+            hci.tab_clear(table(), TAB_CAP)
+            return CMD_OK
+        }
+    }
+    return CMD_BAD
+}
