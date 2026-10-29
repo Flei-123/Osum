@@ -1,0 +1,171 @@
+import mem
+import efi
+
+export { parse, entry, bad_line }
+
+static mut bad: u64 = 0
+
+fn bad_line() -> u64 {
+    return bad
+}
+
+fn entry(c: u64, i: u64) -> u64 {
+    return c + efi.C_ENTRIES + i * efi.ENTRY_SIZE
+}
+
+fn is_key(p: u64, k: u64) -> bool {
+    return mem.streq(p, k)
+}
+
+fn number(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while mem.get8(p + i) >= 48 && mem.get8(p + i) <= 57 {
+        v = v * 10 + mem.get8(p + i) - 48
+        i = i + 1
+    }
+    if i == 0 || mem.get8(p + i) != 0 {
+        return 0xFFFFFFFF
+    }
+    return v
+}
+
+fn resolution(c: u64, p: u64) -> bool {
+    var i: u64 = 0
+    while mem.get8(p + i) != 0 && mem.get8(p + i) != 120 {
+        i = i + 1
+    }
+    if mem.get8(p + i) != 120 {
+        return false
+    }
+    mem.set8(p + i, 0)
+    let w: u64 = number(p)
+    let h: u64 = number(p + i + 1)
+    if w == 0xFFFFFFFF || h == 0xFFFFFFFF {
+        return false
+    }
+    mem.set64(c + efi.C_RES_W, w)
+    mem.set64(c + efi.C_RES_H, h)
+    return true
+}
+
+fn apply(c: u64, k: u64, v: u64) -> bool {
+    var s_timeout: [u8; 8] = "timeout\0"
+    var s_default: [u8; 8] = "default\0"
+    var s_entry: [u8; 6] = "entry\0"
+    var s_kernel: [u8; 7] = "kernel\0"
+    var s_module: [u8; 7] = "module\0"
+    var s_cmdline: [u8; 8] = "cmdline\0"
+    var s_res: [u8; 11] = "resolution\0"
+    let n: u64 = mem.get64(c + efi.C_NENT)
+    if is_key(k, (&s_timeout[0]) as u64) {
+        let t: u64 = number(v)
+        mem.set64(c + efi.C_TIMEOUT, t)
+        return t != 0xFFFFFFFF
+    }
+    if is_key(k, (&s_default[0]) as u64) {
+        let d: u64 = number(v)
+        mem.set64(c + efi.C_DEFAULT, d)
+        return d != 0xFFFFFFFF && d != 0
+    }
+    if is_key(k, (&s_res[0]) as u64) {
+        return resolution(c, v)
+    }
+    if is_key(k, (&s_entry[0]) as u64) {
+        if n >= efi.MAX_ENTRIES || mem.get8(v) == 0 {
+            return false
+        }
+        mem.zero(entry(c, n), efi.ENTRY_SIZE)
+        mem.set64(entry(c, n) + efi.E_TITLE, v)
+        mem.set64(c + efi.C_NENT, n + 1)
+        return true
+    }
+    if n == 0 {
+        return false
+    }
+    let e: u64 = entry(c, n - 1)
+    if is_key(k, (&s_kernel[0]) as u64) {
+        mem.set64(e + efi.E_KERNEL, v)
+        return mem.get8(v) != 0
+    }
+    if is_key(k, (&s_cmdline[0]) as u64) {
+        mem.set64(e + efi.E_CMDLINE, v)
+        return true
+    }
+    if is_key(k, (&s_module[0]) as u64) {
+        let m: u64 = mem.get64(e + efi.E_NMODS)
+        if m >= efi.MAX_MODS || mem.get8(v) == 0 {
+            return false
+        }
+        mem.set64(e + efi.E_MODS + m * 8, v)
+        mem.set64(e + efi.E_NMODS, m + 1)
+        return true
+    }
+    return false
+}
+
+fn line(c: u64, p: u64) -> bool {
+    var i: u64 = 0
+    while mem.get8(p + i) == 32 || mem.get8(p + i) == 9 {
+        i = i + 1
+    }
+    let k: u64 = p + i
+    if mem.get8(k) == 0 || mem.get8(k) == 35 {
+        return true
+    }
+    var j: u64 = 0
+    while mem.get8(k + j) != 0 && mem.get8(k + j) != 32 && mem.get8(k + j) != 9 {
+        j = j + 1
+    }
+    var v: u64 = k + j
+    if mem.get8(v) != 0 {
+        mem.set8(v, 0)
+        v = v + 1
+        while mem.get8(v) == 32 || mem.get8(v) == 9 {
+            v = v + 1
+        }
+    }
+    return apply(c, k, v)
+}
+
+fn parse(c: u64, buf: u64, size: u64) -> bool {
+    mem.set64(c + efi.C_NENT, 0)
+    mem.set64(c + efi.C_TIMEOUT, 5)
+    mem.set64(c + efi.C_DEFAULT, 1)
+    var start: u64 = 0
+    var i: u64 = 0
+    var no: u64 = 1
+    while i <= size {
+        let ch: u64 = mem.get8(buf + i)
+        if ch == 13 {
+            mem.set8(buf + i, 0)
+        }
+        if ch == 10 || i == size {
+            mem.set8(buf + i, 0)
+            if !line(c, buf + start) {
+                bad = no
+                return false
+            }
+            start = i + 1
+            no = no + 1
+        }
+        i = i + 1
+    }
+    let n: u64 = mem.get64(c + efi.C_NENT)
+    if n == 0 {
+        bad = no
+        return false
+    }
+    var e: u64 = 0
+    while e < n {
+        if mem.get64(entry(c, e) + efi.E_KERNEL) == 0 {
+            bad = no
+            return false
+        }
+        e = e + 1
+    }
+    if mem.get64(c + efi.C_DEFAULT) > n {
+        mem.set64(c + efi.C_DEFAULT, 1)
+    }
+    return true
+}

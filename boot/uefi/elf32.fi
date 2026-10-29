@@ -1,0 +1,77 @@
+import mem
+import efi
+import tramp
+
+export { load, ERR_NOT_ELF, ERR_NOT_MB, ERR_RANGE, kernel_end }
+
+const ERR_NOT_ELF: u64 = 1
+const ERR_NOT_MB: u64 = 2
+const ERR_RANGE: u64 = 3
+const MB_MAGIC: u64 = 0x1BADB002
+
+static mut top: u64 = 0
+
+fn kernel_end() -> u64 {
+    return top
+}
+
+fn has_mb_header(buf: u64, size: u64) -> bool {
+    var off: u64 = 0
+    while off + 12 <= size && off < 8192 {
+        if mem.get32(buf + off) == MB_MAGIC {
+            let sum: u64 = (mem.get32(buf + off) + mem.get32(buf + off + 4) + mem.get32(buf + off + 8)) & 0xFFFFFFFF
+            if sum == 0 {
+                return true
+            }
+        }
+        off = off + 4
+    }
+    return false
+}
+
+fn segment(t: u64, buf: u64, size: u64, ph: u64) -> bool {
+    let off: u64 = mem.get32(ph + 4)
+    let pa: u64 = mem.get32(ph + 12)
+    let fsz: u64 = mem.get32(ph + 16)
+    let msz: u64 = mem.get32(ph + 20)
+    if off + fsz > size || fsz > msz {
+        return false
+    }
+    let end: u64 = (pa + msz + 4095) & 0xFFFFFFFFFFFFF000
+    if end > 0x100000000 || pa < 0x100000 {
+        return false
+    }
+    if !tramp.add_copy(t, pa, buf + off, fsz, msz) {
+        return false
+    }
+    if end > top {
+        top = end
+    }
+    return true
+}
+
+fn load(t: u64, buf: u64, size: u64) -> u64 {
+    if size < 52 || mem.get32(buf) != 0x464C457F || mem.get8(buf + 4) != 1 || mem.get16(buf + 18) != 3 {
+        return ERR_NOT_ELF
+    }
+    if !has_mb_header(buf, size) {
+        return ERR_NOT_MB
+    }
+    let phoff: u64 = mem.get32(buf + 28)
+    let phent: u64 = mem.get16(buf + 42)
+    let phnum: u64 = mem.get16(buf + 44)
+    if phoff + phent * phnum > size {
+        return ERR_NOT_ELF
+    }
+    var i: u64 = 0
+    while i < phnum {
+        let ph: u64 = buf + phoff + i * phent
+        if mem.get32(ph) == 1 && mem.get32(ph + 20) != 0 {
+            if !segment(t, buf, size, ph) {
+                return ERR_RANGE
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}

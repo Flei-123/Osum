@@ -1,0 +1,103 @@
+import mem
+import efi
+
+export { create, add_copy, overlaps, map_ok, PAGES }
+
+const PAGES: u64 = 7
+const LIST: u64 = 0x800
+const MAX_COPIES: u64 = 60
+
+fn create(c: u64) -> u64 {
+    let t: u64 = efi.alloc_below(c, efi.LOW_LIMIT, PAGES, efi.LOADER_CODE)
+    if t == 0 {
+        return 0
+    }
+    mem.zero(t, PAGES * 4096)
+    mem.set64(t + 0x1000, (t + 0x2000) | 3)
+    var i: u64 = 0
+    while i < 4 {
+        let pd: u64 = t + 0x3000 + i * 0x1000
+        mem.set64(t + 0x2000 + i * 8, pd | 3)
+        var j: u64 = 0
+        while j < 512 {
+            mem.set64(pd + j * 8, ((i * 512 + j) * 0x200000) | 0x83)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return t
+}
+
+fn add_copy(t: u64, dst: u64, src: u64, fsz: u64, msz: u64) -> bool {
+    let n: u64 = mem.get64(t + LIST)
+    if n >= MAX_COPIES {
+        return false
+    }
+    let e: u64 = t + LIST + 8 + n * 32
+    mem.set64(e, dst)
+    mem.set64(e + 8, src)
+    mem.set64(e + 16, fsz)
+    mem.set64(e + 24, msz)
+    mem.set64(t + LIST, n + 1)
+    return true
+}
+
+fn overlaps(t: u64, a: u64, len: u64) -> bool {
+    let n: u64 = mem.get64(t + LIST)
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = t + LIST + 8 + i * 32
+        let b: u64 = mem.get64(e)
+        let z: u64 = b + mem.get64(e + 24)
+        if a < z && a + len > b {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn usable(kind: u64) -> bool {
+    return kind == 1 || kind == 2 || kind == 3 || kind == 4 || kind == 7 || kind == 10
+}
+
+fn range_ok(b: u64, z: u64, umap: u64, size: u64, dsize: u64) -> bool {
+    var covered: u64 = 0
+    var off: u64 = 0
+    while off + dsize <= size {
+        let d: u64 = umap + off
+        let db: u64 = mem.get64(d + 8)
+        let dz: u64 = db + mem.get64(d + 24) * 4096
+        if db < z && dz > b {
+            if !usable(mem.get32(d)) {
+                return false
+            }
+            var lo: u64 = db
+            if b > lo {
+                lo = b
+            }
+            var hi: u64 = dz
+            if z < hi {
+                hi = z
+            }
+            covered = covered + hi - lo
+        }
+        off = off + dsize
+    }
+    return covered == z - b
+}
+
+fn map_ok(t: u64, umap: u64, size: u64, dsize: u64) -> bool {
+    let n: u64 = mem.get64(t + LIST)
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = t + LIST + 8 + i * 32
+        let b: u64 = mem.get64(e) & 0xFFFFFFFFFFFFF000
+        let z: u64 = (mem.get64(e) + mem.get64(e + 24) + 4095) & 0xFFFFFFFFFFFFF000
+        if !range_ok(b, z, umap, size, dsize) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}

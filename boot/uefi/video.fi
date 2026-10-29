@@ -1,0 +1,80 @@
+import mem
+import efi
+
+export { setup }
+
+fn low_bit(m: u64) -> u64 {
+    var i: u64 = 0
+    while i < 32 && ((m >> i) & 1) == 0 {
+        i = i + 1
+    }
+    return i
+}
+
+fn bits(m: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        n = n + ((m >> i) & 1)
+        i = i + 1
+    }
+    return n
+}
+
+fn pick_mode(c: u64, gop: u64) {
+    let want_w: u64 = mem.get64(c + efi.C_RES_W)
+    let want_h: u64 = mem.get64(c + efi.C_RES_H)
+    if want_w == 0 {
+        return
+    }
+    let max: u64 = mem.get32(mem.get64(gop + 24))
+    var i: u64 = 0
+    while i < max {
+        if efi.call4(mem.get64(gop), gop, i, efi.out_addr(c, 2), efi.out_addr(c, 3)) == 0 {
+            let info: u64 = efi.out(c, 3)
+            if mem.get32(info + 4) == want_w && mem.get32(info + 8) == want_h && mem.get32(info + 12) < 3 {
+                efi.call2(mem.get64(gop + 8), gop, i)
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn setup(c: u64, mbi: u64) -> bool {
+    if efi.call3(efi.bs_fn(c, 320), efi.guid(c, 0x4a3823dc9042a9de, 0x6a5180d0de7afb96), 0, efi.out_addr(c, 0)) != 0 {
+        return false
+    }
+    let gop: u64 = efi.out(c, 0)
+    pick_mode(c, gop)
+    let mode: u64 = mem.get64(gop + 24)
+    let info: u64 = mem.get64(mode + 8)
+    let fmt: u64 = mem.get32(info + 12)
+    var r: u64 = 0xFF
+    var g: u64 = 0xFF00
+    var b: u64 = 0xFF0000
+    if fmt == 1 {
+        r = 0xFF0000
+        b = 0xFF
+    } else if fmt == 2 {
+        r = mem.get32(info + 16)
+        g = mem.get32(info + 20)
+        b = mem.get32(info + 24)
+    } else if fmt != 0 {
+        return false
+    }
+    mem.set64(mbi + 88, mem.get64(mode + 24))
+    mem.set32(mbi + 96, mem.get32(info + 32) * 4)
+    mem.set32(mbi + 100, mem.get32(info + 4))
+    mem.set32(mbi + 104, mem.get32(info + 8))
+    mem.set8(mbi + 108, 32)
+    mem.set8(mbi + 109, 1)
+    mem.set8(mbi + 110, low_bit(r))
+    mem.set8(mbi + 111, bits(r))
+    mem.set8(mbi + 112, low_bit(g))
+    mem.set8(mbi + 113, bits(g))
+    mem.set8(mbi + 114, low_bit(b))
+    mem.set8(mbi + 115, bits(b))
+    mem.set32(mbi, mem.get32(mbi) | 0x1000)
+    return true
+}

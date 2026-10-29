@@ -1,0 +1,193 @@
+import mem
+import efi
+import tramp
+
+export { overlaps_own, create, set_cmdline, add_module, copy_rsdp, prepare_map, finish }
+
+const MBI_CMDLINE_OFF: u64 = 256
+const MODS_STR_OFF: u64 = 2048
+const UMAP_PAGES: u64 = 16
+const MMAP_PAGES: u64 = 8
+const ENT: u64 = 24
+
+static mut mods_page: u64 = 0
+static mut mods_str: u64 = 0
+static mut umap: u64 = 0
+static mut mmap: u64 = 0
+
+fn create(c: u64) -> u64 {
+    let mbi: u64 = efi.alloc_below(c, efi.LOW_LIMIT, 1, efi.LOADER_DATA)
+    mods_page = efi.alloc_below(c, efi.LOW_LIMIT, 1, efi.LOADER_DATA)
+    if mbi == 0 || mods_page == 0 {
+        return 0
+    }
+    mem.zero(mbi, 4096)
+    mem.zero(mods_page, 4096)
+    mods_str = mods_page + MODS_STR_OFF
+    var name: [u8; 7] = "osboot\0"
+    mem.copy(mbi + 128, (&name[0]) as u64, 7)
+    mem.set32(mbi + 64, mbi + 128)
+    mem.set32(mbi, 0x200)
+    return mbi
+}
+
+fn set_cmdline(mbi: u64, s: u64) {
+    var n: u64 = 0
+    if s != 0 {
+        n = mem.strlen(s)
+    }
+    if n > 4096 - MBI_CMDLINE_OFF - 1 {
+        n = 4096 - MBI_CMDLINE_OFF - 1
+    }
+    if n > 0 {
+        mem.copy(mbi + MBI_CMDLINE_OFF, s, n)
+    }
+    mem.set8(mbi + MBI_CMDLINE_OFF + n, 0)
+    mem.set32(mbi + 16, mbi + MBI_CMDLINE_OFF)
+    mem.set32(mbi, mem.get32(mbi) | 4)
+}
+
+fn add_module(mbi: u64, start: u64, size: u64, path: u64) -> bool {
+    let i: u64 = mem.get32(mbi + 20)
+    let n: u64 = mem.strlen(path)
+    if mods_str + n + 1 > mods_page + 4096 || i >= 64 {
+        return false
+    }
+    mem.copy(mods_str, path, n + 1)
+    let e: u64 = mods_page + i * 16
+    mem.set32(e, start)
+    mem.set32(e + 4, start + size)
+    mem.set32(e + 8, mods_str)
+    mods_str = mods_str + n + 1
+    mem.set32(mbi + 20, i + 1)
+    mem.set32(mbi + 24, mods_page)
+    mem.set32(mbi, mem.get32(mbi) | 8)
+    return true
+}
+
+fn guid_is(p: u64, lo: u64, hi: u64) -> bool {
+    return mem.get64(p) == lo && mem.get64(p + 8) == hi
+}
+
+fn copy_rsdp(c: u64) -> u64 {
+    let st: u64 = mem.get64(c + efi.C_ST)
+    let n: u64 = mem.get64(st + 104)
+    let tab: u64 = mem.get64(st + 112)
+    var found: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = tab + i * 24
+        if guid_is(e, 0x11d3e4f18868e871, 0xc3c3c3c7800022bc) {
+            found = mem.get64(e + 16)
+        } else if found == 0 && guid_is(e, 0x11d32d88eb9d2d30, 0x4dc13f279000169a) {
+            found = mem.get64(e + 16)
+        }
+        i = i + 1
+    }
+    if found == 0 {
+        return 0
+    }
+    let page: u64 = efi.alloc_below(c, efi.LOW_LIMIT, 1, efi.ACPI_RECLAIM)
+    if page == 0 {
+        return found
+    }
+    mem.zero(page, 4096)
+    var len: u64 = 20
+    if mem.get8(found + 15) >= 2 {
+        len = mem.get32(found + 20)
+        if len < 36 || len > 4096 {
+            len = 36
+        }
+    }
+    mem.copy(page, found, len)
+    return page
+}
+
+fn prepare_map(c: u64) -> bool {
+    umap = efi.alloc_below(c, 0xFFFFFFFF, UMAP_PAGES, efi.LOADER_DATA)
+    mmap = efi.alloc_below(c, efi.LOW_LIMIT, MMAP_PAGES, efi.LOADER_DATA)
+    return umap != 0 && mmap != 0
+}
+
+fn mb_type(t: u64) -> u64 {
+    if t == 1 || t == 2 || t == 3 || t == 4 || t == 7 {
+        return 1
+    }
+    if t == 9 {
+        return 3
+    }
+    if t == 10 {
+        return 4
+    }
+    if t == 8 {
+        return 5
+    }
+    return 2
+}
+
+fn convert(mbi: u64, size: u64, dsize: u64) {
+    var n: u64 = 0
+    var off: u64 = 0
+    var upper: u64 = 0
+    while off + dsize <= size && (n + 1) * ENT <= MMAP_PAGES * 4096 {
+        let d: u64 = umap + off
+        let t: u64 = mb_type(mem.get32(d))
+        let base: u64 = mem.get64(d + 8)
+        let len: u64 = mem.get64(d + 24) * 4096
+        var merged: bool = false
+        if n > 0 {
+            let p: u64 = mmap + (n - 1) * ENT
+            if mem.get32(p + 20) == t && mem.get64(p + 4) + mem.get64(p + 12) == base {
+                mem.set64(p + 12, mem.get64(p + 12) + len)
+                merged = true
+            }
+        }
+        if !merged {
+            let e: u64 = mmap + n * ENT
+            mem.set32(e, 20)
+            mem.set64(e + 4, base)
+            mem.set64(e + 12, len)
+            mem.set32(e + 20, t)
+            n = n + 1
+        }
+        off = off + dsize
+    }
+    var k: u64 = 0
+    while k < n {
+        let e: u64 = mmap + k * ENT
+        if mem.get32(e + 20) == 1 && mem.get64(e + 4) <= 0x100000 && mem.get64(e + 4) + mem.get64(e + 12) > 0x100000 {
+            upper = (mem.get64(e + 4) + mem.get64(e + 12) - 0x100000) / 1024
+        }
+        k = k + 1
+    }
+    if upper > 0xFFFFFFFF {
+        upper = 0xFFFFFFFF
+    }
+    mem.set32(mbi + 4, 640)
+    mem.set32(mbi + 8, upper)
+    mem.set32(mbi + 44, n * ENT)
+    mem.set32(mbi + 48, mmap)
+    mem.set32(mbi, mem.get32(mbi) | 0x41)
+}
+
+fn overlaps_own(t: u64, mbi: u64) -> bool {
+    return tramp.overlaps(t, mbi, 4096) || tramp.overlaps(t, mods_page, 4096) || tramp.overlaps(t, umap, UMAP_PAGES * 4096) || tramp.overlaps(t, mmap, MMAP_PAGES * 4096) || tramp.overlaps(t, t, tramp.PAGES * 4096)
+}
+
+fn finish(c: u64, mbi: u64, t: u64) -> u64 {
+    var tries: u64 = 0
+    while tries < 4 {
+        mem.set64(efi.out_addr(c, 0), UMAP_PAGES * 4096)
+        if efi.call5(efi.bs_fn(c, 56), efi.out_addr(c, 0), umap, efi.out_addr(c, 1), efi.out_addr(c, 2), efi.out_addr(c, 3)) == 0 {
+            if !tramp.map_ok(t, umap, efi.out(c, 0), efi.out(c, 2)) {
+                return 2
+            }
+            convert(mbi, efi.out(c, 0), efi.out(c, 2))
+            if efi.call2(efi.bs_fn(c, 232), mem.get64(c + efi.C_IMG), efi.out(c, 1)) == 0 {
+                return 0
+            }
+        }
+        tries = tries + 1
+    }
+    return 1
+}

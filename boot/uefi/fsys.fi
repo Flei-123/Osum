@@ -1,0 +1,84 @@
+import mem
+import efi
+
+export { open_root, load, last_size }
+
+const CHUNK: u64 = 0x400000
+const SLOT_SIZE: u64 = 5
+
+fn open_root(c: u64) -> bool {
+    let hp: u64 = efi.bs_fn(c, 152)
+    let img: u64 = mem.get64(c + efi.C_IMG)
+    if efi.call3(hp, img, efi.guid(c, 0x11d295625b1b31a1, 0x3b7269c9a0003f8e), efi.out_addr(c, 0)) != 0 {
+        return false
+    }
+    let dev: u64 = mem.get64(efi.out(c, 0) + 24)
+    if efi.call3(hp, dev, efi.guid(c, 0x11d26459964e5b22, 0x3b7269c9a000398e), efi.out_addr(c, 0)) != 0 {
+        return false
+    }
+    let sfs: u64 = efi.out(c, 0)
+    if efi.call2(mem.get64(sfs + 8), sfs, efi.out_addr(c, 0)) != 0 {
+        return false
+    }
+    mem.set64(c + efi.C_ROOT, efi.out(c, 0))
+    return true
+}
+
+fn wide_path(c: u64, path: u64) -> u64 {
+    let w: u64 = c + efi.C_WBUF
+    var i: u64 = 0
+    while mem.get8(path + i) != 0 && i < 300 {
+        var ch: u64 = mem.get8(path + i)
+        if ch == 47 {
+            ch = 92
+        }
+        mem.set16(w + i * 2, ch)
+        i = i + 1
+    }
+    mem.set16(w + i * 2, 0)
+    return w
+}
+
+fn last_size(c: u64) -> u64 {
+    return efi.out(c, SLOT_SIZE)
+}
+
+fn load(c: u64, path: u64, limit: u64) -> u64 {
+    let root: u64 = mem.get64(c + efi.C_ROOT)
+    if efi.call5(mem.get64(root + 8), root, efi.out_addr(c, 0), wide_path(c, path), 1, 0) != 0 {
+        return 0
+    }
+    let f: u64 = efi.out(c, 0)
+    efi.call2(mem.get64(f + 56), f, 0xFFFFFFFFFFFFFFFF)
+    efi.call2(mem.get64(f + 48), f, efi.out_addr(c, 1))
+    let size: u64 = efi.out(c, 1)
+    efi.call2(mem.get64(f + 56), f, 0)
+    let buf: u64 = efi.alloc_below(c, limit, (size + 4096) / 4096, efi.LOADER_DATA)
+    if buf == 0 {
+        efi.call1(mem.get64(f + 16), f)
+        return 0
+    }
+    var done: u64 = 0
+    var ok: bool = true
+    while done < size && ok {
+        var n: u64 = size - done
+        if n > CHUNK {
+            n = CHUNK
+        }
+        mem.set64(efi.out_addr(c, 1), n)
+        if efi.call3(mem.get64(f + 32), f, efi.out_addr(c, 1), buf + done) != 0 {
+            ok = false
+        } else if efi.out(c, 1) == 0 {
+            ok = false
+        } else {
+            done = done + efi.out(c, 1)
+        }
+    }
+    efi.call1(mem.get64(f + 16), f)
+    if !ok {
+        return 0
+    }
+    mem.set8(buf + size, 0)
+    mem.set64(efi.out_addr(c, SLOT_SIZE), size)
+    return buf
+}

@@ -1,0 +1,167 @@
+import mem
+import efi
+import con
+import fsys
+import cfg
+import menu
+import elf32
+import mbinfo
+import video
+import tramp
+
+extern fn efi_call(f: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64;
+extern fn osboot_handoff(page: u64, entry: u64, mbi: u64);
+
+fn fail(c: u64, what: u64, detail: u64) -> u64 {
+    var pre: [u8; 16] = "osboot: error: \0"
+    var post: [u8; 39] = "\nosboot: returning to firmware in 5 s\n\0"
+    var sp: [u8; 2] = " \0"
+    con.say(c, (&pre[0]) as u64)
+    con.say(c, what)
+    if detail != 0 {
+        con.say(c, (&sp[0]) as u64)
+        con.say(c, detail)
+    }
+    con.say(c, (&post[0]) as u64)
+    efi.stall(c, 5000000)
+    return efi.LOAD_ERROR
+}
+
+fn fail_num(c: u64, what: u64, n: u64) -> u64 {
+    var pre: [u8; 16] = "osboot: error: \0"
+    con.say(c, (&pre[0]) as u64)
+    con.say(c, what)
+    con.say_num(c, n)
+    var post: [u8; 39] = "\nosboot: returning to firmware in 5 s\n\0"
+    con.say(c, (&post[0]) as u64)
+    efi.stall(c, 5000000)
+    return efi.LOAD_ERROR
+}
+
+fn new_ctx(image: u64, st: u64) -> u64 {
+    var slot: [u8; 8] = "\0\0\0\0\0\0\0\0"
+    let out: u64 = (&slot[0]) as u64
+    mem.set64(out, 0xFFFFFFFF)
+    let bsp: u64 = mem.get64(st + 96)
+    if efi_call(mem.get64(bsp + 40), efi.MAX_ADDRESS, efi.LOADER_DATA, efi.CTX_PAGES, out, 0, 0) != 0 {
+        return 0
+    }
+    let c: u64 = mem.get64(out)
+    mem.zero(c, efi.CTX_PAGES * 4096)
+    mem.set64(c + efi.C_ST, st)
+    mem.set64(c + efi.C_IMG, image)
+    mem.set64(c + efi.C_BS, bsp)
+    mem.set64(c + efi.C_CON, mem.get64(st + 64))
+    mem.set64(c + efi.C_CONIN, mem.get64(st + 48))
+    return c
+}
+
+fn load_modules(c: u64, e: u64, mbi: u64, tp: u64) -> u64 {
+    var s_mod: [u8; 20] = "cannot load module:\0"
+    var s_room: [u8; 23] = "module table full, at:\0"
+    let n: u64 = mem.get64(e + efi.E_NMODS)
+    var i: u64 = 0
+    while i < n {
+        let path: u64 = mem.get64(e + efi.E_MODS + i * 8)
+        let buf: u64 = fsys.load(c, path, efi.LOW_LIMIT)
+        if buf == 0 || tramp.overlaps(tp, buf, fsys.last_size(c)) {
+            return fail(c, (&s_mod[0]) as u64, path)
+        }
+        if !mbinfo.add_module(mbi, buf, fsys.last_size(c), path) {
+            return fail(c, (&s_room[0]) as u64, path)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn boot(c: u64) -> u64 {
+    var s_banner: [u8; 8] = "osboot\n\0"
+    var s_root: [u8; 29] = "boot volume cannot be opened\0"
+    var s_cfgpath: [u8; 12] = "/osboot.cfg\0"
+    var s_nocfg: [u8; 18] = "config not found:\0"
+    var s_badcfg: [u8; 24] = "config is broken, line \0"
+    var s_nokern: [u8; 18] = "kernel not found:\0"
+    var s_notelf: [u8; 30] = "kernel is not an ELF32 image:\0"
+    var s_notmb: [u8; 32] = "kernel has no multiboot header:\0"
+    var s_range: [u8; 33] = "kernel memory range is not free:\0"
+    var s_mem: [u8; 18] = "out of low memory\0"
+    var s_exit: [u8; 24] = "ExitBootServices failed\0"
+    var s_novid: [u8; 39] = "osboot: no GOP framebuffer, text only\n\0"
+    var s_go: [u8; 16] = "\nosboot: start \0"
+    var nl: [u8; 2] = "\n\0"
+    con.say(c, (&s_banner[0]) as u64)
+    efi.call4(efi.bs_fn(c, 256), 0, 0, 0, 0)
+    if !fsys.open_root(c) {
+        return fail(c, (&s_root[0]) as u64, 0)
+    }
+    let cbuf: u64 = fsys.load(c, (&s_cfgpath[0]) as u64, 0xFFFFFFFF)
+    if cbuf == 0 {
+        return fail(c, (&s_nocfg[0]) as u64, (&s_cfgpath[0]) as u64)
+    }
+    if !cfg.parse(c, cbuf, fsys.last_size(c)) {
+        return fail_num(c, (&s_badcfg[0]) as u64, cfg.bad_line())
+    }
+    let e: u64 = cfg.entry(c, menu.choose(c))
+    let kpath: u64 = mem.get64(e + efi.E_KERNEL)
+    let kbuf: u64 = fsys.load(c, kpath, 0xFFFFFFFF)
+    if kbuf == 0 {
+        return fail(c, (&s_nokern[0]) as u64, kpath)
+    }
+    let ksize: u64 = fsys.last_size(c)
+    let tp: u64 = tramp.create(c)
+    if tp == 0 {
+        return fail(c, (&s_mem[0]) as u64, 0)
+    }
+    let r: u64 = elf32.load(tp, kbuf, ksize)
+    if r == elf32.ERR_NOT_ELF {
+        return fail(c, (&s_notelf[0]) as u64, kpath)
+    }
+    if r == elf32.ERR_NOT_MB {
+        return fail(c, (&s_notmb[0]) as u64, kpath)
+    }
+    if r == elf32.ERR_RANGE {
+        return fail(c, (&s_range[0]) as u64, kpath)
+    }
+    let entry: u64 = mem.get32(kbuf + 24)
+    let mbi: u64 = mbinfo.create(c)
+    if mbi == 0 {
+        return fail(c, (&s_mem[0]) as u64, 0)
+    }
+    mbinfo.set_cmdline(mbi, mem.get64(e + efi.E_CMDLINE))
+    let mr: u64 = load_modules(c, e, mbi, tp)
+    if mr != 0 {
+        return mr
+    }
+    mbinfo.copy_rsdp(c)
+    if !mbinfo.prepare_map(c) {
+        return fail(c, (&s_mem[0]) as u64, 0)
+    }
+    if mbinfo.overlaps_own(tp, mbi) || tramp.overlaps(tp, kbuf, ksize) {
+        return fail(c, (&s_range[0]) as u64, kpath)
+    }
+    con.say(c, (&s_go[0]) as u64)
+    con.say(c, mem.get64(e + efi.E_TITLE))
+    con.say(c, (&nl[0]) as u64)
+    if !video.setup(c, mbi) {
+        con.say(c, (&s_novid[0]) as u64)
+    }
+    let fin: u64 = mbinfo.finish(c, mbi, tp)
+    if fin == 2 {
+        return fail(c, (&s_range[0]) as u64, kpath)
+    }
+    if fin != 0 {
+        return fail(c, (&s_exit[0]) as u64, 0)
+    }
+    osboot_handoff(tp, entry, mbi)
+    return efi.LOAD_ERROR
+}
+
+#[export_c]
+fn osboot_main(image: u64, st: u64) -> u64 {
+    let c: u64 = new_ctx(image, st)
+    if c == 0 {
+        return efi.LOAD_ERROR
+    }
+    return boot(c)
+}
