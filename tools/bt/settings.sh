@@ -34,7 +34,7 @@ EOF
 run_audit() {
     local n=$1 script=$2 extra=$3
     mkdir -p "$T/$n"
-    AUDIT_QEMU_EXTRA="$extra" bash tools/design/audit.sh "$T/$n" accel=kvm uitrace=yes halt=120 extra="usb usbpoll" drehbuch="$script" > "$T/$n.log" 2>&1
+    AUDIT_QEMU_EXTRA="$extra" bash tools/design/audit.sh "$T/$n" accel=kvm fs=an uitrace=yes halt=120 extra="usb usbpoll" drehbuch="$script" > "$T/$n.log" 2>&1
     tr -cd '\11\12\15\40-\176' < "$T/$n/serial.txt" > "$T/$n.klar"
 }
 chk() { grep -aq -- "$3" "$T/$1.klar" && ok "$1: $2" || bad "$1: $2 (missing: $3)"; }
@@ -52,7 +52,7 @@ kill "$(cat "$T/g.pid")" 2>/dev/null
 
 chk full "page opened" 'settings: bluetooth'
 chk full "adapter bound" 'driver=btusb'
-nochk full "no adapter hint with adapter" 't=No Bluetooth adapter found'
+nochk full "no adapter hint with adapter" 't=Plug in a USB Bluetooth adapter'
 chk full "power switch rect" 'settings: rect name=btpwr'
 chk full "search button rect" 'settings: rect name=btscan'
 chk full "status ready" 't=Ready'
@@ -66,7 +66,7 @@ grep -aq 'bt violations=0' "$T/g.gadget" && ok "full: model saw no malformed com
 grep -aiq 'panic\|exception\|#PF\|#GP\|#UD' "$T/full.klar" && bad "full: panic/exception in log" || ok "full: no panic/exception"
 
 run_audit none "$T/none.txt" ""
-chk none "no adapter hint" 't=No Bluetooth adapter found'
+chk none "no adapter hint" 't=Plug in a USB Bluetooth adapter'
 nochk none "no search button without adapter" 'settings: rect name=btscan'
 nochk none "no power switch without adapter" 'settings: rect name=btpwr'
 grep -aiq 'panic\|exception\|#PF\|#GP\|#UD' "$T/none.klar" && bad "none: panic/exception in log" || ok "none: no panic/exception"
