@@ -47,7 +47,7 @@ start_gadget() {
     : > "$T/g.trig"
     ( while [ ! -S "$T/g.sock" ]; do sleep 0.2; done
       exec python3 -I tools/usbredir/usbdev.py --sock "$T/g.sock" --profile btdongle --trigger "$T/g.trig" --unplug "$T/g.unplug" \
-        --log "$T/g.gadget" --max-secs 300 --bt normal ) &
+        --log "$T/g.gadget" --max-secs 900 --bt normal ) &
     echo $! > "$T/g.pid"
 }
 stop_gadget() { kill "$(cat "$T/g.pid")" 2>/dev/null; }
