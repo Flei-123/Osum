@@ -33,7 +33,7 @@ def lade(pfad):
         i = j
     i += 1
     if teile[0] != b"P6":
-        raise SystemExit("kein P6-PPM: %s" % teile[0])
+        raise SystemExit("not a P6 PPM: %s" % teile[0])
     return int(teile[1]), int(teile[2]), d[i:]
 
 

@@ -68,15 +68,15 @@ def main():
     if name in code:
         for nr, zeile in enumerate(code.split("\n"), 1):
             if name in zeile:
-                print("%s:%d: '%s' steht im Code: %s"
+                print("%s:%d: '%s' is in the code: %s"
                       % (pfad, nr, name, zeile.strip()[:80]))
                 return 1
     # Und die Gegenprobe zum Pruefer selbst: in den ANMERKUNGEN steht er
     # sehr wohl, und das ist in Ordnung -- ein Kopfkommentar darf
     # erklaeren, wie das Programm heisst.
     inkomm = name in roh and name not in code
-    print("'%s' steht nicht im Code von %s%s"
-          % (name, pfad, " (wohl aber in einer Anmerkung)" if inkomm else ""))
+    print("'%s' is not in the code of %s%s"
+          % (name, pfad, " (but in a remark)" if inkomm else ""))
     return 0
 
 

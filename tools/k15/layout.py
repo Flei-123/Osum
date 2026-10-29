@@ -57,23 +57,23 @@ def main():
     r = rechtecke(pfad, marke)
     fehler = []
     if len(r) < mind:
-        fehler.append("nur %d Rechtecke gemeldet, %d erwartet"
+        fehler.append("only %d rectangles reported, %d expected"
                       % (len(r), mind))
     for (i, k, x, y, w, h) in r:
         if w == 0 or h == 0:
-            fehler.append("id=%d hat keine Flaeche: %dx%d" % (i, w, h))
+            fehler.append("id=%d has no area: %dx%d" % (i, w, h))
         if i >= 50:
             continue
         if x + w > bw or y + h > bh:
-            fehler.append("id=%d liegt ausserhalb: (%d,%d) %dx%d, "
-                          "Fenster %dx%d" % (i, x, y, w, h, bw, bh))
+            fehler.append("id=%d lies outside: (%d,%d) %dx%d, "
+                          "window %dx%d" % (i, x, y, w, h, bw, bh))
     for a in range(len(r)):
         for b in range(a + 1, len(r)):
             (ia, _ka, xa, ya, wa, ha) = r[a]
             (ib, _kb, xb, yb, wb, hb) = r[b]
             if xa < xb + wb and xb < xa + wa and \
                ya < yb + hb and yb < ya + ha:
-                fehler.append("id=%d und id=%d ueberschneiden sich: "
+                fehler.append("id=%d and id=%d overlap: "
                               "(%d,%d %dx%d) / (%d,%d %dx%d)"
                               % (ia, ib, xa, ya, wa, ha, xb, yb, wb, hb))
     # Reihenfolge innerhalb einer Spalte (gleiche linke Kante)
@@ -88,7 +88,7 @@ def main():
             continue
         nach_id = [y for (i, y) in sorted(liste)]
         if nach_id != sorted(nach_id):
-            fehler.append("bei x=%d steht die Reihenfolge auf dem Kopf: %s"
+            fehler.append("at x=%d the order is upside down: %s"
                           % (x, nach_id))
     ys = dict((i, y) for (i, _k, _x, y, _w, _h) in r)
     chain = [ys[i] for i in vertical if i in ys]
@@ -99,8 +99,8 @@ def main():
         for f in fehler:
             print(f)
         return 1
-    print("%d Rechtecke, alle im Fenster %dx%d, keine Ueberschneidung, "
-          "Reihenfolge in %d Spalten richtig"
+    print("%d rectangles, all inside window %dx%d, no overlap, "
+          "order correct in %d columns"
           % (len(r), bw, bh, len(spalten)))
     return 0
 

@@ -95,7 +95,7 @@ def main(argv):
         for w in WOERTER:
             f.write("%s %d\n"
                     % (w, sum(1 for x in alle if w.lower() in x.lower())))
-    print("gross: %d Dateien, %d Ordner, %d Namen"
+    print("big: %d files, %d folders, %d names"
           % (n, len(gesehen), len(alle)))
     return 0
 

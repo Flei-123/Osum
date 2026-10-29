@@ -99,7 +99,7 @@ def main():
     with open(os.path.join(d, "soll.txt"), "w") as f:
         for name, groesse, art in soll:
             f.write("%s\t%d\t%s\n" % (name, groesse, art))
-    print("baum: %d Stueck in /data, %d Zeilen fuer mkfs"
+    print("tree: %d entries in /data, %d lines for mkfs"
           % (len(soll), len(zeilen)))
     return 0
 
