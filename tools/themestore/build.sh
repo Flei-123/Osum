@@ -466,7 +466,21 @@ if [ -z "$script" ] && [ "$shot" = yes ]; then
             kill -0 "$PID" 2>/dev/null || break
             sleep 0.5; k=$((k+1))
         done
-        sleep 0.5
+        LAST=-1
+        QUIET=0
+        k=0
+        while [ $k -lt 24 ] && kill -0 "$PID" 2>/dev/null; do
+            sleep 0.5
+            NOW=$(stat -c %s "$OUT/serial.txt" 2>/dev/null || echo 0)
+            if [ "$NOW" = "$LAST" ]; then
+                QUIET=$((QUIET+1))
+                [ "$QUIET" -ge 2 ] && break
+            else
+                QUIET=0
+            fi
+            LAST=$NOW
+            k=$((k+1))
+        done
     fi
     python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 \
         > "$OUT/shot.log" 2>&1
