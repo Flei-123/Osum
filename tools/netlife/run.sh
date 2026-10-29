@@ -56,5 +56,29 @@ check "net.log has renewed event" "$(has "$T/log.txt" ' renewed ')"
 check "net.log has dns-fixed event" "$(has "$T/log.txt" ' dns-fixed ')"
 check "net.log has status line with jarvisd state" "$(has "$T/log.txt" ' status .*jarvisd=')"
 check "net.log lines carry wall clock and uptime" "$(has "$T/log.txt" '^t=[0-9]* up=[0-9]* ')"
+SV=$T/sv; mkdir -p "$SV"
+cat > "$T/dreh_sv.txt" <<EOT
+warteauf 'dhcp: renewing lease' || 240
+warte 45
+EOT
+DESIGNBUILD="$SV/build" bash tools/design/eh6.sh "$SV/o" res=1280x800 accel=$ACC netz=ja tafel=nein \
+    progs="desktop taskbar settings launcher sh echo ls cat ps sleep kill dhcp" drehbuch="$T/dreh_sv.txt" > "$SV/o.log" 2>&1
+SS="$SV/o/serial.txt"
+LC_ALL=C tr -cd '\11\12\15\40-\176' < "$SS" > "$SV/s.klar" 2>/dev/null
+check "supervisor start: daemon enters the renewal loop" "$([ "$(grep -ac 'dhcp: renewing lease, t1=' "$SV/s.klar")" -ge 1 ] && echo 1 || echo 0)"
+check "supervisor start: one lease only, no restart after it" "$([ "$(grep -ac 'dhcp: ack ip=' "$SV/s.klar")" -eq 1 ] && echo 1 || echo 0)"
+check "supervisor start: no dhcp respawn by the supervisor" "$([ "$(grep -ac 'desk: shell dhcp respawn' "$SV/s.klar")" -eq 0 ] && echo 1 || echo 0)"
+argc_ok=1
+python3 -I - kernel/ui/kgui.fi <<'PY' || argc_ok=0
+import re, sys
+src = open(sys.argv[1], "rb").read().decode("latin-1")
+for m in re.finditer(r'desk_spawn_svc\(state, 2, \(&(\w+)\[0\]\) as u64,\s*\(&(\w+)\[0\]\) as u64, (\d+), (\d+)\)', src):
+    decl = re.search(r'var ' + m.group(2) + r': \[u8; \d+\] = "([^"]*)"', src)
+    words = decl.group(1).split("\\0")
+    n = len([w for w in words if w])
+    if n != int(m.group(4)):
+        sys.exit(1)
+PY
+check "kgui dhcp spawn: argc equals the number of argument words" "$argc_ok"
 echo "NETLIFE: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
