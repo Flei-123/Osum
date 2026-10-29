@@ -42,8 +42,14 @@ def parse_limine(text):
     return timeout, default, [e for e in entries if e["kernel"] and e["proto"] == "multiboot1"]
 
 
-def render(timeout, default, entries, resolution=None):
+def render(timeout, default, entries, resolution=None, menu=None, keywait=None, logo=None):
     out = ["timeout %d" % timeout, "default %d" % (default if 1 <= default <= len(entries) else 1)]
+    if menu:
+        out.append("menu %s" % menu)
+    if keywait is not None:
+        out.append("keywait %d" % keywait)
+    if logo:
+        out.append("logo %s" % logo)
     if resolution:
         out.append("resolution %s" % resolution)
     for e in entries:
@@ -59,10 +65,12 @@ def render(timeout, default, entries, resolution=None):
 
 def main(argv):
     if len(argv) < 3:
-        sys.stderr.write("usage: mkcfg.py <limine.conf> <osboot.cfg> [--timeout N] [--resolution WxH]\n")
+        sys.stderr.write("usage: mkcfg.py <limine.conf> <osboot.cfg> [--timeout N] [--resolution WxH] [--menu hidden|shown] [--keywait MS] [--logo PATH] [--entries N]\n")
         return 2
     timeout, default, entries = parse_limine(open(argv[1]).read())
-    resolution = None
+    resolution = menu = logo = None
+    keywait = None
+    limit = 16
     rest = argv[3:]
     while rest:
         flag = rest.pop(0)
@@ -70,12 +78,19 @@ def main(argv):
             timeout = int(rest.pop(0))
         elif flag == "--resolution":
             resolution = rest.pop(0)
+        elif flag == "--menu":
+            menu = rest.pop(0)
+        elif flag == "--keywait":
+            keywait = int(rest.pop(0))
+        elif flag == "--logo":
+            logo = rest.pop(0)
+        elif flag == "--entries":
+            limit = int(rest.pop(0))
     if not entries:
         sys.stderr.write("mkcfg: no multiboot1 entry in %s\n" % argv[1])
         return 1
-    if len(entries) > 16:
-        entries = entries[:16]
-    open(argv[2], "w").write(render(timeout, default, entries, resolution))
+    entries = entries[:limit]
+    open(argv[2], "w").write(render(timeout, default, entries, resolution, menu, keywait, logo))
     return 0
 
 

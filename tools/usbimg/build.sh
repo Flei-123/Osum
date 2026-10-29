@@ -1251,9 +1251,18 @@ PYHDD
 # WITHOUT such a medium (QEMU -kernel/-initrd gates that run the installer) needs BOOT_KERNEL_COPY=1.
 BOOTK=()
 [ "${BOOT_KERNEL_COPY:-0}" = 1 ] && BOOTK=("/boot/osum.mb=$OUT/osum.mb")
+BOOT_LOADER_EFI="$LIMINE/BOOTX64.EFI"
+BOOTO=()
+if [ "${OSBOOT:-0}" = 1 ]; then
+    bash tools/bootloader/build.sh "$OUT/osboot.efi" > "$OUT/osboot-build.txt" 2>&1 || fehler "osboot build failed"
+    python3 tools/bootloader/mklogo.py assets/marke/start-quelle.png "$OUT/osboot.logo" > /dev/null || fehler "osboot logo conversion failed"
+    printf 'menu hidden\nkeywait 300\nlogo /osboot.logo\n' > "$OUT/osboot.cfg"
+    BOOT_LOADER_EFI="$OUT/osboot.efi"
+    BOOTO=("/boot/osboot.cfg=$OUT/osboot.cfg" "/boot/osboot.logo=$OUT/osboot.logo")
+fi
 if [ "${ROOT_SLIM:-0}" != 1 ]; then
-ARGS+=(/boot/ "${BOOTK[@]}"
-       "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI"
+ARGS+=(/boot/ "${BOOTK[@]}" "${BOOTO[@]}"
+       "/boot/BOOTX64.EFI=$BOOT_LOADER_EFI"
        "/boot/limine-bios.sys=$LIMINE/limine-bios.sys"
        "/boot/limine-hdd.bin=$OUT/limine-hdd.bin")
 fi
@@ -2019,7 +2028,13 @@ mkfs.vfat -F 32 -h "$P1_ANF" -n OSUMEFI "$OUT/esp.img" > "$OUT/vfat.log" 2>&1 \
     || { cat "$OUT/vfat.log" >&2; fehler "mkfs.vfat fehlgeschlagen"; }
 
 mmd -i "$OUT/esp.img" ::/EFI ::/EFI/BOOT ::/boot 2>/dev/null
-mcopy -i "$OUT/esp.img" "$LIMINE/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI || fehler "mcopy BOOTX64"
+mcopy -i "$OUT/esp.img" "$BOOT_LOADER_EFI" ::/EFI/BOOT/BOOTX64.EFI || fehler "mcopy BOOTX64"
+if [ "${OSBOOT:-0}" = 1 ]; then
+    mmd -i "$OUT/esp.img" ::/EFI/limine
+    mcopy -i "$OUT/esp.img" "$LIMINE/BOOTX64.EFI" ::/EFI/limine/BOOTX64.EFI || fehler "mcopy limine fallback"
+    mcopy -i "$OUT/esp.img" "$OUT/osboot.cfg" ::/osboot.cfg || fehler "mcopy osboot.cfg"
+    mcopy -i "$OUT/esp.img" "$OUT/osboot.logo" ::/osboot.logo || fehler "mcopy osboot.logo"
+fi
 mcopy -i "$OUT/esp.img" "$LIMINE/limine-bios.sys" ::/limine-bios.sys || fehler "mcopy bios.sys"
 if [ -n "$BOOTREG_EFI" ]; then
     mcopy -i "$OUT/esp.img" "$BOOTREG_EFI" ::/EFI/BOOT/bootreg.efi || fehler "mcopy bootreg.efi"

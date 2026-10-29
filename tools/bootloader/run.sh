@@ -23,6 +23,7 @@ login_case() {
     grep -aq "^smp: cpus=[0-9]*  acpi=1" "$t" && ok "$label: ACPI found via copied RSDP" || bad "$label: smp: acpi=1 missing"
     grep -aq "osum: mount=1" "$t" && ok "$label: root mounted from module" || bad "$label: osum: mount=1 missing"
     grep -aq "$LOGIN" "$t" && ok "$label: login screen reached (${OSB_MS} ms)" || bad "$label: login screen not reached"
+    grep -aq "Boot entries" "$t" && bad "$label: menu shown without a key" || ok "$label: no menu without a key"
 }
 
 error_case() {
@@ -41,11 +42,70 @@ login_case eq35 q35 ehci "OVMF q35 + EHCI stick"
 login_case eide pc ide "OVMF i440fx + IDE disk"
 login_case envme q35 nvme "OVMF q35 + NVMe disk"
 
-sed '2a bogus value' "$D/osboot.cfg" > "$D/broken.cfg"
+python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/single.cfg" --timeout 0 --entries 1 > /dev/null
+sed '2a bogus value' "$D/single.cfg" > "$D/broken.cfg"
 error_case cbroken "$D/broken.cfg" "config is broken, line 3" "broken config"
-sed 's#^kernel .*#kernel /missing.mb#' "$D/osboot.cfg" > "$D/nokern.cfg"
+sed 's#^kernel .*#kernel /missing.mb#' "$D/single.cfg" > "$D/nokern.cfg"
 error_case cnokern "$D/nokern.cfg" "kernel not found: /missing.mb" "missing kernel"
-error_case cnocfg - "config not found: /osboot.cfg" "missing config"
+
+echo "== counter-proof: no osboot.cfg and no limine.conf =="
+cp "$D/stick.img" "$D/cnocfg.base"
+mdel -i "$D/cnocfg.base@@$OSB_OFF" ::osboot.cfg
+osb_without_limine "$D" cnocfg
+OSB_TAIL=8 osb_boot "$D" cnocfg "$D/cnocfg.base" q35 ehci 40 "config not found: /osboot.cfg"
+rm -f "$D/cnocfg.base"
+grep -aq "config not found: /osboot.cfg" "$D/cnocfg.txt" && ok "no config: message" || bad "no config: message missing"
+grep -aq "returning to firmware" "$D/cnocfg.txt" && ok "no config: returns to firmware" || bad "no config: no return to firmware"
+
+echo "== osboot.cfg missing: entries come from limine.conf =="
+osb_with_cfg "$D" nocfg -
+osb_boot "$D" nocfg "$D/nocfg.base" q35 ehci 90 "$LOGIN"
+rm -f "$D/nocfg.base"
+grep -aq "osboot: start " "$D/nocfg.txt" && ok "limine.conf fallback: osboot started the kernel" || bad "limine.conf fallback: kernel not started"
+grep -aq "$LOGIN" "$D/nocfg.txt" && ok "limine.conf fallback: login screen reached" || bad "limine.conf fallback: login screen not reached"
+
+echo "== failed default entry: menu with countdown, next entry boots =="
+python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/two.cfg" --timeout 0 --entries 2 --logo /osboot.logo > /dev/null
+sed '0,/^kernel .*/s##kernel /missing.mb#' "$D/two.cfg" > "$D/fb.cfg"
+osb_with_cfg "$D" fb "$D/fb.cfg"
+osb_boot "$D" fb "$D/fb.base" q35 ehci 120 "$LOGIN"
+rm -f "$D/fb.base"
+grep -aq "kernel not found: /missing.mb" "$D/fb.txt" && ok "fallback: error reported" || bad "fallback: error missing"
+grep -aq "Boot entries" "$D/fb.txt" && ok "fallback: menu shown after the failure" || bad "fallback: no menu"
+grep -aq "$LOGIN" "$D/fb.txt" && ok "fallback: second entry reached login" || bad "fallback: login not reached"
+
+echo "== splash: logo pixels, spinner, no menu =="
+python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/hold.cfg" --timeout 0 --keywait 12000 --logo /osboot.logo > /dev/null
+osb_with_cfg "$D" hold "$D/hold.cfg"
+osb_start "$D" hold "$D/hold.base" q35 ehci
+if osb_wait_text "$D" hold "osboot" 60; then
+    sleep 4
+    osb_shot "$D" hold shotA
+    sleep 1
+    osb_shot "$D" hold shotB
+    python3 -I tools/bootloader/shotcheck.py logo "$D/shotA.ppm" "$D/osboot.logo" && ok "splash: logo pixels centered and exact" || bad "splash: logo pixels do not match"
+    python3 -I tools/bootloader/shotcheck.py spinner "$D/shotA.ppm" "$D/osboot.logo" "$D/shotB.ppm" && ok "splash: spinner drawn and animated" || bad "splash: spinner missing or frozen"
+    grep -aq "Boot entries" "$D/hold.txt" && bad "splash: menu visible without key" || ok "splash: no menu without key"
+else
+    bad "splash: osboot did not start"
+fi
+osb_stop "$D" hold
+
+echo "== Esc opens the menu, Enter boots =="
+osb_start "$D" esc "$D/hold.base" q35 ehci
+if osb_wait_text "$D" esc "osboot" 60; then
+    sleep 4
+    osb_hmp "$D" esc "sendkey esc" 0.5
+    osb_wait_text "$D" esc "Boot entries" 20 && ok "Esc: menu shown" || bad "Esc: no menu"
+    sleep 1
+    osb_shot "$D" esc shotM
+    python3 -I tools/bootloader/shotcheck.py nologo "$D/shotM.ppm" "$D/osboot.logo" && ok "Esc: logo replaced by the menu" || bad "Esc: logo still on screen"
+    osb_hmp "$D" esc "sendkey ret" 0.5
+    osb_wait_text "$D" esc "$LOGIN" 90 && ok "Esc: Enter boots to login" || bad "Esc: login not reached after Enter"
+else
+    bad "Esc: osboot did not start"
+fi
+osb_stop "$D" esc
 
 echo "== default beyond entry count falls back to entry 1 =="
 sed 's/^default .*/default 9/' "$D/osboot.cfg" > "$D/fall.cfg"

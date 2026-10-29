@@ -21,7 +21,9 @@ osb_prepare() {
     sed -i 's/^timeout: .*/timeout: 0/' "$dir/limine.conf"
     cp "$dir/stick.img" "$dir/limine.img"
     mcopy -i "$dir/limine.img@@$OSB_OFF" -o "$dir/limine.conf" ::limine.conf || return 1
-    python3 tools/bootloader/mkcfg.py "$dir/limine.conf" "$dir/osboot.cfg" --timeout 0 > /dev/null || return 1
+    python3 tools/bootloader/mkcfg.py "$dir/limine.conf" "$dir/osboot.cfg" --timeout 0 --logo /osboot.logo > /dev/null || return 1
+    python3 tools/bootloader/mklogo.py assets/marke/start-quelle.png "$dir/osboot.logo" > /dev/null || return 1
+    mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$dir/osboot.logo" ::osboot.logo || return 1
     mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$dir/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI || return 1
     mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$dir/osboot.cfg" ::osboot.cfg
 }
@@ -69,4 +71,46 @@ osb_with_cfg() {
     else
         mcopy -i "$dir/$name.base@@$OSB_OFF" -o "$cfg" ::osboot.cfg
     fi
+}
+
+osb_without_limine() {
+    local dir=$1 name=$2
+    mdel -i "$dir/$name.base@@$OSB_OFF" ::limine.conf
+}
+
+osb_start() {
+    local dir=$1 name=$2 img=$3 mach=$4 bus=$5
+    cp "$img" "$dir/$name.img"
+    cp "$OSB_VARS" "$dir/$name.vars"
+    rm -f "$dir/$name.txt" "$dir/$name.mon"
+    qemu-system-x86_64 "${OSB_KVM[@]}" -machine "$mach" -m 2048 -smp 2 \
+        -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OSB_CODE" \
+        -drive "if=pflash,format=raw,unit=1,file=$dir/$name.vars" \
+        -drive "file=$dir/$name.img,format=raw,if=none,id=stick" $(osb_bus "$bus") \
+        -serial "file:$dir/$name.txt" -monitor "unix:$dir/$name.mon,server,nowait" \
+        -display none -no-reboot -pidfile "$dir/$name.pid" &
+    local i=0
+    while [ ! -S "$dir/$name.mon" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+}
+
+osb_wait_text() {
+    local dir=$1 name=$2 want=$3 secs=$4 i=0
+    while [ $i -lt $((secs*5)) ]; do
+        grep -aq "$want" "$dir/$name.txt" 2>/dev/null && return 0
+        sleep 0.2; i=$((i+1))
+    done
+    return 1
+}
+
+osb_hmp() {
+    python3 -I tools/bootloader/hmp.py "$1/$2.mon" "$3" "${4:-0.5}"
+}
+
+osb_shot() {
+    osb_hmp "$1" "$2" "screendump $1/$3.ppm" 0.8
+}
+
+osb_stop() {
+    kill "$(cat "$1/$2.pid" 2>/dev/null)" 2>/dev/null; wait 2>/dev/null
+    rm -f "$1/$2.img" "$1/$2.vars" "$1/$2.mon"
 }

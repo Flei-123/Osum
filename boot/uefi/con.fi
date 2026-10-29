@@ -1,9 +1,13 @@
 import mem
 import efi
 
-export { say, say_num, say_hex, clear, key }
+export { say, say_num, say_hex, clear, key, hide, reveal, menu_key_pressed, KEY_ESC, KEY_F8 }
 
 const WCAP: u64 = 360
+const KEY_ESC: u64 = 0x10017
+const KEY_F8: u64 = 0x10012
+const SHIFT_VALID: u64 = 0x80000000
+const SHIFT_ANY: u64 = 3
 
 fn flush(c: u64, n: u64) {
     let w: u64 = c + efi.C_WBUF
@@ -85,4 +89,57 @@ fn key(c: u64) -> u64 {
         return uni
     }
     return 0x10000 + (k & 0xFFFF)
+}
+
+fn set_attr(c: u64, attr: u64) {
+    let con: u64 = mem.get64(c + efi.C_CON)
+    efi.call2(mem.get64(con + 40), con, attr)
+}
+
+fn hide(c: u64) {
+    set_attr(c, 0)
+}
+
+fn reveal(c: u64) {
+    set_attr(c, 7)
+}
+
+fn ex_protocol(c: u64) -> u64 {
+    let known: u64 = mem.get64(c + efi.C_EX)
+    if known != 0 {
+        return known
+    }
+    let handle: u64 = mem.get64(mem.get64(c + efi.C_ST) + 40)
+    if efi.call3(efi.bs_fn(c, 152), handle, efi.guid(c, 0x46987762dd9e7534, 0xaa25a61785f5148c), efi.out_addr(c, 0)) != 0 {
+        mem.set64(c + efi.C_EX, 1)
+        return 1
+    }
+    mem.set64(c + efi.C_EX, efi.out(c, 0))
+    return efi.out(c, 0)
+}
+
+fn menu_key_pressed(c: u64) -> bool {
+    let ex: u64 = ex_protocol(c)
+    var n: u64 = 0
+    while ex > 1 && n < 8 {
+        let data: u64 = c + efi.C_KEYX
+        mem.zero(data, 16)
+        if efi.call2(mem.get64(ex + 8), ex, data) != 0 {
+            return false
+        }
+        let scan: u64 = mem.get16(data)
+        let shift: u64 = mem.get32(data + 4)
+        if scan == 0x17 || scan == 0x12 {
+            return true
+        }
+        if (shift & SHIFT_VALID) != 0 && (shift & SHIFT_ANY) != 0 {
+            return true
+        }
+        n = n + 1
+    }
+    if ex > 1 {
+        return false
+    }
+    let k: u64 = key(c)
+    return k == KEY_ESC || k == KEY_F8
 }
