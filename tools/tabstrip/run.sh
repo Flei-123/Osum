@@ -23,7 +23,12 @@ echo "== counter-proof: the server refuses the strip (kernel word nostrip) =="
 bash tools/design/audit.sh "$TMPD/n" accel=kvm uitrace=yes halt=420 extra=nostrip drehbuch="$(pwd)/tools/tabstrip/dreh.txt" > "$TMPD/run2.log" 2>&1
 python3 tools/tabstrip/check.py "$TMPD/n" | tee "$TMPD/old.txt"
 f2=$(grep -c '^  FAIL' "$TMPD/old.txt")
+echo "== Ctrl+N opens a second file manager window =="
+bash tools/design/audit.sh "$TMPD/w" accel=kvm uitrace=yes halt=300 drehbuch="$(pwd)/tools/tabstrip/newwin.txt" > "$TMPD/run3.log" 2>&1
+nw=$(grep -ac 'explorer: new window=' "$TMPD/w/serial.txt" 2>/dev/null); ns=$(grep -ac 'explorer: strip h=' "$TMPD/w/serial.txt" 2>/dev/null)
+f3=0
+if [ "${nw:-0}" -ge 1 ] && [ "${ns:-0}" -ge 2 ]; then echo "  OK    Ctrl+N starts a second file manager window ($ns strips)"; else echo "  FAIL  Ctrl+N did not start a second window (new window=$nw, strips=$ns)"; f3=1; fi
 echo "== result =="
 [ "$f1" -eq 0 ] && [ "$o1" -ge 20 ] && echo "  OK    all $o1 checks pass" || echo "  FAIL  $f1 failed ($o1 ok)"
 [ "$f2" -ge 6 ] && echo "  OK    without the strip $f2 checks fail: they measure something" || echo "  FAIL  without the strip only $f2 checks fail"
-[ "$f1" -eq 0 ] && [ "$o1" -ge 20 ] && [ "$f2" -ge 6 ]
+[ "$f1" -eq 0 ] && [ "$o1" -ge 20 ] && [ "$f2" -ge 6 ] && [ "$f3" -eq 0 ]
