@@ -331,15 +331,42 @@ static mut fat_tag_lba: u64 = 0
 // 1 = the next fresh cluster is overwritten in full by the caller (spc 1,
 // whole-sector write), so zeroing it first is a wasted disk write.
 static mut fat_skip_zero: u64 = 0
+static mut fat_defer: u64 = 0
+static mut fat_dirty: u64 = 0
 
 fn fat_tag_drop() {
     fat_tag_m = 0
     fat_tag_lba = 0
 }
 
+fn fat_flush(state: u64, m: u64) -> bool {
+    if fat_dirty == 0 {
+        return true
+    }
+    fat_dirty = 0
+    if fat_tag_m != m + 1 {
+        return false
+    }
+    let secs: u64 = sget(state, m, S_FATSEC)
+    let n: u64 = sget(state, m, S_NFATS)
+    let lba0: u64 = fat_tag_lba - 1
+    var k: u64 = 0
+    while k < n {
+        if !wr(state, m, lba0 + k * secs, buf(state, FATBUF)) {
+            fat_tag_drop()
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
 fn fat_load(state: u64, m: u64, lba: u64) -> bool {
     if fat_tag_m == m + 1 && fat_tag_lba == lba + 1 {
         return true
+    }
+    if fat_dirty != 0 && !fat_flush(state, m) {
+        return false
     }
     fat_tag_drop()
     if !rd(state, m, lba, buf(state, FATBUF)) {
@@ -374,6 +401,10 @@ fn fat_set(state: u64, m: u64, c: u64, v: u64) -> bool {
     let at: u64 = buf(state, FATBUF) + (off % BS)
     let keep: u64 = le32(at) & 0xF0000000
     put32(at, keep | (v & MASK28))
+    if fat_defer != 0 {
+        fat_dirty = 1
+        return true
+    }
     var k: u64 = 0
     while k < n {
         if !wr(state, m, lba0 + k * secs, buf(state, FATBUF)) {
@@ -1242,6 +1273,15 @@ fn f_write(state: u64, m: u64, node: u64, off: u64, src: u64,
 }
 
 fn f_write__inner(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    fat_defer = 1
+    let wrote: u64 = f_write__body(state, m, node, off, src, len)
+    fat_defer = 0
+    let _ok: bool = fat_flush(state, m)
+    return wrote
+}
+
+fn f_write__body(state: u64, m: u64, node: u64, off: u64, src: u64,
     len: u64) -> u64 {
     tick(state)
     if node == 0 || sget(state, m, S_VALID) == 0 {
