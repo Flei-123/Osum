@@ -8,7 +8,7 @@
 #        HP_ONLY="a b c" limits the overlay to the listed programs (small first step for a slow bridge)
 #        HP_NO_EXTRAS=1 drops the absolute-path files (a device with an old ota refuses them: first step only /bin)
 #        HP_SAME_KERNEL=1 publishes the kernel of HP_BASE (what the HP runs): the HP applies the overlay live, no trial boot
-#        HP_FX_PACK=<dir from tools/linuxapps/hppack.py> adds usr/share/xfx/{firefox.tar,firefox.manifest,user.js} to the overlay (HP_ONLY must then list wayd tar xfx);
+#        HP_FX_PACK=<dir from tools/linuxapps/hppack.py> adds usr/share/xfx/{firefox.tar.partNNN (gz <= 3.9 MB each, from HP_FX_PACK/parts or packsplit.py),firefox.manifest,user.js} to the overlay (HP_ONLY must then list wayd tar xfx);
 #                   the HP needs a root of >= 1 GiB (HP_STICK=1 images since ba9f4ee5), the apply refuses cleanly below 2x the size
 #        HP_KEEP_IMAGE=1 keeps the built image dir.  Run directly (not via heavy) when the heavy queue hangs.
 set -euo pipefail
@@ -58,9 +58,13 @@ while read -r dest rel; do
 done < <([ -n "${HP_NO_EXTRAS:-}" ] || cat tools/ota/overlay-extras.txt)
 if [ -n "${HP_FX_PACK:-}" ]; then
     mkdir -p "$EXTRA/usr/share/xfx"
-    cp "$HP_FX_PACK/firefox.tar" "$EXTRA/usr/share/xfx/firefox.tar"
+    if [ -f "$HP_FX_PACK/parts/firefox.tar.part000" ]; then
+        cp "$HP_FX_PACK"/parts/firefox.tar.part* "$EXTRA/usr/share/xfx/"
+    else
+        python3 -I tools/linuxapps/packsplit.py "$HP_FX_PACK/firefox.tar" "$EXTRA/usr/share/xfx" > /dev/null
+    fi
     cp "$HP_FX_PACK/firefox.manifest" assets/xfx/user.js "$EXTRA/usr/share/xfx/"
-    echo "republish-hp: firefox pack $(stat -c%s "$HP_FX_PACK/firefox.tar") octets"
+    echo "republish-hp: firefox pack $(stat -c%s "$HP_FX_PACK/firefox.tar") octets in $(ls "$EXTRA/usr/share/xfx" | grep -c '\.part') parts"
 fi
 python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${PROGS[*]} term" \
     | sed -n 's|^\(/apps/[A-Za-z0-9._-]*/start\)@\(/bin/[A-Za-z0-9._-]*\)$|\1 \2|p' > "$LINKS"
