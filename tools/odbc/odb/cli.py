@@ -39,10 +39,16 @@ def get_token(ns):
     return os.environ.get("ODB_TOKEN")
 
 
+def port_spec(ns):
+    if getattr(ns, "net", None):
+        return "udp:" + ns.net
+    return ns.port or os.environ.get("ODB_PORT")
+
+
 def open_session(ns, spec=None, login=True):
-    spec = spec or ns.port or os.environ.get("ODB_PORT")
+    spec = spec or port_spec(ns)
     if not spec:
-        sys.exit("odbc: no port (use --port or $ODB_PORT), e.g. --port unix:/tmp/odb.sock")
+        sys.exit("odbc: no port (use --port, --net or $ODB_PORT), e.g. --port unix:/tmp/odb.sock")
     s = Session.open(spec, wait=ns.wait, token=get_token(ns))
     if login:
         s.login(timeout=ns.hello_timeout)
@@ -51,7 +57,7 @@ def open_session(ns, spec=None, login=True):
 
 def candidates(ns):
     c = []
-    p = ns.port or os.environ.get("ODB_PORT")
+    p = port_spec(ns)
     if p:
         c += p.split(";")
     c += ["unix:" + x for x in sorted(glob.glob("/tmp/odb*.sock") + glob.glob("/run/odb/*.sock")
@@ -195,7 +201,7 @@ def cmd_input(ns):
     if ns.kind == "key":
         a += [("key", ns.args[0]), ("mods", ns.mods), ("action", ns.action)]
     elif ns.kind == "text":
-        a += [("text", " ".join(ns.args)), ("delay_ms", ns.delay_ms), ("layout", ns.layout)]
+        a += [("text", " ".join(ns.args)), ("delay_ms", ns.delay_ms), ("layout", getattr(ns, "layout", None))]
     elif ns.kind == "mouse":
         if ns.rel:
             a += [("dx", ns.args[0]), ("dy", ns.args[1])]
@@ -214,6 +220,32 @@ def cmd_ps(ns):
     _, body = s.collect_stream("ps", {"full": 1 if ns.full else None}, proto.STDOUT, timeout=ns.timeout)
     out_bytes(body)
     return 0
+
+
+def cmd_stacks(ns):
+    s = open_session(ns)
+    _, body = s.collect_stream("stacks", {"pid": ns.pid}, proto.STDOUT, timeout=ns.timeout)
+    out_bytes(body)
+    return 0
+
+
+def cmd_ls(ns):
+    s = open_session(ns)
+    _, body = s.collect_stream("ls", {"path": ns.path}, proto.STDOUT, timeout=ns.timeout)
+    out_bytes(body)
+    return 0
+
+
+def cmd_cat(ns):
+    s = open_session(ns)
+    off = ns.offset
+    while True:
+        r, body = s.collect_stream("cat", {"path": ns.path, "offset": off, "len": 8192}, proto.FILE, timeout=ns.timeout)
+        out_bytes(body)
+        size = r.geti("size", 0)
+        off += len(body)
+        if not body or off >= size:
+            return 0
 
 
 def cmd_kill(ns):
@@ -269,7 +301,7 @@ def cmd_reboot(ns):
 
 
 def cmd_ping(ns):
-    s = Session.open(ns.port or os.environ.get("ODB_PORT"), wait=ns.wait)
+    s = Session.open(port_spec(ns), wait=ns.wait)
     r = [s.ping(timeout=ns.timeout) for _ in range(ns.count)]
     print("ping x%d: min %.2f avg %.2f max %.2f ms" % (len(r), min(r) * 1e3, sum(r) / len(r) * 1e3, max(r) * 1e3))
     return 0
@@ -277,7 +309,7 @@ def cmd_ping(ns):
 
 def cmd_wait(ns):
     """Wait until the agent answers hello (boot finished). Exit 0 on success, 1 on timeout."""
-    spec = ns.port or os.environ.get("ODB_PORT")
+    spec = port_spec(ns)
     end = time.time() + ns.limit
     last = None
     while time.time() < end:
@@ -314,7 +346,7 @@ def cmd_imgdiff(ns):
 def cmd_serve(ns):
     """Long-lived relay: keeps a one-client upstream (VBox uart2 pipe) open for many odbc commands."""
     from .proxy import serve
-    spec = ns.port or os.environ.get("ODB_PORT")
+    spec = port_spec(ns)
     if not spec:
         sys.exit("odbc serve: needs --port <upstream>")
     return serve(spec, ns.listen, wait=ns.wait)
@@ -323,6 +355,7 @@ def cmd_serve(ns):
 def build_parser():
     p = argparse.ArgumentParser(prog="odbc", description="Osum debug bridge client")
     p.add_argument("--port", "-p", help="pipe:\\\\.\\pipe\\odb | tcp:h:p | unix:path | tty:/dev/pts/N | com:COM3 ($ODB_PORT)")
+    p.add_argument("--net", help="kernel ODB over LAN: <ip>[:port] (UDP, default port 6970)")
     p.add_argument("--token", help="auth token ($ODB_TOKEN)")
     p.add_argument("--token-file", help="file with the token ($ODB_TOKEN_FILE)")
     p.add_argument("--timeout", "-t", type=float, default=15.0, help="seconds without answer before giving up")
@@ -370,6 +403,16 @@ def build_parser():
     sp = sub.add_parser("ps")
     sp.add_argument("--full", action="store_true")
     sp.set_defaults(fn=cmd_ps)
+    sp = sub.add_parser("stacks", help="kernel stacks per task (kernel ODB, --net)")
+    sp.add_argument("pid", nargs="?", type=int, default=0)
+    sp.set_defaults(fn=cmd_stacks)
+    sp = sub.add_parser("ls", help="list a directory (kernel ODB, --net)")
+    sp.add_argument("path", nargs="?", default="/var/log")
+    sp.set_defaults(fn=cmd_ls)
+    sp = sub.add_parser("cat", help="print a file (kernel ODB, --net)")
+    sp.add_argument("path")
+    sp.add_argument("--offset", type=int, default=0)
+    sp.set_defaults(fn=cmd_cat)
     sp = sub.add_parser("kill")
     sp.add_argument("pid")
     sp.add_argument("--sig", default="TERM")

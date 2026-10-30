@@ -38,3 +38,17 @@ synchronous ReadFile would block writes), `odb/mock.py` Python mock agent (fault
   `bash tools/vbox/run.sh odbc-pack` + `odb-token`, paste the printed `odbinstall` / `odbtoken` lines on the laptop.
   Then `vbtest.ps1 odbwait 90` (marks the agent up; `shot` then uses odb, VBoxManage stays the fallback), `odb info`, `odb exec ...`,
   `odb push/pull`, `odbidle 3000` (guest idle_pct), `odbbench --mib 1`.
+
+## Kernel ODB over LAN (no userland needed)
+
+Boot word `kodb` (or `odb=1`) makes the kernel network task answer ODB on UDP port 6970 (`kodbport=N` changes it). One datagram = one frame. Only hosts in the same subnet are served; `nokodb` turns it off. The token is `/etc/odb.token` (without it only hello/ping work).
+
+    odbc --net 192.168.1.50 --token-file token.txt ping
+    odbc --net 192.168.1.50 --token-file token.txt info
+    odbc --net 192.168.1.50 --token-file token.txt ps --full
+    odbc --net 192.168.1.50 --token-file token.txt stacks [pid]
+    odbc --net 192.168.1.50 --token-file token.txt logs -n 100 [-f]
+    odbc --net 192.168.1.50 --token-file token.txt ls /var/log
+    odbc --net 192.168.1.50 --token-file token.txt cat /var/log/<file>
+
+`ls`/`cat` answer `EBUSY` while the filesystem lock is held. Gate: `tools/kodb/run.sh`.

@@ -9,6 +9,7 @@ Spec strings (--port / ODB_PORT):
   unix:/path/sock        Unix socket (qemu -chardev socket,path=..)
   tty:/dev/pts/N | com:COM3[,115200]   pty / serial port
   file:/path             regular file/fifo (read+write)
+  udp:host[:port]        kernel ODB over LAN (one datagram = one frame, port 6970)
 """
 import os
 import queue
@@ -29,6 +30,8 @@ class TransportError(OSError):
 
 
 class Transport:
+    wake = True
+
     def __init__(self):
         self.q = queue.Queue()
         self.closed = False
@@ -74,7 +77,7 @@ class Transport:
         # between polls to stay off the CPU) and a 16-byte UART FIFO would lose the head of a frame. Zero octets are
         # garbage to the frame resync; the pause lets the agent wake before the real frame starts.
         now = time.monotonic()
-        if WAKE_ENABLE and now - self.last_act > WAKE_IDLE_S:
+        if WAKE_ENABLE and self.wake and now - self.last_act > WAKE_IDLE_S:
             self._write(b"\x00" * WAKE_BYTES)
             time.sleep(WAKE_PAUSE_S)
         self.last_act = time.monotonic()
@@ -117,6 +120,26 @@ class SocketTransport(Transport):
             self.s.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
+        self.s.close()
+
+
+class UdpTransport(SocketTransport):
+    wake = False
+
+    def _write(self, data):
+        self.s.send(data)
+
+    def _read_blocking(self):
+        while not self.closed:
+            try:
+                return self.s.recv(65536)
+            except socket.timeout:
+                continue
+            except ConnectionRefusedError:
+                continue
+        return b""
+
+    def _close(self):
         self.s.close()
 
 
@@ -274,6 +297,16 @@ def open_tcp(hostport, wait=0.0):
     return SocketTransport(s).start()
 
 
+def open_udp(hostport, wait=0.0):
+    host, _, port = hostport.rpartition(":")
+    if not host:
+        host, port = hostport, ""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.5)
+    s.connect((host, int(port or 6970)))
+    return UdpTransport(s).start()
+
+
 def open_unix(path, wait=0.0):
     def c():
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -325,6 +358,8 @@ def open_transport(spec, wait=0.0):
         return open_pipe(spec, wait)
     if spec.startswith("tcp:"):
         return open_tcp(spec[4:], wait)
+    if spec.startswith("udp:"):
+        return open_udp(spec[4:], wait)
     if spec.startswith("unix:"):
         return open_unix(spec[5:], wait)
     if spec.startswith(("tty:", "com:")):
