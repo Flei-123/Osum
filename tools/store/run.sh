@@ -475,7 +475,7 @@ if waitfor "==S-WAIT==" 150; then
     [ "$(lastn)" = 2 ] && ok "Esc clears the search: two tiles again" || bad "Esc: tiles '$(lastn)'"
     echo "  -- detail page of the first tile, by keys"
     mark; key ctrl-f down ret; sleep 2; shot s3-detail
-    sawt "Zurück" && ok "Enter on a tile opens the detail page (Zurück)" || bad "no detail page"
+    sawt "Version: " && ok "Enter on a tile opens the detail page (Version line)" || bad "no detail page"
     sawt "Prüfung: Katalog und Paket" && ok "the detail page says what is checked (signature + hash)" || bad "no check line"
     echo "  -- 'Abbrechen' installs nothing"
     mark; tapt "Installieren" || bad "no 'Installieren' button"
