@@ -248,7 +248,20 @@ cat /var/log/xfx.log
 echo @@end
 SCRIPT
 
+cat > "$TMPD/nowayd.sh" <<'SCRIPT'
+echo @@nowayd
+/bin/xfx install
+/bin/xfxt waitfor /run/xfx.install done 120
+/bin/xfx start
+echo rc=$?
+/bin/xfx status
+echo @@end
+SCRIPT
 build_img main good.tar good.manifest main.sh 16384
+BASE_FULL=$BASE
+BASE=${BASE// \/bin\/wayd=$TMPD\/xfxstub.elf/}
+build_img nowayd good.tar good.manifest nowayd.sh 16384
+BASE=$BASE_FULL
 build_img bad good.tar bad.manifest bad.sh 16384
 build_img big big.tar big.manifest big.sh $(( BIG_MIB * 2 * 2 * 1024 + 32768 ))
 build_parts_img parts parts.sh 000 001 002
@@ -323,6 +336,13 @@ has "$M" log 'sha256 ok, extracting' "sha verified before extraction"
 has "$M" log 'already installed' "second install was idempotent"
 [ "$(seg "$M" log | grep -ac 'install done')" = 1 ] && ok "extraction ran exactly once" || bad "extraction did not run exactly once"
 
+echo "== 3b. image without /bin/wayd (HP 30.10.: xfx: cannot start) =="
+run_case nowayd 300
+W="$TMPD/nowayd.txt"
+has "$W" nowayd 'installed=yes' "installed without wayd"
+has "$W" nowayd 'xfx: /bin/wayd missing, update the system' "start names the missing /bin/wayd"
+hasnot "$W" nowayd 'xfx: cannot start' "no bare 'cannot start' without wayd"
+has "$W" nowayd '^rc=1' "start returns 1 without wayd"
 echo "== 4. bad sha =="
 run_case bad 300
 B="$TMPD/bad.txt"

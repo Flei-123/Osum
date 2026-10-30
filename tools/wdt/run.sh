@@ -26,6 +26,7 @@ probe() { echo "echo ==$1=="; echo "cat /proc/watchdog"; }
 script_busy() { for i in $(seq 1 18); do probe "P$i"; echo "sleep 2"; done; echo "echo ==END=="; }
 script_idle() { probe P1; echo "sleep $1"; probe P2; echo "echo ==END=="; }
 script_hang() { probe P1; echo "sleep 3"; probe P2; echo "cat /proc/watchdog_hang"; echo "echo ==AFTER=="; echo "sleep 60"; }
+script_lsproc() { probe P1; echo "sleep 3"; echo "ls -l /proc"; echo "echo ==AFTER=="; echo "sleep 30"; echo "echo ==END=="; }
 mkimg() {
     local name=$1; shift
     python3 tools/osum/mkfs.py build "$D/$name.img" 20000 /lib/ \
@@ -37,6 +38,7 @@ mkimg() {
 script_busy > "$D/busy.sh"; mkimg busy
 script_idle 100 > "$D/idle.sh"; mkimg idle
 script_hang > "$D/hang.sh"; mkimg hang
+script_lsproc > "$D/lsproc.sh"; mkimg lsproc
 printf 'gen=00000002 vor=00000001 v=00 ok=0\n' > "$D/erp.txt"
 printf '00000002\n' > "$D/akt.txt"
 cp "$D/busy.sh" "$D/trial.sh"; mkimg trial "/system/ERPROBUNG=$D/erp.txt" "/system/AKTUELL=$D/akt.txt"
@@ -63,7 +65,10 @@ runvm spin busy 75 "wdt=10 wdtspin=15" 2>/dev/null &
 runvm blind busy 75 "wdt=10 wdtspin=15 wdtblind" 2>/dev/null &
 runvm panic busy 50 "wdt=10 wdtpanic=15" 2>/dev/null &
 runvm off busy 50 "wdt=off wdthang=15" 2>/dev/null &
-runvm procfs hang 50 "wdt=10" 2>/dev/null &
+runvm procfs hang 50 "wdt=10 wdtproc" 2>/dev/null &
+runvm procoff hang 50 "wdt=10" 2>/dev/null &
+runvm lsproc lsproc 60 "wdt=10" 2>/dev/null &
+runvm lsplant lsproc 60 "wdt=10 wdtproc" 2>/dev/null &
 runvm idle idle 125 "" 2>/dev/null &
 runvm trial trial 130 "wdt=10 wdthang=12" 2>/dev/null &
 wait
@@ -97,11 +102,21 @@ echo "== e1. default 60 s, shell idle in sleep 100 =="
 [ "$(boots idle)" = 1 ] && ok "no false reset over 100 s idle" || bad "false reset: $(boots idle) boots"
 has idle "==END==" && ok "script finished" || bad "script did not finish"
 [ "$(val idle P1 timeout_s)" = 60 ] && ok "default timeout 60 s" || bad "timeout $(val idle P1 timeout_s)"
-echo "== f. cat /proc/watchdog_hang =="
+echo "== f. cat /proc/watchdog_hang with the test word wdtproc =="
 has procfs "==P2==" && ok "probe before the hang" || bad "no probe"
 has procfs "wdt: planted hang" && ok "hang requested through /proc/watchdog_hang" || bad "hang not requested"
 [ "$(boots procfs)" -ge 2 ] && ok "watchdog reset: $(boots procfs) boots" || bad "no second boot"
 second_boot_watchdog procfs && ok "last_boot=watchdog after the reset" || bad "last_boot not watchdog"
+echo "== f2. without wdtproc reading or listing /proc never plants a hang =="
+has procoff "==AFTER==" && ok "cat /proc/watchdog_hang returns" || bad "cat /proc/watchdog_hang did not return"
+has procoff "refused: needs root, an armed watchdog and the boot word wdtproc" && ok "refusal text shown" || bad "no refusal text"
+has procoff "wdt: planted hang" && bad "hang planted without wdtproc" || ok "no hang planted without wdtproc"
+[ "$(boots procoff)" = 1 ] && ok "one boot, no reset" || bad "boots: $(boots procoff)"
+has lsproc "==END==" && ok "ls -l /proc as root finishes" || bad "ls -l /proc did not finish"
+has lsproc "wdt: planted hang" && bad "ls -l /proc planted a hang" || ok "ls -l /proc plants nothing"
+[ "$(boots_until_end lsproc)" = 1 ] && ok "ls -l /proc: one boot until the end" || bad "ls -l /proc boots: $(boots_until_end lsproc)"
+has lsplant "wdt: planted hang" && ok "counter-proof wdtproc: ls -l /proc sizes the file and plants the hang (HP 30.10. 02:12)" || bad "counter-proof wdtproc: no hang through ls -l /proc"
+has lsplant "==END==" && bad "counter-proof wdtproc: script ended although hung" || ok "counter-proof wdtproc: script never ends"
 echo "  info  after the script ends the kernel halts; the watchdog then resets (boots in the busy run: $(boots busy))"
 echo "== g. A/B trial: watchdog resets count as failed starts =="
 grep -a '^ab: ' "$D/trial.klar" | head -6 | sed 's/^/        /'

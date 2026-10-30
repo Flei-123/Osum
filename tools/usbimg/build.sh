@@ -321,6 +321,7 @@ orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysi
 [ "$IMAGE_PROFILE" = personal ] || PROGS=${PROGS// jarvismini/}
 # W-MINI2: the Mini's screenshot key runs /bin/snip (personal stick only)
 if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PROGS="$PROGS snip" ;; esac; case " $PROGS " in *" snipt "*) ;; *) PROGS="$PROGS snipt" ;; esac; fi
+case " $PROGS " in *" xfx "*) case " $PROGS " in *" wayd "*) ;; *) PROGS="$PROGS wayd" ;; esac ;; esac
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -1197,6 +1198,11 @@ for q in $SYMBOLE; do ARGS+=("/etc/netview/$q=$OUT/icons/$q"); done
 ARGS+=(/usr/ /usr/share/ /usr/share/locale/
        /usr/share/locale/en/ "/usr/share/locale/en/messages=$RENDERED/locale/en/messages"
        /usr/share/locale/de/ "/usr/share/locale/de/messages=$RENDERED/locale/de/messages")
+if [[ " $PROGS " == *" wayd "* ]]; then
+    mkdir -p "$OUT/wayd-km"
+    python3 tools/wayland/genkeys.py --keymaps "$OUT/wayd-km" > "$OUT/wayd-km.log" 2>&1 || { echo "wayd keymaps failed"; tail -5 "$OUT/wayd-km.log"; exit 1; }
+    ARGS+=(/usr/share/wayd/ "/usr/share/wayd/keymap-us.xkb=$OUT/wayd-km/keymap-us.xkb" "/usr/share/wayd/keymap-de.xkb=$OUT/wayd-km/keymap-de.xkb")
+fi
 # ============================================== RUNDE LOGIND
 # DIE HEIMATVERZEICHNISSE -- /etc/passwd VERSPRACH EINES, DAS ES NICHT
 # GAB.
