@@ -127,6 +127,22 @@ grep -aq "osboot (bios)" "$W/seabioside.txt" && okk "seabioside: osboot (bios)" 
 grep -aq "osboot: start " "$W/seabioside.txt" && okk "seabioside: osboot started the kernel" || bd "seabioside: no 'osboot: start' line"
 grep -aqE "rootpart=1|rootsel: [a-z]+ -- WURZEL" "$W/seabioside.txt" && okk "seabioside: root found on the disk" || bd "seabioside: no root found on the disk"
 
+echo "== 3a3. SeaBIOS, IDE disk (PIO): login reached and no freeze report =="
+BUS=ide boot seabiosidefull bios "$W/disk.img" "glogin: bereit" 400 30
+check_login seabiosidefull ""
+grep -aq "hang: detected" "$W/seabiosidefull.txt" && bd "seabiosidefull: freeze logger fired: $(grep -a 'hang: detected' "$W/seabiosidefull.txt" | head -1)" \
+    || okk "seabiosidefull: freeze logger stayed quiet during 30 s of PIO writes after login"
+
+if [ -n "${IDEPIO_OLD_KERNEL:-}" ] && [ -f "$IDEPIO_OLD_KERNEL" ]; then
+    echo "== 3a4. counter-proof: the old kernel on the same IDE disk trips the freeze logger =="
+    cp "$W/disk.img" "$W/oldk.img"
+    mcopy -o -i "$W/oldk.img@@1048576" "$IDEPIO_OLD_KERNEL" ::osum.mb 2>/dev/null
+    BUS=ide boot seabiosideold bios "$W/oldk.img" "hang: detected" 400 2
+    grep -aq "hang: detected" "$W/seabiosideold.txt" && okk "seabiosideold: old kernel trips the freeze logger on IDE PIO" \
+        || bd "seabiosideold: old kernel did not trip the freeze logger (counter-proof is blind)"
+    rm -f "$W/oldk.img"
+fi
+
 echo "== 3b. OVMF (UEFI) =="
 boot ovmf uefi "$W/disk.img"
 check_login ovmf ""
