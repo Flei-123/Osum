@@ -93,7 +93,7 @@ NUR_DELL = [
 ]
 
 CRASH_RE = re.compile(
-    r"(panic|PANIC|page fault|#PF|#UD|#GP|general protection|double fault|SIGSEGV|SIGILL|SIGBUS|"
+    r"(panic|PANIC|page fault|#PF|#UD|#GP|#DF|\*\*\* EXCEPTION|general protection|double fault|SIGSEGV|SIGILL|SIGBUS|"
     r"segfault|killed by|stack smash|unhandled|[Oo]ops|FAULT|assert(ion)? fail|launcher: start refused|"
     r"elf: refused|no such program|exec failed|out of memory|OOM )")
 # serial lines that look like a crash but are boot-time summaries or on purpose (extend with care)
