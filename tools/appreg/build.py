@@ -20,6 +20,15 @@ def icon_dir(root, app, aliases):
     return None
 
 
+def alias_target(root, app):
+    aliases = dict(read_rows(os.path.join(root, "tools/appreg/alias.tsv"), "\t"))
+    path = aliases.get(app)
+    if not path or not path.startswith("assets/apps/") or not path.endswith(".osp"):
+        return None
+    name = os.path.basename(path)[:-4]
+    return name if name != app else None
+
+
 def entries(root):
     aliases = dict(read_rows(os.path.join(root, "tools/appreg/alias.tsv"), "\t"))
     for row in read_rows(os.path.join(root, "tools/loader/apps.tab"), "|"):
@@ -38,6 +47,10 @@ def main(argv):
         os.makedirs(target, exist_ok=True)
         with open(os.path.join(target, "symbol"), "wb") as f:
             f.write(symjoin.joined(d))
+        canon = alias_target(root, app)
+        if canon:
+            with open(os.path.join(target, "alias"), "w") as f:
+                f.write(canon + "\n")
         if kind == "konsole":
             with open(os.path.join(target, "console"), "w") as f:
                 f.write("1\n")

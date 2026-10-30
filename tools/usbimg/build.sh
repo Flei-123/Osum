@@ -1198,6 +1198,9 @@ for q in $SYMBOLE; do ARGS+=("/etc/netview/$q=$OUT/icons/$q"); done
 ARGS+=(/usr/ /usr/share/ /usr/share/locale/
        /usr/share/locale/en/ "/usr/share/locale/en/messages=$RENDERED/locale/en/messages"
        /usr/share/locale/de/ "/usr/share/locale/de/messages=$RENDERED/locale/de/messages")
+rm -rf "$OUT/appreg"
+python3 -I tools/appreg/build.py "$PWD" "$OUT/appreg" > "$OUT/appreg.log" 2>&1 || { echo "appreg registry failed"; tail -5 "$OUT/appreg.log"; exit 1; }
+while read -r reg_spec_; do ARGS+=("$reg_spec_"); done < <(bash tools/appreg/specs.sh "$OUT/appreg")
 if [[ " $PROGS " == *" wayd "* ]]; then
     mkdir -p "$OUT/wayd-km"
     python3 tools/wayland/genkeys.py --keymaps "$OUT/wayd-km" > "$OUT/wayd-km.log" 2>&1 || { echo "wayd keymaps failed"; tail -5 "$OUT/wayd-km.log"; exit 1; }
@@ -1615,7 +1618,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/nedit /apps/editor.osp/INFO \
 /bin/trashbin /apps/trashbin.osp/start /apps/trashbin.osp/INFO \
 /apps/trashbin.osp/symbol /etc/papierkorb.conf \
-/apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
+/usr/share/appreg/top/symbol /usr/share/appreg/top/console /usr/share/appreg/edit/alias /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
 /bin/taskmgr /apps/taskmgr.osp/start /apps/taskmgr.osp/INFO \
 /apps/taskmgr.osp/symbol \

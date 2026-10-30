@@ -290,6 +290,9 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/
        /usr/share/locale/de/ "/usr/share/locale/de/messages=locale/de/messages")
 [ -e locale/en/icons ] && ARGS+=("/usr/share/locale/en/icons=locale/en/icons")
 [ -e locale/de/icons ] && ARGS+=("/usr/share/locale/de/icons=locale/de/icons")
+if [ -n "${EH_APPREG_DIR:-}" ]; then
+    while read -r reg_spec; do ARGS+=("$reg_spec"); done < <(bash tools/appreg/specs.sh "$EH_APPREG_DIR")
+fi
 ARGS+=(/users/ /users/justin/ /users/justin/config/
        "/users/justin/config/locale=$OUT/userlocale@0644")
 mkdir -p "$OUT/heim"
