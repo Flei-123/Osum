@@ -1258,7 +1258,11 @@ if [ "${OSBOOT:-0}" = 1 ]; then
     python3 tools/bootloader/mklogo.py assets/marke/start-quelle.png "$OUT/osboot.logo" > /dev/null || fehler "osboot logo conversion failed"
     printf 'menu hidden\nkeywait 300\nlogo /osboot.logo\n' > "$OUT/osboot.cfg"
     BOOT_LOADER_EFI="$OUT/osboot.efi"
-    BOOTO=("/boot/osboot.cfg=$OUT/osboot.cfg" "/boot/osboot.logo=$OUT/osboot.logo")
+    bash tools/bootloader/build-bios.sh "$OUT/osboot-bios" > "$OUT/osboot-bios.log" 2>&1 \
+        || { cat "$OUT/osboot-bios.log" >&2; fehler "osboot bios build failed"; }
+    BOOTO=("/boot/osboot.cfg=$OUT/osboot.cfg" "/boot/osboot.logo=$OUT/osboot.logo"
+           "/boot/osboot-stage0.bin=$OUT/osboot-bios/osboot-stage0.bin"
+           "/boot/osboot-stage2.bin=$OUT/osboot-bios/osboot-stage2.bin")
 fi
 if [ "${ROOT_SLIM:-0}" != 1 ]; then
 ARGS+=(/boot/ "${BOOTK[@]}" "${BOOTO[@]}"
@@ -2055,8 +2059,6 @@ dd if="$OUT/root.img" of="$IMG" bs=512 seek="$P2_ANF" conv=notrunc status=none
 "$LIMINE/limine" bios-install "$IMG" > "$OUT/limine.log" 2>&1 \
     || { cat "$OUT/limine.log" >&2; fehler "limine bios-install fehlgeschlagen"; }
 if [ "${OSBOOT:-0}" = 1 ]; then
-    bash tools/bootloader/build-bios.sh "$OUT/osboot-bios" > "$OUT/osboot-bios.log" 2>&1 \
-        || { cat "$OUT/osboot-bios.log" >&2; fehler "osboot bios build failed"; }
     python3 tools/bootloader/biosinstall.py "$IMG" "$OUT/osboot-bios/osboot-stage0.bin" "$OUT/osboot-bios/osboot-stage2.bin" \
         >> "$OUT/osboot-bios.log" 2>&1 \
         || { cat "$OUT/osboot-bios.log" >&2; fehler "osboot bios install failed"; }

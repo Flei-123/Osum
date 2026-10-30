@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+
+export {
+    load, present, sectors, stage2_ptr, stage2_lba, stage0_into, STAGE2_LBA
+}
+
+const STAGE2_LBA: u64 = 256
+const STAGE0_SIZE: u64 = 440
+const PARAM_OFFSET: u64 = 424
+const PARAM_MAGIC: u64 = 0x3042534F
+const STAGE2_MAX: u64 = 458752
+
+static mut STAGE0: [u8; 512] = [0 as u8; 512]
+static mut STAGE2: [u8; 458752] = [0 as u8; 458752]
+static mut stage2_n: u64 = 0
+static mut p_stage0: [u8; 28] = "/boot/osboot-stage0.bin\0\0\0\0\0"
+static mut p_stage2: [u8; 28] = "/boot/osboot-stage2.bin\0\0\0\0\0"
+
+fn put8(at: u64, v: u64) {
+    __mmio_write8((at) as *mut u8, v as u8)
+}
+
+fn get8(at: u64) -> u64 {
+    return (*((at) as *mut u8)) as u64
+}
+
+fn put32(at: u64, v: u64) {
+    put8(at, v & 255)
+    put8(at + 1, (v >> 8) & 255)
+    put8(at + 2, (v >> 16) & 255)
+    put8(at + 3, (v >> 24) & 255)
+}
+
+fn read_all(path: u64, buf: u64, max: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var n: u64 = 0
+    var more: bool = true
+    while more && n < max {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, buf + n, max - n)
+        if ulib.bad(r) || r == 0 {
+            more = false
+        } else {
+            n = n + r
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if n >= max {
+        return 0
+    }
+    return n
+}
+
+fn load() -> bool {
+    stage2_n = 0
+    ulib.fill((&STAGE0[0 as usize]) as u64, 0, 512)
+    ulib.fill((&STAGE2[0 as usize]) as u64, 0, STAGE2_MAX)
+    let n0: u64 = read_all((&p_stage0[0 as usize]) as u64, (&STAGE0[0 as usize]) as u64, 512)
+    if n0 != STAGE0_SIZE {
+        return false
+    }
+    let n2: u64 = read_all((&p_stage2[0 as usize]) as u64, (&STAGE2[0 as usize]) as u64, STAGE2_MAX)
+    if n2 < 1024 {
+        return false
+    }
+    stage2_n = n2
+    return true
+}
+
+fn present() -> bool {
+    return stage2_n != 0
+}
+
+fn sectors() -> u64 {
+    return (stage2_n + 511) / 512
+}
+
+fn stage2_ptr() -> u64 {
+    return (&STAGE2[0 as usize]) as u64
+}
+
+fn stage2_lba() -> u64 {
+    return STAGE2_LBA
+}
+
+fn stage0_into(sector: u64, esp_lba: u64) {
+    let src: u64 = (&STAGE0[0 as usize]) as u64
+    var i: u64 = 0
+    while i < STAGE0_SIZE {
+        put8(sector + i, get8(src + i))
+        i = i + 1
+    }
+    put32(sector + PARAM_OFFSET, esp_lba)
+    put32(sector + PARAM_OFFSET + 4, STAGE2_LBA)
+    put32(sector + PARAM_OFFSET + 8, sectors())
+    put32(sector + PARAM_OFFSET + 12, PARAM_MAGIC)
+}

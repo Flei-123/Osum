@@ -4,13 +4,14 @@ profile kernel
 
 import ulib
 import dcrypt
+import instbios
 
 export {
     crypt_begin, crypt_end, crypt_off, crypt_active,
     BS, ALIGNMENT, ESP_DEFAULT,
     read_at, write_at, is_ofs, grow, grow_begin, grow_step, grow_position, copy_begin, copy_step, copy_position, fail_with,
     COPY_MORE, COPY_DONE, COPY_ERROR, GROW_MORE, GROW_DONE, GROW_ERROR, F_ABORT, F_TIMEOUT, copy_file, files_equal, kernel_source,
-    gpt_write, bios_load, bios_present, fat32_create, copy_root, copy_root_from,
+    gpt_write, bios_load, bios_present, bios_kind, fat32_create, copy_root, copy_root_from,
     plan_esp_start, plan_esp_end, plan_ofs_start, plan_ofs_end,
     plan_fits, check_source,
     step_nr, step_count, progress_permille, error_at, rewritten,
@@ -857,6 +858,9 @@ fn plan_fits(sect_count: u64, esp_sector: u64) -> bool {
 
 fn bios_load() -> bool {
     bios_n = 0
+    if instbios.load() {
+        return true
+    }
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_bios_hdd[0 as usize]) as u64, 0, 0)
     if ulib.bad(fd) {
         return false
@@ -886,6 +890,16 @@ fn bios_load() -> bool {
 
 fn bios_present() -> bool {
     return bios_n != 0
+}
+
+fn bios_kind() -> u64 {
+    if instbios.present() {
+        return 2
+    }
+    if bios_n != 0 {
+        return 1
+    }
+    return 0
 }
 
 fn gpt_write(dst_fd: u64, sect_count: u64, esp_sector: u64) -> bool {
@@ -1000,6 +1014,9 @@ fn gpt_write(dst_fd: u64, sect_count: u64, esp_sector: u64) -> bool {
         p32(p + 218, 0)
         p16(p + 222, 0)
     }
+    if instbios.present() {
+        instbios.stage0_into(p, esp_start)
+    }
     p8(p + 446 + 1, 0x00)
     p8(p + 446 + 2, 0x02)
     p8(p + 446 + 3, 0x00)
@@ -1017,6 +1034,16 @@ fn gpt_write(dst_fd: u64, sect_count: u64, esp_sector: u64) -> bool {
     p8(p + 511, 0xAA)
     if !write_at(dst_fd, 0, p, BS) {
         return false
+    }
+    if instbios.present() {
+        let stage2: u64 = instbios.stage2_ptr()
+        var sector: u64 = 0
+        while sector < instbios.sectors() {
+            if !write_at(dst_fd, instbios.stage2_lba() + sector, stage2 + sector * BS, BS) {
+                return false
+            }
+            sector = sector + 1
+        }
     }
     return true
 }

@@ -40,5 +40,9 @@
 - `tools/bootloader/bench.sh` (RUNS, MACH, BUS, WANT): time from QEMU start to `glogin: rect`, osboot and Limine alternating, both timeout 0.
 - Former hang after `osum: from module` (i440fx+IDE): not the loader. The test stick carried a kernel without the IDE nIEN fix (c2c2b3da); the same stick hangs at the same line with Limine. The kernel reserves mbi page, module table, modules and map by whole frames, so loader data placement is safe.
 
+## BIOS stage in the installer
+- `kernel/user/instbios.fi` loads `/boot/osboot-stage0.bin` (440 B) and `/boot/osboot-stage2.bin` from the root image (built into it by `OSBOOT=1 tools/usbimg/build.sh`); `instkern.gpt_write` puts stage0 into the MBR (parameters at 424: ESP LBA, stage2 LBA 256, sector count, magic) and stage2 at LBA 256. Without those files the installer falls back to the Limine BIOS stages.
+- `bash tools/install/bios.sh <image-dir>` (`OSBOOT=1 BOOT_KERNEL_COPY=1 tools/usbimg/build.sh <dir>` first; `DISK_IMG=` reuses an installed disk): install, host-side checks, SeaBIOS (AHCI, IDE) and OVMF boot, counter-proofs with zeroed stage2 / stage0.
+
 ## Open
-- BIOS path (MBR + stage2).
+- Logo under BIOS.
