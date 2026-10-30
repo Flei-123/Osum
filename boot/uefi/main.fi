@@ -1,4 +1,5 @@
 import mem
+import ctx
 import efi
 import con
 import fsys
@@ -7,6 +8,8 @@ import limine_cfg
 import menu
 import elf32
 import mbinfo
+import mbcore
+import mbfb
 import video
 import splash
 import tramp
@@ -18,8 +21,8 @@ fn fail(c: u64, what: u64, detail: u64) -> u64 {
     var pre: [u8; 16] = "osboot: error: \0"
     var sp: [u8; 2] = " \0"
     var nl: [u8; 2] = "\n\0"
-    let buf: u64 = c + efi.C_ERRBUF
-    mem.zero(buf, efi.ERRBUF_SIZE)
+    let buf: u64 = c + ctx.C_ERRBUF
+    mem.zero(buf, ctx.ERRBUF_SIZE)
     var n: u64 = mem.strlen(what)
     if n > 120 {
         n = 120
@@ -65,31 +68,31 @@ fn new_ctx(image: u64, st: u64) -> u64 {
     let out: u64 = (&slot[0]) as u64
     mem.set64(out, 0xFFFFFFFF)
     let bsp: u64 = mem.get64(st + 96)
-    if efi_call(mem.get64(bsp + 40), efi.MAX_ADDRESS, efi.LOADER_DATA, efi.CTX_PAGES, out, 0, 0) != 0 {
+    if efi_call(mem.get64(bsp + 40), efi.MAX_ADDRESS, efi.LOADER_DATA, ctx.CTX_PAGES, out, 0, 0) != 0 {
         return 0
     }
     let c: u64 = mem.get64(out)
-    mem.zero(c, efi.CTX_PAGES * 4096)
-    mem.set64(c + efi.C_ST, st)
-    mem.set64(c + efi.C_IMG, image)
-    mem.set64(c + efi.C_BS, bsp)
-    mem.set64(c + efi.C_CON, mem.get64(st + 64))
-    mem.set64(c + efi.C_CONIN, mem.get64(st + 48))
+    mem.zero(c, ctx.CTX_PAGES * 4096)
+    mem.set64(c + ctx.C_ST, st)
+    mem.set64(c + ctx.C_IMG, image)
+    mem.set64(c + ctx.C_BS, bsp)
+    mem.set64(c + ctx.C_CON, mem.get64(st + 64))
+    mem.set64(c + ctx.C_CONIN, mem.get64(st + 48))
     return c
 }
 
 fn load_modules(c: u64, e: u64, mbi: u64, tp: u64) -> u64 {
     var s_mod: [u8; 20] = "cannot load module:\0"
     var s_room: [u8; 23] = "module table full, at:\0"
-    let n: u64 = mem.get64(e + efi.E_NMODS)
+    let n: u64 = mem.get64(e + ctx.E_NMODS)
     var i: u64 = 0
     while i < n {
-        let path: u64 = mem.get64(e + efi.E_MODS + i * 8)
+        let path: u64 = mem.get64(e + ctx.E_MODS + i * 8)
         let buf: u64 = fsys.load(c, path, efi.LOW_LIMIT)
         if buf == 0 || tramp.overlaps(tp, buf, fsys.last_size(c)) {
             return fail(c, (&s_mod[0]) as u64, path)
         }
-        if !mbinfo.add_module(mbi, buf, fsys.last_size(c), path) {
+        if !mbcore.add_module(mbi, buf, fsys.last_size(c), path) {
             return fail(c, (&s_room[0]) as u64, path)
         }
         i = i + 1
@@ -108,7 +111,7 @@ fn try_entry(c: u64, idx: u64) -> u64 {
     var s_go: [u8; 16] = "\nosboot: start \0"
     var nl: [u8; 2] = "\n\0"
     let e: u64 = cfg.entry(c, idx)
-    let kpath: u64 = mem.get64(e + efi.E_KERNEL)
+    let kpath: u64 = mem.get64(e + ctx.E_KERNEL)
     let kbuf: u64 = fsys.load(c, kpath, 0xFFFFFFFF)
     if kbuf == 0 {
         return fail(c, (&s_nokern[0]) as u64, kpath)
@@ -129,11 +132,11 @@ fn try_entry(c: u64, idx: u64) -> u64 {
         return fail(c, (&s_range[0]) as u64, kpath)
     }
     let entry: u64 = mem.get32(kbuf + 24)
-    let mbi: u64 = mbinfo.create(c)
+    let mbi: u64 = mbcore.create(c)
     if mbi == 0 {
         return fail(c, (&s_mem[0]) as u64, 0)
     }
-    mbinfo.set_cmdline(mbi, mem.get64(e + efi.E_CMDLINE))
+    mbcore.set_cmdline(mbi, mem.get64(e + ctx.E_CMDLINE))
     let mr: u64 = load_modules(c, e, mbi, tp)
     if mr != 0 {
         return mr
@@ -146,9 +149,9 @@ fn try_entry(c: u64, idx: u64) -> u64 {
         return fail(c, (&s_range[0]) as u64, kpath)
     }
     con.say(c, (&s_go[0]) as u64)
-    con.say(c, mem.get64(e + efi.E_TITLE))
+    con.say(c, mem.get64(e + ctx.E_TITLE))
     con.say(c, (&nl[0]) as u64)
-    if !video.setup(c, mbi) {
+    if !mbfb.setup(c, mbi) {
         con.say(c, (&s_novid[0]) as u64)
     }
     let fin: u64 = mbinfo.finish(c, mbi, tp)
@@ -165,8 +168,8 @@ fn try_entry(c: u64, idx: u64) -> u64 {
 fn load_logo(c: u64) {
     var s_default: [u8; 13] = "/osboot.logo\0"
     var path: u64 = (&s_default[0]) as u64
-    if mem.get64(c + efi.C_LOGOP) != 0 {
-        path = mem.get64(c + efi.C_LOGOP)
+    if mem.get64(c + ctx.C_LOGOP) != 0 {
+        path = mem.get64(c + ctx.C_LOGOP)
     }
     let buf: u64 = fsys.load(c, path, 0xFFFFFFFF)
     if buf != 0 {
@@ -175,8 +178,8 @@ fn load_logo(c: u64) {
 }
 
 fn next_untried(c: u64) -> u64 {
-    let n: u64 = mem.get64(c + efi.C_NENT)
-    let tried: u64 = mem.get64(c + efi.C_TRIED)
+    let n: u64 = mem.get64(c + ctx.C_NENT)
+    let tried: u64 = mem.get64(c + ctx.C_TRIED)
     var i: u64 = 0
     while i < n {
         if ((tried >> i) & 1) == 0 {
@@ -193,15 +196,15 @@ fn start_screen(c: u64) {
 }
 
 fn pick_entry(c: u64) -> u64 {
-    if mem.get64(c + efi.C_MENU) == 1 {
+    if mem.get64(c + ctx.C_MENU) == 1 {
         return menu.choose_shown(c)
     }
-    var first: u64 = mem.get64(c + efi.C_DEFAULT) - 1
-    if mem.get64(c + efi.C_GOP) != 0 {
+    var first: u64 = mem.get64(c + ctx.C_DEFAULT) - 1
+    if mem.get64(c + ctx.C_GOP) != 0 {
         load_logo(c)
         start_screen(c)
     }
-    if splash.wait(c, mem.get64(c + efi.C_KEYWAIT)) {
+    if splash.wait(c, mem.get64(c + ctx.C_KEYWAIT)) {
         first = menu.choose_forced(c)
         start_screen(c)
     }
@@ -228,7 +231,7 @@ fn boot(c: u64) -> u64 {
     if cbuf != 0 && !cfg.parse(c, cbuf, fsys.last_size(c)) {
         return fail_num(c, (&s_badcfg[0]) as u64, cfg.bad_line())
     }
-    if mem.get64(c + efi.C_NENT) == 0 {
+    if mem.get64(c + ctx.C_NENT) == 0 {
         let lbuf: u64 = fsys.load(c, (&s_limpath[0]) as u64, 0xFFFFFFFF)
         if lbuf == 0 {
             fail(c, (&s_nocfg[0]) as u64, (&s_cfgpath[0]) as u64)
@@ -242,7 +245,7 @@ fn boot(c: u64) -> u64 {
     video.init(c)
     var idx: u64 = pick_entry(c)
     while true {
-        mem.set64(c + efi.C_TRIED, mem.get64(c + efi.C_TRIED) | (1 << idx))
+        mem.set64(c + ctx.C_TRIED, mem.get64(c + ctx.C_TRIED) | (1 << idx))
         try_entry(c, idx)
         let next: u64 = next_untried(c)
         if next == 0xFFFFFFFF {

@@ -1,0 +1,249 @@
+import mem
+import ctx
+import bios
+import plat
+
+export { open_root, load, last_size }
+
+const DIRBUF: u64 = 0x40000
+const DIRMAX: u64 = 0x10000
+const FATBUF: u64 = 0x66800
+const NAMEBUF: u64 = 0x66A00
+const COMP: u64 = 0x66C00
+const EOC: u64 = 0x0FFFFFF8
+
+fn last_size(c: u64) -> u64 {
+    return mem.get64(c + ctx.C_LASTSIZE)
+}
+
+fn open_root(c: u64) -> bool {
+    let esp: u64 = mem.get64(c + ctx.C_ESP)
+    if !bios.read_sectors(c, esp, 1, DIRBUF) {
+        return false
+    }
+    if mem.get16(DIRBUF + 11) != 512 || mem.get16(DIRBUF + 22) != 0 || mem.get32(DIRBUF + 36) == 0 || mem.get16(DIRBUF + 510) != 0xAA55 {
+        return false
+    }
+    let spc: u64 = mem.get8(DIRBUF + 13)
+    let fatbeg: u64 = esp + mem.get16(DIRBUF + 14)
+    mem.set64(c + ctx.C_SPC, spc)
+    mem.set64(c + ctx.C_FATBEG, fatbeg)
+    mem.set64(c + ctx.C_DATABEG, fatbeg + mem.get8(DIRBUF + 16) * mem.get32(DIRBUF + 36))
+    mem.set64(c + ctx.C_ROOTCL, mem.get32(DIRBUF + 44))
+    mem.set64(c + ctx.C_FATSEC, 0xFFFFFFFFFFFF)
+    return spc != 0
+}
+
+fn cluster_lba(c: u64, cl: u64) -> u64 {
+    return mem.get64(c + ctx.C_DATABEG) + (cl - 2) * mem.get64(c + ctx.C_SPC)
+}
+
+fn next_cluster(c: u64, cl: u64) -> u64 {
+    let sec: u64 = mem.get64(c + ctx.C_FATBEG) + (cl * 4) / 512
+    if mem.get64(c + ctx.C_FATSEC) != sec {
+        if !bios.read_sectors(c, sec, 1, FATBUF) {
+            return EOC
+        }
+        mem.set64(c + ctx.C_FATSEC, sec)
+    }
+    return mem.get32(FATBUF + (cl * 4) % 512) & 0x0FFFFFFF
+}
+
+fn read_dir(c: u64, first: u64) -> u64 {
+    let spc: u64 = mem.get64(c + ctx.C_SPC)
+    var cl: u64 = first
+    var off: u64 = 0
+    while cl >= 2 && cl < EOC && off + spc * 512 <= DIRMAX {
+        if !bios.read_sectors(c, cluster_lba(c, cl), spc, DIRBUF + off) {
+            return off
+        }
+        off = off + spc * 512
+        cl = next_cluster(c, cl)
+    }
+    return off
+}
+
+fn lower(ch: u64) -> u64 {
+    if ch >= 65 && ch <= 90 {
+        return ch + 32
+    }
+    return ch
+}
+
+fn same(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while lower(mem.get8(a + i)) == lower(mem.get8(b + i)) {
+        if mem.get8(a + i) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn lfn_part(e: u64) {
+    let seq: u64 = mem.get8(e) & 0x1F
+    if seq == 0 || seq > 20 {
+        return
+    }
+    let base: u64 = NAMEBUF + (seq - 1) * 13
+    var k: u64 = 0
+    while k < 13 {
+        var off: u64 = 0
+        if k < 5 {
+            off = 1 + k * 2
+        } else if k < 11 {
+            off = 14 + (k - 5) * 2
+        } else {
+            off = 28 + (k - 11) * 2
+        }
+        var ch: u64 = mem.get8(e + off)
+        if mem.get8(e + off + 1) != 0 {
+            ch = 63
+        }
+        mem.set8(base + k, ch)
+        k = k + 1
+    }
+    if (mem.get8(e) & 0x40) != 0 {
+        mem.set8(base + 13, 0)
+    }
+}
+
+fn short_name(e: u64) {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 8 && mem.get8(e + i) != 32 {
+        mem.set8(NAMEBUF + n, mem.get8(e + i))
+        n = n + 1
+        i = i + 1
+    }
+    if mem.get8(e + 8) != 32 {
+        mem.set8(NAMEBUF + n, 46)
+        n = n + 1
+        i = 8
+        while i < 11 && mem.get8(e + i) != 32 {
+            mem.set8(NAMEBUF + n, mem.get8(e + i))
+            n = n + 1
+            i = i + 1
+        }
+    }
+    mem.set8(NAMEBUF + n, 0)
+}
+
+fn find(len: u64, name: u64) -> u64 {
+    var have_lfn: bool = false
+    var off: u64 = 0
+    while off + 32 <= len {
+        let e: u64 = DIRBUF + off
+        let first: u64 = mem.get8(e)
+        if first == 0 {
+            return 0
+        }
+        if first == 0xE5 {
+            have_lfn = false
+        } else if mem.get8(e + 11) == 0x0F {
+            if !have_lfn {
+                mem.zero(NAMEBUF, 288)
+            }
+            have_lfn = true
+            lfn_part(e)
+        } else {
+            if (mem.get8(e + 11) & 8) == 0 {
+                if !have_lfn {
+                    short_name(e)
+                }
+                if same(NAMEBUF, name) {
+                    return e
+                }
+            }
+            have_lfn = false
+        }
+        off = off + 32
+    }
+    return 0
+}
+
+fn entry_cluster(e: u64) -> u64 {
+    return (mem.get16(e + 20) << 16) | mem.get16(e + 26)
+}
+
+fn next_component(path: u64, start: u64) -> u64 {
+    var pos: u64 = start
+    var i: u64 = 0
+    while mem.get8(path + pos) == 47 {
+        pos = pos + 1
+    }
+    while mem.get8(path + pos + i) != 0 && mem.get8(path + pos + i) != 47 && i < 200 {
+        mem.set8(COMP + i, mem.get8(path + pos + i))
+        i = i + 1
+    }
+    mem.set8(COMP + i, 0)
+    return pos + i
+}
+
+fn read_file(c: u64, first: u64, size: u64, dst: u64) -> bool {
+    let spc: u64 = mem.get64(c + ctx.C_SPC)
+    var left: u64 = (size + 511) / 512
+    var cl: u64 = first
+    var out: u64 = dst
+    while left > 0 && cl >= 2 && cl < EOC {
+        var run: u64 = 1
+        var nxt: u64 = next_cluster(c, cl)
+        while nxt == cl + run && run * spc < left {
+            run = run + 1
+            nxt = next_cluster(c, cl + run - 1)
+        }
+        var n: u64 = run * spc
+        if n > left {
+            n = left
+        }
+        if !bios.read_sectors(c, cluster_lba(c, cl), n, out) {
+            return false
+        }
+        out = out + n * 512
+        left = left - n
+        cl = nxt
+    }
+    return left == 0
+}
+
+fn load(c: u64, path: u64, limit: u64) -> u64 {
+    var cl: u64 = mem.get64(c + ctx.C_ROOTCL)
+    var pos: u64 = 0
+    var e: u64 = 0
+    while true {
+        pos = next_component(path, pos)
+        if mem.get8(COMP) == 0 {
+            return 0
+        }
+        let len: u64 = read_dir(c, cl)
+        e = find(len, COMP)
+        if e == 0 {
+            return 0
+        }
+        cl = entry_cluster(e)
+        var more: u64 = pos
+        while mem.get8(path + more) == 47 {
+            more = more + 1
+        }
+        if mem.get8(path + more) == 0 {
+            break
+        }
+        if (mem.get8(e + 11) & 0x10) == 0 {
+            return 0
+        }
+    }
+    if (mem.get8(e + 11) & 0x10) != 0 {
+        return 0
+    }
+    let size: u64 = mem.get32(e + 28)
+    let buf: u64 = plat.alloc_data(c, (size + 4095) / 4096 + 1)
+    if buf == 0 {
+        return 0
+    }
+    if size > 0 && !read_file(c, cl, size, buf) {
+        return 0
+    }
+    mem.set64(c + ctx.C_LASTSIZE, size)
+    return buf
+}

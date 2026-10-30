@@ -2054,6 +2054,13 @@ dd if="$OUT/root.img" of="$IMG" bs=512 seek="$P2_ANF" conv=notrunc status=none
 # Startweg.
 "$LIMINE/limine" bios-install "$IMG" > "$OUT/limine.log" 2>&1 \
     || { cat "$OUT/limine.log" >&2; fehler "limine bios-install fehlgeschlagen"; }
+if [ "${OSBOOT:-0}" = 1 ]; then
+    bash tools/bootloader/build-bios.sh "$OUT/osboot-bios" > "$OUT/osboot-bios.log" 2>&1 \
+        || { cat "$OUT/osboot-bios.log" >&2; fehler "osboot bios build failed"; }
+    python3 tools/bootloader/biosinstall.py "$IMG" "$OUT/osboot-bios/osboot-stage0.bin" "$OUT/osboot-bios/osboot-stage2.bin" \
+        >> "$OUT/osboot-bios.log" 2>&1 \
+        || { cat "$OUT/osboot-bios.log" >&2; fehler "osboot bios install failed"; }
+fi
 
 # RUNDE MESSTAFEL: DER ALTE NAME BLEIBT ERREICHBAR. Ein Verweis und
 # keine Kopie -- zwei Dateien mit demselben Inhalt sind zwei Dinge, die

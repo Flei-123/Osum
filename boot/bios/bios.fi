@@ -1,0 +1,178 @@
+import mem
+import ctx
+
+export { begin, set_reg, reg, call, outb, inb, read_sectors, e820, key_peek, key_read, shift_flags, sleep_ms, teletype, set_mode3, DESC_BASE, MAX_DESC }
+
+extern fn bios_int(n: u64);
+extern fn bios_outb(p: u64, v: u64);
+extern fn bios_inb(p: u64) -> u64;
+
+const REGS: u64 = 0x6000
+const DAP: u64 = 0x6040
+const BOUNCE: u64 = 0x50000
+const E820_BUF: u64 = 0x67000
+const DESC_BASE: u64 = 0x70000
+const MAX_DESC: u64 = 128
+const R_FLAGS: u64 = 28
+
+fn begin() {
+    mem.zero(REGS, 64)
+}
+
+fn set_reg(off: u64, v: u64) {
+    mem.set32(REGS + off, v)
+}
+
+fn reg(off: u64) -> u64 {
+    return mem.get32(REGS + off)
+}
+
+fn call(n: u64) -> bool {
+    bios_int(n)
+    return (mem.get32(REGS + R_FLAGS) & 1) == 0
+}
+
+fn outb(p: u64, v: u64) {
+    bios_outb(p, v)
+}
+
+fn inb(p: u64) -> u64 {
+    return bios_inb(p)
+}
+
+fn read_chunk(c: u64, lba: u64, count: u64, dst: u64) -> bool {
+    var tries: u64 = 0
+    while tries < 3 {
+        mem.zero(DAP, 16)
+        mem.set8(DAP, 16)
+        mem.set16(DAP + 2, count)
+        mem.set16(DAP + 6, 0x5000)
+        mem.set64(DAP + 8, lba)
+        begin()
+        set_reg(0, 0x4200)
+        set_reg(12, mem.get64(c + ctx.C_DRIVE))
+        set_reg(16, DAP)
+        if call(0x13) {
+            mem.copy(dst, BOUNCE, count * 512)
+            return true
+        }
+        begin()
+        set_reg(12, mem.get64(c + ctx.C_DRIVE))
+        call(0x13)
+        tries = tries + 1
+    }
+    return false
+}
+
+fn read_sectors(c: u64, lba: u64, count: u64, dst: u64) -> bool {
+    var done: u64 = 0
+    while done < count {
+        var n: u64 = count - done
+        if n > 32 {
+            n = 32
+        }
+        if !read_chunk(c, lba + done, n, dst + done * 512) {
+            return false
+        }
+        done = done + n
+    }
+    return true
+}
+
+fn desc_type(t: u64) -> u64 {
+    if t == 1 {
+        return 7
+    }
+    if t == 3 {
+        return 9
+    }
+    if t == 4 {
+        return 10
+    }
+    if t == 5 {
+        return 8
+    }
+    return 0
+}
+
+fn e820(c: u64) -> u64 {
+    var n: u64 = 0
+    var next: u64 = 0
+    while n < MAX_DESC {
+        begin()
+        set_reg(0, 0xE820)
+        set_reg(4, next)
+        set_reg(8, 24)
+        set_reg(12, 0x534D4150)
+        set_reg(20, 0)
+        mem.set16(REGS + 34, 0x6700)
+        mem.zero(E820_BUF, 24)
+        if !call(0x15) || reg(0) != 0x534D4150 {
+            return n
+        }
+        let b: u64 = mem.get64(E820_BUF)
+        let l: u64 = mem.get64(E820_BUF + 8)
+        let t: u64 = mem.get32(E820_BUF + 16)
+        let kind: u64 = desc_type(t)
+        var lo: u64 = b & 0xFFFFFFFFFFFFF000
+        var hi: u64 = (b + l + 4095) & 0xFFFFFFFFFFFFF000
+        if kind == 7 {
+            lo = (b + 4095) & 0xFFFFFFFFFFFFF000
+            hi = (b + l) & 0xFFFFFFFFFFFFF000
+        }
+        if l != 0 && hi > lo {
+            let d: u64 = DESC_BASE + n * 48
+            mem.zero(d, 48)
+            mem.set32(d, kind)
+            mem.set64(d + 8, lo)
+            mem.set64(d + 24, (hi - lo) / 4096)
+            n = n + 1
+        }
+        next = reg(4)
+        if next == 0 {
+            return n
+        }
+    }
+    return n
+}
+
+fn key_peek() -> bool {
+    begin()
+    set_reg(0, 0x0100)
+    call(0x16)
+    return (reg(28) & 0x40) == 0
+}
+
+fn key_read() -> u64 {
+    begin()
+    set_reg(0, 0)
+    call(0x16)
+    return reg(0) & 0xFFFF
+}
+
+fn shift_flags() -> u64 {
+    begin()
+    set_reg(0, 0x0200)
+    call(0x16)
+    return reg(0) & 0xFF
+}
+
+fn sleep_ms(ms: u64) {
+    begin()
+    set_reg(0, 0x8600)
+    set_reg(8, (ms * 1000) >> 16)
+    set_reg(12, (ms * 1000) & 0xFFFF)
+    call(0x15)
+}
+
+fn teletype(ch: u64) {
+    begin()
+    set_reg(0, 0x0E00 | ch)
+    call(0x10)
+}
+
+fn set_mode3() {
+    begin()
+    set_reg(0, 3)
+    call(0x10)
+}

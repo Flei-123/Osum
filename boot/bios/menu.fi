@@ -1,0 +1,118 @@
+import mem
+import ctx
+import bios
+import con
+import cfg
+
+export { choose_shown, choose_forced, choose_fallback, key_window }
+
+fn draw(c: u64, sel: u64, left_ms: u64) {
+    var head: [u8; 12] = "boot menu\n\n\0"
+    var mark: [u8; 4] = " > \0"
+    var blank: [u8; 4] = "   \0"
+    var dot: [u8; 3] = ". \0"
+    var nl: [u8; 2] = "\n\0"
+    var t1: [u8; 25] = "\nUp/Down, Enter or digit\0"
+    var t2: [u8; 10] = " - entry \0"
+    var t3: [u8; 5] = " in \0"
+    var t4: [u8; 4] = " s\n\0"
+    con.clear(c)
+    con.say(c, (&head[0]) as u64)
+    let n: u64 = mem.get64(c + ctx.C_NENT)
+    var i: u64 = 0
+    while i < n {
+        if i == sel {
+            con.say(c, (&mark[0]) as u64)
+        } else {
+            con.say(c, (&blank[0]) as u64)
+        }
+        con.say_num(c, i + 1)
+        con.say(c, (&dot[0]) as u64)
+        con.say(c, mem.get64(cfg.entry(c, i) + ctx.E_TITLE))
+        con.say(c, (&nl[0]) as u64)
+        i = i + 1
+    }
+    con.say(c, (&t1[0]) as u64)
+    if left_ms > 0 {
+        con.say(c, (&t2[0]) as u64)
+        con.say_num(c, sel + 1)
+        con.say(c, (&t3[0]) as u64)
+        con.say_num(c, (left_ms + 999) / 1000)
+        con.say(c, (&t4[0]) as u64)
+    } else {
+        con.say(c, (&nl[0]) as u64)
+    }
+}
+
+fn run(c: u64, start: u64, timeout_ms: u64) -> u64 {
+    let n: u64 = mem.get64(c + ctx.C_NENT)
+    var sel: u64 = start
+    var left: u64 = timeout_ms
+    draw(c, sel, left)
+    while true {
+        bios.sleep_ms(50)
+        if left > 0 {
+            if left <= 50 {
+                return sel
+            }
+            left = left - 50
+            if left % 1000 < 50 {
+                draw(c, sel, left)
+            }
+        }
+        while bios.key_peek() {
+            let k: u64 = bios.key_read()
+            let scan: u64 = k >> 8
+            let ch: u64 = k & 0xFF
+            left = 0
+            if scan == 0x48 && sel > 0 {
+                sel = sel - 1
+            } else if scan == 0x50 && sel + 1 < n {
+                sel = sel + 1
+            } else if ch == 13 {
+                return sel
+            } else if ch >= 49 && ch <= 57 && ch - 49 < n {
+                return ch - 49
+            }
+            draw(c, sel, left)
+        }
+    }
+    return sel
+}
+
+fn choose_shown(c: u64) -> u64 {
+    return run(c, mem.get64(c + ctx.C_DEFAULT) - 1, mem.get64(c + ctx.C_TIMEOUT) * 1000)
+}
+
+fn choose_forced(c: u64) -> u64 {
+    return run(c, mem.get64(c + ctx.C_DEFAULT) - 1, 0)
+}
+
+fn choose_fallback(c: u64, next: u64) -> u64 {
+    return run(c, next, 5000)
+}
+
+fn key_window(c: u64, ms: u64) -> bool {
+    var left: u64 = ms
+    while true {
+        if (bios.shift_flags() & 3) != 0 {
+            return true
+        }
+        while bios.key_peek() {
+            let k: u64 = bios.key_read()
+            if (k >> 8) == 1 || (k >> 8) == 0x42 {
+                return true
+            }
+        }
+        if left == 0 {
+            return false
+        }
+        var step: u64 = 10
+        if left < step {
+            step = left
+        }
+        bios.sleep_ms(step)
+        left = left - step
+    }
+    return false
+}

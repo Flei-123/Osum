@@ -1,0 +1,92 @@
+import mem
+import ctx
+import bios
+
+export { init }
+
+const INFO: u64 = 0x66000
+const MODE: u64 = 0x66400
+
+fn low_bit_pos(p: u64) -> u64 {
+    return mem.get8(p)
+}
+
+fn mode_info(c: u64, m: u64) -> bool {
+    bios.begin()
+    bios.set_reg(0, 0x4F01)
+    bios.set_reg(8, m)
+    bios.set_reg(20, MODE & 0xF)
+    mem.set16(0x6000 + 34, MODE >> 4)
+    if !bios.call(0x10) || (bios.reg(0) & 0xFFFF) != 0x4F {
+        return false
+    }
+    let attr: u64 = mem.get16(MODE)
+    return (attr & 1) != 0 && (attr & 0x80) != 0 && mem.get8(MODE + 0x19) == 32 && mem.get8(MODE + 0x1B) == 6
+}
+
+fn score(c: u64, w: u64, h: u64) -> u64 {
+    let want_w: u64 = mem.get64(c + ctx.C_RES_W)
+    let want_h: u64 = mem.get64(c + ctx.C_RES_H)
+    if want_w != 0 && w == want_w && h == want_h {
+        return 0xFFFFFFFF
+    }
+    if w == 1024 && h == 768 && want_w == 0 {
+        return 0x7FFFFFFF
+    }
+    if w > 1920 || h > 1200 {
+        return 1
+    }
+    return w * h / 1024 + 1
+}
+
+fn init(c: u64) -> bool {
+    mem.zero(INFO, 512)
+    mem.set8(INFO, 86)
+    mem.set8(INFO + 1, 66)
+    mem.set8(INFO + 2, 69)
+    mem.set8(INFO + 3, 50)
+    bios.begin()
+    bios.set_reg(0, 0x4F00)
+    bios.set_reg(20, INFO & 0xF)
+    mem.set16(0x6000 + 34, INFO >> 4)
+    if !bios.call(0x10) || (bios.reg(0) & 0xFFFF) != 0x4F {
+        return false
+    }
+    let list: u64 = (mem.get16(INFO + 16) << 4) + mem.get16(INFO + 14)
+    var best: u64 = 0
+    var best_score: u64 = 0
+    var i: u64 = 0
+    while i < 256 && mem.get16(list + i * 2) != 0xFFFF {
+        let m: u64 = mem.get16(list + i * 2)
+        if mode_info(c, m) {
+            let s: u64 = score(c, mem.get16(MODE + 0x12), mem.get16(MODE + 0x14))
+            if s > best_score {
+                best_score = s
+                best = m
+            }
+        }
+        i = i + 1
+    }
+    if best_score == 0 {
+        return false
+    }
+    mode_info(c, best)
+    bios.begin()
+    bios.set_reg(0, 0x4F02)
+    bios.set_reg(4, best | 0x4000)
+    if !bios.call(0x10) || (bios.reg(0) & 0xFFFF) != 0x4F {
+        return false
+    }
+    mem.set64(c + ctx.C_GOP, 1)
+    mem.set64(c + ctx.C_FB, mem.get32(MODE + 0x28))
+    mem.set64(c + ctx.C_PITCH, mem.get16(MODE + 0x10) / 4)
+    mem.set64(c + ctx.C_SW, mem.get16(MODE + 0x12))
+    mem.set64(c + ctx.C_SH, mem.get16(MODE + 0x14))
+    mem.set64(c + ctx.C_RBITS, mem.get8(MODE + 0x1F))
+    mem.set64(c + ctx.C_RSH, mem.get8(MODE + 0x20))
+    mem.set64(c + ctx.C_GBITS, mem.get8(MODE + 0x21))
+    mem.set64(c + ctx.C_GSH, mem.get8(MODE + 0x22))
+    mem.set64(c + ctx.C_BBITS, mem.get8(MODE + 0x23))
+    mem.set64(c + ctx.C_BSH, mem.get8(MODE + 0x24))
+    return true
+}

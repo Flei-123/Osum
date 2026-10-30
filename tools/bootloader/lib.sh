@@ -114,3 +114,71 @@ osb_stop() {
     kill "$(cat "$1/$2.pid" 2>/dev/null)" 2>/dev/null; wait 2>/dev/null
     rm -f "$1/$2.img" "$1/$2.vars" "$1/$2.mon"
 }
+
+bios_prepare() {
+    local dir=$1
+    bash tools/bootloader/build-bios.sh "$dir/bios" > "$dir/bios-build.txt" 2>&1 || { cat "$dir/bios-build.txt"; return 1; }
+    if [ -n "${STICK_IMG:-}" ]; then
+        cp "$STICK_IMG" "$dir/stick.img"
+    else
+        OSBOOT=1 bash tools/usbimg/build.sh "$dir/build" > "$dir/build.txt" 2>&1 || { tail -5 "$dir/build.txt"; return 1; }
+        mv "$dir/build/${MARKE_DATEI}-usb.img" "$dir/stick.img"
+        rm -rf "$dir/build"
+    fi
+    if [ -n "${KERNEL:-}" ]; then
+        mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$KERNEL" ::osum.mb || return 1
+    fi
+    python3 tools/bootloader/biosinstall.py "$dir/stick.img" "$dir/bios/osboot-stage0.bin" "$dir/bios/osboot-stage2.bin" > "$dir/bios-install.txt" || return 1
+    mcopy -i "$dir/stick.img@@$OSB_OFF" ::limine.conf "$dir/limine.conf" || return 1
+    sed -i 's/^timeout: .*/timeout: 0/' "$dir/limine.conf"
+    python3 tools/bootloader/mkcfg.py "$dir/limine.conf" "$dir/osboot.cfg" --timeout 0 > /dev/null || return 1
+}
+
+bios_bus() {
+    case "$1" in
+        usb) echo "-device usb-ehci -device usb-storage,drive=stick,bootindex=0" ;;
+        nvme) echo "-device nvme,drive=stick,serial=osbstick,bootindex=0" ;;
+        *) echo "-device ide-hd,drive=stick,bus=ide.0,bootindex=0" ;;
+    esac
+}
+
+bios_start() {
+    local dir=$1 name=$2 img=$3 mach=$4 bus=$5
+    cp "$img" "$dir/$name.img"
+    rm -f "$dir/$name.txt" "$dir/$name.mon"
+    qemu-system-x86_64 "${OSB_KVM[@]}" -machine "$mach" -m 2048 -smp 2 \
+        -drive "file=$dir/$name.img,format=raw,if=none,id=stick" $(bios_bus "$bus") \
+        -serial "file:$dir/$name.txt" -monitor "unix:$dir/$name.mon,server,nowait" \
+        -display none -no-reboot -pidfile "$dir/$name.pid" &
+    local i=0
+    while [ ! -S "$dir/$name.mon" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+}
+
+bios_finish() {
+    kill "$(cat "$1/$2.pid" 2>/dev/null)" 2>/dev/null; wait 2>/dev/null
+    rm -f "$1/$2.img" "$1/$2.mon"
+}
+
+bios_boot() {
+    local dir=$1 name=$2 img=$3 mach=$4 bus=$5 secs=$6 want=$7
+    bios_start "$dir" "$name" "$img" "$mach" "$bus"
+    local t0 t1
+    t0=$(date +%s%N)
+    osb_wait_text "$dir" "$name" "$want\|EXCEPTION" "$secs"
+    t1=$(date +%s%N)
+    OSB_MS=$(( (t1 - t0) / 1000000 ))
+    grep -aq "$want" "$dir/$name.txt" 2>/dev/null || OSB_MS=-1
+    sleep "${OSB_TAIL:-0}"
+    bios_finish "$dir" "$name"
+}
+
+bios_with_cfg() {
+    local dir=$1 name=$2 cfg=$3
+    cp "$dir/stick.img" "$dir/$name.base"
+    if [ "$cfg" = "-" ]; then
+        mdel -i "$dir/$name.base@@$OSB_OFF" ::osboot.cfg 2>/dev/null
+        mdel -i "$dir/$name.base@@$OSB_OFF" ::limine.conf
+    else
+        mcopy -i "$dir/$name.base@@$OSB_OFF" -o "$cfg" ::osboot.cfg
+    fi
+}
