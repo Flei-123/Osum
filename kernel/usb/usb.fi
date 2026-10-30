@@ -90,8 +90,11 @@ import touchev.quirk
 import drv.hid.hidrep
 import drv.hid.hidin
 import gfx.gfx
+import sync.atomic
+import arch.cpu
 
 export {
+    service_cpus, service_skips, service_seq_jumps,
     resume, stage, irq, service, poll, say, report, ready, count,
     msc_ready, msc_blocks, msc_bsize,
     // RUNDE HOTPLUG-2: dasselbe JE PLATZ. `i` ist der Platz in der
@@ -3369,10 +3372,14 @@ fn service(state: u64) {
     // `poll` -- ohne diese Sperre liefen zwei Durchlaeufe auf
     // demselben Ring, und beide warteten auf eine Antwort, die nur
     // einmal kommt.
-    if g(state, S_SVCBUSY) != 0 {
+    let me: u64 = cpu.here(state)
+    if me < 64 {
+        svc_cpus = svc_cpus | (1 << me)
+    }
+    if atomic.cas(state + USCAL_OFF + S_SVCBUSY, 0, me + 1) != 0 {
+        svc_skips = svc_skips + 1
         return
     }
-    s(state, S_SVCBUSY, 1)
     var d: u64 = 0
     while d < MAX_DEV {
         if dg(state, d, D_USED) != 0 && dg(state, d, D_INTDCI) != 0 {
@@ -3381,6 +3388,9 @@ fn service(state: u64) {
             if i < xhci.MAX_EP {
                 let seq: u64 = xhci.ep_seq(state, i)
                 if seq != dg(state, d, D_SEQ) {
+                    if seq -% dg(state, d, D_SEQ) > 1 {
+                        seq_jumps = seq_jumps + 1
+                    }
                     ds(state, d, D_SEQ, seq)
                     let cc: u64 = xhci.ep_code(state, i)
                     ds(state, d, D_LASTCC, cc)
@@ -3441,7 +3451,23 @@ fn service(state: u64) {
     // antwortet also.
     led_service(state)
     btusb.pump(state)
-    s(state, S_SVCBUSY, 0)
+    atomic.store(state + USCAL_OFF + S_SVCBUSY, 0)
+}
+
+static mut svc_cpus: u64 = 0
+static mut svc_skips: u64 = 0
+static mut seq_jumps: u64 = 0
+
+fn service_cpus() -> u64 {
+    return svc_cpus
+}
+
+fn service_skips() -> u64 {
+    return svc_skips
+}
+
+fn service_seq_jumps() -> u64 {
+    return seq_jumps
 }
 
 // DER ZWEITE WEG ZU DENSELBEN BERICHTEN, und er ist eine GEGENPROBE und
