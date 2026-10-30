@@ -178,7 +178,7 @@ else
     expect_gt "crypt, leaked block: errors" "$(val "$TMPD/l.txt" errors)" 0
     cmp -s "$TMPD/leak.gpt" "$TMPD/target.img" && ok "crypt leaked-block check-only left the disk byte-identical" || bad "crypt leaked-block check-only changed the disk"
 
-    run_fsck "$TMPD/leak.gpt" "fsck --crypt $PW /dev/hdb" "$TMPD/m.txt"
+    run_fsck "$TMPD/leak.gpt" "fsck -r --crypt $PW /dev/hdb" "$TMPD/m.txt"
     expect "crypt repair: fixed" "$(val "$TMPD/m.txt" fixed)" 1
     cp --sparse=always "$TMPD/target.img" "$TMPD/repaired.img"
     run_fsck "$TMPD/repaired.img" "fsck --check-only --crypt $PW /dev/hdb" "$TMPD/n.txt"
