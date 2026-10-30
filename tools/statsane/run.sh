@@ -75,7 +75,7 @@ for f in kernel/user/*.fi; do ln -s "$(pwd)/$f" "$TMPD/olduser/"; done
 rm -f "$TMPD/olduser/ls.fi"
 git show "$OLD_LS_REF:kernel/user/ls.fi" > "$TMPD/olduser/ls.fi" 2>/dev/null
 "$FIRNC" "$TMPD/olduser/ls.fi" -o "$TMPD/lsold.o" > "$TMPD/elsold" 2>&1 && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$TMPD/lsold.elf" "$TMPD/crt.o" "$TMPD/lsold.o" 2>/dev/null || { bad "C old ls build"; head -5 "$TMPD/elsold"; }
-SCRIPT="script=ls -l /etc/theme.conf;echo statdone;exit"
+SCRIPT="script=ls -l /etc;echo statdone;exit"
 mtime_boot() {
     local t=$1 lself=$2 img="$TMPD/$1.img" spec="/bin/ /etc/ /etc/theme.conf=$TMPD/theme.conf"
     for p in sh cat echo chown; do spec="$spec /bin/$p=$TMPD/$p.elf"; done
@@ -91,7 +91,7 @@ mtime_boot() {
 mtime_boot c "$TMPD/ls.elf"
 has "$TMPD/c.plant" "planted" "C mtime planted into the inode"
 grep -qax "statdone" "$TMPD/c.ser" && ok "C ls -l returned with a garbage mtime" || bad "C statdone missing"
-has "$TMPD/c.ser" " /etc/theme.conf" "C ls -l printed the line"
+has "$TMPD/c.ser" " theme.conf" "C ls -l /etc printed the theme.conf line"
 mtime_boot d "$TMPD/lsold.elf"
 has "$TMPD/d.plant" "planted" "D mtime planted into the inode"
 [ -s "$TMPD/d.ser" ] && ok "D kernel booted" || bad "D no serial output"
