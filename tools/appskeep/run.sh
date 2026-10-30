@@ -47,7 +47,7 @@ mkrez() { # name deps
     } > "$OUT/rez/$1.rezept"
     python3 "$OPK" bauen "$OUT/rez/$1.rezept" -o "$OUT/dsrc/$1-1.opk"
 }
-mkrez libx "" && ok "package built" || bad "mkrez"
+mkrez libx "" && mkrez keep "" && mkrez edit "" && ok "packages built" || bad "mkrez"
 python3 "$OPK" quelle "$OUT/dsrc" --schluessel "$OUT/geheim.key" > "$OUT/dsrc.log" 2>&1 \
     && python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/dsrc"/*.opk > /dev/null \
     && ok "source /dsrc signed" || { cat "$OUT/dsrc.log"; bad "source signing"; }
@@ -75,6 +75,15 @@ rc=$(lauf k2 "opk install /dsrc/libx-1.opk;opk remove libx;ls /apps;exit")
 hat "$OUT/k2.txt" "opk: removed libx" "libx is removed"
 hat "$OUT/k2.txt" "keep.osp" "image bundle keep survives the remove"
 hatnicht "$OUT/k2.txt" "libx.osp" "the removed bundle is gone from /apps"
+
+cp -f "$OUT/leer.img" "$OUT/ziel.img"
+rc=$(lauf k3 "opk install /dsrc/keep-1.opk;ls /apps/keep.osp;exit")
+hat "$OUT/k3.txt" "opk: installed keep" "package keep installs"
+hat "$OUT/k3.txt" "SYSTEM" "a package named like an image bundle does not replace it (SYSTEM marker stays)"
+cp -f "$OUT/leer.img" "$OUT/ziel.img"
+rc=$(lauf k4 "opk install /dsrc/edit-1.opk;ls /apps;exit")
+hat "$OUT/k4.txt" "opk: installed edit" "package edit installs"
+hatnicht "$OUT/k4.txt" "edit.osp" "the superseded package edit gets no bundle"
 
 echo
 echo "=================================================================="

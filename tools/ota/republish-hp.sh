@@ -10,6 +10,7 @@
 #        HP_SAME_KERNEL=1 publishes the kernel of HP_BASE (what the HP runs): the HP applies the overlay live, no trial boot
 #        HP_FX_PACK=<dir from tools/linuxapps/hppack.py> adds usr/share/xfx/{firefox.tar.partNNN (gz <= 3.9 MB each, from HP_FX_PACK/parts or packsplit.py),firefox.manifest,user.js} to the overlay (HP_ONLY must then list wayd tar xfx);
 #                   the HP needs a root of >= 1 GiB (HP_STICK=1 images since ba9f4ee5), the apply refuses cleanly below 2x the size
+#        HP_BUNDLE_FILES=1 also ships INFO/symbol/SYSTEM/data README and the start link of EVERY image bundle (restores bundles a store package replaced)
 #        HP_KEEP_IMAGE=1 keeps the built image dir.  Run directly (not via heavy) when the heavy queue hangs.
 set -euo pipefail
 REPO=${OSUM_MAIN_CHECKOUT:-/root/jarvis/projects/u_DiS4in7esMF1/osum}
@@ -68,6 +69,25 @@ if [ -n "${HP_FX_PACK:-}" ]; then
 fi
 python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${PROGS[*]} term" \
     | sed -n 's|^\(/apps/[A-Za-z0-9._-]*/start\)@\(/bin/[A-Za-z0-9._-]*\)$|\1 \2|p' > "$LINKS"
+if [ -n "${HP_BUNDLE_FILES:-}" ]; then
+    ALL=$(for f in "$IMG"/*.elf; do basename "$f" .elf; done | grep -v '^osum.mb$' | tr '\n' ' ')
+    BSRC=assets/apps; [ -d "$IMG/rendered/assets/apps" ] && BSRC="$IMG/rendered/assets/apps"
+    python3 tools/k15/bundle.py "$BSRC" "$EXTRA.bundleall" nur="$ALL term" > "$EXTRA.bundleall.txt"
+    sed -n 's|^\(/apps/[A-Za-z0-9._-]*/start\)@\(/bin/[A-Za-z0-9._-]*\)$|\1 \2|p' "$EXTRA.bundleall.txt" >> "$LINKS"
+    sort -u -o "$LINKS" "$LINKS"
+    while IFS='=' read -r dest src; do
+        case "$dest" in
+            /apps/*/INFO|/apps/*/symbol|/apps/*/SYSTEM|/apps/*/data/README) ;;
+            *) continue ;;
+        esac
+        [ -s "$src" ] || continue
+        mkdir -p "$EXTRA/$(dirname "${dest#/}")"
+        cp "$src" "$EXTRA/${dest#/}"
+    done < "$EXTRA.bundleall.txt"
+    NB=$(grep -c '/INFO=' "$EXTRA.bundleall.txt")
+    rm -rf "$EXTRA.bundleall" "$EXTRA.bundleall.txt"
+    echo "republish-hp: bundle files for $NB bundles"
+fi
 rm -rf "$EXTRA.bundle"
 echo "republish-hp: ${#PROGS[@]} overlay programs, $(wc -l < "$LINKS") app links"
 [ -n "${HP_SAME_KERNEL:-}" ] && export FEED_KERNEL="$HP_BASE/osum.mb"
