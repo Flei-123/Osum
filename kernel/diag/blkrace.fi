@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import arch.cpu
+import diag.hangslot
+
+export { tick, saves, fails }
+
+const EVERY: u64 = 3
+const LEN: u64 = 4096
+const REPORT: u64 = 200
+
+static mut r_ticks: u64 = 0
+static mut r_saves: u64 = 0
+static mut r_fails: u64 = 0
+static mut r_buf: [u8; 4096] = [0 as u8; 4096]
+static mut s_rep: [u8; 22] = "blkrace: saves fails \0"
+
+fn saves() -> u64 {
+    return r_saves
+}
+
+fn fails() -> u64 {
+    return r_fails
+}
+
+fn fill(round: u64) {
+    var i: u64 = 0
+    while i < LEN {
+        r_buf[i as usize] = ((i * 29 + round * 7) & 255) as u8
+        i = i + 1
+    }
+}
+
+fn tick(state: u64) {
+    if !kstate.mode_on(state, kstate.M_AHCIRACE) || cpu.here(state) != 1 || !hangslot.ready() {
+        return
+    }
+    r_ticks = r_ticks + 1
+    if r_ticks % EVERY != 0 {
+        return
+    }
+    var ok: bool = false
+    if (r_ticks / EVERY) % 2 == 0 {
+        fill(r_ticks)
+        ok = hangslot.save(state, (&r_buf[0]) as u64, LEN)
+    } else {
+        ok = hangslot.valid(state)
+    }
+    if ok {
+        r_saves = r_saves + 1
+    } else {
+        r_fails = r_fails + 1
+    }
+    if (r_saves + r_fails) % REPORT == 0 {
+        serial.puts((&s_rep[0]) as u64)
+        serial.dec(r_saves)
+        serial.put(32 as u8)
+        serial.dec(r_fails)
+        serial.nl()
+    }
+}

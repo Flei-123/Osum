@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import sync.atomic
+import arch.cpu
+
+export { enter, leave, refused, unlocked, took, G_REFUSE }
+
+const G_HELD: u64 = 0
+const G_TOOK: u64 = 1
+const G_REFUSE: u64 = 2
+const NCPU: u64 = 64
+const TRY_SPINS: u64 = 20000000
+
+static mut g_flags: [u64; 64] = [0 as u64; 64]
+static mut g_unlocked: u64 = 0
+static mut g_took: u64 = 0
+static mut g_refused: u64 = 0
+static mut g_said: u64 = 0
+static mut s_nofs: [u8; 32] = "blk: io without fs lock on cpu \0"
+static mut s_refuse: [u8; 39] = "blk: io refused, fs lock busy on cpu \0\0"
+
+fn refused() -> u64 {
+    return g_refused
+}
+
+fn unlocked() -> u64 {
+    return g_unlocked
+}
+
+fn took() -> u64 {
+    return g_took
+}
+
+fn say(msg: u64, me: u64) {
+    if g_said >= 8 {
+        return
+    }
+    g_said = g_said + 1
+    serial.puts(msg)
+    serial.dec(me)
+    serial.nl()
+}
+
+fn enter(state: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOBLKGUARD) || atomic.off(state, atomic.L_FS) {
+        return G_HELD
+    }
+    let me: u64 = cpu.here(state)
+    if atomic.lock_owner(state, atomic.L_FS) == me + 1 || me >= NCPU {
+        return G_HELD
+    }
+    let flags: u64 = asm("pushfq\npop rax\ncli", out("rax"))
+    atomic.fetch_add((&g_unlocked) as u64, 1)
+    var spin: u64 = 0
+    while spin < TRY_SPINS {
+        if atomic.lock_try(state, atomic.L_FS, me) {
+            g_flags[me as usize] = flags
+            atomic.fetch_add((&g_took) as u64, 1)
+            if g_took == 1 {
+                say((&s_nofs[0]) as u64, me)
+            }
+            return G_TOOK
+        }
+        atomic.pause()
+        spin = spin + 1
+    }
+    atomic.fetch_add((&g_refused) as u64, 1)
+    say((&s_refuse[0]) as u64, me)
+    if (flags & 0x200) != 0 {
+        asm("sti")
+    }
+    return G_REFUSE
+}
+
+fn leave(state: u64, tok: u64) {
+    if tok != G_TOOK {
+        return
+    }
+    let me: u64 = cpu.here(state)
+    let flags: u64 = g_flags[me as usize]
+    atomic.lock_give(state, atomic.L_FS)
+    if (flags & 0x200) != 0 {
+        asm("sti")
+    }
+}

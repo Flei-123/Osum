@@ -109,12 +109,14 @@ import block.wlock
 import klog
 import bus.pci
 import arch.x86_64.apic
+import arch.cpu
+import sync.atomic
 
 export {
     resume, kill, init, present, ide_mode, raid_mode, read_block, write_block, read_many,
     write_many, flush, blocks, block_shift, bdf, port, mode,
     ports_seen, cmds, errs, last_tfd, buffer, ident, sig, slots, why,
-    dead, alive, scan_us,
+    dead, alive, scan_us, lock_refused, lock_nested, stop_fails,
     MODE_NONE, MODE_AHCI, MODE_IDE
 }
 
@@ -1606,6 +1608,71 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
 // `blk.ata_recover` fuer die Portfassung, aus demselben Grund: ein
 // stehen gelassener Port laesst jeden folgenden Befehl in die
 // Zeitschranke laufen, und dann sieht es aus, als sei die Platte weg.
+const DL_BYPASS: u64 = 0
+const DL_TAKEN: u64 = 1
+const DL_REFUSE: u64 = 2
+const DL_SPINS: u64 = 40000000
+
+static mut dl_owner: u64 = 0
+static mut dl_refused: u64 = 0
+static mut dl_nested: u64 = 0
+static mut dl_stopfail: u64 = 0
+static mut dl_said: u64 = 0
+static mut s_dl_nest: [u8; 36] = "ahci: nested driver entry on cpu \0\0\0"
+static mut s_dl_busy: [u8; 36] = "ahci: driver busy, refused on cpu \0\0"
+static mut s_dl_stop: [u8; 44] = "ahci: port did not stop, controller reset\0\0\0"
+
+fn lock_refused() -> u64 {
+    return dl_refused
+}
+
+fn lock_nested() -> u64 {
+    return dl_nested
+}
+
+fn stop_fails() -> u64 {
+    return dl_stopfail
+}
+
+fn dl_say(msg: u64, me: u64) {
+    if dl_said >= 8 {
+        return
+    }
+    dl_said = dl_said + 1
+    serial.puts(msg)
+    serial.dec(me)
+    serial.nl()
+}
+
+fn lock_in(state: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOAHCILOCK) {
+        return DL_BYPASS
+    }
+    let me: u64 = cpu.here(state) + 1
+    if atomic.load((&dl_owner) as u64) == me {
+        atomic.fetch_add((&dl_nested) as u64, 1)
+        dl_say((&s_dl_nest[0]) as u64, me - 1)
+        return DL_REFUSE
+    }
+    var spin: u64 = 0
+    while spin < DL_SPINS {
+        if atomic.cas((&dl_owner) as u64, 0, me) == 0 {
+            return DL_TAKEN
+        }
+        atomic.pause()
+        spin = spin + 1
+    }
+    atomic.fetch_add((&dl_refused) as u64, 1)
+    dl_say((&s_dl_busy[0]) as u64, me - 1)
+    return DL_REFUSE
+}
+
+fn lock_out(t: u64) {
+    if t == DL_TAKEN {
+        atomic.store((&dl_owner) as u64, 0)
+    }
+}
+
 fn recover(state: u64, p: u64) {
     pwr(state, p, P_CMD, prd(state, p, P_CMD) & (~CMD_ST))
     let bis: u64 = frist(state, RESET_US)
@@ -1615,6 +1682,14 @@ fn recover(state: u64, p: u64) {
             break
         }
         spin = spin + 1
+    }
+    if (prd(state, p, P_CMD) & CMD_CR) != 0 && !kstate.mode_on(state, kstate.M_NOAHCILOCK) {
+        dl_stopfail = dl_stopfail + 1
+        dl_say((&s_dl_stop[0]) as u64, p)
+        kstate.add(state, sc(S_DEAD), 1)
+        kstate.set(state, sc(S_READY), 0)
+        kill(state)
+        return
     }
     pwr(state, p, P_SERR, prd(state, p, P_SERR))
     pwr(state, p, P_IS, prd(state, p, P_IS))
@@ -1699,6 +1774,16 @@ fn bounce_copy(from: u64, to: u64, n: u64) {
 }
 
 fn read_block(state: u64, lba: u64, dst: u64) -> bool {
+    let t: u64 = lock_in(state)
+    if t == DL_REFUSE {
+        return false
+    }
+    let ok: bool = read_block_locked(state, lba, dst)
+    lock_out(t)
+    return ok
+}
+
+fn read_block_locked(state: u64, lba: u64, dst: u64) -> bool {
     if !ready(state) {
         return false
     }
@@ -1711,6 +1796,16 @@ fn read_block(state: u64, lba: u64, dst: u64) -> bool {
 }
 
 fn write_block(state: u64, lba: u64, src: u64) -> bool {
+    let t: u64 = lock_in(state)
+    if t == DL_REFUSE {
+        return false
+    }
+    let ok: bool = write_block_locked(state, lba, src)
+    lock_out(t)
+    return ok
+}
+
+fn write_block_locked(state: u64, lba: u64, src: u64) -> bool {
     if !ready(state) {
         return false
     }
@@ -1726,7 +1821,7 @@ fn write_block(state: u64, lba: u64, src: u64) -> bool {
         return false
     }
     if kstate.mode_on(state, kstate.M_AHCISLOW) {
-        return flush(state) // control sample: the old per-block flush
+        return flush_locked(state)
     }
     return true
 }
@@ -1736,6 +1831,16 @@ fn write_block(state: u64, lba: u64, src: u64) -> bool {
 // es ist das, was ein wirklicher Treiber tut. Bis PRDT_MAX Seiten, also
 // 32 KiB; darueber gibt die Funktion nein statt still weniger zu lesen.
 fn read_many(state: u64, lba: u64, count: u64, dst: u64) -> bool {
+    let t: u64 = lock_in(state)
+    if t == DL_REFUSE {
+        return false
+    }
+    let ok: bool = read_many_locked(state, lba, count, dst)
+    lock_out(t)
+    return ok
+}
+
+fn read_many_locked(state: u64, lba: u64, count: u64, dst: u64) -> bool {
     if !ready(state) || count == 0 {
         return false
     }
@@ -1747,6 +1852,16 @@ fn read_many(state: u64, lba: u64, count: u64, dst: u64) -> bool {
 }
 
 fn write_many(state: u64, lba: u64, count: u64, src: u64) -> bool {
+    let t: u64 = lock_in(state)
+    if t == DL_REFUSE {
+        return false
+    }
+    let ok: bool = write_many_locked(state, lba, count, src)
+    lock_out(t)
+    return ok
+}
+
+fn write_many_locked(state: u64, lba: u64, count: u64, src: u64) -> bool {
     if !ready(state) || count == 0 {
         return false
     }
@@ -1759,7 +1874,7 @@ fn write_many(state: u64, lba: u64, count: u64, src: u64) -> bool {
         return false
     }
     if kstate.mode_on(state, kstate.M_AHCISLOW) {
-        return flush(state)
+        return flush_locked(state)
     }
     return true
 }
@@ -1771,6 +1886,16 @@ fn write_many(state: u64, lba: u64, count: u64, src: u64) -> bool {
 // `tools/ahci/run.sh` liest das Abbild HINTERHER auf dem Wirt, was
 // genau diesen Unterschied sichtbar machen wuerde.
 fn flush(state: u64) -> bool {
+    let t: u64 = lock_in(state)
+    if t == DL_REFUSE {
+        return false
+    }
+    let ok: bool = flush_locked(state)
+    lock_out(t)
+    return ok
+}
+
+fn flush_locked(state: u64) -> bool {
     if mode(state) != MODE_AHCI {
         return false
     }
