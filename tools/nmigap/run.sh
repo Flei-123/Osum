@@ -27,7 +27,7 @@ jumps() { grep -ac 'usb: seq jump' "$TMPD/$1/serial.txt"; }
 ringpeak() { grep -aoE ' rp=[0-9]+' "$TMPD/$1/serial.txt" | tail -n1 | cut -d= -f2; }
 
 echo "== NMI every $PERIOD cycles, NMI on IST2 =="
-boot ist "nmiperiod=$PERIOD"
+boot ist "nmiperiod=$PERIOD nmiguard ${NMIGAP_WORDS:-}"
 n=$(faults ist); s=$(starts ist)
 [ "$n" -eq 0 ] && ok "no exception under the NMI storm" || {
     bad "$n exception lines under the NMI storm"
@@ -39,6 +39,13 @@ j=$(jumps ist)
     bad "$j usb seq jump lines"
     grep -a -m2 'usb: seq jump' "$TMPD/ist/serial.txt" | sed 's/^/        /'
 }
+grep -aq 'nmi: frame guard on, fix=' "$TMPD/ist/serial.txt" && ok "nmi frame guard armed" || bad "nmi frame guard line missing"
+c=$(grep -ac 'nmi: frame changed' "$TMPD/ist/serial.txt")
+[ "$c" -eq 0 ] && ok "no nmi return frame changed under the storm" || {
+    bad "$c nmi return frames changed"
+    grep -a -m2 'nmi: frame changed' "$TMPD/ist/serial.txt" | sed 's/^/        /'
+}
+echo "  info  faults inside nmi: $(grep -ac 'nmi: fault inside nmi' "$TMPD/ist/serial.txt") printed"
 rp=$(ringpeak ist)
 [ -n "$rp" ] && [ "$rp" -le 1 ] && ok "at most one transfer queued per hid endpoint (rp=$rp)" || bad "hid ring peak rp=${rp:-missing}, want 1"
 

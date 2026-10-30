@@ -1,0 +1,181 @@
+profile kernel
+
+import lib.kstate
+import serial
+import arch.cpu
+import pwr.power
+import diag.cmdopt
+import arch.x86_64.idt
+
+export { init, enter, leave, note_fault, nested, changed, faults, NORET_MARK }
+
+const NCPU: u64 = 8
+const DEPTH: u64 = 4
+const F_VECTOR: u64 = 120
+const F_RIP: u64 = 136
+const F_CS: u64 = 144
+const F_RSP: u64 = 160
+const IST2_IN_TSS: u64 = 44
+const NORET_MARK: u64 = 0x8000000000000000
+const PRINT_FAULTS: u64 = 4
+
+static mut w_guard: [u8; 9] = "nmiguard\0"
+static mut w_nofix: [u8; 9] = "nonmifix\0"
+static mut s_on: [u8; 30] = "nmi: frame guard on, fix=\0\0\0\0\0"
+static mut s_changed: [u8; 26] = "nmi: frame changed rip=\0\0\0"
+static mut s_arrow: [u8; 4] = "->\0\0"
+static mut s_rsp: [u8; 8] = " rsp=\0\0\0"
+static mut s_cs: [u8; 8] = " cs=\0\0\0\0"
+static mut s_cpu: [u8; 8] = " cpu=\0\0\0"
+static mut s_nested: [u8; 10] = " nested=\0\0"
+static mut s_faults: [u8; 10] = " faults=\0\0"
+static mut s_fault: [u8; 25] = "nmi: fault inside nmi v=\0"
+static mut s_frip: [u8; 8] = " rip=\0\0\0"
+
+static mut g_on: u64 = 0
+static mut g_fix: u64 = 1
+static mut g_nested: u64 = 0
+static mut g_changed: u64 = 0
+static mut g_faults: u64 = 0
+static mut g_depth: [u64; 8] = [0 as u64; 8]
+static mut g_rip: [u64; 32] = [0 as u64; 32]
+static mut g_rsp: [u64; 32] = [0 as u64; 32]
+static mut g_cs: [u64; 32] = [0 as u64; 32]
+
+fn word(frame: u64, off: u64) -> u64 {
+    return __mmio_read64((frame + off) as *mut u64)
+}
+
+fn init(state: u64) {
+    if cmdopt.has(state, (&w_guard[0]) as u64) {
+        g_on = 1
+    }
+    if cmdopt.has(state, (&w_nofix[0]) as u64) {
+        g_fix = 0
+    }
+    if g_on != 0 || g_fix == 0 {
+        serial.puts((&s_on[0]) as u64)
+        serial.dec(g_fix)
+        serial.nl()
+    }
+}
+
+fn nested() -> u64 {
+    return g_nested
+}
+
+fn changed() -> u64 {
+    return g_changed
+}
+
+fn faults() -> u64 {
+    return g_faults
+}
+
+fn me(state: u64) -> u64 {
+    let c: u64 = cpu.here(state)
+    if c >= NCPU {
+        return NCPU - 1
+    }
+    return c
+}
+
+fn enter(state: u64, frame: u64) -> u64 {
+    let c: u64 = me(state)
+    let d: u64 = g_depth[c as usize]
+    if d > 0 {
+        g_nested = g_nested + 1
+    }
+    if d < DEPTH {
+        let i: u64 = c * DEPTH + d
+        g_rip[i as usize] = word(frame, F_RIP)
+        g_rsp[i as usize] = word(frame, F_RSP)
+        g_cs[i as usize] = word(frame, F_CS)
+    }
+    g_depth[c as usize] = d + 1
+    return d
+}
+
+fn leave(state: u64, frame: u64, d: u64) {
+    let c: u64 = me(state)
+    g_depth[c as usize] = d
+    if d >= DEPTH {
+        return
+    }
+    let i: u64 = c * DEPTH + d
+    let rip: u64 = word(frame, F_RIP)
+    let rsp: u64 = word(frame, F_RSP)
+    let cs: u64 = word(frame, F_CS)
+    if rip == g_rip[i as usize] && rsp == g_rsp[i as usize] && cs == g_cs[i as usize] {
+        return
+    }
+    g_changed = g_changed + 1
+    if g_on == 0 {
+        return
+    }
+    serial.puts((&s_changed[0]) as u64)
+    serial.hex(g_rip[i as usize])
+    serial.puts((&s_arrow[0]) as u64)
+    serial.hex(rip)
+    serial.puts((&s_rsp[0]) as u64)
+    serial.hex(g_rsp[i as usize])
+    serial.puts((&s_arrow[0]) as u64)
+    serial.hex(rsp)
+    serial.puts((&s_cs[0]) as u64)
+    serial.hex(cs)
+    serial.puts((&s_cpu[0]) as u64)
+    serial.dec(c)
+    serial.puts((&s_nested[0]) as u64)
+    serial.dec(g_nested)
+    serial.puts((&s_faults[0]) as u64)
+    serial.dec(g_faults)
+    serial.nl()
+    power.halt_forever()
+}
+
+fn ist2_top(state: u64, k: u64) -> u64 {
+    var tss: u64 = cpu.get(state, k, cpu.C_TSSADDR)
+    if tss == 0 && k == 0 {
+        tss = kstate.get(state, kstate.TSS)
+    }
+    if tss == 0 {
+        return 0
+    }
+    return word(tss, IST2_IN_TSS)
+}
+
+fn on_nmi_stack(state: u64, frame: u64) -> bool {
+    var n: u64 = cpu.count(state)
+    if n == 0 {
+        n = 1
+    }
+    if n > NCPU {
+        n = NCPU
+    }
+    var k: u64 = 0
+    while k < n {
+        let top: u64 = ist2_top(state, k)
+        if top != 0 && frame < top && frame + idt.NMI_STACK_BYTES > top {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn note_fault(state: u64, frame: u64, vector: u64) {
+    if !on_nmi_stack(state, frame) {
+        return
+    }
+    g_faults = g_faults + 1
+    if g_fix != 0 {
+        __mmio_write64((frame + F_VECTOR) as *mut u64, vector | NORET_MARK)
+    }
+    if g_on != 0 && g_faults <= PRINT_FAULTS {
+        serial.puts((&s_fault[0]) as u64)
+        serial.dec(vector)
+        serial.puts((&s_frip[0]) as u64)
+        serial.hex(word(frame, F_RIP))
+        serial.nl()
+    }
+}

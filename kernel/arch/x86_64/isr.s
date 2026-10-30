@@ -216,12 +216,33 @@ isr_common:
     popq %rdx
     popq %rcx
     popq %rax
+    btq $63, (%rsp)
+    jc isr_return_in_nmi
     addq $16, %rsp                  /* vector number and error code */
     testb $3, 8(%rsp)
     jz 1f
     swapgs
 1:
     iretq
+
+isr_return_in_nmi:
+    addq $16, %rsp
+    pushq %rax
+    pushq %rcx
+    pushq %rdx
+    movq 48(%rsp), %rax
+    movq 24(%rsp), %rcx
+    movq 40(%rsp), %rdx
+    movq %rcx, -8(%rax)
+    movq %rdx, -16(%rax)
+    subq $16, %rax
+    movq %rax, 32(%rsp)
+    popq %rdx
+    popq %rcx
+    popq %rax
+    movq 8(%rsp), %rsp
+    popfq
+    retq
 
 /* ------------------------------------------------------ system call ---
  *
