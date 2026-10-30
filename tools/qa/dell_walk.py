@@ -46,13 +46,13 @@ APPS = [
     dict(id="explorer", osp="explorer", name="File Explorer", term="explorer", bin="explorer", prog="explorer",
          acts=["warte 3", "taste ctrl-shift-n", "warte 3", "foto {id}-3-dialog", "taste esc", "warte 2",
                "foto {id}-4-dialog-zu"]),
-    dict(id="terminal", osp="terminal", name="Terminal", term="terminal", bin="sh", prog="sh ls ps echo cat",
+    dict(id="terminal", osp="terminal", name="Terminal", term="terminal", bin="term", prog="term sh ls ps echo cat",
          acts=["warte 3", "klick_body", "tippe ls", "taste ret", "warte 2", "tippe ps", "taste ret",
                "warte 3", "foto {id}-3-ls-ps"]),
-    dict(id="terminal2", osp="terminal", name="Terminal (second window)", term="terminal", bin="sh", prog="sh",
+    dict(id="terminal2", osp="terminal", name="Terminal (second window)", term="terminal", bin="term", prog="term sh",
          known="multi-terminal: worker A (tools/term/multi.sh)",
          acts=["warte 3", "klick_body", "tippe echo zwei", "taste ret", "warte 2", "foto {id}-3-echo"]),
-    dict(id="terminal3", osp="terminal", name="Terminal (third window)", term="terminal", bin="sh", prog="sh",
+    dict(id="terminal3", osp="terminal", name="Terminal (third window)", term="terminal", bin="term", prog="term sh",
          known="multi-terminal: worker A (tools/term/multi.sh)",
          acts=["warte 3", "klick_body", "tippe echo drei", "taste ret", "warte 2", "foto {id}-3-echo"]),
     dict(id="editor", osp="editor", name="Editor", term="editor", bin="nedit", prog="nedit",
@@ -61,7 +61,7 @@ APPS = [
          acts=["warte 6", "foto {id}-3-nach-6s"]),
     dict(id="pdfview", osp="pdfview", name="PDF Viewer", term="pdf", bin="pdfview", prog="pdfview",
          acts=["warte 3", "foto {id}-3-leer"]),
-    dict(id="store", osp="store", name="Store", term="programme", bin="store", prog="store stored",
+    dict(id="store", osp="store", name="Store", term="shop", bin="store", prog="store stored ota opk",
          acts=["warte 5", "foto {id}-3-nach-5s"]),
     dict(id="trashbin", osp="trashbin", name="Recycle Bin", term="papierkorb", bin="trashbin", prog="trashbin",
          acts=["warte 3", "foto {id}-3-liste"]),
@@ -313,10 +313,11 @@ def run_vm(args):
                 progs += " " + p
                 have.add(p)
     with open(os.path.join(out, "drehbuch.txt"), "w") as f:
-        f.write("\n".join(script_lines(apps, args.res, tray=not args.apps)) + "\n")
+        f.write("\n".join(script_lines(apps, args.res, tray=not args.apps or args.tray)) + "\n")
     runner = os.path.join(out, "run")
     env = dict(os.environ)
     env.setdefault("DESIGNBUILD", out + "-build")
+    env.setdefault("DRIVE_WATCHDOG", "9000")
     cmd = ["bash", os.path.join(ROOT, "tools/design/eh6.sh"), runner, "accel=" + args.accel,
            "res=" + args.res, "progs=" + progs, "drehbuch=" + os.path.join(out, "drehbuch.txt"),
            "halt=0", "tafel=nein", "tzrule=eu"]  # tzrule=eu: the personal image has `rule=eu` in /etc/time.conf
@@ -343,7 +344,7 @@ def evaluate_vm(runner, out, apps, args, rc=0):
         st, why, info = judge_app(a, runner, serial, steps, shots)
         res.append(dict(kind="app", id=a["id"], name=a["name"], status=st, reasons=why, info=info,
                         scope="VM" if st == "FEHLER" else "-", known=a.get("known", "")))
-    if not args.apps:
+    if not args.apps or args.tray:
         for t in TRAY:
             st, why, info = judge_tray(t, runner, serial, steps, shots)
             res.append(dict(kind="tray", id=t["id"], name=t["name"], status=st, reasons=why, info=info,
@@ -779,6 +780,7 @@ def main():
     ap.add_argument("--res", default="3440x1440")
     ap.add_argument("--accel", default="kvm")
     ap.add_argument("--apps", default="")
+    ap.add_argument("--tray", action="store_true")
     ap.add_argument("--device", default="osum-a4206b26eb96")
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--timeout", type=int, default=90, help="smoke: seconds to wait per bridge job")
