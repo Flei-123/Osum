@@ -1,0 +1,197 @@
+profile kernel
+
+import dcrypt
+import crypto.sha256
+import crypto.xts
+import crypto.argon2
+
+export {
+    open_header, header_valid, has_magic, data_first, data_count, used_slot,
+    HDR_SECTORS, HDR_BYTES
+}
+
+const HDR_SECTORS: u64 = 8
+const HDR_BYTES: u64 = 4096
+const SECTOR: u64 = 512
+const SLOTS: u64 = 8
+const SLOT_BASE: u64 = 0x100
+const SLOT_SIZE: u64 = 256
+const KEY_LEN: u64 = 64
+const WRAP_LEN: u64 = 96
+const SALT_LEN: u64 = 32
+const H_VERSION: u64 = 0x10
+const H_CIPHER: u64 = 0x14
+const H_KDF: u64 = 0x18
+const H_SECSIZE: u64 = 0x1C
+const H_FIRST: u64 = 0x20
+const H_COUNT: u64 = 0x28
+const H_SUM: u64 = 0x30
+const S_USED: u64 = 0x00
+const S_TCOST: u64 = 0x04
+const S_MCOST: u64 = 0x08
+const S_LANES: u64 = 0x0C
+const S_SALT: u64 = 0x10
+const S_WRAPPED: u64 = 0x30
+const S_MAC: u64 = 0x70
+const KDF_ARGON2ID: u64 = 1
+
+static mut sum_buf: [u8; 4096] = [0 as u8; 4096]
+static mut sum_out: [u8; 32] = [0 as u8; 32]
+static mut wrap_buf: [u8; 96] = [0 as u8; 96]
+static mut mac_buf: [u8; 32] = [0 as u8; 32]
+static mut tweak_buf: [u8; 16] = [0 as u8; 16]
+static mut key_buf: [u8; 64] = [0 as u8; 64]
+static mut found_key: [u8; 64] = [0 as u8; 64]
+static mut slot_found: u64 = 0
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn le32(p: u64, off: u64) -> u64 {
+    return ld8(p, off) | (ld8(p, off + 1) << 8) | (ld8(p, off + 2) << 16)
+        | (ld8(p, off + 3) << 24)
+}
+
+fn le64(p: u64, off: u64) -> u64 {
+    return le32(p, off) | (le32(p, off + 4) << 32)
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(p, i, 0)
+        i = i + 1
+    }
+}
+
+fn has_magic(hdr: u64) -> bool {
+    var want: [u8; 10] = "OSUMCRYPT\0"
+    var i: u64 = 0
+    while i < 9 {
+        if ld8(hdr, i) != (want[i as usize] as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn sum_matches(hdr: u64) -> bool {
+    let buf: u64 = (&sum_buf[0 as usize]) as u64
+    let out: u64 = (&sum_out[0 as usize]) as u64
+    var i: u64 = 0
+    while i < HDR_BYTES {
+        st8(buf, i, ld8(hdr, i))
+        i = i + 1
+    }
+    zero(buf + H_SUM, 32)
+    sha256.hash(buf, HDR_BYTES as usize, out)
+    var diff: u64 = 0
+    i = 0
+    while i < 32 {
+        diff = diff | (ld8(out, i) ^ ld8(hdr, H_SUM + i))
+        i = i + 1
+    }
+    return diff == 0
+}
+
+fn header_valid(hdr: u64) -> bool {
+    if !has_magic(hdr) {
+        return false
+    }
+    if le32(hdr, H_VERSION) != 1 || le32(hdr, H_CIPHER) != 1 {
+        return false
+    }
+    if le32(hdr, H_SECSIZE) != SECTOR || le32(hdr, H_KDF) != KDF_ARGON2ID {
+        return false
+    }
+    if le64(hdr, H_FIRST) < HDR_SECTORS {
+        return false
+    }
+    return sum_matches(hdr)
+}
+
+fn data_first(hdr: u64) -> u64 {
+    return le64(hdr, H_FIRST)
+}
+
+fn data_count(hdr: u64) -> u64 {
+    return le64(hdr, H_COUNT)
+}
+
+fn used_slot() -> u64 {
+    return slot_found
+}
+
+fn try_slot(sl: u64, pw: u64, pwlen: u64, dst: u64) -> bool {
+    if le32(sl, S_USED) == 0 {
+        return false
+    }
+    let t: u64 = le32(sl, S_TCOST)
+    let m: u64 = le32(sl, S_MCOST)
+    let p: u64 = le32(sl, S_LANES)
+    if t == 0 || m == 0 || p == 0 || m > dcrypt.DEF_M {
+        return false
+    }
+    let mem: u64 = dcrypt.argmem()
+    if mem == 0 {
+        return false
+    }
+    let wrap: u64 = (&wrap_buf[0 as usize]) as u64
+    if !argon2.argon2id(pw, pwlen as usize, sl + S_SALT, SALT_LEN as usize,
+        t, m, p, mem, wrap, WRAP_LEN as usize) {
+        return false
+    }
+    let mac: u64 = (&mac_buf[0 as usize]) as u64
+    sha256.hmac(wrap + 64, 32, sl + S_WRAPPED, KEY_LEN as usize, mac)
+    var diff: u64 = 0
+    var k: u64 = 0
+    while k < 32 {
+        diff = diff | (ld8(mac, k) ^ ld8(sl, S_MAC + k))
+        k = k + 1
+    }
+    var ok: bool = diff == 0
+    if ok {
+        let tw: u64 = (&tweak_buf[0 as usize]) as u64
+        zero(tw, 16)
+        ok = xts.decrypt(wrap, tw, sl + S_WRAPPED, dst, KEY_LEN as usize)
+    }
+    zero(wrap, WRAP_LEN)
+    return ok
+}
+
+fn open_header(hdr: u64, pw: u64, pwlen: u64) -> bool {
+    if !header_valid(hdr) {
+        return false
+    }
+    let attempt: u64 = (&key_buf[0 as usize]) as u64
+    let keep: u64 = (&found_key[0 as usize]) as u64
+    var found: bool = false
+    var i: u64 = 0
+    while i < SLOTS {
+        if try_slot(hdr + SLOT_BASE + i * SLOT_SIZE, pw, pwlen, attempt) {
+            if !found {
+                var k: u64 = 0
+                while k < KEY_LEN {
+                    st8(keep, k, ld8(attempt, k))
+                    k = k + 1
+                }
+                slot_found = i
+                found = true
+            }
+        }
+        i = i + 1
+    }
+    zero(attempt, KEY_LEN)
+    if !found {
+        return false
+    }
+    dcrypt.load_key(keep)
+    zero(keep, KEY_LEN)
+    return true
+}

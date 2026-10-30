@@ -126,6 +126,82 @@ expect "broken superblock geometry: magic" "$(val "$TMPD/f.txt" magic)" 1
 expect "broken superblock geometry: geom" "$(val "$TMPD/f.txt" geom)" 0
 expect_gt "broken superblock geometry: errors" "$(val "$TMPD/f.txt" errors)" 0
 
+echo "== 5. encrypted root (cryptboot header, XTS-AES-256, Argon2id) =="
+CRYPTPY=${OSUM_KRYPTO_PY:-/root/.krypto-venv/bin/python}
+[ -x "$CRYPTPY" ] || CRYPTPY=python3
+if ! "$CRYPTPY" -c "import argon2, cryptography" 2>/dev/null; then
+    bad "argon2-cffi + cryptography missing for $CRYPTPY"
+else
+    PW=geheim123
+    "$CRYPTPY" tools/fsck/cryptdisk.py build "$TMPD/ofs.img" "$TMPD/crypt.raw" "$PW" >/dev/null || bad "cryptdisk build"
+    python3 tools/fsck/gptdisk.py "$TMPD/crypt.raw" "$TMPD/crypt.gpt" ofs >/dev/null || bad "gptdisk crypt"
+    "$CRYPTPY" tools/fsck/cryptdisk.py leak "$TMPD/ofs.img" "$TMPD/leak.img" >/dev/null || bad "cryptdisk leak"
+    "$CRYPTPY" tools/fsck/cryptdisk.py build "$TMPD/leak.img" "$TMPD/leak.raw" "$PW" >/dev/null || bad "cryptdisk build leak"
+    python3 tools/fsck/gptdisk.py "$TMPD/leak.raw" "$TMPD/leak.gpt" ofs >/dev/null || bad "gptdisk leak"
+    "$CRYPTPY" tools/fsck/cryptdisk.py corrupt "$TMPD/crypt.raw" "$TMPD/crypt.badsb" 0 || bad "cryptdisk corrupt"
+    python3 tools/fsck/gptdisk.py "$TMPD/crypt.badsb" "$TMPD/crypt.badsb.gpt" ofs >/dev/null || bad "gptdisk badsb"
+
+    run_fsck "$TMPD/crypt.gpt" "fsck --check-only --crypt $PW /dev/hdb" "$TMPD/g.txt"
+    expect "crypt GPT: crypt" "$(val "$TMPD/g.txt" crypt)" 1
+    expect "crypt GPT: crypt_open" "$(val "$TMPD/g.txt" crypt_open)" 1
+    expect "crypt GPT: crypt_slot" "$(val "$TMPD/g.txt" crypt_slot)" 0
+    expect "crypt GPT: partition_start" "$(val "$TMPD/g.txt" partition_start)" 2048
+    expect "crypt GPT: magic" "$(val "$TMPD/g.txt" magic)" 1
+    expect "crypt GPT: errors" "$(val "$TMPD/g.txt" errors)" 0
+    expect "crypt GPT: blocks" "$(val "$TMPD/g.txt" blocks)" 16384
+    expect_gt "crypt GPT: files" "$(val "$TMPD/g.txt" files)" 0
+    cmp -s "$TMPD/crypt.gpt" "$TMPD/target.img" && ok "crypt check-only left the disk byte-identical" || bad "crypt check-only changed the disk"
+
+    run_fsck "$TMPD/crypt.raw" "fsck --check-only --crypt $PW /dev/hdb" "$TMPD/h.txt"
+    expect "crypt whole disk: crypt_open" "$(val "$TMPD/h.txt" crypt_open)" 1
+    expect "crypt whole disk: magic" "$(val "$TMPD/h.txt" magic)" 1
+    expect "crypt whole disk: errors" "$(val "$TMPD/h.txt" errors)" 0
+
+    run_fsck "$TMPD/crypt.gpt" "fsck --check-only --crypt wrongpass /dev/hdb" "$TMPD/i.txt"
+    expect "wrong passphrase: crypt_open" "$(val "$TMPD/i.txt" crypt_open)" 0
+    expect "wrong passphrase: magic" "$(val "$TMPD/i.txt" magic)" 0
+    expect_gt "wrong passphrase: errors" "$(val "$TMPD/i.txt" errors)" 0
+    cmp -s "$TMPD/crypt.gpt" "$TMPD/target.img" && ok "wrong passphrase left the disk byte-identical" || bad "wrong passphrase changed the disk"
+
+    run_fsck "$TMPD/crypt.gpt" "fsck --check-only /dev/hdb" "$TMPD/j.txt"
+    expect "no passphrase: crypt" "$(val "$TMPD/j.txt" crypt)" 1
+    expect "no passphrase: crypt_open" "$(val "$TMPD/j.txt" crypt_open)" 0
+    expect_gt "no passphrase: errors" "$(val "$TMPD/j.txt" errors)" 0
+
+    run_fsck "$TMPD/crypt.badsb.gpt" "fsck --check-only --crypt $PW /dev/hdb" "$TMPD/k.txt"
+    expect "crypt, damaged superblock: crypt_open" "$(val "$TMPD/k.txt" crypt_open)" 1
+    expect "crypt, damaged superblock: magic" "$(val "$TMPD/k.txt" magic)" 0
+    expect_gt "crypt, damaged superblock: errors" "$(val "$TMPD/k.txt" errors)" 0
+
+    run_fsck "$TMPD/leak.gpt" "fsck --check-only --crypt $PW /dev/hdb" "$TMPD/l.txt"
+    expect "crypt, leaked block: lost" "$(val "$TMPD/l.txt" lost)" 1
+    expect_gt "crypt, leaked block: errors" "$(val "$TMPD/l.txt" errors)" 0
+    cmp -s "$TMPD/leak.gpt" "$TMPD/target.img" && ok "crypt leaked-block check-only left the disk byte-identical" || bad "crypt leaked-block check-only changed the disk"
+
+    run_fsck "$TMPD/leak.gpt" "fsck --crypt $PW /dev/hdb" "$TMPD/m.txt"
+    expect "crypt repair: fixed" "$(val "$TMPD/m.txt" fixed)" 1
+    cp --sparse=always "$TMPD/target.img" "$TMPD/repaired.img"
+    run_fsck "$TMPD/repaired.img" "fsck --check-only --crypt $PW /dev/hdb" "$TMPD/n.txt"
+    expect "crypt after repair: errors" "$(val "$TMPD/n.txt" errors)" 0
+    expect "crypt after repair: lost" "$(val "$TMPD/n.txt" lost)" 0
+    "$CRYPTPY" -I - "$TMPD/leak.gpt" "$TMPD/repaired.img" <<'PY' && ok "repair rewrote exactly one ciphertext sector, no plaintext on the disk" || bad "repair result on disk is wrong"
+import sys
+before = open(sys.argv[1], "rb").read()
+after = open(sys.argv[2], "rb").read()
+assert len(before) == len(after)
+changed = [i for i in range(0, len(before), 512) if before[i:i + 512] != after[i:i + 512]]
+assert len(changed) == 1, changed
+part = after[2048 * 512:]
+assert part[:9] == b"OSUMCRYPT"
+assert part[8 * 512:8 * 512 + 8] != bytes([0x53, 0x46, 0x4F, 0x2D, 0x4D, 0x55, 0x53, 0x4F])
+PY
+
+    if [ -f "$TMPD/fsckold.elf" ]; then
+        run_fsck "$TMPD/crypt.gpt" "fsckold /dev/hdb" "$TMPD/o.txt"
+        expect "old fsck on encrypted disk: magic" "$(val "$TMPD/o.txt" magic)" 0
+    fi
+fi
+
 echo
 echo "FSCK: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

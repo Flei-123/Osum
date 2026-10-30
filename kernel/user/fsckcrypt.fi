@@ -1,0 +1,93 @@
+profile kernel
+
+import libc.io
+import libc.errno
+import dcrypt
+import cryptopen
+
+export {
+    probe, unlock, data_offset, data_blocks, slot, after_read, before_write,
+    ABSENT, PRESENT, BROKEN
+}
+
+const BS: u64 = 512
+const ABSENT: u64 = 0
+const PRESENT: u64 = 1
+const BROKEN: u64 = 2
+
+static mut header: [u8; 4096] = [0 as u8; 4096]
+static mut scratch: [u8; 512] = [0 as u8; 512]
+static mut active: bool = false
+static mut first_sector: u64 = 0
+static mut block_count: u64 = 0
+
+fn probe(fd: u64, base: u64) -> u64 {
+    let hdr: u64 = (&header[0 as usize]) as u64
+    if errno.failed(io.seek(fd, base * BS, 0)) {
+        return ABSENT
+    }
+    let n: u64 = io.read_full(fd, hdr, cryptopen.HDR_BYTES)
+    if errno.failed(n) || n != cryptopen.HDR_BYTES {
+        return ABSENT
+    }
+    if !cryptopen.has_magic(hdr) {
+        return ABSENT
+    }
+    if !cryptopen.header_valid(hdr) {
+        return BROKEN
+    }
+    return PRESENT
+}
+
+fn unlock(pw: u64, pwlen: u64) -> bool {
+    let hdr: u64 = (&header[0 as usize]) as u64
+    if !cryptopen.open_header(hdr, pw, pwlen) {
+        return false
+    }
+    first_sector = cryptopen.data_first(hdr)
+    block_count = cryptopen.data_count(hdr)
+    active = true
+    return true
+}
+
+fn data_offset() -> u64 {
+    if active {
+        return first_sector
+    }
+    return 0
+}
+
+fn data_blocks() -> u64 {
+    return block_count
+}
+
+fn slot() -> u64 {
+    return cryptopen.used_slot()
+}
+
+fn after_read(lba: u64, dst: u64) -> bool {
+    if !active {
+        return true
+    }
+    let tmp: u64 = (&scratch[0 as usize]) as u64
+    if !dcrypt.dec_sectors(lba, dst, tmp, 1) {
+        return false
+    }
+    var i: u64 = 0
+    while i < BS {
+        *((dst + i) as *mut u8) = *((tmp + i) as *mut u8)
+        i = i + 1
+    }
+    return true
+}
+
+fn before_write(lba: u64, src: u64) -> u64 {
+    if !active {
+        return src
+    }
+    let tmp: u64 = (&scratch[0 as usize]) as u64
+    if !dcrypt.enc_sectors(lba, src, tmp, 1) {
+        return 0
+    }
+    return tmp
+}

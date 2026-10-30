@@ -6,6 +6,7 @@ import libc.io
 import libc.errno
 import libc.kcall
 import fsckpart
+import fsckcrypt
 
 export { u_start }
 
@@ -94,7 +95,7 @@ fn g64(p: u64) -> u64 {
 }
 
 fn read_sector(lba: u64, dst: u64) -> bool {
-    if errno.failed(io.seek(fd, (part_base + lba) * BS, 0)) {
+    if errno.failed(io.seek(fd, (part_base + fsckcrypt.data_offset() + lba) * BS, 0)) {
         return false;
     }
     let n: u64 = io.read_full(fd, dst, BS);
@@ -104,14 +105,18 @@ fn read_sector(lba: u64, dst: u64) -> bool {
     if n != BS {
         return false;
     }
-    return true;
+    return fsckcrypt.after_read(lba, dst);
 }
 
 fn write_sector(lba: u64, src: u64) -> bool {
-    if errno.failed(io.seek(fd, (part_base + lba) * BS, 0)) {
+    if errno.failed(io.seek(fd, (part_base + fsckcrypt.data_offset() + lba) * BS, 0)) {
         return false;
     }
-    let n: u64 = io.write(fd, src, BS);
+    let out: u64 = fsckcrypt.before_write(lba, src);
+    if out == 0 {
+        return false;
+    }
+    let n: u64 = io.write(fd, out, BS);
     if errno.failed(n) {
         return false;
     }
@@ -222,6 +227,11 @@ fn u_start(args: u64) -> u64 {
     var s_dev: [u8; 10] = "/dev/hda\0\0";
     var w_r: [u8; 3] = "-r\0";
     var w_check: [u8; 13] = "--check-only\0";
+    var w_crypt: [u8; 8] = "--crypt\0";
+    var n_crypt: [u8; 6] = "crypt\0";
+    var n_crypt_open: [u8; 11] = "crypt_open\0";
+    var n_crypt_slot: [u8; 11] = "crypt_slot\0";
+    var pass_ptr: u64 = 0;
     var n_part: [u8; 16] = "partition_start\0";
     var n_magic: [u8; 6] = "magic\0";
     var n_version: [u8; 8] = "version\0";
@@ -253,6 +263,9 @@ fn u_start(args: u64) -> u64 {
             repair = true;
         } else if ulib.streq(a, (&w_check[0 as usize]) as u64) {
             check_only = true;
+        } else if ulib.streq(a, (&w_crypt[0 as usize]) as u64) && ai + 1 < argc {
+            ai = ai + 1;
+            pass_ptr = ulib.arg_at(args, ai);
         } else {
             path = a;
         }
@@ -288,12 +301,41 @@ fn u_start(args: u64) -> u64 {
     if have_sb {
         magic_ok = superblock_magic_ok();
     }
-    if magic_ok == 0 && fsckpart.find_ofs_partition(fd) {
+    var crypt_state: u64 = fsckcrypt.probe(fd, 0);
+    if crypt_state == fsckcrypt.ABSENT && magic_ok == 0 && fsckpart.find_ofs_partition(fd) {
         part_base = fsckpart.found_start();
         device_blocks = fsckpart.found_blocks();
-        have_sb = read_sector(0, (&sb[0 as usize]) as u64);
-        if have_sb {
-            magic_ok = superblock_magic_ok();
+        crypt_state = fsckcrypt.probe(fd, part_base);
+        if crypt_state == fsckcrypt.ABSENT {
+            have_sb = read_sector(0, (&sb[0 as usize]) as u64);
+            if have_sb {
+                magic_ok = superblock_magic_ok();
+            }
+        }
+    }
+    if crypt_state != fsckcrypt.ABSENT {
+        report((&n_crypt[0 as usize]) as u64, 1);
+        var opened: bool = false;
+        if crypt_state == fsckcrypt.PRESENT && pass_ptr != 0 {
+            opened = fsckcrypt.unlock(pass_ptr, ulib.length(pass_ptr));
+        }
+        if opened {
+            report((&n_crypt_open[0 as usize]) as u64, 1);
+            report((&n_crypt_slot[0 as usize]) as u64, fsckcrypt.slot());
+            device_blocks = fsckcrypt.data_blocks();
+            have_sb = read_sector(0, (&sb[0 as usize]) as u64);
+            magic_ok = 0;
+            if have_sb {
+                magic_ok = superblock_magic_ok();
+            }
+        } else {
+            report((&n_crypt_open[0 as usize]) as u64, 0);
+            report((&n_part[0 as usize]) as u64, part_base);
+            report((&n_magic[0 as usize]) as u64, 0);
+            errors = errors + 1;
+            report((&n_errors[0 as usize]) as u64, errors);
+            io.close(fd);
+            return 1;
         }
     }
     report((&n_part[0 as usize]) as u64, part_base);
