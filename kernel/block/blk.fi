@@ -34,6 +34,7 @@ import serial
 import lib.kstate
 import block.wlock
 import diag.devwait
+import diag.cmdopt
 import drv.blk.nvme
 import drv.blk.ahci
 import arch.arch
@@ -43,6 +44,7 @@ import mm.mem
 import bus.pci
 
 export {
+    dev_flushes,
     ram_init, use_ata, use_nvme, read, write, blocks, present,
     // ---- RUNDE KRYPTO: der rohe Weg, fuer den Kopfsatz und die Abnahme
     read_raw, read_stream, write_raw, write_run, wb_begin, wb_end, wb_flush,
@@ -878,12 +880,31 @@ fn probe_ata0(state: u64) -> u64 {
 // mehr aussteht. Ohne ihn ist "geschrieben" eine Aussage ueber einen
 // Zwischenspeicher und nicht ueber die Platte -- und ein Stromausfall
 // haette recht.
+static mut v_dev_flushes: u64 = 0
+
+fn dev_flushes() -> u64 {
+    return v_dev_flushes
+}
+
+fn nocacheflush(state: u64) -> bool {
+    var w: [u8; 13] = "nocacheflush\0"
+    return cmdopt.has(state, (&w[0]) as u64)
+}
+
 fn flush(state: u64) -> bool {
     wb_flush(state)
     // w-disklag: AHCI writes are no longer flushed one by one; the
     // barriers (journal commit, sync, shutdown) arrive here.
     if kstate.get(state, kstate.DISK_DEV) == DEV_AHCI {
+        v_dev_flushes = v_dev_flushes + 1
         return ahci.flush(state)
+    }
+    if kstate.get(state, kstate.DISK_DEV) == DEV_NVME {
+        if nocacheflush(state) {
+            return true
+        }
+        v_dev_flushes = v_dev_flushes + 1
+        return nvme.flush(state)
     }
     if kstate.get(state, kstate.DISK_DEV) != DEV_ATA {
         return true
