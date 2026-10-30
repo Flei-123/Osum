@@ -90,8 +90,8 @@ COUNT=$(val fsrv count)
 ROK=$(val fsrv rollok)
 ROK2=$(val fsrv rollok2)
 SCH=$(val fsrv schaeden)
-FSCK=$(val fsck fehler)
-JOFF=$(val fsck joffen)
+FSCK=$(val fsck errors)
+JOFF=$(val fsck journal_open)
 # WURDE UEBERHAUPT NACHGETRAGEN? Ohne diese Zahl waere "0 Schaeden" auch
 # dann gruen, wenn das Journal in keinem Lauf gebraucht worden waere.
 NACH=$(tr -d '\000' < "$S2" 2>/dev/null | grep -oa 'ofsj: nachgetragen=[0-9]*' | head -1 | sed 's/.*=//')

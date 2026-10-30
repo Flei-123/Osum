@@ -228,9 +228,9 @@ lauf "$TMPD/jm.img" "script=fsck /dev/hda;exit" "$TMPD/jm.txt" 600
 num "der Kern haengt das Abbild trotzdem ein" \
     "$(tr -d '\000' < "$TMPD/jm.txt" | grep -ca 'osum: mount=1')" ge 1
 num "die Bestaetigung ist nach dem Einhaengen weg" \
-    "$(val "$TMPD/jm.txt" fsck joffen)" eq 0
+    "$(val "$TMPD/jm.txt" fsck journal_open)" eq 0
 num "und das Dateisystem ist unversehrt" \
-    "$(val "$TMPD/jm.txt" fsck fehler)" eq 0
+    "$(val "$TMPD/jm.txt" fsck errors)" eq 0
 
 echo
 echo "== 6. /bin/fsck auf mutwillig zerstoerten Abbildern =="
@@ -251,7 +251,7 @@ for f in "$TMPD"/kaputt/*.img; do
         -drive "file=$TMPD/fk.img,format=raw,if=ide,index=1" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     rc=$?
-    fe=$(val "$TMPD/fk.txt" fsck fehler)
+    fe=$(val "$TMPD/fk.txt" fsck errors)
     if [ "$rc" -eq 21 ] && [ -n "$fe" ]; then
         fertig=$((fertig+1))
         printf '        %-22s fehler=%s\n' "$n" "$fe"
@@ -275,11 +275,11 @@ fsck2() { # abbild anhang ausgabe
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 }
 fsck2 "" "$TMPD/r0.txt"
-v0=$(val "$TMPD/r0.txt" fsck fehler)
+v0=$(val "$TMPD/r0.txt" fsck errors)
 fsck2 "-r" "$TMPD/r1.txt"
-b1=$(val "$TMPD/r1.txt" fsck behoben)
+b1=$(val "$TMPD/r1.txt" fsck fixed)
 fsck2 "" "$TMPD/r2.txt"
-v2=$(val "$TMPD/r2.txt" fsck fehler)
+v2=$(val "$TMPD/r2.txt" fsck errors)
 num "vor der Reparatur: Fehler" "$v0" gt 0
 num "fsck -r hat behoben" "$b1" gt 0
 num "nach der Reparatur: Fehler" "$v2" eq 0
@@ -291,7 +291,7 @@ num "eine Platte OHNE Journal haengt sich ein" \
     "$(tr -d '\000' < "$TMPD/nj.txt" | grep -ca 'osum: mount=1')" ge 1
 num "und sie meldet 0 Journalbloecke" \
     "$(val "$TMPD/nj.txt" fsck journal)" eq 0
-num "und sie ist unversehrt" "$(val "$TMPD/nj.txt" fsck fehler)" eq 0
+num "und sie ist unversehrt" "$(val "$TMPD/nj.txt" fsck errors)" eq 0
 # Ein Abbild der Fassung 2 muss Oktett fuer Oktett dasselbe sein wie
 # vorher. Zwei Laeufe von mkfs geben dieselben Oktette -- das ist die
 # Zusage aus Runde K15, und sie gilt weiter.

@@ -1,0 +1,151 @@
+profile kernel
+
+import libc.io
+import libc.errno
+
+export { find_ofs_partition, found_start, found_blocks }
+
+const BS: u64 = 512
+const MAX_ENTRIES: u64 = 128
+
+static mut sect: [u8; 512] = [0 as u8; 512]
+static mut start_lba: u64 = 0
+static mut count_blocks: u64 = 0
+
+fn byte_at(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+fn le32(p: u64) -> u64 {
+    return byte_at(p) | (byte_at(p + 1) << 8) | (byte_at(p + 2) << 16)
+        | (byte_at(p + 3) << 24)
+}
+
+fn le64(p: u64) -> u64 {
+    return le32(p) | (le32(p + 4) << 32)
+}
+
+fn read_lba(fd: u64, lba: u64) -> bool {
+    if errno.failed(io.seek(fd, lba * BS, 0)) {
+        return false
+    }
+    let n: u64 = io.read_full(fd, (&sect[0 as usize]) as u64, BS)
+    if errno.failed(n) {
+        return false
+    }
+    return n == BS
+}
+
+fn has_gpt_signature() -> bool {
+    var want: [u8; 9] = "EFI PART\0"
+    var i: u64 = 0
+    while i < 8 {
+        if byte_at((&sect[0 as usize]) as u64 + i) != (want[i as usize] as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn is_ofs_guid(p: u64) -> bool {
+    var want: [u8; 16] = [0 as u8; 16]
+    want[0 as usize] = 0x4D as u8
+    want[1 as usize] = 0x55 as u8
+    want[2 as usize] = 0x53 as u8
+    want[3 as usize] = 0x4F as u8
+    want[4 as usize] = 0x46 as u8
+    want[5 as usize] = 0x4F as u8
+    want[6 as usize] = 0x01 as u8
+    want[7 as usize] = 0x53 as u8
+    want[8 as usize] = 0x8E as u8
+    want[9 as usize] = 0x75 as u8
+    want[10 as usize] = 0x6D as u8
+    want[11 as usize] = 0x6F as u8
+    want[12 as usize] = 0x72 as u8
+    want[13 as usize] = 0x69 as u8
+    want[14 as usize] = 0x4F as u8
+    want[15 as usize] = 0x53 as u8
+    var i: u64 = 0
+    while i < 16 {
+        if byte_at(p + i) != (want[i as usize] as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn has_boot_signature() -> bool {
+    return byte_at((&sect[0 as usize]) as u64 + 510) == 0x55
+        && byte_at((&sect[0 as usize]) as u64 + 511) == 0xAA
+}
+
+fn has_protective_entry() -> bool {
+    var i: u64 = 0
+    while i < 4 {
+        if byte_at((&sect[0 as usize]) as u64 + 446 + i * 16 + 4) == 0xEE {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn find_ofs_partition(fd: u64) -> bool {
+    start_lba = 0
+    count_blocks = 0
+    if !read_lba(fd, 0) {
+        return false
+    }
+    if !has_boot_signature() || !has_protective_entry() {
+        return false
+    }
+    if !read_lba(fd, 1) {
+        return false
+    }
+    if !has_gpt_signature() {
+        return false
+    }
+    let base: u64 = (&sect[0 as usize]) as u64
+    let header_size: u64 = le32(base + 12)
+    let entries_lba: u64 = le64(base + 72)
+    var entries: u64 = le32(base + 80)
+    let entry_size: u64 = le32(base + 84)
+    if header_size < 92 || header_size > BS {
+        return false
+    }
+    if entry_size < 128 || entry_size > BS {
+        return false
+    }
+    if entries == 0 || entries > MAX_ENTRIES {
+        entries = MAX_ENTRIES
+    }
+    let per_sector: u64 = BS / entry_size
+    var idx: u64 = 0
+    while idx < entries {
+        if idx % per_sector == 0 {
+            if !read_lba(fd, entries_lba + idx / per_sector) {
+                return false
+            }
+        }
+        let e: u64 = base + (idx % per_sector) * entry_size
+        let first: u64 = le64(e + 32)
+        let last: u64 = le64(e + 40)
+        if last >= first && is_ofs_guid(e) {
+            start_lba = first
+            count_blocks = last - first + 1
+            return true
+        }
+        idx = idx + 1
+    }
+    return false
+}
+
+fn found_start() -> u64 {
+    return start_lba
+}
+
+fn found_blocks() -> u64 {
+    return count_blocks
+}

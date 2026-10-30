@@ -154,8 +154,8 @@ FALSCHER Summe an. Der Kern haengt das Abbild ein und traegt nichts nach:
 
 ```
 osum: mount=1
-fsck: joffen = 0        (die Bestaetigung ist nach dem Einhaengen weg)
-fsck: fehler = 0        (das Dateisystem ist unversehrt)
+fsck: journal_open = 0        (die Bestaetigung ist nach dem Einhaengen weg)
+fsck: errors = 0        (das Dateisystem ist unversehrt)
 ```
 
 ### Und ein zweiter Fall, der aelter ist als diese Runde

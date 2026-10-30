@@ -78,7 +78,7 @@ num "free blocks after unlink minus before" "$((${b2:-0} - ${b0:-0}))" eq 0
 echo "== 4. fsck in the guest and on the host =="
 cp --sparse=always "$TMPD/big.img" "$TMPD/fsck.img"
 run_guest "$TMPD/k.mb" "$TMPD/fsck.img" "script=fsck /dev/hda;exit" "$TMPD/f.txt"
-num "guest fsck errors" "$(val "$TMPD/f.txt" fsck fehler)" eq 0
+num "guest fsck errors" "$(val "$TMPD/f.txt" fsck errors)" eq 0
 python3 tools/fsrobust/check.py struktur "$TMPD/live.img" > "$TMPD/h.txt" 2>&1
 tail -2 "$TMPD/h.txt" | sed 's/^/        /'
 python3 tools/fsrobust/check.py struktur "$TMPD/live.img" >/dev/null 2>&1 && ok "host check.py struktur after the write test" || bad "host check.py struktur"

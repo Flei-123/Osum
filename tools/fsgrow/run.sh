@@ -67,7 +67,7 @@ run_guest() {
     while [ $try -lt 3 ]; do
         run_guest_once "$@"
         case "$3" in
-            *fsck*) clean "$4" | grep -aq '^fsck: behoben' && return 0 ;;
+            *fsck*) clean "$4" | grep -aq '^fsck: fixed' && return 0 ;;
             *) return 0 ;;
         esac
         try=$((try+1))
@@ -112,7 +112,7 @@ echo "== 2. grow status, grow, df, fsck =="
 cp --sparse=always "$TMPD/base.img" "$TMPD/live.img"
 run_guest "$K" "$TMPD/live.img" "script=ota system grow status;ota system grow;ota system grow status;df;cat /hello.txt;fsck /dev/hda;exit" "$TMPD/g.txt"
 clean "$TMPD/g.txt" > "$TMPD/g.clean"
-grep -a "grow:\|fsck: fehler\|hello grow" "$TMPD/g.clean" | head -24 | sed 's/^/        /'
+grep -a "grow:\|fsck: errors\|hello grow" "$TMPD/g.clean" | head -24 | sed 's/^/        /'
 first_state=$(grep -a '^grow: state ' "$TMPD/g.clean" | head -1 | sed 's/.* //')
 last_state=$(grep -a '^grow: state ' "$TMPD/g.clean" | tail -1 | sed 's/.* //')
 num "state before grow (1 = ready)" "$first_state" eq 1
@@ -120,7 +120,7 @@ num "state after grow (3 = done)" "$last_state" eq 3
 grep -aq '^grow: done' "$TMPD/g.clean" && ok "grow reported done" || bad "grow did not report done"
 num "fs blocks after grow" "$(grep -a '^grow: fs blocks ' "$TMPD/g.clean" | tail -1 | sed 's/.* //')" eq $((DEV_MIB * 2048))
 num "ext inodes after grow" "$(grep -a '^grow: ext inodes ' "$TMPD/g.clean" | tail -1 | sed 's/.* //')" gt 1000
-num "guest fsck errors after grow" "$(val "$TMPD/g.txt" fsck fehler)" eq 0
+num "guest fsck errors after grow" "$(val "$TMPD/g.txt" fsck errors)" eq 0
 grep -aq 'hello grow' "$TMPD/g.clean" && ok "old file readable after grow" || bad "old file unreadable after grow"
 num "host: ext flag after grow" "$(lval "$TMPD/live.img" ext)" eq 1
 num "host: blocks after grow" "$(lval "$TMPD/live.img" blocks)" eq $((DEV_MIB * 2048))
@@ -137,10 +137,10 @@ num "big file bytes written" "$(clean "$TMPD/w.txt" | grep -a '^growfill: wrote'
 num "many files written" "$(clean "$TMPD/w.txt" | grep -a '^growfill: wrote' | tail -n +2 | sed 's/.* //' | awk '{s+=$1} END{print s+0}')" eq $MANY
 echo "        write phase seconds: $((t1 - t0))"
 run_guest "$K" "$TMPD/live.img" "script=growfill bigcheck /big.bin $BIG_MIB;$MANYCHECK_SCRIPT;df;fsck /dev/hda;exit" "$TMPD/r.txt"
-clean "$TMPD/r.txt" | grep -a "growfill:\|fsck: \(fehler\|zugross\|blocks\|inodes\|dateien\)" | sed 's/^/        /'
+clean "$TMPD/r.txt" | grep -a "growfill:\|fsck: \(errors\|too_large\|blocks\|inodes\|files\)" | sed 's/^/        /'
 num "big file bad chunks after reboot" "$(clean "$TMPD/r.txt" | grep -a '^growfill: bad' | head -1 | sed 's/.* //')" eq 0
 num "many files bad after reboot" "$(clean "$TMPD/r.txt" | grep -a '^growfill: bad' | tail -n +2 | sed 's/.* //' | awk '{s+=$1} END{print s+0}')" eq 0
-num "guest fsck errors after writes" "$(val "$TMPD/r.txt" fsck fehler)" eq 0
+num "guest fsck errors after writes" "$(val "$TMPD/r.txt" fsck errors)" eq 0
 python3 tools/fsrobust/check.py struktur "$TMPD/live.img" >"$TMPD/h2.txt" 2>&1 && ok "host check.py struktur after writes" || { bad "host check.py struktur after writes"; tail -4 "$TMPD/h2.txt" | sed 's/^/        /'; }
 num "host: used inodes" "$(lval "$TMPD/live.img" inodes 1)" ge $((MANY + 3))
 num "host: /big.bin lies in the ext zone (first block >= old cover)" "$(python3 -I tools/osum/mkfs.py where "$TMPD/live.img" /big.bin 2>/dev/null | grep -o '[0-9]\+' | awk -v c=$BASE_BLOCKS 'NR>1 && $1>=c {n++} END{print n+0}')" ge 1
@@ -160,7 +160,7 @@ for i in $(seq 1 $CUTS); do
     python3 tools/fsrobust/check.py struktur "$TMPD/cut.img" >"$TMPD/ch$i.txt" 2>&1 || { bad "cut $i: host check after kill"; cutfail=1; tail -3 "$TMPD/ch$i.txt" | sed 's/^/        /'; }
     run_guest "$K" "$TMPD/cut.img" "script=ota system grow;ota system grow status;growfill big /after.bin 8;growfill bigcheck /after.bin 8;cat /hello.txt;fsck /dev/hda;exit" "$TMPD/cr$i.txt"
     st=$(gval "$TMPD/cr$i.txt" state | tail -1)
-    fe=$(val "$TMPD/cr$i.txt" fsck fehler)
+    fe=$(val "$TMPD/cr$i.txt" fsck errors)
     bc=$(clean "$TMPD/cr$i.txt" | grep -a '^growfill: bad' | tail -1 | sed 's/.* //')
     grep -aq 'hello grow' "$TMPD/cr$i.txt" && hh=1 || hh=0
     echo "        cut $i: mark '$mark' +${delay}s, ext after kill=${xv:-0}, resumed state=$st fsck=$fe bad=$bc hello=$hh"
@@ -181,20 +181,20 @@ if build_tree "$OLDD" "$TMPD/old"; then
     make_base "$TMPD/g0.img"
     run_guest "$K" "$TMPD/g0.img" "script=ota system grow;exit" "$TMPD/og.txt"
     run_guest "$TMPD/old/k.mb" "$TMPD/g0.img" "script=cat /hello.txt;echo oldwrite > /old.txt;cat /old.txt;ls /;fsck /dev/hda;exit" "$TMPD/o1.txt"
-    clean "$TMPD/o1.txt" | grep -a "hello grow\|oldwrite\|fsck: fehler" | sed 's/^/        /'
+    clean "$TMPD/o1.txt" | grep -a "hello grow\|oldwrite\|fsck: errors" | sed 's/^/        /'
     grep -aq 'hello grow' "$TMPD/o1.txt" && ok "old kernel reads the grown image" || bad "old kernel cannot read the grown image"
     grep -aq 'oldwrite' "$TMPD/o1.txt" && ok "old kernel writes on the grown image" || bad "old kernel cannot write on the grown image"
-    num "old kernel fsck errors (grown, no ext data)" "$(val "$TMPD/o1.txt" fsck fehler)" eq 0
+    num "old kernel fsck errors (grown, no ext data)" "$(val "$TMPD/o1.txt" fsck errors)" eq 0
     run_guest "$K" "$TMPD/g0.img" "script=cat /old.txt;cat /hello.txt;growfill big /n.bin 8;growfill bigcheck /n.bin 8;fsck /dev/hda;exit" "$TMPD/o2.txt"
     grep -aq 'oldwrite' "$TMPD/o2.txt" && ok "new kernel keeps the file the old kernel wrote" || bad "new kernel lost the old kernel's file"
-    num "new kernel fsck errors after the old kernel ran" "$(val "$TMPD/o2.txt" fsck fehler)" eq 0
+    num "new kernel fsck errors after the old kernel ran" "$(val "$TMPD/o2.txt" fsck errors)" eq 0
     num "new kernel writes ext data after the old kernel ran (bad chunks)" "$(badsum "$TMPD/o2.txt")" eq 0
     cp --sparse=always "$TMPD/live.img" "$TMPD/oldlive.img"
     run_guest "$TMPD/old/k.mb" "$TMPD/oldlive.img" "script=cat /hello.txt;ls /;exit" "$TMPD/o3.txt"
     grep -aq 'hello grow' "$TMPD/o3.txt" && ok "old kernel boots a grown image with ext data (big file + $MANY files)" || bad "old kernel failed on a grown image with ext data"
     run_guest "$K" "$TMPD/oldlive.img" "script=growfill bigcheck /big.bin $BIG_MIB;$MANYCHECK_SCRIPT;fsck /dev/hda;exit" "$TMPD/o4.txt"
     num "ext data intact after the old kernel only read" "$(badsum "$TMPD/o4.txt")" eq 0
-    num "fsck errors after the old kernel only read" "$(val "$TMPD/o4.txt" fsck fehler)" eq 0
+    num "fsck errors after the old kernel only read" "$(val "$TMPD/o4.txt" fsck errors)" eq 0
 else
     bad "old kernel build failed"
 fi
