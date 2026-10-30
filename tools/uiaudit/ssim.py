@@ -23,5 +23,11 @@ def ssim(a, b, k=7):
     return float(m.mean())
 
 if __name__ == "__main__":
-    box = tuple(int(v) for v in sys.argv[3].split(",")) if len(sys.argv) > 3 else None
-    print("SSIM %.4f" % ssim(gray(sys.argv[1], box), gray(sys.argv[2], box)))
+    args = [a for a in sys.argv[1:] if not a.startswith("--min=")]
+    floor = next((float(a[6:]) for a in sys.argv[1:] if a.startswith("--min=")), None)
+    box = tuple(int(v) for v in args[2].split(",")) if len(args) > 2 else None
+    score = ssim(gray(args[0], box), gray(args[1], None))
+    print("SSIM %.4f" % score)
+    if floor is not None and score < floor:
+        print("FAIL below %.2f" % floor)
+        sys.exit(1)

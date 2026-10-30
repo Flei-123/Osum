@@ -24,4 +24,9 @@ fn old_a() {
 X
 python3 -I tools/uiaudit/audit.py "$D" > "$D/old.txt"; orc=$?
 [ $orc -ne 0 ] && [ "$(grep -c FINDING "$D/old.txt")" -ge 4 ] && ok "counter-proof: old patterns are red ($(tail -1 "$D/old.txt"))" || bad "counter-proof stayed green"
+if [ -n "${UIAUDIT_SHOT:-}" ]; then
+    MOCK="${UIAUDIT_MOCK:-/root/jarvis/data/projects_kb/orientos/reports/mockups/hpf-personalization.png}"
+    sc=$(python3 -I tools/uiaudit/ssim.py "$UIAUDIT_SHOT" "$MOCK" 20,4,1022,738 --min=0.95); src=$?
+    [ $src -eq 0 ] && ok "mockup match: $sc" || bad "mockup match: $sc"
+fi
 echo "$pass/$fail OK/FAIL"; [ $fail -eq 0 ]
