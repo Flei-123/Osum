@@ -1,0 +1,269 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.procw
+import block.blk
+import block.blkguard
+import drv.blk.ahci
+import fs.fs
+
+export { render }
+
+const BS: u64 = 512
+const STEP: u64 = 4096
+const WATCH_A: u64 = 151
+const WATCH_B: u64 = 152
+const MAX_HITS: u64 = 24
+
+static mut a_blk: [u8; 512] = [0 as u8; 512]
+static mut a_cursor: u64 = 1
+static mut a_hits: u64 = 0
+
+static mut k_ver: [u8; 8] = "version\0"
+static mut k_total: [u8; 7] = "blocks\0"
+static mut k_data: [u8; 11] = "data_start\0"
+static mut k_itab: [u8; 7] = "itable\0"
+static mut k_bms: [u8; 9] = "bm_start\0"
+static mut k_bmb: [u8; 10] = "bm_blocks\0"
+static mut k_isz: [u8; 12] = "inode_bytes\0"
+static mut k_bino: [u8; 12] = "base_inodes\0"
+static mut k_xit: [u8; 11] = "ext_itable\0"
+static mut k_xin: [u8; 11] = "ext_inodes\0"
+static mut k_metaset: [u8; 14] = "meta_bits_set\0"
+static mut k_xmetaset: [u8; 18] = "ext_meta_bits_set\0"
+static mut k_xmeta: [u8; 15] = "ext_meta_count\0"
+static mut k_gtook: [u8; 18] = "blk_unlocked_took\0"
+static mut k_grefuse: [u8; 13] = "blk_refused\0\0"
+static mut k_drefuse: [u8; 17] = "ahci_lock_busy\0\0\0"
+static mut k_dnest: [u8; 17] = "ahci_lock_nest\0\0\0"
+static mut k_dstop: [u8; 18] = "ahci_stop_fails\0\0\0"
+static mut k_from: [u8; 11] = "scan_from\0\0"
+static mut k_to: [u8; 8] = "scan_to\0"
+static mut k_hits: [u8; 10] = "scan_bad\0\0"
+static mut s_ino: [u8; 7] = "inode \0"
+static mut s_lba: [u8; 6] = " lba \0"
+static mut s_off: [u8; 6] = " off \0"
+static mut s_typ: [u8; 7] = " type \0"
+static mut s_size: [u8; 7] = " size \0"
+static mut s_ptr: [u8; 7] = " ptrs \0"
+static mut s_bad: [u8; 5] = "bad \0"
+static mut s_field: [u8; 8] = " field \0"
+static mut s_val: [u8; 6] = " val \0"
+static mut s_hex: [u8; 5] = "hex \0"
+static mut s_fail: [u8; 13] = "read failed\n\0"
+
+fn get64(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn ptr_fields(i: u64) -> u64 {
+    if i < 8 {
+        return 24 + i * 8
+    }
+    if i == 8 {
+        return 112
+    }
+    if i == 9 {
+        return 120
+    }
+    if i == 10 {
+        return 128
+    }
+    return 160
+}
+
+fn nptr(state: u64) -> u64 {
+    if fs.version(state) >= 3 {
+        return 12
+    }
+    return 10
+}
+
+fn read_inode_block(state: u64, ino: u64) -> bool {
+    return blk.read(state, fs.inode_block_of(state, ino), (&a_blk[0]) as u64)
+}
+
+
+fn count_set(state: u64, first: u64, n: u64) -> u64 {
+    var c: u64 = 0
+    var last_blk: u64 = 0xFFFFFFFFFFFFFFFF
+    var i: u64 = 0
+    while i < n {
+        let b: u64 = first + i
+        let bb: u64 = fs.bm_block_of(state, b)
+        if bb != last_blk {
+            if !blk.read(state, bb, (&a_blk[0]) as u64) {
+                return c
+            }
+            last_blk = bb
+        }
+        let v: u64 = kstate.get8((&a_blk[0]) as u64 + fs.bm_byte(b))
+        c = c + ((v >> (b % 8)) & 1)
+        i = i + 1
+    }
+    return c
+}
+
+fn hexdump(n: u64) {
+    var i: u64 = 0
+    while i < n {
+        if i % 32 == 0 {
+            procw.put_s((&s_hex[0]) as u64)
+            procw.put_hex(i, 3)
+            procw.put_c(32)
+        }
+        procw.put_hex(kstate.get8((&a_blk[0]) as u64 + i), 2)
+        i = i + 1
+        if i % 32 == 0 {
+            procw.put_c(10)
+        }
+    }
+}
+
+fn describe(state: u64, ino: u64) {
+    let lba: u64 = fs.inode_block_of(state, ino)
+    let off: u64 = fs.inode_off(state, ino)
+    procw.put_s((&s_ino[0]) as u64)
+    procw.put_dec(ino)
+    procw.put_s((&s_lba[0]) as u64)
+    procw.put_dec(lba)
+    procw.put_s((&s_off[0]) as u64)
+    procw.put_dec(off)
+    if !read_inode_block(state, ino) {
+        procw.put_c(10)
+        procw.put_s((&s_fail[0]) as u64)
+        return
+    }
+    let p: u64 = (&a_blk[0]) as u64 + off
+    procw.put_s((&s_typ[0]) as u64)
+    procw.put_hex(get64(p), 16)
+    procw.put_s((&s_size[0]) as u64)
+    procw.put_hex(get64(p + 8), 16)
+    procw.put_s((&s_ptr[0]) as u64)
+    var i: u64 = 0
+    while i < nptr(state) {
+        procw.put_hex(get64(p + ptr_fields(i)), 1)
+        procw.put_c(32)
+        i = i + 1
+    }
+    procw.put_c(10)
+}
+
+fn bad_ptr(state: u64, v: u64) -> bool {
+    return v != 0 && (v < fs.data_start(state) || v >= fs.total_blocks(state))
+}
+
+fn scan_one(state: u64, ino: u64, p: u64) {
+    let t: u64 = get64(p)
+    if t == 0 {
+        return
+    }
+    var bad_f: u64 = 0xFFFF
+    var bad_v: u64 = 0
+    if t != fs.T_FILE && t != fs.T_DIR && t != fs.T_LINK {
+        bad_f = 0
+        bad_v = t
+    } else {
+        var i: u64 = 0
+        while i < nptr(state) && bad_f == 0xFFFF {
+            let v: u64 = get64(p + ptr_fields(i))
+            if bad_ptr(state, v) {
+                bad_f = ptr_fields(i)
+                bad_v = v
+            }
+            i = i + 1
+        }
+    }
+    if bad_f == 0xFFFF {
+        return
+    }
+    a_hits = a_hits + 1
+    if a_hits > MAX_HITS {
+        return
+    }
+    procw.put_s((&s_bad[0]) as u64)
+    procw.put_dec(ino)
+    procw.put_s((&s_field[0]) as u64)
+    procw.put_dec(bad_f)
+    procw.put_s((&s_val[0]) as u64)
+    procw.put_hex(bad_v, 1)
+    procw.put_c(10)
+}
+
+fn scan(state: u64, from: u64, to: u64) {
+    var ino: u64 = from
+    var last: u64 = 0xFFFFFFFFFFFFFFFF
+    while ino < to {
+        let lba: u64 = fs.inode_block_of(state, ino)
+        if lba != last {
+            if !blk.read(state, lba, (&a_blk[0]) as u64) {
+                procw.put_s((&s_fail[0]) as u64)
+                return
+            }
+            last = lba
+        }
+        scan_one(state, ino, (&a_blk[0]) as u64 + fs.inode_off(state, ino))
+        ino = ino + 1
+    }
+}
+
+fn geometry(state: u64) {
+    procw.line_num((&k_ver[0]) as u64, fs.version(state))
+    procw.line_num((&k_total[0]) as u64, fs.total_blocks(state))
+    procw.line_num((&k_data[0]) as u64, fs.data_start(state))
+    procw.line_num((&k_itab[0]) as u64, fs.itable(state))
+    procw.line_num((&k_bms[0]) as u64, fs.bm_start(state))
+    procw.line_num((&k_bmb[0]) as u64, fs.bm_blocks(state))
+    procw.line_num((&k_isz[0]) as u64, fs.inode_bytes(state))
+    procw.line_num((&k_bino[0]) as u64, fs.base_inodes(state))
+    procw.line_num((&k_xit[0]) as u64, fs.ext_itable(state))
+    procw.line_num((&k_xin[0]) as u64, fs.ext_inodes(state))
+    procw.line_num((&k_gtook[0]) as u64, blkguard.took())
+    procw.line_num((&k_grefuse[0]) as u64, blkguard.refused())
+    procw.line_num((&k_drefuse[0]) as u64, ahci.lock_refused())
+    procw.line_num((&k_dnest[0]) as u64, ahci.lock_nested())
+    procw.line_num((&k_dstop[0]) as u64, ahci.stop_fails())
+}
+
+fn meta_bits(state: u64) {
+    procw.line_num((&k_metaset[0]) as u64, count_set(state, 0, fs.data_start(state)))
+    let xit: u64 = fs.ext_itable(state)
+    if xit != 0 {
+        let ipb: u64 = fs.inodes_per_block(state)
+        let n: u64 = (fs.ext_inodes(state) + ipb - 1) / ipb
+        procw.line_num((&k_xmeta[0]) as u64, n)
+        procw.line_num((&k_xmetaset[0]) as u64, count_set(state, xit, n))
+    }
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    procw.begin(out, cap)
+    if !fs.ready(state) {
+        return procw.used()
+    }
+    let flags: u64 = fs.lock_only(state)
+    geometry(state)
+    meta_bits(state)
+    describe(state, WATCH_A)
+    describe(state, WATCH_B)
+    if read_inode_block(state, WATCH_A) {
+        hexdump(BS)
+    }
+    let total: u64 = fs.inode_count(state) + 1
+    if a_cursor >= total {
+        a_cursor = 1
+    }
+    var to: u64 = a_cursor + STEP
+    if to > total {
+        to = total
+    }
+    procw.line_num((&k_from[0]) as u64, a_cursor)
+    procw.line_num((&k_to[0]) as u64, to)
+    a_hits = 0
+    scan(state, a_cursor, to)
+    procw.line_num((&k_hits[0]) as u64, a_hits)
+    a_cursor = to
+    fs.unlock_only(state, flags)
+    return procw.used()
+}

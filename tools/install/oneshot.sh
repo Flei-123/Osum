@@ -95,6 +95,11 @@ if [ "$WIE" = roh ]; then
     # GPT-Kopf aus der Sicherung, bevor irgendein Betriebssystem ihn zu
     # Gesicht bekommt (gemessen in dieser Runde), und dann prueft man
     # nicht mehr den Kern, sondern die Firmware.
+    ROHDISK=(-drive "file=$OUT/ziel.img,format=raw,if=ide,index=0")
+    if [ "${OTA_DRIVE:-ide}" = ahci ]; then
+        ROHDISK=(-device ich9-ahci,id=ahci0 -drive "if=none,id=hd0,file=$OUT/ziel.img,format=raw"
+                 -device ide-hd,drive=hd0,bus=ahci0.0)
+    fi
     ZEILE="$BASIS"
     [ -n "${OSUM_EXTRA:-}" ] && ZEILE="$ZEILE $OSUM_EXTRA"
     [ -n "$NETZ" ] && ZEILE="$ZEILE $NETZ"
@@ -102,7 +107,7 @@ if [ "$WIE" = roh ]; then
     timeout "$LIMIT" $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" -smp "${OSUM_SMP:-1}" \
         -kernel "$OUT/k.mb" -append "$ZEILE" \
         -serial "file:$OUT/$NAME.txt" -display none -no-reboot "${RTCARGS[@]}" \
-        -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
+        "${ROHDISK[@]}" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     rc=$?
 elif [ "$WIE" = iso ]; then
