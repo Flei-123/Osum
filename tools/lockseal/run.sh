@@ -272,15 +272,29 @@ def same(x, y):
                if abs(bx[i]-by[i]) + abs(bx[i+1]-by[i+1]) + abs(bx[i+2]-by[i+2]) > 24)
     return 100.0 - 100.0 * diff / n
 print("WINDOW_BEFORE %.1f" % min(dominant(x, box) for x in (a, a2) if x))
-print("WINDOW_LOCKED %.1f" % dominant(b, box))
+def showthrough(before, locked, box):
+    rb = before.crop(box).tobytes()
+    rl = locked.crop(box).tobytes()
+    px = [rb[i:i+3] for i in range(0, len(rb), 3)]
+    dom = Counter(px).most_common(1)[0][0]
+    content = hit = 0
+    for i, p in enumerate(px):
+        if p == dom:
+            continue
+        content += 1
+        q = rl[3*i:3*i+3]
+        if abs(q[0]-p[0]) + abs(q[1]-p[1]) + abs(q[2]-p[2]) <= 24:
+            hit += 1
+    return 100.0 * hit / content if content else 100.0
+print("WINDOW_SHOWTHROUGH %.1f" % max(showthrough(x, b, box) for x in (a, a2) if x))
 print("LOCKED_VS_ATTACKED %.1f" % same(b, c))
 PY
 sed 's/^/        /' "$TMPD/shot.txt"
 wb=$(grep -a WINDOW_BEFORE "$TMPD/shot.txt" | awk '{print $2}')
-wl=$(grep -a WINDOW_LOCKED "$TMPD/shot.txt" | awk '{print $2}')
+wl=$(grep -a WINDOW_SHOWTHROUGH "$TMPD/shot.txt" | awk '{print $2}')
 bc=$(grep -a LOCKED_VS_ATTACKED "$TMPD/shot.txt" | awk '{print $2}')
 if [ -n "$wb" ] && awk -v v="$wb" 'BEGIN{exit !(v<97)}'; then ok "before the lock the window's area is full of content (the biggest single colour: $wb %)"; else bad "before the lock the window's area looks empty ('$wb' %)"; fi
-if [ -n "$wl" ] && awk -v v="$wl" 'BEGIN{exit !(v>99.5)}'; then ok "at the lock the same area is ONE colour ($wl %): nothing of the window shows through"; else bad "at the lock the window's area is not empty ('$wl' % one colour)"; fi
+if [ -n "$wl" ] && awk -v v="$wl" 'BEGIN{exit !(v<5)}'; then ok "at the lock nothing of the window's content shows through the same area ($wl % of its pixels)"; else bad "at the lock the window's content shows through ('$wl' % of its pixels)"; fi
 if [ -n "$bc" ] && awk -v v="$bc" 'BEGIN{exit !(v>97)}'; then ok "the locked screen after the attacks looks as before them ($bc % equal)"; else bad "the locked screen changed during the attacks ('$bc' % equal)"; fi
 
 echo "== 8. the password still opens it =="
