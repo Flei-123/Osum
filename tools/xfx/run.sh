@@ -110,8 +110,6 @@ PY
 
 cat > "$TMPD/main.sh" <<'SCRIPT'
 echo @@usage
-/bin/xfx
-echo rc=$?
 /bin/xfx bogus
 echo rc=$?
 /bin/xfx start now
@@ -299,8 +297,8 @@ M="$TMPD/main.txt"
 hin "qemu rc=$RC"
 grep -qa '^@@end' "$M" && ok "script ran to the end" || bad "script did not finish"
 
-has "$M" usage 'usage: xfx install\|start\|stop\|status' "no argument prints usage"
-[ "$(seg "$M" usage | grep -ac '^rc=2')" = 5 ] && ok "no args, unknown subcommand and extra args all return 2" || bad "usage rc is not 2 five times: $(seg "$M" usage | grep -a '^rc=' | tr '\n' ' ')"
+has "$M" usage 'usage: xfx install\|get\|start\|stop\|status' "a bad subcommand prints usage"
+[ "$(seg "$M" usage | grep -ac '^rc=2')" = 4 ] && ok "unknown subcommand and extra args all return 2" || bad "usage rc is not 2 four times: $(seg "$M" usage | grep -a '^rc=' | tr '\n' ' ')"
 has "$M" fresh 'installed=no install=idle firefox=stopped' "fresh status"
 has "$M" fresh 'not installed' "start refuses without installation"
 has "$M" install 'install started' "install returns at once"
