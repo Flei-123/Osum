@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import icons
+import fuiscene
+
+export {
+    init, set_items, set_selected, selected, is_open, close, build, on_key, poll,
+    K_FIELD, K_CHEV, K_SEARCH, K_LIST, EV_NONE, EV_TOGGLE, EV_PICK
+}
+
+const K_FIELD: u64 = 9100
+const K_CHEV: u64 = 9101
+const K_SEARCH: u64 = 9102
+const K_LIST: u64 = 9103
+const EV_NONE: u64 = 0
+const EV_TOGGLE: u64 = 1
+const EV_PICK: u64 = 2
+const MAX_ITEMS: u64 = 64
+const NAME_MAX: u64 = 48
+const BLOB_MAX: u64 = 3200
+const ROW_PX: u64 = 32
+
+static mut src: u64 = 0
+static mut n_items: u64 = 0
+static mut offs: [u64; 64] = [0 as u64; 64]
+static mut fmap: [u64; 64] = [0 as u64; 64]
+static mut n_f: u64 = 0
+static mut fbuf: [u8; 48] = [0 as u8; 48]
+static mut cur: [u8; 52] = [0 as u8; 52]
+static mut blob: [u8; 3200] = [0 as u8; 3200]
+static mut empty: [u8; 2] = [0 as u8; 2]
+static mut hint_search: u64 = 0
+static mut hint_open: u64 = 0
+static mut sel: u64 = 0
+static mut opened: bool = false
+static mut want_focus: bool = false
+
+fn init(search_hint: u64, open_hint: u64) {
+    hint_search = search_hint
+    hint_open = open_hint
+    opened = false
+    sel = 0
+}
+
+fn set_items(blob_ptr: u64) {
+    src = blob_ptr
+    n_items = 0
+    var i: u64 = 0
+    var at_start: bool = true
+    while *((blob_ptr + i) as *mut u8) != 0 as u8 && n_items < MAX_ITEMS {
+        if at_start {
+            offs[(n_items) as usize] = i
+            n_items = n_items + 1
+            at_start = false
+        }
+        if *((blob_ptr + i) as *mut u8) == 10 as u8 {
+            at_start = true
+        }
+        i = i + 1
+    }
+}
+
+fn set_selected(i: u64) {
+    sel = i
+}
+
+fn selected() -> u64 {
+    return sel
+}
+
+fn is_open() -> bool {
+    return opened
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn item_byte(i: u64, k: u64) -> u64 {
+    let c: u64 = (*((src + offs[(i) as usize] + k) as *mut u8)) as u64
+    if c == 10 {
+        return 0
+    }
+    return c
+}
+
+fn item_matches(i: u64) -> bool {
+    if fbuf[0 as usize] == 0 as u8 {
+        return true
+    }
+    var s: u64 = 0
+    while item_byte(i, s) != 0 {
+        var k: u64 = 0
+        while fbuf[(k) as usize] != 0 as u8 && item_byte(i, s + k) != 0
+            && lower(fbuf[(k) as usize] as u64) == lower(item_byte(i, s + k)) {
+            k = k + 1
+        }
+        if fbuf[(k) as usize] == 0 as u8 {
+            return true
+        }
+        s = s + 1
+    }
+    return false
+}
+
+fn refilter() {
+    var o: u64 = 0
+    n_f = 0
+    var i: u64 = 0
+    while i < n_items {
+        if item_matches(i) {
+            fmap[(n_f) as usize] = i
+            n_f = n_f + 1
+            var k: u64 = 0
+            while item_byte(i, k) != 0 && o + 2 < BLOB_MAX {
+                blob[(o) as usize] = item_byte(i, k) as u8
+                o = o + 1
+                k = k + 1
+            }
+            blob[(o) as usize] = 10 as u8
+            o = o + 1
+        }
+        i = i + 1
+    }
+    blob[(o) as usize] = 0 as u8
+}
+
+fn open_now() {
+    opened = true
+    fbuf[0 as usize] = 0 as u8
+    fuiscene.entry_set(K_SEARCH, (&empty[0 as usize]) as u64)
+    refilter()
+    want_focus = true
+    fuiscene.refresh()
+}
+
+fn close() {
+    if opened {
+        opened = false
+        fuiscene.refresh()
+    }
+}
+
+fn build(parent: usize, w: u64, list_h: u64) {
+    if !opened {
+        var k: u64 = 0
+        while k < NAME_MAX && n_items > 0 && sel < n_items && item_byte(sel, k) != 0 {
+            cur[(k) as usize] = item_byte(sel, k) as u8
+            k = k + 1
+        }
+        cur[(k) as usize] = 0 as u8
+        let row: usize = fuiscene.row(parent)
+        fuiscene.set_gap(row, 4)
+        let b: usize = fuiscene.button(row, (&cur[0 as usize]) as u64, K_FIELD)
+        fuiscene.set_size(b, w - 40, 36)
+        let c: usize = fuiscene.icon_button(row, icons.CHEVRON_DOWN, hint_open, K_CHEV)
+        fuiscene.set_size(c, 36, 36)
+        return
+    }
+    let _e: usize = fuiscene.entry(parent, K_SEARCH, w, (&empty[0 as usize]) as u64)
+    fuiscene.entry_hint(K_SEARCH, hint_search)
+    let _t: usize = fuiscene.table_list(parent, K_LIST, w, list_h, 1, (&blob[0 as usize]) as u64)
+    fuiscene.table_single(K_LIST, true)
+    fuiscene.table_hover(K_LIST, true)
+}
+
+fn pick(r: u64) -> u64 {
+    if r >= n_f {
+        return EV_NONE
+    }
+    sel = fmap[(r) as usize]
+    opened = false
+    fuiscene.refresh()
+    return EV_PICK
+}
+
+fn on_key(key: u64) -> u64 {
+    if key == K_FIELD || key == K_CHEV {
+        if opened {
+            close()
+        } else {
+            open_now()
+        }
+        return EV_TOGGLE
+    }
+    if key == K_LIST {
+        return pick(fuiscene.table_sel(K_LIST))
+    }
+    if key == K_SEARCH {
+        return pick(0)
+    }
+    return EV_NONE
+}
+
+fn poll() {
+    if !opened {
+        return
+    }
+    if want_focus && fuiscene.node_of_key(K_SEARCH) != fuiscene.NONE {
+        fuiscene.focus(K_SEARCH)
+        want_focus = false
+    }
+    let t: u64 = fuiscene.entry_text(K_SEARCH)
+    if t == 0 {
+        return
+    }
+    var diff: bool = false
+    var k: u64 = 0
+    while k < NAME_MAX - 1 {
+        let c: u8 = *((t + k) as *mut u8)
+        if c != fbuf[(k) as usize] {
+            diff = true
+        }
+        if c == 0 as u8 {
+            k = NAME_MAX
+        } else {
+            k = k + 1
+        }
+    }
+    if !diff {
+        return
+    }
+    k = 0
+    while k < NAME_MAX - 1 && *((t + k) as *mut u8) != 0 as u8 {
+        fbuf[(k) as usize] = *((t + k) as *mut u8)
+        k = k + 1
+    }
+    fbuf[(k) as usize] = 0 as u8
+    refilter()
+    fuiscene.table_set_blob(K_LIST, (&blob[0 as usize]) as u64)
+    fuiscene.refresh()
+}

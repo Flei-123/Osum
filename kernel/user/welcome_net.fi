@@ -1,0 +1,258 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import netui.netui
+import wlanconf
+
+export {
+    refresh, link_state, count, blob, ssid_at, needs_password, is_known, seed_fake,
+    LINK_NO_DRIVER, LINK_IDLE, LINK_UP
+}
+
+const LINK_NO_DRIVER: u64 = 0
+const LINK_IDLE: u64 = 1
+const LINK_UP: u64 = 2
+const PROC_CAP: u64 = 3000
+const BLOB_CAP: u64 = 900
+
+static mut p_proc: [u8; 11] = "/proc/wlan\0"
+static mut raw: [u8; 3008] = [0 as u8; 3008]
+static mut out: [u8; 904] = [0 as u8; 904]
+static mut ssid_buf: [u8; 40] = [0 as u8; 40]
+static mut saved: [u8; 40] = [0 as u8; 40]
+static mut word_open: [u8; 8] = "Open\0\0\0\0"
+static mut word_secured: [u8; 8] = "Secured\0"
+static mut word_saved: [u8; 8] = "Saved\0\0\0"
+static mut link: u64 = 0
+
+fn read_proc() -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_proc[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        raw[0 as usize] = 0 as u8
+        return 0
+    }
+    var n: u64 = 0
+    var going: bool = true
+    while going && n < PROC_CAP {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, (&raw[0 as usize]) as u64 + n, 512)
+        if r == 0 || ulib.bad(r) {
+            going = false
+        } else {
+            n = n + r
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    raw[(n) as usize] = 0 as u8
+    return n
+}
+
+fn line_has(at: u64, n: u64, word: u64) -> bool {
+    let wl: u64 = ulib.length(word)
+    var i: u64 = at
+    while i < n && raw[(i) as usize] != 10 as u8 {
+        var j: u64 = 0
+        while j < wl && i + j < n && raw[(i + j) as usize] == *((word + j) as *mut u8) {
+            j = j + 1
+        }
+        if j == wl {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn sec_of(at: u64, n: u64) -> u64 {
+    var k_sec: [u8; 5] = "sec=\0"
+    var i: u64 = at
+    while i + 4 < n && raw[(i) as usize] != 10 as u8 {
+        if raw[(i) as usize] == 115 as u8 && raw[(i + 1) as usize] == 101 as u8
+            && raw[(i + 2) as usize] == 99 as u8 && raw[(i + 3) as usize] == 61 as u8 {
+            let c0: u8 = raw[(i + 4) as usize]
+            let c1: u8 = raw[(i + 5) as usize]
+            let c2: u8 = raw[(i + 6) as usize]
+            if c0 == 111 as u8 && c1 == 112 as u8 {
+                return netui.SC_OPEN
+            }
+            if c0 == 111 as u8 {
+                return netui.SC_OWE
+            }
+            if c0 == 119 as u8 && c1 == 101 as u8 {
+                return netui.SC_WEP
+            }
+            if c0 == 119 as u8 && c1 == 112 as u8 && c2 == 97 as u8 {
+                let c3: u8 = raw[(i + 7) as usize]
+                if c3 == 50 as u8 && raw[(i + 8) as usize] == 43 as u8 {
+                    return netui.SC_MIXED
+                }
+                if c3 == 50 as u8 {
+                    return netui.SC_WPA2
+                }
+                if c3 == 51 as u8 {
+                    return netui.SC_WPA3
+                }
+                return netui.SC_WPA
+            }
+            return netui.SC_UNKNOWN
+        }
+        i = i + 1
+    }
+    return netui.SC_UNKNOWN
+}
+
+fn rssi_of(at: u64, n: u64) -> i64 {
+    var i: u64 = at
+    while i + 6 < n && raw[(i) as usize] != 10 as u8 {
+        if raw[(i) as usize] == 114 as u8 && raw[(i + 1) as usize] == 115 as u8
+            && raw[(i + 2) as usize] == 115 as u8 && raw[(i + 3) as usize] == 105 as u8
+            && raw[(i + 4) as usize] == 61 as u8 {
+            var j: u64 = i + 5
+            var neg: bool = false
+            if raw[(j) as usize] == 45 as u8 {
+                neg = true
+                j = j + 1
+            }
+            var v: i64 = 0
+            while j < n && raw[(j) as usize] >= 48 as u8 && raw[(j) as usize] <= 57 as u8 {
+                v = v * 10 + (raw[(j) as usize] as i64 - 48)
+                j = j + 1
+            }
+            if neg {
+                return 0 - v
+            }
+            return v
+        }
+        i = i + 1
+    }
+    return 0 - 90
+}
+
+fn count() -> u64 {
+    return netui.list_count()
+}
+
+fn link_state() -> u64 {
+    return link
+}
+
+fn blob() -> u64 {
+    return (&out[0 as usize]) as u64
+}
+
+fn ssid_at(rank: u64) -> u64 {
+    var k: u64 = 0
+    let l: u64 = netui.list_ssid_len(rank)
+    while k < l && k < 32 {
+        ssid_buf[(k) as usize] = netui.list_ssid_byte(rank, k)
+        k = k + 1
+    }
+    ssid_buf[(k) as usize] = 0 as u8
+    return (&ssid_buf[0 as usize]) as u64
+}
+
+fn needs_password(rank: u64) -> bool {
+    return netui.sec_needs_password(netui.sec_class(netui.list_sec(rank)))
+}
+
+fn is_known(rank: u64) -> bool {
+    return netui.list_known(rank)
+}
+
+fn add_ssid(at: u64, n: u64) {
+    var s: [u8; 40] = [0 as u8; 40]
+    var l: u64 = 0
+    var i: u64 = at
+    while i < n && raw[(i) as usize] != 32 as u8 && raw[(i) as usize] != 10 as u8 && l < 32 {
+        s[(l) as usize] = raw[(i) as usize]
+        l = l + 1
+        i = i + 1
+    }
+    var known: u64 = 0
+    if saved[0 as usize] != 0 as u8 && ulib.streq((&s[0 as usize]) as u64, (&saved[0 as usize]) as u64) {
+        known = 1
+    }
+    let _a: bool = netui.list_add((&s[0 as usize]) as u64, l, rssi_of(at, n), sec_of(at, n), known)
+}
+
+fn put_out(o: u64, c: u8) -> u64 {
+    if o + 2 < BLOB_CAP {
+        out[(o) as usize] = c
+        return o + 1
+    }
+    return o
+}
+
+fn put_word(o: u64, p: u64) -> u64 {
+    var at: u64 = o
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 {
+        at = put_out(at, *((p + i) as *mut u8))
+        i = i + 1
+    }
+    return at
+}
+
+fn build_blob(w_open: u64, w_sec: u64, w_saved: u64) {
+    var o: u64 = 0
+    var r: u64 = 0
+    while r < netui.list_count() {
+        o = put_word(o, ssid_at(r))
+        o = put_out(o, 9 as u8)
+        if netui.list_known(r) {
+            o = put_word(o, w_saved)
+        } else if needs_password(r) {
+            o = put_word(o, w_sec)
+        } else {
+            o = put_word(o, w_open)
+        }
+        o = put_out(o, 10 as u8)
+        r = r + 1
+    }
+    out[(o) as usize] = 0 as u8
+}
+
+fn refresh(w_open: u64, w_sec: u64, w_saved: u64) {
+    var k_ip: [u8; 4] = "ip=\0"
+    var k_bound: [u8; 13] = "driver=bound\0"
+    var k_net: [u8; 5] = "net \0"
+    let n: u64 = read_proc()
+    let _s: bool = wlanconf.saved_ssid((&saved[0 as usize]) as u64, 33)
+    netui.list_clear()
+    link = LINK_NO_DRIVER
+    var i: u64 = 0
+    while i < n {
+        if i == 0 || raw[(i - 1) as usize] == 10 as u8 {
+            if line_has(i, n, (&k_bound[0 as usize]) as u64) {
+                if link == LINK_NO_DRIVER {
+                    link = LINK_IDLE
+                }
+            }
+            if raw[(i) as usize] == 105 as u8 && raw[(i + 1) as usize] == 112 as u8 && raw[(i + 2) as usize] == 61 as u8 {
+                link = LINK_UP
+            }
+            if raw[(i) as usize] == 110 as u8 && raw[(i + 1) as usize] == 101 as u8
+                && raw[(i + 2) as usize] == 116 as u8 && raw[(i + 3) as usize] == 32 as u8 {
+                add_ssid(i + 4, n)
+            }
+        }
+        i = i + 1
+    }
+    netui.list_sort()
+    build_blob(w_open, w_sec, w_saved)
+}
+
+fn seed_fake(w_open: u64, w_sec: u64, w_saved: u64) {
+    var a: [u8; 12] = "HomeNet-5G\0\0"
+    var b: [u8; 12] = "Cafe Guest\0\0"
+    var c: [u8; 8] = "Office\0\0"
+    var d: [u8; 14] = "Fritz-Box-72\0\0"
+    netui.list_clear()
+    let _a: bool = netui.list_add((&a[0 as usize]) as u64, 10, 0 - 48, netui.SC_WPA2, 1)
+    let _b: bool = netui.list_add((&c[0 as usize]) as u64, 6, 0 - 58, netui.SC_WPA2, 0)
+    let _c: bool = netui.list_add((&d[0 as usize]) as u64, 12, 0 - 67, netui.SC_WPA3, 0)
+    let _d: bool = netui.list_add((&b[0 as usize]) as u64, 10, 0 - 74, netui.SC_OPEN, 0)
+    netui.list_sort()
+    link = LINK_IDLE
+    build_blob(w_open, w_sec, w_saved)
+}
