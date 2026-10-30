@@ -49,6 +49,20 @@ echo "  info  faults inside nmi: $(grep -ac 'nmi: fault inside nmi' "$TMPD/ist/s
 rp=$(ringpeak ist)
 [ -n "$rp" ] && [ "$rp" -le 1 ] && ok "at most one transfer queued per hid endpoint (rp=$rp)" || bad "hid ring peak rp=${rp:-missing}, want 1"
 
+echo "== planted #GP inside every 64th nmi after a spin (nmigpplant): the exception returns without iretq =="
+boot plant "nmiperiod=$PERIOD nmiguard nmigpplant" short
+f=$(grep -ac 'nmi: fault inside nmi' "$TMPD/plant/serial.txt")
+[ "$f" -gt 0 ] && ok "planted faults taken inside nmi ($f printed)" || bad "no planted fault inside nmi"
+n=$(faults plant); c=$(grep -ac 'nmi: frame changed' "$TMPD/plant/serial.txt")
+[ "$n" -eq 0 ] && [ "$c" -eq 0 ] && ok "no exception, no nmi frame change with planted faults" || bad "$n exception lines, $c frame changes with planted faults"
+s=$(starts plant)
+[ "$s" -ge 2 ] && ok "explorer started $s of 2 times with planted faults" || bad "explorer started $s of 2 times with planted faults"
+
+echo "== counter-proof: nonmifix (planted #GP returns with iretq, nmis unblocked inside the nmi) =="
+boot plant0 "nmiperiod=$PERIOD nmiguard nmigpplant nonmifix" short
+n=$(faults plant0); c=$(grep -ac 'nmi: frame changed' "$TMPD/plant0/serial.txt")
+[ $((n + c)) -gt 0 ] && ok "iretq inside the nmi breaks the nmi frame ($n exception lines, $c frame changes)" || bad "nonmifix survived; the plant does not reach nesting"
+
 echo "== counter-proof: usbstack (silence watchdog stacks a block on a live ring, the old refill) =="
 boot stack "nmiperiod=$PERIOD usbstack" short
 rp=$(ringpeak stack)

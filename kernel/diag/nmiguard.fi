@@ -6,6 +6,8 @@ import arch.cpu
 import pwr.power
 import diag.cmdopt
 import arch.x86_64.idt
+import arch.msr
+import arch.x86_64.apic
 
 export { init, enter, leave, note_fault, nested, changed, faults, NORET_MARK }
 
@@ -18,9 +20,13 @@ const F_RSP: u64 = 160
 const IST2_IN_TSS: u64 = 44
 const NORET_MARK: u64 = 0x8000000000000000
 const PRINT_FAULTS: u64 = 4
+const PLANT_MSR: u64 = 0xDEAD0000
+const PLANT_EVERY: u64 = 64
+const PLANT_SPIN_TSC: u64 = 2000000
 
 static mut w_guard: [u8; 9] = "nmiguard\0"
 static mut w_nofix: [u8; 9] = "nonmifix\0"
+static mut w_plant: [u8; 11] = "nmigpplant\0"
 static mut s_on: [u8; 30] = "nmi: frame guard on, fix=\0\0\0\0\0"
 static mut s_changed: [u8; 26] = "nmi: frame changed rip=\0\0\0"
 static mut s_arrow: [u8; 4] = "->\0\0"
@@ -34,10 +40,12 @@ static mut s_frip: [u8; 8] = " rip=\0\0\0"
 
 static mut g_on: u64 = 0
 static mut g_fix: u64 = 1
+static mut g_plant: u64 = 0
 static mut g_nested: u64 = 0
 static mut g_changed: u64 = 0
 static mut g_faults: u64 = 0
 static mut g_depth: [u64; 8] = [0 as u64; 8]
+static mut g_seen: [u64; 8] = [0 as u64; 8]
 static mut g_rip: [u64; 32] = [0 as u64; 32]
 static mut g_rsp: [u64; 32] = [0 as u64; 32]
 static mut g_cs: [u64; 32] = [0 as u64; 32]
@@ -52,6 +60,9 @@ fn init(state: u64) {
     }
     if cmdopt.has(state, (&w_nofix[0]) as u64) {
         g_fix = 0
+    }
+    if cmdopt.has(state, (&w_plant[0]) as u64) {
+        g_plant = 1
     }
     if g_on != 0 || g_fix == 0 {
         serial.puts((&s_on[0]) as u64)
@@ -101,6 +112,9 @@ fn leave(state: u64, frame: u64, d: u64) {
     g_depth[c as usize] = d
     if d >= DEPTH {
         return
+    }
+    if g_plant != 0 {
+        plant(state, c)
     }
     let i: u64 = c * DEPTH + d
     let rip: u64 = word(frame, F_RIP)
@@ -178,4 +192,17 @@ fn note_fault(state: u64, frame: u64, vector: u64) {
         serial.hex(word(frame, F_RIP))
         serial.nl()
     }
+}
+
+fn plant(state: u64, c: u64) {
+    g_seen[c as usize] = g_seen[c as usize] + 1
+    if g_seen[c as usize] % PLANT_EVERY != 0 {
+        return
+    }
+    let t0: u64 = apic.tsc()
+    while apic.tsc() - t0 < PLANT_SPIN_TSC {
+        asm("pause")
+    }
+    var v: u64 = 0
+    let _r: bool = msr.rd(state, PLANT_MSR, (&v) as u64)
 }
