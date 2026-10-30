@@ -48,6 +48,8 @@ profile kernel
 import ulib
 import libc.io
 import actwire
+import xfxio
+import xfxpack
 
 export { u_start }
 
@@ -944,6 +946,75 @@ fn drop_pkg(file: u64) {
     ulib.sys(ulib.SYS_UNLINK, tp, 0, 0)
 }
 
+static mut P_XFX: [u8; 9] = "/bin/xfx\0"
+static mut A_GET: [u8; 4] = "get\0"
+static mut N_FIREFOX: [u8; 8] = "firefox\0"
+static mut P_XFXMAN: [u8; 31] = "/apps/firefox.osp/xfx.manifest\0"
+static mut W_DONE: [u8; 5] = "done\0"
+static mut W_FAILED: [u8; 7] = "failed\0"
+static mut W_RUNNING: [u8; 8] = "running\0"
+static mut T_XFX_LOAD: [u8; 22] = "Firefox wird geladen\0\0"
+static mut T_XFX_UNPACK: [u8; 23] = "Firefox wird entpackt\0\0"
+static mut T_XFX_FAIL: [u8; 44] = "Firefox-Teile nicht zu holen oder abgelehnt\0"
+const XFX_POLL_MS: u64 = 500
+const XFX_MAX_POLLS: u64 = 21600
+const XFX_IDLE_POLLS: u64 = 60
+const XFX_PCT_FROM: u64 = 72
+const XFX_PCT_SPAN: u64 = 27
+
+fn has_xfx(name: u64) -> bool {
+    if !actwire.str_eq(name, (&N_FIREFOX[0 as usize]) as u64) {
+        return false
+    }
+    return xfxio.exists((&P_XFXMAN[0 as usize]) as u64)
+}
+
+fn stage_xfx(verb: u64, name: u64) -> bool {
+    var s_busy: [u8; 6] = "lädt\0"
+    var polls: u64 = 0
+    var idle: u64 = 0
+    var shown: u64 = 0xFFFFFFFF
+    var ok: bool = false
+    var going: bool = true
+    pct_set(XFX_PCT_FROM)
+    if run((&P_XFX[0 as usize]) as u64, (&A_GET[0 as usize]) as u64, 0, 0, 0, 2) != 0 {
+        return false
+    }
+    while going && polls < XFX_MAX_POLLS {
+        ulib.sleep_ms(XFX_POLL_MS)
+        polls = polls + 1
+        let w: u64 = xfxpack.state_word()
+        if ulib.streq(w, (&W_DONE[0 as usize]) as u64) {
+            ok = true
+            going = false
+        } else if ulib.streq(w, (&W_FAILED[0 as usize]) as u64) {
+            going = false
+        } else if ulib.streq(w, (&W_RUNNING[0 as usize]) as u64) {
+            idle = 0
+            let q: u64 = xfxpack.state_pct()
+            pct_set(XFX_PCT_FROM + q * XFX_PCT_SPAN / 100)
+            var phase: u64 = 0
+            if q >= 50 {
+                phase = 1
+            }
+            if phase != shown {
+                shown = phase
+                if phase == 0 {
+                    stat_set((&s_busy[0 as usize]) as u64, verb, name, (&T_XFX_LOAD[0 as usize]) as u64)
+                } else {
+                    stat_set((&s_busy[0 as usize]) as u64, verb, name, (&T_XFX_UNPACK[0 as usize]) as u64)
+                }
+            }
+        } else {
+            idle = idle + 1
+            if idle >= XFX_IDLE_POLLS {
+                going = false
+            }
+        }
+    }
+    return ok
+}
+
 // install | update of ONE program from the (already verified, fresh) catalog.
 // r105: when the package names dependencies that are not installed, `opk update`
 // stops with exit 4 and `<source>/NEED` names the file it wants next; fetch it
@@ -1000,6 +1071,12 @@ fn install_one(verb: u64, name: u64) -> u64 {
     }
     if rc != 0 {
         return fail(verb, name, why)
+    }
+    if has_xfx(name) && !stage_xfx(verb, name) {
+        run((&P_OPK[0 as usize]) as u64, (&A_ENT[0 as usize]) as u64, name, 0, 0, 3)
+        run((&P_OPK[0 as usize]) as u64, (&A_KAT[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64,
+            (&P_KAT[0 as usize]) as u64, 0, 4)
+        return fail(verb, name, (&T_XFX_FAIL[0 as usize]) as u64)
     }
     run((&P_OPK[0 as usize]) as u64, (&A_KAT[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64,
         (&P_KAT[0 as usize]) as u64, 0, 4)

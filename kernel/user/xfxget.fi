@@ -1,0 +1,174 @@
+profile kernel
+
+import ulib
+import sha
+import xfxio
+import xfxparts
+import xfxpath
+import xfxstate
+
+export { fetch_all }
+
+const CHUNK: u64 = 65536
+const LIST_CAP: u64 = 98304
+const MAX_TRIES: u64 = 3
+const LOCAL_PREFIX: u64 = 15
+const HEX_LEN: u64 = 64
+static mut chunk: [u8; 65536] = [0 as u8; 65536]
+static mut list: [u8; 98304] = [0 as u8; 98304]
+static mut argv: [u64; 4] = [0 as u64; 4]
+static mut cur_local: [u8; 40] = [0 as u8; 40]
+static mut a_ota: [u8; 4] = "ota\0"
+static mut a_fetch: [u8; 6] = "fetch\0"
+
+fn file_hex(path: u64, hex: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return ulib.EOF
+    }
+    var dig: [u8; 32] = [0 as u8; 32]
+    var total: u64 = 0
+    var going: bool = true
+    sha.begin()
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&chunk[0 as usize]) as u64, CHUNK)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            sha.update((&chunk[0 as usize]) as u64, n)
+            total = total + n
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    sha.finish((&dig[0 as usize]) as u64)
+    sha.hex_out((&dig[0 as usize]) as u64, 32, hex)
+    return total
+}
+
+fn is_hex(c: u8) -> bool {
+    return (c >= 48 as u8 && c <= 57 as u8) || (c >= 97 as u8 && c <= 102 as u8)
+}
+
+fn skip_digits(p: u64) -> u64 {
+    var q: u64 = p
+    while list[q as usize] >= 48 as u8 && list[q as usize] <= 57 as u8 {
+        q = q + 1
+    }
+    return q
+}
+
+fn is_part_line(at: u64) -> bool {
+    return (at == 0 || list[(at - 1) as usize] == 10 as u8)
+        && list[at as usize] == 112 as u8 && list[(at + 1) as usize] == 97 as u8
+        && list[(at + 2) as usize] == 114 as u8 && list[(at + 3) as usize] == 116 as u8
+        && list[(at + 4) as usize] == 32 as u8
+}
+
+fn count_parts(len: u64) -> u64 {
+    var i: u64 = 0
+    var n: u64 = 0
+    while i < len {
+        if is_part_line(i) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn copy_file(src: u64, dst: u64) -> bool {
+    var b: [u8; 4096] = [0 as u8; 4096]
+    let n: u64 = xfxio.read_text(src, (&b[0 as usize]) as u64, 4096)
+    if n == ulib.EOF {
+        return true
+    }
+    return xfxio.write_text(dst, (&b[0 as usize]) as u64, ulib.O_MAKE)
+}
+
+fn fetch_part(local: u64, size: u64, want: u64) -> u64 {
+    var got: [u8; 72] = [0 as u8; 72]
+    var tries: u64 = 0
+    while tries < MAX_TRIES {
+        if ulib.size_of(local) == size && file_hex(local, (&got[0 as usize]) as u64) == size
+            && ulib.streq((&got[0 as usize]) as u64, want) {
+            return 0
+        }
+        ulib.sys(ulib.SYS_UNLINK, local, 0, 0)
+        argv[0] = (&a_ota[0 as usize]) as u64
+        argv[1] = (&a_fetch[0 as usize]) as u64
+        ulib.strcpy((&cur_local[0 as usize]) as u64, local)
+        argv[2] = (&cur_local[0 as usize]) as u64 + LOCAL_PREFIX
+        argv[3] = (&cur_local[0 as usize]) as u64
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC, xfxpath.p_ota(), (&argv[0 as usize]) as u64, 4)
+        if !ulib.bad(pid) {
+            ulib.wait_code(pid)
+        }
+        tries = tries + 1
+    }
+    if ulib.size_of(local) == size && file_hex(local, (&got[0 as usize]) as u64) == size
+        && ulib.streq((&got[0 as usize]) as u64, want) {
+        return 0
+    }
+    ulib.sys(ulib.SYS_UNLINK, local, 0, 0)
+    return 1
+}
+
+fn fetch_all() -> u64 {
+    var e_src: [u8; 31] = "xfx: signed parts list missing\0"
+    var e_man: [u8; 30] = "xfx: parts list without a tar\0"
+    var e_line: [u8; 25] = "xfx: bad parts list line\0"
+    var e_part: [u8; 34] = "xfx: part missing or sha256 wrong\0"
+    var e_wr: [u8; 31] = "xfx: cannot write the manifest\0"
+    var hex: [u8; 72] = [0 as u8; 72]
+    var path: [u8; 40] = [0 as u8; 40]
+    let len: u64 = xfxio.read_text(xfxpath.p_srcman(), (&list[0 as usize]) as u64, LIST_CAP)
+    if len == ulib.EOF || len == 0 {
+        xfxio.msg((&e_src[0 as usize]) as u64)
+        return 1
+    }
+    if !(list[0 as usize] == 116 as u8 && list[1 as usize] == 97 as u8 && list[2 as usize] == 114 as u8
+        && list[3 as usize] == 32 as u8) {
+        xfxio.msg((&e_man[0 as usize]) as u64)
+        return 1
+    }
+    if !xfxio.write_text(xfxpath.p_man(), (&list[0 as usize]) as u64, ulib.O_MAKE) {
+        xfxio.msg((&e_wr[0 as usize]) as u64)
+        return 1
+    }
+    copy_file(xfxpath.p_srcjs(), xfxpath.p_js())
+    let total: u64 = count_parts(len)
+    var i: u64 = 0
+    var k: u64 = 0
+    while i < len {
+        if is_part_line(i) {
+            var p: u64 = i + 5
+            let idx: u64 = ulib.to_num((&list[0 as usize]) as u64 + p)
+            p = skip_digits(p) + 1
+            let size: u64 = ulib.to_num((&list[0 as usize]) as u64 + p)
+            p = skip_digits(p) + 1
+            var h: u64 = 0
+            while h < HEX_LEN && is_hex(list[(p + h) as usize]) {
+                __mmio_write8(((&hex[0 as usize]) as u64 + h) as *mut u8, list[(p + h) as usize])
+                h = h + 1
+            }
+            __mmio_write8(((&hex[0 as usize]) as u64 + h) as *mut u8, 0 as u8)
+            if idx != k || h != HEX_LEN || size == 0 {
+                xfxio.msg((&e_line[0 as usize]) as u64)
+                return 1
+            }
+            xfxparts.part_name(k, (&path[0 as usize]) as u64)
+            if fetch_part((&path[0 as usize]) as u64, size, (&hex[0 as usize]) as u64) != 0 {
+                xfxio.msg((&e_part[0 as usize]) as u64)
+                return 1
+            }
+            k = k + 1
+            xfxstate.write_progress(k * 99 / total)
+        }
+        i = i + 1
+    }
+    if total == 0 {
+        xfxio.msg((&e_man[0 as usize]) as u64)
+        return 1
+    }
+    return 0
+}
