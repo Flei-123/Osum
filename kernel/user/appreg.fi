@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import symvar
+
+export { resolve_symbol, note_letter_tile, is_console, launch, id_from_path, letter_tiles, registry_hits }
+
+const NOT_FOUND: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut p_root: [u8; 19] = "/usr/share/appreg/\0"
+static mut p_symbol: [u8; 8] = "/symbol\0"
+static mut p_console: [u8; 9] = "/console\0"
+static mut p_term: [u8; 10] = "/bin/term\0"
+static mut p_apps: [u8; 7] = "/apps/\0"
+static mut p_c: [u8; 3] = "-c\0"
+static mut s_hit: [u8; 33] = "appreg: symbol from registry id=\0"
+static mut s_wrap: [u8; 25] = "appreg: console wrap id=\0"
+static mut s_letter: [u8; 24] = "appreg: letter tile id=\0"
+static mut hits: u64 = 0
+static mut tiles: u64 = 0
+
+fn registry_hits() -> u64 {
+    return hits
+}
+
+fn letter_tiles() -> u64 {
+    return tiles
+}
+
+fn entry_path(id: u64, tail: u64, out: u64) {
+    ulib.strcpy(out, (&p_root[0 as usize]) as u64)
+    ulib.strcat(out, id)
+    ulib.strcat(out, tail)
+}
+
+fn read_registry_symbol(id: u64, slot: u64) -> u64 {
+    var path: [u8; 96] = [0 as u8; 96]
+    entry_path(id, (&p_symbol[0 as usize]) as u64, (&path[0 as usize]) as u64)
+    let fd: u64 = io.open((&path[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return NOT_FOUND
+    }
+    var got: u64 = 0
+    var rounds: u64 = 0
+    while got < symvar.SLOT_BYTES && rounds < 64 {
+        let n: u64 = io.read(fd, slot + got, symvar.SLOT_BYTES - got)
+        if ulib.bad(n) || n == 0 {
+            break
+        }
+        got = got + n
+        rounds = rounds + 1
+    }
+    io.close(fd)
+    return got
+}
+
+fn resolve_symbol(id: u64, slot: u64, got: u64) -> u64 {
+    if id == 0 || __mmio_read8(id as *mut u8) == 0 as u8 {
+        return got
+    }
+    if symvar.joined_ok(slot, got) {
+        return got
+    }
+    let r: u64 = read_registry_symbol(id, slot)
+    if r == NOT_FOUND {
+        return got
+    }
+    if !symvar.joined_ok(slot, r) {
+        ulib.fill(slot, 0, symvar.SLOT_BYTES)
+        return 0
+    }
+    hits = hits + 1
+    ulib.say((&s_hit[0 as usize]) as u64)
+    ulib.say(id)
+    ulib.nl()
+    return r
+}
+
+fn note_letter_tile(id: u64) {
+    tiles = tiles + 1
+    ulib.say((&s_letter[0 as usize]) as u64)
+    ulib.say(id)
+    ulib.nl()
+}
+
+fn is_console(id: u64) -> bool {
+    var path: [u8; 96] = [0 as u8; 96]
+    entry_path(id, (&p_console[0 as usize]) as u64, (&path[0 as usize]) as u64)
+    let fd: u64 = io.open((&path[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    io.close(fd)
+    return true
+}
+
+fn id_from_path(path: u64, out: u64) -> bool {
+    var k: u64 = 0
+    while k < 6 {
+        if __mmio_read8((path + k) as *mut u8) != __mmio_read8(((&p_apps[0 as usize]) as u64 + k) as *mut u8) {
+            return false
+        }
+        k = k + 1
+    }
+    var n: u64 = 0
+    while n < 23 {
+        let c: u8 = __mmio_read8((path + 6 + n) as *mut u8)
+        if c == 0 as u8 || c == 46 as u8 || c == 47 as u8 {
+            break
+        }
+        __mmio_write8((out + n) as *mut u8, c)
+        n = n + 1
+    }
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+    return n > 0
+}
+
+fn launch(path: u64, argv: u64, argc: u64) -> u64 {
+    var id: [u8; 24] = [0 as u8; 24]
+    if !id_from_path(path, (&id[0 as usize]) as u64) || !is_console((&id[0 as usize]) as u64) {
+        return ulib.spawn_app(path, argv, argc)
+    }
+    var flag: [u8; 168] = [0 as u8; 168]
+    ulib.strcpy((&flag[0 as usize]) as u64, (&p_c[0 as usize]) as u64)
+    ulib.strncpy((&flag[0 as usize]) as u64 + 2, path, 160)
+    var av: [u64; 8] = [0 as u64; 8]
+    av[0 as usize] = (&p_term[0 as usize]) as u64
+    av[1 as usize] = (&flag[0 as usize]) as u64
+    av[2 as usize] = path
+    var n: u64 = 3
+    var i: u64 = 1
+    while i < argc && n < 7 {
+        av[n as usize] = *((argv + i * 8) as *mut u64)
+        n = n + 1
+        i = i + 1
+    }
+    ulib.say((&s_wrap[0 as usize]) as u64)
+    ulib.say((&id[0 as usize]) as u64)
+    ulib.nl()
+    return ulib.spawn_app((&p_term[0 as usize]) as u64, (&av[0 as usize]) as u64, n)
+}

@@ -38,6 +38,8 @@ TAB=tools/loader/apps.tab
 [ -d "$OUT/bin" ] || { echo "== $OUT/bin fehlt -- erst tools/loader/build.sh"; exit 1; }
 rm -rf "$OUT/stand" "$OUT/info" "$OUT/symbole" "$OUT/rezepte"
 mkdir -p "$OUT/stand" "$OUT/info" "$OUT/symbole" "$OUT/rezepte"
+rm -rf "$OUT/registry"
+python3 tools/appreg/build.py "$ROOT" "$OUT/registry" || exit 1
 
 n=0
 while IFS='|' read -r paket programm fassung titel info keys art; do
@@ -52,8 +54,6 @@ while IFS='|' read -r paket programm fassung titel info keys art; do
         continue
     fi
     [ -x "$prog" ] || { echo "== $prog fehlt -- tools/loader/build.sh baut es"; exit 1; }
-    zeich="tools/loader/symbole/$paket.txt"
-    [ -f "$zeich" ] || { echo "== $zeich fehlt"; exit 1; }
 
     # 1. DIE INFO DES BUENDELS. Das ist das Format aus
     #    kernel/user/appdir.fi und NICHT das der Paketmetadaten: der
@@ -68,9 +68,8 @@ while IFS='|' read -r paket programm fassung titel info keys art; do
 
     # 2. DAS SYMBOL. Aus der Zeichnung, mit demselben Werkzeug, das die
     #    mitgelieferten Buendel benutzen -- kein zweites Format.
-    python3 tools/k15/icon.py "$zeich" "$OUT/symbole/$paket" \
-        > "$OUT/symbole/$paket.log" 2>&1 || {
-        echo "== Symbol $paket:"; cat "$OUT/symbole/$paket.log"; exit 1; }
+    cp "$OUT/registry/usr/share/appreg/$paket/symbol" "$OUT/symbole/$paket" || {
+        echo "== no registry symbol for $paket"; exit 1; }
 
     # 3. DAS REZEPT. Drei Dateien gehen ins Archiv, und genau die drei
     #    macht `opk` auf dem Geraet zum Buendel: `start`, `INFO`,
