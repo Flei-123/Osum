@@ -12,6 +12,7 @@ import fs.fs
 import ldr.module
 import ldr.modidx
 import ldr.modtab
+import ldr.slotattach
 import serial
 
 export {
@@ -92,6 +93,7 @@ static mut n_bound: u64 = 0
 static mut n_failed: u64 = 0
 static mut held_refs: u64 = 0
 static mut loaded_now: u64 = 0
+static mut late: u64 = 0
 
 fn testmode_on() -> bool {
     return testmode != 0
@@ -687,6 +689,22 @@ fn slot_owner(slot: u64) -> u64 {
     return 0
 }
 
+fn attach_slot(state: u64, slot: u64) {
+    var s_pre: [u8; 22] = "drvstore: slot attach\0"
+    var s_ok: [u8; 4] = " ok\0"
+    var s_no: [u8; 6] = " none\0"
+    let attached: bool = slotattach.attach(state, slot)
+    serial.puts((&s_pre[0]) as u64)
+    serial.put(32 as u8)
+    serial.dec(slot)
+    if attached {
+        serial.puts((&s_ok[0]) as u64)
+    } else {
+        serial.puts((&s_no[0]) as u64)
+    }
+    serial.nl()
+}
+
 fn bind_pci(state: u64, p: u64, idx: u64) {
     var s_pre: [u8; 16] = "drvstore: bind \0"
     var s_arrow: [u8; 5] = " -> \0"
@@ -714,6 +732,9 @@ fn bind_pci(state: u64, p: u64, idx: u64) {
             rc = module.load(state, (&path_buf[0]) as u64, slot)
             if rc == module.R_OK {
                 mset(p, M_LOADK, module.last_placed(state))
+                if late == 1 && slot < modidx.MAX_SLOT {
+                    attach_slot(state, slot)
+                }
             } else {
                 res = BR_FAILED
                 mset(p, M_LOADRC, rc)
@@ -745,6 +766,9 @@ fn bind_pci(state: u64, p: u64, idx: u64) {
         serial.puts((&s_ok[0]) as u64)
         mset(p, M_BOUND, mf(p, M_BOUND) + 1)
         module.ref(state, mf(p, M_LOADK))
+        if kstate.mode_on(state, kstate.M_SLOTHOLD) && slot_of(rec_at(p)) < modidx.MAX_SLOT {
+            modtab.acquire(state, slot_of(rec_at(p)), 0)
+        }
         if kstate.mode_on(state, kstate.M_DRVHOLD) {
             module.ref(state, mf(p, M_LOADK))
         }
@@ -986,6 +1010,7 @@ fn unload_test(state: u64) {
 
 fn init(state: u64) {
     on = 1
+    late = 0
     npkg = 0
     nbind = 0
     n_bound = 0
@@ -996,4 +1021,5 @@ fn init(state: u64) {
     scan(state)
     bind_all(state)
     report(state)
+    late = 1
 }

@@ -21,7 +21,7 @@ Manifest keys:
 | `module` | file name in the same directory, `[A-Za-z0-9][A-Za-z0-9._-]{0,30}` |
 | `rights` | optional list: `pci-cfg,mmio,irq,dma,fw,usb,acpi,mouse-slot` |
 | `fw` | optional `file:sha256hex` (for `fw.request`, D3) |
-| `slot` | optional, only `mouse` (binds into `modidx.SLOT_MOUSE`) |
+| `slot` | optional, `mouse` (binds into `modidx.SLOT_MOUSE`) or `aux` |
 | `match` | 1..8 lines: `pci VVVV:DDDD[:SSSS:ssss]`, `pciclass CCSS[:PP]`, `usb VVVV:PPPP`, `acpi HID` |
 
 Selection rule (planned for the kernel): specificity (`pci` with subsystem > `pci` > `pciclass` with prog-if > `pciclass` > `usb`/`acpi` exact) first, then `rank`, then `version`; a built-in driver that already claims the device (`drvreg.claimed`) always wins.
@@ -81,7 +81,8 @@ USB/ACPI auto-bind (only PCI binds; USB/ACPI are listed), hot-plug rescan, right
 - Floor: `check_banlist` tests the compiled-in floor before looking at `/lib/omod.sperre`. A floor module is refused (`gesperrt`) with no list on disk; deleting the list file cannot unlock it.
 - Reference counts: `module.ref/unref/refs_of`; the store takes one reference per device bound to a package module. `module.entladen` refuses (returns false, counter `busy_count`) while references exist. Word `drvunload` (bit 1204) makes the boot try to unload every store module, release its references, and unload again (`drvstore: unload <name> refused refs=N` then `ok`).
 - Hot unload (r16, 26.10.2026): `drvctl unload <name>` writes `unload <name>` to `/dev/drvctl` (root only, hidden from `ls /dev`) and reads the answer back: `unload <name> ok`, `... idle` (valid package, nothing loaded), `... none` (no valid package of that name), `... busy refs=N` (some holder besides the store's own per-device references; nothing changes). On `ok` the store drops its references, `module.entladen` runs `module_exit` and returns the frames, the binds are marked released (`/proc/drivers` shows the device as `drv=none`, `bound=` falls). Exit code 0 only for `ok`. The kernel logs `drvstore: ctl unload <name> <code>` (0 ok, 1 none, 2 idle, 3 busy). Word `drvhold` (bit 1207) makes the store take one extra reference per bound device, which is the busy case in the gate. No automatic rebind at run time: the package binds again at the next boot.
-- Still open: ref-holding by slot drivers (mouse) that are loaded outside the store, run-time rebind after unload.
+- Slot callers outside the store (r16, 30.10.2026): every call from the kernel into a slot module goes through `modtab.acquire(slot, op)` / `modtab.release(slot)` (mouse stub `ps2m-aus.fi`, `auxslot.fi`); the in-flight count is atomic. `module.entladen` calls `modtab.quiesce` first: it closes the slot, waits for in-flight calls (`DRAIN_SPINS`) and, on timeout, reopens the slot and refuses (`busy`). Test word `slothold` leaves one call in flight per bound slot package, which is the busy case in the gate.
+- Run-time rebind (r16, 30.10.2026): `drvctl load/reload` work for slot packages; after a run-time load into the mouse slot the store calls `slotattach.attach` (`kernel/ldr/slotattach.fi`), which runs the module's init op with the screen size via `ps2m.rebind`. A kernel with the built-in ps2m driver answers `false` (no controller re-init). Log line `drvstore: slot attach <n> ok|none`. Not attached during the boot-time bind (graphics start does that).
 
 ## 9. Second slot class and packages inside apps (r16, 26.10.2026, gate `tools/drvstore/run.sh`)
 
@@ -89,4 +90,4 @@ USB/ACPI auto-bind (only PCI binds; USB/ACPI are listed), hot-plug rescan, right
 - Slot ownership is enforced: `module.load` allows only the slot the package was loaded for while `module_init` runs (`modtab.allow`); a bind into another slot returns 4 (`bind_rejects` counts it). The store refuses a second package for an occupied slot: `drvstore: bind <name> -> ... fail: slot busy` (code 40).
 - `/dev/drvctl` commands `slots` (`slots mouse=<pkg|none> aux=<pkg|none>`) and `aux <cmd> <arg>` (`aux C A = V`, or `aux none`); userland `drvctl slots`, `drvctl aux <cmd> <arg>`. `/proc/drivers` has a `slots mouse=... aux=...` line.
 - Packages are also scanned in `/apps/<name>.osp/lib/<pkg>/` (same files, same signature rules, same deny list). Boot lines carry ` app=<name>.osp`. A name already taken by an earlier package is rejected with code 25 (`/lib/drivers` is scanned first). Directories not ending in `.osp` are ignored. `drvctl list|match` cover both roots; `install`/`remove` only touch `/lib/drivers`; `unload`/`ban` work by name.
-- Demo modules: `module/store/auxdemo.fi` (aux slot), `module/store/auxrogue.fi` (tries to bind the mouse slot, refused).
+- Demo modules: `module/store/auxdemo.fi` (aux slot), `module/store/mousedemo.fi` (mouse slot), `module/store/auxrogue.fi` (tries to bind the mouse slot, refused).

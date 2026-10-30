@@ -34,9 +34,11 @@ profile kernel
 
 import lib.kstate
 import ldr.modidx
+import sync.atomic
 
 export {
-    init, bind, op, have, count, clear_slot, filled, bind_rejects, allow, allow_all, NO_ALLOW
+    init, bind, op, have, count, clear_slot, filled, bind_rejects, allow, allow_all, NO_ALLOW,
+    acquire, release, quiesce, inflight, DRAIN_SPINS
 }
 
 // ------------------------------------------------------- die Aufteilung
@@ -49,15 +51,23 @@ const S_FILLED: u64 = 0x00C0 // wie viele Plaetze belegt sind
 const S_BINDREJ: u64 = 0x00C8 // abgewiesene bind-Aufrufe
 const S_ALLOW: u64 = 0x00D0
 const NO_ALLOW: u64 = 0xFFFFFFFFFFFFFFFF
+const G_INFLIGHT: u64 = 0x00E0
+const G_CLOSED: u64 = 0x00F0
+const DRAIN_SPINS: u64 = 4000000
 
 fn space(state: u64, slot: u64, i: u64) -> u64 {
     return kstate.MODULE_OFF + TAB_OFF + (slot * modidx.SLOT_SPAN + i) * 8
+}
+
+fn guard_at(state: u64, base: u64, slot: u64) -> u64 {
+    return state + kstate.MODULE_OFF + base + slot * 8
 }
 
 fn init(state: u64) {
     var s: u64 = 0
     while s < modidx.MAX_SLOT {
         clear_slot(state, s)
+        atomic.store(guard_at(state, G_INFLIGHT, s), 0)
         s = s + 1
     }
     kstate.set(state, kstate.MODULE_OFF + S_FILLED, 0)
@@ -168,4 +178,50 @@ fn clear_slot(state: u64, slot: u64) {
         kstate.set(state, p, 0)
         i = i + 1
     }
+    atomic.store(guard_at(state, G_CLOSED, slot), 0)
+}
+
+fn acquire(state: u64, slot: u64, i: u64) -> u64 {
+    if slot >= modidx.MAX_SLOT || i >= modidx.SLOT_SPAN {
+        return 0
+    }
+    atomic.fetch_add(guard_at(state, G_INFLIGHT, slot), 1)
+    var a: u64 = 0
+    if atomic.load(guard_at(state, G_CLOSED, slot)) == 0 {
+        a = op(state, slot, i)
+    }
+    if a == 0 {
+        atomic.fetch_sub(guard_at(state, G_INFLIGHT, slot), 1)
+    }
+    return a
+}
+
+fn release(state: u64, slot: u64) {
+    if slot < modidx.MAX_SLOT {
+        atomic.fetch_sub(guard_at(state, G_INFLIGHT, slot), 1)
+    }
+}
+
+fn inflight(state: u64, slot: u64) -> u64 {
+    if slot >= modidx.MAX_SLOT {
+        return 0
+    }
+    return atomic.load(guard_at(state, G_INFLIGHT, slot))
+}
+
+fn quiesce(state: u64, slot: u64) -> bool {
+    if slot >= modidx.MAX_SLOT {
+        return true
+    }
+    atomic.store(guard_at(state, G_CLOSED, slot), 1)
+    var spins: u64 = 0
+    while atomic.load(guard_at(state, G_INFLIGHT, slot)) != 0 {
+        if spins >= DRAIN_SPINS {
+            atomic.store(guard_at(state, G_CLOSED, slot), 0)
+            return false
+        }
+        atomic.pause()
+        spins = spins + 1
+    }
+    return true
 }

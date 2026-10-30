@@ -405,5 +405,108 @@ hasnot "$D/apn.klar" "drvstore: pkg" "counter-proof nostore apps: nothing scanne
 hasnot "$D/apn.klar" "src=store" "counter-proof nostore apps: nothing bound"
 has "$D/apd.klar" "drvstore: pkg appdrv ok banned app=hello.osp" "apps: deny list applies to app packages"
 has "$D/apd.klar" "drv=dupdrv src=store bind=bound" "apps: next package takes over after the ban"
+
+bash tools/module/build.sh "$D/mousedemo.omod" --quelle module/store/mousedemo.fi > "$D/mm.txt" 2>&1 && ok "mousedemo module builds and is signed" || { bad "mousedemo module"; tail -3 "$D/mm.txt"; }
+./tools/build-kernel.sh "$D/kaus.img" --stufe 0 --ohne-ps2m > "$D/kaus.txt" 2>&1 && ok "kernel without built-in ps2m builds" || { bad "kernel without ps2m"; tail -3 "$D/kaus.txt"; }
+mkdir -p "$D/pkmouse"
+python3 tools/drvstore/mkpkg.py build "$D/pkmouse" --module "$D/mousedemo.omod" --name mousedemo --slot mouse --match "pci 1234:11e8" > /dev/null
+python3 tools/drvstore/mkpkg.py build "$D/pkmouse" --module "$D/mousedemo.omod" --name mousetwo --slot mouse --match "pci 1b36:0005" > /dev/null
+cat > "$D/rb1.sh" <<'EOS'
+echo ==RB1==
+drvctl slots
+drvctl unload auxdemo
+drvctl slots
+drvctl load auxsecond
+drvctl slots
+drvctl aux 1 21
+drvctl unload auxsecond
+drvctl load auxdemo
+drvctl slots
+drvctl aux 1 21
+drvctl reload auxdemo
+drvctl slots
+drvctl aux 1 21
+echo ==RB1END==
+EOS
+cat > "$D/rb2.sh" <<'EOS'
+echo ==RB2==
+drvctl slots
+drvctl aux 1 21
+drvctl unload auxdemo
+drvctl slots
+drvctl aux 1 21
+drvctl reload auxdemo
+echo ==RB2END==
+EOS
+cat > "$D/rm1.sh" <<'EOS'
+echo ==RM1==
+drvctl slots
+drvctl unload mousedemo
+drvctl slots
+echo ==RM1MID==
+drvctl load mousedemo
+drvctl slots
+drvctl unload mousedemo
+drvctl load mousetwo
+drvctl slots
+echo ==RM1END==
+EOS
+PKOUT=""
+addpk /lib/drivers "$D/pkaux" auxdemo
+addpk /lib/drivers "$D/pkaux" auxsecond
+mkimg rb1 $PKOUT "/t/rb1.sh=$D/rb1.sh" "/t/rb2.sh=$D/rb2.sh"
+cp "$D/d-rb1.img" "$D/d-rb2.img"
+PKOUT=""
+addpk /lib/drivers "$D/pkmouse" mousedemo
+addpk /lib/drivers "$D/pkmouse" mousetwo
+mkimg rm1 $PKOUT "/t/rm1.sh=$D/rm1.sh"
+cp "$D/d-rm1.img" "$D/d-rm2.img"
+SCRIPT=/t/rb1.sh runvm rb1 "" -device edu -device pci-testdev &
+SCRIPT=/t/rb2.sh runvm rb2 slothold -device edu -device pci-testdev &
+wait
+KERN0=$D/k0.img
+cp "$KERN0" "$D/k0.keep"
+cp "$D/kaus.img" "$D/k0.img"
+SCRIPT=/t/rm1.sh runvm rm1 "" -device edu -device pci-testdev &
+wait
+cp "$D/k0.keep" "$D/k0.img"
+SCRIPT=/t/rm1.sh runvm rm2 "" -device edu -device pci-testdev &
+wait
+awk '/==RB1==/{f=1} f' "$D/rb1.klar" > "$D/rb1.run"
+has "$D/rb1.run" "unload auxdemo ok" "rebind aux: owner unloads"
+has "$D/rb1.run" "load auxsecond ok bound=1" "rebind aux: refused package binds into the freed slot"
+has "$D/rb1.run" "slots mouse=none aux=auxsecond" "rebind aux: slot owner switched at run time"
+[ "$(grep -ac 'aux 1 21 = 42' "$D/rb1.run")" -ge 3 ] && ok "rebind aux: control calls reach every new owner" || bad "rebind aux: control call count $(grep -ac 'aux 1 21 = 42' "$D/rb1.run")"
+has "$D/rb1.run" "load auxdemo ok bound=1" "rebind aux: first package binds again after the second unloaded"
+has "$D/rb1.run" "slots mouse=none aux=auxdemo" "rebind aux: slot owner back"
+has "$D/rb1.run" "unload auxdemo ok" "rebind aux: reload unloads first"
+[ "$(grep -ac 'auxdemo: ready' "$D/rb1.run")" -ge 2 ] && ok "rebind aux: module init ran again after reload" || bad "rebind aux: init count $(grep -ac 'auxdemo: ready' "$D/rb1.run")"
+hasnot "$D/rb1.klar" "EXCEPTION" "rebind aux: no kernel exception"
+awk '/==RB2==/{f=1} f' "$D/rb2.klar" > "$D/rb2.run"
+has "$D/rb2.run" "unload auxdemo busy" "in-flight call: unload refused while a slot call is still running"
+has "$D/rb2.run" "drvstore: ctl unload auxdemo 3" "in-flight call: kernel logged the refusal"
+hasnot "$D/rb2.run" "unload auxdemo ok" "counter-proof in-flight call: not unloaded"
+awk '/unload auxdemo busy/{f=1} f' "$D/rb2.run" > "$D/rb2.after"
+has "$D/rb2.after" "slots mouse=none aux=auxdemo" "in-flight call: slot owner unchanged after the refusal"
+has "$D/rb2.after" "aux 1 21 = 42" "in-flight call: module still answers after the refused unload"
+hasnot "$D/rb2.run" "reload auxdemo ok" "counter-proof in-flight call: reload refused too"
+hasnot "$D/rb2.klar" "EXCEPTION" "in-flight call: no kernel exception"
+awk '/==RM1==/{f=1} f' "$D/rm1.klar" > "$D/rm1.run"
+awk '/==RM1==/{exit} {print}' "$D/rm1.klar" > "$D/rm1.boot"
+hasnot "$D/rm1.boot" "slot attach" "mouse slot: no attach during the boot-time bind"
+hasnot "$D/rm1.boot" "mousedemo: init" "mouse slot: module init op not called at boot (graphics start does that)"
+has "$D/rm1.run" "slots mouse=mousedemo aux=none" "mouse slot: package owns the mouse slot after boot"
+has "$D/rm1.run" "unload mousedemo ok" "mouse slot: unload works"
+awk '/==RM1MID==/{f=1} f' "$D/rm1.run" > "$D/rm1.late"
+has "$D/rm1.late" "load mousedemo ok bound=1" "mouse slot: run-time load binds"
+has "$D/rm1.late" "drvstore: slot attach 0 ok" "mouse slot: attach hook ran after the run-time load"
+has "$D/rm1.late" "mousedemo: init 1024 768" "mouse slot: module init op called with the screen size"
+has "$D/rm1.late" "slots mouse=mousetwo aux=none" "mouse slot: second package owns the slot after the first unloaded"
+[ "$(grep -ac 'mousedemo: init' "$D/rm1.late")" -eq "$(grep -ac 'slot attach 0 ok' "$D/rm1.late")" ] && ok "mouse slot: init op called once per attach" || bad "mouse slot: init count $(grep -ac 'mousedemo: init' "$D/rm1.late") vs attach count $(grep -ac 'slot attach 0 ok' "$D/rm1.late")"
+[ "$(grep -ac 'slot attach 0 ok' "$D/rm1.late")" -ge 2 ] && ok "mouse slot: second owner is attached too after the first unloaded" || bad "mouse slot: attach count $(grep -ac 'slot attach 0 ok' "$D/rm1.late")"
+hasnot "$D/rm1.klar" "EXCEPTION" "mouse slot: no kernel exception"
+has "$D/rm2.klar" "load mousedemo ok bound=1" "counter-proof mouse slot: built-in ps2m kernel loads the package too"
+hasnot "$D/rm2.klar" "slot attach 0 ok" "counter-proof mouse slot: built-in ps2m kernel does not re-init the controller"
+hasnot "$D/rm2.klar" "mousedemo: init" "counter-proof mouse slot: module init op not called on a built-in ps2m kernel"
 echo "DRVSTORE: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
