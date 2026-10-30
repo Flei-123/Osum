@@ -1,6 +1,6 @@
-# fUi grid / list geometry (`lib/fui/grid.fi`)
+# fUi grid / list geometry (`lib/fui/pagegrid.fi`)
 
-`import fui.grid` -- integer arithmetic for a tile grid or a list, no widgets, no heap.
+`import fui.pagegrid` -- integer arithmetic for a tile grid or a list, no widgets, no heap.
 
 | call | meaning |
 |---|---|

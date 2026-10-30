@@ -37,21 +37,19 @@
 # ihr `buf_push` hatte KEINE zweite Pruefung und schrieb nach einem
 # gescheiterten Wachsen bedingungslos. Das ist der stille Ueberlauf, den
 # diese Runde gesucht hat.
-diff --git a/rt/rt.fi b/rt/rt.fi
-index 3bf4a226..30714b89 100644
 --- a/rt/rt.fi
 +++ b/rt/rt.fi
-@@ -18,7 +18,8 @@
+@@ -19,7 +19,8 @@
  export {
      Buf,
      heap_alloc, heap_free, mem_copy, mem_set, mem_eq,
--    buf_new, buf_free, buf_clear, buf_reserve, buf_push, buf_push_bytes,
+-    buf_new, buf_free, buf_clear, buf_reserve, buf_push, buf_push_bytes, dec_small,
 +    buf_new, buf_free, buf_clear, buf_reserve, buf_reserve_or_die,
-+    buf_grow, buf_push, buf_push_bytes,
-     buf_len, buf_at, buf_ptr, buf_data, buf_set_len,
++    buf_grow, buf_push, buf_push_bytes, dec_small,
+     buf_len, buf_at, buf_ptr, buf_data, buf_str, buf_set_len,
      buf_push_dec_u64, buf_push_dec_i64, buf_push_hex_u64,
      write_everything, read_file, read_stdin, finish,
-@@ -215,7 +216,25 @@ fn buf_at(b: *mut Buf, i: usize) -> u8 {
+@@ -452,7 +453,25 @@
  }
  
  // Growing doubles the size -- that keeps the number of copies logarithmic.
@@ -78,7 +76,7 @@ index 3bf4a226..30714b89 100644
      var cap: usize = (*b).cap
      if cap == 0 {
          cap = 64
-@@ -225,7 +244,7 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+@@ -462,7 +481,7 @@
      }
      let new: u64 = heap_alloc(cap)
      if new == 0 {
@@ -87,7 +85,7 @@ index 3bf4a226..30714b89 100644
      }
      if (*b).len > 0 {
          mem_copy(new, (*b).ptr, (*b).len)
-@@ -233,36 +252,61 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+@@ -470,13 +489,30 @@
      heap_free((*b).ptr, (*b).cap)
      (*b).ptr = new
      (*b).cap = cap
@@ -120,55 +118,19 @@ index 3bf4a226..30714b89 100644
  }
  
  // THE FAST PATH ON TOP: only the comparison lives here, the growing is a
- // function of its own. That keeps `buf_push` small enough to inline -- measured
- // during round 6, the capacity checks otherwise made up 33 % of all
- // instructions of the tokenizer.
--fn buf_push(b: *mut Buf, v: u8) {
-+// ROUND HAERTUNG-2: `bool` here too -- not because these two overran
-+// (they demonstrably do not, see `buf_grow`), but so that a caller who
-+// WANTS to know does not have to guess. The second capacity check
-+// stays: it is the reason these two paths are safe, and it is not there
-+// by accident.
-+fn buf_push(b: *mut Buf, v: u8) -> bool {
-     if (*b).len >= (*b).cap {
-         buf_grow(b, (*b).len + 1)
-     }
-     if (*b).len < (*b).cap {
-         st8((*b).ptr, (*b).len, v)
-         (*b).len = (*b).len + 1
-+        return true
-     }
-+    return false
- }
- 
--fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) {
-+fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) -> bool {
-     buf_reserve(b, (*b).len + n)
-     if (*b).len + n > (*b).cap {
--        return
-+        return false
-     }
-     mem_copy((*b).ptr + (*b).len as u64, p, n)
-     (*b).len = (*b).len + n
-+    return true
- }
- 
- // ---------------------------------------------------------- Number -> text
-diff --git a/std/rt.fi b/std/rt.fi
-index 3bf4a226..30714b89 100644
 --- a/std/rt.fi
 +++ b/std/rt.fi
-@@ -18,7 +18,8 @@
+@@ -19,7 +19,8 @@
  export {
      Buf,
      heap_alloc, heap_free, mem_copy, mem_set, mem_eq,
--    buf_new, buf_free, buf_clear, buf_reserve, buf_push, buf_push_bytes,
+-    buf_new, buf_free, buf_clear, buf_reserve, buf_push, buf_push_bytes, dec_small,
 +    buf_new, buf_free, buf_clear, buf_reserve, buf_reserve_or_die,
-+    buf_grow, buf_push, buf_push_bytes,
-     buf_len, buf_at, buf_ptr, buf_data, buf_set_len,
++    buf_grow, buf_push, buf_push_bytes, dec_small,
+     buf_len, buf_at, buf_ptr, buf_data, buf_str, buf_set_len,
      buf_push_dec_u64, buf_push_dec_i64, buf_push_hex_u64,
      write_everything, read_file, read_stdin, finish,
-@@ -215,7 +216,25 @@ fn buf_at(b: *mut Buf, i: usize) -> u8 {
+@@ -452,7 +453,25 @@
  }
  
  // Growing doubles the size -- that keeps the number of copies logarithmic.
@@ -195,7 +157,7 @@ index 3bf4a226..30714b89 100644
      var cap: usize = (*b).cap
      if cap == 0 {
          cap = 64
-@@ -225,7 +244,7 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+@@ -462,7 +481,7 @@
      }
      let new: u64 = heap_alloc(cap)
      if new == 0 {
@@ -204,7 +166,7 @@ index 3bf4a226..30714b89 100644
      }
      if (*b).len > 0 {
          mem_copy(new, (*b).ptr, (*b).len)
-@@ -233,36 +252,61 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+@@ -470,13 +489,30 @@
      heap_free((*b).ptr, (*b).cap)
      (*b).ptr = new
      (*b).cap = cap
@@ -237,55 +199,19 @@ index 3bf4a226..30714b89 100644
  }
  
  // THE FAST PATH ON TOP: only the comparison lives here, the growing is a
- // function of its own. That keeps `buf_push` small enough to inline -- measured
- // during round 6, the capacity checks otherwise made up 33 % of all
- // instructions of the tokenizer.
--fn buf_push(b: *mut Buf, v: u8) {
-+// ROUND HAERTUNG-2: `bool` here too -- not because these two overran
-+// (they demonstrably do not, see `buf_grow`), but so that a caller who
-+// WANTS to know does not have to guess. The second capacity check
-+// stays: it is the reason these two paths are safe, and it is not there
-+// by accident.
-+fn buf_push(b: *mut Buf, v: u8) -> bool {
-     if (*b).len >= (*b).cap {
-         buf_grow(b, (*b).len + 1)
-     }
-     if (*b).len < (*b).cap {
-         st8((*b).ptr, (*b).len, v)
-         (*b).len = (*b).len + 1
-+        return true
-     }
-+    return false
- }
- 
--fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) {
-+fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) -> bool {
-     buf_reserve(b, (*b).len + n)
-     if (*b).len + n > (*b).cap {
--        return
-+        return false
-     }
-     mem_copy((*b).ptr + (*b).len as u64, p, n)
-     (*b).len = (*b).len + n
-+    return true
- }
- 
- // ---------------------------------------------------------- Number -> text
-diff --git a/firnc1/rt.fi b/firnc1/rt.fi
-index 3bf4a226..30714b89 100644
 --- a/firnc1/rt.fi
 +++ b/firnc1/rt.fi
-@@ -18,7 +18,8 @@
+@@ -19,7 +19,8 @@
  export {
      Buf,
      heap_alloc, heap_free, mem_copy, mem_set, mem_eq,
--    buf_new, buf_free, buf_clear, buf_reserve, buf_push, buf_push_bytes,
+-    buf_new, buf_free, buf_clear, buf_reserve, buf_push, buf_push_bytes, dec_small,
 +    buf_new, buf_free, buf_clear, buf_reserve, buf_reserve_or_die,
-+    buf_grow, buf_push, buf_push_bytes,
-     buf_len, buf_at, buf_ptr, buf_data, buf_set_len,
++    buf_grow, buf_push, buf_push_bytes, dec_small,
+     buf_len, buf_at, buf_ptr, buf_data, buf_str, buf_set_len,
      buf_push_dec_u64, buf_push_dec_i64, buf_push_hex_u64,
      write_everything, read_file, read_stdin, finish,
-@@ -215,7 +216,25 @@ fn buf_at(b: *mut Buf, i: usize) -> u8 {
+@@ -452,7 +453,25 @@
  }
  
  // Growing doubles the size -- that keeps the number of copies logarithmic.
@@ -312,7 +238,7 @@ index 3bf4a226..30714b89 100644
      var cap: usize = (*b).cap
      if cap == 0 {
          cap = 64
-@@ -225,7 +244,7 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+@@ -462,7 +481,7 @@
      }
      let new: u64 = heap_alloc(cap)
      if new == 0 {
@@ -321,7 +247,7 @@ index 3bf4a226..30714b89 100644
      }
      if (*b).len > 0 {
          mem_copy(new, (*b).ptr, (*b).len)
-@@ -233,36 +252,61 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+@@ -470,13 +489,30 @@
      heap_free((*b).ptr, (*b).cap)
      (*b).ptr = new
      (*b).cap = cap
@@ -354,45 +280,9 @@ index 3bf4a226..30714b89 100644
  }
  
  // THE FAST PATH ON TOP: only the comparison lives here, the growing is a
- // function of its own. That keeps `buf_push` small enough to inline -- measured
- // during round 6, the capacity checks otherwise made up 33 % of all
- // instructions of the tokenizer.
--fn buf_push(b: *mut Buf, v: u8) {
-+// ROUND HAERTUNG-2: `bool` here too -- not because these two overran
-+// (they demonstrably do not, see `buf_grow`), but so that a caller who
-+// WANTS to know does not have to guess. The second capacity check
-+// stays: it is the reason these two paths are safe, and it is not there
-+// by accident.
-+fn buf_push(b: *mut Buf, v: u8) -> bool {
-     if (*b).len >= (*b).cap {
-         buf_grow(b, (*b).len + 1)
-     }
-     if (*b).len < (*b).cap {
-         st8((*b).ptr, (*b).len, v)
-         (*b).len = (*b).len + 1
-+        return true
-     }
-+    return false
- }
- 
--fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) {
-+fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) -> bool {
-     buf_reserve(b, (*b).len + n)
-     if (*b).len + n > (*b).cap {
--        return
-+        return false
-     }
-     mem_copy((*b).ptr + (*b).len as u64, p, n)
-     (*b).len = (*b).len + n
-+    return true
- }
- 
- // ---------------------------------------------------------- Number -> text
-diff --git a/html/mem.fi b/html/mem.fi
-index b905dec7..ddaceb4c 100644
 --- a/html/mem.fi
 +++ b/html/mem.fi
-@@ -147,15 +147,18 @@ fn buf_ptr(b: *mut Buf) -> *mut u8 {
+@@ -148,15 +148,18 @@
  }
  
  #[no_gc]
@@ -415,7 +305,7 @@ index b905dec7..ddaceb4c 100644
      var cap: usize = (*b).cap
      if cap == 0 {
          cap = 64
-@@ -164,21 +167,36 @@ fn buf_grow(b: *mut Buf, need: usize) {
+@@ -165,21 +168,36 @@
          cap = cap * 2
      }
      let p: *mut u8 = heap_alloc(cap)
@@ -453,7 +343,7 @@ index b905dec7..ddaceb4c 100644
  }
  
  #[no_gc]
-@@ -225,7 +243,13 @@ fn read_all_stdin(b: *mut Buf) {
+@@ -226,7 +244,13 @@
      buf_clear(b)
      var next: bool = true
      while next {
@@ -468,11 +358,9 @@ index b905dec7..ddaceb4c 100644
          let r: i64 = syscall(SYS_READ, 0, ((*b).ptr as usize + (*b).len) as i64, 65536, 0, 0, 0)
          if r <= 0 {
              next = false
-diff --git a/std/deflate.fi b/std/deflate.fi
-index f1575a40..d2a2147c 100644
 --- a/std/deflate.fi
 +++ b/std/deflate.fi
-@@ -1227,7 +1227,13 @@ fn emit_stored(d: *mut Deflater, from: usize, to: usize, last: bool) {
+@@ -1264,7 +1264,13 @@
          put_bits(d, 0 as u32, 2)
          flush_bits(d)
          let b: *mut rt.Buf = d_out(d)
