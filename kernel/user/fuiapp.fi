@@ -94,18 +94,22 @@ static mut s_ring: [u64; 4] = [0 as u64; 4]
 // (s_px) and `frame_end` copies only the pixels that differ into the shared
 // buffer (s_shpx): the server never sees a half-painted picture, and a
 // picture that changes nothing (caret blink aside) writes nothing.
-static mut s_atomic_want: u64 = 0
+static mut s_atomic_want: u64 = 1
 static mut s_shpx: u64 = 0
 // X2: set by a private-picture resize; the next frame_end names the whole window
 static mut s_force_full: u64 = 0
 
-// Ask for the private picture; call before `open_plain` / `open_window`.
+// Every window gets the private picture; `set_atomic(false)` before an open opts out.
 // `/etc/paintdirect` (counter-proof) switches it off.
 fn set_atomic(on: bool) {
     s_atomic_want = 0
-    if on && !wlib.paintdirect() {
+    if on {
         s_atomic_want = 1
     }
+}
+
+fn atomic_on() -> bool {
+    return s_atomic_want != 0 && !wlib.paintdirect()
 }
 
 // n octets, 8 at a time (n is a multiple of 4: pixels).
@@ -187,6 +191,8 @@ static mut m_nobuf: [u8; 30] = "fuiapp: no pixels for canvas\0\0"
 static mut m_nobind: [u8; 38] = "fuiapp: fUi refused the canvas (bind)\0"
 static mut m_ok: [u8; 20] = "fuiapp: canvas w=\0\0\0"
 static mut m_h: [u8; 4] = " h=\0"
+static mut m_atomic: [u8; 10] = " atomic=\0\0"
+static mut m_plain: [u8; 8] = " plain=\0"
 
 fn win() -> u64 { return s_win }
 
@@ -273,7 +279,7 @@ fn attach(w: u64, bw: u64, bh: u64) -> bool {
     // the very same frames and nothing is copied per frame. Otherwise the pixels are the program's own, as before.
     var px: u64 = wlib.win_shared_ptr(w)
     s_shpx = 0
-    if px != 0 && s_atomic_want != 0 {
+    if px != 0 && atomic_on() {
         let pv: u64 = rt.heap_alloc(n as usize) as u64
         if pv != 0 {
             // fUi paints into the private picture; the shared buffer is only written by frame_end
@@ -312,8 +318,19 @@ fn attach(w: u64, bw: u64, bh: u64) -> bool {
     ulib.sayn(bw)
     ulib.say((&m_h[0 as usize]) as u64)
     ulib.sayn(bh)
+    ulib.say((&m_atomic[0 as usize]) as u64)
+    ulib.sayn(flag(s_shpx != 0))
+    ulib.say((&m_plain[0 as usize]) as u64)
+    ulib.sayn(s_plain)
     ulib.nl()
     return true
+}
+
+fn flag(v: bool) -> u64 {
+    if v {
+        return 1
+    }
+    return 0
 }
 
 fn resize_detached(nw: u64, nh: u64, n: u64, old: u64, oldn: u64) -> bool {
