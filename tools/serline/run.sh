@@ -119,5 +119,23 @@ CT=$((TORN_MULTI+TORN_OPEN+TORN_ONE))
     && ok "without the line lock lines are torn ($CT torn)" \
     || bad "without the line lock nothing tore -- the test measures nothing"
 
+echo "== wire overlap: widened race between UART ready check and octet write =="
+overlap() {
+    OVL=0
+    for n in $(seq 1 "$BOOTS"); do
+        run "$1$n" "smpfrueh $2"
+        local c
+        c=$(grep -ac 'serial: overlap' "$TMPD/$1$n.txt")
+        echo "        boot $n: overlap markers=$c"
+        OVL=$((OVL + c))
+    done
+}
+overlap wir "serwiden"
+[ "$OVL" -eq 0 ] && ok "wire lock: writers never overlap in the UART" || bad "wire lock: $OVL overlaps"
+overlap wcn "serwiden nowirelock"
+[ "$OVL" -gt 0 ] \
+    && ok "without the wire lock writers overlap ($OVL markers)" \
+    || bad "without the wire lock nothing overlapped -- the gate measures nothing"
+
 echo; echo "SERLINE: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

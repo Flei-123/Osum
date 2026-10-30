@@ -31,7 +31,7 @@ export {
     // RUNDE VIELKERN 3: eine Zeile bleibt eine Zeile.
     line_at, line_clear, line_lost, line_stolen,
     // W-X3: deferred (ring buffered) output for periodic reports
-    defer_on, defer_off, pump, ring_used, ring_flushed, ring_say
+    defer_on, defer_off, pump, ring_used, ring_flushed, ring_say, wire_overlap_count
 }
 
 // ==================================================== RUNDE VIELKERN 3
@@ -99,6 +99,9 @@ static mut entry_stolen: [u64; 1] = [0 as u64; 1] // takeovers from a stale owne
 // timed out), 1 = I took it, 2 = I was the owner through an open line and
 // now hold it explicitly. Every non-zero value must go to `line_clear`.
 fn line_at(me: u64) -> u64 {
+    if kstate.mode_on(arch.kdata_base(), kstate.M_SERWIDEN) {
+        return 0
+    }
     let a: u64 = (&zeile_wer[0]) as u64
     if __mmio_read64(a as *mut u64) == me + 1 {
         if __mmio_read64((&entry_auto[0]) as u64 as *mut u64) != 0 as u64 {
@@ -619,33 +622,69 @@ fn put_raw(c: u8) {
         if ring_push(c) {
             return
         }
+    }
+    var locked: bool = false
+    if !kstate.mode_on(arch.kdata_base(), kstate.M_NOWIRELOCK) {
+        locked = ring_take(RING_LOCK_SPINS)
+    }
+    if locked {
+        if ring_tail[0] != ring_head[0] {
+            ring_flushes = ring_flushes + 1
+            ring_drain_blocking()
+        }
     } else {
         ring_flush_before()
     }
+    wire_out(c)
+    if locked {
+        ring_give()
+    }
+}
+
+static mut wire_busy: [u64; 1] = [0 as u64; 1]
+static mut wire_overlaps: [u64; 1] = [0 as u64; 1]
+
+fn wire_overlap_count() -> u64 {
+    return wire_overlaps[0]
+}
+
+fn wire_out(c: u8) {
     var n: u64 = 0
     while !ready() && n < PUT_GRENZE {
         n = n + 1
     }
     if n >= PUT_GRENZE {
-        // Die Leitung nimmt nichts. Einmal ist ein Zufall; sechzehnmal
-        // heisst, dass dort niemand zuhoert -- dann wird nicht bei
-        // JEDEM weiteren Oktett hunderttausendmal gewartet.
         ser_verw = ser_verw + 1
         if ser_verw >= VERW_GRENZE {
             ser_aus = 1
         }
         return
     }
+    let st: u64 = arch.kdata_base()
+    let a: u64 = (&wire_busy[0]) as u64
+    let mine: bool = __atomic_swap(a as *mut u64, 0 as u64, 1 as u64) == 0 as u64
+    if !mine {
+        wire_overlaps[0] = wire_overlaps[0] + 1
+        if wire_overlaps[0] == 1 {
+            var m: [u8; 17] = "serial: overlap\n\0"
+            var k: u64 = 0
+            while m[k as usize] != 0 as u8 {
+                out8(port(), m[k as usize])
+                k = k + 1
+            }
+        }
+    }
+    if kstate.mode_on(st, kstate.M_SERWIDEN) {
+        var w: u64 = 0
+        while w < 3000 {
+            arch.pause()
+            w = w + 1
+        }
+    }
     out8(port(), c)
-    // Der Bildschirm. RUNDE K11 HAT HIER EIN MODUL DAZWISCHENGESETZT:
-    // `ansi.echo` ist `fb.echo` plus dem Fluchtfolgenautomaten (VT100),
-    // ohne den ein bildschirmorientiertes Programm auf dem Schirm nur
-    // seine Steuerzeichen zeigt. Es holt sich den Datenbereich ueber das
-    // Bindersymbol `kdata` selbst und kehrt genauso sofort zurueck,
-    // solange niemand `gfx` auf die Kommandozeile geschrieben hat -- ein
-    // `lea` und ein Speicherzugriff je Oktett, auf einem Weg, der ohnehin
-    // auf ein 38400-Baud-Tor wartet.
-    // RUNDE KABEL: der Aufruf steht jetzt GANZ OBEN in dieser Funktion.
+    if mine {
+        arch.atomic_store(a, 0)
+    }
 }
 
 fn nl() {
