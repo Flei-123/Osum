@@ -132,6 +132,8 @@ bios_prepare() {
     mcopy -i "$dir/stick.img@@$OSB_OFF" ::limine.conf "$dir/limine.conf" || return 1
     sed -i 's/^timeout: .*/timeout: 0/' "$dir/limine.conf"
     python3 tools/bootloader/mkcfg.py "$dir/limine.conf" "$dir/osboot.cfg" --timeout 0 > /dev/null || return 1
+    python3 tools/bootloader/mklogo.py assets/marke/start-quelle.png "$dir/osboot.logo" > /dev/null || return 1
+    mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$dir/osboot.logo" ::osboot.logo || return 1
 }
 
 bios_bus() {

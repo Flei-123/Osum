@@ -75,5 +75,44 @@ fi
 bios_finish "$D" ckey
 rm -f "$D/ckey.base"
 
+echo "== splash: logo pixels and spinner in the VBE framebuffer =="
+python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/hold.cfg" --timeout 0 --keywait 14000 --logo /osboot.logo > /dev/null
+bios_with_cfg "$D" hold "$D/hold.cfg"
+bios_start "$D" hold "$D/hold.base" q35 ide
+if osb_wait_text "$D" hold "osboot (bios)" 60; then
+    sleep 4
+    osb_shot "$D" hold shotA
+    sleep 1
+    osb_shot "$D" hold shotB
+    python3 -I tools/bootloader/shotcheck.py logo "$D/shotA.ppm" "$D/osboot.logo" && ok "splash: logo pixels centered and exact" || bad "splash: logo pixels do not match"
+    python3 -I tools/bootloader/shotcheck.py spinner "$D/shotA.ppm" "$D/osboot.logo" "$D/shotB.ppm" && ok "splash: spinner drawn and animated" || bad "splash: spinner missing or frozen"
+    grep -aq "boot menu" "$D/hold.txt" && bad "splash: menu visible without key" || ok "splash: no menu without key"
+    osb_hmp "$D" hold "sendkey esc" 0.5
+    osb_wait_text "$D" hold "boot menu" 20 && ok "splash: Esc opens the menu" || bad "splash: Esc did not open the menu"
+    sleep 1
+    osb_shot "$D" hold shotM
+    python3 -I tools/bootloader/shotcheck.py nologo "$D/shotM.ppm" "$D/osboot.logo" && ok "splash: logo replaced by the text menu" || bad "splash: logo still on screen after Esc"
+    osb_hmp "$D" hold "sendkey ret" 0.5
+    osb_wait_text "$D" hold "$LOGIN" 120 && ok "splash: Enter boots to login" || bad "splash: login not reached after Enter"
+else
+    bad "splash: osboot did not start"
+fi
+bios_finish "$D" hold
+rm -f "$D/hold.base"
+
+echo "== counter-proof: no logo file =="
+bios_with_cfg "$D" nologo "$D/hold.cfg"
+mdel -i "$D/nologo.base@@$OSB_OFF" ::osboot.logo
+bios_start "$D" nologo "$D/nologo.base" q35 ide
+if osb_wait_text "$D" nologo "osboot (bios)" 60; then
+    sleep 4
+    osb_shot "$D" nologo shotN
+    python3 -I tools/bootloader/shotcheck.py nologo "$D/shotN.ppm" "$D/osboot.logo" && ok "no logo file: no logo pixels drawn" || bad "no logo file: logo pixels present"
+else
+    bad "no logo file: osboot did not start"
+fi
+bios_finish "$D" nologo
+rm -f "$D/nologo.base"
+
 echo "== $pass ok, $fail fail =="
 [ "$fail" -eq 0 ]
