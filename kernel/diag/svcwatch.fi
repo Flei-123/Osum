@@ -1,0 +1,138 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import sched.sched
+import serial
+import diag.cmdopt
+
+export { PR_WATCH, watch, note, silent, say, watched, silent_pid }
+
+const PR_WATCH: u64 = 0x4F535701
+const SLOTS: u64 = 256
+const TICK_HZ: u64 = 100
+const MIN_S: u64 = 5
+const MAX_S: u64 = 3600
+
+static mut v_win: [u64; 256] = [0 as u64; 256]
+static mut v_pid: [u64; 256] = [0 as u64; 256]
+static mut v_last: [u64; 256] = [0 as u64; 256]
+static mut v_any: u64 = 0
+static mut v_quiet_pid: u64 = 0
+static mut k_off: [u8; 11] = "nosvcwatch\0"
+static mut t_on: [u8; 22] = "svcwatch: watch pid \0\0"
+static mut t_win: [u8; 10] = " window \0\0"
+static mut t_off: [u8; 34] = "svcwatch: off (nosvcwatch), pid \0\0"
+static mut t_hdr: [u8; 16] = "svcwatch: pid \0\0"
+static mut t_sil: [u8; 10] = " silent \0\0"
+static mut t_s: [u8; 26] = " s, not feeding, window \0\0"
+
+fn watch(state: u64, slot: u64, secs: u64) -> u64 {
+    if slot >= SLOTS {
+        return 0
+    }
+    let pid: u64 = sched.tget(state, slot, sched.T_PID)
+    if cmdopt.has(state, (&k_off[0]) as u64) {
+        serial.puts((&t_off[0]) as u64)
+        serial.dec(pid)
+        serial.nl()
+        return 0
+    }
+    if secs == 0 {
+        v_win[slot as usize] = 0
+        return 0
+    }
+    var w: u64 = secs
+    if w < MIN_S {
+        w = MIN_S
+    }
+    if w > MAX_S {
+        w = MAX_S
+    }
+    v_pid[slot as usize] = pid
+    v_last[slot as usize] = kstate.get(state, kstate.TICKS)
+    v_win[slot as usize] = w
+    v_any = 1
+    serial.puts((&t_on[0]) as u64)
+    serial.dec(pid)
+    serial.puts((&t_win[0]) as u64)
+    serial.dec(w)
+    serial.nl()
+    return 0
+}
+
+fn note(state: u64, slot: u64) {
+    if v_any == 0 || slot >= SLOTS {
+        return
+    }
+    if v_win[slot as usize] != 0 {
+        v_last[slot as usize] = kstate.get(state, kstate.TICKS)
+    }
+}
+
+fn gone(state: u64, i: u64) -> bool {
+    let st: u64 = sched.tget(state, i, sched.T_STATE)
+    if st == sched.S_FREE || st == sched.S_ZOMBIE {
+        return true
+    }
+    return sched.tget(state, i, sched.T_PID) != v_pid[i as usize]
+}
+
+fn silent(state: u64, now: u64) -> u64 {
+    if v_any == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    var left: u64 = 0
+    while i < SLOTS {
+        let w: u64 = v_win[i as usize]
+        if w != 0 {
+            if gone(state, i) {
+                v_win[i as usize] = 0
+            } else {
+                left = left + 1
+                let t: u64 = v_last[i as usize]
+                if now > t && now - t > w * TICK_HZ {
+                    v_quiet_pid = v_pid[i as usize]
+                    return i + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    if left == 0 {
+        v_any = 0
+    }
+    v_quiet_pid = 0
+    return 0
+}
+
+fn say(state: u64, which: u64, now: u64) {
+    if which == 0 || which > SLOTS {
+        return
+    }
+    let i: u64 = which - 1
+    serial.puts((&t_hdr[0]) as u64)
+    serial.dec(v_pid[i as usize])
+    serial.puts((&t_sil[0]) as u64)
+    serial.dec((now - v_last[i as usize]) / TICK_HZ)
+    serial.puts((&t_s[0]) as u64)
+    serial.dec(v_win[i as usize])
+    serial.nl()
+}
+
+fn watched() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < SLOTS {
+        if v_win[i as usize] != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn silent_pid() -> u64 {
+    return v_quiet_pid
+}
