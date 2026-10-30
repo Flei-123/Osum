@@ -68,6 +68,28 @@ if [ -n "$f" ]; then
 else
     bad "B no hang report on disk"
 fi
+echo "== C. garbage mtime (HP inode 151): ls -l prints and returns; old ls spins =="
+git show origin/main~0:kernel/user/ls.fi > "$TMPD/lsold.fi" 2>/dev/null
+"$FIRNC" "$TMPD/lsold.fi" -o "$TMPD/lsold.o" > /dev/null 2>&1 && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$TMPD/lsold.elf" "$TMPD/crt.o" "$TMPD/lsold.o" 2>/dev/null || bad "C old ls build"
+SCRIPT="script=ls -l /etc/theme.conf;echo statdone;exit"
+mtime_boot() {
+    local t=$1 lself=$2 img="$TMPD/$1.img" spec="/bin/ /etc/ /etc/theme.conf=$TMPD/theme.conf"
+    for p in sh cat echo chown; do spec="$spec /bin/$p=$TMPD/$p.elf"; done
+    spec="$spec /bin/ls=$lself"
+    python3 tools/osum/mkfs.py build "$img" 8192 --v3 $spec /proc/ /dev/ /mnt/ /var/ /var/crash/ > /dev/null 2>&1 || bad "$t mkfs"
+    python3 tools/statsane/plant_mtime.py "$img" 22 0x04c7c74820244c89 > "$TMPD/$t.plant" 2>&1 || bad "$t plant mtime"
+    timeout -s KILL 45 qemu-system-x86_64 $ACCEL -machine q35 -smp 2 -kernel "$K0" -m 512 \
+        -append "osum nokbd vfs smpfrueh wdt=10 $SCRIPT" \
+        -serial "file:$TMPD/$t.ser" -display none -global ICH9-LPC.noreboot=false -watchdog-action reset \
+        -drive "file=$img,format=raw,if=none,id=d0" -device ide-hd,drive=d0,bus=ide.0 \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 < /dev/null > /dev/null 2>&1
+}
+mtime_boot c "$TMPD/ls.elf"
+has "$TMPD/c.plant" "planted" "C mtime planted into the inode"
+grep -qax "statdone" "$TMPD/c.ser" && ok "C ls -l returned with a garbage mtime" || bad "C statdone missing"
+has "$TMPD/c.ser" " /etc/theme.conf" "C ls -l printed the line"
+mtime_boot d "$TMPD/lsold.elf"
+grep -qax "statdone" "$TMPD/d.ser" && bad "D old ls returned (counter-proof did not bite)" || ok "D counter-proof: old ls spins on the garbage mtime"
 if [ -n "${STATSANE_OUT:-}" ]; then mkdir -p "$STATSANE_OUT"; cp "$TMPD"/*.ser "$TMPD"/*.rep "$STATSANE_OUT/" 2>/dev/null; fi
 echo
 echo "STATSANE: $pass passed, $fail failed"
