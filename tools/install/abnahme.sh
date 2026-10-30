@@ -364,7 +364,7 @@ platte_lauf() { # <name> <skript> <limit>
         local w=0
         while [ $w -lt 240 ]; do
             # wait for the sign-in screen / desktop line too: the taskbar line comes first and a loaded host needs seconds more
-            grep -qa 'desk: start /bin/taskbar' "$ser" 2>/dev/null && grep -qaE 'desk: start /bin/(desktop|glogin)' "$ser" 2>/dev/null && break
+            grep -qa 'desk: start /bin/taskbar' "$ser" 2>/dev/null && grep -qaE 'desk: start /bin/(desktop|glogi)' "$ser" 2>/dev/null && break
             kill -0 "$qp" 2>/dev/null || break
             sleep 1; w=$((w+1))
         done
@@ -480,7 +480,7 @@ fi
 # "die Platte bootet" von "man kann damit arbeiten" unterscheidet:
 # ein Fenster, das der Fensterserver meldet, gibt es nur, wenn ein
 # Ring-3-Programm von DIESER Platte gestartet ist.
-if grep -qa 'desk: start /bin/desktop\|desk: start /bin/glogin' "$OUT/start.txt"; then
+if grep -qaE 'desk: start /bin/(desktop|glogi)|glogin: (bereit|rect)' "$OUT/start.txt"; then
     ok "die Oberflaeche (Anmeldeschirm bzw. Schreibtisch) startet von der Platte"
 else
     bad "kein Schreibtisch -- die Oberflaeche kommt nicht hoch"

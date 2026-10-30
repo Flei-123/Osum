@@ -20,6 +20,9 @@ osb_prepare() {
     mcopy -i "$dir/stick.img@@$OSB_OFF" ::limine.conf "$dir/limine.conf" || return 1
     sed -i 's/^timeout: .*/timeout: 0/' "$dir/limine.conf"
     cp "$dir/stick.img" "$dir/limine.img"
+    if mcopy -i "$dir/stick.img@@$OSB_OFF" ::EFI/limine/BOOTX64.EFI "$dir/limine-loader.efi" 2>/dev/null; then
+        mcopy -i "$dir/limine.img@@$OSB_OFF" -o "$dir/limine-loader.efi" ::EFI/BOOT/BOOTX64.EFI || return 1
+    fi
     mcopy -i "$dir/limine.img@@$OSB_OFF" -o "$dir/limine.conf" ::limine.conf || return 1
     python3 tools/bootloader/mkcfg.py "$dir/limine.conf" "$dir/osboot.cfg" --timeout 0 --logo /osboot.logo > /dev/null || return 1
     python3 tools/bootloader/mklogo.py assets/marke/start-quelle.png "$dir/osboot.logo" > /dev/null || return 1
