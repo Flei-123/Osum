@@ -73,6 +73,7 @@ import libc.io
 import msg
 import wlibc
 import symvar
+import appreg
 
 export {
     load, count, name_of, info_of, exec_of, icon_of, keys_of, file_of,
@@ -536,10 +537,23 @@ fn buendeldatei(dir: u64, name: u64, ziel: u64, max: u64) -> u64 {
     return got
 }
 
+static mut s_nostart: [u8; 26] = "appdir: skip, no start: \0\0"
+
+fn start_ok(path: u64) -> bool {
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        ulib.say((&s_nostart[0 as usize]) as u64)
+        ulib.say(path)
+        ulib.nl()
+        return false
+    }
+    io.close(fd)
+    return true
+}
+
 // ROUND W-ICON: the id of a bundle is its folder name without ".osp" ("/apps/disks.osp" -> "disks"); the fallback
 // tile (lib/appicon.fi via wlibc.app_icon) is built from it, so the start menu, the bar and the task manager agree.
-fn bundle_icon(dir: u64, out: u64) {
-    var id: [u8; 24] = [0 as u8; 24]
+fn bundle_id(dir: u64, id: u64) {
     var n: u64 = ulib.length(dir)
     var from: u64 = 0
     var k: u64 = 0
@@ -556,11 +570,18 @@ fn bundle_icon(dir: u64, out: u64) {
         if ch == 46 as u8 {
             k = n
         } else {
-            id[(m) as usize] = ch
+            __mmio_write8((id + m) as *mut u8, ch)
             m = m + 1
             k = k + 1
         }
     }
+    __mmio_write8((id + m) as *mut u8, 0 as u8)
+}
+
+fn bundle_icon(dir: u64, out: u64) {
+    var id: [u8; 24] = [0 as u8; 24]
+    bundle_id(dir, (&id[0 as usize]) as u64)
+    appreg.note_letter_tile((&id[0 as usize]) as u64)
     let _ok: bool = wlibc.app_icon((&id[0 as usize]) as u64, out)
 }
 
@@ -644,7 +665,7 @@ fn load(dir: u64, ohne_keys: bool) -> u64 {
                             (&slash[0 as usize]) as u64)
                         ulib.strcat((&infop[0 as usize]) as u64,
                             (&s_info[0 as usize]) as u64)
-                        if one_file((&infop[0 as usize]) as u64, nap) {
+                        if start_ok((&befehl[0 as usize]) as u64) && one_file((&infop[0 as usize]) as u64, nap) {
                             // the slot is cleared first: a symbol that fails to load must not leave the
                             // picture of another programme (an earlier load) in its place
                             ulib.fill((&symb[0 as usize]) as u64 + nap * SYMBYTES, 0, SYMBYTES)
@@ -652,7 +673,11 @@ fn load(dir: u64, ohne_keys: bool) -> u64 {
                                 (&s_sym[0 as usize]) as u64,
                                 (&symb[0 as usize]) as u64 + nap * SYMBYTES,
                                 SYMBYTES)
-                            symvar.register((&symb[0 as usize]) as u64 + nap * SYMBYTES, got)
+                            var bid: [u8; 24] = [0 as u8; 24]
+                            bundle_id((&full[0 as usize]) as u64, (&bid[0 as usize]) as u64)
+                            let got2: u64 = appreg.resolve_symbol((&bid[0 as usize]) as u64,
+                                (&symb[0 as usize]) as u64 + nap * SYMBYTES, got)
+                            symvar.register((&symb[0 as usize]) as u64 + nap * SYMBYTES, got2)
                             // ROUND W-ICON: no (valid) symbol in the bundle -> the shared letter tile, keyed by the
                             // bundle id (the folder name without ".osp"), the same id the bar uses
                             if __mmio_read8(((&symb[0 as usize]) as u64 + nap * SYMBYTES) as *mut u8) != 79 as u8 {
