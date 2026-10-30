@@ -375,6 +375,7 @@ echo "== 6. join + hash speed (split pack) =="
 run_case bigparts 1200 ahci
 J="$TMPD/bigparts.txt"
 grep -qa '^@@end' "$J" && ok "bigparts: script ran to the end" || bad "bigparts: script did not finish"
+seg "$J" bigparts | grep -a "xfx:" | sed 's/^/        /'
 has "$J" bigparts 'waitfor=ok' "bigparts: installed"
 has "$J" bigparts 'sha256 ok, extracting' "bigparts: joined tar matches the manifest sha"
 jms=$(seg "$J" bigparts | grep -aoE 'parts joined\+hashed in [0-9]+ ms' | grep -oE '[0-9]+' | head -1)
