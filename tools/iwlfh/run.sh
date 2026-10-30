@@ -120,7 +120,7 @@ grep -aqE 'iwl: cq alive scd=0x0*800000 rc=0' "$I2" && ok "ALIVE notification re
 has "$I2" 'iwl: cq sched rc=0' "scheduler + queue 0 enabled from the ALIVE scd base"
 has "$I2" 'iwl: cq binding rc=0 v=' "BINDING_CONTEXT sent, response status 0 read back"
 has "$I2" 'iwl: cq phycfg rc=0 v=' "PHY_CONFIG sent, response status 0"
-has "$I2" 'iwl: cq scan rc=0 v=1372' "SCAN_REQ_UMAC (1372 octets, two TBs) accepted by the fake"
+has "$I2" 'iwl: cq scan rc=0 v=1376' "SCAN_REQ_UMAC (1376 octets with the wide header, two TBs) accepted by the fake"
 has "$I2" 'iwl: cq scan-complete rc=20 v=1' "SCAN_COMPLETE_UMAC notification (status 1) via the RX ring"
 has "$I2" 'iwl: cq scan-uid rc=20 v=4660' "scan uid in the notification == uid of the request (0x1234)"
 has "$I2" 'iwl: cq stress rc=300 v=300' "300 commands: TFD ring wraps, RX ring wraps and is restocked"

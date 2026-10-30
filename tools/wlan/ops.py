@@ -83,6 +83,10 @@ def check_seq(hw):
     ok(le(mac_add, 4 + 8, 4) == 5 and mac_add[4 + 16:4 + 22] == MAC, "MAC_CONTEXT add: BSS station, own address")
     ok(mac_mod[4 + 24:4 + 30] == BSSID and le(mac_mod, 4 + 4, 4) == 2, "MAC_CONTEXT modify carries the BSSID")
     ok(le(bind, 4 + 20, 4) == 0 and le(bind, 4 + 8, 4) == 0, "BINDING add links MAC 0 and PHY 0")
+    for name, w in (("SCAN_CFG", scfg), ("SCAN_REQ_UMAC", scan)):
+        ok(w[1] == 1 and le(w, 4, 2) == len(w) - 8 and w[6] == 0 and w[7] == 0, "%s uses the wide header (group 1, payload length)" % name)
+    scfg = scfg[:4] + scfg[8:]
+    scan = scan[:4] + scan[8:]
     nchan = le(scfg, 4, 4) >> 26
     ok(nchan == 35 and scfg[4 + 36:4 + 36 + 4] == bytes([1, 2, 3, 4]), "SCAN_CFG lists 35 channels")
     ok(sta[4 + 8:4 + 14] == BSSID and sta[4] == 0, "ADD_STA peer = BSSID, mode add")
