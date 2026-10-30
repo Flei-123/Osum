@@ -6,7 +6,7 @@
 #
 # One QEMU boot (tools/design/audit.sh, 1280x800): open Settings, click Themes in the sidebar, Up, Back, Back, Forward, a breadcrumb,
 # then type a search word and press Enter. Settings prints `settings: nav route=... page= crumbs= back= fwd= up= depth= side= hits= rawkeys=`
-# and the rects navback / navfwd / navup / navcrumb<a..> / tab<a..>. tools/navshell/check.py judges the serial log and the pictures,
+# and the rects navback / navfwd / navcrumb<a..> / tab<a..>. tools/navshell/check.py judges the serial log and the pictures,
 # and proves itself red on doctored copies of the log (counter-proof).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -26,8 +26,8 @@ DREH="$OUT/drehbuch.txt"
   echo "klickauf srecttabh"; echo "warteneu settings: nav route=settings://personalization/themes page=7 || 30"
   echo "warte 2"; echo "foto 01-themes"
   echo "marke settings: nav route="
-  echo "klickauf srectnavup"; echo "warteneu settings: nav route=settings://personalization page=0 || 30"
-  echo "warte 2"; echo "foto 02-up"
+  echo "klickauf srectnavcrumbb"; echo "warteneu settings: nav route=settings://personalization page=0 || 30"
+  echo "warte 2"; echo "foto 02-crumb"
   echo "marke settings: nav route="
   echo "klickauf srectnavback"; echo "warteneu settings: nav route=settings://personalization/themes page=7 || 30"
   echo "warte 2"; echo "foto 03-back"

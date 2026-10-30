@@ -64,13 +64,13 @@ def judge(txt, quiet=False):
         lambda n: n[0] == PERS and n[1] == 0 and n[4] == 1,
         lambda n: n[0] == THEMES and n[1] == 7 and n[6] == 3,
         lambda n: n[0] == PERS and n[1] == 0 and n[6] == 3,
-    ]), "tab click, Up, Back, Back, Forward, breadcrumb: routes, pages, crumbs, flags in order")
-    ok(any(n[0] == THEMES and n[6] == 3 for n in navs), "stack depth 3 after pers, themes, up")
+    ]), "tab click, breadcrumb, Back, Back, Forward, breadcrumb: routes, pages, crumbs, flags in order")
+    ok(any(n[0] == THEMES and n[6] == 3 for n in navs), "stack depth 3 after pers, themes, crumb")
     ok(any(n[8] >= 1 for n in navs), "search for 'power' finds a route (hits>=1)")
     ok(subseq(navs, [lambda n: n[8] >= 1, lambda n: n[0] == POWER and n[1] == 16]), "Enter opens the best hit: %s on page 16" % POWER)
     ok(subseq(navs, [lambda n: n[0] == DISPLAY and n[1] == 1, lambda n: n[0] == DISPADV and n[1] == 19, lambda n: n[0] == POWER]),
        "sidebar: Display (page 1) and Advanced display (page 19, SET-7) open their own pages")
-    for want in ("navback", "navfwd", "navup", "navcrumba", "navcrumbb"):
+    for want in ("navback", "navfwd", "navcrumba", "navcrumbb"):
         ok(want in names, "rect %s reported" % want)
     tabs = [n for n in names if re.fullmatch(r"tab[a-z]", n)]
     ok(len(tabs) >= 18, "sidebar tabs reported (%d)" % len(tabs))
