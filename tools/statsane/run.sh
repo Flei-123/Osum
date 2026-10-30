@@ -69,8 +69,12 @@ else
     bad "B no hang report on disk"
 fi
 echo "== C. garbage mtime (HP inode 151): ls -l prints and returns; old ls spins =="
-git show origin/main~0:kernel/user/ls.fi > "$TMPD/lsold.fi" 2>/dev/null
-"$FIRNC" "$TMPD/lsold.fi" -o "$TMPD/lsold.o" > /dev/null 2>&1 && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$TMPD/lsold.elf" "$TMPD/crt.o" "$TMPD/lsold.o" 2>/dev/null || bad "C old ls build"
+OLD_LS_REF=${STATSANE_OLD_LS_REF:-5376dedf}
+mkdir -p "$TMPD/olduser"
+for f in kernel/user/*.fi; do ln -s "$(pwd)/$f" "$TMPD/olduser/"; done
+rm -f "$TMPD/olduser/ls.fi"
+git show "$OLD_LS_REF:kernel/user/ls.fi" > "$TMPD/olduser/ls.fi" 2>/dev/null
+"$FIRNC" "$TMPD/olduser/ls.fi" -o "$TMPD/lsold.o" > "$TMPD/elsold" 2>&1 && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$TMPD/lsold.elf" "$TMPD/crt.o" "$TMPD/lsold.o" 2>/dev/null || { bad "C old ls build"; head -5 "$TMPD/elsold"; }
 SCRIPT="script=ls -l /etc/theme.conf;echo statdone;exit"
 mtime_boot() {
     local t=$1 lself=$2 img="$TMPD/$1.img" spec="/bin/ /etc/ /etc/theme.conf=$TMPD/theme.conf"
@@ -89,6 +93,8 @@ has "$TMPD/c.plant" "planted" "C mtime planted into the inode"
 grep -qax "statdone" "$TMPD/c.ser" && ok "C ls -l returned with a garbage mtime" || bad "C statdone missing"
 has "$TMPD/c.ser" " /etc/theme.conf" "C ls -l printed the line"
 mtime_boot d "$TMPD/lsold.elf"
+has "$TMPD/d.plant" "planted" "D mtime planted into the inode"
+[ -s "$TMPD/d.ser" ] && ok "D kernel booted" || bad "D no serial output"
 grep -qax "statdone" "$TMPD/d.ser" && bad "D old ls returned (counter-proof did not bite)" || ok "D counter-proof: old ls spins on the garbage mtime"
 if [ -n "${STATSANE_OUT:-}" ]; then mkdir -p "$STATSANE_OUT"; cp "$TMPD"/*.ser "$TMPD"/*.rep "$STATSANE_OUT/" 2>/dev/null; fi
 echo
