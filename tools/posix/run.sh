@@ -428,22 +428,23 @@ rc=$?
 R="$TMPD/redir.txt"
 [ "$rc" -eq 21 ] && ok "the redirection run ended by itself (exit 21)" \
                  || { bad "redirection run: exit code $rc"; tail -6 "$R" | tr -d '\000' | sed 's/^/        /'; }
-if grep -aq '^\./ \.\./ bin/ readme.txt out.txt $' "$R"; then
+SCRIPT2='ls;cat /out.txt;exit'
+run_disk "$TMPD/k0.mb" "osum $QUIET script=$SCRIPT2" "$TMPD/noredir.txt" \
+    "$TMPD/disk.img"
+N="$TMPD/noredir.txt"
+PLAIN=$(grep -a -m1 '^\./ \.\./ bin/ readme.txt ' "$N" | tr -d '\000\r')
+if [ -n "$PLAIN" ] && ! printf '%s' "$PLAIN" | grep -q 'out.txt'; then
+    ok "counter-check: without '>' the listing goes to the console"
+else
+    bad "counter-check: the plain listing is missing"
+fi
+if [ -n "$PLAIN" ] && grep -aqxF "${PLAIN}out.txt " "$R"; then
     ok "'cat /out.txt' shows what 'ls' would have written to the console"
 else
     bad "the redirected listing did not come back out of the file"
     grep -a -A2 'cat /out.txt' "$R" | head -4 | tr -d '\000' | sed 's/^/        /'
 fi
 has "$R" "plain" "and a command without a redirection still writes to the console"
-SCRIPT2='ls;cat /out.txt;exit'
-run_disk "$TMPD/k0.mb" "osum $QUIET script=$SCRIPT2" "$TMPD/noredir.txt" \
-    "$TMPD/disk.img"
-N="$TMPD/noredir.txt"
-if grep -aq '^\./ \.\./ bin/ readme.txt $' "$N"; then
-    ok "counter-check: without '>' the listing goes to the console"
-else
-    bad "counter-check: the plain listing is missing"
-fi
 # ROUND K6 REPLACED `cat`: it names the file it could not open instead of
 # printing the raw error number, and it says so on descriptor 2.
 has "$N" "cat: cannot open /out.txt" "counter-check: and /out.txt was never made -- cat says so"

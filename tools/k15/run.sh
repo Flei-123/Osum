@@ -1064,6 +1064,9 @@ python3 tools/osum/mkfs.py "${GARGS[@]}" > "$TMPD/gmkfs.txt" 2>&1 \
     || { bad "mkfs.py failed"; head -3 "$TMPD/gmkfs.txt"; }
 GN=$(python3 tools/osum/mkfs.py list "$TMPD/gross.img" | tail -n +2 | wc -l)
 num "this many names the image carries in total" "$GN" ge 4000
+BOOT_MADE=$(grep -cE '^static mut p_[a-z]+: \[u8; [0-9]+\] = "/var' kernel/diag/hangslot.fi)
+num "names the kernel creates by itself at every boot (hangslot)" "$BOOT_MADE" ge 1
+GWANT=$((GN + BOOT_MADE))
 
 gross() {
     local name=$1 zeile=$2
@@ -1085,7 +1088,7 @@ GB_S=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'saetze')
 GB_C=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'aufrufe')
 GB_U=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'us')
 GB_T=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'abgeschn')
-num "1. THE BUILD: this many names from the inode table" "$GB_N" eq "$GN"
+num "1. THE BUILD: this many names from the inode table" "$GB_N" eq "$GWANT"
 gleich "and no record was lost on the way" "$GB_N" "$GB_S"
 num "abgeschnitten wurde nichts" "$GB_T" eq 0
 num "and in so few system calls (63 records per call)" "$GB_C" lt 100
