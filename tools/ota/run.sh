@@ -946,6 +946,17 @@ rc=$(lauf kan10 "ota show;ota search;exit")
 hat "$OUT/kan10.txt" "ota: version there 2" "(f) ohne kanal= wird wie bisher flach gelesen"
 hatnicht "$OUT/kan10.txt" "ota: channel" "(f) und es wird kein Kanal angezeigt"
 
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan10d "ota set kanal dev;ota search;exit")
+hat "$OUT/kan10d.txt" "ota: version there 2" "(f2) kanal=dev: the package check reads the flat feed"
+grep -qa "^200 VERZEICHNIS" "$OUT/srv.log" \
+    && ok "(f2) the server saw /VERZEICHNIS and not /dev/VERZEICHNIS" \
+    || bad "(f2) no flat /VERZEICHNIS request in the server log"
+
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan10e "echo keepme > /tmp/keep.txt;ota fetch nosuch-9.opk /tmp/keep.txt;cat /tmp/keep.txt;exit")
+hat "$OUT/kan10e.txt" "keepme" "(f3) a 404 does not overwrite the target file"
+
 # (g) ota boot: Erprobung wird von selbst bestaetigt -- wenn gesund
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan11 "ota apply;exit")
