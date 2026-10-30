@@ -282,7 +282,7 @@ kernel_stack_top:
      * whose cause is a broken rsp cannot be reported on that same rsp. */
     .align 16
 df_stack_bottom:
-    .skip 16384
+    .skip 49152
     .globl df_stack_top
 df_stack_top:
     .skip 32768
