@@ -113,7 +113,7 @@ mut = {
     "wrong page": raw.replace("page=7 ", "page=3 "),
     "raw keys": raw.replace("rawkeys=0", "rawkeys=2"),
     "no crumbs": raw.replace("crumbs=3", "crumbs=1"),
-    "no search": re.sub(r"hits=[1-9]", "hits=0", raw),
+    "no search": re.sub(r"hits=[1-9][0-9]*", "hits=0", raw),
     "no controls": "\n".join(l for l in raw.splitlines() if not l.startswith("settings: controls ")),
     "more controls": re.sub(r"(settings: controls page=\d+ n=)\d+", r"\g<1>99", raw),
 }
