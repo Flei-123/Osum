@@ -23,6 +23,8 @@ boot() {
 }
 faults() { grep -acE 'panic|\*\*\* EXCEPTION|\*\*\* fault' "$TMPD/$1/serial.txt"; }
 starts() { grep -acE '^launcher: start /apps/explorer' "$TMPD/$1/serial.txt"; }
+jumps() { grep -ac 'usb: seq jump' "$TMPD/$1/serial.txt"; }
+ringpeak() { grep -aoE ' rp=[0-9]+' "$TMPD/$1/serial.txt" | tail -n1 | cut -d= -f2; }
 
 echo "== NMI every $PERIOD cycles, NMI on IST2 =="
 boot ist "nmiperiod=$PERIOD"
@@ -32,6 +34,18 @@ n=$(faults ist); s=$(starts ist)
     grep -aE -m3 -A2 '\*\*\* EXCEPTION' "$TMPD/ist/serial.txt" | sed 's/^/        /'
 }
 [ "$s" -ge "$CYCLES" ] && ok "explorer started $s of $CYCLES times" || bad "explorer started $s of $CYCLES times"
+j=$(jumps ist)
+[ "$j" -eq 0 ] && ok "no usb seq jump (every completion delivered)" || {
+    bad "$j usb seq jump lines"
+    grep -a -m2 'usb: seq jump' "$TMPD/ist/serial.txt" | sed 's/^/        /'
+}
+rp=$(ringpeak ist)
+[ -n "$rp" ] && [ "$rp" -le 1 ] && ok "at most one transfer queued per hid endpoint (rp=$rp)" || bad "hid ring peak rp=${rp:-missing}, want 1"
+
+echo "== counter-proof: usbstack (silence watchdog stacks a block on a live ring, the old refill) =="
+boot stack "nmiperiod=$PERIOD usbstack" short
+rp=$(ringpeak stack)
+[ -n "$rp" ] && [ "$rp" -ge 2 ] && ok "the old refill stacks blocks (rp=$rp)" || bad "usbstack ring peak rp=${rp:-missing}, want >= 2"
 
 echo "== counter-proof: nmiflat (NMI on the interrupted rsp, the old entry) =="
 boot flat "nmiperiod=$PERIOD nmiflat" short
