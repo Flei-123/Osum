@@ -692,9 +692,13 @@ vectors:
     .quad s3_vectors                /* 75: pwr/s3.fi */
     .quad mem_read_safe             /* 76: arch/safemem.fi */
     .quad isr2_flat                 /* 77: idt.nmi_flat */
+    .quad panic_note                /* 78: diag/panicnote.fi */
 
     .section .bss, "aw", @nobits
     .align 8
+    .globl panic_note
+panic_note:
+    .skip 136
 saved_rsp:
     .skip 8
 /* Round K4: where `syscall_entry` parks the user stack pointer for the two
@@ -735,6 +739,24 @@ saved_r15:
      */
     .globl osum_panic
 osum_panic:
+    leaq panic_note(%rip), %r9
+    movq %rdx, 8(%r9)
+    movq %rcx, 16(%r9)
+    movl %esi, %eax
+    cmpl $112, %eax
+    jbe .Losum_note_len
+    movl $112, %eax
+.Losum_note_len:
+    xorl %r8d, %r8d
+.Losum_note_copy:
+    cmpl %eax, %r8d
+    jae .Losum_note_done
+    movb (%rdi,%r8), %cl
+    movb %cl, 24(%r9,%r8)
+    incl %r8d
+    jmp .Losum_note_copy
+.Losum_note_done:
+    movq %rax, (%r9)
     movq %rdi, %r10
     movl %esi, %r11d
 .Losum_loop:
