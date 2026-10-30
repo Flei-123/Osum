@@ -31,8 +31,9 @@ ULD=kernel/user/user.ld
 
 echo "== 1. build =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-mkdir -p "$TMPD/bin"
-if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
+mkdir -p "$TMPD/bin" "$TMPD/src"
+cp kernel/user/*.fi tools/xfx/xfxstub.fi "$TMPD/src/"
+if USRC="$TMPD/src" bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
     ok "firnc0 builds $(echo $PROGS | wc -w) programs (xfx $(stat -c%s "$TMPD/bin/xfx.elf") B, stored $(stat -c%s "$TMPD/bin/stored.elf") B)"
 else
     bad "the programs do not build"; head -20 "$TMPD/b.txt" | sed 's/^/        /'
