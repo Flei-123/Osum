@@ -135,7 +135,7 @@ class UdpTransport(SocketTransport):
                 return self.s.recv(65536)
             except socket.timeout:
                 continue
-            except ConnectionRefusedError:
+            except ConnectionError:
                 continue
         return b""
 
