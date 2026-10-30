@@ -68,6 +68,7 @@ import net.netmon
 import net.ebpfhook
 import ipc.share
 import net.wg
+import net.kodb
 
 export {
     init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
@@ -741,7 +742,8 @@ fn pump(state: u64) -> u64 {
             // einer Maschine auf der geteilten Seite). Anders herum
             // zaehlte NETMON entweder den Klartext doppelt oder den
             // Draht gar nicht.
-            if !wg.rx_hook(state, frame, len)
+            if !kodb.rx_hook(state, frame, len, ip(state), mask(state))
+                && !wg.rx_hook(state, frame, len)
                 && !share.inbound(state, frame, len) {
                 stack.net_input(s, frame as *mut u8, len as usize, now)
             }
@@ -783,6 +785,19 @@ fn pump(state: u64) -> u64 {
             }
         }
     }
+    n = 0
+    while n < PUMP_BATCH {
+        let kl: u64 = kodb.tx_len()
+        if kl == 0 || netdev.tx_room(state) == 0 {
+            n = PUMP_BATCH
+        } else {
+            netdev.tx_frame(state, kodb.tx_ptr(), kl)
+            kodb.tx_pop()
+            kstate.add(state, sc(S_OUT), 1)
+            work = work + 1
+            n = n + 1
+        }
+    }
     // The handshakes and keepalives that are due, on the network task's
     // turn and inside the same lock -- a Curve25519 operation has no
     // business in an interrupt handler.
@@ -814,6 +829,7 @@ fn netd_body(state: u64, index: u64) {
     let old_rule: bool = kstate.mode_on(state, kstate.M_NETDHOT)
     while true {
         var w: u64 = pump(state)
+        kodb.service(state, ip(state))
         // ROUND NETMON PART TWO: the shared card gets its turn in the
         // same task. A second task would mean a second thing taking the
         // network lock, and the whole discipline of round K8 is that

@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+
+export { T_REQ, T_RESP, T_DATA, T_END, T_ERR, T_PING, T_PONG, T_CANCEL, HDR, TRL, MAX_PAYLOAD,
+    crc32, le16, le32, put16, put32, check, seal, ftype, fid, fflags, plen, tlv_find, tlv_num, key_is }
+
+const T_REQ: u64 = 1
+const T_RESP: u64 = 2
+const T_DATA: u64 = 3
+const T_END: u64 = 4
+const T_ERR: u64 = 5
+const T_PING: u64 = 6
+const T_PONG: u64 = 7
+const T_CANCEL: u64 = 8
+const HDR: u64 = 16
+const TRL: u64 = 4
+const MAX_PAYLOAD: u64 = 1300
+
+fn crc32(p: u64, n: u64) -> u64 {
+    var c: u64 = 0xFFFFFFFF
+    var i: u64 = 0
+    while i < n {
+        c = c ^ kstate.get8(p + i)
+        var k: u64 = 0
+        while k < 8 {
+            if (c & 1) != 0 {
+                c = (c >> 1) ^ 0xEDB88320
+            } else {
+                c = c >> 1
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return c ^ 0xFFFFFFFF
+}
+
+fn le16(p: u64) -> u64 {
+    return kstate.get8(p) | (kstate.get8(p + 1) << 8)
+}
+
+fn le32(p: u64) -> u64 {
+    return le16(p) | (le16(p + 2) << 16)
+}
+
+fn put16(p: u64, v: u64) {
+    kstate.set8(p, (v & 0xFF) as u8)
+    kstate.set8(p + 1, ((v >> 8) & 0xFF) as u8)
+}
+
+fn put32(p: u64, v: u64) {
+    put16(p, v & 0xFFFF)
+    put16(p + 2, (v >> 16) & 0xFFFF)
+}
+
+fn check(p: u64, n: u64) -> bool {
+    if n < HDR + TRL {
+        return false
+    }
+    if kstate.get8(p) != 0x4F || kstate.get8(p + 1) != 0x44 || kstate.get8(p + 2) != 0x42 || kstate.get8(p + 3) != 0x31 {
+        return false
+    }
+    if kstate.get8(p + 4) != 1 {
+        return false
+    }
+    let len: u64 = le32(p + 12)
+    if len > MAX_PAYLOAD || HDR + len + TRL > n {
+        return false
+    }
+    return crc32(p, HDR + len) == le32(p + HDR + len)
+}
+
+fn seal(p: u64, ftype: u64, flags: u64, id: u64, len: u64) -> u64 {
+    kstate.set8(p, 0x4F as u8)
+    kstate.set8(p + 1, 0x44 as u8)
+    kstate.set8(p + 2, 0x42 as u8)
+    kstate.set8(p + 3, 0x31 as u8)
+    kstate.set8(p + 4, 1 as u8)
+    kstate.set8(p + 5, ftype as u8)
+    put16(p + 6, flags)
+    put32(p + 8, id)
+    put32(p + 12, len)
+    put32(p + HDR + len, crc32(p, HDR + len))
+    return HDR + len + TRL
+}
+
+fn ftype(p: u64) -> u64 {
+    return kstate.get8(p + 5)
+}
+
+fn fflags(p: u64) -> u64 {
+    return le16(p + 6)
+}
+
+fn fid(p: u64) -> u64 {
+    return le32(p + 8)
+}
+
+fn plen(p: u64) -> u64 {
+    return le32(p + 12)
+}
+
+fn key_is(p: u64, n: u64, lit: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(lit + i) != kstate.get8(p + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return kstate.get8(lit + n) == 0
+}
+
+fn tlv_find(start: u64, end: u64, key: u64, vlen_out: u64) -> u64 {
+    var p: u64 = start
+    while p + 3 <= end {
+        let kl: u64 = kstate.get8(p)
+        if p + 1 + kl + 2 > end {
+            return 0
+        }
+        let vl: u64 = le16(p + 1 + kl)
+        let v: u64 = p + 1 + kl + 2
+        if v + vl > end {
+            return 0
+        }
+        if key_is(p + 1, kl, key) {
+            kstate.set(vlen_out, 0, vl)
+            return v
+        }
+        p = v + vl
+    }
+    return 0
+}
+
+fn tlv_num(start: u64, end: u64, key: u64, fallback: u64) -> u64 {
+    var vl: u64 = 0
+    let v: u64 = tlv_find(start, end, key, (&vl) as u64)
+    if v == 0 || vl == 0 || vl > 12 {
+        return fallback
+    }
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < vl {
+        let c: u64 = kstate.get8(v + i)
+        if c < 48 || c > 57 {
+            return fallback
+        }
+        n = n * 10 + (c - 48)
+        i = i + 1
+    }
+    return n
+}

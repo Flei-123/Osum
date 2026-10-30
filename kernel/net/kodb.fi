@@ -1,0 +1,677 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import klog
+import sched.sched
+import arch.cpu
+import arch.x86_64.apic
+import crypto.sha256
+import diag.cmdopt
+import net.netdev
+import net.wire
+import net.kodbframe
+import net.kodbout
+import net.kodbcmd
+import net.kodbauth
+
+export { init, enabled, rx_hook, service, tx_len, tx_ptr, tx_pop, stat }
+
+const PORT: u64 = 6970
+const QN: u64 = 4
+const QSLOT: u64 = 1536
+const OBN: u64 = 16
+const OBSLOT: u64 = 1536
+const CHUNK: u64 = 1100
+const FOLLOW_TICKS: u64 = 6000
+const TICKS_HZ: u64 = 100
+const WORK_MAX: u64 = 28672
+
+static mut on: u64 = 0
+static mut port: u64 = 6970
+static mut q: [u8; 6144] = [0 as u8; 6144]
+static mut q_h: u64 = 0
+static mut q_t: u64 = 0
+static mut ob: [u8; 24576] = [0 as u8; 24576]
+static mut ob_len: [u64; 16] = [0 as u64; 16]
+static mut ob_h: u64 = 0
+static mut ob_t: u64 = 0
+static mut c_mac: [u8; 6] = [0 as u8; 6]
+static mut c_ip: u64 = 0
+static mut c_port: u64 = 0
+static mut me_ip: u64 = 0
+static mut ip_seq: u64 = 0
+static mut pl: [u8; 1320] = [0 as u8; 1320]
+static mut n_rx: u64 = 0
+static mut n_tx: u64 = 0
+static mut n_drop: u64 = 0
+
+static mut j_on: u64 = 0
+static mut j_id: u64 = 0
+static mut j_stream: u64 = 0
+static mut j_off: u64 = 0
+static mut j_len: u64 = 0
+static mut j_stage: u64 = 0
+static mut j_rows: u64 = 0
+static mut j_size: u64 = 0
+static mut j_mac: [u8; 6] = [0 as u8; 6]
+static mut j_ip: u64 = 0
+static mut j_port: u64 = 0
+
+static mut f_on: u64 = 0
+static mut f_id: u64 = 0
+static mut f_cursor: u64 = 0
+static mut f_seen: u64 = 0
+static mut f_mac: [u8; 6] = [0 as u8; 6]
+static mut f_ip: u64 = 0
+static mut f_port: u64 = 0
+
+static mut w_kodb: [u8; 5] = "kodb\0"
+static mut w_nokodb: [u8; 7] = "nokodb\0"
+static mut w_odb: [u8; 4] = "odb\0"
+static mut w_port: [u8; 9] = "kodbport\0"
+static mut s_up: [u8; 23] = "kodb: listening on udp\0"
+
+fn enabled() -> bool {
+    return on != 0
+}
+
+fn stat(which: u64) -> u64 {
+    if which == 0 {
+        return n_rx
+    }
+    if which == 1 {
+        return n_tx
+    }
+    return n_drop
+}
+
+fn init(state: u64) {
+    var s_on: [u8; 18] = "kodb: udp port on\0"
+    if cmdopt.has(state, (&w_nokodb[0]) as u64) {
+        return
+    }
+    if cmdopt.has(state, (&w_kodb[0]) as u64) || cmdopt.number(state, (&w_odb[0]) as u64, 0) == 1 {
+        on = 1
+        port = cmdopt.number(state, (&w_port[0]) as u64, PORT)
+        klog.say(state, 6, (&w_kodb[0]) as u64, (&s_on[0]) as u64)
+    }
+}
+
+fn now(state: u64) -> u64 {
+    return kstate.get(state, kstate.TICKS)
+}
+
+fn same_subnet(a: u64, b: u64, mask: u64) -> bool {
+    return (a & mask) == (b & mask)
+}
+
+fn rx_hook(state: u64, frame: u64, len: u64, my_ip: u64, my_mask: u64) -> bool {
+    if on == 0 || len < 42 + 20 || len > 42 + 1400 {
+        return false
+    }
+    if kstate.get8(frame + 12) != 8 || kstate.get8(frame + 13) != 0 || kstate.get8(frame + 23) != 17 {
+        return false
+    }
+    if kstate.get8(frame + 14) != 0x45 {
+        return false
+    }
+    let dport: u64 = (kstate.get8(frame + 36) << 8) | kstate.get8(frame + 37)
+    if dport != port {
+        return false
+    }
+    let src: u64 = (kstate.get8(frame + 26) << 24) | (kstate.get8(frame + 27) << 16) | (kstate.get8(frame + 28) << 8) | kstate.get8(frame + 29)
+    let dst: u64 = (kstate.get8(frame + 30) << 24) | (kstate.get8(frame + 31) << 16) | (kstate.get8(frame + 32) << 8) | kstate.get8(frame + 33)
+    if dst != my_ip || my_ip == 0 {
+        return false
+    }
+    if !same_subnet(src, my_ip, my_mask) {
+        n_drop = n_drop + 1
+        return true
+    }
+    if q_h - q_t >= QN {
+        n_drop = n_drop + 1
+        return true
+    }
+    let slot: u64 = (&q[0]) as u64 + (q_h % QN) * QSLOT
+    var i: u64 = 0
+    while i < 6 {
+        kstate.set8(slot + i, kstate.get8(frame + 6 + i) as u8)
+        i = i + 1
+    }
+    kodbframe.put32(slot + 8, src)
+    kodbframe.put16(slot + 12, (kstate.get8(frame + 34) << 8) | kstate.get8(frame + 35))
+    let n: u64 = len - 42
+    kodbframe.put16(slot + 14, n)
+    i = 0
+    while i < n {
+        kstate.set8(slot + 16 + i, kstate.get8(frame + 42 + i) as u8)
+        i = i + 1
+    }
+    q_h = q_h + 1
+    n_rx = n_rx + 1
+    return true
+}
+
+fn set_peer(mac: u64, ip: u64, p: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        c_mac[i as usize] = kstate.get8(mac + i) as u8
+        i = i + 1
+    }
+    c_ip = ip
+    c_port = p
+}
+
+fn emit(state: u64, t: u64, id: u64, n: u64) -> bool {
+    if ob_h - ob_t >= OBN {
+        return false
+    }
+    let slot: u64 = ob_h % OBN
+    let f: u64 = (&ob[0]) as u64 + slot * OBSLOT
+    var me: [u8; 6] = [0 as u8; 6]
+    var i: u64 = 0
+    while i < 6 {
+        me[i as usize] = netdev.mac_at(state, i) as u8
+        i = i + 1
+    }
+    wire.eth_build(f as *mut u8, &c_mac[0], &me[0], wire.ETYPE_IP4)
+    i = 0
+    while i < n {
+        kstate.set8(f + 58 + i, pl[i as usize])
+        i = i + 1
+    }
+    let fl: u64 = kodbframe.seal(f + 42, t, 0, id, n)
+    ip_seq = ip_seq + 1
+    wire.ip_build((f + 14) as *mut u8, (0x4B00 + (ip_seq & 0xFF)) as u16, wire.IP_UDP, me_ip as u32, c_ip as u32, (8 + fl) as usize)
+    wire.udp_build((f + 34) as *mut u8, port as u16, c_port as u16, fl as usize, me_ip as u32, c_ip as u32)
+    ob_len[slot as usize] = 42 + fl
+    ob_h = ob_h + 1
+    n_tx = n_tx + 1
+    return true
+}
+
+fn load_pl(src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n && i < 1300 {
+        pl[i as usize] = kstate.get8(src + i) as u8
+        i = i + 1
+    }
+}
+
+fn reply_tlv(state: u64, t: u64, id: u64) -> bool {
+    load_pl(kodbout.tlv_ptr(), kodbout.tlv_len())
+    return emit(state, t, id, kodbout.tlv_len())
+}
+
+fn reply_err(state: u64, id: u64, code: u64, msg: u64) {
+    var k_code: [u8; 5] = "code\0"
+    var k_msg: [u8; 4] = "msg\0"
+    kodbout.tlv_begin()
+    kodbout.tlv_str((&k_code[0]) as u64, code)
+    kodbout.tlv_str((&k_msg[0]) as u64, msg)
+    let _r: bool = reply_tlv(state, kodbframe.T_ERR, id)
+}
+
+fn reply_ok(state: u64, id: u64) {
+    var k_ok: [u8; 3] = "ok\0"
+    kodbout.tlv_begin()
+    kodbout.tlv_dec((&k_ok[0]) as u64, 1)
+    let _r: bool = reply_tlv(state, kodbframe.T_RESP, id)
+}
+
+fn err_auth(state: u64, id: u64, msg: u64) {
+    var c: [u8; 6] = "EAUTH\0"
+    reply_err(state, id, (&c[0]) as u64, msg)
+}
+
+fn hex_of(src: u64, n: u64, dst: u64) {
+    var i: u64 = 0
+    while i < n {
+        let b: u64 = kstate.get8(src + i)
+        let hi: u64 = b >> 4
+        let lo: u64 = b & 15
+        var c1: u64 = 48 + hi
+        if hi > 9 {
+            c1 = 87 + hi
+        }
+        var c2: u64 = 48 + lo
+        if lo > 9 {
+            c2 = 87 + lo
+        }
+        kstate.set8(dst + i * 2, c1 as u8)
+        kstate.set8(dst + i * 2 + 1, c2 as u8)
+        i = i + 1
+    }
+}
+
+fn do_hello(state: u64, id: u64, ip: u64, p: u64) {
+    var k_ver: [u8; 4] = "ver\0"
+    var k_agent: [u8; 6] = "agent\0"
+    var v_agent: [u8; 5] = "kodb\0"
+    var k_agentver: [u8; 9] = "agentver\0"
+    var k_os: [u8; 3] = "os\0"
+    var v_os: [u8; 5] = "osum\0"
+    var k_feat: [u8; 9] = "features\0"
+    var v_feat: [u8; 40] = "info,ps,stacks,logs,ls,cat,locks,ping\0\0\0"
+    var k_chunk: [u8; 9] = "maxchunk\0"
+    var k_window: [u8; 7] = "window\0"
+    var k_maxp: [u8; 11] = "maxpayload\0"
+    var k_auth: [u8; 5] = "auth\0"
+    var v_auth: [u8; 6] = "token\0"
+    var k_nonce: [u8; 6] = "nonce\0"
+    var raw: [u8; 16] = [0 as u8; 16]
+    var hx: [u8; 33] = [0 as u8; 33]
+    kodbauth.make_nonce(state, ip, p, now(state), (&raw[0]) as u64)
+    hex_of((&raw[0]) as u64, 16, (&hx[0]) as u64)
+    kodbauth.session_open(ip, p, (&raw[0]) as u64)
+    kodbout.tlv_begin()
+    kodbout.tlv_dec((&k_ver[0]) as u64, 1)
+    kodbout.tlv_str((&k_agent[0]) as u64, (&v_agent[0]) as u64)
+    kodbout.tlv_dec((&k_agentver[0]) as u64, 1)
+    kodbout.tlv_str((&k_os[0]) as u64, (&v_os[0]) as u64)
+    kodbout.tlv_str((&k_feat[0]) as u64, (&v_feat[0]) as u64)
+    kodbout.tlv_dec((&k_chunk[0]) as u64, CHUNK)
+    kodbout.tlv_dec((&k_window[0]) as u64, 0)
+    kodbout.tlv_dec((&k_maxp[0]) as u64, 1300)
+    kodbout.tlv_str((&k_auth[0]) as u64, (&v_auth[0]) as u64)
+    kodbout.tlv_str((&k_nonce[0]) as u64, (&hx[0]) as u64)
+    let _r: bool = reply_tlv(state, kodbframe.T_RESP, id)
+}
+
+fn do_auth(state: u64, id: u64, ip: u64, p: u64, a: u64, e: u64) {
+    var k_mac: [u8; 4] = "mac\0"
+    var m_nokey: [u8; 9] = "no token\0"
+    var m_lock: [u8; 7] = "locked\0"
+    var m_bad: [u8; 16] = "bad credentials\0"
+    var vl: u64 = 0
+    let v: u64 = kodbframe.tlv_find(a, e, (&k_mac[0]) as u64, (&vl) as u64)
+    if kodbauth.token_len() < 16 {
+        err_auth(state, id, (&m_nokey[0]) as u64)
+        return
+    }
+    if now(state) < kodbauth.locked_until() {
+        err_auth(state, id, (&m_lock[0]) as u64)
+        return
+    }
+    if v == 0 || vl != 64 || !kodbauth.verify(ip, p, v) {
+        kodbauth.fail(now(state), TICKS_HZ)
+        err_auth(state, id, (&m_bad[0]) as u64)
+        return
+    }
+    kodbauth.grant(ip, p)
+    reply_ok(state, id)
+}
+
+fn do_info(state: u64, id: u64) {
+    var k_os: [u8; 3] = "os\0"
+    var v_os: [u8; 5] = "osum\0"
+    var k_kernel: [u8; 7] = "kernel\0"
+    var v_kernel: [u8; 5] = "kodb\0"
+    var k_up: [u8; 10] = "uptime_ms\0"
+    var k_cpus: [u8; 5] = "cpus\0"
+    var k_free: [u8; 12] = "mem_free_kb\0"
+    var k_tasks: [u8; 6] = "tasks\0"
+    var k_seq: [u8; 9] = "klog_seq\0"
+    var k_locks: [u8; 6] = "locks\0"
+    var k_fsok: [u8; 5] = "fsok\0"
+    var k_ticks: [u8; 6] = "ticks\0"
+    var k_rx: [u8; 3] = "rx\0"
+    var k_tx: [u8; 3] = "tx\0"
+    kodbout.reset()
+    kodbcmd.locks(state)
+    var ll: u64 = kodbout.len()
+    if ll > 200 {
+        ll = 200
+    }
+    let lp: u64 = kodbout.ptr()
+    kodbout.tlv_begin()
+    kodbout.tlv_str((&k_os[0]) as u64, (&v_os[0]) as u64)
+    kodbout.tlv_str((&k_kernel[0]) as u64, (&v_kernel[0]) as u64)
+    kodbout.tlv_dec((&k_ticks[0]) as u64, now(state))
+    kodbout.tlv_dec((&k_up[0]) as u64, now(state) * 10)
+    kodbout.tlv_dec((&k_cpus[0]) as u64, cpu.count(state))
+    kodbout.tlv_dec((&k_free[0]) as u64, kstate.get(state, kstate.FRAMES_FREE) * 4)
+    kodbout.tlv_dec((&k_tasks[0]) as u64, kstate.get(state, kstate.TASKS))
+    kodbout.tlv_dec((&k_seq[0]) as u64, klog.seq(state))
+    kodbout.tlv_raw((&k_locks[0]) as u64, lp, ll)
+    if kodbcmd.fs_ok(state) {
+        kodbout.tlv_dec((&k_fsok[0]) as u64, 1)
+    } else {
+        kodbout.tlv_dec((&k_fsok[0]) as u64, 0)
+    }
+    kodbout.tlv_dec((&k_rx[0]) as u64, n_rx)
+    kodbout.tlv_dec((&k_tx[0]) as u64, n_tx)
+    let _r: bool = reply_tlv(state, kodbframe.T_RESP, id)
+}
+
+fn job_start(id: u64, stream: u64, rows: u64, size: u64) {
+    j_on = 1
+    j_id = id
+    j_stream = stream
+    j_off = 0
+    j_len = kodbout.len()
+    j_stage = 0
+    j_rows = rows
+    j_size = size
+    var i: u64 = 0
+    while i < 6 {
+        j_mac[i as usize] = c_mac[i as usize]
+        i = i + 1
+    }
+    j_ip = c_ip
+    j_port = c_port
+}
+
+fn job_pump(state: u64) {
+    var k_rows: [u8; 5] = "rows\0"
+    var k_bytes: [u8; 6] = "bytes\0"
+    var k_size: [u8; 5] = "size\0"
+    var k_trunc: [u8; 10] = "truncated\0"
+    if j_on == 0 {
+        return
+    }
+    set_peer((&j_mac[0]) as u64, j_ip, j_port)
+    var going: bool = true
+    while going {
+        if ob_h - ob_t + 3 > OBN {
+            going = false
+        } else if j_stage == 0 {
+            if j_off >= j_len {
+                j_stage = 1
+            } else {
+                var n: u64 = j_len - j_off
+                if n > CHUNK {
+                    n = CHUNK
+                }
+                pl[0] = j_stream as u8
+                var i: u64 = 0
+                while i < n {
+                    pl[(1 + i) as usize] = kstate.get8(kodbout.ptr() + j_off + i) as u8
+                    i = i + 1
+                }
+                let _e: bool = emit(state, kodbframe.T_DATA, j_id, n + 1)
+                j_off = j_off + n
+            }
+        } else if j_stage == 1 {
+            pl[0] = j_stream as u8
+            let _e: bool = emit(state, kodbframe.T_END, j_id, 1)
+            j_stage = 2
+        } else {
+            kodbout.tlv_begin()
+            kodbout.tlv_dec((&k_rows[0]) as u64, j_rows)
+            kodbout.tlv_dec((&k_bytes[0]) as u64, j_len)
+            if j_size != 0xFFFFFFFFFFFFFFFF {
+                kodbout.tlv_dec((&k_size[0]) as u64, j_size)
+            }
+            if kodbout.full() {
+                kodbout.tlv_dec((&k_trunc[0]) as u64, 1)
+            }
+            let _r: bool = reply_tlv(state, kodbframe.T_RESP, j_id)
+            j_on = 0
+            going = false
+        }
+    }
+}
+
+fn path_arg(a: u64, e: u64, dst: u64) -> bool {
+    var k_path: [u8; 5] = "path\0"
+    var vl: u64 = 0
+    let v: u64 = kodbframe.tlv_find(a, e, (&k_path[0]) as u64, (&vl) as u64)
+    if v == 0 || vl == 0 || vl > 200 {
+        return false
+    }
+    var i: u64 = 0
+    while i < vl {
+        kstate.set8(dst + i, kstate.get8(v + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(dst + vl, 0 as u8)
+    return true
+}
+
+static mut path_buf: [u8; 208] = [0 as u8; 208]
+
+fn handle_req(state: u64, slot: u64) {
+    var c_hello: [u8; 6] = "hello\0"
+    var c_auth: [u8; 5] = "auth\0"
+    var c_ping: [u8; 5] = "ping\0"
+    var c_info: [u8; 5] = "info\0"
+    var c_ps: [u8; 3] = "ps\0"
+    var c_stacks: [u8; 7] = "stacks\0"
+    var c_logs: [u8; 5] = "logs\0"
+    var c_ls: [u8; 3] = "ls\0"
+    var c_cat: [u8; 4] = "cat\0"
+    var c_locks: [u8; 6] = "locks\0"
+    var k_full: [u8; 5] = "full\0"
+    var k_pid: [u8; 4] = "pid\0"
+    var k_lines: [u8; 6] = "lines\0"
+    var k_follow: [u8; 7] = "follow\0"
+    var k_offset: [u8; 7] = "offset\0"
+    var k_len: [u8; 4] = "len\0"
+    var e_unsup: [u8; 7] = "EUNSUP\0"
+    var e_busy: [u8; 6] = "EBUSY\0"
+    var e_noent: [u8; 7] = "ENOENT\0"
+    var m_unsup: [u8; 16] = "unknown command\0"
+    var m_noauth: [u8; 18] = "not authenticated\0"
+    var m_fsbusy: [u8; 25] = "file system lock is held\0"
+    var m_noent: [u8; 15] = "cannot open it\0"
+    var m_jobbusy: [u8; 12] = "job running\0"
+    let f: u64 = slot + 16
+    let id: u64 = kodbframe.fid(f)
+    let p: u64 = f + kodbframe.HDR
+    let plen: u64 = kodbframe.plen(f)
+    if plen < 1 {
+        return
+    }
+    let cl: u64 = kstate.get8(p)
+    if 1 + cl > plen {
+        return
+    }
+    let cmd: u64 = p + 1
+    let a: u64 = p + 1 + cl
+    let e: u64 = p + plen
+    let ip: u64 = c_ip
+    let port_c: u64 = c_port
+    if kodbframe.key_is(cmd, cl, (&c_hello[0]) as u64) {
+        do_hello(state, id, ip, port_c)
+        return
+    }
+    if kodbframe.key_is(cmd, cl, (&c_auth[0]) as u64) {
+        do_auth(state, id, ip, port_c, a, e)
+        return
+    }
+    if kodbframe.key_is(cmd, cl, (&c_ping[0]) as u64) {
+        reply_ok(state, id)
+        return
+    }
+    if !kodbauth.granted(ip, port_c) {
+        err_auth(state, id, (&m_noauth[0]) as u64)
+        return
+    }
+    if kodbframe.key_is(cmd, cl, (&c_info[0]) as u64) {
+        do_info(state, id)
+        return
+    }
+    if j_on != 0 {
+        reply_err(state, id, (&e_busy[0]) as u64, (&m_jobbusy[0]) as u64)
+        return
+    }
+    kodbout.reset()
+    if kodbframe.key_is(cmd, cl, (&c_ps[0]) as u64) {
+        let full: bool = kodbframe.tlv_num(a, e, (&k_full[0]) as u64, 0) != 0
+        let rows: u64 = kodbcmd.ps(state, full)
+        job_start(id, 1, rows, 0xFFFFFFFFFFFFFFFF)
+        return
+    }
+    if kodbframe.key_is(cmd, cl, (&c_stacks[0]) as u64) {
+        let rows: u64 = kodbcmd.stacks(state, kodbframe.tlv_num(a, e, (&k_pid[0]) as u64, 0))
+        job_start(id, 1, rows, 0xFFFFFFFFFFFFFFFF)
+        return
+    }
+    if kodbframe.key_is(cmd, cl, (&c_locks[0]) as u64) {
+        kodbcmd.locks(state)
+        job_start(id, 1, 0, 0xFFFFFFFFFFFFFFFF)
+        return
+    }
+    if kodbframe.key_is(cmd, cl, (&c_logs[0]) as u64) {
+        var lines: u64 = kodbframe.tlv_num(a, e, (&k_lines[0]) as u64, 100)
+        if lines > 300 {
+            lines = 300
+        }
+        let last: u64 = kodbcmd.logs_tail(state, lines)
+        if kodbframe.tlv_num(a, e, (&k_follow[0]) as u64, 0) != 0 {
+            f_on = 1
+            f_id = id
+            f_cursor = last
+            f_seen = now(state)
+            f_ip = c_ip
+            f_port = c_port
+            var i: u64 = 0
+            while i < 6 {
+                f_mac[i as usize] = c_mac[i as usize]
+                i = i + 1
+            }
+        }
+        job_start(id, 5, last, 0xFFFFFFFFFFFFFFFF)
+        return
+    }
+    if kodbframe.key_is(cmd, cl, (&c_ls[0]) as u64) || kodbframe.key_is(cmd, cl, (&c_cat[0]) as u64) {
+        if !path_arg(a, e, (&path_buf[0]) as u64) {
+            reply_err(state, id, (&e_noent[0]) as u64, (&m_noent[0]) as u64)
+            return
+        }
+        if !kodbcmd.fs_ok(state) {
+            reply_err(state, id, (&e_busy[0]) as u64, (&m_fsbusy[0]) as u64)
+            return
+        }
+        if kodbframe.key_is(cmd, cl, (&c_ls[0]) as u64) {
+            if !kodbcmd.ls(state, (&path_buf[0]) as u64) {
+                reply_err(state, id, (&e_noent[0]) as u64, (&m_noent[0]) as u64)
+                return
+            }
+            job_start(id, 1, 0, 0xFFFFFFFFFFFFFFFF)
+            return
+        }
+        var want: u64 = kodbframe.tlv_num(a, e, (&k_len[0]) as u64, 8192)
+        if want > 8192 {
+            want = 8192
+        }
+        let size: u64 = kodbcmd.cat(state, (&path_buf[0]) as u64, kodbframe.tlv_num(a, e, (&k_offset[0]) as u64, 0), want)
+        if size == 0xFFFFFFFFFFFFFFFF {
+            reply_err(state, id, (&e_noent[0]) as u64, (&m_noent[0]) as u64)
+            return
+        }
+        job_start(id, 3, 0, size)
+        return
+    }
+    reply_err(state, id, (&e_unsup[0]) as u64, (&m_unsup[0]) as u64)
+}
+
+fn follow_pump(state: u64) {
+    if f_on == 0 {
+        return
+    }
+    if now(state) - f_seen > FOLLOW_TICKS {
+        f_on = 0
+        return
+    }
+    set_peer((&f_mac[0]) as u64, f_ip, f_port)
+    var line: [u8; 320] = [0 as u8; 320]
+    var go: bool = true
+    while go && ob_h - ob_t + 3 <= OBN && klog.seq(state) > f_cursor {
+        var fill: u64 = 1
+        pl[0] = 5 as u8
+        var s: u64 = f_cursor + 1
+        let last: u64 = klog.seq(state)
+        if s < klog.first_seq(state) {
+            s = klog.first_seq(state)
+        }
+        var more: bool = true
+        while more && s <= last {
+            let n: u64 = klog.line_at(state, s, (&line[0]) as u64, 316)
+            if fill + n > CHUNK {
+                more = false
+            } else {
+                var i: u64 = 0
+                while i < n {
+                    pl[(fill + i) as usize] = line[i as usize]
+                    i = i + 1
+                }
+                fill = fill + n
+                f_cursor = s
+                s = s + 1
+            }
+        }
+        if fill == 1 {
+            f_cursor = s
+            go = false
+        } else {
+            let _e: bool = emit(state, kodbframe.T_DATA, f_id, fill)
+        }
+    }
+}
+
+fn handle(state: u64, slot: u64) {
+    let f: u64 = slot + 16
+    let n: u64 = kodbframe.le16(slot + 14)
+    if !kodbframe.check(f, n) {
+        n_drop = n_drop + 1
+        return
+    }
+    set_peer(slot, kodbframe.le32(slot + 8), kodbframe.le16(slot + 12))
+    let t: u64 = kodbframe.ftype(f)
+    let id: u64 = kodbframe.fid(f)
+    if f_on != 0 && c_ip == f_ip && c_port == f_port {
+        f_seen = now(state)
+    }
+    if t == kodbframe.T_PING {
+        let pn: u64 = kodbframe.plen(f)
+        load_pl(f + kodbframe.HDR, pn)
+        let _e: bool = emit(state, kodbframe.T_PONG, id, pn)
+        return
+    }
+    if t == kodbframe.T_CANCEL {
+        if f_on != 0 && id == f_id && kodbauth.granted(c_ip, c_port) {
+            f_on = 0
+            reply_ok(state, id)
+        }
+        return
+    }
+    if t == kodbframe.T_REQ {
+        handle_req(state, slot)
+    }
+}
+
+fn service(state: u64, my_ip: u64) {
+    if on == 0 {
+        return
+    }
+    me_ip = my_ip
+    kodbauth.token_try(state, now(state))
+    job_pump(state)
+    var guard: u64 = 0
+    while q_t != q_h && guard < QN && ob_h - ob_t + 4 <= OBN {
+        let slot: u64 = (&q[0]) as u64 + (q_t % QN) * QSLOT
+        handle(state, slot)
+        q_t = q_t + 1
+        guard = guard + 1
+        job_pump(state)
+    }
+    follow_pump(state)
+}
+
+fn tx_len() -> u64 {
+    if ob_t == ob_h {
+        return 0
+    }
+    return ob_len[(ob_t % OBN) as usize]
+}
+
+fn tx_ptr() -> u64 {
+    return (&ob[0]) as u64 + (ob_t % OBN) * OBSLOT
+}
+
+fn tx_pop() {
+    ob_t = ob_t + 1
+}

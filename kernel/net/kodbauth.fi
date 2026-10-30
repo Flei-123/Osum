@@ -1,0 +1,168 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import fs.fs
+import arch.x86_64.apic
+import crypto.sha256
+import net.kodbcmd
+
+export { token_try, token_len, make_nonce, session_open, verify, grant, granted, fail, locked_until }
+
+const TOKEN_MAX: u64 = 64
+
+static mut tok: [u8; 64] = [0 as u8; 64]
+static mut tok_n: u64 = 0
+static mut tok_next: u64 = 0
+static mut s_ip: u64 = 0
+static mut s_port: u64 = 0
+static mut s_ok: u64 = 0
+static mut s_nonce: [u8; 16] = [0 as u8; 16]
+static mut fails: u64 = 0
+static mut lock_until: u64 = 0
+static mut ctr: u64 = 0
+
+fn token_len() -> u64 {
+    return tok_n
+}
+
+fn locked_until() -> u64 {
+    return lock_until
+}
+
+fn token_try(state: u64, now: u64) {
+    var p_tok: [u8; 15] = "/etc/odb.token\0"
+    if tok_n != 0 || now < tok_next {
+        return
+    }
+    tok_next = now + 100
+    if !kodbcmd.fs_ok(state) {
+        return
+    }
+    let ino: u64 = fs.path(state, (&p_tok[0]) as u64)
+    if ino == 0 {
+        return
+    }
+    var n: u64 = fs.read_at(state, ino, 0, (&tok[0]) as u64, TOKEN_MAX)
+    while n > 0 && tok[(n - 1) as usize] <= 32 {
+        n = n - 1
+    }
+    tok_n = n
+}
+
+fn put64(p: u64, v: u64) {
+    var i: u64 = 0
+    while i < 8 {
+        kstate.set8(p + i, ((v >> (i * 8)) & 0xFF) as u8)
+        i = i + 1
+    }
+}
+
+fn make_nonce(state: u64, ip: u64, port: u64, now: u64, out: u64) {
+    var msg: [u8; 32] = [0 as u8; 32]
+    var mac: [u8; 32] = [0 as u8; 32]
+    ctr = ctr + 1
+    put64((&msg[0]) as u64, apic.tsc())
+    put64((&msg[0]) as u64 + 8, ctr)
+    put64((&msg[0]) as u64 + 16, ip | (port << 32))
+    put64((&msg[0]) as u64 + 24, now)
+    var klen: u64 = tok_n
+    if klen == 0 {
+        klen = 8
+        put64((&mac[0]) as u64, apic.tsc() ^ 0x4B4F4442)
+        sha256.hmac((&mac[0]) as u64, 8, (&msg[0]) as u64, 32, (&mac[0]) as u64 + 8)
+    } else {
+        sha256.hmac((&tok[0]) as u64, klen as usize, (&msg[0]) as u64, 32, (&mac[0]) as u64)
+    }
+    var i: u64 = 0
+    while i < 16 {
+        if tok_n == 0 {
+            kstate.set8(out + i, mac[(8 + i) as usize])
+        } else {
+            kstate.set8(out + i, mac[i as usize])
+        }
+        i = i + 1
+    }
+}
+
+fn session_open(ip: u64, port: u64, nonce: u64) {
+    s_ip = ip
+    s_port = port
+    s_ok = 0
+    var i: u64 = 0
+    while i < 16 {
+        s_nonce[i as usize] = kstate.get8(nonce + i) as u8
+        i = i + 1
+    }
+}
+
+fn nib(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 255
+}
+
+fn verify(ip: u64, port: u64, hex: u64) -> bool {
+    var tag: [u8; 10] = "ODB1-auth\0"
+    var msg: [u8; 25] = [0 as u8; 25]
+    var mac: [u8; 32] = [0 as u8; 32]
+    if s_ip != ip || s_port != port || tok_n < 16 {
+        return false
+    }
+    var i: u64 = 0
+    while i < 9 {
+        msg[i as usize] = tag[i as usize]
+        i = i + 1
+    }
+    i = 0
+    while i < 16 {
+        msg[(9 + i) as usize] = s_nonce[i as usize]
+        i = i + 1
+    }
+    sha256.hmac((&tok[0]) as u64, tok_n as usize, (&msg[0]) as u64, 25, (&mac[0]) as u64)
+    var diff: u64 = 0
+    i = 0
+    while i < 32 {
+        let hi: u64 = nib(kstate.get8(hex + i * 2))
+        let lo: u64 = nib(kstate.get8(hex + i * 2 + 1))
+        if hi == 255 || lo == 255 {
+            diff = diff | 1
+        }
+        diff = diff | ((hi * 16 + lo) ^ (mac[i as usize] as u64))
+        i = i + 1
+    }
+    return diff == 0
+}
+
+fn grant(ip: u64, port: u64) {
+    s_ip = ip
+    s_port = port
+    s_ok = 1
+    fails = 0
+}
+
+fn granted(ip: u64, port: u64) -> bool {
+    return s_ok == 1 && s_ip == ip && s_port == port
+}
+
+fn fail(now: u64, hz: u64) {
+    s_ok = 0
+    fails = fails + 1
+    var d: u64 = 1
+    var k: u64 = 1
+    while k < fails && d < 30 {
+        d = d * 2
+        k = k + 1
+    }
+    if d > 30 {
+        d = 30
+    }
+    lock_until = now + d * hz
+}

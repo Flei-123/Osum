@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.ksymtab
+
+export { CAP, set_len, reset, len, full, ptr, ch, puts, putsn, dec, hex, pad_dec, sym, tab, nl,
+    tlv_begin, tlv_str, tlv_dec, tlv_raw, tlv_len, tlv_ptr }
+
+const CAP: u64 = 28672
+
+static mut buf: [u8; 28672] = [0 as u8; 28672]
+static mut used: u64 = 0
+static mut over: u64 = 0
+static mut tbuf: [u8; 1280] = [0 as u8; 1280]
+static mut tused: u64 = 0
+
+fn reset() {
+    used = 0
+    over = 0
+}
+
+fn set_len(n: u64) {
+    used = n
+}
+
+fn len() -> u64 {
+    return used
+}
+
+fn full() -> bool {
+    return over != 0
+}
+
+fn ptr() -> u64 {
+    return (&buf[0]) as u64
+}
+
+fn ch(c: u64) {
+    if used >= CAP {
+        over = 1
+        return
+    }
+    buf[used as usize] = c as u8
+    used = used + 1
+}
+
+fn puts(s: u64) {
+    var i: u64 = 0
+    while kstate.get8(s + i) != 0 {
+        ch(kstate.get8(s + i))
+        i = i + 1
+    }
+}
+
+fn putsn(s: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        ch(kstate.get8(s + i))
+        i = i + 1
+    }
+}
+
+fn nl() {
+    ch(10)
+}
+
+fn tab() {
+    ch(9)
+}
+
+fn dec(v: u64) {
+    var d: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        ch(48)
+        return
+    }
+    while x > 0 {
+        d[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        ch(d[n as usize] as u64)
+    }
+}
+
+fn pad_dec(v: u64, width: u64) {
+    var digits: u64 = 1
+    var x: u64 = v
+    while x >= 10 {
+        x = x / 10
+        digits = digits + 1
+    }
+    while digits < width {
+        ch(32)
+        digits = digits + 1
+    }
+    dec(v)
+}
+
+fn hex(v: u64) {
+    ch(48)
+    ch(120)
+    var started: bool = false
+    var s: u64 = 60
+    var more: bool = true
+    while more {
+        let nib: u64 = (v >> s) & 15
+        if nib != 0 || started || s == 0 {
+            started = true
+            if nib < 10 {
+                ch(48 + nib)
+            } else {
+                ch(87 + nib)
+            }
+        }
+        if s == 0 {
+            more = false
+        } else {
+            s = s - 4
+        }
+    }
+}
+
+fn sym(addr: u64) {
+    let i: u64 = ksymtab.resolve(addr)
+    if i >= ksymtab.n_sym() {
+        hex(addr)
+        return
+    }
+    str(ksymtab.sym_name(i))
+    ch(43)
+    hex(addr - ksymtab.sym_addr(i))
+}
+
+fn tlv_begin() {
+    tused = 0
+}
+
+fn tlv_len() -> u64 {
+    return tused
+}
+
+fn tlv_ptr() -> u64 {
+    return (&tbuf[0]) as u64
+}
+
+fn tput(c: u64) {
+    if tused < 1280 {
+        tbuf[tused as usize] = c as u8
+        tused = tused + 1
+    }
+}
+
+fn tlv_raw(key: u64, v: u64, n: u64) {
+    var kl: u64 = 0
+    while kstate.get8(key + kl) != 0 {
+        kl = kl + 1
+    }
+    tput(kl)
+    var i: u64 = 0
+    while i < kl {
+        tput(kstate.get8(key + i))
+        i = i + 1
+    }
+    tput(n & 0xFF)
+    tput((n >> 8) & 0xFF)
+    i = 0
+    while i < n {
+        tput(kstate.get8(v + i))
+        i = i + 1
+    }
+}
+
+fn tlv_str(key: u64, s: u64) {
+    var n: u64 = 0
+    while kstate.get8(s + n) != 0 {
+        n = n + 1
+    }
+    tlv_raw(key, s, n)
+}
+
+fn tlv_dec(key: u64, v: u64) {
+    var d: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        d[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        d[(19 - n) as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    if v == 0 {
+        tlv_raw(key, (&d[0]) as u64, 1)
+    } else {
+        tlv_raw(key, (&d[0]) as u64 + 20 - n, n)
+    }
+}

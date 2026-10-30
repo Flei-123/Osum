@@ -1,0 +1,346 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import klog
+import sched.sched
+import pwr.pmon
+import fs.fs
+import sync.atomic
+import arch.cpu
+import arch.safemem
+import lib.ksymtab
+import net.kodbout
+
+export { fs_ok, ps, stacks, logs_tail, ls, cat, locks, state_letter }
+
+const KERN_LO: u64 = 0x100000
+const SCAN_BYTES: u64 = 4096
+const SCAN_HITS: u64 = 14
+const LS_MAX: u64 = 400
+
+static mut ent: [u8; 264] = [0 as u8; 264]
+
+fn fs_ok(state: u64) -> bool {
+    return fs.ready(state) && atomic.lock_owner(state, atomic.L_FS) == 0
+}
+
+fn state_letter(s: u64) -> u64 {
+    if s == sched.S_RUN {
+        return 82
+    }
+    if s == sched.S_READY {
+        return 82
+    }
+    if s == sched.S_SLEEP || s == sched.S_WAIT || s == sched.S_POLL {
+        return 83
+    }
+    if s == sched.S_ZOMBIE {
+        return 90
+    }
+    if s == sched.S_STOP {
+        return 84
+    }
+    return 78
+}
+
+fn put_state(s: u64) {
+    var n_ready: [u8; 6] = "ready\0"
+    var n_run: [u8; 4] = "run\0"
+    var n_sleep: [u8; 6] = "sleep\0"
+    var n_wait: [u8; 5] = "wait\0"
+    var n_zombie: [u8; 7] = "zombie\0"
+    var n_new: [u8; 4] = "new\0"
+    var n_stop: [u8; 5] = "stop\0"
+    var n_poll: [u8; 5] = "poll\0"
+    var n_other: [u8; 6] = "other\0"
+    if s == sched.S_READY {
+        kodbout.puts((&n_ready[0]) as u64)
+        return
+    }
+    if s == sched.S_RUN {
+        kodbout.puts((&n_run[0]) as u64)
+        return
+    }
+    if s == sched.S_SLEEP {
+        kodbout.puts((&n_sleep[0]) as u64)
+        return
+    }
+    if s == sched.S_WAIT {
+        kodbout.puts((&n_wait[0]) as u64)
+        return
+    }
+    if s == sched.S_ZOMBIE {
+        kodbout.puts((&n_zombie[0]) as u64)
+        return
+    }
+    if s == sched.S_NEW {
+        kodbout.puts((&n_new[0]) as u64)
+        return
+    }
+    if s == sched.S_STOP {
+        kodbout.puts((&n_stop[0]) as u64)
+        return
+    }
+    if s == sched.S_POLL {
+        kodbout.puts((&n_poll[0]) as u64)
+        return
+    }
+    kodbout.puts((&n_other[0]) as u64)
+}
+
+fn name_of(state: u64, i: u64) {
+    var k: u64 = 0
+    while k < pmon.NAME_MAX && pmon.name_at(state, i, k) != 0 {
+        kodbout.ch(pmon.name_at(state, i, k))
+        k = k + 1
+    }
+}
+
+fn pid_of_index(state: u64, i: u64) -> u64 {
+    if i >= kstate.get(state, kstate.TASKS) {
+        return 0
+    }
+    if sched.tget(state, i, sched.T_STATE) == sched.S_FREE {
+        return 0
+    }
+    return sched.tget(state, i, sched.T_PID)
+}
+
+fn wait_detail(state: u64, i: u64, st: u64) {
+    var w_until: [u8; 7] = "until=\0"
+    var w_in: [u8; 5] = " in=\0"
+    var w_futex: [u8; 7] = "futex=\0"
+    var w_wait4: [u8; 7] = "wait4=\0"
+    var w_poll: [u8; 10] = "pollseq=\0\0"
+    var w_stop: [u8; 9] = "stopsig=\0"
+    var w_sig: [u8; 9] = " sigpend\0"
+    if st == sched.S_SLEEP {
+        let wake: u64 = sched.tget(state, i, sched.T_WAKE)
+        let now: u64 = kstate.get(state, kstate.TICKS)
+        kodbout.puts((&w_until[0]) as u64)
+        kodbout.dec(wake)
+        kodbout.puts((&w_in[0]) as u64)
+        if wake > now {
+            kodbout.dec(wake - now)
+        } else {
+            kodbout.dec(0)
+        }
+    } else if st == sched.S_WAIT {
+        if sched.tget(state, i, sched.T_FUTEX) != 0 {
+            kodbout.puts((&w_futex[0]) as u64)
+            kodbout.hex(sched.tget(state, i, sched.T_FUTEX))
+        } else {
+            kodbout.puts((&w_wait4[0]) as u64)
+            kodbout.dec(sched.tget(state, i, sched.T_WAITPID))
+        }
+    } else if st == sched.S_POLL {
+        kodbout.puts((&w_poll[0]) as u64)
+        kodbout.dec(sched.tget(state, i, sched.T_POLLSEQ))
+    } else if st == sched.S_STOP {
+        kodbout.puts((&w_stop[0]) as u64)
+        kodbout.dec(sched.tget(state, i, sched.T_STOPSIG))
+    }
+    if sched.tget(state, i, sched.T_SIGPEND) != 0 {
+        kodbout.puts((&w_sig[0]) as u64)
+    }
+}
+
+fn ps(state: u64, full: bool) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var rows: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let st: u64 = sched.tget(state, i, sched.T_STATE)
+        if st != sched.S_FREE {
+            kodbout.dec(sched.tget(state, i, sched.T_PID))
+            kodbout.tab()
+            kodbout.dec(pid_of_index(state, sched.tget(state, i, sched.T_PARENT)))
+            kodbout.tab()
+            kodbout.ch(state_letter(st))
+            kodbout.tab()
+            kodbout.dec(sched.tget(state, i, sched.T_UPAGES) * 4)
+            kodbout.tab()
+            name_of(state, i)
+            if full {
+                kodbout.tab()
+                kodbout.dec(sched.tget(state, i, sched.T_KIND))
+                kodbout.tab()
+                put_state(st)
+                kodbout.tab()
+                wait_detail(state, i, st)
+                kodbout.tab()
+                kodbout.dec(sched.tget(state, i, sched.T_RUNS))
+                kodbout.tab()
+                kodbout.dec(sched.tget(state, i, sched.T_TICKS))
+            }
+            kodbout.nl()
+            rows = rows + 1
+        }
+        i = i + 1
+    }
+    return rows
+}
+
+fn cpu_running(state: u64, i: u64) -> u64 {
+    let n: u64 = cpu.count(state)
+    var c: u64 = 0
+    while c < n {
+        if cpu.get(state, c, cpu.C_CUR) == i {
+            return c + 1
+        }
+        c = c + 1
+    }
+    return 0
+}
+
+fn stack_of(state: u64, i: u64) {
+    var s_pid: [u8; 5] = "pid=\0"
+    var s_name: [u8; 7] = " name=\0"
+    var s_state: [u8; 8] = " state=\0"
+    var s_rsp: [u8; 6] = " rsp=\0"
+    var s_oncpu: [u8; 14] = " running-cpu=\0"
+    var s_hit: [u8; 3] = "  \0"
+    let st: u64 = sched.tget(state, i, sched.T_STATE)
+    kodbout.puts((&s_pid[0]) as u64)
+    kodbout.dec(sched.tget(state, i, sched.T_PID))
+    kodbout.puts((&s_name[0]) as u64)
+    name_of(state, i)
+    kodbout.puts((&s_state[0]) as u64)
+    put_state(st)
+    let rsp: u64 = sched.tget(state, i, sched.T_RSP)
+    let lo: u64 = sched.tget(state, i, sched.T_KSTACK)
+    let hi: u64 = sched.tget(state, i, sched.T_KTOP)
+    let run: u64 = cpu_running(state, i)
+    if run != 0 {
+        kodbout.puts((&s_oncpu[0]) as u64)
+        kodbout.dec(run - 1)
+        kodbout.nl()
+        return
+    }
+    kodbout.puts((&s_rsp[0]) as u64)
+    kodbout.hex(rsp)
+    kodbout.nl()
+    if rsp < lo || rsp >= hi || lo == 0 || (rsp & 7) != 0 {
+        return
+    }
+    let top: u64 = kstate.get(state, kstate.KERNEL_END)
+    var end: u64 = rsp + SCAN_BYTES
+    if end > hi {
+        end = hi
+    }
+    var hits: u64 = 0
+    var a: u64 = rsp
+    while a + 8 <= end && hits < SCAN_HITS {
+        var v: u64 = 0
+        if safemem.read64(state, a, (&v) as u64) {
+            if v >= KERN_LO && v < top && ksymtab.resolve(v) < ksymtab.n_sym() {
+                kodbout.puts((&s_hit[0]) as u64)
+                kodbout.sym(v)
+                kodbout.nl()
+                hits = hits + 1
+            }
+        }
+        a = a + 8
+    }
+}
+
+fn stacks(state: u64, only_pid: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var rows: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let st: u64 = sched.tget(state, i, sched.T_STATE)
+        if st != sched.S_FREE && st != sched.S_ZOMBIE {
+            if only_pid == 0 || sched.tget(state, i, sched.T_PID) == only_pid {
+                if sched.tget(state, i, sched.T_KIND) != sched.K_IDLE {
+                    stack_of(state, i)
+                    rows = rows + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return rows
+}
+
+fn logs_tail(state: u64, lines: u64) -> u64 {
+    let last: u64 = klog.seq(state)
+    var first: u64 = klog.first_seq(state)
+    if last > lines && last - lines + 1 > first {
+        first = last - lines + 1
+    }
+    var s: u64 = first
+    var line: [u8; 320] = [0 as u8; 320]
+    while s <= last && !kodbout.full() {
+        let n: u64 = klog.line_at(state, s, (&line[0]) as u64, 316)
+        if n > 0 {
+            kodbout.putsn((&line[0]) as u64, n)
+        }
+        s = s + 1
+    }
+    return last
+}
+
+fn ls(state: u64, path: u64) -> bool {
+    let dir: u64 = fs.path(state, path)
+    if dir == 0 {
+        return false
+    }
+    if fs.inode_type(state, dir) != fs.T_DIR {
+        return false
+    }
+    var i: u64 = 0
+    var going: bool = true
+    while going && i < LS_MAX && !kodbout.full() {
+        let ino: u64 = fs.entry_at(state, dir, i, (&ent[0]) as u64, fs.ENTRY_MAX)
+        if ino == 0 {
+            going = false
+        } else {
+            kodbout.puts((&ent[0]) as u64 + 8)
+            kodbout.tab()
+            kodbout.dec(fs.inode_type(state, ino))
+            kodbout.tab()
+            kodbout.dec(fs.inode_size(state, ino))
+            kodbout.nl()
+            i = i + 1
+        }
+    }
+    return true
+}
+
+fn cat(state: u64, path: u64, off: u64, want: u64) -> u64 {
+    let ino: u64 = fs.path(state, path)
+    if ino == 0 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    if fs.inode_type(state, ino) != fs.T_FILE {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    var n: u64 = want
+    if n > kodbout.CAP {
+        n = kodbout.CAP
+    }
+    let got: u64 = fs.read_at(state, ino, off, kodbout.ptr(), n)
+    kodbout.set_len(got)
+    return fs.inode_size(state, ino)
+}
+
+static mut lock_names: [u8; 72] = "sched\0\0\0frame\0\0\0fs\0\0\0\0\0\0console\0stress\0\0boot\0\0\0\0net\0\0\0\0\0proc\0\0\0\0gui\0\0\0\0\0"
+
+fn locks(state: u64) {
+    var s_by: [u8; 13] = " held-by-cpu\0"
+    var i: u64 = 0
+    while i < kstate.LOCK_COUNT {
+        let o: u64 = atomic.lock_owner(state, i)
+        if o != 0 {
+            kodbout.puts((&lock_names[0]) as u64 + i * 8)
+            kodbout.puts((&s_by[0]) as u64)
+            kodbout.dec(o - 1)
+            kodbout.ch(59)
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+}
