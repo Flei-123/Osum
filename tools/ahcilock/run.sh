@@ -5,11 +5,11 @@
 #   bash tools/ahcilock/run.sh [<kib>]
 #
 # Guest on an ICH9 AHCI disk, four cores: `wrace` writes 4 files while the
-# kernel word `ahcirace` makes cpu 1 save and read the hang slot from its timer
+# kernel word `blkrace` makes cpu 1 save and read the hang slot from its timer
 # interrupt (the freeze-logger path, no fs lock) every 30 ms.
 # Checks: guest and host read every octet back, /proc/fsaudit finds no inode
 # with a block pointer below data_start, the guard logged the unlocked I/O.
-# Counter-proof: `noblkguard noahcilock` (old behaviour) must show damage.
+# Counter-proof: `noblkguard nodrvlock` (old behaviour) must show damage.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -43,7 +43,7 @@ fi
 
 guest() {
     cp -f "$OUT/quelle.img" "$OUT/ziel.img"
-    OSUM_SMP=4 OTA_DRIVE=ahci OSUM_EXTRA="r3alle ahcirace $2" OUT="$OUT" \
+    OSUM_SMP=4 OTA_DRIVE=ahci OSUM_EXTRA="r3alle blkrace $2" OUT="$OUT" \
         bash tools/install/oneshot.sh "$1" roh \
         "wrace run /w1 $PROCS $KIB;cat /proc/fsaudit;exit" 1200 > /dev/null 2>&1
     sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' -e 's/\r//g' "$OUT/$1.txt" 2>/dev/null
@@ -70,8 +70,8 @@ grep -aq "^scan_bad 0" "$L" && ok "/proc/fsaudit: no bad inode in the first stag
     || bad "/proc/fsaudit: $(grep -a '^scan_bad\|^bad ' "$L" | head -3 | tr '\n' '|')"
 grep -aq "^data_start [0-9]" "$L" && ok "/proc/fsaudit prints the geometry" || bad "/proc/fsaudit has no geometry"
 
-echo "== 3. counter-proof: noblkguard noahcilock =="
-guest n "noblkguard noahcilock"
+echo "== 3. counter-proof: noblkguard nodrvlock =="
+guest n "noblkguard nodrvlock"
 L="$OUT/n.txt"
 dmg=""
 grep -aq "wrace: ok files=$PROCS" "$L" || dmg="$dmg guest"
