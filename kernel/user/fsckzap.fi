@@ -1,0 +1,100 @@
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.kcall
+
+export { run }
+
+const PR_ZAP: u64 = 0x4F535703
+const CHUNK: u64 = 4096
+const ST_INO: u64 = 8
+
+static mut zbuf: [u8; 4096] = [0 as u8; 4096];
+
+fn line(text: u64, v: u64) -> u64 {
+    var s_head: [u8; 12] = "fsck: zap: \0";
+    ulib.say((&s_head[0 as usize]) as u64);
+    ulib.say(text);
+    ulib.sayn(v);
+    ulib.nl();
+    return v;
+}
+
+fn copy_in(path: u64, src: u64) -> u64 {
+    let fi: u64 = io.open(src, 0);
+    if errno.failed(fi) {
+        return fi;
+    }
+    let fo: u64 = io.open(path, kcall.O_WRONLY | kcall.O_TRUNC);
+    if errno.failed(fo) {
+        io.close(fi);
+        return fo;
+    }
+    var total: u64 = 0;
+    var more: bool = true;
+    while more {
+        let n: u64 = io.read(fi, (&zbuf[0 as usize]) as u64, CHUNK);
+        if errno.failed(n) {
+            total = n;
+            more = false;
+        } else if n == 0 {
+            more = false;
+        } else {
+            let w: u64 = io.write(fo, (&zbuf[0 as usize]) as u64, n);
+            if errno.failed(w) {
+                total = w;
+                more = false;
+            } else {
+                total = total + w;
+            }
+        }
+    }
+    io.close(fo);
+    io.close(fi);
+    return total;
+}
+
+fn run(args: u64) -> u64 {
+    var s_usage: [u8; 38] = "usage: fsck zap <path> <inode> [src]\n\0";
+    var s_stat: [u8; 13] = "stat failed \0";
+    var s_other: [u8; 26] = "path names another inode \0";
+    var s_refused: [u8; 16] = "kernel refused \0";
+    var s_reset: [u8; 13] = "inode reset \0";
+    var s_copy: [u8; 16] = "restore failed \0";
+    var s_wrote: [u8; 16] = "restored bytes \0";
+    let argc: u64 = ulib.arg_count(args);
+    if argc < 4 {
+        ulib.say((&s_usage[0 as usize]) as u64);
+        return 2;
+    }
+    let path: u64 = ulib.arg_at(args, 2);
+    let ino: u64 = ulib.to_num(ulib.arg_at(args, 3));
+    var st: [u8; 144] = [0 as u8; 144];
+    let r: u64 = io.stat_into(path, (&st[0 as usize]) as u64);
+    if errno.failed(r) {
+        line((&s_stat[0 as usize]) as u64, r);
+        return 3;
+    }
+    let have: u64 = __mmio_read64(((&st[0 as usize]) as u64 + ST_INO) as *mut u64);
+    if have != ino {
+        line((&s_other[0 as usize]) as u64, have);
+        return 3;
+    }
+    let z: u64 = ulib.sys(kcall.SYS_PRCTL, PR_ZAP, ino, 0);
+    if errno.failed(z) {
+        line((&s_refused[0 as usize]) as u64, z);
+        return 4;
+    }
+    line((&s_reset[0 as usize]) as u64, ino);
+    if argc >= 5 {
+        let n: u64 = copy_in(path, ulib.arg_at(args, 4));
+        if errno.failed(n) {
+            line((&s_copy[0 as usize]) as u64, n);
+            return 5;
+        }
+        line((&s_wrote[0 as usize]) as u64, n);
+    }
+    return 0;
+}
