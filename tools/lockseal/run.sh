@@ -112,7 +112,10 @@ A=(build "$TMPD/disk.img" 32768 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf"
 [ -f assets/osum-icons.ttf ] && A+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && A+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
 printf '# /etc/theme.conf\nscheme=day\nmode=light\naccent=\nshape=classic\n' > "$TMPD/theme.conf"
-A+=("/etc/theme.conf=$TMPD/theme.conf" /etc/schemas/)
+printf '# /etc/locale.conf\nlang=de\n' > "$TMPD/locale.conf"
+A+=("/etc/theme.conf=$TMPD/theme.conf" "/etc/locale.conf=$TMPD/locale.conf"
+    /usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/ "/usr/share/locale/en/messages=locale/en/messages"
+    /usr/share/locale/de/ "/usr/share/locale/de/messages=locale/de/messages" /etc/schemas/)
 for s in assets/schemes/*.scheme; do A+=("/etc/schemas/$(basename "$s" .scheme)=$s"); done
 for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
 python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
