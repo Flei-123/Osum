@@ -15,7 +15,9 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+KEEP=${PINSTART_KEEP:-}
+save_shots() { [ -n "$KEEP" ] || return 0; mkdir -p "$KEEP"; for n in reg ctl; do mkdir -p "$KEEP/$n"; cp "$TMPD/$n"/*.ppm "$KEEP/$n/" 2>/dev/null; cp "$TMPD/$n/serial.txt" "$KEEP/$n/" 2>/dev/null; done; }
+trap 'save_shots; rm -rf "$TMPD"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
