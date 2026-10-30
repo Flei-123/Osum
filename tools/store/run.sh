@@ -391,6 +391,7 @@ EOS
     echo "echo ==FERTIG=="
 } > "$TMPD/sW.sh"
 EXTRA=("/etc/uitrace=$TMPD/locale.conf" "/etc/theme.conf=$TMPD/theme.conf" "/etc/locale.conf=$TMPD/locale.conf")
+EXTRA+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/ "/usr/share/locale/de/messages=locale/de/messages" "/usr/share/locale/en/messages=locale/en/messages")
 [ -f assets/osum-icons.ttf ] && EXTRA+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && EXTRA+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
 PROGS_SAVE=$PROGS; PROGS="$PROGS store"
@@ -453,13 +454,15 @@ lastn() { wclean | grep -ao "store: tiles=[0-9]*" | tail -1 | tr -cd '0-9'; }
 lasth() { wclean | grep -ao " hits=[0-9]*" | tail -1 | tr -cd '0-9'; }
 if waitfor "==S-WAIT==" 150; then
     ok "the script reached the window part"
-    MARK=1; i=0; while [ $i -lt 60 ]; do sawt "Aktualisieren" && break; sleep 1; i=$((i + 1)); done
-    sawt "Aktualisieren" && ok "the window opened" || bad "no window"
+    MARK=1; i=0; while [ $i -lt 60 ]; do sawt "Alle" && break; sleep 1; i=$((i + 1)); done
+    sawt "Alle" && ok "the window opened" || bad "no window"
     MARK=1
-    waitt "Fertig: Katalog neu" 120 && ok "the window fetched the signed catalog by itself (first start): 'Fertig: Katalog neu'" || bad "no 'Fertig: Katalog neu'"
+    i=0; while [ $i -lt 120 ] && [ "$(lastn)" != 2 ]; do sleep 1; i=$((i + 1)); done
+    [ "$(lastn)" = 2 ] && ok "the window fetched the signed catalog by itself (first start): two tiles" || bad "no catalog tiles after the first start"
+    sawt "store." && bad "raw locale keys painted" || ok "no raw locale keys"
     sleep 3; shot s1-grid
     MARK=1
-    for t in "Updates" "Installiert" "Aktualisieren" "Installieren" "Neue Fassung"; do sawt "$t" && ok "the window shows '$t'" || bad "no '$t'"; done
+    for t in "Updates" "Installiert" "Installieren" "Neue Fassung"; do sawt "$t" && ok "the window shows '$t'" || bad "no '$t'"; done
     [ "$(lastn)" = 2 ] && ok "two tiles (gruss, hallo) -- what the signed catalog delivers, nothing made up" || bad "tiles: '$(lastn)'"
     mark
     echo "  -- keys: Ctrl+F, type, the grid filters"

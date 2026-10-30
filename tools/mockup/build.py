@@ -196,7 +196,7 @@ PAGES = {"store": (store, 860, 560), "explorer": (explorer, 900, 560)}
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "out")
     os.makedirs(out, exist_ok=True)
-    tokens = json.load(open(os.path.join(HERE, "tokens.json"), encoding="utf-8"))
+    tokens = json.load(open(os.environ.get("MOCKUP_TOKENS", os.path.join(HERE, "tokens.json")), encoding="utf-8"))
     for name, (fn, w, h) in PAGES.items():
         with open(os.path.join(out, name + ".html"), "w", encoding="utf-8") as f:
             f.write(fn(tokens))
