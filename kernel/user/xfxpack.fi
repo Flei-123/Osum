@@ -6,19 +6,18 @@ import xfxio
 import xfxparts
 import xfxpath
 import xfxproc
+import xfxstate
 
 export { installed, install_start, state_word, state_pct }
 
 const O_LOG: u64 = 1089
 const FMODE: u64 = 420
-const CHUNK: u64 = 65536
-const REPORT_EVERY: u64 = 16
+const CHUNK: u64 = 262144
+const REPORT_EVERY: u64 = 4
 static mut w_idle: [u8; 5] = "idle\0"
-static mut w_run: [u8; 8] = "running\0"
 static mut w_done: [u8; 5] = "done\0"
 static mut w_fail: [u8; 7] = "failed\0"
-static mut P_SP: [u8; 2] = " \0"
-static mut chunk: [u8; 65536] = [0 as u8; 65536]
+static mut chunk: [u8; 262144] = [0 as u8; 262144]
 
 fn manifest(hex: u64) -> u64 {
     var b: [u8; 1024] = [0 as u8; 1024]
@@ -54,19 +53,6 @@ fn manifest(hex: u64) -> u64 {
     return ulib.EOF
 }
 
-fn write_progress(pct: u64) {
-    var t: [u8; 64] = [0 as u8; 64]
-    var n: [u8; 24] = [0 as u8; 24]
-    ulib.strcpy((&t[0 as usize]) as u64, (&w_run[0 as usize]) as u64)
-    ulib.strcat((&t[0 as usize]) as u64, (&P_SP[0 as usize]) as u64)
-    xfxio.num_text(ulib.sys(ulib.SYS_GETPID, 0, 0, 0), (&n[0 as usize]) as u64)
-    ulib.strcat((&t[0 as usize]) as u64, (&n[0 as usize]) as u64)
-    ulib.strcat((&t[0 as usize]) as u64, (&P_SP[0 as usize]) as u64)
-    xfxio.num_text(pct, (&n[0 as usize]) as u64)
-    ulib.strcat((&t[0 as usize]) as u64, (&n[0 as usize]) as u64)
-    xfxio.write_text(xfxpath.p_state(), (&t[0 as usize]) as u64, ulib.O_MAKE)
-}
-
 fn file_sha(path: u64, hex: u64, size: u64) -> u64 {
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
     if ulib.bad(fd) {
@@ -90,7 +76,7 @@ fn file_sha(path: u64, hex: u64, size: u64) -> u64 {
                 let pct: u64 = total * 99 / size
                 if pct != last {
                     last = pct
-                    write_progress(pct)
+                    xfxstate.write_progress(pct)
                 }
             }
         }
@@ -123,7 +109,7 @@ fn install_work() -> u64 {
     var e_size: [u8; 37] = "xfx: pack size differs from manifest\0"
     var e_sha: [u8; 40] = "xfx: sha256 mismatch, nothing extracted\0"
     var e_join: [u8; 26] = "xfx: joining parts failed\0"
-    var m_join: [u8; 22] = "xfx: parts joined in \0"
+    var m_join: [u8; 29] = "xfx: parts joined+hashed in \0"
     var e_tar: [u8; 23] = "xfx: extraction failed\0"
     var e_bin: [u8; 45] = "xfx: firefox binary missing after extraction\0"
     var m_have: [u8; 23] = "xfx: already installed\0"
@@ -145,12 +131,14 @@ fn install_work() -> u64 {
         xfxio.msg((&m_have[0 as usize]) as u64)
         return 0
     }
+    var hashed: bool = false
     if xfxparts.present() {
         let tj: u64 = xfxio.now_ms()
-        if xfxparts.assemble((&chunk[0 as usize]) as u64, CHUNK) == ulib.EOF {
+        if xfxparts.assemble((&chunk[0 as usize]) as u64, CHUNK, wsize, (&have[0 as usize]) as u64) == ulib.EOF {
             xfxio.msg((&e_join[0 as usize]) as u64)
             return 1
         }
+        hashed = true
         say_ms((&m_join[0 as usize]) as u64, xfxio.now_ms() - tj)
     }
     let tsize: u64 = ulib.size_of(xfxpath.p_tar())
@@ -162,15 +150,17 @@ fn install_work() -> u64 {
         xfxio.msg((&e_size[0 as usize]) as u64)
         return 1
     }
-    write_progress(0)
-    file_sha(xfxpath.p_tar(), (&have[0 as usize]) as u64, tsize)
-    say_ms((&m_hash[0 as usize]) as u64, xfxio.now_ms() - t0)
+    if !hashed {
+        xfxstate.write_progress(0)
+        file_sha(xfxpath.p_tar(), (&have[0 as usize]) as u64, tsize)
+        say_ms((&m_hash[0 as usize]) as u64, xfxio.now_ms() - t0)
+    }
     if !ulib.streq((&have[0 as usize]) as u64, (&want[0 as usize]) as u64) {
         xfxio.msg((&e_sha[0 as usize]) as u64)
         return 1
     }
     xfxio.msg((&m_ok[0 as usize]) as u64)
-    write_progress(100)
+    xfxstate.write_progress(100)
     ulib.sys(ulib.SYS_CHDIR, xfxpath.p_root(), 0, 0)
     var argv: [u64; 4] = [0 as u64; 4]
     argv[0] = (&a_tar[0 as usize]) as u64
@@ -197,11 +187,11 @@ fn state_word() -> u64 {
         return (&w_idle[0 as usize]) as u64
     }
     if b[0 as usize] == 0 as u8 {
-        return (&w_run[0 as usize]) as u64
+        return xfxstate.run_word()
     }
     if b[0 as usize] == 114 as u8 {
         if xfxproc.find_slot(xfxio.pid_field(xfxpath.p_state(), 1)) != ulib.EOF {
-            return (&w_run[0 as usize]) as u64
+            return xfxstate.run_word()
         }
         return (&w_fail[0 as usize]) as u64
     }
@@ -224,7 +214,7 @@ fn install_start() -> u64 {
         xfxio.msg((&e_root[0 as usize]) as u64)
         return 1
     }
-    if ulib.streq(state_word(), (&w_run[0 as usize]) as u64) {
+    if ulib.streq(state_word(), xfxstate.run_word()) {
         xfxio.msg((&e_busy[0 as usize]) as u64)
         return 1
     }
@@ -250,7 +240,7 @@ fn install_start() -> u64 {
         ulib.sys(ulib.SYS_DUP2, fd, 2, 0)
         ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
     }
-    write_progress(0)
+    xfxstate.write_progress(0)
     let rc: u64 = install_work()
     if rc == 0 {
         xfxio.write_text(xfxpath.p_state(), (&w_done[0 as usize]) as u64, ulib.O_MAKE)

@@ -98,6 +98,10 @@ make_tar(d + "/big.tar", big)
 manifest(d + "/good.tar", d + "/good.manifest")
 manifest(d + "/good.tar", d + "/bad.manifest", True)
 manifest(d + "/big.tar", d + "/big.manifest")
+braw = open(d + "/big.tar", "rb").read()
+bq = len(braw) // 4
+for k in range(4):
+    open(d + "/big.part%03d" % k, "wb").write(braw[k * bq:(k + 1) * bq if k < 3 else len(braw)])
 open(d + "/user.js", "w").write('user_pref("browser.shell.checkDefaultBrowser", false);\n')
 open(d + "/passwd", "w").write("root:x:0:0:root:/:/bin/sh\njustin:x:1000:1000:Justin:/home/justin:/bin/sh\n")
 open(d + "/group", "w").write("root:x:0:\njustin:x:1000:\n")
@@ -203,11 +207,11 @@ SPEC="$SPEC /bin/wayd=$TMPD/xfxstub.elf"
 BASE="$SPEC /etc/passwd=$TMPD/passwd@644:0:0 /etc/group=$TMPD/group@644:0:0 /usr/share/xfx/user.js=$TMPD/user.js@644:0:0"
 
 build_parts_img() {
-    local name=$1 script=$2 plist=""
+    local name=$1 script=$2 plist="" src=${PARTS_SRC:-good} blocks=${PARTS_BLOCKS:-16384}
     shift 2
-    for k in "$@"; do plist="$plist /usr/share/xfx/firefox.tar.part$k=$TMPD/good.part$k@644:0:0"; done
-    python3 tools/osum/mkfs.py build "$TMPD/$name.img" 16384 $DIRS $BASE $plist \
-        "/usr/share/xfx/firefox.manifest=$TMPD/good.manifest@644:0:0" \
+    for k in "$@"; do plist="$plist /usr/share/xfx/firefox.tar.part$k=$TMPD/$src.part$k@644:0:0"; done
+    python3 tools/osum/mkfs.py build "$TMPD/$name.img" "$blocks" $DIRS $BASE $plist \
+        "/usr/share/xfx/firefox.manifest=$TMPD/$src.manifest@644:0:0" \
         "/t/run.sh=$TMPD/$script@644:0:0" > "$TMPD/mkfs-$name.txt" 2>&1 \
         && ok "image $name built" || { bad "mkfs fails for $name"; head -5 "$TMPD/mkfs-$name.txt"; }
 }
@@ -249,6 +253,15 @@ build_img bad good.tar bad.manifest bad.sh 16384
 build_img big big.tar big.manifest big.sh $(( BIG_MIB * 2 * 2 * 1024 + 32768 ))
 build_parts_img parts parts.sh 000 001 002
 build_parts_img gap gap.sh 000 002
+cat > "$TMPD/bigparts.sh" <<'SCRIPT'
+echo @@bigparts
+/bin/xfx install
+/bin/xfxt waitfor /run/xfx.install done 900
+/bin/xfx status
+cat /var/log/xfx.log
+echo @@end
+SCRIPT
+PARTS_SRC=big PARTS_BLOCKS=$(( BIG_MIB * 3 * 2048 + 32768 )) build_parts_img bigparts bigparts.sh 000 001 002 003
 
 BASIS="nokbd nosched noproc nofs noring3 vfs"
 run_case() {
@@ -326,7 +339,7 @@ P="$TMPD/parts.txt"
 grep -qa '^@@end' "$P" && ok "parts: script ran to the end" || bad "parts: script did not finish"
 has "$P" parts 'waitfor=ok' "parts: install reaches done"
 has "$P" parts 'installed=yes install=done' "parts: status after install"
-has "$P" parts 'parts joined in' "parts: joined message logged"
+has "$P" parts 'parts joined\+hashed in' "parts: joined message logged"
 has "$P" parts 'sha256 ok, extracting' "parts: joined tar matches the manifest sha"
 [ "$(seg "$P" parts | grep -ac 'exists=yes')" = 1 ] && ok "parts: only the firefox binary exists afterwards" || bad "parts: wrong set of files left (tar or parts remain)"
 [ "$(seg "$P" parts | grep -ac 'exists=no')" = 4 ] && ok "parts: tar and all three parts removed" || bad "parts: tar or parts still present"
@@ -356,6 +369,22 @@ if [ -n "${hms:-}" ] && [ -n "${tms:-}" ] && [ "$hms" -gt 0 ]; then
     [ "$hest" -le "${XFX_MAX_HASH_SECONDS:-90}" ] && ok "estimated sha256 time for 333 MiB: ${hest} s" || bad "estimated sha256 time for 333 MiB: ${hest} s (limit ${XFX_MAX_HASH_SECONDS:-90})"
 else
     bad "timing lines missing in the install log"
+fi
+
+echo "== 6. join + hash speed (split pack) =="
+run_case bigparts 1200 ahci
+J="$TMPD/bigparts.txt"
+grep -qa '^@@end' "$J" && ok "bigparts: script ran to the end" || bad "bigparts: script did not finish"
+has "$J" bigparts 'waitfor=ok' "bigparts: installed"
+has "$J" bigparts 'sha256 ok, extracting' "bigparts: joined tar matches the manifest sha"
+jms=$(seg "$J" bigparts | grep -aoE 'parts joined\+hashed in [0-9]+ ms' | grep -oE '[0-9]+' | head -1)
+if [ -n "${jms:-}" ] && [ "$jms" -gt 0 ]; then
+    jest=$(( 333 * jms / BIG_MIB / 1000 ))
+    hin "join+hash of ${BIG_MIB} MiB: ${jms} ms; 333 MiB would take about ${jest} s"
+    echo "METRIC join_hash_ms=${jms} mib=${BIG_MIB}"
+    ok "join+hash timing line present"
+else
+    bad "join+hash timing line missing in the install log"
 fi
 
 echo "XFX: $pass passed, $fail failed"
