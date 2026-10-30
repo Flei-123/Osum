@@ -66,6 +66,9 @@ runvm nostore nostore -device edu
 runvm noedu "" 
 runvm deny "" -device edu
 runvm empty "" -device edu
+for n in edu nostore noedu deny empty; do
+    has "$D/$n.klar" "==END==" "$n: /proc/drivers output complete (end marker reached)"
+done
 has "$D/edu.klar" "drvstore: pkgs=8 valid=3" "edu: 8 packages scanned, 3 valid"
 has "$D/edu.klar" "drvstore: pkg edudemo ok" "edu: good package accepted"
 has "$D/edu.klar" "drvstore: pkg badsig rejected 20" "edu: bad signature rejected"
