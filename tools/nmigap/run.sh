@@ -4,8 +4,12 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 CYCLES=${NMIGAP_CYCLES:-8}
 PERIOD=${NMIGAP_PERIOD:-200000}
-TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+if [ -n "${NMIGAP_OUT:-}" ]; then
+    TMPD=$NMIGAP_OUT; mkdir -p "$TMPD"
+else
+    TMPD=$(mktemp -d)
+    trap 'rm -rf "$TMPD"' EXIT
+fi
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
