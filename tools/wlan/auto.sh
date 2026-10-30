@@ -94,6 +94,8 @@ hasnot "$C" 'fakeap: m2 badmic' "no MIC failure"
 has "$C" '==END==' "system keeps running"
 has "$C" 'fakefw: scan ok v7 slots=52 nchan=35' "W-WLAN17: scan request is v7 with 52 channel slots (from the blob TLVs), 35 channels used"
 hasnot "$C" 'fakefw: scan bad' "W-WLAN17: the fake firmware format check never fails"
+has "$C" 'fakefw: umac hdr ok wide cmd=' "r2341: SCAN_CFG goes out with the wide header (group 1, length field) like iwlwifi"
+hasnot "$C" 'fakefw: umac hdr bad' "r2341: no UMAC command with a short or broken header"
 
 has "$C" 'fakefw: scd ok q4' "W-WLAN19: SCD_QUEUE_CFG v1 for queue 4 accepted by the format check"
 has "$C" 'fakefw: addsta q4 ok' "W-WLAN19: ADD_STA carries tfd_queue_msk BIT(4)"
@@ -213,5 +215,13 @@ hasnot "$K" 'wlan: link probe' "iwloldloss: no probe"
 [ "$(grep -ac 'fakeap: m4 ok' "$K")" -eq 1 ] && ok "iwloldloss: no reconnect" || bad "iwloldloss: unexpected handshake count"
 has "$K" 'link losses=0 reconnects=0' "iwloldloss: counters stay zero"
 
+echo "-- hd: counter-proof iwloldhdr (UMAC scan commands with the short header, as before r2341)"
+printf 'echo ==START==\nsleep 14\ncat /proc/wlan\necho ==END==\n' > "$T/s.sh"
+image hd || { bad "image hd"; }
+run hd "iwlfhtest iwlfhbind iwloldhdr"
+HD="$T/hd.klar"
+has "$HD" 'fakefw: umac hdr bad short cmd=' "iwloldhdr: the fake firmware drops the short-header SCAN_CFG silently"
+has "$HD" 'diag: step=scan_cfg err=-70' "iwloldhdr: same signature as the HP (scan_cfg err=-70)"
+hasnot "$HD" 'net OrientFake ' "iwloldhdr: no network found"
 echo "WLANAUTO: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]
