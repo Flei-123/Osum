@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import libc.io
+
+export { save, last_step, last_errno, saved_ssid }
+
+const MODE: u64 = 384
+const SYS_CHMOD: u64 = 90
+
+static mut P_CONF: [u8; 15] = "/etc/wlan.conf\0"
+static mut step: u64 = 0
+static mut errno_now: u64 = 0
+
+fn last_step() -> u64 {
+    return step
+}
+
+fn last_errno() -> u64 {
+    return errno_now
+}
+
+fn wipe(p: u64, n: u64) {
+    var z: u64 = 0
+    while z < n {
+        *((p + z) as *mut u8) = 0 as u8
+        z = z + 1
+    }
+}
+
+fn put_line(buf: u64, at: u64, key: u64, val: u64, cap: u64) -> u64 {
+    var o: u64 = at
+    var i: u64 = 0
+    while *((key + i) as *mut u8) != 0 as u8 {
+        *((buf + o) as *mut u8) = *((key + i) as *mut u8)
+        o = o + 1
+        i = i + 1
+    }
+    i = 0
+    while *((val + i) as *mut u8) != 0 as u8 && o < cap {
+        *((buf + o) as *mut u8) = *((val + i) as *mut u8)
+        o = o + 1
+        i = i + 1
+    }
+    *((buf + o) as *mut u8) = 10 as u8
+    return o + 1
+}
+
+fn save(ssid: u64, psk: u64) -> bool {
+    var inh: [u8; 192] = [0 as u8; 192]
+    var k_ssid: [u8; 6] = "ssid \0"
+    var k_psk: [u8; 5] = "psk \0"
+    let b: u64 = (&inh[0 as usize]) as u64
+    var at: u64 = put_line(b, 0, (&k_ssid[0 as usize]) as u64, ssid, 100)
+    at = put_line(b, at, (&k_psk[0 as usize]) as u64, psk, at + 70)
+    step = 0
+    errno_now = 0
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_CONF[0 as usize]) as u64, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        step = 1
+        errno_now = 0 -% fd
+        wipe(b, 192)
+        return false
+    }
+    var done: u64 = 0
+    while done < at {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, b + done, at - done)
+        if ulib.bad(w) || w == 0 {
+            step = 2
+            if ulib.bad(w) {
+                errno_now = 0 -% w
+            }
+            io.close(fd)
+            wipe(b, 192)
+            return false
+        }
+        done = done + w
+    }
+    io.close(fd)
+    let r: u64 = ulib.sys(SYS_CHMOD, (&P_CONF[0 as usize]) as u64, MODE, 0)
+    wipe(b, 192)
+    if ulib.bad(r) {
+        step = 3
+        errno_now = 0 -% r
+        let _u: u64 = ulib.sys(ulib.SYS_UNLINK, (&P_CONF[0 as usize]) as u64, 0, 0)
+        return false
+    }
+    return true
+}
+
+fn saved_ssid(dst: u64, cap: u64) -> bool {
+    var buf: [u8; 192] = [0 as u8; 192]
+    *(dst as *mut u8) = 0 as u8
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_CONF[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[0 as usize]) as u64, 150)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n < 6 {
+        return false
+    }
+    var o: u64 = 0
+    var i: u64 = 5
+    while i < n && buf[(i) as usize] != 10 as u8 && o + 1 < cap {
+        *((dst + o) as *mut u8) = buf[(i) as usize]
+        o = o + 1
+        i = i + 1
+    }
+    *((dst + o) as *mut u8) = 0 as u8
+    wipe((&buf[0 as usize]) as u64, 192)
+    return o > 0
+}
