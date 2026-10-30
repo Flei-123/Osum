@@ -184,12 +184,22 @@ for n in 0 1 2 3 4; do BASE+=("/etc/ota.conf.$n=$TMPD/ota.conf.$n"); done
 python3 tools/osum/mkfs.py "${BASE[@]}" > "$TMPD/mkfs.txt" 2>&1 || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
 ACCEL="-cpu $OSUM_CPU"
 [ -r /dev/kvm ] && [ -w /dev/kvm ] && ACCEL="-accel kvm -cpu host"
-timeout "${STOREXFX_TIMEOUT:-1500}" qemu-system-x86_64 $ACCEL -smp 1 -kernel "$TMPD/k0.img" -m 768 \
+QEMU_LIMIT=${STOREXFX_TIMEOUT:-1500}
+timeout "$QEMU_LIMIT" qemu-system-x86_64 $ACCEL -smp 1 -kernel "$TMPD/k0.img" -m 768 \
     -append "osum vfs nokbd bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
     -serial "file:$TMPD/g.txt" -display none -no-reboot \
     -netdev user,id=n0 -device e1000,netdev=n0,mac=52:54:00:0a:0b:0c \
     -drive "file=$TMPD/g.img,format=raw,if=ide,index=0" \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
+QPID=$!
+for _ in $(seq 1 $((QEMU_LIMIT / 2))); do
+    grep -qa "==FERTIG==" "$TMPD/g.txt" 2>/dev/null && break
+    kill -0 "$QPID" 2>/dev/null || break
+    sleep 2
+done
+sleep 2
+kill "$QPID" 2>/dev/null; pkill -P "$QPID" 2>/dev/null
+wait "$QPID" 2>/dev/null
 tr -cd '\11\12\15\40-\176' < "$TMPD/g.txt" > "$TMPD/g.klar" 2>/dev/null || true
 G="$TMPD/g.klar"
 grep -qa '==FERTIG==' "$G" || { bad "the guest did not finish"; tail -25 "$G" | sed 's/^/        /'; }
