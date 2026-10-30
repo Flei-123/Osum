@@ -89,16 +89,19 @@ a11ydemo &
 sleep 4
 echo ==PRE==
 a11ydemo lockprobe safe
+sleep 2
 echo ==PRE-DONE==
 sleep 4
 lock &
 sleep 8
 echo ==LOCKED==
 a11ydemo lockprobe
+sleep 2
 echo ==LOCKED-DONE==
 sleep 50
 echo ==AFTER==
 a11ydemo lockprobe
+sleep 2
 echo ==AFTER-DONE==
 sleep 40
 echo ==UNLOCKED==
