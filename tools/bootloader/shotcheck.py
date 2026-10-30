@@ -35,7 +35,7 @@ def logo_match(ppm, logo):
     for y in range(0, lh, 2):
         for x in range(0, lw, 2):
             r, g, b, a = rgba[(y * lw + x) * 4:(y * lw + x) * 4 + 4]
-            if a != 255:
+            if a != 255 or r + g + b < 90:
                 continue
             px = left + x * scale
             py = top + y * scale
