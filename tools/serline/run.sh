@@ -125,7 +125,7 @@ overlap() {
     for n in $(seq 1 "$BOOTS"); do
         run "$1$n" "smpfrueh $2"
         local c
-        c=$(grep -ac 'serial: overlap' "$TMPD/$1$n.txt")
+        c=$(tr -cd '\001' < "$TMPD/$1$n.txt" | wc -c)
         echo "        boot $n: overlap markers=$c"
         OVL=$((OVL + c))
     done
