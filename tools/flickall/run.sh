@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)
 trap '[ -n "${FLICKALL_KEEP:-}" ] && { mkdir -p "$FLICKALL_KEEP"; for v in new old; do mkdir -p "$FLICKALL_KEEP/$v"; cp "$TMPD/$v"/serial.txt "$TMPD/$v"/fahren.log "$TMPD/$v"/ref*.ppm "$TMPD/$v"/post.ppm "$FLICKALL_KEEP/$v/" 2>/dev/null; cp "$TMPD/$v.res" "$FLICKALL_KEEP/" 2>/dev/null; done; }; rm -rf "$TMPD"' EXIT
 export DESIGNBUILD="$TMPD/build"
-export EH_SMP=${EH_SMP:-2}
+export EH_SMP=${EH_SMP:-1}
 PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc find du chmod id whoami touch true false sleep kill sort uniq rmdir theme locate dhcp host ping netstat notify osk osktest"
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
@@ -30,7 +30,7 @@ for v in new old; do
         [ "$half" = 0 ] && ok "new: no half-painted keyboard frame" || bad "new: $half half-painted keyboard frames"
     else
         [ "$atomic" = 0 ] && ok "old: paintdirect paints in place ($total windows)" || bad "old: $atomic windows still private"
-        printf '  INFO  old counter-proof: %s half-painted keyboard frames (informational, capture timing dependent)\n' "$half"
+        [ "$half" -ge 2 ] && ok "old counter-proof: $half half-painted keyboard frames" || bad "old counter-proof sees only $half half-painted frames"
     fi
 done
 echo "FLICKALL: $pass passed, $fail failed"
