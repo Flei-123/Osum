@@ -83,7 +83,7 @@ grep -qi 'limine-bios' "$W/esp.txt" && bd "limine-bios.sys copied although the o
 boot() {
     local n=$1 how=$2 img=$3 sock="$W/$1.sock" ser="$W/$1.txt"
     rm -f "$sock" "$ser"; cp -f "$img" "$W/$n.img"
-    local args=(-machine pc -m 1024 -smp 2 -vga std -display none -no-reboot
+    local args=(-machine pc -m 1024 -smp "${SMP:-2}" -vga std -display none -no-reboot
                 -serial "file:$ser" -monitor "unix:$sock,server,nowait")
     if [ "${BUS:-ahci}" = ahci ]; then
         args+=(-device ich9-ahci,id=ahci0 -drive "if=none,id=hd0,file=$W/$n.img,format=raw" -device ide-hd,drive=hd0,bus=ahci0.0)
@@ -132,6 +132,30 @@ BUS=ide boot seabiosidefull bios "$W/disk.img" "glogin: bereit" 400 30
 check_login seabiosidefull ""
 grep -aq "hang: detected" "$W/seabiosidefull.txt" && bd "seabiosidefull: freeze logger fired: $(grep -a 'hang: detected' "$W/seabiosidefull.txt" | head -1)" \
     || okk "seabiosidefull: freeze logger stayed quiet during 30 s of PIO writes after login"
+ide_exec_check() {
+    local n=$1 ser="$W/$1.txt"
+    grep -aq "elf: refused" "$ser" && bd "$n: exec failed on the IDE disk: $(grep -ac 'elf: refused' "$ser") x '$(grep -a 'elf: refused' "$ser" | head -1)'" \
+        || okk "$n: no exec refused on the IDE disk"
+    grep -aqE "desk: start /bin/taskbar +pid=[1-9]" "$ser" && okk "$n: taskbar started from the IDE disk" || bd "$n: taskbar not started"
+}
+ide_exec_check seabiosidefull
+
+echo "== 3a3b. SeaBIOS, IDE disk, 4 cores: concurrent writers and readers keep the channel serialized =="
+SMP=4 BUS=ide boot seabiosidesmp bios "$W/disk.img" "glogin: bereit" 400 30
+check_login seabiosidesmp ""
+ide_exec_check seabiosidesmp
+grep -aq "hang: detected" "$W/seabiosidesmp.txt" && bd "seabiosidesmp: freeze logger fired: $(grep -a 'hang: detected' "$W/seabiosidesmp.txt" | head -1)" \
+    || okk "seabiosidesmp: freeze logger stayed quiet"
+
+if [ -n "${IDEEXEC_OLD_KERNEL:-}" ] && [ -f "$IDEEXEC_OLD_KERNEL" ]; then
+    echo "== 3a5. counter-proof: a kernel that flushes write-behind outside the fs lock breaks the IDE channel on 4 cores =="
+    cp "$W/disk.img" "$W/oldx.img"
+    mcopy -o -i "$W/oldx.img@@1048576" "$IDEEXEC_OLD_KERNEL" ::osum.mb 2>/dev/null
+    SMP=4 BUS=ide boot seabiosideraced bios "$W/oldx.img" "elf: refused\|hang: detected" 400 20
+    grep -aq "elf: refused\|hang: detected" "$W/seabiosideraced.txt" && okk "seabiosideraced: old kernel shows the race ($(grep -a 'elf: refused\|hang: detected' "$W/seabiosideraced.txt" | head -1))" \
+        || bd "seabiosideraced: old kernel stayed clean (counter-proof is blind)"
+    rm -f "$W/oldx.img"
+fi
 
 if [ -n "${IDEPIO_OLD_KERNEL:-}" ] && [ -f "$IDEPIO_OLD_KERNEL" ]; then
     echo "== 3a4. counter-proof: the old kernel on the same IDE disk trips the freeze logger =="
