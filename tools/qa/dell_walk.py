@@ -66,6 +66,7 @@ APPS = [
     dict(id="trashbin", osp="trashbin", name="Recycle Bin", term="papierkorb", bin="trashbin", prog="trashbin",
          acts=["warte 3", "foto {id}-3-liste"]),
     dict(id="widgets", osp="widgets", name="Widgets", term="widgets", bin="widgetdemo", prog="widgetdemo",
+         known="widgetdemo rect lines are cut by interleaved serial output; branch w-r91b-widgets fixes that but the run ends in #DF (r91b)",
          acts=["warte 3", "klick_body", "taste tab", "taste tab", "warte 1", "foto {id}-3-tab"]),
     dict(id="certus", osp="certus", name="Certus (browser)", term="certus", bin="certus", prog="",
          needs_special_build=True,
