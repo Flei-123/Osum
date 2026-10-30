@@ -11,7 +11,8 @@
 # Version in der Historie). Eingecheckt ist nur der Commit-Hash; dieses
 # Skript baut daraus:
 #
-#   vendor/firn/bin/firnc    firnc0 -- der Uebersetzer in Rust
+#   vendor/firn/bin/firnc    wrapper: FIRN_USE_AS=1 (GNU as, not the integrated assembler), then firnc0
+#   vendor/firn/bin/firnc0   firnc0 -- der Uebersetzer in Rust
 #   vendor/firn/bin/firnc1   firnc1 -- der Uebersetzer in Firn, von firnc0 gebaut
 #   vendor/firn/lib/         die Firn-Bibliothek des gleichen Commits (std, ...)
 #
@@ -156,8 +157,14 @@ echo ">> firnc0 bauen (Ziel $HOST)"
 ( cd "$BAU/compiler" && cargo build --release --target "$HOST" >/dev/null )
 
 mkdir -p "$HIER/bin"
-rm -f "$HIER/bin/firnc" "$HIER/bin/firnc1" "$HIER/.gebaut"
-cp -f "$BAU/compiler/target/$HOST/release/firnc" "$HIER/bin/firnc"
+rm -f "$HIER/bin/firnc" "$HIER/bin/firnc0" "$HIER/bin/firnc1" "$HIER/.gebaut"
+cp -f "$BAU/compiler/target/$HOST/release/firnc" "$HIER/bin/firnc0"
+cat > "$HIER/bin/firnc" <<'WRAP'
+#!/bin/sh
+export FIRN_USE_AS="${FIRN_USE_AS-1}"
+exec "$(dirname "$0")/firnc0" "$@"
+WRAP
+chmod +x "$HIER/bin/firnc"
 rm -rf "$HIER/lib"
 # -L: die Firn-Bibliothek enthaelt neun Symlinks, und einer davon
 # (lib/rc/rc.fi) zeigt AUS lib heraus in tests/. Als Symlink kopiert

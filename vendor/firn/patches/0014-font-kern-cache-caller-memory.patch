@@ -1,0 +1,73 @@
+# vendor/firn/patches/0014-font-kern-cache-caller-memory.patch
+#
+# ROUND DSUI-PIN (OrientOS, 30.10.2026) -- font/ttf.fi without `import std.rt`.
+#
+# Firn 8e56de678 added a kerning cache to font/ttf.fi that allocates its
+# table with rt.heap_alloc and therefore imports std.rt. The Osum window
+# server compiles this file as kernel/gfx/fuittf.fi in profile `kernel`,
+# which has no heap and no runtime:
+#   error: the module 'std.rt' belongs to the standard library and is not
+#   available in profile 'kernel'  (lib/font/fuittf.fi:48)
+# The header of ttf.fi itself promises use from a window server without a
+# heap. So the cache memory now comes from the caller: font_kern_cache_attach
+# hands over font_kern_cache_bytes() octets (zeroed); without it font_kern
+# answers from font_kern_raw exactly as the old pin did.
+#
+--- a/font/ttf.fi	2026-10-30 19:15:03.178020431 +0000
++++ b/font/ttf.fi	2026-10-30 19:15:03.207736166 +0000
+@@ -45,14 +45,13 @@
+ // readers below do the shifts by hand instead of casting a pointer; a
+ // `*(p as *mut u16)` would read the machine's order and would be right on
+ // nothing.
+-import std.rt
+ import font.raster
+ 
+ export {
+     Font,
+     font_new, font_init, font_ok,
+     font_upem, font_ascent, font_descent, font_line_gap, font_num_glyphs,
+-    font_glyph_for, font_set_faces, font_set_vhint, font_vhint, font_advance, font_lsb, font_kern, font_has_kern, font_kern_release, font_kern_raw,
++    font_glyph_for, font_set_faces, font_set_vhint, font_vhint, font_advance, font_lsb, font_kern, font_has_kern, font_kern_release, font_kern_raw, font_kern_cache_attach, font_kern_cache_bytes,
+     font_glyph_bbox, font_outline, font_outline_m,
+     font_scratch_needed,
+     font_cmap_format,
+@@ -978,10 +977,17 @@
+ 
+ #[no_gc]
+ fn kern_cache_release(f: *mut Font) {
+-    if (*f).kc != 0 as u64 {
+-        rt.heap_free((*f).kc, KC_BYTES)
+-        (*f).kc = 0 as u64
+-    }
++    (*f).kc = 0 as u64
++}
++
++#[no_gc]
++fn font_kern_cache_attach(f: *mut Font, mem: u64) {
++    (*f).kc = mem
++}
++
++#[no_gc]
++fn font_kern_cache_bytes() -> usize {
++    return KC_BYTES
+ }
+ 
+ #[no_gc]
+@@ -1001,14 +1007,10 @@
+     if (*f).kern_len == 0 && (*f).gk_n == 0 {
+         return 0
+     }
+-    if (*f).kc == 0 as u64 {
+-        let p: u64 = rt.heap_alloc(KC_BYTES)
+-        if p == 0 as u64 {
+-            return font_kern_raw(f, left, right)
+-        }
+-        (*f).kc = p
+-    }
+     let kc: u64 = (*f).kc
++    if kc == 0 as u64 {
++        return font_kern_raw(f, left, right)
++    }
+     let slot: usize = kern_cache_slot(left, right)
+     let key: u64 = (((left as u64) << 32) | (right as u64)) + 1 as u64
+     if kc_get64(kc, slot) == key {
