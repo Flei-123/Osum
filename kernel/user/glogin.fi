@@ -63,6 +63,7 @@ import libc.io
 import wlibc
 import wlib
 import pw
+import authdb
 import pin
 import grp
 import icons
@@ -327,10 +328,13 @@ fn leeren() {
 //
 // Sie steht in `pw.check_hash`. Was hier steht, ist nur die Frage, WEN
 // wir pruefen -- und die Vorsichtsmassnahme fuer den unbekannten Namen.
-fn stimmt() -> bool {
+fn stimmt() -> u64 {
     let n: u64 = (&nam[(0) as usize]) as u64
-    let uid: u64 = pw.uid_of_name(n)
-    if uid == ulib.EOF {
+    let us: u64 = pw.user_state(n)
+    if us == pw.DB_UNREADABLE {
+        return authdb.V_UNREADABLE
+    }
+    if us != pw.DB_OK {
         // DER UNBEKANNTE NAME WIRD TROTZDEM GEPRUEFT. Die Rundenzahl im
         // Scheineintrag ist dieselbe, die `pw.KOSTEN` sagt -- stuende
         // dort eine kleinere, waere ein unbekannter Name schneller
@@ -339,9 +343,10 @@ fn stimmt() -> bool {
         var dummy: [u8; 94] = "$osum1$8192$0000000000000000$0000000000000000000000000000000000000000000000000000000000000000\0"
         let _x: bool = pw.check_hash((&dummy[(0) as usize]) as u64,
             (&kenn[(0) as usize]) as u64)
-        return false
+        return authdb.V_WRONG
     }
-    if !pw.shadow_of(n, (&haben[(0) as usize]) as u64, 180) {
+    let ss: u64 = pw.shadow_state(n, (&haben[(0) as usize]) as u64, 180)
+    if ss != pw.DB_OK {
         // KEIN EINTRAG IN /etc/shadow HEISST: KEINE ANMELDUNG.
         //
         // Das ist die Stelle, an der ein bequemes System sich selbst
@@ -349,19 +354,19 @@ fn stimmt() -> bool {
         // tut dieser Schirm NICHT: ein Konto ohne Kennwort ist ein
         // Konto, an dem sich jeder anmeldet. Wer hereinkommen will,
         // setzt vorher `passwd`.
-        return false
+        return authdb.verdict_of(ss)
     }
     // r253: PIN-shaped input is tried as the device-bound PIN first; every miss falls through to the password check.
     if pin.looks_like_pin((&kenn[(0) as usize]) as u64) {
         if pin.verify(n, (&kenn[(0) as usize]) as u64, 0) == pin.R_OK {
-            return true
+            return authdb.V_OK
         }
     }
     if pw.check_hash((&haben[(0) as usize]) as u64, (&kenn[(0) as usize]) as u64) {
         pin.password_ok(n)
-        return true
+        return authdb.V_OK
     }
-    return false
+    return authdb.V_WRONG
 }
 
 // Die Wartezeit, waehrend das Fenster weiterlebt. In Scheiben von
@@ -555,7 +560,15 @@ fn versuchen() -> bool {
     var s_ok: [u8; 26] = "glogin: angemeldet als \0\0\0"
     var s_no: [u8; 28] = "glogin: abgewiesen, name=\0\0\0"
     var s_uid: [u8; 14] = "glogin: uid=\0\0"
-    if !stimmt() {
+    let verdict: u64 = stimmt()
+    if verdict == authdb.V_UNREADABLE {
+        leeren()
+        authdb.report_unreadable((&T_APP[(0) as usize]) as u64)
+        ulib.strcpy((&kopf[(0) as usize]) as u64, authdb.unreadable_text())
+        fuiscene.refresh()
+        return false
+    }
+    if verdict != authdb.V_OK {
         fehler = fehler + 1
         let _f: u64 = sy(OP_FAIL, 0)
         leeren()

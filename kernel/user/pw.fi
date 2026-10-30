@@ -57,6 +57,7 @@
 profile kernel
 
 import ulib
+import libc.errno
 import tools
 
 export {
@@ -65,6 +66,7 @@ export {
     load_passwd, field, line_at, lines_of, name_of_uid, session_uid, uid_of_name,
     gid_of_name, shell_of_name, home_of_name, shadow_of, PW_MAX,
     read_all, write_all, read_pass, set_shadow,
+    DB_OK, DB_MISSING, DB_UNREADABLE, shadow_state, user_state, db_errno,
     // ------------------------------------------- RUNDE MULTIUSER
     conf_num,
     // RUNDE ANMELDUNG: der Anmeldeschirm liest /etc/passwd Zeile fuer
@@ -590,15 +592,20 @@ static mut shbuf: [u8; 4096] = [0 as u8; 4096]
 // und die Zeile danach beginnt nicht mitten in einem Namen, weil nur
 // GANZE Zeilen verwendet werden.
 fn read_all(path: u64, buf: u64, max: u64) -> u64 {
+    read_err = 0
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
     if ulib.bad(fd) {
+        read_err = errno.negated(fd)
         return ulib.EOF
     }
     var at: u64 = 0
     var going: bool = true
     while going {
         let n: u64 = ulib.sys(ulib.SYS_READ, fd, buf + at, max - 1 - at)
-        if ulib.bad(n) || n == 0 {
+        if ulib.bad(n) {
+            read_err = errno.negated(n)
+            going = false
+        } else if n == 0 {
             going = false
         } else {
             at = at + n
@@ -609,7 +616,80 @@ fn read_all(path: u64, buf: u64, max: u64) -> u64 {
     }
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
     __mmio_write8((buf + at) as *mut u8, 0 as u8)
+    if read_err != 0 && at == 0 {
+        return ulib.EOF
+    }
     return at
+}
+
+const DB_OK: u64 = 0
+const DB_MISSING: u64 = 1
+const DB_UNREADABLE: u64 = 2
+const DB_TRIES: u64 = 5
+const DB_GAP_MS: u64 = 200
+const ERR_NOENT: u64 = 2
+
+static mut read_err: u64 = 0
+static mut db_err: u64 = 0
+
+fn db_errno() -> u64 {
+    return db_err
+}
+
+fn read_db(path: u64, buf: u64, max: u64) -> u64 {
+    var t: u64 = 0
+    while t < DB_TRIES {
+        let n: u64 = read_all(path, buf, max)
+        if n != ulib.EOF && n != 0 {
+            db_err = 0
+            return n
+        }
+        if n == ulib.EOF && read_err == ERR_NOENT {
+            db_err = ERR_NOENT
+            return ulib.EOF
+        }
+        db_err = read_err
+        t = t + 1
+        if t < DB_TRIES {
+            let _s: u64 = ulib.sleep_ms(DB_GAP_MS)
+        }
+    }
+    if db_err == 0 {
+        db_err = ERR_EMPTY
+    }
+    return ulib.EOF
+}
+
+const ERR_EMPTY: u64 = 61
+
+fn user_state(name: u64) -> u64 {
+    var p: [u8; 12] = "/etc/passwd\0"
+    let n: u64 = read_db((&p[0]) as u64, (&pwbuf[0]) as u64, 4096)
+    if n == ulib.EOF {
+        pwlen = 0
+        return DB_UNREADABLE
+    }
+    pwlen = n
+    var f: [u8; 32] = [0 as u8; 32]
+    if !pw_field(name, 2, (&f[0]) as u64, 32) {
+        return DB_MISSING
+    }
+    return DB_OK
+}
+
+fn shadow_state(name: u64, out: u64, max: u64) -> u64 {
+    var p: [u8; 12] = "/etc/shadow\0"
+    let n: u64 = read_db((&p[0]) as u64, (&shbuf[0]) as u64, 4096)
+    if n == ulib.EOF {
+        if db_err == ERR_NOENT {
+            return DB_MISSING
+        }
+        return DB_UNREADABLE
+    }
+    if shadow_scan(name, out, max) {
+        return DB_OK
+    }
+    return DB_MISSING
 }
 
 fn load_passwd() -> u64 {
@@ -797,6 +877,10 @@ fn shadow_of(name: u64, out: u64, max: u64) -> bool {
     if n == ulib.EOF {
         return false
     }
+    return shadow_scan(name, out, max)
+}
+
+fn shadow_scan(name: u64, out: u64, max: u64) -> bool {
     var line: [u8; 256] = [0 as u8; 256]
     var f: [u8; 128] = [0 as u8; 128]
     var i: u64 = 0
