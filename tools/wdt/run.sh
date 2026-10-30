@@ -12,7 +12,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 ACC=$([ -e /dev/kvm ] && echo kvm || echo tcg)
-PROGS="sh cat echo sleep"
+PROGS="sh cat echo sleep ls"
 finish() { [ -n "${WDT_KEEP:-}" ] && { mkdir -p "$WDT_KEEP"; cp "$D"/*.klar "$WDT_KEEP/" 2>/dev/null; }; echo "WDT: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit $?; }
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 mkdir -p "$D/bin"
