@@ -215,6 +215,12 @@ def judge_app(a, out, serial, steps, shots):
         info["started"] = started[-1]
         if ("/%s.osp/" % a["osp"]) not in started[-1] and a["bin"] not in started[-1] and not reasons:
             reasons.append("the launcher started `%s`, expected bundle `%s.osp`" % (started[-1], a["osp"]))
+    opened = marks.get("%s opened" % i)
+    if opened and a.get("term") == "terminal":
+        before_open = serial[b[0]:opened[0]]
+        started_at = before_open.find("launcher: start ")
+        if started_at >= 0 and "kgui: hangup tty=" in before_open[started_at:]:
+            reasons.append("the new terminal window died right after the start (kgui: hangup before the opened step)")
     crashes = [c for c in crash_lines(sl) if "launcher: start refused" not in c]
     if crashes:
         reasons.append("crash/error line(s) on the serial log: " + " | ".join(crashes[:2]))
