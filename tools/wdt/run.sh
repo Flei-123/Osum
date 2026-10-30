@@ -66,9 +66,9 @@ runvm blind busy 75 "wdt=10 wdtspin=15 wdtblind" 2>/dev/null &
 runvm panic busy 50 "wdt=10 wdtpanic=15" 2>/dev/null &
 runvm off busy 50 "wdt=off wdthang=15" 2>/dev/null &
 runvm procfs hang 50 "wdt=10 wdtproc" 2>/dev/null &
-runvm procoff hang 50 "wdt=10" 2>/dev/null &
-runvm lsproc lsproc 60 "wdt=10" 2>/dev/null &
-runvm lsplant lsproc 60 "wdt=10 wdtproc" 2>/dev/null &
+runvm procoff hang 50 "" 2>/dev/null &
+runvm lsproc lsproc 70 "" 2>/dev/null &
+runvm lsplant lsproc 70 "wdtproc" 2>/dev/null &
 runvm idle idle 125 "" 2>/dev/null &
 runvm trial trial 130 "wdt=10 wdthang=12" 2>/dev/null &
 wait
