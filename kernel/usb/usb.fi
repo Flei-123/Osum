@@ -92,9 +92,10 @@ import drv.hid.hidin
 import gfx.gfx
 import sync.atomic
 import arch.cpu
+import diag.cmdopt
 
 export {
-    service_cpus, service_skips, service_seq_jumps,
+    service_cpus, service_skips, service_seq_jumps, ring_peak_get,
     resume, stage, irq, service, poll, say, report, ready, count,
     msc_ready, msc_blocks, msc_bsize,
     // RUNDE HOTPLUG-2: dasselbe JE PLATZ. `i` ist der Platz in der
@@ -3212,6 +3213,7 @@ fn hid_start(state: u64, d: u64) {
         let i2: u64 = xhci.ep_find(state, slot, dg(state, d, D_INTDCI))
         if i2 < xhci.MAX_EP {
             ds(state, d, D_SEQ, xhci.ep_seq(state, i2))
+            ring_fresh(d)
         }
         tr(state, 25, d)
         arm(state, d)
@@ -3232,6 +3234,7 @@ fn hid_start(state: u64, d: u64) {
     let i: u64 = xhci.ep_find(state, slot, dg(state, d, D_INTDCI))
     if i < xhci.MAX_EP {
         ds(state, d, D_SEQ, xhci.ep_seq(state, i))
+        ring_fresh(d)
     }
     arm(state, d)
 }
@@ -3317,6 +3320,12 @@ fn hid_claim(state: u64, d: u64) {
 
 fn arm(state: u64, d: u64) {
     ds(state, d, D_ARMS, dg(state, d, D_ARMS) + 1)
+    if d < MAX_DEV {
+        ring_out[d as usize] = ring_out[d as usize] + 1
+        if ring_out[d as usize] > ring_peak {
+            ring_peak = ring_out[d as usize]
+        }
+    }
     xhci.int_queue(state, dg(state, d, D_SLOT), dg(state, d, D_INTDCI),
         report_buf(state, d), dg(state, d, D_INTLEN))
 }
@@ -3388,10 +3397,12 @@ fn service(state: u64) {
             if i < xhci.MAX_EP {
                 let seq: u64 = xhci.ep_seq(state, i)
                 if seq != dg(state, d, D_SEQ) {
-                    if seq -% dg(state, d, D_SEQ) > 1 {
+                    let done: u64 = seq -% dg(state, d, D_SEQ)
+                    if done > 1 {
                         seq_jumps = seq_jumps + 1
                         seq_jump_say(state, d, i, seq)
                     }
+                    ring_done(d, done)
                     ds(state, d, D_SEQ, seq)
                     let cc: u64 = xhci.ep_code(state, i)
                     ds(state, d, D_LASTCC, cc)
@@ -3486,6 +3497,30 @@ fn seq_jump_say(state: u64, d: u64, i: u64, seq: u64) {
 }
 static mut svc_skips: u64 = 0
 static mut seq_jumps: u64 = 0
+static mut ring_out: [u64; 4] = [0 as u64; 4]
+static mut ring_peak: u64 = 0
+static mut w_usbstack: [u8; 9] = "usbstack\0"
+
+fn ring_done(d: u64, n: u64) {
+    if d >= MAX_DEV {
+        return
+    }
+    if ring_out[d as usize] > n {
+        ring_out[d as usize] = ring_out[d as usize] - n
+    } else {
+        ring_out[d as usize] = 0
+    }
+}
+
+fn ring_fresh(d: u64) {
+    if d < MAX_DEV {
+        ring_out[d as usize] = 0
+    }
+}
+
+fn ring_peak_get() -> u64 {
+    return ring_peak
+}
 
 fn service_cpus() -> u64 {
     return svc_cpus
@@ -3807,6 +3842,32 @@ fn unstall(state: u64, d: u64, dci: u64) {
     xhci.reset_endpoint(state, slot, dci)
     xhci.control(state, slot, 0x02, REQ_CLEAR_FEATURE, 0, epaddr, 0, 0, false)
     xhci.set_dequeue(state, slot, dci, i)
+    ring_fresh(d)
+}
+
+fn refill(state: u64, d: u64) -> bool {
+    let me: u64 = cpu.here(state)
+    if atomic.cas(state + USCAL_OFF + S_SVCBUSY, 0, me + 1) != 0 {
+        return false
+    }
+    let slot: u64 = dg(state, d, D_SLOT)
+    let dci: u64 = dg(state, d, D_INTDCI)
+    let i: u64 = xhci.ep_find(state, slot, dci)
+    if i < xhci.MAX_EP {
+        if xhci.ep_halted(state, slot, dci) {
+            unstall(state, d, dci)
+            ds(state, d, D_HEAL, dg(state, d, D_HEAL) + 1)
+            s(state, S_HEAL, g(state, S_HEAL) + 1)
+        } else if !cmdopt.has(state, (&w_usbstack[0]) as u64) {
+            xhci.stop_endpoint(state, slot, dci)
+            xhci.set_dequeue(state, slot, dci, i)
+            ring_fresh(d)
+        }
+        ds(state, d, D_SEQ, xhci.ep_seq(state, i))
+        arm(state, d)
+    }
+    atomic.store(state + USCAL_OFF + S_SVCBUSY, 0)
+    return true
 }
 
 fn cdb(state: u64) -> u64 {
@@ -5193,25 +5254,11 @@ fn silence_check(state: u64) {
             ds(state, e, D_STUMM, dg(state, e, D_STUMM) + 1)
             if dg(state, e, D_STUMM) >= WACH_GRENZE
                 && dg(state, e, D_AGAIN) < AGAIN_MAX {
-                ds(state, e, D_AGAIN, dg(state, e, D_AGAIN) + 1)
-                ds(state, e, D_STUMM, 0)
-                s(state, S_WIEDERN, g(state, S_WIEDERN) + 1)
-                // Der Endpunkt kann angehalten sein, ohne dass je ein
-                // Transfer fertig wurde -- dann hat `service` den
-                // Fehlercode nie gesehen. Also erst fragen, dann
-                // wiederbeleben, dann neu bestuecken.
-                if xhci.ep_halted(state, dg(state, e, D_SLOT),
-                    dg(state, e, D_INTDCI)) {
-                    unstall(state, e, dg(state, e, D_INTDCI))
-                    ds(state, e, D_HEAL, dg(state, e, D_HEAL) + 1)
-                    s(state, S_HEAL, g(state, S_HEAL) + 1)
+                if refill(state, e) {
+                    ds(state, e, D_AGAIN, dg(state, e, D_AGAIN) + 1)
+                    ds(state, e, D_STUMM, 0)
+                    s(state, S_WIEDERN, g(state, S_WIEDERN) + 1)
                 }
-                let ix: u64 = xhci.ep_find(state, dg(state, e, D_SLOT),
-                    dg(state, e, D_INTDCI))
-                if ix < xhci.MAX_EP {
-                    ds(state, e, D_SEQ, xhci.ep_seq(state, ix))
-                }
-                arm(state, e)
             }
         } else {
             ds(state, e, D_STUMM, 0)
