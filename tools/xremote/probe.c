@@ -20,6 +20,16 @@ static int cmd_screen(void)
     return 0;
 }
 
+static int cmd_heads(void)
+{
+    long n = shot(0, 15, 0);
+    printf("XR-HEADS count=%ld", n);
+    for (long i = 0; i < n && i < 8; i++)
+        printf(" h%ld=%ld,%ld,%ldx%ld", i, shot(0, 32 + i * 4, 0), shot(0, 33 + i * 4, 0), shot(0, 34 + i * 4, 0), shot(0, 35 + i * 4, 0));
+    printf(" past=%ld\n", shot(0, 32 + n * 4, 0));
+    return 0;
+}
+
 static int cmd_input(void)
 {
     long ptr = tipp(0, 14, 0);
@@ -193,12 +203,55 @@ static int cmd_grab(void)
     return 0;
 }
 
+static int cmd_headlit(void)
+{
+    long w = shot(0, 1, 0), h = shot(0, 2, 0), rb = shot(0, 3, 0), rows = shot(0, 5, 0), n = shot(0, 15, 0);
+    if (w <= 0 || h <= 0 || rb <= 0 || rows <= 0)
+        return 1;
+    if (shot(1, 0, 0) < 0)
+        return 2;
+    long lit[8] = {0};
+    long xmin[8], xmax[8];
+    for (int i = 0; i < 8; i++) { xmin[i] = 1 << 30; xmax[i] = -1; }
+    unsigned char *chunk = malloc((size_t)rows * rb);
+    long y = 0;
+    while (y < h) {
+        long got = shot(2, (long)chunk, rows * rb);
+        if (got <= 0)
+            return 3;
+        long m = got / rb;
+        for (long r = 0; r < m; r++) {
+            for (long x = 0; x < w; x++) {
+                unsigned char *p = chunk + r * rb + x * 3;
+                if (p[0] <= 64 && p[1] <= 64 && p[2] <= 64)
+                    continue;
+                for (long i = 0; i < n && i < 8; i++) {
+                    long hx = shot(0, 32 + i * 4, 0), hy = shot(0, 33 + i * 4, 0), hw = shot(0, 34 + i * 4, 0), hh = shot(0, 35 + i * 4, 0);
+                    if (x >= hx && x < hx + hw && y + r >= hy && y + r < hy + hh) {
+                        lit[i]++;
+                        if (x - hx < xmin[i]) xmin[i] = x - hx;
+                        if (x - hx > xmax[i]) xmax[i] = x - hx;
+                    }
+                }
+            }
+        }
+        y += m;
+    }
+    printf("XR-HEADLIT n=%ld", n);
+    for (long i = 0; i < n && i < 8; i++)
+        printf(" l%ld=%ld x%ld=%ld..%ld", i, lit[i], i, lit[i] ? xmin[i] : -1L, xmax[i]);
+    printf("\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2)
         return 64;
     if (!strcmp(argv[1], "screen"))
         return cmd_screen();
+    if (!strcmp(argv[1], "heads"))
+        return cmd_heads();
     if (!strcmp(argv[1], "input"))
         return cmd_input();
     if (!strcmp(argv[1], "wheel"))
@@ -215,6 +268,8 @@ int main(int argc, char **argv)
         return cmd_env();
     if (!strcmp(argv[1], "exec") && argc > 2)
         return cmd_exec(atoi(argv[2]));
+    if (!strcmp(argv[1], "headlit"))
+        return cmd_headlit();
     if (!strcmp(argv[1], "grab"))
         return cmd_grab();
     return 64;

@@ -4,6 +4,7 @@ mkdir -p /root /tmp
 /opt/xr/freeviewer-host --version
 echo "XR1 rc=$?"
 /opt/xr/xrprobe screen
+/opt/xr/xrprobe heads
 /opt/xr/xrprobe grab
 echo "XR2 rc=$?"
 /opt/xr/xrprobe input
@@ -30,13 +31,19 @@ while [ $i -lt @HOSTSECS@ ]; do
     sleep 1
     i=$((i + 1))
 done
+(while true; do printf '%100s%s\n' '' XR-RIGHT-MARK; sleep 1; done) &
+MP=$!
+sleep 3
+/opt/xr/xrprobe headlit
 /opt/xr/xrprobe clipwait FV-CLIP- @CLIPSECS@
 /opt/xr/xrprobe clipbig 5000
 sleep @TAILSECS@
+/opt/xr/xrprobe headlit
 echo "XR-HOSTLOG-BEGIN"
 cat /tmp/host.log
 echo "XR-HOSTLOG-END"
 /opt/xr/xrprobe input
 /opt/xr/xrprobe screen
+kill $MP 2>/dev/null
 kill $HP 2>/dev/null
 echo XR-END

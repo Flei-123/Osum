@@ -14,14 +14,16 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 WD=${XR_WD:-/root/fxhp}
-HOSTBIN=${XR_HOST:-/root/jarvis/data/staff_wt/orientos/fv-host/target/x86_64-unknown-linux-musl/release/freeviewer-host}
-VIEWER=${XR_VIEWER:-/root/jarvis/data/staff_wt/orientos/x1-out/freeviewer-glibc}
+XRTOOLS=${XR_TOOLS:-/root/jarvis/data/orientos-xremote}
+HOSTBIN=${XR_HOST:-$XRTOOLS/freeviewer-host}
+VIEWER=${XR_VIEWER:-$XRTOOLS/freeviewer-glibc}
+HEADS=${XR_HEADS:-1}
 RELAYDIR=${XR_RELAY:-/root/projects/freeviewer/relay}
 NODEPATH=${XR_LIBS:-/root/jarvis/node_modules}
 LIBGCC=${XR_LIBGCC:-$WD/fx-root/usr/lib/libgcc_s.so.1}
 SESSIONSECS=${XR_SESSION:-60}
 CLIPSECS=$((SESSIONSECS * 2))
-TAILSECS=${XR_TAIL:-30}
+TAILSECS=${XR_TAIL:-$([ "$HEADS" -ge 2 ] && echo 55 || echo 30)}
 HOSTSECS=${XR_HOSTSECS:-240}
 RELAYPORT=$((17000 + $$ % 1000))
 pass=0; fail=0
@@ -73,11 +75,20 @@ ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
     timeout 90 "$VIEWER" --connect "$ID" xrpass 5 > "$T/viewer.txt" 2>&1
     sleep 2
     timeout 90 "$VIEWER" --inputtest "$ID" xrpass > "$T/inputtest.txt" 2>&1
+    if [ "$HEADS" -ge 2 ]; then
+        sleep 2
+        timeout 90 "$VIEWER" --connect "$ID" xrpass 4 --monitor 1 > "$T/viewer1.txt" 2>&1
+    fi
 ) &
 VP=$!
+HEADWORDS=""; HEADDEV=""
+if [ "$HEADS" -ge 2 ]; then
+    HEADWORDS=" vgpuheads vgpuextend"
+    HEADDEV=" -device virtio-gpu-pci,id=vg,max_outputs=$HEADS,xres=640,yres=480"
+fi
 KERNEL=${KERNEL:-} DONE=XR-END TMO=${XR_TMO:-900} MEM=1024 \
-    KARGS="osum vfs nokbd nosched noproc nofs fremdtrace gfx nic nip=10.0.2.15/24 ngw=10.0.2.2" \
-    QEMU_EXTRA="-vga std -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:5b:1d:01" \
+    KARGS="osum vfs nokbd nosched noproc nofs fremdtrace gfx nic nip=10.0.2.15/24 ngw=10.0.2.2$HEADWORDS" \
+    QEMU_EXTRA="-vga std$HEADDEV -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:5b:1d:01" \
     SPEC="$T/wd/fxrun/spec.txt" bash tools/linuxapps/run.sh "$WD" "$T/guest.sh" "$OUT" > "$T/linuxapps.log" 2>&1
 wait "$VP" 2>/dev/null; VP=""
 S="$OUT/ser.clean"
@@ -90,10 +101,35 @@ SH=$(grep -ao 'XR-SCREEN ready=1 width=[0-9]* height=[0-9]*' "$S" | head -1 | gr
 grep -aq '^XR-GRAB' "$S" && ok "full SH_ARM + SH_GRAB from a Linux process" || bad "SH_GRAB failed from a Linux process"
 grep -a '^XR-INPUT' "$S" | head -1 | grep -q 'total=0 ' && ok "control: no strokes before the session" || bad "control: strokes counted before the session"
 [ -s "$T/hostid" ] && ok "host registered at the relay (ID $(cat "$T/hostid"))" || bad "host never printed an ID"
-grep -aq "monitor 0: osum ${SW}x${SH}" "$T/viewer.txt" 2>/dev/null && ok "viewer sees monitor osum ${SW}x${SH}" || bad "viewer did not see the osum monitor"
-FR=$(grep -ac '^frame ' "$T/viewer.txt" 2>/dev/null)
-[ "${FR:-0}" -ge 2 ] && ok "viewer received $FR frames of the guest screen" || bad "viewer received ${FR:-0} frames"
-grep -aq "frame [0-9]* ${SW}x${SH}" "$T/viewer.txt" 2>/dev/null && ok "frame size equals the kernel screen size" || bad "frame size differs from the kernel screen size"
+HL=$(grep -a '^XR-HEADS' "$S" | head -1)
+HN=$(echo "$HL" | grep -o 'count=[0-9]*' | cut -d= -f2)
+if [ "$HEADS" -ge 2 ]; then
+    [ "${HN:-0}" = "$HEADS" ] && ok "kernel reports $HEADS extended heads ($HL)" || bad "kernel head count: $HL"
+    H0=$(echo "$HL" | grep -o ' h0=[0-9,x]*' | cut -d= -f2); H1=$(echo "$HL" | grep -o ' h1=[0-9,x]*' | cut -d= -f2)
+    [ "$H0" = "0,0,640x480" ] && ok "head 0 rect $H0" || bad "head 0 rect: $H0"
+    [ "$H1" = "640,0,640x480" ] && ok "head 1 rect $H1 (right of head 0)" || bad "head 1 rect: $H1"
+    echo "$HL" | grep -q 'past=-[0-9]*$' && ok "head field past the last head is refused" || bad "head field past the last head: $HL"
+    [ "$SW" = "1280" ] && [ "$SH" = "480" ] && ok "kernel screen is the wide desktop ${SW}x${SH}" || bad "kernel screen ${SW}x${SH} is not the wide desktop"
+    grep -aq "monitor 0: osum-1 640x480" "$T/viewer.txt" 2>/dev/null && grep -aq "monitor 1: osum-2 640x480" "$T/viewer.txt" 2>/dev/null && ok "viewer lists two monitors osum-1 and osum-2, 640x480 each" || bad "viewer monitor list: $(grep -a '^monitor ' "$T/viewer.txt" 2>/dev/null | tr '\n' ';')"
+    FR=$(grep -ac '^frame ' "$T/viewer.txt" 2>/dev/null)
+    [ "${FR:-0}" -ge 2 ] && ok "viewer received $FR frames of head 0" || bad "viewer received ${FR:-0} frames of head 0"
+    grep -aq "frame [0-9]* 640x480" "$T/viewer.txt" 2>/dev/null && ! grep -aq "frame [0-9]* ${SW}x${SH}" "$T/viewer.txt" 2>/dev/null && ok "head 0 frames are 640x480, not the wide desktop" || bad "head 0 frame size wrong"
+    grep -aq "monitor active 1 -> 640x480" "$T/viewer1.txt" 2>/dev/null && ok "viewer switched to monitor 1 (640x480)" || bad "viewer did not switch to monitor 1: $(grep -a 'monitor' "$T/viewer1.txt" 2>/dev/null | tr '\n' ';')"
+    BA=$(grep -ao 'bbox=[0-9]*\.\.[0-9]*' "$T/viewer.txt" 2>/dev/null | tail -1 | cut -d= -f2)
+    BB=$(grep -ao 'bbox=[0-9]*\.\.[0-9]*' "$T/viewer1.txt" 2>/dev/null | tail -1 | cut -d= -f2)
+    [ -n "$BA" ] && [ "${BA%%..*}" -le 20 ] && ok "head 0 frame has the console text from its left edge (lit columns $BA)" || bad "head 0 frame columns: ${BA:-no lit pixels}"
+    [ -n "$BB" ] && [ "${BB%%..*}" -ge 150 ] && [ "${BB##*..}" -le 290 ] && ok "monitor 1 frame shows only the marker printed in head 1's columns (lit columns $BB)" || bad "monitor 1 frame columns: ${BB:-no lit pixels}"
+    grep -a '^XR-HEADLIT' "$S" | head -1 | grep -q ' l1=[1-9]' && ok "kernel grab sees the marker inside head 1's rect: $(grep -a '^XR-HEADLIT' "$S" | head -1)" || bad "kernel grab sees no marker in head 1"
+    F1=$(grep -ac '^frame ' "$T/viewer1.txt" 2>/dev/null)
+    [ "${F1:-0}" -ge 2 ] && ok "viewer received $F1 frames on monitor 1" || bad "viewer received ${F1:-0} frames on monitor 1"
+else
+    [ "${HN:-x}" = "0" ] && ok "control: one head, the kernel reports no extended heads" || bad "control: head count: $HL"
+    grep -aq "monitor 0: osum ${SW}x${SH}" "$T/viewer.txt" 2>/dev/null && ok "viewer sees monitor osum ${SW}x${SH}" || bad "viewer did not see the osum monitor"
+    ! grep -aq "^monitor 1:" "$T/viewer.txt" 2>/dev/null && ok "control: viewer sees no second monitor" || bad "control: viewer sees a second monitor"
+    FR=$(grep -ac '^frame ' "$T/viewer.txt" 2>/dev/null)
+    [ "${FR:-0}" -ge 2 ] && ok "viewer received $FR frames of the guest screen" || bad "viewer received ${FR:-0} frames"
+    grep -aq "frame [0-9]* ${SW}x${SH}" "$T/viewer.txt" 2>/dev/null && ok "frame size equals the kernel screen size" || bad "frame size differs from the kernel screen size"
+fi
 IN_BASE=$(grep -a '^XR-INPUT' "$S" | sed -n 2p | grep -o 'total=[0-9]*' | cut -d= -f2); IN_LAST=$(grep -a '^XR-INPUT' "$S" | tail -1 | grep -o 'total=[0-9]*' | cut -d= -f2)
 [ "${IN_LAST:-0}" -gt "${IN_BASE:-0}" ] && ok "viewer input arrived as $((IN_LAST - IN_BASE)) osum_tipp strokes after the baseline $IN_BASE" || bad "no osum_tipp strokes after the input test"
 WL=$(grep -a '^XR-WHEEL' "$S" | head -1)
@@ -105,8 +141,10 @@ P0=$(grep -a '^XR-INPUT' "$S" | sed -n 2p)
 P1=$(grep -a '^XR-INPUT' "$S" | tail -1)
 echo "$P0" | grep -q 'wheel=0 hwheel=0 buttons=0$' && ok "control: wheel and buttons zero before the session" || bad "control: wheel/buttons not zero before the session: $P0"
 echo "$P1" | grep -q 'wheel=2 hwheel=0 buttons=0$' && ok "viewer wheel (-3 then +1 lines) reached the kernel as a net 2 notches down" || bad "wheel after the session: $P1"
-echo "$P1" | grep -q 'px=620 py=440 ' && ok "pointer at 620,440 after abs 2500/2500 plus relative +300/+240 read from the kernel" || bad "pointer after the session: $P1"
-echo "$P0" | grep -q 'px=620 py=440 ' && bad "control: pointer already at the final position before the session" || ok "control: pointer not at the final position before the session"
+if [ "$HEADS" -ge 2 ]; then PW=640; PH=480; else PW=$SW; PH=$SH; fi
+PX=$((PW * 2500 / 10000 + 300)); PY=$((PH * 2500 / 10000 + 240))
+echo "$P1" | grep -q "px=$PX py=$PY " && ok "pointer at $PX,$PY after abs 2500/2500 of the shared screen plus relative +300/+240 read from the kernel" || bad "pointer after the session (want $PX,$PY): $P1"
+echo "$P0" | grep -q "px=$PX py=$PY " && bad "control: pointer already at the final position before the session" || ok "control: pointer not at the final position before the session"
 grep -aq '^XR-CLIP get len=0 ' "$S" && ok "control: guest clipboard empty before the session" || bad "control: guest clipboard not empty before the session"
 CW=$(grep -a '^XR-CLIP wait' "$S" | head -1)
 echo "$CW" | grep -q 'head=FV-CLIP-' && ok "viewer clipboard text arrived in the guest clipboard ($CW)" || bad "viewer clipboard text missing in the guest: $CW"
@@ -118,6 +156,6 @@ grep -aq 'Zwischenablage-Update(s) vom Host empfangen' "$T/inputtest.txt" 2>/dev
 grep -aq 'FEHLER' "$T/inputtest.txt" 2>/dev/null && bad "inputtest reports FEHLER: $(grep -a FEHLER "$T/inputtest.txt" | head -1)" || ok "inputtest reports no FEHLER"
 echo "== $pass ok, $fail fail"
 if [ -n "${KEEP:-}" ]; then
-    mkdir -p "${KEEP_DIR:-/tmp/xremote-keep}"; cp -r "$OUT" "$T/viewer.txt" "$T/inputtest.txt" "$T/relay.log" "${KEEP_DIR:-/tmp/xremote-keep}/" 2>/dev/null
+    mkdir -p "${KEEP_DIR:-/tmp/xremote-keep}"; cp -r "$OUT" "$T/viewer.txt" "$T/viewer1.txt" "$T/inputtest.txt" "$T/relay.log" "${KEEP_DIR:-/tmp/xremote-keep}/" 2>/dev/null
 fi
 [ "$fail" -eq 0 ]
