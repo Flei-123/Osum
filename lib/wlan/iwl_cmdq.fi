@@ -7,7 +7,7 @@ import wlan.iwl_mvm_txq
 import wlan.regtrace
 
 export {
-    Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_dq_inflight, cq_dq_wr, cq_dq_rd, cq_bc_bytes, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset, rx_closed, rx_raw_valid, rb_addr, cq_set_raw,
+    Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_prepare, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_dq_inflight, cq_dq_wr, cq_dq_rd, cq_bc_bytes, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset, rx_closed, rx_raw_valid, rb_addr, cq_set_raw,
     CMD_ALIVE, FRAME_INVALID, FRAME_SIZE_MSK, RX_MASK,
     CQ_RB_SIZE, CQ_RB_COUNT, CQ_TFD_SIZE, CQ_TFD_COUNT, CQ_SLOT_SIZE, CQ_CMD_SLOT_SIZE, CQ_SLOTS, CQ_NOTIF_SLOT, CQ_NOTIF_SLOTS, CQ_OLD_NOTIF_SLOT, cq_set_slot_cap, cq_drops,
     cq_err_ptr, cq_uerr_ptr, cq_fw_dead, E_CQ_FWDEAD, CQ_WAIT_CMD, CQ_WAIT_NOTIF, ALIVE_SCD_OFF, ALIVE_PKT_MIN, CMD_QUEUE,
@@ -165,17 +165,32 @@ fn cq_dq_sent(c: *mut Cq) -> u64 { return (*c).dsent }
 fn cq_dq_reclaimed(c: *mut Cq) -> u64 { return (*c).dreclaimed }
 fn cq_dq_inflight(c: *mut Cq) -> u64 { return (*c).dwr - (*c).drd }
 
-fn cq_dq_enable(c: *mut Cq, ssn: u64) {
+fn cq_dq_enable(c: *mut Cq) {
     if (*c).dtfd == 0 { return }
-    (*c).dwr = ssn & 0xFF
-    (*c).drd = ssn & 0xFF
     (*c).dq_on = 1
 }
 
 fn cq_dq_disable(c: *mut Cq) {
     (*c).dq_on = 0
-    (*c).dwr = 0
-    (*c).drd = 0
+    (*c).drd = (*c).dwr
+}
+
+fn cq_dq_ssn(c: *mut Cq, want: u64) -> u64 {
+    var ssn: u64 = want & 0xFF
+    if (*c).dsent != 0 { ssn = (*c).dwr & 0xFF }
+    if ((ssn + 256 - ((*c).dwr & 0xFF)) & 0x3F) == 0 && ssn != ((*c).dwr & 0xFF) { ssn = (ssn + 1) & 0xFF }
+    return ssn
+}
+
+fn cq_dq_prepare(c: *mut Cq, p: *mut iwl_probe.Probe, cmd: u64, hdr: u64) {
+    if (*c).dtfd == 0 { return }
+    let ssn: u64 = cq_dq_ssn(c, iwl_le.ld16(cmd, hdr + 8))
+    iwl_le.st16(cmd, hdr + 8, ssn)
+    (*c).dwr = ssn
+    (*c).drd = ssn
+    if iwl_pwr.mac_access_get(p) != 0 { return }
+    iwl_pwr.wr(p, iwl_g1.HBUS_TARG_WRPTR, ssn | (iwl_mvm_txq.DATA_QUEUE << 8))
+    iwl_pwr.mac_access_put(p)
 }
 
 fn rb_addr(c: *mut Cq, i: u64) -> u64 { return (*c).rb + (i & RX_MASK) * CQ_RB_SIZE }
