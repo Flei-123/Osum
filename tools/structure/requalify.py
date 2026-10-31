@@ -74,7 +74,7 @@ def prune_export(text, drop):
     for ln in m.group(2).split("\n"):
         cut = ln.find("//")
         if cut >= 0:
-            continue
+            ln = ln[:cut]
         toks = [t.strip() for t in ln.split(",") if t.strip()]
         keep = [t for t in toks if t not in drop]
         removed += len(toks) - len(keep)
