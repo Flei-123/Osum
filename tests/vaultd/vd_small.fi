@@ -1,0 +1,75 @@
+import std.rt
+import std.testkit
+import vaultd.vdwire
+import vaultd.vdpolicy
+import vaultd.vdrate
+
+#[test]
+fn wire_parsing() {
+    let req: str = "op=put\npw=00ff10\nnum=42\nbig=99999999999999999999\npwx=zz\n"
+    var b: rt.Buf = rt.buf_new()
+    testkit.assert_true(vdwire.hex_get(req, "pw", &b) && rt.buf_len(&b) == 3, "hex")
+    testkit.assert_true(rt.ld8(rt.buf_ptr(&b), 0) == 0 as u8 && rt.ld8(rt.buf_ptr(&b), 1) == 255 as u8, "hex bytes")
+    var z: rt.Buf = rt.buf_new()
+    testkit.assert_true(!vdwire.hex_get(req, "pwx", &z), "bad hex")
+    testkit.assert_true(!vdwire.hex_get("pw=abc\n", "pw", &z), "odd hex")
+    testkit.assert_true(!vdwire.hex_get(req, "p", &z), "key prefix does not match")
+    testkit.assert_eq_u64(vdwire.num_get(req, "num", 7), 42)
+    testkit.assert_eq_u64(vdwire.num_get(req, "big", 7), 7)
+    testkit.assert_eq_u64(vdwire.num_get(req, "none", 7), 7)
+    var o: rt.Buf = rt.buf_new()
+    testkit.assert_true(vdwire.op_of(req, &o) && rt.buf_str(&o) == "put", "op")
+    var out: rt.Buf = rt.buf_new()
+    vdwire.put_num(&out, "n", 120)
+    vdwire.put_kv(&out, "k", "v")
+    testkit.assert_true(rt.buf_str(&out) == "n=120\nk=v\n", "put helpers")
+}
+
+#[test]
+fn policy_matrix() {
+    testkit.assert_eq_u64(vdpolicy.lookup("status"), vdpolicy.OP_STATUS)
+    testkit.assert_eq_u64(vdpolicy.lookup("nope"), vdpolicy.OP_UNKNOWN)
+    testkit.assert_true(vdpolicy.class_ok(vdpolicy.OP_STATUS, vdpolicy.CL_OTHER), "status for all")
+    testkit.assert_true(!vdpolicy.class_ok(vdpolicy.OP_FIND, vdpolicy.CL_OTHER), "other cannot find")
+    testkit.assert_true(vdpolicy.class_ok(vdpolicy.OP_FIND, vdpolicy.CL_CERTUS), "certus finds")
+    testkit.assert_true(!vdpolicy.class_ok(vdpolicy.OP_REVEAL, vdpolicy.CL_CERTUS), "certus no reveal")
+    testkit.assert_true(!vdpolicy.class_ok(vdpolicy.OP_UNLOCK, vdpolicy.CL_CERTUS), "certus no unlock")
+    testkit.assert_true(vdpolicy.class_ok(vdpolicy.OP_REVEAL, vdpolicy.CL_USER), "user reveals")
+    testkit.assert_true(!vdpolicy.is_secret(vdpolicy.OP_STATUS) && vdpolicy.is_secret(vdpolicy.OP_FIND), "secret flags")
+    testkit.assert_eq_u64(vdpolicy.class_of_origin(""), vdpolicy.CL_USER)
+    testkit.assert_eq_u64(vdpolicy.class_of_origin("app:certus"), vdpolicy.CL_CERTUS)
+    testkit.assert_eq_u64(vdpolicy.class_of_origin("jarvis"), vdpolicy.CL_OTHER)
+    testkit.assert_eq_u64(vdpolicy.class_of_origin("app:certusx"), vdpolicy.CL_OTHER)
+}
+
+#[test]
+fn bucket_and_limiter() {
+    var b: vdrate.Bucket = vdrate.bucket_new(0)
+    var i: u64 = 0
+    while i < 10 {
+        testkit.assert_true(vdrate.take(&b, 0), "burst")
+        i = i + 1
+    }
+    testkit.assert_true(!vdrate.take(&b, 0), "empty")
+    testkit.assert_true(!vdrate.take(&b, 599), "not yet")
+    testkit.assert_true(vdrate.take(&b, 600), "refill one")
+    testkit.assert_true(!vdrate.take(&b, 600), "only one")
+    testkit.assert_true(vdrate.take(&b, 10000000) && b.tokens <= 9, "capped at burst")
+    var l: vdrate.Limiter = vdrate.limiter_new()
+    let ka: u64 = vdrate.key_of(1000, "app:certus")
+    let kb: u64 = vdrate.key_of(1000, "")
+    testkit.assert_true(ka != kb && ka != vdrate.key_of(1001, "app:certus"), "keys differ")
+    i = 0
+    while i < 10 {
+        vdrate.limiter_take(&l, ka, 0)
+        i = i + 1
+    }
+    testkit.assert_true(!vdrate.limiter_take(&l, ka, 0), "key exhausted")
+    testkit.assert_true(vdrate.limiter_take(&l, kb, 0), "other key fresh")
+    var k: u64 = 100
+    while k < 109 {
+        vdrate.limiter_take(&l, k, 0)
+        k = k + 1
+    }
+    testkit.assert_true(vdrate.limiter_take(&l, ka, 0), "evicted key starts fresh")
+}

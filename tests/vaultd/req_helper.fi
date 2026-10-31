@@ -1,0 +1,129 @@
+import std.rt
+import vaultd.vdctx
+import vaultd.vdreq
+import vaultd.vdwire
+import vaultd.vdsess
+
+export { Rq, rq_new, rq_txt, rq_hex, rq_send, ok_of, err_is, hx, tick, daemon, send, simple, create,
+    put_login, hex_of, contains, contains2 }
+
+static mut clock: u64 = 1000
+
+struct Rq {
+    b: rt.Buf,
+}
+
+fn tick(step: u64) -> u64 {
+    clock = clock + step
+    return clock
+}
+
+fn rq_new(op: str) -> Rq {
+    var r: Rq = Rq { b: rt.buf_new() }
+    vdwire.put_kv(&r.b, "op", op)
+    return r
+}
+
+fn rq_txt(r: *mut Rq, key: str, value: str) {
+    vdwire.put_kv(&(*r).b, key, value)
+}
+
+fn rq_hex(r: *mut Rq, key: str, value: str) {
+    vdwire.put_text(&(*r).b, key)
+    rt.buf_push(&(*r).b, 61 as u8)
+    vdwire.put_hex(&(*r).b, value.p as u64, value.n)
+    vdwire.nl(&(*r).b)
+}
+
+fn hx(s: str, out: *mut rt.Buf) {
+    vdwire.put_hex(out, s.p as u64, s.n)
+}
+
+fn rq_send(d: *mut vdctx.Daemon, uid: u64, label: str, r: *mut Rq, ticks: u64, out: *mut rt.Buf) {
+    var c: vdctx.Ctx = vdctx.Ctx { now_s: clock, now_ms: clock * 1000, ticks: ticks }
+    vdreq.handle(d, &c, uid, label, rt.buf_str(&(*r).b), out)
+    rt.buf_free(&(*r).b)
+}
+
+
+fn ok_of(out: *mut rt.Buf) -> bool {
+    return vdwire.num_get(rt.buf_str(out), "ok", 9) == 1
+}
+
+fn err_is(out: *mut rt.Buf, code: str) -> bool {
+    var e: rt.Buf = rt.buf_new()
+    var hit: bool = false
+    if vdwire.text_get(rt.buf_str(out), "err", &e) {
+        hit = rt.buf_str(&e) == code
+    }
+    rt.buf_free(&e)
+    return hit
+}
+
+fn daemon(root: str) -> vdctx.Daemon {
+    return vdctx.daemon_new(root, vdsess.Kdf { kib: 64, passes: 1, lanes: 1 })
+}
+
+fn send(d: *mut vdctx.Daemon, uid: u64, label: str, r: *mut Rq, out: *mut rt.Buf) {
+    rq_send(d, uid, label, r, tick(0), out)
+}
+
+fn simple(d: *mut vdctx.Daemon, uid: u64, label: str, op: str, out: *mut rt.Buf) {
+    var r: Rq = rq_new(op)
+    send(d, uid, label, &r, out)
+}
+
+fn create(d: *mut vdctx.Daemon, uid: u64, out: *mut rt.Buf) {
+    var r: Rq = rq_new("create")
+    rq_hex(&r, "pw", "correct horse")
+    send(d, uid, "", &r, out)
+}
+
+fn put_login(d: *mut vdctx.Daemon, uid: u64, title: str, origin: str, user: str, pw: str,
+    out: *mut rt.Buf) {
+    var r: Rq = rq_new("put")
+    rq_hex(&r, "title", title)
+    rq_hex(&r, "origins", origin)
+    rq_hex(&r, "username", user)
+    rq_hex(&r, "password", pw)
+    send(d, uid, "", &r, out)
+}
+
+fn hex_of(s: str) -> rt.Buf {
+    var b: rt.Buf = rt.buf_new()
+    hx(s, &b)
+    return b
+}
+
+fn contains(out: *mut rt.Buf, s: str) -> bool {
+    var h: rt.Buf = hex_of(s)
+    let hay: str = rt.buf_str(out)
+    let needle: str = rt.buf_str(&h)
+    var found: bool = false
+    var i: usize = 0
+    while !found && i + needle.n <= hay.n {
+        var j: usize = 0
+        while j < needle.n && rt.ld8(hay.p as u64, i + j) == rt.ld8(needle.p as u64, j) {
+            j = j + 1
+        }
+        found = j == needle.n
+        i = i + 1
+    }
+    rt.buf_free(&h)
+    return found
+}
+
+fn contains2(out: *mut rt.Buf, s: str) -> bool {
+    let hay: str = rt.buf_str(out)
+    var found: bool = false
+    var i: usize = 0
+    while !found && i + s.n <= hay.n {
+        var j: usize = 0
+        while j < s.n && rt.ld8(hay.p as u64, i + j) == rt.ld8(s.p as u64, j) {
+            j = j + 1
+        }
+        found = j == s.n
+        i = i + 1
+    }
+    return found
+}

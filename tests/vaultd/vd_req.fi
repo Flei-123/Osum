@@ -1,0 +1,65 @@
+import std.rt
+import std.testkit
+import vault.vlayout
+import vaultd.vdctx
+import vaultd.vdsess
+import vaultd.vdwire
+import req_helper
+
+fn run_flow(root: str, ctx: u64) {
+    var d: vdctx.Daemon = req_helper.daemon(root)
+    var out: rt.Buf = rt.buf_new()
+    req_helper.simple(&d, 1000, "", "status", &out)
+    testkit.assert_true(vdwire.num_get(rt.buf_str(&out), "ok", 9) == 1, "status ok")
+    testkit.assert_true(req_helper.contains2(&out, "state=none"), "state none")
+    req_helper.simple(&d, 1000, "", "list", &out)
+    testkit.assert_true(req_helper.err_is(&out, "locked"), "list before create")
+    req_helper.create(&d, 1000, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "create")
+    req_helper.create(&d, 1000, &out)
+    testkit.assert_true(req_helper.err_is(&out, "exists"), "create twice")
+    req_helper.put_login(&d, 1000, "Example", "https://example.org", "alice", "s3cret-pass", &out)
+    testkit.assert_true(req_helper.ok_of(&out), "put")
+    req_helper.simple(&d, 1000, "", "status", &out)
+    testkit.assert_true(req_helper.contains2(&out, "state=open"), "state open")
+    testkit.assert_true(req_helper.contains2(&out, "logins=1"), "one login")
+    req_helper.simple(&d, 1000, "", "list", &out)
+    testkit.assert_true(req_helper.ok_of(&out) && req_helper.contains(&out, "Example") && req_helper.contains(&out, "alice"), "list shows meta")
+    testkit.assert_true(!req_helper.contains(&out, "s3cret-pass"), "list has no password")
+    var f: req_helper.Rq = req_helper.rq_new("find")
+    req_helper.rq_hex(&f, "origin", "https://example.org")
+    req_helper.send(&d, 1000, "app:certus", &f, &out)
+    testkit.assert_true(req_helper.ok_of(&out) && req_helper.contains(&out, "s3cret-pass"), "certus finds")
+    var f2: req_helper.Rq = req_helper.rq_new("find")
+    req_helper.rq_hex(&f2, "origin", "https://other.org")
+    req_helper.send(&d, 1000, "app:certus", &f2, &out)
+    testkit.assert_true(req_helper.ok_of(&out) && !req_helper.contains(&out, "s3cret-pass"), "other origin finds nothing")
+    var f3: req_helper.Rq = req_helper.rq_new("find")
+    req_helper.rq_hex(&f3, "origin", "https://example.org")
+    req_helper.send(&d, 1000, "jarvis", &f3, &out)
+    testkit.assert_true(req_helper.err_is(&out, "denied"), "jarvis denied")
+    req_helper.simple(&d, 1000, "app:other", "list", &out)
+    testkit.assert_true(req_helper.err_is(&out, "denied"), "other app denied")
+    req_helper.simple(&d, 1000, "app:other", "status", &out)
+    testkit.assert_true(req_helper.ok_of(&out), "any label may ask status")
+    req_helper.simple(&d, 1000, "app:certus", "lock", &out)
+    testkit.assert_true(req_helper.err_is(&out, "denied"), "certus cannot lock")
+    req_helper.simple(&d, 1000, "", "lock", &out)
+    testkit.assert_true(req_helper.ok_of(&out), "lock")
+    req_helper.simple(&d, 1000, "app:certus", "list", &out)
+    testkit.assert_true(req_helper.err_is(&out, "locked"), "locked list")
+    var bad: req_helper.Rq = req_helper.rq_new("unlock")
+    req_helper.rq_hex(&bad, "pw", "wrong wrong wrong")
+    req_helper.send(&d, 1000, "", &bad, &out)
+    testkit.assert_true(req_helper.err_is(&out, "bad"), "bad password")
+    var good: req_helper.Rq = req_helper.rq_new("unlock")
+    req_helper.rq_hex(&good, "pw", "correct horse")
+    req_helper.send(&d, 1000, "", &good, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "unlock")
+    rt.buf_free(&out)
+}
+
+#[test]
+fn full_flow_and_policy() {
+    testkit.with_dir(run_flow, 0)
+}

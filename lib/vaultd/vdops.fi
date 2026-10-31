@@ -1,0 +1,251 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.cborread
+import vault.vlayout
+import vault.vcodes
+import vault.vrecord
+import vault.vstore
+import vault.vbuild
+import vault.vrand
+import vaultd.vdsess
+import vaultd.vdwire
+import vaultd.vdreply
+
+export { op_list, op_find, op_put, op_delete, op_reveal, op_status_counts }
+
+const LIST_CAP: usize = 64
+
+fn wipe_buf(b: *mut rt.Buf) {
+    if rt.buf_len(b) > 0 {
+        vlayout.wipe(rt.buf_ptr(b), rt.buf_len(b))
+    }
+    rt.buf_free(b)
+}
+
+fn op_status_counts(s: *mut vdsess.Session, out: *mut rt.Buf) {
+    let p: u64 = vdsess.store_ptr(s)
+    let n: usize = vdsess.store_len(s)
+    vdwire.put_num(out, "logins", vstore.count_live(p, n, vrecord.T_LOGIN) as u64)
+    vdwire.put_num(out, "passkeys", vstore.count_live(p, n, vrecord.T_PASSKEY) as u64)
+    vdwire.put_num(out, "revision", vdsess.cur_revision(s))
+}
+
+fn list_line(out: *mut rt.Buf, p: u64, n: usize, pos: usize) {
+    let t: u64 = vrecord.rec_type(p, n, pos)
+    vdwire.put_text(out, "item=")
+    vdreply.id_hex(out, p, n, pos)
+    rt.buf_push(out, 44 as u8)
+    if t == vrecord.T_LOGIN {
+        rt.buf_push(out, 108 as u8)
+    } else {
+        rt.buf_push(out, 112 as u8)
+    }
+    rt.buf_push(out, 44 as u8)
+    if t == vrecord.T_LOGIN {
+        vdreply.field_hex(out, p, n, pos, vrecord.K_TITLE, LIST_CAP)
+    } else {
+        vdreply.field_hex(out, p, n, pos, vrecord.K_RP_ID, LIST_CAP)
+    }
+    rt.buf_push(out, 44 as u8)
+    if t == vrecord.T_LOGIN {
+        vdreply.field_hex(out, p, n, pos, vrecord.K_USERNAME, LIST_CAP)
+    } else {
+        vdreply.field_hex(out, p, n, pos, vrecord.K_USER_NAME, LIST_CAP)
+    }
+    vdwire.nl(out)
+}
+
+fn op_list(s: *mut vdsess.Session, from: u64, out: *mut rt.Buf) {
+    let p: u64 = vdsess.store_ptr(s)
+    let n: usize = vdsess.store_len(s)
+    var it: vstore.It = vstore.it_zero()
+    if !vstore.it_open(p, n, &it) {
+        vdreply.fail(out, "store")
+        return
+    }
+    var body: rt.Buf = rt.buf_new()
+    var idx: u64 = 0
+    var more: bool = false
+    while vstore.it_next(&it) {
+        let t: u64 = vrecord.rec_type(p, n, it.start)
+        if (t == vrecord.T_LOGIN || t == vrecord.T_PASSKEY) && vrecord.is_live(p, n, it.start) {
+            if idx >= from {
+                if rt.buf_len(&body) > vdreply.REPLY_SOFT_MAX {
+                    more = true
+                    break
+                }
+                list_line(&body, p, n, it.start)
+            }
+            idx = idx + 1
+        }
+    }
+    vdreply.ok(out)
+    rt.buf_push_bytes(out, rt.buf_ptr(&body), rt.buf_len(&body))
+    if more {
+        vdwire.put_num(out, "next", idx)
+    }
+    rt.buf_free(&body)
+}
+
+fn op_find(s: *mut vdsess.Session, req: str, out: *mut rt.Buf) {
+    var origin: rt.Buf = rt.buf_new()
+    if !vdwire.hex_get(req, "origin", &origin) || rt.buf_len(&origin) == 0 {
+        rt.buf_free(&origin)
+        vdreply.fail(out, "arg")
+        return
+    }
+    let p: u64 = vdsess.store_ptr(s)
+    let n: usize = vdsess.store_len(s)
+    var ranges: rt.Buf = rt.buf_new()
+    let c: usize = vstore.find_origin(p, n, rt.buf_str(&origin), &ranges)
+    vdreply.ok(out)
+    var i: usize = 0
+    while i < c {
+        if rt.buf_len(out) > vdreply.REPLY_SOFT_MAX {
+            vdwire.put_num(out, "next", i as u64)
+            break
+        }
+        let pos: usize = vlayout.get_be64(rt.buf_ptr(&ranges), i * 16) as usize
+        vdwire.put_text(out, "login=")
+        vdreply.id_hex(out, p, n, pos)
+        rt.buf_push(out, 44 as u8)
+        vdreply.field_hex(out, p, n, pos, vrecord.K_USERNAME, 256)
+        rt.buf_push(out, 44 as u8)
+        vdreply.field_hex(out, p, n, pos, vrecord.K_PASSWORD, 256)
+        vdwire.nl(out)
+        i = i + 1
+    }
+    rt.buf_free(&ranges)
+    rt.buf_free(&origin)
+}
+
+fn opt_hex(req: str, key: str, b: *mut rt.Buf) -> bool {
+    if vdwire.value_range_has(req, key) {
+        return vdwire.hex_get(req, key, b)
+    }
+    return true
+}
+
+fn op_put(s: *mut vdsess.Session, root: str, user: str, req: str, now_s: u64, now_ms: u64,
+    out: *mut rt.Buf) {
+    var title: rt.Buf = rt.buf_new()
+    var origins: rt.Buf = rt.buf_new()
+    var username: rt.Buf = rt.buf_new()
+    var password: rt.Buf = rt.buf_new()
+    var notes: rt.Buf = rt.buf_new()
+    var idb: rt.Buf = rt.buf_new()
+    var rec: rt.Buf = rt.buf_new()
+    var next: rt.Buf = rt.buf_new()
+    var good: bool = opt_hex(req, "title", &title) && opt_hex(req, "origins", &origins)
+        && opt_hex(req, "username", &username) && opt_hex(req, "password", &password)
+        && opt_hex(req, "notes", &notes) && opt_hex(req, "id", &idb)
+    if good && rt.buf_len(&idb) == 0 {
+        var raw: [u8; 16] = [0; 16]
+        good = vrand.fill((&raw[0]) as u64, 16)
+        rt.buf_push_bytes(&idb, (&raw[0]) as u64, 16)
+    }
+    if !good || rt.buf_len(&idb) != vrecord.ID_LEN || rt.buf_len(&origins) == 0 {
+        vdreply.fail(out, "arg")
+    } else {
+        let p: u64 = vdsess.store_ptr(s)
+        let n: usize = vdsess.store_len(s)
+        let idp: u64 = rt.buf_ptr(&idb)
+        var created: u64 = now_ms
+        var a: usize = 0
+        var b: usize = 0
+        if vstore.store_find(p, n, idp, &a, &b) {
+            created = vrecord.rec_created(p, n, a)
+        }
+        let modified: u64 = vstore.store_next_modified(p, n, idp, now_ms)
+        var rc: i32 = vbuild.login_new(&rec, idp, created, modified, rt.buf_str(&title),
+            rt.buf_str(&origins), rt.buf_str(&username), rt.buf_str(&password),
+            rt.buf_str(&notes), now_ms)
+        if rc == vcodes.VR_OK {
+            rc = vstore.store_put(p, n, rt.buf_ptr(&rec), rt.buf_len(&rec), &next)
+        }
+        if rc != vcodes.VR_OK {
+            vdreply.fail_store(out, rc)
+        } else {
+            let src: i32 = vdsess.save_store(s, root, user, &next, now_s)
+            if src != vdsess.R_OK {
+                vdreply.fail_rc(out, src, 0)
+            } else {
+                vdreply.ok(out)
+                vdwire.put_text(out, "id=")
+                vdwire.put_hex(out, idp, vrecord.ID_LEN)
+                vdwire.nl(out)
+            }
+        }
+    }
+    wipe_buf(&password)
+    wipe_buf(&notes)
+    wipe_buf(&username)
+    wipe_buf(&title)
+    wipe_buf(&origins)
+    wipe_buf(&rec)
+    wipe_buf(&next)
+    rt.buf_free(&idb)
+}
+
+fn op_delete(s: *mut vdsess.Session, root: str, user: str, req: str, now_s: u64, now_ms: u64,
+    out: *mut rt.Buf) {
+    var idb: rt.Buf = rt.buf_new()
+    if !vdwire.hex_get(req, "id", &idb) || rt.buf_len(&idb) != vrecord.ID_LEN {
+        rt.buf_free(&idb)
+        vdreply.fail(out, "arg")
+        return
+    }
+    var next: rt.Buf = rt.buf_new()
+    let rc: i32 = vstore.store_delete(vdsess.store_ptr(s), vdsess.store_len(s),
+        rt.buf_ptr(&idb), now_ms, &next)
+    if rc != vcodes.VR_OK {
+        vdreply.fail_store(out, rc)
+    } else {
+        let src: i32 = vdsess.save_store(s, root, user, &next, now_s)
+        if src != vdsess.R_OK {
+            vdreply.fail_rc(out, src, 0)
+        } else {
+            vdreply.ok(out)
+        }
+    }
+    wipe_buf(&next)
+    rt.buf_free(&idb)
+}
+
+fn op_reveal(s: *mut vdsess.Session, req: str, out: *mut rt.Buf) {
+    var idb: rt.Buf = rt.buf_new()
+    var pw: rt.Buf = rt.buf_new()
+    if !vdwire.hex_get(req, "id", &idb) || rt.buf_len(&idb) != vrecord.ID_LEN
+        || !vdwire.hex_get(req, "pw", &pw) {
+        vdreply.fail(out, "arg")
+    } else {
+        let rc: i32 = vdsess.verify_pw(s, rt.buf_ptr(&pw), rt.buf_len(&pw))
+        if rc != vdsess.R_OK {
+            vdreply.fail_rc(out, rc, 0)
+        } else {
+            let p: u64 = vdsess.store_ptr(s)
+            let n: usize = vdsess.store_len(s)
+            var a: usize = 0
+            var b: usize = 0
+            if !vstore.store_find(p, n, rt.buf_ptr(&idb), &a, &b)
+                || vrecord.rec_type(p, n, a) != vrecord.T_LOGIN || !vrecord.is_live(p, n, a) {
+                vdreply.fail(out, "notfound")
+            } else {
+                var it: cborread.Item = cborread.item_zero()
+                if vrecord.field(p, n, a, vrecord.K_PASSWORD, &it) && it.len > 700 {
+                    vdreply.fail(out, "limit")
+                } else {
+                    vdreply.ok(out)
+                    vdwire.put_text(out, "username=")
+                    vdreply.field_hex(out, p, n, a, vrecord.K_USERNAME, 256)
+                    vdwire.nl(out)
+                    vdwire.put_text(out, "password=")
+                    vdreply.field_hex(out, p, n, a, vrecord.K_PASSWORD, 700)
+                    vdwire.nl(out)
+                }
+            }
+        }
+    }
+    wipe_buf(&pw)
+    rt.buf_free(&idb)
+}

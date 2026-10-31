@@ -1,0 +1,208 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import vault.vlayout
+import vaultd.vdctx
+import vaultd.vdsess
+import vaultd.vdwire
+import vaultd.vdpolicy
+import vaultd.vdrate
+import vaultd.vdreply
+import vaultd.vdops
+
+export { handle, REQ_MAX }
+
+const REQ_MAX: usize = 2047
+
+fn wipe_buf(b: *mut rt.Buf) {
+    if rt.buf_len(b) > 0 {
+        vlayout.wipe(rt.buf_ptr(b), rt.buf_len(b))
+    }
+    rt.buf_free(b)
+}
+
+fn state_word(st: u64) -> str {
+    if st == vdsess.S_OPEN {
+        return "open"
+    }
+    if st == vdsess.S_LOCKED {
+        return "locked"
+    }
+    return "none"
+}
+
+fn op_status(sp: *mut vdsess.Session, dir: str, out: *mut rt.Buf) {
+    let st: u64 = vdsess.vault_status(sp, dir)
+    vdreply.ok(out)
+    vdwire.put_kv(out, "state", state_word(st))
+    if st == vdsess.S_OPEN {
+        vdops.op_status_counts(sp, out)
+    }
+}
+
+fn op_create(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, req: str, c: *mut vdctx.Ctx,
+    out: *mut rt.Buf) {
+    var pw: rt.Buf = rt.buf_new()
+    if !vdwire.hex_get(req, "pw", &pw) {
+        vdreply.fail(out, "arg")
+    } else {
+        let rc: i32 = vdsess.create_vault(sp, (*d).root, user, rt.buf_ptr(&pw), rt.buf_len(&pw),
+            &(*d).kdf, (*c).now_s)
+        if rc != vdsess.R_OK {
+            vdreply.fail_rc(out, rc, 0)
+        } else {
+            vdreply.ok(out)
+        }
+    }
+    wipe_buf(&pw)
+}
+
+fn op_unlock(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, req: str, c: *mut vdctx.Ctx,
+    out: *mut rt.Buf) {
+    var pw: rt.Buf = rt.buf_new()
+    var rec: rt.Buf = rt.buf_new()
+    let accept: bool = vdwire.num_get(req, "accept", 0) == 1
+    var rc: i32 = vdsess.R_ARG
+    if vdwire.hex_get(req, "pw", &pw) {
+        rc = vdsess.unlock_pw(sp, (*d).root, user, rt.buf_ptr(&pw), rt.buf_len(&pw), &(*d).kdf,
+            (*c).now_s, (*c).now_ms, accept)
+    } else {
+        if vdwire.text_get(req, "recovery", &rec) {
+            rc = vdsess.unlock_recovery(sp, (*d).root, user, rt.buf_ptr(&rec), rt.buf_len(&rec),
+                (*c).now_s, (*c).now_ms, accept)
+        }
+    }
+    if rc != vdsess.R_OK {
+        vdreply.fail_rc(out, rc, (*sp).wait)
+    } else {
+        vdreply.ok(out)
+        if (*sp).migrated > 0 {
+            vdwire.put_num(out, "migrated", (*sp).migrated)
+        }
+    }
+    wipe_buf(&pw)
+    wipe_buf(&rec)
+}
+
+fn op_passwd(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, req: str, out: *mut rt.Buf) {
+    var old: rt.Buf = rt.buf_new()
+    var fresh: rt.Buf = rt.buf_new()
+    if !vdwire.hex_get(req, "pw", &old) || !vdwire.hex_get(req, "new", &fresh) {
+        vdreply.fail(out, "arg")
+    } else {
+        let rc: i32 = vdsess.change_password(sp, (*d).root, user, rt.buf_ptr(&old),
+            rt.buf_len(&old), rt.buf_ptr(&fresh), rt.buf_len(&fresh), &(*d).kdf)
+        if rc != vdsess.R_OK {
+            vdreply.fail_rc(out, rc, 0)
+        } else {
+            vdreply.ok(out)
+        }
+    }
+    wipe_buf(&old)
+    wipe_buf(&fresh)
+}
+
+fn op_recovery(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, out: *mut rt.Buf) {
+    var text: rt.Buf = rt.buf_new()
+    let rc: i32 = vdsess.add_recovery(sp, (*d).root, user, &text)
+    if rc != vdsess.R_OK {
+        vdreply.fail_rc(out, rc, 0)
+    } else {
+        vdreply.ok(out)
+        vdwire.put_text(out, "recovery=")
+        rt.buf_push_bytes(out, rt.buf_ptr(&text), rt.buf_len(&text))
+        vdwire.nl(out)
+    }
+    wipe_buf(&text)
+}
+
+fn needs_open(op: u64) -> bool {
+    return op == vdpolicy.OP_LIST || op == vdpolicy.OP_FIND || op == vdpolicy.OP_PUT
+        || op == vdpolicy.OP_DELETE || op == vdpolicy.OP_PASSWD || op == vdpolicy.OP_RECOVERY
+        || op == vdpolicy.OP_REVEAL
+}
+
+fn run_op(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, op: u64, req: str,
+    c: *mut vdctx.Ctx, out: *mut rt.Buf) {
+    let dir: str = vdsess.user_dir((*d).root, user)
+    if op == vdpolicy.OP_STATUS {
+        op_status(sp, dir, out)
+        return
+    }
+    if op == vdpolicy.OP_CREATE {
+        op_create(d, sp, user, req, c, out)
+        return
+    }
+    if op == vdpolicy.OP_UNLOCK {
+        op_unlock(d, sp, user, req, c, out)
+        return
+    }
+    if op == vdpolicy.OP_LOCK {
+        vdsess.lock(sp)
+        vdreply.ok(out)
+        return
+    }
+    if needs_open(op) && (*sp).open == 0 {
+        vdreply.fail(out, "locked")
+        return
+    }
+    (*sp).touched = (*c).now_s
+    if op == vdpolicy.OP_LIST {
+        vdops.op_list(sp, vdwire.num_get(req, "from", 0), out)
+    }
+    if op == vdpolicy.OP_FIND {
+        vdops.op_find(sp, req, out)
+    }
+    if op == vdpolicy.OP_PUT {
+        vdops.op_put(sp, (*d).root, user, req, (*c).now_s, (*c).now_ms, out)
+    }
+    if op == vdpolicy.OP_DELETE {
+        vdops.op_delete(sp, (*d).root, user, req, (*c).now_s, (*c).now_ms, out)
+    }
+    if op == vdpolicy.OP_PASSWD {
+        op_passwd(d, sp, user, req, out)
+    }
+    if op == vdpolicy.OP_RECOVERY {
+        op_recovery(d, sp, user, out)
+    }
+    if op == vdpolicy.OP_REVEAL {
+        vdops.op_reveal(sp, req, out)
+    }
+}
+
+fn handle(d: *mut vdctx.Daemon, c: *mut vdctx.Ctx, uid: u64, label: str, req: str,
+    out: *mut rt.Buf) {
+    rt.buf_clear(out)
+    if req.n == 0 || req.n > REQ_MAX {
+        vdreply.fail(out, "size")
+        return
+    }
+    var opb: rt.Buf = rt.buf_new()
+    var op: u64 = vdpolicy.OP_UNKNOWN
+    if vdwire.op_of(req, &opb) {
+        op = vdpolicy.lookup(rt.buf_str(&opb))
+    }
+    rt.buf_free(&opb)
+    if op == vdpolicy.OP_UNKNOWN {
+        vdreply.fail(out, "op")
+        return
+    }
+    let class: u64 = vdpolicy.class_of_origin(label)
+    if !vdpolicy.class_ok(op, class) {
+        vdreply.fail(out, "denied")
+        return
+    }
+    if vdpolicy.is_secret(op)
+        && !vdrate.limiter_take(&(*d).lim, vdrate.key_of(uid, label), (*c).ticks) {
+        vdreply.fail(out, "rate")
+        return
+    }
+    let at: usize = vdctx.slot_for(d, uid)
+    if at >= vdctx.USER_SLOTS {
+        vdreply.fail(out, "busy")
+        return
+    }
+    var name: rt.Buf = rt.buf_new()
+    vdctx.user_name(uid, &name)
+    run_op(d, &(*d).users[at].s, rt.buf_str(&name), op, req, c, out)
+    rt.buf_free(&name)
+}

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
-export { Bucket, bucket_new, take, BURST, REFILL_TICKS }
+import std.rt
+
+export { Bucket, bucket_new, take, BURST, REFILL_TICKS, Limiter, limiter_new, limiter_take,
+    key_of, LIM_SLOTS }
 
 const BURST: u64 = 10
 const REFILL_TICKS: u64 = 600
@@ -32,4 +35,54 @@ fn take(b: *mut Bucket, now: u64) -> bool {
     }
     (*b).tokens = (*b).tokens - 1
     return true
+}
+
+const LIM_SLOTS: usize = 8
+
+struct Limiter {
+    keys: [u64; 8],
+    used: [bool; 8],
+    buckets: [Bucket; 8],
+    next: usize,
+}
+
+fn limiter_new() -> Limiter {
+    return Limiter { keys: [0; 8], used: [false; 8],
+        buckets: [bucket_new(0), bucket_new(0), bucket_new(0), bucket_new(0), bucket_new(0),
+            bucket_new(0), bucket_new(0), bucket_new(0)],
+        next: 0 }
+}
+
+fn mix(h: u64, b: u64) -> u64 {
+    var x: u64 = h ^ b
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    return x
+}
+
+fn key_of(uid: u64, label: str) -> u64 {
+    var h: u64 = mix(88172645463325252, uid + 1)
+    var i: usize = 0
+    while i < label.n {
+        h = mix(h, rt.ld8(label.p as u64, i) as u64 + 1)
+        i = i + 1
+    }
+    return h
+}
+
+fn limiter_take(l: *mut Limiter, key: u64, now: u64) -> bool {
+    var i: usize = 0
+    while i < LIM_SLOTS {
+        if (*l).used[i] && (*l).keys[i] == key {
+            return take(&(*l).buckets[i], now)
+        }
+        i = i + 1
+    }
+    let at: usize = (*l).next
+    (*l).next = (at + 1) % LIM_SLOTS
+    (*l).used[at] = true
+    (*l).keys[at] = key
+    (*l).buckets[at] = bucket_new(now)
+    return take(&(*l).buckets[at], now)
 }

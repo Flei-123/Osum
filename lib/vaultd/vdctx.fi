@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import vaultd.vdsess
+import vaultd.vdrate
+
+export { Daemon, Ctx, UserSlot, daemon_new, slot_for, user_name, idle_lock, lock_all, IDLE_SECS,
+    USER_SLOTS }
+
+const USER_SLOTS: usize = 4
+const IDLE_SECS: u64 = 900
+
+struct UserSlot {
+    uid: u64,
+    used: bool,
+    s: vdsess.Session,
+}
+
+struct Ctx {
+    now_s: u64,
+    now_ms: u64,
+    ticks: u64,
+}
+
+struct Daemon {
+    root: str,
+    kdf: vdsess.Kdf,
+    users: [UserSlot; 4],
+    lim: vdrate.Limiter,
+}
+
+fn slot_new() -> UserSlot {
+    return UserSlot { uid: 0, used: false, s: vdsess.session_new() }
+}
+
+fn daemon_new(root: str, kdf: vdsess.Kdf) -> Daemon {
+    return Daemon { root: root, kdf: kdf,
+        users: [slot_new(), slot_new(), slot_new(), slot_new()], lim: vdrate.limiter_new() }
+}
+
+fn slot_for(d: *mut Daemon, uid: u64) -> usize {
+    var i: usize = 0
+    while i < USER_SLOTS {
+        if (*d).users[i].used && (*d).users[i].uid == uid {
+            return i
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < USER_SLOTS {
+        if !(*d).users[i].used {
+            (*d).users[i].used = true
+            (*d).users[i].uid = uid
+            return i
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < USER_SLOTS {
+        if (*d).users[i].s.open == 0 {
+            vdsess.session_close(&(*d).users[i].s)
+            (*d).users[i].s = vdsess.session_new()
+            (*d).users[i].uid = uid
+            return i
+        }
+        i = i + 1
+    }
+    return USER_SLOTS
+}
+
+fn user_name(uid: u64, out: *mut rt.Buf) {
+    rt.buf_push(out, 117 as u8)
+    var digits: [u8; 24] = [0; 24]
+    var n: usize = 0
+    var x: u64 = uid
+    if x == 0 {
+        digits[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        digits[n] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        rt.buf_push(out, digits[n])
+    }
+}
+
+fn idle_lock(d: *mut Daemon, now_s: u64) -> usize {
+    var locked: usize = 0
+    var i: usize = 0
+    while i < USER_SLOTS {
+        if (*d).users[i].used && (*d).users[i].s.open != 0
+            && now_s > (*d).users[i].s.touched && now_s - (*d).users[i].s.touched >= IDLE_SECS {
+            vdsess.lock(&(*d).users[i].s)
+            locked = locked + 1
+        }
+        i = i + 1
+    }
+    return locked
+}
+
+fn lock_all(d: *mut Daemon) {
+    var i: usize = 0
+    while i < USER_SLOTS {
+        if (*d).users[i].used {
+            vdsess.lock(&(*d).users[i].s)
+        }
+        i = i + 1
+    }
+}

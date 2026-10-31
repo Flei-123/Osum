@@ -1,0 +1,282 @@
+import std.rt
+import std.testkit
+import vaultd.vdctx
+import vaultd.vdsess
+import vaultd.vdwire
+import req_helper
+
+fn first_id(out: *mut rt.Buf, key: str, dst: *mut rt.Buf) -> bool {
+    var line: rt.Buf = rt.buf_new()
+    var good: bool = false
+    if vdwire.text_get(rt.buf_str(out), key, &line) && rt.buf_len(&line) >= 32 {
+        rt.buf_push_bytes(dst, rt.buf_ptr(&line), 32)
+        good = true
+    }
+    rt.buf_free(&line)
+    return good
+}
+
+fn run_isolation(root: str, ctx: u64) {
+    var d: vdctx.Daemon = req_helper.daemon(root)
+    var out: rt.Buf = rt.buf_new()
+    req_helper.create(&d, 1000, &out)
+    req_helper.put_login(&d, 1000, "Mine", "https://a.example", "alice", "alice-pass", &out)
+    req_helper.simple(&d, 1001, "", "status", &out)
+    testkit.assert_true(req_helper.contains2(&out, "state=none"), "other uid has no vault")
+    req_helper.simple(&d, 1001, "", "list", &out)
+    testkit.assert_true(req_helper.err_is(&out, "locked"), "other uid cannot list")
+    req_helper.create(&d, 1001, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "other uid creates own")
+    req_helper.simple(&d, 1001, "", "list", &out)
+    testkit.assert_true(req_helper.ok_of(&out) && !req_helper.contains(&out, "Mine"), "own vault only")
+    req_helper.simple(&d, 1000, "", "list", &out)
+    testkit.assert_true(req_helper.contains(&out, "Mine"), "first vault intact")
+    rt.buf_free(&out)
+}
+
+#[test]
+fn users_are_isolated() {
+    testkit.with_dir(run_isolation, 0)
+}
+
+fn run_rate(root: str, ctx: u64) {
+    var d: vdctx.Daemon = req_helper.daemon(root)
+    var out: rt.Buf = rt.buf_new()
+    req_helper.create(&d, 1000, &out)
+    req_helper.put_login(&d, 1000, "T", "https://a.example", "u", "pw-value", &out)
+    var n: usize = 0
+    var limited: bool = false
+    while n < 12 {
+        var f: req_helper.Rq = req_helper.rq_new("find")
+        req_helper.rq_hex(&f, "origin", "https://a.example")
+        req_helper.rq_send(&d, 1000, "app:certus", &f, 5000, &out)
+        if req_helper.err_is(&out, "rate") {
+            limited = true
+            break
+        }
+        n = n + 1
+    }
+    testkit.assert_true(limited && n == 10, "burst of ten then rate")
+    var f2: req_helper.Rq = req_helper.rq_new("find")
+    req_helper.rq_hex(&f2, "origin", "https://a.example")
+    req_helper.rq_send(&d, 1000, "app:certus", &f2, 5000 + 600, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "refill after six seconds")
+    var f3: req_helper.Rq = req_helper.rq_new("find")
+    req_helper.rq_hex(&f3, "origin", "https://a.example")
+    req_helper.rq_send(&d, 1000, "", &f3, 5600, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "user label has its own bucket")
+    req_helper.simple(&d, 1000, "app:certus", "list", &out)
+    testkit.assert_true(req_helper.ok_of(&out), "non-secret op is not limited")
+    rt.buf_free(&out)
+}
+
+#[test]
+fn secret_ops_are_rate_limited() {
+    testkit.with_dir(run_rate, 0)
+}
+
+fn run_shape(root: str, ctx: u64) {
+    var d: vdctx.Daemon = req_helper.daemon(root)
+    var out: rt.Buf = rt.buf_new()
+    var big: req_helper.Rq = req_helper.rq_new("status")
+    var i: usize = 0
+    while i < 300 {
+        req_helper.rq_txt(&big, "padding", "0123456789")
+        i = i + 1
+    }
+    req_helper.rq_send(&d, 1000, "", &big, 1, &out)
+    testkit.assert_true(req_helper.err_is(&out, "size"), "oversize request")
+    var none: req_helper.Rq = req_helper.rq_new("")
+    req_helper.rq_send(&d, 1000, "", &none, 1, &out)
+    testkit.assert_true(req_helper.err_is(&out, "op"), "empty op")
+    var weird: req_helper.Rq = req_helper.rq_new("reveal_all")
+    req_helper.rq_send(&d, 1000, "", &weird, 1, &out)
+    testkit.assert_true(req_helper.err_is(&out, "op"), "unknown op")
+    req_helper.create(&d, 1000, &out)
+    var short: req_helper.Rq = req_helper.rq_new("create")
+    req_helper.rq_hex(&short, "pw", "x")
+    req_helper.rq_send(&d, 1002, "", &short, 1, &out)
+    testkit.assert_true(req_helper.err_is(&out, "short"), "short password")
+    var odd: req_helper.Rq = req_helper.rq_new("unlock")
+    req_helper.rq_txt(&odd, "pw", "abc")
+    req_helper.rq_send(&d, 1000, "", &odd, 1, &out)
+    testkit.assert_true(req_helper.err_is(&out, "arg"), "odd hex is an argument error")
+    var odd2: req_helper.Rq = req_helper.rq_new("put")
+    req_helper.rq_txt(&odd2, "origins", "zz")
+    req_helper.rq_send(&d, 1000, "", &odd2, 1, &out)
+    testkit.assert_true(req_helper.err_is(&out, "arg"), "bad hex")
+    var noorigin: req_helper.Rq = req_helper.rq_new("put")
+    req_helper.rq_hex(&noorigin, "title", "t")
+    req_helper.rq_send(&d, 1000, "", &noorigin, 1, &out)
+    testkit.assert_true(req_helper.err_is(&out, "arg"), "login needs an origin")
+    rt.buf_free(&out)
+}
+
+#[test]
+fn malformed_requests() {
+    testkit.with_dir(run_shape, 0)
+}
+
+fn run_secrets(root: str, ctx: u64) {
+    var d: vdctx.Daemon = req_helper.daemon(root)
+    var out: rt.Buf = rt.buf_new()
+    req_helper.create(&d, 1000, &out)
+    req_helper.put_login(&d, 1000, "Site", "https://s.example", "bob", "bob-pass-1", &out)
+    var id: rt.Buf = rt.buf_new()
+    testkit.assert_true(first_id(&out, "id", &id), "put returns id")
+    var rv: req_helper.Rq = req_helper.rq_new("reveal")
+    vdwire.put_text(&rv.b, "id=")
+    rt.buf_push_bytes(&rv.b, rt.buf_ptr(&id), 32)
+    vdwire.nl(&rv.b)
+    req_helper.rq_hex(&rv, "pw", "not the password")
+    req_helper.rq_send(&d, 1000, "", &rv, 10, &out)
+    testkit.assert_true(req_helper.err_is(&out, "bad"), "reveal wrong password")
+    var rv2: req_helper.Rq = req_helper.rq_new("reveal")
+    vdwire.put_text(&rv2.b, "id=")
+    rt.buf_push_bytes(&rv2.b, rt.buf_ptr(&id), 32)
+    vdwire.nl(&rv2.b)
+    req_helper.rq_hex(&rv2, "pw", "correct horse")
+    req_helper.rq_send(&d, 1000, "app:certus", &rv2, 20, &out)
+    testkit.assert_true(req_helper.err_is(&out, "denied"), "certus cannot reveal")
+    var rv3: req_helper.Rq = req_helper.rq_new("reveal")
+    vdwire.put_text(&rv3.b, "id=")
+    rt.buf_push_bytes(&rv3.b, rt.buf_ptr(&id), 32)
+    vdwire.nl(&rv3.b)
+    req_helper.rq_hex(&rv3, "pw", "correct horse")
+    req_helper.rq_send(&d, 1000, "", &rv3, 30, &out)
+    testkit.assert_true(req_helper.ok_of(&out) && req_helper.contains(&out, "bob-pass-1"), "reveal with password")
+    var upd: req_helper.Rq = req_helper.rq_new("put")
+    vdwire.put_text(&upd.b, "id=")
+    rt.buf_push_bytes(&upd.b, rt.buf_ptr(&id), 32)
+    vdwire.nl(&upd.b)
+    req_helper.rq_hex(&upd, "title", "Site")
+    req_helper.rq_hex(&upd, "origins", "https://s.example")
+    req_helper.rq_hex(&upd, "username", "bob")
+    req_helper.rq_hex(&upd, "password", "bob-pass-2")
+    req_helper.rq_send(&d, 1000, "app:certus", &upd, 40, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "certus updates")
+    req_helper.simple(&d, 1000, "", "status", &out)
+    testkit.assert_true(req_helper.contains2(&out, "logins=1"), "update keeps one login")
+    var del: req_helper.Rq = req_helper.rq_new("delete")
+    vdwire.put_text(&del.b, "id=")
+    rt.buf_push_bytes(&del.b, rt.buf_ptr(&id), 32)
+    vdwire.nl(&del.b)
+    req_helper.rq_send(&d, 1000, "app:certus", &del, 50, &out)
+    testkit.assert_true(req_helper.err_is(&out, "denied"), "certus cannot delete")
+    var del2: req_helper.Rq = req_helper.rq_new("delete")
+    vdwire.put_text(&del2.b, "id=")
+    rt.buf_push_bytes(&del2.b, rt.buf_ptr(&id), 32)
+    vdwire.nl(&del2.b)
+    req_helper.rq_send(&d, 1000, "", &del2, 60, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "user deletes")
+    req_helper.simple(&d, 1000, "", "status", &out)
+    testkit.assert_true(req_helper.contains2(&out, "logins=0"), "login gone")
+    rt.buf_free(&id)
+    rt.buf_free(&out)
+}
+
+#[test]
+fn reveal_update_delete() {
+    testkit.with_dir(run_secrets, 0)
+}
+
+fn run_account(root: str, ctx: u64) {
+    var d: vdctx.Daemon = req_helper.daemon(root)
+    var out: rt.Buf = rt.buf_new()
+    req_helper.create(&d, 1000, &out)
+    req_helper.put_login(&d, 1000, "Keep", "https://k.example", "k", "keep-pass", &out)
+    req_helper.simple(&d, 1000, "", "recovery", &out)
+    testkit.assert_true(req_helper.ok_of(&out) && req_helper.contains2(&out, "recovery="), "recovery text")
+    var text: rt.Buf = rt.buf_new()
+    testkit.assert_true(vdwire.text_get(rt.buf_str(&out), "recovery", &text) && rt.buf_len(&text) == 64, "recovery length")
+    var pw: req_helper.Rq = req_helper.rq_new("passwd")
+    req_helper.rq_hex(&pw, "pw", "wrong old password")
+    req_helper.rq_hex(&pw, "new", "brand new secret")
+    req_helper.rq_send(&d, 1000, "", &pw, 10, &out)
+    testkit.assert_true(req_helper.err_is(&out, "bad"), "passwd wrong old")
+    var pw2: req_helper.Rq = req_helper.rq_new("passwd")
+    req_helper.rq_hex(&pw2, "pw", "correct horse")
+    req_helper.rq_hex(&pw2, "new", "brand new secret")
+    req_helper.rq_send(&d, 1000, "", &pw2, 20, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "passwd")
+    req_helper.simple(&d, 1000, "", "lock", &out)
+    var oldp: req_helper.Rq = req_helper.rq_new("unlock")
+    req_helper.rq_hex(&oldp, "pw", "correct horse")
+    req_helper.rq_send(&d, 1000, "", &oldp, 30, &out)
+    testkit.assert_true(req_helper.err_is(&out, "bad"), "old password closed")
+    var rec: req_helper.Rq = req_helper.rq_new("unlock")
+    vdwire.put_text(&rec.b, "recovery=")
+    rt.buf_push_bytes(&rec.b, rt.buf_ptr(&text), rt.buf_len(&text))
+    vdwire.nl(&rec.b)
+    req_helper.tick(100)
+    req_helper.rq_send(&d, 1000, "", &rec, 40, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "recovery unlock")
+    req_helper.simple(&d, 1000, "", "lock", &out)
+    var newp: req_helper.Rq = req_helper.rq_new("unlock")
+    req_helper.rq_hex(&newp, "pw", "brand new secret")
+    req_helper.tick(100)
+    req_helper.rq_send(&d, 1000, "", &newp, 50, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "new password opens")
+    testkit.assert_true(vdctx.idle_lock(&d, 1) == 0, "fresh session is not idle")
+    testkit.assert_true(vdctx.idle_lock(&d, 1000000) == 1, "idle session locks")
+    req_helper.simple(&d, 1000, "", "list", &out)
+    testkit.assert_true(req_helper.err_is(&out, "locked"), "locked after idle")
+    rt.buf_free(&text)
+    rt.buf_free(&out)
+}
+
+#[test]
+fn recovery_passwd_idle() {
+    testkit.with_dir(run_account, 0)
+}
+
+fn run_paging(root: str, ctx: u64) {
+    var d: vdctx.Daemon = req_helper.daemon(root)
+    var out: rt.Buf = rt.buf_new()
+    req_helper.create(&d, 1000, &out)
+    var i: usize = 0
+    while i < 30 {
+        var title: rt.Buf = rt.buf_new()
+        rt.buf_push_bytes(&title, "Entry number with a long title ".p as u64, 31)
+        vdwire.put_num(&title, "", i as u64)
+        req_helper.put_login(&d, 1000, rt.buf_str(&title), "https://p.example", "user-with-a-long-name-abcdefghij", "pw-value", &out)
+        rt.buf_free(&title)
+        testkit.assert_true(req_helper.ok_of(&out), "put in loop")
+        req_helper.tick(1000)
+        i = i + 1
+    }
+    var from: u64 = 0
+    var pages: usize = 0
+    var items: usize = 0
+    var go: bool = true
+    while go && pages < 20 {
+        var l: req_helper.Rq = req_helper.rq_new("list")
+        vdwire.put_num(&l.b, "from", from)
+        req_helper.rq_send(&d, 1000, "", &l, 1, &out)
+        testkit.assert_true(req_helper.ok_of(&out) && rt.buf_len(&out) < 1800, "page fits the bus")
+        let hay: str = rt.buf_str(&out)
+        var k: usize = 0
+        while k + 5 <= hay.n {
+            if rt.ld8(hay.p as u64, k) == 105 as u8 && rt.ld8(hay.p as u64, k + 1) == 116 as u8
+                && rt.ld8(hay.p as u64, k + 4) == 61 as u8 {
+                items = items + 1
+            }
+            k = k + 1
+        }
+        let nx: u64 = vdwire.num_get(hay, "next", 0)
+        if nx == 0 {
+            go = false
+        } else {
+            from = nx
+        }
+        pages = pages + 1
+    }
+    testkit.assert_eq_u64(items as u64, 30)
+    testkit.assert_true(pages > 1, "several pages")
+    rt.buf_free(&out)
+}
+
+#[test]
+fn list_is_paginated() {
+    testkit.with_dir(run_paging, 0)
+}
