@@ -22,6 +22,35 @@ static int cmd_input(void)
     return 0;
 }
 
+extern char **environ;
+
+static int cmd_env(void)
+{
+    int n = 0;
+    for (char **e = environ; e && *e; e++, n++)
+        printf("XR-ENV %s\n", *e);
+    printf("XR-ENVN %d\n", n);
+    for (int i = 0; i < 4 && environ; i++)
+        printf("XR-RAW %d %p\n", i, (void *)environ[i]);
+    return 0;
+}
+
+static int cmd_exec(int count)
+{
+    static char names[64][16];
+    char *envp[65];
+    char *args[] = {"xrprobe", "env", 0};
+    int i;
+    for (i = 0; i < count && i < 64; i++) {
+        snprintf(names[i], sizeof names[i], "V%d=value%d", i, i);
+        envp[i] = names[i];
+    }
+    envp[i] = 0;
+    execve("/opt/xr/xrprobe", args, envp);
+    perror("execve");
+    return 1;
+}
+
 static int cmd_grab(void)
 {
     long w = shot(0, 1, 0), h = shot(0, 2, 0), rb = shot(0, 3, 0), rows = shot(0, 5, 0);
@@ -55,6 +84,10 @@ int main(int argc, char **argv)
         return cmd_screen();
     if (!strcmp(argv[1], "input"))
         return cmd_input();
+    if (!strcmp(argv[1], "env"))
+        return cmd_env();
+    if (!strcmp(argv[1], "exec") && argc > 2)
+        return cmd_exec(atoi(argv[2]));
     if (!strcmp(argv[1], "grab"))
         return cmd_grab();
     return 64;

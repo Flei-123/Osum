@@ -42,7 +42,7 @@ trap cleanup EXIT
 OUT=${XR_OUT:-$T/out}
 mkdir -p "$OUT" "$T/relay" "$T/home" "$T/fx"
 musl-gcc -O2 -fPIE -pie -o "$T/xrprobe" tools/xremote/probe.c || { echo "XREMOTE: probe build failed"; exit 1; }
-sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@SESSIONSECS@/$SESSIONSECS/g" tools/xremote/guest.sh > "$T/guest.sh"
+sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@SESSIONSECS@/$SESSIONSECS/g" "${XR_GUEST:-tools/xremote/guest.sh}" > "$T/guest.sh"
 grep -E '/@755$|^/(bin|sbin)/|^/usr/(bin|sbin)/[a-z0-9_.-]*->/bin/busybox|^/lib/(ld-musl|libc\.musl)' "$WD/fxrun/spec.txt" > "$T/fx/spec.txt"
 {
     echo "/opt/@755"; echo "/opt/xr/@755"; echo "/usr/@755"; echo "/usr/lib/@755"

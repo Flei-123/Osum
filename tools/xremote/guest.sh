@@ -8,9 +8,11 @@ echo "XR1 rc=$?"
 echo "XR2 rc=$?"
 /opt/xr/xrprobe input
 export FV_RELAY=ws://10.0.2.2:@RELAYPORT@/fv/ws FV_ALLOW_INSECURE_RELAY=1 FV_NOP2P=1 FV_PASSWORD=xrpass
-timeout @HOSTSECS@ /opt/xr/freeviewer-host --headless > /tmp/host.log 2>&1 &
+/opt/xr/xrprobe env
+/opt/xr/freeviewer-host --headless > /tmp/host.log 2>&1 &
 HP=$!
 sleep 20
+if kill -0 $HP 2>/dev/null; then echo XR-ALIVE; else echo XR-DEAD; wait $HP; echo "XR-HOSTRC $?"; fi
 echo XR-EARLY-BEGIN
 cat /tmp/host.log
 echo XR-EARLY-END
@@ -31,5 +33,5 @@ cat /tmp/host.log
 echo "XR-HOSTLOG-END"
 /opt/xr/xrprobe input
 /opt/xr/xrprobe screen
-kill $HP
+kill $HP 2>/dev/null
 echo XR-END

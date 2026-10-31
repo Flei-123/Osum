@@ -62,7 +62,7 @@ DRV=(-drive "file=$OUT/disk.img,format=raw,if=ide,index=0")
 SOCK="$OUT/mon.sock"; rm -f "$SOCK"
 timeout "$TMO" qemu-system-x86_64 "${ACC[@]}" -smp "${SMP:-1}" -kernel "$KERNEL" -m "$MEM" -append "$KARGS" \
     -serial "file:$OUT/ser.txt" -display none -no-reboot -monitor "unix:$SOCK,server,nowait" "${DRV[@]}" \
-    $QEMU_EXTRA -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.txt" 2>&1 &
+    ${QEMU_EXTRA:-} -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.txt" 2>&1 &
 QPID=$!
 i=0
 while kill -0 "$QPID" 2>/dev/null; do
