@@ -23,7 +23,7 @@
 #         nichts auf den Schirm.
 #   T=    kstate.TICKS   -- schlaegt der Zeitgeber ueberhaupt?
 #   LOOP= board_loop     -- laeuft die Schreibtischschleife?
-#   IRQ=  board_irq      -- Rufe aus dem Zeitgeber
+#   IRQ=  board_irq      -- calls from the timer
 #   PRE=  kstate.PREEMPT -- ist die Verdraengung an? (Soll 1)
 #   HZ=   die gemessene Rate (Soll 100)
 #   R=    taskbar: round -- laeuft die Ring-3-Schleife der Leiste?

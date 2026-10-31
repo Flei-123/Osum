@@ -840,7 +840,7 @@ num "und jede der Kacheln ist wirklich rund (tiefe > 0)" "$KTIEF" eq 0
 #
 # Gerechnet statt geschaut: die Kachel meldet jedes Balkenrechteck mit
 # dem Rechteck, in dem es liegen MUSS (`wlib: kachelbalken ... kx= ky=
-# kw= kh= ein=`, kernel/user/wlib.fi `say_bar`). Das Innenrechteck
+# kw= kh= ein=`, kernel/user/wlib.fi `say_bar`). The inner rectangle
 # ist `kx + ein .. kx + kw - ein`; darin liegt jede Zeile der runden
 # Flaeche vollstaendig, unabhaengig davon, wie weit oben sie sitzt.
 # Eine Aufnahme braucht diese Probe nicht -- sie faellt auch dann auf,
@@ -2942,7 +2942,7 @@ done
 # gemalt: Flaeche in Weiss auf einer Karte in #f8fafc, kein Rand. Neben
 # den Knoepfen der Seite Vorlagen sah er aus wie eine Beschriftung, und
 # kein Pruefer hat es gemerkt -- gemessen wurde bis hierher nur SCHRIFT.
-# `wlib.say_button` meldet jetzt Rechteck und Radius jedes gemalten
+# `wlib.say_button` now reports the rectangle and radius of every painted
 # Knopfes, und `shotcheck.py --knoepfe` sieht an seinen vier Kanten
 # nach.
 echo
