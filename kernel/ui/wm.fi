@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.tiling
 import ui.wm.wmworkarea
 import ui.wm.wmhead
 import ui.wm.wmswitchpaint
@@ -144,7 +145,7 @@ export {
     create_ex, attach_buf, win_shm, damage_rect, tab_object, chrome_object, tab_publish, shared_ok, sh_stat,
     lj_fast, frames_total, input_hot, lj_round, lj_may_compose, lj_done,
     cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_log, cp_stat, cp_say_reset, cp_on, CP_NOT, CP_BUSY, destroy, set_focus, raise_win,
-    gest_action, cross_point,
+    cross_point,
     move_win, resize_win, win_w, win_h, win_buf,
     win_kind, win_id,
     win_layer, set_layer, win_hidden, set_hidden, win_deco, set_deco,
@@ -167,10 +168,9 @@ export {
     anims,
     minimize_anim, open_anim,
     set_min_rect,
-    drag_begin_pub, drag_end_pub,
     dnd_take_paste, dnd_live_pub, dnd_nraise_pub, dnd_ncancel_pub,
     win_x_pub, win_y_pub,
-    frame_no, plugkeys,
+    frame_no,
     leser_tick,
     set_before_t0, set_before_step, set_before_win,
     fill, text, flush_win,
@@ -182,11 +182,10 @@ export {
     set_keys,
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
-    tile_on, set_tile_on, tile_take, tile_release, tile_apply,
-    tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
-    kachelbar,
+    tile_on, tile_take, tile_release,
+    tile_action, hotkeys_seen,
     tt_is_bg,
-    term_key, term_paste_done, on_screen_resize, win_tabbed, tiled, tile_focus_state, tile_nodes_all, tile_leaves_all, tile_tree_tag,
+    term_key, term_paste_done, tile_focus_state, tile_nodes_all, tile_leaves_all,
     MAX_WIN, K_TERM,
     damage, damage_all, focus, inx, iny, ready, valid, win_owner, win_x, win_y,
     title_clipped, title_missing,
@@ -198,7 +197,6 @@ export {
     F_HIDDEN, F_NODECO,
     PROBE_IN, PROBE_OUT,
     term_putc,
-    tt,
 }
 
 const E_AXPRESS: u64 = wmlayout.E_AXPRESS
@@ -304,6 +302,42 @@ fn work_x(state: u64) -> u64 {
 
 fn work_y(state: u64) -> u64 {
     return wmworkarea.work_y(state)
+}
+
+fn hotkeys_seen(state: u64) -> u64 {
+    return tiling.hotkeys_seen(state)
+}
+
+fn tile_action(state: u64, act: u64) -> bool {
+    return tiling.tile_action(state, act)
+}
+
+fn tile_focus_state(state: u64) -> u64 {
+    return tiling.tile_focus_state(state)
+}
+
+fn tile_leaves_all(state: u64) -> u64 {
+    return tiling.tile_leaves_all(state)
+}
+
+fn tile_nodes_all(state: u64) -> u64 {
+    return tiling.tile_nodes_all(state)
+}
+
+fn tile_on(state: u64) -> bool {
+    return tiling.tile_on(state)
+}
+
+fn tile_release(state: u64, i: u64) -> bool {
+    return tiling.tile_release(state, i)
+}
+
+fn tile_take(state: u64, i: u64) -> bool {
+    return tiling.tile_take(state, i)
+}
+
+fn win_layer(state: u64, i: u64) -> u64 {
+    return tiling.win_layer(state, i)
 }
 
 fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
@@ -513,13 +547,6 @@ fn win_deco(state: u64, i: u64) -> bool {
 }
 
 const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
-// RUNDE ECHTHARDWARE-3: 12 -> 8, aber jetzt am GANZEN Rand statt nur
-// in der Ecke. Multipliziert mit `uisc` sind das auf Justins Schirm 16
-// Bildpunkte Rand -- breit genug zum Treffen, schmal genug, dass ein
-// Klick in die Flaeche noch ein Klick in die Flaeche ist.
-// DELL ROUND: how much of a window must stay in sight when it is pushed
-// over the left or right screen edge (base pixels, times uisc).
-const VIS_MIN0: u64 = 96
 const CG_MAX: u64 = 1600      // 40 * 40 Punkte
 static mut cg_w: [u64; 4] = [0 as u64; 4]
 static mut cg_h: [u64; 4] = [0 as u64; 4]
@@ -1120,13 +1147,6 @@ fn set_cap_client(state: u64, i: u64, on: bool) -> bool {
     return true
 }
 
-fn win_layer(state: u64, i: u64) -> u64 {
-    if i >= wmbase.MAX_WIN {
-        return wmlayout.L_NORMAL
-    }
-    return wmlayout.wg(state, i, wmlayout.W_LAYER)
-}
-
 fn win_hidden(state: u64, i: u64) -> bool {
     if i >= wmbase.MAX_WIN {
         return false
@@ -1193,30 +1213,34 @@ fn set_nomin(state: u64, on: bool) {
 
 fn hook_create(state: u64, i: u64) {
     if wmlayout.gs(state, wmlayout.S_TILE) != 0 {
-        save_geom(state, i)
-        tile_take(state, i)
+        tiling.save_geom(state, i)
+        tiling.tile_take(state, i)
     }
 }
 
 fn hook_destroy(state: u64, i: u64) {
     wmtabctl.tt_forget(state, i)
-    tile_release(state, i)
+    tiling.tile_release(state, i)
 }
 
 fn hook_focus(state: u64, i: u64) {
     if wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-        tl_sel(state, nd_tag(wmlayout.wg(state, i, wmlayout.W_NODE)))
-        tile.set_focus(tt(state), nd_node(wmlayout.wg(state, i, wmlayout.W_NODE)))
+        tiling.tl_sel(state, tiling.nd_tag(wmlayout.wg(state, i, wmlayout.W_NODE)))
+        tile.set_focus(tiling.tt(state), tiling.nd_node(wmlayout.wg(state, i, wmlayout.W_NODE)))
     }
 }
 
 fn hook_layer_leave(state: u64, i: u64) {
-    tile_release(state, i)
-    restore_geom(state, i)
+    tiling.tile_release(state, i)
+    tiling.restore_geom(state, i)
 }
 
 fn hook_workarea(state: u64) {
     recalc_work(state)
+}
+
+fn hook_say_windows(state: u64) {
+    wins_say(state)
 }
 
 fn install_hooks() {
@@ -1225,6 +1249,7 @@ fn install_hooks() {
     wmhooks.register(wmhooks.H_FOCUS, hook_focus as u64)
     wmhooks.register(wmhooks.H_LAYER_LEAVE, hook_layer_leave as u64)
     wmhooks.register(wmhooks.H_WORKAREA, hook_workarea as u64)
+    wmhooks.register(wmhooks.H_SAY_WINDOWS, hook_say_windows as u64)
 }
 
 fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
@@ -1549,14 +1574,14 @@ fn heads_sync(state: u64) {
                     if ov == 0 {
                         wmcore.move_win(state, i, (wmhead.hw_x(p0) + 24) as i64, (wmhead.hw_y(p0) + 24) as i64)
                     }
-                    drag_klemmen(state, i)
+                    tiling.drag_klemmen(state, i)
                 }
             }
             i = i + 1
         }
         ps2m.set_pos(state, ps2m.x(state), ps2m.y(state))
     }
-    tl_heads_changed(state)
+    tiling.tl_heads_changed(state)
     recalc_work(state)
     wmlayout.ss(state, wmlayout.S_HD_SYNCS, wmlayout.gs(state, wmlayout.S_HD_SYNCS) + 1)
     wmlayout.ss(state, wmlayout.S_HD_GEN, vgpu.hot_gen(state))
@@ -1766,9 +1791,9 @@ fn hd_say_tree(state: u64, i: u64, tag: u64) {
     serial.puts((&s_a[0]) as u64)
     serial.puts(tag)
     serial.puts((&s_t[0]) as u64)
-    serial.dec(tile_tree_tag(state, i))
+    serial.dec(tiling.tile_tree_tag(state, i))
     serial.puts((&s_n[0]) as u64)
-    if tiled(state, i) {
+    if tiling.tiled(state, i) {
         serial.dec(1)
     } else {
         serial.dec(0)
@@ -1793,9 +1818,9 @@ fn hd_say_trees(state: u64, tag: u64) {
     serial.puts((&s_a[0]) as u64)
     serial.puts(tag)
     serial.puts((&s_n[0]) as u64)
-    serial.dec(tile_nodes_all(state))
+    serial.dec(tiling.tile_nodes_all(state))
     serial.puts((&s_l[0]) as u64)
-    serial.dec(tile_leaves_all(state))
+    serial.dec(tiling.tile_leaves_all(state))
     serial.nl()
 }
 
@@ -1827,7 +1852,7 @@ fn hd_demo_tile(state: u64, hot: bool, wa: u64, wb: u64, bar: u64) {
         return
     }
     // a clean slate: nothing tiled, no strut, the full head rects are the work areas
-    set_tile_on(state, false)
+    tiling.set_tile_on(state, false)
     let _d1: bool = wmcore.destroy(state, wa)
     let _d2: bool = wmcore.destroy(state, wb)
     let _d3: bool = wmcore.destroy(state, bar)
@@ -1850,26 +1875,26 @@ fn hd_demo_tile(state: u64, hot: bool, wa: u64, wb: u64, bar: u64) {
     hd_say_win(state, c0, (&t_c0[0]) as u64)
     hd_say_tree(state, c2, (&t_c2[0]) as u64)
     // drag c0 over to the top edge of head 1: tiled as the upper half of head 1's tree
-    drag_begin(state, c0)
+    tiling.drag_begin(state, c0)
     hd_say_tree(state, c0, (&t_c0t[0]) as u64)
-    drag_hover(state, c0, h1x + hw / 2, 0)
+    tiling.drag_hover(state, c0, h1x + hw / 2, 0)
     hd_say_drop(state, (&t_top[0]) as u64)
-    drag_end(state, c0, h1x + hw / 2, 0)
+    tiling.drag_end(state, c0, h1x + hw / 2, 0)
     hd_say_win(state, c0, (&t_c0t[0]) as u64)
     hd_say_win(state, c1, (&t_c1t[0]) as u64)
     hd_say_win(state, c2, (&t_c2t[0]) as u64)
     hd_say_tree(state, c0, (&t_c0t[0]) as u64)
     hd_say_trees(state, (&t_n2[0]) as u64)
     // the seam between the heads is no docking edge; the middle of a tile: no edge either; switch off: nothing
-    drag_hover(state, c0, h1x, 100)
+    tiling.drag_hover(state, c0, h1x, 100)
     hd_say_drop(state, (&t_sm[0]) as u64)
-    drag_hover(state, c0, h1x + hw / 2, 300)
+    tiling.drag_hover(state, c0, h1x + hw / 2, 300)
     hd_say_drop(state, (&t_mid[0]) as u64)
     wmlayout.ss(state, wmlayout.S_DROPN, 0)
     wmlayout.ss(state, wmlayout.S_DROPE, 0)
     wmlayout.ss(state, wmlayout.S_PVON, 0)
     wmlayout.ss(state, wmlayout.S_TILE, 0)
-    drag_hover(state, c0, h1x + hw - 1, 100)
+    tiling.drag_hover(state, c0, h1x + hw - 1, 100)
     hd_say_drop(state, (&t_off[0]) as u64)
     wmlayout.ss(state, wmlayout.S_TILE, 1)
     if hot {
@@ -1889,7 +1914,7 @@ fn hd_demo_tile(state: u64, hot: bool, wa: u64, wb: u64, bar: u64) {
         hd_say_tree(state, c3, (&t_c3[0]) as u64)
         hd_say_trees(state, (&t_n3[0]) as u64)
     }
-    set_tile_on(state, false)
+    tiling.set_tile_on(state, false)
     hd_say_trees(state, (&t_n4[0]) as u64)
     if hot {
         var t_mp: [u8; 11] = "mirror-pre\0"
@@ -2006,8 +2031,8 @@ fn recalc_work(state: u64) {
         wmlayout.ss(state, wmlayout.S_WORK_H, wmhead.hw_h(p))
         wmlayout.ss(state, wmlayout.S_WORKCALC, wmlayout.gs(state, wmlayout.S_WORKCALC) + 1)
         wmworkarea.refit_max(state)
-        tile_area_work(state)
-        tile_apply(state)
+        tiling.tile_area_work(state)
+        tiling.tile_apply(state)
         return
     }
     let sw: u64 = wmlayout.gs(state, wmlayout.S_SW)
@@ -2073,8 +2098,8 @@ fn recalc_work(state: u64) {
     // damit unter der Leiste. Dieselbe Begruendung wie bei `refit_max`
     // eine Zeile darueber: ein Strut, den nur die Haelfte beachtet, ist
     // keiner.
-    tile_area_work(state)
-    tile_apply(state)
+    tiling.tile_area_work(state)
+    tiling.tile_apply(state)
 }
 
 // RUNDE ECHTHARDWARE-1: das Fenster sagt, ob es die Tastatur will.
@@ -3740,7 +3765,7 @@ fn compose(state: u64) -> u64 {
         arch.atomic_store(lk, 0)
         return 0
     }
-    screen_follow(state)
+    tiling.screen_follow(state)
     cp_watch(state)
     tab_publish(state)
     let cur0: u64 = pg_cursor(state)
@@ -3984,7 +4009,7 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
     //     Fenstern und ueberschneiden sie nicht -- der Baum hat ihre
     //     Hoehe von der Flaeche der Kinder abgezogen.
     if wmlayout.gs(state, wmlayout.S_TILE) != 0 {
-        paint_bars(state, x0, y0, x1, y1)
+        tiling.paint_bars(state, x0, y0, x1, y1)
     }
     wmpresent.ph_add(state, wmlayout.S_PH_BG, ph_a0, time.tsc())
     // 2. die Fenster, von unten nach oben
@@ -4054,7 +4079,7 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
     // 2b. das Vorschaurechteck beim Ziehen -- ueber den Fenstern, unter
     //     dem Zeiger.
     if wmlayout.gs(state, wmlayout.S_PVON) != 0 {
-        paint_preview(state, x0, y0, x1, y1)
+        tiling.paint_preview(state, x0, y0, x1, y1)
     }
     // 2c. ROUND ACTION-BUS-5 (AB-004): the trusted dialog, over every
     //     window and under the pointer only
@@ -4391,24 +4416,6 @@ fn win_x_pub(state: u64, i: u64) -> i64 {
 
 fn win_y_pub(state: u64, i: u64) -> i64 {
     return wmbase.win_y(state, i)
-}
-
-fn drag_begin_pub(state: u64, i: u64, gx: u64, gy: u64) {
-    if !wmbase.valid(state, i) {
-        return
-    }
-    drag_begin(state, i)
-    wmlayout.ss(state, wmlayout.S_DRAG, i + 1)
-    wmlayout.ss(state, wmlayout.S_DRAGX, gx)
-    wmlayout.ss(state, wmlayout.S_DRAGY, gy)
-}
-
-fn drag_end_pub(state: u64, i: u64) {
-    if !wmbase.valid(state, i) {
-        return
-    }
-    wmlayout.ss(state, wmlayout.S_DRAG, 0)
-    drag_end(state, i, wmbase.win_x(state, i), wmbase.win_y(state, i))
 }
 
 fn set_blur_cache(state: u64, on: bool) {
@@ -5648,24 +5655,24 @@ fn on_mouse_btn(state: u64, btn: u64) {
         let i: u64 = wmlayout.gs(state, wmlayout.S_DRAG) - 1
         if (btn & ps2m.B_LEFT) == 0 {
             wmlayout.ss(state, wmlayout.S_DRAG, 0)
-            drag_end(state, i, x, y)
+            tiling.drag_end(state, i, x, y)
         } else {
             if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) != 0 && wmlayout.wg(state, i, wmlayout.W_NODE) == 0 && !fb.nosnap_an(state) {
                 let ddx: i64 = x - wmbase.win_x(state, i) - wmlayout.gs(state, wmlayout.S_DRAGX) as i64
                 let ddy: i64 = y - wmbase.win_y(state, i) - wmlayout.gs(state, wmlayout.S_DRAGY) as i64
                 let thr: i64 = 5 * wmgeom.uisc(state) as i64
                 if ddx > thr || ddx < 0 - thr || ddy > thr || ddy < 0 - thr {
-                    if !float_unmax(state, i, x, y) {
+                    if !tiling.float_unmax(state, i, x, y) {
                         wmcore.move_win(state, i, x - wmlayout.gs(state, wmlayout.S_DRAGX) as i64,
                             y - wmlayout.gs(state, wmlayout.S_DRAGY) as i64)
                     }
-                    drag_hover(state, i, x, y)
+                    tiling.drag_hover(state, i, x, y)
                 }
                 return
             }
             wmcore.move_win(state, i, x - wmlayout.gs(state, wmlayout.S_DRAGX) as i64,
                 y - wmlayout.gs(state, wmlayout.S_DRAGY) as i64)
-            drag_hover(state, i, x, y)
+            tiling.drag_hover(state, i, x, y)
             return
         }
     }
@@ -5696,7 +5703,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
             // RUNDE TILING: ein Fenster IM BAUM wird nicht frei
             // gezogen -- es verschiebt die Trennlinie.
             if wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-                tile_drag_resize(state, i, x, y)
+                tiling.tile_drag_resize(state, i, x, y)
                 return
             }
             // RUNDE DESKTOP: der Rand kommt aus `inx`/`iny` und nicht
@@ -6024,7 +6031,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
                     }
                     wmlayout.ss(state, wmlayout.S_STRIPWIN, i + 1)
                     wmlayout.ss(state, wmlayout.S_STRIPT, nowt)
-                    drag_begin(state, i)
+                    tiling.drag_begin(state, i)
                     wmlayout.ss(state, wmlayout.S_DRAG, i + 1)
                     wmlayout.ss(state, wmlayout.S_DRAGX, (x - wmbase.win_x(state, i)) as u64)
                     wmlayout.ss(state, wmlayout.S_DRAGY, (y - wmbase.win_y(state, i)) as u64)
@@ -6034,7 +6041,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
                     // die Titelleiste: ziehen
                     // RUNDE TILING: wer aus dem Baum gezogen wird, muss
                     // sich merken, dass er darin war.
-                    drag_begin(state, i)
+                    tiling.drag_begin(state, i)
                     wmlayout.ss(state, wmlayout.S_DRAG, i + 1)
                     wmlayout.ss(state, wmlayout.S_DRAGX, (x - wmbase.win_x(state, i)) as u64)
                     wmlayout.ss(state, wmlayout.S_DRAGY, (y - wmbase.win_y(state, i)) as u64)
@@ -6294,7 +6301,7 @@ fn poll(state: u64) -> bool {
     // RUNDE TILING: erst die Tastenkuerzel. Sie liegen im Ring, den
     // `kbd.irq` fuellt, wenn Alt gehalten wird -- der Fensterserver
     // HOLT sie ab, statt dass die Tastatur ihn kennt.
-    hotkeys(state)
+    tiling.hotkeys(state)
     wmswitchctl.sw_tick(state) // W1d: Alt released -> the Alt+Tab switcher commits
     dnd_tick(state) // W-DND: hover-raise after the delay
     // DER RUECKFALL AUF ABFRAGE, und er steht hier mit Begruendung.
@@ -6804,2117 +6811,6 @@ fn term_out(state: u64, i: u64, c: u64) {
         return
     }
     wmdamage.damage_win(state, i)
-}
-
-// ===================================================== RUNDE TILING
-//
-// DER FENSTERBAUM AM FENSTERSERVER. Die Rechnung selbst steht in
-// `kernel/tile.fi` und weiss von Fenstern nichts; was hier steht, ist
-// die NAHT: welches Blatt gehoert zu welchem Fenster, wie kommt ein
-// Rechteck aus dem Baum in einen Fenstersatz, wer malt die Reiterzeilen,
-// und was passiert, wenn man ein Fenster mit der Maus irgendwohin zieht.
-//
-// BEIDE WELTEN NEBENEINANDER, und das ist Absicht: ein Fenster mit
-// W_NODE == 0 SCHWEBT wie vor dieser Runde, eines mit W_NODE != 0 haengt
-// im Baum. Ein Dialog will schweben, eine Textkonsole will kacheln.
-// `tile_float` schiebt ein Fenster von der einen Welt in die andere und
-// zurueck; die schwebende Lage wird dabei in W_SAVXY/W_SAVWH aufgehoben,
-// sonst steht der Dialog nach dem Zurueckholen in der Ecke.
-
-// ===================================================== r839 TILE TREE PER HEAD
-// One tree per head. The tree of the primary head is the old tree (the pages at kstate.TILE_OFF, `state` itself is
-// its "tile state"). Every other head gets its own 4-frame tree the first time a window is tiled onto it; the tile
-// module only ever computes `state + kstate.TILE_OFF + ...`, so a tree is addressed by the fake state
-// `frames - TILE_OFF` (`tl_state`). `W_NODE` = (node + 1) | (tree tag << 8); tag 0 = the main tree, tag h >= 1 = the
-// tree of head h. The CURRENT tree (`tl_cur`, answered by `tt(state)`) is a plain global: every entry point selects
-// it first (`tl_use` may allocate the tree, `tl_sel` only selects an existing one), every `tile.*` call below uses
-// `tt(state)`. With fewer than two heads tag 0 is the only one and nothing changes.
-static mut tl_cur: u64 = 0
-static mut tl_alt: [u64; 8] = [0 as u64; 8]
-static mut tl_mask: u64 = 1
-static mut tl_prim: u64 = 0
-static mut tl_drop_tag: u64 = 0
-static mut tl_re: [u8; 32] = [0 as u8; 32]
-
-fn nd_node(v: u64) -> u64 {
-    return (v & 0xFF) - 1
-}
-
-fn nd_tag(v: u64) -> u64 {
-    return v >> 8
-}
-
-fn nd_val(n: u64) -> u64 {
-    return (n + 1) | (tl_cur << 8)
-}
-
-fn tl_state(state: u64, tag: u64) -> u64 {
-    if tag == 0 || tag >= wmhead.HD_MAX {
-        return state
-    }
-    let b: u64 = tl_alt[tag as usize]
-    if b == 0 {
-        return state
-    }
-    return b - kstate.TILE_OFF
-}
-
-fn tt(state: u64) -> u64 {
-    return tl_state(state, tl_cur)
-}
-
-// Select an EXISTING tree (tag 0 when there is none).
-fn tl_sel(state: u64, tag: u64) {
-    if tag != 0 && (tag >= wmhead.HD_MAX || tl_alt[tag as usize] == 0) {
-        tl_cur = 0
-        return
-    }
-    tl_cur = tag
-}
-
-// Tree tag of a head: 0 for the primary head (and always on a single screen).
-fn tl_tag_head(state: u64, hd: u64) -> u64 {
-    if !wmhead.hd_multi(state) || hd >= wmhead.HD_MAX || hd == wmhead.hd_primary(state) {
-        return 0
-    }
-    return hd
-}
-
-// Select the tree of `tag`, making it first when it does not exist yet. False: no such head / no memory (then the
-// main tree is selected).
-fn tl_use(state: u64, tag: u64) -> bool {
-    tl_cur = 0
-    if tag == 0 {
-        return true
-    }
-    if tag >= wmhead.HD_MAX || !wmhead.hd_present(state, tag) {
-        return false
-    }
-    if tl_alt[tag as usize] == 0 {
-        let b: u64 = mem.frame_run(state, 4)
-        if b == 0 {
-            return false
-        }
-        if b <= kstate.TILE_OFF {
-            mem.frame_free_run(state, b, 4)
-            return false
-        }
-        var o: u64 = 0
-        while o < kstate.TILE_MAX {
-            kstate.set(b, o, 0)
-            o = o + 8
-        }
-        let p: u64 = wmhead.head_work(state, tag)
-        if !tile.init(b - kstate.TILE_OFF, wmhead.hw_x(p), wmhead.hw_y(p), wmhead.hw_w(p), wmhead.hw_h(p)) {
-            mem.frame_free_run(state, b, 4)
-            return false
-        }
-        tl_alt[tag as usize] = b
-    }
-    tl_cur = tag
-    return true
-}
-
-fn tl_use_win(state: u64, i: u64) {
-    let v: u64 = wmlayout.wg(state, i, wmlayout.W_NODE)
-    if v == 0 {
-        tl_cur = 0
-        return
-    }
-    tl_sel(state, nd_tag(v))
-}
-
-fn tl_free(state: u64, tag: u64) {
-    if tag == 0 || tag >= wmhead.HD_MAX {
-        return
-    }
-    let b: u64 = tl_alt[tag as usize]
-    if b != 0 {
-        mem.frame_free_run(state, b, 4)
-        tl_alt[tag as usize] = 0
-    }
-}
-
-// Tree state of the focused window's tree (for the ring-3 queries); the main tree when it is not tiled.
-fn tile_focus_state(state: u64) -> u64 {
-    let f: u64 = wmbase.focus(state)
-    if f < wmbase.MAX_WIN && wmbase.valid(state, f) && wmlayout.wg(state, f, wmlayout.W_NODE) != 0 {
-        return tl_state(state, nd_tag(wmlayout.wg(state, f, wmlayout.W_NODE)))
-    }
-    return state
-}
-
-fn tile_nodes_all(state: u64) -> u64 {
-    var n: u64 = tile.nodes(state)
-    var h: u64 = 1
-    while h < wmhead.HD_MAX {
-        if tl_alt[h as usize] != 0 {
-            n = n + tile.nodes(tl_state(state, h))
-        }
-        h = h + 1
-    }
-    return n
-}
-
-fn tile_leaves_all(state: u64) -> u64 {
-    var n: u64 = tile.leaves(state)
-    var h: u64 = 1
-    while h < wmhead.HD_MAX {
-        if tl_alt[h as usize] != 0 {
-            n = n + tile.leaves(tl_state(state, h))
-        }
-        h = h + 1
-    }
-    return n
-}
-
-// Heads came or went (called from heads_sync, after the windows were moved onto heads that exist): a tree whose head
-// is gone gives its windows back (they are tiled again onto the head they are on now); when the PRIMARY head
-// changed, the main tree changed owner, so every tiled window is re-tiled. Trees of new heads need nothing: they
-// are made when the first window lands there.
-fn tl_heads_changed(state: u64) {
-    var mask: u64 = 1
-    var prim: u64 = 0
-    if wmhead.hd_multi(state) {
-        mask = 0
-        var hd: u64 = 0
-        while hd < wmhead.HD_MAX {
-            if wmhead.hd_present(state, hd) {
-                let bit: u64 = 1
-                mask = mask | (bit << hd)
-            }
-            hd = hd + 1
-        }
-        prim = wmhead.hd_primary(state)
-    }
-    let full: bool = prim != tl_prim
-    var gone: u64 = 0
-    var h: u64 = 1
-    while h < wmhead.HD_MAX {
-        let bit2: u64 = 1
-        if tl_alt[h as usize] != 0 && (mask & (bit2 << h)) == 0 {
-            gone = gone | (bit2 << h)
-        }
-        h = h + 1
-    }
-    tl_mask = mask
-    if !full && gone == 0 {
-        return
-    }
-    var i: u64 = 0
-    while i < wmbase.MAX_WIN {
-        tl_re[i as usize] = 0
-        let v: u64 = wmlayout.wg(state, i, wmlayout.W_NODE)
-        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && v != 0 {
-            let t: u64 = nd_tag(v)
-            let bit3: u64 = 1
-            if full || (t != 0 && (gone & (bit3 << t)) != 0) {
-                tile_release(state, i)
-                tl_re[i as usize] = 1
-            }
-        }
-        i = i + 1
-    }
-    h = 1
-    while h < wmhead.HD_MAX {
-        let bit4: u64 = 1
-        if full || (gone & (bit4 << h)) != 0 {
-            tl_free(state, h)
-        }
-        h = h + 1
-    }
-    tl_prim = prim
-    tl_cur = 0
-    i = 0
-    while i < wmbase.MAX_WIN {
-        if tl_re[i as usize] != 0 {
-            let _t: bool = tile_take(state, i)
-        }
-        i = i + 1
-    }
-}
-
-fn tile_tree_tag(state: u64, i: u64) -> u64 {
-    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_NODE) == 0 {
-        return 0
-    }
-    return nd_tag(wmlayout.wg(state, i, wmlayout.W_NODE))
-}
-
-fn tile_on(state: u64) -> bool {
-    return wmlayout.gs(state, wmlayout.S_TILE) != 0
-}
-
-fn tiled(state: u64, i: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    return wmlayout.wg(state, i, wmlayout.W_NODE) != 0
-}
-
-fn tile_node(state: u64, i: u64) -> u64 {
-    if !wmbase.valid(state, i) {
-        return tile.NONE
-    }
-    let nd: u64 = wmlayout.wg(state, i, wmlayout.W_NODE)
-    if nd == 0 {
-        return tile.NONE
-    }
-    return nd_node(nd)
-}
-
-// RUNDE TILING: LIEGT DIESES FENSTER HINTER EINEM REITER. Diese
-// Funktion hiess in der Runde TILING `win_hidden` -- genau wie die
-// Funktion der Runde DESKTOP, die "ist minimiert" beantwortet. Zwei
-// Fragen, zwei Antworten, ein Name: der Uebersetzer hat es gemeldet,
-// und ein Leser haette es nicht gemerkt. Sie heisst jetzt `win_tabbed`.
-fn win_tabbed(state: u64, i: u64) -> bool {
-    if i >= wmbase.MAX_WIN {
-        return false
-    }
-    return (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_TABBED) != 0
-}
-
-fn hotkeys_seen(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_HOTS)
-}
-
-// RUNDE WMPLUGIN: WIE VIELE TASTEN EIN PLUGIN BEKOMMEN HAT -- und
-// damit, wie viele KEIN Fenster bekommen hat. Ohne diese Zahl liesse
-// sich "das Kuerzel wurde geschluckt" nicht von "die Taste kam nie an"
-// unterscheiden, und das sind zwei verschiedene Fehler.
-fn plugkeys(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_KPLUG)
-}
-
-// Der Bereich, den die letzte Baumoperation angefasst hat -- und NUR
-// der. Das ist die Zahl, die `notiledirty` kaputt macht.
-fn damage_tile(state: u64) {
-    let x: u64 = tile.last_x(tt(state))
-    let y: u64 = tile.last_y(tt(state))
-    let w: u64 = tile.last_w(tt(state))
-    let h: u64 = tile.last_h(tt(state))
-    if w == 0 || h == 0 {
-        return
-    }
-    wmbase.damage(state, x as i64, y as i64, (x + w) as i64, (y + h) as i64)
-}
-
-fn set_tile_on(state: u64, on: bool) {
-    if !wmbase.ready(state) {
-        return
-    }
-    if on {
-        wmlayout.ss(state, wmlayout.S_TILE, 1)
-        // ================================================ RUNDE ECHTHARDWARE-3
-        // NICHT ALLES, WAS OFFEN IST, GEHOERT IN DEN BAUM.
-        //
-        // Justins Befund: "Tiling ein-/ausschalten zerschiesst den
-        // Zustand -- danach geht fast gar nichts mehr." Hier stand
-        // "Alles, was jetzt schon offen ist, kommt in den Baum", und
-        // das war woertlich gemeint: der SCHREIBTISCH (L_DESK, deckt
-        // den ganzen Schirm), die TASKLEISTE (L_TOP, reserviert eine
-        // Kante), das Startmenue, ein Klappmenue, eine Blase -- alle
-        // wurden zu Kacheln.
-        //
-        // Was daraus folgt, ist genau das, was er sieht: die Leiste
-        // bekommt eine halbe Bildschirmflaeche zugeteilt und liegt
-        // nicht mehr an ihrer Kante, der Schreibtisch wird zur Kachel
-        // neben ihr, und `restore_geom` beim Ausschalten setzt beide
-        // auf Masse zurueck, die inzwischen nichts mehr bedeuten --
-        // die Leiste ist weg, der Schreibtisch sitzt schief, und ohne
-        // Leiste gibt es keinen Knopf mehr, mit dem man es zuruecknimmt.
-        //
-        // GEKACHELT WIRD, WAS EIN MENSCH ALS FENSTER BENUTZT: die
-        // Ebene L_NORMAL, sichtbar, und ohne reservierte Kante.
-        var i: u64 = 0
-        while i < wmbase.MAX_WIN {
-            if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmlayout.wg(state, i, wmlayout.W_NODE) == 0
-                && wmlayout.wg(state, i, wmlayout.W_LAYER) == wmlayout.L_NORMAL
-                && wmlayout.wg(state, i, wmlayout.W_STRUT) == 0
-                && (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) == 0 {
-                save_geom(state, i)
-                tile_take(state, i)
-            }
-            i = i + 1
-        }
-    } else {
-        wmlayout.ss(state, wmlayout.S_TILE, 0)
-        var k: u64 = 0
-        while k < wmbase.MAX_WIN {
-            if wmlayout.wg(state, k, wmlayout.W_USED) != 0 && wmlayout.wg(state, k, wmlayout.W_NODE) != 0 {
-                tile_release(state, k)
-                restore_geom(state, k)
-            }
-            k = k + 1
-        }
-    }
-    wmbase.damage_all(state)
-}
-
-fn save_geom(state: u64, i: u64) {
-    var x: u64 = wmlayout.wg(state, i, wmlayout.W_X) & 0xFFFFFFFF
-    var y: u64 = wmlayout.wg(state, i, wmlayout.W_Y) & 0xFFFFFFFF
-    wmlayout.wsv(state, i, wmlayout.W_SAVXY, (x << 32) | y)
-    wmlayout.wsv(state, i, wmlayout.W_SAVWH, (wmlayout.wg(state, i, wmlayout.W_W) << 32) | wmlayout.wg(state, i, wmlayout.W_H))
-}
-
-fn restore_geom(state: u64, i: u64) {
-    let wh: u64 = wmlayout.wg(state, i, wmlayout.W_SAVWH)
-    if wh == 0 {
-        return
-    }
-    let xy: u64 = wmlayout.wg(state, i, wmlayout.W_SAVXY)
-    wmlayout.wsv(state, i, wmlayout.W_X, xy >> 32)
-    wmlayout.wsv(state, i, wmlayout.W_Y, xy & 0xFFFFFFFF)
-    let w: u64 = wh >> 32
-    let h: u64 = wh & 0xFFFFFFFF
-    if w >= 32 && h >= 16 {
-        if reframe(state, i, w, h) {
-            wmlayout.wsv(state, i, wmlayout.W_W, w)
-            wmlayout.wsv(state, i, wmlayout.W_H, h)
-            if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-                wmtermwin.term_setup(state, i)
-            } else {
-                wmdraw.fill(state, i, 0, 0, w, h, wmlayout.wg(state, i, wmlayout.W_BG))
-            }
-            wmevent.ev_push(state, i, wmlayout.E_RESIZE, w, h, 0)
-        }
-    }
-    wmlayout.wsv(state, i, wmlayout.W_FLAGS, wmlayout.wg(state, i, wmlayout.W_FLAGS) & ~wmlayout.F_TABBED)
-}
-
-// EIN GROESSERER PUFFER, WENN DER BAUM MEHR PLATZ GIBT. Runde K10 hat
-// den Puffer beim Anlegen geholt und `resize_win` verweigert seitdem
-// jedes Wachsen darueber hinaus -- mit Recht, denn sonst waere es ein
-// Schreibzugriff daneben. Beim Kacheln ist Wachsen aber der Normalfall:
-// wer von vier Fenstern zwei schliesst, verdoppelt die uebrigen. Also
-// wird hier ein neuer Lauf Rahmen geholt und der alte zurueckgegeben.
-fn reframe(state: u64, i: u64, w: u64, h: u64) -> bool {
-    let bytes: u64 = w * h * 4
-    if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
-        return wmtermwin.term_fit(state, i, bytes)
-    }
-    if wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
-        return wmshared.detach_buf(state, i, bytes)
-    }
-    if bytes <= wmlayout.wg(state, i, wmlayout.W_BUFBYTES) {
-        return true
-    }
-    let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
-    let neu: u64 = mem.frame_run(state, rahmen)
-    if neu == 0 {
-        return false
-    }
-    let alt: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
-    let altr: u64 = wmlayout.wg(state, i, wmlayout.W_BUFBYTES) / mem.FRAME_SIZE
-    wmlayout.wsv(state, i, wmlayout.W_BUF, neu)
-    wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, rahmen * mem.FRAME_SIZE)
-    if alt != 0 {
-        mem.frame_free_run(state, alt, altr)
-    }
-    return true
-}
-
-// Ein Blatt des Baumes auf einen Fenstersatz. Der Baum fuehrt das
-// AEUSSERE Rechteck (mit Rahmen und Titelleiste) -- die Malflaeche ist
-// das, was davon uebrigbleibt.
-fn place_win(state: u64, i: u64, n: u64) {
-    let ow: u64 = tile.n_w(tt(state), n)
-    let oh: u64 = tile.n_h(tt(state), n)
-    var w: u64 = 32
-    if ow > wmgeom.border(state) * 2 + 32 {
-        w = ow - wmgeom.border(state) * 2
-    }
-    var h: u64 = 16
-    if oh > wmbase.iny(state, i) + wmgeom.border(state) + 16 {
-        h = oh - wmbase.iny(state, i) - wmgeom.border(state)
-    }
-    // RUNDE SCHIRM-ECHT: DIE DRITTE 2048 -- dieselbe vergessene Zahl,
-    // die `resize_win` schon losgeworden ist. Beim Kacheln bekommt ein
-    // Blatt die Flaeche des Baumes, und die ist auf einem 2560er Schirm
-    // breiter als 2048; das Fenster blieb dann kleiner als sein Platz
-    // und liess einen Streifen Schreibtisch stehen. Die echte Grenze
-    // ist der Puffer, und um den kuemmert sich `reframe` zwei Zeilen
-    // tiefer.
-    if w > wmgeom.MAX_W_HARD {
-        w = wmgeom.MAX_W_HARD
-    }
-    if h > wmgeom.MAX_H_HARD {
-        h = wmgeom.MAX_H_HARD
-    }
-    wmlayout.wsv(state, i, wmlayout.W_X, tile.n_x(tt(state), n))
-    wmlayout.wsv(state, i, wmlayout.W_Y, tile.n_y(tt(state), n))
-    if w == wmlayout.wg(state, i, wmlayout.W_W) && h == wmlayout.wg(state, i, wmlayout.W_H) {
-        return
-    }
-    if !reframe(state, i, w, h) {
-        return
-    }
-    wmlayout.wsv(state, i, wmlayout.W_W, w)
-    wmlayout.wsv(state, i, wmlayout.W_H, h)
-    if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-        wmtermwin.term_setup(state, i)
-    } else {
-        wmdraw.fill(state, i, 0, 0, w, h, wmlayout.wg(state, i, wmlayout.W_BG))
-    }
-    wmevent.ev_push(state, i, wmlayout.E_RESIZE, w, h, 0)
-}
-
-// Den ganzen Baum auf die Fenster uebertragen. Ohne `damage` -- der
-// Rufer beschmutzt EINMAL den Bereich, den der Baum als geaendert
-// meldet, und genau das ist der Unterschied, den diese Runde misst.
-fn tile_apply_one(state: u64) -> bool {
-    let r: u64 = tile.root(tt(state))
-    if r == tile.NONE {
-        return false
-    }
-    var n: u64 = r
-    var guard: u64 = 0
-    while n != tile.NONE && guard <= tile.MAX_NODES {
-        guard = guard + 1
-        if tile.n_kind(tt(state), n) == tile.K_LEAF {
-            let cl: u64 = tile.n_client(tt(state), n)
-            if cl != 0 && cl <= wmbase.MAX_WIN {
-                let i: u64 = cl - 1
-                if wmlayout.wg(state, i, wmlayout.W_USED) != 0 {
-                    // AUCH VERDECKTE REITER BEKOMMEN IHR RECHTECK. Sie
-                    // werden nicht gemalt, aber sie muessen die richtige
-                    // Groesse haben, wenn man den Reiter wechselt --
-                    // sonst zuckt das Fenster beim Umschalten einmal
-                    // durch, weil erst dann neu gerechnet wird.
-                    place_win(state, i, n)
-                    if tile.visible(tt(state), n) {
-                        wmlayout.wsv(state, i, wmlayout.W_FLAGS,
-                            wmlayout.wg(state, i, wmlayout.W_FLAGS) & ~wmlayout.F_TABBED)
-                    } else {
-                        wmlayout.wsv(state, i, wmlayout.W_FLAGS,
-                            wmlayout.wg(state, i, wmlayout.W_FLAGS) | wmlayout.F_TABBED)
-                    }
-                }
-            }
-        }
-        n = tile.dfs_next(tt(state), n, r)
-    }
-    // ================================================ RUNDE WMPLUGIN
-    // DER KACHELBAUM HAT SICH BEWEGT. Diese eine Stelle meldet es, und
-    // sie ist die richtige: JEDE Aenderung am Baum -- einfuegen,
-    // herausnehmen, teilen, ziehen, Reiter wechseln -- laeuft durch
-    // `tile_apply`, weil jede davon die Rechtecke neu verteilt.
-    //
-    // Zwei Zahlen gehen mit: Knoten und Blaetter. Sie genuegen, um "es
-    // ist ein Fenster dazugekommen" von "die Kante wurde gezogen" zu
-    // unterscheiden, und sie kosten den Kern zwei Ablesungen.
-    // NICHT aus `compose` gerufen -- der Bildpfad bleibt frei davon.
-    return true
-}
-
-fn tile_apply(state: u64) {
-    let keep: u64 = tl_cur
-    tl_cur = 0
-    var did: bool = tile_apply_one(state)
-    var h: u64 = 1
-    while h < wmhead.HD_MAX {
-        if tl_alt[h as usize] != 0 {
-            tl_cur = h
-            if tile_apply_one(state) {
-                did = true
-            }
-        }
-        h = h + 1
-    }
-    tl_cur = keep
-    if did {
-        wmplug.notify(state, wmplug.E_TILE, tile_nodes_all(state),
-            tile_leaves_all(state), 0)
-    }
-}
-
-fn kachelbar(state: u64, i: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    if wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL {
-        return false
-    }
-    if wmlayout.wg(state, i, wmlayout.W_STRUT) != 0 {
-        return false
-    }
-    // ==================================== RUNDE ECHTHARDWARE-4
-    // EIN FENSTER OHNE SCHMUCK IST KEINE KACHEL.
-    //
-    // Justins Wort zum Kachelbetrieb war "Muell", und einer der
-    // Gruende steht hier: `F_NODECO` traegt alles, was KEIN
-    // gewoehnliches Fenster ist -- das Startmenue, ein Klappmenue,
-    // eine Blase, ein rahmenloser Dialog. Ebene und Kantenreservierung
-    // haben Schreibtisch und Leiste schon herausgehalten; das
-    // Startmenue liegt aber auf der normalen Ebene und reserviert
-    // nichts, also WAERE es gekachelt worden. Ein Startmenue, das
-    // beim Aufgehen die Fenster daneben umsortiert, ist genau die Art
-    // Automatismus, die in dieser Runde ausdruecklich nicht mehr
-    // vorkommen darf.
-    if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_NODECO) != 0 {
-        return false
-    }
-    return (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) == 0
-}
-
-fn tile_take(state: u64, i: u64) -> bool {
-    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-        return false
-    }
-    if !kachelbar(state, i) {
-        return false
-    }
-    // r839: the tree of the head the window is on (the main tree on a single screen or when that tree cannot be made)
-    let _u: bool = tl_use(state, tl_tag_head(state, wmhead.win_head(state, i)))
-    let n: u64 = tile.insert(tt(state), i + 1)
-    if n == tile.NONE {
-        return false // kein Platz im Baum -- das Fenster schwebt weiter
-    }
-    wmlayout.wsv(state, i, wmlayout.W_NODE, nd_val(n))
-    tile_apply(state)
-    damage_tile(state)
-    return true
-}
-
-fn tile_release(state: u64, i: u64) -> bool {
-    if i >= wmbase.MAX_WIN {
-        return false
-    }
-    let nd: u64 = wmlayout.wg(state, i, wmlayout.W_NODE)
-    if nd == 0 {
-        return false
-    }
-    wmlayout.wsv(state, i, wmlayout.W_NODE, 0)
-    wmlayout.wsv(state, i, wmlayout.W_FLAGS, wmlayout.wg(state, i, wmlayout.W_FLAGS) & ~wmlayout.F_TABBED)
-    tl_sel(state, nd_tag(nd))
-    tile.remove(tt(state), nd_node(nd))
-    tile_apply(state)
-    damage_tile(state)
-    return true
-}
-
-fn tile_float(state: u64, i: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    if wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-        tile_release(state, i)
-        restore_geom(state, i)
-        wmcore.raise_win(state, i)
-        wmdamage.damage_win(state, i)
-        return true
-    }
-    save_geom(state, i)
-    return tile_take(state, i)
-}
-
-fn tile_snap(state: u64, i: u64, where: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    if wmlayout.wg(state, i, wmlayout.W_NODE) == 0 {
-        save_geom(state, i)
-        if !tile_take(state, i) {
-            return false
-        }
-    }
-    let nd: u64 = wmlayout.wg(state, i, wmlayout.W_NODE)
-    if nd == 0 {
-        return false
-    }
-    tl_sel(state, nd_tag(nd))
-    tile.snap(tt(state), nd_node(nd), where)
-    tile_apply(state)
-    damage_tile(state)
-    return true
-}
-
-// EIN WECHSEL DER BILDSCHIRMAUFLOESUNG. Der Baum wird NEU AUSGEMESSEN
-// und nicht neu aufgebaut -- die Verhaeltnisse stehen als Anteile da und
-// nicht als Bildpunkte, also ueberlebt jede Aufteilung den Wechsel.
-fn on_screen_resize(state: u64, w: u64, h: u64) -> bool {
-    if !wmbase.ready(state) || w == 0 || h == 0 {
-        return false
-    }
-    wmlayout.ss(state, wmlayout.S_SW, w)
-    wmlayout.ss(state, wmlayout.S_SH, h)
-    // RUNDE VOLLBILD: der Baum bekommt die ARBEITSFLAECHE. Hier stand
-    // `0, 0, w, h` -- der ganze Schirm -- und damit reichte jedes
-    // gekachelte Fenster unter die Leiste. `recalc_work` rechnet die
-    // Flaeche aus dem neuen Schirm und den Struts; danach steht sie in
-    // S_WORK_*, und der Baum folgt ihr.
-    recalc_work(state)
-    tile_area_work(state)
-    tile_apply(state)
-    // r1004: the pointer limits, the maximized windows and every window that now sticks out of the screen follow the new size
-    ps2m.set_bounds(state, w, h)
-    screen_fit_windows(state, w, h)
-    wmbase.damage_all(state)
-    return true
-}
-
-// r1004: after a resolution change a maximized window gets the new work area; every other normal-layer window is pulled back
-// inside the screen (moved first, shrunk only when it is bigger than the screen). Desk, bar (strut) and hidden windows stay alone.
-fn screen_fit_windows(state: u64, w: u64, h: u64) {
-    var i: u64 = 0
-    while i < wmbase.MAX_WIN {
-        if wmbase.valid(state, i) && wmlayout.wg(state, i, wmlayout.W_STRUT) == 0 {
-            let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
-            let lay: u64 = win_layer(state, i)
-            if (f & wmlayout.F_MAXIMIZED) != 0 {
-                let _fw: bool = wmworkarea.fit_work(state, i)
-            } else if lay == wmlayout.L_NORMAL {
-                var ow: u64 = wmbase.outer_w(state, i)
-                var oh: u64 = wmbase.outer_h(state, i)
-                var x: i64 = wmbase.win_x(state, i)
-                var y: i64 = wmbase.win_y(state, i)
-                // r1061: a floating window that was shrunk by an earlier, smaller screen remembers the size it had (W_SAVWH, tag bit 63;
-                // a tiled window uses the same word for its own purpose, so only W_NODE == 0 counts). When the screen grows again
-                // (800x600 -> auto revert -> 1024x768) the window gets that size back, as far as it fits.
-                var tw: u64 = wmlayout.wg(state, i, wmlayout.W_W)
-                var th: u64 = wmlayout.wg(state, i, wmlayout.W_H)
-                let sv: u64 = wmlayout.wg(state, i, wmlayout.W_SAVWH)
-                let floating: bool = wmlayout.wg(state, i, wmlayout.W_NODE) == 0
-                if floating && (sv >> 63) != 0 {
-                    let rw: u64 = (sv >> 32) & 0xFFFF
-                    let rh: u64 = sv & 0xFFFF
-                    if rw >= tw && rh >= th {
-                        tw = rw
-                        th = rh
-                    }
-                }
-                let dw: u64 = ow - wmlayout.wg(state, i, wmlayout.W_W)
-                let dh: u64 = oh - wmlayout.wg(state, i, wmlayout.W_H)
-                var nw: u64 = tw
-                var nh: u64 = th
-                if tw + dw > w && tw + dw - w < tw {
-                    nw = tw - (tw + dw - w)
-                }
-                if th + dh > h && th + dh - h < th {
-                    nh = th - (th + dh - h)
-                }
-                if nw != wmlayout.wg(state, i, wmlayout.W_W) || nh != wmlayout.wg(state, i, wmlayout.W_H) {
-                    let _rs: bool = wmcore.resize_win(state, i, nw, nh)
-                    ow = wmbase.outer_w(state, i)
-                    oh = wmbase.outer_h(state, i)
-                }
-                if floating {
-                    if nw < tw || nh < th {
-                        wmlayout.wsv(state, i, wmlayout.W_SAVWH, 0x8000000000000000 | ((tw & 0xFFFF) << 32) | (th & 0xFFFF))
-                    } else if (sv >> 63) != 0 {
-                        wmlayout.wsv(state, i, wmlayout.W_SAVWH, 0)
-                    }
-                }
-                if x + (ow as i64) > (w as i64) {
-                    x = (w as i64) - (ow as i64)
-                }
-                if y + (oh as i64) > (h as i64) {
-                    y = (h as i64) - (oh as i64)
-                }
-                if x < 0 {
-                    x = 0
-                }
-                if y < 0 {
-                    y = 0
-                }
-                if x != wmbase.win_x(state, i) || y != wmbase.win_y(state, i) {
-                    wmcore.move_win(state, i, x, y)
-                }
-            }
-        }
-        i = i + 1
-    }
-}
-
-// r1004: THE WINDOW SERVER FOLLOWS THE SCREEN. Nobody called `on_screen_resize`: a host resize hint switched the card (vmode), the window
-// server went on with the old size (work area, tile tree, damage box), and the desktop stayed black. One check at the head of every
-// compose covers every path that switches the mode (host hint, Settings, dispctl). Several heads keep their own tables: left alone.
-fn screen_follow(state: u64) {
-    let fw: u64 = fb.width(state)
-    let fh: u64 = fb.height(state)
-    if fw == 0 || fh == 0 || wmhead.hd_multi(state) {
-        return
-    }
-    if fw != wmlayout.gs(state, wmlayout.S_SW) || fh != wmlayout.gs(state, wmlayout.S_SH) {
-        let _r: bool = on_screen_resize(state, fw, fh)
-    }
-    // INPUT FOLLOWS THE OUTPUT: the hardware pointer sits in PANEL pixels, so a rotation / scale change moves it even when the
-    // pointer itself did not (hwcur_bewegen only talks to the device when form, rotation or panel position changed).
-    if wmcursor.hwcur_moeglich(state) && wmcursor.hw_an(state) {
-        wmcursor.hwcur_bewegen(state)
-    }
-}
-
-// ================================================== RUNDE VOLLBILD
-// DER KACHELBAUM FOLGT DER ARBEITSFLAECHE.
-//
-// An EINER Stelle, weil es zwei Anlaesse gibt, sie zu setzen: ein
-// Wechsel der Aufloesung und ein Wechsel der Struts (die Leiste zieht
-// an eine andere Kante, wird versteckt, kommt zurueck). Stuende die
-// Rechnung an beiden, waere sie eine Gelegenheit, sie an einer zu
-// vergessen -- so wie sie bis zu dieser Runde ganz fehlte.
-fn tile_area_work(state: u64) {
-    let _a: bool = tile.set_area(state, wmlayout.gs(state, wmlayout.S_WORK_X),
-        wmlayout.gs(state, wmlayout.S_WORK_Y), wmlayout.gs(state, wmlayout.S_WORK_W), wmlayout.gs(state, wmlayout.S_WORK_H))
-    // r839: the trees of the other heads follow the work area of their head
-    var h: u64 = 1
-    while h < wmhead.HD_MAX {
-        if tl_alt[h as usize] != 0 && wmhead.hd_multi(state) && wmhead.hd_present(state, h) {
-            let p: u64 = wmhead.head_work(state, h)
-            let _b: bool = tile.set_area(tl_state(state, h), wmhead.hw_x(p), wmhead.hw_y(p), wmhead.hw_w(p), wmhead.hw_h(p))
-        }
-        h = h + 1
-    }
-}
-
-// ------------------------------------------------ die Reiterzeilen
-//
-// Sie werden vom SERVER gemalt, wie die Titelleiste -- eine Anwendung
-// darf nicht wissen, dass sie in einem Reiter liegt, und sie kann es
-// auch nicht malen: die Zeile liegt AUSSERHALB ihres Rechtecks. Der
-// Baum hat ihre Hoehe von der Flaeche der Kinder schon abgezogen, also
-// ueberschneidet sich hier nichts.
-fn paint_bar_of(state: u64, n: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_UI)
-    let px: u64 = wmlayout.gs(state, wmlayout.S_PX_UI)
-    var idx: u64 = 0
-    var c: u64 = tile.n_first(tt(state), n)
-    while c != tile.NONE && idx <= tile.MAX_NODES {
-        let tx: i64 = tile.tab_x(tt(state), n, idx) as i64
-        let ty: i64 = tile.tab_y(tt(state), n, idx) as i64
-        let tw: i64 = tile.tab_w(tt(state), n, idx) as i64
-        let th: i64 = tile.tab_h(tt(state), n, idx) as i64
-        let aktiv: bool = tile.n_active(tt(state), n) == c
-        // ROUND MERGE: THESE WERE FIVE RAW COLOURS. Round TILING wrote
-        // the tab bar with the values that stood in the drawing code
-        // BEFORE round THEME, and round THEME's whole promise is that no
-        // painting routine names a colour -- tests/theme/rawcolour.py
-        // measures exactly that and found eight. A tab bar that keeps
-        // its own dark blue in a light theme is the same bug the
-        // terminal window had, and THEME's script says so in its header.
-        // The four slots are the ones the title bar already uses: a tab
-        // IS a title bar, and the active tab is the focused one.
-        var grund: u64 = wmbase.deco(state, wmlayout.DK_TITLE)
-        var schrift: u64 = wmbase.deco(state, wmlayout.DK_TEXT)
-        if aktiv {
-            grund = wmbase.deco(state, wmlayout.DK_TITLE_ON)
-            schrift = wmbase.deco(state, wmlayout.DK_TEXT_ON)
-        }
-        let ax0: i64 = wmbase.imax(tx, cx0 as i64)
-        let ay0: i64 = wmbase.imax(ty, cy0 as i64)
-        let ax1: i64 = wmbase.imin(tx + tw, cx1 as i64)
-        let ay1: i64 = wmbase.imin(ty + th, cy1 as i64)
-        if ax1 > ax0 && ay1 > ay0 {
-            fb.fill(state, ax0 as u64, ay0 as u64, (ax1 - ax0) as u64,
-                (ay1 - ay0) as u64, grund)
-            // eine Trennlinie am rechten beziehungsweise unteren Rand
-            let rand: u64 = wmbase.deco(state, wmlayout.DK_FRAME)
-            if tw > 1 && tx + tw - 1 < cx1 as i64 && tx + tw - 1 >= cx0 as i64 {
-                fb.fill(state, (tx + tw - 1) as u64, ay0 as u64, 1,
-                    (ay1 - ay0) as u64, rand)
-            }
-            if th > 1 && ty + th - 1 < cy1 as i64 && ty + th - 1 >= cy0 as i64 {
-                fb.fill(state, ax0 as u64, (ty + th - 1) as u64,
-                    (ax1 - ax0) as u64, 1, rand)
-            }
-            if f < ttf.MAX_FONTS {
-                let l: u64 = tile.first_leaf(tt(state), c)
-                if l != tile.NONE {
-                    let cl: u64 = tile.n_client(tt(state), l)
-                    if cl != 0 && cl <= wmbase.MAX_WIN {
-                        wmtitle.title_text(state, cl - 1, f, tx + 6,
-                            ty + 3 + ttf.ascent(state, f, px), schrift,
-                            ax0, ay0, ax1, ay1, tx + tw - 4)
-                    }
-                }
-            }
-        }
-        idx = idx + 1
-        c = tile.n_next(tt(state), c)
-    }
-}
-
-fn paint_bars(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    let keep: u64 = tl_cur
-    tl_cur = 0
-    paint_bars_one(state, cx0, cy0, cx1, cy1)
-    var h: u64 = 1
-    while h < wmhead.HD_MAX {
-        if tl_alt[h as usize] != 0 {
-            tl_cur = h
-            paint_bars_one(state, cx0, cy0, cx1, cy1)
-        }
-        h = h + 1
-    }
-    tl_cur = keep
-}
-
-fn paint_bars_one(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    let r: u64 = tile.root(tt(state))
-    if r == tile.NONE {
-        return
-    }
-    var n: u64 = r
-    var guard: u64 = 0
-    while n != tile.NONE && guard <= tile.MAX_NODES {
-        guard = guard + 1
-        if tile.n_kind(tt(state), n) == tile.K_BOX {
-            if tile.n_layout(tt(state), n) != tile.LAY_SPLIT {
-                paint_bar_of(state, n, cx0, cy0, cx1, cy1)
-            }
-        }
-        n = tile.dfs_next(tt(state), n, r)
-    }
-}
-
-// ------------------------------------------- das Vorschaurechteck
-//
-// Beim Ziehen zeigt ein Rahmen, WO das Fenster landen wird -- nicht
-// wo der Zeiger ist. Ohne das ist ein Ablegen im Baum Raten: die
-// linke Haelfte eines Fensters und sein oberes Viertel sind zwei
-// verschiedene Ziele, und man sieht dem Zeiger nicht an, welches
-// gemeint ist.
-fn paint_preview(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    let x: i64 = wmlayout.gs(state, wmlayout.S_PVX) as i64
-    let y: i64 = wmlayout.gs(state, wmlayout.S_PVY) as i64
-    let w: i64 = wmlayout.gs(state, wmlayout.S_PVW) as i64
-    let h: i64 = wmlayout.gs(state, wmlayout.S_PVH) as i64
-    if w <= 0 || h <= 0 {
-        return
-    }
-    // ROUND MERGE: 0x4C9AE8 is exactly deco_fallback(DK_FRAME_ON) --
-    // round TILING copied the number instead of asking for the slot, so
-    // the drag preview kept the old accent in every other theme.
-    let farbe: u64 = wmbase.deco(state, wmlayout.DK_FRAME_ON)
-    var k: i64 = 0
-    while k < 3 {
-        pv_line(state, x + k, y + k, w - 2 * k, 1, farbe, cx0, cy0, cx1, cy1)
-        pv_line(state, x + k, y + h - 1 - k, w - 2 * k, 1, farbe, cx0, cy0,
-            cx1, cy1)
-        pv_line(state, x + k, y + k, 1, h - 2 * k, farbe, cx0, cy0, cx1, cy1)
-        pv_line(state, x + w - 1 - k, y + k, 1, h - 2 * k, farbe, cx0, cy0,
-            cx1, cy1)
-        k = k + 1
-    }
-}
-
-fn pv_line(state: u64, x: i64, y: i64, w: i64, h: i64, farbe: u64,
-    cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    let ax0: i64 = wmbase.imax(x, cx0 as i64)
-    let ay0: i64 = wmbase.imax(y, cy0 as i64)
-    let ax1: i64 = wmbase.imin(x + w, cx1 as i64)
-    let ay1: i64 = wmbase.imin(y + h, cy1 as i64)
-    if ax1 <= ax0 || ay1 <= ay0 {
-        return
-    }
-    fb.fill(state, ax0 as u64, ay0 as u64, (ax1 - ax0) as u64,
-        (ay1 - ay0) as u64, farbe)
-}
-
-fn preview_damage(state: u64) {
-    if wmlayout.gs(state, wmlayout.S_PVON) == 0 {
-        return
-    }
-    let x: i64 = wmlayout.gs(state, wmlayout.S_PVX) as i64
-    let y: i64 = wmlayout.gs(state, wmlayout.S_PVY) as i64
-    wmbase.damage(state, x, y, x + wmlayout.gs(state, wmlayout.S_PVW) as i64,
-        y + wmlayout.gs(state, wmlayout.S_PVH) as i64)
-}
-
-fn set_preview(state: u64, x: u64, y: u64, w: u64, h: u64) {
-    wmlayout.ss(state, wmlayout.S_PVX, x)
-    wmlayout.ss(state, wmlayout.S_PVY, y)
-    wmlayout.ss(state, wmlayout.S_PVW, w)
-    wmlayout.ss(state, wmlayout.S_PVH, h)
-    wmlayout.ss(state, wmlayout.S_PVON, 1)
-}
-
-// Welches Blatt liegt an dieser Stelle? Der Baum weiss es genauer als
-// die Stapelreihenfolge -- er kennt auch die Stellen, an denen KEIN
-// Fenster liegt, weil dort eine Reiterzeile ist.
-fn leaf_at(state: u64, x: i64, y: i64) -> u64 {
-    let r: u64 = tile.root(tt(state))
-    if r == tile.NONE {
-        return tile.NONE
-    }
-    var n: u64 = r
-    var guard: u64 = 0
-    while n != tile.NONE && guard <= tile.MAX_NODES {
-        guard = guard + 1
-        if tile.n_kind(tt(state), n) == tile.K_LEAF && tile.visible(tt(state), n) {
-            let nx: i64 = tile.n_x(tt(state), n) as i64
-            let ny: i64 = tile.n_y(tt(state), n) as i64
-            if x >= nx && y >= ny {
-                if x < nx + tile.n_w(tt(state), n) as i64 {
-                    if y < ny + tile.n_h(tt(state), n) as i64 {
-                        return n
-                    }
-                }
-            }
-        }
-        n = tile.dfs_next(tt(state), n, r)
-    }
-    return tile.NONE
-}
-
-fn drag_begin(state: u64, i: u64) {
-    // RUNDE ZIEH: das Fenster wird von jetzt an GROESSER gemalt. Der
-    // Nachzug faengt bei null an -- er soll aus der Bewegung
-    // entstehen und nicht aus dem Anfassen --, und die Lage des
-    // letzten Ticks ist die jetzige, sonst liest der erste Tick eine
-    // Geschwindigkeit, die es nie gab (das Fenster stand vorher
-    // irgendwo, und die Differenz waere der ganze Weg dorthin).
-    wmlayout.wsv(state, i, wmlayout.W_SWX, 0)
-    wmlayout.wsv(state, i, wmlayout.W_SWY, 0)
-    wmlayout.wsv(state, i, wmlayout.W_DXLAST, wmbase.win_x(state, i) as u64)
-    wmlayout.wsv(state, i, wmlayout.W_DYLAST, wmbase.win_y(state, i) as u64)
-    wmlayout.wsv(state, i, wmlayout.W_SWOFF, 0)
-    wmanim.damage_win_lift(state, i)
-    wmlayout.ss(state, wmlayout.S_DRAGT, 0)
-    wmlayout.ss(state, wmlayout.S_DROPN, 0)
-    wmlayout.ss(state, wmlayout.S_DROPE, 0)
-    if wmlayout.wg(state, i, wmlayout.W_NODE) == 0 {
-        return
-    }
-    // Wer gezogen wird, ist waehrenddessen NICHT im Baum -- sonst
-    // rechnet der Baum ihn bei jeder Zeigerbewegung neu an seinen alten
-    // Platz. So macht es i3 auch.
-    save_geom(state, i)
-    tile_release(state, i)
-    wmlayout.ss(state, wmlayout.S_DRAGT, 1)
-}
-
-// r828: EDGE DOCKING ON A NON-PRIMARY HEAD. The tile tree is one tree for the primary head (a tree per head is a
-// separate step), so on another head a window dropped at an outer edge of its work area just takes the half of that
-// work area -- floating, outside the tree. S_DROPE 5..8 = left/right/top/bottom half of the head under the pointer.
-// An edge shared with another head (the seam between two monitors) is not a docking edge.
-fn snap_part(p: u64, e: u64) -> u64 {
-    var x: u64 = wmhead.hw_x(p)
-    var y: u64 = wmhead.hw_y(p)
-    var w: u64 = wmhead.hw_w(p)
-    var h: u64 = wmhead.hw_h(p)
-    if e == 1 {
-        w = w / 2
-    } else if e == 2 {
-        x = x + w - w / 2
-        w = w / 2
-    } else if e == 3 {
-        h = h / 2
-    } else if e == 4 {
-        y = y + h - h / 2
-        h = h / 2
-    }
-    return (x << 48) | (y << 32) | (w << 16) | h
-}
-
-
-// Put window `i` on the packed rect (outer size, like `fit_work` does for the work area).
-fn fit_rect(state: u64, i: u64, r: u64) -> bool {
-    var iw: u64 = wmhead.hw_w(r)
-    var ih: u64 = wmhead.hw_h(r)
-    if wmbase.deko(state, i) {
-        if iw <= wmgeom.border(state) * 2 || ih <= wmbase.iny(state, i) + wmgeom.border(state) {
-            return false
-        }
-        iw = iw - wmgeom.border(state) * 2
-        ih = ih - wmbase.iny(state, i) - wmgeom.border(state)
-    }
-    if !wmcore.resize_win(state, i, iw, ih) {
-        return false
-    }
-    wmcore.move_win(state, i, wmhead.hw_x(r) as i64, wmhead.hw_y(r) as i64)
-    return true
-}
-
-// W-WIN11: SNAP OF A FLOATING WINDOW (Windows 11 behaviour). Dragging the title bar to a screen edge shows a preview and the drop
-// docks the window: left / right edge = half, top edge = maximize, a corner = quarter. Codes in S_DROPE: 1 left, 2 right, 3 top
-// (maximize), 9 top-left, 10 top-right, 11 bottom-left, 12 bottom-right (5..8 are the halves of a non-primary head, `snap_part`).
-fn snap_rect(wk: u64, code: u64) -> u64 {
-    let x: u64 = wmhead.hw_x(wk)
-    let y: u64 = wmhead.hw_y(wk)
-    let w: u64 = wmhead.hw_w(wk)
-    let h: u64 = wmhead.hw_h(wk)
-    let hw2: u64 = w / 2
-    let hh2: u64 = h / 2
-    if code == 1 {
-        return (x << 48) | (y << 32) | (hw2 << 16) | h
-    }
-    if code == 2 {
-        return ((x + w - hw2) << 48) | (y << 32) | (hw2 << 16) | h
-    }
-    if code == 9 {
-        return (x << 48) | (y << 32) | (hw2 << 16) | hh2
-    }
-    if code == 10 {
-        return ((x + w - hw2) << 48) | (y << 32) | (hw2 << 16) | hh2
-    }
-    if code == 11 {
-        return (x << 48) | ((y + h - hh2) << 32) | (hw2 << 16) | hh2
-    }
-    if code == 12 {
-        return ((x + w - hw2) << 48) | ((y + h - hh2) << 32) | (hw2 << 16) | hh2
-    }
-    return wk
-}
-
-fn snap_ok(state: u64, i: u64) -> bool {
-    if fb.nosnap_an(state) || !wmbase.valid(state, i) {
-        return false
-    }
-    if !wmbase.deko(state, i) || wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL || wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-        return false
-    }
-    return true
-}
-
-// the zone code (0 = none) of the pointer on the work area `wk`; the flags say which edges are real screen edges
-fn snap_zone(state: u64, wk: u64, x: i64, y: i64, nl: bool, nr: bool, nt: bool, nb: bool) -> u64 {
-    let wx0: i64 = wmhead.hw_x(wk) as i64
-    let wy0: i64 = wmhead.hw_y(wk) as i64
-    let sw: i64 = wmhead.hw_w(wk) as i64
-    let sh: i64 = wmhead.hw_h(wk) as i64
-    let rand: i64 = 2 * wmgeom.uisc(state) as i64
-    var cs: i64 = 64 * wmgeom.uisc(state) as i64
-    if cs > sh / 4 {
-        cs = sh / 4
-    }
-    if x < wx0 + rand && nl {
-        if y < wy0 + cs {
-            return 9
-        }
-        if y >= wy0 + sh - cs {
-            return 11
-        }
-        return 1
-    }
-    if x >= wx0 + sw - rand && nr {
-        if y < wy0 + cs {
-            return 10
-        }
-        if y >= wy0 + sh - cs {
-            return 12
-        }
-        return 2
-    }
-    if y < wy0 + rand && nt {
-        if x < wx0 + cs {
-            return 9
-        }
-        if x >= wx0 + sw - cs {
-            return 10
-        }
-        return 3
-    }
-    if y >= wy0 + sh - rand && nb {
-        if x < wx0 + cs {
-            return 11
-        }
-        if x >= wx0 + sw - cs {
-            return 12
-        }
-    }
-    return 0
-}
-
-fn float_hover(state: u64, i: u64, x: i64, y: i64) {
-    preview_damage(state)
-    wmlayout.ss(state, wmlayout.S_PVON, 0)
-    wmlayout.ss(state, wmlayout.S_DROPE, 0)
-    if !snap_ok(state, i) {
-        return
-    }
-    var wk: u64 = (wmlayout.gs(state, wmlayout.S_WORK_X) << 48) | (wmlayout.gs(state, wmlayout.S_WORK_Y) << 32) | (wmlayout.gs(state, wmlayout.S_WORK_W) << 16) | wmlayout.gs(state, wmlayout.S_WORK_H)
-    var nl: bool = true
-    var nr: bool = true
-    var nt: bool = true
-    var nb: bool = true
-    if wmhead.hd_multi(state) {
-        let hd: u64 = wmhead.hd_at(state, x, y)
-        if hd >= wmhead.HD_MAX {
-            return
-        }
-        wk = wmhead.head_work(state, hd)
-        let hx: i64 = wmhead.hd_x(state, hd) as i64
-        let hy: i64 = wmhead.hd_y(state, hd) as i64
-        nl = wmhead.hd_at(state, hx - 1, y) == wmhead.HD_MAX
-        nr = wmhead.hd_at(state, hx + wmhead.hd_w(state, hd) as i64, y) == wmhead.HD_MAX
-        nt = wmhead.hd_at(state, x, hy - 1) == wmhead.HD_MAX
-        nb = wmhead.hd_at(state, x, hy + wmhead.hd_h(state, hd) as i64) == wmhead.HD_MAX
-    }
-    let code: u64 = snap_zone(state, wk, x, y, nl, nr, nt, nb)
-    if code == 0 {
-        return
-    }
-    let r: u64 = snap_rect(wk, code)
-    wmlayout.ss(state, wmlayout.S_DROPE, code)
-    set_preview(state, wmhead.hw_x(r), wmhead.hw_y(r), wmhead.hw_w(r), wmhead.hw_h(r))
-    preview_damage(state)
-}
-
-// the drop: dock the window on the preview rectangle (the way back is saved like `maximize` does, once)
-fn float_drop(state: u64, i: u64, code: u64) {
-    if !snap_ok(state, i) {
-        return
-    }
-    let r: u64 = (wmlayout.gs(state, wmlayout.S_PVX) << 48) | (wmlayout.gs(state, wmlayout.S_PVY) << 32) | (wmlayout.gs(state, wmlayout.S_PVW) << 16) | wmlayout.gs(state, wmlayout.S_PVH)
-    let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
-    if code == 3 {
-        let _m: bool = wmworkarea.maximize(state, i, true)
-        let _w: bool = wmworkarea.fit_work(state, i)
-        snap_say(state, i, code)
-        return
-    }
-    if (f & wmlayout.F_MAXIMIZED) == 0 {
-        let sx: u64 = ((wmbase.win_x(state, i) + 4096) as u64) & 0xFFFF
-        let sy: u64 = ((wmbase.win_y(state, i) + 4096) as u64) & 0xFFFF
-        wmlayout.wsv(state, i, wmlayout.W_SAVE, (sx << 48) | (sy << 32)
-            | ((wmlayout.wg(state, i, wmlayout.W_W) & 0xFFFF) << 16)
-            | (wmlayout.wg(state, i, wmlayout.W_H) & 0xFFFF))
-        wmlayout.wsv(state, i, wmlayout.W_FLAGS, f | wmlayout.F_MAXIMIZED)
-    }
-    if !fit_rect(state, i, r) {
-        wmlayout.wsv(state, i, wmlayout.W_FLAGS, f)
-        return
-    }
-    wmbase.damage_all(state)
-    snap_say(state, i, code)
-}
-
-// W-WIN11 gate line: where a snapped window ended up -- `wm: snap id= zone= x= y= w= h=` (zone: 1 left, 2 right, 3 top = maximize, 9..12 corners)
-fn snap_say(state: u64, i: u64, code: u64) {
-    var s_sn: [u8; 13] = "wm: snap id=\0"
-    var s_snz: [u8; 7] = " zone=\0"
-    var s_snx: [u8; 4] = " x=\0"
-    var s_sny: [u8; 4] = " y=\0"
-    var s_snw: [u8; 4] = " w=\0"
-    var s_snh: [u8; 4] = " h=\0"
-    serial.puts((&s_sn[0]) as u64)
-    serial.dec(wmlayout.wg(state, i, wmlayout.W_ID))
-    serial.puts((&s_snz[0]) as u64)
-    serial.dec(code)
-    serial.puts((&s_snx[0]) as u64)
-    serial.dec(wmbase.win_x(state, i) as u64)
-    serial.puts((&s_sny[0]) as u64)
-    serial.dec(wmbase.win_y(state, i) as u64)
-    serial.puts((&s_snw[0]) as u64)
-    serial.dec(wmbase.outer_w(state, i))
-    serial.puts((&s_snh[0]) as u64)
-    serial.dec(wmbase.outer_h(state, i))
-    serial.nl()
-}
-
-// a maximized / snapped window that is dragged far enough comes back to its old size, the pointer keeping its place on the title bar
-fn float_unmax(state: u64, i: u64, x: i64, y: i64) -> bool {
-    if fb.nosnap_an(state) || !wmbase.valid(state, i) || wmlayout.gs(state, wmlayout.S_TILE) != 0 || wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-        return false
-    }
-    if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) == 0 || wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL {
-        return false
-    }
-    if (wmlayout.wg(state, i, wmlayout.W_SAVE) & 0xFFFFFFFF) == 0 {
-        return false
-    }
-    let ow: i64 = wmbase.outer_w(state, i) as i64
-    let off: i64 = x - wmbase.win_x(state, i)
-    let dy: i64 = wmlayout.gs(state, wmlayout.S_DRAGY) as i64
-    if !wmworkarea.maximize(state, i, false) {
-        return false
-    }
-    let nw: i64 = wmbase.outer_w(state, i) as i64
-    var nx: i64 = x
-    if ow > 0 {
-        nx = x - off * nw / ow
-    }
-    wmcore.move_win(state, i, nx, y - dy)
-    wmlayout.ss(state, wmlayout.S_DRAGX, (x - wmbase.win_x(state, i)) as u64)
-    wmbase.damage_all(state)
-    return true
-}
-
-fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
-    if wmlayout.gs(state, wmlayout.S_TILE) == 0 {
-        float_hover(state, i, x, y)
-        return
-    }
-    preview_damage(state)
-    wmlayout.ss(state, wmlayout.S_PVON, 0)
-    wmlayout.ss(state, wmlayout.S_DROPN, 0)
-    wmlayout.ss(state, wmlayout.S_DROPE, 0)
-    // r826: edge docking works on the primary head's work area only; on another head there is no preview and no drop.
-    var wx0: i64 = wmlayout.gs(state, wmlayout.S_WORK_X) as i64
-    var wy0: i64 = wmlayout.gs(state, wmlayout.S_WORK_Y) as i64
-    var sw: i64 = wmlayout.gs(state, wmlayout.S_WORK_W) as i64
-    var sh: i64 = wmlayout.gs(state, wmlayout.S_WORK_H) as i64
-    // r839: with several heads the head under the pointer is the drop target (its work area, its tree); an edge that
-    // touches the next head (the seam) is no docking edge
-    var nl: bool = true
-    var nr: bool = true
-    var nt: bool = true
-    var nb: bool = true
-    tl_drop_tag = 0
-    if wmhead.hd_multi(state) {
-        let hd: u64 = wmhead.hd_at(state, x, y)
-        if hd >= wmhead.HD_MAX {
-            return
-        }
-        let hp: u64 = wmhead.head_work(state, hd)
-        wx0 = wmhead.hw_x(hp) as i64
-        wy0 = wmhead.hw_y(hp) as i64
-        sw = wmhead.hw_w(hp) as i64
-        sh = wmhead.hw_h(hp) as i64
-        let hx: i64 = wmhead.hd_x(state, hd) as i64
-        let hy: i64 = wmhead.hd_y(state, hd) as i64
-        nl = wmhead.hd_at(state, hx - 1, y) == wmhead.HD_MAX
-        nr = wmhead.hd_at(state, hx + wmhead.hd_w(state, hd) as i64, y) == wmhead.HD_MAX
-        nt = wmhead.hd_at(state, x, hy - 1) == wmhead.HD_MAX
-        nb = wmhead.hd_at(state, x, hy + wmhead.hd_h(state, hd) as i64) == wmhead.HD_MAX
-        tl_drop_tag = tl_tag_head(state, hd)
-    }
-    // DELL ROUND (04.10.2026): the snap strip was 16 px, so a window that
-    // was only pushed a little over the edge snapped to half the screen
-    // (or jumped back). Now 2 px at scale 1: the pointer must be AT the
-    // screen edge.
-    var rand: i64 = 2 * wmgeom.uisc(state) as i64
-    if fb.winfix_aus(state) {
-        rand = 16
-    }
-    // 1. AM BILDSCHIRMRAND: die Windows-artige Schnellablage. Sie ist
-    //    ein Sonderfall des Baumes und kein zweites System.
-    if x < wx0 + rand && nl {
-        wmlayout.ss(state, wmlayout.S_DROPE, 1)
-        set_preview(state, wx0 as u64, wy0 as u64, (sw / 2) as u64,
-            sh as u64)
-        preview_damage(state)
-        return
-    }
-    if x >= wx0 + sw - rand && nr {
-        wmlayout.ss(state, wmlayout.S_DROPE, 2)
-        set_preview(state, (wx0 + sw - sw / 2) as u64, wy0 as u64,
-            (sw / 2) as u64, sh as u64)
-        preview_damage(state)
-        return
-    }
-    if y < wy0 + rand && nt {
-        wmlayout.ss(state, wmlayout.S_DROPE, 3)
-        set_preview(state, wx0 as u64, wy0 as u64, sw as u64,
-            (sh / 2) as u64)
-        preview_damage(state)
-        return
-    }
-    if y >= wy0 + sh - rand && nb {
-        wmlayout.ss(state, wmlayout.S_DROPE, 4)
-        set_preview(state, wx0 as u64, (wy0 + sh - sh / 2) as u64,
-            sw as u64, (sh / 2) as u64)
-        preview_damage(state)
-        return
-    }
-    // 2. AUF EINEM ANDEREN FENSTER: das Viertel, in dem der Zeiger
-    //    steht, sagt die Seite. Die Mitte heisst REITER.
-    // the tree of that head (none yet: nothing to drop onto)
-    if tl_drop_tag != 0 && tl_alt[tl_drop_tag as usize] == 0 {
-        return
-    }
-    tl_sel(state, tl_drop_tag)
-    let n: u64 = leaf_at(state, x, y)
-    if n == tile.NONE {
-        return
-    }
-    let nx: u64 = tile.n_x(tt(state), n)
-    let ny: u64 = tile.n_y(tt(state), n)
-    let w: u64 = tile.n_w(tt(state), n)
-    let h: u64 = tile.n_h(tt(state), n)
-    let fx: u64 = (x - nx as i64) as u64
-    let fy: u64 = (y - ny as i64) as u64
-    var page: u64 = 4
-    if fx * 4 < w {
-        page = tile.D_LEFT
-    } else {
-        if fx * 4 >= w * 3 {
-            page = tile.D_RIGHT
-        } else {
-            if fy * 4 < h {
-                page = tile.D_UP
-            } else {
-                if fy * 4 >= h * 3 {
-                    page = tile.D_DOWN
-                }
-            }
-        }
-    }
-    wmlayout.ss(state, wmlayout.S_DROPN, n + 1)
-    wmlayout.ss(state, wmlayout.S_DROPS, page)
-    if page == tile.D_LEFT {
-        set_preview(state, nx, ny, w / 2, h)
-    }
-    if page == tile.D_RIGHT {
-        set_preview(state, nx + w - w / 2, ny, w / 2, h)
-    }
-    if page == tile.D_UP {
-        set_preview(state, nx, ny, w, h / 2)
-    }
-    if page == tile.D_DOWN {
-        set_preview(state, nx, ny + h - h / 2, w, h / 2)
-    }
-    if page == 4 {
-        set_preview(state, nx, ny, w, h)
-    }
-    preview_damage(state)
-}
-
-// ============================================== RUNDE GLAS (fix-r4-2)
-// DIE ENDLAGE LIEGT AUF DER ARBEITSFLAECHE -- GEZOGEN WIRD UEBERALL.
-//
-// Beim ZIEHEN darf ein Fenster unter die Leiste wandern; genau daran
-// misst die Abnahme, dass die Leiste ihren Untergrund neu mischt
-// (`measure_below_bar`, Abschnitt 11f). Beim LOSLASSEN darf es dort
-// nicht liegen bleiben: was unter der Leiste endet, ist nicht mehr
-// anzufassen, und was unter der unteren Schirmkante endet, ist gar
-// nicht mehr da. Auf der Aufnahme 15 der Runde hing das untere Drittel
-// des Fensters ausserhalb des Schirms -- `shotcheck.py` zaehlte dreizehn
-// Beschriftungen als `ausserhalb`, und der Reglerblock der Seite
-// "Darstellung" war nicht mehr zu sehen.
-//
-// Geklemmt wird die AEUSSERE Huelle (Rahmen und Titelzeile mitgezaehlt)
-// auf die Arbeitsflaeche, und zwar nur nach unten und rechts bzw. oben
-// und links -- die Groesse des Fensters bleibt unangetastet. Ist das
-// Fenster groesser als die Arbeitsflaeche, gewinnt die obere linke
-// Ecke: lieber unten abgeschnitten als oben, denn oben sitzt die
-// Titelzeile, an der man es wieder anfassen kann.
-fn drag_klemmen(state: u64, i: u64) {
-    if !wmbase.valid(state, i) {
-        return
-    }
-    let wx0: i64 = wmbase.win_x(state, i)
-    let wy0: i64 = wmbase.win_y(state, i)
-    let aw: i64 = wmbase.outer_w(state, i) as i64
-    let ah: i64 = wmbase.outer_h(state, i) as i64
-    // r826: the work area of the window's HOME head (the plain one on a single screen)
-    let kwk: u64 = wmhead.win_work(state, i)
-    let ax0: i64 = wmhead.hw_x(kwk) as i64
-    let ay0: i64 = wmhead.hw_y(kwk) as i64
-    let ax1: i64 = ax0 + wmhead.hw_w(kwk) as i64
-    let ay1: i64 = ay0 + wmhead.hw_h(kwk) as i64
-    // DELL ROUND (04.10.2026, Justin): "a window pushed a little over the
-    // screen edge jumps right back". The old rule kept the WHOLE window
-    // on the work area. Now it may stick out on the left, right and
-    // bottom: it only has to keep a strip it can be grabbed by --
-    //   * the title bar must stay on the work area vertically (top
-    //     edge >= work top, top edge <= work bottom - title bar);
-    //   * horizontally at least VIS_MIN px of the window stay in sight.
-    // A window that is fully inside is never touched.
-    var vis: i64 = (VIS_MIN0 * wmgeom.uisc(state)) as i64
-    if vis > aw {
-        vis = aw
-    }
-    var tb: i64 = wmgeom.title_h(state) as i64
-    if fb.winfix_aus(state) {
-        // counter-proof: the old rule, the whole window stays on the work area
-        vis = aw
-        tb = ah
-    }
-    var nx: i64 = wx0
-    var ny: i64 = wy0
-    if nx > ax1 - vis {
-        nx = ax1 - vis
-    }
-    if nx + aw < ax0 + vis {
-        nx = ax0 + vis - aw
-    }
-    if ny > ay1 - tb {
-        ny = ay1 - tb
-    }
-    if ny < ay0 {
-        ny = ay0
-    }
-    if nx == wx0 && ny == wy0 {
-        return
-    }
-    wmcore.move_win(state, i, nx, ny)
-    // UND ES WIRD GESAGT. Eine Endlage, die der Server selbst gesetzt
-    // hat, ist fuer jeden Laeufer sonst ein Raetsel: er hat nach
-    // `400,600` gezogen und findet das Fenster bei `400,512`.
-    // Und die Stelle VOR dem Klemmen steht daneben: aus ihr rechnet
-    // `tools/themestore/run.sh` die Schnittflaeche mit der Leiste noch
-    // einmal nach, und zwar auf dem Wirt. Ohne sie gaebe es fuer die
-    // Flaeche, die der Server waehrend des Zuges gesehen hat, nur noch
-    // seine eigene Zahl -- und eine Zahl, die sich selbst bestaetigt,
-    // ist in dieser Abnahme keine.
-    var s_k: [u8; 17] = "wm: geklemmt id=\0"
-    var s_x: [u8; 4] = " x=\0"
-    var s_y: [u8; 4] = " y=\0"
-    var s_vx: [u8; 7] = " vorx=\0"
-    var s_vy: [u8; 7] = " vory=\0"
-    var s_aw: [u8; 4] = " w=\0"
-    var s_ah: [u8; 4] = " h=\0"
-    serial.puts((&s_k[0]) as u64)
-    serial.dec(wmlayout.wg(state, i, wmlayout.W_ID))
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(nx as u64)
-    serial.puts((&s_y[0]) as u64)
-    serial.dec(ny as u64)
-    serial.puts((&s_vx[0]) as u64)
-    serial.dec(wx0 as u64)
-    serial.puts((&s_vy[0]) as u64)
-    serial.dec(wy0 as u64)
-    serial.puts((&s_aw[0]) as u64)
-    serial.dec(aw as u64)
-    serial.puts((&s_ah[0]) as u64)
-    serial.dec(ah as u64)
-    serial.nl()
-}
-
-// UND DER RUMPF WIRD SCHMUTZIG -- BEIM LOSLASSEN, NICHT BEI JEDEM
-// MILLIMETER.
-//
-// Ein verschobenes Fenster behaelt seinen Puffer, der Server malt ihn
-// an der neuen Stelle, und bis hierher erfuhr das PROGRAMM davon
-// nichts. Es meldete seine Beschriftungen deshalb weiter zu dem
-// Ursprung, an dem es zuletzt gemalt hatte -- auf der Aufnahme 15 der
-// Runde lagen sie 590 Bildpunkte ueber ihrer wirklichen Stelle, und
-// `shotcheck.py` zaehlte acht leere Beschriftungen, wo in Wahrheit
-// keine fehlte. Der Nachtrag zu 8.1 hat den Ursprung in
-// `wlib.flush_win` nachfragen lassen; gerufen wird `flush_win` aber
-// nur, wenn das Programm ueberhaupt malt.
-//
-// Also bekommt es nach dem Zug einen Grund dazu: dasselbe Ereignis,
-// mit dem eine Groessenaenderung ankommt, mit der UNVERAENDERTEN
-// Groesse. `wlib` macht daraufhin den ganzen Rumpf schmutzig, malt ihn
-// und meldet dabei jedes Rechteck zu der Stelle, an der das Fenster
-// jetzt wirklich steht.
-//
-// HIER und nicht in `move_win`: `move_win` laeuft bei jeder
-// Zeigerbewegung des Zuges, das waeren dreissig Vollanstriche je
-// Sekunde fuer eine Stelle, die sich im naechsten Millimeter wieder
-// aendert.
-fn rumpf_neu(state: u64, i: u64) {
-    if !wmbase.valid(state, i) {
-        return
-    }
-    wmevent.ev_push(state, i, wmlayout.E_RESIZE, wmlayout.wg(state, i, wmlayout.W_W), wmlayout.wg(state, i, wmlayout.W_H), 0)
-    wmdamage.damage_win(state, i)
-}
-
-fn drag_end(state: u64, i: u64, x: i64, y: i64) {
-    // RUNDE ZIEH: LOSGELASSEN. Das Fenster steht ab sofort wieder in
-    // seiner wahren Groesse; was noch laeuft, ist der Nachzug, der
-    // gegen null pendelt (`swing_tick`, Zweig "nicht mehr gezogen").
-    // `W_SWOFF` haelt fest, dass da noch etwas auszupendeln ist --
-    // auch wenn der Versatz in diesem Augenblick zufaellig 0 ist.
-    wmlayout.wsv(state, i, wmlayout.W_SWOFF, kstate.get(state, kstate.TICKS) + 1)
-    wmanim.damage_win_lift(state, i)
-    preview_damage(state)
-    wmlayout.ss(state, wmlayout.S_PVON, 0)
-    drag_klemmen(state, i)
-    // DELL ROUND: where the window ended up (after the clamp), so a runner
-    // can tell "sticks out a little" from "jumped back".
-    var s_ab: [u8; 18] = "wm: abgelegt id=\0\0"
-    var s_abx: [u8; 4] = " x=\0"
-    var s_aby: [u8; 4] = " y=\0"
-    var s_abw: [u8; 4] = " w=\0"
-    var s_abh: [u8; 4] = " h=\0"
-    serial.puts((&s_ab[0]) as u64)
-    serial.dec(wmlayout.wg(state, i, wmlayout.W_ID))
-    serial.puts((&s_abx[0]) as u64)
-    serial.dec(wmbase.win_x(state, i) as u64)
-    serial.puts((&s_aby[0]) as u64)
-    serial.dec(wmbase.win_y(state, i) as u64)
-    serial.puts((&s_abw[0]) as u64)
-    serial.dec(wmbase.outer_w(state, i))
-    serial.puts((&s_abh[0]) as u64)
-    serial.dec(wmbase.outer_h(state, i))
-    serial.nl()
-    rumpf_neu(state, i)
-    if wmlayout.gs(state, wmlayout.S_TILE) == 0 {
-        let fe: u64 = wmlayout.gs(state, wmlayout.S_DROPE)
-        if fe != 0 {
-            float_drop(state, i, fe)
-        }
-        wmlayout.ss(state, wmlayout.S_DROPE, 0)
-        wmlayout.ss(state, wmlayout.S_DRAGT, 0)
-        return
-    }
-    let e: u64 = wmlayout.gs(state, wmlayout.S_DROPE)
-    if e != 0 {
-        let _u: bool = tl_use(state, tl_drop_tag)
-        let n: u64 = tile.insert(tt(state), i + 1)
-        if n != tile.NONE {
-            wmlayout.wsv(state, i, wmlayout.W_NODE, nd_val(n))
-            var wo: u64 = tile.SNAP_LEFT
-            if e == 2 {
-                wo = tile.SNAP_RIGHT
-            }
-            if e == 3 {
-                wo = tile.SNAP_TOP
-            }
-            if e == 4 {
-                wo = tile.SNAP_BOTTOM
-            }
-            tile.snap(tt(state), n, wo)
-            tile_apply(state)
-            wmbase.damage_all(state)
-        }
-        wmlayout.ss(state, wmlayout.S_DRAGT, 0)
-        wmlayout.ss(state, wmlayout.S_DROPE, 0)
-        return
-    }
-    let d: u64 = wmlayout.gs(state, wmlayout.S_DROPN)
-    if d != 0 {
-        let ziel: u64 = d - 1
-        let page: u64 = wmlayout.gs(state, wmlayout.S_DROPS)
-        tl_sel(state, tl_drop_tag)
-        var n: u64 = tile.NONE
-        if page == 4 {
-            n = tile.insert_at(tt(state), ziel, tile.D_RIGHT, i + 1)
-            if n != tile.NONE {
-                tile.set_layout(tt(state), n, tile.LAY_TABBED)
-            }
-        } else {
-            n = tile.insert_at(tt(state), ziel, page, i + 1)
-        }
-        if n != tile.NONE {
-            wmlayout.wsv(state, i, wmlayout.W_NODE, nd_val(n))
-            tile_apply(state)
-            wmbase.damage_all(state)
-        }
-    } else {
-        if wmlayout.gs(state, wmlayout.S_DRAGT) != 0 {
-            tile_take(state, i)
-            wmbase.damage_all(state)
-        }
-    }
-    wmlayout.ss(state, wmlayout.S_DRAGT, 0)
-    wmlayout.ss(state, wmlayout.S_DROPN, 0)
-}
-
-// Der Griff unten rechts an einem GEKACHELTEN Fenster verschiebt das
-// Verhaeltnis am inneren Knoten -- nicht die Groesse des Fensters. Alles
-// andere waere eine Luecke.
-fn tile_drag_resize(state: u64, i: u64, x: i64, y: i64) {
-    let nd: u64 = wmlayout.wg(state, i, wmlayout.W_NODE)
-    if nd == 0 {
-        return
-    }
-    tl_sel(state, nd_tag(nd))
-    let n: u64 = nd_node(nd)
-    let p: u64 = tile.n_parent(tt(state), n)
-    if p == tile.NONE || tile.n_layout(tt(state), p) != tile.LAY_SPLIT {
-        return
-    }
-    var total: u64 = tile.n_h(tt(state), p)
-    var will: i64 = y - tile.n_y(tt(state), n) as i64
-    var ist: i64 = tile.n_h(tt(state), n) as i64
-    if tile.n_dir(tt(state), p) == tile.DIR_H {
-        total = tile.n_w(tt(state), p)
-        will = x - tile.n_x(tt(state), n) as i64
-        ist = tile.n_w(tt(state), n) as i64
-    }
-    if total == 0 {
-        return
-    }
-    let dpx: i64 = will - ist
-    if dpx == 0 {
-        return
-    }
-    let d: i64 = dpx * tile.FRAC_ONE as i64 / total as i64
-    if d == 0 {
-        return
-    }
-    if tile.resize_at(tt(state), n, d) {
-        tile_apply(state)
-        damage_tile(state)
-    }
-}
-
-// -------------------------------------------------- die Tastenkuerzel
-
-fn hot_take_raw(state: u64) -> u64 {
-    let kopf: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_HHEAD)
-    let schwanz: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_HTAIL)
-    if kopf == schwanz {
-        return 0
-    }
-    let p: u64 = state + kstate.K11_OFF + kstate.KB_HOT + (schwanz % 16) * 2
-    let c: u64 = kstate.get8(p)
-    let m: u64 = kstate.get8(p + 1)
-    kstate.set(state, kstate.K11_OFF + kstate.KB_HTAIL, schwanz + 1)
-    return (m << 8) | c
-}
-
-// W1 (hotkeys): put a floating window on the left/right half of its work area. The way back (position + size) is saved
-// the way `maximize` saves it and the window carries F_MAXIMIZED, so Win+Down (maximize off) restores it.
-fn snap_half(state: u64, i: u64, right: bool) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
-    if (f & wmlayout.F_MAXIMIZED) == 0 {
-        let sx: u64 = ((wmbase.win_x(state, i) + 4096) as u64) & 0xFFFF
-        let sy: u64 = ((wmbase.win_y(state, i) + 4096) as u64) & 0xFFFF
-        wmlayout.wsv(state, i, wmlayout.W_SAVE, (sx << 48) | (sy << 32)
-            | ((wmlayout.wg(state, i, wmlayout.W_W) & 0xFFFF) << 16)
-            | (wmlayout.wg(state, i, wmlayout.W_H) & 0xFFFF))
-        wmlayout.wsv(state, i, wmlayout.W_FLAGS, f | wmlayout.F_MAXIMIZED)
-    }
-    let hwk: u64 = wmhead.win_work(state, i)
-    let half: u64 = wmhead.hw_w(hwk) / 2
-    var iw: u64 = half
-    var ih: u64 = wmhead.hw_h(hwk)
-    if wmbase.deko(state, i) {
-        if iw <= wmgeom.border(state) * 2 || ih <= wmbase.iny(state, i) + wmgeom.border(state) {
-            wmlayout.wsv(state, i, wmlayout.W_FLAGS, f)
-            return false
-        }
-        iw = iw - wmgeom.border(state) * 2
-        ih = ih - wmbase.iny(state, i) - wmgeom.border(state)
-    }
-    if !wmcore.resize_win(state, i, iw, ih) {
-        wmlayout.wsv(state, i, wmlayout.W_FLAGS, f)
-        return false
-    }
-    var nx: u64 = wmhead.hw_x(hwk)
-    if right {
-        nx = nx + half
-    }
-    wmcore.move_win(state, i, nx as i64, wmhead.hw_y(hwk) as i64)
-    return true
-}
-
-fn snap_near(a: i64, b: i64) -> bool {
-    var d: i64 = a - b
-    if d < 0 {
-        d = 0 - d
-    }
-    return d <= 2
-}
-
-fn snap_code_of(state: u64, i: u64) -> u64 {
-    if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) == 0 {
-        return 0
-    }
-    let wk: u64 = wmhead.win_work(state, i)
-    var n: u64 = 0
-    while n < 6 {
-        var c: u64 = n + 7
-        if n < 2 {
-            c = n + 1
-        }
-        let r: u64 = snap_rect(wk, c)
-        if snap_near(wmbase.win_x(state, i), wmhead.hw_x(r) as i64) && snap_near(wmbase.win_y(state, i), wmhead.hw_y(r) as i64)
-            && snap_near(wmbase.outer_w(state, i) as i64, wmhead.hw_w(r) as i64) && snap_near(wmbase.outer_h(state, i) as i64, wmhead.hw_h(r) as i64) {
-            return c
-        }
-        n = n + 1
-    }
-    return 0
-}
-
-fn snap_key_target(cur: u64, key: u64) -> u64 {
-    if key == 0x83 {
-        if cur == 1 {
-            return 9
-        }
-        if cur == 2 {
-            return 10
-        }
-        if cur == 11 {
-            return 1
-        }
-        if cur == 12 {
-            return 2
-        }
-    }
-    if key == 0x84 {
-        if cur == 1 {
-            return 11
-        }
-        if cur == 2 {
-            return 12
-        }
-        if cur == 9 {
-            return 1
-        }
-        if cur == 10 {
-            return 2
-        }
-    }
-    if key == 0x81 {
-        if cur == 10 {
-            return 9
-        }
-        if cur == 12 {
-            return 11
-        }
-    }
-    if key == 0x82 {
-        if cur == 9 {
-            return 10
-        }
-        if cur == 11 {
-            return 12
-        }
-    }
-    return 0
-}
-
-fn snap_to_code(state: u64, i: u64, code: u64) -> bool {
-    if code == 1 || code == 2 {
-        let ok: bool = snap_half(state, i, code == 2)
-        if ok {
-            snap_say(state, i, code)
-        }
-        return ok
-    }
-    if !fit_rect(state, i, snap_rect(wmhead.win_work(state, i), code)) {
-        return false
-    }
-    wmbase.damage_all(state)
-    snap_say(state, i, code)
-    return true
-}
-
-// W1 (hotkeys): Win+Left/Right = snap to a half, Win+Up = maximize, Win+Down = restore (tiled/maximized) or minimize.
-// A second press while snapped moves between half and quarter (Windows 11): half + Up/Down = top/bottom quarter, quarter + Left/Right = the other side, quarter + opposite vertical = half again.
-fn win_arrow(state: u64, key: u64) -> bool {
-    let i: u64 = wmbase.focus(state)
-    if i >= wmbase.MAX_WIN {
-        return false
-    }
-    if !wmbase.deko(state, i) || wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL || !wmgate.input_allowed(state, i) {
-        return false
-    }
-    if wmlayout.wg(state, i, wmlayout.W_NODE) == 0 {
-        let tgt: u64 = snap_key_target(snap_code_of(state, i), key)
-        if tgt != 0 && snap_to_code(state, i, tgt) {
-            return true
-        }
-    }
-    if key == 0x81 || key == 0x82 {
-        if wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-            let _t: bool = tile_float(state, i)
-        }
-        return snap_half(state, i, key == 0x82)
-    }
-    if key == 0x83 {
-        if wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-            let _f: bool = tile_float(state, i)
-        }
-        if !wmworkarea.maximize(state, i, true) {
-            return false
-        }
-        // a half-snapped window carries F_MAXIMIZED too (it saves the way back there): grow it to the whole work area
-        return wmworkarea.fit_work(state, i)
-    }
-    if key == 0x84 {
-        if wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-            return tile_float(state, i)
-        }
-        if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) != 0 {
-            return wmworkarea.maximize(state, i, false)
-        }
-        return wmanimctl.minimize_anim(state, i)
-    }
-    return false
-}
-
-fn hotkeys(state: u64) -> u64 {
-    var n: u64 = 0
-    var weiter: bool = true
-    var guard: u64 = 0
-    while weiter && guard < 16 {
-        guard = guard + 1
-        let v: u64 = hot_take_raw(state)
-        if v == 0 {
-            weiter = false
-        } else {
-            n = n + 1
-            wmlayout.ss(state, wmlayout.S_HOTS, wmlayout.gs(state, wmlayout.S_HOTS) + 1)
-            // r382 LOCK SEAL: WHILE THE SCREEN IS LOCKED A SHORTCUT DOES
-            // NOTHING -- not Alt+Tab (raised and focused a window behind
-            // the lock), not close (destroyed it), not full screen, snap,
-            // tile; and no plugin hears it. The key is taken off the ring
-            // and thrown away, and the line below says so.
-            if wmgate.lock_active(state) {
-                var s_hl: [u8; 20] = "wm: hot gesperrt c=\0"
-                var s_hn: [u8; 6] = " mod=\0"
-                serial.puts((&s_hl[0]) as u64)
-                serial.dec(v & 0xFF)
-                serial.puts((&s_hn[0]) as u64)
-                serial.dec((v >> 8) & 0xFF)
-                serial.nl()
-            } else
-            if wmswitch.sw_open != 0 && (v & 0xFF) == 27 {
-                wmswitch.sw_cancel(state)
-            } else
-            // FPS-OV: Ctrl+Alt+F (mods 5 = Alt + Ctrl, 7 with Shift) switches the frame-rate overlay
-            if ((v & 0xFF) == 102 || (v & 0xFF) == 70) && ((v >> 8) & 0xFD) == 5 {
-                wmoverlay.fps_hotkey(state)
-            } else
-            // REPAINT-1: Ctrl+Alt+R recomposes the whole screen from the window buffers (reference picture of the stale-pixel gate)
-            if ((v & 0xFF) == 114 || (v & 0xFF) == 82) && ((v >> 8) & 0xFD) == 5 {
-                wmoverlay.repaint_hotkey(state)
-            } else
-            // W1 (hotkeys): WIN+ARROWS (mod 8) -- the focused window snaps / maximizes / restores, before any binding.
-            if ((v >> 8) & 0xFF) == 8 {
-                let wa: bool = win_arrow(state, v & 0xFF)
-                var s_wh: [u8; 18] = "wm: winarrow key=\0"
-                var s_wg: [u8; 8] = " getan=\0"
-                serial.puts((&s_wh[0]) as u64)
-                serial.dec(v & 0xFF)
-                serial.puts((&s_wg[0]) as u64)
-                if wa {
-                    serial.dec(1)
-                } else {
-                    serial.dec(0)
-                }
-                serial.nl()
-            } else
-            // RUNDE WMPLUGIN: DAS PLUGIN KOMMT VOR DER BINDUNG DES
-            // KACHELBAUMS. Wer ein Kuerzel belegt hat, bekommt es --
-            // und `tile_action` laeuft dafuer gar nicht erst an. Sonst
-            // taete Alt+2 zweierlei auf einmal, je nachdem, was gerade
-            // geladen ist, und das ist genau die Art Ueberraschung, die
-            // ein Erweiterungssystem nicht haben darf.
-            if wmplug.key_owner(state, v & 0xFF, (v >> 8) & 0xFF)
-                < wmplug.MAX_PLUG {
-                wmplug.notify(state, wmplug.E_KEY, v & 0xFF,
-                    (v >> 8) & 0xFF, 0)
-                wmlayout.ss(state, wmlayout.S_KPLUG, wmlayout.gs(state, wmlayout.S_KPLUG) + 1)
-                var s_ph: [u8; 17] = "wm: plughot c=\0\0\0"
-                var s_pj: [u8; 6] = " mod=\0"
-                serial.puts((&s_ph[0]) as u64)
-                serial.dec(v & 0xFF)
-                serial.puts((&s_pj[0]) as u64)
-                serial.dec((v >> 8) & 0xFF)
-                serial.nl()
-            } else {
-                var act: u64 = tile.bind_lookup(state, v & 0xFF, (v >> 8) & 0xFF)
-                // W1d: Alt+Shift+Tab goes backwards through the switcher (only while Alt+Tab is the stock next-window binding)
-                if act == tile.A_NONE && (v & 0xFF) == 9 && ((v >> 8) & 0xFF) == 3
-                    && tile.bind_lookup(state, 9, 1) == tile.A_NEXT_WIN {
-                    act = ACT_PREV_WIN
-                }
-                // RUNDE TUERSCHLOSS: WAS DER RING HERGAB UND WAS DARAUS
-                // WURDE. Drei Zahlen, und sie trennen die drei Faelle, die
-                // sonst gleich aussehen: Taste kam nicht an (keine Zeile),
-                // Taste kam an, aber keine Bindung (act=0), Bindung da, aber
-                // die Handlung tat nichts (getan=0).
-                var s_hk: [u8; 12] = "wm: hot c=\0\0"
-                var s_hm: [u8; 6] = " mod=\0"
-                var s_ha: [u8; 6] = " act=\0"
-                serial.puts((&s_hk[0]) as u64)
-                serial.dec(v & 0xFF)
-                serial.puts((&s_hm[0]) as u64)
-                serial.dec((v >> 8) & 0xFF)
-                serial.puts((&s_ha[0]) as u64)
-                serial.dec(act)
-                // DIE ZEILE WIRD ZUERST FERTIG. `tile_action` ruft
-                // `set_focus`, und das schreibt seit dieser Runde selbst auf
-                // die Leitung -- mitten in diese Zeile hinein. Gemessen:
-                //     wm: hot c=9 mod=1 act=30wm: fokus id=7 vor=15
-                // Beide Angaben stimmen, aber `act=30` und die Fokuszeile
-                // kleben aneinander, und ein Muster, das auf das Zeilenende
-                // wartet, findet keines von beiden. Also: Zeilenumbruch vor
-                // der Handlung, das Ergebnis kommt in eine eigene Zeile.
-                serial.nl()
-                let getan: bool = tile_action(state, act)
-                var s_hr: [u8; 15] = "wm: hot getan=\0"
-                serial.puts((&s_hr[0]) as u64)
-                if getan {
-                    serial.dec(1)
-                } else {
-                    serial.dec(0)
-                }
-                serial.nl()
-                if getan {
-                    wmlayout.ss(state, wmlayout.S_ACTS, wmlayout.gs(state, wmlayout.S_ACTS) + 1)
-                }
-            }
-        }
-    }
-    return n
-}
-const ACT_PREV_WIN: u64 = 64
-
-// W-TPSET2: a touchpad gesture action (lib/touchgest A_*, already resolved from the swipe mode in hidin) that
-// the window server owns: 1 = next window, 2 = previous window (same focus walk as Alt+Tab / Alt+Shift+Tab).
-// Show / restore desktop go over the Win+D key of the taskbar (hidin); task view and virtual desktops do not
-// exist yet, so those codes (3, 6, 7) do nothing. Never while the screen is locked or the trusted dialog is up.
-fn gest_action(state: u64, act: u64, n: u64) -> bool {
-    if act == 1 {
-        return wmswitchctl.swipe_do(state, 1, n)
-    }
-    if act == 2 {
-        return wmswitchctl.swipe_do(state, 2, n)
-    }
-    return false
-}
-
-// EINE HANDLUNG AUSFUEHREN. Welche Taste welche Handlung ausloest, steht
-// NICHT hier, sondern in der Tabelle, die aus
-// /users/<name>/config/tiling.conf gelesen wurde. Hier steht nur, was
-// eine Handlung TUT.
-fn tile_action(state: u64, act: u64) -> bool {
-    if act == tile.A_NONE || !wmbase.ready(state) {
-        return false
-    }
-    // r382 LOCK SEAL: second lock, for the callers that do not come over
-    // the key ring (the syscall WM_TILEDO): no action on any window while
-    // the screen is locked.
-    if wmgate.lock_active(state) {
-        return false
-    }
-    if act == tile.A_TILE_TOGGLE {
-        set_tile_on(state, wmlayout.gs(state, wmlayout.S_TILE) == 0)
-        return true
-    }
-    // RUNDE FENSTER: die MESSTASTE. Sie veraendert nichts -- sie legt die Arbeitsflaeche und die
-    // ganze Fensterliste auf die Leitung. r402: VOR der Frage nach dem Fokus -- sie braucht weder
-    // ein Fenster noch den Baum (nach Alt+F4 auf dem letzten Fenster gab es keinen Fokus mehr, und
-    // die Messtaste blieb stumm).
-    if act == tile.A_SAY {
-        wmworkarea.work_say(state)
-        wins_say(state)
-        return true
-    }
-    let i: u64 = wmbase.focus(state)
-    if i >= wmbase.MAX_WIN {
-        return false
-    }
-    if act == tile.A_CLOSE {
-        wmevent.ev_push(state, i, wmlayout.E_CLOSE, 0, 0, 0)
-        wmcore.destroy(state, i)
-        return true
-    }
-    // r402: Alt+F4 -- a window with a frame, on the normal layer, closed like its close button
-    if act == tile.A_CLOSE_WIN {
-        if !wmbase.deko(state, i) || wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL || !wmgate.input_allowed(state, i) {
-            return false
-        }
-        return wmanimctl.close_anim(state, i)
-    }
-    if act == tile.A_FLOAT {
-        return tile_float(state, i)
-    }
-    if act >= tile.A_SNAP_LEFT && act <= tile.A_SNAP_BR {
-        return tile_snap(state, i, act - tile.A_SNAP_LEFT)
-    }
-    // ================================================ RUNDE TUERSCHLOSS
-    //
-    // ALT+TAB. Diese Abfrage steht VOR `let nd = wg(state, i, W_NODE)`
-    // und dessen `if nd == 0 { return false }` -- und das ist der ganze
-    // Grund, warum sie wirkt.
-    //
-    // GEMESSEN (Runde DURCHKLICK, 4.3): `focus=1` stand ueber 137
-    // Meldungen still. Die vorhandenen Fokushandlungen fragen alle den
-    // KACHELBAUM (`dir_search`); ein schwebendes Fenster hat `W_NODE ==
-    // 0` und faellt aus jeder von ihnen heraus, bevor irgendetwas
-    // passiert. Auf dem Schreibtisch dieses Systems schwebt aber jedes
-    // Fenster -- der Kachelmodus ist standardmaessig aus.
-    //
-    // Alt+Tab geht deshalb durch die FENSTERLISTE DES SERVERS und nicht
-    // durch den Baum: ab dem Fenster mit dem Fokus aufwaerts, im Kreis,
-    // und nimmt das erste, das ein Mensch auch anklicken koennte.
-    if act == tile.A_NEXT_WIN {
-        return wmswitchctl.sw_step(state, false)
-    }
-    if act == ACT_PREV_WIN {
-        return wmswitchctl.sw_step(state, true)
-    }
-    // ================================================== RUNDE VOLLBILD
-    // F11 UMSCHALTEN. Steht aus demselben Grund hier oben wie Alt+Tab:
-    // das Vollbild betrifft EIN Fenster und nicht den Kachelbaum -- ein
-    // schwebendes Fenster (der Normalfall auf diesem Schreibtisch) hat
-    // `W_NODE == 0` und fiele durch die Abfrage darunter heraus, bevor
-    // irgendetwas passiert.
-    //
-    // UMSCHALTEN und nicht EINSCHALTEN: dieselbe Taste zurueck ist das,
-    // was Windows und jeder Browser tun.
-    if act == tile.A_FULL {
-        let an: bool = (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_FULL) == 0
-        let ok: bool = wmworkarea.fullscreen(state, i, an)
-        if ok {
-            wmworkarea.full_say(state, i)
-        }
-        return ok
-    }
-    let nd: u64 = wmlayout.wg(state, i, wmlayout.W_NODE)
-    if nd == 0 {
-        return false
-    }
-    tl_sel(state, nd_tag(nd))
-    let n: u64 = nd_node(nd)
-    if act <= tile.A_FOCUS_DOWN {
-        let z: u64 = tile.dir_search(tt(state), n, act - tile.A_FOCUS_LEFT)
-        if z == tile.NONE {
-            return false
-        }
-        tile.set_focus(tt(state), z)
-        let cl: u64 = tile.n_client(tt(state), z)
-        if cl != 0 && cl <= wmbase.MAX_WIN {
-            wmcore.raise_win(state, cl - 1)
-            wmcore.set_focus(state, cl - 1)
-        }
-        tile_apply(state)
-        damage_tile(state)
-        return true
-    }
-    if act <= tile.A_MOVE_DOWN {
-        if tile.move_dir(tt(state), n, act - tile.A_MOVE_LEFT) {
-            tile_apply(state)
-            damage_tile(state)
-            return true
-        }
-        return false
-    }
-    if act == tile.A_SPLIT_H {
-        tile.set_next_split(tt(state), 1)
-        return true
-    }
-    if act == tile.A_SPLIT_V {
-        tile.set_next_split(tt(state), 2)
-        return true
-    }
-    if act >= tile.A_LAYOUT_SPLIT && act <= tile.A_LAYOUT_STACKED {
-        if tile.set_layout(tt(state), n, act - tile.A_LAYOUT_SPLIT) {
-            tile_apply(state)
-            damage_tile(state)
-            return true
-        }
-        return false
-    }
-    if act == tile.A_ROTATE {
-        tile.rotate(tt(state), tile.root(tt(state)), 1)
-        tile_apply(state)
-        damage_tile(state)
-        return true
-    }
-    if act == tile.A_MIRROR {
-        tile.mirror(tt(state), tile.root(tt(state)), 0)
-        tile_apply(state)
-        damage_tile(state)
-        return true
-    }
-    if act == tile.A_BALANCE {
-        tile.balance(tt(state), tile.root(tt(state)))
-        tile_apply(state)
-        damage_tile(state)
-        return true
-    }
-    if act == tile.A_GROW || act == tile.A_SHRINK {
-        var d: i64 = tile.MIN_FRAC as i64
-        if act == tile.A_SHRINK {
-            d = 0 - d
-        }
-        if tile.resize_at(tt(state), n, d) {
-            tile_apply(state)
-            damage_tile(state)
-            return true
-        }
-        return false
-    }
-    return false
 }
 
 // `ax: mag ...` on the serial line: where the panel and the cut-out are,
