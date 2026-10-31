@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmframe
 import ui.wm.wmcompose
 import ui.wm.headsync
 import ui.wm.wmworkcalc
@@ -168,14 +169,12 @@ export {
     win_opac, set_opac, backlum, BL_MEAN, BL_HI, BL_LO, BL_RUNS, BL_HITS,
     set_blur_cache,
     tb_alpha_ist,
-    present,
     anims,
     minimize_anim, open_anim,
     set_min_rect,
     dnd_take_paste, dnd_live_pub, dnd_nraise_pub, dnd_ncancel_pub,
     win_x_pub, win_y_pub,
     frame_no,
-    leser_tick,
     set_before_t0, set_before_step, set_before_win,
     fill, text, flush_win,
     ev_push, ev_pop, ev_waiting,
@@ -374,6 +373,7 @@ fn win_hidden(state: u64, i: u64) -> bool {
 fn win_shm(state: u64, i: u64) -> u64 {
     return wmcompose.win_shm(state, i)
 }
+
 
 fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     wmbase.damage(state, x0, y0, x1, y1)
@@ -1733,23 +1733,6 @@ const CP_EV_MOVE: u64 = 1
 const CP_EV_BTN: u64 = 2
 const CP_EV_KEY: u64 = 3
 
-fn cp_lock(state: u64) -> bool {
-    let lk: u64 = state + kstate.WM_OFF + wmlayout.S_CLOCK
-    var n: u64 = 0
-    while n < 200000 {
-        let was: u64 = __atomic_swap(lk as *mut u64, 0 as u64, 1 as u64)
-        if was == 0 {
-            return true
-        }
-        n = n + 1
-    }
-    return false
-}
-
-fn cp_unlock(state: u64) {
-    arch.atomic_store(state + kstate.WM_OFF + wmlayout.S_CLOCK, 0)
-}
-
 // the compositor page: made at the first WM_COMP / CP_PAGE, read-only for everybody (SMF_RO)
 fn cp_page_object(state: u64) -> u64 {
     if wmlayout.gs(state, wmlayout.S_CP_PAGEI) != 0 {
@@ -2097,7 +2080,7 @@ fn cp_attach(state: u64, me: u64) -> u64 {
     if fb.nocomp_an(state) {
         return 1
     }
-    if !cp_lock(state) {
+    if !wmframe.cp_lock(state) {
         return 3
     }
     let cur: u64 = wmlayout.gs(state, wmlayout.S_CP_TASK)
@@ -2105,7 +2088,7 @@ fn cp_attach(state: u64, me: u64) -> u64 {
         let idx: u64 = cur - 1
         let st: u64 = sched.tget(state, idx, sched.T_STATE)
         if st != sched.S_ZOMBIE && st != sched.S_FREE && sched.tget(state, idx, sched.T_PID) == wmlayout.gs(state, wmlayout.S_CP_PID) {
-            cp_unlock(state)
+            wmframe.cp_unlock(state)
             return 2
         }
         wmcompose.cp_detach_locked(state, 1)
@@ -2115,7 +2098,7 @@ fn cp_attach(state: u64, me: u64) -> u64 {
     wmlayout.ss(state, wmlayout.S_CP_MISS, 0)
     wmlayout.ss(state, wmlayout.S_CP_NATT, wmlayout.gs(state, wmlayout.S_CP_NATT) + 1)
     wmcompose.cp_sync(state)
-    cp_unlock(state)
+    wmframe.cp_unlock(state)
     // a first complete frame for the new compositor to show
     wmbase.damage_all(state)
     return 0
@@ -2125,11 +2108,11 @@ fn cp_detach(state: u64, me: u64) -> u64 {
     if wmlayout.gs(state, wmlayout.S_CP_TASK) != me + 1 {
         return CP_NOT
     }
-    if !cp_lock(state) {
+    if !wmframe.cp_lock(state) {
         return CP_BUSY
     }
     wmcompose.cp_detach_locked(state, 3)
-    cp_unlock(state)
+    wmframe.cp_unlock(state)
     return 0
 }
 
@@ -2138,7 +2121,7 @@ fn cp_present(state: u64, me: u64) -> u64 {
     if wmlayout.gs(state, wmlayout.S_CP_TASK) != me + 1 {
         return CP_NOT
     }
-    if !cp_lock(state) {
+    if !wmframe.cp_lock(state) {
         return CP_BUSY
     }
     var px: u64 = 0
@@ -2148,7 +2131,7 @@ fn cp_present(state: u64, me: u64) -> u64 {
             wmlayout.ss(state, wmlayout.S_CP_MISS, 0)
         }
     }
-    cp_unlock(state)
+    wmframe.cp_unlock(state)
     return px
 }
 
@@ -2337,58 +2320,6 @@ fn anims(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_ANIMS)
 }
 
-// DAS BILD ZEIGEN. Eine Uebertragung, ein Rechteck -- und der Zaehler
-// steigt nur, wenn wirklich etwas anlag. Wer das im Takt ruft, hat
-// genau die Bildgrenze, die vorher fehlte.
-fn present(state: u64) -> u64 {
-    if !wmbase.ready(state) || !fb.ready(state) {
-        return 0
-    }
-    if wmlayout.gs(state, wmlayout.S_PEND) == 0 {
-        return 0
-    }
-    let x0: u64 = wmlayout.gs(state, wmlayout.S_PX0)
-    let y0: u64 = wmlayout.gs(state, wmlayout.S_PY0)
-    let x1: u64 = wmlayout.gs(state, wmlayout.S_PX1)
-    let y1: u64 = wmlayout.gs(state, wmlayout.S_PY1)
-    wmlayout.ss(state, wmlayout.S_PEND, 0)
-    if x1 <= x0 || y1 <= y0 {
-        return 0
-    }
-    // COMPOSITOR S5: with a compositor the rectangle is handed over, the compositor shows it
-    if wmcompose.cp_on(state) && cp_lock(state) {
-        wmcompose.cp_hand(state, x0, y0, x1, y1)
-        wmcompose.cp_kick(state)
-        cp_unlock(state)
-        return (x1 - x0) * (y1 - y0)
-    }
-    // `flush_rect` statt `flush`: nur die Spalten, die wirklich
-    // schmutzig waren. `flush` haette die ganze Bildbreite genommen,
-    // weil es nur Zeilen kennt.
-    // MIT SEITENUMSCHALTUNG MUSS DIE GANZE SEITE STIMMEN, nicht nur
-    // das schmutzige Rechteck: gezeigt wird gleich die ANDERE Haelfte,
-    // und in der steht das vorletzte Bild. Was seitdem woanders
-    // gemalt wurde, fehlte dort. Also die volle Flaeche kopieren --
-    // sie ist unsichtbar, solange nicht umgeschaltet ist, und der
-    // Preis dafuer steht in docs/VSYNC.md.
-    if fb.flip_on(state) {
-        fb.flush_rect(state, 0, 0, wmlayout.gs(state, wmlayout.S_SW), wmlayout.gs(state, wmlayout.S_SH))
-        fb.flip(state)
-    } else {
-        beam.wait(state, x0, y0, x1 - x0, y1 - y0)
-        fb.flush_rect(state, x0, y0, x1 - x0, y1 - y0)
-    }
-    wmlayout.ss(state, wmlayout.S_PRESENTS, wmlayout.gs(state, wmlayout.S_PRESENTS) + 1)
-    // RUNDE VIRTIOGPU: DIE BILDGRENZE IST HIER UND SONST NIRGENDS.
-    // `flushes` zaehlt Uebertragungen, und davon gibt es mehrere je
-    // Bild. Wer "Oktette je Bild" ausrechnen will, braucht die Zahl
-    // der BILDER -- und ein Bild ist genau ein Durchlauf hier.
-    fb.frame_done(state)
-    let flaeche: u64 = (x1 - x0) * (y1 - y0)
-    wmlayout.ss(state, wmlayout.S_PXSUM, wmlayout.gs(state, wmlayout.S_PXSUM) +% flaeche)
-    return flaeche
-}
-
 fn set_before_t0(state: u64, v: u64) {
     wmlayout.ss(state, wmlayout.S_VT0, v)
 }
@@ -2399,107 +2330,6 @@ fn set_before_step(state: u64, v: u64) {
 
 fn set_before_win(state: u64, v: u64) {
     wmlayout.ss(state, wmlayout.S_VWIN, v)
-}
-
-// EINMAL ABLESEN. Er nimmt das oberste sichtbare Fenster, liest dessen
-// oberen und unteren Signaturstreifen aus dem VORDERPUFFER und
-// vergleicht. Der Aufrufer ruft das dicht -- je dichter, desto eher
-// erwischt er die Uebertragung mitten im Lauf.
-fn leser_tick(state: u64) {
-    if wmlayout.gs(state, wmlayout.S_LESER) == 0 || wmlayout.gs(state, wmlayout.S_SIG) == 0 {
-        return
-    }
-    let i: u64 = wmcore.top_visible(state)
-    if i >= wmbase.MAX_WIN {
-        return
-    }
-    // NUR AN EINEM FENSTER, DAS SICH GERADE NICHT BEWEGT UND NICHT
-    // AUFGEHT. Waehrend einer Oeffnungsbewegung wird die Flaeche
-    // skaliert und gemischt gemalt -- die Signaturstreifen liegen dann
-    // nicht dort, wo dieser Ableser sie aus `win_x`/`win_y` errechnet,
-    // und was er findet, ist wieder eine Aussage ueber die Messung.
-    // Dasselbe gilt fuer ein gezogenes Fenster.
-    if wmlayout.wg(state, i, wmlayout.W_ANK) != 0 || wmlayout.gs(state, wmlayout.S_DRAG) != 0 {
-        return
-    }
-    let wx: i64 = wmbase.win_x(state, i)
-    let wy: i64 = wmbase.win_y(state, i)
-    let ow: i64 = wmbase.outer_w(state, i) as i64
-    let oh: i64 = wmbase.outer_h(state, i) as i64
-    if ow <= 0 || oh < 2 * wmpresent.SIG_H as i64 || wx < 0 || wy < 0 {
-        return
-    }
-    // DIE STELLE WIRD AUS EINER EINZIGEN ABLESUNG DES ORTES GERECHNET.
-    //
-    // Der Ableser rechnete sie zuerst bei jeder Ablesung frisch aus
-    // `win_x`/`win_y` -- und zwar ZWEIMAL, einmal fuer oben und einmal
-    // fuer unten. Waehrend eines Zuges wandert das Fenster dazwischen,
-    // und dann las er oben an der neuen und unten an der alten Stelle:
-    // zwei Signaturen, die nichts miteinander zu tun hatten. GEMESSEN
-    // als 97 Prozent "Risse" bei stehender Bildgrenze, waehrend
-    // derselbe Ableser am STEHENDEN Bild null fand. Der Fehler lag in
-    // der Messung.
-    //
-    // Eine feste Stelle war die naechste Fassung und auch falsch: das
-    // Fenster wandert unter ihr weg, und dann misst sie Hintergrund
-    // (gemessen: 1 165 276 Ablesungen ohne Signatur von 1 210 449).
-    //
-    // Richtig ist: den Ort EINMAL lesen und BEIDE Punkte daraus
-    // rechnen. Bewegt sich das Fenster danach, gehoert die Ablesung
-    // eben zum vorigen Ort -- aber zu EINEM Ort, und genau darauf
-    // kommt es an.
-    let x: u64 = (wx + ow / 2) as u64
-    let y0: u64 = (wy + 1) as u64
-    let y1: u64 = (wy + oh - 2) as u64
-    // BEIDE PUNKTE AUS DERSELBEN BILDSEITE, in einem Zug. Zwei
-    // getrennte Ablesungen haetten den Seitenwechsel dazwischen
-    // erwischt und einen Riss gemeldet, den es nicht gab -- siehe
-    // `fb.front_paar`.
-    let puffer: u64 = state + kstate.WM_OFF + wmlayout.S_LPAAR
-    // BIS ZU DREI VERSUCHE. `front_paar` sagt `false`, wenn zwischen
-    // den beiden Punkten die Bildseite gewechselt wurde -- dann hat die
-    // Ablesung KEINE Aussage (siehe die Begruendung dort). Ein neuer
-    // Versuch trifft die naechste ruhige Spanne; klappt es dreimal
-    // nicht, wird gar nichts gezaehlt. Eine verworfene Ablesung ist
-    // KEIN Riss, und sie als einen zu zaehlen waere die eine Zahl, auf
-    // die sich diese Runde nicht verlassen duerfte.
-    var versuch: u64 = 0
-    var gut: bool = false
-    while versuch < 3 && !gut {
-        gut = fb.front_paar(state, x, y0, y1, puffer)
-        versuch = versuch + 1
-    }
-    if !gut {
-        wmlayout.ss(state, wmlayout.S_VERWORF, wmlayout.gs(state, wmlayout.S_VERWORF) + 1)
-        return
-    }
-    let a: u64 = kstate.get(state, kstate.WM_OFF + wmlayout.S_LPAAR)
-    let b: u64 = kstate.get(state, kstate.WM_OFF + wmlayout.S_LPAAR + 8)
-    let ka: u64 = wmpresent.sig_nr(a)
-    let kb: u64 = wmpresent.sig_nr(b)
-    wmlayout.ss(state, wmlayout.S_LIEST, wmlayout.gs(state, wmlayout.S_LIEST) + 1)
-    // Nur wenn BEIDE eine Signatur tragen, ist die Frage gestellt.
-    // Steht an einer Stelle Fensterinhalt, wurde dort gerade nichts
-    // uebertragen -- das ist kein Riss.
-    if ka < 8 && kb < 8 && ka != kb {
-        wmlayout.ss(state, wmlayout.S_TEAR, wmlayout.gs(state, wmlayout.S_TEAR) + 1)
-        // Die ERSTE Beobachtung festhalten: welche zwei Signaturen,
-        // an welchen Zeilen. Ohne sie ist "es reisst" eine Zahl ohne
-        // Anhalt, und die Suche nach dem Grund faengt bei null an.
-        if wmlayout.gs(state, wmlayout.S_R0) == 0 {
-            wmlayout.ss(state, wmlayout.S_R0, ka + 1)
-            wmlayout.ss(state, wmlayout.S_R1, kb + 1)
-            // Und WO es passiert ist: die Zeilen und die Bildnummer.
-            // Ohne sie bleibt "es reisst noch ein bisschen" eine Zahl
-            // ohne Anhalt.
-            wmlayout.ss(state, wmlayout.S_RY0, y0)
-            wmlayout.ss(state, wmlayout.S_RY1, y1)
-            wmlayout.ss(state, wmlayout.S_RFR, wmlayout.gs(state, wmlayout.S_FRAME))
-        }
-    }
-    if ka >= 8 || kb >= 8 {
-        wmlayout.ss(state, wmlayout.S_KEIN, wmlayout.gs(state, wmlayout.S_KEIN) + 1)
-    }
 }
 
 // WIE VIELE TASTEN BEI DIESEM FENSTER ANGEKOMMEN SIND. Die Zahl ist die
