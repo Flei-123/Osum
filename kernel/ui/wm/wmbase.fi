@@ -1,0 +1,514 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import gfx.fb
+import serial
+import arch.arch
+import ui.frameprof
+import fui.region
+import ui.pixelguard
+import ui.wm.wmlayout
+import ui.wm.wmgeom
+
+const MAX_WIN: u64 = 32
+
+const DECO_SLOTS: u64 = 11
+
+const BC_N: u64 = 4
+
+fn deco_fallback(i: u64) -> u64 {
+    if i == wmlayout.DK_FRAME {
+        return 0x003A4654
+    }
+    if i == wmlayout.DK_TITLE {
+        return 0x002C3848
+    }
+    if i == wmlayout.DK_TEXT {
+        return 0x00909CA8
+    }
+    if i == wmlayout.DK_FRAME_ON {
+        return 0x004C9AE8
+    }
+    if i == wmlayout.DK_TITLE_ON {
+        return 0x001C4E7E
+    }
+    if i == wmlayout.DK_TEXT_ON {
+        return 0x00FFFFFF
+    }
+    if i == wmlayout.DK_CLOSE {
+        return 0x00D04040
+    }
+    if i == wmlayout.DK_DESK {
+        return 0x001E2A38
+    }
+    if i == wmlayout.DK_TERM_FG {
+        return 0x00E0E6EC
+    }
+    if i == wmlayout.DK_TERM_BG {
+        return 0x0010141A
+    }
+    return 0x00FFFFFF
+}
+
+fn deco_rgb(state: u64, i: u64) -> u64 {
+    if i >= DECO_SLOTS {
+        return 0
+    }
+    let v: u64 = wmlayout.gs(state, wmlayout.S_DECO + i * 8)
+    if v == 0 {
+        return deco_fallback(i)
+    }
+    return v - 1
+}
+
+fn rgb24(state: u64, v: u64) -> u64 {
+    return fb.rgb(state, (v >> 16) & 255, (v >> 8) & 255, v & 255)
+}
+
+fn deco(state: u64, i: u64) -> u64 {
+    return rgb24(state, deco_rgb(state, i))
+}
+
+fn form_or(state: u64, i: u64, vorgabe: u64) -> u64 {
+    if i >= wmgeom.FORM_SLOTS {
+        return vorgabe
+    }
+    let v: u64 = wmlayout.gs(state, wmlayout.S_FORM + i * 8)
+    if v == 0 {
+        return vorgabe
+    }
+    return v - 1
+}
+
+fn hline_a_clip(state: u64, x: i64, y: i64, n: i64, farbe: u64, a: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if y < cy0 || y >= cy1 || y < 0 || n <= 0 {
+        return
+    }
+    let x0: i64 = imax(imax(x, cx0), 0)
+    let x1: i64 = imin(x + n, cx1)
+    if x1 <= x0 {
+        return
+    }
+    fb.hline_a(state, x0 as u64, y as u64, (x1 - x0) as u64, farbe, a)
+    wmlayout.ss(state, wmlayout.S_SHADOWPX, wmlayout.gs(state, wmlayout.S_SHADOWPX) + (x1 - x0) as u64)
+}
+
+fn ready(state: u64) -> bool {
+    return wmlayout.gs(state, wmlayout.S_READY) != 0
+}
+
+fn valid(state: u64, i: u64) -> bool {
+    if i >= MAX_WIN {
+        return false
+    }
+    return wmlayout.wg(state, i, wmlayout.W_USED) != 0
+}
+
+fn focus(state: u64) -> u64 {
+    let f: u64 = wmlayout.gs(state, wmlayout.S_FOCUS)
+    if f == 0 {
+        return MAX_WIN
+    }
+    return f - 1
+}
+
+fn panel_win(state: u64) -> u64 {
+    var z: u64 = wmlayout.gs(state, wmlayout.S_COUNT)
+    while z > 0 {
+        z = z - 1
+        let i: u64 = at_z(state, z)
+        if i < MAX_WIN && wmlayout.wg(state, i, wmlayout.W_USED) != 0 {
+            if wmlayout.wg(state, i, wmlayout.W_LAYER) == wmlayout.L_TOP && wmlayout.wg(state, i, wmlayout.W_STRUT) != 0 {
+                return i
+            }
+        }
+    }
+
+    return MAX_WIN
+}
+
+fn win_x(state: u64, i: u64) -> i64 {
+    return wmlayout.wg(state, i, wmlayout.W_X) as i64
+}
+
+fn win_y(state: u64, i: u64) -> i64 {
+    return wmlayout.wg(state, i, wmlayout.W_Y) as i64
+}
+
+fn win_owner(state: u64, i: u64) -> u64 {
+    return wmlayout.wg(state, i, wmlayout.W_OWNER)
+}
+
+fn deko(state: u64, i: u64) -> bool {
+    return (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_NODECO) == 0
+}
+
+fn inx(state: u64, i: u64) -> u64 {
+    if deko(state, i) {
+        return wmgeom.border(state)
+    }
+    return 0
+}
+
+fn iny(state: u64, i: u64) -> u64 {
+    if deko(state, i) {
+
+        if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_CAPCLIENT) != 0 {
+            return wmgeom.border(state)
+        }
+        return wmgeom.title_h(state)
+    }
+    return 0
+}
+
+fn outer_w(state: u64, i: u64) -> u64 {
+    if !deko(state, i) {
+        return wmlayout.wg(state, i, wmlayout.W_W)
+    }
+    return wmlayout.wg(state, i, wmlayout.W_W) + wmgeom.border(state) * 2
+}
+
+fn outer_h(state: u64, i: u64) -> u64 {
+    if !deko(state, i) {
+        return wmlayout.wg(state, i, wmlayout.W_H)
+    }
+    return wmlayout.wg(state, i, wmlayout.W_H) + iny(state, i) + wmgeom.border(state)
+}
+
+fn rgn_lock(state: u64) -> bool {
+    let lk: u64 = state + kstate.WM_OFF + wmlayout.S_RLOCK
+    var spins: u64 = 0
+    var got: bool = false
+    while !got {
+        let alt: u64 = __atomic_swap(lk as *mut u64, 0 as u64, 1 as u64)
+        if alt == 0 {
+            got = true
+        } else {
+            spins = spins + 1
+            if spins > 20000 {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+fn rgn_unlock(state: u64) {
+    arch.atomic_store(state + kstate.WM_OFF + wmlayout.S_RLOCK, 0)
+}
+
+fn rgn_all(state: u64) {
+    if !rgn_lock(state) {
+        wmlayout.ss(state, wmlayout.S_RBAD, 1)
+        return
+    }
+    let r: u64 = state + kstate.WM_OFF + wmlayout.S_RGN
+    region.region_clear(r)
+    region.region_add(r, 0, 0, wmlayout.gs(state, wmlayout.S_SW) as i64, wmlayout.gs(state, wmlayout.S_SH) as i64)
+    rgn_unlock(state)
+}
+
+fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
+    damage_ex(state, x0, y0, x1, y1, 0)
+}
+
+const BT_ALL: u64 = 0xFFFFFFFF
+
+fn damage_ex(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
+    if !ready(state) {
+        return
+    }
+    if skip != 0 && skip <= frameprof.SLOTS {
+        frameprof.note(state, skip - 1, win_owner(state, skip - 1))
+    }
+    if wmlayout.gs(state, wmlayout.S_NODIRTY) != 0 {
+        damage_all(state)
+        return
+    }
+    var a: i64 = x0
+    var b: i64 = y0
+    var c: i64 = x1
+    var d: i64 = y1
+    if a < 0 {
+        a = 0
+    }
+    if b < 0 {
+        b = 0
+    }
+    if c > wmlayout.gs(state, wmlayout.S_SW) as i64 {
+        c = wmlayout.gs(state, wmlayout.S_SW) as i64
+    }
+    if d > wmlayout.gs(state, wmlayout.S_SH) as i64 {
+        d = wmlayout.gs(state, wmlayout.S_SH) as i64
+    }
+    if c <= a || d <= b {
+        return
+    }
+    let pre_a: i64 = a
+    let pre_b: i64 = b
+    let pre_c: i64 = c
+    let pre_d: i64 = d
+
+    blur_touch(state, a, b, c, d, skip)
+
+    bl_touch(state, a, b, c, d, skip)
+
+    if wmlayout.gs(state, wmlayout.S_NOGROW) == 0
+        && (form_or(state, wmlayout.FM_TB_ALPHA, 100) < 100
+            || wmgeom.form(state, wmlayout.FM_BLUR) > 0) {
+        let pw: u64 = panel_win(state)
+        if pw < MAX_WIN {
+            let px0: i64 = win_x(state, pw)
+            let py0: i64 = win_y(state, pw)
+            let px1: i64 = px0 + outer_w(state, pw) as i64
+            let py1: i64 = py0 + outer_h(state, pw) as i64
+            if c > px0 && a < px1 && d > py0 && b < py1 {
+                if px0 < a {
+                    a = px0
+                }
+                if py0 < b {
+                    b = py0
+                }
+                if px1 > c {
+                    c = px1
+                }
+                if py1 > d {
+                    d = py1
+                }
+                if a < 0 {
+                    a = 0
+                }
+                if b < 0 {
+                    b = 0
+                }
+                if c > wmlayout.gs(state, wmlayout.S_SW) as i64 {
+                    c = wmlayout.gs(state, wmlayout.S_SW) as i64
+                }
+                if d > wmlayout.gs(state, wmlayout.S_SH) as i64 {
+                    d = wmlayout.gs(state, wmlayout.S_SH) as i64
+                }
+                wmlayout.ss(state, wmlayout.S_PANELGROW, wmlayout.gs(state, wmlayout.S_PANELGROW) + 1)
+
+                let gz: u64 = wmlayout.gs(state, wmlayout.S_PANELGROW)
+                if gz == 1 || gz % 500 == 0 {
+                    schlieren_say(state)
+                }
+            }
+        }
+    }
+
+    if fb.phases_an(state) && ((c - a) * (d - b)) > 16384 {
+        var s_g0: [u8; 9] = "wm: dmg \0"
+        var s_g1: [u8; 7] = " pre= \0"
+        var s_g2: [u8; 7] = " skip=\0"
+        serial.puts((&s_g0[0]) as u64)
+        serial.dec(a as u64)
+        serial.put(32 as u8)
+        serial.dec(b as u64)
+        serial.put(32 as u8)
+        serial.dec(c as u64)
+        serial.put(32 as u8)
+        serial.dec(d as u64)
+        serial.puts((&s_g1[0]) as u64)
+        serial.dec(pre_a as u64)
+        serial.put(32 as u8)
+        serial.dec(pre_b as u64)
+        serial.put(32 as u8)
+        serial.dec(pre_c as u64)
+        serial.put(32 as u8)
+        serial.dec(pre_d as u64)
+        serial.puts((&s_g2[0]) as u64)
+        serial.dec(skip)
+        serial.nl()
+    }
+
+    let locked: bool = rgn_lock(state)
+    if locked {
+        region.region_add(state + kstate.WM_OFF + wmlayout.S_RGN, a, b, c, d)
+    } else {
+        wmlayout.ss(state, wmlayout.S_RBAD, 1)
+    }
+    box_add(state, a, b, c, d)
+    if locked {
+        rgn_unlock(state)
+    }
+}
+
+fn box_add(state: u64, a: i64, b: i64, c: i64, d: i64) {
+    if wmlayout.gs(state, wmlayout.S_DON) == 0 {
+        wmlayout.ss(state, wmlayout.S_DX0, a as u64)
+        wmlayout.ss(state, wmlayout.S_DY0, b as u64)
+        wmlayout.ss(state, wmlayout.S_DX1, c as u64)
+        wmlayout.ss(state, wmlayout.S_DY1, d as u64)
+        wmlayout.ss(state, wmlayout.S_DON, 1)
+        return
+    }
+    if (a as u64) < wmlayout.gs(state, wmlayout.S_DX0) {
+        wmlayout.ss(state, wmlayout.S_DX0, a as u64)
+    }
+    if (b as u64) < wmlayout.gs(state, wmlayout.S_DY0) {
+        wmlayout.ss(state, wmlayout.S_DY0, b as u64)
+    }
+    if (c as u64) > wmlayout.gs(state, wmlayout.S_DX1) {
+        wmlayout.ss(state, wmlayout.S_DX1, c as u64)
+    }
+    if (d as u64) > wmlayout.gs(state, wmlayout.S_DY1) {
+        wmlayout.ss(state, wmlayout.S_DY1, d as u64)
+    }
+}
+
+fn damage_all(state: u64) {
+
+    wmlayout.ss(state, wmlayout.S_GLASSGEN, wmlayout.gs(state, wmlayout.S_GLASSGEN) + 1)
+    wmlayout.ss(state, wmlayout.S_DX0, 0)
+    wmlayout.ss(state, wmlayout.S_DY0, 0)
+    wmlayout.ss(state, wmlayout.S_DX1, wmlayout.gs(state, wmlayout.S_SW))
+    wmlayout.ss(state, wmlayout.S_DY1, wmlayout.gs(state, wmlayout.S_SH))
+    wmlayout.ss(state, wmlayout.S_DON, 1)
+    rgn_all(state)
+
+    var bk: u64 = 0
+    while bk < BC_N {
+        wmlayout.ss(state, wmlayout.S_BC_GEN + bk * 8, wmlayout.gs(state, wmlayout.S_BC_GEN + bk * 8) + 1)
+        bk = bk + 1
+    }
+}
+
+fn at_z(state: u64, z: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmlayout.wg(state, i, wmlayout.W_Z) == z {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_WIN
+}
+
+fn pending(state: u64) -> bool {
+    return wmlayout.gs(state, wmlayout.S_PEND) != 0
+}
+
+fn imax(a: i64, b: i64) -> i64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn imin(a: i64, b: i64) -> i64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn blur_touch(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
+    if skip == BT_ALL || pixelguard.bug_is(2) {
+        return
+    }
+
+    var skipz: u64 = 0
+    var haveskip: bool = false
+    if skip != 0 && skip - 1 < MAX_WIN {
+        skipz = wmlayout.wg(state, skip - 1, wmlayout.W_Z)
+        haveskip = true
+    }
+
+    var k: u64 = 0
+    while k < BC_N {
+        var spoilable: bool = wmlayout.gs(state, wmlayout.S_BC_WIN + k * 8) != 0
+        if spoilable && haveskip {
+            let sj: u64 = wmlayout.gs(state, wmlayout.S_BC_WIN + k * 8) - 1
+            if sj == skip - 1 || (sj < MAX_WIN && wmlayout.wg(state, sj, wmlayout.W_Z) <= skipz) {
+                spoilable = false
+            }
+        }
+        if spoilable {
+            let bx0: i64 = wmlayout.gs(state, wmlayout.S_BC_X + k * 8) as i64
+            let by0: i64 = wmlayout.gs(state, wmlayout.S_BC_Y + k * 8) as i64
+            let bx1: i64 = bx0 + wmlayout.gs(state, wmlayout.S_BC_W + k * 8) as i64
+            let by1: i64 = by0 + wmlayout.gs(state, wmlayout.S_BC_H + k * 8) as i64
+            if x1 > bx0 && x0 < bx1 && y1 > by0 && y0 < by1 {
+                wmlayout.ss(state, wmlayout.S_BC_GEN + k * 8, wmlayout.gs(state, wmlayout.S_BC_GEN + k * 8) + 1)
+                if fb.phases_an(state) {
+
+                    var s_bt: [u8; 16] = "wm: btouch win=\0"
+                    var s_bk: [u8; 7] = " skip=\0"
+                    var s_br: [u8; 7] = " rect=\0"
+                    serial.puts((&s_bt[0]) as u64)
+                    serial.dec(wmlayout.gs(state, wmlayout.S_BC_WIN + k * 8))
+                    serial.puts((&s_bk[0]) as u64)
+                    serial.dec(skip)
+                    serial.puts((&s_br[0]) as u64)
+                    serial.dec(x0 as u64)
+                    serial.put(44 as u8)
+                    serial.dec(y0 as u64)
+                    serial.put(44 as u8)
+                    serial.dec(x1 as u64)
+                    serial.put(44 as u8)
+                    serial.dec(y1 as u64)
+                    serial.nl()
+                }
+            }
+        }
+        k = k + 1
+    }
+}
+
+fn bl_touch(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
+    if skip == BT_ALL {
+        return
+    }
+    var skipz: u64 = 0
+    var haveskip: bool = false
+    if skip != 0 && skip - 1 < MAX_WIN {
+        skipz = wmlayout.wg(state, skip - 1, wmlayout.W_Z)
+        haveskip = true
+    }
+    var j: u64 = 0
+    while j < MAX_WIN {
+        if wmlayout.wg(state, j, wmlayout.W_USED) != 0 && wmlayout.wg(state, j, wmlayout.W_BL_MEAN) != 0 {
+            var spoil: bool = true
+            if haveskip && (j == skip - 1 || wmlayout.wg(state, j, wmlayout.W_Z) <= skipz) {
+                spoil = false
+            }
+            if spoil {
+                let bx0: i64 = win_x(state, j)
+                let by0: i64 = win_y(state, j)
+                let bx1: i64 = bx0 + outer_w(state, j) as i64
+                let by1: i64 = by0 + outer_h(state, j) as i64
+                if x1 > bx0 && x0 < bx1 && y1 > by0 && y0 < by1 {
+                    wmlayout.wsv(state, j, wmlayout.W_BL_MEAN, 0)
+                }
+            }
+        }
+        j = j + 1
+    }
+}
+
+static mut sl_a: [u8; 20] = "wm: schlieren grow=\0"
+
+static mut sl_b: [u8; 8] = " alpha=\0"
+
+static mut sl_c: [u8; 7] = " blur=\0"
+
+static mut sl_d: [u8; 6] = " aus=\0"
+
+static mut sl_e: [u8; 10] = " unterpx=\0"
+
+fn schlieren_say(state: u64) {
+    serial.puts((&sl_a[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_PANELGROW))
+    serial.puts((&sl_b[0]) as u64)
+    serial.dec(form_or(state, wmlayout.FM_TB_ALPHA, 100))
+    serial.puts((&sl_c[0]) as u64)
+    serial.dec(wmgeom.form(state, wmlayout.FM_BLUR))
+    serial.puts((&sl_d[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_NOGROW))
+    serial.puts((&sl_e[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_UNTERPX))
+    serial.nl()
+}
