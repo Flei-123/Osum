@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.cborread
+
+export { canonicalize }
+
+const MAX_ENTRIES: usize = 4096
+
+fn emit(p: u64, n: usize, pos: usize, flags: u64, out: *mut rt.Buf,
+    endp: *mut usize) -> i32 {
+    var it: cborread.Item = cborread.item_zero()
+    let rc: i32 = cborread.read_head(p, n, pos, flags, &it)
+    if rc != cborread.CB_OK {
+        return rc
+    }
+    if it.kind == cborread.K_ARRAY || it.kind == cborread.K_TAG {
+        rt.buf_push_bytes(out, p + pos as u64, it.end - pos)
+        var cur: usize = it.end
+        var count: u64 = it.val
+        if it.kind == cborread.K_TAG {
+            count = 1
+        }
+        var i: u64 = 0
+        while i < count {
+            let r1: i32 = emit(p, n, cur, flags, out, endp)
+            if r1 != cborread.CB_OK {
+                return r1
+            }
+            cur = *endp
+            i = i + 1
+        }
+        *endp = cur
+        return cborread.CB_OK
+    }
+    if it.kind != cborread.K_MAP {
+        rt.buf_push_bytes(out, p + pos as u64, it.end - pos)
+        *endp = it.end
+        return cborread.CB_OK
+    }
+    if it.val > MAX_ENTRIES as u64 {
+        return cborread.CB_E_LIMIT
+    }
+    rt.buf_push_bytes(out, p + pos as u64, it.end - pos)
+    let c: usize = it.val as usize
+    var cur: usize = it.end
+    if c == 0 {
+        *endp = cur
+        return cborread.CB_OK
+    }
+    var tmp: rt.Buf = rt.buf_new()
+    let offs: u64 = rt.heap_alloc(c * 32)
+    let order: u64 = rt.heap_alloc(c * 8)
+    var result: i32 = cborread.CB_OK
+    if offs == 0 || order == 0 {
+        result = cborread.CB_E_LIMIT
+    }
+    var i: usize = 0
+    while i < c && result == cborread.CB_OK {
+        rt.st64(offs, i * 4, rt.buf_len(&tmp) as u64)
+        let r2: i32 = emit(p, n, cur, flags, &tmp, endp)
+        if r2 != cborread.CB_OK {
+            result = r2
+        } else {
+            cur = *endp
+            rt.st64(offs, i * 4 + 1, rt.buf_len(&tmp) as u64)
+            rt.st64(offs, i * 4 + 2, rt.buf_len(&tmp) as u64)
+            let r3: i32 = emit(p, n, cur, flags, &tmp, endp)
+            if r3 != cborread.CB_OK {
+                result = r3
+            } else {
+                cur = *endp
+                rt.st64(offs, i * 4 + 3, rt.buf_len(&tmp) as u64)
+            }
+        }
+        rt.st64(order, i, i as u64)
+        i = i + 1
+    }
+    if result == cborread.CB_OK {
+        let base: u64 = rt.buf_ptr(&tmp)
+        var a: usize = 1
+        while a < c {
+            let cur_idx: u64 = rt.ld64(order, a)
+            var b: usize = a
+            var go: bool = true
+            while b > 0 && go {
+                let prev_idx: u64 = rt.ld64(order, b - 1)
+                let cmp: i32 = cborread.key_cmp(base,
+                    rt.ld64(offs, (cur_idx * 4) as usize) as usize,
+                    rt.ld64(offs, (cur_idx * 4) as usize + 1) as usize,
+                    rt.ld64(offs, (prev_idx * 4) as usize) as usize,
+                    rt.ld64(offs, (prev_idx * 4) as usize + 1) as usize)
+                if cmp < 0 {
+                    rt.st64(order, b, prev_idx)
+                    b = b - 1
+                } else {
+                    go = false
+                }
+            }
+            rt.st64(order, b, cur_idx)
+            a = a + 1
+        }
+        var k: usize = 0
+        while k < c && result == cborread.CB_OK {
+            let idx: usize = rt.ld64(order, k) as usize
+            if k > 0 {
+                let pidx: usize = rt.ld64(order, k - 1) as usize
+                if cborread.key_cmp(base, rt.ld64(offs, pidx * 4) as usize,
+                    rt.ld64(offs, pidx * 4 + 1) as usize,
+                    rt.ld64(offs, idx * 4) as usize,
+                    rt.ld64(offs, idx * 4 + 1) as usize) == 0 {
+                    result = cborread.CB_E_DUPKEY
+                }
+            }
+            if result == cborread.CB_OK {
+                let ko: usize = rt.ld64(offs, idx * 4) as usize
+                let ke: usize = rt.ld64(offs, idx * 4 + 1) as usize
+                let vo: usize = rt.ld64(offs, idx * 4 + 2) as usize
+                let ve: usize = rt.ld64(offs, idx * 4 + 3) as usize
+                rt.buf_push_bytes(out, base + ko as u64, ke - ko)
+                rt.buf_push_bytes(out, base + vo as u64, ve - vo)
+            }
+            k = k + 1
+        }
+    }
+    if offs != 0 {
+        rt.heap_free(offs, c * 32)
+    }
+    if order != 0 {
+        rt.heap_free(order, c * 8)
+    }
+    rt.buf_free(&tmp)
+    if result == cborread.CB_OK {
+        *endp = cur
+    }
+    return result
+}
+
+fn canonicalize(p: u64, n: usize, flags: u64, maxd: usize, maxtotal: usize,
+    out: *mut rt.Buf) -> i32 {
+    let rc: i32 = cborread.validate_ex(p, n, flags | cborread.CB_LENIENT, maxd,
+        maxtotal)
+    if rc != cborread.CB_OK {
+        return rc
+    }
+    let start: usize = rt.buf_len(out)
+    var e: usize = 0
+    let r2: i32 = emit(p, n, 0, flags | cborread.CB_LENIENT, out, &e)
+    if r2 != cborread.CB_OK {
+        rt.buf_set_len(out, start)
+    }
+    return r2
+}

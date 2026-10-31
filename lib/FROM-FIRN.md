@@ -38,3 +38,12 @@ the pin already has `fui.cmdbar`, `fui.action` and `text.fuzzy`, which the toolk
 Gate: `bash tools/navlibs/run.sh` (byte comparison when the Firn repository is there, plus Firn's tests
 1933-1936 in `tests/navlibs/` built against `lib/` and run). Delete the mirror when the pin has moved
 past that commit.
+
+## `lib/std/{cbor,cborread,cborcanon,utf8}.fi` (MIRROR, 31.10.2026)
+
+Deterministic CBOR (RFC 8949 section 4.2, CTAP2 canonical): encoder `std.cbor`, strict decoder and validator
+`std.cborread` (shortest forms, definite lengths, UTF-8, sorted unique map keys, depth and size limits),
+`std.cborcanon` (re-sorts lenient maps), `std.utf8`. They are written for Firn (`lib/std/`) and mirrored here
+because the pin does not contain them yet; `$FIRNLIB` is searched before the pinned library. Gate:
+`bash tools/vaultlib/run.sh` (RFC 8949 Appendix A vectors, negative cases, fuzz). Delete the mirror when the pin has
+moved past the Firn commit that holds the files (roadmap: lift to Firn).

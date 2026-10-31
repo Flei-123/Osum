@@ -1,0 +1,267 @@
+import std.rt
+import std.testkit
+import std.cbor
+import std.cborread
+import std.cborcanon
+import cbor_helper
+
+fn check(h: str, flags: u64, want: i32) {
+    var b: rt.Buf = rt.buf_new()
+    cbor_helper.hex_to_buf(h, &b)
+    testkit.context(h)
+    testkit.assert_eq_i64(cborread.validate(rt.buf_ptr(&b), rt.buf_len(&b), flags) as i64,
+        want as i64)
+    rt.buf_free(&b)
+}
+
+fn canon_eq(h: str, want: str) {
+    var b: rt.Buf = rt.buf_new()
+    var out: rt.Buf = rt.buf_new()
+    cbor_helper.hex_to_buf(h, &b)
+    testkit.context(h)
+    let rc: i32 = cborcanon.canonicalize(rt.buf_ptr(&b), rt.buf_len(&b), 0, 8, 65536, &out)
+    testkit.assert_eq_i64(rc as i64, 0)
+    testkit.assert_true(cbor_helper.buf_hex_eq(&out, want), "canonical form differs")
+    rt.buf_free(&b)
+    rt.buf_free(&out)
+}
+
+#[test]
+fn non_shortest_forms_rejected() {
+    check("1800", 0, cborread.CB_E_NONCANON)
+    check("1817", 0, cborread.CB_E_NONCANON)
+    check("190000", 0, cborread.CB_E_NONCANON)
+    check("1900ff", 0, cborread.CB_E_NONCANON)
+    check("1a0000ffff", 0, cborread.CB_E_NONCANON)
+    check("1b00000000ffffffff", 0, cborread.CB_E_NONCANON)
+    check("3800", 0, cborread.CB_E_NONCANON)
+    check("5800", 0, cborread.CB_E_NONCANON)
+    check("7800", 0, cborread.CB_E_NONCANON)
+    check("9800", 0, cborread.CB_E_NONCANON)
+    check("b800", 0, cborread.CB_E_NONCANON)
+    check("1818", 0, 0)
+    check("19ffff", 0, 0)
+    check("1a00010000", 0, 0)
+    check("1b0000000100000000", 0, 0)
+}
+
+#[test]
+fn indefinite_and_reserved_rejected() {
+    check("5fff", 0, cborread.CB_E_INDEF)
+    check("7fff", 0, cborread.CB_E_INDEF)
+    check("9fff", 0, cborread.CB_E_INDEF)
+    check("bfff", 0, cborread.CB_E_INDEF)
+    check("ff", 0, cborread.CB_E_INDEF)
+    check("1c", 0, cborread.CB_E_TYPE)
+    check("1d", 0, cborread.CB_E_TYPE)
+    check("1e", 0, cborread.CB_E_TYPE)
+    check("fc", 0, cborread.CB_E_TYPE)
+    check("e0", 0, cborread.CB_E_TYPE)
+    check("f800", 0, cborread.CB_E_TYPE)
+    check("f820", 0, cborread.CB_E_TYPE)
+}
+
+#[test]
+fn truncation_and_trailing() {
+    check("", 0, cborread.CB_E_TRUNC)
+    check("18", 0, cborread.CB_E_TRUNC)
+    check("1b00", 0, cborread.CB_E_TRUNC)
+    check("62616", 0, cborread.CB_E_TRUNC)
+    check("6261", 0, cborread.CB_E_TRUNC)
+    check("5bffffffffffffffff", 0, cborread.CB_E_TRUNC)
+    check("9bffffffffffffffff", 0, cborread.CB_E_TRUNC)
+    check("bbffffffffffffffff", 0, cborread.CB_E_TRUNC)
+    check("9a7fffffff00", 0, cborread.CB_E_TRUNC)
+    check("a1", 0, cborread.CB_E_TRUNC)
+    check("a101", 0, cborread.CB_E_TRUNC)
+    check("8301", 0, cborread.CB_E_TRUNC)
+    check("0000", 0, cborread.CB_E_TRAILING)
+    check("80ff", 0, cborread.CB_E_TRAILING)
+}
+
+#[test]
+fn invalid_utf8_rejected() {
+    check("62c328", 0, cborread.CB_E_UTF8)
+    check("62c080", 0, cborread.CB_E_UTF8)
+    check("63e08080", 0, cborread.CB_E_UTF8)
+    check("63eda080", 0, cborread.CB_E_UTF8)
+    check("64f4908080", 0, cborread.CB_E_UTF8)
+    check("64f0808080", 0, cborread.CB_E_UTF8)
+    check("61ff", 0, cborread.CB_E_UTF8)
+    check("61c3", 0, cborread.CB_E_UTF8)
+    check("62c3bc", 0, 0)
+    check("63e6b0b4", 0, 0)
+    check("64f0908591", 0, 0)
+    check("64f48fbfbf", 0, 0)
+    check("43eda080", 0, 0)
+}
+
+#[test]
+fn map_key_order_and_duplicates() {
+    check("a201010202", 0, 0)
+    check("a202020101", 0, cborread.CB_E_ORDER)
+    check("a201010101", 0, cborread.CB_E_DUPKEY)
+    check("a202020101", cborread.CB_LENIENT, 0)
+    check("a3020101010201", cborread.CB_LENIENT, cborread.CB_E_DUPKEY)
+    check("a30201010102020101", cborread.CB_LENIENT, cborread.CB_E_DUPKEY)
+    check("a2616201616101", 0, cborread.CB_E_ORDER)
+    check("a2616101616201", 0, 0)
+}
+
+#[test]
+fn key_order_is_major_then_length_then_bytes() {
+    check("a300002000616100", 0, 0)
+    check("a21818002000", 0, 0)
+    check("a22000181800", 0, cborread.CB_E_ORDER)
+    check("a20a00181800", 0, 0)
+    check("a261620062616100", 0, 0)
+    check("a262616100616200", 0, cborread.CB_E_ORDER)
+    check("a262616100616200", cborread.CB_LENIENT, 0)
+}
+
+#[test]
+fn nesting_depth_limit() {
+    check("0000", 0, cborread.CB_E_TRAILING)
+    check("818181818181818100", 0, 0)
+    check("81818181818181818100", 0, cborread.CB_E_DEPTH)
+    var b: rt.Buf = rt.buf_new()
+    cbor_helper.hex_to_buf("81818181818181818100", &b)
+    testkit.assert_eq_i64(cborread.validate_ex(rt.buf_ptr(&b), rt.buf_len(&b), 0, 9,
+        65536) as i64, 0)
+    testkit.assert_eq_i64(cborread.validate_ex(rt.buf_ptr(&b), rt.buf_len(&b), 0, 64,
+        65536) as i64, 0)
+    rt.buf_clear(&b)
+    var i: usize = 0
+    while i < 200 {
+        rt.buf_push(&b, 129 as u8)
+        i = i + 1
+    }
+    rt.buf_push(&b, 0 as u8)
+    testkit.assert_eq_i64(cborread.validate_ex(rt.buf_ptr(&b), rt.buf_len(&b), 0, 1000,
+        65536) as i64, cborread.CB_E_DEPTH as i64)
+    rt.buf_free(&b)
+    check("c1c1c1c1c1c1c1c1c100", cborread.CB_TAG, cborread.CB_E_DEPTH)
+}
+
+#[test]
+fn total_size_limit() {
+    var b: rt.Buf = rt.buf_new()
+    cbor.put_array(&b, 70000)
+    var i: usize = 0
+    while i < 70000 {
+        rt.buf_push(&b, 0 as u8)
+        i = i + 1
+    }
+    testkit.assert_eq_i64(cborread.validate(rt.buf_ptr(&b), rt.buf_len(&b), 0) as i64,
+        cborread.CB_E_LIMIT as i64)
+    testkit.assert_eq_i64(cborread.validate_ex(rt.buf_ptr(&b), rt.buf_len(&b), 0, 8,
+        100000) as i64, 0)
+    rt.buf_free(&b)
+}
+
+#[test]
+fn lenient_map_entry_cap() {
+    var b: rt.Buf = rt.buf_new()
+    cbor.put_map(&b, 1025)
+    var i: usize = 1025
+    while i > 0 {
+        i = i - 1
+        cbor.put_uint(&b, i as u64)
+        cbor.put_uint(&b, 0)
+    }
+    testkit.assert_eq_i64(cborread.validate(rt.buf_ptr(&b), rt.buf_len(&b),
+        cborread.CB_LENIENT) as i64, cborread.CB_E_LIMIT as i64)
+    testkit.assert_eq_i64(cborread.validate(rt.buf_ptr(&b), rt.buf_len(&b), 0) as i64,
+        cborread.CB_E_ORDER as i64)
+    rt.buf_free(&b)
+}
+
+#[test]
+fn canonicalize_sorts_maps() {
+    canon_eq("a202020101", "a201010202")
+    canon_eq("a2616201616102", "a2616102616201")
+    canon_eq("a3616302616101616202", "a3616101616202616302")
+    canon_eq("a36161002000181800", "a31818002000616100")
+    canon_eq("82a202010101a203010201", "82a201010201a202010301")
+    canon_eq("a2a20201010100a1010105", "a2a1010105a20101020100")
+}
+
+#[test]
+fn canonicalize_rejects_duplicates_and_bad_input() {
+    var b: rt.Buf = rt.buf_new()
+    var out: rt.Buf = rt.buf_new()
+    cbor_helper.hex_to_buf("a30201010102020301" , &b)
+    testkit.assert_eq_i64(cborcanon.canonicalize(rt.buf_ptr(&b), rt.buf_len(&b), 0, 8,
+        65536, &out) as i64, cborread.CB_E_DUPKEY as i64)
+    testkit.assert_eq_i64(rt.buf_len(&out) as i64, 0)
+    rt.buf_clear(&b)
+    cbor_helper.hex_to_buf("a2020201", &b)
+    testkit.assert_eq_i64(cborcanon.canonicalize(rt.buf_ptr(&b), rt.buf_len(&b), 0, 8,
+        65536, &out) as i64, cborread.CB_E_TRUNC as i64)
+    testkit.assert_eq_i64(rt.buf_len(&out) as i64, 0)
+    rt.buf_free(&b)
+    rt.buf_free(&out)
+}
+
+#[test]
+fn map_lookup_by_int_and_text() {
+    var b: rt.Buf = rt.buf_new()
+    cbor.put_map(&b, 5)
+    cbor.put_uint(&b, 1)
+    cbor.put_text(&b, "x")
+    cbor.put_uint(&b, 2)
+    cbor.put_array(&b, 2)
+    cbor.put_uint(&b, 7)
+    cbor.put_map(&b, 1)
+    cbor.put_uint(&b, 1)
+    cbor.put_uint(&b, 9)
+    cbor.put_int(&b, -1)
+    cbor.put_uint(&b, 70000)
+    cbor.put_text(&b, "k")
+    cbor.put_bool(&b, true)
+    cbor.put_text(&b, "zz")
+    cbor.put_null(&b)
+    let p: u64 = rt.buf_ptr(&b)
+    let n: usize = rt.buf_len(&b)
+    testkit.assert_eq_i64(cborread.validate(p, n, 0) as i64, 0)
+    var it: cborread.Item = cborread.item_zero()
+    testkit.assert_eq_i64(cborread.map_find_int(p, n, 0, 1, &it) as i64, 0)
+    testkit.assert_true(cborread.item_text_eq(&it, "x"), "key 1")
+    testkit.assert_eq_i64(cborread.map_find_int(p, n, 0, -1, &it) as i64, 0)
+    testkit.assert_eq_u64(it.val, 70000)
+    testkit.assert_eq_i64(cborread.map_find_text(p, n, 0, "k", &it) as i64, 0)
+    testkit.assert_eq_u64(it.kind, cborread.K_TRUE)
+    testkit.assert_eq_i64(cborread.map_find_text(p, n, 0, "zz", &it) as i64, 0)
+    testkit.assert_eq_u64(it.kind, cborread.K_NULL)
+    testkit.assert_eq_i64(cborread.map_find_int(p, n, 0, 3, &it) as i64,
+        cborread.CB_E_NOTFOUND as i64)
+    testkit.assert_eq_i64(cborread.map_find_text(p, n, 0, "kk", &it) as i64,
+        cborread.CB_E_NOTFOUND as i64)
+    testkit.assert_eq_i64(cborread.map_find_int(p, n, 0, 2, &it) as i64, 0)
+    testkit.assert_eq_u64(it.kind, cborread.K_ARRAY)
+    var e: usize = 0
+    testkit.assert_eq_i64(cborread.item_end(p, n, it.start, &e) as i64, 0)
+    var inner: cborread.Item = cborread.item_zero()
+    testkit.assert_eq_i64(cborread.map_find_int(p + it.start as u64, e - it.start, 0, 1,
+        &inner) as i64, cborread.CB_E_TYPE as i64)
+    rt.buf_free(&b)
+}
+
+#[test]
+fn integer_helpers() {
+    var b: rt.Buf = rt.buf_new()
+    cbor_helper.hex_to_buf("3bffffffffffffffff", &b)
+    var it: cborread.Item = cborread.item_zero()
+    testkit.assert_eq_i64(cborread.read_head(rt.buf_ptr(&b), rt.buf_len(&b), 0, 0, &it) as i64, 0)
+    testkit.assert_false(cborread.item_fits_i64(&it), "min-1 does not fit")
+    rt.buf_clear(&b)
+    cbor_helper.hex_to_buf("3b7fffffffffffffff", &b)
+    testkit.assert_eq_i64(cborread.read_head(rt.buf_ptr(&b), rt.buf_len(&b), 0, 0, &it) as i64, 0)
+    testkit.assert_true(cborread.item_fits_i64(&it), "min fits")
+    testkit.assert_eq_i64(cborread.item_i64(&it), -9223372036854775807 - 1)
+    rt.buf_clear(&b)
+    cbor_helper.hex_to_buf("20", &b)
+    testkit.assert_eq_i64(cborread.read_head(rt.buf_ptr(&b), rt.buf_len(&b), 0, 0, &it) as i64, 0)
+    testkit.assert_eq_i64(cborread.item_i64(&it), -1)
+    rt.buf_free(&b)
+}

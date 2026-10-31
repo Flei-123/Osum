@@ -1,0 +1,95 @@
+import std.rt
+import std.cbor
+import std.cborread
+
+export { hex_to_buf, transcode, buf_hex_eq, nibble }
+
+fn nibble(c: u8) -> i32 {
+    if c >= 48 as u8 && c <= 57 as u8 {
+        return (c - 48 as u8) as i32
+    }
+    if c >= 97 as u8 && c <= 102 as u8 {
+        return (c - 97 as u8) as i32 + 10
+    }
+    return -1
+}
+
+fn hex_to_buf(s: str, out: *mut rt.Buf) {
+    var i: usize = 0
+    while i + 1 < s.n {
+        let hi: i32 = nibble(rt.ld8(s.p as u64, i))
+        let lo: i32 = nibble(rt.ld8(s.p as u64, i + 1))
+        rt.buf_push(out, (hi * 16 + lo) as u8)
+        i = i + 2
+    }
+}
+
+fn buf_hex_eq(b: *mut rt.Buf, s: str) -> bool {
+    var want: rt.Buf = rt.buf_new()
+    hex_to_buf(s, &want)
+    let same: bool = rt.buf_len(b) == rt.buf_len(&want)
+        && rt.mem_eq(rt.buf_ptr(b), rt.buf_ptr(&want), rt.buf_len(&want))
+    rt.buf_free(&want)
+    return same
+}
+
+fn transcode(p: u64, n: usize, pos: usize, flags: u64, out: *mut rt.Buf,
+    endp: *mut usize) -> i32 {
+    var it: cborread.Item = cborread.item_zero()
+    let rc: i32 = cborread.read_head(p, n, pos, flags, &it)
+    if rc != cborread.CB_OK {
+        return rc
+    }
+    var cur: usize = it.end
+    var children: u64 = 0
+    if it.kind == cborread.K_UINT {
+        cbor.put_uint(out, it.val)
+    }
+    if it.kind == cborread.K_NINT {
+        cbor.put_head(out, cbor.MAJ_NINT, it.val)
+    }
+    if it.kind == cborread.K_BYTES {
+        cbor.put_bytes(out, it.ptr, it.len)
+    }
+    if it.kind == cborread.K_TEXT {
+        cbor.put_text_raw(out, it.ptr, it.len)
+    }
+    if it.kind == cborread.K_ARRAY {
+        cbor.put_array(out, it.val as usize)
+        children = it.val
+    }
+    if it.kind == cborread.K_MAP {
+        cbor.put_map(out, it.val as usize)
+        children = it.val * 2
+    }
+    if it.kind == cborread.K_TAG {
+        cbor.put_tag(out, it.val)
+        children = 1
+    }
+    if it.kind == cborread.K_FALSE {
+        cbor.put_bool(out, false)
+    }
+    if it.kind == cborread.K_TRUE {
+        cbor.put_bool(out, true)
+    }
+    if it.kind == cborread.K_NULL {
+        cbor.put_null(out)
+    }
+    if it.kind == cborread.K_UNDEF {
+        cbor.put_undefined(out)
+    }
+    if it.kind == cborread.K_FLOAT {
+        rt.buf_push_bytes(out, p + pos as u64, it.end - pos)
+    }
+    var i: u64 = 0
+    while i < children {
+        let r2: i32 = transcode(p, n, cur, flags, out, endp)
+        if r2 != cborread.CB_OK {
+            return r2
+        }
+        cur = *endp
+        i = i + 1
+    }
+    *endp = cur
+    return cborread.CB_OK
+}

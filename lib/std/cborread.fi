@@ -1,0 +1,431 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.utf8
+
+export { Item, item_zero, read_head, validate, validate_ex, item_end, key_cmp,
+    map_find_int, map_find_text, item_fits_i64, item_i64, item_text_eq,
+    CB_OK, CB_E_TRUNC, CB_E_DEPTH, CB_E_LIMIT, CB_E_NONCANON, CB_E_INDEF,
+    CB_E_DUPKEY, CB_E_ORDER, CB_E_TYPE, CB_E_TRAILING, CB_E_UTF8,
+    CB_E_NOTFOUND, CB_FLOAT, CB_TAG, CB_LENIENT, CB_DEFAULT_DEPTH,
+    CB_DEFAULT_TOTAL, CB_LENIENT_MAP_MAX, K_UINT, K_NINT, K_BYTES, K_TEXT,
+    K_ARRAY, K_MAP, K_TAG, K_FALSE, K_TRUE, K_NULL, K_UNDEF, K_FLOAT }
+
+const CB_OK: i32 = 0
+const CB_E_TRUNC: i32 = 1
+const CB_E_DEPTH: i32 = 2
+const CB_E_LIMIT: i32 = 3
+const CB_E_NONCANON: i32 = 4
+const CB_E_INDEF: i32 = 5
+const CB_E_DUPKEY: i32 = 6
+const CB_E_ORDER: i32 = 7
+const CB_E_TYPE: i32 = 8
+const CB_E_TRAILING: i32 = 9
+const CB_E_UTF8: i32 = 10
+const CB_E_NOTFOUND: i32 = 11
+
+const CB_FLOAT: u64 = 1
+const CB_TAG: u64 = 2
+const CB_LENIENT: u64 = 4
+
+const CB_DEFAULT_DEPTH: usize = 8
+const CB_DEFAULT_TOTAL: usize = 65536
+const CB_LENIENT_MAP_MAX: usize = 1024
+const CB_HARD_DEPTH: usize = 64
+
+const K_UINT: u64 = 0
+const K_NINT: u64 = 1
+const K_BYTES: u64 = 2
+const K_TEXT: u64 = 3
+const K_ARRAY: u64 = 4
+const K_MAP: u64 = 5
+const K_TAG: u64 = 6
+const K_FALSE: u64 = 7
+const K_TRUE: u64 = 8
+const K_NULL: u64 = 9
+const K_UNDEF: u64 = 10
+const K_FLOAT: u64 = 11
+
+const NAV_FLAGS: u64 = 7
+
+struct Item {
+    kind: u64,
+    val: u64,
+    ptr: u64,
+    len: usize,
+    start: usize,
+    end: usize,
+}
+
+fn item_zero() -> Item {
+    return Item { kind: 0, val: 0, ptr: 0, len: 0, start: 0, end: 0 }
+}
+
+fn read_be(p: u64, pos: usize, k: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < k {
+        v = (v << 8) | (rt.ld8(p, pos + i) as u64)
+        i = i + 1
+    }
+    return v
+}
+
+fn read_head(p: u64, n: usize, pos: usize, flags: u64, it: *mut Item) -> i32 {
+    if pos >= n {
+        return CB_E_TRUNC
+    }
+    let ib: u8 = rt.ld8(p, pos)
+    let major: u64 = (ib >> 5 as u8) as u64
+    let ai: u64 = (ib & 31 as u8) as u64
+    var cur: usize = pos + 1
+    var arg: u64 = ai
+    var wide: usize = 0
+    if ai == 24 {
+        wide = 1
+    }
+    if ai == 25 {
+        wide = 2
+    }
+    if ai == 26 {
+        wide = 4
+    }
+    if ai == 27 {
+        wide = 8
+    }
+    if ai >= 28 {
+        if ai == 31 {
+            return CB_E_INDEF
+        }
+        return CB_E_TYPE
+    }
+    if wide > 0 {
+        if cur + wide > n {
+            return CB_E_TRUNC
+        }
+        arg = read_be(p, cur, wide)
+        cur = cur + wide
+        if major != 7 {
+            if wide == 1 && arg < 24 {
+                return CB_E_NONCANON
+            }
+            if wide == 2 && arg < 256 {
+                return CB_E_NONCANON
+            }
+            if wide == 4 && arg < 65536 {
+                return CB_E_NONCANON
+            }
+            if wide == 8 && arg < 4294967296 {
+                return CB_E_NONCANON
+            }
+        }
+    }
+    (*it).start = pos
+    (*it).end = cur
+    (*it).val = arg
+    (*it).ptr = 0
+    (*it).len = 0
+    let rem: usize = n - cur
+    if major == 0 {
+        (*it).kind = K_UINT
+        return CB_OK
+    }
+    if major == 1 {
+        (*it).kind = K_NINT
+        return CB_OK
+    }
+    if major == 2 || major == 3 {
+        if arg > rem as u64 {
+            return CB_E_TRUNC
+        }
+        if major == 2 {
+            (*it).kind = K_BYTES
+        } else {
+            (*it).kind = K_TEXT
+            if !utf8.utf8_valid(p + cur as u64, arg as usize) {
+                return CB_E_UTF8
+            }
+        }
+        (*it).ptr = p + cur as u64
+        (*it).len = arg as usize
+        (*it).end = cur + arg as usize
+        return CB_OK
+    }
+    if major == 4 {
+        if arg > rem as u64 {
+            return CB_E_TRUNC
+        }
+        (*it).kind = K_ARRAY
+        return CB_OK
+    }
+    if major == 5 {
+        if arg > (rem / 2) as u64 {
+            return CB_E_TRUNC
+        }
+        (*it).kind = K_MAP
+        return CB_OK
+    }
+    if major == 6 {
+        if (flags & CB_TAG) == 0 {
+            return CB_E_TYPE
+        }
+        (*it).kind = K_TAG
+        return CB_OK
+    }
+    if wide == 0 {
+        if ai == 20 {
+            (*it).kind = K_FALSE
+            return CB_OK
+        }
+        if ai == 21 {
+            (*it).kind = K_TRUE
+            return CB_OK
+        }
+        if ai == 22 {
+            (*it).kind = K_NULL
+            return CB_OK
+        }
+        if ai == 23 {
+            (*it).kind = K_UNDEF
+            return CB_OK
+        }
+        return CB_E_TYPE
+    }
+    if wide == 1 {
+        return CB_E_TYPE
+    }
+    if (flags & CB_FLOAT) == 0 {
+        return CB_E_TYPE
+    }
+    (*it).kind = K_FLOAT
+    (*it).len = wide * 8
+    return CB_OK
+}
+
+fn key_cmp(p: u64, a: usize, ae: usize, b: usize, be: usize) -> i32 {
+    let la: usize = ae - a
+    let lb: usize = be - b
+    var m: usize = la
+    if lb < m {
+        m = lb
+    }
+    var i: usize = 0
+    while i < m {
+        let x: u8 = rt.ld8(p, a + i)
+        let y: u8 = rt.ld8(p, b + i)
+        if x < y {
+            return -1
+        }
+        if x > y {
+            return 1
+        }
+        i = i + 1
+    }
+    if la < lb {
+        return -1
+    }
+    if la > lb {
+        return 1
+    }
+    return 0
+}
+
+fn walk(p: u64, n: usize, pos: usize, flags: u64, depth: usize, maxd: usize,
+    endp: *mut usize) -> i32 {
+    var it: Item = item_zero()
+    let rc: i32 = read_head(p, n, pos, flags, &it)
+    if rc != CB_OK {
+        return rc
+    }
+    if it.kind != K_ARRAY && it.kind != K_MAP && it.kind != K_TAG {
+        *endp = it.end
+        return CB_OK
+    }
+    if depth >= maxd {
+        return CB_E_DEPTH
+    }
+    var cur: usize = it.end
+    if it.kind == K_TAG {
+        let rt1: i32 = walk(p, n, cur, flags, depth + 1, maxd, endp)
+        return rt1
+    }
+    if it.kind == K_ARRAY {
+        var i: u64 = 0
+        while i < it.val {
+            let r2: i32 = walk(p, n, cur, flags, depth + 1, maxd, endp)
+            if r2 != CB_OK {
+                return r2
+            }
+            cur = *endp
+            i = i + 1
+        }
+        *endp = cur
+        return CB_OK
+    }
+    let lenient: bool = (flags & CB_LENIENT) != 0
+    if lenient && it.val > CB_LENIENT_MAP_MAX as u64 {
+        return CB_E_LIMIT
+    }
+    var keys: u64 = 0
+    if lenient && it.val > 0 {
+        keys = rt.heap_alloc((it.val * 16) as usize)
+        if keys == 0 {
+            return CB_E_LIMIT
+        }
+    }
+    var result: i32 = CB_OK
+    var prev_s: usize = 0
+    var prev_e: usize = 0
+    var i: u64 = 0
+    while i < it.val && result == CB_OK {
+        let ks: usize = cur
+        let r3: i32 = walk(p, n, cur, flags, depth + 1, maxd, endp)
+        if r3 != CB_OK {
+            result = r3
+        } else {
+            let ke: usize = *endp
+            if i > 0 {
+                let c: i32 = key_cmp(p, prev_s, prev_e, ks, ke)
+                if c == 0 {
+                    result = CB_E_DUPKEY
+                }
+                if c > 0 && !lenient {
+                    result = CB_E_ORDER
+                }
+            }
+            if result == CB_OK && lenient {
+                var j: u64 = 0
+                while j < i && result == CB_OK {
+                    let js: usize = rt.ld64(keys, (j * 2) as usize) as usize
+                    let je: usize = rt.ld64(keys, (j * 2 + 1) as usize) as usize
+                    if key_cmp(p, js, je, ks, ke) == 0 {
+                        result = CB_E_DUPKEY
+                    }
+                    j = j + 1
+                }
+                rt.st64(keys, (i * 2) as usize, ks as u64)
+                rt.st64(keys, (i * 2 + 1) as usize, ke as u64)
+            }
+            prev_s = ks
+            prev_e = ke
+            if result == CB_OK {
+                let r4: i32 = walk(p, n, ke, flags, depth + 1, maxd, endp)
+                if r4 != CB_OK {
+                    result = r4
+                } else {
+                    cur = *endp
+                }
+            }
+        }
+        i = i + 1
+    }
+    if keys != 0 {
+        rt.heap_free(keys, (it.val * 16) as usize)
+    }
+    if result == CB_OK {
+        *endp = cur
+    }
+    return result
+}
+
+fn validate_ex(p: u64, n: usize, flags: u64, maxd: usize, maxtotal: usize) -> i32 {
+    if n > maxtotal {
+        return CB_E_LIMIT
+    }
+    var md: usize = maxd
+    if md > CB_HARD_DEPTH {
+        md = CB_HARD_DEPTH
+    }
+    var e: usize = 0
+    let rc: i32 = walk(p, n, 0, flags, 0, md, &e)
+    if rc != CB_OK {
+        return rc
+    }
+    if e != n {
+        return CB_E_TRAILING
+    }
+    return CB_OK
+}
+
+fn validate(p: u64, n: usize, flags: u64) -> i32 {
+    return validate_ex(p, n, flags, CB_DEFAULT_DEPTH, CB_DEFAULT_TOTAL)
+}
+
+fn item_end(p: u64, n: usize, pos: usize, endp: *mut usize) -> i32 {
+    return walk(p, n, pos, NAV_FLAGS, 0, CB_HARD_DEPTH, endp)
+}
+
+fn item_fits_i64(it: *mut Item) -> bool {
+    if (*it).kind != K_UINT && (*it).kind != K_NINT {
+        return false
+    }
+    return (*it).val <= 9223372036854775807
+}
+
+fn item_i64(it: *mut Item) -> i64 {
+    if (*it).kind == K_NINT {
+        return -1 - ((*it).val as i64)
+    }
+    return (*it).val as i64
+}
+
+fn item_text_eq(it: *mut Item, s: str) -> bool {
+    if (*it).kind != K_TEXT || (*it).len != s.n {
+        return false
+    }
+    return rt.mem_eq((*it).ptr, s.p as u64, s.n)
+}
+
+fn map_find_with(p: u64, n: usize, pos: usize, want_int: bool, ikey: i64,
+    tkey: str, found: *mut Item) -> i32 {
+    var m: Item = item_zero()
+    let rc: i32 = read_head(p, n, pos, NAV_FLAGS, &m)
+    if rc != CB_OK {
+        return rc
+    }
+    if m.kind != K_MAP {
+        return CB_E_TYPE
+    }
+    var cur: usize = m.end
+    var e: usize = 0
+    var i: u64 = 0
+    while i < m.val {
+        var k: Item = item_zero()
+        let r1: i32 = read_head(p, n, cur, NAV_FLAGS, &k)
+        if r1 != CB_OK {
+            return r1
+        }
+        let r2: i32 = walk(p, n, cur, NAV_FLAGS, 0, CB_HARD_DEPTH, &e)
+        if r2 != CB_OK {
+            return r2
+        }
+        cur = e
+        var hit: bool = false
+        if want_int {
+            if item_fits_i64(&k) && item_i64(&k) == ikey {
+                hit = true
+            }
+        } else {
+            if item_text_eq(&k, tkey) {
+                hit = true
+            }
+        }
+        if hit {
+            return read_head(p, n, cur, NAV_FLAGS, found)
+        }
+        let r3: i32 = walk(p, n, cur, NAV_FLAGS, 0, CB_HARD_DEPTH, &e)
+        if r3 != CB_OK {
+            return r3
+        }
+        cur = e
+        i = i + 1
+    }
+    return CB_E_NOTFOUND
+}
+
+fn map_find_int(p: u64, n: usize, pos: usize, key: i64, found: *mut Item) -> i32 {
+    return map_find_with(p, n, pos, true, key, "", found)
+}
+
+fn map_find_text(p: u64, n: usize, pos: usize, key: str, found: *mut Item) -> i32 {
+    return map_find_with(p, n, pos, false, 0, key, found)
+}
