@@ -76,7 +76,7 @@ export {
     save_applied, set_saved, set_save_why, set_applied,
     SW_OK, SW_KEINE, SW_BROKEN, SW_OPEN, SW_ABGELEHNT, SW_OFF,
     poll, switches, fails, reverts, confirms, CONFIRM_MS,
-    lut_addr, set_picture, brightness, contrast, gamma, build_lut,
+    lut_addr, set_picture, brightness, contrast, gamma, build_lut, night, set_night, picture_neutral,
     selftest, selftest_max,
     parse, mode, want,
     M_DISP, M_BIG, M_BACK, M_BAD, M_BENCH, M_ROT, M_CONFIRM, M_EDID, M_DESKROT1, M_DESKROT2, M_DESKROT3,
@@ -140,6 +140,10 @@ const S_GAMMA: u64 = 0x0D8 // 30..300, 100 = 1,00
 const S_MAPLIMIT: u64 = 0x0E0
 const S_UNMAPPABLE: u64 = 0x0E8
 const S_MODEBITS: u64 = 0x0F0
+const S_NIGHT: u64 = 0x200
+const NIGHT_G_DROP: u64 = 35
+const NIGHT_B_DROP: u64 = 70
+const NIGHT_MAX: u64 = 100
 
 // ===================================================== RUNDE CUSTOMRES
 //
@@ -2083,11 +2087,40 @@ fn clamp255(v: u64) -> u64 {
 // Drei getrennte Kanaele stehen trotzdem da -- eine Farbstichkorrektur
 // waere genau die Stelle, an der sie auseinanderlaufen, und dann muesste
 // nichts umgebaut werden.
+fn night(state: u64) -> u64 {
+    return g(state, S_NIGHT)
+}
+
+fn picture_neutral(state: u64) -> bool {
+    if g(state, S_NIGHT) != 0 {
+        return false
+    }
+    return g(state, S_BRIGHT) == 100 && g(state, S_CONTRAST) == 100
+        && g(state, S_GAMMA) == 100
+}
+
+fn set_night(state: u64, strength: u64) -> bool {
+    if strength > NIGHT_MAX {
+        return false
+    }
+    s(state, S_NIGHT, strength)
+    build_lut(state)
+    return true
+}
+
 fn build_lut(state: u64) {
     let tab: u64 = lut_addr(state)
-    let br: u64 = g(state, S_BRIGHT)
-    let ct: u64 = g(state, S_CONTRAST)
-    let gm: u64 = g(state, S_GAMMA)
+    var br: u64 = g(state, S_BRIGHT)
+    var ct: u64 = g(state, S_CONTRAST)
+    var gm: u64 = g(state, S_GAMMA)
+    if br == 0 && ct == 0 && gm == 0 {
+        br = 100
+        ct = 100
+        gm = 100
+    }
+    let nt: u64 = g(state, S_NIGHT)
+    let gain_g: u64 = 100 - nt * NIGHT_G_DROP / 100
+    let gain_b: u64 = 100 - nt * NIGHT_B_DROP / 100
     var i: u64 = 0
     while i < 256 {
         // 1. Kontrast um 128 herum.
@@ -2106,8 +2139,8 @@ fn build_lut(state: u64) {
         // 3. Gamma.
         let e: u64 = clamp255(ipow_frac(v, gm))
         kstate.set8(tab + i, e as u8)
-        kstate.set8(tab + 256 + i, e as u8)
-        kstate.set8(tab + 512 + i, e as u8)
+        kstate.set8(tab + 256 + i, (e * gain_g / 100) as u8)
+        kstate.set8(tab + 512 + i, (e * gain_b / 100) as u8)
         i = i + 1
     }
 }
