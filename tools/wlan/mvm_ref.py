@@ -45,5 +45,8 @@ out['sr7'] = hdr(0x0d, 0, 16) + head7 + chcfg + tail
 out['sab'] = hdr(0x0e, 0, 14) + struct.pack('<II', 5, 0)
 txc = struct.pack('<HHIIIBBBB', 30, 0, 0x8 | 0x2000, 0, 0x4001, 1, 0, 0, 0) + key + struct.pack('<IIIBBBBHH', 0, 0xFFFF, 0x34ABCD00, 0x12, 15, 7, 0, 0, 0)
 out['tx'] = hdr(0x1c, 2, 15) + txc + frame
-for k in ['nvm', 'phy', 'pc3', 'sfc', 'btc', 'ant', 'ctx', 'ctw', 'sta', 'key', 'gkey', 'mac', 'bnd', 'scf', 'srq', 'sr7', 'sab', 'tx']:
+out['aux'] = hdr(0x18, 0, 11) + struct.pack('<BBHI6sHBBHIIBBHHBBHHIHBB', 0, 0, 0xFFFF, 4, bytes(6), 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0x2, 0, 0, 0)
+assert len(out['aux']) == 4 + 48
+out['dqa'] = struct.pack('<BBHHBB', 0x00, 5, 12, 4, 0, 0) + struct.pack('<I', 0)
+for k in ['aux', 'dqa', 'nvm', 'phy', 'pc3', 'sfc', 'btc', 'ant', 'ctx', 'ctw', 'sta', 'key', 'gkey', 'mac', 'bnd', 'scf', 'srq', 'sr7', 'sab', 'tx']:
     print(k, out[k].hex())
