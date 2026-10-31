@@ -87,6 +87,8 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmdamage
+import ui.wm.wmgate
 import ui.wm.wmdraw
 import ui.wm.wmmag
 import ui.wm.wmoverlay
@@ -112,7 +114,7 @@ import sched.sched // docs/COMPOSITOR.md S5: the compositor's wake-up (poll_kick
 import fs.unixsock // docs/COMPOSITOR.md S3: a window buffer may be a shared memory object (memfd) the client paints into
 
 export {
-    sperre_an, sperrer, lock_space, darf, input_seen,
+    sperre_an, lock_space, darf, input_seen,
     trust_ask, trust_poll, trust_cancel,
     init, compose, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
@@ -164,7 +166,7 @@ export {
     riss_y0, riss_y1, riss_frame, verworfen,
     before_t0, set_before_t0, before_step, set_before_step, before_win, set_before_win,
     AN_OPEN, AN_CLOSE, AN_MIN, MOTION_DEF, SIG_H,
-    fill, text, flush_win, hit,
+    fill, text, flush_win,
     ev_push, ev_pop, ev_waiting,
     on_mouse, on_key, term_write, term_out, term_hold, term_release, term_cols, term_rows, term_cx, term_cy,
     term_cellw, term_cellh, term_asc, term_px,
@@ -190,7 +192,6 @@ export {
     win_paints, win_px, win_flags, top_layer_win, wins_say,
     E_KEY, E_DOWN, E_UP, E_CLOSE, E_AXPRESS, swipe_do, swipes_done, hw_demo,
     say_mag,
-    M_SHIFT, M_CTRL,
     L_DESK, L_NORMAL, L_TOAST, L_FLOAT, L_MAX, layer_rank,
     F_HIDDEN, F_NODECO,
     EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT,
@@ -266,6 +267,19 @@ fn text(state: u64, i: u64, f: u64, px: u64, x: i64, y: i64, p: u64,
     n: u64, color: u64) -> i64 {
     return wmdraw.text(state, i, f, px, x, y, p, n, color)
 }
+
+fn darf(state: u64, i: u64) -> bool {
+    return wmgate.darf(state, i)
+}
+
+fn lock_space(state: u64) -> u64 {
+    return wmgate.lock_space(state)
+}
+
+fn sperre_an(state: u64) -> bool {
+    return wmgate.sperre_an(state)
+}
+
 
 const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
 const EV_SLOTS: u64 = 32
@@ -506,7 +520,7 @@ fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
                     wmdraw.fill(state, k, 0, 0, wmlayout.wg(state, k, wmlayout.W_W),
                         wmlayout.wg(state, k, wmlayout.W_H), wmbase.deco(state, wmlayout.DK_TERM_BG))
                     term_redraw(state, k)
-                    damage_win(state, k)
+                    wmdamage.damage_win(state, k)
                 }
             }
             k = k + 1
@@ -1456,62 +1470,6 @@ fn box_take(state: u64, out: u64) -> bool {
     return true
 }
 
-// RUNDE PAINT: DER SCHATTEN GEHOERT ZUM SCHMUTZ.
-//
-// Ein Schatten liegt AUSSERHALB des Fensterrechtecks. Meldet ein
-// Fenster beim Verschieben nur sein eigenes Rechteck als geaendert,
-// bleibt der alte Schatten stehen -- eine Spur aus grauen Raendern
-// quer ueber den Schreibtisch. Der erste Entwurf dieser Runde tat
-// genau das, und man sah es sofort.
-//
-// Also: der schmutzige Bereich waechst um die Reichweite des Schattens,
-// und zwar auf ALLEN VIER SEITEN. Unten und rechts reicht er weiter
-// (der Schatten sitzt einen Bildpunkt tiefer), oben und links wird
-// trotzdem dieselbe Zahl genommen -- ein Bereich, der einen Bildpunkt
-// zu gross ist, kostet eine Bildzeile; einer, der einen zu klein ist,
-// kostet eine sichtbare Kante.
-fn damage_win(state: u64, i: u64) {
-    damage_win_ex(state, i, 0)
-}
-
-fn damage_win_ex(state: u64, i: u64, skip: u64) {
-    // RUNDE GLAS: DIESE EINE STELLE SAGT DEM MILCHGLAS, DASS SICH SEIN
-    // UNTERGRUND GEAENDERT HAT. `flush_win`, `move_win`, `resize_win`,
-    // `raise_win` und `destroy` laufen alle hier durch -- es gibt also
-    // keine zweite Stelle, an der ein Fenster sich ruehren koennte.
-    glass_touch(state, i)
-    // RUNDE SOFTUI: DIE GROESSERE DER BEIDEN REICHWEITEN.
-    //
-    // Es gibt jetzt zwei Schatten -- einen unter dem scharfen Fenster
-    // und einen flacheren unter den uebrigen -- und ein Fenster
-    // WECHSELT zwischen ihnen. Der schmutzige Bereich muss deshalb den
-    // groesseren der beiden fassen, sonst bleibt beim Fokuswechsel der
-    // Rest des tieferen Schattens als grauer Saum stehen. Genau diese
-    // Sorte Spur hat Runde PAINT schon einmal gejagt.
-    var r: i64 = wmgeom.form(state, wmlayout.FM_SHADOW_R) as i64
-    let r2: i64 = wmgeom.form(state, wmlayout.FM_SHADOW_R2) as i64
-    if r2 > r {
-        r = r2
-    }
-    if wmgeom.form(state, wmlayout.FM_SHADOW) == 0 && wmgeom.form(state, wmlayout.FM_SHADOW2) == 0 {
-        r = 0
-    }
-    if !wmbase.deko(state, i) {
-        r = 0
-    }
-    var x0: i64 = wmbase.win_x(state, i) - r
-    var y0: i64 = wmbase.win_y(state, i) - r
-    if x0 < 0 {
-        x0 = 0
-    }
-    if y0 < 0 {
-        y0 = 0
-    }
-    wmbase.damage_ex(state, x0, y0,
-        wmbase.win_x(state, i) + wmbase.outer_w(state, i) as i64 + r + 1,
-        wmbase.win_y(state, i) + wmbase.outer_h(state, i) as i64 + r + 1, skip)
-}
-
 fn dirty_x0(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_DX0)
 }
@@ -1670,7 +1628,7 @@ fn create_ex(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
                 term_setup(state, i)
             }
             set_focus(state, i)
-            damage_win(state, i)
+            wmdamage.damage_win(state, i)
             if wmlayout.gs(state, wmlayout.S_TILE) != 0 {
                 save_geom(state, i)
                 tile_take(state, i)
@@ -1742,7 +1700,7 @@ fn destroy(state: u64, i: u64) -> bool {
     frameprof.reset(i)
     tt_forget(state, i)
     tile_release(state, i)
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
     wmplug.notify(state, wmplug.E_WIN_CLOSE, wmlayout.wg(state, i, wmlayout.W_ID), 0, 0)
     // Stirbt der Prozess EINES PLUGINS, faellt sein Fenster hier durch.
     // Der Platz in der Plugintafel haengt aber am Prozess und nicht am
@@ -2056,7 +2014,7 @@ fn move_to_z(state: u64, i: u64, ziel: u64) {
         k = k + 1
     }
     wmlayout.wsv(state, i, wmlayout.W_Z, ziel)
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
 }
 
 // HEBEN HEISST SEIT DER RUNDE DESKTOP: an die Oberkante SEINER EBENE.
@@ -2176,7 +2134,7 @@ fn set_hidden(state: u64, i: u64, h: bool) {
         if wmlayout.wg(state, i, wmlayout.W_STRUT) != 0 {
             recalc_work(state)
         }
-        damage_win(state, i)
+        wmdamage.damage_win(state, i)
         if wmbase.focus(state) == i {
             wmlayout.ss(state, wmlayout.S_FOCUS, 0)
             let o: u64 = top_visible(state)
@@ -2203,7 +2161,7 @@ fn set_hidden(state: u64, i: u64, h: bool) {
         if wmlayout.wg(state, i, wmlayout.W_STRUT) != 0 {
             recalc_work(state)
         }
-        damage_win(state, i)
+        wmdamage.damage_win(state, i)
     }
 }
 
@@ -2212,13 +2170,13 @@ fn set_deco(state: u64, i: u64, on: bool) {
         return
     }
     let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
-    damage_win(state, i) // das ALTE Rechteck, samt Rahmen
+    wmdamage.damage_win(state, i) // das ALTE Rechteck, samt Rahmen
     if on {
         wmlayout.wsv(state, i, wmlayout.W_FLAGS, f & ~wmlayout.F_NODECO)
     } else {
         wmlayout.wsv(state, i, wmlayout.W_FLAGS, f | wmlayout.F_NODECO)
     }
-    damage_win(state, i) // und das neue, ohne
+    wmdamage.damage_win(state, i) // und das neue, ohne
 }
 
 fn work_x(state: u64) -> u64 {
@@ -3507,7 +3465,7 @@ fn set_focus(state: u64, i: u64) {
     }
     popups_dismiss_on_focus(state, i)
     if alt < wmbase.MAX_WIN {
-        damage_win(state, alt)
+        wmdamage.damage_win(state, alt)
         ev_push(state, alt, wmlayout.E_FOCUS, 0, 0, 0)
     }
     if alt < wmbase.MAX_WIN {
@@ -3554,7 +3512,7 @@ fn set_focus(state: u64, i: u64) {
         tl_sel(state, nd_tag(wmlayout.wg(state, i, wmlayout.W_NODE)))
         tile.set_focus(tt(state), nd_node(wmlayout.wg(state, i, wmlayout.W_NODE)))
     }
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
 }
 
 fn move_win(state: u64, i: u64, x: i64, y: i64) {
@@ -3572,14 +3530,14 @@ fn move_win(state: u64, i: u64, x: i64, y: i64) {
     if hebt {
         damage_win_lift(state, i)
     } else {
-        damage_win(state, i) // die alte Stelle wird wiederhergestellt
+        wmdamage.damage_win(state, i) // die alte Stelle wird wiederhergestellt
     }
     wmlayout.wsv(state, i, wmlayout.W_X, x as u64)
     wmlayout.wsv(state, i, wmlayout.W_Y, y as u64)
     if hebt {
         damage_win_lift(state, i)
     } else {
-        damage_win(state, i) // und die neue gemalt
+        wmdamage.damage_win(state, i) // und die neue gemalt
     }
     unter_leiste_messen(state, i)
 }
@@ -3753,7 +3711,7 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
         wmlayout.wsv(state, i, wmlayout.W_BUF, neu)
         wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, rahmen * mem.FRAME_SIZE)
     }
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
     wmlayout.wsv(state, i, wmlayout.W_W, w)
     wmlayout.wsv(state, i, wmlayout.W_H, h)
     // r1061: any resize (user, program, screen fit) drops the remembered pre-shrink size; screen_fit_windows sets it again afterwards
@@ -3771,7 +3729,7 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
         wmdraw.fill(state, i, 0, 0, w, h, wmlayout.wg(state, i, wmlayout.W_BG))
     }
     ev_push(state, i, wmlayout.E_RESIZE, w, h, 0)
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
     return true
 }
 
@@ -3949,7 +3907,7 @@ fn attach_buf(state: u64, i: u64, sbase: u64, sbytes: u64, sidx: u64) -> bool {
     wmlayout.wsv(state, i, wmlayout.W_BUF, sbase)
     wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, sbytes)
     wmlayout.ss(state, wmlayout.S_SH_ATT, wmlayout.gs(state, wmlayout.S_SH_ATT) + 1)
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
     return true
 }
 
@@ -4154,7 +4112,7 @@ fn tab_publish(state: u64) {
                 var t2: u64 = 0
                 var t3: u64 = 0
                 var mk: u64 = 0
-                if !sperre_an(state) {
+                if !wmgate.sperre_an(state) {
                     let tp: u64 = state + wmlayout.wat(i) + wmlayout.W_TITLE
                     t0 = __mmio_read64(tp as *mut u64)
                     t1 = __mmio_read64((tp + 8) as *mut u64)
@@ -4240,7 +4198,7 @@ fn tab_publish(state: u64) {
     tw(f, 5, wmlayout.gs(state, wmlayout.S_COMPOSITES))
     tw(f, 6, TAB_ROW)
     var lk: u64 = 0
-    if sperre_an(state) {
+    if wmgate.sperre_an(state) {
         lk = 1
     }
     tw(f, 7, lk)
@@ -4378,7 +4336,7 @@ fn cp_sync(state: u64) {
     tw(f, 9, wmlayout.gs(state, wmlayout.S_CP_X1))
     tw(f, 10, wmlayout.gs(state, wmlayout.S_CP_Y1))
     var lk: u64 = 0
-    if sperre_an(state) {
+    if wmgate.sperre_an(state) {
         lk = 1
     }
     tw(f, 11, lk)
@@ -5075,7 +5033,7 @@ fn cp_event(state: u64, typ: u64, mods: u64, btn: u64, x: u64, y: u64, code: u64
     if f == 0 || wmlayout.gs(state, wmlayout.S_CP_TASK) == 0 {
         return
     }
-    if sperre_an(state) || td_live(state) {
+    if wmgate.sperre_an(state) || td_live(state) {
         wmlayout.ss(state, wmlayout.S_CP_EVREF, wmlayout.gs(state, wmlayout.S_CP_EVREF) + 1)
         return
     }
@@ -5225,7 +5183,7 @@ fn flush_win(state: u64, i: u64) {
         return
     }
     // the client painted new contents: its own blur (made from what is under it) is still good
-    damage_win_ex(state, i, i + 1)
+    wmdamage.damage_win_ex(state, i, i + 1)
 }
 
 // ------------------------------------------------- das Zusammensetzen
@@ -5419,12 +5377,12 @@ fn margin_cursor(state: u64, i: u64, x: i64, y: i64) {
         shape_intern(state, cursor.F_CROSS)
         return
     }
-    if dnd_forbidden(state, i) { // W-DND: nobody takes a drop here
+    if wmgate.dnd_forbidden(state, i) { // W-DND: nobody takes a drop here
         shape_intern(state, cursor.F_NO)
         return
     }
-    if dh_live != 0 { // W-DND: Ctrl = copy (plus), otherwise move (drop arrow)
-        if (mods_of(state) & M_CTRL) != 0 {
+    if wmgate.dh_live != 0 { // W-DND: Ctrl = copy (plus), otherwise move (drop arrow)
+        if (wmgate.mods_of(state) & wmgate.M_CTRL) != 0 {
             shape_intern(state, cursor.F_COPY)
         } else {
             shape_intern(state, cursor.F_MOVE)
@@ -5526,10 +5484,10 @@ fn set_shape(state: u64, s: u64) {
     // and returning needs no new call.
     let mx: i64 = wmlayout.gs(state, wmlayout.S_CURX) as i64
     let my: i64 = wmlayout.gs(state, wmlayout.S_CURY) as i64
-    var i: u64 = hit(state, mx, my)
+    var i: u64 = wmgate.hit(state, mx, my)
     if i < wmbase.MAX_WIN && wmbase.valid(state, i) {
         wmlayout.wsv(state, i, wmlayout.W_CURSOR, s)
-        if !darf(state, i) {
+        if !wmgate.darf(state, i) {
             i = wmbase.MAX_WIN
         }
     }
@@ -5606,7 +5564,7 @@ fn anim_start(state: u64, i: u64, art: u64) -> bool {
     wmlayout.wsv(state, i, wmlayout.W_ANMS, motion_ms(state))
     wmlayout.wsv(state, i, wmlayout.W_ANP, 0)
     wmlayout.ss(state, wmlayout.S_ANIMS, wmlayout.gs(state, wmlayout.S_ANIMS) + 1)
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
     return true
 }
 
@@ -5707,7 +5665,7 @@ fn anim_tick(state: u64) -> u64 {
             // Fortschritt gleich blieb -- am Ende der Bewegung steht
             // sonst das letzte Zwischenbild auf dem Schirm.
             // r461: a window that opens or closes cannot spoil the blur of the windows below it
-            damage_win_ex(state, i, i + 1)
+            wmdamage.damage_win_ex(state, i, i + 1)
             if p >= 1000 {
                 wmlayout.wsv(state, i, wmlayout.W_ANK, 0)
                 wmlayout.wsv(state, i, wmlayout.W_ANP, 1000)
@@ -6548,7 +6506,7 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
         // der Sperre nicht auf dem Schirm -- und der Inhalt eines
         // fremden Fensters ist damit auch nicht ablesbar.
         if i < wmbase.MAX_WIN && (wmlayout.wg(state, i, wmlayout.W_FLAGS) & (wmlayout.F_HIDDEN | wmlayout.F_TABBED)) == 0
-            && darf(state, i) {
+            && wmgate.darf(state, i) {
             let pw_t: u64 = time.tsc()
             paint_win(state, i, x0, y0, x1, y1)
             if fb.phases_an(state) {
@@ -7989,7 +7947,7 @@ fn set_opac(state: u64, i: u64, v: u64) -> bool {
         w = 255
     }
     wmlayout.wsv(state, i, wmlayout.W_OPAC, w + 1)
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
     return true
 }
 
@@ -8023,7 +7981,7 @@ fn bl_pixel(state: u64, i: u64, px: i64, py: i64) -> u64 {
         if j >= wmbase.MAX_WIN || j == i {
             continue
         }
-        if (wmlayout.wg(state, j, wmlayout.W_FLAGS) & (wmlayout.F_HIDDEN | wmlayout.F_TABBED)) != 0 || !darf(state, j) {
+        if (wmlayout.wg(state, j, wmlayout.W_FLAGS) & (wmlayout.F_HIDDEN | wmlayout.F_TABBED)) != 0 || !wmgate.darf(state, j) {
             continue
         }
         let ox: i64 = wmbase.win_x(state, j)
@@ -9891,7 +9849,7 @@ fn cap_release(state: u64, over: u64, x: i64, y: i64) {
         return
     }
     damage_caption(state, w)
-    if over != w || sperre_an(state) || !darf(state, w) {
+    if over != w || wmgate.sperre_an(state) || !wmgate.darf(state, w) {
         return
     }
     if cap_at(state, w, x, y) == n {
@@ -10799,37 +10757,6 @@ fn glas_bericht(state: u64) {
     glas_say(state)
 }
 
-fn glass_touch(state: u64, i: u64) {
-    if wmlayout.gs(state, wmlayout.S_GLVALID) == 0 {
-        return
-    }
-    let pw: u64 = wmbase.panel_win(state)
-    if pw < wmbase.MAX_WIN && i == pw {
-        return
-    }
-    if pw >= wmbase.MAX_WIN {
-        wmlayout.ss(state, wmlayout.S_GLASSGEN, wmlayout.gs(state, wmlayout.S_GLASSGEN) + 1)
-        return
-    }
-    if !wmbase.valid(state, i) {
-        wmlayout.ss(state, wmlayout.S_GLASSGEN, wmlayout.gs(state, wmlayout.S_GLASSGEN) + 1)
-        return
-    }
-    // Nur, wenn das Fenster das Leistenrechteck ueberhaupt beruehrt.
-    let px0: i64 = wmbase.win_x(state, pw)
-    let py0: i64 = wmbase.win_y(state, pw)
-    let px1: i64 = px0 + wmbase.outer_w(state, pw) as i64
-    let py1: i64 = py0 + wmbase.outer_h(state, pw) as i64
-    let wx0: i64 = wmbase.win_x(state, i)
-    let wy0: i64 = wmbase.win_y(state, i)
-    let wx1: i64 = wx0 + wmbase.outer_w(state, i) as i64
-    let wy1: i64 = wy0 + wmbase.outer_h(state, i) as i64
-    if wx1 <= px0 || wx0 >= px1 || wy1 <= py0 || wy0 >= py1 {
-        return
-    }
-    wmlayout.ss(state, wmlayout.S_GLASSGEN, wmlayout.gs(state, wmlayout.S_GLASSGEN) + 1)
-}
-
 // Die Ableser fuer die Abnahme. Sie stehen hier, damit
 // `tools/themestore/run.sh` die Zahlen holen kann, ohne die Offsets zu
 // kennen.
@@ -11403,34 +11330,6 @@ fn ev_at(state: u64, i: u64, k: u64) -> u64 {
         + (k % EV_SLOTS) * EV_BYTES
 }
 
-// ================================================== RUNDE EXPLORER-2
-//
-// WELCHE UMSCHALTTASTEN BEIM KLICK UNTEN WAREN.
-//
-// Ein Klick trug bis zu dieser Runde nur die Maustasten (Bit 0..2 aus
-// `ps2m`). Damit ist Strg-Klick von einem gewoehnlichen Klick nicht zu
-// unterscheiden -- und Strg-Klick und Umschalt-Klick sind die beiden
-// Griffe, mit denen ein Mensch in JEDEM Dateimanager mehrere Stuecke
-// auswaehlt.
-//
-// Die Tastenmaske hat oberhalb der drei Maustasten Platz; also gehen
-// die zwei Umschalttasten in Bit 3 und Bit 4 mit. Kein zweiter Weg,
-// kein neues Ereignis -- ein Programm, das die neuen Bits nicht kennt,
-// sieht dieselbe Maske wie vorher, weil es nur die unteren drei prueft.
-const M_SHIFT: u64 = 8
-const M_CTRL: u64 = 16
-
-fn mods_of(state: u64) -> u64 {
-    var m: u64 = 0
-    if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
-        m = m | M_SHIFT
-    }
-    if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
-        m = m | M_CTRL
-    }
-    return m
-}
-
 static mut mv_wid: u64 = 0
 static mut mv_lx: i64 = 0
 static mut mv_ly: i64 = 0
@@ -11639,40 +11538,6 @@ fn ev_pop(state: u64, i: u64, out: u64) -> bool {
     return true
 }
 
-// ------------------------------------------------------- die Eingabe
-
-// Welches Fenster liegt an dieser Stelle -- das OBERSTE. Gibt MAX_WIN,
-// wenn dort der Hintergrund ist.
-fn hit(state: u64, x: i64, y: i64) -> u64 {
-    var z: u64 = wmlayout.gs(state, wmlayout.S_COUNT)
-    while z > 0 {
-        z = z - 1
-        let i: u64 = wmbase.at_z(state, z)
-        // ================================== RUNDE ECHTHARDWARE-3
-        // EINE BLASE NIMMT KEINEN KLICK. Sie liegt ueber allem, damit
-        // man sie SIEHT -- wer dorthin klickt, meint das, was darunter
-        // liegt. Ohne diese Bedingung faengt die Blase den Klick weg,
-        // und der Knopf darunter tut nichts.
-        // RUNDE DREI (S-006): DIE EINBLENDUNG AUCH NICHT. Sie steht
-        // vier Sekunden rechts oben; wer in dieser Zeit dorthin klickt,
-        // meint das Fenster darunter. Waere sie hier nicht genannt,
-        // fraesse sie in genau diesen vier Sekunden jeden Klick in
-        // ihrer Ecke -- und zwar unsichtbar, weil sie danach weg ist.
-        if i < wmbase.MAX_WIN && wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_TIP
-            && wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_TOAST
-            && (wmlayout.wg(state, i, wmlayout.W_FLAGS) & (wmlayout.F_HIDDEN | wmlayout.F_TABBED)) == 0 {
-            let rx: i64 = wmbase.win_x(state, i) + wmbase.outer_w(state, i) as i64
-            let ry: i64 = wmbase.win_y(state, i) + wmbase.outer_h(state, i) as i64
-            if x >= wmbase.win_x(state, i) && y >= wmbase.win_y(state, i) {
-                if x < rx && y < ry {
-                    return i
-                }
-            }
-        }
-    }
-    return wmbase.MAX_WIN
-}
-
 // Der Zeiger hat sich bewegt oder eine Taste gewechselt. Wird aus der
 // Unterbrechungsbehandlung heraus gerufen; alles, was hier passiert,
 // muss ohne Warten auskommen.
@@ -11698,8 +11563,8 @@ fn wheel_out(state: u64, x: u64, y: u64) {
     if d == 0 || td_live(state) {
         return
     }
-    let i: u64 = hit(state, x as i64, y as i64)
-    if i >= wmbase.MAX_WIN || !darf(state, i) {
+    let i: u64 = wmgate.hit(state, x as i64, y as i64)
+    if i >= wmbase.MAX_WIN || !wmgate.darf(state, i) {
         return
     }
     let lx: i64 = (x as i64) - wmbase.win_x(state, i) - wmbase.inx(state, i) as i64
@@ -11734,8 +11599,8 @@ fn hwheel_out(state: u64, x: u64, y: u64) {
     if d == 0 || td_live(state) {
         return
     }
-    let i: u64 = hit(state, x as i64, y as i64)
-    if i >= wmbase.MAX_WIN || !darf(state, i) {
+    let i: u64 = wmgate.hit(state, x as i64, y as i64)
+    if i >= wmbase.MAX_WIN || !wmgate.darf(state, i) {
         return
     }
     let lx: i64 = (x as i64) - wmbase.win_x(state, i) - wmbase.inx(state, i) as i64
@@ -11764,7 +11629,6 @@ const MOUSE_PRESSED_OFF: u64 = 0x0B8
 static mut dh_win: u64 = 0     // window under the pointer + 1 while a drag runs, 0 = none / not raisable
 static mut dh_t: u64 = 0       // mono_ns when the pointer came to that window
 static mut dh_raised: u64 = 0  // window + 1 raised for the current hover
-static mut dh_live: u64 = 0    // 1 = a drag runs (left down, slot full)
 static mut dh_prev: u64 = 0    // left button of the last look
 static mut dh_tty: u64 = 0     // tty + 1 waiting to be typed a dropped path, 0 = none
 static mut dh_src: u64 = 0     // window + 1 under the pointer at the left press (the drag source), 0 = none
@@ -11802,7 +11666,7 @@ fn dnd_hover(state: u64, i: u64, btn: u64) {
         if slots.drag_active(state) != 0 {
             let _c: u64 = slots.drag_clear(state)
         }
-        dh_live = 0
+        wmgate.dh_live = 0
         dh_win = 0
         dh_raised = 0
         dh_src = 0
@@ -11814,12 +11678,12 @@ fn dnd_hover(state: u64, i: u64, btn: u64) {
     if left == 0 {
         // The release goes to the window under the pointer. The SOURCE of a live drag never sees it otherwise and
         // keeps its drag chip; tell it with a release far outside its own area (nothing there to hit).
-        if was != 0 && dh_live != 0 && dh_src != 0 && dh_src != i + 1 && wmbase.valid(state, dh_src - 1) {
+        if was != 0 && wmgate.dh_live != 0 && dh_src != 0 && dh_src != i + 1 && wmbase.valid(state, dh_src - 1) {
             ev_push(state, dh_src - 1, wmlayout.E_UP, 0x7FFF, 0x7FFF, ps2m.B_LEFT)
             dnd_say(state, 3, wmlayout.wg(state, dh_src - 1, wmlayout.W_ID))
         }
         dh_src = 0
-        if was != 0 && dh_live != 0 && i < wmbase.MAX_WIN && wmbase.valid(state, i) && darf(state, i)
+        if was != 0 && wmgate.dh_live != 0 && i < wmbase.MAX_WIN && wmbase.valid(state, i) && wmgate.darf(state, i)
             && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && slots.drag_active(state) != 0
             && (slots.drag_types(state) & bus.T_PATH) != 0 {
             let t: u64 = tty_of(state, i)
@@ -11828,19 +11692,19 @@ fn dnd_hover(state: u64, i: u64, btn: u64) {
                 dnd_say(state, 2, t)
             }
         }
-        dh_live = 0
+        wmgate.dh_live = 0
         dh_win = 0
         dh_raised = 0
         return
     }
     if slots.drag_active(state) == 0 {
-        dh_live = 0
+        wmgate.dh_live = 0
         dh_win = 0
         dh_raised = 0
         return
     }
-    dh_live = 1
-    if i >= wmbase.MAX_WIN || !wmbase.valid(state, i) || !darf(state, i)
+    wmgate.dh_live = 1
+    if i >= wmbase.MAX_WIN || !wmbase.valid(state, i) || !wmgate.darf(state, i)
         || (wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL && wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_FLOAT) {
         dh_win = 0
         return
@@ -11856,7 +11720,7 @@ fn dnd_hover(state: u64, i: u64, btn: u64) {
 
 // Every tick: has the pointer rested long enough on a background window?
 fn dnd_tick(state: u64) {
-    if dh_live == 0 || dh_win == 0 || dh_raised == dh_win {
+    if wmgate.dh_live == 0 || dh_win == 0 || dh_raised == dh_win {
         return
     }
     if time.mono_ns(state) - dh_t < DH_DELAY_NS {
@@ -11879,7 +11743,7 @@ fn dnd_cancel(state: u64) -> bool {
         return false
     }
     let _c: u64 = slots.drag_clear(state)
-    dh_live = 0
+    wmgate.dh_live = 0
     dh_win = 0
     dh_raised = 0
     dh_ncancel = dh_ncancel + 1
@@ -11909,7 +11773,7 @@ fn dnd_take_paste(state: u64, out: u64, max: u64) -> u64 {
 }
 
 fn dnd_live_pub() -> u64 {
-    return dh_live
+    return wmgate.dh_live
 }
 
 fn dnd_nraise_pub() -> u64 {
@@ -11918,17 +11782,6 @@ fn dnd_nraise_pub() -> u64 {
 
 fn dnd_ncancel_pub() -> u64 {
     return dh_ncancel
-}
-
-// "forbidden" shape wanted? A drag runs and the pointer is over the desktop (or no window).
-fn dnd_forbidden(state: u64, i: u64) -> bool {
-    if dh_live == 0 {
-        return false
-    }
-    if i >= wmbase.MAX_WIN || !wmbase.valid(state, i) {
-        return true
-    }
-    return wmlayout.wg(state, i, wmlayout.W_LAYER) == wmlayout.L_DESK
 }
 
 fn on_mouse(state: u64) {
@@ -12044,7 +11897,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
     td_mb = btn
     // r382 LOCK SEAL: a drag or a resize that was running when the lock
     // came is ended; nothing moves a window while the screen is locked.
-    if sperre_an(state) {
+    if wmgate.sperre_an(state) {
         if wmlayout.gs(state, wmlayout.S_DRAG) != 0 {
             wmlayout.ss(state, wmlayout.S_DRAG, 0)
         }
@@ -12262,7 +12115,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
         }
     }
     wmlayout.ss(state, wmlayout.S_MOVES, wmlayout.gs(state, wmlayout.S_MOVES) + 1)
-    let i: u64 = hit(state, x, y)
+    let i: u64 = wmgate.hit(state, x, y)
     if (btn & ~(wmlayout.gs(state, wmlayout.S_KEYS) & 7) & 7) != 0 {
         popup_outside(state, i)
     }
@@ -12282,7 +12135,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
     // Fensterrand auf den Schreibtisch faehrt.
     // r382 LOCK SEAL: the edges of a window that is not on the screen
     // must not show in the pointer shape either.
-    if i < wmbase.MAX_WIN && !darf(state, i) {
+    if i < wmbase.MAX_WIN && !wmgate.darf(state, i) {
         margin_cursor(state, wmbase.MAX_WIN, x, y)
     } else {
         margin_cursor(state, i, x, y)
@@ -12294,7 +12147,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
     // etwas. Die Bewegung des Zeigers selbst laeuft weiter (sonst
     // klebte er fest), die EREIGNISSE gehen nicht hinaus.
     input_seen(state)
-    if !darf(state, i) {
+    if !wmgate.darf(state, i) {
         return
     }
     wmlayout.ss(state, wmlayout.S_HITS, wmlayout.gs(state, wmlayout.S_HITS) + 1)
@@ -12475,7 +12328,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
             // vergessen. Ohne das Wort `audio` ist es ein Vergleich.
             audio.click(state)
             ev_push(state, i, wmlayout.E_DOWN, lokal_x as u64, lokal_y as u64,
-                btn | mods_of(state))
+                btn | wmgate.mods_of(state))
             return
         }
         if (btn & ps2m.B_LEFT) == 0 && (alt & ps2m.B_LEFT) != 0 {
@@ -12500,7 +12353,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
                 }
                 wmlayout.ss(state, wmlayout.S_DOWNS, wmlayout.gs(state, wmlayout.S_DOWNS) + 1)
                 ev_push(state, i, wmlayout.E_DOWN, lokal_x as u64, lokal_y as u64,
-                    btn | mods_of(state))
+                    btn | wmgate.mods_of(state))
             }
             return
         }
@@ -12523,7 +12376,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
                 }
                 wmlayout.ss(state, wmlayout.S_DOWNS, wmlayout.gs(state, wmlayout.S_DOWNS) + 1)
                 ev_push(state, i, wmlayout.E_DOWN, lokal_x as u64, lokal_y as u64,
-                    btn | mods_of(state))
+                    btn | wmgate.mods_of(state))
             }
             return
         }
@@ -12548,19 +12401,6 @@ fn on_mouse_btn(state: u64, btn: u64) {
             ev_push(state, i, wmlayout.E_MOVE, lokal_x as u64, lokal_y as u64, btn)
         }
     }
-}
-
-// Eine Taste. Sie geht an das Fenster mit dem EINGABEFOKUS -- und mit
-// `nofocus` an alle, damit die Zusage darueber etwas wert ist.
-// ============================================ RUNDE ALLTAG: DIE SPERRE
-//
-// Sie steht hier, wo die Eingabe ihren Weg zu einem Fenster nimmt --
-// das ist die einzige Stelle, an der sie WIRKT. Ein Sperrbildschirm,
-// der nur ein Fenster ganz vorne ist, ist ein Vorhang: das Fenster
-// darunter bekommt jede Taste weiter, und wer den Vorhang abschiesst,
-// steht in der Sitzung. Hier bekommt es sie nicht.
-fn sperre_an(state: u64) -> bool {
-    return kstate.get(state, kstate.K11_OFF + kstate.SP_ON) != 0
 }
 
 // ============================================ ROUND ACTION-BUS-5 (AB-004)
@@ -12954,7 +12794,7 @@ fn td_answer(state: u64, v: u64) {
 }
 
 fn td_live(state: u64) -> bool {
-    return td_on != 0 && !sperre_an(state)
+    return td_on != 0 && !wmgate.sperre_an(state)
 }
 
 fn td_armed(state: u64) -> bool {
@@ -13164,32 +13004,6 @@ fn td_paint(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
         fb.rgb(state, 0xFF, 0xFF, 0xFF))
 }
 
-fn sperrer(state: u64) -> u64 {
-    return kstate.get(state, kstate.K11_OFF + kstate.SP_PID)
-}
-
-// Der PLATZ des Sperrers in der Aufgabentafel -- das ist die Zahl, die
-// in `W_OWNER` steht. Die Prozessnummer daneben ist die, die Ring 3
-// sieht; sie sind NICHT dasselbe, und der erste Anlauf hat sie
-// verwechselt: der Sperrbildschirm war danach unsichtbar, weil sein
-// eigenes Fenster ihm nicht zu gehoeren schien.
-fn lock_space(state: u64) -> u64 {
-    return kstate.get(state, kstate.K11_OFF + kstate.SP_SLOT)
-}
-
-// Darf dieses Fenster jetzt etwas bekommen? Ohne Sperre: jedes. Mit
-// Sperre: nur, was dem Sperrer gehoert.
-fn darf(state: u64, i: u64) -> bool {
-    if !sperre_an(state) {
-        return true
-    }
-    let p: u64 = lock_space(state)
-    if sperrer(state) == 0 {
-        return false
-    }
-    return wmlayout.wg(state, i, wmlayout.W_OWNER) == p
-}
-
 fn input_seen(state: u64) {
     kstate.set(state, kstate.K11_OFF + kstate.SP_LAST, time.mono_ns(state))
 }
@@ -13247,7 +13061,7 @@ fn on_key(state: u64, c: u64) {
     }
     // r382 LOCK SEAL: while locked no plugin gets the key (its shortcut
     // could act on windows behind the lock); it goes to the locker only.
-    if !sperre_an(state) && wmplug.key_owner(state, c, mods) < wmplug.MAX_PLUG {
+    if !wmgate.sperre_an(state) && wmplug.key_owner(state, c, mods) < wmplug.MAX_PLUG {
         wmplug.notify(state, wmplug.E_KEY, c, mods, 0)
         wmlayout.ss(state, wmlayout.S_KPLUG, wmlayout.gs(state, wmlayout.S_KPLUG) + 1)
         // Und AUCH nicht an das Terminal des Fokusfensters: `key_tty`
@@ -13265,7 +13079,7 @@ fn on_key(state: u64, c: u64) {
     if wmlayout.gs(state, wmlayout.S_NOFOCUS) != 0 {
         var i: u64 = 0
         while i < wmbase.MAX_WIN {
-            if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && darf(state, i) {
+            if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmgate.darf(state, i) {
                 ev_push(state, i, wmlayout.E_KEY, c, 0, 0)
             }
             i = i + 1
@@ -13280,10 +13094,10 @@ fn on_key(state: u64, c: u64) {
     // die die Taskleiste braucht). Der erste Anlauf hat deshalb jede
     // Taste weggeworfen: der Sperrbildschirm stand da und nahm kein
     // Kennwort an. Gemessen mit `sendkey`.
-    if sperre_an(state) {
+    if wmgate.sperre_an(state) {
         var k: u64 = 0
         while k < wmbase.MAX_WIN {
-            if wmlayout.wg(state, k, wmlayout.W_USED) != 0 && darf(state, k) {
+            if wmlayout.wg(state, k, wmlayout.W_USED) != 0 && wmgate.darf(state, k) {
                 ev_push(state, k, wmlayout.E_KEY, c, 0, 0)
                 k = wmbase.MAX_WIN
             } else {
@@ -13293,7 +13107,7 @@ fn on_key(state: u64, c: u64) {
         return
     }
     let f: u64 = wmbase.focus(state)
-    if f < wmbase.MAX_WIN && darf(state, f) {
+    if f < wmbase.MAX_WIN && wmgate.darf(state, f) {
         ev_push(state, f, wmlayout.E_KEY, c, 0, 0)
     }
 }
@@ -14071,7 +13885,7 @@ fn tsel_paint(state: u64, i: u64, k0: u64, k1: u64) {
         cell_paint(state, i, k % cols, k / cols)
         k = k + 1
     }
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
 }
 
 fn tsel_clear(state: u64, i: u64) {
@@ -14256,7 +14070,7 @@ fn term_paste_done(state: u64) {
     cp_event(state, CP_EV_KEY, 0, 0, 0, 0, 0)
     let f: u64 = wmbase.focus(state)
     if f < wmbase.MAX_WIN && wmbase.valid(state, f) && wmlayout.wg(state, f, wmlayout.W_KIND) == wmlayout.K_TERM {
-        damage_win(state, f)
+        wmdamage.damage_win(state, f)
     }
     tc_kicks[0] = tc_kicks[0] + 1
     var s_k: [u8; 17] = "wm: tpaste kick=\0"
@@ -14378,15 +14192,15 @@ fn term_key(state: u64, c: u64, shift: bool) -> bool {
     if !wmbase.ready(state) {
         return false
     }
-    if shift && (c == 70 || c == 102) && !sperre_an(state) {
+    if shift && (c == 70 || c == 102) && !wmgate.sperre_an(state) {
         mon_hotkey(state)
         return true
     }
     let f: u64 = wmbase.focus(state)
-    if f >= wmbase.MAX_WIN || f >= 32 || wmlayout.wg(state, f, wmlayout.W_KIND) != wmlayout.K_TERM || !darf(state, f) {
+    if f >= wmbase.MAX_WIN || f >= 32 || wmlayout.wg(state, f, wmlayout.W_KIND) != wmlayout.K_TERM || !wmgate.darf(state, f) {
         // r1309: Ctrl+Shift+T is a global "new terminal" when no terminal window has the focus (desktop, other program, the terminal was
         // closed or minimised): it used to fall through to the focused program as a plain ^T and nothing opened. Not while the screen is locked.
-        if shift && (c == 84 || c == 116) && !sperre_an(state) {
+        if shift && (c == 84 || c == 116) && !wmgate.sperre_an(state) {
             tt_request_free(state)
             return true
         }
@@ -14654,7 +14468,7 @@ fn sb_move(state: u64, i: u64, dl: i64) {
     }
     tp_sbv[(i) as usize] = v as u64
     term_redraw(state, i)
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
 }
 
 // serial witness for tools/term/scroll.sh
@@ -15675,7 +15489,7 @@ fn term_write(state: u64, i: u64, p: u64, n: u64) -> u64 {
     }
     tcur_solid(state)
     tcur_sync(state, i)
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
     return n
 }
 
@@ -15712,7 +15526,7 @@ fn term_page(state: u64, up: bool) -> bool {
         return false
     }
     let f: u64 = wmbase.focus(state)
-    if f >= wmbase.MAX_WIN || wmlayout.wg(state, f, wmlayout.W_KIND) != wmlayout.K_TERM || !darf(state, f) {
+    if f >= wmbase.MAX_WIN || wmlayout.wg(state, f, wmlayout.W_KIND) != wmlayout.K_TERM || !wmgate.darf(state, f) {
         return false
     }
     var page: i64 = (wmlayout.wg(state, f, wmlayout.W_ROWS) as i64) - 1
@@ -15748,7 +15562,7 @@ fn key_tty(state: u64) -> u64 {
     // terminal that had the focus before the lock got every key too:
     // on the Dell (27.09.2026) the password typed at sign-in showed up
     // as `sh: cannot run startkennwort` in the terminal behind it.
-    if !darf(state, f) {
+    if !wmgate.darf(state, f) {
         return NO_TTY
     }
     sb_snap(state, f)
@@ -15772,7 +15586,7 @@ fn term_out(state: u64, i: u64, c: u64) {
         term_hold_mask = term_hold_mask | (1 << i)
         return
     }
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
 }
 
 static mut term_hold_n: u64 = 0
@@ -15795,7 +15609,7 @@ fn term_release(state: u64) {
     var i: u64 = 0
     while i < wmbase.MAX_WIN {
         if ((m >> i) & 1) != 0 && wmbase.valid(state, i) {
-            damage_win(state, i)
+            wmdamage.damage_win(state, i)
         }
         i = i + 1
     }
@@ -16407,7 +16221,7 @@ fn tile_float(state: u64, i: u64) -> bool {
         tile_release(state, i)
         restore_geom(state, i)
         raise_win(state, i)
-        damage_win(state, i)
+        wmdamage.damage_win(state, i)
         return true
     }
     save_geom(state, i)
@@ -17297,7 +17111,7 @@ fn rumpf_neu(state: u64, i: u64) {
         return
     }
     ev_push(state, i, wmlayout.E_RESIZE, wmlayout.wg(state, i, wmlayout.W_W), wmlayout.wg(state, i, wmlayout.W_H), 0)
-    damage_win(state, i)
+    wmdamage.damage_win(state, i)
 }
 
 fn drag_end(state: u64, i: u64, x: i64, y: i64) {
@@ -17585,7 +17399,7 @@ fn win_arrow(state: u64, key: u64) -> bool {
     if i >= wmbase.MAX_WIN {
         return false
     }
-    if !wmbase.deko(state, i) || wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL || !darf(state, i) {
+    if !wmbase.deko(state, i) || wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL || !wmgate.darf(state, i) {
         return false
     }
     if wmlayout.wg(state, i, wmlayout.W_NODE) == 0 {
@@ -17639,7 +17453,7 @@ fn hotkeys(state: u64) -> u64 {
             // the lock), not close (destroyed it), not full screen, snap,
             // tile; and no plugin hears it. The key is taken off the ring
             // and thrown away, and the line below says so.
-            if sperre_an(state) {
+            if wmgate.sperre_an(state) {
                 var s_hl: [u8; 20] = "wm: hot gesperrt c=\0"
                 var s_hn: [u8; 6] = " mod=\0"
                 serial.puts((&s_hl[0]) as u64)
@@ -17773,7 +17587,7 @@ fn next_window(state: u64, von: u64) -> bool {
         if wechselbar(state, j) && j != von {
             raise_win(state, j)
             set_focus(state, j)
-            damage_win(state, j)
+            wmdamage.damage_win(state, j)
             return true
         }
         k = k + 1
@@ -17788,7 +17602,7 @@ fn prev_window(state: u64, von: u64) -> bool {
         if wechselbar(state, j) && j != von {
             raise_win(state, j)
             set_focus(state, j)
-            damage_win(state, j)
+            wmdamage.damage_win(state, j)
             return true
         }
         k = k + 1
@@ -17988,7 +17802,7 @@ fn sw_commit(state: u64) {
     if j < wmbase.MAX_WIN && wechselbar(state, j) {
         raise_win(state, j)
         set_focus(state, j)
-        damage_win(state, j)
+        wmdamage.damage_win(state, j)
         sw_commits = sw_commits + 1
     }
 }
@@ -18036,7 +17850,7 @@ fn sw_tick(state: u64) {
     if sw_open == 0 {
         return
     }
-    if sperre_an(state) {
+    if wmgate.sperre_an(state) {
         sw_cancel(state)
         return
     }
@@ -18160,7 +17974,7 @@ fn paint_switcher(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
 // have no consumer yet. Never while the screen is locked or the trusted dialog is up. Returns true if the focus moved.
 static mut sw_done: u64 = 0 // swipes that moved the focus
 fn swipe_do(state: u64, dir: u64, n: u64) -> bool {
-    if n < 3 || !wmbase.ready(state) || sperre_an(state) || td_live(state) {
+    if n < 3 || !wmbase.ready(state) || wmgate.sperre_an(state) || td_live(state) {
         return false
     }
     let i: u64 = wmbase.focus(state)
@@ -18205,7 +18019,7 @@ fn tile_action(state: u64, act: u64) -> bool {
     // r382 LOCK SEAL: second lock, for the callers that do not come over
     // the key ring (the syscall WM_TILEDO): no action on any window while
     // the screen is locked.
-    if sperre_an(state) {
+    if wmgate.sperre_an(state) {
         return false
     }
     if act == tile.A_TILE_TOGGLE {
@@ -18232,7 +18046,7 @@ fn tile_action(state: u64, act: u64) -> bool {
     }
     // r402: Alt+F4 -- a window with a frame, on the normal layer, closed like its close button
     if act == tile.A_CLOSE_WIN {
-        if !wmbase.deko(state, i) || wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL || !darf(state, i) {
+        if !wmbase.deko(state, i) || wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL || !wmgate.darf(state, i) {
             return false
         }
         return close_anim(state, i)
