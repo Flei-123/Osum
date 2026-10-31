@@ -15,7 +15,7 @@
 #     ended (limit, fault or kill), its window stayed as a PICTURE; Super
 #     toggled that picture and every key went into it. That is the Dell photo.
 # Fixes: (1) `wlib.step` sleeps after 200 quiet rounds, the round limits of the
-# scene programs are gone; (2) `kgui.fenster_wache` destroys windows whose
+# scene programs are gone; (2) `kgui.window_watch` destroys windows whose
 # owner is dead, so the next Super / Start starts a fresh launcher; (3) the
 # desktop loop of the kernel waits for the next interrupt (`sched.idle_wait`)
 # instead of spinning on core 0 (the taskbar's CPU gauge reads this core).

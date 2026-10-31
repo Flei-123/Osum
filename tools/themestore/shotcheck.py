@@ -206,7 +206,7 @@ BARRECT = re.compile(
 # nur SCHRIFT gemessen, und die Schrift des Knopfes war tadellos.
 #
 # Also wird ab jetzt gefragt, was ein Mensch fragt: hat das Ding einen
-# Umriss? `wlib.say_knopf` meldet Rechteck und Radius jedes gemalten
+# Umriss? `wlib.say_button` meldet Rechteck und Radius jedes gemalten
 # Knopfes samt seiner Ecke auf dem Schirm, und hier wird an seinen vier
 # Kanten nachgesehen, ob sich der Bildpunkt AUF der Kante von dem zwei
 # Bildpunkte weiter draussen unterscheidet. Die Ecken bleiben aussen vor

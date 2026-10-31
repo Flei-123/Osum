@@ -22,8 +22,8 @@
 #         ist die Kernzahl. Ohne Eingabe muss sie steigen, sonst kommt
 #         nichts auf den Schirm.
 #   T=    kstate.TICKS   -- schlaegt der Zeitgeber ueberhaupt?
-#   LOOP= tafel_loop     -- laeuft die Schreibtischschleife?
-#   IRQ=  tafel_irq      -- Rufe aus dem Zeitgeber
+#   LOOP= board_loop     -- laeuft die Schreibtischschleife?
+#   IRQ=  board_irq      -- Rufe aus dem Zeitgeber
 #   PRE=  kstate.PREEMPT -- ist die Verdraengung an? (Soll 1)
 #   HZ=   die gemessene Rate (Soll 100)
 #   R=    taskbar: round -- laeuft die Ring-3-Schleife der Leiste?

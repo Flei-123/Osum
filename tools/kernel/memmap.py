@@ -127,7 +127,7 @@ BEREICHE = [
     ("SHMN",       "kstate.fi", "SHMN_OFF",       "SHMN_MAX"),
     ("TTY",        "kstate.fi", "TTY_OFF",        "TTY_MAX"),
     ("TTY2",       "kstate.fi", "TTY2_OFF",       "TTY2_MAX"),
-    ("RAND",       "kstate.fi", "RAND_OFF",       "RAND_MAX"),
+    ("RAND",       "kstate.fi", "RANDOM_OFF",       "RANDOM_MAX"),
     # RUNDE K7B: der Rahmenpuffer-Zustand samt Zeichensatz.  Er stand bis
     # zu dieser Runde als einziger Bereich NICHT in `kstate.fi`, sondern
     # nur in `fb.fi` -- und genau deshalb ging er bei K9 unter.
@@ -281,7 +281,7 @@ BEREICHE = [
     # hier zum ersten Mal.  Darin liegen die Skalare des Laders, die
     # vier Modulsaetze, die Abschnittstafel des laufenden Ladevorgangs
     # und die TREIBERTAFEL, die ein geladenes Modul fuellt.
-    ("MODUL",      "kstate.fi", "MODULE_OFF",      "MODUL_MAX"),
+    ("MODUL",      "kstate.fi", "MODULE_OFF",      "MODULE_MAX"),
     ("BUS",        "kstate.fi", "BUS_OFF",        "BUS_MAX"),
 
     # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).

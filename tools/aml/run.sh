@@ -137,7 +137,7 @@ grep -q 'AML_OFF' tools/kernel/memmap.py \
 # DIE MODUSBITS DIESER RUNDE. Sie lagen auf Wort 11 ab Bit 0 (704..712)
 # -- auf dem Zweigstand vom 30.08.2026 war Wort 11 ganz frei. Beim
 # Hereinholen nach main (14.09.2026) stellte sich heraus, dass dort
-# laengst M_ASYNC..M_ASTRESS (Runde ASYNC) und M_MODUL/M_MODULAUS
+# laengst M_ASYNC..M_ASTRESS (Runde ASYNC) und M_MODULE/M_MODULAUS
 # (Runde MODUL) stehen: EIN Wort, ZWEI Bedeutungen, und `aml` auf der
 # Kommandozeile haette den Asynchronweg mitgeschaltet. Die Bits liegen
 # jetzt auf Wort 12 ab Bit 4 (772..780); Bit 0..3 gehoeren dort EHCI

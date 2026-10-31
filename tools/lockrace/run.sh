@@ -8,7 +8,7 @@
 #       one. The run must then FAIL (a child wins the lock).
 #
 # While the screen is locked a root program (`a11ydemo lockrace`) kills the
-# locker (`lock`). The kernel restarts it (`kgui.sperre_wache`, every 32nd
+# locker (`lock`). The kernel restarts it (`kgui.lock_watch`, every 32nd
 # turn), but until then the lock names the dead locker's task SLOT, and the
 # zombie reaper frees that slot within ~16 turns. A process that lands in the
 # slot used to pass `osum_sperre` op 4 ("be the locker": slot matches, the
