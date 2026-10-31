@@ -247,7 +247,7 @@ fi
 case " $GEBAUT " in
 *" orientbus "*)
     cp -f etc/orientbus/policy "$OUT/policy"
-    ARGS+=(/etc/orientbus/ /etc/actions.d/
+    ARGS+=(/etc/orientbus/ /etc/actions.d/ /var/ /var/log/
            "/etc/orientbus/policy=$OUT/policy"
            "/etc/settings.schema=etc/settings.schema"
            "/etc/actions.d/settings.actions=etc/actions.d/settings.actions"

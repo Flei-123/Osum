@@ -1,6 +1,6 @@
 # Media sessions on the action bus (service `media`, provider `/bin/mediad`)
 
-Status: provider + manifest + client module BUILT (compile-checked); not yet wired into the image, no gate, no quick-settings card yet (roadmap).
+Status: provider, manifest, client module, quick settings card (kernel/user/qsmedia.fi) and /bin/play session (kernel/user/playsess.fi) wired into the image; gate tools/qsmedia/run.sh (card, buttons, poll, counter-proof without mediad), tools/qsmedia/ssim.sh (mockup match).
 
 ## Model
 - One session per owner, at most 4. Owner key = the broker-stamped client: `app:<name>`, `compat:<name>`, `jarvis`, or for an unlabelled person's program `user:<app>` (the `app=` argument names it).

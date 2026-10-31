@@ -58,6 +58,7 @@ Namen fuer `klickauf`:
     lrect<N>        Widget N des Starters  (launcher: rect id=N ...)
     lzeile<N>       Zeile N der Trefferliste des Starters
     srect<NAME>     Widget NAME der Einstellungen (settings: rect name=)
+    qsmprev|qsmplay|qsmnext  media card buttons of the quick settings (qs: mprev ... x= y= w= h=)
     frect<N>        Widget N des Dateimanagers (explorer: rect id=N)
     fdrect<N>       widget N of the friends bar (freunde: rect id=N)
     ncrow<N>        row N of the notification card (notifc: open n= x= y= w= h=, rows 28 design points high)
@@ -743,6 +744,14 @@ class Fahrer:
                 return None
             return (int(g.group(1)) + int(m.group(1)),
                     int(g.group(2)) + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
+        if name in ("qsmprev", "qsmplay", "qsmnext"):
+            word = {"qsmprev": "mprev", "qsmplay": "mplay", "qsmnext": "mnext"}[name]
+            m = letzte(r"qs: %s +x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % word)
+            g = letzte(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None or g is None:
+                return None
+            return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name in ("qstm", "qsset"):
             wort = "tm" if name == "qstm" else "set"
