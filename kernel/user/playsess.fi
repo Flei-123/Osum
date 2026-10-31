@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+import actwire
+import actcli
+
+export { begin, step, finish, STOP }
+
+const STOP: u64 = 1
+const POLL_TICKS: u64 = 25
+
+static mut L0: [u8; 15] = "call media.end\0"
+static mut L1: [u8; 19] = "call media.publish\0"
+static mut L2: [u8; 6] = "title\0"
+static mut L3: [u8; 6] = "state\0"
+static mut L4: [u8; 8] = "playing\0"
+static mut L5: [u8; 7] = "paused\0"
+static mut L6: [u8; 9] = "can_prev\0"
+static mut L7: [u8; 9] = "can_next\0"
+static mut L8: [u8; 2] = "0\0"
+static mut L9: [u8; 16] = "call media.poll\0"
+static mut L10: [u8; 4] = "cmd\0"
+static mut L11: [u8; 5] = "stop\0"
+static mut L12: [u8; 6] = "pause\0"
+static mut L13: [u8; 5] = "play\0"
+static mut L14: [u8; 7] = "toggle\0"
+
+static mut s_title: [u8; 96] = [0 as u8; 96]
+static mut s_paused: bool = false
+static mut s_live: bool = false
+static mut s_next: u64 = 0
+
+fn title_ptr() -> u64 {
+    return (&s_title[0 as usize]) as u64
+}
+
+fn publish(state: u64) {
+    actcli.req((&L1[0 as usize]) as u64)
+    actcli.arg((&L2[0 as usize]) as u64, title_ptr())
+    actcli.arg((&L3[0 as usize]) as u64, state)
+    actcli.arg((&L6[0 as usize]) as u64, (&L8[0 as usize]) as u64)
+    actcli.arg((&L7[0 as usize]) as u64, (&L8[0 as usize]) as u64)
+    let _rc: u64 = actcli.send(20)
+}
+
+fn begin(path: u64) {
+    var at: u64 = 0
+    var base: u64 = 0
+    while actwire.ld8(path, at) != 0 {
+        if actwire.ld8(path, at) == 47 {
+            base = at + 1
+        }
+        at = at + 1
+    }
+    var n: u64 = 0
+    while actwire.ld8(path, base + n) != 0 && n < 95 {
+        actwire.st8(title_ptr(), n, actwire.ld8(path, base + n))
+        n = n + 1
+    }
+    actwire.st8(title_ptr(), n, 0)
+    s_paused = false
+    s_live = true
+    s_next = 0
+    publish((&L4[0 as usize]) as u64)
+}
+
+fn poll_cmd() -> u64 {
+    var cmd: [u8; 16] = [0 as u8; 16]
+    let cp: u64 = (&cmd[0 as usize]) as u64
+    actcli.req((&L9[0 as usize]) as u64)
+    if actcli.send(20) != actcli.R_OK {
+        return 0
+    }
+    if !actcli.field((&L10[0 as usize]) as u64, cp, 16) {
+        return 0
+    }
+    if actwire.str_eq(cp, (&L11[0 as usize]) as u64) {
+        return 3
+    }
+    if actwire.str_eq(cp, (&L12[0 as usize]) as u64) {
+        return 1
+    }
+    if actwire.str_eq(cp, (&L13[0 as usize]) as u64) {
+        return 2
+    }
+    if actwire.str_eq(cp, (&L14[0 as usize]) as u64) {
+        if s_paused {
+            return 2
+        }
+        return 1
+    }
+    return 0
+}
+
+fn apply(c: u64) -> bool {
+    if c == 3 {
+        return true
+    }
+    if c == 1 && !s_paused {
+        s_paused = true
+        publish((&L5[0 as usize]) as u64)
+    }
+    if c == 2 && s_paused {
+        s_paused = false
+        publish((&L4[0 as usize]) as u64)
+    }
+    return false
+}
+
+fn step() -> u64 {
+    if !s_live {
+        return 0
+    }
+    let now: u64 = actwire.ticks()
+    if now < s_next && !s_paused {
+        return 0
+    }
+    s_next = now + POLL_TICKS
+    if apply(poll_cmd()) {
+        return STOP
+    }
+    while s_paused {
+        ulib.sleep_ms(POLL_TICKS * 10)
+        if apply(poll_cmd()) {
+            return STOP
+        }
+    }
+    return 0
+}
+
+fn finish() {
+    if !s_live {
+        return
+    }
+    s_live = false
+    actcli.req((&L0[0 as usize]) as u64)
+    let _rc: u64 = actcli.send(20)
+}

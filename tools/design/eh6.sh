@@ -253,6 +253,7 @@ case " $GEBAUT " in
            "/etc/actions.d/settings.actions=etc/actions.d/settings.actions"
            "/etc/actions.d/a11y.actions=etc/actions.d/a11y.actions"
            "/etc/actions.d/store.actions=etc/actions.d/store.actions"
+           "/etc/actions.d/media.actions=etc/actions.d/media.actions"
            "/etc/store.conf=etc/store.conf") ;;
 esac
 # r-svclog: a test runner may add files to the image (mkfs.py arguments, space separated, no blanks inside).
