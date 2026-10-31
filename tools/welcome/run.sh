@@ -135,13 +135,11 @@ page_check pg1s 1 'f=1\n' 360 360 5
 # ---- part D: the clicks walk the wizard
 run_audit walk 'show=ja\nf=1\ns=1\n' 'warteauf "welcome: ready" || 240
 warte 3
-klickauf wlnth2x0
-warte 2
-klickauf wlnth7x1
+klickauf wlnth7x2
 warteauf "welcome: page 1 of 3" || 60
 warte 2
 foto 01-net
-klickauf wlnth7x2
+klickauf wlnth7x3
 warteauf "welcome: page 2 of 3" || 60
 warte 2
 foto 02-done
