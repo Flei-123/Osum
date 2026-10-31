@@ -20,8 +20,21 @@
 #include <time.h>
 #include <dirent.h>
 
+static void absent_syscalls(void)
+{
+    errno = 0; long r = syscall(435, 0, 0);
+    CHECK("clone3_enosys", r == -1 && errno == ENOSYS, "r %ld errno %d", r, errno);
+    errno = 0; r = syscall(334, 0, 0, 0, 0);
+    CHECK("rseq_enosys", r == -1 && errno == ENOSYS, "r %ld errno %d", r, errno);
+    errno = 0; r = syscall(332, -100, "/", 0, 0, 0);
+    CHECK("statx_enosys_or_ok", (r == -1 && errno == ENOSYS) || r == 0, "r %ld errno %d", r, errno);
+    errno = 0; r = syscall(219);
+    CHECK("restart_syscall_eintr", r == -1 && errno == EINTR, "r %ld errno %d", r, errno);
+}
+
 int main(void)
 {
+    absent_syscalls();
     cpu_set_t cs; CPU_ZERO(&cs); errno = 0;
     int r = sched_getaffinity(0, sizeof cs, &cs);
     CHECKC("sched_getaffinity", r == 0);
