@@ -1,0 +1,243 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.crypto.sha256
+import std.crypto.hmac
+import tpm.tpmwire
+import tpm.tpmcmd
+
+export { seal, unseal, TP_OK, TP_E_IO, TP_E_AUTH, TP_E_LOCKOUT, TP_E_TPM, TP_E_PARAM, last_rc,
+    policy_digest }
+
+const TP_OK: i32 = 0
+const TP_E_IO: i32 = 1
+const TP_E_AUTH: i32 = 2
+const TP_E_LOCKOUT: i32 = 3
+const TP_E_TPM: i32 = 4
+const TP_E_PARAM: i32 = 5
+
+const CC_START_AUTH_SESSION: u64 = 0x176
+const RH_NULL: u64 = 0x40000007
+const NONCE_LEN: usize = 16
+
+static mut rc_last: u64 = 0
+
+fn last_rc() -> u64 {
+    return rc_last
+}
+
+fn map_rc(rc: u64) -> i32 {
+    rc_last = rc
+    if rc == tpmwire.RC_OK {
+        return TP_OK
+    }
+    if rc == tpmwire.RC_IO {
+        return TP_E_IO
+    }
+    if rc == tpmcmd.RC_LOCKOUT {
+        return TP_E_LOCKOUT
+    }
+    let code: u64 = rc & 0xBF
+    if code == 0x8E || code == 0xA2 {
+        return TP_E_AUTH
+    }
+    return TP_E_TPM
+}
+
+fn policy_digest(out: u64) {
+    var buf: [u8; 36] = [0; 36]
+    tpmwire.st8((&buf[0]) as u64, 32, tpmcmd.CC_POLICY_AUTH_VALUE >> 24)
+    tpmwire.st8((&buf[0]) as u64, 33, tpmcmd.CC_POLICY_AUTH_VALUE >> 16)
+    tpmwire.st8((&buf[0]) as u64, 34, tpmcmd.CC_POLICY_AUTH_VALUE >> 8)
+    tpmwire.st8((&buf[0]) as u64, 35, tpmcmd.CC_POLICY_AUTH_VALUE)
+    sha256.sha256((&buf[0]) as u64, 36, out)
+}
+
+fn seal(exec: fn(u64, u64, u64, u64) -> u64, auth: u64, secret: u64, secret_n: usize,
+    out: *mut rt.Buf) -> i32 {
+    if secret_n == 0 || secret_n > 128 {
+        return TP_E_PARAM
+    }
+    var policy: [u8; 32] = [0; 32]
+    policy_digest((&policy[0]) as u64)
+    var parent: u64 = 0
+    var rc: u64 = tpmcmd.create_primary(exec, &parent)
+    if rc != tpmwire.RC_OK {
+        return map_rc(rc)
+    }
+    var priv: rt.Buf = rt.buf_new()
+    var pub: rt.Buf = rt.buf_new()
+    rc = tpmcmd.create_sealed(exec, parent, auth, (&policy[0]) as u64, secret, secret_n, &priv, &pub)
+    tpmcmd.flush(exec, parent)
+    if rc == tpmwire.RC_OK {
+        rt.buf_push_bytes(out, rt.buf_ptr(&priv), rt.buf_len(&priv))
+        rt.buf_push_bytes(out, rt.buf_ptr(&pub), rt.buf_len(&pub))
+    }
+    rt.buf_free(&priv)
+    rt.buf_free(&pub)
+    return map_rc(rc)
+}
+
+fn start_policy_session(exec: fn(u64, u64, u64, u64) -> u64, handle: *mut u64, caller: u64,
+    tpm_nonce: u64) -> u64 {
+    var cmd: rt.Buf = rt.buf_new()
+    var rsp: [u8; 2048] = [0; 2048]
+    var got: usize = 0
+    var rc: u64 = tpmcmd.get_random(exec, caller, NONCE_LEN)
+    if rc != tpmwire.RC_OK {
+        rt.buf_free(&cmd)
+        return rc
+    }
+    tpmwire.cmd_begin(&cmd, tpmwire.TAG_NONE, CC_START_AUTH_SESSION)
+    tpmwire.put32(&cmd, RH_NULL)
+    tpmwire.put32(&cmd, RH_NULL)
+    tpmwire.put2b(&cmd, caller, NONCE_LEN)
+    tpmwire.put16(&cmd, 0)
+    rt.buf_push(&cmd, 1 as u8)
+    tpmwire.put16(&cmd, 0x0010)
+    tpmwire.put16(&cmd, 0x000B)
+    rc = tpmcmd.xfer(exec, &cmd, (&rsp[0]) as u64, &got)
+    rt.buf_free(&cmd)
+    if rc != tpmwire.RC_OK {
+        return rc
+    }
+    let rp: u64 = (&rsp[0]) as u64
+    if tpmwire.get16(rp, 14) != NONCE_LEN as u64 || got < 14 + 2 + NONCE_LEN {
+        return tpmwire.RC_IO
+    }
+    *handle = tpmwire.get32(rp, 10)
+    rt.mem_copy(tpm_nonce, rp + 16, NONCE_LEN)
+    return tpmwire.RC_OK
+}
+
+fn policy_auth_value(exec: fn(u64, u64, u64, u64) -> u64, session: u64) -> u64 {
+    var cmd: rt.Buf = rt.buf_new()
+    var rsp: [u8; 2048] = [0; 2048]
+    var got: usize = 0
+    tpmwire.cmd_begin(&cmd, tpmwire.TAG_NONE, tpmcmd.CC_POLICY_AUTH_VALUE)
+    tpmwire.put32(&cmd, session)
+    let rc: u64 = tpmcmd.xfer(exec, &cmd, (&rsp[0]) as u64, &got)
+    rt.buf_free(&cmd)
+    return rc
+}
+
+fn cc_bytes(b: *mut rt.Buf, v: u64) {
+    tpmwire.put32(b, v)
+}
+
+fn unseal_with(exec: fn(u64, u64, u64, u64) -> u64, item: u64, name: u64, name_n: usize,
+    session: u64, caller: u64, tpm_nonce: u64, auth: u64, out: u64, cap: usize,
+    n_out: *mut usize) -> u64 {
+    var cp: rt.Buf = rt.buf_new()
+    cc_bytes(&cp, tpmcmd.CC_UNSEAL)
+    rt.buf_push_bytes(&cp, name, name_n)
+    var cphash: [u8; 32] = [0; 32]
+    sha256.sha256(rt.buf_ptr(&cp), rt.buf_len(&cp), (&cphash[0]) as u64)
+    rt.buf_free(&cp)
+    var hin: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&hin, (&cphash[0]) as u64, 32)
+    rt.buf_push_bytes(&hin, caller, NONCE_LEN)
+    rt.buf_push_bytes(&hin, tpm_nonce, NONCE_LEN)
+    rt.buf_push(&hin, 0 as u8)
+    var mac: [u8; 32] = [0; 32]
+    hmac.hmac_sha256(auth, 32, rt.buf_ptr(&hin), rt.buf_len(&hin), (&mac[0]) as u64)
+    rt.buf_free(&hin)
+    var cmd: rt.Buf = rt.buf_new()
+    var rsp: [u8; 2048] = [0; 2048]
+    var got: usize = 0
+    tpmwire.cmd_begin(&cmd, tpmwire.TAG_SESS, tpmcmd.CC_UNSEAL)
+    tpmwire.put32(&cmd, item)
+    tpmwire.put32(&cmd, (4 + 2 + NONCE_LEN + 1 + 2 + 32) as u64)
+    tpmwire.put32(&cmd, session)
+    tpmwire.put2b(&cmd, caller, NONCE_LEN)
+    rt.buf_push(&cmd, 0 as u8)
+    tpmwire.put2b(&cmd, (&mac[0]) as u64, 32)
+    let rc: u64 = tpmcmd.xfer(exec, &cmd, (&rsp[0]) as u64, &got)
+    rt.buf_free(&cmd)
+    if rc != tpmwire.RC_OK {
+        return rc
+    }
+    let rp: u64 = (&rsp[0]) as u64
+    let plen: usize = tpmwire.get32(rp, 10) as usize
+    if 14 + plen + 2 + NONCE_LEN + 1 + 2 + 32 > got || plen < 2 {
+        return tpmwire.RC_IO
+    }
+    let dlen: usize = tpmwire.get16(rp, 14) as usize
+    if dlen + 2 != plen || dlen > cap {
+        return tpmwire.RC_IO
+    }
+    let aoff: usize = 14 + plen
+    if tpmwire.get16(rp, aoff) != NONCE_LEN as u64 {
+        return tpmwire.RC_IO
+    }
+    var rin: rt.Buf = rt.buf_new()
+    var rcb: [u8; 8] = [0; 8]
+    tpmwire.st8((&rcb[0]) as u64, 4, tpmcmd.CC_UNSEAL >> 24)
+    tpmwire.st8((&rcb[0]) as u64, 5, tpmcmd.CC_UNSEAL >> 16)
+    tpmwire.st8((&rcb[0]) as u64, 6, tpmcmd.CC_UNSEAL >> 8)
+    tpmwire.st8((&rcb[0]) as u64, 7, tpmcmd.CC_UNSEAL)
+    rt.buf_push_bytes(&rin, (&rcb[0]) as u64, 8)
+    rt.buf_push_bytes(&rin, rp + 14, plen)
+    var rphash: [u8; 32] = [0; 32]
+    sha256.sha256(rt.buf_ptr(&rin), rt.buf_len(&rin), (&rphash[0]) as u64)
+    rt.buf_free(&rin)
+    var rhin: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&rhin, (&rphash[0]) as u64, 32)
+    rt.buf_push_bytes(&rhin, rp + aoff as u64 + 2, NONCE_LEN)
+    rt.buf_push_bytes(&rhin, caller, NONCE_LEN)
+    rt.buf_push(&rhin, tpmwire.ld8(rp, aoff + 2 + NONCE_LEN) as u8)
+    var rmac: [u8; 32] = [0; 32]
+    hmac.hmac_sha256(auth, 32, rt.buf_ptr(&rhin), rt.buf_len(&rhin), (&rmac[0]) as u64)
+    rt.buf_free(&rhin)
+    let hoff: usize = aoff + 2 + NONCE_LEN + 1
+    if tpmwire.get16(rp, hoff) != 32 || !hmac.hmac_equal((&rmac[0]) as u64, rp + hoff as u64 + 2, 32) {
+        return tpmwire.RC_IO
+    }
+    rt.mem_copy(out, rp + 16, dlen)
+    *n_out = dlen
+    return tpmwire.RC_OK
+}
+
+fn unseal(exec: fn(u64, u64, u64, u64) -> u64, auth: u64, blob: u64, blob_n: usize, out: u64,
+    cap: usize, n_out: *mut usize) -> i32 {
+    if blob_n < 4 {
+        return TP_E_PARAM
+    }
+    let plen: usize = tpmwire.get16(blob, 0) as usize
+    if 2 + plen + 2 > blob_n {
+        return TP_E_PARAM
+    }
+    let ulen: usize = tpmwire.get16(blob, 2 + plen) as usize
+    if 4 + plen + ulen != blob_n {
+        return TP_E_PARAM
+    }
+    var parent: u64 = 0
+    var rc: u64 = tpmcmd.create_primary(exec, &parent)
+    if rc != tpmwire.RC_OK {
+        return map_rc(rc)
+    }
+    var item: u64 = 0
+    var name: [u8; 66] = [0; 66]
+    var name_n: usize = 0
+    rc = tpmcmd.load(exec, parent, blob, 2 + plen, blob + (2 + plen) as u64, 2 + ulen, &item,
+        (&name[0]) as u64, &name_n)
+    tpmcmd.flush(exec, parent)
+    if rc != tpmwire.RC_OK {
+        return map_rc(rc)
+    }
+    var session: u64 = 0
+    var caller: [u8; 16] = [0; 16]
+    var tpm_nonce: [u8; 16] = [0; 16]
+    rc = start_policy_session(exec, &session, (&caller[0]) as u64, (&tpm_nonce[0]) as u64)
+    if rc != tpmwire.RC_OK {
+        tpmcmd.flush(exec, item)
+        return map_rc(rc)
+    }
+    rc = policy_auth_value(exec, session)
+    if rc == tpmwire.RC_OK {
+        rc = unseal_with(exec, item, (&name[0]) as u64, name_n, session, (&caller[0]) as u64,
+            (&tpm_nonce[0]) as u64, auth, out, cap, n_out)
+    }
+    tpmcmd.flush(exec, session)
+    tpmcmd.flush(exec, item)
+    return map_rc(rc)
+}

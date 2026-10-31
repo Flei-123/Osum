@@ -1,0 +1,194 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import tpm.tpmwire
+
+export { RSP_CAP, xfer, startup, get_random, create_primary, create_sealed, load, flush,
+    CC_UNSEAL, CC_POLICY_AUTH_VALUE, RC_LOCKOUT }
+
+const RSP_CAP: usize = 2048
+const CC_STARTUP: u64 = 0x144
+const CC_CREATE_PRIMARY: u64 = 0x131
+const CC_CREATE: u64 = 0x153
+const CC_LOAD: u64 = 0x157
+const CC_FLUSH: u64 = 0x165
+const CC_GET_RANDOM: u64 = 0x17B
+const CC_UNSEAL: u64 = 0x15E
+const CC_POLICY_AUTH_VALUE: u64 = 0x16B
+const RH_OWNER: u64 = 0x40000001
+const RC_LOCKOUT: u64 = 0x921
+const RC_RETRY: u64 = 0x922
+const RETRIES: usize = 8
+
+fn xfer(exec: fn(u64, u64, u64, u64) -> u64, cmd: *mut rt.Buf, rsp: u64, got: *mut usize) -> u64 {
+    tpmwire.cmd_finish(cmd)
+    var tries: usize = 0
+    while tries < RETRIES {
+        let n: u64 = exec(rt.buf_ptr(cmd), rt.buf_len(cmd) as u64, rsp, RSP_CAP as u64)
+        if n < 10 || n > RSP_CAP as u64 {
+            return tpmwire.RC_IO
+        }
+        if tpmwire.get32(rsp, 2) != n {
+            return tpmwire.RC_IO
+        }
+        *got = n as usize
+        let rc: u64 = tpmwire.get32(rsp, 6)
+        if rc != RC_RETRY {
+            return rc
+        }
+        tries = tries + 1
+    }
+    return RC_RETRY
+}
+
+fn startup(exec: fn(u64, u64, u64, u64) -> u64) -> u64 {
+    var cmd: rt.Buf = rt.buf_new()
+    var rsp: [u8; 2048] = [0; 2048]
+    var got: usize = 0
+    tpmwire.cmd_begin(&cmd, tpmwire.TAG_NONE, CC_STARTUP)
+    tpmwire.put16(&cmd, 0)
+    let rc: u64 = xfer(exec, &cmd, (&rsp[0]) as u64, &got)
+    rt.buf_free(&cmd)
+    return rc
+}
+
+fn get_random(exec: fn(u64, u64, u64, u64) -> u64, out: u64, n: usize) -> u64 {
+    var cmd: rt.Buf = rt.buf_new()
+    var rsp: [u8; 2048] = [0; 2048]
+    var got: usize = 0
+    tpmwire.cmd_begin(&cmd, tpmwire.TAG_NONE, CC_GET_RANDOM)
+    tpmwire.put16(&cmd, n as u64)
+    var rc: u64 = xfer(exec, &cmd, (&rsp[0]) as u64, &got)
+    rt.buf_free(&cmd)
+    if rc != tpmwire.RC_OK {
+        return rc
+    }
+    if tpmwire.get16((&rsp[0]) as u64, 10) != n as u64 {
+        return tpmwire.RC_IO
+    }
+    rt.mem_copy(out, ((&rsp[0]) as u64) + 12, n)
+    return tpmwire.RC_OK
+}
+
+fn put_primary_public(b: *mut rt.Buf) {
+    var zeros: [u8; 32] = [0; 32]
+    tpmwire.put16(b, 90)
+    tpmwire.put16(b, 0x0023)
+    tpmwire.put16(b, 0x000B)
+    tpmwire.put32(b, 0x00030072)
+    tpmwire.put16(b, 0)
+    tpmwire.put16(b, 0x0006)
+    tpmwire.put16(b, 0x0080)
+    tpmwire.put16(b, 0x0043)
+    tpmwire.put16(b, 0x0010)
+    tpmwire.put16(b, 0x0003)
+    tpmwire.put16(b, 0x0010)
+    tpmwire.put2b(b, (&zeros[0]) as u64, 32)
+    tpmwire.put2b(b, (&zeros[0]) as u64, 32)
+}
+
+fn create_primary(exec: fn(u64, u64, u64, u64) -> u64, handle: *mut u64) -> u64 {
+    var cmd: rt.Buf = rt.buf_new()
+    var rsp: [u8; 2048] = [0; 2048]
+    var got: usize = 0
+    tpmwire.cmd_begin(&cmd, tpmwire.TAG_SESS, CC_CREATE_PRIMARY)
+    tpmwire.put32(&cmd, RH_OWNER)
+    tpmwire.put_pw_auth(&cmd)
+    tpmwire.put16(&cmd, 4)
+    tpmwire.put16(&cmd, 0)
+    tpmwire.put16(&cmd, 0)
+    put_primary_public(&cmd)
+    tpmwire.put16(&cmd, 0)
+    tpmwire.put32(&cmd, 0)
+    let rc: u64 = xfer(exec, &cmd, (&rsp[0]) as u64, &got)
+    rt.buf_free(&cmd)
+    if rc == tpmwire.RC_OK {
+        *handle = tpmwire.get32((&rsp[0]) as u64, 10)
+    }
+    return rc
+}
+
+fn create_sealed(exec: fn(u64, u64, u64, u64) -> u64, parent: u64, auth: u64, policy: u64,
+    secret: u64, secret_n: usize, out_priv: *mut rt.Buf, out_pub: *mut rt.Buf) -> u64 {
+    var cmd: rt.Buf = rt.buf_new()
+    var rsp: [u8; 2048] = [0; 2048]
+    var got: usize = 0
+    tpmwire.cmd_begin(&cmd, tpmwire.TAG_SESS, CC_CREATE)
+    tpmwire.put32(&cmd, parent)
+    tpmwire.put_pw_auth(&cmd)
+    tpmwire.put16(&cmd, (2 + 32 + 2 + secret_n) as u64)
+    tpmwire.put2b(&cmd, auth, 32)
+    tpmwire.put2b(&cmd, secret, secret_n)
+    tpmwire.put16(&cmd, 46)
+    tpmwire.put16(&cmd, 0x0008)
+    tpmwire.put16(&cmd, 0x000B)
+    tpmwire.put32(&cmd, 0x00000012)
+    tpmwire.put2b(&cmd, policy, 32)
+    tpmwire.put16(&cmd, 0x0010)
+    tpmwire.put16(&cmd, 0)
+    tpmwire.put16(&cmd, 0)
+    tpmwire.put32(&cmd, 0)
+    let rc: u64 = xfer(exec, &cmd, (&rsp[0]) as u64, &got)
+    wipe_cmd(&cmd)
+    if rc != tpmwire.RC_OK {
+        return rc
+    }
+    let rp: u64 = (&rsp[0]) as u64
+    let plen: usize = tpmwire.get16(rp, 14) as usize
+    if 16 + plen + 2 > got {
+        return tpmwire.RC_IO
+    }
+    let ulen: usize = tpmwire.get16(rp, 16 + plen) as usize
+    if 18 + plen + ulen > got {
+        return tpmwire.RC_IO
+    }
+    tpmwire.put2b(out_priv, rp + 16, plen)
+    tpmwire.put2b(out_pub, rp + 18 + plen as u64, ulen)
+    return tpmwire.RC_OK
+}
+
+fn wipe_cmd(b: *mut rt.Buf) {
+    var i: usize = 0
+    let p: u64 = rt.buf_ptr(b)
+    while i < rt.buf_len(b) {
+        tpmwire.st8(p, i, 0)
+        i = i + 1
+    }
+    rt.buf_free(b)
+}
+
+fn load(exec: fn(u64, u64, u64, u64) -> u64, parent: u64, priv2b: u64, priv_n: usize, pub2b: u64,
+    pub_n: usize, handle: *mut u64, name: u64, name_n: *mut usize) -> u64 {
+    var cmd: rt.Buf = rt.buf_new()
+    var rsp: [u8; 2048] = [0; 2048]
+    var got: usize = 0
+    tpmwire.cmd_begin(&cmd, tpmwire.TAG_SESS, CC_LOAD)
+    tpmwire.put32(&cmd, parent)
+    tpmwire.put_pw_auth(&cmd)
+    rt.buf_push_bytes(&cmd, priv2b, priv_n)
+    rt.buf_push_bytes(&cmd, pub2b, pub_n)
+    let rc: u64 = xfer(exec, &cmd, (&rsp[0]) as u64, &got)
+    rt.buf_free(&cmd)
+    if rc != tpmwire.RC_OK {
+        return rc
+    }
+    let rp: u64 = (&rsp[0]) as u64
+    let nn: usize = tpmwire.get16(rp, 18) as usize
+    if nn > 66 || 20 + nn > got {
+        return tpmwire.RC_IO
+    }
+    *handle = tpmwire.get32(rp, 10)
+    rt.mem_copy(name, rp + 20, nn)
+    *name_n = nn
+    return tpmwire.RC_OK
+}
+
+fn flush(exec: fn(u64, u64, u64, u64) -> u64, handle: u64) -> u64 {
+    var cmd: rt.Buf = rt.buf_new()
+    var rsp: [u8; 2048] = [0; 2048]
+    var got: usize = 0
+    tpmwire.cmd_begin(&cmd, tpmwire.TAG_NONE, CC_FLUSH)
+    tpmwire.put32(&cmd, handle)
+    let rc: u64 = xfer(exec, &cmd, (&rsp[0]) as u64, &got)
+    rt.buf_free(&cmd)
+    return rc
+}

@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.crypto.hkdf
+import vault.vlayout
+import vault.vrand
+import vault.container
+import tpm.tpmseal
+
+export { VT_VERSION, blob_for, open_slot, has_slot, slot_blob_of }
+
+const VT_VERSION: u8 = 1
+const SALT_LEN: usize = 16
+const HEAD_LEN: usize = 17
+const AUTH_LABEL: str = "vault2 tpm auth"
+
+fn derive_auth(salt: u64, pin: u64, pinn: usize, out: u64) -> bool {
+    return hkdf.hkdf(salt, SALT_LEN, pin, pinn, AUTH_LABEL.p as u64, AUTH_LABEL.n, out, 32)
+}
+
+fn blob_for(exec: fn(u64, u64, u64, u64) -> u64, vk: u64, pin: u64, pinn: usize,
+    out: *mut rt.Buf) -> i32 {
+    if pinn == 0 {
+        return tpmseal.TP_E_PARAM
+    }
+    var salt: [u8; 16] = [0; 16]
+    if !vrand.fill((&salt[0]) as u64, SALT_LEN) {
+        return tpmseal.TP_E_PARAM
+    }
+    var auth: [u8; 32] = [0; 32]
+    if !derive_auth((&salt[0]) as u64, pin, pinn, (&auth[0]) as u64) {
+        return tpmseal.TP_E_PARAM
+    }
+    rt.buf_push(out, VT_VERSION)
+    rt.buf_push_bytes(out, (&salt[0]) as u64, SALT_LEN)
+    let rc: i32 = tpmseal.seal(exec, (&auth[0]) as u64, vk, vlayout.KEY_LEN, out)
+    vlayout.wipe((&auth[0]) as u64, 32)
+    return rc
+}
+
+fn slot_blob_of(p: u64, n: usize, off_out: *mut usize, len_out: *mut usize) -> bool {
+    var info: vlayout.Info = vlayout.info_zero()
+    if vlayout.parse_header(p, n, &info) != vlayout.VC_OK {
+        return false
+    }
+    var s: vlayout.SlotRef = vlayout.slotref_zero()
+    if !container.find_slot(p, &info, vlayout.SLOT_TPM, &s) {
+        return false
+    }
+    if s.len < vlayout.SLOT_HEADER + HEAD_LEN + 4 {
+        return false
+    }
+    *off_out = s.off + vlayout.SLOT_HEADER
+    *len_out = s.len - vlayout.SLOT_HEADER
+    return true
+}
+
+fn has_slot(p: u64, n: usize) -> bool {
+    var off: usize = 0
+    var len: usize = 0
+    return slot_blob_of(p, n, &off, &len)
+}
+
+fn open_slot(exec: fn(u64, u64, u64, u64) -> u64, p: u64, n: usize, pin: u64, pinn: usize,
+    vk_out: u64) -> i32 {
+    var off: usize = 0
+    var len: usize = 0
+    if !slot_blob_of(p, n, &off, &len) {
+        return tpmseal.TP_E_PARAM
+    }
+    if rt.ld8(p, off) != VT_VERSION {
+        return tpmseal.TP_E_PARAM
+    }
+    var auth: [u8; 32] = [0; 32]
+    if !derive_auth(p + (off + 1) as u64, pin, pinn, (&auth[0]) as u64) {
+        return tpmseal.TP_E_PARAM
+    }
+    var vk: [u8; 64] = [0; 64]
+    var got: usize = 0
+    let rc: i32 = tpmseal.unseal(exec, (&auth[0]) as u64, p + (off + HEAD_LEN) as u64,
+        len - HEAD_LEN, (&vk[0]) as u64, 64, &got)
+    vlayout.wipe((&auth[0]) as u64, 32)
+    if rc == tpmseal.TP_OK {
+        if got != vlayout.KEY_LEN {
+            vlayout.wipe((&vk[0]) as u64, 64)
+            return tpmseal.TP_E_TPM
+        }
+        rt.mem_copy(vk_out, (&vk[0]) as u64, vlayout.KEY_LEN)
+    }
+    vlayout.wipe((&vk[0]) as u64, 64)
+    return rc
+}

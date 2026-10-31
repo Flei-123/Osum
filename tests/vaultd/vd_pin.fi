@@ -1,0 +1,92 @@
+import std.rt
+import std.testkit
+import vaultd.vdctx
+import vaultd.vdhooks
+import vaultd.vdsess
+import vaultd.vdwire
+import req_helper
+
+static mut pin_fails: u64 = 0
+
+fn mock_tpm(cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
+    return 0
+}
+
+fn mock_pin(name: u64, pin: u64, wait_out: u64) -> u64 {
+    if pin_fails >= 3 {
+        *(wait_out as *mut u64) = 30
+        return vdhooks.PIN_LOCKED
+    }
+    let good: str = "2468"
+    var i: usize = 0
+    var same: bool = true
+    while i < good.n {
+        if rt.ld8(pin, i) != rt.ld8(good.p as u64, i) {
+            same = false
+        }
+        i = i + 1
+    }
+    if same && rt.ld8(pin, good.n) == 0 {
+        pin_fails = 0
+        return vdhooks.PIN_OK
+    }
+    pin_fails = pin_fails + 1
+    return vdhooks.PIN_WRONG
+}
+
+fn reveal_with(d: *mut vdctx.Daemon, id: *mut rt.Buf, key: str, val: str, out: *mut rt.Buf) {
+    req_helper.tick(100000)
+    var r: req_helper.Rq = req_helper.rq_new("reveal")
+    vdwire.put_text(&r.b, "id=")
+    rt.buf_push_bytes(&r.b, rt.buf_ptr(id), rt.buf_len(id))
+    vdwire.nl(&r.b)
+    req_helper.rq_hex(&r, key, val)
+    req_helper.send(d, 1000, "", &r, out)
+}
+
+fn run_uv(root: str, ctx: u64) {
+    var d: vdctx.Daemon = req_helper.daemon(root)
+    vdctx.set_hooks(&d, mock_tpm, false, mock_pin)
+    var out: rt.Buf = rt.buf_new()
+    req_helper.create(&d, 1000, &out)
+    req_helper.put_login(&d, 1000, "Mine", "https://a.example", "alice", "alice-pass", &out)
+    var id: rt.Buf = rt.buf_new()
+    vdwire.text_get(rt.buf_str(&out), "id", &id)
+    req_helper.simple(&d, 1000, "", "status", &out)
+    testkit.assert_true(req_helper.contains2(&out, "tpm=0"), "no tpm reported")
+    testkit.assert_true(req_helper.contains2(&out, "pinunlock=0"), "no pin unlock without tpm")
+    reveal_with(&d, &id, "pin", "9999", &out)
+    testkit.assert_true(req_helper.err_is(&out, "bad"), "wrong pin refused")
+    reveal_with(&d, &id, "pin", "2468", &out)
+    testkit.assert_true(req_helper.ok_of(&out), "right pin is user verification")
+    testkit.assert_true(req_helper.contains(&out, "alice-pass"), "password revealed after pin uv")
+    reveal_with(&d, &id, "pw", "correct horse", &out)
+    testkit.assert_true(req_helper.ok_of(&out), "password still works as uv")
+    reveal_with(&d, &id, "pin", "1", &out)
+    reveal_with(&d, &id, "pin", "1", &out)
+    reveal_with(&d, &id, "pin", "1", &out)
+    reveal_with(&d, &id, "pin", "2468", &out)
+    testkit.assert_true(req_helper.err_is(&out, "wait"), "pin locked after three wrong tries")
+    testkit.assert_eq_u64(vdwire.num_get(rt.buf_str(&out), "wait", 0), 30)
+    reveal_with(&d, &id, "pw", "correct horse", &out)
+    testkit.assert_true(req_helper.ok_of(&out), "password path untouched by pin lock")
+    req_helper.tick(100000)
+    var e: req_helper.Rq = req_helper.rq_new("tpmenroll")
+    req_helper.rq_hex(&e, "pin", "2468")
+    req_helper.send(&d, 1000, "", &e, &out)
+    testkit.assert_true(req_helper.err_is(&out, "tpm"), "enroll needs a tpm")
+    req_helper.simple(&d, 1000, "", "lock", &out)
+    req_helper.tick(100000)
+    var u: req_helper.Rq = req_helper.rq_new("unlock")
+    req_helper.rq_hex(&u, "pin", "2468")
+    req_helper.send(&d, 1000, "", &u, &out)
+    testkit.assert_true(req_helper.err_is(&out, "tpm"), "pin unlock needs a tpm");
+    rt.buf_free(&id)
+    rt.buf_free(&out)
+}
+
+#[test]
+fn pin_is_uv_only_without_tpm() {
+    pin_fails = 0
+    testkit.with_dir(run_uv, 0)
+}

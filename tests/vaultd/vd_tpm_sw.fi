@@ -1,0 +1,87 @@
+import std.rt
+import std.testkit
+import vaultd.vdctx
+import vaultd.vdhooks
+import vaultd.vdwire
+import tpm.tpmsock
+import req_helper
+
+static mut good_pin: [u8; 8] = [50, 52, 54, 56, 0, 0, 0, 0]
+
+fn pin_ok(name: u64, pin: u64, wait_out: u64) -> u64 {
+    var i: usize = 0
+    while i < 5 {
+        if rt.ld8(pin, i) as u64 != good_pin[i] as u64 {
+            return vdhooks.PIN_WRONG
+        }
+        i = i + 1
+    }
+    return vdhooks.PIN_OK
+}
+
+fn pin_req(op: str, pin: str) -> req_helper.Rq {
+    req_helper.tick(100000)
+    var r: req_helper.Rq = req_helper.rq_new(op)
+    req_helper.rq_hex(&r, "pin", pin)
+    return r
+}
+
+fn run_tpm(root: str, ctx: u64) {
+    testkit.assert_true(tpmsock.connect(), "swtpm connect")
+    var d: vdctx.Daemon = req_helper.daemon(root)
+    vdctx.set_hooks(&d, tpmsock.exec_sw, true, pin_ok)
+    var out: rt.Buf = rt.buf_new()
+    req_helper.create(&d, 1000, &out)
+    req_helper.put_login(&d, 1000, "Mine", "https://a.example", "alice", "alice-pass", &out)
+    req_helper.simple(&d, 1000, "", "status", &out)
+    testkit.assert_true(req_helper.contains2(&out, "tpmslot=0"), "no slot yet")
+    var bad: req_helper.Rq = pin_req("tpmenroll", "1111")
+    req_helper.send(&d, 1000, "", &bad, &out)
+    testkit.assert_true(req_helper.err_is(&out, "bad"), "enroll needs the right pin")
+    var e: req_helper.Rq = pin_req("tpmenroll", "2468")
+    req_helper.send(&d, 1000, "", &e, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "enroll ok")
+    req_helper.simple(&d, 1000, "", "status", &out)
+    testkit.assert_true(req_helper.contains2(&out, "tpmslot=1"), "slot present")
+    req_helper.simple(&d, 1000, "", "lock", &out)
+    req_helper.simple(&d, 1000, "", "status", &out)
+    testkit.assert_true(req_helper.contains2(&out, "pinunlock=1"), "pin unlock offered when locked")
+    var w: req_helper.Rq = pin_req("unlock", "1111")
+    req_helper.send(&d, 1000, "", &w, &out)
+    testkit.assert_true(req_helper.err_is(&out, "bad"), "wrong pin does not unlock")
+    var u: req_helper.Rq = pin_req("unlock", "2468")
+    req_helper.send(&d, 1000, "", &u, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "pin unlock through tpm")
+    req_helper.simple(&d, 1000, "", "list", &out)
+    testkit.assert_true(req_helper.contains(&out, "Mine"), "store readable after pin unlock")
+    good_pin[0] = 57
+    var changed: req_helper.Rq = pin_req("tpmenroll", "9468")
+    req_helper.send(&d, 1000, "", &changed, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "re-enroll with the new pin")
+    req_helper.simple(&d, 1000, "", "lock", &out)
+    var old: req_helper.Rq = pin_req("unlock", "2468")
+    req_helper.send(&d, 1000, "", &old, &out)
+    testkit.assert_true(!req_helper.ok_of(&out), "old pin no longer opens")
+    var fresh: req_helper.Rq = pin_req("unlock", "9468")
+    req_helper.send(&d, 1000, "", &fresh, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "new pin opens")
+    req_helper.tick(100000)
+    req_helper.simple(&d, 1000, "", "tpmdrop", &out)
+    testkit.assert_true(req_helper.ok_of(&out), "slot dropped")
+    req_helper.simple(&d, 1000, "", "lock", &out)
+    var gone: req_helper.Rq = pin_req("unlock", "9468")
+    req_helper.send(&d, 1000, "", &gone, &out)
+    testkit.assert_true(req_helper.err_is(&out, "noslot"), "no slot, no pin unlock")
+    var pw: req_helper.Rq = req_helper.rq_new("unlock")
+    req_helper.tick(100000)
+    req_helper.rq_hex(&pw, "pw", "correct horse")
+    req_helper.send(&d, 1000, "", &pw, &out)
+    testkit.assert_true(req_helper.ok_of(&out), "password still opens")
+    rt.buf_free(&out)
+    tpmsock.disconnect()
+}
+
+#[test]
+fn pin_unlocks_through_tpm_slot() {
+    testkit.with_dir(run_tpm, 0)
+}

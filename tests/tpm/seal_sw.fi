@@ -1,0 +1,85 @@
+import std.rt
+import std.testkit
+import tpm.tpmwire
+import tpm.tpmcmd
+import tpm.tpmseal
+import tpm.tpmsock
+
+fn fill(p: u64, n: usize, base: u64) {
+    var i: usize = 0
+    while i < n {
+        tpmwire.st8(p, i, base + i as u64)
+        i = i + 1
+    }
+}
+
+fn same(a: u64, b: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < n {
+        if tpmwire.ld8(a, i) != tpmwire.ld8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+#[test]
+fn swtpm_get_random() {
+    testkit.assert_true(tpmsock.connect(), "check")
+    var r: [u8; 16] = [0; 16]
+    testkit.assert_eq_u64(tpmcmd.get_random(tpmsock.exec_sw, (&r[0]) as u64, 16), 0)
+}
+
+#[test]
+fn swtpm_seal_unseal() {
+    testkit.assert_true(tpmsock.connect(), "check")
+    var auth: [u8; 32] = [0; 32]
+    var secret: [u8; 32] = [0; 32]
+    fill((&auth[0]) as u64, 32, 7)
+    fill((&secret[0]) as u64, 32, 100)
+    var blob: rt.Buf = rt.buf_new()
+    let sr: i32 = tpmseal.seal(tpmsock.exec_sw, (&auth[0]) as u64, (&secret[0]) as u64, 32, &blob)
+    testkit.assert_eq_u64(tpmseal.last_rc(), 0)
+    testkit.assert_eq_i64(sr as i64, 0)
+    testkit.assert_true(rt.buf_len(&blob) > 100, "check")
+    var out: [u8; 64] = [0; 64]
+    var n: usize = 0
+    testkit.assert_eq_i64(tpmseal.unseal(tpmsock.exec_sw, (&auth[0]) as u64, rt.buf_ptr(&blob), rt.buf_len(&blob), (&out[0]) as u64, 64, &n) as i64, 0)
+    testkit.assert_eq_u64(n as u64, 32)
+    testkit.assert_true(same((&out[0]) as u64, (&secret[0]) as u64, 32), "check")
+    var wrong: [u8; 32] = [0; 32]
+    fill((&wrong[0]) as u64, 32, 9)
+    var out2: [u8; 64] = [0; 64]
+    testkit.assert_eq_i64(tpmseal.unseal(tpmsock.exec_sw, (&wrong[0]) as u64, rt.buf_ptr(&blob), rt.buf_len(&blob), (&out2[0]) as u64, 64, &n) as i64, tpmseal.TP_E_AUTH as i64)
+    testkit.assert_eq_i64(out2[0] as i64, 0)
+    testkit.assert_eq_i64(tpmseal.unseal(tpmsock.exec_sw, (&auth[0]) as u64, rt.buf_ptr(&blob), rt.buf_len(&blob), (&out2[0]) as u64, 64, &n) as i64, 0)
+    tpmsock.disconnect()
+}
+
+#[test]
+fn swtpm_lockout_after_failures() {
+    testkit.assert_true(tpmsock.connect(), "connect")
+    var auth: [u8; 32] = [0; 32]
+    var secret: [u8; 32] = [0; 32]
+    var wrong: [u8; 32] = [0; 32]
+    fill((&auth[0]) as u64, 32, 21)
+    fill((&secret[0]) as u64, 32, 50)
+    fill((&wrong[0]) as u64, 32, 22)
+    var blob: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(tpmseal.seal(tpmsock.exec_sw, (&auth[0]) as u64, (&secret[0]) as u64, 32, &blob) as i64, 0)
+    var out: [u8; 64] = [0; 64]
+    var n: usize = 0
+    var i: usize = 0
+    var locked: bool = false
+    while i < 64 && !locked {
+        let rc: i32 = tpmseal.unseal(tpmsock.exec_sw, (&wrong[0]) as u64, rt.buf_ptr(&blob), rt.buf_len(&blob), (&out[0]) as u64, 64, &n)
+        locked = rc == tpmseal.TP_E_LOCKOUT
+        i = i + 1
+    }
+    testkit.assert_true(locked, "lockout reached")
+    testkit.assert_true(i >= 1 && i < 40, "lockout after a bounded number of tries")
+    testkit.assert_eq_i64(tpmseal.unseal(tpmsock.exec_sw, (&auth[0]) as u64, rt.buf_ptr(&blob), rt.buf_len(&blob), (&out[0]) as u64, 64, &n) as i64, tpmseal.TP_E_LOCKOUT as i64)
+    testkit.assert_eq_i64(out[0] as i64, 0)
+    tpmsock.disconnect()
+}

@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import vault.vlayout
+import vault.container
+import vault.vtpm
+import tpm.tpmseal
+import vaultd.vdhooks
+import vaultd.vdsess
+import vaultd.vdfs
+
+export { unlock_pin, tpm_enroll, tpm_drop, verify_pin, locked_has_slot, open_has_slot }
+
+fn c_copy(src: u64, n: usize, out: *mut rt.Buf) {
+    rt.buf_push_bytes(out, src, n)
+    rt.buf_push(out, 0 as u8)
+}
+
+fn pin_rc(code: u64) -> i32 {
+    if code == vdhooks.PIN_OK {
+        return vdsess.R_OK
+    }
+    if code == vdhooks.PIN_WRONG || code == vdhooks.PIN_FORMAT {
+        return vdsess.R_BAD
+    }
+    if code == vdhooks.PIN_LOCKED {
+        return vdsess.R_WAIT
+    }
+    if code == vdhooks.PIN_NOPIN || code == vdhooks.PIN_DISABLED {
+        return vdsess.R_NOPIN
+    }
+    return vdsess.R_IO
+}
+
+fn check_pin(s: *mut vdsess.Session, h: *mut vdhooks.Hooks, user: str, pin: u64, pinn: usize) -> i32 {
+    var name: rt.Buf = rt.buf_new()
+    var secret: rt.Buf = rt.buf_new()
+    c_copy(user.p as u64, user.n, &name)
+    c_copy(pin, pinn, &secret)
+    var wait: u64 = 0
+    let code: u64 = (*h).pin_check(rt.buf_ptr(&name), rt.buf_ptr(&secret), (&wait) as u64)
+    vdsess.wipe_buf(&secret)
+    rt.buf_free(&name)
+    if code == vdhooks.PIN_LOCKED {
+        (*s).wait = wait
+    }
+    return pin_rc(code)
+}
+
+fn tpm_rc(rc: i32) -> i32 {
+    if rc == tpmseal.TP_OK {
+        return vdsess.R_OK
+    }
+    if rc == tpmseal.TP_E_AUTH {
+        return vdsess.R_BAD
+    }
+    if rc == tpmseal.TP_E_LOCKOUT {
+        return vdsess.R_TPMLOCK
+    }
+    return vdsess.R_TPM
+}
+
+fn locked_has_slot(dir: str) -> bool {
+    var img: rt.Buf = rt.buf_new()
+    var found: bool = false
+    if vdfs.present(vdsess.vault_path(dir)) && container.file_load(vdsess.vault_path(dir), &img) == vlayout.VC_OK {
+        found = vtpm.has_slot(rt.buf_ptr(&img), rt.buf_len(&img))
+    }
+    rt.buf_free(&img)
+    return found
+}
+
+fn open_has_slot(s: *mut vdsess.Session) -> bool {
+    return (*s).open != 0 && vtpm.has_slot(rt.buf_ptr(&(*s).img), rt.buf_len(&(*s).img))
+}
+
+fn unlock_pin(s: *mut vdsess.Session, h: *mut vdhooks.Hooks, root: str, user: str, pin: u64,
+    pinn: usize, now_s: u64, accept: bool) -> i32 {
+    if (*s).open != 0 {
+        return vdsess.R_OK
+    }
+    let dir: str = vdsess.user_dir(root, user)
+    if !vdfs.present(vdsess.vault_path(dir)) {
+        return vdsess.R_NONE
+    }
+    if !(*h).tpm_ready {
+        return vdsess.R_TPM
+    }
+    var img: rt.Buf = rt.buf_new()
+    let lrc: i32 = container.file_load(vdsess.vault_path(dir), &img)
+    if lrc != vlayout.VC_OK {
+        rt.buf_free(&img)
+        return vdsess.map_rc(lrc)
+    }
+    if !vtpm.has_slot(rt.buf_ptr(&img), rt.buf_len(&img)) {
+        rt.buf_free(&img)
+        return vdsess.R_NOSLOT
+    }
+    (*s).wait = 0
+    (*s).migrated = 0
+    let prc: i32 = check_pin(s, h, user, pin, pinn)
+    if prc != vdsess.R_OK {
+        rt.buf_free(&img)
+        return prc
+    }
+    var vk: [u8; 32] = [0; 32]
+    let trc: i32 = tpm_rc(vtpm.open_slot((*h).tpm_exec, rt.buf_ptr(&img), rt.buf_len(&img), pin,
+        pinn, (&vk[0]) as u64))
+    if trc != vdsess.R_OK {
+        rt.buf_free(&img)
+        return trc
+    }
+    var body: rt.Buf = rt.buf_new()
+    let brc: i32 = container.read_body(rt.buf_ptr(&img), rt.buf_len(&img), (&vk[0]) as u64, &body)
+    if brc != vlayout.VC_OK {
+        vlayout.wipe((&vk[0]) as u64, 32)
+        rt.buf_free(&img)
+        vdsess.wipe_buf(&body)
+        return vdsess.map_rc(brc)
+    }
+    rt.mem_copy((&(*s).vk[0]) as u64, (&vk[0]) as u64, 32)
+    vlayout.wipe((&vk[0]) as u64, 32)
+    rt.buf_free(&(*s).img)
+    (*s).img = img
+    rt.buf_free(&(*s).store)
+    (*s).store = body
+    vdsess.load_state(s, dir)
+    if !vdsess.check_rollback(s, accept) {
+        vdsess.lock(s)
+        return vdsess.R_ROLLBACK
+    }
+    vdsess.adopt_pin(s, dir, now_s)
+    return vdsess.R_OK
+}
+
+fn save_image(s: *mut vdsess.Session, dir: str, img: *mut rt.Buf) -> i32 {
+    let src: i32 = container.file_save(vdsess.vault_path(dir), img)
+    if src != vlayout.VC_OK {
+        rt.buf_free(img)
+        return vdsess.map_rc(src)
+    }
+    rt.buf_free(&(*s).img)
+    (*s).img = *img
+    vdsess.refresh_rev(s, dir)
+    return vdsess.R_OK
+}
+
+fn tpm_enroll(s: *mut vdsess.Session, h: *mut vdhooks.Hooks, root: str, user: str, pin: u64,
+    pinn: usize) -> i32 {
+    if (*s).open == 0 {
+        return vdsess.R_LOCKED
+    }
+    if !(*h).tpm_ready {
+        return vdsess.R_TPM
+    }
+    let prc: i32 = check_pin(s, h, user, pin, pinn)
+    if prc != vdsess.R_OK {
+        return prc
+    }
+    var blob: rt.Buf = rt.buf_new()
+    let trc: i32 = tpm_rc(vtpm.blob_for((*h).tpm_exec, (&(*s).vk[0]) as u64, pin, pinn, &blob))
+    if trc != vdsess.R_OK {
+        rt.buf_free(&blob)
+        return trc
+    }
+    var img: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&img, rt.buf_ptr(&(*s).img), rt.buf_len(&(*s).img))
+    var rc: i32 = 0
+    if vtpm.has_slot(rt.buf_ptr(&img), rt.buf_len(&img)) {
+        rc = container.slot_replace_opaque(&img, (&(*s).vk[0]) as u64, vlayout.SLOT_TPM,
+            rt.buf_ptr(&blob), rt.buf_len(&blob))
+    } else {
+        rc = container.slot_add_opaque(&img, (&(*s).vk[0]) as u64, vlayout.SLOT_TPM,
+            rt.buf_ptr(&blob), rt.buf_len(&blob))
+    }
+    rt.buf_free(&blob)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&img)
+        return vdsess.map_rc(rc)
+    }
+    return save_image(s, vdsess.user_dir(root, user), &img)
+}
+
+fn tpm_drop(s: *mut vdsess.Session, root: str, user: str) -> i32 {
+    if (*s).open == 0 {
+        return vdsess.R_LOCKED
+    }
+    if !open_has_slot(s) {
+        return vdsess.R_NOSLOT
+    }
+    var img: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&img, rt.buf_ptr(&(*s).img), rt.buf_len(&(*s).img))
+    let rc: i32 = container.slot_remove(&img, (&(*s).vk[0]) as u64, vlayout.SLOT_TPM)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&img)
+        return vdsess.map_rc(rc)
+    }
+    return save_image(s, vdsess.user_dir(root, user), &img)
+}
+
+fn verify_pin(s: *mut vdsess.Session, h: *mut vdhooks.Hooks, user: str, pin: u64, pinn: usize) -> i32 {
+    if (*s).open == 0 {
+        return vdsess.R_LOCKED
+    }
+    return check_pin(s, h, user, pin, pinn)
+}

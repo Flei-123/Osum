@@ -8,6 +8,7 @@ import vaultd.vdpolicy
 import vaultd.vdrate
 import vaultd.vdreply
 import vaultd.vdops
+import vaultd.vdpinslot
 
 export { handle, REQ_MAX }
 
@@ -20,6 +21,13 @@ fn wipe_buf(b: *mut rt.Buf) {
     rt.buf_free(b)
 }
 
+fn bool_word(v: bool) -> str {
+    if v {
+        return "1"
+    }
+    return "0"
+}
+
 fn state_word(st: u64) -> str {
     if st == vdsess.S_OPEN {
         return "open"
@@ -30,13 +38,23 @@ fn state_word(st: u64) -> str {
     return "none"
 }
 
-fn op_status(sp: *mut vdsess.Session, dir: str, out: *mut rt.Buf) {
+fn op_status(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, dir: str, out: *mut rt.Buf) {
     let st: u64 = vdsess.vault_status(sp, dir)
     vdreply.ok(out)
     vdwire.put_kv(out, "state", state_word(st))
+    var slot: bool = false
     if st == vdsess.S_OPEN {
         vdops.op_status_counts(sp, out)
+        slot = vdpinslot.open_has_slot(sp)
     }
+    if st == vdsess.S_LOCKED {
+        slot = vdpinslot.locked_has_slot(dir)
+    }
+    if st != vdsess.S_NONE {
+        vdwire.put_kv(out, "tpmslot", bool_word(slot))
+        vdwire.put_kv(out, "pinunlock", bool_word(slot && (*d).hooks.tpm_ready))
+    }
+    vdwire.put_kv(out, "tpm", bool_word((*d).hooks.tpm_ready))
 }
 
 fn op_create(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, req: str, c: *mut vdctx.Ctx,
@@ -60,6 +78,7 @@ fn op_unlock(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, req: str,
     out: *mut rt.Buf) {
     var pw: rt.Buf = rt.buf_new()
     var rec: rt.Buf = rt.buf_new()
+    var pin: rt.Buf = rt.buf_new()
     let accept: bool = vdwire.num_get(req, "accept", 0) == 1
     var rc: i32 = vdsess.R_ARG
     if vdwire.hex_get(req, "pw", &pw) {
@@ -69,6 +88,11 @@ fn op_unlock(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, req: str,
         if vdwire.text_get(req, "recovery", &rec) {
             rc = vdsess.unlock_recovery(sp, (*d).root, user, rt.buf_ptr(&rec), rt.buf_len(&rec),
                 (*c).now_s, (*c).now_ms, accept)
+        } else {
+            if vdwire.hex_get(req, "pin", &pin) {
+                rc = vdpinslot.unlock_pin(sp, &(*d).hooks, (*d).root, user, rt.buf_ptr(&pin),
+                    rt.buf_len(&pin), (*c).now_s, accept)
+            }
         }
     }
     if rc != vdsess.R_OK {
@@ -81,6 +105,7 @@ fn op_unlock(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, req: str,
     }
     wipe_buf(&pw)
     wipe_buf(&rec)
+    wipe_buf(&pin)
 }
 
 fn op_passwd(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, req: str, out: *mut rt.Buf) {
@@ -115,17 +140,44 @@ fn op_recovery(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, out: *m
     wipe_buf(&text)
 }
 
+fn op_tpmenroll(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, req: str,
+    out: *mut rt.Buf) {
+    var pin: rt.Buf = rt.buf_new()
+    if !vdwire.hex_get(req, "pin", &pin) {
+        vdreply.fail(out, "arg")
+    } else {
+        let rc: i32 = vdpinslot.tpm_enroll(sp, &(*d).hooks, (*d).root, user, rt.buf_ptr(&pin),
+            rt.buf_len(&pin))
+        if rc != vdsess.R_OK {
+            vdreply.fail_rc(out, rc, (*sp).wait)
+        } else {
+            vdreply.ok(out)
+        }
+    }
+    wipe_buf(&pin)
+}
+
+fn op_tpmdrop(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, out: *mut rt.Buf) {
+    let rc: i32 = vdpinslot.tpm_drop(sp, (*d).root, user)
+    if rc != vdsess.R_OK {
+        vdreply.fail_rc(out, rc, 0)
+    } else {
+        vdreply.ok(out)
+    }
+}
+
 fn needs_open(op: u64) -> bool {
     return op == vdpolicy.OP_LIST || op == vdpolicy.OP_FIND || op == vdpolicy.OP_PUT
         || op == vdpolicy.OP_DELETE || op == vdpolicy.OP_PASSWD || op == vdpolicy.OP_RECOVERY
         || op == vdpolicy.OP_REVEAL
+        || op == vdpolicy.OP_TPMENROLL || op == vdpolicy.OP_TPMDROP
 }
 
 fn run_op(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, op: u64, req: str,
     c: *mut vdctx.Ctx, confirm: fn(u64, u64, u64, u64) -> u64, out: *mut rt.Buf) {
     let dir: str = vdsess.user_dir((*d).root, user)
     if op == vdpolicy.OP_STATUS {
-        op_status(sp, dir, out)
+        op_status(d, sp, dir, out)
         return
     }
     if op == vdpolicy.OP_CREATE {
@@ -166,6 +218,12 @@ fn run_op(d: *mut vdctx.Daemon, sp: *mut vdsess.Session, user: str, op: u64, req
     }
     if op == vdpolicy.OP_REVEAL {
         vdops.op_reveal(sp, req, confirm, out)
+    }
+    if op == vdpolicy.OP_TPMENROLL {
+        op_tpmenroll(d, sp, user, req, out)
+    }
+    if op == vdpolicy.OP_TPMDROP {
+        op_tpmdrop(d, sp, user, out)
     }
 }
 
