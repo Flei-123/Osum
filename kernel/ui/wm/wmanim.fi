@@ -1,0 +1,417 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.fb
+import sched.time
+import ui.wm.wmbase
+import ui.wm.wmdamage
+import ui.wm.wmgeom
+import ui.wm.wmlayout
+
+const AN_OPEN: u64 = 1
+
+const AN_CLOSE: u64 = 2
+
+const AN_MIN: u64 = 3
+
+const MOTION_DEF: u64 = 120
+
+const AN_SCALE0: u64 = 850
+
+const SWING_MAX_PX: i64 = 48
+
+const SWING_DECAY: u64 = 250
+
+fn open_anim(state: u64, i: u64) -> bool {
+    return anim_start(state, i, AN_OPEN)
+}
+
+fn set_min_rect(state: u64, i: u64, x: i64, y: i64, w: u64, h: u64)
+    -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+    if w == 0 || h == 0 {
+        wmlayout.wsv(state, i, wmlayout.W_MINWH, 0)
+        return true
+    }
+    wmlayout.wsv(state, i, wmlayout.W_MINXY,
+        ((x as u64) & 0xFFFFFFFF) | (((y as u64) & 0xFFFFFFFF) << 32))
+    wmlayout.wsv(state, i, wmlayout.W_MINWH, (w & 0xFFFFFFFF) | ((h & 0xFFFFFFFF) << 32))
+    return true
+}
+
+fn min_rect_w(state: u64, i: u64) -> u64 {
+    if !wmbase.valid(state, i) {
+        return 0
+    }
+    return wmlayout.wg(state, i, wmlayout.W_MINWH) & 0xFFFFFFFF
+}
+
+fn tw(f: u64, w: u64, v: u64) {
+    __mmio_write64((f + w * 8) as *mut u64, v)
+}
+
+fn motion_ms(state: u64) -> u64 {
+    if wmlayout.gs(state, wmlayout.S_FORM + wmlayout.FM_MOTION * 8) == 0 {
+        return MOTION_DEF
+    }
+    return wmgeom.form(state, wmlayout.FM_MOTION)
+}
+
+fn anim_off(state: u64) -> bool {
+    return wmlayout.gs(state, wmlayout.S_NOANIM) != 0 || motion_ms(state) == 0
+}
+
+fn ease_out(t: u64) -> u64 {
+    var pp: u64 = t
+    if pp > 1000 {
+        pp = 1000
+    }
+    let inv: u64 = 1000 - pp
+    return 1000 - inv * inv / 1000
+}
+
+fn anim_p(state: u64, i: u64) -> u64 {
+    let ms: u64 = wmlayout.wg(state, i, wmlayout.W_ANMS)
+    if ms == 0 {
+        return 1000
+    }
+
+    let jetzt: u64 = time.mono_ns(state) / 1000000
+    let ab: u64 = wmlayout.wg(state, i, wmlayout.W_AN0)
+    if jetzt <= ab {
+        return 0
+    }
+    let vergangen: u64 = jetzt - ab
+    if vergangen >= ms {
+        return 1000
+    }
+    return vergangen * 1000 / ms
+}
+
+fn anim_start(state: u64, i: u64, art: u64) -> bool {
+    if !wmbase.valid(state, i) || anim_off(state) {
+        return false
+    }
+    wmlayout.wsv(state, i, wmlayout.W_ANK, art)
+    wmlayout.wsv(state, i, wmlayout.W_AN0, time.mono_ns(state) / 1000000)
+    wmlayout.wsv(state, i, wmlayout.W_ANMS, motion_ms(state))
+    wmlayout.wsv(state, i, wmlayout.W_ANP, 0)
+    wmlayout.ss(state, wmlayout.S_ANIMS, wmlayout.gs(state, wmlayout.S_ANIMS) + 1)
+    wmdamage.damage_win(state, i)
+    return true
+}
+
+fn anim_laeuft(state: u64, i: u64) -> bool {
+    return wmbase.valid(state, i) && wmlayout.wg(state, i, wmlayout.W_ANK) != 0
+}
+
+fn anim_frames(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_ANFRAMES)
+}
+
+fn anim_ticks(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_TICKS)
+}
+
+fn swings(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_SWINGS)
+}
+
+fn drag_px(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_DRAGPX)
+}
+
+fn zieh_frn(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_ZFRN)
+}
+
+fn zieh_frus(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_ZFRUS)
+}
+
+fn zieh_frmax(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_ZFRMAX)
+}
+
+fn zieh_frueber(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_ZFRUE)
+}
+
+fn ohne_frn(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_OFRN)
+}
+
+fn ohne_frus(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_OFRUS)
+}
+
+fn ohne_frmax(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_OFRMAX)
+}
+
+fn set_noanim(state: u64, on: bool) {
+    wmlayout.ss(state, wmlayout.S_NOANIM, 0)
+    if on {
+        wmlayout.ss(state, wmlayout.S_NOANIM, 1)
+    }
+}
+
+fn anim_mix(state: u64, i: u64) -> u64 {
+    let art: u64 = wmlayout.wg(state, i, wmlayout.W_ANK)
+    if art == 0 {
+        return 1000
+    }
+    let e: u64 = ease_out(anim_p(state, i))
+    if art == AN_OPEN {
+        return e
+    }
+    return 1000 - e
+}
+
+fn is_dragged(state: u64, i: u64) -> bool {
+    return wmlayout.gs(state, wmlayout.S_DRAG) == i + 1
+}
+
+fn drag_lift_on(state: u64) -> u64 {
+    if anim_off(state) {
+        return 0
+    }
+    return wmgeom.form(state, wmlayout.FM_LIFT)
+}
+
+fn drag_tilt_on(state: u64) -> u64 {
+    if anim_off(state) {
+        return 0
+    }
+    return wmgeom.form(state, wmlayout.FM_TILT)
+}
+
+fn drag_swing_on(state: u64) -> u64 {
+    if anim_off(state) {
+        return 0
+    }
+    return wmgeom.form(state, wmlayout.FM_SWING)
+}
+
+fn drag_scale(state: u64, i: u64) -> u64 {
+    if !is_dragged(state, i) {
+        return 1000
+    }
+    return 1000 + drag_lift_on(state)
+}
+
+fn lift_px(state: u64, i: u64) -> i64 {
+    let sk: u64 = drag_scale(state, i)
+    if sk <= 1000 {
+        return 0
+    }
+    let w: i64 = wmbase.outer_w(state, i) as i64
+    let h: i64 = wmbase.outer_h(state, i) as i64
+    let dw: i64 = w * (sk - 1000) as i64 / 1000
+    let dh: i64 = h * (sk - 1000) as i64 / 1000
+    return wmbase.imax(dw, dh) + 1
+}
+
+fn swing_dx(state: u64, i: u64) -> i64 {
+    return wmlayout.wg(state, i, wmlayout.W_SWX) as i64
+}
+
+fn swing_dy(state: u64, i: u64) -> i64 {
+    return wmlayout.wg(state, i, wmlayout.W_SWY) as i64
+}
+
+fn abklingen(v: i64) -> i64 {
+    if v == 0 {
+        return 0
+    }
+    let ab: i64 = v * SWING_DECAY as i64 / 1000
+    if ab == 0 {
+        if v > 0 {
+            return v - 1
+        }
+        return v + 1
+    }
+    return v - ab
+}
+
+fn swing_tick_win(state: u64, i: u64) -> bool {
+    let st: u64 = drag_swing_on(state)
+    let x: i64 = wmbase.win_x(state, i)
+    let y: i64 = wmbase.win_y(state, i)
+    var sx: i64 = swing_dx(state, i)
+    var sy: i64 = swing_dy(state, i)
+    if st == 0 {
+
+        wmlayout.wsv(state, i, wmlayout.W_DXLAST, x as u64)
+        wmlayout.wsv(state, i, wmlayout.W_DYLAST, y as u64)
+        if sx == 0 && sy == 0 {
+            return false
+        }
+        wmlayout.wsv(state, i, wmlayout.W_SWX, 0)
+        wmlayout.wsv(state, i, wmlayout.W_SWY, 0)
+        wmlayout.wsv(state, i, wmlayout.W_SWOFF, 0)
+        damage_win_lift(state, i)
+        return true
+    }
+    if is_dragged(state, i) {
+
+        let vx: i64 = x - wmlayout.wg(state, i, wmlayout.W_DXLAST) as i64
+        let vy: i64 = y - wmlayout.wg(state, i, wmlayout.W_DYLAST) as i64
+
+        sx = sx - vx * st as i64 / 100
+        sy = sy - vy * st as i64 / 100
+
+        sx = abklingen(sx)
+        sy = abklingen(sy)
+
+        if vx == 0 && sx < 2 && sx > -2 {
+            sx = 0
+        }
+        if vy == 0 && sy < 2 && sy > -2 {
+            sy = 0
+        }
+    } else {
+        if wmlayout.wg(state, i, wmlayout.W_SWOFF) == 0 && sx == 0 && sy == 0 {
+            wmlayout.wsv(state, i, wmlayout.W_DXLAST, x as u64)
+            wmlayout.wsv(state, i, wmlayout.W_DYLAST, y as u64)
+            return false
+        }
+        sx = abklingen(sx)
+        sy = abklingen(sy)
+
+        if sx < 2 && sx > -2 {
+            sx = 0
+        }
+        if sy < 2 && sy > -2 {
+            sy = 0
+        }
+        if sx == 0 && sy == 0 {
+            wmlayout.wsv(state, i, wmlayout.W_SWOFF, 0)
+        }
+    }
+    sx = wmbase.imin(wmbase.imax(sx, 0 - SWING_MAX_PX), SWING_MAX_PX)
+    sy = wmbase.imin(wmbase.imax(sy, 0 - SWING_MAX_PX), SWING_MAX_PX)
+    let alt_x: i64 = swing_dx(state, i)
+    let alt_y: i64 = swing_dy(state, i)
+    wmlayout.wsv(state, i, wmlayout.W_SWX, sx as u64)
+    wmlayout.wsv(state, i, wmlayout.W_SWY, sy as u64)
+    wmlayout.wsv(state, i, wmlayout.W_DXLAST, x as u64)
+    wmlayout.wsv(state, i, wmlayout.W_DYLAST, y as u64)
+    if sx != alt_x || sy != alt_y {
+        damage_win_lift(state, i)
+        return true
+    }
+    return false
+}
+
+fn swing_tick(state: u64) -> u64 {
+    if !wmbase.ready(state) {
+        return 0
+    }
+    var offen: u64 = 0
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if wmbase.valid(state, i) {
+            if swing_tick_win(state, i) {
+                offen = offen + 1
+                wmlayout.ss(state, wmlayout.S_SWINGS, wmlayout.gs(state, wmlayout.S_SWINGS) + 1)
+            }
+        }
+        i = i + 1
+    }
+    return offen
+}
+
+fn damage_win_lift(state: u64, i: u64) {
+    let extra: i64 = lift_px(state, i) + SWING_MAX_PX
+    let wx: i64 = wmbase.win_x(state, i)
+    let wy: i64 = wmbase.win_y(state, i)
+    let ow: i64 = wmbase.outer_w(state, i) as i64
+    let oh: i64 = wmbase.outer_h(state, i) as i64
+    wmbase.damage(state, wx - extra, wy - extra, wx + ow + extra, wy + oh + extra)
+}
+
+fn drag_paint_on(state: u64, i: u64) -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+    if is_dragged(state, i) {
+        return drag_lift_on(state) != 0 || drag_swing_on(state) != 0
+    }
+
+    return swing_dx(state, i) != 0 || swing_dy(state, i) != 0
+}
+
+fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
+    cy1: i64) {
+    let p: u64 = anim_mix(state, i)
+
+    let sk: u64 = AN_SCALE0 + (1000 - AN_SCALE0) * p / 1000
+    let a: u64 = 255 * p / 1000
+    if a == 0 {
+        return
+    }
+    let bw: i64 = wmlayout.wg(state, i, wmlayout.W_W) as i64
+    let bh: i64 = wmlayout.wg(state, i, wmlayout.W_H) as i64
+    if bw <= 0 || bh <= 0 {
+        return
+    }
+
+    var nw: i64 = bw * sk as i64 / 1000
+    var nh: i64 = bh * sk as i64 / 1000
+    if nw <= 0 || nh <= 0 {
+        return
+    }
+
+    let ix: i64 = wmbase.win_x(state, i) + wmbase.inx(state, i) as i64
+    let iy: i64 = wmbase.win_y(state, i) + wmbase.iny(state, i) as i64
+    var ox: i64 = ix + (bw - nw) / 2
+    var oy: i64 = iy + (bh - nh) / 2
+
+    if wmlayout.wg(state, i, wmlayout.W_ANK) == AN_MIN && min_rect_w(state, i) != 0 {
+        let mxy: u64 = wmlayout.wg(state, i, wmlayout.W_MINXY)
+        let mwh: u64 = wmlayout.wg(state, i, wmlayout.W_MINWH)
+        let tx: i64 = (mxy & 0xFFFFFFFF) as i64
+        let ty: i64 = ((mxy >> 32) & 0xFFFFFFFF) as i64
+        let tw: i64 = (mwh & 0xFFFFFFFF) as i64
+        let th: i64 = ((mwh >> 32) & 0xFFFFFFFF) as i64
+        let weg: i64 = (1000 - p) as i64
+
+        nw = bw + (tw - bw) * weg / 1000
+        nh = bh + (th - bh) * weg / 1000
+        if nw <= 0 || nh <= 0 {
+            return
+        }
+
+        let vx: i64 = ix + (bw - nw) / 2
+        let vy: i64 = iy + (bh - nh) / 2
+        let zx: i64 = tx + (tw - nw) / 2
+        let zy: i64 = ty + (th - nh) / 2
+        ox = vx + (zx - vx) * weg / 1000
+        oy = vy + (zy - vy) * weg / 1000
+    }
+    let ax0: i64 = wmbase.imax(ox, cx0)
+    let ay0: i64 = wmbase.imax(oy, cy0)
+    let ax1: i64 = wmbase.imin(ox + nw, cx1)
+    let ay1: i64 = wmbase.imin(oy + nh, cy1)
+    if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    let buf: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
+    let stride: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+    var y: i64 = ay0
+    while y < ay1 {
+
+        let sy: i64 = (y - oy) * bh / nh
+        if sy >= 0 && sy < bh && y >= 0 {
+
+            fb.scaled_row_a(state, y as u64, ax0, ax1, buf +% (sy as u64) *% stride *% 4, ox, bw, nw, a)
+        }
+        y = y + 1
+    }
+    wmlayout.wsv(state, i, wmlayout.W_PAINTS, wmlayout.wg(state, i, wmlayout.W_PAINTS) + 1)
+    wmlayout.wsv(state, i, wmlayout.W_PX,
+        wmlayout.wg(state, i, wmlayout.W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
+}

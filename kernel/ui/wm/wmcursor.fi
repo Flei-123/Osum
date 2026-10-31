@@ -1,0 +1,349 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.cursor
+import gfx.fb
+import lib.kstate
+import serial
+import drv.gpu.vgpu
+import drv.gpu.vmsvga
+import ui.wm.wmbase
+import ui.wm.wmgate
+import ui.wm.wmgeom
+import ui.wm.wmlayout
+
+const SZ_L: u64 = 1
+
+const SZ_R: u64 = 2
+
+const SZ_T: u64 = 4
+
+const SZ_B: u64 = 8
+
+const CURSOR_BODY: u64 = 0x00FFFFFF
+
+const CURSOR_EDGE: u64 = 0x00000000
+
+fn curx(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_CURX)
+}
+
+fn cury(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_CURY)
+}
+
+fn cursor_on(state: u64) -> bool {
+    return wmlayout.gs(state, wmlayout.S_CURON) != 0
+}
+
+fn set_cursor(state: u64, on: bool) {
+    if on {
+        wmlayout.ss(state, wmlayout.S_CURON, 1)
+    } else {
+        wmlayout.ss(state, wmlayout.S_CURON, 0)
+    }
+}
+
+const CUR_H: u64 = 18
+
+fn cur_w(state: u64) -> u64 {
+    return cursor.size(wmgeom.uisc(state))
+}
+
+fn cur_h(state: u64) -> u64 {
+    return cursor.size(wmgeom.uisc(state))
+}
+
+fn cur_ox(state: u64) -> u64 {
+    return cursor.griff_x(wmlayout.gs(state, wmlayout.S_SHAPE), cur_w(state))
+}
+
+fn cur_oy(state: u64) -> u64 {
+    return cursor.griff_y(wmlayout.gs(state, wmlayout.S_SHAPE), cur_h(state))
+}
+
+fn cursor_row(r: u64, fuell: bool) -> u64 {
+    return cursor_row_of(0, r, fuell)
+}
+
+fn cursor_row_of(form: u64, r: u64, fuell: bool) -> u64 {
+
+    var umriss: [u8; 37] = b"\x08\x00\x0c\x00\x0a\x00\x09\x00\x08\x80\x08\x40\x08\x20\x08\x10\x08\x08\x08\x04\x08\x0c\x08\x10\x04\x10\x02\x10\x01\x10\x01\x10\x01\x10\x01\xf0\x00"
+    var innen: [u8; 37] = b"\x00\x00\x00\x00\x04\x00\x06\x00\x07\x00\x07\x80\x07\xc0\x07\xe0\x07\xf0\x07\xf8\x07\xf0\x07\xe0\x03\xe0\x01\xe0\x00\xe0\x00\xe0\x00\xe0\x00\x00\x00"
+    var bumriss: [u8; 37] = b"\x03\xfc\x03\xfc\x03\xfc\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x03\xfc\x03\xfc\x03\xfc\x00"
+    var binnen: [u8; 37] = b"\x00\x00\x01\xf8\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x01\xf8\x00\x00\x00"
+    if r >= CUR_H {
+        return 0
+    }
+    var p: u64 = 0
+    if form == 1 {
+        if fuell {
+            p = (&binnen[0]) as u64 + r * 2
+        } else {
+            p = (&bumriss[0]) as u64 + r * 2
+        }
+    } else {
+        if fuell {
+            p = (&innen[0]) as u64 + r * 2
+        } else {
+            p = (&umriss[0]) as u64 + r * 2
+        }
+    }
+    return (kstate.get8(p) << 8) | kstate.get8(p + 1)
+}
+
+fn shape(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_SHAPE)
+}
+
+fn shape_intern(state: u64, s: u64) {
+    if s >= cursor.FORMEN || !wmbase.ready(state) {
+        return
+    }
+    if wmlayout.gs(state, wmlayout.S_SHAPE) == s {
+        return
+    }
+    wmlayout.ss(state, wmlayout.S_SHAPE, s)
+
+    let mx: i64 = wmlayout.gs(state, wmlayout.S_CURX) as i64
+    let my: i64 = wmlayout.gs(state, wmlayout.S_CURY) as i64
+    var s_fm: [u8; 11] = "wm: form=\0\0"
+    var s_fx: [u8; 4] = " x=\0"
+    var s_fy: [u8; 4] = " y=\0"
+    serial.puts((&s_fm[0]) as u64)
+    serial.dec(s)
+    serial.puts((&s_fx[0]) as u64)
+    serial.dec(mx as u64)
+    serial.puts((&s_fy[0]) as u64)
+    serial.dec(my as u64)
+    serial.nl()
+    let gw: i64 = cur_w(state) as i64
+    wmbase.damage(state, mx - gw, my - gw, mx + gw, my + gw)
+}
+
+fn margin_cursor(state: u64, i: u64, x: i64, y: i64) {
+
+    if fb.noshapes_an(state) {
+        shape_intern(state, cursor.F_PFEIL)
+        return
+    }
+    if wmlayout.gs(state, wmlayout.S_SIZING) != 0 {
+        return
+    }
+    if wmlayout.gs(state, wmlayout.S_DRAG) != 0 {
+
+        shape_intern(state, cursor.F_CROSS)
+        return
+    }
+    if wmgate.dnd_forbidden(state, i) {
+        shape_intern(state, cursor.F_NO)
+        return
+    }
+    if wmgate.dh_live != 0 {
+        if (wmgate.mods_of(state) & wmgate.M_CTRL) != 0 {
+            shape_intern(state, cursor.F_COPY)
+        } else {
+            shape_intern(state, cursor.F_MOVE)
+        }
+        return
+    }
+    var will: u64 = cursor.F_PFEIL
+    if i < wmbase.MAX_WIN && wmbase.valid(state, i) {
+
+        let cx: i64 = x - wmbase.win_x(state, i) - wmbase.inx(state, i) as i64
+        let cy: i64 = y - wmbase.win_y(state, i) - wmbase.iny(state, i) as i64
+        if cx >= 0 && cy >= 0 && cx < wmlayout.wg(state, i, wmlayout.W_W) as i64
+            && cy < wmlayout.wg(state, i, wmlayout.W_H) as i64 {
+            if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
+
+                will = cursor.F_TEXT
+            } else {
+                will = wmlayout.wg(state, i, wmlayout.W_CURSOR)
+                if will >= cursor.FORMEN {
+                    will = cursor.F_PFEIL
+                }
+            }
+        }
+    }
+    if i < wmbase.MAX_WIN && wmbase.valid(state, i) && wmbase.deko(state, i) {
+        let lx: i64 = x - wmbase.win_x(state, i) - wmbase.inx(state, i) as i64
+        let ly: i64 = y - wmbase.win_y(state, i) - wmbase.iny(state, i) as i64
+        let k: u64 = grip_mask(state, i, lx, ly)
+        var l: bool = (k & SZ_L) != 0
+        let r: bool = (k & SZ_R) != 0
+        var t: bool = (k & SZ_T) != 0
+        var b: bool = (k & SZ_B) != 0
+
+        if fb.winfix_aus(state) {
+            l = false
+            t = false
+        }
+
+        if (l && t) || (r && b) {
+            will = cursor.F_DIAG1
+        } else if (r && t) || (l && b) {
+            will = cursor.F_DIAG2
+        } else if l || r {
+            will = cursor.F_WIDTH
+        } else if t || b {
+            will = cursor.F_HEIGHT
+        }
+    }
+    shape_intern(state, will)
+}
+
+fn grip_mask(state: u64, i: u64, lokal_x: i64, lokal_y: i64) -> u64 {
+
+    if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) != 0 && !fb.winfix_aus(state) {
+        return 0
+    }
+    let rand: i64 = wmgeom.grip(state) as i64
+    let iw: i64 = wmlayout.wg(state, i, wmlayout.W_W) as i64
+    let ih: i64 = wmlayout.wg(state, i, wmlayout.W_H) as i64
+    let oben: i64 = 0 - wmbase.iny(state, i) as i64
+    var kanten: u64 = 0
+    if lokal_x > 0 - rand && lokal_x < rand {
+        kanten = kanten | SZ_L
+    }
+    if lokal_x >= iw - rand && lokal_x < iw + rand {
+        kanten = kanten | SZ_R
+    }
+    if lokal_y >= oben && lokal_y < oben + wmgeom.grip_top(state) as i64 {
+        kanten = kanten | SZ_T
+    }
+    if lokal_y >= ih - rand && lokal_y < ih + rand {
+        kanten = kanten | SZ_B
+    }
+    let im_rahmen: bool = lokal_x > 0 - rand
+        && lokal_y >= oben
+        && lokal_x < iw + rand && lokal_y < ih + rand
+    if !im_rahmen {
+        return 0
+    }
+    return kanten
+}
+
+fn set_shape(state: u64, s: u64) {
+    if s >= cursor.FORMEN || !wmbase.ready(state) {
+        return
+    }
+    wmlayout.ss(state, wmlayout.S_SHAPE_APP, s)
+
+    let mx: i64 = wmlayout.gs(state, wmlayout.S_CURX) as i64
+    let my: i64 = wmlayout.gs(state, wmlayout.S_CURY) as i64
+    var i: u64 = wmgate.hit(state, mx, my)
+    if i < wmbase.MAX_WIN && wmbase.valid(state, i) {
+        wmlayout.wsv(state, i, wmlayout.W_CURSOR, s)
+        if !wmgate.darf(state, i) {
+            i = wmbase.MAX_WIN
+        }
+    }
+    margin_cursor(state, i, mx, my)
+}
+
+fn hwcur_moeglich(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOHWCUR) {
+        return false
+    }
+    return vgpu.cursor_usable(state) || vmsvga.cursor_ready(state)
+}
+
+fn hw_an(state: u64) -> bool {
+    if vgpu.cursor_usable(state) {
+        return vgpu.cursor_an(state)
+    }
+    return vmsvga.cursor_an(state)
+}
+
+fn hw_zeigen(state: u64, form: u64, g: u64, x: u64, y: u64, hx: u64, hy: u64, rq: u64) {
+    if vgpu.cursor_usable(state) {
+        let _a: bool = vgpu.cursor_displayed(state, form, g, x, y, hx, hy, rq)
+        return
+    }
+    let _b: bool = vmsvga.cursor_show(state, form, g, x, y, hx, hy, rq)
+}
+
+fn hw_bewegen(state: u64, x: u64, y: u64) {
+    if vgpu.cursor_usable(state) {
+        let _a: bool = vgpu.cursor_bewegen(state, x, y)
+        return
+    }
+    let _b: bool = vmsvga.cursor_bewegen(state, x, y)
+}
+
+fn hwcur_an(state: u64) -> bool {
+    return hwcur_moeglich(state)
+}
+
+fn hwcur_bewegen(state: u64) {
+    if !hwcur_moeglich(state) {
+        return
+    }
+    let g: u64 = cur_w(state)
+    let form: u64 = wmlayout.gs(state, wmlayout.S_SHAPE)
+
+    let pp: u64 = fb.logical_to_panel(state, wmlayout.gs(state, wmlayout.S_CURX), wmlayout.gs(state, wmlayout.S_CURY))
+    let x: u64 = pp >> 32
+    let y: u64 = pp & 0xFFFFFFFF
+    let rq: u64 = fb.rotation(state) / 90
+    let hkey: u64 = wmlayout.gs(state, wmlayout.S_SHAPE) + (rq << 16)
+    if !hw_an(state) {
+        wmlayout.ss(state, wmlayout.S_HWSHAPE, hkey)
+        hw_zeigen(state, form, g, x, y,
+            cur_ox(state), cur_oy(state), rq)
+        return
+    }
+
+    if hkey != wmlayout.gs(state, wmlayout.S_HWSHAPE) {
+        wmlayout.ss(state, wmlayout.S_HWSHAPE, hkey)
+        hw_zeigen(state, form, g, x, y,
+            cur_ox(state), cur_oy(state), rq)
+        return
+    }
+    hw_bewegen(state, x, y)
+}
+
+fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
+
+    let form: u64 = wmlayout.gs(state, wmlayout.S_SHAPE)
+    let g: u64 = cur_w(state)
+    cursor.build_map(form, g)
+    let mx: i64 = wmlayout.gs(state, wmlayout.S_CURX) as i64 - cur_ox(state) as i64
+    let my: i64 = wmlayout.gs(state, wmlayout.S_CURY) as i64 - cur_oy(state) as i64
+    let dunkel: u64 = wmbase.rgb24(state, CURSOR_EDGE)
+    let hell: u64 = wmbase.rgb24(state, CURSOR_BODY)
+    let schwarz: u64 = wmbase.rgb24(state, 0)
+    var r: u64 = 0
+    while r < g {
+        let py: i64 = my + r as i64
+        if py >= cy0 as i64 && py < cy1 as i64 {
+            var c: u64 = 0
+            while c < g {
+                let pxx: i64 = mx + c as i64
+                if pxx >= cx0 as i64 && pxx < cx1 as i64 && pxx >= 0 {
+                    let v: u64 = cursor.deck(g, c, r)
+                    if v != 0 {
+                        let ak: u64 = (v >> 16) & 255
+                        let ar: u64 = (v >> 8) & 255
+                        let asch: u64 = v & 255
+
+                        if asch != 0 && ak == 0 && ar == 0 {
+                            fb.pixel_a(state, pxx as u64, py as u64,
+                                schwarz, asch * 90 / 255)
+                        }
+                        if ar != 0 {
+                            fb.pixel_a(state, pxx as u64, py as u64,
+                                hell, ar)
+                        }
+                        if ak != 0 {
+                            fb.pixel_a(state, pxx as u64, py as u64,
+                                dunkel, ak)
+                        }
+                    }
+                }
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+}

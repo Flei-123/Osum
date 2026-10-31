@@ -87,6 +87,8 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmanim
+import ui.wm.wmcursor
 import ui.wm.wmglass
 import ui.wm.wmblur
 import ui.wm.wmdamage
@@ -146,14 +148,9 @@ export {
     tb_alpha_ist, unter_leiste_px,
     present, set_vsync, vsync_on, presents, skipped,
     pxsum,
-    anim_start, anim_tick, anim_laeuft, anims, anim_frames, anim_ticks,
-    set_noanim, close_anim, minimize_anim, open_anim,
-    set_min_rect, min_rect_w,
-    drag_lift_on, drag_tilt_on, drag_swing_on, drag_scale,
-    lift_px, swing_dx, swing_dy,
-    swing_tick, swings, drag_px,
-    zieh_frn, zieh_frus, zieh_frmax, zieh_frueber,
-    ohne_frn, ohne_frus, ohne_frmax,
+    anim_tick, anims,
+    close_anim, minimize_anim, open_anim,
+    set_min_rect,
     drag_begin_pub, drag_end_pub,
     dnd_take_paste, dnd_live_pub, dnd_nraise_pub, dnd_ncancel_pub,
     win_x_pub, win_y_pub,
@@ -161,19 +158,18 @@ export {
     set_leser, leser_tick, liest, risse, tear_top, tear_bottom, without_sig,
     riss_y0, riss_y1, riss_frame, verworfen,
     before_t0, set_before_t0, before_step, set_before_step, before_win, set_before_win,
-    AN_OPEN, AN_CLOSE, AN_MIN, MOTION_DEF, SIG_H,
+    SIG_H,
     fill, text, flush_win,
     ev_push, ev_pop, ev_waiting,
     on_mouse, on_key, term_write, term_out, term_hold, term_release, term_cols, term_rows, term_cx, term_cy,
     term_cellw, term_cellh, term_asc, term_px,
     bind_tty, key_tty, tty_of, NO_TTY, term_outs, term_puts_n,
     term_dump, term_dump_all, term_size,
-    poll, blits, pixels, last_us, cursor_on, set_cursor,
-    hwcur_an, hwcur_moeglich,
+    poll, blits, pixels, last_us,
     frame_us_sum, frame_us_n, frame_us_max, frame_us_last, frame_ueber16,
     frame_fach, frame_us_maxw, frame_ueber16w,
     cap_glyph_treffer, cap_glyph_bauten,
-    shape, set_shape, set_keys,
+    set_keys,
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     tile_on, set_tile_on, tile_take, tile_release, tile_apply,
@@ -184,7 +180,7 @@ export {
     MAX_WIN, K_TERM,
     damage, damage_all, focus, inx, iny, ready, valid, win_owner, win_x, win_y,
     title_clipped, title_missing,
-    evpush, evpop, keyin, curx, cury, evdrops, evkoal, evterm, title_old,
+    evpush, evpop, keyin, evdrops, evkoal, evterm, title_old,
     win_paints, win_px, win_flags, top_layer_win, wins_say,
     E_KEY, E_DOWN, E_UP, E_CLOSE, E_AXPRESS, swipe_do, swipes_done, hw_demo,
     say_mag,
@@ -311,6 +307,15 @@ fn tb_alpha_ist(state: u64) -> u64 {
     return wmglass.tb_alpha_ist(state)
 }
 
+
+fn open_anim(state: u64, i: u64) -> bool {
+    return wmanim.open_anim(state, i)
+}
+
+fn set_min_rect(state: u64, i: u64, x: i64, y: i64, w: u64, h: u64) -> bool {
+    return wmanim.set_min_rect(state, i, x, y, w, h)
+}
+
 const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
 const EV_SLOTS: u64 = 32
 const EV_BYTES: u64 = 16
@@ -342,11 +347,6 @@ const EDGE_BOTTOM: u64 = 0
 const EDGE_TOP: u64 = 1
 const EDGE_LEFT: u64 = 2
 const EDGE_RIGHT: u64 = 3
-
-const SZ_L: u64 = 1
-const SZ_R: u64 = 2
-const SZ_T: u64 = 4
-const SZ_B: u64 = 8
 
 // ------------------------------- RUNDE VEKTOR: DIE ZEICHEN LIEGEN FERTIG
 //
@@ -390,40 +390,13 @@ static mut cg_w: [u64; 4] = [0 as u64; 4]
 static mut cg_h: [u64; 4] = [0 as u64; 4]
 static mut cg_treffer: u64 = 0
 static mut cg_bauten: u64 = 0
-
-// Die Arten einer Fensterbewegung. Oeffnen waechst, Schliessen und
-// Minimieren schrumpfen -- der Unterschied zwischen den letzten beiden
-// liegt NICHT im Bild, sondern darin, was danach passiert.
-const AN_OPEN: u64 = 1
-const AN_CLOSE: u64 = 2
-const AN_MIN: u64 = 3
 // Ein Tick sind zehn Millisekunden, weil `time.TICK_HZ` 100 ist. Die
 // Zahl steht hier als Konstante und nicht als Division im Quelltext,
 // damit ein Takt von 250 Hz an EINER Stelle nachgezogen wird.
 const MS_PRO_TICK: u64 = 10
-// Die Vorgabe, wenn keine Formmarke da ist: MO_FAST aus wlibc.
-const MOTION_DEF: u64 = 120
 // Wie hoch der Signaturstreifen ist. Vier Zeilen sind im PPM sicher zu
 // finden und im Bild klein genug, um den Rest nicht zu verdecken.
 const SIG_H: u64 = 4
-// Wie klein ein Fenster am Anfang der Oeffnungsbewegung ist, in
-// Tausendsteln. 850 heisst: es waechst aus 85 Prozent heraus -- der
-// Sprung, den man sieht, ohne dass es zappelt.
-const AN_SCALE0: u64 = 850
-// Wie weit das Bild beim Nachziehen HOECHSTENS hinter dem Fenster
-// zurueckbleiben darf, in Bildpunkten. Ohne diesen Deckel wird aus
-// einer schnellen Zeigerbewegung ein Fenster, dessen Bild quer ueber
-// den Schirm nachsegelt -- und aus einem Schmuck ein Fehler.
-const SWING_MAX_PX: i64 = 48
-// Die Federkonstante des Auspendelns, in Tausendsteln je Tick. Bei
-// TICK_HZ = 100 zieht sich der Versatz damit je Tick um ein Viertel
-// zusammen: nach zehn Ticks (100 ms) ist er auf 5,6 Prozent. Das ist
-// das Auspendeln, das Justin bestellt hat -- kein Schwingen um den
-// Nullpunkt, sondern ein Nachlassen. Ein echter Federschwinger
-// braeuchte eine zweite Zustandsgroesse (die Geschwindigkeit) je
-// Fenster und wuerde bei der Zeigerabtastrate dieses Servers
-// ueberschwingen, was wie ein Wackelkontakt aussieht.
-const SWING_DECAY: u64 = 250
 // Die groesste Strebe, die ein Fenster anmelden darf. Sie steht hier,
 // weil 0xFFFFFF mitten in einer Bedingung wie eine Farbe aussieht und
 // keine ist.
@@ -432,14 +405,6 @@ const STRUT_MAX: u64 = 0x00FFFFFF
 // Mensch sieht: sie werden geschrieben und wieder gelesen.
 const PROBE_IN: u64 = 0x0000FF00
 const PROBE_OUT: u64 = 0x00FF0000
-// DER MAUSZEIGER IST ABSICHTLICH THEMENFREI. Er liegt ueber den
-// Bildpunkten der Anwendung, und was dort steht, bestimmt kein Schema
-// -- ein Foto, ein Terminal, ein Spiel. Weiss mit schwarzem Rand ist
-// auf jedem Grund zu sehen; eine Zeigerfarbe aus dem Thema ist eine,
-// die man auf dem falschen Bild verliert. Deshalb stehen diese beiden
-// Werte hier und werden nicht ueber WM_DECO gesetzt.
-const CURSOR_BODY: u64 = 0x00FFFFFF
-const CURSOR_EDGE: u64 = 0x00000000
 // Terminal grid: six planes (characters, attributes, colours, and the same three for the saved main screen), each one holds
 // TG cells. 16384 cells = 192 x 85, enough for a 1920 x 1080 window with a 10 x 19 cell (r468: the old 4096 cut the screen
 // of a maximised terminal after 21 rows).
@@ -616,17 +581,6 @@ fn evpop(state: u64) -> u64 {
 
 fn keyin(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_KEYIN)
-}
-
-// WO DER ZEIGER LAUT FENSTERSERVER STEHT. Nicht `ps2m.x` -- das ist
-// die Stelle, die der Treiber fuehrt. Wenn die beiden auseinander
-// laufen, holt der Server nicht ab, und genau das soll man sehen.
-fn curx(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_CURX)
-}
-
-fn cury(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_CURY)
 }
 
 fn evdrops(state: u64) -> u64 {
@@ -1004,18 +958,6 @@ fn pixels(state: u64) -> u64 {
 
 fn last_us(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_LASTUS)
-}
-
-fn cursor_on(state: u64) -> bool {
-    return wmlayout.gs(state, wmlayout.S_CURON) != 0
-}
-
-fn set_cursor(state: u64, on: bool) {
-    if on {
-        wmlayout.ss(state, wmlayout.S_CURON, 1)
-    } else {
-        wmlayout.ss(state, wmlayout.S_CURON, 0)
-    }
 }
 
 fn font_ui(state: u64) -> u64 {
@@ -1777,20 +1719,6 @@ fn term_win(state: u64) -> u64 {
     return wmbase.MAX_WIN
 }
 
-// ---------------------------------------------------- die drei Anlaesse
-//
-// DREI EINSTIEGE UND EIN FALLBACK, und der Fallback ist der Kern der
-// Sache: ist die Bewegung abgeschaltet (Formmarke motion=0 oder die
-// Gegenprobe `noanim`), tut jede dieser Funktionen SOFORT das, was sie
-// zusagt. Der Endzustand haengt nie an der Bewegung -- ein Fenster, das
-// geschlossen werden soll, wird geschlossen, ob es dabei schrumpft oder
-// nicht. Das ist der Unterschied zwischen "reduziert" und "kaputt".
-
-// Ein neues Fenster waechst auf. Der Aufrufer hat es schon angelegt.
-fn open_anim(state: u64, i: u64) -> bool {
-    return anim_start(state, i, AN_OPEN)
-}
-
 // Schliessen ueber die Bewegung. Das Fenster verschwindet erst, wenn
 // sie durch ist -- `anim_tick` ruft dann `destroy`. Ohne Bewegung
 // geschieht genau das sofort.
@@ -1799,7 +1727,7 @@ fn close_anim(state: u64, i: u64) -> bool {
         return false
     }
     ev_push(state, i, wmlayout.E_CLOSE, 0, 0, 0)
-    if !anim_start(state, i, AN_CLOSE) {
+    if !wmanim.anim_start(state, i, wmanim.AN_CLOSE) {
         destroy(state, i)
         return false
     }
@@ -1812,42 +1740,11 @@ fn minimize_anim(state: u64, i: u64) -> bool {
     if !wmbase.valid(state, i) {
         return false
     }
-    if !anim_start(state, i, AN_MIN) {
+    if !wmanim.anim_start(state, i, wmanim.AN_MIN) {
         set_hidden(state, i, true)
         return false
     }
     return true
-}
-
-// DAS ZIEL DES MINIMIERENS SETZEN. Die Taskleiste ruft das fuer ein
-// FREMDES Fenster; die Rechtepruefung sitzt in `sysgui.fi` und ist
-// dieselbe wie bei WM_ACT (der Rufende muss selbst ein Fenster auf der
-// Leistenebene haben).
-//
-// Ein Rechteck mit Breite oder Hoehe 0 LOESCHT das Ziel -- ein Knopf,
-// der verschwindet, weil das Fenster nicht mehr in die Leiste passt,
-// soll wieder mittig schrumpfen und nicht auf einen Punkt zielen, den
-// es nicht mehr gibt.
-fn set_min_rect(state: u64, i: u64, x: i64, y: i64, w: u64, h: u64)
-    -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    if w == 0 || h == 0 {
-        wmlayout.wsv(state, i, wmlayout.W_MINWH, 0)
-        return true
-    }
-    wmlayout.wsv(state, i, wmlayout.W_MINXY,
-        ((x as u64) & 0xFFFFFFFF) | (((y as u64) & 0xFFFFFFFF) << 32))
-    wmlayout.wsv(state, i, wmlayout.W_MINWH, (w & 0xFFFFFFFF) | ((h & 0xFFFFFFFF) << 32))
-    return true
-}
-
-fn min_rect_w(state: u64, i: u64) -> u64 {
-    if !wmbase.valid(state, i) {
-        return 0
-    }
-    return wmlayout.wg(state, i, wmlayout.W_MINWH) & 0xFFFFFFFF
 }
 
 fn close_top(state: u64) -> u64 {
@@ -3471,16 +3368,16 @@ fn move_win(state: u64, i: u64, x: i64, y: i64) {
     // Stelle weiter nur `damage_win`, bliebe beim Ziehen ein Rand des
     // vorigen Bildes stehen -- ein Schmierstreifen, der aussieht wie
     // ein Fehler im Zeichnen und keiner ist.
-    let hebt: bool = drag_paint_on(state, i)
+    let hebt: bool = wmanim.drag_paint_on(state, i)
     if hebt {
-        damage_win_lift(state, i)
+        wmanim.damage_win_lift(state, i)
     } else {
         wmdamage.damage_win(state, i) // die alte Stelle wird wiederhergestellt
     }
     wmlayout.wsv(state, i, wmlayout.W_X, x as u64)
     wmlayout.wsv(state, i, wmlayout.W_Y, y as u64)
     if hebt {
-        damage_win_lift(state, i)
+        wmanim.damage_win_lift(state, i)
     } else {
         wmdamage.damage_win(state, i) // und die neue gemalt
     }
@@ -3915,7 +3812,7 @@ fn tab_plain(state: u64, i: u64) -> bool {
     if win_hidden(state, i) {
         return false
     }
-    if wmlayout.wg(state, i, wmlayout.W_ANK) != 0 || drag_paint_on(state, i) || wmblur.blur_will(state, i) {
+    if wmlayout.wg(state, i, wmlayout.W_ANK) != 0 || wmanim.drag_paint_on(state, i) || wmblur.blur_will(state, i) {
         return false
     }
     var alpha: u64 = wmbase.form_or(state, wmlayout.FM_WIN_ALPHA, 100)
@@ -4010,10 +3907,6 @@ fn chrome_object(state: u64) -> u64 {
     return k
 }
 
-fn tw(f: u64, w: u64, v: u64) {
-    __mmio_write64((f + w * 8) as *mut u64, v)
-}
-
 // Write the table (only when somebody asked for it once: `tab_object`). Called by `compose` before the frame.
 fn tab_publish(state: u64) {
     let f: u64 = wmlayout.gs(state, wmlayout.S_TABF)
@@ -4028,17 +3921,17 @@ fn tab_publish(state: u64) {
     while i < wmbase.MAX_WIN {
         if wmlayout.wg(state, i, wmlayout.W_USED) != 0 {
             let r: u64 = TAB_HEAD + n * TAB_ROW
-            tw(f, r + 0, wmlayout.wg(state, i, wmlayout.W_ID) | (i << 32))
-            tw(f, r + 1, wmlayout.wg(state, i, wmlayout.W_OWNER))
-            tw(f, r + 2, wmlayout.wg(state, i, wmlayout.W_X))
-            tw(f, r + 3, wmlayout.wg(state, i, wmlayout.W_Y))
-            tw(f, r + 4, wmlayout.wg(state, i, wmlayout.W_W))
-            tw(f, r + 5, wmlayout.wg(state, i, wmlayout.W_H))
-            tw(f, r + 6, wmlayout.wg(state, i, wmlayout.W_Z) | (wmlayout.wg(state, i, wmlayout.W_LAYER) << 16) | (wmlayout.wg(state, i, wmlayout.W_KIND) << 24))
-            tw(f, r + 7, wmlayout.wg(state, i, wmlayout.W_FLAGS))
-            tw(f, r + 8, wmbase.inx(state, i) | (wmbase.iny(state, i) << 32))
-            tw(f, r + 9, wmlayout.wg(state, i, wmlayout.W_SHM))
-            tw(f, r + 10, wmlayout.wg(state, i, wmlayout.W_W) * 4)
+            wmanim.tw(f, r + 0, wmlayout.wg(state, i, wmlayout.W_ID) | (i << 32))
+            wmanim.tw(f, r + 1, wmlayout.wg(state, i, wmlayout.W_OWNER))
+            wmanim.tw(f, r + 2, wmlayout.wg(state, i, wmlayout.W_X))
+            wmanim.tw(f, r + 3, wmlayout.wg(state, i, wmlayout.W_Y))
+            wmanim.tw(f, r + 4, wmlayout.wg(state, i, wmlayout.W_W))
+            wmanim.tw(f, r + 5, wmlayout.wg(state, i, wmlayout.W_H))
+            wmanim.tw(f, r + 6, wmlayout.wg(state, i, wmlayout.W_Z) | (wmlayout.wg(state, i, wmlayout.W_LAYER) << 16) | (wmlayout.wg(state, i, wmlayout.W_KIND) << 24))
+            wmanim.tw(f, r + 7, wmlayout.wg(state, i, wmlayout.W_FLAGS))
+            wmanim.tw(f, r + 8, wmbase.inx(state, i) | (wmbase.iny(state, i) << 32))
+            wmanim.tw(f, r + 9, wmlayout.wg(state, i, wmlayout.W_SHM))
+            wmanim.tw(f, r + 10, wmlayout.wg(state, i, wmlayout.W_W) * 4)
             var plain: u64 = 0
             if tab_plain(state, i) {
                 plain = 1
@@ -4048,7 +3941,7 @@ fn tab_publish(state: u64) {
             if wmbase.deko(state, i) && !win_hidden(state, i) {
                 shad = 1
             }
-            tw(f, r + 11, (wmlayout.wg(state, i, wmlayout.W_OPAC) & 0xFFFFFFFF) | (plain << 32) | (shad << 33))
+            wmanim.tw(f, r + 11, (wmlayout.wg(state, i, wmlayout.W_OPAC) & 0xFFFFFFFF) | (plain << 32) | (shad << 33))
             // S6b: the title and the netmark of this row go to the chrome page (never while the screen is locked)
             let cf: u64 = wmlayout.gs(state, wmlayout.S_CHRF)
             if cf != 0 {
@@ -4068,25 +3961,25 @@ fn tab_publish(state: u64) {
                         mk = sicht
                     }
                 }
-                tw(cf, CHR_TITLE + n * 4, t0)
-                tw(cf, CHR_TITLE + n * 4 + 1, t1)
-                tw(cf, CHR_TITLE + n * 4 + 2, t2)
-                tw(cf, CHR_TITLE + n * 4 + 3, t3)
-                tw(cf, CHR_MARK + n, mk)
+                wmanim.tw(cf, CHR_TITLE + n * 4, t0)
+                wmanim.tw(cf, CHR_TITLE + n * 4 + 1, t1)
+                wmanim.tw(cf, CHR_TITLE + n * 4 + 2, t2)
+                wmanim.tw(cf, CHR_TITLE + n * 4 + 3, t3)
+                wmanim.tw(cf, CHR_MARK + n, mk)
             }
             n = n + 1
         }
         i = i + 1
     }
-    tw(f, 0, TAB_MAGIC | (1 << 32))
-    tw(f, 2, n)
-    tw(f, 3, wmlayout.gs(state, wmlayout.S_SW) | (wmlayout.gs(state, wmlayout.S_SH) << 32))
+    wmanim.tw(f, 0, TAB_MAGIC | (1 << 32))
+    wmanim.tw(f, 2, n)
+    wmanim.tw(f, 3, wmlayout.gs(state, wmlayout.S_SW) | (wmlayout.gs(state, wmlayout.S_SH) << 32))
     var fo: u64 = 0
     let fi: u64 = wmlayout.gs(state, wmlayout.S_FOCUS)
     if fi != 0 {
         fo = wmlayout.wg(state, fi - 1, wmlayout.W_ID)
     }
-    tw(f, 4, fo)
+    wmanim.tw(f, 4, fo)
     // S6a: what the compositor needs to paint the window shadow exactly (the same numbers `shadow_build` takes, already scaled by the window
     // alpha): word 8 = strength of the focused window | its reach << 8 | strength of the others << 16 | their reach << 24 | corner radius << 32;
     // word 9 = shadow colour (rgb24) | 1 << 32 (the words are valid) | 1 << 33 when the old ring painter is on
@@ -4094,62 +3987,62 @@ fn tab_publish(state: u64) {
     if wmlayout.gs(state, wmlayout.S_SHOLD) != 0 {
         sold = 1
     }
-    tw(f, 8, wmshadow.shadow_staerke(state, wmlayout.FM_SHADOW) | (wmgeom.form(state, wmlayout.FM_SHADOW_R) << 8) | (wmshadow.shadow_staerke(state, wmlayout.FM_SHADOW2) << 16)
+    wmanim.tw(f, 8, wmshadow.shadow_staerke(state, wmlayout.FM_SHADOW) | (wmgeom.form(state, wmlayout.FM_SHADOW_R) << 8) | (wmshadow.shadow_staerke(state, wmlayout.FM_SHADOW2) << 16)
         | (wmgeom.form(state, wmlayout.FM_SHADOW_R2) << 24) | (wmgeom.form(state, wmlayout.FM_RADIUS) << 32))
-    tw(f, 9, wmbase.rgb24(state, wmgeom.form(state, wmlayout.FM_SHADOW_C)) | (1 << 32) | (sold << 33))
+    wmanim.tw(f, 9, wmbase.rgb24(state, wmgeom.form(state, wmlayout.FM_SHADOW_C)) | (1 << 32) | (sold << 33))
     // S6b: the numbers of the chrome (see `chrome_object`)
     let cf2: u64 = wmlayout.gs(state, wmlayout.S_CHRF)
     if cf2 != 0 {
-        tw(cf2, 0, CHR_MAGIC | (1 << 32))
-        tw(cf2, 2, 1)
-        tw(cf2, 3, fb.rgb(state, 255, 0, 0))
-        tw(cf2, 4, fb.rgb(state, 0, 255, 0))
-        tw(cf2, 5, fb.rgb(state, 0, 0, 255))
-        tw(cf2, 6, wmbase.deco_rgb(state, wmlayout.DK_FRAME))
-        tw(cf2, 7, wmbase.deco_rgb(state, wmlayout.DK_TITLE))
-        tw(cf2, 8, wmbase.deco_rgb(state, wmlayout.DK_TEXT))
-        tw(cf2, 9, wmbase.deco_rgb(state, wmlayout.DK_FRAME_ON))
-        tw(cf2, 10, wmbase.deco_rgb(state, wmlayout.DK_TITLE_ON))
-        tw(cf2, 11, wmbase.deco_rgb(state, wmlayout.DK_TEXT_ON))
-        tw(cf2, 12, wmbase.deco_rgb(state, wmlayout.DK_CLOSE))
-        tw(cf2, 13, wmbase.deco_rgb(state, wmlayout.DK_CLOSE_MARK))
-        tw(cf2, 14, wmgeom.form(state, wmlayout.FM_RADIUS))
-        tw(cf2, 15, wmgeom.form(state, wmlayout.FM_GRAD))
-        tw(cf2, 16, wmgeom.form(state, wmlayout.FM_CAPTION))
-        tw(cf2, 17, wmgeom.border(state))
-        tw(cf2, 18, wmgeom.title_h(state))
-        tw(cf2, 19, wmgeom.cap_w(state))
-        tw(cf2, 20, wmgeom.uisc(state))
-        tw(cf2, 21, deco_alpha(state))
-        tw(cf2, 22, wmlayout.gs(state, wmlayout.S_CAPHOV))
-        tw(cf2, 23, wmlayout.gs(state, wmlayout.S_CAPDOWN))
+        wmanim.tw(cf2, 0, CHR_MAGIC | (1 << 32))
+        wmanim.tw(cf2, 2, 1)
+        wmanim.tw(cf2, 3, fb.rgb(state, 255, 0, 0))
+        wmanim.tw(cf2, 4, fb.rgb(state, 0, 255, 0))
+        wmanim.tw(cf2, 5, fb.rgb(state, 0, 0, 255))
+        wmanim.tw(cf2, 6, wmbase.deco_rgb(state, wmlayout.DK_FRAME))
+        wmanim.tw(cf2, 7, wmbase.deco_rgb(state, wmlayout.DK_TITLE))
+        wmanim.tw(cf2, 8, wmbase.deco_rgb(state, wmlayout.DK_TEXT))
+        wmanim.tw(cf2, 9, wmbase.deco_rgb(state, wmlayout.DK_FRAME_ON))
+        wmanim.tw(cf2, 10, wmbase.deco_rgb(state, wmlayout.DK_TITLE_ON))
+        wmanim.tw(cf2, 11, wmbase.deco_rgb(state, wmlayout.DK_TEXT_ON))
+        wmanim.tw(cf2, 12, wmbase.deco_rgb(state, wmlayout.DK_CLOSE))
+        wmanim.tw(cf2, 13, wmbase.deco_rgb(state, wmlayout.DK_CLOSE_MARK))
+        wmanim.tw(cf2, 14, wmgeom.form(state, wmlayout.FM_RADIUS))
+        wmanim.tw(cf2, 15, wmgeom.form(state, wmlayout.FM_GRAD))
+        wmanim.tw(cf2, 16, wmgeom.form(state, wmlayout.FM_CAPTION))
+        wmanim.tw(cf2, 17, wmgeom.border(state))
+        wmanim.tw(cf2, 18, wmgeom.title_h(state))
+        wmanim.tw(cf2, 19, wmgeom.cap_w(state))
+        wmanim.tw(cf2, 20, wmgeom.uisc(state))
+        wmanim.tw(cf2, 21, deco_alpha(state))
+        wmanim.tw(cf2, 22, wmlayout.gs(state, wmlayout.S_CAPHOV))
+        wmanim.tw(cf2, 23, wmlayout.gs(state, wmlayout.S_CAPDOWN))
         let fu: u64 = wmlayout.gs(state, wmlayout.S_FONT_UI)
-        tw(cf2, 24, fu)
-        tw(cf2, 25, wmlayout.gs(state, wmlayout.S_PX_UI))
-        tw(cf2, 26, wmgeom.title_pad(state))
+        wmanim.tw(cf2, 24, fu)
+        wmanim.tw(cf2, 25, wmlayout.gs(state, wmlayout.S_PX_UI))
+        wmanim.tw(cf2, 26, wmgeom.title_pad(state))
         var tbase: i64 = 0
         if fu < ttf.MAX_FONTS {
             tbase = wmgeom.title_base(state, fu)
         }
-        tw(cf2, 27, tbase as u64)
-        tw(cf2, 28, netmark.W | (netmark.H << 16))
+        wmanim.tw(cf2, 27, tbase as u64)
+        wmanim.tw(cf2, 28, netmark.W | (netmark.H << 16))
         var fok: u64 = 0
         if fu < ttf.MAX_FONTS {
             fok = 1
         }
-        tw(cf2, 29, fok)
+        wmanim.tw(cf2, 29, fok)
     }
     wmlayout.ss(state, wmlayout.S_TAB_N, wmlayout.gs(state, wmlayout.S_TAB_N) + 1)
-    tw(f, 5, wmlayout.gs(state, wmlayout.S_COMPOSITES))
-    tw(f, 6, TAB_ROW)
+    wmanim.tw(f, 5, wmlayout.gs(state, wmlayout.S_COMPOSITES))
+    wmanim.tw(f, 6, TAB_ROW)
     var lk: u64 = 0
     if wmgate.sperre_an(state) {
         lk = 1
     }
-    tw(f, 7, lk)
+    wmanim.tw(f, 7, lk)
     let cf3: u64 = wmlayout.gs(state, wmlayout.S_CHRF)
     if cf3 != 0 {
-        tw(cf3, 1, seq + 1)
+        wmanim.tw(cf3, 1, seq + 1)
     }
     arch.atomic_store(f + 8, seq + 1) // even: consistent
     wmlayout.ss(state, wmlayout.S_TABSEQ, seq + 1)
@@ -4255,8 +4148,8 @@ fn cp_page_object(state: u64) -> u64 {
     }
     wmlayout.ss(state, wmlayout.S_CP_PAGEF, f)
     wmlayout.ss(state, wmlayout.S_CP_PAGEI, k + 1)
-    tw(f, 0, CP_MAGIC | (1 << 32))
-    tw(f, 12, time.khz(state))
+    wmanim.tw(f, 0, CP_MAGIC | (1 << 32))
+    wmanim.tw(f, 12, time.khz(state))
     cp_sync(state)
     return k
 }
@@ -4271,20 +4164,20 @@ fn cp_sync(state: u64) {
     if cp_on(state) {
         on = 1
     }
-    tw(f, 1, on)
-    tw(f, 3, wmlayout.gs(state, wmlayout.S_CP_EVREF))
-    tw(f, 4, wmlayout.gs(state, wmlayout.S_CP_FSEQ))
-    tw(f, 5, wmlayout.gs(state, wmlayout.S_CP_ASEQ))
-    tw(f, 6, wmlayout.gs(state, wmlayout.S_CP_PEND))
-    tw(f, 7, wmlayout.gs(state, wmlayout.S_CP_X0))
-    tw(f, 8, wmlayout.gs(state, wmlayout.S_CP_Y0))
-    tw(f, 9, wmlayout.gs(state, wmlayout.S_CP_X1))
-    tw(f, 10, wmlayout.gs(state, wmlayout.S_CP_Y1))
+    wmanim.tw(f, 1, on)
+    wmanim.tw(f, 3, wmlayout.gs(state, wmlayout.S_CP_EVREF))
+    wmanim.tw(f, 4, wmlayout.gs(state, wmlayout.S_CP_FSEQ))
+    wmanim.tw(f, 5, wmlayout.gs(state, wmlayout.S_CP_ASEQ))
+    wmanim.tw(f, 6, wmlayout.gs(state, wmlayout.S_CP_PEND))
+    wmanim.tw(f, 7, wmlayout.gs(state, wmlayout.S_CP_X0))
+    wmanim.tw(f, 8, wmlayout.gs(state, wmlayout.S_CP_Y0))
+    wmanim.tw(f, 9, wmlayout.gs(state, wmlayout.S_CP_X1))
+    wmanim.tw(f, 10, wmlayout.gs(state, wmlayout.S_CP_Y1))
     var lk: u64 = 0
     if wmgate.sperre_an(state) {
         lk = 1
     }
-    tw(f, 11, lk)
+    wmanim.tw(f, 11, lk)
 }
 
 // ================== W-J (17.10.2026): INPUT -> PICTURE LATENCY
@@ -4796,9 +4689,9 @@ fn pl_page_object(state: u64) -> u64 {
     }
     wmlayout.ss(state, wmlayout.S_PL_PAGEF, f)
     wmlayout.ss(state, wmlayout.S_PL_PAGEI, k + 1)
-    tw(f, 0, PL_MAGIC | (1 << 32))
-    tw(f, 3, PL_RING | (PL_ENT << 32))
-    tw(f, 4, time.khz(state))
+    wmanim.tw(f, 0, PL_MAGIC | (1 << 32))
+    wmanim.tw(f, 3, PL_RING | (PL_ENT << 32))
+    wmanim.tw(f, 4, time.khz(state))
     return k
 }
 
@@ -4829,7 +4722,7 @@ fn cp_log(state: u64, me: u64, stride: u64) -> u64 {
         wmlayout.ss(state, wmlayout.S_PL_ON, 0)
         let f0: u64 = wmlayout.gs(state, wmlayout.S_PL_PAGEF)
         if f0 != 0 {
-            tw(f0, 1, 0)
+            wmanim.tw(f0, 1, 0)
         }
         return CP_BUSY
     }
@@ -4838,8 +4731,8 @@ fn cp_log(state: u64, me: u64, stride: u64) -> u64 {
         return k
     }
     let f: u64 = wmlayout.gs(state, wmlayout.S_PL_PAGEF)
-    tw(f, 1, stride)
-    tw(f, 5, pl_env_bits(state))
+    wmanim.tw(f, 1, stride)
+    wmanim.tw(f, 5, pl_env_bits(state))
     wmlayout.ss(state, wmlayout.S_PL_FLAGS, 0)
     wmlayout.ss(state, wmlayout.S_PL_NCOMP, 0)
     wmlayout.ss(state, wmlayout.S_PL_CDUR, 0)
@@ -4865,37 +4758,37 @@ fn pl_record(state: u64, kind: u64, x0: u64, y0: u64, x1: u64, y1: u64, t0: u64,
     }
     let idx: u64 = wmlayout.gs(state, wmlayout.S_PL_HEAD)
     let at: u64 = PL_AT + (idx % PL_RING) * PL_ENT
-    tw(f, at, 0)
-    tw(f, at + 1, t0)
-    tw(f, at + 2, (x0 & 0xFFFF) | ((y0 & 0xFFFF) << 16) | ((x1 & 0xFFFF) << 32) | ((y1 & 0xFFFF) << 48))
+    wmanim.tw(f, at, 0)
+    wmanim.tw(f, at + 1, t0)
+    wmanim.tw(f, at + 2, (x0 & 0xFFFF) | ((y0 & 0xFFFF) << 16) | ((x1 & 0xFFFF) << 32) | ((y1 & 0xFFFF) << 48))
     var hop: u64 = 0
     if hand_t0 != 0 && t0 > hand_t0 {
         hop = ph_us(state, hand_t0, t0)
     }
-    tw(f, at + 3, (wmlayout.gs(state, wmlayout.S_PL_CCORE) & 0xFF) | ((pl_core() & 0xFF) << 8) | ((wmlayout.gs(state, wmlayout.S_PL_DCORE) & 0xFF) << 16)
+    wmanim.tw(f, at + 3, (wmlayout.gs(state, wmlayout.S_PL_CCORE) & 0xFF) | ((pl_core() & 0xFF) << 8) | ((wmlayout.gs(state, wmlayout.S_PL_DCORE) & 0xFF) << 16)
         | ((wmlayout.gs(state, wmlayout.S_PL_NCOMP) & 0xFF) << 24) | ((hop & 0xFFFFFFFF) << 32))
-    tw(f, at + 4, (wmlayout.gs(state, wmlayout.S_PL_CDUR) & 0xFFFFFFFF) | ((ph_us(state, t0, t1) & 0xFFFFFFFF) << 32))
-    tw(f, at + 5, wmlayout.gs(state, wmlayout.S_PL_HASH))
+    wmanim.tw(f, at + 4, (wmlayout.gs(state, wmlayout.S_PL_CDUR) & 0xFFFFFFFF) | ((ph_us(state, t0, t1) & 0xFFFFFFFF) << 32))
+    wmanim.tw(f, at + 5, wmlayout.gs(state, wmlayout.S_PL_HASH))
     var dus: u64 = 0
     if wmlayout.gs(state, wmlayout.S_PL_DTSC) != 0 && t1 > wmlayout.gs(state, wmlayout.S_PL_DTSC) {
         dus = ph_us(state, wmlayout.gs(state, wmlayout.S_PL_DTSC), t1)
     }
-    tw(f, at + 6, (wmlayout.gs(state, wmlayout.S_PL_DSEQ) & 0xFFFFFFFF) | ((dus & 0xFFFFFFFF) << 32))
+    wmanim.tw(f, at + 6, (wmlayout.gs(state, wmlayout.S_PL_DSEQ) & 0xFFFFFFFF) | ((dus & 0xFFFFFFFF) << 32))
     var since: u64 = 0
     if wmlayout.gs(state, wmlayout.S_PL_TPREV) != 0 && t0 > wmlayout.gs(state, wmlayout.S_PL_TPREV) {
         since = ph_us(state, wmlayout.gs(state, wmlayout.S_PL_TPREV), t0)
     }
-    tw(f, at + 7, since)
-    tw(f, at, ((idx + 1) << 32) | fl)
+    wmanim.tw(f, at + 7, since)
+    wmanim.tw(f, at, ((idx + 1) << 32) | fl)
     wmlayout.ss(state, wmlayout.S_PL_HEAD, idx + 1)
     wmlayout.ss(state, wmlayout.S_PL_NREC, wmlayout.gs(state, wmlayout.S_PL_NREC) + 1)
     wmlayout.ss(state, wmlayout.S_PL_TPREV, t0)
     wmlayout.ss(state, wmlayout.S_PL_FLAGS, 0)
     wmlayout.ss(state, wmlayout.S_PL_NCOMP, 0)
     wmlayout.ss(state, wmlayout.S_PL_CDUR, 0)
-    tw(f, 2, idx + 1)
-    tw(f, 6, wmlayout.gs(state, wmlayout.S_PL_NTORN))
-    tw(f, 7, wmlayout.gs(state, wmlayout.S_PL_NREC))
+    wmanim.tw(f, 2, idx + 1)
+    wmanim.tw(f, 6, wmlayout.gs(state, wmlayout.S_PL_NTORN))
+    wmanim.tw(f, 7, wmlayout.gs(state, wmlayout.S_PL_NREC))
 }
 
 // WM_COMP / CP_ATTACH. 0 = attached, 1 = refused (`nocomp`), 2 = another live compositor is attached, 3 = busy.
@@ -4984,10 +4877,10 @@ fn cp_event(state: u64, typ: u64, mods: u64, btn: u64, x: u64, y: u64, code: u64
     }
     let h: u64 = wmlayout.gs(state, wmlayout.S_CP_HEAD)
     let at: u64 = CP_RING_AT + (h % CP_RING) * 4
-    tw(f, at + 1, x | (y << 32))
-    tw(f, at + 2, code)
-    tw(f, at + 3, time.tsc())
-    tw(f, at, typ | (mods << 8) | (btn << 16) | ((h + 1) << 32))
+    wmanim.tw(f, at + 1, x | (y << 32))
+    wmanim.tw(f, at + 2, code)
+    wmanim.tw(f, at + 3, time.tsc())
+    wmanim.tw(f, at, typ | (mods << 8) | (btn << 16) | ((h + 1) << 32))
     wmlayout.ss(state, wmlayout.S_CP_HEAD, h + 1)
     arch.atomic_store(f + 16, h + 1)
 }
@@ -5138,456 +5031,9 @@ fn flush_win(state: u64, i: u64) {
 // Bilddatei: es sind 72 Oktette, und ein Zeiger, der aus einer Datei
 // kommt, fehlt genau dann, wenn man ihn zum Suchen des Fehlers braucht.
 const CUR_W: u64 = 12
-const CUR_H: u64 = 18
-
-// RUNDE HIDPUNKTE: DER ZEIGER IST EIN PFEIL -- ER WAR NUR ZU KLEIN,
-// UM EINER ZU SEIN.
-//
-// Die Bitmaske stimmt; aus einem echten Bildschirmfoto (3440x1440)
-// herausgeschnitten ist ein sauberer Pfeil mit durchgehendem Schwanz
-// und umlaufendem Rand zu sehen -- er ist dort acht mal fuenfzehn
-// Bildpunkte gross. Auf einem 34-Zoll-Ultrawide ist das ein Fleck, und
-// genau als "einzelner weisser Fleck" hat Justin ihn beschrieben.
-//
-// Titelleiste, Rand und Schriftgroesse wachsen seit Runde SCHIRM mit
-// `uisc(state)`; der Zeiger war das einzige Stueck Oberflaeche, das es
-// nicht tat. Jetzt wird jeder Bildpunkt der Maske zu einem Block von
-// `uisc` mal `uisc` -- auf 1280x800 (uisc=1) aendert sich damit KEIN
-// einziges Bildpunkt, und das ist die Gegenprobe.
-// ============================================ RUNDE ECHTHARDWARE-4
-// DIE GROESSE KOMMT AUS `zeiger.fi`, UND SIE IST QUADRATISCH.
-//
-// Bis hierher war der Zeiger 12 mal 18 Bildpunkte mal Vervielfachung.
-// Die neun Formen (Pfeil, Textmarke, Hand, zwei Balken, zwei
-// Diagonalen, Kreuz, Sanduhr) passen nicht alle in ein hohes Rechteck
-// -- der Doppelpfeil ist breiter als hoch --, also ist das Feld
-// quadratisch: 24 Bildpunkte bei Vervielfachung 1, 48 bei 2. Justins
-// Vorgabe war "rund 24 bei 1, 48 bei 2", und das ist sie.
-fn cur_w(state: u64) -> u64 {
-    return cursor.size(wmgeom.uisc(state))
-}
-
-fn cur_h(state: u64) -> u64 {
-    return cursor.size(wmgeom.uisc(state))
-}
-
-// DER GRIFFPUNKT. Die Mausposition ist die SPITZE des Pfeils und die
-// MITTE der Textmarke -- ein Zeiger, dessen Griff immer in der linken
-// oberen Ecke laege, klickte bei jeder anderen Form daneben. Diese
-// beiden Zahlen sagen, um wieviel das Bild gegen die Position versetzt
-// gemalt wird, und die Schadensrechnung nimmt dieselben.
-fn cur_ox(state: u64) -> u64 {
-    return cursor.griff_x(wmlayout.gs(state, wmlayout.S_SHAPE), cur_w(state))
-}
-
-fn cur_oy(state: u64) -> u64 {
-    return cursor.griff_y(wmlayout.gs(state, wmlayout.S_SHAPE), cur_h(state))
-}
-
-fn cursor_row(r: u64, fuell: bool) -> u64 {
-    return cursor_row_of(0, r, fuell)
-}
-
-// RUNDE K15: ZWEI ZEIGERBILDER STATT EINEM. Der Balken ist mechanisch
-// aus dem Pfeil-Verfahren entstanden und nicht von Hand gemalt: die
-// Fuellung ist der Balken, der Umriss ist die Fuellung um einen
-// Bildpunkt geweitet. Damit ist er ueber JEDEM Untergrund zu sehen --
-// derselbe Grund, aus dem der Pfeil einen schwarzen Rand hat.
-fn cursor_row_of(form: u64, r: u64, fuell: bool) -> u64 {
-    // Bit 11 ist links.
-    // ================================= RUNDE BLECH-HID: DER PFEIL WAR KEINER.
-    //
-    // Justin hat den Zeiger auf echtem Blech fotografiert und
-    // vergroessert: ein weisses Dreieck, darunter eine LUECKE, darunter
-    // zwei getrennte weisse Stummel. Das war kein Rasterfehler und
-    // nichts, was die Maschine getan hat -- es stand so in diesen zwei
-    // Zeilen:
-    //
-    //   innen[11] = 0x0400   EIN einziger gesetzter Bildpunkt; genau
-    //                        unter der breitesten Zeile (0x07fc) reisst
-    //                        der Pfeil damit ab.
-    //   innen[12..16] = 0x0370, 0x01b0, 0x01b0, 0x00d8, 0x00d8
-    //                        je ZWEI getrennte Bloecke, und der Umriss
-    //                        hat die Luecke dazwischen auch noch
-    //                        umrandet (0x0c88).
-    //
-    // Gemeint war der klassische X11-Zeiger, dessen Schwanz sich in zwei
-    // Beine gabelt. Von Hand in Hexadezimalzahlen geschrieben sieht das
-    // aus wie ein Pfeil; auf dem Schirm sieht es aus wie Bruchstuecke.
-    //
-    // DER NEUE PFEIL IST NICHT VON HAND GERECHNET. In
-    // `tools/wm/zeiger.py` steht eine Silhouette -- je Zeile GENAU EIN
-    // Bereich --, und die Fuellung ist ihre EROSION um einen Bildpunkt
-    // in den vier Richtungen; was uebrigbleibt, ist der Rand und ist
-    // damit ueberall genau einen Bildpunkt breit. Derselbe Laeufer liest
-    // diese zwei Masken zurueck, malt sie als ASCII-Bild und rechnet
-    // sechs Zusagen nach: eine zusammenhaengende Flaeche, jeder
-    // Fuellpunkt rundherum gedeckt, keine Zeile mit zwei Bloecken, kein
-    // allein stehender Punkt, keine Ueberschneidung, und die Spitze auf
-    // dem Griffpunkt (0,0).
-    //
-    //    0 |.           |     10 |.#######..  |
-    //    1 |..          |     11 |.######.    |
-    //    2 |.#.         |     12 | .#####.    |
-    //    3 |.##.        |     13 |  .####.    |
-    //    4 |.###.       |     14 |   .###.    |
-    //    5 |.####.      |     15 |   .###.    |
-    //    6 |.#####.     |     16 |   .###.    |
-    //    7 |.######.    |     17 |   .....    |
-    //    8 |.#######.   |
-    //    9 |.########.  |
-    var umriss: [u8; 37] = b"\x08\x00\x0c\x00\x0a\x00\x09\x00\x08\x80\x08\x40\x08\x20\x08\x10\x08\x08\x08\x04\x08\x0c\x08\x10\x04\x10\x02\x10\x01\x10\x01\x10\x01\x10\x01\xf0\x00"
-    var innen: [u8; 37] = b"\x00\x00\x00\x00\x04\x00\x06\x00\x07\x00\x07\x80\x07\xc0\x07\xe0\x07\xf0\x07\xf8\x07\xf0\x07\xe0\x03\xe0\x01\xe0\x00\xe0\x00\xe0\x00\xe0\x00\x00\x00"
-    var bumriss: [u8; 37] = b"\x03\xfc\x03\xfc\x03\xfc\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x03\xfc\x03\xfc\x03\xfc\x00"
-    var binnen: [u8; 37] = b"\x00\x00\x01\xf8\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x01\xf8\x00\x00\x00"
-    if r >= CUR_H {
-        return 0
-    }
-    var p: u64 = 0
-    if form == 1 {
-        if fuell {
-            p = (&binnen[0]) as u64 + r * 2
-        } else {
-            p = (&bumriss[0]) as u64 + r * 2
-        }
-    } else {
-        if fuell {
-            p = (&innen[0]) as u64 + r * 2
-        } else {
-            p = (&umriss[0]) as u64 + r * 2
-        }
-    }
-    return (kstate.get8(p) << 8) | kstate.get8(p + 1)
-}
-
-fn shape(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_SHAPE)
-}
-
-// DIESELBE UMSCHALTUNG, ABER OHNE DEN WUNSCH DER ANWENDUNG ZU
-// UEBERSCHREIBEN. Nur der Server ruft das -- fuer die Raender.
-fn shape_intern(state: u64, s: u64) {
-    if s >= cursor.FORMEN || !wmbase.ready(state) {
-        return
-    }
-    if wmlayout.gs(state, wmlayout.S_SHAPE) == s {
-        return
-    }
-    wmlayout.ss(state, wmlayout.S_SHAPE, s)
-    // DELL ROUND: the shape change on the wire (a runner reads it).
-    let mx: i64 = wmlayout.gs(state, wmlayout.S_CURX) as i64
-    let my: i64 = wmlayout.gs(state, wmlayout.S_CURY) as i64
-    var s_fm: [u8; 11] = "wm: form=\0\0"
-    var s_fx: [u8; 4] = " x=\0"
-    var s_fy: [u8; 4] = " y=\0"
-    serial.puts((&s_fm[0]) as u64)
-    serial.dec(s)
-    serial.puts((&s_fx[0]) as u64)
-    serial.dec(mx as u64)
-    serial.puts((&s_fy[0]) as u64)
-    serial.dec(my as u64)
-    serial.nl()
-    let gw: i64 = cur_w(state) as i64
-    wmbase.damage(state, mx - gw, my - gw, mx + gw, my + gw)
-}
-
-// ============================================ RUNDE ECHTHARDWARE-4
-// DER ZEIGER SAGT, WAS DER RAND KANN.
-//
-// Seit ECHTHARDWARE-3 ist der GANZE rechte und untere Rand eines
-// Fensters ein Griff zum Groessenaendern (vorher waren es zwoelf
-// Bildpunkte in einer Ecke). Ein Griff, den man nicht SIEHT, ist
-// trotzdem einer, den man nicht findet -- deshalb wechselt der Zeiger
-// dort jetzt die Form, genau wie bei jedem anderen System:
-//
-//   rechte Kante        Doppelpfeil waagrecht
-//   untere Kante        Doppelpfeil senkrecht
-//   die Ecke dazwischen Doppelpfeil diagonal NW-SO
-//   sonst               was die Anwendung wollte
-//
-// Waehrend gezogen oder in der Groesse geaendert wird, bleibt die Form
-// stehen: der Zeiger laeuft dabei aus dem Randstreifen heraus, und ein
-// Zeiger, der mitten im Ziehen die Form wechselt, flackert.
-fn margin_cursor(state: u64, i: u64, x: i64, y: i64) {
-    // W-CURSOR counter-proof `noshapes`: an arrow over everything.
-    if fb.noshapes_an(state) {
-        shape_intern(state, cursor.F_PFEIL)
-        return
-    }
-    if wmlayout.gs(state, wmlayout.S_SIZING) != 0 {
-        return
-    }
-    if wmlayout.gs(state, wmlayout.S_DRAG) != 0 {
-        // a window is carried by its title bar: the move cross
-        shape_intern(state, cursor.F_CROSS)
-        return
-    }
-    if wmgate.dnd_forbidden(state, i) { // W-DND: nobody takes a drop here
-        shape_intern(state, cursor.F_NO)
-        return
-    }
-    if wmgate.dh_live != 0 { // W-DND: Ctrl = copy (plus), otherwise move (drop arrow)
-        if (wmgate.mods_of(state) & wmgate.M_CTRL) != 0 {
-            shape_intern(state, cursor.F_COPY)
-        } else {
-            shape_intern(state, cursor.F_MOVE)
-        }
-        return
-    }
-    var will: u64 = cursor.F_PFEIL
-    if i < wmbase.MAX_WIN && wmbase.valid(state, i) {
-        // the wish of the program counts over the CLIENT area only; the
-        // frame and the title bar are the server's and show the arrow.
-        let cx: i64 = x - wmbase.win_x(state, i) - wmbase.inx(state, i) as i64
-        let cy: i64 = y - wmbase.win_y(state, i) - wmbase.iny(state, i) as i64
-        if cx >= 0 && cy >= 0 && cx < wmlayout.wg(state, i, wmlayout.W_W) as i64
-            && cy < wmlayout.wg(state, i, wmlayout.W_H) as i64 {
-            if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-                // the terminal grid is text
-                will = cursor.F_TEXT
-            } else {
-                will = wmlayout.wg(state, i, wmlayout.W_CURSOR)
-                if will >= cursor.FORMEN {
-                    will = cursor.F_PFEIL
-                }
-            }
-        }
-    }
-    if i < wmbase.MAX_WIN && wmbase.valid(state, i) && wmbase.deko(state, i) {
-        let lx: i64 = x - wmbase.win_x(state, i) - wmbase.inx(state, i) as i64
-        let ly: i64 = y - wmbase.win_y(state, i) - wmbase.iny(state, i) as i64
-        let k: u64 = grip_mask(state, i, lx, ly)
-        var l: bool = (k & SZ_L) != 0
-        let r: bool = (k & SZ_R) != 0
-        var t: bool = (k & SZ_T) != 0
-        var b: bool = (k & SZ_B) != 0
-        // counter-proof `nowinfix`: the old cursor knew right and bottom only
-        if fb.winfix_aus(state) {
-            l = false
-            t = false
-        }
-        // DELL ROUND: all eight directions. Before, only right, bottom
-        // and the corner between them had a cursor.
-        if (l && t) || (r && b) {
-            will = cursor.F_DIAG1
-        } else if (r && t) || (l && b) {
-            will = cursor.F_DIAG2
-        } else if l || r {
-            will = cursor.F_WIDTH
-        } else if t || b {
-            will = cursor.F_HEIGHT
-        }
-    }
-    shape_intern(state, will)
-}
-
-// The edges a point (window-local to the work area) is on: the SAME test
-// the press uses, so the cursor shows exactly where a drag would resize.
-fn grip_mask(state: u64, i: u64, lokal_x: i64, lokal_y: i64) -> u64 {
-    // a maximised window has no grips (it fills the work area)
-    if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) != 0 && !fb.winfix_aus(state) {
-        return 0
-    }
-    let rand: i64 = wmgeom.grip(state) as i64
-    let iw: i64 = wmlayout.wg(state, i, wmlayout.W_W) as i64
-    let ih: i64 = wmlayout.wg(state, i, wmlayout.W_H) as i64
-    let oben: i64 = 0 - wmbase.iny(state, i) as i64
-    var kanten: u64 = 0
-    if lokal_x > 0 - rand && lokal_x < rand {
-        kanten = kanten | SZ_L
-    }
-    if lokal_x >= iw - rand && lokal_x < iw + rand {
-        kanten = kanten | SZ_R
-    }
-    if lokal_y >= oben && lokal_y < oben + wmgeom.grip_top(state) as i64 {
-        kanten = kanten | SZ_T
-    }
-    if lokal_y >= ih - rand && lokal_y < ih + rand {
-        kanten = kanten | SZ_B
-    }
-    let im_rahmen: bool = lokal_x > 0 - rand
-        && lokal_y >= oben
-        && lokal_x < iw + rand && lokal_y < ih + rand
-    if !im_rahmen {
-        return 0
-    }
-    return kanten
-}
-
-// Das Bild wechseln und die STELLE schmutzig machen, an der der Zeiger
-// gerade steht -- sonst steht das alte Bild dort, bis sich die Maus
-// bewegt.
-fn set_shape(state: u64, s: u64) {
-    if s >= cursor.FORMEN || !wmbase.ready(state) {
-        return
-    }
-    wmlayout.ss(state, wmlayout.S_SHAPE_APP, s)
-    // W-CURSOR: the wish belongs to the window under the pointer (the
-    // program answers a move event of exactly that window) and is
-    // remembered there. The shape shown follows from the window and the
-    // spot (`margin_cursor`), so leaving the window drops the wish at once
-    // and returning needs no new call.
-    let mx: i64 = wmlayout.gs(state, wmlayout.S_CURX) as i64
-    let my: i64 = wmlayout.gs(state, wmlayout.S_CURY) as i64
-    var i: u64 = wmgate.hit(state, mx, my)
-    if i < wmbase.MAX_WIN && wmbase.valid(state, i) {
-        wmlayout.wsv(state, i, wmlayout.W_CURSOR, s)
-        if !wmgate.darf(state, i) {
-            i = wmbase.MAX_WIN
-        }
-    }
-    margin_cursor(state, i, mx, my)
-}
-
-// ================== RUNDE VSYNC: BEWEGUNG, BILDGRENZE, SIGNATUR
-
-// Die zugesagte Dauer einer Fensterbewegung. Steht keine Formmarke da,
-// gilt MO_FAST -- dieselben 120 ms, die wlib seit DESIGN-2 fuer Hover
-// und Menue nimmt. Die Zahl steht hier EINMAL; wer sie aendern will,
-// aendert die Formmarke und nicht den Quelltext.
-fn motion_ms(state: u64) -> u64 {
-    if wmlayout.gs(state, wmlayout.S_FORM + wmlayout.FM_MOTION * 8) == 0 {
-        return MOTION_DEF
-    }
-    return wmgeom.form(state, wmlayout.FM_MOTION)
-}
-
-// Sind Bewegungen abgeschaltet? Zwei Wege fuehren dahin, und sie
-// bedeuten dasselbe: die Formmarke sagt 0 (das ist "Animationen
-// reduzieren"), oder die Gegenprobe `noanim` steht auf der
-// Befehlszeile. In beiden Faellen ist eine Bewegung SOFORT FERTIG.
-fn anim_off(state: u64) -> bool {
-    return wmlayout.gs(state, wmlayout.S_NOANIM) != 0 || motion_ms(state) == 0
-}
-
-// ease-out, ganzzahlig: 1-(1-t)^2 in Tausendsteln. Dieselbe Kurve wie
-// `wlib.ease(EASE_OUT)` -- absichtlich, damit ein Fenster, das
-// aufgeht, und ein Knopf, der hell wird, sich gleich anfuehlen.
-// Keine Fliesskommazahl: der Kernel rettet in `syscall` kein SSE.
-fn ease_out(t: u64) -> u64 {
-    var pp: u64 = t
-    if pp > 1000 {
-        pp = 1000
-    }
-    let inv: u64 = 1000 - pp
-    return 1000 - inv * inv / 1000
-}
-
-// Der Fortschritt einer laufenden Bewegung, 0..1000. Er faellt aus der
-// VERGANGENEN ZEIT und nicht aus der Zahl der Bilder: bei TICK_HZ=100
-// ist ein Tick 10 ms, und eine Zusage von 120 ms sind zwoelf Ticks --
-// aber wenn der Server einmal langsamer ist, springt die Bewegung
-// weiter, statt sich zu dehnen.
-fn anim_p(state: u64, i: u64) -> u64 {
-    let ms: u64 = wmlayout.wg(state, i, wmlayout.W_ANMS)
-    if ms == 0 {
-        return 1000
-    }
-    // r1135: wall clock (monotonic ms), not ticks. A slow guest loses
-    // ticks; the motion must still end after its promised duration.
-    let jetzt: u64 = time.mono_ns(state) / 1000000
-    let ab: u64 = wmlayout.wg(state, i, wmlayout.W_AN0)
-    if jetzt <= ab {
-        return 0
-    }
-    let vergangen: u64 = jetzt - ab
-    if vergangen >= ms {
-        return 1000
-    }
-    return vergangen * 1000 / ms
-}
-
-// Eine Bewegung anmelden. `art` ist AN_OPEN, AN_CLOSE oder AN_MIN.
-// Ist sie abgeschaltet, wird NICHTS angemeldet -- der Aufrufer sieht
-// `false` und macht seinen Endzustand sofort.
-fn anim_start(state: u64, i: u64, art: u64) -> bool {
-    if !wmbase.valid(state, i) || anim_off(state) {
-        return false
-    }
-    wmlayout.wsv(state, i, wmlayout.W_ANK, art)
-    wmlayout.wsv(state, i, wmlayout.W_AN0, time.mono_ns(state) / 1000000)
-    wmlayout.wsv(state, i, wmlayout.W_ANMS, motion_ms(state))
-    wmlayout.wsv(state, i, wmlayout.W_ANP, 0)
-    wmlayout.ss(state, wmlayout.S_ANIMS, wmlayout.gs(state, wmlayout.S_ANIMS) + 1)
-    wmdamage.damage_win(state, i)
-    return true
-}
-
-fn anim_laeuft(state: u64, i: u64) -> bool {
-    return wmbase.valid(state, i) && wmlayout.wg(state, i, wmlayout.W_ANK) != 0
-}
 
 fn anims(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_ANIMS)
-}
-
-fn anim_frames(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_ANFRAMES)
-}
-
-fn anim_ticks(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_TICKS)
-}
-
-// RUNDE ZIEH: die beiden Zahlen des Aufhebens.
-fn swings(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_SWINGS)
-}
-
-fn drag_px(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_DRAGPX)
-}
-
-// RUNDE ZIEH: die Bildzeit, NUR fuer Bilder mit aufgehobenem Fenster.
-fn zieh_frn(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_ZFRN)
-}
-
-fn zieh_frus(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_ZFRUS)
-}
-
-fn zieh_frmax(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_ZFRMAX)
-}
-
-fn zieh_frueber(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_ZFRUE)
-}
-
-// Die Grundlast: Bilder desselben Laufs OHNE aufgehobenes Fenster.
-fn ohne_frn(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_OFRN)
-}
-
-fn ohne_frus(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_OFRUS)
-}
-
-fn ohne_frmax(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_OFRMAX)
-}
-
-fn set_noanim(state: u64, on: bool) {
-    wmlayout.ss(state, wmlayout.S_NOANIM, 0)
-    if on {
-        wmlayout.ss(state, wmlayout.S_NOANIM, 1)
-    }
-}
-
-// Der Fortschritt, den `paint_win` gerade sehen soll -- schon durch die
-// Kurve gelaufen. Beim Schliessen und Minimieren laeuft er rueckwaerts:
-// dieselbe Kurve, gespiegelt, statt einer zweiten.
-fn anim_mix(state: u64, i: u64) -> u64 {
-    let art: u64 = wmlayout.wg(state, i, wmlayout.W_ANK)
-    if art == 0 {
-        return 1000
-    }
-    let e: u64 = ease_out(anim_p(state, i))
-    if art == AN_OPEN {
-        return e
-    }
-    return 1000 - e
 }
 
 // EIN TICK DER BEWEGUNGEN, und er gehoert in den Zeitgeber und nicht
@@ -5604,7 +5050,7 @@ fn anim_tick(state: u64) -> u64 {
     var i: u64 = 0
     while i < wmbase.MAX_WIN {
         if wmbase.valid(state, i) && wmlayout.wg(state, i, wmlayout.W_ANK) != 0 {
-            let p: u64 = anim_p(state, i)
+            let p: u64 = wmanim.anim_p(state, i)
             let art: u64 = wmlayout.wg(state, i, wmlayout.W_ANK)
             // Der Bereich wird IMMER schmutzig, auch wenn der
             // Fortschritt gleich blieb -- am Ende der Bewegung steht
@@ -5618,10 +5064,10 @@ fn anim_tick(state: u64) -> u64 {
                 // verschwunden, haette die Bewegung nichts mehr zu
                 // zeigen gehabt -- das ist der ganze Grund, warum
                 // Schliessen ueber diesen Umweg laeuft.
-                if art == AN_CLOSE {
+                if art == wmanim.AN_CLOSE {
                     destroy(state, i)
                 } else {
-                    if art == AN_MIN {
+                    if art == wmanim.AN_MIN {
                         set_hidden(state, i, true)
                     }
                 }
@@ -6514,8 +5960,8 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
     // DOPPELT, einmal im Bild und einmal darueber. `hwcur_an` ist
     // deshalb die Bedingung fuer BEIDES: fuer das Malen hier und fuer
     // den Schaden bei der Bewegung.
-    if wmlayout.gs(state, wmlayout.S_CURON) != 0 && !hwcur_an(state) {
-        paint_cursor(state, x0, y0, x1, y1)
+    if wmlayout.gs(state, wmlayout.S_CURON) != 0 && !wmcursor.hwcur_an(state) {
+        wmcursor.paint_cursor(state, x0, y0, x1, y1)
     }
     let tp_cur: u64 = time.tsc()
     // 4. ROUND A11Y-2: THE MAGNIFIER, ON TOP OF EVERYTHING -- after the
@@ -6861,63 +6307,6 @@ fn hits_seen(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_HITS)
 }
 
-// Ein Fenster in den schmutzigen Bereich. Rahmen, Titelleiste,
-// Schliessfeld, Groessengriff -- und dann die Flaeche der Anwendung.
-// RUNDE VSYNC: EIN FENSTER IN BEWEGUNG, und warum es NICHT der
-// gewoehnliche Weg mit anderen Zahlen ist.
-//
-// Beim Oeffnen und Schliessen soll das Fenster skalieren UND
-// durchscheinen. Skalieren heisst: die Fensterflaeche (`W_BUF`) wird
-// beim Uebertragen abgetastet, nicht Zeile fuer Zeile kopiert.
-// Durchscheinen heisst: jeder Bildpunkt wird mit dem gemischt, was
-// schon dasteht. Beides zusammen geht nur, wenn man an die Flaeche VOR
-// dem Uebertragen herankommt -- genau das, was DESIGN-2 in wlib
-// vermisst hat und was hier, im Server, selbstverstaendlich ist.
-//
-// Der Rahmen wird dabei NICHT mitgemalt: ein Rahmen, der mitskaliert,
-// hat an jeder Kante eine andere Strichstaerke und sieht nach Fehler
-// aus. Gemalt wird die Flaeche, mittig um denselben Punkt, um den auch
-// das fertige Fenster steht.
-// ====================================================== RUNDE ZIEH
-//
-// DAS AUFHEBEN BEIM VERSCHIEBEN -- DREI WIRKUNGEN, EINZELN SCHALTBAR.
-//
-// Justins Wunsch, woertlich: beim Ziehen eines Fensters wird es leicht
-// groesser ("als wuerde man es aufheben"), der Pivot liegt an der
-// angefassten Stelle statt in der Mitte, und es schwingt mit Traegheit
-// um diesen Punkt und pendelt beim Absetzen aus -- nur beim
-// Verschieben, nicht sonst.
-//
-// WAS DIESER SERVER NICHT KANN, UND WARUM DAS HIER SO STEHT. Eine
-// echte Kipp-Transformation braucht je Zielbildpunkt eine Ruecktrans-
-// formation mit Sinus und Kosinus. Dieser Kernel rettet in `syscall`
-// kein SSE (siehe `ease_out`), rechnet also ganzzahlig, und die
-// Abtastung in `paint_win_anim` ist eine Nachbarabtastung ueber
-// Zeilen. Eine gedrehte Flaeche waere damit eine Treppe aus
-// Rechtecken. Die Vorrunde hat das schon festgestellt, und die
-// Naeherung, die stattdessen hier steht, ist:
-//
-//   VERSATZ + SKALIERUNG UM EINEN VERSCHOBENEN PIVOT.
-//
-// Das Fenster waechst um FM_LIFT, und der Punkt, der dabei STEHEN
-// BLEIBT, ist nicht die Mitte, sondern (bei FM_TILT = 100) die Stelle
-// unter dem Zeiger. Genau das ist die Wahrnehmung "ich habe es an
-// dieser Ecke angefasst": fasst man unten rechts an, waechst das
-// Fenster nach oben links weg. Der Nachzug (FM_SWING) legt einen
-// Versatz gegen die Bewegungsrichtung darueber, und beim Loslassen
-// laeuft dieser Versatz gegen null -- das ist das Auspendeln.
-//
-// DIE WAHRE LAGE DES FENSTERS BLEIBT UNBERUEHRT. W_X/W_Y folgen dem
-// Zeiger ohne Verzoegerung; nur das BILD haengt hinterher. Ein
-// Fenster, dessen Ablegepunkt von einer Feder abhaengt, ist ein
-// Fenster, das man nicht mehr trifft -- und `drag_hover` (die
-// Andockvorschau) rechnet ohnehin mit der wahren Lage.
-
-// Ist das Fenster gerade dasjenige, das am Zeiger haengt?
-fn is_dragged(state: u64, i: u64) -> bool {
-    return wmlayout.gs(state, wmlayout.S_DRAG) == i + 1
-}
-
 // DIE VORFUEHRUNG FASST AN UND LAESST LOS -- ueber dieselben zwei
 // Wege wie der Zeiger.
 //
@@ -6952,242 +6341,6 @@ fn drag_end_pub(state: u64, i: u64) {
     }
     wmlayout.ss(state, wmlayout.S_DRAG, 0)
     drag_end(state, i, wmbase.win_x(state, i), wmbase.win_y(state, i))
-}
-
-// Die drei Schalter. Jeder ist zugleich seine Staerke; 0 heisst aus.
-// Sie fragen ZUERST `anim_off`: wer "Animationen reduzieren" gesetzt
-// hat, hat damit auch das hier gemeint, und zwei Stellen, an denen man
-// Bewegung abschaltet, sind eine zu viel.
-fn drag_lift_on(state: u64) -> u64 {
-    if anim_off(state) {
-        return 0
-    }
-    return wmgeom.form(state, wmlayout.FM_LIFT)
-}
-
-fn drag_tilt_on(state: u64) -> u64 {
-    if anim_off(state) {
-        return 0
-    }
-    return wmgeom.form(state, wmlayout.FM_TILT)
-}
-
-fn drag_swing_on(state: u64) -> u64 {
-    if anim_off(state) {
-        return 0
-    }
-    return wmgeom.form(state, wmlayout.FM_SWING)
-}
-
-// Die Skalierung, mit der ein gezogenes Fenster gemalt wird, in
-// Tausendsteln. 1000 heisst unveraendert -- und dann malt der
-// gewoehnliche Weg, ohne einen Bildpunkt Mehrkosten.
-fn drag_scale(state: u64, i: u64) -> u64 {
-    if !is_dragged(state, i) {
-        return 1000
-    }
-    return 1000 + drag_lift_on(state)
-}
-
-// Wie viele Bildpunkte das Fenster durch das Aufheben breiter wird.
-// Nur fuer die Messung und fuer `damage`: wer groesser malt, muss auch
-// groesser schmutzig melden, sonst bleibt ein Rand stehen.
-fn lift_px(state: u64, i: u64) -> i64 {
-    let sk: u64 = drag_scale(state, i)
-    if sk <= 1000 {
-        return 0
-    }
-    let w: i64 = wmbase.outer_w(state, i) as i64
-    let h: i64 = wmbase.outer_h(state, i) as i64
-    let dw: i64 = w * (sk - 1000) as i64 / 1000
-    let dh: i64 = h * (sk - 1000) as i64 / 1000
-    return wmbase.imax(dw, dh) + 1
-}
-
-// Der Nachzug, vorzeichenbehaftet gelesen.
-fn swing_dx(state: u64, i: u64) -> i64 {
-    return wmlayout.wg(state, i, wmlayout.W_SWX) as i64
-}
-
-fn swing_dy(state: u64, i: u64) -> i64 {
-    return wmlayout.wg(state, i, wmlayout.W_SWY) as i64
-}
-
-// EIN TICK DES NACHZUGS, und er gehoert in denselben Zeitgeber wie
-// `anim_tick` -- aus dem Grund, den Runde VSYNC schon aufgeschrieben
-// hat: eine Bewegung, die im Zeichnen tickt, laeuft auf einer
-// langsamen Maschine langsamer.
-//
-// Er macht zwei Dinge. Haengt das Fenster am Zeiger, waechst der
-// Versatz mit der Geschwindigkeit (die Differenz der Lage seit dem
-// letzten Tick) -- das ist die Traegheit. Haengt es nicht mehr, faellt
-// der Versatz je Tick um SWING_DECAY Tausendstel gegen null -- das ist
-// das Auspendeln. Beides ist am Deckel SWING_MAX_PX abgeschnitten.
-// DAS ABKLINGEN, UND WARUM ES MINDESTENS EINEN BILDPUNKT NIMMT.
-//
-// `v - v * 250 / 1000` ist ganzzahlig und rundet zur Null: bei v = -3
-// ist -3 * 250 / 1000 = 0, und dann bleibt -3 stehen, Tick fuer Tick.
-// GEMESSEN an einem Fenster, das am Haken stillstand: von t=105 bis
-// t=190 durchgehend sx=-3. Das Bild stand dauerhaft drei Bildpunkte
-// neben dem Fenster -- das ist keine Traegheit mehr, sondern ein
-// Versatz, der nie zurueckkommt.
-//
-// Also: ist der Abzug null, aber der Wert nicht, wird EIN Bildpunkt
-// abgezogen. Damit erreicht jeder Wert die Null in endlich vielen
-// Ticks, und das Auspendeln hat ein Ende statt eines Restes.
-fn abklingen(v: i64) -> i64 {
-    if v == 0 {
-        return 0
-    }
-    let ab: i64 = v * SWING_DECAY as i64 / 1000
-    if ab == 0 {
-        if v > 0 {
-            return v - 1
-        }
-        return v + 1
-    }
-    return v - ab
-}
-
-fn swing_tick_win(state: u64, i: u64) -> bool {
-    let st: u64 = drag_swing_on(state)
-    let x: i64 = wmbase.win_x(state, i)
-    let y: i64 = wmbase.win_y(state, i)
-    var sx: i64 = swing_dx(state, i)
-    var sy: i64 = swing_dy(state, i)
-    if st == 0 {
-        // Abgeschaltet: ein etwa stehengebliebener Versatz wird EINMAL
-        // geraeumt, damit kein Fenster mit schiefem Bild zurueckbleibt.
-        wmlayout.wsv(state, i, wmlayout.W_DXLAST, x as u64)
-        wmlayout.wsv(state, i, wmlayout.W_DYLAST, y as u64)
-        if sx == 0 && sy == 0 {
-            return false
-        }
-        wmlayout.wsv(state, i, wmlayout.W_SWX, 0)
-        wmlayout.wsv(state, i, wmlayout.W_SWY, 0)
-        wmlayout.wsv(state, i, wmlayout.W_SWOFF, 0)
-        damage_win_lift(state, i)
-        return true
-    }
-    if is_dragged(state, i) {
-        // DIE GESCHWINDIGKEIT FAELLT AUS DER LAGE, nicht aus dem
-        // Zeigerweg: `move_win` kann zwischen zwei Ticks mehrmals
-        // gelaufen sein, und was das Bild nachziehen soll, ist die
-        // Strecke, die das Fenster in DIESER Zeit zurueckgelegt hat.
-        let vx: i64 = x - wmlayout.wg(state, i, wmlayout.W_DXLAST) as i64
-        let vy: i64 = y - wmlayout.wg(state, i, wmlayout.W_DYLAST) as i64
-        // Der Versatz zeigt GEGEN die Bewegung -- das Bild bleibt
-        // zurueck. `st` ist die Staerke in Prozent.
-        sx = sx - vx * st as i64 / 100
-        sy = sy - vy * st as i64 / 100
-        // und er laesst zugleich nach, sonst summiert sich ein langer
-        // Zug zu einem Bild, das gar nicht mehr zurueckfindet.
-        sx = abklingen(sx)
-        sy = abklingen(sy)
-        // ================================== GEMESSEN UND BEHOBEN
-        // DER VERSATZ BLIEB BEI -3 STEHEN, SOLANGE DAS FENSTER HING.
-        //
-        // Ganzzahlig ist -3 * 250 / 1000 = 0 (Firn rundet zur Null),
-        // also sx = -3 - 0 = -3, Tick fuer Tick. Gemessen an einem
-        // Fenster, das am Haken STILLSTAND: t=105 bis t=190 alle
-        // sx=-3. Das Bild stand damit dauerhaft drei Bildpunkte
-        // neben dem Fenster -- keine Traegheit mehr, nur noch ein
-        // Versatz, der nie zurueckkommt.
-        //
-        // Dieselbe Wache wie im Zweig "losgelassen", und aus
-        // demselben Grund: unter zwei Bildpunkten ist es kein
-        // Nachzug mehr, sondern eine Zahl, die nie null wird.
-        // Sie steht HIER und nicht nur dort, weil ein Fenster auch
-        // am Haken stillstehen kann -- und dann ist der Nachzug
-        // fertig, obwohl noch niemand losgelassen hat.
-        if vx == 0 && sx < 2 && sx > -2 {
-            sx = 0
-        }
-        if vy == 0 && sy < 2 && sy > -2 {
-            sy = 0
-        }
-    } else {
-        if wmlayout.wg(state, i, wmlayout.W_SWOFF) == 0 && sx == 0 && sy == 0 {
-            wmlayout.wsv(state, i, wmlayout.W_DXLAST, x as u64)
-            wmlayout.wsv(state, i, wmlayout.W_DYLAST, y as u64)
-            return false
-        }
-        sx = abklingen(sx)
-        sy = abklingen(sy)
-        // Unter einem Bildpunkt ist es kein Nachzug mehr, sondern eine
-        // Zahl, die nie null wird: ganzzahlig geteilt bleibt 1 bei 1.
-        if sx < 2 && sx > -2 {
-            sx = 0
-        }
-        if sy < 2 && sy > -2 {
-            sy = 0
-        }
-        if sx == 0 && sy == 0 {
-            wmlayout.wsv(state, i, wmlayout.W_SWOFF, 0)
-        }
-    }
-    sx = wmbase.imin(wmbase.imax(sx, 0 - SWING_MAX_PX), SWING_MAX_PX)
-    sy = wmbase.imin(wmbase.imax(sy, 0 - SWING_MAX_PX), SWING_MAX_PX)
-    let alt_x: i64 = swing_dx(state, i)
-    let alt_y: i64 = swing_dy(state, i)
-    wmlayout.wsv(state, i, wmlayout.W_SWX, sx as u64)
-    wmlayout.wsv(state, i, wmlayout.W_SWY, sy as u64)
-    wmlayout.wsv(state, i, wmlayout.W_DXLAST, x as u64)
-    wmlayout.wsv(state, i, wmlayout.W_DYLAST, y as u64)
-    if sx != alt_x || sy != alt_y {
-        damage_win_lift(state, i)
-        return true
-    }
-    return false
-}
-
-// Der Nachzug aller Fenster. Gibt zurueck, wie viele noch pendeln --
-// dieselbe Auskunft wie `anim_tick`, damit der Ring weiss, ob er
-// weiterzeichnen muss.
-fn swing_tick(state: u64) -> u64 {
-    if !wmbase.ready(state) {
-        return 0
-    }
-    var offen: u64 = 0
-    var i: u64 = 0
-    while i < wmbase.MAX_WIN {
-        if wmbase.valid(state, i) {
-            if swing_tick_win(state, i) {
-                offen = offen + 1
-                wmlayout.ss(state, wmlayout.S_SWINGS, wmlayout.gs(state, wmlayout.S_SWINGS) + 1)
-            }
-        }
-        i = i + 1
-    }
-    return offen
-}
-
-// Ein gezogenes Fenster ist GROESSER als seine Fenstertafel sagt und
-// steht um den Nachzug versetzt. Wer es schmutzig meldet, muss beides
-// mitmelden -- sonst bleibt beim naechsten Bild ein Rand des alten
-// Bildes stehen.
-fn damage_win_lift(state: u64, i: u64) {
-    let extra: i64 = lift_px(state, i) + SWING_MAX_PX
-    let wx: i64 = wmbase.win_x(state, i)
-    let wy: i64 = wmbase.win_y(state, i)
-    let ow: i64 = wmbase.outer_w(state, i) as i64
-    let oh: i64 = wmbase.outer_h(state, i) as i64
-    wmbase.damage(state, wx - extra, wy - extra, wx + ow + extra, wy + oh + extra)
-}
-
-// Wird dieses Fenster gerade AUFGEHOBEN gemalt? Nur dann laeuft der
-// teure Weg. Die Frage ist absichtlich eine einzige Funktion: sie
-// steht in `paint_win` (welcher Weg) und in der Messung (was hat es
-// gekostet), und zwei Fassungen davon waeren zwei Antworten.
-fn drag_paint_on(state: u64, i: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    if is_dragged(state, i) {
-        return drag_lift_on(state) != 0 || drag_swing_on(state) != 0
-    }
-    // Losgelassen, aber noch am Auspendeln.
-    return swing_dx(state, i) != 0 || swing_dy(state, i) != 0
 }
 
 // W-DRAG: THE FRAME, THE TITLE BAR AND THE CAPTION BUTTONS OF A LIFTED WINDOW.
@@ -7292,7 +6445,7 @@ fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     if bw <= 0 || bh <= 0 {
         return
     }
-    let sk: u64 = drag_scale(state, i)
+    let sk: u64 = wmanim.drag_scale(state, i)
     var nw: i64 = bw * sk as i64 / 1000
     var nh: i64 = bh * sk as i64 / 1000
     if nw <= 0 || nh <= 0 {
@@ -7303,10 +6456,10 @@ fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     let iy: i64 = wmbase.win_y(state, i) + wmbase.iny(state, i) as i64
     // DER PIVOT. `ax`/`ay` ist die angefasste Stelle INNERHALB der
     // Malflaeche; `tl` mischt zwischen Mitte (0) und ihr (100).
-    let tl: i64 = drag_tilt_on(state) as i64
+    let tl: i64 = wmanim.drag_tilt_on(state) as i64
     var ax: i64 = bw / 2
     var ay: i64 = bh / 2
-    if is_dragged(state, i) {
+    if wmanim.is_dragged(state, i) {
         let gx: i64 = wmlayout.gs(state, wmlayout.S_DRAGX) as i64 - wmgeom.border(state) as i64
         let gy: i64 = wmlayout.gs(state, wmlayout.S_DRAGY) as i64 - wmbase.iny(state, i) as i64
         // Ausserhalb der Flaeche angefasst (Titelleiste, Rahmen) wird
@@ -7322,8 +6475,8 @@ fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     var ox: i64 = ix + ax - ax * nw / bw
     var oy: i64 = iy + ay - ay * nh / bh
     // und der Nachzug legt sich darueber.
-    ox = ox + swing_dx(state, i)
-    oy = oy + swing_dy(state, i)
+    ox = ox + wmanim.swing_dx(state, i)
+    oy = oy + wmanim.swing_dy(state, i)
     // W-DRAG: the frame, title bar and caption buttons go with the lifted window (the client rectangle is the anchor)
     let fr_x: i64 = ox - wmgeom.border(state) as i64
     let fr_y: i64 = oy - wmbase.iny(state, i) as i64
@@ -7411,101 +6564,6 @@ fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     wmlayout.ss(state, wmlayout.S_ZFLAG, 1)
 }
 
-fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
-    cy1: i64) {
-    let p: u64 = anim_mix(state, i)
-    // Die Groesse laeuft von AN_SCALE0 nach 1000, die Deckung von 0
-    // nach 255. Beide aus DEMSELBEN p -- zwei Kurven waeren zwei
-    // Bewegungen, die nur zufaellig zusammen enden.
-    let sk: u64 = AN_SCALE0 + (1000 - AN_SCALE0) * p / 1000
-    let a: u64 = 255 * p / 1000
-    if a == 0 {
-        return
-    }
-    let bw: i64 = wmlayout.wg(state, i, wmlayout.W_W) as i64
-    let bh: i64 = wmlayout.wg(state, i, wmlayout.W_H) as i64
-    if bw <= 0 || bh <= 0 {
-        return
-    }
-    // Die verkleinerte Flaeche, mittig zur gewachsenen.
-    var nw: i64 = bw * sk as i64 / 1000
-    var nh: i64 = bh * sk as i64 / 1000
-    if nw <= 0 || nh <= 0 {
-        return
-    }
-    // 24.09.2026: THE INNER OFFSET OF THIS WINDOW, not of a decorated
-    // one. `border`/`title_h` put every UNDECORATED window (the login
-    // screen, the lock screen, the taskbar) one title bar lower and one
-    // border further right while it was animating -- and the damage of a
-    // blit, which is in the window's real coordinates, then repainted the
-    // wrong rows: the text field showed its top eight rows new and the
-    // rest old (Dell 9020: "typing is slow, text appears much later").
-    let ix: i64 = wmbase.win_x(state, i) + wmbase.inx(state, i) as i64
-    let iy: i64 = wmbase.win_y(state, i) + wmbase.iny(state, i) as i64
-    var ox: i64 = ix + (bw - nw) / 2
-    var oy: i64 = iy + (bh - nh) / 2
-    // ================================================ RUNDE OBERFLAECHE
-    // BEIM MINIMIEREN FLIEGT ES ZUM EIGENEN LEISTENKNOPF.
-    //
-    // Nur beim Minimieren, nur wenn die Taskleiste ein Ziel gesagt hat
-    // (`set_min_rect`), und aus DEMSELBEN `p` wie Groesse und Deckung.
-    // `p` laeuft beim Minimieren von 1000 nach 0 (anim_mix spiegelt die
-    // Kurve), also ist 1000-p der zurueckgelegte Weg: bei p=1000 steht
-    // das Fenster noch an seinem Platz, bei p=0 deckt es den Knopf.
-    //
-    // Die Flaeche wird dabei bis auf die Knopfgroesse gestaucht statt
-    // nur auf AN_SCALE0 -- ein Fenster, das in Originalgroesse hinter
-    // die Leiste faehrt, sieht aus wie ein Fehler und nicht wie ein
-    // Ablegen.
-    if wmlayout.wg(state, i, wmlayout.W_ANK) == AN_MIN && min_rect_w(state, i) != 0 {
-        let mxy: u64 = wmlayout.wg(state, i, wmlayout.W_MINXY)
-        let mwh: u64 = wmlayout.wg(state, i, wmlayout.W_MINWH)
-        let tx: i64 = (mxy & 0xFFFFFFFF) as i64
-        let ty: i64 = ((mxy >> 32) & 0xFFFFFFFF) as i64
-        let tw: i64 = (mwh & 0xFFFFFFFF) as i64
-        let th: i64 = ((mwh >> 32) & 0xFFFFFFFF) as i64
-        let weg: i64 = (1000 - p) as i64
-        // Groesse: von der vollen Flaeche auf die des Knopfes.
-        nw = bw + (tw - bw) * weg / 1000
-        nh = bh + (th - bh) * weg / 1000
-        if nw <= 0 || nh <= 0 {
-            return
-        }
-        // Lage: von der Fensterecke auf die Knopfecke, beide mittig
-        // zur jeweiligen Flaeche gerechnet.
-        let vx: i64 = ix + (bw - nw) / 2
-        let vy: i64 = iy + (bh - nh) / 2
-        let zx: i64 = tx + (tw - nw) / 2
-        let zy: i64 = ty + (th - nh) / 2
-        ox = vx + (zx - vx) * weg / 1000
-        oy = vy + (zy - vy) * weg / 1000
-    }
-    let ax0: i64 = wmbase.imax(ox, cx0)
-    let ay0: i64 = wmbase.imax(oy, cy0)
-    let ax1: i64 = wmbase.imin(ox + nw, cx1)
-    let ay1: i64 = wmbase.imin(oy + nh, cy1)
-    if ax1 <= ax0 || ay1 <= ay0 {
-        return
-    }
-    let buf: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
-    let stride: u64 = wmlayout.wg(state, i, wmlayout.W_W)
-    var y: i64 = ay0
-    while y < ay1 {
-        // Die Quellzeile: Nachbarabtastung. Ein gewichtetes Mittel
-        // waere schoener und kostet bei zwoelf Zwischenbildern mehr,
-        // als es zeigt -- die Bewegung dauert 120 ms.
-        let sy: i64 = (y - oy) * bh / nh
-        if sy >= 0 && sy < bh && y >= 0 {
-            // r461: the whole row in one call (`fb.scaled_row_a`), not one `pixel_a` and two divisions per pixel
-            fb.scaled_row_a(state, y as u64, ax0, ax1, buf +% (sy as u64) *% stride *% 4, ox, bw, nw, a)
-        }
-        y = y + 1
-    }
-    wmlayout.wsv(state, i, wmlayout.W_PAINTS, wmlayout.wg(state, i, wmlayout.W_PAINTS) + 1)
-    wmlayout.wsv(state, i, wmlayout.W_PX,
-        wmlayout.wg(state, i, wmlayout.W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
-}
-
 fn set_blur_cache(state: u64, on: bool) {
     if on {
         wmlayout.ss(state, wmlayout.S_BC_AUS, 0)
@@ -7553,7 +6611,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         // S6a: the clip may lie ONLY in the shadow ring around this window (a repaint of the wallpaper, an icon, a toast next to it): the
         // background was just filled there, so the shadow must be laid over it again, or the ring keeps a hole until the window moves.
         // (Found by `tools/comp/shadow.sh`: the judge saw 1387 pixels of the top strip missing after a repaint.)
-        if wmlayout.wg(state, i, wmlayout.W_ANK) == 0 && !drag_paint_on(state, i) && wmbase.deko(state, i) {
+        if wmlayout.wg(state, i, wmlayout.W_ANK) == 0 && !wmanim.drag_paint_on(state, i) && wmbase.deko(state, i) {
             var rr: i64 = wmgeom.form(state, wmlayout.FM_SHADOW_R) as i64
             let rr2: i64 = wmgeom.form(state, wmlayout.FM_SHADOW_R2) as i64
             if rr2 > rr {
@@ -7571,7 +6629,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // das Fenster ANDERS gemalt -- skaliert und durchscheinend -- und
     // der gewoehnliche Weg entfaellt vollstaendig.
     if wmlayout.wg(state, i, wmlayout.W_ANK) != 0 {
-        paint_win_anim(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
+        wmanim.paint_win_anim(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
             cy1 as i64)
         return
     }
@@ -7580,7 +6638,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // Der Schmuck faellt weg, weil ein mitskalierter Rahmen bei 105
     // Prozent eine unscharfe Kante ist; das Fenster haengt am Zeiger,
     // seine Titelleiste braucht in dieser halben Sekunde niemand.
-    if drag_paint_on(state, i) {
+    if wmanim.drag_paint_on(state, i) {
         let ph_t: u64 = time.tsc()
         paint_win_drag(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
             cy1 as i64)
@@ -9008,161 +8066,6 @@ fn title_text(state: u64, i: u64, f: u64, x: i64, y: i64, color: u64,
     }
 }
 
-// ===================================================================
-// RUNDE GPU (G-012): DER ZEIGER, DEN DAS GERAET TRAEGT
-// ===================================================================
-//
-// DREI BEDINGUNGEN, UND ALLE DREI MUESSEN STIMMEN:
-//   1. der Treiber hat die Zeigerwarteschlange und die Flaeche
-//      (`vgpu.cursor_bereit`),
-//   2. die Gegenprobe `nohwcur` ist NICHT gesetzt,
-//   3. der Zeiger soll ueberhaupt sichtbar sein.
-//
-// Faellt eine davon, malt `compose` ihn wieder selbst -- derselbe Weg
-// wie vor dieser Runde, ohne dass irgendwo etwas umgestellt werden
-// muesste. Das ist der saubere Rueckfall, den die Abnahme verlangt.
-fn hwcur_moeglich(state: u64) -> bool {
-    if kstate.mode_on(state, kstate.M_NOHWCUR) {
-        return false
-    }
-    return vgpu.cursor_usable(state) || vmsvga.cursor_ready(state)
-}
-
-// r-vmsvga: the pointer goes to whichever driver carries the screen (virtio-gpu first, then VMSVGA).
-fn hw_an(state: u64) -> bool {
-    if vgpu.cursor_usable(state) {
-        return vgpu.cursor_an(state)
-    }
-    return vmsvga.cursor_an(state)
-}
-
-fn hw_zeigen(state: u64, form: u64, g: u64, x: u64, y: u64, hx: u64, hy: u64, rq: u64) {
-    if vgpu.cursor_usable(state) {
-        let _a: bool = vgpu.cursor_displayed(state, form, g, x, y, hx, hy, rq)
-        return
-    }
-    let _b: bool = vmsvga.cursor_show(state, form, g, x, y, hx, hy, rq)
-}
-
-fn hw_bewegen(state: u64, x: u64, y: u64) {
-    if vgpu.cursor_usable(state) {
-        let _a: bool = vgpu.cursor_bewegen(state, x, y)
-        return
-    }
-    let _b: bool = vmsvga.cursor_bewegen(state, x, y)
-}
-
-// OB DIE HARDWARE DEN ZEIGER TRAEGT -- und zwar AB DEM ERSTEN MAL.
-//
-// HIER LAG EIN FEHLER, UND ER IST LEHRREICH GENUG, UM AUFGESCHRIEBEN
-// ZU WERDEN: zuerst stand hier `&& vgpu.cursor_an(state)`. Damit war
-// die Antwort beim ERSTEN Aufruf falsch -- `cursor_an` wird ja erst
-// wahr, NACHDEM `cursor_zeigen` einmal gelaufen ist. Also nahm die
-// Bewegung den Softwareweg, `cursor_zeigen` kam nie dran, und der
-// Zeiger blieb fuer immer im Bild. Die Messung zeigte es sofort:
-// null `update_cursor` beim Wirt, obwohl die Flaeche angelegt war.
-//
-// Richtig ist: sobald der Treiber es KANN, traegt er ihn. Ob er schon
-// einmal hinausging, entscheidet nur, OB das Bild mitmuss -- und das
-// steht in `hwcur_bewegen`, wo es hingehoert.
-fn hwcur_an(state: u64) -> bool {
-    return hwcur_moeglich(state)
-}
-
-// DEN ZEIGER AN DAS GERAET UEBERGEBEN. Wird gerufen, sobald er sich
-// bewegt oder die Form wechselt. Beim ERSTEN Mal geht das Bild mit
-// hinaus, danach nur noch der Ort.
-fn hwcur_bewegen(state: u64) {
-    if !hwcur_moeglich(state) {
-        return
-    }
-    let g: u64 = cur_w(state)
-    let form: u64 = wmlayout.gs(state, wmlayout.S_SHAPE)
-    // INPUT FOLLOWS THE OUTPUT: the device draws the pointer on the PANEL, so the position goes through the output rotation
-    // (fb.logical_to_panel) and the picture + hotspot are turned by the same quarter turns (`rq`).
-    let pp: u64 = fb.logical_to_panel(state, wmlayout.gs(state, wmlayout.S_CURX), wmlayout.gs(state, wmlayout.S_CURY))
-    let x: u64 = pp >> 32
-    let y: u64 = pp & 0xFFFFFFFF
-    let rq: u64 = fb.rotation(state) / 90
-    let hkey: u64 = wmlayout.gs(state, wmlayout.S_SHAPE) + (rq << 16)
-    if !hw_an(state) {
-        wmlayout.ss(state, wmlayout.S_HWSHAPE, hkey)
-        hw_zeigen(state, form, g, x, y,
-            cur_ox(state), cur_oy(state), rq)
-        return
-    }
-    // Die Form kann sich geaendert haben (Pfeil -> Hand -> Groesse).
-    // `cursor_zeigen` merkt das selbst und traegt das Bild nur dann
-    // neu hinaus; sonst ist es ein reiner Ortswechsel.
-    if hkey != wmlayout.gs(state, wmlayout.S_HWSHAPE) {
-        wmlayout.ss(state, wmlayout.S_HWSHAPE, hkey)
-        hw_zeigen(state, form, g, x, y,
-            cur_ox(state), cur_oy(state), rq)
-        return
-    }
-    hw_bewegen(state, x, y)
-}
-
-fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    // ======================================== RUNDE ECHTHARDWARE-4
-    // DREI LAGEN MIT DECKUNG STATT ZWEI BITMASKEN.
-    //
-    // Vorher: je Bildpunkt ein Bit Fuellung und ein Bit Umriss, jedes
-    // Bit bei Vervielfachung 2 zu einem 2x2-Block aufgeblasen. Kein
-    // Zwischenwert, also keine Kantenglaettung -- und bei doppelter
-    // Vervielfachung doppelt so grobe Treppen.
-    //
-    // Jetzt liefert `zeiger.fi` je Bildpunkt DREI Deckungen (Kern,
-    // Rand, Schatten), gerastert in Zielgroesse mit neun Proben. Sie
-    // werden von hinten nach vorn ueber das fertige Bild gelegt:
-    //   Schatten, schwarz und schwach -- er hebt den Zeiger ab,
-    //   Rand, weiss -- damit er auf dunklem Grund sichtbar bleibt,
-    //   Kern, dunkel -- damit er auf hellem Grund sichtbar bleibt.
-    let form: u64 = wmlayout.gs(state, wmlayout.S_SHAPE)
-    let g: u64 = cur_w(state)
-    cursor.build_map(form, g)
-    let mx: i64 = wmlayout.gs(state, wmlayout.S_CURX) as i64 - cur_ox(state) as i64
-    let my: i64 = wmlayout.gs(state, wmlayout.S_CURY) as i64 - cur_oy(state) as i64
-    let dunkel: u64 = wmbase.rgb24(state, CURSOR_EDGE)
-    let hell: u64 = wmbase.rgb24(state, CURSOR_BODY)
-    let schwarz: u64 = wmbase.rgb24(state, 0)
-    var r: u64 = 0
-    while r < g {
-        let py: i64 = my + r as i64
-        if py >= cy0 as i64 && py < cy1 as i64 {
-            var c: u64 = 0
-            while c < g {
-                let pxx: i64 = mx + c as i64
-                if pxx >= cx0 as i64 && pxx < cx1 as i64 && pxx >= 0 {
-                    let v: u64 = cursor.deck(g, c, r)
-                    if v != 0 {
-                        let ak: u64 = (v >> 16) & 255
-                        let ar: u64 = (v >> 8) & 255
-                        let asch: u64 = v & 255
-                        // Der Schatten deckt hoechstens zu einem
-                        // Drittel. Mehr sieht nach Rand aus, und dann
-                        // haette der Zeiger zwei davon.
-                        if asch != 0 && ak == 0 && ar == 0 {
-                            fb.pixel_a(state, pxx as u64, py as u64,
-                                schwarz, asch * 90 / 255)
-                        }
-                        if ar != 0 {
-                            fb.pixel_a(state, pxx as u64, py as u64,
-                                hell, ar)
-                        }
-                        if ak != 0 {
-                            fb.pixel_a(state, pxx as u64, py as u64,
-                                dunkel, ak)
-                        }
-                    }
-                }
-                c = c + 1
-            }
-        }
-        r = r + 1
-    }
-}
-
 // ------------------------------------------------------- die Ereignisse
 
 fn ev_at(state: u64, i: u64, k: u64) -> u64 {
@@ -9678,7 +8581,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
     // COMPOSITOR S5: the input-to-picture clock starts at the interrupt, and the compositor gets a copy of the pointer (not while locked)
     if nx != ox || ny != oy {
         frameprof.hover_in()
-        if !hwcur_an(state) {
+        if !wmcursor.hwcur_an(state) {
             cp_in(state)
         }
         cp_event(state, CP_EV_MOVE, 0, btn, nx, ny, 0)
@@ -9697,9 +8600,9 @@ fn on_mouse_btn(state: u64, btn: u64) {
         // Rechtecke. Ohne ihn bliebe bei jeder Form ausser dem Pfeil
         // ein Streifen des alten Bildes stehen -- genau die "Spuren",
         // nach denen Justin gefragt hat.
-        let gx: u64 = cur_ox(state)
-        let gy: u64 = cur_oy(state)
-        let gw: u64 = cur_w(state)
+        let gx: u64 = wmcursor.cur_ox(state)
+        let gy: u64 = wmcursor.cur_oy(state)
+        let gw: u64 = wmcursor.cur_w(state)
         // ================================ RUNDE GPU (G-012)
         // HIER WIRD DIE ARBEIT WIRKLICH GESPART. Traegt die Hardware
         // den Zeiger, wird KEIN Rechteck schmutzig: weder das alte
@@ -9707,10 +8610,10 @@ fn on_mouse_btn(state: u64, btn: u64) {
         // mehr an, und `present` traegt nichts hinaus -- die Bewegung
         // kostet einen Befehl von 56 Oktetten statt zweier Rechtecke
         // Bildpunkte. Das ist die Zahl, die diese Runde misst.
-        if hwcur_an(state) {
+        if wmcursor.hwcur_an(state) {
             wmlayout.ss(state, wmlayout.S_CURX, nx)
             wmlayout.ss(state, wmlayout.S_CURY, ny)
-            hwcur_bewegen(state)
+            wmcursor.hwcur_bewegen(state)
         } else {
             if !pixelguard.bug_is(3) {
                 wmbase.damage_ex(state, ox as i64 - gx as i64, oy as i64 - gy as i64,
@@ -9835,16 +8738,16 @@ fn on_mouse_btn(state: u64, btn: u64) {
             let alt_y: i64 = wmbase.win_y(state, i)
             let offx: i64 = wmlayout.gs(state, wmlayout.S_SZOFFX) as i64
             let offy: i64 = wmlayout.gs(state, wmlayout.S_SZOFFY) as i64
-            if (kanten & SZ_R) != 0 {
+            if (kanten & wmcursor.SZ_R) != 0 {
                 nw = (x - offx) - (wmbase.win_x(state, i) + ix)
-            } else if (kanten & SZ_L) != 0 {
+            } else if (kanten & wmcursor.SZ_L) != 0 {
                 // Die rechte Kante steht bei `ax`; der Zeiger ist die
                 // neue linke. Die Breite ist der Abstand dazwischen.
                 nw = ax - (x - offx)
             }
-            if (kanten & SZ_B) != 0 {
+            if (kanten & wmcursor.SZ_B) != 0 {
                 nh = (y - offy) - (wmbase.win_y(state, i) + iy)
-            } else if (kanten & SZ_T) != 0 {
+            } else if (kanten & wmcursor.SZ_T) != 0 {
                 // DELL ROUND: `y - offy` is the OUTER top edge; the
                 // content starts `iy` (the title bar) below it.
                 nh = ay - ((y - offy) + iy)
@@ -9870,10 +8773,10 @@ fn on_mouse_btn(state: u64, btn: u64) {
             if nh < minh {
                 nh = minh
             }
-            if (kanten & SZ_L) != 0 {
+            if (kanten & wmcursor.SZ_L) != 0 {
                 nx = ax - nw - ix
             }
-            if (kanten & SZ_T) != 0 {
+            if (kanten & wmcursor.SZ_T) != 0 {
                 ny = ay - nh - iy
             }
             // ==================================== RUNDE ECHTHARDWARE-5
@@ -9890,14 +8793,14 @@ fn on_mouse_btn(state: u64, btn: u64) {
             // wird entsprechend gekappt -- die angefasste Kante bleibt
             // damit unter dem Zeiger, bis der Rand erreicht ist, und
             // steht dann still.
-            if (kanten & SZ_L) != 0 && nx < 0 {
+            if (kanten & wmcursor.SZ_L) != 0 && nx < 0 {
                 nw = nw + nx
                 nx = 0
                 if nw < minw {
                     nw = minw
                 }
             }
-            if (kanten & SZ_T) != 0 && ny < 0 {
+            if (kanten & wmcursor.SZ_T) != 0 && ny < 0 {
                 nh = nh + ny
                 ny = 0
                 if nh < minh {
@@ -9947,7 +8850,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
             }
             serial.nl()
             if ok {
-                if (kanten & SZ_L) != 0 || (kanten & SZ_T) != 0 {
+                if (kanten & wmcursor.SZ_L) != 0 || (kanten & wmcursor.SZ_T) != 0 {
                     move_win(state, i, nx, ny)
                 }
             }
@@ -9976,9 +8879,9 @@ fn on_mouse_btn(state: u64, btn: u64) {
     // r382 LOCK SEAL: the edges of a window that is not on the screen
     // must not show in the pointer shape either.
     if i < wmbase.MAX_WIN && !wmgate.darf(state, i) {
-        margin_cursor(state, wmbase.MAX_WIN, x, y)
+        wmcursor.margin_cursor(state, wmbase.MAX_WIN, x, y)
     } else {
-        margin_cursor(state, i, x, y)
+        wmcursor.margin_cursor(state, i, x, y)
     }
     if i >= wmbase.MAX_WIN {
         return
@@ -10071,7 +8974,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
                 let iw: i64 = wmlayout.wg(state, i, wmlayout.W_W) as i64
                 let ih: i64 = wmlayout.wg(state, i, wmlayout.W_H) as i64
                 // DELL ROUND: one test for press and cursor (`grip_mask`).
-                let kanten: u64 = grip_mask(state, i, lokal_x, lokal_y)
+                let kanten: u64 = wmcursor.grip_mask(state, i, lokal_x, lokal_y)
                 let im_rahmen: bool = kanten != 0
                 if im_rahmen && kanten != 0 {
                     wmlayout.ss(state, wmlayout.S_SIZING, i + 1)
@@ -10086,21 +8989,21 @@ fn on_mouse_btn(state: u64, btn: u64) {
                     // DELL ROUND: the grab offsets (see S_SZOFFX).
                     var ox: i64 = 0
                     var oy: i64 = 0
-                    if (kanten & SZ_L) != 0 {
+                    if (kanten & wmcursor.SZ_L) != 0 {
                         ox = x - (wmbase.win_x(state, i) + wmbase.inx(state, i) as i64)
-                    } else if (kanten & SZ_R) != 0 {
+                    } else if (kanten & wmcursor.SZ_R) != 0 {
                         ox = x - (wmbase.win_x(state, i) + wmbase.inx(state, i) as i64 + iw)
                     }
-                    if (kanten & SZ_T) != 0 {
+                    if (kanten & wmcursor.SZ_T) != 0 {
                         oy = y - wmbase.win_y(state, i)
-                    } else if (kanten & SZ_B) != 0 {
+                    } else if (kanten & wmcursor.SZ_B) != 0 {
                         oy = y - (wmbase.win_y(state, i) + wmbase.iny(state, i) as i64 + ih)
                     }
                     if fb.winfix_aus(state) {
                         // counter-proof: the old rule (pointer = content edge)
                         ox = 0
                         oy = 0
-                        if (kanten & SZ_T) != 0 {
+                        if (kanten & wmcursor.SZ_T) != 0 {
                             oy = 0 - wmbase.iny(state, i) as i64
                         }
                     }
@@ -14200,8 +13103,8 @@ fn screen_follow(state: u64) {
     }
     // INPUT FOLLOWS THE OUTPUT: the hardware pointer sits in PANEL pixels, so a rotation / scale change moves it even when the
     // pointer itself did not (hwcur_bewegen only talks to the device when form, rotation or panel position changed).
-    if hwcur_moeglich(state) && hw_an(state) {
-        hwcur_bewegen(state)
+    if wmcursor.hwcur_moeglich(state) && wmcursor.hw_an(state) {
+        wmcursor.hwcur_bewegen(state)
     }
 }
 
@@ -14429,7 +13332,7 @@ fn drag_begin(state: u64, i: u64) {
     wmlayout.wsv(state, i, wmlayout.W_DXLAST, wmbase.win_x(state, i) as u64)
     wmlayout.wsv(state, i, wmlayout.W_DYLAST, wmbase.win_y(state, i) as u64)
     wmlayout.wsv(state, i, wmlayout.W_SWOFF, 0)
-    damage_win_lift(state, i)
+    wmanim.damage_win_lift(state, i)
     wmlayout.ss(state, wmlayout.S_DRAGT, 0)
     wmlayout.ss(state, wmlayout.S_DROPN, 0)
     wmlayout.ss(state, wmlayout.S_DROPE, 0)
@@ -14961,7 +13864,7 @@ fn drag_end(state: u64, i: u64, x: i64, y: i64) {
     // `W_SWOFF` haelt fest, dass da noch etwas auszupendeln ist --
     // auch wenn der Versatz in diesem Augenblick zufaellig 0 ist.
     wmlayout.wsv(state, i, wmlayout.W_SWOFF, kstate.get(state, kstate.TICKS) + 1)
-    damage_win_lift(state, i)
+    wmanim.damage_win_lift(state, i)
     preview_damage(state)
     wmlayout.ss(state, wmlayout.S_PVON, 0)
     drag_klemmen(state, i)
