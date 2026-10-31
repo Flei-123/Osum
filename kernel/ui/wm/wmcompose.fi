@@ -1,0 +1,1269 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.arch
+import ui.ax
+import drv.gpu.beam
+import gfx.fb
+import lib.kstate
+import net.netmark
+import net.netview
+import ui.pixelguard
+import fui.region
+import sched.sched
+import serial
+import ui.wm.tiling
+import sched.time
+import gfx.ttf
+import ui.wm.wmanim
+import ui.wm.wmbase
+import ui.wm.wmblur
+import ui.wm.wmcaption
+import ui.wm.wmchrome
+import ui.wm.wmcursor
+import ui.wm.wmgate
+import ui.wm.wmgeom
+import ui.wm.wmglass
+import ui.wm.wmlayout
+import ui.wm.wmmag
+import ui.wmplug
+import ui.wm.wmpresent
+import ui.wm.wmshadow
+import ui.wm.wmswitchpaint
+import ui.wm.wmtrust
+
+fn win_hidden(state: u64, i: u64) -> bool {
+    if i >= wmbase.MAX_WIN {
+        return false
+    }
+    return (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) != 0
+}
+
+fn rgn_take(state: u64, out: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64 {
+    if !wmbase.rgn_lock(state) {
+        return 0
+    }
+    let off: bool = fb.rgn_aus(state)
+    let r: u64 = state + kstate.WM_OFF + wmlayout.S_RGN
+    var n: u64 = region.region_count(r)
+    let bad: u64 = wmlayout.gs(state, wmlayout.S_RBAD)
+    if off || bad != 0 || n < 2 || region.region_bounds(r, 0) != bx0 as i64 || region.region_bounds(r, 1) != by0 as i64
+        || region.region_bounds(r, 2) != bx1 as i64 || region.region_bounds(r, 3) != by1 as i64 {
+        n = 0
+    }
+    let box_area: u64 = (bx1 - bx0) * (by1 - by0)
+    let area: u64 = region.region_area(r)
+    if n != 0 && area * 100 > box_area * 75 {
+        n = 0
+    }
+    if n != 0 {
+        var i: u64 = 0
+        while i < n {
+            var k: u64 = 0
+            while k < 4 {
+                __mmio_write64((out + (i * 4 + k) * 8) as *mut u64, region.region_rect(r, i, k) as u64)
+                k = k + 1
+            }
+            i = i + 1
+        }
+        wmlayout.ss(state, wmlayout.S_RSAVED, wmlayout.gs(state, wmlayout.S_RSAVED) + (box_area - area))
+        if pixelguard.bug_is(5) && n >= 2 {
+            var bk: u64 = 0
+            while bk < 4 {
+                __mmio_write64((out + (4 + bk) * 8) as *mut u64, __mmio_read64((out + ((n - 1) * 4 + bk) * 8) as *mut u64))
+                bk = bk + 1
+            }
+            n = n - 1
+        }
+    }
+    region.region_clear(r)
+    wmlayout.ss(state, wmlayout.S_RBAD, 0)
+    wmbase.rgn_unlock(state)
+    return n
+}
+
+fn win_shm(state: u64, i: u64) -> u64 {
+    if !wmbase.valid(state, i) {
+        return 0
+    }
+    return wmlayout.wg(state, i, wmlayout.W_SHM)
+}
+
+const TAB_MAGIC: u64 = 0x42415457
+
+const TAB_ROW: u64 = 12
+
+const TAB_HEAD: u64 = 16
+
+fn tab_plain(state: u64, i: u64) -> bool {
+    if win_hidden(state, i) {
+        return false
+    }
+    if wmlayout.wg(state, i, wmlayout.W_ANK) != 0 || wmanim.drag_paint_on(state, i) || wmblur.blur_will(state, i) {
+        return false
+    }
+    var alpha: u64 = wmbase.form_or(state, wmlayout.FM_WIN_ALPHA, 100)
+
+    if wmbase.deko(state, i) {
+        return alpha >= 100
+    }
+    let pw: u64 = wmbase.panel_win(state)
+    if pw < wmbase.MAX_WIN && i == pw {
+        alpha = wmbase.form_or(state, wmlayout.FM_TB_ALPHA, 100)
+    }
+    let op: u64 = wmblur.win_opac(state, i)
+    if op < 255 {
+        let opp: u64 = op *% 100 / 255
+        if opp < alpha {
+            alpha = opp
+        }
+    }
+    if wmblur.covers_screen(state, i) {
+        alpha = 100
+    }
+    return alpha >= 100
+}
+
+const CHR_MAGIC: u64 = 0x52484357
+
+const CHR_TITLE: u64 = 32
+
+const CHR_MARK: u64 = 192
+
+fn tab_publish(state: u64) {
+    let f: u64 = wmlayout.gs(state, wmlayout.S_TABF)
+    if f == 0 {
+        return
+    }
+    let seq: u64 = wmlayout.gs(state, wmlayout.S_TABSEQ) + 1
+    wmlayout.ss(state, wmlayout.S_TABSEQ, seq)
+    arch.atomic_store(f + 8, seq)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 {
+            let r: u64 = TAB_HEAD + n * TAB_ROW
+            wmanim.tw(f, r + 0, wmlayout.wg(state, i, wmlayout.W_ID) | (i << 32))
+            wmanim.tw(f, r + 1, wmlayout.wg(state, i, wmlayout.W_OWNER))
+            wmanim.tw(f, r + 2, wmlayout.wg(state, i, wmlayout.W_X))
+            wmanim.tw(f, r + 3, wmlayout.wg(state, i, wmlayout.W_Y))
+            wmanim.tw(f, r + 4, wmlayout.wg(state, i, wmlayout.W_W))
+            wmanim.tw(f, r + 5, wmlayout.wg(state, i, wmlayout.W_H))
+            wmanim.tw(f, r + 6, wmlayout.wg(state, i, wmlayout.W_Z) | (wmlayout.wg(state, i, wmlayout.W_LAYER) << 16) | (wmlayout.wg(state, i, wmlayout.W_KIND) << 24))
+            wmanim.tw(f, r + 7, wmlayout.wg(state, i, wmlayout.W_FLAGS))
+            wmanim.tw(f, r + 8, wmbase.inx(state, i) | (wmbase.iny(state, i) << 32))
+            wmanim.tw(f, r + 9, wmlayout.wg(state, i, wmlayout.W_SHM))
+            wmanim.tw(f, r + 10, wmlayout.wg(state, i, wmlayout.W_W) * 4)
+            var plain: u64 = 0
+            if tab_plain(state, i) {
+                plain = 1
+            }
+
+            var shad: u64 = 0
+            if wmbase.deko(state, i) && !win_hidden(state, i) {
+                shad = 1
+            }
+            wmanim.tw(f, r + 11, (wmlayout.wg(state, i, wmlayout.W_OPAC) & 0xFFFFFFFF) | (plain << 32) | (shad << 33))
+
+            let cf: u64 = wmlayout.gs(state, wmlayout.S_CHRF)
+            if cf != 0 {
+                var t0: u64 = 0
+                var t1: u64 = 0
+                var t2: u64 = 0
+                var t3: u64 = 0
+                var mk: u64 = 0
+                if !wmgate.lock_active(state) {
+                    let tp: u64 = state + wmlayout.wat(i) + wmlayout.W_TITLE
+                    t0 = __mmio_read64(tp as *mut u64)
+                    t1 = __mmio_read64((tp + 8) as *mut u64)
+                    t2 = __mmio_read64((tp + 16) as *mut u64)
+                    t3 = __mmio_read64((tp + 24) as *mut u64) & 0x00FFFFFFFFFFFFFF
+                    let sicht: u64 = netview.view_of(state, wmbase.win_owner(state, i))
+                    if sicht != netview.V_REAL && sicht <= 3 {
+                        mk = sicht
+                    }
+                }
+                wmanim.tw(cf, CHR_TITLE + n * 4, t0)
+                wmanim.tw(cf, CHR_TITLE + n * 4 + 1, t1)
+                wmanim.tw(cf, CHR_TITLE + n * 4 + 2, t2)
+                wmanim.tw(cf, CHR_TITLE + n * 4 + 3, t3)
+                wmanim.tw(cf, CHR_MARK + n, mk)
+            }
+            n = n + 1
+        }
+        i = i + 1
+    }
+    wmanim.tw(f, 0, TAB_MAGIC | (1 << 32))
+    wmanim.tw(f, 2, n)
+    wmanim.tw(f, 3, wmlayout.gs(state, wmlayout.S_SW) | (wmlayout.gs(state, wmlayout.S_SH) << 32))
+    var fo: u64 = 0
+    let fi: u64 = wmlayout.gs(state, wmlayout.S_FOCUS)
+    if fi != 0 {
+        fo = wmlayout.wg(state, fi - 1, wmlayout.W_ID)
+    }
+    wmanim.tw(f, 4, fo)
+
+    var sold: u64 = 0
+    if wmlayout.gs(state, wmlayout.S_SHOLD) != 0 {
+        sold = 1
+    }
+    wmanim.tw(f, 8, wmshadow.shadow_staerke(state, wmlayout.FM_SHADOW) | (wmgeom.form(state, wmlayout.FM_SHADOW_R) << 8) | (wmshadow.shadow_staerke(state, wmlayout.FM_SHADOW2) << 16)
+        | (wmgeom.form(state, wmlayout.FM_SHADOW_R2) << 24) | (wmgeom.form(state, wmlayout.FM_RADIUS) << 32))
+    wmanim.tw(f, 9, wmbase.rgb24(state, wmgeom.form(state, wmlayout.FM_SHADOW_C)) | (1 << 32) | (sold << 33))
+
+    let cf2: u64 = wmlayout.gs(state, wmlayout.S_CHRF)
+    if cf2 != 0 {
+        wmanim.tw(cf2, 0, CHR_MAGIC | (1 << 32))
+        wmanim.tw(cf2, 2, 1)
+        wmanim.tw(cf2, 3, fb.rgb(state, 255, 0, 0))
+        wmanim.tw(cf2, 4, fb.rgb(state, 0, 255, 0))
+        wmanim.tw(cf2, 5, fb.rgb(state, 0, 0, 255))
+        wmanim.tw(cf2, 6, wmbase.deco_rgb(state, wmlayout.DK_FRAME))
+        wmanim.tw(cf2, 7, wmbase.deco_rgb(state, wmlayout.DK_TITLE))
+        wmanim.tw(cf2, 8, wmbase.deco_rgb(state, wmlayout.DK_TEXT))
+        wmanim.tw(cf2, 9, wmbase.deco_rgb(state, wmlayout.DK_FRAME_ON))
+        wmanim.tw(cf2, 10, wmbase.deco_rgb(state, wmlayout.DK_TITLE_ON))
+        wmanim.tw(cf2, 11, wmbase.deco_rgb(state, wmlayout.DK_TEXT_ON))
+        wmanim.tw(cf2, 12, wmbase.deco_rgb(state, wmlayout.DK_CLOSE))
+        wmanim.tw(cf2, 13, wmbase.deco_rgb(state, wmlayout.DK_CLOSE_MARK))
+        wmanim.tw(cf2, 14, wmgeom.form(state, wmlayout.FM_RADIUS))
+        wmanim.tw(cf2, 15, wmgeom.form(state, wmlayout.FM_GRAD))
+        wmanim.tw(cf2, 16, wmgeom.form(state, wmlayout.FM_CAPTION))
+        wmanim.tw(cf2, 17, wmgeom.border(state))
+        wmanim.tw(cf2, 18, wmgeom.title_h(state))
+        wmanim.tw(cf2, 19, wmgeom.cap_w(state))
+        wmanim.tw(cf2, 20, wmgeom.uisc(state))
+        wmanim.tw(cf2, 21, wmcaption.deco_alpha(state))
+        wmanim.tw(cf2, 22, wmlayout.gs(state, wmlayout.S_CAPHOV))
+        wmanim.tw(cf2, 23, wmlayout.gs(state, wmlayout.S_CAPDOWN))
+        let fu: u64 = wmlayout.gs(state, wmlayout.S_FONT_UI)
+        wmanim.tw(cf2, 24, fu)
+        wmanim.tw(cf2, 25, wmlayout.gs(state, wmlayout.S_PX_UI))
+        wmanim.tw(cf2, 26, wmgeom.title_pad(state))
+        var tbase: i64 = 0
+        if fu < ttf.MAX_FONTS {
+            tbase = wmgeom.title_base(state, fu)
+        }
+        wmanim.tw(cf2, 27, tbase as u64)
+        wmanim.tw(cf2, 28, netmark.W | (netmark.H << 16))
+        var fok: u64 = 0
+        if fu < ttf.MAX_FONTS {
+            fok = 1
+        }
+        wmanim.tw(cf2, 29, fok)
+    }
+    wmlayout.ss(state, wmlayout.S_TAB_N, wmlayout.gs(state, wmlayout.S_TAB_N) + 1)
+    wmanim.tw(f, 5, wmlayout.gs(state, wmlayout.S_COMPOSITES))
+    wmanim.tw(f, 6, TAB_ROW)
+    var lk: u64 = 0
+    if wmgate.lock_active(state) {
+        lk = 1
+    }
+    wmanim.tw(f, 7, lk)
+    let cf3: u64 = wmlayout.gs(state, wmlayout.S_CHRF)
+    if cf3 != 0 {
+        wmanim.tw(cf3, 1, seq + 1)
+    }
+    arch.atomic_store(f + 8, seq + 1)
+    wmlayout.ss(state, wmlayout.S_TABSEQ, seq + 1)
+}
+
+const CP_LIMIT_MS: u64 = 50
+
+const CP_MAXMISS: u64 = 3
+
+fn cp_on(state: u64) -> bool {
+    return wmlayout.gs(state, wmlayout.S_CP_TASK) != 0
+}
+
+fn cp_sync(state: u64) {
+    let f: u64 = wmlayout.gs(state, wmlayout.S_CP_PAGEF)
+    if f == 0 {
+        return
+    }
+    var on: u64 = 0
+    if cp_on(state) {
+        on = 1
+    }
+    wmanim.tw(f, 1, on)
+    wmanim.tw(f, 3, wmlayout.gs(state, wmlayout.S_CP_EVREF))
+    wmanim.tw(f, 4, wmlayout.gs(state, wmlayout.S_CP_FSEQ))
+    wmanim.tw(f, 5, wmlayout.gs(state, wmlayout.S_CP_ASEQ))
+    wmanim.tw(f, 6, wmlayout.gs(state, wmlayout.S_CP_PEND))
+    wmanim.tw(f, 7, wmlayout.gs(state, wmlayout.S_CP_X0))
+    wmanim.tw(f, 8, wmlayout.gs(state, wmlayout.S_CP_Y0))
+    wmanim.tw(f, 9, wmlayout.gs(state, wmlayout.S_CP_X1))
+    wmanim.tw(f, 10, wmlayout.gs(state, wmlayout.S_CP_Y1))
+    var lk: u64 = 0
+    if wmgate.lock_active(state) {
+        lk = 1
+    }
+    wmanim.tw(f, 11, lk)
+}
+
+static mut lj_cp_n: u64 = 0
+
+fn cp_stat3(state: u64, at: u64, us: u64) {
+    wmlayout.ss(state, at, wmlayout.gs(state, at) + 1)
+    wmlayout.ss(state, at + 8, wmlayout.gs(state, at + 8) + us)
+    if us > wmlayout.gs(state, at + 16) {
+        wmlayout.ss(state, at + 16, us)
+    }
+}
+
+fn cp_lat(state: u64, by_comp: bool) {
+    lj_cp_n = lj_cp_n + 1
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        wmlayout.ss(state, wmlayout.S_CP_IN0, 0)
+        return
+    }
+    let now: u64 = time.tsc()
+    let t0: u64 = wmlayout.gs(state, wmlayout.S_CP_IN0)
+    wmlayout.ss(state, wmlayout.S_CP_IN0, 0)
+    if t0 != 0 && now > t0 {
+        if by_comp {
+            cp_stat3(state, wmlayout.S_CP_WLAT, (now - t0) / (kh / 1000))
+        } else {
+            cp_stat3(state, wmlayout.S_CP_KLAT, (now - t0) / (kh / 1000))
+        }
+    }
+}
+
+fn cp_hand(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    if wmlayout.gs(state, wmlayout.S_CP_PEND) == 0 {
+        wmlayout.ss(state, wmlayout.S_CP_X0, x0)
+        wmlayout.ss(state, wmlayout.S_CP_Y0, y0)
+        wmlayout.ss(state, wmlayout.S_CP_X1, x1)
+        wmlayout.ss(state, wmlayout.S_CP_Y1, y1)
+        wmlayout.ss(state, wmlayout.S_CP_PEND, 1)
+        wmlayout.ss(state, wmlayout.S_CP_T0, time.tsc())
+    } else {
+        if x0 < wmlayout.gs(state, wmlayout.S_CP_X0) {
+            wmlayout.ss(state, wmlayout.S_CP_X0, x0)
+        }
+        if y0 < wmlayout.gs(state, wmlayout.S_CP_Y0) {
+            wmlayout.ss(state, wmlayout.S_CP_Y0, y0)
+        }
+        if x1 > wmlayout.gs(state, wmlayout.S_CP_X1) {
+            wmlayout.ss(state, wmlayout.S_CP_X1, x1)
+        }
+        if y1 > wmlayout.gs(state, wmlayout.S_CP_Y1) {
+            wmlayout.ss(state, wmlayout.S_CP_Y1, y1)
+        }
+    }
+    wmlayout.ss(state, wmlayout.S_CP_NEW, 1)
+    wmlayout.ss(state, wmlayout.S_CP_NHAND, wmlayout.gs(state, wmlayout.S_CP_NHAND) + 1)
+}
+
+fn cp_kick(state: u64) {
+    if wmlayout.gs(state, wmlayout.S_CP_TASK) == 0 || wmlayout.gs(state, wmlayout.S_CP_NEW) == 0 {
+        return
+    }
+    wmlayout.ss(state, wmlayout.S_CP_NEW, 0)
+    wmlayout.ss(state, wmlayout.S_CP_FSEQ, wmlayout.gs(state, wmlayout.S_CP_FSEQ) + 1)
+    cp_sync(state)
+    sched.poll_kick_one(state, wmlayout.gs(state, wmlayout.S_CP_TASK) - 1)
+}
+
+fn cp_flush_locked(state: u64, by_comp: bool) -> u64 {
+    if wmlayout.gs(state, wmlayout.S_CP_PEND) == 0 {
+        return 0
+    }
+    let x0: u64 = wmlayout.gs(state, wmlayout.S_CP_X0)
+    let y0: u64 = wmlayout.gs(state, wmlayout.S_CP_Y0)
+    let x1: u64 = wmlayout.gs(state, wmlayout.S_CP_X1)
+    let y1: u64 = wmlayout.gs(state, wmlayout.S_CP_Y1)
+    let t0: u64 = wmlayout.gs(state, wmlayout.S_CP_T0)
+    wmlayout.ss(state, wmlayout.S_CP_PEND, 0)
+    wmlayout.ss(state, wmlayout.S_CP_T0, 0)
+    var area: u64 = 0
+    var pl_t0: u64 = 0
+    if wmlayout.gs(state, wmlayout.S_PL_ON) != 0 {
+        pl_t0 = time.tsc()
+    }
+    if x1 > x0 && y1 > y0 {
+        if wmlayout.gs(state, wmlayout.S_VSYNC) != 0 {
+
+            if fb.flip_on(state) {
+                fb.flush_rect(state, 0, 0, wmlayout.gs(state, wmlayout.S_SW), wmlayout.gs(state, wmlayout.S_SH))
+                fb.flip(state)
+            } else {
+                fb.flush_rect(state, x0, y0, x1 - x0, y1 - y0)
+            }
+            wmlayout.ss(state, wmlayout.S_PRESENTS, wmlayout.gs(state, wmlayout.S_PRESENTS) + 1)
+            fb.frame_done(state)
+        } else {
+            flush_box(state, x0, y0, x1, y1)
+        }
+        area = (x1 - x0) * (y1 - y0)
+        wmlayout.ss(state, wmlayout.S_PXSUM, wmlayout.gs(state, wmlayout.S_PXSUM) +% area)
+    }
+    wmlayout.ss(state, wmlayout.S_CP_ASEQ, wmlayout.gs(state, wmlayout.S_CP_FSEQ))
+    if pl_t0 != 0 && x1 > x0 && y1 > y0 {
+        var pl_kind: u64 = PL_F_WDOG
+        if by_comp {
+            pl_kind = PL_F_COMP
+        }
+        pl_record(state, pl_kind, x0, y0, x1, y1, pl_t0, t0)
+    }
+    if by_comp {
+        let kh: u64 = time.khz(state)
+        let now: u64 = time.tsc()
+        if kh >= 1000 && t0 != 0 && now > t0 {
+            cp_stat3(state, wmlayout.S_CP_HOP, (now - t0) / (kh / 1000))
+        }
+        wmlayout.ss(state, wmlayout.S_CP_NPRES, wmlayout.gs(state, wmlayout.S_CP_NPRES) + 1)
+    }
+    cp_lat(state, by_comp)
+    cp_sync(state)
+    return area
+}
+
+fn cp_detach_locked(state: u64, why: u64) {
+    if wmlayout.gs(state, wmlayout.S_CP_TASK) == 0 {
+        return
+    }
+    var s_cd: [u8; 29] = "wm: compositor detached why=\0"
+    serial.puts((&s_cd[0]) as u64)
+    serial.dec(why)
+    serial.nl()
+
+    let _px: u64 = cp_flush_locked(state, false)
+    wmlayout.ss(state, wmlayout.S_CP_TASK, 0)
+    wmlayout.ss(state, wmlayout.S_CP_PID, 0)
+    wmlayout.ss(state, wmlayout.S_CP_NDET, wmlayout.gs(state, wmlayout.S_CP_NDET) + 1)
+    cp_sync(state)
+}
+
+fn cp_watch(state: u64) {
+    let tk: u64 = wmlayout.gs(state, wmlayout.S_CP_TASK)
+    if tk == 0 {
+        return
+    }
+    let idx: u64 = tk - 1
+    let st: u64 = sched.tget(state, idx, sched.T_STATE)
+    if st == sched.S_ZOMBIE || st == sched.S_FREE || sched.tget(state, idx, sched.T_PID) != wmlayout.gs(state, wmlayout.S_CP_PID) {
+        cp_detach_locked(state, 1)
+        return
+    }
+    if fb.nowatch_an(state) {
+        return
+    }
+    if wmlayout.gs(state, wmlayout.S_CP_PEND) == 0 {
+        return
+    }
+    let kh: u64 = time.khz(state)
+    let t0: u64 = wmlayout.gs(state, wmlayout.S_CP_T0)
+    let now: u64 = time.tsc()
+    if kh >= 1000 && t0 != 0 && now > t0 && (now - t0) / kh >= CP_LIMIT_MS {
+        let _px: u64 = cp_flush_locked(state, false)
+        wmlayout.ss(state, wmlayout.S_CP_NMISS, wmlayout.gs(state, wmlayout.S_CP_NMISS) + 1)
+        wmlayout.ss(state, wmlayout.S_CP_MISS, wmlayout.gs(state, wmlayout.S_CP_MISS) + 1)
+        if wmlayout.gs(state, wmlayout.S_CP_MISS) >= CP_MAXMISS {
+            cp_detach_locked(state, 2)
+        }
+    }
+}
+
+const PL_RING: u64 = 60
+
+const PL_AT: u64 = 16
+
+const PL_ENT: u64 = 8
+
+const PL_F_COMP: u64 = 1
+
+const PL_F_WDOG: u64 = 2
+
+const PL_F_TORN: u64 = 4
+
+const PL_F_DMGMID: u64 = 8
+
+const PL_F_MULTI: u64 = 16
+
+const PL_F_DIRECT: u64 = 32
+
+fn pl_core() -> u64 {
+    var v: u64 = 0
+    asm("push rbx\nmov eax, 1\ncpuid\nmov eax, ebx\nshr eax, 24\npop rbx",
+        out("rax") & v, clobber("rcx"), clobber("rdx"))
+    return (v >> 0) & 0xFF
+}
+
+fn pl_hash(state: u64) -> u64 {
+    var stride: u64 = wmlayout.gs(state, wmlayout.S_PL_ON)
+    if stride == 0 {
+        stride = 16
+    }
+    var h: u64 = 0xCBF29CE484222325
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if win_shm(state, i) != 0 && !win_hidden(state, i) {
+            let b: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
+            let n: u64 = wmlayout.wg(state, i, wmlayout.W_BUFBYTES) / 8
+            if b != 0 {
+                var k: u64 = 0
+                while k < n {
+                    h = (h ^ __mmio_read64((b + k * 8) as *mut u64)) *% 0x100000001B3
+                    k = k + stride
+                }
+            }
+        }
+        i = i + 1
+    }
+    return h
+}
+
+fn pl_compose_begin(state: u64, outp: u64) {
+    __mmio_write64(outp as *mut u64, pl_hash(state))
+    __mmio_write64((outp + 8) as *mut u64, wmlayout.gs(state, wmlayout.S_PL_DSEQ))
+    __mmio_write64((outp + 16) as *mut u64, time.tsc())
+}
+
+fn pl_compose_end(state: u64, inp: u64) {
+    let hb: u64 = __mmio_read64(inp as *mut u64)
+    let d0: u64 = __mmio_read64((inp + 8) as *mut u64)
+    let t0: u64 = __mmio_read64((inp + 16) as *mut u64)
+    let ha: u64 = pl_hash(state)
+    var fl: u64 = wmlayout.gs(state, wmlayout.S_PL_FLAGS)
+    if ha != hb {
+        fl = fl | PL_F_TORN
+    }
+    if wmlayout.gs(state, wmlayout.S_PL_DSEQ) != d0 {
+        fl = fl | PL_F_DMGMID
+    }
+    if wmlayout.gs(state, wmlayout.S_PL_NCOMP) != 0 {
+        fl = fl | PL_F_MULTI
+    }
+    wmlayout.ss(state, wmlayout.S_PL_FLAGS, fl)
+    wmlayout.ss(state, wmlayout.S_PL_NCOMP, wmlayout.gs(state, wmlayout.S_PL_NCOMP) + 1)
+    wmlayout.ss(state, wmlayout.S_PL_CCORE, pl_core())
+    wmlayout.ss(state, wmlayout.S_PL_HASH, (hb & 0xFFFFFFFF) | (ha << 32))
+    let us: u64 = wmpresent.ph_us(state, t0, time.tsc())
+    if us > wmlayout.gs(state, wmlayout.S_PL_CDUR) {
+        wmlayout.ss(state, wmlayout.S_PL_CDUR, us)
+    }
+}
+
+fn pl_record(state: u64, kind: u64, x0: u64, y0: u64, x1: u64, y1: u64, t0: u64, hand_t0: u64) {
+    let f: u64 = wmlayout.gs(state, wmlayout.S_PL_PAGEF)
+    if f == 0 {
+        return
+    }
+    let t1: u64 = time.tsc()
+    var fl: u64 = wmlayout.gs(state, wmlayout.S_PL_FLAGS) | kind
+    if !fb.double_buffered(state) {
+        fl = fl | PL_F_DIRECT
+    }
+    if (fl & PL_F_TORN) != 0 {
+        wmlayout.ss(state, wmlayout.S_PL_NTORN, wmlayout.gs(state, wmlayout.S_PL_NTORN) + 1)
+    }
+    let idx: u64 = wmlayout.gs(state, wmlayout.S_PL_HEAD)
+    let at: u64 = PL_AT + (idx % PL_RING) * PL_ENT
+    wmanim.tw(f, at, 0)
+    wmanim.tw(f, at + 1, t0)
+    wmanim.tw(f, at + 2, (x0 & 0xFFFF) | ((y0 & 0xFFFF) << 16) | ((x1 & 0xFFFF) << 32) | ((y1 & 0xFFFF) << 48))
+    var hop: u64 = 0
+    if hand_t0 != 0 && t0 > hand_t0 {
+        hop = wmpresent.ph_us(state, hand_t0, t0)
+    }
+    wmanim.tw(f, at + 3, (wmlayout.gs(state, wmlayout.S_PL_CCORE) & 0xFF) | ((pl_core() & 0xFF) << 8) | ((wmlayout.gs(state, wmlayout.S_PL_DCORE) & 0xFF) << 16)
+        | ((wmlayout.gs(state, wmlayout.S_PL_NCOMP) & 0xFF) << 24) | ((hop & 0xFFFFFFFF) << 32))
+    wmanim.tw(f, at + 4, (wmlayout.gs(state, wmlayout.S_PL_CDUR) & 0xFFFFFFFF) | ((wmpresent.ph_us(state, t0, t1) & 0xFFFFFFFF) << 32))
+    wmanim.tw(f, at + 5, wmlayout.gs(state, wmlayout.S_PL_HASH))
+    var dus: u64 = 0
+    if wmlayout.gs(state, wmlayout.S_PL_DTSC) != 0 && t1 > wmlayout.gs(state, wmlayout.S_PL_DTSC) {
+        dus = wmpresent.ph_us(state, wmlayout.gs(state, wmlayout.S_PL_DTSC), t1)
+    }
+    wmanim.tw(f, at + 6, (wmlayout.gs(state, wmlayout.S_PL_DSEQ) & 0xFFFFFFFF) | ((dus & 0xFFFFFFFF) << 32))
+    var since: u64 = 0
+    if wmlayout.gs(state, wmlayout.S_PL_TPREV) != 0 && t0 > wmlayout.gs(state, wmlayout.S_PL_TPREV) {
+        since = wmpresent.ph_us(state, wmlayout.gs(state, wmlayout.S_PL_TPREV), t0)
+    }
+    wmanim.tw(f, at + 7, since)
+    wmanim.tw(f, at, ((idx + 1) << 32) | fl)
+    wmlayout.ss(state, wmlayout.S_PL_HEAD, idx + 1)
+    wmlayout.ss(state, wmlayout.S_PL_NREC, wmlayout.gs(state, wmlayout.S_PL_NREC) + 1)
+    wmlayout.ss(state, wmlayout.S_PL_TPREV, t0)
+    wmlayout.ss(state, wmlayout.S_PL_FLAGS, 0)
+    wmlayout.ss(state, wmlayout.S_PL_NCOMP, 0)
+    wmlayout.ss(state, wmlayout.S_PL_CDUR, 0)
+    wmanim.tw(f, 2, idx + 1)
+    wmanim.tw(f, 6, wmlayout.gs(state, wmlayout.S_PL_NTORN))
+    wmanim.tw(f, 7, wmlayout.gs(state, wmlayout.S_PL_NREC))
+}
+
+fn pg_window_at(state: u64, x: u64, y: u64) -> u64 {
+    var z: u64 = wmlayout.gs(state, wmlayout.S_COUNT)
+    while z > 0 {
+        z = z - 1
+        let i: u64 = wmbase.at_z(state, z)
+        if i < wmbase.MAX_WIN && (wmlayout.wg(state, i, wmlayout.W_FLAGS) & (wmlayout.F_HIDDEN | wmlayout.F_TABBED)) == 0 {
+            let wx: i64 = wmbase.win_x(state, i)
+            let wy: i64 = wmbase.win_y(state, i)
+            if (x as i64) >= wx && (x as i64) < wx + wmbase.outer_w(state, i) as i64
+                && (y as i64) >= wy && (y as i64) < wy + wmbase.outer_h(state, i) as i64 {
+                return i + 1
+            }
+        }
+    }
+    return 0
+}
+
+fn pg_ready(state: u64) -> bool {
+    if ax.mag(state) || fb.transformed(state) || fb.on_vgpu(state) || fb.flip_on(state) {
+        return false
+    }
+    if fb.back(state) == 0 || fb.draw_at(state) != fb.back(state) {
+        return false
+    }
+    if wmlayout.gs(state, wmlayout.S_VSYNC) != 0 || cp_on(state) {
+        return false
+    }
+    return true
+}
+
+fn pg_render(state: u64, slot: u64) -> bool {
+    if !pixelguard.begin(state, slot) {
+        return false
+    }
+    compose_rect(state, 0, 0, wmlayout.gs(state, wmlayout.S_SW), wmlayout.gs(state, wmlayout.S_SH), 0)
+    pixelguard.finish(state)
+    return true
+}
+
+fn pg_box(state: u64, out: u64) {
+    var k: u64 = 0
+    while k < 4 {
+        __mmio_write64((out + k * 8) as *mut u64, 0 as u64)
+        k = k + 1
+    }
+    if wmlayout.gs(state, wmlayout.S_DON) != 0 {
+        __mmio_write64(out as *mut u64, wmlayout.gs(state, wmlayout.S_DX0))
+        __mmio_write64((out + 8) as *mut u64, wmlayout.gs(state, wmlayout.S_DY0))
+        __mmio_write64((out + 16) as *mut u64, wmlayout.gs(state, wmlayout.S_DX1))
+        __mmio_write64((out + 24) as *mut u64, wmlayout.gs(state, wmlayout.S_DY1))
+    }
+}
+
+fn pg_compare(state: u64, slot: u64) -> u64 {
+    var bx: [u64; 4] = [0 as u64; 4]
+    pg_box(state, (&bx[0]) as u64)
+    return pixelguard.compare(state, slot, bx[0], bx[1], bx[2], bx[3])
+}
+
+fn pg_cursor(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_CURX) * 65536 + wmlayout.gs(state, wmlayout.S_CURY)
+}
+
+fn pg_check(state: u64, painted: u64, cur0: u64) {
+    if !pixelguard.due(state, painted) {
+        return
+    }
+    if !pg_ready(state) {
+        pixelguard.count(pixelguard.ST_SKIPPED)
+        return
+    }
+    let t0: u64 = time.tsc()
+    let pl: u64 = wmlayout.gs(state, wmlayout.S_PL_ON)
+    let zf: u64 = wmlayout.gs(state, wmlayout.S_ZFLAG)
+    let p0: u64 = wmlayout.gs(state, wmlayout.S_PH_BG)
+    let p1: u64 = wmlayout.gs(state, wmlayout.S_PH_WIN)
+    let p2: u64 = wmlayout.gs(state, wmlayout.S_PH_DRAG)
+    let p3: u64 = wmlayout.gs(state, wmlayout.S_PH_TOP)
+    let p4: u64 = wmlayout.gs(state, wmlayout.S_PH_PEND)
+    let p5: u64 = wmlayout.gs(state, wmlayout.S_PH_BLUR)
+    let p6: u64 = wmlayout.gs(state, wmlayout.S_PH_GLASS)
+    let p7: u64 = wmlayout.gs(state, wmlayout.S_PH_SHADOW)
+    wmlayout.ss(state, wmlayout.S_PL_ON, 0)
+    if pg_render(state, 0) {
+        pixelguard.count(pixelguard.ST_CHECKS)
+        let bad: u64 = pg_compare(state, 0)
+        if bad == 0 {
+            pixelguard.clear_cand(0)
+        }
+        if bad != 0 && pg_cursor(state) != cur0 {
+            pixelguard.count(pixelguard.ST_PENDING)
+        } else if bad != 0 {
+            if pg_render(state, 1) {
+                let bad2: u64 = pg_compare(state, 1)
+                if bad2 == 0 {
+                    pixelguard.count(pixelguard.ST_PENDING)
+                } else if pixelguard.compare_refs(state, pixelguard.cmp_get(pixelguard.CMP_X0), pixelguard.cmp_get(pixelguard.CMP_Y0),
+                    pixelguard.cmp_get(pixelguard.CMP_X1), pixelguard.cmp_get(pixelguard.CMP_Y1)) != 0 {
+                    pixelguard.count(pixelguard.ST_UNSTABLE)
+                } else if !pixelguard.confirm(0, pixelguard.cmp_get(pixelguard.CMP_X0), pixelguard.cmp_get(pixelguard.CMP_Y0),
+                    pixelguard.cmp_get(pixelguard.CMP_X1), pixelguard.cmp_get(pixelguard.CMP_Y1)) {
+                    pixelguard.count(pixelguard.ST_PENDING)
+                } else {
+                    let win: u64 = pg_window_at(state, pixelguard.cmp_get(pixelguard.CMP_FX), pixelguard.cmp_get(pixelguard.CMP_FY))
+                    pixelguard.report(state, 0, win, pixelguard.ref_addr(1), fb.back(state))
+                }
+            }
+        }
+    }
+    if !fb.stripe(state) {
+        pixelguard.count(pixelguard.ST_CARD_CHECKS)
+        let cbad: u64 = pixelguard.card_compare(state)
+        if cbad == 0 {
+            pixelguard.clear_cand(1)
+        }
+        if cbad != 0 && !pixelguard.confirm(1, pixelguard.cmp_get(pixelguard.CMP_X0), pixelguard.cmp_get(pixelguard.CMP_Y0),
+            pixelguard.cmp_get(pixelguard.CMP_X1), pixelguard.cmp_get(pixelguard.CMP_Y1)) {
+            pixelguard.count(pixelguard.ST_PENDING)
+        } else if cbad != 0 {
+            let cwin: u64 = pg_window_at(state, pixelguard.cmp_get(pixelguard.CMP_FX), pixelguard.cmp_get(pixelguard.CMP_FY))
+            pixelguard.report(state, 1, cwin, fb.back(state), fb.addr(state))
+        }
+    }
+    wmlayout.ss(state, wmlayout.S_PL_ON, pl)
+    wmlayout.ss(state, wmlayout.S_ZFLAG, zf)
+    wmlayout.ss(state, wmlayout.S_PH_BG, p0)
+    wmlayout.ss(state, wmlayout.S_PH_WIN, p1)
+    wmlayout.ss(state, wmlayout.S_PH_DRAG, p2)
+    wmlayout.ss(state, wmlayout.S_PH_TOP, p3)
+    wmlayout.ss(state, wmlayout.S_PH_PEND, p4)
+    wmlayout.ss(state, wmlayout.S_PH_BLUR, p5)
+    wmlayout.ss(state, wmlayout.S_PH_GLASS, p6)
+    wmlayout.ss(state, wmlayout.S_PH_SHADOW, p7)
+    pixelguard.set_last(pixelguard.ST_US, time_us(state, time.tsc() - t0))
+}
+
+fn compose(state: u64) -> u64 {
+    let lk: u64 = state + kstate.WM_OFF + wmlayout.S_CLOCK
+    let alt: u64 = __atomic_swap(lk as *mut u64, 0 as u64, 1 as u64)
+    if alt != 0 {
+        return 0
+    }
+    if pixelguard.frozen() {
+        arch.atomic_store(lk, 0)
+        return 0
+    }
+    tiling.screen_follow(state)
+    cp_watch(state)
+    tab_publish(state)
+    let cur0: u64 = pg_cursor(state)
+    let r: u64 = compose_one(state)
+    pg_check(state, r, cur0)
+    cp_kick(state)
+    arch.atomic_store(lk, 0)
+    return r
+}
+
+fn time_us(state: u64, cyc: u64) -> u64 {
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        return 0
+    }
+    return cyc / (kh / 1000)
+}
+
+fn flush_box(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+
+    beam.wait(state, x0, y0, x1 - x0, y1 - y0)
+    let t0: u64 = time.tsc()
+    let o0: u64 = fb.tx_octets(state)
+    if fb.fullrows_an(state) {
+        fb.dirty(state, y0, y1)
+        fb.flush(state)
+    } else {
+        var fw: u64 = x1 - x0
+        if pixelguard.bug_is(4) && fw > 1 {
+            fw = fw - 1
+        }
+        fb.flush_region(state, x0, y0, fw, y1 - y0)
+    }
+    let t1: u64 = time.tsc()
+    if wmlayout.gs(state, wmlayout.S_PL_ON) != 0 {
+        pl_record(state, 0, x0, y0, x1, y1, t0, 0)
+    }
+    fb.flush_note(state, wmpresent.ph_us(state, t0, t1), fb.tx_octets(state) - o0)
+    beam.note(state, wmpresent.ph_us(state, t0, t1), fb.tx_octets(state) - o0)
+}
+
+fn rects_merge(rs: u64, n0: u64) -> u64 {
+    var n: u64 = n0
+    var again: bool = true
+    while again && n > 1 {
+        again = false
+        var i: u64 = 0
+        while i < n && !again {
+            var j: u64 = i + 1
+            while j < n && !again {
+                let ax0: u64 = __mmio_read64((rs + (i * 4) * 8) as *mut u64)
+                let ay0: u64 = __mmio_read64((rs + (i * 4 + 1) * 8) as *mut u64)
+                let ax1: u64 = __mmio_read64((rs + (i * 4 + 2) * 8) as *mut u64)
+                let ay1: u64 = __mmio_read64((rs + (i * 4 + 3) * 8) as *mut u64)
+                let bx0: u64 = __mmio_read64((rs + (j * 4) * 8) as *mut u64)
+                let by0: u64 = __mmio_read64((rs + (j * 4 + 1) * 8) as *mut u64)
+                let bx1: u64 = __mmio_read64((rs + (j * 4 + 2) * 8) as *mut u64)
+                let by1: u64 = __mmio_read64((rs + (j * 4 + 3) * 8) as *mut u64)
+                var ux0: u64 = ax0
+                if bx0 < ux0 {
+                    ux0 = bx0
+                }
+                var uy0: u64 = ay0
+                if by0 < uy0 {
+                    uy0 = by0
+                }
+                var ux1: u64 = ax1
+                if bx1 > ux1 {
+                    ux1 = bx1
+                }
+                var uy1: u64 = ay1
+                if by1 > uy1 {
+                    uy1 = by1
+                }
+                let aa: u64 = (ax1 - ax0) * (ay1 - ay0)
+                let ba: u64 = (bx1 - bx0) * (by1 - by0)
+                let ua: u64 = (ux1 - ux0) * (uy1 - uy0)
+                var join: bool = false
+                if ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1 {
+                    join = true
+                } else if ua * 100 <= (aa + ba) * 125 {
+                    join = true
+                }
+                if join {
+                    __mmio_write64((rs + (i * 4) * 8) as *mut u64, ux0)
+                    __mmio_write64((rs + (i * 4 + 1) * 8) as *mut u64, uy0)
+                    __mmio_write64((rs + (i * 4 + 2) * 8) as *mut u64, ux1)
+                    __mmio_write64((rs + (i * 4 + 3) * 8) as *mut u64, uy1)
+
+                    var k: u64 = 0
+                    while k < 4 {
+                        __mmio_write64((rs + (j * 4 + k) * 8) as *mut u64, __mmio_read64((rs + ((n - 1) * 4 + k) * 8) as *mut u64))
+                        k = k + 1
+                    }
+                    n = n - 1
+                    again = true
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+    }
+    return n
+}
+
+fn flush_many(state: u64, rs: u64, n: u64) {
+    var us_sum: u64 = 0
+    var okt_sum: u64 = 0
+    var ylo: u64 = 0xFFFFFFFF
+    var yhi: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let x0: u64 = __mmio_read64((rs + (i * 4) * 8) as *mut u64)
+        let y0: u64 = __mmio_read64((rs + (i * 4 + 1) * 8) as *mut u64)
+        let x1: u64 = __mmio_read64((rs + (i * 4 + 2) * 8) as *mut u64)
+        let y1: u64 = __mmio_read64((rs + (i * 4 + 3) * 8) as *mut u64)
+        if x1 > x0 && y1 > y0 {
+            beam.wait(state, x0, y0, x1 - x0, y1 - y0)
+            let ta: u64 = time.tsc()
+            let oa: u64 = fb.tx_octets(state)
+            var fw: u64 = x1 - x0
+            if pixelguard.bug_is(4) && fw > 1 {
+                fw = fw - 1
+            }
+            fb.flush_rect(state, x0, y0, fw, y1 - y0)
+            if wmlayout.gs(state, wmlayout.S_PL_ON) != 0 {
+                pl_record(state, 0, x0, y0, x1, y1, ta, 0)
+            }
+            us_sum = us_sum + wmpresent.ph_us(state, ta, time.tsc())
+            okt_sum = okt_sum + (fb.tx_octets(state) - oa)
+            if y0 < ylo {
+                ylo = y0
+            }
+            if y1 > yhi {
+                yhi = y1
+            }
+        }
+        i = i + 1
+    }
+    if yhi > ylo {
+        let tb: u64 = time.tsc()
+        let ob: u64 = fb.tx_octets(state)
+        fb.flush_done(state, ylo, yhi)
+        us_sum = us_sum + wmpresent.ph_us(state, tb, time.tsc())
+        okt_sum = okt_sum + (fb.tx_octets(state) - ob)
+    }
+    fb.flush_note(state, us_sum, okt_sum)
+    beam.note(state, us_sum, okt_sum)
+}
+
+fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -> u64 {
+    var x0: u64 = bx0
+    var y0: u64 = by0
+    var x1: u64 = bx1
+    var y1: u64 = by1
+
+    if wmlayout.gs(state, wmlayout.S_NOGROW) == 0 && wmgeom.form(state, wmlayout.FM_BLUR) > 0 {
+        var rounds: u64 = 0
+        var grew: bool = true
+        while grew && rounds < 3 {
+            grew = false
+            rounds = rounds + 1
+            var wi: u64 = 0
+            while wi < wmbase.MAX_WIN {
+                if wmblur.blur_will(state, wi) && !wmblur.blur_hit_ok(state, wi) {
+                    var qx0: i64 = wmbase.win_x(state, wi)
+                    var qy0: i64 = wmbase.win_y(state, wi)
+                    var qx1: i64 = qx0 + wmbase.outer_w(state, wi) as i64
+                    var qy1: i64 = qy0 + wmbase.outer_h(state, wi) as i64
+                    if qx0 < 0 {
+                        qx0 = 0
+                    }
+                    if qy0 < 0 {
+                        qy0 = 0
+                    }
+                    if qx1 > wmlayout.gs(state, wmlayout.S_SW) as i64 {
+                        qx1 = wmlayout.gs(state, wmlayout.S_SW) as i64
+                    }
+                    if qy1 > wmlayout.gs(state, wmlayout.S_SH) as i64 {
+                        qy1 = wmlayout.gs(state, wmlayout.S_SH) as i64
+                    }
+                    if qx1 > x0 as i64 && qx0 < x1 as i64
+                        && qy1 > y0 as i64 && qy0 < y1 as i64 {
+                        if (qx0 as u64) < x0 {
+                            x0 = qx0 as u64
+                            grew = true
+                        }
+                        if (qy0 as u64) < y0 {
+                            y0 = qy0 as u64
+                            grew = true
+                        }
+                        if (qx1 as u64) > x1 {
+                            x1 = qx1 as u64
+                            grew = true
+                        }
+                        if (qy1 as u64) > y1 {
+                            y1 = qy1 as u64
+                            grew = true
+                        }
+                    }
+                }
+                wi = wi + 1
+            }
+        }
+    }
+
+    var pl_b: [u64; 3] = [0 as u64; 3]
+    let pl_on_here: bool = wmlayout.gs(state, wmlayout.S_PL_ON) != 0
+    if pl_on_here {
+        pl_compose_begin(state, (&pl_b[0]) as u64)
+    }
+    let ph_a0: u64 = time.tsc()
+
+    fb.fill(state, x0, y0, x1 - x0, y1 - y0, wmlayout.gs(state, wmlayout.S_DESK))
+
+    if wmlayout.gs(state, wmlayout.S_TILE) != 0 {
+        tiling.paint_bars(state, x0, y0, x1, y1)
+    }
+    wmpresent.ph_add(state, wmlayout.S_PH_BG, ph_a0, time.tsc())
+
+    let ph_b: u64 = time.tsc()
+    var z: u64 = 0
+    while z < wmlayout.gs(state, wmlayout.S_COUNT) {
+        let i: u64 = wmbase.at_z(state, z)
+
+        if i < wmbase.MAX_WIN && (wmlayout.wg(state, i, wmlayout.W_FLAGS) & (wmlayout.F_HIDDEN | wmlayout.F_TABBED)) == 0
+            && wmgate.input_allowed(state, i) {
+            let pw_t: u64 = time.tsc()
+            wmchrome.paint_win(state, i, x0, y0, x1, y1)
+            if fb.phases_an(state) {
+                let pw_us: u64 = wmpresent.ph_us(state, pw_t, time.tsc())
+                if pw_us > 8000 {
+                    var s_pw: [u8; 17] = "wm: slowwin win=\0"
+                    var s_pw2: [u8; 5] = " us=\0"
+                    var s_pw3: [u8; 5] = " px=\0"
+                    serial.puts((&s_pw[0]) as u64)
+                    serial.dec(i)
+                    serial.puts((&s_pw2[0]) as u64)
+                    serial.dec(pw_us)
+                    serial.puts((&s_pw3[0]) as u64)
+                    serial.dec(wmlayout.wg(state, i, wmlayout.W_PX))
+                    serial.nl()
+                }
+            }
+        }
+        z = z + 1
+    }
+    let ph_c: u64 = time.tsc()
+    wmpresent.ph_add(state, wmlayout.S_PH_WIN, ph_b, ph_c)
+    if pl_on_here {
+        pl_compose_end(state, (&pl_b[0]) as u64)
+    }
+
+    if wmlayout.gs(state, wmlayout.S_SIG) != 0 {
+        var zs: u64 = 0
+        while zs < wmlayout.gs(state, wmlayout.S_COUNT) {
+            let si: u64 = wmbase.at_z(state, zs)
+            if si < wmbase.MAX_WIN
+                && (wmlayout.wg(state, si, wmlayout.W_FLAGS) & (wmlayout.F_HIDDEN | wmlayout.F_TABBED)) == 0 {
+                wmpresent.paint_sig(state, si, x0 as i64, y0 as i64, x1 as i64,
+                    y1 as i64)
+            }
+            zs = zs + 1
+        }
+    }
+    let tp_sig: u64 = time.tsc()
+
+    if wmlayout.gs(state, wmlayout.S_PVON) != 0 {
+        tiling.paint_preview(state, x0, y0, x1, y1)
+    }
+
+    let tp_pv: u64 = time.tsc()
+    wmswitchpaint.paint_switcher(state, x0, y0, x1, y1)
+    wmtrust.td_paint(state, x0, y0, x1, y1)
+    let tp_td: u64 = time.tsc()
+
+    if wmlayout.gs(state, wmlayout.S_CURON) != 0 && !wmcursor.hwcur_an(state) {
+        wmcursor.paint_cursor(state, x0, y0, x1, y1)
+    }
+    let tp_cur: u64 = time.tsc()
+
+    if ax.mag(state) {
+        wmmag.paint_mag(state)
+    }
+
+    let ph_d: u64 = time.tsc()
+    wmpresent.ph_add(state, wmlayout.S_PH_TOP, ph_c, ph_d)
+
+    if wmpresent.ph_us(state, ph_c, ph_d) > 8000 && fb.phases_an(state) {
+        var s_t0: [u8; 13] = "wm: toplong \0"
+        var s_t1: [u8; 6] = " sig=\0"
+        var s_t2: [u8; 5] = " pv=\0"
+        var s_t3: [u8; 5] = " td=\0"
+        var s_t4: [u8; 6] = " cur=\0"
+        var s_t5: [u8; 6] = " mag=\0"
+        serial.puts((&s_t0[0]) as u64)
+        serial.puts((&s_t1[0]) as u64)
+        serial.dec(wmpresent.ph_us(state, ph_c, tp_sig))
+        serial.puts((&s_t2[0]) as u64)
+        serial.dec(wmpresent.ph_us(state, tp_sig, tp_pv))
+        serial.puts((&s_t3[0]) as u64)
+        serial.dec(wmpresent.ph_us(state, tp_pv, tp_td))
+        serial.puts((&s_t4[0]) as u64)
+        serial.dec(wmpresent.ph_us(state, tp_td, tp_cur))
+        serial.puts((&s_t5[0]) as u64)
+        serial.dec(wmpresent.ph_us(state, tp_cur, ph_d))
+        serial.nl()
+    }
+
+    if fb.phases_an(state) && (x1 - x0) * (y1 - y0) > 16384 {
+        var s_c0: [u8; 11] = "wm: crect \0"
+        var s_c1: [u8; 6] = " in= \0"
+        serial.puts((&s_c0[0]) as u64)
+        serial.dec(x0)
+        serial.put(32 as u8)
+        serial.dec(y0)
+        serial.put(32 as u8)
+        serial.dec(x1)
+        serial.put(32 as u8)
+        serial.dec(y1)
+        serial.puts((&s_c1[0]) as u64)
+        serial.dec(bx0)
+        serial.put(32 as u8)
+        serial.dec(by0)
+        serial.put(32 as u8)
+        serial.dec(bx1)
+        serial.put(32 as u8)
+        serial.dec(by1)
+        serial.nl()
+    }
+    if pixelguard.rendering() {
+        return (x1 - x0) * (y1 - y0)
+    }
+    if wmlayout.gs(state, wmlayout.S_VSYNC) != 0 {
+        wmpresent.pend_add(state, x0, y0, x1, y1)
+        wmlayout.ss(state, wmlayout.S_SKIPPED, wmlayout.gs(state, wmlayout.S_SKIPPED) + 1)
+    } else if cp_on(state) {
+
+        cp_hand(state, x0, y0, x1, y1)
+    } else if outr != 0 {
+
+        __mmio_write64(outr as *mut u64, x0)
+        __mmio_write64((outr + 8) as *mut u64, y0)
+        __mmio_write64((outr + 16) as *mut u64, x1)
+        __mmio_write64((outr + 24) as *mut u64, y1)
+    } else {
+        flush_box(state, x0, y0, x1, y1)
+        wmlayout.ss(state, wmlayout.S_CP_NKP, wmlayout.gs(state, wmlayout.S_CP_NKP) + 1)
+        cp_lat(state, false)
+    }
+    wmpresent.ph_add(state, wmlayout.S_PH_PEND, ph_d, time.tsc())
+    return (x1 - x0) * (y1 - y0)
+}
+
+fn compose_one(state: u64) -> u64 {
+    if !wmbase.ready(state) || !fb.ready(state) {
+        return 0
+    }
+
+    if ax.mag(state) {
+        wmmag.mag_damage(state)
+    } else if wmlayout.gs(state, wmlayout.S_MAGLX) != 0 {
+
+        let ox: u64 = wmlayout.gs(state, wmlayout.S_MAGLX) - 1
+        wmlayout.ss(state, wmlayout.S_MAGLX, 0)
+        wmbase.damage(state, ox as i64, 0, (ox + wmmag.MAG_W) as i64, wmmag.MAG_H as i64)
+    }
+    var bt: [u64; 4] = [0 as u64; 4]
+    if !wmglass.box_take(state, (&bt[0]) as u64) {
+        return 0
+    }
+    let x0: u64 = bt[0]
+    let y0: u64 = bt[1]
+    let x1: u64 = bt[2]
+    let y1: u64 = bt[3]
+    if x1 <= x0 || y1 <= y0 {
+        return 0
+    }
+
+    wmlayout.ss(state, wmlayout.S_FRAME, wmlayout.gs(state, wmlayout.S_FRAME) + 1)
+
+    wmplug.sweep(state)
+
+    let t_start: u64 = time.tsc()
+
+    let sl_bg: u64 = wmlayout.gs(state, wmlayout.S_PH_BG)
+    let sl_win: u64 = wmlayout.gs(state, wmlayout.S_PH_WIN)
+    let sl_top: u64 = wmlayout.gs(state, wmlayout.S_PH_TOP)
+    let sl_pend: u64 = wmlayout.gs(state, wmlayout.S_PH_PEND)
+    let sl_blur: u64 = wmlayout.gs(state, wmlayout.S_PH_BLUR)
+    let sl_shd: u64 = wmlayout.gs(state, wmlayout.S_PH_SHADOW)
+    let sl_drg: u64 = wmlayout.gs(state, wmlayout.S_PH_DRAG)
+    let sl_gls: u64 = wmlayout.gs(state, wmlayout.S_PH_GLASS)
+
+    var rs: [u64; 64] = [0 as u64; 64]
+    var nr: u64 = 0
+    if !ax.mag(state) {
+        nr = rgn_take(state, (&rs[0]) as u64, x0, y0, x1, y1)
+    } else {
+        nr = 0
+    }
+    var painted: u64 = 0
+    if nr == 0 {
+        painted = compose_rect(state, x0, y0, x1, y1, 0)
+    } else {
+        wmlayout.ss(state, wmlayout.S_RFRAMES, wmlayout.gs(state, wmlayout.S_RFRAMES) + 1)
+
+        let collect: bool = wmlayout.gs(state, wmlayout.S_VSYNC) == 0 && !cp_on(state) && !fb.fullrows_an(state)
+        var ri: u64 = 0
+        while ri < nr {
+            var outp: u64 = 0
+            if collect {
+                outp = (&rs[(ri * 4) as usize]) as u64
+            }
+            var rx1: u64 = rs[(ri * 4 + 2) as usize]
+            if pixelguard.bug_is(1) && rx1 > rs[(ri * 4) as usize] + 1 {
+                rx1 = rx1 - 1
+            }
+            painted = painted + compose_rect(state, rs[(ri * 4) as usize], rs[(ri * 4 + 1) as usize],
+                rx1, rs[(ri * 4 + 3) as usize], outp)
+            ri = ri + 1
+        }
+        if collect {
+
+            let nm: u64 = rects_merge((&rs[0]) as u64, nr)
+            fb.bm_add(state, fb.S_RM_IN, nr)
+            fb.bm_add(state, fb.S_RM_OUT, nm)
+            flush_many(state, (&rs[0]) as u64, nm)
+            wmlayout.ss(state, wmlayout.S_CP_NKP, wmlayout.gs(state, wmlayout.S_CP_NKP) + nm)
+            cp_lat(state, false)
+        }
+    }
+    wmlayout.ss(state, wmlayout.S_PH_PX, wmlayout.gs(state, wmlayout.S_PH_PX) + painted)
+    wmlayout.ss(state, wmlayout.S_PH_N, wmlayout.gs(state, wmlayout.S_PH_N) + 1)
+    wmlayout.ss(state, wmlayout.S_COMPOSITES, wmlayout.gs(state, wmlayout.S_COMPOSITES) + 1)
+    wmlayout.ss(state, wmlayout.S_PIXELS, wmlayout.gs(state, wmlayout.S_PIXELS) + painted)
+
+    let kh: u64 = time.khz(state)
+    if kh >= 1000 {
+        let t_ende: u64 = time.tsc()
+
+        if t_ende > t_start {
+            let us: u64 = (t_ende - t_start) / (kh / 1000)
+            wmlayout.ss(state, wmlayout.S_FRUS, wmlayout.gs(state, wmlayout.S_FRUS) + us)
+            wmlayout.ss(state, wmlayout.S_FRN, wmlayout.gs(state, wmlayout.S_FRN) + 1)
+            wmlayout.ss(state, wmlayout.S_FRLAST, us)
+            if us > wmlayout.gs(state, wmlayout.S_FRMAX) {
+                wmlayout.ss(state, wmlayout.S_FRMAX, us)
+            }
+            if us > 16000 {
+                wmlayout.ss(state, wmlayout.S_FRUEBER, wmlayout.gs(state, wmlayout.S_FRUEBER) + 1)
+                if fb.phases_an(state) {
+                    var s_sl: [u8; 13] = "wm: slow us=\0"
+                    var s_s1: [u8; 5] = " bg=\0"
+                    var s_s2: [u8; 6] = " win=\0"
+                    var s_s3: [u8; 6] = " top=\0"
+                    var s_s4: [u8; 7] = " pend=\0"
+                    var s_s5: [u8; 7] = " blur=\0"
+                    var s_s6: [u8; 6] = " shd=\0"
+                    var s_s7: [u8; 6] = " drg=\0"
+                    var s_s8: [u8; 6] = " gls=\0"
+                    var s_s9: [u8; 5] = " px=\0"
+                    serial.puts((&s_sl[0]) as u64)
+                    serial.dec(us)
+                    serial.puts((&s_s1[0]) as u64)
+                    serial.dec(wmlayout.gs(state, wmlayout.S_PH_BG) -% sl_bg)
+                    serial.puts((&s_s2[0]) as u64)
+                    serial.dec(wmlayout.gs(state, wmlayout.S_PH_WIN) -% sl_win)
+                    serial.puts((&s_s3[0]) as u64)
+                    serial.dec(wmlayout.gs(state, wmlayout.S_PH_TOP) -% sl_top)
+                    serial.puts((&s_s4[0]) as u64)
+                    serial.dec(wmlayout.gs(state, wmlayout.S_PH_PEND) -% sl_pend)
+                    serial.puts((&s_s5[0]) as u64)
+                    serial.dec(wmlayout.gs(state, wmlayout.S_PH_BLUR) -% sl_blur)
+                    serial.puts((&s_s6[0]) as u64)
+                    serial.dec(wmlayout.gs(state, wmlayout.S_PH_SHADOW) -% sl_shd)
+                    serial.puts((&s_s7[0]) as u64)
+                    serial.dec(wmlayout.gs(state, wmlayout.S_PH_DRAG) -% sl_drg)
+                    serial.puts((&s_s8[0]) as u64)
+                    serial.dec(wmlayout.gs(state, wmlayout.S_PH_GLASS) -% sl_gls)
+                    serial.puts((&s_s9[0]) as u64)
+                    serial.dec(painted)
+                    serial.nl()
+                }
+            }
+
+            if wmlayout.gs(state, wmlayout.S_ZFLAG) == 0 {
+
+                wmlayout.ss(state, wmlayout.S_OFRN, wmlayout.gs(state, wmlayout.S_OFRN) + 1)
+                wmlayout.ss(state, wmlayout.S_OFRUS, wmlayout.gs(state, wmlayout.S_OFRUS) + us)
+                if us > wmlayout.gs(state, wmlayout.S_OFRMAX) {
+                    wmlayout.ss(state, wmlayout.S_OFRMAX, us)
+                }
+            }
+            if wmlayout.gs(state, wmlayout.S_ZFLAG) != 0 {
+                wmlayout.ss(state, wmlayout.S_ZFLAG, 0)
+                wmlayout.ss(state, wmlayout.S_ZFRN, wmlayout.gs(state, wmlayout.S_ZFRN) + 1)
+                wmlayout.ss(state, wmlayout.S_ZFRUS, wmlayout.gs(state, wmlayout.S_ZFRUS) + us)
+                if us > wmlayout.gs(state, wmlayout.S_ZFRMAX) {
+                    wmlayout.ss(state, wmlayout.S_ZFRMAX, us)
+                }
+                if us > 16700 {
+                    wmlayout.ss(state, wmlayout.S_ZFRUE, wmlayout.gs(state, wmlayout.S_ZFRUE) + 1)
+                }
+            }
+
+            var fach: u64 = 0
+            var g: u64 = 1000
+            while fach < 7 && us >= g {
+                g = g * 2
+                fach = fach + 1
+            }
+            wmlayout.ss(state, wmlayout.S_FRH + fach * 8, wmlayout.gs(state, wmlayout.S_FRH + fach * 8) + 1)
+
+            if wmlayout.gs(state, wmlayout.S_FRN) > 10 {
+                if us > wmlayout.gs(state, wmlayout.S_FRMAXW) {
+                    wmlayout.ss(state, wmlayout.S_FRMAXW, us)
+                }
+                if us > 16000 {
+                    wmlayout.ss(state, wmlayout.S_FRUEBERW, wmlayout.gs(state, wmlayout.S_FRUEBERW) + 1)
+                }
+            }
+        }
+    }
+    return painted
+}
