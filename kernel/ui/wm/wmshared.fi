@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.fb
+import mm.mem
+import serial
+import fs.unixsock
+import ui.wm.wmlayout
+
+fn shared_ok(state: u64) -> bool {
+    return !fb.noshare_an(state)
+}
+
+fn kern_shared(state: u64, bytes: u64) -> u64 {
+    if !shared_ok(state) {
+        return 0
+    }
+    let pages: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+    if pages == 0 || pages > unixsock.SHM_PAGES_CONTIG {
+        return 0
+    }
+    let k: u64 = unixsock.shm_new_contig(state)
+    if k >= unixsock.USHM_MAX {
+        return 0
+    }
+    if unixsock.shm_grow(state, k, pages) != 0 {
+        unixsock.shm_unref(state, k)
+        return 0
+    }
+    unixsock.shm_set_size(state, k, pages * mem.FRAME_SIZE)
+    return k + 1
+}
+
+fn wm_note(state: u64, kind: u64, i: u64, bytes: u64) {
+    var s_a: [u8; 12] = "wm: bufchg \0"
+    var s_w: [u8; 6] = " win=\0"
+    var s_b: [u8; 8] = " bytes=\0"
+    var s_k: [u8; 6] = " own=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(kind)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(i)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(bytes)
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_OWNER))
+    serial.nl()
+}
+
+fn detach_buf(state: u64, i: u64, bytes: u64) -> bool {
+    let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+    let neu: u64 = mem.frame_run(state, rahmen)
+    if neu == 0 {
+        wm_note(state, 0, i, bytes)
+        return false
+    }
+    wm_note(state, 1, i, bytes)
+    unixsock.shm_unref(state, wmlayout.wg(state, i, wmlayout.W_SHM) - 1)
+    wmlayout.wsv(state, i, wmlayout.W_SHM, 0)
+    wmlayout.wsv(state, i, wmlayout.W_BUF, neu)
+    wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, rahmen * mem.FRAME_SIZE)
+    wmlayout.ss(state, wmlayout.S_SH_DET, wmlayout.gs(state, wmlayout.S_SH_DET) + 1)
+    return true
+}

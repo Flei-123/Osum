@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmshared
 import ui.wm.wmevent
 import ui.wm.wmpresent
 import ui.wm.wmterm
@@ -355,6 +356,10 @@ fn frame_us_sum(state: u64) -> u64 {
 
 fn ev_push(state: u64, i: u64, typ: u64, a: u64, b: u64, c: u64) {
     wmevent.ev_push(state, i, typ, a, b, c)
+}
+
+fn shared_ok(state: u64) -> bool {
+    return wmshared.shared_ok(state)
 }
 
 const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
@@ -1414,7 +1419,7 @@ fn create_ex(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
                 // kernel made itself, so the compositor in ring 3 can map it read-only (WM_BUFFD) and judge the terminal as a plain window.
                 // The word `noshare` (or no object / no contiguous run to be had) leaves the old private run of frames.
                 if kind == wmlayout.K_TERM {
-                    kshm = kern_shared(state, bytes)
+                    kshm = wmshared.kern_shared(state, bytes)
                     if kshm != 0 {
                         buf = unixsock.shm_frame(state, kshm - 1, 0)
                         rahmen = unixsock.shm_pages(state, kshm - 1)
@@ -3514,7 +3519,7 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
         keep_buf = wmlayout.wg(state, i, wmlayout.W_BUF)
         keep_w = wmlayout.wg(state, i, wmlayout.W_W)
         keep_h = wmlayout.wg(state, i, wmlayout.W_H)
-        if !detach_buf(state, i, w * h * 4) {
+        if !wmshared.detach_buf(state, i, w * h * 4) {
             return false
         }
     } else if wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM && wmlayout.wg(state, i, wmlayout.W_BUF) != 0 && !resize_clear_an(state) {
@@ -3606,18 +3611,6 @@ fn keep_resized(state: u64, i: u64, old: u64, ow: u64, oh: u64) {
     }
 }
 
-// ================================================= COMPOSITOR S3 (docs/COMPOSITOR.md)
-//
-// SHARED WINDOW BUFFERS. Until now a client painted into memory of its own and `WIG_BLIT` copied the pixels into the server's buffer on every
-// frame (two copies in the kernel, one more in the client's strip). A window can now take over the run of frames of a memfd
-// (`memfd_create(MFD_FRAMES)`): the client maps it, paints into it, and `WM_DAMAGE` only names the rectangle that changed. The compositor
-// reads the same frames -- 0 copies of the client's pixels per frame.
-
-// the kernel word `noshare` switches it off: the counter-proof of tools/comp/shared.sh (clients fall back to WIG_BLIT)
-fn shared_ok(state: u64) -> bool {
-    return !fb.noshare_an(state)
-}
-
 // 0 = the window paints into frames of the server's own, else the shared object + 1
 fn win_shm(state: u64, i: u64) -> u64 {
     if !wmbase.valid(state, i) {
@@ -3626,78 +3619,21 @@ fn win_shm(state: u64, i: u64) -> u64 {
     return wmlayout.wg(state, i, wmlayout.W_SHM)
 }
 
-// COMPOSITOR r486 (terminal): a shared object the KERNEL makes for a window buffer of `bytes` (the server paints the terminal grid into it
-// itself; nobody else holds a descriptor). Returns the object + 1 with its one reference, or 0 (noshare, no slot, no contiguous run).
-fn kern_shared(state: u64, bytes: u64) -> u64 {
-    if !shared_ok(state) {
-        return 0
-    }
-    let pages: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
-    if pages == 0 || pages > unixsock.SHM_PAGES_CONTIG {
-        return 0
-    }
-    let k: u64 = unixsock.shm_new_contig(state)
-    if k >= unixsock.USHM_MAX {
-        return 0
-    }
-    if unixsock.shm_grow(state, k, pages) != 0 {
-        unixsock.shm_unref(state, k)
-        return 0
-    }
-    unixsock.shm_set_size(state, k, pages * mem.FRAME_SIZE)
-    return k + 1
-}
-
 // The terminal window `i` (its buffer is a kernel-made shared object) is going to be `bytes` big: keep the buffer when it fits (the server
 // paints with the new row length), else a new object; when no object can be had the window goes back to a private run of frames.
 fn term_fit(state: u64, i: u64, bytes: u64) -> bool {
     if bytes <= wmlayout.wg(state, i, wmlayout.W_BUFBYTES) {
         return true
     }
-    let o: u64 = kern_shared(state, bytes)
+    let o: u64 = wmshared.kern_shared(state, bytes)
     if o == 0 {
-        return detach_buf(state, i, bytes)
+        return wmshared.detach_buf(state, i, bytes)
     }
     unixsock.shm_unref(state, wmlayout.wg(state, i, wmlayout.W_SHM) - 1)
     wmlayout.wsv(state, i, wmlayout.W_SHM, o)
     wmlayout.wsv(state, i, wmlayout.W_BUF, unixsock.shm_frame(state, o - 1, 0))
     wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, unixsock.shm_pages(state, o - 1) * mem.FRAME_SIZE)
     wmlayout.ss(state, wmlayout.S_TM_SH, wmlayout.gs(state, wmlayout.S_TM_SH) + 1)
-    return true
-}
-
-// W-C3f: one serial line per buffer change of a shared window (rare: only on resizes). kind 0 = detach failed (no contiguous frames),
-// 1 = detach, 2 = attach. Gate tools/vmsvgaresize reads them next to `wm: shared`.
-fn wm_note(state: u64, kind: u64, i: u64, bytes: u64) {
-    var s_a: [u8; 12] = "wm: bufchg \0"
-    var s_w: [u8; 6] = " win=\0"
-    var s_b: [u8; 8] = " bytes=\0"
-    var s_k: [u8; 6] = " own=\0"
-    serial.puts((&s_a[0]) as u64)
-    serial.dec(kind)
-    serial.puts((&s_w[0]) as u64)
-    serial.dec(i)
-    serial.puts((&s_b[0]) as u64)
-    serial.dec(bytes)
-    serial.puts((&s_k[0]) as u64)
-    serial.dec(wmlayout.wg(state, i, wmlayout.W_OWNER))
-    serial.nl()
-}
-
-// A shared window gets a buffer of its own of `bytes` and lets go of the shared one.
-fn detach_buf(state: u64, i: u64, bytes: u64) -> bool {
-    let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
-    let neu: u64 = mem.frame_run(state, rahmen)
-    if neu == 0 {
-        wm_note(state, 0, i, bytes)
-        return false
-    }
-    wm_note(state, 1, i, bytes)
-    unixsock.shm_unref(state, wmlayout.wg(state, i, wmlayout.W_SHM) - 1)
-    wmlayout.wsv(state, i, wmlayout.W_SHM, 0)
-    wmlayout.wsv(state, i, wmlayout.W_BUF, neu)
-    wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, rahmen * mem.FRAME_SIZE)
-    wmlayout.ss(state, wmlayout.S_SH_DET, wmlayout.gs(state, wmlayout.S_SH_DET) + 1)
     return true
 }
 
@@ -3733,7 +3669,7 @@ fn attach_buf(state: u64, i: u64, sbase: u64, sbytes: u64, sidx: u64) -> bool {
         mem.frame_free_run(state, wmlayout.wg(state, i, wmlayout.W_BUF), wmlayout.wg(state, i, wmlayout.W_BUFBYTES) / mem.FRAME_SIZE)
     }
     unixsock.shm_ref(state, sidx)
-    wm_note(state, 2, i, sbytes)
+    wmshared.wm_note(state, 2, i, sbytes)
     wmlayout.wsv(state, i, wmlayout.W_SHM, sidx + 1)
     wmlayout.wsv(state, i, wmlayout.W_BUF, sbase)
     wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, sbytes)
@@ -9914,7 +9850,7 @@ fn reframe(state: u64, i: u64, w: u64, h: u64) -> bool {
         return term_fit(state, i, bytes)
     }
     if wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
-        return detach_buf(state, i, bytes)
+        return wmshared.detach_buf(state, i, bytes)
     }
     if bytes <= wmlayout.wg(state, i, wmlayout.W_BUFBYTES) {
         return true
