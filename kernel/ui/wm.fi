@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmtabs
 import ui.wm.wmtrust
 import ui.wm.wmanim
 import ui.wm.wmcursor
@@ -176,7 +177,7 @@ export {
     tile_on, set_tile_on, tile_take, tile_release, tile_apply,
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
     kachelbar,
-    tt_is_bg, tt_want_spawn, tt_cancel, tt_src, tt_join, tt_free_done,
+    tt_is_bg, tt_join,
     term_page, term_key, term_paste_done, term_primary_take, term_paste_sel, tkicks_pub, term_copy_take, term_paste_take, tcur_toggles_pub, tcur_shown_pub, tcopies_pub, tpastes_pub, on_screen_resize, win_tabbed, tiled, tile_focus_state, tile_nodes_all, tile_leaves_all, tile_tree_tag,
     MAX_WIN, K_TERM,
     damage, damage_all, focus, inx, iny, ready, valid, win_owner, win_x, win_y,
@@ -327,6 +328,10 @@ fn trust_cancel(state: u64, no: u64) {
 
 fn trust_poll(state: u64, no: u64) -> u64 {
     return wmtrust.trust_poll(state, no)
+}
+
+fn tt_is_bg(state: u64, i: u64) -> bool {
+    return wmtabs.tt_is_bg(state, i)
 }
 
 const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
@@ -6950,14 +6955,14 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // der Titel
     let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_UI)
     if f < ttf.MAX_FONTS && !capc {
-        if tt_grouped(state, i) {
-            tt_paint(state, i, wx, wy, titel, schrift, ax0, ay0, ax1, ay1, f)
+        if wmtabs.tt_grouped(state, i) {
+            wmtabs.tt_paint(state, i, wx, wy, titel, schrift, ax0, ay0, ax1, ay1, f)
         } else {
             title_text(state, i, f, wx + wmgeom.border(state) as i64 + wmgeom.title_pad(state) as i64 + before,
                 wy + wmgeom.title_base(state, f),
                 schrift, ax0, ay0, ax1, ay1, bx)
             if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && i < 32 {
-                tt_paint_plus(state, i, wx, wy, schrift, ax0, ay0, ax1, ay1, f)
+                wmtabs.tt_paint_plus(state, i, wx, wy, schrift, ax0, ay0, ax1, ay1, f)
             }
         }
     }
@@ -10356,7 +10361,7 @@ fn term_key(state: u64, c: u64, shift: bool) -> bool {
         // r1309: Ctrl+Shift+T is a global "new terminal" when no terminal window has the focus (desktop, other program, the terminal was
         // closed or minimised): it used to fall through to the focused program as a plain ^T and nothing opened. Not while the screen is locked.
         if shift && (c == 84 || c == 116) && !wmgate.lock_active(state) {
-            tt_request_free(state)
+            wmtabs.tt_request_free(state)
             return true
         }
         return false
@@ -10365,14 +10370,14 @@ fn term_key(state: u64, c: u64, shift: bool) -> bool {
     let is_v: bool = c == 86 || c == 118
     // r1014 tabs: Ctrl+Shift+T new tab, Ctrl+Shift+W close, Ctrl+Tab / Ctrl+Shift+Tab next / previous
     if c == 9 {
-        if tt_grouped(state, f) {
+        if wmtabs.tt_grouped(state, f) {
             tt_step(state, f, !shift)
             return true
         }
         return false
     }
     if shift && (c == 84 || c == 116) {
-        tt_request(state, f)
+        wmtabs.tt_request(state, f)
         return true
     }
     if shift && (c == 87 || c == 119) {
@@ -13905,7 +13910,7 @@ fn sw_minimized(state: u64, i: u64) -> bool {
         return false
     }
     let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
-    if (f & wmlayout.F_HIDDEN) == 0 || (f & wmlayout.F_TABBED) != 0 || (f & wmlayout.F_NODECO) != 0 || tt_is_bg(state, i) {
+    if (f & wmlayout.F_HIDDEN) == 0 || (f & wmlayout.F_TABBED) != 0 || (f & wmlayout.F_NODECO) != 0 || wmtabs.tt_is_bg(state, i) {
         return false
     }
     return wmlayout.wg(state, i, wmlayout.W_LAYER) == wmlayout.L_NORMAL
@@ -14361,127 +14366,6 @@ fn say_mag(state: u64) {
 const CV_DRAWN: u64 = 12 // key of the text the overlay drew last
 const CV_DRAWS: u64 = 15 // overlay paints since boot
 
-// ==================================================== r1014: TERMINAL TABS
-// Every tab is its own K_TERM window (own tty + shell, made by /bin/term like any other terminal). A GROUP is the set of
-// windows that share one place: only the ACTIVE one is shown, the others are hidden (F_HIDDEN, `tt_bg` = 1) and left out of
-// the task bar and Alt+Tab. The title bar of the active window shows the tab strip (this server paints the terminal title
-// itself, so the strip is painted here: tabs, a close 'x' on each tab and a '+'). A switch copies the place and size of the
-// active window to the tab that comes forward. Keys: Ctrl+Shift+T new tab, Ctrl+Tab / Ctrl+Shift+Tab next / previous,
-// Ctrl+Shift+W close. A new tab is requested here (`tt_request`) and made by the desktop loop in kgui (it starts /bin/term);
-// `gfx.term_new` then calls `tt_src` (take the place of the asking window) and `tt_join`.
-static mut tt_grp: [u64; 32] = [0 as u64; 32]   // group id of the window, 0 = not in a group
-static mut tt_ord: [u64; 32] = [0 as u64; 32]   // creation order inside the group (1, 2, 3 ...)
-static mut tt_bg: [u64; 32] = [0 as u64; 32]    // 1 = background tab (hidden behind the active one)
-static mut tt_cnt: [u64; 8] = [0 as u64; 8]     // 0 group ids given, 1 orders given, 2 request (window + 1), 3 request tick, 4 spawn asked, 5 joins, 6 switches, 7 closes
-static mut tt_lab: [u8; 16] = [0 as u8; 16]
-
-fn tt_grp_of(state: u64, i: u64) -> u64 {
-    if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
-        return 0
-    }
-    return tt_grp[(i) as usize]
-}
-
-fn tt_count(state: u64, g: u64) -> u64 {
-    if g == 0 {
-        return 0
-    }
-    var n: u64 = 0
-    var k: u64 = 0
-    while k < 32 {
-        if wmbase.valid(state, k) && tt_grp[(k) as usize] == g {
-            n = n + 1
-        }
-        k = k + 1
-    }
-    return n
-}
-
-fn tt_grouped(state: u64, i: u64) -> bool {
-    let g: u64 = tt_grp_of(state, i)
-    return g != 0 && tt_count(state, g) >= 2
-}
-
-// is window `i` a tab behind the active one? (task bar and Alt+Tab skip it)
-fn tt_is_bg(state: u64, i: u64) -> bool {
-    if i >= 32 || !wmbase.valid(state, i) {
-        return false
-    }
-    return tt_grp[(i) as usize] != 0 && tt_bg[(i) as usize] != 0
-}
-
-// the n-th window of group `g` in creation order (0 = first), MAX_WIN if there is none
-fn tt_nth(state: u64, g: u64, n: u64) -> u64 {
-    var last: u64 = 0
-    var found: u64 = wmbase.MAX_WIN
-    var step: u64 = 0
-    while step <= n {
-        var best: u64 = wmbase.MAX_WIN
-        var bo: u64 = 0xFFFFFFFFFFFF
-        var k: u64 = 0
-        while k < 32 {
-            if wmbase.valid(state, k) && tt_grp[(k) as usize] == g
-                && tt_ord[(k) as usize] > last && tt_ord[(k) as usize] < bo {
-                best = k
-                bo = tt_ord[(k) as usize]
-            }
-            k = k + 1
-        }
-        if best == wmbase.MAX_WIN {
-            return wmbase.MAX_WIN
-        }
-        found = best
-        last = bo
-        step = step + 1
-    }
-    return found
-}
-
-fn tt_pos(state: u64, g: u64, i: u64) -> u64 {
-    let n: u64 = tt_count(state, g)
-    var k: u64 = 0
-    while k < n {
-        if tt_nth(state, g, k) == i {
-            return k
-        }
-        k = k + 1
-    }
-    return 0
-}
-
-// the shown tab of group `g` (the one that is not a background tab)
-fn tt_active(state: u64, g: u64) -> u64 {
-    var k: u64 = 0
-    while k < 32 {
-        if wmbase.valid(state, k) && tt_grp[(k) as usize] == g && tt_bg[(k) as usize] == 0 {
-            return k
-        }
-        k = k + 1
-    }
-    return tt_nth(state, g, 0)
-}
-
-fn tt_say(state: u64, kind: u64, w: u64, g: u64) {
-    var s_new: [u8; 13] = "tt: new win=\0"
-    var s_sw: [u8; 16] = "tt: switch win=\0"
-    var s_cl: [u8; 15] = "tt: close win=\0"
-    var s_g: [u8; 6] = " grp=\0"
-    var s_t: [u8; 7] = " tabs=\0"
-    if kind == 0 {
-        serial.puts((&s_new[0]) as u64)
-    } else if kind == 1 {
-        serial.puts((&s_sw[0]) as u64)
-    } else {
-        serial.puts((&s_cl[0]) as u64)
-    }
-    serial.dec(w)
-    serial.puts((&s_g[0]) as u64)
-    serial.dec(g)
-    serial.puts((&s_t[0]) as u64)
-    serial.dec(tt_count(state, g))
-    serial.nl()
-}
-
 // the tab that comes forward takes over place, size and maximised state of the one that goes back
 fn tt_sync(state: u64, from: u64, to: u64) {
     if !wmbase.valid(state, from) || !wmbase.valid(state, to) {
@@ -14503,42 +14387,42 @@ fn tt_sync(state: u64, from: u64, to: u64) {
 
 // bring tab `to` forward (and put the shown one of its group back)
 fn tt_switch(state: u64, to: u64) {
-    let g: u64 = tt_grp_of(state, to)
+    let g: u64 = wmtabs.tt_grp_of(state, to)
     if g == 0 {
         return
     }
-    let from: u64 = tt_active(state, g)
+    let from: u64 = wmtabs.tt_active(state, g)
     if from == to {
         return
     }
     tt_sync(state, from, to)
-    tt_bg[(to) as usize] = 0
+    wmtabs.tt_bg[(to) as usize] = 0
     set_hidden(state, to, false)
     raise_win(state, to)
     if from < wmbase.MAX_WIN {
-        tt_bg[(from) as usize] = 1
+        wmtabs.tt_bg[(from) as usize] = 1
         set_hidden(state, from, true)
     }
     set_focus(state, to)
-    tt_cnt[6] = tt_cnt[6] + 1
-    tt_say(state, 1, to, g)
+    wmtabs.tt_cnt[6] = wmtabs.tt_cnt[6] + 1
+    wmtabs.tt_say(state, 1, to, g)
     wmbase.damage_all(state)
 }
 
 fn tt_step(state: u64, i: u64, fwd: bool) {
-    let g: u64 = tt_grp_of(state, i)
-    let n: u64 = tt_count(state, g)
+    let g: u64 = wmtabs.tt_grp_of(state, i)
+    let n: u64 = wmtabs.tt_count(state, g)
     if g == 0 || n < 2 {
         return
     }
-    let p: u64 = tt_pos(state, g, i)
+    let p: u64 = wmtabs.tt_pos(state, g, i)
     var q: u64 = 0
     if fwd {
         q = (p + 1) % n
     } else {
         q = (p + n - 1) % n
     }
-    let t: u64 = tt_nth(state, g, q)
+    let t: u64 = wmtabs.tt_nth(state, g, q)
     if t < wmbase.MAX_WIN {
         tt_switch(state, t)
     }
@@ -14548,8 +14432,8 @@ fn tt_close_tab(state: u64, i: u64) {
     if !wmbase.valid(state, i) {
         return
     }
-    tt_cnt[7] = tt_cnt[7] + 1
-    tt_say(state, 2, i, tt_grp_of(state, i))
+    wmtabs.tt_cnt[7] = wmtabs.tt_cnt[7] + 1
+    wmtabs.tt_say(state, 2, i, wmtabs.tt_grp_of(state, i))
     ev_push(state, i, wmlayout.E_CLOSE, 0, 0, 0)
     destroy(state, i)
 }
@@ -14559,92 +14443,27 @@ fn tt_forget(state: u64, i: u64) {
     if i >= 32 {
         return
     }
-    let g: u64 = tt_grp[(i) as usize]
+    let g: u64 = wmtabs.tt_grp[(i) as usize]
     if g == 0 {
         return
     }
-    if tt_bg[(i) as usize] == 0 && tt_count(state, g) >= 2 {
-        let p: u64 = tt_pos(state, g, i)
+    if wmtabs.tt_bg[(i) as usize] == 0 && wmtabs.tt_count(state, g) >= 2 {
+        let p: u64 = wmtabs.tt_pos(state, g, i)
         var q: u64 = 1
         if p > 0 {
             q = p - 1
         }
-        let s: u64 = tt_nth(state, g, q)
+        let s: u64 = wmtabs.tt_nth(state, g, q)
         if s < wmbase.MAX_WIN && s != i {
             tt_sync(state, i, s)
-            tt_bg[(s) as usize] = 0
+            wmtabs.tt_bg[(s) as usize] = 0
             set_hidden(state, s, false)
             raise_win(state, s)
         }
     }
-    tt_grp[(i) as usize] = 0
-    tt_ord[(i) as usize] = 0
-    tt_bg[(i) as usize] = 0
-}
-
-// ---- a new tab: asked here, made by the desktop loop (/bin/term), joined by gfx.term_new
-fn tt_request(state: u64, f: u64) {
-    if tt_cnt[2] == 0 && f < 32 {
-        tt_cnt[2] = f + 1
-        tt_cnt[3] = kstate.get(state, kstate.TICKS)
-        tt_cnt[4] = 0
-    }
-}
-
-// r1309: a new terminal asked for with no terminal window to take the place of (request slot 32 = "no source": gfx.term_new makes it at
-// the cascade place and does not join a group)
-fn tt_request_free(state: u64) {
-    if tt_cnt[2] == 0 {
-        tt_cnt[2] = 33
-        tt_cnt[3] = kstate.get(state, kstate.TICKS)
-        tt_cnt[4] = 0
-    }
-}
-
-// the terminal of a free request (no source window) is made: the request is over
-fn tt_free_done(state: u64, w: u64) {
-    if tt_cnt[2] == 33 && tt_cnt[4] != 0 {
-        tt_cnt[2] = 0
-        tt_cnt[4] = 0
-        var s_fr: [u8; 14] = "tt: free win=\0"
-        serial.puts((&s_fr[0]) as u64)
-        serial.dec(w)
-        serial.nl()
-    }
-}
-
-// true ONCE per request: the desktop loop should start /bin/term now
-fn tt_want_spawn(state: u64) -> bool {
-    if tt_cnt[2] == 0 {
-        return false
-    }
-    let now: u64 = kstate.get(state, kstate.TICKS)
-    if now > tt_cnt[3] + 1500 {
-        tt_cnt[2] = 0
-        tt_cnt[4] = 0
-        return false
-    }
-    if tt_cnt[4] != 0 {
-        return false
-    }
-    tt_cnt[4] = 1
-    return true
-}
-
-fn tt_cancel(state: u64) {
-    tt_cnt[2] = 0
-    tt_cnt[4] = 0
-}
-
-// the window that asked for the tab being made now (MAX_WIN = none)
-fn tt_src(state: u64) -> u64 {
-    if tt_cnt[2] != 0 && tt_cnt[4] != 0 {
-        let s: u64 = tt_cnt[2] - 1
-        if s < 32 && wmbase.valid(state, s) && wmlayout.wg(state, s, wmlayout.W_KIND) == wmlayout.K_TERM {
-            return s
-        }
-    }
-    return wmbase.MAX_WIN
+    wmtabs.tt_grp[(i) as usize] = 0
+    wmtabs.tt_ord[(i) as usize] = 0
+    wmtabs.tt_bg[(i) as usize] = 0
 }
 
 // window `n` (just made) becomes the shown tab of the group of `src`
@@ -14652,207 +14471,29 @@ fn tt_join(state: u64, n: u64, src: u64) {
     if n >= 32 || src >= 32 || n == src || !wmbase.valid(state, n) || !wmbase.valid(state, src) {
         return
     }
-    var g: u64 = tt_grp[(src) as usize]
+    var g: u64 = wmtabs.tt_grp[(src) as usize]
     if g == 0 {
-        tt_cnt[0] = tt_cnt[0] + 1
-        g = tt_cnt[0]
-        tt_grp[(src) as usize] = g
-        tt_cnt[1] = tt_cnt[1] + 1
-        tt_ord[(src) as usize] = tt_cnt[1]
+        wmtabs.tt_cnt[0] = wmtabs.tt_cnt[0] + 1
+        g = wmtabs.tt_cnt[0]
+        wmtabs.tt_grp[(src) as usize] = g
+        wmtabs.tt_cnt[1] = wmtabs.tt_cnt[1] + 1
+        wmtabs.tt_ord[(src) as usize] = wmtabs.tt_cnt[1]
     }
-    tt_cnt[1] = tt_cnt[1] + 1
-    tt_grp[(n) as usize] = g
-    tt_ord[(n) as usize] = tt_cnt[1]
-    tt_bg[(n) as usize] = 0
+    wmtabs.tt_cnt[1] = wmtabs.tt_cnt[1] + 1
+    wmtabs.tt_grp[(n) as usize] = g
+    wmtabs.tt_ord[(n) as usize] = wmtabs.tt_cnt[1]
+    wmtabs.tt_bg[(n) as usize] = 0
     wmlayout.wsv(state, n, wmlayout.W_FLAGS, (wmlayout.wg(state, n, wmlayout.W_FLAGS) & ~wmlayout.F_MAXIMIZED) | (wmlayout.wg(state, src, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED))
     wmlayout.wsv(state, n, wmlayout.W_SAVXY, wmlayout.wg(state, src, wmlayout.W_SAVXY))
     wmlayout.wsv(state, n, wmlayout.W_SAVWH, wmlayout.wg(state, src, wmlayout.W_SAVWH))
     wmlayout.wsv(state, n, wmlayout.W_SAVE, wmlayout.wg(state, src, wmlayout.W_SAVE))
-    tt_bg[(src) as usize] = 1
+    wmtabs.tt_bg[(src) as usize] = 1
     set_hidden(state, src, true)
-    tt_cnt[5] = tt_cnt[5] + 1
-    tt_cnt[2] = 0
-    tt_cnt[4] = 0
-    tt_say(state, 0, n, g)
+    wmtabs.tt_cnt[5] = wmtabs.tt_cnt[5] + 1
+    wmtabs.tt_cnt[2] = 0
+    wmtabs.tt_cnt[4] = 0
+    wmtabs.tt_say(state, 0, n, g)
     wmbase.damage_all(state)
-}
-
-// ---- the strip: geometry (relative to the left / top edge of the window) and painter
-fn tt_lo(state: u64) -> i64 {
-    return (wmgeom.border(state) + wmgeom.title_pad(state)) as i64
-}
-
-// right end of the free part of the title bar: left of the three caption buttons (the classic close box)
-fn tt_hi(state: u64, i: u64) -> i64 {
-    let ow: i64 = wmbase.outer_w(state, i) as i64
-    var bx: i64 = ow - wmgeom.border(state) as i64 - wmgeom.close_w(state) as i64 - 3
-    if wmgeom.form(state, wmlayout.FM_CAPTION) != 0 {
-        bx = ow - wmgeom.border(state) as i64 - (wmlayout.CAP_N * wmgeom.cap_w(state)) as i64
-    }
-    return bx - 4 * wmgeom.uisc(state) as i64
-}
-
-fn tt_sq(state: u64) -> i64 {
-    return wmgeom.title_h(state) as i64 - wmgeom.border(state) as i64 - 1
-}
-
-// width of one tab (n tabs share the bar left of the '+')
-fn tt_tabw(state: u64, i: u64, n: u64) -> i64 {
-    if n == 0 {
-        return 0
-    }
-    let region: i64 = tt_hi(state, i) - tt_lo(state) - tt_sq(state)
-    var w: i64 = region / (n as i64)
-    let mx: i64 = (wmlayout.gs(state, wmlayout.S_PX_UI) * 10) as i64
-    if w > mx {
-        w = mx
-    }
-    if w < 8 {
-        w = 8
-    }
-    return w
-}
-
-// the label of tab `k` into tt_lab, its length. mode 0 = "Terminal k", 1 = "Term k", 2 = "T k", 3 = "k" (narrow tabs keep the NUMBER,
-// z11 showed three narrow tabs all reading "Term")
-fn tt_label(k: u64, mode: u64) -> u64 {
-    var w: [u8; 10] = "Terminal \0"
-    var keep: u64 = 9
-    if mode == 1 {
-        keep = 5
-    } else if mode == 2 {
-        keep = 2
-    } else if mode >= 3 {
-        keep = 0
-    }
-    var j: u64 = 0
-    while j < keep {
-        tt_lab[(j) as usize] = w[(j) as usize]
-        j = j + 1
-    }
-    var n: u64 = keep
-    if k >= 10 {
-        tt_lab[(n) as usize] = (48 + (k / 10) % 10) as u8
-        n = n + 1
-    }
-    tt_lab[(n) as usize] = (48 + k % 10) as u8
-    n = n + 1
-    tt_lab[(n) as usize] = 0 as u8
-    return n
-}
-
-// width in pixels of the first `len` octets of tt_lab
-fn tt_measure(state: u64, f: u64, len: u64) -> i64 {
-    let px: u64 = wmlayout.gs(state, wmlayout.S_PX_UI)
-    var cx: i64 = 0
-    var k: u64 = 0
-    while k < len {
-        let gid: u64 = ttf.glyph_of(state, f, tt_lab[(k) as usize] as u64)
-        cx = cx + ttf.advance26(state, f, gid, px)
-        k = k + 1
-    }
-    return cx >> 6
-}
-
-// the longest label of tab `k` that fits into `avail` pixels (into tt_lab, its length)
-fn tt_fit_label(state: u64, f: u64, k: u64, avail: i64) -> u64 {
-    var mode: u64 = 0
-    var len: u64 = tt_label(k, 0)
-    while mode < 3 && tt_measure(state, f, len) > avail {
-        mode = mode + 1
-        len = tt_label(k, mode)
-    }
-    return len
-}
-
-// ASCII text at x (baseline y), left to right, stops before `grenze`; returns the x behind the last glyph
-fn tt_text(state: u64, f: u64, p: u64, len: u64, x: i64, y: i64, color: u64,
-    ax0: i64, ay0: i64, ax1: i64, ay1: i64, grenze: i64) -> i64 {
-    let px: u64 = wmlayout.gs(state, wmlayout.S_PX_UI)
-    var cx: i64 = x * 64
-    var vorher: u64 = 0
-    var k: u64 = 0
-    while k < len {
-        let c: u64 = kstate.get8(p + k) as u64
-        let gid: u64 = ttf.glyph_of(state, f, c)
-        if vorher != 0 {
-            cx = cx + ttf.kern26(state, f, vorher, gid, px)
-        }
-        let slot: u64 = ttf.glyph(state, f, c, px)
-        if slot < ttf.SLOTS {
-            if (cx >> 6) + ttf.g_w(state, slot) as i64 > grenze {
-                return cx >> 6
-            }
-            wmdraw.fb_glyph(state, slot, cx >> 6, y, color, ax0, ay0, ax1, ay1)
-            cx = cx + ttf.g_adv(state, slot)
-        } else {
-            cx = cx + ttf.advance26(state, f, gid, px)
-        }
-        vorher = gid
-        k = k + 1
-    }
-    return cx >> 6
-}
-
-// one glyph centred in the box [x0, x0 + w)
-fn tt_glyph_mid(state: u64, f: u64, c: u64, x0: i64, w: i64, y: i64, color: u64,
-    ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
-    let px: u64 = wmlayout.gs(state, wmlayout.S_PX_UI)
-    let gid: u64 = ttf.glyph_of(state, f, c)
-    let adv: i64 = ttf.advance26(state, f, gid, px) >> 6
-    tt_lab[12] = c as u8
-    tt_lab[13] = 0 as u8
-    let _e: i64 = tt_text(state, f, (&tt_lab[12]) as u64, 1, x0 + (w - adv) / 2, y, color,
-        ax0, ay0, ax1, ay1, x0 + w + 4)
-}
-
-// the tab strip of the shown tab `i` (instead of the title text); wx / wy = window origin on the screen
-fn tt_paint(state: u64, i: u64, wx: i64, wy: i64, titel: u64, schrift: u64,
-    ax0: i64, ay0: i64, ax1: i64, ay1: i64, f: u64) {
-    let g: u64 = tt_grp_of(state, i)
-    let n: u64 = tt_count(state, g)
-    if n == 0 {
-        return
-    }
-    let uk: i64 = wmgeom.uisc(state) as i64
-    let ty: i64 = wy + wmgeom.border(state) as i64 + 3 * uk
-    let tbot: i64 = wy + wmgeom.title_h(state) as i64 - 1
-    let tbh: i64 = tbot - ty
-    if tbh <= 4 {
-        return
-    }
-    let base: i64 = wy + wmgeom.title_base(state, f)
-    let tw: i64 = tt_tabw(state, i, n)
-    let lo: i64 = tt_lo(state)
-    let sq: i64 = tt_sq(state)
-    let cy1: i64 = wmbase.imin(ay1, tbot)
-    var k: u64 = 0
-    while k < n {
-        let wi: u64 = tt_nth(state, g, k)
-        let x0: i64 = wx + lo + (k as i64) * tw
-        let x1: i64 = x0 + tw - 2 * uk
-        var col: u64 = 0
-        if wi == i {
-            wmdraw.fill_round(state, x0, ty, x1 - x0, tbh + 8 * uk, (6 * uk) as u64, wmlayout.wg(state, i, wmlayout.W_BG), 255,
-                ax0, ay0, ax1, cy1)
-            // z11: the shown tab was only white against grey. An accent bar under its label (the colour of the active frame) says "this one".
-            wmdraw.fill_round(state, x0 + 6 * uk, tbot - 3 * uk, x1 - x0 - 12 * uk, 3 * uk, uk as u64, wmbase.deco(state, wmlayout.DK_FRAME_ON), 255,
-                ax0, ay0, ax1, cy1)
-            col = wmlayout.wg(state, i, wmlayout.W_FG)
-        } else {
-            wmdraw.fill_round(state, x0, ty, x1 - x0, tbh + 8 * uk, (6 * uk) as u64, wmdraw.blend(titel, schrift, 40), 255,
-                ax0, ay0, ax1, cy1)
-            col = schrift
-        }
-        let len: u64 = tt_fit_label(state, f, k + 1, x1 - sq - (x0 + 8 * uk) - 2 * uk)
-        let _t: i64 = tt_text(state, f, (&tt_lab[0]) as u64, len, x0 + 8 * uk, base, col,
-            ax0, ay0, ax1, ay1, x1 - sq)
-        tt_glyph_mid(state, f, 120, x1 - sq, sq, base, col, ax0, ay0, ax1, ay1)
-        k = k + 1
-    }
-    // the '+' button behind the last tab
-    let px0: i64 = wx + lo + (n as i64) * tw
-    tt_glyph_mid(state, f, 43, px0, sq, base, schrift, ax0, ay0, ax1, ay1)
 }
 
 // a left press on the title bar of terminal window `i` at screen (x, y). True = consumed (a tab, its 'x', the '+').
@@ -14866,19 +14507,19 @@ fn tt_press(state: u64, i: u64, x: i64, y: i64) -> bool {
         return false
     }
     let lx: i64 = x - wmbase.win_x(state, i)
-    let g: u64 = tt_grp_of(state, i)
-    let n: u64 = tt_count(state, g)
-    let lo: i64 = tt_lo(state)
-    let sq: i64 = tt_sq(state)
+    let g: u64 = wmtabs.tt_grp_of(state, i)
+    let n: u64 = wmtabs.tt_count(state, g)
+    let lo: i64 = wmtabs.tt_lo(state)
+    let sq: i64 = wmtabs.tt_sq(state)
     if n >= 2 {
-        let tw: i64 = tt_tabw(state, i, n)
+        let tw: i64 = wmtabs.tt_tabw(state, i, n)
         let uk: i64 = wmgeom.uisc(state) as i64
         var k: u64 = 0
         while k < n {
             let x0: i64 = lo + (k as i64) * tw
             let x1: i64 = x0 + tw - 2 * uk
             if lx >= x0 && lx < x1 {
-                let wi: u64 = tt_nth(state, g, k)
+                let wi: u64 = wmtabs.tt_nth(state, g, k)
                 if lx >= x1 - sq {
                     tt_close_tab(state, wi)
                     return true
@@ -14893,24 +14534,16 @@ fn tt_press(state: u64, i: u64, x: i64, y: i64) -> bool {
         }
         let px0: i64 = lo + (n as i64) * tw
         if lx >= px0 && lx < px0 + sq {
-            tt_request(state, i)
+            wmtabs.tt_request(state, i)
             return true
         }
         return false
     }
     // a lone terminal: only the '+' at the right end of the bar
-    let hi: i64 = tt_hi(state, i)
+    let hi: i64 = wmtabs.tt_hi(state, i)
     if lx >= hi - sq && lx < hi {
-        tt_request(state, i)
+        wmtabs.tt_request(state, i)
         return true
     }
     return false
-}
-
-// the '+' of a lone terminal (no tabs yet): at the right end of the free part of the title bar
-fn tt_paint_plus(state: u64, i: u64, wx: i64, wy: i64, schrift: u64,
-    ax0: i64, ay0: i64, ax1: i64, ay1: i64, f: u64) {
-    let sq: i64 = tt_sq(state)
-    let base: i64 = wy + wmgeom.title_base(state, f)
-    tt_glyph_mid(state, f, 43, wx + tt_hi(state, i) - sq, sq, base, schrift, ax0, ay0, ax1, ay1)
 }
