@@ -23,7 +23,7 @@ done
 TOOL="$D/vtool"
 if "$CC" tools/vaultlib/vtool.fi -o "$TOOL" > "$D/vtool.out" 2>&1; then
     V="$D/venv"
-    if python3 -m venv "$V" > /dev/null 2>&1 && "$V/bin/pip" install -q argon2-cffi cryptography > "$D/pip.out" 2>&1; then
+    if python3 -m venv "$V" > /dev/null 2>&1 && "$V/bin/pip" install -q argon2-cffi cryptography cbor2 > "$D/pip.out" 2>&1; then
         PY="$V/bin/python"
     else
         PY=python3

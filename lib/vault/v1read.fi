@@ -1,0 +1,145 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.crypto.hmac
+import std.crypto.chacha
+import std.crypto.argon2
+import vault.vlayout
+import vault.v1kdf
+
+export { V1_HEADER, V1_TAG, V1_MIN, V1_MAX_PBKDF2_ITER, V1_KDF_PBKDF2, V1_KDF_ARGON2ID,
+    is_v1, v1_check, v1_plain_len, v1_kdf, v1_open }
+
+const V1_HEADER: usize = 84
+const V1_TAG: usize = 32
+const V1_MIN: usize = 116
+const V1_MAX_PBKDF2_ITER: u64 = 10000000
+const V1_KDF_PBKDF2: u8 = 1
+const V1_KDF_ARGON2ID: u8 = 2
+
+fn magic_ok(p: u64) -> bool {
+    let m: str = "CERTUSTRESOR"
+    return rt.mem_eq(p, m.p as u64, 12)
+}
+
+fn is_v1(p: u64, n: usize) -> bool {
+    return n >= 12 && magic_ok(p)
+}
+
+fn v1_check(p: u64, n: usize) -> i32 {
+    if n < V1_MIN {
+        return vlayout.VC_E_SHORT
+    }
+    if !magic_ok(p) {
+        return vlayout.VC_E_MAGIC
+    }
+    if rt.ld8(p, 12) != 1 as u8 || rt.ld8(p, 14) != 1 as u8 {
+        return vlayout.VC_E_KDF
+    }
+    let kdf: u8 = rt.ld8(p, 13)
+    let field: u64 = vlayout.get_be32(p, 16)
+    if kdf == V1_KDF_PBKDF2 {
+        if field == 0 as u64 || field > V1_MAX_PBKDF2_ITER {
+            return vlayout.VC_E_LIMIT
+        }
+    } else if kdf == V1_KDF_ARGON2ID {
+        let kib: u64 = field >> 8
+        let passes: u64 = field & 255
+        let lanes: u64 = rt.ld8(p, 15) as u64
+        if lanes < 1 as u64 || passes < 1 as u64 || kib < 8 as u64 * lanes {
+            return vlayout.VC_E_KDF
+        }
+        if kib > vlayout.ARGON_MAX_KIB as u64 || passes > vlayout.ARGON_MAX_PASSES as u64
+            || lanes > vlayout.ARGON_MAX_LANES as u64 {
+            return vlayout.VC_E_LIMIT
+        }
+    } else {
+        return vlayout.VC_E_KDF
+    }
+    let plain: usize = vlayout.get_be32(p, 80) as usize
+    if plain > vlayout.MAX_BODY || V1_HEADER + plain + V1_TAG != n {
+        return vlayout.VC_E_LENGTH
+    }
+    return vlayout.VC_OK
+}
+
+fn v1_plain_len(p: u64, n: usize) -> i64 {
+    let rc: i32 = v1_check(p, n)
+    if rc != vlayout.VC_OK {
+        return 0 - rc as i64
+    }
+    return vlayout.get_be32(p, 80) as i64
+}
+
+fn v1_kdf(p: u64, n: usize) -> i64 {
+    let rc: i32 = v1_check(p, n)
+    if rc != vlayout.VC_OK {
+        return 0 - rc as i64
+    }
+    return rt.ld8(p, 13) as i64
+}
+
+fn derive_master(pw: u64, pwn: usize, p: u64, mk: u64) -> i32 {
+    let field: u64 = vlayout.get_be32(p, 16)
+    if rt.ld8(p, 13) == V1_KDF_PBKDF2 {
+        if !v1kdf.pbkdf2_sha256(pw, pwn, p + 20 as u64, 16, field, mk) {
+            return vlayout.VC_E_KDF
+        }
+        return vlayout.VC_OK
+    }
+    if !argon2.argon2id(pw, pwn, p + 20 as u64, 16, 0, 0, 0, 0, (field & 255) as usize,
+        (field >> 8) as usize, rt.ld8(p, 15) as usize, mk, 32) {
+        return vlayout.VC_E_MEMORY
+    }
+    return vlayout.VC_OK
+}
+
+fn label_key(mk: u64, label: str, out: u64) {
+    hmac.hmac_sha256(mk, 32, label.p as u64, label.n, out)
+}
+
+fn wipe3(a: u64, b: u64, c: u64) {
+    vlayout.wipe(a, 32)
+    vlayout.wipe(b, 32)
+    vlayout.wipe(c, 32)
+}
+
+fn v1_open(pw: u64, pwn: usize, p: u64, n: usize, out: *mut rt.Buf) -> i32 {
+    var rc: i32 = v1_check(p, n)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    let plain: usize = vlayout.get_be32(p, 80) as usize
+    var mk: [u8; 32] = [0; 32]
+    var ek: [u8; 32] = [0; 32]
+    var ak: [u8; 32] = [0; 32]
+    var chk: [u8; 32] = [0; 32]
+    rc = derive_master(pw, pwn, p, (&mk[0]) as u64)
+    if rc != vlayout.VC_OK {
+        wipe3((&mk[0]) as u64, (&ek[0]) as u64, (&ak[0]) as u64)
+        return rc
+    }
+    label_key((&mk[0]) as u64, "certus tresor v1 enc", (&ek[0]) as u64)
+    label_key((&mk[0]) as u64, "certus tresor v1 mac", (&ak[0]) as u64)
+    label_key((&mk[0]) as u64, "certus tresor v1 check", (&chk[0]) as u64)
+    vlayout.wipe((&mk[0]) as u64, 32)
+    if !hmac.hmac_equal((&chk[0]) as u64, p + 36 as u64, 32) {
+        wipe3((&ek[0]) as u64, (&ak[0]) as u64, (&chk[0]) as u64)
+        return vlayout.VC_E_CRED
+    }
+    var tag: [u8; 32] = [0; 32]
+    hmac.hmac_sha256((&ak[0]) as u64, 32, p, V1_HEADER + plain, (&tag[0]) as u64)
+    if !hmac.hmac_equal((&tag[0]) as u64, p + (V1_HEADER + plain) as u64, 32) {
+        wipe3((&ek[0]) as u64, (&ak[0]) as u64, (&chk[0]) as u64)
+        return vlayout.VC_E_TAG
+    }
+    let start: usize = rt.buf_len(out)
+    if !rt.buf_reserve(out, start + plain + 1) {
+        wipe3((&ek[0]) as u64, (&ak[0]) as u64, (&chk[0]) as u64)
+        return vlayout.VC_E_MEMORY
+    }
+    chacha.chacha20((&ek[0]) as u64, p + 68 as u64, 1 as u32, p + V1_HEADER as u64,
+        plain, rt.buf_ptr(out) + start as u64)
+    rt.buf_set_len(out, start + plain)
+    wipe3((&ek[0]) as u64, (&ak[0]) as u64, (&chk[0]) as u64)
+    return vlayout.VC_OK
+}

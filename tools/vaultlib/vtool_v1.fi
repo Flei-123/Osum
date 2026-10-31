@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import vault.vlayout
+import vault.v1read
+import vault.v1import
+import vault.migrate
+import vtool_io
+
+export { dispatch }
+
+fn open_file(start: u64, out: *mut rt.Buf) -> i32 {
+    var img: rt.Buf = rt.buf_new()
+    if !vtool_io.load_file(vtool_io.arg(start, 2), &img) {
+        return 90
+    }
+    let pw: str = vtool_io.arg(start, 3)
+    let rc: i32 = v1read.v1_open(pw.p as u64, pw.n, rt.buf_ptr(&img), rt.buf_len(&img), out)
+    rt.buf_free(&img)
+    return rc
+}
+
+fn cmd_open(start: u64) -> i32 {
+    var plain: rt.Buf = rt.buf_new()
+    let rc: i32 = open_file(start, &plain)
+    if rc != 0 {
+        return rc
+    }
+    vtool_io.store_file(vtool_io.arg(start, 4), rt.buf_ptr(&plain), rt.buf_len(&plain))
+    return 0
+}
+
+fn cmd_import(start: u64) -> i32 {
+    var plain: rt.Buf = rt.buf_new()
+    let rc: i32 = open_file(start, &plain)
+    if rc != 0 {
+        return rc
+    }
+    var store: rt.Buf = rt.buf_new()
+    var st: v1import.Stats = v1import.stats_zero()
+    let irc: i32 = v1import.import_plain(rt.buf_ptr(&plain), rt.buf_len(&plain),
+        vtool_io.num(vtool_io.arg(start, 5)) as u64, &store, &st)
+    if irc != 0 {
+        return irc
+    }
+    vtool_io.store_file(vtool_io.arg(start, 4), rt.buf_ptr(&store), rt.buf_len(&store))
+    var line: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&line, st.added as u64)
+    rt.buf_push(&line, 32 as u8)
+    rt.buf_push_dec_u64(&line, st.replaced as u64)
+    rt.buf_push(&line, 32 as u8)
+    rt.buf_push_dec_u64(&line, st.skipped as u64)
+    rt.buf_push(&line, 32 as u8)
+    rt.buf_push_dec_u64(&line, st.blocked as u64)
+    rt.buf_push(&line, 10 as u8)
+    rt.write_everything(1, rt.buf_ptr(&line), rt.buf_len(&line))
+    return 0
+}
+
+fn cmd_info(start: u64) -> i32 {
+    var img: rt.Buf = rt.buf_new()
+    if !vtool_io.load_file(vtool_io.arg(start, 2), &img) {
+        return 90
+    }
+    let p: u64 = rt.buf_ptr(&img)
+    let n: usize = rt.buf_len(&img)
+    if !v1read.is_v1(p, n) {
+        return vlayout.VC_E_MAGIC
+    }
+    return v1read.v1_check(p, n)
+}
+
+fn cmd_migrate(start: u64) -> i32 {
+    let pw: str = vtool_io.arg(start, 3)
+    vtool_io.det_seed(vtool_io.arg(start, 9), vtool_io.arg(start, 10))
+    var st: v1import.Stats = v1import.stats_zero()
+    return migrate.migrate_file(vtool_io.arg(start, 2), vtool_io.arg(start, 4), pw.p as u64,
+        pw.n, vtool_io.num(vtool_io.arg(start, 5)), vtool_io.num(vtool_io.arg(start, 6)),
+        vtool_io.num(vtool_io.arg(start, 7)), vtool_io.num(vtool_io.arg(start, 8)) as u64, &st)
+}
+
+fn dispatch(start: u64, cmd: str) -> i32 {
+    if cmd == "v1open" && rt.arg_count(start) >= 5 {
+        return cmd_open(start)
+    }
+    if cmd == "v1import" && rt.arg_count(start) >= 6 {
+        return cmd_import(start)
+    }
+    if cmd == "v1migrate" && rt.arg_count(start) >= 11 {
+        return cmd_migrate(start)
+    }
+    if cmd == "v1check" {
+        return cmd_info(start)
+    }
+    return 98
+}

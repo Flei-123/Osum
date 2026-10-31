@@ -1,0 +1,104 @@
+import std.rt
+import std.crypto.hmac
+import std.crypto.chacha
+import std.crypto.argon2
+import vault.vlayout
+import vault.v1kdf
+
+export { seal, sp, line_store, field_store }
+
+fn sp(s: str) -> u64 {
+    return s.p as u64
+}
+
+fn put32(out: *mut rt.Buf, v: u64) {
+    rt.buf_push(out, ((v >> 24) & 255) as u8)
+    rt.buf_push(out, ((v >> 16) & 255) as u8)
+    rt.buf_push(out, ((v >> 8) & 255) as u8)
+    rt.buf_push(out, (v & 255) as u8)
+}
+
+fn label(mk: u64, l: str, out: u64) {
+    hmac.hmac_sha256(mk, 32, l.p as u64, l.n, out)
+}
+
+fn seal(out: *mut rt.Buf, kdf: u8, lanes: u8, field: u64, pw: str, plain: str) -> bool {
+    let magic: str = "CERTUSTRESOR"
+    rt.buf_push_bytes(out, magic.p as u64, 12)
+    rt.buf_push(out, 1 as u8)
+    rt.buf_push(out, kdf)
+    rt.buf_push(out, 1 as u8)
+    rt.buf_push(out, lanes)
+    put32(out, field)
+    var i: usize = 0
+    while i < 16 {
+        rt.buf_push(out, (200 - i) as u8)
+        i = i + 1
+    }
+    var mk: [u8; 32] = [0; 32]
+    var ek: [u8; 32] = [0; 32]
+    var ak: [u8; 32] = [0; 32]
+    var chk: [u8; 32] = [0; 32]
+    let salt: u64 = rt.buf_ptr(out) + 20 as u64
+    if kdf == 1 as u8 {
+        v1kdf.pbkdf2_sha256(sp(pw), pw.n, salt, 16, field, (&mk[0]) as u64)
+    } else {
+        argon2.argon2id(sp(pw), pw.n, salt, 16, 0, 0, 0, 0, (field & 255) as usize,
+            (field >> 8) as usize, lanes as usize, (&mk[0]) as u64, 32)
+    }
+    label((&mk[0]) as u64, "certus tresor v1 enc", (&ek[0]) as u64)
+    label((&mk[0]) as u64, "certus tresor v1 mac", (&ak[0]) as u64)
+    label((&mk[0]) as u64, "certus tresor v1 check", (&chk[0]) as u64)
+    rt.buf_push_bytes(out, (&chk[0]) as u64, 32)
+    i = 0
+    while i < 12 {
+        rt.buf_push(out, (50 + i) as u8)
+        i = i + 1
+    }
+    put32(out, plain.n as u64)
+    let start: usize = rt.buf_len(out)
+    rt.buf_reserve(out, start + plain.n + 64)
+    rt.buf_set_len(out, start + plain.n)
+    chacha.chacha20((&ek[0]) as u64, rt.buf_ptr(out) + 68 as u64, 1 as u32, sp(plain),
+        plain.n, rt.buf_ptr(out) + start as u64)
+    var tag: [u8; 32] = [0; 32]
+    hmac.hmac_sha256((&ak[0]) as u64, 32, rt.buf_ptr(out), rt.buf_len(out), (&tag[0]) as u64)
+    rt.buf_push_bytes(out, (&tag[0]) as u64, 32)
+    return true
+}
+
+fn line_store(out: *mut rt.Buf) {
+    let s: str = "https://a.example\talice\ts3cret\n!https://never.example\nhttps://b.example\tbob\tp\\tw\\nd\nhttps://a.example\talice\tnewer\n"
+    rt.buf_push_bytes(out, s.p as u64, s.n)
+}
+
+fn put_field(out: *mut rt.Buf, s: str) {
+    rt.buf_push(out, ((s.n >> 8) & 255) as u8)
+    rt.buf_push(out, (s.n & 255) as u8)
+    rt.buf_push_bytes(out, s.p as u64, s.n)
+}
+
+fn field_store(out: *mut rt.Buf) {
+    put32(out, 3)
+    put_field(out, "id1")
+    put_field(out, "Carol site")
+    put_field(out, "https://f.example")
+    put_field(out, "carol")
+    put_field(out, "pw-one")
+    put_field(out, "a note")
+    put_field(out, "1700000000")
+    put_field(out, "id2")
+    put_field(out, "")
+    put_field(out, "https://g.example")
+    put_field(out, "dave")
+    put_field(out, "pw-two")
+    put_field(out, "")
+    put_field(out, "")
+    put_field(out, "id3")
+    put_field(out, "")
+    put_field(out, "")
+    put_field(out, "erin")
+    put_field(out, "pw-three")
+    put_field(out, "")
+    put_field(out, "1700000001000")
+}

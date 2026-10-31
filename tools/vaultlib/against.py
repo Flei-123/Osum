@@ -270,14 +270,46 @@ def recovery_vectors(r):
     print("  vector 00..1f:", text)
 
 
+def rotate_check(r):
+    pw = b"rotate-me-pw"
+    r.write("rb", b"body-bytes")
+    r.vt("create", r.p("rot"), pw.decode(), r.p("rb"), 64, 1, 1, 5, 1)
+    rec = r.vt("addrec", r.p("rot"), pw.decode(), 6, 1)
+    rtext = rec.stdout.decode().strip()
+    old = r.read("rot")
+    old_vk = unwrap_pw(old, SLOT_PW, pw)
+    res = r.vt("rotate", r.p("rot"), pw.decode(), 0, 7, 1, rtext)
+    new = r.read("rot")
+    p0, p1 = parse(old), parse(new)
+    new_vk = unwrap_pw(new, SLOT_PW, pw)
+    r.check("rotate: rc 0, new vk differs, same vault id", res.returncode == 0 and new_vk != old_vk and p0["vault_id"] == p1["vault_id"])
+    r.check("rotate: body kept, revision up", open_body(new, new_vk) == b"body-bytes" and p1["revision"] > p0["revision"])
+    r.check("rotate: recovery slot rewrapped", open_body(new, unwrap_key(new, SLOT_RECOVERY, rec_decode(rtext))) == b"body-bytes")
+    r.check("rotate: old vk cannot open new body", _fails(lambda: open_body(new, old_vk)))
+    res = r.vt("rotate", r.p("rot"), pw.decode(), SLOT_RECOVERY, 8, 1, "")
+    after = parse(r.read("rot"))
+    r.check("rotate: dropping recovery slot", res.returncode == 0 and [s[0] for s in after["slots"]] == [SLOT_PW])
+
+
 def main():
     tool, work = sys.argv[1], sys.argv[2]
     r = Run(tool, work)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import against_rec
     det_case(r, True, 11, "a")
     if hash_secret_raw is not None:
         det_case(r, False, 4242, "b")
     python_made(r)
     recovery_vectors(r)
+    if against_rec.cbor2 is None:
+        print("  SKIP  cbor2 missing: records, merge and v1 checks not run")
+    else:
+        against_rec.rec_checks(r)
+        against_rec.v1_checks(r, argon)
+        img = r.read("v2m.vlt")
+        body = open_body(img, unwrap_pw(img, SLOT_PW, "hunter22 ünï".encode()))
+        r.check("v1: migrated v2 container opens in python, store matches import", body == r.read("v1store"))
+        rotate_check(r)
     print("against.py: argon2 via", "argon2-cffi" if hash_secret_raw else "/usr/bin/argon2")
     print(f"against: OK {r.ok} FAIL {r.bad}")
     return 1 if r.bad else 0

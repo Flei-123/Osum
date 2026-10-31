@@ -1,0 +1,295 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import vault.vlayout
+import vault.vcodes
+import vault.vrand
+import vault.container
+import vault.recovery
+import vault.vbuild
+import vault.vstore
+import vault.vmerge
+import vault.vrotate
+import vtool_io
+
+export { dispatch }
+
+fn arg(start: u64, i: usize) -> str {
+    return vtool_io.arg(start, i)
+}
+
+fn num(start: u64, i: usize) -> u64 {
+    return vtool_io.num(arg(start, i)) as u64
+}
+
+fn hex_arg(start: u64, i: usize, out: *mut rt.Buf) -> bool {
+    return vtool_io.hex_into(arg(start, i), out)
+}
+
+fn save(start: u64, i: usize, b: *mut rt.Buf) -> i32 {
+    if !vtool_io.store_file(arg(start, i), rt.buf_ptr(b), rt.buf_len(b)) {
+        return 91
+    }
+    return 0
+}
+
+fn load_store(path: str, out: *mut rt.Buf) -> bool {
+    if path.n == 1 && rt.ld8(path.p as u64, 0) == 45 as u8 {
+        vstore.store_empty(out)
+        return true
+    }
+    return vtool_io.load_file(path, out)
+}
+
+fn commas_to_lines(s: str, out: *mut rt.Buf) {
+    var i: usize = 0
+    while i < s.n {
+        let c: u8 = rt.ld8(s.p as u64, i)
+        if c == 44 as u8 {
+            rt.buf_push(out, 10 as u8)
+        } else {
+            rt.buf_push(out, c)
+        }
+        i = i + 1
+    }
+}
+
+fn cmd_mklogin(start: u64) -> i32 {
+    var id: rt.Buf = rt.buf_new()
+    if !hex_arg(start, 3, &id) || rt.buf_len(&id) != 16 {
+        return 92
+    }
+    var origins: rt.Buf = rt.buf_new()
+    commas_to_lines(arg(start, 7), &origins)
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = vbuild.login_new(&out, rt.buf_ptr(&id), num(start, 4), num(start, 5),
+        arg(start, 6), rt.buf_str(&origins), arg(start, 8), arg(start, 9),
+        arg(start, 10), num(start, 11))
+    if rc != 0 {
+        return rc
+    }
+    return save(start, 2, &out)
+}
+
+fn cmd_mknote(start: u64) -> i32 {
+    var id: rt.Buf = rt.buf_new()
+    if !hex_arg(start, 3, &id) || rt.buf_len(&id) != 16 {
+        return 92
+    }
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = vbuild.note_new(&out, rt.buf_ptr(&id), num(start, 4), num(start, 5),
+        arg(start, 6), arg(start, 7))
+    if rc != 0 {
+        return rc
+    }
+    return save(start, 2, &out)
+}
+
+fn cmd_mkmeta(start: u64) -> i32 {
+    var dev: rt.Buf = rt.buf_new()
+    if !hex_arg(start, 4, &dev) {
+        return 92
+    }
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = vbuild.meta_new(&out, num(start, 3), rt.buf_ptr(&dev), rt.buf_len(&dev),
+        num(start, 5))
+    if rc != 0 {
+        return rc
+    }
+    return save(start, 2, &out)
+}
+
+fn cmd_mkpasskey(start: u64) -> i32 {
+    var k: vbuild.Passkey = vbuild.passkey_zero()
+    var id: rt.Buf = rt.buf_new()
+    var uh: rt.Buf = rt.buf_new()
+    var cred: rt.Buf = rt.buf_new()
+    var priv: rt.Buf = rt.buf_new()
+    var pubk: rt.Buf = rt.buf_new()
+    if !hex_arg(start, 3, &id) || !hex_arg(start, 8, &uh) || !hex_arg(start, 11, &cred)
+        || !hex_arg(start, 13, &priv) || !hex_arg(start, 14, &pubk) {
+        return 92
+    }
+    k.id = rt.buf_ptr(&id)
+    k.created = num(start, 4)
+    k.modified = num(start, 5)
+    k.rp_id = arg(start, 6)
+    k.rp_name = arg(start, 7)
+    k.user_handle = rt.buf_ptr(&uh)
+    k.user_handle_len = rt.buf_len(&uh)
+    k.user_name = arg(start, 9)
+    k.display_name = arg(start, 10)
+    k.cred_id = rt.buf_ptr(&cred)
+    let alg: str = arg(start, 12)
+    if alg.n > 0 && rt.ld8(alg.p as u64, 0) == 45 as u8 {
+        k.alg = 0 - (vtool_io.num(str { p: (alg.p as u64 + 1 as u64) as *mut u8, n: alg.n - 1 }) as i64)
+    } else {
+        k.alg = vtool_io.num(alg) as i64
+    }
+    k.priv_key = rt.buf_ptr(&priv)
+    k.pub_key = rt.buf_ptr(&pubk)
+    k.pub_key_len = rt.buf_len(&pubk)
+    k.sign_count = num(start, 15)
+    k.flags = num(start, 16)
+    k.uv_policy = num(start, 17)
+    k.cred_protect = num(start, 18)
+    k.last_used = num(start, 19)
+    k.origin = arg(start, 20)
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = vbuild.passkey_new(&out, &k)
+    if rc != 0 {
+        return rc
+    }
+    return save(start, 2, &out)
+}
+
+fn cmd_put(start: u64) -> i32 {
+    var st: rt.Buf = rt.buf_new()
+    var rec: rt.Buf = rt.buf_new()
+    if !load_store(arg(start, 2), &st) || !vtool_io.load_file(arg(start, 4), &rec) {
+        return 90
+    }
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = vstore.store_put(rt.buf_ptr(&st), rt.buf_len(&st), rt.buf_ptr(&rec),
+        rt.buf_len(&rec), &out)
+    if rc != 0 {
+        return rc
+    }
+    return save(start, 3, &out)
+}
+
+fn cmd_del(start: u64) -> i32 {
+    var st: rt.Buf = rt.buf_new()
+    var id: rt.Buf = rt.buf_new()
+    if !load_store(arg(start, 2), &st) || !hex_arg(start, 4, &id) || rt.buf_len(&id) != 16 {
+        return 90
+    }
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = vstore.store_delete(rt.buf_ptr(&st), rt.buf_len(&st), rt.buf_ptr(&id),
+        num(start, 5), &out)
+    if rc != 0 {
+        return rc
+    }
+    return save(start, 3, &out)
+}
+
+fn cmd_merge(start: u64) -> i32 {
+    var a: rt.Buf = rt.buf_new()
+    var b: rt.Buf = rt.buf_new()
+    if !load_store(arg(start, 2), &a) || !load_store(arg(start, 3), &b) {
+        return 90
+    }
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = vmerge.merge(rt.buf_ptr(&a), rt.buf_len(&a), rt.buf_ptr(&b),
+        rt.buf_len(&b), &out)
+    if rc != 0 {
+        return rc
+    }
+    return save(start, 4, &out)
+}
+
+fn cmd_purge(start: u64) -> i32 {
+    var st: rt.Buf = rt.buf_new()
+    if !load_store(arg(start, 2), &st) {
+        return 90
+    }
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = vstore.store_purge(rt.buf_ptr(&st), rt.buf_len(&st), num(start, 4),
+        num(start, 5), &out)
+    if rc != 0 {
+        return rc
+    }
+    return save(start, 3, &out)
+}
+
+fn cmd_resolve(start: u64) -> i32 {
+    var st: rt.Buf = rt.buf_new()
+    if !load_store(arg(start, 2), &st) {
+        return 90
+    }
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = vstore.store_resolve(rt.buf_ptr(&st), rt.buf_len(&st), num(start, 4), &out)
+    if rc != 0 {
+        return rc
+    }
+    return save(start, 3, &out)
+}
+
+fn cmd_check(start: u64) -> i32 {
+    var st: rt.Buf = rt.buf_new()
+    if !load_store(arg(start, 2), &st) {
+        return 90
+    }
+    return vstore.store_validate(rt.buf_ptr(&st), rt.buf_len(&st))
+}
+
+fn cmd_rotate(start: u64) -> i32 {
+    var img: rt.Buf = rt.buf_new()
+    let path: str = arg(start, 2)
+    let rc: i32 = container.file_load(path, &img)
+    if rc != 0 {
+        return rc
+    }
+    let pw: str = arg(start, 3)
+    var out: rt.Buf = rt.buf_new()
+    var vk: [u8; 32] = [0; 32]
+    let orc: i32 = container.open_pw(rt.buf_ptr(&img), rt.buf_len(&img), vlayout.SLOT_PW,
+        pw.p as u64, pw.n, &out, (&vk[0]) as u64)
+    if orc != 0 {
+        return orc
+    }
+    vtool_io.det_seed(arg(start, 5), arg(start, 6))
+    var sec: vrotate.Secrets = vrotate.secrets_zero()
+    sec.pw = pw.p as u64
+    sec.pw_len = pw.n
+    var rkey: [u8; 32] = [0; 32]
+    let rtext: str = arg(start, 7)
+    if rt.arg_count(start) >= 8 && rtext.n > 0 {
+        let drc: i32 = recovery.decode(rtext.p as u64, rtext.n, (&rkey[0]) as u64)
+        if drc != 0 {
+            return 80 + drc
+        }
+        sec.recovery_key = (&rkey[0]) as u64
+    }
+    var nvk: [u8; 32] = [0; 32]
+    let rrc: i32 = vrotate.rotate_file(path, &img, (&vk[0]) as u64,
+        vtool_io.num(arg(start, 4)) as u8, &sec, (&nvk[0]) as u64)
+    return rrc
+}
+
+fn dispatch(start: u64, cmd: str) -> i32 {
+    let argc: usize = rt.arg_count(start)
+    if cmd == "mklogin" && argc >= 12 {
+        return cmd_mklogin(start)
+    }
+    if cmd == "mknote" && argc >= 8 {
+        return cmd_mknote(start)
+    }
+    if cmd == "mkmeta" && argc >= 6 {
+        return cmd_mkmeta(start)
+    }
+    if cmd == "mkpasskey" && argc >= 21 {
+        return cmd_mkpasskey(start)
+    }
+    if cmd == "sput" && argc >= 5 {
+        return cmd_put(start)
+    }
+    if cmd == "sdel" && argc >= 6 {
+        return cmd_del(start)
+    }
+    if cmd == "smerge" && argc >= 5 {
+        return cmd_merge(start)
+    }
+    if cmd == "spurge" && argc >= 6 {
+        return cmd_purge(start)
+    }
+    if cmd == "sresolve" && argc >= 5 {
+        return cmd_resolve(start)
+    }
+    if cmd == "scheck" {
+        return cmd_check(start)
+    }
+    if cmd == "rotate" && argc >= 7 {
+        return cmd_rotate(start)
+    }
+    return 98
+}

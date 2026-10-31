@@ -1,0 +1,284 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.crypto.sha256
+import vault.vlayout
+import vault.vcodes
+import vault.vbuild
+import vault.vstore
+
+export { Stats, stats_zero, import_plain, plain_format, FMT_LINES, FMT_FIELDS,
+    MAX_ENTRIES }
+
+const FMT_LINES: u32 = 1
+const FMT_FIELDS: u32 = 2
+const MAX_ENTRIES: usize = 20000
+const SEC_LIMIT: u64 = 100000000000
+
+struct Stats {
+    added: usize,
+    replaced: usize,
+    skipped: usize,
+    blocked: usize,
+}
+
+struct Entry {
+    key: rt.Buf,
+    title: rt.Buf,
+    origin: rt.Buf,
+    user: rt.Buf,
+    password: rt.Buf,
+    notes: rt.Buf,
+    time: u64,
+}
+
+fn stats_zero() -> Stats {
+    return Stats { added: 0, replaced: 0, skipped: 0, blocked: 0 }
+}
+
+fn entry_new() -> Entry {
+    return Entry { key: rt.buf_new(), title: rt.buf_new(), origin: rt.buf_new(),
+        user: rt.buf_new(), password: rt.buf_new(), notes: rt.buf_new(), time: 0 }
+}
+
+fn wipe_buf(b: *mut rt.Buf) {
+    rt.mem_set(rt.buf_ptr(b), 0 as u8, rt.buf_len(b))
+    rt.buf_free(b)
+}
+
+fn entry_free(e: *mut Entry) {
+    rt.buf_free(&(*e).key)
+    rt.buf_free(&(*e).title)
+    rt.buf_free(&(*e).origin)
+    rt.buf_free(&(*e).user)
+    wipe_buf(&(*e).password)
+    rt.buf_free(&(*e).notes)
+}
+
+fn plain_format(p: u64, n: usize) -> u32 {
+    if n >= 4 && rt.ld8(p, 0) == 0 as u8 {
+        return FMT_FIELDS
+    }
+    return FMT_LINES
+}
+
+fn unescape(p: u64, a: usize, b: usize, out: *mut rt.Buf) {
+    var i: usize = a
+    while i < b {
+        let c: u8 = rt.ld8(p, i)
+        if c == 92 as u8 && i + 1 < b {
+            let d: u8 = rt.ld8(p, i + 1)
+            if d == 116 as u8 {
+                rt.buf_push(out, 9 as u8)
+            } else if d == 110 as u8 {
+                rt.buf_push(out, 10 as u8)
+            } else if d == 114 as u8 {
+                rt.buf_push(out, 13 as u8)
+            } else {
+                rt.buf_push(out, d)
+            }
+            i = i + 2
+        } else {
+            rt.buf_push(out, c)
+            i = i + 1
+        }
+    }
+}
+
+fn parse_dec(p: u64, a: usize, b: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = a
+    while i < b {
+        let c: u8 = rt.ld8(p, i)
+        if c < 48 as u8 || c > 57 as u8 || v > 100000000000000 as u64 {
+            return 0
+        }
+        v = v * 10 as u64 + (c - 48 as u8) as u64
+        i = i + 1
+    }
+    return v
+}
+
+fn derive_id(label: str, e: *mut Entry, id: u64) {
+    var sh: sha256.Sha256 = sha256.sha256_new()
+    var zero: [u8; 1] = [0; 1]
+    sha256.sha256_update(&sh, label.p as u64, label.n)
+    sha256.sha256_update(&sh, rt.buf_ptr(&(*e).key), rt.buf_len(&(*e).key))
+    sha256.sha256_update(&sh, (&zero[0]) as u64, 1)
+    sha256.sha256_update(&sh, rt.buf_ptr(&(*e).user), rt.buf_len(&(*e).user))
+    var digest: [u8; 32] = [0; 32]
+    sha256.sha256_final(&sh, (&digest[0]) as u64)
+    rt.mem_copy(id, (&digest[0]) as u64, vlayout.ID_LEN)
+}
+
+fn store_entry(e: *mut Entry, label: str, seq: usize, now: u64, cur: *mut rt.Buf,
+    nxt: *mut rt.Buf, st: *mut Stats) -> bool {
+    if rt.buf_len(&(*e).origin) == 0 || rt.buf_len(&(*e).password) == 0 {
+        (*st).skipped = (*st).skipped + 1
+        return false
+    }
+    var id: [u8; 16] = [0; 16]
+    derive_id(label, e, (&id[0]) as u64)
+    var created: u64 = (*e).time
+    if created == 0 as u64 {
+        created = now
+    }
+    var rec: rt.Buf = rt.buf_new()
+    let rc: i32 = vbuild.login_new(&rec, (&id[0]) as u64, created, created + seq as u64,
+        rt.buf_str(&(*e).title), rt.buf_str(&(*e).origin), rt.buf_str(&(*e).user),
+        rt.buf_str(&(*e).password), rt.buf_str(&(*e).notes), 0)
+    if rc != vcodes.VR_OK {
+        rt.buf_free(&rec)
+        (*st).skipped = (*st).skipped + 1
+        return false
+    }
+    var s: usize = 0
+    var f: usize = 0
+    let existed: bool = vstore.store_find(rt.buf_ptr(cur), rt.buf_len(cur),
+        (&id[0]) as u64, &s, &f)
+    rt.buf_clear(nxt)
+    let prc: i32 = vstore.store_put(rt.buf_ptr(cur), rt.buf_len(cur), rt.buf_ptr(&rec),
+        rt.buf_len(&rec), nxt)
+    wipe_buf(&rec)
+    if prc != vcodes.VR_OK {
+        (*st).skipped = (*st).skipped + 1
+        return false
+    }
+    if existed {
+        (*st).replaced = (*st).replaced + 1
+    } else {
+        (*st).added = (*st).added + 1
+    }
+    return true
+}
+
+fn swap(a: *mut rt.Buf, b: *mut rt.Buf) {
+    let t: rt.Buf = *a
+    *a = *b
+    *b = t
+}
+
+fn tab_at(p: u64, a: usize, e: usize) -> usize {
+    var i: usize = a
+    while i < e && rt.ld8(p, i) != 9 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+fn import_lines(p: u64, n: usize, now: u64, cur: *mut rt.Buf, nxt: *mut rt.Buf,
+    st: *mut Stats) -> i32 {
+    var s: usize = 0
+    var seq: usize = 0
+    while s < n {
+        var e: usize = s
+        while e < n && rt.ld8(p, e) != 10 as u8 {
+            e = e + 1
+        }
+        if e > s && rt.ld8(p, s) == 33 as u8 {
+            (*st).blocked = (*st).blocked + 1
+        } else if e > s {
+            if seq >= MAX_ENTRIES {
+                return vcodes.VR_E_LIMIT
+            }
+            let t1: usize = tab_at(p, s, e)
+            let t2: usize = tab_at(p, t1 + 1, e)
+            var ent: Entry = entry_new()
+            unescape(p, s, t1, &ent.origin)
+            if t1 < e {
+                unescape(p, t1 + 1, t2, &ent.user)
+            }
+            if t2 < e {
+                let t3: usize = tab_at(p, t2 + 1, e)
+                unescape(p, t2 + 1, t3, &ent.password)
+            }
+            unescape(p, s, t1, &ent.key)
+            unescape(p, s, t1, &ent.title)
+            seq = seq + 1
+            if store_entry(&ent, "vault v1 line", seq, now, cur, nxt, st) {
+                swap(cur, nxt)
+            }
+            entry_free(&ent)
+        }
+        s = e + 1
+    }
+    return vcodes.VR_OK
+}
+
+fn field_len(p: u64, n: usize, pos: usize) -> i64 {
+    if pos + 2 > n {
+        return 0 - 1
+    }
+    let len: usize = vlayout.get_be16(p, pos) as usize
+    if pos + 2 + len > n {
+        return 0 - 1
+    }
+    return len as i64
+}
+
+fn import_fields(p: u64, n: usize, now: u64, cur: *mut rt.Buf, nxt: *mut rt.Buf,
+    st: *mut Stats) -> i32 {
+    let count: usize = vlayout.get_be32(p, 0) as usize
+    if count > MAX_ENTRIES {
+        return vcodes.VR_E_LIMIT
+    }
+    var pos: usize = 4
+    var i: usize = 0
+    while i < count {
+        var a: [usize; 7] = [0; 7]
+        var b: [usize; 7] = [0; 7]
+        var f: usize = 0
+        while f < 7 {
+            let len: i64 = field_len(p, n, pos)
+            if len < 0 {
+                return vcodes.VR_E_CBOR
+            }
+            a[f] = pos + 2
+            b[f] = pos + 2 + len as usize
+            pos = pos + 2 + len as usize
+            f = f + 1
+        }
+        var ent: Entry = entry_new()
+        unescape_raw(p, a[0], b[0], &ent.key)
+        unescape_raw(p, a[1], b[1], &ent.title)
+        unescape_raw(p, a[2], b[2], &ent.origin)
+        unescape_raw(p, a[3], b[3], &ent.user)
+        unescape_raw(p, a[4], b[4], &ent.password)
+        unescape_raw(p, a[5], b[5], &ent.notes)
+        var t: u64 = parse_dec(p, a[6], b[6])
+        if t != 0 as u64 && t < SEC_LIMIT {
+            t = t * 1000 as u64
+        }
+        ent.time = t
+        if store_entry(&ent, "vault v1 field", i + 1, now, cur, nxt, st) {
+            swap(cur, nxt)
+        }
+        entry_free(&ent)
+        i = i + 1
+    }
+    if pos != n {
+        return vcodes.VR_E_CBOR
+    }
+    return vcodes.VR_OK
+}
+
+fn unescape_raw(p: u64, a: usize, b: usize, out: *mut rt.Buf) {
+    rt.buf_push_bytes(out, p + a as u64, b - a)
+}
+
+fn import_plain(p: u64, n: usize, now: u64, out: *mut rt.Buf, st: *mut Stats) -> i32 {
+    var cur: rt.Buf = rt.buf_new()
+    var nxt: rt.Buf = rt.buf_new()
+    vstore.store_empty(&cur)
+    var rc: i32 = vcodes.VR_OK
+    if plain_format(p, n) == FMT_FIELDS {
+        rc = import_fields(p, n, now, &cur, &nxt, st)
+    } else {
+        rc = import_lines(p, n, now, &cur, &nxt, st)
+    }
+    if rc == vcodes.VR_OK {
+        rt.buf_push_bytes(out, rt.buf_ptr(&cur), rt.buf_len(&cur))
+    }
+    rt.buf_free(&cur)
+    rt.buf_free(&nxt)
+    return rc
+}

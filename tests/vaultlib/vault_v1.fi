@@ -1,0 +1,240 @@
+import std.rt
+import std.testkit
+import vault.vlayout
+import vault.vcodes
+import vault.v1read
+import vault.v1import
+import vault.vstore
+import vault.vrecord
+import vault.migrate
+import vault.container
+import v1_helper
+
+fn open_rc(img: *mut rt.Buf, pw: str, out: *mut rt.Buf) -> i32 {
+    return v1read.v1_open(v1_helper.sp(pw), pw.n, rt.buf_ptr(img), rt.buf_len(img), out)
+}
+
+
+#[test]
+fn pbkdf2_roundtrip_and_wrong_password() {
+    var img: rt.Buf = rt.buf_new()
+    v1_helper.seal(&img, 1 as u8, 0 as u8, 5, "hunter22", "plain text 123")
+    testkit.assert_true(v1read.is_v1(rt.buf_ptr(&img), rt.buf_len(&img)), "magic")
+    testkit.assert_eq_i64(v1read.v1_kdf(rt.buf_ptr(&img), rt.buf_len(&img)), 1)
+    testkit.assert_eq_i64(v1read.v1_plain_len(rt.buf_ptr(&img), rt.buf_len(&img)), 14)
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(open_rc(&img, "hunter22", &out) as i64, 0)
+    testkit.assert_true(rt.buf_len(&out) == 14 && rt.mem_eq(rt.buf_ptr(&out), v1_helper.sp("plain text 123"), 14), "plain")
+    var bad: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(open_rc(&img, "hunter23", &bad) as i64, vlayout.VC_E_CRED as i64)
+    testkit.assert_eq_i64(rt.buf_len(&bad) as i64, 0)
+}
+
+#[test]
+fn argon2id_roundtrip() {
+    var img: rt.Buf = rt.buf_new()
+    v1_helper.seal(&img, 2 as u8, 1 as u8, (64 << 8) | 1, "correct horse", "argon body")
+    testkit.assert_eq_i64(v1read.v1_kdf(rt.buf_ptr(&img), rt.buf_len(&img)), 2)
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(open_rc(&img, "correct horse", &out) as i64, 0)
+    testkit.assert_true(rt.buf_len(&out) == 10 && rt.mem_eq(rt.buf_ptr(&out), v1_helper.sp("argon body"), 10), "plain")
+    var bad: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(open_rc(&img, "wrong horse", &bad) as i64, vlayout.VC_E_CRED as i64)
+}
+
+#[test]
+fn every_bit_flip_is_refused() {
+    var img: rt.Buf = rt.buf_new()
+    v1_helper.seal(&img, 1 as u8, 0 as u8, 3, "hunter22", "tamper me please")
+    var i: usize = 0
+    var accepted: i64 = 0
+    var wrong: i64 = 0
+    while i < rt.buf_len(&img) {
+        var copy: rt.Buf = rt.buf_new()
+        rt.buf_push_bytes(&copy, rt.buf_ptr(&img), rt.buf_len(&img))
+        rt.st8(rt.buf_ptr(&copy), i, rt.ld8(rt.buf_ptr(&copy), i) ^ 1 as u8)
+        var out: rt.Buf = rt.buf_new()
+        let rc: i32 = open_rc(&copy, "hunter22", &out)
+        if rc == 0 {
+            accepted = accepted + 1
+        }
+        if rt.buf_len(&out) != 0 {
+            wrong = wrong + 1
+        }
+        rt.buf_free(&copy)
+        rt.buf_free(&out)
+        i = i + 1
+    }
+    testkit.assert_eq_i64(accepted, 0)
+    testkit.assert_eq_i64(wrong, 0)
+}
+
+#[test]
+fn header_limits_and_truncation() {
+    var img: rt.Buf = rt.buf_new()
+    v1_helper.seal(&img, 1 as u8, 0 as u8, 3, "hunter22", "abc")
+    var out: rt.Buf = rt.buf_new()
+    var cut: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&cut, rt.buf_ptr(&img), rt.buf_len(&img) - 1)
+    testkit.assert_eq_i64(open_rc(&cut, "hunter22", &out) as i64, vlayout.VC_E_LENGTH as i64)
+    var tiny: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&tiny, rt.buf_ptr(&img), 50)
+    testkit.assert_eq_i64(open_rc(&tiny, "hunter22", &out) as i64, vlayout.VC_E_SHORT as i64)
+
+    var huge: rt.Buf = rt.buf_new()
+    v1_helper.seal(&huge, 1 as u8, 0 as u8, 3, "hunter22", "abc")
+    rt.st8(rt.buf_ptr(&huge), 16, 255 as u8)
+    testkit.assert_eq_i64(open_rc(&huge, "hunter22", &out) as i64, vlayout.VC_E_LIMIT as i64)
+
+    var zero: rt.Buf = rt.buf_new()
+    v1_helper.seal(&zero, 1 as u8, 0 as u8, 3, "hunter22", "abc")
+    rt.st8(rt.buf_ptr(&zero), 19, 0 as u8)
+    testkit.assert_eq_i64(open_rc(&zero, "hunter22", &out) as i64, vlayout.VC_E_LIMIT as i64)
+
+    var ar: rt.Buf = rt.buf_new()
+    v1_helper.seal(&ar, 2 as u8, 1 as u8, (64 << 8) | 1, "correct horse", "abc")
+    rt.st8(rt.buf_ptr(&ar), 16, 255 as u8)
+    testkit.assert_eq_i64(open_rc(&ar, "correct horse", &out) as i64, vlayout.VC_E_LIMIT as i64)
+
+    var other: rt.Buf = rt.buf_new()
+    v1_helper.seal(&other, 1 as u8, 0 as u8, 3, "hunter22", "abc")
+    rt.st8(rt.buf_ptr(&other), 13, 9 as u8)
+    testkit.assert_eq_i64(open_rc(&other, "hunter22", &out) as i64, vlayout.VC_E_KDF as i64)
+
+    var nomagic: rt.Buf = rt.buf_new()
+    v1_helper.seal(&nomagic, 1 as u8, 0 as u8, 3, "hunter22", "abc")
+    rt.st8(rt.buf_ptr(&nomagic), 0, 88 as u8)
+    testkit.assert_false(v1read.is_v1(rt.buf_ptr(&nomagic), rt.buf_len(&nomagic)), "no magic")
+    testkit.assert_eq_i64(open_rc(&nomagic, "hunter22", &out) as i64, vlayout.VC_E_MAGIC as i64)
+}
+
+#[test]
+fn empty_plaintext() {
+    var img: rt.Buf = rt.buf_new()
+    v1_helper.seal(&img, 1 as u8, 0 as u8, 2, "hunter22", "")
+    testkit.assert_eq_i64(rt.buf_len(&img) as i64, 116)
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(open_rc(&img, "hunter22", &out) as i64, 0)
+    testkit.assert_eq_i64(rt.buf_len(&out) as i64, 0)
+}
+
+#[test]
+fn line_format_import() {
+    var plain: rt.Buf = rt.buf_new()
+    v1_helper.line_store(&plain)
+    var store: rt.Buf = rt.buf_new()
+    var st: v1import.Stats = v1import.stats_zero()
+    testkit.assert_eq_i64(v1import.import_plain(rt.buf_ptr(&plain), rt.buf_len(&plain), 1700000000000, &store, &st) as i64, 0)
+    testkit.assert_eq_i64(st.added as i64, 2)
+    testkit.assert_eq_i64(st.replaced as i64, 1)
+    testkit.assert_eq_i64(st.blocked as i64, 1)
+    testkit.assert_eq_i64(st.skipped as i64, 0)
+    testkit.assert_eq_i64(vstore.store_validate(rt.buf_ptr(&store), rt.buf_len(&store)) as i64, 0)
+    testkit.assert_eq_i64(vstore.count_live(rt.buf_ptr(&store), rt.buf_len(&store), vrecord.T_LOGIN) as i64, 2)
+    var found: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vstore.find_origin(rt.buf_ptr(&store), rt.buf_len(&store), "https://a.example", &found) as i64, 1)
+    testkit.assert_true(contains(&store, "newer"), "later duplicate wins")
+    testkit.assert_false(contains(&store, "s3cret"), "old password replaced")
+    testkit.assert_true(contains(&store, "p\tw\nd"), "unescaped")
+}
+
+fn contains(b: *mut rt.Buf, needle: str) -> bool {
+    var i: usize = 0
+    let n: usize = rt.buf_len(b)
+    while i + needle.n <= n {
+        if rt.mem_eq(rt.buf_ptr(b) + i as u64, v1_helper.sp(needle), needle.n) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+#[test]
+fn import_is_deterministic_and_mergeable() {
+    var plain: rt.Buf = rt.buf_new()
+    v1_helper.line_store(&plain)
+    var s1: rt.Buf = rt.buf_new()
+    var s2: rt.Buf = rt.buf_new()
+    var st: v1import.Stats = v1import.stats_zero()
+    v1import.import_plain(rt.buf_ptr(&plain), rt.buf_len(&plain), 1700000000000, &s1, &st)
+    v1import.import_plain(rt.buf_ptr(&plain), rt.buf_len(&plain), 1700000000000, &s2, &st)
+    testkit.assert_true(rt.buf_len(&s1) == rt.buf_len(&s2) && rt.mem_eq(rt.buf_ptr(&s1), rt.buf_ptr(&s2), rt.buf_len(&s1)), "same ids and bytes")
+}
+
+#[test]
+fn field_format_import() {
+    var plain: rt.Buf = rt.buf_new()
+    v1_helper.field_store(&plain)
+    testkit.assert_eq_i64(v1import.plain_format(rt.buf_ptr(&plain), rt.buf_len(&plain)) as i64, v1import.FMT_FIELDS as i64)
+    var store: rt.Buf = rt.buf_new()
+    var st: v1import.Stats = v1import.stats_zero()
+    testkit.assert_eq_i64(v1import.import_plain(rt.buf_ptr(&plain), rt.buf_len(&plain), 1800000000000, &store, &st) as i64, 0)
+    testkit.assert_eq_i64(st.added as i64, 2)
+    testkit.assert_eq_i64(st.skipped as i64, 1)
+    testkit.assert_true(contains(&store, "Carol site"), "title kept")
+    testkit.assert_true(contains(&store, "a note"), "note kept")
+    var cut: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&cut, rt.buf_ptr(&plain), rt.buf_len(&plain) - 3)
+    var store2: rt.Buf = rt.buf_new()
+    var st2: v1import.Stats = v1import.stats_zero()
+    testkit.assert_eq_i64(v1import.import_plain(rt.buf_ptr(&cut), rt.buf_len(&cut), 1800000000000, &store2, &st2) as i64, vcodes.VR_E_CBOR as i64)
+    testkit.assert_eq_i64(rt.buf_len(&store2) as i64, 0)
+}
+
+#[test]
+fn skips_invalid_entries() {
+    let s: str = "\thost-less\tpw\nhttps://x.example\tu\t\nhttps://ok.example\tu\tpw\n"
+    var store: rt.Buf = rt.buf_new()
+    var st: v1import.Stats = v1import.stats_zero()
+    testkit.assert_eq_i64(v1import.import_plain(v1_helper.sp(s), s.n, 1700000000000, &store, &st) as i64, 0)
+    testkit.assert_eq_i64(st.added as i64, 1)
+    testkit.assert_eq_i64(st.skipped as i64, 2)
+}
+
+#[test]
+fn full_chain_container_to_store() {
+    var plain: rt.Buf = rt.buf_new()
+    v1_helper.line_store(&plain)
+    var img: rt.Buf = rt.buf_new()
+    v1_helper.seal(&img, 1 as u8, 0 as u8, 4, "hunter22", rt.buf_str(&plain))
+    var opened: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(open_rc(&img, "hunter22", &opened) as i64, 0)
+    var store: rt.Buf = rt.buf_new()
+    var st: v1import.Stats = v1import.stats_zero()
+    testkit.assert_eq_i64(v1import.import_plain(rt.buf_ptr(&opened), rt.buf_len(&opened), 1700000000000, &store, &st) as i64, 0)
+    testkit.assert_eq_i64(vstore.count_live(rt.buf_ptr(&store), rt.buf_len(&store), vrecord.T_LOGIN) as i64, 2)
+}
+
+#[test]
+fn migrate_buffer_makes_openable_v2() {
+    var plain: rt.Buf = rt.buf_new()
+    v1_helper.line_store(&plain)
+    var img: rt.Buf = rt.buf_new()
+    v1_helper.seal(&img, 1 as u8, 0 as u8, 4, "hunter22", rt.buf_str(&plain))
+    var v2: rt.Buf = rt.buf_new()
+    var st: v1import.Stats = v1import.stats_zero()
+    testkit.assert_eq_i64(migrate.migrate_buffer(rt.buf_ptr(&img), rt.buf_len(&img),
+        v1_helper.sp("hunter22"), 8, 64, 1, 1, 1700000000000, &v2, &st) as i64, 0)
+    testkit.assert_eq_i64(st.added as i64, 2)
+    var body: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.open_pw(rt.buf_ptr(&v2), rt.buf_len(&v2), vlayout.SLOT_PW,
+        v1_helper.sp("hunter22"), 8, &body, 0) as i64, 0)
+    testkit.assert_eq_i64(vstore.store_validate(rt.buf_ptr(&body), rt.buf_len(&body)) as i64, 0)
+    var v2b: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(migrate.migrate_buffer(rt.buf_ptr(&img), rt.buf_len(&img),
+        v1_helper.sp("wrong-pass"), 10, 64, 1, 1, 1700000000000, &v2b, &st) as i64, vlayout.VC_E_CRED as i64)
+    testkit.assert_eq_i64(rt.buf_len(&v2b) as i64, 0)
+}
+
+#[test]
+fn migrate_refuses_short_password_for_v2() {
+    var img: rt.Buf = rt.buf_new()
+    v1_helper.seal(&img, 1 as u8, 0 as u8, 2, "short", "https://x.example\tu\tpw\n")
+    var v2: rt.Buf = rt.buf_new()
+    var st: v1import.Stats = v1import.stats_zero()
+    let rc: i32 = migrate.migrate_buffer(rt.buf_ptr(&img), rt.buf_len(&img),
+        v1_helper.sp("short"), 5, 64, 1, 1, 1700000000000, &v2, &st)
+    testkit.assert_true(rc != 0, "v2 needs 8 octets")
+    testkit.assert_eq_i64(rt.buf_len(&v2) as i64, 0)
+}
