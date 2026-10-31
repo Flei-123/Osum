@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import mm.mem
+import gfx.ttf
+import fs.unixsock
+import ui.wm.wmdraw
+import ui.wm.wmlayout
+import ui.wm.wmshared
+import ui.wm.wmterm
+
+const TG_FRAMES: u64 = 24
+
+fn term_fit(state: u64, i: u64, bytes: u64) -> bool {
+    if bytes <= wmlayout.wg(state, i, wmlayout.W_BUFBYTES) {
+        return true
+    }
+    let o: u64 = wmshared.kern_shared(state, bytes)
+    if o == 0 {
+        return wmshared.detach_buf(state, i, bytes)
+    }
+    unixsock.shm_unref(state, wmlayout.wg(state, i, wmlayout.W_SHM) - 1)
+    wmlayout.wsv(state, i, wmlayout.W_SHM, o)
+    wmlayout.wsv(state, i, wmlayout.W_BUF, unixsock.shm_frame(state, o - 1, 0))
+    wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, unixsock.shm_pages(state, o - 1) * mem.FRAME_SIZE)
+    wmlayout.ss(state, wmlayout.S_TM_SH, wmlayout.gs(state, wmlayout.S_TM_SH) + 1)
+    return true
+}
+
+fn term_setup(state: u64, i: u64) {
+    wmterm.tc_reset(i)
+    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_MONO)
+    var cw: u64 = 8
+    var ch: u64 = 16
+    if f < ttf.MAX_FONTS {
+        let px: u64 = wmlayout.gs(state, wmlayout.S_PX_MONO)
+        let gid: u64 = ttf.glyph_of(state, f, 0x4D)
+        cw = ((ttf.advance26(state, f, gid, px) + 63) >> 6) as u64
+        ch = ttf.line_height(state, f, px)
+    }
+    if cw == 0 {
+        cw = 8
+    }
+    if ch == 0 {
+        ch = 16
+    }
+    if i < 32 {
+        wmterm.tp_sbv[(i) as usize] = 0
+    }
+    let alt_cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let alt_rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    let alt_cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
+    let alt_cx: u64 = wmlayout.wg(state, i, wmlayout.W_CX)
+    wmlayout.wsv(state, i, wmlayout.W_CELLW, cw)
+    wmlayout.wsv(state, i, wmlayout.W_CELLH, ch)
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_W) / cw
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_H) / ch
+    wmlayout.wsv(state, i, wmlayout.W_COLS, cols)
+    wmlayout.wsv(state, i, wmlayout.W_ROWS, rows)
+    let neu_gitter: bool = wmlayout.wg(state, i, wmlayout.W_GRID) == 0
+    if neu_gitter {
+
+        let g0: u64 = mem.frame_run(state, TG_FRAMES)
+        wmlayout.wsv(state, i, wmlayout.W_GRID, g0)
+        wmterm.tp_reset(i)
+        wmterm.sb_free(state, i)
+    }
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+
+    if g != 0 {
+        if neu_gitter || alt_cols == 0 || alt_rows == 0 {
+            var k: u64 = 0
+            while k < cols * rows && k < wmterm.TG {
+                kstate.set8(g + k, 32 as u8)
+                k = k + 1
+            }
+            wmterm.attr_clear(g)
+            wmlayout.wsv(state, i, wmlayout.W_CX, 0)
+            wmlayout.wsv(state, i, wmlayout.W_CY, 0)
+        } else if cols != alt_cols || rows != alt_rows {
+            wmterm.attr_clear(g)
+
+            wmterm.tp_alt[(i) as usize] = 0
+            wmterm.tp_top[(i) as usize] = 0
+            wmterm.tp_bot1[(i) as usize] = 0
+            wmterm.tp_wrap[(i) as usize] = 0
+
+            var lines: u64 = alt_rows
+            if rows < lines {
+                lines = rows
+            }
+            var wide: u64 = alt_cols
+            if cols < wide {
+                wide = cols
+            }
+            if cols > alt_cols {
+                var r: u64 = lines
+                while r > 0 {
+                    r = r - 1
+                    var c: u64 = wide
+                    while c > 0 {
+                        c = c - 1
+                        let src: u64 = r * alt_cols + c
+                        let dst: u64 = r * cols + c
+                        if src < wmterm.TG && dst < wmterm.TG {
+                            kstate.set8(g + dst, kstate.get8(g + src) as u8)
+                        }
+                    }
+
+                    var c2: u64 = wide
+                    while c2 < cols {
+                        let d2: u64 = r * cols + c2
+                        if d2 < wmterm.TG {
+                            kstate.set8(g + d2, 32 as u8)
+                        }
+                        c2 = c2 + 1
+                    }
+                }
+            } else {
+                var r2: u64 = 0
+                while r2 < lines {
+                    var c3: u64 = 0
+                    while c3 < wide {
+                        let s3: u64 = r2 * alt_cols + c3
+                        let d3: u64 = r2 * cols + c3
+                        if s3 < wmterm.TG && d3 < wmterm.TG {
+                            kstate.set8(g + d3, kstate.get8(g + s3) as u8)
+                        }
+                        c3 = c3 + 1
+                    }
+                    var c4: u64 = wide
+                    while c4 < cols {
+                        let d4: u64 = r2 * cols + c4
+                        if d4 < wmterm.TG {
+                            kstate.set8(g + d4, 32 as u8)
+                        }
+                        c4 = c4 + 1
+                    }
+                    r2 = r2 + 1
+                }
+            }
+
+            var r5: u64 = lines
+            while r5 < rows {
+                var c5: u64 = 0
+                while c5 < cols {
+                    let d5: u64 = r5 * cols + c5
+                    if d5 < wmterm.TG {
+                        kstate.set8(g + d5, 32 as u8)
+                    }
+                    c5 = c5 + 1
+                }
+                r5 = r5 + 1
+            }
+
+            var ncx: u64 = alt_cx
+            var ncy: u64 = alt_cy
+            if ncx >= cols {
+                ncx = cols - 1
+            }
+            if ncy >= rows {
+                ncy = rows - 1
+            }
+            wmlayout.wsv(state, i, wmlayout.W_CX, ncx)
+            wmlayout.wsv(state, i, wmlayout.W_CY, ncy)
+        }
+    }
+    wmdraw.fill(state, i, 0, 0, wmlayout.wg(state, i, wmlayout.W_W), wmlayout.wg(state, i, wmlayout.W_H),
+        wmlayout.wg(state, i, wmlayout.W_BG))
+
+    wmterm.term_redraw(state, i)
+}

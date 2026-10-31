@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmtermwin
 import ui.wm.wmshared
 import ui.wm.wmevent
 import ui.wm.wmpresent
@@ -362,6 +363,7 @@ fn shared_ok(state: u64) -> bool {
     return wmshared.shared_ok(state)
 }
 
+
 const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
 // RUNDE ECHTHARDWARE-3: 12 -> 8, aber jetzt am GANZEN Rand statt nur
 // in der Ecke. Multipliziert mit `uisc` sind das auf Justins Schirm 16
@@ -442,7 +444,6 @@ const STRUT_MAX: u64 = 0x00FFFFFF
 // Mensch sieht: sie werden geschrieben und wieder gelesen.
 const PROBE_IN: u64 = 0x0000FF00
 const PROBE_OUT: u64 = 0x00FF0000
-const TG_FRAMES: u64 = 24
 const APP_LEN: u64 = 24
 
 fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
@@ -1525,7 +1526,7 @@ fn create_ex(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             set_title(state, i, title)
             wmdraw.fill(state, i, 0, 0, w, h, wmlayout.wg(state, i, wmlayout.W_BG))
             if kind == wmlayout.K_TERM {
-                term_setup(state, i)
+                wmtermwin.term_setup(state, i)
             }
             set_focus(state, i)
             wmdamage.damage_win(state, i)
@@ -1624,7 +1625,7 @@ fn destroy(state: u64, i: u64) -> bool {
         wmlayout.wsv(state, i, wmlayout.W_BUF, 0)
     }
     if wmlayout.wg(state, i, wmlayout.W_GRID) != 0 {
-        mem.frame_free_run(state, wmlayout.wg(state, i, wmlayout.W_GRID), TG_FRAMES)
+        mem.frame_free_run(state, wmlayout.wg(state, i, wmlayout.W_GRID), wmtermwin.TG_FRAMES)
         wmlayout.wsv(state, i, wmlayout.W_GRID, 0)
     }
     wmterm.sb_free(state, i)
@@ -3510,7 +3511,7 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     }
     if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
         // COMPOSITOR r486: the terminal's buffer belongs to the kernel, which paints it with the new row length itself
-        if !term_fit(state, i, w * h * 4) {
+        if !wmtermwin.term_fit(state, i, w * h * 4) {
             return false
         }
     } else if wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
@@ -3555,7 +3556,7 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
         wmlayout.wsv(state, i, wmlayout.W_SAVWH, 0)
     }
     if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-        term_setup(state, i)
+        wmtermwin.term_setup(state, i)
     } else if keep_buf != 0 && !resize_clear_an(state) {
         keep_resized(state, i, keep_buf, keep_w, keep_h)
         if keep_free != 0 {
@@ -3617,24 +3618,6 @@ fn win_shm(state: u64, i: u64) -> u64 {
         return 0
     }
     return wmlayout.wg(state, i, wmlayout.W_SHM)
-}
-
-// The terminal window `i` (its buffer is a kernel-made shared object) is going to be `bytes` big: keep the buffer when it fits (the server
-// paints with the new row length), else a new object; when no object can be had the window goes back to a private run of frames.
-fn term_fit(state: u64, i: u64, bytes: u64) -> bool {
-    if bytes <= wmlayout.wg(state, i, wmlayout.W_BUFBYTES) {
-        return true
-    }
-    let o: u64 = wmshared.kern_shared(state, bytes)
-    if o == 0 {
-        return wmshared.detach_buf(state, i, bytes)
-    }
-    unixsock.shm_unref(state, wmlayout.wg(state, i, wmlayout.W_SHM) - 1)
-    wmlayout.wsv(state, i, wmlayout.W_SHM, o)
-    wmlayout.wsv(state, i, wmlayout.W_BUF, unixsock.shm_frame(state, o - 1, 0))
-    wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, unixsock.shm_pages(state, o - 1) * mem.FRAME_SIZE)
-    wmlayout.ss(state, wmlayout.S_TM_SH, wmlayout.gs(state, wmlayout.S_TM_SH) + 1)
-    return true
 }
 
 // Window `i` now paints from the run of frames of shared object `sidx` (WM_SETBUF). The old buffer (own frames or an older shared
@@ -8821,194 +8804,6 @@ fn poll(state: u64) -> bool {
     return true
 }
 
-// ------------------------------------------------------ das Terminal
-//
-// Ein Fenster mit einem ZEICHENRASTER. Die Anwendung schickt Oktette,
-// der Server fuehrt dieselbe Zustandsmaschine wie `fb.putc` (Umbruch,
-// Rollen, Tabulator, Ruecktaste) und malt die Zellen mit der
-// Festbreitenschrift. Damit kann eine Shell in einem Fenster laufen,
-// ohne von Schriften etwas zu wissen.
-
-fn term_setup(state: u64, i: u64) {
-    wmterm.tc_reset(i)
-    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_MONO)
-    var cw: u64 = 8
-    var ch: u64 = 16
-    if f < ttf.MAX_FONTS {
-        let px: u64 = wmlayout.gs(state, wmlayout.S_PX_MONO)
-        let gid: u64 = ttf.glyph_of(state, f, 0x4D) // 'M'
-        cw = ((ttf.advance26(state, f, gid, px) + 63) >> 6) as u64
-        ch = ttf.line_height(state, f, px)
-    }
-    if cw == 0 {
-        cw = 8
-    }
-    if ch == 0 {
-        ch = 16
-    }
-    if i < 32 {
-        wmterm.tp_sbv[(i) as usize] = 0
-    }
-    let alt_cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    let alt_rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    let alt_cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
-    let alt_cx: u64 = wmlayout.wg(state, i, wmlayout.W_CX)
-    wmlayout.wsv(state, i, wmlayout.W_CELLW, cw)
-    wmlayout.wsv(state, i, wmlayout.W_CELLH, ch)
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_W) / cw
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_H) / ch
-    wmlayout.wsv(state, i, wmlayout.W_COLS, cols)
-    wmlayout.wsv(state, i, wmlayout.W_ROWS, rows)
-    let neu_gitter: bool = wmlayout.wg(state, i, wmlayout.W_GRID) == 0
-    if neu_gitter {
-        // r400: two frames -- the first holds the characters, the second one attribute
-        // octet per cell (bit 0 = reverse video, set by the VT subset `term_csi`).
-        // r462: six frames -- characters, attributes, colours, and the same three of the main screen while the alternate
-        // screen is up (frames 3 .. 5)
-        let g0: u64 = mem.frame_run(state, TG_FRAMES)
-        wmlayout.wsv(state, i, wmlayout.W_GRID, g0)
-        wmterm.tp_reset(i)
-        wmterm.sb_free(state, i)
-    }
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    // ================================================== RUNDE ECHT
-    // DER TEXT BLEIBT STEHEN, WENN MAN DAS FENSTER ZIEHT.
-    //
-    // Justins Befund am echten Geraet: "Terminal auf, Ausgabe da,
-    // Fenster groesser ziehen -> Inhalt weg." Er hat recht, und die
-    // Ursache stand genau hier: diese Funktion hat das GANZE
-    // Zeichenraster mit Leerzeichen ueberschrieben und den Cursor auf
-    // 0,0 gesetzt -- bei JEDEM Aufruf. `resize_win` ruft sie bei jeder
-    // Groessenaenderung. Der Text war also nicht falsch umgebrochen,
-    // er war GELOESCHT.
-    //
-    // Ein Terminal, dessen Fenster sich aendert, behaelt seinen Inhalt
-    // -- das tut jedes Terminal, seit es Terminals gibt. Die Zeilen
-    // werden in das neue Raster UMKOPIERT, Zeile fuer Zeile, so weit
-    // sie hineinpassen. Was nicht mehr hineinpasst (schmaleres
-    // Fenster), wird rechts abgeschnitten; das ist dasselbe, was xterm
-    // ohne Neuumbruch tut, und es ist ehrlicher, als den Rest zu
-    // loeschen.
-    //
-    // NUR EIN FRISCHES GITTER WIRD GELEERT. Das ist der Fall, fuer den
-    // die Leerung urspruenglich gedacht war: ein neu angelegtes
-    // Terminal, dessen Rahmen noch beliebigen Speicher traegt.
-    if g != 0 {
-        if neu_gitter || alt_cols == 0 || alt_rows == 0 {
-            var k: u64 = 0
-            while k < cols * rows && k < wmterm.TG {
-                kstate.set8(g + k, 32 as u8)
-                k = k + 1
-            }
-            wmterm.attr_clear(g)
-            wmlayout.wsv(state, i, wmlayout.W_CX, 0)
-            wmlayout.wsv(state, i, wmlayout.W_CY, 0)
-        } else if cols != alt_cols || rows != alt_rows {
-            wmterm.attr_clear(g)
-            // r462: the saved main screen and the scroll region belong to the old grid
-            wmterm.tp_alt[(i) as usize] = 0
-            wmterm.tp_top[(i) as usize] = 0
-            wmterm.tp_bot1[(i) as usize] = 0
-            wmterm.tp_wrap[(i) as usize] = 0
-            // UMKOPIEREN, VON UNTEN NACH OBEN ODER VON OBEN NACH
-            // UNTEN -- je nachdem, wohin geschoben wird, damit sich
-            // Quelle und Ziel im selben Rahmen nicht ueberholen.
-            // Zielzeile r liegt bei r*cols, Quellzeile bei r*alt_cols.
-            // Wird das Raster BREITER, wandert jede Zeile nach hinten:
-            // dann von der letzten Zeile an arbeiten.
-            var lines: u64 = alt_rows
-            if rows < lines {
-                lines = rows
-            }
-            var wide: u64 = alt_cols
-            if cols < wide {
-                wide = cols
-            }
-            if cols > alt_cols {
-                var r: u64 = lines
-                while r > 0 {
-                    r = r - 1
-                    var c: u64 = wide
-                    while c > 0 {
-                        c = c - 1
-                        let src: u64 = r * alt_cols + c
-                        let dst: u64 = r * cols + c
-                        if src < wmterm.TG && dst < wmterm.TG {
-                            kstate.set8(g + dst, kstate.get8(g + src) as u8)
-                        }
-                    }
-                    // den Rest der Zielzeile leeren
-                    var c2: u64 = wide
-                    while c2 < cols {
-                        let d2: u64 = r * cols + c2
-                        if d2 < wmterm.TG {
-                            kstate.set8(g + d2, 32 as u8)
-                        }
-                        c2 = c2 + 1
-                    }
-                }
-            } else {
-                var r2: u64 = 0
-                while r2 < lines {
-                    var c3: u64 = 0
-                    while c3 < wide {
-                        let s3: u64 = r2 * alt_cols + c3
-                        let d3: u64 = r2 * cols + c3
-                        if s3 < wmterm.TG && d3 < wmterm.TG {
-                            kstate.set8(g + d3, kstate.get8(g + s3) as u8)
-                        }
-                        c3 = c3 + 1
-                    }
-                    var c4: u64 = wide
-                    while c4 < cols {
-                        let d4: u64 = r2 * cols + c4
-                        if d4 < wmterm.TG {
-                            kstate.set8(g + d4, 32 as u8)
-                        }
-                        c4 = c4 + 1
-                    }
-                    r2 = r2 + 1
-                }
-            }
-            // die neuen Zeilen unten sind leer
-            var r5: u64 = lines
-            while r5 < rows {
-                var c5: u64 = 0
-                while c5 < cols {
-                    let d5: u64 = r5 * cols + c5
-                    if d5 < wmterm.TG {
-                        kstate.set8(g + d5, 32 as u8)
-                    }
-                    c5 = c5 + 1
-                }
-                r5 = r5 + 1
-            }
-            // DER CURSOR BLEIBT, WO ER WAR -- nur in das neue Raster
-            // hineingezwungen. Sonst schriebe die naechste Ausgabe
-            // mitten in den stehengebliebenen Text.
-            var ncx: u64 = alt_cx
-            var ncy: u64 = alt_cy
-            if ncx >= cols {
-                ncx = cols - 1
-            }
-            if ncy >= rows {
-                ncy = rows - 1
-            }
-            wmlayout.wsv(state, i, wmlayout.W_CX, ncx)
-            wmlayout.wsv(state, i, wmlayout.W_CY, ncy)
-        }
-    }
-    wmdraw.fill(state, i, 0, 0, wmlayout.wg(state, i, wmlayout.W_W), wmlayout.wg(state, i, wmlayout.W_H),
-        wmlayout.wg(state, i, wmlayout.W_BG))
-    // UND DER TEXT WIEDER AUF DIE FLAECHE. `fill` hat gerade den
-    // ganzen Puffer mit der Hintergrundfarbe ueberschrieben -- ohne
-    // diese Zeile stuende der gerettete Inhalt zwar im Raster, waere
-    // aber nicht zu sehen, und der Fehler saehe genauso aus wie
-    // vorher. Bei einem frischen Gitter malt sie lauter Leerzeichen,
-    // kostet also nichts.
-    wmterm.term_redraw(state, i)
-}
-
 fn tcur_dmg(state: u64, i: u64, c: u64, r: u64) {
     let cw: u64 = wmlayout.wg(state, i, wmlayout.W_CELLW)
     let ch: u64 = wmlayout.wg(state, i, wmlayout.W_CELLH)
@@ -9828,7 +9623,7 @@ fn restore_geom(state: u64, i: u64) {
             wmlayout.wsv(state, i, wmlayout.W_W, w)
             wmlayout.wsv(state, i, wmlayout.W_H, h)
             if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-                term_setup(state, i)
+                wmtermwin.term_setup(state, i)
             } else {
                 wmdraw.fill(state, i, 0, 0, w, h, wmlayout.wg(state, i, wmlayout.W_BG))
             }
@@ -9847,7 +9642,7 @@ fn restore_geom(state: u64, i: u64) {
 fn reframe(state: u64, i: u64, w: u64, h: u64) -> bool {
     let bytes: u64 = w * h * 4
     if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
-        return term_fit(state, i, bytes)
+        return wmtermwin.term_fit(state, i, bytes)
     }
     if wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
         return wmshared.detach_buf(state, i, bytes)
@@ -9908,7 +9703,7 @@ fn place_win(state: u64, i: u64, n: u64) {
     wmlayout.wsv(state, i, wmlayout.W_W, w)
     wmlayout.wsv(state, i, wmlayout.W_H, h)
     if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-        term_setup(state, i)
+        wmtermwin.term_setup(state, i)
     } else {
         wmdraw.fill(state, i, 0, 0, w, h, wmlayout.wg(state, i, wmlayout.W_BG))
     }
