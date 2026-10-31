@@ -1,0 +1,677 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.fb
+import serial
+import sched.time
+import ui.wm.wmbase
+import ui.wm.wmblur
+import ui.wm.wmdraw
+import ui.wm.wmgeom
+import ui.wm.wmlayout
+
+const SCHLEIER: u64 = 0
+
+const SCHLEIER_WIN: u64 = 0
+
+const PLATTE_MARKE: u64 = 0x01000000
+
+fn box_take(state: u64, out: u64) -> bool {
+    if wmlayout.gs(state, wmlayout.S_DON) == 0 {
+        return false
+    }
+    let tk: bool = wmbase.rgn_lock(state)
+    if wmlayout.gs(state, wmlayout.S_DON) == 0 {
+        if tk {
+            wmbase.rgn_unlock(state)
+        }
+        return false
+    }
+    __mmio_write64(out as *mut u64, wmlayout.gs(state, wmlayout.S_DX0))
+    __mmio_write64((out + 8) as *mut u64, wmlayout.gs(state, wmlayout.S_DY0))
+    __mmio_write64((out + 16) as *mut u64, wmlayout.gs(state, wmlayout.S_DX1))
+    __mmio_write64((out + 24) as *mut u64, wmlayout.gs(state, wmlayout.S_DY1))
+    wmlayout.ss(state, wmlayout.S_DON, 0)
+    if tk {
+        wmbase.rgn_unlock(state)
+    }
+    return true
+}
+
+fn glass_mix(alt: u64, neu: u64, key: u64, alpha: u64,
+    schleier: u64) -> u64 {
+    if alpha >= 100 {
+        return neu
+    }
+
+    if (neu >> 24) == (PLATTE_MARKE >> 24) {
+        return neu & 0xFFFFFF
+    }
+    let nr: u64 = (neu >> 16) & 0xFF
+    let ng: u64 = (neu >> 8) & 0xFF
+    let nb: u64 = neu & 0xFF
+    let kr: u64 = (key >> 16) & 0xFF
+    let kg: u64 = (key >> 8) & 0xFF
+    let kb: u64 = key & 0xFF
+    var d: u64 = 0
+    if nr > kr {
+        d = d + (nr - kr)
+    } else {
+        d = d + (kr - nr)
+    }
+    if ng > kg {
+        d = d + (ng - kg)
+    } else {
+        d = d + (kg - ng)
+    }
+    if nb > kb {
+        d = d + (nb - kb)
+    } else {
+        d = d + (kb - nb)
+    }
+    if d > 96 {
+        d = 96
+    }
+    var a: u64 = alpha + (100 - alpha) * d / 96
+
+    let lg: u64 = hell_von(alt)
+    let lk: u64 = hell_von(key)
+    var dl: u64 = 0
+    if lg > lk {
+        dl = lg - lk
+    } else {
+        dl = lk - lg
+    }
+
+    if schleier > 0 && dl > schleier {
+        let amin: u64 = 100 - schleier * 100 / dl
+        if amin > a {
+            a = amin
+
+            if gaist_an != 0 {
+                gaist_hoch = gaist_hoch + 1
+            }
+        }
+    }
+
+    if gaist_an != 0 {
+        gaist_px = gaist_px + 1
+        gaist_sum = gaist_sum + a
+        if a > gaist_max {
+            gaist_max = a
+        }
+    }
+    return wmdraw.blend(alt, neu, a * 255 / 100)
+}
+
+static mut gaist_max: u64 = 0
+
+static mut gaist_sum: u64 = 0
+
+static mut gaist_hoch: u64 = 0
+
+static mut gaist_px: u64 = 0
+
+static mut gaist_an: u64 = 0
+
+fn glass_stat_an(on: bool) {
+    if on {
+        gaist_an = 1
+    } else {
+        gaist_an = 0
+    }
+}
+
+fn tb_alpha_ist(state: u64) -> u64 {
+    let soll: u64 = wmbase.form_or(state, wmlayout.FM_TB_ALPHA, 100)
+    if gaist_px == 0 {
+        return soll
+    }
+    let m: u64 = gaist_sum / gaist_px
+    if m < soll {
+        return soll
+    }
+    return m
+}
+
+fn tb_alpha_hoch(state: u64) -> u64 {
+    return gaist_hoch
+}
+
+fn fb_row_a(state: u64, x: u64, y: u64, src: u64, n: u64, alpha: u64,
+    key: u64, grund: u64, schleier: u64) {
+    if y < fb.band_lo(state) {
+        return
+    }
+    let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
+    var i: u64 = 0
+    while i < n {
+        let neu: u64 = __mmio_read32((src +% i *% 4) as *mut u32) as u64
+        var alt: u64 = 0
+        if grund != 0 {
+            alt = __mmio_read32((grund +% i *% 4) as *mut u32) as u64
+        } else {
+            alt = __mmio_read32((ziel +% i *% 4) as *mut u32) as u64
+        }
+        __mmio_write32((ziel +% i *% 4) as *mut u32,
+            glass_mix(alt, neu, key, alpha, schleier) as u32)
+        i = i + 1
+    }
+}
+
+const GLASS_W: u64 = 3840
+
+const GLASS_H: u64 = 64
+
+const GLASS_PX: u64 = 1048576
+
+const GLASS_TINT: u64 = 24
+
+static mut gl_puf: [u32; 1048576] = [0 as u32; 1048576]
+
+static mut gl_alt: [u32; 1048576] = [0 as u32; 1048576]
+
+fn glass_blur(w: u64, h: u64, r: u64) {
+    if r == 0 {
+        return
+    }
+    let a: u64 = (&gl_puf[0]) as u64
+    let b: u64 = (&gl_alt[0]) as u64
+    var y: u64 = 0
+    while y < h {
+        wmblur.blur_line(a +% y *% w *% 4, b +% y *% w *% 4, 4, w, r)
+        y = y + 1
+    }
+    var x: u64 = 0
+    while x < w {
+        wmblur.blur_line(b +% x *% 4, a +% x *% 4, w *% 4, h, r)
+        x = x + 1
+    }
+    y = 0
+    while y < h {
+        wmblur.blur_line(a +% y *% w *% 4, b +% y *% w *% 4, 4, w, r)
+        y = y + 1
+    }
+}
+
+fn hell_von(c: u64) -> u64 {
+    return (((c >> 16) & 0xFF) * 299 + ((c >> 8) & 0xFF) * 587
+        + (c & 0xFF) * 114) / 1000
+}
+
+static mut gl_src_hash: u64 = 0
+
+fn glass_source_hash(state: u64, gx: u64, gy: u64, w: u64, h: u64,
+    key: u64) -> u64 {
+    var acc: u64 = key ^ 0x9E3779B97F4A7C15
+    let words: u64 = w / 2
+    var row: u64 = 0
+    while row < h {
+        let q: u64 = fb.draw_at(state) +% (gy + row) *% fb.pitch(state) +%
+            gx *% 4
+        var k: u64 = 0
+        while k < words {
+            let wd: u64 = __mmio_read64((q +% k *% 8) as *mut u64)
+            acc = (acc ^ wd) *% 0x100000001B3
+            acc = acc ^ (acc >> 29)
+            k = k + 1
+        }
+        if (w & 1) != 0 {
+            let tail_px: u64 = __mmio_read32((q +% (w - 1) *% 4) as *mut u32) as u64
+            acc = (acc ^ tail_px) *% 0x100000001B3
+            acc = acc ^ (acc >> 29)
+        }
+        row = row + 1
+    }
+    return acc
+}
+
+fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
+    r: u64) -> u64 {
+    if r == 0 || w == 0 || h == 0 {
+        return 0
+    }
+    if w > GLASS_W || w *% h > GLASS_PX {
+        return 0
+    }
+    if x < 0 || y < 0 {
+        return 0
+    }
+    let gx: u64 = x as u64
+    let gy: u64 = y as u64
+    let basis: u64 = (&gl_puf[0]) as u64
+    wmlayout.ss(state, wmlayout.S_GLRUN, wmlayout.gs(state, wmlayout.S_GLRUN) + 1)
+    if wmlayout.gs(state, wmlayout.S_GLVALID) != 0 && wmlayout.gs(state, wmlayout.S_GLX) == gx
+        && wmlayout.gs(state, wmlayout.S_GLY) == gy && wmlayout.gs(state, wmlayout.S_GLW) == w
+        && wmlayout.gs(state, wmlayout.S_GLH) == h && wmlayout.gs(state, wmlayout.S_GLR) == r
+        && wmlayout.gs(state, wmlayout.S_GLGEN) == wmlayout.gs(state, wmlayout.S_GLASSGEN) {
+        wmlayout.ss(state, wmlayout.S_GLHIT, wmlayout.gs(state, wmlayout.S_GLHIT) + 1)
+
+        wmlayout.ss(state, wmlayout.S_GLSAY, wmlayout.gs(state, wmlayout.S_GLSAY) + 1)
+        if wmlayout.gs(state, wmlayout.S_GLSAY) >= 60 {
+            wmlayout.ss(state, wmlayout.S_GLSAY, 0)
+            glas_say(state)
+        }
+        return basis
+    }
+    let src_hash: u64 = glass_source_hash(state, gx, gy, w, h,
+        wmgeom.form(state, wmlayout.FM_GLASS_KEY))
+    if wmlayout.gs(state, wmlayout.S_GLVALID) != 0 && wmlayout.gs(state, wmlayout.S_GLX) == gx
+        && wmlayout.gs(state, wmlayout.S_GLY) == gy && wmlayout.gs(state, wmlayout.S_GLW) == w
+        && wmlayout.gs(state, wmlayout.S_GLH) == h && wmlayout.gs(state, wmlayout.S_GLR) == r
+        && src_hash == gl_src_hash {
+        wmlayout.ss(state, wmlayout.S_GLGEN, wmlayout.gs(state, wmlayout.S_GLASSGEN))
+        wmlayout.ss(state, wmlayout.S_GLHIT, wmlayout.gs(state, wmlayout.S_GLHIT) + 1)
+        return basis
+    }
+    let t_anfang: u64 = time.tsc()
+
+    let sbas: u64 = (&gl_puf[0]) as u64
+    var row: u64 = 0
+    while row < h {
+        let q: u64 = fb.draw_at(state) +% (gy + row) *% fb.pitch(state) +%
+            gx *% 4
+
+        let z: u64 = sbas +% row *% w *% 4
+        wmdraw.copy_words(z, q, w *% 4 / 8)
+        if (w & 1) != 0 {
+            __mmio_write32((z +% (w - 1) *% 4) as *mut u32,
+                __mmio_read32((q +% (w - 1) *% 4) as *mut u32))
+        }
+        row = row + 1
+    }
+
+    glass_blur(w, h, r)
+
+    let dunkel: bool = hell_von(wmgeom.form(state, wmlayout.FM_GLASS_KEY)) < 128
+    let qbas: u64 = (&gl_alt[0]) as u64
+    var p: u64 = 0
+    let n: u64 = w * h
+    while p < n {
+        let v: u64 = __mmio_read32((qbas +% p *% 4) as *mut u32) as u64
+        var cr: u64 = (v >> 16) & 0xFF
+        var cg: u64 = (v >> 8) & 0xFF
+        var cb: u64 = v & 0xFF
+        if dunkel {
+            if cr > GLASS_TINT {
+                cr = cr - GLASS_TINT
+            } else {
+                cr = 0
+            }
+            if cg > GLASS_TINT {
+                cg = cg - GLASS_TINT
+            } else {
+                cg = 0
+            }
+            if cb > GLASS_TINT {
+                cb = cb - GLASS_TINT
+            } else {
+                cb = 0
+            }
+        } else {
+            cr = cr + GLASS_TINT
+            cg = cg + GLASS_TINT
+            cb = cb + GLASS_TINT
+            if cr > 255 {
+                cr = 255
+            }
+            if cg > 255 {
+                cg = 255
+            }
+            if cb > 255 {
+                cb = 255
+            }
+        }
+        __mmio_write32((sbas +% p *% 4) as *mut u32,
+            ((cr << 16) | (cg << 8) | cb) as u32)
+        p = p + 1
+    }
+
+    let neu_form: bool = wmlayout.gs(state, wmlayout.S_GLVALID) == 0 || wmlayout.gs(state, wmlayout.S_GLW) != w
+        || wmlayout.gs(state, wmlayout.S_GLH) != h || wmlayout.gs(state, wmlayout.S_GLR) != r
+    wmlayout.ss(state, wmlayout.S_GLX, gx)
+    wmlayout.ss(state, wmlayout.S_GLY, gy)
+    wmlayout.ss(state, wmlayout.S_GLW, w)
+    wmlayout.ss(state, wmlayout.S_GLH, h)
+    wmlayout.ss(state, wmlayout.S_GLR, r)
+    wmlayout.ss(state, wmlayout.S_GLGEN, wmlayout.gs(state, wmlayout.S_GLASSGEN))
+    wmlayout.ss(state, wmlayout.S_GLVALID, 1)
+    gl_src_hash = src_hash
+    let kh: u64 = time.khz(state)
+    if kh >= 1000 {
+        let t_ende: u64 = time.tsc()
+        if t_ende > t_anfang {
+            let us: u64 = (t_ende - t_anfang) / (kh / 1000)
+            wmlayout.ss(state, wmlayout.S_GLUS, wmlayout.gs(state, wmlayout.S_GLUS) + us)
+            wmlayout.ss(state, wmlayout.S_GLN, wmlayout.gs(state, wmlayout.S_GLN) + 1)
+            wmlayout.ss(state, wmlayout.S_GLLAST, us)
+            if us > wmlayout.gs(state, wmlayout.S_GLMAX) {
+                wmlayout.ss(state, wmlayout.S_GLMAX, us)
+            }
+        }
+    }
+    wmlayout.ss(state, wmlayout.S_GLSAY, wmlayout.gs(state, wmlayout.S_GLSAY) + 1)
+    if neu_form || wmlayout.gs(state, wmlayout.S_GLSAY) >= 60 {
+        wmlayout.ss(state, wmlayout.S_GLSAY, 0)
+        glas_say(state)
+    }
+    return basis
+}
+
+static mut gl_a: [u8; 13] = "wm: glas r=\0\0"
+
+static mut gl_b: [u8; 5] = " px=\0"
+
+static mut gl_c: [u8; 5] = " us=\0"
+
+static mut gl_d: [u8; 6] = " max=\0"
+
+static mut gl_e: [u8; 8] = " cache=\0"
+
+static mut gl_f: [u8; 2] = "/\0"
+
+static mut gl_g: [u8; 6] = " key=\0"
+
+static mut gl_h: [u8; 17] = "0123456789abcdef\0"
+
+static mut gl_x: [u8; 7] = "000000\0"
+
+fn glas_hex6(v: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        let d: u64 = (v >> ((5 - i) * 4)) & 15
+        gl_x[(i) as usize] = gl_h[(d) as usize]
+        i = i + 1
+    }
+}
+
+fn glas_say(state: u64) {
+    serial.puts((&gl_a[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_GLR))
+    serial.puts((&gl_b[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_GLW) * wmlayout.gs(state, wmlayout.S_GLH))
+    serial.puts((&gl_c[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_GLLAST))
+    serial.puts((&gl_d[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_GLMAX))
+    serial.puts((&gl_e[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_GLHIT))
+    serial.puts((&gl_f[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_GLRUN))
+    serial.puts((&gl_g[0]) as u64)
+    glas_hex6(wmgeom.form(state, wmlayout.FM_GLASS_KEY))
+    serial.puts((&gl_x[0]) as u64)
+    serial.nl()
+}
+
+static mut rh_x: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut rh_y: u64 = 0
+
+static mut rh_w: u64 = 0
+
+static mut rh_h: u64 = 0
+
+static mut rh_r: u64 = 0
+
+static mut rh_a: [u8; 14] = "wm: rahmen x=\0"
+
+static mut rh_b: [u8; 4] = " y=\0"
+
+static mut rh_c: [u8; 4] = " w=\0"
+
+static mut rh_d: [u8; 4] = " h=\0"
+
+static mut rh_e: [u8; 4] = " r=\0"
+
+fn rahmen_say(x: i64, y: i64, w: i64, h: i64, r: u64) {
+    if x < 0 || y < 0 || w <= 0 || h <= 0 {
+        return
+    }
+    let xu: u64 = x as u64
+    let yu: u64 = y as u64
+    let wu: u64 = w as u64
+    let hu: u64 = h as u64
+    if rh_x == xu && rh_y == yu && rh_w == wu && rh_h == hu && rh_r == r {
+        return
+    }
+    rh_x = xu
+    rh_y = yu
+    rh_w = wu
+    rh_h = hu
+    rh_r = r
+    serial.puts((&rh_a[0]) as u64)
+    serial.dec(xu)
+    serial.puts((&rh_b[0]) as u64)
+    serial.dec(yu)
+    serial.puts((&rh_c[0]) as u64)
+    serial.dec(wu)
+    serial.puts((&rh_d[0]) as u64)
+    serial.dec(hu)
+    serial.puts((&rh_e[0]) as u64)
+    serial.dec(r)
+    serial.nl()
+}
+
+static mut al_a: [u8; 22] = "wm: glas alpha_soll=\0\0"
+
+static mut al_b: [u8; 12] = " alpha_ist=\0"
+
+static mut al_c: [u8; 7] = " hoch=\0"
+
+static mut al_d: [u8; 5] = " px=\0"
+
+static mut al_e: [u8; 12] = " alpha_max=\0"
+
+fn glas_alpha_say(state: u64) {
+    serial.puts((&al_a[0]) as u64)
+    serial.dec(wmbase.form_or(state, wmlayout.FM_TB_ALPHA, 100))
+    serial.puts((&al_b[0]) as u64)
+    serial.dec(tb_alpha_ist(state))
+    serial.puts((&al_e[0]) as u64)
+    serial.dec(gaist_max)
+    serial.puts((&al_c[0]) as u64)
+    serial.dec(gaist_hoch)
+    serial.puts((&al_d[0]) as u64)
+    serial.dec(gaist_px)
+    serial.nl()
+}
+
+fn glas_bericht(state: u64) {
+
+    glas_alpha_say(state)
+
+    wmbase.schlieren_say(state)
+    if wmlayout.gs(state, wmlayout.S_GLRUN) == 0 {
+        return
+    }
+    glas_say(state)
+}
+
+fn glass_gen(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_GLASSGEN)
+}
+
+fn glas_us(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_GLLAST)
+}
+
+fn glas_us_max(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_GLMAX)
+}
+
+fn glas_runs(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_GLN)
+}
+
+fn glass_hits(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_GLHIT)
+}
+
+fn panel_grows(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_PANELGROW)
+}
+
+fn set_noglasgrow(state: u64, on: bool) {
+    wmlayout.ss(state, wmlayout.S_NOGROW, 0)
+    if on {
+        wmlayout.ss(state, wmlayout.S_NOGROW, 1)
+    }
+}
+
+static mut gt_a: [u8; 16] = "wm: glastest \0\0\0"
+
+static mut gt_b: [u8; 4] = " / \0"
+
+fn selftest_glas(state: u64) -> u64 {
+    var n: u64 = 0
+
+    if glass_mix(0x000000, 0x204060, 0x204060, 100, SCHLEIER) == 0x204060 {
+        n = n + 1
+    }
+
+    if glass_mix(0x112233, 0x204060, 0x204060, 0, SCHLEIER) == 0x112233 {
+        n = n + 1
+    }
+
+    if glass_mix(0x707070, 0x808080, 0x808080, 50, SCHLEIER) == 0x787878 {
+        n = n + 1
+    }
+
+    if glass_mix(0x000000, 0xFFFFFF, 0x202020, 20, SCHLEIER) == 0xFFFFFF {
+        n = n + 1
+    }
+
+    let qa: u64 = (&gl_puf[0]) as u64
+    let za: u64 = (&gl_alt[0]) as u64
+    var i: u64 = 0
+    while i < 64 {
+        var v: u64 = 0
+        if i >= 32 {
+            v = 200
+        }
+        gl_puf[(i) as usize] = ((v << 16) | (v << 8) | v) as u32
+        i = i + 1
+    }
+    wmblur.blur_line(qa, za, 4, 64, 4)
+    if (gl_alt[(32) as usize] as u64 & 0xFF) == 111 {
+        n = n + 1
+    }
+
+    i = 0
+    while i < 64 {
+        var v2: u64 = 0
+        if i >= 32 {
+            v2 = 200
+        }
+        gl_puf[(i * 8) as usize] = ((v2 << 16) | (v2 << 8) | v2) as u32
+        i = i + 1
+    }
+    wmblur.blur_line(qa, za, 32, 64, 4)
+    if (gl_alt[(32 * 8) as usize] as u64 & 0xFF) == 111 {
+        n = n + 1
+    }
+
+    if glass_mix(0x000000, 0xFFFFFF, 0xFFFFFF, 20, 40) == 0xD8D8D8 {
+        n = n + 1
+    }
+
+    if glass_mix(0x000000, 0xFFFFFF, 0xFFFFFF, 20, SCHLEIER) == 0x333333
+        && glass_mix(0x000000, PLATTE_MARKE | 0xFFFFFF, 0xFFFFFF, 20,
+            SCHLEIER) == 0xFFFFFF {
+        n = n + 1
+    }
+
+    if glass_mix(0x000000, 0xFFFFFF, 0xFFFFFF, 20, SCHLEIER_WIN)
+            == 0x333333
+        && glass_mix(0x000000, PLATTE_MARKE | 0xFFFFFF, 0xFFFFFF, 20,
+            SCHLEIER_WIN) == 0xFFFFFF {
+        n = n + 1
+    }
+
+    wmlayout.ss(state, wmlayout.S_GLVALID, 0)
+    return n
+}
+
+fn selftest_glas_max() -> u64 {
+
+    return 9
+}
+
+fn glastest_say(state: u64) {
+    wmlayout.ss(state, wmlayout.S_GLTEST, selftest_glas(state))
+    serial.puts((&gt_a[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_GLTEST))
+    serial.puts((&gt_b[0]) as u64)
+    serial.dec(selftest_glas_max())
+    serial.nl()
+}
+
+static mut dt_a: [u8; 16] = "wm: damagetest \0"
+
+const DT_MAX: u64 = 8
+
+fn selftest_damage(state: u64) -> u64 {
+    let sv0: u64 = wmlayout.gs(state, wmlayout.S_DX0)
+    let sv1: u64 = wmlayout.gs(state, wmlayout.S_DY0)
+    let sv2: u64 = wmlayout.gs(state, wmlayout.S_DX1)
+    let sv3: u64 = wmlayout.gs(state, wmlayout.S_DY1)
+    let svd: u64 = wmlayout.gs(state, wmlayout.S_DON)
+    var n: u64 = 0
+    var o: [u64; 4] = [0 as u64; 4]
+    let op: u64 = (&o[0]) as u64
+    wmlayout.ss(state, wmlayout.S_DON, 0)
+
+    if !box_take(state, op) {
+        n = n + 1
+    }
+
+    wmbase.box_add(state, 10, 20, 30, 40)
+    if wmlayout.gs(state, wmlayout.S_DON) == 1 && wmlayout.gs(state, wmlayout.S_DX0) == 10 && wmlayout.gs(state, wmlayout.S_DY1) == 40 {
+        n = n + 1
+    }
+
+    wmbase.box_add(state, 5, 25, 60, 35)
+    if wmlayout.gs(state, wmlayout.S_DX0) == 5 && wmlayout.gs(state, wmlayout.S_DY0) == 20 && wmlayout.gs(state, wmlayout.S_DX1) == 60 && wmlayout.gs(state, wmlayout.S_DY1) == 40 {
+        n = n + 1
+    }
+
+    let t4: bool = box_take(state, op)
+    if t4 && wmlayout.gs(state, wmlayout.S_DON) == 0 && o[0] == 5 && o[1] == 20 && o[2] == 60 && o[3] == 40 {
+        n = n + 1
+    }
+
+    wmbase.box_add(state, 100, 200, 110, 210)
+    if wmlayout.gs(state, wmlayout.S_DON) == 1 && wmlayout.gs(state, wmlayout.S_DX0) == 100 && wmlayout.gs(state, wmlayout.S_DY0) == 200 && wmlayout.gs(state, wmlayout.S_DX1) == 110 && wmlayout.gs(state, wmlayout.S_DY1) == 210 {
+        n = n + 1
+    }
+
+    let t6: bool = box_take(state, op)
+    if t6 && o[0] == 100 && o[1] == 200 && o[2] == 110 && o[3] == 210 {
+        n = n + 1
+    }
+
+    if !box_take(state, op) {
+        n = n + 1
+    }
+
+    if wmbase.rgn_lock(state) {
+        wmbase.rgn_unlock(state)
+        n = n + 1
+    }
+    wmlayout.ss(state, wmlayout.S_DX0, sv0)
+    wmlayout.ss(state, wmlayout.S_DY0, sv1)
+    wmlayout.ss(state, wmlayout.S_DX1, sv2)
+    wmlayout.ss(state, wmlayout.S_DY1, sv3)
+    wmlayout.ss(state, wmlayout.S_DON, svd)
+    return n
+}
+
+fn damagetest_say(state: u64) {
+    let r: u64 = selftest_damage(state)
+    serial.puts((&dt_a[0]) as u64)
+    serial.dec(r)
+    serial.puts((&gt_b[0]) as u64)
+    serial.dec(DT_MAX)
+    serial.nl()
+}

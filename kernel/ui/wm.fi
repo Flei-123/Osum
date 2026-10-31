@@ -87,6 +87,8 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmglass
+import ui.wm.wmblur
 import ui.wm.wmdamage
 import ui.wm.wmgate
 import ui.wm.wmdraw
@@ -122,7 +124,7 @@ export {
     lj_fast, frames_total, input_hot, lj_round, lj_may_compose, lj_done,
     cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_log, cp_stat, cp_say_reset, cp_on, CP_NOT, CP_BUSY, destroy, count, set_focus, raise_win,
     close_top, gest_action, close_term, top_visible, cross_point, term_win,
-    move_win, resize_win, win_w, win_h, win_z, win_buf,
+    move_win, resize_win, win_w, win_h, win_buf,
     win_kind, win_id,
     win_layer, set_layer, win_hidden, set_hidden, win_deco, set_deco,
     win_title, by_id, hides, shows, top_visible,
@@ -138,16 +140,10 @@ export {
     set_app, win_app, APP_LEN,
     set_form,
     set_shadow_old, cap_hover, cap_hits,
-    blur_an, blur_radius, blurs, blur_cached, blur_px, blur_us,
-    win_opac, set_opac, win_durch, backlum, BL_MEAN, BL_HI, BL_LO, BL_RUNS, BL_HITS,
-    set_blur_cache, blur_cache_on,
-    blur_treffer, blur_fehl, blur_quote, blur_reset,
-    blur_frn, blur_frus, blur_frmax,
-    glass_gen, glas_us, glas_us_max, glas_runs, glass_hits,
-    panel_grows, set_noglasgrow, selftest_glas, selftest_glas_max,
-    glas_bericht,
-    glass_mix, PLATTE_MARKE,
-    tb_alpha_ist, tb_alpha_hoch, unter_leiste_px,
+    blurs,
+    win_opac, set_opac, backlum, BL_MEAN, BL_HI, BL_LO, BL_RUNS, BL_HITS,
+    set_blur_cache,
+    tb_alpha_ist, unter_leiste_px,
     present, set_vsync, vsync_on, presents, skipped,
     pxsum,
     anim_start, anim_tick, anim_laeuft, anims, anim_frames, anim_ticks,
@@ -281,6 +277,40 @@ fn sperre_an(state: u64) -> bool {
 }
 
 
+const BL_HI: u64 = wmblur.BL_HI
+
+const BL_HITS: u64 = wmblur.BL_HITS
+
+const BL_LO: u64 = wmblur.BL_LO
+
+const BL_MEAN: u64 = wmblur.BL_MEAN
+
+const BL_RUNS: u64 = wmblur.BL_RUNS
+
+fn backlum(state: u64, i: u64, which: u64) -> u64 {
+    return wmblur.backlum(state, i, which)
+}
+
+fn set_opac(state: u64, i: u64, v: u64) -> bool {
+    return wmblur.set_opac(state, i, v)
+}
+
+fn win_h(state: u64, i: u64) -> u64 {
+    return wmblur.win_h(state, i)
+}
+
+fn win_opac(state: u64, i: u64) -> u64 {
+    return wmblur.win_opac(state, i)
+}
+
+fn win_w(state: u64, i: u64) -> u64 {
+    return wmblur.win_w(state, i)
+}
+
+fn tb_alpha_ist(state: u64) -> u64 {
+    return wmglass.tb_alpha_ist(state)
+}
+
 const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
 const EV_SLOTS: u64 = 32
 const EV_BYTES: u64 = 16
@@ -380,17 +410,6 @@ const SIG_H: u64 = 4
 // Tausendsteln. 850 heisst: es waechst aus 85 Prozent heraus -- der
 // Sprung, den man sieht, ohne dass es zappelt.
 const AN_SCALE0: u64 = 850
-// Wie viele Summen die gleitende Zeile fasst -- die groesste Breite,
-// die dieser Server je weichzeichnet. Eine Taskleiste ist so breit wie
-// der Schirm; 3440 deckt auch Justins breiten Schirm ab.
-const BLUR_W_MAX: u64 = 3440
-// Der Nenner der Kehrwerttafel. 19 ist die Zahl, die `probe2` ueber
-// ALLE n (1..33) und ALLE Summen (0..n*255) als fehlerfrei gemessen
-// hat -- mit 16, 20 und 24 blieb ein Fehler von einer Stufe stehen,
-// und eine Stufe ist auf einer weichgezeichneten Flaeche genau das,
-// was man als Streifen sieht.
-const RECIP_SHIFT: u64 = 19
-const RECIP_RUND: u64 = 262144 // 1 << 18
 // Wie weit das Bild beim Nachziehen HOECHSTENS hinter dem Fenster
 // zurueckbleiben darf, in Bildpunkten. Ohne diesen Deckel wird aus
 // einer schnellen Zeigerbewegung ein Fenster, dessen Bild quer ueber
@@ -405,41 +424,6 @@ const SWING_MAX_PX: i64 = 48
 // Fenster und wuerde bei der Zeigerabtastrate dieses Servers
 // ueberschwingen, was wie ein Wackelkontakt aussieht.
 const SWING_DECAY: u64 = 250
-// ============================================== RUNDE GLAS (NACHTRAG 2)
-// UND JETZT IST AUCH DIE ZAHL DER LEISTE NULL.
-//
-// Der Kommentar dazu stimmte, solange die Leiste keine Textplatte
-// hatte. Sie hat eine: ihre Schrift geht wie jede andere Schrift von
-// Ring 3 durch `wlibc.text_at`, und die setzt `PLATTE` in jeden
-// Bildpunkt, auf dem ein Buchstabe steht. Damit traegt die Leiste ihre
-// Lesbarkeit an derselben Stelle wie ein Fenster -- unter der Schrift
-// und nicht ueber der ganzen Flaeche.
-//
-// Was die 40 Stufen wirklich bewirkt haben, steht im Dateinamen einer
-// Aufnahme dieser Runde: `11-dunkles-bild-leiste-soll40-wirkt82`. Der
-// Regler sagte 40 Prozent, die Leiste stand bei 82, und ein Regler,
-// der um mehr als das Doppelte luegt, ist kein Regler. Justin hat
-// ausdruecklich eine WIRKLICH durchsichtige Leiste bestellt.
-const SCHLEIER: u64 = 0
-// UND DIESELBE ZAHL FUER EIN GEWOEHNLICHES FENSTER.
-//
-// Auch hier ist die Deckung dorthin gewandert, wo sie hingehoert:
-// UNTER DIE SCHRIFT. Ring 3 setzt `PLATTE_MARKE` in jeden Bildpunkt,
-// auf dem Schrift steht (kernel/user/wlibc.fi, `platte`), und
-// `glass_mix` nimmt einen markierten Bildpunkt unveraendert. Damit ist
-// die Zeile deckend und die Flaeche zwischen den Zeilen so
-// durchsichtig, wie der Regler sagt.
-//
-// Die Konstante bleibt stehen (statt an den Aufrufstellen zu
-// verschwinden), weil `tools/themestore/glascheck.py` dieselbe Zahl
-// fuehrt und die Abnahme beide gegeneinander haelt: wer hier eine Zahl
-// einsetzt, muss sie dort auch einsetzen, sonst wird der Lauf rot.
-const SCHLEIER_WIN: u64 = 0
-// Die Marke der Textplatte, in den oberen acht Bit eines Bildpunktes
-// des Fensterpuffers. Sie steht wortgleich in kernel/user/wlibc.fi
-// (`const PLATTE`) -- Ring 3 setzt sie, Ring 0 liest und entfernt sie,
-// und `tools/themestore/run.sh` haelt die beiden Zahlen gegeneinander.
-const PLATTE_MARKE: u64 = 0x01000000
 // Die groesste Strebe, die ein Fenster anmelden darf. Sie steht hier,
 // weil 0xFFFFFF mitten in einer Bedingung wie eine Farbe aussieht und
 // keine ist.
@@ -462,8 +446,6 @@ const CURSOR_EDGE: u64 = 0x00000000
 const TG: u64 = 16384
 const TG_FRAMES: u64 = 24
 const TG_ALT_WORDS: u64 = 6144
-const BL_NX: u64 = 8
-const BL_NY: u64 = 4
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -1059,18 +1041,6 @@ fn set_fonts(state: u64, ui: u64, pui: u64, mono: u64, pmono: u64) {
     wmlayout.ss(state, wmlayout.S_PX_MONO, pmono)
 }
 
-fn win_w(state: u64, i: u64) -> u64 {
-    return wmlayout.wg(state, i, wmlayout.W_W)
-}
-
-fn win_h(state: u64, i: u64) -> u64 {
-    return wmlayout.wg(state, i, wmlayout.W_H)
-}
-
-fn win_z(state: u64, i: u64) -> u64 {
-    return wmlayout.wg(state, i, wmlayout.W_Z)
-}
-
 fn win_buf(state: u64, i: u64) -> u64 {
     return wmlayout.wg(state, i, wmlayout.W_BUF)
 }
@@ -1367,8 +1337,8 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     // RUNDE GLAS: der Selbsttest der Mischung und des Weichzeichners.
     // Er steht HIER und nicht in `selftest`, weil der dort mitten in
     // einer Zeile laeuft, die `kgui` schreibt -- siehe `fokus_still`.
-    glastest_say(state)
-    damagetest_say(state)
+    wmglass.glastest_say(state)
+    wmglass.damagetest_say(state)
     wmlayout.ss(state, wmlayout.S_GLASSGEN, 1)
     wmlayout.ss(state, wmlayout.S_GLVALID, 0)
     wmlayout.ss(state, wmlayout.S_PANELGROW, 0)
@@ -1379,7 +1349,7 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     wmlayout.ss(state, wmlayout.S_GLMAX, 0)
     wmlayout.ss(state, wmlayout.S_GLLAST, 0)
     wmlayout.ss(state, wmlayout.S_GLSAY, 0)
-    set_noglasgrow(state, fb.glasgrow_aus(state))
+    wmglass.set_noglasgrow(state, fb.glasgrow_aus(state))
     // Die Gegenprobe meldet sich von selbst: ein Lauf, in dem die Regel
     // abgeschaltet ist, muss das in seiner eigenen Ausgabe sagen und
     // nicht nur auf der Befehlszeile.
@@ -1443,31 +1413,6 @@ fn rgn_take(state: u64, out: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64
     wmlayout.ss(state, wmlayout.S_RBAD, 0)
     wmbase.rgn_unlock(state)
     return n
-}
-
-// r53: take the dirty box for one frame: its four numbers go to `out` (x0, y0, x1, y1), `S_DON` is cleared. false = no damage pending.
-// Runs under the region lock (the same lock `damage_ex` holds while it adds), so a `damage` is either completely before the take (its
-// rectangle is in the box) or completely after it (it starts a new box). Without the lock the old unlocked way runs; a frame is never skipped.
-fn box_take(state: u64, out: u64) -> bool {
-    if wmlayout.gs(state, wmlayout.S_DON) == 0 {
-        return false
-    }
-    let tk: bool = wmbase.rgn_lock(state)
-    if wmlayout.gs(state, wmlayout.S_DON) == 0 {
-        if tk {
-            wmbase.rgn_unlock(state)
-        }
-        return false
-    }
-    __mmio_write64(out as *mut u64, wmlayout.gs(state, wmlayout.S_DX0))
-    __mmio_write64((out + 8) as *mut u64, wmlayout.gs(state, wmlayout.S_DY0))
-    __mmio_write64((out + 16) as *mut u64, wmlayout.gs(state, wmlayout.S_DX1))
-    __mmio_write64((out + 24) as *mut u64, wmlayout.gs(state, wmlayout.S_DY1))
-    wmlayout.ss(state, wmlayout.S_DON, 0)
-    if tk {
-        wmbase.rgn_unlock(state)
-    }
-    return true
 }
 
 fn dirty_x0(state: u64) -> u64 {
@@ -3970,7 +3915,7 @@ fn tab_plain(state: u64, i: u64) -> bool {
     if win_hidden(state, i) {
         return false
     }
-    if wmlayout.wg(state, i, wmlayout.W_ANK) != 0 || drag_paint_on(state, i) || blur_will(state, i) {
+    if wmlayout.wg(state, i, wmlayout.W_ANK) != 0 || drag_paint_on(state, i) || wmblur.blur_will(state, i) {
         return false
     }
     var alpha: u64 = wmbase.form_or(state, wmlayout.FM_WIN_ALPHA, 100)
@@ -3982,14 +3927,14 @@ fn tab_plain(state: u64, i: u64) -> bool {
     if pw < wmbase.MAX_WIN && i == pw {
         alpha = wmbase.form_or(state, wmlayout.FM_TB_ALPHA, 100)
     }
-    let op: u64 = win_opac(state, i)
+    let op: u64 = wmblur.win_opac(state, i)
     if op < 255 {
         let opp: u64 = op *% 100 / 255
         if opp < alpha {
             alpha = opp
         }
     }
-    if deckt_schirm(state, i) {
+    if wmblur.deckt_schirm(state, i) {
         alpha = 100
     }
     return alpha >= 100
@@ -6429,7 +6374,7 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
             rounds = rounds + 1
             var wi: u64 = 0
             while wi < wmbase.MAX_WIN {
-                if blur_will(state, wi) && !blur_hit_ok(state, wi) {
+                if wmblur.blur_will(state, wi) && !wmblur.blur_hit_ok(state, wi) {
                     var qx0: i64 = wmbase.win_x(state, wi)
                     var qy0: i64 = wmbase.win_y(state, wi)
                     var qx1: i64 = qx0 + wmbase.outer_w(state, wi) as i64
@@ -6673,7 +6618,7 @@ fn compose_one(state: u64) -> u64 {
         wmbase.damage(state, ox as i64, 0, (ox + wmmag.MAG_W) as i64, wmmag.MAG_H as i64)
     }
     var bt: [u64; 4] = [0 as u64; 4]
-    if !box_take(state, (&bt[0]) as u64) {
+    if !wmglass.box_take(state, (&bt[0]) as u64) {
         return 0
     }
     let x0: u64 = bt[0]
@@ -7561,568 +7506,6 @@ fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
         wmlayout.wg(state, i, wmlayout.W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
 }
 
-// =====================================================================
-// RUNDE BLUR: DAS ACRYL
-// =====================================================================
-//
-// WAS HIER WIRKLICH DAS PROBLEM WAR -- und es war nicht der Filter.
-//
-// Der Auftrag nennt als ersten und eigentlichen Umbau "den Hintergrund
-// durchreichen": ein Fenster, das durchscheinen will, braucht Lesezugriff
-// auf das, was hinter ihm liegt. Beim Nachsehen stellte sich heraus, dass
-// dieser Server das SCHON KANN, ohne es zu wissen:
-//
-//   `compose` malt den Schreibtisch, dann die Fenster VON UNTEN NACH
-//   OBEN, alle in den Zweitpuffer (fb, S_DRAW). Wenn ein Fenster an der
-//   Reihe ist, steht alles, was unter ihm liegt, dort bereits fertig.
-//   `fb.get_pixel` liest genau aus S_DRAW.
-//
-// Es braucht also KEINEN Mitschnitt des Hintergrunds, keine zweite
-// Flaeche und keinen zusaetzlichen Puffer je Fenster -- der Blur liest
-// an Ort und Stelle aus dem Zweitpuffer, bevor das Fenster sich darueber
-// malt. Das ist der Grund, warum diese Runde am Ende so wenig Speicher
-// braucht. Ein Mitschnitt waere die teurere und die falsche Loesung
-// gewesen; die billige war schon da.
-//
-// WAS GEBLURRT WIRD UND WAS NICHT. Die Kostenmessung ist eindeutig
-// (BEFUND-BLUR.md, auf dieser Maschine nachgemessen):
-//
-//     Benachrichtigung  360x120     0,87 ms     5,2 %
-//     Taskleiste       1920x48      1,64 ms     9,8 %
-//     Startmenue        320x520     3,16 ms    18,9 %
-//     ein Fenster       900x650    10,96 ms    65,6 %
-//     Vollbild FHD     1920x1080   37,90 ms   227,0 %
-//
-// Leiste, Startmenue, Menues, Blasen -- ja. GANZE FENSTER NICHT, und
-// zwar gar nicht, auch nicht als Wahlmoeglichkeit: ein einziges Fenster
-// frisst zwei Drittel des Bildbudgets, und zwei davon reissen es. Die
-// Auswahl trifft deshalb nicht der Geschmack, sondern die EBENE des
-// Fensters -- `blur_will` unten laesst L_NORMAL strukturell nicht durch.
-
-// Der zweifache Kastenfilter, und warum nicht Gauss.
-//
-// Zweimal Kasten hintereinander ist eine Dreiecksfunktion, dreimal waere
-// schon fast eine Glocke; optisch ist der Unterschied zu einem echten
-// Gauss bei diesen Radien nicht zu sehen. Der Preis ist es umso mehr:
-// ein Gauss mit Radius r kostet je Bildpunkt 2r+1 Multiplikationen, der
-// Kasten mit gleitender Summe kostet EINE Addition und EINE Subtraktion
-// -- unabhaengig vom Radius.
-//
-// Der Kehrwert statt der Division: je Bildpunkt und Durchgang stand eine
-// ganzzahlige Division je Kanal, also zwoelf im ganzen Filter. Gemessen
-// hat das den Filter um mehr als das Fuenffache verlangsamt (Startmenue
-// 15,32 ms gegen 3,16 ms). `RECIP` haelt 1/n als Festkommazahl, und
-// `bdiv` rundet im ZAEHLER -- die erste Fassung rundete im Kehrwert und
-// lag dadurch um bis zu 16 Helligkeitsstufen daneben, was man als
-// Farbstich sah.
-fn recip_of(n: u64) -> u64 {
-    if n == 0 {
-        return 0
-    }
-    return (((1 as u64) << RECIP_SHIFT) + n - 1) / n
-}
-
-// Eine Summe durch ihre Anzahl, exakt. Siehe RECIP_SHIFT.
-fn bdiv(summe: u64, rec: u64) -> u64 {
-    return (summe *% rec +% RECIP_RUND) >> RECIP_SHIFT
-}
-
-// ------------------------------------------------- die beiden Durchgaenge
-//
-// WAAGRECHT. Eine Zeile, gleitende Summe ueber 2r+1 Bildpunkte. `n`
-// waechst am linken Rand und schrumpft am rechten -- deshalb wird der
-// Kehrwert je Bildpunkt aus der Tafel geholt und nicht einmal vorab
-// gerechnet.
-// r464: THE LOOP IS ASSEMBLY NOW. firnc turns every `+` into a load, an add with an overflow check and a store, so this loop cost
-// about 60 ns a pixel and one 640 x 416 menu 77 - 105 ms. `tools/blur/blurasm.py` holds the same arithmetic (same reciprocal table
-// `rt`, same rounding, same window) in registers; `tools/blur/asmtest.c` compares it with the old Firn loop on random pictures.
-// `rt` points at the 40 words `rt[n] = recip_of(n)` that `blur_flaeche` fills once per filter run.
-fn blur_h(quelle: u64, ziel: u64, w: u64, h: u64, r: u64, rt: u64, simd: bool) {
-    var blk: [u64; 44] = [0 as u64; 44]   // 12 words + 32 words for the caller's vector registers (routine x)
-    blk[0] = quelle
-    blk[1] = ziel
-    blk[2] = w
-    blk[3] = h
-    blk[4] = r
-    blk[5] = rt
-    // r481: four rows at a time in SSE2 (routine x; the interrupts stay off for each group of four rows only), the remaining
-    // rows (and every row when the vector unit is off, `fbnosimd`) through the scalar routine h. Same pixels: asmtest.c.
-    if simd && h >= 4 {
-        let done: u64 = h - (h & 3)
-        blk[3] = done
-        blk[9] = 1
-        asm("mov r11,rdi\nmov rax,[r11+24]\nshr rax,2\njz 0f\nmov [r11+24],rax\nmov rax,[r11+16]\ntest rax,rax\njz 0f\nmovdqu [r11+96],xmm0\nmovdqu [r11+112],xmm1\nmovdqu [r11+128],xmm2\nmovdqu [r11+144],xmm3\nmovdqu [r11+160],xmm4\nmovdqu [r11+176],xmm5\nmovdqu [r11+192],xmm6\nmovdqu [r11+208],xmm7\nmovdqu [r11+224],xmm8\nmovdqu [r11+240],xmm9\nmovdqu [r11+256],xmm10\nmovdqu [r11+272],xmm11\nmovdqu [r11+288],xmm12\nmovdqu [r11+304],xmm13\nmovdqu [r11+320],xmm14\nmovdqu [r11+336],xmm15\nmov r8,[r11]\nmov r9,[r11+8]\nmov rcx,[r11+16]\nshl rcx,2\nlea rdx,[rcx+rcx*2]\n1:\nmov rax,[r11+72]\ntest rax,rax\njz 91f\npushfq\ncli\n91:\npxor xmm15,xmm15\nmov eax,4\nmovd xmm10,eax\npshuflw xmm10,xmm10,0\npshufd xmm10,xmm10,0\npcmpeqd xmm11,xmm11\npsrld xmm11,8\npxor xmm0,xmm0\npxor xmm1,xmm1\nxor eax,eax\nmov [r11+56],rax\nmov [r11+64],rax\nmov rsi,r8\nxor r10d,r10d\n2:\ncmp r10,[r11+16]\njae 3f\ncmp r10,[r11+32]\nja 3f\nmovd xmm6,[rsi]\nmovd xmm4,[rsi+rcx]\npunpckldq xmm6,xmm4\nmovd xmm7,[rsi+rcx*2]\nmovd xmm4,[rsi+rdx]\npunpckldq xmm7,xmm4\npunpcklbw xmm6,xmm15\npunpcklbw xmm7,xmm15\npaddw xmm0,xmm6\npaddw xmm1,xmm7\nadd rsi,4\ninc qword ptr [r11+56]\ninc r10\njmp 2b\n3:\nxor r10d,r10d\n4:\nmov rax,[r11+56]\ncmp rax,[r11+64]\nje 5f\nmov [r11+64],rax\nshl rax,3\nadd rax,[r11+40]\nmov rax,[rax]\nmovzx edi,ax\nmovd xmm8,edi\npshuflw xmm8,xmm8,0\npshufd xmm8,xmm8,0\nshr eax,16\nmovd xmm9,eax\npshuflw xmm9,xmm9,0\npshufd xmm9,xmm9,0\n5:\nmovdqa xmm2,xmm0\npmulhuw xmm2,xmm8\nmovdqa xmm4,xmm0\npmullw xmm4,xmm9\npaddw xmm2,xmm4\npaddw xmm2,xmm10\npsrlw xmm2,3\nmovdqa xmm3,xmm1\npmulhuw xmm3,xmm8\nmovdqa xmm5,xmm1\npmullw xmm5,xmm9\npaddw xmm3,xmm5\npaddw xmm3,xmm10\npsrlw xmm3,3\npackuswb xmm2,xmm3\npand xmm2,xmm11\nlea rax,[r9+r10*4]\nmovd [rax],xmm2\npsrldq xmm2,4\nmovd [rax+rcx],xmm2\npsrldq xmm2,4\nmovd [rax+rcx*2],xmm2\npsrldq xmm2,4\nmovd [rax+rdx],xmm2\nmov rax,r10\nadd rax,[r11+32]\ninc rax\ncmp rax,[r11+16]\njae 6f\nlea rsi,[r8+rax*4]\nmovd xmm6,[rsi]\nmovd xmm4,[rsi+rcx]\npunpckldq xmm6,xmm4\nmovd xmm7,[rsi+rcx*2]\nmovd xmm4,[rsi+rdx]\npunpckldq xmm7,xmm4\npunpcklbw xmm6,xmm15\npunpcklbw xmm7,xmm15\npaddw xmm0,xmm6\npaddw xmm1,xmm7\ninc qword ptr [r11+56]\n6:\ncmp r10,[r11+32]\njb 7f\nmov rax,r10\nsub rax,[r11+32]\nlea rsi,[r8+rax*4]\nmovd xmm6,[rsi]\nmovd xmm4,[rsi+rcx]\npunpckldq xmm6,xmm4\nmovd xmm7,[rsi+rcx*2]\nmovd xmm4,[rsi+rdx]\npunpckldq xmm7,xmm4\npunpcklbw xmm6,xmm15\npunpcklbw xmm7,xmm15\npsubw xmm0,xmm6\npsubw xmm1,xmm7\ndec qword ptr [r11+56]\n7:\ninc r10\ncmp r10,[r11+16]\njb 4b\nmov rax,[r11+72]\ntest rax,rax\njz 92f\npopfq\n92:\nmov rax,rcx\nshl rax,2\nadd r8,rax\nadd r9,rax\nmov rax,[r11+24]\ndec rax\nmov [r11+24],rax\njnz 1b\nmovdqu xmm0,[r11+96]\nmovdqu xmm1,[r11+112]\nmovdqu xmm2,[r11+128]\nmovdqu xmm3,[r11+144]\nmovdqu xmm4,[r11+160]\nmovdqu xmm5,[r11+176]\nmovdqu xmm6,[r11+192]\nmovdqu xmm7,[r11+208]\nmovdqu xmm8,[r11+224]\nmovdqu xmm9,[r11+240]\nmovdqu xmm10,[r11+256]\nmovdqu xmm11,[r11+272]\nmovdqu xmm12,[r11+288]\nmovdqu xmm13,[r11+304]\nmovdqu xmm14,[r11+320]\nmovdqu xmm15,[r11+336]\n0:",
-            in("rdi") (&blk[0]) as u64,
-            clobber("rax"),
-            clobber("rcx"),
-            clobber("rdx"),
-            clobber("rsi"),
-            clobber("rdi"),
-            clobber("r8"),
-            clobber("r9"),
-            clobber("r10"),
-            clobber("r11"),
-            clobber("memory"))
-        blk[9] = 0
-        blk[0] = quelle +% done *% w *% 4
-        blk[1] = ziel +% done *% w *% 4
-        blk[2] = w
-        blk[3] = h - done
-    }
-    asm("mov rdx,rdi\nmov rax,[rdx+24]\ntest rax,rax\njz 0f\nmov rax,[rdx+16]\ntest rax,rax\njz 0f\nmov rsi,[rdx]\nmov rdi,[rdx+8]\n1:\nxor r8d,r8d\nxor r9d,r9d\nxor r10d,r10d\n2:\ncmp r10,[rdx+16]\njae 3f\ncmp r10,[rdx+32]\nja 3f\nmov eax,[rsi+r10*4]\nmov ecx,eax\nand ecx,16711935\nand eax,65280\nshl rax,24\nor rax,rcx\nadd r8,rax\ninc r9\ninc r10\njmp 2b\n3:\nxor r10d,r10d\n4:\nmov rcx,[rdx+40]\nmov rcx,[rcx+r9*8]\nmov rax,r8\nmovzx eax,ax\nimul rax,rcx\nadd rax,262144\nshr rax,19\nmov r11,r8\nshr r11,16\nmovzx r11d,r11w\nimul r11,rcx\nadd r11,262144\nshr r11,19\nshl r11d,16\nor eax,r11d\nmov r11,r8\nshr r11,32\nmovzx r11d,r11w\nimul r11,rcx\nadd r11,262144\nshr r11,19\nshl r11d,8\nor eax,r11d\nmov [rdi+r10*4],eax\nmov rax,[rdx+32]\nlea rax,[rax+r10+1]\ncmp rax,[rdx+16]\njae 5f\nmov eax,[rsi+rax*4]\nmov ecx,eax\nand ecx,16711935\nand eax,65280\nshl rax,24\nor rax,rcx\nadd r8,rax\ninc r9\n5:\ncmp r10,[rdx+32]\njb 6f\nmov rax,r10\nsub rax,[rdx+32]\nmov eax,[rsi+rax*4]\nmov ecx,eax\nand ecx,16711935\nand eax,65280\nshl rax,24\nor rax,rcx\nsub r8,rax\ndec r9\n6:\ninc r10\ncmp r10,[rdx+16]\njb 4b\nmov rax,[rdx+16]\nshl rax,2\nadd rsi,rax\nadd rdi,rax\nmov rax,[rdx+24]\ndec rax\nmov [rdx+24],rax\njnz 1b\n0:",
-        in("rdi") (&blk[0]) as u64,
-        clobber("rax"),
-        clobber("rcx"),
-        clobber("rdx"),
-        clobber("rsi"),
-        clobber("rdi"),
-        clobber("r8"),
-        clobber("r9"),
-        clobber("r10"),
-        clobber("r11"),
-        clobber("memory"))
-}
-
-// SENKRECHT -- ABER ZEILENWEISE GELESEN, und das ist der Unterschied
-// zwischen tragbar und untragbar.
-//
-// Die naheliegende Fassung laeuft Spalte fuer Spalte. Zwei Bildpunkte
-// untereinander liegen aber w*4 Oktette auseinander, also faellt je
-// Bildpunkt eine eigene Cachezeile an. GEMESSEN: das Startmenue kostete
-// so 27,88 ms statt 15,32 ms -- 167 Prozent des Bildbudgets statt 92.
-// Der Auftrag nannte 11,9 ms; die spaltenweise Fassung haette die Zahl
-// also um mehr als das Doppelte verfehlt, ohne dass am Filter etwas
-// falsch gewesen waere.
-//
-// Also: EINE Zeile gleitender Summen (drei Kanaele mal Breite) im
-// Speicher halten und das Bild von oben nach unten durchlaufen. Jeder
-// Zugriff ist dann fortlaufend.
-fn blur_v(state: u64, quelle: u64, ziel: u64, w: u64, h: u64, r: u64, rt: u64, simd: bool) {
-    let sum: u64 = wmlayout.gs(state, wmlayout.S_BC_SUM)
-    if sum == 0 {
-        return
-    }
-    // r464: assembly, like `blur_h`; the sums of the row are three 16-bit lanes in ONE word per pixel; the row of zeros lies BLUR_W_MAX words (27520 octets) further on, the number is in the asm text; the block has 12 words (7 - 9 scratch, 10 = interrupts off per row, 11 = the row distance in pixels)
-    // r481: a multiple of four columns goes through SSE2 (routine w, each output row with the interrupts off), the other columns (and all of them without the vector unit) through the scalar routine v with the same row distance.
-    var blk: [u64; 44] = [0 as u64; 44]
-    var c4: u64 = 0
-    if simd && w >= 4 {
-        c4 = w - (w & 3)
-        blk[0] = quelle
-        blk[1] = ziel
-        blk[2] = c4
-        blk[3] = h
-        blk[4] = r
-        blk[5] = rt
-        blk[6] = sum
-        blk[10] = 1
-        blk[11] = w
-        asm("mov r11,rdi\nmov rax,[r11+16]\ntest rax,rax\njz 0f\nmov rax,[r11+24]\ntest rax,rax\njz 0f\nmovdqu [r11+96],xmm0\nmovdqu [r11+112],xmm1\nmovdqu [r11+128],xmm2\nmovdqu [r11+144],xmm3\nmovdqu [r11+160],xmm4\nmovdqu [r11+176],xmm5\nmovdqu [r11+192],xmm6\nmovdqu [r11+208],xmm7\nmovdqu [r11+224],xmm8\nmovdqu [r11+240],xmm9\nmovdqu [r11+256],xmm10\nmovdqu [r11+272],xmm11\nmovdqu [r11+288],xmm12\nmovdqu [r11+304],xmm13\nmovdqu [r11+320],xmm14\nmovdqu [r11+336],xmm15\nmov r8,[r11+48]\ncld\nxor eax,eax\nmov rdi,r8\nmov rcx,[r11+16]\nrep stosq\nlea rdi,[r8+27520]\nmov rcx,[r11+16]\nrep stosq\nxor r10d,r10d\nxor r9d,r9d\n1:\ncmp r10,[r11+32]\nja 4f\ncmp r10,[r11+24]\njae 4f\nmov rsi,r10\nimul rsi,[r11+88]\nmov rax,[r11]\nlea rsi,[rax+rsi*4]\nmov rax,[r11+80]\ntest rax,rax\njz 91f\npushfq\ncli\n91:\npxor xmm15,xmm15\nmov rax,r8\nmov rcx,[r11+16]\nshr rcx,2\n2:\nmovdqu xmm4,[rsi]\nmovdqa xmm5,xmm4\npunpcklbw xmm4,xmm15\npunpckhbw xmm5,xmm15\nmovdqu xmm6,[rax]\npaddw xmm6,xmm4\nmovdqu [rax],xmm6\nmovdqu xmm7,[rax+16]\npaddw xmm7,xmm5\nmovdqu [rax+16],xmm7\nadd rsi,16\nadd rax,32\ndec rcx\njnz 2b\nmov rax,[r11+80]\ntest rax,rax\njz 92f\npopfq\n92:\ninc r9\ninc r10\njmp 1b\n4:\nmov [r11+64],r9\nxor eax,eax\nmov [r11+56],rax\n5:\nmov rax,[r11+80]\ntest rax,rax\njz 91f\npushfq\ncli\n91:\npxor xmm15,xmm15\nmov eax,4\nmovd xmm10,eax\npshuflw xmm10,xmm10,0\npshufd xmm10,xmm10,0\npcmpeqd xmm11,xmm11\npsrld xmm11,8\nmov rax,[r11+40]\nmov rcx,[r11+64]\nmov rax,[rax+rcx*8]\nmovzx ecx,ax\nmovd xmm8,ecx\npshuflw xmm8,xmm8,0\npshufd xmm8,xmm8,0\nshr eax,16\nmovd xmm9,eax\npshuflw xmm9,xmm9,0\npshufd xmm9,xmm9,0\nlea rsi,[r8+27520]\nmov rax,[r11+56]\nadd rax,[r11+32]\ninc rax\ncmp rax,[r11+24]\njae 6f\nimul rax,[r11+88]\nmov rsi,[r11]\nlea rsi,[rsi+rax*4]\n6:\nlea rdi,[r8+27520]\nmov rax,[r11+56]\ncmp rax,[r11+32]\njb 7f\nsub rax,[r11+32]\nimul rax,[r11+88]\nmov rdi,[r11]\nlea rdi,[rdi+rax*4]\n7:\nmov rdx,[r11+8]\nmov rax,r8\nmov rcx,[r11+16]\nshr rcx,2\n3:\nmovdqu xmm0,[rax]\nmovdqu xmm1,[rax+16]\nmovdqa xmm2,xmm0\npmulhuw xmm2,xmm8\nmovdqa xmm4,xmm0\npmullw xmm4,xmm9\npaddw xmm2,xmm4\npaddw xmm2,xmm10\npsrlw xmm2,3\nmovdqa xmm3,xmm1\npmulhuw xmm3,xmm8\nmovdqa xmm5,xmm1\npmullw xmm5,xmm9\npaddw xmm3,xmm5\npaddw xmm3,xmm10\npsrlw xmm3,3\npackuswb xmm2,xmm3\npand xmm2,xmm11\nmovdqu [rdx],xmm2\nmovdqu xmm4,[rsi]\nmovdqa xmm5,xmm4\npunpcklbw xmm4,xmm15\npunpckhbw xmm5,xmm15\npaddw xmm0,xmm4\npaddw xmm1,xmm5\nmovdqu xmm4,[rdi]\nmovdqa xmm5,xmm4\npunpcklbw xmm4,xmm15\npunpckhbw xmm5,xmm15\npsubw xmm0,xmm4\npsubw xmm1,xmm5\nmovdqu [rax],xmm0\nmovdqu [rax+16],xmm1\nadd rax,32\nadd rdx,16\nadd rsi,16\nadd rdi,16\ndec rcx\njnz 3b\nmov rax,[r11+80]\ntest rax,rax\njz 92f\npopfq\n92:\nmov rax,[r11+56]\nadd rax,[r11+32]\ninc rax\ncmp rax,[r11+24]\njae 8f\nmov rax,[r11+64]\ninc rax\nmov [r11+64],rax\n8:\nmov rax,[r11+56]\ncmp rax,[r11+32]\njb 9f\nmov rax,[r11+64]\ndec rax\nmov [r11+64],rax\n9:\nmov rax,[r11+88]\nshl rax,2\nadd [r11+8],rax\nmov rax,[r11+56]\ninc rax\nmov [r11+56],rax\ncmp rax,[r11+24]\njb 5b\nmovdqu xmm0,[r11+96]\nmovdqu xmm1,[r11+112]\nmovdqu xmm2,[r11+128]\nmovdqu xmm3,[r11+144]\nmovdqu xmm4,[r11+160]\nmovdqu xmm5,[r11+176]\nmovdqu xmm6,[r11+192]\nmovdqu xmm7,[r11+208]\nmovdqu xmm8,[r11+224]\nmovdqu xmm9,[r11+240]\nmovdqu xmm10,[r11+256]\nmovdqu xmm11,[r11+272]\nmovdqu xmm12,[r11+288]\nmovdqu xmm13,[r11+304]\nmovdqu xmm14,[r11+320]\nmovdqu xmm15,[r11+336]\n0:",
-            in("rdi") (&blk[0]) as u64,
-            clobber("rax"),
-            clobber("rcx"),
-            clobber("rdx"),
-            clobber("rsi"),
-            clobber("rdi"),
-            clobber("r8"),
-            clobber("r9"),
-            clobber("r10"),
-            clobber("r11"),
-            clobber("memory"))
-    }
-    if c4 < w {
-        blk[0] = quelle +% c4 *% 4
-        blk[1] = ziel +% c4 *% 4
-        blk[2] = w - c4
-        blk[3] = h
-        blk[4] = r
-        blk[5] = rt
-        blk[6] = sum +% c4 *% 8
-        blk[10] = 0
-        blk[11] = w
-        asm("mov rdx,rdi\nmov rax,[rdx+24]\ntest rax,rax\njz 0f\nmov rax,[rdx+16]\ntest rax,rax\njz 0f\nmov r8,[rdx+48]\ncld\nxor eax,eax\nmov rdi,r8\nmov rcx,[rdx+16]\nrep stosq\nlea rdi,[r8+27520]\nmov rcx,[rdx+16]\nrep stosq\nxor r10d,r10d\nxor r9d,r9d\n1:\ncmp r10,[rdx+32]\nja 4f\ncmp r10,[rdx+24]\njae 4f\nmov rsi,r10\nimul rsi,[rdx+88]\nmov rax,[rdx]\nlea rsi,[rax+rsi*4]\nxor edi,edi\n2:\nmov eax,[rsi+rdi*4]\nmov ecx,eax\nand ecx,16711935\nand eax,65280\nshl rax,24\nor rax,rcx\nadd [r8+rdi*8],rax\ninc rdi\ncmp rdi,[rdx+16]\njb 2b\ninc r9\ninc r10\njmp 1b\n4:\nmov [rdx+64],r9\nxor eax,eax\nmov [rdx+56],rax\n5:\nmov rax,[rdx+40]\nmov rcx,[rdx+64]\nmov rax,[rax+rcx*8]\nmov [rdx+72],rax\nmov rax,[rdx+56]\nadd rax,[rdx+32]\ninc rax\nlea rsi,[r8+27520]\ncmp rax,[rdx+24]\njae 6f\nimul rax,[rdx+88]\nmov rsi,[rdx]\nlea rsi,[rsi+rax*4]\n6:\nlea r9,[r8+27520]\nmov rax,[rdx+56]\ncmp rax,[rdx+32]\njb 7f\nsub rax,[rdx+32]\nimul rax,[rdx+88]\nmov r9,[rdx]\nlea r9,[r9+rax*4]\n7:\nmov r10,[rdx+8]\nxor edi,edi\n8:\nmov rax,[r8+rdi*8]\nmovzx ecx,ax\nimul rcx,[rdx+72]\nadd rcx,262144\nshr rcx,19\nmov r11,rax\nshr r11,16\nmovzx r11d,r11w\nimul r11,[rdx+72]\nadd r11,262144\nshr r11,19\nshl r11d,16\nor ecx,r11d\nshr rax,32\nmovzx eax,ax\nimul rax,[rdx+72]\nadd rax,262144\nshr rax,19\nshl eax,8\nor eax,ecx\nmov [r10+rdi*4],eax\nmov rax,[r8+rdi*8]\nmov ecx,[rsi+rdi*4]\nmov r11d,ecx\nand ecx,16711935\nand r11d,65280\nshl r11,24\nor rcx,r11\nadd rax,rcx\nmov ecx,[r9+rdi*4]\nmov r11d,ecx\nand ecx,16711935\nand r11d,65280\nshl r11,24\nor rcx,r11\nsub rax,rcx\nmov [r8+rdi*8],rax\ninc rdi\ncmp rdi,[rdx+16]\njb 8b\nmov rax,[rdx+56]\nadd rax,[rdx+32]\ninc rax\ncmp rax,[rdx+24]\njae 9f\nmov rax,[rdx+64]\ninc rax\nmov [rdx+64],rax\n9:\nmov rax,[rdx+56]\ncmp rax,[rdx+32]\njb 3f\nmov rax,[rdx+64]\ndec rax\nmov [rdx+64],rax\n3:\nmov rax,[rdx+88]\nshl rax,2\nadd [rdx+8],rax\nmov rax,[rdx+56]\ninc rax\nmov [rdx+56],rax\ncmp rax,[rdx+24]\njb 5b\n0:",
-            in("rdi") (&blk[0]) as u64,
-            clobber("rax"),
-            clobber("rcx"),
-            clobber("rdx"),
-            clobber("rsi"),
-            clobber("rdi"),
-            clobber("r8"),
-            clobber("r9"),
-            clobber("r10"),
-            clobber("r11"),
-            clobber("memory"))
-    }
-}
-
-// ------------------------------------------------ Toenung und Rauschen
-//
-// DAS RAUSCHEN IST NICHT DIE ZIERDE, SONDERN DER UNTERSCHIED.
-//
-// Ohne es sieht eine weichgezeichnete Flaeche aus wie Milchglas: zu
-// sauber, zu glatt, sie wirkt wie ein Filter und nicht wie ein Material.
-// Windows legt deshalb ein feines Korn darueber, und genau das ist der
-// Punkt, an dem Acryl anfaengt, nach Acryl auszusehen.
-//
-// Der Zufall muss dabei ORTSFEST sein -- er haengt an x und y und nicht
-// an einem laufenden Zaehler. Sonst flimmert die Flaeche bei jedem Bild
-// neu, und aus dem Korn wird Fernsehschnee. Das ist auch der Grund,
-// warum der Zwischenspeicher das Rauschen mitkopieren darf: es ist fuer
-// dieselbe Stelle immer dasselbe.
-fn blur_noise(x: u64, y: u64, amp: u64) -> u64 {
-    if amp == 0 {
-        return 0
-    }
-    // Ein billiger, ortsfester Streuwert. Zwei ungerade Primzahlen,
-    // gemischt und gefaltet -- kein Zufallsgenerator mit Zustand, denn
-    // ein Zustand waere genau das Flimmern, das hier nicht sein darf.
-    var v: u64 = x *% 73856093
-    v = v ^ (y *% 19349663)
-    v = v ^ (v >> 13)
-    v = v *% 2654435761
-    v = v ^ (v >> 15)
-    return v % (amp *% 2 + 1)
-}
-
-// Eine Farbe toenen und koernen. `tint` zieht sie in Richtung `ton`,
-// `amp` streut sie um bis zu amp Stufen nach oben oder unten.
-fn blur_mix(farbe: u64, ton: u64, tint: u64, amp: u64, x: u64,
-    y: u64) -> u64 {
-    var c: u64 = farbe
-    if tint != 0 {
-        c = wmdraw.mix24(c, ton, tint)
-    }
-    if amp == 0 {
-        return c
-    }
-    let d: u64 = blur_noise(x, y, amp)
-    // Der Streuwert liegt in 0..2*amp; die Mitte ist amp, und von dort
-    // aus geht es nach beiden Seiten. Ohne diese Verschiebung waere das
-    // Rauschen eine reine AUFHELLUNG und die Flaeche wuerde milchig.
-    var r: u64 = (c >> 16) & 255
-    var g: u64 = (c >> 8) & 255
-    var b: u64 = c & 255
-    if d >= amp {
-        let auf: u64 = d - amp
-        r = r + auf
-        g = g + auf
-        b = b + auf
-        if r > 255 {
-            r = 255
-        }
-        if g > 255 {
-            g = 255
-        }
-        if b > 255 {
-            b = 255
-        }
-    } else {
-        let ab: u64 = amp - d
-        if r > ab {
-            r = r - ab
-        } else {
-            r = 0
-        }
-        if g > ab {
-            g = g - ab
-        } else {
-            g = 0
-        }
-        if b > ab {
-            b = b - ab
-        } else {
-            b = 0
-        }
-    }
-    return (r << 16) | (g << 8) | b
-}
-
-// Der Platz, auf dem dieses Fenster mit diesem Rechteck liegt -- oder
-// BC_N, wenn es ihn nicht gibt.
-fn blur_slot(state: u64, i: u64, x0: u64, y0: u64, w: u64,
-    h: u64) -> u64 {
-    var k: u64 = 0
-    while k < wmbase.BC_N {
-        if wmlayout.gs(state, wmlayout.S_BC_WIN + k * 8) == i + 1
-            && wmlayout.gs(state, wmlayout.S_BC_X + k * 8) == x0
-            && wmlayout.gs(state, wmlayout.S_BC_Y + k * 8) == y0
-            && wmlayout.gs(state, wmlayout.S_BC_W + k * 8) == w
-            && wmlayout.gs(state, wmlayout.S_BC_H + k * 8) == h {
-            return k
-        }
-        k = k + 1
-    }
-    return wmbase.BC_N
-}
-
-// Ein freier Platz, sonst der naechste im Ring. Reihum und nicht "der
-// aelteste": eine Nutzungszaehlung je Platz waere ein zweiter Zustand,
-// der auseinander laufen kann, und bei vier Plaetzen fuer hoechstens
-// vier gleichzeitig sichtbare Flaechen trifft der Ring ohnehin fast
-// immer einen, der gerade nicht gebraucht wird.
-fn blur_freier(state: u64) -> u64 {
-    var k: u64 = 0
-    while k < wmbase.BC_N {
-        if wmlayout.gs(state, wmlayout.S_BC_WIN + k * 8) == 0 {
-            return k
-        }
-        k = k + 1
-    }
-    let n: u64 = wmlayout.gs(state, wmlayout.S_BC_NEXT) % wmbase.BC_N
-    wmlayout.ss(state, wmlayout.S_BC_NEXT, n + 1)
-    return n
-}
-
-// Darf dieses Fenster durchscheinen?
-//
-// DIE EBENE ENTSCHEIDET, NICHT DER GESCHMACK. Leiste (L_TOP),
-// Startmenue (L_MENU), Klapp- und Kontextmenues (L_POPUP) und Blasen
-// (L_TIP) -- ja. L_NORMAL und L_DESK NEIN, und das ist keine
-// Voreinstellung, sondern eine Struktur: ein Fenster von 900x650 kostet
-// 65,6 Prozent des Bildbudgets, zwei davon reissen es, Vollbild liegt
-// bei 227 Prozent. Es gibt deshalb auch keinen Schalter dafuer -- was
-// man nicht bezahlen kann, bietet man nicht an.
-// 24.09.2026: A WINDOW THAT COVERS THE WHOLE SCREEN IS OPAQUE. The login
-// and lock screens are undecorated full-screen windows on the top layer,
-// and the top layer is where the acrylic of the taskbar lives: they got
-// the glass treatment -- blur, grain, and a window alpha below 100 --
-// and every repainted strip showed the grain through the login screen.
-// Behind a window that covers everything there is nothing to see through
-// to, and behind a LOCK screen there must not be.
-fn deckt_schirm(state: u64, i: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    // Only ABOVE the ordinary windows: the desktop background (L_DESK)
-    // keeps whatever the theme gives it.
-    let l: u64 = wmlayout.wg(state, i, wmlayout.W_LAYER)
-    if l == wmlayout.L_DESK || l == wmlayout.L_NORMAL {
-        return false
-    }
-    return wmbase.win_x(state, i) <= 0 && wmbase.win_y(state, i) <= 0
-        && wmlayout.wg(state, i, wmlayout.W_W) >= wmlayout.gs(state, wmlayout.S_SW)
-        && wmlayout.wg(state, i, wmlayout.W_H) >= wmlayout.gs(state, wmlayout.S_SH)
-}
-
-fn blur_will(state: u64, i: u64) -> bool {
-    if wmgeom.form(state, wmlayout.FM_BLUR) == 0 {
-        return false
-    }
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    if deckt_schirm(state, i) {
-        return false
-    }
-    if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & (wmlayout.F_HIDDEN | wmlayout.F_TABBED)) != 0 {
-        return false
-    }
-    let l: u64 = wmlayout.wg(state, i, wmlayout.W_LAYER)
-    // L_TOAST steht hier ABSICHTLICH NICHT: die Einblendung bekommt
-    // keinen Blur, und die lange Begruendung dazu steht bei `L_TOAST`.
-    if l == wmlayout.L_TOP || l == wmlayout.L_MENU || l == wmlayout.L_POPUP || l == wmlayout.L_TIP {
-        return true
-    }
-    return false
-}
-
-// Die Deckung dieses Fensters, 0..255. 255 = vollstaendig deckend.
-fn win_opac(state: u64, i: u64) -> u64 {
-    if !wmbase.valid(state, i) {
-        return 255
-    }
-    let v: u64 = wmlayout.wg(state, i, wmlayout.W_OPAC)
-    if v == 0 {
-        return 255
-    }
-    return v - 1
-}
-
-fn set_opac(state: u64, i: u64, v: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    var w: u64 = v
-    if w > 255 {
-        w = 255
-    }
-    wmlayout.wsv(state, i, wmlayout.W_OPAC, w + 1)
-    wmdamage.damage_win(state, i)
-    return true
-}
-
-
-// ================================================================== W-WINOPTS S4: THE BRIGHTNESS BEHIND A WINDOW
-//
-// An app that floats over other windows (the Mini) wants its text black on a light background and white on a dark one. The server knows
-// what lies behind the window; the app does not. `backlum` measures the 8 x 4 points of the window's outer rectangle on the picture
-// of everything BELOW the window in the stacking order (never the window itself, never what lies above): the desktop colour, then
-// every visible window bottom up, each mixed in with its own opacity. A point in the frame of a window with decoration takes the
-// frame colours; windows that blur are taken as their buffer (the glass key colour), which is the honest limit of this measurement.
-// The result is the mean of the LINEAR luminance (Q16, `fui.backlum`) plus the second brightest and the second darkest sample.
-//
-// Measured only when asked, and only again when something under the window changed: `bl_touch` (called from `damage_ex`, next to
-// `blur_touch`, with the same `skip` rule) clears the cache of every window the changed rectangle touches. The window's own contents
-// (skip = itself) and the pointer (BT_ALL) never spoil it. The window moving or growing changes the key and measures again.
-const BL_MEAN: u64 = 0
-const BL_HI: u64 = 1
-const BL_LO: u64 = 2
-const BL_RUNS: u64 = 3
-const BL_HITS: u64 = 4
-
-// the colour of ONE point as it looks with everything below window `i` painted (0x00RRGGBB)
-fn bl_pixel(state: u64, i: u64, px: i64, py: i64) -> u64 {
-    var c: u64 = wmlayout.gs(state, wmlayout.S_DESK) & wmdraw.RGB24
-    let zi: u64 = win_z(state, i)
-    var z: u64 = 0
-    while z < zi {
-        let j: u64 = wmbase.at_z(state, z)
-        z = z + 1
-        if j >= wmbase.MAX_WIN || j == i {
-            continue
-        }
-        if (wmlayout.wg(state, j, wmlayout.W_FLAGS) & (wmlayout.F_HIDDEN | wmlayout.F_TABBED)) != 0 || !wmgate.darf(state, j) {
-            continue
-        }
-        let ox: i64 = wmbase.win_x(state, j)
-        let oy: i64 = wmbase.win_y(state, j)
-        if px < ox || py < oy || px >= ox + wmbase.outer_w(state, j) as i64 || py >= oy + wmbase.outer_h(state, j) as i64 {
-            continue
-        }
-        var p: u64 = 0
-        let cx: i64 = px - ox - wmbase.inx(state, j) as i64
-        let cy: i64 = py - oy - wmbase.iny(state, j) as i64
-        if cx >= 0 && cy >= 0 && cx < win_w(state, j) as i64 && cy < win_h(state, j) as i64 {
-            p = wmdraw.wget(state, j, cx as u64, cy as u64) & wmdraw.RGB24
-        } else if cy < 0 || (py - oy) < wmbase.iny(state, j) as i64 {
-            p = wmbase.deco_rgb(state, wmlayout.DK_TITLE) & wmdraw.RGB24
-        } else {
-            p = wmbase.deco_rgb(state, wmlayout.DK_FRAME) & wmdraw.RGB24
-        }
-        let a: u64 = win_opac(state, j)
-        if a >= 255 {
-            c = p
-        } else {
-            let r: u64 = (((c >> 16) & 0xFF) * (255 - a) + ((p >> 16) & 0xFF) * a) / 255
-            let g: u64 = (((c >> 8) & 0xFF) * (255 - a) + ((p >> 8) & 0xFF) * a) / 255
-            let b: u64 = ((c & 0xFF) * (255 - a) + (p & 0xFF) * a) / 255
-            c = (r << 16) | (g << 8) | b
-        }
-    }
-    return c
-}
-
-// measure the 8 x 4 points and fill the cache slots of window `i`
-fn bl_measure(state: u64, i: u64, x0: i64, y0: i64, w: u64, h: u64) {
-    var sum: u64 = 0
-    var hi1: u64 = 0
-    var hi2: u64 = 0
-    var lo1: u64 = 65536
-    var lo2: u64 = 65536
-    var iy: u64 = 0
-    while iy < BL_NY {
-        var ix: u64 = 0
-        while ix < BL_NX {
-            let px: i64 = x0 + ((2 * ix + 1) * w / (2 * BL_NX)) as i64
-            let py: i64 = y0 + ((2 * iy + 1) * h / (2 * BL_NY)) as i64
-            let l: u64 = backlum.lum_q16(bl_pixel(state, i, px, py))
-            sum = sum + l
-            if l > hi1 {
-                hi2 = hi1
-                hi1 = l
-            } else if l > hi2 {
-                hi2 = l
-            }
-            if l < lo1 {
-                lo2 = lo1
-                lo1 = l
-            } else if l < lo2 {
-                lo2 = l
-            }
-            ix = ix + 1
-        }
-        iy = iy + 1
-    }
-    wmlayout.wsv(state, i, wmlayout.W_BL_MEAN, sum / (BL_NX * BL_NY) + 1)
-    wmlayout.wsv(state, i, wmlayout.W_BL_HI, hi2)
-    wmlayout.wsv(state, i, wmlayout.W_BL_LO, lo2)
-    wmlayout.wsv(state, i, wmlayout.W_BL_RUNS, wmlayout.wg(state, i, wmlayout.W_BL_RUNS) + 1)
-}
-
-// What lies behind window `i`. which: BL_MEAN / BL_HI / BL_LO (Q16 linear luminance, 65536 = white), BL_RUNS / BL_HITS (the counters
-// of the cache; they never trigger a measurement). 0 for a window that does not exist.
-fn backlum(state: u64, i: u64, which: u64) -> u64 {
-    if !wmbase.valid(state, i) {
-        return 0
-    }
-    if which == BL_RUNS {
-        return wmlayout.wg(state, i, wmlayout.W_BL_RUNS)
-    }
-    if which == BL_HITS {
-        return wmlayout.wg(state, i, wmlayout.W_BL_HITS)
-    }
-    var x0: i64 = wmbase.win_x(state, i)
-    var y0: i64 = wmbase.win_y(state, i)
-    var x1: i64 = x0 + wmbase.outer_w(state, i) as i64
-    var y1: i64 = y0 + wmbase.outer_h(state, i) as i64
-    if x0 < 0 {
-        x0 = 0
-    }
-    if y0 < 0 {
-        y0 = 0
-    }
-    if x1 > wmlayout.gs(state, wmlayout.S_SW) as i64 {
-        x1 = wmlayout.gs(state, wmlayout.S_SW) as i64
-    }
-    if y1 > wmlayout.gs(state, wmlayout.S_SH) as i64 {
-        y1 = wmlayout.gs(state, wmlayout.S_SH) as i64
-    }
-    if x1 <= x0 || y1 <= y0 {
-        return 0
-    }
-    let kxy: u64 = (((x0 + 32768) as u64) << 32) | ((y0 + 32768) as u64)
-    let kwh: u64 = (((x1 - x0) as u64) << 32) | ((y1 - y0) as u64)
-    if wmlayout.wg(state, i, wmlayout.W_BL_MEAN) != 0 && wmlayout.wg(state, i, wmlayout.W_BL_XY) == kxy && wmlayout.wg(state, i, wmlayout.W_BL_WH) == kwh {
-        wmlayout.wsv(state, i, wmlayout.W_BL_HITS, wmlayout.wg(state, i, wmlayout.W_BL_HITS) + 1)
-    } else {
-        bl_measure(state, i, x0, y0, (x1 - x0) as u64, (y1 - y0) as u64)
-        wmlayout.wsv(state, i, wmlayout.W_BL_XY, kxy)
-        wmlayout.wsv(state, i, wmlayout.W_BL_WH, kwh)
-    }
-    if which == BL_HI {
-        return wmlayout.wg(state, i, wmlayout.W_BL_HI)
-    }
-    if which == BL_LO {
-        return wmlayout.wg(state, i, wmlayout.W_BL_LO)
-    }
-    return wmlayout.wg(state, i, wmlayout.W_BL_MEAN) - 1
-}
-
-// Scheint dieses Fenster durch? Nur dann muss die teurere Zeile her.
-fn win_durch(state: u64, i: u64) -> bool {
-    return win_opac(state, i) < 255
-}
-
-// EINE ZEILE, GEMISCHT statt kopiert.
-//
-// `fb_row` schiebt die Zeile wortweise in den Zweitpuffer und ist
-// damit die schnellste Zeile, die dieser Server hat -- aber sie DECKT.
-// Diese hier liest, was schon dasteht (und das ist nach `blur_flaeche`
-// genau die weichgezeichnete Flaeche), und mischt die Fensterzeile mit
-// `a` darueber. Sie wird NUR gerufen, wenn ein Fenster wirklich
-// durchscheinen will; alle anderen gehen weiter den billigen Weg.
-fn fb_row_mix(state: u64, x: u64, y: u64, src: u64, n: u64, a: u64) {
-    if y < fb.band_lo(state) {
-        return
-    }
-    if a >= 255 {
-        wmdraw.fb_row(state, x, y, src, n)
-        return
-    }
-    let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
-    comp.mix_row(ziel, src, n, a)
-}
-
 fn set_blur_cache(state: u64, on: bool) {
     if on {
         wmlayout.ss(state, wmlayout.S_BC_AUS, 0)
@@ -8131,536 +7514,9 @@ fn set_blur_cache(state: u64, on: bool) {
     }
 }
 
-fn blur_cache_on(state: u64) -> bool {
-    return wmlayout.gs(state, wmlayout.S_BC_AUS) == 0
-}
-
-fn blur_an(state: u64) -> bool {
-    return wmgeom.form(state, wmlayout.FM_BLUR) != 0
-}
-
-fn blur_radius(state: u64) -> u64 {
-    return wmgeom.form(state, wmlayout.FM_BLUR)
-}
-
-// Die Puffer besorgen. Sie kommen aus `mem.frame_run`, genau wie die
-// Fensterpuffer -- und EINMAL, nicht je Bild.
-fn blur_buffers(state: u64, bytes: u64) -> bool {
-    if wmlayout.gs(state, wmlayout.S_BC_SUM) == 0 {
-        let sb: u64 = 3 *% BLUR_W_MAX *% 8
-        let sr: u64 = (sb + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
-        let sp: u64 = mem.frame_run(state, sr)
-        if sp == 0 {
-            return false
-        }
-        wmlayout.ss(state, wmlayout.S_BC_SUM, sp)
-    }
-    // Die Einheit, mit der gerechnet wird: so gross muss EIN Platz
-    // sein. Der Puffer fasst BC_N Plaetze PLUS eine Ablage, die sich
-    // alle teilen -- die Ablage lebt nur waehrend eines Filterlaufs.
-    if wmlayout.gs(state, wmlayout.S_BC_EIN) >= bytes && wmlayout.gs(state, wmlayout.S_BC_BUF) != 0 {
-        return true
-    }
-    if wmlayout.gs(state, wmlayout.S_BC_BUF) != 0 {
-        mem.frame_free_run(state, wmlayout.gs(state, wmlayout.S_BC_BUF),
-            wmlayout.gs(state, wmlayout.S_BC_BYTES) / mem.FRAME_SIZE)
-        wmlayout.ss(state, wmlayout.S_BC_BUF, 0)
-        wmlayout.ss(state, wmlayout.S_BC_BYTES, 0)
-        blur_leeren(state)
-    }
-    let seiten: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
-    let ein: u64 = seiten *% mem.FRAME_SIZE
-    let rahmen: u64 = ein *% (wmbase.BC_N + 1) / mem.FRAME_SIZE
-    let bp: u64 = mem.frame_run(state, rahmen)
-    if bp == 0 {
-        return false
-    }
-    wmlayout.ss(state, wmlayout.S_BC_BUF, bp)
-    wmlayout.ss(state, wmlayout.S_BC_BYTES, rahmen *% mem.FRAME_SIZE)
-    wmlayout.ss(state, wmlayout.S_BC_EIN, ein)
-    blur_leeren(state)
-    return true
-}
-
-// Alle Plaetze fuer ungueltig erklaeren. Nach einem Wechsel der
-// Puffergroesse zeigen die alten Angaben auf Speicher, der so nicht
-// mehr eingeteilt ist -- ein Treffer darauf waere ein Bild aus fremdem
-// Speicher.
-fn blur_leeren(state: u64) {
-    var k: u64 = 0
-    while k < wmbase.BC_N {
-        wmlayout.ss(state, wmlayout.S_BC_WIN + k * 8, 0)
-        k = k + 1
-    }
-    wmlayout.ss(state, wmlayout.S_BC_NEXT, 0)
-}
-
-// ---------------------------------------------------------------------
-// DIE FLAECHE. Das ist die Stelle, an der alles zusammenkommt.
-//
-// Ablauf: pruefen, ob der Zwischenspeicher passt -> wenn ja, NUR
-// kopieren. Sonst: den Hintergrund aus dem Zweitpuffer holen, zweimal
-// Kasten darueber, toenen, koernen, ablegen und ausgeben.
-// FLICKER FIX (17.10.2026): is the blur of window `i` a cache hit right now (same slot, same rectangle, nothing spoiled it)? The
-// rectangle is built exactly as `blur_flaeche` builds it. Then `compose_rect` need not grow a dirty rectangle over the window.
-fn blur_hit_ok(state: u64, i: u64) -> bool {
-    if wmlayout.gs(state, wmlayout.S_BC_AUS) != 0 {
-        return false
-    }
-    var x0: i64 = wmbase.win_x(state, i)
-    var y0: i64 = wmbase.win_y(state, i)
-    var x1: i64 = x0 + wmbase.outer_w(state, i) as i64
-    var y1: i64 = y0 + wmbase.outer_h(state, i) as i64
-    if x0 < 0 {
-        x0 = 0
-    }
-    if y0 < fb.band_lo(state) as i64 {
-        y0 = fb.band_lo(state) as i64
-    }
-    if x1 > wmlayout.gs(state, wmlayout.S_SW) as i64 {
-        x1 = wmlayout.gs(state, wmlayout.S_SW) as i64
-    }
-    if y1 > wmlayout.gs(state, wmlayout.S_SH) as i64 {
-        y1 = wmlayout.gs(state, wmlayout.S_SH) as i64
-    }
-    if x1 <= x0 || y1 <= y0 {
-        return false
-    }
-    let tr: u64 = blur_slot(state, i, x0 as u64, y0 as u64, (x1 - x0) as u64, (y1 - y0) as u64)
-    if tr >= wmbase.BC_N {
-        return false
-    }
-    return wmlayout.gs(state, wmlayout.S_BC_HIT + tr * 8) == wmlayout.gs(state, wmlayout.S_BC_GEN + tr * 8)
-}
-
-// W-S: mixes `pct` percent white into one 0xAARRGGBB pixel (the edge highlight of a blurred surface).
-fn rim_mix(c: u64, pct: u64) -> u64 {
-    let r: u64 = (((c >> 16) & 255) *% (100 - pct) + 255 *% pct) / 100
-    let g: u64 = (((c >> 8) & 255) *% (100 - pct) + 255 *% pct) / 100
-    let b: u64 = ((c & 255) *% (100 - pct) + 255 *% pct) / 100
-    return (c & 0xFF000000) | (r << 16) | (g << 8) | b
-}
-
-fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
-    by1: i64, ton: u64, kx0: i64, ky0: i64, kx1: i64, ky1: i64) {
-    let r: u64 = wmgeom.form(state, wmlayout.FM_BLUR)
-    if r == 0 {
-        return
-    }
-    var x0: i64 = bx0
-    var y0: i64 = by0
-    var x1: i64 = bx1
-    var y1: i64 = by1
-    if x0 < 0 {
-        x0 = 0
-    }
-    if y0 < fb.band_lo(state) as i64 {
-        y0 = fb.band_lo(state) as i64
-    }
-    if x1 > wmlayout.gs(state, wmlayout.S_SW) as i64 {
-        x1 = wmlayout.gs(state, wmlayout.S_SW) as i64
-    }
-    if y1 > wmlayout.gs(state, wmlayout.S_SH) as i64 {
-        y1 = wmlayout.gs(state, wmlayout.S_SH) as i64
-    }
-    if x1 <= x0 || y1 <= y0 {
-        return
-    }
-    let w: u64 = (x1 - x0) as u64
-    let h: u64 = (y1 - y0) as u64
-    if w > BLUR_W_MAX {
-        return
-    }
-    let bytes: u64 = w *% h *% 4
-    if !blur_buffers(state, bytes) {
-        return
-    }
-    // Die Ablage liegt HINTER den vier Plaetzen und gehoert keinem --
-    // sie lebt nur waehrend dieses einen Filterlaufs.
-    let ein: u64 = wmlayout.gs(state, wmlayout.S_BC_EIN)
-    let a: u64 = wmlayout.gs(state, wmlayout.S_BC_BUF) +% wmbase.BC_N *% ein
-    // ------------------------------------------------ der Treffer
-    //
-    // Dasselbe Fenster, dasselbe Rechteck, derselbe Schmutzzaehler --
-    // dann steht auf dem Platz noch genau das Bild, das hier hingehoert.
-    let refm: bool = pixelguard.rendering()
-    var tr: u64 = wmbase.BC_N
-    if !refm {
-        tr = blur_slot(state, i, x0 as u64, y0 as u64, w, h)
-    }
-    if tr < wmbase.BC_N && wmlayout.gs(state, wmlayout.S_BC_AUS) == 0
-        && wmlayout.gs(state, wmlayout.S_BC_HIT + tr * 8) == wmlayout.gs(state, wmlayout.S_BC_GEN + tr * 8) {
-        let bq: u64 = wmlayout.gs(state, wmlayout.S_BC_BUF) +% tr *% ein
-        // FLICKER FIX (17.10.2026): a hit copies ONLY the part inside the clip (the dirty rectangle). The cached picture is the
-        // blurred backdrop of the whole window and stays right outside the clip too, but the window's own contents are painted
-        // only inside the clip -- so copying more would smear the old picture over the rest of the window. `compose_rect` no
-        // longer grows a dirty rectangle over a window whose blur is a cache hit (`blur_hit_ok`).
-        var cx0: i64 = x0
-        var cy0: i64 = y0
-        var cx1: i64 = x1
-        var cy1: i64 = y1
-        if kx0 > cx0 {
-            cx0 = kx0
-        }
-        if ky0 > cy0 {
-            cy0 = ky0
-        }
-        if kx1 < cx1 {
-            cx1 = kx1
-        }
-        if ky1 < cy1 {
-            cy1 = ky1
-        }
-        if cx1 > cx0 && cy1 > cy0 {
-            let cw: u64 = (cx1 - cx0) as u64
-            let off: u64 = (cx0 - x0) as u64
-            var yy: u64 = (cy0 - y0) as u64
-            let ye: u64 = (cy1 - y0) as u64
-            while yy < ye {
-                wmdraw.fb_row(state, cx0 as u64, y0 as u64 + yy,
-                    bq +% yy *% w *% 4 +% off *% 4, cw)
-                yy = yy + 1
-            }
-        }
-        wmlayout.ss(state, wmlayout.S_BLURCACHE, wmlayout.gs(state, wmlayout.S_BLURCACHE) + 1)
-        return
-    }
-    // Kein Treffer: entweder gibt es den Platz schon (dann wird er
-    // ueberschrieben) oder es braucht einen neuen.
-    var sl: u64 = tr
-    var b: u64 = 0
-    if refm {
-        b = pixelguard.blur_scratch(state, bytes)
-        if b == 0 {
-            return
-        }
-    } else {
-        if sl >= wmbase.BC_N {
-            sl = blur_freier(state)
-        }
-        b = wmlayout.gs(state, wmlayout.S_BC_BUF) +% sl *% ein
-    }
-    // ------------------------------------------------ gerechnet
-    let t0: u64 = time.tsc()
-    // 1. den Hintergrund aus dem ZWEITPUFFER holen. Hier steht schon
-    //    alles, was unter diesem Fenster liegt -- der Schreibtisch und
-    //    jedes tiefere Fenster. Das ist der "Hintergrund durchreichen"
-    //    des Auftrags, und er kostet nichts extra.
-    var yy: u64 = 0
-    while yy < h {
-        let zeile: u64 = (y0 as u64 + yy) *% fb.pitch(state)
-        let quelle: u64 = fb.draw_at(state) +% zeile +% x0 as u64 *% 4
-        wmdraw.copy_words(a +% yy *% w *% 4, quelle, w *% 4 / 8)
-        if (w & 1) != 0 {
-            __mmio_write32((a +% yy *% w *% 4 +% (w - 1) *% 4) as *mut u32,
-                __mmio_read32((quelle +% (w - 1) *% 4) as *mut u32))
-        }
-        yy = yy + 1
-    }
-    // 2. ZWEIMAL Kasten, jedes Mal waagrecht und senkrecht. Zweimal
-    //    hintereinander ist optisch fast ein Gauss und kostet einen
-    //    Bruchteil.
-    var rt: [u64; 40] = [0 as u64; 40]
-    var rk: u64 = 1
-    while rk < 40 {
-        rt[rk as usize] = recip_of(rk)
-        rk = rk + 1
-    }
-    let rtp: u64 = (&rt[0]) as u64
-    let simd: bool = fb.simd_ok(state)
-    blur_h(a, b, w, h, r, rtp, simd)
-    blur_v(state, b, a, w, h, r, rtp, simd)
-    blur_h(a, b, w, h, r, rtp, simd)
-    blur_v(state, b, a, w, h, r, rtp, simd)
-    // 3. Toenung und Rauschen, und dann hinaus. Beides in EINEM
-    //    Durchgang ueber die Flaeche -- und in denselben Puffer `b`
-    //    geschrieben, aus dem der naechste Treffer kopiert.
-    let tint: u64 = wmgeom.form(state, wmlayout.FM_BLURTINT)
-    let amp: u64 = wmgeom.form(state, wmlayout.FM_BLURNOISE)
-    let rim: u64 = wmgeom.form(state, wmlayout.FM_BLURRIM)
-    // r399 (design audit): THE FROSTING FOLLOWS THE ROUNDED SHAPE. The filter
-    // ran over the whole outer rectangle, so a window with rounded corners
-    // (the start menu, tooltips) showed a grey blurred square behind each
-    // corner: the corner pixels outside the arc are transparent, the blurred
-    // rectangle shone through them. Pixels outside the corner arc of the
-    // window (radius FM_RADIUS, the same number the frame uses) now keep the
-    // unblurred picture that is already in the second buffer.
-    var crad: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
-    if crad > wmdraw.RADIUS_MAX {
-        crad = wmdraw.RADIUS_MAX
-    }
-    let wl: i64 = bx0
-    let wt: i64 = by0
-    let wr: i64 = bx1
-    let wb: i64 = by1
-    // r464: the middle of every row (all of it, except in the corner rows, where only the part between the two corner columns)
-    // goes through ONE assembly loop (`tools/blur/blurasm.py`, block M): tint, grain and clamp in registers, 5 - 10 ns a
-    // pixel instead of about 120. The few pixels in the corner columns keep the Firn code below: they decide per pixel
-    // whether the frosting follows the rounded shape.
-    var mblk: [u64; 56] = [0 as u64; 56]   // 24 words + 32 words for the caller's vector registers (routine s)
-    var tclip: u64 = tint
-    if tclip > 100 {
-        tclip = 100
-    }
-    mblk[5] = amp
-    mblk[6] = amp *% 2 + 1
-    mblk[7] = 100 - tclip
-    mblk[8] = ((ton >> 16) & 255) *% tclip
-    mblk[9] = ((ton >> 8) & 255) *% tclip
-    mblk[10] = (ton & 255) *% tclip
-    // r466: the grain's modulus as a multiplication: block G writes the magic number and the shift for d = 2 * amp + 1 once per blur
-    asm("mov r11,rdi\nmov rcx,[r11+48]\ncmp rcx,3\njb 0f\nbsr rcx,rcx\nmov [r11+104],rcx\nmov edx,1\nshl rdx,cl\nxor eax,eax\nmov rsi,[r11+48]\ndiv rsi\nmov rdi,rdx\nadd rax,rax\nadd rdi,rdi\njc 1f\ncmp rdi,rsi\njb 2f\n1:\ninc rax\n2:\ninc rax\nmov [r11+96],rax\n0:",
-        in("rdi") (&mblk[0]) as u64,
-        clobber("rax"),
-        clobber("rcx"),
-        clobber("rdx"),
-        clobber("rsi"),
-        clobber("rdi"),
-        clobber("r8"),
-        clobber("r9"),
-        clobber("r10"),
-        clobber("r11"),
-        clobber("memory"))
-    var ry: u64 = 0
-    while ry < h {
-        let qz: u64 = a +% ry *% w *% 4
-        let zz: u64 = b +% ry *% w *% 4
-        let py: i64 = y0 + ry as i64
-        var corner_row: bool = false
-        var cyc: i64 = 0
-        if crad > 0 {
-            if py < wt + crad as i64 {
-                corner_row = true
-                cyc = wt + crad as i64
-            } else if py >= wb - crad as i64 {
-                corner_row = true
-                cyc = wb - crad as i64
-            }
-        }
-        // [ms, me) = the columns that cannot be inside a corner column: the assembly takes them
-        var ms: u64 = 0
-        var me: u64 = w
-        if corner_row {
-            let lo: i64 = wl + crad as i64 - x0
-            let hi: i64 = wr - crad as i64 - x0
-            if hi <= lo || hi <= 0 || lo >= w as i64 {
-                ms = 0
-                me = 0
-            } else {
-                if lo > 0 {
-                    ms = lo as u64
-                }
-                if hi < w as i64 {
-                    me = hi as u64
-                }
-            }
-        }
-        var rx: u64 = 0
-        while rx < w {
-            if rx == ms && me > ms {
-                mblk[0] = qz +% ms *% 4
-                mblk[1] = zz +% ms *% 4
-                mblk[2] = me - ms
-                mblk[3] = x0 as u64 + ms
-                mblk[4] = (y0 as u64 + ry) *% 19349663
-                // r481: four pixels at a time in SSE2 (routine s: tint + clamp in vector registers, the grain's hash stays scalar), the
-                // rest of the run through the scalar routine m below; the interrupts stay off for the run
-                if simd {
-                    mblk[15] = 1
-                    asm("mov r11,rdi\nmov rax,[r11+16]\nshr rax,2\njz 0f\nmovdqu [r11+192],xmm0\nmovdqu [r11+208],xmm1\nmovdqu [r11+224],xmm2\nmovdqu [r11+240],xmm3\nmovdqu [r11+256],xmm4\nmovdqu [r11+272],xmm5\nmovdqu [r11+288],xmm6\nmovdqu [r11+304],xmm7\nmovdqu [r11+320],xmm8\nmovdqu [r11+336],xmm9\nmovdqu [r11+352],xmm10\nmovdqu [r11+368],xmm11\nmovdqu [r11+384],xmm12\nmovdqu [r11+400],xmm13\nmovdqu [r11+416],xmm14\nmovdqu [r11+432],xmm15\nmov rdi,rax\nmov r8,[r11]\nmov r9,[r11+8]\nmov r10,[r11+24]\nmov rax,[r11+120]\ntest rax,rax\njz 91f\npushfq\ncli\n91:\npxor xmm0,xmm0\nmov rax,[r11+56]\nmovd xmm1,eax\npshuflw xmm1,xmm1,0\npshufd xmm1,xmm1,0\nmov rax,[r11+80]\nmov rcx,[r11+72]\nshl rcx,16\nor rax,rcx\nmov rcx,[r11+64]\nshl rcx,32\nor rax,rcx\nmovq xmm2,rax\npunpcklqdq xmm2,xmm2\nmov eax,5243\nmovd xmm3,eax\npshuflw xmm3,xmm3,0\npshufd xmm3,xmm3,0\npcmpeqd xmm4,xmm4\npsrld xmm4,8\nmov rax,[r11+40]\ntest rax,rax\njz 3f\n1:\nmov rcx,r10\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rsi,rcx\nmov rax,[r11+96]\nmul rcx\nmov rax,rsi\nsub rax,rdx\nshr rax,1\nadd rax,rdx\nmov rcx,[r11+104]\nshr rax,cl\nimul rax,[r11+48]\nsub rsi,rax\nsub rsi,[r11+40]\nmovzx esi,si\nmov rax,0x0001000100010001\nimul rsi,rax\nmov [r11+128],rsi\nlea rcx,[r10+1]\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rsi,rcx\nmov rax,[r11+96]\nmul rcx\nmov rax,rsi\nsub rax,rdx\nshr rax,1\nadd rax,rdx\nmov rcx,[r11+104]\nshr rax,cl\nimul rax,[r11+48]\nsub rsi,rax\nsub rsi,[r11+40]\nmovzx esi,si\nmov rax,0x0001000100010001\nimul rsi,rax\nmov [r11+136],rsi\nlea rcx,[r10+2]\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rsi,rcx\nmov rax,[r11+96]\nmul rcx\nmov rax,rsi\nsub rax,rdx\nshr rax,1\nadd rax,rdx\nmov rcx,[r11+104]\nshr rax,cl\nimul rax,[r11+48]\nsub rsi,rax\nsub rsi,[r11+40]\nmovzx esi,si\nmov rax,0x0001000100010001\nimul rsi,rax\nmov [r11+144],rsi\nlea rcx,[r10+3]\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rsi,rcx\nmov rax,[r11+96]\nmul rcx\nmov rax,rsi\nsub rax,rdx\nshr rax,1\nadd rax,rdx\nmov rcx,[r11+104]\nshr rax,cl\nimul rax,[r11+48]\nsub rsi,rax\nsub rsi,[r11+40]\nmovzx esi,si\nmov rax,0x0001000100010001\nimul rsi,rax\nmov [r11+152],rsi\nmovdqu xmm6,[r8]\nmovdqa xmm7,xmm6\npunpcklbw xmm6,xmm0\npunpckhbw xmm7,xmm0\npmullw xmm6,xmm1\npmullw xmm7,xmm1\npaddw xmm6,xmm2\npaddw xmm7,xmm2\npmulhuw xmm6,xmm3\npmulhuw xmm7,xmm3\npsrlw xmm6,3\npsrlw xmm7,3\nmovdqu xmm8,[r11+128]\nmovdqu xmm9,[r11+144]\npaddw xmm6,xmm8\npaddw xmm7,xmm9\npackuswb xmm6,xmm7\npand xmm6,xmm4\nmovdqu [r9],xmm6\nadd r8,16\nadd r9,16\nadd r10,4\ndec rdi\njnz 1b\njmp 4f\n3:\nmovdqu xmm6,[r8]\nmovdqa xmm7,xmm6\npunpcklbw xmm6,xmm0\npunpckhbw xmm7,xmm0\npmullw xmm6,xmm1\npmullw xmm7,xmm1\npaddw xmm6,xmm2\npaddw xmm7,xmm2\npmulhuw xmm6,xmm3\npmulhuw xmm7,xmm3\npsrlw xmm6,3\npsrlw xmm7,3\npackuswb xmm6,xmm7\npand xmm6,xmm4\nmovdqu [r9],xmm6\nadd r8,16\nadd r9,16\nadd r10,4\ndec rdi\njnz 3b\n4:\nmov rax,[r11+120]\ntest rax,rax\njz 92f\npopfq\n92:\nmovdqu xmm0,[r11+192]\nmovdqu xmm1,[r11+208]\nmovdqu xmm2,[r11+224]\nmovdqu xmm3,[r11+240]\nmovdqu xmm4,[r11+256]\nmovdqu xmm5,[r11+272]\nmovdqu xmm6,[r11+288]\nmovdqu xmm7,[r11+304]\nmovdqu xmm8,[r11+320]\nmovdqu xmm9,[r11+336]\nmovdqu xmm10,[r11+352]\nmovdqu xmm11,[r11+368]\nmovdqu xmm12,[r11+384]\nmovdqu xmm13,[r11+400]\nmovdqu xmm14,[r11+416]\nmovdqu xmm15,[r11+432]\nmov [r11],r8\nmov [r11+8],r9\nmov [r11+24],r10\nmov rax,[r11+16]\nand rax,3\nmov [r11+16],rax\n0:",
-                        in("rdi") (&mblk[0]) as u64,
-                        clobber("rax"),
-                        clobber("rcx"),
-                        clobber("rdx"),
-                        clobber("rsi"),
-                        clobber("rdi"),
-                        clobber("r8"),
-                        clobber("r9"),
-                        clobber("r10"),
-                        clobber("r11"),
-                        clobber("memory"))
-                }
-                asm("mov r11,rdi\nmov rax,[r11+16]\ntest rax,rax\njz 0f\nmov r8,[r11]\nmov r9,[r11+8]\nmov r10,[r11+24]\n1:\nmov rcx,[r11+40]\ntest rcx,rcx\njz 2f\nmov rcx,r10\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rsi,rcx\nmov rax,[r11+96]\nmul rcx\nmov rax,rsi\nsub rax,rdx\nshr rax,1\nadd rax,rdx\nmov rcx,[r11+104]\nshr rax,cl\nimul rax,[r11+48]\nsub rsi,rax\nsub rsi,[r11+40]\nmov [r11+88],rsi\n2:\nmov eax,[r8]\nmov esi,eax\nshr esi,16\nand esi,255\nmov edi,eax\nshr edi,8\nand edi,255\nmov ecx,eax\nand ecx,255\nimul rsi,[r11+56]\nadd rsi,[r11+64]\nimul rsi,rsi,5243\nshr rsi,19\nimul rdi,[r11+56]\nadd rdi,[r11+72]\nimul rdi,rdi,5243\nshr rdi,19\nimul rcx,[r11+56]\nadd rcx,[r11+80]\nimul rcx,rcx,5243\nshr rcx,19\nmov rdx,[r11+40]\ntest rdx,rdx\njz 3f\nmov rdx,[r11+88]\nadd rsi,rdx\nxor eax,eax\ntest rsi,rsi\ncmovs rsi,rax\nmov eax,255\ncmp rsi,rax\ncmova rsi,rax\nadd rdi,rdx\nxor eax,eax\ntest rdi,rdi\ncmovs rdi,rax\nmov eax,255\ncmp rdi,rax\ncmova rdi,rax\nadd rcx,rdx\nxor eax,eax\ntest rcx,rcx\ncmovs rcx,rax\nmov eax,255\ncmp rcx,rax\ncmova rcx,rax\n3:\nshl rsi,16\nshl rdi,8\nor rsi,rdi\nor rsi,rcx\nmov [r9],esi\nadd r8,4\nadd r9,4\ninc r10\nmov rax,[r11+16]\ndec rax\nmov [r11+16],rax\njnz 1b\n0:",
-                    in("rdi") (&mblk[0]) as u64,
-                    clobber("rax"),
-        clobber("rcx"),
-        clobber("rdx"),
-        clobber("rsi"),
-        clobber("rdi"),
-        clobber("r8"),
-        clobber("r9"),
-        clobber("r10"),
-        clobber("r11"),
-        clobber("memory"))
-                rx = me
-            } else {
-                let c: u64 = __mmio_read32((qz +% rx *% 4) as *mut u32) as u64
-                var keep: bool = false
-                if corner_row {
-                    let pxx: i64 = x0 + rx as i64
-                    var cxc: i64 = 0
-                    var in_col: bool = false
-                    if pxx < wl + crad as i64 {
-                        in_col = true
-                        cxc = wl + crad as i64
-                    } else if pxx >= wr - crad as i64 {
-                        in_col = true
-                        cxc = wr - crad as i64
-                    }
-                    if in_col {
-                        let ddx: i64 = 2 * (pxx - cxc) + 1
-                        let ddy: i64 = 2 * (py - cyc) + 1
-                        let rr2: i64 = 4 * (crad as i64) * (crad as i64)
-                        if ddx * ddx + ddy * ddy > rr2 {
-                            keep = true
-                        }
-                    }
-                }
-                if keep {
-                    let orow: u64 = fb.draw_at(state) +% (y0 as u64 + ry) *% fb.pitch(state)
-                    let orig: u64 = orow +% (x0 as u64 + rx) *% 4
-                    __mmio_write32((zz +% rx *% 4) as *mut u32,
-                        __mmio_read32(orig as *mut u32))
-                } else {
-                    __mmio_write32((zz +% rx *% 4) as *mut u32,
-                        blur_mix(c, ton, tint, amp, x0 as u64 + rx,
-                            y0 as u64 + ry) as u32)
-                }
-                rx = rx + 1
-            }
-        }
-        // W-S edge highlight: white is mixed into the outermost top row (between the corner arcs) and the two side columns of the
-        // window, inside the cached picture, so a cache hit brings it along.
-        if rim > 0 {
-            if py == wt {
-                var hx: i64 = wl + crad as i64
-                while hx < wr - crad as i64 {
-                    if hx >= x0 && hx < x1 {
-                        let hp: u64 = zz +% (hx - x0) as u64 *% 4
-                        __mmio_write32(hp as *mut u32, rim_mix(__mmio_read32(hp as *mut u32) as u64, rim) as u32)
-                    }
-                    hx = hx + 1
-                }
-            } else if py > wt + crad as i64 && py < wb - crad as i64 {
-                if wl >= x0 && wl < x1 {
-                    let hp: u64 = zz +% (wl - x0) as u64 *% 4
-                    __mmio_write32(hp as *mut u32, rim_mix(__mmio_read32(hp as *mut u32) as u64, rim) as u32)
-                }
-                if wr - 1 >= x0 && wr - 1 < x1 {
-                    let hp: u64 = zz +% (wr - 1 - x0) as u64 *% 4
-                    __mmio_write32(hp as *mut u32, rim_mix(__mmio_read32(hp as *mut u32) as u64, rim) as u32)
-                }
-            }
-        }
-        wmdraw.fb_row(state, x0 as u64, y0 as u64 + ry, zz, w)
-        ry = ry + 1
-    }
-    // 4. den Speicher anschreiben -- mit dem Zaehlerstand VON JETZT.
-    if refm {
-        return
-    }
-    wmlayout.ss(state, wmlayout.S_BC_WIN + sl * 8, i + 1)
-    wmlayout.ss(state, wmlayout.S_BC_X + sl * 8, x0 as u64)
-    wmlayout.ss(state, wmlayout.S_BC_Y + sl * 8, y0 as u64)
-    wmlayout.ss(state, wmlayout.S_BC_W + sl * 8, w)
-    wmlayout.ss(state, wmlayout.S_BC_H + sl * 8, h)
-    wmlayout.ss(state, wmlayout.S_BC_HIT + sl * 8, wmlayout.gs(state, wmlayout.S_BC_GEN + sl * 8))
-    wmlayout.ss(state, wmlayout.S_BC_STAMP + sl * 8, wmlayout.gs(state, wmlayout.S_FRAME))
-    wmlayout.ss(state, wmlayout.S_BLURS, wmlayout.gs(state, wmlayout.S_BLURS) + 1)
-    wmlayout.ss(state, wmlayout.S_BLURPX, wmlayout.gs(state, wmlayout.S_BLURPX) + w *% h)
-    let kh: u64 = time.khz(state)
-    if kh >= 1000 {
-        let t1: u64 = time.tsc()
-        if t1 > t0 {
-            wmlayout.ss(state, wmlayout.S_BLURUS, wmlayout.gs(state, wmlayout.S_BLURUS) + (t1 - t0) / (kh / 1000))
-            // r460: one line per computed blur when the kernel word `phases` is on (which window, how big, how long, and why it
-            // was not a cache hit: 0 = no slot yet / other rectangle, 1 = the slot's picture was spoiled)
-            if fb.phases_an(state) {
-                var s_bl: [u8; 15] = "wm: blurrun i=\0"
-                var s_bw: [u8; 4] = " w=\0"
-                var s_bh: [u8; 4] = " h=\0"
-                var s_bu: [u8; 5] = " us=\0"
-                var s_bm: [u8; 7] = " miss=\0"
-                var s_bs: [u8; 7] = " simd=\0"
-                serial.puts((&s_bl[0]) as u64)
-                serial.dec(i)
-                serial.puts((&s_bw[0]) as u64)
-                serial.dec(w)
-                serial.puts((&s_bh[0]) as u64)
-                serial.dec(h)
-                serial.puts((&s_bu[0]) as u64)
-                serial.dec((t1 - t0) / (kh / 1000))
-                serial.puts((&s_bm[0]) as u64)
-                if tr < wmbase.BC_N {
-                    serial.dec(1)
-                } else {
-                    serial.dec(0)
-                }
-                serial.puts((&s_bs[0]) as u64)
-                if simd {
-                    serial.dec(1)
-                } else {
-                    serial.dec(0)
-                }
-                serial.nl()
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------- die Ableser
 fn blurs(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_BLURS)
-}
-
-fn blur_cached(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_BLURCACHE)
-}
-
-fn blur_px(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_BLURPX)
-}
-
-fn blur_us(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_BLURUS)
-}
-
-fn blur_treffer(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_BLURCACHE)
-}
-
-fn blur_fehl(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_BLURS)
-}
-
-// Die Trefferquote in Prozent -- kopiert von allen Flaechen zusammen.
-// Sie steht hier und nicht im Auswerter, weil sie AUS ZWEI Zahlen
-// besteht und zwei Zahlen an zwei Stellen auseinander laufen.
-fn blur_quote(state: u64) -> u64 {
-    let ganz: u64 = wmlayout.gs(state, wmlayout.S_BLURS) + wmlayout.gs(state, wmlayout.S_BLURCACHE)
-    if ganz == 0 {
-        return 0
-    }
-    return wmlayout.gs(state, wmlayout.S_BLURCACHE) *% 100 / ganz
-}
-
-fn blur_frn(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_BLURS) + wmlayout.gs(state, wmlayout.S_BLURCACHE)
-}
-
-fn blur_frus(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_BLURUS)
-}
-
-fn blur_frmax(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_BLURPX)
-}
-
-fn blur_reset(state: u64) {
-    wmlayout.ss(state, wmlayout.S_BLURS, 0)
-    wmlayout.ss(state, wmlayout.S_BLURCACHE, 0)
-    wmlayout.ss(state, wmlayout.S_BLURPX, 0)
-    wmlayout.ss(state, wmlayout.S_BLURUS, 0)
 }
 
 // The old red close box of the classic shape (FM_CAPTION = 0): the same loop as before, in a function of its own so that a
@@ -8747,9 +7603,9 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // danach selbst deckend darueber malt, verdeckt den Blur ohnehin.
     // Sichtbar bleibt er dort, wo die Anwendung durchscheinen laesst --
     // und die Leiste dieses Systems tut das.
-    if blur_will(state, i) {
+    if wmblur.blur_will(state, i) {
         let ph_t: u64 = time.tsc()
-        blur_flaeche(state, i, wx, wy, wx + ow, wy + oh,
+        wmblur.blur_flaeche(state, i, wx, wy, wx + ow, wy + oh,
             wmbase.deco(state, wmlayout.DK_TITLE), cx0 as i64, cy0 as i64, cx1 as i64,
             cy1 as i64)
         ph_add(state, wmlayout.S_PH_BLUR, ph_t, time.tsc())
@@ -8792,14 +7648,14 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         }
         // `win_opac` ist 0..255, `alpha` ist 0..100 Prozent. Der
         // kleinere der beiden gewinnt, in Prozent gerechnet.
-        let op: u64 = win_opac(state, i)
+        let op: u64 = wmblur.win_opac(state, i)
         if op < 255 {
             let opp: u64 = op *% 100 / 255
             if opp < alpha {
                 alpha = opp
             }
         }
-        if deckt_schirm(state, i) {
+        if wmblur.deckt_schirm(state, i) {
             alpha = 100
         }
         // ============================================ RUNDE DREI (G-006)
@@ -8857,7 +7713,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         var grund: u64 = 0
         if pw < wmbase.MAX_WIN && i == pw && wmgeom.form(state, wmlayout.FM_BLUR) > 0 {
             let ph_g: u64 = time.tsc()
-            grund = glass_prepare(state, wx, wy, wmlayout.wg(state, i, wmlayout.W_W),
+            grund = wmglass.glass_prepare(state, wx, wy, wmlayout.wg(state, i, wmlayout.W_W),
                 wmlayout.wg(state, i, wmlayout.W_H), wmgeom.form(state, wmlayout.FM_BLUR))
             ph_add(state, wmlayout.S_PH_GLASS, ph_g, time.tsc())
         }
@@ -8865,15 +7721,15 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         // Die Zaehlung des wirksamen Alphas gilt der LEISTE; siehe
         // `glass_stat_an`.
         let ist_leiste: bool = pw < wmbase.MAX_WIN && i == pw
-        glass_stat_an(ist_leiste)
+        wmglass.glass_stat_an(ist_leiste)
         // UND DIE LESBARKEITSSCHRANKE GILT FUER BEIDE, ABER NICHT MIT
         // DERSELBEN ZAHL. Ein Fenster ohne Schmuck ist entweder die
         // Leiste (drei Beschriftungen auf leerer Flaeche, 40 Stufen)
         // oder der Schreibtisch bzw. ein Fenster, das seinen Rahmen
         // selbst malt (Schrift von oben bis unten, 20 Stufen).
-        var sch: u64 = SCHLEIER_WIN
+        var sch: u64 = wmglass.SCHLEIER_WIN
         if ist_leiste {
-            sch = SCHLEIER
+            sch = wmglass.SCHLEIER
         }
         var gr: i64 = by0
         while gr < by1 {
@@ -8882,12 +7738,12 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
                 zeile = grund +% ((gr - wy) as u64 *% wmlayout.wg(state, i, wmlayout.W_W)
                     +% (bx0 - wx) as u64) *% 4
             }
-            fb_row_a(state, bx0 as u64, gr as u64,
+            wmglass.fb_row_a(state, bx0 as u64, gr as u64,
                 bq +% (gr - wy) as u64 *% bw *% 4
                 +% (bx0 - wx) as u64 *% 4, bn, alpha, key, zeile, sch)
             gr = gr + 1
         }
-        glass_stat_an(false)
+        wmglass.glass_stat_an(false)
         // r368: THE ALPHA LINE FROM THE PLACE WHERE THE BAR IS MIXED.
         //
         // `glas_bericht` writes `wm: glas alpha_soll=..` once, at the START of
@@ -8902,7 +7758,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         if ist_leiste {
             ga_blits = ga_blits + 1
             if ga_blits == 1 || ga_blits % 240 == 0 {
-                glas_alpha_say(state)
+                wmglass.glas_alpha_say(state)
             }
         }
         wmlayout.ss(state, wmlayout.S_BLITS, wmlayout.gs(state, wmlayout.S_BLITS) + 1)
@@ -8969,7 +7825,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // GEMELDET, damit die Abnahme alle vier Ecken findet und nicht nur
     // die, deren Koordinaten zufaellig auch das Programm kennt.
     if aktiv {
-        rahmen_say(wx, wy, ow, oh, wmgeom.form(state, wmlayout.FM_RADIUS))
+        wmglass.rahmen_say(wx, wy, ow, oh, wmgeom.form(state, wmlayout.FM_RADIUS))
     }
     // die Titelleiste
     //
@@ -9120,7 +7976,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // Zahl dazu steht in `wm: glas ... cache=`.
     var wgrund: u64 = 0
     if wa < 100 && wmgeom.form(state, wmlayout.FM_BLUR) > 0 {
-        wgrund = glass_prepare(state, px0, py0, ww, wmlayout.wg(state, i, wmlayout.W_H),
+        wgrund = wmglass.glass_prepare(state, px0, py0, ww, wmlayout.wg(state, i, wmlayout.W_H),
             wmgeom.form(state, wmlayout.FM_BLUR))
     }
     var r: i64 = sy0
@@ -9162,9 +8018,9 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
                 if wgrund != 0 {
                     gz = wgrund +% (zeile *% ww +% spalte) *% 4
                 }
-                fb_row_a(state, rx0 as u64, r as u64,
+                wmglass.fb_row_a(state, rx0 as u64, r as u64,
                     quelle +% zeile *% ww *% 4 +% spalte *% 4, n, wa, wkey, gz,
-                    SCHLEIER_WIN)
+                    wmglass.SCHLEIER_WIN)
             }
         }
         r = r + 1
@@ -10002,1023 +8858,7 @@ fn rund_saum(state: u64, wx: i64, cx0: i64, cx1: i64, ww: u64, y: u64,
         i = i + 1
     }
 }
-
-// =====================================================================
-// RUNDE GLAS: DIE DURCHSICHTIGE FLAECHE
-// =====================================================================
-//
-// SCHLUESSELFARBE UND ABSTANDSALPHA -- die eine Rechnung, und warum sie
-// nicht einfach "alles mit 40 Prozent" ist.
-//
-// Ein gleichmaessiges Alpha ueber die ganze Leistenflaeche macht AUCH
-// DIE SCHRIFT durchsichtig. Genau daran zerbricht die Zusage "4,5:1"
-// der Runde THEME: weisse Leistenschrift, zu 40 Prozent ueber ein
-// helles Hintergrundbild gemischt, hat gegen denselben Grund gemessen
-// keinen Kontrast mehr, sondern 1,6:1 -- unlesbar, und zwar genau auf
-// den Bildern, auf denen Transparenz am huebschesten aussieht.
-//
-// Deshalb bekommt der Kern mit `FM_GLASS_KEY` die Farbe, mit der Ring 3
-// die Flaeche ausgefuellt hat, und mischt NACH ABSTAND ZU IHR:
-//
-//   d = |dr| + |dg| + |db|                    Abstand zur Grundfarbe
-//   a = alpha + (100 - alpha) * min(d,96)/96  Deckung dieses Punktes
-//
-// Ein Punkt der FLAECHE (d = 0) bekommt genau `alpha` und wird
-// durchsichtig. Ein Punkt der SCHRIFT (d gross) bekommt 100 und bleibt
-// Zahl fuer Zahl so deckend wie vor dieser Runde. Die kantengeglaetteten
-// Raender eines Zeichens liegen dazwischen und bekommen dazwischen --
-// deshalb `min(d,96)/96` und keine Schwelle: eine Schwelle haette
-// Treppen an jeden Buchstaben gemalt.
-//
-// 96 ist die Zahl, bei der ein Punkt voll deckend wird. Sie ist so
-// gewaehlt, dass der Unterschied zwischen zwei benachbarten Flaechen
-// desselben Themas (Leistengrund und Knopfgrund liegen in allen zehn
-// Vorlagen unter 30 Stufen auseinander) noch MITGEMISCHT wird, ein
-// Buchstabe (ueber 300 Stufen in jedem Thema) aber nicht.
-//
-// DIESE FUNKTION RECHNET NICHT SELBST, SIE RUFT `blend`. Das ist die
-// Zusage "genau eine Stelle mischt": hier steht, WIE DECKEND ein Punkt
-// ist, und in `blend` steht, was Mischen heisst.
-// `schleier` ist die Untergrenze der Lesbarkeit in Helligkeitsstufen:
-// SCHLEIER fuer die Leiste, SCHLEIER_WIN fuer ein gewoehnliches
-// Fenster. Sie steht als ARGUMENT und nicht als stille Statische, weil
-// sonst der Aufrufer, der sie zuletzt gesetzt hat, ueber das Bild des
-// naechsten entscheidet -- derselbe Fehler, den `gaist_an` fuer die
-// Zaehlung nur deshalb nicht macht, weil dort jeder Aufrufer sie
-// hinterher wieder abschaltet.
-fn glass_mix(alt: u64, neu: u64, key: u64, alpha: u64,
-    schleier: u64) -> u64 {
-    if alpha >= 100 {
-        return neu
-    }
-    // ============================================ RUNDE GLAS (fix-r4-2)
-    // DIE TEXTPLATTE STICHT JEDES ALPHA.
-    //
-    // Ring 3 setzt die Marke `PLATTE_MARKE` in die oberen acht Bit
-    // jedes Bildpunktes, auf dem Schrift steht (kernel/user/wlibc.fi,
-    // `platte`). Ein markierter Bildpunkt wird nicht gemischt, sondern
-    // genommen, wie er ist -- OHNE die Marke, denn in den Bildspeicher
-    // gehoert eine Farbe und kein Merkzettel.
-    //
-    // Das ist die Stelle, an der die Lesbarkeit einer Fensterschrift
-    // ab jetzt haengt, und sie kostet einen Vergleich je Bildpunkt.
-    // Vorher hing sie am Schleier `SCHLEIER_WIN`, der die GANZE
-    // Fensterflaeche deckender machte -- also auch jeden Bildpunkt, auf
-    // dem gar nichts steht.
-    //
-    // VERGLICHEN WIRD DAS GANZE OKTETT UND NICHT EIN BIT: in den
-    // oberen acht Bit eines Fensterbildpunktes steht nicht nur diese
-    // Marke. Die Vektorbruecke von Ring 3 legt dort das Alpha ihrer
-    // eigenen Mischung ab (255 fuer eine gedeckte Flaeche), und eine
-    // Abfrage auf "irgendein Bit gesetzt" haette damit jede von ihr
-    // gemalte Flaeche fuer eine Textplatte gehalten -- gemessen: die
-    // Karten der Seite "Darstellung" blieben bei `window_alpha=55`
-    // vollstaendig deckend.
-    if (neu >> 24) == (PLATTE_MARKE >> 24) {
-        return neu & 0xFFFFFF
-    }
-    let nr: u64 = (neu >> 16) & 0xFF
-    let ng: u64 = (neu >> 8) & 0xFF
-    let nb: u64 = neu & 0xFF
-    let kr: u64 = (key >> 16) & 0xFF
-    let kg: u64 = (key >> 8) & 0xFF
-    let kb: u64 = key & 0xFF
-    var d: u64 = 0
-    if nr > kr {
-        d = d + (nr - kr)
-    } else {
-        d = d + (kr - nr)
-    }
-    if ng > kg {
-        d = d + (ng - kg)
-    } else {
-        d = d + (kg - ng)
-    }
-    if nb > kb {
-        d = d + (nb - kb)
-    } else {
-        d = d + (kb - nb)
-    }
-    if d > 96 {
-        d = 96
-    }
-    var a: u64 = alpha + (100 - alpha) * d / 96
-    // ================================================= RUNDE GLAS
-    //
-    // DER SCHLEIER -- DIE UNTERGRENZE DER LESBARKEIT, UND SIE IST HIER
-    // NOETIG, WEIL DAS ABSTANDSALPHA ALLEIN SIE NICHT HAELT.
-    //
-    // Das Abstandsalpha haelt die SCHRIFT deckend. Der Kontrast einer
-    // Schrift misst sich aber gegen den Grund NEBEN ihr, und der ist ab
-    // dieser Runde nicht mehr die Themenfarbe, sondern die Mischung aus
-    // ihr und dem Hintergrundbild. GEMESSEN am laufenden System: helles
-    // Thema (Leiste #ffffff, Schrift #0f172a, Kontrast 17,8:1) bei
-    // taskbar_alpha=40 ueber einem DUNKLEN Hintergrundbild -- die
-    // Leistenflaeche kam als (114,116,122) heraus und der Kontrast der
-    // Schrift dagegen als 3,76:1. Unter der Latte, und zwar genau auf
-    // dem Bild, auf dem Transparenz am huebschesten aussieht.
-    //
-    // Also darf sich die FLAECHE nur begrenzt weit von ihrer eigenen
-    // Farbe entfernen. Die Helligkeit einer Mischung ist in dieser
-    // Gewichtung linear, also loest sich die Bedingung
-    // |L(misch) - L(key)| <= SCHLEIER direkt nach der Deckung auf:
-    //
-    //     (100 - a) * |L(grund) - L(key)| / 100 <= SCHLEIER
-    //     a >= 100 - SCHLEIER * 100 / |L(grund) - L(key)|
-    //
-    // Das ist kein Deckel auf den Regler: ueber einem Hintergrundbild,
-    // das der Leistenfarbe ohnehin nahe ist, greift die Schranke NICHT
-    // und die Leiste ist so durchsichtig, wie der Regler sagt. Sie
-    // greift genau dort, wo sie muss -- und sie ist Bildpunkt fuer
-    // Bildpunkt und nicht fuer die ganze Flaeche, weil ein gemustertes
-    // Hintergrundbild beides unter derselben Leiste hat.
-    let lg: u64 = hell_von(alt)
-    let lk: u64 = hell_von(key)
-    var dl: u64 = 0
-    if lg > lk {
-        dl = lg - lk
-    } else {
-        dl = lk - lg
-    }
-    // RUNDE GLAS (fix-r4-2): `schleier == 0` HEISST "KEIN SCHLEIER" UND
-    // NICHT "GAR NICHTS DARF DURCH".
-    //
-    // Die Rechnung darunter loest |L(misch) - L(key)| <= schleier nach
-    // der Deckung auf. Fuer schleier = 0 ist die Loesung a = 100 --
-    // mathematisch richtig und als Regel genau verkehrt herum: ein
-    // Fenster, das seine Lesbarkeit ueber die Textplatte holt und
-    // deshalb KEINEN Schleier braucht, waere damit vollstaendig
-    // deckend geworden. Gemessen, bevor diese Zeile stand: ein Fenster
-    // bei 55 Prozent unterschied sich in 114 von 41 000 abgetasteten
-    // Bildpunkten von demselben Fenster bei 100 Prozent.
-    if schleier > 0 && dl > schleier {
-        let amin: u64 = 100 - schleier * 100 / dl
-        if amin > a {
-            a = amin
-            // ============================== RUNDE GLAS (NACHTRAG)
-            // DER SCHLEIER SCHREIBT DEN REGLER STILL UEBER -- ALSO
-            // SAGT ER ES JETZT.
-            //
-            // Bis hierher hob diese Zeile das Alpha an und niemand
-            // erfuhr davon: der Regler sagte 40 Prozent, die Leiste
-            // stand ueber einem dunklen Bild in Wahrheit bei 83, und
-            // die Aufnahme "Leiste bei 40 %" zeigte etwas, das es
-            // nicht gab. Eine Untergrenze, die man nicht sieht, ist
-            // von einem Fehler nicht zu unterscheiden.
-            //
-            // Gezaehlt wird hier, wo es passiert, und nicht
-            // nachgerechnet: `gaist_hoch` ist die Zahl der
-            // angehobenen Bildpunkte, `gaist_max` das groesste
-            // wirklich benutzte Alpha. Beides sind zwei Vergleiche je
-            // Bildpunkt und steht in der Zeile `wm: glas alpha_soll=
-            // alpha_ist=`, die `glas_bericht` am Ende des Laufs
-            // schreibt.
-            if gaist_an != 0 {
-                gaist_hoch = gaist_hoch + 1
-            }
-        }
-    }
-    // GEZAEHLT WIRD NUR DIE LEISTE. Dieselbe Funktion mischt auch
-    // gewoehnliche Fenster (`window_alpha`); wer beides in eine Zahl
-    // wirft, meldet fuer die Leiste einen Wert, der von einem Fenster
-    // stammt. `gaist_an` setzt der Aufrufer, und nur er weiss, welches
-    // Fenster er gerade mischt.
-    if gaist_an != 0 {
-        gaist_px = gaist_px + 1
-        gaist_sum = gaist_sum + a
-        if a > gaist_max {
-            gaist_max = a
-        }
-    }
-    return wmdraw.blend(alt, neu, a * 255 / 100)
-}
-
-// DIE ZAHLEN ZUM SCHLEIER. Sie liegen in Statischen und nicht im
-// Zustandsblock, weil `glass_mix` je Bildpunkt laeuft und kein
-// `state` in der Hand hat -- dieselbe Bauart wie `cg_treffer` weiter
-// oben.
-static mut gaist_max: u64 = 0 // groesstes wirklich benutztes Alpha, Prozent
-static mut gaist_sum: u64 = 0 // Summe der benutzten Alphas (fuer den Schnitt)
-static mut gaist_hoch: u64 = 0 // Bildpunkte, die der Schleier angehoben hat
-static mut gaist_px: u64 = 0 // Bildpunkte, die ueberhaupt gemischt wurden
-static mut gaist_an: u64 = 0 // 1, solange die LEISTE gemischt wird
 static mut ga_blits: u64 = 0 // r368: wie oft die Leiste gemischt wurde (fuer die Alphazeile)
-
-fn glass_stat_an(on: bool) {
-    if on {
-        gaist_an = 1
-    } else {
-        gaist_an = 0
-    }
-}
-
-// WAS DER REGLER WIRKLICH BEWIRKT. Die Stellung des Reglers ist
-// `form_or(FM_TB_ALPHA)`; `tb_alpha_ist` ist das MITTLERE Alpha, mit
-// dem die Leistenflaeche in diesem Lauf wirklich gemischt wurde.
-//
-// Der Schnitt und nicht das Groesste: ueber einem gemusterten Bild
-// hebt der Schleier an den fernsten Bildpunkten bis auf 100 an, und
-// "100" neben dem Regler waere genauso falsch wie die 40, die vorher
-// dastand -- die Leiste scheint ja durch. Der Schnitt ist die Zahl,
-// die einem Menschen sagt, wie deckend die Leiste aussieht;
-// `alpha_max` steht in der Meldezeile daneben.
-fn tb_alpha_ist(state: u64) -> u64 {
-    let soll: u64 = wmbase.form_or(state, wmlayout.FM_TB_ALPHA, 100)
-    if gaist_px == 0 {
-        return soll
-    }
-    let m: u64 = gaist_sum / gaist_px
-    if m < soll {
-        return soll
-    }
-    return m
-}
-
-fn tb_alpha_hoch(state: u64) -> u64 {
-    return gaist_hoch
-}
-
-// EINE BILDZEILE AUS EINEM FENSTERPUFFER, GEMISCHT.
-//
-// Das Gegenstueck zu `fb_row` -- und `fb_row` bleibt wortgleich stehen
-// und bleibt der Weg bei `alpha >= 100`. Damit ist die Zusage "bei
-// voller Deckung malt dieser Server Bildpunkt fuer Bildpunkt wie vorher"
-// nicht behauptet, sondern baulich: bei 100 Prozent laeuft dieselbe
-// wortweise Kopie wie vor der Runde, und diese Funktion wird nicht
-// einmal betreten.
-//
-// `grund` ist die Zeile, gegen die gemischt wird: 0 heisst "das, was
-// schon im Zweitpuffer steht" (Hintergrund und alle tieferen Fenster,
-// zu diesem Zeitpunkt fertig gemalt), sonst die Adresse einer Zeile des
-// Milchglasstreifens.
-// `schleier` reicht die Untergrenze der Lesbarkeit durch: der
-// Aufrufer weiss, ob er die LEISTE malt oder ein gewoehnliches
-// Fenster, und `glass_mix` soll es nicht raten muessen.
-fn fb_row_a(state: u64, x: u64, y: u64, src: u64, n: u64, alpha: u64,
-    key: u64, grund: u64, schleier: u64) {
-    if y < fb.band_lo(state) {
-        return
-    }
-    let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
-    var i: u64 = 0
-    while i < n {
-        let neu: u64 = __mmio_read32((src +% i *% 4) as *mut u32) as u64
-        var alt: u64 = 0
-        if grund != 0 {
-            alt = __mmio_read32((grund +% i *% 4) as *mut u32) as u64
-        } else {
-            alt = __mmio_read32((ziel +% i *% 4) as *mut u32) as u64
-        }
-        __mmio_write32((ziel +% i *% 4) as *mut u32,
-            glass_mix(alt, neu, key, alpha, schleier) as u32)
-        i = i + 1
-    }
-}
-
-// =====================================================================
-// RUNDE GLAS: DAS MILCHGLAS
-// =====================================================================
-//
-// DER STREIFENPUFFER UND SEINE OBERGRENZE.
-//
-// 3840 mal 64 Bildpunkte, also 960 KiB. Die Breite ist die eines
-// 4K-Schirms, die Hoehe das Anderthalbfache der groessten Leiste, die
-// dieses System aufsetzt (40 Bildpunkte bei Vervielfachung 1, 60 bei 2
-// -- taskbar.fi rechnet sie aus der Schriftgroesse). IST DIE LEISTE
-// GROESSER, BLEIBT DAS MILCHGLAS AUS, und zwar ganz: ein Weichzeichner,
-// der nur die linken 3840 Spalten erwischt, malt eine sichtbare Kante
-// mitten in die Leiste, und ein halb wirkender Schmuck ist schlimmer
-// als gar keiner.
-const GLASS_W: u64 = 3840
-const GLASS_H: u64 = 64
-// RUNDE GLAS (fix-r4-4): DIE OBERGRENZE IST EINE FLAECHE, NICHT EINE
-// HOEHE.
-//
-// Solange nur die Leiste Glas bekam, war "3840 mal 64" beides in einem:
-// die Breite eines 4K-Schirms und anderthalb Leistenhoehen. Unter einem
-// durchsichtigen FENSTER ist die Hoehe eine andere -- das
-// Einstellungsfenster dieser Abnahme ist 760 x 566 --, und die Frage
-// ist nicht mehr "wie hoch", sondern "passt es in den Puffer". Gezaehlt
-// wird deshalb die Flaeche: 460 800 Bildpunkte sind 1,8 MiB je Streifen
-// und decken jedes Fenster ab, das auf einen Schirm von 1280 x 800
-// passt. Was nicht hineinpasst, bekommt KEIN Glas -- ein halb
-// weichgezeichnetes Fenster mit einer Kante in der Mitte waere
-// schlimmer als gar keines, und das war schon die Regel der Leiste.
-// r368: 655 360 (it was 460 800). The settings window is 760 x 640 since its page
-// stands on the scene tree (it was 760 x 566): 486 400 pixels did not fit the
-// old strip, `glass_prepare` refused it and the window got NO frosting at all
-// (11c4 measured one flat colour where the pattern's edge should have become a
-// gradient). 655 360 = 1024 x 640 covers every window of this system on a
-// 1280 x 800 screen; the two strips cost 2.5 MiB of `.bss` each and not one
-// octet in the image.
-const GLASS_PX: u64 = 1048576
-// Um wie viele Stufen der weichgezeichnete Untergrund gegen die
-// Grundfarbe verschoben wird: heller unter einem hellen Satz, dunkler
-// unter einem dunklen. Ohne diesen Schritt bleibt das Glas genau so
-// hell wie das, was darunter liegt, und die Leiste verschwindet auf
-// einem mittelhellen Hintergrundbild ganz. 24 Stufen sind sichtbar und
-// kippen keinen Farbton.
-const GLASS_TINT: u64 = 24
-static mut gl_puf: [u32; 1048576] = [0 as u32; 1048576]
-// DER ZWEITE STREIFEN, UND WARUM ER SICH LOHNT.
-//
-// Ein Kastendurchgang kann nicht in denselben Puffer schreiben, aus dem
-// er noch liest -- die laufende Summe braucht die Quelle noch. Die
-// erste Fassung hat deshalb je Linie in eine Zwischenzeile geschrieben
-// und danach zurueckkopiert: das sind ZWEI Durchlaeufe ueber jeden
-// Bildpunkt statt einem, also 215 040 statt 107 520 Schleifendurchgaengen
-// je Vollbild. Mit zwei Streifen, zwischen denen die drei Durchgaenge
-// hin und her laufen, faellt das Zurueckkopieren ganz weg; die
-// Einfaerbung am Ende ist dann der eine Durchlauf, der ohnehin sein
-// musste. Gemessen im Gast (TCG, 896 x 40, r = 8): 52 435 gegen
-// 30 000 Mikrosekunden.
-static mut gl_alt: [u32; 1048576] = [0 as u32; 1048576]
-
-// EINE LINIE KASTENWEICHZEICHNER MIT LAUFENDER SUMME -- DIE EINE
-// STELLE, an der ueberhaupt weichgezeichnet wird. Waagerecht und
-// senkrecht sind derselbe Rumpf mit einem anderen Schritt (`sb`, dem
-// Abstand zweier Nachbarn in Oktetten); zwei Fassungen waeren zwei Orte
-// fuer dieselbe Sache gewesen.
-//
-// WARUM LAUFENDE SUMME UND NICHT DIE NAIVE SCHLEIFE: naiv kostet ein
-// Bildpunkt 2r+1 Additionen, also bei r = 16 das 33-fache. Hier kostet
-// er EINE Addition und EINE Subtraktion je Kanal, unabhaengig von r --
-// und genau das ist der Unterschied zwischen 60 Bildern und Ruckeln.
-// `tools/themestore/run.sh` misst es an der Zeit: `us` bei r = 16 darf
-// hoechstens das 1,3-fache von `us` bei r = 4 sein.
-//
-// Am Rand zaehlt der Randpunkt mehrfach (statt einer Null ausserhalb).
-// Eine Null dort haette einen dunklen Saum an jede Kante der Leiste
-// gemalt, und der sieht aus wie ein Fehler, weil er einer ist.
-//
-// MIT ADRESSEN UND NICHT MIT FELDINDIZES, und das ist gemessen: der
-// Uebersetzer legt vor jeden Feldzugriff eine Bereichspruefung, und
-// dieser Rumpf macht sechs davon je Bildpunkt.
-fn blur_line(qadr: u64, zadr: u64, sb: u64, n: u64, r: u64) {
-    comp.blur_line(qadr, zadr, sb, n, r)
-}
-
-// DREI DURCHGAENGE: waagerecht, senkrecht, waagerecht. Drei Kaesten
-// hintereinander sind die uebliche ganzzahlige Annaeherung an eine
-// Gaussglocke; einer allein sieht nach Bewegungsunschaerfe aus, weil
-// seine Kante hart bleibt.
-//
-// Der Streifen wandert dabei gl_puf -> gl_alt -> gl_puf -> gl_alt; das
-// Ergebnis steht also in `gl_alt`, und der Rufer holt es sich von dort.
-fn glass_blur(w: u64, h: u64, r: u64) {
-    if r == 0 {
-        return
-    }
-    let a: u64 = (&gl_puf[0]) as u64
-    let b: u64 = (&gl_alt[0]) as u64
-    var y: u64 = 0
-    while y < h {
-        blur_line(a +% y *% w *% 4, b +% y *% w *% 4, 4, w, r)
-        y = y + 1
-    }
-    var x: u64 = 0
-    while x < w {
-        blur_line(b +% x *% 4, a +% x *% 4, w *% 4, h, r)
-        x = x + 1
-    }
-    y = 0
-    while y < h {
-        blur_line(a +% y *% w *% 4, b +% y *% w *% 4, 4, w, r)
-        y = y + 1
-    }
-}
-
-// Helligkeit einer Farbe in Hundertsteln, nach derselben Gewichtung,
-// die `wlibc` fuer die Kontrastrechnung benutzt.
-fn hell_von(c: u64) -> u64 {
-    return (((c >> 16) & 0xFF) * 299 + ((c >> 8) & 0xFF) * 587
-        + (c & 0xFF) * 114) / 1000
-}
-
-// DEN AUSSCHNITT UNTER DER LEISTE HOLEN, WEICHZEICHNEN, EINFAERBEN.
-//
-// Liefert die Adresse des Streifens oder 0, wenn kein Milchglas moeglich
-// ist. Der Streifen ist danach der `grund` fuer `fb_row_a`.
-//
-// DER ZWISCHENSPEICHER UND SEINE BEDINGUNG. Die Uhr in der Leiste malt
-// jede Sekunde neu, obwohl sich unter der Leiste nichts geaendert hat;
-// ohne Zwischenspeicher waere das Milchglas sechzigmal in der Sekunde
-// neu gerechnet worden. `S_GLASSGEN` steigt genau dann, wenn ein
-// Fenster UNTER der Leiste gemalt, bewegt, geoeffnet oder geschlossen
-// wurde (siehe `glass_touch`). Ist der Stand derselbe und sind
-// Rechteck und Radius unveraendert, wird der Streifen wiederverwendet.
-static mut gl_src_hash: u64 = 0
-
-fn glass_source_hash(state: u64, gx: u64, gy: u64, w: u64, h: u64,
-    key: u64) -> u64 {
-    var acc: u64 = key ^ 0x9E3779B97F4A7C15
-    let words: u64 = w / 2
-    var row: u64 = 0
-    while row < h {
-        let q: u64 = fb.draw_at(state) +% (gy + row) *% fb.pitch(state) +%
-            gx *% 4
-        var k: u64 = 0
-        while k < words {
-            let wd: u64 = __mmio_read64((q +% k *% 8) as *mut u64)
-            acc = (acc ^ wd) *% 0x100000001B3
-            acc = acc ^ (acc >> 29)
-            k = k + 1
-        }
-        if (w & 1) != 0 {
-            let tail_px: u64 = __mmio_read32((q +% (w - 1) *% 4) as *mut u32) as u64
-            acc = (acc ^ tail_px) *% 0x100000001B3
-            acc = acc ^ (acc >> 29)
-        }
-        row = row + 1
-    }
-    return acc
-}
-
-fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
-    r: u64) -> u64 {
-    if r == 0 || w == 0 || h == 0 {
-        return 0
-    }
-    if w > GLASS_W || w *% h > GLASS_PX {
-        return 0
-    }
-    if x < 0 || y < 0 {
-        return 0
-    }
-    let gx: u64 = x as u64
-    let gy: u64 = y as u64
-    let basis: u64 = (&gl_puf[0]) as u64
-    wmlayout.ss(state, wmlayout.S_GLRUN, wmlayout.gs(state, wmlayout.S_GLRUN) + 1)
-    if wmlayout.gs(state, wmlayout.S_GLVALID) != 0 && wmlayout.gs(state, wmlayout.S_GLX) == gx
-        && wmlayout.gs(state, wmlayout.S_GLY) == gy && wmlayout.gs(state, wmlayout.S_GLW) == w
-        && wmlayout.gs(state, wmlayout.S_GLH) == h && wmlayout.gs(state, wmlayout.S_GLR) == r
-        && wmlayout.gs(state, wmlayout.S_GLGEN) == wmlayout.gs(state, wmlayout.S_GLASSGEN) {
-        wmlayout.ss(state, wmlayout.S_GLHIT, wmlayout.gs(state, wmlayout.S_GLHIT) + 1)
-        // RUNDE GLAS: AUCH EIN TREFFER ZAEHLT FUER DIE MELDUNG.
-        //
-        // Der Takt der Meldung stand nur im Rechenweg, also wurde
-        // `wm: glas ... cache=` genau einmal geschrieben -- beim ersten
-        // Streifen, und dort steht zwangslaeufig `cache=0/1`. Damit
-        // war die Zusage "wird der Untergrund nicht veraendert, wird
-        // nicht neu gerechnet" nirgends als Zahl zu sehen, und eine
-        // Zusage ohne Zahl ist in diesem Baum keine. Jetzt zaehlt
-        // jeder Durchlauf, und nach sechzig steht die Trefferquote da.
-        wmlayout.ss(state, wmlayout.S_GLSAY, wmlayout.gs(state, wmlayout.S_GLSAY) + 1)
-        if wmlayout.gs(state, wmlayout.S_GLSAY) >= 60 {
-            wmlayout.ss(state, wmlayout.S_GLSAY, 0)
-            glas_say(state)
-        }
-        return basis
-    }
-    let src_hash: u64 = glass_source_hash(state, gx, gy, w, h,
-        wmgeom.form(state, wmlayout.FM_GLASS_KEY))
-    if wmlayout.gs(state, wmlayout.S_GLVALID) != 0 && wmlayout.gs(state, wmlayout.S_GLX) == gx
-        && wmlayout.gs(state, wmlayout.S_GLY) == gy && wmlayout.gs(state, wmlayout.S_GLW) == w
-        && wmlayout.gs(state, wmlayout.S_GLH) == h && wmlayout.gs(state, wmlayout.S_GLR) == r
-        && src_hash == gl_src_hash {
-        wmlayout.ss(state, wmlayout.S_GLGEN, wmlayout.gs(state, wmlayout.S_GLASSGEN))
-        wmlayout.ss(state, wmlayout.S_GLHIT, wmlayout.gs(state, wmlayout.S_GLHIT) + 1)
-        return basis
-    }
-    let t_anfang: u64 = time.tsc()
-    // 1. der schon fertig gemalte Untergrund in den Streifen
-    let sbas: u64 = (&gl_puf[0]) as u64
-    var row: u64 = 0
-    while row < h {
-        let q: u64 = fb.draw_at(state) +% (gy + row) *% fb.pitch(state) +%
-            gx *% 4
-        // Wortweise, ueber `rep movsq` wie in `fb_row`: eine Schleife
-        // aus Einzelzugriffen kostet hier gemessen den Faktor acht.
-        let z: u64 = sbas +% row *% w *% 4
-        wmdraw.copy_words(z, q, w *% 4 / 8)
-        if (w & 1) != 0 {
-            __mmio_write32((z +% (w - 1) *% 4) as *mut u32,
-                __mmio_read32((q +% (w - 1) *% 4) as *mut u32))
-        }
-        row = row + 1
-    }
-    // 2. drei Durchgaenge mit laufender Summe
-    glass_blur(w, h, r)
-    // 3. aufhellen oder abdunkeln, je nachdem, ob der laufende Satz
-    //    hell oder dunkel ist. `FM_GLASS_KEY` ist die Grundfarbe der
-    //    Leiste und sagt es ohne eine weitere Einstellung.
-    let dunkel: bool = hell_von(wmgeom.form(state, wmlayout.FM_GLASS_KEY)) < 128
-    let qbas: u64 = (&gl_alt[0]) as u64
-    var p: u64 = 0
-    let n: u64 = w * h
-    while p < n {
-        let v: u64 = __mmio_read32((qbas +% p *% 4) as *mut u32) as u64
-        var cr: u64 = (v >> 16) & 0xFF
-        var cg: u64 = (v >> 8) & 0xFF
-        var cb: u64 = v & 0xFF
-        if dunkel {
-            if cr > GLASS_TINT {
-                cr = cr - GLASS_TINT
-            } else {
-                cr = 0
-            }
-            if cg > GLASS_TINT {
-                cg = cg - GLASS_TINT
-            } else {
-                cg = 0
-            }
-            if cb > GLASS_TINT {
-                cb = cb - GLASS_TINT
-            } else {
-                cb = 0
-            }
-        } else {
-            cr = cr + GLASS_TINT
-            cg = cg + GLASS_TINT
-            cb = cb + GLASS_TINT
-            if cr > 255 {
-                cr = 255
-            }
-            if cg > 255 {
-                cg = 255
-            }
-            if cb > 255 {
-                cb = 255
-            }
-        }
-        __mmio_write32((sbas +% p *% 4) as *mut u32,
-            ((cr << 16) | (cg << 8) | cb) as u32)
-        p = p + 1
-    }
-    // Ob sich die Einstellungen geaendert haben, entscheidet, ob die
-    // Meldezeile faellig ist -- eine Zeile je Bild waere kein Bericht,
-    // sondern ein Wasserfall.
-    let neu_form: bool = wmlayout.gs(state, wmlayout.S_GLVALID) == 0 || wmlayout.gs(state, wmlayout.S_GLW) != w
-        || wmlayout.gs(state, wmlayout.S_GLH) != h || wmlayout.gs(state, wmlayout.S_GLR) != r
-    wmlayout.ss(state, wmlayout.S_GLX, gx)
-    wmlayout.ss(state, wmlayout.S_GLY, gy)
-    wmlayout.ss(state, wmlayout.S_GLW, w)
-    wmlayout.ss(state, wmlayout.S_GLH, h)
-    wmlayout.ss(state, wmlayout.S_GLR, r)
-    wmlayout.ss(state, wmlayout.S_GLGEN, wmlayout.gs(state, wmlayout.S_GLASSGEN))
-    wmlayout.ss(state, wmlayout.S_GLVALID, 1)
-    gl_src_hash = src_hash
-    let kh: u64 = time.khz(state)
-    if kh >= 1000 {
-        let t_ende: u64 = time.tsc()
-        if t_ende > t_anfang {
-            let us: u64 = (t_ende - t_anfang) / (kh / 1000)
-            wmlayout.ss(state, wmlayout.S_GLUS, wmlayout.gs(state, wmlayout.S_GLUS) + us)
-            wmlayout.ss(state, wmlayout.S_GLN, wmlayout.gs(state, wmlayout.S_GLN) + 1)
-            wmlayout.ss(state, wmlayout.S_GLLAST, us)
-            if us > wmlayout.gs(state, wmlayout.S_GLMAX) {
-                wmlayout.ss(state, wmlayout.S_GLMAX, us)
-            }
-        }
-    }
-    wmlayout.ss(state, wmlayout.S_GLSAY, wmlayout.gs(state, wmlayout.S_GLSAY) + 1)
-    if neu_form || wmlayout.gs(state, wmlayout.S_GLSAY) >= 60 {
-        wmlayout.ss(state, wmlayout.S_GLSAY, 0)
-        glas_say(state)
-    }
-    return basis
-}
-
-// DIE ZAHL, DIE DAS MILCHGLAS BELEGT -- eine Zeile, und in ihr steht
-// alles, was die Abnahme braucht: der Radius, die Flaeche, die
-// gemessene Zeit je Vollbild, die laengste gemessene Zeit und die
-// Trefferquote des Zwischenspeichers. `key=` ist die Schluesselfarbe;
-// steht dort eine andere Zahl als in `taskbar: glas ... key=`, mischt
-// der Kern gegen etwas, das die Leiste nie gemalt hat.
-static mut gl_a: [u8; 13] = "wm: glas r=\0\0"
-static mut gl_b: [u8; 5] = " px=\0"
-static mut gl_c: [u8; 5] = " us=\0"
-static mut gl_d: [u8; 6] = " max=\0"
-static mut gl_e: [u8; 8] = " cache=\0"
-static mut gl_f: [u8; 2] = "/\0"
-static mut gl_g: [u8; 6] = " key=\0"
-static mut gl_h: [u8; 17] = "0123456789abcdef\0"
-static mut gl_x: [u8; 7] = "000000\0"
-
-fn glas_hex6(v: u64) {
-    var i: u64 = 0
-    while i < 6 {
-        let d: u64 = (v >> ((5 - i) * 4)) & 15
-        gl_x[(i) as usize] = gl_h[(d) as usize]
-        i = i + 1
-    }
-}
-
-fn glas_say(state: u64) {
-    serial.puts((&gl_a[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_GLR))
-    serial.puts((&gl_b[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_GLW) * wmlayout.gs(state, wmlayout.S_GLH))
-    serial.puts((&gl_c[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_GLLAST))
-    serial.puts((&gl_d[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_GLMAX))
-    serial.puts((&gl_e[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_GLHIT))
-    serial.puts((&gl_f[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_GLRUN))
-    serial.puts((&gl_g[0]) as u64)
-    glas_hex6(wmgeom.form(state, wmlayout.FM_GLASS_KEY))
-    serial.puts((&gl_x[0]) as u64)
-    serial.nl()
-}
-
-// ================================================ RUNDE GLAS (fix-r4-3)
-// DAS AEUSSERE RECHTECK DES FENSTERS UND SEIN RADIUS.
-//
-//     wm: rahmen x=20 y=3 w=764 h=590 r=24
-//
-// Ohne diese Zeile kennt die Abnahme nur die OBERE LINKE Ecke: sie
-// nimmt `settings: rect name=win`, und das ist die Flaeche, die das
-// Programm bekommen hat -- nicht die, die der Server malt. Wer die
-// unteren Ecken messen will, braucht die untere Kante, und die weiss
-// nur der Server (Rahmenbreite und Titelhoehe sind Formmarken und
-// aendern sich mit dem Aussehen). Gemeldet wird nur bei AENDERUNG, und
-// nur fuer das Fenster mit dem Fokus: ein Malvorgang je Bildrunde mal
-// zwanzig Sekunden waere eine Meldung, die niemand liest.
-static mut rh_x: u64 = 0xFFFFFFFFFFFFFFFF
-static mut rh_y: u64 = 0
-static mut rh_w: u64 = 0
-static mut rh_h: u64 = 0
-static mut rh_r: u64 = 0
-static mut rh_a: [u8; 14] = "wm: rahmen x=\0"
-static mut rh_b: [u8; 4] = " y=\0"
-static mut rh_c: [u8; 4] = " w=\0"
-static mut rh_d: [u8; 4] = " h=\0"
-static mut rh_e: [u8; 4] = " r=\0"
-
-fn rahmen_say(x: i64, y: i64, w: i64, h: i64, r: u64) {
-    if x < 0 || y < 0 || w <= 0 || h <= 0 {
-        return
-    }
-    let xu: u64 = x as u64
-    let yu: u64 = y as u64
-    let wu: u64 = w as u64
-    let hu: u64 = h as u64
-    if rh_x == xu && rh_y == yu && rh_w == wu && rh_h == hu && rh_r == r {
-        return
-    }
-    rh_x = xu
-    rh_y = yu
-    rh_w = wu
-    rh_h = hu
-    rh_r = r
-    serial.puts((&rh_a[0]) as u64)
-    serial.dec(xu)
-    serial.puts((&rh_b[0]) as u64)
-    serial.dec(yu)
-    serial.puts((&rh_c[0]) as u64)
-    serial.dec(wu)
-    serial.puts((&rh_d[0]) as u64)
-    serial.dec(hu)
-    serial.puts((&rh_e[0]) as u64)
-    serial.dec(r)
-    serial.nl()
-}
-
-// ================================================ RUNDE GLAS (NACHTRAG)
-// WAS DER REGLER SAGT UND WAS WIRKLICH GEMALT WURDE.
-//
-//     wm: glas alpha_soll=40 alpha_ist=83 hoch=27412 px=35840
-//
-// `alpha_soll` ist die Stellung des Reglers, `alpha_ist` das groesste
-// Alpha, mit dem in diesem Lauf wirklich gemischt wurde, `hoch` die
-// Zahl der Bildpunkte, an denen der Schleier (die Lesbarkeitsschranke
-// in `glass_mix`) angehoben hat, und `px` die Zahl der gemischten
-// Bildpunkte insgesamt. Ohne diese Zeile heisst eine Aufnahme
-// "Leiste bei 40 %", obwohl ueber einem dunklen Bild 83 Prozent
-// gemalt wurden -- das war der Befund an Bild 11.
-static mut al_a: [u8; 22] = "wm: glas alpha_soll=\0\0"
-static mut al_b: [u8; 12] = " alpha_ist=\0"
-static mut al_c: [u8; 7] = " hoch=\0"
-static mut al_d: [u8; 5] = " px=\0"
-static mut al_e: [u8; 12] = " alpha_max=\0"
-
-fn glas_alpha_say(state: u64) {
-    serial.puts((&al_a[0]) as u64)
-    serial.dec(wmbase.form_or(state, wmlayout.FM_TB_ALPHA, 100))
-    serial.puts((&al_b[0]) as u64)
-    serial.dec(tb_alpha_ist(state))
-    serial.puts((&al_e[0]) as u64)
-    serial.dec(gaist_max)
-    serial.puts((&al_c[0]) as u64)
-    serial.dec(gaist_hoch)
-    serial.puts((&al_d[0]) as u64)
-    serial.dec(gaist_px)
-    serial.nl()
-}
-
-// RUNDE GLAS: DIE SCHLUSSZEILE ZUM MILCHGLAS.
-//
-// `glas_say` schreibt im Betrieb nur alle sechzig Durchlaeufe, sonst
-// stuende im Bildtakt ein Wasserfall auf der Leitung. Genau dadurch
-// war die Trefferquote des Zwischenspeichers nie zu sehen: die einzige
-// Zeile eines Laufs ist die des ERSTEN Streifens, und dort steht
-// zwangslaeufig `cache=0/1`. Am Ende eines Laufs -- dort, wo `kgui`
-// ohnehin seine Zahlen schreibt -- kostet eine Zeile nichts und sagt,
-// wie oft wirklich gerechnet und wie oft wiederverwendet wurde.
-fn glas_bericht(state: u64) {
-    // DIE ALPHAZEILE STEHT VOR DEM AUSSTIEG. Gemischt wird auch ohne
-    // Milchglas (`taskbar_alpha` allein braucht keinen Streifen), und
-    // genau dieser Fall -- 40 Prozent ueber einem dunklen Bild -- ist
-    // der, in dem der Schleier anhebt und es bisher niemand erfuhr.
-    //
-    // ZUSAMMENFUEHRUNG: SIE STEHT JETZT IMMER DA, AUCH MIT px=0.
-    //
-    // Hier stand `if gaist_px > 0`, und das war eine Bedingung ueber
-    // den ZUFALL, wie weit der Server in seinem Zeitfenster gekommen
-    // ist. Auf diesem Baum dauert ein Vollcompose 1,5 Sekunden (auf
-    // dem Zweig GLAS 33 Millisekunden, gemessen mit `wmbench` -- die
-    // Zahl gehoert der Runde BLUR und ist aelter als dieses
-    // Zusammenfuehren): der Messlauf von `tools/themestore/run.sh`
-    // schafft in zwanzig Sekunden genau einen Blit der Leiste, und der
-    // faellt HINTER diese Zeile. Die Zeile fehlte dann ganz, und
-    // sechzehn Zusagen von Abschnitt 11 lasen eine leere
-    // Zeichenkette -- ein Messgeraet, das schweigt, statt eine Null zu
-    // melden.
-    //
-    // `px=0` IST eine Aussage: "in diesem Lauf wurde kein Bildpunkt
-    // der Leiste gemischt". Wer sie liest, weiss danach mehr als
-    // vorher; eine fehlende Zeile sagt gar nichts. `hoch=0` ist dann
-    // ebenfalls wahr -- angehoben wurde nichts, weil nichts gemischt
-    // wurde --, und `alpha_ist` liefert schon immer die Reglerstellung,
-    // wenn nichts gemessen wurde (siehe `tb_alpha_ist`).
-    glas_alpha_say(state)
-    // UND DIE SCHLIERENZEILE AM ENDE DES LAUFS. Im Betrieb schreibt
-    // sie sich beim ersten Aufziehen und danach alle fuenfhundert --
-    // die Schnittflaeche mit der Leiste (`unterpx=`) waechst aber
-    // waehrend eines Zuges, und die frueh geschriebene Zeile traegt
-    // deshalb eine Null, die nichts bedeutet. Diese hier traegt den
-    // Stand, zu dem die Aufnahme entstanden ist.
-    wmbase.schlieren_say(state)
-    if wmlayout.gs(state, wmlayout.S_GLRUN) == 0 {
-        return
-    }
-    glas_say(state)
-}
-
-// Die Ableser fuer die Abnahme. Sie stehen hier, damit
-// `tools/themestore/run.sh` die Zahlen holen kann, ohne die Offsets zu
-// kennen.
-fn glass_gen(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_GLASSGEN)
-}
-
-// ZUSAMMENFUEHRUNG: DIESE DREI HIESSEN AUF DEM ZWEIG GLAS `blur_us`,
-// `blur_us_max` und `blur_runs`. Die Runde BLUR hat einen eigenen
-// `blur_us` (die Zeit des Acrylfilters, aus `S_BLURUS`), und zwei
-// gleichnamige Ableser auf verschiedenen Zaehlern waeren genau der
-// zweite Ort fuer dieselbe Sache, den es hier nicht geben darf. Also
-// tragen die Zahlen des GLASSTREIFENS jetzt den Namen ihrer Sache.
-fn glas_us(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_GLLAST)
-}
-
-fn glas_us_max(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_GLMAX)
-}
-
-fn glas_runs(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_GLN)
-}
-
-fn glass_hits(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_GLHIT)
-}
-
-fn panel_grows(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_PANELGROW)
-}
-
-fn set_noglasgrow(state: u64, on: bool) {
-    wmlayout.ss(state, wmlayout.S_NOGROW, 0)
-    if on {
-        wmlayout.ss(state, wmlayout.S_NOGROW, 1)
-    }
-}
-
-// =====================================================================
-// RUNDE GLAS: DER SELBSTTEST DER MISCHUNG UND DES WEICHZEICHNERS
-// =====================================================================
-//
-// Er steht NICHT in `wm.selftest`. Der laeuft mitten in einer Zeile,
-// die `kgui` schreibt ("wm: selftest " + Zahl), und seine Zahl 30 ist
-// in einem halben Dutzend Abnahmeskripten festgenagelt. Also eine
-// eigene Zahl in einer eigenen Zeile, gerechnet beim Aufsetzen des
-// Fensterservers -- und ohne einen einzigen Bildpunkt auf dem Schirm:
-// beide gepruefte Funktionen sind rein.
-static mut gt_a: [u8; 16] = "wm: glastest \0\0\0"
-static mut gt_b: [u8; 4] = " / \0"
-
-fn selftest_glas(state: u64) -> u64 {
-    var n: u64 = 0
-    // 1. Alpha 100 laesst den neuen Punkt unveraendert -- das ist die
-    //    Zusage "bei voller Deckung wie vorher", hier als Zahl.
-    if glass_mix(0x000000, 0x204060, 0x204060, 100, SCHLEIER) == 0x204060 {
-        n = n + 1
-    }
-    // 2. Alpha 0 auf der SCHLUESSELFARBE: der Grund bleibt stehen.
-    //    d = 0, also a = 0, also kommt der Untergrund heraus.
-    if glass_mix(0x112233, 0x204060, 0x204060, 0, SCHLEIER) == 0x112233 {
-        n = n + 1
-    }
-    // 3. Alpha 50 auf der Schluesselfarbe, von Hand gerechnet. Der
-    //    Untergrund liegt dicht an der Schluesselfarbe (Helligkeit 112
-    //    gegen 128, also 16 Stufen und damit unter SCHLEIER), also
-    //    greift die Untergrenze NICHT und es gilt genau a = 50 %:
-    //    a255 = 127, und blend(0x707070, 0x808080, 127) ist je Kanal
-    //    (128*127 + 112*128 + 127)/255 = 30719/255 = 120 = 0x78.
-    if glass_mix(0x707070, 0x808080, 0x808080, 50, SCHLEIER) == 0x787878 {
-        n = n + 1
-    }
-    // 4. UND DER PUNKT, AN DEM DIE LESBARKEIT HAENGT: ein Punkt, der
-    //    weit von der Schluesselfarbe weg liegt (weisse Schrift auf
-    //    dunklem Grund, d = 3 * 255 = 765 > 96), bleibt bei Alpha 20
-    //    VOLL DECKEND. Waere das nicht so, waere die Leistenschrift
-    //    durchsichtig und der Kontrast dahin.
-    if glass_mix(0x000000, 0xFFFFFF, 0x202020, 20, SCHLEIER) == 0xFFFFFF {
-        n = n + 1
-    }
-    // 5. Der Weichzeichner gegen eine NAIV gerechnete Mitte. Eine Zeile
-    //    aus 64 Punkten, deren linke Haelfte 0 und deren rechte 200 ist;
-    //    ein einzelner Kastendurchgang mit r = 4 liefert in der Mitte
-    //    den Mittelwert der neun Punkte um sie herum. Naiv gerechnet
-    //    sind das bei x = 32 die Punkte 28..36, also vier Nullen und
-    //    fuenf Zweihunderter: 1000/9 = 111.
-    let qa: u64 = (&gl_puf[0]) as u64
-    let za: u64 = (&gl_alt[0]) as u64
-    var i: u64 = 0
-    while i < 64 {
-        var v: u64 = 0
-        if i >= 32 {
-            v = 200
-        }
-        gl_puf[(i) as usize] = ((v << 16) | (v << 8) | v) as u32
-        i = i + 1
-    }
-    blur_line(qa, za, 4, 64, 4)
-    if (gl_alt[(32) as usize] as u64 & 0xFF) == 111 {
-        n = n + 1
-    }
-    // 6. Und dieselbe Zeile SENKRECHT gelesen muss dieselbe Zahl
-    //    liefern -- sonst haette der Schritt (`stride`) einen Fehler,
-    //    und der faellt an einer Leiste von 40 Zeilen Hoehe sonst nicht
-    //    auf.
-    i = 0
-    while i < 64 {
-        var v2: u64 = 0
-        if i >= 32 {
-            v2 = 200
-        }
-        gl_puf[(i * 8) as usize] = ((v2 << 16) | (v2 << 8) | v2) as u32
-        i = i + 1
-    }
-    blur_line(qa, za, 32, 64, 4)
-    if (gl_alt[(32 * 8) as usize] as u64 & 0xFF) == 111 {
-        n = n + 1
-    }
-    // 7. UND DER SCHLEIER, von Hand gerechnet. Weisse Leiste (Key
-    //    0xffffff, Helligkeit 255) ueber schwarzem Grund (Helligkeit 0):
-    //    dl = 255, also amin = 100 - 40*100/255 = 85 Prozent -- und
-    //    nicht die 20, die der Regler sagt. a255 = 216, und
-    //    blend(0x000000, 0xffffff, 216) ist je Kanal
-    //    (255*216 + 0 + 127)/255 = 55207/255 = 216 = 0xd8.
-    //    Gegen die dunkle Leistenschrift #0f172a sind das 12,1:1 und
-    //    damit ueber der Latte; ohne den Schleier waeren es 1,6:1.
-    // NACHTRAG 2: die Zahl steht hier AUSGESCHRIEBEN und nicht mehr als
-    // `SCHLEIER`. Geprueft wird die ARITHMETIK der Untergrenze, nicht
-    // die Entscheidung, ob die Leiste eine haben soll -- die Leiste hat
-    // seit diesem Nachtrag keine mehr (`SCHLEIER` ist 0, ihre
-    // Lesbarkeit traegt die Textplatte). Mit der Konstante im Aufruf
-    // haette dieser Fall die Politik gemessen und waere beim Umstellen
-    // rot geworden, obwohl die Rechnung stimmt.
-    if glass_mix(0x000000, 0xFFFFFF, 0xFFFFFF, 20, 40) == 0xD8D8D8 {
-        n = n + 1
-    }
-    // 7b. UND DIE LEISTE SELBST HAT KEINE UNTERGRENZE MEHR: derselbe
-    //     Punkt mit `SCHLEIER` bleibt bei zwanzig Prozent, und derselbe
-    //     Punkt mit der Marke der Textplatte kommt deckend zurueck.
-    //     Das ist die Zusage in zwei Zeilen: die Flaeche ist so
-    //     durchsichtig, wie der Regler sagt, die Schrift darauf nicht.
-    if glass_mix(0x000000, 0xFFFFFF, 0xFFFFFF, 20, SCHLEIER) == 0x333333
-        && glass_mix(0x000000, PLATTE_MARKE | 0xFFFFFF, 0xFFFFFF, 20,
-            SCHLEIER) == 0xFFFFFF {
-        n = n + 1
-    }
-    // 8. UND DERSELBE FALL FUER EIN GEWOEHNLICHES FENSTER -- ZWEIMAL,
-    //    denn dort hat sich mit fix-r4-2 beides geaendert.
-    //
-    //    OHNE MARKE: `SCHLEIER_WIN` ist 0, der Schleier greift also
-    //    gar nicht mehr (hier stand bis fix-r4-2 eine 20, und die hob
-    //    denselben Punkt still auf 93 Prozent an). Zwanzig Prozent
-    //    sind damit zwanzig Prozent: a255 = 20*255/100 = 51, und
-    //    blend(0x000000, 0xffffff, 51) ist je Kanal
-    //    (255*51 + 0 + 127)/255 = 13132/255 = 51 = 0x33.
-    //
-    //    MIT MARKE: derselbe Punkt, aber mit `PLATTE_MARKE` in den
-    //    oberen acht Bit -- also ein Punkt, auf dem Schrift steht. Er
-    //    kommt unveraendert zurueck UND OHNE DIE MARKE; stuende sie
-    //    noch darin, liefe sie in den Bildspeicher.
-    //
-    //    Zusammen sind das die zwei Haelften der neuen Zusage: die
-    //    Flaeche ist so durchsichtig, wie der Regler sagt, und die
-    //    Zeile darauf ist es nicht.
-    if glass_mix(0x000000, 0xFFFFFF, 0xFFFFFF, 20, SCHLEIER_WIN)
-            == 0x333333
-        && glass_mix(0x000000, PLATTE_MARKE | 0xFFFFFF, 0xFFFFFF, 20,
-            SCHLEIER_WIN) == 0xFFFFFF {
-        n = n + 1
-    }
-    // Der Streifen ist jetzt Prueffarbe und kein Untergrund mehr.
-    wmlayout.ss(state, wmlayout.S_GLVALID, 0)
-    return n
-}
-
-fn selftest_glas_max() -> u64 {
-    // NACHTRAG 2: neun, seit die Leiste ihren eigenen Fall 7b hat.
-    return 9
-}
-
-fn glastest_say(state: u64) {
-    wmlayout.ss(state, wmlayout.S_GLTEST, selftest_glas(state))
-    serial.puts((&gt_a[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_GLTEST))
-    serial.puts((&gt_b[0]) as u64)
-    serial.dec(selftest_glas_max())
-    serial.nl()
-}
-
-// r53: SELF-TEST OF THE DIRTY BOX PROTOCOL (`box_add` / `box_take`, the pair `damage_ex` and `compose_one` use). Pure: it saves the four box
-// words and the flag, runs on them, puts them back; no pixel is touched. The race itself (a `damage` held up between its check of `S_DON`
-// and its stores while another core takes the frame) needs two cores; what this proves is the half that makes the fix work: after a take a
-// new rectangle STARTS a new box (it is never merged into the box of a frame that was already taken, and never lost).
-static mut dt_a: [u8; 16] = "wm: damagetest \0"
-const DT_MAX: u64 = 8
-
-fn selftest_damage(state: u64) -> u64 {
-    let sv0: u64 = wmlayout.gs(state, wmlayout.S_DX0)
-    let sv1: u64 = wmlayout.gs(state, wmlayout.S_DY0)
-    let sv2: u64 = wmlayout.gs(state, wmlayout.S_DX1)
-    let sv3: u64 = wmlayout.gs(state, wmlayout.S_DY1)
-    let svd: u64 = wmlayout.gs(state, wmlayout.S_DON)
-    var n: u64 = 0
-    var o: [u64; 4] = [0 as u64; 4]
-    let op: u64 = (&o[0]) as u64
-    wmlayout.ss(state, wmlayout.S_DON, 0)
-    // 1. nothing pending: no frame
-    if !box_take(state, op) {
-        n = n + 1
-    }
-    // 2. one rectangle: it is the box
-    wmbase.box_add(state, 10, 20, 30, 40)
-    if wmlayout.gs(state, wmlayout.S_DON) == 1 && wmlayout.gs(state, wmlayout.S_DX0) == 10 && wmlayout.gs(state, wmlayout.S_DY1) == 40 {
-        n = n + 1
-    }
-    // 3. a second one widens it
-    wmbase.box_add(state, 5, 25, 60, 35)
-    if wmlayout.gs(state, wmlayout.S_DX0) == 5 && wmlayout.gs(state, wmlayout.S_DY0) == 20 && wmlayout.gs(state, wmlayout.S_DX1) == 60 && wmlayout.gs(state, wmlayout.S_DY1) == 40 {
-        n = n + 1
-    }
-    // 4. the take returns the union and clears the flag
-    let t4: bool = box_take(state, op)
-    if t4 && wmlayout.gs(state, wmlayout.S_DON) == 0 && o[0] == 5 && o[1] == 20 && o[2] == 60 && o[3] == 40 {
-        n = n + 1
-    }
-    // 5. a rectangle after the take starts a NEW box: not widened by the old numbers
-    wmbase.box_add(state, 100, 200, 110, 210)
-    if wmlayout.gs(state, wmlayout.S_DON) == 1 && wmlayout.gs(state, wmlayout.S_DX0) == 100 && wmlayout.gs(state, wmlayout.S_DY0) == 200 && wmlayout.gs(state, wmlayout.S_DX1) == 110 && wmlayout.gs(state, wmlayout.S_DY1) == 210 {
-        n = n + 1
-    }
-    // 6. and the next take gets exactly that rectangle (it was not lost)
-    let t6: bool = box_take(state, op)
-    if t6 && o[0] == 100 && o[1] == 200 && o[2] == 110 && o[3] == 210 {
-        n = n + 1
-    }
-    // 7. a second take finds nothing
-    if !box_take(state, op) {
-        n = n + 1
-    }
-    // 8. the region lock is free again after all of this (no path leaves it taken)
-    if wmbase.rgn_lock(state) {
-        wmbase.rgn_unlock(state)
-        n = n + 1
-    }
-    wmlayout.ss(state, wmlayout.S_DX0, sv0)
-    wmlayout.ss(state, wmlayout.S_DY0, sv1)
-    wmlayout.ss(state, wmlayout.S_DX1, sv2)
-    wmlayout.ss(state, wmlayout.S_DY1, sv3)
-    wmlayout.ss(state, wmlayout.S_DON, svd)
-    return n
-}
-
-fn damagetest_say(state: u64) {
-    let r: u64 = selftest_damage(state)
-    serial.puts((&dt_a[0]) as u64)
-    serial.dec(r)
-    serial.puts((&gt_b[0]) as u64)
-    serial.dec(DT_MAX)
-    serial.nl()
-}
 
 // Der Titel, auf die Breite bis zum Schliessfeld beschnitten.
 // EIN ZEICHEN AUS `kernel/netmark.fi`, EINFARBIG. Der Fensterserver
