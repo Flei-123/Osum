@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wminput
 import ui.wm.wmframe
 import ui.wm.wmcompose
 import ui.wm.headsync
@@ -143,7 +144,7 @@ import sched.sched // docs/COMPOSITOR.md S5: the compositor's wake-up (poll_kick
 import fs.unixsock // docs/COMPOSITOR.md S3: a window buffer may be a shared memory object (memfd) the client paints into
 
 export {
-    sperre_an, lock_space, darf, input_seen,
+    sperre_an, lock_space, darf,
     trust_ask, trust_poll, trust_cancel,
     init, compose, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
@@ -178,7 +179,7 @@ export {
     set_before_t0, set_before_step, set_before_win,
     fill, text, flush_win,
     ev_push, ev_pop, ev_waiting,
-    on_mouse, on_key, term_write, term_out, term_cols, term_rows,
+    on_key, term_write, term_out, term_cols, term_rows,
     poll, blits, pixels, last_us,
     frame_us_sum, frame_us_n,
     set_keys,
@@ -374,6 +375,10 @@ fn win_shm(state: u64, i: u64) -> u64 {
     return wmcompose.win_shm(state, i)
 }
 
+
+fn strip_h(state: u64) -> u64 {
+    return wminput.strip_h(state)
+}
 
 fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     wmbase.damage(state, x0, y0, x1, y1)
@@ -1102,22 +1107,6 @@ fn win_id(state: u64, i: u64) -> u64 {
     return wmlayout.wg(state, i, wmlayout.W_ID)
 }
 
-// r454: the height of the strip in buffer rows: the title bar and the line under it (what the buffer grows by)
-fn strip_h(state: u64) -> u64 {
-    return wmgeom.title_h(state) - wmgeom.border(state)
-}
-
-// r454: is the client x inside the declared drag region of the strip? (the caption buttons are tested before this)
-fn strip_drag_at(state: u64, i: u64, x: i64) -> bool {
-    let r: u64 = wmlayout.wg(state, i, wmlayout.W_DRAGX)
-    let x0: u64 = r & 0xFFFFFFFF
-    let x1: u64 = r >> 32
-    if x1 <= x0 || x < 0 {
-        return false
-    }
-    return (x as u64) >= x0 && (x as u64) < x1
-}
-
 // r454: the program declares the empty part of its strip: [x0, x1) in client coordinates (0, 0 = none)
 fn set_strip_drag(state: u64, i: u64, x0: u64, x1: u64) -> bool {
     if !wmtitle.cap_client(state, i) {
@@ -1141,7 +1130,7 @@ fn set_cap_client(state: u64, i: u64, on: bool) -> bool {
     if on == has {
         return true
     }
-    let sh: u64 = strip_h(state)
+    let sh: u64 = wminput.strip_h(state)
     let w: u64 = wmlayout.wg(state, i, wmlayout.W_W)
     let h: u64 = wmlayout.wg(state, i, wmlayout.W_H)
     let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
@@ -1496,25 +1485,25 @@ fn hw_demo(state: u64) {
     }
     hw_drain(state, wa)
     hw_drain(state, wb)
-    wh_seen = ps2m.wheel(state)
-    hwh_seen = ps2m.hwheel(state)
+    wminput.wh_seen = ps2m.wheel(state)
+    wminput.hwh_seen = ps2m.hwheel(state)
     // two steps right over window a: ONE event, c = 2
     ps2m.hwheel_add(state, 1)
     ps2m.hwheel_add(state, 1)
-    hwheel_out(state, 150, 150)
+    wminput.hwheel_out(state, 150, 150)
     hw_say_ev(state, wa, (&g_r[0]) as u64)
     // one step left: c = 0xFFFF (-1)
     ps2m.hwheel_add(state, 0 - 1)
-    hwheel_out(state, 150, 150)
+    wminput.hwheel_out(state, 150, 150)
     hw_say_ev(state, wa, (&g_l[0]) as u64)
     // over the gap between the windows: the sum is taken, nobody gets an event
     ps2m.hwheel_add(state, 1)
-    hwheel_out(state, 370, 150)
+    wminput.hwheel_out(state, 370, 150)
     hw_say_ev(state, wa, (&g_g[0]) as u64)
     hw_say_ev(state, wb, (&g_g[0]) as u64)
     // over window b: b gets it, a does not
     ps2m.hwheel_add(state, 1)
-    hwheel_out(state, 500, 150)
+    wminput.hwheel_out(state, 500, 150)
     hw_say_ev(state, wb, (&g_b[0]) as u64)
     hw_say_ev(state, wa, (&g_a2[0]) as u64)
     // swipes: with two windows left = the other window, right = back, 2 fingers and up = nothing
@@ -1725,12 +1714,8 @@ fn sh_stat(state: u64, k: u64) -> u64 {
 // From word 16 a ring of CP_RING entries of 4 words: 0 type | mods << 8 | buttons << 16 | (index + 1) << 32, 1 x | y << 32, 2 key code,
 // 3 time stamp counter at the interrupt. A reader keeps its own tail; an entry is good when word 0 >> 32 == its index + 1 before and after.
 const CP_MAGIC: u64 = 0x504D4357
-const CP_RING: u64 = 64
-const CP_RING_AT: u64 = 16
 const CP_NOT: u64 = 0xFFFFFFFFFFFFFFFF // the caller is not the attached compositor
 const CP_BUSY: u64 = 0xFFFFFFFFFFFFFFFE // the compose lock did not come free in time: try again
-const CP_EV_MOVE: u64 = 1
-const CP_EV_BTN: u64 = 2
 const CP_EV_KEY: u64 = 3
 
 // the compositor page: made at the first WM_COMP / CP_PAGE, read-only for everybody (SMF_RO)
@@ -1955,13 +1940,6 @@ fn lj_say_reset(state: u64) {
     }
 }
 
-// the first pointer movement that has not reached the card yet (the start of the input-to-picture clock)
-fn cp_in(state: u64) {
-    if wmlayout.gs(state, wmlayout.S_CP_IN0) == 0 {
-        wmlayout.ss(state, wmlayout.S_CP_IN0, time.tsc())
-    }
-}
-
 
 // ===========================================================================================================================
 // PRESENT LOG (W-DELLFLICK, 14.10.2026): ONE RECORD PER PRESENT, OFF BY DEFAULT, ONE WORD COMPARED WHEN OFF.
@@ -2147,26 +2125,6 @@ fn cp_wait(state: u64, me: u64, seen: u64, ms: u64) -> u64 {
     }
     sched.poll_sleep(state, ps, kstate.get(state, kstate.TICKS) + ms / 10 + 1)
     return wmlayout.gs(state, wmlayout.S_CP_FSEQ)
-}
-
-// the input copy: see the header. `a`, `b`, `c` as in the page description.
-fn cp_event(state: u64, typ: u64, mods: u64, btn: u64, x: u64, y: u64, code: u64) {
-    let f: u64 = wmlayout.gs(state, wmlayout.S_CP_PAGEF)
-    if f == 0 || wmlayout.gs(state, wmlayout.S_CP_TASK) == 0 {
-        return
-    }
-    if wmgate.lock_active(state) || wmtrust.td_live(state) {
-        wmlayout.ss(state, wmlayout.S_CP_EVREF, wmlayout.gs(state, wmlayout.S_CP_EVREF) + 1)
-        return
-    }
-    let h: u64 = wmlayout.gs(state, wmlayout.S_CP_HEAD)
-    let at: u64 = CP_RING_AT + (h % CP_RING) * 4
-    wmanim.tw(f, at + 1, x | (y << 32))
-    wmanim.tw(f, at + 2, code)
-    wmanim.tw(f, at + 3, time.tsc())
-    wmanim.tw(f, at, typ | (mods << 8) | (btn << 16) | ((h + 1) << 32))
-    wmlayout.ss(state, wmlayout.S_CP_HEAD, h + 1)
-    arch.atomic_store(f + 16, h + 1)
 }
 
 // the modifiers that make a key a shortcut (Alt or the Windows key): 1 = shortcut
@@ -2386,9 +2344,6 @@ fn set_blur_cache(state: u64, on: bool) {
 fn blurs(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_BLURS)
 }
-static mut mv_lx: i64 = 0
-static mut mv_ly: i64 = 0
-static mut mv_btn: u64 = 0
 
 fn ev_waiting(state: u64, i: u64) -> u64 {
     if !wmbase.valid(state, i) {
@@ -2416,228 +2371,51 @@ fn ev_pop(state: u64, i: u64, out: u64) -> bool {
     wmlayout.ss(state, wmlayout.S_EVPOP, wmlayout.gs(state, wmlayout.S_EVPOP) + 1)
     return true
 }
-
-// Der Zeiger hat sich bewegt oder eine Taste gewechselt. Wird aus der
-// Unterbrechungsbehandlung heraus gerufen; alles, was hier passiert,
-// muss ohne Warten auskommen.
-static mut cp_pb: u64 = 0 // COMPOSITOR S5: the buttons of the last report (a change is an event for the compositor)
-static mut wh_seen: u64 = 0 // ROUND FV-W24: the driver's wheel sum as far as it was handed out
-
-// ROUND FV-W24: the wheel notches since the last call, to the window under
-// the pointer. Not while the trusted dialog is up or the screen is locked
-// (`darf`); the sum is taken either way so nothing is replayed later.
-fn wheel_out(state: u64, x: u64, y: u64) {
-    let sum: u64 = ps2m.wheel(state)
-    if sum == wh_seen {
-        return
-    }
-    var d: i64 = (wh_seen as i64) - (sum as i64)
-    wh_seen = sum
-    if d > 127 {
-        d = 127
-    }
-    if d < 0 - 127 {
-        d = 0 - 127
-    }
-    if d == 0 || wmtrust.td_live(state) {
-        return
-    }
-    let i: u64 = wmgate.hit(state, x as i64, y as i64)
-    if i >= wmbase.MAX_WIN || !wmgate.input_allowed(state, i) {
-        return
-    }
-    let lx: i64 = (x as i64) - wmbase.win_x(state, i) - wmbase.inx(state, i) as i64
-    let ly: i64 = (y as i64) - wmbase.win_y(state, i) - wmbase.iny(state, i) as i64
-    if lx < 0 || ly < 0 {
-        return
-    }
-    input_seen(state)
-    if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-        wmterm.sb_wheel(state, i, d)
-        return
-    }
-    wmevent.ev_push(state, i, wmlayout.E_WHEEL, lx as u64, ly as u64, (d as u64) & 0xFFFF)
-}
-
-static mut hwh_seen: u64 = 0 // r804: the driver's horizontal wheel sum as far as it was handed out
-
-// r804: horizontal wheel notches since the last call, to the window under the pointer (same rules as wheel_out).
-fn hwheel_out(state: u64, x: u64, y: u64) {
-    let sum: u64 = ps2m.hwheel(state)
-    if sum == hwh_seen {
-        return
-    }
-    var d: i64 = (sum as i64) - (hwh_seen as i64)
-    hwh_seen = sum
-    if d > 127 {
-        d = 127
-    }
-    if d < 0 - 127 {
-        d = 0 - 127
-    }
-    if d == 0 || wmtrust.td_live(state) {
-        return
-    }
-    let i: u64 = wmgate.hit(state, x as i64, y as i64)
-    if i >= wmbase.MAX_WIN || !wmgate.input_allowed(state, i) {
-        return
-    }
-    let lx: i64 = (x as i64) - wmbase.win_x(state, i) - wmbase.inx(state, i) as i64
-    let ly: i64 = (y as i64) - wmbase.win_y(state, i) - wmbase.iny(state, i) as i64
-    if lx < 0 || ly < 0 {
-        return
-    }
-    input_seen(state)
-    wmevent.ev_push(state, i, wmlayout.E_HWHEEL, lx as u64, ly as u64, (d as u64) & 0xFFFF)
-}
-
-// 0x0B8 in the mouse state (ps2m.S_PRESSED): buttons that went down since the last look
-const MOUSE_PRESSED_OFF: u64 = 0x0B8
-
-// ============================================================ W-DND
-// DRAG AND DROP IN THE WINDOW SERVER. The payload lives on the bus (`slots.drag_*`: the source puts it there when a
-// drag starts, a target takes it on release). A drag RUNS while the left button is down and the slot is full. What the
-// server adds:
-//   - hover-raise: ~600 ms over a background window raises it (and gives it the focus), so one can drop there; the
-//     taskbar does the same for its window buttons (taskbar.fi `dnd_bar_step`).
-//   - Esc cancels: the slot is emptied, the release then drops nothing.
-//   - the pointer shows "forbidden" over the desktop (nobody takes a drop there).
-//   - a K_TERM window with a tty takes a PATH as typed text (`dnd_take_paste`, pumped by kgui).
-//   - a fresh left press empties a stale slot (a drag nobody took).
-// Witness lines on the serial port: `wm: dndraise id=N`, `wm: dndcancel`, `wm: dndterm tty=T`.
-static mut dh_win: u64 = 0     // window under the pointer + 1 while a drag runs, 0 = none / not raisable
-static mut dh_t: u64 = 0       // mono_ns when the pointer came to that window
-static mut dh_raised: u64 = 0  // window + 1 raised for the current hover
-static mut dh_prev: u64 = 0    // left button of the last look
-static mut dh_tty: u64 = 0     // tty + 1 waiting to be typed a dropped path, 0 = none
-static mut dh_src: u64 = 0     // window + 1 under the pointer at the left press (the drag source), 0 = none
 static mut dh_nraise: u64 = 0
 static mut dh_ncancel: u64 = 0
 const DH_DELAY_NS: u64 = 600000000
 
-fn dnd_say(state: u64, which: u64, v: u64) {
-    var s_r: [u8; 17] = "wm: dndraise id=\0"
-    var s_c: [u8; 14] = "wm: dndcancel\0"
-    var s_t: [u8; 17] = "wm: dndterm tty=\0"
-    var s_s: [u8; 16] = "wm: dndsrc id=\0\0"
-    if which == 3 {
-        serial.puts((&s_s[0]) as u64)
-        serial.dec(v)
-    } else if which == 0 {
-        serial.puts((&s_r[0]) as u64)
-        serial.dec(v)
-    } else if which == 1 {
-        serial.puts((&s_c[0]) as u64)
-    } else {
-        serial.puts((&s_t[0]) as u64)
-        serial.dec(v)
-    }
-    serial.nl()
-}
-
-// Called with every pointer look (`i` = window under the pointer, MAX_WIN = none).
-fn dnd_hover(state: u64, i: u64, btn: u64) {
-    let left: u64 = btn & ps2m.B_LEFT
-    let was: u64 = dh_prev
-    dh_prev = left
-    if left != 0 && was == 0 {
-        // a new press: a payload nobody took is stale
-        if slots.drag_active(state) != 0 {
-            let _c: u64 = slots.drag_clear(state)
-        }
-        wmgate.dh_live = 0
-        dh_win = 0
-        dh_raised = 0
-        dh_src = 0
-        if i < wmbase.MAX_WIN && wmbase.valid(state, i) {
-            dh_src = i + 1
-        }
-        return
-    }
-    if left == 0 {
-        // The release goes to the window under the pointer. The SOURCE of a live drag never sees it otherwise and
-        // keeps its drag chip; tell it with a release far outside its own area (nothing there to hit).
-        if was != 0 && wmgate.dh_live != 0 && dh_src != 0 && dh_src != i + 1 && wmbase.valid(state, dh_src - 1) {
-            wmevent.ev_push(state, dh_src - 1, wmlayout.E_UP, 0x7FFF, 0x7FFF, ps2m.B_LEFT)
-            dnd_say(state, 3, wmlayout.wg(state, dh_src - 1, wmlayout.W_ID))
-        }
-        dh_src = 0
-        if was != 0 && wmgate.dh_live != 0 && i < wmbase.MAX_WIN && wmbase.valid(state, i) && wmgate.input_allowed(state, i)
-            && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && slots.drag_active(state) != 0
-            && (slots.drag_types(state) & bus.T_PATH) != 0 {
-            let t: u64 = wmterm.tty_of(state, i)
-            if t != wmterm.NO_TTY {
-                dh_tty = t + 1
-                dnd_say(state, 2, t)
-            }
-        }
-        wmgate.dh_live = 0
-        dh_win = 0
-        dh_raised = 0
-        return
-    }
-    if slots.drag_active(state) == 0 {
-        wmgate.dh_live = 0
-        dh_win = 0
-        dh_raised = 0
-        return
-    }
-    wmgate.dh_live = 1
-    if i >= wmbase.MAX_WIN || !wmbase.valid(state, i) || !wmgate.input_allowed(state, i)
-        || (wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL && wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_FLOAT) {
-        dh_win = 0
-        return
-    }
-    if dh_win != i + 1 {
-        dh_win = i + 1
-        dh_t = time.mono_ns(state)
-        if dh_raised != i + 1 {
-            dh_raised = 0
-        }
-    }
-}
-
 // Every tick: has the pointer rested long enough on a background window?
 fn dnd_tick(state: u64) {
-    if wmgate.dh_live == 0 || dh_win == 0 || dh_raised == dh_win {
+    if wmgate.dh_live == 0 || wminput.dh_win == 0 || wminput.dh_raised == wminput.dh_win {
         return
     }
-    if time.mono_ns(state) - dh_t < DH_DELAY_NS {
+    if time.mono_ns(state) - wminput.dh_t < DH_DELAY_NS {
         return
     }
-    let i: u64 = dh_win - 1
-    dh_raised = dh_win
+    let i: u64 = wminput.dh_win - 1
+    wminput.dh_raised = wminput.dh_win
     if i >= wmbase.MAX_WIN || !wmbase.valid(state, i) || wmbase.focus(state) == i {
         return
     }
     wmcore.raise_win(state, i)
     wmcore.set_focus(state, i)
     dh_nraise = dh_nraise + 1
-    dnd_say(state, 0, wmlayout.wg(state, i, wmlayout.W_ID))
+    wminput.dnd_say(state, 0, wmlayout.wg(state, i, wmlayout.W_ID))
 }
 
 // Esc while a drag runs: the payload goes, the release drops nothing. True = the key is consumed.
 fn dnd_cancel(state: u64) -> bool {
-    if dh_prev == 0 || slots.drag_active(state) == 0 {
+    if wminput.dh_prev == 0 || slots.drag_active(state) == 0 {
         return false
     }
     let _c: u64 = slots.drag_clear(state)
     wmgate.dh_live = 0
-    dh_win = 0
-    dh_raised = 0
+    wminput.dh_win = 0
+    wminput.dh_raised = 0
     dh_ncancel = dh_ncancel + 1
-    dnd_say(state, 1, 0)
+    wminput.dnd_say(state, 1, 0)
     return true
 }
 
 // kgui pumps this: a path dropped on a terminal window. Copies "<path> " to `out` (max bytes), returns
 // (tty << 32) | length, 0 = nothing waits. The slot is emptied.
 fn dnd_take_paste(state: u64, out: u64, max: u64) -> u64 {
-    if dh_tty == 0 {
+    if wminput.dh_tty == 0 {
         return 0
     }
-    let t: u64 = dh_tty - 1
-    dh_tty = 0
+    let t: u64 = wminput.dh_tty - 1
+    wminput.dh_tty = 0
     if max < 4 {
         return 0
     }
@@ -2663,634 +2441,11 @@ fn dnd_ncancel_pub() -> u64 {
     return dh_ncancel
 }
 
-fn on_mouse(state: u64) {
-    if !wmbase.ready(state) {
-        return
-    }
-    // A press AND its release that both landed before this look leave the button state unchanged ("never
-    // pressed"): the click is lost (toolbar buttons that ignored a click under host load). The driver remembers
-    // the press; replay it as its own step, then handle the real state (the release).
-    let pend: u64 = kstate.get(state + kstate.MOUSE_OFF, MOUSE_PRESSED_OFF)
-    kstate.set(state + kstate.MOUSE_OFF, MOUSE_PRESSED_OFF, 0)
-    let now: u64 = ps2m.buttons(state)
-    let seen: u64 = wmlayout.gs(state, wmlayout.S_KEYS) & 7
-    let lost: u64 = pend & ~now & ~seen & 7
-    if lost != 0 {
-        on_mouse_btn(state, seen | lost)
-    }
-    on_mouse_btn(state, now)
-}
-
-// A button went down: every popup menu (L_POPUP) the press did not land on is dismissed, like Esc. The owner reads E_CLOSE in
-// its wlib step, answers "dismissed" (0xFFFF) and closes the menu window itself (the window stays until then, so the event is never
-// lost); the press itself still goes to the window under the pointer.
-fn popup_outside(state: u64, hit_win: u64) {
-    var j: u64 = 0
-    var menu_open: bool = false
-    while j < wmbase.MAX_WIN {
-        if wmbase.valid(state, j) && wmlayout.wg(state, j, wmlayout.W_LAYER) == wmlayout.L_MENU && (wmlayout.wg(state, j, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) == 0 {
-            menu_open = true
-        }
-        j = j + 1
-    }
-    // the start menu closes when it loses the focus; the bare desktop takes the focus only when a start menu stands (a press there is
-    // an outside press for it) -- otherwise typing into the window keeps working after a click on the wallpaper
-    if menu_open && hit_win < wmbase.MAX_WIN && wmbase.valid(state, hit_win) && wmlayout.wg(state, hit_win, wmlayout.W_LAYER) == wmlayout.L_DESK {
-        wmcore.set_focus(state, hit_win)
-    }
-    j = 0
-    while j < wmbase.MAX_WIN {
-        if j != hit_win && wmbase.valid(state, j) && wmlayout.wg(state, j, wmlayout.W_LAYER) == wmlayout.L_POPUP {
-            wmevent.ev_push(state, j, wmlayout.E_CLOSE, 0, 0, 0)
-        }
-        j = j + 1
-    }
-}
-
-fn on_mouse_btn(state: u64, btn: u64) {
-    let nx: u64 = ps2m.x(state)
-    let ny: u64 = ps2m.y(state)
-    let ox: u64 = wmlayout.gs(state, wmlayout.S_CURX)
-    let oy: u64 = wmlayout.gs(state, wmlayout.S_CURY)
-    wheel_out(state, nx, ny)
-    hwheel_out(state, nx, ny)
-    // COMPOSITOR S5: the input-to-picture clock starts at the interrupt, and the compositor gets a copy of the pointer (not while locked)
-    if nx != ox || ny != oy {
-        frameprof.hover_in()
-        if !wmcursor.hwcur_an(state) {
-            cp_in(state)
-        }
-        cp_event(state, CP_EV_MOVE, 0, btn, nx, ny, 0)
-    }
-    if btn != cp_pb {
-        cp_pb = btn
-        cp_event(state, CP_EV_BTN, 0, btn, nx, ny, 0)
-    }
-    if nx != ox || ny != oy {
-        // DIE WIEDERHERSTELLUNG DES HINTERGRUNDS. Beide Rechtecke --
-        // das alte und das neue -- werden schmutzig; `compose` malt
-        // dort den Hintergrund und die Fenster neu und danach den
-        // Zeiger. Ein gerettetes Rechteck waere der zweite Weg dahin
-        // und muesste bei jedem Fensterwechsel nachgezogen werden.
-        // RUNDE ECHTHARDWARE-4: der Griffpunkt gehoert in beide
-        // Rechtecke. Ohne ihn bliebe bei jeder Form ausser dem Pfeil
-        // ein Streifen des alten Bildes stehen -- genau die "Spuren",
-        // nach denen Justin gefragt hat.
-        let gx: u64 = wmcursor.cur_ox(state)
-        let gy: u64 = wmcursor.cur_oy(state)
-        let gw: u64 = wmcursor.cur_w(state)
-        // ================================ RUNDE GPU (G-012)
-        // HIER WIRD DIE ARBEIT WIRKLICH GESPART. Traegt die Hardware
-        // den Zeiger, wird KEIN Rechteck schmutzig: weder das alte
-        // noch das neue. `compose` laeuft fuer die Bewegung gar nicht
-        // mehr an, und `present` traegt nichts hinaus -- die Bewegung
-        // kostet einen Befehl von 56 Oktetten statt zweier Rechtecke
-        // Bildpunkte. Das ist die Zahl, die diese Runde misst.
-        if wmcursor.hwcur_an(state) {
-            wmlayout.ss(state, wmlayout.S_CURX, nx)
-            wmlayout.ss(state, wmlayout.S_CURY, ny)
-            wmcursor.hwcur_bewegen(state)
-        } else {
-            if !pixelguard.bug_is(3) {
-                wmbase.damage_ex(state, ox as i64 - gx as i64, oy as i64 - gy as i64,
-                    (ox + gw) as i64 - gx as i64, (oy + gw) as i64 - gy as i64, wmbase.BT_ALL)
-            }
-            wmlayout.ss(state, wmlayout.S_CURX, nx)
-            wmlayout.ss(state, wmlayout.S_CURY, ny)
-            wmbase.damage_ex(state, nx as i64 - gx as i64, ny as i64 - gy as i64,
-                (nx + gw) as i64 - gx as i64, (ny + gw) as i64 - gy as i64, wmbase.BT_ALL)
-        }
-    }
-    let x: i64 = nx as i64
-    let y: i64 = ny as i64
-    // ROUND ACTION-BUS-5 (AB-004): while the trusted dialog is up the
-    // mouse belongs to it -- a press on a button answers it, nothing
-    // reaches a window below
-    if wmtrust.td_live(state) {
-        if (btn & ps2m.B_LEFT) != 0 && (wmtrust.td_mb & ps2m.B_LEFT) == 0 {
-            wmtrust.td_click(state, nx, ny)
-        }
-        wmtrust.td_mb = btn
-        return
-    }
-    wmtrust.td_mb = btn
-    // r382 LOCK SEAL: a drag or a resize that was running when the lock
-    // came is ended; nothing moves a window while the screen is locked.
-    if wmgate.lock_active(state) {
-        if wmlayout.gs(state, wmlayout.S_DRAG) != 0 {
-            wmlayout.ss(state, wmlayout.S_DRAG, 0)
-        }
-        if wmlayout.gs(state, wmlayout.S_SIZING) != 0 {
-            wmlayout.ss(state, wmlayout.S_SIZING, 0)
-        }
-    }
-    // Ziehen
-    if wmlayout.gs(state, wmlayout.S_DRAG) != 0 {
-        let i: u64 = wmlayout.gs(state, wmlayout.S_DRAG) - 1
-        if (btn & ps2m.B_LEFT) == 0 {
-            wmlayout.ss(state, wmlayout.S_DRAG, 0)
-            tiling.drag_end(state, i, x, y)
-        } else {
-            if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) != 0 && wmlayout.wg(state, i, wmlayout.W_NODE) == 0 && !fb.nosnap_an(state) {
-                let ddx: i64 = x - wmbase.win_x(state, i) - wmlayout.gs(state, wmlayout.S_DRAGX) as i64
-                let ddy: i64 = y - wmbase.win_y(state, i) - wmlayout.gs(state, wmlayout.S_DRAGY) as i64
-                let thr: i64 = 5 * wmgeom.uisc(state) as i64
-                if ddx > thr || ddx < 0 - thr || ddy > thr || ddy < 0 - thr {
-                    if !tiling.float_unmax(state, i, x, y) {
-                        wmcore.move_win(state, i, x - wmlayout.gs(state, wmlayout.S_DRAGX) as i64,
-                            y - wmlayout.gs(state, wmlayout.S_DRAGY) as i64)
-                    }
-                    tiling.drag_hover(state, i, x, y)
-                }
-                return
-            }
-            wmcore.move_win(state, i, x - wmlayout.gs(state, wmlayout.S_DRAGX) as i64,
-                y - wmlayout.gs(state, wmlayout.S_DRAGY) as i64)
-            tiling.drag_hover(state, i, x, y)
-            return
-        }
-    }
-    if wmlayout.gs(state, wmlayout.S_SIZING) != 0 {
-        let i: u64 = wmlayout.gs(state, wmlayout.S_SIZING) - 1
-        if (btn & ps2m.B_LEFT) == 0 {
-            wmlayout.ss(state, wmlayout.S_SIZING, 0)
-            // DELL ROUND: the end of a resize, on the wire (a runner reads it)
-            if i < wmbase.MAX_WIN && wmbase.valid(state, i) {
-                var s_gz: [u8; 17] = "wm: gezogen id=\0\0"
-                var s_gx: [u8; 4] = " x=\0"
-                var s_gy: [u8; 4] = " y=\0"
-                var s_gw: [u8; 4] = " w=\0"
-                var s_gh: [u8; 4] = " h=\0"
-                serial.puts((&s_gz[0]) as u64)
-                serial.dec(wmlayout.wg(state, i, wmlayout.W_ID))
-                serial.puts((&s_gx[0]) as u64)
-                serial.dec(wmbase.win_x(state, i) as u64)
-                serial.puts((&s_gy[0]) as u64)
-                serial.dec(wmbase.win_y(state, i) as u64)
-                serial.puts((&s_gw[0]) as u64)
-                serial.dec(wmlayout.wg(state, i, wmlayout.W_W))
-                serial.puts((&s_gh[0]) as u64)
-                serial.dec(wmlayout.wg(state, i, wmlayout.W_H))
-                serial.nl()
-            }
-        } else {
-            // RUNDE TILING: ein Fenster IM BAUM wird nicht frei
-            // gezogen -- es verschiebt die Trennlinie.
-            if wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-                tiling.tile_drag_resize(state, i, x, y)
-                return
-            }
-            // RUNDE DESKTOP: der Rand kommt aus `inx`/`iny` und nicht
-            // aus BORDER/TITLE_H -- ein Fenster ohne Schmuck (F_NODECO,
-            // Schreibtisch und Taskleiste) hat keinen.
-            // ==================================== RUNDE ECHTHARDWARE-5
-            // GEGEN DEN ANKER RECHNEN, NICHT GEGEN DIE LINKE OBERE ECKE.
-            //
-            // Hier stand `x - win_x(...)`: die neue Breite war immer der
-            // Abstand vom LINKEN Rand zum Zeiger. Fuer die rechte Kante
-            // ist das richtig; fuer die linke ist es genau verkehrt
-            // herum, und fuer die obere ebenso. Das ist der ganze Grund,
-            // warum bei Justin nur rechts (und unten) etwas passierte.
-            //
-            // Jetzt: die angefasste Kante folgt dem Zeiger, die
-            // GEGENUEBERLIEGENDE steht fest. Aus beiden ergibt sich die
-            // Groesse -- und, wenn links oder oben gezogen wurde, ein
-            // neuer Ursprung. Beides wird in EINEM Schritt gesetzt,
-            // sonst zappelt das Fenster.
-            let kanten: u64 = wmlayout.gs(state, wmlayout.S_SZEDGE)
-            let ax: i64 = wmlayout.gs(state, wmlayout.S_SZAX) as i64
-            let ay: i64 = wmlayout.gs(state, wmlayout.S_SZAY) as i64
-            let ix: i64 = wmbase.inx(state, i) as i64
-            let iy: i64 = wmbase.iny(state, i) as i64
-            var nw: i64 = wmlayout.gs(state, wmlayout.S_SZAW) as i64
-            var nh: i64 = wmlayout.gs(state, wmlayout.S_SZAH) as i64
-            var nx: i64 = wmbase.win_x(state, i)
-            var ny: i64 = wmbase.win_y(state, i)
-            // RUNDE ECHTHARDWARE-6: der Zustand VOR dem Zug, fuer die
-            // Meldung weiter unten.
-            let alt_w: u64 = wmlayout.wg(state, i, wmlayout.W_W)
-            let alt_h: u64 = wmlayout.wg(state, i, wmlayout.W_H)
-            let alt_x: i64 = wmbase.win_x(state, i)
-            let alt_y: i64 = wmbase.win_y(state, i)
-            let offx: i64 = wmlayout.gs(state, wmlayout.S_SZOFFX) as i64
-            let offy: i64 = wmlayout.gs(state, wmlayout.S_SZOFFY) as i64
-            if (kanten & wmcursor.SZ_R) != 0 {
-                nw = (x - offx) - (wmbase.win_x(state, i) + ix)
-            } else if (kanten & wmcursor.SZ_L) != 0 {
-                // Die rechte Kante steht bei `ax`; der Zeiger ist die
-                // neue linke. Die Breite ist der Abstand dazwischen.
-                nw = ax - (x - offx)
-            }
-            if (kanten & wmcursor.SZ_B) != 0 {
-                nh = (y - offy) - (wmbase.win_y(state, i) + iy)
-            } else if (kanten & wmcursor.SZ_T) != 0 {
-                // DELL ROUND: `y - offy` is the OUTER top edge; the
-                // content starts `iy` (the title bar) below it.
-                nh = ay - ((y - offy) + iy)
-            }
-            // DIE MINDESTGROESSE, UND ZWAR VOR DEM VERSCHIEBEN.
-            // Wer sie erst danach begrenzt, laesst das Fenster beim
-            // Unterschreiten weiterwandern, obwohl es nicht mehr
-            // schrumpft -- das ist das "Springen", das Justin
-            // ausdruecklich nicht will.
-            // DIESELBE UNTERGRENZE, DIE `resize_win` SELBST ZIEHT
-            // (32x16 mit Schmuck, 1x1 ohne) -- hier noch einmal, weil
-            // sie VOR dem Verschieben gebraucht wird und nicht erst
-            // beim Ablehnen.
-            var minw: i64 = 32
-            var minh: i64 = 16
-            if !wmcore.win_deco(state, i) {
-                minw = 1
-                minh = 1
-            }
-            if nw < minw {
-                nw = minw
-            }
-            if nh < minh {
-                nh = minh
-            }
-            if (kanten & wmcursor.SZ_L) != 0 {
-                nx = ax - nw - ix
-            }
-            if (kanten & wmcursor.SZ_T) != 0 {
-                ny = ay - nh - iy
-            }
-            // ==================================== RUNDE ECHTHARDWARE-5
-            // NICHT UEBER DEN LINKEN ODER OBEREN RAND HINAUS.
-            //
-            // GEMESSEN in dieser Runde: zieht man die linke Kante ueber
-            // den Bildschirmrand, wird `nx` negativ (der Server meldete
-            // `x=18446744073709551608`, also -8 als Zweierkomplement),
-            // und der naechste Anstrich rechnet mit einer Adresse
-            // ausserhalb des Rahmenpuffers. Ein Fenster, das man aus
-            // dem Schirm herausziehen kann, ist kein Fenster mehr.
-            //
-            // Also: der Ursprung bleibt auf dem Schirm, und die Breite
-            // wird entsprechend gekappt -- die angefasste Kante bleibt
-            // damit unter dem Zeiger, bis der Rand erreicht ist, und
-            // steht dann still.
-            if (kanten & wmcursor.SZ_L) != 0 && nx < 0 {
-                nw = nw + nx
-                nx = 0
-                if nw < minw {
-                    nw = minw
-                }
-            }
-            if (kanten & wmcursor.SZ_T) != 0 && ny < 0 {
-                nh = nh + ny
-                ny = 0
-                if nh < minh {
-                    nh = minh
-                }
-            }
-            // RUNDE ECHTHARDWARE-5: die Spur des Ziehens. Ohne sie
-            // ist "die Groesse aendert sich nicht" nicht von "die
-            // Kante wurde nie angefasst" zu unterscheiden.
-            var s_sz: [u8; 12] = "wm: zieh k=\0"
-            var s_szw: [u8; 5] = " w=\0\0"
-            var s_szh: [u8; 5] = " h=\0\0"
-            var s_szx: [u8; 5] = " x=\0\0"
-            var s_szr: [u8; 6] = " rc=\0\0"
-            serial.puts((&s_sz[0]) as u64)
-            serial.dec(kanten)
-            serial.puts((&s_szw[0]) as u64)
-            serial.dec(nw as u64)
-            serial.puts((&s_szh[0]) as u64)
-            serial.dec(nh as u64)
-            serial.puts((&s_szx[0]) as u64)
-            serial.dec(nx as u64)
-            let ok: bool = wmcore.resize_win(state, i, nw as u64, nh as u64)
-            // ==================================== RUNDE ECHTHARDWARE-6
-            // WAS DAS FENSTER VORHER WAR. Ohne diese vier Zahlen ist
-            // `rc=1` nur eine Zusage: `resize_win` gibt auch dann true,
-            // wenn es die Groesse auf die Untergrenze gekappt hat, und
-            // von aussen sieht "gekappt" wie "nicht gewirkt" aus.
-            // Justins Befund B ist genau diese Unterscheidung.
-            var s_va: [u8; 8] = " vorw=\0\0"
-            var s_vb: [u8; 8] = " vorh=\0\0"
-            var s_vx: [u8; 8] = " vorx=\0\0"
-            var s_vy: [u8; 8] = " vory=\0\0"
-            serial.puts((&s_va[0]) as u64)
-            serial.dec(alt_w)
-            serial.puts((&s_vb[0]) as u64)
-            serial.dec(alt_h)
-            serial.puts((&s_vx[0]) as u64)
-            serial.dec(alt_x as u64)
-            serial.puts((&s_vy[0]) as u64)
-            serial.dec(alt_y as u64)
-            serial.puts((&s_szr[0]) as u64)
-            if ok {
-                serial.dec(1)
-            } else {
-                serial.dec(0)
-            }
-            serial.nl()
-            if ok {
-                if (kanten & wmcursor.SZ_L) != 0 || (kanten & wmcursor.SZ_T) != 0 {
-                    wmcore.move_win(state, i, nx, ny)
-                }
-            }
-            return
-        }
-    }
-    wmlayout.ss(state, wmlayout.S_MOVES, wmlayout.gs(state, wmlayout.S_MOVES) + 1)
-    let i: u64 = wmgate.hit(state, x, y)
-    if (btn & ~(wmlayout.gs(state, wmlayout.S_KEYS) & 7) & 7) != 0 {
-        popup_outside(state, i)
-    }
-    // RUNDE SOFTUI: der Ueberfahr-Zustand der drei Schaltflaechen. Er
-    // steht VOR dem Ausstieg fuer "kein Fenster getroffen", denn genau
-    // dann muss er zurueckgesetzt werden -- sonst bleibt der rote
-    // Schliessen-Knopf rot, nachdem der Zeiger das Fenster verlassen
-    // hat.
-    wmchrome.cap_track(state, i, x, y)
-    dnd_hover(state, i, btn) // W-DND
-    if wmlayout.gs(state, wmlayout.S_CAPDOWN) != 0 && (btn & ps2m.B_LEFT) == 0 {
-        wmchrome.cap_release(state, i, x, y)
-    }
-    // RUNDE ECHTHARDWARE-4: die Form des Zeigers folgt dem, worueber
-    // er steht. Der Aufruf steht VOR dem Ausstieg fuer "kein Fenster
-    // getroffen" -- sonst bliebe der Doppelpfeil stehen, wenn man vom
-    // Fensterrand auf den Schreibtisch faehrt.
-    // r382 LOCK SEAL: the edges of a window that is not on the screen
-    // must not show in the pointer shape either.
-    if i < wmbase.MAX_WIN && !wmgate.input_allowed(state, i) {
-        wmcursor.margin_cursor(state, wmbase.MAX_WIN, x, y)
-    } else {
-        wmcursor.margin_cursor(state, i, x, y)
-    }
-    if i >= wmbase.MAX_WIN {
-        return
-    }
-    // RUNDE ALLTAG: waehrend die Sperre steht, bekommt nur der Sperrer
-    // etwas. Die Bewegung des Zeigers selbst laeuft weiter (sonst
-    // klebte er fest), die EREIGNISSE gehen nicht hinaus.
-    input_seen(state)
-    if !wmgate.input_allowed(state, i) {
-        return
-    }
-    wmlayout.ss(state, wmlayout.S_HITS, wmlayout.gs(state, wmlayout.S_HITS) + 1)
-    let lokal_x: i64 = x - wmbase.win_x(state, i) - wmbase.inx(state, i) as i64
-    let lokal_y: i64 = y - wmbase.win_y(state, i) - wmbase.iny(state, i) as i64
-    let mit_schmuck: bool = wmbase.deko(state, i)
-    // Tastenwechsel erkennen: `ps2m` fuehrt den Zustand, hier steht der
-    // zuletzt GESEHENE.
-    let alt: u64 = wmlayout.gs(state, wmlayout.S_KEYS) & 7
-    if btn != alt {
-        wmlayout.ss(state, wmlayout.S_KEYS, (wmlayout.gs(state, wmlayout.S_KEYS) & ~7) | btn)
-        if (btn & ps2m.B_LEFT) != 0 && (alt & ps2m.B_LEFT) == 0 {
-            wmcore.raise_win(state, i)
-            // RUNDE DESKTOP: SCHREIBTISCH UND TASKLEISTE NEHMEN DIE
-            // TASTATUR NICHT. Wer auf die Leiste klickt, will ein
-            // Fenster wechseln und nicht in die Leiste tippen -- und
-            // ein Schreibtisch, der den Fokus an sich zieht, macht
-            // jeden Tastendruck danach wirkungslos.
-            // RUNDE ECHTHARDWARE-1: ... ODER WENN DAS FENSTER
-            // AUSDRUECKLICH DARUM GEBETEN HAT (F_KEYS).
-            if wmlayout.wg(state, i, wmlayout.W_LAYER) == wmlayout.L_NORMAL
-                || (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_KEYS) != 0 {
-                wmcore.set_focus(state, i)
-            }
-            if mit_schmuck {
-                // RUNDE SOFTUI: die drei Schaltflaechen, wenn die Form
-                // sie verlangt. Sie liegen VOR dem Ziehen der Leiste --
-                // wer auf das Kreuz klickt, will nicht schieben.
-                let cn: u64 = wmchrome.cap_at(state, i, x, y)
-                if cn < wmlayout.CAP_N {
-                    // r402: the press only HOLDS the button (painted darker); the action
-                    // is `cap_act`, on release over the same button (`cap_release`).
-                    wmlayout.ss(state, wmlayout.S_CAPDOWN, i * 4 + cn + 1)
-                    wmchrome.damage_caption(state, i)
-                    return
-                }
-                // Schliessfeld?
-                let bx: i64 = wmbase.win_x(state, i) + wmbase.outer_w(state, i) as i64
-                    - wmgeom.border(state) as i64 - wmgeom.close_w(state) as i64 - 3
-                let by: i64 = wmbase.win_y(state, i) + 4
-                let im_feld: bool = wmgeom.form(state, wmlayout.FM_CAPTION) == 0
-                    && x >= bx && x < bx + wmgeom.close_w(state) as i64
-                let im_feld2: bool = y >= by && y < by + wmgeom.close_w(state) as i64
-                if im_feld && im_feld2 {
-                    wmevent.ev_push(state, i, wmlayout.E_CLOSE, 0, 0, 0)
-                    wmcore.destroy(state, i)
-                    return
-                }
-                // ================================ RUNDE ECHTHARDWARE-5
-                // ALLE VIER KANTEN UND ALLE VIER ECKEN.
-                //
-                // Justins Befund D, woertlich: "Ziehen funktioniert nur
-                // an der rechten Kante." Hier stand `am_rechts ||
-                // am_unten` -- die linke und die obere Kante wurden gar
-                // nicht erst angefasst. Und sie HAETTEN auch nicht
-                // funktionieren koennen: `resize_win` rechnet die neue
-                // Groesse aus der linken oberen Ecke, die beim Ziehen an
-                // der linken Kante ja gerade die ist, die sich bewegt.
-                //
-                // Also wird jetzt gemerkt, WELCHE Kanten angefasst
-                // wurden (Bitmaske) und WO die gegenueberliegende Kante
-                // steht (`S_SZAX`/`S_SZAY`). Die Bewegung rechnet dann
-                // gegen diesen Anker: die festgehaltene Kante bleibt
-                // stehen, das Fenster springt nicht, und eine Ecke
-                // aendert beide Achsen zugleich, weil zwei Bits gesetzt
-                // sind.
-                //
-                // DIESE PRUEFUNG STEHT VOR DEM ZIEHEN DER TITELLEISTE,
-                // und das ist der eigentliche Fix. Stuende sie danach,
-                // waere die OBERE Kante nie erreichbar: `lokal_y < 0`
-                // ist die Titelleiste, und die faengt jeden Klick dort
-                // ab. Ein Mensch, der ein Fenster oben groesser ziehen
-                // will, greift genau dorthin.
-                //
-                // `lokal_y` ist relativ zur ARBEITSFLAECHE: 0 ist deren
-                // Oberkante, die Titelleiste liegt bei negativem
-                // `lokal_y`, und der aeussere Rahmen noch darueber. Die
-                // obere Greifkante ist deshalb der schmale Streifen
-                // GANZ OBEN im Schmuck -- nicht die ganze Titelleiste,
-                // sonst liesse sich das Fenster nicht mehr schieben.
-                let iw: i64 = wmlayout.wg(state, i, wmlayout.W_W) as i64
-                let ih: i64 = wmlayout.wg(state, i, wmlayout.W_H) as i64
-                // DELL ROUND: one test for press and cursor (`grip_mask`).
-                let kanten: u64 = wmcursor.grip_mask(state, i, lokal_x, lokal_y)
-                let im_rahmen: bool = kanten != 0
-                if im_rahmen && kanten != 0 {
-                    wmlayout.ss(state, wmlayout.S_SIZING, i + 1)
-                    wmlayout.ss(state, wmlayout.S_SZEDGE, kanten)
-                    // Die Kante, die STEHENBLEIBT, in Bildschirmmass.
-                    wmlayout.ss(state, wmlayout.S_SZAX,
-                        (wmbase.win_x(state, i) + wmbase.inx(state, i) as i64 + iw) as u64)
-                    wmlayout.ss(state, wmlayout.S_SZAY,
-                        (wmbase.win_y(state, i) + wmbase.iny(state, i) as i64 + ih) as u64)
-                    wmlayout.ss(state, wmlayout.S_SZAW, iw as u64)
-                    wmlayout.ss(state, wmlayout.S_SZAH, ih as u64)
-                    // DELL ROUND: the grab offsets (see S_SZOFFX).
-                    var ox: i64 = 0
-                    var oy: i64 = 0
-                    if (kanten & wmcursor.SZ_L) != 0 {
-                        ox = x - (wmbase.win_x(state, i) + wmbase.inx(state, i) as i64)
-                    } else if (kanten & wmcursor.SZ_R) != 0 {
-                        ox = x - (wmbase.win_x(state, i) + wmbase.inx(state, i) as i64 + iw)
-                    }
-                    if (kanten & wmcursor.SZ_T) != 0 {
-                        oy = y - wmbase.win_y(state, i)
-                    } else if (kanten & wmcursor.SZ_B) != 0 {
-                        oy = y - (wmbase.win_y(state, i) + wmbase.iny(state, i) as i64 + ih)
-                    }
-                    if fb.winfix_aus(state) {
-                        // counter-proof: the old rule (pointer = content edge)
-                        ox = 0
-                        oy = 0
-                        if (kanten & wmcursor.SZ_T) != 0 {
-                            oy = 0 - wmbase.iny(state, i) as i64
-                        }
-                    }
-                    wmlayout.ss(state, wmlayout.S_SZOFFX, ox as u64)
-                    wmlayout.ss(state, wmlayout.S_SZOFFY, oy as u64)
-                    return
-                }
-                // r1014: terminal tabs: a press on an inactive tab, a tab's 'x' or the '+' is the strip's, not the title bar's
-                if lokal_y < 0 && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && wmtabctl.tt_press(state, i, x, y) {
-                    return
-                }
-                // r454: the strip of a window that paints its own title bar. The empty part (the drag region the program
-                // declared) is the title bar: a press moves the window, a second press within one second (the system-wide double click time of wlib) maximises or restores
-                // it. The rest of the strip -- the tabs, the plus button -- is the program's: the press goes to it as a
-                // normal click (below). The caption buttons were tested above, the lock was tested before all of this.
-                if wmtitle.cap_client(state, i) && lokal_y >= 0 && lokal_y < strip_h(state) as i64
-                    && strip_drag_at(state, i, lokal_x) {
-                    let nowt: u64 = time.mono_ns(state)
-                    if wmlayout.gs(state, wmlayout.S_STRIPWIN) == i + 1 && nowt - wmlayout.gs(state, wmlayout.S_STRIPT) < 1000000000 {
-                        wmlayout.ss(state, wmlayout.S_STRIPWIN, 0)
-                        wmchrome.cap_act(state, i, wmlayout.CAP_MAX)
-                        return
-                    }
-                    wmlayout.ss(state, wmlayout.S_STRIPWIN, i + 1)
-                    wmlayout.ss(state, wmlayout.S_STRIPT, nowt)
-                    tiling.drag_begin(state, i)
-                    wmlayout.ss(state, wmlayout.S_DRAG, i + 1)
-                    wmlayout.ss(state, wmlayout.S_DRAGX, (x - wmbase.win_x(state, i)) as u64)
-                    wmlayout.ss(state, wmlayout.S_DRAGY, (y - wmbase.win_y(state, i)) as u64)
-                    return
-                }
-                if lokal_y < 0 {
-                    // die Titelleiste: ziehen
-                    // RUNDE TILING: wer aus dem Baum gezogen wird, muss
-                    // sich merken, dass er darin war.
-                    tiling.drag_begin(state, i)
-                    wmlayout.ss(state, wmlayout.S_DRAG, i + 1)
-                    wmlayout.ss(state, wmlayout.S_DRAGX, (x - wmbase.win_x(state, i)) as u64)
-                    wmlayout.ss(state, wmlayout.S_DRAGY, (y - wmbase.win_y(state, i)) as u64)
-                    return
-                }
-                // ==================================== RUNDE ECHTHARDWARE-3
-                // DER GRIFF WAR EIN QUADRAT VON ZWOELF BILDPUNKTEN.
-                //
-                // Justins Befund: "Fenstergroesse aendern funktioniert
-                // nicht". Es funktionierte -- aber nur in der EINEN
-                // Ecke unten rechts, und dort auf 12x12 Bildpunkten
-                // (GRIP0). Auf seinem 2560x1440-Schirm mit uiscale 2
-                // sind das 24x24, also ein knapper Millimeter Ziel:
-                // wer den nicht trifft, ZIEHT DAS FENSTER, weil der
-                // Klick daneben ein gewoehnlicher Klick ist. Das sieht
-                // aus, als ginge es nicht.
-                //
-                // Jetzt ist der ganze RAND ein Griff: die rechte
-                // Kante, die untere Kante und die Ecke dazwischen.
-                // Das ist die Bedienung, die jedes andere System hat.
-            }
-            if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && lokal_x >= 0 && lokal_y >= 0 {
-                wmterm.term_mouse(state, i, 0, lokal_x as u64, lokal_y as u64, btn)
-            }
-            wmlayout.ss(state, wmlayout.S_DOWNS, wmlayout.gs(state, wmlayout.S_DOWNS) + 1)
-            // RUNDE TON: der Klickton. HIER, im Fensterserver, weil
-            // hier JEDER Druck der linken Taste vorbeikommt -- kein
-            // Programm muss dafuer etwas tun, und keines kann ihn
-            // vergessen. Ohne das Wort `audio` ist es ein Vergleich.
-            audio.click(state)
-            wmevent.ev_push(state, i, wmlayout.E_DOWN, lokal_x as u64, lokal_y as u64,
-                btn | wmgate.mods_of(state))
-            return
-        }
-        if (btn & ps2m.B_LEFT) == 0 && (alt & ps2m.B_LEFT) != 0 {
-            if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && lokal_x >= 0 && lokal_y >= 0 {
-                wmterm.term_mouse(state, i, 1, lokal_x as u64, lokal_y as u64, btn)
-            }
-            wmevent.ev_push(state, i, wmlayout.E_UP, lokal_x as u64, lokal_y as u64, alt)
-            return
-        }
-        // RUNDE K15: DIE RECHTE TASTE. Runde K10 sah nur die linke an --
-        // sie brauchte nicht mehr, und der Rest lief still ueber die
-        // Zustandsmaske. Ein Kontextmenue gibt es ohne rechte Taste
-        // nicht, also kommt sie hier dazu: dieselben zwei Ereignisse,
-        // dieselben Ortskoordinaten, und die Tastenmaske steht wie bei
-        // der linken im dritten Wort. KEIN Heben und KEIN Fokuswechsel
-        // dabei -- ein Rechtsklick soll das Fenster nicht umsortieren,
-        // sondern nur fragen.
-        if (btn & ps2m.B_RIGHT) != 0 && (alt & ps2m.B_RIGHT) == 0 {
-            if lokal_x >= 0 && lokal_y >= 0 {
-                if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-                    wmterm.term_mouse(state, i, 3, lokal_x as u64, lokal_y as u64, btn)
-                }
-                wmlayout.ss(state, wmlayout.S_DOWNS, wmlayout.gs(state, wmlayout.S_DOWNS) + 1)
-                wmevent.ev_push(state, i, wmlayout.E_DOWN, lokal_x as u64, lokal_y as u64,
-                    btn | wmgate.mods_of(state))
-            }
-            return
-        }
-        if (btn & ps2m.B_RIGHT) == 0 && (alt & ps2m.B_RIGHT) != 0 {
-            if lokal_x >= 0 && lokal_y >= 0 {
-                wmevent.ev_push(state, i, wmlayout.E_UP, lokal_x as u64, lokal_y as u64,
-                    alt)
-            }
-            return
-        }
-        // The MIDDLE button, like the right one: same two events, same local
-        // coordinates, the button mask in the third word. No raise and no focus
-        // change. Without this a remote-desktop viewer never saw a middle
-        // click (gui_input: "mouse-middle" had 0 events); programs that do not
-        // look at bit 4 ignore the event.
-        if (btn & ps2m.B_MIDDLE) != 0 && (alt & ps2m.B_MIDDLE) == 0 {
-            if lokal_x >= 0 && lokal_y >= 0 {
-                if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-                    wmterm.term_mouse(state, i, 4, lokal_x as u64, lokal_y as u64, btn)
-                }
-                wmlayout.ss(state, wmlayout.S_DOWNS, wmlayout.gs(state, wmlayout.S_DOWNS) + 1)
-                wmevent.ev_push(state, i, wmlayout.E_DOWN, lokal_x as u64, lokal_y as u64,
-                    btn | wmgate.mods_of(state))
-            }
-            return
-        }
-        if (btn & ps2m.B_MIDDLE) == 0 && (alt & ps2m.B_MIDDLE) != 0 {
-            if lokal_x >= 0 && lokal_y >= 0 {
-                wmevent.ev_push(state, i, wmlayout.E_UP, lokal_x as u64, lokal_y as u64,
-                    alt)
-            }
-            return
-        }
-    }
-    if lokal_x >= 0 && lokal_y >= 0 {
-        if (btn & ps2m.B_LEFT) != 0 && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-            wmterm.term_mouse(state, i, 2, lokal_x as u64, lokal_y as u64, btn)
-        }
-        let wid: u64 = wmlayout.wg(state, i, wmlayout.W_ID)
-        if wid != wmevent.mv_wid || lokal_x != mv_lx || lokal_y != mv_ly || btn != mv_btn {
-            wmevent.mv_wid = wid
-            mv_lx = lokal_x
-            mv_ly = lokal_y
-            mv_btn = btn
-            wmevent.ev_push(state, i, wmlayout.E_MOVE, lokal_x as u64, lokal_y as u64, btn)
-        }
-    }
-}
-
-fn input_seen(state: u64) {
-    kstate.set(state, kstate.K11_OFF + kstate.SP_LAST, time.mono_ns(state))
-}
-
 fn on_key(state: u64, c: u64) {
     if !wmbase.ready(state) || c == 0 {
         return
     }
-    input_seen(state)
+    wminput.input_seen(state)
     lj_input(state) // r1049: a key starts the active stretch too (only the pointer did)
     // W-DND: Esc cancels a running drag
     if c == 27 && dnd_cancel(state) {
@@ -3316,9 +2471,9 @@ fn on_key(state: u64, c: u64) {
     wmlayout.ss(state, wmlayout.S_KEYIN, wmlayout.gs(state, wmlayout.S_KEYIN) + 1)
     // COMPOSITOR S5: the compositor sees THAT a key came, and its code only while Alt or the Windows key is held (a shortcut)
     if cp_shortcut(state) != 0 {
-        cp_event(state, CP_EV_KEY, 1, 0, 0, 0, c)
+        wminput.cp_event(state, CP_EV_KEY, 1, 0, 0, 0, c)
     } else {
-        cp_event(state, CP_EV_KEY, 0, 0, 0, 0, 0)
+        wminput.cp_event(state, CP_EV_KEY, 0, 0, 0, 0, 0)
     }
     // ================================================ RUNDE WMPLUGIN
     // ERST DAS PLUGIN, DANN DAS FENSTER -- und zwar in dieser Reihe.
@@ -3478,7 +2633,7 @@ fn poll(state: u64) -> bool {
             // findet die Taste wieder oben und hat den Klick verloren.
             if ps2m.changed(state) {
                 ps2m.take_change(state)
-                on_mouse(state)
+                wminput.on_mouse(state)
                 lj_input(state)
             }
             n = n + 1
@@ -3491,7 +2646,7 @@ fn poll(state: u64) -> bool {
         return false
     }
     ps2m.take_change(state)
-    on_mouse(state)
+    wminput.on_mouse(state)
     lj_input(state)
     return true
 }
@@ -3556,8 +2711,8 @@ fn term_paste_done(state: u64) {
     if !wmbase.ready(state) {
         return
     }
-    input_seen(state)
-    cp_event(state, CP_EV_KEY, 0, 0, 0, 0, 0)
+    wminput.input_seen(state)
+    wminput.cp_event(state, CP_EV_KEY, 0, 0, 0, 0, 0)
     let f: u64 = wmbase.focus(state)
     if f < wmbase.MAX_WIN && wmbase.valid(state, f) && wmlayout.wg(state, f, wmlayout.W_KIND) == wmlayout.K_TERM {
         wmdamage.damage_win(state, f)
