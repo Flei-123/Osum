@@ -1,0 +1,579 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ecke
+import gfx.fb
+import net.netmark
+import net.netview
+import sched.time
+import gfx.ttf
+import ui.wm.wmanim
+import ui.wm.wmanimctl
+import ui.wm.wmbase
+import ui.wm.wmblur
+import ui.wm.wmcaption
+import ui.wm.wmdragpaint
+import ui.wm.wmdraw
+import ui.wm.wmgate
+import ui.wm.wmgeom
+import ui.wm.wmglass
+import ui.wm.wmlayout
+import ui.wm.wmpresent
+import ui.wm.wmshadow
+import ui.wm.wmtabs
+import ui.wm.wmtitle
+import ui.wm.wmworkarea
+
+const CG_MAX: u64 = 1600
+
+static mut cg_w: [u64; 4] = [0 as u64; 4]
+
+static mut cg_h: [u64; 4] = [0 as u64; 4]
+
+fn cap_hover(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_CAPHOV)
+}
+
+fn cap_hits(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_CAPHITS)
+}
+
+fn cap_strip_w(state: u64) -> u64 {
+    return wmlayout.CAP_N * wmgeom.cap_w(state) + wmgeom.border(state)
+}
+
+fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
+    let wx: i64 = wmbase.win_x(state, i)
+    let wy: i64 = wmbase.win_y(state, i)
+    let ow: i64 = wmbase.outer_w(state, i) as i64
+    let oh: i64 = wmbase.outer_h(state, i) as i64
+    let ax0: i64 = wmbase.imax(wx, cx0 as i64)
+    let ay0: i64 = wmbase.imax(wy, cy0 as i64)
+    let ax1: i64 = wmbase.imin(wx + ow, cx1 as i64)
+    let ay1: i64 = wmbase.imin(wy + oh, cy1 as i64)
+    if ax1 <= ax0 || ay1 <= ay0 {
+
+        if wmlayout.wg(state, i, wmlayout.W_ANK) == 0 && !wmanim.drag_paint_on(state, i) && wmbase.deko(state, i) {
+            var rr: i64 = wmgeom.form(state, wmlayout.FM_SHADOW_R) as i64
+            let rr2: i64 = wmgeom.form(state, wmlayout.FM_SHADOW_R2) as i64
+            if rr2 > rr {
+                rr = rr2
+            }
+            rr = rr + 1
+            if rr > 1 && wmbase.imin(wx + ow + rr, cx1 as i64) > wmbase.imax(wx - rr, cx0 as i64)
+                && wmbase.imin(wy + oh + rr, cy1 as i64) > wmbase.imax(wy - rr, cy0 as i64) {
+                wmshadow.paint_shadow(state, i, cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
+            }
+        }
+        return
+    }
+
+    if wmlayout.wg(state, i, wmlayout.W_ANK) != 0 {
+        wmanim.paint_win_anim(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
+            cy1 as i64)
+        return
+    }
+
+    if wmanim.drag_paint_on(state, i) {
+        let ph_t: u64 = time.tsc()
+        wmdragpaint.paint_win_drag(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
+            cy1 as i64)
+        wmpresent.ph_add(state, wmlayout.S_PH_DRAG, ph_t, time.tsc())
+        return
+    }
+
+    wmlayout.wsv(state, i, wmlayout.W_PAINTS, wmlayout.wg(state, i, wmlayout.W_PAINTS) + 1)
+    wmlayout.wsv(state, i, wmlayout.W_PX,
+        wmlayout.wg(state, i, wmlayout.W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
+
+    if wmblur.blur_will(state, i) {
+        let ph_t: u64 = time.tsc()
+        wmblur.blur_area(state, i, wx, wy, wx + ow, wy + oh,
+            wmbase.deco(state, wmlayout.DK_TITLE), cx0 as i64, cy0 as i64, cx1 as i64,
+            cy1 as i64)
+        wmpresent.ph_add(state, wmlayout.S_PH_BLUR, ph_t, time.tsc())
+    }
+
+    if !wmbase.deko(state, i) {
+        let bx0: i64 = wmbase.imax(wx, cx0 as i64)
+        let by0: i64 = wmbase.imax(wy, cy0 as i64)
+        let bx1: i64 = wmbase.imin(wx + wmlayout.wg(state, i, wmlayout.W_W) as i64, cx1 as i64)
+        let by1: i64 = wmbase.imin(wy + wmlayout.wg(state, i, wmlayout.W_H) as i64, cy1 as i64)
+        if bx1 <= bx0 || by1 <= by0 {
+            return
+        }
+        let bw: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+        let bq: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
+        let bn: u64 = (bx1 - bx0) as u64
+
+        let pw: u64 = wmbase.panel_win(state)
+        var alpha: u64 = wmbase.form_or(state, wmlayout.FM_WIN_ALPHA, 100)
+        if pw < wmbase.MAX_WIN && i == pw {
+            alpha = wmbase.form_or(state, wmlayout.FM_TB_ALPHA, 100)
+        }
+
+        let op: u64 = wmblur.win_opac(state, i)
+        if op < 255 {
+            let opp: u64 = op *% 100 / 255
+            if opp < alpha {
+                alpha = opp
+            }
+        }
+        if wmblur.covers_screen(state, i) {
+            alpha = 100
+        }
+
+        let rr: u64 = nodeco_radius(state, i)
+        let wh: u64 = wmlayout.wg(state, i, wmlayout.W_H)
+        if alpha >= 100 {
+            var br: i64 = by0
+            while br < by1 {
+
+                var dy: u64 = 0xFFFFFFFFFFFFFFFF
+                if rr != 0 {
+                    let o: u64 = (br - wy) as u64
+                    dy = o
+                    if wh > o && wh - 1 - o < dy {
+                        dy = wh - 1 - o
+                    }
+                }
+                var ein: u64 = 0
+                if rr != 0 && dy < rr {
+                    ein = rund_einzug(dy, rr)
+                }
+                let zr: u64 = bq +% (br - wy) as u64 *% bw *% 4
+                var xs: i64 = bx0
+                var xe: i64 = bx1
+                if ein != 0 {
+                    xs = wmbase.imax(bx0, wx + ein as i64)
+                    xe = wmbase.imin(bx1, wx + bw as i64 - ein as i64)
+                }
+                if xe > xs {
+                    wmdraw.fb_row(state, xs as u64, br as u64,
+                        zr +% (xs - wx) as u64 *% 4, (xe - xs) as u64)
+                }
+                if ein != 0 {
+                    rund_saum(state, wx, bx0, bx1, bw, br as u64, zr, dy,
+                        rr, true)
+                    rund_saum(state, wx, bx0, bx1, bw, br as u64, zr, dy,
+                        rr, false)
+                }
+                br = br + 1
+            }
+            wmlayout.ss(state, wmlayout.S_BLITS, wmlayout.gs(state, wmlayout.S_BLITS) + 1)
+            return
+        }
+
+        var grund: u64 = 0
+        if pw < wmbase.MAX_WIN && i == pw && wmgeom.form(state, wmlayout.FM_BLUR) > 0 {
+            let ph_g: u64 = time.tsc()
+            grund = wmglass.glass_prepare(state, wx, wy, wmlayout.wg(state, i, wmlayout.W_W),
+                wmlayout.wg(state, i, wmlayout.W_H), wmgeom.form(state, wmlayout.FM_BLUR))
+            wmpresent.ph_add(state, wmlayout.S_PH_GLASS, ph_g, time.tsc())
+        }
+        let key: u64 = wmgeom.form(state, wmlayout.FM_GLASS_KEY)
+
+        let ist_leiste: bool = pw < wmbase.MAX_WIN && i == pw
+        wmglass.glass_stat_an(ist_leiste)
+
+        var sch: u64 = wmglass.SCHLEIER_WIN
+        if ist_leiste {
+            sch = wmglass.SCHLEIER
+        }
+        var gr: i64 = by0
+        while gr < by1 {
+            var zeile: u64 = 0
+            if grund != 0 {
+                zeile = grund +% ((gr - wy) as u64 *% wmlayout.wg(state, i, wmlayout.W_W)
+                    +% (bx0 - wx) as u64) *% 4
+            }
+            wmglass.fb_row_a(state, bx0 as u64, gr as u64,
+                bq +% (gr - wy) as u64 *% bw *% 4
+                +% (bx0 - wx) as u64 *% 4, bn, alpha, key, zeile, sch)
+            gr = gr + 1
+        }
+        wmglass.glass_stat_an(false)
+
+        if ist_leiste {
+            ga_blits = ga_blits + 1
+            if ga_blits == 1 || ga_blits % 240 == 0 {
+                wmglass.glas_alpha_say(state)
+            }
+        }
+        wmlayout.ss(state, wmlayout.S_BLITS, wmlayout.gs(state, wmlayout.S_BLITS) + 1)
+        return
+    }
+    let aktiv: bool = wmbase.focus(state) == i
+    var rahmen: u64 = wmbase.deco(state, wmlayout.DK_FRAME)
+    var titel: u64 = wmbase.deco(state, wmlayout.DK_TITLE)
+    var schrift: u64 = wmbase.deco(state, wmlayout.DK_TEXT)
+    if aktiv {
+        rahmen = wmbase.deco(state, wmlayout.DK_FRAME_ON)
+        titel = wmbase.deco(state, wmlayout.DK_TITLE_ON)
+        schrift = wmbase.deco(state, wmlayout.DK_TEXT_ON)
+    }
+
+    let ph_s: u64 = time.tsc()
+    wmshadow.paint_shadow(state, i, cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
+    wmpresent.ph_add(state, wmlayout.S_PH_SHADOW, ph_s, time.tsc())
+
+    let f_bo: i64 = wmgeom.border(state) as i64
+    let f_rad: i64 = wmgeom.form(state, wmlayout.FM_RADIUS) as i64
+    let f_inny: i64 = wmbase.iny(state, i) as i64
+    let f_full: bool = wmbase.form_or(state, wmlayout.FM_WIN_ALPHA, 100) >= 100 && wmlayout.wg(state, i, wmlayout.W_W) as i64 == ow - 2 * f_bo
+        && f_inny + wmlayout.wg(state, i, wmlayout.W_H) as i64 == oh - f_bo
+    if f_full {
+        let f_top: i64 = wy + wmbase.imax(f_inny, f_rad)
+        let f_bot: i64 = wy + oh - wmbase.imax(f_bo, f_rad)
+        let f_cx0: i64 = cx0 as i64
+        let f_cy0: i64 = cy0 as i64
+        let f_cx1: i64 = cx1 as i64
+        let f_cy1: i64 = cy1 as i64
+        let f_r: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
+        let f_a: u64 = wmcaption.deco_alpha(state)
+        if wmbase.imin(f_cy1, f_top) > f_cy0 {
+            wmdraw.fill_round(state, wx, wy, ow, oh, f_r, rahmen, f_a, f_cx0, f_cy0, f_cx1, wmbase.imin(f_cy1, f_top))
+        }
+        if f_cy1 > wmbase.imax(f_cy0, f_bot) {
+            wmdraw.fill_round(state, wx, wy, ow, oh, f_r, rahmen, f_a, f_cx0, wmbase.imax(f_cy0, f_bot), f_cx1, f_cy1)
+        }
+        let f_my0: i64 = wmbase.imax(f_cy0, f_top)
+        let f_my1: i64 = wmbase.imin(f_cy1, f_bot)
+        if f_my1 > f_my0 {
+            if wmbase.imin(f_cx1, wx + f_bo) > f_cx0 {
+                wmdraw.fill_round(state, wx, wy, ow, oh, f_r, rahmen, f_a, f_cx0, f_my0, wmbase.imin(f_cx1, wx + f_bo), f_my1)
+            }
+            if f_cx1 > wmbase.imax(f_cx0, wx + ow - f_bo) {
+                wmdraw.fill_round(state, wx, wy, ow, oh, f_r, rahmen, f_a, wmbase.imax(f_cx0, wx + ow - f_bo), f_my0, f_cx1, f_my1)
+            }
+        }
+    } else {
+        wmdraw.fill_round(state, wx, wy, ow, oh, wmgeom.form(state, wmlayout.FM_RADIUS), rahmen,
+            wmcaption.deco_alpha(state), cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
+    }
+
+    if aktiv {
+        wmglass.frame_say(wx, wy, ow, oh, wmgeom.form(state, wmlayout.FM_RADIUS))
+    }
+
+    let capc: bool = wmtitle.cap_client(state, i)
+    if !capc {
+        wmcaption.paint_title(state, i, wx, wy, ow, titel, schrift, ax0, ay0, ax1, ay1)
+    }
+
+    var bx: i64 = wx + ow - wmgeom.border(state) as i64 - wmgeom.close_w(state) as i64 - 3
+    if wmgeom.form(state, wmlayout.FM_CAPTION) != 0 {
+        bx = wx + ow - wmgeom.border(state) as i64 - (wmlayout.CAP_N * wmgeom.cap_w(state)) as i64
+        if !capc {
+            wmcaption.paint_caption(state, i, wx, wy, ow, titel, schrift,
+                ax0, ay0, ax1, ay1)
+        }
+    } else if !capc {
+        wmcaption.paint_close_classic(state, wx, wy, ow, ax0, ay0, ax1, ay1)
+    }
+
+    var before: i64 = 0
+    let sicht: u64 = netview.view_of(state, wmbase.win_owner(state, i))
+    if sicht != netview.V_REAL && sicht <= 3 && !capc {
+        wmtitle.title_mark(state, sicht - 1, wx + wmgeom.border(state) as i64 + wmgeom.title_pad(state) as i64,
+            wy + wmgeom.border(state) as i64
+                + ((wmgeom.title_h(state) - wmgeom.border(state) - netmark.H) / 2) as i64,
+            schrift, ax0, ay0, ax1, ay1)
+        before = netmark.W as i64 + 4
+    }
+
+    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_UI)
+    if f < ttf.MAX_FONTS && !capc {
+        if wmtabs.tt_grouped(state, i) {
+            wmtabs.tt_paint(state, i, wx, wy, titel, schrift, ax0, ay0, ax1, ay1, f)
+        } else {
+            wmtitle.title_text(state, i, f, wx + wmgeom.border(state) as i64 + wmgeom.title_pad(state) as i64 + before,
+                wy + wmgeom.title_base(state, f),
+                schrift, ax0, ay0, ax1, ay1, bx)
+            if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && i < 32 {
+                wmtabs.tt_paint_plus(state, i, wx, wy, schrift, ax0, ay0, ax1, ay1, f)
+            }
+        }
+    }
+
+    let px0: i64 = wx + wmgeom.border(state) as i64
+    let py0: i64 = wy + wmbase.iny(state, i) as i64
+    let sx0: i64 = wmbase.imax(px0, ax0)
+    let sy0: i64 = wmbase.imax(py0, ay0)
+    let sx1: i64 = wmbase.imin(px0 + wmlayout.wg(state, i, wmlayout.W_W) as i64, ax1)
+    let sy1: i64 = wmbase.imin(py0 + wmlayout.wg(state, i, wmlayout.W_H) as i64, ay1)
+    if sx1 <= sx0 || sy1 <= sy0 {
+        return
+    }
+    let ww: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+    let quelle: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
+
+    let wa: u64 = wmbase.form_or(state, wmlayout.FM_WIN_ALPHA, 100)
+    let wkey: u64 = wmgeom.form(state, wmlayout.FM_GLASS_KEY)
+
+    let rad: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
+    let bo: i64 = wmgeom.border(state) as i64
+    let cw: i64 = wmlayout.wg(state, i, wmlayout.W_W) as i64
+
+    var wgrund: u64 = 0
+    if wa < 100 && wmgeom.form(state, wmlayout.FM_BLUR) > 0 {
+        wgrund = wmglass.glass_prepare(state, px0, py0, ww, wmlayout.wg(state, i, wmlayout.W_H),
+            wmgeom.form(state, wmlayout.FM_BLUR))
+    }
+    var r: i64 = sy0
+    while r < sy1 {
+        let zeile: u64 = (r - py0) as u64
+        var rx0: i64 = sx0
+        var rx1: i64 = sx1
+        let dyb: i64 = wy + oh - 1 - r
+        if capc && rad > 0 && r - wy < rad as i64 {
+
+            let skt: i64 = ecke.corner_skip(rad, (r - wy) as u64) as i64
+            if skt > 0 {
+                rx0 = wmbase.imax(rx0, px0 + skt)
+                rx1 = wmbase.imin(rx1, px0 + cw - skt)
+            }
+        }
+        if rad > 0 && dyb >= 0 && dyb < rad as i64 {
+
+            let sk: i64 = ecke.corner_skip(rad, dyb as u64) as i64
+            if sk > 0 {
+                rx0 = wmbase.imax(rx0, px0 + sk)
+                rx1 = wmbase.imin(rx1, px0 + cw - sk)
+            }
+        }
+        if rx1 > rx0 {
+            let spalte: u64 = (rx0 - px0) as u64
+            let n: u64 = (rx1 - rx0) as u64
+            if wa >= 100 {
+                wmdraw.fb_row(state, rx0 as u64, r as u64,
+                    quelle +% zeile *% ww *% 4 +% spalte *% 4, n)
+            } else {
+                var gz: u64 = 0
+                if wgrund != 0 {
+                    gz = wgrund +% (zeile *% ww +% spalte) *% 4
+                }
+                wmglass.fb_row_a(state, rx0 as u64, r as u64,
+                    quelle +% zeile *% ww *% 4 +% spalte *% 4, n, wa, wkey, gz,
+                    wmglass.SCHLEIER_WIN)
+            }
+        }
+        r = r + 1
+    }
+
+    if capc {
+        if wmgeom.form(state, wmlayout.FM_CAPTION) != 0 {
+            wmcaption.paint_caption(state, i, wx, wy, ow, titel, schrift,
+                ax0, ay0, ax1, ay1)
+        } else {
+            wmcaption.paint_close_classic(state, wx, wy, ow, ax0, ay0, ax1, ay1)
+        }
+    }
+    wmlayout.ss(state, wmlayout.S_BLITS, wmlayout.gs(state, wmlayout.S_BLITS) + 1)
+}
+
+fn lum3(c: u64) -> u64 {
+    return ((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255)
+}
+
+fn cap_x0(state: u64, i: u64) -> i64 {
+    return wmbase.win_x(state, i) + wmbase.outer_w(state, i) as i64 - wmgeom.border(state) as i64
+        - (wmlayout.CAP_N * wmgeom.cap_w(state)) as i64
+}
+
+fn cap_at(state: u64, i: u64, x: i64, y: i64) -> u64 {
+    if !wmbase.valid(state, i) || !wmbase.deko(state, i) {
+        return wmlayout.CAP_N
+    }
+    if wmgeom.form(state, wmlayout.FM_CAPTION) == 0 {
+        return wmlayout.CAP_N
+    }
+    let bx: i64 = cap_x0(state, i)
+    let by: i64 = wmbase.win_y(state, i) + wmgeom.border(state) as i64
+    let h: i64 = wmgeom.title_h(state) as i64 - 1 - wmgeom.border(state) as i64
+    if y < by || y >= by + h || x < bx || x >= bx + (wmlayout.CAP_N * wmgeom.cap_w(state)) as i64 {
+        return wmlayout.CAP_N
+    }
+    return ((x - bx) / wmgeom.cap_w(state) as i64) as u64
+}
+
+fn cap_box_thick(state: u64, x: i64, y: i64, w: i64, h: i64, sb: i64,
+    farbe: u64, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    var t: i64 = 0
+    while t < sb {
+        cap_h(state, x, y + t, w, farbe, ax0, ay0, ax1, ay1)
+        cap_h(state, x, y + h - 1 - t, w, farbe, ax0, ay0, ax1, ay1)
+        var k: i64 = 0
+        while k < h {
+            wmcaption.cap_px(state, x + t, y + k, farbe, ax0, ay0, ax1, ay1)
+            wmcaption.cap_px(state, x + w - 1 - t, y + k, farbe, ax0, ay0, ax1, ay1)
+            k = k + 1
+        }
+        t = t + 1
+    }
+}
+
+fn cap_glyph_treffer() -> u64 {
+    return wmcaption.cg_treffer
+}
+
+fn cap_glyph_bauten() -> u64 {
+    return wmcaption.cg_bauten
+}
+
+fn cap_h(state: u64, x: i64, y: i64, n: i64, farbe: u64, ax0: i64,
+    ay0: i64, ax1: i64, ay1: i64) {
+    var k: i64 = 0
+    while k < n {
+        wmcaption.cap_px(state, x + k, y, farbe, ax0, ay0, ax1, ay1)
+        k = k + 1
+    }
+}
+
+fn cap_box(state: u64, x: i64, y: i64, w: i64, h: i64, farbe: u64,
+    ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    cap_h(state, x, y, w, farbe, ax0, ay0, ax1, ay1)
+    cap_h(state, x, y + h - 1, w, farbe, ax0, ay0, ax1, ay1)
+    var k: i64 = 1
+    while k < h - 1 {
+        wmcaption.cap_px(state, x, y + k, farbe, ax0, ay0, ax1, ay1)
+        wmcaption.cap_px(state, x + w - 1, y + k, farbe, ax0, ay0, ax1, ay1)
+        k = k + 1
+    }
+}
+
+fn cap_act(state: u64, i: u64, cn: u64) {
+    if !wmbase.valid(state, i) || !wmbase.deko(state, i) {
+        return
+    }
+    wmlayout.ss(state, wmlayout.S_CAPHITS, wmlayout.gs(state, wmlayout.S_CAPHITS) + 1)
+    if cn == wmlayout.CAP_CLOSE {
+
+        let _ca: bool = wmanimctl.close_anim(state, i)
+        return
+    }
+    if cn == wmlayout.CAP_MIN {
+
+        let _ma: bool = wmanimctl.minimize_anim(state, i)
+        return
+    }
+    let auf: bool = (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) == 0
+    let _m: bool = wmworkarea.maximize(state, i, auf)
+}
+
+fn cap_release(state: u64, over: u64, x: i64, y: i64) {
+    let d: u64 = wmlayout.gs(state, wmlayout.S_CAPDOWN)
+    if d == 0 {
+        return
+    }
+    wmlayout.ss(state, wmlayout.S_CAPDOWN, 0)
+    let w: u64 = (d - 1) / 4
+    let n: u64 = (d - 1) % 4
+    if w >= wmbase.MAX_WIN || !wmbase.valid(state, w) {
+        return
+    }
+    damage_caption(state, w)
+    if over != w || wmgate.lock_active(state) || !wmgate.input_allowed(state, w) {
+        return
+    }
+    if cap_at(state, w, x, y) == n {
+        cap_act(state, w, n)
+    }
+}
+
+fn cap_track(state: u64, i: u64, x: i64, y: i64) {
+    var nv: u64 = 0
+    if i < wmbase.MAX_WIN {
+        let n: u64 = cap_at(state, i, x, y)
+        if n < wmlayout.CAP_N {
+            nv = i * 4 + n + 1
+        }
+    }
+    let alt: u64 = wmlayout.gs(state, wmlayout.S_CAPHOV)
+    if nv == alt {
+        return
+    }
+    wmlayout.ss(state, wmlayout.S_CAPHOV, nv)
+    if alt != 0 {
+        damage_caption(state, (alt - 1) / 4)
+    }
+    if nv != 0 {
+        damage_caption(state, (nv - 1) / 4)
+    }
+}
+
+fn damage_caption(state: u64, i: u64) {
+    if !wmbase.valid(state, i) || !wmbase.deko(state, i) {
+        return
+    }
+    let bx: i64 = cap_x0(state, i)
+    let by: i64 = wmbase.win_y(state, i) + wmgeom.border(state) as i64
+    wmbase.damage(state, bx, by, bx + (wmlayout.CAP_N * wmgeom.cap_w(state)) as i64,
+        by + wmgeom.title_h(state) as i64 - 1 - wmgeom.border(state) as i64)
+}
+
+fn nodeco_radius(state: u64, i: u64) -> u64 {
+    let r: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
+    if r == 0 {
+        return 0
+    }
+
+    if wmlayout.wg(state, i, wmlayout.W_STRUT) != 0 {
+        return 0
+    }
+
+    if wmlayout.wg(state, i, wmlayout.W_W) >= wmlayout.gs(state, wmlayout.S_SW)
+        && wmlayout.wg(state, i, wmlayout.W_H) >= wmlayout.gs(state, wmlayout.S_SH) {
+        return 0
+    }
+
+    var rr: u64 = r
+    if rr * 2 > wmlayout.wg(state, i, wmlayout.W_W) {
+        rr = wmlayout.wg(state, i, wmlayout.W_W) / 2
+    }
+    if rr * 2 > wmlayout.wg(state, i, wmlayout.W_H) {
+        rr = wmlayout.wg(state, i, wmlayout.W_H) / 2
+    }
+    return rr
+}
+
+fn rund_einzug(dy: u64, r: u64) -> u64 {
+    return ecke.corner_skip(r, dy)
+}
+
+fn rund_saum(state: u64, wx: i64, cx0: i64, cx1: i64, ww: u64, y: u64,
+    row: u64, dy: u64, r: u64, links: bool) {
+    if r == 0 || dy >= r || ww == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < r && i < ww {
+        var sx: u64 = i
+        if !links {
+            sx = ww - 1 - i
+        }
+        let x: i64 = wx + sx as i64
+        if x >= cx0 && x < cx1 {
+            let cov: u64 = ecke.corner_cov(r - 1 - i, r - 1 - dy, r)
+            if cov != 0 {
+                let c: u64 = __mmio_read32((row +% sx *% 4) as *mut u32) as u64
+                fb.pixel_a(state, x as u64, y, c, cov)
+            }
+        }
+        i = i + 1
+    }
+}
+
+static mut ga_blits: u64 = 0
+
+fn title_clipped() -> u64 {
+    return wmtitle.title_cut
+}
+
+fn title_old() -> u64 {
+    return wmtitle.title_cut_old
+}
+
+fn title_missing() -> u64 {
+    return wmtitle.title_max
+}
