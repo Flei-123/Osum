@@ -31,7 +31,8 @@ export {
     // RUNDE VIELKERN 3: eine Zeile bleibt eine Zeile.
     line_at, line_clear, line_lost, line_stolen,
     // W-X3: deferred (ring buffered) output for periodic reports
-    defer_on, defer_off, pump, ring_used, ring_flushed, ring_say, wire_overlap_count
+    defer_on, defer_off, pump, ring_used, ring_flushed, ring_say, wire_overlap_count,
+    ring_stolen_count
 }
 
 // ==================================================== RUNDE VIELKERN 3
@@ -405,11 +406,16 @@ fn rx_off() {
 const RING_SIZE: u64 = 4096
 const RING_LOCK_SPINS: u64 = 20000
 const RING_ROOM: u64 = 16
-const WIRE_LOCK_SPINS: u64 = 4000000
+const WIRE_LOCK_SPINS: u64 = 2000000
+const RING_SLICE: u64 = 64
+const WIRE_ROUNDS: u64 = 80
+const RING_STALE: u64 = 300000000
 static mut ring_buf: [u8; 4096] = [0 as u8; 4096]
 static mut ring_head: [u64; 1] = [0 as u64; 1] // next write (monotonic)
 static mut ring_tail: [u64; 1] = [0 as u64; 1] // next read (monotonic)
 static mut ring_lock: [u64; 1] = [0 as u64; 1]
+static mut ring_stamp: [u64; 1] = [0 as u64; 1]
+static mut ring_stolen: [u64; 1] = [0 as u64; 1]
 static mut defer_depth: [u64; 1] = [0 as u64; 1]
 static mut ser_burst: u64 = 1 // octets per THRE (16 with a 16550A FIFO)
 static mut ring_flushes: u64 = 0 // times a plain put had to flush the ring
@@ -435,17 +441,37 @@ fn ring_flushed() -> u64 {
     return ring_flushes
 }
 
-// 1 = lock taken. `spins` = how long to try.
+fn ring_stolen_count() -> u64 {
+    return ring_stolen[0]
+}
+
 fn ring_take(spins: u64) -> bool {
+    let me: u64 = cpu.here(arch.kdata_base()) + 1
     let a: u64 = (&ring_lock[0]) as u64
     var n: u64 = 0
-    while __atomic_swap(a as *mut u64, 0 as u64, 1 as u64) != 0 as u64 {
+    while __atomic_swap(a as *mut u64, 0 as u64, me) != 0 as u64 {
+        let o: u64 = __mmio_read64(a as *mut u64)
+        if o == me {
+            return false
+        }
+        if o != 0 as u64 {
+            let now: u64 = arch.cycles()
+            let st: u64 = __mmio_read64((&ring_stamp[0]) as u64 as *mut u64)
+            if now > st && now - st > RING_STALE {
+                if __atomic_swap(a as *mut u64, o, me) == o {
+                    ring_stolen[0] = ring_stolen[0] + 1
+                    ring_stamp[0] = now
+                    return true
+                }
+            }
+        }
         n = n + 1
         if n >= spins {
             return false
         }
         arch.pause()
     }
+    ring_stamp[0] = arch.cycles()
     return true
 }
 
@@ -458,6 +484,7 @@ fn ring_out_one() {
     let t: u64 = ring_tail[0]
     uart_write(ring_buf[(t % RING_SIZE) as usize])
     ring_tail[0] = t + 1
+    ring_stamp[0] = arch.cycles()
 }
 
 // Blocking drain of the whole ring, in order. Caller holds the lock.
@@ -624,22 +651,36 @@ fn put_raw(c: u8) {
             return
         }
     }
-    var locked: bool = false
+    wire_put(c)
+}
+
+fn wire_put(c: u8) {
     if !kstate.mode_on(arch.kdata_base(), kstate.M_NOWIRELOCK) {
-        locked = ring_take(WIRE_LOCK_SPINS)
-    }
-    if locked {
-        if ring_tail[0] != ring_head[0] {
-            ring_flushes = ring_flushes + 1
-            ring_drain_blocking()
+        var rounds: u64 = 0
+        while rounds < WIRE_ROUNDS {
+            let fl: u64 = arch.irq_save()
+            if !ring_take(WIRE_LOCK_SPINS) {
+                arch.irq_restore(fl)
+                break
+            }
+            if ring_tail[0] != ring_head[0] {
+                ring_flushes = ring_flushes + 1
+                ring_drain_some(RING_SLICE)
+                if ring_tail[0] != ring_head[0] {
+                    ring_give()
+                    arch.irq_restore(fl)
+                    rounds = rounds + 1
+                    continue
+                }
+            }
+            wire_out(c)
+            ring_give()
+            arch.irq_restore(fl)
+            return
         }
-    } else {
-        ring_flush_before()
     }
+    ring_flush_before()
     wire_out(c)
-    if locked {
-        ring_give()
-    }
 }
 
 static mut wire_busy: [u64; 1] = [0 as u64; 1]
