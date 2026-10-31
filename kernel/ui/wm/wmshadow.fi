@@ -1,0 +1,336 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ecke
+import gfx.fb
+import lib.kstate
+import ui.wm.wmbase
+import ui.wm.wmgeom
+import ui.wm.wmlayout
+
+const SHMASK_SIDE: u64 = 40
+
+const SHADOW_MAX: u64 = 16
+
+fn shadow_px(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_SHADOWPX)
+}
+
+fn shadow_builds(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_SHBUILD)
+}
+
+fn ring_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
+    colour: u64, a: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if w <= 1 || h <= 1 || a == 0 {
+        return
+    }
+    var r: u64 = r0
+    if r * 2 > w as u64 {
+        r = (w / 2) as u64
+    }
+    if r * 2 > h as u64 {
+        r = (h / 2) as u64
+    }
+    let ri: i64 = r as i64
+    wmbase.hline_a_clip(state, x + ri, y, w - 2 * ri, colour, a, cx0, cy0, cx1, cy1)
+    wmbase.hline_a_clip(state, x + ri, y + h - 1, w - 2 * ri, colour, a,
+        cx0, cy0, cx1, cy1)
+
+    var k: i64 = y + ri
+    while k < y + h - ri {
+        shadow_px1(state, x, k, colour, a, cx0, cy0, cx1, cy1)
+        shadow_px1(state, x + w - 1, k, colour, a, cx0, cy0, cx1, cy1)
+        k = k + 1
+    }
+    if r == 0 {
+        return
+    }
+    var innen: u64 = 0
+    if r > 1 {
+        innen = r - 1
+    }
+    var dy: u64 = 0
+    while dy < r {
+        var dx: u64 = 0
+        while dx < r {
+            let aussen: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
+            var i2: u64 = 0
+            if innen > 0 {
+                i2 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, innen)
+            }
+            var cov: u64 = 0
+            if aussen > i2 {
+                cov = aussen - i2
+            }
+            if cov != 0 {
+                let d: u64 = cov * a / 255
+                let x0: i64 = x + dx as i64
+                let y0: i64 = y + dy as i64
+                let x1: i64 = x + w - 1 - dx as i64
+                let y1: i64 = y + h - 1 - dy as i64
+                shadow_px1(state, x0, y0, colour, d, cx0, cy0, cx1, cy1)
+                shadow_px1(state, x1, y0, colour, d, cx0, cy0, cx1, cy1)
+                shadow_px1(state, x0, y1, colour, d, cx0, cy0, cx1, cy1)
+                shadow_px1(state, x1, y1, colour, d, cx0, cy0, cx1, cy1)
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
+
+fn paint_shadow(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
+    cy1: i64) {
+
+    var staerke: u64 = shadow_staerke(state, wmlayout.FM_SHADOW2)
+    var reach: u64 = wmgeom.form(state, wmlayout.FM_SHADOW_R2)
+    var bank: u64 = 1
+    if wmbase.focus(state) == i {
+        staerke = shadow_staerke(state, wmlayout.FM_SHADOW)
+        reach = wmgeom.form(state, wmlayout.FM_SHADOW_R)
+        bank = 0
+    }
+    if staerke == 0 || reach == 0 {
+        return
+    }
+    let colour: u64 = wmbase.rgb24(state, wmgeom.form(state, wmlayout.FM_SHADOW_C))
+    let r: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
+    let wx: i64 = wmbase.win_x(state, i)
+    let wy: i64 = wmbase.win_y(state, i)
+    let ow: i64 = wmbase.outer_w(state, i) as i64
+    let oh: i64 = wmbase.outer_h(state, i) as i64
+    if wmlayout.gs(state, wmlayout.S_SHOLD) != 0 {
+        shadow_rings(state, wx, wy, ow, oh, r, staerke, reach, colour,
+            cx0, cy0, cx1, cy1)
+        return
+    }
+    shadow_mask(state, wx, wy, ow, oh, r, reach, bank, colour,
+        cx0, cy0, cx1, cy1)
+}
+
+fn shadow_rings(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
+    staerke: u64, reach: u64, colour: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    var k: u64 = reach
+    while k > 0 {
+        let a: u64 = staerke * 255 / 100 * (reach + 1 - k) / (reach + 1)
+        if a != 0 {
+            ring_round(state, wx - k as i64, wy - k as i64 + 1,
+                ow + 2 * k as i64, oh + 2 * k as i64, r + k, colour, a,
+                cx0, cy0, cx1, cy1)
+        }
+        k = k - 1
+    }
+}
+
+fn shadow_staerke(state: u64, slot: u64) -> u64 {
+    return wmgeom.form(state, slot) * wmbase.form_or(state, wmlayout.FM_WIN_ALPHA, 100) / 100
+}
+
+fn shadow_key(state: u64) -> u64 {
+    let r: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
+    let a1: u64 = shadow_staerke(state, wmlayout.FM_SHADOW)
+    let r1: u64 = wmgeom.form(state, wmlayout.FM_SHADOW_R)
+    let a2: u64 = shadow_staerke(state, wmlayout.FM_SHADOW2)
+    let r2: u64 = wmgeom.form(state, wmlayout.FM_SHADOW_R2)
+
+    return ((((r * 17 + r1) * 17 + r2) * 101 + a1) * 101 + a2) + 1
+}
+
+fn isqrt(n: u64) -> u64 {
+    if n < 2 {
+        return n
+    }
+    var x: u64 = n
+    var y: u64 = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    return x
+}
+
+fn shadow_ramp(staerke: u64, reach: u64, d16: u64) -> u64 {
+    let full: u64 = reach * 16 + 16
+    if d16 == 0 || d16 >= full {
+        return 0
+    }
+    return staerke * 255 / 100 * (full - d16) / full
+}
+
+fn shadow_build(state: u64) {
+    let r: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
+    let a1: u64 = shadow_staerke(state, wmlayout.FM_SHADOW)
+    let r1: u64 = wmgeom.form(state, wmlayout.FM_SHADOW_R)
+    let a2: u64 = shadow_staerke(state, wmlayout.FM_SHADOW2)
+    let r2: u64 = wmgeom.form(state, wmlayout.FM_SHADOW_R2)
+    var rmax: u64 = r1
+    if r2 > rmax {
+        rmax = r2
+    }
+    var side: u64 = r + rmax
+    if side > SHMASK_SIDE {
+        side = SHMASK_SIDE
+    }
+    wmlayout.ss(state, wmlayout.S_SHS, side)
+    let base: u64 = state + kstate.WM_OFF + wmlayout.S_SHMASK
+    let ebase: u64 = state + kstate.WM_OFF + wmlayout.S_SHEDGE
+
+    var k: u64 = 0
+    while k < SHADOW_MAX {
+        var v1: u64 = 0
+        var v2: u64 = 0
+        if k < r1 {
+            v1 = shadow_ramp(a1, r1, (k + 1) * 16)
+        }
+        if k < r2 {
+            v2 = shadow_ramp(a2, r2, (k + 1) * 16)
+        }
+        kstate.set8(ebase + k, v1 as u8)
+        kstate.set8(ebase + SHADOW_MAX + k, v2 as u8)
+        k = k + 1
+    }
+
+    let bank: u64 = SHMASK_SIDE * SHMASK_SIDE
+    var j: u64 = 0
+    while j < side {
+        var ii: u64 = 0
+        while ii < side {
+            let dx: u64 = side - ii
+            let dy: u64 = side - j
+
+            let dist16: u64 = isqrt((dx * dx + dy * dy) * 256)
+            var d16: u64 = 0
+            if dist16 > r * 16 {
+                d16 = dist16 - r * 16
+            }
+            let o: u64 = j * SHMASK_SIDE + ii
+            kstate.set8(base + o, shadow_ramp(a1, r1, d16) as u8)
+            kstate.set8(base + bank + o, shadow_ramp(a2, r2, d16) as u8)
+            ii = ii + 1
+        }
+        j = j + 1
+    }
+    wmlayout.ss(state, wmlayout.S_SHKEY, shadow_key(state))
+    wmlayout.ss(state, wmlayout.S_SHBUILD, wmlayout.gs(state, wmlayout.S_SHBUILD) + 1)
+}
+
+fn shadow_px1(state: u64, x: i64, y: i64, colour: u64, a: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if a == 0 {
+        return
+    }
+    if x < cx0 || y < cy0 || x >= cx1 || y >= cy1 || x < 0 || y < 0 {
+        return
+    }
+    fb.pixel_a(state, x as u64, y as u64, colour, a)
+    wmlayout.ss(state, wmlayout.S_SHADOWPX, wmlayout.gs(state, wmlayout.S_SHADOWPX) + 1)
+}
+
+fn mask_run(state: u64, x: i64, y: i64, n: i64, colour: u64, m0: u64,
+    schritt: i64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if n <= 0 || y < cy0 || y >= cy1 || y < 0 {
+        return
+    }
+    var a: i64 = x
+    var m: u64 = m0
+    var len: i64 = n
+    if a < cx0 {
+        let skip: i64 = cx0 - a
+        if skip >= len {
+            return
+        }
+        a = cx0
+        len = len - skip
+        if schritt < 0 {
+            m = m -% skip as u64
+        } else {
+            m = m +% skip as u64
+        }
+    }
+    if a + len > cx1 {
+        len = cx1 - a
+    }
+    if len <= 0 || a < 0 {
+        return
+    }
+    fb.hline_mask(state, a as u64, y as u64, len as u64, colour, m, schritt)
+    wmlayout.ss(state, wmlayout.S_SHADOWPX, wmlayout.gs(state, wmlayout.S_SHADOWPX) + len as u64)
+}
+
+fn edge_run(state: u64, x: i64, y: i64, n: i64, colour: u64, a: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if a == 0 {
+        return
+    }
+    wmbase.hline_a_clip(state, x, y, n, colour, a, cx0, cy0, cx1, cy1)
+}
+
+fn shadow_mask(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
+    reach: u64, bank: u64, colour: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if wmlayout.gs(state, wmlayout.S_SHKEY) != shadow_key(state) {
+        shadow_build(state)
+    }
+    let side: u64 = wmlayout.gs(state, wmlayout.S_SHS)
+    if side == 0 || reach == 0 {
+        return
+    }
+    let base: u64 = state + kstate.WM_OFF + wmlayout.S_SHMASK
+        + bank * SHMASK_SIDE * SHMASK_SIDE
+    let ebase: u64 = state + kstate.WM_OFF + wmlayout.S_SHEDGE + bank * SHADOW_MAX
+
+    let sy: i64 = wy + 1
+    let si: i64 = side as i64
+    let ri: i64 = r as i64
+    let rc: i64 = reach as i64
+
+    let lx: i64 = wx - rc
+    let rx: i64 = wx + ow - ri
+    let mx: i64 = wx + ri
+    let mw: i64 = ow - 2 * ri
+    let my: i64 = sy + ri
+    let mh: i64 = oh - 2 * ri
+
+    var j: i64 = 0
+    while j < si {
+        let y: i64 = sy - rc + j
+        let m: u64 = base + (j * SHMASK_SIDE as i64) as u64
+        mask_run(state, lx, y, si, colour, m, 1, cx0, cy0, cx1, cy1)
+        mask_run(state, rx, y, si, colour, m + (side - 1), -1,
+            cx0, cy0, cx1, cy1)
+
+        if j < rc && mw > 0 {
+            let a: u64 = kstate.get8(ebase + (rc - 1 - j) as u64)
+            edge_run(state, mx, y, mw, colour, a, cx0, cy0, cx1, cy1)
+        }
+        j = j + 1
+    }
+
+    j = 0
+    while j < si {
+        let y: i64 = sy + oh + rc - 1 - j
+        let m: u64 = base + (j * SHMASK_SIDE as i64) as u64
+        mask_run(state, lx, y, si, colour, m, 1, cx0, cy0, cx1, cy1)
+        mask_run(state, rx, y, si, colour, m + (side - 1), -1,
+            cx0, cy0, cx1, cy1)
+        if j < rc && mw > 0 {
+            let a: u64 = kstate.get8(ebase + (rc - 1 - j) as u64)
+            edge_run(state, mx, y, mw, colour, a, cx0, cy0, cx1, cy1)
+        }
+        j = j + 1
+    }
+
+    if mh > 0 && rc > 0 {
+        var q: i64 = 0
+        while q < mh {
+            let y: i64 = my + q
+            mask_run(state, wx - rc, y, rc, colour, ebase + (reach - 1), -1,
+                cx0, cy0, cx1, cy1)
+            mask_run(state, wx + ow, y, rc, colour, ebase, 1,
+                cx0, cy0, cx1, cy1)
+            q = q + 1
+        }
+    }
+}

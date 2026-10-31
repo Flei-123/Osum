@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ui.ax
+import gfx.fb
+import ui.wm.wmbase
+import ui.wm.wmlayout
+
+const MAG_W: u64 = 200
+
+const MAG_H: u64 = 150
+
+const MAG_F: u64 = 2
+
+fn mag_centre(state: u64) -> u64 {
+    let px: u64 = wmlayout.gs(state, wmlayout.S_CURX)
+    let py: u64 = wmlayout.gs(state, wmlayout.S_CURY)
+    if px != wmlayout.gs(state, wmlayout.S_MAGPX) || py != wmlayout.gs(state, wmlayout.S_MAGPY) {
+        wmlayout.ss(state, wmlayout.S_MAGPX, px)
+        wmlayout.ss(state, wmlayout.S_MAGPY, py)
+        wmlayout.ss(state, wmlayout.S_MAGMODE, 0)
+    }
+    let fs: u64 = ax.fseq(state)
+    if fs != wmlayout.gs(state, wmlayout.S_MAGFS) {
+        wmlayout.ss(state, wmlayout.S_MAGFS, fs)
+        wmlayout.ss(state, wmlayout.S_MAGMODE, 1)
+    }
+    var cx: u64 = px
+    var cy: u64 = py
+    if wmlayout.gs(state, wmlayout.S_MAGMODE) == 1 {
+        let f: u64 = wmbase.focus(state)
+        if f < wmbase.MAX_WIN && wmbase.valid(state, f) {
+            let n: u64 = ax.focus_node(state, f)
+            if n < ax.MAX_NODES {
+                var wx: i64 = wmbase.win_x(state, f) + wmbase.inx(state, f) as i64
+                var wy: i64 = wmbase.win_y(state, f) + wmbase.iny(state, f) as i64
+                if wx < 0 {
+                    wx = 0
+                }
+                if wy < 0 {
+                    wy = 0
+                }
+
+                var half: u64 = ax.node_w(state, n) / 2
+                if half > MAG_W / MAG_F / 2 - 5 {
+                    half = MAG_W / MAG_F / 2 - 5
+                }
+                cx = wx as u64 + ax.node_x(state, n) + half
+                cy = wy as u64 + ax.node_y(state, n) + ax.node_h(state, n) / 2
+            }
+        }
+    }
+    wmlayout.ss(state, wmlayout.S_MAGCX, cx)
+    wmlayout.ss(state, wmlayout.S_MAGCY, cy)
+    return cx
+}
+
+fn mag_src(state: u64, k: u64) -> u64 {
+    let sw: u64 = wmlayout.gs(state, wmlayout.S_SW)
+    let sh: u64 = wmlayout.gs(state, wmlayout.S_SH)
+    let qw: u64 = MAG_W / MAG_F
+    let qh: u64 = MAG_H / MAG_F
+    var c: u64 = wmlayout.gs(state, wmlayout.S_MAGCX)
+    var lim: u64 = sw
+    var q: u64 = qw
+    if k == 1 {
+        c = wmlayout.gs(state, wmlayout.S_MAGCY)
+        lim = sh
+        q = qh
+    }
+    if lim <= q || c < q / 2 {
+        return 0
+    }
+    if c + q / 2 >= lim {
+        return lim - q
+    }
+    return c - q / 2
+}
+
+fn mag_x(state: u64) -> u64 {
+    let sw: u64 = wmlayout.gs(state, wmlayout.S_SW)
+    if sw <= MAG_W * 2 {
+        return 0
+    }
+    let sx: u64 = mag_src(state, 0)
+    let sy: u64 = mag_src(state, 1)
+    if sx + MAG_W / MAG_F > sw - MAG_W && sy < MAG_H {
+        return 0
+    }
+    return sw - MAG_W
+}
+
+fn mag_damage(state: u64) {
+    let ocx: u64 = wmlayout.gs(state, wmlayout.S_MAGCX)
+    let ocy: u64 = wmlayout.gs(state, wmlayout.S_MAGCY)
+    let _c: u64 = mag_centre(state)
+    if wmlayout.gs(state, wmlayout.S_DON) == 0 && ocx == wmlayout.gs(state, wmlayout.S_MAGCX)
+        && ocy == wmlayout.gs(state, wmlayout.S_MAGCY) && wmlayout.gs(state, wmlayout.S_MAGLX) != 0 {
+        return
+    }
+    let px: u64 = mag_x(state)
+    let last: u64 = wmlayout.gs(state, wmlayout.S_MAGLX)
+    if last != 0 && last - 1 != px {
+        wmbase.damage(state, (last - 1) as i64, 0, (last - 1 + MAG_W) as i64,
+            MAG_H as i64)
+    }
+    wmlayout.ss(state, wmlayout.S_MAGLX, px + 1)
+    wmbase.damage(state, px as i64, 0, (px + MAG_W) as i64, MAG_H as i64)
+}
+
+fn paint_mag(state: u64) {
+    let sw: u64 = wmlayout.gs(state, wmlayout.S_SW)
+    let sh: u64 = wmlayout.gs(state, wmlayout.S_SH)
+    if sw < MAG_W * 2 || sh < MAG_H * 2 {
+        return
+    }
+    let px: u64 = mag_x(state)
+    let sx: u64 = mag_src(state, 0)
+    let sy: u64 = mag_src(state, 1)
+
+    var r: u64 = 0
+    while r < MAG_H {
+        var c: u64 = 0
+        while c < MAG_W {
+            fb.pixel(state, px + c, r,
+                fb.get_pixel(state, sx + c / MAG_F, sy + r / MAG_F))
+            c = c + 1
+        }
+        r = r + 1
+    }
+
+    let rim: u64 = wmbase.deco(state, wmlayout.DK_TITLE_ON)
+    var k: u64 = 0
+    while k < MAG_W {
+        fb.pixel(state, px + k, 0, rim)
+        fb.pixel(state, px + k, 1, rim)
+        fb.pixel(state, px + k, MAG_H - 2, rim)
+        fb.pixel(state, px + k, MAG_H - 1, rim)
+        k = k + 1
+    }
+    k = 0
+    while k < MAG_H {
+        fb.pixel(state, px, k, rim)
+        fb.pixel(state, px + 1, k, rim)
+        fb.pixel(state, px + MAG_W - 2, k, rim)
+        fb.pixel(state, px + MAG_W - 1, k, rim)
+        k = k + 1
+    }
+    wmlayout.ss(state, wmlayout.S_MAGN, wmlayout.gs(state, wmlayout.S_MAGN) + 1)
+}

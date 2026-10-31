@@ -87,6 +87,9 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmmag
+import ui.wm.wmoverlay
+import ui.wm.wmshadow
 import ui.wmplug
 import ui.ax
 import ui.frameprof
@@ -130,15 +133,15 @@ export {
     set_nostrut, nostrut,
     set_deco_colour, deco_writes,
     set_app, win_app, APP_LEN,
-    set_form, form_writes, shadow_px, aa_px, paint_reset,
-    shadow_builds, set_shadow_old, cap_hover, cap_hits,
+    set_form, form_writes, aa_px, paint_reset,
+    set_shadow_old, cap_hover, cap_hits,
     BLUR_MAX, TINT_MAX, NOISE_MAX, RIM_MAX,
     blur_an, blur_radius, blurs, blur_cached, blur_px, blur_us,
     win_opac, set_opac, win_durch, backlum, BL_MEAN, BL_HI, BL_LO, BL_RUNS, BL_HITS,
     set_blur_cache, blur_cache_on,
     blur_treffer, blur_fehl, blur_quote, blur_reset,
     blur_frn, blur_frus, blur_frmax,
-    RADIUS_MAX, SHADOW_MAX, LIFT_MAX, TILT_MAX, SWING_MAX,
+    RADIUS_MAX, LIFT_MAX, TILT_MAX, SWING_MAX,
     glass_gen, glas_us, glas_us_max, glas_runs, glass_hits,
     panel_grows, set_noglasgrow, selftest_glas, selftest_glas_max,
     glas_bericht,
@@ -168,7 +171,7 @@ export {
     term_cellw, term_cellh, term_asc, term_px,
     bind_tty, key_tty, tty_of, NO_TTY, term_outs, term_puts_n,
     term_dump, term_dump_all, term_size,
-    poll, composites, cadence_note, last_paint_tsc, blits, pixels, last_us, cursor_on, set_cursor,
+    poll, blits, pixels, last_us, cursor_on, set_cursor,
     hwcur_an, hwcur_moeglich,
     frame_us_sum, frame_us_n, frame_us_max, frame_us_last, frame_ueber16,
     frame_fach, frame_us_maxw, frame_ueber16w,
@@ -352,13 +355,11 @@ const SIG_H: u64 = 4
 // Tausendsteln. 850 heisst: es waechst aus 85 Prozent heraus -- der
 // Sprung, den man sieht, ohne dass es zappelt.
 const AN_SCALE0: u64 = 850
-const SHMASK_SIDE: u64 = 40
 const RIM_MAX: u64 = 60
 // Die Obergrenzen. Sie stehen hier und nicht beim Aufrufer, weil ein
 // Radius von 4000 den Rahmen nicht rund macht, sondern den Server in
 // eine Schleife ueber vier Millionen Eckpunkte schickt.
 const RADIUS_MAX: u64 = 24
-const SHADOW_MAX: u64 = 16
 // ======================================================= RUNDE ZIEH
 // DIE OBERGRENZEN, UND WARUM SIE SO NIEDRIG SIND.
 //
@@ -567,8 +568,8 @@ fn set_form(state: u64, i: u64, v: u64) -> bool {
     if i == wmlayout.FM_SHADOW && w > 100 {
         w = 100
     }
-    if i == wmlayout.FM_SHADOW_R && w > SHADOW_MAX {
-        w = SHADOW_MAX
+    if i == wmlayout.FM_SHADOW_R && w > wmshadow.SHADOW_MAX {
+        w = wmshadow.SHADOW_MAX
     }
     if i == wmlayout.FM_SHADOW_C {
         w = w & RGB24
@@ -580,8 +581,8 @@ fn set_form(state: u64, i: u64, v: u64) -> bool {
     if i == wmlayout.FM_SHADOW2 && w > 100 {
         w = 100
     }
-    if i == wmlayout.FM_SHADOW_R2 && w > SHADOW_MAX {
-        w = SHADOW_MAX
+    if i == wmlayout.FM_SHADOW_R2 && w > wmshadow.SHADOW_MAX {
+        w = wmshadow.SHADOW_MAX
     }
     if i == wmlayout.FM_GRAD && w > GRAD_MAX {
         w = GRAD_MAX
@@ -675,10 +676,6 @@ fn form_writes(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_FORMN)
 }
 
-fn shadow_px(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_SHADOWPX)
-}
-
 // Der Zaehler des Abtasters. Er sitzt seit dieser Runde im Rasterer
 // selbst (`lib/ecke.fi`) und nicht mehr im Zustandsblock: es gibt
 // einen Schirm, einen Zustand und einen Abtaster, und der Zaehler
@@ -690,10 +687,6 @@ fn aa_px(state: u64) -> u64 {
 fn paint_reset(state: u64) {
     wmlayout.ss(state, wmlayout.S_SHADOWPX, 0)
     ecke.aa_reset()
-}
-
-fn shadow_builds(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_SHBUILD)
 }
 
 // DIE GEGENPROBE ZU DIESER RUNDE, und sie ist der einzige Grund, warum
@@ -839,160 +832,6 @@ fn fill_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
     }
 }
 
-// EIN UMRISS VON EINEM BILDPUNKT, rund, gemischt -- der Baustein des
-// Schattens. Vier gerade Stuecke und vier Boegen; ein Bildpunkt gehoert
-// zum Bogen, wenn er im aeusseren Kreis liegt und im inneren nicht.
-fn ring_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
-    farbe: u64, a: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
-    if w <= 1 || h <= 1 || a == 0 {
-        return
-    }
-    var r: u64 = r0
-    if r * 2 > w as u64 {
-        r = (w / 2) as u64
-    }
-    if r * 2 > h as u64 {
-        r = (h / 2) as u64
-    }
-    let ri: i64 = r as i64
-    wmbase.hline_a_clip(state, x + ri, y, w - 2 * ri, farbe, a, cx0, cy0, cx1, cy1)
-    wmbase.hline_a_clip(state, x + ri, y + h - 1, w - 2 * ri, farbe, a,
-        cx0, cy0, cx1, cy1)
-    // RUNDE SOFTUI: GEZAEHLT WIRD JETZT JEDER BILDPUNKT. Vorher zaehlte
-    // `S_SHADOWPX` nur die waagerechten Laeufe -- die Spalten und die
-    // vier Boegen liefen ueber `px_clip` und blieben unsichtbar. Ein
-    // Zaehler, der die Haelfte auslaesst, macht die neue Fassung
-    // scheinbar teurer als die alte.
-    var k: i64 = y + ri
-    while k < y + h - ri {
-        shadow_px1(state, x, k, farbe, a, cx0, cy0, cx1, cy1)
-        shadow_px1(state, x + w - 1, k, farbe, a, cx0, cy0, cx1, cy1)
-        k = k + 1
-    }
-    if r == 0 {
-        return
-    }
-    var innen: u64 = 0
-    if r > 1 {
-        innen = r - 1
-    }
-    var dy: u64 = 0
-    while dy < r {
-        var dx: u64 = 0
-        while dx < r {
-            let aussen: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
-            var i2: u64 = 0
-            if innen > 0 {
-                i2 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, innen)
-            }
-            var cov: u64 = 0
-            if aussen > i2 {
-                cov = aussen - i2
-            }
-            if cov != 0 {
-                let d: u64 = cov * a / 255
-                let x0: i64 = x + dx as i64
-                let y0: i64 = y + dy as i64
-                let x1: i64 = x + w - 1 - dx as i64
-                let y1: i64 = y + h - 1 - dy as i64
-                shadow_px1(state, x0, y0, farbe, d, cx0, cy0, cx1, cy1)
-                shadow_px1(state, x1, y0, farbe, d, cx0, cy0, cx1, cy1)
-                shadow_px1(state, x0, y1, farbe, d, cx0, cy0, cx1, cy1)
-                shadow_px1(state, x1, y1, farbe, d, cx0, cy0, cx1, cy1)
-            }
-            dx = dx + 1
-        }
-        dy = dy + 1
-    }
-}
-
-// =====================================================================
-// DER FENSTERSCHATTEN -- und warum er hier moeglich ist und in Ring 3
-// nicht.
-// =====================================================================
-//
-// docs/ROUNDLOOK.md schrieb, ein weicher Schatten sei nicht gemalt,
-// weil "the compositor cannot read what is under a window". Das war
-// eine Aussage ueber die WIDGET-BIBLIOTHEK und stimmte dort: sie malt
-// in den Puffer IHRES Fensters und sieht nichts darunter.
-//
-// Fuer den Server stimmt sie nicht, und zwar seit Runde K10: JEDES
-// FENSTER HAT SEINEN EIGENEN PUFFER (`W_BUF`, in `create` aus dem
-// Rahmenverwalter geholt), und `compose` setzt von unten nach oben
-// zusammen -- erst der Schreibtischgrund, dann Fenster fuer Fenster.
-// Wenn `paint_win` fuer Fenster i laeuft, steht ALLES, was unter i
-// liegt, bereits fertig im Bildpuffer. Der Untergrund ist da; es hat
-// ihn nur nie jemand gelesen.
-//
-// Damit ist der Schatten kein Umbau, sondern ein Aufruf an der
-// richtigen Stelle: VOR dem Rahmen von i, NACH allem unter i.
-//
-// WIE ER GEMALT WIRD. Keine Faltung -- eine Gaussche Unschaerfe
-// braeuchte einen zweiten Puffer in Bildschirmgroesse und zwei
-// Durchlaeufe darueber. Statt dessen `reach` geschachtelte Umrisse,
-// jeder einen Bildpunkt weiter aussen und jeder schwaecher als der
-// vorige: ein linearer Abfall. Bei den vier bis sechs Bildpunkten, die
-// ein Fensterschatten wirklich benutzt, ist der Unterschied zur
-// Gausskurve nicht zu sehen, und der Preis ist `reach` Umrisse statt
-// einer Faltung -- also der UMFANG mal `reach` und nicht die FLAECHE.
-// Fuer ein Fenster von 796x576 und reach 6 sind das rund 17 000
-// gemischte Bildpunkte statt 458 000.
-//
-// UND ER SITZT TIEFER ALS DAS FENSTER. Ein Bildpunkt Versatz nach unten
-// je Ring; das ist es, was das Ding als "darueber" und nicht als
-// "leuchtend" lesbar macht.
-fn paint_shadow(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
-    cy1: i64) {
-    // RUNDE SOFTUI: WELCHE BANK. Das Fenster mit dem Fokus steht
-    // hoeher; die anderen liegen flacher auf dem Schreibtisch.
-    var staerke: u64 = shadow_staerke(state, wmlayout.FM_SHADOW2)
-    var reach: u64 = wmgeom.form(state, wmlayout.FM_SHADOW_R2)
-    var bank: u64 = 1
-    if wmbase.focus(state) == i {
-        staerke = shadow_staerke(state, wmlayout.FM_SHADOW)
-        reach = wmgeom.form(state, wmlayout.FM_SHADOW_R)
-        bank = 0
-    }
-    if staerke == 0 || reach == 0 {
-        return
-    }
-    let farbe: u64 = wmbase.rgb24(state, wmgeom.form(state, wmlayout.FM_SHADOW_C))
-    let r: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
-    let wx: i64 = wmbase.win_x(state, i)
-    let wy: i64 = wmbase.win_y(state, i)
-    let ow: i64 = wmbase.outer_w(state, i) as i64
-    let oh: i64 = wmbase.outer_h(state, i) as i64
-    if wmlayout.gs(state, wmlayout.S_SHOLD) != 0 {
-        shadow_rings(state, wx, wy, ow, oh, r, staerke, reach, farbe,
-            cx0, cy0, cx1, cy1)
-        return
-    }
-    shadow_mask(state, wx, wy, ow, oh, r, reach, bank, farbe,
-        cx0, cy0, cx1, cy1)
-}
-
-// ---------------------------------------------------- DER ALTE WEG
-//
-// `reach` geschachtelte Umrisse, jeder einen Bildpunkt weiter aussen
-// und jeder schwaecher. Er steht als GEGENPROBE hier und nicht als
-// Erbstueck: `set_shadow_old` schaltet ihn an, und dann muss dasselbe
-// Bild herauskommen wie mit der Maske. Kaeme etwas anderes heraus,
-// waere die Maske falsch und niemand haette es gemerkt.
-fn shadow_rings(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
-    staerke: u64, reach: u64, farbe: u64,
-    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
-    var k: u64 = reach
-    while k > 0 {
-        let a: u64 = staerke * 255 / 100 * (reach + 1 - k) / (reach + 1)
-        if a != 0 {
-            ring_round(state, wx - k as i64, wy - k as i64 + 1,
-                ow + 2 * k as i64, oh + 2 * k as i64, r + k, farbe, a,
-                cx0, cy0, cx1, cy1)
-        }
-        k = k - 1
-    }
-}
-
 // =====================================================================
 // DIE VORBERECHNETE SCHATTENMASKE -- der Kern dieser Runde.
 // =====================================================================
@@ -1045,280 +884,12 @@ fn deco_alpha(state: u64) -> u64 {
     return wmbase.form_or(state, wmlayout.FM_WIN_ALPHA, 100) * 255 / 100
 }
 
-// UND DIE STAERKE DES SCHATTENS, mit derselben Deckkraft verrechnet.
-//
-// Ein voller Schatten unter einem halb durchsichtigen Fenster sieht
-// falsch aus, weil er mehr Licht schluckt als das Fenster selbst. Die
-// Zahl geht durch `shadow_key` mit in den Maskenschluessel -- damit
-// wird die Schattenmaske beim Verschieben des Reglers genau EINMAL neu
-// gebaut und nicht in jedem Bild, und `shadow_builds` bleibt klein.
-fn shadow_staerke(state: u64, slot: u64) -> u64 {
-    return wmgeom.form(state, slot) * wmbase.form_or(state, wmlayout.FM_WIN_ALPHA, 100) / 100
-}
-
-fn shadow_key(state: u64) -> u64 {
-    let r: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
-    let a1: u64 = shadow_staerke(state, wmlayout.FM_SHADOW)
-    let r1: u64 = wmgeom.form(state, wmlayout.FM_SHADOW_R)
-    let a2: u64 = shadow_staerke(state, wmlayout.FM_SHADOW2)
-    let r2: u64 = wmgeom.form(state, wmlayout.FM_SHADOW_R2)
-    // Ein Schluessel und kein Zeitstempel: baut die Maske nur neu, wenn
-    // sich wirklich eine der fuenf Zahlen geaendert hat. + 1, damit
-    // "alles null" nicht wie "nie gebaut" aussieht.
-    return ((((r * 17 + r1) * 17 + r2) * 101 + a1) * 101 + a2) + 1
-}
-
-// Die ganzzahlige Quadratwurzel, Newton. Sie laeuft NUR beim Bau der
-// Maske -- also 1600 mal je Formwechsel und kein einziges Mal beim
-// Malen eines Bildes.
-fn isqrt(n: u64) -> u64 {
-    if n < 2 {
-        return n
-    }
-    var x: u64 = n
-    var y: u64 = (x + 1) / 2
-    while y < x {
-        x = y
-        y = (x + n / x) / 2
-    }
-    return x
-}
-
-// Der Abfall an einem Abstand `d16` (in Sechzehnteln eines Bildpunktes)
-// vom Fensterrand. Bei d16 = 16*k steht hier auf das Oktett genau die
-// Zahl, die der alte Ring k bekommen hat.
-fn shadow_ramp(staerke: u64, reach: u64, d16: u64) -> u64 {
-    let full: u64 = reach * 16 + 16
-    if d16 == 0 || d16 >= full {
-        return 0
-    }
-    return staerke * 255 / 100 * (full - d16) / full
-}
-
-fn shadow_build(state: u64) {
-    let r: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
-    let a1: u64 = shadow_staerke(state, wmlayout.FM_SHADOW)
-    let r1: u64 = wmgeom.form(state, wmlayout.FM_SHADOW_R)
-    let a2: u64 = shadow_staerke(state, wmlayout.FM_SHADOW2)
-    let r2: u64 = wmgeom.form(state, wmlayout.FM_SHADOW_R2)
-    var rmax: u64 = r1
-    if r2 > rmax {
-        rmax = r2
-    }
-    var side: u64 = r + rmax
-    if side > SHMASK_SIDE {
-        side = SHMASK_SIDE
-    }
-    wmlayout.ss(state, wmlayout.S_SHS, side)
-    let base: u64 = state + kstate.WM_OFF + wmlayout.S_SHMASK
-    let ebase: u64 = state + kstate.WM_OFF + wmlayout.S_SHEDGE
-    // die beiden Streifen der geraden Stuecke
-    var k: u64 = 0
-    while k < SHADOW_MAX {
-        var v1: u64 = 0
-        var v2: u64 = 0
-        if k < r1 {
-            v1 = shadow_ramp(a1, r1, (k + 1) * 16)
-        }
-        if k < r2 {
-            v2 = shadow_ramp(a2, r2, (k + 1) * 16)
-        }
-        kstate.set8(ebase + k, v1 as u8)
-        kstate.set8(ebase + SHADOW_MAX + k, v2 as u8)
-        k = k + 1
-    }
-    // das Eckquadrat, einmal fuer beide Baenke
-    let bank: u64 = SHMASK_SIDE * SHMASK_SIDE
-    var j: u64 = 0
-    while j < side {
-        var ii: u64 = 0
-        while ii < side {
-            let dx: u64 = side - ii
-            let dy: u64 = side - j
-            // 16 * sqrt(dx^2 + dy^2), also der Abstand vom Mittelpunkt
-            // des Eckkreises in Sechzehnteln.
-            let dist16: u64 = isqrt((dx * dx + dy * dy) * 256)
-            var d16: u64 = 0
-            if dist16 > r * 16 {
-                d16 = dist16 - r * 16
-            }
-            let o: u64 = j * SHMASK_SIDE + ii
-            kstate.set8(base + o, shadow_ramp(a1, r1, d16) as u8)
-            kstate.set8(base + bank + o, shadow_ramp(a2, r2, d16) as u8)
-            ii = ii + 1
-        }
-        j = j + 1
-    }
-    wmlayout.ss(state, wmlayout.S_SHKEY, shadow_key(state))
-    wmlayout.ss(state, wmlayout.S_SHBUILD, wmlayout.gs(state, wmlayout.S_SHBUILD) + 1)
-}
-
-// Ein Bildpunkt aus der Maske, gemischt und gezaehlt.
-fn shadow_px1(state: u64, x: i64, y: i64, farbe: u64, a: u64,
-    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
-    if a == 0 {
-        return
-    }
-    if x < cx0 || y < cy0 || x >= cx1 || y >= cy1 || x < 0 || y < 0 {
-        return
-    }
-    fb.pixel_a(state, x as u64, y as u64, farbe, a)
-    wmlayout.ss(state, wmlayout.S_SHADOWPX, wmlayout.gs(state, wmlayout.S_SHADOWPX) + 1)
-}
-
-// Ein Lauf aus der Deckungstafel, beschnitten. Die Beschneidung
-// passiert HIER und einmal je Lauf -- `fb.hline_mask` prueft nur noch
-// den Bildschirmrand.
-fn mask_run(state: u64, x: i64, y: i64, n: i64, farbe: u64, m0: u64,
-    schritt: i64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
-    if n <= 0 || y < cy0 || y >= cy1 || y < 0 {
-        return
-    }
-    var a: i64 = x
-    var m: u64 = m0
-    var len: i64 = n
-    if a < cx0 {
-        let weg: i64 = cx0 - a
-        if weg >= len {
-            return
-        }
-        a = cx0
-        len = len - weg
-        if schritt < 0 {
-            m = m -% weg as u64
-        } else {
-            m = m +% weg as u64
-        }
-    }
-    if a + len > cx1 {
-        len = cx1 - a
-    }
-    if len <= 0 || a < 0 {
-        return
-    }
-    fb.hline_mask(state, a as u64, y as u64, len as u64, farbe, m, schritt)
-    wmlayout.ss(state, wmlayout.S_SHADOWPX, wmlayout.gs(state, wmlayout.S_SHADOWPX) + len as u64)
-}
-
-// Ein Lauf mit EINER Deckung, beschnitten -- die gerade Kante.
-fn edge_run(state: u64, x: i64, y: i64, n: i64, farbe: u64, a: u64,
-    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
-    if a == 0 {
-        return
-    }
-    wmbase.hline_a_clip(state, x, y, n, farbe, a, cx0, cy0, cx1, cy1)
-}
-
-// =====================================================================
-// DER SCHATTEN, ZEILE FUER ZEILE
-// =====================================================================
-//
-// DIE ERSTE FASSUNG DIESER RUNDE WAR SPALTENWEISE UND DAS WAR DER
-// FEHLER. Sie hat die Ecktafel Punkt fuer Punkt ueber `fb.pixel_a`
-// abgearbeitet, und gemessen kostete der Schatten damit 1143 us je Bild
-// gegen 1268 us mit den alten Ringen -- elf Hundertstel besser, wo
-// vier- bis fuenffach zu erwarten war. Die Abtastung war weg, die
-// Buchhaltung nicht: sechs Zustandszugriffe je Bildpunkt.
-//
-// Also nicht "welcher Bildpunkt der Tafel gehoert wohin", sondern
-// "welche LAEUFE hat diese Bildzeile". Die Neun-Felder-Zerlegung
-// beantwortet das ohne eine einzige Bedingung je Bildpunkt:
-//
-//   Zeilen ueber dem Fenster   zwei Ecklaeufe + ein gerader Lauf
-//   Zeilen an der Fensterecke  zwei Ecklaeufe
-//   Zeilen in der Mitte        zwei Randlaeufe aus dem Streifen
-//   Zeilen unter dem Fenster   spiegelbildlich zu oben
-//
-// Die beiden RECHTEN Laeufe lesen dieselbe Tafelzeile RUECKWAERTS
-// (`schritt = -1`), die beiden UNTEREN dieselbe Tafel von unten. Eine
-// Tafel, vier Ecken, kein Spiegeln zur Laufzeit.
-fn shadow_mask(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
-    reach: u64, bank: u64, farbe: u64,
-    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
-    if wmlayout.gs(state, wmlayout.S_SHKEY) != shadow_key(state) {
-        shadow_build(state)
-    }
-    let side: u64 = wmlayout.gs(state, wmlayout.S_SHS)
-    if side == 0 || reach == 0 {
-        return
-    }
-    let base: u64 = state + kstate.WM_OFF + wmlayout.S_SHMASK
-        + bank * SHMASK_SIDE * SHMASK_SIDE
-    let ebase: u64 = state + kstate.WM_OFF + wmlayout.S_SHEDGE + bank * SHADOW_MAX
-    // EIN BILDPUNKT TIEFER. Derselbe Versatz wie beim alten Weg: der
-    // Schatten sitzt unter dem Fenster und nicht um es herum.
-    let sy: i64 = wy + 1
-    let si: i64 = side as i64
-    let ri: i64 = r as i64
-    let rc: i64 = reach as i64
-    // x der vier Ecklaeufe
-    let lx: i64 = wx - rc // linke Tafel, vorwaerts
-    let rx: i64 = wx + ow - ri // rechte Tafel, rueckwaerts
-    let mx: i64 = wx + ri // der gerade Teil dazwischen
-    let mw: i64 = ow - 2 * ri
-    let my: i64 = sy + ri // erste Zeile des geraden Mittelteils
-    let mh: i64 = oh - 2 * ri
-    // FIX (compositor S6a): the table square starts REACH rows above the window and ends R rows inside it (its corner circle is centred at
-    // the bottom right of the square). The rows were placed `side` rows above the window (R too high above, R too low below), so the top and
-    // bottom shadow floated away from the window. The kernel picture is the oracle of wmd: both use the same rows now.
-    // -------------------------------------------- oben, side Zeilen
-    var j: i64 = 0
-    while j < si {
-        let y: i64 = sy - rc + j
-        let m: u64 = base + (j * SHMASK_SIDE as i64) as u64
-        mask_run(state, lx, y, si, farbe, m, 1, cx0, cy0, cx1, cy1)
-        mask_run(state, rx, y, si, farbe, m + (side - 1), -1,
-            cx0, cy0, cx1, cy1)
-        // Der gerade Teil oben gibt es nur, solange die Zeile noch
-        // UEBER dem Fenster liegt.
-        if j < rc && mw > 0 {
-            let a: u64 = kstate.get8(ebase + (rc - 1 - j) as u64)
-            edge_run(state, mx, y, mw, farbe, a, cx0, cy0, cx1, cy1)
-        }
-        j = j + 1
-    }
-    // ------------------------------------------- unten, side Zeilen
-    j = 0
-    while j < si {
-        let y: i64 = sy + oh + rc - 1 - j
-        let m: u64 = base + (j * SHMASK_SIDE as i64) as u64
-        mask_run(state, lx, y, si, farbe, m, 1, cx0, cy0, cx1, cy1)
-        mask_run(state, rx, y, si, farbe, m + (side - 1), -1,
-            cx0, cy0, cx1, cy1)
-        if j < rc && mw > 0 {
-            let a: u64 = kstate.get8(ebase + (rc - 1 - j) as u64)
-            edge_run(state, mx, y, mw, farbe, a, cx0, cy0, cx1, cy1)
-        }
-        j = j + 1
-    }
-    // ------------------------------------------------ die Mitte
-    //
-    // Links laeuft der Streifen von aussen nach innen, rechts von innen
-    // nach aussen -- also dieselben `reach` Oktette, einmal vorwaerts
-    // und einmal rueckwaerts. Auch hier: EIN Streifen, zwei Seiten.
-    if mh > 0 && rc > 0 {
-        var q: i64 = 0
-        while q < mh {
-            let y: i64 = my + q
-            mask_run(state, wx - rc, y, rc, farbe, ebase + (reach - 1), -1,
-                cx0, cy0, cx1, cy1)
-            mask_run(state, wx + ow, y, rc, farbe, ebase, 1,
-                cx0, cy0, cx1, cy1)
-            q = q + 1
-        }
-    }
-}
-
 fn deco_writes(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_DECON)
 }
 
 fn count(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_COUNT)
-}
-
-fn composites(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_COMPOSITES)
 }
 
 // W-X1: every frame that reached the card (composes + pointer-only blits); the desktop loop compares it to see "something was painted".
@@ -1423,7 +994,7 @@ fn top_layer_win(state: u64) -> u64 {
 // zero, so that a runner can measure one PHASE after the boot (idle, pointer, menu, window drag)
 // and not the mean over a whole run that is dominated by the start.
 fn bild_say_reset(state: u64) {
-    cadence_say_reset(state)
+    wmoverlay.cadence_say_reset(state)
     var s_b: [u8; 12] = "wm: bild n=\0"
     var s_m: [u8; 9] = " mittel=\0"
     var s_x: [u8; 6] = " max=\0"
@@ -5128,7 +4699,7 @@ fn tab_publish(state: u64) {
     if wmlayout.gs(state, wmlayout.S_SHOLD) != 0 {
         sold = 1
     }
-    tw(f, 8, shadow_staerke(state, wmlayout.FM_SHADOW) | (wmgeom.form(state, wmlayout.FM_SHADOW_R) << 8) | (shadow_staerke(state, wmlayout.FM_SHADOW2) << 16)
+    tw(f, 8, wmshadow.shadow_staerke(state, wmlayout.FM_SHADOW) | (wmgeom.form(state, wmlayout.FM_SHADOW_R) << 8) | (wmshadow.shadow_staerke(state, wmlayout.FM_SHADOW2) << 16)
         | (wmgeom.form(state, wmlayout.FM_SHADOW_R2) << 24) | (wmgeom.form(state, wmlayout.FM_RADIUS) << 32))
     tw(f, 9, wmbase.rgb24(state, wmgeom.form(state, wmlayout.FM_SHADOW_C)) | (1 << 32) | (sold << 33))
     // S6b: the numbers of the chrome (see `chrome_object`)
@@ -7557,7 +7128,7 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
     //    reads from the finished picture (`fb.get_pixel` reads the draw
     //    target), so it magnifies what is ON THE SCREEN, not one window.
     if ax.mag(state) {
-        paint_mag(state)
+        wmmag.paint_mag(state)
     }
     // RUNDE VSYNC: DIE WEICHE. Mit Bildgrenze wird das Rechteck nur
     // VORGEMERKT -- `present` uebertraegt es im Takt, und zwar als
@@ -7644,12 +7215,12 @@ fn compose_one(state: u64) -> u64 {
     // Without this the panel would be painted and not transferred, or
     // its old picture would stay on the screen.
     if ax.mag(state) {
-        mag_damage(state)
+        wmmag.mag_damage(state)
     } else if wmlayout.gs(state, wmlayout.S_MAGLX) != 0 {
         // switched off: the old panel goes away
         let ox: u64 = wmlayout.gs(state, wmlayout.S_MAGLX) - 1
         wmlayout.ss(state, wmlayout.S_MAGLX, 0)
-        wmbase.damage(state, ox as i64, 0, (ox + MAG_W) as i64, MAG_H as i64)
+        wmbase.damage(state, ox as i64, 0, (ox + wmmag.MAG_W) as i64, wmmag.MAG_H as i64)
     }
     var bt: [u64; 4] = [0 as u64; 4]
     if !box_take(state, (&bt[0]) as u64) {
@@ -9685,7 +9256,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
             rr = rr + 1
             if rr > 1 && wmbase.imin(wx + ow + rr, cx1 as i64) > wmbase.imax(wx - rr, cx0 as i64)
                 && wmbase.imin(wy + oh + rr, cy1 as i64) > wmbase.imax(wy - rr, cy0 as i64) {
-                paint_shadow(state, i, cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
+                wmshadow.paint_shadow(state, i, cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
             }
         }
         return
@@ -9900,7 +9471,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // ueber allem, was schon gemalt ist -- also genau hier, vor der
     // ersten Fuellung des Rahmens und nach allen tieferen Fenstern.
     let ph_s: u64 = time.tsc()
-    paint_shadow(state, i, cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
+    wmshadow.paint_shadow(state, i, cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
     ph_add(state, wmlayout.S_PH_SHADOW, ph_s, time.tsc())
     // Der ganze Aussenbereich in Rahmenfarbe, danach die Leiste und die
     // Flaeche darueber. Das ist ein Rechteck mehr als noetig und spart
@@ -18643,11 +18214,11 @@ fn hotkeys(state: u64) -> u64 {
             } else
             // FPS-OV: Ctrl+Alt+F (mods 5 = Alt + Ctrl, 7 with Shift) switches the frame-rate overlay
             if ((v & 0xFF) == 102 || (v & 0xFF) == 70) && ((v >> 8) & 0xFD) == 5 {
-                fps_hotkey(state)
+                wmoverlay.fps_hotkey(state)
             } else
             // REPAINT-1: Ctrl+Alt+R recomposes the whole screen from the window buffers (reference picture of the stale-pixel gate)
             if ((v & 0xFF) == 114 || (v & 0xFF) == 82) && ((v >> 8) & 0xFD) == 5 {
-                repaint_hotkey(state)
+                wmoverlay.repaint_hotkey(state)
             } else
             // W1 (hotkeys): WIN+ARROWS (mod 8) -- the focused window snaps / maximizes / restores, before any binding.
             if ((v >> 8) & 0xFF) == 8 {
@@ -19350,177 +18921,6 @@ fn tile_action(state: u64, act: u64) -> bool {
     return false
 }
 
-// ==================================================================
-// ROUND A11Y-2 (S-008) -- THE MAGNIFIER
-//
-// A CUT-OUT, TWICE ENLARGED, IN A FIXED PANEL of 200 x 150 at the top
-// right. Not the whole screen enlarged (macOS' zoom): that needs a second
-// composition of the WHOLE picture per movement and takes away the
-// overview. A panel shows both.
-//
-// IT FOLLOWS THE FOCUS AND THE POINTER, whichever moved last. The focus
-// comes from the accessibility tree: the focused node of the focused
-// window, in screen coordinates (window corner + frame + the node's
-// place). So a person who works with the keyboard sees the control that
-// Tab just reached, magnified, without moving a mouse.
-//
-// THE PANEL GIVES WAY. If the cut-out would overlap the panel at the top
-// right, the panel goes to the top left -- otherwise it would magnify
-// itself and the picture would be a spiral. The rule is hard, not soft:
-// a test must be able to compute where the panel is, and the kernel says
-// it on the serial line (`ax: mag ...`) so the test does not need a
-// second copy of this arithmetic.
-const MAG_W: u64 = 200
-const MAG_H: u64 = 150
-const MAG_F: u64 = 2
-
-// The centre of the cut-out, in screen coordinates. Updates the mode.
-fn mag_centre(state: u64) -> u64 {
-    let px: u64 = wmlayout.gs(state, wmlayout.S_CURX)
-    let py: u64 = wmlayout.gs(state, wmlayout.S_CURY)
-    if px != wmlayout.gs(state, wmlayout.S_MAGPX) || py != wmlayout.gs(state, wmlayout.S_MAGPY) {
-        wmlayout.ss(state, wmlayout.S_MAGPX, px)
-        wmlayout.ss(state, wmlayout.S_MAGPY, py)
-        wmlayout.ss(state, wmlayout.S_MAGMODE, 0)
-    }
-    let fs: u64 = ax.fseq(state)
-    if fs != wmlayout.gs(state, wmlayout.S_MAGFS) {
-        wmlayout.ss(state, wmlayout.S_MAGFS, fs)
-        wmlayout.ss(state, wmlayout.S_MAGMODE, 1)
-    }
-    var cx: u64 = px
-    var cy: u64 = py
-    if wmlayout.gs(state, wmlayout.S_MAGMODE) == 1 {
-        let f: u64 = wmbase.focus(state)
-        if f < wmbase.MAX_WIN && wmbase.valid(state, f) {
-            let n: u64 = ax.focus_node(state, f)
-            if n < ax.MAX_NODES {
-                var wx: i64 = wmbase.win_x(state, f) + wmbase.inx(state, f) as i64
-                var wy: i64 = wmbase.win_y(state, f) + wmbase.iny(state, f) as i64
-                if wx < 0 {
-                    wx = 0
-                }
-                if wy < 0 {
-                    wy = 0
-                }
-                // a wide control (an entry, a check box row) is centred
-                // on its START, where its text begins -- the middle of
-                // a 400-pixel field is empty
-                var half: u64 = ax.node_w(state, n) / 2
-                if half > MAG_W / MAG_F / 2 - 5 {
-                    half = MAG_W / MAG_F / 2 - 5
-                }
-                cx = wx as u64 + ax.node_x(state, n) + half
-                cy = wy as u64 + ax.node_y(state, n) + ax.node_h(state, n) / 2
-            }
-        }
-    }
-    wmlayout.ss(state, wmlayout.S_MAGCX, cx)
-    wmlayout.ss(state, wmlayout.S_MAGCY, cy)
-    return cx
-}
-
-// The top left of the CUT-OUT. k = 0: x, 1: y.
-fn mag_src(state: u64, k: u64) -> u64 {
-    let sw: u64 = wmlayout.gs(state, wmlayout.S_SW)
-    let sh: u64 = wmlayout.gs(state, wmlayout.S_SH)
-    let qw: u64 = MAG_W / MAG_F
-    let qh: u64 = MAG_H / MAG_F
-    var c: u64 = wmlayout.gs(state, wmlayout.S_MAGCX)
-    var lim: u64 = sw
-    var q: u64 = qw
-    if k == 1 {
-        c = wmlayout.gs(state, wmlayout.S_MAGCY)
-        lim = sh
-        q = qh
-    }
-    if lim <= q || c < q / 2 {
-        return 0
-    }
-    if c + q / 2 >= lim {
-        return lim - q
-    }
-    return c - q / 2
-}
-
-// Where the panel stands: top right, unless the cut-out reaches into it.
-fn mag_x(state: u64) -> u64 {
-    let sw: u64 = wmlayout.gs(state, wmlayout.S_SW)
-    if sw <= MAG_W * 2 {
-        return 0
-    }
-    let sx: u64 = mag_src(state, 0)
-    let sy: u64 = mag_src(state, 1)
-    if sx + MAG_W / MAG_F > sw - MAG_W && sy < MAG_H {
-        return 0
-    }
-    return sw - MAG_W
-}
-
-// Only when something is dirty anyway or the centre moved -- `compose`
-// runs from the idle loop too, and an unchanged panel costs nothing.
-fn mag_damage(state: u64) {
-    let ocx: u64 = wmlayout.gs(state, wmlayout.S_MAGCX)
-    let ocy: u64 = wmlayout.gs(state, wmlayout.S_MAGCY)
-    let _c: u64 = mag_centre(state)
-    if wmlayout.gs(state, wmlayout.S_DON) == 0 && ocx == wmlayout.gs(state, wmlayout.S_MAGCX)
-        && ocy == wmlayout.gs(state, wmlayout.S_MAGCY) && wmlayout.gs(state, wmlayout.S_MAGLX) != 0 {
-        return
-    }
-    let px: u64 = mag_x(state)
-    let last: u64 = wmlayout.gs(state, wmlayout.S_MAGLX)
-    if last != 0 && last - 1 != px {
-        wmbase.damage(state, (last - 1) as i64, 0, (last - 1 + MAG_W) as i64,
-            MAG_H as i64)
-    }
-    wmlayout.ss(state, wmlayout.S_MAGLX, px + 1)
-    wmbase.damage(state, px as i64, 0, (px + MAG_W) as i64, MAG_H as i64)
-}
-
-fn paint_mag(state: u64) {
-    let sw: u64 = wmlayout.gs(state, wmlayout.S_SW)
-    let sh: u64 = wmlayout.gs(state, wmlayout.S_SH)
-    if sw < MAG_W * 2 || sh < MAG_H * 2 {
-        return
-    }
-    let px: u64 = mag_x(state)
-    let sx: u64 = mag_src(state, 0)
-    let sy: u64 = mag_src(state, 1)
-    // READ, THEN WRITE: the cut-out never overlaps the panel (mag_x), so
-    // no pixel is read after it was written.
-    var r: u64 = 0
-    while r < MAG_H {
-        var c: u64 = 0
-        while c < MAG_W {
-            fb.pixel(state, px + c, r,
-                fb.get_pixel(state, sx + c / MAG_F, sy + r / MAG_F))
-            c = c + 1
-        }
-        r = r + 1
-    }
-    // A frame in the colour of the active title bar -- from the scheme,
-    // not a number (no raw colour in drawing code since round THEME), and
-    // it goes along with high contrast.
-    let rim: u64 = wmbase.deco(state, wmlayout.DK_TITLE_ON)
-    var k: u64 = 0
-    while k < MAG_W {
-        fb.pixel(state, px + k, 0, rim)
-        fb.pixel(state, px + k, 1, rim)
-        fb.pixel(state, px + k, MAG_H - 2, rim)
-        fb.pixel(state, px + k, MAG_H - 1, rim)
-        k = k + 1
-    }
-    k = 0
-    while k < MAG_H {
-        fb.pixel(state, px, k, rim)
-        fb.pixel(state, px + 1, k, rim)
-        fb.pixel(state, px + MAG_W - 2, k, rim)
-        fb.pixel(state, px + MAG_W - 1, k, rim)
-        k = k + 1
-    }
-    wmlayout.ss(state, wmlayout.S_MAGN, wmlayout.gs(state, wmlayout.S_MAGN) + 1)
-}
-
 // `ax: mag ...` on the serial line: where the panel and the cut-out are,
 // so a test checks the PICTURE against the kernel's own numbers.
 fn say_mag(state: u64) {
@@ -19533,11 +18933,11 @@ fn say_mag(state: u64) {
     var s_g: [u8; 9] = " frames=\0"
     var s_h: [u8; 6] = " rim=\0"
     serial.puts((&s_a[0]) as u64)
-    serial.dec(mag_x(state))
+    serial.dec(wmmag.mag_x(state))
     serial.puts((&s_b[0]) as u64)
-    serial.dec(mag_src(state, 0))
+    serial.dec(wmmag.mag_src(state, 0))
     serial.puts((&s_c[0]) as u64)
-    serial.dec(mag_src(state, 1))
+    serial.dec(wmmag.mag_src(state, 1))
     serial.puts((&s_d[0]) as u64)
     serial.dec(wmlayout.gs(state, wmlayout.S_MAGCX))
     serial.puts((&s_e[0]) as u64)
@@ -19550,549 +18950,8 @@ fn say_mag(state: u64) {
     serial.hex(wmbase.deco(state, wmlayout.DK_TITLE_ON))
     serial.nl()
 }
-
-
-// ================================================================ W-E (17.10.2026): frame cadence + debug FPS overlay
-// The kernel desktop loop (kgui wait_wm) calls `cadence_note` once per round, after compose and BEFORE the frame boundary
-// (`gfx.bild_fertig`). A round counts as a painted frame when compose composed something or the card still has a pending box
-// (wmd's CP_PRESENT path). Interval = TSC distance of two painted frames: the real frame cadence, not the compose cost.
-// Intervals above 100 ms are idle gaps, not cadence. F12 prints `wm: cadence ...` and zeroes the counters; the overlay switch is
-// the config key `fps=true` (settings key debug.fps, /etc/mouse.conf, re-read about once a second by ptrcfg.poll).
-static mut cad_v: [u64; 16] = [0 as u64; 16]
-static mut cad_h: [u64; 8] = [0 as u64; 8]
-const CV_LASTTSC: u64 = 0
-const CV_LASTCOMP: u64 = 1
-const CV_N: u64 = 2 // intervals <= 100 ms since the last F12
-const CV_SUM: u64 = 3 // microseconds summed
-const CV_MAX: u64 = 4
-const CV_IDLE: u64 = 5 // gaps above 100 ms
-const CV_WT0: u64 = 6 // one-second window start (TSC)
-const CV_WN: u64 = 7 // painted frames in the window
-const CV_WSUM: u64 = 8
-const CV_WK: u64 = 9
-const CV_FPS: u64 = 10 // last full window
-const CV_MS10: u64 = 11 // mean interval of that window, tenths of ms
 const CV_DRAWN: u64 = 12 // key of the text the overlay drew last
-const CV_TOTAL: u64 = 13 // painted frames since boot
-const CV_OVER: u64 = 14 // intervals above 17.5 ms
 const CV_DRAWS: u64 = 15 // overlay paints since boot
-
-fn last_paint_tsc(state: u64) -> u64 {
-    return cad_v[CV_LASTTSC as usize]
-}
-
-fn cad_bucket(us: u64) -> u64 {
-    if us < 8000 {
-        return 0
-    }
-    if us < 12000 {
-        return 1
-    }
-    if us < 15500 {
-        return 2
-    }
-    if us < 17500 {
-        return 3
-    }
-    if us < 21000 {
-        return 4
-    }
-    if us < 34000 {
-        return 5
-    }
-    if us < 51000 {
-        return 6
-    }
-    return 7
-}
-
-fn cad_dec(buf: u64, at: u64, v: u64) -> u64 {
-    var tmp: [u8; 20] = [0 as u8; 20]
-    var k: u64 = 0
-    var x: u64 = v
-    if x == 0 {
-        tmp[0] = 48 as u8
-        k = 1
-    }
-    while x > 0 {
-        tmp[k as usize] = (48 + x % 10) as u8
-        x = x / 10
-        k = k + 1
-    }
-    var i: u64 = 0
-    var p: u64 = at
-    while i < k {
-        kstate.set8(buf + p, tmp[(k - 1 - i) as usize])
-        p = p + 1
-        i = i + 1
-    }
-    return p
-}
-
-fn cad_str(buf: u64, at: u64, src: u64, n: u64) -> u64 {
-    var i: u64 = 0
-    while i < n {
-        kstate.set8(buf + at + i, (kstate.get8(src + i)) as u8)
-        i = i + 1
-    }
-    return at + n
-}
-
-// ---------------------------------------------------------------- FPS-OV (20.10.2026): the FPS / frame time overlay, top right
-// Three clocks, all from the real paths (no model):
-//   * painted frames: `cadence_note` stamps every round that composed something (or had a pending box) into the ring `fo_t`.
-//   * frame time: the interval between the last two painted frames; mean / max over the intervals of the last 1000 ms (gaps above
-//     100 ms are idle, not frame time).
-//   * present clock: the driver's own counter (VMSVGA `present_frames` = UPDATE rectangles sent, virtio-gpu `transfers`), sampled
-//     once per round; every counted step gets a stamp in `fo_p`. The overlay's own repaint is a present too -- those are
-//     subtracted (`FO_OVONLY`), otherwise an idle screen would show 4 "presents" a second made by the overlay itself.
-// All numbers are a SLIDING window of the last 1000 ms. The text is rebuilt every 250 ms (readable), but painted again in every painted
-// round (the compose may have covered it). No painted frame for 1 s -> "FPS 0 IDLE" and the overlay stops painting (a silent screen
-// stays silent). Switch: Ctrl+Alt+F (hotkeys -> fps_hotkey) or the Settings page (key debug.fps, /etc/mouse.conf fps=).
-static mut fo_t: [u64; 256] = [0 as u64; 256]
-static mut fo_p: [u64; 128] = [0 as u64; 128]
-static mut fo_v: [u64; 24] = [0 as u64; 24]
-static mut fo_txt: [u8; 112] = [32 as u8; 112]
-const FO_FH: u64 = 0 // painted frames stamped since boot (ring head)
-const FO_PH: u64 = 1 // real presents stamped since boot
-const FO_LASTPC: u64 = 2 // driver present counter at the last sample
-const FO_OVONLY: u64 = 3 // presents the overlay's own repaint is going to cause (to subtract)
-const FO_STATT: u64 = 4 // TSC of the last text rebuild
-const FO_KEY: u64 = 5 // hash of the text last built
-const FO_SAYT: u64 = 6 // TSC of the last serial line
-const FO_ON: u64 = 7 // the overlay was on in the last round
-const FO_RX: u64 = 8 // rectangle of the last paint (pixels); width 0 = nothing painted
-const FO_RY: u64 = 9
-const FO_RW: u64 = 10
-const FO_RH: u64 = 11
-const FO_LASTFT: u64 = 12 // last frame interval, microseconds
-const FO_PTOTAL: u64 = 13 // real presents since boot
-const FO_DRAWS: u64 = 14 // overlay paints since boot
-const FO_FPS: u64 = 15 // last results (microseconds / counts), for the serial line and the tests
-const FO_AVG: u64 = 16
-const FO_MAX: u64 = 17
-const FO_PRES: u64 = 18
-const FO_NINT: u64 = 19
-const FO_W: u64 = 26 // text columns of the overlay
-const FO_ROWS: u64 = 4
-
-fn present_driver(state: u64) -> bool {
-    return vgpu.usable(state) || vmsvga.is_ready(state)
-}
-
-// the number of pictures the card driver has been told about (a counter of the driver itself); 0 without a driver
-fn present_count(state: u64) -> u64 {
-    if vgpu.usable(state) {
-        return vgpu.transfers(state)
-    }
-    if vmsvga.is_ready(state) {
-        return vmsvga.present_frames(state)
-    }
-    return 0
-}
-
-// one round: look at the driver's counter, stamp the steps that were not caused by the overlay itself
-fn fo_sample_present(state: u64, now: u64) {
-    let pc: u64 = present_count(state)
-    let lastpc: u64 = fo_v[FO_LASTPC as usize]
-    let sub: u64 = fo_v[FO_OVONLY as usize]
-    fo_v[FO_OVONLY as usize] = 0
-    fo_v[FO_LASTPC as usize] = pc
-    if pc <= lastpc {
-        return
-    }
-    var real: u64 = pc - lastpc
-    if real > sub {
-        real = real - sub
-    } else {
-        real = 0
-    }
-    if real > 4 {
-        real = 4
-    }
-    var k: u64 = 0
-    while k < real {
-        fo_p[(fo_v[FO_PH as usize] % 128) as usize] = now
-        fo_v[FO_PH as usize] = fo_v[FO_PH as usize] + 1
-        fo_v[FO_PTOTAL as usize] = fo_v[FO_PTOTAL as usize] + 1
-        k = k + 1
-    }
-}
-
-// the sliding window: results into fo_v[FO_FPS..FO_NINT]
-fn fo_stats(now: u64, kh: u64) {
-    let per_us: u64 = kh / 1000
-    var ws: u64 = 0
-    if now > kh * 1000 {
-        ws = now - kh * 1000
-    }
-    var n: u64 = 0
-    var cnt: u64 = 0
-    var sum: u64 = 0
-    var mx: u64 = 0
-    var newer: u64 = 0
-    var k: u64 = 0
-    let head: u64 = fo_v[FO_FH as usize]
-    while k < 256 && k < head {
-        let t: u64 = fo_t[((head - 1 - k) % 256) as usize]
-        if t < ws {
-            break
-        }
-        n = n + 1
-        if newer != 0 && newer > t {
-            let us: u64 = (newer - t) / per_us
-            if us <= 100000 {
-                sum = sum + us
-                cnt = cnt + 1
-                if us > mx {
-                    mx = us
-                }
-            }
-        }
-        newer = t
-        k = k + 1
-    }
-    var pn: u64 = 0
-    let ph: u64 = fo_v[FO_PH as usize]
-    k = 0
-    while k < 128 && k < ph {
-        let t: u64 = fo_p[((ph - 1 - k) % 128) as usize]
-        if t < ws {
-            break
-        }
-        pn = pn + 1
-        k = k + 1
-    }
-    fo_v[FO_FPS as usize] = n
-    fo_v[FO_NINT as usize] = cnt
-    fo_v[FO_AVG as usize] = 0
-    if cnt != 0 {
-        fo_v[FO_AVG as usize] = sum / cnt
-    }
-    fo_v[FO_MAX as usize] = mx
-    fo_v[FO_PRES as usize] = pn
-}
-
-// microseconds as "12.3" (tenths of a millisecond, rounded down)
-fn fo_ms(buf: u64, at: u64, us: u64) -> u64 {
-    var p: u64 = cad_dec(buf, at, us / 1000)
-    kstate.set8(buf + p, 46 as u8)
-    p = cad_dec(buf, p + 1, (us % 1000) / 100)
-    return p
-}
-
-// one text line into fo_txt row r: padded with blanks to FO_W columns, closed with a 0
-fn fo_line_end(buf: u64, n: u64) {
-    var i: u64 = n
-    while i < FO_W {
-        kstate.set8(buf + i, 32 as u8)
-        i = i + 1
-    }
-    kstate.set8(buf + FO_W, 0 as u8)
-}
-
-// rebuild the four lines from fo_v; returns the key of the text (a change = the text has to be painted)
-fn fo_build(state: u64, w: u64, h: u64) -> u64 {
-    var t_fps: [u8; 5] = "FPS \0"
-    var t_ft: [u8; 6] = "  FT \0"
-    var t_ms: [u8; 4] = " ms\0"
-    var t_idle: [u8; 12] = "FPS 0  IDLE\0"
-    var t_avg: [u8; 5] = "AVG \0"
-    var t_max: [u8; 7] = "  MAX \0"
-    var t_none: [u8; 13] = "AVG -  MAX -\0"
-    var t_pres: [u8; 9] = "PRESENT \0"
-    var t_ps: [u8; 3] = "/s\0"
-    var t_na: [u8; 21] = "PRESENT n/a (direct)\0"
-    let b: u64 = (&fo_txt[0]) as u64
-    let fps: u64 = fo_v[FO_FPS as usize]
-    var n: u64 = 0
-    // row 0: fps and the last frame interval
-    var l0: u64 = b
-    if fps == 0 {
-        n = cad_str(l0, 0, (&t_idle[0]) as u64, 11)
-    } else {
-        n = cad_str(l0, 0, (&t_fps[0]) as u64, 4)
-        n = cad_dec(l0, n, fps)
-        n = cad_str(l0, n, (&t_ft[0]) as u64, 5)
-        n = fo_ms(l0, n, fo_v[FO_LASTFT as usize])
-        n = cad_str(l0, n, (&t_ms[0]) as u64, 3)
-    }
-    fo_line_end(l0, n)
-    // row 1: mean / max of the window
-    let l1: u64 = b + FO_W + 2
-    if fo_v[FO_NINT as usize] == 0 {
-        n = cad_str(l1, 0, (&t_none[0]) as u64, 12)
-    } else {
-        n = cad_str(l1, 0, (&t_avg[0]) as u64, 4)
-        n = fo_ms(l1, n, fo_v[FO_AVG as usize])
-        n = cad_str(l1, n, (&t_max[0]) as u64, 6)
-        n = fo_ms(l1, n, fo_v[FO_MAX as usize])
-    }
-    fo_line_end(l1, n)
-    // row 2: the present clock
-    let l2: u64 = b + (FO_W + 2) * 2
-    if present_driver(state) {
-        n = cad_str(l2, 0, (&t_pres[0]) as u64, 8)
-        n = cad_dec(l2, n, fo_v[FO_PRES as usize])
-        n = cad_str(l2, n, (&t_ps[0]) as u64, 2)
-    } else {
-        n = cad_str(l2, 0, (&t_na[0]) as u64, 20)
-    }
-    fo_line_end(l2, n)
-    // row 3: resolution
-    let l3: u64 = b + (FO_W + 2) * 3
-    n = cad_dec(l3, 0, w)
-    kstate.set8(l3 + n, 120 as u8)
-    n = cad_dec(l3, n + 1, h)
-    fo_line_end(l3, n)
-    return fps * 1000000007 + fo_v[FO_LASTFT as usize] / 100 * 10007 + fo_v[FO_AVG as usize] / 100 * 331 + fo_v[FO_MAX as usize] / 100 * 17 + fo_v[FO_PRES as usize] * 3 + w / 8
-}
-
-fn fps_overlay(state: u64, painted: bool, now: u64, kh: u64) {
-    if !fb.ready(state) {
-        return
-    }
-    let w: u64 = fb.width(state)
-    let h: u64 = fb.height(state)
-    var changed: bool = false
-    let st: u64 = fo_v[FO_STATT as usize]
-    if st == 0 || now < st || (now - st) / kh >= 250 {
-        fo_v[FO_STATT as usize] = now
-        fo_stats(now, kh)
-        let key: u64 = fo_build(state, w, h)
-        if key != fo_v[FO_KEY as usize] {
-            fo_v[FO_KEY as usize] = key
-            changed = true
-        }
-        // the serial line, once a second, only with the kernel word `phases` (the gates read it)
-        let sy: u64 = fo_v[FO_SAYT as usize]
-        if fb.phases_an(state) && (sy == 0 || now < sy || (now - sy) / kh >= 1000) {
-            fo_v[FO_SAYT as usize] = now
-            var s_a: [u8; 15] = "wm: fpsov fps=\0"
-            var s_b: [u8; 5] = " ft=\0"
-            var s_c: [u8; 6] = " avg=\0"
-            var s_d: [u8; 6] = " max=\0"
-            var s_e: [u8; 7] = " pres=\0"
-            var s_f: [u8; 7] = " drv=\0\0"
-            serial.puts((&s_a[0]) as u64)
-            serial.dec(fo_v[FO_FPS as usize])
-            serial.puts((&s_b[0]) as u64)
-            serial.dec(fo_v[FO_LASTFT as usize])
-            serial.puts((&s_c[0]) as u64)
-            serial.dec(fo_v[FO_AVG as usize])
-            serial.puts((&s_d[0]) as u64)
-            serial.dec(fo_v[FO_MAX as usize])
-            serial.puts((&s_e[0]) as u64)
-            serial.dec(fo_v[FO_PRES as usize])
-            serial.puts((&s_f[0]) as u64)
-            if present_driver(state) {
-                serial.dec(1)
-            } else {
-                serial.dec(0)
-            }
-            serial.nl()
-        }
-    }
-    if !painted && !changed && fo_v[FO_RW as usize] != 0 {
-        return
-    }
-    fo_v[FO_DRAWS as usize] = fo_v[FO_DRAWS as usize] + 1
-    var sc: u64 = fb.scale(state)
-    if sc == 0 {
-        sc = 1
-    }
-    var col: u64 = 0
-    if fb.cols(state) > FO_W {
-        col = fb.cols(state) - FO_W
-    }
-    fb.set_color(state, fb.rgb(state, 0, 255, 0), fb.rgb(state, 0, 0, 0))
-    var r: u64 = 0
-    while r < FO_ROWS {
-        fb.goto(state, col, r)
-        fb.puts(state, ((&fo_txt[0]) as u64) + r * (FO_W + 2))
-        r = r + 1
-    }
-    var fw: u64 = FO_W * 8 * sc
-    if fw > w {
-        fw = w
-    }
-    let fx: u64 = col * 8 * sc
-    fb.flush_rect(state, fx, 0, fw, FO_ROWS * 16 * sc)
-    fo_v[FO_RX as usize] = fx
-    fo_v[FO_RY as usize] = 0
-    fo_v[FO_RW as usize] = fw
-    fo_v[FO_RH as usize] = FO_ROWS * 16 * sc
-    // the repaint reaches the card in this round's present: it is no new picture of the desktop
-    if !painted {
-        fo_v[FO_OVONLY as usize] = fo_v[FO_OVONLY as usize] + 1
-    }
-}
-
-// switched off: give the covered pixels back (the compose paints the desktop there again)
-fn fps_overlay_off(state: u64) {
-    if fo_v[FO_ON as usize] == 0 {
-        return
-    }
-    fo_v[FO_ON as usize] = 0
-    let rw: u64 = fo_v[FO_RW as usize]
-    if rw != 0 {
-        let rx: u64 = fo_v[FO_RX as usize]
-        let ry: u64 = fo_v[FO_RY as usize]
-        wmbase.damage(state, rx as i64, ry as i64, (rx + rw) as i64, (ry + fo_v[FO_RH as usize]) as i64)
-    }
-    fo_v[FO_RW as usize] = 0
-    fo_v[FO_KEY as usize] = 0
-}
-
-// Ctrl+Alt+R
-fn repaint_hotkey(state: u64) {
-    var s_rp: [u8; 17] = "wm: fullrepaint\0\0"
-    wmbase.damage_all(state)
-    serial.puts((&s_rp[0]) as u64)
-    serial.nl()
-}
-
-// Ctrl+Alt+F
-fn fps_hotkey(state: u64) {
-    let on: bool = ptrcfg.fps_toggle(state)
-    ptrcfg.fps_flush(state)
-    var s_on: [u8; 19] = "wm: fps overlay on\0"
-    var s_off: [u8; 20] = "wm: fps overlay off\0"
-    if on {
-        serial.puts((&s_on[0]) as u64)
-    } else {
-        serial.puts((&s_off[0]) as u64)
-    }
-    serial.nl()
-}
-
-fn mon_apply(state: u64) {
-    let e: u64 = ptrcfg.mon_take(state)
-    if e == 2 {
-        frameprof.mon_set(true)
-    } else if e == 1 {
-        frameprof.mon_set(false)
-    }
-    let pe: u64 = ptrcfg.pg_take(state)
-    if pe == 2 {
-        pixelguard.set_mode(pixelguard.MODE_SAMPLE)
-    } else if pe == 1 {
-        pixelguard.set_mode(pixelguard.MODE_OFF)
-        pixelguard.release(state)
-    }
-}
-
-fn cadence_note(state: u64, pending: bool) {
-    ptrcfg.poll(state)
-    mon_apply(state)
-    let kh: u64 = time.khz(state)
-    if kh < 1000 {
-        return
-    }
-    let now: u64 = time.tsc()
-    let per_us: u64 = kh / 1000
-    let comp: u64 = composites(state)
-    let painted: bool = pending || comp != cad_v[CV_LASTCOMP as usize]
-    cad_v[CV_LASTCOMP as usize] = comp
-    if painted {
-        let last: u64 = cad_v[CV_LASTTSC as usize]
-        if last != 0 && now > last {
-            let us: u64 = (now - last) / per_us
-            if us <= 100000 {
-                let bk: u64 = cad_bucket(us)
-                cad_h[bk as usize] = cad_h[bk as usize] + 1
-                cad_v[CV_N as usize] = cad_v[CV_N as usize] + 1
-                cad_v[CV_SUM as usize] = cad_v[CV_SUM as usize] + us
-                if us > cad_v[CV_MAX as usize] {
-                    cad_v[CV_MAX as usize] = us
-                }
-                if us > 17500 {
-                    cad_v[CV_OVER as usize] = cad_v[CV_OVER as usize] + 1
-                }
-                cad_v[CV_WSUM as usize] = cad_v[CV_WSUM as usize] + us
-                cad_v[CV_WK as usize] = cad_v[CV_WK as usize] + 1
-            } else {
-                cad_v[CV_IDLE as usize] = cad_v[CV_IDLE as usize] + 1
-            }
-        }
-        if last != 0 && now > last {
-            fo_v[FO_LASTFT as usize] = (now - last) / per_us
-        }
-        fo_t[(fo_v[FO_FH as usize] % 256) as usize] = now
-        fo_v[FO_FH as usize] = fo_v[FO_FH as usize] + 1
-        cad_v[CV_LASTTSC as usize] = now
-        cad_v[CV_WN as usize] = cad_v[CV_WN as usize] + 1
-        cad_v[CV_TOTAL as usize] = cad_v[CV_TOTAL as usize] + 1
-    }
-    let w0: u64 = cad_v[CV_WT0 as usize]
-    if w0 == 0 || now < w0 {
-        cad_v[CV_WT0 as usize] = now
-    } else {
-        let el_ms: u64 = (now - w0) / kh
-        if el_ms >= 1000 {
-            cad_v[CV_FPS as usize] = (cad_v[CV_WN as usize] * 1000 + el_ms / 2) / el_ms
-            var m10: u64 = 0
-            if cad_v[CV_WK as usize] != 0 {
-                m10 = (cad_v[CV_WSUM as usize] / cad_v[CV_WK as usize]) / 100
-            }
-            cad_v[CV_MS10 as usize] = m10
-            cad_v[CV_WT0 as usize] = now
-            cad_v[CV_WN as usize] = 0
-            cad_v[CV_WSUM as usize] = 0
-            cad_v[CV_WK as usize] = 0
-        }
-    }
-    fo_sample_present(state, now)
-    if ptrcfg.fps_on(state) {
-        fo_v[FO_ON as usize] = 1
-        fps_overlay(state, painted, now, kh)
-    } else {
-        fps_overlay_off(state)
-    }
-}
-
-fn cadence_say_reset(state: u64) {
-    var s_c: [u8; 16] = "wm: cadence n=\0\0"
-    var s_m: [u8; 9] = " mittel=\0"
-    var s_x: [u8; 6] = " max=\0"
-    var s_o: [u8; 10] = " ueber17=\0"
-    var s_i: [u8; 7] = " idle=\0"
-    var s_f: [u8; 7] = " fach=\0"
-    var s_t: [u8; 8] = " total=\0"
-    let n: u64 = cad_v[CV_N as usize]
-    serial.puts((&s_c[0]) as u64)
-    serial.dec(n)
-    serial.puts((&s_m[0]) as u64)
-    if n != 0 {
-        serial.dec(cad_v[CV_SUM as usize] / n)
-    } else {
-        serial.dec(0)
-    }
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(cad_v[CV_MAX as usize])
-    serial.puts((&s_o[0]) as u64)
-    serial.dec(cad_v[CV_OVER as usize])
-    serial.puts((&s_i[0]) as u64)
-    serial.dec(cad_v[CV_IDLE as usize])
-    serial.puts((&s_f[0]) as u64)
-    var k: u64 = 0
-    while k < 8 {
-        serial.dec(cad_h[k as usize])
-        if k < 7 {
-            serial.put(32 as u8)
-        }
-        cad_h[k as usize] = 0
-        k = k + 1
-    }
-    serial.puts((&s_t[0]) as u64)
-    serial.dec(cad_v[CV_TOTAL as usize])
-    serial.nl()
-    cad_v[CV_N as usize] = 0
-    cad_v[CV_SUM as usize] = 0
-    cad_v[CV_MAX as usize] = 0
-    cad_v[CV_OVER as usize] = 0
-    cad_v[CV_IDLE as usize] = 0
-}
 
 // ==================================================== r1014: TERMINAL TABS
 // Every tab is its own K_TERM window (own tty + shell, made by /bin/term like any other terminal). A GROUP is the set of

@@ -1,0 +1,572 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.fb
+import ui.frameprof
+import lib.kstate
+import ui.pixelguard
+import drv.hid.ptrcfg
+import serial
+import sched.time
+import drv.gpu.vgpu
+import drv.gpu.vmsvga
+import ui.wm.wmbase
+import ui.wm.wmlayout
+
+fn composites(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_COMPOSITES)
+}
+
+static mut cad_v: [u64; 16] = [0 as u64; 16]
+
+static mut cad_h: [u64; 8] = [0 as u64; 8]
+
+const CV_LASTTSC: u64 = 0
+
+const CV_LASTCOMP: u64 = 1
+
+const CV_N: u64 = 2
+
+const CV_SUM: u64 = 3
+
+const CV_MAX: u64 = 4
+
+const CV_IDLE: u64 = 5
+
+const CV_WT0: u64 = 6
+
+const CV_WN: u64 = 7
+
+const CV_WSUM: u64 = 8
+
+const CV_WK: u64 = 9
+
+const CV_FPS: u64 = 10
+
+const CV_MS10: u64 = 11
+
+const CV_TOTAL: u64 = 13
+
+const CV_OVER: u64 = 14
+
+fn last_paint_tsc(state: u64) -> u64 {
+    return cad_v[CV_LASTTSC as usize]
+}
+
+fn cad_bucket(us: u64) -> u64 {
+    if us < 8000 {
+        return 0
+    }
+    if us < 12000 {
+        return 1
+    }
+    if us < 15500 {
+        return 2
+    }
+    if us < 17500 {
+        return 3
+    }
+    if us < 21000 {
+        return 4
+    }
+    if us < 34000 {
+        return 5
+    }
+    if us < 51000 {
+        return 6
+    }
+    return 7
+}
+
+fn cad_dec(buf: u64, at: u64, v: u64) -> u64 {
+    var tmp: [u8; 20] = [0 as u8; 20]
+    var k: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0] = 48 as u8
+        k = 1
+    }
+    while x > 0 {
+        tmp[k as usize] = (48 + x % 10) as u8
+        x = x / 10
+        k = k + 1
+    }
+    var i: u64 = 0
+    var p: u64 = at
+    while i < k {
+        kstate.set8(buf + p, tmp[(k - 1 - i) as usize])
+        p = p + 1
+        i = i + 1
+    }
+    return p
+}
+
+fn cad_str(buf: u64, at: u64, src: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(buf + at + i, (kstate.get8(src + i)) as u8)
+        i = i + 1
+    }
+    return at + n
+}
+
+static mut fo_t: [u64; 256] = [0 as u64; 256]
+
+static mut fo_p: [u64; 128] = [0 as u64; 128]
+
+static mut fo_v: [u64; 24] = [0 as u64; 24]
+
+static mut fo_txt: [u8; 112] = [32 as u8; 112]
+
+const FO_FH: u64 = 0
+
+const FO_PH: u64 = 1
+
+const FO_LASTPC: u64 = 2
+
+const FO_OVONLY: u64 = 3
+
+const FO_STATT: u64 = 4
+
+const FO_KEY: u64 = 5
+
+const FO_SAYT: u64 = 6
+
+const FO_ON: u64 = 7
+
+const FO_RX: u64 = 8
+
+const FO_RY: u64 = 9
+
+const FO_RW: u64 = 10
+
+const FO_RH: u64 = 11
+
+const FO_LASTFT: u64 = 12
+
+const FO_PTOTAL: u64 = 13
+
+const FO_DRAWS: u64 = 14
+
+const FO_FPS: u64 = 15
+
+const FO_AVG: u64 = 16
+
+const FO_MAX: u64 = 17
+
+const FO_PRES: u64 = 18
+
+const FO_NINT: u64 = 19
+
+const FO_W: u64 = 26
+
+const FO_ROWS: u64 = 4
+
+fn present_driver(state: u64) -> bool {
+    return vgpu.usable(state) || vmsvga.is_ready(state)
+}
+
+fn present_count(state: u64) -> u64 {
+    if vgpu.usable(state) {
+        return vgpu.transfers(state)
+    }
+    if vmsvga.is_ready(state) {
+        return vmsvga.present_frames(state)
+    }
+    return 0
+}
+
+fn fo_sample_present(state: u64, now: u64) {
+    let pc: u64 = present_count(state)
+    let lastpc: u64 = fo_v[FO_LASTPC as usize]
+    let sub: u64 = fo_v[FO_OVONLY as usize]
+    fo_v[FO_OVONLY as usize] = 0
+    fo_v[FO_LASTPC as usize] = pc
+    if pc <= lastpc {
+        return
+    }
+    var real: u64 = pc - lastpc
+    if real > sub {
+        real = real - sub
+    } else {
+        real = 0
+    }
+    if real > 4 {
+        real = 4
+    }
+    var k: u64 = 0
+    while k < real {
+        fo_p[(fo_v[FO_PH as usize] % 128) as usize] = now
+        fo_v[FO_PH as usize] = fo_v[FO_PH as usize] + 1
+        fo_v[FO_PTOTAL as usize] = fo_v[FO_PTOTAL as usize] + 1
+        k = k + 1
+    }
+}
+
+fn fo_stats(now: u64, kh: u64) {
+    let per_us: u64 = kh / 1000
+    var ws: u64 = 0
+    if now > kh * 1000 {
+        ws = now - kh * 1000
+    }
+    var n: u64 = 0
+    var cnt: u64 = 0
+    var sum: u64 = 0
+    var mx: u64 = 0
+    var newer: u64 = 0
+    var k: u64 = 0
+    let head: u64 = fo_v[FO_FH as usize]
+    while k < 256 && k < head {
+        let t: u64 = fo_t[((head - 1 - k) % 256) as usize]
+        if t < ws {
+            break
+        }
+        n = n + 1
+        if newer != 0 && newer > t {
+            let us: u64 = (newer - t) / per_us
+            if us <= 100000 {
+                sum = sum + us
+                cnt = cnt + 1
+                if us > mx {
+                    mx = us
+                }
+            }
+        }
+        newer = t
+        k = k + 1
+    }
+    var pn: u64 = 0
+    let ph: u64 = fo_v[FO_PH as usize]
+    k = 0
+    while k < 128 && k < ph {
+        let t: u64 = fo_p[((ph - 1 - k) % 128) as usize]
+        if t < ws {
+            break
+        }
+        pn = pn + 1
+        k = k + 1
+    }
+    fo_v[FO_FPS as usize] = n
+    fo_v[FO_NINT as usize] = cnt
+    fo_v[FO_AVG as usize] = 0
+    if cnt != 0 {
+        fo_v[FO_AVG as usize] = sum / cnt
+    }
+    fo_v[FO_MAX as usize] = mx
+    fo_v[FO_PRES as usize] = pn
+}
+
+fn fo_ms(buf: u64, at: u64, us: u64) -> u64 {
+    var p: u64 = cad_dec(buf, at, us / 1000)
+    kstate.set8(buf + p, 46 as u8)
+    p = cad_dec(buf, p + 1, (us % 1000) / 100)
+    return p
+}
+
+fn fo_line_end(buf: u64, n: u64) {
+    var i: u64 = n
+    while i < FO_W {
+        kstate.set8(buf + i, 32 as u8)
+        i = i + 1
+    }
+    kstate.set8(buf + FO_W, 0 as u8)
+}
+
+fn fo_build(state: u64, w: u64, h: u64) -> u64 {
+    var t_fps: [u8; 5] = "FPS \0"
+    var t_ft: [u8; 6] = "  FT \0"
+    var t_ms: [u8; 4] = " ms\0"
+    var t_idle: [u8; 12] = "FPS 0  IDLE\0"
+    var t_avg: [u8; 5] = "AVG \0"
+    var t_max: [u8; 7] = "  MAX \0"
+    var t_none: [u8; 13] = "AVG -  MAX -\0"
+    var t_pres: [u8; 9] = "PRESENT \0"
+    var t_ps: [u8; 3] = "/s\0"
+    var t_na: [u8; 21] = "PRESENT n/a (direct)\0"
+    let b: u64 = (&fo_txt[0]) as u64
+    let fps: u64 = fo_v[FO_FPS as usize]
+    var n: u64 = 0
+
+    var l0: u64 = b
+    if fps == 0 {
+        n = cad_str(l0, 0, (&t_idle[0]) as u64, 11)
+    } else {
+        n = cad_str(l0, 0, (&t_fps[0]) as u64, 4)
+        n = cad_dec(l0, n, fps)
+        n = cad_str(l0, n, (&t_ft[0]) as u64, 5)
+        n = fo_ms(l0, n, fo_v[FO_LASTFT as usize])
+        n = cad_str(l0, n, (&t_ms[0]) as u64, 3)
+    }
+    fo_line_end(l0, n)
+
+    let l1: u64 = b + FO_W + 2
+    if fo_v[FO_NINT as usize] == 0 {
+        n = cad_str(l1, 0, (&t_none[0]) as u64, 12)
+    } else {
+        n = cad_str(l1, 0, (&t_avg[0]) as u64, 4)
+        n = fo_ms(l1, n, fo_v[FO_AVG as usize])
+        n = cad_str(l1, n, (&t_max[0]) as u64, 6)
+        n = fo_ms(l1, n, fo_v[FO_MAX as usize])
+    }
+    fo_line_end(l1, n)
+
+    let l2: u64 = b + (FO_W + 2) * 2
+    if present_driver(state) {
+        n = cad_str(l2, 0, (&t_pres[0]) as u64, 8)
+        n = cad_dec(l2, n, fo_v[FO_PRES as usize])
+        n = cad_str(l2, n, (&t_ps[0]) as u64, 2)
+    } else {
+        n = cad_str(l2, 0, (&t_na[0]) as u64, 20)
+    }
+    fo_line_end(l2, n)
+
+    let l3: u64 = b + (FO_W + 2) * 3
+    n = cad_dec(l3, 0, w)
+    kstate.set8(l3 + n, 120 as u8)
+    n = cad_dec(l3, n + 1, h)
+    fo_line_end(l3, n)
+    return fps * 1000000007 + fo_v[FO_LASTFT as usize] / 100 * 10007 + fo_v[FO_AVG as usize] / 100 * 331 + fo_v[FO_MAX as usize] / 100 * 17 + fo_v[FO_PRES as usize] * 3 + w / 8
+}
+
+fn fps_overlay(state: u64, painted: bool, now: u64, kh: u64) {
+    if !fb.ready(state) {
+        return
+    }
+    let w: u64 = fb.width(state)
+    let h: u64 = fb.height(state)
+    var changed: bool = false
+    let st: u64 = fo_v[FO_STATT as usize]
+    if st == 0 || now < st || (now - st) / kh >= 250 {
+        fo_v[FO_STATT as usize] = now
+        fo_stats(now, kh)
+        let key: u64 = fo_build(state, w, h)
+        if key != fo_v[FO_KEY as usize] {
+            fo_v[FO_KEY as usize] = key
+            changed = true
+        }
+
+        let sy: u64 = fo_v[FO_SAYT as usize]
+        if fb.phases_an(state) && (sy == 0 || now < sy || (now - sy) / kh >= 1000) {
+            fo_v[FO_SAYT as usize] = now
+            var s_a: [u8; 15] = "wm: fpsov fps=\0"
+            var s_b: [u8; 5] = " ft=\0"
+            var s_c: [u8; 6] = " avg=\0"
+            var s_d: [u8; 6] = " max=\0"
+            var s_e: [u8; 7] = " pres=\0"
+            var s_f: [u8; 7] = " drv=\0\0"
+            serial.puts((&s_a[0]) as u64)
+            serial.dec(fo_v[FO_FPS as usize])
+            serial.puts((&s_b[0]) as u64)
+            serial.dec(fo_v[FO_LASTFT as usize])
+            serial.puts((&s_c[0]) as u64)
+            serial.dec(fo_v[FO_AVG as usize])
+            serial.puts((&s_d[0]) as u64)
+            serial.dec(fo_v[FO_MAX as usize])
+            serial.puts((&s_e[0]) as u64)
+            serial.dec(fo_v[FO_PRES as usize])
+            serial.puts((&s_f[0]) as u64)
+            if present_driver(state) {
+                serial.dec(1)
+            } else {
+                serial.dec(0)
+            }
+            serial.nl()
+        }
+    }
+    if !painted && !changed && fo_v[FO_RW as usize] != 0 {
+        return
+    }
+    fo_v[FO_DRAWS as usize] = fo_v[FO_DRAWS as usize] + 1
+    var sc: u64 = fb.scale(state)
+    if sc == 0 {
+        sc = 1
+    }
+    var col: u64 = 0
+    if fb.cols(state) > FO_W {
+        col = fb.cols(state) - FO_W
+    }
+    fb.set_color(state, fb.rgb(state, 0, 255, 0), fb.rgb(state, 0, 0, 0))
+    var r: u64 = 0
+    while r < FO_ROWS {
+        fb.goto(state, col, r)
+        fb.puts(state, ((&fo_txt[0]) as u64) + r * (FO_W + 2))
+        r = r + 1
+    }
+    var fw: u64 = FO_W * 8 * sc
+    if fw > w {
+        fw = w
+    }
+    let fx: u64 = col * 8 * sc
+    fb.flush_rect(state, fx, 0, fw, FO_ROWS * 16 * sc)
+    fo_v[FO_RX as usize] = fx
+    fo_v[FO_RY as usize] = 0
+    fo_v[FO_RW as usize] = fw
+    fo_v[FO_RH as usize] = FO_ROWS * 16 * sc
+
+    if !painted {
+        fo_v[FO_OVONLY as usize] = fo_v[FO_OVONLY as usize] + 1
+    }
+}
+
+fn fps_overlay_off(state: u64) {
+    if fo_v[FO_ON as usize] == 0 {
+        return
+    }
+    fo_v[FO_ON as usize] = 0
+    let rw: u64 = fo_v[FO_RW as usize]
+    if rw != 0 {
+        let rx: u64 = fo_v[FO_RX as usize]
+        let ry: u64 = fo_v[FO_RY as usize]
+        wmbase.damage(state, rx as i64, ry as i64, (rx + rw) as i64, (ry + fo_v[FO_RH as usize]) as i64)
+    }
+    fo_v[FO_RW as usize] = 0
+    fo_v[FO_KEY as usize] = 0
+}
+
+fn repaint_hotkey(state: u64) {
+    var s_rp: [u8; 17] = "wm: fullrepaint\0\0"
+    wmbase.damage_all(state)
+    serial.puts((&s_rp[0]) as u64)
+    serial.nl()
+}
+
+fn fps_hotkey(state: u64) {
+    let on: bool = ptrcfg.fps_toggle(state)
+    ptrcfg.fps_flush(state)
+    var s_on: [u8; 19] = "wm: fps overlay on\0"
+    var s_off: [u8; 20] = "wm: fps overlay off\0"
+    if on {
+        serial.puts((&s_on[0]) as u64)
+    } else {
+        serial.puts((&s_off[0]) as u64)
+    }
+    serial.nl()
+}
+
+fn mon_apply(state: u64) {
+    let e: u64 = ptrcfg.mon_take(state)
+    if e == 2 {
+        frameprof.mon_set(true)
+    } else if e == 1 {
+        frameprof.mon_set(false)
+    }
+    let pe: u64 = ptrcfg.pg_take(state)
+    if pe == 2 {
+        pixelguard.set_mode(pixelguard.MODE_SAMPLE)
+    } else if pe == 1 {
+        pixelguard.set_mode(pixelguard.MODE_OFF)
+        pixelguard.release(state)
+    }
+}
+
+fn cadence_note(state: u64, pending: bool) {
+    ptrcfg.poll(state)
+    mon_apply(state)
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        return
+    }
+    let now: u64 = time.tsc()
+    let per_us: u64 = kh / 1000
+    let comp: u64 = composites(state)
+    let painted: bool = pending || comp != cad_v[CV_LASTCOMP as usize]
+    cad_v[CV_LASTCOMP as usize] = comp
+    if painted {
+        let last: u64 = cad_v[CV_LASTTSC as usize]
+        if last != 0 && now > last {
+            let us: u64 = (now - last) / per_us
+            if us <= 100000 {
+                let bk: u64 = cad_bucket(us)
+                cad_h[bk as usize] = cad_h[bk as usize] + 1
+                cad_v[CV_N as usize] = cad_v[CV_N as usize] + 1
+                cad_v[CV_SUM as usize] = cad_v[CV_SUM as usize] + us
+                if us > cad_v[CV_MAX as usize] {
+                    cad_v[CV_MAX as usize] = us
+                }
+                if us > 17500 {
+                    cad_v[CV_OVER as usize] = cad_v[CV_OVER as usize] + 1
+                }
+                cad_v[CV_WSUM as usize] = cad_v[CV_WSUM as usize] + us
+                cad_v[CV_WK as usize] = cad_v[CV_WK as usize] + 1
+            } else {
+                cad_v[CV_IDLE as usize] = cad_v[CV_IDLE as usize] + 1
+            }
+        }
+        if last != 0 && now > last {
+            fo_v[FO_LASTFT as usize] = (now - last) / per_us
+        }
+        fo_t[(fo_v[FO_FH as usize] % 256) as usize] = now
+        fo_v[FO_FH as usize] = fo_v[FO_FH as usize] + 1
+        cad_v[CV_LASTTSC as usize] = now
+        cad_v[CV_WN as usize] = cad_v[CV_WN as usize] + 1
+        cad_v[CV_TOTAL as usize] = cad_v[CV_TOTAL as usize] + 1
+    }
+    let w0: u64 = cad_v[CV_WT0 as usize]
+    if w0 == 0 || now < w0 {
+        cad_v[CV_WT0 as usize] = now
+    } else {
+        let el_ms: u64 = (now - w0) / kh
+        if el_ms >= 1000 {
+            cad_v[CV_FPS as usize] = (cad_v[CV_WN as usize] * 1000 + el_ms / 2) / el_ms
+            var m10: u64 = 0
+            if cad_v[CV_WK as usize] != 0 {
+                m10 = (cad_v[CV_WSUM as usize] / cad_v[CV_WK as usize]) / 100
+            }
+            cad_v[CV_MS10 as usize] = m10
+            cad_v[CV_WT0 as usize] = now
+            cad_v[CV_WN as usize] = 0
+            cad_v[CV_WSUM as usize] = 0
+            cad_v[CV_WK as usize] = 0
+        }
+    }
+    fo_sample_present(state, now)
+    if ptrcfg.fps_on(state) {
+        fo_v[FO_ON as usize] = 1
+        fps_overlay(state, painted, now, kh)
+    } else {
+        fps_overlay_off(state)
+    }
+}
+
+fn cadence_say_reset(state: u64) {
+    var s_c: [u8; 16] = "wm: cadence n=\0\0"
+    var s_m: [u8; 9] = " mittel=\0"
+    var s_x: [u8; 6] = " max=\0"
+    var s_o: [u8; 10] = " ueber17=\0"
+    var s_i: [u8; 7] = " idle=\0"
+    var s_f: [u8; 7] = " fach=\0"
+    var s_t: [u8; 8] = " total=\0"
+    let n: u64 = cad_v[CV_N as usize]
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_m[0]) as u64)
+    if n != 0 {
+        serial.dec(cad_v[CV_SUM as usize] / n)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(cad_v[CV_MAX as usize])
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(cad_v[CV_OVER as usize])
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(cad_v[CV_IDLE as usize])
+    serial.puts((&s_f[0]) as u64)
+    var k: u64 = 0
+    while k < 8 {
+        serial.dec(cad_h[k as usize])
+        if k < 7 {
+            serial.put(32 as u8)
+        }
+        cad_h[k as usize] = 0
+        k = k + 1
+    }
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(cad_v[CV_TOTAL as usize])
+    serial.nl()
+    cad_v[CV_N as usize] = 0
+    cad_v[CV_SUM as usize] = 0
+    cad_v[CV_MAX as usize] = 0
+    cad_v[CV_OVER as usize] = 0
+    cad_v[CV_IDLE as usize] = 0
+}

@@ -348,7 +348,7 @@ schau "der vierte Reiter ist der aktive (helle Leiste rechts oben)" \
 # nimmt er seit dem Zusammenfuehren den Deko-Platz DK_TITLE, und der
 # steht bei 0x2C3848. Geholt wird er hier aus `deco_fallback`, damit
 # ein neues Schema die Zusage nicht wieder umwirft.
-DKT=$(sed -n '/fn deco_fallback/,/^}/p' kernel/ui/wm.fi \
+DKT=$(sed -n '/fn deco_fallback/,/^}/p' kernel/ui/wm/wmbase.fi \
     | grep -A2 'i == DK_TITLE {' | grep -oE '0x00[0-9A-Fa-f]{6}' | head -1)
 DKT=${DKT:-0x002C3848}
 dkr=$(( (DKT >> 16) & 255 )); dkg=$(( (DKT >> 8) & 255 )); dkb=$(( DKT & 255 ))
