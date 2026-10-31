@@ -1,0 +1,153 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+
+export { value_range, hex_get, text_get, num_get, op_of, put_hex, put_text, put_kv, put_num, nl }
+
+fn byte_at(s: str, i: usize) -> u8 {
+    return rt.ld8(s.p as u64, i)
+}
+
+fn key_hits(s: str, at: usize, key: str) -> bool {
+    if at + key.n + 1 > s.n {
+        return false
+    }
+    var i: usize = 0
+    while i < key.n {
+        if byte_at(s, at + i) != byte_at(key, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return byte_at(s, at + key.n) == 61 as u8
+}
+
+fn value_range(s: str, key: str, from: *mut usize, to: *mut usize) -> bool {
+    var at: usize = 0
+    while at < s.n {
+        var e: usize = at
+        while e < s.n && byte_at(s, e) != 10 as u8 {
+            e = e + 1
+        }
+        if key_hits(s, at, key) {
+            (*from) = at + key.n + 1
+            (*to) = e
+            return true
+        }
+        at = e + 1
+    }
+    return false
+}
+
+fn hex_val(c: u8) -> i32 {
+    if c >= 48 as u8 && c <= 57 as u8 {
+        return (c - 48 as u8) as i32
+    }
+    if c >= 97 as u8 && c <= 102 as u8 {
+        return (c - 87 as u8) as i32
+    }
+    return 0 - 1
+}
+
+fn hex_get(s: str, key: str, out: *mut rt.Buf) -> bool {
+    var a: usize = 0
+    var b: usize = 0
+    if !value_range(s, key, &a, &b) {
+        return false
+    }
+    if (b - a) % 2 != 0 {
+        return false
+    }
+    var i: usize = a
+    while i < b {
+        let h: i32 = hex_val(byte_at(s, i))
+        let l: i32 = hex_val(byte_at(s, i + 1))
+        if h < 0 || l < 0 {
+            return false
+        }
+        rt.buf_push(out, (h * 16 + l) as u8)
+        i = i + 2
+    }
+    return true
+}
+
+fn text_get(s: str, key: str, out: *mut rt.Buf) -> bool {
+    var a: usize = 0
+    var b: usize = 0
+    if !value_range(s, key, &a, &b) {
+        return false
+    }
+    rt.buf_push_bytes(out, (s.p as u64) + (a as u64), b - a)
+    return true
+}
+
+fn num_get(s: str, key: str, dflt: u64) -> u64 {
+    var a: usize = 0
+    var b: usize = 0
+    if !value_range(s, key, &a, &b) || b == a {
+        return dflt
+    }
+    var v: u64 = 0
+    var i: usize = a
+    while i < b {
+        let c: u8 = byte_at(s, i)
+        if c < 48 as u8 || c > 57 as u8 || v > 100000000000 {
+            return dflt
+        }
+        v = v * 10 + ((c - 48 as u8) as u64)
+        i = i + 1
+    }
+    return v
+}
+
+fn op_of(s: str, out: *mut rt.Buf) -> bool {
+    return text_get(s, "op", out)
+}
+
+fn put_hex(out: *mut rt.Buf, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        let b: u8 = rt.ld8(p, i)
+        let hi: u8 = b >> 4 as u8
+        let lo: u8 = b & 15 as u8
+        rt.buf_push(out, (if hi < 10 as u8 { 48 as u8 + hi } else { 87 as u8 + hi }))
+        rt.buf_push(out, (if lo < 10 as u8 { 48 as u8 + lo } else { 87 as u8 + lo }))
+        i = i + 1
+    }
+}
+
+fn put_text(out: *mut rt.Buf, s: str) {
+    rt.buf_push_bytes(out, s.p as u64, s.n)
+}
+
+fn put_kv(out: *mut rt.Buf, key: str, value: str) {
+    put_text(out, key)
+    rt.buf_push(out, 61 as u8)
+    put_text(out, value)
+    rt.buf_push(out, 10 as u8)
+}
+
+fn put_num(out: *mut rt.Buf, key: str, v: u64) {
+    put_text(out, key)
+    rt.buf_push(out, 61 as u8)
+    var digits: [u8; 24] = [0; 24]
+    var n: usize = 0
+    var x: u64 = v
+    if x == 0 {
+        digits[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        digits[n] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        rt.buf_push(out, digits[n])
+    }
+    rt.buf_push(out, 10 as u8)
+}
+
+fn nl(out: *mut rt.Buf) {
+    rt.buf_push(out, 10 as u8)
+}

@@ -1,0 +1,128 @@
+import std.rt
+import std.fs
+import std.testkit
+import vault.vlayout
+import vault.container
+import vaultd.vdsess
+import v1_helper
+
+fn kdf() -> vdsess.Kdf {
+    return vdsess.Kdf { kib: 64, passes: 1, lanes: 1 }
+}
+
+fn pwp(s: str) -> u64 {
+    return s.p as u64
+}
+
+fn run_create(root: str, ctx: u64) {
+    var s: vdsess.Session = vdsess.session_new()
+    var k: vdsess.Kdf = kdf()
+    let dir: str = vdsess.user_dir(root, "alice")
+    testkit.assert_eq_u64(vdsess.vault_status(&s, dir), vdsess.S_NONE)
+    testkit.assert_eq_i64(vdsess.create_vault(&s, root, "alice", pwp("short"), 5, &k, 1000) as i64, vdsess.R_SHORT as i64)
+    testkit.assert_eq_i64(vdsess.create_vault(&s, root, "alice", pwp("correct horse"), 13, &k, 1000) as i64, 0)
+    testkit.assert_eq_u64(vdsess.vault_status(&s, dir), vdsess.S_OPEN)
+    testkit.assert_eq_i64(vdsess.create_vault(&s, root, "alice", pwp("correct horse"), 13, &k, 1000) as i64, vdsess.R_EXISTS as i64)
+    let info: fs.FileInfo = fs.stat(fs.path_join(dir, "vault.vlt")) catch fs.FileInfo { kind: 0 as u8, mode: 0 as u32, size: 0, mtime_ns: 0 }
+    testkit.assert_eq_i64(info.mode as i64, 384)
+    vdsess.lock(&s)
+    testkit.assert_eq_u64(vdsess.vault_status(&s, dir), vdsess.S_LOCKED)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "alice", pwp("wrong wrong"), 11, &k, 2000, 2000000, false) as i64, vdsess.R_BAD as i64)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "alice", pwp("correct horse"), 13, &k, 2000, 2000000, false) as i64, 0)
+    testkit.assert_eq_u64(vdsess.vault_status(&s, dir), vdsess.S_OPEN)
+}
+
+#[test]
+fn create_lock_unlock() {
+    testkit.with_dir(run_create, 0)
+}
+
+fn run_lockout(root: str, ctx: u64) {
+    var s: vdsess.Session = vdsess.session_new()
+    var k: vdsess.Kdf = kdf()
+    vdsess.create_vault(&s, root, "bob", pwp("correct horse"), 13, &k, 1000)
+    vdsess.lock(&s)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "bob", pwp("bad pass 1"), 10, &k, 1000, 0, false) as i64, vdsess.R_BAD as i64)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "bob", pwp("bad pass 2"), 10, &k, 1000, 0, false) as i64, vdsess.R_BAD as i64)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "bob", pwp("bad pass 3"), 10, &k, 1000, 0, false) as i64, vdsess.R_BAD as i64)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "bob", pwp("correct horse"), 13, &k, 1000, 0, false) as i64, vdsess.R_WAIT as i64)
+    testkit.assert_eq_u64(s.wait, 2)
+    var fresh: vdsess.Session = vdsess.session_new()
+    testkit.assert_eq_i64(vdsess.unlock_pw(&fresh, root, "bob", pwp("correct horse"), 13, &k, 1001, 0, false) as i64, vdsess.R_WAIT as i64)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&fresh, root, "bob", pwp("correct horse"), 13, &k, 900, 0, false) as i64, vdsess.R_WAIT as i64)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&fresh, root, "bob", pwp("correct horse"), 13, &k, 1002, 0, false) as i64, 0)
+    vdsess.lock(&fresh)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&fresh, root, "bob", pwp("correct horse"), 13, &k, 1003, 0, false) as i64, 0)
+}
+
+#[test]
+fn lockout_persists_across_sessions() {
+    testkit.with_dir(run_lockout, 0)
+}
+
+fn run_recovery(root: str, ctx: u64) {
+    var s: vdsess.Session = vdsess.session_new()
+    var k: vdsess.Kdf = kdf()
+    vdsess.create_vault(&s, root, "carol", pwp("correct horse"), 13, &k, 1000)
+    var text: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vdsess.add_recovery(&s, root, "carol", &text) as i64, 0)
+    testkit.assert_eq_u64(rt.buf_len(&text) as u64, 64)
+    vdsess.lock(&s)
+    testkit.assert_eq_i64(vdsess.unlock_recovery(&s, root, "carol", pwp("AAAA-BBBB"), 9, 2000, 0, false) as i64, vdsess.R_BAD as i64)
+    testkit.assert_eq_i64(vdsess.unlock_recovery(&s, root, "carol", rt.buf_ptr(&text), rt.buf_len(&text), 2000, 0, false) as i64, 0)
+    testkit.assert_eq_u64(vdsess.vault_status(&s, vdsess.user_dir(root, "carol")), vdsess.S_OPEN)
+}
+
+#[test]
+fn recovery_unlock() {
+    testkit.with_dir(run_recovery, 0)
+}
+
+fn run_rollback(root: str, ctx: u64) {
+    var s: vdsess.Session = vdsess.session_new()
+    var k: vdsess.Kdf = kdf()
+    let dir: str = vdsess.user_dir(root, "dave")
+    vdsess.create_vault(&s, root, "dave", pwp("correct horse"), 13, &k, 1000)
+    var old: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.file_load(fs.path_join(dir, "vault.vlt"), &old) as i64, 0)
+    var next: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&next, vdsess.store_ptr(&s), vdsess.store_len(&s))
+    testkit.assert_eq_i64(vdsess.save_store(&s, root, "dave", &next, 1100) as i64, 0)
+    testkit.assert_eq_i64(vdsess.save_store(&s, root, "dave", &next, 1200) as i64, 0)
+    vdsess.lock(&s)
+    fs.write_atomic_mode(fs.path_join(dir, "vault.vlt"), rt.buf_ptr(&old), rt.buf_len(&old), 384 as u32) catch false
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "dave", pwp("correct horse"), 13, &k, 2000, 0, false) as i64, vdsess.R_ROLLBACK as i64)
+    testkit.assert_eq_u64(vdsess.vault_status(&s, dir), vdsess.S_LOCKED)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "dave", pwp("correct horse"), 13, &k, 2001, 0, true) as i64, 0)
+}
+
+#[test]
+fn rollback_is_refused_until_accepted() {
+    testkit.with_dir(run_rollback, 0)
+}
+
+fn run_migrate(root: str, ctx: u64) {
+    var s: vdsess.Session = vdsess.session_new()
+    var k: vdsess.Kdf = kdf()
+    let dir: str = vdsess.user_dir(root, "erin")
+    fs.mkdir_all(dir) catch false
+    var v1: rt.Buf = rt.buf_new()
+    testkit.assert_true(v1_helper.seal(&v1, 1 as u8, 0 as u8, 5, "migrate me please", "https://a.example\talice\tpw-one\n"), "seal v1")
+    fs.write_atomic_mode(fs.path_join(dir, "vault.v1"), rt.buf_ptr(&v1), rt.buf_len(&v1), 384 as u32) catch false
+    testkit.assert_eq_u64(vdsess.vault_status(&s, dir), vdsess.S_LOCKED)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "erin", pwp("wrong wrong wrong"), 17, &k, 1000, 5000, false) as i64, vdsess.R_BAD as i64)
+    testkit.assert_true(!fs.exists(fs.path_join(dir, "vault.vlt")), "no v2 after a wrong password")
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "erin", pwp("migrate me please"), 17, &k, 1001, 5000, false) as i64, 0)
+    testkit.assert_eq_u64(s.migrated, 1)
+    testkit.assert_true(fs.exists(fs.path_join(dir, "vault.vlt")), "v2 written")
+    testkit.assert_true(!fs.exists(fs.path_join(dir, "vault.v1")), "v1 moved away")
+    testkit.assert_true(fs.exists(fs.path_join(dir, "vault.v1.bak")), "v1 kept as .bak")
+    vdsess.lock(&s)
+    testkit.assert_eq_i64(vdsess.unlock_pw(&s, root, "erin", pwp("migrate me please"), 17, &k, 1002, 5000, false) as i64, 0)
+    testkit.assert_eq_u64(s.migrated, 0)
+}
+
+#[test]
+fn v1_migrates_on_first_unlock() {
+    testkit.with_dir(run_migrate, 0)
+}

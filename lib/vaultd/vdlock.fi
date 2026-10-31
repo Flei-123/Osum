@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+
+export { STATE_LEN, G_OK, G_WAIT, FREE_TRIES, MAX_WAIT_S, state_new, state_valid,
+    get_fails, get_until, get_seen, get_rev, set_rev, has_vid, vid_matches, set_vid,
+    gate, mark_try, mark_success, penalty }
+
+const STATE_LEN: usize = 64
+const G_OK: u64 = 0
+const G_WAIT: u64 = 1
+const FREE_TRIES: u64 = 3
+const MAX_WAIT_S: u64 = 900
+
+const O_FAILS: usize = 8
+const O_UNTIL: usize = 16
+const O_SEEN: usize = 24
+const O_REV: usize = 32
+const O_VID: usize = 40
+const O_HAS: usize = 56
+
+fn ld64(p: u64, at: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < 8 {
+        v = (v << 8) | (rt.ld8(p, at + i) as u64)
+        i = i + 1
+    }
+    return v
+}
+
+fn st64(p: u64, at: usize, v: u64) {
+    var i: usize = 0
+    while i < 8 {
+        rt.st8(p, at + i, ((v >> ((7 - i) * 8) as u64) & 255) as u8)
+        i = i + 1
+    }
+}
+
+fn state_new(p: u64) {
+    var i: usize = 0
+    while i < STATE_LEN {
+        rt.st8(p, i, 0 as u8)
+        i = i + 1
+    }
+    rt.st8(p, 0, 86 as u8)
+    rt.st8(p, 1, 68 as u8)
+    rt.st8(p, 2, 83 as u8)
+    rt.st8(p, 3, 49 as u8)
+}
+
+fn state_valid(p: u64, n: usize) -> bool {
+    if n != STATE_LEN {
+        return false
+    }
+    return rt.ld8(p, 0) == 86 as u8 && rt.ld8(p, 1) == 68 as u8
+        && rt.ld8(p, 2) == 83 as u8 && rt.ld8(p, 3) == 49 as u8
+}
+
+fn get_fails(p: u64) -> u64 {
+    return ld64(p, O_FAILS)
+}
+
+fn get_until(p: u64) -> u64 {
+    return ld64(p, O_UNTIL)
+}
+
+fn get_seen(p: u64) -> u64 {
+    return ld64(p, O_SEEN)
+}
+
+fn get_rev(p: u64) -> u64 {
+    return ld64(p, O_REV)
+}
+
+fn set_rev(p: u64, rev: u64) {
+    st64(p, O_REV, rev)
+}
+
+fn has_vid(p: u64) -> bool {
+    return ld64(p, O_HAS) != 0
+}
+
+fn vid_matches(p: u64, vid: u64) -> bool {
+    var i: usize = 0
+    while i < 16 {
+        if rt.ld8(p, O_VID + i) != rt.ld8(vid, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn set_vid(p: u64, vid: u64) {
+    var i: usize = 0
+    while i < 16 {
+        rt.st8(p, O_VID + i, rt.ld8(vid, i))
+        i = i + 1
+    }
+    st64(p, O_HAS, 1)
+}
+
+fn effective(p: u64, now: u64) -> u64 {
+    let seen: u64 = ld64(p, O_SEEN)
+    if now < seen {
+        return seen
+    }
+    return now
+}
+
+fn penalty(tries: u64) -> u64 {
+    if tries < FREE_TRIES {
+        return 0
+    }
+    let k: u64 = tries - FREE_TRIES + 1
+    if k >= 10 {
+        return MAX_WAIT_S
+    }
+    var w: u64 = 1
+    var i: u64 = 0
+    while i < k {
+        w = w * 2
+        i = i + 1
+    }
+    if w > MAX_WAIT_S {
+        return MAX_WAIT_S
+    }
+    return w
+}
+
+fn gate(p: u64, now: u64, wait_out: *mut u64) -> u64 {
+    let eff: u64 = effective(p, now)
+    let until: u64 = ld64(p, O_UNTIL)
+    if eff < until {
+        (*wait_out) = until - eff
+        return G_WAIT
+    }
+    (*wait_out) = 0
+    return G_OK
+}
+
+fn mark_try(p: u64, now: u64) {
+    let eff: u64 = effective(p, now)
+    let fails: u64 = ld64(p, O_FAILS) + 1
+    st64(p, O_FAILS, fails)
+    st64(p, O_SEEN, eff)
+    st64(p, O_UNTIL, eff + penalty(fails))
+}
+
+fn mark_success(p: u64, now: u64) {
+    st64(p, O_FAILS, 0)
+    st64(p, O_UNTIL, 0)
+    st64(p, O_SEEN, effective(p, now))
+}

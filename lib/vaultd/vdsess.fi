@@ -1,0 +1,453 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.fs
+import vault.vlayout
+import vault.container
+import vault.recovery
+import vault.migrate
+import vault.v1import
+import vault.vstore
+import vault.vrand
+import vaultd.vdlock
+
+export { Session, Kdf, session_new, session_close, kdf_default, R_OK, R_WAIT, R_BAD, R_DAMAGED,
+    R_NONE, R_ROLLBACK, R_IO, R_EXISTS, R_SHORT, R_LOCKED, R_ARG, vault_status, user_dir,
+    unlock_pw, unlock_recovery, create_vault, lock, save_store, add_recovery, change_password,
+    S_NONE, S_LOCKED, S_OPEN, store_ptr, store_len, cur_revision }
+
+const R_OK: i32 = 0
+const R_WAIT: i32 = 1
+const R_BAD: i32 = 2
+const R_DAMAGED: i32 = 3
+const R_NONE: i32 = 4
+const R_ROLLBACK: i32 = 5
+const R_IO: i32 = 6
+const R_EXISTS: i32 = 7
+const R_SHORT: i32 = 8
+const R_LOCKED: i32 = 9
+const R_ARG: i32 = 10
+
+const S_NONE: u64 = 0
+const S_LOCKED: u64 = 1
+const S_OPEN: u64 = 2
+
+struct Kdf {
+    kib: usize,
+    passes: usize,
+    lanes: usize,
+}
+
+struct Session {
+    open: u64,
+    touched: u64,
+    wait: u64,
+    migrated: u64,
+    img: rt.Buf,
+    store: rt.Buf,
+    vk: [u8; 32],
+    state: [u8; 64],
+}
+
+fn kdf_default() -> Kdf {
+    return Kdf { kib: vlayout.ARGON_DEFAULT_KIB, passes: vlayout.ARGON_DEFAULT_PASSES,
+        lanes: vlayout.ARGON_DEFAULT_LANES }
+}
+
+fn session_new() -> Session {
+    var s: Session = Session { open: 0, touched: 0, wait: 0, migrated: 0, img: rt.buf_new(),
+        store: rt.buf_new(), vk: [0; 32], state: [0; 64] }
+    vdlock.state_new((&s.state[0]) as u64)
+    return s
+}
+
+fn user_dir(root: str, user: str) -> str {
+    return fs.path_join(root, user)
+}
+
+fn vault_path(dir: str) -> str {
+    return fs.path_join(dir, "vault.vlt")
+}
+
+fn v1_path(dir: str) -> str {
+    return fs.path_join(dir, "vault.v1")
+}
+
+fn state_path(dir: str) -> str {
+    return fs.path_join(dir, "state")
+}
+
+fn vault_status(s: *mut Session, dir: str) -> u64 {
+    if (*s).open != 0 {
+        return S_OPEN
+    }
+    if fs.exists(vault_path(dir)) || fs.exists(v1_path(dir)) {
+        return S_LOCKED
+    }
+    return S_NONE
+}
+
+fn load_state(s: *mut Session, dir: str) {
+    var raw: rt.Buf = rt.buf_new()
+    let got: usize = fs.read_file(state_path(dir), &raw) catch 0
+    if got == vdlock.STATE_LEN && vdlock.state_valid(rt.buf_ptr(&raw), rt.buf_len(&raw)) {
+        rt.mem_copy((&(*s).state[0]) as u64, rt.buf_ptr(&raw), vdlock.STATE_LEN)
+    } else {
+        vdlock.state_new((&(*s).state[0]) as u64)
+    }
+    rt.buf_free(&raw)
+}
+
+fn save_state(s: *mut Session, dir: str) -> bool {
+    let ok: bool = fs.write_atomic_mode(state_path(dir), (&(*s).state[0]) as u64,
+        vdlock.STATE_LEN, 384 as u32) catch false
+    return ok
+}
+
+fn ensure_dir(dir: str) -> bool {
+    if fs.is_dir(dir) {
+        return true
+    }
+    let ok: bool = fs.mkdir_all(dir) catch false
+    return ok
+}
+
+fn wipe_buf(b: *mut rt.Buf) {
+    if rt.buf_len(b) > 0 {
+        vlayout.wipe(rt.buf_ptr(b), rt.buf_len(b))
+    }
+    rt.buf_free(b)
+}
+
+fn lock(s: *mut Session) {
+    vlayout.wipe((&(*s).vk[0]) as u64, 32)
+    wipe_buf(&(*s).store)
+    wipe_buf(&(*s).img)
+    (*s).open = 0
+}
+
+fn session_close(s: *mut Session) {
+    lock(s)
+}
+
+fn map_rc(rc: i32) -> i32 {
+    if rc == vlayout.VC_OK {
+        return R_OK
+    }
+    if rc == vlayout.VC_E_CRED || rc == vlayout.VC_E_NOSLOT {
+        return R_BAD
+    }
+    if rc == vlayout.VC_E_IO {
+        return R_IO
+    }
+    if rc == vlayout.VC_E_PARAM {
+        return R_SHORT
+    }
+    return R_DAMAGED
+}
+
+fn image_revision(img: *mut rt.Buf) -> u64 {
+    var info: vlayout.Info = vlayout.info_zero()
+    if vlayout.parse_header(rt.buf_ptr(img), rt.buf_len(img), &info) != vlayout.VC_OK {
+        return 0
+    }
+    return info.revision
+}
+
+fn cur_revision(s: *mut Session) -> u64 {
+    return image_revision(&(*s).img)
+}
+
+fn store_ptr(s: *mut Session) -> u64 {
+    return rt.buf_ptr(&(*s).store)
+}
+
+fn store_len(s: *mut Session) -> usize {
+    return rt.buf_len(&(*s).store)
+}
+
+fn check_rollback(s: *mut Session, accept: bool) -> bool {
+    let sp: u64 = (&(*s).state[0]) as u64
+    let vid: u64 = rt.buf_ptr(&(*s).img) + 16
+    let rev: u64 = image_revision(&(*s).img)
+    if vdlock.has_vid(sp) && !accept {
+        if !vdlock.vid_matches(sp, vid) || rev < vdlock.get_rev(sp) {
+            return false
+        }
+    }
+    return true
+}
+
+fn adopt(s: *mut Session, dir: str, now: u64) {
+    let sp: u64 = (&(*s).state[0]) as u64
+    vdlock.mark_success(sp, now)
+    vdlock.set_vid(sp, rt.buf_ptr(&(*s).img) + 16)
+    vdlock.set_rev(sp, image_revision(&(*s).img))
+    save_state(s, dir)
+    (*s).open = 1
+    (*s).touched = now
+}
+
+fn open_v2(s: *mut Session, dir: str, kind: u8, secret: u64, secret_n: usize, is_key: bool) -> i32 {
+    var img: rt.Buf = rt.buf_new()
+    let rc: i32 = container.file_load(vault_path(dir), &img)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&img)
+        return map_rc(rc)
+    }
+    var body: rt.Buf = rt.buf_new()
+    var rc2: i32 = 0
+    if is_key {
+        rc2 = container.open_key(rt.buf_ptr(&img), rt.buf_len(&img), kind, secret, &body,
+            (&(*s).vk[0]) as u64)
+    } else {
+        rc2 = container.open_pw(rt.buf_ptr(&img), rt.buf_len(&img), kind, secret, secret_n,
+            &body, (&(*s).vk[0]) as u64)
+    }
+    if rc2 != vlayout.VC_OK {
+        rt.buf_free(&img)
+        wipe_buf(&body)
+        return map_rc(rc2)
+    }
+    rt.buf_free(&(*s).img)
+    (*s).img = img
+    rt.buf_free(&(*s).store)
+    (*s).store = body
+    return R_OK
+}
+
+fn migrate_v1(s: *mut Session, dir: str, pw: u64, pwn: usize, k: *mut Kdf, now_ms: u64) -> i32 {
+    var st: v1import.Stats = v1import.Stats { added: 0, replaced: 0, skipped: 0, blocked: 0 }
+    let rc: i32 = migrate.migrate_file(v1_path(dir), vault_path(dir), pw, pwn, (*k).kib,
+        (*k).passes, (*k).lanes, now_ms, &st)
+    if rc != vlayout.VC_OK {
+        return map_rc(rc)
+    }
+    let rc2: i32 = open_v2(s, dir, vlayout.SLOT_PW, pw, pwn, false)
+    if rc2 != R_OK {
+        return rc2
+    }
+    let kept: bool = fs.rename(v1_path(dir), fs.path_join(dir, "vault.v1.bak")) catch false
+    if !kept {
+        return R_IO
+    }
+    (*s).migrated = (st.added + st.replaced) as u64
+    return R_OK
+}
+
+fn unlock_common(s: *mut Session, root: str, user: str, now_s: u64, now_ms: u64) -> i32 {
+    let dir: str = user_dir(root, user)
+    if (*s).open != 0 {
+        return R_OK
+    }
+    load_state(s, dir)
+    var wait: u64 = 0
+    if vdlock.gate((&(*s).state[0]) as u64, now_s, &wait) == vdlock.G_WAIT {
+        (*s).wait = wait
+        return R_WAIT
+    }
+    (*s).wait = 0
+    (*s).migrated = 0
+    return 100
+}
+
+fn unlock_pw(s: *mut Session, root: str, user: str, pw: u64, pwn: usize, k: *mut Kdf,
+    now_s: u64, now_ms: u64, accept_rollback: bool) -> i32 {
+    let pre: i32 = unlock_common(s, root, user, now_s, now_ms)
+    if pre != 100 {
+        return pre
+    }
+    let dir: str = user_dir(root, user)
+    let has2: bool = fs.exists(vault_path(dir))
+    if !has2 && !fs.exists(v1_path(dir)) {
+        return R_NONE
+    }
+    vdlock.mark_try((&(*s).state[0]) as u64, now_s)
+    if !ensure_dir(dir) || !save_state(s, dir) {
+        return R_IO
+    }
+    var rc: i32 = 0
+    if has2 {
+        rc = open_v2(s, dir, vlayout.SLOT_PW, pw, pwn, false)
+        if rc == R_BAD {
+            rc = open_v2(s, dir, vlayout.SLOT_LOGIN, pw, pwn, false)
+        }
+    } else {
+        rc = migrate_v1(s, dir, pw, pwn, k, now_ms)
+    }
+    if rc != R_OK {
+        return rc
+    }
+    if !check_rollback(s, accept_rollback) {
+        lock(s)
+        return R_ROLLBACK
+    }
+    adopt(s, dir, now_s)
+    return R_OK
+}
+
+fn unlock_recovery(s: *mut Session, root: str, user: str, text: u64, textn: usize,
+    now_s: u64, now_ms: u64, accept_rollback: bool) -> i32 {
+    let pre: i32 = unlock_common(s, root, user, now_s, now_ms)
+    if pre != 100 {
+        return pre
+    }
+    let dir: str = user_dir(root, user)
+    if !fs.exists(vault_path(dir)) {
+        return R_NONE
+    }
+    var key: [u8; 32] = [0; 32]
+    vdlock.mark_try((&(*s).state[0]) as u64, now_s)
+    if !save_state(s, dir) {
+        return R_IO
+    }
+    if recovery.decode(text, textn, (&key[0]) as u64) != 0 {
+        return R_BAD
+    }
+    let rc: i32 = open_v2(s, dir, vlayout.SLOT_RECOVERY, (&key[0]) as u64, 32, true)
+    vlayout.wipe((&key[0]) as u64, 32)
+    if rc != R_OK {
+        return rc
+    }
+    if !check_rollback(s, accept_rollback) {
+        lock(s)
+        return R_ROLLBACK
+    }
+    adopt(s, dir, now_s)
+    return R_OK
+}
+
+fn create_vault(s: *mut Session, root: str, user: str, pw: u64, pwn: usize, k: *mut Kdf,
+    now_s: u64) -> i32 {
+    let dir: str = user_dir(root, user)
+    if fs.exists(vault_path(dir)) || fs.exists(v1_path(dir)) {
+        return R_EXISTS
+    }
+    if pwn < vlayout.MIN_PASSWORD_LEN {
+        return R_SHORT
+    }
+    if !ensure_dir(dir) {
+        return R_IO
+    }
+    var empty: rt.Buf = rt.buf_new()
+    vstore.store_empty(&empty)
+    var img: rt.Buf = rt.buf_new()
+    let rc: i32 = container.create(&img, rt.buf_ptr(&empty), rt.buf_len(&empty), pw, pwn,
+        (*k).kib, (*k).passes, (*k).lanes, vlayout.FLAG_PASSKEYS, 0)
+    rt.buf_free(&empty)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&img)
+        return map_rc(rc)
+    }
+    let src: i32 = container.file_save(vault_path(dir), &img)
+    rt.buf_free(&img)
+    if src != vlayout.VC_OK {
+        return map_rc(src)
+    }
+    load_state(s, dir)
+    let orc: i32 = open_v2(s, dir, vlayout.SLOT_PW, pw, pwn, false)
+    if orc != R_OK {
+        return orc
+    }
+    adopt(s, dir, now_s)
+    return R_OK
+}
+
+fn save_store(s: *mut Session, root: str, user: str, next: *mut rt.Buf, now_s: u64) -> i32 {
+    if (*s).open == 0 {
+        return R_LOCKED
+    }
+    let dir: str = user_dir(root, user)
+    var img: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&img, rt.buf_ptr(&(*s).img), rt.buf_len(&(*s).img))
+    let rc: i32 = container.update(&img, (&(*s).vk[0]) as u64, rt.buf_ptr(next), rt.buf_len(next))
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&img)
+        return map_rc(rc)
+    }
+    let src: i32 = container.file_save(vault_path(dir), &img)
+    if src != vlayout.VC_OK {
+        rt.buf_free(&img)
+        return map_rc(src)
+    }
+    rt.buf_free(&(*s).img)
+    (*s).img = img
+    wipe_buf(&(*s).store)
+    rt.buf_push_bytes(&(*s).store, rt.buf_ptr(next), rt.buf_len(next))
+    vdlock.set_rev((&(*s).state[0]) as u64, image_revision(&(*s).img))
+    save_state(s, dir)
+    (*s).touched = now_s
+    return R_OK
+}
+
+fn add_recovery(s: *mut Session, root: str, user: str, text_out: *mut rt.Buf) -> i32 {
+    if (*s).open == 0 {
+        return R_LOCKED
+    }
+    let dir: str = user_dir(root, user)
+    var key: [u8; 32] = [0; 32]
+    if !recovery.generate((&key[0]) as u64) {
+        return R_DAMAGED
+    }
+    var img: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&img, rt.buf_ptr(&(*s).img), rt.buf_len(&(*s).img))
+    var rc: i32 = container.slot_add_key(&img, (&(*s).vk[0]) as u64, vlayout.SLOT_RECOVERY,
+        (&key[0]) as u64)
+    if rc == vlayout.VC_E_PARAM || rc == vlayout.VC_E_SLOTS {
+        rc = container.slot_replace_key(&img, (&(*s).vk[0]) as u64, vlayout.SLOT_RECOVERY,
+            (&key[0]) as u64)
+    }
+    if rc != vlayout.VC_OK {
+        vlayout.wipe((&key[0]) as u64, 32)
+        rt.buf_free(&img)
+        return map_rc(rc)
+    }
+    let src: i32 = container.file_save(vault_path(dir), &img)
+    if src != vlayout.VC_OK {
+        vlayout.wipe((&key[0]) as u64, 32)
+        rt.buf_free(&img)
+        return map_rc(src)
+    }
+    recovery.encode((&key[0]) as u64, text_out)
+    vlayout.wipe((&key[0]) as u64, 32)
+    rt.buf_free(&(*s).img)
+    (*s).img = img
+    vdlock.set_rev((&(*s).state[0]) as u64, image_revision(&(*s).img))
+    save_state(s, dir)
+    return R_OK
+}
+
+fn change_password(s: *mut Session, root: str, user: str, old_pw: u64, old_n: usize,
+    new_pw: u64, new_n: usize, k: *mut Kdf) -> i32 {
+    if (*s).open == 0 {
+        return R_LOCKED
+    }
+    if new_n < vlayout.MIN_PASSWORD_LEN {
+        return R_SHORT
+    }
+    let dir: str = user_dir(root, user)
+    var probe: rt.Buf = rt.buf_new()
+    let prc: i32 = container.open_pw(rt.buf_ptr(&(*s).img), rt.buf_len(&(*s).img),
+        vlayout.SLOT_PW, old_pw, old_n, &probe, 0)
+    wipe_buf(&probe)
+    if prc != vlayout.VC_OK {
+        return map_rc(prc)
+    }
+    var img: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&img, rt.buf_ptr(&(*s).img), rt.buf_len(&(*s).img))
+    let rc: i32 = container.slot_replace_pw(&img, (&(*s).vk[0]) as u64, vlayout.SLOT_PW,
+        new_pw, new_n, (*k).kib, (*k).passes, (*k).lanes)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&img)
+        return map_rc(rc)
+    }
+    let src: i32 = container.file_save(vault_path(dir), &img)
+    if src != vlayout.VC_OK {
+        rt.buf_free(&img)
+        return map_rc(src)
+    }
+    rt.buf_free(&(*s).img)
+    (*s).img = img
+    vdlock.set_rev((&(*s).state[0]) as u64, image_revision(&(*s).img))
+    save_state(s, dir)
+    return R_OK
+}
