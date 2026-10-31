@@ -1,0 +1,450 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import serial
+import ui.wm.wmbase
+import ui.wm.wmcpath
+import ui.wm.wmdamage
+import ui.wm.wmgate
+import ui.wm.wminput
+import ui.wm.wmlayout
+import ui.wm.wmtabctl
+import ui.wm.wmtabs
+import ui.wm.wmterm
+
+const CP_EV_KEY: u64 = 3
+
+fn tcur_dmg(state: u64, i: u64, c: u64, r: u64) {
+    let cw: u64 = wmlayout.wg(state, i, wmlayout.W_CELLW)
+    let ch: u64 = wmlayout.wg(state, i, wmlayout.W_CELLH)
+    let _d: u64 = wmcpath.damage_rect(state, i, c * cw, r * ch, cw, ch)
+}
+
+fn tcur_off(state: u64, i: u64) {
+    if i >= 32 || wmterm.tc_on[(i) as usize] == 0 {
+        return
+    }
+    wmterm.tc_on[(i) as usize] = 0
+    wmterm.cell_paint(state, i, wmterm.tc_cc[(i) as usize], wmterm.tc_cr[(i) as usize])
+    tcur_dmg(state, i, wmterm.tc_cc[(i) as usize], wmterm.tc_cr[(i) as usize])
+}
+
+fn tcur_sync(state: u64, i: u64) {
+    if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return
+    }
+    let want: bool = wmterm.tcur_want(state, i)
+    let cx: u64 = wmlayout.wg(state, i, wmlayout.W_CX)
+    let cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
+    if wmterm.tc_on[(i) as usize] != 0 && (!want || wmterm.tc_cc[(i) as usize] != cx || wmterm.tc_cr[(i) as usize] != cy) {
+        tcur_off(state, i)
+    }
+    if want && wmterm.tc_on[(i) as usize] == 0 {
+        wmterm.tc_on[(i) as usize] = 1
+        wmterm.tc_cc[(i) as usize] = cx
+        wmterm.tc_cr[(i) as usize] = cy
+        wmterm.cell_paint(state, i, cx, cy)
+        tcur_dmg(state, i, cx, cy)
+    }
+}
+
+fn tcur_tick(state: u64) {
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if now < wmterm.tc_next[0] {
+        return
+    }
+    wmterm.tc_next[0] = now + wmterm.BLINK_TICKS
+    if wmterm.tc_phase[0] == 0 {
+        wmterm.tc_phase[0] = 1
+    } else {
+        wmterm.tc_phase[0] = 0
+    }
+    wmterm.tc_toggles[0] = wmterm.tc_toggles[0] + 1
+    var i: u64 = 0
+    while i < 32 && i < wmbase.MAX_WIN {
+        tcur_sync(state, i)
+        i = i + 1
+    }
+}
+
+fn term_paste_done(state: u64) {
+    if !wmbase.ready(state) {
+        return
+    }
+    wminput.input_seen(state)
+    wminput.cp_event(state, CP_EV_KEY, 0, 0, 0, 0, 0)
+    let f: u64 = wmbase.focus(state)
+    if f < wmbase.MAX_WIN && wmbase.valid(state, f) && wmlayout.wg(state, f, wmlayout.W_KIND) == wmlayout.K_TERM {
+        wmdamage.damage_win(state, f)
+    }
+    wmterm.tc_kicks[0] = wmterm.tc_kicks[0] + 1
+    var s_k: [u8; 17] = "wm: tpaste kick=\0"
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(wmterm.tc_kicks[0])
+    serial.nl()
+}
+
+fn term_key(state: u64, c: u64, shift: bool) -> bool {
+    if !wmbase.ready(state) {
+        return false
+    }
+    if shift && (c == 70 || c == 102) && !wmgate.lock_active(state) {
+        wmterm.mon_hotkey(state)
+        return true
+    }
+    let f: u64 = wmbase.focus(state)
+    if f >= wmbase.MAX_WIN || f >= 32 || wmlayout.wg(state, f, wmlayout.W_KIND) != wmlayout.K_TERM || !wmgate.input_allowed(state, f) {
+
+        if shift && (c == 84 || c == 116) && !wmgate.lock_active(state) {
+            wmtabs.tt_request_free(state)
+            return true
+        }
+        return false
+    }
+    let is_c: bool = c == 67 || c == 99
+    let is_v: bool = c == 86 || c == 118
+
+    if c == 9 {
+        if wmtabs.tt_grouped(state, f) {
+            wmtabctl.tt_step(state, f, !shift)
+            return true
+        }
+        return false
+    }
+    if shift && (c == 84 || c == 116) {
+        wmtabs.tt_request(state, f)
+        return true
+    }
+    if shift && (c == 87 || c == 119) {
+        wmtabctl.tt_close_tab(state, f)
+        return true
+    }
+    if shift {
+        if is_c {
+            if wmterm.tsel_shown(f) {
+                wmterm.tsel_copy(state, f)
+            }
+            return true
+        }
+        if is_v {
+            wmterm.tpaste_ask(state, f)
+            return true
+        }
+        return false
+    }
+    if is_c && wmterm.tsel_shown(f) {
+        wmterm.tsel_copy(state, f)
+        wmterm.tsel_clear(state, f)
+        return true
+    }
+    return false
+}
+
+fn term_full_reset(state: u64, i: u64) {
+    tcur_off(state, i)
+    wmterm.tc_hide[(i) as usize] = 0
+    wmterm.term_blank_screen(state, i)
+    wmterm.tp_reset(i)
+    wmlayout.wsv(state, i, wmlayout.W_CX, 0)
+    wmlayout.wsv(state, i, wmlayout.W_CY, 0)
+}
+
+fn term_esc_take(state: u64, i: u64, ch: u64) -> bool {
+    if i >= 32 {
+        return false
+    }
+    let st: u64 = wmterm.tp_esc[(i) as usize]
+    if st == 0 {
+        if ch == 27 {
+            wmterm.tp_esc[(i) as usize] = 1
+            return true
+        }
+        return false
+    }
+    if st == 3 {
+
+        if ch == 7 {
+            wmterm.tp_esc[(i) as usize] = 0
+        } else if ch == 27 {
+            wmterm.tp_esc[(i) as usize] = 5
+        }
+        return true
+    }
+    if st == 5 {
+        wmterm.tp_esc[(i) as usize] = 0
+        return true
+    }
+    if st == 4 {
+        wmterm.tp_esc[(i) as usize] = 0
+        return true
+    }
+    if st == 1 {
+        wmterm.tp_esc[(i) as usize] = 0
+        if ch == 91 {
+            wmterm.tp_esc[(i) as usize] = 2
+            wmterm.tp_np[(i) as usize] = 0
+            wmterm.tp_priv[(i) as usize] = 0
+            var k: u64 = 0
+            while k < wmterm.TP_NP {
+                wmterm.tp_par[(i * wmterm.TP_NP + k) as usize] = 0
+                wmterm.tp_has[(i * wmterm.TP_NP + k) as usize] = 0
+                k = k + 1
+            }
+            return true
+        }
+        if ch == 93 || ch == 80 || ch == 94 || ch == 95 || ch == 88 {
+
+            wmterm.tp_esc[(i) as usize] = 3
+            return true
+        }
+        if ch == 40 || ch == 41 || ch == 42 || ch == 43 || ch == 35 || ch == 37 {
+
+            wmterm.tp_esc[(i) as usize] = 4
+            return true
+        }
+        if ch == 99 {
+            term_full_reset(state, i)
+            return true
+        }
+        if ch == 55 {
+            wmterm.term_save_cursor(state, i)
+            return true
+        }
+        if ch == 56 {
+            wmterm.term_restore_cursor(state, i)
+            return true
+        }
+        if ch == 68 {
+            wmterm.term_lf(state, i)
+            return true
+        }
+        if ch == 69 {
+            wmlayout.wsv(state, i, wmlayout.W_CX, 0)
+            wmterm.tp_wrap[(i) as usize] = 0
+            wmterm.term_lf(state, i)
+            return true
+        }
+        if ch == 77 {
+            wmterm.term_ri(state, i)
+            return true
+        }
+        if ch == 27 {
+            wmterm.tp_esc[(i) as usize] = 1
+            return true
+        }
+        if ch >= 48 && ch <= 126 {
+
+            return true
+        }
+        if ch < 32 {
+
+            return false
+        }
+        return true
+    }
+
+    if ch >= 48 && ch <= 57 {
+        let np: u64 = wmterm.tp_np[(i) as usize]
+        if np < wmterm.TP_NP {
+            let at: u64 = i * wmterm.TP_NP + np
+            wmterm.tp_par[(at) as usize] = wmterm.tp_par[(at) as usize] * 10 + (ch - 48)
+            if wmterm.tp_par[(at) as usize] > 9999 {
+                wmterm.tp_par[(at) as usize] = 9999
+            }
+            wmterm.tp_has[(at) as usize] = 1
+        }
+        return true
+    }
+    if ch == 59 || ch == 58 {
+
+        if wmterm.tp_np[(i) as usize] + 1 < wmterm.TP_NP {
+            wmterm.tp_np[(i) as usize] = wmterm.tp_np[(i) as usize] + 1
+        }
+        return true
+    }
+    if ch == 63 {
+        wmterm.tp_priv[(i) as usize] = 1
+        return true
+    }
+    if ch == 60 || ch == 61 || ch == 62 {
+        wmterm.tp_priv[(i) as usize] = 2
+        return true
+    }
+    if ch >= 64 && ch <= 126 {
+
+        let np2: u64 = wmterm.tp_np[(i) as usize]
+        if wmterm.tp_has[(i * wmterm.TP_NP + np2) as usize] != 0 || np2 > 0 {
+            wmterm.tp_np[(i) as usize] = np2 + 1
+        }
+        wmterm.tp_esc[(i) as usize] = 0
+        wmterm.term_csi(state, i, ch)
+        return true
+    }
+    if ch == 27 {
+        wmterm.tp_esc[(i) as usize] = 1
+        return true
+    }
+    if ch == 24 || ch == 26 {
+
+        wmterm.tp_esc[(i) as usize] = 0
+        return true
+    }
+    if ch < 32 {
+
+        return false
+    }
+
+    return true
+}
+
+fn term_putc(state: u64, i: u64, ch: u64) {
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    if cols == 0 || rows == 0 || i >= 32 {
+        return
+    }
+    if ch < 256 && term_esc_take(state, i, ch) {
+        return
+    }
+
+    if ch < 32 {
+        wmterm.tp_utf[(i) as usize] = 0
+    }
+    var cx: u64 = wmlayout.wg(state, i, wmlayout.W_CX)
+    var cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
+    if ch == 13 {
+        wmlayout.wsv(state, i, wmlayout.W_CX, 0)
+        wmterm.tp_wrap[(i) as usize] = 0
+        return
+    }
+    if ch == 10 {
+        wmlayout.wsv(state, i, wmlayout.W_CX, 0)
+        wmterm.tp_wrap[(i) as usize] = 0
+        wmterm.term_lf(state, i)
+        return
+    }
+    if ch == 8 {
+        wmterm.tp_wrap[(i) as usize] = 0
+        if cx > 0 {
+            cx = cx - 1
+            wmlayout.wsv(state, i, wmlayout.W_CX, cx)
+            wmterm.cell_set(state, i, cx, cy, 32)
+            wmterm.cell_attr_set(state, i, cx, cy, 0)
+            wmterm.cell_col_set(state, i, cx, cy, 0)
+            wmterm.cell_paint(state, i, cx, cy)
+        }
+        return
+    }
+
+    if ch == 0x108 {
+        wmterm.tp_wrap[(i) as usize] = 0
+        if cx > 0 {
+            cx = cx - 1
+        } else if cy > 0 {
+            cy = cy - 1
+            cx = cols - 1
+        } else {
+            return
+        }
+        wmlayout.wsv(state, i, wmlayout.W_CX, cx)
+        wmlayout.wsv(state, i, wmlayout.W_CY, cy)
+        wmterm.cell_set(state, i, cx, cy, 32)
+        wmterm.cell_attr_set(state, i, cx, cy, 0)
+        wmterm.cell_col_set(state, i, cx, cy, 0)
+        wmterm.cell_paint(state, i, cx, cy)
+        return
+    }
+    if ch == 9 {
+        var n: u64 = 8 - (cx & 7)
+        while n > 0 {
+            term_putc(state, i, 32)
+            n = n - 1
+        }
+        return
+    }
+
+    var z: u64 = ch
+    if wmterm.tp_utf[(i) as usize] != 0 {
+        let lead: u64 = wmterm.tp_utf[(i) as usize]
+        wmterm.tp_utf[(i) as usize] = 0
+        if ch < 128 || ch > 191 {
+
+            z = ch
+        } else {
+            z = (lead - 192) * 64 + (ch - 128)
+            if z > 255 {
+                z = 63
+            }
+        }
+    } else if ch >= 194 && ch <= 223 {
+        wmterm.tp_utf[(i) as usize] = ch
+        return
+    } else if ch >= 224 && ch <= 244 {
+
+        z = 63
+    } else if ch > 127 {
+        return
+    }
+
+    if z < 32 || (z > 126 && z < 160) {
+        return
+    }
+
+    if wmterm.tp_wrap[(i) as usize] != 0 {
+        wmterm.tp_wrap[(i) as usize] = 0
+        wmlayout.wsv(state, i, wmlayout.W_CX, 0)
+        wmterm.term_lf(state, i)
+        cx = 0
+        cy = wmlayout.wg(state, i, wmlayout.W_CY)
+    }
+    wmterm.cell_set(state, i, cx, cy, z)
+    wmterm.cell_attr_set(state, i, cx, cy, wmterm.tp_attr[(i) as usize])
+    wmterm.cell_col_set(state, i, cx, cy, wmterm.tp_col[(i) as usize])
+    wmterm.cell_paint(state, i, cx, cy)
+    if cx + 1 >= cols {
+        if wmterm.tp_nowrap[(i) as usize] == 0 {
+            wmterm.tp_wrap[(i) as usize] = 1
+        }
+        wmlayout.wsv(state, i, wmlayout.W_CX, cols - 1)
+    } else {
+        wmlayout.wsv(state, i, wmlayout.W_CX, cx + 1)
+    }
+}
+
+fn term_write(state: u64, i: u64, p: u64, n: u64) -> u64 {
+    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return 0
+    }
+    wmterm.sb_snap(state, i)
+    wmterm.tsel_clear(state, i)
+    tcur_off(state, i)
+    var k: u64 = 0
+    while k < n {
+        term_putc(state, i, kstate.get8(p + k))
+        k = k + 1
+    }
+    wmterm.tcur_solid(state)
+    tcur_sync(state, i)
+    wmdamage.damage_win(state, i)
+    return n
+}
+
+fn term_out(state: u64, i: u64, c: u64) {
+    wmlayout.ss(state, wmlayout.S_TOUT, wmlayout.gs(state, wmlayout.S_TOUT) + 1)
+    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return
+    }
+    wmlayout.ss(state, wmlayout.S_TPUT, wmlayout.gs(state, wmlayout.S_TPUT) + 1)
+    wmterm.sb_snap(state, i)
+    wmterm.tsel_clear(state, i)
+    tcur_off(state, i)
+    term_putc(state, i, c)
+    wmterm.tcur_solid(state)
+    tcur_sync(state, i)
+    if wmterm.term_hold_n != 0 {
+        wmterm.term_hold_mask = wmterm.term_hold_mask | (1 << i)
+        return
+    }
+    wmdamage.damage_win(state, i)
+}
