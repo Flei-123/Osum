@@ -14,10 +14,10 @@
 #     is the switch and not a broken program
 #   - bad arguments -> usage, rc 2
 # Part B, audit machine with a display: /etc/welcome.conf (show=ja) in the image,
-# the desktop starts `/bin/welcome -a` by itself:
-#   - "welcome: ready", the window has a check box and two buttons (3 rects)
-#   (the GUI toggle is NOT measured yet -- see the note near the end)
-# Part C: window sizes 300x200 / 520x330 (+ old layout as counter-proof), overlap measured by the program.
+# the desktop starts `/bin/welcome -a` by itself: wizard page 0 (language) with its rects.
+# Part C: every page opened by the conf key p= (0 language, 1 Wi-Fi with f=1 fake networks, 2 done) reports its
+# page number and its controls; small window sizes keep the navigation inside the window.
+# Part D: clicks walk the wizard (next, next, row opens Settings, finish).
 # Static: the string keys exist in de + en, the bundle is in the stick list.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -34,8 +34,12 @@ TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 # ---- static
 for l in de en; do
-    n=$(grep -c '^welcome\.\(title\|head\|t1\|t2\|t3\|show\|sett\|close\) = ' locale/$l/messages)
-    [ "$n" = 8 ] && ok "locale $l: 8 welcome.* keys" || bad "locale $l: $n of 8 welcome.* keys"
+    miss=0
+    for k in title show sett back next done lang.head lang.note lang.search lang.open net.head net.note net.noadapter net.empty net.open net.secured net.saved net.pw net.connect net.fail net.short net.retry done.head done.note step.upd step.disp; do
+        n=$(grep -c "^welcome\.$k = " locale/$l/messages)
+        [ "$n" = 1 ] || { miss=$((miss+1)); echo "    key welcome.$k: $n entries in $l"; }
+    done
+    [ "$miss" = 0 ] && ok "locale $l: 27 wizard keys, each exactly once" || bad "locale $l: $miss wizard keys missing or duplicated"
 done
 grep -q 'privacy welcome[ "]' tools/usbimg/build.sh && ok "usbimg PROGS has welcome" || bad "usbimg PROGS"
 grep -q '/apps/welcome.osp/start' tools/usbimg/build.sh && ok "usbimg PFLICHT has the bundle" || bad "usbimg PFLICHT"
@@ -90,70 +94,68 @@ hasnot "$TMPD/AOFF.txt" "welcome: no surface" "-a with show=nein does not even t
 has "$TMPD/AOFF.txt" "rc=0" "-a with show=nein exits with 0"
 has "$TMPD/AON.txt" "welcome: no surface" "COUNTER-PROBE: -a with show=ja tries to open the window"
 has "$TMPD/USE.txt" "usage: welcome" "bad argument: usage text"
-# ---- part B
-W=$(mktemp -d); trap 'rm -rf "$TMPD" "$W" "$W-build" "$W-drehbuch.txt" "$W.log" "$W-welcome.conf"' EXIT
-printf 'show=ja\n' > "$W-welcome.conf"
-export DESIGNBUILD="$W-build"
-export AUDIT_MKFS_EXTRA="/etc/ /etc/welcome.conf=$W-welcome.conf"
-{
-  echo "warte 14"
-  echo "foto 00-welcome"
-} > "$W-drehbuch.txt"
-bash tools/design/audit.sh "$W" accel=kvm uitrace=yes halt=300 \
-    progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme welcome" \
-    drehbuch="$W-drehbuch.txt" > "$W.log" 2>&1
-S="$W/serial.txt"
-has "$S" "welcome: ready" "audit machine: the desktop started the welcome window by itself"
-n=$(grep -ac '^welcome: rect ' "$S" 2>/dev/null; true)
-[ "$n" = 7 ] && ok "window has 7 touchable controls (4 step buttons + check box + 2 buttons)" || bad "controls reported: $n"
-# NOT CHECKED (open, r849 note): toggling the check box by key/click in the GUI. A bare `space` does not
-# reach the box (focus is not on it); the switch itself is covered by part A (`welcome show on|off`).
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
-[ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
-# ---- part C (16.10.2026, boss: "small window: the text overlaps"): the layout at 3 window sizes, measured by the program itself.
-# `welcome: layout win=<height> bottom=<end of the button bar> tier=<paragraphs dropped> overlap=<neighbouring boxes that overlap>`.
-# /etc/welcome.conf keys of the gate: w=/h= window size, l=1 the OLD layout (fixed one-line paragraph height, squeezing) = counter-proof.
-run_size() { # tag w h legacy -> prints the last layout line
-    local V="$W-$1"
-    printf 'show=ja\nw=%s\nh=%s\nl=%s\n' "$2" "$3" "$4" > "$V.conf"
-    printf 'warte 18\nfoto 00\n' > "$V.book"
+# ---- audit machine helper: run_audit <tag> <conf text> <book text> -> $W/<tag>/serial.txt
+W=$(mktemp -d); trap 'rm -rf "$TMPD" "$W"' EXIT
+run_audit() {
+    local V="$W/$1"
+    printf "$2" > "$V.conf"
+    printf "$3" > "$V.book"
     DESIGNBUILD="$V-build" AUDIT_MKFS_EXTRA="/etc/ /etc/welcome.conf=$V.conf" \
         bash tools/design/audit.sh "$V" accel=kvm uitrace=yes halt=300 \
         progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme welcome" drehbuch="$V.book" > "$V.log" 2>&1
-    grep -a '^welcome: layout' "$V/serial.txt" | tail -1
-    rm -rf "$V" "$V-build" "$V.conf" "$V.book" "$V.log"
 }
+rects_of() { grep -a '^welcome: rect ' "$1" | wc -l; }
 lay_num() { echo "$1" | sed -n "s/.* $2=\([0-9]*\).*/\1/p"; }
-L1=$(run_size small 300 200 0); L2=$(run_size normal 520 330 0); L3=$(run_size old 520 330 1)
-echo "  small : $L1"; echo "  normal: $L2"; echo "  old   : $L3"
-[ -n "$L1" ] && [ "$(lay_num "$L1" overlap)" = 0 ] && ok "300x200: no box overlaps another" || bad "300x200: overlap ($L1)"
-[ -n "$L1" ] && [ "$(lay_num "$L1" bottom)" -le "$(lay_num "$L1" win)" ] 2>/dev/null && ok "300x200: the button bar ends inside the window" || bad "300x200: bar outside ($L1)"
-[ -n "$L1" ] && [ "$(lay_num "$L1" tier)" -ge 1 ] 2>/dev/null && ok "300x200: paragraphs are dropped instead of squeezed" || bad "300x200: nothing dropped ($L1)"
-[ -n "$L2" ] && [ "$(lay_num "$L2" overlap)" = 0 ] && [ "$(lay_num "$L2" tier)" = 0 ] && ok "520x330: all three paragraphs, no overlap" || bad "520x330 ($L2)"
-[ -n "$L2" ] && [ "$(lay_num "$L2" bottom)" -le "$(lay_num "$L2" win)" ] 2>/dev/null && ok "520x330: the button bar ends inside the window" || bad "520x330: bar outside ($L2)"
-[ -n "$L3" ] && [ "$(lay_num "$L3" overlap)" -ge 1 ] 2>/dev/null && ok "COUNTER-PROOF: the old layout (l=1) overlaps at 520x330" || bad "counter-proof: old layout did not overlap ($L3)"
-L4=$(run_size steps 520 480 0)
-echo "  steps : $L4"
-[ -n "$L4" ] && [ "$(lay_num "$L4" overlap)" = 0 ] && ok "520x480: step rows and paragraphs do not overlap" || bad "520x480: overlap ($L4)"
-[ -n "$L4" ] && [ "$(lay_num "$L4" bottom)" -le "$(lay_num "$L4" win)" ] 2>/dev/null && ok "520x480: the button bar ends inside the window" || bad "520x480: bar outside ($L4)"
-# ---- part D: the step buttons open Settings on the right page (click measured from the reported rects)
-D="$W-steps"
-printf 'show=ja\n' > "$D.conf"
-{
-  echo "warteauf 'welcome: ready' || 240"
-  echo "warte 3"
-  echo "klickauf wlnth2x1"
-  echo "warteauf 'settings: ready' || 120"
-  echo "warte 2"
-  echo "foto 01-after-click"
-} > "$D.book"
-DESIGNBUILD="$D-build" AUDIT_MKFS_EXTRA="/etc/ /etc/welcome.conf=$D.conf" \
-    bash tools/design/audit.sh "$D" accel=kvm uitrace=yes halt=300 \
-    progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme welcome" drehbuch="$D.book" > "$D.log" 2>&1
-has "$D/serial.txt" "welcome: step 1 page=3" "network step button reported its page"
-has "$D/serial.txt" "settings: ready" "Settings window opened after the click"
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$D/serial.txt" 2>/dev/null; true)
-[ "$c" = 0 ] && ok "no crash after the click" || bad "crash lines after click: $c"
-mkdir -p /tmp/welcome-last; cp "$D/01-after-click.ppm" /tmp/welcome-last/ 2>/dev/null; rm -rf "$D" "$D-build" "$D.conf" "$D.book" "$D.log"
+# ---- part B: the desktop starts the wizard by itself (page 0, language)
+run_audit auto 'show=ja\n' 'warteauf "welcome: ready" || 240\nwarte 3\nfoto 00-lang\n'
+S="$W/auto/serial.txt"
+has "$S" "welcome: ready" "audit machine: the desktop started the welcome wizard by itself"
+has "$S" "welcome: page 0 of 3" "wizard opens on page 0"
+n=$(rects_of "$S")
+[ "$n" -ge 4 ] && ok "page 0 reports $n controls (field, chevron, dots, next)" || bad "page 0 controls: $n"
+c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+[ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
+# ---- part C: each page opens directly (conf p=) and fits small windows
+page_check() { # tag page extra-conf w h expected-min-rects
+    run_audit "$1" "show=ja\np=$2\n$3w=$4\nh=$5\n" 'warteauf "welcome: ready" || 240\nwarte 3\nfoto 00\n'
+    local SS="$W/$1/serial.txt"
+    has "$SS" "welcome: page $2 of 3" "page $2 at $4x$5 opens"
+    has "$SS" "welcome: geom x=160 y=120 w=$4 h=$5" "page $2 at $4x$5 has the asked size"
+    local r; r=$(rects_of "$SS")
+    [ "$r" -ge "$6" ] && ok "page $2 at $4x$5: $r controls (>= $6)" || bad "page $2 at $4x$5: $r controls (< $6)"
+    local bottom; bottom=$(grep -a '^welcome: rect ' "$SS" | sed -n 's/.* y=\([0-9]*\) w=[0-9]* h=\([0-9]*\)$/\1 \2/p' | awk '{b=$1+$2; if(b>m)m=b} END{print m+0}')
+    [ "$bottom" -le "$5" ] 2>/dev/null && ok "page $2 at $4x$5: all controls end inside the window ($bottom <= $5)" || bad "page $2 at $4x$5: controls end at $bottom > $5"
+    local cc; cc=$(grep -acE 'ABSTURZ|EXCEPTION' "$SS" 2>/dev/null; true)
+    [ "$cc" = 0 ] && ok "page $2 at $4x$5: no crash" || bad "page $2 at $4x$5: crash lines $cc"
+}
+page_check pg0 0 '' 520 420 4
+page_check pg1 1 'f=1\ns=1\n' 520 420 6
+page_check pg2 2 '' 520 420 4
+page_check pg1s 1 'f=1\n' 360 360 5
+# ---- part D: the clicks walk the wizard
+run_audit walk 'show=ja\nf=1\ns=1\n' 'warteauf "welcome: ready" || 240
+warte 3
+klickauf wlnth2x0
+warte 2
+klickauf wlnth7x1
+warteauf "welcome: page 1 of 3" || 60
+warte 2
+foto 01-net
+klickauf wlnth7x2
+warteauf "welcome: page 2 of 3" || 60
+warte 2
+foto 02-done
+klickauf wlnth6x0
+warteauf "settings: ready" || 120
+warte 2
+foto 03-settings
+'
+S="$W/walk/serial.txt"
+has "$S" "welcome: page 1 of 3" "click next: Wi-Fi page"
+has "$S" "welcome: page 2 of 3" "click next: done page"
+has "$S" "settings: ready" "click on a done row opens Settings"
+c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+[ "$c" = 0 ] && ok "no crash after the clicks" || bad "crash lines after the clicks: $c"
+mkdir -p /tmp/welcome-last; cp "$W/walk/"0?-*.ppm /tmp/welcome-last/ 2>/dev/null
 echo "WELCOME: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

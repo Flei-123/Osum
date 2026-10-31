@@ -1,381 +1,79 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/welcome.fi -- E3 (Mint round): THE WELCOME WINDOW (/bin/welcome).
-//
-//   welcome            the window (fUi): three hints, a check box "show at start",
-//                      buttons "Open settings" and "Close"
-//   welcome -a         autostart mode: exit at once (no window) unless
-//                      /etc/welcome.conf says show=ja
-//   welcome status     print "welcome: show=ja|nein" (what the file says)
-//   welcome show on|off  write the switch (same as the check box)
-//
-// THE SWITCH lives in /etc/welcome.conf as one line `show=ja` or `show=nein`.
-// A MISSING FILE MEANS NO: only the installer (kernel/user/instaccount.fi) writes
-// `show=ja`, so a new installed system greets its owner once and every test image
-// and live stick starts without an extra window in the way of the clicks. The
-// desktop starts `/bin/welcome -a` after the autostart list (kernel/user/desktop.fi).
-//
-// NOTHING IS SENT ANYWHERE and the text says so (see /bin/privacy).
-
 profile app
 
 import ulib
 import fuiscene
 import msg
+import welcome_conf
+import welcome_pages
 
 export { u_start }
 
-const K_SHOW: u64 = 1
-const K_SET: u64 = 2
-const K_CLOSE: u64 = 3
-
-static mut P_CONF: [u8; 18] = "/etc/welcome.conf\0"
-static mut P_SET: [u8; 14] = "/bin/settings\0"
-static mut A_SET: [u8; 9] = "settings\0"
-
-static mut k_title: [u8; 14] = "welcome.title\0"
-static mut k_head: [u8; 13] = "welcome.head\0"
-static mut k_t1: [u8; 11] = "welcome.t1\0"
-static mut k_t2: [u8; 11] = "welcome.t2\0"
-static mut k_t3: [u8; 11] = "welcome.t3\0"
-static mut k_show: [u8; 13] = "welcome.show\0"
-static mut k_set: [u8; 13] = "welcome.sett\0"
-static mut k_close: [u8; 14] = "welcome.close\0"
-static mut k_open: [u8; 13] = "welcome.open\0"
-static mut k_st_lang: [u8; 18] = "welcome.step.lang\0"
-static mut k_st_net: [u8; 17] = "welcome.step.net\0"
-static mut k_st_upd: [u8; 17] = "welcome.step.upd\0"
-static mut k_st_disp: [u8; 18] = "welcome.step.disp\0"
-static mut k_v_de: [u8; 13] = "welcome.v.de\0"
-static mut k_v_en: [u8; 13] = "welcome.v.en\0"
-static mut k_n_ok: [u8; 15] = "welcome.net.ok\0"
-static mut k_n_none: [u8; 17] = "welcome.net.none\0"
-static mut k_n_noip: [u8; 17] = "welcome.net.noip\0"
-static mut k_n_nogw: [u8; 17] = "welcome.net.nogw\0"
-static mut k_u_hint: [u8; 17] = "welcome.upd.hint\0"
-static mut k_d_hint: [u8; 18] = "welcome.disp.hint\0"
-
-const K_STEP: u64 = 10
-const STEPS: u64 = 4
-const STEP_BUF: u64 = 128
-const PAGE_DISPLAY: u64 = 1
-const PAGE_NETWORK: u64 = 3
-const PAGE_LANGUAGE: u64 = 6
-const PAGE_UPDATE: u64 = 14
-const SYS_NETGET: u64 = 1300
-const NG_STATE: u64 = 8
-const STEPS_MIN_HEIGHT: u64 = 400
-static mut st_text: [u8; 512] = [0 as u8; 512]
-static mut st_page: [u64; 4] = [0 as u64; 4]
-static mut st_arg: [u8; 24] = [0 as u8; 24]
-static mut shown_net: u64 = 0
-static mut shown_lang: u64 = 0
+const WIN_X: u64 = 160
+const WIN_Y: u64 = 120
+const WIN_W: u64 = 520
+const WIN_H: u64 = 420
+const MIN_W: u64 = 280
+const MIN_H: u64 = 240
 const POLL_TICKS: u64 = 300
 
-static mut show_now: bool = false
+static mut k_title: [u8; 14] = "welcome.title\0"
 
 fn say(p: u64) {
     ulib.say(p)
 }
 
-// does the file say show=ja?
-fn conf_on() -> bool {
-    var buf: [u8; 128] = [0 as u8; 128]
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_CONF[0 as usize]) as u64, 0, 0)
-    if ulib.bad(fd) {
-        return false
-    }
-    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[0 as usize]) as u64, 127)
-    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    if ulib.bad(n) || n < 7 {
-        return false
-    }
-    // "show=ja" at the start of a line
-    var i: u64 = 0
-    while i + 7 <= n {
-        let at_line: bool = i == 0 || buf[(i - 1) as usize] == 10 as u8
-        if at_line && buf[(i) as usize] == 115 as u8 && buf[(i + 1) as usize] == 104 as u8
-            && buf[(i + 2) as usize] == 111 as u8 && buf[(i + 3) as usize] == 119 as u8
-            && buf[(i + 4) as usize] == 61 as u8 && buf[(i + 5) as usize] == 106 as u8
-            && buf[(i + 6) as usize] == 97 as u8 {
-            return true
-        }
-        i = i + 1
-    }
-    return false
-}
-
-// A number after `key` (e.g. "w=") at the start of a line of /etc/welcome.conf; 0 when absent.
-// Test hook for the gate: it opens the window at a small size (the owner gets the default).
-fn conf_num(key0: u8, key1: u8) -> u64 {
-    var buf: [u8; 128] = [0 as u8; 128]
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_CONF[0 as usize]) as u64, 0, 0)
-    if ulib.bad(fd) {
-        return 0
-    }
-    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[0 as usize]) as u64, 127)
-    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    if ulib.bad(n) {
-        return 0
-    }
-    var i: u64 = 0
-    while i + 3 <= n {
-        let at_line: bool = i == 0 || buf[(i - 1) as usize] == 10 as u8
-        if at_line && buf[(i) as usize] == key0 && buf[(i + 1) as usize] == key1 {
-            var v: u64 = 0
-            var j: u64 = i + 2
-            while j < n && buf[(j) as usize] >= 48 as u8 && buf[(j) as usize] <= 57 as u8 {
-                v = v * 10 + (buf[(j) as usize] as u64 - 48)
-                j = j + 1
-            }
-            return v
-        }
-        i = i + 1
-    }
-    return 0
-}
-
-fn conf_write(on: bool) -> bool {
-    var yes: [u8; 9] = "show=ja\n\0"
-    var no: [u8; 11] = "show=nein\n\0"
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_CONF[0 as usize]) as u64, ulib.O_MAKE, 420)
-    if ulib.bad(fd) {
-        return false
-    }
-    var w: u64 = 0
+fn say_show(on: bool) {
+    var s_set: [u8; 16] = "welcome: show=\0\0"
+    var s_ja: [u8; 3] = "ja\0"
+    var s_nein: [u8; 5] = "nein\0"
+    say((&s_set[0 as usize]) as u64)
     if on {
-        w = ulib.sys(ulib.SYS_WRITE, fd, (&yes[0 as usize]) as u64, 8)
+        say((&s_ja[0 as usize]) as u64)
     } else {
-        w = ulib.sys(ulib.SYS_WRITE, fd, (&no[0 as usize]) as u64, 10)
+        say((&s_nein[0 as usize]) as u64)
     }
-    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    return !ulib.bad(w)
+    ulib.nl()
 }
 
-// Paragraphs dropped from the end (0 = all three shown). A small window shows fewer hints instead of squeezing
-// the lines of the paragraphs into each other; a bigger window brings them back (`resized`).
-static mut tier: u64 = 0
-static mut nd_head: usize = 0
-static mut nd_bar: usize = 0
-
-// The boxes of the root column in order (the overlap check of `say_layout` walks them).
-static mut col_nodes: [usize; 16] = [0 as usize; 16]
-static mut col_n: u64 = 0
-
-// Counter-proof switch of the gate (`l=1` in /etc/welcome.conf): the old layout (fixed one-line paragraph heights, squeezing).
-static mut legacy: bool = false
-
-fn keep(i: usize) -> usize {
-    if !legacy {
-        fuiscene.set_noshrink(i)
-    }
-    if col_n < 16 {
-        col_nodes[(col_n) as usize] = i
-        col_n = col_n + 1
-    }
-    return i
-}
-
-// A paragraph: label_wrap gives it a fixed height of ONE line (24); two or more lines then ran into the next
-// box. Height 0 = the height of its lines (it follows the width the column gives it).
-fn para(col: usize, key: u64) -> usize {
-    if legacy {
-        return keep(fuiscene.label_wrap(col, msg.get(key), 3))
-    }
-    let i: usize = fuiscene.label_wrap(col, msg.get(key), 12)
-    fuiscene.set_size(i, 0, 0)
-    return keep(i)
-}
-
-fn rb(p: u64, i: u64) -> u64 {
-    return __mmio_read8((p + i) as *mut u8) as u64
-}
-
-fn put(buf: u64, at: u64, src: u64) -> u64 {
-    var i: u64 = 0
-    var o: u64 = at
-    while rb(src, i) != 0 && o + 1 < STEP_BUF {
-        __mmio_write8((buf + o) as *mut u8, rb(src, i) as u8)
-        i = i + 1
-        o = o + 1
-    }
-    __mmio_write8((buf + o) as *mut u8, 0 as u8)
-    return o
-}
-
-fn net_key() -> u64 {
-    let st: u64 = ulib.sys(SYS_NETGET, NG_STATE, 0, 0)
-    if ulib.bad(st) || st == 0 {
-        return (&k_n_none[0 as usize]) as u64
-    }
-    if st == 1 {
-        return (&k_n_noip[0 as usize]) as u64
-    }
-    if st == 2 {
-        return (&k_n_nogw[0 as usize]) as u64
-    }
-    return (&k_n_ok[0 as usize]) as u64
-}
-
-fn lang_key() -> u64 {
-    if rb(msg.lang(), 0) == 100 {
-        return (&k_v_de[0 as usize]) as u64
-    }
-    return (&k_v_en[0 as usize]) as u64
-}
-
-fn step(col: usize, idx: u64, title_key: u64, value_key: u64, page: u64) {
-    let buf: u64 = (&st_text[0 as usize]) as u64 + idx * STEP_BUF
-    var at: u64 = put(buf, 0, msg.get(title_key))
-    var sep: [u8; 3] = ": \0"
-    at = put(buf, at, (&sep[0 as usize]) as u64)
-    at = put(buf, at, msg.get(value_key))
-    st_page[(idx) as usize] = page
-    let r: usize = keep(fuiscene.row(col))
-    fuiscene.set_gap(r, 8)
-    let l: usize = fuiscene.label(r, buf)
-    fuiscene.set_grow(l, 1)
-    let b: usize = fuiscene.button(r, msg.get((&k_open[0 as usize]) as u64), K_STEP + idx)
-    fuiscene.set_noshrink(b)
-    fuiscene.set_size(b, 110, 32)
-}
-
-fn status_changed() -> bool {
-    return net_key() != shown_net || lang_key() != shown_lang
-}
-
-fn build_steps(col: usize) {
-    shown_net = net_key()
-    shown_lang = lang_key()
-    step(col, 0, (&k_st_lang[0 as usize]) as u64, shown_lang, PAGE_LANGUAGE)
-    step(col, 1, (&k_st_net[0 as usize]) as u64, shown_net, PAGE_NETWORK)
-    step(col, 2, (&k_st_upd[0 as usize]) as u64, (&k_u_hint[0 as usize]) as u64, PAGE_UPDATE)
-    step(col, 3, (&k_st_disp[0 as usize]) as u64, (&k_d_hint[0 as usize]) as u64, PAGE_DISPLAY)
-}
-
-fn open_page(page: u64) {
-    var head: [u8; 6] = "page=\0"
-    var argv: [u64; 2] = [0 as u64; 2]
-    let a: u64 = (&st_arg[0 as usize]) as u64
-    var at: u64 = 0
-    while at < 5 {
-        __mmio_write8((a + at) as *mut u8, head[(at) as usize])
-        at = at + 1
-    }
-    if page >= 10 {
-        __mmio_write8((a + at) as *mut u8, (48 + page / 10) as u8)
-        at = at + 1
-    }
-    __mmio_write8((a + at) as *mut u8, (48 + page % 10) as u8)
-    __mmio_write8((a + at + 1) as *mut u8, 0 as u8)
-    argv[(0) as usize] = (&A_SET[0 as usize]) as u64
-    argv[(1) as usize] = a
-    let _p: u64 = ulib.sys(ulib.SYS_EXEC, (&P_SET[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2)
-}
-
-fn build() {
-    let col: usize = fuiscene.root()
-    col_n = 0
-    nd_head = keep(fuiscene.label(col, msg.get((&k_head[0 as usize]) as u64)))
-    if fuiscene.height() >= STEPS_MIN_HEIGHT {
-        build_steps(col)
-    }
-    if tier < 3 {
-        let _a: usize = para(col, (&k_t1[0 as usize]) as u64)
-    }
-    if tier < 2 {
-        let _b: usize = para(col, (&k_t2[0 as usize]) as u64)
-    }
-    if tier < 1 {
-        let _c: usize = para(col, (&k_t3[0 as usize]) as u64)
-    }
-    let _ck: usize = keep(fuiscene.check(col, msg.get((&k_show[0 as usize]) as u64), K_SHOW, show_now))
-    // narrow window: the two buttons stand on top of each other instead of running out of the window
-    var bar: usize = 0
-    if fuiscene.width() < 360 {
-        bar = fuiscene.column(col)
-    } else {
-        bar = fuiscene.row(col)
-    }
-    nd_bar = keep(bar)
-    fuiscene.set_gap(bar, 8)
-    let b1: usize = fuiscene.button_main(bar, msg.get((&k_set[0 as usize]) as u64), K_SET)
-    fuiscene.set_noshrink(b1)
-    fuiscene.set_size(b1, 180, 36)
-    let b2: usize = fuiscene.button(bar, msg.get((&k_close[0 as usize]) as u64), K_CLOSE)
-    fuiscene.set_noshrink(b2)
-    fuiscene.set_size(b2, 120, 36)
-}
-
-// The line `welcome: layout ...` (gate): window height, bottom of the button bar, hidden paragraphs, overlaps of
-// neighbouring boxes of the column (0 = none).
-fn say_layout() {
-    var s_l: [u8; 22] = "welcome: layout win=\0\0"
-    var s_b: [u8; 9] = " bottom=\0"
-    var s_t: [u8; 7] = " tier=\0"
-    var s_o: [u8; 10] = " overlap=\0"
-    var ov: u64 = 0
-    var k: u64 = 1
-    while k < col_n {
-        let p: usize = col_nodes[(k - 1) as usize]
-        let q: usize = col_nodes[(k) as usize]
-        if fuiscene.node_y(p) + fuiscene.node_h(p) > fuiscene.node_y(q) {
-            ov = ov + 1
-        }
-        k = k + 1
-    }
-    // a paragraph whose box is lower than its lines (16 px each at least): the text is painted over the next box
-    k = 0
-    while k < col_n {
-        let p2: usize = col_nodes[(k) as usize]
-        if fuiscene.node_lines(p2) * 16 > fuiscene.node_h(p2) {
-            ov = ov + 1
-        }
-        k = k + 1
-    }
-    say((&s_l[0 as usize]) as u64)
-    ulib.sayu(fuiscene.height())
-    say((&s_b[0 as usize]) as u64)
-    ulib.sayu(fuiscene.node_y(nd_bar) + fuiscene.node_h(nd_bar))
-    say((&s_t[0 as usize]) as u64)
-    ulib.sayu(tier)
-    say((&s_o[0 as usize]) as u64)
-    ulib.sayu(ov)
+fn say_geom(w: u64, h: u64) {
+    var s_geo: [u8; 23] = "welcome: geom x=160 y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    say((&s_geo[0 as usize]) as u64)
+    ulib.sayu(WIN_Y)
+    say((&s_w[0 as usize]) as u64)
+    ulib.sayu(w)
+    say((&s_h[0 as usize]) as u64)
+    ulib.sayu(h)
     ulib.nl()
 }
 
 fn u_gui() -> u64 {
     var s_bad: [u8; 23] = "welcome: no surface\0\0\0\0"
     var s_go: [u8; 15] = "welcome: ready\0"
-    var s_set: [u8; 16] = "welcome: show=\0\0"
-    var s_ja: [u8; 3] = "ja\0"
-    var s_nein: [u8; 5] = "nein\0"
     var s_nm: [u8; 8] = "welcome\0"
+    var s_app: [u8; 8] = "welcome\0"
     let _mi: u64 = msg.init()
-    show_now = conf_on()
-    legacy = conf_num(108 as u8, 61 as u8) == 1
-    var ww: u64 = conf_num(119 as u8, 61 as u8)
-    var wh: u64 = conf_num(104 as u8, 61 as u8)
-    if ww < 120 {
-        ww = 520
+    var ww: u64 = welcome_conf.conf_num(119 as u8, 61 as u8)
+    var wh: u64 = welcome_conf.conf_num(104 as u8, 61 as u8)
+    if ww < MIN_W {
+        ww = WIN_W
     }
-    if wh < 80 {
-        wh = 480
+    if wh < MIN_H {
+        wh = WIN_H
     }
-    if !fuiscene.open(160, 120, ww, wh, msg.get((&k_title[0 as usize]) as u64), build) {
+    welcome_pages.init()
+    welcome_pages.set_page(welcome_conf.conf_num(112 as u8, 61 as u8))
+    if !fuiscene.open(WIN_X, WIN_Y, ww, wh, msg.get((&k_title[0 as usize]) as u64), welcome_pages.build) {
         say((&s_bad[0 as usize]) as u64)
         ulib.nl()
         return 1
     }
-    // The window tells the taskbar which bundle it belongs to (WM_APP); without it the button has no icon.
-    var win_app_name: [u8; 8] = "welcome\0"
-    fuiscene.set_app((&win_app_name[0 as usize]) as u64)
+    fuiscene.set_app((&s_app[0 as usize]) as u64)
     var first: bool = true
-    var seen_rs: u64 = fuiscene.resized()
-    var seen_tier: u64 = 99
-    var settle: u64 = 0
-    var poll_at: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
     var spin: u64 = 0
-    var s_live: [u8; 24] = "welcome: status refresh\0"
+    var poll_at: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
     while fuiscene.alive() {
         let key: u64 = fuiscene.pump()
         spin = spin + 1
@@ -383,70 +81,29 @@ fn u_gui() -> u64 {
             let now: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
             if now < poll_at || now - poll_at >= POLL_TICKS {
                 poll_at = now
-                if status_changed() {
-                    say((&s_live[0 as usize]) as u64)
-                    ulib.nl()
-                    fuiscene.refresh()
-                }
+                welcome_pages.tick()
             }
-        }
-        // the window got another size: try all the paragraphs again, drop from the end while the bar does not fit
-        if fuiscene.resized() != seen_rs {
-            seen_rs = fuiscene.resized()
-            tier = 0
-            settle = 0
-            fuiscene.refresh()
-        } else if !first && !legacy && fuiscene.node_y(nd_bar) + fuiscene.node_h(nd_bar) + 8 > fuiscene.height() && tier < 3 {
-            tier = tier + 1
-            fuiscene.refresh()
-        } else if !first && (tier != seen_tier) {
-            seen_tier = tier
-            say_layout()
         }
         if first {
             first = false
             fuiscene.say_rects((&s_nm[0 as usize]) as u64)
-            var s_geo: [u8; 23] = "welcome: geom x=160 y=\0"
-            var s_geo_w: [u8; 4] = " w=\0"
-            var s_geo_h: [u8; 4] = " h=\0"
-            say((&s_geo[0 as usize]) as u64)
-            ulib.sayu(120)
-            say((&s_geo_w[0 as usize]) as u64)
-            ulib.sayu(ww)
-            say((&s_geo_h[0 as usize]) as u64)
-            ulib.sayu(wh)
-            ulib.nl()
+            say_geom(ww, wh)
+            welcome_pages.say_page()
             say((&s_go[0 as usize]) as u64)
             ulib.nl()
         }
-        if key == K_SHOW {
-            let on: bool = fuiscene.value_of(K_SHOW) != 0
-            let _w: bool = conf_write(on)
-            show_now = on
-            say((&s_set[0 as usize]) as u64)
-            if on {
-                say((&s_ja[0 as usize]) as u64)
-            } else {
-                say((&s_nein[0 as usize]) as u64)
+        if key != 0 {
+            let ev: u64 = welcome_pages.on_key(key)
+            if ev == welcome_pages.EV_QUIT {
+                fuiscene.quit()
+            } else if ev == welcome_pages.EV_PAGE {
+                welcome_pages.say_page()
+                fuiscene.say_rects((&s_nm[0 as usize]) as u64)
+            } else if ev == welcome_pages.EV_VIEW {
+                fuiscene.say_rects((&s_nm[0 as usize]) as u64)
+            } else if ev == welcome_pages.EV_SHOW {
+                say_show(welcome_pages.show_on())
             }
-            ulib.nl()
-        } else if key == K_SET {
-            var argv: [u64; 1] = [0 as u64; 1]
-            argv[(0) as usize] = (&A_SET[0 as usize]) as u64
-            let _p: u64 = ulib.sys(ulib.SYS_EXEC, (&P_SET[0 as usize]) as u64, (&argv[0 as usize]) as u64, 1)
-            fuiscene.quit()
-        } else if key >= K_STEP && key < K_STEP + STEPS {
-            var s_step: [u8; 16] = "welcome: step \0\0"
-            var s_pg: [u8; 7] = " page=\0"
-            say((&s_step[0 as usize]) as u64)
-            ulib.sayu(key - K_STEP)
-            say((&s_pg[0 as usize]) as u64)
-            ulib.sayu(st_page[(key - K_STEP) as usize])
-            ulib.nl()
-            open_page(st_page[(key - K_STEP) as usize])
-            fuiscene.refresh()
-        } else if key == K_CLOSE {
-            fuiscene.quit()
         }
     }
     return 0
@@ -458,34 +115,25 @@ fn u_start(args: u64) -> u64 {
     var a_show: [u8; 5] = "show\0"
     var a_on: [u8; 3] = "on\0"
     var a_off: [u8; 4] = "off\0"
-    var s_st: [u8; 15] = "welcome: show=\0"
-    var s_ja: [u8; 3] = "ja\0"
-    var s_nein: [u8; 5] = "nein\0"
     var s_use: [u8; 44] = "usage: welcome [-a | status | show on|off]\0\0"
     var s_fail: [u8; 28] = "welcome: cannot write conf\0\0"
     let argc: u64 = ulib.arg_count(args)
     if argc >= 2 {
         let c: u64 = ulib.arg_at(args, 1)
         if ulib.streq(c, (&a_auto[0 as usize]) as u64) {
-            if !conf_on() {
+            if !welcome_conf.conf_on() {
                 return 0
             }
             return u_gui()
         }
         if ulib.streq(c, (&a_stat[0 as usize]) as u64) {
-            say((&s_st[0 as usize]) as u64)
-            if conf_on() {
-                say((&s_ja[0 as usize]) as u64)
-            } else {
-                say((&s_nein[0 as usize]) as u64)
-            }
-            ulib.nl()
+            say_show(welcome_conf.conf_on())
             return 0
         }
         if ulib.streq(c, (&a_show[0 as usize]) as u64) && argc >= 3 {
             let v: u64 = ulib.arg_at(args, 2)
             if ulib.streq(v, (&a_on[0 as usize]) as u64) || ulib.streq(v, (&a_off[0 as usize]) as u64) {
-                if !conf_write(ulib.streq(v, (&a_on[0 as usize]) as u64)) {
+                if !welcome_conf.conf_write(ulib.streq(v, (&a_on[0 as usize]) as u64)) {
                     say((&s_fail[0 as usize]) as u64)
                     ulib.nl()
                     return 1
