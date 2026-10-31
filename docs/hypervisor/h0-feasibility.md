@@ -26,6 +26,13 @@ Scope: read and measure only. No kernel behavior change. Probe: `/proc/vmxcaps` 
 - CPUID 0x8000000A works (SVM rev 1, 16 ASIDs; with `max`, EDX shows NPT).
 - Existing hypervisor code (`kernel/arch/x86_64/hv.fi`) is AMD-V only for this reason.
 
+### HP measured with probe kernel (31.10., build 4384, `cat /proc/vmxcaps`, `cat /proc/dmar`)
+- CPU: cpuid.1 eax=0x806e9 (Kaby Lake U), ecx bit 5 VMX = 1.
+- IA32_FEATURE_CONTROL (msr 0x3a) = 0x1: lock bit set, "VMXON outside SMX" bit 2 = 0. VMXON would #GP and the lock forbids enabling it: VTx is OFF in BIOS (needs BIOS F10, then power cycle).
+- VMX capability MSRs are readable and good: basic 0x480 = rev 4, VMCS 0x400, WB; secondary controls 0x48b allow-1 = 0x005fbcff incl. EPT (bit 1), VPID (bit 5), unrestricted guest (bit 7), VMCS shadowing (bit 14); EPT/VPID cap 0x48c = 0x00000f0106734141 (4-level, WB, 2M + 1G pages, INVEPT, INVVPID).
+- /proc/dmar = `dmar: none`: VT-d is off in BIOS as well.
+- Verdict: Intel VMX is feasible on the HP hardware-wise; blockers are BIOS settings only (VTx + VTd).
+
 ## Expected for i5-7200U (Intel ARK, NOT measured)
 - VT-x, EPT, VT-d: supported by the SKU. EPT 2 MiB pages, A/D bits, VPID, unrestricted guest: Skylake-family cores support them. 1 GiB EPT pages: also on Skylake-family, to be confirmed.
 - IA32_FEATURE_CONTROL lock bit and VMX-outside-SMX bit depend on BIOS; HP normally sets both when VT-x is on.
@@ -37,6 +44,6 @@ Scope: read and measure only. No kernel behavior change. Probe: `/proc/vmxcaps` 
 - HP DMAR reading needs the probe kernel on the device (feed + apply), which was not allowed in this task.
 
 ## Next step
-1. Ship the probe kernel to the HP in the next regular feed; run `cat /proc/vmxcaps` and `cat /proc/dmar`.
-2. If DMAR stays `none`: enter BIOS (F10), enable "Virtualization Technology (VTx)" and "VTd", re-read.
+1. Done 31.10.: probe kernel on the HP, values above.
+2. DMAR is `none` and msr 0x3a bit 2 = 0: enter BIOS (F10), enable "Virtualization Technology (VTx)" and "VTd", re-read.
 3. Connect the Dell and repeat.
