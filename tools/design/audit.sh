@@ -635,7 +635,7 @@ wait "$PID"; RC=$?
 rm -f "$SOCK"
 echo "qemu exit $RC"
 # r837: kernel stack guard hits are never allowed; print the count so callers (tools/kstack/run.sh) can assert it.
-echo "kernstapel: $(grep -ac 'KERNSTAPEL UEBERGELAUFEN' "$OUT/serial.txt" 2>/dev/null) Waechterbrueche"
+echo "kernstapel: $(grep -ac 'KERNEL STACK OVERFLOW' "$OUT/serial.txt" 2>/dev/null) Waechterbrueche"
 
 # ------------------------------------------------------------ 4. PNG
 python3 - "$OUT" <<'PY'

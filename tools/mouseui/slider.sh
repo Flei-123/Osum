@@ -43,7 +43,7 @@ grep -aq 'settings: ready' "$S" && ok "window up" || bad "window up"
 for r in mspeed pscrb; do
   grep -aq "settings: rect name=$r " "$S" && ok "widget $r reported" || bad "widget $r reported"
 done
-[ "$(grep -ac 'KERNSTAPEL UEBERGELAUFEN' "$S")" = 0 ] && ok "no kernel stack overflow line" || bad "kernel stack overflow line (r837)"
+[ "$(grep -ac 'KERNEL STACK OVERFLOW' "$S")" = 0 ] && ok "no kernel stack overflow line" || bad "kernel stack overflow line (r837)"
 grep -aq 'ziehespur .* -> KEIN' "$OUT.log" && bad "a drag had no target" || ok "every drag found its slider"
 python3 -I - "$S" <<'PY' && ok "mouse speed: drag up raised it, drag down lowered it, track click set a middle value (ok=1)" || bad "mouse speed effects"
 import re, sys

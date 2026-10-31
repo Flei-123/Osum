@@ -145,7 +145,7 @@ lauf() { # name  kommandozeile  geraet  [zeit] [platte]
 echo "== 1. der Regler kommt hoch und findet einen Weg zum Lautsprecher =="
 rc=$(lauf hup "osum nokbd nosched noproc nofs audio audgraph audsay" "$HDADEV")
 same "der Kern beendet sich selbst (21)" 21 "$rc"
-has "$TMPD/hup.txt" "hda: bereit" "der HD-Audio-Regler ist aufgesetzt"
+has "$TMPD/hup.txt" "hda: ready" "der HD-Audio-Regler ist aufgesetzt"
 num "der gewaehlte Treiber (2 = HDA)" "$(val "$TMPD/hup.txt" backend)" eq 2
 num "Knoten im Codec-Graphen" "$(val "$TMPD/hup.txt" hda_widgets)" ge 2
 num "der Wandler (Audio Output Converter)" "$(val "$TMPD/hup.txt" hda_dac)" ge 1
@@ -178,7 +178,7 @@ has "$TMPD/noaud.txt" "aud: aus (kein Wort)" "noaudio hebt audio auf"
 # ZUSAGE (f): KEIN GERAET.
 rc=$(lauf nodev "osum nokbd nosched noproc nofs audio audsay" "")
 same "ZUSAGE (f): ohne Tonkarte beendet sich der Kern NORMAL" 21 "$rc"
-has "$TMPD/nodev.txt" "hda: kein Geraet 04:03 da" "HDA sagt klar, dass kein Geraet da ist"
+has "$TMPD/nodev.txt" "hda: no device 04:03" "HDA sagt klar, dass kein Geraet da ist"
 has "$TMPD/nodev.txt" "ac97: kein Geraet 04:01 da" "AC97 sagt es auch"
 has "$TMPD/nodev.txt" "aud: kein Geraet, why2" "und die Schicht gibt eine ZAHL heraus (2 = kein Geraet)"
 has "$TMPD/nodev.txt" "kernel: done" "das System laeuft danach ganz normal weiter"

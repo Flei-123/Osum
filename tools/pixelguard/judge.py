@@ -8,7 +8,7 @@ STAT_RE = re.compile(
     r"pixelguard: stat checks=(\d+) bad=(\d+) unstable=(\d+) pending=(\d+) skipped=(\d+) card_bad=(\d+) renders=(\d+) us=(\d+)"
 )
 SET_RE = re.compile(r"pixelguard: set mode=(\d+)")
-PANIC_RE = re.compile(r"ABSTURZ|EXCEPTION|panic|KERNSTAPEL UEBERGELAUFEN")
+PANIC_RE = re.compile(r"ABSTURZ|EXCEPTION|panic|KERNEL STACK OVERFLOW")
 
 results = []
 

@@ -35,8 +35,8 @@
 #       `CPU_SYSCALLS`) stimmen Zahl fuer Zahl mit cpu.fi ueberein.
 #       Laufen sie auseinander, holt der Einsprung seinen Kernstapel aus
 #       einem falschen Feld -- und zwar leise.
-#    2. `sched.darf_ring3` gibt es, und die Auswahl im Ablaufplaner ruft
-#       sie wirklich. Das ist die Zeile, die in BLECHKERN gefehlt hat.
+#    2. `sched.ring3_allowed` exists, and the pick in the scheduler calls
+#       it for real. That is the line that was missing in BLECHKERN.
 #    3. Kein Weg in fs.fi fasst einen geteilten Blockpuffer an, ohne
 #       durch `enter` (also `atomic.L_FS`) zu gehen. Das war die zweite
 #       Ursache dieser Runde und wird deshalb an der QUELLE nachgezaehlt
@@ -116,21 +116,21 @@ grep -qa 'incq %gs:CPU_SYSCALLS' kernel/arch/x86_64/isr.s \
 
 echo
 echo "== 2. der Riegel steht im CODE und nicht im Kommentar =="
-grep -qa '^fn darf_ring3' kernel/sched/sched.fi \
-    && ok "sched.darf_ring3 gibt es" || bad "sched.darf_ring3 fehlt"
-grep -qa 'darf_ring3(state, i, me)' kernel/sched/sched.fi \
+grep -qa '^fn ring3_allowed' kernel/sched/sched.fi \
+    && ok "sched.ring3_allowed exists" || bad "sched.ring3_allowed is missing"
+grep -qa 'ring3_allowed(state, i, me)' kernel/sched/sched.fi \
     && ok "die Auswahl des Ablaufplaners ruft ihn wirklich" \
-    || bad "darf_ring3 wird in der Auswahl NICHT gerufen -- genau der Fehler von BLECHKERN"
+    || bad "ring3_allowed is NOT called in the pick -- exactly the BLECHKERN bug"
 grep -qa 'gs_ready(state, me)' kernel/sched/sched.fi \
     && ok "und er fragt die GEPRUEFTE GS-Basis ab" \
-    || bad "darf_ring3 fragt die GS-Basis nicht ab"
-# `gs_gut` ist ein festes Feld von acht. Waechst MAX_CPUS, ohne dass es
-# mitwaechst, meldet `gs_bereit` fuer jeden Kern ab dem neunten "nein" --
-# Ring 3 liefe dort nie, und niemand saehe warum.
+    || bad "ring3_allowed does not check the GS base"
+# `gs_good` is a fixed array of eight. If MAX_CPUS grows without it,
+# `gs_ready` says "no" for every core from the ninth on -- ring 3
+# would never run there and nobody would see why.
 mc=$(grep -aoE 'const MAX_CPUS: u64 = [0-9]+' kernel/lib/kstate.fi | grep -oE '[0-9]+$')
-gg=$(grep -aoE 'static mut gs_gut: \[u64; [0-9]+\]' kernel/sched/sched.fi | sed -n 's/.*; \([0-9]*\)\]/\1/p')
-if [ -n "$mc" ] && [ "$mc" = "$gg" ]; then ok "kstate.MAX_CPUS = sched.gs_gut = $mc"
-else bad "MAX_CPUS=$mc, aber gs_gut fasst $gg -- Kerne darueber bekaemen nie Ring 3"; fi
+gg=$(grep -aoE 'static mut gs_good: \[u64; [0-9]+\]' kernel/sched/sched.fi | sed -n 's/.*; \([0-9]*\)\]/\1/p')
+if [ -n "$mc" ] && [ "$mc" = "$gg" ]; then ok "kstate.MAX_CPUS = sched.gs_good = $mc"
+else bad "MAX_CPUS=$mc, but gs_good holds $gg -- cores above it would never get ring 3"; fi
 
 echo
 echo "== 3. kein geteilter Blockpuffer ohne die Sperre L_FS =="
@@ -298,8 +298,8 @@ lauf() { # name smp extra [limit]
 TAFEL23='^tafel: 23 [A-Z]'
 w_r3k()  { grep -a "$TAFEL23" "$1" | tail -1 | grep -oE 'R3K [0-9]+' | awk '{print $2}'; }
 w_r3w()  { grep -a "$TAFEL23" "$1" | tail -1 | grep -oE 'R3W [0-9]+' | awk '{print $2}'; }
-w_abw()  { grep -a '^r3: syscalls' "$1" | tail -1 | sed -n 's/.*abw=\([0-9]*\).*/\1/p'; }
-w_kerne(){ grep -a '^r3: prozesse' "$1" | tail -1 | sed -n 's/.* n=\([0-9]*\).*/\1/p'; }
+w_abw()  { grep -a '^r3: syscalls' "$1" | tail -1 | sed -n 's/.*diff=\([0-9]*\).*/\1/p'; }
+w_kerne(){ grep -a '^r3: procs' "$1" | tail -1 | sed -n 's/.* n=\([0-9]*\).*/\1/p'; }
 w_scpu() { grep -a '^r3: syscalls' "$1" | tail -1 \
     | grep -oE 'c[0-9]+=[0-9]+' | grep -vE '=0$' | wc -l; }
 w_exc()  { grep -ac '^\*\*\* EXCEPTION\|^absturz:  0' "$1"; }
@@ -319,7 +319,7 @@ zahl "Ausnahmen" "$(w_exc $L)" eq 0
 grep -qa '^desk: start /bin/settings  pid=[1-9]' $L \
     && ok "auch das vierte Programm (/bin/settings) kommt hoch" \
     || bad "/bin/settings kommt nicht hoch -- genau der Fehler der Vorrunde"
-grep -a '^r3: prozesse' $L | tail -1 | sed 's/^/        /'
+grep -a '^r3: procs' $L | tail -1 | sed 's/^/        /'
 grep -a '^r3: syscalls' $L | tail -1 | sed 's/^/        /'
 
 echo
@@ -348,7 +348,7 @@ echo
 echo "== 8. GEGENPROBE zum Riegel, Haelfte 1: gsluege -- er MUSS halten =="
 # Jeder Anwendungskern bekommt die GS-Basis von Kern 0. Das ist der
 # Zustand, an dem Justins Brett am 05.09. gestorben ist -- nur dass ihn
-# `sched.darf_ring3` jetzt sieht.
+# `sched.ring3_allowed` jetzt sieht.
 lauf g4 4 "r3alle gsluege"
 L=$TMPD/g4.txt
 zahl "R3W muss GROESSER null werden (die Luege wird gesehen)" "$(w_r3w $L)" ge 1

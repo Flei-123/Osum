@@ -235,7 +235,7 @@ schreibtisch() { # name smp extra
     # aufhoert, gibt ihm ein Drittel der Gelegenheiten.
     local A="gfx wm wig desk wmhold wiglong wmdauer wigapp=/bin/taskmgr,melde,takt,500 wighalt=60"
     # `r3alle` -- ausdruecklich, obwohl es seit VIELKERN 3 ohnehin gilt
-    # (`sched.fi`: `static mut ring3_alle: u64 = 1`). Der Absatz in
+    # (`sched.fi`: `static mut ring3_all: u64 = 1`). Der Absatz in
     # derselben Datei, der 'DEFAULT: RING 3 BLEIBT AUF KERN 0' sagt, ist
     # von VIELKERN 2 und stimmt nicht mehr; er hat diese Runde eine
     # halbe Stunde gekostet. Das Wort steht hier, damit die Bedingung
