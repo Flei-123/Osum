@@ -10,7 +10,7 @@ export {
     Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_dq_inflight, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset, rx_closed, rx_raw_valid, rb_addr, cq_set_raw,
     CMD_ALIVE, FRAME_INVALID, FRAME_SIZE_MSK, RX_MASK,
     CQ_RB_SIZE, CQ_RB_COUNT, CQ_TFD_SIZE, CQ_TFD_COUNT, CQ_SLOT_SIZE, CQ_CMD_SLOT_SIZE, CQ_SLOTS, CQ_NOTIF_SLOT, CQ_NOTIF_SLOTS, CQ_OLD_NOTIF_SLOT, cq_set_slot_cap, cq_drops,
-    cq_err_ptr, cq_uerr_ptr, CQ_WAIT_CMD, CQ_WAIT_NOTIF, ALIVE_SCD_OFF, ALIVE_PKT_MIN, CMD_QUEUE,
+    cq_err_ptr, cq_uerr_ptr, cq_fw_dead, E_CQ_FWDEAD, CQ_WAIT_CMD, CQ_WAIT_NOTIF, ALIVE_SCD_OFF, ALIVE_PKT_MIN, CMD_QUEUE,
     CMD_TX_DATA, E_CQ_TIMEOUT, E_CQ_BIG, E_CQ_NORX, E_CQ_NOTX, E_CQ_FULL, E_CQ_PROG, E_CQ_SHORT
 }
 
@@ -43,6 +43,10 @@ const ALIVE_SCD_OFF: u64 = 44
 const ALIVE_CNT_OFF: u64 = 40
 const ALIVE_ERR_OFF: u64 = 24
 const ALIVE_UERR_OFF: u64 = 64
+const ALIVE_UERR_ALT_OFF: u64 = 68
+const SRAM_PTR_MASK: u64 = 0xFFFF0000
+const SRAM_PTR_BASE: u64 = 0x00800000
+const INT_SW_ERR: u64 = 0x02000000
 const ALIVE_PKT_MIN: u64 = 48
 
 const E_CQ_TIMEOUT: i64 = -70
@@ -52,6 +56,7 @@ const E_CQ_NOTX: i64 = -73
 const E_CQ_FULL: i64 = -74
 const E_CQ_PROG: i64 = -75
 const E_CQ_SHORT: i64 = -76
+const E_CQ_FWDEAD: i64 = -77
 
 struct Cq {
     rx_bd: u64,
@@ -87,13 +92,14 @@ struct Cq {
     scd_hw: u64,
     stage: u64,
     err_ptr: u64,
-    uerr_ptr: u64
+    uerr_ptr: u64,
+    fw_dead: u64
 }
 
 fn cq_new() -> Cq {
     var c: Cq = Cq { rx_bd: 0, rx_stts: 0, rb: 0, tfd: 0, cmdbuf: 0, kw: 0, bc: 0, notif: 0, wr: 0, rd: 0, rxr: 0, rx_wptr: 0,
         rx_on: 0, tx_on: 0, nh: 0, nt: 0, scd: 0, dropped: 0, slot_cap: CQ_NOTIF_SLOT, matched: 0,
-        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, dsent: 0, dreclaimed: 0, rx_raw: 0, scd_alive: 0, alive_cnt: 0, scd_hw: 0, stage: 0, err_ptr: 0, uerr_ptr: 0 }
+        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, dsent: 0, dreclaimed: 0, rx_raw: 0, scd_alive: 0, alive_cnt: 0, scd_hw: 0, stage: 0, err_ptr: 0, uerr_ptr: 0, fw_dead: 0 }
     return c
 }
 
@@ -125,6 +131,7 @@ fn cq_reset(c: *mut Cq) {
     (*c).dq_on = 0
     (*c).dsent = 0
     (*c).dreclaimed = 0
+    (*c).fw_dead = 0
 }
 
 fn cq_set_slot_cap(c: *mut Cq, cap: u64) { (*c).slot_cap = cap }
@@ -138,6 +145,14 @@ fn cq_attach_data(c: *mut Cq, dtfd: u64, dbuf: u64) {
 
 fn cq_err_ptr(c: *mut Cq) -> u64 { return (*c).err_ptr }
 fn cq_uerr_ptr(c: *mut Cq) -> u64 { return (*c).uerr_ptr }
+fn cq_fw_dead(c: *mut Cq) -> u64 { return (*c).fw_dead }
+
+fn sw_err_seen(c: *mut Cq, p: *mut iwl_probe.Probe, d: u64) -> bool {
+    if d == 0xFFFFFFFF || (d & INT_SW_ERR) == 0 { return false }
+    iwl_pwr.wr(p, iwl_probe.CSR_INT, d)
+    (*c).fw_dead = d
+    return true
+}
 fn cq_dq_on(c: *mut Cq) -> bool { return (*c).dq_on != 0 }
 fn cq_dq_sent(c: *mut Cq) -> u64 { return (*c).dsent }
 fn cq_dq_reclaimed(c: *mut Cq) -> u64 { return (*c).dreclaimed }
@@ -331,6 +346,7 @@ fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, c
     if (*c).rx_on == 0 { return E_CQ_NORX }
     if (*c).tx_on == 0 { return E_CQ_NOTX }
     if len < 4 || len > CQ_CMD_SLOT_SIZE { return E_CQ_BIG }
+    if (*c).fw_dead != 0 { return E_CQ_FWDEAD }
     if (*c).wr - (*c).rd >= CQ_TFD_COUNT - 6 { return E_CQ_FULL }
     let idx: u64 = (*c).wr & 0xFF
     let slot: u64 = (*c).cmdbuf + (idx % CQ_SLOTS) * CQ_CMD_SLOT_SIZE
@@ -351,15 +367,18 @@ fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, c
     iwl_pwr.wr(p, iwl_g1.HBUS_TARG_WRPTR, ((*c).wr & 0xFF) | (CMD_QUEUE << 8))
     var i: u64 = 0
     var done: bool = false
-    while i < CQ_WAIT_CMD && !done {
+    var dead: bool = false
+    while i < CQ_WAIT_CMD && !done && !dead {
         if drain(c, p, true, cmd, idx, resp, cap) { done = true }
         if !done {
             let d: u64 = iwl_pwr.rd(p, iwl_probe.CSR_INT)
             if d != 0 && regtrace.is_on() { regtrace.rec_irq(d) }
+            dead = sw_err_seen(c, p, d)
         }
         i = i + 1
     }
     iwl_pwr.mac_access_put(p)
+    if dead { return E_CQ_FWDEAD }
     if !done { return E_CQ_TIMEOUT }
     return ((*c).matched - 1) as i64
 }
@@ -441,7 +460,7 @@ fn cq_wait(c: *mut Cq, p: *mut iwl_probe.Probe, cmd: u64, out: u64, cap: u64, bu
         let _h: bool = drain(c, p, false, 0xFFFF, 0xFFFF, 0, 0)
         let j: i64 = find_cmd(c, cmd)
         if j >= 0 { return pop_to(c, j as u64, out, cap) }
-        let _d: u64 = iwl_pwr.rd(p, iwl_probe.CSR_INT)
+        if sw_err_seen(c, p, iwl_pwr.rd(p, iwl_probe.CSR_INT)) { return E_CQ_FWDEAD }
         i = i + 1
     }
     return E_CQ_TIMEOUT
@@ -454,7 +473,14 @@ fn cq_alive(c: *mut Cq, p: *mut iwl_probe.Probe, out: u64, cap: u64) -> i64 {
     (*c).alive_cnt = iwl_le.ld32(out, ALIVE_CNT_OFF)
     (*c).err_ptr = iwl_le.ld32(out, ALIVE_ERR_OFF)
     (*c).uerr_ptr = 0
-    if (n as u64) >= ALIVE_UERR_OFF + 4 { (*c).uerr_ptr = iwl_le.ld32(out, ALIVE_UERR_OFF) }
+    if (n as u64) >= ALIVE_UERR_OFF + 4 {
+        let a: u64 = iwl_le.ld32(out, ALIVE_UERR_OFF)
+        if (a & SRAM_PTR_MASK) == SRAM_PTR_BASE { (*c).uerr_ptr = a }
+    }
+    if (*c).uerr_ptr == 0 && (n as u64) >= ALIVE_UERR_ALT_OFF + 4 {
+        let b: u64 = iwl_le.ld32(out, ALIVE_UERR_ALT_OFF)
+        if (b & SRAM_PTR_MASK) == SRAM_PTR_BASE { (*c).uerr_ptr = b }
+    }
     (*c).scd_alive = iwl_le.ld32(out, ALIVE_SCD_OFF)
     (*c).stage = 2
     return (*c).scd_alive as i64

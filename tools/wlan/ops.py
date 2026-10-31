@@ -71,20 +71,28 @@ def check_seq(hw):
     out = run(["seq" + mode])
     c = cmds(out)
     ids = [x[0] for x in c]
-    want = [0x08, 0x28, 0x2B, 0x0C, 0x18, 0x28, 0x0D, 0x08] + ([0x17, 0x17] if hw else []) + [0x1C]
+    want = [0x18, 0x08, 0x28, 0x2B, 0x0C, 0x18, 0x28, 0x0D, 0x08] + ([0x17, 0x17] if hw else []) + [0x1C]
     ok(ids == want, "command ids %s" % " ".join("%02x" % i for i in ids))
     ok([le(x, 2, 2) & 0xFF for x in c] == list(range(1, len(c) + 1)), "command slots count up")
     rc = [l for l in out if l.startswith("rc ")][0].split()
     ok(rc[1:7] == ["0"] * 6 and rc[7] == "30", "all operations returned 0, send returned 30")
     ok(rc[9] == ("2" if hw else "0") and rc[11] == ("1" if hw else "0"), "keys sent / ccmp flag as %s mode" % mode)
+    aux = c[0]
+    c = c[1:]
+    ok(aux[4 + 16] == 1 and le(aux, 4 + 4, 4) == 4 and le(aux, 4 + 2, 2) == 0xFFFF and le(aux, 4 + 40, 4) == 2, "ADD_STA aux station: id 1, MAC index 4, all TIDs off, queue 1")
     phy_add, mac_add, bind, scfg, sta, mac_mod, scan, phy_mod = c[:8]
     ok(le(phy_add, 4 + 4, 4) == 1 and phy_add[4 + 17] == 1 and phy_add[4 + 16] == 1 and len(phy_add) == 4 + 36, "PHY_CONTEXT add, v1 layout 36 octets, 2.4 GHz channel 1")
     ok(le(phy_mod, 4 + 4, 4) == 2 and phy_mod[4 + 17] == 6 and phy_mod[4 + 16] == 1, "PHY_CONTEXT modify channel 6 2.4 GHz")
     ok(le(mac_add, 4 + 8, 4) == 5 and mac_add[4 + 16:4 + 22] == MAC, "MAC_CONTEXT add: BSS station, own address")
     ok(mac_mod[4 + 24:4 + 30] == BSSID and le(mac_mod, 4 + 4, 4) == 2, "MAC_CONTEXT modify carries the BSSID")
     ok(le(bind, 4 + 20, 4) == 0 and le(bind, 4 + 8, 4) == 0, "BINDING add links MAC 0 and PHY 0")
+    for name, w in (("SCAN_CFG", scfg), ("SCAN_REQ_UMAC", scan)):
+        ok(w[1] == 1 and le(w, 4, 2) == len(w) - 8 and w[6] == 0 and w[7] == 0, "%s uses the wide header (group 1, payload length)" % name)
+    scfg = scfg[:4] + scfg[8:]
+    scan = scan[:4] + scan[8:]
     nchan = le(scfg, 4, 4) >> 26
     ok(nchan == 35 and scfg[4 + 36:4 + 36 + 4] == bytes([1, 2, 3, 4]), "SCAN_CFG lists 35 channels")
+    ok(le(scfg, 4, 4) & 0x3FFFFFF == 0x2EF09 and le(scfg, 4 + 12, 4) == 0x0FFF0FFF and scfg[4 + 24:4 + 28] == bytes([10, 110, 44, 90]) and scfg[4 + 34] == 1 and scfg[4 + 35] == 0xF, "SCAN_CFG flags/rates/dwell/aux id/channel flags as iwlwifi legacy config v1")
     ok(sta[4 + 8:4 + 14] == BSSID and sta[4] == 0, "ADD_STA peer = BSSID, mode add")
     ok(scan[4 + 33] == 35 and b"HPAP" in scan, "SCAN_REQ_UMAC: 35 channels, direct scan SSID")
     tx = c[-1]
@@ -170,17 +178,17 @@ def check_parse():
 check_build()
 def check_diag():
     print("== setup failure diagnosis ==")
-    expect = [(1, 0x08, 0x00), (2, 0x28, 0x02), (3, 0x2B, 0x06), (4, 0x0C, 0x0E)]
-    out = run(["failstep %d" % i for i in range(5)])
+    expect = [(6, 0x18, 0x00), (1, 0x08, 0x40), (2, 0x28, 0x42), (3, 0x2B, 0x46), (4, 0x0C, 0x4E)]
+    out = run(["failstep %d" % i for i in range(6)])
     for i, (step, cmd, okm) in enumerate(expect):
         f = out[i].split(" ")
         ok(f[:2] == ["failstep", "rc"] and f[2] == "-70" and f[4] == str(step) and f[6] == "-70" and f[8] == str(cmd) and f[10] == str(okm),
            "command %d failing is reported as step %d cmd %d: %s" % (i, step, cmd, out[i]))
     for i in range(5):
         f = out[i].split(" ")
-        ok(f[12] == "0" and f[14] == "4", "setup retry after failure at command %d resends only the missing steps (4 commands total): %s" % (i, out[i]))
-    f = out[4].split(" ")
-    ok(f[2] == "0" and f[4] == "0" and f[6] == "0" and f[10] == "30", "all steps ok: no failed step, ok mask 0x1e: " + out[4])
+        ok(f[12] == "0" and f[14] == "5", "setup retry after failure at command %d resends only the missing steps (5 commands total): %s" % (i, out[i]))
+    f = out[5].split(" ")
+    ok(f[2] == "0" and f[4] == "0" and f[6] == "0" and f[10] == "94", "all steps ok: no failed step, ok mask 0x5e: " + out[5])
 
 
 check_seq(True)

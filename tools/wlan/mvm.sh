@@ -44,5 +44,8 @@ mut 's/iwl_le.st8(a, h + 19, n_aps)/iwl_le.st8(a, h + 18, n_aps)/' "SCAN_REQ v7 
 mut 's/iwl_le.st16(a, h + 22, budget)/iwl_le.st16(a, h + 20, budget)/' "SCAN_REQ v7 budget offset" iwl_mvm_scan.fi
 mut 's/const SCAN_V7_HEAD_LEN: u64 = iwl_buf.HDR + 48/const SCAN_V7_HEAD_LEN: u64 = iwl_buf.HDR + 44/' "SCAN_REQ v7 head length" iwl_mvm_scan.fi
 mut 's/iwl_le.st8(a, h + 51, tid)/iwl_le.st8(a, h + 50, tid)/' "TX_CMD tid offset" iwl_mvm_tx.fi
+mut 's/const OFF_STA_TYPE: u64 = 35/const OFF_STA_TYPE: u64 = 33/' "ADD_STA v10 station_type offset" iwl_mvm_sta.fi
+mut 's/const STA_LEN_V8: u64 = 48/const STA_LEN_V8: u64 = 52/' "ADD_STA v10 length" iwl_mvm_sta.fi
+mut 's/const DATA_PATH_GROUP: u64 = 5/const DATA_PATH_GROUP: u64 = 1/' "DQA_ENABLE group" iwl_mvm_txq.fi
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

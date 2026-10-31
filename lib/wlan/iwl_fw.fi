@@ -13,7 +13,7 @@
 
 export {
     FwInfo, fwinfo_new, fw_parse, fw_sec_count, fw_sec_off, fw_sec_len, fw_sec_addr, fw_sec_kind,
-    fw_kind_count, fw_has_api, fw_has_capa, fw_cmd_ver, fw_notif_ver, fw_calib_ev, fw_calib_fl, fw_tx_ant, fw_rx_ant, CALIB_REGULAR, CALIB_INIT, TLV_N_SCAN_CHANNELS,
+    fw_kind_count, fw_has_api, fw_has_api1, fw_has_capa, fw_cmd_ver, fw_notif_ver, fw_calib_ev, fw_calib_fl, fw_tx_ant, fw_rx_ant, CALIB_REGULAR, CALIB_INIT, TLV_N_SCAN_CHANNELS,
     TLV_DEF_CALIB, TLV_CMD_VERSIONS,
     IMG_RT, IMG_INIT, KIND_LMAC, KIND_UMAC, KIND_PAGING, SEC_MAX,
     SEP_CPU, SEP_PAGING,
@@ -64,6 +64,7 @@ struct FwInfo {
     num_cpu: u64,
     api0: u64,          // API_CHANGES_SET with api_index 0 (OR of all such TLVs)
     capa0: u64,         // ENABLED_CAPABILITIES with api_index 0
+    api1: u64,
     n_scan_ch: u64,
     cmd_ver: [u8; 256],
     notif_ver: [u8; 256],
@@ -80,7 +81,7 @@ struct FwInfo {
 
 fn fwinfo_new() -> FwInfo {
     var f: FwInfo = FwInfo {
-        ver: 0, n_tlv: 0, flags: 0, phy_sku: 0, calib_ev: [0; 3], calib_fl: [0; 3], num_cpu: 0, api0: 0, capa0: 0, n_scan_ch: 0, cmd_ver: [0; 256], notif_ver: [0; 256], paging_size: 0,
+        ver: 0, n_tlv: 0, flags: 0, phy_sku: 0, calib_ev: [0; 3], calib_fl: [0; 3], num_cpu: 0, api0: 0, capa0: 0, api1: 0, n_scan_ch: 0, cmd_ver: [0; 256], notif_ver: [0; 256], paging_size: 0,
         iml_off: 0, iml_len: 0, n_sec: [0; 2], n_kind: [0; 6],
         s_off: [0; 64], s_len: [0; 64], s_addr: [0; 64], s_kind: [0; 64]
     }
@@ -90,6 +91,11 @@ fn fwinfo_new() -> FwInfo {
 fn ld8(p: u64, o: usize) -> u64 {
     let b: u8 = *((p + o as u64) as *mut u8)
     return b as u64
+}
+
+fn ver_slot(v: u64) -> u8 {
+    if v >= 0xFF { return 0 }
+    return (v + 1) as u8
 }
 
 fn ld32(p: u64, o: usize) -> u64 {
@@ -159,6 +165,7 @@ fn fw_parse(blob: u64, len: usize, f: *mut FwInfo) -> i64 {
             (*f).paging_size = ld32(blob, d)
         } else if t == TLV_API_CHANGES_SET && l >= 8 {
             if ld32(blob, d) == 0 { (*f).api0 = (*f).api0 | ld32(blob, d + 4) }
+            if ld32(blob, d) == 1 { (*f).api1 = (*f).api1 | ld32(blob, d + 4) }
         } else if t == TLV_ENABLED_CAPABILITIES && l >= 8 {
             if ld32(blob, d) == 0 { (*f).capa0 = (*f).capa0 | ld32(blob, d + 4) }
         } else if t == TLV_N_SCAN_CHANNELS && l >= 4 {
@@ -166,10 +173,10 @@ fn fw_parse(blob: u64, len: usize, f: *mut FwInfo) -> i64 {
         } else if t == TLV_CMD_VERSIONS {
             var q: u64 = 0
             while q + 4 <= l {
-                if ld8(blob, d + q as usize) == 0 {
-                    let c: usize = ld8(blob, d + q as usize + 1) as usize
-                    (*f).cmd_ver[c] = (ld8(blob, d + q as usize + 2) + 1) as u8
-                    (*f).notif_ver[c] = (ld8(blob, d + q as usize + 3) + 1) as u8
+                if ld8(blob, d + q as usize + 1) == 0 {
+                    let c: usize = ld8(blob, d + q as usize) as usize
+                    (*f).cmd_ver[c] = ver_slot(ld8(blob, d + q as usize + 2))
+                    (*f).notif_ver[c] = ver_slot(ld8(blob, d + q as usize + 3))
                 }
                 q = q + 4
             }
@@ -191,9 +198,17 @@ fn fw_sec_addr(f: *mut FwInfo, img: usize, i: usize) -> u64 { return (*f).s_addr
 fn fw_sec_kind(f: *mut FwInfo, img: usize, i: usize) -> u64 { return (*f).s_kind[img * SEC_MAX + i] }
 fn fw_kind_count(f: *mut FwInfo, img: usize, kind: u64) -> u64 { return (*f).n_kind[img * 3 + kind as usize] }
 fn fw_has_api(f: *mut FwInfo, bit: u64) -> bool { return bit < 32 && ((*f).api0 >> bit) & 1 == 1 }
+fn fw_has_api1(f: *mut FwInfo, bit: u64) -> bool { return bit >= 32 && bit < 64 && ((*f).api1 >> (bit - 32)) & 1 == 1 }
 fn fw_has_capa(f: *mut FwInfo, bit: u64) -> bool { return bit < 32 && ((*f).capa0 >> bit) & 1 == 1 }
-fn fw_cmd_ver(f: *mut FwInfo, cmd: u64) -> i64 { return ((*f).cmd_ver[(cmd & 0xFF) as usize] as i64) - 1 }
-fn fw_notif_ver(f: *mut FwInfo, cmd: u64) -> i64 { return ((*f).notif_ver[(cmd & 0xFF) as usize] as i64) - 1 }
+fn legacy_group(cmd: u64) -> bool { return (cmd >> 8) <= 1 }
+fn fw_cmd_ver(f: *mut FwInfo, cmd: u64) -> i64 {
+    if !legacy_group(cmd) { return -1 }
+    return ((*f).cmd_ver[(cmd & 0xFF) as usize] as i64) - 1
+}
+fn fw_notif_ver(f: *mut FwInfo, cmd: u64) -> i64 {
+    if !legacy_group(cmd) { return -1 }
+    return ((*f).notif_ver[(cmd & 0xFF) as usize] as i64) - 1
+}
 fn fw_calib_ev(f: *mut FwInfo, ucode_type: u64) -> u64 {
     if ucode_type >= 3 { return 0 }
     return (*f).calib_ev[ucode_type as usize]

@@ -5,10 +5,12 @@ import wlan.iwl_le
 import drv.net.iwl_fakeap
 import drv.net.iwl_fakeap_frames
 import drv.net.iwl_fakescan
+import drv.net.iwl_fakehdr
 import drv.net.iwl_fakemac
 import drv.net.iwl_fakephy
 import drv.net.iwl_faketx
 import wlan.iwl_mvm_txq
+import wlan.iwl_buf
 
 export {
     doorbell, alive, alive_forced, reset, rx_enabled, set_norx, set_silent, set_knobs, set_bigcal, phydb_bytes, phydb_bad, cmds, rx_pkts, rx_drops, tx_ok, tx_bad, last_cmd, set_ap, ap_on, last_uid, phydb_cmds, nvm_reads, init_completes, err_word, FAKE_SCD_BASE
@@ -489,6 +491,7 @@ fn one_tfd(ctx: u64, ring: u64, idx: u64) {
     s(ctx, S_LASTCMD, cmd)
     var total_x: u64 = l0
     if n == 2 { total_x = l0 + (iwl_le.ld16(t, 14) >> 4) }
+    if iwl_fakehdr.umac(cmd) && !iwl_fakehdr.accept(tb0, total_x) { return }
     if cmd == CMD_NVM_ACCESS {
         if g(ctx, S_NONVM) == 0 { put_nvm(ctx, tb0, seq) }
     } else if cmd == CMD_PHY_CONTEXT {
@@ -509,20 +512,19 @@ fn one_tfd(ctx: u64, ring: u64, idx: u64) {
     }
     if cmd == CMD_PHY_CFG && phy_cfg_ok(ctx, tb0, total_x) { after_phy_cfg(ctx, tb0) }
     if cmd == CMD_SCAN_REQ_UMAC {
-        let uid: u64 = iwl_le.ld32(tb0, 8)
+        let sb: u64 = iwl_fakehdr.base(tb0)
+        let uid: u64 = iwl_le.ld32(sb, 8)
         s(ctx, S_LASTUID, uid)
-        var total: u64 = l0
-        if n == 2 { total = l0 + (iwl_le.ld16(t, 14) >> 4) }
-        let scan_ok: bool = iwl_fakescan.check(tb0, total)
+        let scan_ok: bool = iwl_fakescan.check(sb, total_x - (sb - tb0))
         if g(ctx, S_AP) != 0 && scan_ok { put_beacons(ctx) }
         put_scan_complete(ctx, uid)
     }
     if cmd == CMD_MAC_CONTEXT { iwl_fakemac.report(tb0) }
-    if cmd == CMD_ADD_STA {
+    if cmd == CMD_ADD_STA && iwl_le.ld32(tb0, iwl_buf.HDR + 40) != iwl_mvm_txq.queue_msk_of(iwl_mvm_txq.AUX_QUEUE) {
         let has: bool = iwl_faketx.sta_has_q4(tb0)
         if has { s(ctx, S_Q4MSK, 1) } else { s(ctx, S_Q4MSK, 0) }
     }
-    if cmd == CMD_SCD_CFG {
+    if cmd == CMD_SCD_CFG && iwl_le.ld8(tb0, iwl_buf.HDR + 3) != iwl_mvm_txq.AUX_QUEUE {
         var total_c: u64 = l0
         if n == 2 { total_c = l0 + (iwl_le.ld16(t, 14) >> 4) }
         if iwl_faketx.scd_check(tb0, total_c) {
