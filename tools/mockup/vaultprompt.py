@@ -17,11 +17,11 @@ CSS = """
 .li .nm { flex: 1; font-size: 14px; position: relative; left: -0.5px; }
 .li .st { font-size: 13px; color: var(--muted); }
 .li svg { color: var(--text); }
-.hint { font-size: 13px; color: var(--muted); height: 24px; line-height: 24px; margin-top: 12px; }
+.hint { font-size: 14px; color: var(--muted); height: 24px; line-height: 24px; margin-top: 13px; }
 .foot { position: absolute; left: 28px; right: 28px; bottom: 28px; height: 36px; display: flex; gap: 8px; }
 .b { height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; box-sizing: border-box; }
 .b.main { width: 140px; background: var(--accent); color: var(--on-accent); border: 1px solid #B4C4EC; }
-.b.plain { width: 120px; background: var(--card); color: var(--text); border: 1px solid var(--stroke); }
+.b.plain { width: 120px; background: #E2E8F0; color: var(--text); border: 1px solid var(--stroke); }
 """ % {"w": WIN_W, "h": WIN_H}
 
 

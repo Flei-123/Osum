@@ -112,6 +112,7 @@ echo "== 2. part A: stub prompt =="
     seed
     for t in ALLOW DENY TIMEOUT UI HANG ALLOW2; do
         id=ID_${t%2}
+        [ "$t" = HANG ] && echo "sleep -m 20000"
         echo "echo ==R-$t=="
         echo "vaultctl reveal id=${!id}"
         echo "echo rc=\$?"
@@ -186,7 +187,7 @@ CPROGS="vaultprompt theme sh echo ls cat"
 cwin() { # name secs keys...
     local nm=$1 secs=$2; shift 2
     local m="" c
-    for c in "$@"; do m="$m mon=sendkey\ $c"; done
+    for c in "$@"; do m="$m mon=sendkey\ $c mon=warte\ 1"; done
     eval bash "$B2" "$TMPD/$nm" kbd=yes uitrace=yes lang=en warten=10 \
         extra=\"wigapp=/bin/vaultprompt,reveal,github.com,alice,-,$secs\" progs=\"$CPROGS\" \
         xfile=/etc/wallpaper=assets/wallpaper-sea.osym $m > "$TMPD/$nm.log" 2>&1
@@ -204,11 +205,11 @@ if [ -s "$TMPD/c1/desktop.png" ]; then
 else
     bad "no screenshot"
 fi
-cwin c2 60 tab ret
-has "$TMPD/c2/serial.txt" "vaultprompt: allow" "Tab, Enter on the first button: allow"
+cwin c2 60 tab tab ret
+has "$TMPD/c2/serial.txt" "vaultprompt: allow" "Tab (details), Tab (Allow), Enter: allow"
 hasnot "$TMPD/c2/serial.txt" "vaultprompt: deny" "... and not deny"
-cwin c3 60 tab tab ret
-has "$TMPD/c3/serial.txt" "vaultprompt: deny" "Tab, Tab, Enter: deny"
+cwin c3 60 tab tab tab ret
+has "$TMPD/c3/serial.txt" "vaultprompt: deny" "Tab x3, Enter: deny"
 hasnot "$TMPD/c3/serial.txt" "vaultprompt: allow" "COUNTER-PROOF: deny never says allow"
 cwin c4 4
 has "$TMPD/c4/serial.txt" "vaultprompt: timeout" "no answer: timeout"
