@@ -1,0 +1,188 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import vault.vlayout
+import vault.vrand
+import vault.vslot
+import vault.vbody
+import vault.container
+
+export { Secrets, secrets_zero, rotate, rotate_file }
+
+struct Secrets {
+    pw: u64,
+    pw_len: usize,
+    login: u64,
+    login_len: usize,
+    recovery_key: u64,
+    device_key: u64,
+    tpm_blob: u64,
+    tpm_len: usize,
+}
+
+fn secrets_zero() -> Secrets {
+    return Secrets { pw: 0, pw_len: 0, login: 0, login_len: 0, recovery_key: 0,
+        device_key: 0, tpm_blob: 0, tpm_len: 0 }
+}
+
+fn rewrap_pw(p: u64, s: *mut vlayout.SlotRef, vault_id: u64, old_vk: u64,
+    new_vk: u64, pw: u64, pwn: usize, slots: *mut rt.Buf) -> i32 {
+    if pw == 0 || pwn == 0 {
+        return vlayout.VC_E_PARAM
+    }
+    var got: [u8; 32] = [0; 32]
+    var rc: i32 = vslot.unwrap_pw(p, s, vault_id, pw, pwn, (&got[0]) as u64)
+    if rc == vlayout.VC_OK && !rt.mem_eq((&got[0]) as u64, old_vk, vlayout.KEY_LEN) {
+        rc = vlayout.VC_E_CRED
+    }
+    vlayout.wipe((&got[0]) as u64, 32)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    let passes: usize = rt.ld8(p, (*s).off + 5) as usize
+    let lanes: usize = rt.ld8(p, (*s).off + 6) as usize
+    let kib: usize = vlayout.get_be32(p, (*s).off + 8) as usize
+    return vslot.make_pw_slot(slots, (*s).kind, vault_id, new_vk, pw, pwn, kib,
+        passes, lanes)
+}
+
+fn rewrap_key(p: u64, s: *mut vlayout.SlotRef, vault_id: u64, old_vk: u64,
+    new_vk: u64, key: u64, slots: *mut rt.Buf) -> i32 {
+    if key == 0 {
+        return vlayout.VC_E_PARAM
+    }
+    var got: [u8; 32] = [0; 32]
+    var rc: i32 = vslot.unwrap_key(p, s, vault_id, key, (&got[0]) as u64)
+    if rc == vlayout.VC_OK && !rt.mem_eq((&got[0]) as u64, old_vk, vlayout.KEY_LEN) {
+        rc = vlayout.VC_E_CRED
+    }
+    vlayout.wipe((&got[0]) as u64, 32)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    return vslot.make_key_slot(slots, (*s).kind, vault_id, new_vk, key)
+}
+
+fn rewrap_slot(p: u64, s: *mut vlayout.SlotRef, vault_id: u64, old_vk: u64,
+    new_vk: u64, sec: *mut Secrets, slots: *mut rt.Buf) -> i32 {
+    if (*s).kind == vlayout.SLOT_PW {
+        return rewrap_pw(p, s, vault_id, old_vk, new_vk, (*sec).pw, (*sec).pw_len, slots)
+    }
+    if (*s).kind == vlayout.SLOT_LOGIN {
+        return rewrap_pw(p, s, vault_id, old_vk, new_vk, (*sec).login, (*sec).login_len, slots)
+    }
+    if (*s).kind == vlayout.SLOT_RECOVERY {
+        return rewrap_key(p, s, vault_id, old_vk, new_vk, (*sec).recovery_key, slots)
+    }
+    if (*s).kind == vlayout.SLOT_DEVICE {
+        return rewrap_key(p, s, vault_id, old_vk, new_vk, (*sec).device_key, slots)
+    }
+    if (*s).kind == vlayout.SLOT_TPM {
+        if (*sec).tpm_blob == 0 || (*sec).tpm_len == 0 {
+            return vlayout.VC_E_PARAM
+        }
+        return vslot.make_opaque_slot(slots, vlayout.SLOT_TPM, (*sec).tpm_blob, (*sec).tpm_len)
+    }
+    return vlayout.VC_E_PARAM
+}
+
+fn rotate_into(img: *mut rt.Buf, old_vk: u64, drop_kind: u8, sec: *mut Secrets,
+    next: *mut rt.Buf, vk_out: u64) -> i32 {
+    let p: u64 = rt.buf_ptr(img)
+    var info: vlayout.Info = vlayout.info_zero()
+    var rc: i32 = vlayout.parse_header(p, rt.buf_len(img), &info)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    var plain: rt.Buf = rt.buf_new()
+    rc = vbody.open(p, &info, old_vk, &plain)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&plain)
+        return rc
+    }
+    var new_vk: [u8; 32] = [0; 32]
+    var slots: rt.Buf = rt.buf_new()
+    var count: usize = 0
+    var dropped: bool = drop_kind == 0 as u8
+    if !vrand.fill((&new_vk[0]) as u64, vlayout.KEY_LEN) {
+        rc = vlayout.VC_E_RANDOM
+    }
+    let vault_id: u64 = container.vault_id_ptr(p)
+    var i: usize = 0
+    while rc == vlayout.VC_OK && i < info.slot_count {
+        var s: vlayout.SlotRef = vlayout.slotref_zero()
+        if vlayout.slot_at(p, &info, i, &s) {
+            if s.kind == drop_kind {
+                dropped = true
+            } else {
+                rc = rewrap_slot(p, &s, vault_id, old_vk, (&new_vk[0]) as u64, sec, &slots)
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    if rc == vlayout.VC_OK && !dropped {
+        rc = vlayout.VC_E_NOSLOT
+    }
+    if rc == vlayout.VC_OK && count == 0 {
+        rc = vlayout.VC_E_PARAM
+    }
+    if rc == vlayout.VC_OK {
+        rc = container.assemble(next, vault_id, info.flags, info.revision + 1, &slots,
+            count, (&new_vk[0]) as u64, rt.buf_ptr(&plain), rt.buf_len(&plain))
+    }
+    if rc == vlayout.VC_OK {
+        var check: rt.Buf = rt.buf_new()
+        rc = container.read_body(rt.buf_ptr(next), rt.buf_len(next), (&new_vk[0]) as u64, &check)
+        if rc == vlayout.VC_OK
+            && (rt.buf_len(&check) != rt.buf_len(&plain)
+            || !rt.mem_eq(rt.buf_ptr(&check), rt.buf_ptr(&plain), rt.buf_len(&plain))) {
+            rc = vlayout.VC_E_TAG
+        }
+        vlayout.wipe(rt.buf_ptr(&check), rt.buf_len(&check))
+        rt.buf_free(&check)
+    }
+    if rc == vlayout.VC_OK && vk_out != 0 {
+        rt.mem_copy(vk_out, (&new_vk[0]) as u64, vlayout.KEY_LEN)
+    }
+    vlayout.wipe((&new_vk[0]) as u64, 32)
+    vlayout.wipe(rt.buf_ptr(&plain), rt.buf_len(&plain))
+    rt.buf_free(&plain)
+    rt.buf_free(&slots)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(next)
+        (*next) = rt.buf_new()
+    }
+    return rc
+}
+
+fn rotate(img: *mut rt.Buf, old_vk: u64, drop_kind: u8, sec: *mut Secrets,
+    vk_out: u64) -> i32 {
+    var next: rt.Buf = rt.buf_new()
+    let rc: i32 = rotate_into(img, old_vk, drop_kind, sec, &next, vk_out)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    rt.buf_free(img)
+    (*img) = next
+    return vlayout.VC_OK
+}
+
+fn rotate_file(path: str, img: *mut rt.Buf, old_vk: u64, drop_kind: u8,
+    sec: *mut Secrets, vk_out: u64) -> i32 {
+    var next: rt.Buf = rt.buf_new()
+    var rc: i32 = rotate_into(img, old_vk, drop_kind, sec, &next, vk_out)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    rc = container.file_save_fresh(path, &next)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&next)
+        if vk_out != 0 {
+            vlayout.wipe(vk_out, vlayout.KEY_LEN)
+        }
+        return rc
+    }
+    rt.buf_free(img)
+    (*img) = next
+    return vlayout.VC_OK
+}

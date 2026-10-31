@@ -1,0 +1,601 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.cbor
+import std.cborread
+import vault.vlayout
+import vault.vcodes
+import vault.vrecord
+import vault.vbuild
+
+export { It, it_zero, it_open, it_next, store_empty, store_validate,
+    store_schema, store_find, store_put, store_delete, store_next_modified,
+    store_purge, store_resolve, find_rp, find_origin, find_resident,
+    find_credential, count_live, id_cmp, version_cmp, writable, MAX_RECORDS,
+    TOMBSTONE_MAX_AGE_MS }
+
+const MAX_RECORDS: usize = 20000
+const MAX_TOTAL_ITEMS: usize = 4194304
+const TOMBSTONE_MAX_AGE_MS: u64 = 7776000000
+
+struct It {
+    p: u64,
+    n: usize,
+    left: u64,
+    next: usize,
+    start: usize,
+    end: usize,
+}
+
+fn it_zero() -> It {
+    return It { p: 0, n: 0, left: 0, next: 0, start: 0, end: 0 }
+}
+
+fn it_open(p: u64, n: usize, it: *mut It) -> bool {
+    var a: cborread.Item = cborread.item_zero()
+    if cborread.read_head(p, n, 0, 0, &a) != cborread.CB_OK || a.kind != cborread.K_ARRAY {
+        return false
+    }
+    (*it).p = p
+    (*it).n = n
+    (*it).left = a.val
+    (*it).next = a.end
+    (*it).start = a.end
+    (*it).end = a.end
+    return true
+}
+
+fn it_next(it: *mut It) -> bool {
+    if (*it).left == 0 {
+        return false
+    }
+    var e: usize = 0
+    if cborread.item_end((*it).p, (*it).n, (*it).next, &e) != cborread.CB_OK {
+        (*it).left = 0
+        return false
+    }
+    (*it).start = (*it).next
+    (*it).end = e
+    (*it).next = e
+    (*it).left = (*it).left - 1
+    return true
+}
+
+fn store_empty(out: *mut rt.Buf) {
+    cbor.put_array(out, 0)
+}
+
+fn id_cmp(a: u64, b: u64) -> i32 {
+    var i: usize = 0
+    while i < vrecord.ID_LEN {
+        let x: u8 = rt.ld8(a, i)
+        let y: u8 = rt.ld8(b, i)
+        if x < y {
+            return -1
+        }
+        if x > y {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn bytes_cmp(a: u64, an: usize, b: u64, bn: usize) -> i32 {
+    var m: usize = an
+    if bn < m {
+        m = bn
+    }
+    var i: usize = 0
+    while i < m {
+        let x: u8 = rt.ld8(a, i)
+        let y: u8 = rt.ld8(b, i)
+        if x < y {
+            return -1
+        }
+        if x > y {
+            return 1
+        }
+        i = i + 1
+    }
+    if an < bn {
+        return -1
+    }
+    if an > bn {
+        return 1
+    }
+    return 0
+}
+
+fn version_cmp(pa: u64, na: usize, sa: usize, ea: usize, pb: u64, nb: usize,
+    sb: usize, eb: usize) -> i32 {
+    let ma: u64 = vrecord.rec_modified(pa, na, sa)
+    let mb: u64 = vrecord.rec_modified(pb, nb, sb)
+    if ma < mb {
+        return -1
+    }
+    if ma > mb {
+        return 1
+    }
+    let da: bool = vrecord.is_deleted(pa, na, sa)
+    let db: bool = vrecord.is_deleted(pb, nb, sb)
+    if !da && db {
+        return -1
+    }
+    if da && !db {
+        return 1
+    }
+    return bytes_cmp(pa + sa as u64, ea - sa, pb + sb as u64, eb - sb)
+}
+
+fn map_cbor(rc: i32) -> i32 {
+    if rc == cborread.CB_OK {
+        return vcodes.VR_OK
+    }
+    if rc == cborread.CB_E_LIMIT || rc == cborread.CB_E_DEPTH {
+        return vcodes.VR_E_LIMIT
+    }
+    return vcodes.VR_E_CBOR
+}
+
+fn store_validate(p: u64, n: usize) -> i32 {
+    let crc: i32 = cborread.validate_ex(p, n, 0, 8, MAX_TOTAL_ITEMS)
+    if crc != cborread.CB_OK {
+        return map_cbor(crc)
+    }
+    var it: It = it_zero()
+    if !it_open(p, n, &it) {
+        return vcodes.VR_E_SCHEMA
+    }
+    if it.left > MAX_RECORDS as u64 {
+        return vcodes.VR_E_LIMIT
+    }
+    var have_prev: bool = false
+    var prev: u64 = 0
+    while it_next(&it) {
+        let rc: i32 = vrecord.validate(p, n, it.start)
+        if rc != vcodes.VR_OK {
+            return rc
+        }
+        let cur: u64 = vrecord.id_ptr(p, n, it.start)
+        if have_prev && id_cmp(prev, cur) >= 0 {
+            return vcodes.VR_E_ORDER
+        }
+        prev = cur
+        have_prev = true
+    }
+    return vcodes.VR_OK
+}
+
+fn store_schema(p: u64, n: usize) -> u64 {
+    var it: It = it_zero()
+    if !it_open(p, n, &it) {
+        return vrecord.SCHEMA_VERSION
+    }
+    while it_next(&it) {
+        if vrecord.rec_type(p, n, it.start) == vrecord.T_META {
+            return vrecord.get_uint(p, n, it.start, vrecord.K_SCHEMA, vrecord.SCHEMA_VERSION)
+        }
+    }
+    return vrecord.SCHEMA_VERSION
+}
+
+fn writable(p: u64, n: usize) -> bool {
+    return store_schema(p, n) <= vrecord.SCHEMA_VERSION
+}
+
+fn store_find(p: u64, n: usize, id: u64, start: *mut usize, end: *mut usize) -> bool {
+    var it: It = it_zero()
+    if !it_open(p, n, &it) {
+        return false
+    }
+    while it_next(&it) {
+        let cur: u64 = vrecord.id_ptr(p, n, it.start)
+        if cur != 0 && id_cmp(cur, id) == 0 {
+            *start = it.start
+            *end = it.end
+            return true
+        }
+    }
+    return false
+}
+
+fn store_next_modified(p: u64, n: usize, id: u64, now: u64) -> u64 {
+    var s: usize = 0
+    var e: usize = 0
+    if store_find(p, n, id, &s, &e) {
+        let old: u64 = vrecord.rec_modified(p, n, s)
+        if old >= now {
+            return old + 1
+        }
+    }
+    return now
+}
+
+fn passkey_conflict(bp: u64, bn: usize, a: usize, rp: u64, rpn: usize, uh: u64,
+    uhn: usize, check_uh: bool) -> bool {
+    var rv: cborread.Item = cborread.item_zero()
+    if !vrecord.field(bp, bn, a, vrecord.K_RP_ID, &rv) || rv.len != rpn
+        || !rt.mem_eq(rv.ptr, rp, rpn) {
+        return false
+    }
+    if !check_uh {
+        return true
+    }
+    if vrecord.get_uint(bp, bn, a, vrecord.K_FLAGS, 0) & vrecord.PK_RESIDENT == 0 {
+        return false
+    }
+    var uv: cborread.Item = cborread.item_zero()
+    if !vrecord.field(bp, bn, a, vrecord.K_USER_HANDLE, &uv) {
+        return false
+    }
+    return vrecord.bytes_eq_at(&uv, uh, uhn)
+}
+
+fn is_resident(p: u64, n: usize, pos: usize) -> bool {
+    return vrecord.get_uint(p, n, pos, vrecord.K_FLAGS, 0) & vrecord.PK_RESIDENT != 0
+}
+
+fn live_passkey(p: u64, n: usize, pos: usize) -> bool {
+    return vrecord.rec_type(p, n, pos) == vrecord.T_PASSKEY && vrecord.is_live(p, n, pos)
+}
+
+fn same_cred(p: u64, n: usize, a: usize, q: u64, qn: usize) -> bool {
+    var c: cborread.Item = cborread.item_zero()
+    if !vrecord.field(p, n, a, vrecord.K_CRED_ID, &c) {
+        return false
+    }
+    return vrecord.bytes_eq_at(&c, q, qn)
+}
+
+fn same_resident(p: u64, n: usize, a: usize, rp: *mut cborread.Item,
+    uh: *mut cborread.Item) -> bool {
+    if !is_resident(p, n, a) {
+        return false
+    }
+    var r: cborread.Item = cborread.item_zero()
+    var u: cborread.Item = cborread.item_zero()
+    if !vrecord.field(p, n, a, vrecord.K_RP_ID, &r) || !vrecord.field(p, n, a, vrecord.K_USER_HANDLE, &u) {
+        return false
+    }
+    return r.len == (*rp).len && rt.mem_eq(r.ptr, (*rp).ptr, r.len)
+        && u.len == (*uh).len && rt.mem_eq(u.ptr, (*uh).ptr, u.len)
+}
+
+fn emit_array_head(out: *mut rt.Buf, count: usize) {
+    cbor.put_array(out, count)
+}
+
+fn store_put(p: u64, n: usize, rec: u64, rn: usize, out: *mut rt.Buf) -> i32 {
+    var rc: i32 = vrecord.validate(rec, rn, 0)
+    if rc != vcodes.VR_OK {
+        return rc
+    }
+    rc = store_validate(p, n)
+    if rc != vcodes.VR_OK {
+        return rc
+    }
+    if !writable(p, n) {
+        return vcodes.VR_E_NEWER
+    }
+    let id: u64 = vrecord.id_ptr(rec, rn, 0)
+    let new_mod: u64 = vrecord.rec_modified(rec, rn, 0)
+    let new_type: u64 = vrecord.rec_type(rec, rn, 0)
+    let new_live: bool = vrecord.is_live(rec, rn, 0)
+    var it: It = it_zero()
+    it_open(p, n, &it)
+    var count: usize = it.left as usize
+    var replaced: bool = false
+    var rp: cborread.Item = cborread.item_zero()
+    var uh: cborread.Item = cborread.item_zero()
+    var cid: cborread.Item = cborread.item_zero()
+    let is_pk: bool = new_live && new_type == vrecord.T_PASSKEY
+    var resident: bool = false
+    if is_pk {
+        vrecord.field(rec, rn, 0, vrecord.K_RP_ID, &rp)
+        vrecord.field(rec, rn, 0, vrecord.K_CRED_ID, &cid)
+        resident = is_resident(rec, rn, 0) && vrecord.field(rec, rn, 0, vrecord.K_USER_HANDLE, &uh)
+    }
+    while it_next(&it) {
+        let cur: u64 = vrecord.id_ptr(p, n, it.start)
+        let same: bool = id_cmp(cur, id) == 0
+        if same {
+            replaced = true
+            if vrecord.rec_modified(p, n, it.start) >= new_mod {
+                return vcodes.VR_E_STALE
+            }
+            if vrecord.rec_type(p, n, it.start) != new_type {
+                return vcodes.VR_E_SCHEMA
+            }
+        }
+        if is_pk && !same && live_passkey(p, n, it.start)
+            && same_cred(p, n, it.start, cid.ptr, cid.len) {
+            return vcodes.VR_E_DUP
+        }
+    }
+    if !replaced {
+        if count >= MAX_RECORDS {
+            return vcodes.VR_E_LIMIT
+        }
+        count = count + 1
+    }
+    var body: rt.Buf = rt.buf_new()
+    var inserted: bool = false
+    it_open(p, n, &it)
+    while it_next(&it) {
+        let cur: u64 = vrecord.id_ptr(p, n, it.start)
+        let cmp: i32 = id_cmp(cur, id)
+        if !inserted && cmp >= 0 {
+            rt.buf_push_bytes(&body, rec, rn)
+            inserted = true
+            if cmp == 0 {
+                continue
+            }
+        }
+        if resident && live_passkey(p, n, it.start) && cmp != 0
+            && same_resident(p, n, it.start, &rp, &uh) {
+            var mod_old: u64 = vrecord.rec_modified(p, n, it.start)
+            if new_mod > mod_old {
+                mod_old = new_mod
+            }
+            rc = vbuild.tombstone_new(&body, p, n, it.start, mod_old)
+            if rc != vcodes.VR_OK {
+                rt.buf_free(&body)
+                return rc
+            }
+            continue
+        }
+        rt.buf_push_bytes(&body, p + it.start as u64, it.end - it.start)
+    }
+    if !inserted {
+        rt.buf_push_bytes(&body, rec, rn)
+    }
+    emit_array_head(out, count)
+    rt.buf_push_bytes(out, rt.buf_ptr(&body), rt.buf_len(&body))
+    rt.buf_free(&body)
+    return vcodes.VR_OK
+}
+
+fn store_delete(p: u64, n: usize, id: u64, now: u64, out: *mut rt.Buf) -> i32 {
+    var rc: i32 = store_validate(p, n)
+    if rc != vcodes.VR_OK {
+        return rc
+    }
+    if !writable(p, n) {
+        return vcodes.VR_E_NEWER
+    }
+    var s: usize = 0
+    var e: usize = 0
+    if !store_find(p, n, id, &s, &e) {
+        return vcodes.VR_E_NOTFOUND
+    }
+    var it: It = it_zero()
+    it_open(p, n, &it)
+    var body: rt.Buf = rt.buf_new()
+    while it_next(&it) {
+        if it.start == s {
+            if vrecord.is_deleted(p, n, s) {
+                rt.buf_push_bytes(&body, p + s as u64, e - s)
+            } else {
+                rc = vbuild.tombstone_new(&body, p, n, s,
+                    store_next_modified(p, n, id, now))
+                if rc != vcodes.VR_OK {
+                    rt.buf_free(&body)
+                    return rc
+                }
+            }
+        } else {
+            rt.buf_push_bytes(&body, p + it.start as u64, it.end - it.start)
+        }
+    }
+    emit_array_head(out, vrecord_count(p, n))
+    rt.buf_push_bytes(out, rt.buf_ptr(&body), rt.buf_len(&body))
+    rt.buf_free(&body)
+    return vcodes.VR_OK
+}
+
+fn vrecord_count(p: u64, n: usize) -> usize {
+    var it: It = it_zero()
+    if !it_open(p, n, &it) {
+        return 0
+    }
+    return it.left as usize
+}
+
+fn store_purge(p: u64, n: usize, now: u64, max_age: u64, out: *mut rt.Buf) -> i32 {
+    let rc: i32 = store_validate(p, n)
+    if rc != vcodes.VR_OK {
+        return rc
+    }
+    var it: It = it_zero()
+    it_open(p, n, &it)
+    var body: rt.Buf = rt.buf_new()
+    var kept: usize = 0
+    while it_next(&it) {
+        var drop: bool = false
+        if vrecord.is_deleted(p, n, it.start) && now >= max_age
+            && vrecord.rec_modified(p, n, it.start) <= now - max_age {
+            drop = true
+        }
+        if !drop {
+            rt.buf_push_bytes(&body, p + it.start as u64, it.end - it.start)
+            kept = kept + 1
+        }
+    }
+    emit_array_head(out, kept)
+    rt.buf_push_bytes(out, rt.buf_ptr(&body), rt.buf_len(&body))
+    rt.buf_free(&body)
+    return vcodes.VR_OK
+}
+
+fn dominates(p: u64, n: usize, q_start: usize, q_end: usize, r_start: usize,
+    r_end: usize) -> bool {
+    let c: i32 = version_cmp(p, n, q_start, q_end, p, n, r_start, r_end)
+    return c > 0
+}
+
+fn loses(p: u64, n: usize, s: usize, e: usize) -> bool {
+    var rp: cborread.Item = cborread.item_zero()
+    var uh: cborread.Item = cborread.item_zero()
+    var cid: cborread.Item = cborread.item_zero()
+    vrecord.field(p, n, s, vrecord.K_RP_ID, &rp)
+    vrecord.field(p, n, s, vrecord.K_CRED_ID, &cid)
+    let resident: bool = is_resident(p, n, s) && vrecord.field(p, n, s, vrecord.K_USER_HANDLE, &uh)
+    var it: It = it_zero()
+    it_open(p, n, &it)
+    while it_next(&it) {
+        if it.start == s || !live_passkey(p, n, it.start) {
+            continue
+        }
+        var clash: bool = same_cred(p, n, it.start, cid.ptr, cid.len)
+        if !clash && resident {
+            clash = same_resident(p, n, it.start, &rp, &uh)
+        }
+        if clash && dominates(p, n, it.start, it.end, s, e) {
+            return true
+        }
+    }
+    return false
+}
+
+fn store_resolve(p: u64, n: usize, now: u64, out: *mut rt.Buf) -> i32 {
+    var rc: i32 = store_validate(p, n)
+    if rc != vcodes.VR_OK {
+        return rc
+    }
+    if !writable(p, n) {
+        return vcodes.VR_E_NEWER
+    }
+    var it: It = it_zero()
+    it_open(p, n, &it)
+    var body: rt.Buf = rt.buf_new()
+    while it_next(&it) {
+        if live_passkey(p, n, it.start) && loses(p, n, it.start, it.end) {
+            var m: u64 = now
+            let old: u64 = vrecord.rec_modified(p, n, it.start)
+            if old >= m {
+                m = old + 1
+            }
+            rc = vbuild.tombstone_new(&body, p, n, it.start, m)
+            if rc != vcodes.VR_OK {
+                rt.buf_free(&body)
+                return rc
+            }
+        } else {
+            rt.buf_push_bytes(&body, p + it.start as u64, it.end - it.start)
+        }
+    }
+    emit_array_head(out, vrecord_count(p, n))
+    rt.buf_push_bytes(out, rt.buf_ptr(&body), rt.buf_len(&body))
+    rt.buf_free(&body)
+    return vcodes.VR_OK
+}
+
+fn push_range(out: *mut rt.Buf, s: usize, e: usize) {
+    vlayout.put_be64(out, s as u64)
+    vlayout.put_be64(out, e as u64)
+}
+
+fn find_rp(p: u64, n: usize, rp: str, out: *mut rt.Buf) -> usize {
+    var it: It = it_zero()
+    var c: usize = 0
+    if !it_open(p, n, &it) {
+        return 0
+    }
+    while it_next(&it) {
+        if live_passkey(p, n, it.start)
+            && passkey_conflict(p, n, it.start, rp.p as u64, rp.n, 0, 0, false) {
+            push_range(out, it.start, it.end)
+            c = c + 1
+        }
+    }
+    return c
+}
+
+fn find_origin(p: u64, n: usize, origin: str, out: *mut rt.Buf) -> usize {
+    var it: It = it_zero()
+    var c: usize = 0
+    if !it_open(p, n, &it) {
+        return 0
+    }
+    while it_next(&it) {
+        if vrecord.rec_type(p, n, it.start) == vrecord.T_LOGIN && vrecord.is_live(p, n, it.start) {
+            var o: cborread.Item = cborread.item_zero()
+            if vrecord.field(p, n, it.start, vrecord.K_ORIGINS, &o) && o.kind == cborread.K_ARRAY {
+                var cur: usize = o.end
+                var i: u64 = 0
+                var hit: bool = false
+                while i < o.val {
+                    var e: cborread.Item = cborread.item_zero()
+                    if cborread.read_head(p, n, cur, 0, &e) != cborread.CB_OK {
+                        break
+                    }
+                    if vrecord.text_eq(&e, origin) {
+                        hit = true
+                    }
+                    cur = e.end
+                    i = i + 1
+                }
+                if hit {
+                    push_range(out, it.start, it.end)
+                    c = c + 1
+                }
+            }
+        }
+    }
+    return c
+}
+
+fn find_resident(p: u64, n: usize, rp: str, uh: u64, uhn: usize, start: *mut usize,
+    end: *mut usize) -> bool {
+    var it: It = it_zero()
+    var found: bool = false
+    var bs: usize = 0
+    var be: usize = 0
+    if !it_open(p, n, &it) {
+        return false
+    }
+    while it_next(&it) {
+        if live_passkey(p, n, it.start)
+            && passkey_conflict(p, n, it.start, rp.p as u64, rp.n, uh, uhn, true) {
+            if !found || dominates(p, n, it.start, it.end, bs, be) {
+                bs = it.start
+                be = it.end
+                found = true
+            }
+        }
+    }
+    if found {
+        *start = bs
+        *end = be
+    }
+    return found
+}
+
+fn find_credential(p: u64, n: usize, cid: u64, start: *mut usize, end: *mut usize) -> bool {
+    var it: It = it_zero()
+    if !it_open(p, n, &it) {
+        return false
+    }
+    while it_next(&it) {
+        if live_passkey(p, n, it.start) && same_cred(p, n, it.start, cid, 32) {
+            *start = it.start
+            *end = it.end
+            return true
+        }
+    }
+    return false
+}
+
+fn count_live(p: u64, n: usize, t: u64) -> usize {
+    var it: It = it_zero()
+    var c: usize = 0
+    if !it_open(p, n, &it) {
+        return 0
+    }
+    while it_next(&it) {
+        if vrecord.rec_type(p, n, it.start) == t && vrecord.is_live(p, n, it.start) {
+            c = c + 1
+        }
+    }
+    return c
+}

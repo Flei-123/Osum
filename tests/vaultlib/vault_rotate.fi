@@ -1,0 +1,125 @@
+import std.rt
+import std.fs
+import std.testkit
+import vault.vlayout
+import vault.vrand
+import vault.container
+import vault.vrotate
+import vault_helper
+
+fn build(img: *mut rt.Buf, vk: u64, key: u64) {
+    testkit.assert_eq_i64(container.create(img, vault_helper.sp("records body"), 12,
+        vault_helper.sp("correct horse"), 13, 64, 1, 1, 0 as u8, vk) as i64, 0)
+    testkit.assert_eq_i64(container.slot_add_key(img, vk, vlayout.SLOT_RECOVERY, key) as i64, 0)
+    testkit.assert_eq_i64(container.slot_add_pw(img, vk, vlayout.SLOT_LOGIN,
+        vault_helper.sp("login secret"), 12, 64, 1, 1) as i64, 0)
+}
+
+fn secrets(s: *mut vrotate.Secrets, key: u64) {
+    (*s).pw = vault_helper.sp("correct horse")
+    (*s).pw_len = 13
+    (*s).login = vault_helper.sp("login secret")
+    (*s).login_len = 12
+    (*s).recovery_key = key
+}
+
+fn same(a: *mut rt.Buf, b: *mut rt.Buf) -> bool {
+    return rt.buf_len(a) == rt.buf_len(b) && rt.mem_eq(rt.buf_ptr(a), rt.buf_ptr(b), rt.buf_len(a))
+}
+
+#[test]
+fn rotation_rewraps_and_revokes() {
+    var vk: [u8; 32] = [0; 32]
+    var nvk: [u8; 32] = [0; 32]
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 9 as u8)
+    var img: rt.Buf = rt.buf_new()
+    build(&img, (&vk[0]) as u64, (&key[0]) as u64)
+    var before: rt.Buf = rt.buf_new()
+    vault_helper.copy_img(&img, &before)
+    var sec: vrotate.Secrets = vrotate.secrets_zero()
+    secrets(&sec, (&key[0]) as u64)
+    var info0: vlayout.Info = vlayout.info_zero()
+    vlayout.parse_header(rt.buf_ptr(&img), rt.buf_len(&img), &info0)
+    testkit.assert_eq_i64(vrotate.rotate(&img, (&vk[0]) as u64, vlayout.SLOT_RECOVERY, &sec, (&nvk[0]) as u64) as i64, 0)
+    testkit.assert_true(!rt.mem_eq((&vk[0]) as u64, (&nvk[0]) as u64, 32), "new volume key")
+    var info: vlayout.Info = vlayout.info_zero()
+    vlayout.parse_header(rt.buf_ptr(&img), rt.buf_len(&img), &info)
+    testkit.assert_eq_i64(info.slot_count as i64, 2)
+    testkit.assert_eq_i64(info.revision as i64, (info0.revision + 1) as i64)
+    testkit.assert_true(vault_helper.open_ok(&img, "correct horse", "records body"), "pw opens")
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.open_pw(rt.buf_ptr(&img), rt.buf_len(&img), vlayout.SLOT_LOGIN,
+        vault_helper.sp("login secret"), 12, &out, 0) as i64, 0)
+    testkit.assert_eq_i64(container.open_key(rt.buf_ptr(&img), rt.buf_len(&img), vlayout.SLOT_RECOVERY,
+        (&key[0]) as u64, &out, 0) as i64, vlayout.VC_E_NOSLOT as i64)
+    var o2: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.read_body(rt.buf_ptr(&img), rt.buf_len(&img), (&vk[0]) as u64, &o2) as i64, vlayout.VC_E_TAG as i64)
+    testkit.assert_eq_i64(container.read_body(rt.buf_ptr(&img), rt.buf_len(&img), (&nvk[0]) as u64, &o2) as i64, 0)
+}
+
+#[test]
+fn failed_rotation_leaves_image_untouched() {
+    var vk: [u8; 32] = [0; 32]
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 9 as u8)
+    var img: rt.Buf = rt.buf_new()
+    build(&img, (&vk[0]) as u64, (&key[0]) as u64)
+    var before: rt.Buf = rt.buf_new()
+    vault_helper.copy_img(&img, &before)
+    var sec: vrotate.Secrets = vrotate.secrets_zero()
+    secrets(&sec, (&key[0]) as u64)
+    sec.login = 0
+    testkit.assert_eq_i64(vrotate.rotate(&img, (&vk[0]) as u64, vlayout.SLOT_RECOVERY, &sec, 0) as i64, vlayout.VC_E_PARAM as i64)
+    testkit.assert_true(same(&img, &before), "missing secret")
+    secrets(&sec, (&key[0]) as u64)
+    sec.pw = vault_helper.sp("wrong horse!!")
+    testkit.assert_eq_i64(vrotate.rotate(&img, (&vk[0]) as u64, vlayout.SLOT_RECOVERY, &sec, 0) as i64, vlayout.VC_E_CRED as i64)
+    testkit.assert_true(same(&img, &before), "wrong secret")
+    secrets(&sec, (&key[0]) as u64)
+    testkit.assert_eq_i64(vrotate.rotate(&img, (&vk[0]) as u64, vlayout.SLOT_DEVICE, &sec, 0) as i64, vlayout.VC_E_NOSLOT as i64)
+    testkit.assert_true(same(&img, &before), "no such slot")
+    var bad: [u8; 32] = [1; 32]
+    testkit.assert_eq_i64(vrotate.rotate(&img, (&bad[0]) as u64, vlayout.SLOT_RECOVERY, &sec, 0) as i64, vlayout.VC_E_TAG as i64)
+    testkit.assert_true(same(&img, &before), "wrong volume key")
+    var solo: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vault_helper.make(&solo, "x", "correct horse") as i64, 0)
+    var vk2: [u8; 32] = [0; 32]
+    var o: rt.Buf = rt.buf_new()
+    container.open_pw(rt.buf_ptr(&solo), rt.buf_len(&solo), vlayout.SLOT_PW, vault_helper.sp("correct horse"), 13, &o, (&vk2[0]) as u64)
+    var keep: rt.Buf = rt.buf_new()
+    vault_helper.copy_img(&solo, &keep)
+    testkit.assert_eq_i64(vrotate.rotate(&solo, (&vk2[0]) as u64, vlayout.SLOT_PW, &sec, 0) as i64, vlayout.VC_E_PARAM as i64)
+    testkit.assert_true(same(&solo, &keep), "last slot stays")
+    testkit.assert_eq_i64(vrotate.rotate(&solo, (&vk2[0]) as u64, 0 as u8, &sec, 0) as i64, 0)
+    testkit.assert_true(vault_helper.open_ok(&solo, "correct horse", "x"), "rekey only")
+}
+
+fn run(dir: str, ctx: u64) {
+    let path: str = fs.path_join(dir, "v.vlt")
+    let bak: str = fs.path_join(dir, "v.vlt.bak")
+    var vk: [u8; 32] = [0; 32]
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 9 as u8)
+    var img: rt.Buf = rt.buf_new()
+    build(&img, (&vk[0]) as u64, (&key[0]) as u64)
+    testkit.assert_eq_i64(container.file_save(path, &img) as i64, 0)
+    testkit.assert_eq_i64(container.update(&img, (&vk[0]) as u64, vault_helper.sp("second body"), 11) as i64, 0)
+    testkit.assert_eq_i64(container.file_save(path, &img) as i64, 0)
+    testkit.assert_true(fs.exists(bak), "backup exists before rotation")
+    var sec: vrotate.Secrets = vrotate.secrets_zero()
+    secrets(&sec, (&key[0]) as u64)
+    var nvk: [u8; 32] = [0; 32]
+    testkit.assert_eq_i64(vrotate.rotate_file(fs.path_join(dir, "nodir/x.vlt"), &img, (&vk[0]) as u64, vlayout.SLOT_RECOVERY, &sec, 0) as i64, vlayout.VC_E_IO as i64)
+    testkit.assert_true(fs.exists(bak), "failed rotation keeps files")
+    testkit.assert_eq_i64(vrotate.rotate_file(path, &img, (&vk[0]) as u64, vlayout.SLOT_RECOVERY, &sec, (&nvk[0]) as u64) as i64, 0)
+    testkit.assert_true(!fs.exists(bak), "old generation removed")
+    var loaded: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.file_load(path, &loaded) as i64, 0)
+    testkit.assert_true(vault_helper.open_ok(&loaded, "correct horse", "second body"), "reopens")
+}
+
+#[test]
+fn rotate_file_drops_old_generation() {
+    testkit.with_dir(run, 0)
+}

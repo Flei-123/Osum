@@ -1,0 +1,183 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.cbor
+import std.cborread
+import vault.vlayout
+import vault.vcodes
+
+export { RW, RW_MAX_ENTRIES, rw_new, rw_free, rw_uint, rw_int, rw_bytes,
+    rw_text, rw_bool, rw_list_begin, rw_list_text, rw_pair, rw_finish }
+
+const RW_MAX_ENTRIES: usize = 64
+const ENTRY_SIZE: usize = 24
+
+struct RW {
+    stage: rt.Buf,
+    idx: rt.Buf,
+    count: usize,
+    err: i32,
+}
+
+fn rw_new() -> RW {
+    return RW { stage: rt.buf_new(), idx: rt.buf_new(), count: 0, err: 0 }
+}
+
+fn rw_free(w: *mut RW) {
+    rt.buf_free(&(*w).stage)
+    rt.buf_free(&(*w).idx)
+    (*w).count = 0
+}
+
+fn set_be64(p: u64, off: usize, v: u64) {
+    var i: usize = 0
+    while i < 8 {
+        rt.st8(p, off + i, ((v >> ((56 - i * 8) as u64)) & 255) as u8)
+        i = i + 1
+    }
+}
+
+fn begin(w: *mut RW, key: u64) -> bool {
+    if (*w).err != 0 {
+        return false
+    }
+    if (*w).count >= RW_MAX_ENTRIES {
+        (*w).err = vcodes.VR_E_LIMIT
+        return false
+    }
+    let ks: usize = rt.buf_len(&(*w).stage)
+    cbor.put_uint(&(*w).stage, key)
+    let ke: usize = rt.buf_len(&(*w).stage)
+    vlayout.put_be64(&(*w).idx, ks as u64)
+    vlayout.put_be64(&(*w).idx, ke as u64)
+    vlayout.put_be64(&(*w).idx, ke as u64)
+    (*w).count = (*w).count + 1
+    return true
+}
+
+fn close_entry(w: *mut RW) {
+    let at: usize = ((*w).count - 1) * ENTRY_SIZE + 16
+    set_be64(rt.buf_ptr(&(*w).idx), at, rt.buf_len(&(*w).stage) as u64)
+}
+
+fn rw_uint(w: *mut RW, key: u64, v: u64) {
+    if begin(w, key) {
+        cbor.put_uint(&(*w).stage, v)
+        close_entry(w)
+    }
+}
+
+fn rw_int(w: *mut RW, key: u64, v: i64) {
+    if begin(w, key) {
+        cbor.put_int(&(*w).stage, v)
+        close_entry(w)
+    }
+}
+
+fn rw_bytes(w: *mut RW, key: u64, p: u64, n: usize) {
+    if begin(w, key) {
+        cbor.put_bytes(&(*w).stage, p, n)
+        close_entry(w)
+    }
+}
+
+fn rw_text(w: *mut RW, key: u64, p: u64, n: usize) {
+    if begin(w, key) {
+        cbor.put_text_raw(&(*w).stage, p, n)
+        close_entry(w)
+    }
+}
+
+fn rw_bool(w: *mut RW, key: u64, v: bool) {
+    if begin(w, key) {
+        cbor.put_bool(&(*w).stage, v)
+        close_entry(w)
+    }
+}
+
+fn rw_list_begin(w: *mut RW, key: u64, count: usize) {
+    if begin(w, key) {
+        cbor.put_array(&(*w).stage, count)
+        close_entry(w)
+    }
+}
+
+fn rw_list_text(w: *mut RW, p: u64, n: usize) {
+    if (*w).err != 0 || (*w).count == 0 {
+        return
+    }
+    cbor.put_text_raw(&(*w).stage, p, n)
+    close_entry(w)
+}
+
+fn rw_pair(w: *mut RW, kp: u64, kn: usize, vp: u64, vn: usize) {
+    if (*w).err != 0 {
+        return
+    }
+    if (*w).count >= RW_MAX_ENTRIES {
+        (*w).err = vcodes.VR_E_LIMIT
+        return
+    }
+    let ks: usize = rt.buf_len(&(*w).stage)
+    rt.buf_push_bytes(&(*w).stage, kp, kn)
+    let ke: usize = rt.buf_len(&(*w).stage)
+    rt.buf_push_bytes(&(*w).stage, vp, vn)
+    vlayout.put_be64(&(*w).idx, ks as u64)
+    vlayout.put_be64(&(*w).idx, ke as u64)
+    vlayout.put_be64(&(*w).idx, rt.buf_len(&(*w).stage) as u64)
+    (*w).count = (*w).count + 1
+}
+
+fn entry_key_start(w: *mut RW, i: usize) -> usize {
+    return vlayout.get_be64(rt.buf_ptr(&(*w).idx), i * ENTRY_SIZE) as usize
+}
+
+fn entry_key_end(w: *mut RW, i: usize) -> usize {
+    return vlayout.get_be64(rt.buf_ptr(&(*w).idx), i * ENTRY_SIZE + 8) as usize
+}
+
+fn entry_end(w: *mut RW, i: usize) -> usize {
+    return vlayout.get_be64(rt.buf_ptr(&(*w).idx), i * ENTRY_SIZE + 16) as usize
+}
+
+fn rw_finish(w: *mut RW, out: *mut rt.Buf) -> i32 {
+    if (*w).err != 0 {
+        return (*w).err
+    }
+    var order: [usize; 64] = [0 as usize; 64]
+    let n: usize = (*w).count
+    let sp: u64 = rt.buf_ptr(&(*w).stage)
+    var i: usize = 0
+    while i < n {
+        var j: usize = i
+        while j > 0 {
+            let a: usize = order[j - 1]
+            if cborread.key_cmp(sp, entry_key_start(w, a), entry_key_end(w, a),
+                entry_key_start(w, i), entry_key_end(w, i)) <= 0 {
+                break
+            }
+            order[j] = a
+            j = j - 1
+        }
+        order[j] = i
+        i = i + 1
+    }
+    i = 1
+    while i < n {
+        let a: usize = order[i - 1]
+        let b: usize = order[i]
+        if cborread.key_cmp(sp, entry_key_start(w, a), entry_key_end(w, a),
+            entry_key_start(w, b), entry_key_end(w, b)) == 0 {
+            return vcodes.VR_E_DUP
+        }
+        i = i + 1
+    }
+    cbor.put_map(out, n)
+    i = 0
+    while i < n {
+        let e: usize = order[i]
+        rt.buf_push_bytes(out, sp + entry_key_start(w, e) as u64,
+            entry_end(w, e) - entry_key_start(w, e))
+        i = i + 1
+    }
+    return vcodes.VR_OK
+}

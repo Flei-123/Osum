@@ -1,0 +1,128 @@
+import std.rt
+import vault.vbuild
+import vault.vstore
+import vault.vrecord
+import vault.rwriter
+
+export { set_id, login, passkey, note, put, put_rc, store_eq, ids_of, rec_at,
+    fill, count_records, add_common, finish }
+
+fn set_id(b: u64, v: u64) {
+    var i: usize = 0
+    while i < 16 {
+        rt.st8(b, i, 0 as u8)
+        i = i + 1
+    }
+    var k: usize = 0
+    while k < 8 {
+        rt.st8(b, 15 - k, ((v >> ((k * 8) as u64)) & 255) as u8)
+        k = k + 1
+    }
+}
+
+fn fill(b: u64, n: usize, seed: u8) {
+    var i: usize = 0
+    while i < n {
+        rt.st8(b, i, (seed as usize + i * 3 + 1) as u8)
+        i = i + 1
+    }
+}
+
+fn login(out: *mut rt.Buf, idn: u64, modified: u64, title: str, origins: str, password: str) -> i32 {
+    var id: [u8; 16] = [0; 16]
+    set_id((&id[0]) as u64, idn)
+    rt.buf_clear(out)
+    return vbuild.login_new(out, (&id[0]) as u64, 1000, modified, title, origins, "user", password, "", 0)
+}
+
+fn note(out: *mut rt.Buf, idn: u64, modified: u64, title: str, text: str) -> i32 {
+    var id: [u8; 16] = [0; 16]
+    set_id((&id[0]) as u64, idn)
+    rt.buf_clear(out)
+    return vbuild.note_new(out, (&id[0]) as u64, 1000, modified, title, text)
+}
+
+fn passkey(out: *mut rt.Buf, idn: u64, modified: u64, rp: str, uh_seed: u8, cid_seed: u8, flags: u64) -> i32 {
+    var id: [u8; 16] = [0; 16]
+    var uh: [u8; 8] = [0; 8]
+    var cid: [u8; 32] = [0; 32]
+    var key: [u8; 32] = [0; 32]
+    set_id((&id[0]) as u64, idn)
+    fill((&uh[0]) as u64, 8, uh_seed)
+    fill((&cid[0]) as u64, 32, cid_seed)
+    fill((&key[0]) as u64, 32, cid_seed + 9 as u8)
+    var k: vbuild.Passkey = vbuild.passkey_zero()
+    k.id = (&id[0]) as u64
+    k.created = 1000
+    k.modified = modified
+    k.rp_id = rp
+    k.rp_name = "Example"
+    k.user_handle = (&uh[0]) as u64
+    k.user_handle_len = 8
+    k.user_name = "ann"
+    k.cred_id = (&cid[0]) as u64
+    k.priv_key = (&key[0]) as u64
+    k.flags = flags
+    rt.buf_clear(out)
+    return vbuild.passkey_new(out, &k)
+}
+
+fn put_rc(store: *mut rt.Buf, rec: *mut rt.Buf) -> i32 {
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = vstore.store_put(rt.buf_ptr(store), rt.buf_len(store),
+        rt.buf_ptr(rec), rt.buf_len(rec), &out)
+    if rc == 0 {
+        rt.buf_free(store)
+        (*store) = out
+    } else {
+        rt.buf_free(&out)
+    }
+    return rc
+}
+
+fn put(store: *mut rt.Buf, rec: *mut rt.Buf) {
+    put_rc(store, rec)
+}
+
+fn store_eq(a: *mut rt.Buf, b: *mut rt.Buf) -> bool {
+    return rt.buf_len(a) == rt.buf_len(b) && rt.mem_eq(rt.buf_ptr(a), rt.buf_ptr(b), rt.buf_len(a))
+}
+
+fn count_records(s: *mut rt.Buf) -> usize {
+    var it: vstore.It = vstore.it_zero()
+    if !vstore.it_open(rt.buf_ptr(s), rt.buf_len(s), &it) {
+        return 0
+    }
+    return it.left as usize
+}
+
+fn ids_of(s: *mut rt.Buf, out: *mut rt.Buf) {
+    var it: vstore.It = vstore.it_zero()
+    vstore.it_open(rt.buf_ptr(s), rt.buf_len(s), &it)
+    while vstore.it_next(&it) {
+        let id: u64 = vrecord.id_ptr(rt.buf_ptr(s), rt.buf_len(s), it.start)
+        rt.buf_push(out, rt.ld8(id, 15))
+    }
+}
+
+fn rec_at(s: *mut rt.Buf, idn: u64, start: *mut usize, end: *mut usize) -> bool {
+    var id: [u8; 16] = [0; 16]
+    set_id((&id[0]) as u64, idn)
+    return vstore.store_find(rt.buf_ptr(s), rt.buf_len(s), (&id[0]) as u64, start, end)
+}
+
+fn add_common(w: *mut rwriter.RW, idn: u64, t: u64, modified: u64) {
+    var id: [u8; 16] = [0; 16]
+    set_id((&id[0]) as u64, idn)
+    rwriter.rw_bytes(w, 0, (&id[0]) as u64, 16)
+    rwriter.rw_uint(w, 1, t)
+    rwriter.rw_uint(w, 2, 1000)
+    rwriter.rw_uint(w, 3, modified)
+}
+
+fn finish(w: *mut rwriter.RW, out: *mut rt.Buf) -> i32 {
+    rt.buf_clear(out)
+    let rc: i32 = rwriter.rw_finish(w, out)
+    rwriter.rw_free(w)
+    return rc
+}
