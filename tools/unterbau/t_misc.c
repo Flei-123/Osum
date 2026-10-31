@@ -20,14 +20,51 @@
 #include <time.h>
 #include <dirent.h>
 
+static void statx_calls(void)
+{
+    unsigned char sx[256];
+    struct stat st;
+    long r;
+    memset(sx, 0xAA, sizeof sx); errno = 0;
+    r = syscall(332, -100, "/", 0, 0x7ff, sx);
+    unsigned mode = sx[28] | (sx[29] << 8);
+    CHECK("statx_root_ok", r == 0, "r %ld errno %d", r, errno);
+    CHECK("statx_root_is_dir", r == 0 && S_ISDIR(mode), "mode %o", mode);
+    CHECK("statx_mask_basic", r == 0 && (sx[0] | (sx[1] << 8)) == 0x7ff, "mask %x", sx[0] | (sx[1] << 8));
+    int fd = open("/tmp/statx_probe", O_CREAT | O_RDWR | O_TRUNC, 0640);
+    CHECK("statx_probe_create", fd >= 0 && write(fd, "hello", 5) == 5, "errno %d", errno);
+    memset(sx, 0xAA, sizeof sx); errno = 0;
+    r = syscall(332, -100, "/tmp/statx_probe", 0, 0x7ff, sx);
+    mode = sx[28] | (sx[29] << 8);
+    unsigned long long size; memcpy(&size, sx + 40, 8);
+    CHECK("statx_file_reg", r == 0 && S_ISREG(mode), "r %ld mode %o errno %d", r, mode, errno);
+    CHECK("statx_file_size", r == 0 && size == 5, "size %llu", size);
+    errno = 0;
+    int sr = stat("/tmp/statx_probe", &st);
+    unsigned long long ino; memcpy(&ino, sx + 32, 8);
+    CHECK("statx_matches_stat", sr == 0 && r == 0 && ino == st.st_ino && (mode & 07777) == (st.st_mode & 07777), "ino %llu/%llu", ino, (unsigned long long)st.st_ino);
+    unsigned uid; memcpy(&uid, sx + 20, 4);
+    CHECK("statx_uid_matches", sr == 0 && uid == st.st_uid, "uid %u/%u", uid, st.st_uid);
+    memset(sx, 0xAA, sizeof sx); errno = 0;
+    r = syscall(332, fd, "", 0x1000, 0x7ff, sx);
+    memcpy(&size, sx + 40, 8);
+    CHECK("statx_empty_path_fd", r == 0 && size == 5, "r %ld size %llu errno %d", r, size, errno);
+    errno = 0;
+    r = syscall(332, -100, "/tmp/statx_missing_zz", 0, 0x7ff, sx);
+    CHECK("statx_missing_enoent", r == -1 && errno == ENOENT, "r %ld errno %d", r, errno);
+    errno = 0;
+    r = syscall(332, -100, "/tmp/statx_probe", 0, 0x7ff, (void *)8);
+    CHECK("statx_bad_buffer_efault", r == -1 && errno == EFAULT, "r %ld errno %d", r, errno);
+    close(fd);
+    unlink("/tmp/statx_probe");
+}
+
 static void absent_syscalls(void)
 {
     errno = 0; long r = syscall(435, 0, 0);
     CHECK("clone3_enosys", r == -1 && errno == ENOSYS, "r %ld errno %d", r, errno);
     errno = 0; r = syscall(334, 0, 0, 0, 0);
     CHECK("rseq_enosys", r == -1 && errno == ENOSYS, "r %ld errno %d", r, errno);
-    errno = 0; r = syscall(332, -100, "/", 0, 0, 0);
-    CHECK("statx_enosys_or_ok", (r == -1 && errno == ENOSYS) || r == 0, "r %ld errno %d", r, errno);
     errno = 0; r = syscall(219);
     CHECK("restart_syscall_eintr", r == -1 && errno == EINTR, "r %ld errno %d", r, errno);
 }
@@ -35,6 +72,7 @@ static void absent_syscalls(void)
 int main(void)
 {
     absent_syscalls();
+    statx_calls();
     cpu_set_t cs; CPU_ZERO(&cs); errno = 0;
     int r = sched_getaffinity(0, sizeof cs, &cs);
     CHECKC("sched_getaffinity", r == 0);

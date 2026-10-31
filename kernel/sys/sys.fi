@@ -48,6 +48,7 @@ import arch.cpu
 import arch.x86_64.user
 import fs.fs
 import fs.statsane
+import fs.statxconv
 import fs.fsgrow
 import drv.hid.kbd
 import ldr.elf
@@ -414,12 +415,11 @@ const SYS_READV: u64 = 19
 const SYS_WRITEV: u64 = 20
 const SYS_SET_TID_ADDRESS: u64 = 218
 const ABS_RESTART_SYSCALL: u64 = 219
-const ABS_STATX: u64 = 332
 const ABS_RSEQ: u64 = 334
 const ABS_CLONE3: u64 = 435
 
 fn is_tolerated_absent(number: u64) -> bool {
-    return number == ABS_STATX || number == ABS_RSEQ || number == ABS_CLONE3
+    return number == ABS_RSEQ || number == ABS_CLONE3
 }
 
 // RUNDE LAUFZEIT, ZWEITER FUND (SQLite): ohne diese beiden kommt keine
@@ -3169,6 +3169,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE LC4 (W-LC4): the `*at` family of the x86-64 table (openat 257 ... renameat2 316). glibc, Go and newer musl use these
     // instead of open/stat/unlink/mkdir/rename/readlink. This kernel has no directory descriptors, so -- like fchmodat/faccessat above --
     // the directory argument is honoured only as AT_FDCWD or when the path is absolute; a relative path with a real dirfd answers -ENOSYS.
+    if number == statxconv.SYS_STATX {
+        return do_statx(state, me, a0, a1, a2, a4)
+    }
     if lc_is_at(number) {
         return lc_at(state, me, number, a0, a1, a2, a3, a4)
     }
@@ -21488,6 +21491,22 @@ const LC_AT_FDCWD32: u64 = 0xFFFFFF9C // -100 as an int (a caller may or may not
 const LC_AT_SYMLINK_NOFOLLOW: u64 = 0x100
 const LC_AT_REMOVEDIR: u64 = 0x200
 const LC_AT_EMPTY_PATH: u64 = 0x1000
+
+fn do_statx(state: u64, me: u64, dirfd: u64, path: u64, flags: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, statxconv.STATX_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    let r: u64 = lc_at(state, me, LC_NEWFSTATAT, dirfd, path, out, flags, 0)
+    if r != 0 {
+        return r
+    }
+    let dst: u64 = blockb(state) + 3072
+    statxconv.convert(blockb(state) + 2048, dst)
+    if !copy_out(state, me, out, dst, statxconv.STATX_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
+}
 
 fn lc_is_at(number: u64) -> bool {
     if number >= LC_OPENAT && number <= LC_READLINKAT {

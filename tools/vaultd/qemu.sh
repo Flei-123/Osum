@@ -160,6 +160,12 @@ ls /secrets/justin
 echo ==J-READ-ROOT-FILE==
 su justin /bin/cat /secrets/root/vault.vlt
 echo rc=\$?
+echo ==MODES==
+ls -ld /secrets
+ls -ld /secrets/root
+ls -ld /secrets/justin
+ls -l /secrets/root
+ls -l /secrets/justin
 echo ==ROOT-STILL==
 vaultctl find origin=$ORIGIN
 sleep 12
@@ -259,12 +265,14 @@ part "$A" J-DIRS J-READ-ROOT-FILE > "$TMPD/p.txt"
 has "$TMPD/p.txt" "justin" "the folder is named after the user, not the uid"
 has "$TMPD/p.txt" "vault.vlt" "... and holds justin's vault.vlt"
 hasnot "$TMPD/p.txt" "u1000" "no uid-named folder for justin"
-part "$A" J-READ-ROOT-FILE ROOT-STILL > "$TMPD/p.txt"
-if grep -qa "VAULT2" "$TMPD/p.txt"; then
-    echo "  GAP   justin can read the ciphertext of root's vault file (file mode not enforced on /secrets, follow-up r2477)"
-else
-    ok "justin cannot read root's vault file as bytes"
-fi
+part "$A" J-READ-ROOT-FILE MODES > "$TMPD/p.txt"
+hasnot "$TMPD/p.txt" "VAULT2" "justin cannot read root's vault file as bytes (mode enforced by the kernel)"
+hasnot "$TMPD/p.txt" "rc=0" "... the read fails with a non-zero exit"
+part "$A" MODES ROOT-STILL > "$TMPD/p.txt"
+grep -a "rwx------" "$TMPD/p.txt" | grep -a " /secrets/root$" > /dev/null && ok "/secrets/root is drwx------" || bad "/secrets/root is not drwx------"
+grep -a "rwx------" "$TMPD/p.txt" | grep -a " /secrets/justin$" > /dev/null && ok "/secrets/justin is drwx------" || bad "/secrets/justin is not drwx------"
+grep -a "rwx------" "$TMPD/p.txt" | grep -a " /secrets$" > /dev/null && ok "/secrets is drwx------" || bad "/secrets is not drwx------"
+grep -a -- "-rw-------" "$TMPD/p.txt" | grep -a "vault.vlt" > /dev/null && ok "vault.vlt is -rw-------" || bad "vault.vlt is not -rw-------"
 part "$A" ROOT-STILL ROOT-PASSWD > "$TMPD/p.txt"
 has "$TMPD/p.txt" "$H_LPW" "root's login is still there after justin's work"
 part "$A" ROOT-PASSWD FERTIG > "$TMPD/p.txt"
