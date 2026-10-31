@@ -1,47 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/time.fi -- Runde K9: die Uhr.
-//
-// Bis zu dieser Runde hatte Osum keine. `sleep` zaehlte Zeitgebermarken,
-// `ls -l` zeigte keine Daten, und jede Datei war so alt wie jede andere.
-// Ein Zeitgeberzaehler ist keine Uhr: er faengt bei jedem Start wieder
-// bei null an, er hat keine Aufloesung unter zehn Millisekunden, und er
-// weiss nicht, welcher Tag heute ist.
-//
-// ZWEI UHREN, wie in jedem Unix, und der Unterschied ist der ganze Punkt:
-//
-//   DIE ECHTZEITUHR sagt, welcher Zeitpunkt jetzt ist. Sie kommt aus dem
-//   CMOS-Baustein, den jeder PC seit 1984 hat, wird EINMAL beim Start
-//   gelesen und danach fortgerechnet. Sie darf springen (jemand stellt
-//   sie), und deshalb darf man mit ihr keine Dauer messen.
-//
-//   DIE MONOTONE UHR sagt, wie viel Zeit seit dem Start vergangen ist.
-//   Sie kommt aus dem Zyklenzaehler des Prozessors, geteilt durch seine
-//   gemessene Frequenz. Sie LAEUFT NIE RUECKWAERTS -- das ist die einzige
-//   Zusage, die eine monotone Uhr macht, und sie ist hier nicht behauptet
-//   sondern erzwungen: `mono_ns` klammert jeden Wert gegen den zuletzt
-//   herausgegebenen (`kstate.TIME_LAST`, mit `lock cmpxchg`, weil vier
-//   Kerne gleichzeitig fragen duerfen) und zaehlt in `kstate.TIME_BACK`
-//   mit, wie oft die Klammer greifen musste.
-//
-// WARUM DER ZYKLENZAEHLER UND NICHT DER ZEITGEBER. Der Zeitgeber schlaegt
-// hundertmal in der Sekunde; eine Uhr aus ihm hat zehn Millisekunden
-// Koernung, und `clock_gettime` waere damit fuer alles unbrauchbar, was
-// eine Messung macht. Der Zyklenzaehler laeuft mit dem Prozessortakt --
-// er hat die Aufloesung, die fehlt, und ihm fehlt nur der Massstab. Den
-// gibt ihm `calibrate`: der Zaehler wird gegen den Zeitgeber gehalten,
-// der zu diesem Zeitpunkt bereits nachweislich laeuft (`kmain.ticks`).
-// Solange das nicht geschehen ist -- und auf einer Maschine, deren
-// Zaehler stillsteht -- rechnet `mono_ns` aus den Marken weiter, mit den
-// zehn Millisekunden Koernung, die es dann eben hat. Eine Uhr, die
-// zugibt, grob zu sein, ist besser als eine, die eine Zahl erfindet.
-//
-// DIE ARITHMETIK-FALLE DIESER RUNDE. In Firn panicken `+`, `-` und `*`
-// bei Ueberlauf (SPEC 13). Eine Differenz zweier Zyklenzaehler MEINT
-// Umdeutung -- der Zaehler laeuft ueber, und `b - a` ueber die Grenze
-// hinweg ist genau die gesuchte Differenz und genau das, was `-` fuer
-// einen Fehler haelt. Jede Zeile unten, die mit Zyklen oder Nanosekunden
-// rechnet, benutzt deshalb `+%`, `-%` und `*%`. Das ist keine Nachlaes-
-// sigkeit, es ist die Bedeutung.
 
 import serial
 import lib.kstate
@@ -53,7 +11,6 @@ import sched.clockslew
 export {
     init, calibrate, mono_ns, real_ns, boot_sec, rtc_field, tsc, khz,
     set_rtc_utc, rtc_utc, tz_anwenden, rtc_raw, rtc_frame_get, sync_get, clock_moved_get, tz_done_get,
-    // RUNDE BLECHFUENF: der Versatz auf Ortszeit.
     tz_min, set_tz, now_local,
     // DAILY-DRIVER: summer time by rule, setting the clock.
     tz_base, tz_rule_get, set_tz_rule, eu_dst, set_utc, rtc_write,
@@ -67,12 +24,6 @@ export {
     NS_PER_SEC, TICK_NS, TICK_HZ
 }
 
-// Die Nummern von Linux (`include/uapi/linux/time.h`). Die drei, die
-// dieser Kernel nicht unterscheiden kann (Prozess- und Fadenzeit), geben
-// die monotone Uhr zurueck statt einen Fehler: ein Programm, das seine
-// eigene Rechenzeit misst, bekommt hier die verstrichene -- was auf einer
-// Maschine mit einem Prozess pro Kern dasselbe ist, und was `docs/
-// ROUNDK9.md` ausdruecklich als Abweichung nennt.
 const CLOCK_REALTIME: u64 = 0
 const CLOCK_MONOTONIC: u64 = 1
 const CLOCK_PROCESS: u64 = 2
@@ -94,11 +45,8 @@ const NS_PER_SEC: u64 = 1000000000
 const SLEW_LIMIT_NS: u64 = 2000000000000
 const RTC_READBACK_SLACK_S: u64 = 3
 const TICK_HZ: u64 = 100
-const TICK_NS: u64 = 10000000 // eine Marke bei 100 Hz
+const TICK_NS: u64 = 10000000
 
-// Wie viele Marken die Eichung mitnimmt. Zwanzig sind 200 ms: lang genug,
-// dass die Koernung des Zeitgebers (eine Marke) unter einem Prozent
-// bleibt, kurz genug, dass kein Testlauf darauf wartet.
 const CAL_TICKS: u64 = 20
 
 // ------------------------------------------------------ der Zyklenzaehler
@@ -121,13 +69,6 @@ fn cmos(reg: u64) -> u64 {
     return serial.in8(0x71 as u16) as u64
 }
 
-// Ein Feld der Echtzeituhr. Statusregister B sagt, ob die Felder in BCD
-// stehen und ob die Stunde bis zwoelf gezaehlt wird; beides wird GELESEN
-// und nicht angenommen -- QEMU und ein echtes Brett sind sich ueber die
-// Voreinstellungen nicht einig. Bit 7 von Statusregister A steht, waehrend
-// der Baustein Sekunden in Minuten traegt; wer dann liest, bekommt eine
-// Zeit, die es nie gab. Die Warteschleife ist begrenzt: ein Baustein, der
-// nicht da ist, darf den Kernel nicht anhalten.
 fn rtc_field(what: u64) -> u64 {
     var guard: u64 = 0
     while guard < 100000 && (cmos(0x0A) & 0x80) != 0 {
@@ -176,14 +117,6 @@ fn rtc_field(what: u64) -> u64 {
     return v
 }
 
-// Tage seit dem 1. Januar 1970 aus einem buergerlichen Datum. Der
-// Algorithmus ist Howard Hinnants `days_from_civil` -- keine Schleife
-// ueber Jahre, keine Tabelle von Monatslaengen, und er ist fuer jedes
-// Datum ab 1970 richtig, Schaltjahre und die Hundertjahrregel
-// eingeschlossen. Alles rechnet mit Umdeutung: der Zwischenwert `y -% 1`
-// im Januar und Februar und das abschliessende `-% 719468` (die Tage von
-// Jahr 0 bis 1970) sind genau die Stellen, an denen die gepruefte
-// Arithmetik dieser Sprache sonst stehenbliebe.
 fn days_from_civil(y0: u64, m: u64, d: u64) -> u64 {
     var y: u64 = y0
     if m <= 2 {
@@ -202,20 +135,14 @@ fn days_from_civil(y0: u64, m: u64, d: u64) -> u64 {
     return ((era *% 146097) +% doe) -% 719468
 }
 
-// Sekunden seit 1970 aus sechs Feldern.
 fn epoch_of(y: u64, mo: u64, d: u64, h: u64, mi: u64, s: u64) -> u64 {
     let days: u64 = days_from_civil(y, mo, d)
     return (((days *% 86400) +% (h *% 3600)) +% (mi *% 60)) +% s
 }
 
-// Der Weg zurueck: aus Sekunden seit 1970 wieder ein Datum. `date` und
-// `ls -l` brauchen ihn, und der Kernel ist die einzige Stelle, die den
-// Schaltjahrkalender schon kennt. `out` zeigt auf sechs Woerter in der
-// Reihenfolge R_YEAR..R_SEC.
 fn split(secs: u64, out: u64) {
     let days: u64 = secs / 86400
     let rest: u64 = secs % 86400
-    // Hinnants civil_from_days, dieselbe Herkunft wie oben.
     let z: u64 = days +% 719468
     let era: u64 = z / 146097
     let doe: u64 = z -% (era *% 146097)
@@ -240,11 +167,6 @@ fn split(secs: u64, out: u64) {
 
 // ------------------------------------------------------------- der Start
 
-// Einmal, so frueh wie moeglich: die Wandzeit lesen und den Zyklenzaehler
-// zum selben Zeitpunkt festhalten. Beides gehoert zusammen -- die
-// Echtzeituhr ist von hier an TIME_BOOT plus das, was der Zaehler seit
-// TIME_TSC0 gezaehlt hat, und wenn die beiden Werte aus verschiedenen
-// Augenblicken kaemen, waere der Fehler fuer immer eingebaut.
 fn init(state: u64) -> u64 {
     let y: u64 = rtc_field(R_YEAR)
     let mo: u64 = rtc_field(R_MONTH)
@@ -253,25 +175,11 @@ fn init(state: u64) -> u64 {
     let mi: u64 = rtc_field(R_MIN)
     let s: u64 = rtc_field(R_SEC)
     var secs: u64 = 0
-    // Eine Uhr, die nicht da ist, liefert Nullen oder 0xFF in jedem
-    // Register. Beides ergibt kein Datum, und dann ist die Echtzeituhr
-    // eben der Start der Maschine -- gesagt statt erfunden.
     if y >= 1970 && y < 2200 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31 {
         if h < 24 && mi < 60 && s < 60 {
             secs = epoch_of(y, mo, d, h, mi, s)
         }
     }
-    // RUNDE ECHTHARDWARE-1: TIME_BOOT IST IMMER UTC.
-    //
-    // Stand die Uhr auf Ortszeit (Vorgabe, siehe `rtc_ist_utc`), wird
-    // der Versatz hier EINMAL abgezogen -- danach ist jede Rechnung im
-    // Kern eine UTC-Rechnung, und `now_local` addiert ihn genau einmal
-    // wieder. Vorher wurde er null- oder zweimal gezaehlt, je nachdem,
-    // wen man fragte.
-    //
-    // `init` laeuft VOR dem Auswerten der Kommandozeile; deshalb macht
-    // die Umrechnung nicht diese Funktion, sondern `tz_anwenden`, das
-    // `kmain` aufruft, sobald `tz=` und `rtcutc` gelesen sind.
     kstate.set(state, kstate.TIME_BOOT, secs)
     rtc_roh = secs
     kstate.set(state, kstate.TIME_TSC0, tsc())
@@ -280,21 +188,9 @@ fn init(state: u64) -> u64 {
     return secs
 }
 
-// Der Massstab fuer den Zyklenzaehler, gegen den Zeitgeber gemessen. Wird
-// von `kmain` aufgerufen, NACHDEM der Zeitgeber nachweislich laeuft --
-// vorher gaebe es nichts, wogegen zu messen waere. Gibt die gemessenen
-// Zyklen je Millisekunde zurueck, oder 0.
-//
-// Die Warteschleifen sind nach oben begrenzt. Mit `notimer` auf der
-// Kommandozeile schlaegt der Zeitgeber nie, und diese Funktion muss dann
-// aufgeben statt die Maschine anzuhalten -- der Kernel rechnet danach
-// weiter mit Marken, deren es keine gibt, und `mono_ns` steht still. Das
-// ist richtig so: eine Maschine ohne Zeitgeber hat keine Zeit.
 fn calibrate(state: u64) -> u64 {
     let t0: u64 = kstate.get(state, kstate.TICKS)
     var guard: u64 = 0
-    // Auf die naechste Flanke warten, damit die angebrochene erste Marke
-    // nicht mitzaehlt.
     while kstate.get(state, kstate.TICKS) == t0 && guard < 200000000 {
         guard = guard + 1
     }
@@ -319,8 +215,6 @@ fn calibrate(state: u64) -> u64 {
         return 0
     }
     let k: u64 = cycles / ms
-    // Ein Zaehler, der weniger als ein Megahertz meldet, ist keiner --
-    // dann bleibt es bei den Marken.
     if k < 1000 {
         return 0
     }
@@ -330,11 +224,6 @@ fn calibrate(state: u64) -> u64 {
 
 // ------------------------------------------------------- die beiden Uhren
 
-// Nanosekunden seit dem Start. Der eigentliche Rechenweg ist die eine
-// Stelle, an der ein Kernel gern ueberlaeuft: `cycles * 1000000 / khz`
-// haette bei 3 GHz nach 6 Sekunden 1.8e19 erreicht und waere umgelaufen.
-// Deshalb erst teilen, dann malnehmen, und den Rest getrennt: beide
-// Zwischenwerte bleiben unter 1e13.
 fn raw_ns(state: u64) -> u64 {
     let k: u64 = kstate.get(state, kstate.TIME_KHZ)
     if k == 0 {
@@ -346,14 +235,6 @@ fn raw_ns(state: u64) -> u64 {
     return whole +% part
 }
 
-// Und die Zusage. Vier Kerne duerfen gleichzeitig fragen, und ihre
-// Zyklenzaehler muessen nicht auf dieselbe Zahl geeicht sein -- ein
-// Kern, dessen Zaehler zwei Mikrosekunden hinterherlaeuft, wuerde eine
-// Uhr, die einfach rechnet, rueckwaerts laufen lassen. Also: der zuletzt
-// herausgegebene Wert steht in einem Wort, und ein neuer wird nur
-// herausgegeben, wenn er groesser ist -- mit `lock cmpxchg`, weil sonst
-// zwei Kerne dasselbe Wort ueberschreiben. Wer einen kleineren Wert
-// errechnet, bekommt den alten und wird in TIME_BACK gezaehlt.
 fn mono_ns(state: u64) -> u64 {
     let want: u64 = raw_ns(state)
     let cell: u64 = state + kstate.TIME_LAST
@@ -373,9 +254,6 @@ fn mono_ns(state: u64) -> u64 {
     return last
 }
 
-// Die Echtzeituhr: der Startzeitpunkt plus die monotone Uhr. Sie erbt
-// damit deren Aufloesung, und sie erbt NICHT das Springen einer Uhr, die
-// bei jedem Aufruf neu aus dem CMOS gelesen wuerde.
 fn real_ns(state: u64) -> u64 {
     let mono: u64 = mono_ns(state)
     return (kstate.get(state, kstate.TIME_BOOT) *% NS_PER_SEC) +% mono +% clockslew.offset_ns(mono)
@@ -385,52 +263,14 @@ fn now_sec(state: u64) -> u64 {
     return real_ns(state) / NS_PER_SEC
 }
 
-// ============================================ RUNDE BLECHFUENF
-// DER VERSATZ AUF ORTSZEIT, IN MINUTEN.
-//
-// Die Echtzeituhr eines PC steht entweder auf UTC (so haelt es Linux)
-// oder auf Ortszeit (so haelt es Windows). Dieser Kern KANN sie nicht
-// setzen und soll auch nicht raten, welche der beiden Sitten das Brett
-// unter ihm pflegt -- also nimmt er die Zahl entgegen: `tz=120` auf der
-// Kommandozeile sind zwei Stunden, und das ist Mitteleuropa im Sommer.
-//
-// Vorgabe ist NULL, und das ist Absicht: alles, was in diesem Baum eine
-// Zeit vergleicht (Dateizeiten, die Regressionslaeufe), rechnet dann
-// genau wie vorher. Der Versatz betrifft die ANZEIGE.
 static mut tz_offset: u64 = 0 // the MAGNITUDE of the standard offset in minutes
 // N-004: zones west of Greenwich. `tz_west` = 1 makes the standard offset negative;
 // all arithmetic goes through `base_w()`, the offset as wrapped signed minutes
 // (lib/tz/tz.fi), so `utc +% (off *% 60)` is right for both signs.
 static mut tz_west: u64 = 0
 
-// ============================================ RUNDE ECHTHARDWARE-1
-// STEHT DIE ECHTZEITUHR AUF UTC ODER AUF ORTSZEIT?
-//
-// Justins Foto vom 09.09. 12:38 zeigt beides nebeneinander und den
-// Fehler dazu:
-//
 //     19 UHR  RTC 12:38:07  KRN 14:38:06  TZ 120
-//
-// Die RTC sagt 12:38, und das WAR die Ortszeit (der Fotostempel sagt
-// dasselbe). Sein Brett hat Windows daneben, und Windows stellt die
-// Uhr auf Ortszeit. `init` hat diesen Wert unbesehen als UTC in
-// TIME_BOOT gelegt, `now_local` hat noch einmal zwei Stunden addiert --
-// und die Taskleiste, die die RTC bei jedem Aufruf FRISCH liest
-// (`uio.sysinfo`), zeigte gleichzeitig 12:37. Zwei Anzeigen, zwei
-// Rechenwege, eine davon doppelt.
-//
-// DIE ENTSCHEIDUNG, und sie folgt der Lage und nicht dem Geschmack:
-// dieses System startet auf Rechnern, die daneben Windows haben. Die
-// VORGABE IST DESHALB "RTC STEHT AUF ORTSZEIT" -- genau wie Windows es
-// haelt. Wer eine auf UTC gestellte Uhr hat (so haelt es Linux),
-// schreibt `rtcutc` auf die Kommandozeile.
-//
-// UND ES GIBT AB HIER NUR NOCH EINE QUELLE: `now_local` ist die
-// Ortszeit, `now_sec` die UTC, und beide kommen aus demselben
-// TIME_BOOT. Die Tafel und die Leiste fragen dieselbe Funktion.
-static mut rtc_ist_utc: u64 = 0
-// Der ROHE Wert, wie er beim Start aus dem Baustein kam -- damit
-// `tz_anwenden` idempotent ist.
+static mut rtc_is_utc: u64 = 0
 static mut rtc_roh: u64 = 0
 // r544: 1 once `tz_anwenden` has converted with a known zone / once the
 // clock was set by somebody (set_utc): no conversion from the raw RTC
@@ -542,12 +382,11 @@ fn tz_min(state: u64) -> u64 {
     return tz.magnitude(tz.offset_min(now_sec(state), base_w(), tz_rule))
 }
 
-// `rtcutc` auf der Kommandozeile: die Uhr im Baustein ist UTC.
 fn set_rtc_utc(state: u64, an: u64) {
-    if rtc_ist_utc == an {
+    if rtc_is_utc == an {
         return
     }
-    rtc_ist_utc = an
+    rtc_is_utc = an
     if clock_moved != 0 || rtc_roh == 0 {
         return
     }
@@ -556,25 +395,14 @@ fn set_rtc_utc(state: u64, an: u64) {
 }
 
 fn rtc_utc(state: u64) -> u64 {
-    return rtc_ist_utc
+    return rtc_is_utc
 }
 
-// Die Zeit des Kerns in ORTSZEIT. Sekunden seit der Epoche plus der
-// Versatz -- das ist die Zahl, aus der die Tafel ihre Uhr macht.
 fn now_local(state: u64) -> u64 {
     let u: u64 = now_sec(state)
     return u +% (tz.offset_min(u, base_w(), tz_rule) *% 60)
 }
 
-// RUNDE ECHTHARDWARE-1: DIE EINMALIGE KORREKTUR, nachdem die
-// Kommandozeile gelesen ist.
-//
-// Sie zieht den Versatz von TIME_BOOT ab, wenn die Uhr auf Ortszeit
-// steht -- und sie tut es GENAU EINMAL, gemessen an TIME_RTC0: ein
-// zweiter Aufruf findet denselben Rohwert vor und rechnet nicht noch
-// einmal. Ohne diese Absicherung waere aus dem doppelt gezaehlten
-// Versatz ein dreifach gezaehlter geworden, sobald jemand die Funktion
-// an einer zweiten Stelle aufruft.
 fn tz_anwenden(state: u64) {
     let roh: u64 = rtc_roh
     // r544: `mode_of` (command line) runs BEFORE `time.init` (RTC read), so
@@ -592,7 +420,7 @@ fn tz_anwenden(state: u64) {
     }
     var utc: u64 = roh
     var frame: u64 = 3
-    if rtc_ist_utc == 0 {
+    if rtc_is_utc == 0 {
         frame = 1
         // wrapped signed seconds: east of Greenwich subtracts, west adds
         let ab: u64 = base_w() *% 60
@@ -614,7 +442,7 @@ fn tz_anwenden(state: u64) {
     // A zone that is not known yet (no `tz=` on the boot line; it comes
     // later from /etc/time.conf through SETTZ) leaves the door open: the
     // next call with a zone does the one conversion.
-    if tz_offset != 0 || tz_west != 0 || tz_rule != 0 || rtc_ist_utc != 0 {
+    if tz_offset != 0 || tz_west != 0 || tz_rule != 0 || rtc_is_utc != 0 {
         tz_done = 1
     }
 }
@@ -693,7 +521,7 @@ fn rtc_write(state: u64) -> bool {
         return false
     }
     var t: u64 = now_sec(state)
-    if rtc_ist_utc == 0 {
+    if rtc_is_utc == 0 {
         t = t +% (tz.offset_min(t, base_w(), tz_rule) *% 60)
     }
     var f: [u64; 6] = [0 as u64; 6]

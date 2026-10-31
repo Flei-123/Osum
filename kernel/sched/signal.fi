@@ -1,58 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/signal.fi -- Runde K9: Signale.
-//
-// Bis zu dieser Runde konnte man einen Prozess in Osum nicht ordentlich
-// unterbrechen. Es gab `SYS_OSUM_KILL` aus Runde K6, und das war kein
-// `kill`: es machte aus einem Prozess sofort eine Leiche mit einem
-// Beendigungscode. Der Prozess erfuhr nichts davon, konnte nichts
-// aufraeumen, konnte sich nicht wehren und konnte auch nicht
-// weitergemacht werden. Ein Betriebssystem ohne Signale hat keine
-// Unterbrechung, kein STRG-C, kein `SIGCHLD` und keinen Weg, aus einem
-// Prozessorfehler etwas anderes zu machen als eine Leiche.
-//
-// WAS EIN SIGNAL WIRKLICH IST, und die Reihenfolge ist die ganze
-// Schwierigkeit:
-//
-//   1. ABSCHICKEN ist billig: ein Bit in `T_SIGPEND` der Zielaufgabe.
-//      Mehr passiert beim Absender nicht. Ein Signal, das der Absender
-//      selbst zustellen wuerde, muesste in einen fremden Adressraum
-//      schreiben, waehrend dessen Besitzer laeuft.
-//   2. ZUSTELLEN geschieht IM ZIEL und nur an einer Stelle: kurz bevor es
-//      nach Ring 3 zurueckkehrt. Dort -- und nur dort -- steht sein
-//      Zusammenhang vollstaendig und unbenutzt im Speicher, und dort
-//      laesst er sich auf den Nutzerstapel retten.
-//   3. BLOCKIEREN ist eine Maske je Aufgabe. Ein blockiertes Signal
-//      bleibt wartend, es geht nicht verloren.
-//
-// DER RAHMEN AUF DEM NUTZERSTAPEL. Eine Behandlungsroutine laeuft in Ring
-// 3, auf dem Stapel des Prozesses, und wenn sie fertig ist, muss der
-// Prozess GENAU dort weitermachen, wo er unterbrochen wurde -- mit allen
-// sechzehn Registern und den Flaggen. Also legt der Kernel unter den
-// Stapelzeiger:
-//
-//     [rsp]        die Ruecksprungadresse: `sigreturn_tramp` in `.utext`
-//     [rsp+8]      das Kennwort, die alte Maske, die Nummer
-//     [rsp+32]     zweiundzwanzig Woerter Zusammenhang (isr.s' Form)
-//
-// und setzt rip auf die Routine, rdi auf die Nummer. Laeuft die Routine
-// zu Ende, springt sie in den Trampolinsprung, der `sigreturn` ruft, und
-// dieser Aufruf legt den Zusammenhang zurueck. Der Trampolinsprung liegt
-// in `.utext` und nicht auf dem Stapel: Stapelseiten tragen seit Runde K1
-// das No-Execute-Bit, und ein Kernel, der es dafuer abnimmt, hat die
-// Luecke wieder aufgemacht, deretwegen es da ist.
-//
-// DER ROTE BEREICH. System V erlaubt einer Funktion, 128 Oktette UNTER
-// ihrem Stapelzeiger zu benutzen, ohne ihn zu bewegen. Ein Signalrahmen,
-// der dort hineingelegt wird, ueberschreibt lebende Daten. Also faengt er
-// 128 Oktette tiefer an -- eine Zeile Code und der Unterschied zwischen
-// "laeuft" und "laeuft meistens".
-//
-// DIE GEGENPROBE, und ohne sie zaehlt in diesem Projekt nichts: mit
-// `nosig` auf der Kommandozeile wird NICHT zugestellt. Alles andere
-// bleibt -- `kill` sagt 0, das Bit wird gesetzt, der Zaehler der
-// abgeschickten Signale steigt. Nur ankommen tut nichts. Ein Programm,
-// das seine SIGINTs zaehlt, muss dann bei null bleiben, und wenn es das
-// nicht tut, hat der Test nie das gemessen, was er zu messen behauptet.
 
 import serial
 import lib.kstate
@@ -79,10 +26,6 @@ export {
     SA_NOCLDSTOP, SA_RESTART, SA_NODEFER, SA_RESETHAND, SA_SIGINFO
 }
 
-// Die Nummern von Linux x86-64 (`arch/x86/include/uapi/asm/signal.h`).
-// Sie sind dieselben wie auf jedem System V der letzten dreissig Jahre;
-// eine eigene Nummerierung waere eine Uebersetzungstabelle, die jemand
-// pflegen muesste.
 const SIGHUP: u64 = 1
 const SIGINT: u64 = 2
 const SIGQUIT: u64 = 3
@@ -123,21 +66,18 @@ const SA_ONSTACK: u64 = 0x08000000
 const SA_NODEFER: u64 = 0x40000000
 const SA_RESETHAND: u64 = 0x80000000
 
-// Was bei einem Signal ohne eigene Routine geschieht.
 const D_TERM: u64 = 0 // beenden
 const D_IGN: u64 = 1 // ueberhoeren
-const D_CORE: u64 = 2 // beenden, und es war ein Fehler
+const D_CORE: u64 = 2
 const D_STOP: u64 = 3 // anhalten
 const D_CONT: u64 = 4 // fortsetzen
 
-// Ein Platz je Signal je Aufgabe.
 const A_BYTES: u64 = 24
 const A_HANDLER: u64 = 0
 const A_FLAGS: u64 = 8
 const A_MASK: u64 = 16
 const A_TASK: u64 = 768 // NSIG_OLD * A_BYTES
 
-// Der Rahmen auf dem Nutzerstapel.
 const SF_MAGIC: u64 = 0
 const SF_MASK: u64 = 8
 const SF_SIG: u64 = 16
@@ -152,11 +92,8 @@ const SF_UC: u64 = 328
 const SF_BYTES: u64 = 1264
 const MAGIC: u64 = 0x5349474E414C4B39 // "SIGNALK9"
 
-// Der rote Bereich von System V.
 const REDZONE: u64 = 128
 
-// Die zweiundzwanzig Woerter, die `iretq` zurueckgibt -- die Form, die
-// `isr_common` in isr.s aufbaut.
 const C_R15: u64 = 0
 const C_R11: u64 = 32
 const C_R10: u64 = 40
@@ -174,7 +111,6 @@ const C_RSP: u64 = 160
 const C_SS: u64 = 168
 const C_WORDS: u64 = 22
 
-// Die Form des Systemaufrufrahmens (`kernel/sys.fi`, F_*).
 const F_R15: u64 = 0
 const F_R14: u64 = 8
 const F_R13: u64 = 16
@@ -192,14 +128,9 @@ const F_RIP: u64 = 104
 const F_RFLAGS: u64 = 112
 const F_RSP: u64 = 120
 
-// Die Wahlnummern aus isr.s.
 const V_TRAMP: u64 = 67
 const V_IRET: u64 = 68
 
-// Was `sysret` laedt (`kernel/user.fi`, MSR_STAR): Nutzercode 0x2B,
-// Nutzerstapel 0x23. Ein Signal, das aus einem Systemaufruf heraus
-// zugestellt wird, hat keine gespeicherten Selektoren -- diese beiden
-// sind die einzigen, die ein Prozess dieses Kernels je hat.
 const USER_CS: u64 = 0x2B
 const USER_SS: u64 = 0x23
 
@@ -237,15 +168,10 @@ fn bit(sig: u64) -> u64 {
     return 1 << (sig - 1)
 }
 
-// Zwei Signale kann niemand abfangen, blockieren oder ueberhoeren --
-// SIGKILL und SIGSTOP. Das ist keine Bequemlichkeit des Kernels, es ist
-// die einzige Zusage, die ein Betreiber gegenueber einem Programm hat,
-// das nicht mehr auf sich selbst hoert.
 fn uncatchable(sig: u64) -> bool {
     return sig == SIGKILL || sig == SIGSTOP
 }
 
-// Das Standardverhalten. Aus SUSv4, Tabelle "Signal Default Actions".
 fn default_of(sig: u64) -> u64 {
     if sig == SIGCHLD || sig == SIGWINCH || sig == 23 {
         return D_IGN
@@ -263,13 +189,6 @@ fn default_of(sig: u64) -> u64 {
     return D_TERM
 }
 
-// Vier Oktette je Name, damit der Index eine Multiplikation ist und keine
-// Suche -- dieselbe Bauart wie die Ausnahmenamen in `trap.report`.
-// Der Name wird GESCHRIEBEN und nicht zurueckgegeben. Firn laesst die
-// Adresse eines lokalen Feldes nicht aus einer Funktion heraus (und hat
-// recht damit -- sie zeigte auf einen Stapelrahmen, den es dann nicht
-// mehr gibt), und das Kernelprofil hat keine globalen Zeichenketten. Also
-// steht die Tabelle dort, wo sie benutzt wird.
 fn say_name(sig: u64) {
     var names: [u8; 128] = "?  \0HUP\0INT\0QIT\0ILL\0TRP\0ABR\0BUS\0FPE\0KIL\0US1\0SEG\0US2\0PIP\0ALR\0TRM\0STK\0CHL\0CNT\0STP\0TSP\0TIN\0TOU\0URG\0XCP\0XFS\0VTA\0PRF\0WIN\0IO \0PWR\0SYS\0"
     var n: u64 = sig
@@ -303,18 +222,12 @@ fn clear_task(state: u64, task: u64) {
 
 fn init_task(state: u64, task: u64) {
     clear_task(state, task)
-    // Die Prozessgruppe ist die eigene pid, solange niemand etwas anderes
-    // sagt -- `setpgid(0, 0)` ist dann ein Nichts und keine Aenderung.
     let pid: u64 = sched.tget(state, task, sched.T_PID)
     sched.tset(state, task, sched.T_PGID, pid)
     sched.tset(state, task, sched.T_SID, pid)
     sched.tset(state, task, sched.T_TGID, pid)
 }
 
-// `fork`: das Kind erbt die Routinen und die Maske, aber KEINE wartenden
-// Signale. Das steht so in POSIX, und der Grund ist einleuchtend -- ein
-// SIGINT, das dem Elternprozess galt, gilt nicht dem Kind, das es im
-// Augenblick des Abschickens noch nicht gab.
 fn inherit(state: u64, parent: u64, child: u64) {
     var i: u64 = 0
     while i < NSIG {
@@ -340,10 +253,6 @@ fn inherit(state: u64, parent: u64, child: u64) {
         sched.tget(state, child, sched.T_PID))
 }
 
-// `execve`: das neue Abbild hat die Routinen des alten nicht mehr -- ihre
-// Adressen zeigen in Code, den es nicht mehr gibt. Was UEBERHOERT wurde,
-// bleibt ueberhoert (POSIX), alles andere faellt auf das Standard-
-// verhalten zurueck. Die Maske ueberlebt, die Prozessgruppe auch.
 fn exec_reset(state: u64, task: u64) {
     var i: u64 = 0
     while i < NSIG {
@@ -368,7 +277,6 @@ fn pending(state: u64, task: u64) -> u64 {
     return sched.tget(state, task, sched.T_SIGPEND)
 }
 
-// Was JETZT zugestellt werden koennte: wartend und nicht blockiert.
 fn deliverable(state: u64, task: u64) -> u64 {
     var d: u64 = sched.tget(state, task, sched.T_SIGPEND)
         & (0xFFFFFFFFFFFFFFFF -% sched.tget(state, task, sched.T_SIGMASK))
@@ -381,10 +289,6 @@ fn deliverable(state: u64, task: u64) -> u64 {
     return d
 }
 
-// Wartet etwas, das einen blockierenden Systemaufruf abbrechen muss? Das
-// ist die Frage, die aus einem `read` auf der Tastatur ein -EINTR macht,
-// und ohne sie wuerde STRG-C in einer Shell, die auf eine Zeile wartet,
-// nichts tun.
 fn interrupted(state: u64, task: u64) -> bool {
     return deliverable(state, task) != 0
 }
@@ -404,9 +308,6 @@ fn stopped_count(state: u64) -> u64 {
 
 // ------------------------------------------------------------ abschicken
 
-// Ein Signal an eine Aufgabe. Billig und ohne Zustellung: ein Bit, und
-// wenn das Ziel schlaeft oder wartet, ein Stups, damit es aufwacht und
-// selbst nachsieht.
 fn send_task(state: u64, task: u64, sig: u64) -> bool {
     if task >= kstate.MAX_TASKS || sig == 0 || sig >= NSIG {
         return false
@@ -416,16 +317,10 @@ fn send_task(state: u64, task: u64, sig: u64) -> bool {
         return false
     }
     let flags: u64 = sched.irq_save()
-    // SIGCONT loescht die wartenden Anhaltesignale und umgekehrt -- sonst
-    // wuerde ein Prozess, dem beides zugleich geschickt wurde, von der
-    // Reihenfolge der Zustellung abhaengen.
     var pend: u64 = sched.tget(state, task, sched.T_SIGPEND)
     if sig == SIGCONT {
         pend = pend & (0xFFFFFFFFFFFFFFFF -% (bit(SIGSTOP) | bit(SIGTSTP)
                 | bit(SIGTTIN) | bit(SIGTTOU)))
-        // Fortsetzen wirkt SOFORT, auch wenn die Routine erst spaeter
-        // laeuft: das ist die einzige Art, wie eine angehaltene Aufgabe
-        // ueberhaupt wieder dazu kommt, irgendetwas zuzustellen.
         if st == sched.S_STOP {
             if sched.state_cas(state, task, sched.S_STOP, sched.S_READY) {
                 sched.tset(state, task, sched.T_STOPSIG, 0)
@@ -436,27 +331,10 @@ fn send_task(state: u64, task: u64, sig: u64) -> bool {
         pend = pend & (0xFFFFFFFFFFFFFFFF -% bit(SIGCONT))
     }
     sched.tset(state, task, sched.T_SIGPEND, pend | bit(sig))
-    // Ein Schlaefer und ein Wartender werden wach: sie sollen die Frage
-    // stellen, ob etwas fuer sie da ist. Ein ANGEHALTENER nicht -- nur
-    // SIGCONT weckt den, und das ist oben schon geschehen.
     let now: u64 = sched.tget(state, task, sched.T_STATE)
-    // RUNDE POLL: S_POLL GEHOERT HIER DAZU, und ohne diese Zeile waere
-    // das die eine Stelle, an der ein Prozess unerreichbar wird: ein
-    // `poll` OHNE Frist traegt POLL_FOREVER in T_WAKE ein, der
-    // Zeitgeber kommt also nie vorbei, und ein SIGTERM darauf haette
-    // erst gewirkt, wenn irgendwo zufaellig ein Rohr beschrieben wird.
-    // Der Aufruf selbst fragt nach jedem Aufwachen `signal.interrupted`
-    // und gibt dann -EINTR -- aber er muss dafuer aufwachen duerfen.
     if now == sched.S_SLEEP || now == sched.S_WAIT || now == sched.S_POLL {
         sched.state_cas(state, task, now, sched.S_READY)
     }
-    // SIGKILL HOLT AUCH EINEN ANGEHALTENEN ZURUECK, und das ist keine
-    // Feinheit: ein Prozess, der mit STRG-Z angehalten wurde, stellt
-    // nichts mehr zu -- er bekommt den Prozessor nicht. Ein `kill -9`
-    // darauf verschwaende sonst still, und wer auf ihn wartet, wartet
-    // fuer immer. Genau das ist in dieser Runde einmal passiert: der
-    // Selbsttest blieb hinter "job ttin" stehen, weil ein von SIGTTIN
-    // angehaltenes Kind sein SIGKILL nie sah.
     if sig == SIGKILL && now == sched.S_STOP {
         if sched.state_cas(state, task, sched.S_STOP, sched.S_READY) {
             sched.tset(state, task, sched.T_STOPSIG, 0)
@@ -475,9 +353,6 @@ fn send_pid(state: u64, pid: u64, sig: u64) -> u64 {
         return neg(errno.E_SRCH)
     }
     if sig == 0 {
-        // Nummer null schickt nichts und prueft nur, ob es den Prozess
-        // gibt -- der Weg, auf dem jede Shell nachsieht, ob ein Auftrag
-        // noch lebt.
         return 0
     }
     if !send_task(state, i, sig) {
@@ -486,8 +361,6 @@ fn send_pid(state: u64, pid: u64, sig: u64) -> u64 {
     return 0
 }
 
-// An eine ganze Prozessgruppe -- was STRG-C wirklich tut. Gibt zurueck,
-// wie viele es getroffen hat.
 fn send_pgid(state: u64, pgid: u64, sig: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.TASKS)
     var i: u64 = 0
@@ -527,16 +400,6 @@ fn send_tty(state: u64, t: u64, zero_too: bool, sig: u64) -> u64 {
     return hit
 }
 
-// DIESELBE GRUPPE, ABER NUR, WAS DER SENDER SEHEN DARF.
-//
-// `send_pgid` hat Aufrufer ausserhalb von `kill` (das Terminal schickt
-// STRG-C an die Vordergrundgruppe, `exiting` meldet SIGCHLD) -- deren
-// Absender ist der KERN und nicht ein Prozess. Deshalb bekommt
-// `send_pgid` keinen zusaetzlichen Parameter, sondern es gibt diese
-// zweite Tuer fuer den Fall, in dem ein PROZESS fragt. Eine
-// Prozessgruppe kann Glieder in zwei Containern haben (der Wirt legt
-// einen Prozess in einen Container, die Gruppe bleibt) -- getroffen
-// werden nur die sichtbaren.
 fn send_pgid_from(state: u64, sender: u64, pgid: u64, sig: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.TASKS)
     var i: u64 = 0
@@ -561,10 +424,6 @@ fn send(state: u64, task: u64, sig: u64) -> bool {
     return send_task(state, task, sig)
 }
 
-// SIGCHLD an den Elternprozess. Wird gerufen, BEVOR die Aufgabe zur
-// Leiche wird -- danach kennt niemand mehr ihren Elternteil mit
-// Sicherheit. `wait4` weckt `sched.exit_task` ohnehin; dieses Signal ist
-// das, was ein Programm ohne `wait` davon erfaehrt.
 fn exiting(state: u64, task: u64) {
     let p: u64 = sched.tget(state, task, sched.T_PARENT)
     if p >= kstate.MAX_TASKS || p == task {
@@ -576,19 +435,9 @@ fn exiting(state: u64, task: u64) {
     send_task(state, p, SIGCHLD)
 }
 
-// ------------------------------------------------- aus einer Ausnahme
-
-// WAS AUS EINEM PROZESSORFEHLER WIRD. Bis zu dieser Runde toetete jede
-// Ausnahme in Ring 3 den Prozess auf der Stelle (`sched.kill_current`).
-// Das ist die Haelfte der Wahrheit: ein Zugriff daneben IST toedlich,
-// solange niemand hinsieht -- aber ein Programm DARF hinsehen. Genau
-// dafuer gibt es SIGSEGV, und ein Sprachlaufzeitsystem, das seinen Stapel
-// waechst, wenn er anstoesst, haengt daran.
-//
-// Die Zuordnung ist die von Linux (`arch/x86/kernel/traps.c`):
 fn signal_of(v: u64) -> u64 {
     if v == 0 {
-        return SIGFPE // #DE, geteilt durch null
+        return SIGFPE
     }
     if v == 1 || v == 3 {
         return SIGTRAP
@@ -617,39 +466,21 @@ fn signal_of(v: u64) -> u64 {
     return SIGSEGV
 }
 
-// Ein Fehler aus Ring 3. Gibt zurueck, ob er ZUGESTELLT werden konnte --
-// dann geht es im Prozess weiter (mit der Routine oder mit seinem Tod),
-// und der Kernel bleibt stehen, wo er ist.
 fn fault(state: u64, task: u64, v: u64) -> u64 {
     let sig: u64 = signal_of(v)
     sched.tset(state, task, sched.T_FAULTS,
         sched.tget(state, task, sched.T_FAULTS) + 1)
-    // Ein Fehler LAESST SICH NICHT BLOCKIEREN. Wer SIGSEGV blockiert und
-    // dann daneben greift, bekommt es trotzdem -- alles andere waere eine
-    // Schleife aus derselben Ausnahme fuer immer. Also faellt die Maske
-    // fuer dieses eine Signal, so wie es in jedem Unix geschieht.
     let m: u64 = sched.tget(state, task, sched.T_SIGMASK)
     sched.tset(state, task, sched.T_SIGMASK, m & (0xFFFFFFFFFFFFFFFF -% bit(sig)))
-    // Und eine eigene Routine gilt nur EINMAL: kehrt sie zurueck, laeuft
-    // derselbe Befehl wieder und faellt wieder. Ein Programm, das das
-    // will, setzt sie in der Routine neu.
-    // RUNDE UNTERBAU: ... for a handler of the old kind. One that was installed with SA_SIGINFO stays (as on Linux): a trap handler that
-    // resumes the program (guard pages, wasm, JIT) is hit again and again, and a one-shot handler turned the second fault into a death.
     if handler_of(state, task, sig) != SIG_DFL && (aget(act(state, task, sig) + A_FLAGS) & SA_SIGINFO) == 0 {
         aset(act(state, task, sig) + A_FLAGS,
             aget(act(state, task, sig) + A_FLAGS) | SA_RESETHAND)
     }
-    // Der Beendigungscode, den die Runden 62 bis K6 gemessen haben:
-    // 128 + VEKTOR und nicht 128 + Signalnummer. Er gilt nur fuer diesen
-    // einen Tod und nur, wenn ihn niemand abfaengt.
     sched.tset(state, task, sched.T_KILLCODE, 128 + v)
     send_task(state, task, sig)
     return sig
 }
 
-// Wird dieses Signal den Prozess umbringen? Die Frage, die `trap.fi`
-// stellen muss, bevor es "-- process killed" druckt: was abgefangen wird,
-// bringt niemanden um.
 fn lethal(state: u64, task: u64, sig: u64) -> bool {
     if uncatchable(sig) {
         return sig == SIGKILL
@@ -662,7 +493,6 @@ fn lethal(state: u64, task: u64, sig: u64) -> bool {
     return d == D_TERM || d == D_CORE
 }
 
-// SIGALRM, wenn die Frist abgelaufen ist. Aus dem Zeitgeber gerufen.
 fn alarm_check(state: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.TASKS)
     let now: u64 = kstate.get(state, kstate.TICKS)
@@ -697,9 +527,6 @@ fn poke64(state: u64, task: u64, addr: u64, v: u64) -> bool {
     if phys == 0 {
         return false
     }
-    // ROUNDE K10: der Signalrahmen wird auf den NUTZERSTAPEL gelegt, und
-    // das ist Speicher, den Ring 3 sehen darf. Mit CR4.SMAP braucht auch
-    // dieser Weg sein Fenster (`guard.fi`).
     guard.stac(state)
     __mmio_write64(phys as *mut u64, v)
     guard.clac(state)
@@ -741,12 +568,6 @@ fn greg_off(i: u64) -> u64 {
     return 152
 }
 
-// Die eine Stelle, an der ein Signal wirklich ankommt. `ctx` zeigt auf
-// zweiundzwanzig Woerter in der Form von isr.s -- der Aufrufer hat sie
-// entweder direkt (aus einer Unterbrechung) oder aus dem
-// Systemaufrufrahmen zusammengesetzt. Gibt zurueck, ob rip und rsp
-// geaendert wurden; nur dann muss der Aufrufer sie in seinen eigenen
-// Rahmen zurueckschreiben.
 fn deliver(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
     let h: u64 = handler_of(state, task, sig)
     let old_rsp: u64 = __mmio_read64((ctx + C_RSP) as *mut u64)
@@ -761,10 +582,6 @@ fn deliver(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
         }
     }
     let ret: u64 = base -% 8
-    // Der Rahmen muss vollstaendig im Stapel des Prozesses liegen. Ein
-    // Stapel, der dafuer zu klein geworden ist, ist der Fall, in dem
-    // jedes Unix den Prozess mit SIGSEGV beendet -- und wir tun es hier
-    // ohne Umweg, weil ein halb geschriebener Rahmen schlimmer waere.
     if !proc.user_ok(state, task, ret, SF_BYTES + 8) {
         return false
     }
@@ -784,10 +601,6 @@ fn deliver(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
             __mmio_read64((ctx + i * 8) as *mut u64))
         i = i + 1
     }
-    // Waehrend die Routine laeuft, ist ihr eigenes Signal blockiert (das
-    // ist der Sinn von `sa_mask` plus der Nummer selbst) -- sonst
-    // unterbricht ein zweites SIGINT die Behandlung des ersten mitten
-    // darin, und der Stapel waechst, solange jemand die Taste haelt.
     let fl: u64 = aget(act(state, task, sig) + A_FLAGS)
     var m: u64 = sched.tget(state, task, sched.T_SIGMASK)
         | aget(act(state, task, sig) + A_MASK)
@@ -796,18 +609,10 @@ fn deliver(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
     }
     sched.tset(state, task, sched.T_SIGMASK, m)
     sched.tset(state, task, sched.T_SIGRET, base)
-    // `SA_RESETHAND`: die Routine gilt einmal. `signal()` von C hiess so,
-    // bevor `sigaction` es abwaehlbar machte.
     if (fl & SA_RESETHAND) != 0 {
         aset(act(state, task, sig) + A_HANDLER, SIG_DFL)
         aset(act(state, task, sig) + A_FLAGS, fl & (0xFFFFFFFFFFFFFFFF -% SA_RESETHAND))
     }
-    // Und der Sprung: rip auf die Routine, rsp auf den Rahmen, rdi auf
-    // die Nummer. rsi und rdx waeren siginfo und ucontext -- dieser
-    // Kernel gibt sie nicht, und `docs/ROUNDK9.md` sagt das ausdruecklich,
-    // statt zwei Zeiger auf nichts zu uebergeben.
-    // RUNDE UNTERBAU: siginfo + ucontext (see SF_INFO). A hardware fault leaves 128 + vector in T_KILLCODE (`fault`) and the page-fault
-    // address, shifted left by 16, above the error code in the context (`trap.fi`).
     var kc: u64 = sched.tget(state, task, sched.T_KILLCODE)
     var is_fault: bool = false
     var vec: u64 = 0
@@ -870,7 +675,6 @@ fn deliver(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
     return true
 }
 
-// Das Standardverhalten. Gibt zurueck, ob die Aufgabe danach noch laeuft.
 fn do_default(state: u64, task: u64, sig: u64) -> bool {
     let what: u64 = default_of(sig)
     kstate.add(state, kstate.SIG_DEFAULT, 1)
@@ -881,23 +685,11 @@ fn do_default(state: u64, task: u64, sig: u64) -> bool {
     if what == D_STOP {
         sched.tset(state, task, sched.T_STOPSIG, sig)
         kstate.add(state, kstate.SIG_STOPS, 1)
-        // Der Elternteil erfaehrt es -- so wie er es vom Ende erfaehrt.
         exiting(state, task)
         sched.wake_pid(state, sched.tget(state, task, sched.T_PID))
-        // Und jetzt die Aufgabe wirklich aus der Hand geben. Kommt zurueck,
-        // wenn SIGCONT sie wieder auf S_READY gesetzt hat.
-        // DELL STABILITY: S_STOP and the switch under ONE hold of L_SCHED
-        // (the same rule as `wait_sleep`): a SIGCONT on another core in the
-        // gap between the store and the switch made the task READY while it
-        // still ran here, and a third core picked it up.
         sched.stop_sleep(state, bit(SIGCONT))
         return true
     }
-    // Beenden. Der Code ist der, den jede Shell liest: 128 + Nummer.
-    // Eine Zeile, wenn ein Signal einen Prozess umbringt -- aber NICHT,
-    // wenn es eine Ausnahme war: die hat `trap.fi` schon in der Form
-    // gemeldet, die seit Runde 62 gemessen wird, und zwei Meldungen
-    // desselben Todes waeren eine zu viel.
     if sched.tget(state, task, sched.T_KILLCODE) == 0 {
         var s_dead: [u8; 15] = "signal: pid=\0\0\0"
         var s_by: [u8; 8] = " SIG\0\0\0\0"
@@ -932,9 +724,6 @@ fn do_default(state: u64, task: u64, sig: u64) -> bool {
     return false // nicht erreicht
 }
 
-// Die naechste zustellbare Nummer, oder 0. Kleine Nummern zuerst -- das
-// bringt SIGKILL (9) vor SIGTERM (15) und die Fehlersignale vor alles
-// andere, was die Reihenfolge ist, die jedes Unix hat.
 fn next_signal(state: u64, task: u64) -> u64 {
     let d: u64 = deliverable(state, task)
     if d == 0 {
@@ -950,13 +739,7 @@ fn next_signal(state: u64, task: u64) -> u64 {
     return 0
 }
 
-// Der Kern der Zustellung, auf einem fertigen Zusammenhang. Gibt zurueck,
-// ob der Zusammenhang veraendert wurde.
 fn run_pending(state: u64, task: u64, ctx: u64) -> bool {
-    // DIE GEGENPROBE. Mit `nosig` wird nichts zugestellt. Die Bits
-    // bleiben stehen, die Zaehler der ABGESCHICKTEN Signale stimmen
-    // weiter -- nur ankommen tut nichts, und ein Programm, das seine
-    // SIGINTs zaehlt, muss dann bei null bleiben.
     if kstate.mode_on(state, kstate.M_NOSIG) {
         return false
     }
@@ -967,8 +750,6 @@ fn run_pending(state: u64, task: u64, ctx: u64) -> bool {
         if sig == 0 {
             return changed
         }
-        // Das Bit faellt, BEVOR gehandelt wird: sonst stellt dieselbe
-        // Schleife dasselbe Signal noch einmal zu.
         sched.tset(state, task, sched.T_SIGPEND,
             sched.tget(state, task, sched.T_SIGPEND)
             & (0xFFFFFFFFFFFFFFFF -% bit(sig)))
@@ -984,14 +765,8 @@ fn run_pending(state: u64, task: u64, ctx: u64) -> bool {
                     do_default(state, task, sig)
                 } else {
                     if deliver(state, task, sig, ctx) {
-                        // Nur EINE Routine je Rueckkehr. Die naechste
-                        // kommt, wenn diese durch `sigreturn` wieder
-                        // herausgekommen ist -- alles andere baute
-                        // Rahmen auf Rahmen.
                         return true
                     }
-                    // Der Stapel gab den Rahmen nicht her: das ist der
-                    // Fall, in dem der Prozess stirbt.
                     do_default(state, task, SIGSEGV)
                 }
             }
@@ -1001,10 +776,6 @@ fn run_pending(state: u64, task: u64, ctx: u64) -> bool {
     return changed
 }
 
-// Aus einem SYSTEMAUFRUF heraus. Der Rahmen hat sechzehn Woerter in der
-// Form von `sys.fi`; daraus wird der vollstaendige Zusammenhang gebaut.
-// rcx und r11 sind hier wirklich verloren -- `syscall` hat sie beim
-// Eintritt zerstoert, bevor irgendjemand sie sehen konnte.
 fn check_sys(state: u64, task: u64, frame: u64) {
     if sched.tget(state, task, sched.T_KIND) != sched.K_USER {
         return
@@ -1041,8 +812,6 @@ fn check_sys(state: u64, task: u64, frame: u64) {
         suspend_done(state, task)
         return
     }
-    // Zurueck in den Systemaufrufrahmen: nur die vier Woerter, die die
-    // Zustellung wirklich veraendert hat.
     __mmio_write64((frame + F_RIP) as *mut u64, __mmio_read64((c + C_RIP) as *mut u64))
     __mmio_write64((frame + F_RSP) as *mut u64, __mmio_read64((c + C_RSP) as *mut u64))
     __mmio_write64((frame + F_RDI) as *mut u64, __mmio_read64((c + C_RDI) as *mut u64))
@@ -1050,11 +819,6 @@ fn check_sys(state: u64, task: u64, frame: u64) {
     __mmio_write64((frame + F_RDX) as *mut u64, __mmio_read64((c + C_RDX) as *mut u64))
 }
 
-// Aus einer UNTERBRECHUNG heraus -- und das ist der Fall, den STRG-C in
-// einer Endlosschleife braucht: das Programm macht keine Systemaufrufe,
-// also gibt es nur einen Augenblick, in dem der Kernel es in der Hand
-// hat, und das ist der Zeitgeber. Der Rahmen von `isr_common` HAT bereits
-// die richtige Form; er kann unmittelbar benutzt werden.
 fn check_trap(state: u64, task: u64, frame: u64) {
     if sched.tget(state, task, sched.T_KIND) != sched.K_USER {
         return
@@ -1071,12 +835,6 @@ fn check_trap(state: u64, task: u64, frame: u64) {
 
 // ------------------------------------------------------ die Systemaufrufe
 
-// `rt_sigaction(sig, act, old, sigsetsize)`. Die Struktur ist Linux':
-//   +0 Routine, +8 Flaggen, +16 Wiederherstellung, +24 Maske
-// Der `sa_restorer` wird gelesen und verworfen: dieser Kernel hat einen
-// eigenen Trampolinsprung in `.utext` und braucht keinen aus der libc --
-// und ein Zeiger aus Ring 3, dem der Kernel BLIND folgt, waere genau die
-// Art Vertrauen, die dieser Kernel sonst nirgends aufbringt.
 fn do_sigaction(state: u64, task: u64, sig: u64, na: u64, oa: u64) -> u64 {
     if sig == 0 || sig >= NSIG {
         return neg(errno.E_INVAL)
@@ -1103,9 +861,6 @@ fn do_sigaction(state: u64, task: u64, sig: u64, na: u64, oa: u64) -> u64 {
         aset(act(state, task, sig) + A_HANDLER, h)
         aset(act(state, task, sig) + A_FLAGS, f)
         aset(act(state, task, sig) + A_MASK, m)
-        // Eine Routine, die auf SIG_IGN gesetzt wird, wirft weg, was
-        // wartet -- sonst kaeme das eine Signal noch, das im Augenblick
-        // des Umschaltens unterwegs war.
         if h == SIG_IGN {
             sched.tset(state, task, sched.T_SIGPEND,
                 sched.tget(state, task, sched.T_SIGPEND)
@@ -1144,9 +899,6 @@ fn do_sigprocmask(state: u64, task: u64, how: u64, set: u64,
             }
         }
     }
-    // SIGKILL und SIGSTOP lassen sich nicht blockieren. Ein Programm, das
-    // es versucht, bekommt keinen Fehler -- die beiden Bits fallen
-    // einfach heraus, so wie in jedem Unix.
     m = m & (0xFFFFFFFFFFFFFFFF -% (bit(SIGKILL) | bit(SIGSTOP)))
     sched.tset(state, task, sched.T_SIGMASK, m)
     return 0
@@ -1160,19 +912,6 @@ fn do_sigpending(state: u64, task: u64, out: u64) -> u64 {
     return 0
 }
 
-// `rt_sigreturn`. Kommt aus dem Trampolinsprung, und der Stapelzeiger des
-// Aufrufers zeigt genau auf den Rahmen, den `deliver` gelegt hat.
-//
-// DER KERNEL FOLGT DEM ZEIGER NICHT BLIND. Drei Dinge werden geprueft:
-// der Rahmen liegt vollstaendig im Stapel des Prozesses, das Kennwort
-// steht darin, und die Adresse ist die, die der Kernel selbst notiert hat
-// (`T_SIGRET`). Ohne die dritte koennte ein Programm einen eigenen Rahmen
-// bauen und sich damit Flaggen und Selektoren aussuchen -- und cs mit
-// zwei Nullbits im Rueckgabewort ist Ring 0.
-//
-// Diese Funktion KEHRT NICHT ZURUECK: sie springt ueber `user_iret`
-// unmittelbar nach Ring 3 zurueck, so wie `user_resume` es fuer das Kind
-// eines `fork` tut.
 fn do_sigreturn(state: u64, task: u64, frame: u64) -> u64 {
     let base: u64 = __mmio_read64((frame + F_RSP) as *mut u64)
     let noted: u64 = sched.tget(state, task, sched.T_SIGRET)
@@ -1199,11 +938,6 @@ fn do_sigreturn(state: u64, task: u64, frame: u64) -> u64 {
         __mmio_write64((c + greg_off(gk)) as *mut u64, peek64(state, task, base + SF_UC + 40 + gk * 8))
         gk = gk + 1
     }
-    // Die Selektoren und die Flaggen kommen NICHT aus dem Rahmen, sie
-    // werden neu gesetzt: was Ring 3 dort hineinschreiben koennte, waere
-    // sonst der Weg nach Ring 0. Von den Flaggen bleibt nur, was ein
-    // Programm ohnehin setzen darf; IF wird erzwungen, denn ein Prozess
-    // mit abgeschalteten Unterbrechungen ist eine stehende Maschine.
     let fl: u64 = __mmio_read64((c + C_RFLAGS) as *mut u64)
     __mmio_write64((c + C_RFLAGS) as *mut u64, (fl & 0x00000CD5) | 0x202)
     __mmio_write64((c + C_CS) as *mut u64, USER_CS)
@@ -1212,32 +946,16 @@ fn do_sigreturn(state: u64, task: u64, frame: u64) -> u64 {
         peek64(state, task, base + SF_MASK)
         & (0xFFFFFFFFFFFFFFFF -% (bit(SIGKILL) | bit(SIGSTOP))))
     sched.tset(state, task, sched.T_SIGRET, 0)
-    // Wartet schon das naechste? Dann sofort, auf demselben
-    // Zusammenhang -- der Stapel ist wieder frei.
     run_pending(state, task, c)
     asm("call rax", in("rax") vector(state, V_IRET), in("rdi") c,
         clobber("memory"))
     return 0 // nicht erreicht
 }
 
-// `kill(pid, sig)` mit Linux' Bedeutung, und die ist mehr als eine Zahl:
-//   pid  > 0   genau dieser Prozess
-//   pid == 0   die eigene Prozessgruppe -- was eine Shell fuer STRG-C tut
-//   pid  < 0   die Gruppe -pid
 fn do_kill(state: u64, task: u64, pid: u64, sig: u64) -> u64 {
     if sig >= NSIG {
         return neg(errno.E_INVAL)
     }
-    // RUNDE O-CONTAINER, STUFE 3: NICHT UEBER DIE GRENZE.
-    //
-    // Gefragt wird VOR der Verzweigung nach der Zielart, und der
-    // einzelne Prozess ist der Fall, der hier entschieden wird -- die
-    // Gruppenfaelle (`pid <= 0`) laufen durch `send_pgid` bzw. die
-    // Schleife unten, und BEIDE sehen ihrerseits `ctr.visible` (siehe
-    // dort). Ein Container, der eine fremde pid raet, bekommt -ESRCH
-    // und NICHT -EPERM: die Nummer soll ihm nicht verraten, dass es
-    // den Prozess gibt. Dasselbe tut Linux' pid-Namensraum, und aus
-    // demselben Grund.
     if (pid & 0x8000000000000000) == 0 && pid != 0 {
         let z: u64 = sched.find_pid(state, pid)
         if z < kstate.MAX_TASKS {
@@ -1254,20 +972,14 @@ fn do_kill(state: u64, task: u64, pid: u64, sig: u64) -> u64 {
         }
         return 0
     }
-    // Negativ heisst hier: das oberste Bit steht. Der Wert ist ein
-    // `i64` im Register, und `0 -% pid` ist sein Betrag -- eine
-    // Umdeutung, keine Subtraktion.
     if (pid & 0x8000000000000000) != 0 {
         let g: u64 = 0 -% pid
         if g == 1 {
-            // -1 heisst "alle" -- in diesem Kernel: jeder Nutzerprozess
-            // ausser dem Aufrufer selbst.
             let n: u64 = kstate.get(state, kstate.TASKS)
             var i: u64 = 0
             var hit: u64 = 0
             while i < n {
                 if i != task && sched.tget(state, i, sched.T_KIND) == sched.K_USER {
-                    // Auch "an alle" endet an der Containergrenze.
                     if ctr.may_signal(state, task, i) {
                         if send_task(state, i, sig) {
                             hit = hit + 1
@@ -1289,8 +1001,6 @@ fn do_kill(state: u64, task: u64, pid: u64, sig: u64) -> u64 {
     return send_pid(state, pid, sig)
 }
 
-// `pause()`: schlafen, bis irgendein Signal kommt. Immer -EINTR, so will
-// es POSIX -- ein `pause`, das mit 0 zurueckkehrt, hat nichts gesagt.
 fn do_pause(state: u64, task: u64) -> u64 {
     var rounds: u64 = 0
     while rounds < 6000 {
@@ -1303,8 +1013,6 @@ fn do_pause(state: u64, task: u64) -> u64 {
     return neg(errno.E_INTR)
 }
 
-// `alarm(sekunden)`: gibt zurueck, wie viel von einer frueheren Frist noch
-// uebrig war.
 fn do_alarm(state: u64, task: u64, secs: u64) -> u64 {
     let now: u64 = kstate.get(state, kstate.TICKS)
     let old: u64 = sched.tget(state, task, sched.T_ALARM)
@@ -1323,8 +1031,6 @@ fn do_alarm(state: u64, task: u64, secs: u64) -> u64 {
 
 // ---------------------------------------------------- die Prozessgruppen
 
-// `setpgid(pid, pgid)`. Beide Nullen heissen "ich" und "meine eigene" --
-// die Form, in der eine Shell einen Auftrag in eine Gruppe steckt.
 fn do_setpgid(state: u64, task: u64, pid: u64, pgid: u64) -> u64 {
     var t: u64 = task
     if pid != 0 {
@@ -1337,8 +1043,6 @@ fn do_setpgid(state: u64, task: u64, pid: u64, pgid: u64) -> u64 {
     if g == 0 {
         g = sched.tget(state, t, sched.T_PID)
     }
-    // Ueber Sitzungsgrenzen hinweg geht es nicht -- das ist die einzige
-    // Regel, die Prozessgruppen ueberhaupt zu etwas macht.
     if sched.tget(state, t, sched.T_SID) != sched.tget(state, task, sched.T_SID) {
         return neg(errno.E_PERM)
     }
@@ -1357,14 +1061,10 @@ fn do_getpgid(state: u64, task: u64, pid: u64) -> u64 {
     return sched.tget(state, t, sched.T_PGID)
 }
 
-// `setsid()`: eine neue Sitzung, eine neue Prozessgruppe, kein Terminal.
 fn do_setsid(state: u64, task: u64) -> u64 {
     let pid: u64 = sched.tget(state, task, sched.T_PID)
     if sched.tget(state, task, sched.T_PGID) == pid
     && sched.tget(state, task, sched.T_SID) == pid {
-        // Wer schon Fuehrer seiner eigenen Gruppe ist, kann keine neue
-        // Sitzung aufmachen (POSIX) -- sonst gaebe es zwei Sitzungen mit
-        // derselben Nummer.
         return neg(errno.E_PERM)
     }
     sched.tset(state, task, sched.T_SID, pid)

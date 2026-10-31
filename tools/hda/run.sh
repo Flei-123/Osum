@@ -179,7 +179,7 @@ has "$TMPD/noaud.txt" "aud: aus (kein Wort)" "noaudio hebt audio auf"
 rc=$(lauf nodev "osum nokbd nosched noproc nofs audio audsay" "")
 same "ZUSAGE (f): ohne Tonkarte beendet sich der Kern NORMAL" 21 "$rc"
 has "$TMPD/nodev.txt" "hda: no device 04:03" "HDA sagt klar, dass kein Geraet da ist"
-has "$TMPD/nodev.txt" "ac97: kein Geraet 04:01 da" "AC97 sagt es auch"
+has "$TMPD/nodev.txt" "ac97: no device 04:01" "AC97 sagt es auch"
 has "$TMPD/nodev.txt" "aud: kein Geraet, why2" "und die Schicht gibt eine ZAHL heraus (2 = kein Geraet)"
 has "$TMPD/nodev.txt" "kernel: done" "das System laeuft danach ganz normal weiter"
 
