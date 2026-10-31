@@ -47,3 +47,7 @@ Deterministic CBOR (RFC 8949 section 4.2, CTAP2 canonical): encoder `std.cbor`, 
 because the pin does not contain them yet; `$FIRNLIB` is searched before the pinned library. Gate:
 `bash tools/vaultlib/run.sh` (RFC 8949 Appendix A vectors, negative cases, fuzz). Delete the mirror when the pin has
 moved past the Firn commit that holds the files (roadmap: lift to Firn).
+
+## `lib/vault/` + `lib/std/{cbor,cborread,cborcanon,utf8}.fi` (MIRROR, roadmap r2441)
+
+Container v2 (`vlayout`, `vslot`, `vbody`, `container`, `recovery`, `vrand`) is written here first and must move to Firn `lib/vault/` when the pin catches up; gate `tools/vaultlib/run.sh` (incl. the Python cross-check `against.py`).
