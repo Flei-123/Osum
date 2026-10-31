@@ -11,6 +11,7 @@
 #      SPEC (an existing mkroot spec; default <workdir>/fxrun/spec.txt), KEEP=1 (keep the disk image),
 #      GUI=1 (replace busybox sh/sleep/echo/cat/ls by the Osum programs, add wayd, fonts and keymaps: the guest script is then an Osum-sh script),
 #      EXTRA="/guest/path=host/path@755 ..." (more spec entries).
+#      QEMU_EXTRA="-vga std -netdev ... -device ..." (more QEMU arguments, word-split).
 # Result: <outdir>/ser.txt (raw serial), <outdir>/ser.clean, <outdir>/summary.txt (ENOSYS numbers, failing mem calls, user faults, guest markers).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -61,7 +62,7 @@ DRV=(-drive "file=$OUT/disk.img,format=raw,if=ide,index=0")
 SOCK="$OUT/mon.sock"; rm -f "$SOCK"
 timeout "$TMO" qemu-system-x86_64 "${ACC[@]}" -smp "${SMP:-1}" -kernel "$KERNEL" -m "$MEM" -append "$KARGS" \
     -serial "file:$OUT/ser.txt" -display none -no-reboot -monitor "unix:$SOCK,server,nowait" "${DRV[@]}" \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.txt" 2>&1 &
+    $QEMU_EXTRA -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.txt" 2>&1 &
 QPID=$!
 i=0
 while kill -0 "$QPID" 2>/dev/null; do
