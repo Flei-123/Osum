@@ -272,7 +272,8 @@ Gates (each build order names its own; all heavy runs through `/root/jarvis/bin/
 - Authenticator gate: `authenticator.md` section 8.
 
 ## 8b. PIN + TPM slot (r2489, built in lib; kernel device open)
-- **Wire:** `unlock pin=<hex>` (needs a `tpm` slot), `tpmenroll pin=<hex>` (vault open, seals VK to the TPM, adds/replaces the slot), `tpmdrop` (removes it), `reveal pin=<hex>` (UV, alternative to `pw`). `status` adds `tpm=` (device ready), `tpmslot=`, `pinunlock=`. Errors: `nopin` (no/disabled PIN), `tpm` (device unusable), `tpmlock` (TPM dictionary-attack lockout, use the main password), `noslot`.
+- **Wire:** `unlock pin=<hex>` (needs a `tpm` slot), `tpmenroll pin=<hex>` (vault open, seals VK to the TPM, adds/replaces the slot), `tpmdrop` (removes it). `status` adds `tpm=` (device ready), `tpmslot=`, `pinunlock=`. Errors: `nopin` (no/disabled PIN), `tpm` (device unusable), `tpmlock` (TPM dictionary-attack lockout, use the main password), `noslot`.
+- **Reveal UV:** since 294aa3e4 `reveal` asks the vaultprompt confirm callback; the prompt decides how UV happens (PIN via `pin.fi` stays there).
 - **Counter:** every PIN check goes through the `pin_check` hook = `pin.fi verify` (persisted counter, back-off, 10th wrong disables). vaultd keeps no PIN counter. A PIN unlock does not reset the password lockout state.
 - **TPM:** `lib/tpm/` (tpmwire, tpmcmd, tpmseal): CreatePrimary (ECC P-256 SRK) + Create (keyedhash, `fixedTPM|fixedParent`, no userWithAuth, authPolicy = PolicyAuthValue digest) + Load + policy session (StartAuthSession, PolicyAuthValue) + Unseal with session HMAC; the response HMAC is verified. DA lockout is the TPM's own (`TP_E_LOCKOUT`).
 - **Slot blob (`lib/vault/vtpm.fi`):** `ver(1) salt(16) priv2b pub2b`. authValue = HKDF-SHA256(salt, PIN, "vault2 tpm auth"). Changing the PIN requires `tpmenroll` again with the open vault.
