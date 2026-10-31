@@ -40,6 +40,24 @@ static void statx_calls(void)
     CHECK("statx_file_reg", r == 0 && S_ISREG(mode), "r %ld mode %o errno %d", r, mode, errno);
     CHECK("statx_creat_mode_honoured", r == 0 && (mode & 0777) == 0640, "mode %o", mode & 0777);
     CHECK("statx_file_size", r == 0 && size == 5, "size %llu", size);
+    {
+        unsigned dm;
+        errno = 0; r = mkdir("/tmp/mkm_700", 0700);
+        CHECK("mkdir_mode_0700_created", r == 0 || errno == EEXIST, "errno %d", errno);
+        memset(sx, 0xAA, sizeof sx);
+        r = syscall(332, -100, "/tmp/mkm_700", 0, 0x7ff, sx); dm = sx[28] | (sx[29] << 8);
+        CHECK("mkdir_mode_0700_honoured", r == 0 && S_ISDIR(dm) && (dm & 0777) == 0700, "mode %o", dm & 0777);
+        errno = 0; r = mkdir("/tmp/mkm_750", 0750);
+        memset(sx, 0xAA, sizeof sx);
+        r = syscall(332, -100, "/tmp/mkm_750", 0, 0x7ff, sx); dm = sx[28] | (sx[29] << 8);
+        CHECK("mkdir_mode_0750_honoured", r == 0 && S_ISDIR(dm) && (dm & 0777) == 0750, "mode %o", dm & 0777);
+        errno = 0; r = syscall(258, -100, "/tmp/mkm_at705", 0705);
+        CHECK("mkdirat_created", r == 0 || errno == EEXIST, "r %ld errno %d", r, errno);
+        memset(sx, 0xAA, sizeof sx);
+        r = syscall(332, -100, "/tmp/mkm_at705", 0, 0x7ff, sx); dm = sx[28] | (sx[29] << 8);
+        CHECK("mkdirat_mode_0705_honoured", r == 0 && S_ISDIR(dm) && (dm & 0777) == 0705, "mode %o", dm & 0777);
+        rmdir("/tmp/mkm_700"); rmdir("/tmp/mkm_750"); rmdir("/tmp/mkm_at705");
+    }
     errno = 0;
     int sr = stat("/tmp/statx_probe", &st);
     unsigned long long ino; memcpy(&ino, sx + 32, 8);
