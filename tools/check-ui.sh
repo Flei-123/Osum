@@ -346,7 +346,7 @@ if [[ -f kernel/ui/wm.fi ]]; then
         # musste. Also die Klammer verlangen.
         /core\.[a-z_]+\(/ { fui++ }
         END { if (name != "" && W[name] && roh > 0) print "  " name " (" roh " rohe Setzer -- eine Form-Funktion setzt keine Bildpunkte)" }
-    ' kernel/ui/wm.fi)
+    ' kernel/ui/wm.fi kernel/ui/wm/wmcaption.fi)
 
     if [[ -n ${kroh//[$'\n' ]/} ]]; then
         fehler=$((fehler + 1))

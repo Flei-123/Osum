@@ -87,6 +87,8 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmswitchpaint
+import ui.wm.wmdragpaint
 import ui.wm.wmcaption
 import ui.wm.wmtitle
 import ui.wm.wmswitchctl
@@ -219,6 +221,8 @@ const MAX_WIN: u64 = wmbase.MAX_WIN
 fn minimize_anim(state: u64, i: u64) -> bool {
     return wmanimctl.minimize_anim(state, i)
 }
+
+
 
 
 
@@ -915,7 +919,7 @@ fn wins_say(state: u64) {
                 serial.puts((&s_tg[0]) as u64)
                 serial.hex(tg)
                 serial.puts((&s_tk[0]) as u64)
-                serial.dec(wmtitle.titel_schnitt_alt)
+                serial.dec(wmtitle.title_cut_old)
                 // r402: the measures of the chrome, so that a runner can place the three
                 // caption buttons without a constant of its own
                 var s_br: [u8; 6] = " bar=\0"
@@ -4562,7 +4566,7 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
     // 2c. ROUND ACTION-BUS-5 (AB-004): the trusted dialog, over every
     //     window and under the pointer only
     let tp_pv: u64 = time.tsc()
-    paint_switcher(state, x0, y0, x1, y1) // W1d: the Alt+Tab panel, over the windows
+    wmswitchpaint.paint_switcher(state, x0, y0, x1, y1) // W1d: the Alt+Tab panel, over the windows
     wmtrust.td_paint(state, x0, y0, x1, y1)
     let tp_td: u64 = time.tsc()
     // 3. der Zeiger, ganz oben
@@ -4914,227 +4918,6 @@ fn drag_end_pub(state: u64, i: u64) {
     drag_end(state, i, wmbase.win_x(state, i), wmbase.win_y(state, i))
 }
 
-// W-DRAG: THE FRAME, THE TITLE BAR AND THE CAPTION BUTTONS OF A LIFTED WINDOW.
-//
-// `paint_win_drag` copies only the client area, so a dragged window lost its frame, its title bar and its caption buttons for the whole
-// drag and the swing after the release (Justin, Dell 3440x1440, scale 2: "the title bar disappears while I drag"). The old comment said
-// nobody needs the bar for half a second -- but the bar is the thing the user HOLDS. It is painted here with the geometry of the lifted
-// client rectangle: same height as always (a bar scaled by 105 percent would be a blurred edge), as wide as the lifted client plus the frame.
-// `late` = the second call, after the client area: the caption buttons of a window that paints its own strip lie over the strip.
-fn paint_drag_chrome(state: u64, i: u64, wx: i64, wy: i64, ow: i64, oh: i64, cx0: i64, cy0: i64, cx1: i64, cy1: i64, late: bool) {
-    if !wmbase.deko(state, i) || fb.nodragbar_an(state) {
-        return
-    }
-    let ax0: i64 = wmbase.imax(wx, cx0)
-    let ay0: i64 = wmbase.imax(wy, cy0)
-    let ax1: i64 = wmbase.imin(wx + ow, cx1)
-    let ay1: i64 = wmbase.imin(wy + oh, cy1)
-    if ax1 <= ax0 || ay1 <= ay0 {
-        return
-    }
-    let aktiv: bool = wmbase.focus(state) == i
-    var rahmen: u64 = wmbase.deco(state, wmlayout.DK_FRAME)
-    var titel: u64 = wmbase.deco(state, wmlayout.DK_TITLE)
-    var schrift: u64 = wmbase.deco(state, wmlayout.DK_TEXT)
-    if aktiv {
-        rahmen = wmbase.deco(state, wmlayout.DK_FRAME_ON)
-        titel = wmbase.deco(state, wmlayout.DK_TITLE_ON)
-        schrift = wmbase.deco(state, wmlayout.DK_TEXT_ON)
-    }
-    let capc: bool = wmtitle.cap_client(state, i)
-    if late {
-        if capc {
-            if wmgeom.form(state, wmlayout.FM_CAPTION) != 0 {
-                wmcaption.paint_caption(state, i, wx, wy, ow, titel, schrift, ax0, ay0, ax1, ay1)
-            } else {
-                wmcaption.paint_close_classic(state, wx, wy, ow, ax0, ay0, ax1, ay1)
-            }
-        }
-        return
-    }
-    // The frame colour only where the client area will NOT cover it: four bands (top with the bar, bottom, left, right) through the same
-    // rounded fill with a narrower clip each. A fill of the whole outer rectangle cost +0.5 ms a frame in stationaer.sh phase 5.
-    let ry: i64 = wy + wmbase.iny(state, i) as i64
-    let rb: i64 = wy + oh - wmgeom.border(state) as i64
-    let rl: i64 = wx + wmgeom.border(state) as i64
-    let rr: i64 = wx + ow - wmgeom.border(state) as i64
-    let rad: u64 = wmgeom.form(state, wmlayout.FM_RADIUS)
-    let dal: u64 = wmcaption.deco_alpha(state)
-    if wmbase.imin(cy1, ry) > cy0 {
-        wmdraw.fill_round(state, wx, wy, ow, oh, rad, rahmen, dal, cx0, cy0, cx1, wmbase.imin(cy1, ry))
-    }
-    if cy1 > wmbase.imax(cy0, rb) {
-        wmdraw.fill_round(state, wx, wy, ow, oh, rad, rahmen, dal, cx0, wmbase.imax(cy0, rb), cx1, cy1)
-    }
-    if wmbase.imin(cy1, rb) > wmbase.imax(cy0, ry) {
-        if wmbase.imin(cx1, rl) > cx0 {
-            wmdraw.fill_round(state, wx, wy, ow, oh, rad, rahmen, dal, cx0, wmbase.imax(cy0, ry), wmbase.imin(cx1, rl), wmbase.imin(cy1, rb))
-        }
-        if cx1 > wmbase.imax(cx0, rr) {
-            wmdraw.fill_round(state, wx, wy, ow, oh, rad, rahmen, dal, wmbase.imax(cx0, rr), wmbase.imax(cy0, ry), cx1, wmbase.imin(cy1, rb))
-        }
-    }
-    if !capc {
-        wmcaption.paint_title(state, i, wx, wy, ow, titel, schrift, ax0, ay0, ax1, ay1)
-    }
-    var bx: i64 = wx + ow - wmgeom.border(state) as i64 - wmgeom.close_w(state) as i64 - 3
-    if wmgeom.form(state, wmlayout.FM_CAPTION) != 0 {
-        bx = wx + ow - wmgeom.border(state) as i64 - (wmlayout.CAP_N * wmgeom.cap_w(state)) as i64
-        if !capc {
-            wmcaption.paint_caption(state, i, wx, wy, ow, titel, schrift, ax0, ay0, ax1, ay1)
-        }
-    } else if !capc {
-        wmcaption.paint_close_classic(state, wx, wy, ow, ax0, ay0, ax1, ay1)
-    }
-    var before: i64 = 0
-    let sicht: u64 = netview.view_of(state, wmbase.win_owner(state, i))
-    if sicht != netview.V_REAL && sicht <= 3 && !capc {
-        wmtitle.title_mark(state, sicht - 1, wx + wmgeom.border(state) as i64 + wmgeom.title_pad(state) as i64,
-            wy + wmgeom.border(state) as i64 + ((wmgeom.title_h(state) - wmgeom.border(state) - netmark.H) / 2) as i64,
-            schrift, ax0, ay0, ax1, ay1)
-        before = netmark.W as i64 + 4
-    }
-    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_UI)
-    if f < ttf.MAX_FONTS && !capc {
-        wmtitle.title_text(state, i, f, wx + wmgeom.border(state) as i64 + wmgeom.title_pad(state) as i64 + before,
-            wy + wmgeom.title_base(state, f), schrift, ax0, ay0, ax1, ay1, bx)
-    }
-}
-
-// DAS GEZOGENE FENSTER MALEN -- Versatz und Skalierung um einen
-// verschobenen Pivot.
-//
-// Der Pivot: bei FM_TILT = 0 die Mitte (das Fenster waechst
-// gleichmaessig nach allen Seiten), bei 100 die angefasste Stelle. Sie
-// steht in S_DRAGX/S_DRAGY, gesetzt beim Anfassen, relativ zur
-// AUSSENecke des Fensters -- genau die Zahl, die dieser Rechenweg
-// braucht, und sie liegt schon da.
-fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
-    cy1: i64) {
-    let bw: i64 = wmlayout.wg(state, i, wmlayout.W_W) as i64
-    let bh: i64 = wmlayout.wg(state, i, wmlayout.W_H) as i64
-    if bw <= 0 || bh <= 0 {
-        return
-    }
-    let sk: u64 = wmanim.drag_scale(state, i)
-    var nw: i64 = bw * sk as i64 / 1000
-    var nh: i64 = bh * sk as i64 / 1000
-    if nw <= 0 || nh <= 0 {
-        return
-    }
-    // Die Malflaeche, wie sie ohne alles laege.
-    let ix: i64 = wmbase.win_x(state, i) + wmgeom.border(state) as i64
-    let iy: i64 = wmbase.win_y(state, i) + wmbase.iny(state, i) as i64
-    // DER PIVOT. `ax`/`ay` ist die angefasste Stelle INNERHALB der
-    // Malflaeche; `tl` mischt zwischen Mitte (0) und ihr (100).
-    let tl: i64 = wmanim.drag_tilt_on(state) as i64
-    var ax: i64 = bw / 2
-    var ay: i64 = bh / 2
-    if wmanim.is_dragged(state, i) {
-        let gx: i64 = wmlayout.gs(state, wmlayout.S_DRAGX) as i64 - wmgeom.border(state) as i64
-        let gy: i64 = wmlayout.gs(state, wmlayout.S_DRAGY) as i64 - wmbase.iny(state, i) as i64
-        // Ausserhalb der Flaeche angefasst (Titelleiste, Rahmen) wird
-        // auf sie geklemmt: ein Pivot ausserhalb des Bildes laesst die
-        // Flaeche wegdriften statt wachsen.
-        let px: i64 = wmbase.imin(wmbase.imax(gx, 0), bw)
-        let py: i64 = wmbase.imin(wmbase.imax(gy, 0), bh)
-        ax = bw / 2 + (px - bw / 2) * tl / 100
-        ay = bh / 2 + (py - bh / 2) * tl / 100
-    }
-    // Um den Pivot skalieren heisst: der Punkt `a` liegt nachher dort,
-    // wo er vorher lag. Alles andere waechst von ihm weg.
-    var ox: i64 = ix + ax - ax * nw / bw
-    var oy: i64 = iy + ay - ay * nh / bh
-    // und der Nachzug legt sich darueber.
-    ox = ox + wmanim.swing_dx(state, i)
-    oy = oy + wmanim.swing_dy(state, i)
-    // W-DRAG: the frame, title bar and caption buttons go with the lifted window (the client rectangle is the anchor)
-    let fr_x: i64 = ox - wmgeom.border(state) as i64
-    let fr_y: i64 = oy - wmbase.iny(state, i) as i64
-    let fr_w: i64 = nw + 2 * wmgeom.border(state) as i64
-    let fr_h: i64 = nh + wmbase.iny(state, i) as i64 + wmgeom.border(state) as i64
-    paint_drag_chrome(state, i, fr_x, fr_y, fr_w, fr_h, cx0, cy0, cx1, cy1, false)
-    let ax0: i64 = wmbase.imax(ox, cx0)
-    let ay0: i64 = wmbase.imax(oy, cy0)
-    let ax1: i64 = wmbase.imin(ox + nw, cx1)
-    let ay1: i64 = wmbase.imin(oy + nh, cy1)
-    if ax1 <= ax0 || ay1 <= ay0 {
-        paint_drag_chrome(state, i, fr_x, fr_y, fr_w, fr_h, cx0, cy0, cx1, cy1, true)
-        return
-    }
-    let buf: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
-    let stride: u64 = wmlayout.wg(state, i, wmlayout.W_W)
-    // KEINE DECKUNGSMISCHUNG. Ein gezogenes Fenster ist undurchsichtig
-    // -- es wird aufgehoben, nicht eingeblendet --, und `pixel` ohne
-    // Mischung ist der Weg, auf dem die 0,18 ms der Kostenmessung
-    // gemessen sind.
-    // r460: ROW BY ROW, NO CALL PER PIXEL. The first version called `fb.pixel` for every pixel (five state reads and three
-    // compares each) and divided twice per pixel -- 15 ms for a 860x580 window. Now the clip is cut once, the row start is
-    // one address, and the source column steps with an integer remainder (`sx = (x - ox) * bw / nw` exactly, so the picture
-    // is the same pixel for pixel; `tools/wm` compares it).
-    let sw: i64 = fb.width(state) as i64
-    let shh: i64 = fb.height(state) as i64
-    var cl0: i64 = wmbase.imax(ax0, 0)
-    var cl1: i64 = wmbase.imin(ax1, sw)
-    var ct0: i64 = wmbase.imax(ay0, fb.band_lo(state) as i64)
-    var ct1: i64 = wmbase.imin(ay1, shh)
-    // the source column also has to stay inside the window picture
-    if cl0 < ox {
-        cl0 = ox
-    }
-    if cl1 > ox + nw {
-        cl1 = ox + nw
-    }
-    if cl1 > cl0 && ct1 > ct0 {
-        let pitch: u64 = fb.pitch(state)
-        let dst0: u64 = fb.draw_at(state)
-        // the first source column of the row and its remainder: sx = q, rem = (x - ox) * bw - q * nw
-        let num0: i64 = (cl0 - ox) * bw
-        let q0: i64 = num0 / nw
-        let r0: i64 = num0 - q0 * nw
-        let qs: i64 = bw / nw
-        let rs: i64 = bw - qs * nw
-        // r465: the inner loop is assembly (`tools/blur/blurasm.py`, routine d; 752 + 2000 cases in `asmtest.c`). The old Firn loop
-        // cost about 10 ns a pixel (stack code, overflow checks); the column test `0 <= q < bw` is gone because the clip above
-        // keeps every x in [ox, ox + nw), which makes q = (x - ox) * bw / nw lie in [0, bw).
-        var blk: [u64; 8] = [0 as u64; 8]
-        blk[2] = (cl1 - cl0) as u64
-        blk[3] = q0 as u64
-        blk[4] = r0 as u64
-        blk[5] = qs as u64
-        blk[6] = rs as u64
-        blk[7] = nw as u64
-        var y: i64 = ct0
-        while y < ct1 {
-            let sy: i64 = (y - oy) * bh / nh
-            if sy >= 0 && sy < bh {
-                blk[0] = buf +% (sy as u64) *% stride *% 4
-                blk[1] = dst0 +% (y as u64) *% pitch +% (cl0 as u64) *% 4
-                asm("mov rdx,rdi\nmov rcx,[rdx+16]\ntest rcx,rcx\njz 0f\nmov rsi,[rdx]\nmov rdi,[rdx+8]\nmov r8,[rdx+24]\nmov r9,[rdx+32]\nmov r10,[rdx+40]\nmov r11,[rdx+48]\n1:\nmov eax,[rsi+r8*4]\nand eax,16777215\nmov [rdi],eax\nadd rdi,4\nadd r8,r10\nadd r9,r11\ncmp r9,[rdx+56]\njl 2f\nsub r9,[rdx+56]\ninc r8\n2:\ndec rcx\njnz 1b\n0:",
-                    in("rdi") (&blk[0]) as u64,
-                    clobber("rax"),
-                    clobber("rcx"),
-                    clobber("rdx"),
-                    clobber("rsi"),
-                    clobber("rdi"),
-                    clobber("r8"),
-                    clobber("r9"),
-                    clobber("r10"),
-                    clobber("r11"),
-                    clobber("memory"))
-            }
-            y = y + 1
-        }
-    }
-    paint_drag_chrome(state, i, fr_x, fr_y, fr_w, fr_h, cx0, cy0, cx1, cy1, true)
-    wmlayout.wsv(state, i, wmlayout.W_PAINTS, wmlayout.wg(state, i, wmlayout.W_PAINTS) + 1)
-    wmlayout.wsv(state, i, wmlayout.W_PX,
-        wmlayout.wg(state, i, wmlayout.W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
-    wmlayout.ss(state, wmlayout.S_DRAGPX,
-        wmlayout.gs(state, wmlayout.S_DRAGPX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
-    wmlayout.ss(state, wmlayout.S_ZFLAG, 1)
-}
-
 fn set_blur_cache(state: u64, on: bool) {
     if on {
         wmlayout.ss(state, wmlayout.S_BC_AUS, 0)
@@ -5190,7 +4973,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // seine Titelleiste braucht in dieser halben Sekunde niemand.
     if wmanim.drag_paint_on(state, i) {
         let ph_t: u64 = time.tsc()
-        paint_win_drag(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
+        wmdragpaint.paint_win_drag(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
             cy1 as i64)
         wmpresent.ph_add(state, wmlayout.S_PH_DRAG, ph_t, time.tsc())
         return
@@ -5959,15 +5742,15 @@ fn rund_saum(state: u64, wx: i64, cx0: i64, cx1: i64, ww: u64, y: u64,
 static mut ga_blits: u64 = 0 // r368: wie oft die Leiste gemischt wurde (fuer die Alphazeile)
 
 fn title_clipped() -> u64 {
-    return wmtitle.titel_schnitt
+    return wmtitle.title_cut
 }
 
 fn title_old() -> u64 {
-    return wmtitle.titel_schnitt_alt
+    return wmtitle.title_cut_old
 }
 
 fn title_missing() -> u64 {
-    return wmtitle.titel_max
+    return wmtitle.title_max
 }
 static mut mv_lx: i64 = 0
 static mut mv_ly: i64 = 0
@@ -9460,116 +9243,6 @@ fn hotkeys(state: u64) -> u64 {
     return n
 }
 const ACT_PREV_WIN: u64 = 64
-
-fn paint_switcher(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    if wmswitch.sw_open == 0 || wmswitch.sw_n == 0 {
-        return
-    }
-    wmswitch.sw_geom(state)
-    let c0: i64 = cx0 as i64
-    let r0: i64 = cy0 as i64
-    let c1: i64 = cx1 as i64
-    let r1: i64 = cy1 as i64
-    let k: i64 = wmswitch.sw_g[9 as usize]
-    let px: i64 = wmswitch.sw_g[0 as usize]
-    let py: i64 = wmswitch.sw_g[1 as usize]
-    let cw: i64 = wmswitch.sw_g[4 as usize]
-    let ch: i64 = wmswitch.sw_g[5 as usize]
-    let gap: i64 = wmswitch.sw_g[6 as usize]
-    let pad: i64 = wmswitch.sw_g[7 as usize]
-    let cols: i64 = wmswitch.sw_g[8 as usize]
-    if px + wmswitch.sw_g[2 as usize] <= c0 || py + wmswitch.sw_g[3 as usize] <= r0 || px >= c1 || py >= r1 {
-        return
-    }
-    wmdraw.fill_round(state, px, py, wmswitch.sw_g[2 as usize], wmswitch.sw_g[3 as usize], wmswitch.sw_dim(state, 12, k) as u64, 0x202020, 240, c0, r0, c1, r1)
-    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_UI)
-    let pxui: u64 = wmlayout.gs(state, wmlayout.S_PX_UI)
-    let accent: u64 = wmbase.deco(state, wmlayout.DK_FRAME_ON)
-    let n: i64 = wmswitch.sw_n as i64
-    var t: i64 = 0
-    while t < n {
-        let w: u64 = wmswitch.sw_list[t as usize]
-        let row: i64 = t / cols
-        var inrow: i64 = n - row * cols
-        if inrow > cols {
-            inrow = cols
-        }
-        let off: i64 = (cols - inrow) * (cw + gap) / 2
-        let tx: i64 = px + pad + off + (t % cols) * (cw + gap)
-        let ty: i64 = py + pad + row * (ch + gap)
-        if wmbase.valid(state, w) && tx < c1 && ty < r1 && tx + cw > c0 && ty + ch > r0 {
-            if (t as u64) == wmswitch.sw_sel {
-                wmdraw.fill_round(state, tx, ty, cw, ch, wmswitch.sw_dim(state, 8, k) as u64, accent, 255, c0, r0, c1, r1)
-                let b: i64 = wmswitch.sw_dim(state, 3, k)
-                wmdraw.fill_round(state, tx + b, ty + b, cw - 2 * b, ch - 2 * b, wmswitch.sw_dim(state, 6, k) as u64, 0x2E2E2E, 255, c0, r0, c1, r1)
-            }
-            let m: i64 = wmswitch.sw_dim(state, 10, k)
-            let thx: i64 = tx + m
-            let thy: i64 = ty + m
-            let thw: i64 = cw - 2 * m
-            let thh: i64 = ch - 2 * m - wmswitch.sw_dim(state, 26, k)
-            let bw: i64 = wmlayout.wg(state, w, wmlayout.W_W) as i64
-            let bh: i64 = wmlayout.wg(state, w, wmlayout.W_H) as i64
-            let buf: u64 = wmlayout.wg(state, w, wmlayout.W_BUF)
-            // X1: no black letterbox -- the picture is scaled to its own aspect and centred, the tile colour shows around it.
-            // Only a window without a buffer gets a dark placeholder box.
-            if !(bw > 0 && bh > 0 && buf != 0) {
-                wmdraw.fill_clip(state, thx, thy, thw, thh, 0x101010, 255, c0, r0, c1, r1)
-            }
-            if bw > 0 && bh > 0 && buf != 0 && thw > 0 && thh > 0 {
-                var nw: i64 = thw
-                var nh: i64 = bh * thw / bw
-                if nh > thh {
-                    nh = thh
-                    nw = bw * thh / bh
-                }
-                if nw > 0 && nh > 0 {
-                    let ox: i64 = thx + (thw - nw) / 2
-                    let oy: i64 = thy + (thh - nh) / 2
-                    let ax0: i64 = wmbase.imax(ox, c0)
-                    let ax1: i64 = wmbase.imin(ox + nw, c1)
-                    let ay0: i64 = wmbase.imax(oy, r0)
-                    let ay1: i64 = wmbase.imin(oy + nh, r1)
-                    let stride: u64 = wmlayout.wg(state, w, wmlayout.W_W)
-                    var y: i64 = ay0
-                    while y < ay1 && ax1 > ax0 {
-                        let sy: i64 = (y - oy) * bh / nh
-                        if sy >= 0 && sy < bh && y >= 0 {
-                            fb.scaled_row_a(state, y as u64, ax0, ax1, buf +% (sy as u64) *% stride *% 4, ox, bw, nw, 255)
-                        }
-                        y = y + 1
-                    }
-                }
-            }
-            var lead_x: i64 = thx
-            let an: u64 = wmcore.win_app(state, w)
-            if an != 0 && f < ttf.MAX_FONTS && (__mmio_read8((an) as *mut u8)) != 0 as u8 {
-                // ROUND W-ICON: the program's tile in front of the title -- same colour and letter as the bar,
-                // the start menu and the task manager (lib/appicon.fi)
-                let ts: i64 = wmswitch.sw_dim(state, 16, k)
-                let ty2: i64 = thy + thh + wmswitch.sw_dim(state, 4, k)
-                wmdraw.fill_round(state, thx, ty2, ts, ts, wmswitch.sw_dim(state, 4, k) as u64, appicon.color_of(an), 255, c0, r0, c1, r1)
-                let cp: u64 = appicon.letter_cp(an, 0)
-                if cp != 0 {
-                    let gs_: u64 = ttf.glyph(state, f, cp, pxui)
-                    if gs_ < ttf.SLOTS {
-                        let gw_: i64 = ttf.g_w(state, gs_) as i64
-                        let gh_: i64 = ttf.g_h(state, gs_) as i64
-                        wmdraw.fb_glyph(state, gs_, thx + (ts - gw_) / 2 - ttf.g_left(state, gs_),
-                            ty2 + (ts - gh_) / 2 + ttf.g_top(state, gs_), 0xFFFFFF,
-                            wmbase.imax(thx, c0), wmbase.imax(ty, r0), wmbase.imin(tx + cw, c1), wmbase.imin(ty + ch, r1))
-                    }
-                }
-                lead_x = thx + ts + wmswitch.sw_dim(state, 4, k)
-            }
-            if f < ttf.MAX_FONTS {
-                wmtitle.title_text(state, w, f, lead_x, thy + thh + wmswitch.sw_dim(state, 4, k) + ttf.ascent(state, f, pxui), 0xFFFFFF,
-                    wmbase.imax(thx, c0), wmbase.imax(ty, r0), wmbase.imin(tx + cw, c1), wmbase.imin(ty + ch, r1), tx + cw - m)
-            }
-        }
-        t = t + 1
-    }
-}
 
 // W-TPSET2: a touchpad gesture action (lib/touchgest A_*, already resolved from the swipe mode in hidin) that
 // the window server owns: 1 = next window, 2 = previous window (same focus walk as Alt+Tab / Alt+Shift+Tab).
