@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.fs
+
+export { lookup_in, lookup, name_ok, PASSWD_PATH }
+
+const PASSWD_PATH: str = "/etc/passwd"
+const NAME_MAX: usize = 32
+
+fn name_ok(b: *mut rt.Buf) -> bool {
+    let n: usize = rt.buf_len(b)
+    if n == 0 || n > NAME_MAX {
+        return false
+    }
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.buf_at(b, i)
+        let alpha: bool = (c >= 97 as u8 && c <= 122 as u8) || (c >= 65 as u8 && c <= 90 as u8)
+        let digit: bool = c >= 48 as u8 && c <= 57 as u8
+        let punct: bool = c == 95 as u8 || c == 45 as u8 || (c == 46 as u8 && i > 0)
+        if !alpha && !digit && !punct {
+            return false
+        }
+        if i == 0 && (c == 45 as u8 || digit) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn parse_uid(text: *mut rt.Buf, from: usize, to: usize) -> u64 {
+    if to <= from || to - from > 10 {
+        return 0xFFFFFFFFFFFF
+    }
+    var v: u64 = 0
+    var i: usize = from
+    while i < to {
+        let c: u8 = rt.buf_at(text, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return 0xFFFFFFFFFFFF
+        }
+        v = v * 10 + (c - 48 as u8) as u64
+        i = i + 1
+    }
+    return v
+}
+
+fn lookup_in(text: *mut rt.Buf, uid: u64, out: *mut rt.Buf) -> bool {
+    let n: usize = rt.buf_len(text)
+    var pos: usize = 0
+    while pos < n {
+        var eol: usize = pos
+        while eol < n && rt.buf_at(text, eol) != 10 as u8 {
+            eol = eol + 1
+        }
+        var colon: [usize; 3] = [0; 3]
+        var found: usize = 0
+        var i: usize = pos
+        while i < eol && found < 3 {
+            if rt.buf_at(text, i) == 58 as u8 {
+                colon[found] = i
+                found = found + 1
+            }
+            i = i + 1
+        }
+        if found == 3 && parse_uid(text, colon[1] + 1, colon[2]) == uid {
+            var cand: rt.Buf = rt.buf_new()
+            var k: usize = pos
+            while k < colon[0] {
+                rt.buf_push(&cand, rt.buf_at(text, k))
+                k = k + 1
+            }
+            let ok: bool = name_ok(&cand)
+            if ok {
+                rt.buf_push_bytes(out, rt.buf_ptr(&cand), rt.buf_len(&cand))
+            }
+            rt.buf_free(&cand)
+            return ok
+        }
+        pos = eol + 1
+    }
+    return false
+}
+
+fn lookup(path: str, uid: u64, out: *mut rt.Buf) -> bool {
+    var text: rt.Buf = rt.buf_new()
+    let r: usize = fs.read_file(path, &text) catch 0
+    var ok: bool = false
+    if r > 0 {
+        ok = lookup_in(&text, uid, out)
+    }
+    rt.buf_free(&text)
+    return ok
+}

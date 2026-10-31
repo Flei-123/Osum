@@ -134,10 +134,10 @@ echo rc=\$?
 vaultctl status
 echo ==ROOT-FILE==
 ls /secrets
-ls /secrets/u0
-grep -c $PW1 /secrets/u0/vault.vlt
-grep -c $LPW /secrets/u0/vault.vlt
-grep -c $USER1 /secrets/u0/vault.vlt
+ls /secrets/root
+grep -c $PW1 /secrets/root/vault.vlt
+grep -c $LPW /secrets/root/vault.vlt
+grep -c $USER1 /secrets/root/vault.vlt
 echo ==J-STATUS0==
 su justin /bin/vaultctl status
 echo ==J-FIND-ROOT-ORIGIN==
@@ -154,8 +154,11 @@ su justin /bin/vaultctl find origin=$ORIGIN
 echo rc=\$?
 echo ==J-LIST==
 su justin /bin/vaultctl list
+echo ==J-DIRS==
+ls /secrets
+ls /secrets/justin
 echo ==J-READ-ROOT-FILE==
-su justin /bin/cat /secrets/u0/vault.vlt
+su justin /bin/cat /secrets/root/vault.vlt
 echo rc=\$?
 echo ==ROOT-STILL==
 vaultctl find origin=$ORIGIN
@@ -234,8 +237,9 @@ part "$A" ROOT-LIST ROOT-FILE > "$TMPD/p.txt"
 has "$TMPD/p.txt" "ok=1" "list answers"
 has "$TMPD/p.txt" "state=open" "status: open"
 part "$A" ROOT-FILE J-STATUS0 > "$TMPD/p.txt"
-has "$TMPD/p.txt" "u0" "the vault lives in /secrets/u0"
+has "$TMPD/p.txt" "root" "the vault lives in /secrets/root"
 has "$TMPD/p.txt" "vault.vlt" "... as vault.vlt"
+hasnot "$TMPD/p.txt" "u0" "no uid-named folder for root"
 n_clear=$(grep -aE '^[0-9]+$' "$TMPD/p.txt" | tr '\n' ' ')
 [ "$(echo "$n_clear" | tr -d ' 0')" = "" ] && [ -n "$n_clear" ] \
     && ok "the file holds neither the main password, the login password nor the user name in clear (grep -c: $n_clear)" \
@@ -251,9 +255,13 @@ has "$TMPD/p.txt" "ok=1" "justin: own vault created"
 part "$A" J-FIND-EMPTY J-LIST > "$TMPD/p.txt"
 hasnot "$TMPD/p.txt" "login=" "ISOLATION: justin's open vault does not know root's login"
 has "$TMPD/p.txt" "ok=1" "... and the find itself works"
+part "$A" J-DIRS J-READ-ROOT-FILE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "justin" "the folder is named after the user, not the uid"
+has "$TMPD/p.txt" "vault.vlt" "... and holds justin's vault.vlt"
+hasnot "$TMPD/p.txt" "u1000" "no uid-named folder for justin"
 part "$A" J-READ-ROOT-FILE ROOT-STILL > "$TMPD/p.txt"
 if grep -qa "VAULT2" "$TMPD/p.txt"; then
-    echo "  GAP   justin can read the ciphertext of root's vault file (file mode not enforced on /secrets, follow-up r2473)"
+    echo "  GAP   justin can read the ciphertext of root's vault file (file mode not enforced on /secrets, follow-up r2477)"
 else
     ok "justin cannot read root's vault file as bytes"
 fi
