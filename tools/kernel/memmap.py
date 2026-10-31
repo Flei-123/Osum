@@ -554,7 +554,7 @@ KEINE_KDATA = {
     ("virtio.fi", "TXB_OFF"),
     ("pci.fi", "K2_OFF"),       # derselbe Wert wie TABLE_OFF
     ("ttf.fi", "A_HEAP"),       # Versatz IM Glyphenspeicher, nicht kdata
-    ("wm.fi", "W_OFF"),         # Versatz IN der Fenstertafel
+    ("wmlayout.fi", "W_OFF"),         # Versatz IN der Fenstertafel
     ("wig.fi", "CLIP_OFF"),     # Versatz IN WIG_OFF (Runde K15)
     ("wig.fi", "STAGE_OFF"),    # dito
     ("vmode.fi", "LUT_OFF"),    # Versatz IN DLUT_OFF (Runde DISPLAY)

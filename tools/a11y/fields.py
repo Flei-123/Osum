@@ -60,7 +60,7 @@ for k, v in ax.items():
 same("AX_DUMP", sy.get("AX_DUMP"), wc.get("AXC_DUMP"))
 same("P_READ", ax["P_READ"], wc["AXP_READ"])
 same("P_ACT", ax["P_ACT"], wc["AXP_ACT"])
-same("E_AXPRESS", consts("kernel/ui/wm.fi").get("E_AXPRESS"), wc.get("EV_AXPRESS"))
+same("E_AXPRESS", consts("kernel/ui/wm/wmlayout.fi").get("E_AXPRESS"), wc.get("EV_AXPRESS"))
 if bad:
     print("fields: " + "; ".join(bad))
     sys.exit(1)
