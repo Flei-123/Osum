@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.errno
+import fs.vfs
+import net.wlan_knobs
+
+export { load, parse }
+
+const FILE_MAX: u64 = 1024
+
+static mut kf_path: [u8; 16] = "/etc/wlan.knobs\0"
+static mut kf_buf: [u8; 1024] = [0 as u8; 1024]
+static mut kf_loaded: u64 = 0
+
+fn is_blank(c: u8) -> bool {
+    return c == 32 as u8 || c == 9 as u8 || c == 13 as u8
+}
+
+fn value_of(at: u64, len: u64) -> u64 {
+    let c0: u8 = kf_buf[at as usize]
+    if len == 1 && c0 == 48 as u8 { return 0 }
+    if len == 3 && c0 == 111 as u8 && kf_buf[(at + 1) as usize] == 102 as u8 { return 0 }
+    return 1
+}
+
+fn parse(state: u64, len: u64) -> u64 {
+    var applied: u64 = 0
+    var i: u64 = 0
+    while i < len {
+        while i < len && is_blank(kf_buf[i as usize]) { i = i + 1 }
+        let ns: u64 = i
+        while i < len && !is_blank(kf_buf[i as usize]) && kf_buf[i as usize] != 10 as u8 { i = i + 1 }
+        let nl: u64 = i - ns
+        while i < len && is_blank(kf_buf[i as usize]) { i = i + 1 }
+        let vs: u64 = i
+        while i < len && !is_blank(kf_buf[i as usize]) && kf_buf[i as usize] != 10 as u8 { i = i + 1 }
+        let vl: u64 = i - vs
+        while i < len && kf_buf[i as usize] != 10 as u8 { i = i + 1 }
+        if nl != 0 && kf_buf[ns as usize] != 35 as u8 {
+            let idx: u64 = wlan_knobs.index_of((&kf_buf[0]) as u64 + ns, nl)
+            if idx < wlan_knobs.count() {
+                var v: u64 = 1
+                if vl != 0 { v = value_of(vs, vl) }
+                let r: u64 = wlan_knobs.apply(state, idx + 1, v)
+                if !errno.is_error(r) { applied = applied + 1 }
+            }
+        }
+        i = i + 1
+    }
+    return applied
+}
+
+fn load(state: u64) -> u64 {
+    if kf_loaded != 0 { return 0 }
+    kf_loaded = 1
+    let m: u64 = vfs.mount_for(state, (&kf_path[0]) as u64)
+    if m >= vfs.MAX_MNT { return 0 }
+    let node: u64 = vfs.node_for(state, m, (&kf_path[0]) as u64)
+    if node == 0 { return 0 }
+    let n: u64 = vfs.v_read(state, m, node, 0, (&kf_buf[0]) as u64, FILE_MAX)
+    if n > FILE_MAX { return 0 }
+    return parse(state, n)
+}

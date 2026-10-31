@@ -234,8 +234,41 @@ hasnot "$SW" 'fakefw: tx bad' "switches on: no TX format violation"
 has "$SW" 'diag: dq sent=' "switches on: the data-queue counters are in /proc/wlan"
 has "$SW" ' hdata host ' "switches on: the data-queue TX command is in the register trace"
 has "$SW" 'ip=192.168.77.50 mask=255.255.255.0 gw=192.168.77.1' "switches on: lease 192.168.77.50"
-echo "-- ap: airplane mode (wlanctl radio off/on): link drops, no rejoin while off, back up when on; control without the switch"
 bash tools/sync/build.sh "$T/bin" 0 wlanctl > "$T/b2.txt" 2>&1 && ok "wlanctl builds" || { bad "wlanctl build"; tail "$T/b2.txt"; }
+echo "-- rt: runtime knobs while the driver is bound (wlanctl reload) + /etc/wlan.knobs at boot"
+section() { awk -v a="==$2==" -v b="==$3==" '$0 ~ a {f=1; next} $0 ~ b {f=0} f' "$1"; }
+rt_image() { # name script [knobs-file]
+    printf '%s' "$2" > "$T/$1.sh"
+    local extra=()
+    [ -n "${3:-}" ] && extra=("/etc/wlan.knobs=$3")
+    python3 tools/osum/mkfs.py build "$T/$1.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+        /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/wlanctl="$T/bin/wlanctl.elf" \
+        "/t/s.sh=$T/$1.sh" "$FWPATH=$T/blobs/v7.bin" "/etc/wlan.conf=$T/good.conf" "${extra[@]}" > "$T/$1.mkfs" 2>&1
+}
+RT_SCRIPT=$'echo ==START==\nsleep 14\necho ==BEFORE==\ncat /proc/wlan\nwlanctl reload list\nwlanctl reload wltxoff on\nwlanctl reload wlbcbytes on\nwlanctl reload iwlnoipoll on\necho ==AFTER==\nwlanctl reload list\ncat /proc/wlan\nwlanctl radio off\nsleep 4\nwlanctl radio on\nsleep 14\necho ==REJOIN==\ncat /proc/wlan\nwlanctl reload wltxoff off\nwlanctl reload list\ncat /proc/wlan\necho ==END==\n'
+rt_image rt "$RT_SCRIPT" || bad "image rt"
+run rt "iwlfhtest iwlfhbind"
+RT="$T/rt.klar"
+section "$RT" BEFORE AFTER | grep -aq '^wltxoff=off' && ok "runtime: wltxoff starts off" || bad "runtime: wltxoff not off at start"
+section "$RT" BEFORE AFTER | grep -aqE 'quirks=0x0[[:space:]]*$' && ok "runtime: live quirk word is 0 before" || bad "runtime: quirk word not 0 before"
+section "$RT" AFTER REJOIN | grep -aq '^wltxoff=on' && ok "runtime: wltxoff on while the driver is bound" || bad "runtime: wltxoff refused while bound"
+section "$RT" AFTER REJOIN | grep -aq '^wlbcbytes=on' && ok "runtime: wlbcbytes on while the driver is bound" || bad "runtime: wlbcbytes refused while bound"
+section "$RT" AFTER REJOIN | grep -aq 'quirks=0x300' && ok "runtime: live quirk word 0x300 (TX_OFF + BC_BYTES) after the knobs" || bad "runtime: quirk word not 0x300"
+section "$RT" AFTER REJOIN | grep -aq '^iwlnoipoll=on' && bad "runtime: a boot-only knob changed while bound" || ok "runtime: boot-only knob still refused while bound"
+section "$RT" REJOIN END | grep -aq 'auto=up rc=0' && ok "runtime: rejoin with the knobs on works" || bad "runtime: no link after the knobs"
+section "$RT" REJOIN END | grep -aq '^wltxoff=off' && ok "runtime: wltxoff off again" || bad "runtime: wltxoff not off again"
+section "$RT" REJOIN END | grep -aq 'quirks=0x200' && ok "runtime: live quirk word back to 0x200 (only BC_BYTES)" || bad "runtime: quirk word not 0x200"
+printf 'wltxoff on\n# comment\nwlbcbytes\nbogusknob on\niwlnoipoll off\n' > "$T/knobs.txt"
+KF_SCRIPT=$'echo ==START==\nsleep 14\nwlanctl reload list\ncat /proc/wlan\necho ==END==\n'
+rt_image kf "$KF_SCRIPT" "$T/knobs.txt" || bad "image kf"
+run kf "iwlfhtest iwlfhbind iwlnoipoll"
+KF="$T/kf.klar"
+grep -aq '^wltxoff=on' "$KF" && ok "knob file: wltxoff on from /etc/wlan.knobs" || bad "knob file: wltxoff not on"
+grep -aq '^wlbcbytes=on' "$KF" && ok "knob file: a bare name means on" || bad "knob file: wlbcbytes not on"
+grep -aq '^iwlnoipoll=off' "$KF" && ok "knob file: explicit off overrides the cmdline word" || bad "knob file: iwlnoipoll not off"
+grep -aq 'quirks=0x300' "$KF" && ok "knob file: live quirk word 0x300 at boot" || bad "knob file: quirk word not 0x300"
+grep -aq 'auto=up rc=0' "$KF" && ok "knob file: join works with the knobs" || bad "knob file: no link"
+echo "-- ap: airplane mode (wlanctl radio off/on): link drops, no rejoin while off, back up when on; control without the switch"
 air_image() { # name script
     printf '%s' "$2" > "$T/$1.sh"
     python3 tools/osum/mkfs.py build "$T/$1.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
