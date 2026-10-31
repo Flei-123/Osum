@@ -6,6 +6,7 @@ RULES = [
     (re.compile(rb"(?<![\w.])ulib\.sayu\("), b"lineout.add_unum("),
     (re.compile(rb"(?<![\w.])ulib\.say\("), b"lineout.add_text("),
     (re.compile(rb"(?<![\w.])ulib\.nl\(\)"), b"lineout.end_line()"),
+    (re.compile(rb"(?<![\w.])ulib\.put\("), b"lineout.add_bytes("),
 ]
 IMPORT_ULIB = re.compile(rb"^import ulib[ \t]*\r?$", re.M)
 IMPORT_LINEOUT = re.compile(rb"^import lineout[ \t]*\r?$", re.M)

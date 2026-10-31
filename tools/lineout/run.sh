@@ -46,6 +46,14 @@ else
 fi
 cp kernel/user/wmplug.fi "$work/mut/kernel/user/wmplug.fi"
 
+printf 'fn lineout_probe(b: u64) {\n    let _w: u64 = ulib.put(b, 4)\n}\n' >> "$work/mut/kernel/user/wlib.fi"
+if python3 -I tools/lineout/lint.py "$work/mut" > /dev/null; then
+    bad "counter-proof: injected ulib.put in wlib.fi was not caught"
+else
+    ok "counter-proof: injected ulib.put in wlib.fi is caught"
+fi
+cp kernel/user/wlib.fi "$work/mut/kernel/user/wlib.fi"
+
 sed -i 's/lineout\.end_line()//; s/\\n//g' "$work/mut/kernel/user/theme.fi"
 if python3 -I tools/lineout/lint.py "$work/mut" > /dev/null; then
     bad "counter-proof: pieces without end_line in theme.fi were not caught"
