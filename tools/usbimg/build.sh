@@ -314,7 +314,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp ping log host ota fsck jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
-orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo hwinv massren privacy welcome elevate runbox cliphist xclip charmap osk apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl dbgsrv backup recover screenreader xfx"}
+orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo hwinv massren privacy welcome elevate runbox cliphist xclip charmap osk apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl dbgsrv backup recover screenreader xfx vaultd vaultctl"}
 # ODB=1 (debug build): the debug agent is one more program in /bin
 [ "${ODB:-0}" = 1 ] && PROGS="$PROGS odbd"
 # the public image has no chat server to reach: no JARVIS Mini binary there
@@ -1326,6 +1326,7 @@ cat > "$OUT/inittab" <<'EOFTAB'
 # die Tafel.
 sh:konsole:ctrl:/bin/sh
 hwinv:grafik:once:/bin/hwinv -d /var/jarvis/hwinv.txt
+vaultd:grafik:respawn:/bin/vaultd
 EOFTAB
 [ "$BBSH" = 1 ] && sed -i 's|^sh:konsole:ctrl:/bin/sh$|sh:konsole:ctrl:/bin/osh|' "$OUT/inittab"
 printf 'grafik
@@ -1635,7 +1636,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/social /bin/soclocal /bin/melder /bin/freunde /bin/partyrun /bin/socfleitec /apps/social.prog/ACTIONS /apps/social.prog/SETTINGS /etc/social/providers /etc/social/fleitec.conf /etc/social/games.tsv /bin/sysinfo /bin/hwinv /bin/privacy /bin/welcome /bin/elevate /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /apps/run.osp/symbol /bin/osk /apps/osk.osp/start /apps/osk.osp/INFO /apps/osk.osp/symbol /bin/charmap /apps/charmap.osp/start /apps/charmap.osp/INFO /apps/charmap.osp/symbol /bin/xclip /bin/cliphist /apps/cliphist.osp/start /apps/cliphist.osp/INFO /apps/cliphist.osp/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
-PFLICHT="$PFLICHT /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
+PFLICHT="$PFLICHT /bin/vaultd /bin/vaultctl /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
 [ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip /bin/snipt"
 [ "${ROOT_SLIM:-0}" = 1 ] || [ "${BOOT_KERNEL_COPY:-0}" != 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
