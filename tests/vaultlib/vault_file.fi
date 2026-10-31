@@ -1,0 +1,51 @@
+import std.rt
+import std.fs
+import std.testkit
+import vault.vlayout
+import vault.container
+import vault_helper
+
+fn run(dir: str, ctx: u64) {
+    let path: str = fs.path_join(dir, "v.vlt")
+    let bak: str = fs.path_join(dir, "v.vlt.bak")
+    var img: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vault_helper.make(&img, "first", "correct horse") as i64, 0)
+    testkit.assert_eq_i64(container.file_save(path, &img) as i64, 0)
+    testkit.assert_true(!fs.exists(bak), "no backup after first save")
+    let info: fs.FileInfo = fs.stat(path) catch fs.FileInfo { kind: 0 as u8, mode: 0 as u32, size: 0, mtime_ns: 0 }
+    testkit.assert_eq_i64(info.mode as i64, 384)
+    var loaded: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.file_load(path, &loaded) as i64, 0)
+    testkit.assert_true(vault_helper.open_ok(&loaded, "correct horse", "first"), "load+open")
+    var vk: [u8; 32] = [0; 32]
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.open_pw(rt.buf_ptr(&loaded), rt.buf_len(&loaded), vlayout.SLOT_PW, vault_helper.sp("correct horse"), 13, &out, (&vk[0]) as u64) as i64, 0)
+    testkit.assert_eq_i64(container.update(&loaded, (&vk[0]) as u64, vault_helper.sp("second"), 6) as i64, 0)
+    testkit.assert_eq_i64(container.file_save(path, &loaded) as i64, 0)
+    var old: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.file_load(bak, &old) as i64, 0)
+    testkit.assert_true(vault_helper.open_ok(&old, "correct horse", "first"), "backup is previous generation")
+    var cur: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.file_load(path, &cur) as i64, 0)
+    testkit.assert_true(vault_helper.open_ok(&cur, "correct horse", "second"), "current generation")
+
+    var junk: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&junk, vault_helper.sp("not a vault at all, just text that is long enough to pass the size gate"), 70)
+    rt.buf_push_bytes(&junk, vault_helper.sp("not a vault at all, just text that is long enough to pass the size gate"), 70)
+    testkit.assert_eq_i64(container.file_save(path, &junk) as i64, vlayout.VC_E_MAGIC as i64)
+    var still: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.file_load(path, &still) as i64, 0)
+    testkit.assert_true(vault_helper.open_ok(&still, "correct horse", "second"), "refused save leaves file intact")
+    let missing: str = fs.path_join(dir, "nope.vlt")
+    var none: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.file_load(missing, &none) as i64, vlayout.VC_E_IO as i64)
+    let junkp: str = fs.path_join(dir, "junk.vlt")
+    fs.write_file(junkp, rt.buf_ptr(&junk), rt.buf_len(&junk)) catch 0
+    var jl: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.file_load(junkp, &jl) as i64, vlayout.VC_E_MAGIC as i64)
+}
+
+#[test]
+fn atomic_save_backup_and_refusals() {
+    testkit.with_dir(run, 0)
+}

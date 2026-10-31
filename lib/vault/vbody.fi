@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.crypto.chacha
+import std.crypto.hkdf
+import vault.vlayout
+import vault.vrand
+
+export { seal, open, body_key }
+
+fn body_key(vk: u64, salt: u64, out: u64) -> bool {
+    let label: str = "vault2 body"
+    return hkdf.hkdf(salt, vlayout.BODY_SALT_LEN, vk, vlayout.KEY_LEN,
+        label.p as u64, label.n, out, vlayout.KEY_LEN)
+}
+
+fn seal(img: *mut rt.Buf, vk: u64, plain: u64, n: usize) -> i32 {
+    var salt: [u8; 16] = [0; 16]
+    if !vrand.fill((&salt[0]) as u64, vlayout.BODY_SALT_LEN) {
+        return vlayout.VC_E_RANDOM
+    }
+    rt.buf_push_bytes(img, (&salt[0]) as u64, vlayout.BODY_SALT_LEN)
+    var key: [u8; 32] = [0; 32]
+    if !body_key(vk, (&salt[0]) as u64, (&key[0]) as u64) {
+        return vlayout.VC_E_PARAM
+    }
+    var nonce: [u8; 12] = [0; 12]
+    let aad_len: usize = rt.buf_len(img)
+    let body_at: usize = aad_len
+    if !rt.buf_reserve(img, aad_len + n + vlayout.TAG_LEN) {
+        vlayout.wipe((&key[0]) as u64, 32)
+        return vlayout.VC_E_MEMORY
+    }
+    let base: u64 = rt.buf_ptr(img)
+    chacha.aead_seal((&key[0]) as u64, (&nonce[0]) as u64, base, aad_len,
+        plain, n, base + body_at as u64)
+    rt.buf_set_len(img, aad_len + n + vlayout.TAG_LEN)
+    vlayout.wipe((&key[0]) as u64, 32)
+    return vlayout.VC_OK
+}
+
+fn open(p: u64, info: *mut vlayout.Info, vk: u64, out: *mut rt.Buf) -> i32 {
+    var key: [u8; 32] = [0; 32]
+    if !body_key(vk, p + (*info).header_len as u64, (&key[0]) as u64) {
+        return vlayout.VC_E_PARAM
+    }
+    var nonce: [u8; 12] = [0; 12]
+    let n: usize = (*info).body_len
+    let start: usize = rt.buf_len(out)
+    if !rt.buf_reserve(out, start + n + 1) {
+        vlayout.wipe((&key[0]) as u64, 32)
+        return vlayout.VC_E_MEMORY
+    }
+    let ok: bool = chacha.aead_open((&key[0]) as u64, (&nonce[0]) as u64, p,
+        (*info).body_off, p + (*info).body_off as u64, n + vlayout.TAG_LEN,
+        rt.buf_ptr(out) + start as u64)
+    vlayout.wipe((&key[0]) as u64, 32)
+    if !ok {
+        return vlayout.VC_E_TAG
+    }
+    rt.buf_set_len(out, start + n)
+    return vlayout.VC_OK
+}

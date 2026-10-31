@@ -144,7 +144,7 @@ Body key per save: `subkey = HKDF-SHA256(salt = body_salt, ikm = VK, info = "vau
 | 1 `pw` | `kdf=2 (Argon2id)`, m_kib u32, t u8, lanes u8, salt16, nonce12, `AEAD(KEK, VK)` 48 octets; `KEK = Argon2id(password, salt, ...)` | Default 64 MiB × 3 × 1 (RFC 9106 second recommendation, ~1 s release build; measured in Certus). Read limits 1 GiB / 16 / 64 before allocating. Min password length 8 (Certus rule). |
 | 2 `login` | like `pw`, KEK from the account password (+ device key) | Lets the vault open at sign-in with zero extra typing when the account password was typed; absent after PIN sign-in. Optional, user can disable. |
 | 3 `tpm` | TPM2 sealed object holding VK; policy PolicyAuthValue (authValue = PIN-derived) + TPM dictionary-attack lockout | Only with TPM (P2). The only slot that makes a short PIN safe against a stolen disk. |
-| 4 `recovery` | `AEAD(HKDF(recovery_key), VK)`; recovery key = 256 random bits shown once as 12 groups of 4 base32 characters | Printed/stored by the user; optional but offered at creation. |
+| 4 `recovery` | `AEAD(HKDF(recovery_key), VK)`; recovery key = 256 random bits shown once as 13 groups of 4 base32 characters (52 symbols = 260 bits: 256 key bits + a 4-bit check taken from SHA-256(key), so a typo is caught on entry; 12 groups would carry only 240 bits) | Printed/stored by the user; optional but offered at creation. |
 | 5 `device` | VK wrapped by `/device/vaultkey` | **Reserved, not enabled by default**: a key on the same disk gives no offline protection (honest limit as `ksiegel.fi` S1). Allowed only when full-disk encryption is active (`CRYPT-BOOT.md`). |
 
 Changing password/PIN rewrites one slot; the body is untouched. Revoking an unlock method removes the slot AND rotates VK if the old slot content may have leaked (user choice "I think it was exposed").
@@ -167,6 +167,16 @@ Size budget: a passkey record is ~250 octets, a login ~200 + text. 1000 passkeys
 **Sign counter policy.** Backup-eligible credentials report `signCount = 0` always (WebAuthn recommendation for synced credentials; avoids a write per assertion and rollback conflicts). The stored field is kept for future device-bound (TPM) credentials where a counter is meaningful.
 
 ---
+
+**Built (r2428/r2442, lib/vault/):** `vlayout` (header, slot table, limits), `vslot` (slot wrap/unwrap), `vbody` (body AEAD), `container` (create, unlock, read_body, update, slot_add/remove/replace, file_load/file_save with `.bak` and atomic rename, mode 0600), `recovery` (Base32 13x4), `vrand` (RNG with a deterministic test mode). Exact wire details beyond the table above:
+- pw/login slot (88 octets): `kind, 0, len16, kdf=2, passes, lanes, 0, kib32, salt16, nonce12, wrapped48`. KEK = Argon2id(password, salt, t=passes, m=kib, p=lanes, 32 octets).
+- recovery/device slot (64 octets): `kind, 0, len16, nonce12, wrapped48`. KEK = HKDF-SHA256(salt = vault_id, ikm = 32-octet key, info = "vault2 recovery slot" or "vault2 device slot").
+- Key wrap = ChaCha20-Poly1305(KEK, random nonce, aad = vault_id || slot octets before the nonce, VK) = 48 octets. The slot is bound to its vault and to its own parameters.
+- tpm slot: `kind, 0, len16, opaque blob` (at most 4100 octets), VK is unsealed by the caller and passed to `read_body`.
+- Body: `subkey = HKDF-SHA256(salt = body_salt, ikm = VK, info = "vault2 body")`, nonce 0, aad = header || slots || body_salt, tag verified before decrypt. Every octet of the file is authenticated: a flipped bit gives MAGIC/LENGTH/SLOTS/KDF parse errors, CRED (slot does not open) or TAG (body damaged), never plaintext.
+- One slot per kind; at most 8 slots; the last slot cannot be removed; edits re-seal the body (new salt, revision + 1). A password slot needs 8+ octets, the login slot any length.
+- Recovery text: 52 Base32 symbols (RFC 4648 alphabet) in 13 groups of 4 joined by "-"; decoding ignores case, "-" and spaces, rejects other characters.
+- Not built: VK rotation on slot removal (needs all remaining slot secrets), v1 reader (r2443), records layer (r2429).
 
 ## 6. Unlocking
 

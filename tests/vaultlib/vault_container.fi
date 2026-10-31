@@ -1,0 +1,206 @@
+import std.rt
+import std.testkit
+import vault.vlayout
+import vault.vrand
+import vault.container
+import vault.vslot
+import vault_helper
+
+fn open_rc(img: *mut rt.Buf, kind: u8, pw: str) -> i32 {
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = container.open_pw(rt.buf_ptr(img), rt.buf_len(img), kind,
+        vault_helper.sp(pw), pw.n, &out, 0)
+    if rc != 0 {
+        testkit.assert_eq_i64(rt.buf_len(&out) as i64, 0)
+    }
+    rt.buf_free(&out)
+    return rc
+}
+
+#[test]
+fn create_open_roundtrip_and_wrong_password() {
+    var img: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vault_helper.make(&img, "hello vault body", "correct horse") as i64, 0)
+    testkit.assert_true(vault_helper.open_ok(&img, "correct horse", "hello vault body"), "open")
+    testkit.assert_eq_i64(open_rc(&img, vlayout.SLOT_PW, "wrong horse!") as i64, vlayout.VC_E_CRED as i64)
+    testkit.assert_eq_i64(open_rc(&img, vlayout.SLOT_LOGIN, "correct horse") as i64, vlayout.VC_E_NOSLOT as i64)
+    testkit.assert_eq_i64(open_rc(&img, vlayout.SLOT_PW, "") as i64, vlayout.VC_E_CRED as i64)
+}
+
+#[test]
+fn empty_and_large_bodies() {
+    var img: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vault_helper.make(&img, "", "correct horse") as i64, 0)
+    testkit.assert_true(vault_helper.open_ok(&img, "correct horse", ""), "empty")
+    var big: rt.Buf = rt.buf_new()
+    var i: usize = 0
+    while i < 200000 {
+        rt.buf_push(&big, ((i * 7) & 255) as u8)
+        i = i + 1
+    }
+    var img2: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.create(&img2, rt.buf_ptr(&big), rt.buf_len(&big),
+        vault_helper.sp("correct horse"), 13, 64, 1, 1, 0 as u8, 0) as i64, 0)
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.open_pw(rt.buf_ptr(&img2), rt.buf_len(&img2),
+        vlayout.SLOT_PW, vault_helper.sp("correct horse"), 13, &out, 0) as i64, 0)
+    testkit.assert_eq_i64(rt.buf_len(&out) as i64, 200000)
+    testkit.assert_true(rt.mem_eq(rt.buf_ptr(&out), rt.buf_ptr(&big), 200000), "big body")
+}
+
+#[test]
+fn create_parameter_checks() {
+    var img: rt.Buf = rt.buf_new()
+    let pw: u64 = vault_helper.sp("correct horse")
+    testkit.assert_eq_i64(container.create(&img, 0, 0, vault_helper.sp("short"), 5, 64, 1, 1, 0 as u8, 0) as i64, vlayout.VC_E_PARAM as i64)
+    testkit.assert_eq_i64(container.create(&img, 0, 0, pw, 13, 4, 1, 1, 0 as u8, 0) as i64, vlayout.VC_E_KDF as i64)
+    testkit.assert_eq_i64(container.create(&img, 0, 0, pw, 13, 64, 0, 1, 0 as u8, 0) as i64, vlayout.VC_E_KDF as i64)
+    testkit.assert_eq_i64(container.create(&img, 0, 0, pw, 13, 64, 17, 1, 0 as u8, 0) as i64, vlayout.VC_E_KDF as i64)
+    testkit.assert_eq_i64(container.create(&img, 0, 0, pw, 13, 64, 1, 0, 0 as u8, 0) as i64, vlayout.VC_E_KDF as i64)
+    testkit.assert_eq_i64(container.create(&img, 0, 0, pw, 13, 64, 1, 65, 0 as u8, 0) as i64, vlayout.VC_E_KDF as i64)
+    testkit.assert_eq_i64(container.create(&img, 0, 0, pw, 13, 1048577, 1, 1, 0 as u8, 0) as i64, vlayout.VC_E_KDF as i64)
+    testkit.assert_eq_i64(rt.buf_len(&img) as i64, 0)
+    testkit.assert_eq_i64(container.create(&img, 0, 0, pw, 13, 16, 1, 2, 0 as u8, 0) as i64, 0)
+}
+
+#[test]
+fn default_parameters_work() {
+    var img: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.create(&img, vault_helper.sp("x"), 1,
+        vault_helper.sp("correct horse"), 13, vlayout.ARGON_DEFAULT_KIB,
+        vlayout.ARGON_DEFAULT_PASSES, vlayout.ARGON_DEFAULT_LANES, 0 as u8, 0) as i64, 0)
+    testkit.assert_true(vault_helper.open_ok(&img, "correct horse", "x"), "default argon2")
+}
+
+#[test]
+fn update_keeps_slots_and_bumps_revision() {
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 3 as u8)
+    var img: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vault_helper.make_with_recovery(&img, "one", "correct horse", (&key[0]) as u64) as i64, 0)
+    var vk: [u8; 32] = [0; 32]
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.open_pw(rt.buf_ptr(&img), rt.buf_len(&img),
+        vlayout.SLOT_PW, vault_helper.sp("correct horse"), 13, &out, (&vk[0]) as u64) as i64, 0)
+    var info: vlayout.Info = vlayout.info_zero()
+    testkit.assert_eq_i64(vlayout.parse_header(rt.buf_ptr(&img), rt.buf_len(&img), &info) as i64, 0)
+    testkit.assert_eq_i64(info.revision as i64, 2)
+    testkit.assert_eq_i64(info.slot_count as i64, 2)
+    var salt1: [u8; 16] = [0; 16]
+    rt.mem_copy((&salt1[0]) as u64, rt.buf_ptr(&img) + info.header_len as u64, 16)
+    testkit.assert_eq_i64(container.update(&img, (&vk[0]) as u64, vault_helper.sp("two!"), 4) as i64, 0)
+    testkit.assert_eq_i64(vlayout.parse_header(rt.buf_ptr(&img), rt.buf_len(&img), &info) as i64, 0)
+    testkit.assert_eq_i64(info.revision as i64, 3)
+    testkit.assert_eq_i64(info.slot_count as i64, 2)
+    testkit.assert_true(!rt.mem_eq((&salt1[0]) as u64, rt.buf_ptr(&img) + info.header_len as u64, 16), "fresh body salt per save")
+    testkit.assert_true(vault_helper.open_ok(&img, "correct horse", "two!"), "pw after update")
+    var out2: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.open_key(rt.buf_ptr(&img), rt.buf_len(&img),
+        vlayout.SLOT_RECOVERY, (&key[0]) as u64, &out2, 0) as i64, 0)
+    testkit.assert_eq_i64(rt.buf_len(&out2) as i64, 4)
+    var wrong: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&wrong[0]) as u64, 4 as u8)
+    var out3: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.open_key(rt.buf_ptr(&img), rt.buf_len(&img),
+        vlayout.SLOT_RECOVERY, (&wrong[0]) as u64, &out3, 0) as i64, vlayout.VC_E_CRED as i64)
+    var bad: [u8; 32] = [9; 32]
+    testkit.assert_eq_i64(container.update(&img, (&bad[0]) as u64, vault_helper.sp("x"), 1) as i64, vlayout.VC_E_TAG as i64)
+    testkit.assert_true(vault_helper.open_ok(&img, "correct horse", "two!"), "image untouched after refused update")
+}
+
+#[test]
+fn slot_edit_operations() {
+    var img: rt.Buf = rt.buf_new()
+    var vk: [u8; 32] = [0; 32]
+    let vkp: u64 = (&vk[0]) as u64
+    testkit.assert_eq_i64(container.create(&img, vault_helper.sp("payload"), 7,
+        vault_helper.sp("correct horse"), 13, 64, 1, 1, 0 as u8, vkp) as i64, 0)
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 40 as u8)
+    testkit.assert_eq_i64(container.slot_add_key(&img, vkp, vlayout.SLOT_RECOVERY, (&key[0]) as u64) as i64, 0)
+    testkit.assert_eq_i64(container.slot_add_key(&img, vkp, vlayout.SLOT_RECOVERY, (&key[0]) as u64) as i64, vlayout.VC_E_PARAM as i64)
+    testkit.assert_eq_i64(container.slot_add_key(&img, vkp, vlayout.SLOT_DEVICE, (&key[0]) as u64) as i64, 0)
+    testkit.assert_eq_i64(container.slot_add_key(&img, vkp, vlayout.SLOT_PW, (&key[0]) as u64) as i64, vlayout.VC_E_PARAM as i64)
+    testkit.assert_eq_i64(container.slot_add_pw(&img, vkp, vlayout.SLOT_LOGIN,
+        vault_helper.sp("login pw"), 8, 64, 1, 1) as i64, 0)
+    testkit.assert_eq_i64(container.slot_add_pw(&img, vkp, vlayout.SLOT_LOGIN,
+        vault_helper.sp("login pw"), 8, 64, 1, 1) as i64, vlayout.VC_E_PARAM as i64)
+    var blob: [u8; 40] = [170; 40]
+    testkit.assert_eq_i64(container.slot_add_opaque(&img, vkp, vlayout.SLOT_TPM, (&blob[0]) as u64, 40) as i64, 0)
+    testkit.assert_eq_i64(container.slot_add_opaque(&img, vkp, vlayout.SLOT_TPM, (&blob[0]) as u64, 40) as i64, vlayout.VC_E_PARAM as i64)
+    testkit.assert_eq_i64(container.slot_add_opaque(&img, vkp, vlayout.SLOT_RECOVERY, (&blob[0]) as u64, 40) as i64, vlayout.VC_E_PARAM as i64)
+    var info: vlayout.Info = vlayout.info_zero()
+    testkit.assert_eq_i64(vlayout.parse_header(rt.buf_ptr(&img), rt.buf_len(&img), &info) as i64, 0)
+    testkit.assert_eq_i64(info.slot_count as i64, 5)
+    testkit.assert_eq_i64(info.revision as i64, 5)
+    testkit.assert_eq_i64(open_rc(&img, vlayout.SLOT_LOGIN, "login pw") as i64, 0)
+    testkit.assert_eq_i64(open_rc(&img, vlayout.SLOT_PW, "correct horse") as i64, 0)
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.open_key(rt.buf_ptr(&img), rt.buf_len(&img), vlayout.SLOT_DEVICE, (&key[0]) as u64, &out, 0) as i64, 0)
+    var out2: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.read_body(rt.buf_ptr(&img), rt.buf_len(&img), vkp, &out2) as i64, 0)
+    testkit.assert_eq_str(rt.buf_str(&out2), "payload")
+
+    testkit.assert_eq_i64(container.slot_replace_pw(&img, vkp, vlayout.SLOT_PW,
+        vault_helper.sp("new password"), 12, 64, 1, 1) as i64, 0)
+    testkit.assert_eq_i64(open_rc(&img, vlayout.SLOT_PW, "correct horse") as i64, vlayout.VC_E_CRED as i64)
+    testkit.assert_eq_i64(open_rc(&img, vlayout.SLOT_PW, "new password") as i64, 0)
+    testkit.assert_eq_i64(container.slot_replace_pw(&img, vkp, vlayout.SLOT_PW,
+        vault_helper.sp("short"), 5, 64, 1, 1) as i64, vlayout.VC_E_PARAM as i64)
+    testkit.assert_eq_i64(open_rc(&img, vlayout.SLOT_PW, "new password") as i64, 0)
+    testkit.assert_eq_i64(container.slot_replace_key(&img, vkp, vlayout.SLOT_RECOVERY, (&key[0]) as u64) as i64, 0)
+
+    testkit.assert_eq_i64(container.slot_remove(&img, vkp, vlayout.SLOT_LOGIN) as i64, 0)
+    testkit.assert_eq_i64(open_rc(&img, vlayout.SLOT_LOGIN, "login pw") as i64, vlayout.VC_E_NOSLOT as i64)
+    testkit.assert_eq_i64(container.slot_remove(&img, vkp, vlayout.SLOT_LOGIN) as i64, vlayout.VC_E_NOSLOT as i64)
+    testkit.assert_eq_i64(container.slot_remove(&img, vkp, vlayout.SLOT_TPM) as i64, 0)
+    testkit.assert_eq_i64(container.slot_remove(&img, vkp, vlayout.SLOT_DEVICE) as i64, 0)
+    testkit.assert_eq_i64(container.slot_remove(&img, vkp, vlayout.SLOT_RECOVERY) as i64, 0)
+    testkit.assert_eq_i64(container.slot_replace_key(&img, vkp, vlayout.SLOT_RECOVERY, (&key[0]) as u64) as i64, vlayout.VC_E_NOSLOT as i64)
+    testkit.assert_eq_i64(container.slot_remove(&img, vkp, vlayout.SLOT_PW) as i64, vlayout.VC_E_PARAM as i64)
+    testkit.assert_eq_i64(vlayout.parse_header(rt.buf_ptr(&img), rt.buf_len(&img), &info) as i64, 0)
+    testkit.assert_eq_i64(info.slot_count as i64, 1)
+    var bad: [u8; 32] = [1; 32]
+    testkit.assert_eq_i64(container.slot_remove(&img, (&bad[0]) as u64, vlayout.SLOT_PW) as i64, vlayout.VC_E_TAG as i64)
+    testkit.assert_eq_i64(container.slot_add_pw(&img, (&bad[0]) as u64, vlayout.SLOT_LOGIN,
+        vault_helper.sp("login pw"), 8, 64, 1, 1) as i64, vlayout.VC_E_TAG as i64)
+    testkit.assert_eq_i64(open_rc(&img, vlayout.SLOT_PW, "new password") as i64, 0)
+}
+
+#[test]
+fn oversized_tpm_blob_refused() {
+    var img: rt.Buf = rt.buf_new()
+    var vk: [u8; 32] = [0; 32]
+    testkit.assert_eq_i64(container.create(&img, 0, 0, vault_helper.sp("correct horse"), 13, 64, 1, 1, 0 as u8, (&vk[0]) as u64) as i64, 0)
+    var big: rt.Buf = rt.buf_new()
+    var i: usize = 0
+    while i < vlayout.TPM_SLOT_MAX {
+        rt.buf_push(&big, 1 as u8)
+        i = i + 1
+    }
+    testkit.assert_eq_i64(container.slot_add_opaque(&img, (&vk[0]) as u64, vlayout.SLOT_TPM, rt.buf_ptr(&big), rt.buf_len(&big)) as i64, vlayout.VC_E_LIMIT as i64)
+    testkit.assert_eq_i64(container.slot_add_opaque(&img, (&vk[0]) as u64, vlayout.SLOT_TPM, rt.buf_ptr(&big), 0) as i64, vlayout.VC_E_PARAM as i64)
+    testkit.assert_eq_i64(container.slot_add_opaque(&img, (&vk[0]) as u64, vlayout.SLOT_TPM, rt.buf_ptr(&big), vlayout.TPM_SLOT_MAX - vlayout.SLOT_HEADER) as i64, 0)
+}
+
+#[test]
+fn deterministic_mode_and_salt_freshness() {
+    vrand.det_enable(99, false)
+    var a: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vault_helper.make(&a, "same", "correct horse") as i64, 0)
+    vrand.det_enable(99, false)
+    var b: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vault_helper.make(&b, "same", "correct horse") as i64, 0)
+    testkit.assert_eq_i64(rt.buf_len(&a) as i64, rt.buf_len(&b) as i64)
+    testkit.assert_true(rt.mem_eq(rt.buf_ptr(&a), rt.buf_ptr(&b), rt.buf_len(&a)), "same seed same image")
+    vrand.det_enable(100, false)
+    var c: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vault_helper.make(&c, "same", "correct horse") as i64, 0)
+    testkit.assert_true(!rt.mem_eq(rt.buf_ptr(&a), rt.buf_ptr(&c), rt.buf_len(&a)), "other seed other image")
+    vrand.det_disable()
+    var d: rt.Buf = rt.buf_new()
+    var e: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vault_helper.make(&d, "same", "correct horse") as i64, 0)
+    testkit.assert_eq_i64(vault_helper.make(&e, "same", "correct horse") as i64, 0)
+    testkit.assert_true(!rt.mem_eq(rt.buf_ptr(&d), rt.buf_ptr(&e), rt.buf_len(&d)), "real random differs")
+}

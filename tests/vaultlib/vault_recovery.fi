@@ -1,0 +1,86 @@
+import std.rt
+import std.testkit
+import vault.vlayout
+import vault.vrand
+import vault.recovery
+import vault_helper
+
+const VECTOR: str = "AAAQ-EAYE-AUDA-OCAJ-BIFQ-YDIO-B4IB-CEQT-CQKR-MFYY-DENB-WHA5-DYPW"
+
+#[test]
+fn python_vector_and_shape() {
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 0 as u8)
+    var text: rt.Buf = rt.buf_new()
+    recovery.encode((&key[0]) as u64, &text)
+    testkit.assert_eq_str(rt.buf_str(&text), VECTOR)
+    testkit.assert_eq_i64(rt.buf_len(&text) as i64, recovery.REC_TEXT_LEN as i64)
+    testkit.assert_eq_i64((recovery.REC_GROUPS * 4) as i64, recovery.REC_SYMBOLS as i64)
+    testkit.assert_true(recovery.REC_SYMBOLS * 5 >= 256 + 4, "13 groups of 4 carry 256 bits plus check")
+    var back: [u8; 32] = [0; 32]
+    testkit.assert_eq_i64(recovery.decode(rt.buf_ptr(&text), rt.buf_len(&text), (&back[0]) as u64) as i64, 0)
+    testkit.assert_true(rt.mem_eq((&back[0]) as u64, (&key[0]) as u64, 32), "decode")
+}
+
+#[test]
+fn roundtrip_many_and_input_forms() {
+    vrand.det_enable(5, false)
+    var i: usize = 0
+    while i < 200 {
+        var key: [u8; 32] = [0; 32]
+        testkit.assert_true(recovery.generate((&key[0]) as u64), "generate")
+        var text: rt.Buf = rt.buf_new()
+        recovery.encode((&key[0]) as u64, &text)
+        var back: [u8; 32] = [0; 32]
+        testkit.assert_eq_i64(recovery.decode(rt.buf_ptr(&text), rt.buf_len(&text), (&back[0]) as u64) as i64, 0)
+        testkit.assert_true(rt.mem_eq((&back[0]) as u64, (&key[0]) as u64, 32), "roundtrip")
+        i = i + 1
+    }
+    vrand.det_disable()
+    var out: [u8; 32] = [0; 32]
+    let low: str = "aaaq eaye audа ocaj"
+    testkit.assert_eq_i64(recovery.decode(vault_helper.sp(low), low.n, (&out[0]) as u64) as i64, recovery.REC_E_CHARS as i64)
+    let lowv: str = "aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dypw"
+    testkit.assert_eq_i64(recovery.decode(vault_helper.sp(lowv), lowv.n, (&out[0]) as u64) as i64, 0)
+    let sp: str = "AAAQ EAYE AUDA OCAJ BIFQ YDIO B4IB CEQT CQKR MFYY DENB WHA5 DYPW"
+    testkit.assert_eq_i64(recovery.decode(vault_helper.sp(sp), sp.n, (&out[0]) as u64) as i64, 0)
+}
+
+#[test]
+fn bad_inputs_rejected_and_typos_caught() {
+    var out: [u8; 32] = [0; 32]
+    let short: str = "AAAQ-EAYE-AUDA"
+    testkit.assert_eq_i64(recovery.decode(vault_helper.sp(short), short.n, (&out[0]) as u64) as i64, recovery.REC_E_LENGTH as i64)
+    let long: str = "AAAQ-EAYE-AUDA-OCAJ-BIFQ-YDIO-B4IB-CEQT-CQKR-MFYY-DENB-WHA5-DYPW-AAAA"
+    testkit.assert_eq_i64(recovery.decode(vault_helper.sp(long), long.n, (&out[0]) as u64) as i64, recovery.REC_E_LENGTH as i64)
+    let digit: str = "AAAQ-EAYE-AUDA-OCAJ-BIFQ-YDIO-B4IB-CEQT-CQKR-MFYY-DENB-WHA1-DYPW"
+    testkit.assert_eq_i64(recovery.decode(vault_helper.sp(digit), digit.n, (&out[0]) as u64) as i64, recovery.REC_E_CHARS as i64)
+    testkit.assert_eq_i64(recovery.decode(vault_helper.sp(""), 0, (&out[0]) as u64) as i64, recovery.REC_E_LENGTH as i64)
+    var text: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&text, vault_helper.sp(VECTOR), VECTOR.n)
+    var caught: usize = 0
+    var total: usize = 0
+    var pos: usize = 0
+    while pos < rt.buf_len(&text) {
+        let c: u8 = rt.buf_at(&text, pos)
+        if c != 45 as u8 {
+            var alt: usize = 0
+            while alt < 32 {
+                let sym: u8 = if alt < 26 { (65 + alt) as u8 } else { (50 + alt - 26) as u8 }
+                if sym != c {
+                    var w: rt.Buf = rt.buf_new()
+                    rt.buf_push_bytes(&w, rt.buf_ptr(&text), rt.buf_len(&text))
+                    rt.st8(rt.buf_ptr(&w), pos, sym)
+                    total = total + 1
+                    if recovery.decode(rt.buf_ptr(&w), rt.buf_len(&w), (&out[0]) as u64) != 0 {
+                        caught = caught + 1
+                    }
+                    rt.buf_free(&w)
+                }
+                alt = alt + 1
+            }
+        }
+        pos = pos + 1
+    }
+    testkit.assert_true(caught * 100 >= total * 90, "single substitutions caught at least 90 percent")
+}

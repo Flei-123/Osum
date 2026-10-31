@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.crypto.sha256
+import vault.vlayout
+import vault.vrand
+
+export { REC_OK, REC_E_CHARS, REC_E_LENGTH, REC_E_CHECK, REC_SYMBOLS,
+    REC_GROUPS, REC_TEXT_LEN, generate, encode, decode }
+
+const REC_OK: i32 = 0
+const REC_E_CHARS: i32 = 1
+const REC_E_LENGTH: i32 = 2
+const REC_E_CHECK: i32 = 3
+
+const REC_SYMBOLS: usize = 52
+const REC_GROUPS: usize = 13
+const REC_TEXT_LEN: usize = 64
+
+fn alphabet(i: u64) -> u8 {
+    if i < 26 {
+        return (65 + i) as u8
+    }
+    return (50 + i - 26) as u8
+}
+
+fn symbol_value(c: u8) -> i32 {
+    if c >= 65 as u8 && c <= 90 as u8 {
+        return (c - 65 as u8) as i32
+    }
+    if c >= 97 as u8 && c <= 122 as u8 {
+        return (c - 97 as u8) as i32
+    }
+    if c >= 50 as u8 && c <= 55 as u8 {
+        return (c - 50 as u8) as i32 + 26
+    }
+    return -1
+}
+
+fn check_nibble(key: u64) -> u64 {
+    var h: [u8; 32] = [0; 32]
+    sha256.sha256(key, vlayout.KEY_LEN, (&h[0]) as u64)
+    return (h[0] >> 4) as u64
+}
+
+fn generate(key_out: u64) -> bool {
+    return vrand.fill(key_out, vlayout.KEY_LEN)
+}
+
+fn bit_at(key: u64, nib: u64, pos: usize) -> u64 {
+    if pos < 256 {
+        return ((rt.ld8(key, pos / 8) >> (7 - (pos % 8)) as u8) & 1 as u8) as u64
+    }
+    return (nib >> (259 - pos) as u64) & 1
+}
+
+fn encode(key: u64, out: *mut rt.Buf) {
+    let nib: u64 = check_nibble(key)
+    var s: usize = 0
+    while s < REC_SYMBOLS {
+        var v: u64 = 0
+        var k: usize = 0
+        while k < 5 {
+            v = (v << 1) | bit_at(key, nib, s * 5 + k)
+            k = k + 1
+        }
+        if s > 0 && s % 4 == 0 {
+            rt.buf_push(out, 45 as u8)
+        }
+        rt.buf_push(out, alphabet(v))
+        s = s + 1
+    }
+}
+
+fn decode(text: u64, n: usize, key_out: u64) -> i32 {
+    var vals: [u8; 52] = [0; 52]
+    var count: usize = 0
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(text, i)
+        if c != 45 as u8 && c != 32 as u8 {
+            let v: i32 = symbol_value(c)
+            if v < 0 {
+                return REC_E_CHARS
+            }
+            if count >= REC_SYMBOLS {
+                return REC_E_LENGTH
+            }
+            vals[count] = v as u8
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if count != REC_SYMBOLS {
+        return REC_E_LENGTH
+    }
+    var key: [u8; 32] = [0; 32]
+    var nib: u64 = 0
+    var pos: usize = 0
+    while pos < 260 {
+        let bit: u64 = ((vals[pos / 5] >> (4 - (pos % 5)) as u8) & 1 as u8) as u64
+        if pos < 256 {
+            key[pos / 8] = key[pos / 8] | (bit << (7 - (pos % 8)) as u64) as u8
+        } else {
+            nib = (nib << 1) | bit
+        }
+        pos = pos + 1
+    }
+    if nib != check_nibble((&key[0]) as u64) {
+        vlayout.wipe((&key[0]) as u64, 32)
+        return REC_E_CHECK
+    }
+    rt.mem_copy(key_out, (&key[0]) as u64, vlayout.KEY_LEN)
+    vlayout.wipe((&key[0]) as u64, 32)
+    return REC_OK
+}

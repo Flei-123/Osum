@@ -1,0 +1,352 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.fs
+import std.fsx
+import vault.vlayout
+import vault.vrand
+import vault.vslot
+import vault.vbody
+
+export { create, unlock_pw, unlock_key, read_body, open_pw, open_key,
+    update, slot_add_pw, slot_add_key, slot_add_opaque, slot_remove,
+    slot_replace_pw, slot_replace_key, find_slot, file_load, file_save,
+    vault_id_ptr }
+
+const ID_OFF: usize = 16
+const REVISION_OFF: usize = 32
+
+fn vault_id_ptr(p: u64) -> u64 {
+    return p + ID_OFF as u64
+}
+
+fn put_magic(out: *mut rt.Buf) {
+    var m: [u8; 8] = [86, 65, 85, 76, 84, 50, 0, 0]
+    rt.buf_push_bytes(out, (&m[0]) as u64, 8)
+}
+
+fn assemble(out: *mut rt.Buf, vault_id: u64, flags: u8, revision: u64,
+    slots: *mut rt.Buf, count: usize, vk: u64, plain: u64, n: usize) -> i32 {
+    if n > vlayout.MAX_BODY {
+        return vlayout.VC_E_LIMIT
+    }
+    put_magic(out)
+    vlayout.put_be16(out, (vlayout.FIXED_HEADER + rt.buf_len(slots)) as u64)
+    rt.buf_push(out, count as u8)
+    rt.buf_push(out, flags)
+    vlayout.put_be32(out, n as u64)
+    rt.buf_push_bytes(out, vault_id, vlayout.ID_LEN)
+    vlayout.put_be64(out, revision)
+    rt.buf_push_bytes(out, rt.buf_ptr(slots), rt.buf_len(slots))
+    return vbody.seal(out, vk, plain, n)
+}
+
+fn create(out: *mut rt.Buf, plain: u64, n: usize, pw: u64, pwn: usize,
+    kib: usize, passes: usize, lanes: usize, flags: u8, vk_out: u64) -> i32 {
+    var vault_id: [u8; 16] = [0; 16]
+    var vk: [u8; 32] = [0; 32]
+    if !vrand.fill((&vault_id[0]) as u64, vlayout.ID_LEN)
+    || !vrand.fill((&vk[0]) as u64, vlayout.KEY_LEN) {
+        return vlayout.VC_E_RANDOM
+    }
+    var slots: rt.Buf = rt.buf_new()
+    var rc: i32 = vslot.make_pw_slot(&slots, vlayout.SLOT_PW,
+        (&vault_id[0]) as u64, (&vk[0]) as u64, pw, pwn, kib, passes, lanes)
+    if rc == vlayout.VC_OK {
+        rc = assemble(out, (&vault_id[0]) as u64, flags, 1, &slots, 1,
+            (&vk[0]) as u64, plain, n)
+    }
+    rt.buf_free(&slots)
+    if rc == vlayout.VC_OK && vk_out != 0 {
+        rt.mem_copy(vk_out, (&vk[0]) as u64, vlayout.KEY_LEN)
+    }
+    vlayout.wipe((&vk[0]) as u64, 32)
+    if rc != vlayout.VC_OK {
+        rt.buf_clear(out)
+    }
+    return rc
+}
+
+fn find_slot(p: u64, info: *mut vlayout.Info, kind: u8,
+    out: *mut vlayout.SlotRef) -> bool {
+    var i: usize = 0
+    while i < (*info).slot_count {
+        var s: vlayout.SlotRef = vlayout.slotref_zero()
+        if vlayout.slot_at(p, info, i, &s) && s.kind == kind {
+            (*out).index = s.index
+            (*out).off = s.off
+            (*out).len = s.len
+            (*out).kind = s.kind
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn unlock_pw(p: u64, n: usize, kind: u8, pw: u64, pwn: usize,
+    vk_out: u64) -> i32 {
+    var info: vlayout.Info = vlayout.info_zero()
+    let rc: i32 = vlayout.parse_header(p, n, &info)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    var s: vlayout.SlotRef = vlayout.slotref_zero()
+    if !find_slot(p, &info, kind, &s) {
+        return vlayout.VC_E_NOSLOT
+    }
+    return vslot.unwrap_pw(p, &s, vault_id_ptr(p), pw, pwn, vk_out)
+}
+
+fn unlock_key(p: u64, n: usize, kind: u8, key: u64, vk_out: u64) -> i32 {
+    var info: vlayout.Info = vlayout.info_zero()
+    let rc: i32 = vlayout.parse_header(p, n, &info)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    var s: vlayout.SlotRef = vlayout.slotref_zero()
+    if !find_slot(p, &info, kind, &s) {
+        return vlayout.VC_E_NOSLOT
+    }
+    return vslot.unwrap_key(p, &s, vault_id_ptr(p), key, vk_out)
+}
+
+fn read_body(p: u64, n: usize, vk: u64, out: *mut rt.Buf) -> i32 {
+    var info: vlayout.Info = vlayout.info_zero()
+    let rc: i32 = vlayout.parse_header(p, n, &info)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    return vbody.open(p, &info, vk, out)
+}
+
+fn open_pw(p: u64, n: usize, kind: u8, pw: u64, pwn: usize,
+    out: *mut rt.Buf, vk_out: u64) -> i32 {
+    var vk: [u8; 32] = [0; 32]
+    var rc: i32 = unlock_pw(p, n, kind, pw, pwn, (&vk[0]) as u64)
+    if rc == vlayout.VC_OK {
+        rc = read_body(p, n, (&vk[0]) as u64, out)
+    }
+    if rc == vlayout.VC_OK && vk_out != 0 {
+        rt.mem_copy(vk_out, (&vk[0]) as u64, vlayout.KEY_LEN)
+    }
+    vlayout.wipe((&vk[0]) as u64, 32)
+    return rc
+}
+
+fn open_key(p: u64, n: usize, kind: u8, key: u64, out: *mut rt.Buf,
+    vk_out: u64) -> i32 {
+    var vk: [u8; 32] = [0; 32]
+    var rc: i32 = unlock_key(p, n, kind, key, (&vk[0]) as u64)
+    if rc == vlayout.VC_OK {
+        rc = read_body(p, n, (&vk[0]) as u64, out)
+    }
+    if rc == vlayout.VC_OK && vk_out != 0 {
+        rt.mem_copy(vk_out, (&vk[0]) as u64, vlayout.KEY_LEN)
+    }
+    vlayout.wipe((&vk[0]) as u64, 32)
+    return rc
+}
+
+fn rebuild(img: *mut rt.Buf, info: *mut vlayout.Info, vk: u64, slots: *mut rt.Buf,
+    count: usize, plain: u64, n: usize) -> i32 {
+    let p: u64 = rt.buf_ptr(img)
+    var out: rt.Buf = rt.buf_new()
+    let rc: i32 = assemble(&out, vault_id_ptr(p), (*info).flags,
+        (*info).revision + 1, slots, count, vk, plain, n)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&out)
+        return rc
+    }
+    rt.buf_free(img)
+    (*img) = out
+    return vlayout.VC_OK
+}
+
+fn copy_slots(p: u64, info: *mut vlayout.Info, drop_kind: u8, slots: *mut rt.Buf) -> usize {
+    var kept: usize = 0
+    var i: usize = 0
+    while i < (*info).slot_count {
+        var s: vlayout.SlotRef = vlayout.slotref_zero()
+        if vlayout.slot_at(p, info, i, &s) && s.kind != drop_kind {
+            rt.buf_push_bytes(slots, p + s.off as u64, s.len)
+            kept = kept + 1
+        }
+        i = i + 1
+    }
+    return kept
+}
+
+fn edit(img: *mut rt.Buf, vk: u64, drop_kind: u8, add: *mut rt.Buf, add_kind: u8) -> i32 {
+    let p: u64 = rt.buf_ptr(img)
+    var info: vlayout.Info = vlayout.info_zero()
+    var rc: i32 = vlayout.parse_header(p, rt.buf_len(img), &info)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    var plain: rt.Buf = rt.buf_new()
+    rc = vbody.open(p, &info, vk, &plain)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&plain)
+        return rc
+    }
+    var s: vlayout.SlotRef = vlayout.slotref_zero()
+    if drop_kind != 0 as u8 && !find_slot(p, &info, drop_kind, &s) {
+        rt.buf_free(&plain)
+        return vlayout.VC_E_NOSLOT
+    }
+    var slots: rt.Buf = rt.buf_new()
+    var count: usize = copy_slots(p, &info, drop_kind, &slots)
+    if add_kind != 0 as u8 {
+        if drop_kind != add_kind && find_slot(p, &info, add_kind, &s) {
+            rc = vlayout.VC_E_PARAM
+        }
+        if count >= vlayout.MAX_SLOTS {
+            rc = vlayout.VC_E_LIMIT
+        }
+        if rc == vlayout.VC_OK {
+            rt.buf_push_bytes(&slots, rt.buf_ptr(add), rt.buf_len(add))
+            count = count + 1
+        }
+    }
+    if rc == vlayout.VC_OK && count == 0 {
+        rc = vlayout.VC_E_PARAM
+    }
+    if rc == vlayout.VC_OK {
+        rc = rebuild(img, &info, vk, &slots, count, rt.buf_ptr(&plain),
+            rt.buf_len(&plain))
+    }
+    vlayout.wipe(rt.buf_ptr(&plain), rt.buf_len(&plain))
+    rt.buf_free(&plain)
+    rt.buf_free(&slots)
+    return rc
+}
+
+fn update(img: *mut rt.Buf, vk: u64, plain: u64, n: usize) -> i32 {
+    let p: u64 = rt.buf_ptr(img)
+    var info: vlayout.Info = vlayout.info_zero()
+    var rc: i32 = vlayout.parse_header(p, rt.buf_len(img), &info)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    var check: rt.Buf = rt.buf_new()
+    rc = vbody.open(p, &info, vk, &check)
+    vlayout.wipe(rt.buf_ptr(&check), rt.buf_len(&check))
+    rt.buf_free(&check)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    var slots: rt.Buf = rt.buf_new()
+    let count: usize = copy_slots(p, &info, 0 as u8, &slots)
+    rc = rebuild(img, &info, vk, &slots, count, plain, n)
+    rt.buf_free(&slots)
+    return rc
+}
+
+fn slot_add_pw(img: *mut rt.Buf, vk: u64, kind: u8, pw: u64, pwn: usize,
+    kib: usize, passes: usize, lanes: usize) -> i32 {
+    var add: rt.Buf = rt.buf_new()
+    var rc: i32 = vslot.make_pw_slot(&add, kind, vault_id_ptr(rt.buf_ptr(img)), vk,
+        pw, pwn, kib, passes, lanes)
+    if rc == vlayout.VC_OK {
+        rc = edit(img, vk, 0 as u8, &add, kind)
+    }
+    rt.buf_free(&add)
+    return rc
+}
+
+fn slot_replace_pw(img: *mut rt.Buf, vk: u64, kind: u8, pw: u64, pwn: usize,
+    kib: usize, passes: usize, lanes: usize) -> i32 {
+    var add: rt.Buf = rt.buf_new()
+    var rc: i32 = vslot.make_pw_slot(&add, kind, vault_id_ptr(rt.buf_ptr(img)), vk,
+        pw, pwn, kib, passes, lanes)
+    if rc == vlayout.VC_OK {
+        rc = edit(img, vk, kind, &add, kind)
+    }
+    rt.buf_free(&add)
+    return rc
+}
+
+fn slot_add_key(img: *mut rt.Buf, vk: u64, kind: u8, key: u64) -> i32 {
+    var add: rt.Buf = rt.buf_new()
+    var rc: i32 = vslot.make_key_slot(&add, kind, vault_id_ptr(rt.buf_ptr(img)), vk, key)
+    if rc == vlayout.VC_OK {
+        rc = edit(img, vk, 0 as u8, &add, kind)
+    }
+    rt.buf_free(&add)
+    return rc
+}
+
+fn slot_replace_key(img: *mut rt.Buf, vk: u64, kind: u8, key: u64) -> i32 {
+    var add: rt.Buf = rt.buf_new()
+    var rc: i32 = vslot.make_key_slot(&add, kind, vault_id_ptr(rt.buf_ptr(img)), vk, key)
+    if rc == vlayout.VC_OK {
+        rc = edit(img, vk, kind, &add, kind)
+    }
+    rt.buf_free(&add)
+    return rc
+}
+
+fn slot_add_opaque(img: *mut rt.Buf, vk: u64, kind: u8, blob: u64, n: usize) -> i32 {
+    var add: rt.Buf = rt.buf_new()
+    var rc: i32 = vslot.make_opaque_slot(&add, kind, blob, n)
+    if rc == vlayout.VC_OK {
+        rc = edit(img, vk, 0 as u8, &add, kind)
+    }
+    rt.buf_free(&add)
+    return rc
+}
+
+fn slot_remove(img: *mut rt.Buf, vk: u64, kind: u8) -> i32 {
+    var none: rt.Buf = rt.buf_new()
+    let rc: i32 = edit(img, vk, kind, &none, 0 as u8)
+    rt.buf_free(&none)
+    return rc
+}
+
+fn file_load(path: str, img: *mut rt.Buf) -> i32 {
+    var raw: rt.Buf = rt.buf_new()
+    let got: usize = fs.read_file(path, &raw) catch 0
+    if got == 0 {
+        rt.buf_free(&raw)
+        return vlayout.VC_E_IO
+    }
+    var info: vlayout.Info = vlayout.info_zero()
+    let rc: i32 = vlayout.parse_header(rt.buf_ptr(&raw), rt.buf_len(&raw), &info)
+    if rc != vlayout.VC_OK {
+        rt.buf_free(&raw)
+        return rc
+    }
+    rt.buf_free(img)
+    (*img) = raw
+    return vlayout.VC_OK
+}
+
+fn bak_name(path: str) -> str {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&b, path.p as u64, path.n)
+    rt.buf_push(&b, 46 as u8)
+    rt.buf_push(&b, 98 as u8)
+    rt.buf_push(&b, 97 as u8)
+    rt.buf_push(&b, 107 as u8)
+    return __str_copy(str { p: rt.buf_data(&b), n: rt.buf_len(&b) })
+}
+
+fn file_save(path: str, img: *mut rt.Buf) -> i32 {
+    var info: vlayout.Info = vlayout.info_zero()
+    let rc: i32 = vlayout.parse_header(rt.buf_ptr(img), rt.buf_len(img), &info)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    if fs.exists(path) {
+        let kept: usize = fsx.copy_file(path, bak_name(path)) catch 0
+        if kept == 0 {
+            return vlayout.VC_E_IO
+        }
+    }
+    let ok: bool = fs.write_atomic_mode(path, rt.buf_ptr(img), rt.buf_len(img),
+        384 as u32) catch false
+    if !ok {
+        return vlayout.VC_E_IO
+    }
+    return vlayout.VC_OK
+}

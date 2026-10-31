@@ -1,0 +1,259 @@
+import std.rt
+import std.testkit
+import vault.vlayout
+import vault.vrand
+import vault.container
+import vault_helper
+
+fn rc_pw(p: u64, n: usize, out: *mut rt.Buf) -> i32 {
+    return container.open_pw(p, n, vlayout.SLOT_PW, vault_helper.sp("correct horse"), 13, out, 0)
+}
+
+fn rc_rec(p: u64, n: usize, key: u64, out: *mut rt.Buf) -> i32 {
+    return container.open_key(p, n, vlayout.SLOT_RECOVERY, key, out, 0)
+}
+
+fn build(img: *mut rt.Buf, key: u64) {
+    vrand.det_enable(31337, false)
+    testkit.assert_eq_i64(vault_helper.make_with_recovery(img, "forty octets of secret record data...", "correct horse", key) as i64, 0)
+    vrand.det_disable()
+}
+
+#[test]
+fn layout_of_the_test_image() {
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 5 as u8)
+    var img: rt.Buf = rt.buf_new()
+    build(&img, (&key[0]) as u64)
+    var info: vlayout.Info = vlayout.info_zero()
+    testkit.assert_eq_i64(vlayout.parse_header(rt.buf_ptr(&img), rt.buf_len(&img), &info) as i64, 0)
+    testkit.assert_eq_i64(info.header_len as i64, 192)
+    testkit.assert_eq_i64(info.body_len as i64, 37)
+    testkit.assert_eq_i64(rt.buf_len(&img) as i64, 192 + 16 + 37 + 16)
+}
+
+fn expect_pw(i: usize, rc: i32) -> bool {
+    if i < 8 {
+        return rc == vlayout.VC_E_MAGIC
+    }
+    if i == 8 || i == 9 {
+        return rc == vlayout.VC_E_LENGTH
+    }
+    if i == 10 {
+        return rc == vlayout.VC_E_SLOTS
+    }
+    if i == 11 {
+        return rc == vlayout.VC_E_TAG
+    }
+    if i >= 12 && i < 16 {
+        return rc == vlayout.VC_E_LENGTH || rc == vlayout.VC_E_LIMIT
+    }
+    if i >= 16 && i < 32 {
+        return rc == vlayout.VC_E_CRED
+    }
+    if i >= 32 && i < 40 {
+        return rc == vlayout.VC_E_TAG
+    }
+    if i >= 40 && i < 48 {
+        return rc == vlayout.VC_E_SLOTS || rc == vlayout.VC_E_KDF || rc == vlayout.VC_E_NOSLOT || rc == vlayout.VC_E_CRED
+    }
+    if i >= 48 && i < 52 {
+        return rc == vlayout.VC_E_KDF || rc == vlayout.VC_E_CRED
+    }
+    if i >= 52 && i < 128 {
+        return rc == vlayout.VC_E_CRED
+    }
+    if i >= 128 && i < 132 {
+        return rc == vlayout.VC_E_TAG || rc == vlayout.VC_E_SLOTS
+    }
+    return rc == vlayout.VC_E_TAG
+}
+
+fn expect_rec(i: usize, rc: i32) -> bool {
+    if i >= 16 && i < 32 {
+        return rc == vlayout.VC_E_CRED
+    }
+    if i >= 132 && i < 192 {
+        return rc == vlayout.VC_E_CRED
+    }
+    return rc != 0
+}
+
+#[test]
+fn every_byte_flip_is_refused_with_the_right_class() {
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 5 as u8)
+    var img: rt.Buf = rt.buf_new()
+    build(&img, (&key[0]) as u64)
+    var work: rt.Buf = rt.buf_new()
+    var bad_pw: usize = 0
+    var bad_rec: usize = 0
+    var leaked: usize = 0
+    var i: usize = 0
+    while i < rt.buf_len(&img) {
+        var m: usize = 0
+        while m < 8 {
+            vault_helper.copy_img(&img, &work)
+            vault_helper.flip(&work, i, (1 << m) as u8)
+            var out: rt.Buf = rt.buf_new()
+            let rc: i32 = rc_pw(rt.buf_ptr(&work), rt.buf_len(&work), &out)
+            if !expect_pw(i, rc) {
+                bad_pw = bad_pw + 1
+                testkit.context("pw flip")
+                testkit.assert_eq_i64(i as i64, -1)
+            }
+            if rt.buf_len(&out) != 0 {
+                leaked = leaked + 1
+            }
+            rt.buf_free(&out)
+            var out2: rt.Buf = rt.buf_new()
+            let rc2: i32 = rc_rec(rt.buf_ptr(&work), rt.buf_len(&work), (&key[0]) as u64, &out2)
+            if !expect_rec(i, rc2) {
+                bad_rec = bad_rec + 1
+                testkit.assert_eq_i64(i as i64, -2)
+            }
+            if rt.buf_len(&out2) != 0 {
+                leaked = leaked + 1
+            }
+            rt.buf_free(&out2)
+            m = m + 1
+        }
+        i = i + 1
+    }
+    testkit.assert_eq_i64(bad_pw as i64, 0)
+    testkit.assert_eq_i64(bad_rec as i64, 0)
+    testkit.assert_eq_i64(leaked as i64, 0)
+}
+
+#[test]
+fn truncation_and_extension_refused() {
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 5 as u8)
+    var img: rt.Buf = rt.buf_new()
+    build(&img, (&key[0]) as u64)
+    var n: usize = 0
+    var accepted: usize = 0
+    while n < rt.buf_len(&img) {
+        var out: rt.Buf = rt.buf_new()
+        if rc_pw(rt.buf_ptr(&img), n, &out) == 0 {
+            accepted = accepted + 1
+        }
+        rt.buf_free(&out)
+        n = n + 1
+    }
+    testkit.assert_eq_i64(accepted as i64, 0)
+    rt.buf_push(&img, 0 as u8)
+    var out2: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(rc_pw(rt.buf_ptr(&img), rt.buf_len(&img), &out2) as i64, vlayout.VC_E_LENGTH as i64)
+}
+
+fn set_be32(img: *mut rt.Buf, off: usize, v: u64) {
+    let p: u64 = rt.buf_ptr(img)
+    rt.st8(p, off, ((v >> 24) & 255) as u8)
+    rt.st8(p, off + 1, ((v >> 16) & 255) as u8)
+    rt.st8(p, off + 2, ((v >> 8) & 255) as u8)
+    rt.st8(p, off + 3, (v & 255) as u8)
+}
+
+fn parse_rc(img: *mut rt.Buf) -> i32 {
+    var info: vlayout.Info = vlayout.info_zero()
+    return vlayout.parse_header(rt.buf_ptr(img), rt.buf_len(img), &info)
+}
+
+#[test]
+fn hostile_parameters_rejected_before_any_allocation() {
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 5 as u8)
+    var img: rt.Buf = rt.buf_new()
+    build(&img, (&key[0]) as u64)
+    var w: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(parse_rc(&img) as i64, 0)
+
+    vault_helper.copy_img(&img, &w)
+    set_be32(&w, 48, 4294967295)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_KDF as i64)
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(rc_pw(rt.buf_ptr(&w), rt.buf_len(&w), &out) as i64, vlayout.VC_E_KDF as i64)
+
+    vault_helper.copy_img(&img, &w)
+    set_be32(&w, 48, 1048577)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_KDF as i64)
+    vault_helper.copy_img(&img, &w)
+    set_be32(&w, 48, 1048576)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, 0)
+    vault_helper.copy_img(&img, &w)
+    set_be32(&w, 48, 7)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_KDF as i64)
+
+    vault_helper.copy_img(&img, &w)
+    rt.st8(rt.buf_ptr(&w), 45, 17 as u8)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_KDF as i64)
+    vault_helper.copy_img(&img, &w)
+    rt.st8(rt.buf_ptr(&w), 45, 16 as u8)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, 0)
+    vault_helper.copy_img(&img, &w)
+    rt.st8(rt.buf_ptr(&w), 45, 0 as u8)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_KDF as i64)
+    vault_helper.copy_img(&img, &w)
+    rt.st8(rt.buf_ptr(&w), 46, 65 as u8)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_KDF as i64)
+    vault_helper.copy_img(&img, &w)
+    rt.st8(rt.buf_ptr(&w), 44, 1 as u8)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_KDF as i64)
+    vault_helper.copy_img(&img, &w)
+    rt.st8(rt.buf_ptr(&w), 47, 1 as u8)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_KDF as i64)
+
+    vault_helper.copy_img(&img, &w)
+    set_be32(&w, 12, 67108865)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_LIMIT as i64)
+    vault_helper.copy_img(&img, &w)
+    rt.st8(rt.buf_ptr(&w), 10, 0 as u8)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_SLOTS as i64)
+    vault_helper.copy_img(&img, &w)
+    rt.st8(rt.buf_ptr(&w), 10, 9 as u8)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_SLOTS as i64)
+    vault_helper.copy_img(&img, &w)
+    rt.st8(rt.buf_ptr(&w), 40, 9 as u8)
+    testkit.assert_eq_i64(parse_rc(&w) as i64, vlayout.VC_E_SLOTS as i64)
+    var short: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&short, rt.buf_ptr(&img), 60)
+    testkit.assert_eq_i64(parse_rc(&short) as i64, vlayout.VC_E_SHORT as i64)
+}
+
+#[test]
+fn damaged_versus_wrong_password() {
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 5 as u8)
+    var img: rt.Buf = rt.buf_new()
+    build(&img, (&key[0]) as u64)
+    var w: rt.Buf = rt.buf_new()
+    vault_helper.copy_img(&img, &w)
+    vault_helper.flip(&w, 230, 4 as u8)
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(rc_pw(rt.buf_ptr(&w), rt.buf_len(&w), &out) as i64, vlayout.VC_E_TAG as i64)
+    var out2: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(container.open_pw(rt.buf_ptr(&img), rt.buf_len(&img), vlayout.SLOT_PW, vault_helper.sp("another one!"), 12, &out2, 0) as i64, vlayout.VC_E_CRED as i64)
+}
+
+#[test]
+fn slot_swap_between_vaults_is_refused() {
+    var key: [u8; 32] = [0; 32]
+    vault_helper.rec_key((&key[0]) as u64, 5 as u8)
+    var a: rt.Buf = rt.buf_new()
+    var b: rt.Buf = rt.buf_new()
+    vrand.det_enable(1, false)
+    testkit.assert_eq_i64(vault_helper.make(&a, "vault a body", "correct horse") as i64, 0)
+    vrand.det_enable(2, false)
+    testkit.assert_eq_i64(vault_helper.make(&b, "vault b body", "correct horse") as i64, 0)
+    vrand.det_disable()
+    var w: rt.Buf = rt.buf_new()
+    vault_helper.copy_img(&a, &w)
+    rt.mem_copy(rt.buf_ptr(&w) + 40, rt.buf_ptr(&b) + 40, 88)
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(rc_pw(rt.buf_ptr(&w), rt.buf_len(&w), &out) as i64, vlayout.VC_E_CRED as i64)
+    vault_helper.copy_img(&a, &w)
+    rt.mem_copy(rt.buf_ptr(&w) + 16, rt.buf_ptr(&b) + 16, 16)
+    var out2: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(rc_pw(rt.buf_ptr(&w), rt.buf_len(&w), &out2) as i64, vlayout.VC_E_CRED as i64)
+}

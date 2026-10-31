@@ -1,0 +1,183 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.crypto.argon2
+import std.crypto.chacha
+import std.crypto.hkdf
+import vault.vlayout
+import vault.vrand
+
+export { make_pw_slot, make_key_slot, make_opaque_slot, unwrap_pw,
+    unwrap_key, slot_label }
+
+const PW_AAD_LEN: usize = 28
+const KEY_AAD_LEN: usize = 4
+const NONCE_OFF_PW: usize = 28
+const NONCE_OFF_KEY: usize = 4
+
+fn slot_label(kind: u8) -> str {
+    if kind == vlayout.SLOT_RECOVERY {
+        return "vault2 recovery slot"
+    }
+    return "vault2 device slot"
+}
+
+fn push_slot_header(out: *mut rt.Buf, kind: u8, len: usize) {
+    rt.buf_push(out, kind)
+    rt.buf_push(out, 0 as u8)
+    vlayout.put_be16(out, len as u64)
+}
+
+fn wrap_into(out: *mut rt.Buf, start: usize, aad_len: usize, vault_id: u64,
+    kek: u64, vk: u64) -> i32 {
+    var aad: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&aad, vault_id, vlayout.ID_LEN)
+    rt.buf_push_bytes(&aad, rt.buf_ptr(out) + start as u64, aad_len)
+    var nonce: [u8; 12] = [0; 12]
+    if !vrand.fill((&nonce[0]) as u64, vlayout.NONCE_LEN) {
+        rt.buf_free(&aad)
+        return vlayout.VC_E_RANDOM
+    }
+    rt.buf_push_bytes(out, (&nonce[0]) as u64, vlayout.NONCE_LEN)
+    var wrapped: [u8; 48] = [0; 48]
+    chacha.aead_seal(kek, (&nonce[0]) as u64, rt.buf_ptr(&aad), rt.buf_len(&aad),
+        vk, vlayout.KEY_LEN, (&wrapped[0]) as u64)
+    rt.buf_push_bytes(out, (&wrapped[0]) as u64, vlayout.WRAPPED_LEN)
+    rt.buf_free(&aad)
+    return vlayout.VC_OK
+}
+
+fn derive_pw_kek(pw: u64, pwn: usize, salt: u64, passes: usize, kib: usize,
+    lanes: usize, kek: u64) -> i32 {
+    if !argon2.argon2id(pw, pwn, salt, vlayout.BODY_SALT_LEN, 0, 0, 0, 0,
+        passes, kib, lanes, kek, vlayout.KEY_LEN) {
+        return vlayout.VC_E_MEMORY
+    }
+    return vlayout.VC_OK
+}
+
+fn derive_key_kek(kind: u8, vault_id: u64, key: u64, kek: u64) -> bool {
+    let label: str = slot_label(kind)
+    return hkdf.hkdf(vault_id, vlayout.ID_LEN, key, vlayout.KEY_LEN,
+        label.p as u64, label.n, kek, vlayout.KEY_LEN)
+}
+
+fn make_pw_slot(out: *mut rt.Buf, kind: u8, vault_id: u64, vk: u64, pw: u64,
+    pwn: usize, kib: usize, passes: usize, lanes: usize) -> i32 {
+    if kind != vlayout.SLOT_PW && kind != vlayout.SLOT_LOGIN {
+        return vlayout.VC_E_PARAM
+    }
+    if kind == vlayout.SLOT_PW && pwn < vlayout.MIN_PASSWORD_LEN {
+        return vlayout.VC_E_PARAM
+    }
+    if pwn == 0 {
+        return vlayout.VC_E_PARAM
+    }
+    if !vlayout.kdf_params_ok(passes, lanes, kib) {
+        return vlayout.VC_E_KDF
+    }
+    var salt: [u8; 16] = [0; 16]
+    if !vrand.fill((&salt[0]) as u64, vlayout.BODY_SALT_LEN) {
+        return vlayout.VC_E_RANDOM
+    }
+    var kek: [u8; 32] = [0; 32]
+    let rc: i32 = derive_pw_kek(pw, pwn, (&salt[0]) as u64, passes, kib, lanes,
+        (&kek[0]) as u64)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    let start: usize = rt.buf_len(out)
+    push_slot_header(out, kind, vlayout.PW_SLOT_LEN)
+    rt.buf_push(out, vlayout.KDF_ARGON2ID)
+    rt.buf_push(out, passes as u8)
+    rt.buf_push(out, lanes as u8)
+    rt.buf_push(out, 0 as u8)
+    vlayout.put_be32(out, kib as u64)
+    rt.buf_push_bytes(out, (&salt[0]) as u64, vlayout.BODY_SALT_LEN)
+    let rc2: i32 = wrap_into(out, start, PW_AAD_LEN, vault_id, (&kek[0]) as u64, vk)
+    vlayout.wipe((&kek[0]) as u64, 32)
+    return rc2
+}
+
+fn make_key_slot(out: *mut rt.Buf, kind: u8, vault_id: u64, vk: u64,
+    key: u64) -> i32 {
+    if kind != vlayout.SLOT_RECOVERY && kind != vlayout.SLOT_DEVICE {
+        return vlayout.VC_E_PARAM
+    }
+    var kek: [u8; 32] = [0; 32]
+    if !derive_key_kek(kind, vault_id, key, (&kek[0]) as u64) {
+        return vlayout.VC_E_PARAM
+    }
+    let start: usize = rt.buf_len(out)
+    push_slot_header(out, kind, vlayout.KEY_SLOT_LEN)
+    let rc: i32 = wrap_into(out, start, KEY_AAD_LEN, vault_id, (&kek[0]) as u64, vk)
+    vlayout.wipe((&kek[0]) as u64, 32)
+    return rc
+}
+
+fn make_opaque_slot(out: *mut rt.Buf, kind: u8, blob: u64, n: usize) -> i32 {
+    if kind != vlayout.SLOT_TPM || n == 0 {
+        return vlayout.VC_E_PARAM
+    }
+    if vlayout.SLOT_HEADER + n > vlayout.TPM_SLOT_MAX {
+        return vlayout.VC_E_LIMIT
+    }
+    push_slot_header(out, kind, vlayout.SLOT_HEADER + n)
+    rt.buf_push_bytes(out, blob, n)
+    return vlayout.VC_OK
+}
+
+fn open_wrapped(p: u64, slot_off: usize, aad_len: usize, nonce_off: usize,
+    vault_id: u64, kek: u64, vk_out: u64) -> i32 {
+    var aad: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&aad, vault_id, vlayout.ID_LEN)
+    rt.buf_push_bytes(&aad, p + slot_off as u64, aad_len)
+    var vk: [u8; 32] = [0; 32]
+    let ok: bool = chacha.aead_open(kek, p + (slot_off + nonce_off) as u64,
+        rt.buf_ptr(&aad), rt.buf_len(&aad),
+        p + (slot_off + nonce_off + vlayout.NONCE_LEN) as u64,
+        vlayout.WRAPPED_LEN, (&vk[0]) as u64)
+    rt.buf_free(&aad)
+    if !ok {
+        vlayout.wipe((&vk[0]) as u64, 32)
+        return vlayout.VC_E_CRED
+    }
+    rt.mem_copy(vk_out, (&vk[0]) as u64, vlayout.KEY_LEN)
+    vlayout.wipe((&vk[0]) as u64, 32)
+    return vlayout.VC_OK
+}
+
+fn unwrap_pw(p: u64, slot: *mut vlayout.SlotRef, vault_id: u64, pw: u64,
+    pwn: usize, vk_out: u64) -> i32 {
+    let off: usize = (*slot).off
+    if (*slot).kind != vlayout.SLOT_PW && (*slot).kind != vlayout.SLOT_LOGIN {
+        return vlayout.VC_E_PARAM
+    }
+    let passes: usize = rt.ld8(p, off + 5) as usize
+    let lanes: usize = rt.ld8(p, off + 6) as usize
+    let kib: usize = vlayout.get_be32(p, off + 8) as usize
+    var kek: [u8; 32] = [0; 32]
+    let rc: i32 = derive_pw_kek(pw, pwn, p + (off + 12) as u64, passes, kib,
+        lanes, (&kek[0]) as u64)
+    if rc != vlayout.VC_OK {
+        return rc
+    }
+    let rc2: i32 = open_wrapped(p, off, PW_AAD_LEN, NONCE_OFF_PW, vault_id,
+        (&kek[0]) as u64, vk_out)
+    vlayout.wipe((&kek[0]) as u64, 32)
+    return rc2
+}
+
+fn unwrap_key(p: u64, slot: *mut vlayout.SlotRef, vault_id: u64, key: u64,
+    vk_out: u64) -> i32 {
+    if (*slot).kind != vlayout.SLOT_RECOVERY && (*slot).kind != vlayout.SLOT_DEVICE {
+        return vlayout.VC_E_PARAM
+    }
+    var kek: [u8; 32] = [0; 32]
+    if !derive_key_kek((*slot).kind, vault_id, key, (&kek[0]) as u64) {
+        return vlayout.VC_E_PARAM
+    }
+    let rc: i32 = open_wrapped(p, (*slot).off, KEY_AAD_LEN, NONCE_OFF_KEY,
+        vault_id, (&kek[0]) as u64, vk_out)
+    vlayout.wipe((&kek[0]) as u64, 32)
+    return rc
+}
