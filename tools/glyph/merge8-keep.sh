@@ -96,7 +96,7 @@ done
 grep -q 'kstate.WIGST_OFF + k \* STAGE_MAX' kernel/ui/wig.fi \
     && ok "stage_of rechnet mit der Kernnummer (WIGST_OFF + k * STAGE_MAX)" \
     || bad "stage_of rechnet nicht je Kern"
-if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'tafel_an('; then
+if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'table_on('; then
     ok "ttf.glyph nimmt die Tafelsperre"
 else bad "ttf.glyph nimmt die Tafelsperre nicht"; fi
 # ================================================== RUNDE ROADMAP-2

@@ -1,62 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/xhci.fi -- Runde K17: der Regler, an dem an einem echten Rechner
-// alles haengt.
-//
-// Osum hatte bis zu dieser Runde genau zwei Eingabegeraete, und beide
-// haengen am 8042: die Tastatur an IRQ 1 (Runde 59) und die Maus an
-// IRQ 12 (Runde K10). Im Kommentarkopf von `ps2m.fi` steht der Satz, der
-// diese Runde ausgeloest hat: "Ein USB-HID-Weg braucht davor einen
-// xHCI-Treiber, Endpunkte, Deskriptoren und eine Warteschlange; das ist
-// eine Runde fuer sich." Das hier ist diese Runde.
-//
-// WAS EIN xHCI IST, in der Reihenfolge, in der der Treiber es braucht:
-//
-//   1. VIER REGISTERSAETZE, und wo sie liegen, sagt der erste. Bei BAR 0
-//      stehen die FAEHIGKEITSREGISTER; ihr erstes Oktett (CAPLENGTH) ist
-//      der Abstand zu den BETRIEBSREGISTERN, `DBOFF` der Abstand zur
-//      TUERKLINGELTAFEL, `RTSOFF` der zu den LAUFZEITREGISTERN. Ein
-//      Treiber, der eine dieser Zahlen raet, spricht mit dem Nichts.
-//   2. ZWEI RINGE, die dem WIRT gehoeren, und einer, der dem REGLER
-//      gehoert. Der Kommandoring nimmt Befehle an den Regler auf
-//      (Steckplatz einschalten, Adresse vergeben, Endpunkte einrichten),
-//      je Endpunkt nimmt ein Uebertragungsring die Datenpakete auf, und
-//      auf dem EREIGNISRING antwortet der Regler auf beides. Jeder Ring
-//      ist ein Feld von 16-Oktett-Bloecken (TRB) mit einem UMLAUFBIT:
-//      wer schreibt, setzt es, wer liest, vergleicht es. Ohne dieses Bit
-//      liesse sich nicht sagen, wo der eine aufgehoert und der andere
-//      angefangen hat.
-//   3. EINE TAFEL VON ZUSAMMENHAENGEN (DCBAA). Je Steckplatz ein
-//      Geraetezusammenhang, darin ein Steckplatzzusammenhang und bis zu
-//      31 Endpunktzusammenhaenge. Der Regler LIEST diese Bloecke; der
-//      Wirt beschreibt sie nur ueber einen EINGABEZUSAMMENHANG, den ein
-//      Befehl uebernimmt. Ein Treiber, der den Ausgabezusammenhang
-//      selbst beschreibt, arbeitet gegen den Regler.
-//   4. TUERKLINGELN. Ein Ring, der gewachsen ist, wird nicht abgefragt,
-//      sondern GEMELDET: ein 32-Bit-Schreibzugriff je Steckplatz.
-//      Klingel 0 gehoert dem Kommandoring, Klingel n dem Steckplatz n --
-//      und der Wert sagt, WELCHER Endpunkt gemeint ist.
-//
-// WAS DIESE DATEI NICHT WEISS, und das ist Absicht: sie kennt weder
-// Tastaturen noch Sticks noch Deskriptoren. Sie kennt Steckplaetze,
-// Endpunkte und Uebertragungen. Die Aufzaehlung, die Klassen und die
-// Zuordnung stehen in `usb.fi` -- so wie `blk.fi` nicht weiss, was ein
-// Dateisystem ist.
-//
-// WAS DIE SPRACHE HIER NICHT KANN, gleiche Lage wie in `nvme.fi`: ein
-// TRB ist ein Block mit Feldern an festen Stellen, aber Firn hat weder
-// fluechtigen Feldzugriff noch `#[align(n)]`. Also werden die Versaetze
-// von Hand gerechnet, und jeder Zugriff auf Geraetespeicher geht durch
-// `__mmio_read32`/`__mmio_write32`. Die Ausrichtung kommt aus dem
-// Bereich, den `boot.s` uebergibt -- er ist seitenausgerichtet, und
-// jeder Versatz hier ist ein Vielfaches von 64.
-//
-// DIE ADRESSEN. Der Regler liest den BUS, nicht die Seitentabelle. In
-// diesem Kernel sind physische und virtuelle Adresse im ersten Gigabyte
-// dieselbe Zahl (`boot.s` bildet es auf sich selbst ab), und `kdata`
-// liegt darin. Deshalb steht `state + VERSATZ` in einem Registerwert,
-// den der Regler liest. Auf einem Kernel mit hoher Haelfte waere genau
-// das die Zeile, an der ein Treiber bricht -- sie steht deshalb hier und
-// nicht verstreut.
 
 profile kernel
 
@@ -88,41 +29,25 @@ export {
     I_MPS, I_ESIT, ISO_QUEUED, ISO_EVENTS, ISO_BYTES, ISO_UNDER, ISO_MISSED, ISO_ERR,
     MAX_SLOT, max_slot, MAX_EP,
     CC_SUCCESS, CC_SHORT, VEC_XHCI, teardown, forget_slot,
-    // RUNDE BLECH-HID: was ein zweiter Regler und eine fremde Firmware
-    // von diesem Treiber verlangen.
-    count_hc, nth_hc, init_at, unit, udelay, power_all, melde_art,
+    count_hc, nth_hc, init_at, unit, udelay, power_all, notify_kind,
     uebersicht, bericht, owned_by_bios, hcs_seen, legtest,
-    // RUNDE BLECHVIER: was die Ruecksetzung der Anschluesse gekostet hat.
     reset_fails, reset_vorbelegt, bar_pde
 }
-
-// ------------------------------------------------- der Vorrat dieser Runde
-//
-// Acht Seiten, 0x50000..0x58000, und keine davon gehoert jemand anderem.
-// Der Vorrat ist VOR dem Bauen zugeteilt worden, weil mehrere Runden
-// gleichzeitig an diesem Baum arbeiten; `tools/kernel/memmap.py` rechnet
-// nach, dass sich nichts ueberschneidet. Die Untergliederung steht hier
-// und ist in der Karte als "kein eigener kdata-Bereich" eingetragen --
-// sie liegt vollstaendig INNERHALB von K17_OFF.
 
 const SCAL_OFF: u64 = 0x50000 // 1 KiB Skalare
 const EPTAB_OFF: u64 = 0x50400 // 16 Endpunkte * 64 Oktette
 const DCBAA_OFF: u64 = 0x50800 // 128 Steckplaetze * 8, 64-ausgerichtet
-const ERST_OFF: u64 = 0x50C00 // ein Eintrag, 16 Oktette, 64-ausgerichtet
+const ERST_OFF: u64 = 0x50C00
 const CMD_OFF: u64 = 0x51000 // Kommandoring, 128 TRBs
 const EVT_OFF: u64 = 0x52000 // Ereignisring, 256 TRBs
 const INCTX_OFF: u64 = 0x53000 // ein Eingabezusammenhang
-const DEVCTX_OFF: u64 = 0x54000 // vier Geraetezusammenhaenge zu 1 KiB
+const DEVCTX_OFF: u64 = 0x54000
 const RING_OFF: u64 = 0x55000 // 16 Uebertragungsringe zu 256 Oktetten
-// 0x56000 gehoert `usb.fi`: die Puffer, die ein GERAET beschreibt
-// (Deskriptoren, Berichte, Befehlsbloecke, ein Datenblock). Sie
-// stehen dort und nicht hier, weil diese Datei nicht weiss, was in
-// ihnen steht -- sie bewegt Oktette, sie liest sie nicht.
 const SPARE_OFF: u64 = 0x57000 // Kratzblockfeld und Reserve
 
 const CMD_TRBS: u64 = 128
 const EVT_TRBS: u64 = 256
-const RING_TRBS: u64 = 16 // 15 nutzbar, der letzte ist der Sprung
+const RING_TRBS: u64 = 16
 const RING_BYTES: u64 = 256
 const MAX_EP: u64 = 16
 const MAX_SLOT: u64 = 4 // so viele Geraete traegt DEVCTX_OFF
@@ -153,51 +78,28 @@ const S_PORTEV: u64 = 0x098
 const S_ERRORS: u64 = 0x0A0
 const S_NEP: u64 = 0x0A8 // belegte Plaetze der Endpunkttafel
 const S_MSIX: u64 = 0x0B0
-// RUNDE HIDWEG: WIE gemeldet wird. 0 = Stift durch den I/O-APIC,
-// 1 = MSI-X, 2 = MSI. Ohne diese Zahl ist `irqs=0` nicht zu deuten.
-const MELDE_INTX: u64 = 0
-const MELDE_MSIX: u64 = 1
-const MELDE_MSI: u64 = 2
-const S_SCRATCH: u64 = 0x0B8 // Feld der Kratzbloecke, 0 = keine
+const NOTIFY_INTX: u64 = 0
+const NOTIFY_MSIX: u64 = 1
+const NOTIFY_MSI: u64 = 2
+const S_SCRATCH: u64 = 0x0B8
 const S_NSCRATCH: u64 = 0x0C0
 const S_XFERS: u64 = 0x0C8
 const S_STALLS: u64 = 0x0D0
 
 // ================================================ RUNDE BLECH-HID
-//
-// WAS AUF ECHTEM BLECH ZU MESSEN IST UND IN QEMU NIE AUFFIEL. Justin
-// hat am 03.09.2026 den Stick zum ersten Mal in einen echten Rechner
-// gesteckt: die Tastatur ging IM STARTMENUE DES LADERS einwandfrei und
-// war tot, sobald Osum uebernahm -- die Maus leuchtete nicht einmal.
-// Genau das ist das Bild, das entsteht, wenn die Firmware den Regler
-// noch besitzt: sie bedient ihn weiter, das Betriebssystem sieht keine
-// Ereignisse, und ein HCRST auf einem fremden Regler wird von der
-// Firmware ueber einen SMI abgefangen.
-//
-// Diese acht Zellen halten fest, was dabei gemessen wurde -- vorher,
-// nachher und wie lange es gedauert hat. Sie stehen im Bericht, damit
-// ein FOTO des Bildschirms die Frage beantwortet und nicht eine
-// Vermutung.
-const S_UNIT: u64 = 0x0D8 // der wievielte xHCI dieses Bretts
-const S_HCS: u64 = 0x0E0 // wie viele es ueberhaupt gibt
-const S_XECP: u64 = 0x0E8 // Versatz der ersten erweiterten Faehigkeit
-const S_LEGCAP: u64 = 0x0F0 // Versatz von USBLEGSUP, 0 = es gibt keine
-const S_LEGPRE: u64 = 0x0F8 // USBLEGSUP, wie die Firmware es hinterliess
-const S_LEGPOST: u64 = 0x100 // ... und nach der Uebernahme
-const S_LEGMS: u64 = 0x108 // Millisekunden, die das BIOS gebraucht hat
-const S_LEGFORCE: u64 = 0x110 // 1 = das BIOS-Bit musste geloescht werden
+const S_UNIT: u64 = 0x0D8
+const S_HCS: u64 = 0x0E0
+const S_XECP: u64 = 0x0E8
+const S_LEGCAP: u64 = 0x0F0
+const S_LEGPRE: u64 = 0x0F8
+const S_LEGPOST: u64 = 0x100
+const S_LEGMS: u64 = 0x108
+const S_LEGFORCE: u64 = 0x110
 const S_HALTOK: u64 = 0x118
 const S_RSTOK: u64 = 0x120
 const S_HCIVER: u64 = 0x128
 const S_BAR: u64 = 0x130
-// RUNDE BLECHVIER: Ruecksetzungen, die nicht durchkamen. Eine Zahl
-// groesser null heisst: an diesem Anschluss ist ein Geraet, das die
-// Ruecksetzung nicht quittiert -- und dann ist jede folgende Aussage
-// ueber dieses Geraet mit Vorsicht zu lesen.
 const S_RESETFAIL: u64 = 0x138
-// Wie oft ein Anschluss zurueckgesetzt wurde, OBWOHL er schon
-// freigeschaltet war. Das ist die Zahl der Geraete, die die Firmware
-// vor uns angefasst hatte.
 const S_RESETVOR: u64 = 0x140
 // ROUND LOGIN-2 (Dell 9020): Intel port routing, see `intel_route`.
 const S_IRDONE: u64 = 0x148 // 0 = not an Intel switchable part, 1 = switched, 2 = nothing to switch
@@ -272,11 +174,6 @@ const R_ERSTSZ: u64 = 0x28
 const R_ERSTBA: u64 = 0x30
 const R_ERDP: u64 = 0x38
 
-// PORTSC. Die Bits, die beim Schreiben ERHALTEN bleiben duerfen: PP,
-// Anzeige, Aufweckbits. Alles andere ist entweder nur lesbar oder
-// wird durch eine Eins GELOESCHT -- ein Treiber, der den gelesenen Wert
-// unveraendert zurueckschreibt, loescht damit jede Aenderungsmeldung
-// und schaltet nebenbei den Anschluss ab (Bit 1 ist RW1CS).
 const PSC_KEEP: u64 = 0x0E00C200
 const PSC_CCS: u64 = 0x1
 const PSC_PED: u64 = 0x2
@@ -315,37 +212,11 @@ const T_PORT_EVENT: u64 = 34
 const CC_SUCCESS: u64 = 1
 const CC_SHORT: u64 = 13
 
-// 43 ist frei: 32 Zeitgeber, 33 Tastatur, 44 NVMe, 45 Netz, 46 Maus,
-// 47 verirrt. `tools/kernel/memmap.py` rechnet die Vektortafel seit
-// Runde K10 nach -- zwei Namen auf einer Zahl waeren genau der Fehler,
-// der dort dokumentiert ist.
 const VEC_XHCI: u64 = 43
 
 const SPIN_LIMIT: u64 = 2000000
 const RESET_SPIN: u64 = 400000
 
-// ======================================= RUNDE BLECH-HID: DIE UEBERGABE
-//
-// Ein xHCI traegt hinter den Faehigkeitsregistern eine VERKETTETE LISTE
-// erweiterter Faehigkeiten (xHCI 1.2, Abschnitt 7). Wo sie anfaengt,
-// steht in HCCPARAMS1 Bit 31..16, und zwar in DOPPELWORTEN. Jeder
-// Eintrag hat im ersten Oktett seine Kennung und im zweiten den Abstand
-// zum naechsten, ebenfalls in Doppelworten; ein Abstand von null ist das
-// Ende.
-//
-// KENNUNG 1 IST DIE, AN DER ALLES HAENGT: "USB Legacy Support". Das
-// erste Doppelwort ist USBLEGSUP mit zwei Fahnen -- Bit 16 "HC BIOS
-// Owned" und Bit 24 "HC OS Owned". Solange Bit 16 steht, gehoert der
-// Regler der FIRMWARE. Das Betriebssystem setzt Bit 24 und WARTET,
-// bis die Firmware Bit 16 fallen laesst; erst danach darf es den Regler
-// anfassen. Wer das ueberspringt, bekommt genau das Bild von oben.
-//
-// Das zweite Doppelwort (USBLEGCTLSTS) sagt, welche Ereignisse die
-// Firmware als SMI zugestellt bekommt. Nach der Uebernahme werden alle
-// Freigaben geloescht und die stehenden Meldungen quittiert -- sonst
-// laeuft die Maschine bei jedem Tastendruck in den Systemverwaltungsmodus
-// und der Regler wird zweimal bedient. Die beiden Masken sind
-// zeichengleich die aus Linux (drivers/usb/host/pci-quirks.c).
 const XECP_LEGSUP: u64 = 1
 const XECP_PROTO: u64 = 2
 const LEG_BIOS: u64 = 0x00010000
@@ -353,9 +224,6 @@ const LEG_OS: u64 = 0x01000000
 const O_LEGCTL: u64 = 4
 const LEG_SMI_BEHALTEN: u64 = 0x000E1FEE
 const LEG_SMI_QUITTIEREN: u64 = 0xE0000000
-// So lange wird der Firmware Zeit gelassen. Linux wartet 5 Sekunden;
-// eine Sekunde reicht fuer jedes Brett, das ueberhaupt loslaesst, und
-// laenger will niemand vor einem schwarzen Schirm sitzen.
 const LEG_MS: u64 = 1000
 
 // ---------------------------------------------------------- Kleinkram
@@ -433,13 +301,7 @@ fn cmds(state: u64) -> u64 {
 }
 
 // ==================================================== RUNDE HIDWEG
-//
-// DREI REGISTER, DIE LIVE GELESEN WERDEN. Ein Zaehler sagt, wie oft
-// eine Meldung ANKAM; diese drei sagen, ob der Regler ueberhaupt eine
-// SCHICKT. Bleibt `irqs` stehen und `sts` hat EINT gesetzt, dann hat
-// der Regler gemeldet und niemand hat es abgeholt -- ein Fehler im
-// Meldeweg. Bleiben beide stehen, liegt es weiter unten.
-fn melde_art(state: u64) -> u64 {
+fn notify_kind(state: u64) -> u64 {
     return g(state, S_MSIX)
 }
 
@@ -473,12 +335,6 @@ fn zero(p: u64, n: u64) {
     }
 }
 
-// Ein TRB besteht aus vier Doppelworten. Alle vier gehen durch die
-// fluechtigen Zugriffe: der Regler ist der zweite Leser dieses Speichers,
-// und der Uebersetzer darf hier nichts zusammenlegen oder verschieben.
-// Das Steuerwort ZULETZT, weil in ihm das Umlaufbit steht -- der Regler
-// darf den Block erst dann fuer gueltig halten, wenn der Rest schon
-// darin steht.
 fn trb(at: u64, param: u64, status: u64, control: u64) {
     __mmio_write32((at) as *mut u32, (param & 0xFFFFFFFF) as u32)
     __mmio_write32((at + 4) as *mut u32, ((param >> 32) & 0xFFFFFFFF) as u32)
@@ -512,10 +368,6 @@ fn ep_find(state: u64, slot: u64, dci: u64) -> u64 {
     return MAX_EP
 }
 
-// Einen Uebertragungsring anlegen. Der Ring ist SEIN Platz in der Tafel:
-// Platz i bekommt die 256 Oktette bei RING_OFF + i * 256. Damit haengt
-// die Zahl der gleichzeitig offenen Endpunkte an einer Zahl (MAX_EP) und
-// nicht an einem Allokator, den ein Unterbrechungsweg anfassen muesste.
 fn ep_open(state: u64, slot: u64, dci: u64) -> u64 {
     let found: u64 = ep_find(state, slot, dci)
     if found < MAX_EP {
@@ -559,9 +411,6 @@ fn ep_resid(state: u64, i: u64) -> u64 {
     return eg(state, i, E_RESID)
 }
 
-// Alle Plaetze eines Steckplatzes vergessen. Wird beim Abziehen gerufen:
-// ein Endpunkt eines Geraets, das nicht mehr da ist, darf keine
-// Uebertragung mehr annehmen -- und sein Platz soll wieder frei werden.
 fn forget_slot(state: u64, slot: u64) {
     let n: u64 = g(state, S_NEP)
     var i: u64 = 0
@@ -576,11 +425,6 @@ fn forget_slot(state: u64, slot: u64) {
     }
 }
 
-// Einen Block in den Ring legen. Der letzte Platz ist immer ein SPRUNG
-// zurueck an den Anfang, und mit ihm kippt das Umlaufbit -- das ist die
-// ganze Ringmechanik von xHCI. Gibt die Adresse des gelegten Blocks
-// zurueck: die steht spaeter im Ereignis, und nur so laesst sich sagen,
-// WELCHER Block fertig wurde.
 fn ring_push(state: u64, i: u64, param: u64, status: u64, control: u64) -> u64 {
     let base: u64 = eg(state, i, E_RING)
     var at: u64 = eg(state, i, E_ENQ)
@@ -589,7 +433,6 @@ fn ring_push(state: u64, i: u64, param: u64, status: u64, control: u64) -> u64 {
     trb(here, param, status, control | cyc)
     at = at + 1
     if at == RING_TRBS - 1 {
-        // Der Sprung. TC (Bit 1) sagt: hier kippt das Umlaufbit.
         trb(base + at * 16, base, 0, (T_LINK << 10) | 2 | cyc)
         at = 0
         cyc = 1 - cyc
@@ -615,8 +458,6 @@ fn irq(state: u64) {
         serial.dec(rd32(op(state), O_USBSTS))
         serial.nl()
     }
-    // Beide Meldebits loeschen -- eine Eins loescht, eine Null laesst
-    // stehen. Ein Regler mit stehendem IP schickt keine zweite Meldung.
     wr32(op(state), O_USBSTS, STS_EINT)
     wr32(rt(state), R_IMAN, rd32(rt(state), R_IMAN) | 1)
     drain(state)
@@ -624,20 +465,6 @@ fn irq(state: u64) {
     wr64(rt(state), R_ERDP, (state + EVT_OFF + g(state, S_EVT_DEQ) * 16) | 8)
 }
 
-// Alles nehmen, was da liegt. Eine Meldung kann fuer mehrere fertige
-// Uebertragungen stehen; ein Behandler, der immer nur eine nimmt, laesst
-// den Rest liegen -- derselbe Satz steht in `nvme.drain`, und er gilt
-// hier genauso.
-// UNTERBRECHUNGSSICHER, und das ist keine Vorsicht auf Vorrat. Der
-// Ereignisring hat GENAU EINEN Abholzeiger, und an ihm arbeiten in
-// diesem Kernel zwei Seiten: die Abfrageschleife einer laufenden
-// Steuerungsuebertragung und der Behandler von Vektor 43. Wird die
-// Schleife zwischen "Block gelesen" und "Zeiger weitergesetzt"
-// unterbrochen, liest der Behandler denselben Block noch einmal -- und
-// zaehlt dieselbe Uebertragung zweimal fertig. Deshalb wird hier
-// abgeschaltet und danach genau dann wieder ein, wenn es vorher an war;
-// aus dem Behandler heraus gerufen bleibt es aus. Denselben Griff macht
-// `ps2m.init` seit Runde K10, und aus demselben Grund.
 static mut drain_busy: u64 = 0
 static mut ev_last: [u64; 16] = [0 as u64; 16]
 static mut ev_prev: [u64; 16] = [0 as u64; 16]
@@ -705,9 +532,6 @@ fn drain_inner(state: u64) -> u64 {
     let n: u64 = got
     s(state, S_EVT_DEQ, at)
     s(state, S_EVT_CYC, cyc)
-    // Bit 3 des Abholzeigers (EHB) sagt dem Regler: der Behandler ist
-    // fertig. Ohne ihn bleibt der Regler der Meinung, es laufe noch
-    // einer, und schickt keine weitere Meldung.
     wr64(rt(state), R_ERDP, (state + EVT_OFF + at * 16) | 8)
     if n > EVT_TRBS {
         return n - EVT_TRBS - 1
@@ -967,10 +791,6 @@ fn isoc_queue(state: u64, slot: u64, dci: u64, buf: u64, len: u64) -> bool {
 
 // ------------------------------------------------------ die Kommandos
 
-// Einen Befehl in den Kommandoring legen, klingeln und auf die Antwort
-// warten. Gibt den Abschlusscode zurueck; 0xFF heisst: der Regler hat
-// nicht geantwortet. Begrenzt, weil ein Regler, der nie antwortet, den
-// Kernel nicht anhalten darf.
 fn command(state: u64, param: u64, status: u64, control: u64) -> u64 {
     let want: u64 = g(state, S_CC_SEQ) + 1
     var at: u64 = g(state, S_CMD_ENQ)
@@ -1044,34 +864,12 @@ fn stop_endpoint(state: u64, slot: u64, dci: u64) -> u64 {
         | ((dci & 0x1F) << 16))
 }
 
-// Nach einem Abbruch weiss der Regler nicht mehr, wo im Ring er stand.
-// Diese Zeile sagt es ihm -- und das Umlaufbit gehoert dazu, sonst liest
-// er den halben Ring als leer.
 fn set_dequeue(state: u64, slot: u64, dci: u64, i: u64) -> u64 {
     ep_reset_ring(state, i)
     return command(state, eg(state, i, E_RING) | 1, 0,
         (T_SET_DEQ << 10) | ((slot & 0xFF) << 24) | ((dci & 0x1F) << 16))
 }
 
-// ============================================== RUNDE STARTKNOPF
-// WAS DER REGLER SELBST UEBER DEN ENDPUNKT SAGT.
-//
-// Bis zu dieser Runde war der einzige Blick auf einen Endpunkt der
-// Fertigmeldungscode des letzten Transfers -- also unsere eigene
-// Buchfuehrung. Die sagt NICHT, ob der Regler den Endpunkt noch
-// bedient. Genau das ist die offene Frage auf Justins Brett: "KBD 2
-// TAS 0" heisst, das Geraet ist da und liefert nichts, und ein
-// ANGEHALTENER Endpunkt sieht von aussen genauso aus wie ein Geraet,
-// das nicht tippt.
-//
-// Der GERAETEZUSAMMENHANG steht im Speicher des Reglers und wird von
-// IHM geschrieben (xHCI 1.2, 6.2.3): Endpunktzusammenhang `dci`,
-// Doppelwort 0, Bits 0..2 -- der ENDPUNKTZUSTAND:
-//   0 disabled  1 running  2 halted  3 stopped  4 error
-// Steht dort 2 oder 4, nimmt der Endpunkt keinen Block mehr an, egal
-// wie oft `arm` klingelt. Diese Zahl beantwortet die Frage mit EINEM
-// Foto -- und sie ist der Grund, warum die Wiederbelebung unten
-// ueberhaupt gebaut werden konnte.
 fn dev_ctx(state: u64, slot: u64) -> u64 {
     if slot == 0 || slot > 127 {
         return 0
@@ -1097,8 +895,6 @@ fn ep_state(state: u64, slot: u64, dci: u64) -> u64 {
     return rd32(c + dci * ctx_size(state), 0) & 7
 }
 
-// Ein Endpunkt, der nichts mehr annimmt. `halted` und `error` sind die
-// beiden Zustaende, aus denen er von selbst nicht zurueckkommt.
 fn ep_halted(state: u64, slot: u64, dci: u64) -> bool {
     let st: u64 = ep_state(state, slot, dci)
     return st == 2 || st == 4
@@ -1106,9 +902,6 @@ fn ep_halted(state: u64, slot: u64, dci: u64) -> bool {
 
 // ---------------------------------------------------- die Zusammenhaenge
 
-// Wo der Regler den Zusammenhang eines Steckplatzes SUCHT. Die Tafel
-// gehoert dieser Datei; `usb.fi` traegt nur ein, was es angelegt hat --
-// und beim Abziehen wieder aus.
 fn dcbaa_set(state: u64, slot: u64, addr: u64) {
     if slot == 0 || slot > 127 {
         return
@@ -1116,27 +909,10 @@ fn dcbaa_set(state: u64, slot: u64, addr: u64) {
     __mmio_write64((state + DCBAA_OFF + slot * 8) as *mut u64, addr)
 }
 
-// RUNDE HIDPUNKTE: DIE 1024 WAREN EINE ANNAHME UEBER FREMDE HARDWARE.
-//
-// Ein Geraetezusammenhang hat 32 Eintraege (Steckplatz + 31 Endpunkte),
-// und wie gross EIN Eintrag ist, sagt der REGLER in HCCPARAMS1: 32 oder
-// 64 Oktett. QEMU sagt ueberall 32, und mit 32 * 32 = 1024 ging die
-// feste Zahl auf. Justins zweiter Regler (1022:149c) sagt **64** --
-// gemessen auf seinem Brett, `usb: xhci slots=64 ports=8 ctx=64`. Dann
-// braucht EIN Zusammenhang 2048 Oktett, und der zweite Steckplatz lag
-// mitten im ersten.
-//
-// Der Abstand ist jetzt gerechnet und nicht geraten, und wie viele
-// Steckplaetze in den Bereich passen, sagt `max_slot`.
 fn dctx_bytes(state: u64) -> u64 {
     return 32 * ctx_size(state)
 }
 
-// So viele Geraetezusammenhaenge passen zwischen DEVCTX_OFF und
-// RING_OFF: vier bei 32 Oktett je Eintrag, zwei bei 64. Wer darueber
-// hinaus einen Steckplatz vergaebe, wuerde die Uebertragungsringe
-// ueberschreiben -- und ein Fehler, der Speicher zerstoert, ist
-// schlimmer als ein Geraet, das abgelehnt wird und das sagt.
 fn max_slot(state: u64) -> u64 {
     let n: u64 = 4096 / dctx_bytes(state)
     if n > MAX_SLOT {
@@ -1156,9 +932,6 @@ fn inctx(state: u64) -> u64 {
     return state + INCTX_OFF
 }
 
-// Der Eingabesteuerzusammenhang steht ganz vorn, danach der
-// Steckplatzzusammenhang, danach die 31 Endpunkte -- jeder so gross, wie
-// HCCPARAMS1 es sagt.
 fn in_control(state: u64) -> u64 {
     return state + INCTX_OFF
 }
@@ -1273,9 +1046,6 @@ fn port_connected(state: u64, p: u64) -> bool {
     return (portsc(state, p) & PSC_CCS) != 0
 }
 
-// DAS CACHE-ATTRIBUT DES EIGENEN REGISTERSATZES, aus der Seitentafel
-// zurueckgelesen. MMIO MUSS unbeschreibbar sein: eine Tuerklingel, die
-// im L1 liegenbleibt, klingelt nie. 0x1B = PRESENT|WRITE|PWT|PCD|HUGE.
 fn bar_pde(state: u64) -> u64 {
     return apic.pde_at(state, g(state, S_BASE))
 }
@@ -1309,25 +1079,6 @@ fn port_power(state: u64, p: u64) {
     portsc_write(state, p, (cur & PSC_KEEP) | PSC_PP)
 }
 
-// RUNDE BLECH-HID: ALLE ANSCHLUESSE EINSCHALTEN UND DANN WIRKLICH WARTEN.
-//
-// Justins Maus LEUCHTETE NICHT EINMAL. Das ist keine Aussage ueber HID
-// und keine ueber die Aufzaehlung -- das ist eine Aussage ueber die
-// Versorgungsspannung an einem Anschluss. Ein HCRST setzt PP auf null
-// (xHCI 1.2, 5.4.8: "PP ... is reset to 0 by HCRST when PPC = 1"), und
-// danach dauert es, bis Spannung anliegt: die USB-2.0-Spezifikation gibt
-// einem Anschluss dafuer bis zu 100 ms (bPwrOn2PwrGood, in
-// 2-ms-Schritten), und das Geraet dahinter braucht danach noch einmal
-// Zeit, bis es sich meldet.
-//
-// Bis zu dieser Runde stand an dieser Stelle eine ZAEHLSCHLEIFE mit
-// 200000 leeren Durchlaeufen. Sie misst keine Zeit -- sie misst den
-// Uebersetzer und den Prozessortakt, und auf einer schnellen Maschine
-// ist sie in weniger als einer Millisekunde durch. In QEMU faellt das
-// nicht auf, weil ein nachgebildetes Geraet sofort "verbunden" meldet.
-// Hier stehen jetzt 200 echte Millisekunden, und die Zahl der
-// Anschluesse, an denen danach WIRKLICH Strom steht, wird
-// zurueckgegeben statt gehofft.
 fn power_all(state: u64) -> u64 {
     let n: u64 = ports(state)
     var p: u64 = 1
@@ -1352,63 +1103,17 @@ fn port_clear_changes(state: u64, p: u64) {
     portsc_write(state, p, (cur & PSC_KEEP) | (cur & PSC_CHANGES))
 }
 
-// Ein USB-2-Anschluss braucht eine Ruecksetzung, bevor das Geraet
-// antwortet; ein USB-3-Anschluss richtet sich selbst ein und ist nach
-// dem Anstecken schon freigeschaltet. Beide Faelle stehen hier, weil
-// QEMU beide anbietet: die ersten Anschluesse von `qemu-xhci` sind
-// USB 2, die hinteren USB 3.
 fn port_reset(state: u64, p: u64) -> bool {
-    // ================================================ RUNDE BLECHVIER
-    // ============ DIE RUECKSETZUNG WIRD ERZWUNGEN, NICHT ERSPART.
-    //
-    // HIER STAND: `if port_enabled(state, p) { return true }` -- ein
-    // freigeschalteter Anschluss galt als fertig. Auf einem Brett mit
-    // UEFI ist das falsch, und es ist die beste Erklaerung, die es fuer
-    // Justins flatternde Aufzaehlung gibt.
-    //
-    // Die Firmware zaehlt Tastatur und Maus SELBST auf, bevor der Lader
-    // laeuft: sie adressiert die Geraete und schaltet die Anschluesse
-    // frei. Nach unserem `HCRST` sind UNSERE Steckplaetze weg -- das
-    // GERAET aber behaelt seine von der Firmware vergebene Adresse, bis
-    // es einen echten Anschluss-Reset sieht. Wer den Reset ueberspringt,
-    // weil PED schon steht, vergibt Adresse 1 an ein Geraet, das noch
-    // auf die alte Adresse hoert: `Address Device` wird quittiert, die
-    // Aufzaehlung gilt formal als geglueckt, und JEDER folgende
-    // Steuertransfer laeuft ins Leere.
-    //
-    // UND ES FLATTERT GENAU RICHTIG: ob die Firmware ein Geraet
-    // angefasst hat, haengt davon ab, ob im Bootmenue eine Taste
-    // gedrueckt wurde. Zwei Startvorgaenge desselben Sticks, zwei
-    // verschiedene Ergebnisse, bei UNVERAENDERTER Zahl von
-    // Unterbrechungen und Ereignissen -- und genau das hat Justin
-    // gemeldet.
-    //
-    // In QEMU faellt es nicht auf, weil dort niemand vor uns
-    // aufgezaehlt hat.
-    //
-    // `usbnoreset` ist die Gegenprobe und stellt das alte Verhalten her.
     let war_an: bool = port_enabled(state, p)
     if war_an && kstate.mode_on(state, kstate.M_USBNORESET) {
         port_clear_changes(state, p)
         return true
     }
-    // ============ UND DAS ALTE AENDERUNGSBIT ZUERST WEG.
-    //
-    // `PSC_PRC` ist RW1C. Steht es noch von einer frueheren
-    // Ruecksetzung, kehrt die Warteschleife unten SOFORT zurueck und
-    // meldet einen Reset, den es nie gab. Es wird deshalb hier
-    // ausdruecklich geloescht -- vor `PR`, nicht danach, denn danach
-    // wuerde es die gerade erst gemeldete Ruecksetzung wegwerfen.
     if war_an {
         s(state, S_RESETVOR, g(state, S_RESETVOR) + 1)
     }
     let before: u64 = portsc(state, p)
     portsc_write(state, p, (before & PSC_KEEP) | PSC_PRC)
-    // RUNDE BLECH-HID: DIE PRELLZEIT. Ein Anschluss, der gerade
-    // "verbunden" gemeldet hat, ist noch nicht ruhig -- USB 2.0,
-    // 7.1.7.3 verlangt 100 ms (TATTDB), bevor zurueckgesetzt wird. Ein
-    // nachgebildetes Geraet braucht das nicht, ein Stecker in einer
-    // Buchse schon.
     udelay(state, 100000)
     let cur: u64 = portsc(state, p)
     portsc_write(state, p, (cur & PSC_KEEP) | PSC_PR)
@@ -1424,10 +1129,6 @@ fn port_reset(state: u64, p: u64) -> bool {
         }
     }
     if !fertig {
-        // Die Ruecksetzung kam nicht durch. War der Anschluss vorher
-        // freigeschaltet, ist das immer noch besser als gar nichts --
-        // aber es wird GEMELDET und nicht stillschweigend als Erfolg
-        // verbucht.
         s(state, S_RESETFAIL, g(state, S_RESETFAIL) + 1)
         if war_an {
             port_clear_changes(state, p)
@@ -1436,21 +1137,11 @@ fn port_reset(state: u64, p: u64) -> bool {
         return false
     }
     port_clear_changes(state, p)
-    // Und die Erholungszeit danach (USB 2.0, 7.1.7.5, TRSTRCY = 10 ms).
-    // Wer sofort auf Adresse 0 fragt, fragt ein Geraet, das noch nicht
-    // zuhoert.
     udelay(state, 20000)
     return (portsc(state, p) & PSC_PED) != 0
 }
 
 // ================================ RUNDE BLECH-HID: EINE ECHTE PAUSE
-//
-// Gemessen am Zyklenzaehler, den `apic.calibrate` gegen den PIT gehalten
-// hat -- dieselbe Rechnung wie `smp.udelay`, hier noch einmal, weil
-// dieser Treiber `smp` nicht einbinden darf (smp bindet `sched` ein, und
-// `sched` laeuft ueber Geraete). Ohne geeichten Zaehler bleibt die
-// Zaehlschleife als Rueckfall -- sie ist dann ungenau, aber sie ist
-// nicht null.
 fn udelay(state: u64, us: u64) {
     let hz: u64 = apic.tsc_hz(state)
     if hz == 0 {
@@ -1475,16 +1166,11 @@ fn udelay(state: u64, us: u64) {
 
 // ------------------------------------------ die erweiterten Faehigkeiten
 
-// Der Versatz der ersten erweiterten Faehigkeit, in OKTETTEN ab BAR 0.
-// 0 heisst: dieser Regler hat keine.
 fn xecp_first(b: u64) -> u64 {
     let hcc1: u64 = rd32(b, C_HCCPARAMS1)
     return ((hcc1 >> 16) & 0xFFFF) * 4
 }
 
-// Der Versatz der Faehigkeit mit der Kennung `id`, oder 0. Die Liste
-// wird BEGRENZT durchlaufen: ein Brett mit einem verbogenen Zeiger darf
-// den Start nicht anhalten.
 fn xecp_find(b: u64, id: u64) -> u64 {
     var at: u64 = xecp_first(b)
     var n: u64 = 0
@@ -1577,7 +1263,6 @@ fn intel_route(state: u64, idx: u64) {
     s(state, S_IRDONE, 1)
 }
 
-// Gehoert der Regler in diesem Augenblick der Firmware?
 fn owned_by_bios(state: u64) -> bool {
     let b: u64 = base_of(state)
     let cap: u64 = xecp_find(b, XECP_LEGSUP)
@@ -1587,20 +1272,6 @@ fn owned_by_bios(state: u64) -> bool {
     return (rd32(b, cap) & LEG_BIOS) != 0
 }
 
-// ================== RUNDE BLECH-HID: DEN REGLER DER FIRMWARE ABNEHMEN
-//
-// Der Ablauf steht in xHCI 1.2, Abschnitt 4.22.1, und er ist kurz:
-// OS-Bit setzen, warten, bis das BIOS-Bit faellt, danach die SMIs
-// abschalten. Was hier dazukommt, ist die Ehrlichkeit darueber, was
-// gemessen wurde -- vorher, nachher, wie lange -- und der Fall, in dem
-// die Firmware NICHT loslaesst.
-//
-// DASS WIR DANN TROTZDEM UEBERNEHMEN, ist eine Entscheidung und keine
-// Nachlaessigkeit: Linux tut dasselbe (`pci-quirks.c` loescht das
-// BIOS-Bit nach dem Zeitablauf von Hand), und ein Regler, den niemand
-// bedient, ist schlimmer als einer, den man einer Firmware wegnimmt, die
-// auf ein Bit nicht antwortet. Der Bericht sagt, welcher der beiden
-// Faelle eingetreten ist.
 fn handover(state: u64) -> bool {
     let b: u64 = base_of(state)
     s(state, S_XECP, xecp_first(b))
@@ -1609,9 +1280,6 @@ fn handover(state: u64) -> bool {
     s(state, S_LEGMS, 0)
     s(state, S_LEGFORCE, 0)
     if cap == 0 {
-        // Kein Legacy-Abschnitt: der Regler hat nie jemandem gehoert.
-        // QEMU ist dieser Fall, und genau deshalb ist der Fehler
-        // fuenfundzwanzig Runden lang nicht aufgefallen.
         s(state, S_LEGPRE, 0)
         s(state, S_LEGPOST, 0)
         return true
@@ -1619,12 +1287,6 @@ fn handover(state: u64) -> bool {
     let before: u64 = rd32(b, cap)
     s(state, S_LEGPRE, before)
     wr32(b, cap, before | LEG_OS)
-    // ZWEI ZAEHLER UND NICHT EINER. Der erste Entwurf hat die Schleife
-    // mit `ms = LEG_MS` verlassen und damit die gemessene Zeit
-    // ueberschrieben -- eine Uebernahme, die nach drei Millisekunden
-    // durch war, meldete tausend. Gefunden hat es `legtest`, Fall 1,
-    // und genau dafuer gibt es ihn: die Zahl im Bericht ist die
-    // Begruendung fuer alles, was danach entschieden wird.
     var ms: u64 = 0
     var lauf: u64 = 0
     var free: bool = false
@@ -1645,8 +1307,6 @@ fn handover(state: u64) -> bool {
         s(state, S_LEGFORCE, 1)
     }
     s(state, S_LEGPOST, rd32(b, cap))
-    // Und die Systemverwaltungsmeldungen abschalten, bevor der erste
-    // Tastendruck ankommt.
     let ctl: u64 = rd32(b, cap + O_LEGCTL)
     wr32(b, cap + O_LEGCTL, (ctl & LEG_SMI_BEHALTEN) | LEG_SMI_QUITTIEREN)
     return (rd32(b, cap) & LEG_BIOS) == 0
@@ -1667,19 +1327,6 @@ fn wait_ep(state: u64, i: u64, want: u64) -> bool {
     return false
 }
 
-// Eine Steuerungsuebertragung: Anforderungsblock, Datenblock, Quittung.
-// `len` Oktette in oder aus `dst`. Rueckgabe: uebertragene Oktette, oder
-// eine negative Zahl, wenn etwas schiefging.
-//
-// DREI BLOECKE UND ZWEI MELDUNGEN. Auf dem Datenblock steht IOC und ISP
-// (Meldung auch bei einem kurzen Paket), auf der Quittung IOC. Das erste
-// Ereignis sagt, wie viel WIRKLICH kam -- der Rest steht als `resid`
-// darin; das zweite sagt, dass das Geraet die Uebertragung abgeschlossen
-// hat. Wer nur auf die Quittung wartet, bekommt eine Laenge, die er sich
-// ausgedacht hat.
-// A STALLed control request (e.g. VirtualBox's USB keyboard refusing SET_PROTOCOL) leaves endpoint 0 in the
-// Halted state (xHCI 1.2, 4.8.3): the controller then ignores every further doorbell until Reset Endpoint and
-// Set TR Dequeue Pointer. Without this the NEXT control transfer waits for an event that never comes.
 fn ep0_recover(state: u64, slot: u64, i: u64) {
     if kstate.mode_on(state, kstate.M_XHCIOLD) {
         return
@@ -1765,8 +1412,6 @@ fn control_run(state: u64, slot: u64, bmreq: u64, brequest: u64, wvalue: u64,
     return moved as i64
 }
 
-// Ein einzelner Datenblock auf einem Massen- oder Unterbrechungsendpunkt,
-// und darauf gewartet. Rueckgabe wie oben.
 fn bulk(state: u64, slot: u64, dci: u64, dst: u64, len: u64) -> i64 {
     let i: u64 = ep_find(state, slot, dci)
     if i >= MAX_EP {
@@ -1790,10 +1435,6 @@ fn bulk(state: u64, slot: u64, dci: u64, dst: u64, len: u64) -> i64 {
     return (len - resid) as i64
 }
 
-// Einen Block auf einem Unterbrechungsendpunkt einreihen, OHNE zu warten.
-// Das ist der Weg, auf dem eine Tastatur meldet: der Ring traegt immer
-// genau einen offenen Block, und wenn er fertig ist, kommt eine
-// Unterbrechung -- nicht eine Abfrage.
 fn int_queue(state: u64, slot: u64, dci: u64, dst: u64, len: u64) -> bool {
     let i: u64 = ep_find(state, slot, dci)
     if i >= MAX_EP {
@@ -1811,18 +1452,8 @@ fn present(state: u64) -> bool {
     return count_hc(state) > 0
 }
 
-// ============ RUNDE BLECH-HID: ES GIBT MEHR ALS EINEN xHCI IN EINEM PC
-//
-// `rootsel` auf Justins Brett meldet ZWEI:
-//
 //     rootsel: usb xHCI bdf=0x200 1022:43d5
 //     rootsel: usb xHCI bdf=0xc03 1022:149c
-//
-// Bis zu dieser Runde nahm `init` immer `pci.find_class(...)`, also den
-// ERSTEN, und hat den zweiten nie angesehen. Steckt die Tastatur an
-// einer Buchse des anderen Reglers, gibt es keine Eingabe -- und, was
-// schlimmer ist, keine Zeile darueber. Jetzt werden sie GEZAEHLT, jeder
-// einzeln aufgesetzt und einzeln berichtet.
 fn is_hc(state: u64, i: u64) -> bool {
     return pci.get(state, i, pci.E_CLASS) == 0x0C
         && pci.get(state, i, pci.E_SUBCLASS) == 0x03
@@ -1841,7 +1472,6 @@ fn count_hc(state: u64) -> u64 {
     return n
 }
 
-// Der PCI-Platz des `n`-ten Reglers, oder `pci.MAX_DEV`.
 fn nth_hc(state: u64, n: u64) -> u64 {
     var seen: u64 = 0
     var i: u64 = 0
@@ -1869,12 +1499,6 @@ fn init(state: u64, armed: bool) -> bool {
     return init_at(state, 0, armed)
 }
 
-// RUNDE PROTOKOLL: die Quelle dieses Treibers im Ring. Siehe `nvme.lq`.
-// Der Name liegt als `static mut` im Modul und nicht als `var` in
-// dieser Funktion: eine lokale Zeichenkette stirbt mit dem Rahmen,
-// und firnc faengt genau das ab ("the address of the local escapes
-// through the return value"). Der Protokollring liest den Namen
-// erst im Aufruf danach.
 static mut q_xhci: [u8; 5] = "xhci\0"
 static mut last_rc: u64 = 0
 static mut last_ctl: u64 = 0
@@ -1932,15 +1556,8 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
         return false
     }
 
-    // Ohne dieses Bit darf der Regler antworten, aber nicht selbst in den
-    // Speicher greifen -- und ein xHCI tut nichts anderes als das.
     pci.enable_master(bdf(state))
 
-    // RUNDE BLECH-HID: ZUERST DER FIRMWARE ABNEHMEN, DANN ANFASSEN.
-    // Diese eine Zeile ist der Unterschied zwischen "die Tastatur geht
-    // im Startmenue und danach nicht mehr" und "sie geht". Vor ihr stand
-    // hier unmittelbar `halt` -- ein Schreibzugriff auf USBCMD eines
-    // Reglers, der noch dem BIOS gehoert.
     handover(state)
     // ROUND LOGIN-2: and on an Intel 7/8/9-series chipset the ports
     // themselves still belong to the EHCI -- see `intel_route`.
@@ -1955,10 +1572,6 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     }
     s(state, S_RSTOK, 1)
 
-    // Steckplaetze anmelden. Genau so viele, wie diese Runde
-    // Geraetezusammenhaenge hat: die Steckplatznummern, die der Regler
-    // dann vergibt, liegen zwischen 1 und MAX_SLOT und sind damit
-    // unmittelbar der Platz in DEVCTX_OFF.
     var want: u64 = max_slot(state)
     if want > slots(state) {
         want = slots(state)
@@ -1990,54 +1603,26 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
         return false
     }
     wr64(op(state), O_DCBAAP, state + DCBAA_OFF)
-    // Bit 0 ist das Umlaufbit des Kommandorings, nicht ein Teil der
-    // Adresse -- der Ring ist 64-ausgerichtet, die unteren sechs Bit
-    // sind frei.
     wr64(op(state), O_CRCR, (state + CMD_OFF) | 1)
 
-    // Der Ereignisring wird nicht angemeldet, sondern seine
-    // SEGMENTTAFEL. Ein Eintrag: Adresse und Zahl der Bloecke.
     trb(state + ERST_OFF, state + EVT_OFF, EVT_TRBS, 0)
     wr32(rt(state), R_ERSTSZ, 1)
     wr64(rt(state), R_ERDP, (state + EVT_OFF) | 8)
     wr64(rt(state), R_ERSTBA, state + ERST_OFF)
-    // Der Zwischenzaehler: 4000 * 250 ns = 1 ms zwischen zwei Meldungen.
     wr32(rt(state), R_IMOD, 4000)
 
-    // DIE MELDUNG WIRD SCHARFGEMACHT, BEVOR DER REGLER LAEUFT. Dieselbe
-    // Regel wie bei NVMe in Runde K2, und aus demselben Grund: was
-    // hinterher eingerichtet wird, kennt keine Warteschlange.
-    // ================================================== RUNDE HIDWEG
-    //
-    // DREI WEGE, UND ZWEI DAVON GAB ES NICHT.
-    //
-    // Bis hierher kannte dieser Treiber MSI-X und den Stift durch den
-    // I/O-APIC. Dazwischen fehlte MSI -- die aeltere Nachrichtenform,
-    // die viele Chipsatz-xHCI koennen und MSI-X nicht.
-    //
-    // GEMESSEN auf Justins Brett (03.09.2026): `hc0` (1022:43d5, der
-    // Chipsatzregler mit 22 Anschluessen und dem Stick daran) meldete
-    // `events=50 irqs=0` -- fuenfzig fertige Uebertragungen, und KEINE
-    // EINZIGE Meldung. Der Stift half nicht: `intx_arm` liest die
-    // Anschlussleitung aus dem PCI-Kopf und gibt auf, wenn dort 0 oder
-    // etwas ueber 23 steht -- und genau das steht auf einem Brett, das
-    // ueber MSI meldet, im Kopf. Ein Regler ohne Meldung bewegt Daten,
-    // sagt es aber niemandem.
-    //
-    // Reihenfolge: MSI-X (eine Tabelle je Vektor), dann MSI, dann der
-    // Stift. Was genommen wurde, steht seit dieser Runde IM BERICHT.
     if pci.get(state, idx, pci.E_MSIX) != 0 {
         if msix_arm(state, idx, VEC_XHCI, armed) {
-            s(state, S_MSIX, MELDE_MSIX)
+            s(state, S_MSIX, NOTIFY_MSIX)
         } else {
             return false
         }
     } else if pci.get(state, idx, pci.E_MSI) != 0
         && msi_arm(state, idx, VEC_XHCI, armed) {
-        s(state, S_MSIX, MELDE_MSI)
+        s(state, S_MSIX, NOTIFY_MSI)
     } else {
         intx_arm(state, idx, VEC_XHCI, armed)
-        s(state, S_MSIX, MELDE_INTX)
+        s(state, S_MSIX, NOTIFY_INTX)
     }
     var iman: u64 = 0
     if armed {
@@ -2087,11 +1672,6 @@ fn reset(state: u64) -> bool {
     return false
 }
 
-// Manche Regler verlangen Arbeitsspeicher fuer sich selbst, und wie viel,
-// sagen sie in HCSPARAMS2. QEMU verlangt keinen -- die Zeilen stehen
-// trotzdem hier, weil ein Treiber, der die Zahl nicht liest, auf der
-// ersten echten Maschine mit einem Regler spricht, der auf Speicher
-// wartet, den es nicht gibt.
 fn scratchpad(state: u64) -> bool {
     let hcs2: u64 = rd32(base_of(state), C_HCSPARAMS2)
     let n: u64 = ((hcs2 >> 27) & 0x1F) | (((hcs2 >> 21) & 0x1F) << 5)
@@ -2121,8 +1701,6 @@ fn scratchpad(state: u64) -> bool {
     return true
 }
 
-// Denselben Weg wie `nvme.fi`: entweder eine Nachricht, die das Geraet
-// selbst auf den Bus schreibt, oder der Stift durch den I/O-APIC.
 fn msix_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
     let d: u64 = pci.get(state, idx, pci.E_BDF)
     let cap: u64 = pci.get(state, idx, pci.E_MSIX)
@@ -2153,16 +1731,6 @@ fn msix_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
     return true
 }
 
-// MSI -- die Nachricht OHNE Tabelle. Adresse und Datum stehen im
-// PCI-Kopf selbst; wie viele Nachrichten das Geraet anbieten darf, steht
-// in den Bits 3..1 des Steuerworts, und wie viele es benutzen SOLL, in
-// den Bits 6..4. Hier wird genau EINE bestellt -- dieser Treiber hat
-// einen Ereignisring und einen Vektor.
-//
-// Bit 7 des Steuerworts sagt, ob die Adresse 64 Bit breit ist; danach
-// richtet sich, wo das Datum steht (Versatz 8 oder 12). Wer das
-// verwechselt, schreibt den Vektor in die obere Adresshaelfte -- und
-// dann meldet der Regler an eine Stelle, an der niemand zuhoert.
 fn msi_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
     let d: u64 = pci.get(state, idx, pci.E_BDF)
     let cap: u64 = pci.get(state, idx, pci.E_MSI)
@@ -2177,16 +1745,12 @@ fn msi_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
         pci.cfg_write32(d, cap + 8, 0)
         datoff = cap + 12
     }
-    // Flanke, festgelegt, Vektor. Die oberen Bits bleiben null: keine
-    // Umleitung, kein Niedrigstpriorisieren.
     pci.cfg_write16(d, datoff, vector & 0xFF)
-    // Bits 6..4 auf null (genau eine Nachricht), Bit 0 = einschalten.
-    var neu: u64 = ctrl & 0xFF8E
+    var fresh: u64 = ctrl & 0xFF8E
     if armed {
-        neu = neu | 1
+        fresh = fresh | 1
     }
-    pci.cfg_write16(d, cap + 2, neu)
-    // Und der Stift wird abgeschaltet, sonst meldet der Regler zweimal.
+    pci.cfg_write16(d, cap + 2, fresh)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
     return true
 }
@@ -2194,13 +1758,6 @@ fn msi_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
 fn intx_arm(state: u64, idx: u64, vector: u64, armed: bool) {
     let d: u64 = pci.get(state, idx, pci.E_BDF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
-    // RUNDE AML: DIE LEITUNG KOMMT AUS `_PRT`, NICHT AUS 0x3C.
-    // `aml.gsi_or_line` fragt zuerst die Interrupt-Routing-Tabelle der
-    // Firmware (das AML-Objekt `_PRT` der Wurzelbruecke, ausgewertet in
-    // kernel/aml.fi) und faellt auf genau die Zeile zurueck, die hier
-    // frueher stand, wenn es kein `_PRT` gibt, es nicht lesbar war oder
-    // das Geraet dort nicht vorkommt. Was beide Wege sagen, steht mit
-    // `aml` auf der seriellen Leitung nebeneinander.
     let gsi: u64 = aml.gsi_or_line(state, idx)
     if gsi == 0 || gsi > 23 {
         return
@@ -2212,32 +1769,6 @@ fn intx_arm(state: u64, idx: u64, vector: u64, armed: bool) {
 }
 
 // =================================================== RUNDE BLECH-HID
-//
-// DER USB-BERICHT, DER AUF EIN FOTO PASSEN MUSS.
-//
-// Justin steht vor einem Rechner ohne serielles Kabel und hat ein
-// Mobiltelefon in der Hand. Was hier gedruckt wird, muss deshalb drei
-// Bedingungen erfuellen: es muss die Frage "warum kommt keine Eingabe
-// an" WIRKLICH beantworten, es muss KURZ sein, und die wichtigste
-// Aussage muss in EINER Zeile stehen -- fuer den Fall, dass der Rest
-// unscharf ist.
-//
-// Deshalb gibt es zwei Ausgaben:
-//
-//   `uebersicht` LIEST NUR. Sie steht in der Diagnose (Menue 1) und
-//   sagt, was die FIRMWARE hinterlassen hat: wie viele Regler es gibt,
-//   wem sie gehoeren, und wie viele Anschluesse Strom und ein Geraet
-//   haben. Kein Register wird beschrieben -- das ist die Regel dieses
-//   Berichts seit Runde USBIMG, und sie gilt weiter.
-//
-//   `bericht` steht NACH der Uebernahme und sagt, was sich geaendert
-//   hat: die Halbleiter-Semaphore vorher und nachher, ob HCRST
-//   geantwortet hat, und dann jeden Anschluss einzeln mit seinen vier
-//   Bits.
-//
-// PP=0 heisst "an dieser Buchse liegt keine Spannung" und erklaert eine
-// Maus, die nicht leuchtet. CCS=0 heisst "hier steckt nichts". PED=1
-// heisst "der Anschluss ist freigeschaltet, das Geraet antwortet".
 
 fn h(v: u64, n: u64) {
     pci.hexn(v, n)
@@ -2250,7 +1781,6 @@ fn yes(b: bool) -> u64 {
     return 0
 }
 
-// Die eine Zeile je Anschluss.
 fn port_line(state: u64, p: u64) {
     var s_p: [u8; 3] = " p\0"
     var s_e: [u8; 7] = " psc=0\0"
@@ -2280,7 +1810,6 @@ fn port_line(state: u64, p: u64) {
     serial.dec((v >> 10) & 0xF)
 }
 
-// Die Kopfzeile eines Reglers: wer er ist, wie gross er ist.
 fn header_line(state: u64, einheit: u64) {
     var s_hc: [u8; 9] = "usb: hc\0\0"
     var s_bdf: [u8; 8] = " bdf=0\0\0"
@@ -2313,9 +1842,6 @@ fn header_line(state: u64, einheit: u64) {
     serial.nl()
 }
 
-// Die erweiterten Faehigkeiten als Liste, und die
-// Anschlussgruppen (USB2 gegen USB3) aus Kennung 2 -- das ist die
-// Zeile, die sagt, WELCHE Buchse an welchem Draht haengt.
 fn xecp_line(state: u64, einheit: u64) {
     var s_x: [u8; 9] = "usb: hc\0\0"
     var s_c: [u8; 8] = " xecp=0\0"
@@ -2341,8 +1867,6 @@ fn xecp_line(state: u64, einheit: u64) {
         serial.puts((&s_id[0]) as u64)
         serial.dec(id)
         if id == XECP_PROTO {
-            // Name (Oktette 4..7, "USB "), Hauptfassung im dritten
-            // Oktett des ersten Doppelworts, dann Anschluss und Anzahl.
             let rev: u64 = (w >> 24) & 0xFF
             let pp: u64 = rd32(b, at + 8)
             let erst: u64 = pp & 0xFF
@@ -2365,11 +1889,10 @@ fn xecp_line(state: u64, einheit: u64) {
     serial.nl()
 }
 
-// Die Zeile ueber die Uebernahme. SIE IST DIE WICHTIGSTE DES BERICHTS.
 fn leg_line(state: u64, einheit: u64) {
     var s_x: [u8; 9] = "usb: hc\0\0"
     var s_k: [u8; 12] = " legsup=0\0\0\0"
-    var s_kein: [u8; 34] = " legsup=KEINE (nie fremd besetzt)\0"
+    var s_kein: [u8; 46] = " legsup=NONE (never taken by a foreign owner)\0"
     var s_vor: [u8; 7] = " vor=0\0"
     var s_nach: [u8; 9] = " nach=0\0\0"
     var s_bios: [u8; 7] = " bios=\0"
@@ -2437,18 +1960,12 @@ fn leg_line(state: u64, einheit: u64) {
     serial.nl()
 }
 
-// Die Anschluesse, vier je Zeile -- damit zwanzig Anschluesse fuenf
-// Zeilen brauchen und nicht zwanzig.
 fn port_lines(state: u64, einheit: u64) {
     var s_x: [u8; 9] = "usb: hc\0\0"
     var s_sum: [u8; 8] = " strom=\0"
     var s_von: [u8; 2] = "/\0"
     var s_ver: [u8; 12] = " verbunden=\0"
     var s_fr: [u8; 8] = " frei=\0\0"
-    // RUNDE HIDWEG: WIE dieser Regler meldet. `irqs=0` ist ohne diese
-    // Angabe nicht zu deuten -- an einem Stift, den die Firmware nicht
-    // eingetragen hat, sieht ein Treiber genauso aus wie an einer
-    // Nachricht, die nie eingerichtet wurde.
     var s_me: [u8; 9] = " melde=\0\0"
     var s_mx: [u8; 6] = "msi-x\0"
     var s_ms: [u8; 4] = "msi\0"
@@ -2474,9 +1991,9 @@ fn port_lines(state: u64, einheit: u64) {
     serial.puts((&s_x[0]) as u64)
     serial.dec(einheit)
     serial.puts((&s_me[0]) as u64)
-    if g(state, S_MSIX) == MELDE_MSIX {
+    if g(state, S_MSIX) == NOTIFY_MSIX {
         serial.puts((&s_mx[0]) as u64)
-    } else if g(state, S_MSIX) == MELDE_MSI {
+    } else if g(state, S_MSIX) == NOTIFY_MSI {
         serial.puts((&s_ms[0]) as u64)
     } else {
         serial.puts((&s_ix[0]) as u64)
@@ -2504,7 +2021,6 @@ fn port_lines(state: u64, einheit: u64) {
     }
 }
 
-// Der volle Bericht ueber den Regler, der GERADE aufgesetzt ist.
 fn bericht(state: u64) {
     let einheit: u64 = g(state, S_UNIT)
     header_line(state, einheit)
@@ -2513,35 +2029,6 @@ fn bericht(state: u64) {
     port_lines(state, einheit)
 }
 
-// ============ RUNDE BLECH-HID: DIE GEGENPROBE ZUR UEBERNAHME
-//
-// DAS PROBLEM MIT DIESER RUNDE IST, DASS IHR WICHTIGSTER TEIL IN QEMU
-// NICHT VORKOMMT. Weder `qemu-xhci` noch `nec-usb-xhci` traegt einen
-// Legacy-Abschnitt -- beide melden "legsup=KEINE", und die zwanzig
-// Zeilen, an denen auf Justins Brett alles haengt, laufen dort NIE.
-// Eine Runde, die ihren eigenen Kern nicht messen kann, hat nichts
-// vorzuweisen; also wird die Faehigkeitsliste GEBAUT und derselbe
-// Quelltext dagegen gefahren.
-//
-// Was damit wirklich gemessen wird -- und das ist genau der Teil, an
-// dem ein Treiber sich vertut:
-//
-//   * die ZEIGERRECHNUNG. Der Zeiger in HCCPARAMS1 zaehlt DOPPELWORTE
-//     und nicht Oktette, und der Abstand zum naechsten Eintrag ebenso.
-//     Wer einmal mal 4 vergisst, landet im Nichts und findet nie eine
-//     Faehigkeit -- und das sieht auf dem Schirm genauso aus wie ein
-//     Brett ohne Legacy-Abschnitt.
-//   * die BEIDEN FAHNEN. Bit 16 gehoert dem BIOS, Bit 24 dem
-//     Betriebssystem. Wer sie vertauscht, wartet auf sich selbst.
-//   * DER FALL, IN DEM DIE FIRMWARE NICHT LOSLAESST. Ein Speicherwort
-//     antwortet nie -- also ist der Ablauf im Prueffall immer der
-//     harte, und dass er greift, ist die Zusage.
-//   * DER FALL, IN DEM SIE SCHON LOSGELASSEN HAT. Steht Bit 16 nicht,
-//     muss die Uebernahme SOFORT zurueckkommen (0 ms, nicht erzwungen).
-//
-// Der Prueffall wohnt in `SPARE_OFF` -- dem Feld, das der Regler nur
-// braucht, wenn er Kratzbloecke verlangt, und das zu diesem Zeitpunkt
-// noch niemandem gehoert.
 fn legtest(state: u64) {
     var s_a: [u8; 14] = "usbleg: fall \0"
     var s_cap: [u8; 6] = " cap=\0"
@@ -2559,9 +2046,7 @@ fn legtest(state: u64) {
     var s_sch: [u8; 11] = " schlecht=\0"
     let buf: u64 = state + SPARE_OFF
     var gut: u64 = 0
-    var schlecht: u64 = 0
-    // Der gemerkte Zustand des echten Reglers, damit die Probe ihn nicht
-    // verliert -- sie schreibt in dieselben Zellen.
+    var bad: u64 = 0
     let alt_base: u64 = g(state, S_BASE)
     let alt_cap: u64 = g(state, S_LEGCAP)
     let alt_pre: u64 = g(state, S_LEGPRE)
@@ -2572,13 +2057,8 @@ fn legtest(state: u64) {
     var fall: u64 = 0
     while fall < 2 {
         zero(buf, 0x200)
-        // Die Faehigkeitsregister: der Zeiger steht in Doppelworten.
-        // 0x100 Oktette = 0x40 Doppelworte.
         wr32(buf, C_HCCPARAMS1, (0x40 << 16) | 4)
-        // Erster Eintrag bei 0x100: Kennung 2 (Anschlussarten), vier
-        // Doppelworte weiter geht es.
         wr32(buf, 0x100, 2 | (4 << 8))
-        // Zweiter Eintrag bei 0x110: Kennung 1, Ende der Kette.
         var leg: u64 = 1
         if fall == 0 {
             leg = leg | LEG_BIOS
@@ -2592,34 +2072,29 @@ fn legtest(state: u64) {
         let cap: u64 = g(state, S_LEGCAP)
         let post: u64 = g(state, S_LEGPOST)
         let ctl: u64 = rd32(buf, 0x114)
-        var heil: bool = true
+        var intact: bool = true
         if cap != 0x110 {
-            heil = false
+            intact = false
         }
         if (post & LEG_OS) == 0 {
-            heil = false
+            intact = false
         }
         if (post & LEG_BIOS) != 0 {
-            heil = false
+            intact = false
         }
         if !genommen {
-            heil = false
+            intact = false
         }
-        // Die SMI-Freigaben muessen weg und die drei Meldebits
-        // quittiert sein.
         if (ctl & 0x0000E000) != 0 {
-            heil = false
+            intact = false
         }
         if fall == 0 {
-            // Ein Speicherwort laesst nie los: es MUSS erzwungen worden
-            // sein, und es muss die volle Frist gedauert haben.
             if g(state, S_LEGFORCE) != 1 || g(state, S_LEGMS) != LEG_MS {
-                heil = false
+                intact = false
             }
         } else {
-            // Schon frei: sofort zurueck, nichts erzwungen.
             if g(state, S_LEGFORCE) != 0 || g(state, S_LEGMS) != 0 {
-                heil = false
+                intact = false
             }
         }
         serial.puts((&s_a[0]) as u64)
@@ -2647,12 +2122,12 @@ fn legtest(state: u64) {
         serial.puts((&s_ctl[0]) as u64)
         serial.put(120 as u8)
         h(ctl, 8)
-        if heil {
+        if intact {
             serial.puts((&s_ok[0]) as u64)
             gut = gut + 1
         } else {
             serial.puts((&s_bad[0]) as u64)
-            schlecht = schlecht + 1
+            bad = bad + 1
         }
         serial.nl()
         fall = fall + 1
@@ -2660,7 +2135,7 @@ fn legtest(state: u64) {
     serial.puts((&s_sum[0]) as u64)
     serial.dec(gut)
     serial.puts((&s_sch[0]) as u64)
-    serial.dec(schlecht)
+    serial.dec(bad)
     serial.nl()
     zero(buf, 0x200)
     s(state, S_BASE, alt_base)
@@ -2673,11 +2148,6 @@ fn legtest(state: u64) {
 }
 
 // ============================================================ die Uebersicht
-//
-// NUR LESEN. Jeder Regler auf dem Bus, seine Kennung, wem er gehoert und
-// wie seine Anschluesse dastehen -- so, wie die Firmware sie
-// hinterlassen hat. Diese Fassung fasst NICHTS an: sie bildet den
-// Registerbereich ab und liest.
 fn uebersicht(state: u64) {
     var s_n: [u8; 14] = "usb: regler=\0\0"
     var s_hc: [u8; 9] = "usb: hc\0\0"
@@ -2688,9 +2158,9 @@ fn uebersicht(state: u64) {
     var s_bios: [u8; 5] = "BIOS\0"
     var s_frei: [u8; 5] = "frei\0"
     var s_os: [u8; 3] = "OS\0"
-    var s_strom: [u8; 8] = " strom=\0"
+    var s_power: [u8; 8] = " strom=\0"
     var s_ver: [u8; 12] = " verbunden=\0"
-    var s_bad: [u8; 24] = " NICHT ZU ERREICHEN\0\0\0\0\0"
+    var s_bad: [u8; 17] = " UNREACHABLE\0\0\0\0\0"
     let n: u64 = count_hc(state)
     serial.puts((&s_n[0]) as u64)
     serial.dec(n)
@@ -2743,7 +2213,7 @@ fn uebersicht(state: u64) {
                 }
                 p = p + 1
             }
-            serial.puts((&s_strom[0]) as u64)
+            serial.puts((&s_power[0]) as u64)
             serial.dec(mit)
             serial.puts((&s_ver[0]) as u64)
             serial.dec(ver)
@@ -2753,8 +2223,6 @@ fn uebersicht(state: u64) {
     }
 }
 
-// Den Regler wieder anhalten. Wird von der Gegenprobe gerufen, die das
-// Abziehen im Betrieb misst -- und von nichts sonst.
 fn teardown(state: u64) {
     if g(state, S_READY) == 0 {
         return

@@ -1,65 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/usb.fi -- Runde K17: der Kern ueber dem Regler, und die drei
-// Klassen, die ein Rechner wirklich braucht.
-//
-// `xhci.fi` weiss, was ein Steckplatz und ein Endpunkt ist. Diese Datei
-// weiss, was ein GERAET ist -- und das ist etwas anderes: ein Geraet
-// beschreibt sich selbst, und zwar in einer festen Reihenfolge, die man
-// nicht abkuerzen kann.
-//
-//   1. ANSCHLUSS EINSCHALTEN UND ZURUECKSETZEN. Ein USB-2-Geraet meldet
-//      sich erst nach einer Ruecksetzung; ein USB-3-Geraet richtet die
-//      Verbindung selbst ein und ist danach schon freigeschaltet. Beide
-//      Faelle stehen hier, weil `qemu-xhci` beide anbietet -- die
-//      vorderen Anschluesse sind USB 2, die hinteren USB 3.
-//   2. STECKPLATZ ANFORDERN und einen Geraetezusammenhang dafuer
-//      hinterlegen.
-//   3. ADRESSE VERGEBEN. Bis hierher hoert das Geraet auf Adresse 0; der
-//      Befehl `Address Device` gibt ihm eine eigene.
-//   4. DESKRIPTOREN LESEN, und zwar in ZWEI Schritten: erst acht Oktett
-//      des Geraetedeskriptors, weil in Oktett 7 steht, wie gross ein
-//      Paket auf dem Steuerungsendpunkt sein darf -- und ein
-//      langsameres Geraet sagt dort acht, wo der Treiber vierundsechzig
-//      angenommen hat. Dann der ganze.
-//   5. KONFIGURATIONSDESKRIPTOR, auch in zwei Schritten: die ersten neun
-//      Oktett sagen, wie lang das Ganze ist. Darin stehen die
-//      SCHNITTSTELLEN und ihre ENDPUNKTE -- eine Kette von Bloecken
-//      hintereinander, jeder mit seiner Laenge im ersten Oktett.
-//   6. ENDPUNKTE EINRICHTEN (`Configure Endpoint`) und dann
-//      `SET_CONFIGURATION`. In dieser Reihenfolge: der Regler muss die
-//      Bandbreite kennen, bevor das Geraet zu senden anfaengt.
-//   7. TREIBER ZUORDNEN, an der KLASSE der Schnittstelle und an nichts
-//      sonst. Ein Treiber, der an Hersteller- und Geraetenummer haengt,
-//      kennt genau die Geraete, die sein Schreiber besass.
-//
-// DIE TASTATUR UND DIE MAUS MUENDEN IN DEN BESTEHENDEN EINGABEWEG, und
-// das ist woertlich gemeint: der Tastaturtreiber uebersetzt den
-// HID-Gebrauchscode in einen PS/2-ABTASTCODE (Satz 1) und ruft damit
-// `kbd.on_code` -- dieselbe Funktion, die die Unterbrechung von IRQ 1
-// ruft. Es gibt keinen zweiten Weg in die Zeilendisziplin, keinen
-// zweiten Fokus im Fensterserver und keine zweite Tabelle fuer
-// Umschalt und Steuerung. Die Maus baut aus dem HID-Bericht ein
-// PS/2-PAKET und gibt es an `ps2m.usb_packet`. Damit gilt fuer Shell,
-// Fensterserver und Widgets: sie merken nicht, woher die Taste kam --
-// und genau das misst `tools/k17/run.sh`, indem es DENSELBEN Testlauf
-// einmal mit `-device usb-kbd` und einmal mit PS/2 faehrt und die
-// Ausgaben Oktett fuer Oktett vergleicht.
-//
-// DER STICK IST EIN BLOCKGERAET, und auch das ist woertlich gemeint: er
-// haengt als `blk.DEV_USB` an derselben Schnittstelle wie RAM-Platte,
-// ATA und NVMe (`kernel/blk.fi`, Runde 62). `fs.fi`, `vfs.fi` und
-// `fat.fi` aendern dafuer keine Zeile -- dieselbe Zusage wie bei NVMe in
-// Runde K2, und dieselbe Art, sie zu pruefen: das Abbild wird nach dem
-// Lauf VON AUSSEN gelesen.
-//
-// WAS DIESE DATEI NICHT TUT: sie kennt keine HID-Berichtsbeschreibung.
-// Tastatur und Maus laufen im BOOT-PROTOKOLL (`SET_PROTOCOL 0`), in dem
-// das Berichtsformat festgelegt ist -- acht Oktett bei der Tastatur,
-// drei oder vier bei der Maus. Das ist kein Kniff: es ist der Grund,
-// warum jedes BIOS eine USB-Tastatur bedienen kann, ohne einen Zerleger
-// fuer Berichtsbeschreibungen zu haben. Ein Geraet ohne Boot-Protokoll
-// (Schnittstellenunterklasse != 1) wird deshalb ausdruecklich ABGELEHNT
-// und nicht stillschweigend falsch gelesen.
 
 profile kernel
 
@@ -98,113 +36,38 @@ export {
     service_cpus, service_skips, service_seq_jumps, ring_peak_get,
     resume, stage, irq, service, poll, say, report, ready, count,
     msc_ready, msc_blocks, msc_bsize,
-    // RUNDE HOTPLUG-2: dasselbe JE PLATZ. `i` ist der Platz in der
-    // Liste der Massenspeicher und zugleich `blk.DEV_USB0 + i`.
     msc_ready_at, msc_blocks_at, msc_bsize_at, msc_read_at, msc_write_at,
     msc_count, MAX_MSC, msc_sync_at,
     probe, unplug_check, unplug_now, keys, reports, enums, hotplugs, unplugs,
-    // RUNDE HIDWEG: die Zahlen von `hidin`, durch diese Tuer. `kgui`
-    // darf `hidin` NICHT einbinden -- hidin -> gfx -> kgui waere ein
-    // Kreis im Modulgraphen, und der bleibt ein Baum.
     hid_keys, hid_los, hid_bew,
     dev_reps, dev_arms, dev_cc, dev_dci, dev_iface, dev_generic, dev_roh, dev_rohw, dev_rohn,
-    silence_check, wachen, wiedern, kbd_taugt, mouse_works,
+    silence_check, wachen, wiedern, kbd_suitable, mouse_works,
     stat,
     have_kbd, have_mouse, msc_errors, msc_ios, selftest,
-    // RUNDE HOTPLUG: die zwei Flanken des Wechseldatentraegers.
-    msc_gen, msc_weg,
+    msc_gen, msc_gone,
     rangtest, rangtest_max,
-    // RUNDE HIDPUNKTE: die Punktzahl je Regler und die getroffene Wahl.
-    punkte, pkt_get, choice,
+    points, pkt_get, choice,
     DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM, DRV_RNDIS, DRV_NCM, DRV_CH336, DRV_AX88772, DRV_AX88179, DRV_RTL8153, DRV_BT,
-    // ============================== RUNDE BLECHEINGABE
-    // Was der Kern WIRKLICH sieht -- fuer den Bericht auf dem Schirm.
-    // Justin kann nur fotografieren; eine Diagnose auf der seriellen
-    // Leitung ist fuer ihn keine.
     fund_count, fund_port, fund_hub, fund_speed, fund_vid, fund_pid,
     fund_dcls, fund_dsub, fund_dpro, fund_icls, fund_isub, fund_ipro,
     fund_ifaces, fund_flags, fund_driver,
     F_ADDR, F_DESC, F_CFG, F_BOUND,
     hubs, hubports, fails, attached_map,
-    // Die Lampen der Tastatur und der Herzschlag darueber.
     set_leds, led_service, beat_leds, leds_sent, leds_fail, leds_last,
     leds_try, kbd_dev, mouse_dev,
     dev_errs, dev_heal, dev_epstate, dev_slot, dev_intdci, heilungen, ch_diag,
     CK_LIVE, CK_PRESENT, CK_VID, CK_PID, CK_SPEED, CK_ROUTE, CK_NCFG, CK_CFG, CK_RC, CK_CLASS, CK_SUB, CK_PROTO, CK_IFACE, CK_INDCI, CK_OUTDCI, CK_INT, CK_BULKMPS, CK_STEP, CK_RESULT, CK_SET, CK_ALT, CK_ALTSCAN, CK_SETIF,
     without_space,
-    // Aufzaehlen NICHT mehr aus dem Zeitgeber.
     port_watch, hotplug_work, pending,
     // RUNDE BLECHDREI: laeuft gerade eine Aufzaehlung?
     busy
 }
 
-// ---------------------------------------------- der Platz dieser Runde
-//
-// Die zwei Kilooktett hinter dem Kommandoring von `xhci.fi` -- derselbe
-// Vorrat 0x50000..0x58000, kein Byte darueber hinaus.
-
-// RUNDE BLECHEINGABE: die Skalare brauchen 0x180 statt 0x100 (acht
-// neue Zaehler), das Geraetefeld 0x400 statt 0x300 und die Fundliste
-// 0x280. Zusammen 0x800 -- genau der Vorrat 0x51800..0x52000, der
-// zwischen dem Kommandoring (endet 0x51800) und dem Ereignisring
-// (faengt 0x52000 an) liegt. Kein Oktett darueber hinaus.
 const USCAL_OFF: u64 = 0x51800
-// RUNDE BLECHEINGABE: 192 waren voll (D_GENERIC = 184 war das letzte
-// Feld). Ein Geraet hinter einem Hub braucht mehr: den Wegweiser
-// (Route-String), den Steckplatz des Hubs, seinen Anschluss dort, die
-// Zahl der Schnittstellen und ob `SET_CONFIGURATION` quittiert wurde.
-// RUNDE HOTPLUG-2: die alte Rechnung "256 * 4 = 1 KiB" stimmt seit
-// Runde BLECHFUENF nicht mehr -- `DEV_BYTES` ist 384. Das Feld reicht
-// von 0x51980 bis 0x51F80 und hat den Vorrat bis 0x52000 fast auf.
-// Die Fundliste, die frueher auf 0x51D80 mittendrin lag, ist deshalb
-// in die Pufferseite gezogen (siehe FUND_OFF).
-// RUNDE HOTPLUG-2: das Geraetefeld ruecke um 0x80 nach hinten, weil der
-// Skalarvorrat zu klein war. Er reichte von 0x51800 bis hierher, also
-// 0x180 Oktette -- und `S_MSCWEG` steht auf 0x180. Der Zaehler der
-// fallenden Flanke und `dev0.D_USED` (Feldanfang, Offset 0) waren
-// DIESELBE ZELLE: jedes Abziehen schrieb die Belegtmarke des ersten
-// Geraets. Jetzt hat der Vorrat 0x200, und die Liste der
-// Massenspeicher (0x188..0x1A8) liegt sicher darin.
 const UDEV_OFF: u64 = 0x51A00
-const DEV_BYTES: u64 = 384 // RUNDE BLECHFUENF: Platz fuer D_REPS/D_LASTCC/D_ARMS
+const DEV_BYTES: u64 = 384
 const MAX_DEV: u64 = 4
 
-// ================================================ RUNDE BLECHEINGABE
-// ================================ DIE FUNDLISTE, UND WARUM ES SIE GIBT
-//
-// Justin fragt zu Recht als ERSTES: "Sag, WAS DER KERN UEBERHAUPT
-// SIEHT." Bis zu dieser Runde konnte der Kern das nicht sagen. Der
-// Grund steht in `attach`: schlaegt `configure` fehl -- und es schlaegt
-// fehl, sobald KEINE Schnittstelle zu diesem Kern passt --, dann ruft
-// `attach` `drop_dev`, und das Geraet ist SPURLOS weg. Ein Hub (Klasse
-// 09) fiel damit heraus, eine Tastatur mit unbekanntem Aufbau ebenso.
-// Auf dem Bildschirm stand dann "devices=0", und das ist keine Diagnose,
-// sondern ihr Gegenteil.
-//
-// Die Fundliste ist deshalb GETRENNT vom Geraetefeld: hier steht JEDES
-// Geraet, das ueberhaupt geantwortet hat -- mit Anschluss,
-// Geschwindigkeit, Hersteller/Erzeugnis, Klasse des Geraets UND der
-// gewaehlten Schnittstelle, Zahl der Schnittstellen und einer Fahne je
-// Stufe, die geglueckt ist. Sie wird NIE geleert.
-// RUNDE HOTPLUG-2: DIE FUNDLISTE ZOG UM, WEIL SIE UEBERSCHRIEBEN WURDE.
-//
-// Sie lag auf 0x51D80 -- MITTEN IM GERAETEFELD. Der Kommentar bei
-// UDEV_OFF rechnet noch mit 256 Oktett je Geraet; seit Runde BLECHFUENF
-// sind es 384 (`DEV_BYTES`). Damit reicht das Geraetefeld bis 0x51F80
-// und ueberlappt die Fundliste um 512 Oktette. `alloc_dev` nullt
-// `DEV_BYTES` am Stueck, also loeschte
-//   das DRITTE Geraet (dev2) die Fundeintraege 0..1,
-//   das VIERTE  (dev3) die Fundeintraege 2..7.
-// Gemerkt hat es niemand, weil bis heute selten vier USB-Geraete
-// zugleich steckten -- ZWEI STICKS plus Hub plus Tastatur sind genau
-// vier. Der Fehler ist AELTER als diese Runde; gefunden hat ihn die
-// Bestandsaufnahme, nicht ein Absturz.
-//
-// Sie liegt jetzt hinter dem Hub-Puffer in der Pufferseite: `HUB_OFF`
-// braucht 40 Oktette (Deskriptor + Anschlusszustand bei +32), der Rest
-// der Seite bis 0x57000 war unbenutzt. Der Skalarvorrat
-// 0x51800..0x52000 gehoert damit allein den Skalaren und dem
-// Geraetefeld.
 const FUND_OFF: u64 = 0x56700
 const FUND_BYTES: u64 = 64
 const MAX_FUND: u64 = 10
@@ -214,24 +77,19 @@ const F_PORT: u64 = 8 // Wurzelanschluss | Hubanschluss << 8
 const F_SPEED: u64 = 16
 const F_ID: u64 = 24 // VID << 16 | PID
 const F_DCLS: u64 = 32 // Geraeteklasse << 16 | Unterklasse << 8 | Protokoll
-const F_ICLS: u64 = 40 // dasselbe fuer die GEWAEHLTE Schnittstelle
-const F_IFACES: u64 = 48 // wie viele Schnittstellen die Konfiguration hat
-const F_FLAGS: u64 = 56 // welche Stufe geglueckt ist, plus der Treiber
+const F_ICLS: u64 = 40
+const F_IFACES: u64 = 48
+const F_FLAGS: u64 = 56
 
-// Die Stufen. Justin sieht auf dem Schirm, WIE WEIT ein Geraet kam.
 const F_ADDR: u64 = 1 // `Address Device` quittiert
 const F_DESC: u64 = 2 // Geraetedeskriptor gelesen
 const F_CFG: u64 = 4 // SET_CONFIGURATION quittiert
-const F_BOUND: u64 = 8 // ein Treiber hat es genommen
+const F_BOUND: u64 = 8
 
-// Der Hub-Deskriptor und die Anschlusszustaende dahinter.
 const HUB_OFF: u64 = 0x56600
 
-// Die Puffer, die ein GERAET beschreibt. Sie liegen in `kdata`, weil der
-// Regler sie ueber den Bus erreicht und der Haldenallokator nichts
-// darueber verspricht, wo etwas liegt.
 const DESC_OFF: u64 = 0x56000 // Deskriptoren, 512
-const REPORT_OFF: u64 = 0x56200 // vier Berichte zu 64
+const REPORT_OFF: u64 = 0x56200
 const CBW_OFF: u64 = 0x56300 // der Befehlsblock, 64
 const CSW_OFF: u64 = 0x56340 // die Quittung, 64
 const BLK_OFF: u64 = 0x56400 // ein Datenblock, 512
@@ -241,14 +99,6 @@ const S_NDEV: u64 = 0x08
 const S_ENUMS: u64 = 0x10
 const S_KBD: u64 = 0x18 // Platz + 1, 0 = keine
 const S_MOUSE: u64 = 0x20
-// 0x28 war `S_MSC`, die EINE Zelle fuer den einen Massenspeicher.
-// Seit HOTPLUG-2 steht die Liste auf 0x188 (siehe `S_MSCTAB`), weil
-// hier zwischen 0x28 und `S_TAG` (0x40) nur drei Plaetze frei waren
-// und ein vierter `S_TAG` ueberschrieben haette -- die Laufnummer des
-// Bulk-Only-Transports, also ausgerechnet die Zahl, an der jede
-// Quittung haengt.
-// 0x30 und 0x38 gehoeren seit HOTPLUG-2 zur Liste oben (Platz 1 und 2).
-// Die Groesse steht je Geraet in `D_MSCBLK`/`D_MSCBS`.
 const S_TAG: u64 = 0x40
 const S_REPORTS: u64 = 0x48
 const S_KEYS: u64 = 0x50
@@ -258,17 +108,14 @@ const S_HOTPLUGS: u64 = 0x68
 const S_MSCERR: u64 = 0x70
 const S_MSCIO: u64 = 0x78
 const S_FAILS: u64 = 0x80
-const S_ATTACHED: u64 = 0x88 // Bitkarte der Anschluesse mit Geraet
+const S_ATTACHED: u64 = 0x88
 const S_NOHID: u64 = 0x90
 const S_NOMSC: u64 = 0x98
-const S_LASTDATA: u64 = 0xA0 // Oktette im Datenteil der letzten BOT-Runde
-const S_GEN: u64 = 0xA8 // 1 = der generische Weg ist erlaubt (Modus `hid`)
-const S_GENDEV: u64 = 0xB0 // wie viele Geraete wirklich darueber laufen
-const S_RDFAIL: u64 = 0xB8 // Beschreibung nicht zu holen/zu zerlegen
+const S_LASTDATA: u64 = 0xA0
+const S_GEN: u64 = 0xA8
+const S_GENDEV: u64 = 0xB0
+const S_RDFAIL: u64 = 0xB8
 const S_RDLEN: u64 = 0xC0 // Oktette der zuletzt geholten Beschreibung
-// RUNDE BLECH-HID: 1, solange DIESER Baum selbst aufzaehlt. Siehe
-// `unplug_check` -- der Zeitgeber darf dem Aufzaehlen nicht ins Wort
-// fallen.
 const S_BUSY: u64 = 0xC8
 // RUNDE BLECHEINGABE.
 const S_FUNDN: u64 = 0xF8 // Eintraege in der Fundliste
@@ -277,85 +124,29 @@ const S_HUBPORTS: u64 = 0x108 // Anschluesse hinter allen Hubs zusammen
 const S_LEDS: u64 = 0x110 // was zuletzt an die Tastatur ging
 const S_LEDOK: u64 = 0x118 // erfolgreiche SET_REPORT
 const S_LEDBAD: u64 = 0x120 // fehlgeschlagene
-const S_PEND: u64 = 0x128 // Bitkarte der Anschluesse mit offenem Wechsel
+const S_PEND: u64 = 0x128
 const S_HUBDUE: u64 = 0xD8
 const S_HUBTRY: u64 = 0xE0
 const S_HUBHITS: u64 = 0xE8
 const HUB_TRY_MAX: u64 = 48
-const S_PENDN: u64 = 0x130 // wie oft der Zeitgeber einen Wechsel sah
-const S_LEDHERZ: u64 = 0x138 // die Lampe, die der Herzschlag gerade legt
-// RUNDE BLECHZWEI: wie oft es VERSUCHT wurde. `LED 0` allein sagt
-// nicht, ob es keine Tastatur gab oder ob der Steuertransfer
-// scheiterte -- das sind zwei verschiedene Fehler.
+const S_PENDN: u64 = 0x130
+const S_LEDHERZ: u64 = 0x138
 const S_LEDTRY: u64 = 0x140
-// 1, solange ein SET_REPORT laeuft. Der Zeitgeber und die
-// Schreibtischschleife greifen sonst gleichzeitig auf den
-// Steuerungsring desselben Steckplatzes zu.
 const S_LEDBUSY: u64 = 0x148
-// ============================================== RUNDE STARTKNOPF
-// Wie oft ein Unterbrechungsendpunkt wiederbelebt werden musste.
 const S_HEAL: u64 = 0x150
-// 1, solange `service` laeuft. Die Wiederbelebung eines Endpunkts
-// wartet auf Antworten des Reglers; faellt in diese Wartezeit eine
-// zweite Meldung, stuenden zwei Durchlaeufe auf demselben Ring.
 const S_SVCBUSY: u64 = 0x158
-// RUNDE ECHTHARDWARE-6: wie oft der Wachhund nachgesehen hat.
 const S_WACHN: u64 = 0x168
 const S_WIEDERN: u64 = 0x170 // neu bestueckte stumme Endpunkte
 
-// ====================================== RUNDE HOTPLUG
-// DIE ZAEHLER, AN DENEN EIN ANDERER DIE FLANKE SIEHT.
-//
-// Dieser Baum darf NICHTS von Partitionen, Dateisystemen und Pfaden
-// wissen -- `tools/k17/run.sh`, Abschnitt 1, misst genau das, und der
-// Kopf dieser Datei sagt seit Runde K17, warum. Der Stick ist hier ein
-// BLOCKGERAET und sonst nichts.
-//
-// Damit trotzdem jemand merken kann, DASS einer gekommen oder gegangen
-// ist, zaehlt dieser Baum zwei Flanken mit -- zwei Zahlen, mehr nicht.
-// Wer sie liest (`kernel/kgui.fi`, die Schreibtischschleife), vergleicht
-// sie mit dem, was er beim letzten Blick gesehen hat, und macht die
-// Arbeit selbst. Das ist derselbe Griff, mit dem `port_watch` und
-// `hotplug_work` zusammenarbeiten: der eine merkt, der andere handelt.
-//
-// WARUM NICHT EIN RUECKRUF: ein Funktionszeiger aus `usb.fi` in eine
-// Schicht darueber waere derselbe Kreis im Modulgraphen, nur
-// verschleiert. Eine Zahl kennt niemanden.
-const S_MSCGEN: u64 = 0x178 // +1, sobald ein Massenspeicher bereit ist
-const S_MSCWEG: u64 = 0x180 // +1, sobald einer verschwunden ist
+const S_MSCGEN: u64 = 0x178
+const S_MSCWEG: u64 = 0x180
 
-// ===================================== RUNDE HOTPLUG-2
-// DIE LISTE DER MASSENSPEICHER, und warum sie eine Liste ist.
-//
-// Vier Plaetze zu 8 Oktett, 0x188..0x1A8. `S_MSCTAB + n * 8` haelt
-// `Geraetenummer + 1` des n-ten Massenspeichers, 0 = frei. Der Platz n
-// ist die Nummer, die nach aussen geht: `blk.DEV_USB0 + n`.
-//
-// WARUM DER PLATZ UND NICHT DIE GERAETENUMMER nach aussen geht: die
-// Geraetenummer ist ein Platz im USB-Geraetefeld und wird nach dem
-// Abziehen sofort wieder vergeben (`alloc_dev` nimmt den ersten
-// freien). Wer zwei Sticks steckt, einen abzieht und einen neuen
-// steckt, bekaeme sonst fuer den neuen Stick die Nummer des alten --
-// und `wechsel.fi` haelt die Einhaengung an genau dieser Nummer fest.
-// Der Platz in DIESER Liste wird dagegen erst frei, wenn der
-// Massenspeicher geht, und `blk.fi` kennt nur ihn.
 const S_MSCTAB: u64 = 0x188
 const MAX_MSC: u64 = 4
-// Wie oft `alloc_dev` leer war -- ein Geraet, fuer das kein Platz mehr
-// da ist, verschwindet sonst spurlos. Justins Brett meldet FUND 5 bei
-// MAX_DEV 4; ob das je angeschlagen hat, stand nirgends.
 const S_NOPLATZ: u64 = 0x160
 
-// RUNDE HIDPUNKTE: DIE PUNKTZAHL JE REGLER, und sie ist der ganze
-// Unterschied zwischen "Justin kann tippen" und "Justin kann nicht
-// tippen". Bis zu dieser Runde gewann der ERSTE Regler, an dem
-// IRGENDEIN Eingabegeraet hing. Auf Justins Brett haengt an hc0 ein
-// Stick und ein HID OHNE Boot-Protokoll (Kingston 0951:16df), an hc1
-// seine Tastatur und seine Maus -- und damit gewann hc0 mit einem
-// Geraet, das keine Taste liefert, waehrend hc1 nie aufgesetzt wurde.
-// Gemessen und nachgestellt in `tools/hidpunkte/run.sh`.
-const S_PKT: u64 = 0xD0 // vier Regler zu 8 Oktett: 0xD0..0xF0
-const S_WAHL: u64 = 0xF0 // welcher Regler behalten wurde
+const S_PKT: u64 = 0xD0
+const S_CHOICE: u64 = 0xF0 // welcher Regler behalten wurde
 const MAX_HC_PKT: u64 = 4
 
 const D_USED: u64 = 0
@@ -380,101 +171,37 @@ const D_MPS0: u64 = 144
 const D_INTMPS: u64 = 152
 const D_INTIVL: u64 = 160
 const D_BULKMPS: u64 = 168
-// RUNDE HID: die Laenge der Berichtsbeschreibung, wie der HID-Deskriptor
-// (Art 0x21) sie ansagt, und ob dieses Geraet ueber den Zerleger laeuft.
 const D_RDLEN: u64 = 176
 const D_GENERIC: u64 = 184
-// RUNDE BLECHEINGABE: alles, was ein Geraet HINTER EINEM HUB braucht.
-const D_ROUTE: u64 = 192 // der Wegweiser, 20 Bit, 0 = direkt am Wurzelanschluss
-const D_PARENT: u64 = 200 // Steckplatz des Hubs davor, 0 = keiner
+const D_ROUTE: u64 = 192
+const D_PARENT: u64 = 200
 const D_HUBPORT: u64 = 208 // Anschluss AN DIESEM Hub, 0 = Wurzel
-const D_PORTS: u64 = 216 // ein Hub: wie viele Anschluesse er hat
+const D_PORTS: u64 = 216
 const D_IFACES: u64 = 224 // Schnittstellen der Konfiguration
-const D_FUND: u64 = 232 // Platz in der Fundliste + 1
-const D_TTSLOT: u64 = 240 // Steckplatz des Uebersetzers (TT), 0 = keiner
+const D_FUND: u64 = 232
+const D_TTSLOT: u64 = 240
 const D_TTPORT: u64 = 248
-// ============================================ RUNDE BLECHFUENF
-// WAS JEDES GERAET FUER SICH GEMELDET HAT.
-//
-// Justins Tafel sagt "KBD 2 TAS 0": eine Tastatur ist da, und keine
-// Taste kommt an. Damit ist NICHT entschieden, ob der
-// Unterbrechungstransfer der Tastatur ueberhaupt fertig wird -- die
-// Zahl `ber=` ist die SUMME ueber alle Geraete, und die Maus allein
-// hat davon 6186 von 6188. Zwei Geraete in einem Zaehler sind eine
-// Zahl ohne Aussage.
-//
-// Ab hier zaehlt JEDES Geraet fuer sich, und der zuletzt empfangene
-// Bericht steht in den ersten acht Oktett auf der Tafel. Damit
-// entscheidet EIN Foto die Frage: aendern sich die Oktett, wenn Justin
-// eine Taste drueckt, kommt der Bericht an und der Zerleger ist
-// schuld. Bleiben sie stehen, kommt gar nichts an.
 const D_REPS: u64 = 256 // fertige Unterbrechungstransfers dieses Geraets
-const D_LASTCC: u64 = 264 // der letzte Fertigmeldungscode
-const D_ARMS: u64 = 272 // wie oft ein Block auf den Ring gelegt wurde
-// ============================================== RUNDE STARTKNOPF
-// FEHLER UND WIEDERBELEBUNGEN, JE GERAET.
+const D_LASTCC: u64 = 264
+const D_ARMS: u64 = 272
 const D_ERRS: u64 = 280 // Transfers mit schlechtem Fertigmeldungscode
-const D_HEAL: u64 = 288 // wie oft der Endpunkt wiederbelebt wurde
-// ====================================================== RUNDE VIELKERN
-// DER LETZTE BERICHT, DER NICHT LEER WAR -- UND WARUM DAS DER
-// UNTERSCHIED ZWISCHEN EINEM MESSGERAET UND EINER NULL IST.
-//
-// `dev_roh` las bisher den DMA-Puffer, also das, was die Karte ZULETZT
-// hineingeschrieben hat. Eine USB-Tastatur im Boot-Protokoll schickt
-// beim LOSLASSEN einen Bericht aus acht Nullen. Nach jedem normalen
-// Tastendruck steht dort also 0000000000000000 -- die Tafel zeigte
-// getreulich den Zustand "gerade wird keine Taste gehalten".
-//
-// Damit war die Zeile genau dann leer, wenn man sie liest, und Justins
-// Anleitung dazu lautete folgerichtig "eine Taste druecken und HALTEN,
-// dann fotografieren". Ein Messgeraet, das eine dritte Hand braucht,
-// ist keins. Gemerkt wird deshalb der letzte Bericht, der NICHT nur
-// Nullen war, und wie viele davon es gab.
-const D_ROHW: u64 = 296 // die ersten acht Oktett, als ein Wort
-const D_ROHN: u64 = 304 // wie viele nicht-leere Berichte es gab
-// RUNDE ECHTHARDWARE-6: der letzte Stand von D_REPS, den der Wachhund
-// gesehen hat. Bewegt er sich zwischen zwei Blicken nicht, wird einmal
-// nachgesehen. Siehe `stille_pruefen`.
+const D_HEAL: u64 = 288
+const D_ROHW: u64 = 296
+const D_ROHN: u64 = 304
 const D_WACH: u64 = 312
-// RUNDE ECHTHARDWARE-6: wie viele Blicke lang dieses Geraet noch KEINEN
-// einzigen Bericht geliefert hat, und wie oft sein Ring deshalb neu
-// bestueckt wurde.
 const D_STUMM: u64 = 320
 const D_AGAIN: u64 = 328
 
-// ===================================== RUNDE HOTPLUG-2
-// DIE GROESSE DES STICKS GEHOERT ZUM STICK, NICHT ZUM BAUM.
-//
-// Bis zu dieser Runde standen Bloecke und Blockgroesse in den Skalaren
-// (`S_BLOCKS`, `S_BSIZE`) -- also EINMAL fuer den ganzen Rechner. Beim
-// zweiten Stick ueberschrieb `msc_start` die Zahlen des ersten, und
-// `blk.blocks_on` haette danach fuer BEIDE die Groesse des zuletzt
-// gesteckten gemeldet. Das ist der Grund, warum die Vorrunde den
-// zweiten Stick lieber abgelehnt hat.
-//
-// Hier ist Platz: 384 Oktett je Geraet, benutzt waren 336.
 const D_MSCBLK: u64 = 336 // Bloecke dieses Massenspeichers
 const D_MSCBS: u64 = 344 // Oktette je Block (immer 512, sonst abgelehnt)
-// Vier Blicke je Sekunde -> rund fuenf Sekunden Stille.
-const WACH_GRENZE: u64 = 20
+const WATCH_LIMIT: u64 = 20
 const AGAIN_MAX: u64 = 3
 
 const DRV_NONE: u64 = 0
 const DRV_KBD: u64 = 1
 const DRV_MOUSE: u64 = 2
 const DRV_MSC: u64 = 3
-// RUNDE HID: eine HID-Schnittstelle OHNE Boot-Protokoll. Was sie ist --
-// Tastatur, Maus, Touchpad -- steht nicht in ihrer Klasse, sondern in
-// ihrer Berichtsbeschreibung; entschieden wird deshalb erst in
-// `hid_start`, nachdem die geholt und zerlegt ist.
 const DRV_HIDGEN: u64 = 4
-// RUNDE BLECHEINGABE: der Hub. `grep -i hub kernel/usb.fi kernel/xhci.fi`
-// hatte bis zu dieser Runde NULL Treffer -- der Kern sah ausschliesslich
-// Geraete, die DIREKT an einem Wurzelanschluss hingen. Auf einem
-// heutigen Brett haengen die hinteren Buchsen regelmaessig an internen
-// Hubs, und eine Spieletastatur bringt oft ihren eigenen mit
-// (Durchschleifbuchse). Das ist die Zeile zwischen "startet auf einem
-// Rechner" und "startet auf DIESEM Rechner".
 const DRV_HUB: u64 = 5
 // L-015: CDC-ECM network function (USB tethering, QEMU usb-net CDC config).
 const DRV_ECM: u64 = 6
@@ -517,24 +244,17 @@ const D_MACSTR: u64 = 360 // ECM: string index of the MAC address
 const D_DATAIF: u64 = 368 // ECM: number of the data interface (union descriptor)
 const D_DATAALT: u64 = 376 // ECM: alternate setting that carries the bulk pipes
 
-// Die Standardanforderungen. Sie stehen im Kapitel 9 der Spezifikation
-// und in jedem Geraet der Welt gleich.
 const REQ_GET_DESCRIPTOR: u64 = 6
 const REQ_SET_CONFIGURATION: u64 = 9
 const REQ_CLEAR_FEATURE: u64 = 1
 const REQ_SET_FEATURE: u64 = 3
 const REQ_GET_STATUS: u64 = 0
-// RUNDE BLECHEINGABE: der Ausgabebericht. DAS ist die Anforderung, die
-// eine Lampe an einer Tastatur umschaltet, und sie fehlte in diesem
-// Baum vollstaendig.
 const REQ_SET_REPORT: u64 = 9
 const D_DEVICE: u64 = 1
 const D_CONFIGURATION: u64 = 2
-// Der Hub-Deskriptor: 0x29 fuer USB 2, 0x2A fuer SuperSpeed.
 const D_HUB: u64 = 0x29
 const D_HUB_SS: u64 = 0x2A
 
-// Die Anschlussmerkmale eines Hubs (USB 2.0, Tabelle 11-17).
 const PF_ENABLE: u64 = 1
 const PF_RESET: u64 = 4
 const PF_POWER: u64 = 8
@@ -610,14 +330,11 @@ fn msc_ios(state: u64) -> u64 {
     return g(state, S_MSCIO)
 }
 
-// RUNDE HOTPLUG: wie oft ein Massenspeicher BEREIT geworden ist, und
-// wie oft einer verschwunden ist. Beide Zahlen laufen nur nach oben;
-// wer sie liest, merkt sich seinen letzten Stand.
 fn msc_gen(state: u64) -> u64 {
     return g(state, S_MSCGEN)
 }
 
-fn msc_weg(state: u64) -> u64 {
+fn msc_gone(state: u64) -> u64 {
     return g(state, S_MSCWEG)
 }
 
@@ -666,10 +383,6 @@ fn stage(state: u64) {
         serial.nl()
         return
     }
-    // RUNDE HOTPLUG-2: 0x200 statt 256. Geloescht wurden bisher nur
-    // 0x000..0x0FF -- alles ab `S_HUBS` (0x100) ueberlebte eine neue
-    // Aufzaehlung, darunter `S_MSCGEN`/`S_MSCWEG`, an denen die
-    // Schicht darueber ihre Flanken misst.
     zero(state + USCAL_OFF, 0x200)
     zero(state + UDEV_OFF, MAX_DEV * DEV_BYTES)
     if kstate.mode_on(state, kstate.M_NOHID) {
@@ -684,19 +397,11 @@ fn stage(state: u64) {
     if kstate.mode_on(state, kstate.M_USBISOC) {
         s(state, S_ISOOK, 1)
     }
-    // RUNDE HID: der generische Weg. `nohidrep` ist die GEGENPROBE --
-    // damit laeuft alles wie vor dieser Runde, im Boot-Protokoll, und
-    // ein Geraet ohne Boot-Protokoll wird wieder abgelehnt. Der
-    // Unterschied zwischen den beiden Laeufen ist die ganze Runde.
     if kstate.mode_on(state, kstate.M_HID)
         && !kstate.mode_on(state, kstate.M_NURBOOT) {
         s(state, S_GEN, 1)
     }
     hidin.stage(state)
-    // RUNDE HIDWEG: die Rangfolge der Schnittstellen, gemessen an einem
-    // gebauten Deskriptor. Steht hier und nicht in einem eigenen
-    // Menueeintrag, weil sie keinen Regler braucht und weil die Zahl
-    // damit auf JEDEM Foto steht, auf dem `usb:` steht.
     var s_rang: [u8; 15] = "usb: rang ok=\0\0"
     var s_von2: [u8; 4] = " / \0"
     serial.puts((&s_rang[0]) as u64)
@@ -707,8 +412,6 @@ fn stage(state: u64) {
     if kstate.mode_on(state, kstate.M_NOMSC) {
         s(state, S_NOMSC, 1)
     }
-    // DIE GEGENPROBE, die alles fallen laesst: kein Regler, kein Kern,
-    // keine Klasse. Jede Zusage dieser Runde MUSS damit zusammenbrechen.
     if kstate.mode_on(state, kstate.M_NOUSB) {
         serial.puts((&s_off[0]) as u64)
         serial.nl()
@@ -721,42 +424,13 @@ fn stage(state: u64) {
     }
     let armed: bool = !kstate.mode_on(state, kstate.M_NOUSBIRQ)
     // ================================= RUNDE BLECH-HID: JEDER REGLER
-    //
-    // Bis hierher wurde GENAU EINER aufgesetzt, und zwar der erste, den
-    // `pci.find_class` fand. Auf Justins Brett sind es zwei
-    // (1022:43d5 und 1022:149c), und niemand kann wissen, an welchem
-    // seine Tastatur steckt. Also werden sie der Reihe nach probiert,
-    // und der ERSTE, an dem ein Eingabegeraet haengt, bleibt stehen.
-    //
-    // WARUM NICHT BEIDE GLEICHZEITIG: der Vorrat dieses Treibers
-    // (0x50000..0x58000, Ringe, Zusammenhaenge, Endpunkttafel) ist
-    // EINMAL da. Zwei Regler gleichzeitig zu fahren hiesse, ihn zu
-    // verdoppeln -- eine eigene Runde. Was diese Runde tut, ist das,
-    // was den Unterschied zwischen "gar keine Eingabe" und "Eingabe"
-    // ausmacht; und der Bericht sagt fuer JEDEN Regler, was an seinen
-    // Anschluessen steht, damit ein Mensch Tastatur und Maus notfalls
-    // an denselben stecken kann.
     chdiag.arm(state)
     usbdiag.reset_all()
-    let anzahl: u64 = xhci.count_hc(state)
-    // ================================= RUNDE HIDPUNKTE: DER BESTE, NICHT DER ERSTE
-    //
-    // JEDER Regler wird aufgesetzt und aufgezaehlt, und JEDER bekommt
-    // eine Punktzahl (`punkte`). Danach wird der BESTE noch einmal
-    // aufgesetzt und bleibt stehen. Das kostet auf einer Maschine mit
-    // zwei Reglern ein zusaetzliches Aufsetzen (etwa 300 ms) und ist
-    // der Unterschied zwischen einer toten und einer lebenden Tastatur.
-    //
-    // WARUM NICHT BEIDE GLEICHZEITIG: der Vorrat dieses Treibers
-    // (0x50000..0x58000, Ringe, Zusammenhaenge, Endpunkttafel) ist
-    // EINMAL da; zwei Regler gleichzeitig zu fahren hiesse, ihn zu
-    // verdoppeln und jeden Zugriff reglerrelativ zu machen -- eine
-    // eigene Runde. Was DIESE Runde leistet, ist, dass der Regler mit
-    // der Tastatur gewinnt und nicht der mit dem Stick.
+    let cur_count: u64 = xhci.count_hc(state)
     var u: u64 = 0
     var bester: u64 = 0
     var bestp: u64 = 0
-    while u < anzahl && u < MAX_HC_PKT {
+    while u < cur_count && u < MAX_HC_PKT {
         let p: u64 = versuch(state, u, armed)
         pkt_set(state, u, p)
         if p > bestp {
@@ -765,18 +439,13 @@ fn stage(state: u64) {
         }
         u = u + 1
     }
-    // Der beste wird noch einmal aufgesetzt -- ausser er war ohnehin
-    // der letzte, dann steht er schon.
-    let letzter: u64 = anzahl - 1
-    if anzahl > 0 && bester != letzter {
-        let _wieder: u64 = versuch(state, bester, armed)
+    let last: u64 = cur_count - 1
+    if cur_count > 0 && bester != last {
+        let _again: u64 = versuch(state, bester, armed)
     }
-    s(state, S_WAHL, bester)
+    s(state, S_CHOICE, bester)
     usbdiag.set_choice(bester)
     usbdiag.set_t0(kstate.get(state, kstate.TICKS) + 1)
-    // EINE ZEILE FUER EIN FOTO: welcher Regler wie viele Punkte hatte
-    // und welcher gewonnen hat. Ohne sie ist "die Tastatur geht nicht"
-    // nicht von "die Tastatur haengt am anderen Regler" zu trennen.
     var s_w1: [u8; 11] = "usb: wahl \0"
     var s_w2: [u8; 3] = "hc\0"
     var s_w3: [u8; 2] = "=\0"
@@ -784,7 +453,7 @@ fn stage(state: u64) {
     var s_w5: [u8; 2] = "c\0"
     serial.puts((&s_w1[0]) as u64)
     var v: u64 = 0
-    while v < anzahl && v < MAX_HC_PKT {
+    while v < cur_count && v < MAX_HC_PKT {
         serial.puts((&s_w2[0]) as u64)
         serial.dec(v)
         serial.puts((&s_w3[0]) as u64)
@@ -839,8 +508,6 @@ fn usbdiag_close(state: u64, h: u64) {
     usbdiag.set_info(h, usbdiag.I_PENDING, pend)
 }
 
-// EIN REGLER: aufsetzen, Anschluesse einschalten, aufzaehlen, berichten.
-// Gibt zurueck, ob an ihm eine Tastatur oder eine Maus haengt.
 fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
     var s_fail: [u8; 22] = "usb: init fehlt hc\0\0\0\0"
     var s_hc: [u8; 12] = "usb: xhci \0\0"
@@ -849,9 +516,6 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
     var s_ctx: [u8; 7] = "  ctx=\0"
     var s_msix: [u8; 7] = "  irq=\0"
     var s_hcn: [u8; 6] = "  hc=\0"
-    // Der Regler, der vorher lief, wird ANGEHALTEN, bevor der naechste
-    // aufgesetzt wird -- sonst liest ein laufender Regler weiter aus
-    // Ringen, die gleich neu beschrieben werden.
     xhci.teardown(state)
     chdiag.bump(state, chdiag.F_PASSES)
     chdiag.set64(state, chdiag.F_UNIT, einheit)
@@ -861,7 +525,6 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
     s(state, S_NDEV, 0)
     s(state, S_KBD, 0)
     s(state, S_MOUSE, 0)
-    // RUNDE HOTPLUG-2: die ganze Liste leeren, nicht die eine Zelle.
     var mi: u64 = 0
     while mi < MAX_MSC {
         msc_slot_set(state, mi, 0)
@@ -873,9 +536,6 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
         serial.puts((&s_fail[0]) as u64)
         serial.dec(einheit)
         serial.nl()
-        // Auch ein Regler, der sich nicht aufsetzen laesst, bekommt
-        // seine Zeile im Bericht -- sonst ist "nichts passiert" von
-        // "es gibt ihn nicht" nicht zu unterscheiden.
         return 0
     }
     serial.puts((&s_hc[0]) as u64)
@@ -896,19 +556,9 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
     usbdiag_close(state, einheit)
     xhci.bericht(state)
     say(state)
-    return punkte(state)
+    return points(state)
 }
 
-// Alle Anschluesse einschalten und dann durchsehen. In zwei Durchgaengen,
-// weil ein Anschluss nach dem Einschalten der Versorgung einen
-// Augenblick braucht, bevor er eine Verbindung meldet -- und ein
-// Treiber, der beides in einer Schleife tut, findet das erste Geraet
-// und das zweite nicht.
-// Enumeration trace: "usb: t <step> <value>" on the serial line, one line per step.
-// Steps: 1 scan power on, 2 power done (ports with PP), 3 port connected (port),
-// 4 port reset ok (speed), 5 port reset failed (portsc), 6 slot enabled (slot),
-// 7 slot enable failed, 8 address ok, 9 address failed (cc), 10 descriptor ok,
-// 11 descriptor failed, 12 configure ok, 13 configure failed, 14 second pass.
 fn tr(state: u64, step: u64, v: u64) {
     usbdiag.step(step, v)
     if !kstate.mode_on(state, kstate.M_USBTRACE) {
@@ -971,26 +621,8 @@ fn probe(state: u64) {
 
 fn scan(state: u64) {
     // ============================================= RUNDE BLECH-HID
-    //
-    // WARUM HIER EIN SCHLOSS STEHT. Seit dieser Runde WARTET das
-    // Aufzaehlen wirklich -- zweihundert Millisekunden, bis an den
-    // Anschluessen Spannung steht. In dieser Zeit laeuft der Zeitgeber,
-    // und der ruft viermal je Sekunde `unplug_check`. Der sieht
-    // Anschluesse mit gesetztem Aenderungsbit, findet sie nicht in der
-    // Bitkarte -- und zaehlt drei ANSTECKUNGEN IM BETRIEB fuer
-    // Tastatur, Maus und Stick, die von Anfang an steckten.
-    //
-    // `tools/k17/run.sh` hat genau das gemeldet ("Anstecken im Betrieb
-    // im Regellauf (darf nicht anschlagen): 3"), und die Zusage hat
-    // recht: ein Zaehler, der ohne Stecker hochlaeuft, ist Rauschen.
-    // Waehrend der Baum SELBST aufzaehlt, faehrt ihm der Zeitgeber
-    // nicht dazwischen.
     s(state, S_BUSY, 1)
     let n: u64 = xhci.ports(state)
-    // RUNDE BLECH-HID: einschalten UND warten, bis wirklich Spannung
-    // ansteht. `power_all` gibt zurueck, an wie vielen Anschluessen PP
-    // danach steht -- das ist die Zahl, an der eine Maus, die nicht
-    // leuchtet, abzulesen ist.
     tr(state, 1, n)
     let _mit: u64 = xhci.power_all(state)
     tr(state, 2, _mit)
@@ -1008,23 +640,6 @@ fn scan(state: u64) {
         }
         p = p + 1
     }
-    // ZWEITER DURCHGANG -- UND NUR, WENN DER ERSTE NICHTS FAND.
-    //
-    // Ein Geraet mit langsamem Netzteil meldet sich spaeter, als der
-    // Regler antwortet, und beim Start sammelt niemand nach. Also wird
-    // noch einmal nachgesehen.
-    //
-    // ABER NUR ALS RUECKFALL, und das ist gemessen: der zweite Durchgang
-    // wartet dreihundert Millisekunden, und in dieser Zeit laeuft der
-    // Zeitgeber, der `unplug_check` ruft. Der sieht einen Anschluss mit
-    // gesetztem Aenderungsbit, findet ihn nicht in der Bitkarte und
-    // zaehlt ein ANSTECKEN IM BETRIEB. `tools/k17/run.sh` hat genau das
-    // gemeldet ("Anstecken im Betrieb im Regellauf (darf nicht
-    // anschlagen): 1") -- und die Zusage hat recht: in einem Lauf, in
-    // dem niemand etwas ansteckt, darf der Zaehler nicht anschlagen.
-    // Wurde beim ersten Mal etwas gefunden, ist die Wartezeit ohnehin
-    // ueberfluessig; auf Justins Brett, wo nichts gefunden wurde, ist
-    // sie der ganze Zweck.
     var late: bool = false
     p = 1
     while p <= n {
@@ -1050,10 +665,6 @@ fn scan(state: u64) {
             p = p + 1
         }
     }
-    // Und jetzt darf der Zeitgeber wieder. Die Aenderungsbits der
-    // eigenen Aufzaehlung sind quittiert (`port_reset` ->
-    // `port_clear_changes`); was von hier an anschlaegt, hat wirklich
-    // jemand gesteckt.
     s(state, S_BUSY, 0)
     if kstate.mode_on(state, kstate.M_USBSTALL) {
         stall_test(state)
@@ -1123,36 +734,13 @@ fn mps0_of(speed: u64) -> u64 {
     if speed >= 4 {
         return 512 // Super und darueber
     }
-    return 8 // voll und langsam
+    return 8
 }
-
-// ------------------------------------------------- ein Geraet aufnehmen
 
 fn attach(state: u64, port: u64) -> bool {
     return attach_at(state, port, 0, MAX_DEV, 0, false, 0)
 }
 
-// ================================================ RUNDE BLECHEINGABE
-// EIN GERAET AUFNEHMEN -- AM WURZELANSCHLUSS ODER HINTER EINEM HUB.
-//
-// `rootport` ist IMMER der Anschluss am Regler; `route` ist der
-// Wegweiser (xHCI 1.2, 4.5.2: fuenf Nibbles, eines je Etage), `hubdev`
-// der Hub davor (MAX_DEV = keiner), `hubport` sein Anschluss. Steht
-// `mitspeed`, kommt die Geschwindigkeit aus dem Anschlusszustand des
-// Hubs -- ein Hub hat kein PORTSC.
-//
-// UND JEDES GERAET WIRD NOTIERT, AUCH WENN ES SCHEITERT. Bis zu dieser
-// Runde loeschte `drop_dev` jede Spur, sobald `configure` fehlschlug --
-// und `configure` schlaegt fehl, sobald keine Schnittstelle passt. Ein
-// Hub, eine unbekannte Tastatur, ein Kartenleser: alle unsichtbar, und
-// auf dem Schirm stand "devices=0". Das war der Grund, warum drei
-// Runden lang niemand sagen konnte, WAS an Justins Brett haengt.
-// RUNDE PROTOKOLL: die Quelle dieses Treibers im Ring. Siehe `nvme.lq`.
-// Der Name liegt als `static mut` im Modul und nicht als `var` in
-// dieser Funktion: eine lokale Zeichenkette stirbt mit dem Rahmen,
-// und firnc faengt genau das ab ("the address of the local escapes
-// through the return value"). Der Protokollring liest den Namen
-// erst im Aufruf danach.
 static mut q_usb: [u8; 4] = "usb\0"
 
 fn lq() -> u64 {
@@ -1179,8 +767,8 @@ fn net_reclaim(state: u64) {
 
 fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     hubport: u64, mitspeed: bool, vorspeed: u64) -> bool {
-    var l_rst: [u8; 42] = "Anschluss lässt sich nicht zurücksetzen\0"
-    var l_neu: [u8; 32] = "Geraet am Anschluss, port/speed\0"
+    var l_rst: [u8; 21] = "port cannot be reset\0"
+    var l_fresh: [u8; 31] = "device on the port, port/speed\0"
 
     var s_dev: [u8; 11] = "usb: port=\0"
     var s_sp: [u8; 8] = " speed=\0"
@@ -1224,11 +812,6 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     ds(state, d, D_HUBPORT, hubport)
     if hubdev < MAX_DEV {
         ds(state, d, D_PARENT, dg(state, hubdev, D_SLOT))
-        // DER UEBERSETZER. Ein langsames oder volles Geraet hinter einem
-        // schnellen Hub spricht nicht die Sprache des Busses; der Hub
-        // uebersetzt (Transaction Translator), und der Regler muss
-        // wissen, WELCHER. Ohne diese zwei Zahlen antwortet eine
-        // Tastatur an einem USB-2-Hub nie -- xHCI 1.2, 4.5.2.
         if speed < 3 && dg(state, hubdev, D_SPEED) == 3 {
             ds(state, d, D_TTSLOT, dg(state, hubdev, D_SLOT))
             ds(state, d, D_TTPORT, hubport)
@@ -1237,8 +820,6 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
             ds(state, d, D_TTPORT, dg(state, hubdev, D_TTPORT))
         }
     }
-    // Der Platz in der Fundliste, JETZT -- damit auch ein Geraet, das
-    // gleich an `address` scheitert, auf dem Schirm steht.
     let f: u64 = found_new(state, rootport, hubport, speed)
     ds(state, d, D_FUND, f + 1)
     tr(state, 6, slot)
@@ -1271,22 +852,6 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     s(state, S_NDEV, g(state, S_NDEV) + 1)
 
     // ==================================================== RUNDE HIDWEG
-    //
-    // ERST BINDEN, DANN BERICHTEN -- UND DIE ZEILE AM STUECK.
-    //
-    // Bis hierher stand die Zeile VOR `bind`, und damit stand darin,
-    // was `driver_for` aus der Klasse GERATEN hatte, nicht, was der
-    // Baum daraus gemacht hat. Auf Justins Brett las sich das als
-    //   `usb: port=10 ... id=0951:16df class=03:00:00 driver=none`,
-    // und "none" war schlicht falsch: das Geraet war ueber seine
-    // BERICHTSBESCHREIBUNG angenommen worden (`hidrep: dev=1 ok=1
-    // felder=15`) und lief ueber den generischen Weg. `drv_name`
-    // kannte DRV_HIDGEN nur nicht.
-    //
-    // `bind` druckt SELBST (die Zerlegerzeile, die Blockzahl des
-    // Sticks). Deshalb steht der ganze Bericht dahinter und nicht
-    // halb davor -- sonst schiebt sich eine fremde Zeile mitten in
-    // diese hinein, und auf einem Foto ist das nicht zu entwirren.
     bind(state, d)
     let ff: u64 = dg(state, d, D_FUND)
     if ff != 0 {
@@ -1317,33 +882,13 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     drv_name(dg(state, d, D_DRIVER))
     serial.nl()
     post_event(state, d, uevent.ACT_ADD)
-    wlan_melden(dg(state, d, D_VID), dg(state, d, D_PID))
+    wlan_report(dg(state, d, D_VID), dg(state, d, D_PID))
     return true
 }
 
-// RUNDE WLAN-2: DIE ZEILE, DIE JUSTIN FOTOGRAFIEREN SOLL.
-//
-// In seinem Rechner steckt ein USB-WLAN-Stick, dessen Chip niemand
-// kennt -- und ohne diese Auskunft ist jeder Treiber geraten, weil die
-// USB-WLAN-Welt sechs Familien hat, die untereinander nichts gemeinsam
-// haben. Ein Stick, der bisher als
-//
 //     usb: ... id=0bda:8812 cls=ff:ff:ff drv=none
-//
-// durchlief, war nicht von einem beliebigen anderen Geraet zu
-// unterscheiden. Ab jetzt sagt die Maschine, WAS sie nicht fahren
-// kann:
-//
 //     wifi-usb: Realtek RTL8812AU (0bda:8812), kein Treiber
-//
-// Das ist derselbe Gedanke wie bei HWNET (RTL8168) und BLECH (I225):
-// der Unterschied zwischen einem Rechner, der kaputt ist, und einem,
-// der sagt, was ihm fehlt. Die Tabelle steht in lib/wlan/usbchip.fi
-// und ist damit auch auf dem Wirt messbar.
-//
-// Hier wird NICHTS gebunden. Es gibt keinen Treiber, und diese Zeile
-// behauptet auch keinen.
-fn wlan_melden(vid: u64, pid: u64) {
+fn wlan_report(vid: u64, pid: u64) {
     if !usbchip.ist_wlan_stick(vid, pid) {
         return
     }
@@ -1362,32 +907,12 @@ fn wlan_melden(vid: u64, pid: u64) {
     serial.nl()
 }
 
-// RUNDE HIDPUNKTE: WAS EIN REGLER WERT IST.
-//
-// Nicht "hat er irgendein HID", sondern WIE GUT. Eine Tastatur mit
-// Boot-Protokoll ist das, woran ein Mensch tippt; ein Geraet, das nur
-// ueber seine Berichtsbeschreibung als Zeigegeraet durchgeht (ein
-// Touchpad, QEMUs `usb-tablet`, Justins Kingston), ist ein schwacher
-// Hinweis. Wer beide gleich zaehlt, waehlt den falschen Regler --
-// genau das ist auf Justins Brett passiert.
-//
-// Der Massenspeicher zaehlt ABSICHTLICH null: Kern und Wurzelabbild
-// sind zu diesem Zeitpunkt laengst geladen (Multiboot-Module), der
-// Stick wird nicht mehr gebraucht, und ein Regler ohne Eingabe ist ein
-// Regler ohne Nutzen fuer einen Menschen vor dem Schirm.
-fn punkte(state: u64) -> u64 {
+fn points(state: u64) -> u64 {
     var p: u64 = 0
     var d: u64 = 0
     while d < MAX_DEV {
         if dg(state, d, D_USED) != 0 {
             let k: u64 = dg(state, d, D_DRIVER)
-            // Was ein Geraet IST, steht in seiner Schnittstelle, nicht
-            // darin, auf welchem Weg der Kern es gerade liest. Mit
-            // `hidgen` laeuft AUCH eine Boot-Tastatur ueber den
-            // generischen Zerleger; wer nach `D_GENERIC` unterscheidet,
-            // zaehlt sie dann wie ein Touchpad. Also nach Unterklasse 1
-            // und Protokoll 1/2 -- das ist die Boot-Schnittstelle, und
-            // die hat kein Lautstaerkeregler und kein Kartenleser.
             let boot: bool = dg(state, d, D_SUB) == 1
                 && (dg(state, d, D_PROTO) == 1 || dg(state, d, D_PROTO) == 2)
             if k == DRV_KBD || k == DRV_MOUSE {
@@ -1422,7 +947,7 @@ fn pkt_set(state: u64, u: u64, v: u64) {
 }
 
 fn choice(state: u64) -> u64 {
-    return g(state, S_WAHL)
+    return g(state, S_CHOICE)
 }
 
 fn hex2(v: u64) {
@@ -1510,9 +1035,6 @@ fn drv_name(k: u64) {
     }
 }
 
-// Den Steckplatz mit einem Zusammenhang versehen und die Adresse
-// vergeben. Der Eingabezusammenhang traegt zwei Bloecke: den des
-// Steckplatzes und den des Steuerungsendpunkts.
 fn address(state: u64, d: u64) -> bool {
     let slot: u64 = dg(state, d, D_SLOT)
     let dc: u64 = xhci.devctx(state, slot)
@@ -1533,23 +1055,6 @@ fn address(state: u64, d: u64) -> bool {
     return true
 }
 
-// ================================================ RUNDE BLECHEINGABE
-// DER STECKPLATZZUSAMMENHANG, JETZT MIT WEGWEISER UND UEBERSETZER.
-//
-// Bis zu dieser Runde standen hier zwei Zahlen: Geschwindigkeit und
-// Wurzelanschluss. Das reicht fuer ein Geraet, das DIREKT am Regler
-// haengt, und fuer kein anderes. Ein Geraet hinter einem Hub braucht
-//
-//   * den WEGWEISER (Route String, xHCI 1.2, 4.5.2): fuenf Nibbles,
-//     eines je Etage, das erste unten. Ohne ihn schickt der Regler die
-//     Pakete an den Hub statt durch ihn hindurch.
-//   * bei langsamer oder voller Geschwindigkeit hinter einem SCHNELLEN
-//     Hub den UEBERSETZER (TT): Steckplatz und Anschluss des Hubs, der
-//     uebersetzt. Ohne ihn antwortet eine Tastatur an einem USB-2-Hub
-//     nie -- und genau so eine haengt an vielen heutigen Brettern.
-//   * ist das Geraet SELBST ein Hub: die Hub-Fahne und die Zahl seiner
-//     Anschluesse. Die setzt `hub_slot_update` nach, sobald der
-//     Hub-Deskriptor gelesen ist -- vorher weiss niemand davon.
 fn build_slot(state: u64, d: u64, entries: u64) {
     let sc: u64 = xhci.in_slot(state)
     zero(sc, xhci.ctx_size(state))
@@ -1574,15 +1079,11 @@ fn build_ep0(state: u64, d: u64, i: u64) {
     let ec: u64 = xhci.in_ep(state, 1)
     zero(ec, xhci.ctx_size(state))
     wr32(ec, 0)
-    // CErr = 3, Art 4 (Steuerung), Paketgroesse oben.
     wr32(ec + 4, (3 << 1) | (4 << 3) | (dg(state, d, D_MPS0) << 16))
     __mmio_write64((ec + 8) as *mut u64, xhci.ep_ring(state, i) | 1)
     wr32(ec + 16, 8)
 }
 
-// Die Deskriptoren. Erst acht Oktett -- nur so erfaehrt der Treiber die
-// wirkliche Paketgroesse des Steuerungsendpunkts, und nur mit ihr
-// stimmen alle weiteren Uebertragungen.
 fn describe(state: u64, d: u64) -> bool {
     let slot: u64 = dg(state, d, D_SLOT)
     let buf: u64 = state + DESC_OFF
@@ -1617,10 +1118,6 @@ fn describe(state: u64, d: u64) -> bool {
             | (dg(state, d, D_PORT) << 40) | (dg(state, d, D_HUBPORT) << 48),
             (b16(buf, 8) << 16) | b16(buf, 10))
     }
-    // RUNDE BLECHEINGABE: die Klasse des GERAETS (Oktett 4..6). Bei
-    // einem Hub steht sie hier (09) und nicht erst in der
-    // Schnittstelle; bei einem Verbundgeraet steht hier 0x00 und die
-    // Wahrheit erst eine Etage tiefer. Beides gehoert auf den Schirm.
     let f: u64 = dg(state, d, D_FUND)
     if f != 0 {
         fund_dev_class(state, f - 1, b8(buf, 4), b8(buf, 5), b8(buf, 6))
@@ -1628,13 +1125,6 @@ fn describe(state: u64, d: u64) -> bool {
     return true
 }
 
-// Den Konfigurationsdeskriptor holen und die Schnittstelle waehlen, die
-// dieser Kernel bedienen kann. Die Kette wird EINMAL durchgegangen; die
-// erste Schnittstelle mit einer bekannten Klasse gewinnt, und alles, was
-// danach an Endpunkten kommt, gehoert ihr -- bis die naechste
-// Schnittstelle anfaengt.
-// Walk the configurations of the device until one has an interface this kernel serves (a device with one
-// configuration behaves as before). Returns the length of the last configuration read, 0 on a transfer error.
 fn walk_configs(state: u64, d: u64, buf: u64) -> u64 {
     let slot: u64 = dg(state, d, D_SLOT)
     var ncfg: u64 = dg(state, d, D_NCFG)
@@ -1745,9 +1235,6 @@ fn configure(state: u64, d: u64) -> bool {
     if dg(state, d, D_DRIVER) == DRV_ISOTEST {
         iso_data(state, d, buf, total)
     }
-    // RUNDE BLECHEINGABE: die Klasse der GEWAEHLTEN Schnittstelle steht
-    // auf dem Schirm -- und wenn keine gewaehlt wurde, die der ersten.
-    // "Klasse 09 an Anschluss 7" ist die Auskunft, die Justin braucht.
     let f1: u64 = dg(state, d, D_FUND)
     if f1 != 0 {
         if dg(state, d, D_DRIVER) != DRV_NONE {
@@ -1978,36 +1465,10 @@ fn ch_diag(state: u64, key: u64) -> u64 {
 // ======================================================= RUNDE HIDWEG
 //
 // WELCHE SCHNITTSTELLE EINES GERAETS GENOMMEN WIRD.
-//
-// Ein Geraet hat oft mehrere. Eine Spieletastatur bringt regelmaessig
-// drei mit: eine ohne Boot-Protokoll mit allen Tasten gleichzeitig
-// (03:00:00), eine Boot-Tastatur (03:01:01) und eine
-// Verbrauchersteuerung fuer die Medientasten (auch 03:00:00). Welche
-// davon zuerst im Konfigurationsdeskriptor steht, entscheidet der
-// Hersteller und niemand sonst.
-//
-// Bis zu dieser Runde nahm `parse` die ERSTE, die durch `wanted` kam --
-// also die erste in der Reihenfolge des Herstellers. Auf Justins Brett
-// war das bei 0951:16df eine mit `top=0xc0001`, einer
-// VERBRAUCHERSTEUERUNG: die Beschreibung wurde sauber zerlegt
-// (`felder=15`), das Geraet lief -- und meldete Lautstaerketasten statt
-// Buchstaben.
-//
-// Jetzt wird ZWEIMAL gelesen. Der erste Durchgang sucht den besten
-// Rang, der zweite nimmt die erste Schnittstelle mit genau diesem Rang.
-// Damit gewinnt eine Boot-Tastatur gegen eine Verbrauchersteuerung
-// DESSELBEN Geraets, egal in welcher Reihenfolge sie dastehen.
-//
-// Der Rang ist ausdruecklich eine Rangfolge und keine Wertung: eine
-// Schnittstelle ohne Boot-Protokoll bleibt annehmbar (Rang 1) -- das
-// Praezisions-Touchpad eines Laptops hat gar nichts anderes.
 fn iface_rang(state: u64, cls: u64, sub: u64, pro: u64) -> u64 {
     if !wanted(state, cls, sub, pro) {
         return 0
     }
-    // Ein HUB steht ueber allem: hinter ihm koennen Tastatur und Maus
-    // erst hervorkommen. Wer ihn nicht nimmt, sieht die Haelfte der
-    // Buchsen eines heutigen Bretts nicht.
     if cls == CLS_HUB {
         return 5
     }
@@ -2045,21 +1506,6 @@ fn best_rang(state: u64, buf: u64, total: u64) -> u64 {
     return best
 }
 
-// ================================ DER SELBSTTEST ZUR RANGFOLGE
-//
-// Ein zusammengesetztes Geraet gibt es in QEMU nicht: `-device usb-kbd`
-// hat GENAU EINE Schnittstelle. Die Rangfolge liesse sich damit
-// ueberhaupt nicht messen -- und eine Aenderung an der Auswahl, die
-// niemand misst, ist eine Behauptung.
-//
-// Also wird der Konfigurationsdeskriptor HIER GEBAUT, Oktett fuer
-// Oktett, genau so, wie eine Spieletastatur ihn liefert: zuerst eine
-// Schnittstelle OHNE Boot-Protokoll (03:00:00), danach die
-// Boot-Tastatur (03:01:01). Der alte Weg nahm die erste. Der neue muss
-// die zweite nehmen -- mit ihrer Schnittstellennummer, ihrer
-// Beschreibungslaenge (63 statt 52) und ihrem Endpunkt (0x82 -> DCI 5).
-//
-// Gibt zurueck, wie viele der sechs Zusagen halten.
 fn rangtest(state: u64) -> u64 {
     let buf: u64 = state + DESC_OFF
     zero(buf, 64)
@@ -2117,8 +1563,8 @@ fn parse(state: u64, d: u64, buf: u64, total: u64) {
     var at: u64 = 0
     var mine: bool = false
     var picked: bool = false
-    let ziel: u64 = best_rang(state, buf, total)
-    if ziel == 0 {
+    let target: u64 = best_rang(state, buf, total)
+    if target == 0 {
         return
     }
     while at + 2 <= total {
@@ -2129,15 +1575,12 @@ fn parse(state: u64, d: u64, buf: u64, total: u64) {
             at = total
         } else {
             if kind == 4 && len >= 9 {
-                // Eine Schnittstelle. Alternative Einstellungen ausser 0
-                // werden uebergangen -- die Vorgabe ist das, was ohne
-                // `SET_INTERFACE` gilt.
                 mine = false
                 if !picked && b8(buf, at + 3) == 0 {
                     let cls: u64 = b8(buf, at + 5)
                     let sub: u64 = b8(buf, at + 6)
                     let pro: u64 = b8(buf, at + 7)
-                    if iface_rang(state, cls, sub, pro) == ziel {
+                    if iface_rang(state, cls, sub, pro) == target {
                         ds(state, d, D_CLASS, cls)
                         ds(state, d, D_SUB, sub)
                         ds(state, d, D_PROTO, pro)
@@ -2148,12 +1591,6 @@ fn parse(state: u64, d: u64, buf: u64, total: u64) {
                     }
                 }
             } else if kind == 0x21 && len >= 9 && mine {
-                // DER HID-DESKRIPTOR. Er steht zwischen der
-                // Schnittstelle und ihren Endpunkten und sagt, WIE LANG
-                // die Berichtsbeschreibung ist -- ohne diese Zahl laesst
-                // sie sich nicht holen, denn ein Kontrolltransfer will
-                // die Laenge vorher wissen. Ab Oktett 6 stehen Paare
-                // (Art, Laenge); genommen wird das erste mit Art 0x22.
                 var k: u64 = 0
                 let nd: u64 = b8(buf, at + 5)
                 while k < nd && 6 + k * 3 + 2 < len {
@@ -2213,10 +1650,6 @@ fn ecm_data(state: u64, d: u64, buf: u64, total: u64) {
     }
 }
 
-// Welche Schnittstellen dieser Kernel annimmt. Eine HID-Schnittstelle
-// OHNE Boot-Protokoll (Unterklasse 1) wird ABGELEHNT und nicht falsch
-// gelesen: ihr Berichtsformat steht in einer Berichtsbeschreibung, und
-// die zerlegt diese Runde nicht.
 fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
     if cls == CLS_HUB {
         return !kstate.mode_on(state, kstate.M_NOHUB)
@@ -2228,13 +1661,6 @@ fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
         if sub == 1 && (pro == 1 || pro == 2) {
             return true
         }
-        // RUNDE HID: eine Schnittstelle OHNE Boot-Protokoll. Bis zu
-        // dieser Runde stand hier `return false` mit der Begruendung
-        // "ihr Berichtsformat steht in einer Berichtsbeschreibung, und
-        // die zerlegt diese Runde nicht". Jetzt zerlegt sie sie.
-        // DAS IST DER FALL EINES LAPTOPS: ein Praezisions-Touchpad hat
-        // kein Boot-Protokoll, und `-device usb-tablet` in QEMU auch
-        // nicht.
         return g(state, S_GEN) != 0
     }
     if cls == CLS_MSC {
@@ -2325,14 +1751,6 @@ fn take_ep(state: u64, d: u64, buf: u64, at: u64) {
         ds(state, d, D_INTDCI, dci)
         ds(state, d, D_INTMPS, mps)
         ds(state, d, D_INTIVL, ivl)
-        // RUNDE HID: BIS ZU DIESER RUNDE STANDEN HIER ACHT.
-        // Acht ist die Groesse eines Boot-Tastaturberichts, und
-        // solange es nur die gab, war die Zahl richtig. Ein
-        // Praezisions-Touchpad schickt 29 Oktett und `-device
-        // usb-tablet` sechs bis acht; wer bei acht abschneidet,
-        // bekommt von einem Touchpad die ersten anderthalb Finger
-        // und sonst nichts. Die Grenze ist jetzt der Platz, den
-        // `report_buf` je Geraet hat (64), und nicht eine Bauform.
         var want: u64 = mps
         if want > 64 {
             want = 64
@@ -2341,12 +1759,6 @@ fn take_ep(state: u64, d: u64, buf: u64, at: u64) {
         return
     }
     if attrs == 2 {
-        // DIE PAKETGROSSE KOMMT AUS DEM DESKRIPTOR UND NICHT AUS DEM
-        // KOPF DES TREIBERS. Ein Massenendpunkt hat bei voller
-        // Geschwindigkeit 64, bei hoher 512 und bei Super 1024 Oktett --
-        // und `qemu-xhci` haengt einen Stick an einen USB-3-Anschluss,
-        // wenn einer frei ist. Eine geratene 512 waere dort schlicht
-        // falsch.
         ds(state, d, D_BULKMPS, mps)
         if (addr & 0x80) != 0 {
             if dg(state, d, D_INDCI) == 0 {
@@ -2360,8 +1772,6 @@ fn take_ep(state: u64, d: u64, buf: u64, at: u64) {
     }
 }
 
-// Ein Endpunktzusammenhang. `art` ist die xHCI-Nummer: 2 Masse aus,
-// 6 Masse ein, 7 Unterbrechung ein.
 fn build_ep(state: u64, dci: u64, art: u64, mps: u64, ivl: u64, ring: u64,
     avg: u64) {
     let ec: u64 = xhci.in_ep(state, dci)
@@ -2376,11 +1786,6 @@ fn build_ep(state: u64, dci: u64, art: u64, mps: u64, ivl: u64, ring: u64,
     wr32(ec + 16, avg | esit)
 }
 
-// Das Zeitraster einer Unterbrechungsmeldung. Bei hoher Geschwindigkeit
-// steht in `bInterval` schon ein Logarithmus, bei voller und langsamer
-// stehen dort MILLISEKUNDEN -- und xHCI will in beiden Faellen einen
-// Exponenten zur Basis 125 Mikrosekunden. Wer das verwechselt, bekommt
-// eine Tastatur, die achtmal zu selten oder achtmal zu oft meldet.
 fn interval_of(speed: u64, binterval: u64) -> u64 {
     if speed >= 3 {
         if binterval == 0 {
@@ -2406,11 +1811,8 @@ fn interval_of(speed: u64, binterval: u64) -> u64 {
 fn endpoints(state: u64, d: u64) -> bool {
     let slot: u64 = dg(state, d, D_SLOT)
     var top: u64 = 1
-    var add: u64 = 1 // der Steckplatz selbst
+    var add: u64 = 1
     let ic: u64 = xhci.in_control(state)
-    // Alle Endpunktbloecke des Eingabezusammenhangs leeren: was von
-    // einem frueheren Geraet stehenbliebe, waere ein Endpunkt, den
-    // niemand bestellt hat.
     zero(xhci.in_ep(state, 1), 31 * xhci.ctx_size(state))
 
     let idci: u64 = dg(state, d, D_INTDCI)
@@ -2505,19 +1907,7 @@ fn drop_dev(state: u64, d: u64) {
 
 // ------------------------------------------------------- die Zuordnung
 
-// ============================================== RUNDE ECHTHARDWARE-6
-// TAUGT DER EINTRAG, DER SCHON DASTEHT?
-//
-// "Taugen" heisst hier genau zweierlei, und beides ist nachpruefbar:
-// der Platz ist ueberhaupt belegt, UND das Geraet auf diesem Platz ist
-// noch benutzt und hat einen Unterbrechungsendpunkt. Ein Geraet, das
-// abgezogen wurde, wird in `port_gone` ohnehin auf 0 gesetzt; diese
-// Pruefung faengt zusaetzlich den Fall ab, dass dort eine Leiche steht.
-//
-// Ohne diese Frage waere die Regel "der erste gewinnt" zu streng: eine
-// Tastatur, die beim Aufsetzen scheitert, wuerde den Platz fuer immer
-// blockieren, und keine spaeter eingesteckte kaeme mehr durch.
-fn dev_taugt(state: u64, e: u64) -> bool {
+fn dev_suitable(state: u64, e: u64) -> bool {
     if e == 0 {
         return false
     }
@@ -2528,12 +1918,12 @@ fn dev_taugt(state: u64, e: u64) -> bool {
     return dg(state, d, D_USED) != 0 && dg(state, d, D_INTDCI) != 0
 }
 
-fn kbd_taugt(state: u64) -> bool {
-    return dev_taugt(state, g(state, S_KBD))
+fn kbd_suitable(state: u64) -> bool {
+    return dev_suitable(state, g(state, S_KBD))
 }
 
 fn mouse_works(state: u64) -> bool {
-    return dev_taugt(state, g(state, S_MOUSE))
+    return dev_suitable(state, g(state, S_MOUSE))
 }
 
 fn bind(state: u64, d: u64) {
@@ -2542,49 +1932,10 @@ fn bind(state: u64, d: u64) {
         hid_start(state, d)
         return
     }
-    // ============================================ RUNDE ECHTHARDWARE-6
-    // HIER STAND `s(state, S_KBD, d + 1)` OHNE JEDE BEDINGUNG -- UND
-    // DAS IST DIE TOTE TASTATUR AUS JUSTINS TAFELZEILE 18.
-    //
-    // Sein Foto sagt woertlich
-    //     18 KEYS  D 2 BER 0 ARM 1 CC 0 RK 00000000 N 0
-    //     20 ENDP  KBD EP1 F0 H0
-    // Das ist ein Widerspruch, solange man `D` fuer die Tastatur haelt:
-    // der Endpunkt LAEUFT (EP1), hat KEINEN Fehler (F0) und musste nie
-    // wiederbelebt werden (H0) -- trotzdem ist nie ein Bericht fertig
-    // geworden. Ein angehaltener Endpunkt sieht anders aus (EP2/EP4),
-    // ein Zerlegerfehler auch (BER stiege, N bliebe 0).
-    //
-    // Die Aufloesung steht in `D` selbst. `S_KBD` ist der Geraeteplatz
-    // PLUS EINS, `D 2` heisst also Platz 1 -- das ZWEITE Geraet. Auf
-    // Justins Brett ist Platz 0 die Tastatur und Platz 1 die zweite
-    // HID-Schnittstelle seines Tastatur/Maus-Gespanns. Die Tafel zeigte
-    // die Zahlen eines Geraets, das nie eine Tastatur war: dort wurde
-    // genau einmal ein Block gelegt (ARM 1) und nichts kam zurueck.
-    //
-    // WIE `S_KBD` DORT HINKAM: `hid_start` weiter unten holt die
-    // Berichtsbeschreibung, ruft `hid_claim` -- und `hid_claim` setzt
-    // `S_KBD` KORREKT, naemlich nur, wenn noch keine Tastatur steht
-    // (usb.fi, `if g(state, S_KBD) == 0`). Danach kam diese Zeile und
-    // hat das Ergebnis BEDINGUNGSLOS ueberschrieben. Jedes spaeter
-    // aufgesetzte Geraet, dessen Klasse `kbd` sagt, hat damit die
-    // laufende Tastatur von der Tafel UND aus `hidin` verdraengt.
-    //
-    // In QEMU faellt das nie auf: dort gibt es genau EIN Geraet mit
-    // Tastaturklasse, also ueberschreibt es sich selbst mit demselben
-    // Wert. Gemessen in genau diesem Baum, `tools/design/eh6.sh`:
-    //     usb: port=5 ... class=03:01:01 driver=kbd
-    //     tafel: 18 KEYS  D 1 BER 12 ARM 13 CC 1 RK 00170000 N 6
-    // Ein Brett mit zwei HID-Schnittstellen an einem Gehaeuse -- also
-    // jede Spieletastatur mit Multimediatasten -- trifft es sofort.
-    //
-    // AB HIER GILT DIESELBE REGEL WIE IN `hid_claim`: DER ERSTE, DER
-    // WIRKLICH LAEUFT, BLEIBT. Ein zweiter Fund wird nur genommen, wenn
-    // der Platz frei ist oder der bisherige Eintrag nicht mehr taugt.
     if k == DRV_KBD {
         hid_start(state, d)
         tr(state, 27, d)
-        if !kbd_taugt(state) {
+        if !kbd_suitable(state) {
             s(state, S_KBD, d + 1)
         }
         return
@@ -2598,23 +1949,14 @@ fn bind(state: u64, d: u64) {
     }
     if k == DRV_MSC {
         if msc_start(state, d) {
-            // RUNDE HOTPLUG-2: einen PLATZ nehmen statt der einen
-            // Zelle. Ist keiner mehr frei, ist das Geraet aufgezaehlt
-            // und traegt seine Groesse -- es bekommt nur keine
-            // Blockgeraetenummer, und das wird gemeldet statt still
-            // uebergangen.
             let mi: u64 = msc_alloc(state)
             if mi >= MAX_MSC {
-                var s_voll: [u8; 30] = "usb: msc kein Platz mehr frei\0"
+                var s_voll: [u8; 27] = "usb: msc no free slot left\0"
                 serial.puts((&s_voll[0]) as u64)
                 serial.nl()
                 return
             }
             msc_slot_set(state, mi, d + 1)
-            // RUNDE HOTPLUG: die STEIGENDE Flanke. Erst hier ist der
-            // Stick wirklich bereit -- INQUIRY beantwortet, TEST UNIT
-            // READY durch, Groesse und Blockgroesse bekannt. Wer frueher
-            // einhaengte, laese in ein Geraet, das noch anlaeuft.
             s(state, S_MSCGEN, g(state, S_MSCGEN) + 1)
         }
         return
@@ -3162,36 +2504,12 @@ fn ncm_start(state: u64, d: u64) {
 }
 
 // ------------------------------------------------------------ HID
-//
-// Boot-Protokoll einschalten, Wiederholung abschalten, und dann liegt
-// dauerhaft GENAU EIN Block auf dem Unterbrechungsring. Wird er fertig,
-// kommt eine Meldung; der Behandler wertet den Bericht aus und legt
-// sofort den naechsten hin. Ein Ring ohne offenen Block ist eine
-// Tastatur, die einmal getippt hat.
 
 fn hid_start(state: u64, d: u64) {
     tr(state, 20, d)
     let slot: u64 = dg(state, d, D_SLOT)
     let iface: u64 = dg(state, d, D_IFACE)
     // RUNDE HID: ZUERST DIE BERICHTSBESCHREIBUNG VERSUCHEN.
-    //
-    // Geht sie zu holen UND zu zerlegen, laeuft dieses Geraet im
-    // BERICHTSPROTOKOLL (SET_PROTOCOL 1) und seine Berichte gehen durch
-    // `hidin.report` -- dann sind alle Tasten da, alle Knoepfe, das Rad
-    // steht da, wo die Beschreibung es hinlegt, und ein Touchpad
-    // funktioniert ueberhaupt erst.
-    //
-    // Geht sie NICHT, bleibt alles wie vorher: Boot-Protokoll. Das ist
-    // kein Rest, sondern der Rueckfallweg, und er ist der Grund, warum
-    // jedes BIOS eine USB-Tastatur bedienen kann. Ein Geraet, das man
-    // nach dieser Runde NICHT mehr bedienen koennte, waere ein
-    // Rueckschritt.
-    // DER PLATZ IM ZERLEGER IST DER GERAETEPLATZ HIER -- mit EINER
-    // Ausnahme: der letzte gehoert `i2chid.fi`. Ein Laptop hat sein
-    // Touchpad an I2C und kann daneben vier USB-Geraete haben; ohne
-    // diese Grenze wuerde das vierte USB-Geraet die Beschreibung des
-    // Touchpads ueberschreiben, und der Zeiger waere weg, sobald jemand
-    // einen Stick zu viel einsteckt.
     var generisch: bool = false
     if g(state, S_GEN) != 0 && d < hidrep.USB_DEV_MAX {
         generisch = hid_descriptor(state, d, slot, iface)
@@ -3221,14 +2539,11 @@ fn hid_start(state: u64, d: u64) {
         return
     }
     if dg(state, d, D_DRIVER) == DRV_HIDGEN {
-        // Kein Boot-Protokoll UND keine brauchbare Beschreibung: dieses
-        // Geraet bleibt liegen. Gezaehlt, nicht geraten.
         ds(state, d, D_DRIVER, DRV_NONE)
         return
     }
     // SET_PROTOCOL 0 = Boot. Klasse, Schnittstelle, Wirt an Geraet.
     xhci.control(state, slot, 0x21, 0x0B, 0, iface, 0, 0, false)
-    // SET_IDLE 0 = nur melden, wenn sich etwas aendert.
     xhci.control(state, slot, 0x21, 0x0A, 0, iface, 0, 0, false)
     ds(state, d, D_PREV, 0)
     let i: u64 = xhci.ep_find(state, slot, dg(state, d, D_INTDCI))
@@ -3239,17 +2554,6 @@ fn hid_start(state: u64, d: u64) {
     arm(state, d)
 }
 
-// DIE BERICHTSBESCHREIBUNG HOLEN UND ZERLEGEN.
-//
-// GET_DESCRIPTOR mit bmRequestType 0x81 -- Geraet an Wirt, STANDARD,
-// Empfaenger SCHNITTSTELLE. Das letzte ist der Punkt: eine
-// Berichtsbeschreibung gehoert der Schnittstelle und nicht dem Geraet,
-// und wer sie mit 0x80 anfordert, bekommt von manchem Geraet einen
-// Stall und von manchem etwas anderes.
-//
-// Die Laenge steht im HID-Deskriptor der Konfiguration (`parse`, Art
-// 0x21). Ohne sie wird gar nicht erst gefragt -- eine geratene Laenge
-// waere entweder zu kurz (halbe Beschreibung) oder zu lang (Stall).
 fn hid_descriptor(state: u64, d: u64, slot: u64, iface: u64) -> bool {
     let n: u64 = dg(state, d, D_RDLEN)
     if n == 0 || n > hidrep.RAW_MAX {
@@ -3292,10 +2596,6 @@ fn hid_set_modes(state: u64, d: u64, slot: u64, iface: u64) {
     }
 }
 
-// Was das Geraet IST, steht in seiner Beschreibung und nicht in seiner
-// Klasse. Ein Geraet kann beides sein (viele Tastaturen melden neben
-// den Tasten eine Verbrauchersteuerung); dann zaehlt es hier als
-// Tastatur UND meldet die Multimediatasten mit.
 fn hid_claim(state: u64, d: u64) {
     let art: u64 = hidrep.kind(state, d)
     if (art & hidrep.K_KBD) != 0 {
@@ -3312,9 +2612,6 @@ fn hid_claim(state: u64, d: u64) {
         }
         return
     }
-    // Etwas anderes (reine Verbrauchersteuerung zum Beispiel). Die
-    // Berichte gehen trotzdem durch den Zerleger; was `hidin` darin
-    // nicht kennt, faellt weg, statt falsch gedeutet zu werden.
     ds(state, d, D_DRIVER, DRV_HIDGEN)
 }
 
@@ -3362,25 +2659,15 @@ fn report_buf(state: u64, d: u64) -> u64 {
     return state + REPORT_OFF + d * 64
 }
 
-// Der Unterbrechungsweg. `trap.fi` ruft das; alles darunter ist die
-// Kette, die ein Tastendruck bis in die Zeilendisziplin nimmt.
 fn irq(state: u64) {
     xhci.irq(state)
     service(state)
 }
 
-// Was seit dem letzten Blick fertig wurde. Wird aus der Unterbrechung
-// gerufen UND aus dem Abfragebetrieb der Gegenprobe -- beide Wege enden
-// hier, und deshalb misst die Gegenprobe wirklich dieselbe Auswertung.
 fn service(state: u64) {
     if g(state, S_READY) == 0 {
         return
     }
-    // RUNDE STARTKNOPF: die Wiederbelebung eines Endpunkts wartet auf
-    // den Regler. `service` kommt aus der Unterbrechung UND aus
-    // `poll` -- ohne diese Sperre liefen zwei Durchlaeufe auf
-    // demselben Ring, und beide warteten auf eine Antwort, die nur
-    // einmal kommt.
     let me: u64 = cpu.here(state)
     if me < 64 {
         svc_cpus = svc_cpus | (1 << me)
@@ -3409,40 +2696,9 @@ fn service(state: u64) {
                     if cc == xhci.CC_SUCCESS || cc == xhci.CC_SHORT {
                         s(state, S_REPORTS, g(state, S_REPORTS) + 1)
                         ds(state, d, D_REPS, dg(state, d, D_REPS) + 1)
-                        // RUNDE VIELKERN: den Bericht MERKEN, bevor
-                        // der naechste ihn ueberschreibt -- und nur,
-                        // wenn er etwas sagt. Siehe D_ROHW.
                         raw_remember(state, d)
                         deliver(state, d)
                     } else {
-                        // ==================== RUNDE STARTKNOPF
-                        // EIN ANGEHALTENER ENDPUNKT KOMMT VON SELBST
-                        // NICHT ZURUECK.
-                        //
-                        // HIER STAND NUR `arm`. Das ist der Fehler, und
-                        // er erklaert die Beobachtung genau: die MAUS
-                        // laeuft (sie hat nie einen Fehler), die
-                        // TASTATUR liefert nichts (ein einziger
-                        // Uebertragungsfehler genuegt). Nach einem
-                        // Stall (6) oder einem Uebertragungsfehler (4)
-                        // steht der Endpunkt im Zustand `halted`, und
-                        // xHCI 1.2, 4.6.8 ist dabei eindeutig: der
-                        // Regler nimmt DANN KEINEN BLOCK MEHR AN. Man
-                        // darf klingeln, so oft man will -- `ARM` laeuft
-                        // hoch, `BER` steht. Genau dieses Zahlenbild
-                        // meldet Justins Tafel.
-                        //
-                        // In QEMU kommt es nie vor: ein nachgebildetes
-                        // Geraet erzeugt keine Uebertragungsfehler. Auf
-                        // Blech, an einem echten Kabel, mit einer echten
-                        // Spieletastatur, kommen sie.
-                        //
-                        // Die Wiederbelebung ist die vorgeschriebene:
-                        // `Reset Endpoint` an den Regler,
-                        // CLEAR_FEATURE(ENDPOINT_HALT) an das Geraet,
-                        // `Set TR Dequeue Pointer` auf den frischen
-                        // Ring. `unstall` tut genau das und wurde
-                        // bisher nur vom Massenspeicher gerufen.
                         ds(state, d, D_ERRS, dg(state, d, D_ERRS) + 1)
                         if xhci.ep_halted(state, dg(state, d, D_SLOT),
                             dg(state, d, D_INTDCI)) {
@@ -3457,10 +2713,6 @@ fn service(state: u64) {
         }
         d = d + 1
     }
-    // RUNDE BLECHEINGABE: hat eine Feststelltaste den Zustand umgelegt,
-    // geht er JETZT an das Geraet zurueck. Hier und nicht im Zeitgeber:
-    // hier ist gerade ohnehin ein Bericht durchgelaufen, das Geraet
-    // antwortet also.
     led_service(state)
     btusb.pump(state)
     atomic.store(state + USCAL_OFF + S_SVCBUSY, 0)
@@ -3534,14 +2786,6 @@ fn service_seq_jumps() -> u64 {
     return seq_jumps
 }
 
-// DER ZWEITE WEG ZU DENSELBEN BERICHTEN, und er ist eine GEGENPROBE und
-// kein Ersatz. Mit `usbnoirq` bleibt der Meldevektor maskiert: der
-// Regler bewegt die Daten weiterhin, aber niemand sagt es dem Kernel --
-// und dann kommt keine Taste an. Mit `usbpoll` sieht der Kernel selbst
-// nach, und dieselben Tasten kommen an. Der Unterschied zwischen den
-// beiden Laeufen ist der Beweis, dass die Meldung wirklich das ist, was
-// die Eingabe traegt, und nicht eine Verzierung neben einer
-// Abfrageschleife.
 fn poll(state: u64) {
     if g(state, S_READY) == 0 {
         return
@@ -3551,12 +2795,6 @@ fn poll(state: u64) {
 }
 
 fn deliver(state: u64, d: u64) {
-    // RUNDE HID: EINE WEICHE UND ZWEI WEGE, DIE BEIDE IN `hidin.fi`
-    // ENDEN. Oben der generische -- der Bericht wird nach seiner
-    // Beschreibung gelesen. Unten der Rueckfallweg mit dem festen
-    // Format des Boot-Protokolls. Was danach kommt (Abtastcode,
-    // Zeilendisziplin, Fensterfokus, PS/2-Paket), ist fuer beide
-    // dasselbe und steht nur einmal da.
     if dg(state, d, D_GENERIC) == 1 {
         hidin.report(state, d, report_buf(state, d), dg(state, d, D_INTLEN))
         return
@@ -3570,23 +2808,12 @@ fn deliver(state: u64, d: u64) {
     }
 }
 
-// Acht Oktett: ein Zusatztastenfeld, ein leeres, sechs Gebrauchscodes.
-// Was NEU dabei ist, ist gedrueckt worden. Was fehlt, ist losgelassen --
-// und das interessiert nur bei Umschalt und Steuerung, weil der
-// PS/2-Weg fuer alles andere ohnehin nur die Druecken-Codes ansieht.
 fn kbd_report(state: u64, d: u64) {
     let before: u64 = hidin.keys(state)
     hidin.kbd_report_boot(state, d, report_buf(state, d))
-    // `usb: keys=N` zaehlt seit Runde K17 die Tasten, die WIRKLICH
-    // durch den USB-Weg gegangen sind, und `tools/k17/run.sh` haengt
-    // daran. Die Zahl bleibt, auch wenn die Auswertung eine Etage
-    // tiefer gewandert ist.
     s(state, S_KEYS, g(state, S_KEYS) + (hidin.keys(state) - before))
 }
 
-// RUNDE HIDWEG: was `hidin` gezaehlt hat, fuer den Eingabepuls des
-// Schreibtischs. Drei Weiterreichungen und keine eigene Buchfuehrung --
-// zwei Zaehler ueber dieselbe Sache waeren zwei Wahrheiten.
 fn hid_keys(state: u64) -> u64 {
     return hidin.keys(state)
 }
@@ -3611,22 +2838,10 @@ fn mouse_report(state: u64, d: u64) {
 }
 
 // ------------------------------------------------------ Massenspeicher
-//
-// Bulk-Only-Transport: ein Befehlsblock hin, Daten hin oder her, eine
-// Quittung zurueck. Darin steckt ein SCSI-Befehl -- derselbe, den eine
-// SATA-Platte auch verstuende. Das ist der Grund, warum ein Stick
-// ueberhaupt an `blk.fi` passt: er spricht Bloecke.
 
 const CBW_SIG: u64 = 0x43425355
 const CSW_SIG: u64 = 0x53425355
 
-// ============================== RUNDE HOTPLUG-2: JE PLATZ, NICHT JE BAUM
-//
-// Jede dieser Fragen gilt einem BESTIMMTEN Massenspeicher. `i` ist der
-// Platz in der Liste (0..MAX_MSC-1) und zugleich die Nummer, die
-// `blk.fi` als `DEV_USB0 + i` fuehrt.
-
-// Der Platz haelt `Geraetenummer + 1`; 0 heisst frei.
 fn msc_slot(state: u64, i: u64) -> u64 {
     if i >= MAX_MSC {
         return 0
@@ -3662,7 +2877,6 @@ fn msc_bsize_at(state: u64, i: u64) -> u64 {
     return dg(state, msc_dev_at(state, i), D_MSCBS)
 }
 
-// Wie viele Plaetze belegt sind. Fuer Meldungen und die Abnahme.
 fn msc_count(state: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
@@ -3675,7 +2889,6 @@ fn msc_count(state: u64) -> u64 {
     return n
 }
 
-// Einen freien Platz nehmen, MAX_MSC wenn keiner mehr da ist.
 fn msc_alloc(state: u64) -> u64 {
     var i: u64 = 0
     while i < MAX_MSC {
@@ -3687,7 +2900,6 @@ fn msc_alloc(state: u64) -> u64 {
     return MAX_MSC
 }
 
-// Der Platz, auf dem dieses Geraet liegt -- MAX_MSC, wenn keiner.
 fn msc_slot_of_dev(state: u64, d: u64) -> u64 {
     var i: u64 = 0
     while i < MAX_MSC {
@@ -3699,10 +2911,6 @@ fn msc_slot_of_dev(state: u64, d: u64) -> u64 {
     return MAX_MSC
 }
 
-// ----------------------------------------------------------------
-// DIE ALTEN NAMEN, damit die Schichten darueber unveraendert laufen.
-// Sie meinen den ERSTEN belegten Platz. `rootsel.fi` sucht so seine
-// Wurzel, und `blkdev.fi` fragt so, ob ueberhaupt ein Stick da ist.
 fn msc_first(state: u64) -> u64 {
     var i: u64 = 0
     while i < MAX_MSC {
@@ -3746,9 +2954,6 @@ fn be32(p: u64, i: u64) -> u64 {
         | b8(p, i + 3)
 }
 
-// Ein Befehl. `cdb` steht schon im Befehlsblock ab Oktett 15; hier wird
-// nur der Kopf gefuellt, gesendet, Daten bewegt und die Quittung
-// geprueft. Rueckgabe: true, wenn das Geraet 0 gemeldet hat.
 fn bot(state: u64, d: u64, cdb_len: u64, data: u64, dlen: u64,
     dir_in: bool) -> bool {
     let slot: u64 = dg(state, d, D_SLOT)
@@ -3784,10 +2989,6 @@ fn bot(state: u64, d: u64, cdb_len: u64, data: u64, dlen: u64,
             s(state, S_LASTDATA, 0)
         }
         if n < 0 {
-            // Ein STALL im Datenteil ist kein Weltuntergang -- das
-            // Protokoll sieht ihn vor. Der Endpunkt wird
-            // zurueckgesetzt, und die Quittung wird trotzdem geholt;
-            // sie sagt, was wirklich war.
             unstall(state, d, dci)
         }
     }
@@ -3832,9 +3033,6 @@ fn unstall(state: u64, d: u64, dci: u64) {
     if i >= xhci.MAX_EP {
         return
     }
-    // CLEAR_FEATURE(ENDPOINT_HALT) an das GERAET und `Reset Endpoint` an
-    // den REGLER: beide Seiten haben den Anschlag gemerkt, und beide
-    // muessen ihn vergessen.
     var epaddr: u64 = dci / 2
     if (dci & 1) != 0 {
         epaddr = epaddr | 0x80
@@ -3885,17 +3083,12 @@ fn msc_start(state: u64, d: u64) -> bool {
         return false
     }
     let buf: u64 = state + DESC_OFF
-    // INQUIRY: 36 Oktett, und die Oktette 8..15 sind der Hersteller --
-    // die einzige Stelle, an der ein Stick sagt, wer er ist.
     zero(buf, 64)
     let inq_cdb: u64 = scsi.inquiry(cdb(state), 36)
     if !bot(state, d, inq_cdb, buf, 36, true) {
         return false
     }
     let inq_len: u64 = g(state, S_LASTDATA)
-    // TEST UNIT READY, bis zu fuenfmal. Ein Stick, der gerade erst
-    // angesteckt wurde, meldet beim ersten Mal oft "nicht bereit"; das
-    // ist kein Fehler, sondern der Grund, warum es diesen Befehl gibt.
     var tries: u64 = 0
     var up: bool = false
     while tries < 5 && !up {
@@ -3910,12 +3103,6 @@ fn msc_start(state: u64, d: u64) -> bool {
     if !up {
         return false
     }
-    // Die Antwort auf READ CAPACITY kommt in einen EIGENEN Puffer.
-    // Der erste Entwurf schrieb sie ueber die INQUIRY-Antwort, und
-    // danach war der Herstellername in der Meldung leer -- ein Fehler,
-    // der nur in der AUSGABE stand und nicht im Treiber, und der genau
-    // deshalb eine Stunde gekostet haette, wenn ihn niemand gemeldet
-    // haette.
     let cap: u64 = buf + 128
     zero(cap, 32)
     let cap_cdb: u64 = scsi.read_capacity10(cdb(state))
@@ -3934,15 +3121,11 @@ fn msc_start(state: u64, d: u64) -> bool {
         bs = be32(cap, 8)
     }
     if bs != 512 {
-        // Ehrlich statt still: `blk.fi` spricht 512 Oktett je Block,
-        // und ein Stick mit 4096 waere ein anderer Treiber. Er wird
-        // gemeldet und NICHT eingehaengt.
         serial.puts((&s_bad[0]) as u64)
         serial.dec(bs)
         serial.nl()
         return false
     }
-    // RUNDE HOTPLUG-2: die Groesse gehoert zum GERAET, nicht zum Baum.
     ds(state, d, D_MSCBLK, last + 1)
     ds(state, d, D_MSCBS, bs)
     serial.puts((&s_msc[0]) as u64)
@@ -3992,13 +3175,6 @@ fn msc_sync_at(state: u64, i: u64) -> bool {
     return done
 }
 
-// Die zwei Zeilen, an denen `blk.fi` haengt. Ein Block, 512 Oktett, und
-// die Schicht darueber erfaehrt nicht, dass er ueber vier Endpunkte und
-// drei Uebertragungen gekommen ist.
-// RUNDE HOTPLUG-2: MIT PLATZNUMMER. `i` sagt, WELCHER Stick gemeint
-// ist; `bot` nahm die Geraetenummer schon immer entgegen und holt
-// Steckplatz und Endpunkte aus dem Geraetefeld -- der Transport war
-// also nie einzelgeraetig, nur die Zeile darueber.
 fn msc_read_at(state: u64, i: u64, lba: u64, dst: u64) -> bool {
     if !msc_ready_at(state, i) {
         return false
@@ -4045,9 +3221,6 @@ fn copy(from: u64, to: u64, n: u64) {
 
 // ------------------------------------------------------ abziehen
 
-// Nachsehen, ob ein Geraet verschwunden ist. Wird aus dem Zeitgeber
-// gerufen und aus der Gegenprobe -- und der Unterschied zwischen
-// "abgezogen" und "war nie da" steht in der Bitkarte S_ATTACHED.
 fn unplug_check(state: u64) {
     if g(state, S_READY) == 0 || g(state, S_BUSY) != 0 {
         return
@@ -4149,12 +3322,6 @@ fn gone(state: u64, p: u64) {
     }
 }
 
-// DIE GEGENPROBE ZUM ABZIEHEN, ohne dass jemand am Stecker zieht: der
-// Anschluss wird fuer weg erklaert. Genau das, was passiert, wenn eine
-// Hand den Stick herauszieht -- der Regler meldet einen Anschlusswechsel
-// und CCS faellt auf null. Hier wird nur der zweite Teil nachgestellt,
-// und was danach geschieht (kein Panik, ENODEV auf offenen Deskriptoren)
-// ist dasselbe.
 fn unplug_now(state: u64) {
     if g(state, S_READY) == 0 {
         return
@@ -4201,16 +3368,6 @@ fn say(state: u64) {
     serial.nl()
 }
 
-// WAS DER BAUM IN DIESEM LAUF WIRKLICH GETAN HAT. Diese Zeile steht am
-// ENDE des Laufs, nicht am Anfang -- alles darin ist eine Zahl, die
-// waehrend der Arbeit entstanden ist, und `tools/k17/run.sh` liest jede
-// einzelne zurueck. Eine Runde, die eine Tastatur baut und nicht sagen
-// kann, wie viele Tasten ueber sie gekommen sind, hat nichts vorzuweisen.
-//
-// `keys` ist dabei die wichtigste: sie zaehlt NUR die Tasten, die durch
-// `usb.press` gegangen sind. Steht dort null und in der Shell trotzdem
-// Text, dann hat die PS/2-Tastatur getippt und nicht die USB-Tastatur --
-// genau der Selbstbetrug, gegen den diese Zahl da ist.
 fn report(state: u64) {
     var s_h: [u8; 11] = "usb: keys=\0"
     var s_r: [u8; 10] = " reports=\0"
@@ -4256,11 +3413,6 @@ fn report(state: u64) {
     serial.dec(g(state, S_NDEV))
     serial.puts((&s_t[0]) as u64)
     serial.dec(selftest(state))
-    // Wo der Zeiger steht, welche Taste haengt und wie viele Pakete
-    // durchgegangen sind. Die drei Zahlen kommen aus `ps2m` und NICHT
-    // aus diesem Treiber -- das ist der Sinn der Sache: eine USB-Maus,
-    // die ihre eigene Position fuehrte, waere ein zweites Zeigegeraet
-    // und kein Geraet am selben Zeiger.
     serial.puts((&s_mx[0]) as u64)
     serial.dec(gfx.mouse_x(state))
     serial.puts((&s_my[0]) as u64)
@@ -4275,10 +3427,6 @@ fn report(state: u64) {
     hid_report(state)
 }
 
-// RUNDE HID: EINE EIGENE ZEILE, und das mit Absicht. Die Zeile `usb:`
-// wird seit K17 von `tools/k17/run.sh` Wort fuer Wort gelesen; wer eine
-// Zahl dazwischenschiebt, bricht einen Test, der mit dieser Runde
-// nichts zu tun hat.
 fn hid_report(state: u64) {
     var s_a: [u8; 10] = "hid: gen=\0"
     var s_b: [u8; 8] = " rdlen=\0"
@@ -4293,10 +3441,6 @@ fn hid_report(state: u64) {
     hidin.say(state)
 }
 
-// WAS RING 3 UEBER DIESEN BAUM ERFAHREN DARF. Eine Zahl je Frage, ueber
-// SYS_OSUM_USBSTAT (1701) -- damit `/bin/k17` jede Zusage dieser Runde
-// von AUSSEN messen kann und nicht aus der seriellen Leitung des Kerns
-// abschreiben muss. Dieselbe Bauart wie SYS_OSUM_MNTSTAT aus Runde K14.
 fn stat(state: u64, what: u64) -> u64 {
     if what == 0 {
         return yes(ready(state))
@@ -4313,9 +3457,6 @@ fn stat(state: u64, what: u64) -> u64 {
     if what == 4 {
         return yes(msc_ready(state))
     }
-    // RUNDE HOTPLUG-2: die Groesse des ERSTEN Sticks. Die Zahlen sind
-    // eine Auskunft fuer den Schirm; wer einen bestimmten Stick meint,
-    // fragt `blk.blocks_on(DEV_USB0 + n)`.
     if what == 5 {
         return msc_blocks(state)
     }
@@ -4376,9 +3517,6 @@ fn stat(state: u64, what: u64) -> u64 {
     return 0
 }
 
-// Der Selbsttest dieser Schicht: Zusagen, die sie ueber sich selbst
-// machen kann, ohne dass ein Testlaeufer sie ihr vorsagt. Rueckgabe: wie
-// viele davon halten.
 fn selftest(state: u64) -> u64 {
     var n: u64 = 0
     if xhci.ready(state) {
@@ -4408,20 +3546,9 @@ fn selftest(state: u64) -> u64 {
     return n
 }
 
-
 // ####################################################################
 // ############################################ RUNDE BLECHEINGABE
 // ####################################################################
-//
-// DREI DINGE, DIE IN DIESEM BAUM NICHT VORHANDEN WAREN, und alle drei
-// hat Justin durch Nachsehen im Quelltext gefunden, nicht durch Raten:
-//
-//   1. `grep -i hub kernel/usb.fi kernel/xhci.fi` -> NULL TREFFER.
-//      Der Kern sah ausschliesslich Geraete an einem WURZELANSCHLUSS.
-//   2. `grep 'SET_REPORT|LED|numlock' kernel/` -> NULL TREFFER.
-//      Der Kern konnte eine Lampe an einer Tastatur nicht setzen.
-//   3. Ein Geraet, das nicht passte, verschwand SPURLOS (`drop_dev`).
-//      Auf dem Schirm stand "devices=0", und das ist keine Auskunft.
 
 // ==================================================== DIE FUNDLISTE
 
@@ -4483,10 +3610,6 @@ fn fund_driver_set(state: u64, i: u64, k: u64) {
     }
 }
 
-// Wurde KEINE Schnittstelle genommen, steht die ERSTE auf dem Schirm --
-// sonst waere die Zeile leer, und "leer" ist genau die Auskunft, die
-// nicht weiterhilft. `Klasse 09` an dieser Stelle heisst: dort sitzt ein
-// Hub, den dieser Kern nicht bedient.
 fn first_iface(state: u64, i: u64, buf: u64, total: u64) {
     var at: u64 = 0
     while at + 2 <= total {
@@ -4586,17 +3709,6 @@ fn pending(state: u64) -> u64 {
     return g(state, S_PENDN)
 }
 
-// ============================================ DIE LAMPEN DER TASTATUR
-//
-// SET_REPORT, Ausgabebericht: bmRequestType 0x21 (Wirt an Geraet,
-// KLASSE, Empfaenger SCHNITTSTELLE), bRequest 0x09, wValue
-// (2 << 8) | ReportID 0, wIndex = die Schnittstellennummer, ein Oktett
-// Nutzlast: Bit 0 Nummernfeststell, Bit 1 Feststell, Bit 2 Rollen.
-//
-// DAS IST JUSTINS PRUEFSTEIN: druecken, Lampe wechselt -- dann steht
-// die ganze Kette Tastatur -> Regler -> Kern -> Regler -> Tastatur.
-// Bleibt sie stehen, weiss man, dass sie NICHT steht, und das ist mehr
-// als bisher.
 fn set_leds(state: u64, mask: u64) -> bool {
     let k: u64 = g(state, S_KBD)
     if k == 0 {
@@ -4606,15 +3718,6 @@ fn set_leds(state: u64, mask: u64) -> bool {
     if dg(state, d, D_USED) == 0 {
         return false
     }
-    // RUNDE BLECHZWEI: NICHT ZWEIMAL GLEICHZEITIG AUF DENSELBEN RING.
-    //
-    // `herz_leds` kommt aus dem Zeitgeberbehandler, `led_service` aus
-    // der Meldung des Geraets und aus `usb.poll` in der
-    // Schreibtischschleife. Beide legen Bloecke auf den
-    // Steuerungsendpunkt DESSELBEN Steckplatzes. Faellt die
-    // Unterbrechung einer laufenden Uebertragung ins Wort, warten
-    // danach beide auf eine Meldung, die nur einmal kommt -- und beide
-    // zaehlen einen Fehlschlag.
     if g(state, S_LEDBUSY) != 0 {
         return false
     }
@@ -4634,9 +3737,6 @@ fn set_leds(state: u64, mask: u64) -> bool {
     return true
 }
 
-// Wie oft es VERSUCHT wurde, und ob es ueberhaupt eine Tastatur gibt.
-// `LED 0` allein ist zweideutig: keine Tastatur, oder Tastatur da und
-// der Transfer scheitert. Zwei Zahlen, zwei Antworten.
 fn leds_try(state: u64) -> u64 {
     return g(state, S_LEDTRY)
 }
@@ -4645,14 +3745,10 @@ fn kbd_dev(state: u64) -> u64 {
     return g(state, S_KBD)
 }
 
-// Dasselbe fuer die Maus. Sie ist der FUNKTIONIERENDE Zweig auf
-// Justins Brett und damit die Vergleichszahl: was bei ihr steht und
-// bei der Tastatur nicht, ist der Unterschied.
 fn mouse_dev(state: u64) -> u64 {
     return g(state, S_MOUSE)
 }
 
-// RUNDE BLECHFUENF: was EIN Geraet fuer sich gemeldet hat.
 fn dev_reps(state: u64, d: u64) -> u64 {
     if d >= MAX_DEV {
         return 0
@@ -4695,8 +3791,6 @@ fn dev_generic(state: u64, d: u64) -> u64 {
     return dg(state, d, D_GENERIC)
 }
 
-// EIN OKTETT DES ZULETZT EMPFANGENEN BERICHTS. Das ist die Zahl, die
-// Justins Tastendruck sichtbar macht -- oder eben nicht.
 fn dev_roh(state: u64, d: u64, k: u64) -> u64 {
     if d >= MAX_DEV || k >= 64 {
         return 0
@@ -4732,8 +3826,6 @@ fn dev_intdci(state: u64, d: u64) -> u64 {
     return dg(state, d, D_INTDCI)
 }
 
-// Der Endpunktzustand, wie der REGLER ihn in den Geraetezusammenhang
-// schreibt. 1 = laeuft, 2 = angehalten, 4 = Fehler, 0 = gar nicht da.
 fn dev_epstate(state: u64, d: u64) -> u64 {
     if d >= MAX_DEV {
         return 0
@@ -4751,28 +3843,10 @@ fn without_space(state: u64) -> u64 {
 
 // ================================================== RUNDE BLECHDREI
 // LAEUFT GERADE EINE AUFZAEHLUNG?
-//
-// Justins Brett meldete im vorigen Lauf `kbd=1 mouse=1` und im
-// naechsten, mit demselben Kern, `kbd=0 mouse=0` -- ohne dass eine
-// einzige Zeile am Aufzaehlen geaendert worden waere (der Unterschied
-// zwischen bdc0d0f und f513165 an `usb.fi` sind 35 Zeilen, und alle
-// betreffen die Lampen). Was sich geaendert hat, ist die ZEIT: seit der
-// Runde HAENGER malt die Messtafel aus dem Zeitgeberbehandler, und seit
-// BLECHZWEI haelt sie dabei `slot_remap` und `copy_words` unter
-// `irq_save` zusammen. Auf einem gestreiften Rahmenpuffer (Justins
-// 3060, 19,8 MB durch EIN 2-MiB-Fenster) sind das lange Fenster mit
-// abgeschalteten Unterbrechungen -- mitten in `port_reset` und den
-// Wartezeiten des Aufzaehlens.
-//
-// Also malt die Tafel nicht, solange aufgezaehlt wird. Sie hat danach
-// den Rest der Laufzeit dafuer Zeit.
 fn busy(state: u64) -> u64 {
     return g(state, S_BUSY)
 }
 
-// Hat eine Feststelltaste den Zustand umgelegt, geht er hinaus. Der
-// Zustand liegt in `kbd.fi` -- der EINEN Stelle, durch die PS/2 und USB
-// beide gehen; zwei Zustaende waeren zwei Wahrheiten.
 fn led_service(state: u64) {
     if g(state, S_READY) == 0 || g(state, S_KBD) == 0 {
         return
@@ -4796,14 +3870,6 @@ fn leds_last(state: u64) -> u64 {
     return g(state, S_LEDS)
 }
 
-// DER HERZSCHLAG AUF DER LAMPE. Aus dem Zeitgeberbehandler, einmal je
-// Sekunde: die ROLLEN-Lampe wird ueber den Tastenzustand gelegt und
-// wieder abgenommen. Blinkt sie, laeuft der Zeitgeber -- und das ist
-// die Aussage, die weder Bildschirm noch serielle Leitung braucht.
-//
-// Der Tastenzustand bleibt dabei unberuehrt: gelegt wird mit `xor`,
-// und was der Mensch mit Feststell und Nummernfeststell eingestellt
-// hat, steht weiter in `kbd.fi`.
 fn beat_leds(state: u64, an: u64) {
     if g(state, S_READY) == 0 || g(state, S_KBD) == 0 {
         return
@@ -4820,21 +3886,6 @@ fn beat_leds(state: u64, an: u64) {
 }
 
 // ==================================================== DER HUB-TREIBER
-//
-// Ein Hub ist ein Geraet wie jedes andere -- bis auf eine Kleinigkeit:
-// hinter ihm haengen weitere. Er beantwortet KLASSENANFRAGEN an sich
-// selbst (bmRequestType 0xA0) und an seine Anschluesse (0xA3/0x23),
-// und der Regler muss von ihm wissen, sonst schickt er die Pakete an
-// den Hub statt durch ihn hindurch.
-//
-// DIE REIHENFOLGE, und keine Stufe laesst sich ueberspringen:
-//   1. Hub-Deskriptor holen  -> wie viele Anschluesse, wie lange bis
-//      Spannung steht (bPwrOn2PwrGood, in 2-ms-Schritten).
-//   2. Dem REGLER sagen, dass dies ein Hub ist (Hub-Fahne und
-//      Anschlusszahl im Steckplatzzusammenhang, `Configure Endpoint`).
-//   3. Jeden Anschluss EINSCHALTEN und die angesagte Zeit warten.
-//   4. Zustand lesen; wo etwas steckt: Ruecksetzen, Geschwindigkeit
-//      ablesen, und das Geraet mit WEGWEISER am Regler anmelden.
 
 fn hub_desc(state: u64, d: u64) -> bool {
     let p: u64 = state + HUB_OFF
@@ -4855,10 +3906,6 @@ fn hub_desc(state: u64, d: u64) -> bool {
     return true
 }
 
-// Dem Regler sagen, dass hinter diesem Steckplatz ein Hub sitzt.
-// `Configure Endpoint` mit NUR dem Steckplatzblock -- so macht es jeder
-// Treiber, und `Evaluate Context` kann es laut xHCI 1.2, 4.6.7 nicht
-// (das wertet nur Interrupter Target und Max Exit Latency aus).
 fn hub_slot_update(state: u64, d: u64) -> bool {
     let slot: u64 = dg(state, d, D_SLOT)
     let sc: u64 = xhci.dev_slot_ctx(state, slot)
@@ -4866,21 +3913,20 @@ fn hub_slot_update(state: u64, d: u64) -> bool {
     build_slot(state, d, entries)
     let ic: u64 = xhci.in_control(state)
     wr32(ic, 0)
-    wr32(ic + 4, 1) // nur der Steckplatzblock
+    wr32(ic + 4, 1)
     return xhci.configure_endpoint(state, slot) == xhci.CC_SUCCESS
 }
 
-fn hub_feature(state: u64, d: u64, setzen: bool, merkmal: u64,
+fn hub_feature(state: u64, d: u64, assign: bool, merkmal: u64,
     port: u64) -> bool {
     var req: u64 = REQ_CLEAR_FEATURE
-    if setzen {
+    if assign {
         req = REQ_SET_FEATURE
     }
     return xhci.control(state, dg(state, d, D_SLOT), 0x23, req,
         merkmal, port, 0, 0, false) >= 0
 }
 
-// wPortStatus in den unteren 16 Bit, wPortChange in den oberen.
 const HUB_STATUS_ERR: u64 = 0xFFFFFFFFFFFFFFFF
 
 fn hub_port_read(state: u64, d: u64, port: u64) -> u64 {
@@ -4927,8 +3973,6 @@ fn hub_child_gone(state: u64, d: u64, p: u64) {
     }
 }
 
-// Aus dem Anschlusszustand die Geschwindigkeit, in der Zaehlweise des
-// Reglers: 1 voll, 2 langsam, 3 hoch, 4 Super.
 fn hub_speed(state: u64, d: u64, st: u64) -> u64 {
     if dg(state, d, D_SPEED) >= 4 {
         return 4
@@ -4950,7 +3994,6 @@ fn hub_port_reset(state: u64, d: u64, port: u64) -> bool {
     var fertig: bool = false
     while ms < 800 {
         let st: u64 = hub_port_status(state, d, port)
-        // C_PORT_RESET (Wechselbit 4) heisst: das Ruecksetzen ist durch.
         if (st & (1 << (16 + 4))) != 0 {
             fertig = true
             ms = 800
@@ -4996,26 +4039,22 @@ fn hub_start(state: u64, d: u64) {
     hub_scan(state, d)
 }
 
-// DIE ANSCHLUESSE HINTER DEM HUB. Erst alle einschalten und WIRKLICH
-// warten (der Hub sagt in bPwrOn2PwrGood selbst, wie lange), dann
-// nachsehen. Wer sofort nachsieht, sieht nichts -- und genau daran ist
-// die Vorrunde am Wurzelanschluss schon einmal gescheitert.
 fn hub_scan(state: u64, d: u64) {
     let n: u64 = dg(state, d, D_PORTS)
     let p0: u64 = state + HUB_OFF
-    var warten: u64 = b8(p0, 5) * 2000 // bPwrOn2PwrGood, 2-ms-Schritte
-    if warten < 100000 {
-        warten = 100000
+    var wait_for: u64 = b8(p0, 5) * 2000 // bPwrOn2PwrGood, 2-ms-Schritte
+    if wait_for < 100000 {
+        wait_for = 100000
     }
-    if warten > 400000 {
-        warten = 400000
+    if wait_for > 400000 {
+        wait_for = 400000
     }
     var p: u64 = 1
     while p <= n {
         hub_feature(state, d, true, PF_POWER, p)
         p = p + 1
     }
-    xhci.udelay(state, warten)
+    xhci.udelay(state, wait_for)
     p = 1
     while p <= n {
         let st: u64 = hub_port_status(state, d, p)
@@ -5118,24 +4157,6 @@ fn hub_rescan_ports(state: u64, d: u64) {
     }
 }
 
-// ======================= DAS AUFZAEHLEN GEHOERT NICHT IN DEN ZEITGEBER
-//
-// HIER STAND EIN ECHTER FEHLER, und er erklaert ein eingefrorenes Bild
-// besser als alles andere: `trap.fi` rief viermal je Sekunde
-// `unplug_check` AUS DEM ZEITGEBERBEHANDLER -- mit abgeschalteten
-// Unterbrechungen. Und `unplug_check` ruft `attach`, und `attach` ruft
-// `xhci.port_reset`, und darin stehen `udelay(100000)`, eine Schleife
-// von bis zu 500 ms und noch einmal `udelay(20000)`. Das sind
-// ZEHNTELSEKUNDEN BIS SEKUNDEN IM ZEITGEBERBEHANDLER, in denen der
-// Zeitgeber selbst nicht schlaegt, niemand geweckt wird und kein Bild
-// mehr entsteht. Kommt ein Anschluss dabei nicht zur Ruhe, steht der
-// Rechner endgueltig -- Uhr eingefroren, keine Eingabe, keine Tafel.
-//
-// Jetzt macht der Zeitgeber nur noch das, was ein
-// Unterbrechungsbehandler darf: EIN Lesezugriff je Anschluss, das
-// Wechselbit quittieren, den Anschluss vormerken. Die Arbeit selbst
-// (Ruecksetzen, Deskriptoren, Hub) macht `hotplug_work` in der
-// Schreibtischschleife, wo sie schlafen und dauern darf.
 fn port_watch(state: u64) {
     if g(state, S_READY) == 0 || g(state, S_BUSY) != 0 {
         return
@@ -5171,35 +4192,6 @@ fn port_watch(state: u64) {
     }
 }
 
-// ============================================== RUNDE ECHTHARDWARE-6
-// DER WACHHUND FUER EINEN RING, DER STILL GEWORDEN IST.
-//
-// Der Fehler in `bind` erklaert, warum die Tafel das FALSCHE Geraet
-// zeigte. Er erklaert nicht den zweiten, unabhaengigen Fall: ein
-// Unterbrechungsblock liegt auf dem Ring, die Meldung dazu geht
-// verloren (verlorene MSI, ein Regler, der nach dem Aufwachen keine
-// mehr schickt), und dann wartet `service` auf eine Fertigmeldung, die
-// nie kommt. Danach legt niemand mehr einen Block nach, denn genau das
-// tut `service` -- der einzige Ort, an dem `arm` gerufen wird.
-//
-// Das ist eine SELBSTHALTENDE Stille: ein einziges verlorenes
-// Ereignis legt die Tastatur fuer den Rest der Sitzung still, und von
-// aussen sieht es aus wie `ARM n, BER n-1` bei laufendem Endpunkt.
-// Genau dieses Zahlenbild stand auf Justins Foto.
-//
-// Der Wachhund haengt am selben Zeitgeber wie `port_watch` (alle 25
-// Schlaege, also rund viermal je Sekunde bei 100 Hz). Er sieht nach,
-// ob sich der Zaehler eines HID-Geraets seit dem letzten Blick bewegt
-// hat. Bewegt er sich nicht, wird EINMAL nachgesehen (`xhci.drain` +
-// `service`) -- das kostet nichts, wenn ohnehin nichts anliegt, und
-// holt eine verlorene Meldung nach, wenn eine verloren ging.
-//
-// WICHTIG, UND DESHALB STEHT ES HIER: NICHT einfach `arm` rufen. Ein
-// zweiter Block auf einem Ring, auf dem schon einer liegt, ist ein
-// Fehler und kein Rueckfall -- deshalb geht der Weg ueber `service`,
-// das den Ring liest und nur nachlegt, wenn wirklich etwas fertig
-// wurde. Wer hier `arm` schriebe, bekaeme `ARM` ins Unendliche und
-// haette den Fehler, den diese Runde beseitigt, nur verschoben.
 fn silence_check(state: u64) {
     if g(state, S_READY) == 0 || g(state, S_BUSY) != 0 {
         return
@@ -5208,11 +4200,11 @@ fn silence_check(state: u64) {
     var d: u64 = 0
     while d < MAX_DEV {
         if dg(state, d, D_USED) != 0 && dg(state, d, D_INTDCI) != 0 {
-            let jetzt: u64 = dg(state, d, D_REPS)
-            if jetzt == dg(state, d, D_WACH) {
+            let now: u64 = dg(state, d, D_REPS)
+            if now == dg(state, d, D_WACH) {
                 still = true
             }
-            ds(state, d, D_WACH, jetzt)
+            ds(state, d, D_WACH, now)
         }
         d = d + 1
     }
@@ -5221,38 +4213,12 @@ fn silence_check(state: u64) {
         xhci.drain(state)
         service(state)
     }
-    // ========================================== RUNDE ECHTHARDWARE-6
-    // UND WENN AUCH DAS NICHTS HILFT: DEN ENDPUNKT NEU AUFSETZEN.
-    //
-    // Justins zweites Foto (15:39, nach 42 Minuten) zeigt
-    // `USB BER 122651` -- die Tastatur lief. Beim Start davor stand
-    // `BER 0`. Der Fehler ist also NICHT dauerhaft, sondern haengt am
-    // Startablauf, und das ist schlimmer als ein harter Fehler: mal
-    // geht sie, mal nicht.
-    //
-    // `drain`+`service` holt eine VERLORENE Meldung nach. Es hilft
-    // nicht, wenn gar kein Block auf dem Ring liegt -- dann gibt es
-    // nichts, was fertig werden koennte, und der Zaehler steht fuer
-    // immer. Genau dieses Bild ist `ARM 1 BER 0` bei laufendem
-    // Endpunkt.
-    //
-    // Deshalb die zweite Stufe: bleibt EIN Geraet mit
-    // Unterbrechungsendpunkt WACH_GRENZE Blicke lang stumm (bei vier
-    // Blicken je Sekunde sind das rund fuenf Sekunden), wird sein
-    // Endpunkt einmal frisch bestueckt. `arm` ist hier richtig und
-    // oben falsch: oben lag moeglicherweise noch ein Block, hier ist
-    // seit fuenf Sekunden nachweislich nichts passiert.
-    //
-    // EINMAL, NICHT IMMER WIEDER: `D_WIEDER` zaehlt die Versuche je
-    // Geraet und deckelt sie. Ein Ring, der sich nach drei Anlaeufen
-    // nicht bewegt, ist kein Ring mehr, den man durch Klingeln
-    // ueberzeugt -- dann ist die Zahl auf der Tafel die Auskunft.
     var e: u64 = 0
     while e < MAX_DEV {
         if dg(state, e, D_USED) != 0 && dg(state, e, D_INTDCI) != 0
             && dg(state, e, D_REPS) == 0 {
             ds(state, e, D_STUMM, dg(state, e, D_STUMM) + 1)
-            if dg(state, e, D_STUMM) >= WACH_GRENZE
+            if dg(state, e, D_STUMM) >= WATCH_LIMIT
                 && dg(state, e, D_AGAIN) < AGAIN_MAX {
                 if refill(state, e) {
                     ds(state, e, D_AGAIN, dg(state, e, D_AGAIN) + 1)
@@ -5267,46 +4233,37 @@ fn silence_check(state: u64) {
     }
 }
 
-// Wie oft ein stummer Endpunkt neu bestueckt wurde. Auf der Tafel
-// steht die Zahl als `NEU` in Zeile 18 -- laeuft sie hoch und `BER`
-// bleibt null, hat das Geraet wirklich nichts zu sagen; laeuft sie
-// einmal hoch und `BER` steigt danach, hat die Wiederherstellung
-// gegriffen.
 fn wiedern(state: u64) -> u64 {
     return g(state, S_WIEDERN)
 }
 
-// Wie oft der Wachhund nachgesehen hat. Steht diese Zahl still und die
-// Tastatur laeuft, hat er nie eingreifen muessen; laeuft sie hoch,
-// waehrend `BER` steigt, holt er wirklich Meldungen nach.
 fn wachen(state: u64) -> u64 {
     return g(state, S_WACHN)
 }
 
-// AUS DER SCHREIBTISCHSCHLEIFE, in Aufgabenkontext. Hier darf es dauern.
 fn hotplug_work(state: u64) {
     if g(state, S_READY) == 0 || g(state, S_BUSY) != 0 {
         return
     }
-    let offen: u64 = g(state, S_PEND)
+    let is_open: u64 = g(state, S_PEND)
     let hubdue: u64 = g(state, S_HUBDUE)
-    if offen == 0 && hubdue == 0 {
+    if is_open == 0 && hubdue == 0 {
         return
     }
     s(state, S_PEND, 0)
     s(state, S_HUBDUE, 0)
-    if offen != 0 {
+    if is_open != 0 {
         chdiag.bump(state, chdiag.F_PASSES)
     }
     s(state, S_BUSY, 1)
     let n: u64 = xhci.ports(state)
     var p: u64 = 1
     while p <= n && p < 64 {
-        if (offen & (1 << p)) != 0 {
-            let jetzt: bool = xhci.port_connected(state, p)
-            if was_there(state, p) && !jetzt {
+        if (is_open & (1 << p)) != 0 {
+            let now: bool = xhci.port_connected(state, p)
+            if was_there(state, p) && !now {
                 gone(state, p)
-            } else if !was_there(state, p) && jetzt {
+            } else if !was_there(state, p) && now {
                 s(state, S_HOTPLUGS, g(state, S_HOTPLUGS) + 1)
                 mark(state, p)
                 attach(state, p)
@@ -5330,6 +4287,6 @@ fn resume(state: u64) -> bool {
         return false
     }
     let armed: bool = !kstate.mode_on(state, kstate.M_NOUSBIRQ)
-    let _p: u64 = versuch(state, g(state, S_WAHL), armed)
+    let _p: u64 = versuch(state, g(state, S_CHOICE), armed)
     return ready(state)
 }

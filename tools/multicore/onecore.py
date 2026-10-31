@@ -88,7 +88,7 @@ PUFFER = re.compile(
 SPERRE = re.compile(r"\benter\(state\)|\bfs\.enter\(|atomic\.lock_take\("
                     r"|serial\.zeile_an\("
                     # RUNDE GLYPHE: die drei Namen des Zeichenwegs.
-                    r"|buehne_an\(|buehne_wenn_|tafel_an\(|stage_of\(")
+                    r"|buehne_an\(|buehne_wenn_|table_on\(|stage_of\(")
 
 # RUNDE GLYPHE: die zweite Bauform -- eine Seite, die die Datei ueber
 # einen EIGENEN Zugriff holt. Der Zugriff selbst wird hier gesucht ...

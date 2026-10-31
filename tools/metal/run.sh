@@ -386,7 +386,7 @@ hat "$TMPD/8a.txt" "ehci: skipped" \
 hatnicht "$TMPD/8a.txt" "ehci: dev 0" "und kein Geraet wird aufgezaehlt"
 
 lauf "$TMPD/neu.mb" "ehci nokbd nosched noproc nofs noring3" "$TMPD/8b.txt"
-hat "$TMPD/8b.txt" "ehci: kein EHCI auf dem Bus" \
+hat "$TMPD/8b.txt" "ehci: no EHCI on the bus" \
     "GEGENPROBE mit dem Wort, aber ohne Regler: eine Meldung statt eines Haengers"
 
 # Derselbe Treiber an einem ANDEREN Regler: der EHCI des ICH9 auf q35.
