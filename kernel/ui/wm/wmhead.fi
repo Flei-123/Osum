@@ -1,0 +1,215 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.fb
+import drv.hid.ps2m
+import ui.wm.wmbase
+import ui.wm.wmlayout
+
+const EDGE_BOTTOM: u64 = 0
+
+const EDGE_TOP: u64 = 1
+
+const EDGE_LEFT: u64 = 2
+
+const HD_MAX: u64 = 8
+
+fn hd_multi(state: u64) -> bool {
+    return ps2m.heads(state) >= 2
+}
+
+fn hd_present(state: u64, hd: u64) -> bool {
+    return hd < HD_MAX && ps2m.head_w(state, hd) != 0
+}
+
+fn hd_primary(state: u64) -> u64 {
+    var hd: u64 = 0
+    while hd < HD_MAX {
+        if ps2m.head_w(state, hd) != 0 {
+            return hd
+        }
+        hd = hd + 1
+    }
+    return 0
+}
+
+fn hd_x(state: u64, hd: u64) -> u64 {
+    if !hd_multi(state) {
+        return 0
+    }
+    return ps2m.head_x(state, hd)
+}
+
+fn hd_y(state: u64, hd: u64) -> u64 {
+    if !hd_multi(state) {
+        return 0
+    }
+    return ps2m.head_y(state, hd)
+}
+
+fn hd_w(state: u64, hd: u64) -> u64 {
+    if !hd_multi(state) {
+        return wmlayout.gs(state, wmlayout.S_SW)
+    }
+    return ps2m.head_w(state, hd)
+}
+
+fn hd_h(state: u64, hd: u64) -> u64 {
+    if !hd_multi(state) {
+        return wmlayout.gs(state, wmlayout.S_SH)
+    }
+    return ps2m.head_h(state, hd)
+}
+
+fn hd_overlap(state: u64, hd: u64, x0: i64, y0: i64, x1: i64, y1: i64) -> u64 {
+    if !hd_present(state, hd) {
+        return 0
+    }
+    let hx: i64 = ps2m.head_x(state, hd) as i64
+    let hy: i64 = ps2m.head_y(state, hd) as i64
+    let hx1: i64 = hx + ps2m.head_w(state, hd) as i64
+    let hy1: i64 = hy + ps2m.head_h(state, hd) as i64
+    var ax: i64 = x0
+    if hx > ax {
+        ax = hx
+    }
+    var ay: i64 = y0
+    if hy > ay {
+        ay = hy
+    }
+    var bx: i64 = x1
+    if hx1 < bx {
+        bx = hx1
+    }
+    var by: i64 = y1
+    if hy1 < by {
+        by = hy1
+    }
+    if bx <= ax || by <= ay {
+        return 0
+    }
+    return ((bx - ax) as u64) * ((by - ay) as u64)
+}
+
+fn hd_at(state: u64, x: i64, y: i64) -> u64 {
+    var hd: u64 = 0
+    while hd < HD_MAX {
+        if hd_overlap(state, hd, x, y, x + 1, y + 1) != 0 {
+            return hd
+        }
+        hd = hd + 1
+    }
+    return HD_MAX
+}
+
+fn win_head(state: u64, i: u64) -> u64 {
+    if !hd_multi(state) || !wmbase.valid(state, i) {
+        return 0
+    }
+    let x0: i64 = wmbase.win_x(state, i)
+    let y0: i64 = wmbase.win_y(state, i)
+    let x1: i64 = x0 + wmbase.outer_w(state, i) as i64
+    let y1: i64 = y0 + wmbase.outer_h(state, i) as i64
+    var best: u64 = HD_MAX
+    var ba: u64 = 0
+    var hd: u64 = 0
+    while hd < HD_MAX {
+        let a: u64 = hd_overlap(state, hd, x0, y0, x1, y1)
+        if a > ba {
+            ba = a
+            best = hd
+        }
+        hd = hd + 1
+    }
+    if best == HD_MAX {
+        return hd_primary(state)
+    }
+    return best
+}
+
+fn hw_x(p: u64) -> u64 {
+    return (p >> 48) & 0xFFFF
+}
+
+fn hw_y(p: u64) -> u64 {
+    return (p >> 32) & 0xFFFF
+}
+
+fn hw_w(p: u64) -> u64 {
+    return (p >> 16) & 0xFFFF
+}
+
+fn hw_h(p: u64) -> u64 {
+    return p & 0xFFFF
+}
+
+fn head_work(state: u64, hd: u64) -> u64 {
+    let multi: bool = hd_multi(state)
+    let hx: u64 = hd_x(state, hd)
+    let hy: u64 = hd_y(state, hd)
+    let hw: u64 = hd_w(state, hd)
+    let hh: u64 = hd_h(state, hd)
+    var x0: u64 = hx
+    var y0: u64 = hy
+    var x1: u64 = hx + hw
+    var y1: u64 = hy + hh
+    if wmlayout.gs(state, wmlayout.S_NOSTRUT) == 0 {
+        if hx == 0 && hy == 0 {
+            let band: u64 = fb.band(state)
+            if band > y0 {
+                y0 = band
+            }
+        }
+        var i: u64 = 0
+        while i < wmbase.MAX_WIN {
+            if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmlayout.wg(state, i, wmlayout.W_STRUT) != 0
+                && (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) == 0 {
+                var on: bool = true
+                if multi {
+                    let sx: i64 = wmbase.win_x(state, i)
+                    let sy: i64 = wmbase.win_y(state, i)
+                    on = hd_overlap(state, hd, sx, sy, sx + wmbase.outer_w(state, i) as i64,
+                        sy + wmbase.outer_h(state, i) as i64) != 0
+                }
+                if on {
+                    let e: u64 = (wmlayout.wg(state, i, wmlayout.W_STRUT) & 0xFF) - 1
+                    let n: u64 = wmlayout.wg(state, i, wmlayout.W_STRUT) >> 8
+                    if e == EDGE_TOP {
+                        if hy + n > y0 {
+                            y0 = hy + n
+                        }
+                    } else if e == EDGE_BOTTOM {
+                        if n < hh && hy + hh - n < y1 {
+                            y1 = hy + hh - n
+                        }
+                    } else if e == EDGE_LEFT {
+                        if hx + n > x0 {
+                            x0 = hx + n
+                        }
+                    } else {
+                        if n < hw && hx + hw - n < x1 {
+                            x1 = hx + hw - n
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    if x1 < x0 + 64 || y1 < y0 + 64 {
+        x0 = hx
+        y0 = hy
+        x1 = hx + hw
+        y1 = hy + hh
+    }
+    return ((x0 & 0xFFFF) << 48) | ((y0 & 0xFFFF) << 32) | (((x1 - x0) & 0xFFFF) << 16) | ((y1 - y0) & 0xFFFF)
+}
+
+fn win_work(state: u64, i: u64) -> u64 {
+    if !hd_multi(state) {
+        return ((wmlayout.gs(state, wmlayout.S_WORK_X) & 0xFFFF) << 48) | ((wmlayout.gs(state, wmlayout.S_WORK_Y) & 0xFFFF) << 32)
+            | ((wmlayout.gs(state, wmlayout.S_WORK_W) & 0xFFFF) << 16) | (wmlayout.gs(state, wmlayout.S_WORK_H) & 0xFFFF)
+    }
+    return head_work(state, win_head(state, i))
+}
