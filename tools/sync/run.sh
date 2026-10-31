@@ -972,7 +972,7 @@ fi
 # (j3) Der Rueckschrittschutz wird ausgebaut: ein Zaehler, der nie
 #      steigt, muss den Rueckschrittfall aus (e) durchgehen lassen.
 rm -rf "$TMPD/usrc-j3"; cp -a kernel/user "$TMPD/usrc-j3"
-sed 's/^    if g < zaehler {$/    if false {/' kernel/user/sync.fi > "$TMPD/kaputt/sync-ohneschutz.fi"
+sed 's/^    if g < counter {$/    if false {/' kernel/user/sync.fi > "$TMPD/kaputt/sync-ohneschutz.fi"
 if ! cmp -s "$TMPD/kaputt/sync-ohneschutz.fi" kernel/user/sync.fi; then
     cp "$TMPD/kaputt/sync-ohneschutz.fi" "$TMPD/usrc-j3/sync.fi"
     if USRC="$TMPD/usrc-j3" bash tools/sync/build.sh "$TMPD/binj" 0 sync >/dev/null 2>&1; then
