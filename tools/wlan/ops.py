@@ -178,17 +178,17 @@ def check_parse():
 check_build()
 def check_diag():
     print("== setup failure diagnosis ==")
-    expect = [(1, 0x08, 0x00), (2, 0x28, 0x02), (3, 0x2B, 0x06), (4, 0x0C, 0x0E)]
-    out = run(["failstep %d" % i for i in range(5)])
+    expect = [(6, 0x18, 0x00), (1, 0x08, 0x40), (2, 0x28, 0x42), (3, 0x2B, 0x46), (4, 0x0C, 0x4E)]
+    out = run(["failstep %d" % i for i in range(6)])
     for i, (step, cmd, okm) in enumerate(expect):
         f = out[i].split(" ")
         ok(f[:2] == ["failstep", "rc"] and f[2] == "-70" and f[4] == str(step) and f[6] == "-70" and f[8] == str(cmd) and f[10] == str(okm),
            "command %d failing is reported as step %d cmd %d: %s" % (i, step, cmd, out[i]))
     for i in range(5):
         f = out[i].split(" ")
-        ok(f[12] == "0" and f[14] == "4", "setup retry after failure at command %d resends only the missing steps (4 commands total): %s" % (i, out[i]))
-    f = out[4].split(" ")
-    ok(f[2] == "0" and f[4] == "0" and f[6] == "0" and f[10] == "30", "all steps ok: no failed step, ok mask 0x1e: " + out[4])
+        ok(f[12] == "0" and f[14] == "5", "setup retry after failure at command %d resends only the missing steps (5 commands total): %s" % (i, out[i]))
+    f = out[5].split(" ")
+    ok(f[2] == "0" and f[4] == "0" and f[6] == "0" and f[10] == "94", "all steps ok: no failed step, ok mask 0x5e: " + out[5])
 
 
 check_seq(True)
