@@ -100,7 +100,7 @@ echo "== 2. die Gegenprobe der Gegenprobe =="
 # Ein Vergleich, der nie anschlaegt, ist kein Vergleich. Also wird er
 # einmal absichtlich gebrochen.
 cp tools/netzui/logik.fi "$TMPD/kaputt.fi"
-sed -i 's|return (neu - alt) \* 100 / dt|return (neu - alt) * 99 / dt|' "$TMPD/kaputt.fi"
+sed -i 's|return (fresh - alt) \* 100 / dt|return (fresh - alt) * 99 / dt|' "$TMPD/kaputt.fi"
 a=$(rumpf kernel/user/settings.fi rate_aus)
 b=$(rumpf "$TMPD/kaputt.fi" rate_aus)
 if [ "$a" != "$b" ]; then

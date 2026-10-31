@@ -255,7 +255,7 @@ for key, ty, kind, act in binds:
 for k in ("settings.catpkg", "settings.pkg.ok", "settings.pkg.ask", "settings.pkg.err", "settings.pkg.nobus", "settings.pkg.deny"):
     for nm, cat in (("en", en), ("de", de)):
         if not re.search(r"^" + re.escape(k) + r" = ", cat, re.M): bad("catalogue key %s missing in %s" % (k, nm))
-for need in ("manifest.add_pkg(", '".prog/SETTINGS', "page_pkg(cl, cr, reiter - R_ANZ)", "pkg_init()", "pkg_cat(", "tab_key(p)", "key >= K_PKGTAB0", "kind == 999"):
+for need in ("manifest.add_pkg(", '".prog/SETTINGS', "page_pkg(cl, cr, active_tab - R_ANZ)", "pkg_init()", "pkg_cat(", "tab_key(p)", "key >= K_PKGTAB0", "kind == 999"):
     if need not in src: bad("settings.fi lacks: " + need)
 # every action call goes through the namespace check
 for fn in ("fn pkg_click", "fn pkg_read_page"):
