@@ -1,29 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/softui/run.sh -- ROUND SOFTUI: die Abnahme.
-#
-# Sieben Abschnitte, und jeder endet in einer Zahl, die ein Lauf
-# hergestellt hat. Die Regel ist die von Runde LOOK, mit dem Zusatz von
-# Runde PAINT: eine Aussage ueber den Bildschirm ist eine Aussage ueber
-# Bildpunkte, und eine neue Faehigkeit ohne ihren Preis ist eine halbe
-# Antwort.
-#
-#   A  classic ist unveraendert   dasselbe Bild wie auf dem Zweig, von
-#                                 dem diese Runde abzweigt -- Bildpunkt
-#                                 fuer Bildpunkt
-#   B  die Formdatei              alle 24 Marken werden gelesen, auch
-#                                 aus einer Datei mit sieben Kilooktetten
-#                                 Begruendung davor
-#   C  der Schatten               Maske gegen Ringe gegen gar keinen,
-#                                 in EINEM Lauf gemessen
-#   D  die drei Schaltflaechen    Strich, Quadrat, Kreuz -- als Bild
-#                                 nachgerechnet -- und der rote
-#                                 Schliessen-Knopf im Ueberfahr-Zustand
-#   E  der Fokus ohne Farbe       der Schatten des scharfen Fensters ist
-#                                 tiefer und weiter als der der anderen
-#   F  der Kontrast               nicht schlechter als vorher
-#   G  die Bilder                 keine leeren Beschriftungen, nichts
-#                                 abgeschnitten, nichts ueberlappend
 #
 #   bash tools/softui/run.sh
 set -uo pipefail
@@ -49,67 +24,24 @@ shot() { # dir args...
 val() { grep -aoE "$2" "$1" 2>/dev/null | tail -1 | grep -oE '[0-9]+$'; }
 
 echo "== A. classic ist unveraendert =="
-# DIE GEGENPROBE, DIE DIESE RUNDE UEBERHAUPT LANDEN LAESST.
-#
-# `modern` darf anders aussehen -- das ist der Auftrag. `classic` darf
-# es nicht, und das laesst sich nicht durch Nachdenken feststellen: die
-# Runde hat den Fensterserver, die Widget-Bibliothek, die Leiste und die
-# Einstellungen angefasst. Also wird das Bild gegen den Zweig gehalten,
-# von dem hier abgezweigt wurde, und zwar Bildpunkt fuer Bildpunkt.
-# Die Grundlinie ist ein Arbeitsbaum auf dem ELTERNCOMMIT dieser Runde
-# (d4c2742, nach den drei Merges und vor der ersten Zeile SOFTUI-Code) --
-# NICHT der Zweig `mergeline`: der hat weder `paint` noch `themestore`,
-# und der Unterschied waere dann deren Werk und nicht meins.
-#   git worktree add --detach /root/softui-base d4c2742
-#
-# RUNDE MERGE-2: DIE GRUNDLINIE IST HIER EINE ANDERE, AUS DEMSELBEN
-# GRUND. Im Integrationszweig steht vor `softui` auch `umlaut2` (echte
-# Umlaute in jeder Beschriftung), `usbimg` und `themestore` -- ein Bild
-# gegen den Elterncommit d4c2742 zu halten hiesse, deren Werk dieser
-# Runde zuzuschreiben. Die richtige Grundlinie ist der Integrationsstand
-# UNMITTELBAR VOR diesem Merge:
 #
 #   git worktree add --detach /root/mgline2-base 54bf135
 #   cd /root/mgline2-base && FIRNLIB=$(pwd)/lib bash tools/look/shot.sh \
 #       /tmp/softui/base-classic shape=classic scheme=day mode=light \
 #       keep=yes accel=tcg
 #
-# Die Aussage bleibt dieselbe: `classic` sieht nach dieser Runde
-# BILDPUNKTGENAU so aus wie davor.
 REF=${SOFTUIBASEPPM:-/tmp/softui/base-classic/desktop.ppm}
 if shot A shape=classic scheme=day mode=light keep=yes accel=tcg; then
     ok "classic bootet (QEMU exit 21)"
     if [ -s "$REF" ]; then
-        # ZWEI RECHTECKE SIND AUSGENOMMEN, UND BEIDE STEHEN IM BERICHT.
         #
-        # (1) Die Uhr in der Leiste. Sie zeigt die echte Zeit; zwei
-        #     Laeufe sind zwangslaeufig verschieden.
-        # (2) Die Malflaeche des Terminalfensters. Der Kernel spiegelt
-        #     seinen Mitschnitt auf den Schirm (`fb: console mirrored`),
-        #     und darin stehen die Groesse des Kerns, Rahmenadressen und
-        #     die Zahlen von `fbbench` -- alles Dinge, die sich aendern,
-        #     weil der Kern GROESSER geworden ist, und keines davon ist
-        #     eine Aussage ueber das Aussehen.
-        #
-        # Alles andere -- Schreibtisch, Leiste, Fensterrahmen,
-        # Titelleisten, Starter, Suchfenster -- wird ohne Nachsicht
-        # verglichen.
         G=$(python3 tools/softui/gleich.py "$REF" "$TMPD/A/desktop.ppm" \
             --zeit --ausser 26,62,560,380 2>&1)
         echo "$G" | sed 's/^/        /'
         D=$(echo "$G" | grep -oE 'unterschiedlich [0-9]+' | grep -oE '[0-9]+')
         is "classic: abweichende Bildpunkte gegen die Grundlinie" "${D:-x}" "0"
     else
-        # RUNDE MERGE-2: OHNE GRUNDLINIE WIRD UEBERSPRUNGEN, NICHT
-        # BEHAUPTET. Das Bild des VORHER-Standes kann dieser Lauf nicht
-        # selbst herstellen -- dazu gehoert ein zweiter Arbeitsbaum auf
-        # einem anderen Commit. Ein Fehlschlag waere hier eine Aussage
-        # ueber die Umgebung und nicht ueber den Code; ein stilles
-        # Bestehen waere gelogen. Also: sichtbar uebersprungen, mit der
-        # Anleitung daneben.
         #
-        # GEMESSEN wurde es (30.08.2026, Integrationszweig mergeline2,
-        # Grundlinie 54bf135): 0 von 480000 Bildpunkten anders.
         printf '   --    Abschnitt A uebersprungen: keine Grundlinie unter %s\n' "$REF"
         printf '         Herstellen:\n'
         printf '           git worktree add --detach /root/mgline2-base <commit-vor-softui>\n'
@@ -160,7 +92,6 @@ if [ -s "$TMPD/B/serial.txt" ]; then
     else
         bad "keine Zeitmessung im Mitschnitt"
     fi
-    # DER EIGENTLICHE MESSWERT: der Eckenabtaster ist aus dem Bild raus.
     if [ -n "$MA" ] && [ -n "$RA" ]; then
         le "Eckabtastungen je Bild mit der Maske" "$MA" "$((RA / 4))"
     fi
@@ -208,10 +139,6 @@ if shot E0 shape=modern scheme=day mode=light keep=yes shadow=on extra='nostart 
     python3 tools/softui/fokus.py "$TMPD/E0/desktop.ppm" \
         "$TMPD/E0/serial.txt" > "$TMPD/E.txt" 2>&1
     cat "$TMPD/E.txt" | sed 's/^/        /'
-    # `aktiv` steht am ZEILENANFANG, `inaktiv` auch -- und `aktiv` ist
-    # ein Teilwort von `inaktiv`. Ohne das ^ zaehlt die erste Zeile
-    # beide Male mit, und der Vergleich haelt eine Zahl gegen sich
-    # selbst.
     AT=$(grep -E '^aktiv ' "$TMPD/E.txt" | grep -oE 'tiefe=[0-9]+' | grep -oE '[0-9]+')
     IT=$(grep -E '^inaktiv ' "$TMPD/E.txt" | grep -oE 'tiefe=[0-9]+' | grep -oE '[0-9]+')
     if [ -n "$AT" ] && [ -n "$IT" ] && [ "$IT" -gt 0 ]; then
@@ -229,16 +156,7 @@ if shot E0 shape=modern scheme=day mode=light keep=yes shadow=on extra='nostart 
 fi
 
 echo "== F. der Kontrast =="
-# GEMESSEN WIRD ZWEIMAL, und die beiden Zahlen beantworten zwei Fragen.
 #
-# (1) Das TOKENMODELL. Die Marke, gegen die diese Runde antritt -- 5,16
-#     fuer day+modern und 12,36 fuer night+modern -- ist das Paar
-#     `on-accent / accent`, also weisse Schrift auf dem Akzentblau.
-#     Diese Runde hat keine einzige Farbe angefasst, also MUSS die Zahl
-#     gleich bleiben; wenn nicht, ist etwas passiert, das niemand
-#     wollte.
-# (2) DAS BILD. Die Titelleiste traegt den Akzent nicht mehr; was dort
-#     wirklich steht, weiss nur das Foto.
 for v in "day light 516" "night dark 1236"; do
     set -- $v
     if shot "F-$1" shape=modern scheme=$1 mode=$2 keep=yes extra='einst nostart'; then

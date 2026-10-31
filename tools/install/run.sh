@@ -1,60 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/install/run.sh -- RUNDE INSTALL: DAS SYSTEM AUF EINE ECHTE PLATTE,
-# UND DER AKTUALISIERUNGSWEG BIS ZUM STROMAUSFALL.
-#
-# Was diese Runde beweisen soll, steht in OrientOS' ROADMAP.md unter 9.4
-# ("Ein Schreibpfad auf eine echte Platte") und 6.1 ("`opk` laeuft auf
-# dem Wirt, nicht auf Osum"). Beide Punkte haben bis heute EINE Sorte
-# Beleg gehabt: einen Satz darueber, was fehlt. Hier stehen Zahlen.
-#
-# SIEBEN TEILE, UND JEDER HAT SEINE GEGENPROBE:
-#
-#   1. DIE KARTE UND DAS FORMAT (auf dem Wirt, ohne QEMU).
-#      `tools/kernel/memmap.py` rechnet nach, dass sich in `kdata` nichts
-#      ueberschneidet. Und die mehrblockige Blockkarte, die diese Runde
-#      dem Dateisystem gibt, wird gegen die EINBLOCKIGE gehalten: ein
-#      Abbild ohne `--karten` muss Oktett fuer Oktett dasselbe sein wie
-#      eines, das der mkfs.py von `main` baut. Ein Format, das sich
-#      "nur ein bisschen" aendert, ist ein anderes Format.
-#
-#   2. DIE INSTALLATION. Ein Lauf mit dem Wurzeldateisystem als
-#      Boot-Modul (also die Lage eines ISO) schreibt auf eine LEERE
-#      Platte. Danach liest der WIRT die Platte mit seinen eigenen
-#      Werkzeugen: die beiden CRC32 des GPT werden mit `zlib`
-#      nachgerechnet, die Partitionen mit `python` gelesen, das FAT32
-#      mit `mtools`/`fsck.fat` geprueft, und Kern und Bootlader werden
-#      Oktett fuer Oktett gegen die Originale gehalten. Ein
-#      Installationsprogramm, dem nur sein eigenes Betriebssystem
-#      glaubt, hat nichts gezeigt.
-#      GEGENPROBE: derselbe Aufruf OHNE `--ja` darf die Platte NICHT
-#      anfassen -- verglichen wird die ganze Abbilddatei.
-#
-#   3. DER START VON DER PLATTE, OHNE ISO. QEMU bekommt KEIN `-kernel`
-#      und KEIN `-cdrom`, nur die Platte und OVMF. Was startet, startet
-#      ueber die EFI-Partition, die der Installer beschrieben hat, mit
-#      der Kommandozeile, die AUF DER PLATTE steht.
-#      GEGENPROBE: ein einziges gekipptes Oktett im GPT-Kopf, und der
-#      Kern darf die Wurzel NICHT mehr finden.
-#
-#   4. DASS SCHREIBEN UEBERLEBT. Eine Datei anlegen, herunterfahren,
-#      neu starten, wieder lesen. Das ist der Satz aus 9.4, der bis
-#      heute nicht galt: "Aenderungen ueberleben den Lauf nicht".
-#
-#   5. DER PAKETWEG AUF DEM GERAET. `/bin/opk` installiert ein Paket,
-#      das der WIRT gebaut hat und das Osum nie gesehen hat; das Paket
-#      LAEUFT; es wird aus einer signierten Quelle aktualisiert; nach
-#      einem Neustart laeuft die neue Fassung; eine Generation zurueck,
-#      und die alte laeuft wieder.
-#      GEGENPROBEN: ein Paket mit einem gekippten Oktett wird abgelehnt,
-#      und ein Paket, das nicht zum INDEX der Quelle passt, ebenfalls.
-#
-#   6. DER STROMAUSFALL. QEMU wird mitten im Schreiben mit SIGKILL
-#      beendet -- an mehreren verschiedenen Stellen. Danach MUSS die
-#      Platte noch starten, und die Paketliste MUSS entweder die alte
-#      oder die neue Fassung nennen und nichts dazwischen.
-#
-#   7. DIE ZAHLEN, die in docs/ROUNDINSTALL.md und in die Roadmap gehen.
 #
 # Verwendung:  bash tools/install/run.sh
 set -uo pipefail
@@ -96,8 +40,6 @@ k=$(python3 tools/kernel/memmap.py kernel 2>&1 | tail -1)
 echo "        $k"
 case "$k" in *"0 Kollisionen"*) ok "kdata ohne Kollision" ;; *) bad "kdata: $k" ;; esac
 
-# Ein Abbild in der alten Geometrie, gebaut von DIESEM mkfs.py und von
-# dem aus `main`. Sie muessen Oktett fuer Oktett gleich sein.
 mkdir -p "$OUT/fmt"
 echo "hallo" > "$OUT/fmt/a.txt"
 git show main:tools/osum/mkfs.py > "$OUT/fmt/mkfs-main.py" 2>/dev/null
@@ -114,8 +56,6 @@ if [ -s "$OUT/fmt/mkfs-main.py" ]; then
 else
     bad "mkfs.py aus main nicht lesbar (kein git-Baum?)"
 fi
-# Und die GEGENPROBE zur Gegenprobe: MIT Vorrat muss es ein ANDERES
-# Abbild sein, sonst haette `--karten` gar nichts getan.
 python3 tools/osum/mkfs.py build "$OUT/fmt/gross.img" 4096 --karten=8 /x/ \
     "/x/a=$OUT/fmt/a.txt" > /dev/null 2>&1
 if cmp -s "$OUT/fmt/neu.img" "$OUT/fmt/gross.img"; then
@@ -162,7 +102,6 @@ num "Wurzeldateisystem gewachsen auf" "$gro" ge 400000
 sek=$(grep -aoE 'ata0 sectors=[0-9]+' "$OUT/inst.txt" | head -1 | sed 's/.*=//')
 gleich "IDENTIFY meldet die Plattengroesse" "$sek" "524288"
 
-# --------- der Wirt liest die Platte mit SEINEN Werkzeugen
 python3 - "$OUT/ziel.img" > "$OUT/gpt.txt" 2>&1 <<'EOF'
 import struct, sys, zlib
 f = open(sys.argv[1], "rb")
@@ -206,7 +145,6 @@ hat "$OUT/gpt.txt" "part1 4d55534f464f01538e756d6f72694f53" "Partition 1 traegt 
 # FAT32 mit fremden Werkzeugen
 if command -v fsck.fat > /dev/null; then
     fsck.fat -n "$OUT/ziel.img@@1048576" > "$OUT/fsck.txt" 2>&1
-    # mtools-Syntax kennt fsck.fat nicht; also die Partition herausschneiden
     dd if="$OUT/ziel.img" of="$OUT/esp.img" bs=512 skip=2048 count=70000 \
         status=none
     fsck.fat -n "$OUT/esp.img" > "$OUT/fsck.txt" 2>&1
@@ -226,14 +164,6 @@ if cmp -s "$LIM/BOOTX64.EFI" "$OUT/rueck-l.efi"; then
     ok "der Bootlader ist Oktett fuer Oktett der gebaute ($(stat -c%s "$LIM/BOOTX64.EFI"))"
 else bad "der Bootlader weicht ab"; fi
 
-# Das Wurzeldateisystem AUF DER PARTITION, gelesen von mkfs.py -- der
-# zweiten Umsetzung des Formats, die den Kern nie gesehen hat.
-# WIEVIELE BLOECKE, steht im Superblock und nicht in diesem Skript. Es
-# stand hier einmal 4096 -- so gross war das Wurzeldateisystem, als
-# diese Runde geschrieben wurde. Seit die Wurzel in der FASSUNG 3
-# gebaut wird (der Kern passt in Fassung 2 nicht mehr in eine Datei),
-# ist sie groesser, und ein fester Auszug von zwei Megaoktetten schnitt
-# die Inodetabelle ab: `mkfs.py list` fand dann kein einziges Programm.
 python3 - "$OUT/ziel.img" 72048 "$OUT/wurzel.img" <<'EOF'
 import struct, sys
 f = open(sys.argv[1], "rb"); f.seek(int(sys.argv[2]) * 512)
@@ -263,7 +193,6 @@ hat "$OUT/boot.txt" "osum: bin " "das Userland liegt darauf"
 erst=$(grep -aoE 'first=[0-9]+' "$OUT/boot.txt" | head -1 | sed 's/.*=//')
 gleich "erster Block der Wurzelpartition" "$erst" "72048"
 
-# GEGENPROBE: ein Oktett im GPT-Kopf umdrehen.
 cp -f "$OUT/ziel.img" "$OUT/kaputt.img"
 python3 - "$OUT/kaputt.img" > "$OUT/kaputt-crc.txt" <<'EOF'
 import struct, sys, zlib
@@ -283,9 +212,6 @@ EOF
 cat "$OUT/kaputt-crc.txt" | sed 's/^/        /'
 hat "$OUT/kaputt-crc.txt" "arr_crc_kaputt True" "die Gegenprobe hat die Summe wirklich zerstoert"
 cp -f "$OUT/ziel.img" "$OUT/gut.img"
-# ERST DER POSITIVE FALL AUF DEMSELBEN WEG. Ohne ihn wuerde die
-# Gegenprobe darunter auch dann gruen, wenn dieser Startweg gar nicht
-# funktioniert.
 rc=$(lauf roh roh "" 600)
 gleich "Start ohne Firmware und ohne Modul: Beendigungscode" "$rc" "21"
 hat "$OUT/roh.txt" "osum: rootpart=1" "auch so kommt die Wurzel aus Partition 1"
@@ -300,11 +226,6 @@ else
 fi
 hat "$OUT/kaputt.txt" "part: gpt crc mismatch" "der Kern sagt, warum er die Tafel ablehnt"
 hat "$OUT/kaputt.txt" "osum: no ofs partition" "und dass er keine Wurzelpartition findet"
-# UND DER BEFUND, DER DIESE GEGENPROBE ERST AUF DIESEN WEG GEZWUNGEN HAT:
-# ueber OVMF startet DIESELBE kaputte Platte, weil die Firmware den
-# primaeren GPT-Kopf aus der Sicherung wiederherstellt. Das ist keine
-# Schwaeche des Kerns -- es ist eine Eigenschaft von UEFI, und sie
-# gehoert gemessen und nicht behauptet.
 cp -f "$OUT/ziel.img" "$OUT/kaputt-uefi.img"
 rc=$(lauf reparatur platte "" 600)
 if grep -qaF "osum: rootpart=" "$OUT/reparatur.txt"; then
@@ -322,7 +243,6 @@ gleich "Schreiben: Beendigungscode" "$rc" "21"
 hat "$OUT/schreib.txt" "diese-zeile-ueberlebt" "die Datei ist im selben Lauf lesbar"
 rc=$(lauf wieder platte "cat /etc/beweis.txt;exit" 600)
 hat "$OUT/wieder.txt" "diese-zeile-ueberlebt" "und nach einem NEUSTART immer noch"
-# Und der Wirt sieht sie auch -- ohne Osum.
 python3 - "$OUT/ziel.img" 72048 "$OUT/wurzel2.img" <<'EOF'
 import struct, sys
 f = open(sys.argv[1], "rb"); f.seek(int(sys.argv[2]) * 512)
@@ -369,10 +289,6 @@ hat "$OUT/pak4.txt" "opk: rolled back to 0" "eine Generation zurueck"
 hat "$OUT/pak4.txt" "paket-hallo fassung 1" "und die ALTE Fassung laeuft wieder"
 hat "$OUT/pak4.txt" "${h1:0:12}" "die Liste nennt wieder den alten Hash"
 
-# GEGENPROBEN: ein Paket mit einem gekippten Oktett, und eines, das
-# nicht zum INDEX passt. Beide werden in die laufende Wurzel gelegt --
-# ueber die EFI-Partition geht das nicht, also legt sie der Testlauf in
-# die QUELLE, bevor installiert wird. Dafuer wird das Abbild neu gebaut.
 cp -f "$OUT/pak/hallo-1.opk" "$OUT/kaputt.opk"
 python3 - "$OUT/kaputt.opk" <<'EOF'
 import sys
@@ -380,16 +296,7 @@ f = open(sys.argv[1], "r+b"); f.seek(200)
 b = f.read(1); f.seek(200); f.write(bytes([b[0] ^ 0x40]))
 EOF
 cp -f "$OUT/pak/hallo-2.opk" "$OUT/falsch.opk"
-# RUNDE MERGE-2: DAS KAPUTTE PAKET WIRD SAUBER SIGNIERT.
 #
-# Seit Runde UPDATE prueft `/bin/opk` die Ed25519-Signatur ZUERST
-# (kernel/user/opk.fi, "DIE SIGNATUR ZUERST, vor der Pruefsumme") -- ein
-# Paket ohne .sig kommt gar nicht mehr bis zur Pruefsumme, und diese
-# Gegenprobe wuerde ab jetzt aus dem falschen Grund gruen werden bzw.
-# 'opk: Pruefsumme falsch' nie zu sehen bekommen. Damit sie weiter das
-# prueft, was sie behauptet -- naemlich die PRUEFSUMME --, wird das
-# gekippte Paket mit demselben Schluessel unterschrieben wie jedes
-# andere. Der Weg ist dann: Signatur gilt -> Pruefsumme faellt.
 python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/kaputt.opk" \
     > "$OUT/kaputt.sig.log" 2>&1 || { cat "$OUT/kaputt.sig.log"; exit 1; }
 KAPUTT="$OUT/kaputt.opk" FALSCH="$OUT/falsch.opk" \
@@ -404,16 +311,6 @@ hat "$OUT/gpak.txt" "opk: installed hallo" "GEGENPROBE zur Gegenprobe: das UNVER
 echo
 echo "== 6. der Stromausfall =="
 #
-# QEMU wird mit SIGKILL beendet, waehrend die Aktualisierung schreibt.
-# Danach wird von derselben Platte neu gestartet, und drei Dinge muessen
-# gelten: die Maschine startet, `opk list` nennt GENAU einen der beiden
-# Hashes, und das Paket laeuft.
-#
-# WARUM SIGKILL DAS RICHTIGE WERKZEUG IST: QEMU schreibt mit
-# `cache=writeback` unmittelbar in den Seitenspeicher des Wirts. Was der
-# Gast geschrieben hat, ueberlebt das Ende des QEMU-Prozesses -- der
-# Abbruch trifft also GENAU den Gast, und nicht die Abbilddatei. Ein
-# Wirtsabsturz waere eine andere Frage, und die stellt dieser Lauf nicht.
 
 cp -f "$OUT/ziel.img" "$OUT/vor-strom.img"
 rc=$(lauf spak platte "opk install /quelle1/hallo-1.opk;exit" 600)
@@ -427,7 +324,6 @@ for ms in 300 700 1200 1800 2600 3600; do
     OUT="$OUT" bash tools/install/oneshot.sh strom-$ms platte \
         "opk update hallo --source /quelle2;exit" 600 > /dev/null 2>&1 &
     lpid=$!
-    # warten, bis die Shell den Befehl wirklich angefangen hat
     i=0
     while [ $i -lt 900 ]; do
         grep -qa "opk update" "$OUT/strom-$ms.txt" 2>/dev/null && break
@@ -439,7 +335,6 @@ for ms in 300 700 1200 1800 2600 3600; do
     pkill -9 -f "file=$OUT/ziel.img" 2>/dev/null
     wait $lpid 2>/dev/null
     ausfaelle=$((ausfaelle + 1))
-    # und jetzt: startet die Platte noch?
     rc=$(lauf nach-$ms platte "opk list;/apps/hallo.osp/start;opk verify;exit" 600)
     gestartet=0
     grep -qaF "osum: mount=1" "$OUT/nach-$ms.txt" && gestartet=1

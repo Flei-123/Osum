@@ -1,56 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/handle/run.sh -- DER BEWEIS, DASS DIE LEBENSDAUER STIMMT,
-# BEVOR ES DIE ERSTE ASYNCHRONE OPERATION GIBT.
-#
-# WARUM DIESE RUNDE ZUERST KOMMT. Google hat 2023 berichtet, dass rund
-# 60 % der eingereichten Linux-Kernel-Exploits aus io_uring stammten, und
-# hat den Ring auf Android und ChromeOS abgeschaltet. Die Ursache war
-# nicht der geteilte Speicher und nicht die Ringform -- es war die
-# ASYNCHRONE LEBENSDAUER: ein Auftrag lebt laenger als der Aufruf, der
-# ihn eingereicht hat, das Programm schliesst inzwischen sein Handle, der
-# Platz wird neu vergeben, und der alte Auftrag greift auf das neue
-# Objekt zu. Das ist Use-after-free mit Zwischenschritten, und es ist
-# nachtraeglich nicht zu reparieren.
-#
-# Also wird es hier VORHER gebaut und VORHER gemessen. Der Ring (Runde
-# RING) ist NICHT Teil dieser Runde.
-#
-# WAS GEMESSEN WIRD, UND WARUM JEDE ZUSAGE EINE GEGENPROBE HAT:
-#
-#   1. FUENFUNDDREISSIG ZUSAGEN AUS RING 3 (`uprog.u_handle`). Nicht der
-#      Kernel behauptet, seine Rechnung stimme -- ein unprivilegiertes
-#      Programm jenseits des Schutzwalls sagt Zeile fuer Zeile, was es
-#      geschafft hat und was ihm verwehrt wurde. Jede Zeile wird hier
-#      EINZELN nachgelesen; eine Sammelzahl allein waere zu leicht.
-#   2. ZWEI DINGE, DIE EIN PROGRAMM NICHT ZEIGEN KANN, misst der Kernel
-#      selbst: dass zwei Prozesse fuer DASSELBE Objekt am DEMSELBEN Platz
-#      verschiedene Handle-Werte bekommen (und der fremde Wert nichts
-#      trifft), und dass eine ausdrueckliche Uebergabe die Rechte
-#      schneidet statt sie zu uebernehmen.
-#   3. DIE LECKZAHLEN. Nach einem Lauf, in dem jeder Prozess ordentlich
-#      geendet hat, muss die Objekttafel wieder auf den drei
-#      Konsoleneintraegen stehen und kein Auftrag mehr laufen. Eine
-#      Refcount-Schicht, die niemand nachzaehlt, ist eine Behauptung.
-#   4. VIER GEGENPROBEN, und jede schaltet GENAU EINE Zusage aus:
-#        nogen     -- die Generation wird nicht verglichen. "veraltet"
-#                     MUSS fallen, und der alte Auftrag MUSS das neue
-#                     Objekt treffen. Das ist der io_uring-Fehler,
-#                     absichtlich wieder eingebaut.
-#        noflight  -- ein laufender Auftrag haelt keinen Verweis.
-#                     "kein-free-in-flug" MUSS fallen.
-#        norights  -- die Rechte des Handles werden im Deskriptorpfad
-#                     nicht geprueft. "kopie-darf-nicht" MUSS fallen.
-#        (ohne)    -- ohne das Wort `handle` passiert nichts von alledem.
-#   5. DER SCHALTER `hstrict` AUF DEM PLATTENWEG: nichts wird geerbt.
-#      Die Shell von der Platte bekommt dann keine Deskriptoren mehr und
-#      sagt kein Wort -- das ist die Messung, WAS am alten Verhalten
-#      haengt, und nicht bloss die Behauptung, dass etwas daran haengt.
-#   6. DER PREIS. `file.fd_of` in Zyklen, Median aus 33 Bloecken zu 512
-#      Aufrufen. Die Zahl steht im Protokoll; der Vergleich mit dem Stand
-#      vor der Runde steht in docs/HANDLE-STATUS.md.
-#   7. BEIDE UEBERSETZER. firnc0 und firnc1 bauen denselben Kernel, und
-#      er sagt beide Male dasselbe.
 #
 # Verwendung:  bash tools/handle/run.sh
 set -uo pipefail
@@ -83,7 +31,6 @@ num() { # name wert op erwartet
     else bad "$name: $value, erwartet $op $want"; fi
 }
 
-# Eine Zahl aus einer Zeile "handle: NAME=WERT".
 zahl() { sed -n "s/^handle: $2=\([0-9]*\).*/\1/p" "$1" | head -1; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
@@ -120,14 +67,6 @@ build_stage() { # 0 = firnc0, 1 = firnc1
     [ -x "$cc" ] || { bad "Uebersetzer fehlt: $cc"; return 1; }
     "$cc" kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s uebersetzt kernel/kmain.fi nicht"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
-    # DER NAME DIESER DATEI IST NICHT EGAL. `kernel/kernel.ld` sammelt
-    # den Ring-3-Code mit dem Muster `*uprog*.o(.text .text.*)` in den
-    # Abschnitt `.utext` -- den einzigen mit gesetztem User-Bit. Heisst
-    # die Objektdatei anders, landet `uprog.fi` im Kerneltext, und das
-    # erste Programm in Ring 3 faellt beim ERSTEN BEFEHL mit einem #PF
-    # (err=0x15: vorhanden, Nutzer, Befehlsabruf). Genau das ist beim
-    # Schreiben dieses Laeufers passiert: der Kernel bootete sauber
-    # durch, meldete "exit 21", und keine einzige Zusage kam.
     "$cc" kernel/uprog.fi -o "$TMPD/uprog$s.o" >>"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s uebersetzt kernel/uprog.fi nicht"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
     ld -n -T "$LDSCRIPT" \
@@ -155,12 +94,6 @@ build_stage() { # 0 = firnc0, 1 = firnc1
 
 build_stage 0 || { echo "HANDLE: $pass bestanden, $fail gefallen"; exit 1; }
 
-# Die Speicherkarte von kdata: die fuenf Bereiche dieser Runde duerfen
-# sich mit nichts ueberschneiden. Das ist die Stelle, an der dieses
-# Projekt viermal denselben Fehler gemacht hat.
-# Der Abschnitt mit dem User-Bit muss den Ring-3-Code WIRKLICH tragen.
-# Ein leeres `.utext` ist der Fehler, der oben beschrieben ist, und er
-# sieht von aussen aus wie ein stummer Kernel.
 UTHEX=$(readelf -SW "$TMPD/k0.elf" \
     | sed -n 's/.*\.utext *PROGBITS *[0-9a-f]* *[0-9a-f]* *\([0-9a-f]*\).*/\1/p' | head -1)
 UT=$((16#${UTHEX:-0}))
@@ -179,8 +112,6 @@ M="$TMPD/main.txt"
 [ "$rc" -eq 21 ] && ok "der Kernel hat sich selbst beendet (exit 21)" \
                  || { bad "QEMU-Rueckgabe $rc, erwartet 21"; tail -8 "$M" | sed 's/^/        /'; }
 
-# Die fuenfunddreissig stehen hier im Klartext, damit eine GELOESCHTE
-# oder umbenannte Zusage auffaellt -- und nicht nur eine kleinere Summe.
 ZUSAGEN=(
  "fassung"                "die Schnittstelle meldet ihre Fassung"
  "roehre"                 "eine Roehre als Testobjekt"
@@ -236,13 +167,6 @@ grep -qa 'handle: pass=1  shrink=1  notransfer=1  refs=2' "$M" \
     || { bad "die Uebergabe an ein Kind stimmt nicht"; grep -a 'handle: pass=' "$M" | sed 's/^/        /'; }
 
 echo "== 4. die Zaehler: hat ueberhaupt jemand gefragt? =="
-# GEZAEHLT WIRD NUR DER KALTE WEG. `handle.resolve_num` -- der Pfad, den
-# jeder `read` und jeder `write` nimmt -- zaehlt ABSICHTLICH nicht mit:
-# ein Zaehler dort war gemessen der teuerste Einzelposten dieser Runde.
-# Dass die Schicht im heissen Pfad trotzdem gefragt wird, beweisen die
-# Gegenproben in Abschnitt 5 bis 7 staerker als jeder Zaehler es koennte
-# -- wuerde sie nicht gefragt, koennte das Umlegen der Bits das Ergebnis
-# nicht aendern.
 num "Aufloesungen ueber den kalten Weg" "$(zahl "$M" checks)" ge 20
 num "abgelehnt, weil ein Recht fehlte"          "$(zahl "$M" denied)" ge 1
 num "abgelehnt, weil etwas veraltet war"        "$(zahl "$M" stale)" ge 3
@@ -250,25 +174,12 @@ num "abgebrochene Auftraege"                    "$(zahl "$M" cancels)" ge 1
 num "Freigaben, die ein Auftrag aufgehalten hat" "$(zahl "$M" deferred)" ge 1
 num "versuchte Rechteerweiterungen (gezaehlt, nicht gewaehrt)" "$(zahl "$M" escalate)" ge 1
 num "angelegte Objekte"                         "$(zahl "$M" opened)" ge 10
-# DIE BEIDEN LECKZAHLEN. Am Ende dieses Abschnitts hat jeder Prozess
-# ordentlich geendet: es darf kein Auftrag mehr laufen, und die
-# Objekttafel darf nur noch die DREI Konsoleneintraege halten. Eine
-# Verweiszaehlung, die niemand nachzaehlt, ist eine Behauptung.
-# Am Ende dieses Abschnitts hat jeder Prozess ordentlich geendet: was
-# angelegt wurde, ist wieder abgeraeumt, und es laeuft kein Auftrag mehr.
-# Die Gleichheit ist die staerkere Zusage als eine feste Zahl -- sie muss
-# in JEDEM Lauf gelten, egal wie viele Objekte unterwegs waren.
 OPENED=$(zahl "$M" opened); CLOSED=$(zahl "$M" closed)
 [ "$OPENED" = "$CLOSED" ] \
     && ok "kein Leck: angelegt $OPENED, abgeraeumt $CLOSED -- gleich viele" \
     || bad "LECK: angelegt $OPENED, abgeraeumt $CLOSED"
 num "Objekte am Ende"           "$(zahl "$M" objects)" le 3
 num "Auftraege am Ende (keiner)" "$(zahl "$M" inflight)" eq 0
-# Und der Waechter des Benchmarks: misst er ueberhaupt eine Aufloesung?
-# DIE KOSTEN, UND ZWAR AUS EINEM EIGENEN LAUF OHNE `handle`. Mit dem
-# Selbsttestwort laufen die Zaehler mit, und dann misst der Benchmark den
-# Selbsttest statt des Regelbetriebs -- gemessen 471 statt 342 Zyklen
-# allein fuer `getpid`. Die Zahl, die gilt, kommt aus `hbench` allein.
 run_kernel "$TMPD/k0.mb" "hbench" "$TMPD/bench.txt"
 B="$TMPD/bench.txt"
 num "bench-fdok (der Eintrag hinter Deskriptor 1 -- 64 hiesse: die Messung misst nichts)" \
@@ -278,10 +189,6 @@ GP=$(sed -n 's/^hbench: getpid=\([0-9]*\).*/\1/p' "$B" | head -1)
 LS=$(sed -n 's/^hbench: lseek=\([0-9]*\).*/\1/p' "$B" | head -1)
 printf '  ZAHL  file.fd_of %s Zyklen (Median) | getpid %s | lseek %s | Leerschleife %s | TSC %s kHz\n' \
     "$FDOF" "$GP" "$LS" "$LEER" "$KHZ"
-# Die Schranken sind grosszuegig und stehen hier als WAECHTER, nicht als
-# Ziel: sie sollen anschlagen, wenn eine spaetere Runde die Aufloesung
-# versehentlich verdoppelt. Die gemessenen Zahlen stehen in
-# docs/HANDLE-STATUS.md.
 num "file.fd_of bleibt unter 250 Zyklen" "$FDOF" lt 250
 num "lseek aus Ring 3 bleibt unter 700 Zyklen" "$LS" lt 700
 num "getpid (von dieser Runde unberuehrt) bleibt unter 450 Zyklen" "$GP" lt 450
@@ -291,12 +198,6 @@ run_kernel "$TMPD/k0.mb" "handle nogen" "$TMPD/nogen.txt"
 N="$TMPD/nogen.txt"
 has "$N" "[FAIL] veraltet" "ohne Generationsvergleich faellt 'veraltet'"
 has "$N" "[FAIL] nicht-das-neue-ding" "und der alte Auftrag trifft WIRKLICH das neue Objekt"
-# `gefaelschte-gen` bleibt hier ZU RECHT gruen, und das ist kein
-# Schoenreden: das Handle in dieser Zusage gehoert zu einem GESCHLOSSENEN
-# Deskriptor, sein Platz ist leer, und ein leerer Platz faellt in
-# `resolve_num` schon vor der Generationsfrage durch. Die Gegenprobe
-# schaltet den GENERATIONSVERGLEICH ab, nicht die Existenzpruefung -- ein
-# totes Objekt gibt sie nie heraus.
 has "$N" "[ ok ] gefaelschte-gen" "ein LEERER Platz faellt auch ohne Generationsvergleich durch"
 hasnot "$N" "handle: 35/35 Zusagen" "der Lauf ist nicht mehr vollstaendig gruen"
 
@@ -321,10 +222,6 @@ hasnot "$O" "handle: ring 3 beginnt" "und startet kein Programm"
 hasnot "$O" "[ ok ] veraltet" "und misst nichts"
 
 echo "== 9. der Schalter 'hstrict': nichts wird geerbt =="
-# Was am alten Verhalten haengt, wird hier GEMESSEN und nicht behauptet:
-# /bin/sh von der Platte liest von 0 und schreibt nach 1, ohne je danach
-# gefragt zu haben. Mit `hstrict` bekommt ein Kind von `elf.spawn` gar
-# keine Deskriptoren mehr -- und dann sagt die Shell kein Wort.
 printf 'runde handle\n' > "$TMPD/readme.txt"
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
@@ -334,13 +231,6 @@ if python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
     QUIET="nokbd nosched noproc nofs noring3"
     run_disk "$TMPD/k0.mb" "osum $QUIET script=ls;exit" "$TMPD/erbt.txt" "$TMPD/disk.img"
     run_disk "$TMPD/k0.mb" "osum hstrict $QUIET script=ls;exit" "$TMPD/streng.txt" "$TMPD/disk.img"
-    # GEMESSEN WIRD AM KIND DER SHELL, nicht an der Shell selbst, und das
-    # ist genau die Altlast, die diese Runde BENENNT statt sie zu
-    # verschweigen: die ERSTE Shell startet aus dem Bootprozess, und der
-    # hat keine Deskriptoren -- `elf.spawn` ruft `inherit_std` fuer sie
-    # gar nicht, sie bekommt ihre drei von `file.init_task`. Was der
-    # Schalter abstellt, ist die Vererbung von einem Prozess an sein
-    # Kind, und das ist `ls`.
     has    "$TMPD/erbt.txt"   "sh: ready, osum" "die Shell laeuft in beiden Faellen"
     has    "$TMPD/erbt.txt"   "./ ../ bin/ readme.txt" "ohne den Schalter erbt 'ls' 0, 1 und 2 und schreibt seine Liste"
     has    "$TMPD/streng.txt" "sh: ready, osum" "MIT 'hstrict' laeuft die Shell weiter"

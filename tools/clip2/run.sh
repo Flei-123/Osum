@@ -1,50 +1,11 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/clip2/run.sh -- RUNDE CLIP-2: DAS ZIEL EINER ZIEHBEWEGUNG.
 #
 #   bash tools/clip2/run.sh [arbeitsverzeichnis]
 #
-# WAS S-002 WIRKLICH WAR. Die Offenliste sagte, `drag_take`/`drag_an`/
-# `drag_drop` stuenden "inzwischen in wlib und ulib" und genommen werde
-# nur im Editor -- der Dateimanager habe "kein Drop-Ziel". Der erste
-# Teil stimmt, der zweite war zu kurz gegriffen: es fehlte NICHT nur
-# ein Aufruf im Dateimanager. Es fehlte die MELDUNG. `wlib.on_up`
-# (jetzt :6100) kannte das Loslassen, gab es aber an kein Programm
-# weiter, und `s_down` ist bei einer Ziehbewegung, die in einem ANDEREN
-# Fenster angefangen hat, null -- der alte Rumpf war fertig, bevor er
-# zum Ablegen kam. Ohne diese Naht kann kein Programm ein Ziel sein,
-# ohne `wlibc` an `wlib` vorbei zu rufen.
-#
-# DIE FUENF PUNKTE, und jeder hat eine Gegenprobe, die FALLEN muss:
-#
-#   1. DIE NAHT. `wlib` meldet `K_DROP`, wenn ueber einem angemeldeten
-#      Fenster losgelassen wird, waehrend der Ziehplatz voll ist.
-#      Gemessen an `explorer: drops N` auf der Leitung.
-#      Gegenprobe: ohne `drop_an` darf nichts gemeldet werden.
-#   2. DIE TAT. Eine Datei wird aus /data auf den Ordner `bilder`
-#      gezogen. Danach ist sie DORT und nicht mehr in /data.
-#      Gemessen vom WIRT im Plattenabbild, nicht am Bild.
-#   3. DIE INODE. Verschoben heisst umgehaengt: die Inodenummer vor
-#      und nach dem Ablegen ist DIESELBE, und der Inhalt auch.
-#      Das ist der Unterschied zwischen `rename` und kopieren.
-#   4. DAS ZIEL OHNE ORDNER. Auf eine DATEI abgelegt landet das Stueck
-#      im angezeigten Ordner und nicht "in" der Datei.
-#   5. DER LEERLAUF. Ablegen im selben Ordner tut NICHTS und macht
-#      keinen Konfliktdialog auf.
-#
-# Gemessen wie in jeder Runde davor: eine Maschine, ein Drehbuch mit
-# echten Maus-Ereignissen (`ziehvon` -- druecken, in Schritten fahren,
-# loslassen), serielle Ausgabe gegen die Erwartung, und das
-# Plattenabbild danach vom WIRT gelesen.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-# A-034: OHNE Argument ist das Arbeitsverzeichnis ein Wegwerfordner und
-# wird am Ende geraeumt -- vorher blieben je Lauf rund 70 MB in /tmp
-# liegen (gemessen 24.09., zwei Laeufe = 138 MB auf einer vollen
-# Platte), dazu der Bau der Gegenprobe (/tmp/osum-clip2-gegen, 33 MB).
-# Wer einen Ordner uebergibt, behaelt ihn.
 if [ -n "${1:-}" ]; then
     OUT=$1
 else
@@ -71,11 +32,6 @@ fi
 
 # =================================================== 1. der Quelltext
 #
-# DREI AUSSAGEN, die von aussen NICHT zu sehen sind und deshalb hier
-# gefragt werden: dass die Naht in der Bibliothek liegt (und nicht im
-# Programm an ihr vorbei), dass das Verschieben ueber `expakt` geht
-# (und damit ueber `io.rename`), und dass der Dateimanager keine Datei
-# selbst anfasst.
 echo "== 1. Quelltext =="
 grep -qE '^const K_DROP: u64 = [0-9]+' kernel/user/wlib.fi \
     && ok "wlib kennt K_DROP" || bad "wlib kennt kein K_DROP"
@@ -93,13 +49,11 @@ grep -qE 'fn ablegen\(' kernel/user/explorer.fi \
 grep -qE 'expakt\.einfuegen' kernel/user/explorer.fi \
     && ok "abgelegt wird ueber expakt.einfuegen (also io.rename)" \
     || bad "das Ablegen geht an expakt vorbei"
-# Der Dateimanager fasst weiterhin keine Datei selbst an.
 if grep -qE 'io\.(create|write_all|unlink)\(' kernel/user/explorer.fi; then
     bad "explorer.fi fasst Dateien selbst an"
 else
     ok "explorer.fi fasst keine Datei selbst an"
 fi
-# GEGENPROBE ZUR NAHT: das Ablegen darf NICHT an wlib vorbeigehen.
 if grep -qE 'wlibc\.drag_take' kernel/user/explorer.fi; then
     bad "der Dateimanager ruft wlibc.drag_take an der Bibliothek vorbei"
 else
@@ -116,10 +70,6 @@ ok "Kern und Programme uebersetzen"
 
 # ======================================================== 3. der Lauf
 #
-# DAS DREHBUCH. Zeile 0 der Tabelle ist `bilder` (Verzeichnisse
-# zuerst), Zeile 1 `notizen`, ab Zeile 2 die Dateien in Namensfolge:
-# alpha, beta, delta, epsilon, gamma, zeta. Gezogen wird `alpha.txt`
-# (Zeile 2) auf `bilder` (Zeile 0).
 echo "== 3. der Lauf =="
 cat > "$OUT/dreh.txt" <<'DREH'
 warteauf explorer: ready || 240
@@ -155,7 +105,6 @@ grep -qa 'KEIN RECHTECK GEMELDET' "$OUT/lauf.log" \
     && bad "ein ziehvon fand sein Rechteck nicht (siehe lauf.log)" \
     || ok "jedes ziehvon hat seine zwei Rechtecke gefunden"
 
-# ----------------------------------------- Punkt 1: die Naht meldet sich
 echo "== 4. Punkt 1: die Naht =="
 hat "$S" 'explorer: drops [0-9]+' "wlib meldet das Ablegen (K_DROP)"
 dn=$(groesste "$S" 'explorer: drops [0-9]+')
@@ -169,43 +118,20 @@ hat "$S" 'expl: drop /data/alpha\.txt q=/data/bilder' \
     "Punkt 2: alpha.txt wurde auf /data/bilder abgelegt"
 hat "$S" 'expl: drop /data/notizen q=/data gleich' \
     "Punkt 5: das Ablegen im selben Ordner wurde als 'gleich' erkannt"
-# Der Leerlauf darf KEINEN Konfliktdialog ausgeloest haben.
 hatnicht "$S" 'explorer: dlgrect' \
     "Punkt 5: kein Dialog beim Ablegen im selben Ordner"
-# Die Ergebniszeile steht seit dieser Runde FUER SICH ("expl: drop* rc=
-# .. z= ..") -- vorher lief sie ohne Zeilenende in die naechste Meldung
-# von `expakt` hinein, und kein Muster traf sie.
 drc=$(grep -aoE 'expl: drop\* rc=[0-9]+' "$S" | tail -1 \
       | grep -oE '[0-9]+$')
 [ "${drc:-1}" = "0" ] \
     && ok "Punkt 2: das Ablegen meldete rc=0" \
     || bad "Punkt 2: das Ablegen meldete rc=${drc:-?}"
 
-# =========================================== 6. DIE PLATTE, VOM WIRT
-#
-# HIER WIRD GEMESSEN UND NICHT GEGLAUBT. Alles davor ist, was das
-# PROGRAMM sagt; das hier ist, was auf der PLATTE steht. Die beiden
-# auseinanderzuhalten ist der Sinn dieses Abschnitts -- ein Programm,
-# das "rc=0" meldet und nichts getan hat, faellt genau hier auf.
 echo "== 6. die Platte (vom Wirt gelesen) =="
 IMG="$OUT/lauf/disk.img"
 if [ ! -s "$IMG" ]; then
     bad "kein Plattenabbild zum Nachsehen"
 else
-    # DIE INODE VON VORHER, UND ZWAR AUS DEM RICHTIGEN ABBILD.
     #
-    # GEMESSEN am 18.09.2026: hier stand `$OUT/bau/disk.img`, und der
-    # Vergleich meldete "inode anders 104 105" fuer eine Datei, die in
-    # Wahrheit sauber umgehaengt worden war. Der Grund ist, dass
-    # `capture.sh` JE AUFRUF ein eigenes Abbild baut (`mkfs.py` mit
-    # `--time=$(date +%s)`): der Bau-Aufruf und der Lauf-Aufruf
-    # vergeben verschiedene Inodenummern, und die Nummer aus dem einen
-    # Abbild sagt ueber das andere nichts.
-    #
-    # Also wird die Nummer aus DEM Abbild gelesen, in dem auch gemessen
-    # wird -- aus der Sicherung, die dieser Laeufer vor dem Start
-    # zieht. Ohne diese Sicherung ist Punkt 3 nicht messbar, und ein
-    # Punkt, der nicht messbar ist, wird hier nicht gruen gemeldet.
     VOR=""
     if [ -s "$OUT/lauf/disk.img.vorher" ]; then
         VOR=$(python3 tools/clip2/lies.py "$OUT/lauf/disk.img.vorher" \
@@ -222,7 +148,6 @@ else
         > "$OUT/platte.txt" 2>"$OUT/platte.err"
     if [ -s "$OUT/platte.txt" ]; then
         cat "$OUT/platte.txt"
-        # Punkt 2: alpha.txt ist in /data/bilder und NICHT mehr in /data.
         grep -qE '^da /data/bilder/alpha\.txt ' "$OUT/platte.txt" \
             && ok "Punkt 2: alpha.txt liegt in /data/bilder" \
             || bad "Punkt 2: alpha.txt liegt NICHT in /data/bilder"
@@ -236,7 +161,6 @@ else
         grep -qE '^inhalt ok' "$OUT/platte.txt" \
             && ok "Punkt 3: der Inhalt ist unveraendert ('eins')" \
             || bad "Punkt 3: der Inhalt stimmt nicht"
-        # Punkt 5: notizen ist geblieben, wo es war.
         grep -qE '^da /data/notizen ' "$OUT/platte.txt" \
             && ok "Punkt 5: notizen liegt unveraendert in /data" \
             || bad "Punkt 5: notizen ist verschwunden"
@@ -245,26 +169,10 @@ else
     fi
 fi
 
-# ================================== 7. DIE GEGENPROBE, DIE FALLEN MUSS
-#
-# WARUM DIESER ABSCHNITT DA IST. Runde GRUNDLINIE-2 hat dreizehn
-# Gegenproben gefunden, die NICHTS gemessen haben -- sie meldeten
-# gruen, weil der Kern flach kopiert wurde und der `sed` ins Leere
-# griff. Also wird hier zuerst geprueft, dass die Gegenprobe ueberhaupt
-# GREIFT: die Zeile, die entfernt wird, MUSS vorher da sein, und der
-# Bau MUSS danach noch durchlaufen.
 echo "== 7. die Gegenprobe: ohne drop_an meldet wlib nichts =="
 GEG=$OUT/gegen
 mkdir -p "$GEG"
-# IN EINER KOPIE DES BAUMS (gleiche Lehre wie A-028 bei tools/sync).
 #
-# Bis hierher wurde kernel/user/explorer.fi IM BAUM auf
-# `drop_an(false)` gestellt und per trap zurueckgelegt. Das hielt beim
-# Abbruch -- aber nicht fuer PARALLELE Laeufe: jeder andere Laeufer, der
-# waehrenddessen (mehrere Minuten, zwei QEMU-Laeufe) Programme baute,
-# baute den abgeschalteten Dateimanager mit. Gemessen am 24.09.: waehrend
-# clip2 lief, zeigte `git status` den Baum veraendert. Jetzt wird eine
-# Kopie verbogen und von DORT gebaut; der Baum bleibt, wie er ist.
 GBAUM="$GEG/baum"
 EXPL_SHA0=$(sha256sum kernel/user/explorer.fi | cut -d' ' -f1)
 rm -rf "$GBAUM"; mkdir -p "$GBAUM"
@@ -298,7 +206,6 @@ else
                 # Sie muss ueberhaupt gelaufen sein ...
                 if grep -qaE 'explorer: ready' "$GS"; then
                     ok "Gegenprobe: der Dateimanager kam auch ohne drop_an hoch"
-                    # ... und DANN darf nichts abgelegt worden sein.
                     hatnicht "$GS" 'explorer: drops [0-9]+' \
                         "GEGENPROBE: ohne drop_an meldet wlib kein Ablegen"
                     hatnicht "$GS" 'expl: drop ' \

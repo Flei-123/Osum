@@ -1,50 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/sshd/run.sh -- RUNDE SSHD: DER FERNZUGANG, GEGEN DEN ECHTEN
-# OPENSSH-KLIENTEN.
-#
-# EHRLICHER AUSGANGSPUNKT, gemessen und nicht behauptet: vor dieser Runde
-# fand `grep -ril ssh --include=*.fi` im ganzen Baum NULL Dateien. Es gab
-# TLS 1.3 (Runde HWNET), Ed25519 (Runde UPDATE), X25519 und
-# ChaCha20-Poly1305 (Runde TUNNEL) und seit Runde POLL den Aufruf, ohne
-# den ein Dienst nicht zwei Dinge gleichzeitig bedienen kann -- aber kein
-# SSH.
-#
-# ===================================================================
-# WAS HIER DER BEWEIS IST, UND WAS NICHT
-#
-# NICHT der Beweis: ein selbstgeschriebener Klient. Zwei Enden, die
-# dasselbe Missverstaendnis teilen, sind sich perfekt einig -- das ist
-# die Versagensart jedes selbstgebauten Protokolls, und `tools/net/run.sh`
-# hat aus demselben Grund gegen den Linux-Kernel gemessen und nicht gegen
-# sich selbst.
-#
-# DER BEWEIS: `ssh` aus OpenSSH, unveraendert, von diesem Wirt aus, durch
-# QEMUs Anschlussweiterleitung, gegen den Kernel unter `-accel kvm`. Was
-# dieser Klient annimmt, ist SSH; was er ablehnt, ist keines. Dazu
-# `ssh-keyscan` und `ssh-keygen -lf` als zweite Meinung ueber den
-# Wirtsschluessel.
-#
-# ZEHN ZUSAGEN, jede mit einer Gegenprobe:
-#
-#   1. Die Bausteine stimmen mit den RFCs ueberein (Abschnitt 1, gegen
-#      Python). Gegenprobe: ein gekipptes Bit wird abgelehnt.
-#   2. Der Wirtsschluessel entsteht beim ersten Start und BLEIBT.
-#      Gegenprobe: derselbe Datentraeger, zweiter Start, gleicher
-#      Fingerabdruck -- und `ssh-keygen -lf` rechnet denselben aus.
-#   3. Anmeldung mit SCHLUESSEL aus `~/.ssh/authorized_keys`.
-#      Gegenprobe: ein anderer Schluessel wird abgelehnt, und derselbe
-#      Schluessel wird auf einem Abbild OHNE `authorized_keys` ebenfalls
-#      abgelehnt.
-#   4. Anmeldung mit PASSWORT gegen `/etc/shadow` (Runde K13).
-#      Gegenprobe: ein falsches Passwort und ein unbekannter Name.
-#   5. Ein Befehl aus der Ferne, mit VERGLICHENER Ausgabe.
-#   6. Der Beendigungscode des Befehls kommt beim Klienten an.
-#   7. Eine Datei durch die Verbindung, SHA-256 auf beiden Seiten.
-#   8. Eine Shell -- interaktiv ueber Rohre und an einem echten
-#      Pseudoterminal.
-#   9. ZWEI Verbindungen GLEICHZEITIG.
-#  10. Als Dienst aus `/etc/inittab`, sichtbar in `/run/svc.state`.
 #
 # Aufruf:  bash tools/sshd/run.sh
 set -uo pipefail
@@ -93,9 +47,6 @@ for t in qemu-system-x86_64 ssh ssh-keygen ssh-keyscan python3; do
     command -v "$t" >/dev/null 2>&1 || { echo "SSHD: uebersprungen, $t fehlt"; exit 0; }
 done
 
-# Seit Runde KVMFIX laeuft der Kern unter KVM (zwei echte Hardwarefehler,
-# siehe KVMFIX-STATUS.md). Wo /dev/kvm da ist, wird es benutzt -- und wo
-# nicht, sagt es der Laeufer, statt still langsamer zu messen.
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACCEL="-accel kvm"; ACCELNAME="kvm"
 else
@@ -176,7 +127,6 @@ undef=$(nm -u "$TMPD/sshd0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
                 || bad "undefinierte Namen in sshd: $undef"
 note "/sbin/sshd: $(stat -c%s "$TMPD/sshd0.elf") Oktette"
 
-# --- die Benutzer, die Schluessel, die Daten
 python3 - "$TMPD" <<'PY'
 import binascii, hashlib, sys
 d = sys.argv[1]
@@ -224,21 +174,11 @@ python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS \
     $DIRS $SPEC $ETC $AK $DATA > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py baut das Abbild MIT ~/.ssh/authorized_keys" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
-# DAS GEGENSTUECK: dasselbe Abbild OHNE die Schluesseldatei. Ohne dieses
-# zweite Abbild waere „der Schluessel wird angenommen" keine Aussage --
-# ein Server, der JEDEN Schluessel annimmt, bestuende den ersten Test
-# ebenso.
 python3 tools/osum/mkfs.py build "$TMPD/nokeys.img" $BLOCKS \
     $DIRS $SPEC $ETC $DATA >/dev/null 2>&1 \
     && ok "und ein zweites OHNE sie (die Gegenprobe zu Abschnitt 4)" \
     || bad "das zweite Abbild ist nicht entstanden"
 
-# =====================================================================
-# Der Draht: QEMUs Benutzernetz mit einer Weiterleitung. Das braucht
-# keine Netzwerknamensraeume und keine Rechte -- anders als
-# tools/net/run.sh, das den Stapel auf einem veth-Paar misst. Hier geht
-# es nicht um den Stapel, sondern um das Protokoll darueber.
-# =====================================================================
 QPID=""
 SER=""
 start_osum() { # abbild serielldatei port
@@ -308,13 +248,6 @@ FP1=$(grep -a -m1 'sshd: host key SHA256:' "$F" | sed 's/.*SHA256://')
 [ -n "$FP1" ] && ok "sshd nennt seinen Fingerabdruck: SHA256:$FP1" \
               || bad "kein Fingerabdruck auf der Konsole"
 
-# ZWEITE MEINUNG NUMMER EINS: `ssh-keyscan` holt den Schluessel ueber das
-# Protokoll, `ssh-keygen -lf` rechnet den Fingerabdruck. Beide Programme
-# gehoeren OpenSSH und nicht diesem Repo.
-# `-t ed25519`: ohne die Angabe fragt ssh-keyscan NACHEINANDER nach
-# rsa, ecdsa und ed25519 -- drei Verbindungen, von denen dieser Server
-# zwei richtigerweise beim Schluesselaustausch abweist, weil er nur
-# ssh-ed25519 hat. Das ist kein Fehler, kostet aber drei Zeitlimits.
 ssh-keyscan -t ed25519 -T 45 -p "$FWPORT" 127.0.0.1 \
     > "$TMPD/scan.txt" 2>"$TMPD/scan.err"
 if [ -s "$TMPD/scan.txt" ]; then
@@ -349,10 +282,6 @@ grep -qa 'sshd: publickey accepted' "$F" \
 echo "   -- die ausgehandelten Verfahren, aus der Sicht des Klienten"
 timeout 300 ssh -vv -p "$FWPORT" $SSHO $KEYOPT -o PasswordAuthentication=no \
     justin@127.0.0.1 true > /dev/null 2>"$TMPD/verb.txt"
-# `tr -d '\r'`: ssh schreibt seine Debugzeilen mit CRLF, und ein
-# unsichtbares CR am Ende macht aus zwei gleichen Zeichenketten zwei
-# verschiedene. GEMESSEN -- der erste Abnahmelauf meldete woertlich
-# 'curve25519-sha256' != 'curve25519-sha256'.
 kexline=$(grep -a -m1 'debug1: kex: algorithm:' "$TMPD/verb.txt" \
           | tr -d '\r' | sed 's/.*: //')
 hostline=$(grep -a -m1 'debug1: kex: host key algorithm:' "$TMPD/verb.txt" \
@@ -384,10 +313,6 @@ as_key 'true' >/dev/null 2>&1
 num "und 0 fuer einen Befehl, der gelingt" "$?" eq 0
 
 echo "   -- eine Datei durch die Verbindung, SHA-256 auf beiden Seiten"
-# ZUERST die LEERE Sitzung messen. Was ein `ssh host cat datei` braucht,
-# ist Sitzungsaufbau PLUS Uebertragung; ohne die erste Zahl waere die
-# zweite nicht zu haben, und „20000 Oktette in 16 Sekunden" waere eine
-# Aussage ueber X25519 und nicht ueber den Durchsatz.
 TL0=$(date +%s%N)
 as_key 'true' >/dev/null 2>&1
 TL1=$(date +%s%N)
@@ -424,10 +349,6 @@ printf 'echo P1\nexit\n' | timeout 300 ssh -p "$FWPORT" $SSHO -tt \
 num "die Sitzung am Pseudoterminal (ssh -tt) endet ordentlich" "$?" eq 0
 grep -qa 'P1' "$TMPD/pty.txt" && ok "sie hat den Befehl ausgefuehrt" \
                              || bad "'P1' fehlt in der pty-Sitzung"
-# DER UNTERSCHIED, an dem man sieht, dass es WIRKLICH ein Terminal war:
-# die Zeilendisziplin haengt vor jedes \n ein \r (ONLCR), und sie hat
-# das Getippte zurueckgeworfen (ECHO). Ueber ein Rohr passiert beides
-# nicht.
 if grep -qa $'\r' "$TMPD/pty.txt"; then
     ok "die Zeilenenden tragen CR -- die Zeilendisziplin des Terminals war dran"
 else
@@ -504,10 +425,6 @@ else
     bad "sshd steht nicht als laufender Dienst in /run/svc.state"
     note "$(echo "$out" | tr '\n' ' ')"
 fi
-# WIE OFT WURDE ER NEU GESTARTET? Ein Dienst, der bei jeder Verbindung
-# stirbt und von `init` wieder hochgezogen wird, sieht von aussen aus wie
-# einer, der laeuft. Die Zahl hinter dem Zustand ist die der Starts, und
-# sie muss 1 sein.
 starts=$(echo "$out" | awk '/^sshd /{print $4}')
 is "Zahl der Starts des Dienstes (1 = er ist nie gestorben)" "${starts:-?}" "1"
 conns=$(grep -ac 'sshd: accepted from' "$F")
@@ -515,7 +432,6 @@ num "angenommene Verbindungen in diesem Lauf" "$conns" ge 12
 polls=$(grep -a 'sshd: polls =' "$F" | sed 's/.*= //' | sort -n | tail -1)
 num "die groesste Zahl von poll-Durchlaeufen EINER Sitzung (eine Warteschleife haette Tausende)" \
     "${polls:-99999}" le 400
-# Die Zeile lautet:  sshd: ms vkx a <version> <kex> <auth>
 kexms=$(grep -a 'sshd: ms vkx a' "$F" | awk '{print $6}' | sort -n | tail -1)
 authms=$(grep -a 'sshd: ms vkx a' "$F" | awk '{print $7}' | sort -n | tail -1)
 note "langsamster Schluesselaustausch: ${kexms:-?} ms, langsamste Anmeldung: ${authms:-?} ms"
@@ -547,9 +463,6 @@ fi
 
 # =====================================================================
 echo "== 8. der ZWEITE Start: derselbe Wirtsschluessel =="
-# =====================================================================
-# Derselbe Datentraeger, nicht noch einmal aus disk.img kopiert -- sonst
-# waere der Schluessel wieder weg und der Test bewiese nichts.
 if start_osum "$TMPD/live.img" "$TMPD/run2.txt" "$FWPORT"; then
     ok "der Dienst laeuft wieder"
     G="$TMPD/run2.txt"
@@ -560,7 +473,6 @@ if start_osum "$TMPD/live.img" "$TMPD/run2.txt" "$FWPORT"; then
     is "derselbe Fingerabdruck wie beim ersten Start" "$FP3" "$FP1"
     out=$(as_key 'echo ZWEITERSTART' 2>/dev/null)
     is "und derselbe Schluessel meldet sich weiter an" "$out" "ZWEITERSTART"
-    # Die dritte Meinung: die Datei auf der Platte, gelesen vom WIRT.
     python3 tools/osum/mkfs.py cat "$TMPD/live.img" \
         /etc/ssh/ssh_host_ed25519.pub > "$TMPD/hostpub.txt" 2>/dev/null
     if [ -s "$TMPD/hostpub.txt" ]; then
@@ -581,10 +493,6 @@ fi
 
 # =====================================================================
 echo "== 9. OHNE authorized_keys: derselbe Schluessel wird abgelehnt =="
-# =====================================================================
-# Das ist die Gegenprobe, die aus „der Schluessel wurde angenommen" eine
-# Aussage macht. Gleicher Kern, gleiches Passwort, gleicher Schluessel --
-# nur die Datei fehlt.
 cp "$TMPD/nokeys.img" "$TMPD/live2.img"
 if start_osum "$TMPD/live2.img" "$TMPD/run3.txt" "$FWPORT"; then
     timeout 120 ssh -p "$FWPORT" $SSHO $KEYOPT -o PasswordAuthentication=no \
@@ -606,8 +514,6 @@ else
 fi
 
 echo
-# Die Schlusszeile in der Form, die `zusagen()` in ./test.sh liest --
-# sonst faellt die Zahl dieser Runde still unter den Tisch.
 echo "SSHD: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

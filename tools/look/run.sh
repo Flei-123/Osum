@@ -50,14 +50,6 @@ if shot A user=- icons=yes lang=de uitrace=yes extra=launchervis keep=yes; then
     K=$(grep -a 'taskbar: lang=' "$S" | tail -1 | grep -oE 'keys=[0-9]+' \
         | grep -oE '[0-9]+')
     ge "keys in the message catalogue" "$K" 140
-    # (the German 'kein Netz' of the bar is checked in B2: with the icon font
-    # the field shows a symbol, only without it the bar writes the words)
-    # THE UMLAUT, PIXEL BY PIXEL.
-    #
-    # The word is `Ausführen`, the launcher's button, and it is on the
-    # DEFAULT desktop -- no extra word on the kernel command line, no
-    # page that has to be opened first. That matters: the claim is
-    # about what a person sees when the machine comes up.
     #
     # It is also SHORT, and that is deliberate. The reference
     # rasteriser accumulates its advances a fraction of a pixel
@@ -72,15 +64,6 @@ if shot A user=- icons=yes lang=de uitrace=yes extra=launchervis keep=yes; then
     # atomic, so a line can come out cut in half by another program's.
     # Take the last COMPLETE one; there are several repaints, so there
     # is one.
-    #
-    # ROUND SOFTUI: THE PATTERN IS FIELD-BASED NOW, and that makes it
-    # STRICTER and not looser. It read `... bg=<n> t=Ausführen`, which
-    # says "and nothing between them" -- so it stopped matching the
-    # moment round THEMESTORE put ` tw=<n>` in that gap, and round
-    # SOFTUI put ` ax=<n> ay=<n>` after it. Measured on the parent
-    # commit of round SOFTUI, before a line of this round existed: the
-    # same FAIL. A test that breaks when a REPORT grows a field was
-    # testing the field order and not the screen.
     #
     # It still requires kind=2 and it still requires the exact word.
     L=$(grep -aoE 'kind=2 x=[0-9]+ base=[0-9]+ fg=[0-9]+ bg=[0-9]+( [a-z]+=[0-9]+)* t=Ausführen' "$S" | tail -1)
@@ -125,11 +108,6 @@ if shot A user=- icons=yes lang=de uitrace=yes extra=launchervis keep=yes; then
     fi
     N=$(python3 tools/i18n/scan.py 2>/dev/null | grep -aoE '^gefunden: [0-9]+' | grep -oE '[0-9]+')
     is "hardcoded German surface text (tools/i18n/scan.py)" "${N:-x}" "0"
-    # THE STRING FROM THE PHOTOGRAPH. The starter's rows are the bundle
-    # labels, and the bundle labels never pass through the catalogue --
-    # which is why "Text schreiben und aendern" survived round I18N,
-    # round LOOK part A and two addenda, in plain sight, three rows
-    # under a correctly drawn "Ausführen".
     if python3 tools/look/umlaut.py "$S" "$TMPD/A/desktop.ppm" "Suchen" \
             "Text schreiben und ändern" 0 --ink; then
         ok "the bundle label is on the screen with a real 'ä'"
@@ -142,50 +120,9 @@ fi
 
 echo "== A2. five DIFFERENT umlaut characters, pixel for pixel =="
 #
-# Part A proved one string. One string is not enough: 'ä' and 'ü' are
-# all over the catalogue, 'ß' and 'Ö' are rare, and a font cut down to
-# 339 characters can have a hole exactly there without "Ausführen" ever
-# noticing. So: five characters, four widgets, three windows.
-#
-# TWO PICTURES AND NOT ONE, and the reason is worth writing down. The
-# theme window and the file manager are laid out by the same tiler, and
-# it gives the file manager 396 pixels when the starter is up. The
-# column "Größe" begins at x=368 and is 44 wide, so it ends 20 pixels
-# past its own window -- and what stands there is the NEXT window. That
-# is not a font fault and must not be measured as one; `umlaut.py` says
-# so instead. Without the starter the manager gets 660 and the string
-# fits. Both pictures are of a German desktop; neither is arranged to
-# make a test pass.
 PROGS_TT="desktop taskbar settings launcher dhcp explorer widgetdemo themetest locate sh echo ls cat edit"
-# RUNDE MERGE-2: `themeshot` STATT `themegui` -- UND DAS IST DIE
-# BEHEBUNG DES ROTEN ABSCHNITTS A2a.
 #
-# `themegui` ist die MESSFASSUNG von /bin/themetest: sie schaltet
-# fortwaehrend zwischen hell und dunkel um, um zu messen, was ein
-# Themenwechsel kostet. Der Bildschirmabzug faellt damit mitten in einen
-# Neuaufbau -- gemessen an diesem Bild: die obere Haelfte des Fensters
-# ist hell, ab y=300 ist alles dunkel, und an der Stelle, an der
-# `Übernehmen` stehen muesste, steht gar nichts. 526 von 526
-# Tintenpunkten "falsch" sind kein Zeichensatzfehler, sondern ein
-# zerrissenes Bild.
-#
-# STATUS-SOFTUI.md fuehrt diesen Abschnitt ausdruecklich als NICHT
-# behoben auf und vermutet die Farbe ("der Bericht meldet bg=#ffffff,
-# unter der Schrift steht etwas anderes"). Es ist nicht die Farbe: an
-# der Stelle steht ueberhaupt keine Schrift.
-#
-# `themeshot` ist dieselbe Oberflaeche OHNE das Umschalten (siehe
-# kernel/user/themetest.fi: `gui_test(day, messen=false)`, "NUR DAS
-# BILD"). Damit ist das Bild stabil und die Zusage misst wieder das,
-# was sie behauptet: den Rasterer.
 if shot A2a lang=de icons=yes uitrace=yes extra="themeshot" progs="$PROGS_TT" keep=yes; then
-    # r374: the window of `themetest gui` is a scene tree of fUi now (its
-    # button is the host's, painted by fUi's painter, not by wlib's fixed
-    # point rasteriser). Like the file manager below (A2b) it is measured with
-    # `--ink`: every character must have its ink on the screen at the
-    # reported place; the sub-pixel position of the edge pixels is the
-    # painter's, not the second rasterisation's (tolerance 0 said 100 % of
-    # the ink "wrong" at a correct place: 'Ü' stands at x=156 y=388).
     if python3 tools/look/umlaut.py "$TMPD/A2a/serial.txt" \
             "$TMPD/A2a/desktop.ppm" "Themenprobe" "Übernehmen" 64 --ink; then
         ok "a CAPITAL umlaut is drawn: 'Übernehmen'"
@@ -195,23 +132,7 @@ if shot A2a lang=de icons=yes uitrace=yes extra="themeshot" progs="$PROGS_TT" ke
 else
     bad "A2a did not boot"
 fi
-# A2b HAT ABSICHTLICH KEIN themetest UND KEINEN STARTER, und der Grund
-# ist gemessen: sobald DREI Anwendungsfenster offen sind, kachelt der
-# Fenstermanager der Runde TILING sie, und der Dateimanager bekommt 396
-# Bildpunkte statt der 664, die er anfordert. Seine Spalte "Größe"
-# faengt bei x=368 an und ist 44 breit -- sie passt dann nicht mehr ins
-# eigene Fenster. Mit zwei Fenstern bleibt die Anordnung frei, das
-# Fenster ist 660 breit, und die Zeichenkette steht ganz darin.
 if shot A2b lang=de icons=yes uitrace=yes extra="themegui nostart wigapp=/bin/explorer" keep=yes; then
-    # TOLERANCE 64, AND HERE IS THE MEASURED NUMBER FOR IT. The two dots
-    # of an 'ö' are a second glyph box over the first, and where two
-    # boxes overlap the library mixes glyph ON glyph while the reference
-    # mixes each onto the clean ground -- the same effect tools/k15
-    # documents for the "ff" in "Öffnen". Measured on this line: at
-    # tolerance 0 three of 282 ink pixels differ, at 16 one, at 64 none.
-    # The largest deviation is therefore under 64 of 255 steps and
-    # touches three pixels. Nothing here is loosened: the string, the
-    # position and the colours all still have to be right.
     if python3 tools/look/umlaut.py "$TMPD/A2b/serial.txt" \
             "$TMPD/A2b/desktop.ppm" "Datei-Explorer" "Größe" 64 --ink; then
         ok "'ö' and 'ß' stand next to each other in the table heading"
@@ -221,8 +142,6 @@ if shot A2b lang=de icons=yes uitrace=yes extra="themegui nostart wigapp=/bin/ex
 else
     bad "A2b did not boot"
 fi
-# Und die Gegenprobe fuer den Pruefer selbst: ein Text, der aus seinem
-# Fenster laeuft, muss ERKANNT und nicht falsch gemessen werden.
 if [ -s "$TMPD/A2a/desktop.ppm" ]; then
     if python3 tools/look/umlaut.py "$TMPD/A2a/serial.txt" \
             "$TMPD/A2a/desktop.ppm" "Datei-Explorer" "Größe" 64 \
@@ -238,18 +157,9 @@ fi
 echo "== B. the symbols in the corner =="
 if shot B1 lang=de icons=yes nvicons=no keep=yes; then
     S="$TMPD/B1/serial.txt"
-    # RUNDE MERGE-2: DAS GANZE MUSTER, NICHT DIE HALBE ZEILE.
-    #
-    # Auf der seriellen Leitung schreiben fuenf Prozesse gleichzeitig.
-    # In diesem Lauf stand da:
     #
     #   taskbar: icon field=bat id=57381 bg=... sel=... ix=17 iy=87 ...
     #
-    # -- die Zeile der Leiste, mitten hinein zerschnitten von einer
-    # anderen. `grep ' x='` fand darin nichts, `set -- $pair` bekam zwei
-    # Woerter statt drei, und bash brach mit "$2: unbound variable" ab.
-    # Genommen wird jetzt der letzte Treffer, der WIRKLICH die ganze
-    # Meldung traegt; zerschnittene Zeilen fallen von selbst heraus.
     NL=$(grep -aoE 'taskbar: icon field=net id=[0-9]+ x=[0-9]+ y=[0-9]+ px=[0-9]+' "$S" | tail -1)
     BL=$(grep -aoE 'taskbar: icon field=bat id=[0-9]+ x=[0-9]+ y=[0-9]+ px=[0-9]+' "$S" | tail -1)
     [ -n "$NL" ] && ok "the network has a glyph: $NL" || bad "no network glyph"
@@ -521,11 +431,6 @@ fi
 
 # ---- A, part three: real characters, not transliteration.
 #
-# Part A of this round proved that a German string RENDERS (438 ink
-# pixels on "Ausführen", 0 wrong). It did not check that the German
-# strings ARE German. They were not: the editor bundle said "Text
-# schreiben und aendern", and a bundle label never goes through the
-# catalogue, so no catalogue test could have seen it.
 python3 tools/i18n/translit.py --zaehle > "$TMPD/translit.txt" 2>&1
 TRC=$?
 sed 's/^/        /' "$TMPD/translit.txt"

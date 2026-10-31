@@ -4,28 +4,6 @@
 #
 #   bash tools/systembus/run.sh
 #
-# ======================================================================
-# WARUM ES DIESEN LAEUFER GIBT
-# ======================================================================
-#
-# Die Wegkarte (/root/osum-roadmap/ROADMAP.md, A3) nennt den Systembus
-# den wichtigsten Einzelposten und begruendet das so: "Baust du ihn
-# nicht, baust du ihn siebenmal." Zwischenablage, Drag-and-Drop,
-# Benachrichtigungen, Energie und Sperrbildschirm haengen alle daran.
-#
-# Ein Bus ist die Art Sache, die sich SEHR leicht behaupten laesst: ein
-# paar Systemrufe, ein Kommentar, und in einem Lauf mit einem Kern sieht
-# alles gut aus. Was ihn wirklich ausmacht, ist:
-#
-#   -- traegt eine Nachricht die Kennung des ABSENDERS, und zwar die
-#      echte aus der Aufgabentafel und nicht die behauptete,
-#   -- wird ein Ruf ohne Recht ABGELEHNT, sichtbar und zaehlbar,
-#   -- ueberlebt das Ganze VIER KERNE, die gleichzeitig hineinschreiben,
-#   -- und wird ein Megabyte GETEILT oder heimlich kopiert.
-#
-# Jede dieser Fragen hat hier einen Abschnitt, und drei davon haben eine
-# GEGENPROBE -- einen Lauf, in dem die Zusage brechen MUSS. Eine
-# Messung, die auch ohne die Eigenschaft dasselbe sagt, misst nichts.
 set -u
 cd "$(dirname "$0")/../.."
 TMPD=${SYSBUS_TMPD:-$(mktemp -d)}
@@ -49,11 +27,6 @@ grep -q 'BUS_OFF' tools/kernel/memmap.py \
 
 echo
 echo "== 2. die Ein-Kern-Regel, an der Quelle =="
-# EIN GLOBALER PUFFER IST DIE FORM DES FEHLERS, NICHT SEIN NAME.
-# `static mut` in einer Kerneldatei ist genau das: ein Platz, den alle
-# Kerne teilen und den niemand sperrt. STATUS-MERGE6.md haelt zwei
-# davon fest (fs.inode_get, wig.glyph_into). In bus.fi darf es keinen
-# geben.
 n_static=$(grep -c '^static mut' kernel/bus/bus.fi || true)
 if [ "$n_static" = 0 ]; then
     ok "kernel/bus/bus.fi hat keinen 'static mut'"
@@ -268,36 +241,10 @@ echo "== 8. die Oberflaeche: die Meldungen in der Leiste =="
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     || bad "tools/k15/tree.py faellt"
 printf '# taskbar.conf\nedge=0\nheight=40\nwidth=0\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
-# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
-# Gleiche Ursache wie in K15, NETVIEW und GLYPHE: Runde GRUNDLINIE hat
-# die Laeufer -- zu Recht -- auf `--profile=app` umgestellt, weil die
-# Programme mit Oberflaeche seit Runde 31 `profile app` in ihrer ersten
-# Zeile tragen. Das Profil `app` bringt Firns volle Laufzeit mit, und
-# sechs der dreizehn Programme dieses Abbilds sind solche. /bin/explorer
-# allein ist damit 1623040 statt 907360 Oktette; die dreizehn zusammen
-# brauchen rund 16285 Bloecke, und 16384 sind es mit Schriften,
-# Buendeln, Baum, Bitmap und Inode-Tafel nicht mehr. `mkfs.py` sagte
-# "the disk is full", und ohne Abbild startet kein QEMU.
-# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
 ARGS=(build "$TMPD/disk.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
-# RUNDE ROTABSCHNITTE: /etc/uitrace -- DER SCHALTER, DER HIER FEHLTE.
-# Die Zusage e) wird geprueft mit `grep 'Meldg' leiste.txt`, also auf
-# der SERIELLEN LEITUNG. Die Leiste sagt dort aber nur etwas, wenn sie
-# eingeschaltet ist: `taskbar.fi`, `dbg_setup` -- entweder die Datei
-# /etc/uitrace liegt auf der Platte, oder `debug` steht auf der
-# Programmzeile. Ohne beides schweigt sie vollstaendig (`say`/`sayn`/
-# `nl` kehren sofort zurueck), und dann kann `Meldg` dort nicht stehen,
-# egal wie lange gewartet wird und egal ob der Bus funktioniert.
-# Nachgemessen an einem behaltenen Lauf (SYSBUS_KEEP=1): im ganzen
-# Mitschnitt kam KEINE EINZIGE `taskbar:`-Zeile vor, auch nicht das
-# `taskbar: ready ascent` des Starts -- die Leiste lief, sie sagte nur
-# nichts. tools/desktop/run.sh, das dieselben Zeilen liest, legt die
-# Datei genau dafuer an und ist gruen.
-# Das entschaerft nichts: die Meldung muss weiterhin wirklich in der
-# Leiste stehen, sie wird jetzt nur wieder berichtet.
 printf 'on\n' > "$TMPD/uitrace"
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf"
     "/etc/uitrace=$TMPD/uitrace")
@@ -317,27 +264,7 @@ gui() { # name extra drehbuch
     local sock="$TMPD/$name.sock"
     rm -f "$sock"
     cp -f "$TMPD/disk.img" "$TMPD/$name.img"
-    # RUNDE ROTABSCHNITTE: `wmshell` FEHLTE, UND DAMIT DIE SHELL.
-    # Zusage d) tippt `edit /etc/taskbar.conf` ins Terminalfenster.
-    # Das Fenster war da (`wm: term win=0`, taskbar btn id=7,
-    # app=terminal) und der Klick traf es auch -- nur lief darin
-    # keine Shell, die den Befehl haette ausfuehren koennen. Genau
-    # dafuer ist `wmshell` da: "gibt dem Programm die Shell IM
-    # Terminalfenster" (tools/tiling/run.sh:383). Ohne das Wort
-    # landeten die Tasten im Suchfeld des Starters -- im
-    # Mitschnitt steht dann `launcher: treffer` statt `edit:
-    # ready`. tools/hidpunkte, tools/hidweg, tools/loader und
-    # tools/tiling setzen es aus demselben Grund.
     #
-    # NICHT `wmdauer` DAZU -- GEMESSEN UND VERWORFEN. Es nimmt dem
-    # Schreibtisch die Rundengrenze UND startet die Shell neu,
-    # sobald sie endet. Hier endet sie aber sofort wieder (die
-    # Konsole ist leer, es wird ja ueber den Monitor getippt), und
-    # das ergab eine Endlosschleife: `elf: start 2295`,
-    # 2410-mal `sh: ready` in einem Lauf, 830 KB Mitschnitt, und
-    # `wm: hold` kam nie -- der Lauf haing, bis er abgebrochen
-    # wurde. hidpunkte/hidweg/loader setzen `wmdauer` deshalb OHNE
-    # `wmhold`; dieser Laeufer braucht `wmhold` fuer die Fotos.
     timeout 320 $QEMU -kernel "$TMPD/k.mb" -m 512 \
         -append "gfx fbres=1024x768 wm wig desk wmshell wmhold wighalt=300 nokbd nosched noproc nofs $extra" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot \
@@ -398,14 +325,7 @@ bild 01-leiste-meldung
 
 echo
 echo "== 9. die Oberflaeche: kopieren im Editor, einfuegen im Terminal =="
-# DIE BEWEGUNG, UM DIE ES GEHT, und sie ist die Zusage d) der Runde:
-# im Editor STRG-K (Zeile ausschneiden), Editor zu, dann in der
-# Kommandozeile `clip` -- und dort steht dieselbe Zeile. ZWEI PROZESSE,
-# EINE Ablage, und der Weg dazwischen ist der Bus und nichts sonst.
 #
-# Getippt wird ueber den QEMU-Monitor, Taste fuer Taste. `tipp` macht
-# aus einem Wort die `taste`-Zeilen des Drehbuchs -- von Hand waeren es
-# vierzig Zeilen, und vierzig Zeilen liest niemand nach.
 tipp() {
     python3 - "$1" <<'PY'
 import sys
@@ -428,25 +348,20 @@ PY
     echo "warteauf 'wm: hold' || 90"
     echo "warte 5"
     echo "foto 02-schreibtisch"
-    # 1. in das Terminalfenster klicken, damit die Tasten dort landen
     echo "klickauf tbbtn0"
     echo "warte 2"
-    # 2. den Editor auf eine Datei starten, die es gibt
     tipp "edit /etc/taskbar.conf"
     echo "taste ret"
     echo "warteauf 'edit: ready' || 40"
     echo "warte 3"
     echo "foto 03-editor"
-    # 3. STRG-K schneidet die Zeile aus -- und legt sie auf den Bus
     echo "taste ctrl-k"
     echo "warte 2"
     echo "foto 04-editor-nach-strg-k"
-    # 4. Editor zu, OHNE zu sichern
     echo "taste ctrl-x"
     echo "warte 2"
     echo "taste n"
     echo "warte 3"
-    # 5. und im Terminal nachsehen, was auf dem Bus liegt
     tipp "clip"
     echo "taste ret"
     echo "warte 3"

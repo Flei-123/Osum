@@ -1,33 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/operation/run.sh -- RUNDE BETRIEB: DIE NAMENSAUFLOESUNG, DIE
-# SCHLUESSELVERWALTUNG UND DIE SERVERSEITE, GEMESSEN.
 #
-# Voraussetzung: `bash tools/operation/vorbereiten.sh $OUT` ist gelaufen
-# (Pakete, Zertifikate, Schluesselbund, vier Auslieferungen, Abbild,
-# installierte Platte unter $OUT/basis.img).
-#
-#   bash tools/operation/run.sh [--ohne-qemu]
-#
-# GEGEN WAS GEMESSEN WIRD, und es steht hier und nicht im Kleingedruckten:
-#
-#   * DER AUFLOESER gegen `dig` (BIND) -- mit ECHTEN Namen und einem
-#     ECHTEN Nameserver, weil ein Aufloeser, der nur gegen einen
-#     selbstgebauten Server gemessen ist, nur beweist, dass zwei eigene
-#     Programme sich einig sind.
-#   * DIE HAERTUNG gegen `tools/operation/dnsdienst.py --boese`, einen
-#     Faelscher, der VOR der richtigen Antwort falsche schickt.
-#   * DAS FORMAT gegen `kernel/user/dnswt.fi`, neunzehn von Hand
-#     gebaute, feindliche Nachrichten -- ohne ein einziges Paket.
-#   * DER UPDATE-WEG gegen `tools/ota/server.py` (echtes TLS 1.3 aus
-#     Pythons `ssl`) und `tools/operation/dnsdienst.py`, beide auf dem
-#     Wirt, das Geraet in QEMU ueber eine e1000.
-#
-# DER AUFLOESER LAEUFT IN ZWEI LADERN, und beide Male ist es DIESELBE
-# Binaerdatei aus DEMSELBEN Quelltext: einmal auf dem Wirt (Linux laedt
-# sie, weil Osums Systemaufrufe Linux' Nummern tragen -- Runde K4) und
-# einmal in QEMU auf Osum. Der Wirt macht die Messung gegen `dig`
-# bezahlbar; QEMU beweist, dass es auf dem echten System laeuft.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -45,10 +17,6 @@ OHNEQEMU=0
 W="$OUT/wirt"
 mkdir -p "$W"
 
-# DER LAUF MUSS SICH WIEDERHOLEN LASSEN. Er veroeffentlicht Fassungen und
-# wechselt Schluessel; ohne diesen Schnappschuss stuende beim zweiten Lauf
-# Fassung 18 und Generation 6 da, und jede Zahl im Bericht waere eine
-# andere. `$OUT/rein` ist der Zustand nach `vorbereiten.sh`.
 if [ -d "$OUT/aus" ] && [ ! -d "$OUT/rein" ]; then
     mkdir -p "$OUT/rein"
     cp -a "$OUT/aus" "$OUT/rein/aus"
@@ -225,9 +193,6 @@ gleich "gekuerzte Antwort (TC-Bit) wird als TRUNCATED gemeldet" \
 nsd_aus
 gleich "kein Nameserver antwortet -> TIMEOUT und nicht ein falsches Ergebnis" \
     "$(timeout 30 "$W/host" -s 127.0.0.1 "$NAME" 2>&1 | head -1)" "TIMEOUT"
-# Ein Nameserver, den es GIBT, der aber nicht antwortet, und einer, der
-# nicht erreichbar ist -- beide muessen zu einer AUSSAGE fuehren und
-# nicht zu einer erfundenen Adresse.
 gleich "ein Nameserver, den es nicht gibt -> TIMEOUT" \
     "$(timeout 40 "$W/host" -s 127.0.0.9 "$NAME" 2>&1 | head -1)" "TIMEOUT"
 
@@ -245,18 +210,15 @@ LINKS=$(stat -c%h "$OUT/aus/v/2/hallo-2.opk")
 [ "${LINKS:-1}" -ge 2 ] \
     && ok "eine Fassung vorzuhalten kostet KEINE Kopie ($LINKS harte Verknuepfungen)" \
     || bad "v/2 haelt eine eigene Kopie"
-# Das Register darf nicht zurueckgehen -- auch nicht auf Zuruf.
 python3 tools/ota/veroeffentlichen.py "$OUT/aus" --stand "$OUT/stand" \
     --bund "$OUT/bund.json" --fassung 2 > "$W/zurueck.txt" 2>&1
 hat "$W/zurueck.txt" "geht zurueck" "eine kleinere Fassungsnummer wird ABGELEHNT"
 LETZTE=$(python3 -c "import json;print(json.load(open('$OUT/aus/register.json'))['letzte'])")
 gleich "und das Register steht unveraendert" "$LETZTE" "4"
-# Eine Ruecknahme gibt die Nummer NICHT zurueck.
 cp "$OUT/aus/register.json" "$W/reg.bak"
 python3 tools/ota/veroeffentlichen.py "$OUT/aus" --zuruecknehmen 4 > "$W/rn.txt" 2>&1
 hat "$W/rn.txt" "gefuehrt bleibt 4" "eine zurueckgenommene Auslieferung behaelt ihre Nummer"
 hat "$W/rn.txt" "aktuell ist 3" "und aktuell faellt auf die vorige Fassung"
-# zuruecksetzen fuer den Rest des Laufs
 cp "$W/reg.bak" "$OUT/aus/register.json"
 printf '# keine\n' > "$OUT/aus/gesperrt.txt"
 python3 - <<PY
@@ -303,11 +265,6 @@ fi
 # =====================================================================
 echo
 echo "== 10. auf Osum: DHCP schreibt /etc/resolv.conf, und ein echter Name =="
-# =====================================================================
-# QEMUs Benutzernetz bietet per DHCP den Nameserver 10.0.2.3 an; der
-# leitet an den Aufloeser des WIRTS weiter. Damit loest das Geraet einen
-# ECHTEN Namen auf, und das Ergebnis laesst sich gegen `dig` auf dem
-# Wirt halten.
 frisch
 rc=$(lauf dhcp1 "dhcp einmal;cat /etc/resolv.conf;host -v example.com;host -c;exit")
 gleich "die Maschine kommt hoch" "$rc" "21"
@@ -359,7 +316,6 @@ rc=$(lauf drei2 "ota apply;sh /start.sh;ota show;exit")
 gleich "der Sprung 1 -> 4" "$rc" "21"
 hat "$OUT/drei2.txt" "opk: installed hallo" "eingespielt"
 hat "$OUT/drei2.txt" "ota: version here 4" "das Geraet steht jetzt auf Fassung 4"
-# und die alten Fassungen sind WEITER abrufbar
 for v in 1 2 3; do
     C=$(curl -s --cacert "$OUT/certs/ca.pem" --resolve "$NAME:$PORT:127.0.0.1" \
         -o "$W/v$v.VERZEICHNIS" -w '%{http_code}' \
@@ -371,10 +327,6 @@ cp -f "$OUT/ziel.img" "$OUT/f4.img"
 
 # =====================================================================
 echo
-# ERST JETZT, UND DAS IST KEIN SCHOENHEITSFEHLER: bis hierher steht
-# `aktuell` auf Fassung 4, und genau das misst Abschnitt 12 ("drei
-# Fassungen zurueck"). Waeren die Fassungen 5..9 vorher entstanden,
-# spraenge das Geraet von 1 auf 9 und der Nachweis waere ein anderer.
 echo "== 12b. weitere Auslieferungen fuer die Gegenproben =="
 # =====================================================================
 mach() { # <ziel-notiz> <schalter...>
@@ -417,7 +369,6 @@ gpruef "ein FREMD signiertes Update wird abgelehnt" \
     "SIGNATURE OF THE VERZEICHNIS WRONG" "$OUT/gp1.txt"
 hatnicht "$OUT/gp1.txt" "opk: installed" "        und es wurde wirklich nichts installiert"
 
-# (2) mit dem ERSATZSCHLUESSEL signiert -- muss durchgehen
 dienst "$OUT/aus" || bad "Gegenstelle"
 frisch
 rc=$(lauf gp2 "ota set quelle https://$NAME:$PORT/v/5;ota apply;exit")
@@ -425,8 +376,6 @@ gpruef "ein mit dem ERSATZSCHLUESSEL signiertes Update wird angenommen" \
     "ota: checked with the SPARE KEY" "$OUT/gp2.txt"
 hat "$OUT/gp2.txt" "opk: installed hallo" "        und es wurde wirklich installiert"
 
-# (3) gesperrte Fassung -- das Geraet merkt sich die Sperre und lehnt
-#     die (richtig signierte!) Auslieferung 5 danach ab.
 frisch
 rc=$(lauf gp3a "ota set quelle https://$NAME:$PORT/v/6;ota search;exit")
 hat "$OUT/gp3a.txt" "ota: blocked versions: 5" "        die Sperrliste steht im signierten VERZEICHNIS"
@@ -441,7 +390,6 @@ rc=$(lauf gp4 "ota set quelle https://$NAME:$PORT/v/1;ota apply;exit")
 gpruef "ein RUECKSCHRITT auf eine aeltere Fassung wird abgelehnt" \
     "ota: ROLLBACK REFUSED" "$OUT/gp4.txt"
 
-# (5) Schluesselwechsel mit gueltiger Kette
 frisch
 rc=$(lauf gp5 "ota set quelle https://$NAME:$PORT/v/7;ota apply;ota show;exit")
 gpruef "ein SCHLUESSELWECHSEL mit gueltiger Kette geht durch" \
@@ -449,7 +397,6 @@ gpruef "ein SCHLUESSELWECHSEL mit gueltiger Kette geht durch" \
 hat "$OUT/gp5.txt" "ota: key generation 1" "        und die neue Generation steht auf der Platte"
 hat "$OUT/gp5.txt" "opk: installed hallo" "        das Update selbst ging auch durch"
 
-# (6) Schluesselwechsel mit unterbrochener Kette
 frisch
 rc=$(lauf gp6 "ota set quelle https://$NAME:$PORT/v/8;ota apply;ota show;exit")
 gpruef "ein SCHLUESSELWECHSEL mit UNTERBROCHENER Kette wird abgelehnt" \
@@ -457,7 +404,6 @@ gpruef "ein SCHLUESSELWECHSEL mit UNTERBROCHENER Kette wird abgelehnt" \
 hat "$OUT/gp6.txt" "ota: key generation 0" "        und die Generation ist NICHT gewechselt"
 hatnicht "$OUT/gp6.txt" "opk: installed" "        und nichts installiert"
 
-# (7) zwei Wechsel verpasst -- in einem Zug nachgeholt
 frisch
 rc=$(lauf gp7 "ota set quelle https://$NAME:$PORT/v/9;ota apply;ota show;exit")
 gpruef "ein Geraet, das ZWEI Wechsel verpasst hat, holt sie in einem Zug nach" \

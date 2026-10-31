@@ -1,53 +1,6 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/suspend/run.sh -- DIE ABNAHME DER RUNDE SUSPEND (K-018).
 #
-# ==================================================================
-# WAS HIER GEMESSEN WIRD, UND WAS AUSDRUECKLICH NICHT
-# ==================================================================
-#
-# Der Auftrag verlangt ZUERST MESSEN, DANN BAUEN. Die Vorabmessung
-# steht im Kern (`kernel/susp.fi`, Schalter `suspmess`) und wird hier
-# gegen eine ZWEITE, unabhaengige Quelle gehalten: `iasl -d` auf
-# einem Abzug der DSDT aus DERSELBEN Maschine. Ein Kern, der sich
-# selbst misst und sich selbst glaubt, misst nichts.
-#
-# Genau diese Gegenprobe hat in dieser Runde einen echten Fehler
-# gefunden: die erste Fassung meldete "kein _S3", weil sie
-# `amlns.node_at(state,0)` (eine ADRESSE) an `amlns.child` gab, das
-# einen INDEX erwartet. Ohne den Abgleich mit iasl waere in den
-# Bericht geschrieben worden, die Firmware koenne kein S3 -- sie kann
-# es, und das Paket lautet {One, One, Zero, Zero}.
-#
-# DIE MESSLATTE, die fallen muss:
-#
-#   1. Die Speicherkarte hat 0 Kollisionen, und SUSP_OFF liegt in
-#      seinem ZUGETEILTEN Bereich 0x110000..0x113000. Keine Seite
-#      ausserhalb. (Fuenf Runden hintereinander haben sich dieselbe
-#      freie Seite genommen; diese Stelle prueft genau das.)
-#   2. Der Kern baut.
-#   3. Die Vorabmessung des Kerns == das, was iasl in der DSDT sieht.
-#   4. ZWEI volle Zyklen: ein Zustand geht schlafen, kommt zurueck
-#      und ist DANACH IDENTISCH -- byteweise verglichen, nicht per
-#      Augenschein. Der zweite Zyklus benutzt einen ANDEREN Zustand
-#      als der erste; ein stehengebliebenes Abbild faellt sonst nicht
-#      auf.
-#   5. Frei vorher == frei nachher. Kein einziger verlorener Rahmen.
-#   6. DIE GEGENPROBE, DIE FEHLSCHLAGEN MUSS: ein absichtlich
-#      beschaedigtes Abbild (ein Oktett gekippt, Kopf unveraendert)
-#      darf NICHT eingespielt werden, sondern muss zu einem sauberen
-#      Kaltstart fuehren. Ein Ruhezustand, der Muell einspielt, ist
-#      schlimmer als keiner.
-#   7. tools/check-ui.sh bleibt PASSED, tools/usbimg/build.sh baut.
-#
-# WAS DIESE RUNDE NICHT ZUSAGT, und es steht hier und nicht in einer
-# Fussnote: die Maschine wird NICHT wirklich abgeschaltet. Gemessen
-# ist der TRAEGER -- Abbild, Pruefsumme, Wiedererkennung, Gegenprobe
-# -- und dass ein definierter Zustand byteweise zurueckkommt. Die
-# Sicherung der CPU-Register, des FPU/XSAVE-Bereichs, der
-# Seitentabellen und der Geraetezustaende ist NICHT gebaut und steht
-# als roter Punkt in docs/RUNDE-SUSPEND.md.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -90,8 +43,6 @@ else
 fi
 hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
 
-# DER ZUGETEILTE BEREICH. Diese Stelle hat dem Projekt fuenf
-# Kollisionen beschert, jede davon still und erst nach dem Merge.
 v=$(grep -aE "^const SUSP_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 m=$(grep -aE "^const SUSP_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
@@ -119,17 +70,10 @@ else
     exit 1
 fi
 
-# Ein Lauf im Kern. Die Platte ist bei JEDEM Lauf frisch -- ein
-# Abbild aus einem frueheren Lauf darf den naechsten nicht faerben.
 lauf() { # name kommandozeile [zeitlimit]
     local name=$1 app=$2 t=${3:-300}
     rm -f "$TMPD/$name.img"
     qemu-img create -f raw "$TMPD/$name.img" 64M >/dev/null 2>&1
-    # `isa-debug-exit` ist der Weg, auf dem dieser Kern den Gast
-    # beendet (kernel/power.fi, Anschluss 0xF4). OHNE ihn laeuft QEMU
-    # nach `kernel: done` weiter, bis `timeout` zuschlaegt -- unter
-    # KVM gemessen: die Messung war fertig und richtig, der Abschnitt
-    # stand trotzdem 300 Sekunden.
     timeout "$t" $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 -append "$app" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
@@ -151,9 +95,6 @@ fi
 hat "$TMPD/mess.txt" 'why=ok' "die Vorabmessung findet alles, was sie braucht"
 hat_nicht "$TMPD/mess.txt" 'panic' "kein Ausnahmefehler im Messlauf"
 
-# DIE ZAHLEN, EINZELN. Sie stehen hier als Erwartung, damit ein
-# stilles Verschwinden auffaellt -- eine Zeile "s3=NEIN" ist ein
-# Ergebnis, aber keine bestandene Abnahme.
 K_S3=$(sed -n 's/.* s3=\([0-9]*,[0-9]*\).*/\1/p' "$TMPD/mess.txt" | head -1)
 K_S4=$(sed -n 's/.* s4=\([0-9]*,[0-9]*\).*/\1/p' "$TMPD/mess.txt" | head -1)
 K_PM1A=$(sed -n 's/.* pm1a=\(0x[0-9a-fA-F]*\).*/\1/p' "$TMPD/mess.txt" | head -1)
@@ -165,7 +106,6 @@ K_PM1A=$(sed -n 's/.* pm1a=\(0x[0-9a-fA-F]*\).*/\1/p' "$TMPD/mess.txt" | head -1
                   || bad "kein PM1a_CNT"
 hat "$TMPD/mess.txt" 'facs=0x[0-9a-f]*[1-9a-f]' "die FACS liegt vor (Platz fuer den Aufwachvektor)"
 
-# --------------------- 3b. DIE GEGENPROBE GEGEN EINE ZWEITE QUELLE
 if [ "$IASL" = 1 ]; then
     echo
     echo "== 3b. dieselbe DSDT, gelesen von iasl statt vom Kern =="
@@ -217,14 +157,6 @@ PY
             ok "die DSDT ist herausgeschnitten ($(stat -c%s "$TMPD/dsdt.aml") Oktette)"
             ( cd "$TMPD" && iasl -d dsdt.aml >/dev/null 2>&1 )
             if [ -f "$TMPD/dsdt.dsl" ]; then
-                # Die ersten zwei Elemente des Pakets, aus dem
-                # Disassemblat. One/Zero/0xNN kommen alle vor.
-                # DER WIRT HAT NICHT ZWINGEND GAWK. `strtonum` ist
-                # eine GNU-Erweiterung, und auf mawk (Debian-Vorgabe)
-                # gibt es sie nicht -- gemessen: "awk: line 14:
-                # function strtonum never defined", und beide Werte
-                # kamen leer zurueck. Die Umwandlung macht deshalb
-                # `printf` in der Shell und nicht awk.
                 paket() { # datei name -> "a,b"
                     local roh
                     roh=$(awk -v want="Name (_$2," '
@@ -275,7 +207,6 @@ PY
     fi
 fi
 
-# ------------------------------------------- 4. die zwei Zyklen
 echo
 echo "== 4. zwei Zyklen, byteweise verglichen =="
 lauf zyk "osum suspend acpiev" 400
@@ -305,9 +236,6 @@ else
     grep -a 'RAHMEN VERLOREN\|vorher\|nachher' "$TMPD/zyk.txt" | sed 's/^/        /' | head -6
 fi
 
-# DIE ZWEI ZYKLEN MUESSEN VERSCHIEDENE ABBILDER SCHREIBEN. Sonst
-# misst der zweite ein stehengebliebenes Abbild des ersten und
-# meldet gruen, ohne etwas getan zu haben.
 S1=$(grep -a 'susp: gesichert' "$TMPD/zyk.txt" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
 S2=$(grep -a 'susp: gesichert' "$TMPD/zyk.txt" | sed -n '2s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
 if [ -n "$S1" ] && [ -n "$S2" ] && [ "$S1" != "$S2" ]; then
@@ -316,7 +244,6 @@ else
     bad "beide Zyklen haben dieselbe Summe (${S1:-?} / ${S2:-?}) -- der zweite misst den ersten"
 fi
 
-# Die Summe beim Einspielen muss die des Kopfes sein.
 if grep -aq 'susp: eingespielt' "$TMPD/zyk.txt"; then
     SCHIEF=$(awk '/susp: eingespielt/{
         s="";v="";
@@ -332,7 +259,6 @@ else
     bad "es wurde nie etwas eingespielt"
 fi
 
-# --------------------------- 5. die Gegenprobe, die fehlschlagen MUSS
 echo
 echo "== 5. die Gegenprobe: ein beschaedigtes Abbild darf NICHT gelten =="
 hat "$TMPD/zyk.txt" 'susp: == gegenprobe kaputt' "die Gegenprobe laeuft"
@@ -358,12 +284,6 @@ else
     bad "tools/check-ui.sh ist NICHT mehr gruen"
     tail -6 "$TMPD/ui.txt" | sed 's/^/        /'
 fi
-# ACHTUNG, EINMAL SELBST HINEINGEFALLEN: `build.sh` nimmt ein
-# AUSGABEVERZEICHNIS, keinen Dateinamen. Mit einem Dateinamen legt es
-# ein Verzeichnis dieses Namens an, und `stat` auf die nicht
-# vorhandene Datei meldete "12288 Oktette" -- eine gruene Zeile ohne
-# Abbild dahinter. Geprueft wird deshalb die Datei, die wirklich
-# entsteht, UND ihre Groesse.
 mkdir -p "$TMPD/usb"
 if bash tools/usbimg/build.sh "$TMPD/usb" > "$TMPD/usb.txt" 2>&1 \
    && [ -f "$TMPD/usb/${MARKE_DATEI}-usb.img" ]; then
@@ -378,37 +298,10 @@ else
     tail -8 "$TMPD/usb.txt" | sed 's/^/        /'
 fi
 
-# ==================================================================
-# ABSCHNITT 7 BIS 11 -- DIE RUNDE SCHLAF (K-018, zweite Haelfte)
-# ==================================================================
-#
-# WAS HIER NEU GEMESSEN WIRD, UND WORIN ES SICH VON ABSCHNITT 4
-# UNTERSCHEIDET:
-#
-# Abschnitt 4 (die Vorrunde) laeuft in EINEM Kernlauf. Er schreibt
-# das Abbild, verwirft den Zustand im Speicher und holt ihn zurueck.
-# Das misst den TRAEGER -- aber nichts zwingt den Kern, den Zustand
-# wirklich verloren zu haben: Bitkarte, Seitentabellen und
-# Arbeitsspeicher stehen die ganze Zeit unveraendert da.
-#
-# Diese Abschnitte messen ueber den HOCHLAUF. Je Zyklus zwei
-# QEMU-Laeufe mit DERSELBEN Plattendatei, und zwischen ihnen wird
-# QEMU BEENDET. Was den zweiten Lauf erreicht, ist ausschliesslich
-# das, was auf der Platte steht -- ein echter Verlust des
-# Arbeitsspeichers liegt dazwischen.
-#
-#   Lauf A ("schlafarm")   Prozesse anlegen, rechnen lassen,
-#                          sichern, Gast BEENDEN.
-#   Lauf B ("schlafpruef") der Hochlauf findet das Abbild von selbst,
-#                          spielt es ein, vergleicht.
-
-# Ein VOLLER ZYKLUS: zwei Laeufe, eine Platte, QEMU dazwischen aus.
-# $1 = Name, $2 = zusaetzliche Woerter fuer Lauf A
 zyklus() {
     local name=$1 extra=${2:-} t=${3:-400}
     rm -f "$TMPD/$name.img"
     qemu-img create -f raw "$TMPD/$name.img" 64M >/dev/null 2>&1
-    # LAUF A -- sichern und beenden.
     timeout "$t" $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
         -append "osum schlafarm $extra acpiev" \
         -serial "file:$TMPD/$name-a.txt" -display none -no-reboot \
@@ -427,10 +320,6 @@ zyklus() {
 
 echo
 echo "== 7. der zugeteilte Raum der Runde SCHLAF =="
-# DIESELBE PRUEFUNG WIE IN ABSCHNITT 1, fuer den zweiten Bereich.
-# Welle 1 hat gezeigt, dass zugeteilte SEITEN allein nicht reichen --
-# `suspend` und `krypto` nahmen denselben MODUSINDEX. Diese Runde hat
-# beide Raeume zugeteilt bekommen, und beide werden geprueft.
 sv=$(grep -aE "^const SCHLAF_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 sm=$(grep -aE "^const SCHLAF_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
@@ -445,8 +334,6 @@ if [ -n "$sv" ] && [ -n "$sm" ] && [ "$((sv + sm))" -le $((0x126000)) ]; then
 else
     bad "der Bereich geht ueber 0x126000 hinaus -- das ist fremdes Land"
 fi
-# DIE MODUSINDIZES. Zugeteilt war 1020..1029; jeder Name der Runde
-# muss darin liegen.
 ausser=$(grep -aE "^const M_(SCHLAF|SCHLAFARM|SCHLAFPRUEF|SCHLAFHW|SCHLAFKAPUTT|NOSCHLAF|SCHLAFMESS): u64 = [0-9]+" \
     kernel/lib/kstate.fi | grep -oE '= [0-9]+' | grep -oE '[0-9]+' \
     | awk '$1 < 1020 || $1 > 1029' | wc -l)
@@ -467,9 +354,6 @@ hat_nicht "$B" 'panic' "kein Ausnahmefehler im Wiederanlauf"
 hat "$A" 'schlaf: abbild steht' "Lauf A schreibt das Abbild"
 hat "$A" 'schlaf: gast wird beendet' "Lauf A BEENDET den Gast -- der Speicher ist wirklich weg"
 
-# DIE STARTERKENNUNG: der neue Kern findet das Abbild VON SELBST.
-# Das ist Punkt 1 des Auftrags und der Unterschied zur Vorrunde, die
-# `S_RESTORED` setzte und niemand fragte.
 if grep -a 'schlaf: start' "$B" | grep -aq 'abbild=1'; then
     ok "der Hochlauf erkennt das Abbild VON SELBST (Starterkennung)"
 else
@@ -482,14 +366,9 @@ else
     bad "das Abbild wurde verworfen"
 fi
 
-# DER ZUSTAND, byteweise. `gleich` steht nur, wenn Zaehler, Muster,
-# Registersatz UND die Rahmenzahl stimmen (kernel/schlaf.fi:pruef).
 hat "$B" 'schlaf: gleich' "der Zustand ist nach dem Hochlauf IDENTISCH"
 hat_nicht "$B" 'schlaf: UNGLEICH' "kein veraenderter Zustand"
 
-# DIE HARDWARE-KENNUNG muss ueber den Neustart GLEICH sein -- sonst
-# waere sie als Merkmal wertlos (auf QEMU ist hwsig 0, deshalb ein
-# zweiter Weg: Plattengroesse + CPU-Merkmale + Rahmenzahl).
 HWA=$(grep -a 'schlaf: gesichert' -m1 "$A" >/dev/null 2>&1; \
       grep -a 'schlaf: start' "$B" | sed -n '1s/.* hw=\(0x[0-9a-f]*\).*/\1/p')
 HWI=$(grep -a 'schlaf: start' "$B" | sed -n '1s/.* hwimg=\(0x[0-9a-f]*\).*/\1/p')
@@ -499,8 +378,6 @@ else
     bad "Hardware-Kennung: jetzt '${HWA:-?}', im Abbild '${HWI:-?}'"
 fi
 
-# PUNKT 2/3/5: Register, FPU-Bereich, Geraete -- sie muessen IM
-# ABBILD liegen und beim Wiederanlauf dastehen.
 if grep -a 'schlaf: gesichert' "$A" | grep -aq 'regs=1'; then
     ok "PUNKT 2: der Registersatz (rsp/rbp/rbx/r12-15/rip/cr3) geht ins Abbild"
 else
@@ -525,8 +402,6 @@ else
     grep -a 'schlaf: gleich' "$B" | sed 's/^/        /' | head -2
 fi
 
-# PUNKT 4: DIE RAHMEN. Das ist die eigentliche Messgroesse der
-# Runde -- die Vorrunde trug 63 Bloecke Pruefstandsmuster.
 FR=$(grep -a 'schlaf: gesichert' "$A" | sed -n '1s/.*rahmen=\([0-9]*\).*/\1/p')
 FB=$(grep -a 'schlaf: start' "$B" | sed -n '1s/.* zurueck=\([0-9]*\).*/\1/p')
 if [ -n "$FR" ] && [ "$FR" -gt 0 ]; then
@@ -534,24 +409,17 @@ if [ -n "$FR" ] && [ "$FR" -gt 0 ]; then
 else
     bad "PUNKT 4: es gingen 0 Rahmen ins Abbild"
 fi
-# DIE ZAHL DER GESICHERTEN RAHMEN MUSS ZUR BITKARTE PASSEN: was
-# geschrieben wurde, muss auch zurueckkommen.
 if [ -n "$FR" ] && [ "$FR" = "$FB" ]; then
     ok "gesicherte == eingespielte Rahmen ($FR == $FB)"
 else
     bad "gesichert $FR, eingespielt ${FB:-?} -- ein Rahmen ist unterwegs verloren"
 fi
 
-# FREIE RAHMEN: kein verlorener Rahmen ueber den Wiederanlauf.
 hat "$B" 'schlaf: rahmen gleich' "frei vorher == frei nachher (kein verlorener Rahmen)"
 hat_nicht "$B" 'schlaf: RAHMEN VERLOREN' "keine Meldung ueber verlorene Rahmen"
 
 echo
 echo "== 9. DIE ZUSAGE, DIE REGISTER UND SEITENTABELLEN PRUEFT: WEITERRECHNEN =="
-# Ein Prozess, der nach dem Schlafen nur EXISTIERT, beweist nichts --
-# er koennte neu angelegt worden sein. Dieser hier fuehrt eine
-# laufende Rechnung in seiner privaten Seite, und der Kern rechnet
-# sie UNABHAENGIG nach: summe muss n*(n+1)/2 sein.
 if grep -aq 'schlaf: weitergerechnet=1' "$B"; then
     R=$(grep -a 'schlaf: rechnung' "$B" | sed -n '1s/.*s=\([0-9]*\) schritt=\([0-9]*\) soll=\([0-9]*\).*/summe=\1 schritt=\2 soll=\3/p')
     ok "der Prozess rechnet nach dem Hochlauf RICHTIG weiter ($R)"
@@ -559,8 +427,6 @@ else
     bad "die Rechnung des Prozesses hat den Schlaf NICHT ueberlebt"
     grep -a 'schlaf: rechnung\|weitergerechnet' "$B" | sed 's/^/        /' | head -3
 fi
-# Die Zahl darf nicht null sein -- "0 == 0" waere eine grüne Zeile
-# ohne Inhalt.
 RS=$(grep -a 'schlaf: rechnung' "$B" | sed -n '1s/.*s=\([0-9]*\) .*/\1/p')
 if [ -n "$RS" ] && [ "$RS" -gt 0 ]; then
     ok "und die Rechnung ist nicht leer (summe=$RS)"
@@ -576,8 +442,6 @@ hat "$A2" 'schlaf: == arm zyklus2' "der zweite Zyklus fuehrt einen ANDEREN Zusta
 hat "$B2" 'schlaf: gleich' "auch der zweite Zyklus kommt identisch zurueck"
 hat "$B2" 'schlaf: weitergerechnet=1' "auch im zweiten Zyklus rechnet der Prozess weiter"
 hat "$B2" 'schlaf: rahmen gleich' "auch im zweiten Zyklus kein verlorener Rahmen"
-# DIE ABBILDER MUESSEN VERSCHIEDEN SEIN. Sonst misst der zweite
-# Zyklus ein stehengebliebenes Abbild des ersten.
 S1=$(grep -a 'schlaf: gesichert' "$A" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
 S2=$(grep -a 'schlaf: gesichert' "$A2" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
 if [ -n "$S1" ] && [ -n "$S2" ] && [ "$S1" != "$S2" ]; then
@@ -585,7 +449,6 @@ if [ -n "$S1" ] && [ -n "$S2" ] && [ "$S1" != "$S2" ]; then
 else
     bad "beide Zyklen haben dieselbe Summe (${S1:-?} / ${S2:-?}) -- der zweite misst den ersten"
 fi
-# Und die Zustaende selbst muessen sich unterscheiden.
 C1=$(grep -a 'schlaf: gleich' "$B" | sed -n '1s/.*cnt=\([0-9]*\).*/\1/p')
 C2=$(grep -a 'schlaf: gleich' "$B2" | sed -n '1s/.*cnt=\([0-9]*\).*/\1/p')
 if [ -n "$C1" ] && [ -n "$C2" ] && [ "$C1" != "$C2" ]; then
@@ -596,9 +459,6 @@ fi
 
 echo
 echo "== 11. DIE GEGENPROBEN, DIE FEHLSCHLAGEN MUESSEN =="
-# 11a. BESCHAEDIGTES ABBILD -> Kaltstart, UND ZWAR WEGEN DER
-# PRUEFSUMME. Das ist die Gegenprobe der Vorrunde, jetzt ueber den
-# Hochlauf statt im selben Lauf.
 zyklus gk "schlafkaputt" 400
 GK="$TMPD/gk-b.txt"
 if grep -a 'schlaf: start' "$GK" | grep -aq 'abbild=0'; then
@@ -614,10 +474,6 @@ else
 fi
 hat_nicht "$GK" 'panic' "kein Ausnahmefehler beim Kaltstart nach dem Schaden"
 
-# 11b. FALSCHE HARDWARE-KENNUNG -> ebenfalls Kaltstart. NEU in
-# dieser Runde: ein Abbild, das zu einer ANDEREN Maschine gehoert,
-# ist auch dann falsch, wenn es in sich stimmig ist -- und dieser
-# Fall ist der gefaehrlichere, weil er gesund aussieht.
 zyklus gh "schlafhw" 400
 GH="$TMPD/gh-b.txt"
 if grep -a 'schlaf: start' "$GH" | grep -aq 'abbild=0'; then
@@ -633,9 +489,6 @@ else
 fi
 hat_nicht "$GH" 'panic' "kein Ausnahmefehler beim Kaltstart nach fremder Kennung"
 
-# 11c. DIE STARTERKENNUNG LAESST SICH ABSCHALTEN (`noschlaf`). Ein
-# gueltiges Abbild darf dann NICHT eingespielt werden -- sonst gibt
-# es keinen Weg, eine Maschine bewusst kalt zu starten.
 rm -f "$TMPD/gn.img"
 qemu-img create -f raw "$TMPD/gn.img" 64M >/dev/null 2>&1
 timeout 400 $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
@@ -655,35 +508,6 @@ else
     grep -a 'schlaf: start\|KALTSTART' "$TMPD/gn-b.txt" | sed 's/^/        /' | head -2
 fi
 
-# ==================================================================
-# 12. RUNDE WACH (K-018, Abschluss): LAUFEN DIE PROZESSE WEITER?
-#
-# DAS IST DIE ZUSAGE, UM DIE ES GEHT, und sie ist etwas anderes als
-# alles, was bis hierher gemessen wurde. Abschnitt 9 prueft, ob der
-# INHALT eines Benutzerrahmens zurueckgekommen ist -- byteweise, mit
-# Gegenrechnung. Das ist viel, aber es ist nicht "der Prozess laeuft":
-# die Zahlen im Rahmen stehen dort auch dann, wenn nie wieder eine
-# Anweisung dieses Prozesses ausgefuehrt wurde. Sie sind ja von VOR
-# dem Schlafen.
-#
-# Hier wird gemessen, ob der Prozess nach dem Wiederanlauf AUF DEM
-# PROZESSOR war. Der Traeger dafuer ist `P_WACH` (kernel/uprog.fi,
-# Nr. 65): eine Schleife, die einen Zaehler hochzaehlt und sich kurz
-# hinlegt. Geprueft wird in drei Stufen, von denen keine allein
-# genuegt:
-#
-#   1. zurueckgeholt  -- `wach: zurueck aufgaben=N`
-#   2. auf dem Prozessor gewesen -- `gelaufen=N` (aus `T_RUNS`, das
-#      `switch_to` hochzaehlt)
-#   3. WEITERGERECHNET -- der Zaehler steht HOEHER als der, der ins
-#      Abbild ging, UND die Summe passt zu ihrem Schritt
-#      (`n*(n+1)/2`).
-#
-# Stufe 3 ist der Beweis. Die Vergleichszahl (`vorher=`) kommt aus
-# dem ABBILD und nicht aus dem laufenden Kern -- sonst verglichen
-# wir gegen eine Null, und jeder Wert waere "gestiegen". Genau
-# dieser Fehler stand in der ersten Fassung dieser Runde und ist
-# gemessen worden.
 echo
 echo "== 12. RUNDE WACH: laufen die Prozesse nach dem Hochlauf weiter? =="
 wzyklus() { # name extra-arm timeout
@@ -709,9 +533,6 @@ WA="$TMPD/wz1-a.txt"; WB="$TMPD/wz1-b.txt"
 hat_nicht "$WA" 'panic' "kein Ausnahmefehler im Sicherungslauf (wach)"
 hat_nicht "$WB" 'panic' "kein Ausnahmefehler im Wiederanlauf (wach)"
 
-# MEHRERE PROZESSE MIT VERSCHIEDENEN PIDS. Ein einzelner Prozess
-# koennte zufaellig funktionieren -- etwa weil sein Kernstapel
-# gerade wieder an dieselbe Stelle faellt.
 WN=$(grep -a 'wach: prozesse' "$WA" | sed -n '1s/.*n=\([0-9]*\).*/\1/p')
 WPIDS=$(grep -a 'wach: prozesse' "$WA" | sed -n '1s/.*pids=\([0-9,]*\).*/\1/p')
 if [ -n "$WN" ] && [ "$WN" -ge 3 ]; then
@@ -726,7 +547,6 @@ else
     bad "die pids sind nicht verschieden: $WPIDS"
 fi
 
-# DIE AUFGABEN KOMMEN ZURUECK -- mit Kernstapeln und Seitentafeln.
 if grep -a 'wach: zurueck' "$WB" | grep -aq 'why=ok'; then
     ok "der Wiederanlauf holt die Aufgaben zurueck (why=ok)"
 else
@@ -747,7 +567,6 @@ else
     bad "die Kernstapelrahmen passen nicht: kstapel=${WKST:-?}, aufgaben=${WBACK:-?}"
 fi
 
-# PUNKT 2: SIE WAREN AUF DEM PROZESSOR.
 WLAUF=$(grep -a 'wach: weiterlauf' "$WB" | sed -n '1s/.*gelaufen=\([0-9]*\).*/\1/p')
 if [ -n "$WLAUF" ] && [ "$WLAUF" -ge 3 ]; then
     ok "PUNKT 2: $WLAUF wiederangelaufene Prozesse waren auf dem Prozessor (T_RUNS>0)"
@@ -755,7 +574,6 @@ else
     bad "PUNKT 2: kein wiederangelaufener Prozess kam auf den Prozessor (gelaufen=${WLAUF:-0})"
 fi
 
-# ---- DIE ZUSAGE: DER ZAEHLER STEIGT, UND DIE SUMME STIMMT ----
 WVOR=$(grep -a 'wach: weiter ' "$WB" | sed -n '1s/.*vorher=\([0-9]*\).*/\1/p')
 WNACH=$(grep -a 'wach: weiter ' "$WB" | sed -n '1s/.*nachher=\([0-9]*\).*/\1/p')
 WSUM=$(grep -a 'wach: weiter ' "$WB" | sed -n '1s/.*summe=\([0-9]*\).*/\1/p')
@@ -788,10 +606,6 @@ else
     bad "nicht alle wiederangelaufenen Prozesse dieser Runde rechnen weiter"
 fi
 
-# ---- KEIN VERLORENER RAHMEN, MIT DEM NEUEN POSTEN ----
-# Die Zusage der Vorrunde lautete `frei + eingespielt == frei_vorher`.
-# Diese Runde belegt ZUSAETZLICH Kernstapel und Seitentabellen, also
-# wird der Posten MITGEZAEHLT statt die Zusage zu lockern.
 if grep -aq 'schlaf: rahmen gleich' "$WB"; then
     ok "kein verlorener Rahmen -- auch mit Kernstapeln und Seitentafeln"
 else
@@ -805,13 +619,9 @@ else
     bad "der Wiederanlauf zaehlt seine eigenen Rahmen nicht"
 fi
 
-# DIE ZUSAGEN DER VORRUNDE BLEIBEN GRUEN -- im selben Lauf.
 hat "$WB" 'schlaf: gleich' "die Zusage der Vorrunde haelt: der Zustand ist identisch"
 hat "$WB" 'schlaf: weitergerechnet=1' "und ihre Gegenrechnung haelt ebenfalls"
 
-# ==================================================================
-# 13. ZWEI ZYKLEN HINTEREINANDER, verschiedene Abbilder UND
-#     verschiedene Zustaende -- mit weiterlaufenden Prozessen.
 echo
 echo "== 13. zwei Wach-Zyklen mit verschiedenen Zustaenden =="
 wzyklus wz2 "wach schlaf" 400
@@ -831,8 +641,6 @@ if [ -n "$W2SUM" ] && [ "$W2SUM" = "$W2SOLL" ] && [ "${W2SUM:-0}" -gt 0 ]; then
 else
     bad "die Gegenrechnung des zweiten Zyklus stimmt nicht"
 fi
-# DIE ZUSTAENDE MUESSEN VERSCHIEDEN SEIN. Ein stehengebliebenes
-# Abbild faellt sonst nicht auf -- dieselbe Lehre wie in Abschnitt 10.
 S1=$(grep -a 'schlaf: start' "$WB"  | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
 S2=$(grep -a 'schlaf: start' "$W2B" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
 if [ -n "$S1" ] && [ -n "$S2" ] && [ "$S1" != "$S2" ]; then
@@ -841,14 +649,6 @@ else
     bad "beide Zyklen haben dasselbe Abbild ($S1 / $S2)"
 fi
 
-# ==================================================================
-# 14. DIE GEGENPROBE: `nowach` schaltet den Wiederanlauf ab.
-#
-# Eine Abnahme, die immer gruen ist, misst nichts. Mit `nowach` muss
-# das Abbild weiterhin eingespielt werden (der Speicher kommt
-# zurueck -- das ist der Stand der Vorrunde), aber KEINE Aufgabe darf
-# in die Laufliste kommen. Das trennt die beiden Zusagen sauber
-# voneinander.
 echo
 echo "== 14. Gegenprobe: 'nowach' laesst die Prozesse liegen =="
 rm -f "$TMPD/wn.img"
@@ -875,9 +675,6 @@ if grep -a 'wach: zurueck' "$WNB" | grep -aq 'aufgaben=0'; then
 else
     bad "trotz 'nowach' kamen Aufgaben zurueck"
 fi
-# ABER DER SPEICHER KOMMT TROTZDEM ZURUECK -- der Stand der Vorrunde
-# bleibt davon unberuehrt. Das ist der Beweis, dass die beiden
-# Zusagen wirklich getrennt sind und nicht eine an der anderen haengt.
 if grep -a 'schlaf: start' "$WNB" | grep -aq 'abbild=1'; then
     ok "der SPEICHER kommt trotzdem zurueck (die Zusage der Vorrunde haengt nicht daran)"
 else
@@ -885,12 +682,6 @@ else
 fi
 hat_nicht "$WNB" 'panic' "kein Ausnahmefehler mit 'nowach'"
 
-# ==================================================================
-# 15. DER ZUGETEILTE RAUM DER RUNDE WACH.
-#
-# Dieselbe Pruefung wie in Abschnitt 1 und 7, fuer den dritten
-# Bereich. Zugeteilt: kdata 0x127000..0x12C000 und die Modusindizes
-# 1050..1059.
 echo
 echo "== 15. der zugeteilte Raum der Runde WACH =="
 wv=$(grep -aE "^const WACH_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \

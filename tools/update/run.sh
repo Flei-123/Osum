@@ -1,34 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/update/run.sh -- RUNDE UPDATE: DIE KETTE, MIT DER SICH DIESES
-# SYSTEM SELBST ERNEUERT -- UND DIE STELLE, AN DER SIE ABBRICHT.
-#
-# VIER ABSCHNITTE, und der wichtigste ist der letzte:
-#
-#   1. DIE RECHNUNG (auf dem Wirt, ohne QEMU). SHA-512 gegen FIPS 180-4
-#      und Pythons `hashlib`, Ed25519 gegen die fuenf Vektoren aus dem
-#      Text von RFC 8032, gegen die 1024 Vektoren der offiziellen
-#      `sign.input` und gegen libsodium -- dazu die NEGATIVE Haelfte: ein
-#      gekipptes Bit in Nachricht, R, S oder Schluessel, und ein S+L, das
-#      dieselbe Signatur anders schreibt. (tools/update/vectors.py)
-#
-#   2. DIE SIGNATURPFLICHT AUF DEM GERAET. `/bin/opk` in QEMU, auf einer
-#      echten Platte, gestartet ueber die EFI-Partition. Ein richtig
-#      signiertes Paket wird installiert; ein UNSIGNIERTES, ein
-#      VERDREHTES, eines aus einer Quelle mit veraendertem INDEX, eines
-#      mit einem FREMDEN Schluessel und eines OHNE vertrauten Schluessel
-#      werden abgelehnt -- und nach jeder Ablehnung wird nachgesehen,
-#      dass wirklich NICHTS installiert wurde.
-#
-#   3. DER ERPROBUNGSZAEHLER. Ein Update, das sauber signiert ist und
-#      trotzdem nicht hochkommt (`kernel/user/hallo3.fi` beendet sich mit
-#      Code 1). Drei Starts, kein Erfolgsvermerk, und beim dritten faellt
-#      der Kern VON SELBST auf die vorige Generation zurueck.
-#      GEGENPROBE: dasselbe mit einem Update, das laeuft -- dann wird
-#      bestaetigt und NIE zurueckgefallen.
-#
-#   4. DER GANZE ABLAUF am Stueck: pruefen, holen, Signatur, Generation,
-#      Neustart, Erfolgsvermerk.
 #
 # Verwendung:  bash tools/update/run.sh  [--schnell]
 set -uo pipefail
@@ -89,20 +59,7 @@ EX="/quelle3/ /boese/"
 for f in "$OUT/quelle3"/*; do EX="$EX /quelle3/$(basename "$f")=$f"; done
 for f in "$OUT/boese"/*;   do EX="$EX /boese/$(basename "$f")=$f"; done
 EX="$EX /fremd.pub=$OUT/fremd.pub"
-# DAS STARTSKRIPT. Die Kommandozeile des Laders trennt bei `;` und
-# uebergibt jedes Stueck als EINEN Befehl -- ein `if` kaeme dort nie
-# heil an. Also liegt der Startvorgang als richtiges Shell-Skript auf
-# der Platte, so wie er auf einem Geraet auch laege:
 #
-#     opk rebuild                 die Sicht /apps aus der LAUFENDEN
-#                                 Generation neu bauen (nach einem
-#                                 Rueckfall zeigt sie sonst noch auf die
-#                                 Generation, die nicht hochkam)
-#     if /apps/hallo.osp/start    das Paket starten
-#     then opk trial ok       und NUR WENN ES LAEUFT bestaetigen
-#
-# Auf einem ausgelieferten System stuenden diese drei Zeilen in
-# `/etc/inittab` bzw. in dem Dienst, der den Start abschliesst.
 printf 'opk rebuild\nif /apps/hallo.osp/start\nthen\nopk trial ok\nfi\nopk trial\n' \
     > "$OUT/start.sh"
 EX="$EX /start.sh=$OUT/start.sh"
@@ -141,14 +98,12 @@ hat "$OUT/sig2.txt" "NO SIGNATURE" "GEGENPROBE: ohne .sig wird abgelehnt, und zw
 hatnicht "$OUT/sig2.txt" "opk: installed" "und es wird NICHTS installiert"
 hatnicht "$OUT/sig2.txt" "generation 0" "es entsteht auch keine Generation"
 
-# --- verdrehtes Paket, richtige Signaturdatei des Originals
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig3 "opk install /boese/verdreht.opk;opk list;exit")
 hat "$OUT/sig3.txt" "SIGNATURE WRONG" "GEGENPROBE: ein gekipptes Oktett bricht die Signatur"
 hatnicht "$OUT/sig3.txt" "opk: installed" "und es wird nichts installiert"
 hatnicht "$OUT/sig3.txt" "checksum wrong" "die SIGNATUR schlaegt zuerst zu, nicht die Pruefsumme"
 
-# --- Quelle mit veraendertem INDEX
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig4 "opk install /quelle1/hallo-1.opk;opk update hallo --source /boese;opk list;exit")
 hat "$OUT/sig4.txt" "SIGNATURE OF THE INDEX WRONG" "GEGENPROBE: ein veraenderter INDEX bricht die Quelle"
@@ -160,7 +115,6 @@ rc=$(lauf sig5 "cp /fremd.pub /system/schluessel.pub;opk install /quelle1/hallo-
 hat "$OUT/sig5.txt" "SIGNATURE WRONG" "GEGENPROBE: richtig signiert, aber mit dem falschen Schluessel geprueft -> abgelehnt"
 hatnicht "$OUT/sig5.txt" "opk: installed" "und es wird nichts installiert"
 
-# --- gar kein Schluessel
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig6 "rm /system/schluessel.pub;opk install /quelle1/hallo-1.opk;opk list;exit")
 hat "$OUT/sig6.txt" "no trusted key" "GEGENPROBE: ohne /system/schluessel.pub installiert opk gar nichts"
@@ -171,11 +125,6 @@ echo
 echo "== 4. der Erprobungszaehler: ein Update, das nicht hochkommt =="
 # =====================================================================
 #
-# Der Startbefehl jedes Laufs ist DERSELBE und er ist das, was ein
-# System beim Hochfahren taete: die Sicht `/apps` aus der laufenden
-# Generation neu bauen, das Paket starten, und NUR WENN ES LAEUFT den
-# Erfolgsvermerk setzen. Faellt das Paket um, bleibt der Vermerk aus --
-# es gibt nichts, was der Testlauf dafuer extra tun muesste.
 START='sh /start.sh;exit'
 
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
@@ -208,7 +157,6 @@ rc=$(lauf ab5 "opk trial;/apps/hallo.osp/start;exit")
 hat "$OUT/ab5.txt" "ab: gen=0 bestaetigt" "beim naechsten Start ist nichts mehr in Erprobung"
 hat "$OUT/ab5.txt" "paket-hallo fassung 1" "und es bleibt bei der alten Fassung"
 
-# --- DIE GEGENPROBE: dasselbe mit einem Update, das LAEUFT.
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf gab1 "opk update hallo --source /quelle2;$START")
 hat "$OUT/gab1.txt" "opk: in trial: 1 before 0" "GEGENPROBE: auch das gute Update steht erst in Erprobung"

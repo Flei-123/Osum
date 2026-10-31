@@ -1,64 +1,8 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/install/abnahme.sh -- DIE KETTE, DIE P-001 WIRKLICH ABNIMMT.
 #
 #   bash tools/install/abnahme.sh [ausgabeverzeichnis]
 #
-# ==================================================================
-# WAS HIER GEMESSEN WIRD, UND WARUM GENAU DIESE REIHENFOLGE
-# ==================================================================
-#
-# Ein Installationsprogramm ist nicht dann fertig, wenn es "fertig"
-# meldet. Es ist dann fertig, wenn die Maschine OHNE DAS
-# INSTALLATIONSMEDIUM startet und das, was man angelegt hat, einen
-# Neustart ueberlebt. Alles davor ist eine Behauptung.
-#
-# Deshalb genau diese Kette, und jedes Glied einzeln belegt:
-#
-#   1. VOM STICK STARTEN. Der Kern kommt als Multiboot-Modul mit der
-#      Wurzel im Arbeitsspeicher -- die Lage, in der OrientOS heute
-#      ausgeliefert wird. Beleg: ein Foto des Schreibtischs.
-#
-#   2. DAS FENSTER STEHT. /bin/installer laeuft, findet die Platte und
-#      zeigt sie mit Groesse und Belegung. Beleg: ein Foto, und die
-#      Rechtecke, die das Programm selbst meldet.
-#
-#   3. INSTALLIEREN. Die Platte bekommt GPT, eine EFI-Partition, das
-#      Wurzeldateisystem und den Bootlader. Beleg: die Meldungen der
-#      Maschine UND der Wirt, der die Platte danach mit SEINEN
-#      Werkzeugen liest (sgdisk, mdir) -- einem Installationsprogramm,
-#      dem nur sein eigenes Betriebssystem glaubt, glaubt hier niemand.
-#
-#   4. DIE MASCHINE AUS. Kein Zustand im Arbeitsspeicher darf das
-#      naechste Glied tragen.
-#
-#   5. DAS MEDIUM WEG. QEMU bekommt KEIN `-kernel`, KEIN `-initrd` und
-#      KEIN `-cdrom`. Nur die Platte und OVMF. Was jetzt noch startet,
-#      startet von der Platte -- oder gar nicht. Das ist das Glied, an
-#      dem sich entscheidet, ob diese Runde etwas wert ist.
-#
-#   6. EINE DATEI ANLEGEN. Auf der Wurzel, die jetzt auf der Platte
-#      liegt.
-#
-#   7. NEU STARTEN, WIEDER OHNE MEDIUM. Und die Datei MUSS noch da
-#      sein, mit ihrem Inhalt.
-#
-# GEGENPROBE (Glied 8): dieselbe Platte, aber mit einem gekippten
-# Oktett im Superblock der Wurzelpartition. Dann DARF der Kern die
-# Wurzel NICHT finden. Ohne diese Gegenprobe waere Glied 7 auch dann
-# gruen, wenn der Kern seine Wurzel in Wahrheit woanders herholt.
-#
-# ==================================================================
-# WARUM `roh` UND NICHT `platte` FUER DIE GEGENPROBE
-# ==================================================================
-#
-# Runde INSTALL hat das schon einmal gemessen und aufgeschrieben: OVMF
-# REPARIERT einen kaputten primaeren GPT-Kopf aus der Sicherung, bevor
-# ein Betriebssystem ihn zu Gesicht bekommt. Wer die Tafel kaputtmacht
-# und ueber OVMF startet, prueft die Firmware und nicht sich selbst.
-# Die Gegenprobe hier trifft deshalb den SUPERBLOCK des Dateisystems --
-# den repariert niemand.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; the installer needs /boot/osum.mb in the root
@@ -75,7 +19,6 @@ ok()  { printf '  [ ok ] %s\n' "$*"; ok=$((ok+1)); }
 bad() { printf '  [FEHL] %s\n' "$*"; bad=$((bad+1)); }
 titel() { printf '\n== %s\n' "$*"; }
 
-# Ein Foto aus einem laufenden QEMU ueber den Monitor.
 schuss() { # <sockel> <ziel.png>
     local sock=$1 ziel=$2 ppm="$OUT/tmp.ppm"
     printf 'screendump %s\n' "$ppm" | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1
@@ -88,8 +31,6 @@ Image.open('$ppm').save('$ziel')
     return 1
 }
 
-# Wieviel steht auf einem Bild? Ein Schirm, der zu 99 % eine Farbe ist,
-# zeigt nichts -- und ein Beleg, der nichts zeigt, ist keiner.
 tinte() { # <png> -> Prozent als ganze Zahl
     python3 -c "
 from PIL import Image
@@ -110,8 +51,6 @@ ZIEL_MIB=${ZIEL_MIB:-320}
 titel "0. bauen -- Kern UND Abbild aus DEMSELBEN Baum"
 # ==================================================================
 #
-# Wer einen neuen Kern gegen eine alte Wurzel laufen laesst, misst alte
-# Programme. Deshalb beides in einem Lauf.
 if [ -n "${SCHNELL:-}" ] && [ -f "$BAU/osum.mb" ] && [ -f "$BAU/root.img" ]; then
     echo "   (SCHNELL: vorhandenes $BAU wird benutzt)"
 else
@@ -128,9 +67,6 @@ grep -q '^/bin/installer ' "$OUT/liste.txt" \
 grep -q '^/apps/installer.osp/start' "$OUT/liste.txt" \
     && ok "das Buendel liegt im Abbild (steht im Menue)" || bad "Buendel fehlt"
 
-# Eine leere Platte. DUENN angelegt: sie ist 320 MiB gross und belegt
-# nur, was wirklich daraufgeschrieben wird -- auf einem Wirt mit 3 GiB
-# frei ist das der Unterschied zwischen "laeuft" und "kein Platz".
 rm -f "$ZIEL"
 truncate -s "${ZIEL_MIB}M" "$ZIEL"
 ok "leere Zielplatte, ${ZIEL_MIB} MiB"
@@ -139,76 +75,15 @@ ok "leere Zielplatte, ${ZIEL_MIB} MiB"
 titel "1.-3. vom Stick starten, das Fenster zeigen, installieren"
 # ==================================================================
 #
-# EIN LAUF fuer diese drei Glieder, und das ist Absicht: sie gehoeren
-# zusammen. Der Stick startet, das Fenster steht, und aus demselben
-# laufenden System heraus wird die Platte beschrieben. Ein Neustart
-# dazwischen waere ein anderer Versuch.
 SOCK="$OUT/mon.sock"
 SER="$OUT/stick.txt"
 rm -f "$SER" "$SOCK"
 
-# `vfs` IST HIER PFLICHT UND WAR ES BEIM ERSTEN LAUF NICHT.
-#
-# Ohne dieses Wort haengt der Kern /dev gar nicht ein -- und dann
-# findet /bin/installer keine einzige Platte, obwohl eine daran
-# haengt. Auf der Leitung stand woertlich "installer: ready n=0",
-# und im Fenster war die Tabelle leer. Der Fehler sah nach einem
-# Fehler des Programms aus und war einer der Kommandozeile.
-# tools/install/oneshot.sh hat das Wort von Anfang an drin
-# (BASIS="osum vfs ..."); hier fehlte es.
-# `wighalt=1200` UND NICHT `wiglong` -- ZWANZIG SEKUNDEN REICHEN NICHT.
-#
-# GEMESSEN: mit `wiglong` haelt der Fensterserver 20 Sekunden still
-# (kernel/kgui.fi, halt_secs) und der Kern faehrt danach herunter --
-# auf der Leitung steht dann "kernel: done", und zwar MITTEN in der
-# Installation. Das Kopieren der Wurzel dauert aber Minuten: 32768
-# Sektoren, und der Kern des Systems geht oktettweise durch den
-# FAT32-Schreiber auf die EFI-Partition.
-#
-# Der Fehler sah aus wie "der Installer tut nichts": das Fenster
-# stand, die Platte war gefunden, und dann kam einfach nichts mehr.
-# `wighalt=<sekunden>` sticht beide Vorgaben (Runde OBERFLAECHE).
-# UND `wmhold` DAZU -- OHNE DAS WIRKT `wighalt` NICHT.
-#
-# GEMESSEN, zum zweiten Mal an derselben Stelle: die Halteschleife
-# in kernel/kgui.fi steht HINTER `if !mode_on(M_WMHOLD) { ... }`.
-# Ohne `wmhold` wird sie nie betreten, `wighalt` liest niemand, und
-# auf der Leitung fehlt die Zeile "wm: halt sek=" -- der Kern faehrt
-# herunter, sobald der Fensterserver seine Messreihe fertig hat.
-# Mit `wmhold` UND `wighalt=1200` laeuft er zwanzig Minuten weiter,
-# und genau so lange kann eine Installation dauern.
-#
-# `wmdauer` bleibt daneben: es sorgt dafuer, dass die Schleife auch
-# ohne Shell im Fenster laeuft (Runde TAFEL).
-# HIER STEHT ABSICHTLICH KEIN `wmshell` -- DIE ZEILE IST GEMESSEN.
-#
-# RUNDE INSTALLER2 (P-001). Der Fehler dieser Runde sah so aus:
-#
 #     osum: pid1 init
 #     init: ziel=grafik
 #     init: dienste=1
 #     init: herunterfahren      <- und `k15: start` kam nie
 #
-# URSACHE: `osum(state)` in kernel/kmain.fi startet den ERSTEN PROZESS
-# `/bin/init`, und zwar VOR `gfx.stage_surface`, das den Fensterserver
-# und damit `wigapp=` ueberhaupt erst hochzieht. `osum` kehrt erst
-# zurueck, wenn init fertig ist; init findet im Ziel `grafik` keinen
-# Dienst (die inittab des Sticks fuehrt nur `sh:konsole:ctrl`), laeuft
-# in seine Leerlaufschranke (4000 * 25 ms) und schaltet ab.
-#
-# BEHOBEN IM KERN und nicht hier: `wm_owns_shell` fragt jetzt nach
-# ALLEN Woertern, mit denen der Fensterserver sein Programm selbst
-# startet (`wig`, `wigfiles`, `wigstart`, `desk`, `tileshot`), nicht
-# mehr nur nach `wmshell`. Bei `wig` startet `osum` deshalb kein init
-# mehr -- haengt die Wurzel aber weiter ein, denn die frueher
-# Rueckkehr steht jetzt VOR dem ersten Prozess und nicht vor dem
-# Einhaengen (sonst faende der Installer keine Platte: "ready n=0").
-#
-# UND WARUM NICHT EINFACH `wmshell` DAZU: das Wort startet zusaetzlich
-# `/bin/sh` im Terminalfenster. Unter `nokbd` endet sie sofort auf EOF
-# und `wait_wm` startet sie im Sekundentakt neu. GEMESSEN: 361 Starts,
-# und das Kopieren der Wurzel fiel von 940 auf 43 Bloecke je Minute --
-# der Installer verhungerte neben seinem eigenen Terminal.
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs"
 APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,now,account=abnahme,password=geheim123"
 
@@ -220,7 +95,6 @@ timeout 3000 $QEMU_X86 -m 512 \
     -drive "file=$ZIEL,format=raw,if=ide,index=0" > "$OUT/qemu1.log" 2>&1 &
 QP=$!
 
-# Warten, bis das Fenster steht.
 i=0
 while [ $i -lt 400 ]; do
     grep -qa 'installer: ready' "$SER" 2>/dev/null && break
@@ -246,7 +120,6 @@ grep -qa 'installer: disk /dev/hda' "$SER" \
     && ok "die Platte wurde gefunden und aufgelistet" \
     || bad "die Platte steht nicht in der Liste"
 
-# Jetzt laeuft die Installation (Schalter `sofort`). Sie dauert Minuten.
 i=0
 while [ $i -lt 3000 ]; do
     grep -qa 'installer: done\|installer: ERROR' "$SER" 2>/dev/null && break
@@ -262,17 +135,12 @@ else
     bad "die Installation ist nicht fertig geworden"
     grep -aE 'installer:' "$SER" | tail -5 | sed 's/^/        /'
 fi
-# DIE EFI-PARTITION, DIE SIE EINGEHAENGT HAT. Der Name wird aus dem
-# gewaehlten Geraet gebaut; ein fest verdrahtetes /dev/hda1 haette bei
-# einer Installation auf die zweite Platte die EFI-Partition der
-# ERSTEN beschrieben.
 esp=$(grep -aoE 'installer: esp=/dev/[a-z0-9]+' "$SER" | head -1 | sed 's/.*esp=//')
 if [ "$esp" = "/dev/hda1" ]; then
     ok "die EFI-Partition wurde aus dem Ziel gebaut: $esp"
 else
     bad "falsche oder fehlende EFI-Partition: '${esp:-keine}'"
 fi
-# Die Schritte, die sie unterwegs gemeldet hat.
 st=$(grep -aoE 'installer: step=[0-9]+' "$SER" | sed 's/.*=//' | sort -un | tr '\n' ' ')
 echo "        Schritte auf der Leitung: $st"
 case "$st" in *1*2*3*4*5*) ok "alle fuenf Schritte gemeldet" ;;
@@ -286,7 +154,6 @@ sleep 1
 pgrep -f "file=$ZIEL" > /dev/null && bad "es laeuft noch eine Maschine auf der Platte" \
     || ok "die Maschine ist aus"
 
-# ------- und der WIRT liest die Platte mit SEINEN Werkzeugen
 titel "4b. was der Wirt auf der Platte findet"
 sgdisk -p "$ZIEL" > "$OUT/gpt.txt" 2>&1
 grep -q 'EF00' "$OUT/gpt.txt" && ok "eine EFI-Partition steht in der Tafel" \
@@ -306,14 +173,6 @@ grep -qi 'limine' "$OUT/esp2.txt" && ok "die Startdatei liegt daneben" \
 titel "5. VON DER PLATTE starten -- ohne Stick, ohne Modul"
 # ==================================================================
 #
-# KEIN -kernel, KEIN -initrd. Was jetzt startet, startet ueber die
-# EFI-Partition, die der Installer beschrieben hat, mit der
-# Kommandozeile, die AUF DER PLATTE steht.
-# The INSTALLED disk boots on an ICH9 AHCI controller (DMA, like real SATA). Over IDE PIO a KVM guest on a
-# loaded host needed minutes for the root and sometimes never showed the login screen or the desktop within the
-# gate's waits (r1255: "screen empty", r1256: typed keys lost; the same disk reached the login screen in 17 s on
-# AHCI at load 43 and did not at all in 240 s on IDE). INST_DRIVE=ide restores the old controller. The installer
-# run itself (stick + /dev/hda target) stays on IDE.
 INST_DRIVE=${INST_DRIVE:-ahci}
 disk_boot_args() { # sets DISKBOOT for the CURRENT $ZIEL
     if [ "$INST_DRIVE" = ahci ]; then
@@ -328,25 +187,8 @@ platte_lauf() { # <name> <skript> <limit>
     local ser="$OUT/$name.txt" vars="$OUT/$name.vars.fd"
     rm -f "$ser"
     cp -f /usr/share/OVMF/OVMF_VARS.fd "$vars" 2>/dev/null || true
-    # ============================================================
-    # DIE STARTDATEI DES INSTALLERS BLEIBT, WO SIE IST
     #
-    # Fuer den Lauf OHNE Skript (Glied 5) wird hier NICHTS
-    # ueberschrieben: was gemessen werden soll, ist die Datei, die der
-    # Installer selbst geschrieben hat. Wer sie vorher ersetzt, misst
-    # seine eigene Kommandozeile und erfaehrt nichts darueber, ob die
-    # Installation eine startfaehige Platte hinterlaesst.
-    #
-    # Fuer die Laeufe MIT Skript (Glieder 6 und 7) muss eine hinein --
-    # ein Skript laesst sich nur ueber die Kommandozeile uebergeben,
-    # und die steht auf der Platte. Ein `-append` waere geschummelt.
-    # Also wird die limine.conf dann geaendert, so wie ein Mensch es
-    # mit einem Editor taete.
     if [ -z "$skript" ]; then
-        # MIT MONITOR UND MIT SCHIRM: von diesem Lauf soll ein BILD
-        # entstehen. Es ist der Beleg, auf den es in dieser Runde
-        # ankommt -- ein Schreibtisch, der von der PLATTE kommt, ohne
-        # dass ein Stick im Rechner steckt.
         local msock="$OUT/mon-platte.sock"
         rm -f "$msock"
         disk_boot_args
@@ -360,7 +202,6 @@ platte_lauf() { # <name> <skript> <limit>
         [ -f "$vars" ] && args0+=(-drive "if=pflash,format=raw,unit=1,file=$vars")
         timeout "$limit" $QEMU_X86 "${args0[@]}" > /dev/null 2>&1 &
         local qp=$!
-        # Warten, bis der Schreibtisch wirklich steht.
         local w=0
         while [ $w -lt 240 ]; do
             # wait for the sign-in screen / desktop line too: the taskbar line comes first and a loaded host needs seconds more
@@ -382,28 +223,11 @@ platte_lauf() { # <name> <skript> <limit>
         echo "    protocol: multiboot1"
         echo "    path: boot():/osum.mb"
         if [ -n "$skript" ]; then
-            # `initsh` GEHOERT DAZU, UND OHNE ES LAEUFT DAS SKRIPT NICHT.
-            #
-            # GEMESSEN (Runde INSTALLER2). Seit der Installer eine
-            # VOLLSTAENDIGE Wurzel schreibt, liegt auf der Platte auch
-            # `/bin/init` -- und `osum(state)` in kernel/kmain.fi
-            # startet dann init statt `/bin/sh`. Das Skript aus
-            # `script=` liest laut Kommentar bei `wm_owns_shell` "der,
-            # der zuerst danach greift"; init greift gar nicht danach.
-            # Es findet im Ziel `grafik` keinen Dienst, laeuft in seine
-            # Leerlaufschranke und schaltet ab:
             #
             #     osum: pid1 init
             #     init: ziel=grafik
             #     init: herunterfahren
             #
-            # Auf der Leitung stand danach KEIN `sh: ready`, und
-            # /beweis.txt wurde nie angelegt. Glied 7 meldete deshalb
-            # "die Datei ist nach dem Neustart weg" -- sie war nie da.
-            #
-            # `initsh` ist der dafuer vorgesehene Notweg (kmain.fi,
-            # M_INITSH): er nimmt den alten Weg und startet `/bin/sh`,
-            # das `script=` dann auch wirklich abarbeitet.
             echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 initsh script=$skript"
         else
             echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3"
@@ -424,24 +248,7 @@ platte_lauf() { # <name> <skript> <limit>
 
 platte_lauf start "" 400
 rc=$?
-# DER BEENDIGUNGSCODE IST HIER 124 UND NICHT 21 -- UND DAS IST DAS
-# RICHTIGE ERGEBNIS.
 #
-# 21 ist der vereinbarte Erfolgscode eines Laufs, der etwas ABARBEITET
-# und danach aufhoert (`isa-debug-exit`). Die limine.conf, die der
-# Installer schreibt, startet aber den SCHREIBTISCH -- und ein
-# Schreibtisch hoert nicht von selbst auf. Er laeuft, bis jemand ihn
-# beendet; hier bis `timeout` zuschlaegt, und das ist 124.
-#
-# Ein Lauf, der hier mit 21 zurueckkaeme, waere der verdaechtige:
-# dann haette das System nach dem Start etwas abgearbeitet und sich
-# beendet, statt eine Oberflaeche hinzustellen.
-#
-# Gemessen wird deshalb nicht der Code, sondern WAS AUF DER LEITUNG
-# STEHT -- die Wurzel, die Einhaengung und der Schreibtisch. Die drei
-# Zusagen darunter tun genau das.
-# Der Lauf wird von aussen beendet, sobald das Foto steht -- der Code
-# sagt hier also nichts. Was zaehlt, steht auf der Leitung und im Bild.
 if [ -s "$OUT/start.txt" ]; then
     ok "die Platte startet und laeuft (ein Schreibtisch endet nicht von selbst)"
 else
@@ -460,12 +267,6 @@ if [ -s "$SHOTS/40-von-der-platte.png" ]; then
 else
     bad "kein Bild vom Schreibtisch auf der Platte"
 fi
-# DIE WURZEL -- auf BEIDEN Wegen. Die limine.conf, die der Installer
-# schreibt, startet den SCHREIBTISCH; der geht ueber kgui.surface und
-# meldet `wm: rootpart=`. Der Textweg (kmain.osum) meldet
-# `osum: rootpart=`. Gesucht wird, was davon dasteht -- entscheidend
-# ist, DASS die Wurzel von der Partition kommt.
-# on the AHCI controller the root is found by the root selector (`rootsel: ahci -- WURZEL, Bloecke=.. first=..`)
 if grep -qaE '(osum|wm): rootpart=|rootsel: (ahci|ide|nvme)[a-z]* -- WURZEL' "$OUT/start.txt"; then
     ok "der Kern findet seine Wurzel auf der Platte: $(grep -aoE 'rootpart=[0-9]+ +first=[0-9]+ +blocks=[0-9]+|rootsel: [a-z]+ -- WURZEL, Bloecke=[0-9]+ +first=[0-9]+' "$OUT/start.txt" | head -1)"
 else
@@ -476,16 +277,11 @@ if grep -qaE '(osum|wm): mount=1' "$OUT/start.txt"; then
 else
     bad "die Wurzel ist nicht eingehaengt"
 fi
-# UND DER SCHREIBTISCH KOMMT HOCH. Das ist der Punkt, an dem sich
-# "die Platte bootet" von "man kann damit arbeiten" unterscheidet:
-# ein Fenster, das der Fensterserver meldet, gibt es nur, wenn ein
-# Ring-3-Programm von DIESER Platte gestartet ist.
 if grep -qaE 'desk: start /bin/(desktop|glogi)|glogin: (bereit|rect)' "$OUT/start.txt"; then
     ok "die Oberflaeche (Anmeldeschirm bzw. Schreibtisch) startet von der Platte"
 else
     bad "kein Schreibtisch -- die Oberflaeche kommt nicht hoch"
 fi
-# DER ENTSCHEIDENDE SATZ: es war KEIN Modul im Spiel.
 grep -qa 'from module' "$OUT/start.txt" \
     && bad "es lief doch ueber ein Boot-Modul -- dann ist nichts bewiesen" \
     || ok "GEGENPROBE: 'from module' kommt nicht vor -- es war kein Stick im Spiel"
@@ -501,34 +297,13 @@ titel "6. eine Datei anlegen -- auf der Platte"
 # ==================================================================
 platte_lauf schreib "echo hallo-von-der-platte >/beweis.txt;cat /beweis.txt;sync;exit" 300
 rc=$?
-# DER BEENDIGUNGSCODE: 21 ODER 0, UND BEIDES IST RICHTIG.
 #
-# 21 ist `isa-debug-exit` (kernel/power.fi, EXIT_OK): ein Lauf, der
-# etwas abarbeitet und den Pruefstand beendet. 0 ist die ECHTE
-# ACPI-Abschaltung -- derselbe Kommentar in power.fi sagt es woertlich:
-# "eine ACPI-Abschaltung ergibt 0, isa-debug-exit ergibt 21".
-#
-# GEMESSEN (Runde INSTALLER2): seit auf der Platte ein vollstaendiges
-# System liegt, endet der Lauf ueber ACPI ("power: init sagt ab") und
-# damit mit 0. Auf 21 zu bestehen hiesse, den SCHLECHTEREN der beiden
-# Wege zu verlangen. Was zaehlt, ist dass der Lauf ZU ENDE kam und
-# nicht in den Zeitablauf (124) oder einen Absturz lief.
 if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
     ok "der Schreiblauf ist durchgelaufen (Code $rc)"
 else
     bad "der Schreiblauf endete mit Code $rc"
 fi
-# NICHT EINFACH NACH DEM WORT SUCHEN -- ES STEHT SCHON IN DER FRAGE.
 #
-# GEMESSEN (Runde INSTALLER2): `grep hallo-von-der-platte` traf die
-# Zeile `mb: flags=... cmd=... script=echo hallo-von-der-platte >...`,
-# also die KOMMANDOZEILE, die der Kern beim Start ausgibt. Der Test
-# war damit gruen, waehrend das Skript in Wahrheit NIE lief (statt der
-# Shell startete init, siehe `initsh` weiter oben) und /beweis.txt nie
-# entstand. Ein gruener Haken auf die eigene Frage ist keine Messung.
-#
-# Also wird die `mb:`-Zeile ausgenommen und zusaetzlich verlangt, dass
-# die Shell ueberhaupt gelaufen ist.
 if grep -qa 'sh: ready' "$OUT/schreib.txt"; then
     ok "die Shell auf der Platte ist gelaufen"
 else
@@ -545,13 +320,11 @@ titel "7. NEU STARTEN -- und die Datei muss noch da sein"
 # ==================================================================
 platte_lauf wieder "cat /beweis.txt;exit" 300
 rc=$?
-# 21 oder 0 -- die Begruendung steht bei Glied 6.
 if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
     ok "der zweite Start ist durchgelaufen (Code $rc)"
 else
     bad "der zweite Start endete mit Code $rc"
 fi
-# Auch hier OHNE die `mb:`-Zeile -- aus demselben Grund wie oben.
 if grep -va '^mb: ' "$OUT/wieder.txt" | grep -qa 'hallo-von-der-platte'; then
     ok "DIE DATEI HAT DEN NEUSTART UEBERLEBT -- das ist der Punkt der Runde"
 else
@@ -564,12 +337,6 @@ fi
 titel "7a. DAS EIGENE KONTO (r172) -- der Installer legt es an"
 # ==================================================================
 #
-# Der Installer wurde mit `account=abnahme,password=geheim123` gestartet
-# (das Fenster fragt einen Menschen; der Laeufer bekommt es als
-# Argument). Auf der installierten Platte muss GENAU dieses Konto
-# stehen, mit einem Hash, der zu dem Passwort passt -- nachgerechnet
-# von PYTHON (hashlib), nicht vom System selbst --, und OHNE die
-# Konten des Sticks, OHNE Autologin, mit Heimordner.
 platte_lauf konto "echo ==PASSWD;cat /etc/passwd;echo ==SHADOW;cat /etc/shadow;echo ==GROUP;cat /etc/group;echo ==AUTOLOGIN;ls /etc;echo ==USERS;ls /users;echo ==ENDE;exit" 300
 rc=$?
 if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
@@ -624,10 +391,6 @@ grep -q '^ok8' "$OUT/konto-py.txt" && ok "kein /etc/autologin auf der installier
 titel "7c. MIT DEM NEUEN KONTO ANMELDEN -- am echten Anmeldeschirm"
 # ==================================================================
 #
-# Die Platte startet ohne Skript und ohne Autologin: der Anmeldeschirm kommt.
-# Das Passwort wird durch den QEMU-Monitor getippt (Tastendruecke, wie ein
-# Mensch). Richtiges Passwort -> "angemeldet als abnahme" mit uid=1000;
-# GEGENPROBE: ein falsches wird abgewiesen und es meldet sich niemand an.
 login_lauf() { # name keys...
     local name=$1; shift
     local ser="$OUT/$name.txt" vars="$OUT/$name.vars.fd" msock="$OUT/mon-$name.sock"
@@ -688,45 +451,6 @@ fi
 titel "7b. O-009: DER GERAETESCHLUESSEL UEBERLEBT DEN NEUSTART"
 # ==================================================================
 #
-# `O-009` in OFFEN.md: der Geraeteschluessel entsteht beim Koppeln in
-# der RAM-Wurzel, also muss nach jedem Neustart neu gekoppelt werden --
-# "haengt an P-001". Sobald die Wurzel auf der PLATTE liegt, ist die
-# Bedingung erfuellt, und hier wird sie gemessen.
-#
-# GEMESSEN WIRD DER ECHTE SCHLUESSEL, NICHT EIN PLATZHALTER. Eine
-# fruehere Fassung dieser Probe legte 64 Hexziffern von Hand hin und
-# las sie wieder -- das belegt den PFAD, aber nicht den AUSWEIS: es
-# haette auch dann gehalten, wenn `jsig` den Schluessel bei jedem Start
-# neu wuerfelt, und genau das ist der Fehler, um den es in O-009 geht.
-#
-# DIESER ABSCHNITT LAEUFT NUR, WENN GLIED 5 TRAEGT -- also wenn von
-# der Platte gestartet werden kann. Stand 15.09.2026 tut er das auf
-# diesem Wirt NICHT: der Installer bekommt sein Fenster nicht auf
-# (`wigapp=/bin/installer` -> `init: herunterfahren`, gemessen in
-# Glied 1-3), und damit gibt es keine installierte Platte. Das ist
-# P-001 und nicht O-009.
-#
-# DAMIT O-009 TROTZDEM GEMESSEN IST, steht dieselbe Frage noch einmal
-# in `tools/geraetekey/run.sh` -- dort mit einer Wurzel auf einer
-# IDE-Platte, die ueber zwei Starts dieselbe bleibt, ohne Installer
-# und ohne Oberflaeche. Dort ist sie GRUEN (11/0). Sobald P-001 traegt,
-# misst der Abschnitt hier dasselbe noch einmal auf dem echten Weg.
-#
-# Deshalb der volle Lebenslauf, ueber `/bin/jsig`:
-#
-#   Lauf 1:  `jsig init`                 legt das Ed25519-Paar an
-#            `jsig sign <hex>` unterschreibt eine Nachricht
-#            -> der oeffentliche Teil UND die Unterschrift werden notiert
-#   NEUSTART (dieselbe Platte, kein Medium)
-#   Lauf 2:  `jsig init`                 darf KEINEN neuen anlegen
-#            -> derselbe oeffentliche Teil
-#            `jsig verify <pub> <msg> <sig>` -> die ALTE Unterschrift
-#               verifiziert weiterhin
-#
-# DIE GEGENPROBE (Zuruecksetzen): `rm /etc/jarvis/device.key`, dann
-# `jsig init` -- jetzt MUSS ein ANDERER oeffentlicher Teil herauskommen.
-# Ohne sie waere Lauf 2 auch dann gruen, wenn `jsig` den Schluessel
-# ueberhaupt nicht aus der Datei liest.
 NACHRICHT=4f2d303039
 platte_lauf jarvis1 "mkdir /etc/jarvis;jsig init;jsig sign $NACHRICHT;exit" 300
 PUB1=$(grep -aoE '^pub [0-9a-f]{64}' "$OUT/jarvis1.txt" | head -1 | awk '{print $2}')
@@ -753,11 +477,6 @@ else
     tail -6 "$OUT/jarvis2.txt" | sed 's/^/        /'
 fi
 
-# UND MIT FREMDEN AUGEN. Dass OrientOS seine eigene Unterschrift
-# nachrechnet, ist die schwaechere Aussage -- ein Fehler, der in
-# `jsig init` und in `jsig verify` gleich steckt, faellt dabei nicht auf.
-# `python-cryptography` hat diesen Fehler nicht. Steht es nicht zur
-# Verfuegung, wird das GESAGT und nicht stillschweigend uebergangen.
 if [ -n "$PUB1" ] && [ -n "$SIG1" ]; then
     if python3 -c 'import cryptography' 2>/dev/null; then
         python3 - "$PUB1" "$SIG1" "$NACHRICHT" > "$OUT/fremd.txt" 2>&1 <<'PYFREMD'
@@ -792,7 +511,6 @@ PYFREMD
     fi
 fi
 
-# Die Gegenprobe: zuruecksetzen -- und es MUSS ein anderer werden.
 platte_lauf jarvis3 "rm /etc/jarvis/device.key;jsig init;exit" 300
 PUB3=$(grep -aoE '^pub [0-9a-f]{64}' "$OUT/jarvis3.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB3" ] && [ -n "$PUB1" ] && [ "$PUB3" != "$PUB1" ]; then
@@ -806,11 +524,6 @@ fi
 titel "8. GEGENPROBE -- eine kaputte Wurzel darf NICHT starten"
 # ==================================================================
 #
-# Ein gekipptes Oktett in der Kennung des Superblocks der
-# Wurzelpartition. Getroffen wird das Dateisystem und nicht die
-# GPT-Tafel: einen kaputten primaeren GPT-Kopf repariert OVMF aus der
-# Sicherung, bevor der Kern ihn sieht (gemessen in Runde INSTALL) --
-# dann prueft man die Firmware und nicht sich selbst.
 cp -f "$ZIEL" "$OUT/kaputt.img"
 ERST=$(grep -aoE 'first=[0-9]+' "$OUT/start.txt" | head -1 | sed 's/.*=//')
 if [ -n "$ERST" ]; then

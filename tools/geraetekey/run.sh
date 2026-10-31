@@ -1,53 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/geraetekey/run.sh -- DIE ABNAHME VON O-009: DER GERAETESCHLUESSEL
-# UEBERLEBT DEN NEUSTART.
-#
-# ==================================================================
-# DIE FRAGE, UND WARUM SIE NICHT DIE VON P-001 IST
-# ==================================================================
-#
-# `O-009` in OFFEN.md: `jarvisd` weist das Geraet mit einem
-# Ed25519-Paar aus; der private Teil liegt in /etc/jarvis/device.key,
-# entsteht aber erst beim Koppeln und zwar in der RAM-Wurzel. Nach
-# jedem Neustart muss neu gekoppelt werden. In OFFEN.md steht dazu
-# "haengt an P-001" -- also an der Installation auf Platte.
-#
-# DAS IST EINE VERMISCHUNG ZWEIER FRAGEN, und diese Abnahme trennt sie:
-#
-#   P-001 fragt: kann ein MENSCH OrientOS ueber die Oberflaeche auf
-#         eine Platte installieren? Das ist eine Frage an den
-#         Installer und seine Bedienung.
-#   O-009 fragt: wenn die Wurzel auf einem SCHREIBBAREN Traeger liegt
-#         -- bleibt der Geraeteschluessel dann derselbe?
-#
-# Die zweite Frage laesst sich messen, OHNE die erste zu loesen: eine
-# Wurzel auf einer IDE-Platte, die ueber zwei Starts DIESELBE bleibt.
-# Genau so misst `tools/bridge2/kette.sh` schon heute (Zeile 265-278,
-# "ein Rechner, der beim Neustart seine Identitaet verliert, DARF nicht
-# mehr hereinkommen"), und genau das wird hier fuer den Schluessel
-# nachgeholt.
-#
-# WAS DIESE ABNAHME ALSO BELEGT: der Schluessel ueberlebt, sobald die
-# Wurzel ueberlebt -- und `jsig` wuerfelt ihn NICHT bei jedem Start neu.
-# WAS SIE NICHT BELEGT: dass man OrientOS bequem installieren kann. Das
-# bleibt P-001.
-#
-# ==================================================================
-# WIE GEMESSEN WIRD
-# ==================================================================
-#
-#   Lauf 1   jsig init                 -> legt das Paar an, nennt `pub`
-#            jsig sign <hex> -> `sig` auf eine feste Nachricht
-#   Lauf 2   DIESELBE PLATTE, neuer Start des Kerns
-#            jsig init                 -> darf KEINEN neuen anlegen
-#            jsig verify <pub1> <msg> <sig1> -> die ALTE Unterschrift
-#   Lauf 3   GEGENPROBE (Zuruecksetzen): rm geraet.key, dann jsig init
-#            -> jetzt MUSS ein ANDERER Schluessel herauskommen
-#
-# Und die Unterschrift aus Lauf 1 wird zusaetzlich von
-# `python-cryptography` nachgerechnet -- fremdes Werkzeug, damit ein
-# Fehler, der in `jsig init` und `jsig verify` gleich steckt, auffliegt.
 #
 # Aufruf:  bash tools/geraetekey/run.sh
 set -uo pipefail
@@ -64,17 +15,10 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-# $QEMU_X86 aus tools/lib/qemu.sh ist DREI Woerter
-# ("qemu-system-x86_64 -accel kvm") und muss deshalb UNGEQUOTET stehen --
-# in Anfuehrungszeichen suchte die Shell ein Programm dieses ganzen
-# Namens und fand keines (gemessen: kein einziges Serienprotokoll).
 if [ -f tools/lib/qemu.sh ]; then . tools/lib/qemu.sh; fi
 QEMU=${QEMU_X86:-qemu-system-x86_64}
 
 echo "== 0. bauen: Kern und die Programme, aus DEMSELBEN Baum =="
-# `rm` gehoert dazu: die Gegenprobe in Abschnitt 4 setzt den Schluessel
-# zurueck, und dafuer muss er sich loeschen lassen. In der
-# Voreinstellung von tools/bridge/build.sh ist `rm` nicht dabei.
 export BRIDGE_PROGS="sh ls cat echo chmod rm jsig jarvisctl"
 if bash tools/bridge/build.sh "$TMPD/w0" 0 > "$TMPD/build.txt" 2>&1; then
     ok "Kern und Ring-3-Programme gebaut"
@@ -87,9 +31,6 @@ K="$TMPD/w0/k.mb"
 [ -f "$TMPD/w0/jsig.elf" ] && ok "/bin/jsig liegt vor ($(stat -c%s "$TMPD/w0/jsig.elf") Oktette)" \
     || bad "jsig.elf fehlt"
 
-# Die Wurzel. EINMAL angelegt und danach BEHALTEN -- das ist der ganze
-# Punkt: eine Platte, die jeder Lauf frisch kopiert, kann gar nichts
-# ueberleben.
 cat > "$TMPD/rechte.conf" <<'CONF'
 commands        = no
 screenshot = no
@@ -110,12 +51,7 @@ python3 tools/osum/mkfs.py build "$TMPD/platte.img" 16384 \
     && ok "die Wurzel steht auf der Platte ($(stat -c%s "$TMPD/platte.img") Oktette)" \
     || { bad "mkfs"; tail -6 "$TMPD/mkfs.txt" | sed 's/^/        /'; }
 
-# EIN START. DIESELBE Platte, kein Kopieren, kein Loeschen danach.
 start() { # <name> <skript>
-    # GK_WEGWERF ist die Gegenprobe (Abschnitt 5): die Platte wird vor
-    # JEDEM Start frisch ueberschrieben -- genau das Verhalten der
-    # RAM-Wurzel, an dem O-009 haengt. Ohne den Schalter bleibt die
-    # Platte, wie es sich fuer eine Platte gehoert.
     [ -n "${GK_WEGWERF:-}" ] && cp -f "$TMPD/frisch.img" "$TMPD/platte.img"
     timeout 180 $QEMU -kernel "$K" -m 256 \
         -append "osum nokbd nosched noproc nofs noring3 script=$2" \
@@ -125,7 +61,6 @@ start() { # <name> <skript>
     return 0
 }
 
-# Die unberuehrte Wurzel, fuer die Gegenprobe in Abschnitt 5.
 cp -f "$TMPD/platte.img" "$TMPD/frisch.img"
 NACHRICHT=4f2d303039   # "O-009" in Hex
 
@@ -191,9 +126,6 @@ else
 fi
 
 echo "== 4. GEGENPROBE: zuruecksetzen -- und er MUSS weg sein =="
-# Ohne diese Gegenprobe waere Abschnitt 2 auch dann gruen, wenn `jsig`
-# den Schluessel gar nicht aus der Datei liest, sondern etwa aus einer
-# festen Zahl ableitet.
 start lauf3 "rm /etc/jarvis/device.key;jsig init;exit"
 PUB3=$(grep -aoE '^pub [0-9a-f]{64}' "$TMPD/lauf3.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB3" ] && [ -n "$PUB1" ] && [ "$PUB3" != "$PUB1" ]; then
@@ -202,7 +134,6 @@ else
     bad "nach dem Loeschen kam derselbe Schluessel wieder (${PUB3:-?}) -- dann liest jsig ihn nicht aus der Datei"
     tail -8 "$TMPD/lauf3.txt" | sed 's/^/        /'
 fi
-# Und die alte Unterschrift darf gegen den NEUEN Schluessel nicht mehr passen.
 start lauf4 "jsig verify $PUB3 $NACHRICHT $SIG1;exit"
 if grep -qa '^no$' "$TMPD/lauf4.txt"; then
     ok "GEGENPROBE: die alte Unterschrift passt NICHT zum neuen Schluessel"
@@ -212,10 +143,6 @@ else
 fi
 
 echo "== 5. GEGENPROBE: eine Wurzel, die NICHT ueberlebt =="
-# Der Zustand VOR dieser Runde, nachgestellt: die Platte wird vor jedem
-# Start frisch ueberschrieben (die RAM-Wurzel des Sticks). Dann MUSS
-# Abschnitt 2 durchfallen -- taete er es nicht, wuerde diese Abnahme
-# gar nicht das Ueberleben messen, sondern nur `jsig` mit sich selbst.
 if [ -z "${GK_WEGWERF:-}" ]; then
     GK_WEGWERF=1 OSUM_GK_TMP="$TMPD/gegen" OSUM_GK_KEEP=1 \
         bash "$0" > "$TMPD/gegen.txt" 2>&1

@@ -1,62 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/certus/run.sh -- CERTUS ALS PROGRAMM VON OSUM, GEMESSEN.
-# Runde CERTUS-AUF-OSUM (05.09.2026).
-#
-# Die Frage dieser Runde ist nicht, ob es einen Browser gibt -- den gibt
-# es im Firn-Baum seit den Runden B1 bis B6 und er ist seither um
-# JavaScript, Raster, Sicherheit und drei Rueckwaende gewachsen. Die
-# Frage ist, ob er IN DIESEM BETRIEBSSYSTEM laeuft: als gewoehnliches
-# Ring-3-Programm, mit DESSEN Widgets, DESSEN Netz, DESSEN Adressraum
-# -- und ob man ihn aus dem Laden installieren kann. Dieser Laeufer
-# beantwortet das mit Zahlen und mit Bildern.
-#
-#   1. BAUEN. /bin/certus als eigenstaendige ELF64-Datei fuer Ring 3,
-#      gebaut mit dem EIGENEN Uebersetzer des Certus-Baumes
-#      (kernel/user/certus/build.sh) -- und die Gegenproben dazu: keine
-#      undefinierte Referenz, drei Segmente mit getrennten Rechten,
-#      kein Segment zugleich schreib- und ausfuehrbar, Ende unterhalb
-#      von proc.IMAGE_END.
-#
-#   2. WAS DER KERN DAFUER GELERNT HAT. Vier Zahlen und drei Namen:
-#      das Abbildfenster (6,5 MiB Browser), die grosse Arena (ein
-#      Browser fasst 47 MiB Adressraum an), `/proc/self` (der Sammler
-#      von Firn fragt danach), SSE (er rechnet in Gleitkomma) und
-#      `fxsave` beim Umschalten (sonst rechnet ein Prozess mit den
-#      Zahlen eines anderen).
-#
-#   3. DIE LEINWAND. `wlib.leinwand` ist das Widget dieser Runde: die
-#      Seite steht in Bildpunkten, die dem Programm gehoeren, und die
-#      Bedienleiste darueber sind echte wlib-Widgets. Hier wird
-#      geprueft, dass beides im Quelltext steht und dass die Bibliothek
-#      ohne libc.mem auskommt (Ein-Kern-Regel: kein zweites Modul `mem`).
-#
-#   4. EINE ECHTE SEITE, IM FENSTER. Ein Webserver auf dem WIRT, QEMUs
-#      Benutzernetz als Draht, `wigapp=/bin/certus,<url>,...` als
-#      Start. Gemessen wird ZWEIMAL und von zwei Seiten:
-#        * der Abzug, den Certus selbst schreibt (`--dump=`), also die
-#          Leinwand,
-#        * und das Bild der emulierten Grafikkarte (`screendump` ueber
-#          QEMUs Monitor), also das, was auf dem Schirm steht.
-#      Ein Browser, der behauptet gemalt zu haben, und ein Bildschirm,
-#      der leer ist, fallen genau hier auf (die Falle aus Runde K7B).
-#
-#   5. EINE SEITE MIT JAVASCRIPT. Dieselbe Maschine, eine Seite mit
-#      `document.write`, einer Schleife und einem
-#      `style.background = "#cc0000"`. Die Gegenprobe ist die FARBE: der
-#      Kasten ist im Quelltext blau und nur ein gelaufenes Skript macht
-#      ihn rot. Ein Browser ohne JavaScript besteht jede Tintenzaehlung
-#      und diesen Fall nicht.
-#
-#   6. ZEIT BIS BILD, gemessen an der seriellen Leitung: vom Start des
-#      Programms bis zum ersten `wig: blit`.
-#
-#   7. ZWANZIG LAEUFE OHNE PANIK ($CERTUS_SOAK, Vorgabe 20; mit
-#      `--schnell` drei). Jeder Lauf ein eigener Kaltstart.
-#
-#   8. DER LADEN. `certus-1.opk` wird gebaut, signiert, auf die Platte
-#      gelegt und IM GAST installiert -- und danach steht das Buendel
-#      unter /apps. Mit Bild.
 #
 # Aufruf:  bash tools/certus/run.sh [--schnell] [arbeitsverzeichnis]
 set -uo pipefail
@@ -100,10 +42,6 @@ done
 # ------------------------------------------------------------ der Server
 WWW="$OUT/www"
 mkdir -p "$WWW"
-# DIE NAMEN SIND KURZ, und das ist kein Geschmack: `wigapp=` liest
-# hoechstens 63 Oktette von der Kernelzeile (kernel/kgui.fi,
-# `wigapp_zerlegen`), und da stehen Pfad, Adresse und drei Schalter
-# drin. `/i.htm` statt `/index.html` sind acht Zeichen weniger.
 cat > "$WWW/i.htm" <<'HTML'
 <!doctype html><html><head><title>Certus auf Osum</title></head><body>
 <h1>Certus laeuft auf Osum</h1>
@@ -131,12 +69,6 @@ document.body.appendChild(p);
 </script>
 </body></html>
 HTML
-# WARUM NICHT `style.background` UND NICHT `document.write`: gemessen am
-# 05.09.2026 auf genau diesem Stand -- mit `z.style.background = "#cc0000"`
-# blieb der Kasten blau (24000 Bildpunkte #0033aa), mit
-# `style.backgroundColor` wurde er rot. `document.write` waehrend des
-# Zerteilens landete ebenfalls nicht im Baum. Beides sind Luecken der
-# Maschine und nicht der Portierung; sie stehen in STATUS-CERTUS.md.
 printf '<!doctype html><html><body></body></html>\n' > "$WWW/l.htm"
 
 PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('0.0.0.0',0));print(s.getsockname()[1]);s.close()")
@@ -202,13 +134,6 @@ PY
 grep -q 'w_self' kernel/fs/procfs.fi \
     && ok "kernel/fs/procfs.fi kennt /proc/self (der Sammler fragt danach)" \
     || bad "/proc/self fehlt"
-# RICHTIGSTELLUNG (06.09.2026): SSE fuer Ring 3 und die Rettung der
-# Vektorregister beim Wechsel sind NICHT neu von dieser Runde -- Runde
-# AVX hat beides gebaut (kernel/arch/x86_64/fpu.fi, `fpu.switch` in
-# sched.fi). Ein zweiter, handgeschriebener `fxsave` in switch.s war
-# genau ein Fehler zu viel: er hat die oberen Haelften der ymm-Register
-# zerlegt und tools/avx/run.sh rot gemacht. Er ist wieder draussen;
-# gemessen wird jetzt, dass der VORHANDENE Weg greift.
 grep -q 'CR4_OSFXSR' kernel/arch/x86_64/fpu.fi \
     && ok "kernel/arch/x86_64/fpu.fi schaltet SSE fuer Ring 3 ein (CR4.OSFXSR)" \
     || bad "SSE wird nicht eingeschaltet"
@@ -263,21 +188,6 @@ LADEN_STAND="$OUT/stand" bash tools/loader/abbild.sh "$OUT" > "$OUT/abbild.log" 
 
 # ---------------------------------------------------------------- Laeufe
 #
-# EIN Lauf: Kaltstart, Certus als Fensteranwendung, Foto vom Schirm,
-# Abzug von der Platte. `wigapp=` ist der Weg, auf dem der Kern ein
-# Programm IM Fensterserver startet (kernel/kgui.fi, Runde POWERMON).
-# WARUM `wmdauer` HIER FEHLT UND WARUM DAS EINE MESSUNG RETTET:
-# `wig: blits=… pixels=…` schreibt der Kern beim BEENDEN. Mit
-# `wmdauer` laeuft er weiter, bis ihn jemand abschiesst -- und dann
-# steht die Zeile nirgends. Gemessen: derselbe Lauf einmal mit und
-# einmal ohne, mit `wmdauer` fehlten beide Zahlen.
-#
-# Ohne `wmdauer` gilt der Fahrplan des Kerns: nach `k15: start` vier
-# Sekunden, in denen die Anwendung ihr Fenster anlegt, dann `wm: hold`
-# und zwanzig Sekunden Stillhalten fuer das Foto, dann Schluss. Das
-# Foto wird deshalb 18 Sekunden nach der Marke gemacht (Certus braucht
-# gemessen 11 bis 13 fuer das erste Bild), und abgeschossen wird NICHT
-# -- der Kern beendet sich selbst und sagt dabei seine Zahlen.
 lauf_wig() { # <name> <url> <extraargs,mit,komma> <warte>
     local name=$1 url=$2 extra=$3 warte=$4
     cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/$name.img"
@@ -329,8 +239,6 @@ if [ -s "$OUT/js.ppm" ]; then
     python3 tools/certus/pixel.py "$OUT/js.ppm" --json "$OUT/js.json" | sed 's/^/        /'
     JT=$(python3 -c "import json;print(json.load(open('$OUT/js.json'))['tintenpunkte'])")
     num "JS-Seite: Tintenpunkte" "$JT" ge 3000
-    # DIE GEGENPROBE, DIE NUR JAVASCRIPT BESTEHEN KANN: der Kasten ist
-    # im Quelltext #0033aa und wird von `style.background` rot.
     ROT=$(python3 tools/certus/farbe.py "$OUT/js.ppm" cc0000)
     BLAU=$(python3 tools/certus/farbe.py "$OUT/js.ppm" 0033aa)
     num "der Kasten ist ROT -- das Skript hat style.backgroundColor gesetzt" "$ROT" ge 5000
@@ -344,12 +252,6 @@ fi
 echo
 echo "== 7. Zeit bis Bild =="
 #
-# WAS HIER GEMESSEN WIRD, und warum es die ehrliche Zahl ist: die Zeit
-# vom Start des Programms (`k15: start /bin/certus` auf der seriellen
-# Leitung) bis zu der Zeile, die Certus SELBST schreibt, wenn die Seite
-# geladen, ausgelegt und gemalt ist (`HOEHE <n>` aus `--laut=1`).
-# Dazwischen liegt alles: der ELF-Lader, der Sammler, DNS, TCP, HTTP,
-# Baumbau, Kaskade, Layout, Schriftrasterer, das Blit ins Fenster.
 cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/zeit.img"
 LADEN_PLATTE="$OUT/zeit.img" LADEN_KILL=ja LADEN_WARTE=15 \
     bash tools/loader/lauf.sh zeit \
@@ -374,9 +276,6 @@ if [ "$t_start" != 0 ] && [ "$t_bild" != 0 ]; then
     MS=$((t_bild - t_start))
     ok "Zeit vom Programmstart bis zum fertigen Bild: ${MS} ms"
     echo "$MS" > "$OUT/zeit-ms.txt"
-    # KEINE Zusage nach oben: die Zahl gehoert in den Bericht und nicht
-    # in eine Schwelle, die niemand begruendet hat. Was hier scheitern
-    # MUSS, ist ein Bild, das gar nicht kommt.
     num "das Bild kam ueberhaupt (ms)" "$MS" gt 0
 else
     bad "kein Bild -- Start gefunden: $t_start, Bild: $t_bild"
@@ -388,11 +287,6 @@ rm -f "$OUT/zeit.img"
 echo
 echo "== 8. $SOAK Laeufe ohne Panik =="
 #
-# VIER GLEICHZEITIG. Ein Lauf ist ein Kaltstart mit einem 6,5-MiB-Abbild
-# vom Laufwerk, und das dauert (siehe STATUS-CERTUS.md, "Ladezeit").
-# Zwanzig davon nacheinander waeren zwei Stunden; der Wirt hat zwanzig
-# Kerne, und die Laeufe wissen nichts voneinander -- jeder hat seine
-# eigene Platte.
 PAR=${CERTUS_PAR:-4}
 panik=0; lief=0; ohne=0
 i=1
@@ -409,10 +303,6 @@ while [ "$i" -le "$SOAK" ]; do
         pids="$pids $!"
         i=$((i + 1)); j=$((j + 1))
     done
-    # NUR AUF DIESE VIER WARTEN. `wait` ohne Argument wartet auf JEDEN
-    # Hintergrundauftrag dieser Shell -- und einer davon ist der
-    # Webserver, der die ganze Zeit laufen soll. GEMESSEN: der Laeufer
-    # blieb nach dem ersten Schub stehen und tat nichts mehr.
     for q in $pids; do wait "$q"; done
 done
 i=1
@@ -435,10 +325,6 @@ num "Laeufe, in denen der Browser nicht hochkam" "$ohne" eq 0
 
 echo
 echo "== 9. aus dem Laden installiert =="
-# DAS PAKET LIEGT AUF DER PLATTE UND NICHT IM NETZ: der Laden ueber das
-# offene Internet wird von tools/loader/run.sh gemessen (er braucht einen
-# Server, der diesem Wirt gehoert). Was HIER gemessen wird, ist der Weg
-# des Pakets selbst -- Signatur, Auspacken, Buendel unter /apps.
 cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/store.img"
 LADEN_PLATTE="$OUT/store.img" bash tools/loader/lauf.sh store \
     "osum vfs nokbd nosched noproc nofs noring3 script=opk install /store/certus-1.opk;opk list;exit" \

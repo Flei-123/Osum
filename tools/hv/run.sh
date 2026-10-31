@@ -1,63 +1,9 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/hv/run.sh -- DER BEWEIS, DASS DIESER KERNEL EINEN FREMDEN
-# PROZESSOR FUEHREN KANN.
-#
-# Runde K12 baut einen Hypervisor. Nicht als Nachbau fremder
-# Schnittstellen -- das waere eine Arbeit ohne Ende -- sondern als
-# Virtualisierung des PROZESSORS: Steuerblock, Gastzustand, Abfangbits,
-# Eintritt, Austritt, Austrittsgrund. Diese Aufgabe ist endlich, sie
-# steht vollstaendig in den Handbuechern, und wenn sie stimmt, stimmt
-# sie fuer JEDES Gastsystem -- weil ein Gastsystem nichts anderes sieht
-# als einen Prozessor.
-#
-# ================= WARUM AMD-V UND NICHT INTEL VT-x =================
-#
-# Der Auftrag sagte "Intel zuerst". Das geht hier nicht, und das ist
-# GEMESSEN und nicht vermutet -- Abschnitt 0 dieses Laeufers misst es bei
-# jedem Lauf neu:
 #
 #   qemu-system-x86_64 -accel tcg -cpu qemu64,+vmx
 #     -> "warning: TCG doesn't support requested feature: CPUID.01H:ECX.vmx"
 #   qemu-system-x86_64 -accel tcg -cpu qemu64,+svm
 #     -> keine Warnung
-#
-# QEMUs Softwareemulation kann VMX NICHT. Sie kann SVM. Der Rechner, auf
-# dem dieses Projekt gemessen wird, hat kein /dev/kvm -- es gibt also
-# keine Beschleunigung, hinter der ein echtes VT-x steckte. Ein VMX-Wirt
-# waere hier NICHT MESSBAR, und dieses Projekt misst. Das ist der ganze
-# Grund; die Sache selbst ist dieselbe.
-#
-# ==================== WAS HIER GEMESSEN WIRD ====================
-#
-#   1. DER PROZESSOR KANN ES, UND ZWAR NACHGEZAEHLT. CPUID 0x8000000A
-#      sagt, was da ist: verschachtelte Seitentabellen ja, "nrip save"
-#      nein, "decode assists" nein. Was fehlt, muss der Wirt selbst tun --
-#      und beides tut er: RIP weiterruecken und Befehle selbst lesen.
-#   2. EIN GAST LAEUFT WIRKLICH. Nicht "er stuerzt nicht ab" -- er meldet
-#      ueber einen vereinbarten Weg (`vmmcall`) Zahlen zurueck, und jede
-#      einzelne wird hier nachgelesen.
-#   3. DIE VERSCHACHTELTE SEITENTABELLE TRAEGT, und zwar doppelt: der
-#      zweite Gast geht SELBST in den geschuetzten Modus, baut sich seine
-#      EIGENE zweistufige Seitentabelle, schaltet sein eigenes Paging ein
-#      und liest durch eine selbstgebaute virtuelle Adresse den Wert
-#      zurueck, den er dort hingeschrieben hat. Damit haengen ZWEI
-#      Uebersetzungen hintereinander -- die des Gasts und die des Wirts.
-#   4. DER WIRT BEHAELT DIE MASCHINE. Ein Gast, der `cli` sagt und im
-#      Kreis laeuft, wird vom Zeitgeber des Wirts eingeholt. Ein Gast,
-#      der einen Dreifachfehler baut, stirbt allein.
-#   5. RING 3 FUEHRT EINE GASTMASCHINE -- ueber ein Handle mit Rechten
-#      und keinen zweiten Weg.
-#   6. UND JEDE ZUSAGE HAT EINE GEGENPROBE, in der die Messung
-#      ZUSAMMENBRICHT:
-#         ohne `hv`   der Kernel verhaelt sich Zeile fuer Zeile wie vorher
-#         `nonpt`     ohne verschachtelte Tabellen laeuft der Gast in den
-#                     Speicher des Wirts und kommt nie zurueck
-#         `gastfrei`  ohne V_INTR_MASKING behaelt der Laeufer den Prozessor
-#         `nosvm`     ohne EFER.SVME gibt es nichts von alledem
-#         -cpu qemu64 CPUID bietet keine NPT an, und der Wirt SAGT es
-#   7. BEIDE UEBERSETZER. firnc0 und firnc1 bauen denselben Kernel, und er
-#      sagt beide Male dasselbe.
 #
 # Verwendung:  bash tools/hv/run.sh
 set -uo pipefail
@@ -74,7 +20,6 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has()    { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht da sein" || ok "$3"; }
 
-# Eine Zahl aus einer `schluessel=wert`-Zeile der Ausgabe.
 feld() { # datei schluessel
     grep -aoE "(^|[ ])$2=[0-9]+" "$1" | tail -1 | cut -d= -f2
 }
@@ -94,9 +39,6 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 0
 fi
 
-# `-cpu max` ist NICHT beliebig: `-cpu qemu64` meldet in CPUID 0x8000000A
-# KEINE verschachtelten Seitentabellen (gemessen: svm_feat_edx = 0).
-# Gegenprobe E unten misst genau das.
 CPU=max
 
 run_kernel() { # abbild anhang ausgabe zeitlimit
@@ -107,15 +49,10 @@ run_kernel() { # abbild anhang ausgabe zeitlimit
 }
 
 BASIS="osum nokbd nofs"
-# RUNDE HV2: die drei neuen Stufen kommen dazu -- der lange Modus
-# (`gastlang`) und die virtuellen Geraete (`gastgeraet`).
 APPEND="$BASIS hv gastlauf gastmess gastcr gastlang gastgeraet"
 
 # ------------------------------------------------------------ Abschnitt 0
 #
-# Was die Umgebung ueberhaupt kann. Diese Zusagen stehen VOR allem
-# anderen, denn sie sind der Grund fuer die Bauart dieser Runde. Wer sie
-# ueberspringt, baut ins Blaue.
 echo "== 0. was diese Umgebung ueberhaupt kann =="
 
 probe_feature() { # feature datei
@@ -142,10 +79,6 @@ else
     ok "TCG kann SVM -- die Grundlage dieser Runde"
 fi
 
-# Die beiden Zahlen, die zusammengehoeren MUESSEN: der Datenbereich steht
-# in `boot.s` UND in `kstate.fi`. Runde K12 hat ihn wachsen lassen, weil
-# er voll war -- geht das auseinander, nullt der Kernel weniger, als er
-# benutzt, und der Fehler zeigt sich irgendwo ganz anders.
 KB=$(grep -oE 'KDATA_SIZE, 0x[0-9A-Fa-f]+' kernel/arch/x86_64/boot.s | grep -oE '0x[0-9A-Fa-f]+')
 KS=$(grep -oE 'KDATA_SIZE: u64 = 0x[0-9A-Fa-f]+' kernel/lib/kstate.fi | grep -oE '0x[0-9A-Fa-f]+$')
 [ "$KB" = "$KS" ] && ok "kdata ist in boot.s und kstate.fi dieselbe Zahl ($KB)" \
@@ -155,9 +88,6 @@ python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1 \
     && ok "die Karte von kdata ist ueberschneidungsfrei ($(tail -1 "$TMPD/karte.txt"))" \
     || { bad "die Karte von kdata kollidiert"; sed 's/^/        /' "$TMPD/karte.txt" | head -6; }
 
-# Die Zusagen, die der Kernel selbst meldet. Sie stehen hier im
-# KLARTEXT, damit eine geloeschte oder umbenannte Zusage auffaellt und
-# nicht nur eine kleinere Gesamtzahl.
 ZUSAGEN=(
  "the processor can do svm"
  "svm switched on, rc = 0"
@@ -181,7 +111,6 @@ ZUSAGEN=(
  "the host took the runaway guest's processor"
  "and the runaway guest counted onwards"
  "every frame of every guest came back"
- # ---------------- RUNDE HV2, STUFE 1: DER LANGE MODUS ----------------
  "guest 7 signed off with 0x6464"
  "guest 7 reached LONG MODE: efer.lme and lma"
  "guest 7 runs with pe and paging on cr0"
@@ -189,9 +118,7 @@ ZUSAGEN=(
  "guest 7 really has 64 bit wide registers"
  "guest 7 wrote through a 2 MiB page and read"
  "and the host really took the efer.lme write"
- # --------------- RUNDE HV2, STUFE 2: DIE TABELLE WAECHST -------------
  "and its npt is built from 2 MiB pages, not 4K"
- # ----------------- RUNDE HV2, STUFE 3: DIE GERAETE -------------------
  "guest 8 signed off with 0x7777"
  "the uart scratch register really holds 0x5A"
  "the uart says thre and temt: it can send"
@@ -224,75 +151,47 @@ for stufe in 0 1; do
         continue
     fi
 
-    # 1. Jede einzelne Zusage des Kernels, im Klartext nachgelesen.
     for z in "${ZUSAGEN[@]}"; do
         has "$OUT" "hv: OK  $z" "firnc$stufe: $z"
     done
     hasnot "$OUT" "hv: BAD" "firnc$stufe: keine einzige Zusage ist rot"
 
-    # 2. DER GAST HAT WIRKLICH GEREDET. Der Text kommt aus dem Gast durch
-    #    einen Anschluss, den es fuer ihn nicht gibt, und der Wirt hat ihn
-    #    Oktett fuer Oktett abgefangen und weitergereicht.
     has "$OUT" "gast| hallo vom gast" \
         "firnc$stufe: der Gast hat durch einen Anschluss geredet, den es nicht gibt"
 
-    # 3. DIE AUSTRITTE, NACH GRUND GEZAEHLT. Das ist die Zeile, die diese
-    #    Runde ausmacht: nicht "es lief", sondern wie oft und weswegen.
     num "firnc$stufe: cpuid-Austritte"           "$(feld "$OUT" cpuid)"    eq 2
-    # RUNDE HV2: 16 aus K12 + 1 aus dem langen Modus ('L') + 31 aus dem
-    # Geraetegast (5 Proben mit Ruecklesen und 17 Oktette Text). Die
-    # Zahl ist ausgerechnet und nicht abgelesen -- geht sie auseinander,
-    # hat ein Gast mehr oder weniger getan als gedacht.
     num "firnc$stufe: Anschluss-Austritte"       "$(feld "$OUT" ioio)"     gt 40
     num "firnc$stufe: vmmcall-Austritte"         "$(feld "$OUT" vmmcall)"  gt 500
     num "firnc$stufe: Seitenfehler des Gasts"    "$(feld "$OUT" npf)"      eq 1
     num "firnc$stufe: Dreifachfehler"            "$(feld "$OUT" shutdown)" eq 1
-    # RUNDE HV2: 3 aus K12 (Gast 2) + 4 aus dem langen Modus
-    # (cr4, cr3, cr0 zweimal) = 7.
     num "firnc$stufe: Steuerregister-Austritte"  "$(feld "$OUT" crwr)"     eq 7
-    # UND DER WIRT HAT SIE ALLE ENTZIFFERT. Waere auch nur einer
-    # danebengegangen, waere der Gast daran gestorben und haette sich
-    # nie abgemeldet -- die Zusage oben faende es, diese sagt es direkt.
     num "firnc$stufe: MSR-Austritte (efer)"      "$(feld "$OUT" msr)"      gt 2
     num "firnc$stufe: Unterbrechungen des Wirts" "$(feld "$OUT" intr)"     gt 8
     num "firnc$stufe: kein zurueckgewiesener Eintritt" "$(feld "$OUT" err)"   eq 0
     num "firnc$stufe: kein unbehandelter Grund"  "$(feld "$OUT" other)"    eq 0
     num "firnc$stufe: Austritte insgesamt"       "$(feld "$OUT" total)"    gt 600
 
-    # 4. KEIN RAHMEN GEHT VERLOREN. Ein Wirt, der bei jeder Gastmaschine
-    #    Rahmen liegen laesst, ist ein Wirt mit einem Leck -- und ein Leck
-    #    sieht man nur, wenn man zaehlt.
     num "firnc$stufe: kein Rahmen verloren" "$(feld "$OUT" leak)" eq 0
 
-    # 5. WAS EIN AUSTRITT KOSTET. Die Zahl ist eine Zahl UNTER QEMUs
-    #    Softwareemulation und keine Aussage ueber echte Hardware; was sie
-    #    beweist, ist, dass gemessen wurde und nicht geschaetzt.
     num "firnc$stufe: der Preis eines Austritts ist gemessen" \
         "$(feld "$OUT" per-exit)" gt 0
     echo "        bench: $(grep -a '^hv: bench' "$OUT" | tail -1 | sed 's/^hv: //')"
     echo "        exits: $(grep -a '^hv: exits' "$OUT" | tail -1 | sed 's/^hv: //')"
     echo "        cpu:   $(grep -a '^hv: cpu' "$OUT" | tail -1 | sed 's/^hv: //')"
 
-    # 6. RING 3. Vierzehn Zusagen aus einem Programm ohne Sonderrechte.
     has "$OUT" "hvuser: 14 / 14" "firnc$stufe: Ring 3 fuehrt eine Gastmaschine, 14/14"
     has "$OUT" "hv: ring 3 exit=0" "firnc$stufe: und meldet es mit seinem Beendigungscode"
     num "firnc$stufe: Ring 3 sah die Austritte des Gasts" \
         "$(grep -aoE 'hvuser: exits=[0-9]+' "$OUT" | tail -1 | cut -d= -f2)" gt 10
-    # Das Muster, das der Gast durch die verschachtelte Seitentabelle
-    # gelesen hat, ist bis nach Ring 3 durchgekommen -- ohne dass dieses
-    # Programm je eine physische Adresse in der Hand gehabt haette.
     num "firnc$stufe: das NPT-Muster kam bis nach Ring 3" \
         "$(grep -aoE 'hvuser: value=[0-9]+' "$OUT" | tail -1 | cut -d= -f2)" eq 23130
 
-    # 7. DER UEBRIGE KERNEL IST DERSELBE.
     has "$OUT" "kernel: done" "firnc$stufe: der Kernel laeuft bis zum Ende durch"
 done
 
 # ------------------------------------------------------- die Gegenproben
 echo "== die Gegenproben =="
 
-# A. OHNE DAS WORT `hv` PASSIERT NICHTS. Eine Zeile, sonst nichts -- und
-#    der uebrige Kernel verhaelt sich Zeile fuer Zeile wie vorher.
 OFF="$TMPD/off.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS" "$OFF" 150 || rc=$?
@@ -304,11 +203,6 @@ hasnot "$OFF" "gast|" "ohne 'hv': kein Gast hat geredet"
 hasnot "$OFF" "hvuser:" "ohne 'hv': kein Programm in Ring 3"
 has    "$OFF" "kernel: done" "ohne 'hv': der uebrige Kernel ist unberuehrt"
 
-# B. OHNE VERSCHACHTELTE SEITENTABELLEN BRICHT ALLES ZUSAMMEN. Der Gast
-#    hat dann keinen eigenen physischen Adressraum: er laeuft unmittelbar
-#    im Speicher des WIRTS, faengt an, dort Unfug auszufuehren, und kommt
-#    nie zurueck. Genau das ist der Beweis, dass die Uebersetzung nicht
-#    beilaeufig ist, sondern alles traegt.
 NPT="$TMPD/nonpt.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv nonpt" "$NPT" 25 || rc=$?
@@ -320,10 +214,6 @@ fi
 has    "$NPT" "hv: OK  it can do nested page tables" "nonpt: bis dahin lief alles"
 hasnot "$NPT" "guest 1 signed off" "nonpt: aber KEIN Gast meldet sich mehr ab"
 
-# C. OHNE V_INTR_MASKING GEHOERT DIE MASCHINE DEM GAST. Der Laeufer sagt
-#    `cli` und dreht sich im Kreis. MIT V_INTR_MASKING holt der Zeitgeber
-#    des Wirts ihn ein (oben gemessen). OHNE es entscheidet das Flag DES
-#    GASTS ueber die physische Unterbrechung -- und der Gast hat es zu.
 FREI="$TMPD/gastfrei.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv gastlauf gastfrei" "$FREI" 25 || rc=$?
@@ -334,7 +224,6 @@ else
 fi
 hasnot "$FREI" "the host took the runaway guest" "gastfrei: der Wirt holt ihn NICHT ein"
 
-# D. OHNE EFER.SVME GIBT ES NICHTS DAVON.
 NOS="$TMPD/nosvm.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv nosvm" "$NOS" 150 || rc=$?
@@ -344,12 +233,6 @@ has    "$NOS" "counter-check nosvm: SVM stays off" "nosvm: der Kernel sagt es se
 hasnot "$NOS" "hv: guest" "nosvm: keine einzige Gastmaschine"
 hasnot "$NOS" "gast|" "nosvm: kein Gast hat geredet"
 
-# E. UND DIE UMGEBUNG SELBST: mit `-cpu qemu64` meldet CPUID KEINE
-#    verschachtelten Seitentabellen. Der Wirt muss das SAGEN und darf
-#    nicht behaupten, er koenne es. (Dass QEMU die Tabellen dann
-#    trotzdem benutzt, wenn man NP_ENABLE setzt, ist eine Eigenheit von
-#    QEMU und keine Zusage dieses Kernels -- deshalb wird hier nur die
-#    Auskunft geprueft und nicht der Zusammenbruch.)
 Q64="$TMPD/qemu64.txt"
 rc=0
 timeout 150 qemu-system-x86_64 -kernel "$TMPD/osum0.mb" -cpu qemu64 -m 256 \
@@ -361,23 +244,8 @@ has "$Q64" "np=no" "-cpu qemu64: der Wirt MELDET, dass CPUID keine NPT anbietet"
 has "$Q64" "hv: BAD it can do nested page tables" \
     "-cpu qemu64: und die Zusage darueber wird ROT, statt stillzuschweigen"
 
-# F. DAS WORT MUSS EIN WORT SEIN -- und das ist keine Feinheit, sondern
-#    ein Fehler, den Gegenprobe A dieser Runde WIRKLICH GEFUNDEN hat.
-#
-#    QEMU stellt der Multiboot-Kommandozeile den PFAD DES ABBILDS voran:
-#
 #      mb: flags=0x24f  cmd=/tmp/tmp.aBhvXk12/osum0.mb osum nokbd nofs
 #
-#    Die Laeufer bauen in ein Verzeichnis aus `mktemp -d`, und dessen
-#    Name ist zufaellig. Enthielt er die zwei Buchstaben `hv`, fand die
-#    urspruengliche Teilzeichenkettensuche das Wort dieser Runde IM PFAD
-#    -- und der Kernel schaltete den Hypervisor ein, obwohl auf der
-#    Kommandozeile nichts davon stand. Gegenprobe A wurde rot, weil der
-#    Kernel 20 Zusagen meldete, wo er haette schweigen sollen.
-#
-#    Von hier an wird genau das gemessen, statt sich auf den Zufall zu
-#    verlassen: das Abbild wird in ein Verzeichnis gelegt, dessen Name
-#    die zwei Buchstaben ENTHAELT, und der Kernel muss trotzdem schweigen.
 WORTDIR="$TMPD/ein-pfad-mit-hv-darin"
 mkdir -p "$WORTDIR"
 cp "$TMPD/osum0.mb" "$WORTDIR/k.mb"
@@ -394,8 +262,6 @@ grep -qa "cmd=$WORTDIR" "$WORT" \
 has    "$WORT" "hv: skipped" "und der Kernel schweigt trotzdem"
 hasnot "$WORT" "hv: OK" "kein Wort im Pfad hat die Runde eingeschaltet"
 
-# Und die Gegenprobe zur Gegenprobe: MIT dem Wort auf der Kommandozeile
-# laeuft aus DEMSELBEN Pfad alles.
 WORT2="$TMPD/wort2.txt"
 rc=0
 timeout 200 qemu-system-x86_64 -kernel "$WORTDIR/k.mb" -cpu "$CPU" -m 256 \
@@ -406,22 +272,8 @@ timeout 200 qemu-system-x86_64 -kernel "$WORTDIR/k.mb" -cpu "$CPU" -m 256 \
 has "$WORT2" "hv: OK  every frame of every guest came back" \
     "und zwar vollstaendig"
 
-# =====================================================================
-#            RUNDE HV2: DIE GEGENPROBEN ZU DEN NEUEN STUFEN
-# =====================================================================
-#
-# Jede der drei Stufen hat eine Probe, in der sie ZUSAMMENBRICHT. Ohne
-# sie waere jede Zusage oben nur eine Behauptung ueber einen Lauf, der
-# zufaellig gutging.
 echo "== die Gegenproben der Runde HV2 =="
 
-# G. OHNE DAS UEBERNOMMENE EFER.LME GIBT ES KEINEN LANGEN MODUS.
-#
-#    Das ist die schaerfste Probe dieser Runde. Der Wirt faengt JEDES
-#    MSR-Schreiben ab. Schluckt er das auf EFER -- so wie die Runde K12
-#    es tat --, dann bleibt der Gast 32 Bit, und zwar SCHWEIGEND: kein
-#    Fehler, keine Meldung, der weite Sprung landet nur woanders.
-#    Gemessen bricht er dann in einen Dreifachfehler.
 LME="$TMPD/ohnelme.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv gastlang ohnelme" "$LME" 150 || rc=$?
@@ -433,20 +285,12 @@ hasnot "$LME" "hv: OK  guest 7 really has 64 bit" \
     "ohnelme: und keine 64-Bit-Register"
 has "$LME" "hv: BAD guest 7 reached LONG MODE" \
     "ohnelme: und die Zusage darueber wird ROT, statt stillzuschweigen"
-# Und die Gegenprobe zur Gegenprobe: MIT dem uebernommenen Schreiben
-# laeuft derselbe Gast durch.
 LME2="$TMPD/mitlme.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv gastlang" "$LME2" 150 || rc=$?
 has "$LME2" "hv: OK  guest 7 reached LONG MODE" \
     "und mit dem Schreiben erreicht derselbe Gast den langen Modus"
 
-# H. DIE GERAETE SIND WIRKLICH GERAETE UND KEIN OFFENER BUS.
-#
-#    Ein Anschluss ohne Geraet liefert 0xFF -- und genau darauf gibt
-#    Linux' Treiber die serielle Schnittstelle auf ("LSR safety check").
-#    Diese Probe misst, dass der Wirt NICHT 0xFF liefert, wo ein Geraet
-#    steht, und dass die Werte die des Gasts sind und keine Erfindung.
 DEV="$TMPD/geraet.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv gastgeraet" "$DEV" 150 || rc=$?
@@ -459,8 +303,6 @@ has "$DEV" "hv: OK  and the lsr is NOT 0xFF -- linux would give up" \
 has "$DEV" "gast| geraete geprueft" \
     "Geraete: der Gast hat durch die emulierte Schnittstelle geredet"
 
-# I. UND DAS WORT MUSS AUCH HIER EIN WORT SEIN. Dieselbe Falle wie in
-#    Gegenprobe F: ohne die neuen Woerter darf KEIN neuer Gast laufen.
 OHNE="$TMPD/ohne-neu.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv" "$OHNE" 150 || rc=$?

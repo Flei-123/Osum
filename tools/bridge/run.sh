@@ -1,43 +1,8 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge/run.sh -- RUNDE BRIDGE: DER HELFER, UND WAS ER NICHT DARF.
-#
-# Diese Runde baut den JARVIS-Helfer fuer Osum (kernel/app/jarvisd.fi,
-# kernel/user/jsig.fi, kernel/user/jarvisctl.fi). Gemessen wird hier
-# NICHT in erster Linie, dass er Auftraege ausfuehrt -- das ist der
-# leichte Teil -- sondern DASS ER SIE ABLEHNT, wenn sie nicht in der
-# Rechteliste stehen. Ein Fernhelfer, der alles kann, ist keine
-# Errungenschaft, sondern eine Hintertuer.
-#
-# GEGEN WEN GEMESSEN WIRD, ausdruecklich: gegen `tools/bridge/peer.py`,
-# einen TLS-1.3-Server in Python, NICHT gegen den echten JARVIS-Server.
-# Der laeuft anderswo, spricht ein anderes Protokoll und ist nicht Teil
-# dieses Repos. Alles, was hier gruen ist, ist damit eine Aussage ueber
-# das Protokoll dieser Runde und ueber Osums Seite davon -- und keine
-# ueber die Gegenseite in Justins Rechenzentrum. Was fuer den Betrieb
-# gegen den echten Server noch fehlt, steht in docs/BRIDGE.md.
-#
-# DER DRAHT ist der von Runde K8/HWNET (tools/net/bridge.c): QEMUs
-# UDP-Rueckseite auf der einen Seite, AF_PACKET in ein veth-Paar auf der
-# anderen, und ein Netzraum mit der Gegenstelle darin.
 #
 #   Osum in QEMU <--e1000--> QEMU <--UDP--> tools/net/bridge
 #                <--AF_PACKET--> veth <--> peer.py im Netzraum
 #
-# DIE ABSCHNITTE:
-#   1. bauen: zwei Profile, ein Abbild, keine undefinierten Namen
-#   2. die Rechteliste ohne Netz -- und die Gegenprobe mit leerer Liste
-#   3. die Anmeldung: Ed25519, von Python nachgerechnet
-#   4. die sechs Auftragsarten, wenn sie erlaubt sind
-#   5. ZUSAGE (a): jede Auftragsart einzeln abgelehnt, protokolliert,
-#      und nichts ist passiert
-#   6. ZUSAGE (b): drei falsche Zertifikate, drei Weigerungen
-#   7. ZUSAGE (c): Kopplung ohne Bestaetigung am Geraet -> abgelehnt
-#   8. ZUSAGE (d): Abriss mitten im Auftrag -> sauber, und wieder da
-#   9. ZUSAGE (e): zu grosse Datei, zu grosse Ausgabe -> Grenze greift
-#  10. ZUSAGE (f): kein Netz beim Start -> der Dienst laeuft und wartet
-#  11. ZUSAGE (g): der private Schluessel ist nicht fuer andere lesbar
-#  12. die Messungen
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -112,9 +77,6 @@ for p in jsig jarvisctl; do
     fi
 done
 
-# Die Gegenprobe zur Trennung: DIESELBEN zwei Bibliotheken in EINEM
-# Programm gehen NICHT, und genau deshalb sind es zwei Programme. Wer
-# die Trennung eines Tages aufheben will, faellt hier auf.
 cat > "$TMPD/beides.fi" <<'FIEND'
 import std.rt
 import tls.tls
@@ -141,13 +103,10 @@ JSSZ=$(stat -c%s "$TMPD/w0/jsig.elf")
 zahl "jarvisd auf der Platte, in Oktetten" "$JDSZ" le 2400000
 zahl "jsig auf der Platte, in Oktetten" "$JSSZ" le 400000
 
-# Quellzeilen, gezaehlt und nicht geschaetzt.
 ZEILEN=$(cat kernel/app/jarvisd.fi kernel/user/jsig.fi \
     kernel/user/jarvisctl.fi | wc -l)
 note "Quelltext dieser Runde: $ZEILEN Zeilen in drei Dateien"
 
-# Der GUI-lose Serverbau muss den Helfer auch tragen -- ohne Bildschirm
-# gibt es eben kein Bildschirmfoto, aber sehr wohl einen Helfer.
 if grep -q -- '--gui' tools/build-kernel.sh 2>/dev/null; then
     if ./tools/build-kernel.sh "$TMPD/srv.img" --stufe 0 --gui off \
             > "$TMPD/srv.log" 2>&1; then
@@ -165,7 +124,6 @@ python3 tools/hwnet/mkcerts.py "$TMPD/certs" jarvis.test > "$TMPD/certs.txt" 2>&
     || { bad "mkcerts.py fehlgeschlagen"; cat "$TMPD/certs.txt"; }
 gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>/dev/null || bad "bridge.c uebersetzt nicht"
 
-# Die Rechteliste der Runde, mit der Adresse des Pruefstands.
 mach_conf() { # <datei> <befehle> <foto> <system> <extra...>
     local f=$1; shift
     cat > "$f" <<CONF
@@ -339,7 +297,6 @@ hat "$G.5.bin" "neu.txt" "liste: die eben geschriebene Datei steht darin"
 [ "$(status_von 6)" = ok ] && ok "befehl: /bin/echo lief" || bad "befehl: $(antwort 6)"
 hat "$G.6.bin" "eins zwei" "befehl: und seine Ausgabe kam zurueck"
 hat "$G.6.bin" "ende 0" "befehl: mit seinem Beendigungscode"
-# foto steht in dieser Liste auf `nein`, also MUSS es scheitern.
 [ "$(status_von 7)" = nein ] && ok 'foto: abgelehnt, weil bildschirmfoto = nein' \
                              || bad "foto: $(antwort 7)"
 hat "$F" "jarvisd: connections 1" "genau eine Verbindung"
@@ -356,10 +313,6 @@ note "vom QEMU-Start bis zum Ende dieses Laufs: $VERB_MS ms (mit Bau des Abbilds
 
 # =====================================================================
 echo "== 5. ZUSAGE (a): jede Auftragsart einzeln abgelehnt =="
-# =====================================================================
-# Die Rechteliste erlaubt NICHTS. Alle sechs Arten muessen einzeln
-# scheitern, jede mit einem Grund, jede im Protokoll -- und danach darf
-# nichts geschehen sein.
 mach_conf "$TMPD/nix.conf" no no no
 abbild "$TMPD/nix.img" "$TMPD/nix.conf" "/var/jarvis/gruss.txt=$TMPD/gruss.txt"
 cat > "$TMPD/auf-nix.txt" <<'AUF'
@@ -411,9 +364,6 @@ hat "$F" "jarvisd: rejected 8" "acht Ablehnungen gezaehlt"
 
 # =====================================================================
 echo "== 6. ZUSAGE (b): falsche Zertifikate =="
-# =====================================================================
-# DIE WEIGERUNGEN SIND DIE MESSUNG. Ein Helfer, der jedes Zertifikat
-# nimmt, ist schlimmer als einer ohne TLS: er behauptet Sicherheit.
 : > "$TMPD/leerspeicher.pem"
 for fall in expired wrong rogue; do
     draht_auf
@@ -431,8 +381,6 @@ for fall in expired wrong rogue; do
     hat "$Z" "tls REJECTED" "$fall: die Ablehnung steht im Protokoll"
 done
 
-# Und ohne Wurzelspeicher ist nichts vertrauenswuerdig, auch nicht das
-# gute Zertifikat.
 python3 tools/osum/mkfs.py build "$TMPD/leerca.img" 16384 \
     /bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/ \
     "/bin/sh=$TMPD/w0/sh.elf" "/bin/jsig=$TMPD/w0/jsig.elf" \
@@ -549,23 +497,17 @@ echo "== 8. ZUSAGE (d): Abriss mitten im Auftrag =="
 # =====================================================================
 draht_auf
 gegenstelle_an good "$TMPD/auf-gut.txt" "$TMPD/g5.log" --abriss
-# OHNE -1: der Helfer muss von selbst wiederkommen wollen. Die
-# Zeitgrenze beendet ihn, nicht der Abriss.
 lauf_mit_netz "$TMPD/nonet.img" "jarvisd -t 25000 -v;jarvisctl log 10;exit" "$TMPD/r5.txt" 200
 gegenstelle_aus
 draht_zu
 hat "$TMPD/g5.log" "ABRISS nach Auftrag 1" "die Gegenstelle hat mitten im Auftrag abgerissen"
 hat "$TMPD/r5.txt" "jarvisd: waiting" "der Helfer stirbt nicht, sondern wartet auf den naechsten Versuch"
 hat "$TMPD/r5.txt" "jarvisd: connections 1" "er zaehlt die eine Verbindung, die es gab"
-# Er versucht es WIRKLICH wieder -- ohne Gegenstelle scheitert der
-# Versuch, und genau das steht dann da.
 hat "$TMPD/r5.txt" "jarvisd: no connection" "und er versucht es danach wieder (die Gegenstelle ist weg)"
 hat "$TMPD/r5.txt" "service stopped" "er endet geordnet an seiner Zeitgrenze"
 
 # =====================================================================
 echo "== 9. ZUSAGE (e): grosse Datei, grosse Ausgabe =="
-# =====================================================================
-# voll.conf hat max_datei = 8192 und max_ausgabe = 4096.
 python3 -c "open('$TMPD/gross.bin','wb').write(b'A'*20000)"
 python3 -c "
 import binascii
@@ -675,9 +617,6 @@ G="$TMPD/g9e.log"
 
 # =====================================================================
 echo "== 10. ZUSAGE (f): kein Netz beim Start =="
-# =====================================================================
-# KEIN draht_auf. Die Karte ist da, dahinter ist NICHTS. Der Dienst muss
-# trotzdem hochkommen, ruhig warten und geordnet enden.
 lauf_und_miss() { # <abbild> <skript> <ausgabe> <sekunden>
     local copy="$TMPD/live-miss.img"
     cp "$1" "$copy"
@@ -707,9 +646,6 @@ lauf_und_miss() { # <abbild> <skript> <ausgabe> <sekunden>
     rm -f "$copy"
     return $rc
 }
-# LAUF A: gar kein Draht. Ein Verbindungsversuch ins Leere laeuft in
-# TCPs eigene Zeitgrenze; entscheidend ist, dass der Dienst hochkommt,
-# es sagt und geordnet endet.
 lauf_und_miss "$TMPD/nonet.img" "jarvisd -t 20000 -v;exit" "$TMPD/r7.txt" 60
 F="$TMPD/r7.txt"
 hat "$F" "jarvisd: ready" "ohne Netz startet der Dienst trotzdem"
@@ -717,9 +653,6 @@ hat "$F" "jarvisd: no connection" "er sagt, dass da nichts ist"
 hat "$F" "jarvisd: connections 0" "keine einzige Verbindung"
 hat "$F" "service stopped" "und er endet geordnet an seiner Zeitgrenze"
 
-# LAUF B: der Draht steht, aber niemand lauscht. Dann kommt die
-# Absage sofort, und der Helfer durchlaeuft seine Wartezeiten oft
-# genug, dass sich die LEERLAUFLAST messen laesst.
 draht_auf
 lauf_und_miss "$TMPD/nonet.img" "jarvisd -t 20000 -v;exit" "$TMPD/r7c.txt" 60
 draht_zu
@@ -729,8 +662,6 @@ WMS=$(grep -a 'wait_ms' "$F" | tail -1 | awk '{print $3}')
 WAUF=$(grep -a 'calls_while_waiting' "$F" | tail -1 | awk '{print $3}')
 note "gewartet: ${WMS:-?} ms, Systemaufrufe des ganzen Systems dabei: ${WAUF:-?}"
 if [ -n "${WMS:-}" ] && [ "${WMS:-0}" -ge 1000 ] && [ -n "${WAUF:-}" ]; then
-    # Eine Warteschleife braucht je Umlauf mindestens einen Aufruf. Bei
-    # ueber zehn Sekunden Wartezeit waeren das Zehntausende.
     zahl "Systemaufrufe je Sekunde Wartezeit" \
         $(( WAUF * 1000 / WMS )) le 50
 else
@@ -739,12 +670,7 @@ fi
 HZ=$(getconf CLK_TCK 2>/dev/null || echo 100)
 CPU_MS=$(( CPU_TICKS * 1000 / HZ ))
 note "QEMU auf dem Wirt: $CPU_MS ms Rechenzeit in $WALL_MS ms Laufzeit"
-# QEMU selbst dreht (der Kern hat eine Leerlaufschleife), also ist das
-# hier KEINE Aussage ueber Osums Leerlauf -- die steht eine Zeile
-# darueber. Sie steht trotzdem da, damit niemand sie erfindet.
 
-# GEGENPROBE zur Wartezahl: derselbe Kern, aber mit Arbeit. Dann muss
-# die Zahl der Systemaufrufe um Groessenordnungen groesser sein.
 lauf_ohne_netz "$TMPD/nonet.img" "jarvisd -n;jarvisd -n;jarvisd -n;exit" "$TMPD/r7b.txt"
 ok "GEGENPROBE gelaufen: derselbe Kern mit Arbeit statt Warten"
 
@@ -759,8 +685,6 @@ hat "$F" "sig " "und sie laesst sich damit benutzen"
 hat "$F" "is readable by others" "nach chmod 644 WEIGERT sich jsig, sie zu benutzen"
 SIGZ=$(grep -a '^sig ' "$F" | head -1 | awk '{print $2}')
 zahl "die Laenge der Unterschrift in Hexziffern" "${#SIGZ}" eq 128
-# Die Gegenprobe: die Unterschrift wird von etwas geprueft, das dieses
-# Repo nicht geschrieben hat.
 PUBZ=$(grep -a '^pub ' "$F" | head -1 | awk '{print $2}')
 python3 - "$PUBZ" "$SIGZ" > "$TMPD/verify.txt" 2>&1 <<'PYEOF'
 import sys
@@ -804,10 +728,7 @@ cat > "$TMPD/auf-foto.txt" <<'AUF'
 foto||
 foto||
 AUF
-# `gfx` schaltet den Rahmenpuffer ein (kernel/fb.fi, `parse`); ohne
-# dieses Wort hat der Kern keinen, und dann gibt es auch kein Bild.
 EXTRA="gfx"
-# ERST OHNE SCHEIN: `bildschirmfoto = ja` allein reicht nicht.
 draht_auf
 gegenstelle_an good "$TMPD/auf-foto.txt" "$TMPD/g7.log"
 lauf_mit_netz "$TMPD/foto.img" "jarvisd -1 -t 40000;exit" "$TMPD/r10.txt" 180
@@ -818,7 +739,6 @@ G="$TMPD/g7.log"
                              || bad "ohne Schein kam ein Bild: $(grep -a '^ANTWORT 1 ' "$G")"
 hat "$G.1.bin" "no screenshot permit" "und der Grund nennt den fehlenden Schein"
 
-# JETZT MIT SCHEIN.
 draht_auf
 gegenstelle_an good "$TMPD/auf-foto.txt" "$TMPD/g8.log"
 lauf_mit_netz "$TMPD/foto.img" "jarvisctl screenshot 600;jarvisd -1 -t 60000;jarvisctl log 10;exit" "$TMPD/r11.txt" 220
@@ -862,11 +782,6 @@ PYEOF
         && ok "DER SCHEIN GILT EINMAL: das zweite Foto wird abgelehnt" \
         || bad "das zweite Foto kam auch noch -- der Schein wird nicht verbraucht"
 elif grep -qa "screen size\|framebuffer" "$G.1.bin" 2>/dev/null; then
-    # KEIN BILD. Ring 3 bekommt in diesem Zweig die Bildschirmmasse nicht:
-    # SYS_OSUM_SHOT (Runde FEEDBACK) fehlt, und WIG_SCREEN/DISPGET liegen
-    # hinter dem Fensterserver. Der Helfer sagt genau das, statt zu raten --
-    # und der Kodierer wird gleich darunter mit einem gerechneten Bild
-    # gemessen. `jarvisd -s` nennt die Zahlen, docs/BRIDGE.md die Folgen.
     ok "mit Schein: dieser Kern gibt Ring 3 keine Bildschirmmasse, und der Helfer sagt genau das"
     note "KEIN BILD VOM ECHTEN BILDSCHIRM GEMESSEN -- siehe docs/BRIDGE.md."
     [ "$(status_von 2)" = nein ] && ok "und das zweite Foto scheitert ebenfalls" \
@@ -878,10 +793,6 @@ hat "$F" "screenshot " "das Foto steht im Protokoll -- heimlich geht es nicht"
 EXTRA=""
 
 echo "   -- der PNG-Kodierer selbst, mit einem gerechneten Bild"
-# Ring 3 bekommt in diesem Zweig KEINE Bildschirmmasse (SYS_OSUM_SHOT
-# fehlt, der Fensterserver laeuft in diesen Laeufen nicht). Damit der
-# Kodierer trotzdem gemessen ist und nicht nur uebersetzt, rechnet
-# `jarvisd -b` ein Bild aus und schickt es durch denselben Weg.
 lauf_ohne_netz "$TMPD/foto.img" "jarvisd -b;exit" "$TMPD/r13.txt"
 tr -d '\000' < "$TMPD/r13.txt" | grep -a '^bild ' | head -1 | awk '{print $2}' > "$TMPD/bild.hex"
 if [ -s "$TMPD/bild.hex" ]; then
@@ -931,10 +842,6 @@ fi
 
 # =====================================================================
 echo "== 13. die Messungen =="
-# =====================================================================
-# Vom Start des Programms bis "angemeldet", von innen gemessen: der
-# Helfer schreibt seine Laufzeit in Millisekunden seit dem Hochlauf des
-# Kerns, einmal beim Start und einmal nach der Anmeldung.
 cat > "$TMPD/auf-mess.txt" <<'AUF'
 system||
 system||

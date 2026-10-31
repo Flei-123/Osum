@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/hidweg/run.sh -- WARUM AUF JUSTINS BRETT KEINE EINGABE ANKAM.
 #
 #   bash tools/hidweg/run.sh
-#
-# ======================================================================
-# DIE AUSGANGSLAGE, UND SIE IST EINE MESSUNG UND KEINE VERMUTUNG
-# ======================================================================
-#
-# Am 03.09.2026 hat Justin das USB-Abbild a37098b9 auf echter Hardware
-# gestartet (AMD-Brett, zwei xHCI-Regler, NVIDIA GA106, Ultrabreitbild)
-# und die USB-Diagnose fotografiert. Darauf steht:
 #
 #     usbleg: gut=2 schlecht=0
 #     usb: hc1 ... id=1022:149c ... strom=8/8 verbunden=2 frei=2
@@ -18,65 +8,9 @@
 #     usb: port=4 ... id=046d:c336 class=03:01:01 driver=kbd
 #     usb: devices=2 kbd=1 mouse=1 ... events=36 irqs=23
 #
-# Uebernahme, Anschlussstrom, Aufzaehlung, Bindung, Meldung -- ALLES
-# GEHT. Und im Schreibtisch bewegte sich der Zeiger trotzdem nicht.
-#
-# ======================================================================
-# WAS DIESE RUNDE GEFUNDEN HAT: DREI FEHLER, ALLE OBERHALB DES TREIBERS
-# ======================================================================
-#
-# 1. DER SCHREIBTISCH HAT AUFGEHOERT. `kgui.wait_wm` wartete auf die
-#    Shell im Terminalfenster in einer Schleife mit HARTER RUNDENGRENZE
-#    (20000). Danach kehrte sie zurueck, `surface` kehrte zurueck, der
-#    Kern lief durch bis `kernel: done`. Das Bild blieb stehen, aber
-#    NIEMAND rief mehr `wm.poll`. GEMESSEN, mit genau der
-#    Kommandozeile von Menue 4: der Schreibtisch lebte 9,4 SEKUNDEN.
-#
-# 2. DIE UNTERBRECHUNGEN WAREN AUS. Der Ausflug nach Ring 3
-#    (`arch/x86_64/user.fi`, Runde 59) geht ueber `sysretq` hinaus und
-#    ueber `leave_user` zurueck -- ohne `sysret`, also aus einem
-#    SYSCALL heraus, und `syscall` loescht IF ueber IA32_FMASK.
-#    Niemand setzte es wieder. GEMESSEN, Stufe fuer Stufe:
-#
 #        nach hv.stage    if=1
 #        nach ring3       if=0
 #
-#    Von da an: kein Zeitgeber, keine Taste, keine Maus. `ps2m.init`
-#    half nicht -- es stellt nur wieder her, was es vorfand.
-#
-# 3. NIEMAND FRAGTE NACH. Der Schreibtisch verliess sich vollstaendig
-#    auf die Meldung. Ein Regler, dessen Meldung nicht ankommt (auf
-#    Justins Brett `hc0`: `events=50 irqs=0`), ist damit stumm.
-#
-# ======================================================================
-# WAS HIER GEMESSEN WIRD
-# ======================================================================
-#
-#   1. DIE GEGENPROBE ZUERST. Ohne `wmdauer` endet der Schreibtisch --
-#      `wm: sh exit=...4073709551614` (das ist -2, die Rundengrenze)
-#      steht im Mitschnitt, und die Sekunden bis dahin werden gezaehlt.
-#      Ein Fehler, dessen Gegenprobe nicht faellt, ist keiner.
-#   2. MIT `wmdauer` steht diese Zeile NICHT da, und die Maschine laeuft
-#      noch, wenn der Laeufer sie abraeumt.
-#   3. DER EINGABEPULS. Der Kern schreibt alle fuenf Sekunden eine Zeile
-#      INS TERMINALFENSTER und auf die Leitung. Daran wird gemessen:
-#      `if=1` (Unterbrechungen an), `mk=` waechst (der Zeitgeber
-#      schlaegt), `irq=` waechst (die Meldung kommt an).
-#   4. ECHTE EINGABE. Ueber den QEMU-Monitor gehen Tasten, Bewegungen
-#      und ein Klick in die laufende Maschine. `bew=`, `pk=`, `xy=`,
-#      `wm=` und `kl=` MUESSEN sich bewegen.
-#   5. DIE GEGENPROBE ZUR MELDUNG. Mit `usbnoirq` bleibt der Vektor
-#      maskiert: `irq=` steht still -- und die Eingabe kommt TROTZDEM
-#      an, ueber die Abfrage in der Schleife. Das ist der Nachweis,
-#      dass Punkt 3 der Reparatur wirklich traegt und nicht nur
-#      danebensteht.
-#   6. ZWEI REGLER, HID AM ZWEITEN. Wie auf Justins Brett.
-#   7. DIE RANGFOLGE DER SCHNITTSTELLEN, an einem GEBAUTEN
-#      Konfigurationsdeskriptor: Verbrauchersteuerung zuerst,
-#      Boot-Tastatur danach -- genommen werden MUSS die zweite.
-#      QEMU hat kein zusammengesetztes HID-Geraet; ohne diesen Test
-#      waere die Auswahl eine Behauptung.
-#   8. DIE MELDEART je Regler steht im Bericht (`melde=msi-x|msi|intx`).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -125,17 +59,6 @@ done
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "der Verzeichnisbaum steht" || bad "tools/k15/tree.py faellt"
 printf '# taskbar.conf\nedge=0\nheight=28\nwidth=100\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
-# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
-# Gleiche Ursache wie in K15, NETVIEW und GLYPHE: Runde GRUNDLINIE hat
-# die Laeufer -- zu Recht -- auf `--profile=app` umgestellt, weil die
-# Programme mit Oberflaeche seit Runde 31 `profile app` in ihrer ersten
-# Zeile tragen. Das Profil `app` bringt Firns volle Laufzeit mit, und
-# sechs der dreizehn Programme dieses Abbilds sind solche. /bin/explorer
-# allein ist damit 1623040 statt 907360 Oktette; die dreizehn zusammen
-# brauchen rund 16285 Bloecke, und 16384 sind es mit Schriften,
-# Buendeln, Baum, Bitmap und Inode-Tafel nicht mehr. `mkfs.py` sagte
-# "the disk is full", und ohne Abbild startet kein QEMU.
-# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
 ARGS=(build "$TMPD/root.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
@@ -146,7 +69,6 @@ python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "das Wurzelabbild steht ($(stat -c%s "$TMPD/root.img") Oktette)" \
     || { bad "mkfs.py faellt"; tail -3 "$TMPD/mkfs.txt"; }
 
-# Zwei Regler, HID am ZWEITEN -- die Aufstellung von Justins Brett.
 ZWEI="-device qemu-xhci,id=x0 -device nec-usb-xhci,id=x1 -device usb-kbd,bus=x1.0 -device usb-mouse,bus=x1.0"
 
 cat > "$TMPD/befehle" <<'EOM'
@@ -166,9 +88,6 @@ mouse_button 0
 warte 2.0
 EOM
 
-# Ein Lauf. Wartet auf die Marke, speist dann Maus und Tastatur ein und
-# raeumt nach `sek` Sekunden ab. Der Beendigungscode sagt, ob die
-# Maschine von sich aus fertig war (21) oder abgeraeumt wurde (124).
 lauf() { # name kommandozeile marke sek [mit-eingabe]
     local name=$1 app=$2 marke=$3 sek=$4 eingabe=${5:-ja}
     local sock="$TMPD/mon-$name.sock" out="$TMPD/$name.txt"
@@ -192,19 +111,10 @@ lauf() { # name kommandozeile marke sek [mit-eingabe]
     RC=$(cat "$TMPD/$name.rc" 2>/dev/null || echo 99)
 }
 
-# Ein Feld aus der LETZTEN Pulszeile.
 feld() { # datei name
     grep -a '^eingabe:' "$1" | tail -1 | sed -n "s/.*[ :]$2=\([0-9]*\).*/\1/p"
 }
 feld1() { # datei name -- aus der ersten VOLLSTAENDIGEN Pulszeile
-    # RUNDE HIDPUNKTE: `sh=` IST DAS LETZTE FELD DER ZEILE, und dass hier
-    # danach gefiltert wird, ist keine Vorsicht auf Vorrat. Der Laeufer
-    # wartet jetzt auf die erste Pulszeile und liest die Datei in dem
-    # Augenblick, in dem sie geschrieben wird -- die erste Zeile ist
-    # dann oft halb da. `irq=` steht vorne und war zu lesen, `mk=` und
-    # `xy=` stehen hinten und waren leer, und ein leerer Vergleichswert
-    # laesst jede Zusage darauf fallen. Gemessen: "der Zeitgeber
-    # schlaegt (mk): 4217, sollte groesser als  sein".
     grep -a '^eingabe:' "$1" | grep -a 'sh=' | head -1 \
         | sed -n "s/.*[ :]$2=\([0-9]*\).*/\1/p"
 }
@@ -224,22 +134,7 @@ echo "       (Lebensdauer bis zum Aufgeben: $(( (t1-t0)/1000000000 )) s)"
 
 echo
 echo "== 3. MIT wmdauer laeuft er weiter, und die Meldungen kommen an =="
-# RUNDE HIDPUNKTE: DIE MARKE IST JETZT DIE ERSTE PULSZEILE UND NICHT
-# MEHR DAS TERMINALFENSTER, und das ist die Reparatur eines Wettlaufs im
-# LAEUFER, nicht im Kern.
 #
-# Die drei Zusagen weiter unten vergleichen die LETZTE Pulszeile mit der
-# ERSTEN ("irq steigt", "ber steigt", "der Zeiger bewegt sich"). Das
-# Terminalfenster steht aber lange VOR dem ersten Puls (der haengt an
-# den Marken, alle fuenf Sekunden). Wurde die elf Sekunden lange
-# Befehlsfolge in dieser Luecke abgearbeitet, stand in der ERSTEN
-# Pulszeile bereits `ber=13 irq=47 xy=799,539` -- und dieselbe Zahl kann
-# nicht groesser als sie selbst sein.
-#
-# Gemessen an BEIDEN Kernen, dem dieser Runde und dem davor (HEAD ohne
-# die Aenderungen): erste und letzte Zeile identisch. Es ist also die
-# Zeitlage der Maschine und keine Regression -- deshalb wird hier die
-# Marke verschoben und nicht die Zusage aufgeweicht.
 lauf neu "$BASE wmdauer" '^eingabe:' 45
 hatnicht "$TMPD/neu.txt" 'wm: sh exit' "mit wmdauer gibt der Schreibtisch NICHT auf"
 is "die Maschine lief noch, als der Laeufer sie abraeumte" "$RC" 124

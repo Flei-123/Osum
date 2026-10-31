@@ -1,49 +1,6 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/krypto/run.sh -- DIE ABNAHME DER RUNDE KRYPTO (K-019).
 #
-# DIE FRAGE DIESER RUNDE: liegen die Daten von OrientOS verschluesselt
-# auf dem Blech, und kommt man ohne Passphrase wirklich nicht daran?
-#
-# WIE HIER GEMESSEN WIRD, und warum es so und nicht anders geht:
-#
-#   DER WIRT IST DIE GEGENSTELLE, mit FREMDEM Werkzeug -- `argon2-cffi`
-#   (die Referenzumsetzung von RFC 9106), `cryptography` (OpenSSL
-#   darunter) und `hashlib`. Keine Zeile Osum-Code ist daran beteiligt.
-#
-#   ES WIRD IN BEIDE RICHTUNGEN GEMESSEN. Was OrientOS verschluesselt,
-#   muss der Wirt entschluesseln koennen -- und was der WIRT anlegt,
-#   muss OrientOS aufmachen koennen. Die zweite Richtung ist die
-#   schaerfere: sie faellt aus, sobald OrientOS irgendwo etwas anderes
-#   rechnet als die Norm, auch wenn es mit sich selbst einig bleibt.
-#
-#   UND DAZU DIE VEROEFFENTLICHTEN VEKTOREN: FIPS 180-4 ueber
-#   `hashlib`, RFC 7693 (BLAKE2b), RFC 9106 (Argon2id) und IEEE 1619
-#   (XTS) ueber OpenSSL.
-#
-# Eine Kryptoumsetzung, die nur gegen sich selbst geprueft ist, ist
-# wertlos -- das ist der erste Satz des Auftrags, und dieser Laeufer ist
-# seine Einloesung.
-#
-# WAS GEMESSEN WIRD, in dieser Reihenfolge:
-#
-#   1. Die Speicherkarte von kdata (0 Kollisionen) und der Bereich
-#      dieser Runde an der ZUGETEILTEN Adresse.
-#   2. Der Bau: Kern und das Orakel aus denselben lib/crypto-Dateien.
-#   3. Die Rechnung gegen die Normen und gegen OpenSSL, mit der
-#      negativen Haelfte (was abgelehnt werden MUSS).
-#   4. Anlegen, Dateisystem, bekannter Baum -- dann NEUSTART, Passphrase,
-#      jede SHA-256.
-#   5. Die Gegenproben: falsche Passphrase, gar nicht entsperrt,
-#      beschaedigter Kopfsatz. Alle drei mit DERSELBEN Antwort.
-#   6. Das Rohgeraet: kein Klartext, keine Signatur, Entropie.
-#   7. Der Schluesselplatz-Wechsel: neue Passphrase dazu, alte weg,
-#      Daten unveraendert.
-#   8. Die Gegenprobe mit fremden Augen, beide Richtungen.
-#
-# Aufruf:  bash tools/krypto/run.sh
-#          OSUM_KRYPTO_SCHNELL=1   ohne die langen Vektorschleifen
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -75,7 +32,6 @@ gleich() { # name soll ist
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hat_nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da" || ok "$3"; }
 
-# Ein Wert aus der seriellen Ausgabe ("krypto: name=zahl").
 kwert() { # datei name
     grep -a -m1 -oE "$2=[0-9]+" "$1" 2>/dev/null | head -1 | cut -d= -f2
 }
@@ -92,9 +48,6 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || {
 command -v python3 >/dev/null 2>&1 || {
     echo "KRYPTO: uebersprungen, python3 fehlt"; exit 0; }
 
-# DAS FREMDE WERKZEUG. Ohne argon2-cffi und cryptography gibt es keine
-# unabhaengige Gegenrechnung -- und dann ist dieser Laeufer wertlos und
-# sagt das, statt gruen zu werden.
 PY=python3
 for kandidat in "${OSUM_KRYPTO_PY:-}" /root/.krypto-venv/bin/python python3; do
     [ -n "$kandidat" ] || continue
@@ -127,9 +80,6 @@ else
 fi
 hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
 
-# DER BEREICH DIESER RUNDE LIEGT, WO ER ZUGETEILT WURDE. Fuenf Runden
-# hintereinander haben sich dieselbe freie Seite genommen; diese hier
-# hat ihre Adresse VOR der Runde bekommen.
 v=$(grep -aE "^const CRYPT_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 if [ "$(( v ))" = "$(( 0x113000 ))" ]; then
@@ -145,14 +95,6 @@ else
     bad "der Bereich ragt ueber 0x118000 hinaus"
 fi
 
-# GEGENPROBE ZUR KARTE: den Bereich auf eine fremde Adresse legen MUSS
-# anschlagen. Ohne diese Zeilen prueft die Karte nur das, woran jemand
-# gedacht hat.
-# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
-# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
-# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
-# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
-# zu melden, die hier gemessen wird.
 mkdir -p "$TMPD/koll"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/koll/" \; )
 sed -i 's/^const CRYPT_OFF: u64 = 0x113000$/const CRYPT_OFF: u64 = 0x108000/' \
@@ -182,14 +124,11 @@ else
     sed 's/^/        /' "$TMPD/orakel.err" | head -20
     echo "KRYPTO: $pass bestanden, $fail gescheitert"; exit 1
 fi
-# Ein Orakel, das nie FAIL sagt, misst nichts.
 if [ "$(echo 'quatsch' | ./.probe/korakel)" = "FAIL" ]; then
     ok "das Orakel lehnt Unsinn ab (sagt FAIL)"
 else
     bad "das Orakel sagt zu 'quatsch' nicht FAIL"
 fi
-
-# ------------------------------------- 3. die Rechnung gegen die Normen
 
 echo "== 3. die Rechnung gegen die Normen und gegen OpenSSL =="
 if [ "${OSUM_KRYPTO_SCHNELL:-0}" = 1 ]; then
@@ -210,8 +149,6 @@ else
     done
 fi
 
-# DER OFFIZIELLE VEKTOR AUS RFC 9106, ueber den argon2-Befehl der
-# Distribution -- eine DRITTE Umsetzung neben unserer und argon2-cffi.
 if command -v argon2 >/dev/null 2>&1; then
     soll=$(printf 'password' | argon2 somesaltsomesalt -id -t 3 -m 5 -p 4 \
         -l 32 -v 13 -r 2>/dev/null)
@@ -220,8 +157,6 @@ if command -v argon2 >/dev/null 2>&1; then
     gleich "Argon2id t=3 m=32 p=4 gegen den argon2-Befehl" "$soll" "$ist"
 fi
 
-# ------------------------------------------------ 4. die volle Kette
-
 echo "== 4. anlegen, schreiben, NEUSTART, entsperren, nachrechnen =="
 BLOCKS=8192
 python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
@@ -229,10 +164,6 @@ python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     && ok "die Wurzelplatte steht" \
     || bad "mkfs.py scheitert"
 
-# Kleine Argon2-Parameter: der Abnahmelauf misst die RECHNUNG, nicht die
-# Geduld. Sie stehen im Kopfsatz, also wird auch mit ihnen aufgemacht --
-# ein Schalter, der im Messlauf etwas anderes rechnet als im Betrieb,
-# waere unehrlich.
 KP="kryptot=1 kryptom=64 kryptop=1"
 
 lauf() { # name abbild kommandozeile [zeitlimit]
@@ -253,14 +184,11 @@ ksagt "$TMPD/a1.txt" "kopfda"   1 "der Kopfsatz steht nach dem Formatieren noch"
 ksagt "$TMPD/a1.txt" "mount"    1 "eingehaengt"
 ksagt "$TMPD/a1.txt" "baum"     4 "vier Dateien geschrieben"
 
-# DER NEUSTART. Das ist der Unterschied zwischen "der Puffer stimmt
-# noch" und "es steht auf der Platte".
 lauf a2 "$TMPD/a.img" "osum nopwr kryptoauf kryptopruef kryptopw=geheim $KP"
 ksagt "$TMPD/a2.txt" "auf"    1 "nach dem Neustart mit der Passphrase aufgemacht"
 ksagt "$TMPD/a2.txt" "fehler" 0 "ohne Fehlversuch"
 ksagt "$TMPD/a2.txt" "mount"  1 "und eingehaengt"
 
-# Die vier Pruefsummen gegen `hashlib` auf dem WIRT.
 python3 - "$TMPD/soll.txt" <<'PYEOF'
 import hashlib, sys
 laengen = [100, 700, 5000, 40000]
@@ -286,9 +214,6 @@ ksagt "$TMPD/b1.txt" "auf"    0 "die FALSCHE Passphrase macht nicht auf"
 ksagt "$TMPD/b1.txt" "fehler" 1 "und wird gezaehlt"
 ksagt "$TMPD/b1.txt" "mount"  0 "ohne Schluessel laesst sich nichts einhaengen"
 
-# DIE ANTWORT DARF NICHT VERRATEN, WIE NAH MAN DRAN WAR. Die Zeile bei
-# falscher Passphrase muss Zeichen fuer Zeichen die sein, die auch ein
-# beschaedigter Kopfsatz bekommt.
 cp --sparse=always "$TMPD/a.img" "$TMPD/c.img"
 python3 - "$TMPD/c.img" <<'PYEOF'
 import sys
@@ -304,8 +229,6 @@ zb=$(grep -a -m1 'krypto: auf=' "$TMPD/b1.txt" | tr -d '\r\000')
 zc=$(grep -a -m1 'krypto: auf=' "$TMPD/c1.txt" | tr -d '\r\000')
 gleich "falsche Passphrase und kaputter Kopf geben DIESELBE Zeile" "$zb" "$zc"
 
-# Ganz ohne Entsperrung: das Dateisystem MUSS scheitern. Das ist der
-# Beleg, dass wirklich verschluesselt auf der Platte steht.
 cp --sparse=always "$TMPD/a.img" "$TMPD/d.img"
 lauf d1 "$TMPD/d.img" "osum nopwr kryptoroh kryptopruef"
 ksagt "$TMPD/d1.txt" "roh"   1 "der Kopfsatz wird gefunden"
@@ -349,7 +272,6 @@ while read -r nm soll; do
 done < "$TMPD/soll.txt"
 num "die Daten sind nach dem Wechsel unveraendert (kein Sektor neu verschluesselt)" \
     "$gut" eq 4
-# Und der geloeschte Platz ist wirklich genullt und nicht nur abgehakt.
 python3 - "$TMPD/e.img" > "$TMPD/platz0.txt" <<'PYEOF'
 import sys
 d = open(sys.argv[1], "rb").read(4096)
@@ -358,11 +280,8 @@ print("null=%d" % (1 if sl == b"\0" * 256 else 0))
 PYEOF
 ksagt "$TMPD/platz0.txt" "null" 1 "der geloeschte Platz ist genullt, nicht nur leer gemeldet"
 
-# --------------------------------- 8. die Gegenprobe mit fremden Augen
-
 echo "== 8. die Gegenprobe mit fremden Augen, BEIDE Richtungen =="
 
-# RICHTUNG 1: was OrientOS geschrieben hat, macht der Wirt auf.
 "$PY" tools/krypto/gegen.py lies "$TMPD/a.img" geheim > "$TMPD/g1.txt" 2>&1
 sed 's/^/        /' "$TMPD/g1.txt"
 ksagt "$TMPD/g1.txt" "summe" 1 "der Wirt haelt die Pruefsumme des Kopfes fuer richtig"
@@ -371,16 +290,11 @@ num "der Wirt macht den Schluesselplatz mit Argon2id+XTS auf" "${auf:-0}" eq 1
 hat "$TMPD/g1.txt" "SFO-MUSO" \
     "und findet darunter den OFS-Superblock (die Sektorrechnung stimmt)"
 
-# UND DIE DATEIEN SELBST, mit fremdem Werkzeug aus dem Geheimtext
-# geholt -- bis in die zweifach indirekten Zeiger der 40000er Datei.
 "$PY" tools/krypto/gegen.py baum "$TMPD/a.img" geheim > "$TMPD/g2.txt" 2>&1
 sed 's/^/        /' "$TMPD/g2.txt"
 g=$(grep -a -m1 'baum: gut=' "$TMPD/g2.txt" | grep -oE 'gut=[0-9]+' | cut -d= -f2)
 num "der Wirt liest ALLE vier Dateien aus dem Geheimtext" "${g:-0}" eq 4
 
-# RICHTUNG 2, DIE SCHAERFERE: der WIRT legt einen Traeger an, den
-# OrientOS nie gesehen hat -- fremder Hauptschluessel, fremdes Salz,
-# fremde Ableitung. OrientOS muss ihn aufmachen UND darauf schreiben.
 "$PY" tools/krypto/gegen.py schreib "$TMPD/f.img" fremdpw 1 64 1 "$BLOCKS" \
     > "$TMPD/g3.txt" 2>&1
 hat "$TMPD/g3.txt" "schrieb:" "der Wirt legt einen eigenen Traeger an"
@@ -388,14 +302,12 @@ lauf f1 "$TMPD/f.img" "osum nopwr kryptoauf kryptofs kryptobaum kryptopw=fremdpw
 ksagt "$TMPD/f1.txt" "auf"      1 "${MARKE_PRODUKT} macht den FREMDEN Kopfsatz auf"
 ksagt "$TMPD/f1.txt" "fsformat" 1 "und legt sein Dateisystem darauf an"
 ksagt "$TMPD/f1.txt" "baum"     4 "und schreibt die vier Dateien"
-# Und der Kreis schliesst sich: der Wirt liest sie wieder.
 "$PY" tools/krypto/gegen.py baum "$TMPD/f.img" fremdpw > "$TMPD/g4.txt" 2>&1
 sed 's/^/        /' "$TMPD/g4.txt"
 g=$(grep -a -m1 'baum: gut=' "$TMPD/g4.txt" | grep -oE 'gut=[0-9]+' | cut -d= -f2)
 num "der Wirt liest zurueck, was ${MARKE_PRODUKT} auf SEINEN Traeger schrieb" \
     "${g:-0}" eq 4
 
-# Und die falsche Passphrase scheitert auch beim Wirt.
 if "$PY" tools/krypto/gegen.py lies "$TMPD/a.img" falschefalsche \
         > "$TMPD/g5.txt" 2>&1; then
     bad "GEGENPROBE: der Wirt macht mit der falschen Passphrase auf"

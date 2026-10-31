@@ -1,50 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/k16/run.sh -- RUNDE K16: DER UEBERSETZER LAEUFT AUF DEM SYSTEM
-# SELBST, UND EINE DATEI WEISS, WOMIT MAN SIE OEFFNET.
-#
-# Fuenf Teile, und der vierte ist der, um den es geht:
-#
-#   1. WAS EIN ASSEMBLER LEISTEN MUSS (auf dem Wirt, ohne QEMU).
-#      `kernel/user/fas.fi` liest den Assemblertext, den `firnc`
-#      ausgibt, und macht daraus UNMITTELBAR eine ausfuehrbare Datei --
-#      ohne `as`, ohne `ld`, ohne Objektformat. Gemessen wird nicht
-#      "es laeuft durch", sondern: dasselbe Programm, einmal von
-#      `as`+`ld` gebaut und einmal von `fas`, sagt bei denselben
-#      Eingaben Oktett fuer Oktett dasselbe und geht mit demselben Code.
-#      Und: ALLE Programme dieses Userlands gehen durch.
-#      Gegenproben: ein Befehl, den `fas` nicht kennt, eine Quelle ohne
-#      `_start` und ein Sprung ins Nichts -- alle drei muessen mit
-#      Zeilennummer abbrechen.
-#
-#   2. DIE ZAHLEN, AUS DENEN DIE KERNAENDERUNGEN FOLGEN. Wie viel
-#      Adressraum und wie viel Stapel `firnc1` wirklich braucht,
-#      gemessen mit `setrlimit` auf dem Wirt. Ohne diese zwei Zahlen
-#      waeren "3 MiB Abbildfenster", "6 MiB Arena" und "504 KiB Stapel"
-#      geraten. Gegenprobe: mit weniger geht es nachweislich nicht.
-#
-#   3. DIE SPEICHERKARTE. `tools/kernel/memmap.py` rechnet nach, dass
-#      sich der Bereich dieser Runde (0x49000..0x4C000) mit keinem
-#      anderen ueberschneidet. Gegenprobe: mit der Adresse von Runde K15
-#      MUSS der Pruefer anschlagen.
-#
-#   4. DER UEBERSETZER AUF OSUM -- DER BEWEIS DIESER RUNDE.
-#      `/bin/firnc` liest eine `.fi` von der Platte, uebersetzt sie und
-#      schreibt eine `.s` auf die Platte. `/bin/fas` macht daraus ein
-#      Programm auf der Platte. Das Programm LAEUFT. Und dann die
-#      Steigerung: der WIRT liest beides aus dem Plattenabbild zurueck
-#      und haelt es gegen das, was DERSELBE Uebersetzer auf Linux aus
-#      DERSELBEN Quelle macht -- Oktett fuer Oktett.
-#      Gegenproben: `nostackgrow` (der Stapel waechst nicht -- der
-#      Uebersetzer MUSS an einem Seitenfehler sterben), `nobigmem` (die
-#      grosse Arena ist aus -- er MUSS an Speichermangel sterben) und
-#      eine ANDERE Quelle, die NICHT zeichengleich herauskommen darf.
-#
-#   5. WOMIT MAN EINE DATEI OEFFNET. Die Tabelle im Kern
-#      (`kernel/ftype.fi`) und der Ausleger (`#!`) in `execve`, gemessen
-#      aus Ring 3 durch `kernel/user/k16.fi`. Der Fall, der die Regel
-#      ueberhaupt zu einer Regel macht: `/tarn.fi` heisst wie
-#      Firn-Quelltext und IST ein Programm -- der Inhalt geht vor.
 #
 # Verwendung:  bash tools/k16/run.sh
 set -uo pipefail
@@ -98,28 +52,6 @@ else
 fi
 FAS="$TMPD/fas"
 
-# ---- 1a. ALLE Programme dieses Userlands gehen durch den Assembler.
-#
-# ACHT MODULE SIND KEINE PROGRAMME DIESER PLATTE, und die Liste war
-# stehengeblieben. `flate`, `tools` und `ulib` standen hier von Anfang
-# an; `appdir`, `nidx`, `pw`, `wlib` und `wlibc` sind seit den Runden
-# K15/K16 dazugekommen und stehen selbst in ihrer ersten Zeile, was sie
-# sind ("eine Bibliothek ohne `u_start`"). Der Binder hat sie trotzdem
-# als Programme gebunden bekommen und ist an genau dem Namen gescheitert,
-# den es in einer Bibliothek nicht gibt: `_F1.u_start`.
-#
-# Das ist ein Fehler DIESES LAEUFERS und keiner des Systems -- er faellt
-# auf `main` (3389fbd) mit denselben fuenf Namen und derselben Zahl
-# ("70, erwartet eq 75"), mit einem eigenen Arbeitsbaum nachgemessen.
-# Repariert ist er, indem die Ausnahmeliste sagt, was wahr ist.
-#
-# NACHTRAG AUS k-merge2: DIE LISTE ALLEIN REICHT NICHT. Sie ist eine
-# Aufzaehlung, und jede Runde bringt neue Bibliotheksmodule mit --
-# `bsec`, `bstore`, `chacha`, `msg`, `nv`, `qs` und `sha` sind seither
-# dazugekommen und standen nicht darin; der Binder ist an genau ihnen
-# gescheitert. Darum steht neben der Liste jetzt die REGEL, die sie
-# ueberfluessig macht: gezaehlt wird, was `fn u_start` hat. Die Liste
-# bleibt als Begruendung stehen.
 mkdir -p "$TMPD/s"
 PROGS=""
 for f in kernel/user/*.fi; do
@@ -128,20 +60,7 @@ for f in kernel/user/*.fi; do
     grep -q "fn u_start" "$f" || continue
     PROGS="$PROGS $n"
 done
-# RUNDE GRUNDLINIE (A-015): `--crt` NUR, WENN DAS PROGRAMM KEIN EIGENES
-# `_start` MITBRINGT.  `fas --crt NAME` HAENGT einen Anlauf an: ".globl
-# _start / _start: ... call NAME".  Im Profil `kernel` ist das richtig --
-# dort steht kein `_start` im Text, sonst kaeme "fas: die Marke _start
-# fehlt".  Im Profil `app` bringt Firns eigener Anlauf `_start` schon in
-# Zeile 3 der .s mit, und dann sagt fas voellig zu Recht
 #
-#     fas: Zeile 290844: diese Marke gibt es zwei '_start'
-#
-# fuer genau die sieben Programme mit Oberflaeche (desktop, taskbar,
-# settings, launcher, explorer, widgetdemo, taskmgr).  Das war KEIN
-# Fehler von fas und keiner der Programme, sondern der Aufruf hier.
-# Gefragt wird die .s selbst, nicht die Liste der sieben Namen -- die
-# naechste Umstellung soll das hier nicht wieder umwerfen.
 gebaut=0; nichtgebaut=""
 for p in $PROGS; do
     if "$FC1" "kernel/user/$p.fi" > "$TMPD/s/$p.s" 2>"$TMPD/s/$p.err"; then
@@ -166,7 +85,6 @@ else
 fi
 num "Programme, die fas gebunden hat" "$gebaut" eq "$ANZ"
 
-# ---- 1b. DIE EIGENTLICHE MESSUNG: gleiches Verhalten wie as+ld.
 printf 'b\na\nb\nc\na\n' > "$TMPD/in.txt"
 VERGLEICH="echo wc sort head tail uniq grep cat seq tr cut basename dirname which true false"
 same=0; diffs=""
@@ -193,7 +111,6 @@ else
     bad "fas und as+ld unterscheiden sich bei:$diffs"
 fi
 
-# ---- 1c. GEGENPROBEN. Ein Assembler, der nie nein sagt, misst nichts.
 printf '.intel_syntax noprefix\n.text\n.globl _start\n_start:\n    mov rax, rbx\n    quatschbefehl rax, rbx\n    ret\n' > "$TMPD/kaputt.s"
 if "$FAS" "$TMPD/kaputt.s" -o "$TMPD/kaputt.bin" --wirt > "$TMPD/kaputt.err" 2>&1; then
     bad "GEGENPROBE: fas hat einen unbekannten Befehl durchgelassen"
@@ -262,26 +179,6 @@ gleich "GEGENPROBE: mit einem MiB weniger Adressraum geht es nicht" \
 gleich "GEGENPROBE: mit acht KiB weniger Stapel geht es nicht" \
     "$(wert "$TMPD/mess.txt" 'weniger_stapel [0-9]+' | grep -oE '[0-9]+$')" "0"
 
-# ================================================== RUNDE MERGE-10
-# `firnc1` SCHWEIGT, WO `firnc0` REDET -- UND DAS IST DER GANZE D-019.
-#
-# Der alte Befund D-019 lautete: "firnc1 bricht still ab, wenn wlib.fi
-# zu gross wird", und daraus wurde eine Zeitbombe gefolgert, die jede
-# Runde treffen kann, die wlib.fi wachsen laesst.
-#
-# ES IST KEINE GROESSENGRENZE. Gemessen in Runde MERGE-10: dieselbe
-# Datei (md5 gleich) uebersetzt sich in `kernel/user/` fehlerfrei und
-# scheitert in `/tmp/` -- weil dort die importierte Nachbardatei
-# `ulib.fi` fehlt. `firnc0` sagt genau das mit Zeilennummer; `firnc1`
-# gibt 2 zurueck und schreibt NULL Oktett.
-#
-# Hier wird beides festgenagelt, damit die Diagnose nicht ein zweites
-# Mal einen halben Tag kostet:
-#   * dass `firnc1` bei fehlendem Import schweigt (der Mangel selbst),
-#   * dass `firnc0` an derselben Stelle den Dateinamen nennt (der Weg
-#     zur Antwort, solange der Mangel besteht).
-# Faellt einer der beiden Punkte, hat sich `vendor/firn` geaendert --
-# und dann gehoert BEFUND-FIRNC1-STILL.md nachgezogen.
 echo "== 2b. der stille Abbruch von firnc1 (D-019) =="
 LEER="$TMPD/leerimport"
 rm -rf "$LEER"; mkdir -p "$LEER"
@@ -301,27 +198,12 @@ gleich "und schreibt dabei KEIN Oktett (das ist der Mangel)" \
 grep -q "ulib.fi" "$LEER/c0.err" \
     && ok "firnc0 NENNT die fehlende Datei -- so kommt man an die Ursache" \
     || bad "firnc0 nennt die fehlende Datei nicht mehr"
-# Und die Gegenprobe, dass es NICHT die Groesse ist: dieselbe Datei an
-# ihrem Platz, mit ihren Nachbarn, geht durch.
-#
-# RUNDE GRUNDLINIE: GEMESSEN WIRD UEBER EINEN BENUTZER VON wlib, NICHT
-# UEBER wlib SELBST. `wlib.fi` ist eine BIBLIOTHEK: keine Profilzeile,
-# kein `u_start`, kein `main`. Einzeln uebersetzt bekommt sie darum das
-# Vorgabeprofil `kernel` und scheitert an fUi
 #
 #     error: the module 'std.rt' belongs to the standard library and
 #     is not available in profile 'kernel'
 #
-# und mit `--profile=app` an der anderen Seite:
-#
 #     error: the program has no function 'main'
 #
-# Die Gegenprobe scheiterte also an genau dem, was sie WIDERLEGEN soll,
-# und behauptete eine Groessengrenze, die es nicht gibt. Niemand baut
-# wlib.fi einzeln -- sie wird importiert. Genau so wird jetzt gemessen:
-# `taskmgr.fi` zieht wlib mit herein, steht in `kernel/user/` bei seinen
-# Nachbarn und traegt `profile app`. Geht das durch, war die Groesse von
-# wlib nie das Hindernis -- und das ist die Aussage dieses Abschnitts.
 UPROF_G=""
 grep -qa '^profile app' kernel/user/taskmgr.fi && UPROF_G=--profile=app
 FIRNLIB="$PWD/lib" "$FC1" -c $UPROF_G -o "$TMPD/wlib-gross.o" \
@@ -340,21 +222,8 @@ fi
 grep -q 'K16_OFF' tools/kernel/memmap.py \
     && ok "der Bereich K16 steht in tools/kernel/memmap.py und wird mitgerechnet" \
     || bad "K16 fehlt in tools/kernel/memmap.py"
-# RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
-# seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
-# einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
-# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
-# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
-# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
-# zu melden, die hier gemessen wird.
 mkdir -p "$TMPD/kern"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kern/" \; )
-# Die Gegenprobe legt K16 auf die Seite des Schriftlesers aus Runde K10
-# (TTF_OFF = 0x3F000). Sie ist BELEGT, also MUSS der Pruefer anschlagen
-# -- ein Pruefer, der nie anschlaegt, rechnet nichts nach. (Nicht auf
-# 0x46000: der Bereich von Runde K15 steht noch in ihrem eigenen Zweig
-# und waere hier eine leere Seite.)
 sed -i 's/^const K16_OFF: u64 = 0x49000$/const K16_OFF: u64 = 0x3F000/' "$TMPD/kern/lib/kstate.fi"
 grep -q '^const K16_OFF: u64 = 0x3F000' "$TMPD/kern/lib/kstate.fi" \
     || bad "die Gegenprobe konnte K16_OFF gar nicht verschieben"
@@ -376,13 +245,6 @@ echo "== 4. der Uebersetzer auf Osum =="
 bash tools/build-kernel.sh "$TMPD/k.mb" >/dev/null 2>&1 \
     || { bad "der Kernel laesst sich nicht bauen"; echo "K16: $pass passed, $fail failed"; exit 1; }
 
-# DIE PROGRAMME FUER OSUM LIEGEN IN EINEM EIGENEN VERZEICHNIS, und das ist
-# kein Ordnungssinn: `$FAS` ist der Assembler FUER DEN WIRT, gebunden mit
-# tools/k11/hostcrt.s. Ein `fas` fuer Osum an derselben Stelle waere ein
-# Programm, das auf 0x40100000 liegt und seine Argumente aus rdi liest --
-# auf dem Wirt gestartet gaebe es die Gebrauchsanweisung aus, und der
-# Vergleich weiter unten haette nichts zu vergleichen. Genau so ist es
-# beim Bau dieser Runde passiert.
 mkdir -p "$TMPD/o"
 bau_osum() { # name
     "$FIRNC" -c -o "$TMPD/o/$1.o" "kernel/user/$1.fi" > "$TMPD/o/$1.err" 2>&1 || return 1
@@ -394,11 +256,6 @@ for p in sh cat echo hello fas firun k16; do
     bau_osum "$p" || { bad "$p laesst sich nicht fuer Osum bauen"; sed 's/^/        /' "$TMPD/o/$p.err" | head -5; }
 done
 
-# `firnc` FUER OSUM: dasselbe `bin/firnc1.fi` wie auf dem Wirt, nur gegen
-# `kernel/user/user.ld` gebunden -- Abbild ab 0x40100000 statt 0x400000.
-# Kein crt.s: `firnc1.fi` hat ein `fn main`, und dafuer erzeugt firnc
-# sein `_start` selbst (genau deshalb musste der Kern den Argumentblock
-# auf den Stapelzeiger legen, siehe kernel/elf.fi).
 FIRNQ=""
 for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn" "$ROOT/../../../firn"; do
     [ -n "$k" ] && [ -f "$k/bin/firnc1.fi" ] && FIRNQ=$(cd "$k" && pwd) && break
@@ -415,12 +272,6 @@ else
     fi
 fi
 
-# DIE QUELLE, DIE OSUM UEBERSETZEN SOLL. Sie steht hier im Skript und
-# nicht in einer Datei des Repos, damit ihr Inhalt UND IHR NAME auf
-# beiden Seiten dieselben sind -- der Pfad steht in den Panikmeldungen,
-# die firnc nach `.rodata` legt, und ein anderer Pfad ist ein anderes
-# Programm. Genau daran ist der erste Vergleich dieser Runde gescheitert
-# (docs/ROUNDK16.md).
 mkdir -p "$TMPD/q"
 cat > "$TMPD/q/probe.fi" <<'FI'
 fn schreib(fd: u64, p: u64, n: u64) -> u64 {
@@ -540,13 +391,6 @@ G=$(grep -a -c 'k16: fopen_c = 42' "$TMPD/open.txt" 2>/dev/null || true)
 num "und der Beendigungscode des uebersetzten Programms kommt durch (42)" "${G:-0}" ge 1
 K=$(grep -a -c 'k16: fopen_c = 70' "$TMPD/open.txt" 2>/dev/null || true)
 num "GEGENPROBE: eine .fi, die NICHT uebersetzt, endet mit 70 statt mit 0" "${K:-0}" ge 1
-# WAS DER NUTZER WIRKLICH LIEST -- und was er NICHT liest.
-# `firnc1` schreibt bei einem Fehler keine Zeile: nicht auf Deskriptor 1,
-# nicht auf Deskriptor 2, gemessen am 26.08.2026. Es gibt einen Code
-# zurueck und sonst nichts. `firun` uebersetzt diesen Code in einen Satz,
-# und DAS ist es, was ein Mensch nach einem Doppelklick zu sehen bekommt.
-# Die Grenze steht so in docs/ROUNDK16.md: WELCHER ART der Fehler ist,
-# steht da -- WO er steht, nicht.
 hat "$TMPD/open.txt" "firun: der Übersetzer lehnt ab, Code 1" \
     "GEGENPROBE: und der Nutzer LIEST, warum -- der Grund steht auf dem Schirm"
 hat "$TMPD/open.txt" "im Quelltext steht ein Fehler" \

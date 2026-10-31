@@ -1,56 +1,8 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/customres/run.sh -- DIE ABNAHME DER RUNDE CUSTOMRES.
-#
-# DIE FRAGE, DIE DIESE RUNDE BEANTWORTET, war: "Kann man auch
-# benutzerdefinierte Aufloesungen erstellen wie im NVIDIA-Control-Panel?"
-#
-# Vor dieser Runde konnte man das NICHT. `vmode.set_mode` verlangte, dass
-# die Zahlen in der Liste stehen, die `probe` aus zweiundzwanzig
-# AUFGESCHRIEBENEN Kandidaten gesiebt hatte -- 1400x1050 stand dort nie,
-# obwohl die Karte es kann, und die Antwort war E_NOMODE.
-#
-# WAS HIER GEMESSEN WIRD, und in dieser Reihenfolge:
-#
-#   1. DIE QUELLEN. Die Gruende (CW_*) stehen in ZWEI Dateien -- im Kern
-#      und im Programm in Ring 3, das sie in Saetze uebersetzt. Eine
-#      benannte Doppelung mit einer Zusage darauf ist etwas anderes als
-#      eine vergessene. Dazu die Aufrufnummern, die kdata-Karte und die
-#      feste Satzbreite von /system/BILDMODUS.
-#   2. BAUEN, mit beiden Uebersetzern.
-#   3. EINE EIGENE AUFLOESUNG, IM BILD. 1400x1050 steht in KEINER
-#      Kandidatenliste -- das wird im Quelltext nachgesehen -- und das
-#      Bildschirmfoto ist danach 1400 x 1050 Bildpunkte gross.
-#   4. DIE DREI SCHRANKEN, JEDE MIT IHRER ZAHL. Das ist der Kern der
-#      Runde: "geht nicht" ist wertlos. Es muss dastehen, WELCHE
-#      Schranke und MIT WELCHER ZAHL -- und der Bildschirm muss danach
-#      unveraendert dastehen.
-#   4b. DIESELBE ANFRAGE AN EINE KLEINERE KARTE. Derselbe Kern, dieselbe
-#      Befehlszeile, nur `vgamem_mb=8`: derselbe Modus wird jetzt aus
-#      einem ANDEREN Grund und mit einer ANDEREN Zahl abgelehnt. Eine
-#      Fehlermeldung, die sich mit der Maschine aendert, ist eine
-#      Messung; eine, die immer gleich lautet, ist ein Text.
-#   5. DIE FRIST, OHNE JEDES ZUTUN. Ein Programm in Ring 3 stellt eine
-#      eigene Aufloesung ein und legt sich dann SCHLAFEN. Es ruft danach
-#      keinen einzigen Bildschirmaufruf mehr auf. Was zurueckschaltet,
-#      ist die Leerlaufaufgabe -- oder es schaltet niemand zurueck.
-#   6. DER NEUSTART. DIESELBE Platte, fuenf Starts hintereinander: setzen
-#      und bestaetigen - Neustart, der Modus steht wieder - zwei Starts
-#      ohne Bestaetigung - der Zaehler ist voll, der Startmodus bleibt.
-#   7. RING 3. Zehn Zusagen ueber die Aufrufschwelle, und der SATZ, den
-#      ein Mensch liest.
-#   8. DIE GEGENPROBE. DERSELBE Kern ohne das Wort `disp`: keine eigene
-#      Aufloesung, keine gespeicherte, und jede neue Zahl ist ein Strich.
-#   9. DIE GRENZE, EHRLICH. Wo sie liegt, warum sie dort liegt, und was
-#      sich aendert, wenn die Karte mehr Bildspeicher hat.
 #
 # Verwendung:  bash tools/customres/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-# RUNDE MARKE: der Produktname kommt aus `marke.conf` (geschlagen von
-# OSUM_MARKE_*), nicht aus dieser Datei. Eine Zusage auf einen fest
-# getippten Namen waere nach der ersten Umbenennung eine Zusage auf
-# etwas, das es nicht mehr gibt -- sie ginge auf und pruefte nichts.
 . tools/lib/marke.sh
 marke_laden . || exit 1
 ROOT=$(pwd)
@@ -78,9 +30,6 @@ gleich() { if [ "$2" = "$3" ]; then ok "$1 ($3)"; else bad "$1 -- soll '$2', ist
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hat_nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 
-# Ein Feld aus einer `disp: eigen ...`-Zeile. Die Nummer waehlt, welche
-# der Zeilen -- ein Lauf verlangt mehrere eigene Aufloesungen
-# hintereinander, und jede hat ihre eigene Begruendung.
 ew() { # datei nummer name
     grep -a '^disp: eigen ' "$1" 2>/dev/null | sed -n "$2p" \
         | grep -ao "$3=[0-9]*" | head -1 | sed 's/.*=//' | tr -d '\r\000'; }
@@ -107,38 +56,18 @@ bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschla
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "CUSTOMRES: skipped, qemu-system-x86_64 ist nicht da"; exit 0
 fi
-# `-accel kvm`, wo es geht. Das ist kein Schoenheitsfehler: unter TCG
-# dauert ein Lauf mit einer Frist von fuenfzehn Sekunden und zweiundzwanzig
-# Sekunden Schlaf laenger als das Zeitlimit, das ein Testlaeufer
-# vernuenftigerweise setzt.
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 #
-# Bis zum Merge von mergeline stand hier die eigene Wahl:
-#     ACCEL=""; [ -w /dev/kvm ] && ACCEL="-accel kvm"
-# Die zentrale Fassung kann mehr: sie kennt die Ausnahmeliste
-# (tools/lib/accel-ausnahmen.txt) und $OSUM_ACCEL. Wichtig fuer
-# GENAU DIESE Runde, weil zwei ihrer Abschnitte an einer FRIST
-# haengen (fuenfzehn Sekunden) -- misst der Beschleuniger die Zeit
-# anders, gehoert der Abschnitt in die Liste und nicht in einen
-# groesseren Zeitpuffer.
 ACCEL="${QEMU_X86#qemu-system-x86_64 }"
 
 echo "== 1. die Quellen: zwei Dateien, eine Legende =="
 
-# DIE GRUENDE STEHEN ZWEIMAL, und das ist Absicht: `kernel/vmode.fi`
-# vergibt sie, `kernel/user/dispctl.fi` macht Saetze daraus und laeuft in
-# Ring 3, wo es den Kern nicht einbinden kann. Laufen die beiden Listen
-# auseinander, schreibt das Programm einen anderen Satz, als der Kern
-# gemeint hat -- und das faellt niemandem auf, weil beide Seiten fuer
-# sich stimmig bleiben.
 for r in CW_OK CW_REGS CW_VRAM CW_LIMIT CW_DEPTH CW_UNSINN CW_NOCARD; do
     a=$(grep -aE "^const $r: u64 = " kernel/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
     b=$(grep -aE "^const $r: u64 = " kernel/user/dispctl.fi | sed 's/.*= //; s/ *\/\/.*//')
     if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$r steht im Kern und in Ring 3 gleich ($a)"
     else bad "$r: vmode.fi='$a', dispctl.fi='$b'"; fi
 done
-# Und die Legende von `cand_why` (Runde DISPLAY) benutzt DIESELBEN
-# Nummern -- eine Legende fuer beide, sonst waere die Doku eine Falle.
 gleich "Grund 1 heisst hier wie dort 'die Register haben abgelehnt'" "1" \
     "$(grep -aE '^const CW_REGS' kernel/gfx/vmode.fi | sed 's/.*= //')"
 gleich "Grund 2 heisst hier wie dort 'zu gross fuer den Bildspeicher'" "2" \
@@ -146,17 +75,9 @@ gleich "Grund 2 heisst hier wie dort 'zu gross fuer den Bildspeicher'" "2" \
 gleich "Grund 3 heisst hier wie dort 'dieser Kernel kann es nicht abbilden'" "3" \
     "$(grep -aE '^const CW_LIMIT' kernel/gfx/vmode.fi | sed 's/.*= //')"
 
-# Die neuen Aufrufnummern bleiben im Zehner der Runde DISPLAY
-# (1810..1819) -- es sind KEINE neuen Nummern dazugekommen, nur neue
-# FELDER in den drei vorhandenen.
 eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/sys/sys.fi | wc -l | tr -d ' ')
 gleich "diese Runde braucht keine neue Aufrufnummer (weiter genau drei)" "3" "$eigen"
 
-# /system/BILDMODUS: die Satzbreite im Quelltext und das Muster, aus dem
-# der Satz gebaut wird, muessen zusammenpassen. Eine Datei, deren Laenge
-# sich aendert, braucht zwei Schreibvorgaenge -- und der Zaehler, der
-# einen Stromausfall ueberleben soll, darf den Zustand dazwischen nicht
-# haben. Der Absatz dazu steht in kernel/dispsave.fi.
 sl=$(grep -aE '^const LEN: u64 = ' kernel/gfx/dispsave.fi | sed 's/.*= //')
 must=$(python3 - <<'PY'
 import re, io
@@ -196,13 +117,6 @@ done
 [ "$rc" = 0 ] && ok "der Kern und $(echo $PROGS | wc -w) Programme sind gebaut"
 [ -f "$TMPD/k0.mb" ] || { echo "CUSTOMRES: ohne Kern geht nichts weiter"; exit 1; }
 
-# Das Bedienfeld mit der neuen Seite. Nicht auf die Platte -- dazu
-# braeuchte es einen laufenden Fensterserver --, sondern damit ein Fehler
-# in den drei neuen Eingabefeldern auffaellt, bevor jemand sie oeffnet.
-# RUNDE GRUNDLINIE (A-016): Profil aus der Wurzeldatei LESEN, und im
-# Profil `app` mit -c und OHNE crt.o. Ohne das stand hier
-#     ld: input file '.../eins.o' is the same as output file
-# weil firnc im Profil `app` ohne -c gleich zu binden versucht.
 UPROF=""; UCRT="$TMPD/crt.o"
 grep -qa '^profile app' kernel/user/settings.fi && { UPROF=--profile=app; UCRT=""; }
 if "$FIRNC" $UPROF -c kernel/user/settings.fi -o "$TMPD/eins.o" > "$TMPD/eins.err" 2>&1 \
@@ -233,14 +147,6 @@ python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" /bin/ $MKARGS \
 
 GRUND="nokbd nosched noproc nofs noring3"
 
-# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
-#
-# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
-# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
-# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
-# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
-# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
-# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
 VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
 
 lauf() { # name kommandozeile [zeitlimit] [vga-argumente]
@@ -274,8 +180,6 @@ foto() { # name kommandozeile
     rm -f "$sock"
 }
 
-# Ein Lauf mit einer Platte, die BESTEHEN BLEIBT -- das ist der ganze
-# Sinn von Abschnitt 6: ein Neustart auf demselben Datentraeger.
 lauf_platte() { # name kommandozeile abbild
     local name=$1 zeile=$2 img=$3
     rm -f "$TMPD/$name.txt"
@@ -290,8 +194,6 @@ lauf_platte() { # name kommandozeile abbild
 
 echo "== 3. eine eigene Aufloesung -- und zwar im Bild =="
 
-# ZUERST DER NACHWEIS, DASS 1400x1050 WIRKLICH NEU IST. Ohne ihn misst
-# dieser Abschnitt nur, dass `set_mode` weiterhin funktioniert.
 if grep -aq '(1400 << 16)' kernel/gfx/vmode.fi; then
     bad "1400x1050 steht in der Kandidatenliste -- dann ist es keine EIGENE Aufloesung"
 else
@@ -306,8 +208,6 @@ gleich "kein Grund, also keine Schranke gegriffen" "0" "$(ew "$E" 1 why)"
 gleich "und die Zahl ist die Groesse des Bildes in Oktetten" "5880000" "$(ew "$E" 1 num)"
 gleich "der Kernel zaehlt eine eigene Aufloesung in seiner Liste" "1" "$(ew "$E" 1 custom)"
 hat "$E" "panel=1400x1050" "die Tafel steht auf den eingegebenen Zahlen"
-# UND DAS FOTO. Das ist die Zusage: nicht "der Kernel sagt 1400x1050",
-# sondern "QEMU zeigt 1400 x 1050 Bildpunkte".
 schau "das Foto ist 1400x1050 -- der Modus steht WIRKLICH" \
     size "$TMPD/eigen.ppm" 1400 1050
 schau "das Pruefbild ist neu gezeichnet, Feld 1 ist rot" \
@@ -322,30 +222,13 @@ gleich "und die neun eigenen dieser Runde" "9" \
     "$(grep -ao 'disp: custom selftest [0-9]*' "$E" | head -1 | grep -o '[0-9]*$')"
 behalte "$TMPD/eigen.ppm" eigen-1400x1050
 
-# ============================================== 4. die drei Schranken
-
 echo "== 4. abgelehnt -- aber MIT Schranke und MIT Zahl =="
-# RUNDE KLEINKRAM (14.09.2026), A-018: `vgamem_mb=64` fuer DIESEN Lauf.
-# Die erste Schranke unten ist die der FENSTERPLAETZE, und sie ist erst
-# messbar, wenn die Karte davor NICHT schon abgelehnt hat. Mit den 16
-# MiB der Vorgabe stuende die Bildspeicherschranke (Grund 2) im Weg:
-# 3840x2160x4 = 33177600 > 16777216. Abschnitt 9 unten geht denselben
-# Weg und begruendet ihn dort ausfuehrlich.
 VGA_STD="-device VGA,edid=off,vgamem_mb=64" \
     foto schranken "gfx disp dispeigenbad nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber -- eine abgelehnte Zahl haelt den Kernel NICHT an" "$RC" eq 21
 S="$TMPD/schranken.txt"
 gleich "drei Anfragen, drei Antworten" "3" "$(grep -ac '^disp: eigen ' "$S")"
 
-# (a) DIE KACHELGRENZE DIESES KERNELS. 3840x2160x4 sind 33 177 600
-#     Oktette; die Karte hat hier 67 108 864 und nimmt sie an -- was
-#     NICHT traegt, sind die Fensterplaetze (29 360 128).
-#
-#     RUNDE KLEINKRAM (14.09.2026), A-018: hier stand 2560x1440 /
-#     14745600. Das war richtig gegen WIN_SLOTS=8 (maplimit 14680064).
-#     Commit 758c3c6 hat WIN_SLOTS auf 16 gesetzt -- mit Grund, siehe
-#     kernel/kgui.fi an der geaenderten Stelle -- und seither PASST
-#     2560x1440. Der Kern nahm es zu Recht an; falsch war die Erwartung.
 gleich "1. Schranke: dieser Kernel kann es nicht einblenden (Grund 3)" "3" "$(ew "$S" 1 why)"
 gleich "   und die genannte Zahl ist GENAU das, was das Bild braucht" \
     "33177600" "$(ew "$S" 1 num)"
@@ -355,24 +238,16 @@ num "   und KLEINER als der Bildspeicher der Karte -- die Karte war es also nich
     "33177600" lt "$(ew "$S" 1 vram)"
 gleich "   der Fehlerwert nach aussen ist E_LIMIT (8) und nicht E_NOMODE" "8" "$(ew "$S" 1 rc)"
 
-# (b) DIE KARTE SELBST. 1366 ist kein Vielfaches von acht; QEMU macht
-#     daraus 1360 und laesst das stehen -- und GENAU diese Zahl meldet
-#     der Kernel zurueck, nicht den Ankerwert.
 gleich "2. Schranke: die Register der Karte nehmen die Zahl nicht (Grund 1)" \
     "1" "$(ew "$S" 2 why)"
 gleich "   und es steht da, was die Karte STATTDESSEN behalten hat" "1360" "$(ew "$S" 2 num)"
 gleich "   der Fehlerwert ist E_SETFAIL (4)" "4" "$(ew "$S" 2 rc)"
 
-# (c) DIE FARBTIEFE. Der Grund dafuer hat sich in dieser Runde nicht
-#     geaendert und steht in docs/DISPLAY.md 8.1.
 gleich "3. Schranke: diese Farbtiefe zeichnet der Kernel nicht (Grund 4)" \
     "4" "$(ew "$S" 3 why)"
 gleich "   und die Zahl ist die verlangte Tiefe" "16" "$(ew "$S" 3 num)"
 gleich "   der Fehlerwert ist E_DEPTH (6)" "6" "$(ew "$S" 3 rc)"
 
-# UND DER BILDSCHIRM STEHT NOCH. Das ist die Zusage, ohne die der Rest
-# gefaehrlich waere: eine abgelehnte Anfrage darf keinen schwarzen
-# Schirm hinterlassen -- auch nicht die zweite und dritte hintereinander.
 hat "$S" "panel=800x600" "nach drei abgelehnten Anfragen steht die Tafel unveraendert"
 gleich "und KEIN Wechsel hat stattgefunden" "0" \
     "$(grep -a -m1 '^disp: sw=' "$S" | grep -ao 'sw=[0-9]*' | sed 's/sw=//')"
@@ -387,26 +262,14 @@ schau_nicht "ein schwarzer Schirm haette hier kein Rot" \
 behalte "$TMPD/schranken.ppm" abgelehnt-800x600
 
 echo "== 4b. dieselbe Zahl an eine KLEINERE Karte =="
-# DERSELBE KERN, DIESELBE BEFEHLSZEILE, nur ein kleinerer Bildspeicher.
-# 2560x1440 braucht 14 745 600 Oktette; mit 8 MiB hat die Karte 8 388 608.
-# Der Grund MUSS sich von 3 (Kachelgrenze) auf 2 (Bildspeicher) aendern,
-# denn jetzt ist wirklich die Karte zu klein -- und die genannte Zahl
-# bleibt dieselbe, weil das Bild dieselbe Groesse hat.
 rc=$(lauf klein "gfx disp dispeigenbad $GRUND" 180 "-device VGA,edid=off,vgamem_mb=8")
 num "der Lauf endet sauber" "$rc" eq 21
 K="$TMPD/klein.txt"
 gleich "die kleinere Karte meldet 8 MiB" "8388608" "$(ew "$K" 1 vram)"
 gleich "und JETZT ist der Bildspeicher der Grund (2 statt 3)" "2" "$(ew "$K" 1 why)"
-# RUNDE KLEINKRAM (14.09.2026), A-018: 14745600 -> 33177600, weil die
-# erste Anfrage des Abschnitts `dispeigenbad` jetzt 3840x2160 ist und
-# nicht mehr 2560x1440 (Begruendung in kernel/kgui.fi). Die Zusage ist
-# unveraendert: dieselbe Anfrage an eine KLEINERE Karte muss denselben
-# Zahlenwert nennen und nur den GRUND wechseln (3 -> 2).
 gleich "die Zahl ist unveraendert das, was das Bild braucht" "33177600" "$(ew "$K" 1 num)"
 gleich "der Fehlerwert nach aussen ist E_VRAM (7)" "7" "$(ew "$K" 1 rc)"
 ok "eine Begruendung, die sich mit der Maschine aendert, ist eine Messung"
-
-# ============================================== 5. die Frist ohne Zutun
 
 echo "== 5. die Frist laeuft ohne JEDES Zutun ab =="
 cp -f "$TMPD/root.img" "$TMPD/frist.img"
@@ -418,20 +281,14 @@ F="$TMPD/frist.txt"
 hat "$F" "dispctl: accepted" "ein Programm in Ring 3 hat eine eigene Aufloesung gesetzt"
 gleich "direkt danach steht die Tafel auf 1400" "1400" "$(uwn "$F" panelw 1)"
 gleich "und eine Frist laeuft" "1" "$(uwn "$F" pending 1)"
-# ZWISCHEN DIESEN BEIDEN ZEILEN LIEF NUR `sleep`. Das Programm hat
-# danach KEINEN Bildschirmaufruf mehr gemacht -- `sleep` kennt keinen.
-# Was hier zurueckgeschaltet hat, war die Leerlaufaufgabe.
 gleich "nach 22 Sekunden Schlaf steht die alte Tafel wieder da" "800" "$(uwl "$F" panelw)"
 gleich "die Frist ist zu" "0" "$(uwl "$F" pending)"
 gleich "der Kernel hat von SELBST zurueckgeschaltet" "1" "$(uwl "$F" reverts)"
 gleich "und zwei Wechsel gezaehlt (hin und zurueck)" "2" "$(uwl "$F" switches)"
 gleich "nichts wurde bestaetigt" "0" "$(uwl "$F" confirms)"
-# Die Gegenprobe zum WEG: es gab in diesem Lauf keinen Aufruf, der `poll`
-# haette ausloesen koennen -- ausser dem der Leerlaufaufgabe.
 hat kernel/tasks.fi "vmode.poll" "der Rueckweg steht in der Leerlaufaufgabe (tasks.fi)"
 hat_nicht kernel/user/sleep.fi "DISPSET" "und /bin/sleep ruft keinen Bildschirmaufruf"
 
-# Und dasselbe im Bild: nach der Frist steht wieder der Startmodus da.
 foto zurueck "gfx disp dispeigenfrist nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber" "$RC" eq 21
 Z="$TMPD/zurueck.txt"
@@ -491,8 +348,6 @@ S5="$TMPD/s5.txt"
 hat "$S5" "disp: save none" "der Satz ist stillgelegt -- kein zweiter Rueckfall, keine Schleife"
 gleich "und die Tafel bleibt beim Startmodus" "800" "$(uwl "$S5" panelw)"
 
-# UND DIE GEGENPROBE ZUM ZAEHLER: wer bestaetigt, faengt wieder bei null
-# an. Sonst waere die Bestaetigung eine Geste.
 cp -f "$TMPD/root.img" "$TMPD/dauer2.img"
 rc=$(lauf_platte t1 \
     "osum gfx disp nokbd nosched noproc script=dispctl custom 1400 1050;dispctl keep" \
@@ -516,12 +371,6 @@ R="$TMPD/ring3.txt"
 gleich "zehn Zusagen ueber die Aufrufschwelle" "10" \
     "$(grep -ao 'dispctl: testc [0-9]*' "$R" | head -1 | grep -o '[0-9]*$')"
 cp -f "$TMPD/root.img" "$TMPD/r4.img"
-# RUNDE KLEINKRAM (14.09.2026), A-018: 2560x1440 -> 3840x2160 und
-# `vgamem_mb=64`, aus demselben Grund wie in Abschnitt 4 oben --
-# WIN_SLOTS ist seit 758c3c6 16, 2560x1440 passt und wird angenommen.
-# Dieser Abschnitt will aber den SATZ pruefen, den ein abgelehnter
-# Wunsch hinterlaesst, und braucht dafuer einen, der wirklich abgelehnt
-# wird.
 rc=$(VGA_STD="-device VGA,edid=off,vgamem_mb=64" lauf_platte satz \
     "osum gfx disp nokbd nosched noproc script=dispctl custom 3840 2160;dispctl custom 1366 768" \
     "$TMPD/r4.img")
@@ -533,9 +382,6 @@ hat "$A" "29360128" "und die Zahl, die ginge"
 hat "$A" "2-MiB window slots" "und wovon die Schranke kommt"
 hat "$A" "the card does not accept this number" "die zweite Schranke nennt sich anders"
 hat "$A" "multiple of" "und gibt den Hinweis, der wirklich weiterhilft"
-# UND DIE DRITTE: eine Zahl, die kein Bildschirm ist. Sie nennt nicht nur
-# die falsche Zahl, sondern den Bereich -- sonst weiss der Benutzer zwar,
-# welche seiner beiden Zahlen es zerreisst, aber nicht, wohin damit.
 cp -f "$TMPD/root.img" "$TMPD/r5.img"
 rc=$(lauf_platte unsinn \
     "osum gfx disp nokbd nosched noproc script=dispctl custom 4 4" "$TMPD/r5.img")
@@ -566,17 +412,11 @@ gleich "und der neue Grund ist ein Strich und keine Null" "-" "$(uw "$O3" custwh
 gleich "auch die Zahl" "-" "$(uw "$O3" custnum)"
 gleich "auch der gespeicherte Modus" "-" "$(uw "$O3" saveok)"
 
-# ============================================== 9. die Grenze, ehrlich
-
 echo "== 9. wo die Grenze wirklich liegt =="
 rc=$(lauf gross "gfx disp $GRUND" 180 "-device VGA,edid=off,vgamem_mb=64")
 num "der Lauf endet sauber" "$rc" eq 21
 G="$TMPD/gross.txt"
 gleich "mit 64 MiB Bildspeicher meldet die Karte mehr" "65536" "$(kw "$G" vram)"
-# DIE ENTSCHEIDENDE MESSUNG DIESES ABSCHNITTS. Mit 16 MiB Bildspeicher
-# lehnen QEMUs Register 3840x2160 ab (Grund 1) -- weil ihre eigene
-# Registerpruefung den Bildspeicher mitprueft. Mit 64 MiB NEHMEN sie es
-# an, und uebrig bleibt genau eine Schranke: diese hier.
 gleich "3840x2160 scheitert jetzt NUR noch an den Fensterplaetzen dieses Kernels" "3" \
     "$(grep -a '^disp: out   3840x2160' "$G" | grep -ao 'reason=[0-9]*' | sed 's/reason=//')"
 rc=$(lauf klein16 "gfx disp $GRUND" 180 "$VGA_STD")
@@ -587,14 +427,6 @@ gleich "mit 16 MiB war es noch die Karte, die ablehnte" "1" \
 ok "derselbe Kern, dieselbe Zeile, zwei Gruende -- die Schranken sind unabhaengig gemessen"
 ka=$(grep -a -m1 '^disp: kacheln' "$K16")
 [ -n "$ka" ] && ok "die Belegung der Fensterplaetze: $ka" || bad "keine Belegung gemeldet"
-# RUNDE KLEINKRAM (14.09.2026), A-018: 8 -> 16. Das ist keine
-# aufgeweichte Zusage, sondern der nachgezogene Wert: WIN_SLOTS steht
-# seit Commit 758c3c6 auf 16 (kernel/fb.fi:574), damit 3440x1440 an
-# einem Stueck haengt und trotzdem GERAETE_FREI Plaetze fuer Netz,
-# Platte, USB und Ton bleiben. Die Zusage selbst ist unveraendert: es
-# wird geprueft, dass der laengste zusammenhaengende Bereich KLEINER
-# ist als die Gesamtzahl -- also dass belegte Plaetze wirklich Loecher
-# reissen und nicht wegdefiniert werden.
 gleich "sechzehn Plaetze zu 2 MiB sind 32 MiB Fenster" "16" \
     "$(echo "$ka" | grep -ao 'alle=[0-9]*' | sed 's/.*=//')"
 num "und davon traegt der laengste zusammenhaengende Bereich weniger" \

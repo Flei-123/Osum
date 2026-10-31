@@ -1,67 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/ahci/run.sh -- DIE PLATTE, DIE EIN ECHTER PC HAT.
-#
-# ==================================================================
-# WARUM ES DIESEN ABSCHNITT GIBT
-# ==================================================================
-#
-# Bis zu dieser Runde kannte Osum drei Wege zu einem Blockgeraet: ATA
-# PIO ueber die Ports von 1986, NVMe ueber M.2, und virtio -- das es nur
-# in einer virtuellen Maschine gibt. Was fehlte, ist der haeufigste Fall
-# auf einem gewoehnlichen PC seit 2010: eine SATA-SSD an einem
-# Controller im nativen AHCI-Modus.
-#
-# Auf so einem Rechner haette Osum KEINE PLATTE GEFUNDEN. Kein Start,
-# keine Installation. Das ist kein Schoenheitsfehler, sondern einer von
-# zwei harten Blockern vor dem ersten Lauf auf echter Hardware.
-#
-# ==================================================================
-# WAS HIER GEMESSEN WIRD -- UND WOMIT ES SICH WIDERLEGEN LIESSE
-# ==================================================================
-#
-#   1. DER CONTROLLER WIRD UEBER DEN BUS GEFUNDEN, nicht ueber eine
-#      Tabelle im Kernel: PCI-Klasse 01, Unterklasse 06,
-#      Programmierschnittstelle 01.
-#   2. EIN SEKTOR HIN UND ZURUECK. Ein Muster geschrieben, gelesen,
-#      verglichen -- und der Lesepuffer steht vorher auf einem ANDEREN
-#      Muster (`pre=0`). Ohne diese zweite Zahl waere ein Treiber
-#      gruen, der gar nichts tut und beide Puffer stehen laesst.
-#   3. ACHT SEKTOREN IN EINEM BEFEHL. Das ist die PRDT-Zeile mit der
-#      Laenge MINUS EINS; wer sie falsch hat, liest genau einen Sektor
-#      zu wenig. Das Muster ist je Sektor ein anderes, sonst faellt es
-#      nicht auf.
-#   4. DAS DATEISYSTEM DARAUF, ohne eine geaenderte Zeile in `fs.fi`.
-#      Zum vierten Mal dieselbe Zusage wie bei DEV_NVME (K2), DEV_ATA1
-#      (K14) und DEV_USB (K17).
-#   5. UND DER WIRT LIEST DAS ABBILD NACH. Das ist der Punkt, an dem
-#      der Kernel nicht mehr sein eigener Zeuge ist: die Oktette
-#      stehen hinterher in der Datei auf DIESEM Rechner, an den
-#      Sektornummern, die der Treiber genannt hat -- und der Sektor
-#      DAHINTER ist unberuehrt.
-#
-#   VIER GEGENPROBEN, in denen die Messung zusammenbricht:
-#      a) CONTROLLER OHNE PLATTE. Ein AHCI-Chip ohne angehaengtes
-#         Laufwerk muss `why=8` melden (kein Port mit einer
-#         ATA-Kennung) und darf keine Platte erfinden.
-#      b) KEIN AHCI, SONDERN IDE. Auf der Maschine `pc` meldet sich
-#         der Chipsatz mit Klasse 01:01. Das ist genau der Fall
-#         "Firmware steht auf IDE/Compatibility", und der Treiber muss
-#         `mode=ide` sagen statt stumm nichts zu finden.
-#      c) OHNE BUSMASTER-BIT. Der Controller darf dann Register
-#         beantworten, aber nichts aus dem Speicher holen. Jede
-#         Uebertragung muss FEHLSCHLAGEN, das Geraet muss danach als
-#         weg gelten (`dead=1 alive=0`) -- und das Abbild auf dem Wirt
-#         muss LEER bleiben. Das ist der Beweis, dass die Oktette
-#         wirklich per DMA gewandert sind und nicht durch den
-#         Prozessor.
-#      d) DERSELBE LAUF UNTER TCG IST AUCH GRUEN. Ohne diese Haelfte
-#         waere nicht gesagt, ob KVM etwas repariert oder nur etwas
-#         anderes tut.
-#
-# ALLES LAEUFT UNTER -accel kvm, ALSO AUF DER ECHTEN CPU. Was hier
-# kracht, kracht auch auf einem echten PC -- das ist der Sinn der
-# Sache. Ohne /dev/kvm faellt der Laeufer auf TCG zurueck und sagt das.
 #
 # Aufruf:  bash tools/ahci/run.sh
 set -uo pipefail
@@ -83,9 +20,6 @@ fi
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
-# Der Beschleuniger. KVM ist die echte CPU und damit die Messung, um die
-# es geht; ohne /dev/kvm wird TCG genommen und das steht in der Ausgabe,
-# statt dass ein Lauf ohne Virtualisierung als voller Beweis durchgeht.
 ACC=tcg
 CPUARGS=()
 if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
@@ -112,9 +46,6 @@ else
     bad "der Kernel fehlt"
 fi
 
-# Die Speicherkarte. Diese Runde nimmt fuenf Seiten aus `kdata`, und
-# genau an dieser Stelle hat das Projekt viermal dieselbe Kollision
-# gebaut (siehe den Kopf von `tools/kernel/memmap.py`).
 if python3 tools/kernel/memmap.py >"$TMPD/map.txt" 2>&1; then
     ok "die Speicherkarte von kdata ist kollisionsfrei -- $(cat "$TMPD/map.txt")"
 else
@@ -135,15 +66,11 @@ lauf() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 || RC=$?
 }
 
-# Ein FRISCHES Abbild je Fall. Zwei Gruende: ein Fall darf nicht sehen,
-# was der Fall davor geschrieben hat, und QEMU nimmt eine Schreibsperre
-# darauf -- ein abgebrochener Lauf blockierte sonst den naechsten.
 bild() {
     rm -f "$TMPD/$1.img"
     dd if=/dev/zero of="$TMPD/$1.img" bs=1M count=8 2>/dev/null
 }
 
-# Die Argumente fuer "ein AHCI-Controller mit einer Platte daran".
 platte() {
     printf '%s\n' -drive "file=$TMPD/$1.img,format=raw,if=none,id=d0" \
         -device "ahci,id=a0" -device "ide-hd,drive=d0,bus=a0.0"
@@ -188,8 +115,6 @@ zahl() { # BESCHREIBUNG IST OP SOLL
     fi
 }
 
-# =========================================== 1. der Controller am Bus
-
 echo
 echo "== 1. der Controller wird auf dem BUS gefunden, nicht im Kernel =="
 
@@ -209,15 +134,11 @@ SZ=$(feld a '^ahci: blocks=' lbasz)
 PRT=$(feld a '^ahci: blocks=' ports)
 SLT=$(feld a '^ahci: blocks=' slots)
 BM=$(feld a '^ahci: blocks=' master)
-# 8 MiB durch 512 sind 16384 Sektoren. Die Zahl steht NICHT im Kernel,
-# sie kommt aus IDENTIFY DEVICE -- also aus dem Geraet.
 zahl "1.3 die Groesse kommt aus IDENTIFY DEVICE (8 MiB = 16384 Sektoren)" "$BLK" eq 16384
 zahl "1.4 die Sektorgroesse kommt aus IDENTIFY DEVICE" "$SZ" eq 512
 zahl "1.5 genau ein Port hat eine Verbindung" "$PRT" eq 1
 zahl "1.6 der Controller meldet seine Befehlsplaetze" "$SLT" ge 1
 zahl "1.7 das Busmaster-Bit steht" "$BM" eq 1
-
-# ================================== 2. ein Sektor und acht Sektoren
 
 echo
 echo "== 2. Lesen und Schreiben gegen bekannte Daten =="
@@ -226,8 +147,6 @@ W1=$(feld a '^ahci: one ' wr); R1=$(feld a '^ahci: one ' rd)
 P1=$(feld a '^ahci: one ' pre); S1=$(feld a '^ahci: one ' same)
 zahl "2.1 ein Sektor geschrieben" "$W1" eq 1
 zahl "2.2 derselbe Sektor gelesen" "$R1" eq 1
-# DIE GEGENPROBE IM SELBEN LAUF: vor dem Lesen sind die beiden Puffer
-# VERSCHIEDEN. Waere pre schon 1, sagte same=1 gar nichts.
 zahl "2.3 vorher sind Schreib- und Lesepuffer verschieden (pre)" "$P1" eq 0
 zahl "2.4 nachher sind sie Oktett fuer Oktett gleich (same)" "$S1" eq 1
 
@@ -245,8 +164,6 @@ zahl "2.9 kein einziger Fehler im ganzen Lauf" "$ERR" eq 0
 # w-disklag: writes are no longer flushed one by one (cmds 198 -> 84 in this run), so the floor is lower.
 zahl "2.10 und es waren wirklich Befehle unterwegs" "$CMD" ge 60
 zahl "2.11 keine abgelaufene Zeitschranke" "$DEAD" eq 0
-
-# ================================ 3. das Dateisystem, ohne eine Zeile
 
 echo
 echo "== 3. dasselbe Dateisystem darauf, ohne eine geaenderte Zeile in fs.fi =="
@@ -267,8 +184,6 @@ else
     bad "3.6 die Datei steht nicht im Verzeichnis"
 fi
 
-# ======================= 4. DER WIRT LIEST NACH -- hier endet das Wort
-
 echo
 echo "== 4. der WIRT liest das Abbild nach: hier ist der Kernel nicht mehr sein eigener Zeuge =="
 
@@ -283,10 +198,6 @@ n5a=$(dd if="$TMPD/a.img" bs=512 skip=4096 count=1 2>/dev/null \
       | od -An -v -t x1 | tr -s ' ' '\n' | grep -c '^5a$')
 zahl "4.2 Sektor 4096 traegt 512 mal das Muster 0x5A" "$n5a" eq 512
 
-# Die acht Sektoren ab 5000: je Sektor ein ANDERES Muster. Geprueft wird
-# das erste Oktett jedes Sektors gegen ((i/512)*17 + i) & 0xFF -- also
-# genau die Formel, die der Kernel geschrieben hat. Ein Treiber, der
-# achtmal denselben Sektor abliefert, faellt genau hier auf.
 mismatch=0
 for i in 0 1 2 3 4 5 6 7; do
     soll=$(( ( i*17 + i*512 ) & 255 ))
@@ -296,13 +207,9 @@ for i in 0 1 2 3 4 5 6 7; do
 done
 zahl "4.3 alle acht Sektoren ab 5000 tragen ihr EIGENES Muster" "$mismatch" eq 0
 
-# Und der Sektor DAHINTER ist unberuehrt. Ein Treiber, der zu viel
-# schreibt, faellt nur hier auf.
 leer=$(dd if="$TMPD/a.img" bs=512 skip=5008 count=1 2>/dev/null \
        | od -An -v -t x1 | tr -s ' ' '\n' | grep -c -v '^00$\|^$')
 zahl "4.4 der Sektor DAHINTER (5008) ist unberuehrt" "$leer" eq 0
-
-# ============================ 5. Gegenprobe: Controller ohne Platte
 
 echo
 echo "== 5. Gegenprobe: ein AHCI-Controller OHNE Platte =="
@@ -315,16 +222,12 @@ else
     bad "5.2 der Treiber hat eine Platte erfunden -- $(grep -a -m1 '^ahci:' "$TMPD/c.txt")"
 fi
 WHY=$(feld c '^ahci: init failed' why)
-# why=8 heisst genau: PI hatte Ports, aber keiner davon trug eine
-# ATA-Kennung. Jede andere Zahl waere ein anderer Fehler.
 zahl "5.3 und zwar an der richtigen Stelle (kein Port mit ATA-Kennung)" "$WHY" eq 8
 if grep -qa '^ahci: blocks=' "$TMPD/c.txt"; then
     bad "5.4 es wurde trotzdem eine Groesse gemeldet"
 else
     ok "5.4 es wird KEINE Groesse gemeldet"
 fi
-
-# ===================== 6. Gegenprobe: die Firmware steht auf IDE
 
 echo
 echo "== 6. Gegenprobe: kein AHCI, sondern IDE (Maschine pc) =="
@@ -343,8 +246,6 @@ else
     bad "6.3 kein IDE-Geraet in der PCI-Liste -- dann sagt 6.2 nichts"
 fi
 
-# =================== 7. Gegenprobe: ohne Busmaster faellt alles um
-
 echo
 echo "== 7. Gegenprobe: OHNE Busmaster-Bit -- der Beweis, dass es DMA war =="
 
@@ -361,10 +262,6 @@ zahl "7.4 der Lesebefehl schlaegt fehl" "$FR" eq 0
 zahl "7.5 und die Puffer sind verschieden geblieben" "$FS" eq 0
 FD=$(feld f '^ahci:   cmds=' dead)
 FA=$(feld f '^ahci:   cmds=' alive)
-# UND DER LAUF ENDET TROTZDEM. Vor dieser Zeile lief die Gegenprobe in
-# die Zeitschranke des Laeufers: jeder der tausenden Bloecke des
-# Dateisystems wartete die volle Spanne ab. Ein Geraet, das einmal nicht
-# geantwortet hat, gilt jetzt als weg.
 zahl "7.6 die Zeitschranke ist genau EINMAL abgelaufen" "$FD" eq 1
 zahl "7.7 und das Geraet gilt danach als weg statt die Maschine anzuhalten" "$FA" eq 0
 FFMT=$(grep -a -m1 '^ahci: format ' "$TMPD/f.txt" | sed -n 's/^ahci: format \([0-9]*\).*/\1/p')
@@ -377,8 +274,6 @@ fi
 n0=$(dd if="$TMPD/f.img" bs=512 skip=4096 count=1 2>/dev/null \
      | od -An -v -t x1 | tr -s ' ' '\n' | grep -c -v '^00$\|^$')
 zahl "7.10 auch Sektor 4096 ist unberuehrt" "$n0" eq 0
-
-# ==================== 8. Gegenprobe: derselbe Lauf unter TCG
 
 echo
 echo "== 8. die Gegenrichtung: derselbe Lauf unter TCG =="

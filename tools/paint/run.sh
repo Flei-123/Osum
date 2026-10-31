@@ -1,44 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/paint/run.sh -- RUNDE PAINT: DIE MISCHUNG, DIE KANTE, DER
-# SCHATTEN UND DAS SYMBOL -- JEDES MIT SEINEM PREIS.
-#
-# DIE REGEL DIESER RUNDE, und sie ist die von Runde LOOK mit einer
-# Zeile mehr:
-#
-#     Eine Aussage ueber den Bildschirm ist eine Aussage ueber
-#     Bildpunkte, und sie ist nur etwas wert, wenn die Bildpunkte
-#     gezaehlt wurden -- UND WENN DANEBENSTEHT, WAS SIE GEKOSTET HABEN.
-#     "Sieht besser aus" zaehlt nicht. Takte oder Bildpunkte je Sekunde.
 #
 # Die Abschnitte:
 #
-#   1. DIE RECHNUNG. src-over gegen die exakte Rechnung, alle 16 777 216
-#      Tripel (a, src, dst). Und die fuenf Fundstellen im Baum
-#      gegeneinander -- eine Formel, die an fuenf Stellen steht, steht
-#      an vier Stellen falsch, sobald jemand eine davon anfasst.
-#   2. DIE KOSTEN. `paintbench` im Kern (Takte je Bildpunkt, opak gegen
-#      gemischt, 800x600 und 1024x768) und DIESELBE Rechnung nativ auf
-#      dem Wirt. Ohne die zweite Zahl haelt man den Faktor des
-#      Emulators fuer den Faktor der Rechnung.
-#   3. DIE ZUSAGEN IM KERN. `fb.selftest3`, vierzehn Stueck, auf dem
-#      Rahmenpuffer, in den auch gemalt wird.
-#   4. DIE KANTENGLAETTUNG DER GLYPHEN. Deckungsstufen je Zeichen und
-#      je Kante, und die 4x4-Naeherung gegen 32x32 als Referenz.
-#   5. ZWEI RUNDEN AUF DERSELBEN ADRESSE. `tools/paint/scalars.py`
-#      rechnet die Skalare jeder Kerneldatei paarweise gegeneinander.
-#   6. DIE NUMMERN AN DREI STELLEN. WM_FORM, WM_APP und die
-#      Steckplatznummern stehen in kernel/wm.fi, kernel/sys.fi und
-#      kernel/user/wlibc.fi. Eine Nummernvergabe, die nicht geprueft
-#      wird, laeuft auseinander -- Runde LOOK hat genau so einen Fehler
-#      gefunden (SYS_KBD 1780 gegen 1703).
-#   7. DAS BILD. Ein Lauf auf `modern` und einer auf `classic`, und aus
-#      den Bildpunkten gelesen: der Verlauf des Schattens, die Stufen
-#      der Ecke, die Tinte der Symbole in den Knoepfen.
-#
-# Gegenproben: `classic` MUSS ohne Schatten und mit harter Ecke malen --
-# ohne diesen Abschnitt beweist ein gruener Abschnitt 7 nichts, weil
-# eine Messung, die immer gruen ist, nichts misst.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
@@ -72,14 +35,6 @@ if ! bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/k.log" 2>&1; then
 fi
 ok "der Kernel baut ($(stat -c%s "$TMPD/k0.mb") Oktette)"
 
-# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
-#
-# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
-# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
-# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
-# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
-# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
-# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
 VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
 
 lauf() { # zeile ausgabe
@@ -101,10 +56,6 @@ for f in std big; do
         wh=$(echo "$z" | sed -n 's/.*paintbench: \([0-9]*\)x\([0-9]*\).*/\1 \2/p')
         set -- $wh
         px=$(( $1 * $2 ))
-        # DIE ZUSAGE UEBER DIE MESSUNG SELBST: es wurden so viele
-        # Bildpunkte gemischt, wie die Flaeche hat, mal der Rundenzahl.
-        # Waere die Zahl kleiner, haette die Schleife Zeilen
-        # uebersprungen und die Zeit waere zu gut.
         if [ "$bl" = "$(( px * 4 ))" ]; then
             ok "$1x$2: $bl gemischte Bildpunkte = $px * 4 Durchgaenge"
         else
@@ -170,12 +121,6 @@ for n in 2115 2116; do
     grep -qE "= $n( |$)" kernel/sys/sys.fi && ok "Aufrufnummer $n steht in kernel/sys/sys.fi" \
         || bad "Aufrufnummer $n fehlt"
 done
-# RUNDE WMPLUGIN: die ABGESCHRIEBENE ZAHL IST WEG. Hier stand `= 2116`,
-# und seit die Plugin-Runde 2117..2126 dazugelegt hat, war die Zusage
-# rot -- eine rote Zusage, ueber die alle steigen, ist schlimmer als
-# keine. Also wird die Zahl GELESEN und VERGLICHEN: sie muss mindestens
-# 2126 sein und mit der hoechsten Aufrufnummer uebereinstimmen, die
-# wirklich in der Datei steht.
 maxnr=$(grep -oE 'const WM_MAXNR: u64 = [0-9]+' kernel/sys/sys.fi | grep -oE '[0-9]+$')
 hoch=$(grep -oE '^const WM_[A-Z_]+: u64 = 21[0-9][0-9]' kernel/sys/sys.fi \
     | grep -v WM_MAXNR | grep -oE '[0-9]+$' | sort -n | tail -1)
@@ -222,8 +167,6 @@ else
     else
         ok "shape=classic gebootet und fotografiert"
     fi
-    # Das Rechteck des Fensters aus dem eigenen Bericht des Servers --
-    # nicht aus dem Gedaechtnis. Runde LOOK hat sich das teuer erkauft.
     R=$(grep -a 'wm: win nr=' "$TMPD/m.log" | grep -a 'deco=1' \
         | grep -av 'Terminal' | head -1)
     X=$(echo "$R" | sed -n 's/.* x=\(-\?[0-9]*\) .*/\1/p')
@@ -232,11 +175,6 @@ else
     OH=$(echo "$R" | sed -n 's/.* oh=\([0-9]*\) .*/\1/p')
     echo "     das gemessene Fenster: x=$X y=$Y ow=$OW oh=$OH"
     if [ -n "$X" ] && [ -s "$SH/modern/desktop.ppm" ]; then
-        # BEIDE MESSUNGEN GEHEN GEGEN DEN LAUF, DER ES NICHT HAT.
-        # `classic` sagt Radius 0 und Schatten 0; was `modern` mehr hat,
-        # ist der Unterschied und nicht der Hintergrund. Die erste
-        # Fassung las eine Zeile aus EINEM Bild und mass den Verlauf des
-        # Schreibtischs -- gruen, und ohne Aussage.
         for was in schatten ecke; do
             if [ "$was" = schatten ]; then
                 A=(schatten "$SH/classic/desktop.ppm" "$SH/modern/desktop.ppm" \
@@ -253,7 +191,6 @@ else
     else
         bad "kein Bild und kein gemeldetes Fenster"
     fi
-    # DIE SYMBOLE IN DEN KNOEPFEN, aus dem Bericht der Leiste.
     ns=$(grep -ac 'taskbar: sym btn=' "$TMPD/m.log")
     if [ "$ns" -gt 0 ]; then
         grep -a 'taskbar: sym btn=' "$TMPD/m.log" | sort -u | sed 's/^/     /'
@@ -266,15 +203,7 @@ else
     else
         bad "die Taskleiste meldet kein einziges Programmsymbol"
     fi
-    # UND DASS DAS PROTOKOLL WIRKLICH GESETZT WURDE.
-    # RUNDE MERGE-2: VIER ODER MEHR, UND DIE ZAHL STEHT IM BERICHT.
     #
-    # Runde SOFTUI hat `form_push` um vier weitere Werte erweitert
-    # (WF_SHADOW2, WF_SHADOW_R2, WF_GRAD, WF_CAPTION), also meldet die
-    # Leiste `form n=8`. Die Zusage dieser Runde ist, dass die VIER
-    # Formwerte von PAINT ankommen -- nicht, dass es nie mehr werden
-    # duerfen. Eine Gleichheit haette hier bei jeder weiteren Formmarke
-    # falschen Alarm geschlagen.
     FN=$(grep -aoE 'form n=[0-9]+' "$TMPD/m.log" | tail -1 | grep -oE '[0-9]+')
     if [ "${FN:-0}" -ge 4 ]; then
         ok "die Taskleiste hat alle vier Formwerte an den Server gegeben (form n=$FN)"

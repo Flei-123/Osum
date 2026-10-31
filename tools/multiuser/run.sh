@@ -3,56 +3,8 @@
 # tools/multiuser/run.sh -- MEHRBENUTZERBETRIEB, GEMESSEN (Runde MULTIUSER).
 #
 # ==================================================================
-# WAS DIESE RUNDE BEHAUPTET UND WAS HIER NACHGERECHNET WIRD
-# ==================================================================
-#
-# Runde K13 hat Benutzer, Rechte und die Anmeldung gebaut und AM ENDE
-# EINE LISTE MIT GRENZEN HINGESCHRIEBEN. Diese Runde arbeitet die Liste
-# ab, und dieser Laeufer misst genau das:
-#
-#   1. DAS BETRETUNGSRECHT AUF JEDEM GLIED EINES PFADES. Vorher wurde
-#      nur nach der Zieldatei gefragt: ein Verzeichnis 0o700 root:root
-#      schuetzte seinen Inhalt NICHT, wenn die Datei darin 0o644 war und
-#      man ihren Namen kannte. Gemessen mit zwei Wegen zu zwei gleichen
-#      Dateien -- einer offen, einer verschlossen -- und der GEGENPROBE
-#      `nowalk`, in der die Messung zusammenbricht.
-#   2. ZUSATZGRUPPEN. /etc/group, getgroups/setgroups, initgroups in
-#      login und su. Gemessen an einer Datei 0o640 root:projekt, an die
-#      `justin` NUR ueber die Nebengruppe kommt. Gegenprobe `nogroups`.
-#   3. RECHTE UEBER DIE VFS-SCHICHT. `open_vfs` hatte KEINE Pruefung --
-#      kein /dev, kein /proc und keine eingehaengte Platte wurde je
-#      gefragt. Gemessen an /dev/hda (0o644 root): lesen ja, schreiben
-#      nur root.
-#   4. DER KOSTENFAKTOR. Nicht behauptet, sondern gemessen: wie lange
-#      eine Pruefung dauert und dass die Zeit MIT DER RUNDENZAHL
-#      WAECHST. Aus dieser Messung folgt die Zahl in pw.fi.
-#   5. DIE VERZOEGERUNG NACH EINEM FEHLVERSUCH, und dass sie sich
-#      verdoppelt -- an den Zahlen, die `login` nennt, UND an der Uhr
-#      des Wirts, und mit zwei /etc/login.conf, damit auch bewiesen ist,
-#      dass die Datei gelesen wird.
-#   6. DIE AUFRUFNUMMERN, gegen beide Tabellen, plus die GEGENPROBE, die
-#      den Fehler von Runde MERGE (zweimal 1320) nachbaut.
-#   7. setuid VON EINEM GEWOEHNLICHEN BENUTZER AUF root SCHLAEGT FEHL.
-#   8. chmod UND chown WIRKEN -- nachgelesen AUS DEM ABBILD.
-#   9. passwd schreibt ueber eine Zwischendatei, und /etc/shadow traegt
-#      danach weiter 0o600 root:root.
-#
-# ==================================================================
 # WARUM -accel kvm
 # ==================================================================
-#
-# Diese Runde ist die erste, die RECHNET: eine Passwortpruefung ist 8192
-# mal HMAC-SHA256. Unter QEMUs Softwareemulation kostet das rund 1,8
-# Sekunden, auf der echten CPU 0,26 -- gemessen in Abschnitt 3. Ein
-# Laeufer mit zwanzig solchen Pruefungen ist damit der Unterschied
-# zwischen einer halben Minute und zehn.
-#
-# ABER KVM IST NICHT DIE MESSUNG, SONDERN NUR SCHNELLER. Deshalb laeuft
-# der rechenlastige Abschnitt ZWEIMAL -- unter KVM und unter TCG -- und
-# die Aussagen ueber die RECHTE werden gegeneinander gehalten. Waere
-# eine davon unter KVM eine andere, waere die Beschleunigung wertlos.
-# Ohne /dev/kvm faellt der Laeufer auf TCG zurueck und sagt es, statt zu
-# ueberspringen.
 #
 # Aufruf:  bash tools/multiuser/run.sh
 set -uo pipefail
@@ -79,9 +31,6 @@ has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 mval() { grep -aoE "mut: $2=-?[0-9]+" "$1" | sed -n "${3:-1}p" | grep -oE '\-?[0-9]+$'; }
 mlast() { grep -aoE "mut: $2=-?[0-9]+" "$1" | tail -1 | grep -oE '\-?[0-9]+$'; }
-# Die Zeile dieser Runde hat ihr eigenes Praefix. Runde MERGE hat
-# gelernt, was passiert, wenn zwei Runden dasselbe Feld auf dieselbe
-# Leitung schreiben: `tail -1` nimmt die falsche Null.
 muval() { grep -aoE "^mu: .*" "$1" | tail -1 \
     | grep -oE "(^| )$2=[0-9]+" | tail -1 | grep -oE '[0-9]+$'; }
 
@@ -154,14 +103,6 @@ for n in "SYS_GETGROUPS 115" "SYS_SETGROUPS 116" "SYS_OSUM_MUSTAT 1200"; do
         bad "$1: Kernel '$a', libc '$b', erwartet '$2'"
     fi
 done
-# ---- DIE GEGENPROBE: der Fehler von Runde MERGE, nachgebaut.
-# RUNDE GRUNDLINIE-2 (A-021): die Kopie legte `sys.fi` flach nach
-# `kol/kernel/`, der `sed` zielte aber auf `kol/kernel/sys/sys.fi` --
-# einen Pfad, den es in der Kopie nie gab. Der `sed` griff ins Leere, die
-# Kopie blieb unveraendert, `syscalls.py` fand folgerichtig KEINE
-# Doppelvergabe, und die Gegenprobe meldete "der Waechter ist wertlos",
-# obwohl der Waechter in Ordnung war. Die Kopie behaelt jetzt den ECHTEN
-# Baumpfad; `syscalls.py` sucht `sys.fi` ohnehin selbst (_finde).
 mkdir -p "$TMPD/kol/kernel/sys" "$TMPD/kol/lib/libc" "$TMPD/kol/tools/kernel"
 cp kernel/sys/sys.fi "$TMPD/kol/kernel/sys/"
 cp lib/libc/kcall.fi "$TMPD/kol/lib/libc/"
@@ -286,14 +227,6 @@ for p in $PROGS; do
         *)         SPEC="$SPEC /bin/$p=$TMPD/${p}.elf" ;;
     esac
 done
-# DIE VERZEICHNISSE SIND DIE MESSUNG. /geheim ist 0o700 root:root und
-# enthaelt eine Datei mit 0o644 -- vor dieser Runde kam man an sie heran.
-# ZWEI EBENEN, UND DAS IST DER GANZE PUNKT. Runde K13 hat das
-# UNMITTELBARE Elternverzeichnis schon geprueft (`sys.dir_allowed`) --
-# `/geheim/inhalt.txt` war also nie offen. Die Luecke war ALLES DARUEBER:
-# bei `/zu/tief/inhalt.txt` wurde `/zu/tief` gefragt (0o755, also ja) und
-# `/zu` NIE. Wer den Namen kannte, war drin. Genau diese Form steht hier,
-# und `/geheim` daneben als Beleg, dass die eine Ebene schon vorher hielt.
 DIRS="/bin/ /sbin/ /etc/ /run/ /proc/ /dev/ /t/ /w/@777:0:0
       /home/@755:0:0 /home/justin/@700:1000:1000
       /zu/@700:0:0 /zu/tief/@755:0:0
@@ -346,17 +279,6 @@ is "die Projektdatei gehoert root und der Gruppe 2000, 0o640" \
 
 # --------------------------------------------------------- die Laeufe
 
-# EIN LAUF. Er setzt ZWEI GLOBALE Variablen -- $RC und $DAUER -- und
-# druckt nichts.
-#
-# WARUM NICHT `rc=$(run_case ...)`, wie es K13 tut: eine
-# Befehlsersetzung laeuft in einer UNTERSCHALE, und was dort an $DAUER
-# geschrieben wird, kommt hier nie an. Der erste Lauf dieser Runde hat
-# genau das gemessen -- "drei Fehlversuche dauerten 0 ms laenger (0
-# gegen 0)" --, und die Null war nicht die Verzoegerung, sondern die
-# Unterschale. Die WANDZEIT ist hier keine Nebensache: sie ist der
-# einzige Beweis, dass `login` wirklich gewartet hat und die Zahl nicht
-# bloss hingeschrieben.
 RC=0
 DAUER=0
 run_case() {
@@ -403,18 +325,6 @@ if [ -n "${us8192:-}" ] && [ "${us8192:-0}" -gt 100000 ]; then
 else
     bad "die Pruefung dauert keine messbare Zeit (${us8192:-?} us)"
 fi
-# RUNDE MERGE-2: DAS VERHAELTNIS WIRD JETZT ZWISCHEN 1024 UND 4096
-# GEMESSEN UND NICHT MEHR ZWISCHEN 2048 UND 8192. Der Grund ist gemessen
-# und steht hier, weil er sonst wieder jemanden eine Stunde kostet.
-#
-# Diese Zusage hat auf dem Zweig MULTIUSER gehalten (401/100) und ist
-# nach dem Verschmelzen gefallen (851/100). Sie ist dabei NICHT kaputt
-# gegangen -- sie lief zum ersten Mal ueberhaupt: ihr Abschnitt war in
-# test.sh hinter `abschnitte_abarbeiten` angemeldet und damit im
-# parallelen Lauf tot (siehe MERGE-2 09b).
-#
-# Gemessen wurde daraufhin eine ganze Reihe, in EINEM Systemstart, auf
-# derselben Maschine, mit /dev/kvm:
 #
 #     Runden     us      Runden/s
 #       512    13456      38049
@@ -424,44 +334,12 @@ fi
 #      8192   475210      17238
 #     16384   707006      23173
 #
-# Bis 4096 ist es sauber linear -- rund 36 bis 38 Tausend Runden je
-# Sekunde, ueber den Faktor acht. Ab 8192 kommt ein AUFSCHLAG VON RUND
-# 250 MILLISEKUNDEN dazu, und zwar ein KONSTANTER: 8192 kostet 248 ms
-# mehr als linear, 16384 kostet 252 ms mehr als linear. Deshalb sieht
-# 16384 je Runde wieder schneller aus als 8192.
-#
-# Was der Aufschlag IST, ist mit diesen Zahlen nicht entschieden. Er ist
-# reproduzierbar (zwei 8192er-Laeufe im selben Start: 471000 und 472035
-# us), er haengt nicht an der Reihenfolge (ein Vorlauf aendert nichts,
-# also ist es kein Taktverhalten des Wirts beim Hochlaufen), und er
-# haengt nicht am ersten Anfassen von Speicher (er faellt bei JEDEM Lauf
-# an, nicht nur beim ersten). Der naechstliegende Verdacht ist, dass der
-# Wirt den vCPU-Faden bei Laeufen ueber ~200 ms einmal verdraengt; das
-# ist NICHT belegt und steht hier als Verdacht und nicht als Befund.
-#
-# Auf dem Zweig MULTIUSER war davon nichts zu sehen, weil dort alles
-# unter TCG lief: bei 6698 Runden je Sekunde verschwinden 250 ms im
-# Rauschen. Erst der KVM-Pfad aus Runde KVMFIX macht die Laeufe so kurz,
-# dass ein fester Aufschlag von 250 ms das Verhaeltnis kippt.
-#
-# WAS DIE ZUSAGE MEINT, bleibt unveraendert: viermal so viele Runden
-# muessen viermal so viel kosten, sonst wirkt der Kostenfaktor nicht.
-# Gemessen wird das jetzt dort, wo die Messung diese Frage beantwortet
-# -- im linearen Bereich, 1024 gegen 4096. Die 8192 bleiben daneben
-# stehen und liefern die Runden je Sekunde, aus denen der Kostenfaktor
-# in kernel/user/pw.fi begruendet ist.
 if [ -n "${us1024:-}" ] && [ "${us1024:-0}" -gt 0 ] && [ -n "${us4096:-}" ]; then
     v=$(( us4096 * 100 / us1024 ))
     if [ "$v" -ge 300 ] && [ "$v" -le 500 ]; then
         ok "viermal so viele Runden kosten viermal so viel Zeit (${v}/100, 1024 gegen 4096) -- die Zahl WIRKT"
     else
         bad "das Verhaeltnis stimmt nicht: ${us1024} us zu ${us4096} us (${v}/100)"
-        # RUNDE MERGE-2: WENN DIE ZAHL NICHT STIMMT, GEHOEREN DIE ROHWERTE
-        # DAZU. Die Zusage nennt zwei Zahlen und ein Verhaeltnis und laesst
-        # offen, WOHER die zwei Zahlen kommen -- `mval ... us 1` und
-        # `... us 2` picken die erste und zweite Zeile eines Musters aus
-        # einer seriellen Ausgabe. Kommt eine dritte Zeile dazu, misst der
-        # Test etwas anderes, als er zu messen glaubt, und sagt es nicht.
         echo "        alle mut-Zeilen dieses Laufs:"
         grep -aoE "mut: [a-z]+=-?[0-9]+" "$F" | sed "s/^/          /"
     fi
@@ -607,12 +485,6 @@ w3=$(grep -aoE 'login: warte [0-9]+ ms' "$B" | sed -n 3p | grep -oE '[0-9]+')
 is "nach dem ersten Fehlversuch wartet login" "${w1:-fehlt}" "1000"
 is "nach dem zweiten doppelt so lang" "${w2:-fehlt}" "2000"
 is "nach dem dritten wieder doppelt" "${w3:-fehlt}" "4000"
-# ---- UND ER HAT WIRKLICH GESCHLAFEN. Die Zahl oben koennte `login`
-#      hinschreiben, ohne zu warten. Diese hier kommt aus
-#      CLOCK_MONOTONIC IN DER MASCHINE und misst NUR den Schlaf --
-#      nicht die Passwortpruefung daneben, die auf einer ausgelasteten
-#      Maschine ein Vielfaches davon kostet und jede Wandzeitmessung
-#      unbrauchbar machen wuerde.
 g1=$(grep -aoE 'login: gewartet [0-9]+ ms' "$B" | sed -n 1p | grep -oE '[0-9]+')
 g3=$(grep -aoE 'login: gewartet [0-9]+ ms' "$B" | sed -n 3p | grep -oE '[0-9]+')
 if [ -n "${g1:-}" ] && [ "${g1:-0}" -ge 900 ]; then
@@ -641,18 +513,7 @@ f1=$(grep -aoE 'login: warte [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
 f3=$(grep -aoE 'login: warte [0-9]+ ms' "$S" | sed -n 3p | grep -oE '[0-9]+')
 is "mit verzoegerung_ms=200 in /etc/login.conf wartet login 200 ms" "${f1:-fehlt}" "200"
 is "und beim dritten Mal 800 -- dieselbe Verdopplung, andere Basis" "${f3:-fehlt}" "800"
-# NUR EINE UNTERE SCHRANKE, und der Grund ist gemessen: die Zusage
-# "und die Uhr der Maschine sieht 200 ms statt 1000" ist auf einem
-# GETEILTEN Wirt nicht haltbar. CLOCK_MONOTONIC im Gast zaehlt unter KVM
-# auch die Zeit mit, in der die virtuelle CPU gar nicht lief -- bei
-# `load average` 26 wurden aus 200 angeforderten Millisekunden 3028
-# gemessene. Die Zahl nach OBEN zu pruefen hiesse, die Auslastung des
-# Wirts zu messen und sie `login` anzulasten.
 #
-# Dass /etc/login.conf wirklich gelesen wird, steht deshalb an den zwei
-# Zusagen darueber: `login` nennt 200 und 800 statt 1000 und 4000, und
-# das sind exakte Zahlen aus der Datei. Diese hier sagt nur: es wurde
-# ueberhaupt gewartet.
 h1=$(grep -aoE 'login: gewartet [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
 if [ -n "${h1:-}" ] && [ "${h1:-0}" -ge 180 ]; then
     ok "und die Uhr der Maschine bestaetigt: gefordert 200 ms, wirklich gewartet ${h1} ms"

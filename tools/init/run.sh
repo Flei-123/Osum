@@ -1,86 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/init/run.sh -- DER ERSTE PROZESS, SERVERTAUGLICH (Runde INIT).
-#
-# ==================================================================
-# WAS DIESE RUNDE BEHAUPTET UND WAS HIER GEMESSEN WIRD
-# ==================================================================
-#
-#   1. ES GIBT EIN /bin/init, UND DER KERN STARTET ES. Nicht /sbin/init
-#      -- der Name bleibt als zweiter Weg stehen, weil `tools/k13/run.sh`
-#      ihn seit jener Runde benutzt und keine bestehende Zusage kosten
-#      soll. Gemessen an `osum: pid1 init` und `k13: ... init=1`.
-#
-#   2. EIN DIENST STARTET VON SELBST. `/etc/inittab` liegt im Abbild,
-#      init liest sie, und die Dienste laufen, ohne dass jemand etwas
-#      tippt. Gemessen an `init: dienste=8` und an `svc status`.
-#
-#   3. EIN ABSTUERZENDER DIENST WIRD NEU GESTARTET UND NACH FUENF
-#      VERSUCHEN ABGESCHALTET. Das ist der Kern dieser Runde. Der Dienst
-#      `kaputt` ist `/bin/false`: er endet sofort mit 1. Gemessen wird
-#      die ZEILE, die init darueber schreibt, UND die drei Zahlen in
-#      `/run/svc.state`: Zustand `failed`, 5 Starts, 5 Fehler. Nicht
-#      vier, nicht sechs.
-#
-#      DIE GEGENPROBE STEHT DANEBEN UND IST GENAUSO WICHTIG: `sauber`
-#      ist `/bin/true` und endet ebenso sofort -- aber mit 0. Er wird
-#      oefter neu gestartet als `kaputt` und darf NIE abgeschaltet
-#      werden. Ohne diese zweite Haelfte waere die Grenze nur ein
-#      Zaehler, der alles trifft, was schnell endet.
-#
-#   4. EIN ZIEL ENTSCHEIDET, WAS LAEUFT. `/etc/ziel` traegt ein Wort.
-#      Bei `konsole` bleibt der Dienst `fenster` (Ziel `grafik`) mit
-#      NULL Starts stehen -- das ist die Zusage, die ein Serverbau ohne
-#      Bildschirm braucht. Die GEGENPROBE ist derselbe Baum mit
-#      `/etc/ziel = grafik`: dann laeuft `fenster` und `kons` steht
-#      still. Eine Zusage ohne eine Fassung, in der sie faellt, ist keine.
-#
-#   5. EIN DIENST KANN AUF DAS NETZ WARTEN. Der Dienst `spaet` traegt
-#      die Option `netz`; dieser Lauf hat keine Netzkarte, und deshalb
-#      MUSS er im Zustand `waiting` bleiben und null Starts haben.
-#
-#   6. EIN DIENST SCHREIBT IN EINE PROTOKOLLDATEI. `proto` schreibt eine
-#      Zeile nach `/var/log/proto.log`; sie steht dort und NICHT auf der
-#      Konsole.
-#
-#   7. `svc` ZEIGT, WER LAEUFT, SEIT WANN UND WIE OFT NEU. Und `svc
-#      start` hebt eine Abschaltung auf -- gemessen an `kaputt`, das
-#      nach dem Handgriff wieder anlaeuft und dessen Fehlerzaehler auf
-#      null steht.
-#
-#   8. `shutdown` FAEHRT WIRKLICH HERUNTER. Beweis ist der
-#      Beendigungscode von QEMU: 0 (ACPI) statt 21 (der Ausgang des
-#      Pruefstands). Die Gegenprobe `noacpi` nimmt genau den einen Weg
-#      weg, und dann steht dort wieder 21.
-#
-#   9. `reboot` STARTET WIRKLICH NEU. Das ist die ehrlichste Messung
-#      dieses Laeufers: derselbe Lauf OHNE `-no-reboot` muss den Kernel
-#      ZWEIMAL hochkommen lassen -- `osum: pid1 init` steht dann zweimal
-#      im Mitschnitt. Ein `halt`, das sich als Neustart ausgibt, kommt
-#      kein zweites Mal.
-#
-#  10. KEIN ZOMBIE BLEIBT UEBRIG. `k13t waise` laesst ein Kind
-#      verwaisen; init nimmt es an (`init: orphans=1`), und die letzte
-#      Zeile des Laufs sagt `zombies=0`.
-#
-#  11. DAS ALTE FORMAT LEBT. Der Dienst `alt` steht als
-#      `alt:respawn:/bin/sleep 60` da -- die drei Felder von Runde K13.
-#      Er laeuft. Ohne diese Zusage waere jede inittab dieses Projekts
-#      mit der Runde kaputt gegangen.
-#
-#  12. OHNE /etc/inittab SAGT init DAS UND STIRBT NICHT STILL.
-#
-#  13. DER KERNFEHLER, DEN DIESE RUNDE GEFUNDEN HAT. `wait4` fragte
-#      `find_child` nach dem ERSTEN Kind des Rufers, ohne nach dessen
-#      Zustand zu fragen -- lebte es noch, meldete WNOHANG eine 0, und
-#      der Zombie DAHINTER wurde nie abgeholt. Fuer eine Shell mit einem
-#      Kind unsichtbar, fuer den Prozess 1 toedlich. `waitfirst` auf der
-#      Kommandozeile stellt den alten Weg wieder her, und dann bleibt
-#      derselbe Dienst nach zwei Starts fuer immer stehen.
-#
-# Alle Laeufe gehen ueber `-accel kvm`, wenn /dev/kvm benutzbar ist
-# (rund viereinhalbmal schneller als TCG, gemessen in Runde KVMFIX),
-# sonst ueber TCG -- und der Laeufer sagt, was er genommen hat.
 #
 # Verwendung:  bash tools/init/run.sh
 set -uo pipefail
@@ -107,22 +25,12 @@ is()  { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', erwartet '$3'"
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 val() { grep -aoE "$2" "$1" | tail -1 | grep -oE '\-?[0-9]+$'; }
-# Eine Spalte aus /run/svc.state, so wie `svc status` sie ausgegeben hat.
-# $1 Datei, $2 Dienst, $3 Spalte (2=Zustand 3=pid 4=Starts 5=Fehler
-# 6=Startzeit 7=Ziel), $4 head (der erste Aufruf) oder tail (der letzte).
 sp() {
     local f=$1 name=$2 col=$3 which=${4:-tail}
     grep -aoE "^$name (running|stopped|done|waiting|failed) [0-9]+ [0-9]+ [0-9]+ [0-9]+ [a-z,]+" "$f" \
         | $which -1 | awk -v c="$col" '{print $c}'
 }
 
-# Der GROESSTE Wert einer Spalte ueber ALLE Ausgaben im Mitschnitt. Fuer
-# eine Zahl, die nur wachsen kann (die Starts), ist das die ehrliche
-# Frage -- `tail` traefe die Zeile, die `svc stop` gerade ausgegeben hat.
-# Die n-te Ausgabe von `svc status` im Mitschnitt. `dienste.sh` sieht
-# ZWEIMAL nach: einmal sofort nach dem Hochfahren (da hat jeder Dienst
-# genau einen Start) und einmal fuenf Sekunden spaeter -- und erst dort
-# steht, was diese Runde behauptet.
 spn() {
     local f=$1 name=$2 col=$3 n=$4
     grep -aoE "^$name (running|stopped|done|waiting|failed) [0-9]+ [0-9]+ [0-9]+ [0-9]+ [a-z,]+" "$f" \
@@ -146,8 +54,6 @@ fi
 
 ACC=tcg
 if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-    # `-kernel /bin/true` scheitert immer -- gemessen wird, WORAN. Sagt
-    # QEMU dabei etwas ueber kvm, ist /dev/kvm nicht benutzbar.
     if qemu-system-x86_64 -accel kvm -m 32 -display none -no-reboot \
             -kernel /bin/true 2>&1 | grep -qi 'kvm'; then ACC=tcg; else ACC=kvm; fi
 fi
@@ -206,7 +112,6 @@ fi
 
 echo "== 2. die Abbilder: /etc/inittab, /etc/ziel, /var/log =="
 
-# ACHT DIENSTE, UND JEDER STEHT FUER EINE ZUSAGE.
 cat > "$TMPD/inittab" <<'TAB'
 # name:ziele:art:befehl:optionen
 blink:*:respawn:/bin/sleep 1
@@ -219,12 +124,6 @@ spaet:*:once:/bin/echo netz-ist-da:netz
 alt:respawn:/bin/sleep 60
 sh:*:ctrl:/bin/sh
 TAB
-# EINE ZWEITE, MINIMALE TAFEL -- NUR FUER DIE GEGENPROBE ZUM KERNFEHLER.
-# Genau zwei Zeilen, und die Reihenfolge ist der Punkt: `sh` wird zuerst
-# gestartet und steht damit in der Aufgabentafel VOR `sauber`. Mit dem
-# alten `wait4` (das nach dem ERSTEN Kind fragt) trifft die Suche immer
-# das lebende `sh` -- und der Zombie von `sauber` wird NIE abgeholt. So
-# haengt die Gegenprobe nicht davon ab, wer gerade wo in der Tafel liegt.
 cat > "$TMPD/inittab2" <<'TAB2'
 sh:*:ctrl:/bin/sh
 sauber:*:respawn:/bin/true
@@ -374,11 +273,6 @@ has "$F" "DIENST           ZUSTAND   PID  STARTS  FEHLER  LAUFZEIT  ZIEL" \
     "svc list zeigt eine Tafel mit Laufzeit und Neustarts"
 has "$F" "Dienste laufen" "und darunter, wieviele von wievielen laufen"
 is "svc stop haelt einen Dienst an" "$(sp "$F" blink 2 tail)" "done"
-# `svc start` auf einen abgeschalteten Dienst: der Zaehler geht auf null
-# und er laeuft wieder an. Gemessen an der ZAHL DER STARTS -- sie war
-# bei fuenf stehengeblieben, und nach dem Handgriff ist sie groesser.
-# Danach stirbt `/bin/false` weiter und wird ein ZWEITES Mal
-# abgeschaltet; auch das steht im Mitschnitt, und auch das ist richtig.
 kn=$(sp "$F" kaputt 4 tail)
 if [ -n "${kn:-}" ] && [ "$kn" -gt 5 ]; then
     ok "svc start hebt die Abschaltung auf: $kn Starts statt der fuenf, bei denen es stand"
@@ -396,16 +290,6 @@ is "und am Ende steht keine Leiche mehr" "$(val "$F" 'zombies=[0-9]+')" "0"
 has "$F" "power: acpi pm1a=" "die Abschaltung liest FADT und _S5_ aus der ACPI-Tafel"
 
 echo "-- 3j. DER KERNFEHLER, DEN DIESE RUNDE GEFUNDEN HAT"
-# `wait4` fragte `find_child` nach dem ERSTEN Kind des Rufers, ohne nach
-# seinem Zustand zu fragen. Lebte das noch, antwortete WNOHANG mit 0 --
-# und der ZOMBIE DAHINTER wurde nie abgeholt. Fuer eine Shell mit einem
-# Kind faellt das nie auf; fuer den Prozess 1, der immer mehrere hat,
-# steht danach jeder Dienst fuer immer auf `running`, obwohl er tot ist.
-# `waitfirst` stellt den alten Weg wieder her -- und dann bricht die
-# Messung zusammen.
-# Zwei Laeufe mit demselben Abbild (zwei Zeilen in der inittab), einmal
-# behoben und einmal mit `waitfirst`. Der Unterschied ist nicht graduell:
-# der eine sammelt jedes Kind ein, der andere kein einziges.
 rc=$(run_case zweizeilen "$TMPD/d2.img" "osum $BASE script=sh /t/kurz.sh" 200 -no-reboot)
 Z="$TMPD/zweizeilen.txt"
 zn=$(spmax "$Z" sauber 4)
@@ -423,10 +307,6 @@ if [ -n "${wn:-}" ] && [ "$wn" -le 2 ]; then
 else bad "GEGENPROBE waitfirst traegt nicht: ${wn:-?} Starts gegen $zn"; fi
 is "und er meldet sich weiter als 'running', obwohl er tot ist" \
    "$(sp "$WF" sauber 2 tail)" "running"
-# DIE ZAHL, DIE DEN FEHLER AM DIREKTESTEN BENENNT: wieviele Kinder init
-# im ganzen Lauf eingesammelt hat. Mit dem alten `wait4` sind es die
-# ein, zwei, die der SIGKILL beim Herunterfahren noch freilegt -- waehrend
-# des Betriebs kein einziges.
 wr=$(val "$WF" 'init: reaped=[0-9]+')
 zr=$(val "$Z" 'init: reaped=[0-9]+')
 if [ -n "${wr:-}" ] && [ -n "${zr:-}" ] && [ "$wr" -le 2 ] && [ "$zr" -gt "$wr" ]; then
@@ -465,10 +345,6 @@ fi
 hasnot "$N" "power: acpi pm1a=" "und KEINE Abschaltung -- die beiden Wege sind getrennt"
 
 echo "-- 5a. DER EHRLICHSTE BEWEIS: die Maschine kommt wirklich zurueck"
-# OHNE `-no-reboot`. QEMU startet den Gast dann wirklich neu, und der
-# Kernel kommt ein zweites Mal hoch. Der Lauf endet ueber das Zeitlimit
-# (124) -- gemessen wird nicht der Beendigungscode, sondern wie oft
-# `osum: pid1 init` im Mitschnitt steht.
 cp "$TMPD/d0.img" "$TMPD/live-wieder.img"
 W="$TMPD/wieder.txt"
 : > "$W"
@@ -506,9 +382,6 @@ rc=$(run_case initsh "$TMPD/d0.img" "osum initsh $BASE script=id" 300 -no-reboot
 I="$TMPD/initsh.txt"
 is "DER NOTWEG: mit initsh endet der Lauf wie vor dieser Runde" "$rc" "21"
 hasnot "$I" "osum: pid1 init" "und zwar mit /bin/sh statt init"
-# OHNE /etc/passwd KENNT `id` KEINEN NAMEN -- das Abbild dieser Runde
-# hat keine, und `uid=0(root)` waere hier eine Erfindung. Gemessen wird
-# die Zeile, die dieses Abbild wirklich liefert.
 has "$I" "uid=0 gid=0 euid=0 egid=0" "das System ist damit vollstaendig benutzbar"
 
 # ------------------------------------------------------ 7. firnc1

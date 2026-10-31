@@ -1,57 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/k14/run.sh -- DIE VFS-SCHICHT UND DIE FREMDEN DATEISYSTEME.
-#
-# Bis zu dieser Runde kannte Osum genau EIN Dateisystem: sein eigenes.
-# `mount` gab es, aber ohne Ziel -- es hiess "die eine Platte ist da".
-# Folge: kein /proc, kein /dev als Verzeichnis, und jede Platte, die
-# Linux oder Windows beschrieben hatte, war unlesbar.
-#
-# WAS HIER GEMESSEN WIRD, und alles davon IM LAUFENDEN KERNEL:
-#
-#   1. DIE NUMMERN. mount ist 165, umount2 ist 166, rename ist 82 --
-#      Linux' Nummern, weil Linux die Aufrufe hat. Die eigene Nummer
-#      dieser Runde liegt im zugeteilten Block 1700..1799. Und die
-#      Karte von `kdata`: die drei Seiten dieser Runde liegen in
-#      0x43000..0x46000 und ueberschneiden sich mit nichts.
-#   2. DASS DIE OPS-TAFEL ECHTE ZEIGER SIND. Die uebersetzte
-#      Objektdatei wird ZERLEGT und die `call *`-Befehle werden
-#      gezaehlt. Eine Weiche aus `if`s hat keinen einzigen davon. Dazu
-#      der Zaehlerbeweis im Lauf: `VFS_OPS` zaehlt die Schicht, wenn
-#      sie eine Verrichtung ANSTOESST, `VFS_INDIRECT` zaehlt der
-#      TREIBER, wenn sie bei ihm ANKOMMT -- zwei Zaehler an zwei
-#      Stellen, und ihre Gleichheit ist eine Aussage.
-#   3. FAT32 GEGEN DIE ECHTEN LINUX-WERKZEUGE. Das Abbild kommt von
-#      `mkfs.vfat`, die Dateien von `mcopy`, die Partitionstafel von
-#      `sfdisk` und `sgdisk`. Osum liest sie und der Inhalt wird OKTETT
-#      FUER OKTETT verglichen. Umgekehrt: was Osum schreibt, holt
-#      `mcopy` wieder heraus und `cmp` vergleicht es -- und `fsck.fat`
-#      sagt, ob das Dateisystem danach noch eines ist.
-#   4. MBR UND GPT. Beide Tafeln, beide von fremden Werkzeugen
-#      geschrieben. Bei GPT werden BEIDE Pruefsummen gerechnet; ein
-#      umgedrehtes Bit im Kopf MUSS dazu fuehren, dass Osum die Platte
-#      nicht mehr liest.
-#   5. /proc UND /dev als echte Dateisysteme, gemessen ueber ein
-#      Programm in Ring 3 (`/bin/k14`), das jede Antwort als Zahl
-#      meldet -- und `ps` (ueber SYS_OSUM_PSTAT) gegen
-#      `cat /proc/<pid>/stat` (ueber das Dateisystem), Zahl fuer Zahl.
-#   6. DIE GEGENPROBEN, ohne die in diesem Projekt nichts zaehlt:
-#      `novfs` (nur die Wurzel -- alles andere MUSS verschwinden),
-#      `noprocfs`, `nodevfs`, `nofat`, `nopart` (das Dateisystem wird
-#      bei Block 0 gesucht, wo die TAFEL steht -- die Messung MUSS
-#      zusammenbrechen), `fatro` (jeder Schreibversuch -EROFS), ein
-#      Lauf ohne zweite Platte, und ein Abbild mit einem kaputten
-#      GPT-Kopf.
-#   7. OFS VERLIERT NICHTS. Derselbe Kernel, dieselbe Arbeit, einmal
-#      auf dem geraden Weg von Runde 62 und einmal mit `vfsall` durch
-#      die Ops-Tafel -- die Ausgaben werden OKTETT FUER OKTETT
-#      verglichen. Das ist der Beweis, dass OFS ein NUTZER dieser
-#      Schicht ist und kein Sonderfall daneben.
-#
-# Gemessen wie in den Runden 59 bis K12: QEMU je Fall, mit Zeitlimit,
-# serielle Ausgabe gegen Erwartungen, Beendigungscode aus
-# `isa-debug-exit` (21 = der Kernel hat sich selbst beendet, 63 = eine
-# Ausnahme).
 #
 # Aufruf:  bash tools/k14/run.sh
 set -uo pipefail
@@ -96,7 +43,6 @@ dateien_gleich() { # name sollDatei istDatei
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hat_nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 
-# Ein Wert aus der Ausgabe von /bin/k14 ("k14: name = zahl").
 wert() { # datei name
     grep -a -m1 "^k14: $2 = " "$1" 2>/dev/null | sed 's/.* = //' | tr -d '\r\000'
 }
@@ -138,9 +84,6 @@ check UMOUNT2 166 "Linux' Nummer"
 check RENAME 82 "Linux' Nummer"
 check OSUM_MNTSTAT 1700 "der Block dieser Runde"
 
-# Die eigene Nummer dieser Runde liegt im ZUGETEILTEN Bereich und
-# nirgends sonst. Drei Runden arbeiten gleichzeitig an diesem Baum; das
-# ist genau die Lage, aus der die vier kdata-Kollisionen entstanden sind.
 mnt_nr=$(number_in kernel/sys/sys.fi "SYS_OSUM_MNTSTAT")
 if [ "${mnt_nr:-0}" -ge 1700 ] && [ "${mnt_nr:-0}" -le 1799 ]; then
     ok "die eigene Aufrufnummer liegt im Vorrat 1700..1799: $mnt_nr"
@@ -151,8 +94,6 @@ kfile=$(number_in kernel/fs/file.fi "K_VFILE")
 kdir=$(number_in kernel/fs/file.fi "K_VDIR")
 gleich "die Deskriptorarten dieser Runde sind 12 und 13" "12 13" "$kfile $kdir"
 
-# Die kdata-Karte. `memmap.py` rechnet jede Ueberschneidung nach -- diese
-# Stelle hat dem Projekt viermal denselben Fehler beschert.
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
 else
@@ -169,17 +110,6 @@ for r in K14_OFF FAT_OFF PROCFS_OFF; do
         bad "$r = ${v:-fehlt} liegt AUSSERHALB von 0x43000..0x46000"
     fi
 done
-# GEGENPROBE ZUR KARTE: eine Seite dieser Runde auf eine fremde Adresse
-# gelegt MUSS anschlagen. Ohne diese Zeile prueft die Karte nur das,
-# woran jemand gedacht hat.
-# RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
-# seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
-# einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
-# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
-# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
-# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
-# zu melden, die hier gemessen wird.
 mkdir -p "$TMPD/kollision"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kollision/" \; )
 sed -i 's/^const PROCFS_OFF: u64 = 0x45000$/const PROCFS_OFF: u64 = 0x3C000/' "$TMPD/kollision/lib/kstate.fi"
@@ -224,34 +154,23 @@ else
     bad "firnc1 baut diese Runde nicht"
 fi
 
-# ------------------------------- 3. die Ops-Tafel sind ECHTE Zeiger
-
 echo "== 3. die Tafel der Verrichtungen ist eine Tafel von ZEIGERN =="
-# Firn Stufe 0 kann einen Funktionszeiger weder in eine Zahl wandeln
-# noch aus einer Tafel heraus aufrufen ("only direct function names can
-# be called"). Ein FELD EINER STRUKTUR aufzurufen kann es -- und das
-# ergibt `call *rax`. Eine Weiche aus `if`s ergaebe keinen einzigen.
 indirekt0=$(objdump -d "$TMPD/k0.mb.elf" 2>/dev/null | grep -cE 'call.*\*')
 num "indirekte Aufrufe im Kern (firnc0)" "$indirekt0" ge 9
 if [ -f "$TMPD/k1.mb.elf" ]; then
     indirekt1=$(objdump -d "$TMPD/k1.mb.elf" 2>/dev/null | grep -cE 'call.*\*')
     num "indirekte Aufrufe im Kern (firnc1)" "$indirekt1" ge 9
 fi
-# Sie stehen in `vfs.fi`: jede der neun Verrichtungen genau einmal.
 for f in node_for v_readdir v_attr v_read v_write v_create v_unlink v_rename v_trunc; do
     n=$(objdump -d "$TMPD/k0.mb.elf" --disassemble="_F0.vfs__$f" 2>/dev/null \
         | grep -cE 'call.*\*')
     if [ "${n:-0}" -ge 1 ]; then ok "vfs.$f ruft ueber einen Zeiger ($n)"
     else bad "vfs.$f enthaelt keinen indirekten Aufruf"; fi
 done
-# Und: `vfs.fi` kennt OFS nicht beim Namen. `fs.` kommt dort nicht vor
-# -- das ist der Unterschied zwischen einer Schicht und einer Weiche.
 aussen=$(grep -acE '(^|[^a-z_])fs\.[a-z_]+\(' kernel/fs/vfs.fi)
 num "Aufrufe von fs.* (OFS) in kernel/fs/vfs.fi" "$aussen" eq 0
 neun=$(grep -acE '^    (lookup|readdir|attr|read|write|create|unlink|rename|trunc): fn' kernel/fs/vfsops.fi)
 num "Verrichtungen in der Tafel von vfsops.fi" "$neun" eq 9
-
-# ------------------------------------------- 4. die Abbilder, von aussen
 
 echo "== 4. die Abbilder: FAT32 von mkfs.vfat, Partitionen von sfdisk/sgdisk =="
 FAT="$TMPD/fat.img"
@@ -262,8 +181,6 @@ mkfs.vfat -F 32 -s 1 -n OSUMTEST "$FAT" >/dev/null 2>"$TMPD/mkfs.err" \
 
 printf 'hallo aus linux\n' > "$TMPD/hello.txt"
 head -c 5000 /dev/urandom > "$TMPD/blob.bin"
-# Eine Datei, die NICHT in 8+3 passt: nur ueber einen LANGEN NAMEN
-# lesbar. Ein Treiber ohne VFAT-Lesung sieht hier "EINSEH~1.TXT".
 printf 'langer name\n' > "$TMPD/lang.txt"
 mcopy -i "$FAT" "$TMPD/hello.txt" ::hello.txt
 mcopy -i "$FAT" "$TMPD/blob.bin" ::blob.bin
@@ -274,7 +191,6 @@ mdir -i "$FAT" :: > "$TMPD/mdir0.txt" 2>&1 \
     && ok "mcopy/mmd haben vier Dateien und ein Verzeichnis hineingelegt" \
     || bad "mcopy scheitert"
 
-# Die MBR-Platte.
 MBR="$TMPD/mbr.img"
 dd if=/dev/zero of="$MBR" bs=1M count=80 status=none
 printf 'label: dos\nstart=2048, type=c\n' | sfdisk "$MBR" >/dev/null 2>&1 \
@@ -282,7 +198,6 @@ printf 'label: dos\nstart=2048, type=c\n' | sfdisk "$MBR" >/dev/null 2>&1 \
     || bad "sfdisk scheitert"
 dd if="$FAT" of="$MBR" bs=512 seek=2048 conv=notrunc status=none
 
-# Die GPT-Platte.
 GPT="$TMPD/gpt.img"
 if command -v sgdisk >/dev/null 2>&1; then
     dd if=/dev/zero of="$GPT" bs=1M count=80 status=none
@@ -295,9 +210,6 @@ else
     echo "  (sgdisk fehlt -- der GPT-Teil wird uebersprungen)"
 fi
 
-# Die Wurzelplatte von Osum. /proc, /dev und /mnt sind VERZEICHNISSE
-# darin -- ohne sie wird nichts eingehaengt, und genau deshalb aendert
-# diese Runde an den Abbildern der Runden 59 bis K12 nichts.
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/${p}0.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
@@ -387,8 +299,6 @@ num "/proc/<pid>/fd zaehlt die eigenen Deskriptoren" "${fdn:-0}" ge 3
 upb=$(wert "$H" uptime_bytes)
 num "/proc/uptime ist eine Zeile mit zwei Zahlen" "${upb:-0}" ge 6
 
-# Die Zaehler der Schicht. VFS_OPS zaehlt die Schicht beim ANSTOSSEN,
-# VFS_INDIRECT der TREIBER beim ANKOMMEN -- zwei Stellen, eine Zahl.
 line=$(grep -a -m1 '^k14: mounts=' "$H" | tr -d '\000\r')
 ops=$(echo "$line" | grep -oE 'ops=[0-9]+' | grep -oE '[0-9]+')
 ind=$(echo "$line" | grep -oE 'indirect=[0-9]+' | grep -oE '[0-9]+')
@@ -397,12 +307,7 @@ num "Verrichtungen ueber die Ops-Tafel" "${ops:-0}" ge 40
 gleich "jede angestossene Verrichtung kam beim Treiber an ($ops)" "$ops" "$ind"
 num "ueberquerte Einhaengegrenzen" "${cross:-0}" ge 10
 
-# ---------------------------------- 6. FAT32 gegen die echten Werkzeuge
-
 echo "== 6. FAT32 gegen mkfs.vfat, mcopy, mdir und fsck.fat =="
-# 6a: LESEN. Osum kopiert die Dateien der fremden Platte auf SEINE
-# eigene, und der Wirt holt sie dort heraus und vergleicht sie Oktett
-# fuer Oktett mit dem, was `mcopy` hineingelegt hat.
 rc=$(lauf lesen "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
     "osum nokbd vfs script=cp /mnt/hello.txt /a.txt;cp /mnt/blob.bin /b.bin;cp /mnt/unter/tief.txt /c.txt;cp /mnt/einsehrlangername.txt /d.txt;ls /mnt")
 num "der Lesefall beendet sich selbst" "$rc" eq 21
@@ -435,8 +340,6 @@ gleich "der Inhalt der neuen Datei" "osum-war-hier" "$(tr -d '\r\n' < "$TMPD/neu
 mdir -i "$Z@@1048576" ::/neuverz > "$TMPD/mdir2.txt" 2>&1
 hat "$TMPD/mdir2.txt" "x.txt" "im neuen Verzeichnis liegt die neue Datei"
 hat "$TMPD/mdir2.txt" "<DIR>" "das neue Verzeichnis hat . und .."
-# Das Datum: ein FAT-Eintrag ohne Datum traegt Monat 0 und Tag 0, und
-# die gibt es nicht. `mdir` schreibt dann "1980-00-00".
 hat_nicht "$TMPD/mdir1.txt" "1980-00-00" "die neuen Eintraege tragen ein gueltiges Datum"
 
 # 6c: fsck.fat -- das Urteil eines fremden Pruefers.
@@ -446,9 +349,6 @@ if command -v fsck.fat >/dev/null 2>&1; then
     frc=$?
     num "fsck.fat auf dem von Osum beschriebenen Dateisystem (0 = sauber)" "$frc" eq 0
     sed 's/^/        /' "$TMPD/fsck.txt" | head -6
-    # GEGENPROBE: OHNE `umount` bleibt die Zahl der freien Verbaende
-    # "unbekannt" -- fsck sagt es dann, und genau daran sieht man, dass
-    # `umount` wirklich etwas tut.
     rc=$(lauf ohnesync "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
         "osum nokbd vfs script=echo \"unlock hdb\" > /dev/wlock;echo x > /mnt/ohnesync.txt")
     dd if="$TMPD/live2-ohnesync.img" of="$TMPD/teil2.img" bs=512 skip=2048 status=none
@@ -471,10 +371,6 @@ if [ -n "$GPT" ]; then
     hat "$TMPD/gpt.txt" "hallo aus linux" "und die Datei darin ist lesbar"
     hat_nicht "$TMPD/gpt.txt" "gpt crc mismatch" "beide Pruefsummen stimmen"
 
-    # GEGENPROBE: EIN OKTETT IM GPT-KOPF UMGEDREHT. Die Pruefsumme des
-    # Kopfes MUSS anschlagen, und die Platte darf danach NICHT mehr
-    # eingehaengt werden. Ohne diese Zeile ist "die Pruefsumme wird
-    # gerechnet" eine Behauptung.
     cp "$GPT" "$TMPD/gptbad.img"
     python3 - "$TMPD/gptbad.img" <<'PY'
 import sys
@@ -493,19 +389,12 @@ PY
         "GEGENPROBE: und die Platte wird danach NICHT gelesen"
 fi
 
-# GEGENPROBE: OHNE die Partitionstafel wird das Dateisystem bei Block 0
-# gesucht -- dort steht die TAFEL. Es MUSS fehlschlagen.
 rc=$(lauf nopart "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
     "osum nokbd vfs nopart script=mount")
 hat "$TMPD/nopart.txt" "k14: mounts=4" "GEGENPROBE nopart: nur vier Einhaengungen (mit /sys)"
 hat_nicht "$TMPD/nopart.txt" "on /mnt type vfat" \
     "GEGENPROBE nopart: ohne Partitionstafel wird kein FAT32 gefunden"
 
-# EIN PROZESS, DER EINE DATEI AUF /mnt OEFFNET UND ENDET, MUSS DIE
-# EINHAENGUNG WIEDER FREIGEBEN. Der Zaehler haengt an `open_unref`, und
-# ein sterbender Prozess geht durch `file.close_all` -- also an
-# `sys.unref_of` VORBEI. Die erste Fassung dieser Runde zaehlte dort,
-# und `umount /mnt` sagte danach fuer immer -EBUSY.
 rc=$(lauf freigabe "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
     "osum nokbd vfs script=cat /mnt/hello.txt;mount;umount /mnt;mount")
 num "der Freigabelauf beendet sich selbst" "$rc" eq 21
@@ -513,8 +402,6 @@ n=$(grep -ac 'on /mnt type vfat' "$TMPD/freigabe.txt")
 num "/mnt steht vor dem Aushaengen genau einmal in der Tafel" "$n" eq 1
 hat "$TMPD/freigabe.txt" "hallo aus linux" "und der Prozess hat davon wirklich gelesen"
 
-# GEGENPROBE: KEINE ZWEITE PLATTE. Der Kernel muss das sagen und
-# weiterlaufen -- eine Maschine ohne zweites Laufwerk ist keine kaputte.
 rc=$(lauf keineplatte "$TMPD/k0.mb" "$TMPD/root.img" "" \
     "osum nokbd vfs script=mount")
 num "ohne zweite Platte laeuft der Kernel weiter (21)" "$rc" eq 21
@@ -535,8 +422,6 @@ sagt "$TMPD/novfs.txt" dev_type 0 "GEGENPROBE novfs: kein /dev"
 sagt "$TMPD/novfs.txt" st_dev_different 0 "GEGENPROBE novfs: keine zweite Platte im Namensraum"
 sagt "$TMPD/novfs.txt" hdb_boot_ok 0 "GEGENPROBE novfs: /dev/hdb gibt es nicht"
 sagt "$TMPD/novfs.txt" done 1 "und das Messprogramm laeuft trotzdem durch"
-# UND OFS FUNKTIONIERT WEITER. Das ist die Zusage "nichts loeschen,
-# bevor der Ersatz laeuft".
 hat "$TMPD/novfs.txt" "osum: bin" "GEGENPROBE novfs: OFS traegt weiter das Userland"
 
 for w in noprocfs nodevfs nofat; do
@@ -550,14 +435,9 @@ hat_nicht "$TMPD/noprocfs.txt" "on /proc type proc" "GEGENPROBE noprocfs: kein /
 hat_nicht "$TMPD/nodevfs.txt" "on /dev type devfs" "GEGENPROBE nodevfs: kein /dev"
 hat_nicht "$TMPD/nofat.txt" "on /mnt type vfat" "GEGENPROBE nofat: kein FAT32"
 
-# GEGENPROBE: NUR LESEND EINGEHAENGT. Jeder Schreibversuch -EROFS, und
-# die Platte danach unveraendert -- Oktett fuer Oktett.
 rc=$(lauf fatro "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
     "osum nokbd vfs fatro script=mount;echo x > /mnt/darfnicht.txt;mkdir /mnt/auchnicht;rm /mnt/hello.txt;ls /mnt")
 hat "$TMPD/fatro.txt" "type vfat (ro)" "GEGENPROBE fatro: nur lesend eingehaengt"
-# Nicht im Mitschnitt suchen -- die Shell schreibt den Befehl selbst
-# noch einmal hin, und "darfnicht.txt" stuende dort in JEDEM Fall. Die
-# Wahrheit steht auf der PLATTE, und `mdir` liest sie.
 mdir -i "$TMPD/live2-fatro.img@@1048576" :: > "$TMPD/mdirro.txt" 2>&1
 hat_nicht "$TMPD/mdirro.txt" "darfnicht" "GEGENPROBE fatro: die Datei entsteht NICHT"
 hat_nicht "$TMPD/mdirro.txt" "auchnicht" "GEGENPROBE fatro: das Verzeichnis entsteht NICHT"
@@ -568,19 +448,12 @@ else
     bad "GEGENPROBE fatro: die Platte hat sich geaendert"
 fi
 
-# ------------------------------ 9. OFS verliert nichts: der zweite Weg
-
 echo "== 9. OFS ist ein NUTZER der Schicht, kein Sonderfall daneben =="
-# Dieselbe Arbeit, zweimal: einmal auf dem geraden Weg von Runde 62,
-# einmal mit `vfsall` durch die Ops-Tafel. Die Ausgaben muessen OKTETT
-# FUER OKTETT gleich sein -- sonst ersetzt der eine Weg den anderen nicht.
 ARBEIT="script=ls /bin;mkdir /neu;echo eins > /neu/a.txt;cat /neu/a.txt;cp /neu/a.txt /neu/b.txt;cat /neu/b.txt;ls /neu;rm /neu/a.txt;ls /neu;wc /neu/b.txt;grep eins /neu/b.txt"
 rc=$(lauf ofsdirekt "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" "osum nokbd vfs $ARBEIT")
 num "der gerade Weg beendet sich selbst" "$rc" eq 21
 rc=$(lauf ofsvfs "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" "osum nokbd vfs vfsall $ARBEIT")
 num "der Weg ueber die Ops-Tafel beendet sich selbst" "$rc" eq 21
-# Nur die Zeilen der SHELL vergleichen: die Zeilen des Laders nennen
-# Rahmenadressen, und die duerfen sich unterscheiden.
 schnitt() { sed -n '/sh: ready/,/sh: bye/p' "$1" | grep -av '^elf:' | tr -d '\000'; }
 schnitt "$TMPD/ofsdirekt.txt" > "$TMPD/a.out"
 schnitt "$TMPD/ofsvfs.txt" > "$TMPD/b.out"
@@ -588,10 +461,8 @@ dateien_gleich "dieselbe Arbeit auf OFS, beide Wege, Oktett fuer Oktett" \
     "$TMPD/a.out" "$TMPD/b.out"
 n=$(wc -l < "$TMPD/a.out")
 num "und es war wirklich Arbeit (Zeilen im Vergleich)" "$n" ge 10
-# Und die Platten danach: dieselben Oktette auf beiden Wegen.
 dateien_gleich "und die Wurzelplatte danach, Oktett fuer Oktett" \
     "$TMPD/live-ofsdirekt.img" "$TMPD/live-ofsvfs.img"
-# Der Beweis, dass der zweite Weg wirklich ein anderer war.
 o1=$(grep -a -m1 '^k14: mounts=' "$TMPD/ofsdirekt.txt" | grep -oE 'ops=[0-9]+' | grep -oE '[0-9]+')
 o2=$(grep -a -m1 '^k14: mounts=' "$TMPD/ofsvfs.txt" | grep -oE 'ops=[0-9]+' | grep -oE '[0-9]+')
 if [ "${o2:-0}" -gt "${o1:-0}" ]; then
@@ -600,13 +471,7 @@ else
     bad "vfsall aendert nichts an der Zahl der Verrichtungen ($o1 -> $o2)"
 fi
 
-# ------------------------ 10. /proc gegen den Sonderaufruf von Runde K6
-
 echo "== 10. /proc gegen SYS_OSUM_PSTAT: zwei Wege, dieselben Zahlen =="
-# `ps` liest die Aufgabentafel ueber SYS_OSUM_PSTAT (Runde K6, Nummer
-# 1003). `cat /proc/<pid>/stat` liest sie ueber das Dateisystem. Die
-# beiden MUESSEN dieselben Zahlen sagen -- und solange das nicht
-# gemessen ist, wird der Sonderaufruf nicht entfernt.
 rc=$(lauf pstat "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
     "osum nokbd vfs script=ps;cat /proc/1/stat;cat /proc/2/stat")
 num "der Vergleichslauf beendet sich selbst" "$rc" eq 21

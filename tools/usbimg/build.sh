@@ -1,79 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/usbimg/build.sh -- RUNDE USBIMG: EIN ABBILD, DAS AUF ECHTEM BLECH
-# STARTET.
 #
-#   bash tools/usbimg/build.sh [ausgabeverzeichnis]
-#   -> <ausgabeverzeichnis>/orientos-usb.img, mit dd auf einen Stick zu
-#      schreiben. Der alte Name osum-usb.img liegt als VERWEIS daneben,
-#      damit Lesezeichen und Skripte nicht brechen (Runde MESSTAFEL:
-#      das Abbild ist das SYSTEM, also OrientOS -- der Kern darin
-#      heisst weiter osum.mb).
-#
-# ==================================================================
-# WARUM ES SO UND NICHT ANDERS GEBAUT IST
-# ==================================================================
-#
-# 1. MULTIBOOT MIT RAHMENPUFFER, UNTER BIOS UND UNTER UEFI.
-#    Der Multiboot-Kopf in `kernel/arch/x86_64/boot.s` hat Bit 2 gesetzt
-#    (Video), und der Kommentar dort sagt auch warum: ohne dieses Bit
-#    verlangt ein Multiboot-Lader unter UEFI einen Textmodus, den es dort
-#    nicht gibt, und bricht mit "Cannot use text mode with UEFI" ab. Mit
-#    dem Bit setzt die Firmware einen LINEAREN Rahmenpuffer, und DASSELBE
-#    Abbild startet ueber beide Wege. Genau das misst tools/usbimg/run.sh.
-#
-# 2. DIE WURZEL IST EIN BOOT-MODUL UND KEINE PARTITION.
-#    Das ist die wichtigste Entscheidung dieses Skripts, und sie folgt
-#    direkt aus dem Zweck des Sticks. Der Stick soll auf einem Rechner
-#    starten, von dem wir NICHT WISSEN, was fuer ein Plattencontroller
-#    darin steckt -- das herauszufinden ist ja der Grund, warum es ihn
-#    gibt. Laege die Wurzel auf einer Partition, muesste der Kern dieses
-#    Geraet lesen koennen, um ueberhaupt bis zu der Meldung zu kommen,
-#    die sagt, dass er es nicht kann. Als Modul laedt der LADER die
-#    Wurzel -- ueber die Firmware, die ihr eigenes Geraet immer lesen
-#    kann --, und der Kern findet sie fertig im Arbeitsspeicher. Er
-#    braucht dafuer keinen einzigen Treiber.
-#
-#    `kernel/bootmod.fi` kann das seit Runde K10, und `kmain.osum` nimmt
-#    das Modul seit derselben Runde als Wurzelplatte. Was diese Runde
-#    hinzugefuegt hat, ist die gleiche Moeglichkeit fuer den WEG UEBER
-#    DEN FENSTERSERVER (`kmain.surface`, Abschnitt 2) -- der lud seine
-#    Schriften bis dahin nur von einer ATA-Platte.
-#
-# 3. TROTZDEM GPT MIT EFI-PARTITION UND WURZELPARTITION.
-#    Was `install.fi` aus Runde INSTALL kann, wird hier benutzt und nicht
-#    nachgebaut: die Tafel ist GPT, Partition 1 ist eine EFI-Partition
-#    (FAT32, Typ EF00), Partition 2 traegt DASSELBE OFS-Dateisystem noch
-#    einmal, diesmal als Partition. Der Start benutzt sie nicht -- aber
-#    ein Rechner, dessen Controller sich als lesbar herausstellt, hat
-#    damit sofort eine Wurzel auf dem Stick, und `/bin/install` findet
-#    die Lage vor, fuer die es gebaut wurde.
-#
-# 4. BIOS UND UEFI AUS EINER DATEI.
-#    Limine legt seinen BIOS-Ladeteil in den MBR-Bereich und nach
-#    `limine-bios.sys` auf der EFI-Partition; unter UEFI startet die
-#    Firmware `/EFI/BOOT/BOOTX64.EFI` von derselben Partition. Eine
-#    Datei, zwei Startwege, dieselbe `limine.conf`.
-#
-# 5. UND DIE DATEIEN, DIE IN DER LETZTEN RUNDE GEFEHLT HABEN, WERDEN
-#    GEZAEHLT UND NICHT GEHOFFT.
-#    Das vorige Bootabbild enthielt weder locale/de noch locale/en noch
-#    die Symbole unter /etc/netview/ -- deshalb fiel die Oberflaeche auf
-#    englische Ersatztexte und Textmarken zurueck, und der Fehler sah wie
-#    einer des Zeichenwerks aus, obwohl er im Abbildbau lag. Deshalb
-#    liest dieses Skript das FERTIGE Dateisystem mit `mkfs.py list`
-#    zurueck und bricht ab, wenn auch nur einer der Pflichtpfade fehlt.
-#    Die Liste steht unten unter PFLICHT.
-#
-#    RUNDE TUERSCHLOSS: UND DIE BUENDEL STEHEN JETZT AUCH DARIN.
-#    `/bin/settings` war gebaut, 635 600 Oktette gross und im Abbild --
-#    aber ohne `/apps/settings.osp/` stand es in keinem Menue und war
-#    ueber die Oberflaeche nicht erreichbar (Runde DURCHKLICK, 3.9).
-#    Die Pflichtliste hat das nicht gemerkt, weil sie nur nach `/bin`
-#    gesehen hat: ein Programm ist auf diesem System aber erst dann
-#    da, wenn es auch sein Buendel hat. Also stehen die sechs Buendel
-#    hier, und ein siebtes, das jemand vergisst, faellt beim naechsten
-#    Bau auf und nicht erst beim Durchklicken.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
@@ -86,30 +12,6 @@ STUFE=${STUFE:-0}
 CC=${FIRNC:-vendor/firn/bin/firnc}
 LIMINE=${LIMINE_DIR:-/root/jarvis/projects/u_DiS4in7esMF1/orientos/vendor/limine}
 ESP_MIB=${ESP_MIB:-96}
-# RUNDE MERGE9: 65536 Bloecke (32 MiB) statt 40960 (20 MiB).
-# GEMESSEN: das Abbild der Runde MERGE-8 hatte bei 40960 Bloecken noch
-# free=8945, also 4,4 MiB frei. Certus ist 6 493 760 Oktette (6,19 MiB)
-# und passte damit NICHT. Mit 65536 bleiben nach Certus noch rund 10 MiB
-# fuer busybox, lua und sqlite.
-# WARUM DAS GEHT: seit OFS v3 ist die Blockkarte MEHRBLOCKIG
-# (SB_BMBLOCKS, kernel/fs.fi). FS_KARTEN=128 traegt 128*4096 = 524 288
-# Bloecke = 256 MiB; 65536 Bloecke brauchen davon 16. Der Satz in
-# STATUS-FREMDLAND.md ("4096 Bloecke = 2 MB je Platte") und der
-# Kommentar in fs.fi:236 stammen aus der Zeit VOR OFS v3 und gelten
-# nicht mehr -- das gebaute Abbild meldet bmblocks=128.
-# DAILY-DRIVER (02.10.2026): 65536 -> 81920 blocks (40 MiB). The PDF viewer
-# (pdfview, 1.9 MB), accountcli and the fatter installer filled the 32 MiB image:
-# "mkfs: the disk is full". 81920 blocks need 20 of the 128 map blocks.
-# r373 (05.10.2026): 81920 -> 90112 blocks (44 MiB). The lock screen, the
-# sign-in screen, certus, themetest and a11ydemo carry fUi's scene host now
-# (~250 KB each): "mkfs: the disk is full" again.
-# 11.10.2026: 90112 -> 102400 blocks (50 MiB). The personal Dell image was already built with FS_BLOCKS=102400 by hand; with the
-# default the build on main stopped with "mkfs: the disk is full" (tools/usbimg/run.sh 0/1). EFI partition (96 MiB) still holds it.
-# 16.10.2026 (W-IMG2, r893): 102400 -> 122880 blocks (60 MiB). JARVIS Mini (1.8 MB) + hotkeyd + wmplug in the personal image: with 102400 the
-# personal build stopped with "mkfs: the disk is full" (tools/usbimg/run.sh 0/1). EFI partition (96 MiB) holds the 60 MiB root (measured).
-# 19.10.2026 (benchd, r1223/r1224): 122880 -> 98304 blocks (48 MiB). The whole root.img is loaded as a boot module and stays in RAM
-# (live stick), free blocks included. Without the /boot kernel copy and with the programs built without the heuristic inliner
-# the personal image uses ~32 MiB, so 48 MiB still leaves ~16 MiB free (before: 2.4 MiB free in 60 MiB) and saves 12 MiB of RAM and load.
 [ "${HP_STICK:-0}" = 1 ] && : "${BOOT_KERNEL_COPY:=1}"
 FS_BLOCKS_DEFAULT=98304
 [ "${BOOT_KERNEL_COPY:-0}" = 1 ] && FS_BLOCKS_DEFAULT=114688
@@ -122,19 +24,9 @@ FS_INODES=${FS_INODES:-$FS_INODES_DEFAULT}
 FS_KARTEN=${FS_KARTEN:-$FS_KARTEN_DEFAULT}
 
 mkdir -p "$OUT"
-# ============================== RUNDE MARKE: DER NAME AUS EINER QUELLE
-#
-# Bis hierher stand "orientos" in dieser Zeile. Jetzt kommt er aus
-# `marke.conf`, geschlagen von `OSUM_MARKE_*` aus der Umgebung -- genau
-# wie im Kern und wie in der Vorlage
-# /root/projects/freeviewer/src/brand.rs. Eine Umbenennung ist damit
-# ein Bauaufruf:
 #
 #   OSUM_MARKE_PRODUKT="Xoffi OS" bash tools/usbimg/build.sh /tmp/bau
 #
-# `MARKE_DATEI` ist der abgeleitete Dateiname (PRODUKT kleingeschrieben,
-# ohne Leerzeichen) -- die Entsprechung zu `reg_key()` in der Vorlage:
-# abgeleitet, nicht gespeichert.
 . tools/lib/marke.sh
 marke_laden . || fehler "marke.conf laesst sich nicht lesen"
 RENDERED="$OUT/rendered"
@@ -207,9 +99,6 @@ else
 fi
 
 IMG="$OUT/${MARKE_DATEI}-usb.img"
-# DER ALTE NAME BLEIBT ERREICHBAR. Er haengt am KURZnamen und nicht am
-# Produktnamen -- Justins Lesezeichen zeigt auf osum-usb.img, und ein
-# Verweis, der bei jeder Umbenennung mitwandert, waere kein Verweis.
 IMG_ALT="$OUT/${MARKE_KURZ}-usb.img"
 
 ph() { printf '%s\t%s\n' "$SECONDS" "$*" >> "$OUT/phases.log"; }
@@ -232,82 +121,8 @@ bash tools/build-kernel.sh "$OUT/osum.mb" --stufe "$STUFE" > "$OUT/k.log" 2>&1 \
     || { tail -20 "$OUT/k.log" >&2; fehler "der Kern laesst sich nicht bauen"; }
 sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
 
-# ====================================================== 2. Ring 3
-# RUNDE MERGE-2: DIE DREI NAMEN SIND ENGLISCH. Der Zweig USBIMG ist von
-# einem Stand vor der Runde RENAME-EN abgezweigt; dort hiessen die
-# Programme noch `schreibtisch`, `leiste` und `einstellungen`. Die
-# Dateien heissen seit RENAME-EN desktop.fi, taskbar.fi, settings.fi --
-# und weil die Schleife unten fehlende Quellen still ueberspringt, sind
-# die drei Programme sonst einfach nicht im Abbild, und erst die
-# Pflichtliste in Abschnitt 5 faellt darueber ("FEHLT IM ABBILD:
-# /bin/schreibtisch").
-# ================================================ RUNDE ECHTHARDWARE-5
-# `taskmgr` MUSSTE HIER STEHEN, UND ER STAND NICHT DA.
-#
-# Justins Befund F: "Taskmanager und Einstellungen lassen sich nicht
-# oeffnen, die Knoepfe im Kontrollzentrum reagieren nicht."
-#
-# NACHGEWIESEN, nicht vermutet: die Wurzelpartition des ausgelieferten
-# Abbildes orientos-usb-20260910-44a5af3.img, ausgelesen mit
-#
 #     python3 tools/osum/mkfs.py list <wurzel.img>
 #
-# hat 177 Inoden und darunter KEIN /bin/taskmgr. Das Kontrollzentrum
-# startet aber genau diesen Pfad (kernel/user/qs.fi, `p_taskmgr`).
-# Ein Knopf, dessen Programm nicht auf der Platte liegt, kann nicht
-# reagieren -- und weil `SYS_EXEC` still fehlschlaegt, sah es aus, als
-# waere der Knopf kaputt.
-#
-# `/bin/settings` LAG im Abbild; der Einstellungsknopf hat deshalb eine
-# andere Ursache und wird getrennt behandelt.
-# RUNDE INSTALLER (P-001): `installer` MUSS HIER STEHEN.
-#
-# Dieselbe Falle wie bei `taskmgr` in Runde ECHTHARDWARE-5 und bei
-# `settings` in Runde TUERSCHLOSS: das Programm ist gebaut, das
-# Buendel liegt unter assets/apps/ -- und wenn der Name hier fehlt,
-# ist es trotzdem nicht auf dem Stick. Der Starter zeigt dann einen
-# Eintrag, dessen Programm es nicht gibt, und `SYS_EXEC` schlaegt
-# STILL fehl: es sieht aus, als reagiere der Knopf nicht.
-#
-# Und ausgerechnet dieses Programm darf nicht fehlen -- es ist der
-# einzige Weg vom Stick auf eine Platte, und ein Stick, der sich
-# nicht installieren laesst, bleibt ein Vorfuehrstueck.
-# ============ INTEGRATIONSRUNDE 19.09.2026: `nedit` HAT HIER GEFEHLT.
-#
-# Die Runde GUI-EDITOR hat /bin/nedit gebaut, gemessen (18/0) und ein
-# Buendel dafuer angelegt (assets/apps/nedit.osp). In DIESE Zeile ist
-# es nie eingetragen worden -- und `tools/k15/bundle.py` bekommt
-# `nur="$PROGS"`, filtert das Buendel also mit heraus. Ergebnis: auf
-# dem Stick gab es den neuen Editor nicht, weder unter /bin noch im
-# Startmenue, und der alte Zeileneditor `edit` war weiterhin das
-# einzige, was "Editor" hiess.
-#
-# GEMESSEN in der Integrationspruefung: ein Lauf des fertigen Abbilds
-# fand `/bin/nedit` nicht im Wurzelabbild (grep -c nedit root.img = 0),
-# waehrend derselbe Quellbaum in tools/alltag/build.sh 18/0 meldete --
-# die Abnahme baut ihre eigene Platte und hatte nedit in ihrer Liste.
-# Genau so sieht ein Programm aus, das "fertig" ist und trotzdem bei
-# niemandem ankommt.
-#
-# ============ RUNDE DREI 22.09.2026: `papierkorb` HAT HIER GEFEHLT --
-# ZUM DRITTEN MAL DERSELBE FEHLER (nach `nedit` und `bold.ttf`).
-#
-# `kernel/user/papierkorb.fi` ist seit Runde ALLTAG fertig: ein Fenster
-# mit Tabelle und vier Knoepfen (Zurueckholen, Entfernen, Leeren, Neu
-# lesen), und `tools/alltag/run.sh` misst es mit `progs="... papierkorb
-# ..."` in SEINER eigenen Liste. In DIESER Zeile stand es nie.
-#
-# WAS DAS BEDEUTET HAT: der Dateimanager loescht mit Entf in den Korb
-# (`expakt.in_korb` -> `trash.hinein`) und bietet ihn in der
-# Seitenleiste und unter "Gehe zu" als Ort an -- aber das Programm, mit
-# dem man etwas WIEDERHERSTELLT, lag auf dem Stick nicht. Gelegtes kam
-# hinein und nicht wieder heraus, ausser von Hand auf der
-# Kommandozeile. Genau der Rest, den OFFEN.md unter D-016
-# "Wiederherstellen aus der Oberflaeche" fuehrt.
-#
-# `edit` BLEIBT: es ist das Terminalprogramm (kein wlib), und die
-# Abnahme der Runde GUI-EDITOR prueft ausdruecklich, dass es
-# unveraendert eines ist.
 PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
 widgetdemo taskmgr installer dualcli locate edit nedit trashbin sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
@@ -323,64 +138,6 @@ orientbus act settingsd axd sntp accountcli pdfview store stored mediad presentl
 if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PROGS="$PROGS snip" ;; esac; case " $PROGS " in *" snipt "*) ;; *) PROGS="$PROGS snipt" ;; esac; fi
 case " $PROGS " in *" xfx "*) case " $PROGS " in *" wayd "*) ;; *) PROGS="$PROGS wayd" ;; esac ;; esac
 
-# RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
-# DIESE.
-#
-# `docs/BLECH-BEREIT.md` Abschnitt 7 hat die Liste selbst geschrieben:
-# `ota`, `fetch`, `host`, `jarvisd`, `jsig`, `jarvisctl`, `pollbr` lagen
-# in keinem Stick-Abbild. Der Kern konnte das Netz, die Programme waren
-# gebaut und gemessen -- sie standen nur nicht in dieser Zeile. Also:
-#
-#   ota         das Update holen, pruefen, einspielen (profile kernel)
-#   host        einen Namen aufloesen -- ohne ihn ist `store.fleitec.com`
-#               eine Zeichenkette und keine Adresse
-#   dhcp        die Adresse UND den Nameserver aus dem Netz. Ohne ihn
-#               gibt es kein /etc/resolv.conf, und ohne das keinen Namen
-#   jsig        der Ed25519-Ausweis des Geraets fuer die Bruecke
-#   jarvisctl   die Bruecke bedienen (koppeln, Protokoll, Fotoschein)
-#   pollbr      der Wartedienst der Runde POLL (hiess bis BLECH-ECHT
-#               ebenfalls jarvisd, siehe docs/RUNDE-BLECH-ECHT.md 2.4)
-#   reboot      nach `ota apply` will jemand neu starten
-#
-# RUNDE TUERSCHLOSS: UND VIER, DIE GEBAUT WAREN UND TROTZDEM GEFEHLT HABEN.
-#
-#   shutdown    die Maschine AUSSCHALTEN. `kernel/user/shutdown.fi`
-#               gibt es seit Runde K18 und es kann genau das, was ein
-#               Herunterfahren ist (ueber init: SIGTERM an die Dienste,
-#               warten, SIGKILL, sync, aushaengen, ACPI S5; ohne init
-#               wenigstens sync und der Aufruf). Es stand nur nicht in
-#               dieser Zeile -- Runde DURCHKLICK 7.4 hat daraus zu
-#               Recht "kein Herunterfahren ueber die Oberflaeche"
-#               gemacht: der einzige Weg aus dem System war der
-#               Netzschalter, und der riskiert bei jedem Mal das
-#               Dateisystem.
-#   power       das Bedienprogramm der Energieverwaltung (Runde K18).
-#               Gehoert daneben: wer ausschalten kann, will auch die
-#               Helligkeit und den Akkustand sehen.
-#   firnc, fas  DER UEBERSETZER UND SEIN ASSEMBLER -- der Punkt, an dem
-#               dieses System aufhoert, ein Vorfuehrstueck zu sein.
-#               `tools/k16/run.sh` ist mit 64/0 gruen: firnc laeuft AUF
-#               Osum, liest eine .fi von der Platte, schreibt eine .s,
-#               und `fas` macht daraus ein laufendes Programm. Beides
-#               war im Abbild bisher nicht enthalten (DURCHKLICK 8.1:
-#               "auf dem Stick laesst sich kein Firn-Programm
-#               uebersetzen"). Ein selbsttragendes System, das sich
-#               selbst nicht fortsetzen kann, ist keines.
-#
-# UND ZWEI, DIE ANDERS GEBAUT WERDEN MUESSEN:
-#
-#   fetch       HTTPS mit TLS 1.3
-#   jarvisd     die JARVIS-Bruecke, TLS 1.3 hinaus
-#
-# Beide sind `--profile=app` und binden gegen die VOLLE Firn-Bibliothek
-# aus `vendor/firn/lib`, nicht gegen die libc dieses Repos. Der Grund
-# steht in `tools/bridge/build.sh`: `crypto.sha512` dieses Repos und
-# `std.crypto.sha512` von Firn heissen beide `sha512`, und der
-# Uebersetzer fuehrt Module unter ihrem letzten Namen. Deshalb ZWEI
-# Uebersetzungslaeufe in EINEM Abbild -- der Weg ist woertlich der aus
-# `tools/install/build.sh` und `tools/bridge/build.sh`.
-# ROUND ROADMAP-5 (K-008): `ipprint` prints over IPP -- same build path
-# (profile app, TrueType reader from the library), see kernel/app/ipprint.fi.
 APPS=${APPS:-"fetch jarvisd ipprint socfleitec rootsctl smbctl"}
 # W-MINI2: the network half of the JARVIS Mini (TLS + login + WebSocket), personal stick only
 if [ "$IMAGE_PROFILE" = personal ]; then case " $APPS " in *" jmlink "*) ;; *) APPS="$APPS jmlink" ;; esac; fi
@@ -388,24 +145,7 @@ if [ "$IMAGE_PROFILE" = personal ]; then case " $APPS " in *" jmlink "*) ;; *) A
 as --64 -o "$OUT/crt.o" kernel/user/crt.s || fehler "crt.s laesst sich nicht assemblieren"
 gebaut=""
 rc=0
-# RUNDE ABBILD: EIN PROGRAMM IM PROFIL `app` WIRD ANDERS GEBAUT.
 #
-# Seit Runde 31 kommen die Bedienelemente der Oberflaeche aus fUi, und
-# fUi rechnet in f64 und benutzt `std.rt` -- beides ist im Profil
-# `kernel` gesperrt. Wessen Wurzeldatei deshalb `profile app` sagt
-# (desktop, settings, launcher, explorer, widgetdemo), braucht ZWEI
-# Unterschiede, und ohne sie baut der Stick nicht mehr:
-#
-#   1. `--profile=app`, sonst sagt der Uebersetzer
-#      "the module 'std.rt' belongs to the standard library and is not
-#       available in profile 'kernel'"  (vendor/firn/lib/fui/render.fi)
-#   2. KEIN crt.o. Unter `app` legt firnc dieselben vier Befehle selbst
-#      hinein, die in crt.s stehen; crt.o dazuzubinden waere
-#      "multiple definition of `_start`".
-#
-# Genau diese Unterscheidung trifft `tools/look/shot.sh` seit Runde 31,
-# und sie wird auch hier GELESEN und nicht getippt -- sonst stimmt sie
-# nach der naechsten Umstellung nicht mehr.
 . tools/kernel/buildcache.sh
 FIRNQ=""
 # Fallback: without FIRN_REPO, take the PINNED firn commit (vendor/firn/COMMIT) from a
@@ -471,21 +211,6 @@ for p in $PROGS; do
     built_list="$built_list $p"
 done
 
-# ------------------------------------------------ 2b. die zwei Apps
-#
-# KEIN crt.o: Firns eigenes `_start` ist der Eintrittspunkt, und es tut
-# schon das, was Osums Lader erwartet.
-#
-# UND FIRNLIB BLEIBT AUF lib/ -- das ist der Weg aus tools/install/build.sh
-# und er ist nicht willkuerlich. `fetch` braucht BEIDE Haelften:
-# `std.io`, `std.net`, `tls.tls` von Firn und `libc.dns` aus diesem
-# Repo. Der Uebersetzer sucht ein Modul erst in $FIRNLIB und danach in
-# `<Verzeichnis des Uebersetzers>/../lib` -- und weil `firnc` unter
-# vendor/firn/bin liegt, ist das genau vendor/firn/lib. Mit
-# FIRNLIB=lib/ sind damit beide Haelften erreichbar; mit
-# FIRNLIB=vendor/firn/lib faellt `libc.dns` heraus, und das sieht dann
-# so aus:
-#     error: cannot read 'kernel/app/libc/dns.fi'  --> fetch.fi:88
 gebaut_app=""
 build_app() {
     local p=$1
@@ -542,33 +267,6 @@ if [ -n "$gebaut_app" ]; then
 fi
 export FIRNLIB="$ROOT/lib"
 
-# ======================================== 2c. DER UEBERSETZER SELBST
-#
-# RUNDE TUERSCHLOSS: `firnc` KOMMT MIT AUF DEN STICK.
-#
-# WARUM DAS DER WICHTIGSTE NACHTRAG DIESER RUNDE IST. Runde DURCHKLICK
-# hat die vollstaendige Dateiliste des Abbilds gelesen und festgestellt
-# (8.1): kein `firnc`, kein `fas` -- "auf dem Stick laesst sich kein
-# Firn-Programm uebersetzen". Ein System, das sich selbst nicht
-# fortsetzen kann, ist ein Vorfuehrstueck. `tools/k16/run.sh` ist dabei
-# mit 64/0 gruen: der Uebersetzer LAEUFT auf Osum, er lag nur nicht
-# darauf.
-#
-# WOHER DIE QUELLE KOMMT. `firnc` ist nicht Teil dieses Baums; es ist
-# `bin/firnc1.fi` aus dem Firn-Baum, uebersetzt vom festgenagelten
-# `firnc0` und gegen `kernel/user/user.ld` gebunden -- Abbild ab
-# 0x40100000 statt 0x400000. Das ist woertlich der Weg aus
-# `tools/k16/run.sh` Abschnitt 4, und er steht hier nicht noch einmal
-# anders: dieselben zwei Befehle, damit nicht zwei Wege entstehen, aus
-# derselben Quelle zwei verschiedene Uebersetzer zu machen.
-#
-# KEIN crt.o: `firnc1.fi` hat ein `fn main`, und dafuer erzeugt der
-# Uebersetzer sein `_start` selbst (genau deshalb legt `kernel/elf.fi`
-# den Argumentblock auf den Stapelzeiger).
-#
-# WENN DIE QUELLE FEHLT, ist das kein Abbruch: der Stick ist ohne
-# Uebersetzer schlechter, aber nicht kaputt. Dann sagt diese Stelle,
-# dass er fehlt, und der Rest laeuft weiter.
 if [ -n "$FIRNQ" ]; then
     wait "$FIRNC_PID"   # the background firnc compile (started with the programs) is done
     if [ ! -f "$OUT/firnc-osum.fail" ]; then
@@ -583,7 +281,6 @@ else
     echo "== HINWEIS: kein Firn-Baum gefunden, /bin/firnc fehlt im Abbild" >&2
 fi
 
-# ================================================ 3. was sonst auf die Platte
 ph firnc-osum-done
 python3 tools/netview/icons.py bauen "$OUT/icons" > "$OUT/icons.log" 2>&1 \
     || { tail -10 "$OUT/icons.log" >&2; fehler "die Symbole lassen sich nicht bauen"; }
@@ -600,33 +297,8 @@ printf 'root:x:0:0:root:/:%s\n%s:x:1000:1000:%s:/users/%s:%s\n' \
 # ============================================== RUNDE ANMELDUNG
 # /etc/shadow, /etc/group, /etc/login.conf, /etc/sperre.conf
 #
-# BIS HIERHER GAB ES KEIN /etc/shadow IM ABBILD. `/etc/passwd` lag
-# darin (zwei Konten, `root` und `justin`), aber kein einziger
-# Kennworteintrag -- gemessen am Abbild vom 13.09.:
-#
 #     python3 tools/osum/mkfs.py list root.img | grep shadow   ->  nichts
 #
-# Damit konnte sich niemand anmelden, auch wenn `login` im Abbild
-# gelegen haette (tat es auch nicht). Der Schreibtisch startete direkt
-# aus dem Kern als root, und das ist der Befund P-002.
-#
-# DAS KENNWORT STEHT NICHT IM KLARTEXT AUF DER PLATTE, und das ist
-# keine Behauptung, sondern das Format: `$osum1$<runden>$<salz>$<dk>`
-# mit PBKDF2-HMAC-SHA256, genau das, was `kernel/user/pw.fi`
-# (`make_hash`, `check_hash`) liest und schreibt. Die Rundenzahl ist
-# `pw.KOSTEN` = 8192; sie wird HIER AUS DER QUELLE GELESEN und nicht
-# getippt, sonst laufen die beiden Zahlen nach der naechsten Aenderung
-# auseinander.
-#
-# DAS SALZ IST ZUFAELLIG, je Konto ein eigenes, aus os.urandom. Ein
-# festes Salz waere in jedem Abbild dasselbe -- dann hilft eine
-# Regenbogentabelle wieder, und genau dagegen ist ein Salz da.
-#
-# DAS ANFANGSKENNWORT steht in der Datei FASSUNG des Bauverzeichnisses
-# und wird auf der Bauausgabe GENANNT. Es ist kein Geheimnis dieses
-# Systems, sondern eines, das der Mensch beim ersten Anmelden aendert
-# (`passwd`); ein Abbild ohne bekanntes Anfangskennwort waere eines,
-# an dem sich niemand anmelden kann.
 PW_RUNDEN=$(sed -n 's/^const KOSTEN: u64 = \([0-9]*\).*/\1/p' kernel/user/pw.fi | head -1)
 [ -n "$PW_RUNDEN" ] || fehler "die Rundenzahl steht nicht in kernel/user/pw.fi"
 # ROUND LIVE: on the public image root is LOCKED (`!` is no hash, so
@@ -664,14 +336,9 @@ with open(d + "/group", "w") as f:
 PYEOF
 chmod 600 "$OUT/shadow"
 
-# /etc/login.conf -- was die Anmeldung an Verzoegerung nimmt.
-# `verzoegerung_ms` ist die ERSTE Wartezeit; sie verdoppelt sich mit
-# jedem Fehlversuch (login.fi, glogin.fi).
 printf '# /etc/login.conf -- die Anmeldung.\n# verzoegerung_ms: die erste Wartezeit nach einem Fehlversuch.\n#   Sie VERDOPPELT sich mit jedem weiteren und ist bei einer Minute\n#   gedeckelt. max_versuche gilt nur fuer die Anmeldung am Terminal.\nverzoegerung_ms=1000\nmax_versuche=3\n# runden: der Kostenfaktor fuer NEUE Kennwoerter (passwd).\nrunden=%s\n' \
     "$PW_RUNDEN" > "$OUT/login.conf"
 
-# /etc/sperre.conf -- der Leerlauf, nach dem von selbst gesperrt wird.
-# 600 Sekunden sind zehn Minuten (W-D: vorher 300); 0 hiesse "nie von selbst".
 printf '# /etc/sperre.conf -- der Sperrbildschirm.\n# leerlauf: Sekunden ohne Eingabe, nach denen von selbst gesperrt\n#   wird. 0 schaltet den Waechter ab.\nleerlauf=%s\n' \
     "${SPERRE_LEERLAUF:-$([ "$IMAGE_PROFILE" = public ] && echo 0 || echo 600)}" > "$OUT/sperre.conf"
 # ROUND LIVE: /etc/autologin -- ONLY on the public image. glogin signs
@@ -689,26 +356,6 @@ else
     sagen "konten      2 (root, $KONTO), PBKDF2 $PW_RUNDEN Runden, Salz je Konto zufaellig"
     sagen "            Anfangskennwort $KONTO='$PW_KONTO' root='$PW_ROOT' -- mit passwd aendern"
 fi
-# ============================================== RUNDE STARTKNOPF
-# Die Vorgaben der Leiste, nach Justins Vorlage (Windows 11):
-#   labels=never    Programmknoepfe nur als Symbol -- ein Symbol wird
-#                   nie abgeschnitten ("St", "Termina" waren die Folge
-#                   einer festen Hoechstbreite, nicht von Platzmangel).
-#   clock_seconds=1 Die Uhr tickt SICHTBAR. Ohne Sekunden wird die
-#                   Leiste hoechstens einmal je Minute neu gemalt, und
-#                   das ist von "eingefroren" nicht zu unterscheiden --
-#                   genau der Befund, den Justin gemeldet hat.
-#   clock_date=1    Datum daneben; die Feldbreite waechst mit.
-#   hide_missing=1  Kein Symbol und kein Text fuer Hardware, die es
-#                   nicht gibt. Das "kein Akku" auf einem Tischrechner
-#                   war keine Auskunft.
-#   height=40       28 war auf 3440x1440 ein Strich.
-# W3 polish run: THE WINDOWS 11 BAR IS THE DEFAULT OF THE IMAGE.
-#   height=48        Windows 11 height (buttons 40, symbols 24)
-#   align=center     pinned programs and windows centred
-#   clock_lines=2    time over date, NO seconds (clock_seconds=0), four digit year
-#   tray_*           chevron, language (keyboard + DEU/DE), network/sound/battery
-#                    as one capsule with icons only (battery keeps its percentage)
 printf '# taskbar.conf\nedge=bottom\nheight=48\nwidth=104\nautohide=0\nontop=1\nalign=center\nlabels=never\nclock_seconds=0\nclock_date=1\nclock_weekday=0\nclock_lines=2\nclock_year4=1\ntray_language=1\ntray_chevron=1\ntray_group=1\nhide_missing=1\n' \
     > "$OUT/taskbar.conf"
 # ROUND LIVE: on the public stick "Install OrientOS" is pinned first --
@@ -716,67 +363,18 @@ printf '# taskbar.conf\nedge=bottom\nheight=48\nwidth=104\nautohide=0\nontop=1\n
 if [ "$IMAGE_PROFILE" = public ]; then
     printf 'pins=installer,explorer,terminal,settings\n' >> "$OUT/taskbar.conf"
 fi
-# ====================================================== RUNDE MODULE
-# /etc/module.conf -- DIE LAGE DER SCHREIBTISCHMODULE, AUSGELIEFERT.
 #
-# Eine Zeile je Modul: name=an,anker,dx,dy. Der Anker ist die ECKE
-# (0 links oben, 1 rechts oben, 2 links unten, 3 rechts unten), dx/dy
-# zaehlen von ihr aus nach innen -- deshalb liegt ein Modul auf jedem
-# Schirm an derselben Ecke und nicht bei 1700 Bildpunkten, die es auf
-# einem 1280er nicht gibt.
-#
-# `taste=280` ist F9 (0x118): das Kuerzel, das den Bearbeitungsmodus
-# aufmacht. Es steht in der Datei und nicht im Quelltext, damit die
-# Seite "Darstellung" es aendern kann.
 printf '# /etc/module.conf -- name=an,anker,dx,dy\nuhr=1,1,16,16\nspeicher=1,1,16,56\ncpu=1,1,16,96\ntaste=280\n' \
     > "$OUT/module.conf"
 
-# ================================================= RUNDE DREI (D-016)
-# /etc/papierkorb.conf -- DIE GRENZE DES PAPIERKORBS.
-#
-# `kernel/user/trash.fi::grenze()` liest hier `grenze=<MiB>` und faellt
-# ohne die Datei auf 64 MiB zurueck. Die Vorgabe ist also nicht neu --
-# neu ist, dass sie im Abbild STEHT und damit aenderbar ist, ohne den
-# Quelltext anzufassen. Vorher gab es keinen Weg, sie zu verstellen:
-# die Datei wurde nie ausgeliefert.
-#
-# WARUM 512 UND NICHT 64. Ein Korb, der bei 64 MiB das Aelteste
-# endgueltig wegwirft, verliert bei einem einzigen geloeschten Video
-# alles, was vorher darin lag -- und das ist genau der Fall, in dem man
-# den Korb braucht. 512 MiB sind auf jedem Traeger, auf den dieses
-# System passt, verschmerzbar.
 printf '# /etc/papierkorb.conf -- die Grenze des Papierkorbs.\n# grenze=<MiB>: wird sie ueberschritten, fliegt das AELTESTE heraus,\n# bis es wieder passt. trash.fi sagt jedes endgueltige Loeschen auf\n# der seriellen Leitung an.\ngrenze=512\n' \
     > "$OUT/papierkorb.conf"
 
-# ============================================ RUNDE ECHTHARDWARE-1
-# DAS ABBILD BEKOMMT DAS AUSSEHEN, DAS DIE DEMO HATTE.
-#
-# Justin, vor den Fotos vom 09.09.: "alles komplett eckig -- nicht die
-# Demo, die du mir damals gezeigt hast". Er hat recht, und der Grund
-# stand nicht im Kernel, sondern in DIESER Datei.
-#
-# Die Demo (.design-shots/nachher/*.png) entstand mit
-# tools/design/capture.sh, und dieses Skript legt VIER Dinge ins
-# Abbild, die hier bis heute fehlten:
-#
 #     /etc/theme.conf   scheme=, mode=, shape=
 #     /etc/schemas/     die Farbschemata
 #     /etc/shapes/      die Formsaetze (osum.shape: radius_window=8)
 #     /etc/themes/      die fertigen Voreinstellungen
 #
-# OHNE /etc/shapes/ UND OHNE `shape=` BLEIBT `wlibc.met` AUF `classic`,
-# und classic ist radius_window=0. Die Taskleiste ruft `form_push()`
-# treu bei jedem Start -- sie schickt dann eben lauter Nullen an
-# `wm.FM_RADIUS`, und der Server malt gehorsam rechteckig. Es war also
-# nie ein fehlender Zeichenweg, es war eine fehlende Datei.
-#
-# Und die Farben: bis hierher kam /etc/theme aus tools/k15/tree.py --
-# zwoelf DUNKLE Flaechenfarben aus Runde K15, ohne Schriftfarbe. Die
-# Demo lief auf `scheme=day mode=light`. Das ist der zweite Teil von
-# "die Farben passen nicht zusammen".
-#
-# GEWAEHLT IST `tageslicht`, weil dessen Preset Zeile fuer Zeile die
-# Kombination der Demo ist (scheme=day, mode=light, shape=osum).
 THEMA=${THEMA:-tageslicht}
 lies_preset() {
     grep -a "^$1=" "assets/themes/$THEMA.preset" 2>/dev/null \
@@ -786,19 +384,7 @@ T_SCHEME=$(lies_preset scheme); T_SCHEME=${T_SCHEME:-day}
 T_MODE=$(lies_preset mode);     T_MODE=${T_MODE:-light}
 T_SHAPE=$(lies_preset shape);   T_SHAPE=${T_SHAPE:-osum}
 T_ACCENT=$(lies_preset accent)
-# ==================================================== RUNDE FARBE
-# `dark_scheme=` UND `accent=` GEHOEREN MIT INS ABBILD.
 #
-# Ohne die erste Zeile schaltet der Dunkelmodus nur das ANDERE ENDE
-# DERSELBEN RAMPE ein -- und die Rampe von `tageslicht` ist Slate,
-# also blau (#0f172a hat B-R = +27). Die Vorlage sagt seit dieser
-# Runde `dark_scheme=midnight` (Zinc, B-R = +3); wer sie hier nicht
-# ausliest, baut ein Abbild, dessen Dunkelmodus wieder blau ist,
-# obwohl die Vorlage daneben es besser weiss.
-#
-# Beide Zeilen werden NUR geschrieben, wenn die Vorlage sie hat: ein
-# leeres `dark_scheme=` waere kein leerer Wert, sondern ein leerer
-# DATEINAME, und `wlibc` faende im Dunkelmodus gar kein Schema mehr.
 T_DSCHEME=$(lies_preset dark_scheme)
 {
   printf '# /etc/theme.conf -- Runde FARBE (MERGE-10)\nscheme=%s\n' "$T_SCHEME"
@@ -806,25 +392,7 @@ T_DSCHEME=$(lies_preset dark_scheme)
   printf 'mode=%s\naccent=%s\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
     "$T_MODE" "$T_ACCENT" "$T_SHAPE"
 } > "$OUT/theme.conf"
-# ================================================ RUNDE FUI-WIN11
-# DIE AKZENTFARBE WIRD AUFGELOEST GEMELDET UND NICHT ALS STRICH.
 #
-# Justins Befund am 13.09.: der Bau meldete `accent=-`, und daraus las
-# sich "es gibt keine Akzentfarbe, also ist alles fest blau". Das
-# stimmt NICHT, und die Meldung war schuld.
-#
-# `accent=` LEER ist ein gueltiger Wert mit einer Bedeutung: "diese
-# Vorlage schreibt keine eigene Akzentfarbe vor, es gilt die des
-# SCHEMAS" (assets/themes/*.preset, Kopfzeile: "accent the accent, or
-# empty for the scheme's own"). `vorlage.fi` traegt dafuer ACC_NONE und
-# NICHT 0 -- 0 waere Schwarz und damit eine echte Farbe.
-#
-# Die Farbe, die dann wirklich gilt, steht im Schema
-# (assets/schemes/<scheme>.scheme, Zeile `accent=`) und wird von
-# `wlibc.bind_accent` auf die Rampe gelegt, samt Kontrollrechnung gegen
-# WCAG. Also wird sie hier NACHGESCHLAGEN und mitgemeldet -- wer den
-# Bericht liest, sieht die Farbe, die auf dem Schirm landet, und nicht
-# einen Strich.
 T_ACC_EFF="$T_ACCENT"
 T_ACC_HER="vorlage"
 if [ -z "$T_ACC_EFF" ]; then
@@ -835,18 +403,6 @@ fi
 sagen "thema       $THEMA (scheme=$T_SCHEME dark_scheme=${T_DSCHEME:--} mode=$T_MODE shape=$T_SHAPE accent=${T_ACCENT:--})"
 sagen "akzent      #${T_ACC_EFF:-??} (aus ${T_ACC_HER}) -- das ist die Farbe, die aktive Kacheln, Auswahl und Fokusring tragen"
 
-# ==================== RUNDE BLECH-HID: DER NOTAUSGANG OHNE TASTATUR
-#
-# Justins erster Blech-Lauf hat den Stick gestartet und ein Bild
-# gezeigt -- und keine Taste und keine Maus angenommen. Damit war jeder
-# Befehl unerreichbar; `dhcp`, `host`, `fetch` und `ota` liegen auf dem
-# Abbild und waren nicht zu tippen.
-#
-# Dieses Skript ist die Antwort darauf: der Menueeintrag "Netz-Selbstlauf"
-# gibt es der Shell als Argument mit (Kernwort `netlauf`), sie faehrt es
-# von oben nach unten, und danach bleibt der Bildschirm stehen. Ein Foto
-# davon ist die erste Messung des Netzwegs auf echter Hardware -- ohne
-# eine einzige Taste.
 cat > "$OUT/netlauf.sh" <<'EOFNL'
 echo "=================================================="
 echo "  OSUM NETZ-SELBSTLAUF -- ohne Tastatur, ohne Maus"
@@ -867,79 +423,8 @@ echo "=================================================="
 EOFNL
 # ===================================================== RUNDE ECHTHARDWARE-2
 #
-# DIE SPRACHE DES STICKS IST ENGLISCH. Dauerregel von Justin vom
-# 09.09.2026: Englisch ist die Hauptsprache der Oberflaeche, Deutsch
-# bleibt als waehlbare Uebersetzung.
-#
-# HIER UND NUR HIER. Der Katalog (kernel/user/msg.fi, Runde I18N) hat
-# das immer schon gekonnt: `init` liest ZUERST locale/en/messages, und
-# Englisch ist die Rueckfallsprache fuer jeden Schluessel, den eine
-# Uebersetzung nicht hat. Was den Stick trotzdem deutsch machte, war
-# diese eine Zeile -- sie schrieb `de` in /users/root/config/locale,
-# und der Katalog legte die Uebersetzung folgsam ueber das Englische.
-# GEMESSEN auf Justins Abbild: `taskbar: lang=de src=1 keys=288`
-# (src=1 = die Wahl des Benutzers, genau diese Datei).
-#
-# Es waren also NICHT 71 Stellen im Quelltext zu aendern, sondern ein
-# Wort in einer Datei. Beide Kataloge bleiben im Abbild, und wer
-# Deutsch will, waehlt es in den Einstellungen -- die Datei wird dann
-# mit `de` ueberschrieben.
-#
-# Die Datei heisst weiterhin `locale-de` im Baubaum; sie ist nur der
-# Zwischenspeicher fuer den Inhalt und wird nach
-# /users/root/config/locale kopiert.
-# ---------------------------------------------------------------------
-# INTEGRATIONSRUNDE 19.09.2026: ZURUECK AUF DEUTSCH -- UND ZWAR HIER.
-#
-# Der Absatz darueber beschreibt den Stand vom 09.09., als Englisch zur
-# Hauptsprache gemacht wurde. Die Begruendung von damals stimmt
-# technisch immer noch (eine Zeile, nicht 71 Stellen im Quelltext) --
-# nur zeigt das Abbild damit eine ENGLISCHE Oberflaeche auf einem
-# System, dessen Quelltext, Kommentare, Berichte und Katalog
-# durchgehend deutsch sind. Der deutsche Katalog liegt vollstaendig im
-# Abbild (locale/de/messages, 588 Zeilen) und wurde nie benutzt.
-#
-# Also `de` -- und zwar an ALLEN DREI Stellen, die die Sprache
-# festlegen, weil eine allein nichts bewirkt (Reihenfolge aus
-# kernel/user/msg.fi, staerkste zuerst):
-#
-#   1. /users/root/config/locale   die WAHL DES BENUTZERS  <- diese Zeile
-#   2. /etc/locale.conf            die VORGABE DES SYSTEMS
-#   3. `lang=` auf der Kommandozeile schreibt (1) VOR dem ersten
-#      Ring-3-Programm (kernel/lib/kstate.fi, M_LANGDE)
-#
-# Haette man nur (2) geaendert, bliebe die Oberflaeche englisch: (1)
-# sticht (2). Genau diese Falle hat die Pruefung dieser Runde gekostet.
-#
-# ENGLISCH BLEIBT WAEHLBAR und geht nicht verloren: der englische
-# Katalog bleibt im Abbild, er ist weiterhin die Rueckfallsprache fuer
-# jeden Schluessel, den die Uebersetzung nicht hat, das
-# Einstellungsprogramm schaltet um, und der Bootmenue-Eintrag mit
-# `lang=en` (weiter unten) bleibt Wort fuer Wort stehen.
 printf 'de\n' > "$OUT/locale-de"
 
-# ---------------------------------------------- RUNDE STICK: DAS NETZ
-#
-# Drei Dateien, und ohne sie sind die neuen Programme Zierde:
-#
-#   /etc/ssl/roots.pem   ohne Wurzelspeicher vertraut `fetch` NICHTS und
-#                        sagt "no trust store". Genommen werden die
-#                        Mozilla-Wurzeln des Wirts (tools/hwnet/mkroots.py) --
-#                        dieselben, gegen die Runde MERGE-5 die echte
-#                        Let's-Encrypt-Kette von store.fleitec.com
-#                        geprueft hat. $OTA_ROOTS ueberschreibt.
-#   /etc/ota.conf        WOHER. Ein NAME und keine Adresse: das Geraet
-#                        loest ihn selbst auf (Runde BETRIEB). `auto=true` ist
-#                        die Vorgabe (Entscheidung des Besitzers
-#                        02.10.2026): das Abbild sucht, holt und spielt
-#                        Updates selbst ein; abschaltbar in Einstellungen
-#                        -> Updates oder mit `ota set auto nein`.
-#   /system/schluessel.pub  WEM. Ohne den vertrauten Schluessel nimmt
-#                        `ota` kein Verzeichnis und `opk` kein Paket an.
-#
-# Fehlt der Schluessel, wird er NICHT erfunden: dann steht er nicht im
-# Abbild, `ota` sagt es beim ersten Versuch, und das ist besser als eine
-# Datei, die wie Vertrauen aussieht.
 ROOTS=${OTA_ROOTS:-}
 if [ -z "$ROOTS" ]; then
     if python3 tools/hwnet/mkroots.py "$OUT/roots.pem" > "$OUT/roots.log" 2>&1; then
@@ -952,11 +437,6 @@ else
     sagen "wurzeln     KEINE -- /bin/fetch wird nichts vertrauen"
 fi
 
-# RUNDE MARKE, zweite Entwurfsentscheidung der Vorlage: "Ein
-# Xoffi-Build darf sich nie zum FreeViewer aktualisieren." Der Feed
-# gehoert zur MARKE. Ein umbenannter Bau holt damit nie die Pakete der
-# anderen Marke. STORE_URL schlaegt beides -- das ist der Weg fuer
-# einen Testspeicher und aendert an der Regel nichts.
 STORE=${STORE_URL:-$MARKE_FEED}
 if [ -n "${OTA_CONF:-}" ] && [ -s "${OTA_CONF}" ]; then
     [ "$OTA_CONF" -ef "$OUT/ota.conf" ] || cp -f "$OTA_CONF" "$OUT/ota.conf"
@@ -984,10 +464,6 @@ if [ -z "$KEY" ] && [ -s "${STORE_DIR:-/srv/store}/osum/aktuell/schluessel.pub" 
     KEY="${STORE_DIR:-/srv/store}/osum/aktuell/schluessel.pub"
 fi
 printf '%08d\n' "${OTA_KGEN:-0}" > "$OUT/SCHLUESSELGEN"
-# Die Fassung, mit der dieser Stick ausgeliefert wird. Neun Oktette
-# fester Breite, wie /system/SCHLUESSELGEN -- `ota` vergleicht sie mit
-# der Fassung im signierten VERZEICHNIS und lehnt alles ab, was nicht
-# groesser ist (Rueckschrittsschutz).
 printf '%08d\n' "${OTA_FASSUNG:-0}" > "$OUT/FASSUNG"
 # SELFUPDATE (SU-2): the OS-readable system version. /system/SYSVERSION = build number
 # (commit count of the tree, 8 digits + newline, only ever grows: rollback guard of
@@ -997,15 +473,6 @@ SYS_COMMIT=$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
 printf '%08d\n' "$SYS_BUILD" > "$OUT/SYSVERSION"
 printf '%s build %s (%s) %s\n' "$MARKE_PRODUKT" "$SYS_BUILD" "$SYS_COMMIT" "$(date -u +%Y-%m-%dT%H:%MZ)" > "$OUT/osversion"
 
-# ------------------------------------------- RUNDE STICK: DIE BRUECKE
-#
-# `/etc/jarvis/permissions.conf` MUSS da sein -- ohne Rechteliste sagt
-# `jarvisd` "ohne Rechteliste ist nichts erlaubt" und hoert auf. Was
-# drinsteht, ist die Vorgabe eines Geraets, das noch niemandem gehoert:
-# KEIN Server, KEINE Befehle, KEIN Bildschirmfoto, KEINE Pfade. So
-# gestartet meldet sich der Dienst nirgends an und fuehrt nichts aus.
-# Wer ihn benutzen will, traegt Server und Rechte ein -- von Hand oder
-# mit `jarvisd -c <eigene datei>`.
 if [ "${HP_STICK:-0}" = 1 ] && [ "$IMAGE_PROFILE" = personal ]; then
     JARVIS_CONF=${JARVIS_CONF:-assets/jarvis/rechte-hp.conf}
     JARVIS_DEVICE_KEY=${JARVIS_DEVICE_KEY:-${JARVIS_ABB:-/root/abbilder}/hp-device.key}
@@ -1049,23 +516,7 @@ FS_TIME=${FS_TIME:-$(git log -1 --format=%ct 2>/dev/null)}
 case "$FS_TIME" in ''|*[!0-9]*) FS_TIME=1760000000 ;; esac
 ARGS=(build "$OUT/root.img" "$FS_BLOCKS" --v3 "--time=$FS_TIME"
       "--inodes=$FS_INODES" "--karten=$FS_KARTEN")
-# ============ RUNDE MODERN + INTEGRATION 21.09.2026: `bold.ttf` HAT
-# HIER GEFEHLT -- DERSELBE FEHLER WIE BEI `nedit`, NUR EINE SCHRIFT.
 #
-# RUNDE MODERN hat den echten fetten Schnitt geschnitten
-# (assets/osum-sans-bold.ttf, 45012 Oktett, 364 Glyphen, Umrisse
-# bitgleich zu DejaVuSans-Bold) und ihn in tools/k15/build.sh und
-# tools/design/capture.sh eingetragen -- also in die Abbilder, mit
-# denen GEMESSEN wird. In DIESE Zeile, die das AUSGELIEFERTE
-# Wurzelabbild baut, kam er nie. Kein Testlauf war rot: kgui.fi laedt
-# /lib/bold.ttf ausdruecklich als NICHT PFLICHT (fehlt er, wiegt Fett
-# so viel wie Normal). Auf dem Messplatz war der fette Schnitt also
-# da, auf dem Stick nicht -- und die Schrifthierarchie, die diese
-# Runde gebaut hat, waere bei niemandem angekommen.
-#
-# Darum steht /lib/bold.ttf ab jetzt AUCH unten in PFLICHT: die
-# Schrift darf zur Laufzeit fehlen duerfen, aber sie darf nicht
-# STILL aus dem Bauplan fallen.
 ARGS+=(/lib/
        "/lib/mono.ttf=assets/osum-mono.ttf"
        "/lib/sans.ttf=assets/osum-sans.ttf"
@@ -1090,37 +541,7 @@ if [ "$BBSH" = 1 ]; then
     sagen "busybox     /bin/sh = busybox ($(stat -c%s "$BBDYN") + musl $(stat -c%s "$BBLIBC") Oktette), Osum-Shell = /bin/osh"
 fi
 ARGS+=("/bin/files@/bin/explorer")
-# ============================================ RUNDE ECHTHARDWARE-1
-# /etc/theme WIRD NICHT MEHR MITGELIEFERT -- UND DAS IST DER ZWEITE
-# TEIL VON "DIE FARBEN PASSEN NICHT ZUSAMMEN".
 #
-# `wlibc.reload_inner` liest die Dateien in dieser Reihenfolge:
-#   1. /etc/theme.conf   (scheme=, mode=, shape=)
-#   2. /etc/schemas/<scheme>
-#   3. /etc/shapes/<shape>
-#   4. /etc/theme        -- ZULETZT, und es ueberschreibt alles davor
-#
-# Punkt 4 ist Absicht (eine Maschine aus Runde K15 soll aussehen wie
-# vorher), aber die Datei, die dieser Stick bisher mitgab, kam aus
-# tools/k15/tree.py und traegt ZWOELF DUNKLE FLAECHENFARBEN ohne eine
-# einzige Schriftfarbe. Sie hat also das helle Tagschema wieder
-# zugeschuettet -- gemessen am 09.09.: Schreibtisch hell (#f1f5f9),
-# Panel dunkel (#26303c), weisse Schrift auf hellem Cyan. Genau das
-# Bild, das Justin fotografiert hat.
-#
-# Ein Abbild, das ein Schema mitbringt, darf keine Ueberschreibungsdatei
-# mitbringen. Wer eine eigene will, legt sie selbst an.
-# RUNDE ABBILD: DIE VORGABE DES SYSTEMS STEHT AUCH IM ABBILD.
-#
-# /users/root/config/locale sagt seit dem 09.09.2026 `en` -- Englisch
-# ist die Hauptsprache der Oberflaeche, Deutsch die waehlbare
-# Uebersetzung (Begruendung oben bei `locale-de`). Was fehlte, war die
-# VORGABE DES SYSTEMS daneben: ohne /etc/locale.conf gibt es nur die
-# Benutzerwahl, und wer die Datei loescht, faellt auf die eingebaute
-# Vorgabe zurueck, statt auf eine, die im Abbild steht und die man
-# lesen kann. Dieselbe Datei, die tools/look/shot.sh seit Runde LOOK
-# schreibt -- mit demselben Inhalt wie die Benutzerwahl, damit beide
-# dasselbe sagen.
 printf '# /etc/locale.conf -- the system default language.\n# A user who has chosen one overrides this in\n# /users/<name>/config/locale; the settings program writes only there.\nlang=de\n' \
     > "$OUT/locale.conf"
 ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
@@ -1142,29 +563,10 @@ if [ "${IMAGE_NO_WALLPAPER:-0}" != "1" ] && [ -f assets/wallpaper-sea.osym ]; th
     ARGS+=("/etc/wallpaper=assets/wallpaper-sea.osym@0644")
     echo "   wallpaper  assets/wallpaper-sea.osym (the sea)"
 fi
-# ===================================================== RUNDE HOVERSTIL
-# /etc/uitrace -- DER SCHALTER, OHNE DEN DIE OBERFLAECHE STUMM IST.
-#
-# `kernel/user/qs.fi::dbg_setup` macht ALLE Meldungen des
-# Kontrollzentrums von dieser Datei abhaengig:
 #
 #     let fdt: u64 = io.open("/etc/uitrace", 0)
 #     if !ulib.bad(fdt) { s_dbg = 1 }
 #
-# und `say`/`sayn`/`nl` kehren ohne sie sofort zurueck. Fehlt sie, dann
-# laeuft das Panel VOLLSTAENDIG richtig -- es geht auf, es geht zu, der
-# Zeiger wirkt --, aber es steht KEINE EINZIGE `qs:`-Zeile auf der
-# Leitung. Genau das hat diese Runde zwei Anlaeufe gekostet: gemessen
-# wurden fuenfmal `hk: super+a` und fuenfmal ein Wechsel von `fl=19`
-# (versteckt) auf `fl=18` (sichtbar) im Fensterbericht -- das Panel
-# gehorchte also --, waehrend `qs: kachel` und selbst eine eigens
-# eingebaute Diagnosezeile NULL Treffer hatten. Wer daraus "die Maus
-# kommt nicht an" schliesst, misst diesen Schalter und nicht das
-# System.
-#
-# Die Datei ist LEER und kostet einen Verzeichniseintrag. Sie kommt nur
-# mit UITRACE=1 ins Abbild, damit ein Auslieferungsstick weiter still
-# ist; jeder Messlauf setzt die Umgebungsvariable.
 if [ "${UITRACE:-0}" = "1" ]; then
     : > "$OUT/uitrace"
     ARGS+=("/etc/uitrace=$OUT/uitrace")
@@ -1177,10 +579,6 @@ if [ "${UIBLINK:-0}" = "1" ]; then
     ARGS+=("/etc/uiblink=$OUT/uiblink")
     echo "   uiblink    AN -- die Einfuegemarke blinkt auch im Messlauf"
 fi
-# RUNDE ECHTHARDWARE-1: die drei Verzeichnisse, ohne die `shape=` und
-# `scheme=` ins Leere zeigen. Derselbe Weg wie in
-# tools/design/capture.sh -- dieselben Dateien, damit der Stick zeigt,
-# was die Demo gezeigt hat.
 ARGS+=(/etc/schemas/)
 for s_ in assets/schemes/*.scheme; do
     ARGS+=("/etc/schemas/$(basename "$s_" .scheme)=$s_")
@@ -1206,32 +604,11 @@ if [[ " $PROGS " == *" wayd "* ]]; then
     python3 tools/wayland/genkeys.py --keymaps "$OUT/wayd-km" > "$OUT/wayd-km.log" 2>&1 || { echo "wayd keymaps failed"; tail -5 "$OUT/wayd-km.log"; exit 1; }
     ARGS+=(/usr/share/wayd/ "/usr/share/wayd/keymap-us.xkb=$OUT/wayd-km/keymap-us.xkb" "/usr/share/wayd/keymap-de.xkb=$OUT/wayd-km/keymap-de.xkb")
 fi
-# ============================================== RUNDE LOGIND
-# DIE HEIMATVERZEICHNISSE -- /etc/passwd VERSPRACH EINES, DAS ES NICHT
-# GAB.
-#
-# `/etc/passwd` traegt seit der Runde ANMELDUNG zwei Konten, und
-# `justin` steht dort mit dem Heimatverzeichnis `/users/justin`. Im
-# Abbild gab es aber NUR `/users/root/` -- gemessen am Abbild vom
-# 15.09.:
 #
 #     python3 tools/osum/mkfs.py list root.img | grep /users/
 #         /users/ /users/root/ /users/root/config/ ...
 #         (kein /users/justin)
 #
-# docs/RUNDE-ANMELDUNG.md hat das unter 5.4 selbst als offen benannt.
-# Es ist kein Schoenheitsfehler: `glogin` legt die Rechte ab und
-# startet den Schreibtisch als uid 1000. Jedes Programm, das danach
-# etwas Eigenes ablegen will (die Einstellungen schreiben
-# `/users/<name>/config/locale`, der Explorer will ein Zuhause zum
-# Anzeigen), schreibt in ein Verzeichnis, das nicht existiert -- und
-# ein Schreibfehler in einem Pfad, den /etc/passwd verspricht, ist ein
-# gebrochenes Versprechen und kein fehlendes Merkmal.
-#
-# RECHTE UND EIGENTUM SIND DER PUNKT. Ohne `@0700:1000:1000` gehoerte
-# das Verzeichnis root mit 0755 (die Vorgabe von mkfs.py) -- dann
-# koennte justin in seinem eigenen Zuhause nichts anlegen, und jeder
-# andere koennte hineinsehen. 0700 heisst: nur er, und niemand sonst.
 ARGS+=(/users/ /users/root/ /users/root/config/
        "/users/root/config/locale=$OUT/locale-de"
        "/users/$KONTO/@0700:1000:1000"
@@ -1279,27 +656,7 @@ ARGS+=(/boot/ "${BOOTK[@]}" "${BOOTO[@]}"
        "/boot/limine-bios.sys=$LIMINE/limine-bios.sys"
        "/boot/limine-hdd.bin=$OUT/limine-hdd.bin")
 fi
-# ==================================================== RUNDE ENERGIE
-# /run, /etc/inittab UND /etc/ziel -- OHNE SIE HAT DER AUSSCHALTKNOPF
-# NIEMANDEN, DEM ER ES SAGEN KANN.
 #
-# GEMESSEN AN DIESEM ABBILD, bevor diese Zeilen dazukamen:
-# `mkfs.py list` fand WEDER /bin/init NOCH /etc/inittab NOCH ein
-# Verzeichnis /run. Der Weg, den `/bin/shutdown` seit Runde INIT geht
-# (eine Zeile nach /run/svc.cmd, Prozess 1 raeumt auf), war auf dem
-# Auslieferungsstick also gar nicht vorhanden -- `/bin/shutdown` fiel
-# dort IMMER auf seinen Notweg `self()` zurueck: sync und ACPI, ohne
-# dass ein einziger Dienst ein Signal bekommt.
-#
-# Das ist genau der Unterschied, um den es bei einem Ausschaltknopf
-# geht. Ein Knopf, der die Platte im Flug abschneidet, ist schlimmer
-# als keiner -- deshalb liegt ab dieser Runde das Ziel `grafik` im
-# Abbild, dazu eine inittab, die den Schreibtisch als Dienst fuehrt,
-# und das leere /run, in das die Oberflaeche ihre Zeile schreibt.
-#
-# DIE TAFEL IST ABSICHTLICH KURZ. Sie fuehrt genau das, was dieser
-# Stick wirklich startet; jeder weitere Dienst waere eine Behauptung
-# ueber einen Betrieb, den niemand gemessen hat.
 cat > "$OUT/inittab" <<'EOFTAB'
 # /etc/inittab -- name:ziele:art:befehl:optionen
 #
@@ -1352,19 +709,8 @@ if [ "${DBGSRV:-$DBGSRV_DEFAULT}" = 1 ]; then
     echo "build.sh: DBGSRV=1 -- debug HTTP service dbgsrv on port 8765 (docs/DEBUG-NET.md), token in $DBGSRV_TOKEN_FILE"
 fi
 ARGS+=(/dev/ /proc/ /mnt/ /esp/ /tmp/ /store/ /apps/ /system/ /run/)
-# RUNDE TUERSCHLOSS: EIN BEISPIEL ZUM UEBERSETZEN.
 #
-# Seit dieser Runde liegen `firnc` und `fas` auf dem Stick. Eine Quelle
-# daneben zu legen kostet 591 Oktette und erspart dem, der es
-# ausprobieren will, das Tippen einer Datei in einem Editor, den er
-# gerade erst kennenlernt.
-#
-# Und es ist der Pruefstein fuer den Uebersetzer AUF dem System:
-#     firnc /beispiel/hallo.fi -o /tmp/hallo.s
-#     fas /tmp/hallo.s -o /tmp/hallo
-#     /tmp/hallo ; echo $?     -> 42
 ARGS+=(/beispiel/ "/beispiel/hallo.fi=assets/beispiel/hallo.fi")
-# RUNDE STICK: die Verzeichnisse, in denen die neuen Programme leben.
 ARGS+=(/etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/)
 # AB-016: THE ACTION BUS (docs/ACTION-BUS.md). The broker /bin/orientbus
 # and the settings provider /bin/settingsd are started by the session
@@ -1426,17 +772,8 @@ if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
 fi
 # ================================ RUNDE MERGE9: DIE GROSSEN MITBRINGSEL
 #
-# Certus, busybox, lua und sqlite liegen NICHT in diesem Baum -- sie
-# werden anderswo gebaut (Certus im eigenen Repo, die drei Fremdlinge
-# nach tools/foreign/README.md). Wer sie hat, gibt ihren Pfad an; wer
-# nicht, bekommt einen Stick ohne sie und keinen Abbruch. Genau so
-# haelt es die Stelle oben mit `firnc`.
-#
 #   CERTUS=/pfad/certus  BUSYBOX=...  LUA=...  SQLITE=...
 #
-# WARUM SIE HIER STEHEN: das Wurzelabbild fasst seit dieser Runde
-# 65536 Bloecke (32 MiB) statt 40960; Certus allein ist 6,19 MiB und
-# passte vorher nicht (free war 4,4 MiB).
 for mit in "CERTUS:/bin/certus" "BUSYBOX:/bin/busybox" \
            "LUA:/bin/lua" "SQLITE:/bin/sqlite3"; do
     mvar=${mit%%:*}; mziel=${mit##*:}
@@ -1659,10 +996,6 @@ if [ "$IMAGE_PROFILE" = public ]; then
     sagen "oeffentlich geprueft: nur root (gesperrt) und $KONTO, Bruecke aus"
 fi
 
-# DIE UMLAUTE. Sie stehen in locale/de/messages, sie muessen im ABBILD
-# stehen, und ein 'ü' sind ZWEI Oktette -- was jede Feldbreitenrechnung
-# angeht. Hier wird nur gezaehlt, dass sie ueberhaupt angekommen sind;
-# gemessen wird es im Bild (tools/usbimg/run.sh).
 UML=$(python3 -c '
 import sys
 d = open(sys.argv[1], "rb").read()
@@ -1839,10 +1172,6 @@ interface_branding: @MARKE_PRODUKT@ - Secure Boot must be OFF
     cmdline: hwdiag hwdiagstop grafik gfx nokbd nosched noproc nofs noring3
 EOF
 
-# Und JETZT der Name hinein. `@MARKE_PRODUKT@` ist der einzige
-# Platzhalter in dieser Datei; bleibt einer stehen, bricht der Bau ab --
-# ein Bootmenue, in dem "@MARKE_PRODUKT@" steht, waere schlimmer als
-# eines mit dem alten Namen.
 sed -i "s|@MARKE_PRODUKT@|$MARKE_PRODUKT|g" "$OUT/limine.conf" \
     || fehler "der Produktname liess sich nicht in limine.conf einsetzen"
 if grep -q '@MARKE_PRODUKT@' "$OUT/limine.conf"; then
@@ -1944,12 +1273,6 @@ fi
 if grep -qE '^[[:space:]]*#' "$OUT/limine.conf"; then
     fehler "limine.conf enthaelt Kommentarzeilen -- die gehoeren nach docs/STICK-MENUE.md"
 fi
-# RUNDE BLECH2: KEIN MENUEEINTRAG LAENGER ALS 60 ZEICHEN. Justins Foto
-# vom 05.09.: "OrientOS -- Schreibtisch (Zwischenspeicher nach jedem Bild
-# lee" -- Limine schneidet den Text an der Spaltenzahl des Menues ab, und
-# der Rest stand nirgends. Gezaehlt wird NACH dem Einsetzen des
-# Produktnamens: ein laengerer Name aus marke.conf nimmt dem Rest den
-# Platz, und dann soll der Bau das sagen und nicht der Bildschirm.
 zu_lang=$(grep -E '^/' "$OUT/limine.conf" | sed 's|^/*||' | awk 'length($0) > 60')
 if [ -n "$zu_lang" ]; then
     fehler "Menueeintrag laenger als 60 Zeichen: $zu_lang"
@@ -2035,9 +1358,6 @@ else
     fi
 fi
 
-# Die EFI-Partition wird EINZELN gebaut und dann hineingelegt: mkfs.vfat
-# und mtools auf einen Bereich MITTEN in einer Datei zu richten geht nur
-# ueber Schleifengeraete, und die braucht dieses Skript sonst nirgends.
 dd if=/dev/zero of="$OUT/esp.img" bs=1M count="$ESP_MIB" status=none
 mkfs.vfat -F 32 -h "$P1_ANF" -n OSUMEFI "$OUT/esp.img" > "$OUT/vfat.log" 2>&1 \
     || { cat "$OUT/vfat.log" >&2; fehler "mkfs.vfat fehlgeschlagen"; }
@@ -2063,10 +1383,6 @@ mcopy -i "$OUT/esp.img" "$OUT/root.img" ::/root.img || fehler "mcopy wurzel"
 dd if="$OUT/esp.img" of="$IMG" bs=512 seek="$P1_ANF" conv=notrunc status=none
 dd if="$OUT/root.img" of="$IMG" bs=512 seek="$P2_ANF" conv=notrunc status=none
 
-# UND DER BIOS-TEIL. `limine bios-install` schreibt seinen ersten Teil in
-# den MBR-Bereich der Datei und traegt ein, wo `limine-bios.sys` liegt.
-# Unter UEFI wird davon nichts angefasst; unter BIOS ist es der ganze
-# Startweg.
 "$LIMINE/limine" bios-install "$IMG" > "$OUT/limine.log" 2>&1 \
     || { cat "$OUT/limine.log" >&2; fehler "limine bios-install fehlgeschlagen"; }
 if [ "${OSBOOT:-0}" = 1 ]; then
@@ -2075,10 +1391,6 @@ if [ "${OSBOOT:-0}" = 1 ]; then
         || { cat "$OUT/osboot-bios.log" >&2; fehler "osboot bios install failed"; }
 fi
 
-# RUNDE MESSTAFEL: DER ALTE NAME BLEIBT ERREICHBAR. Ein Verweis und
-# keine Kopie -- zwei Dateien mit demselben Inhalt sind zwei Dinge, die
-# auseinanderlaufen koennen, und genau daran ist diese Runde schon
-# einmal fast gescheitert.
 ln -sf "$(basename "$IMG")" "$IMG_ALT"
 
 sagen "abbild      $IMG"

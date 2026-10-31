@@ -1,22 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/hda/mkmedia.sh -- die Testdateien der Runde HDA, auf dem WIRT gebaut.
-#
-# NICHTS DAVON WIRD EINGECHECKT, und das ist eine Regel dieses Projekts
-# und keine Bequemlichkeit: eine Tondatei im Repo ist ein Fremdinhalt,
-# den niemand nachrechnen kann. Dieses Skript baut sie aus einer Formel,
-# und jeder Lauf ergibt dieselben Oktette.
 #
 #   bash tools/hda/mkmedia.sh <verzeichnis>
 #
-# Erzeugt:
-#   ton.wav   440 Hz, 48000 Hz, stereo, 16 Bit, eine Sekunde -- dieselbe
-#             Festkommareihe, die der Kernel rechnet, damit /bin/play
-#             gegen refsine.py geprueft werden kann
-#   ton44.wav dasselbe mit 44100 Hz -- damit die Ratenaushandlung eine
-#             Datei hat, die sie WIRKLICH braucht
-#   mono.wav  ein Kanal, 48000 Hz -- der Weg Mono -> Stereo
-#   ton.mp3   dieselbe Sekunde als MPEG-1 Layer III, 128 kbit/s
 set -uo pipefail
 AUS=${1:?Verzeichnis fehlt}
 mkdir -p "$AUS"
@@ -133,10 +118,6 @@ if os.environ.get('TON_LANG', '1') != '0':
             [v for x in lang for v in (x, x)])
 PY
 
-# Das MP3. ffmpeg auf dem WIRT, mit -flags +bitexact, damit zwei Laeufe
-# dieselbe Datei ergeben. Der Dekodierer im System bekommt damit eine
-# Datei, die er NICHT selbst erzeugt hat -- alles andere waere eine
-# Pruefung gegen sich selbst.
 if command -v ffmpeg >/dev/null 2>&1; then
     ffmpeg -hide_banner -loglevel error -y -flags +bitexact -fflags +bitexact \
         -i "$AUS/ton.wav" -codec:a libmp3lame -b:a 128k "$AUS/ton.mp3" \

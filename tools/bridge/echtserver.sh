@@ -2,29 +2,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/bridge/echtserver.sh -- RUNDE BRIDGE-2: OSUM AM ECHTEN JARVIS.
 #
-# ====================================================================
-# DAS IST DER ABSCHNITT, DEN RUNDE BRIDGE NICHT HATTE.
-# ====================================================================
-#
-# `tools/bridge/run.sh` misst gegen `peer.py` -- einen
-# TLS-Server in Python, der GENAU das Protokoll aus `jarvisd.fi`
-# spricht. Das ist eine ehrliche Messung von OSUMS SEITE, und
-# docs/BRIDGE.md sagt selbst, was damit NICHT gemessen ist: ob der
-# ECHTE JARVIS-Server dieses Geraet annimmt.
-#
-# Hier laeuft der echte Server (`/root/jarvis/server.js`, Node) mit dem
-# Adapter aus `lib/osumbridge.js`, und Osum meldet sich in QEMU bei ihm
-# an. Gemessen wird, was der AUFTRAG verlangt:
-#
-#   1. das Geraet taucht in der Geraete-Registry auf -- derselben, aus
-#      der `list_devices` und `remote_shell` schoepfen,
-#   2. `remote_shell` fuehrt einen Befehl aus,
-#   3. `remote_read` liest eine Datei,
-#   4. `remote_write` schreibt eine, und das Zuruecklesen zeigt sie,
-#   5. `computer(screenshot)` bringt ein PNG mit dem Schirm.
-#
-# DER SERVER LAEUFT MIT EIGENEM PORT UND EIGENEM data/ (JARVIS_ROOT),
-# damit dieser Laeufer den laufenden Dienst nicht anfasst.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -49,9 +26,6 @@ QPORT=$(( 17000 + ($$ % 300) * 2 ))
 BPORT=$(( QPORT + 1 ))
 OSUM_IP=10.9.0.2
 HOST_IP=10.9.0.1
-# EIN EIGENER PORT JE LAUF. 8443 fest war falsch: ein Laeufer, dessen
-# Server noch haengt, blockiert den naechsten (gemessen: "Osum-Bruecke:
-# listen EADDRINUSE"), und der naechste sucht den Fehler dann in Osum.
 TLSPORT=$(( 8500 + $$ % 400 ))
 HTTPPORT=$(( 18900 + $$ % 90 ))
 SRVPID=""
@@ -71,19 +45,6 @@ ip netns del "$NS" 2>/dev/null
 
 # ------------------------------------------------- 1. das Zertifikat
 #
-# Es muss auf den NAMEN lauten, den Osums Rechteliste als `servername`
-# fuehrt -- sonst lehnt der Helfer ab, und genau das soll er auch.
-# DIESELBEN ZERTIFIKATE WIE DIE UEBRIGE ABNAHME, und das ist kein
-# Zufall: ein mit `openssl req -x509` erzeugtes Zertifikat hat Osums
-# X.509-Leser hier NICHT angenommen -- gemessen, `tls_verify_reason` 1
-# (V_PARSE, "laesst sich nicht zerlegen"). `tools/hwnet/mkcerts.py`
-# baut die Kette, gegen die dieses Projekt seit Runde HWNET misst:
-# eine Wurzel und ein Serverzertifikat auf <name> mit SAN dNSName UND
-# iPAddress 10.9.0.1.
-#
-# WICHTIG: in den Wurzelspeicher von Osum gehoert die WURZEL (ca.pem),
-# nicht das Serverzertifikat. Der erste Anlauf hat good.pem dorthin
-# gelegt -- damit prueft der Helfer ein Zertifikat gegen sich selbst.
 mkdir -p "$W/certs"
 if [ ! -f "$W/certs/good.pem" ]; then
     python3 tools/hwnet/mkcerts.py "$W/certs" jarvis.test >"$W/certs.txt" 2>&1 || {
@@ -151,18 +112,6 @@ ip netns exec "$NS" ethtool -K "$V1" tx off rx off tso off gso off gro off >/dev
 "$W/bridge" "$V0" "$BPORT" "$QPORT" 2>"$W/br.log" & BRPID=$!
 sleep 0.5
 
-# KEIN WEITERLEITER MEHR, und das ist die Lehre aus zwei Fehlversuchen:
-# der Server zieht gleich SELBST in den Netzraum (siehe Abschnitt 4).
-#
-# Was vorher schiefging und warum: ein Netzraum hat sein EIGENES
-# Loopback, also war `127.0.0.1` aus ihm heraus nicht der Wirt
-# ("Connection refused"). Und eine zweite Adresse am Wirtsende des
-# veth-Paares half auch nicht ("timed out"): dieses Ende gehoert
-# `tools/net/bridge.c`, das die Rahmen per AF_PACKET abholt -- es ist
-# absichtlich KEINE Schnittstelle, fuer die der Linux-Stapel antwortet.
-# `peer.py` macht es seit Runde BRIDGE richtig: sie laeuft IM
-# Netzraum und lauscht dort auf 0.0.0.0.
-
 # ------------------------------------------------- 4. der echte Server
 D="$W/jarvisdata"
 rm -rf "$D"; mkdir -p "$D/data" "$D/logs" "$D/memory" "$D/uploads" "$D/downloads" "$D/projects"
@@ -178,10 +127,6 @@ fs.writeFileSync('$D/data/users.json', JSON.stringify({users:{u_pruef:{
   settings:{}, admin:true}}}, null, 2))
 " || { echo "ECHT: das Pruefkonto liess sich nicht anlegen"; exit 1; }
 
-# DER SERVER LAEUFT IM NETZRAUM. Nur so ist er fuer Osum ueberhaupt
-# erreichbar (siehe die Begruendung beim Draht oben). Sein HTTP-Teil
-# lauscht dann ebenfalls dort -- die Werkzeuge unten sprechen ihn
-# deshalb auch aus dem Netzraum heraus an (`ip netns exec`).
 ip netns exec "$NS" env -C "$JARVIS" JARVIS_ROOT="$D" JARVIS_PORT="$HTTPPORT" \
     JARVIS_OSUM_PORT="$TLSPORT" JARVIS_OSUM_DIR="$D/data" \
     JARVIS_OSUM_PROBE=1 \
@@ -200,7 +145,6 @@ else
     echo "ECHT: $pass bestanden, $fail durchgefallen"; exit 1
 fi
 
-# Anmelden und einen Kopplungscode holen -- so, wie Justin es im Cockpit tut.
 KEKS=$(ip netns exec "$NS" curl -s -i -X POST "http://127.0.0.1:$HTTPPORT/api/login" \
     -H 'content-type: application/json' \
     -d '{"username":"osumpruef","password":"Pr8fst4nd!xy"}' \
@@ -216,23 +160,6 @@ else
     echo "ECHT: $pass bestanden, $fail durchgefallen"; exit 1
 fi
 
-# ------------------------------------------------- 5. Osum meldet sich an
-# DIE REIHENFOLGE IST DER GANZE WITZ DER KOPPLUNG.
-#
-# `jarvisctl pair` bestaetigt einen Code, den DER HELFER SCHON
-# BEKOMMEN HAT: der Helfer legt ihn nach `/var/jarvis/pairing`, und
-# `jarvisctl` liest ihn dort und vergleicht. Wer zuerst bestaetigt,
-# bekommt zu Recht "Es liegt keine Kopplungsanfrage vor" -- gemessen,
-# `jarvisctl -> 1`, und der Server meldete "die Kopplung wurde am
-# Geraet abgelehnt". Genau so soll es sein: ein Code, den niemand
-# angefragt hat, wird nicht bestaetigt.
-#
-# ALSO IN DREI SCHRITTEN, wie an einem echten Geraet auch:
-#   1. `jarvisd -1` verbindet sich, bekommt `kopplung-noetig <code>`,
-#      schreibt ihn auf den Schirm und nach /var/jarvis/pairing und
-#      legt auf (niemand hat bestaetigt),
-#   2. der Mensch tippt `jarvisctl pair <code>`,
-#   3. `jarvisd` verbindet sich neu -- und jetzt geht es durch.
 SKRIPT="jarvisd -1 -t 20000;jarvisctl pair $CODE;jarvisctl screenshot 900;jarvisd -t 120000"
 timeout 400 qemu-system-x86_64 -kernel "$K" -m 256 \
     -append "osum nokbd nosched noproc nofs noring3 gfx nocursor nic nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=0 script=$SKRIPT" \
@@ -243,8 +170,6 @@ timeout 400 qemu-system-x86_64 -kernel "$K" -m 256 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$W/qemu.log" 2>&1 &
 QPID=$!
 
-# Warten, bis der Server das Geraet als verbunden fuehrt, und DANN die
-# Werkzeuge benutzen -- genau so, wie JARVIS es tut.
 VERB=""
 for i in $(seq 1 240); do
     VERB=$(ip netns exec "$NS" curl -s "http://127.0.0.1:$HTTPPORT/api/osum/devices" -H "cookie: $KEKS" \
@@ -264,7 +189,6 @@ else
     grep -aE 'jarvisd:|Osum' "$W/seriell.txt" "$W/server.log" 2>/dev/null | tail -8 | sed 's/^/        /'
 fi
 
-# Die Werkzeuge, ueber denselben Weg wie JARVIS: node ruft den Adapter.
 if [ "$VERB" = ja ]; then
     ip netns exec "$NS" env JARVIS_DIR="$JARVIS" HTTPPORT="$HTTPPORT" \
         KEKS="$KEKS" W="$W" \

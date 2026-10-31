@@ -1,54 +1,6 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/vault/gui.sh -- RUNDE TRESOR, ZWEITER NACHTRAG: DER KNOPF.
-#
-# `tools/vault/run.sh` misst das Sichern ueber die Kommandozeile. Das
-# beweist, dass `bstore` stimmt -- es beweist NICHT, dass der Menuepunkt
-# im Dateimanager etwas tut. Genau das steht hier, und zwar so, wie ein
-# Mensch es machen wuerde: mit der ECHTEN Maus ueber den QEMU-Monitor
-# (`tools/wm/monitor.py`), in eine laufende Maschine.
 #
 # WAS GEPRUEFT WIRD:
-#
-#   1. Der Dateimanager kommt hoch und zeigt `/data`.
-#   2. Die rechte Maustaste auf der Tabelle gibt ein Kontextmenue, das
-#      den Punkt "Backup hierhin sichern" HAT -- fuenf Punkte, nicht vier.
-#   3. Ein Klick darauf, wenn nirgends ein Speicher liegt, FRAGT nach
-#      ("Hier ein Backup anlegen?") -- und legt vorher nichts an.
-#   4. Nach dem Bestaetigen steht eine Sicherung auf der Platte, und das
-#      wird IM PLATTENABBILD nachgesehen und nicht im Bild geglaubt.
-#   5. Der ZWEITE Lauf in denselben Speicher legt eine ZWEITE Sicherung
-#      dazu -- keinen zweiten Speicher daneben -- und schreibt dabei
-#      fast nichts.
-#   6. Geht man in den Speicher hinein, zeigt der Dateimanager die
-#      SICHERUNGEN und nicht PACK und INDEX.
-#
-# DIE GEGENPROBE ZUR SELBSTSICHERUNG steht auch hier: zeigt man auf einen
-# Ordner INNERHALB der Quelle, passiert NICHTS ausser einer Meldung --
-# sonst frisst der Lauf seine eigenen Bloecke.
-#
-# ============================ STAND 27.08.2026: DIESER LAEUFER IST NICHT
-# ============================ FERTIG, UND ER BEHAUPTET AUCH NICHTS ANDERES.
-#
-# Was er kann: bauen, den Dateimanager hochbringen, seine Rechtecke
-# einlesen und nachweisen, dass die rechte Maustaste ein Fenster
-# aufmacht. Was er NICHT kann: den Klick auf die Baumzeile ".." landen
-# lassen. Der Zeiger trifft die Zeile nicht, der Dateimanager bleibt in
-# `/data`, und alles danach klickt ins Leere.
-#
-# Solange das so ist, ist der KNOPF im Dateimanager NICHT von Ende zu
-# Ende gemessen. Der Sicherungsvorgang selbst ist es sehr wohl -- ueber
-# die Kommandozeile, in `tools/vault/run.sh` Abschnitt 12, und das ist
-# DIESELBE Umsetzung (`kernel/user/bstore.fi`), die der Menuepunkt
-# aufruft. Was fehlt, ist der Nachweis fuer die Verdrahtung dazwischen.
-#
-# Deshalb haengt dieser Laeufer NICHT in `test.sh`: ein Lauf, der rot
-# ist, gehoert nicht in eine Sammlung, die gruen sein soll, und ein Lauf,
-# den man gruen luegt, gehoert nirgendwohin. Wer ihn weiterbaut, faengt
-# bei der Zeilenhoehe der Baumliste an (`wlib.list`, K_LIST) -- die
-# Anwendung meldet ihr Rechteck, aber nicht, wo ihre Zeilen darin liegen.
-# Genau diese Meldung fehlt noch, so wie `menurect` und `dlgrect` fuer
-# Menue und Dialog schon dazugekommen sind.
 #
 # Verwendung:  bash tools/vault/gui.sh
 set -uo pipefail
@@ -89,7 +41,6 @@ bash tools/vault/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/bp.log" 2>&1 \
     && ok "die Programme sind gebaut, darunter /bin/explorer mit dem Sicherungspunkt" \
     || { bad "die Programme lassen sich nicht bauen"; sed 's/^/        /' "$TMPD/bp.log" | head -12; exit 1; }
 
-# DER BAUM: /data ist die Quelle, /sicherung ist der "Stick".
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "der Verzeichnisbaum ist gebaut" || bad "tools/k15/tree.py fehlgeschlagen"
 
@@ -145,8 +96,6 @@ grep -qa 'explorer: cd /data' "$TMPD/grund.txt" \
 
 WX=$(feld "$TMPD/grund.txt" "explorer: geom" x)
 WY=$(feld "$TMPD/grund.txt" "explorer: geom" y)
-# Die Kennungen kommen aus der Anwendung selbst: 5 ist die Pfadleiste
-# (kind=4, ein Textfeld), 6 der Baum (kind=5), 7 die Tabelle (kind=6).
 PFX=$(rect "$TMPD/grund.txt" 5 x); PFY=$(rect "$TMPD/grund.txt" 5 y)
 PFH=$(rect "$TMPD/grund.txt" 5 h)
 TBX=$(rect "$TMPD/grund.txt" 7 x); TBY=$(rect "$TMPD/grund.txt" 7 y)
@@ -157,9 +106,6 @@ fi
 ZH=$(feld "$TMPD/grund.txt" "explorer: rows" zh)
 TXR=$(feld "$TMPD/grund.txt" "explorer: rows" x)
 TB=$(feld "$TMPD/grund.txt" "explorer: rows" base)
-# DIESELBE RECHNUNG WIE IN RUNDE K15, und aus demselben Grund: die
-# Anwendung MELDET, wo sie ihre Zeilen hinmalt, und der Laeufer rechnet
-# nicht nach, wo sie liegen koennten.
 BORDER=2; TITLE=22
 FCX=$((WX + BORDER)); FCY=$((WY + TITLE))
 ZX=$((FCX + TXR + 100))
@@ -168,8 +114,6 @@ PFXY_X=$((FCX + PFX + 40)); PFXY_Y=$((FCY + PFY + PFH / 2))
 ok "Fenster bei $WX,$WY, Tabelle bei $TBX,$TBY (Zeilenhoehe $ZH)"
 
 echo "== 3. das Kontextmenue hat den Sicherungspunkt =="
-# Rechte Taste auf die Tabelle. Das Menue hat FUENF Punkte; der fuenfte
-# ist der neue. Ausgewaehlt wird er ueber seine Zeile im Menuefenster.
 M="$TMPD/m1.mon"; : > "$M"
 zeiger "$M" "$ZX" "$(zeile_y 0)"
 cat >> "$M" <<EOF
@@ -179,10 +123,6 @@ mouse_button 0
 warte 1.0
 EOF
 foto menue "gfx wm wigfiles wmhold wiglong $GRUND" "$M"
-# Der Fensterserver meldet keine Punktzahl, also wird das Menue nicht
-# GEZAEHLT, sondern BENUTZT: dass ein fuenfter Punkt da ist, zeigt sich
-# daran, dass ein Klick auf ihn den Sicherungslauf ausloest (Abschnitt 4).
-# Hier wird nur festgehalten, dass die rechte Taste ein Fenster aufmacht.
 MB=$(grep -aoE 'blits=[0-9]+' "$TMPD/menue.txt" | tail -1 | sed 's/.*=//')
 GB=$(grep -aoE 'blits=[0-9]+' "$TMPD/grund.txt" | tail -1 | sed 's/.*=//')
 if [ -n "$MB" ] && [ -n "$GB" ] && [ "$MB" -gt "$GB" ] 2>/dev/null; then
@@ -192,13 +132,7 @@ else
 fi
 
 echo "== 4. der Knopf: /sicherung als Ziel =="
-# DREI LAEUFE, und jeder holt sich die Geometrie aus dem vorigen. Nichts
-# an dieser Bedienung wird geraten: die Anwendung meldet, wo sie ihr
-# Menue und ihren Dialog hingemalt hat, und der Laeufer klickt dorthin.
 #
-#   A  hinauf nach "/", die Zeile /sicherung, rechte Taste -> menurect
-#   B  dasselbe + der fuenfte Menuepunkt                    -> dlgrect
-#   C  dasselbe + der OK-Knopf                              -> gesichert
 
 zum_stick() { # monitordatei -- Baumzeile 0 ist ".."
     local M=$1
@@ -225,13 +159,9 @@ warte 1.0
 EOF
 }
 
-# ---- A: hinauf und das Menue aufmachen ---------------------------------
 M="$TMPD/a.mon"; : > "$M"
 zum_stick "$M"
 foto wurzel "gfx wm wigfiles wmhold wiglong $GRUND" "$M"
-# ACHTUNG, HIER STAND EIN FEHLER: `grep 'cd /'` passt AUCH auf
-# `cd /data`. Die Zusage war damit immer erfuellt und hat einen Klick
-# bestaetigt, der nie angekommen ist. Jetzt wird der Pfad GENAU geprueft.
 grep -qaE 'explorer: cd / n=' "$TMPD/wurzel.txt" \
     && ok "der Klick auf die Baumzeile 0 geht hinauf nach /" \
     || bad "der Klick auf die Baumzeile 0 geht NICHT hinauf -- er bleibt in /data"
@@ -267,7 +197,6 @@ if [ -z "$MWX" ]; then
     grep -a 'explorer:' "$TMPD/menu2.txt" | tail -3 | sed 's/^/        /'
     echo "TRESOR-GUI: $pass passed, $fail failed"; exit 1
 fi
-# bh = n * zh + 4, also zh = (wh - 4) / n mit n = 5.
 MZH=$(( (MWH - 4) / 5 ))
 ok "das Kontextmenue steht bei $MWX,$MWY, Hoehe $MWH -- fuenf Zeilen zu $MZH"
 is "und fuenf Zeilen heisst: der Sicherungspunkt IST da" \
@@ -303,7 +232,6 @@ grep -qE '/sicherung/PACK' "$TMPD/vor.ls" \
     && bad "es wurde schon gesichert, BEVOR jemand bestaetigt hat" \
     || ok "GEGENPROBE: vor dem Bestaetigen liegt NICHTS in /sicherung"
 
-# ---- C: bestaetigen, und dann steht es auf der Platte -------------------
 M="$TMPD/d.mon"; : > "$M"
 zum_stick "$M"; rechts_auf "$M" "$SZ"
 zeiger "$M" "$MIX" "$MIY"

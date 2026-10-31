@@ -1,52 +1,8 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/display/run.sh -- DIE ABNAHME DER RUNDE DISPLAY.
-#
-# WAS DIESE RUNDE BEHAUPTET, UND WAS HIER DAVON GEMESSEN WIRD.
-#
-# Vor dieser Runde kannte Osum ZWEI Aufloesungen. Sie standen als vier
-# Konstanten in `kernel/fb.fi`, umschaltbar nur ueber ein Wort auf der
-# Befehlszeile beim Start, und das Einstellungen-Programm schrieb dazu
-# den ehrlichen Satz "im Betrieb kann dieser Kernel ihn nicht wechseln".
-#
-# Jede dieser vier Behauptungen wird hier zur Zahl:
-#
-#   1. DIE QUELLEN. Die Register- und Fensterzahlen stehen in ZWEI
-#      Dateien (fb.fi und vmode.fi) -- dieselbe benannte Doppelung wie
-#      zwischen fb.fi und apic.fi, und dieselbe Zusage darauf. Dazu die
-#      kdata-Karte und der Vorrat dieser Runde.
-#   2. BAUEN. Beide Uebersetzer, Kern und Programme.
-#   3. DIE LISTE. Was QEMU wirklich annimmt -- mit den Zahlen, die
-#      dabei herauskommen, und mit dem Grund fuer jeden Kandidaten, der
-#      NICHT in der Liste steht. Eine Liste ohne ihre Ausschluesse ist
-#      eine Behauptung.
-#   4. EDID. Was der Bildschirm ueber sich sagt, und ob es ein
-#      gueltiger Block ist (Kennung und Pruefsumme werden im Kernel
-#      gerechnet, hier wird die ROHE Fassung nachgerechnet).
-#   5. DER WECHSEL ZUR LAUFZEIT, mit BILDSCHIRMFOTO vorher und nachher.
-#      Ohne Foto ist "der Modus wurde gewechselt" eine Zeile im
-#      Mitschnitt und kein Bild.
-#   6. DER FEHLERFALL. Ein Modus, den es nicht gibt -- und danach steht
-#      DASSELBE Bild da wie ohne den Versuch. Kein schwarzer Schirm.
-#   7. DIE FRIST. Wechseln, NICHT bestaetigen, und der alte Modus kommt
-#      von selbst zurueck.
-#   8. DIE DREHUNG, im Bild.
-#   9. DIE KOSTEN. Was die Nachschlagetabelle je Bild kostet, bei der
-#      groessten Aufloesung der Liste -- und was sie bei einer
-#      Textzeile kostet, denn das ist die Zahl, die im Betrieb zaehlt.
-#  10. RING 3. Dasselbe ueber die drei Aufrufe 1800..1802, aus einem
-#      Programm ohne Kernelrechte, und die Zahlen gegen die des Kernels.
-#  11. DIE GEGENPROBE. DERSELBE Kernel, DIESELBE Befehlszeile, nur ohne
-#      das Wort `disp`: keine Liste, kein EDID, kein Wechsel, und jeder
-#      Aufruf aus Ring 3 sagt -ENODEV.
 #
 # Verwendung:  bash tools/display/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-# RUNDE MARKE: der Produktname kommt aus `marke.conf` (geschlagen von
-# OSUM_MARKE_*), nicht aus dieser Datei. Eine Zusage auf einen fest
-# getippten Namen waere nach der ersten Umbenennung eine Zusage auf
-# etwas, das es nicht mehr gibt -- sie ginge auf und pruefte nichts.
 . tools/lib/marke.sh
 marke_laden . || exit 1
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -75,17 +31,8 @@ gleich() { if [ "$2" = "$3" ]; then ok "$1 ($3)"; else bad "$1 -- soll '$2', ist
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hat_nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 
-# Ein Wert aus einer `disp: ... name=zahl`-Zeile des Kernels.
-# NUR die Zeilen DIESER Runde. Die erste Fassung suchte im ganzen
-# Mitschnitt nach `refused=`, und der Kernel meldet dasselbe Wort auch
-# fuer die Tabelle der Dateiarten (Runde K16) -- der Laeufer las deren
-# Zahl und rechnete damit. Ein Testlaeufer, der die falsche Zahl liest,
-# ist schlimmer als keiner.
 kw() { grep -ao "^disp:.*[ =]$2=[0-9a-fx]*" "$1" 2>/dev/null | head -1 \
        | grep -ao "$2=[0-9a-fx]*" | head -1 | sed 's/.*=//' | tr -d '\r\000'; }
-# Ein Wert aus `dispctl: name=zahl` (Ring 3) -- der ERSTE bzw. der LETZTE.
-# Beide werden gebraucht: ein Lauf, der erst umschaltet und dann anzeigt,
-# hat DIESELBE Zeile zweimal im Mitschnitt, mit verschiedenen Zahlen.
 uw()  { grep -a -m1 "^dispctl: $2=" "$1" 2>/dev/null | sed 's/^[^=]*=//' | tr -d '\r\000'; }
 uwl() { grep -a "^dispctl: $2=" "$1" 2>/dev/null | tail -1 | sed 's/^[^=]*=//' | tr -d '\r\000'; }
 
@@ -105,12 +52,6 @@ fi
 
 echo "== 1. die Quellen: zwei Dateien, eine Wahrheit =="
 
-# DIE VBE-REGISTER STEHEN ZWEIMAL, und das ist Absicht (der Absatz ueber
-# den Abhaengigkeitskreis steht in beiden Dateien). Eine gewollte
-# Doppelung mit einer Zusage darauf ist etwas anderes als eine
-# vergessene: laufen die Zahlen auseinander, programmiert die eine Datei
-# ein anderes Register als die andere, und das faellt erst auf, wenn ein
-# Bildschirm schwarz bleibt.
 for r in VBE_INDEX VBE_DATA VBE_ID VBE_XRES VBE_YRES VBE_BPP VBE_ENABLE \
          VBE_BANK VBE_VWIDTH VBE_VHEIGHT VBE_XOFF VBE_YOFF \
          VBE_DISABLED VBE_ENABLED VBE_LFB VBE_ID_LO VBE_ID_HI; do
@@ -119,44 +60,21 @@ for r in VBE_INDEX VBE_DATA VBE_ID VBE_XRES VBE_YRES VBE_BPP VBE_ENABLE \
     if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$r steht in fb.fi und vmode.fi gleich ($a)"
     else bad "$r: fb.fi='$a', vmode.fi='$b'"; fi
 done
-# Und der Index, den Runde K7 nicht kannte.
 v64=$(grep -aE '^const VBE_VRAM64K' kernel/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
 gleich "VBE_VIDEO_MEMORY_64K ist Index 10 (0x0A)" "10" "$v64"
 
-# Die Seiten dieser Runde und die Karte.
 d1=$(grep -aE '^const DISP_OFF' kernel/lib/kstate.fi | sed 's/.*= //')
 d2=$(grep -aE '^const DLUT_OFF' kernel/lib/kstate.fi | sed 's/.*= //')
-# RUNDE MERGE: DIE ADRESSEN STEHEN NICHT MEHR IM LAEUFER. Diese Runde
-# nahm 0x5A000 und 0x5B000; auf dem zusammengefuehrten Baum liegt dort
-# OFS3, und der Modustreiber ist auf 0x5C000/0x5D000 gerueckt. Die Frage
-# dieser Zeilen ist "liegen die beiden Seiten hintereinander und kennt
-# der Kartenpruefer sie", nicht "steht dort eine bestimmte Zahl" -- die
-# Zahl darf sich aendern, der Kartenpruefer drei Zeilen weiter unten ist
-# der, der ueber Kollisionen entscheidet.
 [ -n "$d1" ] && ok "die kdata-Seite des Modustreibers steht in kstate.fi: $d1" \
              || bad "DISP_OFF fehlt in kernel/lib/kstate.fi"
 [ -n "$d2" ] && ok "die kdata-Seite der Nachschlagetabelle steht daneben: $d2" \
              || bad "DLUT_OFF fehlt in kernel/lib/kstate.fi"
 gleich "und sie folgt unmittelbar auf den Modustreiber" \
     "$(printf '0x%X' $(( $d1 + 0x1000 )))" "$(printf '0x%X' $(( $d2 )))"
-# AUFRUFNUMMERN: 1810..1819 gehoeren dieser Runde, und niemandem sonst.
-# RUNDE MERGE: der Bereich hiess hier 1810..1849 und war damit zu weit.
-# Der Hunderter ist inzwischen aufgeteilt -- 1800..1809 die Widget-Naht
-# aus K15, 1810..1819 diese Runde, 1820..1829 Runde TILING, 1830..1839
-# Runde POWERMON -- und jede der drei anderen Runden prueft ihren eigenen
-# Zehner genauso. Ein Laeufer, der den halben Hunderter fuer sich
-# beansprucht, meldet die Nachbarn als Eindringlinge.
 fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/ \
     | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/user/dispctl.fi' \
               -e '^kernel/user/settings.fi' -e '^kernel/user/qs.fi' \
               -e '^kernel/user/snip.fi' -e '^kernel/user/wmd.fi' || true)
-# wmd.fi (compositor S6) only READS the mode through SYS_DISPGET, like qs.fi and snip.fi.
-# `kernel/user/qs.fi` (Runde GLYPHE) und `kernel/user/snip.fi` (Runde
-# ALLTAG) stehen aus demselben Grund daneben wie powermon.fi in
-# tools/k18/run.sh: sie LESEN ueber genau diesen Aufruf. Das
-# Ausschnittwerkzeug braucht Zeilenlaenge und Farbtiefe des Schirms,
-# bevor es ein PNG daraus macht. Eine zweite VERGABE derselben Nummer
-# faende diese Suche weiterhin.
 [ -z "$fremd" ] && ok "keine Aufrufnummer aus 1810..1819 steht ausserhalb der Dateien dieser Runde" \
                 || bad "Aufrufnummern aus 1810..1819 stehen auch in: $(echo $fremd | tr '\n' ' ')"
 eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/sys/sys.fi | wc -l | tr -d ' ')
@@ -185,14 +103,6 @@ done
 [ "$rc" = 0 ] && ok "der Kern und $(echo $PROGS | wc -w) Programme sind gebaut"
 [ -f "$TMPD/k0.mb" ] || { echo "DISPLAY: ohne Kern geht nichts weiter"; echo "DISPLAY: $pass passed, $((fail+1)) failed"; exit 1; }
 
-# Das Einstellungen-Programm ist die Oberflaeche dieser Runde. Es wird
-# hier ZUSAETZLICH uebersetzt und gebunden -- nicht auf die Platte
-# gelegt, denn dazu braeuchte es einen laufenden Fensterserver, sondern
-# damit ein Fehler in der neuen Seite auffaellt, bevor jemand sie oeffnet.
-# RUNDE GRUNDLINIE (A-016): Profil aus der Wurzeldatei LESEN, und im
-# Profil `app` mit -c und OHNE crt.o. Ohne das stand hier
-#     ld: input file '.../eins.o' is the same as output file
-# weil firnc im Profil `app` ohne -c gleich zu binden versucht.
 UPROF=""; UCRT="$TMPD/crt.o"
 grep -qa '^profile app' kernel/user/settings.fi && { UPROF=--profile=app; UCRT=""; }
 if "$FIRNC" $UPROF -c kernel/user/settings.fi -o "$TMPD/eins.o" > "$TMPD/eins.err" 2>&1 \
@@ -204,14 +114,6 @@ if "$FIRNC" $UPROF -c kernel/user/settings.fi -o "$TMPD/eins.o" > "$TMPD/eins.er
 else
     bad "settings.fi laesst sich nicht bauen"; head -8 "$TMPD/eins.err" | sed 's/^/        /'
 fi
-# Und die Zusage ueber den Inhalt: der Satz, den diese Runde falsch
-# gemacht hat, steht nicht mehr da.
-# RUNDE MERGE: GESUCHT WIRD DER ANZEIGETEXT, NICHT DER KOMMENTAR.
-# Seit Runde I18N steht der Text der Oberflaeche in `locale/<code>/
-# messages` und nicht mehr im Quelltext; im Quelltext steht nur noch ein
-# Kommentar, der ERKLAERT, warum der Satz weg ist -- und den hat dieser
-# Griff gefunden und als Rueckfall gemeldet. Geprueft werden deshalb die
-# Sprachdateien und die Nicht-Kommentarzeilen des Programms.
 for f in locale/de/messages locale/en/messages; do
     hat_nicht "$f" "kann dieser Kernel ihn nicht wechseln" \
         "der unwahre Satz steht nicht in $f"
@@ -240,14 +142,6 @@ python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" /bin/ $MKARGS \
 
 GRUND="nokbd nosched noproc nofs noring3"
 
-# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
-#
-# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
-# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
-# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
-# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
-# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
-# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
 VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
 
 lauf() { # name kommandozeile [zeitlimit]
@@ -259,7 +153,6 @@ lauf() { # name kommandozeile [zeitlimit]
     echo $?
 }
 
-# Ein Lauf MIT Bildschirmfoto. Die Marke ist `fb: hold`.
 RC=0
 foto() { # name kommandozeile
     local name=$1 zeile=$2
@@ -305,8 +198,6 @@ num "es wurden Kandidaten gefragt und nicht geraten" "$probed" ge 20
 anz=$(grep -a -m1 '^disp: modes ' "$L" | sed 's/.*modes //' | tr -d '\r\000')
 num "die Liste ist laenger als die zwei Konstanten von Runde K7" "$anz" gt 2
 num "und kuerzer als die Kandidatenliste -- es wurde wirklich ausgesiebt" "$anz" lt "$probed"
-# DIE DREI GRUENDE, EINZELN. Ohne sie waere "17 von 22" eine Zahl ohne
-# Inhalt, und man saehe nicht, welche Schranke gegriffen hat.
 ref=$(kw "$L" refused); tb=$(kw "$L" toobig); um=$(kw "$L" unmappable)
 ok "gefragt $probed · aufgenommen $anz · Register abgelehnt $ref · zu gross fuer den Bildspeicher $tb · nicht abbildbar $um"
 s=$((anz + ref + tb + um))
@@ -314,7 +205,6 @@ gleich "die vier Zahlen gehen auf" "$probed" "$s"
 hat "$L" "disp:   800x600x 32" "800x600 steht in der Liste (was Runde K7 konnte)"
 hat "$L" "disp:   1024x768x 32" "1024x768 steht in der Liste (was Runde K7 auch konnte)"
 hat "$L" "disp:   1920x1080x 32" "1920x1080 steht in der Liste (was Runde K7 NICHT konnte)"
-# Jeder ausgeschlossene Kandidat hat einen Grund, und der Grund steht da.
 n_out=$(grep -ac '^disp: out ' "$L")
 gleich "jeder ausgeschlossene Kandidat wird mit Grund gemeldet" "$((ref + tb + um))" "$n_out"
 lim=$(kw "$L" maplimit)
@@ -329,7 +219,6 @@ gleich "und die dreizehn aus Runde K7 stehen unveraendert" "13" "$st1"
 # ============================================== 4. EDID
 
 echo "== 4. EDID: was der Bildschirm ueber sich sagt =="
-# ... ausser diesem einen: er MISST die Tafel und braucht sie deshalb.
 rc=$(VGA_STD="-vga std" lauf edid "gfx disp dispedid $GRUND")
 num "der Lauf endet sauber" "$rc" eq 21
 E="$TMPD/edid.txt"
@@ -340,10 +229,6 @@ if grep -qa '^disp: edid ok' "$E"; then
     nat=$(grep -ao 'nat=[0-9]*x[0-9]*' "$E" | head -1 | sed 's/nat=//')
     [ -n "$nat" ] && ok "die native Aufloesung aus dem ersten Zeitlagensatz: $nat" \
                   || bad "keine native Aufloesung im EDID-Block"
-    # DIE ROHE FASSUNG NACHRECHNEN. Der Kernel sagt "Pruefsumme stimmt";
-    # hier wird sie ein zweites Mal gerechnet, aus den Oktetten, die er
-    # ausgegeben hat. Ein Kernel, der seine eigene Pruefung bestaetigt,
-    # hat nichts bewiesen.
     roh=$(grep -a -m1 '^disp: edid 0x' "$E" | sed 's/^disp: edid //' | tr -d '\r\000')
     python3 - "$roh" <<'PY' > "$TMPD/edid.chk" 2>&1
 import sys, re
@@ -369,7 +254,6 @@ fi
 
 echo "== 5. der Wechsel zur Laufzeit, im Bild =="
 
-# VORHER: 800x600, das Pruefbild von Runde K7.
 foto vorher "gfx disp nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber" "$RC" eq 21
 schau "VORHER: das Foto ist 800x600" size "$TMPD/vorher.ppm" 800 600
@@ -377,7 +261,6 @@ schau "VORHER: Feld 1 ist reines Rot" area "$TMPD/vorher.ppm" 0 0 100 100 255 0 
 schau "VORHER: die Textzeile steht bildpunktgenau" \
     text "$TMPD/vorher.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 
-# NACHHER: DERSELBE Kernel, DIESELBE Zeile, ein Wort mehr -- `dispbig`.
 foto nachher "gfx disp dispbig nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber" "$RC" eq 21
 N="$TMPD/nachher.txt"
@@ -389,8 +272,6 @@ gleich "der Wechsel meldet Erfolg" "0" "$rcsw"
 us=$(echo "$sw" | grep -ao 'us=[0-9]*' | sed 's/us=//')
 [ -n "$us" ] && ok "er hat $us Mikrosekunden gedauert (Registersatz, Neuabbildung, Zweitpuffer, Neuzeichnen)" \
              || bad "keine Zeit gemessen"
-# UND DAS FOTO. Das ist die eigentliche Zusage: nicht "der Kernel sagt
-# 1024x768", sondern "QEMU zeigt 1024x768".
 schau "NACHHER: das Foto ist 1024x768 -- der Modus wurde WIRKLICH gewechselt" \
     size "$TMPD/nachher.ppm" 1024 768
 schau "NACHHER: das Pruefbild ist neu gezeichnet, Feld 1 ist wieder rot" \
@@ -402,8 +283,6 @@ schau "NACHHER: die Ecke bei (1023,767) gibt es jetzt und sie ist schwarz" \
     pixel "$TMPD/nachher.ppm" 1023 767 0 0 0
 schau_nicht "VORHER gab es diese Ecke NICHT" pixel "$TMPD/vorher.ppm" 1023 767 0 0 0
 
-# UND ZURUECK. Zwei Wechsel in EINEM Lauf -- der Rueckweg ist der Fall,
-# in dem Fensterplaetze frei werden statt belegt zu werden.
 foto zurueck "gfx disp dispbig dispback nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber" "$RC" eq 21
 Z="$TMPD/zurueck.txt"
@@ -429,14 +308,11 @@ fb_=$(grep -a -m1 '^disp: sw=' "$S" | grep -ao 'fail=[0-9]*' | sed 's/fail=//')
 num "der Zaehler der abgelehnten Wechsel steht" "$fb_" ge 1
 swb=$(grep -a -m1 '^disp: sw=' "$S" | grep -ao 'sw=[0-9]*' | sed 's/sw=//')
 gleich "und KEIN Wechsel hat stattgefunden" "0" "$swb"
-# DIE EIGENTLICHE ZUSAGE DIESES ABSCHNITTS: das Bild ist noch da.
 schau "das Foto ist 800x600 -- der Bildmodus steht noch" size "$TMPD/schlecht.ppm" 800 600
 schau "Feld 1 ist rot -- der Bildschirm ist NICHT schwarz" \
     area "$TMPD/schlecht.ppm" 0 0 100 100 255 0 0
 schau "und die Textzeile steht bildpunktgenau da, als waere nichts gewesen" \
     text "$TMPD/schlecht.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
-# Und die Gegenprobe zum Foto selbst: ein SCHWARZES Bild haette diese
-# Stellen nicht.
 schau_nicht "ein schwarzer Schirm haette hier kein Rot" \
     area "$TMPD/schlecht.ppm" 0 0 100 100 0 0 0
 
@@ -474,10 +350,6 @@ hat "$D" "img=600x800" "das BILD ist danach 600x800 ..."
 hat "$D" "panel=800x600" "... und die TAFEL bleibt 800x600"
 schau "das Foto ist 800x600 -- gedreht wird beim Uebertragen, nicht in der Karte" \
     size "$TMPD/dreh.ppm" 800 600
-# Das Pruefbild hat vier Farbfelder in der obersten Bildzeile. Um 90 Grad
-# im Uhrzeigersinn gedreht liegen sie in der RECHTEN Spalte, von oben
-# nach unten. Ein Bildpunkt aus Feld 1 (rot, Bildkoordinate 50,50) liegt
-# danach bei Tafel(800-1-50, 50) = (749,50).
 schau "Feld 1 (rot) liegt nach der Drehung rechts oben" \
     pixel "$TMPD/dreh.ppm" 749 50 255 0 0
 schau "Feld 2 (gruen) liegt darunter" pixel "$TMPD/dreh.ppm" 749 150 0 255 0
@@ -500,10 +372,6 @@ d_ro=$(echo "$bz" | grep -ao 'rot90=[0-9]*' | sed 's/rot90=//')
 num "gemessen wurde bei der GROESSTEN Aufloesung der Liste (Bildpunkte)" "$px" ge 1000000
 num "der schnelle Weg von Runde K7 steht noch (Mikrosekunden je Bild)" "$d_fl" gt 0
 num "die Nachschlagetabelle kostet mehr als der schnelle Weg" "$d_lu" gt "$d_fl"
-# DIE ZAHL, DIE IM BETRIEB ZAEHLT. Eine Konsole baut fast nie ein ganzes
-# Bild auf; sie schreibt eine Zeile. Wer nur das volle Bild misst, sieht
-# die Tabelle nur von ihrer teuersten Seite -- derselbe Einwand, den
-# `bench_zeile` in Runde K7 gegen den vollen Bildaufbau erhoben hat.
 num "eine TEXTZEILE durch die Tabelle kostet deutlich weniger als ein volles Bild" \
     "$d_ln" lt "$((d_lu / 4))"
 num "die Vierteldrehung kostet ein volles Bild" "$d_ro" gt 0
@@ -512,28 +380,12 @@ ok "je Bildpunkt: flush $((d_fl * 1000 / px)) ns · Tabelle $((d_lu * 1000 / px)
 # ============================================== 10. Ring 3
 
 echo "== 10. dieselben Zahlen aus Ring 3, ueber 1800..1802 =="
-# RUNDE KLEINKRAM (14.09.2026), A-020: `VGA_STD="-vga std"` -- GENAU
-# dieselbe Ausnahme wie in Abschnitt 4 oben, und aus demselben Grund.
-# Die Vorgabe dieses Laeufers ist `-vga std -global VGA.edid=off`: die
-# Tafel ist ABGESCHALTET, weil die uebrigen Abschnitte die eingebaute
-# Vorgabe (800x600) messen und keine Tafel wollen. Drei Zusagen dieses
-# Abschnitts fragen aber nach dem EDID-Block ("EDID hat auch Ring 3
-# gesehen", Hersteller- und Modellname ueber osum_dispstr). Ohne Tafel
-# gibt es keinen Block, `vmode.edid_ok` ist 0, `do_dispstr` antwortet
-# mit E_NODEV -- und die drei Zusagen waren rot, seit es sie gibt.
-# DAS WAR DER MESSAUFBAU UND NICHT DER KERN: dieselben drei Werte
-# kommen in Abschnitt 4 sauber heraus, nur eben aus Ring 0. Der Weg
-# nach Ring 3 wird hier zum ersten Mal mit einer Tafel gemessen.
 rc=$(VGA_STD="-vga std" lauf_platte ring3 "osum gfx disp nokbd nosched noproc script=dispctl test;dispctl raw")
 num "der Lauf mit /bin/dispctl endet sauber" "$rc" eq 21
 R="$TMPD/ring3.txt"
 hat "$R" "osum\$ dispctl" "das Programm ist gestartet"
 t3=$(grep -ao 'dispctl: test [0-9]*' "$R" | head -1 | grep -o '[0-9]*$')
 gleich "die Zusagen aus Ring 3" "12" "$t3"
-# DIE NUMMERN DIESER RUNDE SIND 1810..1812 UND NICHT 1800..1802 --
-# 1800..1809 gehoeren seit Runde K15 der Widget-Bibliothek. Dass das
-# auffiel, ist genau dieser Abschnitt gewesen; der Grund steht in
-# kernel/sys.fi.
 wig=$(grep -aE '^const WIG_BASE' kernel/sys/sys.fi | sed 's/.*= //')
 dg=$(grep -aE '^const SYS_OSUM_DISPGET' kernel/sys/sys.fi | sed 's/.*= //')
 if [ "$dg" -gt "$((wig + 9))" ]; then
@@ -542,9 +394,6 @@ else
     bad "die Aufrufnummern kollidieren mit WIG_BASE: disp=$dg, wig=$wig"
 fi
 
-# UND JETZT DER VERGLEICH. Zwei Wege, eine Wahrheit: was der Kernel
-# ueber sich gemeldet hat, und was ein Programm ohne Kernelrechte ueber
-# dieselben drei Aufrufe herausbekommt.
 for f in vram:vram maplimit:maplimit probed:probed refused:refused toobig:toobig; do
     kn=${f%%:*}; un=${f##*:}
     a=$(kw "$L" "$kn"); b=$(uw "$R" "$un")
@@ -553,22 +402,7 @@ for f in vram:vram maplimit:maplimit probed:probed refused:refused toobig:toobig
 done
 u_anz=$(uw "$R" count)
 gleich "auch die Laenge der Liste" "$anz" "$u_anz"
-# RUNDE KLEINKRAM (14.09.2026), A-020: 800 -> 1280. Das ist die FOLGE
-# der Tafel, die dieser Lauf seit dieser Runde hat (siehe oben), und
-# keine aufgeweichte Zusage: mit EDID nimmt der Kern die native
-# Aufloesung der Tafel, und QEMUs `-vga std` nennt 1280x800. Ohne Tafel
-# blieb es bei der eingebauten Vorgabe 800x600. Die Zusage selbst ist
-# unveraendert -- Ring 3 muss DIESELBE Zahl sehen wie der Kern.
-# RUNDE KLEINKRAM (14.09.2026), A-020: hier stand fest getippt "800",
-# und das galt, solange dieser Lauf KEINE Tafel hatte. Er hat jetzt
-# eine (siehe die Begruendung oben am Lauf), und mit EDID nimmt der
-# Kern die native Aufloesung -- QEMUs `-vga std` nennt 1280x800.
 #
-# Statt die 800 durch eine 1280 zu ersetzen, wird die Zahl jetzt AUS
-# DEM KERNMITSCHNITT DESSELBEN LAUFS genommen. Das ist genau die
-# Zusage, um die es in diesem Abschnitt geht -- "zwei Wege, eine
-# Wahrheit" --, und sie haelt auch dann noch, wenn jemand die Tafel
-# wieder umstellt.
 k_panel=$(grep -ao '^disp: eigen .* panel=[0-9]*x[0-9]*' "$R" 2>/dev/null \
     | tail -1 | grep -ao 'panel=[0-9]*' | sed 's/panel=//')
 [ -n "$k_panel" ] || k_panel=$(grep -ao '^fb: [0-9]*x[0-9]*' "$R" 2>/dev/null \
@@ -583,7 +417,6 @@ hat "$R" "dispctl: model=QEMU Monitor" "der Modellname auch"
 n_modes=$(grep -ac '^dispctl: mode ' "$R")
 gleich "und die Liste kommt Zeile fuer Zeile heraus" "$anz" "$n_modes"
 
-# Ein Wechsel AUS RING 3 -- und der Kernel schaltet wirklich um.
 rc=$(lauf_platte ring3b "osum gfx disp nokbd nosched noproc script=dispctl set 1024 768;dispctl keep;dispctl raw")
 num "der Lauf endet sauber" "$rc" eq 21
 R2="$TMPD/ring3b.txt"
@@ -591,10 +424,7 @@ gleich "ein Programm in Ring 3 hat die Tafel umgestellt" "1024" "$(uwl "$R2" pan
 gleich "und die Hoehe" "768" "$(uwl "$R2" panelh)"
 gleich "die Zeilenlaenge ist mitgewandert" "4096" "$(uwl "$R2" pitch)"
 gleich "der Kernel zaehlt genau einen Wechsel" "1" "$(uwl "$R2" switches)"
-# Direkt nach dem Wechsel steht die Frist offen ...
 gleich "direkt nach dem Wechsel laeuft die Bestaetigungsfrist" "1" "$(uw "$R2" pending)"
-# ... und nach `dispctl keep` ist sie zu. Beide Zahlen aus DEMSELBEN
-# Mitschnitt, die erste und die letzte Zeile desselben Namens.
 gleich "nach dem Bestaetigen ist sie zu" "0" "$(uwl "$R2" pending)"
 gleich "und der Kernel hat die Bestaetigung gezaehlt" "1" "$(uwl "$R2" confirms)"
 
@@ -609,14 +439,6 @@ hat_nicht "$O" "disp: modes" "und es gibt keine Liste"
 hat_nicht "$O" "disp: edid" "und kein EDID"
 hat "$O" "fb: 800x600x32" "der Bildschirm von Runde K7 steht unveraendert"
 hat "$O" "fb: selftest 13 / 13" "und seine dreizehn Zusagen auch"
-# UND AUS RING 3: jeder Aufruf muss -ENODEV sagen und nicht eine Null,
-# die wie ein Messwert aussieht.
-# HIER STAND EIN FEHLER, DER DIE GEGENPROBE WERTLOS MACHTE. Der Kernel
-# suchte seine Woerter als TEILZEICHENKETTE, und `script=dispctl raw`
-# enthaelt `disp`. Diese Gegenprobe erkundete die Karte also und bewies
-# das Gegenteil von dem, was sie sollte. Der Kernel sucht seit dem
-# ganze Woerter (`vmode.find_word`); die Zeile hier bleibt, wie sie ist,
-# weil genau sie den Fehler auffliegen laesst.
 rc=$(lauf_platte ohne3 "osum gfx nokbd nosched noproc script=dispctl raw;dispctl test")
 num "der Lauf endet sauber" "$rc" eq 21
 O3="$TMPD/ohne3.txt"

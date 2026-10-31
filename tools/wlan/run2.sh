@@ -1,36 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/wlan/run2.sh -- RUNDE WLAN-2: gegen ein ZWEITES PROGRAMM.
-#
-# ======================================================================
-# WAS DIESER ABSCHNITT MISST UND WAS ER AUSDRUECKLICH NICHT ZEIGT
-# ======================================================================
-#
-# Abschnitt 42 (`tools/wlan/run.sh`, Runde WLAN) misst die Rechnung
-# gegen NORMVEKTOREN: aus festen Zahlen muss ein festes Ergebnis
-# kommen. Das ist noetig und es reicht nicht, und die Runde WLAN hat
-# das selbst aufgeschrieben:
-#
-#     S2 -- Der 4-Wege-Handschlag ist gegen sich selbst und gegen die
-#     Normvektoren der Primitiven gemessen, NICHT gegen einen echten
-#     Zugangspunkt.
-#
-# Dieser Abschnitt schliesst S2 und S4. Er laesst Osums Supplicanten
-# gegen `tools/wlan/gegenstelle.py` antreten -- einen vollstaendigen
-# WPA2-Authenticator, der mit Osum KEINE ZEILE teilt, unter sich
-# OpenSSL statt `lib/crypto/` benutzt und bei jedem Lauf NEUE
-# Zufallszahlen wuerfelt.
-#
-# WAS ER NICHT ZEIGT: dass Osum sich mit einem WLAN verbindet. Es gibt
-# keinen Treiber. `docs/WLAN.md` sagt, warum, was es kostet und was
-# genau am echten Blech noch fehlt.
-#
-# WARUM NICHT hostapd: gemessen und im Kopf von `peer.py`
-# festgehalten -- Debian baut hostapd/wpa_supplicant ohne
-# CONFIG_TESTING_OPTIONS, damit fehlen EAPOL_RX und MGMT_RX_PROCESS;
-# `driver=wired` ist auf 802.1X verdrahtet und ruehrt die
-# WPA-PSK-Maschine nicht an; `mac80211_hwsim` gibt es auf diesem Kern
-# nicht.
 #
 # Verwendung:  bash tools/wlan/run2.sh [--schnell]
 set -uo pipefail
@@ -72,9 +40,6 @@ python3 -c 'import cryptography' 2>/dev/null \
 echo "== 2. die Gegenstelle eicht sich an einer ECHTEN Aufzeichnung =="
 # =====================================================================
 #
-# Ein selbst geschriebener Massstab ist erst dann einer, wenn er selbst
-# geeicht ist. Bevor die Gegenstelle Osum prueft, rechnet sie den
-# Handschlag von 2007 nach, der in tools/wlan/mitschnitt.txt liegt.
 
 python3 tools/wlan/gegenstelle.py --selbsttest tools/wlan/mitschnitt.txt \
     > "$OUT/eich.txt" 2>&1
@@ -103,9 +68,6 @@ fail=$((fail+HF))
 echo "== 4. die Naht zum Blech =="
 # =====================================================================
 #
-# `lib/wlan/device.fi` sagt vier Dinge zu. Sie werden hier gemessen,
-# obwohl -- nein: WEIL -- es keine Karte gibt. Wenn eine kommt, ist
-# alles ueber der Naht schon gemessen.
 
 R=$(printf 'geraet 08413a01aabbccddeeff112233445566778899aa0000cafebabe\n' \
     | ./.probe/worakel)
@@ -115,7 +77,6 @@ case "$R" in
   *)
     bad "die Naht liefert '$R' statt der erwarteten Zeile" ;;
 esac
-# Der erste Teil derselben Zeile ist die wichtigere Zusage.
 case "$R" in
   vorher=1*)
     ok "ein Geraet OHNE Tafel gibt -1, statt in einen Nullzeiger zu springen" ;;
@@ -127,14 +88,6 @@ esac
 echo "== 4b. der ganze Weg, und was passiert, wenn jemand luegt (T4) =="
 # =====================================================================
 #
-# `verbinden.fi` ist der Draht zwischen Beacon, Automat, Supplicant und
-# Geraet. Genau dort sitzen die drei Fehler, die die Datei verhindern
-# soll: sich an ein offenes Netz haengen, verbunden sein ohne
-# Schluessel, einen Schluessel haben ohne fertigen Handschlag.
-#
-# Die Zahl, auf die es ankommt, ist `skeys` -- wie viele Schluessel
-# wirklich im GERAET liegen. Nicht was ein Merker sagt, sondern was
-# unten angekommen ist.
 
 ORAKEL=./.probe/worakel python3 tools/wlan/weg.py > "$OUT/weg.txt" 2>&1
 grep -E '^  (OK|FAIL)' "$OUT/weg.txt" || true
@@ -147,10 +100,6 @@ fail=$((fail+WF))
 echo "== 5. welcher USB-Stick steckt da? =="
 # =====================================================================
 #
-# Die Frage, die gerade wirklich offen ist. Justins Rechner hat einen
-# USB-WLAN-Stick, dessen Chip niemand kennt. Diese Tabelle ist der Weg,
-# auf dem wir es erfahren -- und ein Tippfehler in einer der Nummern
-# faellt sonst erst am echten Blech auf.
 
 python3 - > "$OUT/chip.txt" <<'PY'
 import subprocess
@@ -194,13 +143,11 @@ else
     grep '^FAIL' "$OUT/chip.txt" | head -10
 fi
 
-# Die Zeile, die auf Justins Schirm landen soll, steht wirklich im Kern.
 if grep -q 'wifi-usb: ' kernel/usb/usb.fi; then
     ok "kernel/usb/usb.fi meldet einen erkannten Stick als 'wifi-usb: <Name> (<vid>:<pid>), kein Treiber'"
 else
     bad "die Meldezeile fehlt in kernel/usb/usb.fi"
 fi
-# und sie bindet KEINEN Treiber -- das waere eine Behauptung.
 if grep -q 'DRV_WLAN\|wlan_start' kernel/usb/usb.fi; then
     bad "kernel/usb/usb.fi bindet einen WLAN-Treiber, den es nicht gibt"
 else
@@ -211,8 +158,6 @@ fi
 echo "== 5b. /bin/wlan, wirklich gelaufen =="
 # =====================================================================
 #
-# Ein Programm, das nur uebersetzt, ist nicht gemessen. Dieser Teil
-# baut ein Abbild MIT /bin/wlan darin und ruft es in Osum auf.
 
 bash tools/wlan/prog.sh "$OUT/prog" > "$OUT/prog.txt" 2>&1
 grep -E '^  (OK|FAIL)' "$OUT/prog.txt" || true
@@ -231,12 +176,6 @@ else
     ok "SAE ist NICHT gebaut -- Begruendung in docs/WLAN.md"
 fi
 
-# Kein USB-WLAN-Treiber. Gesucht wird nach dem, was einer TUT --
-# Firmware in den Chip schieben --, und zwar im QUELLTEXT und nicht in
-# den Anmerkungen. Der erste Anlauf dieser Wache suchte auch in
-# Kommentaren und wurde prompt rot, weil in usbchip.fi der Satz steht,
-# welcher Linux-Treiber die Familie fuehrt. Eine Wache, die an einem
-# erklaerenden Satz ausloest, misst die Erklaerung und nicht die Sache.
 KOMMENTARFREI=$(cat lib/wlan/*.fi kernel/usb/usb.fi 2>/dev/null | sed 's|//.*||')
 if printf '%s' "$KOMMENTARFREI" | grep -q 'fn fw_download\|fn firmware_laden\|DRV_WLAN'; then
     bad "irgendwo wird WLAN-Firmware geladen -- dann gibt es einen Treiber, den docs/WLAN.md nicht kennt"

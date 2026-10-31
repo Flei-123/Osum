@@ -1,42 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/sync/run.sh -- RUNDE SYNC: der Abgleich zweier Geraete ueber
-# einen Server, der nichts mitlesen kann.
-#
-# Was hier gemessen wird, und in welcher Reihenfolge:
-#
-#   1. BAUEN. Kern, Programme, das gehostete Orakel. Kein Programm mit
-#      einem undefinierten Namen.
-#   2. DIE BAUSTEINE GEGEN IHRE NORMEN (tools/sync/vectors.py, auf dem
-#      WIRT): scrypt gegen RFC 7914 und Pythons hashlib, HKDF gegen
-#      RFC 5869, XChaCha20-Poly1305 gegen libsodium, der
-#      Wiederherstellungscode hin und zurueck samt Tippfehlern.
-#   3. (a) ZWEI SYSTEME, EIN KONTO. Auf A eine Datei anlegen, abgleichen;
-#      der WIRT nimmt den Speicher, wie ein Anbieter ihn haette, und
-#      setzt damit Geraet B auf; auf B erscheint die Datei -- OKTETT FUER
-#      OKTETT verglichen, aus dem Plattenabbild und nicht aus einem
-#      Mitschnitt der seriellen Leitung.
-#   4. (b) DER SERVER SIEHT NICHTS. Der ganze Speicher wird nach einem
-#      bekannten Klartext durchsucht -- Oktette, Namen, Wurzel.
-#   5. (c) DER WIEDERERKENNUNGSANGRIFF, mit und ohne HMAC, beide
-#      Ergebnisse gemessen. Mit Gegenprobe: mit dem Schluessel werden
-#      dieselben Dateien sehr wohl gefunden.
-#   6. (d) FALSCHE PASSPHRASE -- kein Teilklartext, keine Auskunft. Und
-#      der Wiederherstellungscode holt den Zugang zurueck.
-#   7. (e) EIN BOESARTIGER SERVER: geaenderte, alte, fremde, zu grosse
-#      Bloecke und eine luegende Wurzel. Der Rueckschritt ist der
-#      wichtigste Fall.
-#   8. (f) ABBRUCH MITTEN IM ABGLEICH, 30 mal mit SIGKILL. Danach ist der
-#      lokale Zustand gueltig und der Abgleich nimmt wieder auf.
-#   9. (g) KONFLIKT: dieselbe Datei auf beiden Geraeten geaendert --
-#      BEIDE Fassungen sind da.
-#  10. (h) DER TRESOR: Frist, Recht, und ein Geheimnis, das nie in eine
-#      Datei kommt.
-#  11. (i) OHNE KONTO geht alles weiter -- und der Umzug per Stick
-#      (`backup` aus Runde TRESOR) ist unveraendert.
-#  12. (j) VIER ABSICHTLICH KAPUTTE FASSUNGEN, die den Test wirklich
-#      fallen lassen muessen.
-#  13. DIE MESSUNGEN.
 #
 # Verwendung:  bash tools/sync/run.sh
 set -uo pipefail
@@ -47,21 +9,9 @@ export FIRNLIB="$ROOT/lib"
 
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 BLOCKS=6144
-# `sleep` GEHOERT DAZU: (h) wartet mit `sleep 3` auf das Ende einer Frist
-# von einer Sekunde. Ohne /bin/sleep (die Schale hat es nicht eingebaut)
-# kam nur "nicht gefunden", die Frist lief nicht ab, und "(h) die Frist
-# wirkt nicht" war rot -- bis auf Laeufe unter Last, in denen der
-# Systemstart selbst laenger als eine Sekunde brauchte.
 PROGS="sh ls cat echo mkdir rm cp sync vault backup key bsect sleep"
 
 TMPD=$(mktemp -d)
-# WAS BEIM ABBRUCH ZURUECKBLEIBEN DARF: nichts. Die Gegenproben (j3, j4)
-# brauchen eine kaputte Fassung von kernel/user/sync.fi. Bis A-028 wurde
-# die Datei dafuer IM BAUM ueberschrieben und danach zurueckgespielt --
-# ein abgebrochener Lauf oder eine Aenderung waehrenddessen hat so echten
-# Quelltext zurueckgedreht, und parallele Laeufer bauten die kaputte
-# Fassung mit. Jetzt flicken sie eine Kopie ($TMPD/usrc-*), und der
-# Laeufer prueft am Ende, dass der Baum unangetastet ist.
 SYNC_SHA0=$(sha256sum kernel/user/sync.fi | cut -d' ' -f1)
 aufraeumen() {
     rm -rf "$TMPD"
@@ -114,8 +64,6 @@ done
                || bad "undefinierte Namen:$undef"
 note "/bin/sync: $(stat -c%s "$TMPD/bin/sync.elf") Oktette, /bin/vault: $(stat -c%s "$TMPD/bin/vault.elf") Oktette"
 
-# Und die zweite Stufe: derselbe Quelltext durch den Uebersetzer, der
-# selbst in Firn geschrieben ist.
 if bash tools/sync/build.sh "$TMPD/bin1" 1 sync vault > "$TMPD/b1.txt" 2>&1; then
     ok "firnc1 baut sync und vault ebenfalls"
 else
@@ -134,10 +82,6 @@ else
     tail -25 "$TMPD/vec.txt" | sed 's/^/        /'
 fi
 
-# =====================================================================
-# Die Werkzeuge, mit denen ein Geraet gebaut und wieder ausgelesen wird.
-# =====================================================================
-# spec_von <wirtsverzeichnis> <praefix im abbild>  -> mkfs-Argumente
 spec_von() {
     local hd=$1 pre=$2
     [ -d "$hd" ] || return 0
@@ -198,15 +142,7 @@ printf 'die erste zeile\nGEHEIMNIS-4711 steht hier\n' > "$TMPD/daten/a.txt"
 head -c 9000 /dev/urandom > "$TMPD/daten/unter/b.bin"
 printf 'hallo\n' > "$TMPD/daten/klein.txt"
 printf '100 farbe blau\n100 sprache de\n' > "$TMPD/daten/EINST"
-# EINE DATEI, DIE NICHT IN EINE ZEILE PASST. Ihre Bloecke heissen
-# zusammen 49 x 65 = 3185 Oktette -- mehr als die 1024 einer
-# Verzeichniszeile. Bis diese Datei hier stand, war der groesste Prueffall
-# 9000 Oktette gross, und ALLES darueber fiel STILL aus dem Abgleich:
-# `datei_zeile` scheiterte an einem Feld von 700 Oktetten, der Aufrufer
-# machte mit `continue` weiter, und der Lauf meldete "fertig". Das ist
-# der schlimmste denkbare Ausgang, und kein einziger Test sah ihn.
 head -c 200000 /dev/urandom > "$TMPD/daten/gross.bin"
-# Eine Datei, die der Nutzer NICHT hat -- fuer den Angriff in (c).
 mkdir -p "$TMPD/fremd"
 printf 'diese datei hat er nicht\n' > "$TMPD/fremd/x.txt"
 
@@ -223,7 +159,7 @@ rc=$(lauf "$TMPD/A.img" A)
 is "Geraet A endet ordentlich" "$rc" "21"
 klar A > "$TMPD/A.log"
 hat "$TMPD/A.log" "wiederherstellungscode: " "A zeigt den Wiederherstellungscode"
-hat "$TMPD/A.log" "ACHTUNG: ohne Passphrase UND ohne Wiederherstellungscode" \
+hat "$TMPD/A.log" "WARNING: without the passphrase AND without the recovery code" \
     "und die Warnung steht VOR dem Anlegen"
 CODE=$(grep -a '^wiederherstellungscode: ' "$TMPD/A.log" | tail -1 | sed 's/^wiederherstellungscode: //')
 note "Code: $CODE"
@@ -243,9 +179,6 @@ hol "$TMPD/A.img" /konto "$TMPD/kontoA"
                            || bad "der Speicher ist unvollstaendig"
 note "Speicher: PACK $(stat -c%s "$TMPD/store1/PACK" 2>/dev/null) Oktette, INDEX $(stat -c%s "$TMPD/store1/INDEX" 2>/dev/null), ROOT $(stat -c%s "$TMPD/store1/ROOT" 2>/dev/null)"
 
-# Geraet B: dasselbe Konto (nur der KOPF reist), derselbe Speicher, ein
-# LEERER Datenbaum. Mehr braucht ein zweites Geraet nicht -- kein
-# ZAEHLER, kein BASIS, keine Anmeldung.
 mkdir -p "$TMPD/kontoB"
 cp "$TMPD/kontoA/KOPF" "$TMPD/kontoB/KOPF"
 mkdir -p "$TMPD/leer"
@@ -264,20 +197,12 @@ is "Geraet B endet ordentlich" "$rc" "21"
 klar B > "$TMPD/B.log"
 B_RUNTER=$(feld "$TMPD/B.txt" heruntergel)
 B_EINST=$(feld "$TMPD/B.txt" einstellungen)
-# DREI DOKUMENTE, NICHT VIER. `heruntergel` zaehlt Dokumente. Die vierte
-# Datei ist `EINST`, und die kommt NICHT ueber denselben Weg herunter:
-# Einstellungen werden je Schluessel gemischt (letzter Schreiber gewinnt,
-# mit Verlauf) und nicht als Datei kopiert -- der Grund steht in
-# `kernel/user/sync.fi` im Kopf. Dass EINST trotzdem und Oktett fuer
-# Oktett ankommt, misst der Vergleich aus dem Plattenabbild weiter unten.
-# Die frueheren "4" hier war schlicht falsch gezaehlt.
 is "B holt 4 Dokumente herunter" "$B_RUNTER" "4"
 [ -n "$B_EINST" ] && [ "$B_EINST" -gt 0 ] \
     && ok "und EINST kommt ueber den Einstellungsweg: $B_EINST Schluessel gemischt" \
     || bad "B hat keine Einstellung gemischt: '$B_EINST'"
 is "B meldet fertig" "$(klar B | grep -c '^fertig')" "1"
 
-# DER EIGENTLICHE NACHWEIS: der WIRT liest B's Baum aus dem Abbild.
 hol "$TMPD/B.img" /daten "$TMPD/datenB"
 gleich=0
 ungleich=""
@@ -331,25 +256,24 @@ rc=$(lauf "$TMPD/D.img" D)
 is "der Passphrasenlauf endet ordentlich" "$rc" "21"
 klar D > "$TMPD/D.log"
 absch() { sed -n "/^==$1==/,/^==/p" "$TMPD/D.log"; }
-absch FALSCH | grep -qa 'falsche Passphrase' \
+absch FALSCH | grep -qa 'wrong passphrase' \
     && ok "(d) eine falsche Passphrase wird abgewiesen" \
     || bad "(d) eine falsche Passphrase wird NICHT abgewiesen"
 absch FALSCH | grep -qa 'fertig' \
     && bad "(d) der Abgleich lief trotzdem" \
     || ok "(d) und es wird NICHTS abgeglichen"
-absch FASTRICHTIG | grep -qa 'falsche Passphrase' \
+absch FASTRICHTIG | grep -qa 'wrong passphrase' \
     && ok "(d) ein einziges Zeichen daneben reicht" \
     || bad "(d) eine fast richtige Passphrase kam durch"
 absch CODE | grep -qa 'konto: auf' \
     && ok "(d) der Wiederherstellungscode holt den Zugang zurueck" \
     || bad "(d) der Wiederherstellungscode wirkt nicht"
-absch CODEFALSCH | grep -qa 'nicht gueltig' \
+absch CODEFALSCH | grep -qa 'not valid' \
     && ok "(d) ein erfundener Code wird abgewiesen" \
     || bad "(d) ein erfundener Code kam durch"
 absch RICHTIG | grep -qa 'konto: auf' \
     && ok "(d) und die richtige Passphrase geht weiterhin" \
     || bad "(d) die richtige Passphrase geht nicht mehr"
-# KEIN TEILKLARTEXT: im ganzen Lauf darf der Klartext nirgends auftauchen.
 nicht "$TMPD/D.log" "GEHEIMNIS-4711" "(d) kein Teilklartext im ganzen Lauf"
 
 # =====================================================================
@@ -383,8 +307,6 @@ boese_lauf gross        "fehler"      gross
 boese_lauf wurzelluege  "gefaelscht"  luege
 boese_lauf halbe        "gefaelscht"  halbe
 
-# DER RUECKSCHRITT -- der wichtigste Fall. Er braucht ein Geraet, das
-# schon eine hoehere Generation gesehen hat, also einen ZAEHLER.
 rm -rf "$TMPD/kontoR"; cp -r "$TMPD/kontoA" "$TMPD/kontoR"
 printf '9\n' > "$TMPD/kontoR/ZAEHLER"
 rm -rf "$TMPD/sb-rueck"; cp -r "$TMPD/store1" "$TMPD/sb-rueck"
@@ -397,7 +319,6 @@ else
     bad "(e) DER RUECKSCHRITT wird NICHT erkannt -- ein Server kann alte Daten unterschieben"
     grep -a 'sync:\|generation' "$TMPD/E-rueck.log" | head -4 | sed 's/^/        /'
 fi
-# Die GEGENPROBE: derselbe Speicher mit einem Zaehler, der passt, geht.
 rm -rf "$TMPD/kontoR2"; cp -r "$TMPD/kontoA" "$TMPD/kontoR2"
 printf '1\n' > "$TMPD/kontoR2/ZAEHLER"
 geraet "$TMPD/E-ok.img" "$TMPD/sE.sh" "$TMPD/kontoR2" "$TMPD/store1" "$TMPD/leer" -
@@ -416,17 +337,7 @@ while [ $i -lt 12 ]; do
     head -c 12000 /dev/urandom > "$TMPD/gross/d$i.bin"
     i=$((i+1))
 done
-# ZWEI ABGLEICHE UND NICHT EINER, und das ist der Kern dieses
-# Abschnitts. Beim ersten Anlauf stand hier nur einer -- und in 30 von
-# 30 Faellen lag danach GAR KEINE Wurzel auf der Platte, weil die Wurzel
-# ZULETZT geschrieben wird und der Systemstart den groessten Teil der
-# Laufzeit frisst. "Nie eine halbe Wurzel gefunden" war damit eine
-# Aussage ueber null Faelle, und das ist keine Aussage.
 #
-# Jetzt laeuft der erste Abgleich durch (Generation 1 liegt, ROOT ist
-# da), dann aendert sich der Baum, und der ZWEITE wird abgeschossen.
-# Damit ist in fast jedem Abbruch eine Wurzel auf der Platte, und die
-# Frage "ganz oder halb" hat einen Gegenstand.
 cat > "$TMPD/sF.sh" <<EOS
 sync neu /konto $PASS eigen /store $NP $RP
 sync abgleich /konto /daten $PASS
@@ -442,13 +353,6 @@ echo ==END==
 EOS
 geraet "$TMPD/F0.img" "$TMPD/sF.sh" - - "$TMPD/gross" -
 
-# ZUERST MESSEN, DANN SCHIESSEN. Frueher stand hier ein fester Zeitraum
-# von 1 bis 4 Sekunden. Das ist geraten, und auf einem Wirt unter Last
-# war es falsch geraten: der Abbruch kam, bevor das Konto ueberhaupt
-# angelegt war. Ergebnis: 30 Laeufe, 0 Wurzeln, kein Konto -- und ein
-# roter Test, der nichts ueber das Programm sagte, sondern nur ueber die
-# Laune des Wirtes. Also wird EIN Lauf ungestoert zu Ende gefahren und
-# gestoppt; die Abbrueche liegen dann zwischen 20 % und 95 % DIESER Zeit.
 cp "$TMPD/F0.img" "$TMPD/Fv.img"
 tv0=$(date +%s%N)
 SYNC_TIMEOUT=900 lauf "$TMPD/Fv.img" Fv > /dev/null
@@ -470,12 +374,6 @@ n=0
 while [ $n -lt 30 ]; do
     cp "$TMPD/F0.img" "$TMPD/F-$n.img"
     : > "$TMPD/F.txt"
-    # KEIN `timeout` DAVOR. `timeout 900 qemu &` macht `$!` zur Nummer
-    # des TIMEOUT-Prozesses; `kill -9 $!` erschlaegt dann den Waechter
-    # und laesst QEMU weiterlaufen -- in ein Abbild hinein, das der
-    # Laeufer im selben Augenblick herausliest. Gebraucht wird der
-    # Waechter hier ohnehin nicht: dieser Abschnitt schiesst JEDEN Lauf
-    # selbst ab.
     qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" \
         -kernel "$TMPD/k0.img" -m 512 \
         -append "osum vfs nokbd script=sh /t/s.sh;exit" \
@@ -483,15 +381,6 @@ while [ $n -lt 30 ]; do
         -drive "file=$TMPD/F-$n.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
     qp=$!
-    # 45 BIS 99 % UND NICHT 20 BIS 95. Die Wurzel wird ZULETZT
-    # geschrieben -- erst alle Bloecke, dann `ROOT`. Ein Fenster, das bei
-    # 95 % aufhoert, trifft die Stelle nie: der erste Lauf dieses
-    # Abschnitts brach 30 von 30 Mal ab, BEVOR ueberhaupt eine Wurzel auf
-    # der Platte lag, und "keine halbe Wurzel gefunden" war damit eine
-    # Aussage ueber nichts. Interessant ist genau der schmale Streifen
-    # zwischen dem ersten Block und der fertigen Wurzel.
-    # 50 BIS 99 %: der erste Abgleich ist dann durch (die Wurzel liegt),
-    # der zweite ist mittendrin. Das ist der Streifen, der etwas misst.
     ms=$(( (F_VOLL * 50 / 100) + (RANDOM % (F_VOLL * 49 / 100)) ))
     sleep "$(awk "BEGIN{print $ms/1000}")"
     if kill -0 "$qp" 2>/dev/null; then
@@ -499,18 +388,11 @@ while [ $n -lt 30 ]; do
         kills=$((kills+1))
     fi
     wait "$qp" 2>/dev/null
-    # Was auf der Platte steht, muss ENTWEDER kein oder ein GANZES ROOT
-    # sein -- niemals ein halbes.
     hol "$TMPD/F-$n.img" /store "$TMPD/fs-$n" 2>/dev/null
     hol "$TMPD/F-$n.img" /konto "$TMPD/fk-$n" 2>/dev/null
     if [ -f "$TMPD/fk-$n/KOPF" ]; then
         konten=$((konten+1))
         letztes=$n
-        # NUR DAS LETZTE BRAUCHBARE ABBILD BLEIBT LIEGEN. Dreissig
-        # Abbilder zu je 24 MiB sind 720 MiB, und ein Testlauf, der die
-        # Platte des Wirtes vollschreibt, faellt nicht nur selbst um,
-        # sondern nimmt alles andere mit -- genau das ist hier einmal
-        # passiert.
         rm -f "$TMPD/Flast.img"
         mv "$TMPD/F-$n.img" "$TMPD/Flast.img"
     fi
@@ -518,8 +400,6 @@ while [ $n -lt 30 ]; do
     rm -rf "$TMPD/fk-$n"
     if [ -f "$TMPD/fs-$n/ROOT" ]; then
         gefunden=$((gefunden+1))
-        # GANZ heisst: Kopfwort, Generation, Blockname und Siegel, und
-        # sonst nichts. Eine halbe Wurzel waere ein zerrissener Zustand.
         if ! grep -qaE '^osumwurzel1 [0-9]+ [0-9a-f]{64} [0-9a-f]{64}$' \
                 "$TMPD/fs-$n/ROOT"; then
             halbe=$((halbe+1))
@@ -533,8 +413,6 @@ note "Abbruchfenster: 50-99 % von $F_VOLL ms"
 is "(f) 30 Abbrueche gefahren" "$n" "30"
 num_ge=$gefunden
 note "$num_ge davon hatten schon eine Wurzel auf der Platte, $konten ein Konto"
-# EINE ZUSAGE UEBER NULL FAELLE IST KEINE ZUSAGE. "keine halbe Wurzel"
-# heisst nur dann etwas, wenn ueberhaupt Wurzeln da waren.
 [ "$num_ge" -ge 1 ] \
     && ok "(f) $num_ge Abbrueche lagen NACH dem Schreiben der Wurzel" \
     || bad "(f) kein einziger Abbruch traf die Wurzel -- (f) misst die falsche Stelle"
@@ -545,15 +423,11 @@ is "(f) KEINE halbe Wurzel, in keinem der 30 Faelle" "$halbe" "0"
 [ "$konten" -ge 1 ] \
     && ok "(f) mindestens ein abgebrochener Lauf hatte schon ein Konto: $konten" \
     || bad "(f) kein einziger Abbruch hat es bis zum Konto geschafft"
-# Weitergefahren wird der LETZTE Abbruch, der ueberhaupt ein Konto hat --
-# und nicht blind der letzte Lauf.
 if [ -n "$letztes" ]; then
     cp "$TMPD/Flast.img" "$TMPD/F.img"
     note "weitergefahren wird Lauf $letztes"
 fi
 
-# Der Wiederaufnahmetest: der zuletzt abgebrochene Zustand wird
-# weitergefahren, und danach ist der Baum vollstaendig.
 cat > "$TMPD/sF2.sh" <<EOS
 echo ==AB==
 sync abgleich /konto /daten $PASS
@@ -568,7 +442,6 @@ if [ -f "$TMPD/kontoF/KOPF" ]; then
     grep -qa 'fertig' "$TMPD/F2.log" \
         && ok "(f) nach dem Abbruch nimmt der Abgleich wieder auf und wird fertig" \
         || bad "(f) nach dem Abbruch kommt der Abgleich nicht mehr durch"
-    # und das Ergebnis stimmt: ein drittes Geraet holt sich alles daraus
     hol "$TMPD/F2.img" /store "$TMPD/storeF2"
     mkdir -p "$TMPD/kontoF2"; cp "$TMPD/kontoF/KOPF" "$TMPD/kontoF2/KOPF"
     geraet "$TMPD/F3.img" "$TMPD/sB.sh" "$TMPD/kontoF2" "$TMPD/storeF2" "$TMPD/leer" -
@@ -582,16 +455,11 @@ if [ -f "$TMPD/kontoF/KOPF" ]; then
     done
     is "(f) und alle 12 Dateien kommen danach heil beim naechsten Geraet an" "$g" "12"
     if [ "$g" != 12 ]; then
-        # Was das dritte Geraet dazu sagt -- ohne das ist die Zahl stumm.
         klar F3 | grep -a 'sync\|fehler\|fertig\|heruntergel\|dateien\|^d[0-9]' \
             | head -12 | sed 's/^/        F3: /'
         note "F3 /daten: $(ls "$TMPD/datenF3" 2>/dev/null | tr '\n' ' ')"
         note "F2: $(klar F2 | grep -a 'dateien\|hochgel\|neubloecke\|generation' | tr '\n' ' ')"
     fi
-    # Und die sechs Kopien, die der abgeschossene ZWEITE Abgleich
-    # hochladen wollte: entweder ganz da oder gar nicht da -- niemals
-    # halb. Wieviele es sind, haengt davon ab, wann der Schuss fiel;
-    # dass keine davon zerrissen ist, haengt am Programm.
     hin=0; kaputt=0
     i=0
     while [ $i -lt 6 ]; do
@@ -612,15 +480,6 @@ fi
 
 # =====================================================================
 echo "== 8b. der eigene Datentraeger laeuft voll =="
-# =====================================================================
-# NICHT AUS DER AUFGABE, SONDERN AUS EINEM MESSFEHLER. Der Messabschnitt
-# unten meldete einmal 245 Bloecke statt 302, einen INDEX, der auf dem
-# Wirt leer ankam, und einen Mehraufwand von MINUS 16,9 %. Der Grund war
-# nicht das Programm, sondern das Abbild: 3 MiB, und die Bloecke passten
-# nicht hinein. Damit ist die Frage aufgeworfen, die niemand gestellt
-# hatte -- was tut der Abgleich, wenn der eigene Datentraeger voll
-# laeuft? Er darf NICHT "fertig" sagen und er darf KEINE Wurzel
-# schreiben, denn eine Wurzel verspricht Bloecke, die es nicht gibt.
 mkdir -p "$TMPD/vollmess"
 i=0
 while [ $i -lt 20 ]; do
@@ -657,8 +516,6 @@ hol "$TMPD/V.img" /store "$TMPD/storeV"
 
 # =====================================================================
 echo "== 9. (g) der Konflikt =="
-# =====================================================================
-# B aendert a.txt und gleicht ab -> Speicher 2
 cat > "$TMPD/sG1.sh" <<EOS
 echo ==AB1==
 sync abgleich /konto /daten $PASS
@@ -675,7 +532,6 @@ hol "$TMPD/G1.img" /store "$TMPD/store2"
 grep -qa 'fertig' "$TMPD/G1.log" && ok "(g) B aendert a.txt und laedt hoch" \
                                  || bad "(g) B kommt nicht durch"
 
-# A aendert dieselbe Datei anders und trifft auf Speicher 2
 cat > "$TMPD/sG2.sh" <<EOS
 echo ==AENDERN==
 echo VON-A > /daten/a.txt
@@ -760,7 +616,6 @@ habs FALSCHPASS | grep -qa 'wrong passphrase' \
 habs NACHFRIST | grep -qa 'timeout has expired' \
     && ok "(h) nach der Frist ist der Tresor von selbst zu" \
     || bad "(h) die Frist wirkt nicht"
-# DER KLARTEXT LIEGT IN KEINER DATEI. Der Wirt sucht ihn im ganzen Abbild.
 hol "$TMPD/H.img" /tresor "$TMPD/tresorH"
 found=0
 for f in "$TMPD/tresorH"/*; do
@@ -770,9 +625,6 @@ is "(h) der Klartext steht in KEINER Datei des Tresors" "$found" "0"
 [ -f "$TMPD/tresorH/G-bank" ] && ok "(h) das Geheimnis liegt als G-bank da (versiegelt)" \
                              || bad "(h) G-bank fehlt"
 
-# DAS RECHT: ohne den Sitzungsschluessel in /system kommt niemand daran.
-# Der Wirt nimmt ihn weg -- das ist genau der Fall "ein Programm ohne
-# Recht".
 hol "$TMPD/H.img" /tresor "$TMPD/tresorH2"
 cat > "$TMPD/sH2.sh" <<'EOS'
 echo ==OHNERECHT==
@@ -782,8 +634,6 @@ EOS
 geraet "$TMPD/H2.img" "$TMPD/sH2.sh" "$TMPD/kontoA" "$TMPD/store1" "$TMPD/leer" "$TMPD/tresorH2"
 lauf "$TMPD/H2.img" H2 > /dev/null
 klar H2 > "$TMPD/H2.log"
-# Die Sitzungsdatei aus dem alten Lauf ist mitgereist, /system/tresor.sit
-# aber nicht -- also fehlt genau das Recht.
 if grep -qa 'no right\|no open session\|timeout' "$TMPD/H2.log"; then
     ok "(h) ohne den Sitzungsschluessel in /system kommt kein Geheimnis heraus"
 else
@@ -826,13 +676,8 @@ sed -n '/^==BACKUP==/,/^==END==/p' "$TMPD/I.log" | grep -qa 'restored files' \
 
 # =====================================================================
 echo "== 12. (j) vier absichtlich kaputte Fassungen =="
-# =====================================================================
-# Eine Zusage ohne Gegenprobe ist eine Behauptung. Diese drei muessen
-# den Test WIRKLICH fallen lassen.
 mkdir -p "$TMPD/kaputt"
 
-# (j1) Der Name ist wieder der blanke SHA-256 -- der Wiedererkennungs-
-#      angriff muss aufgehen.
 cp lib/sync/chain.fi "$TMPD/kaputt/kette.fi.orig"
 python3 - "$TMPD" <<'PY'
 import sys, re
@@ -845,17 +690,10 @@ s = s.replace("""fn block_name(namekey: u64, p: u64, n: u64, out: u64) {
 }""")
 open(d + "/kaputt/kette-naiv.fi", "w").write(s)
 PY
-# GEBAUT WIRD GEGEN EINE KOPIE DES BIBLIOTHEKSBAUMS, nicht gegen den
-# Arbeitsbaum. Die frueheren Fassungen dieses Tests haben lib/sync/chain.fi
-# ueberschrieben und hinterher zurueckkopiert -- was genau so lange gut
-# geht, bis der Lauf dazwischen abbricht. Dann steht die KAPUTTE Fassung
-# im Arbeitsbaum, und der naechste Lauf misst Unsinn.
 cp -a lib "$TMPD/lib-naiv"
 cp "$TMPD/kaputt/kette-naiv.fi" "$TMPD/lib-naiv/sync/chain.fi"   # vor Runde ENGLISCH: kette.fi
 if FIRNLIB="$TMPD/lib-naiv" $FIRNC tools/sync/oracle.fi \
         -o "$TMPD/naivoracle" 2>/dev/null; then
-    # Mit dem naiven Namen muss der Angriff aufgehen: der Name eines
-    # bekannten Blocks IST dessen SHA-256.
     r=$(python3 - "$TMPD" <<'PY'
 import binascii, hashlib, os, subprocess, sys
 d = sys.argv[1]
@@ -872,20 +710,6 @@ else
     bad "(j1) die kaputte Fassung baut nicht -- die Gegenprobe misst nichts"
 fi
 
-# (j2) Das AAD faellt weg -- ein Block unter fremdem Namen muss dann
-#      durchgehen.
-# WAS HIER GEMESSEN WIRD, UND WARUM ES NICHT DAS IST, WAS ERST
-# DASTAND. Der erste Anlauf hat nur das AAD weggenommen und erwartet,
-# dass ein Block dann unter fremdem Namen aufgeht. Er ging NICHT auf --
-# und das war kein Fehler des Tests, sondern eine Auskunft ueber den
-# Aufbau: Schluessel UND Nonce eines Blocks kommen selbst aus dem Namen
-# (`kb = HMAC(K_INHALT, name)`), also ist ein Block schon dadurch an
-# seinen Platz gebunden. Das AAD ist der zweite Riegel an derselben Tuer.
-#
-# Gemessen wird deshalb BEIDES:
-#   ohneaad     nur das AAD faellt weg  -> muss TROTZDEM dichthalten
-#   losgeloest  AAD weg UND Schluessel/Nonce nicht mehr aus dem Namen
-#               -> jetzt MUSS der fremde Name durchgehen
 python3 - "$TMPD" <<'PYX'
 import sys
 d = sys.argv[1]
@@ -918,13 +742,6 @@ PYX
 if cmp -s "$TMPD/kaputt/kette-ohneaad.fi" lib/sync/chain.fi; then
     bad "(j2) die kaputte Fassung ist mit dem Original identisch -- sie misst nichts"
 else
-    # UND JETZT DER EIGENTLICHE NACHWEIS. Frueher stand hier nur ein
-    # `cmp`: "die Datei ist anders". Das beweist ueber die Zusage nichts.
-    # Das AAD ist der NAME des Blocks; es bindet den Block an seinen
-    # Platz. Faellt es weg, laesst sich ein Block, der unter Namen A
-    # versiegelt wurde, unter Namen B oeffnen -- genau der Angriff
-    # "fremd" aus (e). Also wird das GEMESSEN: mit AAD scheitert das
-    # Oeffnen unter falschem Namen, ohne AAD gelingt es.
     cp -a lib "$TMPD/lib-ohneaad"
     cp "$TMPD/kaputt/kette-ohneaad.fi" "$TMPD/lib-ohneaad/sync/chain.fi"
     cp -a lib "$TMPD/lib-los"
@@ -943,12 +760,10 @@ na, nb = os.urandom(32), os.urandom(32)
 blk = os.urandom(4096)
 hx = lambda b: binascii.hexlify(b).decode()
 
-
 def frage(prog, zeile):
     p = subprocess.run([prog], input=zeile + "\n",
                        capture_output=True, text=True)
     return p.stdout.strip()
-
 
 aus = []
 for nam, prog in (("ECHT", ".probe/syncoracle"),
@@ -969,8 +784,6 @@ PYX
     fi
 fi
 
-# (j3) Der Rueckschrittschutz wird ausgebaut: ein Zaehler, der nie
-#      steigt, muss den Rueckschrittfall aus (e) durchgehen lassen.
 rm -rf "$TMPD/usrc-j3"; cp -a kernel/user "$TMPD/usrc-j3"
 sed 's/^    if g < counter {$/    if false {/' kernel/user/sync.fi > "$TMPD/kaputt/sync-ohneschutz.fi"
 if ! cmp -s "$TMPD/kaputt/sync-ohneschutz.fi" kernel/user/sync.fi; then
@@ -995,13 +808,6 @@ else
     bad "(j3) der Schnitt hat nichts geaendert -- die Gegenprobe misst nichts"
 fi
 
-# (j4) DIE STILLE LUECKE. Die alte Fassung zurueckgebaut: die Namen einer
-#      Datei passen wieder nur in 700 Oktette, und eine Datei, die sich
-#      nicht darstellen laesst, wird im Baum einfach uebersprungen. Dann
-#      MUSS gross.bin aus dem Abgleich fallen -- und der Lauf muss
-#      trotzdem "fertig" melden. Genau das war der Zustand, den kein
-#      Test der Runde gesehen hat, weil die groesste Pruefdatei 9000
-#      Oktette hatte.
 rm -rf "$TMPD/usrc-j4"; cp -a kernel/user "$TMPD/usrc-j4"
 python3 - kernel/user/sync.fi "$TMPD/kaputt/sync-still.fi" <<'PYS'
 import sys
@@ -1045,15 +851,6 @@ fi
 
 # =====================================================================
 echo "== 12b. der voreingestellte Preis der Schluesselableitung =="
-# =====================================================================
-# ALLE ANDEREN ABSCHNITTE FAHREN MIT N=256, damit sie in QEMU nicht
-# ewig brauchen. Damit misst KEINER von ihnen, was ein echtes Konto
-# kostet -- und der Kopf von `kbund.fi` behauptete, der voreingestellte
-# Preis sei N=16384 (16 MiB). Das ist auf diesem System UNMOEGLICH: die
-# grosse Arena aus Runde K16 ist 6 MiB, also ist bei r=8 bei N=4096
-# Schluss. Gemessen: mit N=16384 scheitert `sync neu`, und danach geht
-# der Tresor nie auf. Hier steht beides -- dass die Voreinstellung
-# wirklich laeuft, und dass die Zahl darueber wirklich scheitert.
 cat > "$TMPD/sP.sh" <<EOS
 echo ==VOR==
 date -u
@@ -1086,8 +883,6 @@ grep -qa '^vault: open' "$TMPD/P.log" \
 sed -n '/^==ZUVIEL==/,$p' "$TMPD/P.log" | grep -qa 'fehler' \
     && ok "GEGENPROBE: N=16384 (16 MiB) scheitert -- die Arena hat 6 MiB" \
     || bad "N=16384 kam durch -- dann stimmt die Grenze im Kopf von kbund.fi nicht"
-# Die Zeiten aus der Uhr des Systems (`date -u` gibt Millisekunden
-# Betriebsdauer). Keine Zusage mit fester Zahl -- sie haengen vom Wirt ab.
 python3 - "$TMPD/P.log" <<'PYT'
 import re, sys
 marke = None; letzte = None; namen = ["sync neu", "vault new", "vault open"]
@@ -1106,11 +901,6 @@ PYT
 
 # =====================================================================
 echo "== 13. die Messungen =="
-# =====================================================================
-# Der Durchsatz: ein voller Abgleich und einer, bei dem sich eine
-# Kleinigkeit geaendert hat. KEINE Zusage mit fester Zahl -- die Zeiten
-# haengen vom Wirt ab, und ein Test, der bei Last umfaellt, misst den
-# Wirt und nicht das Programm.
 mkdir -p "$TMPD/mess"
 i=0
 while [ $i -lt 20 ]; do
@@ -1128,22 +918,10 @@ echo eine-kleine-aenderung > /daten/m0.bin
 sync abgleich /konto /daten $PASS
 echo ==END==
 EOS
-# EIN GROESSERES ABBILD FUER DIE MESSUNG. Mit den 6144 Bloecken
-# (3 MiB), die fuer alle anderen Geraete reichen, ist der Datentraeger
-# nach etwa 245 der 302 Bloecke VOLL -- und dann misst dieser Abschnitt
-# nicht den Abgleich, sondern die Groesse des Abbilds. Genau das ist
-# passiert: 245 Bloecke statt 302, ein INDEX, der auf dem Wirt leer
-# ankam, und ein gerechneter Mehraufwand, der nichts bedeutete.
 BLOCKS_ALT=$BLOCKS
 BLOCKS=16384
 geraet "$TMPD/M.img" "$TMPD/sM.sh" - - "$TMPD/mess" -
 BLOCKS=$BLOCKS_ALT
-# EIGENES ZEITLIMIT. Drei Abgleiche ueber 1 MiB in einem einzigen
-# Systemstart brauchen laenger als die 300 Sekunden, die fuer einen
-# gewoehnlichen Lauf reichen -- und auf einem Wirt, der nebenbei andere
-# Testreihen faehrt, noch einmal deutlich laenger. Lief die Messung ins
-# Limit, standen hier vorher leere Zahlen und zwei Zusagen fielen, ohne
-# dass am Programm irgendetwas falsch war.
 t0=$(date +%s%N)
 SYNC_TIMEOUT=1800 lauf "$TMPD/M.img" M > /dev/null
 t1=$(date +%s%N)
@@ -1162,16 +940,6 @@ M_LES1=$(feld_n "$TMPD/M.txt" gelesen 1)
 note "1 MiB in 20 Dateien: $M_BLK Bloecke, erster Lauf $M_NEU1 neu ($M_GES1 Oktette gesendet)"
 note "zweiter Lauf: $M_NEU2 neue Bloecke; nach einer kleinen Aenderung: $M_NEU3"
 note "alle drei Laeufe samt Anlegen des Kontos und Systemstart: $M_GESAMT ms (accel=$OSUM_QEMU_ACCEL)"
-# WORAUS DIE 302 BLOECKE BESTEHEN, damit die Zahl nachrechenbar ist:
-#   260  Daten      20 Dateien zu 51200 Oktetten, je 13 Bloecke
-#                   (12 volle und ein auf 4096 aufgefuellter)
-#    40  Namen      je Datei 13 Namen zu 65 Oktetten = 845 -- zu viel
-#                   fuer eine Verzeichniszeile, also K-Form: ein Block
-#                   Text und ein Kopfblock je Datei
-#     2  Verzeichnis
-# Steht hier eine kleinere Zahl, ist eine Datei aus dem Abgleich
-# gefallen. Genau das war der Fall: 201 Bloecke, weil jede Datei nach
-# 10 Bloecken abbrach und der Baum sie still uebersprang.
 is "der Messlauf meldet dreimal fertig" "$(grep -ca '^fertig' "$TMPD/M.log")" "3"
 is "der volle Abgleich sieht alle 20 Dateien" "$(feld_n "$TMPD/M.txt" dateien 1)" "20"
 [ -n "$M_BLK" ] && [ "$M_BLK" -ge 300 ] \
@@ -1183,18 +951,6 @@ is "der zweite Lauf schreibt NULL neue Bloecke" "$M_NEU2" "0"
     && ok "eine kleine Aenderung kostet $M_NEU3 neue Bloecke, nicht $M_NEU1" \
     || bad "eine kleine Aenderung kostet $M_NEU3 Bloecke"
 
-# DER MEHRAUFWAND, GEGEN DEN KLARTEXT UND NICHT GEGEN "gelesen".
-#
-# Hier stand einmal `(gesendet - gelesen) / gelesen` -- und das Ergebnis
-# war MINUS 8,3 %, also ein Verfahren, das beim Verschluesseln Platz
-# spart. Der Fehler: `gelesen` zaehlt die Oktette, die aus dem Baum
-# GELESEN wurden (Bloecke, aufgefuellt, auch die schon bekannten),
-# `gesendet` nur die NEUEN Bloecke. Zwei verschiedene Mengen.
-#
-# Richtig ist der Vergleich mit dem, was der Nutzer wirklich hat: die
-# Summe der Dateigroessen auf dem WIRT gegen die Groesse von PACK auf dem
-# Server. Darin steckt beides -- die 16 Oktette Siegel je Block UND das
-# Auffuellen des letzten Blocks jeder Datei, das der teurere Posten ist.
 hol "$TMPD/M.img" /store "$TMPD/storeM"
 M_KLAR=$(du -sb "$TMPD/mess" | cut -f1)
 M_PACK=$(stat -c%s "$TMPD/storeM/PACK" 2>/dev/null || echo 0)
@@ -1211,26 +967,17 @@ else
     bad "der Mehraufwand laesst sich nicht rechnen: Klartext $M_KLAR, PACK $M_PACK"
 fi
 
-# DER DURCHSATZ. `sync` sagt seit dieser Runde selbst, wie lange es
-# gedauert hat (`sekunden:`) -- die Gesamtzeit der virtuellen Maschine
-# enthaelt Systemstart und das Anlegen des Kontos und taugt dafuer nicht.
 M_S1=$(feld_n "$TMPD/M.txt" sekunden 1)
 M_S2=$(feld_n "$TMPD/M.txt" sekunden 2)
 M_S3=$(feld_n "$TMPD/M.txt" sekunden 3)
 note "Dauer der drei Abgleiche: $M_S1 s (voll), $M_S2 s (nichts neu), $M_S3 s (eine Aenderung)"
 if [ -n "$M_S1" ] && [ "$M_S1" -gt 0 ]; then
-    # IN KiB/s UND NICHT IN MiB/s. In MiB/s stand hier "0.00" -- eine
-    # Zahl, die nichts sagt, weil der Abgleich in QEMU eben langsam ist
-    # (rund 4 KiB/s bei 1 MiB in 247 s). Eine Einheit, in der die
-    # Messung als Null erscheint, ist die falsche Einheit.
     kbs=$(awk "BEGIN{printf \"%.1f\", $M_KLAR/1024.0/$M_S1}")
     kbs3=$(awk "BEGIN{printf \"%.1f\", $M_KLAR/1024.0/$M_S3}")
     note "erster voller Abgleich: ${kbs} KiB/s; nach einer kleinen Aenderung ${kbs3} KiB/s"
     note "(in QEMU auf einem Wirt unter Last -- das misst die Emulation mit, nicht nur das Verfahren)"
 fi
 
-# Der Speicherbedarf der Schluesselableitung und ihre Zeit, auf dem WIRT
-# gemessen (in QEMU waere es die Emulation, nicht das Verfahren).
 python3 - "$TMPD" > "$TMPD/kdf.txt" <<'PY'
 import binascii, os, subprocess, sys, time
 d = sys.argv[1]
@@ -1246,15 +993,9 @@ for (N, r) in [(256, 8), (1024, 8), (4096, 8), (16384, 8)]:
           % (N, r, (N + 2) * 128 * r // 1024, el))
 PY
 sed 's/^/     /' "$TMPD/kdf.txt"
-# EINE ZUSAGE OHNE PRUEFUNG IST KEINE ZUSAGE. Hier stand ein blankes
-# `ok` -- es meldete "gemessen" auch dann, wenn die Datei gar nicht
-# entstanden war. Jetzt zaehlt, dass alle vier Stufen wirklich drinstehen.
 is "die Schluesselableitung: vier Stufen gemessen (auf dem Wirt, firnc0)" \
    "$(grep -c 'N=' "$TMPD/kdf.txt" 2>/dev/null || echo 0)" "4"
 
-# Der Blockindex bei 10 000 Dateien -- gerechnet aus dem Format, das
-# oben gemessen wurde: je Block eine Zeile aus 64 Hexziffern, zwei
-# Tabulatoren, Offset und Laenge.
 python3 - <<'PY'
 n = 10000
 # eine Datei kleiner als 4096 Oktette = ein Block; dazu das Verzeichnis
@@ -1266,7 +1007,6 @@ print("  im Speicher (32 Oktette Name + 2 x 8 Zahl je Block): %d KiB"
 PY
 note "gerechnet aus dem Format, dessen Zeilen oben gemessen wurden"
 
-# A-028: kein Abschnitt darf den Quelltext im Baum veraendert haben.
 is "kernel/user/sync.fi im Baum ist nach allen Gegenproben unangetastet" \
    "$(sha256sum kernel/user/sync.fi | cut -d' ' -f1)" "$SYNC_SHA0"
 

@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/alltag/build.sh -- RUNDE ALLTAG: EINE PLATTE MIT DEN KLEINEN
-# PROGRAMMEN DARAUF.
-#
-# Abstammung: das ist der Bauer der Runde THEMESTORE, um das erweitert,
-# was diese Runde braucht -- eine laengere Programmliste, Dateien, die
-# von aussen auf die Platte gelegt werden (`xfile=`), und `wigapp=` auf
-# der Befehlszeile, damit ein Fenster ohne Mausklick aufgeht. Er ist
-# KOPIERT und nicht importiert, weil eine Abnahme, die den Bauer einer
-# anderen Runde mitbenutzt, mit deren naechster Aenderung rot wird.
 #
 #   bash tools/themestore/build.sh <outdir> [key=value ...]
 #
@@ -225,9 +215,6 @@ printf '%s\n' "$lang" > "$OUT/userlocale"
 # file manager (with the host's clipboard, password nodes, Shift+Tab) is
 # 2 137 632. The stick has been v3 for a long time (tools/usbimg/build.sh).
 ARGS=(build "$OUT/disk.img" "$bloecke" --v3)
-# RUNDE ALLTAG: die INODE-TAFEL ist einstellbar (mkfs.py --inodes) und
-# die Vorgabe 128 ist fuer sechs Pakete zu klein -- gemessen: inodes
-# 128/128 und das sechste Buendel entstand nicht mehr.
 [ -n "$inodes" ] && ARGS+=("--inodes=$inodes")
 ARGS+=(/lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
@@ -257,7 +244,6 @@ if [ -n "$xscheme" ] && [ -f "$xscheme" ]; then
     ARGS+=("/etc/schemas/$(basename "$xscheme" .scheme)=$xscheme@0644")
 fi
 fi
-# Ordner, die es geben muss, BEVOR eine Datei hineingelegt wird.
 for d in $xdirs; do
     ARGS+=("$d/")
 done
@@ -295,21 +281,9 @@ if [ "$account" = yes ]; then
     ARGS+=(/users/ "/users/$user/" "/users/$user/config/"
            "/users/$user/config/locale=$OUT/userlocale@0644")
 fi
-# THE APPLICATION BUNDLES, but only those whose program is really on
-# this disk. `editor.osp` points at /bin/edit and `widgets.osp` at
-# /bin/widgetdemo; neither is in the program list of this round, and
-# mkfs.py stops with "gibt es nicht" -- rightly.
 rm -rf "$OUT/apps"
 cp -a assets/apps "$OUT/apps"
-# RUNDE WERKZEUGE: NICHT MEHR ZWEI NAMEN, SONDERN DIE REGEL DAHINTER.
 #
-# Hier standen `editor.osp` und `widgets.osp`, weil ihre Programme
-# (/bin/edit, /bin/widgetdemo) nicht in der Programmliste dieser Runde
-# stehen und `mkfs.py` dann mit "gibt es nicht" abbricht. Die naechste
-# Runde, die ein Programm mit Buendel dazulegt, laeuft in dieselbe Wand
-# -- diese hier ist es (taskmgr.osp), und statt einen dritten Namen
-# einzutragen wird jetzt gefragt: liegt das Programm, auf das
-# `start.txt` zeigt, ueberhaupt auf DIESER Platte?
 for b in "$OUT/apps"/*.osp; do
     [ -d "$b" ] || continue
     ziel=$(grep -avE '^\s*#' "$b/start.txt" 2>/dev/null | grep -aoE '/bin/[a-z0-9]+' | head -1)
@@ -319,21 +293,11 @@ for b in "$OUT/apps"/*.osp; do
     done
     [ "$keep" = yes ] || rm -rf "$b"
 done
-# RUNDE ALLTAG: `mager=yes` laesst weg, was diese Runde nicht braucht.
-# Der Grund ist eine harte Grenze und keine Sparsamkeit: dieses
-# Dateisystem hat 128 INODES (kernel/fs.fi, INODE_COUNT), und die
-# Grundausstattung verbraucht davon schon ueber hundert. Sechs Pakete
-# zu installieren heisst, zwei Dutzend neue Dateien anzulegen -- das
-# geht nur auf einer Platte, auf der Platz dafuer ist.
 if [ "$mager" = no ]; then
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" 2>/dev/null || true)
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 fi
-# RUNDE ALLTAG: EINE SCHON BESPIELTE PLATTE WEITERBENUTZEN.
 #
-# Zwei Laeufe hintereinander auf DEMSELBEN Dateisystem sind der einzige
-# Weg, "was der eine geschrieben hat, macht der andere auf" wirklich zu
-# zeigen -- ein frisch gebautes Abbild haette die Datei nie gesehen.
 if [ -n "$platte" ]; then
     cp "$platte" "$OUT/disk.img"
     echo "disk $(stat -c%s "$OUT/disk.img") octets (uebernommen von $platte)"
@@ -347,17 +311,12 @@ fi
 ACC=()
 [ "$accel" = kvm ] && ACC=(-accel kvm)
 SOCK="$OUT/mon.sock"; rm -f "$SOCK" "$OUT/serial.txt"
-# OHNE `nokbd` nimmt der Kern die echte Tastatur -- das braucht jeder
-# Test, der eine TASTE schickt (Entf, Umschalt+Entf, Win+L).
 KBW=nokbd
 [ "$kbd_on" = yes ] && KBW=""
 if [ -n "$script" ]; then
     APPEND="osum nokbd nosched noproc nofs script=$script"
     WAITFOR='^kernel: done'
 else
-    # OHNE `desk` ist NUR das Programm auf dem Schirm. Fuer das Bild
-    # eines einzelnen Fensters ist das der Unterschied zwischen einer
-    # Aufnahme und einer Aufnahme mit dem Startmenue davor.
     if [ "$desk_on" = yes ]; then
         APPEND="gfx wm wig wigicons desk wmhold wiglong $KBW nosched noproc nofs $extra"
         [ "$hold_on" = no ] && APPEND="gfx wm wig wigicons desk $KBW nosched noproc nofs $extra"
@@ -395,13 +354,6 @@ if [ -n "$clicks" ]; then
     python3 tools/wm/monitor.py "$SOCK" "$OUT/mon.txt" > "$OUT/click.log" 2>&1
     sleep 2
 fi
-# RUNDE ALLTAG: BELIEBIGE MONITORBEFEHLE (`mon=...`), nach den Klicks.
-# `sendkey shift-delete` ist der einzige Weg, Umschalt+Entf zu
-# schicken, und ohne ihn waere die Zusage "Umschalt+Entf loescht
-# endgueltig" eine Behauptung.
-# RUNDE ALLTAG: dem Gast Zeit lassen. Ein Programm, das eine Aufnahme
-# macht und eine Datei schreibt, ist nicht fertig, wenn der
-# Fensterserver "hold" sagt.
 [ -n "$hook" ] && OUT="$OUT" SOCK="$SOCK" bash -c "$hook"
 [ "$warten" != 0 ] && sleep "$warten"
 if [ -n "$moncmds" ]; then
@@ -416,12 +368,7 @@ if [ -z "$script" ] && [ "$shot" = yes ]; then
     python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 \
         > "$OUT/shot.log" 2>&1
 fi
-# RUNDE ALLTAG: AUCH DAS KIND ERSCHLAGEN.
 #
-# `$PID` ist das `timeout`, nicht QEMU -- `kill` darauf liess die
-# Maschine weiterlaufen. Nach einem Dutzend Laeufen standen ein Dutzend
-# QEMUs auf dem Wirt und jeder weitere Lauf wurde langsamer (gemessen:
-# aus 40 Sekunden wurden Minuten).
 if [ -z "$script" ]; then
     for kind in $(pgrep -P "$PID" 2>/dev/null); do kill "$kind" 2>/dev/null; done
     kill "$PID" 2>/dev/null

@@ -1,43 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/fremdfs/run.sh -- DIE ABNAHME DER RUNDE FREMDFS.
 #
-# DIE FRAGE DIESER RUNDE: kommt OrientOS an die Daten des Systems, neben
-# das es sich seit der Runde DUALBOOT installieren laesst? Also: liest
-# es ext4 (Linux) und NTFS (Windows)?
-#
-# WIE HIER GEMESSEN WIRD, und warum es so und nicht anders geht:
-#
-#   DER WIRT BAUT DIE ABBILDER, mit den ECHTEN Werkzeugen --
-#   `mkfs.ext4`/`debugfs`/`e2fsck` und `mkntfs`/libntfs-3g. Er legt
-#   einen BEKANNTEN Baum an und merkt sich JEDE SHA-256.
-#
-#   OSUM LIEST SIE, im laufenden Kernel, in Ring 3, ueber `mount` und
-#   ganz gewoehnliche `open`/`read`-Aufrufe (`/bin/fremdfs`), und
-#   rechnet die SHA-256 SELBST -- mit `kernel/user/sha.fi`, das in der
-#   Runde TRESOR gegen die Vektoren aus FIPS 180-4 gemessen wurde.
-#
-#   DIE ZWEI SUMMEN WERDEN VERGLICHEN. Stimmen sie, ist die Datei
-#   Oktett fuer Oktett dieselbe -- und das ist eine Aussage und keine
-#   Ansicht. "Sieht richtig aus" kommt hier nicht vor.
-#
-# DIE GEGENPROBEN, ohne die das kein Messgeraet waere, sondern eine
-# Vorfuehrung:
-#
-#   - ein ext4 mit ZERSTOERTER MAGIE muss abgelehnt werden -- nicht
-#     haengen, nicht Muell liefern;
-#   - ein FAT32 darf NICHT als ext4 durchgehen (und umgekehrt);
-#   - ein ABGESCHNITTENES Abbild muss auffallen, statt ueber das Ende
-#     hinaus zu lesen;
-#   - ein NTFS mit zerstoerter Kennung muss abgelehnt werden;
-#   - ein UNSAUBER ausgehaengtes ext4 muss ERKANNT werden (und wird
-#     dann nur lesend mit Warnung eingehaengt -- die Begruendung steht
-#     in kernel/ext4.fi);
-#   - SCHREIBEN muss auf beiden scheitern.
-#
-# Aufruf:  bash tools/fremdfs/run.sh
-#          OSUM_FF_NUR=ext4   nur der ext4-Teil
-#          OSUM_FF_NUR=ntfs   nur der NTFS-Teil
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -72,7 +34,6 @@ gleich() { # name soll ist
 }
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 
-# Ein Wert aus der Ausgabe von /bin/fremdfs ("ff: name = zahl").
 wert() { # datei name
     grep -a -m1 "^ff: $2 = " "$1" 2>/dev/null | sed 's/.* = //' | tr -d '\r\000'
 }
@@ -83,7 +44,6 @@ sagt() { # datei name soll beschreibung
     if [ "$got" = "$3" ]; then ok "$4 ($2 = $got)"
     else bad "$4 -- $2 = $got, erwartet $3"; fi
 }
-# Eine Pruefsumme aus der Ausgabe ("ff: sha /mnt/x = <hex>").
 shawert() { # datei pfad
     grep -a -m1 "^ff: sha $2 = " "$1" 2>/dev/null | sed 's/.* = //' \
         | tr -d '\r\000'
@@ -111,16 +71,10 @@ else
 fi
 hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
 
-# Die zwei neuen Seiten liegen da, wo sie liegen sollen, und nirgends
-# sonst. Diese Stelle hat dem Projekt schon vier Kollisionen beschert.
 for r in EXT4_OFF NTFS_OFF; do
     v=$(grep -aE "^const $r: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
         | head -1 | grep -oE '0x[0-9A-Fa-f]+')
     d=$((v))
-    # MERGE 14.09.2026: die beiden Bereiche sind hinter die alte
-    # kdata-Grenze gezogen (0x100000/0x103000), weil vier parallele
-    # Runden sich denselben freien Raum ab 0xF2000 genommen hatten.
-    # Siehe den Merge-Vermerk in kernel/kstate.fi.
     if [ "$d" -ge $((0x100000)) ] && [ "$d" -lt $((0x106000)) ]; then
         ok "$r = $v liegt im zugeteilten Bereich 0x100000..0x106000"
     else
@@ -128,14 +82,6 @@ for r in EXT4_OFF NTFS_OFF; do
     fi
 done
 
-# GEGENPROBE ZUR KARTE: eine Seite auf eine fremde Adresse gelegt MUSS
-# anschlagen. Ohne diese Zeilen prueft die Karte nur das, woran jemand
-# gedacht hat.
-# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
-# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
-# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
-# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
-# zu melden, die hier gemessen wird.
 mkdir -p "$TMPD/kollision"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kollision/" \; )
 sed -i 's/^const EXT4_OFF: u64 = 0x100000$/const EXT4_OFF: u64 = 0xF2000/' \
@@ -146,20 +92,9 @@ else
     ok "GEGENPROBE: EXT4_OFF auf VGPU_OFF gelegt -- der Kartenpruefer schlaegt an"
 fi
 
-# DIE AUFTEILUNG DER SEITE, NACHGERECHNET.
-#
-# Die Knotentafel faengt bei NODE_OFF an und ist MAX_NODES *
-# NODE_BYTES lang; der erste grosse Puffer steht dahinter. Ragt die
-# Tafel in den Puffer, ueberschreibt jeder gelesene Block die letzten
-# Knoten -- und genau das ist in dieser Runde passiert (24 x 48 = 0x480
-# ab 0x400 endet bei 0x880, der Puffer beginnt bei 0x800). Die Wirkung
-# war eine Datei, die nach einem Block zu Ende war. Deshalb steht die
-# Rechnung jetzt hier und nicht nur im Kommentar.
 for f in ext4 ntfs; do
     zahl() { grep -aE "^const $1: u64 = " "kernel/$f.fi" | head -1 \
         | sed -E 's/.*= *//; s/ *\/\/.*//'; }
-    # `$(( ))` versteht 0x-Zahlen, `[ -le ]` NICHT -- deshalb werden
-    # beide Seiten erst durch die Arithmetik geschickt.
     no=$(( $(zahl NODE_OFF) )); nb=$(( $(zahl NODE_BYTES) ))
     mn=$(( $(zahl MAX_NODES) ))
     if [ "$f" = ext4 ]; then pb=$(( $(zahl BLKBUF) )); else pb=$(( $(zahl MFTBUF) )); fi
@@ -171,7 +106,6 @@ for f in ext4 ntfs; do
     fi
 done
 
-# Und: die zwei Treiber tragen NUR die vier lesenden Bits.
 for f in ext4 ntfs; do
     if grep -qaE '^\s*mask: vfsops\.OP_READONLY,' "kernel/fs/$f.fi"; then
         ok "kernel/$f.fi sagt OP_READONLY zu (und nichts darueber hinaus)"
@@ -235,9 +169,6 @@ hat "$TMPD/bild.log" "ntfsfix -n sagt: in Ordnung" \
 abw=$(grep -a 'NTFS-Gegenlesung' "$TMPD/bild.log" | grep -oE '[0-9]+ Abweichungen' | grep -oE '^[0-9]+')
 num "ntfscat liest das NTFS-Abbild ohne Abweichung" "${abw:-99}" eq 0
 
-# DASS DER EXTENT-BAUM WIRKLICH EINER IST. Ohne diese Zahl waere
-# "der Treiber kann Extent-Baeume" eine Hoffnung: bei Tiefe 0 stehen
-# alle Extents im Inode, und der Baum wird nie betreten.
 tiefe=$(cat "$BILD/ext4-tiefe.txt" 2>/dev/null)
 num "der Extent-Baum von gross.bin hat Tiefe" "${tiefe:-0}" ge 1
 extents=$(cat "$BILD/ext4-extents.txt" 2>/dev/null)
@@ -245,12 +176,9 @@ num "und so viele Blatt-Extents" "${extents:-0}" ge 10
 htree=$(cat "$BILD/ext4-htree.txt" 2>/dev/null)
 num "/viele ist htree-indiziert (EXT4_INDEX_FL)" "${htree:-0}" eq 1
 
-# Die Pruefsummen des Wirts, nach Pfad.
 soll() { # pfad
     grep -a " $1\$" "$BILD/baum.sha" | head -1 | cut -d' ' -f1
 }
-
-# -------------------------------------------- 4. die Wurzelplatte von Osum
 
 echo "== 4. die Wurzelplatte =="
 MKARGS=""
@@ -260,16 +188,10 @@ python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     && ok "die Wurzelplatte steht: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
 
-# Die fremden Abbilder bekommen eine MBR-Tafel, damit sie als
-# PARTITION eingehaengt werden -- so, wie sie auf einer echten Platte
-# neben OrientOS laegen. Der Typ ist 0x83 (Linux) bzw. 0x07 (NTFS).
 partitionieren() { # quelle ziel typ
     local quelle=$1 ziel=$2 typ=$3
     local groesse
     groesse=$(stat -c %s "$quelle")
-    # MIT LOECHERN. `dd if=/dev/zero` belegt die volle Groesse wirklich;
-    # bei einem Dutzend Abbildern ist das knapp ein Gigaoktett, und
-    # genau daran ist dieser Lauf schon einmal gescheitert.
     rm -f "$ziel"
     python3 - "$ziel" $(( groesse / 1048576 + 2 )) <<'PYEOF'
 import sys
@@ -301,7 +223,6 @@ lauf() { # name wurzel zweite kommandozeile [zeitlimit]
         "${drives[@]}" > /dev/null 2>&1
     echo $?
 }
-# -cpu host geht nur mit KVM; unter TCG waere es ein Fehler.
 if [ "$OSUM_QEMU_ACCEL" != kvm ]; then
     lauf() {
         local name=$1 root=$2 second=$3 app=$4 t=${5:-300}
@@ -319,8 +240,6 @@ if [ "$OSUM_QEMU_ACCEL" != kvm ]; then
     }
 fi
 
-# Ein ganzer Durchgang ueber ein Abbild: einhaengen, alles lesen,
-# jede Summe vergleichen.
 durchgang() { # name abbild art erwartet_verweise(0/1)
     local name=$1 abbild=$2 art=$3 mit_verweisen=$4
     local D="$TMPD/$name.txt"
@@ -334,23 +253,12 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
     fi
     sagt "$D" mount 1 "[$name] das Dateisystem wird eingehaengt"
 
-    # DIE VERZEICHNISSE, gegen die Zahlen des Wirts.
     local soll_wurzel soll_viele
     soll_wurzel=$(grep -a '^\. ' "$BILD/baum.liste" | awk '{print $2}')
     soll_viele=$(grep -a '^viele ' "$BILD/baum.liste" | awk '{print $2}')
-    # ext4 hat zusaetzlich lost+found und die zwei Verweise in der
-    # Wurzel; NTFS hat weder das eine noch das andere.
     local ist_wurzel
     ist_wurzel=$(wert "$D" wurzel)
-    # DIE ZAHL IST FUER BEIDE ANDERS, UND ZWAR AUS EINEM GRUND, DER IM
-    # DATEISYSTEM LIEGT UND NICHT IM TREIBER:
     #
-    #   ext4: der Baum PLUS `lost+found` (legt `mkfs.ext4` an) PLUS die
-    #         zwei symbolischen Verweise, die es nur hier gibt.
-    #   NTFS: GENAU der Baum. Die Systemdateien ($MFT, $Boot, ...) sind
-    #         echte Indexeintraege, werden aber uebergangen -- so wie
-    #         Windows und ntfs-3g es tun (siehe MFT_FIRST_FREE in
-    #         kernel/ntfs.fi). Verweise legt `ntfsbaum.c` keine an.
     if [ "$art" = ext4 ]; then
         num "[$name] die Wurzel hat alle Eintraege" "${ist_wurzel:-0}" ge \
             $(( soll_wurzel + 1 ))
@@ -368,8 +276,6 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
     sagt "$D" gr-mittel 204800 "[$name] mittel.bin ist 200 KiB gross"
     sagt "$D" art-dir 16384 "[$name] /viele meldet sich als Verzeichnis"
 
-    # ========================= DIE PRUEFSUMMEN =========================
-    # Das ist die Zusage dieser Runde: Oktett fuer Oktett dasselbe.
     local p
     for p in hallo.txt leer.bin mittel.bin gross.bin \
              a/b/c/d/tief.txt a/b/zwischen.txt \
@@ -388,8 +294,6 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
             printf '        Wirt: %s\n        Osum: %s\n' "$s" "$i"
         fi
     done
-    # Die Datei mit Umlauten im Namen -- sie prueft den NAMEN, also
-    # muss sie ueber ihren Namen gefunden werden.
     local su iu
     su=$(soll 'umlaut-äöü.txt')
     iu=$(shawert "$D" '/mnt/umlaut-äöü.txt')
@@ -400,7 +304,6 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
         printf '        Wirt: %s\n        Osum: %s\n' "$su" "$iu"
     fi
 
-    # DAS LESEN AB EINER STELLE. Der Wirt rechnet dieselbe Summe.
     local soll_mitte ist_mitte
     soll_mitte=$(python3 - "$BILD" <<'PY'
 import sys
@@ -423,7 +326,6 @@ PY
     gleich "[$name] lesen ab Oktett 3000000 (Quersumme von 4096 Oktetten)" \
         "$soll_mitte" "$ist_mitte"
 
-    # DIE SYMBOLISCHEN VERWEISE -- nur ext4.
     if [ "$mit_verweisen" = 1 ]; then
         sagt "$D" art-lnk 40960 "[$name] verweis.txt meldet sich als VERWEIS"
         local zk zl
@@ -437,7 +339,6 @@ PY
             "$(cat "$BILD/verweis-lang.txt")" "$zl"
     fi
 
-    # WAS NICHT GEHEN DARF.
     sagt "$D" schreib 0 "[$name] SCHREIBEN scheitert (nur lesend)"
     sagt "$D" umount 1 "[$name] aushaengen geht sauber"
 }
@@ -472,8 +373,6 @@ fi
 
 echo "== 7. die Gegenproben: was NICHT gelesen werden darf =="
 
-# 7a. Ein ext4 mit zerstoerter Magie. Es MUSS abgelehnt werden -- und
-#     zwar ohne zu haengen (das Zeitlimit von QEMU ist der Zeuge).
 partitionieren "$BILD/kaputt-ext4.img" "$TMPD/kaputt-part.img" 83 >/dev/null
 rc=$(lauf kaputt "$TMPD/root.img" "$TMPD/kaputt-part.img" \
     "osum nokbd vfs script=fremdfs ext4 /dev/hdb1 /mnt")
@@ -483,8 +382,6 @@ sagt "$TMPD/kaputt.txt" mount 0 \
 hat "$TMPD/kaputt.txt" "ext4: nicht ext4 (1" \
     "[kaputt] und der Treiber sagt WARUM (Grund 1: keine Magie)"
 
-# 7c. Ein FAT32 darf NICHT als ext4 durchgehen. Das ist die Probe
-#     darauf, dass die Erkennung wirklich prueft und nicht nur hofft.
 partitionieren "$BILD/fat-als-ext4.img" "$TMPD/fat-part.img" 83 >/dev/null
 rc=$(lauf fatext "$TMPD/root.img" "$TMPD/fat-part.img" \
     "osum nokbd vfs script=fremdfs ext4 /dev/hdb1 /mnt")
@@ -492,16 +389,12 @@ num "[fat-als-ext4] der Kernel beendet sich selbst" "$rc" eq 21
 sagt "$TMPD/fatext.txt" mount 0 \
     "[fat-als-ext4] ein FAT32 geht NICHT als ext4 durch"
 
-# 7c. Und die Gegenrichtung: ein ext4 geht nicht als vfat durch.
 rc=$(lauf extfat "$TMPD/root.img" "$TMPD/ext4-part.img" \
     "osum nokbd vfs script=fremdfs vfat /dev/hdb1 /mnt")
 num "[ext4-als-vfat] der Kernel beendet sich selbst" "$rc" eq 21
 sagt "$TMPD/extfat.txt" mount 0 \
     "[ext4-als-vfat] ein ext4 geht NICHT als FAT32 durch"
 
-# 7d. Ein ABGESCHNITTENES ext4. Der Superblock nennt mehr Bloecke, als
-#     das Geraet hat -- ein Treiber, der das nicht prueft, liest ueber
-#     das Ende hinaus.
 partitionieren "$BILD/kurz-ext4.img" "$TMPD/kurz-part.img" 83 >/dev/null
 rc=$(lauf kurz "$TMPD/root.img" "$TMPD/kurz-part.img" \
     "osum nokbd vfs script=fremdfs ext4 /dev/hdb1 /mnt")
@@ -511,7 +404,6 @@ sagt "$TMPD/kurz.txt" mount 0 \
 hat "$TMPD/kurz.txt" "ext4: nicht ext4 (6" \
     "[kurz] und der Treiber sagt WARUM (Grund 6: kuerzer als der Kopf behauptet)"
 
-# 7e. Ein NTFS mit zerstoerter Kennung.
 partitionieren "$BILD/kaputt-ntfs.img" "$TMPD/kntfs-part.img" 7 >/dev/null
 rc=$(lauf kntfs "$TMPD/root.img" "$TMPD/kntfs-part.img" \
     "osum nokbd vfs script=fremdfs ntfs /dev/hdb1 /mnt")
@@ -519,9 +411,6 @@ num "[kaputt-ntfs] der Kernel beendet sich selbst" "$rc" eq 21
 sagt "$TMPD/kntfs.txt" mount 0 \
     "[kaputt-ntfs] ein NTFS mit zerstoerter Kennung wird ABGELEHNT"
 
-# 7f. DAS UNSAUBER AUSGEHAENGTE ext4. Es wird eingehaengt (nur lesend,
-#     das ist dieser Treiber immer) -- ABER die Warnung MUSS kommen.
-#     Die Begruendung fuer diese Entscheidung steht in kernel/ext4.fi.
 partitionieren "$BILD/ext4-schmutzig.img" "$TMPD/schmutz-part.img" 83 >/dev/null
 rc=$(lauf schmutz "$TMPD/root.img" "$TMPD/schmutz-part.img" \
     "osum nokbd vfs script=fremdfs ext4 /dev/hdb1 /mnt")
@@ -533,13 +422,6 @@ hat "$TMPD/schmutz.txt" "ext4: WARNUNG unsauber ausgehaengt" \
 
 # ------------------------------------------------- 7b. DIE ABSCHALTBARKEIT
 #
-# Justins Zusatzvorgabe vom 14.09.2026: die zwei Dateisysteme muessen
-# sich EINZELN aus dem Abbild nehmen lassen, das System muss ohne sie
-# unveraendert laufen, und ein Einhaengeversuch muss einen klaren
-# Fehler geben statt zu haengen.
-#
-# Gemessen wird das hier an vier Abbildern -- voll, ohne ext4, ohne
-# NTFS, ohne beide -- und an einem LAUF mit dem Abbild ohne beide.
 
 echo "== 7b. die Abschaltbarkeit (--ohne-ext4 / --ohne-ntfs) =="
 
@@ -563,9 +445,6 @@ num "das Abbild ohne ext4 ist gebaut" "${gr_oe:-0}" gt 1000000
 num "das Abbild ohne NTFS ist gebaut" "${gr_on:-0}" gt 1000000
 num "das Abbild ohne beide ist gebaut" "${gr_ob:-0}" gt 1000000
 
-# JEDES ABSCHALTEN MUSS DAS ABBILD WIRKLICH KLEINER MACHEN. Eine
-# Bauoption, die nichts spart, hat nichts ausgebaut -- dann stuende der
-# Treiber noch drin und die Zusage waere eine Behauptung.
 if [ "${gr_oe:-0}" -lt "${gr_voll:-0}" ] 2>/dev/null; then
     ok "--ohne-ext4 spart $(( gr_voll - gr_oe )) Oktette ($(( (gr_voll - gr_oe) / 1024 )) KiB)"
 else
@@ -584,8 +463,6 @@ fi
 printf 'voll %s\nohne-ext4 %s\nohne-ntfs %s\nohne-beide %s\n' \
     "$gr_voll" "$gr_oe" "$gr_on" "$gr_ob" > "$TMPD/groessen.txt"
 
-# DIE ZEILE, DIE ES SAGT. Wer ein Abbild in der Hand hat, muss ihm
-# ansehen koennen, was darin ist.
 grep -qa 'ext4=aus, ntfs=aus' "$TMPD/v-ohne-beide.log" \
     && ok "der Bau meldet 'ext4=aus, ntfs=aus'" \
     || bad "der Bau sagt nicht, dass die zwei fehlen"
@@ -593,8 +470,6 @@ grep -qa 'ext4=an, ntfs=an' "$TMPD/v-voll.log" \
     && ok "und beim vollen Bau 'ext4=an, ntfs=an'" \
     || bad "der volle Bau sagt es nicht"
 
-# DER LAUF OHNE BEIDE. Das System muss unveraendert hochkommen, und
-# ein Einhaengeversuch muss SOFORT scheitern -- nicht haengen.
 lauf_mit() { # name kernel zweite kommandozeile
     local name=$1 kern=$2 second=$3 app=$4
     cp --sparse=always "$TMPD/root.img" "$TMPD/live-$name.img"
@@ -618,9 +493,6 @@ if [ "${gr_ob:-0}" -gt 1000000 ]; then
     num "[ohne-beide] der Kernel beendet sich selbst statt zu haengen" "$rc" eq 21
     sagt "$TMPD/ohne-e4.txt" mount 0 \
         "[ohne-beide] ein ext4 wird ABGELEHNT (Dateisystem nicht unterstuetzt)"
-    # UND ZWAR OHNE EINEN EINZIGEN VERSUCH, DIE PLATTE ZU LESEN: die
-    # Leerfassung meldet gar nichts. Steht hier trotzdem eine Zeile des
-    # Treibers, ist er doch mit im Abbild.
     if grep -qa '^ext4: ' "$TMPD/ohne-e4.txt"; then
         bad "[ohne-beide] der ext4-Treiber meldet sich -- er ist noch im Abbild"
     else
@@ -638,16 +510,12 @@ if [ "${gr_ob:-0}" -gt 1000000 ]; then
         ok "[ohne-beide] der NTFS-Treiber meldet sich mit keiner Zeile"
     fi
 
-    # DAS SYSTEM LAEUFT UNVERAENDERT. Dieselbe Arbeit auf der eigenen
-    # Wurzelplatte, mit dem Abbild ohne die zwei Treiber -- sie muss
-    # genauso durchgehen wie mit ihnen.
     rc=$(lauf_mit ohne-ofs "$TMPD/v-ohne-beide.mb" "" \
         "osum nokbd vfs script=ls /bin;echo fertig-ohne")
     num "[ohne-beide] das System kommt ohne die zwei Treiber hoch" "$rc" eq 21
     hat "$TMPD/ohne-ofs.txt" "fertig-ohne" \
         "[ohne-beide] und arbeitet auf der eigenen Platte unveraendert weiter"
 
-    # EINZELN: mit --ohne-ext4 muss NTFS noch gehen.
     rc=$(lauf_mit nur-ntfs "$TMPD/v-ohne-ext4.mb" "$TMPD/ntfs-part.img" \
         "osum nokbd vfs script=fremdfs ntfs /dev/hdb1 /mnt")
     num "[ohne-ext4] der Lauf beendet sich selbst" "$rc" eq 21
@@ -660,8 +528,6 @@ if [ "${gr_ob:-0}" -gt 1000000 ]; then
         "[ohne-ntfs] ext4 geht weiterhin"
 fi
 
-# Die Abbilder dieses Abschnitts sind gemessen und gelaufen; sie
-# belegen zusammen gut 20 MB und werden nicht mehr gebraucht.
 rm -f "$TMPD"/v-*.mb "$TMPD"/v-*.mb.elf "$TMPD"/live-ohne-*.img \
       "$TMPD"/live2-ohne-*.img "$TMPD"/live-nur-*.img \
       "$TMPD"/live2-nur-*.img 2>/dev/null
@@ -669,10 +535,6 @@ rm -f "$TMPD"/v-*.mb "$TMPD"/v-*.mb.elf "$TMPD"/live-ohne-*.img \
 # ------------------------------------------------- 8. die Lesegeschwindigkeit
 
 echo "== 8. wie schnell gelesen wird (gegen das eigene OFS) =="
-# Dieselbe Arbeit, dieselbe Maschine: die 6-MiB-Datei einmal ganz
-# lesen. Gemessen wird die Zeit des GANZEN Laufs -- das ist kein
-# Mikromassstab, aber es ist eine ehrliche Zahl, und der Vergleich
-# zwischen den Dateisystemen ist fair, weil alles andere gleich bleibt.
 messen() { # name abbild art
     local name=$1 abbild=$2 art=$3 t0 t1
     t0=$(date +%s%N)

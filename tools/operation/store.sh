@@ -1,56 +1,8 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/operation/store.sh -- RUNDE MERGE-5: DIE UPDATE-KETTE GEGEN EINEN
-# ECHTEN, OEFFENTLICH ERREICHBAREN AUSLIEFERUNGSPLATZ.
 #
 #   bash tools/operation/store.sh [ausgabeverzeichnis]
 #
-# WARUM ES DIESEN LAEUFER GIBT, und das ist der ganze Punkt:
-#
-# `docs/OTA.md` sagt in seinem eigenen Kopf: "ES GIBT KEINEN ECHTEN
-# UPDATE-SERVER IM INTERNET, gegen den diese Runde messen koennte."
-# `docs/RUNDE-BETRIEB.md` misst gegen `tools/ota/server.py` auf DEMSELBEN
-# Wirt. Beides ist ehrlich aufgeschrieben, und beides laesst genau die
-# Fragen offen, die erst ein fremder Server stellt:
-#
-#   1. Loest das Geraet einen NAMEN selbst auf -- mit einem Nameserver,
-#      den ihm DHCP gegeben hat, und nicht mit einer Zeile, die jemand
-#      von Hand hingeschrieben hat?
-#   2. Haelt die Kettenpruefung gegen ein ECHTES Zertifikat? Die
-#      Gegenstelle des Pruefstands legt eine Wurzel vor, die derselbe
-#      Lauf zwei Minuten vorher selbst erzeugt hat -- eine Kette der
-#      Laenge 1. Let's Encrypt liefert VIER Zertifikate und eine
-#      Kettentiefe von 3, mit ECDSA P-256 und P-384 darin.
-#   3. Traegt der Wurzelspeicher IM ABBILD die richtige Wurzel? Bis
-#      hierher trug er die selbstgemachte.
-#
-# Seit dem 02.09.2026 gibt es diesen Platz: https://store.fleitec.com/
-# (systemd-Dienst `orientstore`, statische Dateien aus /srv/store,
-# Zertifikat von Let's Encrypt). Dieser Laeufer legt dort eine
-# Auslieferung ab und laesst ein Osum in QEMU sie ueber ihren NAMEN
-# holen.
-#
-# DIESER LAEUFER IST ABSICHTLICH NICHT IN test.sh ANGEMELDET.
-# Er schreibt auf einen echten Server und braucht das offene Internet;
-# eine Abnahme, die ohne fremde Infrastruktur nicht gruen werden kann,
-# ist keine Abnahme. Was hier gemessen wird, steht mit Zahlen in
-# docs/RUNDE-MERGE5.md, Abschnitt 4.
-#
-# WAS ER AM STORE AENDERT: er legt EINE Auslieferung unter /srv/store/osum
-# ab und nimmt EINE Fassung in den Katalog auf (`werkzeug/store add`).
-# Er entfernt nichts, er baut nichts um, und `store verify` laeuft
-# danach durch.
-#
-# ---------------------------------------------------------------------
-# DIE GEGENPROBE, UND SIE IST DER GRUND, WARUM DIE RUNDE AVX DAZUGEHOERT
-#
-# Derselbe Lauf wird zweimal gefahren, mit demselben Abbild, demselben
-# Namen und demselben Server -- einmal normal und einmal mit dem
-# Kernwort `nofpu`, also GENAU im Zustand vor der Runde AVX. Dann muss
-# `/bin/fetch` mit `user fault: vector=6` sterben und `ota` mit
-# "cannot fetch: VERZEICHNIS" aufhoeren. Ohne diese zweite Haelfte
-# waere "es geht" eine Beobachtung und kein Nachweis.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -124,30 +76,9 @@ done
 echo "== 2. auf den echten Server, ohne dort etwas wegzunehmen =="
 # =====================================================================
 if [ -d "$STORE_DIR" ] && [ -w "$STORE_DIR" ]; then
-    # DIE REIHENFOLGE IST NICHT EGAL: erst die Nutzlast, dann das
-    # VERZEICHNIS, zuletzt die Signatur -- sonst zeigt fuer die Dauer
-    # der Uebertragung ein gueltig signiertes Verzeichnis auf Dateien,
-    # die es noch nicht gibt.
     mkdir -p "$STORE_DIR/osum/aktuell"
     cp -aL "$OUT/aus/pakete" "$OUT/aus/v" "$STORE_DIR/osum/" 2>/dev/null
-    # HIER STAND EINMAL EINE MUSTERLISTE (`for f in hallo-*.opk ...`), UND
-    # SIE HAT DIE RUNDE EINEN LAUF GEKOSTET. Die Muster werden im
-    # ARBEITSVERZEICHNIS aufgeloest und nicht in `$OUT/aus/aktuell` --
-    # sie trafen also nichts, und das Paket samt seiner Signatur blieb
-    # liegen. Auf dem Server stand danach ein VERZEICHNIS aus DIESEM
-    # Lauf neben einer Paketsignatur aus dem VORIGEN, mit einem anderen
-    # Schluessel. Das Geraet hat das gemerkt und abgelehnt:
     #
-    #     opk: SIGNATURE WRONG -- das Paket wird ABGELEHNT
-    #     ota: opk did not install, code 1
-    #
-    # Also genau das richtige Verhalten -- der Fehler lag hier. Jetzt
-    # wird ueber die WIRKLICH VORHANDENEN Dateien gegangen, und in der
-    # Reihenfolge, die eine Auslieferung braucht: erst die Nutzlast und
-    # alles Beiwerk, dann das VERZEICHNIS, ganz zuletzt seine Signatur.
-    # Wer die Signatur vor der Nutzlast hochlaedt, hat fuer die Dauer
-    # der Uebertragung eine gueltig signierte Zusage auf Dateien, die es
-    # noch nicht gibt.
     find "$OUT/aus/aktuell" -maxdepth 1 -type f ! -name 'VERZEICHNIS*' \
         -exec cp -fL {} "$STORE_DIR/osum/aktuell/" \;
     cp -fL "$OUT/aus/aktuell/VERZEICHNIS"     "$STORE_DIR/osum/aktuell/"
@@ -156,8 +87,6 @@ if [ -d "$STORE_DIR" ] && [ -w "$STORE_DIR" ]; then
            "$OUT/aus/gesperrt.txt" "$STORE_DIR/osum/" 2>/dev/null
     N=$(find "$STORE_DIR/osum/aktuell" -maxdepth 1 -type f | wc -l)
     ok "die Auslieferung liegt unter $STORE_DIR/osum ($N Dateien unter aktuell/)"
-    # UND SIE IST IN SICH STIMMIG. Eine Auslieferung, in der eine Datei
-    # aus einem anderen Lauf stehengeblieben ist, ist keine.
     UNGL=0
     for q in "$OUT/aus/aktuell/"*; do
         cmp -s "$q" "$STORE_DIR/osum/aktuell/$(basename "$q")" || UNGL=$((UNGL+1))
@@ -167,14 +96,8 @@ else
     ok "uebersprungen: $STORE_DIR ist hier nicht beschreibbar (fremder Wirt)"
 fi
 
-# Und die Fassung in den KATALOG des Speichers -- das ist der Weg, den
-# ein Mensch geht, und er ist ein Befehl.
 if [ -d "$STORE_REPO/bau/repo" ]; then
     cp -f "$STORE_REPO/bau/repo/index.json" "$OUT/kat-vorher.json" 2>/dev/null
-    # `add` ist reines HINZUFUEGEN. Steht die Fassung schon im Katalog
-    # (weil dieser Laeufer schon einmal lief), sagt das Werkzeug nein --
-    # und das ist richtig so; ein zweiter Lauf darf einen Katalog nicht
-    # umschreiben. Dann wird nur nachgesehen, dass sie WIRKLICH dasteht.
     ( cd "$STORE_REPO" && python3 werkzeug/store --repo bau/repo add \
         "$OUT/pak/hallo-2.opk" \
         --beschreibung "Beispielpaket der Runde MERGE-5 (${MARKE_PRODUKT}/Osum)." \
@@ -183,12 +106,6 @@ if [ -d "$STORE_REPO/bau/repo" ]; then
         "$STORE_DIR" >> "$OUT/store.log" 2>&1 ) \
         && ok "der Katalog ist veroeffentlicht (store publish -> $STORE_DIR)" \
         || bad "store publish"
-    # OB SIE NEU IST, WIRD AN DER REVISION ABGELESEN UND NICHT AM
-    # BEENDIGUNGSCODE VON `add`. `add` sagt auch dann Ja, wenn es nichts
-    # zu tun gab (dieselbe Datei, dieselbe Fassung, gleicher Streuwert)
-    # -- der Katalog wird dann NICHT neu geschrieben und die Revision
-    # bleibt stehen. Das ist richtiges Verhalten und darf hier nicht als
-    # "neu aufgenommen" gemeldet werden.
     SHA=$(sha256sum "$OUT/pak/hallo-2.opk" | cut -d' ' -f1)
     RV=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['revision'])" \
          "$OUT/kat-vorher.json" 2>/dev/null)
@@ -203,8 +120,6 @@ if [ -d "$STORE_REPO/bau/repo" ]; then
     else
         bad "die Fassung steht nicht im veroeffentlichten Katalog"
     fi
-    # UND NICHTS IST WEGGEKOMMEN. Der Katalog zaehlt vorher wie nachher
-    # dieselben Pakete, und die Fassungszahlen sind nicht kleiner.
     python3 - "$STORE_DIR/index.json" "$OUT/kat-vorher.json" <<'PYEOF' \
         > "$OUT/katvergleich.txt" 2>&1
 import json, sys, os
@@ -232,8 +147,6 @@ PYEOF
         || { bad "store verify"; tail -5 "$OUT/verify.log"; }
 fi
 
-# Vom offenen Netz aus, mit einem fremden Werkzeug (curl), damit die
-# Aussage nicht von diesem Repo abhaengt.
 for f in VERZEICHNIS VERZEICHNIS.sig; do
     code=$(curl -sS -o "$OUT/netz-$f" -w '%{http_code}' --max-time 30 \
            "$BASIS_URL/aktuell/$f" 2>/dev/null)
@@ -286,9 +199,6 @@ NS=$(grep -aoE '^nameserver [0-9.]+' "$OUT/s1.txt" | head -1 | awk '{print $2}')
 [ -n "${NS:-}" ] && ok "der Nameserver kommt vom DHCP-Server: $NS" \
     || bad "keine nameserver-Zeile in /etc/resolv.conf"
 
-# Der Name, aufgeloest VON OSUM -- und daneben derselbe Name, aufgeloest
-# von `dig` auf dem Wirt. Zwei Aufloeser, eine Antwort, sonst ist es
-# keine Messung.
 IP_OSUM=$(grep -aoE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' "$OUT/s1.txt" | head -1)
 IP_DIG=$(dig +short "$NAME" A | grep -E '^[0-9.]+$' | head -1)
 gleich "/bin/host loest $NAME auf, und dig sagt dasselbe" \

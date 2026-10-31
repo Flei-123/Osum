@@ -1,38 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/toolbench/run.sh -- DIE ABNAHME DER RUNDE WERKZEUGE.
 #
 #   bash tools/toolbench/run.sh
 #
-# Acht Abschnitte, und der rote Faden ist der der Runden davor: zu jeder
-# Zusage gehoert eine GEGENPROBE, und eine Zahl, die nur die gepruefte
-# Sache selbst erzeugt, ist keine Messung.
-#
-#   1. BAUEN. Kern und Programme aus dem festgenagelten Uebersetzer,
-#      /bin/taskmgr und /apps/taskmgr.osp auf der Platte.
-#   2. DIE NEUEN KENNZAHLEN GIBT ES WIRKLICH. `C_IDLETICKS` je Kern,
-#      `P_PAGES` und `P_CPU` je Prozess, `SYS_CPUSTAT`. Gemessen an dem,
-#      was der Aufgabenverwalter meldet -- und mit GEGENPROBEN:
-#      Leerlauf <= Schlaege auf jedem Kern, die Summe der Anteile passt
-#      zum Kopf, und ein Prozess ohne eigenen Adressraum hat 0 Seiten.
-#   3. DIE ZAHLEN KOMMEN AUS DERSELBEN QUELLE WIE ps/top. Dieselbe
-#      Maschine, dieselbe Sekunde: die Prozessliste des Fensters gegen
-#      die von `/bin/ps`, Prozessnummer fuer Prozessnummer.
-#   4. DAS FENSTER STEHT. Jedes gemeldete Rechteck liegt im Fenster und
-#      ueberschneidet kein anderes; jede Beschriftung hat Tinte im Bild
-#      (tools/themestore/shotcheck.py mit der Marke dieser Runde).
-#   5. SORTIEREN UND WAEHLEN mit der MAUS, ueber den QEMU-Monitor.
-#   6. BEENDEN BEENDET WIRKLICH. Vorher: der Starter laeuft (Zustand 1).
-#      Nachher: derselbe Platz, dieselbe Prozessnummer, Zustand 5 --
-#      eine Leiche. GEGENPROBE: ohne den Klick auf "Ja" passiert nichts.
-#   7. DER GRAPH IST GEMALT UND NICHT BEHAUPTET. Die Kurve wird im BILD
-#      an den Stellen gesucht, die das Programm selbst gemeldet hat.
-#   8. DAS KONTROLLZENTRUM. Sechs Kacheln, ein Regler, der Akkustand,
-#      zwei Verknuepfungen -- und der Dunkelmodus-Schalter wird
-#      GEDRUECKT und das Bild danach GEMESSEN (es wird dunkler).
-#
-# Er braucht QEMU. Ohne QEMU sagt er das und endet mit 0, wie jeder
-# andere Laeufer dieses Baums.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -105,33 +74,20 @@ echo
 echo "== 2. die Kennzahlen, die es vor dieser Runde nicht gab =="
 NC=$(grep -aoE 'taskmgr: kern n=[0-9]+' "$S1" | sed 's/.*=//' | sort -un | wc -l)
 num "Kerne, ueber die der Kern einzeln Auskunft gibt" "$NC" ge 2
-# GEGENPROBE ZUR LEERLAUFZAEHLUNG: sie darf nie ueber der Gesamtzahl der
-# Schlaege desselben Kerns liegen. Beide gehen im selben Zeitgeber hoch;
-# eine Verletzung hiesse, dass sie NICHT dieselbe Unterbrechung zaehlen.
 BAD=$(grep -a 'taskmgr: kern n=' "$S1" | sed -E 's/.*ticks=([0-9]+) idle=([0-9]+).*/\1 \2/' \
       | awk '$2>$1 {n++} END {print n+0}')
 num "kein Kern meldet mehr Leerlauf als Zeit (idle <= ticks)" "$BAD" eq 0
-# UND SIE STEHT NICHT STILL: irgendein Kern muss Leerlauf gezaehlt haben,
-# sonst waere das Feld schlicht immer 0 und die Zusage leer.
 IDLE=$(grep -a 'taskmgr: kern n=' "$S1" | sed -E 's/.*idle=([0-9]+).*/\1/' | sort -n | tail -1)
 num "und der Leerlaufzaehler laeuft wirklich" "${IDLE:-0}" gt 100
-# EIN KERN IST WIRKLICH BESCHAEFTIGT. Der Bootkern traegt den
-# Fensterserver; seine Auslastung muss deutlich ueber der der anderen
-# liegen -- sonst misst die Zahl nichts.
 MAXPM=$(grep -a 'taskmgr: kern n=' "$S1" | sed -E 's/.*pm=([0-9]+).*/\1/' | sort -n | tail -1)
 num "der Kern mit dem Fensterserver ist ueber 50 % ausgelastet" "${MAXPM:-0}" ge 500
-# SPEICHER JE PROZESS: die Programme mit eigenem Adressraum haben Seiten,
-# die Kernaufgaben nicht. BEIDES muss vorkommen, sonst misst das Feld nichts.
 MIT=$(grep -a 'taskmgr: zeile' "$S1" | grep -c 'kib=[1-9]')
 OHNE=$(grep -a 'taskmgr: zeile' "$S1" | grep -c 'kib=0 ')
 num "Prozesse mit gemessenem Speicher" "$MIT" gt 0
 num "und Kernaufgaben ohne eigenen Adressraum (Strich statt Null)" "$OHNE" gt 0
-# KERN JE PROZESS: es muss mehr als einen Wert geben, sonst kaeme die
-# Zahl aus dem Nichts.
 KERNE=$(grep -a 'taskmgr: zeile' "$S1" | sed -E 's/.*kern=([0-9]+).*/\1/' | sort -un | wc -l)
 num "verschiedene Kerne, auf denen Prozesse zuletzt liefen" "$KERNE" ge 2
 
-# ========================================= 3. dieselbe Quelle wie ps/top
 echo
 echo "== 3. dieselben Zahlen wie /bin/ps -- zwei Wege, eine Wahrheit =="
 bash tools/toolbench/build.sh "$TMPD/b2" script='ps;exit' wait=1 last=120 \
@@ -139,27 +95,13 @@ bash tools/toolbench/build.sh "$TMPD/b2" script='ps;exit' wait=1 last=120 \
 S2="$TMPD/b2/serial.txt"
 PSN=$(grep -acE '^ *[0-9]+ +[0-9]+ ' "$S2")
 num "/bin/ps meldet Zeilen" "$PSN" gt 0
-# Der Aufgabenverwalter und `ps` laufen in verschiedenen Maschinen; was
-# sich vergleichen laesst, ist die FORM: dieselben Zustandsnummern und
-# dieselben Prozessnummern fuer dieselben Programme.
 TMPIDS=$(grep -a 'taskmgr: zeile' "$S1" | grep -oE ' pid=[0-9]+' | sed 's/.*=//' | sort -un | wc -l)
 num "der Aufgabenverwalter kennt so viele Prozesse wie die Tafel Plaetze hat" "$TMPIDS" ge 5
 ZUST=$(grep -a 'taskmgr: zeile' "$S1" | sed -E 's/.*st=([0-9]+).*/\1/' | sort -un | tr '\n' ' ')
 ok "die vorkommenden Zustandsnummern: $ZUST (dieselben wie sched.S_*)"
 
-# ==================================================== 4. das Fenster steht
 echo
 echo "== 4. jedes Rechteck liegt im Fenster, jede Beschriftung hat Tinte =="
-# GEMESSEN WIRD AM FENSTER ALLEIN und nicht auf dem Schreibtisch, und
-# das ist keine Bequemlichkeit: der Schreibtisch startet die Shell im
-# Terminalfenster NACH den Anwendungen, und das Terminal (560 x 380 bei
-# 24,40) liegt damit ueber der oberen Haelfte des Aufgabenverwalters --
-# inklusive des Graphen. Ein Pruefer, der dort Tinte sucht, misst das
-# Terminal. `wigapp=` ohne `desk` gibt genau ein Fenster auf leerem
-# Grund, so wie tools/powermon/run.sh es seit Runde POWERMON tut.
-# The serial line `taskmgr: start bw=` is sometimes lost under host load (about one boot in five,
-# also on origin/main -- measured 18.10.2026). Measure again (at most three boots) instead of
-# judging a window whose first report never arrived.
 for try in 1 2 3; do
     rm -rf "$TMPD/b0"
     bash tools/toolbench/build.sh "$TMPD/b0" app=/bin/taskmgr,melde,takt,300 \
@@ -169,16 +111,7 @@ done
 S0="$TMPD/b0/serial.txt"
 BW=$(grep -a 'taskmgr: start bw=' "$S0" | head -1 | sed -E 's/.*bw=([0-9]+).*/\1/')
 BH=$(grep -a 'taskmgr: start bw=' "$S0" | head -1 | sed -E 's/.*bh=([0-9]+).*/\1/')
-# RUNDE MERGE-6: DIE LAGE WIRD GELESEN, NICHT GETIPPT.
 #
-# Hier stand `--window=20,14` fest in der Zeile darunter -- dieselben
-# zwei Zahlen wie in kernel/user/taskmgr.fi, also an zwei Stellen. Beim
-# Zusammenfuehren mit der Runde OBERFLAECHE ist die 14 auf 16 gewandert
-# (14/4 = 3,5 liegt neben dem Viererraster), und dieser Pruefer haette
-# ohne ein Wort daneben gemessen: jede Beschriftung im Fenster waere um
-# zwei Bildpunkte verschoben gesucht worden. Das Programm meldet seine
-# Lage jetzt selbst (`wx=`/`wy=`); die 20/14 bleiben nur als Rueckfall
-# fuer einen Mitschnitt aus der Zeit davor.
 WX=$(grep -a 'taskmgr: start bw=' "$S0" | head -1 | sed -nE 's/.* wx=([0-9]+).*/\1/p')
 WY=$(grep -a 'taskmgr: start bw=' "$S0" | head -1 | sed -nE 's/.* wy=([0-9]+).*/\1/p')
 WX=${WX:-20}
@@ -215,8 +148,6 @@ echo
 echo "== 5. sortieren und waehlen mit der Maus =="
 has "$S1" "taskmgr: sortiert spalte=0" "ein Klick in die Kopfzeile sortiert nach Namen"
 has "$S1" "taskmgr: wahl pid=" "ein Klick auf eine Zeile waehlt einen Prozess"
-# GEGENPROBE ZUR SORTIERUNG: nach dem Klick stehen die Namen wirklich in
-# der Reihenfolge, die der Sortierschluessel verlangt.
 python3 - "$S1" > "$TMPD/sortcheck.txt" 2>&1 <<'PY'
 import re, sys
 txt = open(sys.argv[1], "rb").read().decode("latin1").splitlines()
@@ -249,9 +180,6 @@ echo "== 6. der Knopf beendet wirklich einen Prozess =="
 has "$S1" "taskmgr: frage pid=" "der Knopf fragt nach, statt sofort zu toeten"
 KPID=$(grep -a 'taskmgr: beende pid=' "$S1" | head -1 | grep -oE 'pid=[0-9]+' | sed 's/.*=//')
 KRC=$(grep -a 'taskmgr: beende pid=' "$S1" | head -1 | sed -E 's/.*rc=(-?[0-9]+).*/\1/')
-# UND ES MUSS DER STARTER GEWESEN SEIN. Ein Lauf, der statt dessen den
-# Schreibtisch erwischt, hat auch "einen Prozess beendet" -- und misst
-# trotzdem etwas anderes, als er behauptet.
 LPID=$(grep -a 'taskmgr: zeile' "$S1" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
 if [ "${KPID:-x}" = "${LPID:-y}" ]; then ok "und es war der Starter (pid $KPID)"
 else bad "beendet wurde pid ${KPID:-?}, gemeint war der Starter (pid ${LPID:-?})"; fi
@@ -265,7 +193,6 @@ if [ -n "${KPID:-}" ]; then
     num "und er rechnet nicht mehr (Anteil 0)" "${PMN:-1}" eq 0
 fi
 
-# ==================================================== 7. der Graph im Bild
 echo
 echo "== 7. der Verlaufsgraph ist gemalt und nicht behauptet =="
 # r443: the history graph lives on the PERFORMANCE page (a sidebar of pages since this round); the program is

@@ -6,38 +6,6 @@
 # WORUM ES GEHT
 # ==================================================================
 #
-# Bis zu dieser Runde hat Osum die Unterbrechungsleitung eines PCI-
-# Geraets aus dem Register 0x3C seiner Konfiguration gelesen. Das ist
-# kein Register des Geraets, sondern ein Notizzettel der Firmware. Die
-# Wahrheit steht im AML-Objekt `_PRT`, und um es zu lesen, braucht es
-# einen Interpreter fuer AML. Diese Runde baut ihn.
-#
-# ==================================================================
-# WAS HIER WIRKLICH GEMESSEN WIRD -- und was nicht
-# ==================================================================
-#
-# GEMESSEN wird auf QEMU 7.2, Maschine `pc` (i440fx). Deren DSDT ist
-# 6476 Oktette lang, hat 360 Namen und -- das ist der Punkt -- ein
-# `_PRT`, das KEINE fertige Tabelle ist, sondern eine METHODE mit einer
-# While-Schleife ueber 128 Durchlaeufe, Paketen, `Index`, `ShiftLeft`,
-# `And`, `Or` und Verweisen auf fuenf Link-Geraete. Deren `_CRS`
-# wiederum ruft eine zweite Methode auf, die einen Puffer anlegt, ein
-# `CreateDWordField` darauf setzt und ein PIIX3-Register aus dem
-# PCI-KONFIGURATIONSRAUM liest. Wer das auswerten kann, hat keinen
-# Spielzeug-Parser.
-#
-# NICHT GEMESSEN wird echte Hardware. Auf diesem Rechner liegt kein
-# Testbrett. Jede Zahl unten kommt aus QEMU, und wo das den Unterschied
-# macht, steht es dabei -- so wie in `docs/REALHW.md` seit Runde HWNET.
-#
-# DIE ZUSAGE, AN DER DIE RUNDE HAENGT, ist Abschnitt 5: der
-# Unterbrechungsvektor kommt WIRKLICH an, wenn die Leitung aus `_PRT`
-# in den I/O-APIC eingetragen wird -- und er kommt NICHT an, wenn
-# dieselbe Leitung um eins verschoben eingetragen wird (`amlwrong`).
-# Ohne diese Gegenprobe waere "wir haben eine Zahl gewonnen" keine
-# Messung, sondern eine Behauptung: das Geraet arbeitet naemlich auch
-# per Abfrage weiter, nur eben ohne Unterbrechung.
-#
 # Aufruf:  bash tools/aml/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -74,24 +42,15 @@ num() { # beschreibung wert op soll
 }
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 
-# EIN WERT AUS EINER `aml:`-ZEILE. Die Meldungen haben die Form
-#   aml: tables=1 nodes=346 heap=91608 us=1680 err=0
-# also wird nach "name=" gesucht und bis zum naechsten Leerzeichen gelesen.
 w() { # datei name
     grep -a -o -m1 "$2=[0-9]*" "$1" 2>/dev/null | head -1 | sed 's/.*=//' \
         | tr -d '\r\000'
 }
-# DASSELBE, ABER NUR AUS DEN ZEILEN DES INTERPRETERS. `err=` steht auch
-# in Meldungen anderer Untersysteme; wer stumpf die erste Fundstelle in
-# der Datei nimmt, misst irgendetwas. Das ist derselbe Fehler, den
-# tools/k18/run.sh in seinem Kopf beschreibt.
 aw() { # datei name
     grep -a '^aml:' "$1" 2>/dev/null | grep -o -m1 "$2=[0-9]*" | head -1 \
         | sed 's/.*=//' | tr -d '\r\000'
 }
 
-# EINE ZUSAGE UEBER EINEN SOLCHEN WERT. Ein FEHLENDER Wert faellt durch
-# -- ein Vergleich, der besteht, weil beide Seiten leer sind, ist keiner.
 sagt() { # datei name soll beschreibung
     local got; got=$(aw "$1" "$2")
     if [ -z "$got" ]; then bad "$4 -- '$2=' steht nicht in der Ausgabe"; return; fi
@@ -121,9 +80,6 @@ lauf() { # append out [qemu-args...]
 
 echo "== 1. die Zahlen, die Karte und die Modusbits =="
 
-# Der kdata-Bereich dieser Runde steht in kstate.fi UND in der
-# Speicherkarte. Genau hier hat dieses Projekt viermal denselben Fehler
-# gemacht (siehe tools/kernel/memmap.py).
 if python3 tools/kernel/memmap.py kernel >/dev/null 2>&1; then
     ok "die kdata-Karte ist ueberschneidungsfrei (memmap.py)"
 else
@@ -134,30 +90,15 @@ grep -q 'AML_OFF' tools/kernel/memmap.py \
     && ok "der Bereich AML_OFF steht in der Speicherkarte" \
     || bad "AML_OFF fehlt in tools/kernel/memmap.py"
 
-# DIE MODUSBITS DIESER RUNDE. Sie lagen auf Wort 11 ab Bit 0 (704..712)
-# -- auf dem Zweigstand vom 30.08.2026 war Wort 11 ganz frei. Beim
-# Hereinholen nach main (14.09.2026) stellte sich heraus, dass dort
-# laengst M_ASYNC..M_ASTRESS (Runde ASYNC) und M_MODULE/M_MODULAUS
-# (Runde MODUL) stehen: EIN Wort, ZWEI Bedeutungen, und `aml` auf der
-# Kommandozeile haette den Asynchronweg mitgeschaltet. Die Bits liegen
-# jetzt auf Wort 12 ab Bit 4 (772..780); Bit 0..3 gehoeren dort EHCI
-# und BLK. Diese Pruefung ist der Grund, warum es aufgefallen ist --
-# sie bleibt, nur der Vorrat wandert mit.
 fremd=$(grep -rn --include='*.fi' -E '^const M_[A-Z0-9_]+: u64 = 7(7[2-9]|80)' kernel/ \
         | grep -vE 'M_(AML|AMLDUMP|NOAML|AMLBAD|AMLLOOP|AMLDEEP|AMLLEAK|AMLPRT|AMLWRONG)' || true)
 [ -z "$fremd" ] && ok "die Modusbits 772..780 gehoeren nur dieser Runde" \
                 || { bad "fremde Modusbits im Vorrat dieser Runde"; echo "$fremd"; }
 
-# UND DIE GEGENPROBE ZUR GEGENPROBE: die Bits, die der Zweig FRUEHER
-# hatte, muessen jetzt jemand anderem gehoeren. Stuende dort nichts,
-# waere die Verschiebung sinnlos gewesen.
 grep -rq --include='*.fi' -E '^const M_ASYNC: u64 = 704' kernel/ \
     && ok "Wort 11 Bit 0 gehoert wieder Runde ASYNC (M_ASYNC)" \
     || bad "M_ASYNC steht nicht mehr auf 704 -- die Verschiebung stimmt nicht"
 
-
-# Der Kernstapel steht in boot.s und die Wache in amlev.fi. Die Wache
-# MUSS deutlich unter dem Stapel liegen, sonst schuetzt sie nicht.
 stack=$(grep -A20 '^kernel_stack_bottom:' kernel/arch/x86_64/boot.s \
         | grep -m1 '\.skip' | sed 's/.*\.skip *//')
 limit=$(grep -m1 '^const STACK_LIMIT' kernel/acpi/amlev.fi | sed 's/.*= *//')
@@ -168,10 +109,6 @@ num "die Stapelwache liegt unter dem halben Stapel" \
 echo
 echo "== 2. der Namensraum -- gegen eine zweite, unabhaengige Fassung =="
 
-# Der Kernel legt die ACPI-Tabellen als Hexzeilen auf die Leitung;
-# tools/aml/disasm.py liest DIESELBEN Oktette noch einmal, in Python,
-# von Hand nach der Spezifikation. Wo beide auseinandergehen, hat einer
-# von beiden unrecht.
 lauf "osum aml amldump nopwr" "$TMPD/dump.txt"
 gleich "der Lauf mit amldump endet sauber" "21" "$(cat "$TMPD/dump.txt.rc")"
 
@@ -207,14 +144,6 @@ sagt "$TMPD/ok.txt" err 0 "der Namensraum wurde ohne Fehler gebaut"
 
 if [ -f "$TMPD/DSDT.bin" ]; then
     python3 tools/aml/disasm.py ns "$TMPD"/*.bin > "$TMPD/ns.txt" 2>/dev/null
-    # `disasm.py` zaehlt jede ERKLAERUNG, der Kernel jeden KNOTEN --
-    # `Scope(\_SB)` steht in QEMUs DSDT dreimal und ist EIN Knoten.
-    # Verglichen wird deshalb die Zahl der VERSCHIEDENEN vollen Namen.
-    # Namen, die INNERHALB eines Methodenrumpfes stehen (QEMU: drei),
-    # legt der Kernel beim Laden NICHT an -- er ueberspringt die Rumpfe
-    # und legt sie erst beim Aufruf an, so wie es die Spezifikation
-    # verlangt (sie gehoeren der Aufrufinstanz, nicht der Tabelle).
-    # Also werden sie hier auf beiden Seiten weggelassen.
     awk '$2=="Method"{print $1}' "$TMPD/ns.txt" | sort -u > "$TMPD/meth.txt"
     awk '{print $1}' "$TMPD/ns.txt" | grep '^\\' | sort -u > "$TMPD/alle.txt"
     python3 - "$TMPD/alle.txt" "$TMPD/meth.txt" > "$TMPD/tabnamen.txt" <<'PY2'
@@ -243,10 +172,6 @@ PY2
     gleich "Methoden: Kernel und Python zaehlen dasselbe" "$py_m" "$k_m"
     gleich "Regionen: Kernel und Python zaehlen dasselbe" "$py_r" "$k_r"
 
-    # NICHT NUR DIE ANZAHL, SONDERN DIE NAMEN SELBST. Zwei Listen
-    # gleicher Laenge koennen verschiedene Namen enthalten; erst der
-    # Mengenvergleich sagt, dass der Kernel WIRKLICH denselben
-    # Namensraum gebaut hat wie die unabhaengige Fassung.
     lauf "osum aml amlprt nopwr" "$TMPD/ns-kernel.txt"
     grep -a '^aml: ns ' "$TMPD/ns-kernel.txt" | awk '{print $3}' | sort -u \
         > "$TMPD/knamen.txt"
@@ -258,8 +183,6 @@ PY2
         comm -3 "$TMPD/tabnamen.txt" "$TMPD/knamen.txt" | head -10 | sed 's/^/        /'
     fi
 
-    # Die Geraete, an denen diese Runde haengt, MUESSEN im Namensraum
-    # stehen -- geprueft an der unabhaengigen Fassung.
     for n in '\_SB.PCI0._PRT' '\_SB.LNKA._CRS' '\_SB.LNKD._SRS' \
              '\_SB.PCI0.S08.P40C' '\_SB.PRQ0'; do
         if awk -v n="$n" '$1==n{f=1} END{exit !f}' "$TMPD/ns.txt"; then
@@ -325,10 +248,6 @@ echo "== 4. _PRT -- die Leitung aus der Firmware statt aus 0x3C =="
 sagt "$TMPD/ok.txt" prtok 1 "_PRT wurde ausgewertet"
 sagt "$TMPD/ok.txt" routes 128 "die Routentafel hat einen Eintrag je Steckplatz und Stift"
 
-# Die entscheidende Gegenrechnung: fuer JEDES Geraet mit einem Stift
-# muessen `_PRT` und das Interrupt-Line-Register dasselbe sagen. In QEMU
-# tun sie das, weil SeaBIOS die PIIX3-Register nach derselben Tabelle
-# programmiert -- zwei unabhaengige Wege zur selben Zahl.
 mismatch=0
 paare=0
 while read -r line; do
@@ -341,9 +260,6 @@ done < <(grep -a '^aml: gsi ' "$TMPD/ok.txt")
 num "Geraete mit einem Unterbrechungsstift" "$paare" ge 2
 gleich "_PRT und das Register 0x3C sagen bei allen dasselbe" "0" "$mismatch"
 
-# Und die Zahl selbst, damit nicht beide gemeinsam falsch liegen: die
-# Netzkarte steht in QEMU auf 00:03.0, Stift A. `_PRT` fuehrt ueber
-# LNKC auf das PIIX3-Register 0x62, und dort steht die 11.
 zeile=$(grep -a '^aml: gsi 00:03.0' "$TMPD/ok.txt" | head -1)
 gsi=$(echo "$zeile" | sed -n 's/.* aml=\([0-9]*\).*/\1/p')
 gleich "00:03.0 Stift A liegt laut _PRT auf GSI 11" "11" "${gsi:-fehlt}"
@@ -402,10 +318,6 @@ else
     gleich "die Karte wird mit der Leitung aus _PRT eingetragen" "11" "${g_ok:-fehlt}"
     num "MIT der Leitung aus _PRT kommen Unterbrechungen an" "${irq_ok:-0}" ge 1
     num "und die Karte beantwortet die Pings" "${icmp_ok:-0}" ge 5
-    # DIE GEGENPROBE. Um eins verschoben eingetragen, kommt KEINE
-    # Unterbrechung mehr an. Dass die Karte per Abfrage trotzdem
-    # weiterarbeitet, ist genau der Grund, warum hier die Unterbrechungen
-    # gezaehlt werden und nicht die Antworten.
     gleich "mit der FALSCHEN Leitung kommt keine einzige Unterbrechung an" \
         "0" "${irq_bad:-fehlt}"
 
@@ -423,8 +335,6 @@ e=$(aw "$TMPD/bad.txt" err)
 num "es gibt einen DEFINIERTEN Fehler (nicht 0)" "${e:-0}" ge 1
 sagt "$TMPD/bad.txt" prtok 0 "_PRT wurde NICHT fuer gueltig erklaert"
 sagt "$TMPD/bad.txt" routes 0 "die Routentafel bleibt leer"
-# Und der Rueckfall traegt: die Zeilen zeigen aml=999 (nichts gefunden)
-# und trotzdem eine Leitung aus dem Register.
 grep -qa 'aml: gsi 00:03.0 pin=1 aml=999 line=11' "$TMPD/bad.txt" \
     && ok "der Rueckfall auf das Interrupt-Line-Register greift (line=11)" \
     || bad "der Rueckfall greift nicht"
@@ -497,9 +407,6 @@ num "_PRT bleibt unter fuenfzig Millisekunden" "${prtus:-99999}" le 50000
 num "der Kernstapel bleibt unter der Wache" \
     "$(( limit - ${stackh:-999999} ))" ge 0
 
-# Bootzeit vorher/nachher. `noaml` ist der Zustand VOR dieser Runde --
-# derselbe Kernel, nur ohne den Interpreter. Der Unterschied ist der
-# Preis der Runde und keine Schaetzung.
 mess_boot() { # append -> ms (Median aus fuenf)
     local i t0 t1
     : > "$TMPD/zeiten.txt"
@@ -515,11 +422,6 @@ b_ohne=$(mess_boot "osum noaml nopwr")
 b_mit=$(mess_boot "osum aml nopwr")
 printf '    Bootzeit ohne aml:      %s ms (Median aus 5, ganzer QEMU-Lauf)\n' "$b_ohne"
 printf '    Bootzeit mit aml:       %s ms (Median aus 5, ganzer QEMU-Lauf)\n' "$b_mit"
-# EHRLICH GESAGT: dieser Unterschied misst den ganzen QEMU-Lauf samt
-# Start und Beendigung und schwankt von Lauf zu Lauf um mehrere zehn
-# Millisekunden. Die belastbare Zahl ist die, die der Kernel SELBST
-# nimmt (us + prtus oben, zusammen rund 6 ms); diese hier ist nur die
-# Gegenprobe, dass keine Groessenordnung dazwischenliegt.
 num "der Interpreter bremst den Start um weniger als 200 ms" \
     "$(( b_mit - b_ohne ))" le 200
 

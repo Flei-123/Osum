@@ -1,36 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/toolbench/build.sh -- RUNDE WERKZEUGE: EINE PLATTE, EIN LAUF.
 #
 #   bash tools/toolbench/build.sh <outdir> [key=value ...]
 #
-#     app=<pfad>        wigapp=<pfad> -- welches Programm der
-#                       Fensterserver startet. Kommata trennen seine
-#                       Argumente: app=/bin/taskmgr,melde,takt,300
-#     desk=yes|no       statt eines einzelnen Fensters den ganzen
-#                       Schreibtisch (Taskleiste, Kontrollzentrum)
-#     script=<befehl>   im Gast eine Befehlszeile statt einer Oberflaeche
-#     mode=light|dark   Farbschema
-#     lang=de|en        system and user language
-#     shape=modern|classic
-#     smp=<n>           wie viele Prozessorkerne QEMU gibt
-#     click=<x,y,...>   Klicks ueber den QEMU-Monitor (tools/themestore/click.py)
-#     shot=<name>       Bildschirmfoto nach <outdir>/<name>.ppm
-#     shots=<n@name,..> mehrere Fotos: nach n Sekunden eines mit dem Namen
-#     plan=<datei>      Ablauf aus Schritten: warte/klick/ziel/foto/marke
-#     wait=<n>          Sekunden warten, bevor geklickt/fotografiert wird
-#     progs="..."       die Programmliste
-#     second=<img>      a second disk (hdb) from this image file
-#     flaky=<K>         /etc/themeflaky with the digit K: the first K reads of /etc/theme.conf per program fail (r1123 test hook)
-#     svcstate=<file>   plant the file as /run/svc.state (the table init writes)
-#     accel=tcg|kvm
-#     last=<sekunden>   wie lange die Maschine insgesamt laufen darf
-#
-# Sie ist die kleine Schwester von tools/themestore/build.sh und teilt
-# deren Bauverzeichnis-Regel: der Baum, in dem sie steht, entscheidet
-# ueber das Bauverzeichnis -- zwei Arbeitsbaeume desselben Repos, die
-# sich eines teilen, haben in Runde PAINT ein "Vorher"-Bild erzeugt, das
-# den "Nachher"-Code enthielt.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
@@ -104,9 +75,6 @@ if [ ! -s "$BUILDD/crt.o" ] || [ -n "${WZREBUILD:-}" ]; then
     as --64 -o "$BUILDD/crt.o" kernel/user/crt.s 2>"$BUILDD/as.err" \
         || { echo "FEHLGESCHLAGEN: crt.s"; cat "$BUILDD/as.err"; exit 1; }
 fi
-# Ein Programm ist nicht nur seine eigene Datei: jedes bindet ulib, wlib
-# und wlibc ein. Die neueste Datei unter kernel/user entscheidet fuer
-# alle -- Runde LOOK hat das auf dem langsamen Weg gelernt.
 USERNEW=$(ls -t kernel/user/*.fi 2>/dev/null | head -1)
 for p in $progs; do
     if [ -s "$BUILDD/$p.elf" ] && [ -z "${WZREBUILD:-}" ] \
@@ -138,36 +106,16 @@ printf '# /etc/locale.conf\nlang=%s\n' "$lang" > "$OUT/locale.conf"
 printf 'root:x:0:0:root:/users/osum:/bin/sh\n' > "$OUT/passwd"
 printf '%s\n' "$lang" > "$OUT/userlocale"
 
-# 18.10.2026: 32768 -> 65536 blocks (32 MiB): the 15 programs outgrew 16 MiB (mkfs: the disk is full).
-# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
-# Dieselbe Ursache wie in K15, NETVIEW, GLYPHE, NETMON, look/shot.sh und
-# tests/theme: Runde GRUNDLINIE (1d16d34) hat die Laeufer -- zu Recht --
-# auf `--profile=app` umgestellt, und sechs der fuenfzehn Programme
-# dieses Abbilds tragen `profile app` (desktop, taskbar, settings,
-# launcher, explorer, taskmgr). /bin/explorer ist damit 1623040 statt
-# 907360 Oktette. Im Protokoll dieses Laeufers steht:
-#
 #     programme 15
 #     FEHLGESCHLAGEN: mkfs
 #     mkfs: the disk is full
 #
-# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
-# --v3: the default format holds 2 134 016 octets per file at most, and the
-# file manager is about to pass that (the multi-window layer of the host)
 ARGS=(build "$OUT/disk.img" 65536 --v3 --inodes=512 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/ /dev/ /mnt/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
-# RUNDE ROTABSCHNITTE: /etc/uitrace -- DER SCHALTER, DER HIER FEHLTE.
-# `qs.fi` und `taskmgr.fi` melden ihre Rechtecke und Zustaende NUR,
-# wenn diese Datei da ist (qs.fi, `dbg_setup`: "die Pruefstaende legen
-# sie ohnehin an" -- dieser hier tat es nicht). Ohne sie schweigen sie
-# vollstaendig, und tools/toolbench/run.sh sucht dann vergeblich nach
-# `qs: symbols n=6`, `qs: open x=`, `qs: tile n=3 to=1` und
-# `taskmgr: frage pid=`. tools/desktop/run.sh legt die Datei aus
-# demselben Grund an und ist gruen.
 printf 'on\n' > "$OUT/uitrace"
 ARGS+=(/etc/
        "/etc/uitrace=$OUT/uitrace@0644"
@@ -209,7 +157,6 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/
 [ -e locale/de/icons ] && ARGS+=("/usr/share/locale/de/icons=locale/de/icons")
 ARGS+=(/users/ "/users/osum/" "/users/osum/config/"
        "/users/osum/config/locale=$OUT/userlocale@0644")
-# Die Buendel, aber nur die, deren Programm auch auf dieser Platte liegt.
 rm -rf "$OUT/apps"
 cp -a assets/apps "$OUT/apps"
 for b in "$OUT/apps"/*.osp; do
@@ -242,11 +189,6 @@ if [ -n "$script" ]; then
 elif [ "$desk" = yes ]; then
     WA=""; [ -n "$app" ] && WA="wigapp=$app"
     APPEND="gfx wm wig desk wmhold wiglong wmdauer $WA nokbd nosched noproc nofs $extra"
-    # WORAUF GEWARTET WIRD. `wm: hold` heisst "der Schreibtisch steht",
-    # und das ist das richtige Zeichen ohne eigene Anwendung. MIT einer
-    # ist es das falsche: sie wird NACH der Leiste gestartet, und unter
-    # KVM kam `wm: hold` erst danach -- der Laeufer stand fuenf Minuten
-    # in der Warteschleife, waehrend im Gast alles laengst lief.
     if [ -n "$app" ]; then
         WAITFOR="^desk: start ${app%%,*} "
     else
@@ -283,11 +225,6 @@ if [ -n "$clicks" ]; then
 fi
 # ------------------------------------------------------------ 4b. der Plan
 #
-# EINE VERBINDUNG FUER DEN GANZEN ABLAUF. Warum das eine eigene Datei
-# geworden ist und nicht eine Schleife hier, steht im Kopf von
-# tools/toolbench/fahren.py: der QEMU-Monitor nahm die ZWEITE Verbindung
-# nicht mehr an, und ein verlorener Klick sieht im Gast genauso aus wie
-# eine Trefferpruefung, die nicht greift.
 if [ -n "$plan" ] && [ -f "$plan" ]; then
     python3 tools/toolbench/fahren.py "$SOCK" "$plan" "$OUT/serial.txt" "$OUT" \
         2>&1 | tee "$OUT/plan.log"
@@ -295,7 +232,6 @@ fi
 if [ -n "$shot" ]; then
     python3 tools/gfx/screenshot.py "$SOCK" "$OUT/$shot.ppm" 25 > "$OUT/shot.log" 2>&1
 fi
-# Mehrere Aufnahmen: "3@a,6@b" heisst nach 3 Sekunden a, nach 6 Sekunden b.
 if [ -n "$shots" ]; then
     vor=0
     for e in ${shots//,/ }; do

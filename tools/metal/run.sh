@@ -2,61 +2,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/metal/run.sh -- OSUM AUF FREMDEM BLECH.
 #
-# ==================================================================
-# WARUM ES DIESEN ABSCHNITT GIBT
-# ==================================================================
-#
-# Der Bericht der Runde MERGE-3 (docs/RUNDE-MERGE3.md) hat drei Saetze
-# aufgeschrieben, die diese Runde einzeln widerlegt:
-#
-#   1. "Die automatische Treiberwahl beim Start ist nicht gebaut --
-#       welches Geraet die Wurzel traegt, entscheidet die
-#       Kommandozeile." Nachgelesen: `osum_stage` ruft `blk.use_ata`,
-#       und `root_from_part` ruft `part.scan(state, blk.DEV_ATA)`. Auf
-#       einem PC mit NVMe-Riegel endet der Start mit "osum: no drive".
-#   2. "SATA im RAID-Modus -- dann findet Osum keine Platte." Richtig,
-#       und bis zu dieser Runde SAGTE der Kern es nicht. Ein Notebook,
-#       dessen Firmware ab Werk auf Intel RST steht, zeigt eine leere
-#       Plattenliste und keinen Grund.
-#   3. "Jeder Rechner seit ~2012 hat xHCI. Das ist der richtige und
-#       einzige noetige Controller." Der erste Teil stimmt. Ein Rechner
-#       VOR 2012 hat gar kein xHCI, und dort ist jeder USB-Anschluss
-#       tot.
-#
-# ==================================================================
-# WAS HIER GEMESSEN WIRD -- UND WOMIT ES SICH WIDERLEGEN LIESSE
-# ==================================================================
-#
-#   1. DIE WURZEL WIRD GESUCHT. Dieselbe Maschine, ZWEI Kerne: der vom
-#      Abzweigpunkt und der dieser Runde. Auf einer Maschine, deren
-#      einzige Platte ein NVMe-Riegel mit einem OFS darauf ist, muss der
-#      ALTE "osum: no drive" sagen und der NEUE die Wurzel einhaengen.
-#      Ohne den alten Kern daneben waere die Zusage nicht nachweisbar --
-#      vielleicht haette der alte es ja auch gekonnt.
-#   2. UND SIE WIRD NICHT GERATEN. Steht neben der leeren NVMe-Platte
-#      eine AHCI-Platte MIT System, muss die AHCI-Platte gewinnen. Ein
-#      Bewerber, der nur DA ist, gewinnt nicht.
-#   3. UND DER ALTE WEG BLEIBT DER ERSTE. Mit einer IDE-Platte, die
-#      traegt, darf die neue Suche NULL Mal laufen. Das ist die Zusage,
-#      an der die 54 bestehenden Abschnitte haengen, und sie wird durch
-#      ZAEHLEN belegt.
-#   4. DER RAID-MODUS WIRD BENANNT. `-device megasas` ist ein Controller
-#      der Klasse 01:04, also genau das, was Intel RST auf einem
-#      Notebook hinstellt. Der Kern muss seine Nummern nennen UND sagen,
-#      welche Einstellung im BIOS zu aendern ist.
-#   5. EHCI: EIN STICK, UND DER WIRT RECHNET NACH. Drei Bloecke ueber
-#      Bulk-Only-Transport; ihre gewichteten Oktettsummen rechnet DIESES
-#      Skript aus demselben Abbild aus, aus dem QEMU liest. "Der Treiber
-#      meldet Erfolg" ist keine Messung.
-#   6. EHCI: EINE TASTATUR, UND ES SIND DIE RICHTIGEN CODES. Geprueft
-#      wird nicht die ZAHL der Tasten, sondern die FOLGE der Abtastcodes
-#      gegen den AT-Satz 1.
-#   7. NVMe MIT DREI NAMENSRAEUMEN, und der dritte hat ABSICHTLICH die
-#      Nummer 7. Eine Liste, die "1,2,3,..." annimmt, faellt hier auf.
-#   8. GEGENPROBEN. Ohne das Wort `ehci` gibt es keinen Treiber; ohne
-#      Regler eine Meldung statt eines Haengers; mit einem anderen
-#      Regler (ich9-usb-ehci1 auf q35) dieselben Zahlen.
-#
 # Aufruf:  bash tools/metal/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -90,9 +35,6 @@ hin "Beschleuniger: $OSUM_QEMU_ACCEL"
 
 # ------------------------------------------------------------ die Kerne
 #
-# ZWEI Kerne, und der zweite ist der Sinn des Abschnitts: der Stand des
-# Abzweigpunkts als Vergleichsmass. Ohne ihn waere jede Zusage dieser
-# Runde die BEHAUPTUNG, dass der alte Kern etwas nicht konnte.
 bash tools/build-kernel.sh "$TMPD/neu.mb" --stufe 0 >"$TMPD/b1.txt" 2>&1 \
     && ok "der Kern dieser Runde ist gebaut ($(stat -c%s "$TMPD/neu.mb") Oktette)" \
     || { bad "der Kern liess sich nicht bauen"; sed 's/^/        /' "$TMPD/b1.txt" | head -5; }
@@ -115,9 +57,6 @@ if [ -n "$VOR" ]; then
     fi
 fi
 
-# Die Speicherkarte. Diese Runde nimmt VIER Seiten aus `kdata` -- drei
-# fuer den EHCI, eine fuer die Wurzelwahl -- und genau an dieser Stelle
-# hat das Projekt viermal dieselbe Kollision gebaut.
 if python3 tools/kernel/memmap.py >"$TMPD/map.txt" 2>&1; then
     ok "die Speicherkarte von kdata ist kollisionsfrei -- $(cat "$TMPD/map.txt")"
 else
@@ -220,11 +159,6 @@ lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/4.txt" \
     -device megasas -device sdhci-pci \
     -drive "file=$TMPD/leer.img,format=raw,if=none,id=n0" \
     -device "nvme,drive=n0,serial=x" -device "ahci,id=a0"
-# NACHTRAG RUNDE BLECH: diese vier Zeilen kommen jetzt aus
-# `kernel/blkdev.fi` statt aus `rootsel.fi` -- der Schicht, die fuer
-# Speicher dasselbe ist wie `netdev.fi` fuer Netz.  Die AUSSAGE ist
-# dieselbe geblieben und um den Chipnamen reicher; nur die Vorsilbe
-# heisst jetzt `blkdev:` und nicht mehr `rootsel:`.
 hat "$TMPD/4.txt" "RAID-Modus" \
     "ein Controller der Klasse 01:04 wird als RAID-Modus erkannt"
 hat "$TMPD/4.txt" "1000:0060" "und mit SEINEN NUMMERN genannt"
@@ -269,10 +203,6 @@ done < "$TMPD/summen.txt"
 
 # =====================================================================
 echo "== 6. EHCI: eine Tastatur, und es sind die RICHTIGEN Codes =="
-# =====================================================================
-# h a l l o Eingabe im Abtastcodesatz 1. Die Werte stehen NICHT aus dem
-# Kernel hier, sondern aus der AT-Tabelle -- sonst pruefte sich der
-# Uebersetzer selbst.
 ERWARTET="23 1e 26 26 18 1c"
 ( sleep 8
   for k in h a l l o ret; do echo "sendkey $k"; sleep 0.3; done
@@ -298,13 +228,6 @@ p=$(wert "$TMPD/6.txt" 'abfragen=[0-9]+')
 
 # =====================================================================
 echo "== 6b. ZWEI Geraete am selben Regler -- Tastatur UND Stick =="
-# =====================================================================
-# Das ist die Messung, die den zweiten eigenen Fehler dieser Runde
-# festhaelt: der Geraetesatz war 64 Oktett gross, und vier seiner
-# Felder (Hersteller, Erzeugnis, Umschaltbit hinaus, Paketgroesse
-# hinein) lagen bei 0x40..0x58 -- also im Platz des NAECHSTEN Geraets.
-# Mit EINEM Geraet am Regler faellt das nie auf. Mit zweien traegt die
-# Tastatur die Herstellernummer des Sticks.
 ( sleep 8
   for k in h a l l o ret; do echo "sendkey $k"; sleep 0.3; done
   sleep 22; echo quit ) | \
@@ -389,7 +312,6 @@ lauf "$TMPD/neu.mb" "ehci nokbd nosched noproc nofs noring3" "$TMPD/8b.txt"
 hat "$TMPD/8b.txt" "ehci: no EHCI on the bus" \
     "GEGENPROBE mit dem Wort, aber ohne Regler: eine Meldung statt eines Haengers"
 
-# Derselbe Treiber an einem ANDEREN Regler: der EHCI des ICH9 auf q35.
 timeout 180 $QEMU_X86 -M q35 -kernel "$TMPD/neu.mb" -m 256 \
     -append "ehci ehcitest nokbd nosched noproc nofs noring3" \
     -serial "file:$TMPD/8c.txt" -display none -no-reboot \
@@ -423,24 +345,6 @@ hat "$TMPD/9b.txt" "(kein Treiber)" \
 echo "== 10. die zwei Nachrechner: Namen und 8125-Register =="
 # =====================================================================
 #
-# WARUM SIE HIER STEHEN UND NICHT NUR IM VERZEICHNIS LIEGEN. Der Bericht
-# der Runde hat sich selbst vorgeworfen, dass `fb.sh` gebaut, aber nie
-# angemeldet wurde -- ein Pruefwerkzeug, das niemand aufruft, ist kein
-# Pruefwerkzeug. Diese beiden pruefen genau das, was in dieser Runde
-# NICHT ueber QEMU pruefbar ist:
-#
-#   chipnames.py  181 Namensbehauptungen gegen pci.ids und den
-#                 Linux-Quelltext. Erster Lauf: 14 davon falsch.
-#   r8125regs.py  den 8125-Zweig gegen r8169_main.c -- Adresse UND
-#                 Zugriffsbreite UND Wert. Erster Lauf: der Sendeanstoss
-#                 falsch, und auf echter Hardware waere kein Paket
-#                 hinausgegangen.
-#
-# Beide laufen OHNE Netz, wenn ihre Vorlagen unter /tmp liegen; fehlen
-# sie, holen sie sie einmal. Ohne Netz und ohne Vorlage werden sie
-# UEBERSPRUNGEN und sagen das -- ein Abnahmelauf darf nicht an einer
-# fehlenden Internetverbindung scheitern, aber er darf sie auch nicht
-# verschweigen.
 
 if python3 tools/metal/chipnames.py >"$TMPD/chipnames.txt" 2>&1; then
     n=$(grep -oaE 'BESTAETIGT[^0-9]*([0-9]+)' "$TMPD/chipnames.txt" | grep -oaE '[0-9]+$')
@@ -471,10 +375,6 @@ fi
 echo "== 11. der ehrliche Bestand, auch ueber Nicht-Ethernet =="
 # =====================================================================
 #
-# `probe` sieht nur Klasse 02 UNTERKLASSE 00. Eine WLAN-Karte ist 02:80
-# und kam bis zu dieser Runde in KEINER Liste vor. `-device rocker` ist
-# das einzige Geraet der Klasse 02:80, das QEMU 7.2 anbietet -- damit
-# ist der Zweig wirklich gefahren und nicht nur gelesen.
 lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/10.txt" \
     -device e1000e,netdev=nx -netdev user,id=nx -device rocker,name=sw1
 hat "$TMPD/10.txt" "netdev: bestand" "die Bestandsliste wird gedruckt"
@@ -485,9 +385,6 @@ hat "$TMPD/10.txt" "kein Treiber (kein Ethernet-Port)" \
 hat "$TMPD/10.txt" "netdev: bestand 2 geraete, 1 mit treiber, 1 ohne" \
     "und die Zaehlung darunter stimmt"
 
-# Die Zeilenanfaenge, die Vertraege sind. Sie sind in dieser Runde
-# zweimal versehentlich uebersetzt worden; ab jetzt faellt das SOFORT
-# hier auf und nicht erst in drei fremden Testdateien.
 lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/11.txt" \
     -device ne2k_pci,netdev=ny -netdev user,id=ny
 hat "$TMPD/11.txt" "netdev: no driver for 0x10ec:0x8029" \

@@ -1,40 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/caps/run.sh -- DER BEWEIS, DASS RING 3 NUR NOCH DAS DARF,
-# WAS IN SEINEM HANDLE STEHT.
-#
-# Die POSIX-Schicht der Runde K4 arbeitet mit UMGEBUNGSAUTORITAET: ein
-# Prozess bekommt die Deskriptoren 0, 1 und 2 geschenkt, `open` sucht in
-# einem globalen Wurzelbaum, und eine geratene kleine Zahl ist mit etwas
-# Glueck ein offener Deskriptor. Das ist die Bauart von 1970.
-#
-# Diese Runde bringt das Gegenteil daneben -- portiert aus OrientOS'
-# nativer ABI (`libs/osum-abi-native/`, Rust, no_std): eine Handle-Tabelle
-# je Prozess (`kernel/cap.fi`), eine zweite Aufrufnummerierung ab 2000
-# (`kernel/sys.fi`, `native`), und ein Programm in Ring 3, das damit
-# arbeitet (`kernel/uprog.fi`, `u_caps`).
-#
-# WAS HIER GEMESSEN WIRD, und warum jede Zusage eine Gegenprobe hat:
-#
-#   1. ACHTZEHN ZUSAGEN AUS RING 3. Nicht der Kernel behauptet, seine
-#      Tabelle sei richtig -- ein unprivilegiertes Programm jenseits des
-#      Schutzwalls sagt Zeile fuer Zeile, was es darf und was nicht. Jede
-#      Zeile wird hier EINZELN nachgelesen; eine Sammelzahl allein waere
-#      zu leicht.
-#   2. RECHT FEHLT != HANDLE FALSCH. Das gueltige Handle ohne Leserecht
-#      gibt -2 (RightsDenied), das gefaelschte -1 (BadHandle). POSIX hat
-#      fuer beides nur -EBADF, und das ist der Unterschied, um den es
-#      geht.
-#   3. NICHTS WIRD GEERBT. Der erste Lauf macht seine Tabelle absichtlich
-#      voll (16 von 16). Der zweite Lauf bekommt DENSELBEN Platz in der
-#      Aufgabentabelle und zaehlt trotzdem GENAU EIN Handle.
-#   4. ZWEI PROZESSE, DERSELBE PLATZ, VERSCHIEDENE HANDLES. Der
-#      Wuerfelwert der Tabelle geht in die Generation ein.
-#   5. DIE GEGENPROBE: ohne das Wort `caps` auf der Kommandozeile
-#      passiert nichts von alledem -- und der uebrige Kernel verhaelt sich
-#      Zeile fuer Zeile wie vorher.
-#   6. BEIDE UEBERSETZER. firnc0 und firnc1 bauen denselben Kernel, und
-#      er sagt beide Male dasselbe.
 #
 # Verwendung:  bash tools/caps/run.sh
 set -uo pipefail
@@ -64,9 +28,6 @@ run_kernel() { # abbild anhang ausgabe
     return $?
 }
 
-# Die achtzehn Zusagen, die das Programm in Ring 3 meldet. Sie stehen hier
-# im Klartext, damit eine geloeschte oder umbenannte Zusage auffaellt --
-# und nicht nur eine kleinere Gesamtzahl.
 ZUSAGEN=(
  "version"           "die ABI meldet ihre Fassung"
  "count-is-one"      "die Tabelle haelt genau EIN Handle"
@@ -114,7 +75,6 @@ for stufe in 0 1; do
     has "$OUT" "cap: handles instead of ambient" \
         "firnc$stufe: der Abschnitt laeuft"
 
-    # 1. Jede einzelne Zusage aus Ring 3.
     i=0
     while [ $i -lt ${#ZUSAGEN[@]} ]; do
         schluessel=${ZUSAGEN[$i]}
@@ -129,7 +89,6 @@ for stufe in 0 1; do
     done
     hasnot "$OUT" "[FAIL]" "firnc$stufe: keine gefallene Zusage in Ring 3"
 
-    # 2. Beide Laeufe des Programms melden die volle Zahl und gehen mit 0.
     n=$(grep -acF "caps: 18/18 proofs" "$OUT")
     if [ "$n" -eq 2 ]; then
         ok "firnc$stufe: beide Laeufe melden 18 von 18 Zusagen"
@@ -144,8 +103,6 @@ for stufe in 0 1; do
         grep -a 'cap: ring 3 exit=' "$OUT" | sed 's/^/        /'
     fi
 
-    # 3. NICHTS WIRD GEERBT: derselbe Platz der Aufgabentabelle, der
-    #    Vorgaenger liess 16 Handles stehen, der Nachfolger zaehlt eines.
     zeile=$(grep -a 'cap: slot t1=' "$OUT" | tail -1)
     t1=$(echo "$zeile" | sed -n 's/.*t1=\([0-9]*\).*/\1/p')
     t2=$(echo "$zeile" | sed -n 's/.*t2=\([0-9]*\).*/\1/p')
@@ -161,14 +118,6 @@ for stufe in 0 1; do
         bad "firnc$stufe: der Vorgaenger liess $left Handles stehen, erwartet 16"
     fi
 
-    # 3b. JEDE SEITE VON `.utext` IST WIRKLICH ABGEBILDET. Das ist die
-    #     Zusage hinter `user.map_user_pt`: der Abschnitt, den Ring 3
-    #     sehen darf, ist mit dieser Runde ueber eine 2-MiB-Kachel
-    #     hinausgewachsen (unter firnc1), und eine einzige geteilte
-    #     Seitentabelle haette die erste Kachel mit der zweiten
-    #     ueberschrieben. Gegenprobe von Hand: mit ausgebautem Fix bleibt
-    #     derselbe Kernel unmittelbar nach dem APIC-Abschnitt stehen
-    #     (Beendigungscode 0 statt 21).
     seiten=$(readelf -S "$IMG.elf" 2>/dev/null | grep -A1 '\.utext' | tail -1 \
              | awk '{print $1}')
     if [ -n "${seiten:-}" ]; then
@@ -183,7 +132,6 @@ for stufe in 0 1; do
         echo "        (.utext: $soll Seiten, $kacheln 2-MiB-Kachel(n))"
     fi
 
-    # 4. Der Wuerfelwert: derselbe Platz, verschiedene Handle-Werte.
     if grep -qa 'cap: first .*differ=1' "$OUT"; then
         ok "firnc$stufe: zwei Prozesse, derselbe Platz, verschiedene Handles"
     else
@@ -191,9 +139,6 @@ for stufe in 0 1; do
         grep -a 'cap: first' "$OUT" | sed 's/^/        /'
     fi
 
-    # 5. DIE GEGENPROBE. Ohne das Wort `caps` gibt es die Schicht nicht --
-    #    und der Rest des Kernels sagt Zeile fuer Zeile dasselbe wie
-    #    vorher. Das ist die Zusage, dass diese Runde nichts umgebaut hat.
     OHNE="$TMPD/ohne$stufe.txt"
     rc=0
     run_kernel "$IMG" "$APPEND_OHNE" "$OHNE" || rc=$?
@@ -202,19 +147,10 @@ for stufe in 0 1; do
     has "$OHNE" "cap: skipped" "firnc$stufe: ohne das Wort caps wird der Abschnitt uebersprungen"
     hasnot "$OHNE" "caps: " "firnc$stufe: ohne caps meldet niemand Zusagen"
     hasnot "$OHNE" "cap: ring 3" "firnc$stufe: ohne caps laeuft kein Handle-Programm"
-    # Alles ausserhalb des Capability-Abschnitts muss in beiden Laeufen
-    # gleich sein.
-    # Die Zeile `mb: ... cmd=...` enthaelt die Kommandozeile selbst und
-    # unterscheidet sich damit zwangslaeufig -- sie faellt heraus.
     saeubern() {
         sed -e 's/0x[0-9a-f]*/0xX/g' -e 's/[0-9][0-9]*/N/g' \
             -e '/^caps*:/d' -e '/^  \[/d' -e '/^mb: /d' "$1"
     }
-    # SORTIERT verglichen, und das mit Absicht: die Reihenfolge zweier
-    # Zeilen zweier gleichzeitig laufender Prozesse haengt am Zeitgeber
-    # und ist zwischen zwei Laeufen nicht dieselbe. Was hier gemessen
-    # wird, ist, dass KEINE Zeile hinzukommt, wegfaellt oder anders
-    # lautet.
     saeubern "$OUT"  | sort > "$TMPD/a$stufe"
     saeubern "$OHNE" | sort > "$TMPD/b$stufe"
     if diff -q "$TMPD/a$stufe" "$TMPD/b$stufe" >/dev/null; then

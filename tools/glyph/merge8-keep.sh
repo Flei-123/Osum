@@ -1,56 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/glyph/run.sh -- RUNDE GLYPHE: DER ZEICHENWEG AUF MEHREREN KERNEN.
-#
-# WORUM ES GEHT. `wig.glyph_into` hat die Antwort auf einen `WIG_GLYPH`
-# in EINEM Puffer der Datenseite zusammengebaut (`base(state) +
-# STAGE_OFF`): sechs Kopfworte, dann die Bildpunkte, dann alles am
-# Stueck nach Ring 3. Und `wig.blit` -- der Weg, durch den JEDE
-# Fensterzeile geht -- benutzte DENSELBEN Puffer, ohne jede Sperre.
-# Zeichnen zwei Kerne gleichzeitig, steht im Kopf die Breite des einen
-# Zeichens und dahinter die Bildpunkte des anderen, und der Klient
-# rechnet `gw * gh` auf Zahlen, die nicht zusammengehoeren:
 #
 #     panic: integer overflow in 'u64 * u64' at wlibc.fi:1128
 #
-# GEMESSEN in Runde MERGE-6, gleicher Kern, gleiche Platte:
-# `-smp 1` 0 Panics bei 212 Meldezeilen, `-smp 4` ein Panic in fuenf
-# Laeufen. Die Buehnensperre jener Runde senkte die Rate und schloss
-# die Luecke NICHT -- sie lag nur um `glyph_into`, nicht um `blit`.
-#
-# WAS DIESE RUNDE GEBAUT HAT:
-#   * JE KERN EINE BUEHNE (`kstate.WIGST_OFF`, MAX_CPUS Seiten,
-#     angesprochen ueber `cpu.here` wie `C_KSTACK` ueber die GS-Basis).
-#     Sicher, weil `MSR_SFMASK` IF fuer den ganzen Systemaufruf unten
-#     haelt: darin wird nicht verdraengt und nicht der Kern gewechselt.
-#   * DEN GLYPHENSPEICHER UNTER EINE SPERRE (`ttf.tafel_an`): der
-#     Schluessel wurde vor den Daten veroeffentlicht, der Stossallokator
-#     und die Kantenliste gehoerten allen.
-#   * DIE ZWISCHENABLAGE unter dieselbe Sperre -- derselbe Fehler, vom
-#     erweiterten `tools/multicore/onecore.py` gefunden.
-#   * EINEN ZWEITEN RIEGEL IN RING 3 (`wlibc.gload`): ein Kopf, der
-#     nicht zur gemeldeten Laenge passt, wird verworfen statt
-#     multipliziert.
-#
-# WIE ES NACHGEWIESEN WIRD. Wie `fsrace` in MERGE-6: nicht durch
-# Zusehen, sondern erzwungen. `glyphrace` laesst ueber `smp.run_phase`
-# ALLE Kerne im selben Augenblick durch `wig.glyph_build` zeichnen --
-# den Rumpf des Systemaufrufs, keine Nachbildung -- und in derselben
-# Runde eine Bildpunktzeile auf die Buehne legen, so wie `blit` es tut.
-# Dazu DREI Gegenproben, denn eine Zusage ohne Gegenprobe ist eine
-# Behauptung:
-#
-#   `glyphblind`      eine Buehne fuer alle, Sperre nur um die Glyphe
-#                     -- WOERTLICH der Stand von MERGE-6.
-#   `glyphsperre`     eine Buehne, aber `blit` UND `glyph_into` unter
-#                     derselben Sperre -- die zweite Bauform, gegen die
-#                     gemessen wurde.
-#   `glyphtafelfrei`  der Glyphenspeicher ohne seine Sperre.
-#
-# Und zuletzt der Fall, der die Runde ausgeloest hat: der volle
-# Schreibtisch mit dem Aufgabenverwalter, $LAEUFE mal mit vier und
-# $LAEUFE mal mit acht Kernen. Eine gruene Runde reicht nicht -- der
-# Fehler kam in einem von fuenf Laeufen.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -75,15 +26,6 @@ zahl() { # name wert op soll
 }
 
 echo "== 1. an der Quelle: wer holt die Buehne, und woher =="
-# Der Fehler war nicht, dass eine Sperre fehlte -- er war, dass ZWEI
-# Wege denselben Puffer nahmen und nur einer davon gesichert war. Also
-# wird hier gezaehlt, wer den Puffer ueberhaupt anfasst.
-# GEZAEHLT WIRD CODE, NICHT ERKLAERUNG. `grep -c` zaehlt auch die
-# Kommentarzeilen, die den Fehler dieser Runde beschreiben -- und die
-# muessen den Ausdruck woertlich nennen, sonst erklaeren sie nichts.
-# Stand 06.09.: vier Fundstellen, davon DREI in Kommentaren (347, 448,
-# 512) und eine im Code (541, in `stage_of` selbst). Wer hier stumpf
-# zaehlt, macht jede Begruendung zu einem Fehler.
 ROH=$(grep 'base(state) + STAGE_OFF' kernel/ui/wig.fi | grep -vc '^[[:space:]]*//')
 zahl "Stellen im CODE, die die geteilte Buehne noch direkt nehmen" "$ROH" eq 1
 grep -q 'fn stage_of' kernel/ui/wig.fi \
@@ -99,18 +41,6 @@ grep -q 'kstate.WIGST_OFF + k \* STAGE_MAX' kernel/ui/wig.fi \
 if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'table_on('; then
     ok "ttf.glyph nimmt die Tafelsperre"
 else bad "ttf.glyph nimmt die Tafelsperre nicht"; fi
-# ================================================== RUNDE ROADMAP-2
-# HIER STAND `irq_aus()`. Die Funktion heisst seit Runde ENGLISCH
-# (`d3b925ba`, "der Kern -- 209 Namen, 1324 Stellen in 93 Dateien")
-# `irq_ack` -- der Kern kennt `irq_aus` an KEINER Stelle mehr. Der
-# grep fand also nie etwas, und die Zusage war dauerhaft rot, obwohl
-# `ttf.glyph` die Unterbrechungen sehr wohl anhaelt:
-#     let fl: u64 = irq_ack()      // pushfq; pop rax; cli
-#     ...
-#     irq_an(fl)                   // sti, wenn IF vorher stand
-# Gesucht wird jetzt das PAAR aus Abschalten und Wiederherstellen und
-# nicht ein einzelner Name -- und `irq_aus` bleibt als alter Name
-# zugelassen, damit die Zusage auch auf aelteren Staenden misst.
 if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi \
    | grep -qE 'irq_(ack|aus)\(\)' \
    && awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'irq_an('; then
@@ -186,8 +116,6 @@ done
 
 echo
 echo "== 4. GEGENPROBE 1: glyphblind -- EINE Buehne, wie in MERGE-6 =="
-# Ohne diesen Abschnitt misst Abschnitt 3 nichts: null Abweichungen
-# koennten auch heissen, dass gar nicht gezeichnet wurde.
 for n in 4 8; do
     rennen "b$n" "$n" "glyphblind"
     L="$TMPD/r-b$n.txt"
@@ -204,18 +132,11 @@ if grep -qa '^panic:' "$TMPD/r-tf.txt"; then
 elif [ -n "$TFF" ] && [ "$TFF" -ge 1 ]; then
     ok "ohne die Tafelsperre: $TFF Abweichungen"
 else
-    # Auch das ist ein Rennen: ohne die Tafelsperre stirbt der Kern
-    # ZUVERLAESSIG (panic in ttf.fi:975), aber nur, wenn im Lauf
-    # ueberhaupt gerastert wird. Bei wenigen Runden kann der Lauf vorher
-    # enden. Dieselbe Einschraenkung wie unten in Abschnitt 8.
     bad "ohne die Tafelsperre passiert NICHTS -- dann misst sie auch nichts (LAEUFE=$LAEUFE)"
 fi
 
 echo
 echo "== 6. DIE MESSUNG, DIE ENTSCHIEDEN HAT: je Kern gegen eine Sperre =="
-# Bauform A (`glyphsperre`) ist RICHTIG -- und teuer: sie stellt das
-# Zeichnen aller Kerne wieder in eine Reihe. Beide Zahlen stehen hier,
-# damit die Wahl nachrechenbar ist und nicht behauptet.
 for n in 4 8; do
     rennen "s$n" "$n" "glyphrace glyphsperre"
     L="$TMPD/r-s$n.txt"
@@ -230,17 +151,7 @@ done
 schreibtisch() { # name smp extra
     local name=$1 smp=$2 extra=$3
     cp -f "$TMPD/disk.img" "$TMPD/d-$name.img"
-    # `wighalt=60` -- DREIMAL SO LANG WIE DIE VORGABE. Der Fehler kam
-    # in einem von fuenf Laeufen; ein Lauf, der nach zwanzig Sekunden
-    # aufhoert, gibt ihm ein Drittel der Gelegenheiten.
     local A="gfx wm wig desk wmhold wiglong wmdauer wigapp=/bin/taskmgr,melde,takt,500 wighalt=60"
-    # `r3alle` -- ausdruecklich, obwohl es seit VIELKERN 3 ohnehin gilt
-    # (`sched.fi`: `static mut ring3_all: u64 = 1`). Der Absatz in
-    # derselben Datei, der 'DEFAULT: RING 3 BLEIBT AUF KERN 0' sagt, ist
-    # von VIELKERN 2 und stimmt nicht mehr; er hat diese Runde eine
-    # halbe Stunde gekostet. Das Wort steht hier, damit die Bedingung
-    # SICHTBAR ist und nicht von einer Vorgabe abhaengt, die eine
-    # spaetere Runde umdrehen kann.
     A="$A r3alle nokbd nosched noproc nofs $extra"
     timeout "$SEK" $QEMU_X86 -kernel "$TMPD/k.mb" -m 512 -smp "$smp" \
         -append "$A" -serial "file:$TMPD/d-$name.txt" -display none \
@@ -281,34 +192,17 @@ done
 
 echo
 echo "== 8. GEGENPROBE 3: dieselben Laeufe mit glyphblind =="
-# Ohne sie sagt Abschnitt 7 nur, dass an DIESEM Tag nichts passiert ist.
 read -r P L Z S <<<"$(serie gb4 4 "glyphblind")"
 printf '        -smp 4 glyphblind: %s Laeufe, %s mit Panic/Ausnahme, %s Meldezeilen\n' \
     "$L" "$P" "$Z"
 if [ "$P" -ge 1 ]; then
     ok "mit EINER Buehne bricht es weiterhin: $P von $L Laeufen"
 else
-    # WIE VIELE LAEUFE DAS BRAUCHT, STEHT IN RUNDE-GLYPHE 8.1: der
-    # Schreibtischlauf ist KEIN Sucher. Er fand den Fehler in einem von
-    # fuenf Laeufen, und mit weniger als ~20 Laeufen ist ein gruenes
-    # Ergebnis hier ein Zufall und kein Beweis. Mit OSUM_GLYPHE_LAEUFE=6
-    # (der Wert, mit dem ./test.sh faehrt, damit der Abschnitt nicht eine
-    # Stunde dauert) schlaegt diese Gegenprobe deshalb regelmaessig fehl.
-    # Die belastbare Zusage ist Abschnitt 4/5: `zeichenrennen` findet mit
-    # geteilter Buehne JEDESMAL Hunderte Abweichungen und mit der Buehne
-    # je Kern null -- in JEDEM einzelnen Lauf, ohne Wuerfeln.
     bad "mit EINER Buehne passiert nichts -- dann misst Abschnitt 7 nichts (Rate 1 von 5; LAEUFE=$LAEUFE, fuer eine belastbare Aussage >= 20)"
 fi
 
 echo
 echo "== 9. die Ein-Kern-Reste, an der Quelle gezaehlt =="
-# RUNDE MERGE-7: 66 -> 67, aus demselben Grund wie in
-# tools/multicore/run.sh (derselbe Vertrag, zwei Stellen). Die drei
-# neuen Ein-Kern-Reste sind alle in kernel/klog.fi (Runde PROTOKOLL,
-# gibt es in merge6 nicht) und haben eine EIGENE Sperre (atomic.cas auf
-# H_LK), weil alle acht kstate.LOCK_COUNT-Plaetze vergeben sind.
-# onecore.py kennt diese Bauform nicht. Belegt durch
-# tools/protocol/run.sh: 40000 Zeilen aus 4 Kernen, 0 verschraenkte.
 EK_SOLL=${EK_SOLL:-67}
 ekz=$(python3 tools/multicore/onecore.py)
 echo "        $ekz"

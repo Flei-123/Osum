@@ -1,39 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/argon/run.sh -- DIE ABNAHME DER RUNDE ARGON (K-021).
 #
-# DIE FRAGE DIESER RUNDE: wird das AUFSPERREN schneller, ohne dass die
-# Rechnung wackelt?
-#
-# Die zweite Haelfte ist die schwerere, und sie ist schaerfer als bei
-# AES-NI. Ein Argon2, das anders rechnet als die Norm, macht jede
-# bestehende verschluesselte Platte UNAUFSPERRBAR -- und zwar still: der
-# abgeleitete Schluessel sieht genauso zufaellig aus wie der richtige,
-# nur passt der Pruefwert nicht mehr. Deshalb misst dieser Laeufer die
-# Richtigkeit zuerst und das Tempo zuletzt.
-#
-# WAS GEMESSEN WIRD, in dieser Reihenfolge:
-#
-#   1. Die Speicherkarte: 0 Kollisionen, und der Bereich dieser Runde
-#      an der ZUGETEILTEN Adresse (0x126000) mit den zugeteilten
-#      Modusindizes (1040..1049).
-#   2. Der Bau: Kern und Orakel.
-#   3. DIE RICHTIGKEIT VON ARGON2 gegen `argon2-cffi`, die
-#      Referenzumsetzung von RFC 9106 -- und darin ausdruecklich der
-#      Vektor t=3/m=32/p=4, denn genau der prueft, ob die Spuren
-#      richtig zusammengesetzt werden.
-#   4. EINE BESTEHENDE PLATTE. Mit dem ALTEN Code angelegt, mit dem
-#      NEUEN aufgesperrt. Das ist die Zusage, die zaehlt.
-#   5. DIE PARALLELITAET: laufen die Spuren wirklich auf mehreren
-#      Kernen? Gemessen wird die Zahl der KERNE, auf denen die Spuren
-#      gerechnet haben -- nicht die Zahl der angelegten Aufgaben.
-#   6. SHA-NI: die Kreisprobe ueber viele Laengen, FIPS 180-4, und der
-#      Rueckfallweg ECHT gefahren (`-cpu qemu64` hat kein SHA-NI).
-#   7. DAS TEMPO, seriell gegen parallel, auf DERSELBEN Maschine.
-#   8. Dass die Nachbarn heil sind: krypto 61/0 und aesni 31/0.
-#
-# Aufruf:  bash tools/argon/run.sh
-#          OSUM_ARGON_SCHNELL=1   ohne die beiden Nachbar-Abnahmen
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -51,7 +17,6 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 info(){ printf '        %s\n' "$1"; }
 
-# Das fremde Werkzeug. Ohne argon2-cffi gibt es keine Gegenrechnung.
 PY=python3
 for kandidat in "${OSUM_KRYPTO_PY:-}" /root/.krypto-venv/bin/python python3; do
     [ -n "$kandidat" ] || continue
@@ -90,7 +55,6 @@ hoch=$(grep -oE 'const M_[A-Z0-9]+: u64 = 104[0-9]' kernel/lib/kstate.fi \
 [[ -n $hoch && $hoch -le 1049 ]] \
     && ok "kein Modusindex dieser Runde oberhalb von 1049 (hoechster: $hoch)" \
     || bad "ein Modusindex liegt ausserhalb von 1040..1049"
-# Und der Vektor muss die Indizes TRAGEN -- die Lehre aus Welle 2.
 mw=$(grep -oE 'const MODE_WORDS: u64 = [0-9]+' kernel/lib/kstate.fi | grep -oE '[0-9]+$')
 [[ -n $mw ]] && [[ $((mw * 64)) -gt 1049 ]] \
     && ok "der Modusvektor traegt Index 1049 (MODE_WORDS=$mw -> $((mw*64)) Bits)" \
@@ -174,7 +138,6 @@ PYEOF
     else
         bad "Argon2 weicht ab: $br"
     fi
-    # Und die ganze Kryptokette, mit SHA-NI scharf.
     if "$PY" tools/krypto/gegen.py vektoren "$TMPD/orakel" >"$TMPD/vek.txt" 2>&1; then
         ges=$(grep -oE 'gesamt [0-9]+/[0-9]+' "$TMPD/vek.txt" | cut -d' ' -f2)
         [[ -n $ges && ${ges%/*} == ${ges#*/} ]] \
@@ -197,8 +160,6 @@ python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     && ok "die Wurzelplatte steht" \
     || bad "mkfs.py scheitert"
 
-# Der ALTE Kern: derselbe Baum, aber mit `noargonpar` -- das ist
-# buchstabengetreu der Weg der Vorrunde (Spuren nacheinander).
 lauf() { # name abbild kommandozeile [smp] [zeitlimit]
     local name=$1 img=$2 app=$3 smp=${4:-4} t=${5:-300}
     timeout "$t" $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 -smp "$smp" \
@@ -223,7 +184,6 @@ grep -q 'osum: mount=1' "$TMPD/alt2.txt" \
     && ok "das Dateisystem darauf haengt ein" \
     || bad "mount scheitert"
 
-# Und die Gegenrichtung: parallel angelegt, seriell aufgemacht.
 cp --sparse=always "$TMPD/root.img" "$TMPD/par.img"
 lauf par1 "$TMPD/par.img" "osum nopwr kryptoneu kryptopw=geheim $KP" 4
 lauf par2 "$TMPD/par.img" "osum nopwr kryptoauf noargonpar kryptopw=geheim" 1
@@ -231,7 +191,6 @@ grep -q 'auf=1' "$TMPD/par2.txt" \
     && ok "und umgekehrt: parallel angelegt, seriell aufgemacht" \
     || bad "die Gegenrichtung scheitert"
 
-# Eine falsche Passphrase muss weiter abgewiesen werden.
 lauf fal "$TMPD/alt.img" "osum nopwr kryptoauf kryptofalsch kryptopw=geheim" 4
 grep -q 'auf=0' "$TMPD/fal.txt" \
     && ok "die falsche Passphrase wird weiter abgewiesen (auf=0)" \
@@ -248,24 +207,8 @@ p4=$(par_von "$TMPD/alt2.txt")
     && ok "der parallele Weg wird wirklich gegangen (par=1)" \
     || bad "par=$p4 -- der parallele Weg greift nicht"
 
-# WIE VIELE KERNE WIRKLICH GERECHNET HABEN -- und warum das NICHT an
-# `alt2.txt` gemessen wird.
-#
-# `alt.img` traegt die kleinen Abnahmeparameter (t=1, m=64 KiB). Ein
-# Segment ist dort VIER Bloecke gross, und die sind schneller gerechnet,
-# als der Ablaufplaner eine Aufgabe auf einen anderen Kern legt: der
-# Startkern hat alle vier Spuren fertig, bevor ein zweiter sie
-# anfassen kann. GEMESSEN, vier Laeufe hintereinander, alle `kerne=1`
-# bei `takte=5,8..6,0 Mio`.
-#
-# Das ist KEIN Fehler und wird hier deshalb auch nicht als einer
-# gemeldet -- es ist die richtige Antwort auf eine Rechnung, die zu
-# klein ist, um sie zu verteilen. Gemessen wird die Verteilung deshalb
-# an den VORGABEparametern (t=2, m=32 MiB), und das ist genau der Lauf,
-# den Abschnitt 7 ohnehin fuer das Tempo braucht.
 info "an den kleinen Abnahmeparametern (t=1, m=64 KiB) ist kerne=$(kerne_von "$TMPD/alt2.txt") -- ein Segment ist dort 4 Bloecke gross"
 
-# Die Gegenprobe: mit `noargonpar` MUSS par=0 herauskommen.
 ps=$(par_von "$TMPD/par2.txt")
 [[ ${ps:-9} == 0 ]] \
     && ok "GEGENPROBE: mit noargonpar ist par=0 (der Schalter wirkt wirklich)" \
@@ -287,7 +230,6 @@ if [[ -x "$TMPD/kreis" ]]; then
         || bad "FIPS 180-4 stimmt nicht: $kh"
 fi
 
-# Im Kern, auf drei verschiedenen Maschinen.
 shani_lauf() { # name cpu extra
     timeout 300 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 -smp 4 -cpu "$2" \
         -append "osum nopwr shatest kryptoauf kryptopw=geheim $3" \
@@ -350,8 +292,6 @@ if [[ -n $ts && -n $tp && $tp -gt 0 ]]; then
     [[ $fak -ge 150 ]] \
         && ok "der parallele Weg ist mindestens Faktor 1,5 schneller (gemessen: $((fak/100)),$(printf '%02d' $((fak%100))))" \
         || bad "der Gewinn ist zu klein: Faktor $((fak/100)),$(printf '%02d' $((fak%100)))"
-    # DIE VERTEILUNG, an den Vorgabeparametern gemessen -- hier ist die
-    # Rechnung gross genug, dass sich das Verteilen lohnt.
     [[ ${kp:-0} -ge 2 ]] \
         && ok "und die Spuren rechnen dabei wirklich auf mehreren Kernen (kerne=$kp)" \
         || bad "kerne=$kp -- bei den Vorgabeparametern laeuft alles auf einem Kern"

@@ -1,88 +1,13 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/multicore/run.sh -- RING 3 AUF ALLEN KERNEN, UND DER RIEGEL DAVOR.
 #
 #   bash tools/multicore/run.sh
 #
-# ======================================================================
-# WARUM ES DIESEN LAEUFER GIBT
-# ======================================================================
-#
-# Runde BLECHKERN (a53cb1d) hat einen Satz in einen Kommentar geschrieben
-# und nicht in den Code: "Ring 3 bleibt auf dem Startkern". Die Zeile
-# darunter stand auf `ANY_CPU`. Ein Anwendungskern durfte damit einen
-# Ring-3-Prozess nehmen, dessen `syscall` den Kernstapel aus EINEM Wort
-# fuer die ganze Maschine holte -- zwei Kerne auf einem Stapel.
-#
-# GEMERKT HAT ES NIEMAND. Kein Laeufer hat je gefragt, auf welchem Kern
-# ein Ring-3-Prozess wirklich lief; die Abnahme war gruen. Aufgefallen
-# ist es auf ECHTER HARDWARE, auf Justins Brett, als Foto:
-#
 #     VEK 6 #UD RIP 0x80   KERN 2   ART 1
-#
-# 0x80 ist keine Adresse, sondern der Rest einer ueberschriebenen
-# Ruecksprungkette.
-#
-# Ein Riegel, dessen Bruch niemand herbeifuehren kann, ist nicht
-# geprueft, sondern geglaubt. Dieser Laeufer kann ihn brechen.
 #
 # ======================================================================
 # WAS GEMESSEN WIRD
 # ======================================================================
 #
-# A. STATISCH, an den Quellen -- die Klasse Fehler, die still bleibt:
-#    1. Die Feldabstaende in isr.s (`CPU_SYSRSP`, `CPU_KSTACK`,
-#       `CPU_SYSCALLS`) stimmen Zahl fuer Zahl mit cpu.fi ueberein.
-#       Laufen sie auseinander, holt der Einsprung seinen Kernstapel aus
-#       einem falschen Feld -- und zwar leise.
-#    2. `sched.ring3_allowed` exists, and the pick in the scheduler calls
-#       it for real. That is the line that was missing in BLECHKERN.
-#    3. Kein Weg in fs.fi fasst einen geteilten Blockpuffer an, ohne
-#       durch `enter` (also `atomic.L_FS`) zu gehen. Das war die zweite
-#       Ursache dieser Runde und wird deshalb an der QUELLE nachgezaehlt
-#       und nicht nur am Verhalten.
-#
-# B. AM LAUFENDEN KERN, voller Schreibtisch, vier Ring-3-Programme:
-#    4. `-smp 4 r3alle`  -- R3W 0, R3K >= 2, keine Ausnahme, alle vier
-#       Programme bekommen eine pid, die Systemaufrufe verteilen sich
-#       auf mehr als einen Kern, `abw` 0.
-#    5. `-smp 8 r3alle`  -- dasselbe mit acht.
-#    6. GEGENPROBE ZUR MESSUNG: `-smp 4` OHNE `r3alle` -- R3K MUSS 1
-#       sein und alle Systemaufrufe auf c0. Eine Messung, die auch ohne
-#       die Eigenschaft dasselbe sagt, misst nichts.
-#    7. GEGENPROBE ZUM RIEGEL, HAELFTE 1: `gsluege` gibt jedem
-#       Anwendungskern eine FALSCHE GS-Basis -- der Zustand vom 05.09.
-#       Der Riegel MUSS greifen: R3W > 0, R3K 1, KEINE Ausnahme, die
-#       Maschine lebt.
-#    8. GEGENPROBE ZUM RIEGEL, HAELFTE 2: `gsluege r3blind` schaltet den
-#       Riegel zusaetzlich ab. Jetzt MUSS die Maschine brechen -- und
-#       zwar in einem Ring-3-Programm. Faellt diese Zusage, dann rettet
-#       nicht der Riegel die Maschine, sondern der Zufall, und Zusage 7
-#       ist wertlos.
-#
-#    9. RUNDE MERGE-6, DER INODEPUFFER AUF BESTELLUNG. Bis hierher war
-#       der Fund von VIELKERN 3 (`fs.inode_get` liest in EINEN Puffer
-#       der ganzen Maschine) nur STATISCH gesichert -- Abschnitt 3
-#       zaehlt an der Quelle nach, dass kein Weg ohne `enter`
-#       auskommt. Eine Zusage ueber Text faellt, wenn jemand die
-#       Sperre entfernt, und sie faellt NICHT, wenn die Sperre dasteht
-#       und nicht wirkt.
-#       `fsrace` erzwingt den Fall: die Sperre `smp.run_phase` startet
-#       ALLE Kerne im selben Augenblick, jeder liest zwanzigtausend Mal
-#       die Art SEINES Inodes -- aus einem EIGENEN Inodeblock, denn der
-#       geteilte Puffer fasst einen BLOCK und nicht einen Inode.
-#       GEGENPROBE `fsblind`: dieselbe Schleife durch den Rumpf, den
-#       `inode_get` VOR VIELKERN 3 hatte. Sie MUSS fallen.
-#
-#   10. RUNDE MERGE-6, DIE UEBRIGEN EIN-KERN-RESTE. Ein Puffer in der
-#       Datenseite gehoert der ganzen Maschine. `tools/multicore/onecore.py`
-#       zaehlt an der Quelle, wie viele Funktionen einen benutzen, ohne
-#       dass ein Sperrwort in ihrem Rumpf steht. Die Zahl ist KEINE
-#       Fehlerliste -- sie ist ein Vertrag: sie darf nicht wachsen,
-#       ohne dass jemand es aufschreibt.
-#
-# Zusage 8 ist der eigentliche Punkt: sie ist die einzige, die BEWEIST,
-# dass Zusage 7 etwas misst.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -215,29 +140,11 @@ fi
 
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 || bad "tools/k15/tree.py faellt"
 printf '# taskbar.conf\nedge=0\nheight=40\nwidth=0\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
-# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
-# Gleiche Ursache wie in K15, NETVIEW und GLYPHE: Runde GRUNDLINIE hat
-# die Laeufer -- zu Recht -- auf `--profile=app` umgestellt, weil die
-# Programme mit Oberflaeche seit Runde 31 `profile app` in ihrer ersten
-# Zeile tragen. Das Profil `app` bringt Firns volle Laufzeit mit, und
-# sechs der dreizehn Programme dieses Abbilds sind solche. /bin/explorer
-# allein ist damit 1623040 statt 907360 Oktette; die dreizehn zusammen
-# brauchen rund 16285 Bloecke, und 16384 sind es mit Schriften,
-# Buendeln, Baum, Bitmap und Inode-Tafel nicht mehr. `mkfs.py` sagte
-# "the disk is full", und ohne Abbild startet kein QEMU.
-# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
 ARGS=(build "$TMPD/disk.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf")
-# RUNDE MERGE-6: `nur=` -- SONST IST DIESER LAEUFER TOT.
-# Die Runde WERKZEUGE hat assets/apps/taskmgr.osp dazugelegt. Ein
-# Buendel ist ein VERWEIS auf eine Datei unter /bin; steht sie nicht in
-# $PROGS, bricht mkfs.py mit "gibt es nicht" ab -- und dann faellt
-# ALLES ab Abschnitt 5, weil es keine Platte gibt. Gemessen am
-# zusammengefuehrten Stand VOR dieser Zeile: 22 rote Zusagen, davon 21
-# allein an der fehlenden Platte.
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" "nur=$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
@@ -255,17 +162,7 @@ lauf() { # name smp extra [limit]
         -vga std -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/$name.qemu" 2>&1 &
     local pid=$! i=0
-    # GEWARTET WIRD AUF FUENF MESSTAFELN, NICHT AUF EINE.
     #
-    # Die Tafel geht alle fuenf Sekunden auf die Leitung. Die erste
-    # steht, BEVOR die Programme wirklich gelaufen sind -- `R3K` ist
-    # dann 1, weil noch nichts gewandert ist, und die Zahl der
-    # Systemaufrufe einstellig. Gemessen an einem zu frueh
-    # abgebrochenen Lauf: `summe=8`. Fuenf Tafeln sind rund zwanzig
-    # Sekunden Schreibtischbetrieb, und das ist die Zeit, in der der
-    # Fehler der Runde BLECHKERN (Abschnitt 9) auch wirklich zuschlaegt.
-    # `wm: hold` taugt als Marke NICHT: unter `gsluege` laeuft alles auf
-    # Kern 0 und die Zeile kommt in der Zeit gar nicht.
     while [ $i -lt 800 ]; do
         [ "$(grep -ac '^tafel: 23 [A-Z]' "$out" 2>/dev/null)" -ge 5 ] && break
         grep -qa '^absturz:  0\|^\*\*\* EXCEPTION' "$out" 2>/dev/null && break
@@ -276,25 +173,7 @@ lauf() { # name smp extra [limit]
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     return 0
 }
-# ACHTUNG BEIM AUSLESEN: in "R3K" steckt eine 3. `grep -oE '[0-9]+'`
-# liefert darauf ZWEI Zahlen ("3" und den Wert), und die Zusage misst
-# dann die 3 aus dem Namen. Deshalb ueberall das zweite Feld.
 #
-# ================================================== RUNDE ROADMAP-2
-# GESUCHT WIRD DIE ZEILENNUMMER, NICHT DAS WORT DAHINTER.
-#
-# Hier stand '^tafel: 23 SICHER'. Die Tafelzeile heisst im Kern aber
-# seit Runde ENGLISCH "23 SAFETY" (`kernel/ui/kgui.fi`, `var t23`) --
-# wie alle ihre Nachbarn (10 BEAT, 11 USB, 12 STAGE, ...). Das Wort
-# wurde uebersetzt, die Laeufer nicht, und seitdem fand dieser grep
-# NICHTS: sechs Zusagen meldeten "keine Zahl gefunden", und die
-# Warteschleife in `lauf` lief bei JEDEM Lauf in ihre volle Schranke,
-# weil sie auf fuenf Tafeln wartete, die unter diesem Namen nie kamen.
-# Gemessen: VIELKERN 30/10 -- und keiner der zehn war ein Kernfehler.
-#
-# Dieselbe Bauart wie `A-004`/`A-021`/`F-003`: die Marke ist die
-# ZEILENNUMMER (die ist Teil der Schnittstelle und wird nicht
-# uebersetzt), das Wort dahinter darf sich aendern.
 TAFEL23='^tafel: 23 [A-Z]'
 w_r3k()  { grep -a "$TAFEL23" "$1" | tail -1 | grep -oE 'R3K [0-9]+' | awk '{print $2}'; }
 w_r3w()  { grep -a "$TAFEL23" "$1" | tail -1 | grep -oE 'R3W [0-9]+' | awk '{print $2}'; }
@@ -346,9 +225,6 @@ grep -a '^r3: syscalls' $L | tail -1 | sed 's/^/        /'
 
 echo
 echo "== 8. GEGENPROBE zum Riegel, Haelfte 1: gsluege -- er MUSS halten =="
-# Jeder Anwendungskern bekommt die GS-Basis von Kern 0. Das ist der
-# Zustand, an dem Justins Brett am 05.09. gestorben ist -- nur dass ihn
-# `sched.ring3_allowed` jetzt sieht.
 lauf g4 4 "r3alle gsluege"
 L=$TMPD/g4.txt
 zahl "R3W muss GROESSER null werden (die Luege wird gesehen)" "$(w_r3w $L)" ge 1
@@ -359,9 +235,6 @@ grep -a "$TAFEL23" $L | tail -1 | sed 's/^/        /'
 
 echo
 echo "== 9. GEGENPROBE zum Riegel, Haelfte 2: gsluege r3blind -- er MUSS brechen =="
-# Ohne diese Zusage misst Abschnitt 8 nichts: dass die Maschine dort
-# lebt, koennte auch Zufall sein. Hier wird der Riegel abgeschaltet, und
-# derselbe Fehler MUSS wiederkommen.
 lauf b4 4 "r3alle gsluege r3blind" 200
 L=$TMPD/b4.txt
 if [ "$(w_exc $L)" -ge 1 ]; then
@@ -375,10 +248,6 @@ grep -qa 'ART 3' $L && ok "und zwar in einer Aufgabe der Gattung 3 (K_USER, also
 
 echo
 echo "== 10. RUNDE MERGE-6: der Inodepuffer, auf mehreren Kernen ERZWUNGEN =="
-# Der Lauf braucht kein Ring 3 und keinen Schreibtisch: er laeuft in
-# `smp.stage`, also im Hochlauf, und ist nach einer Sekunde fertig.
-# `nosched noproc` haelt alles andere still -- was hier misst, ist der
-# Puffer und nichts sonst.
 fsrace() { # name  smp  extra
     local name=$1 smp=$2 extra=$3
     cp -f "$TMPD/disk.img" "$TMPD/fsr-$name.img"
@@ -406,8 +275,6 @@ fi
 
 echo
 echo "== 11. GEGENPROBE dazu: fsblind -- ohne die Sperre MUSS es brechen =="
-# Ohne diesen Abschnitt misst Abschnitt 10 nichts: null Abweichungen
-# koennten auch heissen, dass die Schleife gar nicht gelaufen ist.
 fsrace ohne 4 "fsblind"
 L=$TMPD/fsr-ohne.txt
 if [ -s "$L" ]; then
@@ -419,31 +286,7 @@ fi
 
 echo
 echo "== 12. RUNDE MERGE-6: die uebrigen Ein-Kern-Reste, an der Quelle gezaehlt =="
-# KEINE FEHLERLISTE, SONDERN EIN VERTRAG. Die Zahl darf nicht wachsen,
-# ohne dass jemand sie hier hochsetzt und in docs/RUNDE-MERGE6.md
-# aufschreibt, warum.
-# RUNDE GLYPHE: 60 -> 66. Nicht, weil sechs Stellen dazugekommen
-# waeren -- `onecore.py` SIEHT seit dieser Runde eine zweite Bauform
-# desselben Fehlers: eine Seite, die eine Datei ueber einen EIGENEN
-# Zugriff holt (`base(state) + KONST` statt `state + kstate.X_OFF`).
-# Genau in dieser Form stand der Fehler, an dem MERGE-6 gescheitert
-# ist. Die sechs neuen sind hwid.fi (2), ofsj.fi (2) und rand.fi (2);
-# `wig.fi` war die siebte und ist repariert. Begruendung ausfuehrlich
-# in docs/RUNDE-GLYPHE.md.
-# RUNDE MERGE-7: 66 -> 67. Die drei neuen Stellen sind ALLE in
-# `kernel/klog.fi` (Runde PROTOKOLL, in merge6 gibt es die Datei nicht):
-# `base()`, `emit()` und `set_filter()` fassen `kstate.LOG_OFF` an, ohne
-# dass `onecore.py` ein Sperrwort SIEHT. Sie sind trotzdem gesperrt --
-# klog nimmt eine EIGENE Sperre mit `atomic.cas` auf `H_LK`
-# (kernel/klog.fi:300..311), weil alle acht Plaetze in `kstate.LOCK_COUNT`
-# vergeben sind und `atomic.lock_take` deshalb ausschied. `onecore.py`
-# kennt nur die Namen aus SPERRE und sieht diese Bauform nicht.
 #
-# BELEGT, nicht behauptet: tools/protocol/run.sh laesst vier Kerne
-# gleichzeitig in den Ring schreiben (PH_LOG) und misst 40000 Zeilen
-# geschrieben, 40000 gezaehlt, **0 verschraenkte Eintraege**. Eine
-# ungesperrte Datenseite haette dort Kopf und Text verschiedener Kerne
-# gemischt.
 EK_SOLL=${EK_SOLL:-67}
 ek=$(python3 tools/multicore/onecore.py | sed -n 's/.*offen=\([0-9]*\).*/\1/p')
 if [ -n "$ek" ] && [ "$ek" -le "$EK_SOLL" ] 2>/dev/null; then

@@ -2,64 +2,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/unix/run.sh -- WAS JEDES UNIX-PROGRAMM STILLSCHWEIGEND VORAUSSETZT.
 #
-# Runde K4 hat die POSIX-Schicht gelegt, K6 ein Userland darauf gebaut --
-# und trotzdem konnte man in diesem System einen Prozess nicht ordentlich
-# unterbrechen, es gab kein Terminal, keine Uhr und keinen Zufall. Ohne
-# die vier bleibt jedes portierte Programm ein Krueppel: es kann nicht auf
-# STRG-C hoeren, es kann seinen Bildschirm nicht ausmessen, es kann nicht
-# sagen, wie spaet es ist, und es kann keine Folgenummer waehlen, die
-# niemand erraet.
-#
-# WAS HIER GEMESSEN WIRD, und alles davon IM LAUFENDEN KERNEL. Ein
-# Aufruf, der nicht abstuerzt, ist keine Zusage:
-#
-#   1. DIE NUMMERN sind Linux' Nummern, und die Karte in `kernel/sys.fi`
-#      sagt, welchen Bereich diese Runde belegt -- drei Runden arbeiten
-#      gleichzeitig an diesem Repo.
-#   2. SIGNALE. Ein Programm faengt SIGUSR1 ab und ZAEHLT MIT. Ein
-#      blockiertes Signal geht nicht verloren, es wartet und kommt beim
-#      Freigeben. Ein ueberhoertes kommt nie. SIGKILL und SIGSTOP lassen
-#      sich nicht abfangen. Ein Kind stirbt an SIGTERM mit 143, eines an
-#      SIGKILL mit 137, und der Elternteil bekommt SIGCHLD.
-#   3. AUSNAHMEN SIND SIGNALE. Ein Zugriff auf die Null wird zu SIGSEGV
-#      und landet in einer Routine in Ring 3, die von dort einen
-#      Systemaufruf macht (Beendigungscode 51 = 40 + 11). Ohne Routine
-#      bleibt der Beendigungscode der von Runde 62: 128 + Vektor.
-#   4. ANHALTEN UND FORTSETZEN. Ein Prozess wird angehalten, sein Zustand
-#      ist S_STOP, SEINE RECHENZEIT STEHT STILL, und nach SIGCONT laeuft
-#      sie weiter. Ein schlafender Prozess taete das nicht.
-#   5. TERMINAL. Zeilendisziplin, Echo an und aus, roher Modus,
-#      Fenstergroesse (mit SIGWINCH), und ein Pseudoterminalpaar in beide
-#      Richtungen -- mit dem Echo, das ein Terminal macht.
-#   6. STRG-C BEENDET WIRKLICH. Ein Vordergrundprozess in eigener
-#      Prozessgruppe, ein Oktett 3 auf der Steuerseite, und der Prozess
-#      ist tot mit 130 = 128 + SIGINT. Dazu STRG-Z (angehalten) und ein
-#      Hintergrundleser (SIGTTIN, angehalten).
-#   7. DIE MONOTONE UHR LAEUFT NIE RUECKWAERTS -- ueber zwanzigtausend
-#      Messungen geprueft, nicht ueber zwei.
-#   8. DER ZUFALL besteht die Verteilung ueber 256 Faecher (Chi-Quadrat)
-#      und ist zwischen zwei Neustarts VERSCHIEDEN.
-#
-# UND DIE GEGENPROBEN, ohne die in diesem Projekt nichts zaehlt:
-#
-#   `nosig`      Es wird nichts zugestellt. `kill` sagt weiter 0, das Bit
-#                wird gesetzt -- der Zaehler des Programms MUSS bei null
-#                bleiben. Ein Test, der auch dann zaehlt, hat nie Signale
-#                gemessen.
-#   `fixedrand`  Der Generator gibt fuer immer dasselbe Oktett. Die
-#                statistische Pruefung MUSS durchfallen. (Und dabei faellt
-#                ein zweites auf: der Bit-Test allein faellt NICHT durch,
-#                weil 0x5A vier von acht Bits gesetzt hat. Eine Pruefung
-#                allein reicht nicht -- das Chi-Quadrat ist die, die es
-#                merkt.)
-#   drei Laeufe  Derselbe Kernel, dreimal gestartet, drei verschiedene
-#                Zufallssaaten. Ein Generator, der bei jedem Start
-#                dasselbe liefert, ist kein Generator.
-#
-# Gemessen wie in den Runden 59 bis K6: QEMU je Fall, mit Zeitlimit,
-# serielle Ausgabe gegen Erwartungen, Beendigungscode aus `isa-debug-exit`
-# (21 = der Kernel hat sich selbst beendet, 63 = eine Ausnahme).
-#
 # Aufruf:  bash tools/unix/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -144,10 +86,6 @@ check RT_SIGPENDING 127
 check TIME 201
 check CLOCK_GETTIME 228
 check GETRANDOM 318
-# Was Osum selbst erfunden hat, liegt im Hunderterblock DIESER Runde --
-# 1000..1099 gehoert den Runden K1 und K6, 1200 aufwaerts den Runden K7
-# und K8. Genau daran ist an diesem Repo schon dreimal ein Zusammenstoss
-# entstanden.
 own=$(grep -aoE "^const SYS_OSUM_(PTY|TTYINFO|SIGINFO): u64 = [0-9]+" kernel/sys/sys.fi \
     | sed -E 's/.*= ([0-9]+).*/\1/' | sort -n)
 lo=$(echo "$own" | head -1); hi=$(echo "$own" | tail -1)
@@ -156,7 +94,6 @@ num "und die groesste" "${hi:-0}" le 1199
 grep -q '1100\.\.1199   RUNDE K9' kernel/sys/sys.fi \
     && ok "die Bereichskarte steht oben in sys.fi" \
     || bad "die Bereichskarte fehlt in sys.fi"
-# Keine Nummer von K9 liegt im Socket-Block, den Runde K8 braucht.
 clash=0
 for n in 13 14 15 16 34 37 56 62 96 109 111 112 121 127 201 202 228 229 230 234 318; do
     if [ "$n" -ge 41 ] && [ "$n" -le 55 ]; then clash=$((clash+1)); fi
@@ -173,10 +110,6 @@ done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/ascrt.err" \
     && ok "crt.s assembliert (mit den Behandlungsroutinen von Runde K9)" \
     || { bad "crt.s"; sed 's/^/        /' "$TMPD/ascrt.err" | head -5; }
-# Die Routine MUSS in crt.s liegen: eine Behandlungsroutine ist eine
-# ADRESSE, und Stufe 0 von Firn kann die Adresse einer eigenen Funktion
-# nicht nennen. Ohne diese Zeilen koennte kein Programm `sigaction` auch
-# nur aufrufen.
 nm "$TMPD/crt.o" | grep -q 'T osum_sighandler' \
     && ok "crt.s stellt osum_sighandler bereit -- die Adresse, die Firn nicht nennen kann" \
     || bad "osum_sighandler fehlt in crt.o"
@@ -358,9 +291,6 @@ say "$N" "caught" 0 "ohne Zustellung faengt niemand etwas ab"
 say "$N" "count" 0 "und sechs abgeschickte Signale zaehlen null"
 say "$N" "after unblock" 0 "auch die Freigabe holt nichts nach"
 say "$N" "pending" 1 "ABER DAS BIT STEHT -- abgeschickt wurde sehr wohl etwas"
-# Das ist der Kern der Gegenprobe: `kill` verhaelt sich gleich, nur
-# ZUGESTELLT wird nichts. Waere `kill` selbst abgeschaltet, wuerde die
-# Gegenprobe etwas anderes messen, als sie behauptet.
 p_on=$(value_of "$TMPD/run.txt" "count"); p_off=$(value_of "$N" "count")
 if [ "$p_on" = "6" ] && [ "$p_off" = "0" ]; then
     ok "derselbe Code, ein Wort auf der Kommandozeile: 6 gegen 0"
@@ -380,9 +310,6 @@ chi=$(value_of "$X" "random chi")
 num "Chi-Quadrat mit festverdrahtetem Oktett (die Pruefung muss durchfallen)" "${chi:-0}" ge 100000
 say "$X" "random diff" 0 "und zwei Puffer hintereinander sind Oktett fuer Oktett gleich"
 say "$X" "random got" 1024 "geliefert wird trotzdem, worum gebeten wurde -- nur eben Unsinn"
-# UND DIE LEHRE DARAUS, die mit im Bericht steht: die Bitverteilung ALLEIN
-# haette den festen Strom durchgewinkt, weil 0x5A vier von acht Bits
-# gesetzt hat. Eine Pruefung reicht nicht.
 bits=$(value_of "$X" "random bits")
 if [ -n "$bits" ] && [ "$bits" -ge 450 ] && [ "$bits" -le 550 ]; then
     ok "und die Bitverteilung allein haette ihn durchgewinkt ($bits) -- deshalb gibt es zwei Pruefungen"

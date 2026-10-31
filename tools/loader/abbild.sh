@@ -1,43 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/loader/abbild.sh -- DIE PLATTE, MIT DER DIESE RUNDE GEMESSEN WIRD.
 #
 #   bash tools/loader/abbild.sh [arbeitsverzeichnis]
 #
-# Was daran anders ist als bei den beiden Abbildern davor:
-#
-#   tools/look/shot.sh   baut eine Platte mit OBERFLAECHE, aber ohne
-#                        `opk`, ohne `ota`, ohne `fetch` und ohne Netz.
-#   tools/install/build.sh baut eine Platte mit `opk`/`ota`/`fetch`,
-#                        aber ohne eine einzige Zeile Oberflaeche.
-#
-# Ein Laden, der Programme mit Fenstern ausliefert, braucht BEIDES auf
-# derselben Platte -- sonst kann man zwar installieren oder zusehen,
-# aber nicht beides nacheinander. Diese Datei ist die Zusammenlegung,
-# und sie erfindet dafuer nichts Neues: die Bausteine sind
-# `tools/k15/bundle.py`, `tools/k15/tree.py`, `tools/hwnet/mkroots.py`
-# und `tools/osum/mkfs.py`, alle unveraendert.
-#
-# WAS AUF DIE PLATTE KOMMT UND WARUM:
-#
-#   /bin/*                   die Programme aus tools/loader/build.sh
-#   /apps/*.osp              die MITGELIEFERTEN Buendel (assets/apps).
-#                            Sie sind der Vorher-Zustand: `opk` baut
-#                            /apps bei der ersten Installation
-#                            VOLLSTAENDIG neu (kernel/user/opk.fi,
-#                            `apps_bauen`), und genau daran sieht man
-#                            hinterher, was aus dem Laden kam.
-#   /system/schluessel.pub   der Vertrauensanker. OHNE IHN INSTALLIERT
-#                            `opk` NICHTS -- das ist die Zusage der
-#                            Runde UPDATE und sie bleibt.
-#   /etc/ota.conf            die Quelle, als NAME und nicht als Adresse
-#   /etc/ssl/roots.pem       die Wurzeln, damit `fetch` eine echte Kette
-#                            pruefen kann
-#   /boese/*.opk             die beschaedigten Pakete aus
-#                            /root/ota-avx-nach/boese -- das Pruefmaterial
-#                            fuer die Gegenprobe. Sie liegen auf der
-#                            Platte und NICHT im Laden: was der Laden
-#                            ausliefert, ist heil.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -48,9 +12,6 @@ BLOCKS=${LADEN_BLOCKS:-262144}          # 512-Oktett-Bloecke -> 128 MiB
 BOESE=${BOESE:-/root/ota-avx-nach/boese}
 QUELLE=${LADEN_QUELLE:-https://store.fleitec.com/osum/aktuell}
 PUB=${LADEN_PUB:-$OUT/schluessel.pub}
-# RUNDE ROADMAP-3: niemand legte $OUT/schluessel.pub an -- run.sh brach bei
-# Abschnitt 3 ab. Derselbe Rueckgriff wie tools/usbimg/build.sh:783: der
-# Schluessel der Auslieferung, die dieser Wirt selbst bedient.
 if [ -z "${LADEN_PUB:-}" ] && [ ! -s "$PUB" ] \
    && [ -s "${STORE_DIR:-/srv/store}/osum/aktuell/schluessel.pub" ]; then
     PUB="${STORE_DIR:-/srv/store}/osum/aktuell/schluessel.pub"
@@ -73,14 +34,7 @@ printf '# /etc/theme.conf\nscheme=day\nmode=light\naccent=\nshape=modern\nlight_
 printf '# taskbar.conf -- tools/loader/abbild.sh\nedge=bottom\nheight=28\nwidth=104\nautohide=0\nontop=1\nalign=left\n' > "$P/taskbar.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$P/time.conf"
 printf 'lang=de\n' > "$P/locale.conf"
-# DER NAMENSDIENST STEHT SCHON AUF DER PLATTE.
 #
-# `dhcp` schreibt dieselbe Datei, und der Textlauf dieser Runde misst
-# genau das. Fuer die BILDER wird sie mitgeliefert: dort wird der Befehl
-# ueber die Tastatur in ein Fenster getippt, und jeder Buchstabe, den
-# ein Foto nicht braucht, ist eine Fehlerquelle mehr. 10.0.2.3 ist der
-# Aufloeser von QEMUs Benutzernetz -- dieselbe Zahl, die der
-# DHCP-Server dort in Option 6 nennt.
 printf 'nameserver 10.0.2.3\n' > "$P/resolv.conf"
 cat > "$P/ota.conf" <<EOF
 # /etc/ota.conf -- woher dieses Geraet seine Programme holt.
@@ -137,40 +91,17 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/
 [ -e locale/de/icons ] && ARGS+=("/usr/share/locale/de/icons=locale/de/icons")
 ARGS+=(/system/ "/system/schluessel.pub=$PUB")
 ARGS+=(/store/ /users/ /tmp/ /mnt/ /dev/ /proc/)
-# RUNDE CERTUS-AUF-OSUM: DIE PAKETE MIT AUF DIE PLATTE.
 #
-# `/store/` war bis hierher ein leeres Verzeichnis -- der Ort, an den
-# `ota` holt, was es aus dem Netz bekommt. Mit $LADEN_STAND legt dieser
-# Bau die fertigen Pakete samt ihren Signaturen GLEICH dort hinein.
-# Damit laesst sich der Weg des Pakets (Signatur pruefen, auspacken,
-# Buendel unter /apps) OHNE einen Server im Netz messen -- der Weg MIT
-# Server bleibt tools/loader/run.sh, und beide messen dasselbe `opk`.
 if [ -n "${LADEN_STAND:-}" ] && [ -d "${LADEN_STAND}" ]; then
     for f in "$LADEN_STAND"/*.opk "$LADEN_STAND"/*.opk.sig; do
         [ -e "$f" ] || continue
         ARGS+=("/store/$(basename "$f")=$f")
     done
 fi
-# DIE MITGELIEFERTEN BUENDEL -- der Vorher-Zustand.
 #
-# RUNDE GLYPHE: `nur=` -- SONST GIBT ES DIESES ABBILD NICHT.
-#
-# Ein Buendel ist ein VERWEIS auf eine Datei unter /bin; liegt sie nicht
-# auf DIESER Platte, bricht mkfs.py mit "gibt es nicht" ab. Die Runde
-# WERKZEUGE hat assets/apps/taskmgr.osp dazugelegt, und /bin dieses
-# Laeufers hat kein taskmgr -- gemessen am zusammengefuehrten Stand:
-#
-#     FEHLGESCHLAGEN: mkfs
-#     mkfs: '/bin/taskmgr' gibt es nicht
-#
-# MERGE-6 hat denselben Bruch in tools/design/capture.sh und
-# tools/multicore/run.sh gefunden und dort denselben Riegel eingebaut;
-# HIER fiel er nicht auf, weil dieser Laeufer in jener Runde nicht
-# gefahren ist. Er ist der Grund, warum die Auflage offen blieb.
 while read -r z; do ARGS+=("$z"); done \
     < <(python3 tools/k15/bundle.py assets/apps "$P/buendel" \
         "nur=$(ls "$OUT/bin" | tr '\n' ' ')")
-# DAS PRUEFMATERIAL FUER DIE GEGENPROBE.
 if [ -d "$BOESE" ]; then
     ARGS+=(/boese/)
     for f in "$BOESE"/*; do

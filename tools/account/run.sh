@@ -2,53 +2,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/account/run.sh -- RUNDE KONTO, GEMESSEN.
 #
-# ======================================================================
-# WAS DIESE RUNDE BEHAUPTET UND WAS HIER NACHGERECHNET WIRD
-# ======================================================================
-#
-#  0. DIE TRENNUNG. Kein Anbietername im allgemeinen Teil -- gemessen
-#     mit `tools/account/split.py` ueber acht Dateien, plus die
-#     Gegenprobe, die genau EINE Zeile `if anbieter == "..."` einbaut
-#     und den Wachhund fallen laesst.
-#  1. DAS PROGRAMM BAUT UND PASST. `--profile=app`, keine undefinierte
-#     Marke, gebunden mit kernel/user/user.ld, wie `fetch.fi`.
-#  2. DER KATALOG. Jeder Schluessel, den diese Runde benutzt, steht in
-#     BEIDEN Sprachdateien, und `konto --text` gibt auf dem laufenden
-#     System denselben Satz zurueck, den der WIRT aus der Datei liest --
-#     mit einer zweiten Umsetzung, in Python.
-#  3. ANMELDEN AN ALLEN DREI RUECKEN, ueber TLS 1.3 gegen einen Nachbau
-#     der beschriebenen APIs. Danach: NEUSTART, und die Sitzung ist noch
-#     da. Danach: ABMELDEN, und das Merkmal ist WIRKLICH von der Platte
-#     -- nachgesehen wird IM ABBILD, an den Bloecken, an denen die Datei
-#     lag.
-#  4. DAS TOKEN LIEGT NIE IM KLARTEXT AUF DER PLATTE. Gesucht wird das
-#     Token, das der Server ausgestellt hat, im ganzen Abbild.
-#     Gegenprobe `--kaputt=klartext`: dann MUSS es gefunden werden.
-#  5. KEINE AMBIENTEN KEKSE. Die Attrappe schreibt JEDE Kopfzeile mit;
-#     der Xoffi-Weg traegt `Authorization: Bearer` und NIE `Cookie`.
-#     Gegenprobe `--kaputt=keks`.
-#  6. FALSCHES KENNWORT: klarer Fehler, keine Sitzung, kein Token auf
-#     der Platte. Zwanzig Fehlversuche: der Server bremst, das Geraet
-#     bleibt stehen, und die Antwort verraet NICHT, ob es das Konto gibt
-#     -- gemessen an den Antworten fuer einen bekannten und einen
-#     erfundenen Namen.
-#  7. ZWEITER FAKTOR: der ganze Weg mit `temp_token`, und der Fall
-#     "abgelaufen".
-#  8. ZWEI ORGANISATIONEN, DIESELBE ANSCHRIFT: es wird GEFRAGT, es
-#     entstehen ZWEI Konten mit ZWEI Kennungen, und die Sitzung des
-#     einen ist im anderen nicht sichtbar. Gegenprobe
-#     `--kaputt=einemandant`: dann faellt es zusammen.
-#  9. ERNEUERN: Token kurz vor dem Ablauf -> neues Token. Erneuerung
-#     abgelehnt -> sauber abgemeldet, und die Kontenliste ueberlebt es.
-# 10. KEIN NETZ: anmelden schlaegt klar fehl; ein ANGEMELDETES Geraet
-#     bleibt angemeldet und benutzbar. Das ist die wichtigste Zusage.
-# 11. master_session WIRD ABGELEHNT; is_admin und nexus_core_access
-#     erzeugen KEINE lokale Berechtigung. Gegenproben `--kaputt
-#     claimcheck` und `--kaputt=rechte`.
-# 12. DAS PRINZIP: ein System einrichten, benutzen und sichern, OHNE
-#     sich je anzumelden -- und der Beweis, dass diese Runde daran
-#     nichts geaendert hat.
-#
 # Aufruf:  bash tools/account/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -65,7 +18,6 @@ num() { local n=$1 v=${2:-} o=$3 w=$4
     if [ -z "$v" ]; then bad "$n: keine Zahl (erwartet $o $w)"; return; fi
     if [ "$v" -"$o" "$w" ] 2>/dev/null; then ok "$n: $v"; else bad "$n: $v, erwartet $o $w"; fi
 }
-# Der Wert einer `konto: <name> = <wert>`-Zeile, die letzte davon.
 kv() { grep -aoE "^konto: $2 = .*" "$1" 2>/dev/null | tail -1 | sed 's/^konto: [a-z_]* = //'; }
 kv1() { grep -aoE "^konto: $2 = .*" "$1" 2>/dev/null | head -1 | sed 's/^konto: [a-z_]* = //'; }
 kvn() { grep -acE "^konto: $2 = " "$1" 2>/dev/null; }
@@ -111,8 +63,6 @@ is "die Trennungswache" "$TRRC" "0"
 VER=$(grep -oE 'verstoesse=[0-9]+' "$TMPD/tr.txt" | cut -d= -f2)
 is "Verstoesse im allgemeinen Teil" "$VER" "0"
 
-# DIE GEGENPROBE. Eine Zeile, die genau das tut, was die Runde verboten
-# hat -- und der Wachhund muss anschlagen.
 cp -a kernel/app "$TMPD/appsicherung"
 mkdir -p "$TMPD/kaputt/kernel/app"
 cp kernel/app/*.fi "$TMPD/kaputt/kernel/app/"
@@ -199,7 +149,6 @@ FD=$(grep -oE 'fehlen_de=[0-9]+' "$TMPD/keys.txt" | cut -d= -f2)
 num "Schluessel dieser Runde im Quelltext" "$KN" ge 20
 is "davon in locale/en/messages nicht vorhanden" "$FE" "0"
 is "davon in locale/de/messages nicht vorhanden" "$FD" "0"
-# ECHTE UMLAUTE. Runde UMLAUT2 hat die Umschrift zum Fehler erklaert.
 if grep -aE '^konto\.' locale/de/messages | grep -qE 'ue[a-z]|ae[a-z]|oe[a-z]|ss[^a-z]' ; then
     hin "Hinweis: pruefe die deutschen Konto-Zeilen auf Umschrift"
 fi
@@ -209,22 +158,6 @@ else
     bad "die deutschen Konto-Texte haben keinen einzigen Umlaut"
 fi
 TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | sed 's/^[^=]*=//' | grep -o '\\n' | wc -l)
-# RUNDE PRAESENZ: ZEHN STATT NEUN. Auf dem Zweig `konto` allein war
-# "Konten" der neunte Reiter. Runde PRAESENZ hat `konto` UND `sync` auf
-# einen Zweig geholt, und `sync` bringt "Abgleich" als zehnten mit
-# (beide Runden hatten sich unabhaengig die Nummer 8 genommen; KONTO
-# behaelt 8, SYNC rueckt auf 9). Die Zahl steht hier weiterhin fest und
-# wird nicht aus der Datei abgeleitet -- eine Zusage, die sich selbst
-# nachrechnet, faellt nie auf.
-# RUNDE ROADMAP-3: ELF. BRUECKE 4/n (1960756c) hat "Bruecke" als elften
-# Reiter angehaengt; die Zahl stand hier seitdem auf dem alten Stand.
-# ROUND ROADMAP-7: VIERZEHN. ACTION-BUS-3 brachte "System" (12) und
-# "App-Rechte" (13), ROADMAP-7 "Protokoll" (14) -- die Zahl stand seit
-# ACTION-BUS-3 auf dem alten Stand (auf main rot: 13 statt 11).
-# DAILY-DRIVER: FUENFZEHN -- "Updates" ist der 15. Reiter.
-# r149: NEUNZEHN -- Maus (16), Energie (17), Info (18) und Apps (19) kamen dazu; die Zahl stand auf 15 (Altlast).
-# Seiten von Paketen (/apps/<app>.prog/SETTINGS) stehen NICHT in settings.tabs, sie kommen aus dem Katalog.
-# 31 (touchpad tab added) -- two catalogue lines (settings.tabs, settings.tabs2) because one value holds at most 191 octets (msg VALW 192)
 TABS_LINES=$(grep -ac '^settings.tabs' locale/de/messages)
 num "Reiter in settings.tabs, tabs2 + tabs3 (deutsch)" "$((TABS_DE + TABS_LINES))" eq 33
 
@@ -242,15 +175,11 @@ python3 tools/hwnet/mkcerts.py "$TMPD/certs" konto.test > "$TMPD/certs.txt" 2>&1
     || bad "mkcerts.py schlug fehl"
 gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>/dev/null || bad "bridge.c"
 
-# Die Kennwortdateien im Abbild. Das Programm liest sein Geheimnis von
-# der Eingabe -- an einer Roehre oder einer Datei wird nicht gefragt.
 printf 'richtig\n'    > "$TMPD/pw_gut"
 printf 'auchrichtig\n' > "$TMPD/pw2"
 printf 'falsch\n'     > "$TMPD/pw_schlecht"
 : > "$TMPD/leer"
 mkdir -p "$TMPD/eigenordner/konten"
-# Ein Konto fuer den Ordner-Ruecken: PBKDF2 auf dem WIRT gerechnet, mit
-# Pythons hashlib -- eine zweite Umsetzung gegen die in anb_eigen.fi.
 python3 - "$TMPD/eigenordner/konten/lokal" <<'PY'
 import hashlib, os, sys
 salz = bytes(range(16))
@@ -332,8 +261,6 @@ lauf() { # <abbild> <script> <aus>
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 }
 lauf_ohne_netz() { # <abbild> <script> <aus>
-    # KEINE Netzkarte. Nicht "die Gegenstelle antwortet nicht" -- gar
-    # kein Netz, so wie ein Zug im Tunnel.
     timeout 200 qemu-system-x86_64 -kernel "$K" -m 512 \
         -append "osum nokbd nosched noproc nofs noring3 script=$2;exit" \
         -serial "file:$3" -display none -no-reboot \
@@ -344,9 +271,6 @@ lauf_ohne_netz() { # <abbild> <script> <aus>
 Z="https://10.9.0.1:8443"
 N="konto.test"
 
-# /etc/konten.conf -- eine Zeile je Anbieter. Damit steht die Adresse
-# EINMAL da und nicht in jedem Befehl; das ist nicht nur bequem, es ist
-# noetig: dieser Kern gibt einem Programm acht Woerter.
 {
   printf 'jarvis ziel=%s name=%s\n' "$Z" "$N"
   printf 'xoffi  ziel=%s name=%s\n' "$Z" "$N"
@@ -384,11 +308,9 @@ lauf "$TMPD/d1.img" "konto anmelden --anbieter=jarvis --kennung=justin < /pw_gut
 is "jarvis anmelden" "$(kv "$TMPD/o_j1.txt" stand)" "ok"
 JKEN=$(kv "$TMPD/o_j1.txt" kennung)
 
-# --- eigen, ueber HTTPS
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=eigen --kennung=justin < /pw_gut" "$TMPD/o_e1.txt"
 is "eigen ueber HTTPS anmelden" "$(kv "$TMPD/o_e1.txt" stand)" "ok"
 
-# --- eigen, als ORDNER, und dafuer wird der Server ABGESCHALTET
 server_zu
 netz_zu
 lauf_ohne_netz "$TMPD/d1.img" "konto anmelden --anbieter=eigen --ziel=datei:///eigen --kennung=lokal < /pw_gut" "$TMPD/o_e2.txt"
@@ -433,17 +355,11 @@ else
     BLK=""
 fi
 
-# --- die Gegenprobe: dieselbe Anmeldung mit --kaputt=klartext
 abbild "$TMPD/dk.img" || true
 lauf "$TMPD/dk.img" "konto --kaputt=klartext anmelden --anbieter=jarvis --kennung=zweiter < /pw2" "$TMPD/o_kk.txt"
 is "Gegenprobe klartext: angemeldet" "$(kv "$TMPD/o_kk.txt" stand)" "ok"
 is "Gegenprobe klartext: gesiegelt" "$(kv "$TMPD/o_kk.txt" gesiegelt)" "0"
 KKEN=$(kv "$TMPD/o_kk.txt" kennung)
-# Die kaputte Fassung legt das Token ROH ab -- also wird es auch roh
-# gelesen: `mkfs.py cat` holt den Inhalt der Sitzungsdatei aus dem
-# Abbild. (Ueber `konto uebergabe` geht das absichtlich NICHT: die
-# Uebergabe liest nur gesiegelte Sitzungen, und dass sie das tut, ist
-# ein Teil der Zusage und kein Mangel der Gegenprobe.)
 python3 tools/osum/mkfs.py cat "$TMPD/dk.img" "/state/session/konto/$KKEN" \
     > "$TMPD/kk_roh.bin" 2>/dev/null
 KTOK=$(tr -d '\0' < "$TMPD/kk_roh.bin" | head -c 400)
@@ -469,8 +385,6 @@ grep -qa "no such path" "$TMPD/wo2.txt" \
     && ok "die Sitzungsdatei ist aus dem Verzeichnis verschwunden" \
     || bad "die Sitzungsdatei steht noch da: $(cat "$TMPD/wo2.txt")"
 if [ -n "${BLK:-}" ]; then
-    # DIE BLOECKE SELBST. `unlink` nimmt den Namen; hier wird
-    # nachgesehen, was in den Oktetten steht, die die Datei belegt hat.
     python3 - "$TMPD/d5.img" "$BLK" > "$TMPD/blk.txt" <<'PY'
 import sys
 img, blk = sys.argv[1], int(sys.argv[2])
@@ -540,7 +454,6 @@ is "danach: Konten auf dem Geraet" "$(kv "$TMPD/o_f2.txt" konten)" "0"
 python3 tools/osum/mkfs.py where "$TMPD/d8.img" "/state/session/konto" > "$TMPD/wo3.txt" 2>&1
 hin "und /state/session/konto: $(head -1 "$TMPD/wo3.txt")"
 
-# Zwanzig Versuche. Die Zeit wird auf dem WIRT gemessen.
 SK=""
 T0=$(date +%s)
 for i in $(seq 1 20); do
@@ -556,7 +469,6 @@ num "und das Geraet ist nie stehengeblieben (Antworten)" "$((GEB+FAL))" eq 20
 lauf "$TMPD/d8.img" "konto liste" "$TMPD/o_v99.txt"
 is "nach zwanzig Fehlversuchen: Konten" "$(kv "$TMPD/o_v99.txt" konten)" "0"
 
-# Verraet die Antwort, ob es das Konto gibt?
 lauf "$TMPD/d8.img" "konto anmelden --anbieter=xoffi --kennung=gibtesnicht@example.test --bereich=alpha < /pw_schlecht" "$TMPD/o_g1.txt"
 A=$(kv "$TMPD/o_g1.txt" stand)
 lauf "$TMPD/d8.img" "konto anmelden --anbieter=xoffi --kennung=admin@example.test --bereich=alpha < /pw_schlecht" "$TMPD/o_g2.txt"
@@ -588,7 +500,6 @@ fi
 is "und zwei verschiedene Subjekte" "$([ "$S1" != "$S2" ] && echo ja)" "ja"
 lauf "$TMPD/d9.img" "konto liste" "$TMPD/o_m3.txt"
 is "beide Konten stehen nebeneinander" "$(kv "$TMPD/o_m3.txt" konten)" "2"
-# Die Gegenprobe: die Sitzung des einen darf im anderen nicht auftauchen.
 lauf "$TMPD/d9.img" "konto uebergabe --kennung=$K1" "$TMPD/o_m4.txt"
 lauf "$TMPD/d9.img" "konto uebergabe --kennung=$K2" "$TMPD/o_m5.txt"
 T1T=$(kv "$TMPD/o_m4.txt" zugriff)
@@ -636,7 +547,6 @@ else
     bad "der Ablauf ging zurueck: $AB1 -> $AB2"
 fi
 
-# Jetzt sagt der Server NEIN.
 server_zu
 server_auf --access-sekunden 3600 --refresh-verweigern
 lauf "$TMPD/da.img" "konto status --kennung=$RK" "$TMPD/o_r3.txt"
@@ -656,7 +566,6 @@ abbild "$TMPD/dn.img" || true
 lauf "$TMPD/dn.img" "konto anmelden --anbieter=jarvis --kennung=justin < /pw_gut" "$TMPD/o_n0.txt"
 is "erst anmelden, mit Netz" "$(kv "$TMPD/o_n0.txt" stand)" "ok"
 NK=$(kv "$TMPD/o_n0.txt" kennung)
-# ---- jetzt ohne jede Netzkarte
 lauf_ohne_netz "$TMPD/dn.img" "konto status --kennung=$NK" "$TMPD/o_n1.txt"
 is "OHNE NETZ: die Sitzung ist noch da" "$(kv "$TMPD/o_n1.txt" sitzung)" "1"
 is "OHNE NETZ: der Stand ist ok" "$(kv "$TMPD/o_n1.txt" stand)" "ok"
@@ -671,19 +580,11 @@ is "OHNE NETZ: eine NEUE Anmeldung schlaegt klar fehl" "$(kv "$TMPD/o_n4.txt" st
 has "$TMPD/o_n4.txt" "konto: text = " "und sie sagt WARUM, aus dem Sprachkatalog"
 lauf_ohne_netz "$TMPD/dn.img" "konto liste" "$TMPD/o_n5.txt"
 is "OHNE NETZ: der Fehlversuch hat nichts kaputtgemacht" "$(kv "$TMPD/o_n5.txt" konten)" "1"
-# und das Geraet ist BENUTZBAR
 lauf_ohne_netz "$TMPD/dn.img" "ls /bin" "$TMPD/o_n6.txt"
 has "$TMPD/o_n6.txt" "konto" "OHNE NETZ: das System selbst laeuft weiter (ls /bin)"
 
 # ======================================================================
 echo "== 11b. ein faules Zertifikat ist NICHT \"kein Netz\" =="
-# ======================================================================
-# Beides fuehlt sich gleich an -- es kommt keine Antwort. Aber das eine
-# ist ein Zug im Tunnel und das andere jemand, der sich dazwischensetzt.
-# Wer beides gleich meldet, schickt den Nutzer WLAN suchen, waehrend in
-# Wahrheit ein fremdes Zertifikat vor ihm steht. `rogue.pem` traegt
-# denselben Namen, ist aber von einer Wurzel unterschrieben, die dieses
-# Geraet nicht kennt.
 server_zu
 server_auf_zert "$TMPD/certs/rogue.pem" "$TMPD/certs/rogue.key"
 abbild "$TMPD/dt.img" || true
@@ -697,12 +598,6 @@ server_auf
 
 # ======================================================================
 echo "== 11c. die Befehlszeile: zwei Schreibweisen, und acht Woerter =="
-# ======================================================================
-# `proc.MAX_ARGS` ist 8. Die getrennte Schreibweise `--ziel <url>` macht
-# aus einer Anmeldung mit zweitem Faktor elf Woerter -- die Shell sagt
-# dann "too many arguments" und laesst den Befehl fallen. Genau daran ist
-# der erste Lauf dieser Runde gescheitert, deshalb steht es jetzt hier
-# als Messung und nicht als Erinnerung.
 MAXA=$(grep -oE 'argv: \[u64; [0-9]+\]' kernel/user/sh.fi | grep -oE '[0-9]+' | tail -1)
 is "die Shell nimmt so viele Woerter" "$MAXA" "64"
 abbild "$TMPD/dw.img" || true
@@ -713,14 +608,12 @@ abbild "$TMPD/dw2.img" || true
 lauf "$TMPD/dw2.img" "konto anmelden --anbieter=jarvis --kennung=justin < /pw_gut" "$TMPD/o_w2.txt"
 W2=$(kv "$TMPD/o_w2.txt" kennung)
 is "und sie fuehrt zur GLEICHEN Kennung wie die angehaengte" "$W2" "$W1"
-# Die Gegenprobe: dieselbe Anmeldung in der getrennten, langen Form.
 lauf "$TMPD/dw2.img" "konto anmelden --anbieter xoffi --ziel $Z --name $N --kennung mfa@example.test --bereich alpha --code 1 < /pw_gut" "$TMPD/o_w3.txt"
 if grep -qa "too many arguments" "$TMPD/o_w3.txt"; then
     bad "die lange Form (elf Woerter) faellt durch -- proc.MAX_ARGS/Shell sind 64 (r716)"
 else
     ok "die lange Form (elf Woerter) kommt durch (Limit seit r716: 64)"
 fi
-# Und die Konfigdatei: OHNE --ziel, nur aus /etc/konten.conf.
 grep -qa "^jarvis ziel=" "$TMPD/konten.conf" \
     && ok "/etc/konten.conf traegt die Adresse, kein Geheimnis" \
     || bad "/etc/konten.conf fehlt"
@@ -736,7 +629,6 @@ lauf "$TMPD/dm.img" "konto liste" "$TMPD/o_ms2.txt"
 is "und es entsteht kein Konto" "$(kv "$TMPD/o_ms2.txt" konten)" "0"
 python3 tools/osum/mkfs.py where "$TMPD/dm.img" "/state/session/konto" > "$TMPD/wo5.txt" 2>&1
 hin "  /state/session/konto: $(head -1 "$TMPD/wo5.txt")"
-# Gegenprobe: ohne die Pruefung geht es durch
 lauf "$TMPD/dm.img" "konto --kaputt=claimcheck anmelden --anbieter=xoffi --kennung=chef@example.test --bereich=alpha < /pw_gut" "$TMPD/o_ms3.txt"
 is "Gegenprobe claimcheck: jetzt geht sie durch" "$(kv "$TMPD/o_ms3.txt" stand)" "ok"
 ok "  (also misst Abschnitt 12 die Weigerung und nicht einen Zufall)"
@@ -761,7 +653,6 @@ else
 fi
 FELDER=$(head -1 "$TMPD/konten.txt" | awk -F'\t' '{print NF}')
 is "eine Kontozeile hat genau sieben Felder" "$FELDER" "7"
-# Gegenprobe: --kaputt=rechte macht daraus eine lokale Berechtigung
 abbild "$TMPD/dm3.img" || true
 lauf "$TMPD/dm3.img" "konto --kaputt=rechte anmelden --anbieter=xoffi --kennung=admin@example.test --bereich=alpha < /pw_gut" "$TMPD/o_ad2.txt"
 python3 tools/osum/mkfs.py where "$TMPD/dm3.img" "/etc/konto.rechte" > "$TMPD/wo7.txt" 2>&1
@@ -785,10 +676,6 @@ fi
 
 # ======================================================================
 echo "== 14. DAS PRINZIP: alles ohne Konto =="
-# ======================================================================
-# Ein Abbild, das NIE eine Anmeldung gesehen hat -- und ein System, das
-# vollstaendig ist. Gemessen wird das, was ein Mensch tut: Dateien
-# anlegen, lesen, auflisten, die Einstellungen oeffnen.
 abbild "$TMPD/dp.img" || true
 lauf_ohne_netz "$TMPD/dp.img" "echo hallo > /probe.txt;cat /probe.txt;ls /bin;konto liste;konto status" "$TMPD/o_p1.txt"
 has "$TMPD/o_p1.txt" "hallo" "ohne jedes Konto: schreiben und lesen geht"
@@ -805,11 +692,6 @@ grep -qa "no such path" "$TMPD/wo9.txt" \
 
 # ======================================================================
 echo "== 15. Einstellungen -> Konten: 'Adressbuch verbinden' (r125) =="
-# ======================================================================
-# Die Seite kennt keinen Anbieter: sie reicht `--exchange` durch, liest die
-# Zeile `konto: exchange = <wort>` (alt: `tausch`, Woerter keinnetz/abgelehnt) und waehlt daraus einen Katalogschluessel.
-# Gemessen wird die VERDRAHTUNG: Knopf, Flagge, jedes Wort, jeder Schluessel
-# in beiden Sprachen, und dass die Woerter dieselben sind, die konto sagt.
 SF=kernel/user/settings.fi
 # r136: the page comes from the SETTINGS manifest (kernel/user/settings.d/builtin.settings); the button is an action `book`
 # there with the catalogue key konto.ui.book, and the binding `book` -> K_BKBOOK is in settings.fi.
@@ -821,8 +703,6 @@ for W in ok offline denied; do
     num "Wort '$W' wird von konto ausgegeben" "$(grep -c "return \"$W\"" kernel/app/account.fi)" ge 1
     num "Wort '$W' wird von der Seite ausgewertet" "$(grep -c "= \"$W\\\\0\"" $SF)" ge 1
 done
-# ALIAS: die ersten Namen gelten weiter -- die Seite liest das alte Schluesselwort
-# `tausch` und die alten Woerter keinnetz/abgelehnt, konto nimmt die alten Schalter an
 for W in keinnetz abgelehnt; do
     num "ALIAS: altes Wort '$W' wird von der Seite noch ausgewertet" "$(grep -c "= \"$W\\\\0\"" $SF)" ge 1
 done
@@ -836,19 +716,15 @@ for K in konto.ui.book konto.ui.book.state konto.ui.book.on konto.ui.book.off ko
     if [ -n "$D" ] && [ -n "$E" ] && [ "$D" != "$E" ]; then ok "Meldung $K: de + en, verschieden"; else bad "Meldung $K fehlt oder ist unuebersetzt"; fi
     num "Schluessel $K wird von der Seite benutzt" "$(( $(grep -c "\"$K\\\\0" $SF) + $(grep -c -F -w "$K" kernel/user/settings.d/builtin.settings) ))" ge 1
 done
-# dieselbe Hinweis-Meldung wie im Ruecken (Vergleich Text gegen Text)
 HS=$(grep -c '"konto.hint.noscope' $SF); HB=$(grep -c '"konto.hint.noscope' kernel/app/anb_fleitec.fi)
 num "Scope-fehlt erkennt die Seite am gleichen Schluessel wie der Ruecken" "$((HS * HB))" ge 1
-# kein Anbietername in den neuen Texten und im Seitencode der neuen Funktionen
 if grep -ai '^konto\.ui\.book' locale/de/messages locale/en/messages | grep -aqi 'fleitec\|xoffi\|jarvis'; then
     bad "ein Anbietername steht in den neuen Meldungen"
 else
     ok "die neuen Meldungen nennen keinen Anbieter (Adressbuch, nicht Dienst)"
 fi
-# (das Buch-Programm /bin/socfleitec selbst darf stehen: die Seite fragt es, nur dort)
 SEG=$(sed -n '/^fn book_same/,/^fn accounts_read/p' $SF | sed 's#/bin/socfleitec##')
 if printf '%s' "$SEG" | grep -qi 'fleitec\|xoffi\|jarvis'; then bad "Anbietername in book_key/book_state"; else ok "book_key/book_state kennen keinen Anbieter"; fi
-# das Token wird nie angezeigt: der Status liest nur 'account<TAB>' aus `hello`
 num "der Status liest nie die Konfiguration (nur 'hello')" "$(printf '%s' "$SEG" | grep -c 'fleitec.conf\|token=')" eq 0
 
 server_zu

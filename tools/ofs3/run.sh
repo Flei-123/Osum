@@ -1,49 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/ofs3/run.sh -- RUNDE OFS3: DER DECKEL, DEN NIEMAND AUFGESCHRIEBEN HAT.
-#
-# Was diese Runde behebt, stand seit Runde 62 im Quelltext und in keiner
-# Roadmap: `kernel/fs.fi` hatte EINEN Block Blockkarte. Ein Block sind
-# 512 Oktette, also 4096 Bits, also 4096 Bloecke -- ZWEI MEGAOKTETT je
-# Platte. Und dahinter sass ein zweiter Deckel, der noch weniger
-# aufgefallen ist: `kmain.fi` meldete die Wurzelplatte mit der KONSTANTEN
-# `OSUM_BLOCKS = 4096` an, ganz gleich, wie gross sie wirklich war.
-# Selbst eine mehrblockige Karte haette daran nichts geaendert.
-#
-# Die Regel dieses Projekts ist, dass eine Eigenschaft ohne Gegenprobe
-# eine Behauptung ist. Jeder Punkt hier hat deshalb eine zweite Messung,
-# die FALLEN muss:
-#
-#   1. DIE PLATTE. Ein Abbild von vier Gibioktett wird gebaut, gebootet
-#      und von `df` gezaehlt. Gegenprobe: dieselben Programme auf einer
-#      Platte der Fassung 2 -- dort bleibt alles beim Alten.
-#   2. DIE DATEI. `/bin/ofs3` schreibt in Ring 3 ueber die alte Grenze
-#      von 2.134.016 Oktetten hinaus und liest an drei Stellen zurueck.
-#      Der Sollwert an jeder Stelle ist AUS DER STELLE AUSGERECHNET --
-#      ein falscher Block faellt damit auf, statt eine Null zu liefern,
-#      die wie eine Null aussieht.
-#   3. DER WEITE BLOCK. Ein Abbild, dessen erste 200.000 Datenbloecke von
-#      Hand belegt sind; die Datei darin liegt an einer Blocknummer, fuer
-#      die es in Fassung 2 kein Bit gab. Der Kern liest sie, schreibt sie
-#      neu, und der WIRT prueft nach, was wirklich auf der Platte steht.
-#   4. DER NAME. 255 Zeichen, angelegt, wiedergefunden, ueber `getdents`
-#      in voller Laenge zurueck. Gegenprobe: dieselbe Datei auf einer
-#      Platte in Fassung 2 -- dort passt der Name nicht.
-#   5. DIE ZEIT. Eine frische Datei traegt eine Zeit ungleich null, ein
-#      Schreiben hebt sie, und sie steht NACH EINEM NEUSTART noch da.
-#      Gegenprobe: dieselbe Zeile auf einer Platte der Fassung 2 zeigt
-#      die Null von 1970.
-#   6. UMBENENNEN OHNE KOPIEREN. Die Inodenummer vor und nach `rename`
-#      ist dieselbe.
-#   7. DER SYMBOLISCHE VERWEIS. Anlegen, `readlink`, hindurchlesen,
-#      `lstat` sieht `l` und `stat` sieht die Datei. Gegenprobe: mit dem
-#      Wort `nolinks` folgt der Kern keinem Verweis mehr.
-#   8. DIE ALTEN ABBILDER. Fassung 1 und Fassung 2 booten weiter, und
-#      ihre Vorgabe hat sich nicht um ein Oktett verschoben.
-#
-# Gemessen wie in jeder Runde davor: QEMU je Fall, mit Zeitlimit,
-# serielle Ausgabe gegen die Erwartung, Rueckgabewert aus
-# `isa-debug-exit` (21 = der Kern hat selbst abgeschaltet).
 #
 # Benutzung:  bash tools/ofs3/run.sh
 set -uo pipefail
@@ -72,7 +27,6 @@ num() { # name value op expected
 }
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht da sein" || ok "$3"; }
-# eine `ofs3: <name> = <zahl>`-Zeile
 val3() { tr -d '\000' < "$1" | grep -a "^ofs3: $2 = " | head -1 | sed 's/.* = //'; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
@@ -91,13 +45,9 @@ run_disk() { # kernel append out disk
         -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     local rc=$?
-    # der Zustand der Platte NACH dem Lauf -- der Wirt sieht ihn sich an
     cp --sparse=always "$TMPD/live.img" "$TMPD/after.img"
     return $rc
 }
-# ZWEI LAEUFE AUF DERSELBEN PLATTE. Das ist der einzige Weg, "es steht
-# nach einem Neustart noch da" zu messen: der zweite Lauf bekommt genau
-# die Oktette, die der erste hinterlassen hat.
 run_again() { # kernel append out
     timeout 600 $QEMU_X86 -kernel "$1" -m 512 -append "$2" \
         -serial "file:$3" -display none -no-reboot \
@@ -151,8 +101,6 @@ python3 tools/osum/mkfs.py build "$TMPD/v1.img" 4096 --v1 /bin/ /bin/sh="$TMPD/s
 python3 tools/osum/mkfs.py build "$TMPD/v3.img" 131072 --v3 --inodes=1024 \
     --time=1780000000 $SPEC /tmp/ > "$TMPD/m3.txt" 2>&1 || bad "mkfs Fassung 3"
 cat "$TMPD/m1.txt" "$TMPD/m2.txt" "$TMPD/m3.txt" | sed 's/^/        /'
-# DIE VORGABE HAT SICH NICHT VERSCHOBEN. Ohne `--v3` ist alles wie vorher
-# -- Karte ein Block, Inode 128, Eintrag 32, Name 24, Daten ab Block 34.
 has "$TMPD/m2.txt" "version=2 bmblocks=1 isize=128 dirent=32 namelen=24" \
     "ohne --v3 baut mkfs weiter GENAU die Fassung 2"
 has "$TMPD/m2.txt" "data=34" "und der Datenbereich faengt weiter bei Block 34 an"
@@ -164,8 +112,6 @@ mf2=$(grep -oa 'maxfile=[0-9]*' "$TMPD/m2.txt" | cut -d= -f2)
 mf3=$(grep -oa 'maxfile=[0-9]*' "$TMPD/m3.txt" | cut -d= -f2)
 num "groesste Datei in Fassung 2 (Oktette)" "$mf2" eq 2134016
 num "groesste Datei in Fassung 3 (Oktette)" "$mf3" eq 8726286336
-# Zwei gleiche Laeufe geben dasselbe Abbild -- die Zusage aus K15, und
-# sie gilt fuer die neue Fassung genauso.
 python3 tools/osum/mkfs.py build "$TMPD/v3b.img" 131072 --v3 --inodes=1024 \
     --time=1780000000 $SPEC /tmp/ >/dev/null 2>&1
 cmp -s "$TMPD/v3.img" "$TMPD/v3b.img" \
@@ -183,7 +129,6 @@ O="$TMPD/o3.txt"
 has "$O" "osum: mount=1" "der Kern haengt ein Abbild der Fassung 3 ein"
 has "$O" "k13: ofsver=3" "und er sagt selbst, dass es Fassung 3 ist"
 
-# --- die grosse Datei
 g=$(val3 "$O" grossdatei)
 num "geschriebene Oktette in EINE Datei" "$g" gt 2134016
 num "und es sind die vollen 2,5 MiB" "$g" eq 2396160
@@ -191,7 +136,6 @@ num "richtige Oktette am Anfang der Datei (von 512)" "$(val3 "$O" lesen1)" eq 51
 num "richtige Oktette HINTER der alten Grenze (von 512)" "$(val3 "$O" lesen2)" eq 512
 num "richtige Oktette ganz am Ende (von 512)" "$(val3 "$O" lesen3)" eq 512
 
-# --- der lange Name
 num "Laenge des angelegten Namens" "$(val3 "$O" namelen)" eq 255
 num "der Name liess sich anlegen und wiederfinden" "$(val3 "$O" nameok)" eq 1
 num "und er kam ueber getdents in voller Laenge zurueck" "$(val3 "$O" dentlen)" eq 255
@@ -237,8 +181,6 @@ num "auch die Aenderungszeit ist null" "$(val3 "$Z" mtime0)" eq 0
 
 echo
 echo "== 5. DIE PLATTE: vier Gibioktett =="
-# Der Wirt baut sie als Loch -- 4 GiB Adressraum, ein Megaoktett auf der
-# Platte des Wirts. Was zaehlt, ist was der KERN daraus macht.
 python3 tools/osum/mkfs.py build "$TMPD/4g.img" 8388608 --v3 --inodes=256 \
     --time=1780000000 $SPEC /tmp/ > "$TMPD/m4g.txt" 2>&1 || bad "mkfs 4 GiB"
 sed 's/^/        /' "$TMPD/m4g.txt"
@@ -284,14 +226,12 @@ rm -f "$TMPD/weit.img"
 
 echo
 echo "== 7. DIE ZEIT UEBERLEBT DEN NEUSTART =="
-# Erster Lauf: eine Datei anlegen und ihre Zeit aufschreiben.
 run_disk "$TMPD/k.mb" "osum vfs $QUIET script=touch /tmp/marke;ls -l /tmp;exit" \
     "$TMPD/t1.txt" "$TMPD/v3.img"
 rc=$?
 [ "$rc" -eq 21 ] && ok "erster Lauf: Datei angelegt (exit 21)" || bad "erster Zeit-Lauf: exit $rc"
 z1=$(tr -d '\000' < "$TMPD/t1.txt" | grep -a ' marke$' | head -1)
 echo "        ls -l nach dem Anlegen:  $z1"
-# Zweiter Lauf auf DERSELBEN Platte -- nichts wird neu gebaut.
 run_again "$TMPD/k.mb" "osum vfs $QUIET script=ls -l /tmp;exit" "$TMPD/t2.txt"
 rc=$?
 [ "$rc" -eq 21 ] && ok "zweiter Lauf auf derselben Platte (exit 21)" || bad "zweiter Zeit-Lauf: exit $rc"
@@ -305,7 +245,6 @@ fi
 echo "$z2" | grep -qE '20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]' \
     && ok "und sie steht als Datum da, nicht als Leerraum" \
     || bad "ls -l zeigt kein Datum: '$z2'"
-# Gegenprobe: dieselbe Zeile auf der Platte der Fassung 2.
 run_disk "$TMPD/k.mb" "osum vfs $QUIET script=touch /tmp/marke;ls -l /tmp;exit" \
     "$TMPD/t3.txt" "$TMPD/v2.img"
 z3=$(tr -d '\000' < "$TMPD/t3.txt" | grep -a ' marke$' | head -1)
@@ -326,7 +265,6 @@ has "$P" "/tmp/neu" "'find -newer' findet die JUENGERE Datei"
 tr -d '\000' < "$P" | grep -qa '^/tmp/alt$' \
     && bad "'find -newer' hat auch die aeltere gefunden" \
     || ok "und die aeltere NICHT -- das ist der Unterschied, den es vorher nicht geben konnte"
-# tar: das mtime-Feld steht bei Versatz 136, zwoelf Oktette oktal.
 python3 tools/osum/mkfs.py cat "$TMPD/after.img" /tmp/t.tar > "$TMPD/t.tar" 2>/dev/null
 if [ -s "$TMPD/t.tar" ]; then
     mt=$(python3 -c "
@@ -341,12 +279,6 @@ fi
 
 echo
 echo "== 9. der symbolische Verweis, und die Gegenprobe dazu =="
-# DER VERWEIS KOMMT VOM WIRT und nicht aus einem `echo` in der Shell.
-# Der erste Versuch hat ihn im Lauf angelegt -- und die Shell schreibt
-# jeden Befehl, den sie ausfuehrt, auf dieselbe serielle Leitung. Das
-# Wort, auf das die Gegenprobe wartet, stand damit schon in der
-# Befehlszeile, und die Messung haette immer bestanden. So etwas ist
-# schlimmer als kein Test.
 printf 'ZIELINHALT\n' > "$TMPD/ziel.txt"
 python3 tools/osum/mkfs.py build "$TMPD/link.img" 131072 --v3 --inodes=256 \
     --time=1780000000 $SPEC /ziel.txt="$TMPD/ziel.txt" "/zeiger->/ziel.txt" \
@@ -365,8 +297,6 @@ tr -d '\000' < "$L" | grep -qa 'zeiger -> /ziel.txt' \
 tr -d '\000' < "$L" | grep -qaE '^l +[0-9]+ ' \
     && ok "und mit dem Buchstaben 'l' in der ersten Spalte" \
     || bad "ls -l kennzeichnet den Verweis nicht mit 'l'"
-# GEGENPROBE: mit `nolinks` folgt der Kern keinem Verweis mehr. Dieselbe
-# Platte, derselbe Befehl, ein Wort auf der Kommandozeile anders.
 run_disk "$TMPD/k.mb" "osum vfs nolinks $QUIET script=cat /zeiger;exit" \
     "$TMPD/l2.txt" "$TMPD/link.img"
 N="$TMPD/l2.txt"

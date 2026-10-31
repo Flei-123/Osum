@@ -1,50 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/alltag/run.sh -- DIE ABNAHME DER RUNDE ALLTAG.
 #
 #   bash tools/alltag/run.sh [arbeitsverzeichnis]
 #
-# Sechs kleine Programme, die am ersten Tag fehlen -- Sperrbildschirm,
-# Papierkorb, Ausschnittwerkzeug, Bildbetrachter, ZIP, Taschenrechner --
-# und zu jedem eine Zahl, die von aussen nachrechenbar ist. Kein
-# Abschnitt sagt "sieht gut aus".
-#
-# ZEHN ABSCHNITTE, und jeder hat eine Gegenprobe:
-#
-#   1. BAUEN. Kern und Programme. Ohne diesen Abschnitt sagen die
-#      anderen nichts.
-#   2. DER RECHNER gegen PYTHON. Vierzig Ausdruecke, mit `-e` durch den
-#      Gast und durch Pythons Bibliothek; verglichen werden die ZAHLEN,
-#      relative Schranke 1e-9. Gegenprobe: ein Ausdruck, der falsch ist,
-#      muss "Fehler im Ausdruck" bekommen und nicht 0.
-#   3. ZIP IN BEIDE RICHTUNGEN. Packen -> Entpacken -> `diff` sagt
-#      gleich. Ein mit Python erzeugtes ZIP wird entpackt. Und das vom
-#      GAST erzeugte Archiv wird auf dem WIRT mit Pythons zipfile
-#      geoeffnet -- das ist die Richtung, die ein eigener Entpacker
-#      nicht pruefen kann.
-#   4. DER PAPIERKORB. Loeschen -> Liste -> Zurueckholen -> `diff` sagt
-#      byte-gleich. Leeren. Und im DATEIMANAGER: Entf legt hinein
-#      (das Verzeichnis .papierkorb entsteht), Umschalt+Entf loescht
-#      endgueltig (es entsteht nicht).
-#   5. DIE BILDER gegen PILLOW. PNG (RGBA, Farbtafel, Grau), BMP und
-#      JPEG (4:4:4 und 4:2:0): Groesse, die Summe jedes Farbkanals ueber
-#      ALLE Bildpunkte und fuenf einzelne Bildpunkte. Verlustfrei heisst
-#      EXAKT.
-#   6. DAS AUSSCHNITTWERKZEUG. Das PNG, das der Gast schreibt, gegen
-#      QEMUs eigenes Bildschirmfoto DESSELBEN Schirms -- Bildpunkt fuer
-#      Bildpunkt. Danach macht der Bildbetrachter im Gast dieselbe Datei
-#      auf.
-#   7. DIE SPERRE. Falsches Kennwort: bleibt zu. Richtiges: auf.
-#      Absturz des Sperrers: bleibt zu UND der Kern startet ihn neu.
-#      Leerlauf: sperrt von selbst.
-#   8. DER LADEN. Sechs signierte Pakete, mit `opk install`
-#      eingespielt, sechs Buendel unter /apps, der Starter zaehlt sechs.
-#      Gegenprobe: ein Paket mit gekipptem Oktett wird abgelehnt.
-#   9. DIE BILDER DER PROGRAMME. Je eine Aufnahme nach .alltag-shots/,
-#      und jede wird GEMESSEN (shotcheck: keine leere Beschriftung,
-#      nichts abgeschnitten, nichts ueberlappend) statt angesehen.
-#  10. DIE REGELN DER RUNDE. Kein Zeichenaufruf ausserhalb wlib, das
-#      Vierer-Raster, und die Abnahme der Runde THEMESTORE bleibt gruen.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -183,15 +140,10 @@ hat "$K" "trashbin: number 1  /w/wichtig.txt" "die Liste kennt den Originalpfad"
 hat "$K" "DIFF-ZURUECK 0" "zurueckgeholt und byte-gleich"
 hat "$K" "trashbin: empty" "nach dem Leeren ist er leer"
 printf 'eine Notiz\n' > "$OUT/n1.txt"
-# RUNDE ROADMAP-3: `debug` schaltet den Mitschnitt des Explorers an (ohne
-# /etc/uitrace schweigt er, dbg_setup), und `/w` ist jetzt wirklich der
-# Startordner (vorher fing er immer in /data an).
 bash "$B" "$OUT/ex1" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w,debug" \
     mon="sendkey delete" mon="sendkey ret" \
     progs="explorer trashbin theme sh echo ls cat" \
     xdir=/w xfile=/w/n1.txt="$OUT/n1.txt" > "$OUT/ex1.log" 2>&1
-# RUNDE ROADMAP-3: Loeschen fragt seit EXPLORER-2 IMMER nach ("Wirklich
-# löschen?") -- also Entf UND Eingabe, wie in ex2 unten.
 hat "$OUT/ex1/serial.txt" "explorer: tat 3 n=1 rc=0" "Entf im Dateimanager: in den Korb"
 if python3 tools/osum/mkfs.py list "$OUT/ex1/disk.img" 2>/dev/null \
        | grep -qa '^/.papierkorb/1.info'; then
@@ -286,17 +238,11 @@ pass
 PY
 )
 num "Bildpunkte gleich wie in QEMUs eigenem Foto (Promille)" "$G" ge 990
-# Und der Bildbetrachter macht dieselbe Datei auf -- auf DERSELBEN
-# Platte, die der vorige Lauf beschrieben hat.
 cp "$OUT/snip/disk.img" "$OUT/snip.img"
 bash "$B" "$OUT/snipv" platte="$OUT/snip.img" script='viewer -i /schnipsel.png;exit' \
     progs="snip viewer theme sh echo ls cat" > "$OUT/snipv.log" 2>&1
 hat "$OUT/snipv/serial.txt" "viewer: art=png w=1280 h=800" \
     "der Bildbetrachter macht das PNG des Ausschnittwerkzeugs auf"
-# UND ER LIEST DIESELBEN ZAHLEN WIE PILLOW aus derselben Datei -- damit
-# ist die Kette geschlossen: Schirm -> PNG (Gast) -> Bildpunkte (Gast)
-# und Schirm -> PNG (Gast) -> Bildpunkte (Wirt) kommen zum selben
-# Ergebnis.
 if python3 tools/alltag/bildref.py pruefen "$OUT/snipv/serial.txt" \
        "$OUT/schnipsel.png" > "$OUT/snipref.txt" 2>&1; then
     ok "und liest daraus Zahl fuer Zahl dasselbe wie Pillow"
@@ -345,8 +291,6 @@ hat "$OUT/sp3/serial.txt" "sperre: Leerlauf abgelaufen, sperre" \
 # ------------------------------------------------------------- 8. Laden
 echo
 echo "== 8. der Laden: sechs Pakete, signiert, eingespielt =="
-# A-025: seit dem Aufraeumen vom 21.09. gab es den alten Pfad nicht mehr --
-# der Abschnitt wurde STILL uebersprungen. Der Pfad kommt jetzt von opkpfad.py.
 OPK_ALLTAG=$(python3 tools/lib/opkpfad.py)
 if [ -f "$OPK_ALLTAG" ]; then
     bash tools/loader/build.sh "$OUT/laden" > "$OUT/laden-bau.log" 2>&1
@@ -364,7 +308,6 @@ if [ -f "$OPK_ALLTAG" ]; then
         X="$X xfile=/pakete/$p-1.opk=$OUT/laden/stand/$p-1.opk"
         X="$X xfile=/pakete/$p-1.opk.sig=$OUT/laden/stand/$p-1.opk.sig"
     done
-    # DIE GEGENPROBE: ein Paket mit EINEM gekippten Oktett.
     python3 - "$OUT/laden/stand/calc-1.opk" "$OUT/boese.opk" <<'PY'
 import sys
 d = bytearray(open(sys.argv[1], "rb").read())
@@ -381,8 +324,6 @@ PY
         echo "ls /apps"
         echo "echo STORE-FERTIG"
     } > "$OUT/inst.sh"
-    # RUNDE ROADMAP-3: /etc/uitrace schaltet den Mitschnitt des Starters an
-    # (launcher.fi dbg_setup) -- ohne ihn kam "launcher: apps=" nie.
     : > "$OUT/uitrace"
     eval bash "$B" "$OUT/store" bloecke=262144 inodes=512 mager=yes \
         script=\"sh /inst.sh\;exit\" \
@@ -460,7 +401,6 @@ PY
     esac
     python3 tools/design/messen.py "$OUT/s-$name" 2>/dev/null \
         | sed -n '/raster/p;/klickflaechen/p' | sed 's/^/        /'
-    # DAS RASTER WIRD FUER JEDES PROGRAMM GEFORDERT, nicht nur gezeigt.
     local r
     r=$(python3 tools/design/messen.py "$OUT/s-$name" 2>/dev/null \
         | grep -a 'raster/4' | grep -aoE '\([0-9]+%\)' | tr -dc '0-9')

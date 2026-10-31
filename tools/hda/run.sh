@@ -1,60 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/hda/run.sh -- DIE ABNAHME DER RUNDE HDA: TON AUF ECHTER HARDWARE.
-#
-# ==================================================================
-# WIE MAN TON MISST, OHNE IHN ANZUHOEREN
-# ==================================================================
-#
-# Ton ist die einzige Sache in diesem Projekt, deren Ergebnis den
-# Rechner verlaesst und die sich nicht zurueckrechnen laesst -- ein
-# Bildschirmfoto kann man Bildpunkt fuer Bildpunkt nachzaehlen, Schall
-# nicht.
-#
-# QEMU loest das: `-audiodev wav,path=...` schreibt GENAU die Oktette in
-# eine Datei, die sonst an eine Soundkarte gingen. Damit ist jede Zusage
-# dieser Runde eine Zahl auf dem Wirt. Die Frequenz des Ausgabegeraets
-# wird AUSDRUECKLICH festgelegt (`out.frequency=48000`); sonst schreibt
-# QEMU mit 44100 und rechnet um, und dann ist die Datei ein Ergebnis von
-# QEMUs Umrechnung und nicht von diesem Kernel.
-#
-# DIE SIEBEN ZUSAGEN DES AUFTRAGS, und wo sie gemessen werden:
-#
-#   (a) Sinus NACHRECHNEN         Abschnitt 3, `refsine.py` -- 48000
-#                                 Werte, Wert fuer Wert gegen dieselbe
-#                                 Festkommareihe auf dem Wirt
-#   (b) Position monoton + Tempo  Abschnitt 4, ueber 1 s UND ueber 10 s,
-#                                 gegen Zyklenzaehler UND Zeitgeber
-#   (c) zwei Programme zugleich   Abschnitt 5, beide Toene per FFT
-#                                 einzeln nachgewiesen, Summe rechnerisch
-#                                 ohne Uebersteuerung -- mit Gegenprobe
-#   (d) Unterlauf -> Stille       Abschnitt 6, Luecke in der Datei ist
-#                                 STILL (nicht das alte Signal), Zaehler
-#                                 steigt
-#   (e) mitten im Lauf schliessen Abschnitt 7, DMA steht, Geraet wieder
-#                                 zu haben, Buchfuehrung bei null
-#   (f) kein Geraet               Abschnitt 8, klare Zahl, System laeuft
-#                                 weiter bis `kernel: done`
-#   (g) MP3 abspielen             Abschnitt 9, Laenge und Rate gegen das,
-#                                 was der Dekodierer meldet
-#
-# JEDE ZUSAGE HAT EINE GEGENPROBE, und ohne sie ist sie nichts wert:
-#
-#   noaudio    kein Ton -> die Datei bleibt leer
-#   nohda      HDA uebergehen -> derselbe Ton ueber AC97, zum Vergleich
-#   noac97     AC97 uebergehen -> auf einer Maschine mit beidem faehrt
-#              wirklich HDA und nicht der ausgestorbene Chip
-#   audnomix   Mischer stumm -> gleich lang, aber still. Das trennt
-#              "der DMA laeuft nicht" von "der Codec laesst nichts
-#              durch" -- zwei Fehler, die beide nach Stille klingen
-#   audhalf    halbe Lautstaerke -> das RMS muss fallen
-#   audstarve  Ring absichtlich leerlaufen lassen -> `underruns` MUSS
-#              steigen
-#   audclip    zwei Stroeme mit VOLLER Aussteuerung -> der
-#              Begrenzungszaehler MUSS steigen und die Datei muss einen
-#              FLACHEN Scheitel haben statt eines Sprungs ans andere
-#              Ende
-#   noaudirq   Vektor maskiert -> der abfragende Weg traegt allein
 #
 # Verwendung:  bash tools/hda/run.sh
 set -uo pipefail
@@ -96,8 +40,6 @@ bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/build.txt" 2>&1 \
     || { bad "der Kern baut nicht"; sed 's/^/        /' "$TMPD/build.txt"; \
          echo "HDA: $pass bestanden, $fail gefallen"; exit 1; }
 
-# Der GUI-lose Serverbau MUSS ohne eine Zeile Grafik durchgehen -- und
-# der Ton MUSS darin fehlen duerfen, ohne dass etwas bricht.
 bash tools/build-kernel.sh "$TMPD/ks.mb" --gui off > "$TMPD/builds.txt" 2>&1 \
     && ok "der Serverbau (--gui off) baut" \
     || { bad "der Serverbau baut nicht"; sed 's/^/        /' "$TMPD/builds.txt"; }
@@ -175,7 +117,6 @@ rc=$(lauf noaud "osum nokbd nosched noproc nofs audio noaudio audsay" "$HDADEV")
 same "GEGENPROBE noaudio: der Kern beendet sich normal" 21 "$rc"
 has "$TMPD/noaud.txt" "aud: aus (kein Wort)" "noaudio hebt audio auf"
 
-# ZUSAGE (f): KEIN GERAET.
 rc=$(lauf nodev "osum nokbd nosched noproc nofs audio audsay" "")
 same "ZUSAGE (f): ohne Tonkarte beendet sich der Kern NORMAL" 21 "$rc"
 has "$TMPD/nodev.txt" "hda: no device 04:03" "HDA sagt klar, dass kein Geraet da ist"
@@ -222,24 +163,12 @@ if [ -n "$dt" ] && [ -n "$df" ] && [ "$dt" -gt 0 ]; then
     hz10=$(( df * 1000000000 / dt ))
     ppm=$(( (hz10 - 48000) * 1000000 / 48000 ))
     echo "    ueber 10 s: $df Rahmen in $dt ns -> $hz10 Hz (${ppm} ppm gegen 48000)"
-    # DIE SPANNE IST FUENF PROZENT UND NICHT ZWEI, und das ist eine
-    # Aussage ueber den EMULATOR und nicht ueber den Treiber: QEMUs
-    # Tonmischer laeuft an der Uhr des WIRTS, und der Wirt hat waehrend
-    # dieser Abnahme ein Dutzend andere Gastmaschinen. GEMESSEN im
-    # selben Lauf: ueber eine Sekunde 48303 Hz (+0,6 %), ueber zehn
-    # Sekunden 49938 Hz (+4,0 %) -- die LAENGERE Strecke weicht mehr
-    # ab, und ein Quarz tut das nicht. Ein Gangfehler des Geraets waere
-    # ueber beide Strecken derselbe.
     #
-    # AUF ECHTER HARDWARE IST DIESE ZAHL NEU ZU MESSEN. Sie steht in
-    # STATUS-HDA.md ausdruecklich als "unter einem Emulator gemessen".
     num "Tempo ueber zehn Sekunden (48000 Hz +-5 %)" "$hz10" ge 45600
     num "Tempo ueber zehn Sekunden, Obergrenze" "$hz10" le 50400
 else
     bad "die Messwerte der langen Strecke fehlen"
 fi
-# DIESELBE STRECKE UNTER LAST. Eine Zusage ueber Aussetzer, die nur im
-# Leerlauf gilt, ist keine.
 rc=$(lauf load "osum nokbd nosched noproc nofs audio audpos audload audsay" "$HDADEV" 180)
 same "derselbe Lauf UNTER RECHENLAST endet sauber" 21 "$rc"
 num "ZUSAGE: Aussetzer unter Last" "$(val "$TMPD/load.txt" pos_under)" eq 0
@@ -262,10 +191,6 @@ num "ZUSAGE (c): begrenzte Abtastwerte (12000+12000 < 32767)" \
 pk=$(val "$TMPD/mix.txt" mix_peak)
 num "die groesste Summe liegt unter der Vollaussteuerung" "$pk" lt 32768
 num "und sie liegt ueber der eines EINZELNEN Stromes (12000)" "$pk" gt 12000
-# EIN Eintrag (2,67 ms) Stille darf im ANLAUFEN stehen: der Mischerweg
-# hat einen Puffer mehr als der Einstromweg, und bis der erste Schub
-# durch beide gelaufen ist, ist der Ring einmal kurz leer. Was zaehlt,
-# ist die Datei -- sie hat null Luecken.
 num "Aussetzer beim Mischen (hoechstens einer beim Anlaufen)" \
     "$(val "$TMPD/mix.txt" underruns)" le 1
 num "Stroeme, die zu spaet kamen" "$(val "$TMPD/mix.txt" mix_under)" eq 0
@@ -279,7 +204,6 @@ a2=$(grep -oE 'p2=[0-9]+' "$TMPD/mix.chk" | grep -oE '[0-9]+$')
 num "ZUSAGE (c): 440 Hz ist in der Datei" "${a1:-0}" gt 2000
 num "ZUSAGE (c): 660 Hz ist AUCH in der Datei" "${a2:-0}" gt 2000
 
-# DIE GEGENPROBE. Ohne sie ist die Null oben wertlos.
 rc=$(lauf clip "osum nokbd nosched noproc nofs audio audclip audsay" "$HDADEV" 180)
 same "die Uebersteuerungsprobe endet sauber" 21 "$rc"
 num "GEGENPROBE: 32000+32000 begrenzt WIRKLICH" "$(val "$TMPD/clip.txt" clip_clips)" gt 1000
@@ -341,10 +265,6 @@ num "und nicht still" "${rh:-0}" gt 100
 rc=$(lauf noirq "osum nokbd nosched noproc nofs audio noaudirq audsine audsay" "$HDADEV")
 same "GEGENPROBE noaudirq endet sauber" 21 "$rc"
 num "der Vektor ist maskiert" "$(val "$TMPD/noirq.txt" irqarmed)" eq 0
-# ETWAS MEHR ALS 48000 IST RICHTIG UND KEIN FEHLER: `pad_and_submit`
-# fuellt den angefangenen Eintrag mit Stille auf (hoechstens 127
-# Rahmen), und haelt der Regler zwischendurch an, kommt je Anfahren ein
-# weiterer Vorlauf dazu. Was zaehlt, ist die DATEI.
 num "und der abfragende Weg traegt TROTZDEM (48000 Rahmen)" \
     "$(val "$TMPD/noirq.txt" written)" ge 48000
 num "und nicht wesentlich mehr" "$(val "$TMPD/noirq.txt" written)" le 49024
@@ -366,7 +286,6 @@ python3 tools/hda/refsine.py "$TMPD/ac97.wav" --hz 440 --rahmen 48000 --pegel 24
 da=$(grep -oE 'ungleich=[0-9]+' "$TMPD/ac97.ref" | grep -oE '[0-9]+$')
 num "AC97 liefert DIESELBE Datei, Wert fuer Wert" "${da:-999}" eq 0
 
-# BEIDE CHIPS AUF EINER MASCHINE: HDA muss gewinnen.
 rc=$(lauf beide "osum nokbd nosched noproc nofs audio audsay" \
      "$HDADEV -device AC97,audiodev=snd0")
 num "mit BEIDEN Chips auf dem Bus faehrt HDA (2) und nicht AC97" \
@@ -384,11 +303,6 @@ num "und die Datei hat keine Luecke" "${g4:-999}" eq 0
 
 echo "== 9. ZUSAGE (g): RING 3 -- /bin/play auf einer Datei von der Platte =="
 #
-# Der Kernel dieser Runde kann selbst einen Ton erzeugen, und das ist
-# die saubere Messstrecke: EIN Verdaechtiger. Dieser Abschnitt misst die
-# andere Haelfte -- durch die Shell, den ELF-Lader, das Dateisystem und
-# fuenf Systemaufrufe hindurch. Faellt er, waehrend Abschnitt 3 gruen
-# ist, liegt es NICHT am Treiber.
 pl() { # name  befehlszeile
     local n=$1 cmd=$2
     local aud="-audiodev wav,id=snd0,path=$TMPD/$n.wav,out.frequency=48000,out.channels=2,out.format=s16"
@@ -406,10 +320,6 @@ rc=$(pl vorhanden "/bin/ls /bin")
 same "der Lauf mit Platte endet sauber" 21 "$rc"
 has "$TMPD/vorhanden.txt" "play" "die Platte traegt /bin/play"
 
-# Die Shell dieses Systems bekommt ihre Zeilen ueber `script=` auf der
-# Kernel-Befehlszeile -- derselbe Weg, den tools/userland/run.sh seit
-# Runde K6 geht. Eine Rueckleitung ueber die serielle Schnittstelle gibt
-# es nicht: sie ist schon die AUSGABE, und beides auf einmal geht nicht.
 pv() { grep -oaE "$2: *[0-9]+" "$1" | tail -1 | grep -oE '[0-9]+$'; }
 
 echo "-- WAV, 48000 Hz, stereo --"
@@ -458,10 +368,6 @@ num "ZUSAGE (g): die Dauer liegt bei einer Sekunde (+-60 ms Ein-/Ausschwingen)" 
 num "und nicht darueber" "${md:-99999}" le 1120
 mg=$(pv "$TMPD/pmp3.txt" 'gespielt')
 echo "    wirklich hinausgegangen: $mg Rahmen"
-# DIE ZUSAGE IST EINE GLEICHUNG UND KEINE SPANNE: was der Dekodierer
-# als Dauer meldet, mal 48 Rahmen je Millisekunde, MUSS die Zahl der
-# hinausgegangenen Rahmen sein. Ist sie es nicht, spielt das System
-# etwas anderes ab, als der Dekodierer gelesen hat.
 num "ZUSAGE (g): gespielte Rahmen = gemeldete Dauer * 48 (untere Grenze)" \
     "${mg:-0}" ge $(( ${md:-0} * 48 - 1152 ))
 num "ZUSAGE (g): und obere Grenze" "${mg:-0}" le $(( ${md:-0} * 48 + 1152 ))
@@ -482,9 +388,6 @@ else
 fi
 
 echo "== 10. ZWEI PROGRAMME GLEICHZEITIG, aus Ring 3 =="
-# Zwei Abspieler mit `&` im Hintergrund. Das ist die Zusage (c) noch
-# einmal, aber diesmal ueber die ganze Kette -- zwei PROZESSE, zwei
-# Handle-Tabellen, zwei Stroeme im Mischer.
 rc=$(pl zwei "/bin/play /ton.wav & /bin/play /ton44.wav")
 n2=$(grep -ca 'strom:' "$TMPD/zwei.txt" || true)
 num "zwei Abspieler haben je einen Strom bekommen" "${n2:-0}" ge 1
@@ -499,13 +402,6 @@ echo "    Ausgabelatenz:      $(val "$TMPD/hup.txt" latencyus) us (ganzer Ring, 
 echo "    ein Eintrag:        $(val "$TMPD/hup.txt" entryus) us (128 Rahmen)"
 echo "    Aussetzer/Minute:   siehe Abschnitt 4 (10 s mit und ohne Last)"
 
-# Die Nummern der Systemaufrufe duerfen nirgends sonst vorkommen -- die
-# Lehre aus 1780 gegen 1750 und aus 1320 gegen 1320.
-# Eine Aufrufnummer darf an GENAU ZWEI Stellen stehen: einmal im Kern
-# (sys.fi) und einmal in Ring 3, wo ein Programm sie braucht
-# (kernel/user/). Steht sie ein drittes Mal, hat sich eine Runde eine
-# Nummer genommen, die schon vergeben war -- die Lehre aus 1780 gegen
-# 1750 und aus 1320 gegen 1320.
 for n in 1850 1851 1852 1853 1854; do
     c=$(grep -rlan "u64 = $n\$" kernel --include=*.fi | grep -v '^kernel/user/' | grep -vc 'kernel/sys/sys.fi' || true)
     [ "${c:-0}" = "0" ] && ok "die Aufrufnummer $n ist im Kern nur in sys.fi vergeben" \

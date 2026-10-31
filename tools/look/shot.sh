@@ -71,13 +71,6 @@ keep=no
 extra=""
 # RUNDE ZIEH: MEHRERE BILDER WAEHREND DES HALTENS.
 #
-# `shots="0.35 0.35 0.25 0.45"` schiesst vier Bilder in diesen
-# Abstaenden (Sekunden, jeweils NACH dem vorigen) und legt sie als
-# schuss-1.png ... ab. Leer = das bisherige Verhalten, EIN Bild.
-#
-# Warum es das braucht: ein Foto vom Ende einer Bewegung sieht aus wie
-# eines ohne Bewegung. Die Wirkung, um die Runde ZIEH geht, ist mitten
-# im Zug -- das Fenster ist groesser und steht versetzt.
 shots=""
 # ROUND SOFTUI: HARDWARE VIRTUALISATION, AND WHY IT IS A SWITCH AND NOT
 # A CONSTANT.  Round PAINT wrote "the measuring machine has no /dev/kvm"
@@ -110,7 +103,6 @@ hidemissing=0
 autohide=0
 accel=tcg
 append=""
-# RUNDE MODULE: eine fertige /etc/module.conf aufs Abbild legen.
 modulconf=""
 progs="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit nedit"
 for a in "$@"; do
@@ -208,17 +200,7 @@ for p in $progs; do
     vendor/firn/bin/firnc $OPTL -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FAILED to compile $p"; head -20 "$BUILDD/e-$p"; exit 1; }
-    # RUNDE 31: EIN PROGRAMM IM PROFIL `app` BRINGT SEINEN `_start` MIT.
     #
-    # Wessen Bedienelemente aus fUi kommen, dessen Wurzeldatei ist
-    # `profile app` (fUi rechnet in f64 und benutzt std.rt, beides ist
-    # unter `kernel` gesperrt). Unter `app` legt firnc dieselben vier
-    # Befehle hinein, die auch in crt.s stehen -- crt.o dazuzubinden
-    # waere dann "multiple definition of `_start`".
-    #
-    # Also: crt.o nur fuer die Programme, die es noch brauchen. Die
-    # Unterscheidung wird nicht getippt, sondern GELESEN -- sonst
-    # stimmt sie nach der naechsten Umstellung nicht mehr.
     CRT="$BUILDD/crt.o"
     if grep -qa '^profile app' "kernel/user/$p.fi"; then
         CRT=""
@@ -254,38 +236,16 @@ EOF
 # 8192 blocks (4 MiB) held these programs with 4 per cent to spare
 # after round LOOK. That is not spare room, that is a countdown.
 #
-# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
-# Der Countdown ist abgelaufen. Runde GRUNDLINIE (1d16d34) hat die
-# Laeufer -- zu Recht -- auf `--profile=app` umgestellt, und sechs der
-# dreizehn Programme dieser Liste tragen `profile app` (desktop,
-# taskbar, settings, launcher, explorer, widgetdemo). Das Profil `app`
-# bringt Firns volle Laufzeit mit: /bin/explorer ist 1623040 statt
-# 907360 Oktette. GEMESSEN, unmittelbar:
-#
 #     $ bash tools/look/shot.sh /tmp/shottest
 #     FAILED: mkfs
 #     mkfs: the disk is full
 #
-# Das traf jeden Laeufer, der ueber diese Datei fotografiert -- SOFTUI
-# fiel damit auf "0 bestanden, 2 gefallen" ("classic bootet nicht",
-# "modern bootet nicht"), ohne dass am Aussehen irgendetwas falsch war.
-# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
-# --v3: the default format holds 2 134 016 octets per file at most, and the
-# file manager is about to pass that (the multi-window layer of the host)
 ARGS=(build "$OUT/disk.img" 32768 --v3 --inodes=512 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS")
 [ "$icons" = yes ] && ARGS+=("/lib/icons.ttf=$ICONF")
 ARGS+=(/bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
-# RUNDE ROTABSCHNITTE: `/bin/speicher` ist der Name, unter dem der
-# KERN die Speicherplatzanalyse startet (kgui.fi: p_spei), und der
-# hat sich nie geaendert. Die QUELLDATEI heisst seit ENGLISCH
-# ETAPPE 7 (9dd8fe4) storage.fi -- gebaut wird also `storage`, und
-# der alte Pfad ist ein zweiter Name auf dieselbe Datei. Ohne das
-# suchte tools/umlaut/run.sh ein kernel/user/speicher.fi, das es
-# nicht mehr gibt ("FAILED to compile speicher"), und drei
-# Abschnitte bekamen gar kein Bild.
 case " $progs " in *" storage "*) ARGS+=("/bin/speicher@/bin/storage");; esac
 ARGS+=(/etc/
        "/etc/theme.conf=$OUT/theme.conf@0644"
@@ -293,13 +253,7 @@ ARGS+=(/etc/
        "/etc/locale.conf=$OUT/locale.conf@0644"
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644" "/etc/startmenu.conf=$OUT/startmenu.conf@0644")
-# ====================================================== RUNDE MODULE
-# /etc/module.conf -- DIE LAGE DER SCHREIBTISCHMODULE.
 #
-# `modul=` nimmt eine fertige Datei auf die Platte. OHNE das Wort wird
-# KEINE angelegt, und das ist Absicht: der Schreibtisch soll beweisen
-# koennen, dass er ohne Datei seine VORGABE nimmt (drei Kaestchen
-# rechts oben). Genau dieser Fall ist Bild 1 der Abnahme.
 if [ -n "$modulconf" ]; then
     cp "$modulconf" "$OUT/module.conf"
     ARGS+=("/etc/module.conf=$OUT/module.conf@0644")
@@ -325,24 +279,7 @@ if ls assets/shapes/*.shape >/dev/null 2>&1; then
         ARGS+=("/etc/shapes/$(basename "$s" .shape)=$s@0644")
     done
 fi
-# ====================================================== RUNDE 32
-# /etc/themes -- DER PRUEFSTAND HATTE SIE NICHT, DAS ABBILD SCHON.
 #
-# Justin, 12.09.2026, zum dritten Mal derselbe Fehler: "der Pruefstand
-# ist anders bestueckt als das Abbild, und die Abnahme misst deshalb
-# etwas anderes, als der Nutzer bootet." Beim ersten Mal waren es drei
-# statt sechs Symboldateien (Runde ECHT-2), beim zweiten die Marke.
-#
-# Gemessen mit `grep -oP '/etc/\K[a-z]+(?=/)'` gegen beide Skripte:
-# das Abbild legt jarvis, netview, schemas, shapes, ssl UND THEMES ab,
-# der Pruefstand nur netview, schemas, shapes. `/etc/themes` fehlte --
-# das sind die fertigen Voreinstellungen (assets/themes/*.preset), aus
-# denen `wlibc` Schema, Modus und Form zusammen liest.
-#
-# jarvis und ssl bleiben ABSICHTLICH draussen: der Wurzelspeicher und
-# die Rechteliste des Helfers gehoeren zu einem Geraet, nicht zu einem
-# Bildschirmfoto -- sie stehen deshalb in der Ausnahmeliste von
-# tools/look/inventory.sh und nicht hier.
 if ls assets/themes/*.preset >/dev/null 2>&1; then
     ARGS+=(/etc/themes/)
     for s in assets/themes/*.preset; do
@@ -352,20 +289,7 @@ fi
 if [ "$nvicons" = yes ]; then
     if python3 tools/netview/icons.py bauen "$OUT/nvicons" > "$OUT/nvicons.log" 2>&1; then
         ARGS+=(/etc/netview/)
-        # RUNDE 32: DIESELBE LISTE WIE IM ABBILD, UND ZUM VIERTEN MAL
-        # DERSELBE FEHLER.
         #
-        # Hier standen ELF Namen, tools/usbimg/build.sh (Zeile 346)
-        # nennt aber FUENFZEHN: tile-dark, tile-power und tile-tile
-        # fehlten -- genau die Kacheln "Dark mode", "Power" und
-        # "Tiling" im Kontrollzentrum. In Runde ECHT-2 war es dieselbe
-        # Stelle mit drei statt sechs Dateien.
-        #
-        # Gefunden hat es diesmal tools/look/inventory.sh, nicht
-        # Justin: es zaehlt die Namen in beiden Skripten und schlaegt
-        # an, wenn die Zahlen auseinandergehen. Deshalb zaehlt es und
-        # prueft nicht nur, ob das Verzeichnis vorkommt -- ein fehlender
-        # Name in einer vorhandenen Liste ist unsichtbar.
         for q in state-nocarrier state-noip state-noroute state-online \
                  mark-filtered mark-faked mark-none sys-faking \
                  tile-fake tile-net tile-hide tile-dark tile-power \
@@ -393,11 +317,6 @@ echo "disk $(stat -c%s "$OUT/disk.img") octets"
 # ------------------------------------------------------------ 4. boot
 SOCK="$OUT/mon.sock"; rm -f "$SOCK" "$OUT/serial.txt"
 ACC=()
-# RUNDE MERGE-2: `-cpu host` von softui, die Pruefung samt Hinweis von
-# uns. Ohne `-cpu host` ist der Prozessor `qemu64`, der kein SMAP kann --
-# und genau mit SMAP hat softui den fehlenden Gegenpart zu `map_user`
-# gefunden. Ohne die Pruefung faellt ein Wirt ohne /dev/kvm still auf
-# eine Zeile herein, die er nicht ausfuehren kann.
 if [ "$accel" = kvm ]; then
     if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
         ACC=(-accel kvm -cpu host)
@@ -424,7 +343,6 @@ if [ -n "$hover" ]; then
     sleep 2
 fi
 if [ -n "$shots" ]; then
-    # RUNDE ZIEH: die Reihe. Jede Zahl ist eine Pause VOR ihrem Bild.
     n=0
     for g in $shots; do
         n=$((n+1))

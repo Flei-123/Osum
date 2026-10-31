@@ -1,33 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/fsrobust/run.sh -- DIE ABNAHME DER RUNDE FSROBUST.
-#
-# Sieben Abschnitte, und der dritte ist der, um den es geht:
-#
-#   1. BAUEN. Kern und Programme, und die Abbilder auf dem Wirt.
-#   2. DIE GRENZEN. Wie gross eine Datei, ein Datentraeger und ein
-#      Verzeichnis wirklich sein duerfen -- gemessen, nicht gerechnet.
-#      Die Langfassung steht in docs/OFS-LIMITS.md.
-#   3. DER STROMAUSFALL. QEMU wird mit SIGKILL abgeschossen, mitten im
-#      Schreiben, zu einem zufaelligen Zeitpunkt. Danach derselbe Kern
-#      auf denselben Oktetten: einhaengen, nachtragen, pruefen. Die Zahl
-#      der beschaedigten Faelle MUSS null sein.
-#   4. DIE GEGENPROBE. Dasselbe mit dem Wort `nojournal`. Hier MUESSEN
-#      Schaeden auftreten -- sonst misst Abschnitt 3 nichts.
-#   5. DIE HALB GESCHRIEBENE BESTAETIGUNG. Ein Journal mit richtiger
-#      Kennung und falscher Pruefsumme darf NICHT nachgetragen werden.
-#   6. FSCK. Auf dreizehn mutwillig zerstoerten Abbildern: es muss
-#      FERTIG WERDEN und melden. Und `-r` muss beheben, was eindeutig
-#      ist.
-#   7. RUECKWAERTS. Ein Abbild der Fassung 2 ist Oktett fuer Oktett das
-#      von vor dieser Runde, und ein Abbild OHNE Journal haengt sich
-#      weiter ein.
-#
-# Umgebung:
-#   FSR_LAEUFE   wie viele Abschuesse je Abschnitt (Vorgabe 10).
-#                Die Zahl in docs/OFS-JOURNAL.md kommt aus einem Lauf
-#                mit 60.
-#   FSR_PAR      wie viele gleichzeitig (Vorgabe 4).
 #
 # Benutzung:  bash tools/fsrobust/run.sh
 set -uo pipefail
@@ -37,31 +8,7 @@ export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo rm df touch mkdir fsrlim fsrw fsrv fsck"
-# RUNDE MERGE-2: VIERZIG STATT ZEHN, UND DIE ZAHL IST GEMESSEN.
 #
-# Abschnitt 4 ist die Gegenprobe der ganzen Runde: OHNE Journal MUESSEN
-# bei denselben Abschuessen Schaeden auftreten, sonst misst Abschnitt 3
-# nichts. Sie ist von Natur aus ein GLUECKSSPIEL -- der Abschuss faellt
-# zu einem zufaelligen Zeitpunkt, und Schaden entsteht nur, wenn er
-# mitten in eine mehrblockige Aenderung faellt.
-#
-# Auf dem Zweig FSROBUST trafen 3 von 10 Laeufen (30 %). Auf dem
-# zusammengefuehrten Stand sind es nachgemessen 4 von 40 (10 %) -- der
-# Kernel ist nach dem Verschmelzen deutlich schneller, und damit ist das
-# verwundbare Fenster ein kleinerer Anteil der Laufzeit. (Das ist die
-# naheliegende Erklaerung fuer den Rueckgang, nicht mehr; gemessen ist
-# die RATE, nicht die Ursache.)
-#
-# Bei 10 Laeufen und 10 % Trefferrate endet die Gegenprobe mit
-# Wahrscheinlichkeit 0,9^10 = 35 % ergebnislos -- und genau das ist beim
-# ersten Lauf nach dem Merge passiert: "ohne Journal trat in 10 Laeufen
-# KEIN Schaden auf". Die Zusage war nicht falsch, sie war zu schwach.
-# Bei 40 Laeufen sind es 0,9^40 = 1,5 %.
-#
-# Dieselbe Zahl gilt fuer Abschnitt 3, und zwar aus demselben Grund:
-# "mit Journal 0 Schaeden in 10 Laeufen" ist keine starke Aussage,
-# solange ohne Journal nur jeder zehnte Lauf einen Schaden zeigt.
-# 0 von 40 ist eine.
 LAEUFE=${FSR_LAEUFE:-40}
 PAR=${FSR_PAR:-4}
 
@@ -106,9 +53,6 @@ ok "$(echo $PROGS | wc -w) Programme gebaut, darunter /bin/fsck"
 
 SPEC="/bin/ /tmp/ /dev/ /proc/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
-# Die Platte, auf der der Stromausfall gemessen wird: 32 MiB, 512 Inodes,
-# MIT Journal. Klein genug, dass ein Lauf schnell ist, gross genug, dass
-# der Zuteiler etwas zu tun hat.
 python3 tools/osum/mkfs.py build "$TMPD/j.img" 65536 --v3 --inodes=512 \
     --journal --time=1780000000 $SPEC > "$TMPD/mkj.txt" 2>&1 \
     || bad "mkfs mit Journal"
@@ -140,12 +84,8 @@ rc=$?
                  || bad "QEMU exit $rc, erwartet 21"
 num "groesster Blockindex einer Datei" "$(val "$TMPD/lim.txt" fsrlim maxidx)" eq 17043527
 num "groesste Datei in Oktetten" "$(val "$TMPD/lim.txt" fsrlim maxfile)" eq 8726286336
-# DIE GEGENPROBE ZUR SUCHE. Ohne sie waere die Zahl oben nur der letzte
-# Erfolg und keine Grenze.
 num "EIN Block weiter geht es NICHT" "$(val "$TMPD/lim.txt" fsrlim ueber)" eq 0
 
-# Ein Verzeichnis IST eine Datei: eines mit ueber zwoelftausend Eintraegen
-# liegt hinter der doppelt indirekten Stufe (2.134.016 Oktette).
 FSR_PROGS="$PROGS" python3 - "$TMPD" <<'PY' > "$TMPD/gross.txt" 2>&1
 import sys, os
 sys.path.insert(0, "tools/osum")
@@ -263,7 +203,6 @@ done
 num "kaputte Abbilder, auf denen fsck FERTIG WIRD" "$fertig" eq "$n_k"
 num "kaputte Abbilder, auf denen es haengenbleibt" "$haengt" eq 0
 
-# `-r` muss beheben, was eindeutig ist: eine genullte Karte.
 cp --sparse=always "$TMPD/kaputt/kaputt-leerkarte.img" "$TMPD/rep.img"
 cp --sparse=always "$TMPD/j.img" "$TMPD/repboot.img"
 fsck2() { # abbild anhang ausgabe
@@ -292,9 +231,6 @@ num "eine Platte OHNE Journal haengt sich ein" \
 num "und sie meldet 0 Journalbloecke" \
     "$(val "$TMPD/nj.txt" fsck journal)" eq 0
 num "und sie ist unversehrt" "$(val "$TMPD/nj.txt" fsck errors)" eq 0
-# Ein Abbild der Fassung 2 muss Oktett fuer Oktett dasselbe sein wie
-# vorher. Zwei Laeufe von mkfs geben dieselben Oktette -- das ist die
-# Zusage aus Runde K15, und sie gilt weiter.
 python3 tools/osum/mkfs.py build "$TMPD/v2a.img" 4096 /bin/ \
     "/bin/sh=$TMPD/sh.elf" >/dev/null 2>&1
 python3 tools/osum/mkfs.py build "$TMPD/v2b.img" 4096 /bin/ \

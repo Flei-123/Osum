@@ -1,39 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/k11/run.sh -- DER BEWEIS, DASS MAN AUF OSUM ARBEITEN KANN.
-#
-# Bis zu dieser Runde konnte auf diesem System niemand eine Datei
-# schreiben oder aendern. Es lief nur, was vorher hineinkompiliert worden
-# war. Diese Datei misst, dass das vorbei ist -- und zwar so, dass ein
-# "startet ohne Absturz" nirgends als Zusage durchgeht:
-#
-#   1. DER EDITOR WIRD WIRKLICH BEDIENT. Die Tasten kommen ueber den
-#      QEMU-Monitor (`sendkey`) am Tor 0x60 an, laufen durch IRQ1,
-#      `kernel/kbd.fi` und die Zeilendisziplin. Danach liest der WIRT die
-#      gesicherte Datei AUS DEM PLATTENABBILD (`mkfs.py cat`) und haelt
-#      sie Oktett fuer Oktett gegen die Erwartung. Kein Mitschnitt, keine
-#      Behauptung -- die Oktette auf der Platte.
-#   2. BEIDE AUSGABEWEGE ZEIGEN DASSELBE. Derselbe Lauf schreibt auf die
-#      serielle Leitung UND auf den Bildschirm. Der Mitschnitt geht durch
-#      ein Terminal in Python (`tools/k11/vt.py`), das Bildschirmfoto
-#      durch den Zeichensatzleser aus Runde K7B
-#      (`tools/gfx/checkshot.py read`). Die beiden Bilder muessen
-#      uebereinstimmen.
-#   3. JEDES WERKZEUG GEGEN SEIN LINUX-GEGENSTUECK. Dieselben Eingaben,
-#      dieselbe Ausgabe, Oktett fuer Oktett. Wo bewusst abgewichen wird,
-#      steht es in docs/ROUNDK11.md UND hier im Testfall.
-#   4. `tar` UND `gzip` GEGEN DIE ECHTEN. Was Osum packt, muss GNU
-#      auspacken koennen, und umgekehrt. Fuer ein Dateiformat ist das die
-#      einzige ehrliche Pruefung.
-#   5. DIE SHELL IST EINE SPRACHE. if/elif/else, while, until, for, case,
-#      Funktionen, return/break/continue/shift, test und [.
-#   6. FEHLERFAELLE. Datei gibt es nicht, Verzeichnis statt Datei, kein
-#      Platz mehr, Text ohne abschliessenden Zeilenumbruch, sehr lange
-#      Zeilen, Binaerdaten.
-#   7. GEGENPROBEN. Ohne die Umschalttaste kein Grossbuchstabe; ohne
-#      `kernel/ansi.fi` stehen die Steuerzeichen auf dem Schirm; ein
-#      geaenderter Puffer, den man nicht sichert, aendert die Platte
-#      nicht; `umount` nimmt dem System wirklich den Boden weg.
 #
 # Verwendung:  bash tools/k11/run.sh
 set -uo pipefail
@@ -46,7 +11,6 @@ FC1=${FIRNC1:-vendor/firn/bin/firnc1}
 ULD=kernel/user/user.ld
 BLOCKS=4096
 
-# Der Werkzeugkasten dieser Runde plus das, was die Faelle sonst brauchen.
 K11="edit find sed diff patch tar gzip gunzip xargs du top mount umount
      basename dirname tee cut tr seq env which"
 BASIS="sh cat echo ls cp rm mkdir wc grep sort head true false sleep"
@@ -123,8 +87,6 @@ else
     bad "firnc1 hat den Werkzeugkasten nicht gebaut"
 fi
 
-# Kein Programm haengt an irgendetwas -- kein libc, kein Kern, keine
-# Laufzeit. Dieselbe Zusage wie in Runde K1, fuer die neuen Programme.
 undef=""
 for p in $K11; do
     u=$(nm -u "$TMPD/${p}0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
@@ -169,10 +131,6 @@ printf 'hallo\nwelt\n'                              > "$TMPD/fix/e1.txt"
 printf 'eins\nzwei\ndrei\nvier\nfuenf\n'            > "$TMPD/fix/e2.txt"
 printf 'aXbXc\n'                                    > "$TMPD/fix/e3.txt"
 
-# Der Baum, an dem `find`, `du` und `tar` gemessen werden. Er wird auf dem
-# WIRT gebaut und Datei fuer Datei aufs Abbild gelegt -- damit stehen auf
-# beiden Seiten dieselben Oktette, und der Vergleich mit GNU vergleicht
-# wirklich dasselbe.
 mkdir -p "$TMPD/baum/unter/tief"
 printf 'alpha\nbeta\ngamma\n'   > "$TMPD/baum/a.txt"
 printf 'one\ntwo\n'             > "$TMPD/baum/unter/b.txt"
@@ -193,10 +151,6 @@ DATA="/d/drei.txt=$TMPD/fix/drei.txt /d/dup.txt=$TMPD/fix/dup.txt
       /e/e3.txt=$TMPD/fix/e3.txt"
 DIRS="/bin/ /d/ /b/ /b/unter/ /b/unter/tief/ /e/ /t/ /w/"
 
-# ------------------------------------------------- die Faelle als Skripte
-
-# Ein Fall: alles zwischen den beiden Marken, ohne die Zeilen, die der
-# Kern ueber dieselbe Leitung schreibt.
 block() {
     awk '/^==BEGIN==$/ {f=1; next} /^==END==$/ {f=0} f' "$1" \
         | grep -vaE '^(elf: |key: |osum: |user fault: |fb: |\*\*\*)'
@@ -389,8 +343,6 @@ skript() { # name skriptdatei
     lauf "$TMPD/d0.img" "$1" "osum nokbd nosched noproc nofs noring3 script=sh $2;exit"
 }
 
-# ------------------------------------------- 3. die Werkzeuge gegen GNU
-
 echo "== 3. jedes Werkzeug gegen sein Linux-Gegenstueck, Oktett fuer Oktett =="
 F="$TMPD/fix"
 
@@ -432,8 +384,6 @@ block "$TMPD/text.txt" > "$TMPD/text.ist"
     seq 3
     seq 2 5
     seq 1 3 10
-    # `which` hat auf diesem System EINEN Suchpfad: /bin. Der Wirt hat
-    # einen anderen, also steht die Erwartung hier und nicht in GNU.
     echo /bin/sh
 } > "$TMPD/text.soll"
 dateien_gleich "sed, cut, tr, basename, dirname, seq, which wie GNU" \
@@ -456,9 +406,6 @@ skript werk /t/werk.sh; rc=$?
 [ "$rc" -eq 21 ] && ok "Werkzeug-Lauf: der Kern beendet sich selbst (21)" \
                  || bad "Werkzeug-Lauf: Beendigungscode $rc, erwartet 21"
 block "$TMPD/werk.txt" > "$TMPD/werk.ist"
-# `du` weicht bewusst ab (Verzeichnisse zaehlen null, Bloecke zu 1024 aus
-# der GROESSE). Also wird die Erwartung hier gerechnet -- aus denselben
-# Dateien, mit derselben Regel, und docs/ROUNDK11.md sagt warum.
 du_soll() { # verzeichnis anzeigename
     ( cd "$TMPD" || exit
       find "$1" -type f -printf '%h %s\n' ) | awk -v top="$1" -v name="$2" '
@@ -468,8 +415,6 @@ du_soll() { # verzeichnis anzeigename
         }'
 }
 {
-    # tief: c.bin (1 Oktett) -> 1 Block; unter: + b.txt (8) -> 2; /b: + a.txt
-    # (17) + leer.txt (0) -> 3
     printf '1\t/b/unter/tief\n2\t/b/unter\n3\t/b\n'
     printf '3\t/b\n'
     echo "VOR eins zwei drei"
@@ -501,13 +446,6 @@ for paar in "cut=1" "sed=2" "diff=2" "find=1" "du=1" "tar=2" "gunzip=1" "sedverz
 done
 hat "$E" "cut: cannot open /nirgends" "cut sagt, welche Datei fehlt"
 hat "$E" "gunzip: not a gzip file" "gunzip erkennt, dass das kein gzip ist"
-# Eine Datei OHNE abschliessenden Zeilenumbruch: `cat` gibt genau die
-# Oktette, `wc -c` zaehlt sie, und die naechste Zeile klebt nicht daran.
-# Ein Text OHNE abschliessenden Zeilenumbruch, durch `cat` in eine neue
-# Datei -- und dann die Oktette AUF DER PLATTE dagegen gehalten. Auf der
-# seriellen Leitung liesse sich das gar nicht messen: dort klebt die
-# naechste Zeile des Kerns daran, und genau daran erkennt man ja, dass
-# kein Umbruch da war.
 python3 tools/osum/mkfs.py cat "$TMPD/nach-fehler.img" /w/nonl2.txt > "$TMPD/nonl2.ist" 2>/dev/null
 dateien_gleich "Text ohne abschliessenden Zeilenumbruch: 12 Oktette, unveraendert durch cat" \
     "$F/nonl.txt" "$TMPD/nonl2.ist"
@@ -547,8 +485,6 @@ WANT
 dateien_gleich "if/elif/else, test, while, for, case, Funktionen, shift, export" \
     "$TMPD/sh.soll" "$TMPD/sh.ist"
 
-# ------------------------------------------- 6. tar und gzip gegen die echten
-
 echo "== 6. tar und gzip gegen die echten: in beide Richtungen =="
 skript pack /t/pack.sh; rc=$?
 [ "$rc" -eq 21 ] && ok "Pack-Lauf: der Kern beendet sich selbst (21)" \
@@ -564,8 +500,6 @@ block "$TMPD/pack.txt" > "$TMPD/pack.ist"
 dateien_gleich "tar -tf nennt denselben Baum, gzip/gunzip geben dieselbe Laenge" \
     "$TMPD/pack.soll" "$TMPD/pack.ist"
 
-# WAS OSUM GEPACKT HAT, MUSS GNU AUSPACKEN KOENNEN. Das Archiv wird aus
-# dem Plattenabbild geholt -- nicht aus einem Mitschnitt.
 python3 tools/osum/mkfs.py cat "$TMPD/nach-pack.img" /w/eigen.tar > "$TMPD/eigen.tar" 2>/dev/null
 if [ -s "$TMPD/eigen.tar" ]; then
     ok "das Archiv liegt auf der Platte ($(stat -c%s "$TMPD/eigen.tar") Oktette)"
@@ -617,7 +551,6 @@ else
     bad "auf der Platte liegt kein /w/bin.gz"
 fi
 
-# UND UMGEKEHRT: was GNU gepackt hat, muss Osum auspacken koennen.
 tar --format=ustar -cf "$TMPD/gnu.tar" -C "$TMPD" baum 2>/dev/null
 gzip -9 -c "$F/gross.txt" > "$TMPD/gnu.gz"
 cat > "$TMPD/t_ein.sh" <<'SCRIPT'
@@ -678,7 +611,6 @@ else
     bad "auf der Platte liegt keine /w/d.diff"
 fi
 
-# UND UMGEKEHRT: eine Differenz von GNU, eingespielt von Osum.
 diff -u --label /w/g.txt --label /w/g.txt "$F/alt.txt" "$F/neu.txt" > "$TMPD/gnu.diff"
 cat > "$TMPD/t_gp.sh" <<'SCRIPT'
 echo ==BEGIN==
@@ -700,17 +632,6 @@ dateien_gleich "Osums patch spielt ein, was GNUs diff erzeugt hat" \
 
 echo "== 8. der Editor, wirklich bedient: Tasten ueber den QEMU-Monitor =="
 
-# Ein Lauf, in dem ein MENSCH tippt. Die Tasten gehen ueber den Monitor an
-# den PS/2-Regler, also durch IRQ1, `kbd.fi` und die Zeilendisziplin --
-# denselben Weg, den eine echte Tastatur nimmt.
-# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
-#
-# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
-# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
-# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
-# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
-# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
-# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
 VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
 
 tipp_lauf() { # name abbild kommandozeile muster tasten...
@@ -735,11 +656,6 @@ tipp_lauf() { # name abbild kommandozeile muster tasten...
     RC=$(cat "$TMPD/$name.rc" 2>/dev/null || echo 99)
 }
 
-# ---- Fall A: tippen, sichern, verlassen -- auf Schirm UND Leitung.
-#
-# `hallo` / `welt` wird zu `hallo Welt!` / `welt`, und zwar mit: Ende der
-# Zeile, Ruecktaste, Umschalttaste, Sonderzeichen. Danach ein
-# Bildschirmfoto, WAEHREND der Editor noch steht, dann STRG-X.
 tipp_lauf edA "$TMPD/d0.img" \
     "osum gfx nosched noproc nofs noring3 script=edit /e/e1.txt" \
     "edit: ready" \
@@ -754,7 +670,6 @@ printf 'hallo Welt!\nwelt\n' > "$TMPD/edA.soll"
 dateien_gleich "DIE GESICHERTE DATEI, Oktett fuer Oktett aus dem Plattenabbild" \
     "$TMPD/edA.soll" "$TMPD/edA.ist"
 
-# Der Mitschnitt durch ein Terminal: was auf der LEITUNG zu sehen waere.
 VTQ="$TMPD/edA.ppm.ser"
 [ -s "$VTQ" ] || VTQ="$TMPD/edA.txt"
 python3 tools/k11/vt.py "$VTQ" 24 80 --ab 'edit: ready' > "$TMPD/edA.vt" 2>&1
@@ -768,8 +683,6 @@ grep -qa '\^O Write' "$TMPD/edA.vt" \
     && ok "und unten die Tastenzeile" \
     || bad "die Tastenzeile fehlt"
 
-# Und dasselbe Bild aus einem echten BILDSCHIRMFOTO, Zelle fuer Zelle
-# gegen den Zeichensatz gerechnet (`tools/gfx/checkshot.py read`, Runde K7B).
 if [ -s "$TMPD/edA.ppm" ]; then
     ok "das Bildschirmfoto steht ($(stat -c%s "$TMPD/edA.ppm") Oktette)"
     python3 tools/gfx/checkshot.py read "$TMPD/edA.ppm" kernel/gfx/font.fi \
@@ -786,9 +699,6 @@ if [ -s "$TMPD/edA.ppm" ]; then
     grep -qa 'Write' "$TMPD/edA.schirm.txt" \
         && ok "und die Tastenzeile steht auch dort" \
         || bad "die Tastenzeile fehlt auf dem Bildschirm"
-    # DIE EIGENTLICHE ZUSAGE: beide Wege zeigen dasselbe. Verglichen
-    # werden die Zeilen mit Text darin -- der Rand ist auf beiden Seiten
-    # leer, aber das Foto liest Leerzeichen dort, wo `vt.py` nichts hat.
     grep -av '^$' "$TMPD/edA.vt" | sed 's/ *$//' | sort > "$TMPD/edA.a"
     grep -av '^$' "$TMPD/edA.schirm.txt" | sed 's/ *$//' | sort > "$TMPD/edA.b"
     gemeinsam=$(comm -12 "$TMPD/edA.a" "$TMPD/edA.b" | wc -l)
@@ -800,13 +710,6 @@ else
     tail -4 "$TMPD/edA.tasten" | sed 's/^/        /'
 fi
 
-# ---- Fall B: OHNE Bildschirm. Derselbe Editor, nur die serielle Leitung.
-# Bewegen, loeschen, Zeilen trennen und verbinden.
-# eins/zwei/drei/vier/fuenf:
-#   end ret "neu"   -> Zeile 0 wird getrennt, Zeile 1 ist "neu"
-#   home "A"        -> "Aneu"
-#   down home delete-> aus "zwei" wird "wei"
-#   end backspace   -> aus "wei" wird "we"
 tipp_lauf edB "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /e/e2.txt" \
     "edit: ready" \
@@ -832,7 +735,6 @@ printf 'drei\neins\nzwei\nvier\nfuenf\n' > "$TMPD/edC.soll"
 dateien_gleich "zweimal ausschneiden, einmal einfuegen, ein X wieder zurueck" \
     "$TMPD/edC.soll" "$TMPD/edC.ist"
 
-# ---- Fall D: suchen und ersetzen, alle.
 tipp_lauf edD "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /e/e3.txt" \
     "edit: ready" \
@@ -844,7 +746,6 @@ printf 'a-b-c\n' > "$TMPD/edD.soll"
 dateien_gleich "suchen und ersetzen: aXbXc wird a-b-c" \
     "$TMPD/edD.soll" "$TMPD/edD.ist"
 
-# ---- Fall E: eine NEUE Datei anlegen -- der Fall, den es vorher nicht gab.
 tipp_lauf edE "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /w/neu.txt" \
     "edit: ready" \
@@ -856,7 +757,6 @@ printf 'erste zeile\nzweite zeile\n' > "$TMPD/edE.soll"
 dateien_gleich "EINE DATEI, DIE VORHER NICHT DA WAR, mit der Tastatur geschrieben" \
     "$TMPD/edE.soll" "$TMPD/edE.ist"
 
-# ---- Fall F: eine sehr lange Zeile -- der Editor schiebt statt umzubrechen.
 tipp_lauf edF "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /d/lang.txt" \
     "edit: ready" \
@@ -875,8 +775,6 @@ dateien_gleich "900 Zeichen, ans Ende gesprungen, angehaengt, gesichert" \
 
 echo "== 9. Gegenproben: was NICHT passieren darf =="
 
-# (a) Wer nicht sichert, aendert die Platte nicht. Derselbe Tastensatz wie
-#     in Fall A, nur ohne STRG-O -- und mit `n` auf die Frage.
 tipp_lauf gegA "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /e/e1.txt" \
     "edit: ready" \
@@ -885,9 +783,6 @@ python3 tools/osum/mkfs.py cat "$TMPD/nach-gegA.img" /e/e1.txt > "$TMPD/gegA.ist
 dateien_gleich "GEGENPROBE: ohne Sichern bleibt die Datei, wie sie war" \
     "$F/e1.txt" "$TMPD/gegA.ist"
 
-# (b) Die Umschalttaste ist wirklich neu. Dieselbe Folge OHNE `shift-`
-#     schreibt Kleinbuchstaben -- war die Tastatur vorher schon so, waere
-#     hier kein Unterschied.
 tipp_lauf gegB "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /w/klein.txt" \
     "edit: ready" \
@@ -897,11 +792,6 @@ printf 'abcABC\n' > "$TMPD/gegB.soll"
 dateien_gleich "GEGENPROBE: mit Umschalt kommen Grossbuchstaben, ohne nicht" \
     "$TMPD/gegB.soll" "$TMPD/gegB.ist"
 
-# (c) OHNE `kernel/ansi.fi` waeren die Fluchtfolgen auf dem Schirm zu
-#     sehen. Das laesst sich nicht abschalten -- also wird die Gegenprobe
-#     an der Zaehlung gemacht: der Automat MUSS Folgen ausgefuehrt haben,
-#     und auf der Leitung MUSS das Oktett 27 stehen. Kaeme keines an,
-#     zeichnete der Editor gar nicht.
 n=$(od -An -tu1 -v "$TMPD/edA.txt" 2>/dev/null | tr ' ' '\n' | grep -c '^27$')
 num "Fluchtfolgen auf der seriellen Leitung (Oktett 27)" "$n" ge 50
 python3 tools/k11/vt.py "$VTQ" 24 80 --ab 'edit: ready' 2>/dev/null \
@@ -909,19 +799,13 @@ python3 tools/k11/vt.py "$VTQ" 24 80 --ab 'edit: ready' 2>/dev/null \
 n=$(cat "$TMPD/eckig.txt")
 num "GEGENPROBE: auf dem gerechneten Schirm steht KEINE rohe Folge mehr" "$n" lt 2
 
-# (d) `umount` nimmt dem System wirklich den Boden weg.
 skript mount /t/mount.sh >/dev/null
 block "$TMPD/mount.txt" > "$TMPD/mount.ist"
 n=$(grep -ca 'on / type ofs' "$TMPD/mount.txt")
 num "mount nennt das eingehaengte Dateisystem (einmal, vor dem Aushaengen)" "$n" eq 1
-# NACH `umount` LAESST SICH KEIN PROGRAMM MEHR STARTEN -- sie liegen ja auf
-# der Platte. Das ist keine Schwaeche des Testfalls, das IST das Ergebnis:
-# `umount` nimmt dem System wirklich den Boden weg, und die Shell sagt es.
 hat "$TMPD/mount.txt" "sh: cannot run mount" \
     "GEGENPROBE: nach umount startet kein Programm mehr von der Platte"
 
-# (e) Ohne das Wort `gfx` gibt es kein Bild -- die Messung aus Abschnitt 8
-#     haengt wirklich am Bildschirm und nicht an einer Erfindung.
 rm -f "$TMPD/kein.ppm"
 tipp_lauf gegE "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /e/e1.txt" \
@@ -935,9 +819,6 @@ else
     ok "GEGENPROBE: ohne 'gfx' kommt kein brauchbares Bild zustande"
 fi
 
-# (f) Die Speicherkarte von kdata: der neue Bereich K11 darf sich mit
-#     keinem anderen ueberschneiden. Genau dieser Fehler hat Runde K7
-#     den Zeichensatz geloescht.
 python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1 \
     && ok "$(tail -1 "$TMPD/karte.txt")" \
     || { bad "die Speicherkarte von kdata hat Kollisionen"; tail -6 "$TMPD/karte.txt" | sed 's/^/        /'; }
@@ -945,24 +826,17 @@ grep -qa 'K11' tools/kernel/memmap.py \
     && ok "und der Bereich dieser Runde steht in der Karte" \
     || bad "K11_OFF fehlt in tools/kernel/memmap.py"
 
-# (g) Die Aufrufnummern dieser Runde stehen in der Karte in sys.fi und
-#     kollidieren mit keiner anderen Runde.
 n=$(grep -aoE '^const SYS_OSUM_(SETENV|MOUNT): u64 = 14[0-9][0-9]' kernel/sys/sys.fi | wc -l)
 num "eigene Aufrufnummern im Block 1400..1499" "$n" eq 2
 grep -qa '1400..1499   RUNDE K11' kernel/sys/sys.fi \
     && ok "der Block ist in der Karte von sys.fi eingetragen" \
     || bad "der Block 1400..1499 fehlt in der Karte von sys.fi"
-# SYS_MARK und SYS_LEAVE sind die zwei Marken aus Runde 59. Sie tragen
-# die Nummern 1 und 2 und gelten NUR, solange `kstate.EXCURSION` steht --
-# der Kopfkommentar von sys.fi erklaert, warum. Sie zaehlen hier nicht mit.
 doppelt=$(grep -aoE '^const SYS_[A-Z0-9_]+: u64 = [0-9]+' kernel/sys/sys.fi \
     | grep -v 'SYS_MARK\|SYS_LEAVE' \
     | awk '{print $NF}' | sort | uniq -d | tr '\n' ' ')
 [ -z "$doppelt" ] && ok "keine Aufrufnummer ist zweimal vergeben" \
                   || bad "doppelte Aufrufnummern: $doppelt"
 
-# (h) Und der Weg zurueck: die Umgebung erreicht das Kind wirklich. Ohne
-#     `export` darf sie NICHT ankommen.
 cat > "$TMPD/t_env.sh" <<'SCRIPT'
 echo ==BEGIN==
 A=eins
@@ -1009,7 +883,6 @@ if [ -n "$vorher" ] && [ -n "$nachher" ]; then
     gleich "die freien Rahmen sind nach dreissig Prozessen dieselben" \
         "$vorher" "$nachher"
 else
-    # `df` dieses Userlands nennt die Rahmen nicht; dann zaehlt die Platte.
     v=$(grep -aoE 'free [0-9]+' "$TMPD/leck.txt" | head -1 | grep -oE '[0-9]+')
     n2=$(grep -aoE 'free [0-9]+' "$TMPD/leck.txt" | tail -1 | grep -oE '[0-9]+')
     if [ -n "$v" ] && [ -n "$n2" ]; then

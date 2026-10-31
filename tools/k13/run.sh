@@ -1,40 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/k13/run.sh -- BENUTZER, RECHTE UND DER ERSTE PROZESS (Runde K13).
-#
-# Was diese Runde behauptet und was hier gemessen wird:
-#
-#   1. JEDER PROZESS HAT EINE KENNUNG, und sie ueberlebt `fork` und
-#      `execve`. Gemessen in Ring 3 ohne Platte (`k13run`, kernel/uprog.fi):
-#      das Kind meldet seine Kennung ueber den Beendigungscode zurueck.
-#      Und mit den Regeln von POSIX: root darf alles, wer die Kennung
-#      abgelegt hat, kommt nur ueber die GESICHERTE zurueck, und
-#      `setuid(0)` danach MUSS -EPERM sein.
-#   2. DATEIEN HABEN RECHTE UND EINEN EIGENTUEMER, im Inode auf der
-#      Platte. Der WIRT liest sie hinterher AUS DEM ABBILD zurueck
-#      (`mkfs.py meta`) -- nicht aus einem Mitschnitt der seriellen
-#      Leitung. Ein Abbild der alten Fassung bleibt lesbar; die Fassung
-#      steht im Superblock, und `ofsv2raw` zeigt, was ohne sie geschaehe.
-#   3. DIE RECHTEPRUEFUNG WIRKT. Dasselbe Programm, dieselben Dateien,
-#      einmal als root und einmal als `justin`: 0o600 laesst den einen
-#      durch und den anderen nicht, 0o000 laesst root durch (so ist die
-#      Regel) und `justin` nicht, /etc/shadow liest nur root. Die
-#      GEGENPROBE ist `noperm`: derselbe Kernel, dieselben Dateien, die
-#      Pruefung sagt immer ja -- und die Messung bricht zusammen.
-#   4. PASSWOERTER SIND NICHT IM KLARTEXT und auch kein blosser SHA.
-#      PBKDF2-HMAC-SHA256 mit Salz. Gemessen gegen PYTHONS `hashlib`:
-#      dieselben Eingaben, dieselben 64 Hexziffern. Und `passwd` schreibt
-#      wirklich in /etc/shadow -- der Wirt liest die Datei aus dem Abbild
-#      und rechnet den Eintrag mit Python nach.
-#   5. DAS setuid-BIT WIRKT. `justin` liest /etc/shadow nicht, `su` liest
-#      es fuer ihn -- weil die Datei das Bit traegt. GEGENPROBE `nosuid`:
-#      dasselbe scheitert.
-#   6. ES GIBT EINEN PROZESS 1. Er startet Dienste, startet abgestuerzte
-#      neu, nimmt Waisen an und faehrt herunter. Die Waise ist die
-#      GEGENPROBE: ohne init steigt die Zahl der Leichen nachweislich.
-#      Und dass die Abschaltung wirklich ACPI war und nicht der Ausgang
-#      des Pruefstands, steht im Beendigungscode von QEMU: 0 gegen 21.
-#   7. DER NOTWEG STEHT. `initsh` startet die Shell wie vor dieser Runde.
 #
 # Verwendung:  bash tools/k13/run.sh
 set -uo pipefail
@@ -47,18 +11,6 @@ FC1=${FIRNC1:-vendor/firn/bin/firnc1}
 ULD=kernel/user/user.ld
 # RUNDE MERGE-2: 16384 STATT 4096 BLOECKE (8 MiB statt 2 MiB).
 #
-# Der Lauf mit den Programmen aus firnc1 (Abschnitt 9) endete mit
-# "mkfs: the disk is full". Der Grund ist kein Fehler, sondern eine
-# Groesse: firnc1 baut dieselben Programme deutlich groesser als firnc0
-# -- am Kernabbild gemessen 7 266 684 gegen 3 082 944 Oktette, Faktor
-# 2,36. Elf Programme dieser Groesse passen nicht mehr in zwei
-# Megaoktette, und die Runden MULTIUSER und INIT haben die Liste
-# zusaetzlich um /sbin/init und svc verlaengert.
-#
-# Die Zahl ist eine ARBEITSGROESSE fuer ein Abbild im Temporaerbereich,
-# kein Versprechen ueber irgendetwas; sie darf grosszuegig sein. 8 MiB
-# lassen dem Stufe-1-Userland Luft, ohne dass der Lauf spuerbar laenger
-# dauert.
 BLOCKS=16384
 
 K13="id whoami chmod chown passwd su login init svc k13t"
@@ -135,14 +87,6 @@ fi
 grep -q '"K13_OFF"' tools/kernel/memmap.py \
     && ok "der Bereich dieser Runde (0x41000..0x43000) steht in der Karte" \
     || bad "K13_OFF fehlt in tools/kernel/memmap.py"
-# RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
-# seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
-# einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
-# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
-# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
-# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
-# zu melden, die hier gemessen wird.
 mkdir -p "$TMPD/kbad"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kbad/" \; )
 sed -i 's/^const K13_OFF: u64 = 0x41000/const K13_OFF: u64 = 0x40000/' "$TMPD/kbad/lib/kstate.fi"
@@ -482,15 +426,6 @@ PY
 grep -q '^keinklartext' "$TMPD/pwcheck.txt" \
     && ok "das Passwort steht NICHT im Klartext in /etc/shadow" \
     || bad "das Passwort steht im Klartext in /etc/shadow"
-# RUNDE MULTIUSER: hier stand `^runden 2048`, und 2048 war die Zahl, die
-# `kernel/user/pw.fi` damals als ITERS trug. Diese Runde hat den
-# Kostenfaktor gemessen und heraufgesetzt -- die Zusage ist deshalb
-# NICHT gelockert, sondern SCHAERFER geworden: die Zahl im Eintrag muss
-# jetzt mit der uebereinstimmen, die im Quelltext steht, statt mit einer,
-# die hier noch einmal hingeschrieben ist. Wer ITERS aendert und diese
-# Datei vergisst, faellt damit nicht mehr durch -- wer aber den Eintrag
-# OHNE Rundenzahl schreibt oder eine andere nimmt als die vereinbarte,
-# faellt weiter durch, und das ist die Zusage, um die es geht.
 WANT_ITERS=$(grep -oE '^const KOSTEN: u64 = [0-9]+' kernel/user/pw.fi \
     | grep -oE '[0-9]+$')
 grep -q "^runden ${WANT_ITERS:-0}$" "$TMPD/pwcheck.txt" \
@@ -513,13 +448,6 @@ if bash tools/build-kernel.sh "$TMPD/k1.img" --stufe 1 > "$TMPD/b1.txt" 2>&1; th
     ok "firnc1 baut denselben Kern"
     if build_progs 1; then
         ok "firnc1 baut dieselben Programme"
-        # NUR DIE PROGRAMME, DIE DIESER FALL BRAUCHT. Das Abbild kann
-        # nicht groesser werden: die Blockkarte von OFS ist EIN Block,
-        # also 512 * 8 = 4096 Bloecke = 2 MiB, und mehr Bloecke kann
-        # `block_alloc` nicht vergeben (kernel/fs.fi). Das Userland aus
-        # firnc1 ist groesser als das aus firnc0 und passt vollstaendig
-        # nicht hinein -- also die zehn, die `rechte.sh` und
-        # `/etc/inittab` wirklich anfassen.
         SPEC1=""
         for p in sh echo sleep id whoami k13t chmod chown su init; do
             case $p in

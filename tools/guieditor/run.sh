@@ -1,32 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/guieditor/run.sh -- DIE ABNAHME DER RUNDE GUI-EDITOR.
 #
 #   bash tools/guieditor/run.sh [arbeitsverzeichnis]
 #
-# WAS DIESE RUNDE ZUGESAGT HAT, UND WOMIT ES HIER BELEGT WIRD.
-#
-# Die Messlatte des Auftrags nennt fuenf Dinge, und jedes bekommt hier
-# eine Zahl oder ein Bild -- kein Abschnitt sagt "sieht gut aus":
-#
-#   1. Eine 5000-Zeilen-Datei laesst sich fluessig oeffnen, scrollen
-#      und bearbeiten  ->  Abschnitt 3 und 4, in Mikrosekunden.
-#   2. Tippen fuehlt sich nicht traege an (miss die Zeit je
-#      Tastendruck)  ->  Abschnitt 4, GEGEN eine kleine Datei
-#      gemessen, denn nur der Vergleich sagt, ob die Dateigroesse
-#      ueberhaupt etwas kostet.
-#   3. Zwei Dateien gleichzeitig in Reitern  ->  Abschnitt 5.
-#   4. Suchen/Ersetzen am Bild nachweisbar  ->  Abschnitt 6.
-#   5. Syntaxfarben sichtbar  ->  Abschnitt 6, am Bild gezaehlt.
-#
-# WARUM DIE ZEITEN AUS DEM PROGRAMM KOMMEN UND NICHT VON AUSSEN: ein
-# Tastendruck ueber den QEMU-Monitor laeuft durch PS/2, Kern,
-# Fensterserver und Ereignisschlange. Was davon auf das TEXTFELD
-# entfaellt, ist in der Gesamtzeit nicht zu sehen. `/bin/nedit` hat
-# deshalb `messen=N`, `rollen=N` und `rollnur=N`: sie speisen die
-# Tasten durch GENAU den Weg ein, den eine echte Taste nimmt
-# (`wlib.feed_key` -> `on_key` -> `ta_key`), und nehmen davor und
-# danach die Uhr (I_TICKS, 100 Hz -- deshalb ein Buendel und geteilt).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -51,9 +26,6 @@ fi
 python3 -c "import PIL" 2>/dev/null || {
     echo "GUI-EDITOR: uebersprungen, Pillow fehlt"; exit 0; }
 
-# Die zwei Proben. Sie werden HIER gebaut und nicht eingecheckt: eine
-# Datei mit 5000 Zeilen im Baum waere 260 KiB Ballast fuer eine Zahl,
-# die sich in drei Zeilen Python wieder herstellen laesst.
 KLEIN="$OUT/probe.fi"
 GROSS="$OUT/gross.fi"
 ZWEI="$OUT/zwei.sh"
@@ -90,7 +62,6 @@ with open(sys.argv[1], "w") as f:
         f.write("fn f%d() -> u64 { let x: u64 = %d  // Zeile %d\n" % (i, i, i))
 PY
 
-# lauf <name> <datei-auf-der-platte> <hostpfad> <extra-worte> [bild]
 lauf() {
     local name=$1 gast=$2 host=$3 extra=$4 bild=${5:-nein}
     local d="$OUT/$name"
@@ -119,9 +90,6 @@ if python3 tools/k15/icon.py assets/apps/editor.osp/symbol.txt \
 else
     bad "sein Symbol laesst sich in ein Bild wandeln"
 fi
-# DER ALTE EDITOR BLEIBT. Der Auftrag sagt es ausdruecklich, und ohne
-# diese zwei Zusagen waere "ersetzt" von "danebengestellt" nicht zu
-# unterscheiden.
 grep -qa '^import wlib$' kernel/user/edit.fi \
     && bad "kernel/user/edit.fi zieht auf einmal wlib herein -- das ist der TERMINAL-Editor" \
     || ok "kernel/user/edit.fi ist unveraendert ein Terminalprogramm (kein wlib)"
@@ -154,9 +122,6 @@ S2="$OUT/klein/serial.txt"
 tipp2=$(grep -aoE 'tippen n[0-9]+ ticks [0-9]+ us_je [0-9]+' "$S2" | head -1 | grep -oE '[0-9]+$')
 roll2=$(grep -aoE 'rollen n[0-9]+ ticks [0-9]+ us_je [0-9]+' "$S2" | head -1 | grep -oE '[0-9]+$')
 echo "        gemessen: tippen ${tipp2:-?} us/Taste, rollen ${roll2:-?} us/Taste (12 Zeilen)"
-# DIE ZUSAGE IST NICHT "schnell", SONDERN "UNABHAENGIG VON DER
-# DATEIGROESSE". Eine feste Schranke waere eine Aussage ueber den
-# Wirt; das Verhaeltnis ist eine Aussage ueber den Entwurf.
 if [ -n "${tipp:-}" ] && [ -n "${tipp2:-}" ]; then
     if [ "$tipp2" -eq 0 ]; then tipp2=1; fi
     v=$(( tipp * 100 / tipp2 ))
@@ -194,7 +159,6 @@ for z in 1 2 3; do
         extra="wigapp=/bin/nedit,/probe.fi,zeig=$z" > "$d.log" 2>&1
     [ -s "$d/desktop.png" ] && cp "$d/desktop.png" "$SHOTS/ab-zeig$z.png"
 done
-# Der Zustand steht auf der Leitung, das Bild daneben.
 z1=$(grep -aoE 'nedit: reiter [0-9]+ zeilen [0-9]+ zeile [0-9]+ spalte [0-9]+' \
      "$OUT/zeig1/serial.txt" | tail -1)
 z2=$(grep -aoE 'zeile [0-9]+ spalte [0-9]+' "$OUT/zeig2/serial.txt" | tail -1)
@@ -203,10 +167,6 @@ echo "        Auswahl endet bei: $z1"
 echo "        Suchtreffer steht bei: $z2"
 num "nach dem Ersetzen ist die Datei veraendert" "${z3:-0}" -eq 1
 
-# DIE FARBEN WERDEN GEZAEHLT UND NICHT ANGESEHEN. Ein Bild mit
-# Syntaxfarben hat im Textbereich mehr als eine Vordergrundfarbe; eines
-# ohne hat genau eine. Gezaehlt wird in dem Rechteck, in dem der Text
-# steht.
 python3 - "$SHOTS/ab-zeig2.png" > "$OUT/farben.txt" 2>&1 <<'PY'
 import sys
 from PIL import Image
@@ -228,12 +188,7 @@ num "der Text hat mehr als eine Farbe (Syntaxhervorhebung)" "${nf:-0}" -ge 3
 sed -n '2,6p' "$OUT/farben.txt" | sed 's/^/        /'
 
 echo "== 7. Sichern: die Oktette liegen wirklich auf der Platte =="
-# DIE EINZIGE ZUSAGE, DIE ZWEI MASCHINEN BRAUCHT.
 #
-# Dass der Editor "gesichert" auf die Leitung schreibt, ist seine
-# eigene Aussage ueber sich selbst. Gemessen ist sie erst, wenn eine
-# ZWEITE Maschine dieselbe Platte aufmacht und die geaenderten Oktette
-# darin findet -- deshalb `platte=` und `script=cat`.
 d="$OUT/sichern"
 bash tools/alltag/build.sh "$d" \
     progs="desktop taskbar nedit sh echo ls cat" accel="${OSUM_ACCEL:-kvm}" \
@@ -255,9 +210,6 @@ else
     bad "die geaenderte Zeile steht nicht auf der Platte"
     grep -a -A3 'probe.fi --' "$d2/serial.txt" | head -5 | sed 's/^/        /'
 fi
-# Und der Rest der Datei ist unversehrt -- ein Sichern, das die
-# Aenderung schreibt und daneben etwas zerstoert, waere schlimmer als
-# keines.
 grep -qa 'const TEXT: u64 = 0x1234' "$d2/serial.txt" \
     && ok "der Rest der Datei ist unveraendert" \
     || bad "der Rest der Datei hat gelitten"

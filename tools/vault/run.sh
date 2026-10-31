@@ -1,68 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/vault/run.sh -- RUNDE TRESOR: Geraeteidentitaet, Sicherung,
-# Schluesselverwaltung. Und das, was NICHT geht.
-#
-# Was diese Runde behauptet und was hier gemessen wird:
-#
-#   1. SHA-256 IN RING 3 IST SHA-256. `kernel/user/sha.fi` gegen PYTHONS
-#      `hashlib`: die drei Standardnachrichten aus FIPS 180-4, eine ueber
-#      viele Bloecke, und DIESELBE in sieben ungleichen Stuecken -- die
-#      letzten beiden muessen gleich sein, sonst ist die Pufferung falsch.
-#      `pw.fi` konnte das nicht: dort steht `if len > 256 { return false }`.
-#
-#   2. DER KERNEL LIEST SMBIOS WIRKLICH. Der WIRT holt sich denselben
-#      Speicher ueber den QEMU-Monitor (`pmemsave`) und entschluesselt die
-#      Tabelle mit einer ZWEITEN, unabhaengigen Umsetzung
-#      (`tools/vault/smbios.py`, Python). Einstiegspunkt, Tabellenadresse,
-#      Laenge, Anzahl der Strukturen und jede Zeichenkette muessen
-#      uebereinstimmen. Eine Umsetzung allein koennte zweimal denselben
-#      Fehler machen.
-#
-#   3. DIE PRUEFSUMME IST NOETIG. In QEMU steht bei 0x000F1031 die
-#      ZEICHENKETTE "_SM3_" aus dem Zeichenvorrat von SeaBIOS. Der Wirt
-#      weist nach, dass sie da ist und dass ihre Pruefsumme NICHT stimmt;
-#      der Kernel meldet `tried=1`, also GENAU EINEN angenommenen
-#      Einstiegspunkt.
-#
-#   4. WAS EINE VM HERGIBT UND WAS NICHT. Zwei Laeufe desselben Kernels:
-#      ohne `-smbios` ist die Seriennummer LEER und die UUID sechzehn
-#      Nulloktette; mit `-smbios type=1,serial=...` steht genau da, was
-#      auf der Kommandozeile stand. Das ist zugleich die Zusage (der
-#      Parser stimmt) und die Gegenprobe (die Werte sind faelschbar).
-#
-#   5. DER EFI-WEG. Multiboot 1 liefert keine EFI-Systemtafel, also baut
-#      der Lauf `hwidefi` eine VON HAND und laesst `hwid.from_efi` sie
-#      gehen -- mit drei Gegenproben: Zeiger 0, falsche Signatur, und eine
-#      Tafel, in der nur ein FREMDER GUID steht.
-#
-#   6. DER FINGERABDRUCK. `/proc/hwid` und `hwid -f` in Ring 3, und der
-#      WIRT rechnet denselben Fingerabdruck aus dem kanonischen Text nach.
-#      Dazu: derselbe Rechner mit einer NEUEN PLATTE gibt DENSELBEN
-#      Fingerabdruck (eine Neuinstallation aendert ihn nicht), ein anderer
-#      Rechner einen ANDEREN.
-#
-#   7. DIE SICHERUNG. `backup save` zweimal hintereinander: der zweite Lauf
-#      schreibt NULL Oktette. Sichern, loeschen, wiederherstellen ergibt
-#      einen Baum, den der WIRT aus dem Plattenabbild zurueckliest und
-#      Oktett fuer Oktett vergleicht -- nicht aus einem Mitschnitt der
-#      seriellen Leitung.
-#
-#   8. DIE EHRLICHE GRENZE. Dieselben acht Oktette, einmal HINTEN an eine
-#      Datei und einmal VORNE. Hinten: ein neuer Block. Vorne: JEDER Block
-#      neu. Feste Blockgroesse kann das nicht, und die Zahlen stehen in
-#      docs/THEFT.md statt einer Ausrede.
-#
-#   9. `backup verify` FINDET SCHADEN. Der WIRT kippt EIN Oktett in der
-#      Packdatei IM ABBILD (`tools/vault/corrupt.py`) -- von aussen, so
-#      wie echter Schaden entsteht -- und derselbe Lauf prueft den
-#      beschaedigten UND einen heilen Speicher.
-#
-#  10. DIE SCHLUESSELVERWALTUNG. PBKDF2-HMAC-SHA256 gegen Pythons
-#      `hashlib.pbkdf2_hmac`, drei Faelle, 64 Oktette (also ZWEI Bloecke).
-#      Und der Rundlauf: init -> open gibt denselben Fingerabdruck, ein
-#      falsches Passwort wird abgewiesen, nach `erase` ist der Schluessel
-#      weg. Mit der Zeit, die das gekostet hat.
 #
 # Verwendung:  bash tools/vault/run.sh
 set -uo pipefail
@@ -84,7 +20,6 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 is()  { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', erwartet '$3'"; fi; }
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
-# Der Wert hinter `schluessel: ` aus einer Ausgabe.
 wert() { grep -a "^$2: " "$1" | tail -1 | sed "s/^$2: //"; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
@@ -127,20 +62,8 @@ grep -q '"HWID_OFF"' tools/kernel/memmap.py \
     && ok "der Bereich dieser Runde (0x5A000..0x5C000) steht in der Karte" \
     || bad "HWID_OFF fehlt in tools/kernel/memmap.py"
 
-# GEGENPROBE: der Bereich auf die Seite von K18 gelegt MUSS auffallen.
-# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
-# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
-# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
-# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
-# zu melden, die hier gemessen wird.
 mkdir -p "$TMPD/kbad"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kbad/" \; )
-# RUNDE GRUNDLINIE-2: die Gegenprobe zielte auf 0x5A000/0x59000 -- beide
-# Zahlen stimmen seit Langem nicht mehr. HWID liegt heute bei 0x72000,
-# der Nachbar davor ist SHARE (0x6F000..0x72000). Der `sed` griff ins
-# Leere, die Kopie blieb unveraendert und war -- richtigerweise --
-# kollisionsfrei; die Gegenprobe mass also NICHTS. Jetzt wird HWID um
-# eine Seite nach unten auf SHARE gelegt, und der Pruefer MUSS anschlagen.
 sed -i 's/^const HWID_OFF: u64 = 0x72000/const HWID_OFF: u64 = 0x71000/' "$TMPD/kbad/lib/kstate.fi"
 grep -q '^const HWID_OFF: u64 = 0x71000' "$TMPD/kbad/lib/kstate.fi" \
     || bad "die Gegenprobe konnte HWID_OFF gar nicht verschieben"
@@ -150,27 +73,6 @@ else
     ok "GEGENPROBE: HWID auf 0x59000 kollidiert mit BATT und faellt auf"
 fi
 
-# RUNDE MERGE-3: 480 SEKUNDEN STATT 240, UND DIE ZAHL IST GEMESSEN.
-# Nach der Zusammenfuehrung von mergeline2 endete der Abschnitt mit
-# "der Geheimnislauf endet ordentlich: '124', erwartet '21'" -- 124 ist
-# der Rueckgabewert von `timeout`, also NICHT ein Fehler des Kerns,
-# sondern die Frist. Danach fielen sechs weitere Zusagen, weil ihre
-# Zahlen aus der Ausgabe dieses einen Laufs kommen: 212/7.
-# GEMESSEN mit einer Kopie dieses Laeufers, die jede Startdauer
-# mitschreibt (Wirt ruhig, Lastmittel unter 4):
-#     sec2   254 s   <- der Geheimnislauf, mit 240 s abgeschnitten
-#     mess   124 s
-#     orph   118 s
-#     backup  84 s
-# Der laengste Lauf liegt also 14 Sekunden ueber der alten Frist. Mit
-# 900 s lief derselbe Abschnitt vollstaendig durch: 220 bestanden, 0
-# gescheitert. 480 s sind knapp das Doppelte des gemessenen Wertes --
-# genug Luft fuer einen belasteten Wirt und immer noch eine Frist, die
-# einen echten Haenger abfaengt. ES IST KEINE ZUSAGE ENTSCHAERFT:
-# derselbe Lauf, dieselben Vergleiche, nur nicht mehr mittendrin
-# abgeschnitten.
-# ------------------------------------------------------------- ein Lauf
-# lauf <name> <abbild> <kommandozeile> [weitere qemu-argumente...]
 lauf() {
     local name=$1 img=$2 app=$3
     shift 3
@@ -235,7 +137,6 @@ g5=$(grep -a '^sha5: ' "$TMPD/sha.txt" | sed 's/^sha5: //')
 
 echo "== 3. SMBIOS: der Kernel gegen eine zweite, unabhaengige Umsetzung =="
 
-# Ein Lauf, der NUR liest, und daneben ein Speicherabzug ueber den Monitor.
 python3 tools/vault/dump.py "$TMPD/k0.img" "$TMPD/mem.bin" "$TMPD/dumprun.txt" \
     > "$TMPD/dump.log" 2>&1 \
     && ok "der Wirt holt sich 0x0..0x100000 ueber den QEMU-Monitor" \
@@ -270,14 +171,11 @@ for feld in sys_man sys_prod sys_ver; do
     fi
 done
 
-# Die Pruefsumme ist noetig -- der Beleg dafuer.
 python3 tools/vault/smbios.py --koeder "$TMPD/mem.bin" > "$TMPD/koeder.txt" 2>&1
 hat "$TMPD/koeder.txt" "koeder=1" "bei 0xF1031 steht '_SM3_' aus dem Zeichenvorrat von SeaBIOS"
 hat "$TMPD/koeder.txt" "koeder_pruefsumme=falsch" "und seine Pruefsumme stimmt NICHT"
 is "der Kernel hat GENAU EINEN Einstiegspunkt angenommen" \
    "$(grep -a '^hwid: tried=' "$TMPD/hwraw.txt" | tail -1 | sed 's/^hwid: tried=//')" "1"
-
-# ======================================= 4. was eine VM hergibt (und nicht)
 
 echo "== 4. dieselbe Maschine, zwei Firmwares: was SMBIOS wirklich wert ist =="
 
@@ -308,7 +206,6 @@ is "die UUID auch" \
 is "und jetzt IST es eine UUID" \
    "$(grep -a '^hwid: uuid_ok=' "$TMPD/hwfake.txt" | tail -1 | sed 's/^hwid: uuid_ok=//')" "1"
 
-# NVMe: die Seriennummer aus IDENTIFY CONTROLLER.
 dd if=/dev/zero of="$TMPD/nv.img" bs=1M count=8 status=none
 rc=$(kernlauf hwnvme "hwid nvme nokbd nosched noproc nofs noring3" \
      -drive "file=$TMPD/nv.img,format=raw,if=none,id=nv0" \
@@ -320,8 +217,6 @@ is "die Seriennummer des Laufwerks kommt aus IDENTIFY CONTROLLER" \
 is "und das Modell dazu" \
    "$(grep -a '^hwid: nvme_mod=' "$TMPD/hwnvme.txt" | tail -1 | sed 's/^hwid: nvme_mod=//')" \
    "QEMU NVMe Ctrl"
-# GEGENPROBE: ohne das Wort `nvme` steht der Controller nie, also auch
-# keine Seriennummer -- obwohl das Laufwerk am Bus haengt.
 rc=$(kernlauf hwnonvme "hwid nokbd nosched noproc nofs noring3" \
      -drive "file=$TMPD/nv.img,format=raw,if=none,id=nv0" \
      -device nvme,drive=nv0,serial=NVME-SER-4242)
@@ -335,8 +230,6 @@ is "die MAC-Adresse kommt aus dem Treiber" \
    "$(grep -a '^hwid: mac=' "$TMPD/hwmac.txt" | tail -1 | sed 's/^hwid: mac=//')" "525400123456"
 is "GEGENPROBE: ohne Karte gibt es keine MAC" \
    "$(grep -a '^hwid: mac_ok=' "$TMPD/hwraw.txt" | tail -1 | sed 's/^hwid: mac_ok=//')" "0"
-
-# ============================================== 5. der EFI-Weg
 
 echo "== 5. der EFI-Weg, gegen eine von Hand gebaute Systemtafel =="
 
@@ -353,8 +246,6 @@ is "GEGENPROBE: eine Tafel ohne Signatur wird abgewiesen" \
 is "GEGENPROBE: eine Tafel mit nur einem FREMDEN GUID gibt nichts her" \
    "$(grep -a '^hwidefi: decoy=' "$TMPD/hwefi.txt" | tail -1 | sed 's/^hwidefi: decoy=//')" "1"
 nicht "$TMPD/hwraw.txt" "hwidefi:" "GEGENPROBE: ohne das Wort hwidefi wird der Pfad nie betreten"
-
-# ================================== 6. /proc/hwid und der Fingerabdruck
 
 echo "== 6. /proc/hwid, der Fingerabdruck und was ihn NICHT aendert =="
 
@@ -375,7 +266,6 @@ mkimg_hwid() { # ziel
 }
 mkimg_hwid "$TMPD/dh1.img" && ok "mkfs.py baut das Abbild fuer /proc/hwid" \
     || bad "mkfs.py fehlgeschlagen"
-# Ein ZWEITES Abbild, frisch gebaut -- das ist die "Neuinstallation".
 mkimg_hwid "$TMPD/dh2.img"
 
 rc=$(lauf hwp1 "$TMPD/dh1.img" "osum vfs nokbd script=sh /t/hwid.sh;exit" "${SMB1[@]}")
@@ -393,7 +283,6 @@ FP1=$(fingerabdruck "$TMPD/hwp1.txt")
 [ ${#FP1} -eq 64 ] && ok "hwid -f gibt 64 Hexziffern" \
                    || bad "hwid -f gibt '$FP1' (${#FP1} Zeichen)"
 
-# Der Wirt rechnet denselben Fingerabdruck aus dem kanonischen Text nach.
 SOLL=$(python3 - <<'PY'
 import hashlib
 canon = (b"system_manufacturer=Flei\n"
@@ -406,12 +295,10 @@ PY
 )
 is "der Fingerabdruck ist auf dem Wirt nachrechenbar" "$FP1" "$SOLL"
 
-# DIESELBE Maschine, ANDERE Platte: der Fingerabdruck darf sich nicht ruehren.
 rc=$(lauf hwp2 "$TMPD/dh2.img" "osum vfs nokbd script=sh /t/hwid.sh;exit" "${SMB1[@]}")
 FP2=$(fingerabdruck "$TMPD/hwp2.txt")
 is "eine NEUE PLATTE aendert den Fingerabdruck nicht" "$FP2" "$FP1"
 
-# ANDERE Maschine: er muss sich aendern.
 rc=$(lauf hwp3 "$TMPD/dh1.img" "osum vfs nokbd script=sh /t/hwid.sh;exit" "${SMB2[@]}")
 FP3=$(fingerabdruck "$TMPD/hwp3.txt")
 if [ -n "$FP3" ] && [ "$FP3" != "$FP1" ]; then
@@ -420,14 +307,11 @@ else
     bad "zwei verschiedene Maschinen haben denselben Fingerabdruck ($FP3)"
 fi
 
-# Und die Ehrlichkeit: ohne Firmwareangaben zaehlt der Fingerabdruck wenig.
 rc=$(lauf hwp4 "$TMPD/dh1.img" "osum vfs nokbd script=sh /t/hwid.sh;exit")
 hat "$TMPD/hwp4.txt" "system_serial: " "ohne -smbios bleibt die Seriennummer leer"
 q=$(grep -a '^sources: ' "$TMPD/hwp4.txt" | tail -1 | sed 's/^sources: //')
 [ "${q:-0}" -le 2 ] && ok "und der Fingerabdruck stuetzt sich auf hoechstens zwei Quellen (${q:-0})" \
                     || bad "unerwartet viele Quellen ohne Firmwareangaben: $q"
-
-# ==================================== 7. die Sicherung: Kern der Runde
 
 echo "== 7. die Sicherung: doppelt, inkrementell, und Oktett fuer Oktett zurueck =="
 
@@ -491,9 +375,6 @@ is "DER ZWEITE LAUF SCHREIBT NULL NEUE BLOECKE" "$R2_NEW" "0"
 is "und null Oktette" "$R2_WR" "0"
 is "obwohl er denselben Baum GANZ gelesen hat" "$R2_RD" "$R1_RD"
 
-# Die Zeiten. KEINE Zusage mit fester Zahl -- sie haengen vom Wirt ab und
-# ein Test, der bei Last umfaellt, misst den Wirt und nicht das Programm.
-# Sie werden gemeldet, damit die Doku eine reproduzierbare Quelle hat.
 R1_MS=$(feld RUN1 "ms"); R2_MS=$(feld RUN2 "ms")
 ok "Zeit: erster Lauf ${R1_MS} ms, zweiter Lauf ${R2_MS} ms (Zeitgeber 100 Hz, also 10 ms Aufloesung)"
 
@@ -509,8 +390,6 @@ abschnitt GETBAD | grep -qa 'no such path' \
     && ok "backup get auf einen Pfad, den es nicht gibt, ist ein FEHLER" \
     || bad "backup get auf einen unbekannten Pfad meldet keinen Fehler"
 
-# DER EIGENTLICHE NACHWEIS: der Wirt liest den wiederhergestellten Baum
-# AUS DEM ABBILD und haelt ihn gegen das Original.
 python3 - "$TMPD/live-backup.img" > "$TMPD/vergleich.txt" 2>&1 <<'PY'
 import subprocess, sys
 img = sys.argv[1]
@@ -536,8 +415,6 @@ PY
 sed 's/^/        /' "$TMPD/vergleich.txt" | grep -v 'verglichen=' | head -6
 is "der wiederhergestellte Baum ist OKTETT FUER OKTETT der alte (6 Eintraege)" \
    "$(grep -a '^verglichen=' "$TMPD/vergleich.txt")" "verglichen=6 gleich=6"
-
-# ================================= 8. die ehrliche Grenze der festen Blockgroesse
 
 echo "== 8. die ehrliche Grenze: dieselben acht Oktette, hinten und vorne =="
 
@@ -694,31 +571,11 @@ sed -n '/^==AFTER==/,/^==END==/p' "$K" | grep -qa 'cannot read' \
     && ok "nach erase ist der Schluessel weg -- open findet nichts mehr" \
     || bad "nach erase laesst sich der Schluessel noch oeffnen"
 
-# GEGENPROBE: der Schluessel selbst darf NIE auf der Leitung stehen.
 if grep -qa '^key: [0-9a-f]\{64\}$' "$K"; then
     bad "der Schluessel steht im Klartext in der Ausgabe"
 else
     ok "GEGENPROBE: der Schluessel selbst steht nirgends in der Ausgabe"
 fi
-
-# ============ 11. verwaiste Pakete: die eine Ausnahme, und was sie kostet
-#
-# Der Nachtrag vom 27.08.2026. Ein Backup traegt KEINE Programme -- ihre
-# Oktette liegen in einer Quelle und der Hash im PLAN benennt sie
-# eindeutig. Das gilt aber nur, solange eine Quelle sie auch liefern kann.
-# Ein selbst gebautes, nie veroeffentlichtes Paket ist VERWAIST: sein Hash
-# steht im PLAN, und niemand kann die Oktette herausgeben.
-#
-# Gemessen wird hier:
-#   * dasselbe Backup einmal OHNE und einmal MIT Verwaisten -- die
-#     Differenz ist der Preis der Ausnahme, in Oktetten und in Prozent;
-#   * das ERREICHBARE Paket landet NICHT im Schnappschuss (Gegenprobe);
-#   * ein zweiter Rechner, auf dem es den Baum GAR NICHT gibt, stellt aus
-#     dem Speicher allein wieder her, und der Wirt vergleicht die Oktette
-#     mit dem Original AUS DEM ABBILD;
-#   * das wiederhergestellte Paket LAEUFT -- was zugleich beweist, dass
-#     `restore` die Rechtebits wirklich setzt;
-#   * eine kaputte Zeile und ein fehlender Eintrag sind LAUTE Fehler.
 
 echo "== 11. verwaiste Pakete: sichern, Baum wegwerfen, wiederherstellen =="
 
@@ -756,8 +613,6 @@ open(t + "/BADSHAPE", "wb").write(b"../../etc/passwd\n")
 open(t + "/MISSING", "wb").write(b"deadbeefdeadbeefdead\n")
 PY2
 
-# Das verwaiste Paket ist ein ECHTES Programm -- sonst liesse sich nicht
-# messen, dass es nach der Wiederherstellung laeuft.
 cp "$TMPD/bin/hello.elf" "$TMPD/orph-start"
 cp "$TMPD/bin/echo.elf" "$TMPD/reach-start"
 printf 'name=mine\nversion=0.1.0\n' > "$TMPD/orph-meta"
@@ -809,7 +664,6 @@ is "und schreibt dafuer auch null verwaiste Oktette" "$(ofeld BASE 'orphan bytes
 is "MIT Liste sichert backup GENAU EINEN verwaisten Eintrag" "$(ofeld WITH 'orphan entries')" "1"
 is "eine LEERE Liste ist kein Fehler und sichert nichts" "$(ofeld EMPTY 'orphan entries')" "0"
 
-# DIE ZAHL, um die es geht: was die Ausnahme kostet.
 BASEB=$(ofeld BASE 'written bytes')
 WITHB=$(ofeld WITH 'written bytes')
 ORPHB=$(ofeld WITH 'orphan bytes')
@@ -824,7 +678,6 @@ else
     bad "die Oktettzahlen des Verwaisten-Laufs fehlen"
 fi
 
-# GEGENPROBEN am Schnappschuss selbst.
 SNAP=$(sed -n '/^==SNAP==/,/^==END==/p' "$O")
 echo "$SNAP" | grep -qa "/store/$ORPH/start" \
     && ok "der Schnappschuss nennt das VERWAISTE Paket" \
@@ -847,11 +700,6 @@ sed -n '/^==MISSING==/,/^==SNAP==/p' "$O" | grep -qa 'orphan is not in the store
     && ok "ein verwaister Eintrag, den es nicht gibt, ist ein LAUTER Fehler" \
     || bad "ein fehlender verwaister Eintrag wird stillschweigend uebergangen"
 
-# ---- DER EIGENTLICHE NACHWEIS: ein Rechner OHNE den Baum ----------------
-#
-# Das zweite Abbild bekommt NUR den Sicherungsspeicher. Kein /tree, kein
-# /set, kein Paket -- die Oktette koennen nirgendwo anders herkommen als
-# aus PACK.
 for f in PACK INDEX S-b1; do
     python3 tools/osum/mkfs.py cat "$TMPD/live-orph.img" "/sb/$f" > "$TMPD/sb-$f" 2>/dev/null \
         || bad "der Wirt kann /sb/$f nicht aus dem Abbild lesen"
@@ -902,22 +750,6 @@ cat "$TMPD/orphcmp.txt" | sed 's/^/        /'
 grep -qa 'gleich=True' "$TMPD/orphcmp.txt" \
     && ok "das verwaiste Paket ist OKTETT FUER OKTETT wieder da, aus dem Abbild gelesen" \
     || bad "das wiederhergestellte verwaiste Paket ist NICHT oktettgleich"
-
-# ====== 12. was der Entwurf taugt: Deduplizierung, Zuwachs, Rueckweg
-#
-# Der ZWEITE NACHTRAG vom 27.08.2026. Justins Frage war, ob beim Sichern
-# "eine Backup-Datei, ein ZIP oder so" herauskommt. Die Antwort ist nein,
-# und hier stehen die Zahlen, die erklaeren, warum das die bessere
-# Antwort ist:
-#
-#   * DIESELBE DATEI IN DREI ORDNERN liegt EINMAL im Speicher.
-#   * DERSELBE BAUM ZWEIMAL gesichert schreibt beim zweiten Mal NICHTS.
-#   * EINE GROSSE DATEI MINIMAL GEAENDERT kostet die geaenderten Bloecke
-#     und keinen Oktett mehr -- ein ZIP haette alles neu geschrieben.
-#   * WIEDERHERSTELLEN geht einzeln (eine Datei) und ganz (der Baum),
-#     und der WIRT vergleicht die Oktette aus dem Plattenabbild.
-#   * EIN ABGEBROCHENER LAUF hinterlaesst NICHTS, was wie eine fertige
-#     Sicherung aussieht.
 
 echo "== 12. Deduplizierung, Zuwachs und der Rueckweg =="
 
@@ -1001,7 +833,6 @@ is "der Messlauf endet ordentlich" "$rc" "21"
 M="$TMPD/mess.txt"
 mfeld() { sed -n "/^==$1==/,/^==/p" "$M" | grep -a "^$2: " | tail -1 | sed "s/^$2: //"; }
 
-# ---- 1. DIESELBE DATEI IN DREI ORDNERN -----------------------------------
 is "drei Ordner, dieselbe Datei: 6 Bloecke gesehen" "$(mfeld DEDUP 'chunks')" "6"
 is "aber nur ZWEI davon sind neu" "$(mfeld DEDUP 'new chunks')" "2"
 is "gelesen wurden alle 24576 Oktette" "$(mfeld DEDUP 'read bytes')" "24576"
@@ -1021,7 +852,6 @@ ok "ZAHLEN: 1. Lauf $W1 Oktette in ${T1} ms, 2. Lauf $W2 Oktette in ${T2} ms"
 echo "        (der Faktor ist kein Verhaeltnis, sondern eine Null:"
 echo "         $W1 -> $W2 Oktette bei gleichem Lesen von $R1)"
 
-# ---- 3. EINE GROSSE DATEI, EIN OKTETT ANDERS -----------------------------
 W3=$(mfeld RUN3 'written bytes'); N3=$(mfeld RUN3 'new chunks')
 is "EIN Oktett in b.bin geaendert: genau EIN neuer Block" "$N3" "1"
 is "das sind 4096 Oktette von 44384 gelesenen" "$W3" "4096"
@@ -1073,7 +903,6 @@ sed -n '/^==RESTABBRUCH==/,/^==END==/p' "$M" | grep -qa 'no such snapshot' \
     && ok "und wiederherstellen laesst sich daraus auch nichts" \
     || bad "aus dem abgebrochenen Lauf laesst sich etwas wiederherstellen"
 
-# GEGENPROBE AM ABBILD: liegt da wirklich kein S-, und auch kein T-?
 python3 tools/osum/mkfs.py list "$TMPD/live-mess.img" > "$TMPD/mess.ls" 2>&1
 grep -qE '/st4/S-' "$TMPD/mess.ls" \
     && bad "im Abbild liegt eine S-Datei aus dem abgebrochenen Lauf" \
@@ -1081,8 +910,6 @@ grep -qE '/st4/S-' "$TMPD/mess.ls" \
 grep -qE '/st4/T-' "$TMPD/mess.ls" \
     && bad "die halbfertige T-Datei ist liegengeblieben" \
     || ok "GEGENPROBE im Abbild: die halbfertige T-Datei ist weggeraeumt"
-
-# ================ 13. Geheimnisse: drei Klassen, zwei getrennte Passwoerter
 
 echo "== 13a. ChaCha20 und die Ableitung gegen RFC 8439 und hashlib =="
 
@@ -1129,8 +956,6 @@ is "sl5 gegengerechnet auf dem Wirt" "$(wv sl5name)" "$(wv sl5name)"
 
 echo "== 13b. drei Klassen in einer echten Sicherung =="
 
-# Der Sicherungssatz. Jede Datei traegt eine EINDEUTIGE Marke, damit der
-# Wirt sie im fertigen Speicher suchen kann -- und ihr Fehlen etwas heisst.
 python3 - "$TMPD" <<'PY2'
 import os, sys
 t = sys.argv[1] + "/set"
@@ -1237,28 +1062,19 @@ python3 tools/osum/mkfs.py build "$TMPD/dsec2.img" $BLOCKS \
 rc=$(lauf sec2 "$TMPD/dsec2.img" "osum vfs nokbd script=sh /t/s.sh;exit")
 is "der Geheimnislauf endet ordentlich" "$rc" "21"
 S2="$TMPD/sec2.txt"
-# GEGENPROBE, und sie hat einen echten Fehler gefunden: dieser Kern gibt
-# einem Programm hoechstens acht Argumente (`proc.MAX_ARGS`). `-p pass -m
-# pass` sind neun, die Schale sagt "too many arguments" und LAESST DEN
-# BEFEHL AUS -- die Sicherung lief nie und der Test las nur leere Felder.
-# Darum haengt das Passwort jetzt am Buchstaben, und darum steht diese
-# Zusage hier.
 is "GEGENPROBE: keine Zeile sprengt das Argumentlimit der Schale" \
    "$(grep -ac 'too many arguments' "$S2" || true)" "0"
 sfeld() { sed -n "/^==$1==/,/^==/p" "$S2" | grep -a "^$2: " | tail -1 | sed "s/^$2: //" | tr -d '\r'; }
 sab() { sed -n "/^==$1==/,/^==/p" "$S2"; }
 
-# ---- STANDARDLAUF: OHNE ausdrueckliche Wahl kommt KEIN Geheimnis mit ----
 is "A (Standard): KEINE geheime Datei gesichert" "$(sfeld A 'secret files')" "0"
 is "A (Standard): drei geheime Orte AUSGELASSEN" "$(sfeld A 'secret left out')" "3"
 is "A (Standard): drei Orte der Klasse (c) ausgelassen" "$(sfeld A 'never out')" "3"
 
-# ---- MIT -m: die Geheimnisse kommen mit, versiegelt --------------------
 is "B (-m): drei geheime Dateien mitgenommen" "$(sfeld B 'secret files')" "3"
 is "B (-m): keine mehr ausgelassen" "$(sfeld B 'secret left out')" "0"
 is "B (-m): Klasse (c) bleibt trotzdem drausssen" "$(sfeld B 'never out')" "3"
 
-# ---- DER EIGENTLICHE NACHWEIS: der WIRT durchsucht die fertigen Speicher
 python3 - "$TMPD/live-sec2.img" "$TMPD" > "$TMPD/grep.txt" 2>&1 <<'PY2'
 import subprocess, sys
 img = sys.argv[1]
@@ -1325,7 +1141,6 @@ sed 's/^/        /' "$TMPD/grep.txt" | head -34
 
 g() { grep -a "^  $1 $2 " "$TMPD/grep.txt" | awk '{print $3}'; }
 
-# Die Gegenprobe ZUERST: die Suche muss ueberhaupt etwas finden koennen.
 is "GEGENPROBE: gewoehnliche Daten stehen in A im KLARTEXT im Speicher" \
    "$(g /sA/ PLAN)" "1"
 is "A: der Tresor ist NICHT im Speicher -- gar nicht" "$(g /sA/ VAULT)" "0"
@@ -1349,7 +1164,6 @@ is "C (-p -m): auch die gewoehnlichen Daten sind nicht mehr lesbar" "$(g /sC/ PL
 is "C: der Tresor natuerlich auch nicht" "$(g /sC/ VAULT)" "0"
 is "C: der Geraeteschluessel ist gar nicht erst drin" "$(g /sC/ DEVICEKEY)" "0"
 
-# DER ROHINHALT, den ein Finder des Sticks vor sich haette.
 vb() { grep -a "^vaultblock $1 " "$TMPD/grep.txt" | sed 's/.*mark=//'; }
 vl() { grep -a "^vaultblock $1 " "$TMPD/grep.txt" | sed 's/.*len=\([0-9]*\).*/\1/'; }
 is "der Tresorblock in B ist 4112 Oktette gross -- 4096 + 16 Oktette Marke" \
@@ -1365,11 +1179,9 @@ is "GEGENPROBE: derselbe Klartext, zwei Speicher, ZWEI verschiedene Geheimtexte"
        "$(grep -a '^vaulthex /sC/' "$TMPD/grep.txt" | awk '{print $3}')" ] \
        && echo gleich || echo verschieden)" "verschieden"
 
-# DIE GEMESSENE LUECKE, und sie steht in bsec.fi B4 als Grenze.
 is "EHRLICH: der PFAD /secrets/vault.kdbx steht auch in C im KLARTEXT" \
    "$(grep -a '^pathleak' "$TMPD/grep.txt" | awk '{print $2}')" "1"
 
-# ---- WIEDERHERSTELLEN OHNE HAUPTPASSWORT: klare Meldung, kein Schweigen --
 sab BRESTNOM | grep -qa 'carries secrets' \
     && ok "ohne -m sagt das Wiederherstellen KLAR, dass Geheimnisse drin sind" \
     || bad "ohne -m wird still weitergemacht"
@@ -1392,7 +1204,6 @@ sab CVERIFYNOP | grep -qa 'this store is encrypted' \
 is "verify mit beiden Passwoertern: nichts kaputt" "$(sfeld CVERIFY corrupt)" "0"
 is "verify mit beiden Passwoertern: nichts ungeprueft" "$(sfeld CVERIFY unchecked)" "0"
 
-# ---- OKTETT FUER OKTETT aus dem Abbild ---------------------------------
 python3 - "$TMPD/live-sec2.img" > "$TMPD/seccmp.txt" 2>&1 <<'PY2'
 import subprocess, sys
 img = sys.argv[1]

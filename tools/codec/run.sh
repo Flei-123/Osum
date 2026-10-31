@@ -1,50 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/codec/run.sh -- DIE ABNAHME DER RUNDE CODEC (P-022).
 #
-# DIE FRAGE DIESER RUNDE: kann OrientOS Video dekodieren -- H.264, das
-# Format, in dem praktisch jede Aufnahme und jeder Stream vorliegt?
-# `kernel/user/media.fi` kannte bis hierher nur den NAMEN "H.264 / AVC"
-# und sagte ehrlich, dass es ihn nicht kann.
-#
-# WIE HIER GEMESSEN WIRD, und warum es so und nicht anders geht:
-#
-#   DER WIRT BAUT DAS PRUEFMATERIAL mit dem ECHTEN Werkzeug --
-#   `ffmpeg -c:v libx264 -profile:v baseline`. Und DERSELBE ffmpeg
-#   dekodiert dieselbe Datei nach rohem YUV 4:2:0.
-#
-#   OSUM DEKODIERT SIE, im laufenden Kern, in Ring 3, ueber ganz
-#   gewoehnliche `open`/`read` (`/bin/h264t`), und rechnet ueber JEDES
-#   Bild eine SHA-256 -- mit `kernel/user/sha.fi`, das in der Runde
-#   TRESOR gegen die Vektoren aus FIPS 180-4 gemessen wurde.
-#
-#   DIE ZWEI SUMMEN WERDEN VERGLICHEN, Bild fuer Bild. Stimmen sie,
-#   ist das Bild OKTETT FUER OKTETT dasselbe.
-#
-# WARUM BITGLEICH UND NICHT "AEHNLICH GENUG": H.264 ist ein EXAKT
-# spezifizierter Dekodierer. ITU-T H.264 Abschnitt 8.5 gibt die
-# Transformation als Ganzzahlfolge vor; zwei normgerechte Dekodierer
-# liefern DASSELBE Oktett. Eine Toleranz waere hier keine Grosszuegig-
-# keit, sondern eine Stelle, an der sich Fehler verstecken. (Bei JPEG
-# ist es anders -- T.81 schreibt die IDCT nicht bitgenau vor, und
-# `kernel/user/jpeg.fi` rechnet sie deshalb in f64. Hier ist kein
-# Fliesskomma erlaubt.)
-#
-# DIE GEGENPROBEN, ohne die das kein Messgeraet waere, sondern eine
-# Vorfuehrung:
-#
-#   - ABGESCHNITTENE Stroeme (jeder Bruchteil) duerfen nicht
-#     abstuerzen und nicht haengen -- sie muessen abweisen;
-#   - VERFAELSCHTE Oktette ebenso;
-#   - ein Strom mit HIGH PROFILE muss abgelehnt werden, statt Muell
-#     zu liefern -- dieser Dekodierer kann nur Baseline;
-#   - ein CABAC-Strom (Main Profile) ebenso;
-#   - die Speicherkarte darf keine Kollision haben, und die
-#     Gegenprobe dazu muss anschlagen;
-#   - die erzeugten Tafeln muessen PRAEFIXFREI sein.
-#
-# Aufruf:  bash tools/codec/run.sh
-#          OSUM_CODEC_SCHNELL=1   nur die zwei kleinsten Stroeme
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -74,7 +29,6 @@ gleich() { # name soll ist
 }
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 
-# Ein Wert aus der Ausgabe von /bin/h264t ("h264: name = wert").
 wert() { grep -a -m1 "^h264: $2 = " "$1" 2>/dev/null | sed 's/.* = //' \
          | tr -d '\r\000'; }
 
@@ -87,9 +41,6 @@ for w in ffmpeg python3 sha256sum; do
     command -v "$w" >/dev/null 2>&1 || {
         echo "CODEC: uebersprungen, $w fehlt"; exit 0; }
 done
-# ACHTUNG: `... | grep -q` schliesst die Leitung, sobald es fuendig
-# wird; ffmpeg bekommt SIGPIPE, und mit `set -o pipefail` gilt der
-# ganze Ausdruck als gescheitert. Deshalb erst in eine Datei.
 ffmpeg -hide_banner -encoders > "$TMPD/enc.txt" 2>/dev/null || true
 grep -q libx264 "$TMPD/enc.txt" || {
     echo "CODEC: uebersprungen, ffmpeg kann kein libx264"; exit 0; }
@@ -106,8 +57,6 @@ else
 fi
 hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
 
-# Der Bereich dieser Runde liegt da, wo er liegen soll, und nirgends
-# sonst. Diese Stelle hat dem Projekt fuenf Kollisionen beschert.
 v=$(grep -aE "^const CODEC_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 m=$(grep -aE "^const CODEC_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
@@ -118,14 +67,6 @@ else
     bad "CODEC_OFF = ${v:-fehlt} (+${m:-?}) liegt AUSSERHALB von 0x118000..0x120000"
 fi
 
-# GEGENPROBE ZUR KARTE: der Bereich auf eine fremde Adresse gelegt MUSS
-# anschlagen. Ohne diese Zeilen prueft die Karte nur das, woran jemand
-# gedacht hat.
-# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
-# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
-# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
-# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
-# zu melden, die hier gemessen wird.
 mkdir -p "$TMPD/kollision"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kollision/" \; )
 sed -i 's/^const CODEC_OFF: u64 = 0x118000$/const CODEC_OFF: u64 = 0x108000/' \
@@ -136,9 +77,6 @@ else
     ok "GEGENPROBE: CODEC_OFF auf WMP_OFF gelegt -- der Kartenpruefer schlaegt an"
 fi
 
-# KEIN BILDPUFFER IN kdata. Der Bereich ist acht Seiten gross; ein
-# einziges CIF-Bild ist 152 KiB und passte nicht einmal hinein. Die
-# Zusage steht hier als Rechnung und nicht als Kommentar.
 if [ "$((m))" -le $((0x8000)) ]; then
     ok "der Bereich ist $((m / 1024)) KiB -- zu klein fuer einen Bildpuffer, also liegt dort keiner"
 else
@@ -159,9 +97,6 @@ else
     sed 's/^/        /' "$TMPD/tab.err" | head -5
 fi
 
-# DIE PRAEFIXPROBE. Eine Huffman-Tafel mit zwei Codes, von denen einer
-# der Anfang des anderen ist, ist mehrdeutig -- und der Fehler zeigt
-# sich erst drei Koeffizienten spaeter als "Code nicht gefunden".
 if python3 tools/codec/praefix.py > "$TMPD/praefix.txt" 2>&1; then
     ok "alle CAVLC-Tafeln sind praefixfrei: $(tail -1 "$TMPD/praefix.txt")"
 else
@@ -203,13 +138,6 @@ else
     bad "firnc1 baut diese Runde nicht"
 fi
 
-# KEIN FLIESSKOMMA. Die Zusage dieser Runde steht im Kopf von h264.fi;
-# hier wird sie nachgerechnet und nicht geglaubt.
-#
-# GEPRUEFT WIRD DER CODE, NICHT DER TEXT: der Dateikopf ERKLAERT, warum
-# hier kein f64 vorkommt (und nennt dabei jpeg.fi, das eines benutzt).
-# Wer stumpf grept, faellt darauf herein -- deshalb fliegen Kommentare
-# vorher heraus.
 for f in kernel/user/h264.fi kernel/user/h264tab.fi; do
     sed 's://.*::' "$f" > "$TMPD/ohnekomm.fi"
     if grep -qaE '\b(f32|f64)\b|allow_fp|std\.math' "$TMPD/ohnekomm.fi"; then
@@ -235,7 +163,6 @@ else
     exit 1
 fi
 
-# Dass die Stroeme wirklich BASELINE sind (sonst misst der Rest nichts).
 for f in "$MED"/*.264; do
     pr=$(ffprobe -v error -select_streams v:0 -show_entries stream=profile \
          -of csv=p=0 "$f" 2>/dev/null)
@@ -246,9 +173,6 @@ for f in "$MED"/*.264; do
 done
 ok "alle Stroeme tragen das Baseline-Profil (ffprobe)"
 
-# DASS DER SLICE-STROM WIRKLICH MEHRERE SLICES JE BILD HAT. Ohne diese
-# Zahl waere "mehrere Slices gehen" eine Hoffnung: kodiert x264 doch
-# nur einen, laeuft der Test durch, ohne den Fall je zu beruehren.
 sl=$(python3 tools/codec/nalzahl.py "$MED/slices.264" 2>/dev/null)
 sl_n=$(echo "$sl" | cut -d' ' -f1)
 sl_fm=$(echo "$sl" | cut -d' ' -f3)
@@ -259,7 +183,6 @@ case "$sl_fm" in
     *) bad "die first_mb_in_slice-Werte sehen falsch aus: $sl_fm" ;;
 esac
 
-# Die Stroeme mit HIGH und MAIN fuer die Gegenproben.
 ffmpeg -y -v error -f lavfi -i testsrc2=size=128x96:rate=5 -frames:v 2 \
     -c:v libx264 -profile:v high -pix_fmt yuv420p -f h264 \
     "$MED/x_high.264" 2>/dev/null \
@@ -271,9 +194,6 @@ ffmpeg -y -v error -f lavfi -i testsrc2=size=128x96:rate=5 -frames:v 2 \
     && ok "ein CABAC-Strom (Main) fuer die Gegenprobe steht" \
     || bad "der CABAC-Strom laesst sich nicht bauen"
 
-# UEBER DER GRENZE: 1920x1080. MAXW/MAXH stehen seit P-023 bei 1280x720;
-# was darueber liegt, muss mit E_GROSS abgewiesen werden statt ueber das
-# Ende der Bildspeicher hinauszuschreiben.
 ffmpeg -y -v error -f lavfi -i testsrc2=size=1920x1080:rate=5 -frames:v 1 \
     -c:v libx264 -profile:v baseline -pix_fmt yuv420p -f h264 \
     "$MED/x_gross.264" 2>/dev/null \
@@ -308,8 +228,6 @@ lauf() { # name kommandozeile [zeitlimit]
 
 # ============================================== 6. DIE GEGENPROBE
 #
-# Das ist die Zusage dieser Runde: Oktett fuer Oktett dasselbe Bild
-# wie ffmpeg.
 
 echo "== 6. die ffmpeg-Gegenprobe: jedes Bild, jede Pruefsumme =="
 GESAMT_BILDER=0
@@ -350,19 +268,14 @@ while read -r name w h nf; do
     else
         bad "[$name] ${w}x${h}: $fr von $nf Bildern, err=$er, $n_hier Summen geprueft"
     fi
-    # Die Zahlen aus dem KERN (kdata, CODEC_OFF) gegen die des Programms.
     gleich "[$name] der Kern zaehlt dieselben Bilder (kdata CODEC_OFF)" "$nf" "$kf"
     gleich "[$name] der Kern kennt die Breite" "$w" "$kw"
     gleich "[$name] der Kern kennt die Hoehe" "$h" "$kh"
 done < "$MED/liste.txt"
 num "die Gegenprobe insgesamt: bitgleiche Bilder" "$GESAMT_GLEICH" eq "$GESAMT_BILDER"
 
-# ======================================== 7. was NICHT gehen darf
-
 echo "== 7. die Gegenproben: was ABGEWIESEN werden muss =="
 
-# 7a. High Profile -- dieser Dekodierer kann nur Baseline und muss das
-#     SAGEN, statt Muell zu liefern.
 rc=$(lauf high "osum nokbd script=h264t /v/x_high.264")
 num "[high] der Kernel beendet sich selbst statt zu haengen" "$rc" eq 21
 er=$(wert "$TMPD/high.txt" err)
@@ -370,7 +283,6 @@ fr=$(wert "$TMPD/high.txt" frames)
 gleich "[high] ein High-Profile-Strom wird ABGEWIESEN (err=2, nicht Baseline)" "2" "$er"
 gleich "[high] und es entsteht KEIN Bild" "0" "$fr"
 
-# 7b. CABAC (Main Profile) -- gehoert nicht zu Baseline.
 rc=$(lauf cabac "osum nokbd script=h264t /v/x_cabac.264")
 num "[cabac] der Kernel beendet sich selbst" "$rc" eq 21
 er=$(wert "$TMPD/cabac.txt" err)
@@ -380,12 +292,7 @@ else
     bad "[cabac] ein CABAC-Strom wird NICHT abgewiesen (err=$er)"
 fi
 
-# 7c. ABGESCHNITTENE Stroeme. Keiner darf haengen, keiner darf
-#     abstuerzen -- und wer ein Bild liefert, muss es richtig liefern.
 echo "== 7c. abgeschnittene Stroeme =="
-# ZWEI Quellen: ein Strom mit EINEM Slice je Bild und einer mit VIER.
-# Der zweite kann mitten in einem halb dekodierten Bild abbrechen --
-# ein Zustand, den der erste gar nicht erreichen kann.
 kurz_ok=0; kurz_bad=0
 for SRC in "$MED/i_sd.264" "$MED/slices.264"; do
 G=$(stat -c%s "$SRC")
@@ -450,7 +357,6 @@ done
 num "verfaelschte Stroeme, die sauber enden (von 12)" "$kipp_ok" eq 12
 num "verfaelschte Stroeme, die haengen oder abstuerzen" "$kipp_bad" eq 0
 
-# 7e. Unsinn als Eingabe.
 echo "== 7e. Unsinn =="
 : > "$TMPD/leer.264"
 head -c 4096 /dev/urandom > "$TMPD/muell.264"
@@ -474,19 +380,6 @@ num "Unsinn als Eingabe, sauber abgewiesen (von 3)" "$unsinn_ok" eq 3
 
 # ---------------------------------------------------- 8. check-ui
 
-# ================================= 7f. DIE KREISPROBE DER SCHNELLEN
-#     BEWEGUNGSKOMPENSATION (P-023)
-#
-# Der schnelle Weg (Randpuffer statt Klemmung je Punkt, Zwischenwerte
-# nur einmal, gleiche Vektoren zu einem Rechteck) MUSS Oktett fuer
-# Oktett dasselbe liefern wie der alte, der Punkt fuer Punkt rechnet.
-# `/bin/h264t --langsam` faehrt den alten Weg; verglichen werden die
-# SHA-256 je Bild aus beiden Laeufen.
-#
-# WARUM DAS NICHT SCHON DURCH DIE ffmpeg-GEGENPROBE ABGEDECKT IST: die
-# prueft den schnellen Weg gegen ffmpeg. Diese hier prueft die beiden
-# Wege GEGENEINANDER -- und faellt damit auch dann auf, wenn eines
-# Tages beide zusammen abweichen wuerden.
 echo "== 7f. die Kreisprobe: schneller gegen langsamen Weg der MC =="
 while read -r name w h nf; do
     if [ "$NUR" = 1 ]; then
@@ -508,11 +401,6 @@ while read -r name w h nf; do
     fi
 done < "$MED/liste.txt"
 
-# ================================= 7g. UEBER DER GRENZE WIRD ABGEWIESEN
-#
-# MAXW/MAXH stehen jetzt bei 1280x720. Ein groesserer Strom muss mit
-# E_GROSS (4) abgewiesen werden und darf NICHT halb dekodiert werden --
-# sonst schriebe er ueber das Ende der Bildspeicher hinaus.
 echo "== 7g. ueber der Grenze (1280x720) wird abgewiesen =="
 rc=$(lauf gross "osum nokbd script=h264t /v/x_gross.264")
 num "[gross] der Kernel beendet sich selbst statt zu haengen" "$rc" eq 21

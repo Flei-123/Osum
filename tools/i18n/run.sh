@@ -1,34 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/i18n/run.sh -- DIE ABNAHME DER RUNDE I18N.
-#
-# Was diese Runde behauptet und was hier gemessen wird:
-#
-#   1. DIE SCHRIFTEN KOENNEN MEHR ALS ASCII. Vorher 95 Zeichen, jetzt
-#      338 -- gezaehlt aus der cmap-Tabelle der Dateien, die wirklich
-#      auf der Platte liegen (tools/i18n/coverage.py). Und sie entstehen
-#      weiterhin OKTETT FUER OKTETT reproduzierbar aus DejaVu.
-#   2. DER DEKODIERER IST RICHTIG, auch bei falscher Eingabe:
-#      ueberlange Formen, Surrogate, alles ueber U+10FFFF und
-#      abgeschnittene Folgen werden zu U+FFFD, und die Maschine laeuft
-#      weiter. Gemessen in Ring 3 (kernel/user/i18nt.fi).
-#   3. DER KATALOG TUT, WAS ER SOLL: Englisch ist Quelle und Rueckfall,
-#      ein fehlender Schluessel ergibt nie einen leeren Knopf, und der
-#      Zeiger auf einen Text bleibt ueber einen Sprachwechsel hinweg
-#      DERSELBE -- daran haengt der Wechsel zur Laufzeit.
-#   4. ES STEHT WIRKLICH AUF DEM BILDSCHIRM. Derselbe Schirm auf
-#      Englisch und auf Deutsch, und der deutsche mit ECHTEN UMLAUTEN --
-#      bildpunktgenau gegen tools/ttf/raster.py gerechnet, nicht "da ist
-#      irgendwas hell".
-#   5. DIE SPRACHE LAESST SICH ZUR LAUFZEIT WECHSELN, mit der MAUS, in
-#      EINEM Lauf, ohne Neustart -- und die TASKLEISTE, ein ANDERER
-#      Prozess, zieht mit. Gemessen an ihrem eigenen Mitschnitt.
-#   6. IM QUELLTEXT STEHT KEIN DEUTSCHER OBERFLAECHENTEXT MEHR.
-#      tools/i18n/scan.py durchsucht den Baum; das Ziel ist 0.
-#   7. DIE UTF-8-DEKODIERUNG BREMST DAS ZEICHNEN NICHT SPUERBAR.
-#      Mikrosekunden je Textzeile, vorher und nachher.
-#   8. DIE TASTATUR HAT ZWEI BELEGUNGEN, umschaltbar, und lehnt eine
-#      dritte ab, die es nicht gibt.
 #
 # Verwendung:  bash tools/i18n/run.sh
 set -uo pipefail
@@ -49,9 +19,6 @@ is()  { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', erwartet '$3'"
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 
-# Ein Aufruf von schau.py, dessen Ausgabe im Erfolgsfall mitgemeldet wird
-# -- eine Zahl wie "526 Tintenpunkte geprueft, 0 falsch" ist die Messung,
-# nicht das Wort "OK".
 schau() { local was=$1; shift
     local aus; aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1)
     if [ $? = 0 ]; then ok "$was: $aus"; else bad "$was: $aus"; fi; }
@@ -77,8 +44,6 @@ ZEILE="gfx wm wig desk einst nostart wmhold wiglong nokbd nosched noproc nofs"
 echo "== 1. die Schriften: mehr als ASCII, und weiter reproduzierbar =="
 
 python3 tools/i18n/coverage.py "$SANS" "$MONO" > "$TMPD/deckung.txt" 2>&1
-# Die Zeile `i18n-coverage: ...` ist der Vertrag zwischen dem Werkzeug
-# und diesem Laeufer -- ein Name, ein Gleichheitszeichen, eine Zahl.
 cov() { grep -a "i18n-coverage: file=assets/osum-$1.ttf" "$TMPD/deckung.txt" \
         | tail -1 | grep -oE " $2=[0-9]+" | sed 's/.*=//'; }
 for f in sans mono; do
@@ -91,8 +56,6 @@ for f in sans mono; do
     is "osum-$f.ttf: Zeichen, die eine deutsche Oberflaeche braucht und die FEHLEN" \
         "$(cov $f missing)" "0"
 done
-# GEGENPROBE: der alte Ausschnitt kann es NICHT. Ohne sie ist die
-# Messung oben nur eine Zahl ohne Vergleich.
 DEJAVU=${DEJAVU:-/usr/share/fonts/truetype/dejavu}
 if [ -f "$DEJAVU/DejaVuSans.ttf" ]; then
     python3 tools/ttf/subset.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/alt.ttf" \
@@ -137,8 +100,6 @@ rc=$?
 n=$(grep -oE 'gefunden: [0-9]+' "$TMPD/scan.txt" | grep -oE '[0-9]+$')
 is "fest eingebaute deutsche Oberflaechentexte" "${n:-?}" "0"
 [ "$rc" = 0 ] || sed 's/^/        /' "$TMPD/scan.txt" | head -20
-# GEGENPROBE FUER DEN PRUEFER SELBST: er MUSS anschlagen, wenn wirklich
-# einer dasteht. Ein Pruefer ohne Gegenprobe prueft nichts.
 mkdir -p "$TMPD/schlecht/kernel/user"
 cp kernel/user/desktop.fi "$TMPD/schlecht/kernel/user/"
 printf 'static mut x: [u8; 12] = "Uebernehmen\\0"\n' \
@@ -162,13 +123,6 @@ python3 tools/i18n/quota.py > "$TMPD/quota.txt" 2>&1 \
     || { bad "die Abdeckung laesst sich nicht rechnen"; cat "$TMPD/quota.txt"; }
 sed 's/^/        /' "$TMPD/quota.txt" | tail -n +2
 
-# ---- ECHTE ZEICHEN, KEINE UMSCHRIFT (Nachtrag 3 der Runde LOOK)
-#
-# Bis I18N konnte das System kein "ue" zeichnen, also stand ueberall die
-# Umschrift. Seither kann es das -- und damit ist die Umschrift ein
-# Fehler, den nur niemand sieht, weil die Zeile lesbar bleibt. Genau so
-# hat "Text schreiben und aendern" ein halbes Jahr im Starter gestanden,
-# waehrend zwei Zeilen weiter schon "Ausführen" richtig erschien.
 python3 tools/i18n/translit.py --zaehle > "$TMPD/translit.txt" 2>&1
 TRC=$?
 sed 's/^/        /' "$TMPD/translit.txt"
@@ -186,8 +140,6 @@ else
     bad "nur $TU echte Umlautzeichen -- das ist zu wenig fuer Deutsch"
 fi
 
-# Und die Gegenprobe: eine Pruefung, die immer gruen ist, prueft nichts.
-# Dieselbe Pruefung auf einen Baum, in dem die Umschrift zurueck ist.
 rm -rf "$TMPD/tw"
 mkdir -p "$TMPD/tw/locale/de" "$TMPD/tw/kernel/user" "$TMPD/tw/assets/apps/x.osp"
 cp kernel/user/msg.fi kernel/user/appdir.fi "$TMPD/tw/kernel/user/"
@@ -205,8 +157,6 @@ else
         bad "Gegenprobe: nur $NF Funde, erwartet mindestens 2"
     fi
 fi
-
-# ================================================== 4. bauen und messen
 
 echo "== 4. bauen: Kern, sechs Programme, zwei Abbilder =="
 
@@ -279,16 +229,12 @@ is "und auf Deutsch"                "$(text_von "$DF" 5)" "Übernehmen"
 is "das Statusfeld auf Englisch"    "$(text_von "$EF" 42)" "ready"
 is "und auf Deutsch"                "$(text_von "$DF" 42)" "bereit"
 
-# DIE REGEL DIESER RUNDE, GEMESSEN: der PFAD im uebersetzten Satz ist
-# unveraendert geblieben.
 case "$(text_von "$DF" 1)" in
     *"/etc/schemas"*) ok "der deutsche Text nennt den Pfad UNVERAENDERT: $(text_von "$DF" 1)" ;;
     *) bad "der Pfad wurde uebersetzt: $(text_von "$DF" 1)" ;;
 esac
 hasnot "$DF" "/etc/schemata" "und kein Pfad wurde eingedeutscht"
 
-# BILDPUNKTGENAU. Das ist der Unterschied zwischen "der Mitschnitt sagt
-# es" und "es steht auf dem Schirm".
 ex=$(feld "$EF" 5 x); eb=$(feld "$EF" 5 base)
 dx=$(feld "$DF" 5 x); db=$(feld "$DF" 5 base)
 schau "der englische Knopf steht bildpunktgenau da" \
@@ -305,44 +251,20 @@ schau "der uebersetzte Satz mit dem unuebersetzten Pfad steht auf dem Schirm" \
     tchain "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + lx)) $((CY + lb)) \
     230 230 230 30 34 40 "Farbschema (aus /etc/schemas):" 8
 
-# Die Taskleiste -- ein ANDERER Prozess, dieselbe Sprache.
-#
-# DAS FELD HEISST `net` UND NICHT `netz`. Bis zum dritten Nachtrag der
-# Runde LOOK stand hier `taskbar: text netz` -- eine Zeichenkette, die
-# die Leiste NIE geschrieben hat (`git log -S'text netz'` findet nichts).
-# Sieben Zusagen suchten also nach etwas, das es nicht gibt, und waren
-# damit immer rot. Eine Zusage, die nie zutreffen KANN, ist keine.
 has "$EF" "taskbar: text net" "die Taskleiste meldet ihr Netzfeld"
 grep -a 'taskbar: text net' "$EF" | tail -1 | grep -q 'no network' \
     && ok "auf Englisch: no network" || bad "die Taskleiste ist nicht englisch"
 grep -a 'taskbar: text net' "$DF" | tail -1 | grep -q 'kein Netz' \
     && ok "auf Deutsch: kein Netz" || bad "die Taskleiste ist nicht deutsch"
 
-# UND DIE BEIDEN BILDER SIND WIRKLICH VERSCHIEDEN. Ohne diese Zahl
-# koennte alles oben stimmen und der Schirm trotzdem zweimal gleich
-# aussehen.
 d=$(python3 tools/i18n/diff.py "$TMPD/en/en.ppm" "$TMPD/de/de.ppm" 2>&1)
 case "$d" in
     0*) bad "die beiden Bildschirmfotos sind IDENTISCH" ;;
     *)  ok "die beiden Bildschirmfotos unterscheiden sich: $d" ;;
 esac
 
-# ======================================= 7. der Wechsel zur Laufzeit
-
 echo "== 7. die Sprache wechseln -- mit der Maus, in EINEM Lauf =="
 
-# DREI KLICKS, und keine einzige Koordinate ist geraten:
-#
-#   1. auf den Reiter "Language". Wo er liegt, meldet das Programm
-#      selbst -- seine Breite haengt am Text und der Text an der
-#      Sprache ("Language" ist schmaler, als "Sprache" breit ist).
-#   2. auf das Auswahlfeld. Ein Klick schaltet weiter, also von
-#      "English" auf "Deutsch".
-#   3. auf "Apply".
-#
-# Danach faehrt der Zeiger weg -- sonst hebt er den Knopf hervor und
-# das Foto misst eine andere Hintergrundfarbe, als das Programm
-# gemeldet hat.
 lauf "$TMPD/en" vor
 rfeld() { grep -a "settings: reiter nr=$1" "$2" | tail -1 \
           | grep -oE " $3=[0-9]+" | grep -oE '[0-9]+$'; }
@@ -359,11 +281,8 @@ else
     lauf "$TMPD/en" tab "$TMPD/klick1.mon"
     has "$TMPD/en/tab.txt" "t=Language of the surface:" \
         "ein Klick auf den Reiter oeffnet die Sprachseite"
-    # Das Auswahlfeld (kind=9) und der Knopf (kind=2) dieser Seite.
     zeile_von() { grep -a 'settings: feld' "$1" | grep " kind=$2 " \
                   | tail -1; }
-    # Das LETZTE Auswahlfeld ist die Tastaturbelegung; das ERSTE die
-    # Sprache. Also das erste nehmen.
     cx=$(grep -a 'settings: feld' "$TMPD/en/tab.txt" | grep ' kind=9 ' \
          | head -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
     cb=$(grep -a 'settings: feld' "$TMPD/en/tab.txt" | grep ' kind=9 ' \
@@ -387,9 +306,6 @@ else
             grep -a 'settings: feld' "$W" | tail -8 | sed 's/^/        /'
         fi
         has "$W" "t=Sprache gewechselt: de" "und das Statusfeld sagt es"
-        # UND EIN ANDERER PROZESS ZIEHT MIT. Das ist die eigentliche
-        # Zusage: die Taskleiste liest die Wahl des Benutzers nach, so
-        # wie sie /etc/theme nachliest.
         if grep -a 'taskbar: text net' "$W" | tail -1 | grep -q 'kein Netz'; then
             ok "und die TASKLEISTE, ein ANDERER Prozess, zieht mit: kein Netz statt no network"
         else
@@ -406,8 +322,6 @@ else
         schau "und die umgestellte Taskleiste auch" \
             tchain "$TMPD/en/wechsel.ppm" "$SANS_INK" 15 "$nx" $((572 + nb)) \
             230 230 230 42 47 55 "kein Netz" 8
-        # DIE WAHL IST GESCHRIEBEN -- unter dem BENUTZER und nicht unter
-        # /etc/. Nachgelesen aus dem Abbild, nicht aus einem Mitschnitt.
         python3 tools/osum/mkfs.py cat "$TMPD/en/live-wechsel.img" \
             /users/root/config/locale > "$TMPD/gewaehlt.txt" 2>/dev/null
         is "in /users/root/config/locale steht" \
@@ -424,9 +338,6 @@ fi
 
 echo "== 8. was die UTF-8-Dekodierung das Zeichnen kostet =="
 
-# Die Zahl kommt aus dem Kernel selbst (`wm: text ... us=`), einmal mit
-# der neuen Textschleife und einmal mit der alten -- beide auf
-# derselben Maschine, derselben Schrift, demselben Text.
 grep -a '^i18n: draw' "$TMPD/en/en.txt" | sed 's/^/        /'
 alt=$(grep -aoE 'i18n: draw ascii us=[0-9]+' "$TMPD/en/en.txt" | tail -1 \
       | grep -oE '[0-9]+$')
@@ -453,35 +364,9 @@ fi
 
 echo "== 9. was vorher gruen war, ist es noch =="
 
-# GEGEN DIE GEMESSENE AUSGANGSLAGE UND NICHT GEGEN NULL.
-#
-# `tools/wm/run.sh` und `tools/k15/run.sh` waren schon VOR dieser Runde
-# nicht vollstaendig gruen. GEMESSEN auf d7bdcfc, dem Stand, auf dem
-# diese Runde aufsetzt -- in einem eigenen Arbeitsbaum, mit demselben
-# Uebersetzer, auf derselben Maschine:
-#
 #     tools/wm/run.sh    99 erfuellt, 4 gescheitert
 #     tools/k15/run.sh  249 erfuellt, 2 gescheitert
 #
-# Nach dieser Runde:
-#
-#     tools/wm/run.sh    99 erfuellt, 4 gescheitert -- DIESELBEN vier
-#     tools/k15/run.sh  250 erfuellt, 2 gescheitert -- DIESELBEN zwei,
-#                       und eine Zusage mehr (die neue Gegenprobe, dass
-#                       "Ausfuehren" nicht mehr im Quelltext steht)
-#
-# Was scheitert, gehoert der Runde DESKTOP und nicht dieser:
-#
-#   * "die Zusagen des Fensterservers ueber sich selbst: 20, erwartet 17"
-#     -- DESKTOP hat vier Selbsttests dazugebaut (jetzt 21) und den
-#     Laeufer nicht nachgezogen. Und einer der 21 faellt wirklich durch.
-#   * dreimal "der Titel ... LEER" -- die Titelleiste zeigt in diesem
-#     Stand keinen Text an der Stelle, an der der Laeufer ihn erwartet.
-#
-# Diese Runde macht das nicht schlimmer -- und sie repariert es auch
-# nicht: `kernel/wm.fi` gehoert in diesem Augenblick der Runde TILING,
-# und zwei Runden, die dieselbe Datei richten, richten sie zweimal
-# verschieden. Gemeldet ist es hier, damit niemand die 4 fuer neu haelt.
 BASIS_WM=${BASIS_WM:-4}
 BASIS_K15=${BASIS_K15:-2}
 

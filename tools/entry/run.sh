@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/entry/run.sh -- RUNDE STARTKNOPF: DER ABSTURZ, DEN JUSTIN
-# GEFANGEN HAT, UND DIE ZUSAGE, DASS ER NICHT WIEDERKOMMT.
-#
-# WAS PASSIERT IST. Justin hat auf einem echten Brett ein Fenster
-# geschlossen, danach stand die Maschine, und die Absturzanzeige aus
-# der Runde BLECHFUENF hat zum ersten Mal die Zahlen geliefert:
 #
 #     RIP 0x000000000010049C   CS 0x0008   ERR 0x0
 #     RSP 0x000000004007F000   CR2 0x000000004007EFF8
-#
-# `objdump -d` auf das Abbild, das er gebootet hat, sagt, was an
-# 0x0010049C steht:
 #
 #     000000000010046d <enter_user_task>:
 #       10046d: mov  %rdi,%rcx
@@ -20,45 +10,6 @@
 #       ...
 #       10049c: sysretq          <-- HIER
 #
-# Das ist der Uebergang nach Ring 3 (`kernel/arch/x86_64/switch.s`),
-# gerufen aus `proc.user_start`. `rcx` traegt dabei `T_ENTRY`, `rsp`
-# den `T_USTACK` -- und 0x4007F000 ist genau `proc.ARGS_BASE`, der
-# Stapelzeiger jedes Programms von der Platte. Es wurde also gerade ein
-# PROGRAMM GESTARTET.
-#
-# `sysretq` fasst keinen Speicher an; ein #PF ist an dieser Adresse
-# unmoeglich. Mit Fehlercode 0 in Ring 0 bleibt genau eine Deutung:
-# #GP(0), und den wirft dieser Befehl aus genau einem Grund --
-# NICHT KANONISCHER RUECKSPRUNGZEIGER IN rcx (AMD APM Bd. 3, SYSRET:
-# "#GP(0) if the target RIP is non-canonical"; Intel SDM Bd. 2B
-# gleichlautend). `rcx` ist `T_ENTRY`.
-#
-# Das `cr2` auf dem Foto ist NICHT die Ursache: ein #GP fasst cr2 nicht
-# an, die Zahl stand noch von dem Seitenfehler, mit dem der Stapel
-# dieses Prozesses gewachsen war (0x4007F000 - 8 ist genau der erste
-# `push` eines frisch gestarteten Programms). Sie hat die Analyse in
-# die falsche Richtung geschickt, und deshalb steht sie ab dieser Runde
-# nur noch bei #PF auf dem Schirm.
-#
-# WARUM ES DIE MASCHINE UMBRINGT UND NICHT NUR DAS PROGRAMM:
-# das `sysretq` steht in RING 0. `trap.user_fault` verlangt
-# `(cs & 3) == 3`; ein Fehler mit cs=0x0008 faellt also an jeder
-# Signalbehandlung vorbei bis `trap.report`, und das haelt an. EIN
-# Programm mit kaputtem Einsprung nimmt den ganzen Rechner mit.
-#
-# WAS DIESER LAEUFER MISST. `einsprung` auf der Kernel-Befehlszeile
-# gibt jedem Programm, das von der Platte startet, einen Einsprung von
-# 0xDEAD000000000000 -- nicht kanonisch, also genau Justins Fall.
-# Die Zusagen:
-#
-#   1. Der Regellauf (ohne das Wort) startet den Schreibtisch.
-#   2. Mit `einsprung` wird JEDER Start abgelehnt, und zwar LAUT
-#      ("elf: entry abgelehnt").
-#   3. UND DIE MASCHINE LEBT WEITER: kein "*** EXCEPTION", der
-#      Fensterserver kommt bis `wm: hold`.
-#
-# Vor dieser Runde waere 3. fehlgeschlagen -- mit genau dem Bild, das
-# Justin fotografiert hat.
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -93,8 +44,6 @@ bash tools/build-kernel.sh "$TMPD/k0.mb" --stufe 0 > "$TMPD/b0.log" 2>&1 \
 [ -f "$TMPD/k0.mb" ] || { echo "EINSPRUNG: $pass bestanden, $((fail+1)) gescheitert"; exit 1; }
 
 echo "== 2. DER BEWEIS AM ABBILD: das sysretq in enter_user_task =="
-# Nicht behauptet, nachgesehen. Bricht diese Zusage, hat sich der
-# Einstieg nach Ring 3 verschoben und die Analyse oben ist neu zu machen.
 SYSRET_ADDR=$(objdump -d "$TMPD/k0.mb.elf" 2>/dev/null \
     | awk '/<enter_user_task>:/{f=1} f && /sysretq/{gsub(":","",$1); print "0x"$1; exit}')
 if [ -n "$SYSRET_ADDR" ]; then
@@ -122,17 +71,6 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "Verzeichnisbaum gebaut" || bad "tools/k15/tree.py fehlgeschlagen"
 
 printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=100\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
-# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
-# Gleiche Ursache wie in K15, NETVIEW und GLYPHE: Runde GRUNDLINIE hat
-# die Laeufer -- zu Recht -- auf `--profile=app` umgestellt, weil die
-# Programme mit Oberflaeche seit Runde 31 `profile app` in ihrer ersten
-# Zeile tragen. Das Profil `app` bringt Firns volle Laufzeit mit, und
-# sechs der dreizehn Programme dieses Abbilds sind solche. /bin/explorer
-# allein ist damit 1623040 statt 907360 Oktette; die dreizehn zusammen
-# brauchen rund 16285 Bloecke, und 16384 sind es mit Schriften,
-# Buendeln, Baum, Bitmap und Inode-Tafel nicht mehr. `mkfs.py` sagte
-# "the disk is full", und ohne Abbild startet kein QEMU.
-# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
 ARGS=(build "$TMPD/disk.img" 32768 /lib/
     "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
@@ -145,10 +83,6 @@ if python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1; then
 else
     bad "mkfs.py fehlgeschlagen"
     sed 's/^/        /' "$TMPD/mkfs.txt" | head -5
-    # OHNE ABBILD IST JEDE WEITERE ZUSAGE EINE LUEGE: `hasnot` findet in
-    # einer Datei, die es nicht gibt, natuerlich nichts und meldet
-    # Erfolg. Genau so ist dieser Laeufer beim ersten Versuch mit
-    # "8 bestanden" durchgelaufen, obwohl gar nichts gemessen wurde.
     echo
     echo "EINSPRUNG: $pass bestanden, $fail gescheitert (ohne Abbild abgebrochen)"
     exit 1
@@ -185,7 +119,6 @@ echo "== 4. MIT KAPUTTEM EINSPRUNG -- JUSTINS FALL =="
 lauf knall "einsprung"
 has "$TMPD/knall.txt" "elf: entry abgelehnt" "der kaputte Einsprung wird abgelehnt, und zwar laut"
 has "$TMPD/knall.txt" "DEAD000000000000" "und die abgelehnte Anschrift steht dabei"
-# DIE ZUSAGE DIESER RUNDE: die Maschine ueberlebt.
 hasnot "$TMPD/knall.txt" "*** EXCEPTION" "KEINE Ausnahme -- die Maschine lebt (vor dieser Runde: #GP am sysretq)"
 hasnot "$TMPD/knall.txt" "#GP" "kein #GP"
 has "$TMPD/knall.txt" "wm: hold" "und der Fensterserver laeuft weiter bis 'wm: hold'"

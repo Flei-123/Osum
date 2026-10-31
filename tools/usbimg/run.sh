@@ -1,39 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/usbimg/run.sh -- DIE ABNAHME DER RUNDE USBIMG.
 #
 #   bash tools/usbimg/run.sh [arbeitsverzeichnis]
 #
-# ==================================================================
-# WAS HIER GEMESSEN WIRD, UND WARUM ES UNTER KVM GEMESSEN WIRD
-# ==================================================================
-#
-# Die Runde KVMFIX hat vorgefuehrt, was TCG verschweigt: zwei Fehler, die
-# auf jeder AMD-CPU toedlich sind, standen 25 Runden lang unter einer
-# Nachbildung, die sie stillschweigend zurechtbog. Ein Abbild, das auf
-# einem ECHTEN Rechner starten soll, wird deshalb hier auf der ECHTEN CPU
-# gestartet: `-accel kvm -cpu host`. Was darunter kracht, kracht auch auf
-# Justins Blech.
-#
-# DIE VIER LAEUFE:
-#
-#   1. BIOS. Der Startweg ueber `limine bios-install` und den MBR-Bereich.
-#   2. UEFI. Dieselbe Datei, dieselbe `limine.conf`, aber die Firmware
-#      (OVMF) startet /EFI/BOOT/BOOTX64.EFI. Das ist der Lauf, der ohne
-#      Bit 2 im Multiboot-Kopf mit "Cannot use text mode with UEFI"
-#      abbraeche.
-#   3. AHCI STATT IDE. Damit die Diagnose etwas ANDERES melden muss.
-#      Meldete sie in beiden Laeufen dasselbe, waere sie kein Messgeraet,
-#      sondern eine Konstante.
-#   4. e1000 STATT virtio-net. Dieselbe Gegenprobe fuer den Netzteil:
-#      `netdev` muss die andere Karte nennen -- oder, wenn es sie nicht
-#      bedienen kann, "no driver for" mit Hersteller und Geraet.
-#
-# UND EIN BILD. Der Schreibtisch-Eintrag der `limine.conf` wird gefahren
-# und fotografiert, und in dem Foto muessen DEUTSCHE Texte MIT UMLAUTEN
-# stehen. Das ist die eigentliche Gegenprobe zum Fehler der letzten
-# Runde: Sprachdateien im Abbild, die die Oberflaeche dann doch nicht
-# benutzt, waeren derselbe Fehler mit einer neuen Ausrede.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -83,7 +51,6 @@ if sgdisk --print "$IMG" > "$TMPD/gpt.txt" 2>&1; then
 else
     bad "sgdisk kann die Tafel nicht lesen"
 fi
-# Der BIOS-Teil: Limine traegt seinen Namen in den MBR-Bereich ein.
 if dd if="$IMG" bs=512 count=4 status=none | grep -qa 'LIMINE'; then
     ok "der BIOS-Startteil von Limine steht im MBR-Bereich"
 else
@@ -99,22 +66,15 @@ for f in ::/EFI/BOOT/BOOTX64.EFI ::/limine.conf ::/osum.mb ::/root.img \
 done
 
 echo "== 3. echte Umlaute in locale/de/messages =="
-# Der Fehler, der zurueckkommen soll, wenn ihn jemand rueckgaengig macht:
-# in der Datei stand durchgehend ASCII-Umschrift, obwohl ihr eigener
-# Kommentar echte Umlaute behauptete.
 u=$(grep -cP '[äöüßÄÖÜ]' locale/de/messages)
 if [ "${u:-0}" -gt 0 ]; then
     ok "locale/de/messages: $u Zeilen mit echten UTF-8-Umlauten"
 else
     bad "locale/de/messages enthaelt keinen einzigen echten Umlaut"
 fi
-# UND KEINE UMSCHRIFT MEHR IM ANGEZEIGTEN TEXT. Geprueft wird nur RECHTS
-# vom Gleichheitszeichen: die Schluessel links sind englisch und bleiben
-# es, und ein Kommentar darf schreiben, was er will.
 umschrift=$(awk -F' = ' '/^[a-z][a-z0-9._]* = /{print $2}' locale/de/messages \
     | grep -ocP '\b(aendern|Groesse|groesse|fuer|schliessen|Uebernehmen|Aufloesung|laesst|liess|Oeffnen|Loeschen)\b' || true)
 is "ASCII-Umschriften im angezeigten deutschen Text" "${umschrift:-0}" "0"
-# Und die Oktettrechnung: ein 'ü' sind ZWEI Oktette.
 zeichen=$(python3 -c '
 import sys
 d = open("locale/de/messages", encoding="utf-8").read()
@@ -133,31 +93,6 @@ fi
 
 lauf() { # name zusatzargumente...
     #
-    # DER DIAGNOSE-EINTRAG HAELT AN (`hwdiagstop`), also endet der Lauf
-    # nicht von selbst. Auf das Zeitlimit zu warten waere bei sechs
-    # Laeufen eine Viertelstunde Leerlauf; also wird auf die letzte Zeile
-    # des Berichts gewartet und dann abgeschaltet.
-    #
-    # ================================================ RUNDE TUERSCHLOSS
-    # DER DIAGNOSE-EINTRAG WIRD AUSGEWAEHLT UND NICHT MEHR VORAUSGESETZT.
-    #
-    # Dieser Laeufer startete das Abbild und erwartete den
-    # hwdiag-Bericht auf der Leitung -- weil `default_entry` frueher auf
-    # die Hardware-Diagnose zeigte. Runde HAENGER hat das aus gutem
-    # Grund umgestellt (Commit 4ca1d9e): ein Stick, der nach zwanzig
-    # Sekunden von selbst in einen Bericht laeuft, der ABSICHTLICH
-    # stehenbleibt, kommt nie bis zum Schreibtisch. Seither zeigt
-    # `default_entry: 1` auf den Schreibtisch -- und dieser Laeufer
-    # meldete elf Fehlschlaege, die alle denselben Satz sagen:
-    # "hwdiag: ... fehlt im Bericht". Gemessen: im Mitschnitt steht
-    # stattdessen `desktop: ready w=1280 h=800`. Der Stick tat das
-    # Richtige, die Erwartung war alt.
-    #
-    # Statt `default_entry` zurueckzudrehen (das waere der Fehler, den
-    # HAENGER behoben hat) wird der Eintrag jetzt AUSGEWAEHLT: Limine
-    # nimmt Pfeiltasten und Eingabe entgegen, und der Diagnose-Eintrag
-    # ist der achte. `sendkey` ueber den Monitor ist der Weg, den
-    # tools/wm/monitor.py fuer die Tastatur ohnehin geht.
     local name=$1; shift
     local out="$TMPD/$name.txt"
     cp -f "$IMG" "$TMPD/$name.img"
@@ -190,9 +125,6 @@ lauf() { # name zusatzargumente...
     return 0
 }
 
-# Dasselbe ohne das Abbild: der Kern und sein Modul kommen direkt von
-# QEMU. Damit lassen sich Maschinen bauen, die es als STARTBARES Abbild
-# nicht gibt -- eine ohne jedes Standardgeraet zum Beispiel.
 lauf_direkt() { # name kommandozeile zusatzargumente...
     local name=$1 cmd=$2; shift 2
     local out="$TMPD/$name.txt"
@@ -266,7 +198,6 @@ for m in 'hwdiag: firmware=' 'hwdiag: cpu vendor=' 'hwdiag: pci devices=' \
 done
 fw=$(grep -aoE 'firmware=(BIOS|UEFI)' "$TMPD/bios.txt" | head -1 | sed 's/.*=//')
 is "BIOS-Lauf: erkannte Firmware" "${fw:-?}" "BIOS"
-# ANGEHALTEN heisst ANGEHALTEN: nach dem Bericht darf nichts mehr kommen.
 if grep -qa 'ANGEHALTEN' "$TMPD/bios.txt"; then
     ok "der Diagnose-Eintrag haelt an, statt abzuschalten"
 else
@@ -331,27 +262,7 @@ else
     bad "netdev nennt fuer virtio nicht virtio-net"
     grep -a 'netdev:' "$TMPD/virtio.txt" | sed 's/^/       /'
 fi
-# UND EINE KARTE, DIE DIESER KERN NICHT KANN. Ohne diesen Lauf waere die
-# Zeile "no driver for" nie gemessen worden -- und genau sie ist die
-# Zeile, an der Justin ablesen soll, welchen Treiber er braucht.
 #
-# RUNDE BLECH, NACHTRAG: HIER STAND `-device rtl8139`, UND DAS IST SEIT
-# DEM MERGE DES ZWEIGS `rtl` KEINE FREMDE KARTE MEHR. QEMUs rtl8139
-# meldet PCI-Revision 0x20, also den C+-Modus -- und genau den faehrt
-# `kernel/r8169.fi` seit Runde RTL, er ist dort sogar der EINZIGE in QEMU
-# gemessene Zweig. Die Zusage hat danach nicht mehr geprueft, was sie
-# pruefen wollte: sie verlangte "kein Treiber" von einer Karte, fuer die
-# es inzwischen einen gibt.
-#
-# Das ist kein Fehler dieser Runde, sondern eine Altlast des Merges
-# (Commit "BLECH 16/n"): die volle Abnahme um 12:59 lief noch VOR ihm und
-# war deshalb gruen. Sie faellt seitdem -- gesehen hat es niemand, weil
-# usbimg zwischen dem Merge und jetzt nicht mehr einzeln lief.
-#
-# Genommen wird jetzt `ne2k_pci` (10EC:8029): derselbe Hersteller wie der
-# gefahrene Realtek, aber ein Chip ohne Ringe, den dieser Kern nicht
-# faehrt und nie fahren wird. Damit prueft die Zusage wieder ihre Absicht
-# -- und sie prueft zusaetzlich, dass die Zeile den KLARNAMEN traegt.
 lauf fremd -device ide-hd,drive=stick \
      -device ne2k_pci,netdev=n0 -netdev user,id=n0
 if grep -qa 'netdev: no driver for' "$TMPD/fremd.txt"; then
@@ -365,9 +276,6 @@ if grep -qa 'RTL8029 (ne2000)' "$TMPD/fremd.txt"; then
 else
     bad "die fremde Karte wird nicht beim Namen genannt"
 fi
-# GEGENPROBE ZUR ZUSAGE SELBST: derselbe Lauf mit rtl8139 muss das
-# GEGENTEIL zeigen -- eine Karte, die dieser Kern SEHR WOHL faehrt. Ohne
-# sie stuende hier wieder eine Zusage, die nur zufaellig gruen ist.
 lauf gefahren -device ide-hd,drive=stick \
      -device rtl8139,netdev=n0 -netdev user,id=n0
 if grep -qa 'netdev: c0=r8169' "$TMPD/gefahren.txt"; then
@@ -376,7 +284,6 @@ else
     bad "GEGENPROBE: der rtl8139 wird nicht als r8169 gefahren"
     grep -a 'netdev:' "$TMPD/gefahren.txt" | sed 's/^/       /'
 fi
-# UND DER KERN LAEUFT TROTZDEM WEITER. Punkt 5 der Runde.
 if grep -qa 'ANGEHALTEN' "$TMPD/fremd.txt"; then
     ok "und der Kern laeuft nach der unbekannten Karte bis zum Ende des Berichts"
 else
@@ -385,22 +292,6 @@ fi
 
 echo "== 7. keine Platte, keine Karte -- und trotzdem ein Bericht =="
 #
-# PUNKT 5 DER RUNDE: findet der Kern nichts, darf er nicht still haengen,
-# sondern muss es BENENNEN und weiterlaufen.
-#
-# UND HIER STEHT EINE EHRLICHE EINSCHRAENKUNG. Eine x86-Maschine OHNE
-# Plattencontroller laesst sich mit QEMU nicht bauen: der PIIX3 der
-# `pc`-Maschine und der ICH9-AHCI der `q35`-Maschine gehoeren zum
-# Chipsatz und sind auch mit `-nodefaults` da (nachgemessen: `pc` meldet
-# `disk IDE 8086:7010`, `q35` meldet `disk AHCI 8086:2922`). `isapc` hat
-# gar keinen PCI-Bus, startet diesen Kern aber nicht.
-#
-# Also wird die Lage auf dem einzigen Weg hergestellt, auf dem sie
-# herstellbar ist: mit `nopci`, dem Gegenprobenwort, das `kernel/hw.fi`
-# seit Runde K2 dafuer hat. Der Bus wird dann gar nicht erst gelesen,
-# die Geraetetabelle bleibt leer, und genau das ist die Lage, in der ein
-# echter Rechner mit einem Controller, den dieser Kern nicht findet,
-# ebenfalls landet.
 lauf_direkt leer "hwdiag hwdiagstop gfx nopci nokbd nosched noproc nofs noring3"
 if grep -qa 'hwdiag: pci=KEIN GERÄT' "$TMPD/leer.txt"; then
     ok "ohne Bus sagt der Bericht das, statt still zu haengen"
@@ -425,9 +316,6 @@ if grep -qa 'ANGEHALTEN' "$TMPD/leer.txt"; then
 else
     bad "der Bericht bricht ab, wenn nichts gefunden wird"
 fi
-# GEGENPROBE ZUR GEGENPROBE: dieselbe Maschine MIT Bus meldet sehr wohl
-# etwas. Ohne diese Zeile waere oben nur bewiesen, dass der Bericht
-# immer dasselbe sagt.
 lauf_direkt mitbus "hwdiag hwdiagstop gfx nokbd nosched noproc nofs noring3"
 if grep -qa 'hwdiag: disk IDE' "$TMPD/mitbus.txt"; then
     ok "GEGENPROBE: dieselbe Maschine MIT Bus meldet ihren IDE-Controller"
@@ -435,8 +323,6 @@ else
     bad "GEGENPROBE: die Maschine mit Bus meldet keinen Controller"
     grep -a 'hwdiag: disk' "$TMPD/mitbus.txt" | sed 's/^/       /'
 fi
-# UND OHNE NETZKARTE, ABER MIT BUS -- die Lage eines Rechners, dessen
-# Netzteil auf dem Mainboard sitzt und den dieser Kern nicht kennt.
 if grep -qa 'hwdiag: net=KEINE KARTE' "$TMPD/mitbus.txt"; then
     ok "und ohne Netzkarte (aber mit Bus) sagt sie auch das"
 else
@@ -445,44 +331,6 @@ fi
 
 echo "== 8. der Schreibtisch, auf deutsch, mit Umlauten im BILD =="
 #
-# WAS HIER GEMESSEN WIRD UND WAS NICHT.
-#
-# NICHT gemessen wird, ob der Rasterer Umlaute kann -- das hat Runde
-# I18N bildpunktgenau erledigt. Gemessen wird, ob DIESES ABBILD seine
-# Sprachdateien mitbringt UND BENUTZT. Der Unterschied ist genau der
-# Fehler der letzten Runde: die Oberflaeche fiel auf englische
-# Ersatztexte zurueck, weil /usr/share/locale/de/messages nicht im
-# Abbild lag.
-#
-# Der Weg: Kern und Wurzelmodul wie auf dem Stick, dann von aussen
-# Super+A -- das oeffnet den Starter. Auf ihm steht "Ausfuehren", und
-# zwar mit ue-Ligatur: `Ausführen`. Dieses eine Wort traegt beide
-# Zusagen auf einmal, die deutsche Sprache und den echten Umlaut.
-#
-# `tools/usbimg/searchtext.py` sucht die Zeile im GANZEN Bild -- gerastert
-# mit `tools/ttf/raster.py`, der zweiten Fassung des Rasterers. Es wird
-# also nicht gegen sich selbst geprueft.
-# RUNDE ABBILD: `lang=de` GEHOERT AUF DIE ZEILE, WEIL DAS ABBILD
-# ENGLISCH AUSLIEFERT.
-#
-# Dieser Abschnitt misst den DEUTSCHEN Katalog: `Suchen`, `Ausfuehren`
-# mit echtem Umlaut, `Programm suchen:`, `kein Netz`. Bis zum 09.09.2026
-# kam der Stick deutsch hoch, also stimmte das ohne Zutun. Seitdem ist
-# Englisch die Hauptsprache der Oberflaeche und Deutsch die waehlbare
-# Uebersetzung (die Begruendung steht in tools/usbimg/build.sh bei
-# `locale-de`) -- der Bau schreibt `en` in /users/root/config/locale.
-#
-# Der Abschnitt hat das nicht mitbekommen und ist seitdem rot: er
-# verlangte deutschen Text von einem System, das er englisch startet.
-# GEMESSEN: `taskbar: lang=en src=1` -- src=1 ist genau diese
-# Benutzerdatei.
-#
-# `lang=de` auf der Kernel-Kommandozeile ist die vorgesehene Antwort:
-# `kgui.locale_set` schreibt damit `de` in dieselbe Datei, bevor die
-# Oberflaeche startet, und setzt die Tastaturbelegung gleich mit. Damit
-# misst dieser Abschnitt wieder, was er messen will -- dass der deutsche
-# Katalog im Abbild liegt und wirkt --, ohne die Auslieferungssprache zu
-# behaupten.
 DESKARGS="modfs osum gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs lang=de"
 rm -f "$TMPD/desk.txt" "$TMPD/desk.ppm" "$TMPD/desk.sock"
 # A-038: the SEARCH opens with the Windows key alone. `meta_l-a` has
@@ -532,13 +380,6 @@ fi
 grep -qaE 'desk: (social|melder) (ended|respawn)' "$TMPD/desk.txt" \
     && bad "Social-Dienst oder Melder ist gleich nach dem Start wieder zu Ende" \
     || ok "Social-Dienst und Melder laufen (kein Ende, kein Neustart im Lauf)"
-# DER MITSCHNITT SAGT ES SCHON: der Starter meldet seinen eigenen Namen,
-# und der kommt aus dem Katalog.
-# A-038: the launcher prints `launcher: name [...]` ONLY with
-# /etc/uitrace or `debug` (9bc8a551, RUNDE BELEG: the shipped system does
-# not measure itself). This is the shipped image, so the line cannot
-# come; the German launcher is proved on the picture below instead. If
-# the line IS there, it still has to be German.
 if grep -qa 'launcher: name' "$TMPD/desk.txt"; then
     if grep -qa 'launcher: name \[Suchen\]' "$TMPD/desk.txt"; then
         ok "der Starter nennt sich 'Suchen' -- deutsch, aus /usr/share/locale/de"
@@ -562,9 +403,6 @@ if [ -s "$TMPD/desk.ppm" ]; then
           "Ausfuehren" --nicht
     finde "GEGENPROBE: und der englische Text auch nicht" "Run" --nicht
     finde "der deutsche Aufforderungstext des Starters" "Programm suchen:"
-    # A-038: the taskbar shows the network as a SYMBOL now (no text), so
-    # 'kein Netz' could not be found on any build. The second German
-    # surface is the control centre (Windows+A).
     BILD="$TMPD/desk2.ppm" finde "und das Kontrollzentrum ist ebenfalls deutsch" "Dunkelmodus"
     BILD="$TMPD/desk2.ppm" finde "GEGENPROBE: dort steht nicht das englische Wort" "Dark mode" --nicht
     python3 -c "

@@ -1,26 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/explorer2/run.sh -- DIE ABNAHME DER RUNDE EXPLORER-2.
 #
 #   bash tools/explorer2/run.sh [arbeitsverzeichnis]
 #
-# ZWOELF PFLICHTPUNKTE, ZWOELF BELEGE. Kein Abschnitt sagt "sieht gut
-# aus": jeder nennt eine Zeile, die auf der seriellen Leitung stehen
-# MUSS, oder eine Stelle im Quelltext, die dastehen oder eben NICHT
-# mehr dastehen muss.
-#
-# WARUM AUCH DER QUELLTEXT GEPRUEFT WIRD und nicht nur der Lauf: drei
-# der zwoelf Punkte sind Aussagen darueber, wie etwas gemacht wird und
-# nicht, dass es geschieht. "Umbenennen geht ueber `rename`" ist von
-# aussen nicht zu sehen -- ein Kopieren-und-Loeschen sieht bei einer
-# kleinen Datei genauso aus und geht erst bei einem ORDNER schief.
-# Also wird beides gefragt: dass die Tat geschieht (Leitung) und dass
-# sie richtig geschieht (Quelltext).
-#
-# DIE MASCHINE LAEUFT EINMAL, und ein Drehbuch klickt sich durch. Der
-# Grund steht ausgeschrieben in `tools/design/capture.sh`: je Bild
-# eine eigene Maschine sind je Bild eine eigene Uhrzeit und ein eigener
-# Zufall, und ein Vergleich mit Rauschen darin ist keiner.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -53,10 +34,6 @@ bash tools/design/capture.sh "$OUT/bau" nurbau=ja res="$RES" \
     || { echo "FEHLGESCHLAGEN: der Bau"; tail -20 "$OUT/bau.log"; exit 1; }
 ok "Kern und Programme uebersetzen"
 
-# Die fuenf neuen Bausteine muessen EINZELN uebersetzen -- einer, der
-# nur als Teil des Ganzen baut, ist beim naechsten Umbau nicht zu retten.
-# The modules have no `main` and import fUi (profile app), so each is built
-# through a one-line stub root that imports ONLY that module.
 for m in expmodell exporte expakt expdlg fileop; do
     stub="kernel/user/zz_chk_$m.fi"
     printf 'profile app\nimport %s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$stub"
@@ -69,7 +46,6 @@ for m in expmodell exporte expakt expdlg fileop; do
     rm -f "$stub"
 done
 
-# ------------------------------------------- 2. der Katalog, beide Sprachen
 echo "== 2. der Katalog (de und en) =="
 python3 - "$ROOT" "$OUT" <<'PY'
 import re, sys, os
@@ -93,9 +69,7 @@ grep -q 'nur_en \[\]' "$OUT/katalog.txt" \
     && ok "jeder englische Schluessel hat einen deutschen" \
     || { bad "Schluessel fehlen in de"; grep nur_en "$OUT/katalog.txt"; }
 
-# ---------------------------------- 3. was der Quelltext sagen muss
 echo "== 3. Quelltext: Punkte 2, 11, 12 =="
-# Punkt 12: die Werkzeugleiste traegt Symbole und nicht < > ^.
 if grep -qE '^\s*static mut t_(zur|vor|auf):' kernel/user/explorer.fi; then
     bad "Punkt 12: die Textzeichen < > ^ stehen noch im Quelltext"
 else
@@ -105,7 +79,6 @@ grep -qE 'fuiscene\.icon_button\([a-z]+, icons\.NAV_BACK' kernel/user/explorer.f
     && ok "Punkt 12: die Werkzeugleiste ruft icon_button(NAV_BACK)" \
     || bad "Punkt 12: keine Symbolknoepfe in der Werkzeugleiste"
 
-# Punkt 2: umbenennen ist `rename` und keine Kopierschleife.
 grep -qE 'io\.rename' kernel/user/expakt.fi \
     && ok "Punkt 2: umbenennen ruft io.rename" \
     || bad "Punkt 2: kein io.rename -- es wird noch kopiert und geloescht"
@@ -114,16 +87,12 @@ if grep -qE '^fn umbenennen\(' kernel/user/explorer.fi; then
 else
     ok "Punkt 2: die alte Funktion umbenennen() ist weg"
 fi
-# Und der Dateimanager fasst zum Umbenennen ueberhaupt keine Datei mehr
-# an: kein `create`, kein `write_all`, kein `unlink` in explorer.fi.
-# Die Taten liegen in `expakt`/`fileop`, und nur dort.
 if grep -qE 'io\.(create|write_all|unlink)\(' kernel/user/explorer.fi; then
     bad "Punkt 2: explorer.fi fasst Dateien noch selbst an"
 else
     ok "Punkt 2: explorer.fi fasst keine Datei mehr selbst an"
 fi
 
-# Punkt 11: die Grenzen und der tote Zweig.
 me=$(grep -oE '^const MAXENT: u64 = [0-9]+' kernel/user/expmodell.fi | grep -oE '[0-9]+$')
 nb=$(grep -oE '^const NAMEB: u64 = [0-9]+' kernel/user/expmodell.fi | grep -oE '[0-9]+$')
 hi=$(grep -oE '^const CAP: u64 = [0-9]+' lib/nav/stack.fi | grep -oE '[0-9]+$')
@@ -134,7 +103,6 @@ w4=$(grep -cE 'if welches == 4 \{' kernel/user/explorer.fi)
 [ "$w4" -le 1 ] && ok "Punkt 11: der doppelte Zweig ist aufgeloest ($w4 Vorkommen)" \
     || bad "Punkt 11: 'if welches == 4' steht $w4 mal da, der zweite ist tot"
 
-# Punkt 8: jeder Fehlercode bekommt einen Text.
 grep -qE 'fn error_key' kernel/user/expakt.fi \
     && ok "Punkt 8: es gibt eine Zuordnung Fehlercode -> Katalogtext" \
     || bad "Punkt 8: keine Zuordnung Fehlercode -> Text"
@@ -235,10 +203,8 @@ grep -qa 'wm: hold' "$S" && ok "der Fensterserver kam bis 'wm: hold'" \
     || bad "der Fensterserver kam nie bis 'wm: hold'"
 hat "$S" 'explorer: ready' "der Dateimanager ist hochgekommen"
 
-# ---------------------------------------------------- 5. die zwoelf Punkte
 echo "== 5. die Pflichtpunkte an der seriellen Leitung =="
 
-# --- Punkt 5: die Zeit-Spalte.
 hat "$S" 'explorer: zeit mtime=[0-9]+' "Punkt 5: die Zeiten werden gelesen"
 mit=$(letzte "$S" 'explorer: zeit mtime=[0-9]+ mit=[0-9]+')
 von=$(grep -aoE 'explorer: zeit [^ ]+ mit=[0-9]+ von=[0-9]+' "$S" | tail -1 \
@@ -254,7 +220,6 @@ hat "$S" 'tzoff=[0-9]+' "Punkt 5: der Ortszeitversatz aus /etc/time.conf"
 hat "$S" 'explorer: modell n=[0-9]+ blob=[0-9]+ ueberlauf=0' \
     "Punkt 11: eingelesen ohne Ueberlauf"
 
-# --- Punkt 6: Orte und Brosamen.
 orte=$(groesste "$S" 'explorer: orte n=[0-9]+')
 [ "${orte:-0}" -ge 4 ] 2>/dev/null \
     && ok "Punkt 6: $orte Orte in der Seitenleiste" \
@@ -276,7 +241,6 @@ clipn=$(groesste "$S" 'explorer: clip n=[0-9]+')
     || bad "Punkt 1: die Ablage blieb leer -- Strg+C greift nicht"
 hat "$S" 'explorer: paste n=[0-9]+' "Punkt 1: Strg+V hat eingefuegt"
 
-# --- Punkt 2: umbenennen zur Laufzeit.
 hat "$S" 'explorer: dlgrect' "Punkt 2: F2 macht den Umbenennen-Dialog auf"
 
 # --- Punkt 4: Eigenschaften.
@@ -285,9 +249,6 @@ hat "$S" 'explorer: (props zeilen=[0-9]+|taste 288)' \
 
 # --- Punkt 7: die Kuerzel.
 hat "$S" 'explorer: taste ' "Punkt 7: die Kuerzel kommen im Programm an"
-# 304 = 0x130 = KEY_CTRL_H, und `an=` sagt, ob versteckte Dateien
-# jetzt sichtbar sind. Die Nummer steht hier und nicht ein Wort, weil
-# das Programm die TASTE meldet und nicht ihren Namen.
 hat "$S" 'explorer: taste 304 an=[01]' \
     "Punkt 7: Strg+H schaltet versteckte Dateien"
 hat "$S" 'explorer: taste 273' "Punkt 7: F2 kommt an"
@@ -296,7 +257,6 @@ hat "$S" 'explorer: taste 276' "Punkt 7: F5 kommt an"
 # --- Punkt 9: rueckgaengig.
 hat "$S" 'explorer: (undo|taste 26)' "Punkt 9: Strg+Z meldet sich"
 
-# --- Punkt 10: oeffnen mit.
 hat "$S" 'explorer: openwith n=[0-9]+' "Punkt 10: die Programmliste ist gelesen"
 
 # ---------------------------------------------- 6. die Bilder, gemessen
@@ -314,29 +274,12 @@ for f in "$OUT/lauf"/*.png; do
 done
 [ "$n" -ge 6 ] && ok "$n Aufnahmen entstanden" || bad "nur $n Aufnahmen"
 
-# JEDES BILD WIRD GEMESSEN und nicht angesehen: nichts abgeschnitten,
-# nichts ueberlappend. (Leere Beschriftungen zaehlen hier NICHT als
-# Fehler: ein zugeklapptes Menue hat seine Woerter gemeldet, malt sie
-# aber nicht mehr -- das ist richtig so und kein Mangel.)
 for f in "$OUT/lauf"/*.png; do
     [ -e "$f" ] || continue
     b=$(basename "$f" .png)
     r=$(python3 tools/alltag/shotcheck.py "$f" "$S" --winat=400,200 2>&1 | head -1)
     cut=$(echo "$r" | grep -oE 'cut [0-9]+' | grep -oE '[0-9]+')
-    # NUR `cut` WIRD GEZAEHLT, UND HIER STEHT WARUM.
     #
-    # `overlapping` haelt zwei gemeldete Textkaesten gegeneinander, die
-    # sich im BILD ueberschneiden. Die Meldungen sind aber ueber die
-    # ganze Laufzeit gesammelt, und dieses Fenster malt dieselbe Stelle
-    # mehrmals NEU: die Statuszeile trug nacheinander
-    # "8 Stueck, 2 Ordner, 354 ...", dann "2 Stueck, 0 Ordner, 28 ..."
-    # (im Unterordner), dann "9 Stueck, 1 Ordner, 382 ..." (nach dem
-    # Einfuegen). Drei Texte an derselben Stelle sind drei
-    # "Ueberschneidungen" -- und alle drei sind richtig, es war nur
-    # nie mehr als einer gleichzeitig da.
-    #
-    # `cut` (ein Text, der ueber seinen Kasten hinauslaeuft) hat dieses
-    # Problem nicht: er misst EINEN Text gegen SEINEN Platz.
     if [ "${cut:-9}" = "0" ]; then
         ok "Bild $b: nichts abgeschnitten"
     else

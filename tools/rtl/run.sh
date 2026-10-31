@@ -1,49 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/rtl/run.sh -- RUNDE RTL: DER CHIP, DEN MAN ANFASSEN KANN.
 #
-# Runde HWNET hat zwei Treiber gegeneinander gemessen (virtio-net und
-# e1000) und im eigenen Bericht aufgeschrieben, warum sie den Realtek
-# NICHT gebaut hat: QEMU habe nur `-device rtl8139`, und der 8139 sei
-# "nicht derselbe Chip" wie der 8168/8169 -- vier feste Sendepuffer statt
-# Deskriptorringen. Ein Treiber ohne Messung sei eine Behauptung.
-#
-# Diese Runde widerspricht dem an genau einer Stelle, und die ist
-# nachpruefbar: der RTL8139 ab Revision 0x20 hat einen ZWEITEN
-# Betriebszustand, den C+-Modus, und in dem hat er Deskriptorringe --
-# dieselben, die der 8169 hat. QEMU emuliert diesen Zustand
-# (`currCPlusTxDesc`, `cplus_enabled` stehen im Programm). Damit ist die
-# Ringmechanik messbar, und gemessen wird sie hier.
-#
-# WAS DAS BEWEIST UND WAS NICHT, weil genau das der strittige Punkt ist:
-#
-#   BEWIESEN  Deskriptorringe, OWN-Protokoll, DMA in beide Richtungen,
-#             das Einsammeln fertiger Sendedeskriptoren, Ringueberlauf,
-#             Unterbrechungen mit Zurueckschreiben des ISR, Verbindung
-#             weg und wieder da, die vier Oktett Pruefsumme am Rahmenende.
-#             Das ist derselbe Quelltext, den ein 8168 ausfuehren wuerde.
-#   NICHT     Der Sendeanstoss sitzt beim 8169 auf 0x38 statt auf 0xD9,
-#             die Verbindung steht in PHYstatus 0x6C statt in MSR 0x58,
-#             und der PHY haengt an MDIO statt fest im Chip. Diese drei
-#             Stellen sind aus dem Datenblatt und haben nie geantwortet.
-#             Ebenso der ganze I219-Zweig in `kernel/e1000.fi`.
-#
-# DER DRAHT ist der aus Runde K8 (`tools/net/bridge.c`): QEMUs
-# UDP-Steckdose auf der einen Seite, eine AF_PACKET-Bruecke in ein
-# veth-Paar auf der anderen, und ein Netzraum mit dem Linux-Kern darin.
-# `/dev/net/tun` gibt es in diesem Behaelter nicht.
-#
-# DIE GEGENPROBEN, jede ein Lauf, in dem die Messung zusammenbrechen muss:
-#
-#   ohne `nic`  dasselbe Abbild fasst die Karte nie an: der Ping bekommt
-#               nichts
-#   nicnobm     das Busmasterbit wird weggenommen: der Chip darf Register
-#               beantworten, aber keinen Deskriptor holen
-#   ne2k_pci    eine Karte MIT DEMSELBEN HERSTELLER (10EC:8029), fuer die
-#               es keinen Treiber gibt -- sie muss mit ihren Nummern
-#               genannt werden, nicht stillschweigend uebergangen
-#   rev < 0x20  ein RTL8139B hat keinen C+-Modus. Die Tabelle muss ihn
-#               ablehnen, obwohl die Geraetenummer dieselbe ist
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -98,19 +54,12 @@ if ! ip netns add "$NS" 2>/dev/null; then
     exit 0
 fi
 ip netns del "$NS" 2>/dev/null
-# Der C+-Modus ist der ganze Grund, warum diese Runde ueberhaupt messen
-# kann. Fehlt er in dieser QEMU-Fassung, ist jede Zahl darunter wertlos --
-# also wird er ZUERST geprueft und nicht angenommen.
-# (kein `grep -q` in der Roehre: es beendet `strings` mit SIGPIPE, und
-# `set -o pipefail` macht daraus einen Fehlschlag der ganzen Roehre.)
 cplus=$(strings "$(command -v qemu-system-x86_64)" 2>/dev/null | grep -c currCPlusTxDesc)
 if [ "${cplus:-0}" -eq 0 ]; then
     echo "RTL: uebersprungen, dieses QEMU emuliert den C+-Modus des rtl8139 nicht"
     exit 0
 fi
 
-# Ein Monitorbefehl an QEMU. `socat` gibt es in diesem Behaelter nicht,
-# also uebernimmt das python3, das die Werkzeugliste ohnehin verlangt.
 mon() {
     python3 - "$MON" "$1" <<'PYEOF' >/dev/null 2>&1
 import socket, sys, time
@@ -146,8 +95,6 @@ fi
 K="$TMPD/s0/k.mb"
 D="$TMPD/s0/disk.img"
 
-# Der Treiber ist Teil des freistehenden Kerns: keine libc, keine
-# Laufzeit und kein einziger `syscall` in Ring 0.
 undef=$(nm -u "$TMPD/s0/k.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' \
         | grep -vE '^(osum_panic|kdata|osym_tab)$')
 [ -z "$undef" ] && ok "k.o: kein undefinierter Name ausser osum_panic und kdata" \
@@ -161,11 +108,6 @@ gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>"$TMPD/gcc.err" \
 
 # =====================================================================
 echo "== 2. die Treibertabelle, ausgefuehrt statt gelesen =="
-# =====================================================================
-# Dieses Verzeichnis hat keinen RTL8168 und keinen I219 und wird nie einen
-# haben. Was es pruefen KANN, ist die WAHL: `nictab` laesst den Kern die
-# Tabelle gegen eine eingebaute Nummernliste laufen und je Zeile sagen,
-# welcher Treiber es waere. Ohne Karte, ohne Draht, ohne Netz.
 rm -f "$TMPD/tab.txt"
 timeout 90 qemu-system-x86_64 -kernel "$K" -m 256 \
     -append "osum nokbd nosched noproc nofs noring3 nictab nwait=20" \
@@ -275,8 +217,6 @@ echo "== 4. dieselbe Abnahme wie in Runde HWNET, auf dem Realtek =="
 # =====================================================================
 dd if=/dev/urandom of="$TMPD/quarter.bin" bs=1024 count=256 2>/dev/null
 
-# --- ICMP. Die drei Sekunden sind aus Runde HWNET uebernommen, damit die
-# Zahlen vergleichbar bleiben, und nicht als Bequemlichkeitspause.
 wire_up; bridge_up
 qemu_bg "rtl8139" "osum $BASE $NETARGS nsvc=0 nwait=1500" "$TMPD/ping-rtl.txt"
 await_line "$TMPD/ping-rtl.txt" "nic: netd=" 25
@@ -312,18 +252,11 @@ num "rtl8139: Abschnitte mit falscher Pruefsumme" "$(val "$S" csum)" eq 0
 num "rtl8139: Wiederholungen auf einem sauberen Draht" "$(val "$S" rexmit)" eq 0
 num "rtl8139: Rahmen, die der Treiber verwerfen musste (Ring voll)" "$(val "$S" drops)" eq 0
 num "rtl8139: Rahmen, die der Chip als fehlerhaft meldete" "$(val "$S" rerr)" eq 0
-# DIESE ZWEI ZEILEN SIND DER GEFUNDENE FEHLER, festgenagelt. Mit 32
-# Ringplaetzen -- der Zahl, die `e1000.fi` benutzt -- stand hier
-# `ooo=41` und `286 KiB/s`: QEMUs rtl8139 wirft einen Rahmen weg, fuer
-# den kein Deskriptor frei ist, waehrend QEMUs e1000 ihn beiseitelegt.
-# Ein echter 8168 macht es wie der rtl8139. Mit 128 Plaetzen sind beide
-# Zahlen null. Wer den Ring wieder verkleinert, faellt hier durch.
 num "rtl8139: Abschnitte ausser der Reihe (jeder einer ist ein verlorener Rahmen)" \
     "$(val "$S" ooo)" eq 0
 num "rtl8139: Rahmen, die der Chip mangels Ringplatz verwarf" "$(val "$S" rovw)" eq 0
 ok "rtl8139: Durchsatz Linux -> Osum: $(val "$S" kib_per_s) KiB/s ($(val "$S" us) us fuer 256 KiB)"
 
-# --- DHCP, aus einem Server, den dieses Verzeichnis nicht geschrieben hat
 wire_up; bridge_up
 cat > "$TMPD/udhcpd.conf" <<EOF
 start 10.9.0.50
@@ -379,11 +312,6 @@ num "GEGENPROBE ohne Busmaster, verlorene Pakete" "$(loss "$TMPD/nobmping.txt")"
 
 # =====================================================================
 echo "== 6. der volle Ring und der zu grosse Rahmen =="
-# =====================================================================
-# Zwei Zusagen, die ein Ping nie ausloest, weil sie erst eintreten, wenn
-# etwas schiefgeht. `nicself` schaltet dem Chip das Senden ab, fuellt den
-# Ring, bis er ueberlaeuft, und wirft dann einen Rahmen hinterher, der
-# groesser ist als ein Puffer. Beides mit Zahlen statt mit Zusicherungen.
 wire_up; bridge_up
 qemu_bg "rtl8139" "osum $BASE $NETARGS nicself nsvc=0 nwait=1800" "$TMPD/self.txt"
 await_line "$TMPD/self.txt" "nic: netd=" 25
@@ -399,8 +327,6 @@ fit=$(echo "$line" | grep -oE 'fit=[0-9]+' | cut -d= -f2)
 drp=$(echo "$line" | grep -oE 'drop=[0-9]+' | cut -d= -f2)
 ovr=$(echo "$line" | grep -oE 'over=[0-9]+' | cut -d= -f2)
 slt=$(echo "$line" | grep -oE 'slots=[0-9]+' | cut -d= -f2)
-# 128 Deskriptoren, einer bleibt immer leer -- voll und leer waeren sonst
-# derselbe Zustand. Also passen genau 127 hinein.
 num "der Empfangs- und Sendering hat 128 Plaetze (gemessen noetig, siehe r8169.fi)" \
     "${slt:-0}" eq 128
 num "RINGUEBERLAUF: Rahmen, die in den Ring passten (128 Plaetze, einer bleibt leer)" \
@@ -411,8 +337,6 @@ num "GROESSER ALS MTU: ein Rahmen von 2049 Oktett wurde abgewiesen" "${ovr:-0}" 
 has "$SF" "cpcmd=0x3" "der C+-Modus ist wirklich eingeschaltet (CpCmd = TxEnb|RxEnb)"
 has "$SF" "rcr=0xe70a" "der Empfangsfilter steht auf 'eigene Adresse + Rundruf'"
 has "$SF" "var=1 rev=0x20" "der Chip wurde als 8139C+ erkannt, an seiner PCI-Revision"
-# Und nach der Selbstpruefung muss die Karte WIEDER REDEN -- sonst waere
-# die Pruefung ein Schaden und kein Nachweis.
 num "und danach redet die Karte weiter: Pakete verloren" \
     "$(loss "$TMPD/selfping.txt")" eq 0
 
@@ -441,9 +365,6 @@ num "und der Treiber meldet die Verbindung am Ende als stehend" \
 
 # =====================================================================
 echo "== 8. die drei Spalten, nebeneinander =="
-# =====================================================================
-# Dieselbe Abnahme, dieselben Zahlen, drei Chips -- damit Runde HWNET eine
-# dritte Spalte bekommt und nicht eine zweite Tabelle.
 for dev in virtio-net-pci e1000; do
     wire_up; bridge_up
     qemu_bg "$dev" "osum $BASE $NETARGS nsvc=1 nport=7 nbytes=262144" "$TMPD/sink-$dev.txt"

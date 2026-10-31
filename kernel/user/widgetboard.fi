@@ -1,0 +1,919 @@
+// ================================================== DIE ENTSCHEIDUNGEN
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+
+export {
+    // die Tafel
+    MAX, ANZ, M_UHR, M_MEMORY, M_CPU,
+    an, set_on, x_von, y_von, width, height, name_von,
+    anker_von, set_anchor, dx_von, dy_von, set_position,
+    // der Zustand
+    load, save, vorgabe, zuruecksetzen, geaendert, dirty,
+    set_clean,
+    // Bearbeiten und Ziehen
+    bearbeiten, set_editing, treffer, ziehen_start, ziehen_zu,
+    ziehen_ende, zieht, gezogen,
+    fetch_values, text_von, text_length, messen, paint, paint_frame,
+    // Belege
+    zuege, schreibvorgaenge, A_LO, A_RO, A_LU, A_RU,
+    set_screen, build_texts,
+    key, set_key, KEY_DEFAULT
+}
+
+// ------------------------------------------------------- die Zahlen
+
+const MAX: u64 = 8
+const ANZ: u64 = 3
+
+const M_UHR: u64 = 0
+const M_MEMORY: u64 = 1
+const M_CPU: u64 = 2
+
+const A_LO: u64 = 0 // links oben
+const A_RO: u64 = 1 // rechts oben
+const A_LU: u64 = 2 // links unten
+const A_RU: u64 = 3 // rechts unten
+
+const F_AN: u64 = 0
+const F_ANKER: u64 = 1
+const F_DX: u64 = 2
+const F_DY: u64 = 3
+const F_W: u64 = 4
+const F_H: u64 = 5
+const F_SPAN: u64 = 6
+
+static mut table: [u64; 48] = [0 as u64; 48] // MAX * F_SPAN
+
+static mut s_w: u64 = 0
+static mut s_h: u64 = 0
+
+// Bearbeitungsmodus, Ziehzustand.
+static mut bearb: u64 = 0
+static mut zieht_i: u64 = MAX // MAX = keiner
+static mut griff_dx: u64 = 0
+static mut griff_dy: u64 = 0
+static mut n_zuege: u64 = 0
+static mut n_write: u64 = 0
+static mut dreckig: u64 = 0
+
+// ============================================ DIE TASTE
+const KEY_DEFAULT: u64 = 0x118 // wlib.KEY_F9
+static mut m_key: u64 = KEY_DEFAULT
+
+fn key() -> u64 {
+    return m_key
+}
+
+fn set_key(t: u64) {
+    if m_key != t {
+        m_key = t
+        dreckig = 1
+    }
+}
+
+// ------------------------------------------------------- die Tafel
+
+fn at(i: u64, f: u64) -> u64 {
+    return table[(i * F_SPAN + f) as usize]
+}
+
+fn put(i: u64, f: u64, v: u64) {
+    table[(i * F_SPAN + f) as usize] = v
+}
+
+fn an(i: u64) -> bool {
+    if i >= MAX {
+        return false
+    }
+    return at(i, F_AN) != 0
+}
+
+fn set_on(i: u64, v: bool) {
+    if i >= MAX {
+        return
+    }
+    var n: u64 = 0
+    if v {
+        n = 1
+    }
+    if at(i, F_AN) != n {
+        put(i, F_AN, n)
+        dreckig = 1
+    }
+}
+
+fn anker_von(i: u64) -> u64 {
+    if i >= MAX {
+        return A_LO
+    }
+    return at(i, F_ANKER)
+}
+
+fn set_anchor(i: u64, a: u64) {
+    if i >= MAX || a > A_RU {
+        return
+    }
+    put(i, F_ANKER, a)
+    dreckig = 1
+}
+
+fn dx_von(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    return at(i, F_DX)
+}
+
+fn dy_von(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    return at(i, F_DY)
+}
+
+fn width(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    return at(i, F_W)
+}
+
+fn height(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    return at(i, F_H)
+}
+
+fn x_von(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    let a: u64 = at(i, F_ANKER)
+    let dx: u64 = at(i, F_DX)
+    let w: u64 = at(i, F_W)
+    if a == A_RO || a == A_RU {
+        if s_w < dx + w {
+            return 0
+        }
+        return s_w - dx - w
+    }
+    if dx + w > s_w && s_w > w {
+        return s_w - w
+    }
+    return dx
+}
+
+fn y_von(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    let a: u64 = at(i, F_ANKER)
+    let dy: u64 = at(i, F_DY)
+    let h: u64 = at(i, F_H)
+    if a == A_LU || a == A_RU {
+        if s_h < dy + h {
+            return 0
+        }
+        return s_h - dy - h
+    }
+    if dy + h > s_h && s_h > h {
+        return s_h - h
+    }
+    return dy
+}
+
+fn set_position(i: u64, x: u64, y: u64) {
+    if i >= MAX {
+        return
+    }
+    let a: u64 = at(i, F_ANKER)
+    let w: u64 = at(i, F_W)
+    let h: u64 = at(i, F_H)
+    var nx: u64 = x
+    var ny: u64 = y
+    if a == A_RO || a == A_RU {
+        if s_w > x + w {
+            nx = s_w - x - w
+        } else {
+            nx = 0
+        }
+    }
+    if a == A_LU || a == A_RU {
+        if s_h > y + h {
+            ny = s_h - y - h
+        } else {
+            ny = 0
+        }
+    }
+    if at(i, F_DX) != nx || at(i, F_DY) != ny {
+        put(i, F_DX, nx)
+        put(i, F_DY, ny)
+        dreckig = 1
+    }
+}
+
+fn geaendert() -> u64 {
+    return dreckig
+}
+
+fn dirty() -> bool {
+    return dreckig != 0
+}
+
+fn set_clean() {
+    dreckig = 0
+}
+
+fn zuege() -> u64 {
+    return n_zuege
+}
+
+fn schreibvorgaenge() -> u64 {
+    return n_write
+}
+
+// ------------------------------------------------- die Namen
+
+static mut n_uhr: [u8; 8] = "uhr\0\0\0\0\0"
+static mut n_spe: [u8; 12] = "speicher\0\0\0\0"
+static mut n_cpu: [u8; 8] = "cpu\0\0\0\0\0"
+
+fn name_von(i: u64) -> u64 {
+    if i == M_UHR {
+        return (&n_uhr[0 as usize]) as u64
+    }
+    if i == M_MEMORY {
+        return (&n_spe[0 as usize]) as u64
+    }
+    return (&n_cpu[0 as usize]) as u64
+}
+
+// ============================================ DIE VORGABE
+fn vorgabe() {
+    var i: u64 = 0
+    while i < MAX {
+        put(i, F_AN, 0)
+        put(i, F_ANKER, A_RO)
+        put(i, F_DX, 0)
+        put(i, F_DY, 0)
+        put(i, F_W, 0)
+        put(i, F_H, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < ANZ {
+        put(i, F_AN, 1)
+        put(i, F_ANKER, A_RO)
+        put(i, F_DX, 16)
+        i = i + 1
+    }
+    put(M_UHR, F_DY, 16)
+    put(M_MEMORY, F_DY, 56)
+    put(M_CPU, F_DY, 96)
+    m_key = KEY_DEFAULT
+    dreckig = 0
+}
+
+fn zuruecksetzen() {
+    vorgabe()
+    messen()
+    dreckig = 1
+}
+
+// ============================================ DIE WERTE
+static mut w_std: u64 = 0
+static mut w_min: u64 = 0
+static mut w_mb_frei: u64 = 0
+static mut w_mb_all: u64 = 0
+static mut w_cpu: u64 = 0
+
+static mut cs_t: u64 = 0
+static mut cs_i: u64 = 0
+static mut cs_da: u64 = 0
+
+fn cpu_last() -> u64 {
+    let t: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_TICKS, 0)
+    let i: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_IDLE, 0)
+    if ulib.bad(t) || ulib.bad(i) {
+        return 0
+    }
+    var last: u64 = 0
+    if cs_da != 0 && t > cs_t {
+        let dt: u64 = t - cs_t
+        var di: u64 = 0
+        if i > cs_i {
+            di = i - cs_i
+        }
+        if di > dt {
+            di = dt
+        }
+        last = ((dt - di) * 100) / dt
+    }
+    cs_t = t
+    cs_i = i
+    cs_da = 1
+    return last
+}
+
+// ============================================ DER ZEITVERSATZ
+static mut p_time: [u8; 16] = "/etc/time.conf\0\0"
+static mut offset: u64 = 0
+
+fn read_offset() {
+    var buf: [u8; 64] = [0 as u8; 64]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_time[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 63)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    var i: u64 = 0
+    var v: u64 = 0
+    var d: u64 = 0
+    var in_value: bool = false
+    while i < n {
+        let c: u64 = __mmio_read8((b + i) as *mut u8) as u64
+        if c == 61 {
+            in_value = true
+        } else if in_value && c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48)
+            d = d + 1
+        } else if d > 0 {
+            i = n
+        }
+        i = i + 1
+    }
+    if d > 0 && v <= 1440 {
+        offset = v
+    }
+}
+
+fn fetch_values() -> bool {
+    let h_roh: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0)
+    let m_roh: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0)
+    var std: u64 = h_roh
+    var min: u64 = m_roh
+    if !ulib.bad(h_roh) && !ulib.bad(m_roh) {
+        var vs: u64 = 0
+        if ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZMIN, 0, 0) == 0 {
+            vs = offset
+        }
+        let ges: u64 = (h_roh * 60 + m_roh + vs) % 1440
+        std = ges / 60
+        min = ges % 60
+    }
+    let fr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_FREE, 0, 0)
+    let al: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_ALL, 0, 0)
+    var mb_f: u64 = 0
+    var mb_a: u64 = 0
+    if !ulib.bad(fr) {
+        mb_f = fr / 256
+    }
+    if !ulib.bad(al) {
+        mb_a = al / 256
+    }
+    let cp: u64 = cpu_last()
+    var fresh: bool = false
+    if !ulib.bad(std) && std != w_std {
+        w_std = std
+        fresh = true
+    }
+    if !ulib.bad(min) && min != w_min {
+        w_min = min
+        fresh = true
+    }
+    if mb_f != w_mb_frei {
+        w_mb_frei = mb_f
+        fresh = true
+    }
+    if mb_a != w_mb_all {
+        w_mb_all = mb_a
+        fresh = true
+    }
+    if cp != w_cpu {
+        w_cpu = cp
+        fresh = true
+    }
+    return fresh
+}
+
+// ------------------------------------------------- der Text
+
+static mut txt: [u8; 256] = [0 as u8; 256]
+static mut txt_n: [u64; 8] = [0 as u64; 8]
+
+fn t_at(i: u64) -> u64 {
+    return (&txt[0 as usize]) as u64 + i * 32
+}
+
+fn put_out(p: u64, at2: u64, c: u64) -> u64 {
+    __mmio_write8((p + at2) as *mut u8, c as u8)
+    return at2 + 1
+}
+
+fn two_digits(p: u64, at2: u64, v: u64) -> u64 {
+    var a: u64 = put_out(p, at2, 48 + (v / 10) % 10)
+    return put_out(p, a, 48 + v % 10)
+}
+
+fn number(p: u64, at2: u64, v: u64) -> u64 {
+    var a: u64 = at2
+    if v >= 1000 {
+        a = put_out(p, a, 48 + (v / 1000) % 10)
+    }
+    if v >= 100 {
+        a = put_out(p, a, 48 + (v / 100) % 10)
+    }
+    if v >= 10 {
+        a = put_out(p, a, 48 + (v / 10) % 10)
+    }
+    return put_out(p, a, 48 + v % 10)
+}
+
+fn build_texts() {
+    // uhr: "HH:MM"
+    var p: u64 = t_at(M_UHR)
+    var a: u64 = two_digits(p, 0, w_std)
+    a = put_out(p, a, 58) // :
+    a = two_digits(p, a, w_min)
+    let _z: u64 = put_out(p, a, 0)
+    txt_n[(M_UHR) as usize] = a
+
+    p = t_at(M_MEMORY)
+    a = put_out(p, 0, 82)  // R
+    a = put_out(p, a, 65)  // A
+    a = put_out(p, a, 77)  // M
+    a = put_out(p, a, 32)
+    a = number(p, a, w_mb_all - w_mb_frei)
+    a = put_out(p, a, 47)  // /
+    a = number(p, a, w_mb_all)
+    a = put_out(p, a, 32)
+    a = put_out(p, a, 77)  // M
+    a = put_out(p, a, 66)  // B
+    let _z2: u64 = put_out(p, a, 0)
+    txt_n[(M_MEMORY) as usize] = a
+
+    // cpu: "CPU NN%"
+    p = t_at(M_CPU)
+    a = put_out(p, 0, 67)  // C
+    a = put_out(p, a, 80)  // P
+    a = put_out(p, a, 85)  // U
+    a = put_out(p, a, 32)
+    a = number(p, a, w_cpu)
+    a = put_out(p, a, 37)  // %
+    let _z3: u64 = put_out(p, a, 0)
+    txt_n[(M_CPU) as usize] = a
+}
+
+fn text_von(i: u64) -> u64 {
+    if i >= MAX {
+        return t_at(0)
+    }
+    return t_at(i)
+}
+
+fn text_length(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    return txt_n[(i) as usize]
+}
+
+// ============================================ DIE GROESSE
+fn measure_width(i: u64) -> u64 {
+    var mus: [u8; 24] = [0 as u8; 24]
+    let p: u64 = (&mus[0 as usize]) as u64
+    var n: u64 = 0
+    if i == M_UHR {
+        // "00:00"
+        n = 5
+        var k: u64 = 0
+        while k < 5 {
+            __mmio_write8((p + k) as *mut u8, 48 as u8)
+            k = k + 1
+        }
+    } else if i == M_MEMORY {
+        n = 16
+        var k2: u64 = 0
+        while k2 < 16 {
+            __mmio_write8((p + k2) as *mut u8, 56 as u8)
+            k2 = k2 + 1
+        }
+    } else {
+        // "CPU 100%"
+        n = 8
+        var k3: u64 = 0
+        while k3 < 8 {
+            __mmio_write8((p + k3) as *mut u8, 56 as u8)
+            k3 = k3 + 1
+        }
+    }
+    return wlib.draw_text_w(p, n, wlibc.TY_BODY)
+}
+
+fn pad_x() -> u64 {
+    return wlibc.metric(wlibc.M_PAD_X)
+}
+
+fn pad_y() -> u64 {
+    return wlibc.metric(wlibc.M_PAD_Y)
+}
+
+fn messen() {
+    let lh: u64 = wlibc.type_lh(wlibc.TY_BODY)
+    var groesste: u64 = 0
+    var i: u64 = 0
+    while i < ANZ {
+        let b: u64 = wlibc.snap_up(measure_width(i) + 2 * pad_x())
+        if b > groesste {
+            groesste = b
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < ANZ {
+        let h: u64 = wlibc.snap_up(lh + 2 * pad_y())
+        put(i, F_W, groesste)
+        put(i, F_H, h)
+        i = i + 1
+    }
+    let h0: u64 = at(M_UHR, F_H)
+    if at(M_UHR, F_DY) == 16 && at(M_MEMORY, F_DY) == 56
+        && at(M_CPU, F_DY) == 96 {
+        put(M_MEMORY, F_DY, 16 + h0 + 8)
+        put(M_CPU, F_DY, 16 + 2 * (h0 + 8))
+    }
+}
+
+// ============================================ TREFFER UND ZIEHEN
+fn treffer(mx: u64, my: u64) -> u64 {
+    var k: u64 = ANZ
+    while k > 0 {
+        let i: u64 = k - 1
+        if an(i) {
+            let x: u64 = x_von(i)
+            let y: u64 = y_von(i)
+            if mx >= x && my >= y && mx < x + at(i, F_W)
+                && my < y + at(i, F_H) {
+                return i
+            }
+        }
+        k = k - 1
+    }
+    return MAX
+}
+
+fn bearbeiten() -> bool {
+    return bearb != 0
+}
+
+fn set_editing(v: bool) {
+    if v {
+        bearb = 1
+    } else {
+        bearb = 0
+        zieht_i = MAX
+    }
+}
+
+fn zieht() -> bool {
+    return zieht_i < MAX
+}
+
+fn gezogen() -> u64 {
+    return zieht_i
+}
+
+fn ziehen_start(i: u64, mx: u64, my: u64) -> bool {
+    if bearb == 0 || i >= ANZ || !an(i) {
+        return false
+    }
+    let x: u64 = x_von(i)
+    let y: u64 = y_von(i)
+    griff_dx = 0
+    griff_dy = 0
+    if mx > x {
+        griff_dx = mx - x
+    }
+    if my > y {
+        griff_dy = my - y
+    }
+    zieht_i = i
+    n_zuege = n_zuege + 1
+    return true
+}
+
+const FANG: u64 = 12
+
+fn ziehen_zu(mx: u64, my: u64) -> bool {
+    if zieht_i >= ANZ {
+        return false
+    }
+    let i: u64 = zieht_i
+    let w: u64 = at(i, F_W)
+    let h: u64 = at(i, F_H)
+    var nx: u64 = 0
+    var ny: u64 = 0
+    if mx > griff_dx {
+        nx = mx - griff_dx
+    }
+    if my > griff_dy {
+        ny = my - griff_dy
+    }
+    if nx + w > s_w {
+        if s_w > w {
+            nx = s_w - w
+        } else {
+            nx = 0
+        }
+    }
+    if ny + h > s_h {
+        if s_h > h {
+            ny = s_h - h
+        } else {
+            ny = 0
+        }
+    }
+    // aufs Raster
+    nx = wlibc.snap(nx)
+    ny = wlibc.snap(ny)
+    if nx < FANG {
+        nx = 0
+    }
+    if ny < FANG {
+        ny = 0
+    }
+    if s_w > w && nx + w + FANG > s_w {
+        nx = s_w - w
+    }
+    if s_h > h && ny + h + FANG > s_h {
+        ny = s_h - h
+    }
+    let ax: u64 = x_von(i)
+    let ay: u64 = y_von(i)
+    if ax == nx && ay == ny {
+        return false
+    }
+    set_position(i, nx, ny)
+    return true
+}
+
+// ============================================ DAS LOSLASSEN
+fn ziehen_ende() -> u64 {
+    if zieht_i >= ANZ {
+        return MAX
+    }
+    let i: u64 = zieht_i
+    let x: u64 = x_von(i)
+    let y: u64 = y_von(i)
+    let mx: u64 = x + at(i, F_W) / 2
+    let my: u64 = y + at(i, F_H) / 2
+    var a: u64 = A_LO
+    if mx * 2 >= s_w && my * 2 >= s_h {
+        a = A_RU
+    } else if mx * 2 >= s_w {
+        a = A_RO
+    } else if my * 2 >= s_h {
+        a = A_LU
+    }
+    put(i, F_ANKER, a)
+    set_position(i, x, y)
+    dreckig = 1
+    zieht_i = MAX
+    return i
+}
+
+// ============================================ DAS MALEN
+fn paint(i: u64) {
+    if i >= ANZ || !an(i) {
+        return
+    }
+    let x: u64 = x_von(i)
+    let y: u64 = y_von(i)
+    let w: u64 = at(i, F_W)
+    let h: u64 = at(i, F_H)
+    var rand: u64 = 0
+    if bearb != 0 {
+        rand = wlibc.theme(wlibc.C_ACCENT)
+    }
+    wlib.draw_board(x, y, w, h, wlib.MR_PANEL, wlibc.EL_FLAT,
+        wlibc.theme(wlibc.C_PANEL_BG), rand)
+    let capm: u64 = wlibc.type_px(wlibc.TY_BODY) * 73 / 100
+    let bas: u64 = y + (h + capm) / 2
+    let _b: u64 = wlib.draw_text(x + pad_x(), bas, t_at(i), txt_n[(i) as usize],
+        wlibc.theme(wlibc.C_WINDOW_TEXT), wlibc.TY_BODY)
+}
+
+fn paint_frame(i: u64) {
+    if i >= ANZ || !an(i) {
+        return
+    }
+    wlib.draw_frame(x_von(i), y_von(i), at(i, F_W), at(i, F_H),
+        wlib.MR_PANEL, wlibc.theme(wlibc.C_FOCUS_RING))
+}
+
+// ============================================ DIE DATEI
+//     uhr=1,1,16,16
+//        an, anker, dx, dy
+static mut p_conf: [u8; 20] = "/etc/module.conf\0\0\0\0"
+static mut puf: [u8; 512] = [0 as u8; 512]
+
+static mut k_key: [u8; 8] = "taste\0\0\0"
+
+static mut c_head: [u8; 64] =
+    "# /etc/module.conf -- name=an,anker,dx,dy\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+
+fn p_text(b: u64, at2: u64, p: u64) -> u64 {
+    var a: u64 = at2
+    var k: u64 = 0
+    while k < 64 {
+        let c: u64 = __mmio_read8((p + k) as *mut u8) as u64
+        if c == 0 {
+            return a
+        }
+        __mmio_write8((b + a) as *mut u8, c as u8)
+        a = a + 1
+        k = k + 1
+    }
+    return a
+}
+
+fn p_number(b: u64, at2: u64, v: u64) -> u64 {
+    var a: u64 = at2
+    if v >= 10000 {
+        a = p_number(b, a, v / 10000)
+        __mmio_write8((b + a) as *mut u8, (48 + (v / 1000) % 10) as u8)
+        a = a + 1
+    } else if v >= 1000 {
+        __mmio_write8((b + a) as *mut u8, (48 + (v / 1000) % 10) as u8)
+        a = a + 1
+    }
+    if v >= 100 {
+        __mmio_write8((b + a) as *mut u8, (48 + (v / 100) % 10) as u8)
+        a = a + 1
+    }
+    if v >= 10 {
+        __mmio_write8((b + a) as *mut u8, (48 + (v / 10) % 10) as u8)
+        a = a + 1
+    }
+    __mmio_write8((b + a) as *mut u8, (48 + v % 10) as u8)
+    return a + 1
+}
+
+fn save() -> bool {
+    let b: u64 = (&puf[0 as usize]) as u64
+    var a: u64 = p_text(b, 0, (&c_head[0 as usize]) as u64)
+    __mmio_write8((b + a) as *mut u8, 10 as u8)
+    a = a + 1
+    var i: u64 = 0
+    while i < ANZ {
+        a = p_text(b, a, name_von(i))
+        __mmio_write8((b + a) as *mut u8, 61 as u8) // =
+        a = a + 1
+        a = p_number(b, a, at(i, F_AN))
+        __mmio_write8((b + a) as *mut u8, 44 as u8) // ,
+        a = a + 1
+        a = p_number(b, a, at(i, F_ANKER))
+        __mmio_write8((b + a) as *mut u8, 44 as u8)
+        a = a + 1
+        a = p_number(b, a, at(i, F_DX))
+        __mmio_write8((b + a) as *mut u8, 44 as u8)
+        a = a + 1
+        a = p_number(b, a, at(i, F_DY))
+        __mmio_write8((b + a) as *mut u8, 10 as u8)
+        a = a + 1
+        i = i + 1
+    }
+    a = p_text(b, a, (&k_key[0 as usize]) as u64)
+    __mmio_write8((b + a) as *mut u8, 61 as u8)
+    a = a + 1
+    a = p_number(b, a, m_key)
+    __mmio_write8((b + a) as *mut u8, 10 as u8)
+    a = a + 1
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64,
+        ulib.O_MAKE, 0x1A4)
+    if ulib.bad(fd) {
+        return false
+    }
+    let g: u64 = ulib.sys(ulib.SYS_WRITE, fd, b, a)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(g) || g < a {
+        return false
+    }
+    n_write = n_write + 1
+    dreckig = 0
+    return true
+}
+
+fn equal(a: u64, b: u64, n: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if __mmio_read8((a + k) as *mut u8) != __mmio_read8((b + k) as *mut u8) {
+            return false
+        }
+        k = k + 1
+    }
+    return __mmio_read8((b + n) as *mut u8) == 0 as u8
+}
+
+fn load() -> bool {
+    read_offset()
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let b: u64 = (&puf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 511)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        // Kommentar und Leerzeile ueberspringen
+        if __mmio_read8((b + i) as *mut u8) == 35 as u8 {
+            while i < n && __mmio_read8((b + i) as *mut u8) != 10 as u8 {
+                i = i + 1
+            }
+            i = i + 1
+        } else if __mmio_read8((b + i) as *mut u8) == 10 as u8
+            || __mmio_read8((b + i) as *mut u8) == 13 as u8 {
+            i = i + 1
+        } else {
+            let ks: u64 = i
+            while i < n && __mmio_read8((b + i) as *mut u8) != 61 as u8
+                && __mmio_read8((b + i) as *mut u8) != 10 as u8 {
+                i = i + 1
+            }
+            if i < n && __mmio_read8((b + i) as *mut u8) == 61 as u8 {
+                let kl: u64 = i - ks
+                i = i + 1
+                var f: [u64; 4] = [0 as u64; 4]
+                var fi: u64 = 0
+                while fi < 4 {
+                    var v: u64 = 0
+                    var d: u64 = 0
+                    while i < n {
+                        let c: u64 = __mmio_read8((b + i) as *mut u8) as u64
+                        if c >= 48 && c <= 57 {
+                            v = v * 10 + (c - 48)
+                            d = d + 1
+                            i = i + 1
+                        } else {
+                            break
+                        }
+                    }
+                    if d > 0 {
+                        f[(fi) as usize] = v
+                    }
+                    if i < n && __mmio_read8((b + i) as *mut u8) == 44 as u8 {
+                        i = i + 1
+                    }
+                    fi = fi + 1
+                }
+                if equal(b + ks, (&k_key[0 as usize]) as u64, kl) {
+                    m_key = f[(0) as usize]
+                }
+                // welches Modul?
+                var m: u64 = 0
+                while m < ANZ {
+                    if equal(b + ks, name_von(m), kl) {
+                        var av: u64 = f[(0) as usize]
+                        if av > 1 {
+                            av = 1
+                        }
+                        var an2: u64 = f[(1) as usize]
+                        if an2 > A_RU {
+                            an2 = A_RO
+                        }
+                        put(m, F_AN, av)
+                        put(m, F_ANKER, an2)
+                        put(m, F_DX, f[(2) as usize])
+                        put(m, F_DY, f[(3) as usize])
+                    }
+                    m = m + 1
+                }
+            }
+            while i < n && __mmio_read8((b + i) as *mut u8) != 10 as u8 {
+                i = i + 1
+            }
+            i = i + 1
+        }
+    }
+    dreckig = 0
+    return true
+}
+
+fn set_screen(w: u64, h: u64) {
+    s_w = w
+    s_h = h
+}

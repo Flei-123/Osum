@@ -1,45 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/storage/run.sh -- DER BEWEIS, DASS OSUM DIE FRAGE "WAS FRISST
-# MEINEN PLATZ" BEANTWORTET, OHNE DIE PLATTE ZU DURCHLAUFEN.
-#
-# TreeSize und WizTree koennen diese Frage auch. Beide muessen dafuer
-# beim Start die Platte lesen -- WizTree die Master File Table am Stueck,
-# TreeSize Verzeichnis fuer Verzeichnis --, und beide fangen bei jedem
-# Start von vorn an. Osum nicht: `kernel/nidx.fi` fuehrt seit Runde K15
-# ein Aenderungsjournal des Dateisystems, und seit dieser Runde traegt es
-# nicht nur Namen, sondern auch GROESSEN, aufsummiert bis zur Wurzel.
-#
-# DAS IST EINE BEHAUPTUNG. Dieser Laeufer macht Zahlen daraus:
-#
-#   1. ZEIT GEGEN ZEIT. Auf einem Abbild mit viertausend Dateien wird
-#      dieselbe Frage zweimal gestellt -- einmal an den Index, einmal an
-#      einen vollstaendigen Verzeichnisdurchlauf --, und beide Zeiten
-#      stehen nebeneinander. Gemessen wird IM GAST, mit derselben Uhr,
-#      hintereinander, damit die Last des Wirts beide gleich trifft.
-#   2. RICHTIGKEIT VOR GESCHWINDIGKEIT. Eine sofortige, aber falsche Zahl
-#      ist wertlos. Also wird JEDES Verzeichnis des Abbilds Oktett fuer
-#      Oktett gegen den echten Durchlauf gehalten (`du -p`) -- und
-#      zusaetzlich gegen eine DRITTE Zahl, die `tools/storage/tree.py`
-#      auf dem WIRT ausrechnet, in Python, ohne den Kernel zu kennen
-#      (`tools/storage/pruefen.py`). Zwei Wege koennen denselben
-#      Denkfehler haben; drei ist unwahrscheinlicher.
-#   3. DAS JOURNAL MUSS WACHSTUM MITBEKOMMEN. Ein Namensindex merkt, dass
-#      es einen Namen mehr gibt. Ein Speicherindex muss merken, dass eine
-#      Datei GEWACHSEN ist -- das passiert oefter. `du -w` schreibt in
-#      eine Datei und prueft, dass die Summen sich um genau den
-#      Unterschied bewegt haben, ohne Neuaufbau.
-#   4. JEDE ZUSAGE HAT EINE GEGENPROBE. `du -W` schaltet das Nachziehen
-#      ab: dann MUSS die Zahl falsch werden. `wignoidx` nimmt der
-#      Oberflaeche den Index: dann MUESSEN dort Nullen stehen. Eine
-#      Messung, die auch ohne ihre Quelle noch stimmt, misst nichts.
-#   5. DIE OBERFLAECHE WIRD ANGESEHEN. `/bin/speicher` laeuft unter dem
-#      Fensterserver, und es entstehen Bildschirmfotos -- ein Baum, der
-#      im Quelltext richtig aussieht, kann im Bild uebereinander liegen.
-#
-# DAUER: die Laeufe mit vollstaendigem Durchlauf brauchen Minuten, nicht
-# Sekunden -- ohne KVM ist jeder Inode-Zugriff emulierte IDE. Genau das
-# ist ja der Punkt.
 #
 # Verwendung:  bash tools/storage/run.sh [ausgabeverzeichnis]
 set -uo pipefail
@@ -62,14 +21,6 @@ num() { # name wert op erwartet
     else bad "$name: $wert, erwartet $op $want"; fi
 }
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
-# EIN FELD AUS EINER GEMELDETEN ZEILE. `grep -oE '.*okt=[0-9]+'` waere
-# gierig und faende bei `laufkb=` das falsche Feld; deshalb wird der
-# Feldname mit Wortgrenze davor gesucht.
-# DIE ZAHL HINTER DEM GLEICHHEITSZEICHEN, und zwar NUR sie. Die erste
-# Fassung schloss mit `grep -oE '[0-9]+'` ab und gab fuer `us10=161`
-# zwei Zahlen zurueck ("10" aus dem Feldnamen und "161"); jede Zusage,
-# die darauf rechnete, verglich Unsinn. Also wird der Feldname mit
-# `sed` abgeschnitten statt nach Ziffern gesucht.
 feld() { grep -aoE "(^|[^a-z])$3=[0-9]+" <(grep -aF "$2" "$1" | tail -1) \
          | tail -1 | sed 's/.*=//'; }
 
@@ -84,9 +35,6 @@ bash tools/storage/build.sh "$TMPD" || exit 1
 
 # --------------------------------------------------------------- Laeufe
 #
-# `nokbd nosched noproc nofs noring3` ist die stille Grundlage: kein
-# Zeitgeber, der in die Messung hineinredet, keine Selbsttests, die die
-# serielle Leitung fuellen. `script=...` gibt der Schale eine Zeile.
 lauf() { # name kommandozeile [abbild] [frist]
     local name=$1 zeile=$2 img=${3:-inhalt.img} frist=${4:-3000}
     cp -f "$TMPD/$img" "$TMPD/live-$name.img"
@@ -98,9 +46,6 @@ lauf() { # name kommandozeile [abbild] [frist]
     echo "RC=$?" > "$TMPD/$name.rc"
 }
 
-# EIN BILDSCHIRMFOTO. Der Weg ist der aus Runde K15: QEMU bekommt eine
-# Bildflaeche (`-vga std`) auch bei `-display none`, und ueber den
-# Monitor an einem Unix-Socket schreibt `screendump` sie als PPM.
 foto() { # name kommandozeile [marke]
     local name=$1 zeile=$2 marke=${3:-'^speicher: ready'}
     local sock="$TMPD/mon-$name.sock"
@@ -138,8 +83,6 @@ BUS=$(feld "$TMPD/zeit.txt" "du: bauen" us)
 has "$TMPD/zeit.txt" "du: vergleich" "die Messung ist durchgelaufen"
 num "Dateien im Durchlauf" "$NDAT" ge 4000
 if [ -n "${IUS:-}" ] && [ -n "${WUS:-}" ] && [ "$IUS" -gt 0 ]; then
-    # us10 ist die Zeit fuer ZEHN Abfragen -- so gemessen, weil eine
-    # einzelne unter der Koernung der Uhr laege.
     FAKTOR=$(( WUS * 10 / IUS ))
     ok "Index $((IUS / 10)) us je Abfrage, Durchlauf $WUS us -- Faktor $FAKTOR"
     num "der Index ist wenigstens tausendmal schneller" "$FAKTOR" ge 1000
@@ -187,12 +130,6 @@ num "und nach dem Loeschen steht wieder der alte Stand da" \
 
 echo "== 5. Gegenprobe: ohne Nachziehen MUSS die Zahl falsch werden"
 lauf schreibW 'du -W'
-# GEPRUEFT WIRD DAS FELD, NICHT DIE ZEICHENFOLGE. `grep -qa "ok=0"`
-# stand hier zuerst und ging IMMER durch: die Energieschicht schreibt
-# beim Hochfahren `pwr: tempok=0` und `pwr: acok=0`, und beides enthaelt
-# "ok=0". Die Gegenprobe haette also auch dann bestanden, wenn sie
-# durchgefallen waere -- genau der Fehler, den diese Runde an anderer
-# Stelle schon einmal gemacht hat.
 WOK=$(feld "$TMPD/schreibW.txt" 'du: schreib nachgezogen' ok)
 WNACH=$(feld "$TMPD/schreibW.txt" 'du: schreib nachgezogen' nachher)
 WERW=$(feld "$TMPD/schreibW.txt" 'du: schreib nachgezogen' erwartet)
@@ -205,18 +142,6 @@ fi
 echo "== 6. Die Oberflaeche"
 mkdir -p "$SHOTS"
 GRUND="nokbd nosched noproc nofs"
-# GEWARTET WIRD AUF `speicher: ready`, UND DAS DAUERT. Das Programm macht
-# vor dieser Zeile seine eigene Gegenprobe -- einen vollstaendigen
-# Durchlauf des angezeigten Verzeichnisses --, und genau die soll hier
-# mit aufgezeichnet werden. Die Kacheln stehen laengst im Bild; wer nur
-# ein Foto will, nimmt `speicher: kachel` als Marke und ist in Sekunden
-# fertig.
-# A-029: `wighalt=240`. `wiglong` haelt zwanzig Sekunden, und in denen
-# kommt /bin/speicher auf dem 4000-Dateien-Abbild nicht bis `ready`:
-# vorher laeuft seine Gegenprobe, ein echter Durchlauf mit `stat` je
-# Datei (Abschnitt 1 misst dafuer rund 60 s). Danach war der Kern schon
-# durch, QEMU weg, und es gab weder `speicher: probe` noch ein Foto.
-# Der Halt ist nur die Obergrenze -- `foto` wartet auf die Marke.
 foto ruhe "gfx wm wig wigspeicher wmhold wiglong wighalt=240 $GRUND" '^speicher: ready'
 has "$TMPD/ruhe.txt" "k15: start /bin/speicher" "/bin/speicher kommt VON DER PLATTE"
 has "$TMPD/ruhe.txt" "speicher: kachel" "es hat seine Kacheln gerechnet"
@@ -226,9 +151,6 @@ if [ "${SOKT:-x}" = "${SOLL:-y}" ]; then
 else
     bad "die Oberflaeche sagt '$SOKT', du und der Wirt sagen '$SOLL'"
 fi
-# Die Summe der angezeigten Zeilen MUSS die angezeigte Gesamtsumme sein.
-# Eine Oberflaeche, deren Zeilen sich auf etwas anderes addieren als auf
-# ihre eigene Statuszeile, zeigt zwei verschiedene Wahrheiten.
 ZSUM=$(grep -aoE '^speicher: zeile i=[0-9]+ okt=[0-9]+' "$TMPD/ruhe.txt" \
        | grep -oE 'okt=[0-9]+' | sed 's/okt=//' \
        | awk '{s+=$1} END{print s+0}')
@@ -240,7 +162,6 @@ fi
 has "$TMPD/ruhe.txt" "speicher: probe" "die Oberflaeche rechnet sich selbst gegen"
 num "und zwar richtig" "$(feld "$TMPD/ruhe.txt" 'speicher: probe' ok)" eq 1
 
-# DIE KACHELN WERDEN IM BILD NACHGEMESSEN, nicht im Quelltext geglaubt.
 if [ -s "$TMPD/ruhe.ppm" ]; then
     python3 tools/gfx/ppm2png.py "$TMPD/ruhe.ppm" "$SHOTS/speicher.png" \
         > "$TMPD/png.log" 2>&1 || cp -f "$TMPD/ruhe.ppm" "$SHOTS/speicher.ppm"

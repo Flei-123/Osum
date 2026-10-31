@@ -1,47 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/design/eh5.sh -- DIE ABNAHME DER RUNDE ECHTHARDWARE-5.
 #
 #   bash tools/design/eh5.sh <ausgabeverzeichnis> [key=value ...]
 #
-# WARUM ES DIESEN LAEUFER GIBT UND capture.sh NICHT GENUEGT.
-#
-# Justins Befunde aus ECHTHARDWARE-4 (Fotos vom 10.09.2026, 11:31-11:37,
-# Abbild orientos-usb-20260910-44a5af3.img) liessen sich mit
-# `tools/design/capture.sh` NICHT nachstellen -- und zwar nicht, weil
-# sie nicht da waeren, sondern weil dieser Laeufer eine ANDERE MASCHINE
-# baut als der Stick. Drei Unterschiede, jeder einzeln nachgewiesen:
-#
-#   1. DIE BEFEHLSZEILE. capture.sh faehrt
-#         gfx ... wm desk wmhold ... nokbd nosched noproc nofs
-#      der Stick dagegen (tools/usbimg/build.sh, Menue 1)
-#         modfs osum gfx wm wig desk wmshell wmdauer tafel herz ...
-#      `wmhold` haelt den Fensterserver an einer Stelle an, an der der
-#      Schreibtisch NOCH LAEUFT, aber `wmshell` fehlt: es wird also NIE
-#      eine Shell im Terminalfenster gestartet. Justins Befund B
-#      ("Terminalfenster ist leer") KANN unter capture.sh gar nicht
-#      auftreten, weil dort nie eine Shell im Fenster stand.
-#      Ausserdem `nokbd`: der Tastaturtreiber ist AUS. Befund A
-#      ("im Suchfenster laesst sich nichts tippen") ist damit ebenfalls
-#      nicht pruefbar -- `sendkey` kam bisher ueber einen Sonderweg an.
-#
-#   2. DIE PROGRAMMLISTE. capture.sh baut elf Programme; der Stick
-#      baut achtundfuenfzig. `/bin/taskmgr` ist in BEIDEN nicht dabei,
-#      und genau das ist Justins Befund F: das Kontrollzentrum ruft
-#      `/bin/taskmgr` (kernel/user/qs.fi:1316), und diese Datei liegt
-#      auf seinem Stick nicht. Nachgewiesen mit
-#      `python3 tools/osum/mkfs.py list` auf der Wurzelpartition des
-#      ausgelieferten Abbildes: 177 Inoden, kein `/bin/taskmgr`.
-#
-#   3. DIE TAFEL. `tafel herz` malt die Diagnosetafel, aus der Justins
-#      Zahlen stammen (RING/VERL/KOAL, ISR MAX, SAFETY, PANEL). Ohne
-#      diese Woerter gibt es die Zeilen nicht, gegen die seine Fotos
-#      gelesen werden.
-#
-# Dieser Laeufer baut deshalb die MASCHINE DES STICKS: dieselbe
-# Befehlszeile, dieselbe Programmliste (soweit sie uebersetzt), und die
-# Tafel an. Was hier gemessen wird, ist damit vergleichbar mit dem, was
-# Justin auf dem Blech sieht -- und nur so ist ein Befund ein Befund.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -65,9 +25,6 @@ nurbau=nein
 ton=nein
 netz=nein
 extra=""
-# DIE PROGRAMME. Das ist die Liste des Sticks, gekuerzt um die, die
-# dieser Laeufer nicht braucht -- ABER MIT `taskmgr` UND `sh`, weil
-# genau die beiden in Justins Befunden vorkommen.
 progs="desktop taskbar settings launcher explorer netview taskmgr \
 edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc \
 find du chmod id whoami touch true false sleep kill sort uniq rmdir \
@@ -137,16 +94,6 @@ for p in $progs; do
 done
 echo "programme $(echo $GEBAUT | wc -w)"
 
-# ============================================== RUNDE ECHTHARDWARE-5
-# DIE APPS (`fetch`) -- FUER JUSTINS PUNKT I.
-#
-# `fetch` ist das einzige Programm dieses Baumes, das TLS spricht, und
-# damit die einzige Antwort auf "geht ausgehendes HTTPS". Es liegt in
-# kernel/app/ und braucht ein anderes Profil (`--profile=app`) und
-# FIRNLIB=lib/ -- der Grund steht ausfuehrlich in
-# tools/usbimg/build.sh: `fetch` zieht `libc.dns` aus DIESEM Repo UND
-# `tls.tls` aus vendor/firn/lib, und nur mit FIRNLIB=lib/ sind beide
-# Haelften erreichbar.
 GEBAUT_APP=""
 for p in ${APPS:-fetch}; do
     [ -f "kernel/app/$p.fi" ] || continue
@@ -215,9 +162,6 @@ if python3 tools/netview/icons.py bauen "$OUT/nvicons" > "$OUT/nvicons.log" 2>&1
         [ -e "$OUT/nvicons/$q" ] && ARGS+=("/etc/netview/$q=$OUT/nvicons/$q")
     done
 fi
-# RUNDE ECHTHARDWARE-5: die Wurzelzertifikate. Ohne sie vertraut
-# `fetch` NICHTS und jede HTTPS-Verbindung endet an der Pruefung --
-# was wie ein Netzfehler aussaehe und keiner waere.
 if python3 tools/hwnet/mkroots.py "$OUT/roots.pem" > "$OUT/roots.log" 2>&1; then
     ARGS+=(/etc/ssl/ "/etc/ssl/roots.pem=$OUT/roots.pem@0644")
     echo "wurzeln    $(stat -c%s "$OUT/roots.pem") Oktette"
@@ -244,16 +188,6 @@ echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
 
 # ------------------------------------------------------------ 3. starten
 #
-# DIE BEFEHLSZEILE DES STICKS, und das ist der ganze Sinn dieses
-# Laeufers. Woertlich aus tools/usbimg/build.sh, Menue 1, minus die
-# Netz-Woerter (dieser Lauf hat keine Netzkarte) und minus `modfs`
-# (der Kern bekommt die Platte hier ueber `-drive`, nicht als Modul).
-#
-#   wmshell   startet /bin/sh IM TERMINALFENSTER  -> Befund B pruefbar
-#   wmdauer   der Schreibtisch laeuft ohne Rundengrenze
-#   tafel     die Diagnosetafel                   -> Befunde G und H
-#   herz      der Puls
-#   KEIN nokbd: der Tastaturtreiber laeuft        -> Befund A pruefbar
 APPEND="osum gfx fbres=${XRES}x${YRES} wm wig desk wmshell wmdauer tafel herz"
 APPEND="$APPEND absturzhalt nopuls tz=120 lang=$lang nosched noproc nofs"
 [ -n "$SKAL" ] && APPEND="$APPEND $SKAL"
@@ -268,25 +202,10 @@ if [ "$ton" = ja ]; then
     TONDEV=(-audiodev none,id=snd0 -device intel-hda
             -device hda-duplex,audiodev=snd0)
 fi
-# ================================================ RUNDE ECHTHARDWARE-5
-# `netz=ja` -- EINE ECHTE NETZKARTE MIT AUSGANG INS INTERNET.
 #
-# Justins Punkt I: seit ECHTHARDWARE-4 hat sein Brett einen echten
-# DHCP-Lease (Tafel Zeile 22, `IP 192.168.1.107`). Die Frage ist, ob
-# darauf DNS und ausgehendes HTTPS gehen -- die Voraussetzung fuer
-# Browser und Jarvis-Bruecke.
-#
-# QEMUs Benutzernetz beantwortet genau das: es hat einen eigenen
-# DHCP-Server (10.0.2.15 fuer den Gast, 10.0.2.2 als Router,
-# 10.0.2.3 als DNS) und leitet nach draussen weiter. `e1000` ist die
-# Karte, fuer die dieser Kern einen Treiber hat.
 NETDEV=()
 if [ "$netz" = ja ]; then
     NETDEV=(-netdev user,id=n0 -device e1000,netdev=n0)
-    # DIESELBEN WOERTER WIE DER STICK (tools/usbimg/build.sh, Menue 1).
-    # `nic` allein genuegt NICHT: ohne `nsvc=0 nwait=0` kommt der
-    # Netzstapel nicht hoch, und `/bin/dhcp` meldet dann woertlich
-    # `dhcp: kein Netz im Kernel` -- gemessen in genau diesem Lauf.
     APPEND="$APPEND nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp"
 fi
 ACC=()
@@ -302,9 +221,6 @@ timeout 900 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
     "${TONDEV[@]}" "${NETDEV[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 &
 PID=$!
-# GEWARTET WIRD AUF DEN SCHREIBTISCH, NICHT AUF `wm: hold`.
-# Ohne `wmhold` gibt es diese Zeile gar nicht; was den Zustand
-# "bedienbar" wirklich anzeigt, ist die Leiste bzw. der Starter.
 i=0
 while [ $i -lt 3000 ]; do
     grep -qaE 'launcher: ready|taskbar: ready|wm: dauer' "$OUT/serial.txt" 2>/dev/null && break
@@ -321,7 +237,6 @@ if [ -n "$drehbuch" ]; then
         2>&1 | tee "$OUT/fahren.log"
 fi
 
-# Beenden: erst hoeflich ueber den Monitor, dann hart.
 printf 'quit\n' | timeout 5 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1 || true
 sleep 0.5
 kill "$PID" 2>/dev/null || true

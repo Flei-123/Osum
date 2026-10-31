@@ -1,60 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/k17/run.sh -- DER BEWEIS, DASS OSUM USB KANN.
-#
-# Bis zu dieser Runde hatte Osum zwei Eingabegeraete, und beide haengen am
-# 8042: die Tastatur an IRQ 1 (Runde 59) und die Maus an IRQ 12 (Runde
-# K10). Auf einem Laptop von 2026 gibt es diesen Baustein nicht mehr. Im
-# Kopf von `kernel/ps2m.fi` steht seit K10 der Satz, der diese Runde
-# ausgeloest hat: "Ein USB-HID-Weg braucht davor einen xHCI-Treiber,
-# Endpunkte, Deskriptoren und eine Warteschlange; das ist eine Runde fuer
-# sich."
-#
-# WAS HIER GEMESSEN WIRD, UND WARUM SO:
-#
-#   1. DIE TASTATUR WIRD ZWEIMAL GEMESSEN, MIT DEMSELBEN TEST. Einmal
-#      mit `-device usb-kbd`, einmal mit dem PS/2-Geraet -- dieselbe
-#      Folge von `sendkey`-Befehlen aus dem QEMU-Monitor, dieselbe
-#      Shell, dasselbe Plattenabbild. Danach werden die `key:`-Zeilen
-#      und der Mitschnitt der Shell OKTETT FUER OKTETT verglichen. Das
-#      ist die eigentliche Zusage dieser Runde: nicht "USB liefert
-#      Zeichen", sondern "USB liefert DIESELBEN Zeichen".
-#      UND DAZU DER GEGENBEWEIS, dass in Lauf A wirklich USB geliefert
-#      hat: `usb: keys=N` zaehlt NUR die Tasten, die durch `usb.press`
-#      gegangen sind. Ohne diese Zahl waere der Vergleich wertlos --
-#      QEMU koennte die Tasten in beiden Laeufen an den PS/2-Regler
-#      geschickt haben, und beide Seiten waeren gleich UND falsch.
-#   2. DIE LEHRE AUS B3: EIN VERGLEICH ZWEIER LEERER SEITEN IST KEIN
-#      TEST. Vor jedem Oktettvergleich wird geprueft, dass BEIDE Seiten
-#      nicht leer sind und mindestens so viele Zeilen haben, wie sie
-#      haben muessen. Ist eine leer, faellt die Zusage -- sie wird
-#      ausdruecklich NICHT als bestanden gezaehlt.
-#   3. DIE LEHRE AUS K7B: NICHT STATISTISCH MESSEN. Hier wird nichts
-#      gegen eine Flaeche gerechnet. Der Zeiger steht nach zehn
-#      Bewegungen an EINEM Punkt, und der Punkt ist ausgerechnet, nicht
-#      geschaetzt: mx=200, my=120, mclk=1.
-#   4. DER STICK WIRD VON AUSSEN NACHGELESEN. Das Abbild kommt von
-#      `mkfs.vfat` und `sfdisk`, die Datei darin von `mcopy`. Osum liest
-#      sie und schreibt eine eigene -- und danach holt `mtools` auf dem
-#      WIRT diese Datei wieder heraus und `cmp` vergleicht sie. "Das
-#      Schreiben hat keinen Fehler gemeldet" ist keine Messung.
-#   5. ABZIEHEN IM BETRIEB. Ein Deskriptor bleibt OFFEN, das Geraet
-#      verschwindet, und danach MUSS jeder Zugriff -ENODEV geben --
-#      und der Prozess, der ihn gemacht hat, MUSS weiterlaufen und auf
-#      der Wurzel weiterschreiben koennen. Gemessen aus Ring 3
-#      (`/bin/k17`), nicht aus dem Mitschnitt des Kerns.
-#   6. JEDE ZUSAGE HAT EINE GEGENPROBE. `nousb` (gar kein Baum),
-#      `nohid` (kein Eingabetreiber), `nomsc` (kein Blockgeraet),
-#      `usbnoirq` (der Meldevektor bleibt maskiert -- die Uebertragung
-#      laeuft, die Meldung nicht, und keine Taste kommt an), `usbpoll`
-#      (derselbe maskierte Vektor, aber der Kern sieht selbst nach --
-#      und die Ereignisse kommen trotzdem an), ein Lauf ohne `-device
-#      qemu-xhci`, einer ohne Geraete daran und einer ohne das Wort
-#      `usb`.
-#
-# Gemessen wie in den Runden 59 bis K16: QEMU je Fall, mit Zeitlimit,
-# serielle Ausgabe gegen Erwartungen, Beendigungscode aus
-# `isa-debug-exit` (21 = der Kernel hat sich selbst beendet).
 #
 # Aufruf:  bash tools/k17/run.sh
 set -uo pipefail
@@ -65,10 +9,6 @@ export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 FC1=${FIRNC1:-vendor/firn/bin/firnc1}
 ULD=kernel/user/user.ld
-# RUNDE O-STRUKTUR: die Kerndateien liegen in Schichtverzeichnissen
-# (kernel/sys/sys.fi, kernel/lib/kstate.fi, ...). Statt den Pfad zu
-# buchstabieren, wird er einmal erfragt -- `tools/kfind.sh` findet die
-# Datei, wo immer sie liegt, und bricht ab, wenn es sie nicht gibt.
 . tools/kpfad.sh
 K_SYS=$(kfi sys)       || exit 1
 K_KSTATE=$(kfi kstate) || exit 1
@@ -102,11 +42,6 @@ gleich() { # name soll ist
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hat_nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 
-# ZWEI DATEIEN VERGLEICHEN -- UND ZUERST PRUEFEN, DASS SIE NICHT LEER
-# SIND. Das ist die Lehre aus Runde B3 in ihrer pruefbaren Form: ein
-# `cmp` ueber zwei leere Dateien geht immer durch und sagt nichts. Die
-# Mindestzahl von Zeilen steht deshalb als Argument da, und eine zu
-# kurze Seite laesst die Zusage FALLEN statt sie zu bestehen.
 gleiche_datei() { # name a b mindestzeilen
     local na nb
     na=$(wc -l < "$2" 2>/dev/null || echo 0)
@@ -123,7 +58,6 @@ gleiche_datei() { # name a b mindestzeilen
     fi
 }
 
-# Eine Zahl aus einer `k17: name = zahl`-Zeile von /bin/k17.
 wert() { grep -a -m1 "^k17: $2 = " "$1" 2>/dev/null | sed 's/.* = //' | tr -d '\r\000'; }
 sagt() { # datei name soll beschreibung
     local got
@@ -132,10 +66,8 @@ sagt() { # datei name soll beschreibung
     if [ "$got" = "$3" ]; then ok "$4 ($2 = $got)"
     else bad "$4 -- $2 = $got, erwartet $3"; fi
 }
-# Eine Zahl aus der Zusammenfassung `usb: keys=... reports=...`.
 uz() { grep -a "^usb: keys=" "$1" 2>/dev/null | tail -1 | tr -d '\000' \
         | grep -oE "$2=[0-9]+" | tail -1 | cut -d= -f2; }
-# Eine Zahl aus der Zeile `usb: devices=... enums=... cmds=...`.
 us() { grep -a "^usb: devices=" "$1" 2>/dev/null | tail -1 | tr -d '\000' \
         | grep -oE "$2=[0-9]+" | tail -1 | cut -d= -f2; }
 number_in() { grep -aE "^const $2: u64 = [0-9]+" "$1" | head -1 \
@@ -157,12 +89,8 @@ for w in mkfs.vfat mcopy mdir mtype sfdisk; do
     }
 done
 
-# ============================================== 1. die Nummern und die Karte
-
 echo "== 1. die Nummern, die Vektoren und die Karte von kdata =="
 
-# Die zwei Aufrufnummern dieser Runde. 1700 gehoert seit Runde K14 der
-# Einhaengetafel; der Vorrat dieser Runde faengt deshalb bei 1701 an.
 for n in 1701 1702; do
     grep -qE "= $n( |$)" "$K_SYS" && ok "die Aufrufnummer $n steht in $K_SYS" \
         || bad "die Aufrufnummer $n fehlt in $K_SYS"
@@ -176,19 +104,10 @@ for v in "$stat_nr" "$pull_nr"; do
         bad "die Nummer ${v:-fehlt} liegt AUSSERHALB von 1701..1749"
     fi
 done
-# UND NIRGENDS SONST IM BAUM. Drei Runden arbeiten gleichzeitig an
-# diesem Kernel; eine Nummer, die zweimal vorkommt, ist genau die Art
-# Fehler, die erst beim Verschmelzen auffaellt.
 doppelt=$(grep -rn "u64 = 170[12]$" kernel/ lib/ 2>/dev/null \
     | grep -cv 'USBSTAT\|USBPULL\|USB_MINNR\|USB_MAXNR' || true)
 num "andere Verwendungen der Nummern 1701/1702 im Baum" "${doppelt:-0}" eq 0
 
-# RUNDE MERGE: `trap.fi` und `boot.s` liegen seit Runde ARM unter
-# `kernel/arch/x86_64/`. Dieser Laeufer suchte sie an der alten Stelle,
-# fand nichts und meldete drei Fehler ueber Dinge, die unveraendert da
-# waren.
-# Der Vektor. 43, und keiner sonst -- `karte.py` rechnet die
-# Vektortafel seit Runde K10 nach.
 grep -q 'const VEC_XHCI: u64 = 43' kernel/arch/x86_64/trap.fi \
     && ok "der Meldevektor des Reglers ist 43 (kernel/arch/x86_64/trap.fi)" \
     || bad "VEC_XHCI ist nicht 43 in kernel/arch/x86_64/trap.fi"
@@ -196,9 +115,6 @@ grep -q 'const VEC_XHCI: u64 = 43' "$K_XHCI" \
     && ok "und dieselbe Zahl steht im Treiber" \
     || bad "VEC_XHCI in $K_XHCI passt nicht"
 
-# Die Speicherkarte. `karte.py` rechnet seit dieser Runde AUCH die
-# Untergliederung des USB-Bereichs nach -- sie ist kein eigener
-# kdata-Bereich, kann sich aber selbst ueberschneiden.
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
 else
@@ -210,17 +126,9 @@ k17off=$(grep -aE '^const K17_OFF: u64 = 0x[0-9A-Fa-f]+' "$K_KSTATE" | grep -oE 
 k17max=$(grep -aE '^const K17_MAX: u64 = 0x[0-9A-Fa-f]+' "$K_KSTATE" | grep -oE '0x[0-9A-Fa-f]+')
 gleich "der Vorrat dieser Runde faengt bei 0x50000 an" "0x50000" "$k17off"
 gleich "und ist acht Seiten gross" "0x8000" "$k17max"
-# kdata musste dafuer wachsen -- und die Zahl steht ZWEIMAL.
 a=$(grep -aE '^const KDATA_SIZE: u64 = 0x[0-9A-Fa-f]+' "$K_KSTATE" | grep -oE '0x[0-9A-Fa-f]+')
 b=$(grep -aE '\.set KDATA_SIZE, 0x[0-9A-Fa-f]+' kernel/arch/x86_64/boot.s | grep -oE '0x[0-9A-Fa-f]+' | head -1)
 gleich "KDATA_SIZE steht in kstate.fi und boot.s gleich" "$a" "$b"
-# Der Vorrat dieser Runde endet bei 0x58000. Als K17 zuerst geschrieben
-# wurde, WAR das die Grenze; Runde K18 hat kdata inzwischen auf 0x60000
-# gehoben und ihre zwei Seiten dahinter gelegt. Geprueft wird deshalb,
-# was wirklich gilt: der Vorrat dieser Runde liegt VOLLSTAENDIG in kdata.
-# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM. `kstate.fi`
-# liegt unter kernel/lib/, `xhci.fi` unter kernel/drv/usb/, `usb.fi`
-# unter kernel/usb/ -- ein flaches `cp kernel/*.fi` liess alle drei weg.
 kopie_kernel() { # ziel
     mkdir -p "$1"
     ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$1/" \; )
@@ -235,12 +143,6 @@ fi
 
 # ---------------------------------------------------- der Modusvektor
 #
-# Der erste Anlauf dieser Runde ist GENAU HIER gescheitert: K17 und K18
-# hatten unabhaengig voneinander dieselben sieben Bits genommen (1<<47
-# bis 1<<53), und danach waren im ganzen u64 nur noch vier frei. Seit
-# der Vorarbeit zu dieser Runde ist der Modus ein Vektor aus Woertern,
-# ein Wort je Untersystem, und ein Modusname ist ein Bitindex
-# (Wort * 64 + Bit). Die neun Schalter dieser Runde liegen in Wort 6.
 for n in M_USB M_NOUSB M_USBPOLL M_NOHID M_NOMSC M_UNPLUG M_NOUSBIRQ \
          M_USBSTICK M_USBHOLD; do
     v=$(number_in "$K_KSTATE" "$n")
@@ -250,17 +152,11 @@ for n in M_USB M_NOUSB M_USBPOLL M_NOHID M_NOMSC M_UNPLUG M_NOUSBIRQ \
         bad "$n hat den Index ${v:-fehlt}, erwartet 384..447 (Wort 6)"
     fi
 done
-# UND KEINE EINZIGE MASKE MEHR IM KERNEL. Solange irgendwo `mode & M_X`
-# steht, kann eine Runde wieder eine Maske erfinden.
-# RUNDE GRUNDLINIE-2: `kernel/*.fi` sah nur die oberste Ebene und damit
-# einen Bruchteil des Kernels. Der Zaehler geht jetzt ueber den BAUM.
 masken=$(grep -rac 'kstate\.MODE) &\|& kstate\.M_' \
         --include='*.fi' kernel/ 2>/dev/null \
         | awk -F: '{s+=$2} END {print s+0}')
 num "Stellen im Kernel, die den Modus noch als MASKE lesen" "${masken:-1}" eq 0
 
-# GEGENPROBE ZUM MODUSPRUEFER, zweimal -- ohne sie prueft er nur das,
-# woran jemand gedacht hat.
 kopie_kernel "$GG"
 sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 321/' "$GG/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg3.txt" 2>&1; then
@@ -276,22 +172,13 @@ else
     ok "GEGENPROBE: eine vergessene Maske (1<<47) hinter dem Vektor -- der Pruefer schlaegt an"
 fi
 
-# GEGENPROBE ZUM KARTENPRUEFER: ein Stueck des USB-Bereichs aus seinem
-# Bereich herausgelegt MUSS auffallen. Ohne diese Zeile prueft die neue
-# Karte nur das, woran jemand gedacht hat.
 kopie_kernel "$GG"
-# RUNDE GRUNDLINIE-2: 0x4C000 liegt heute GANZ AUSSERHALB des
-# K17-Vorrats (0x50000..0x58000) -- der Kartenpruefer sieht dort keinen
-# Bereich und meldet folglich auch keine Kollision. Die Gegenprobe mass
-# damit nichts. Sie legt den Ereignisring jetzt auf die Geraetesaetze
-# INNERHALB des Vorrats, und das MUSS auffallen.
 sed -i 's/^const EVT_OFF: u64 = 0x52000/const EVT_OFF: u64 = 0x56000/' "$GG/drv/usb/xhci.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg.txt" 2>&1; then
     bad "GEGENPROBE: EVT_OFF auf 0x56000 (die Geraetesaetze) gelegt und der Pruefer schweigt"
 else
     ok "GEGENPROBE: ein Ring ausserhalb des Vorrats -- der Kartenpruefer schlaegt an"
 fi
-# Und eine zweite: zwei Stuecke INNERHALB des Bereichs uebereinander.
 kopie_kernel "$GG"
 sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x55000/' "$GG/usb/usb.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg2.txt" 2>&1; then
@@ -300,9 +187,6 @@ else
     ok "GEGENPROBE: zwei Stuecke des USB-Bereichs uebereinander -- der Pruefer schlaegt an"
 fi
 
-# DIE SCHICHT HAT SICH NICHT VERBREITERT. `fs.fi`, `fat.fi` und `vfs.fi`
-# kennen kein USB -- das ist die Zusage von `blk.fi` aus Runde 62, zum
-# dritten Mal (nach NVMe in K2 und dem ATA-Sklaven in K14).
 for f in fs.fi fat.fi vfs.fi ofs.fi part.fi; do
     n=$(grep -acE '(^|[^a-z_])usb\.' "kernel/$f" 2>/dev/null || true)
     if [ "${n:-0}" -eq 0 ]; then ok "kernel/$f ruft kein usb.* -- die Blockschicht traegt es"
@@ -354,8 +238,6 @@ python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     && ok "die Wurzelplatte steht: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
 
-# Der Stick: ein FAT32 von den ECHTEN Linux-Werkzeugen, in einer
-# MBR-Tafel von `sfdisk`, mit einer Datei von `mcopy` darin.
 printf 'von linux auf den stick\n' > "$TMPD/host.txt"
 dd if=/dev/zero of="$TMPD/fat.img" bs=1M count=48 status=none
 mkfs.vfat -F 32 -s 1 -n USBSTICK "$TMPD/fat.img" >/dev/null 2>&1 \
@@ -401,7 +283,6 @@ lauf_stick() { # name kernel kommandozeile [weitere qemu-argumente...]
     echo $?
 }
 
-# Ein Lauf, in dem von aussen die MAUS bewegt wird.
 mauslauf() { # name kernel kommandozeile marke monitordatei [qemu-args...]
     local name=$1 img=$2 app=$3 marke=$4 mon=$5
     shift 5
@@ -415,8 +296,6 @@ mauslauf() { # name kernel kommandozeile marke monitordatei [qemu-args...]
         "$@" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
       echo $? > "$TMPD/$name.rc" ) &
     local pid=$!
-    # Warten, bis der Kern stillhaelt -- sonst faellt die erste Bewegung
-    # in einen Kern, der noch aufzaehlt.
     local i=0
     while [ $i -lt 600 ]; do
         grep -qa "$marke" "$TMPD/$name.txt" 2>/dev/null && break
@@ -429,8 +308,6 @@ mauslauf() { # name kernel kommandozeile marke monitordatei [qemu-args...]
     RC=$(cat "$TMPD/$name.rc" 2>/dev/null || echo 99)
 }
 
-# Ein Lauf, in dem GETIPPT wird (ueber tools/k11/keys.py, Runde K11):
-# die Tasten gehen als echte `sendkey`-Befehle in die laufende Maschine.
 tastenlauf() { # name kernel kommandozeile marke -- tasten... -- qemu-args...
     local name=$1 img=$2 app=$3 marke=$4
     shift 4
@@ -455,8 +332,6 @@ tastenlauf() { # name kernel kommandozeile marke -- tasten... -- qemu-args...
     RC=$(cat "$TMPD/$name.rc" 2>/dev/null || echo 99)
 }
 
-# ====================================== 3. der Regler kommt hoch
-
 echo "== 3. der Regler: ueber PCI gefunden, aufgesetzt, Meldungen =="
 rc=$(lauf_stick hc "$TMPD/k0.mb" "usb nokbd nosched noproc nofs" \
     "${XHCI[@]}" "${KBD[@]}" "${MOUSE[@]}")
@@ -479,19 +354,16 @@ gleich "jede Meldung hat mindestens ein Ereignis gebracht" "1" \
 num "Fehler des Reglers im ganzen Lauf" "$(uz "$H" xhcierr)" eq 0
 num "Zusagen, die die Schicht ueber sich selbst macht" "$(uz "$H" selftest)" eq 8
 
-# GEGENPROBE 1: kein Regler an der Maschine.
 rc=$(lauf kein "$TMPD/k0.mb" "usb nokbd nosched noproc nofs")
 num "ohne -device qemu-xhci beendet sich der Kern trotzdem sauber" "$rc" eq 21
 hat "$TMPD/kein.txt" "usb: no controller" "und sagt, dass keiner da ist"
 hat_nicht "$TMPD/kein.txt" "usb: xhci slots=" "und setzt nichts auf"
-# GEGENPROBE 2: `nousb` -- der Baum bleibt ganz aus.
 rc=$(lauf_stick nousb "$TMPD/k0.mb" "usb nousb nokbd nosched noproc nofs" \
     "${XHCI[@]}" "${KBD[@]}" "${MOUSE[@]}")
 num "mit nousb beendet sich der Kern sauber" "$rc" eq 21
 hat "$TMPD/nousb.txt" "usb: nousb" "die Gegenprobe sagt es"
 hat_nicht "$TMPD/nousb.txt" "usb: port=" "und KEIN Geraet wird aufgezaehlt"
 hat_nicht "$TMPD/nousb.txt" "usb: keys=" "und es gibt keine Zahlen dieser Runde"
-# GEGENPROBE 3: ohne das Wort `usb` bleibt der Kern der von Runde K16.
 rc=$(lauf_stick ohne "$TMPD/k0.mb" "nokbd nosched noproc nofs" \
     "${XHCI[@]}" "${KBD[@]}" "${MOUSE[@]}")
 num "ohne das Wort usb beendet sich der Kern sauber" "$rc" eq 21
@@ -506,19 +378,13 @@ hat "$H" "class=03:01:02 driver=mouse" "die Maus, an Klasse 03:01:02 (HID/Boot/M
 hat "$H" "class=08:06:50 driver=msc" "der Stick, an Klasse 08:06:50 (Massenspeicher/SCSI/BOT)"
 num "aufgezaehlte Geraete" "$(uz "$H" devices)" eq 3
 num "Aufzaehlungen, die durchgelaufen sind" "$(us "$H" enums)" eq 3
-# Jedes Geraet hat einen EIGENEN Steckplatz bekommen -- eine Nummer,
-# die der REGLER vergeben hat, nicht der Treiber.
 sl=$(grep -a 'usb: port=' "$H" | grep -oE 'slot=[0-9]+' | cut -d= -f2 | sort -u | wc -l)
 num "verschiedene Steckplaetze fuer drei Geraete" "$sl" eq 3
 pt=$(grep -a 'usb: port=' "$H" | grep -oE 'port=[0-9]+' | cut -d= -f2 | sort -u | wc -l)
 num "verschiedene Anschluesse" "$pt" eq 3
-# Die Paketgroesse des Steuerungsendpunkts kommt aus dem Deskriptor --
-# also hat der Treiber ihn wirklich gelesen.
 num "Kommandos an den Regler (Steckplatz, Adresse, Endpunkte)" \
     "$(us "$H" cmds)" ge 9
 
-# GEGENPROBE: `nohid` -- die Geraete werden gefunden, aber kein
-# Eingabetreiber nimmt sie an.
 rc=$(lauf_stick nohid "$TMPD/k0.mb" "usb nohid nokbd nosched noproc nofs" \
     "${XHCI[@]}" "${KBD[@]}" "${MOUSE[@]}")
 num "mit nohid beendet sich der Kern sauber" "$rc" eq 21
@@ -544,25 +410,10 @@ tastenlauf kbdps2 "$TMPD/k0.mb" "osum nosched noproc" "osum: bin " \
     -- "${TASTEN[@]}" --
 num "der PS/2-Lauf beendet sich selbst (21)" "$RC" eq 21
 
-# DER GEGENBEWEIS ZUERST: hat im USB-Lauf wirklich die USB-Tastatur
-# geliefert? `usb: keys=` zaehlt NUR, was durch `usb.press` ging.
 kus=$(uz "$TMPD/kbdusb.txt" keys)
 num "Tasten, die durch den USB-Weg gegangen sind" "${kus:-0}" ge 24
 hat_nicht "$TMPD/kbdps2.txt" "usb: keys=" "im PS/2-Lauf gibt es diesen Weg gar nicht"
 
-# RUNDE ROTABSCHNITTE: `^key: ` VERLIERT DIE ERSTE MELDUNG JE ZEILE.
-# Die Shell schreibt ihre Eingabeaufforderung `osum$ ` ohne
-# Zeilenumbruch; die naechste Tastenmeldung landet deshalb HINTER dem
-# Prompt in derselben Zeile (`osum$ key: e`) und faengt nicht am
-# Zeilenanfang an. Nachgerechnet: getippt werden 31 Zeichen
-# ("echo hallo"+ret, "echo zwei drei"+ret, "exit"+ret), es gibt drei
-# Eingabeaufforderungen, also sieht `^key: ` genau 31-3 = 28 -- und
-# genau 28 gegen 31 stand im Protokoll. Der USB-Zaehler hatte recht,
-# der Vergleich hatte unrecht.
-#
-# `grep -o` zaehlt die MELDUNG statt der Spalte. Das Muster verlangt
-# Zeilenanfang oder ein Zeichen, das kein Kleinbuchstabe ist, damit
-# `monkey: `/`keyboard: ` nicht mitzaehlen.
 grep -aoE '(^|[^a-z])key: .*' "$TMPD/kbdusb.txt" | sed 's/^[^k]*//' | tr -d '\000' > "$TMPD/kbdusb.keys"
 grep -aoE '(^|[^a-z])key: .*' "$TMPD/kbdps2.txt" | sed 's/^[^k]*//' | tr -d '\000' > "$TMPD/kbdps2.keys"
 gleiche_datei "DIESELBEN ZEICHEN: die key-Zeilen beider Laeufe" \
@@ -570,9 +421,6 @@ gleiche_datei "DIESELBEN ZEICHEN: die key-Zeilen beider Laeufe" \
 gleich "so viele key-Zeilen, wie der USB-Treiber Tasten gezaehlt hat" \
     "$(wc -l < "$TMPD/kbdusb.keys")" "${kus:-0}"
 
-# UND DIE SHELL SIEHT DASSELBE. Der Mitschnitt zwischen `sh: ready` und
-# `sh: bye`, ohne die Zeilen des Laders (die tragen Adressen) und ohne
-# die Zeilen dieser Runde (die gibt es im PS/2-Lauf nicht).
 schale() { sed -n '/sh: ready/,/sh: bye/p' "$1" | tr -d '\000' \
     | grep -avE '^(elf:|usb:|k17:)'; }
 schale "$TMPD/kbdusb.txt" > "$TMPD/kbdusb.sh"
@@ -609,36 +457,11 @@ for kp in kpusb kpps2; do
     gleich "$kp: with Num Lock off KP 1 types no digit (exactly one '1')" "1" "$ones"
 done
 
-# GEGENPROBE: der Meldevektor bleibt maskiert. Der Regler bewegt die
-# Daten weiter -- aber niemand sagt es dem Kernel, und dann kommt keine
-# Taste an.
 tastenlauf kbdnoirq "$TMPD/k0.mb" "osum usb usbnoirq nosched noproc" "osum: bin " \
     -- text:"echo hallo" ret warte:1.5 text:exit ret warte:1.0 \
     -- "${XHCI[@]}" "${KBD[@]}"
 num "GEGENPROBE usbnoirq: der Kern beendet sich trotzdem" "$RC" eq 21
-# RUNDE ROTABSCHNITTE: DIESE ERWARTUNG IST VERALTET, NICHT VERLETZT.
 #
-# Sie stammt aus Runde K17, als `usbnoirq` wirklich hiess "kein
-# Ereignis kommt je an". Seither hat Runde ECHTHARDWARE-6 den
-# Wachhund `usb.silence_check` eingebaut (kernel/usb.fi:3376). Der
-# haengt am ZEITGEBER (kernel/arch/x86_64/trap.fi:413) und nicht am
-# USB-Meldevektor, sieht viermal je Sekunde nach, ob sich ein
-# HID-Zaehler bewegt hat, und holt mit `xhci.drain` + `service` eine
-# verlorene Meldung nach. Genau dafuer wurde er gebaut: auf Justins
-# Rechner stand die Tastatur nach EINER verlorenen Meldung fuer den
-# Rest der Sitzung still.
-#
-# Mit maskiertem Vektor kommen deshalb heute ein paar Tasten durch --
-# gemessen 4 -- und das ist das GEWOLLTE Verhalten des Wachhunds und
-# kein Fehler. Die Zusage, um die es dieser Gegenprobe wirklich geht,
-# steht unveraendert zwei Zeilen tiefer und BESTEHT: die Shell
-# bekommt kein Zeichen, `hallo` wird nie getippt. Der Unterschied zum
-# `usbpoll`-Lauf (dort kommen ALLE Tasten an) bleibt damit genau der
-# Beweis, den die Runde HIDWEG fuehren wollte.
-#
-# Gemessen wird deshalb, was jetzt gilt: der maskierte Vektor traegt
-# die Eingabe NICHT -- es kommt allenfalls durch, was der Wachhund
-# nachholt, und das ist weit weniger als die 31 des vollen Laufs.
 kn=$(uz "$TMPD/kbdnoirq.txt" keys)
 kn=${kn:-0}
 kvoll=$(uz "$TMPD/kbdusb.txt" keys)
@@ -650,9 +473,6 @@ grep -qa '^hallo$' "$TMPD/kbdnoirq.txt" \
     && bad "GEGENPROBE usbnoirq: die Shell hat trotzdem etwas getippt bekommen" \
     || ok "GEGENPROBE usbnoirq: die Shell bekommt kein Zeichen"
 
-# GEGENPROBE ZUR GEGENPROBE: derselbe maskierte Vektor, aber der Kern
-# sieht selbst nach. Dann kommen die Ereignisse wieder an -- also lag es
-# an der MELDUNG und nicht daran, dass die Uebertragung nicht liefe.
 : > "$TMPD/leer.mon"
 mauslauf kbdpoll "$TMPD/k0.mb" \
     "usb usbnoirq usbpoll usbhold nokbd nosched noproc nofs" \
@@ -687,9 +507,6 @@ gleich "so viele PS/2-Pakete wie Berichte -- jeder Bericht wird EIN Paket" \
     "$(uz "$TMPD/maus.txt" reports)" "$(uz "$TMPD/maus.txt" mpkt)"
 gleich "die Taste ist am Ende wieder losgelassen" "0" "$(uz "$TMPD/maus.txt" mbtn)"
 
-# GEGENPROBE: derselbe Lauf ohne Maus am Bus. Der Zeiger darf sich nicht
-# bewegen -- und wenn er es doch tut, hat der PS/2-Regler geliefert und
-# die ganze Messung oben waere wertlos.
 mauslauf mausohne "$TMPD/k0.mb" "usb usbhold nokbd nomouse nosched noproc nofs" \
     "k17: hold" "$M" "${XHCI[@]}" "${KBD[@]}"
 num "GEGENPROBE: der Lauf ohne USB-Maus beendet sich sauber" "$RC" eq 21
@@ -719,8 +536,6 @@ sagt "$S" devdiff 1 "Stick und Wurzel haben zwei verschiedene st_dev"
 sagt "$S" mscerr 0 "kein einziger Fehler im Bulk-Only-Transport"
 num "SCSI-Befehle ueber den Stick" "$(wert "$S" mscio)" ge 20
 
-# DIE EIGENTLICHE ZUSAGE: was Osum geschrieben hat, holt der WIRT wieder
-# heraus. Nicht "das Schreiben hat keinen Fehler gemeldet".
 mtype -i "$TMPD/live2-stick.img@@1048576" ::neu.txt > "$TMPD/vonaussen.txt" 2>/dev/null
 printf 'osum-war-hier\n' > "$TMPD/soll.txt"
 if [ -s "$TMPD/vonaussen.txt" ]; then
@@ -732,8 +547,6 @@ fi
 mdir -i "$TMPD/live2-stick.img@@1048576" :: > "$TMPD/mdir.txt" 2>&1
 hat "$TMPD/mdir.txt" "host" "und host.txt liegt unveraendert daneben"
 if command -v fsck.fat >/dev/null 2>&1; then
-    # `fsck.fat` kennt die `@@versatz`-Schreibweise von mtools nicht --
-    # die Partition wird deshalb herausgeschnitten und fuer sich geprueft.
     dd if="$TMPD/live2-stick.img" of="$TMPD/nach.part" bs=512 skip=2048 \
         status=none
     if fsck.fat -n "$TMPD/nach.part" > "$TMPD/fsck.txt" 2>&1; then
@@ -745,7 +558,6 @@ else
     ok "(fsck.fat fehlt -- uebersprungen)"
 fi
 
-# UND AUS DER SHELL: /dev/usb0 ist ein Blockgeraet, und `mount` nimmt es.
 rc=$(lauf_stick shellmount "$TMPD/k0.mb" \
     "osum usb vfs nokbd nosched noproc script=mount /dev/usb1 /usb vfat;ls /usb;cat /usb/host.txt;umount /usb" \
     "${XHCI[@]}")
@@ -753,16 +565,11 @@ num "der Lauf mit mount aus der Shell beendet sich selbst" "$rc" eq 21
 hat "$TMPD/shellmount.txt" "host.txt" "/bin/mount haengt /dev/usb0 ein und ls sieht die Datei"
 hat "$TMPD/shellmount.txt" "von linux auf den stick" "und cat liest sie"
 
-# GEGENPROBE: ohne Stick am Bus gibt es weder Geraet noch /dev/usb0.
 rc=$(lauf ohnestick "$TMPD/k0.mb" \
     "osum usb vfs nokbd nosched noproc script=ls /dev" \
     "${XHCI[@]}" "${KBD[@]}")
 num "GEGENPROBE ohne Stick: der Kern beendet sich sauber" "$rc" eq 21
 hat_nicht "$TMPD/ohnestick.txt" "usb: msc blocks=" "GEGENPROBE: kein Massenspeicher"
-# NUR DIE ZEILE VON `ls /dev` ANSEHEN. Der erste Entwurf hat die ganze
-# Ausgabe durchsucht -- und `usb` steht dort auch in der Kommandozeile,
-# die der Kern beim Start ausgibt. Die Zusage war damit immer rot, und
-# zwar aus einem Grund, der mit dem Geraeteverzeichnis nichts zu tun hat.
 devzeile() { sed -n '/sh: ready/,$p' "$1" | tr -d '\000' \
     | grep -a '^\./ \.\./ null' | tail -1; }
 devA=$(devzeile "$TMPD/ohnestick.txt")
@@ -773,8 +580,6 @@ elif printf '%s' "$devA" | grep -qE '(^| )usb( |$)'; then
 else
     ok "GEGENPROBE: /dev/usb steht NICHT im Verzeichnis ($devA)"
 fi
-# UND DIE GEGENPROBE ZUR GEGENPROBE: mit Stick steht er da. Sonst
-# prueft die Zeile darueber nur, dass irgendetwas fehlt.
 rc=$(lauf_stick mitstick "$TMPD/k0.mb" \
     "osum usb vfs nokbd nosched noproc script=ls /dev" "${XHCI[@]}")
 num "der Lauf MIT Stick beendet sich sauber" "$rc" eq 21
@@ -803,8 +608,6 @@ hat_nicht "$S" "user fault" "und kein Prozess ist gestorben"
 hat "$S" "kernel: done" "der Kern kommt an sein eigenes Ende"
 hat "$S" "usb: unplug port=" "und sagt auf der Leitung, welcher Anschluss es war"
 
-# GEGENPROBE: derselbe Pfad, aber NICHT abgezogen -- dann liest er.
-# Sonst misst der Test seinen Hintergrund.
 rc=$(lauf_stick nopull "$TMPD/k0.mb" \
     "osum usb usbstick vfs nokbd nosched noproc script=wc /usb/host.txt;cat /usb/host.txt" \
     "${XHCI[@]}")
@@ -812,16 +615,11 @@ num "GEGENPROBE ohne Abziehen: der Kern beendet sich sauber" "$rc" eq 21
 hat "$TMPD/nopull.txt" "von linux auf den stick" "GEGENPROBE: ohne Abziehen liest derselbe Pfad die Datei"
 hat_nicht "$TMPD/nopull.txt" "usb: unplug port=" "GEGENPROBE: und nichts wird abgezogen"
 
-# ANSTECKEN IM BETRIEB: der Kern sieht viermal je Sekunde nach. Gemessen
-# wird, dass der Weg da ist und im Regellauf NICHT anschlaegt -- ein
-# Zaehler, der ohne Stecker hochlaeuft, waere Rauschen.
 num "Anstecken im Betrieb im Regellauf (darf nicht anschlagen)" \
     "$(uz "$H" hotplugs)" eq 0
 grep -qa 'usb.unplug_check' kernel/arch/x86_64/trap.fi \
     && ok "der Zeitgeber sieht wirklich nach (kernel/arch/x86_64/trap.fi)" \
     || bad "im Zeitgeber steht kein Blick auf die Anschluesse"
-
-# ======================================= 9. dieselben Zahlen aus firnc1
 
 echo "== 9. dasselbe aus dem Uebersetzer, der in Firn geschrieben ist =="
 if [ -f "$TMPD/k1.mb" ]; then

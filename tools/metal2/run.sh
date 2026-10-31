@@ -1,53 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/metal2/run.sh -- DIE ABNAHME DER RUNDE BLECH2.
 #
-#   bash tools/metal2/run.sh [--kern <osum.mb> --root <root.img>] \
-#                            [--sek 60] [--hz 1000] [--aus <verzeichnis>]
-#
-# ======================================================================
-# WAS JUSTINS FOTO VOM 05.09.2026, 22:46 GESAGT HAT -- UND WAS HIER
-# NACHGEMESSEN WIRD
-# ======================================================================
-#
-# Ryzen, Huawei 3440x1440, Limine UEFI, USB-Tastatur und -Maus, alles
-# laeuft -- und auf der Tafel standen drei Zahlen, die im Pruefstand nie
-# aufgefallen waren:
-#
-#   Zeile 4   RING 5226 VERL 1283   ein Viertel der Ereignisse "verloren"
-#   Zeile 7   LEISTE ... TK 643     "643 Titel beschnitten"
-#   Zeile 16  ISR VERL 4 SPAET 1    nachgetragene Zeitgebermarken
-#
-# Dazu: das Terminal voll mit `taskbar:`-Messzeilen, und ein Limine-
-# Eintrag, der mitten im Wort aufhoerte.
-#
-# Was davon ein Fehler war und was ein falsches Messgeraet, steht in
-# STATUS-BLECH2.md. Dieser Laeufer stellt die Bedingungen des Fotos in
-# QEMU her -- 3440x1440 mit `fbpad=16` (gemeldete Breite 3424 bei einer
-# Zeilenbreite von 13760, der Fall echter Firmware), xHCI mit
-# USB-Tastatur und USB-Maus, ein Bewegungsstrom in der Groessenordnung
-# einer echten Maus -- und misst:
-#
-#   A. QMP-MAUS. tools/metal2/maus.py schickt 60 s lang mit 1000 Hz
-#      `input-send-event` (QEMU fasst das im HID-Geraet auf ~100 Berichte
-#      je Sekunde zusammen -- die Rate einer gewoehnlichen Maus), alle 2 s
-#      ein Klick auf die Schreibtischflaeche, danach 20 Tasten in das
-#      Terminal. Zusagen: VERL 0 und Zeile 4 GRUEN, TK 0, jeder Klick
-#      kommt an (gesendet == K == kl), der Titel "Terminal -- sh" steht
-#      BILDPUNKTGENAU im Foto (checkshot.py tchain), das Terminal traegt
-#      keine langen Messzeilen, die `taskbar:`-Zeilen stehen weiter auf
-#      der Leitung, keine Tafelzeile ist zu lang (LG 0).
-#   B. KERNSTROM 1000 Hz. `mausflut=1000` erzeugt die Pakete IM KERN --
-#      echte tausend je Sekunde, jedes durch `wm.on_mouse`, alle 250 ein
-#      Klick. Zusagen: VERL 0, K == D im selben Anstrich (kein Klick
-#      zwischen Zeiger und Ring verloren), KOAL > 0 (die Koaleszenz
-#      arbeitet).
-#   C. KERNSTROM 4000 Hz. Dasselbe mit vierfacher Rate -- 40 Pakete je
-#      Schleifenrunde, mehr als der Ring Plaetze hat. Ohne Koaleszenz
-#      fiele hier alles um.
-#
-# Und der Bau selbst prueft die Menuetexte (tools/usbimg/build.sh):
-# kein Eintrag laenger als 60 Zeichen NACH dem Einsetzen des Namens.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -83,8 +35,6 @@ gt() { # was ist mehr-als
 hat() { # datei muster text
     if grep -qa "$2" "$1" 2>/dev/null; then ok "$3"; else bad "$3 -- '$2' fehlt in $1"; fi
 }
-# Eine Zahl aus der LETZTEN Tafelzeile mit dieser Nummer: `zahl <tafel.txt> <zeile> <schluessel>`
-# liest "... SCHLUESSEL 123 ..." oder "... SCHLUESSEL123 ...".
 zahl() {
     grep -a "^$2 " "$1" | tail -1 | sed -n "s/.*[ ]$3 *\([0-9][0-9]*\).*/\1/p"
 }
@@ -151,9 +101,6 @@ gt "die taskbar:-Zeilen stehen weiter auf der Leitung" "$(grep -ac '^taskbar: ' 
 tka=$(grep -a '^wm: fen i=0 ' "$A/serial.txt" | tail -1 | sed -n 's/.* tka=\([0-9]*\).*/\1/p')
 echo "       (alte TK-Zaehlweise in diesem Lauf: tka=$tka -- Schnittfenster rechts vom Titelanfang)"
 
-# DER TITEL, BILDPUNKTGENAU. Der Server sagt in `wm: fen`, wo er den
-# Titel hingemalt hat (tx, tb, tp) und in welchen Farben (tf, tg); der
-# zweite Rasterer rechnet nach.
 F=$(grep -a '^wm: fen i=0 ' "$A/serial.txt" | tail -1)
 tx=$(printf '%s' "$F" | sed -n 's/.* tx=\([0-9]*\).*/\1/p')
 tb=$(printf '%s' "$F" | sed -n 's/.* tb=\([0-9]*\).*/\1/p')
@@ -173,11 +120,6 @@ else
     bad "kein Titelort (wm: fen tx=) oder kein Bild"
 fi
 
-# DAS TERMINAL OHNE MESSZEILEN. `taskbar: text start x=32 base=50 ...`
-# ist ueber 40 Zeichen lang; was die Shell selbst schreibt ("sh: ready,
-# osum"), ist kurz. Also: rechts von Spalte 22 darf in der ganzen
-# Fensterflaeche KEINE Tinte stehen. Auf dem Foto vom 05.09. stand dort
-# Zeile fuer Zeile Text.
 W=$(grep -a '^wm: fen i=0 ' "$A/serial.txt" | tail -1)
 wx=$(printf '%s' "$W" | sed -n 's/.* x=\([0-9]*\).*/\1/p')
 wy=$(printf '%s' "$W" | sed -n 's/.* y=\([0-9]*\).*/\1/p')
@@ -207,8 +149,6 @@ n = sum(1 for y in range(y0, y1) for x in range(x0, x1) if at(x, y) not in bgs)
 print(n)
 PY
 )
-    # Der Zeiger darf dort stehen (er ist ~10 Punkte gross); eine
-    # einzige `taskbar:`-Messzeile brachte auf Justins Foto Tausende.
     if [ "${tinte:-999}" -le 200 ]; then
         ok "keine Messzeilen rechts von Spalte 22 im Terminal (Tinte $tinte, nur der Zeiger)"
     else
@@ -230,8 +170,6 @@ for lauf in B C; do
     gt "zusammengefasst (Zeile 4 KOAL)" "$(zahl "$D/tafel.txt" 4 KOAL)" 10000
     is "Titel im Band (Zeile 7 TK)" "$(zahl "$D/tafel.txt" 7 TK)" 0
     is "keine Tafelzeile zu lang (Zeile 23 LG)" "$(zahl "$D/tafel.txt" 23 LG)" 0
-    # RUNDE ROADMAP-2: Zeilennummer statt uebersetzbarem Wort -- der
-    # Kern schreibt seit Runde ENGLISCH "23 SAFETY", nicht "23 SICHER".
     hat "$D/serial.txt" '^tafel: 23 [A-Z]* WA 0 ' "kein Stapelueberlauf (WA 0)"
 done
 

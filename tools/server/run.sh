@@ -2,43 +2,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/server/run.sh -- DER SERVERBAU, ABGENOMMEN.
 #
-# Die Runde SERVERBUILD stellt drei Behauptungen auf, und dieser
-# Abschnitt macht aus jeder eine Messung:
-#
-#   1. OSUM LAESST SICH OHNE GRAFIK BAUEN. `--gui off` uebersetzt
-#      `kernel/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`,
-#      `tile.fi`, `vmode.fi`, `ansi.fi`, `ps2m.fi`, `kgui.fi` und
-#      `sysgui.fi` GAR NICHT ERST. Gemessen wird nicht, dass es
-#      "funktioniert", sondern der OKTETTUNTERSCHIED der beiden
-#      Abbilder -- und dass im Serverabbild keine Zeichenkette der
-#      Oberflaeche mehr steht.
-#
-#   2. DER SCHNITT IST SAUBER. Ausserhalb von `kernel/gfx.fi` schreibt
-#      kein Modul dieses Kernels noch `fb.` oder `wm.`. Das zaehlt ein
-#      Pruefer nach; vor dieser Runde waren es 745 Stellen in acht
-#      Dateien.
-#
-#   3. DIE SERIELLE LEITUNG IST EIN TERMINAL. Nicht "es kommt eine
-#      Meldung heraus" -- sondern: eine Shell laeuft darauf, sie
-#      antwortet auf getippte Befehle, der Rueckschritt nimmt ein
-#      Zeichen zurueck, STRG-U die Zeile, STRG-C schickt ein Signal,
-#      und `echo` laesst sich abschalten. Getippt wird ueber eine
-#      UNIX-Steckdose (`tools/server/console.py`), Zeichen fuer
-#      Zeichen, mit Warten auf die Antwort dazwischen.
-#
-# GEGENPROBEN, denn eine Eigenschaft ohne Gegenprobe ist eine
-# Behauptung:
-#
-#   * OHNE `console=ttyS0` darf die Konsole NICHT auf die Leitung
-#     hoeren -- dann ist die Eingabe wirkungslos, und der Lauf endet
-#     wie jeder Lauf vor dieser Runde.
-#   * `noserirq` nimmt den Eintrag im I/O-APIC weg. Die Oktette
-#     muessen dann ueber den Abfrageweg kommen, und `sercon: irqs=0`
-#     muss es sagen. Kaeme dieselbe Zahl wie vorher heraus, waere
-#     nicht bewiesen, dass der Vektor irgendetwas tut.
-#   * Ein Serverabbild darf KEIN Programm mit Oberflaeche auf seiner
-#     Platte haben (`tools/server/build.sh` prueft das beim Bauen).
-#
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -59,9 +22,6 @@ fi
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
-# KVM, wenn die Maschine es hergibt. Die Runde KVMFIX hat gemessen,
-# dass das hier 4,6x schneller ist -- und sie hat zwei echte Fehler
-# gefunden, die unter TCG nie auffielen.
 ACCEL=""
 if [ -w /dev/kvm ] && qemu-system-x86_64 -accel kvm -m 32 -display none \
         -no-reboot -kernel /dev/null >/dev/null 2>&1; then
@@ -91,14 +51,6 @@ if [ -f "$TMPD/gui.mb" ] && [ -f "$TMPD/srv.mb" ]; then
     num "das Serverabbild ist kleiner, in Promille" "$P" gt 200
 fi
 
-# DIE ENTSCHEIDENDE GEGENPROBE ZUM BAUSCHALTER. Ein Schalter, der nur
-# eine Verzweigung zur Laufzeit setzt, waere am Oktettunterschied allein
-# nicht zu unterscheiden -- der Code der Oberflaeche staende weiter im
-# Abbild und liefe nur nicht mehr an. Also wird nicht der Unterschied
-# gezaehlt, sondern die SYMBOLTAFEL: `_F0.wm__*` ist jede Funktion, die
-# aus `kernel/wm.fi` in das Abbild gekommen ist. Im Serverabbild muss es
-# davon NULL geben, fuer jedes der elf Module -- und `_F0.gfx__*` muss
-# in BEIDEN stehen, denn die Naht bleibt.
 if [ -f "$TMPD/gui.mb.elf" ] && [ -f "$TMPD/srv.mb.elf" ]; then
     gsum=0; ssum=0; schlecht=""
     for m in wm fb wig font ttf tile vmode ansi ps2m kgui sysgui; do
@@ -117,8 +69,6 @@ if [ -f "$TMPD/gui.mb.elf" ] && [ -f "$TMPD/srv.mb.elf" ]; then
     [ "$ng" = "$ns" ] && [ "$ng" -gt 20 ] \
         && ok "die Naht selbst steht in beiden, mit derselben Zahl Symbole: $ng" \
         || bad "die Naht ist verschieden breit: gui=$ng srv=$ns"
-    # Und dieselbe Frage noch einmal an den Zeichenketten, weil eine
-    # Symboltafel wegfallen kann und die Daten nicht.
     treffer=""
     for w in vmode glyph raster focus cursor; do
         strings -a "$TMPD/srv.mb" | grep -v "gpu_hw_cursor\|ax__focus_node\|ax.focus_node" | grep -qa -- "$w" && treffer="$treffer $w"
@@ -136,23 +86,6 @@ echo "        Stellen ausserhalb von kernel/gfx/gfx.fi: $N"
 num "kein Modul ausser der Naht greift noch auf die Grafik zu" "$N" eq 0
 python3 tools/server/count.py kernel --je-datei | sed 's/^/        /'
 
-# UND DIE ZWEITE HAELFTE DERSELBEN FRAGE: war der Umzug ein Umzug?
-# `kgui.fi` und `sysgui.fi` behaupten, dieselben Funktionen zu
-# enthalten, die vorher in `kmain.fi` und `sys.fi` standen -- Zeile fuer
-# Zeile. Das laesst sich nachrechnen, also wird es nachgerechnet: die
-# alten Fassungen kommen aus git, die Rumpfe werden zeichenweise
-# verglichen, und erlaubt ist genau die eine Abweichung, die der Umzug
-# erzwingt (`neg` -> `sys.neg`, `bnum` -> `kutil.bnum`).
-# RUNDE MERGE-2: DIE GRUNDLINIE DES VERGLEICHS IST NACHGEZOGEN.
-# Hier stand 4f844b5 -- der Stand, von dem die Runde SERVERBUILD abgezweigt
-# ist. Beim Verschmelzen nach mergeline2 stimmt der nicht mehr: main hat an
-# sechs der verschobenen Funktionen weitergearbeitet (desk_start, graphics,
-# netv_demo, surface, wm_call, wm_list), und diese neueren Fassungen sind
-# beim Merge mit umgezogen. Gegen 4f844b5 gemessen muesste der Vergleich
-# also FALLEN, und zwar zu Recht -- er verglich dann gegen einen Baum, den
-# es nicht mehr gibt. Die Grundlinie ist der Stand von mergeline2
-# unmittelbar VOR dem Merge; dann prueft der Vergleich genau das, was er
-# prueft soll: dass der Umzug ein Umzug war und keine Neuschrift.
 BASIS=${SERVERBUILD_BASIS:-5d2550c}
 if git rev-parse --verify -q "$BASIS" >/dev/null 2>&1; then
     if python3 tools/server/moved.py "$BASIS" > "$TMPD/moved.txt" 2>&1; then
@@ -211,9 +144,6 @@ lauf shell "osum console=ttyS0" \
     || bad "die Shell antwortet nicht ueber die serielle Leitung"
 sed 's/^/        | /' "$TMPD/shell.log" | grep -aE 'osum\$|hallo-vom-server|Kein Bildschirm' | head -12
 
-# WAS DIESE ZEILEN BEWEISEN, und es ist mehr als "es lief": jeder
-# Befehl wurde GETIPPT, Zeichen fuer Zeichen, in eine Steckdose, und
-# die Antwort kam ueber dieselbe Leitung zurueck.
 for w in 'hallo-vom-server' 'Kein Bildschirm, eine Leitung'; do
     grep -qa -- "$w" "$TMPD/shell.log" \
         && ok "die Antwort auf der Leitung enthaelt: $w" \
@@ -222,9 +152,6 @@ done
 
 echo "== 4. die Zeilendisziplin auf der Leitung =="
 
-# RUECKSCHRITT. Getippt wird `echo ABX`, dann ein Rueckschritt, dann
-# `C`. Herauskommen muss `ABC` -- und NICHT `ABXC`. Ein Terminal ohne
-# Zeilenbearbeitung wuerde hier den zweiten Text liefern.
 lauf edit "osum console=ttyS0" \
     --frist 60 \
     --erwarte 'sh: ready' \
@@ -249,7 +176,6 @@ fi
 
 echo "== 5. die Gegenproben =="
 
-# OHNE console= darf die Leitung NICHT hoeren.
 lauf ohne "osum" \
     --frist 45 \
     --erwarte 'sh: ready' \
@@ -264,8 +190,6 @@ grep -qa 'sercon: off' "$TMPD/ohne.log" \
     && ok "und der Kernel sagt es: sercon: off" \
     || bad "der Kernel meldet die serielle Konsole nicht als aus"
 
-# noserirq: der Vektor wird nicht eingetragen. Es MUSS trotzdem
-# ankommen -- ueber den Abfrageweg -- und `irqs=0` muss es sagen.
 lauf noirq "osum console=ttyS0 noserirq" \
     --frist 60 \
     --erwarte 'sh: ready' \

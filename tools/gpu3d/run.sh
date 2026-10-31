@@ -1,78 +1,8 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/gpu3d/run.sh -- DIE ABNAHME DER RUNDE GPU (G-012).
-#
-# ===================================================================
-# ZUERST: WAS DIESER WIRT HERGIBT -- UND WARUM DIE RUNDE 2D GEWORDEN IST
-# ===================================================================
-#
-# Der Auftrag verlangte, VOR dem Bauen zu messen, ob VIRGL auf diesem
-# Rechner ueberhaupt laeuft, und das Ergebnis aufzuschreiben. Es wurde
-# gemessen, und es war ein klares NEIN -- aus mehreren voneinander
-# unabhaengigen Gruenden:
-#
-#   qemu-system-x86_64 -device virtio-gpu-gl-pci
-#       -> "opengl is not available"
-#          (dieses QEMU 7.2.22 ist OHNE OpenGL gebaut; `-display help`
-#           meldet zusaetzlich "module ui-ui-none not found")
-#   qemu-system-x86_64 -display egl-headless
-#       -> "egl: no drm render node available"
-#   ls /dev/dri            -> existiert NICHT
-#   systemd-detect-virt    -> lxc
-#   ls /lib/modules/$(uname -r)/kernel/drivers/gpu/drm -> existiert NICHT
-#   modprobe vgem          -> "Module vgem not found"
-#
-# libvirglrenderer.so.1 (0.10.4) IST installiert -- sie nuetzt nur
-# nichts, solange QEMU kein OpenGL hat und es keinen Renderknoten gibt.
-# In einem LXC-Behaelter ohne durchgereichte GPU laesst sich beides von
-# innen nicht herstellen.
-#
-# Damit waere ein VIRGL-Pfad auf diesem Wirt NICHT EINMAL ZU STARTEN,
-# also auch nicht zu messen -- und unueberpruefbare Arbeit ist nach der
-# Regel dieses Baums nichts wert. Deshalb Punkt 4 des Auftrags: der
-# 2D-Weg von virtio-gpu wird ausgebaut, und zwar an der Stelle, an der
-# heute wirklich jeder Bildpunkt durch die CPU geht -- DEM ZEIGER.
 #
 # ===================================================================
 # WAS GEBAUT WURDE
 # ===================================================================
-#
-# Die ZWEITE WARTESCHLANGE von virtio-gpu (`cursorq`) und der Zeiger
-# als EIGENE FLAECHE des Geraets:
-#
-#   kernel/vgpu.fi   cursor_queue_setup (Warteschlange 1, eigener Ring),
-#                    CMD_UPDATE_CURSOR/CMD_MOVE_CURSOR, eine 64x64-
-#                    Ressource in B8G8R8A8, das Bild aus cursor.deck()
-#   kernel/wm.fi     compose malt den Zeiger NICHT mehr ins Bild, und
-#                    on_mouse macht bei einer Bewegung KEIN Rechteck
-#                    mehr schmutzig
-#   kernel/kgui.fi   `mauslauf=<n>` -- ein GEZAEHLTER Zeigerlauf
-#
-# WARUM `mauslauf` UND NICHT DAS VORHANDENE `mausflut`: `mausflut`
-# rechnet aus der UHR (`marken * hz / 100`). Auf diesem Wirt laufen
-# acht Runden gleichzeitig (Lastmittel ueber 10 bei 20 Kernen), und
-# derselbe Kern mit derselben Zeile lieferte nacheinander packets=0,
-# 0, 1 -- und in einem frueheren Lauf 21. Eine Waage, die bei gleicher
-# Last verschiedene Zahlen zeigt, wiegt nichts. `mauslauf=<n>` schickt
-# GENAU n Pakete, ohne die Uhr zu fragen.
-#
-# ===================================================================
-# WAS DIESE ABNAHME PRUEFT
-# ===================================================================
-#
-#   1. Der Kern baut, die Speicherkarte hat 0 Kollisionen.
-#   2. Der Wirtsbefund oben wird ERNEUT GEFAHREN, nicht behauptet.
-#   3. Die Messung: n Zeigerpakete, einmal mit Zeiger in der Hardware,
-#      einmal mit `nohwcur`. Verglichen werden Bilder, Oktette und
-#      Zeit -- und WIRTSSEITIG (QEMU `-trace`), wie viele
-#      `virtio_gpu_update_cursor` wirklich ankamen.
-#   4. DER BILDBELEG: zwei Fotos, maschinell verglichen. Der Zeiger
-#      muss im Softwarebild DRIN sein und im Hardwarebild FEHLEN --
-#      an derselben Stelle, in Zeigergroesse.
-#   5. DIE GEGENPROBEN, ohne die hier nichts zaehlt:
-#        - `nohwcur` erzeugt NULL Zeigerbefehle beim Wirt.
-#        - `novgpu` (kein Treiber) laeuft sauber weiter, hw=0.
-#        - GAR KEIN virtio-gpu-Geraet: laeuft sauber weiter, hw=0.
 #
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
@@ -150,11 +80,6 @@ lauf() { # name zusatz qemu-geraete...
 
 zahl() { grep -a "^$2" "$1" 2>/dev/null | tail -1; }
 feld() { echo "$1" | grep -oE "$2=[0-9]+" | tail -1 | cut -d= -f2; }
-# `grep -c` schreibt bei null Treffern schon "0" und gibt TROTZDEM 1
-# zurueck. Mit `|| echo 0` stand danach "0\n0" in der Variablen, und der
-# Vergleich mit "0" schlug fehl -- die Gegenprobe meldete einen Fehler,
-# wo keiner war. Richtig ist, den Rueckgabecode zu schlucken und die
-# Zahl zu nehmen, die grep ohnehin schreibt.
 wirt() { grep -c "$2" "$TMPD/trace-$1.txt" 2>/dev/null | head -1; }
 
 echo
@@ -261,7 +186,6 @@ if [ -s "$TMPD/bhw.ppm" ] && [ -s "$TMPD/bsw.ppm" ]; then
     else
         bad "der Bildbeleg stimmt NICHT"
     fi
-    # Die Fotos aufheben, damit man sie ansehen kann -- klein genug.
     mkdir -p /tmp/gpu3d-bilder
     cp -f "$TMPD/bhw.ppm" "$TMPD/bsw.ppm" /tmp/gpu3d-bilder/ 2>/dev/null
     echo "     (die Fotos liegen unter /tmp/gpu3d-bilder/)"

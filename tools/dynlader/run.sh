@@ -1,39 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/dynlader/run.sh -- DIE ABNAHME DER RUNDE DYNLADER.
 #
 #   bash tools/dynlader/run.sh [arbeitsverzeichnis]
 #
-# ==================================================================
-# WAS HIER GEMESSEN WIRD
-# ==================================================================
-#
-# Die Frage der Runde ist EINE: laeuft ein DYNAMISCH gelinktes
-# Linux-Programm auf OrientOS? Bis zu dieser Runde lief nur, was
-# statisch gelinkt war -- der Befund der Runden LAUFZEIT und FREMDLAND.
-#
-# Die Messlatte hat drei Stufen, und jede wird HIER gefahren:
-#
-#   Stufe 1  ein eigenes hello.c, dynamisch gegen musl gelinkt, mit
-#            PT_INTERP. Es druckt seine Zeile und endet mit 0.
-#   Stufe 2  busybox, DYNAMISCH gegen musl gebaut: zehn Applets, und
-#            ihre Ausgabe muss OKTETT FUER OKTETT dieselbe sein wie die
-#            derselben Applets auf dem Linux-Wirt.
-#   Stufe 3  dlopen/dlsym.
-#
-# UND DIE GEGENPROBEN, ohne die die Zusagen nichts wert waeren:
-#
-#   * ein Interpreter-Pfad, den es NICHT gibt, muss einen sauberen
-#     Fehler geben (ENOENT) und keinen Haenger,
-#   * ein Interpreter, der selbst einen PT_INTERP hat, muss abgewiesen
-#     werden (ELOOP),
-#   * die BESTEHENDEN, statisch gebundenen Programme muessen unveraendert
-#     weiterlaufen -- eine Runde, die den dynamischen Fall oeffnet und
-#     dabei den statischen bricht, hat nichts gewonnen,
-#   * jede Textkonstante in kernel/elf.fi muss so lang sein wie ihr Feld.
-#     Das ist keine Formsache: firnc1 bricht bei einer zu langen
-#     Zeichenkette OHNE MELDUNG ab (Rueckgabe 1, leeres stderr, keine
-#     Datei), und genau das hat in dieser Runde Stunden gekostet.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -60,9 +28,6 @@ ok "musl-gcc, qemu und readelf sind da"
 [ ${#KVM[@]} -gt 0 ] && ok "KVM wird benutzt (-accel kvm -cpu host)" \
                      || weg "kein /dev/kvm -- der Lauf geht unter TCG und ist langsamer"
 
-# ============================================================ 1.
-# DIE TEXTKONSTANTEN. Zuerst, weil ein Fehler hier den Bau ohne jede
-# Meldung umbringt und man ihn sonst durch Halbierung suchen muss.
 echo "== 1. die Textkonstanten in kernel/ldr/elf.fi =="
 python3 - "$ROOT/kernel/ldr/elf.fi" > "$TMPD/texte.txt" 2>&1 <<'PY'
 import re, sys
@@ -97,8 +62,6 @@ musl-gcc -O2 -o "$TMPD/hello_dyn" "$TMPD/hello.c" 2>"$TMPD/cc.err" \
     && ok "hello.c dynamisch gegen musl gebunden" \
     || { bad "musl-gcc gescheitert"; sed 's/^/        /' "$TMPD/cc.err" | head -5; }
 
-# Der Nachweis, dass es WIRKLICH dynamisch ist und nicht versehentlich
-# statisch -- sonst misst die ganze Runde den Fall von vorletzter Runde.
 IPATH=$(readelf -lW "$TMPD/hello_dyn" 2>/dev/null \
         | sed -n 's/.*Requesting program interpreter: \(.*\)\]/\1/p')
 [ -n "$IPATH" ] && ok "hello_dyn hat ein PT_INTERP: $IPATH" \
@@ -106,7 +69,6 @@ IPATH=$(readelf -lW "$TMPD/hello_dyn" 2>/dev/null \
 readelf -hW "$TMPD/hello_dyn" 2>/dev/null | grep -q 'Type:.*DYN' \
     && ok "hello_dyn ist ET_DYN (PIE)" || bad "hello_dyn ist nicht ET_DYN"
 
-# Der Interpreter selbst.
 LDSO=${LDSO:-/lib/ld-musl-x86_64.so.1}
 if [ -r "$LDSO" ]; then
     LDREAL=$(readlink -f "$LDSO")
@@ -134,9 +96,6 @@ C
 musl-gcc -O2 -o "$TMPD/dltest" "$TMPD/dltest.c" 2>/dev/null \
     && ok "dltest (dlopen/dlsym) gebunden" || weg "dltest nicht baubar"
 
-# busybox, dynamisch. Wird NICHT hier gebaut (das dauert Minuten) --
-# wer ihn hat, gibt ihn an; wer nicht, bekommt Stufe 2 uebersprungen
-# statt einen Abbruch. Derselbe Umgang wie in tools/usbimg/build.sh.
 BBDYN=${BBDYN:-/root/bbdyn/busybox}
 BB_DA=0
 if [ -x "$BBDYN" ] && readelf -lW "$BBDYN" 2>/dev/null | grep -q 'program interpreter'; then
@@ -148,13 +107,6 @@ fi
 
 # ============================================================ 3.
 echo "== 3. der Kernel =="
-# DER KERNEL WIRD MIT tools/build-kernel.sh GEBAUT UND NICHT MIT EINER
-# EIGENEN ld-ZEILE. Der Grund steht in jenem Skript: das Binden ist seit
-# der Runde SYMBOLE ZWEI Durchgaenge (die Symboltabelle fuer den
-# Panik-Bildschirm entsteht aus dem ersten und geht in den zweiten), und
-# es braucht sieben --defsym. Ein Laeufer, der das nachbaut, baut etwas
-# anderes als das, was ausgeliefert wird -- und misst dann auch etwas
-# anderes.
 if bash tools/build-kernel.sh "$TMPD/k.mb" --stufe 1 > "$TMPD/k.log" 2>&1; then
     ok "der Kernel ist gebaut ($(stat -c%s "$TMPD/k.mb") Oktette)"
 else
@@ -165,13 +117,6 @@ else
     exit 1
 fi
 
-# ============================================================ 3b.
-# DIE PROGRAMME DES SYSTEMS. Ohne sie ist das Abbild leer: `script=`
-# gibt seine Zeile an /bin/sh, und eine Shell, die es nicht gibt, kann
-# auch kein dynamisches Programm starten. Gemessen, bevor diese
-# Abschnitt dastand: JEDER Lauf endete mit `elf: refused, reason 1 --
-# no such file`, und zwar auch fuer das eingebaute `cat`. Das sah aus
-# wie ein Fehler des neuen Laders und war keiner.
 echo "== 3b. die Programme des Userlands =="
 PROGS=${PROGS:-"sh ls cat echo"}
 export FIRNLIB="$ROOT/lib"
@@ -191,15 +136,10 @@ done
 [ $ubad = 0 ] && ok "$(echo $PROGS | wc -w) Programme gebaut ($PROGS)" \
               || bad "$ubad Programme fehlen -- das Abbild waere unbrauchbar"
 
-# ============================================================ 4.
-# DAS DATEISYSTEM. Der Interpreter muss unter GENAU dem Pfad liegen, den
-# das PT_INTERP nennt -- sonst sucht der Kern ihn dort, wo er nicht ist.
 echo "== 4. das Abbild =="
 BLOCKS=${BLOCKS:-65536}
 mkdir -p "$TMPD/bin"
 
-# Ein Skript, das die Shell abfaehrt. Es steht als Datei im Abbild,
-# damit die Kommandozeile kurz bleibt.
 SPEC="/lib/ /bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
 SPEC="$SPEC /lib/ld-musl-x86_64.so.1=$LDREAL"
@@ -207,8 +147,6 @@ SPEC="$SPEC /bin/hello_dyn=$TMPD/hello_dyn"
 [ -x "$TMPD/dltest" ] && SPEC="$SPEC /bin/dltest=$TMPD/dltest"
 [ "$BB_DA" = 1 ] && SPEC="$SPEC /bin/busybox=$BBDYN"
 
-# DIE GEGENPROBE-DATEIEN.
-# a) ein Programm, dessen PT_INTERP auf etwas zeigt, das es nicht gibt.
 python3 - "$TMPD/hello_dyn" "$TMPD/badinterp" <<'PY'
 import sys, struct
 d = bytearray(open(sys.argv[1], 'rb').read())
@@ -228,8 +166,6 @@ open(sys.argv[2], 'wb').write(bytes(d))
 PY
 [ -s "$TMPD/badinterp" ] && SPEC="$SPEC /bin/badinterp=$TMPD/badinterp"
 
-# b) ein "Interpreter", der selbst einen PT_INTERP hat: das ist
-#    hello_dyn selbst, als Interpreter eingetragen.
 python3 - "$TMPD/hello_dyn" "$TMPD/chaininterp" <<'PY'
 import sys, struct
 d = bytearray(open(sys.argv[1], 'rb').read())
@@ -293,53 +229,24 @@ if [ "$BB_DA" = 1 ]; then
 /bin/busybox ls /bin
 S
     printf 'eins\nzwei\ndrei\n' > "$TMPD/pruef.txt"
-    # Das Abbild noch einmal, mit der Pruefdatei und dem Skript.
     python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
         /etc/ "/etc/pruef.txt=$TMPD/pruef.txt" > "$TMPD/mkfs2.txt" 2>&1 \
         || bad "mkfs.py (Stufe 2) gescheitert"
-    # Jedes Applet EINZELN, damit ein Absturz nicht die uebrigen verdeckt.
-    # NUR APPLETS, DEREN AUSGABE AUF BEIDEN SEITEN DIESELBE SEIN KANN.
     #
-    # `env` und `ls /bin` standen hier zuerst und waren beide FALSCH
-    # gemessen: `env` druckt die Umgebung DES WIRTS (SHELL=/bin/bash,
-    # PATH=...), die es auf Osum nicht gibt, und `ls /bin` listet das
-    # /bin DES WIRTS mit seinen tausend Dateien. Beide "scheiterten"
-    # deshalb, obwohl sie auf Osum sauber liefen -- `busybox ls /bin`
-    # druckt dort in Spalten
-    #     badinterp cat dltest hello_dyn sh busybox chaininterp echo ls
-    # also genau den Inhalt dieses Abbilds. Ein Vergleich, der zwei
-    # verschiedene Dinge nebeneinanderlegt, misst keines von beiden.
-    #
-    # Sie werden deshalb nicht weggelassen, sondern ANDERS geprueft:
-    # weiter unten gegen den Inhalt, den DIESES Abbild hat.
     for a in "echo hallo-echo" "cat /etc/pruef.txt" "wc -c /etc/pruef.txt" \
              "head -n 2 /etc/pruef.txt" "sort /etc/pruef.txt" \
              "grep zwei /etc/pruef.txt" "uname -s" \
              "sha256sum /etc/pruef.txt"; do
         name=${a%% *}
         run_disk "osum $QUIET script=busybox $a;exit" "$TMPD/bb-$name.txt"
-        # Der Wirt sagt, was herauskommen muss.
         ( cd "$TMPD" && mkdir -p wirt/etc wirt/bin && cp pruef.txt wirt/etc/ )
         soll=$("$BBDYN" $(echo "$a" | sed "s|/etc/pruef.txt|$TMPD/pruef.txt|g") 2>/dev/null \
                | head -5 | tr -d '\r')
-        # Nur die ERSTE Zeile vergleichen: die Serienausgabe traegt
-        # Kernmeldungen, und ein Vergleich der ganzen Datei misst die.
         if [ -n "$soll" ]; then
             erste=$(printf '%s' "$soll" | head -1)
-            # sha256sum/wc nennen den Pfad, der auf beiden Seiten anders
-            # ist -- dann nur die Summe/Zahl vergleichen.
             case "$name" in
                 sha256sum|wc) erste=$(printf '%s' "$erste" | awk '{print $1}') ;;
             esac
-            # DIE KOMMANDOZEILE WIRD WEGGESCHNITTEN, BEVOR VERGLICHEN
-            # WIRD. Der Kern druckt beim Start seine eigene `cmdline`
-            # (`mb: flags=... cmd=... script=busybox echo hallo-echo`),
-            # und die enthaelt den gesuchten Text WOERTLICH. Ohne diese
-            # Zeile bestaende die Zusage auch dann, wenn busybox gar
-            # nicht gelaufen waere -- gemessen: `echo` und `grep` galten
-            # als bestanden, waehrend der Lader in Wahrheit noch mit
-            # `reason 1` abbrach. Eine Zusage, die ohne das Programm
-            # haelt, misst das Programm nicht.
             sed '/^mb: flags=/d' "$TMPD/bb-$name.txt" > "$TMPD/bb-$name.rein"
             if grep -qF "$erste" "$TMPD/bb-$name.rein" 2>/dev/null; then
                 ok "busybox $name -- Ausgabe wie auf dem Wirt ($erste)"
@@ -350,9 +257,6 @@ S
             weg "busybox $name -- der Wirt liefert nichts zum Vergleichen"
         fi
     done
-    # `ls /bin` GEGEN DAS ABBILD, nicht gegen den Wirt. Was dort steht,
-    # ist bekannt: es ist die Liste, die weiter oben in SPEC aufgebaut
-    # wurde.
     run_disk "osum $QUIET script=busybox ls /bin;exit" "$TMPD/bb-ls.txt"
     sed '/^mb: flags=/d' "$TMPD/bb-ls.txt" > "$TMPD/bb-ls.rein"
     lsfehlt=""
@@ -363,19 +267,8 @@ S
         && ok "busybox ls -- nennt jede Datei, die in /bin dieses Abbilds liegt" \
         || bad "busybox ls -- diese Namen fehlen in der Ausgabe:$lsfehlt"
 
-    # `env` GEGEN DIE UMGEBUNG DIESES SYSTEMS. Osum fuehrt EINEN
-    # Umgebungsblock (Runde K11), und `build_stack` legt ihn als envp
-    # auf den Stapel. Die Zusage ist deshalb nicht "dieselbe Ausgabe wie
-    # der Wirt" (die kann es nicht sein), sondern: es laeuft, es endet
-    # sauber, und was es druckt, stammt aus dem Stapel, den diese Runde
-    # gebaut hat.
     run_disk "osum $QUIET script=busybox env;exit" "$TMPD/bb-env.txt"
     sed '/^mb: flags=/d' "$TMPD/bb-env.txt" > "$TMPD/bb-env.rein"
-    # `refused` ALLEIN REICHT NICHT ALS ABBRUCHZEICHEN. Der Kern druckt
-    # beim Start `heap test: ... 1M refused=1` -- eine voellig normale
-    # Zeile des Haldentests, die mit diesem Lauf nichts zu tun hat. Ein
-    # Muster, das sie trifft, meldet jeden Lauf als abgebrochen. Gesucht
-    # ist die Ablehnung DES LADERS, und die heisst `elf: refused`.
     if grep -qiE 'panic|vector=|elf: refused' "$TMPD/bb-env.rein"; then
         bad "busybox env -- der Lauf ist abgebrochen"
         grep -iE 'panic|vector=|elf: refused' "$TMPD/bb-env.rein" | sed 's/^/        /' | head -4
@@ -402,11 +295,8 @@ else
     weg "STUFE 3 uebersprungen"
 fi
 
-# ============================================================ 8.
-# DIE GEGENPROBEN. Eine Zusage ohne sie ist eine Behauptung.
 echo "== 8. die Gegenproben =="
 
-# a) fehlender Interpreter: SAUBERER FEHLER, KEIN HAENGER.
 run_disk "osum $QUIET script=badinterp;exit" "$TMPD/g1.txt"
 rc=$?
 if [ $rc -eq 124 ]; then
@@ -434,35 +324,22 @@ else
     grep -iE 'elf:|reason|vector' "$TMPD/g2.txt" | sed 's/^/        /' | head -6
 fi
 
-# c) DER STATISCHE FALL LEBT. Die Runde darf nicht kaputtmachen, was
-#    seit K1 laeuft: die eingebauten Programme sind ET_EXEC und muessen
-#    unveraendert starten.
 run_disk "osum $QUIET script=echo statisch-lebt;exit" "$TMPD/g3.txt"
 sed '/^mb: flags=/d' "$TMPD/g3.txt" > "$TMPD/g3.rein" 2>/dev/null
 if grep -q 'statisch-lebt' "$TMPD/g3.rein" 2>/dev/null; then
     ok "die statisch gebundenen Programme laufen unveraendert weiter"
 else
-    # /bin/echo liegt in diesem Abbild vielleicht gar nicht -- dann ist
-    # das keine Aussage, und es wird auch keine behauptet.
     weg "kein /bin/echo im Abbild -- der statische Fall wurde hier nicht gemessen"
 fi
 
-# ============================================================ 9.
-# DIE MODULARITAET. Justins Zusatzvorgabe vom 14.09.2026: der
-# Interpreter und die Fremdbibliotheken gehoeren NICHT ins Grundabbild,
-# sondern als eigenes Paket. Hier wird beides gemessen -- dass das
-# Grundabbild sie nicht enthaelt, UND dass es ohne sie sauber scheitert
-# statt zu haengen.
 echo "== 9. Modularitaet: abschaltbar und separat ausgeliefert =="
 
-# a) Das Standardabbild nennt den Interpreter NICHT.
 if grep -q 'ld-musl' tools/usbimg/build.sh 2>/dev/null; then
     bad "tools/usbimg/build.sh nennt ld-musl -- der Interpreter waere im Grundabbild"
 else
     ok "das Standardabbild (tools/usbimg/build.sh) nennt weder ld-musl noch busybox"
 fi
 
-# b) Die Pakete lassen sich WIRKLICH bauen -- nicht nur beschreiben.
 OPKPY=${OPKPY:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 if [ -r "$OPKPY" ]; then
     mkdir -p "$TMPD/opk"
@@ -477,7 +354,6 @@ if [ -r "$OPKPY" ]; then
         bad "das Paket linux-abi baut nicht"
         sed 's/^/        /' "$TMPD/opk/bau1.txt" | head -4
     fi
-    # Und es laesst sich installieren, mit Generation und Pruefsumme.
     rm -rf "$TMPD/wurzel"; mkdir -p "$TMPD/wurzel"
     if python3 "$OPKPY" installieren --wurzel "$TMPD/wurzel" \
             "$TMPD/opk/linux-abi.opk" > "$TMPD/opk/inst.txt" 2>&1; then
@@ -494,12 +370,6 @@ else
     weg "kein opk.py ($OPKPY) -- der Paketbau wurde nicht gemessen"
 fi
 
-# c) DER ENTSCHEIDENDE LAUF: das Abbild in der Form, die eine
-#    OPK-INSTALLATION hinterlaesst -- die Datei unter /apps, und
-#    /lib/ld-musl-x86_64.so.1 nur ein symbolischer VERWEIS darauf.
-#    Ohne diese Zusage waere "es kommt aus dem Store" eine Behauptung:
-#    das PT_INTERP nennt einen ABSOLUTEN Pfad, und ob der ueber einen
-#    Verweis in ein Paketverzeichnis fuehren darf, entscheidet der Kern.
 APPLIB="/apps/linux-abi.prog/lib/ld-musl-x86_64.so.1"
 SPEC3="--v3 /lib/ /bin/ /etc/ /apps/ /apps/linux-abi.prog/ /apps/linux-abi.prog/lib/"
 SPEC3="$SPEC3 $APPLIB=$LDREAL /lib/ld-musl-x86_64.so.1->$APPLIB"
@@ -524,9 +394,6 @@ else
     sed 's/^/        /' "$TMPD/mkfs3.txt" | head -5
 fi
 
-# d) UND OHNE DAS PAKET: sauberer Fehler, kein Haenger. Das ist die
-#    Gegenprobe zu (c) -- ein System ohne `linux-abi` ist kein kaputtes
-#    System, es kann nur keine dynamischen Programme starten.
 SPEC4="/bin/ /etc/"
 for p in $PROGS; do SPEC4="$SPEC4 /bin/$p=$TMPD/$p.elf"; done
 SPEC4="$SPEC4 /bin/hello_dyn=$TMPD/hello_dyn /etc/pruef.txt=$TMPD/pruef.txt"
@@ -548,8 +415,6 @@ else
     bad "ohne das Paket gibt es keine erkennbare Ablehnung"
 fi
 
-# e) DIE STATISCHEN PROGRAMME BRAUCHEN DAS PAKET NICHT. Dasselbe Abbild
-#    OHNE linux-abi, und ein gewoehnliches Osum-Programm laeuft darin.
 cp -f "$TMPD/ohne.img" "$TMPD/live.img"
 timeout "${TMO:-240}" $QEMU_X86 "${KVM[@]}" -kernel "$TMPD/k.mb" -m 512 \
     -append "osum $QUIET script=echo ohne-paket-lebt;exit" \

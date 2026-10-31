@@ -1,40 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/aesni/run.sh -- DIE ABNAHME DER RUNDE AESNI (K-020).
 #
-# DIE FRAGE DIESER RUNDE: rechnet die Plattenverschluesselung schnell
-# genug, um benutzbar zu sein -- UND rechnet sie dabei noch dasselbe?
-#
-# Die zweite Haelfte ist die schwerere. Eine schnelle AES-Umsetzung, die
-# anders rechnet als die Norm, macht jede verschluesselte Platte
-# unlesbar, und zwar still: der Geheimtext sieht genauso zufaellig aus
-# wie vorher. Deshalb misst dieser Laeufer das Tempo ZULETZT und die
-# Richtigkeit zuerst.
-#
-# WAS GEMESSEN WIRD, in dieser Reihenfolge:
-#
-#   1. Die Speicherkarte: 0 Kollisionen, und der Bereich dieser Runde
-#      an der ZUGETEILTEN Adresse (0x120000) mit den zugeteilten
-#      Modusindizes (1010..1019).
-#   2. Der Bau: Kern und Orakel.
-#   3. DIE KREISPROBE auf dem Wirt. Dieselben Eingaben durch BEIDE Wege
-#      -- Tabelle und AES-NI --, byteweise verglichen, ueber alle drei
-#      Schluessellaengen und ueber tausende Zufallsbloecke.
-#   4. GEGEN FREMDE AUGEN. Was der schnelle Weg verschluesselt, muss
-#      OpenSSL entschluesseln koennen, und umgekehrt. Dazu die Vektoren
-#      aus FIPS 197 Anhang C.
-#   5. DER RUECKFALLWEG, und zwar ECHT: `qemu-x86_64 -cpu qemu64` hat
-#      kein AES-NI. Dieselbe Binaerdatei muss dort laufen, dasselbe
-#      liefern und NICHT mit #UD sterben.
-#   6. Im KERN: `aestest` (die Kreisprobe in Ring 0), auf einer CPU mit
-#      und auf einer ohne AES-NI, und die Gegenprobe `noaesni`.
-#   7. DAS TEMPO, vorher und nachher, auf DERSELBEN Maschine.
-#   8. Dass die Nachbarn heil sind: krypto 61/0 und WLAN 0 Fehler
-#      haengen an derselben `lib/crypto/aes.fi`.
-#
-# Aufruf:  bash tools/aesni/run.sh
-#          OSUM_AESNI_SCHNELL=1   ohne die langen Schleifen und ohne
-#                                 die beiden Nachbar-Abnahmen
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -70,8 +35,6 @@ grep -q 'AESNI_OFF' tools/kernel/memmap.py \
     && ok "AESNI steht in tools/kernel/memmap.py" \
     || bad "AESNI fehlt in tools/kernel/memmap.py"
 
-# DIE ZUGETEILTEN BEREICHE. Sie stehen im Auftrag und in kstate.fi oben
-# bei KDATA_SIZE; wer sie verschiebt, faellt hier auf.
 grep -q 'const AESNI_OFF: u64 = 0x120000' kernel/lib/kstate.fi \
     && ok "der kdata-Bereich liegt auf 0x120000 wie zugeteilt" \
     || bad "AESNI_OFF steht nicht auf 0x120000"
@@ -81,7 +44,6 @@ grep -q 'const AESNI_MAX: u64 = 0x1000' kernel/lib/kstate.fi \
 grep -q 'const M_NOAESNI: u64 = 1010' kernel/lib/kstate.fi \
     && ok "die Modusindizes fangen bei 1010 an wie zugeteilt" \
     || bad "M_NOAESNI steht nicht auf 1010"
-# Kein Index oberhalb von 1019.
 hoch=$(grep -oE 'const M_[A-Z]+: u64 = 101[0-9]' kernel/lib/kstate.fi \
     | grep -oE '101[0-9]' | sort -n | tail -1)
 [[ -n $hoch && $hoch -le 1019 ]] \
@@ -206,9 +168,6 @@ fi
 
 echo "== 5. der Rueckfallweg, auf einer CPU OHNE AES-NI =="
 
-# `qemu-x86_64` (Ring 3, Befehlssatzemulation) kann eine CPU ohne
-# AES-NI vortaeuschen. Das ist die einzige Stelle, an der sich der
-# Rueckfallweg auf dieser Maschine WIRKLICH fahren laesst.
 if command -v qemu-x86_64 >/dev/null 2>&1; then
     KEY=$(python3 -c "print('00'*32+'11'*32)")
     PL=$(python3 -c "print('ab'*256)")
@@ -226,8 +185,6 @@ if command -v qemu-x86_64 >/dev/null 2>&1; then
     else
         bad "der Rueckfallweg liefert etwas anderes"
     fi
-    # UND DIE GEGENPROBE ZUR GEGENPROBE: ohne die cpuid-Abfrage waere
-    # genau das ein #UD. Das belegt, dass die Pruefung nicht Zierde ist.
     if timeout 60 qemu-x86_64 -cpu Westmere "$TMPD/orakel" \
             < "$TMPD/f.in" >/dev/null 2>&1; then
         ok "auf -cpu Westmere (dem ersten mit AES-NI, 2010) laeuft es ebenfalls"
@@ -240,10 +197,6 @@ fi
 
 echo "== 6. im Kern: die Kreisprobe in Ring 0 =="
 
-# `-device isa-debug-exit` ist KEIN Schmuck: ohne ihn bleibt QEMU nach
-# `kernel: done` stehen, und der Lauf endet erst, wenn `timeout`
-# zuschlaegt -- bei drei Laeufen sind das Minuten Wartezeit fuer nichts.
-# Derselbe Griff wie in `tools/krypto/run.sh`.
 kern_lauf() { # name cpu append zeitlimit
     local name=$1 cpu=$2 app=$3 t=${4:-200}
     timeout "$t" $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 -cpu "$cpu" \
@@ -272,9 +225,6 @@ if [[ -f "$TMPD/k0.mb" ]]; then
         && ok "der Kern laeuft mit AES-NI bis zum Ende durch" \
         || bad "der Kern kommt mit AES-NI nicht bis 'kernel: done'"
 
-    # DIE GEGENPROBE: derselbe Kern, dieselbe CPU, der schnelle Weg von
-    # Hand heraus. Ohne diesen Lauf waere der Faktor unten eine
-    # Behauptung.
     kern_lauf ohne max "osum nopwr aestest aesbench noaesni" 380
     zo=$(grep -E '^aesni: have=' "$TMPD/ohne.txt" 2>/dev/null | head -1)
     info "${zo:-keine aesni-Zeile}"
@@ -285,7 +235,6 @@ if [[ -f "$TMPD/k0.mb" ]]; then
         && ok "und der Kern laeuft auf der Tabelle ebenso durch" \
         || bad "der Kern stirbt auf dem Tabellenweg"
 
-    # UND EINE CPU, DIE ES WIRKLICH NICHT KANN.
     kern_lauf keine "qemu64,-aes" "osum nopwr aestest aesbench" 380
     zk=$(grep -E '^aesni: have=' "$TMPD/keine.txt" 2>/dev/null | head -1)
     info "${zk:-keine aesni-Zeile}"
@@ -344,7 +293,6 @@ PY
         bad "XTS bleibt unter 20 MiB/s: ${mib:-?}"
     fi
 
-    # Die Takte aus dem KERN, wenn die Laeufe oben etwas geliefert haben.
     tm=$(grep -oE 'takt512=[0-9]+' "$TMPD/mit.txt" 2>/dev/null | head -1 | cut -d= -f2)
     to=$(grep -oE 'takt512=[0-9]+' "$TMPD/ohne.txt" 2>/dev/null | head -1 | cut -d= -f2)
     if [[ -n ${tm:-} && -n ${to:-} && ${tm:-0} -gt 0 ]]; then

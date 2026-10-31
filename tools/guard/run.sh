@@ -1,62 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/guard/run.sh -- RUNDE K10: DIE ZWEI SCHUTZBITS UND DAS BOOT-MODUL.
-#
-# Diese Runde hat nichts Neues erfunden. Sie holt die letzten zwei
-# Faehigkeiten aus OrientOS' Rust-Kernel herueber, die Osum noch nicht
-# hatte, und misst sie hier nach. Was portiert wurde:
 #
 #   `arch/x86_64/user.rs`   -> `kernel/arch/x86_64/guard.fi`    SMEP/SMAP in CR4
 #   `kcore/initramfs.rs`    -> `kernel/bootmod.fi`  Boot-Modul + CRC32
-#
-# WARUM DAS NICHT ZWEI RUNDEN SIND. Beide sind klein, beide haengen an
-# derselben Frage -- was ein Kernel von aussen entgegennimmt und was er
-# davon anfassen darf --, und beide brauchen dieselben Gegenproben:
-# einmal MIT und einmal OHNE die Sache selbst.
-#
-# WAS HIER GEMESSEN WIRD:
-#
-#   1. DIE BITS STEHEN WIRKLICH IN CR4. Nicht "der Kernel sagt, er habe
-#      sie gesetzt", sondern das Register selbst, zurueckgelesen und
-#      ausgegeben. Gegenprobe: auf einem Prozessor OHNE die beiden
-#      (QEMUs Vorgabe `qemu64`) meldet derselbe Kernel ehrlich 0 -- und
-#      laeuft trotzdem durch. Ein Kernel, der ein Bit meldet, das die
-#      Maschine nicht hat, waere schlimmer als einer ohne das Bit.
-#   2. SMAP SETZT WIRKLICH DURCH. `smapraw` laesst den Kernel EINE Zelle
-#      Ring-3-Speicher OHNE das `stac`-Fenster lesen. Mit SMAP ist das
-#      ein #PF mit Fehlercode 0x1 und der Lauf endet mit 63; mit
-#      `nosmap` daneben kommt derselbe Lesezugriff zurueck und liefert
-#      das Oktett 0x5A, das der Kernel selbst hingeschrieben hat. Der
-#      Unterschied zwischen den beiden Laeufen ist EIN Bit in CR4.
-#   3. SMEP SETZT WIRKLICH DURCH. `smepraw` ruft eine Seite mit
-#      Benutzerbit auf, in der ein einzelnes `ret` steht. Mit SMEP: #PF
-#      mit Fehlercode 0x11 -- Bit 4 ist der Instruktionsabruf, und genau
-#      der ist hier der Punkt. Mit `nosmep`: der Aufruf kommt zurueck.
-#   4. DAS FENSTER WIRD BENUTZT. `windows=` zaehlt, wie oft `stac` es
-#      geoeffnet hat. Eine Zusage "SMAP ist an" ohne eine einzige
-#      Oeffnung waere ein Kernel, der Ring-3-Speicher nie anfasst -- und
-#      der koennte keine Systemaufrufe.
-#   5. JEDER KERN. CR4 ist PRO PROZESSOR. Unter `-smp 4` muessen alle
-#      drei weiteren Kerne die Bits nach dem Hochlaufen tragen, und
-#      gezaehlt wird nur, wer sie danach WIRKLICH in seinem CR4 stehen
-#      hat (zurueckgelesen, nicht angenommen).
-#   6. DAS BOOT-MODUL IST EINE PLATTE. Der Lader reicht ein
-#      OFS-Dateisystem als Modul herein; der Kernel rechnet seine CRC32,
-#      vergleicht sie mit `modcrc=` und mountet es als Wurzel. Darauf
-#      laeuft dieselbe Shell wie sonst von der ATA-Platte. Das ist der
-#      Unterschied zwischen einem ISO, das nur einen Kern traegt, und
-#      einem, das ein Userland hat.
-#   7. DIE PRUEFSUMME IST EINE BEDINGUNG, KEINE ANGABE. Mit einem
-#      falschen `modcrc=` wird das Modul NICHT benutzt. Ohne `modfs`
-#      wird es gesehen, gerechnet und trotzdem nicht benutzt -- ein
-#      Modul, das niemand angefordert hat, wird nicht heimlich zur
-#      Wurzel.
-#   8. DER BEREICH IST RESERVIERT. Am Ende des Laufs wird die Summe
-#      NOCH EINMAL gerechnet. Haette `mem.scan` den Bereich des Moduls
-#      nicht aus dem Rahmenverwalter genommen, haette ein Prozess
-#      daraufgeschrieben und die zweite Summe waere eine andere.
-#   9. BEIDE UEBERSETZER. firnc0 und firnc1 bauen denselben Kernel, und
-#      er sagt beide Male dasselbe.
 #
 # Verwendung:  bash tools/guard/run.sh
 set -uo pipefail
@@ -85,9 +30,6 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 0
 fi
 
-# Ein Lauf. $1 Abbild, $2 Kommandozeile, $3 Ausgabe, Rest: QEMU-Argumente.
-# Rueckgabe ist der Beendigungscode von QEMU: 21 = der Kernel hat sich
-# selbst beendet, 63 = er ist an einer Ausnahme stehengeblieben.
 lauf() {
     local img=$1 app=$2 out=$3
     shift 3
@@ -113,8 +55,6 @@ for s in 0 1; do
 done
 [ -f "$TMPD/k0.mb" ] || { echo "GUARD: $pass passed, $fail failed"; exit 1; }
 
-# Das Userland fuer das Boot-Modul. Neun Programme reichen: gemessen wird
-# hier, ob ein Modul eine Platte sein kann, nicht die Shell.
 PROGS="sh ls cat echo wc grep uname true false"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/as.err" \
     || bad "crt.s laesst sich nicht assemblieren"
@@ -137,27 +77,11 @@ python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 $SPEC \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
 CRC=$(python3 -c "import zlib,sys;print('%08x'%zlib.crc32(open(sys.argv[1],'rb').read()))" \
         "$TMPD/disk.img")
-# So, wie der KERNEL sie schreibt: `serial.hex` gibt die Ziffern aus, die
-# die Zahl hat, und nicht acht Stueck. Bei einer Summe, die mit einer Null
-# anfaengt, fiele ein Vergleich gegen die aufgefuellte Form.
 CRCK=$(printf '%x' "0x$CRC")
 ok "die CRC32 des Abbilds auf dem Wirt: 0x$CRC (der Kernel schreibt 0x$CRCK)"
 
 # ------------------------------------------------- 2. die Bits in CR4
 
-# RUNDE AVX: DIE PRUEFUNG SIEHT AUF DIE BITS UND NICHT MEHR AUF DIE GANZE
-# ZAHL.
-#
-# Bis dahin stand hier ein Vergleich gegen `guard: cr4=0x300020` -- also
-# gegen den VOLLSTAENDIGEN Inhalt von CR4. Das hielt genau so lange, wie
-# SMEP und SMAP die einzigen Bits waren, die dieser Kernel setzt. Runde
-# AVX setzt OSFXSR (Bit 9), OSXMMEXCPT (Bit 10) und OSXSAVE (Bit 18)
-# dazu, und aus 0x300020 wurde 0x340620 -- der Abschnitt fiel, ohne dass
-# an SMEP oder SMAP irgendetwas anders geworden waere.
-#
-# Die Zusage dieses Abschnitts ist "Bit 20 und Bit 21 stehen wirklich in
-# CR4, zurueckgelesen aus dem Register". Genau das wird jetzt geprueft,
-# und nichts darueber hinaus. Die volle Zahl steht weiter im Protokoll.
 cr4bits() { # <logdatei> <maske hex> <erwartet hex> <name>
     local v
     v=$(grep -ao 'guard: cr4=0x[0-9a-f]*' "$1" | head -1 | cut -d= -f2)
@@ -179,9 +103,6 @@ cr4bits "$TMPD/max.log" 0x300000 0x300000 \
 has "$TMPD/max.log" "smep=1  smap=1  cpu=1/1" \
     "beide sind gesetzt, und CPUID meldet beide"
 
-# DIE GEGENPROBE ZUR MESSUNG SELBST: derselbe Kernel auf einem
-# Prozessor, der die Bits nicht kennt (QEMUs Vorgabe). Er darf sie NICHT
-# melden und muss trotzdem durchlaufen.
 rc=0; lauf "$TMPD/k0.mb" "$BASIS" "$TMPD/alt.log" || rc=$?
 gleich "Beendigungscode auf einem Prozessor ohne die Bits" "$rc" 21
 cr4bits "$TMPD/alt.log" 0x300000 0x0 \
@@ -193,8 +114,6 @@ rc=0; lauf "$TMPD/k0.mb" "$BASIS nosmep" "$TMPD/nosmep.log" -cpu max || rc=$?
 has "$TMPD/nosmep.log" "smep=0  smap=1" "nosmep laesst SMAP stehen und nimmt SMEP"
 rc=0; lauf "$TMPD/k0.mb" "$BASIS nosmap" "$TMPD/nosmap.log" -cpu max || rc=$?
 has "$TMPD/nosmap.log" "smep=1  smap=0" "nosmap laesst SMEP stehen und nimmt SMAP"
-
-# --------------------------------------------- 3. sie setzen durch
 
 echo "== 3. die Gegenproben: ein Zugriff, der scheitern MUSS =="
 rc=0; lauf "$TMPD/k0.mb" "$BASIS smapraw" "$TMPD/rawr.log" -cpu max || rc=$?
@@ -219,8 +138,6 @@ rc=0; lauf "$TMPD/k0.mb" "$BASIS smepraw nosmep" "$TMPD/rawx-off.log" -cpu max |
 gleich "derselbe Aufruf ohne SMEP: der Lauf endet regulaer" "$rc" 21
 has "$TMPD/rawx-off.log" "smep: came back (!)" \
     "und das ret in der Nutzerseite wurde wirklich ausgefuehrt"
-
-# ------------------------------------------ 4. das Fenster wird benutzt
 
 echo "== 4. das Fenster: der Kernel fasst Ring-3-Speicher an =="
 rc=0; lauf "$TMPD/k0.mb" "osum nokbd nosched nofs noring3 caps" \
@@ -252,8 +169,6 @@ has "$TMPD/smp4.log" "guard: aps=3" \
 rc=0; lauf "$TMPD/k0.mb" "$BASIS" "$TMPD/smp1.log" -cpu max -smp 1 || rc=$?
 has "$TMPD/smp1.log" "guard: aps=0" "Gegenprobe: mit einem Prozessor zaehlt niemand mit"
 
-# -------------------------------------------------- 6. das Boot-Modul
-
 echo "== 6. ein Boot-Modul ist eine Platte =="
 MOD="osum nokbd nosched noproc nofs noring3 modfs modcrc=$CRC"
 rc=0
@@ -269,7 +184,6 @@ has "$TMPD/mod.log" "./ ../ sh ls cat echo wc grep uname true false" \
     "'ls /bin' zeigt die neun Programme"
 has "$TMPD/mod.log" "eins" "'cat /d/d.txt' liest eine Datei aus dem Modul"
 has "$TMPD/mod.log" "osum: sh exit=0" "und die Shell endet sauber"
-# ...und das alles mit beiden Schutzbits an.
 has "$TMPD/mod.log" "smep=1  smap=1" "das ganze Userland lief mit SMEP und SMAP"
 
 echo "== 7. die Pruefsumme ist eine Bedingung =="

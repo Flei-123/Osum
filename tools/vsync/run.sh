@@ -1,47 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/vsync/run.sh -- DIE ABNAHME DER RUNDE VSYNC.
 #
-# Zwei Zusagen, und beide werden hier gemessen und nicht behauptet:
-#
-#   1. KEIN REISSEN. Beim Bewegen und Neuzeichnen darf auf dem Schirm
-#      nie eine halbe Bildseite stehen.
-#   2. FENSTER BEWEGEN SICH. Oeffnen und Schliessen skalieren und
-#      mischen ueber MOTION_DEF = 120 ms, statt zu springen.
-#
-# WARUM DIE ZERREISSPROBE SO AUSSIEHT, WIE SIE AUSSIEHT.
-#
-# Reissen ist unter QEMU nicht zu fotografieren: `screendump` liest die
-# Bildflaeche in EINEM Zug, waehrend niemand schreibt, und ein halb
-# uebertragenes Bild sieht darin aus wie ein ganzes. GEMESSEN: eine
-# Bildserie waehrend eines Zuges fand mit ausdruecklich ABGESCHALTETER
-# Bildgrenze (`nopresent`) NULL zerrissene Bilder. Eine Messung, die
-# auch dann gruen bleibt, wenn die Zusage abgeschaltet ist, misst nichts.
-#
-# Also wird die Frage dort gestellt, wo sie beantwortbar ist: im Kern.
-# Der Server faerbt im Signaturbetrieb (`wmsig`) einen Streifen oben und
-# einen unten an jedem Fenster mit einer Farbe, die aus der Bildnummer
-# faellt. Ein ZWEITER KERN liest waehrenddessen den VORDERPUFFER --
-# genau das, was ein Bildschirm tut -- und vergleicht die beiden
-# Signaturen. Verschieden heisst: halb uebertragen, also Reissen.
-#
-# Und gemessen wird am STEHENDEN Fenster (`wmruhe`), das trotzdem in
-# jedem Takt neu gemalt wird. Ein GEZOGENES Fenster waere das falsche
-# Ziel: der Ableser rechnet seine zwei Punkte aus dem Ort des Fensters,
-# und waehrend eines Zuges aendert der sich zwischen den Ablesungen --
-# was er dann findet, ist eine Eigenschaft der Messung und nicht des
-# Bildes (gemessen: 97 Prozent "Risse", waehrend dasselbe Bild im
-# Stehen null ergab).
-#
-# Die drei Stufen, und jede beantwortet eine eigene Frage:
-#
-#   nopresent noflip   ohne alles          -> es MUSS reissen
-#   vsync noflip       nur sammeln         -> es reisst WEITER
-#   vsync flip         Seitenumschaltung   -> NULL
-#
-# Die mittlere Zeile ist die wichtigste der Runde: das Sammeln allein
-# senkt nur die Zahl der Gelegenheiten, es beseitigt das Reissen NICHT.
-# Erst der Seitenwechsel tut es, und nur der.
 set -u
 
 cd "$(dirname "$0")/../.." || exit 1
@@ -73,7 +31,6 @@ else
 fi
 K="$TMPD/k.mb"
 
-# Das Abbild mit den Schriften -- ohne sie gibt es keine Fenster.
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     > "$TMPD/mkfs.txt" 2>&1 \
@@ -82,7 +39,6 @@ python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 /lib/ \
 
 GRUND="nokbd noproc nofs"
 
-# Ein Lauf mit zwei Kernen: einer malt, einer liest ab.
 ruhe() { # extra ausgabe [sekunden]
     local extra=$1 aus=$2 sek=${3:-6}
     cp -f "$TMPD/disk.img" "$TMPD/live.img"
@@ -114,7 +70,6 @@ echo "        ohne alles      liest=${L0:-?}  risse=${R0:-?}"
 echo "        nur sammeln     liest=${L1:-?}  risse=${R1:-?}  comp=${C1:-?} pres=${P1:-?}"
 echo "        + Seitenwechsel liest=${L2:-?}  risse=${R2:-?}  flips=${F2:-?}"
 
-# Die Gegenprobe MUSS anschlagen -- sonst misst der Ableser nichts.
 [ "${R0:-0}" -gt 0 ] 2>/dev/null \
     && ok "ohne Bildgrenze reisst es ($R0 zerrissene Ablesungen) -- die Probe kann anschlagen" \
     || bad "ohne Bildgrenze KEIN Riss gefunden -- die Zerreissprobe misst nichts"
@@ -123,14 +78,10 @@ echo "        + Seitenwechsel liest=${L2:-?}  risse=${R2:-?}  flips=${F2:-?}"
     && ok "der Ableser hat dicht gelesen ($L2 Ablesungen)" \
     || bad "zu wenige Ablesungen ($L2) -- die Probe traefe die Uebertragung nicht"
 
-# Das Sammeln allein reicht NICHT. Das ist ein BEFUND und keine Panne;
-# er steht hier als Zusage, damit niemand die Seitenumschaltung fuer
-# entbehrlich haelt.
 [ "${R1:-0}" -gt 0 ] 2>/dev/null \
     && ok "Sammeln allein beseitigt das Reissen NICHT ($R1) -- der Seitenwechsel ist noetig" \
     || echo "    hinweis -- Sammeln allein ergab risse=$R1 (auf dieser Maschine)"
 
-# Und die eigentliche Zusage.
 if [ "${FL:-0}" = "1" ]; then
     [ "${R2:-1}" -eq 0 ] 2>/dev/null \
         && ok "MIT Seitenwechsel: 0 Risse in $L2 Ablesungen" \
@@ -159,9 +110,6 @@ for RES in 1280x800 1920x1080; do
 done
 
 echo "== 4. die Fensterbewegung =="
-# Ein Fenster geht auf und wieder zu, und die Zwischenwerte werden
-# gezaehlt. `noanim` ist die Gegenprobe: derselbe Endzustand, aber
-# ohne ein einziges Zwischenbild.
 lauf_anim() { # extra ausgabe
     cp -f "$TMPD/disk.img" "$TMPD/live.img"
     timeout 150 $QEMU_X86 -kernel "$K" -m 256 \
@@ -185,8 +133,6 @@ echo "        ohne (noanim) anim=${A0:-?} frames=${FR0:-?}"
 [ "${A1:-0}" -ge 2 ] 2>/dev/null \
     && ok "zwei Bewegungen gelaufen (Oeffnen und Schliessen)" \
     || bad "es gab keine zwei Bewegungen (anim=$A1)"
-# Bei 120 ms und TICK_HZ=100 sind ~12 Zwischenbilder je Bewegung zu
-# erwarten. Unter 10 waere ein Sprung mit Anlauf.
 [ "${FR1:-0}" -ge 10 ] 2>/dev/null \
     && ok "$FR1 Zwischenbilder -- die Bewegung hat wirklich Stufen" \
     || bad "nur ${FR1:-0} Zwischenbilder -- das ist ein Sprung"
@@ -198,8 +144,6 @@ echo "$W0" | grep -q 'n=1' \
     || bad "mit noanim endet es anders: $W0"
 
 echo "== 5. die Sparsamkeit der Runde UHRWERK bleibt =="
-# Ohne Eingabe darf der Server NICHT mehr zeichnen als vorher. Die
-# Bildgrenze sammelt; sie darf nichts zusaetzlich anstossen.
 cp -f "$TMPD/disk.img" "$TMPD/live.img"
 timeout 150 $QEMU_X86 -kernel "$K" -m 256 \
     -append "gfx wm wmhold wighalt=10 $GRUND" \
@@ -221,8 +165,6 @@ fi
 echo "        $UP"
 
 echo "== 6. die Gegenprobe: ohne die Woerter aendert sich nichts =="
-# Derselbe Kernel OHNE `vsync` muss sich verhalten wie vor der Runde:
-# sofort uebertragen, kein Sammeln, keine Bewegung.
 V0=$(zahl "$TMPD/u.txt" 'vsync=[0-9]+')
 P0=$(zahl "$TMPD/u.txt" 'pres=[0-9]+')
 [ "${V0:-1}" -eq 0 ] 2>/dev/null && [ "${P0:-1}" -eq 0 ] 2>/dev/null \

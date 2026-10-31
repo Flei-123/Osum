@@ -1,47 +1,10 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/dmodul/run.sh -- RUNDE MODULE: DER BEWEIS, DASS EIN MODUL SICH
-# ZIEHEN LAESST UND DEN NEUSTART UEBERLEBT.
 #
 #   bash tools/dmodul/run.sh <ausgabe> [accel=kvm|tcg]
 #
-# WARUM `dmodul` UND NICHT `modul`. `tools/module/run.sh` GIBT ES SCHON
-# -- das ist der Laeufer des NACHLADBAREN TREIBERS (kernel/ldr/module.fi,
-# `ps2m.ko`). Er hat mit den Schreibtischmodulen nichts zu tun, und zwei
-# Laeufer mit fast demselben Namen im selben Verzeichnis sind genau die
-# Falle, in die eine spaetere Runde tritt. `d` steht fuer Desktop.
-#
 # ============================================================ WAS ER MISST
 #
-# Drei Bilder, und das dritte ist das einzige, das wirklich etwas
-# beweist:
-#
-#   1-vorgabe.png    Ohne /etc/module.conf. Die drei Kaestchen stehen
-#                    an ihrer Vorgabe (Anker 1 = rechts oben).
-#   2-gezogen.png    Nach einem ZUG mit gehaltener Maustaste: F9 macht
-#                    den Bearbeitungsmodus auf, das Uhrmodul wandert in
-#                    die LINKE UNTERE Ecke. Der Zug geht ueber den
-#                    QEMU-Monitor, also durch denselben PS/2-Weg, den
-#                    ein Mensch benutzt.
-#   3-neustart.png   DIESELBE PLATTE noch einmal gebootet, ohne
-#                    irgendetwas anzufassen. Liegt die Uhr wieder links
-#                    unten, hat der Schreibtisch sie wirklich nach
-#                    /etc/module.conf geschrieben und wieder gelesen.
-#
-# DIE GEGENPROBE, OHNE DIE BILD 3 NICHTS SAGT: die Platte wird zwischen
-# Lauf 2 und Lauf 3 NICHT neu gebaut. Wuerde sie neu gebaut, stuende
-# darin wieder die ausgelieferte Vorgabe, und ein Bild, das die Uhr
-# rechts oben zeigt, waere kein Fehler, sondern der Bauplan. Deshalb:
-# ein `mkfs`, zwei Boots.
-#
-# UND DIE ZWEITE GEGENPROBE: nach Lauf 2 wird die Datei AUS DER PLATTE
-# zurueckgelesen (`mkfs.py cat`) und neben das Bild gelegt. Wer dem Bild
-# nicht traut, liest die vier Zahlen.
 set -uo pipefail
-# Die Wurzel des Arbeitsbaums, ABSOLUT und einmal.
-# `tools/build-kernel.sh` wechselt das Arbeitsverzeichnis; danach
-# zeigt jeder relative Pfad woandershin. Deshalb steht hier eine
-# Zahl und keine Hoffnung.
 WURZEL=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$WURZEL" || exit 1
 
@@ -97,10 +60,6 @@ platte_bauen() {
     local ziel=$1
     local mitconf=$2
     local ARGS=(build "$ziel" 32768 /lib/)
-    # DIE SCHRIFTEN HEISSEN AUF DER PLATTE ANDERS ALS IM BAUM.
-    # Ohne sie sagt der Kern `ttf: keine Schrift gefunden` und der
-    # Schreibtisch startet gar nicht erst -- gemessen beim ersten Lauf
-    # dieser Runde, und im Bild war nichts zu sehen ausser Schwarz.
     ARGS+=("/lib/sans.ttf=$WURZEL/assets/osum-sans.ttf"
            "/lib/mono.ttf=$WURZEL/assets/osum-mono.ttf"
            "/lib/icons.ttf=$WURZEL/assets/osum-icons.ttf")
@@ -120,9 +79,6 @@ platte_bauen() {
            "/etc/locale.conf=$OUT/locale.conf@0644"
            "/etc/time.conf=$OUT/time.conf@0644"
            "/etc/passwd=$OUT/passwd@0644")
-    # DER SCHALTER DER MESSUNG. Ohne /etc/uitrace ist der Schreibtisch
-    # stumm (Runde BELEG), und genau seine `desktop: modul`-Zeilen sind
-    # hier der halbe Beweis.
     printf 'on\n' > "$OUT/uitrace"
     ARGS+=("/etc/uitrace=$OUT/uitrace@0644")
     if [ "$mitconf" = ja ]; then
@@ -169,20 +125,7 @@ booten() {
     done
     if [ -n "$klicks" ]; then
         python3 "$WURZEL"/tools/themestore/click.py $klicks > "$OUT/mon.txt" 2>"$OUT/click.err"
-        # ERST DER RECHTE KNOPF AUF DAS MODUL, DANN DER ZUG.
         #
-        # Ohne Bearbeitungsmodus nimmt der Schreibtisch den Zug nicht
-        # an -- das ist der Sinn des Modus und zugleich seine
-        # Gegenprobe. Geplant war dafuer F9; die Taste kommt bei einem
-        # Fenster auf `L_DESK` nie an (gemessen, siehe der lange
-        # Kommentar in kernel/user/desktop.fi bei EV_DOWN). Also der
-        # rechte Knopf, an genau der Stelle, an der gleich gegriffen
-        # wird.
-        #
-        # `mouse_button 2` ist rechts (1 links, 2 rechts, 4 Mitte im
-        # QEMU-Monitor). Die Fahrt dorthin macht click.py, indem der
-        # Zug ohnehin an dieser Stelle anfaengt -- deshalb wird hier
-        # nur der Knopf davorgesetzt, nachdem der Zeiger schon steht.
         {
             python3 "$WURZEL"/tools/themestore/click.py "$gx,$gy" \
                 | sed 's/^mouse_button 1$/mouse_button 2/'
@@ -191,8 +134,6 @@ booten() {
         } > "$OUT/mon2.txt"
         python3 "$WURZEL"/tools/wm/monitor.py "$SOCK" "$OUT/mon2.txt" \
             > "$OUT/click.log" 2>&1
-        # Warten, bis der Gast still ist -- nicht auf die Uhr, sondern
-        # auf ihn (derselbe Grund wie in tools/themestore/build.sh).
         local LAST=-1 QUIET=0 j=0 NOW
         while [ $j -lt 24 ]; do
             sleep 0.5
@@ -227,23 +168,15 @@ sagen "  module" "$(wc -l < "$OUT/1-modul.txt") Zeilen gemeldet"
 
 # ================================================== LAUF 2: ziehen
 #
-# Wohin gegriffen wird, steht NICHT hier als getippte Zahl, sondern wird
-# aus Lauf 1 GELESEN: die Mitte des Uhrmoduls ist der Griff. Eine
-# getippte Zahl waere nach der naechsten Schriftaenderung falsch, und der
-# Zug ginge ins Leere, ohne dass jemand merkt warum.
 GRIFF=$(awk '/name=uhr /{for(i=1;i<=NF;i++){if($i ~ /^x=/)x=substr($i,3);if($i ~ /^y=/)y=substr($i,3);if($i ~ /^w=/)w=substr($i,3);if($i ~ /^h=/)h=substr($i,3)}print int(x+w/2)" "int(y+h/2)}' "$OUT/1-modul.txt" | head -1)
 [ -n "$GRIFF" ] || fehler "Lauf 1 hat die Lage der Uhr nicht gemeldet (uitrace?)"
 gx=${GRIFF% *}
 gy=${GRIFF#* }
 sagen "  griff" "Uhr-Mitte bei $gx,$gy"
-# Ziel: linke untere Ecke. 40/700 liegt im Fangbereich der Kanten, also
-# rastet das Kaestchen dort ein -- und bekommt beim Loslassen den Anker
-# LINKS UNTEN (A_LU = 2). Genau das ist die Zahl, die Lauf 3 prueft.
 sagen lauf2 "F9, dann Uhr nach links unten ziehen"
 booten "$OUT/disk.img" "$OUT/2-gezogen.png" "$OUT/s2.txt" "$gx,$gy>300,600>40,700"
 grep -a 'desktop: modul' "$OUT/s2.txt" > "$OUT/2-modul.txt" || true
 
-# Die Datei AUS DER PLATTE lesen -- der Beleg neben dem Bild.
 python3 "$WURZEL"/tools/osum/mkfs.py cat "$OUT/disk.img" /etc/module.conf \
     > "$OUT/2-module.conf" 2>/dev/null || true
 if [ -s "$OUT/2-module.conf" ]; then
@@ -254,7 +187,6 @@ fi
 
 # ================================================== LAUF 3: Neustart
 #
-# DIESELBE PLATTE. Kein mkfs, kein Kopieren, nichts angefasst.
 sagen lauf3 "Neustart auf DERSELBEN Platte"
 booten "$OUT/disk.img" "$OUT/3-neustart.png" "$OUT/s3.txt" ""
 grep -a 'desktop: modul ' "$OUT/s3.txt" > "$OUT/3-modul.txt" || true

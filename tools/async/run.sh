@@ -1,60 +1,6 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/async/run.sh -- DER BEWEIS, DASS DIE ASYNCHRONE AUFTRAGSSCHICHT
-# TRAEGT, BEVOR DER RING DARAUF GEBAUT WIRD.
-#
-# WARUM DIESE RUNDE NACH HANDLE UND VOR RING KOMMT. Runde HANDLE hat die
-# Lebensdauer eines Kernobjekts geordnet -- Verweiszaehler, Generation,
-# Abbruch-Token -- aber sie hatte keinen Kunden: `req_begin` und
-# `req_end` standen im selben Systemaufruf nebeneinander, und dazwischen
-# konnte nichts geschehen. Erst diese Runde legt zwischen die beiden
-# einen Zustandswechsel, einen Arbeitsfaden und beliebig viele
-# Zeitscheiben eines anderen Prozesses. Damit wird die Zusage von Runde
-# HANDLE ueberhaupt erst PRUEFBAR.
-#
-# Google hat 2023 berichtet, dass rund 60 % der eingereichten
-# Linux-Kernel-Exploits aus io_uring stammten. Die Ursache war nicht der
-# geteilte Speicher und nicht die Ringform, sondern GENAU DIESE SCHICHT:
-# ein Auftrag, der ein Objekt meint, das inzwischen ein anderes ist.
-# Deshalb hat hier jede Zusage eine GEGENPROBE, die sie absichtlich
-# kaputtmacht -- eine Zusage, die auch ohne ihren Code steht, misst
-# nichts.
 #
 # WAS GEMESSEN WIRD:
-#
-#   1. DIE NUMMERNTAFEL. Sechs neue Aufrufe im Kernel und in der libc,
-#      und keine Nummer doppelt. Das ist die Lehre aus der Runde mit der
-#      zweimal vergebenen 1320.
-#   2. DIE SPEICHERKARTE. Diese Runde laesst `kdata` von 0x80000 auf
-#      0x90000 wachsen -- dieselbe Zahl steht in `kstate.fi` UND in
-#      `kernel/arch/x86_64/boot.s`, und beide werden hier verglichen.
-#      Dazu `memmap.py`: kein Bereich ueberschneidet einen anderen.
-#   3. ZWEIUNDDREISSIG ZUSAGEN AUS RING 3 (`uprog.u_async`) ueber die
-#      sechs Fehlerklassen (a) bis (f), jede einzeln nachgelesen.
-#   4. SIEBEN WEITERE auf einem echten Dateisystem (`uprog.u_asyncfs`):
-#      asynchron oeffnen, lesen, auf den Traeger druecken, schliessen.
-#   5. DREI GEGENPROBEN, und jede schaltet Zusagen aus:
-#        noagen   -- der Arbeitsfaden fragt die Generation NICHT.
-#                    "b-veraltet" und "b-nicht-das-neue-ding" MUESSEN
-#                    fallen: der alte Auftrag trifft das neue Objekt.
-#                    Das ist der io_uring-Fehler, absichtlich wieder
-#                    eingebaut.
-#        noareap  -- ein sterbender Prozess raeumt seine Auftraege NICHT
-#                    ab. "d-drei-abgeraeumt" MUSS fallen.
-#        noawork  -- es laufen KEINE Arbeitsfaeden. Mehrere Zusagen
-#                    MUESSEN fallen -- das ist der Nachweis, dass die
-#                    Arbeit wirklich woanders geschieht.
-#   6. DIE LIBC-ANBINDUNG, von der Platte: `/bin/aiot` ist ein
-#      gewoehnliches Programm, gebunden gegen `lib/libc/io.fi`, geladen
-#      vom ELF-Lader, gestartet von der Shell. Eine libc-Anbindung, die
-#      niemand uebersetzt, ist eine Behauptung.
-#   7. DIE LECKZAHLEN. Nach einem Lauf, in dem jeder Prozess ordentlich
-#      geendet hat, MUSS die Auftragstafel leer sein, kein Handle-Auftrag
-#      mehr in Flug und kein Ring eine Meldung verloren haben.
-#   8. DIE MESSUNG. Latenz und Durchsatz bei 1, 4 und 16 gleichzeitig
-#      offenen Auftraegen, gegen den synchronen Weg. Die Zahlen stehen
-#      im Protokoll; die Auswertung in docs/ASYNC-STATUS.md.
-#   9. BEIDE UEBERSETZER. firnc0 und firnc1 bauen denselben Kernel.
 #
 # Verwendung:  bash tools/async/run.sh
 set -uo pipefail
@@ -88,14 +34,10 @@ num() { # name wert op erwartet
     else bad "$name: $value, erwartet $op $want"; fi
 }
 
-# Eine Zahl aus einer Zeile "async: NAME=WERT".
 zahl()  { sed -n "s/^async: $2=\([0-9]*\).*/\1/p" "$1" | head -1; }
-# ... und aus "abench: NAME=WERT".
 bzahl() { sed -n "s/^abench: $2=\([0-9]*\).*/\1/p" "$1" | head -1; }
-# ... und aus "aiot: NAME = WERT" (mit Vorzeichen).
 azahl() { sed -n "s/^aiot: $2 = \(-\{0,1\}[0-9]*\).*/\1/p" "$1" | head -1; }
 
-# Eine einzelne Zusage aus Ring 3 nachlesen: "  [ ok ] NAME".
 zusage() { # datei name
     if grep -qa "^  \[ ok \] $2\$" "$1"; then ok "Zusage $2"
     else
@@ -118,17 +60,6 @@ fi
 echo "== 1. die Nummern und die Speicherkarte, ohne den Kernel zu starten =="
 # =====================================================================
 
-# 1a. Kein Aufruf zweimal vergeben -- ueber die GANZE Tafel beider Dateien.
-#     Sockelnamen (AIO_BASE = AIO_VERSION, HND_BASE = HND_VERSION,
-#     CAP_BASE = CAP_VERSION, HND_MAXNR = HND_OBJINFO) sind ABSICHTLICH
-#     doppelt: sie benennen dieselbe Nummer zweimal. Herausgerechnet wird
-#     deshalb nur, was auch als *_BASE oder *_MAXNR dasteht.
-#     SYS_MARK (1) und SYS_LEAVE (2) sind der ZWEITE Fall: sie gehoeren
-#     zur Ausflug-ABI der Runde 59 und werden in `dispatch` VOR allem
-#     anderen verteilt, und zwar nur, solange `kstate.EXCURSION` steht.
-#     Sie bedeuten also nie gleichzeitig dasselbe wie SYS_WRITE und
-#     SYS_OPEN. Sie stehen namentlich hier, damit diese Ausnahme
-#     benannt ist statt uebersehen.
 for f in kernel/sys/sys.fi lib/libc/kcall.fi; do
     dup=$(grep -a '^const \(SYS_\|CAP_\|WM_\|HND_\|AIO_\)[A-Z0-9_]*: u64 = [0-9]*' "$f" \
         | sed 's/.*= *\([0-9]*\).*/\1/' | sort -n | uniq -d | tr '\n' ' ')
@@ -143,7 +74,6 @@ for f in kernel/sys/sys.fi lib/libc/kcall.fi; do
                    || bad "$f: doppelte Aufrufnummern:$echt"
 done
 
-# 1b. Kernel und libc sagen dasselbe.
 for n in AIO_VERSION:1980 AIO_SUBMIT:1981 AIO_WAIT:1982 AIO_CANCEL:1983 \
          AIO_STATE:1984 SYS_FSYNC:74; do
     name=${n%%:*}; want=${n##*:}
@@ -153,13 +83,11 @@ for n in AIO_VERSION:1980 AIO_SUBMIT:1981 AIO_WAIT:1982 AIO_CANCEL:1983 \
     else bad "$name: Kernel='$k' libc='$l', erwartet $want"; fi
 done
 
-# 1c. Die Grenze von `kdata` steht ZWEIMAL im Baum und muss gleich sein.
 kk=$(sed -n 's/^const KDATA_SIZE: u64 = \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/lib/kstate.fi | head -1)
 kb=$(sed -n 's/.*\.set KDATA_SIZE, \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/arch/x86_64/boot.s | head -1)
 if [ "$kk" = "$kb" ] && [ -n "$kk" ]; then ok "KDATA_SIZE: kstate.fi und boot.s sagen beide $kk"
 else bad "KDATA_SIZE: kstate.fi='$kk', boot.s='$kb'"; fi
 
-# 1d. Und kein Bereich ueberschneidet einen anderen.
 if python3 tools/kernel/memmap.py > "$TMPD/memmap.txt" 2>&1; then
     ok "memmap.py: $(tail -1 "$TMPD/memmap.txt")"
 else
@@ -182,15 +110,6 @@ build_stage() { # 0 = firnc0, 1 = firnc1
     [ -x "$cc" ] || return 1
     "$cc" kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s uebersetzt den Kernel nicht"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
-    # DER NAME DIESER OBJEKTDATEI IST NICHT BELIEBIG. `kernel/kernel.ld`
-    # sammelt den Ring-3-Code mit dem Muster `*uprog*.o(.text .text.*)`
-    # in den Abschnitt `.utext` und schliesst ihn aus dem Kerneltext aus.
-    # Heisst die Datei anders -- `u0.o` zum Beispiel --, landet `uprog.fi`
-    # im Kerneltext, und jedes Programm in Ring 3 faellt beim ersten
-    # Befehl. Der Lauf ist dann trotzdem "sauber" zu Ende: der Kernel
-    # sagt nur nichts mehr. Runde HANDLE hat diesen Fehler schon einmal
-    # gehabt; diese Runde hat ihn beim Abschreiben des Laeufers von POLL
-    # ein zweites Mal geerbt.
     "$cc" kernel/uprog.fi -o "$TMPD/uprog$s.o" >>"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s uebersetzt uprog.fi nicht"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
     ld -n -T "$LDSCRIPT" \
@@ -331,10 +250,6 @@ num "Abgaben an voller Warteschlange"       "$(zahl "$F" full)" ge 1
 num "Wartevorgaenge an der Zeitgrenze"      "$(zahl "$F" timeouts)" ge 1
 num "beim Prozesstod abgeraeumte"           "$(zahl "$F" abandoned)" ge 3
 num "Zugriffe auf fremde Auftraege"         "$(zahl "$F" denied)" ge 2
-# DIE ZAHL, DIE DIE WARTESCHLEIFE ENTLARVT HAETTE. Ein `poll`-Auftrag,
-# der auf sein Ereignis WARTET statt zu drehen, laesst die Arbeitsfaeden
-# nur ein paar Dutzend Mal laufen. Die erste Fassung dieser Runde kam
-# fuer dieselben Auftraege auf 525241.
 num "Durchlaeufe der Arbeitsfaeden mit Arbeit" "$(zahl "$F" workruns)" lt 2000
 
 # =====================================================================
@@ -424,10 +339,6 @@ if [ -n "$khz" ] && [ "$khz" -gt 0 ] 2>/dev/null && [ -n "$a16" ]; then
 else
     bad "die Messung hat keine Zahlen geliefert"
 fi
-# DIE ZUSAGE, DIE DIESE RUNDE UEBERHAUPT RECHTFERTIGT: mehr gleichzeitig
-# offene Auftraege muessen den Preis JE AUFTRAG senken. Tut das die Zahl
-# nicht, hat die Schicht ihren Zweck verfehlt -- und das steht dann hier
-# und nicht in einer Ausrede.
 if [ -n "$a1" ] && [ -n "$a16" ]; then
     if [ "$a16" -lt "$a1" ]; then
         ok "die Tiefe zahlt sich aus: 16 offene Auftraege kosten je $a16 Zyklen, einer $a1"
@@ -435,10 +346,6 @@ if [ -n "$a1" ] && [ -n "$a16" ]; then
         bad "die Tiefe zahlt sich NICHT aus: 16 offene kosten je $a16, einer $a1"
     fi
 fi
-# UND DIE ZWEITE, DIE EHRLICHERE: die Abgabe allein muss deutlich
-# billiger sein als der ganze synchrone Aufruf. Das ist die Zeit, die der
-# abgebende Prozess wirklich spart -- und das ist der Gewinn, den diese
-# Runde auf EINEM Kern nachweisen kann.
 if [ -n "$su" ] && [ -n "$sy" ]; then
     if [ "$su" -lt "$sy" ]; then
         ok "der Abgeber zahlt $su statt $sy Zyklen je Lesevorgang"

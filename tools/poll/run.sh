@@ -1,63 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/poll/run.sh -- RUNDE POLL: AUF ZWEI DINGE GLEICHZEITIG WARTEN.
-#
-# EHRLICHER AUSGANGSPUNKT, gemessen und nicht behauptet: vor dieser Runde
-# fand `grep` im ganzen Baum kein `poll`, kein `select` und kein `epoll`.
-# Es gab `fork`, `exec`, `pipe`, `dup2`, `wait4` und eine `/etc/inittab`
-# mit `respawn` -- alles, was ein Unix braucht, ausser der einen Sache,
-# ohne die ein Prozess nur auf GENAU EINE Quelle warten kann.
-#
-# WARUM DAS DER HARTE BLOCKER WAR. Die geplante Bruecke nach JARVIS
-# (`pollbr`, bis Runde BLECH-ECHT `jarvisd`) ist ein Helfer, der
-# gleichzeitig auf einen NETZANSCHLUSS
-# und auf das ROHR ZU EINEM KINDPROZESS warten muss. Ohne `poll` bleibt
-# nur der Wechsel zwischen beiden in einer Warteschleife -- Rechenzeit,
-# wenn nichts los ist, und Verzoegerung, wenn etwas los ist. Jede Shell
-# braucht denselben Aufruf.
-#
-# WAS HIER GEMESSEN WIRD, und jeder Punkt hat eine GEGENPROBE, weil eine
-# Eigenschaft ohne Gegenprobe eine Behauptung ist:
-#
-#   1. DIE NUMMER. `poll` ist 7 -- Linux' Nummer, denn Regel 1 der Karte
-#      in `kernel/sys.fi` sagt: was Linux hat, hat Linux' Nummer. Geprueft
-#      wird, dass KEINE Nummer in einer der beiden Tafeln (Kernel und
-#      libc) zweimal vorkommt und dass beide Tafeln Zahl fuer Zahl
-#      uebereinstimmen. Das ist die Lehre aus der Runde, in der zwei
-#      Zweige beide die 1320 vergeben hatten: eine Nummer, die zwei Dinge
-#      bedeutet, ist ein Programm, das nach `poll` fragt und `lstat`
-#      bekommt. Geprueft wird die GANZE Tafel, nicht nur die neue Zeile.
-#   2. ZWEI ROHRE, EINES BESCHRIEBEN -- `poll` meldet GENAU EINES. Ein
-#      `poll`, das beide meldet, hat geraten.
-#   3. DAS GESCHLOSSENE GEGENENDE ist POLLHUP, und mit Oktetten im Rohr
-#      POLLHUP UND POLLIN. Die Schreibseite ohne Leser ist POLLERR. Beide
-#      kommen, OHNE dass danach gefragt wurde (so verlangt es POSIX).
-#   4. DER ZEITABLAUF MISST WIRKLICH DIE ZEIT, gemessen mit
-#      CLOCK_MONOTONIC und nicht mit dem Tickzaehler, den `poll` selbst
-#      benutzt -- sonst misst die Uhr sich selbst. Die Toleranz ist
-#      begruendet: der Zeitgeber laeuft mit 100 Hz, `poll` rundet auf und
-#      zaehlt die angebrochene Marke mit, also liegt die Frist zwischen
-#      `timeout` und `timeout + 20 ms`. FRUEHER als verlangt darf sie nie
-#      liegen.
-#   5. WER WARTET, RECHNET NICHT. Das ist die Zusage, um die es geht.
-#      Gemessen wird der Systemaufrufzaehler des ganzen Systems ueber
-#      1,2 Sekunden Wartezeit -- einmal mit `poll` und einmal als
-#      Warteschleife mit 10 ms Schlaf. Der Unterschied ist der Beweis.
-#   6. DIE FEHLER: zu viele Deskriptoren (-EINVAL), ein Nullzeiger und
-#      ein Zeiger in den Kern (-EFAULT), ein Deskriptor, der nicht offen
-#      ist (POLLNVAL statt eines Fehlers des ganzen Aufrufs).
-#   7. DIE BRUECKE SELBST, MIT DRAHT. `/bin/pollbr` lauscht auf 9100,
-#      haelt daneben das Rohr eines Kindes und steht in EINEM `poll`
-#      ueber beide. Der Wirt verbindet sich durch QEMUs Weiterleitung und
-#      schickt eine Zeile; das Kind redet unabhaengig davon. BEIDES muss
-#      bedient werden, und die Antwort muss beim Wirt ankommen.
-#
-# Gemessen wie die Runden 59, 62 und K1 gemessen haben: QEMU je Fall, mit
-# Zeitgrenze, serielle Ausgabe gegen Erwartungen, Beendigungscode aus
-# `isa-debug-exit` (21 = der Kernel hat selbst Schluss gemacht, 63 = eine
-# Ausnahme). MIT `-accel kvm`, wo vorhanden -- das ist seit Runde KVMFIX
-# moeglich und rund viereinhalbmal schneller; ohne KVM faellt der Laeufer
-# auf `-accel tcg` zurueck und sagt es.
 #
 # Aufruf:  bash tools/poll/run.sh
 set -uo pipefail
@@ -125,10 +66,6 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 0
 fi
 
-# RUNDE KVMFIX hat den Kernel unter KVM zum Laufen gebracht (zwei echte
-# Hardwarefehler, siehe KVMFIX-STATUS.md). Wo /dev/kvm da ist, wird es
-# benutzt -- und wo nicht, sagt es der Laeufer, statt still langsamer zu
-# messen.
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACCEL="-accel kvm"; ACCELNAME="kvm"
 else
@@ -145,8 +82,6 @@ ln=$(number_in lib/libc/kcall.fi SYS_POLL)
 [ "$ln" = 7 ] && ok "lib/libc/kcall.fi: SYS_POLL = 7" \
               || bad "lib/libc/kcall.fi: SYS_POLL = ${ln:-fehlt}"
 
-# DIE PRUEFUNG, DIE ES OHNE DIE 1320 NICHT GAEBE: keine Nummer darf in
-# einer der beiden Tafeln zweimal vergeben sein.
 dup_in() { # datei
     grep -aoE "^const SYS_[A-Z0-9_]+: u64 = [0-9]+" "$1" \
         | sed -E 's/^const ([A-Z0-9_]+): u64 = ([0-9]+).*/\2 \1/' \
@@ -161,8 +96,6 @@ ldup=$(dup_in lib/libc/kcall.fi)
 [ -z "$ldup" ] && ok "lib/libc/kcall.fi: keine Nummer ist zweimal vergeben" \
                || { bad "lib/libc/kcall.fi: doppelt vergebene Nummern"; echo "$ldup" | sed 's/^/        /'; }
 
-# Und beide Tafeln sagen dasselbe -- Name fuer Name, wie Abschnitt 1 von
-# tools/posix/run.sh es seit Runde K4 tut.
 diffs=0
 while read -r name value; do
     other=$(number_in lib/libc/kcall.fi "$name")
@@ -173,7 +106,6 @@ done < <(grep -aoE "^const SYS_[A-Z0-9_]+: u64 = [0-9]+" kernel/sys/sys.fi \
     | grep -vE '^SYS_(MARK|LEAVE) ')
 num "Nummern, bei denen Kernel und libc auseinanderlaufen" "$diffs" eq 0
 
-# Die Bits von <poll.h> sind die von Linux, und in beiden Dateien gleich.
 for pair in "POLLIN 1" "POLLPRI 2" "POLLOUT 4" "POLLERR 8" "POLLHUP 16" "POLLNVAL 32"; do
     set -- $pair
     k=$(number_in kernel/sys/sys.fi "$1"); l=$(number_in lib/libc/io.fi "$1")
@@ -181,8 +113,6 @@ for pair in "POLLIN 1" "POLLPRI 2" "POLLOUT 4" "POLLERR 8" "POLLHUP 16" "POLLNVA
     else bad "$1: kernel ${k:-fehlt}, libc ${l:-fehlt}, erwartet $2"; fi
 done
 
-# Die Gegenprobe zur Ausgangslage: es gibt weiterhin kein `select` und
-# kein `epoll` -- diese Runde hat `poll` gebaut und nichts vorgetaeuscht.
 if grep -aqE "^const SYS_(SELECT|EPOLL)" kernel/sys/sys.fi; then
     bad "es steht ploetzlich select/epoll in der Tafel -- diese Runde hat das nicht gebaut"
 else
@@ -302,12 +232,6 @@ say "$F" err_kern -14    "ein Zeiger in den Kern: -EFAULT"
 
 echo "   -- der Zeitablauf misst die Zeit"
 say "$F" tmo_ret 0       "nichts wurde bereit: 0, kein Fehler"
-# Die Toleranz, begruendet: der Zeitgeber laeuft mit 100 Hz. `poll`
-# rundet auf die naechste Marke auf und zaehlt die ANGEBROCHENE Marke
-# mit, weil `kstate.TICKS` beim Eintritt schon mitten in ihr steht --
-# also 300..320 ms; die 340 oben lassen dem Umschalten der Aufgaben Luft.
-# Unter 300 darf es NIE liegen: zu frueh zurueckzukommen ist das eine,
-# was POSIX verbietet und was ein Programm nicht nachbessern kann.
 between "poll(300 ms) hat wirklich mindestens 300 ms gewartet (Gast-Uhr: Untergrenze 10 % darunter)" "$(value_of "$F" tmo_ms)" 270 340
 say "$F" tmo0_ret 0      "Zeitablauf 0: nachsehen und sofort zurueck"
 between "und das kostet keine messbare Zeit" "$(value_of "$F" tmo0_ms)" 0 20
@@ -330,37 +254,22 @@ between "und die Warteschleife hat dieselbe Zeit gebraucht (sonst waere der Verg
     "$(value_of "$F" busy_ms)" 1190 1500
 
 echo "   -- ein Signal holt einen Wartenden zurueck"
-# Ohne die Zeile in kernel/signal.fi, die S_POLL mit aufweckt, waere ein
-# `poll` ohne Frist die eine Stelle, an der ein Prozess unerreichbar
-# wird: der Zeitgeber kommt nie vorbei, weil T_WAKE auf POLL_FOREVER
-# steht. Das hier ist die Gegenprobe dazu.
 say "$F" sig_act 0 "SIGUSR1 hat eine Routine bekommen"
 say "$F" sig_ret -4 "poll(OHNE Frist) endet an einem Signal mit -EINTR"
 between "und zwar nach der Zeit des Signals, nicht spaeter" "$(value_of "$F" sig_ms)" 290 500
 
 echo "   -- die Bauform der Bruecke, ohne Draht"
-# Ohne Karte gibt es keine Steckdose (-ENODEV, kernel/sys.fi). Das ist
-# hier KEIN Fehler: der Lauf MIT Draht steht in Abschnitt 4. Was dieser
-# Teil zeigt, ist, dass die Schleife mit einem Eintrag, den es nicht
-# gibt, sauber weiterarbeitet und den Kindkanal trotzdem bedient.
 say "$F" mix_ret 1    "poll ueber Netzseite und Kindkanal meldet den Kindkanal"
 say "$F" mix_child 17 "der Kindkanal: POLLIN und POLLHUP (17)"
 say "$F" mix_hup 16   "nach dem Ende des Kindes bleibt POLLHUP stehen"
 n=$(value_of "$F" lines)
 num "Messzeilen, die /bin/pollt gedruckt hat" "${n:-0}" ge 33
 
-# Die Gegenprobe zum ganzen Abschnitt: der Kernel lebt danach noch.
 grep -aq "kernel: done" "$F" && ok "der Kernel ist nach allen Faellen noch am Leben" \
                              || bad "'kernel: done' fehlt -- der Kernel hat den Lauf nicht ueberstanden"
 
 # =====================================================================
 echo "== 4. die Bruecke selbst: /bin/pollbr am Draht =="
-# =====================================================================
-# Der Draht ist QEMUs Benutzernetz mit einer Weiterleitung. Das braucht
-# keine Netzwerknamensraeume und keine Rechte -- anders als
-# tools/net/run.sh, das den Stapel auf einem veth-Paar misst. Hier geht
-# es nicht um den Stapel, sondern um EINE Frage: bedient ein Prozess in
-# EINEM `poll` gleichzeitig eine Verbindung und ein Kind?
 if ! command -v nc >/dev/null 2>&1; then
     note 'Abschnitt 4: uebersprungen, nc fehlt'
 else
@@ -377,9 +286,6 @@ else
       echo $? > "$JF.rc" ) &
     QPID=$!
 
-    # Warten, bis der Helfer WIRKLICH lauscht. Die Zeile steht nach
-    # `listen` und nicht davor -- ein Test, der frueher verbindet, misst
-    # das Zeitverhalten von QEMU und nicht das von `poll`.
     listening=0
     for i in $(seq 1 600); do
         [ -f "$JF" ] && grep -qa 'pollbr: listening' "$JF" && { listening=1; break; }
@@ -406,9 +312,6 @@ else
         v=$(jvalue_of "$JF" child_lines); num "Zeilen aus dem Kindrohr bedient"   "${v:-0}" ge 2
         v=$(jvalue_of "$JF" child_hup);   num "das Ende des Kindes kam als POLLHUP" "${v:-0}" eq 1
         v=$(jvalue_of "$JF" child_code);  num "und das Kind ist ordentlich gestorben" "${v:-0}" eq 5
-        # DIE ZUSAGE: beides in EINER Schleife, und die Schleife ist nicht
-        # heissgelaufen. Ein `poll`, das in Wahrheit eine Warteschleife
-        # waere, haette in diesen Sekunden Hunderte von Durchlaeufen.
         v=$(jvalue_of "$JF" polls)
         num "Durchlaeufe der einen Schleife (eine Warteschleife haette Hunderte)" "${v:-999}" le 12
         v=$(jvalue_of "$JF" first)

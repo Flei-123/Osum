@@ -1,45 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/module/run.sh -- DER BEWEIS, DASS EIN TREIBER NACHGELADEN WERDEN KANN.
 #
-# Die Frage des Eigners war: "Wie macht es Windows? Bei der GPU steht da
-# Basic Display Driver, und dann kann ich mir z. B. von NVIDIA
-# GPU-Treiber herunterladen." `docs/MODUL-BEFUND.md` sagt, was daran
-# geht und was nicht. Dieser Laeufer misst den Teil, der geht.
-#
-# NEUN ABSCHNITTE, und jeder hat eine Gegenprobe, die ihn umbringt:
-#
-#   1. BAUEN. Zwei Kernabbilder aus DEMSELBEN Quelltext: eines mit
-#      `kernel/ps2m.fi` darin, eines mit `--ohne-ps2m` (dann steht
-#      `kernel/ps2m-aus.fi` an seiner Stelle -- dieselben 31 Ausfuhren,
-#      kein Treiber). Und das Modul, aus derselben Datei `ps2m.fi`.
-#   2. DIE AUSFUHRTAFEL. Der Kern druckt Name und Adresse jedes Symbols,
-#      das er anbietet; dieser Laeufer haelt jede Zahl gegen `nm` auf
-#      dem gebundenen Abbild. Waeren sie verschieden, waere der Kniff in
-#      `kernel/ksym.fi` falsch und alles darunter Zufall.
-#   3. OHNE MODUL FEHLT DAS GERAET. `--ohne-ps2m`, leere Platte:
-#      `mouse_init` sagt nein, `present` sagt nein.
-#   4. MIT MODUL IST ES DA. Dieselbe Zeile Quelltext, andere Antwort --
-#      und die Maus bewegt sich wirklich: der QEMU-Monitor schickt
-#      `mouse_move`, der Paketzaehler steigt.
-#   5. ENTLADEN. Danach sagt `present` wieder nein, UND die Zahl der
-#      freien Rahmen ist wieder die von vorher. Ein Lader, der Speicher
-#      verliert, faellt an dieser Zahl auf.
-#   6. DIE SECHS ABWEISUNGEN. Falsche Schnittstellenfassung, gekippte
-#      Signatur, gekippte Nutzlast, kaputte Kennung, ein Symbol, das der
-#      Kern nicht anbietet, gar keine Datei. Jede mit ihrem Grund, und
-#      der Kern lebt nach jeder weiter.
-#   7. DIE GEMESSENE GRENZE. Ein Modul, dessen PROGRAMMTEXT verdorben
-#      ist und das TROTZDEM richtig signiert wurde, kommt durch alle
-#      Riegel -- und nimmt den Kern mit. Das ist kein Fehler des
-#      Laeufers, sondern die Wahrheit ueber Ring 0, und sie wird hier
-#      GEMESSEN statt beschwiegen.
-#   8. WAS ES KOSTET. Abbildgroessen, Modulgroesse, Zahl der
-#      Relokationen.
-#   9. BEIDE UEBERSETZERSTUFEN. Ein Modul von firnc0 laeuft unter einem
-#      Kern von firnc1 und umgekehrt -- das ist der Sinn von
-#      `#[export_c]` und der Grund, warum in `kernel/ksym.fi` kein
-#      `_F0.` steht.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -73,13 +33,6 @@ bash tools/build-kernel.sh "$TMPD/k-modul" --ohne-ps2m > "$TMPD/b2.txt" 2>&1 \
     && ok "Kern OHNE ps2m.fi ($(stat -c%s "$TMPD/k-modul") Oktette)" \
     || { bad "Kern ohne ps2m"; sed 's/^/        /' "$TMPD/b2.txt" | head -5; }
 
-# Die Gegenprobe zur Gegenprobe: der Treiber ist im zweiten Abbild WIRKLICH
-# nicht drin. Nicht "wird nicht benutzt" -- NICHT VORHANDEN.
-# ACHTUNG, UND ES HAT DIESEN LAEUFER EINMAL FALSCH ROT GEMACHT: unter
-# `set -o pipefail` darf hier kein `nm ... | grep -q` stehen. `grep -q`
-# bricht ab, sobald es fuegt, `nm` stirbt an SIGPIPE, und pipefail macht
-# daraus einen Fehlschlag der ganzen Roehre -- unabhaengig davon, ob das
-# Symbol da war. Also erst in eine Datei, dann suchen.
 nm "$TMPD/k-fest.elf" > "$TMPD/nm-fest.txt" 2>/dev/null
 nm "$TMPD/k-modul.elf" > "$TMPD/nm-modul.txt" 2>/dev/null
 if grep -c 'ps2m__consume' "$TMPD/nm-fest.txt" >/dev/null 2>&1 \
@@ -105,9 +58,6 @@ for n in k_abi k_bind k_dec k_puts kdata osum_panic; do
 done
 ok "das Modul verlangt genau die sechs Namen, die kernel/lib/ksym.fi anbietet"
 
-# Die absichtlich kaputten Fassungen. Sie entstehen HIER und nicht mit
-# `dd` hinterher -- eine Datei, die ein Skript nachtraeglich verbiegt,
-# misst am naechsten Tag etwas anderes.
 bash tools/module/build.sh "$TMPD/m-abi.omod"  --name ps2maus --abi 2 >/dev/null 2>&1
 bash tools/module/build.sh "$TMPD/m-sig.omod"  --name ps2maus --abi 1 --sig-dreh >/dev/null 2>&1
 bash tools/module/build.sh "$TMPD/m-nutz.omod" --name ps2maus --abi 1 --nutz-dreh 1000 >/dev/null 2>&1
@@ -137,9 +87,6 @@ ok "acht OFS-Abbilder mit je einer /lib/ps2maus.omod (bzw. keiner)"
 
 # ------------------------------------------------------------- der Laeufer
 #
-# Er wartet auf die MARKE, die die Maschine selbst gedruckt hat
-# (`modul: warte`), und nicht auf die Uhr des Wirts -- derselbe Griff wie
-# in Runde OTA (docs/RUNDE-MERGE3.md Teil 1b).
 lauf() { # kernel disk append log
     local sock="$TMPD/mon.$$.$RANDOM"
     cp -f "$2" "$TMPD/live.img"
@@ -165,10 +112,6 @@ lauf() { # kernel disk append log
 }
 QUIET="nokbd nosched noproc nofs noring3"
 wert() { grep -aoE "$2" "$1" | head -1 | grep -oE '[0-9]+$'; }
-# DIE ZAHLEN AUS DER EINEN ZEILE, DIE `zahlen()` DRUCKT. Getrennt, und das
-# ist kein Schoenheitsfehler: `ext=[0-9]+` trifft sonst das `ext=0` in
-# `k_text=0x1153cc`, und `id=[0-9]+` das `id=0` in `apic: id=0`. Beides ist
-# hier passiert und hat den Laeufer falsch rot gemacht.
 zwert() { grep -a 'modul: sigok=' "$1" | head -1 | grep -oE "$2" | grep -oE '[0-9]+$'; }
 nwert() { grep -a 'modul: nach init=' "$1" | head -1 | grep -oE "$2" | grep -oE '[0-9]+$'; }
 
@@ -211,7 +154,6 @@ PYEOF
 num "Adressen, die mit nm uebereinstimmen" "$(wert "$TMPD/nm.txt" 'gleich=[0-9]+')" eq 14
 grep -q ABWEICHUNG "$TMPD/nm.txt" && sed 's/^/        /' "$TMPD/nm.txt" | head -5
 
-# ------------------------------------------ 3. ohne Modul fehlt das Geraet
 echo "== 3. ohne Modul fehlt das Geraet =="
 lauf "$TMPD/k-modul" "$TMPD/d-leer.img" "modul $QUIET" "$TMPD/l-leer.txt"
 num "der Lauf endet sauber" "$RC" eq 21
@@ -220,7 +162,6 @@ has "$TMPD/l-leer.txt" "modul: vor init=0 present=0" "vor dem Laden: kein Zeigeg
 has "$TMPD/l-leer.txt" "modul: nach init=0 present=0" "und danach immer noch keins"
 has "$TMPD/l-leer.txt" "modul: ende" "der Kern lebt und kommt bis ans Ende des Abschnitts"
 
-# --------------------------------------------- 4. mit Modul ist es da
 echo "== 4. mit Modul ist es da, und es bewegt sich wirklich =="
 has "$TMPD/l-gut.txt" "modul: vor init=0 present=0" "vor dem Laden: kein Zeigegeraet"
 has "$TMPD/l-gut.txt" "modul: laden=ok" "das Modul wird angenommen"
@@ -233,8 +174,6 @@ num "Namen, die aus dem KERN kamen" "$(zwert "$TMPD/l-gut.txt" 'ext=[0-9]+')" ge
 num "Rahmen fuer das Abbild" "$(zwert "$TMPD/l-gut.txt" 'rahmen=[0-9]+')" ge 1
 num "belegte Plaetze in der Treibertafel" "$(zwert "$TMPD/l-gut.txt" 'plaetze=[0-9]+')" eq 37
 num "Rueckgabe von modul_init" "$(zwert "$TMPD/l-gut.txt" 'initrc=[0-9]+')" eq 0
-# Die Kennung des Geraets kommt vom ECHTEN 8042 und nicht aus einer
-# Tabelle: 3 heisst "mit Rad", und QEMU baut ein Rad ein.
 num "Geraetekennung vom 8042" "$(nwert "$TMPD/l-gut.txt" 'id=[0-9]+')" eq 3
 PKT=$(grep -a 'modul: pkt=' "$TMPD/l-gut.txt" | head -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
 num "PS/2-Pakete, nachdem der Monitor die Maus bewegt hat" "$PKT" ge 3
@@ -253,8 +192,6 @@ if [ -n "$A" ] && [ "$A" = "$B" ]; then
 else
     bad "freie Rahmen: nachher=$A, vorher=$B"
 fi
-# Und danach wird die Maus WEITER bewegt. Eine Unterbrechung, die jetzt
-# noch kommt, findet in der Treibertafel eine Null.
 LETZT=$(grep -a 'modul: pkt=' "$TMPD/l-gut.txt" | tail -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
 num "Pakete nach dem Entladen (der Stummel zaehlt nichts mehr)" "$LETZT" eq 0
 has "$TMPD/l-gut.txt" "modul: ende" "der Kern lebt nach dem Entladen weiter"
@@ -274,9 +211,6 @@ pruefe_abweisung sig   signatur
 pruefe_abweisung nutz  signatur
 pruefe_abweisung kenn  kennung
 pruefe_abweisung fremd symbol
-# Bei `fremd` ist die Signatur GUELTIG und der Parser laeuft durch -- die
-# Abweisung kommt erst am Namen. Das ist die schaerfere Zusage: der Lader
-# springt nicht in ein Modul, dessen Luecken er nicht fuellen konnte.
 num "fremd: die Signatur war gueltig" "$(zwert "$TMPD/l-fremd.txt" 'sigok=[0-9]+')" eq 1
 num "fremd: es wurden schon Relokationen angewandt" "$(zwert "$TMPD/l-fremd.txt" 'rel=[0-9]+')" ge 1
 num "fremd: aber KEIN Platz in der Treibertafel" "$(zwert "$TMPD/l-fremd.txt" 'plaetze=[0-9]+')" eq 0
@@ -335,16 +269,11 @@ if [ -f "$OPK" ] && [ -f "$STORE" ]; then
         sed 's/^/        /' "$TMPD/pak.txt" | tail -12
     fi
     has "$TMPD/pak.txt" "f lib/ps2maus.omod" "das .opk traegt genau eine Datei: lib/ps2maus.omod"
-    # DER SCHRITT, DER DEN KREIS SCHLIESST: das Paket wird ausgepackt wie
-    # auf dem Geraet, daraus eine Platte gebaut, und DER KERN LAEDT DAS,
-    # WAS DIE PAKETVERWALTUNG DORT HINGELEGT HAT.
     W="$TMPD/wurzel"
     rm -rf "$W"; mkdir -p "$W"
     if python3 "$OPK" installieren --wurzel "$W" \
             "$TMPD/pak/ps2maus-1.0.0.opk" > "$TMPD/inst.txt" 2>&1; then
         ok "opk installiert das Paket in einen Wurzelbaum"
-        # opk legt Pakete unter /apps/<name>.osp ab; `.prog` war der Name
-        # der Runde INSTALL. Gemessen wird, was wirklich da liegt.
         INST=$(ls "$W"/apps/ps2maus.*/lib/ps2maus.omod 2>/dev/null | head -1)
         if [ -n "$INST" ] && cmp -s "$INST" "$TMPD/pak/ps2maus.omod"; then
             ok "die installierte Datei ist OKTETT FUER OKTETT das gebaute .omod"
@@ -381,12 +310,6 @@ fi
 
 # ------------------------------------------ 11. K-014: die Sperrliste
 echo "== 11. K-014: die Sperrliste -- ein signierter Treiber laesst sich zuruecknehmen =="
-# Vier Platten, dasselbe gute Modul auf jeder; nur /lib/omod.sperre
-# unterscheidet sich:
-#   fremd  -- gueltige Liste, sperrt ein ANDERES Modul (m-abi) -> laedt
-#   drin   -- gueltige Liste, sperrt GENAU dieses Modul       -> gesperrt
-#   dreh   -- Liste ohne dieses Modul, aber Signatur gekippt  -> sperrliste
-#   zahl   -- richtig signiert, Anzahlfeld passt nicht zur Laenge -> sperrliste
 SP="tools/module/mksperre.py"
 python3 "$SP" "$TMPD/sp-fremd"  "$TMPD/m-abi.omod" >/dev/null 2>&1
 python3 "$SP" "$TMPD/sp-drin"   "$TMPD/m-abi.omod" "$TMPD/ps2maus.omod" >/dev/null 2>&1
@@ -412,8 +335,6 @@ for f in drin:gesperrt dreh:sperrliste zahl:sperrliste; do
     has "$TMPD/l-sp-$n.txt" "modul: nach init=0 present=0" "sp-$n: kein Geraet danach"
     hasnot "$TMPD/l-sp-$n.txt" "ps2maus: eingetragen" "sp-$n: modul_init ist NICHT gelaufen"
 done
-# Die schaerfere Zusage bei `drin`: die Signatur des Moduls war GUELTIG
-# -- abgewiesen hat allein die Liste.
 num "drin: die Signatur des Moduls war gueltig" "$(zwert "$TMPD/l-sp-drin.txt" 'sigok=[0-9]+')" eq 1
 num "drin: die Liste hatte 2 Eintraege" "$(zwert "$TMPD/l-sp-drin.txt" 'sperre=[0-9]+')" eq 2
 

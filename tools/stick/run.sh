@@ -1,55 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/stick/run.sh -- RUNDE STICK: DIE SIEBEN PROGRAMME, DIE AUF DEM
-# ABBILD GEFEHLT HABEN -- GEMESSEN IM LAUFENDEN SYSTEM, VOM STICK.
 #
 #   bash tools/stick/run.sh [arbeitsverzeichnis]
 #
-# ==================================================================
-# WAS HIER GEMESSEN WIRD, UND WORIN ES SICH UNTERSCHEIDET
-# ==================================================================
-#
-# `tools/usbimg/run.sh` misst, dass das Abbild STARTET. Dieser Laeufer
-# misst, was danach kommt: ob ein Mensch am Stick etwas TUN kann.
-# Deshalb wird hier NICHT mit `qemu -kernel` gefahren -- der Kern kommt
-# vom Abbild, ueber Limine, wie auf Justins Laptop:
-#
-#   * BIOS  ueber den MBR-Teil von Limine
-#   * UEFI  ueber OVMF und /EFI/BOOT/BOOTX64.EFI
-#
-# und in beiden Faellen wird der Menueeintrag "Kommandozeile mit Netz"
-# gewaehlt (vier Mal nach unten, dann Eingabe -- ueber den QEMU-Monitor,
-# also wie ein Mensch am Bildschirm), und danach wird auf der seriellen
-# Leitung GETIPPT (`tools/server/console.py`, Runde SERVERBUILD).
-#
-# DIE VIER ZUSAGEN DIESER RUNDE:
-#
-#   1. /bin traegt die sieben, die `docs/BLECH-BEREIT.md` Abschnitt 7
-#      vermisst hat: ota, fetch, host, jarvisd, jsig, jarvisctl, pollbr
-#      (dazu dhcp und reboot, ohne die die anderen nichts koennen).
-#   2. `fetch` holt eine ECHTE HTTPS-Seite aus dem offenen Netz --
-#      store.fleitec.com, Let's-Encrypt-Kette, geprueft gegen die
-#      Mozilla-Wurzeln IM ABBILD.
-#   3. `ota search` findet den Update-Server ueber den NAMEN
-#      store.fleitec.com: DHCP gibt den Nameserver, der Aufloeser macht
-#      daraus eine Adresse, das signierte VERZEICHNIS wird gelesen.
-#   4. `jarvisd` meldet sich an einer Gegenstelle an und BEANTWORTET
-#      einen Auftrag.
-#
-# WOGEGEN GEMESSEN WIRD, ausdruecklich:
-#   * Zusage 2 und 3 gegen den ECHTEN Server https://store.fleitec.com/
-#     im offenen Internet. Kein Pruefstand, kein selbstgemachtes
-#     Zertifikat.
-#   * Zusage 4 gegen `tools/bridge/peer.py`, einen TLS-Server in
-#     Python -- NICHT gegen den echten JARVIS-Server. Der laeuft
-#     anderswo und ist nicht Teil dieses Repos.
-#
-# UND DAS ABBILD WIRD DAFUER NICHT ANGEFASST. Die Rechteliste und die
-# Wurzel des Pruefstands kommen auf einer ZWEITEN PLATTE herein, die im
-# laufenden System eingehaengt wird (`mount /dev/hdb /mnt ofs`) --
-# genau der Weg, den ein Mensch mit einem zweiten Stick auch haette.
-# Das Abbild, das am Ende ausgeliefert wird, ist Oktett fuer Oktett das
-# hier gemessene.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -119,9 +71,6 @@ echo "       /bin traegt $N Programme"
 
 # =====================================================================
 echo "== 3. die Gegenstelle und die zweite Platte =="
-# =====================================================================
-# Zertifikate fuer den Pruefstand. 10.0.2.2 ist in QEMUs Benutzernetz
-# der Wirt; mkcerts.py legt den Namen UND diese Adresse in den SAN.
 mkdir -p "$TMPD/certs"
 if python3 tools/ota/mkcerts.py "$TMPD/certs" jarvis.test 10.0.2.2 \
         > "$TMPD/certs.log" 2>&1; then
@@ -147,15 +96,6 @@ screenshot = no
 max_output    = 4096
 max_file      = 8192
 EOFC
-# DIE ZWEITE PLATTE IST FAT32 UND NICHT OFS, und das ist kein
-# Geschmack: `tools/e2e/run.sh` hat es gemessen und aufgeschrieben --
-# OFS LAESST SICH NICHT ZWEIMAL EINHAENGEN. `vfs.mount_at` endet fuer
-# FS_OFS in `ofs.node_root(state)`, also in der WURZEL, egal welches
-# Geraet genannt wurde. `mount /dev/hdb /mnt ofs` gibt dann eine 0
-# zurueck und haengt den Stick noch einmal an sich selbst; genau das ist
-# hier passiert (`mount -> 0`, danach `cat: cannot open
-# /mnt/rechte.conf`). Mit FAT32 auf einer MBR-Partition geht es -- der
-# Weg, den `tools/k14/run.sh` misst.
 FAT="$TMPD/fat.img"
 dd if=/dev/zero of="$FAT" bs=1M count=64 status=none
 if mkfs.vfat -F 32 -s 1 -n OSUMPROBE "$FAT" > "$TMPD/probefs.txt" 2>&1 \
@@ -176,11 +116,6 @@ system||
 befehl|/bin/echo hallo-vom-stick|
 AUF
 
-# =====================================================================
-# EIN START VOM STICK, MIT MENUEWAHL UND EINER TASTATUR AM SERIELLEN
-# ANSCHLUSS.
-# =====================================================================
-# The ESP of the stick starts at sector 2048 (tools/usbimg/build.sh).
 eintrag_conf() { # <img> <title substring>
     local img=$1 titel=$2 off=$((2048 * 512)) c="$TMPD/eintrag.conf"
     mcopy -o -i "$img@@$off" ::/limine.conf "$c.orig" >/dev/null 2>&1 || return 1
@@ -212,12 +147,6 @@ stick_lauf() { # <name> <bios|uefi> <mit-gegenstelle:0|1> <console.py-args...>
     local d="$TMPD/$name"
     rm -rf "$d"; mkdir -p "$d"
     cp -f "$IMG" "$d/stick.img"
-    # A-002 (24.09.2026): the entry is WRITTEN into the copy, not chosen
-    # with arrow keys. "four times down" landed on entry 5 -- since
-    # entries were added in front, "Kommandozeile mit Netz" is the
-    # seventh, and the boot ran the lamp diagnosis instead (22 red, none
-    # of them a network fault). The copy's limine.conf holds exactly that
-    # entry from the shipped file; the stick itself is untouched.
     eintrag_conf "$d/stick.img" "Command line" \
         || bad "$name: Menueeintrag nicht in die Kopie geschrieben"
     cp -f "$TMPD/probe.img" "$d/probe.img"
@@ -244,13 +173,7 @@ stick_lauf() { # <name> <bios|uefi> <mit-gegenstelle:0|1> <console.py-args...>
         -serial "unix:$d/ser.sock,server,nowait" \
         -monitor "unix:$d/mon.sock,server,nowait" > "$d/qemu.txt" 2>&1 ) &
     local qpid=$!
-    # Der Menueeintrag "Kommandozeile mit Netz" ist der fuenfte: vier
-    # Mal nach unten. Der erste Tastendruck haelt den Countdown an.
     #
-    # UNTER UEFI SPAETER: OVMF braucht mehrere Sekunden, bevor Limine
-    # ueberhaupt malt, und eine Taste vor dem Menue ist verloren
-    # (gemessen: mit neun Sekunden lief der UEFI-Lauf in den
-    # Vorgabeeintrag).
     local warte=${MENUE_WARTE:-9}
     [ "$art" = uefi ] && warte=${MENUE_WARTE_UEFI:-15}
     python3 tools/server/console.py "$d/ser.sock" "$d/con.log" "$@" \
@@ -258,8 +181,6 @@ stick_lauf() { # <name> <bios|uefi> <mit-gegenstelle:0|1> <console.py-args...>
     local rc=$?
     kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
     if [ -n "$srvpid" ]; then kill "$srvpid" 2>/dev/null; wait "$srvpid" 2>/dev/null; fi
-    # Die Kopien sind je 118 MiB; die Protokolle bleiben, die Abbilder
-    # nicht. Drei Laeufe waeren sonst ein Drittel Gigaoktett Abfall.
     rm -f "$d/stick.img" "$d/probe.img" "$d/vars.fd"
     sed 's/^/       /' "$d/con.out"
     return $rc
@@ -274,8 +195,6 @@ set -- \
     --sende 'ota search\n'                     --frist 200 --erwarte 'ota -> '
 NETZFOLGE=("$@")
 
-# Mit STICK_NUR=bruecke laesst sich der letzte Abschnitt einzeln fahren
-# -- die drei Starts kosten zusammen mehrere Minuten.
 if [ "${STICK_NUR:-}" != bruecke ]; then
 
 # =====================================================================
@@ -335,15 +254,6 @@ stick_lauf sbr bios 1 \
     --sende 'jarvisctl log 20\n'   --frist 60  --erwarte 'jarvisctl -> '
 R="$TMPD/sbr/con.log"
 G="$TMPD/sbr/g.log"
-# DIE ZWEITE PLATTE HAENGT SCHON. GEMESSEN, und es war eine
-# Ueberraschung: `mount /dev/hdb1 /mnt vfat` von Hand sagt
-# "cannot mount" und gibt 1 -- ZU RECHT, denn `kernel/kmain.fi` haengt
-# mit dem Kernwort `vfs` die FAT-Partition der ZWEITEN ATA-Platte beim
-# Start selbst unter /mnt ein (Zeile 2502), und `vfs.mount_at` weist
-# einen zweiten Eintrag auf demselben Ort ab. Gemessen wird deshalb,
-# was zaehlt: dass die Einhaengetafel sie fuehrt und die Datei lesbar
-# ist. Fuer Justin heisst das: eine FAT-Platte oder ein zweiter Stick
-# ist beim Start einfach da.
 hat "$R" '/mnt type vfat' "die zweite Platte steht in der Einhaengetafel (/mnt, vfat)"
 hat "$R" 'servername' "und ihre Rechteliste ist lesbar"
 hat "$R" 'jarvisd: connected' "jarvisd hat die Verbindung aufgebaut"

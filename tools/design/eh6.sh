@@ -1,47 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/design/eh5.sh -- DIE ABNAHME DER RUNDE ECHTHARDWARE-5.
 #
 #   bash tools/design/eh5.sh <ausgabeverzeichnis> [key=value ...]
 #
-# WARUM ES DIESEN LAEUFER GIBT UND capture.sh NICHT GENUEGT.
-#
-# Justins Befunde aus ECHTHARDWARE-4 (Fotos vom 10.09.2026, 11:31-11:37,
-# Abbild orientos-usb-20260910-44a5af3.img) liessen sich mit
-# `tools/design/capture.sh` NICHT nachstellen -- und zwar nicht, weil
-# sie nicht da waeren, sondern weil dieser Laeufer eine ANDERE MASCHINE
-# baut als der Stick. Drei Unterschiede, jeder einzeln nachgewiesen:
-#
-#   1. DIE BEFEHLSZEILE. capture.sh faehrt
-#         gfx ... wm desk wmhold ... nokbd nosched noproc nofs
-#      der Stick dagegen (tools/usbimg/build.sh, Menue 1)
-#         modfs osum gfx wm wig desk wmshell wmdauer tafel herz ...
-#      `wmhold` haelt den Fensterserver an einer Stelle an, an der der
-#      Schreibtisch NOCH LAEUFT, aber `wmshell` fehlt: es wird also NIE
-#      eine Shell im Terminalfenster gestartet. Justins Befund B
-#      ("Terminalfenster ist leer") KANN unter capture.sh gar nicht
-#      auftreten, weil dort nie eine Shell im Fenster stand.
-#      Ausserdem `nokbd`: der Tastaturtreiber ist AUS. Befund A
-#      ("im Suchfenster laesst sich nichts tippen") ist damit ebenfalls
-#      nicht pruefbar -- `sendkey` kam bisher ueber einen Sonderweg an.
-#
-#   2. DIE PROGRAMMLISTE. capture.sh baut elf Programme; der Stick
-#      baut achtundfuenfzig. `/bin/taskmgr` ist in BEIDEN nicht dabei,
-#      und genau das ist Justins Befund F: das Kontrollzentrum ruft
-#      `/bin/taskmgr` (kernel/user/qs.fi:1316), und diese Datei liegt
-#      auf seinem Stick nicht. Nachgewiesen mit
-#      `python3 tools/osum/mkfs.py list` auf der Wurzelpartition des
-#      ausgelieferten Abbildes: 177 Inoden, kein `/bin/taskmgr`.
-#
-#   3. DIE TAFEL. `tafel herz` malt die Diagnosetafel, aus der Justins
-#      Zahlen stammen (RING/VERL/KOAL, ISR MAX, SAFETY, PANEL). Ohne
-#      diese Woerter gibt es die Zeilen nicht, gegen die seine Fotos
-#      gelesen werden.
-#
-# Dieser Laeufer baut deshalb die MASCHINE DES STICKS: dieselbe
-# Befehlszeile, dieselbe Programmliste (soweit sie uebersetzt), und die
-# Tafel an. Was hier gemessen wird, ist damit vergleichbar mit dem, was
-# Justin auf dem Blech sieht -- und nur so ist ein Befund ein Befund.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -65,9 +25,6 @@ nurbau=nein
 ton=nein
 netz=nein
 usb=ja
-# RUNDE ECHTHARDWARE-6: der Schattenschalter. Vorgabe `aus` -- genau
-# wie im System selbst. `schatten=an` schaltet ihn fuer die Gegenprobe
-# zurueck, mit der Punkt A belegt wird.
 schatten=aus
 # r486: the glass key of /etc/theme.conf (empty = the theme default; see tools/comp/shadow.sh)
 window_alpha=""
@@ -83,9 +40,6 @@ moreprogs=""
 tzrule=""
 # AA-CORNER: extra lines for /etc/theme.conf, `;`-separated (e.g. themeextra="aa_old=1"); empty = none
 themeextra=""
-# DIE PROGRAMME. Das ist die Liste des Sticks, gekuerzt um die, die
-# dieser Laeufer nicht braucht -- ABER MIT `taskmgr` UND `sh`, weil
-# genau die beiden in Justins Befunden vorkommen.
 progs="desktop taskbar settings launcher explorer netview taskmgr \
 edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc \
 find du chmod id whoami touch true false sleep kill sort uniq rmdir \
@@ -170,16 +124,6 @@ for p in $progs; do
 done
 echo "programme $(echo $GEBAUT | wc -w)"
 
-# ============================================== RUNDE ECHTHARDWARE-5
-# DIE APPS (`fetch`) -- FUER JUSTINS PUNKT I.
-#
-# `fetch` ist das einzige Programm dieses Baumes, das TLS spricht, und
-# damit die einzige Antwort auf "geht ausgehendes HTTPS". Es liegt in
-# kernel/app/ und braucht ein anderes Profil (`--profile=app`) und
-# FIRNLIB=lib/ -- der Grund steht ausfuehrlich in
-# tools/usbimg/build.sh: `fetch` zieht `libc.dns` aus DIESEM Repo UND
-# `tls.tls` aus vendor/firn/lib, und nur mit FIRNLIB=lib/ sind beide
-# Haelften erreichbar.
 GEBAUT_APP=""
 for p in ${APPS:-fetch}; do
     [ -f "kernel/app/$p.fi" ] || continue
@@ -279,9 +223,6 @@ if python3 tools/netview/icons.py bauen "$OUT/nvicons" > "$OUT/nvicons.log" 2>&1
         [ -e "$OUT/nvicons/$q" ] && ARGS+=("/etc/netview/$q=$OUT/nvicons/$q")
     done
 fi
-# RUNDE ECHTHARDWARE-5: die Wurzelzertifikate. Ohne sie vertraut
-# `fetch` NICHTS und jede HTTPS-Verbindung endet an der Pruefung --
-# was wie ein Netzfehler aussaehe und keiner waere.
 if python3 tools/hwnet/mkroots.py "$OUT/roots.pem" > "$OUT/roots.log" 2>&1; then
     ARGS+=(/etc/ssl/ "/etc/ssl/roots.pem=$OUT/roots.pem@0644")
     echo "wurzeln    $(stat -c%s "$OUT/roots.pem") Oktette"
@@ -317,35 +258,6 @@ echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
 
 # ------------------------------------------------------------ 3. starten
 #
-# DIE BEFEHLSZEILE DES STICKS, und das ist der ganze Sinn dieses
-# Laeufers. Woertlich aus tools/usbimg/build.sh, Menue 1, minus die
-# Netz-Woerter (dieser Lauf hat keine Netzkarte) und minus `modfs`
-# (der Kern bekommt die Platte hier ueber `-drive`, nicht als Modul).
-#
-#   wmshell   startet /bin/sh IM TERMINALFENSTER  -> Befund B pruefbar
-#   wmdauer   der Schreibtisch laeuft ohne Rundengrenze
-#   tafel     die Diagnosetafel                   -> Befunde G und H
-#   herz      der Puls
-#   KEIN nokbd: der Tastaturtreiber laeuft        -> Befund A pruefbar
-# ================================================ RUNDE ECHTHARDWARE-6
-# `disp` GEHOERT DAZU, UND SEIN FEHLEN HAT PUNKT I VERDECKT.
-#
-# Der Stick faehrt (tools/usbimg/build.sh, Menue 1)
-#     modfs osum gfx disp audio wm wig desk ...
-# `eh5.sh` liess `disp` weg. Ohne dieses Wort setzt `vmode` nie auf,
-# und `do_dispset` (kernel/sysgui.fi) weist JEDEN Aufruf gleich in der
-# ersten Zeile ab:
-#     if !vmode.ready(state) { return sys.neg(errno.E_NODEV) }
-#
-# Gemessen in genau diesem Baum, Helligkeitsregler gezogen:
-#     qs: hell auf =59 rc=-19      (-19 = E_NODEV)
-#     qs: hell ist=20 x=10
-# Der Zug KAM AN -- `auf =59` ist der aus der Zeigerstelle gerechnete
-# Wert --, nur der Systemaufruf nahm ihn nicht. Das ist Justins
-# Punkt I, sauber in seine zwei Haelften zerlegt: Ereignis ja, Wirkung
-# nein.
-#
-# Mit `disp` misst dieser Laeufer denselben Weg wie sein Brett.
 APPEND="osum gfx disp fbres=${XRES}x${YRES} wm wig desk wmshell wmdauer tafel herz"
 [ "$tafel" = nein ] && APPEND="${APPEND/ tafel herz/}"
 APPEND="$APPEND absturzhalt nopuls tz=120 lang=$lang nosched noproc nofs"
@@ -363,46 +275,16 @@ if [ "$ton" = ja ]; then
     TONDEV=(-audiodev none,id=snd0 -device intel-hda
             -device hda-duplex,audiodev=snd0)
 fi
-# ================================================ RUNDE ECHTHARDWARE-5
-# `netz=ja` -- EINE ECHTE NETZKARTE MIT AUSGANG INS INTERNET.
 #
-# Justins Punkt I: seit ECHTHARDWARE-4 hat sein Brett einen echten
-# DHCP-Lease (Tafel Zeile 22, `IP 192.168.1.107`). Die Frage ist, ob
-# darauf DNS und ausgehendes HTTPS gehen -- die Voraussetzung fuer
-# Browser und Jarvis-Bruecke.
-#
-# QEMUs Benutzernetz beantwortet genau das: es hat einen eigenen
-# DHCP-Server (10.0.2.15 fuer den Gast, 10.0.2.2 als Router,
-# 10.0.2.3 als DNS) und leitet nach draussen weiter. `e1000` ist die
-# Karte, fuer die dieser Kern einen Treiber hat.
 NETDEV=()
 if [ "$netz" = ja ]; then
     NETDEV=(-netdev user,id=n0 -device e1000,netdev=n0)
-    # DIESELBEN WOERTER WIE DER STICK (tools/usbimg/build.sh, Menue 1).
-    # `nic` allein genuegt NICHT: ohne `nsvc=0 nwait=0` kommt der
-    # Netzstapel nicht hoch, und `/bin/dhcp` meldet dann woertlich
-    # `dhcp: kein Netz im Kernel` -- gemessen in genau diesem Lauf.
     APPEND="$APPEND nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp"
 fi
-# ================================================ RUNDE ECHTHARDWARE-6
-# EINE ECHTE USB-TASTATUR AN EINEM ECHTEN xHCI.
-#
-# DAS WAR DER GRUND, WARUM R1 UNTER eh5.sh NICHT ZU SEHEN WAR.
-# `eh5.sh` gab QEMU KEINEN USB-Regler. Der Kern meldet dann woertlich
 #
 #     usb: skipped
 #     tafel: 18 KEYS  D 0
 #
-# `D 0` heisst: es gibt gar keine USB-Tastatur. Getippt wurde in jenem
-# Lauf ueber den PS/2-Weg -- also ueber genau die Leitung, die auf
-# Justins Brett NICHT benutzt wird. Justins Tafel sagt `D 2`: zwei
-# USB-Geraete, die Tastatur darunter. Wer ohne xHCI misst, misst den
-# anderen Treiber und kann Justins Befund per Bauart nicht sehen.
-#
-# `qemu-xhci` + `usb-kbd` + `usb-mouse` ist die Aufstellung, die auch
-# tools/clockwork/messen.sh und tools/usbimg/merge8-schuss.sh benutzen,
-# und sie erzeugt genau das Zahlenbild, gegen das Justins Foto gelesen
-# wird.
 USBDEV=()
 if [ "$usb" = ja ]; then
     USBDEV=(-device qemu-xhci,id=x0
@@ -425,9 +307,6 @@ timeout 5400 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 ${EH_
     "${TONDEV[@]}" "${NETDEV[@]}" "${USBDEV[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 &
 PID=$!
-# GEWARTET WIRD AUF DEN SCHREIBTISCH, NICHT AUF `wm: hold`.
-# Ohne `wmhold` gibt es diese Zeile gar nicht; was den Zustand
-# "bedienbar" wirklich anzeigt, ist die Leiste bzw. der Starter.
 i=0
 while [ $i -lt 3000 ]; do
     grep -qaE 'launcher: ready|taskbar: ready|wm: dauer' "$OUT/serial.txt" 2>/dev/null && break
@@ -444,7 +323,6 @@ if [ -n "$drehbuch" ]; then
         2>&1 | tee "$OUT/fahren.log"
 fi
 
-# Beenden: erst hoeflich ueber den Monitor, dann hart.
 printf 'quit\n' | timeout 5 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1 || true
 sleep 0.5
 kill "$PID" 2>/dev/null || true
