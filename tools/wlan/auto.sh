@@ -223,6 +223,17 @@ HD="$T/hd.klar"
 has "$HD" 'fakefw: umac hdr bad short cmd=' "iwloldhdr: the fake firmware drops the short-header SCAN_CFG silently"
 has "$HD" 'diag: step=scan_cfg err=-70' "iwloldhdr: same signature as the HP (scan_cfg err=-70)"
 hasnot "$HD" 'net OrientFake ' "iwloldhdr: no network found"
+echo "-- sw: TX command switches wltxoff + wlbcbytes (bytes in the byte-count table, MH pad only, pm timeout) join like the default"
+printf 'echo ==START==\nsleep 14\ncat /proc/wlan\ncat /proc/wlan_trace\necho ==END==\n' > "$T/s.sh"
+image sw "$T/good.conf" || { bad "image sw"; }
+run sw "iwlfhtest iwlfhbind wltrace wltxoff wlbcbytes"
+SW="$T/sw.klar"
+has "$SW" 'fakeap: m4 ok' "switches on: 4-way handshake completes"
+has "$SW" 'fakefw: tx ok q4' "switches on: the fake firmware accepts the data-queue TX command (byte-count entry in either form)"
+hasnot "$SW" 'fakefw: tx bad' "switches on: no TX format violation"
+has "$SW" 'diag: dq sent=' "switches on: the data-queue counters are in /proc/wlan"
+has "$SW" ' hdata host ' "switches on: the data-queue TX command is in the register trace"
+has "$SW" 'ip=192.168.77.50 mask=255.255.255.0 gw=192.168.77.1' "switches on: lease 192.168.77.50"
 echo "-- ap: airplane mode (wlanctl radio off/on): link drops, no rejoin while off, back up when on; control without the switch"
 bash tools/sync/build.sh "$T/bin" 0 wlanctl > "$T/b2.txt" 2>&1 && ok "wlanctl builds" || { bad "wlanctl build"; tail "$T/b2.txt"; }
 air_image() { # name script

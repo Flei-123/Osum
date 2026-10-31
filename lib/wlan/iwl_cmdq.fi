@@ -7,7 +7,7 @@ import wlan.iwl_mvm_txq
 import wlan.regtrace
 
 export {
-    Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_dq_inflight, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset, rx_closed, rx_raw_valid, rb_addr, cq_set_raw,
+    Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_dq_inflight, cq_dq_wr, cq_dq_rd, cq_bc_bytes, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset, rx_closed, rx_raw_valid, rb_addr, cq_set_raw,
     CMD_ALIVE, FRAME_INVALID, FRAME_SIZE_MSK, RX_MASK,
     CQ_RB_SIZE, CQ_RB_COUNT, CQ_TFD_SIZE, CQ_TFD_COUNT, CQ_SLOT_SIZE, CQ_CMD_SLOT_SIZE, CQ_SLOTS, CQ_NOTIF_SLOT, CQ_NOTIF_SLOTS, CQ_OLD_NOTIF_SLOT, cq_set_slot_cap, cq_drops,
     cq_err_ptr, cq_uerr_ptr, cq_fw_dead, E_CQ_FWDEAD, CQ_WAIT_CMD, CQ_WAIT_NOTIF, ALIVE_SCD_OFF, ALIVE_PKT_MIN, CMD_QUEUE,
@@ -84,6 +84,7 @@ struct Cq {
     dwr: u64,
     drd: u64,
     dq_on: u64,
+    bcb: u64,
     dsent: u64,
     dreclaimed: u64,
     rx_raw: u64,
@@ -99,7 +100,7 @@ struct Cq {
 fn cq_new() -> Cq {
     var c: Cq = Cq { rx_bd: 0, rx_stts: 0, rb: 0, tfd: 0, cmdbuf: 0, kw: 0, bc: 0, notif: 0, wr: 0, rd: 0, rxr: 0, rx_wptr: 0,
         rx_on: 0, tx_on: 0, nh: 0, nt: 0, scd: 0, dropped: 0, slot_cap: CQ_NOTIF_SLOT, matched: 0,
-        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, dsent: 0, dreclaimed: 0, rx_raw: 0, scd_alive: 0, alive_cnt: 0, scd_hw: 0, stage: 0, err_ptr: 0, uerr_ptr: 0, fw_dead: 0 }
+        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, bcb: 0, dsent: 0, dreclaimed: 0, rx_raw: 0, scd_alive: 0, alive_cnt: 0, scd_hw: 0, stage: 0, err_ptr: 0, uerr_ptr: 0, fw_dead: 0 }
     return c
 }
 
@@ -154,6 +155,12 @@ fn sw_err_seen(c: *mut Cq, p: *mut iwl_probe.Probe, d: u64) -> bool {
     return true
 }
 fn cq_dq_on(c: *mut Cq) -> bool { return (*c).dq_on != 0 }
+fn cq_dq_wr(c: *mut Cq) -> u64 { return (*c).dwr }
+fn cq_dq_rd(c: *mut Cq) -> u64 { return (*c).drd }
+fn cq_bc_bytes(c: *mut Cq, on: bool) {
+    (*c).bcb = 0
+    if on { (*c).bcb = 1 }
+}
 fn cq_dq_sent(c: *mut Cq) -> u64 { return (*c).dsent }
 fn cq_dq_reclaimed(c: *mut Cq) -> u64 { return (*c).dreclaimed }
 fn cq_dq_inflight(c: *mut Cq) -> u64 { return (*c).dwr - (*c).drd }
@@ -399,7 +406,10 @@ fn cq_dq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64) -> i64 {
     let flen: u64 = iwl_le.ld16(slot, TXCMD_HDR)
     let sta: u64 = iwl_le.ld8(slot, TXCMD_HDR + 16)
     let sec: u64 = iwl_le.ld8(slot, TXCMD_HDR + 17)
-    iwl_mvm_txq.bc_store((*c).bc, iwl_mvm_txq.DATA_QUEUE, idx, iwl_mvm_txq.bc_entry(flen, sec, sta))
+    var bce: u64 = iwl_mvm_txq.bc_entry(flen, sec, sta)
+    if (*c).bcb != 0 { bce = iwl_mvm_txq.bc_entry_bytes(flen, sec, sta) }
+    iwl_mvm_txq.bc_store((*c).bc, iwl_mvm_txq.DATA_QUEUE, idx, bce)
+    if regtrace.is_on() { regtrace.rec_host(regtrace.K_HDATA, slot, len) }
     put_tfd((*c).dtfd + idx * CQ_TFD_SIZE, slot, len)
     (*c).dwr = (*c).dwr + 1
     if iwl_pwr.mac_access_get(p) != 0 {

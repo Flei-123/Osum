@@ -26,6 +26,7 @@ the Linux side (mmiotrace on the live stick, converter by W-wlantrace) writes th
 | `sram_r` | `sram` | device SRAM address | value | | folded from `HBUS_TARG_MEM_RADDR/RDAT` |
 | `sram_w` | `sram` | device SRAM address | value | | folded from `HBUS_TARG_MEM_WADDR/WDAT` |
 | `hcmd` | `host` | wide id `ggcc` (group, cmd) | payload length | `v=<ver> d=<payload hex> [t=1]` | host command sent; payload = bytes after the 4-byte header |
+| `hdata` | `host` | wide id `ggcc` of the data-queue TX command | payload length | `d=<first 256 payload bytes hex> [t=1]` | TX_CMD queued on the data queue (Osum only) |
 | `rx` | `host` | wide id `ggcc` of the packet | payload length | `d=<first 64 payload bytes hex> [t=1]` | response or notification received |
 | `dma_desc` | `dma` | descriptor index | low 32 bits of the buffer address | `ah=<hi32> l=<len 8hex> q=<queue 4hex>` | TFD/RBD written (Osum only) |
 | `irq` | `csr` | `00000008` (CSR_INT) | interrupt cause | | interrupt taken (Osum only) |

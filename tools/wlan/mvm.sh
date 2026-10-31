@@ -47,5 +47,11 @@ mut 's/iwl_le.st8(a, h + 51, tid)/iwl_le.st8(a, h + 50, tid)/' "TX_CMD tid offse
 mut 's/const OFF_STA_TYPE: u64 = 35/const OFF_STA_TYPE: u64 = 33/' "ADD_STA v10 station_type offset" iwl_mvm_sta.fi
 mut 's/const STA_LEN_V8: u64 = 48/const STA_LEN_V8: u64 = 52/' "ADD_STA v10 length" iwl_mvm_sta.fi
 mut 's/const DATA_PATH_GROUP: u64 = 5/const DATA_PATH_GROUP: u64 = 1/' "DQA_ENABLE group" iwl_mvm_txq.fi
+mut 's/iwl_le.st16(a, h + 52, pm_timeout)/iwl_le.st16(a, h + 54, pm_timeout)/' "TX_CMD pm_frame_timeout offset" iwl_mvm_tx.fi
+mut 's/const OFFLOAD_PAD: u64 = 0x2000/const OFFLOAD_PAD: u64 = 0x4000/' "TX_CMD offload_assist PAD bit" iwl_mvm_tx.fi
+mut 's/const PM_FRAME_ASSOC: u64 = 3/const PM_FRAME_ASSOC: u64 = 2/' "pm_frame_timeout for association requests" iwl_mvm_tx.fi
+mut 's/if st == SUBTYPE_ACTION { return 0 }/if st == SUBTYPE_ACTION { return 2 }/' "pm_frame_timeout for action frames" iwl_mvm_tx.fi
+mut 's/const TID_MGMT: u64 = 8/const TID_MGMT: u64 = 0/' "TX_CMD tid for management and non-QoS frames" iwl_mvm_tx.fi
+mut 's/var bytes: u64 = flen + 8/var bytes: u64 = flen + 4/' "byte-count table entry in bytes" iwl_mvm_txq.fi
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

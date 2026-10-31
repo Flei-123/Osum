@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import wlan.iwl_buf
 import wlan.iwl_le
+import wlan.frame
 
 export {
-    TX_FLG_ACK, TX_FLG_SEQ_CTL, TX_FLG_STA_RATE, TX_FLG_MH_PAD, TX_CMD_LEN, mvm_tx_cmd
+    TX_FLG_ACK, TX_FLG_SEQ_CTL, TX_FLG_STA_RATE, TX_FLG_MH_PAD, TX_CMD_LEN, OFFLOAD_PAD, TID_MGMT, mvm_tx_cmd, tx_tid_of, tx_pm_timeout_of
 }
 
 const TX_FLG_ACK: u64 = 0x8
@@ -12,10 +13,20 @@ const TX_FLG_SEQ_CTL: u64 = 0x2000
 const TX_FLG_MH_PAD: u64 = 0x100000
 
 const TX_CMD_LEN: u64 = iwl_buf.HDR + 56
+const OFFLOAD_PAD: u64 = 0x2000
+const TID_MGMT: u64 = 8
+const PM_FRAME_MGMT: u64 = 2
+const PM_FRAME_ASSOC: u64 = 3
+const SUBTYPE_ASSOC_REQ: u64 = 0
+const SUBTYPE_REASSOC_REQ: u64 = 2
+const SUBTYPE_ACTION: u64 = 13
+const LLC_ETHERTYPE_AT: u64 = 6
+const ETHERTYPE_PAE_HI: u64 = 0x88
+const ETHERTYPE_PAE_LO: u64 = 0x8E
 
 fn mvm_tx_cmd(a: u64, qid: u64, slot: u64, offload: u64, tx_flags: u64, rate: u64, sta_id: u64, sec_ctl: u64,
               rate_index: u64, key: u64, life_time: u64, scratch_phys: u64, rts_retry: u64, data_retry: u64,
-              tid: u64, frame: u64, flen: u64) -> u64 {
+              tid: u64, pm_timeout: u64, frame: u64, flen: u64) -> u64 {
     let h: u64 = iwl_buf.HDR
     iwl_le.zero(a, TX_CMD_LEN + flen)
     iwl_buf.hdr(a, 0x1C, qid, slot)
@@ -39,10 +50,34 @@ fn mvm_tx_cmd(a: u64, qid: u64, slot: u64, offload: u64, tx_flags: u64, rate: u6
     iwl_le.st8(a, h + 49, rts_retry)
     iwl_le.st8(a, h + 50, data_retry)
     iwl_le.st8(a, h + 51, tid)
+    iwl_le.st16(a, h + 52, pm_timeout)
     i = 0
     while i < flen {
         iwl_le.st8(a, TX_CMD_LEN + i, iwl_le.ld8(frame, i))
         i = i + 1
     }
     return TX_CMD_LEN + flen
+}
+
+fn tx_tid_of(frame_ptr: u64, n: usize) -> u64 {
+    let t: i64 = frame.qos_tid(frame_ptr, n)
+    if t < 0 { return TID_MGMT }
+    return t as u64
+}
+
+fn tx_pm_timeout_of(frame_ptr: u64, n: usize, hdr_len: u64) -> u64 {
+    let fcv: u64 = frame.fc(frame_ptr, n)
+    let kind: u64 = frame.art(fcv)
+    if kind == frame.KIND_MGMT {
+        let st: u64 = frame.untertyp(fcv)
+        if st == SUBTYPE_ASSOC_REQ || st == SUBTYPE_REASSOC_REQ { return PM_FRAME_ASSOC }
+        if st == SUBTYPE_ACTION { return 0 }
+        return PM_FRAME_MGMT
+    }
+    if kind == frame.KIND_DATA && !frame.geschuetzt(fcv) && hdr_len != 0 && (n as u64) >= hdr_len + 8 {
+        if iwl_le.ld8(frame_ptr, hdr_len + LLC_ETHERTYPE_AT) == ETHERTYPE_PAE_HI && iwl_le.ld8(frame_ptr, hdr_len + LLC_ETHERTYPE_AT + 1) == ETHERTYPE_PAE_LO {
+            return PM_FRAME_MGMT
+        }
+    }
+    return 0
 }
