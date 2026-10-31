@@ -1,6 +1,6 @@
 # kernel/ui/wm.fi split plan
 
-State: wm.fi had 23996 lines, 851 fns, 573 consts, 166 statics (1590 items). Cut 1 (terminal self-tests) is done: wm.fi 23263, `kernel/ui/wm/vtest.fi` 699.
+State: wm.fi had 23996 lines, 851 fns, 573 consts, 166 statics (1590 items). Cut 1 (terminal self-tests) done: `kernel/ui/wm/vtest.fi` 699. Cut 2 done: `wm/wmlayout.fi` 816 (401 items: all S_/W_/K_/F_/E_/L_/DK_/FM_/CAP_ consts, WIN_BYTES, gs/ss/wat/wg/wsv) and `wm/wmgeom.fi` 133 (23 items: uisc, title_h, border, grip, cap_w, close_w, max_w/h, form, FORM_SLOTS, ...); wm.fi 21643.
 
 ## Facts (measured with tools/structure)
 - Item call graph is a DAG. Only cycle: `backlum` <-> `bl_measure`. So every cut is solvable by moving items, no redesign needed.
@@ -40,8 +40,8 @@ State: wm.fi had 23996 lines, 851 fns, 573 consts, 166 statics (1590 items). Cut
 | base (consts, gs/ss, accessors, metrics) | 2088 | 987 | all |
 
 ## Target layout (kernel/ui/wm/*.fi, tree of imports, lowest first)
-1. `layout.fi` - all `S_*`, `W_*`, `K_*`, `F_*`, `E_*`, `L_*`, `DK_*`, `FM_*`, `CAP_*` constants, `gs/ss`, window table accessors (`wat`, `wg`, `wsv`, `win_*`). Mirror in `tools/arch/memmap.py` (reads offsets).
-2. `geom.fi` - `uisc`, `title_h`, `border`, `grip`, `outer_*`, `work_*` getters, `hd_*` getters.
+1. `wmlayout.fi` (DONE; named wmlayout because Firn module names are global by last path segment: `layout`/`geom` collide with spirv.layout / touchgest.geom) - all `S_*`, `W_*`, `K_*`, `F_*`, `E_*`, `L_*`, `DK_*`, `FM_*`, `CAP_*` constants, `gs/ss`, window table accessors (`wat`, `wg`, `wsv`, `win_*`). Mirror in `tools/arch/memmap.py` (reads offsets).
+2. `wmgeom.fi` (DONE) - `uisc`, `title_h`, `border`, `grip`, `cap_w`, `close_w`, `max_w/h`, `form`. `outer_*`, `work_*`, `hd_*` stay in wm.fi (sysgui uses work_*; outer_* need `deko`/`iny`).
 3. `draw.fi`, `shadow.fi`, `blur.fi`, `glass.fi` - pixel primitives and effects (no window logic).
 4. `cursor.fi`, `anim.fi`, `measure.fi`, `overlay.fi`, `pguard.fi`, `mag.fi`.
 5. `core.fi` - damage, regions, `valid`, `create/destroy`, focus and z-order, `raise_win` (what features need from the server).
@@ -57,7 +57,7 @@ State: wm.fi had 23996 lines, 851 fns, 573 consts, 166 statics (1590 items). Cut
 
 ## Order of cuts (each: pure move, no behaviour, own gate run)
 1. DONE `wm/vtest.fi` (terminal self-tests, top of DAG, only kgui calls them, 13 fns, 23 exports added).
-2. `wm/layout.fi` + `geom.fi` (unlocks all others; touches every const reference; needs `memmap.py` + `wm.<const>` users in kgui/gfx/wig/sysgui checked, tools greps).
+2. DONE `wm/wmlayout.fi` + `wmgeom.fi`: `tools/structure/requalify.py` qualifies every use in wm.fi (`wmlayout.S_X`), prunes the export block, retargets kgui/gfx/vtest; sysgui stays untouched, so the 13 consts it uses (E_AXPRESS E_CLOSE E_DOWN E_KEY E_UP F_HIDDEN F_NODECO K_TERM L_DESK L_FLOAT L_MAX L_NORMAL L_TOAST) stay as `const X: u64 = wmlayout.X` aliases in wm.fi (drop them when sysgui may change). Locals named like a moved item (`form`) are skipped by hand: revert the qualification inside that fn. Tools: memmap.py W_OFF -> wmlayout.fi, a11y/fields.py E_AXPRESS, gates.tsv `kernel/ui/wm/*` added next to every `kernel/ui/wm.fi`.
 3. `measure`, `pguard`, `shadow`, `overlay`, `mag` (few incoming).
 4. `draw`, `blur`, `glass`, `cursor`, `anim`.
 5. `core` + hook table, then `tabs`, `trust`, `switcher`.
