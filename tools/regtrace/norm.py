@@ -40,7 +40,7 @@ def to_entries(recs, keep):
         if r.kind not in keep:
             continue
         extra = host_extra(r) if r.space == "host" else ""
-        out.append(Entry(r.kind, r.space, r.off, r.val, 1, extra, r.line, r.seq))
+        out.append(Entry(r.kind, r.space, r.off, r.val, 1 + int(r.ctx.get("x", "0"), 16), extra, r.line, r.seq))
     return out
 
 
@@ -48,14 +48,16 @@ def fold_polls(entries):
     out = []
     for e in entries:
         last = out[-1] if out else None
-        same = last is not None and e.kind in READ_KINDS and last.space == e.space and last.off == e.off \
+        is_read = e.kind in READ_KINDS
+        same = last is not None and is_read and last.space == e.space and last.off == e.off \
             and (last.kind == e.kind or (last.kind == "poll" and last.extra == e.kind))
-        if same:
-            if last.kind != "poll":
-                out[-1] = Entry("poll", last.space, last.off, e.val, 2, last.kind, last.line, last.seq)
-            else:
-                last.count += 1
-                last.val = e.val
+        if same and last.kind == "poll":
+            last.count += e.count
+            last.val = e.val
+        elif same:
+            out[-1] = Entry("poll", last.space, last.off, e.val, last.count + e.count, last.kind, last.line, last.seq)
+        elif is_read and e.count > 1:
+            out.append(Entry("poll", e.space, e.off, e.val, e.count, e.kind, e.line, e.seq))
         else:
             out.append(e)
     return out

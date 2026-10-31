@@ -30,6 +30,7 @@ the Linux side (mmiotrace on the live stick, converter by W-wlantrace) writes th
 | `dma_desc` | `dma` | descriptor index | low 32 bits of the buffer address | `ah=<hi32> l=<len 8hex> q=<queue 4hex>` | TFD/RBD written (Osum only) |
 | `irq` | `csr` | `00000008` (CSR_INT) | interrupt cause | | interrupt taken (Osum only) |
 
+- `x=<hex n>` on `r32` means the identical read (same offset, same value) repeated n more times in a row (Osum compresses idle polling in the ring; one line stands for n+1 reads).
 - `t=1` means the payload was truncated; the real length is in `value`.
 - Producers emit only the physical level (`r32`/`w32` on BAR0). `prph_*` and `sram_*` are folded by the parser from the
   `HBUS_TARG_*` register pairs (CSR 0x444 waddr, 0x448 raddr, 0x44c wdat, 0x450 rdat for prph; 0x410 waddr, 0x40c raddr, 0x418 wdat, 0x41c rdat for mem; mem data accesses auto-increment by 4), so Linux and Osum

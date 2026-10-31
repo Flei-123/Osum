@@ -61,6 +61,14 @@ def unit_tests():
     check("diff: identical traces equal", first_diff(p, normalize(trace("w32 csr 00000020 00000001", "hcmd host 010c 00000004 v=0 d=01020304", "w32 csr 00000024 00000008"))) == -1)
 
 
+def x_tests():
+    t = trace("r32 csr 00000008 00000000 x=2", "r32 csr 00000008 00000000", "w32 csr 00000024 00000001")
+    n = normalize(t)
+    check("x=: run-length count folds into poll", [text(e) for e in n] == ["poll csr 00000008 until 00000000", "w32 csr 00000024 00000001"] and n[0].count == 4, str([(text(e), e.count) for e in n]))
+    one = normalize(trace("r32 csr 00000008 00000000", "w32 csr 00000024 00000001"))
+    check("x=: single read equals compressed run in diff", first_diff(n, one) == -1)
+
+
 def firn_dump_tests(d):
     def load(name):
         with open(os.path.join(d, name), "r", encoding="utf-8") as f:
@@ -80,6 +88,12 @@ def firn_dump_tests(d):
     check("firn: ring overflow keeps the newest records", ov.startswith("# regtrace v1 osum first_seq=32 records=8") and len(orecs) == 8, ov.splitlines()[0])
     check("firn: overflow sequence contiguous", [r.seq for r in orecs] == list(range(32, 40)), str([r.seq for r in orecs]))
     check("firn: overflow last value is the newest", orecs[-1].val == 0x13 and orecs[-2].val == 0x13, str(orecs[-2:]))
+    rp = load("repeat.txt")
+    rrecs = parse_text(rp)
+    check("firn: identical reads compress to one record with x=", len(rrecs) == 4 and rrecs[1].ctx.get("x") == "0000012b", rp)
+    check("firn: repeat header counts records not reads", rp.startswith("# regtrace v1 osum first_seq=0 records=4"), rp.splitlines()[0])
+    rn = normalize(rrecs)
+    check("firn: compressed polls normalize like the expanded loop", [text(e) for e in rn] == ["w32 csr 00000024 00000008", "poll csr 00000008 until 00000004", "w32 csr 00000024 00000008"], str([text(e) for e in rn]))
     chunked = load("on.txt")
     full = load("on_full.txt")
     check("firn: chunked read equals a single read", chunked == full)
@@ -87,6 +101,7 @@ def firn_dump_tests(d):
 
 if __name__ == "__main__":
     unit_tests()
+    x_tests()
     if len(sys.argv) > 1:
         firn_dump_tests(sys.argv[1])
     print("RESULT pass=%d fail=%d" % (passed, failed))
