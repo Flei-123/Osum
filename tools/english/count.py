@@ -45,7 +45,7 @@ from firnlex import spans     # noqa: E402
 AMBIG = {"bin", "die", "was", "tag", "will", "man", "rest", "stand", "fest", "tut", "kon", "mit", "mal",
          "last", "laut", "typ", "ort", "nach", "alt", "frei", "voll", "eng", "roh", "kern", "wer", "von",
          "hin", "her", "bis", "sich", "rund", "fund", "punkt", "satz", "bund", "ende", "ganz", "aus",
-         "auf", "bei", "das", "der", "ein", "eine", "oder", "und", "vor", "wie", "zu", "an", "im", "ob"}
+         "auf", "bei", "das", "der", "ein", "eine", "oder", "und", "vor", "wie", "zu", "an", "im", "ob", "ist", "symbol"}
 EXTRA = {"zeiger", "breite", "hoehe", "gross", "groesse", "fenster", "schrift", "farbe", "knopf", "feld",
          "meldung", "pruefung", "laenge", "zaehler", "gerat", "geraet", "geraete", "papierkorb", "drucke",
          "dateiop", "dispctl", "praesenz", "tresor", "sperrwache", "netzmess", "kontocli", "auswerfen",
