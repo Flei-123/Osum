@@ -9,6 +9,7 @@ import vault.vbuild
 import vault.vrand
 import vaultd.vdsess
 import vaultd.vdwire
+import vaultd.vdask
 import vaultd.vdreply
 
 export { op_list, op_find, op_put, op_delete, op_reveal, op_status_counts }
@@ -212,28 +213,34 @@ fn op_delete(s: *mut vdsess.Session, root: str, user: str, req: str, now_s: u64,
     rt.buf_free(&idb)
 }
 
-fn op_reveal(s: *mut vdsess.Session, req: str, out: *mut rt.Buf) {
+fn op_reveal(s: *mut vdsess.Session, req: str, confirm: fn(u64, u64, u64, u64) -> u64,
+    out: *mut rt.Buf) {
     var idb: rt.Buf = rt.buf_new()
-    var pw: rt.Buf = rt.buf_new()
-    if !vdwire.hex_get(req, "id", &idb) || rt.buf_len(&idb) != vrecord.ID_LEN
-        || !vdwire.hex_get(req, "pw", &pw) {
+    if !vdwire.hex_get(req, "id", &idb) || rt.buf_len(&idb) != vrecord.ID_LEN {
         vdreply.fail(out, "arg")
     } else {
-        let rc: i32 = vdsess.verify_pw(s, rt.buf_ptr(&pw), rt.buf_len(&pw))
-        if rc != vdsess.R_OK {
-            vdreply.fail_rc(out, rc, 0)
+        let p: u64 = vdsess.store_ptr(s)
+        let n: usize = vdsess.store_len(s)
+        var a: usize = 0
+        var b: usize = 0
+        if !vstore.store_find(p, n, rt.buf_ptr(&idb), &a, &b)
+            || vrecord.rec_type(p, n, a) != vrecord.T_LOGIN || !vrecord.is_live(p, n, a) {
+            vdreply.fail(out, "notfound")
         } else {
-            let p: u64 = vdsess.store_ptr(s)
-            let n: usize = vdsess.store_len(s)
-            var a: usize = 0
-            var b: usize = 0
-            if !vstore.store_find(p, n, rt.buf_ptr(&idb), &a, &b)
-                || vrecord.rec_type(p, n, a) != vrecord.T_LOGIN || !vrecord.is_live(p, n, a) {
-                vdreply.fail(out, "notfound")
+            var it: cborread.Item = cborread.item_zero()
+            if vrecord.field(p, n, a, vrecord.K_PASSWORD, &it) && it.len > 700 {
+                vdreply.fail(out, "limit")
             } else {
-                var it: cborread.Item = cborread.item_zero()
-                if vrecord.field(p, n, a, vrecord.K_PASSWORD, &it) && it.len > 700 {
-                    vdreply.fail(out, "limit")
+                var origin: rt.Buf = rt.buf_new()
+                var user: rt.Buf = rt.buf_new()
+                vdask.first_origin(p, n, a, &origin)
+                vdask.field_text(p, n, a, vrecord.K_USERNAME, &user)
+                let answer: u64 = confirm(rt.buf_ptr(&origin), rt.buf_len(&origin) as u64,
+                    rt.buf_ptr(&user), rt.buf_len(&user) as u64)
+                rt.buf_free(&origin)
+                rt.buf_free(&user)
+                if answer != vdask.ANSWER_ALLOW {
+                    vdreply.fail(out, vdask.deny_code(answer))
                 } else {
                     vdreply.ok(out)
                     vdwire.put_text(out, "username=")
@@ -246,6 +253,5 @@ fn op_reveal(s: *mut vdsess.Session, req: str, out: *mut rt.Buf) {
             }
         }
     }
-    wipe_buf(&pw)
     rt.buf_free(&idb)
 }
