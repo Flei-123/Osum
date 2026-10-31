@@ -58,7 +58,7 @@ State: wm.fi had 23996 lines, 851 fns, 573 consts, 166 statics (1590 items). Cut
 ## Order of cuts (each: pure move, no behaviour, own gate run)
 1. DONE `wm/vtest.fi` (terminal self-tests, top of DAG, only kgui calls them, 13 fns, 23 exports added).
 2. DONE `wm/wmlayout.fi` + `wmgeom.fi`: `tools/structure/requalify.py` qualifies every use in wm.fi (`wmlayout.S_X`), prunes the export block, retargets kgui/gfx/vtest; sysgui stays untouched, so the 13 consts it uses (E_AXPRESS E_CLOSE E_DOWN E_KEY E_UP F_HIDDEN F_NODECO K_TERM L_DESK L_FLOAT L_MAX L_NORMAL L_TOAST) stay as `const X: u64 = wmlayout.X` aliases in wm.fi (drop them when sysgui may change). Locals named like a moved item (`form`) are skipped by hand: revert the qualification inside that fn. Tools: memmap.py W_OFF -> wmlayout.fi, a11y/fields.py E_AXPRESS, gates.tsv `kernel/ui/wm/*` added next to every `kernel/ui/wm.fi`.
-3. `measure`, `pguard`, `shadow`, `overlay`, `mag` (few incoming).
+3. DONE (cut 3) `wm/wmmeasure.fi` 186 (20 items), `wm/wmbase.fi` 514 (41 items: low layer win_x/y, inx/iny, outer_*, damage*, rgn_*, focus, valid, panel_win, blur_touch; wm.fi keeps 1-line wrappers for the 10 fns sysgui uses), `wm/wmshadow.fi` 336, `wm/wmoverlay.fi` 572, `wm/wmmag.fi` 150 (`say_mag` stays in wm.fi for sysgui). wm.fi 21644 -> 19508. `pguard` NOT cut: pg_* calls compose_rect/cp_on/time_us (closure 285 items) and compose calls pg_*; cut it together with the compositor.
 4. `draw`, `blur`, `glass`, `cursor`, `anim`.
 5. `core` + hook table, then `tabs`, `trust`, `switcher`.
 6. `term/*` (2531 lines), then `tiling/*`.
