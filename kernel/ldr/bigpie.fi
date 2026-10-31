@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import sched.proc
+import fs.fs
+
+export {
+    HIGH_BASE, OK, E_RANGE, E_SEGFILE, E_MEMSZ, E_ALIGN, E_NOMEM, E_READ, E_OVERLAP,
+    needs_high, in_high, map_segment
+}
+
+const PAGE: u64 = 4096
+const PAGE_MASK: u64 = 4095
+const PF_X: u64 = 1
+const PF_W: u64 = 2
+
+const HIGH_BASE: u64 = 0x80000000
+const HIGH_SPAN: u64 = 0x40000000
+
+const OK: u64 = 0
+const E_RANGE: u64 = 1
+const E_SEGFILE: u64 = 2
+const E_MEMSZ: u64 = 3
+const E_ALIGN: u64 = 4
+const E_NOMEM: u64 = 5
+const E_READ: u64 = 6
+const E_OVERLAP: u64 = 7
+
+fn needs_high(extent: u64, bias: u64, limit: u64) -> bool {
+    if limit <= bias {
+        return true
+    }
+    return extent > limit - bias
+}
+
+fn in_high(bias: u64) -> bool {
+    return bias >= proc.LAZY_BASE
+}
+
+fn mark_page(state: u64, t: u64, addr: u64, flags: u64, ino: u64, file_page: u64, backed: bool) -> bool {
+    let wr: bool = (flags & PF_W) != 0
+    let ex: bool = (flags & PF_X) != 0
+    if backed {
+        return proc.lazy_mark_file(state, t, addr, true, wr, ex, ino, file_page)
+    }
+    return proc.lazy_mark(state, t, addr, true, wr, ex)
+}
+
+fn edge_page(state: u64, t: u64, ino: u64, addr: u64, flags: u64, file_off: u64, have: u64) -> u64 {
+    let wr: bool = (flags & PF_W) != 0
+    let ex: bool = (flags & PF_X) != 0
+    if !proc.page_free(state, t, addr) {
+        return E_OVERLAP
+    }
+    let frame: u64 = proc.map_page(state, t, addr, wr, ex)
+    if frame == 0 {
+        return E_NOMEM
+    }
+    var i: u64 = 0
+    while i < PAGE {
+        kstate.set8(frame + i, 0 as u8)
+        i = i + 1
+    }
+    if have > 0 {
+        let scratch: u64 = state + kstate.LOAD_OFF
+        if fs.read_at(state, ino, file_off, scratch, have) != have {
+            return E_READ
+        }
+        var j: u64 = 0
+        while j < have {
+            kstate.set8(frame + j, kstate.get8(scratch + j) as u8)
+            j = j + 1
+        }
+    }
+    return OK
+}
+
+fn map_segment(state: u64, t: u64, ino: u64, file_size: u64, bias: u64,
+    vraw: u64, off: u64, filesz: u64, memsz: u64, flags: u64) -> u64 {
+    if vraw > HIGH_SPAN || memsz > HIGH_SPAN {
+        return E_RANGE
+    }
+    if filesz > memsz {
+        return E_MEMSZ
+    }
+    if off > file_size || file_size - off < filesz {
+        return E_SEGFILE
+    }
+    let vaddr: u64 = vraw + bias
+    let skew: u64 = vaddr & PAGE_MASK
+    if skew != (off & PAGE_MASK) {
+        return E_ALIGN
+    }
+    if vaddr < proc.LAZY_BASE || vaddr + memsz >= proc.LAZY_TOP {
+        return E_RANGE
+    }
+    let first: u64 = vaddr - skew
+    let span: u64 = memsz + skew
+    let pages: u64 = (span + PAGE_MASK) / PAGE
+    let file_first_page: u64 = off / PAGE
+    let data: u64 = filesz + skew
+    var k: u64 = 0
+    while k < pages {
+        let addr: u64 = first + k * PAGE
+        let page_lo: u64 = k * PAGE
+        if page_lo >= data {
+            if !mark_page(state, t, addr, flags, 0, 0, false) {
+                return E_OVERLAP
+            }
+        } else if page_lo + PAGE <= data || span <= data {
+            if !mark_page(state, t, addr, flags, ino, file_first_page + k, true) {
+                return E_OVERLAP
+            }
+        } else {
+            let r: u64 = edge_page(state, t, ino, addr, flags, (file_first_page + k) * PAGE, data - page_lo)
+            if r != OK {
+                return r
+            }
+        }
+        k = k + 1
+    }
+    return OK
+}

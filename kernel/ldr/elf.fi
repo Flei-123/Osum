@@ -65,6 +65,7 @@ import pwr.pmon
 import sched.ctr
 import sync.atomic
 import ui.ax
+import ldr.bigpie
 
 export {
     spawn, build, STACK_ENV_MAXN, lock_enter, lock_leave, load, load_at, say_reason, errno_of,
@@ -522,6 +523,79 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     return R_OK
 }
 
+fn high_reason(code: u64) -> u64 {
+    if code == bigpie.E_SEGFILE {
+        return R_SEGFILE
+    }
+    if code == bigpie.E_MEMSZ {
+        return R_MEMSZ
+    }
+    if code == bigpie.E_ALIGN {
+        return R_ALIGN
+    }
+    if code == bigpie.E_NOMEM {
+        return R_NOMEM
+    }
+    if code == bigpie.E_READ {
+        return R_READ
+    }
+    if code == bigpie.E_OVERLAP {
+        return R_OVERLAP
+    }
+    return R_RANGE
+}
+
+fn place_segment(state: u64, t: u64, ino: u64, ph: u64, size: u64, bias: u64) -> u64 {
+    if !bigpie.in_high(bias) {
+        return segment(state, t, ino, ph, size, bias)
+    }
+    let code: u64 = bigpie.map_segment(state, t, ino, size, bias, get64(ph + P_VADDR), get64(ph + P_OFFSET),
+        get64(ph + P_FILESZ), get64(ph + P_MEMSZ), kstate.get32(ph + P_FLAGS))
+    if code == bigpie.OK {
+        return R_OK
+    }
+    return high_reason(code)
+}
+
+fn entry_runnable(state: u64, t: u64, h: u64, n: u64, bias: u64) -> bool {
+    let entry: u64 = get64(h + E_ENTRY)
+    if !bigpie.in_high(bias) {
+        return proc.page_exec(state, t, entry + bias)
+    }
+    var seg: u64 = 0
+    while seg < n {
+        let ph: u64 = h + EHSIZE + seg * PHENTSIZE
+        if kstate.get32(ph + P_TYPE) == PT_LOAD && (kstate.get32(ph + P_FLAGS) & PF_X) != 0 {
+            let lo: u64 = get64(ph + P_VADDR)
+            let len: u64 = get64(ph + P_FILESZ)
+            if entry >= lo && entry - lo < len {
+                return true
+            }
+        }
+        seg = seg + 1
+    }
+    return false
+}
+
+fn image_extent(state: u64) -> u64 {
+    let h: u64 = head(state)
+    let n: u64 = kstate.get16(h + E_PHNUM)
+    var top: u64 = 0
+    var seg: u64 = 0
+    while seg < n {
+        let ph: u64 = h + EHSIZE + seg * PHENTSIZE
+        if kstate.get32(ph + P_TYPE) == PT_LOAD {
+            let lo: u64 = get64(ph + P_VADDR)
+            let len: u64 = get64(ph + P_MEMSZ)
+            if lo < proc.IMAGE_END && len < proc.IMAGE_END && lo + len > top {
+                top = lo + len
+            }
+        }
+        seg = seg + 1
+    }
+    return top
+}
+
 fn fill_bytes(p: u64, n: u64, v: u64) {
     var i: u64 = 0
     while i < n {
@@ -575,7 +649,7 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
         let ph: u64 = h + EHSIZE + seg * PHENTSIZE
         if kstate.get32(ph + P_TYPE) == PT_LOAD {
             if get64(ph + P_MEMSZ) > 0 {
-                let bad: u64 = segment(state, t, ino, ph, size, bias)
+                let bad: u64 = place_segment(state, t, ino, ph, size, bias)
                 if bad != R_OK {
                     return bad
                 }
@@ -611,7 +685,7 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
     // The last check, and it is the one that catches a file whose header
     // and whose segments each look fine on their own: `e_entry` has to
     // land on a page that was really mapped and is really executable.
-    if !proc.page_exec(state, t, get64(h + E_ENTRY) + bias) {
+    if !entry_runnable(state, t, h, n, bias) {
         return R_ENTRY
     }
     kstate.set(state, kstate.ELF_BYTES, bytes)
@@ -1640,6 +1714,13 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     var bias: u64 = 0
     if ist_dyn {
         bias = PIE_BASE
+        var window_end: u64 = proc.IMAGE_END
+        if braucht_lader {
+            window_end = INTERP_BASE
+        }
+        if bigpie.needs_high(image_extent(state), PIE_BASE, window_end) {
+            bias = bigpie.HIGH_BASE
+        }
     }
     let r: u64 = load_at(state, t, ino, bias)
     if r != R_OK {
