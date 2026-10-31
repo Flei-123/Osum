@@ -98,6 +98,7 @@ OBERFLAECHE = [
     "kernel/user/wlibc.fi",
     "kernel/user/msg.fi",
     "kernel/ui/wm.fi",
+    "kernel/ui/wm/wmtrust.fi",
 ]
 
 # Wo AUSSERDEM gesucht wird -- zum BERICHTEN, nicht zum Scheitern.
