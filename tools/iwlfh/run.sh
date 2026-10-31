@@ -187,7 +187,7 @@ else
     echo "  (no pinned WLAN_8265_FW: real-blob runs skipped)"
 fi
 
-printf 'echo ==START==\ncat /proc/wlan\ncat /proc/wlanpoll\ncat /proc/wlanirq\necho ==END==\n' > "$T/s2.sh"
+printf 'echo ==START==\ncat /proc/wlan\ncat /proc/wlanpoll\ncat /proc/wlanirq\ncat /proc/wlan_trace\necho ==END==\n' > "$T/s2.sh"
 echo "-- L: INIT stage over the command queue (NVM, PHY_CFG, calibration, INIT_COMPLETE), RT replay, /proc/wlan"
 python3 tools/osum/mkfs.py build "$T/twoc.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
     /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" "/t/s.sh=$T/s2.sh" "$FWPATH=$T/blobs/two.bin" > "$T/twoc.mkfs" 2>&1 || bad "image twoc"
@@ -211,6 +211,15 @@ has "$L1" 'nvm=ok bytes=200 secs=3' "/proc/wlan: NVM read (3 sections incl. MAC 
 has "$L1" 'calib=4 bytes=24 replayed=4' "/proc/wlan: 4 calibration results collected and replayed"
 has "$L1" 'last_cmd=0x6a last_notif=0x04' "/proc/wlan: last command PHY_CFG, last notification INIT_COMPLETE"
 has "$L1" 'alive=yes init_alive=yes rt_alive=yes' "/proc/wlan: both ALIVEs seen"
+hasnot "$L1" '# regtrace' "regtrace: trace off -> /proc/wlan_trace is empty (no buffer, no header)"
+runc ltr "iwlfhtest wltrace"
+LTR="$T/ltr.klar"
+has "$LTR" '# regtrace v1 osum first_seq=0 records=' "regtrace: wltrace on -> header with records"
+has "$LTR" ' w32 csr 00000024 ' "regtrace: CSR write recorded"
+has "$LTR" ' r32 csr 00000024 ' "regtrace: CSR read recorded"
+has "$LTR" ' hcmd host 006a ' "regtrace: PHY_CFG host command recorded"
+has "$LTR" ' dma_desc dma ' "regtrace: TFD descriptor recorded"
+has "$LTR" 'phase=ready' "regtrace: driver still reaches phase=ready with the trace on"
 runc lb "iwlfhtest iwlfhbigcal"
 LB="$T/lb.klar"
 has "$LB" 'iwl: boot2 init nvm rc=0' "real-shaped calibration (CFG 20, NCH 2600, 4 PAPD 1312 type 4, 8 TXP type 5 incl. group 7 len 2056 as seen on the HP, 1 unused type 3): INIT stage succeeds"

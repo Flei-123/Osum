@@ -27,12 +27,12 @@ the Linux side (mmiotrace on the live stick, converter by W-wlantrace) writes th
 | `sram_w` | `sram` | device SRAM address | value | | folded from `HBUS_TARG_MEM_WADDR/WDAT` |
 | `hcmd` | `host` | wide id `ggcc` (group, cmd) | payload length | `v=<ver> d=<payload hex> [t=1]` | host command sent; payload = bytes after the 4-byte header |
 | `rx` | `host` | wide id `ggcc` of the packet | payload length | `d=<first 64 payload bytes hex> [t=1]` | response or notification received |
-| `dma_desc` | `dma` | descriptor index | low 32 bits of the buffer address | `ah=<hi32> l=<len hex> q=<queue hex>` | TFD/RBD written (Osum only) |
+| `dma_desc` | `dma` | descriptor index | low 32 bits of the buffer address | `ah=<hi32> l=<len 8hex> q=<queue 4hex>` | TFD/RBD written (Osum only) |
 | `irq` | `csr` | `00000008` (CSR_INT) | interrupt cause | | interrupt taken (Osum only) |
 
 - `t=1` means the payload was truncated; the real length is in `value`.
 - Producers emit only the physical level (`r32`/`w32` on BAR0). `prph_*` and `sram_*` are folded by the parser from the
-  `HBUS_TARG_*` register pairs (CSR 0x440/0x444/0x448/0x44c prph, 0x40c/0x410/0x418/0x41c mem), so Linux and Osum
+  `HBUS_TARG_*` register pairs (CSR 0x444 waddr, 0x448 raddr, 0x44c wdat, 0x450 rdat for prph; 0x410 waddr, 0x40c raddr, 0x418 wdat, 0x41c rdat for mem; mem data accesses auto-increment by 4), so Linux and Osum
   normalize identically. Address flags in the upper bits (`3<<24` dword flag) are masked.
 - Records that exist on one side only (`dma_desc`, `irq`, ...) are removed by `normalize --keep` (default keeps
   `r32 w32 prph_* sram_* hcmd`).

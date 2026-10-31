@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import mm.mem
+import fs.vfs
+import net.inet
+import wlan.regtrace
+
+export { sync, size, read }
+
+const RING_PAGES: u64 = 128
+const CONF_CAP: u64 = 512
+
+static mut wt_ring: u64 = 0
+static mut wt_path: [u8; 15] = "/etc/wlan.conf\0"
+static mut wt_conf: [u8; 520] = [0 as u8; 520]
+static mut wt_key: [u8; 8] = "trace=1\0"
+
+fn clock(ctx: u64) -> u64 {
+    return inet.us(ctx)
+}
+
+fn conf_len(state: u64) -> u64 {
+    let m: u64 = vfs.mount_for(state, (&wt_path[0]) as u64)
+    if m >= vfs.MAX_MNT { return 0 }
+    let node: u64 = vfs.node_for(state, m, (&wt_path[0]) as u64)
+    if node == 0 { return 0 }
+    let n: u64 = vfs.v_read(state, m, node, 0, (&wt_conf[0]) as u64, CONF_CAP)
+    if n > CONF_CAP { return 0 }
+    return n
+}
+
+fn line_is_key(n: u64, at: u64) -> bool {
+    var i: u64 = 0
+    while wt_key[i as usize] != 0 as u8 {
+        if at + i >= n { return false }
+        if wt_conf[(at + i) as usize] != wt_key[i as usize] { return false }
+        i = i + 1
+    }
+    if at + i < n {
+        let c: u8 = wt_conf[(at + i) as usize]
+        return c == 10 as u8 || c == 13 as u8 || c == 32 as u8
+    }
+    return true
+}
+
+fn conf_wants(state: u64) -> bool {
+    let n: u64 = conf_len(state)
+    var at: u64 = 0
+    var found: bool = false
+    while at < n {
+        if line_is_key(n, at) { found = true }
+        while at < n && wt_conf[at as usize] != 10 as u8 { at = at + 1 }
+        at = at + 1
+    }
+    var i: u64 = 0
+    while i < 520 {
+        wt_conf[i as usize] = 0 as u8
+        i = i + 1
+    }
+    return found
+}
+
+fn sync(state: u64) {
+    var want: bool = kstate.mode_on(state, kstate.M_WLTRACE)
+    if !want && !regtrace.is_on() { want = conf_wants(state) }
+    if want && !regtrace.is_on() {
+        if wt_ring == 0 { wt_ring = mem.frame_run(state, RING_PAGES) }
+        if wt_ring == 0 { return }
+        regtrace.set_clock(clock, state)
+        let _ok: bool = regtrace.enable(wt_ring, RING_PAGES * 4096)
+        return
+    }
+    if !want && regtrace.is_on() && !kstate.mode_on(state, kstate.M_WLTRACE) {
+        regtrace.disable()
+    }
+}
+
+fn size(state: u64) -> u64 {
+    return regtrace.size()
+}
+
+fn read(state: u64, off: u64, dst: u64, len: u64) -> u64 {
+    return regtrace.read(off, dst, len)
+}

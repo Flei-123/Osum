@@ -1,0 +1,290 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_le
+import wlan.iwl_w
+
+export {
+    enable, disable, is_on, set_clock, record_count, first_seq, slots_cap,
+    rec_reg, rec_host, rec_dma, rec_irq, size, read,
+    K_R32, K_W32, K_HCMD, K_RX, K_DMA, K_IRQ
+}
+
+const SLOT: u64 = 32
+const DATA_PER_SLOT: u64 = 24
+const K_R32: u64 = 0
+const K_W32: u64 = 1
+const K_HCMD: u64 = 2
+const K_RX: u64 = 3
+const K_DMA: u64 = 4
+const K_IRQ: u64 = 5
+const K_DATA: u64 = 255
+const S_CSR: u64 = 0
+const S_HOST: u64 = 1
+const S_DMA: u64 = 2
+const HCMD_CAP: u64 = 256
+const RX_CAP: u64 = 64
+const HDR_LEN: u64 = 4
+const LINE_CAP: u64 = 768
+const CSR_INT: u64 = 8
+
+
+static mut KIND_NAMES: [u8; 29] = "r32\0w32\0hcmd\0rx\0dma_desc\0irq\0"
+static mut SPACE_NAMES: [u8; 13] = "csr\0host\0dma\0"
+static mut D_KEY: [u8; 3] = "d=\0"
+static mut V_KEY: [u8; 3] = "v=\0"
+static mut T_KEY: [u8; 5] = " t=1\0"
+static mut AH_KEY: [u8; 4] = "ah=\0"
+static mut L_KEY: [u8; 4] = "l=\0\0"
+static mut Q_KEY: [u8; 3] = "q=\0"
+static mut HEAD_KEY: [u8; 22] = "# regtrace v1 osum\0\0\0\0"
+static mut FS_KEY: [u8; 12] = " first_seq=\0"
+static mut REC_KEY: [u8; 10] = " records=\0"
+static mut CAP_KEY: [u8; 12] = " cap_slots=\0"
+static mut tr_on: u64 = 0
+static mut tr_base: u64 = 0
+static mut tr_slots: u64 = 0
+static mut tr_head: u64 = 0
+static mut tr_seq: u64 = 0
+static mut tr_clk_fn: u64 = 0
+static mut tr_clk_ctx: u64 = 0
+
+fn is_on() -> bool { return tr_on != 0 }
+
+fn set_clock(now: fn(u64) -> u64, ctx: u64) {
+    tr_clk_fn = now as u64
+    tr_clk_ctx = ctx
+}
+
+fn enable(base: u64, bytes: u64) -> bool {
+    if base == 0 || bytes < SLOT * 8 { return false }
+    tr_slots = bytes / SLOT
+    tr_base = base
+    tr_head = 0
+    tr_seq = 0
+    tr_on = 1
+    return true
+}
+
+fn disable() { tr_on = 0 }
+
+fn slots_cap() -> u64 { return tr_slots }
+
+fn slot_at(i: u64) -> u64 { return tr_base + (i % tr_slots) * SLOT }
+
+fn start_slot() -> u64 {
+    var s: u64 = 0
+    if tr_head > tr_slots { s = tr_head - tr_slots }
+    while s < tr_head && iwl_le.ld8(slot_at(s), 4) == K_DATA { s = s + 1 }
+    return s
+}
+
+fn record_count() -> u64 {
+    var n: u64 = 0
+    var i: u64 = start_slot()
+    while i < tr_head {
+        if iwl_le.ld8(slot_at(i), 4) != K_DATA { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+fn first_seq() -> u64 {
+    let s: u64 = start_slot()
+    if s >= tr_head { return tr_seq }
+    return iwl_le.ld32(slot_at(s), 0)
+}
+
+fn stamp(a: u64, kind: u64, space: u64, aux: u64, off: u64, val: u64, x0: u64, x1: u64) {
+    iwl_le.st32(a, 0, tr_seq)
+    iwl_le.st8(a, 4, kind)
+    iwl_le.st8(a, 5, space)
+    iwl_le.st16(a, 6, aux)
+    var t: u64 = 0
+    if tr_clk_fn != 0 {
+        let clk: fn(u64) -> u64 = tr_clk_fn as fn(u64) -> u64
+        t = clk(tr_clk_ctx)
+    }
+    iwl_le.st64(a, 8, t)
+    iwl_le.st32(a, 16, off)
+    iwl_le.st32(a, 20, val)
+    iwl_le.st32(a, 24, x0)
+    iwl_le.st32(a, 28, x1)
+}
+
+fn rec_reg(kind: u64, off: u64, val: u64) {
+    stamp(slot_at(tr_head), kind, S_CSR, 0, off, val, 0, 0)
+    tr_head = tr_head + 1
+    tr_seq = tr_seq + 1
+}
+
+fn rec_irq(cause: u64) {
+    stamp(slot_at(tr_head), K_IRQ, S_CSR, 0, CSR_INT, cause, 0, 0)
+    tr_head = tr_head + 1
+    tr_seq = tr_seq + 1
+}
+
+fn rec_dma(index: u64, addr: u64, len: u64, queue: u64) {
+    stamp(slot_at(tr_head), K_DMA, S_DMA, queue, index, addr & 0xFFFFFFFF, addr >> 32, len)
+    tr_head = tr_head + 1
+    tr_seq = tr_seq + 1
+}
+
+fn rec_host(kind: u64, pkt: u64, total: u64) {
+    if total < HDR_LEN { return }
+    var cap: u64 = RX_CAP
+    if kind == K_HCMD { cap = HCMD_CAP }
+    let plen: u64 = total - HDR_LEN
+    var keep: u64 = plen
+    if keep > cap { keep = cap }
+    let wid: u64 = (iwl_le.ld8(pkt, 1) << 8) | iwl_le.ld8(pkt, 0)
+    let nd: u64 = (keep + DATA_PER_SLOT - 1) / DATA_PER_SLOT
+    stamp(slot_at(tr_head), kind, S_HOST, 0, wid, plen, 0, keep)
+    var i: u64 = 0
+    while i < nd {
+        let a: u64 = slot_at(tr_head + 1 + i)
+        var n: u64 = keep - i * DATA_PER_SLOT
+        if n > DATA_PER_SLOT { n = DATA_PER_SLOT }
+        iwl_le.st32(a, 0, tr_seq)
+        iwl_le.st8(a, 4, K_DATA)
+        iwl_le.st8(a, 5, n)
+        iwl_le.st16(a, 6, 0)
+        iwl_le.copy(a + 8, pkt + HDR_LEN + i * DATA_PER_SLOT, n)
+        i = i + 1
+    }
+    tr_head = tr_head + 1 + nd
+    tr_seq = tr_seq + 1
+}
+
+fn name_of(table: u64, idx: u64) -> u64 {
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < idx {
+        while iwl_le.ld8(table, at) != 0 { at = at + 1 }
+        at = at + 1
+        i = i + 1
+    }
+    return table + at
+}
+
+fn fmt_head(w: *mut iwl_w.W, a: u64) {
+    let kind: u64 = iwl_le.ld8(a, 4)
+    iwl_w.w_dec(w, iwl_le.ld32(a, 0))
+    iwl_w.w_ch(w, 32)
+    iwl_w.w_dec(w, iwl_le.ld64(a, 8))
+    iwl_w.w_ch(w, 32)
+    iwl_w.w_s(w, name_of((&KIND_NAMES[0]) as u64, kind))
+    iwl_w.w_ch(w, 32)
+    iwl_w.w_s(w, name_of((&SPACE_NAMES[0]) as u64, iwl_le.ld8(a, 5)))
+    iwl_w.w_ch(w, 32)
+}
+
+fn fmt_data(w: *mut iwl_w.W, i: u64, keep: u64) {
+    iwl_w.w_s(w, (&D_KEY[0]) as u64)
+    var n: u64 = 0
+    var s: u64 = i + 1
+    while n < keep {
+        let a: u64 = slot_at(s)
+        let c: u64 = iwl_le.ld8(a, 5)
+        var j: u64 = 0
+        while j < c {
+            iwl_w.w_hex(w, iwl_le.ld8(a + 8, j), 2)
+            j = j + 1
+        }
+        n = n + c
+        s = s + 1
+    }
+}
+
+
+fn fmt_record(w: *mut iwl_w.W, i: u64) {
+    let a: u64 = slot_at(i)
+    let kind: u64 = iwl_le.ld8(a, 4)
+    fmt_head(w, a)
+    if kind == K_R32 || kind == K_W32 || kind == K_IRQ {
+        iwl_w.w_hex(w, iwl_le.ld32(a, 16), 8)
+        iwl_w.w_ch(w, 32)
+        iwl_w.w_hex(w, iwl_le.ld32(a, 20), 8)
+    } else if kind == K_HCMD || kind == K_RX {
+        let keep: u64 = iwl_le.ld32(a, 28)
+        let plen: u64 = iwl_le.ld32(a, 20)
+        iwl_w.w_hex(w, iwl_le.ld32(a, 16), 4)
+        iwl_w.w_ch(w, 32)
+        iwl_w.w_hex(w, plen, 8)
+        iwl_w.w_ch(w, 32)
+        if kind == K_HCMD {
+            iwl_w.w_s(w, (&V_KEY[0]) as u64)
+            iwl_w.w_hex(w, 0, 1)
+            iwl_w.w_ch(w, 32)
+        }
+        fmt_data(w, i, keep)
+        if keep < plen { iwl_w.w_s(w, (&T_KEY[0]) as u64) }
+    } else {
+        iwl_w.w_hex(w, iwl_le.ld32(a, 16), 8)
+        iwl_w.w_ch(w, 32)
+        iwl_w.w_hex(w, iwl_le.ld32(a, 20), 8)
+        iwl_w.w_ch(w, 32)
+        iwl_w.w_s(w, (&AH_KEY[0]) as u64)
+        iwl_w.w_hex(w, iwl_le.ld32(a, 24), 8)
+        iwl_w.w_ch(w, 32)
+        iwl_w.w_s(w, (&L_KEY[0]) as u64)
+        iwl_w.w_hex(w, iwl_le.ld32(a, 28), 8)
+        iwl_w.w_ch(w, 32)
+        iwl_w.w_s(w, (&Q_KEY[0]) as u64)
+        iwl_w.w_hex(w, iwl_le.ld16(a, 6), 4)
+    }
+    iwl_w.w_nl(w)
+}
+
+fn fmt_header(w: *mut iwl_w.W) {
+    iwl_w.w_s(w, (&HEAD_KEY[0]) as u64)
+    iwl_w.w_s(w, (&FS_KEY[0]) as u64)
+    iwl_w.w_dec(w, first_seq())
+    iwl_w.w_s(w, (&REC_KEY[0]) as u64)
+    iwl_w.w_dec(w, record_count())
+    iwl_w.w_s(w, (&CAP_KEY[0]) as u64)
+    iwl_w.w_dec(w, tr_slots)
+    iwl_w.w_nl(w)
+}
+
+
+fn walk(off: u64, dst: u64, len: u64) -> u64 {
+    var line: [u8; 768] = [0 as u8; 768]
+    var pos: u64 = 0
+    var out: u64 = 0
+    var w: iwl_w.W = iwl_w.W { a: (&line[0]) as u64, cap: LINE_CAP, n: 0 }
+    var i: u64 = start_slot()
+    var first: bool = true
+    while (first || i < tr_head) && (dst == 0 || out < len) {
+        w.n = 0
+        if first {
+            fmt_header(&w)
+            first = false
+        } else {
+            fmt_record(&w, i)
+            i = i + 1
+            while i < tr_head && iwl_le.ld8(slot_at(i), 4) == K_DATA { i = i + 1 }
+        }
+        if dst != 0 {
+            var k: u64 = 0
+            while k < w.n && out < len {
+                if pos + k >= off {
+                    iwl_le.st8(dst, out, iwl_le.ld8(w.a, k))
+                    out = out + 1
+                }
+                k = k + 1
+            }
+        }
+        pos = pos + w.n
+    }
+    if dst == 0 { return pos }
+    return out
+}
+
+fn size() -> u64 {
+    if tr_slots == 0 { return 0 }
+    return walk(0, 0, 0)
+}
+
+fn read(off: u64, dst: u64, len: u64) -> u64 {
+    if tr_slots == 0 { return 0 }
+    return walk(off, dst, len)
+}
