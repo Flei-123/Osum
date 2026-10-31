@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import serial
+import sched.time
+import ui.wm.wmcompose
+import ui.wm.wmlayout
+
+const LJ_ACTIVE_US: u64 = 200000
+
+const LJ_MIN_US: u64 = 6000
+
+static mut lj_last_round: u64 = 0
+
+static mut lj_act: u64 = 0
+
+static mut lj_inp: u64 = 0
+
+const LJ_CHAIN_US: u64 = 1000000
+
+static mut lj_in0: u64 = 0
+
+static mut lj_in_comp: u64 = 0
+
+static mut lj_last_comp: u64 = 0
+
+static mut lj_comp_tsc: u64 = 0
+
+static mut lj_gap: [u64; 8] = [0 as u64; 8]
+
+static mut lj_lat: [u64; 8] = [0 as u64; 8]
+
+fn lj_us(state: u64, d: u64) -> u64 {
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        return 0
+    }
+    return d / (kh / 1000)
+}
+
+fn lj_active(state: u64) -> bool {
+    if lj_act == 0 {
+        return false
+    }
+    let now: u64 = time.tsc()
+    if now < lj_act {
+        return true
+    }
+    return lj_us(state, now - lj_act) < LJ_ACTIVE_US
+}
+
+fn lj_round(state: u64) {
+    let now: u64 = time.tsc()
+    if lj_last_round != 0 && now > lj_last_round && lj_active(state) {
+        let g: u64 = lj_us(state, now - lj_last_round)
+        lj_gap[0] = lj_gap[0] + 1
+        lj_gap[1] = lj_gap[1] + g
+        lj_gap[2] = lj_gap[2] + g * g
+        if g > lj_gap[3] {
+            lj_gap[3] = g
+        }
+        if g > 8000 {
+            lj_gap[4] = lj_gap[4] + 1
+        }
+        if g > 16000 {
+            lj_gap[5] = lj_gap[5] + 1
+        }
+        if g > 33000 {
+            lj_gap[6] = lj_gap[6] + 1
+        }
+    }
+    lj_last_round = now
+}
+
+fn lj_input(state: u64) {
+    let now: u64 = time.tsc()
+    lj_act = now
+    lj_inp = now
+    if lj_in0 == 0 {
+        lj_in0 = now
+        lj_in_comp = wmlayout.gs(state, wmlayout.S_COMPOSITES) + wmcompose.lj_cp_n
+    }
+}
+
+fn lj_done(state: u64) {
+    let c: u64 = wmlayout.gs(state, wmlayout.S_COMPOSITES)
+    let now: u64 = time.tsc()
+    if c != lj_last_comp {
+        lj_last_comp = c
+        lj_comp_tsc = now
+
+        if lj_inp != 0 && (now < lj_inp || lj_us(state, now - lj_inp) < LJ_CHAIN_US) {
+            lj_act = now
+        }
+    }
+    if lj_in0 != 0 && c + wmcompose.lj_cp_n != lj_in_comp {
+        if now > lj_in0 {
+            let l: u64 = lj_us(state, now - lj_in0)
+
+            if l < 250000 {
+                lj_lat[0] = lj_lat[0] + 1
+                lj_lat[1] = lj_lat[1] + l
+                if l > lj_lat[2] {
+                    lj_lat[2] = l
+                }
+                if l > 16000 {
+                    lj_lat[3] = lj_lat[3] + 1
+                }
+                if l > 33000 {
+                    lj_lat[4] = lj_lat[4] + 1
+                }
+            }
+        }
+        lj_in0 = 0
+    }
+}
+
+fn lj_may_compose(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOLATFIX) {
+        return true
+    }
+    if !lj_active(state) {
+        return true
+    }
+    let now: u64 = time.tsc()
+    if lj_comp_tsc == 0 || now < lj_comp_tsc {
+        return true
+    }
+    return lj_us(state, now - lj_comp_tsc) >= LJ_MIN_US
+}
+
+fn lj_fast(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOLATFIX) {
+        return false
+    }
+    return lj_active(state)
+}
+
+fn lj_say_reset(state: u64) {
+    var s_l: [u8; 14] = "wm: lat gapn=\0"
+    var s_1: [u8; 10] = " gapmean=\0"
+    var s_2: [u8; 10] = " gapwait=\0"
+    var s_3: [u8; 9] = " gapmax=\0"
+    var s_4: [u8; 7] = " gap8=\0"
+    var s_5: [u8; 8] = " gap16=\0"
+    var s_6: [u8; 8] = " gap33=\0"
+    var s_7: [u8; 8] = " latn=\0\0"
+    var s_8: [u8; 10] = " latmean=\0"
+    var s_9: [u8; 9] = " latmax=\0"
+    var s_a: [u8; 8] = " lat16=\0"
+    var s_b: [u8; 8] = " lat33=\0"
+    let n: u64 = lj_gap[0]
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_1[0]) as u64)
+    if n != 0 {
+        serial.dec(lj_gap[1] / n)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_2[0]) as u64)
+    if lj_gap[1] != 0 {
+        serial.dec(lj_gap[2] / (2 * lj_gap[1]))
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_3[0]) as u64)
+    serial.dec(lj_gap[3])
+    serial.puts((&s_4[0]) as u64)
+    serial.dec(lj_gap[4])
+    serial.puts((&s_5[0]) as u64)
+    serial.dec(lj_gap[5])
+    serial.puts((&s_6[0]) as u64)
+    serial.dec(lj_gap[6])
+    let m: u64 = lj_lat[0]
+    serial.puts((&s_7[0]) as u64)
+    serial.dec(m)
+    serial.puts((&s_8[0]) as u64)
+    if m != 0 {
+        serial.dec(lj_lat[1] / m)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_9[0]) as u64)
+    serial.dec(lj_lat[2])
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(lj_lat[3])
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(lj_lat[4])
+    serial.nl()
+    var z: u64 = 0
+    while z < 8 {
+        lj_gap[z as usize] = 0
+        lj_lat[z as usize] = 0
+        z = z + 1
+    }
+}
