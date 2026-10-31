@@ -750,10 +750,10 @@ grep -qa '==FERTIG==' "$E" || { bad "settings/compat guest did not finish"; tail
 echo "  -- 13. settings"
 has "$E" "orientbus: provider settings bound" "settingsd is a provider like any app (bound by the kernel-routed ping)"
 part "$E" S-CHECK S-LIST > "$TMPD/p.txt"
-has "$TMPD/p.txt" "settingsd: schema ok keys=45" "the shipped schema: 45 settings"
+has "$TMPD/p.txt" "settingsd: schema ok keys=46" "the shipped schema: 46 settings"
 has "$TMPD/p.txt" "risk must be harmless or critical" "a broken schema is refused, with the reason"
 part "$E" S-LIST S-DESC > "$TMPD/p.txt"
-has "$TMPD/p.txt" "count=4" "settings.list area=display: 4 settings"
+has "$TMPD/p.txt" "count=5" "settings.list area=display: 5 settings"
 has "$TMPD/p.txt" "display.brightness=80" "... with the default value"
 has "$TMPD/p.txt" "display.brightness.type=int 0..100 harmless" "... type, range and risk"
 has "$TMPD/p.txt" "display.brightness.text=Screen brightness in percent" "... and the description"
@@ -1091,6 +1091,16 @@ echo modus=dhcp > /etc/network.conf
 act call settings.set key=net.dhcp value=false
 act confirm last
 cat /etc/network.conf
+echo ==V-MODES==
+act call settings.set key=display.night value=true
+act call settings.set key=display.night.strength value=40
+act call settings.set key=power.saver value=true
+act call settings.set key=net.airplane value=true
+cat /etc/modes.conf
+act call settings.get key=display.night
+act call settings.set key=net.airplane value=false
+act call settings.set key=display.night value=false
+cat /etc/modes.conf
 echo ==V-DB==
 cat /etc/settings.db
 act stop
@@ -1142,6 +1152,13 @@ has "$TMPD/p.txt" "modus=fest" "back to the fixed address that is written there"
 part "$V" V-NOIP V-DB > "$TMPD/p.txt"
 has "$TMPD/p.txt" "net.dhcp=false refused, no ip=" "GEGENPROBE: 'fixed' without an address is refused"
 has "$TMPD/p.txt" "modus=dhcp" "... and the file is untouched"
+part "$V" V-MODES V-DB > "$TMPD/p.txt"
+has "$TMPD/p.txt" "night=true" "display.night lands in /etc/modes.conf"
+has "$TMPD/p.txt" "night_strength=40" "display.night.strength lands in /etc/modes.conf"
+has "$TMPD/p.txt" "saver=true" "power.saver lands in /etc/modes.conf"
+has "$TMPD/p.txt" "airplane=true" "net.airplane lands in /etc/modes.conf"
+has "$TMPD/p.txt" "airplane=false" "GEGENPROBE: switching airplane off writes false back"
+has "$TMPD/p.txt" "night=false" "GEGENPROBE: switching night off writes false back"
 part "$V" V-DB FERTIG > "$TMPD/p.txt"
 hasnot "$TMPD/p.txt" "sound.volume" "the volume never went into /etc/settings.db"
 hasnot "$TMPD/p.txt" "net.dhcp" "... nor net.dhcp"

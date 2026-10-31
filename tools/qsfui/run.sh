@@ -89,7 +89,7 @@ check_scale() {
     # a key press that is lost on a loaded host (no `qs: open`) is tried once more
     for try in 1 2; do
         rm -rf "$D"
-        bash tools/design/eh6.sh "$D" res=$res uiscale=$sc mode=$MODE accel=kvm drehbuch="$TMPD/dreh.txt" \
+        bash tools/design/eh6.sh "$D" res=$res uiscale=$sc mode=$MODE accel=kvm tafel=nein drehbuch="$TMPD/dreh.txt" \
             > "$TMPD/s$sc.log" 2>&1
         grep -aq 'qs: open ' "$D/serial.txt" 2>/dev/null && break
         echo "        (try $try: the panel did not open)"
