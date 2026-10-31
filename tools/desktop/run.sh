@@ -251,9 +251,9 @@ fi
 # THE FOUR EDGES ARE THE SAME FOUR NUMBERS IN FOUR PLACES. Not a
 # translation table -- one set of numbers, written down four times, and
 # a runner that would notice if one of them drifted.
-for f in kernel/ui/wm.fi kernel/sys/sys.fi kernel/user/wlibc.fi; do
-    if grep -qE '(EDGE|WE)_BOTTOM: u64 = 0' "$f" \
-       && grep -qE '(EDGE|WE)_RIGHT: u64 = 3' "$f"; then
+for f in "kernel/ui/wm.fi kernel/ui/wm/wmhead.fi kernel/ui/wm/wmworkarea.fi" kernel/sys/sys.fi kernel/user/wlibc.fi; do
+    if cat $f | grep -qE '(EDGE|WE)_BOTTOM: u64 = 0' \
+       && cat $f | grep -qE '(EDGE|WE)_RIGHT: u64 = 3'; then
         ok "$f numbers the edges 0..3 the same way"
     else
         bad "$f numbers the edges differently"
