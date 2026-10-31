@@ -71,7 +71,7 @@ def check_seq(hw):
     out = run(["seq" + mode])
     c = cmds(out)
     ids = [x[0] for x in c]
-    want = [0x18, 0x08, 0x28, 0x2B, 0x0C, 0x18, 0x28, 0x0D, 0x08] + ([0x17, 0x17] if hw else []) + [0x1C]
+    want = [0x18, 0x08, 0x28, 0x2B, 0x0C, 0x18, 0x28, 0x29, 0x0D, 0x08] + ([0x17, 0x17] if hw else []) + [0x1C]
     ok(ids == want, "command ids %s" % " ".join("%02x" % i for i in ids))
     ok([le(x, 2, 2) & 0xFF for x in c] == list(range(1, len(c) + 1)), "command slots count up")
     rc = [l for l in out if l.startswith("rc ")][0].split()
@@ -80,7 +80,7 @@ def check_seq(hw):
     aux = c[0]
     c = c[1:]
     ok(aux[4 + 16] == 1 and le(aux, 4 + 4, 4) == 4 and le(aux, 4 + 2, 2) == 0xFFFF and le(aux, 4 + 40, 4) == 2, "ADD_STA aux station: id 1, MAC index 4, all TIDs off, queue 1")
-    phy_add, mac_add, bind, scfg, sta, mac_mod, scan, phy_mod = c[:8]
+    phy_add, mac_add, bind, scfg, sta, mac_mod, tev, scan, phy_mod = c[:9]
     ok(le(phy_add, 4 + 4, 4) == 1 and phy_add[4 + 17] == 1 and phy_add[4 + 16] == 1 and len(phy_add) == 4 + 36, "PHY_CONTEXT add, v1 layout 36 octets, 2.4 GHz channel 1")
     ok(le(phy_mod, 4 + 4, 4) == 2 and phy_mod[4 + 17] == 6 and phy_mod[4 + 16] == 1, "PHY_CONTEXT modify channel 6 2.4 GHz")
     ok(le(mac_add, 4 + 8, 4) == 5 and mac_add[4 + 16:4 + 22] == MAC, "MAC_CONTEXT add: BSS station, own address")
@@ -93,6 +93,7 @@ def check_seq(hw):
     nchan = le(scfg, 4, 4) >> 26
     ok(nchan == 35 and scfg[4 + 36:4 + 36 + 4] == bytes([1, 2, 3, 4]), "SCAN_CFG lists 35 channels")
     ok(le(scfg, 4, 4) & 0x3FFFFFF == 0x2EF09 and le(scfg, 4 + 12, 4) == 0x0FFF0FFF and scfg[4 + 24:4 + 28] == bytes([10, 110, 44, 90]) and scfg[4 + 34] == 1 and scfg[4 + 35] == 0xF, "SCAN_CFG flags/rates/dwell/aux id/channel flags as iwlwifi legacy config v1")
+    ok(le(tev, 4, 4) == 0 and le(tev, 4 + 4, 4) == 1 and le(tev, 4 + 28, 4) == 800 and le(tev, 4 + 34, 2) == 0x803 and len(tev) == 40, "TIME_EVENT add: session protection 800 TU, notify start/end, start immediately")
     ok(sta[4 + 8:4 + 14] == BSSID and sta[4] == 0, "ADD_STA peer = BSSID, mode add")
     ok(scan[4 + 33] == 35 and b"HPAP" in scan, "SCAN_REQ_UMAC: 35 channels, direct scan SSID")
     tx = c[-1]
@@ -101,7 +102,7 @@ def check_seq(hw):
     ok(tx[4 + 16] == 0, "TX_CMD station id = AP")
     ok(le(tx, 4 + 4, 4) == 0x2008 and le(tx, 4 + 12, 4) == 0x400D, "TX_CMD flags ACK|SEQ_CTL, 6M OFDM rate")
     if hw:
-        k1, k2 = c[8], c[9]
+        k1, k2 = c[9], c[10]
         ok(k1[4 + 4:4 + 20] == bytes([0x55] * 16) and le(k1, 4 + 2, 2) == 0x0002, "ADD_STA_KEY pairwise: key bytes, CCMP, unicast")
         ok(le(k2, 4 + 2, 2) == 0x4102 and k2[4 + 1] == 2, "ADD_STA_KEY group: multicast, key id 1")
     rx = [l for l in out if l.startswith("rx ")][0].split()
