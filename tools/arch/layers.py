@@ -58,9 +58,9 @@ TABLE = {
     'toolkit': _s("""wlibc wlib fuib fuiglyph fuiapp fuiscene fuied winopts winfloat backdrop template"""),
     'services': _s("""orientbus odbd settingsd stored social sshd wayd powerd hotkeyd wmplug dhcp sntp svc rpc rpcc
         rpcd init ota opk presence proxy dnswt fsrv fsrw fsrlim fremdfs stickwr standby power
-        melder autorun diskctl drvctl dispctl ebpfctl axd bsect"""),
+        melder autorun diskctl drvctl dispctl ebpfctl axd bsect modeapply"""),
     'shell': _s("""desktop taskbar launcher glogin login signin lock lockclaim idlelock floatlock welcome barpop traypop
-        calpop calev taskview notifc qs runbox wmd freunde tiling backlum cliphist mbg modul elevate"""),
+        calpop calev taskview notifc qs qsmodes runbox wmd freunde tiling backlum cliphist mbg modul elevate"""),
     'apps': _s("""explorer expakt exporte fileop expdlg expmodell massren trashbin settings term termfull nedit calc
         taskmgr store mail pdfview viewer fvviewer mp3 play charmap snip notes netview powermon theme jarvismini
         install installer fas certus disks storage netmon wlan vpn"""),

@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import actwire
+import dbgio
+
+export { handles, put, restore }
+
+const SYS_DISPGET: u64 = 1810
+const SYS_DISPSET: u64 = 1811
+const SYS_PWRGET: u64 = 1750
+const SYS_PWRSET: u64 = 1751
+const DG_READY: u64 = 0
+const DG_BRIGHT: u64 = 16
+const DS_BRIGHT: u64 = 3
+const DS_NIGHT: u64 = 20
+const PG_READY: u64 = 0
+const PG_PROFILE: u64 = 1
+const PS_PROFILE: u64 = 0
+const PROFILE_SAVE: u64 = 0
+const SAVER_BRIGHT_MAX: u64 = 70
+const NIGHT_DEFAULT: u64 = 70
+
+static mut P_MODES: [u8; 16] = "/etc/modes.conf\0"
+static mut K_NIGHT: [u8; 14] = "display.night\0"
+static mut K_STRENGTH: [u8; 23] = "display.night.strength\0"
+static mut K_SAVER: [u8; 12] = "power.saver\0"
+static mut K_AIR: [u8; 13] = "net.airplane\0"
+static mut F_NIGHT: [u8; 6] = "night\0"
+static mut F_STRENGTH: [u8; 15] = "night_strength\0"
+static mut F_SAVER: [u8; 6] = "saver\0"
+static mut F_AIR: [u8; 9] = "airplane\0"
+static mut F_PREV_B: [u8; 13] = "saver_bright\0"
+static mut F_PREV_P: [u8; 14] = "saver_profile\0"
+static mut V_EMPTY: [u8; 1] = "\0"
+
+fn is_key(k: u64, lit: u64) -> bool {
+    return actwire.str_eq(k, lit)
+}
+
+fn handles(k: u64) -> bool {
+    return is_key(k, (&K_NIGHT[0 as usize]) as u64)
+        || is_key(k, (&K_STRENGTH[0 as usize]) as u64)
+        || is_key(k, (&K_SAVER[0 as usize]) as u64)
+        || is_key(k, (&K_AIR[0 as usize]) as u64)
+}
+
+fn is_true(v: u64) -> bool {
+    return actwire.ld8(v, 0) == 116 || actwire.ld8(v, 0) == 49
+}
+
+fn disp_ready() -> bool {
+    let r: u64 = ulib.sys(SYS_DISPGET, DG_READY, 0, 0)
+    return !ulib.bad(r) && r == 1
+}
+
+fn power_ready() -> bool {
+    let r: u64 = ulib.sys(SYS_PWRGET, PG_READY, 0, 0)
+    return !ulib.bad(r) && r != 0
+}
+
+fn file_flag(field: u64) -> bool {
+    var z: [u8; 16] = [0 as u8; 16]
+    if !actwire.kvfile_get((&P_MODES[0 as usize]) as u64, field, (&z[0 as usize]) as u64, 16) {
+        return false
+    }
+    return z[0 as usize] == 116
+}
+
+fn file_num(field: u64, dflt: u64) -> u64 {
+    var z: [u8; 16] = [0 as u8; 16]
+    if !actwire.kvfile_get((&P_MODES[0 as usize]) as u64, field, (&z[0 as usize]) as u64, 16) {
+        return dflt
+    }
+    if z[0 as usize] == 0 {
+        return dflt
+    }
+    return ulib.to_num((&z[0 as usize]) as u64)
+}
+
+fn file_put_num(field: u64, v: u64) {
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&z[0 as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    actwire.kvfile_set((&P_MODES[0 as usize]) as u64, field, (&z[0 as usize]) as u64)
+}
+
+fn night_apply(on: bool, strength: u64) -> bool {
+    if !disp_ready() {
+        return true
+    }
+    var s: u64 = 0
+    if on {
+        s = strength
+    }
+    return !ulib.bad(ulib.sys(SYS_DISPSET, DS_NIGHT, s, 0))
+}
+
+fn air_apply(on: bool) -> bool {
+    var f: u64 = 0
+    if on {
+        f = 1
+    }
+    return !ulib.bad(dbgio.call(dbgio.OP_WLAN_RADIO_SET, f, 0, 0, 0))
+}
+
+fn saver_apply(on: bool) -> bool {
+    let fb: u64 = (&F_PREV_B[0 as usize]) as u64
+    let fp: u64 = (&F_PREV_P[0 as usize]) as u64
+    if on {
+        if disp_ready() {
+            let k: u64 = ulib.sys(SYS_DISPGET, DG_BRIGHT, 0, 0)
+            if !ulib.bad(k) {
+                if file_num(fb, 0) == 0 {
+                    file_put_num(fb, k)
+                }
+                if k > SAVER_BRIGHT_MAX {
+                    ulib.sys(SYS_DISPSET, DS_BRIGHT, SAVER_BRIGHT_MAX, 0)
+                }
+            }
+        }
+        if power_ready() {
+            let p: u64 = ulib.sys(SYS_PWRGET, PG_PROFILE, 0, 0)
+            if !ulib.bad(p) {
+                if file_num(fp, 9) == 9 {
+                    file_put_num(fp, p)
+                }
+                ulib.sys(SYS_PWRSET, PS_PROFILE, PROFILE_SAVE, 0)
+            }
+        }
+        return true
+    }
+    let b: u64 = file_num(fb, 0)
+    if b != 0 && disp_ready() {
+        ulib.sys(SYS_DISPSET, DS_BRIGHT, b, 0)
+    }
+    let p: u64 = file_num(fp, 9)
+    if p != 9 && power_ready() {
+        ulib.sys(SYS_PWRSET, PS_PROFILE, p, 0)
+    }
+    actwire.kvfile_set((&P_MODES[0 as usize]) as u64, fb, (&V_EMPTY[0 as usize]) as u64)
+    actwire.kvfile_set((&P_MODES[0 as usize]) as u64, fp, (&V_EMPTY[0 as usize]) as u64)
+    return true
+}
+
+fn put(k: u64, v: u64) -> bool {
+    if is_key(k, (&K_NIGHT[0 as usize]) as u64) {
+        return night_apply(is_true(v), file_num((&F_STRENGTH[0 as usize]) as u64, NIGHT_DEFAULT))
+    }
+    if is_key(k, (&K_STRENGTH[0 as usize]) as u64) {
+        if !file_flag((&F_NIGHT[0 as usize]) as u64) {
+            return true
+        }
+        return night_apply(true, ulib.to_num(v))
+    }
+    if is_key(k, (&K_SAVER[0 as usize]) as u64) {
+        return saver_apply(is_true(v))
+    }
+    if is_key(k, (&K_AIR[0 as usize]) as u64) {
+        return air_apply(is_true(v))
+    }
+    return true
+}
+
+fn restore() {
+    if file_flag((&F_NIGHT[0 as usize]) as u64) {
+        night_apply(true, file_num((&F_STRENGTH[0 as usize]) as u64, NIGHT_DEFAULT))
+    }
+    if file_flag((&F_AIR[0 as usize]) as u64) {
+        air_apply(true)
+    }
+    if file_flag((&F_SAVER[0 as usize]) as u64) {
+        saver_apply(true)
+    }
+}

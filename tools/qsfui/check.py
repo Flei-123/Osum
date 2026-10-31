@@ -8,7 +8,7 @@ Reads the panel's own scene report (`qs: open`, `qs: kachel`, `qs: platte`,
 `qs: label`, `qs: regler`, `qs: medien`, `qs: fussb`) and the picture, and
 judges:
 
-  1. five tiles, three to a row (3 + 2), every cell and every plate EQUAL in size
+  1. eight tiles, three to a row (3 + 3 + 2), every cell and every plate EQUAL in size
   2. nothing outside the panel: tiles, labels, sliders, media tile, footer buttons
   3. the label stands UNDER the plate (below its bottom edge), inside its cell
   4. the sliders lie inside the panel with a margin (they used to run out of it)
@@ -94,9 +94,9 @@ def main():
         ok(good, "%s inside the panel %dx%d (x=%d y=%d w=%d h=%d)" % (what, qw, qh, x, y, w, h))
 
     # 1. the grid
-    ok(len(cells) >= 5, "%d tiles reported (need 5)" % len(cells))
-    if len(cells) < 5 or len(plates) < 5 or len(labels) < 5:
-        ok(False, "plates %d / labels %d reported (need 5 each)" % (len(plates), len(labels)))
+    ok(len(cells) >= 8, "%d tiles reported (need 8)" % len(cells))
+    if len(cells) < 8 or len(plates) < 8 or len(labels) < 8:
+        ok(False, "plates %d / labels %d reported (need 8 each)" % (len(plates), len(labels)))
         print("\n".join(out))
         return 1
     ws = {c["w"] for c in cells.values()}
@@ -109,7 +109,7 @@ def main():
     ok(ws == {100 * sc}, "a cell is %d pixels wide (100 points)" % (100 * sc))
     ys = sorted({c["y"] for c in cells.values()})
     perrow = [sum(1 for c in cells.values() if c["y"] == y) for y in ys]
-    ok(perrow == [3, 2], "three tiles to a row, then two (rows: %s)" % perrow)
+    ok(perrow == [3, 3, 2], "three tiles to a row, then three, then two (rows: %s)" % perrow)
     xs = sorted({c["x"] for c in cells.values()})
     ok(len(xs) == 3 and xs[1] - xs[0] == xs[2] - xs[1], "three equal columns (x: %s)" % xs)
     # 2. nothing outside

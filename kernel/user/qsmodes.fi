@@ -1,0 +1,133 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import actwire
+import actcli
+import icons
+import msg
+
+export { is_tile, on, label, glyph, click, T_NIGHT, T_SAVER, T_AIRPLANE, N_MODES }
+
+const T_NIGHT: u64 = 7
+const T_SAVER: u64 = 8
+const T_AIRPLANE: u64 = 9
+const N_MODES: u64 = 3
+const SYS_DISPGET: u64 = 1810
+const SYS_DISPSET: u64 = 1811
+const DG_NIGHT: u64 = 900
+const DS_NIGHT: u64 = 20
+const NIGHT_DEFAULT: u64 = 70
+const CACHE_TICKS: u64 = 20
+const BUS_WAIT: u64 = 300
+
+static mut P_MODES: [u8; 16] = "/etc/modes.conf\0"
+static mut F_SAVER: [u8; 6] = "saver\0"
+static mut F_AIR: [u8; 9] = "airplane\0"
+static mut K_NIGHT: [u8; 14] = "display.night\0"
+static mut K_SAVER: [u8; 12] = "power.saver\0"
+static mut K_AIR: [u8; 13] = "net.airplane\0"
+static mut L_NIGHT: [u8; 9] = "qs.night\0"
+static mut L_SAVER: [u8; 9] = "qs.saver\0"
+static mut L_AIR: [u8; 12] = "qs.airplane\0"
+static mut V_SET: [u8; 18] = "call settings.set\0"
+static mut A_KEY: [u8; 4] = "key\0"
+static mut A_VALUE: [u8; 6] = "value\0"
+static mut V_TRUE: [u8; 5] = "true\0"
+static mut V_FALSE: [u8; 6] = "false\0"
+static mut cache_at: u64 = 0
+static mut cache_saver: bool = false
+static mut cache_air: bool = false
+
+fn is_tile(t: u64) -> bool {
+    return t >= T_NIGHT && t < T_NIGHT + N_MODES
+}
+
+fn refresh() {
+    let now: u64 = actwire.ticks()
+    if cache_at != 0 && now - cache_at < CACHE_TICKS {
+        return
+    }
+    cache_at = now
+    var z: [u8; 16] = [0 as u8; 16]
+    let zp: u64 = (&z[0 as usize]) as u64
+    cache_saver = actwire.kvfile_get((&P_MODES[0 as usize]) as u64, (&F_SAVER[0 as usize]) as u64, zp, 16)
+        && z[0 as usize] == 116
+    cache_air = actwire.kvfile_get((&P_MODES[0 as usize]) as u64, (&F_AIR[0 as usize]) as u64, zp, 16)
+        && z[0 as usize] == 116
+}
+
+fn night_level() -> u64 {
+    let r: u64 = ulib.sys(SYS_DISPGET, DG_NIGHT, 0, 0)
+    if ulib.bad(r) {
+        return 0
+    }
+    return r
+}
+
+fn on(t: u64) -> bool {
+    if t == T_NIGHT {
+        return night_level() != 0
+    }
+    refresh()
+    if t == T_SAVER {
+        return cache_saver
+    }
+    return cache_air
+}
+
+fn label(t: u64) -> u64 {
+    if t == T_NIGHT {
+        return msg.get((&L_NIGHT[0 as usize]) as u64)
+    }
+    if t == T_SAVER {
+        return msg.get((&L_SAVER[0 as usize]) as u64)
+    }
+    return msg.get((&L_AIR[0 as usize]) as u64)
+}
+
+fn glyph(t: u64) -> u64 {
+    if t == T_NIGHT {
+        return icons.QS_NIGHT
+    }
+    if t == T_SAVER {
+        return icons.QS_SAVER
+    }
+    return icons.QS_AIRPLANE
+}
+
+fn key_of(t: u64) -> u64 {
+    if t == T_NIGHT {
+        return (&K_NIGHT[0 as usize]) as u64
+    }
+    if t == T_SAVER {
+        return (&K_SAVER[0 as usize]) as u64
+    }
+    return (&K_AIR[0 as usize]) as u64
+}
+
+fn click(t: u64) -> u64 {
+    var value: u64 = (&V_TRUE[0 as usize]) as u64
+    if on(t) {
+        value = (&V_FALSE[0 as usize]) as u64
+    }
+    cache_at = 0
+    var rc: u64 = actcli.R_NOBUS
+    if actcli.open() {
+        actcli.req((&V_SET[0 as usize]) as u64)
+        actcli.arg((&A_KEY[0 as usize]) as u64, key_of(t))
+        actcli.arg((&A_VALUE[0 as usize]) as u64, value)
+        rc = actcli.send(BUS_WAIT)
+    }
+    if rc == actcli.R_OK {
+        return 0
+    }
+    if rc == actcli.R_NOBUS && t == T_NIGHT {
+        var level: u64 = 0
+        if !on(t) {
+            level = NIGHT_DEFAULT
+        }
+        return ulib.sys(SYS_DISPSET, DS_NIGHT, level, 0)
+    }
+    return 0 - 1
+}
