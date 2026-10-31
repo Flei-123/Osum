@@ -69,7 +69,7 @@ rumpf() { # datei funktion
     ' "$1" | grep -v '^\s*//' | grep -v '^\s*$' | sed 's/[[:space:]]\+/ /g'
 }
 
-for fn in rate_aus rate_an menge_an zehntel_an; do
+for fn in rate_aus rate_an append_amount zehntel_an; do
     a=$(rumpf kernel/user/settings.fi "$fn")
     b=$(rumpf tools/netzui/logik.fi "$fn")
     if [ -z "$a" ]; then

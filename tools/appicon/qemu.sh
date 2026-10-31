@@ -115,7 +115,7 @@ python3 -I - "$OLD/kernel/user/taskbar.fi" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding="latin1").read()
-k = "fn sym_fallback(platz: u64, app: u64, ziel: u64) -> u64 {\n"
+k = "fn sym_fallback(room: u64, app: u64, target: u64) -> u64 {\n"
 assert k in s
 open(p, "w", encoding="latin1").write(s.replace(k, k + "    return 0\n", 1))
 PY

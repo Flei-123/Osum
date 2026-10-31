@@ -16,13 +16,13 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 SRC = open(os.path.join(ROOT, "kernel/user/settings.fi"), encoding="latin1").read()
 PAGES = [  # (id, R_ const, function, category)
     ("appearance", "R_DARST", "page_darst", "Personalisation"), ("screen", "R_SCREEN", "page_screen", "Display"),
-    ("time", "R_TIME", "page_time", "Time & Language"), ("network", "R_NETZ", "page_network", "Network"),
+    ("time", "R_TIME", "page_time", "Time & Language"), ("network", "R_NET", "page_network", "Network"),
     ("users", "R_BENUT", "page_benut", "Accounts"), ("netview", "R_NETV", "page_netv", "Network"),
     ("language", "R_SPRACHE", "page_sprache", "Time & Language"), ("presets", "R_VORL", "page_vorl", "Personalisation"),
-    ("accounts", "R_KONTO", "page_accounts", "Accounts"), ("sync", "R_SYNC", "page_sync", "Accounts"),
-    ("bridge", "R_BRUECKE", "page_bruecke", "System"), ("system", "R_SYSTEM", "page_system", "System"),
+    ("accounts", "R_ACCOUNT", "page_accounts", "Accounts"), ("sync", "R_SYNC", "page_sync", "Accounts"),
+    ("bridge", "R_BRIDGE", "page_bridge", "System"), ("system", "R_SYSTEM", "page_system", "System"),
     ("approights", "R_RECHTE", "page_rechte", "About"), ("log", "R_PROTO", "page_proto", "About"),
-    ("updates", "R_UPDATE", "page_update", "Update"), ("mouse", "R_MAUS", "page_maus", "System"),
+    ("updates", "R_UPDATE", "page_update", "Update"), ("mouse", "R_MOUSE", "page_mouse", "System"),
     ("power", "R_ENERGIE", "page_energie", "System"), ("about", "R_INFO", "page_info", "About"),
     ("apps", "R_APPS", "page_apps", "System"),
     ("password", "R_PASSW", "page_passw", "Accounts"), ("pin", "R_PIN", "page_pin", "Accounts"),

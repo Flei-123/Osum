@@ -143,7 +143,7 @@ static mut k_ip: u32 = 0 as u32
 static mut k_port: u32 = 0 as u32
 static mut k_https: bool = false
 static mut k_pair_web: bool = false
-static mut k_pfad: [u8; 96] = [0; 96]
+static mut k_path: [u8; 96] = [0; 96]
 static mut k_pfadlen: usize = 0
 static mut k_sid: [u8; 40] = [0; 40]
 static mut k_sidlen: usize = 0
@@ -152,26 +152,26 @@ static mut k_namelen: usize = 0
 static mut k_wurzeln: [u8; 128] = [0; 128]
 static mut k_protokoll: [u8; 128] = [0; 128]
 static mut k_arbeit: [u8; 128] = [0; 128]
-static mut k_schein: [u8; 128] = [0; 128]
+static mut k_cert: [u8; 128] = [0; 128]
 
 static mut k_befehle: bool = false
-static mut k_foto: bool = false
+static mut k_photo: bool = false
 static mut k_system: bool = false
 static mut k_tipp: bool = false
-static mut k_max_ausgabe: usize = 65536
+static mut k_max_output: usize = 65536
 // `command_timeout = <seconds>`: how long one `befehl` may run before it is
 // killed (default 60; an update that fetches 40 MB needs minutes).
-static mut k_befehl_ms: u64 = 60000
-static mut k_max_datei: usize = 262144
+static mut k_command_ms: u64 = 60000
+static mut k_max_file: usize = 262144
 
-static mut l_lesen: [u8; 8192] = [0; 8192]
-static mut n_lesen: usize = 0
-static mut l_schreiben: [u8; 8192] = [0; 8192]
-static mut n_schreiben: usize = 0
+static mut l_read: [u8; 8192] = [0; 8192]
+static mut n_read: usize = 0
+static mut l_write: [u8; 8192] = [0; 8192]
+static mut n_write: usize = 0
 static mut l_auflisten: [u8; 8192] = [0; 8192]
 static mut n_auflisten: usize = 0
-static mut l_befehl: [u8; 8192] = [0; 8192]
-static mut n_befehl: usize = 0
+static mut l_command: [u8; 8192] = [0; 8192]
+static mut n_command: usize = 0
 static mut l_flag: [u8; 8192] = [0; 8192]
 static mut n_flag: usize = 0
 static mut l_sub: [u8; 8192] = [0; 8192]
@@ -232,8 +232,8 @@ const NG_MAC1: i64 = 5
 // SYSTEMAUFRUFE, DUENN UMWICKELT
 // ====================================================================
 
-fn sys_open(pfad: u64, flags: i64, mode: i64) -> i64 {
-    return syscall(S_OPEN, pfad as i64, flags, mode, 0, 0, 0)
+fn sys_open(path: u64, flags: i64, mode: i64) -> i64 {
+    return syscall(S_OPEN, path as i64, flags, mode, 0, 0, 0)
 }
 
 fn sys_close(fd: i64) -> i64 {
@@ -248,12 +248,12 @@ fn sys_write(fd: i64, p: u64, n: usize) -> i64 {
     return syscall(S_WRITE, fd, p as i64, n as i64, 0, 0, 0)
 }
 
-fn sys_mkdir(pfad: u64) -> i64 {
-    return syscall(S_MKDIR, pfad as i64, 493, 0, 0, 0, 0)
+fn sys_mkdir(path: u64) -> i64 {
+    return syscall(S_MKDIR, path as i64, 493, 0, 0, 0, 0)
 }
 
-fn sys_unlink(pfad: u64) -> i64 {
-    return syscall(S_UNLINK, pfad as i64, 0, 0, 0, 0, 0)
+fn sys_unlink(path: u64) -> i64 {
+    return syscall(S_UNLINK, path as i64, 0, 0, 0, 0, 0)
 }
 
 fn sys_getdents(fd: i64, p: u64, n: usize) -> i64 {
@@ -275,15 +275,15 @@ fn hnd_rechte(fd: i64) -> i64 {
 fn schlafe_ms(ms: u64) {
     var rest: u64 = ms
     while rest > 0 {
-        var teil: u64 = rest
-        if teil > 30000 {
-            teil = 30000
+        var part: u64 = rest
+        if part > 30000 {
+            part = 30000
         }
         var ts: [i64; 2] = [0; 2]
-        ts[0] = (teil / 1000) as i64
-        ts[1] = ((teil % 1000) * 1000000) as i64
+        ts[0] = (part / 1000) as i64
+        ts[1] = ((part % 1000) * 1000000) as i64
         syscall(S_NANOSLEEP, (&ts[0]) as i64, 0, 0, 0, 0, 0)
-        rest = rest - teil
+        rest = rest - part
     }
 }
 
@@ -296,7 +296,7 @@ const COMMAND_MS: u64 = 60000
 
 fn wait_child(kind: i64, st: *mut i32) -> bool {
     let t0: u64 = now_ms()
-    while now_ms() - t0 < k_befehl_ms {
+    while now_ms() - t0 < k_command_ms {
         let r: i64 = syscall(S_WAIT4, kind, st as i64, WNOHANG, 0, 0, 0)
         if r == kind || r < 0 {
             return false
@@ -318,7 +318,7 @@ fn wait_child(kind: i64, st: *mut i32) -> bool {
         }
         schlafe_ms(50)
     }
-    sag("jarvisd: killed command did not end within 10 s -- left behind\n")
+    say("jarvisd: killed command did not end within 10 s -- left behind\n")
     return true
 }
 
@@ -345,7 +345,7 @@ fn keepalive() {
     let _k: bool = word_send(d, "alive", 0, 0 as usize)
 }
 
-fn alive_schreiben() {
+fn alive_write() {
     var name: [u8; 18] = "/var/jarvis/alive\0"
     let fd: i64 = sys_open((&name[0]) as u64, O_WRONLY | O_CREAT | O_TRUNC, 420)
     if fd < 0 {
@@ -359,7 +359,7 @@ fn alive_schreiben() {
     rt.buf_free(&b)
 }
 
-fn alive_lesen() -> u64 {
+fn alive_read() -> u64 {
     var name: [u8; 18] = "/var/jarvis/alive\0"
     var b: rt.Buf = rt.buf_new()
     var v: u64 = 0
@@ -381,7 +381,7 @@ fn gut_gemeldet() {
     }
     if k_alive_ms == 0 || t - k_alive_ms >= iv {
         k_alive_ms = t
-        alive_schreiben()
+        alive_write()
     }
 }
 
@@ -404,11 +404,11 @@ fn sende_info(d: *mut Wire) {
     var pre: [u8; 5] = "mac=\0"
     rt.buf_push_bytes(&nutz, (&pre[0]) as u64, 4)
     hex_an(&nutz, (&m[0]) as u64, 6)
-    var kopf: rt.Buf = rt.buf_new()
+    var head: rt.Buf = rt.buf_new()
     var w: [u8; 5] = "info\0"
-    rt.buf_push_bytes(&kopf, (&w[0]) as u64, 4)
-    let _i: bool = sende(d, &kopf, nutz.ptr, nutz.len)
-    rt.buf_free(&kopf)
+    rt.buf_push_bytes(&head, (&w[0]) as u64, 4)
+    let _i: bool = sende(d, &head, nutz.ptr, nutz.len)
+    rt.buf_free(&head)
     rt.buf_free(&nutz)
 }
 
@@ -418,7 +418,7 @@ fn zu_still(t0: u64) -> bool {
         return false
     }
     let t: u64 = now_ms()
-    var last: u64 = alive_lesen()
+    var last: u64 = alive_read()
     if last > t || last < t0 {
         last = t0
     }
@@ -428,8 +428,8 @@ fn zu_still(t0: u64) -> bool {
 // The service: fork a worker, wait for it, start a new one when it ends or
 // has gone silent. Returns true IN THE WORKER; the parent never returns.
 fn supervise() -> bool {
-    var warte: u64 = 2000
-    sag("jarvisd: supervisor started\n")
+    var wait: u64 = 2000
+    say("jarvisd: supervisor started\n")
     syscall(S_PRCTL, PR_SERVICE_WATCH, SERVICE_WATCH_S, 0, 0, 0, 0)
     while true {
         let t0: u64 = now_ms()
@@ -438,21 +438,21 @@ fn supervise() -> bool {
             return true
         }
         if kind < 0 {
-            sag("jarvisd: supervisor: fork refused, trying again in 10 s\n")
+            say("jarvisd: supervisor: fork refused, trying again in 10 s\n")
             schlafe_ms(10000)
             continue
         }
         var status: i32 = 0
-        var grund: u64 = 0
-        while grund == 0 {
+        var reason: u64 = 0
+        while reason == 0 {
             let r: i64 = syscall(S_WAIT4, kind, (&status) as i64, WNOHANG, 0, 0, 0)
             if r == kind || r < 0 {
-                grund = 1
+                reason = 1
                 break
             }
             schlafe_ms(5000)
             if zu_still(t0) {
-                sag("jarvisd: supervisor: worker silent too long -- killing it\n")
+                say("jarvisd: supervisor: worker silent too long -- killing it\n")
                 syscall(S_KILL, kind, 9, 0, 0, 0, 0)
                 var k0: u64 = now_ms()
                 while now_ms() - k0 < 10000 {
@@ -462,25 +462,25 @@ fn supervise() -> bool {
                     }
                     schlafe_ms(100)
                 }
-                grund = 2
+                reason = 2
             }
         }
         var a: [u8; 11] = "supervisor\0"
-        if grund == 2 {
+        if reason == 2 {
             notiere((&a[0]) as u64, 10, "WORKER-KILLED-SILENT", 0, 0 as usize)
         } else {
             notiere((&a[0]) as u64, 10, "WORKER-ENDED", 0, 0 as usize)
         }
         if now_ms() - t0 > 120000 {
-            warte = 2000
+            wait = 2000
         } else {
-            warte = warte * 2
-            if warte > 60000 {
-                warte = 60000
+            wait = wait * 2
+            if wait > 60000 {
+                wait = 60000
             }
         }
-        sag("jarvisd: supervisor: restarting the worker\n")
-        schlafe_ms(warte)
+        say("jarvisd: supervisor: restarting the worker\n")
+        schlafe_ms(wait)
     }
     return false
 }
@@ -606,17 +606,17 @@ fn num_from(p: u64, n: usize) -> u64 {
     return v
 }
 
-fn hinein(ziel: u64, max: usize, p: u64, n: usize) -> usize {
+fn hinein(target: u64, max: usize, p: u64, n: usize) -> usize {
     var k: usize = n
     if k > max - 1 {
         k = max - 1
     }
-    rt.mem_copy(ziel, p, k)
-    rt.st8(ziel, k, 0 as u8)
+    rt.mem_copy(target, p, k)
+    rt.st8(target, k, 0 as u8)
     return k
 }
 
-fn sag(s: str) {
+fn say(s: str) {
     io.print(s)
 }
 
@@ -633,7 +633,7 @@ fn say_num(v: u64) {
     rt.buf_free(&b)
 }
 
-fn sag_oktette(p: u64, n: usize) {
+fn say_octets(p: u64, n: usize) {
     rt.write_everything(1, p, n)
 }
 
@@ -641,17 +641,17 @@ fn sag_oktette(p: u64, n: usize) {
 // DIE RECHTELISTE
 // ====================================================================
 
-fn list_add(feld: u64, n: *mut usize, p: u64, len: usize) {
+fn list_add(field: u64, n: *mut usize, p: u64, len: usize) {
     if *n >= MAXLISTE {
-        sag("jarvisd: permission list full -- an entry was DROPPED\n")
+        say("jarvisd: permission list full -- an entry was DROPPED\n")
         return
     }
-    hinein(feld + (*n * MAXPFAD) as u64, MAXPFAD, p, len)
+    hinein(field + (*n * MAXPFAD) as u64, MAXPFAD, p, len)
     *n = *n + 1
 }
 
-fn list_path(feld: u64, i: usize) -> u64 {
-    return feld + (i * MAXPFAD) as u64
+fn list_path(field: u64, i: usize) -> u64 {
+    return field + (i * MAXPFAD) as u64
 }
 
 fn yes_is(p: u64, n: usize) -> bool {
@@ -660,93 +660,93 @@ fn yes_is(p: u64, n: usize) -> bool {
 }
 
 fn addr_read(p: u64, n: usize) -> bool {
-    var teil: u64 = 0
-    var wert: u64 = 0
+    var part: u64 = 0
+    var value: u64 = 0
     var adr: u32 = 0 as u32
     var i: usize = 0
     var hatte: bool = false
     while i < n {
         let c: u64 = rt.ld8(p, i) as u64
         if c >= 48 && c <= 57 {
-            wert = wert * 10 + (c - 48)
+            value = value * 10 + (c - 48)
             hatte = true
         } else if c == 46 { // '.'
-            if !hatte || wert > 255 || teil >= 3 {
+            if !hatte || value > 255 || part >= 3 {
                 return false
             }
-            adr = (adr << 8) | (wert as u32)
-            teil = teil + 1
-            wert = 0
+            adr = (adr << 8) | (value as u32)
+            part = part + 1
+            value = 0
             hatte = false
         } else if c == 58 { // ':'
-            if !hatte || wert > 255 || teil != 3 {
+            if !hatte || value > 255 || part != 3 {
                 return false
             }
-            adr = (adr << 8) | (wert as u32)
-            teil = 4
-            wert = 0
+            adr = (adr << 8) | (value as u32)
+            part = 4
+            value = 0
             hatte = false
         } else {
             return false
         }
         i = i + 1
     }
-    if teil != 4 || !hatte || wert == 0 || wert > 65535 {
+    if part != 4 || !hatte || value == 0 || value > 65535 {
         return false
     }
     k_ip = adr
-    k_port = wert as u32
+    k_port = value as u32
     return true
 }
 
-fn konf_leeren() {
+fn conf_clear() {
     k_https = false
     k_pair_web = false
     var dp: [u8; 16] = "/bridge/wire\0\0\0\0"
-    k_pfadlen = hinein((&k_pfad[0]) as u64, 96, (&dp[0]) as u64, 12)
+    k_pfadlen = hinein((&k_path[0]) as u64, 96, (&dp[0]) as u64, 12)
     k_befehle = false
-    k_foto = false
+    k_photo = false
     k_system = false
-    n_lesen = 0
-    n_schreiben = 0
+    n_read = 0
+    n_write = 0
     n_auflisten = 0
-    n_befehl = 0
+    n_command = 0
     n_flag = 0
     n_sub = 0
-    k_max_ausgabe = 65536
-    k_max_datei = 262144
-    k_befehl_ms = COMMAND_MS
+    k_max_output = 65536
+    k_max_file = 262144
+    k_command_ms = COMMAND_MS
     k_watchdog_ms = 600000
     var p1: [u8; 22] = "/var/log/jarvisd.log\0\0"
     hinein((&k_protokoll[0]) as u64, MAXPFAD, (&p1[0]) as u64, 20)
     var p2: [u8; 23] = "/var/jarvis/output.txt\0"
     hinein((&k_arbeit[0]) as u64, MAXPFAD, (&p2[0]) as u64, 22)
     var p3: [u8; 31] = "/var/jarvis/screenshot-permit\0\0"
-    hinein((&k_schein[0]) as u64, MAXPFAD, (&p3[0]) as u64, 29)
+    hinein((&k_cert[0]) as u64, MAXPFAD, (&p3[0]) as u64, 29)
     var p4: [u8; 20] = "/etc/ssl/roots.pem\0\0"
     hinein((&k_wurzeln[0]) as u64, MAXPFAD, (&p4[0]) as u64, 18)
 }
 
 fn conf_read() -> bool {
-    konf_leeren()
+    conf_clear()
     var b: rt.Buf = rt.buf_new()
     if !rt.read_file((&konfpfad[0]) as u64, &b) {
         rt.buf_free(&b)
         return false
     }
     var s_server: [u8; 7] = "server\0"
-    var s_weg: [u8; 10] = "transport\0"
-    var s_pfad: [u8; 5] = "path\0"
+    var s_gone: [u8; 10] = "transport\0"
+    var s_path: [u8; 5] = "path\0"
     var s_name: [u8; 11] = "servername\0"
     var s_wurzeln: [u8; 6] = "roots\0"
     var s_befehle: [u8; 9] = "commands\0"
     var s_berl: [u8; 16] = "command_allowed\0"
     var s_flag: [u8; 21] = "command_flag_allowed\0"
     var s_sub: [u8; 20] = "command_sub_allowed\0"
-    var s_lesen: [u8; 5] = "read\0"
+    var s_read: [u8; 5] = "read\0"
     var s_schr: [u8; 6] = "write\0"
     var s_aufl: [u8; 6] = "list\0\0"
-    var s_foto: [u8; 11] = "screenshot\0"
+    var s_photo: [u8; 11] = "screenshot\0"
     var s_sys: [u8; 8] = "sysinfo\0"
     var s_tipp: [u8; 6] = "input\0"
     var s_maxa: [u8; 11] = "max_output\0"
@@ -809,16 +809,16 @@ fn conf_read() -> bool {
             if sl > 0 {
                 if ist(sp, sl, (&s_server[0]) as u64) {
                     addr_read(wp, wl)
-                } else if ist(sp, sl, (&s_weg[0]) as u64) {
+                } else if ist(sp, sl, (&s_gone[0]) as u64) {
                     // `weg = https` -- alles andere heisst: roher Port.
                     var w_https: [u8; 6] = "https\0"
                     k_https = ist(wp, wl, (&w_https[0]) as u64)
-                } else if ist(sp, sl, (&s_pfad[0]) as u64) {
-                    k_pfadlen = hinein((&k_pfad[0]) as u64, 96, wp, wl)
+                } else if ist(sp, sl, (&s_path[0]) as u64) {
+                    k_pfadlen = hinein((&k_path[0]) as u64, 96, wp, wl)
                     var old_path: [u8; 15] = "/bruecke/draht\0"
-                    if ist((&k_pfad[0]) as u64, k_pfadlen, (&old_path[0]) as u64) {
+                    if ist((&k_path[0]) as u64, k_pfadlen, (&old_path[0]) as u64) {
                         var cur_path: [u8; 13] = "/bridge/wire\0"
-                        k_pfadlen = hinein((&k_pfad[0]) as u64, 96, (&cur_path[0]) as u64, 12)
+                        k_pfadlen = hinein((&k_path[0]) as u64, 96, (&cur_path[0]) as u64, 12)
                     }
                 } else if ist(sp, sl, (&s_pair[0]) as u64) {
                     var w_web: [u8; 4] = "web\0"
@@ -832,37 +832,37 @@ fn conf_read() -> bool {
                 } else if ist(sp, sl, (&s_arb[0]) as u64) {
                     hinein((&k_arbeit[0]) as u64, MAXPFAD, wp, wl)
                 } else if ist(sp, sl, (&s_sch[0]) as u64) {
-                    hinein((&k_schein[0]) as u64, MAXPFAD, wp, wl)
+                    hinein((&k_cert[0]) as u64, MAXPFAD, wp, wl)
                 } else if ist(sp, sl, (&s_befehle[0]) as u64) {
                     k_befehle = yes_is(wp, wl)
-                } else if ist(sp, sl, (&s_foto[0]) as u64) {
-                    k_foto = yes_is(wp, wl)
+                } else if ist(sp, sl, (&s_photo[0]) as u64) {
+                    k_photo = yes_is(wp, wl)
                 } else if ist(sp, sl, (&s_sys[0]) as u64) {
                     k_system = yes_is(wp, wl)
                 } else if ist(sp, sl, (&s_tipp[0]) as u64) {
                     k_tipp = yes_is(wp, wl)
                 } else if ist(sp, sl, (&s_maxa[0]) as u64) {
-                    k_max_ausgabe = num_from(wp, wl) as usize
+                    k_max_output = num_from(wp, wl) as usize
                 } else if ist(sp, sl, (&s_maxd[0]) as u64) {
-                    k_max_datei = num_from(wp, wl) as usize
+                    k_max_file = num_from(wp, wl) as usize
                 } else if ist(sp, sl, (&s_cto[0]) as u64) {
                     let sec: u64 = num_from(wp, wl)
                     if sec >= 5 && sec <= 3600 {
-                        k_befehl_ms = sec * 1000
+                        k_command_ms = sec * 1000
                     }
                 } else if ist(sp, sl, (&s_wdg[0]) as u64) {
                     let wsec: u64 = num_from(wp, wl)
                     if wsec == 0 || (wsec >= 20 && wsec <= 86400) {
                         k_watchdog_ms = wsec * 1000
                     }
-                } else if ist(sp, sl, (&s_lesen[0]) as u64) {
-                    list_add((&l_lesen[0]) as u64, &n_lesen, wp, wl)
+                } else if ist(sp, sl, (&s_read[0]) as u64) {
+                    list_add((&l_read[0]) as u64, &n_read, wp, wl)
                 } else if ist(sp, sl, (&s_schr[0]) as u64) {
-                    list_add((&l_schreiben[0]) as u64, &n_schreiben, wp, wl)
+                    list_add((&l_write[0]) as u64, &n_write, wp, wl)
                 } else if ist(sp, sl, (&s_aufl[0]) as u64) {
                     list_add((&l_auflisten[0]) as u64, &n_auflisten, wp, wl)
                 } else if ist(sp, sl, (&s_berl[0]) as u64) {
-                    list_add((&l_befehl[0]) as u64, &n_befehl, wp, wl)
+                    list_add((&l_command[0]) as u64, &n_command, wp, wl)
                 } else if ist(sp, sl, (&s_flag[0]) as u64) {
                     list_add((&l_flag[0]) as u64, &n_flag, wp, wl)
                 } else if ist(sp, sl, (&s_sub[0]) as u64) {
@@ -930,10 +930,10 @@ fn fits_entry(e: u64, p: u64, n: usize) -> bool {
     return eq(e, el, p, n)
 }
 
-fn in_list(feld: u64, anzahl: usize, p: u64, n: usize) -> bool {
+fn in_list(field: u64, count: usize, p: u64, n: usize) -> bool {
     var i: usize = 0
-    while i < anzahl {
-        if fits_entry(list_path(feld, i), p, n) {
+    while i < count {
+        if fits_entry(list_path(field, i), p, n) {
             return true
         }
         i = i + 1
@@ -1018,7 +1018,7 @@ fn wire_new_https() -> Wire {
 fn http_request(req: *mut rt.Buf, rumpfn: usize) {
     var m: [u8; 6] = "POST \0"
     rt.buf_push_bytes(req, (&m[0]) as u64, 5)
-    rt.buf_push_bytes(req, (&k_pfad[0]) as u64, k_pfadlen)
+    rt.buf_push_bytes(req, (&k_path[0]) as u64, k_pfadlen)
     var v: [u8; 18] = " HTTP/1.1\r\nHost: \0"
     rt.buf_push_bytes(req, (&v[0]) as u64, 17)
     rt.buf_push_bytes(req, (&k_name[0]) as u64, k_namelen)
@@ -1034,7 +1034,7 @@ fn http_request(req: *mut rt.Buf, rumpfn: usize) {
     rt.buf_push_bytes(req, (&crlf[0]) as u64, 4)
 }
 
-fn http_nummer(p: u64, n: usize) -> u64 {
+fn http_number(p: u64, n: usize) -> u64 {
     if n < 12 {
         return 0
     }
@@ -1069,7 +1069,7 @@ fn http_body_from(p: u64, n: usize) -> usize {
     return n
 }
 
-fn https_wechsel(d: *mut Wire, rumpf: u64, rumpfn: usize) -> bool {
+fn https_wechsel(d: *mut Wire, body: u64, rumpfn: usize) -> bool {
     var schief: bool = false
     var c: net.Conn = net.connect_tcp(k_ip, k_port as u16)
     catch | e | fail_conn(&schief)
@@ -1092,7 +1092,7 @@ fn https_wechsel(d: *mut Wire, rumpf: u64, rumpfn: usize) -> bool {
         }
         rt.buf_free(&storebuf)
         if wurzeln == 0 {
-            sag("jarvisd: no root store -- nothing is trusted\n")
+            say("jarvisd: no root store -- nothing is trusted\n")
             net.close(&c)
             return false
         }
@@ -1104,9 +1104,9 @@ fn https_wechsel(d: *mut Wire, rumpf: u64, rumpfn: usize) -> bool {
     var hschief: bool = false
     let okh: bool = tls.tls_handshake(&t) catch | e | fail_bool(&hschief)
     if hschief || !tls.tls_established(&t) {
-        sag("jarvisd: TLS handshake failed, reason ")
+        say("jarvisd: TLS handshake failed, reason ")
         say_num(tls.tls_verify_reason(&t) as u64)
-        sag("\n")
+        say("\n")
         tls.tls_free(&t)
         net.close(&c)
         return false
@@ -1115,7 +1115,7 @@ fn https_wechsel(d: *mut Wire, rumpf: u64, rumpfn: usize) -> bool {
     var req: rt.Buf = rt.buf_new()
     http_request(&req, rumpfn)
     if rumpfn > 0 {
-        rt.buf_push_bytes(&req, rumpf, rumpfn)
+        rt.buf_push_bytes(&req, body, rumpfn)
     }
     var werr: bool = false
     let okw: bool = tls.tls_write(&t, req.ptr, req.len)
@@ -1143,11 +1143,11 @@ fn https_wechsel(d: *mut Wire, rumpf: u64, rumpfn: usize) -> bool {
     tls.tls_free(&t)
     net.close(&c)
 
-    let code: u64 = http_nummer(roh.ptr, roh.len)
+    let code: u64 = http_number(roh.ptr, roh.len)
     if code != 200 {
-        sag("jarvisd: server answered ")
+        say("jarvisd: server answered ")
         say_num(code)
-        sag("\n")
+        say("\n")
         rt.buf_free(&roh)
         return false
     }
@@ -1240,8 +1240,8 @@ fn wire_line(d: *mut Wire, aus: *mut rt.Buf) -> bool {
 
 fn wire_bytes(d: *mut Wire, n: usize, aus: *mut rt.Buf) -> bool {
     rt.buf_clear(aus)
-    var fehlt: usize = n
-    while fehlt > 0 {
+    var missing: usize = n
+    while missing > 0 {
         let da: usize = (*d).puf.len - (*d).at
         if da == 0 {
             if !wire_fill(d) {
@@ -1250,12 +1250,12 @@ fn wire_bytes(d: *mut Wire, n: usize, aus: *mut rt.Buf) -> bool {
             continue
         }
         var k: usize = da
-        if k > fehlt {
-            k = fehlt
+        if k > missing {
+            k = missing
         }
         rt.buf_push_bytes(aus, (*d).puf.ptr + (*d).at as u64, k)
         (*d).at = (*d).at + k
-        fehlt = fehlt - k
+        missing = missing - k
         wire_trim(d)
     }
     return true
@@ -1284,9 +1284,9 @@ fn wire_write(d: *mut Wire, p: u64, n: usize) -> bool {
     return true
 }
 
-fn sende(d: *mut Wire, kopf: *mut rt.Buf, nutz: u64, nutzn: usize) -> bool {
+fn sende(d: *mut Wire, head: *mut rt.Buf, nutz: u64, nutzn: usize) -> bool {
     var b: rt.Buf = rt.buf_new()
-    rt.buf_push_bytes(&b, (*kopf).ptr, (*kopf).len)
+    rt.buf_push_bytes(&b, (*head).ptr, (*head).len)
     rt.buf_push(&b, 32 as u8)
     rt.buf_push_dec_u64(&b, nutzn as u64)
     rt.buf_push(&b, 10 as u8)
@@ -1330,9 +1330,9 @@ fn zerlege(p: u64, n: usize, f: *mut Felder) {
 // DIE AUFTRAEGE
 // ====================================================================
 
-fn ablehnen(aus: *mut rt.Buf, grund: str) -> bool {
+fn ablehnen(aus: *mut rt.Buf, reason: str) -> bool {
     rt.buf_clear(aus)
-    rt.buf_push_bytes(aus, grund.p as u64, grund.n)
+    rt.buf_push_bytes(aus, reason.p as u64, reason.n)
     z_abgelehnt = z_abgelehnt + 1
     return false
 }
@@ -1390,15 +1390,15 @@ fn tight_make(fd: i64, maske: i64, aus: *mut rt.Buf) -> i64 {
     return enger
 }
 
-fn do_read(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
-    if !path_clean(pfad, pn) {
+fn do_read(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
+    if !path_clean(path, pn) {
         return ablehnen(aus, "not a clean absolute path")
     }
-    if !in_list((&l_lesen[0]) as u64, n_lesen, pfad, pn) {
+    if !in_list((&l_read[0]) as u64, n_read, path, pn) {
         return ablehnen(aus, "path not allowed by `read` in /etc/jarvis/permissions.conf")
     }
     var name: [u8; 128] = [0; 128]
-    hinein((&name[0]) as u64, MAXPFAD, pfad, pn)
+    hinein((&name[0]) as u64, MAXPFAD, path, pn)
     let roh: i64 = sys_open((&name[0]) as u64, 0, 0)
     if roh < 0 {
         return ablehnen(aus, "cannot open the file")
@@ -1415,7 +1415,7 @@ fn do_read(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
         if n <= 0 {
             break
         }
-        if (*aus).len + (n as usize) > k_max_datei {
+        if (*aus).len + (n as usize) > k_max_file {
             zuviel = true
             break
         }
@@ -1430,19 +1430,19 @@ fn do_read(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
 
 // ----------------------------------------------------------- schreib
 
-fn do_write(pfad: u64, pn: usize, nutz: *mut rt.Buf,
+fn do_write(path: u64, pn: usize, nutz: *mut rt.Buf,
     aus: *mut rt.Buf) -> bool {
-    if !path_clean(pfad, pn) {
+    if !path_clean(path, pn) {
         return ablehnen(aus, "not a clean absolute path")
     }
-    if !in_list((&l_schreiben[0]) as u64, n_schreiben, pfad, pn) {
+    if !in_list((&l_write[0]) as u64, n_write, path, pn) {
         return ablehnen(aus, "path not allowed by `write` in /etc/jarvis/permissions.conf")
     }
-    if (*nutz).len > k_max_datei {
+    if (*nutz).len > k_max_file {
         return ablehnen(aus, "content is larger than max_file")
     }
     var name: [u8; 128] = [0; 128]
-    hinein((&name[0]) as u64, MAXPFAD, pfad, pn)
+    hinein((&name[0]) as u64, MAXPFAD, path, pn)
     let roh: i64 = sys_open((&name[0]) as u64,
         O_WRONLY | O_CREAT | O_TRUNC, 420)
     if roh < 0 {
@@ -1480,15 +1480,15 @@ fn do_write(pfad: u64, pn: usize, nutz: *mut rt.Buf,
 
 // ------------------------------------------------------------- liste
 
-fn do_list(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
-    if !path_clean(pfad, pn) {
+fn do_list(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
+    if !path_clean(path, pn) {
         return ablehnen(aus, "not a clean absolute path")
     }
-    if !in_list((&l_auflisten[0]) as u64, n_auflisten, pfad, pn) {
+    if !in_list((&l_auflisten[0]) as u64, n_auflisten, path, pn) {
         return ablehnen(aus, "directory not allowed by `list` in /etc/jarvis/permissions.conf")
     }
     var name: [u8; 128] = [0; 128]
-    hinein((&name[0]) as u64, MAXPFAD, pfad, pn)
+    hinein((&name[0]) as u64, MAXPFAD, path, pn)
     let fd: i64 = sys_open((&name[0]) as u64, O_DIRECTORY, 0)
     if fd < 0 {
         return ablehnen(aus, "cannot open the directory")
@@ -1521,7 +1521,7 @@ fn do_list(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
                 k = k + 1
             }
             rt.buf_push(aus, 10 as u8)
-            if (*aus).len > k_max_ausgabe {
+            if (*aus).len > k_max_output {
                 sys_close(fd)
                 return ablehnen(aus, "listing is longer than max_output")
             }
@@ -1566,8 +1566,8 @@ const S_GETPID_NF: i64 = 39
 // `command_allowed` by the caller). Returns true when it answered.
 fn nofork_builtin(prog: u64, pn: usize, a1: u64, a2: u64, a3: u64, aus: *mut rt.Buf) -> bool {
     rt.buf_clear(aus)
-    var kopf: [u8; 7] = "ende \0\0"
-    rt.buf_push_bytes(aus, (&kopf[0]) as u64, 5)
+    var head: [u8; 7] = "ende \0\0"
+    rt.buf_push_bytes(aus, (&head[0]) as u64, 5)
     if fits_entry((&k_nf_ps[0]) as u64, prog, pn) {
         rt.buf_push_dec_u64(aus, 0)
         rt.buf_push(aus, 10 as u8)
@@ -1616,10 +1616,10 @@ fn nofork_builtin(prog: u64, pn: usize, a1: u64, a2: u64, a3: u64, aus: *mut rt.
     return false
 }
 
-fn rules_for(feld: u64, anzahl: usize, prog: u64, pn: usize) -> bool {
+fn rules_for(field: u64, count: usize, prog: u64, pn: usize) -> bool {
     var i: usize = 0
-    while i < anzahl {
-        let e: u64 = list_path(feld, i)
+    while i < count {
+        let e: u64 = list_path(field, i)
         if rt.c_length(e) > pn && rt.ld8(e, pn) == 32 as u8 && eq(e, pn, prog, pn) {
             return true
         }
@@ -1628,24 +1628,24 @@ fn rules_for(feld: u64, anzahl: usize, prog: u64, pn: usize) -> bool {
     return false
 }
 
-fn flags_denied(zeile: u64, zn: usize, prog: u64, pn: usize) -> bool {
+fn flags_denied(line: u64, zn: usize, prog: u64, pn: usize) -> bool {
     if !rules_for((&l_flag[0]) as u64, n_flag, prog, pn) {
         return false
     }
     var i: usize = pn
     while i < zn {
-        while i < zn && rt.ld8(zeile, i) == 32 as u8 {
+        while i < zn && rt.ld8(line, i) == 32 as u8 {
             i = i + 1
         }
         if i >= zn {
             break
         }
         let von: usize = i
-        while i < zn && rt.ld8(zeile, i) != 32 as u8 {
+        while i < zn && rt.ld8(line, i) != 32 as u8 {
             i = i + 1
         }
         let wn: usize = i - von
-        if rt.ld8(zeile, von) != 45 as u8 {
+        if rt.ld8(line, von) != 45 as u8 {
             continue
         }
         if pn + 1 + wn >= MAXPFAD {
@@ -1660,7 +1660,7 @@ fn flags_denied(zeile: u64, zn: usize, prog: u64, pn: usize) -> bool {
         key[pn] = 32 as u8
         k = 0
         while k < wn {
-            key[pn + 1 + k] = rt.ld8(zeile, von + k)
+            key[pn + 1 + k] = rt.ld8(line, von + k)
             k = k + 1
         }
         if !in_list((&l_flag[0]) as u64, n_flag, (&key[0]) as u64, pn + 1 + wn) {
@@ -1670,24 +1670,24 @@ fn flags_denied(zeile: u64, zn: usize, prog: u64, pn: usize) -> bool {
     return false
 }
 
-fn sub_denied(zeile: u64, zn: usize, prog: u64, pn: usize) -> bool {
+fn sub_denied(line: u64, zn: usize, prog: u64, pn: usize) -> bool {
     if !rules_for((&l_sub[0]) as u64, n_sub, prog, pn) {
         return false
     }
     var i: usize = pn
     while i < zn {
-        while i < zn && rt.ld8(zeile, i) == 32 as u8 {
+        while i < zn && rt.ld8(line, i) == 32 as u8 {
             i = i + 1
         }
         if i >= zn {
             break
         }
         let von: usize = i
-        while i < zn && rt.ld8(zeile, i) != 32 as u8 {
+        while i < zn && rt.ld8(line, i) != 32 as u8 {
             i = i + 1
         }
         let wn: usize = i - von
-        if rt.ld8(zeile, von) == 45 as u8 {
+        if rt.ld8(line, von) == 45 as u8 {
             continue
         }
         if pn + 1 + wn >= MAXPFAD {
@@ -1702,7 +1702,7 @@ fn sub_denied(zeile: u64, zn: usize, prog: u64, pn: usize) -> bool {
         key[pn] = 32 as u8
         k = 0
         while k < wn {
-            key[pn + 1 + k] = rt.ld8(zeile, von + k)
+            key[pn + 1 + k] = rt.ld8(line, von + k)
             k = k + 1
         }
         return !in_list((&l_sub[0]) as u64, n_sub, (&key[0]) as u64, pn + 1 + wn)
@@ -1710,54 +1710,54 @@ fn sub_denied(zeile: u64, zn: usize, prog: u64, pn: usize) -> bool {
     return true
 }
 
-fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
+fn do_cmd(line: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     if !k_befehle {
         return ablehnen(aus, "`commands = no` in /etc/jarvis/permissions.conf")
     }
     var i: usize = 0
-    while i < zn && rt.ld8(zeile, i) == 32 as u8 {
+    while i < zn && rt.ld8(line, i) == 32 as u8 {
         i = i + 1
     }
     let pvon: usize = i
-    while i < zn && rt.ld8(zeile, i) != 32 as u8 {
+    while i < zn && rt.ld8(line, i) != 32 as u8 {
         i = i + 1
     }
     let pn: usize = i - pvon
     if pn == 0 {
         return ablehnen(aus, "empty command")
     }
-    let prog: u64 = zeile + pvon as u64
+    let prog: u64 = line + pvon as u64
     if !path_clean(prog, pn) {
         return ablehnen(aus, "the program must be given with its full path")
     }
-    if !in_list((&l_befehl[0]) as u64, n_befehl, prog, pn) {
+    if !in_list((&l_command[0]) as u64, n_command, prog, pn) {
         return ablehnen(aus, "program not allowed by `command_allowed` in /etc/jarvis/permissions.conf")
     }
-    if flags_denied(zeile, zn, prog, pn) {
+    if flags_denied(line, zn, prog, pn) {
         return ablehnen(aus, "option not allowed by `command_flag_allowed` in /etc/jarvis/permissions.conf (needs local confirmation)")
     }
-    if sub_denied(zeile, zn, prog, pn) {
+    if sub_denied(line, zn, prog, pn) {
         return ablehnen(aus, "subcommand not allowed by `command_sub_allowed` in /etc/jarvis/permissions.conf (needs local confirmation)")
     }
-    let anz: usize = arg_count(zeile, zn)
+    let anz: usize = arg_count(line, zn)
     if anz > 6 {
         return ablehnen(aus, "at most six words per command")
     }
     var worte: rt.Buf = rt.buf_new()
-    var zeiger: [u64; 8] = [0; 8]
+    var cur_ptr: [u64; 8] = [0; 8]
     var wz: usize = 0
     var starts: [usize; 8] = [0; 8]
     i = 0
     while i < zn && wz < 7 {
-        while i < zn && rt.ld8(zeile, i) == 32 as u8 {
+        while i < zn && rt.ld8(line, i) == 32 as u8 {
             i = i + 1
         }
         if i >= zn {
             break
         }
         starts[wz] = worte.len
-        while i < zn && rt.ld8(zeile, i) != 32 as u8 {
-            rt.buf_push(&worte, rt.ld8(zeile, i))
+        while i < zn && rt.ld8(line, i) != 32 as u8 {
+            rt.buf_push(&worte, rt.ld8(line, i))
             i = i + 1
         }
         rt.buf_push(&worte, 0 as u8)
@@ -1765,23 +1765,23 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     }
     var q: usize = 0
     while q < wz {
-        zeiger[q] = worte.ptr + starts[q] as u64
+        cur_ptr[q] = worte.ptr + starts[q] as u64
         q = q + 1
     }
-    zeiger[wz] = 0
+    cur_ptr[wz] = 0
 
-    let ziel: i64 = sys_open((&k_arbeit[0]) as u64,
+    let target: i64 = sys_open((&k_arbeit[0]) as u64,
         O_WRONLY | O_CREAT | O_TRUNC, 384)
-    if ziel < 0 {
+    if target < 0 {
         rt.buf_free(&worte)
         return ablehnen(aus, "cannot create the work file")
     }
     let kind: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
     if kind < 0 {
-        sys_close(ziel)
+        sys_close(target)
         // r346: a full task table (no fork) must not lock the owner out. These
         // three need no child: look at the table, end a program, restart.
-        if nofork_builtin(prog, pn, zeiger[1], zeiger[2], zeiger[3], aus) {
+        if nofork_builtin(prog, pn, cur_ptr[1], cur_ptr[2], cur_ptr[3], aus) {
             rt.buf_free(&worte)
             return true
         }
@@ -1789,9 +1789,9 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
         return ablehnen(aus, "fork failed (task table full) -- allowed without fork: /bin/ps, /bin/kill <pid>, /bin/reboot")
     }
     if kind == 0 {
-        syscall(S_DUP2, ziel, 1, 0, 0, 0, 0)
-        syscall(S_DUP2, ziel, 2, 0, 0, 0, 0)
-        sys_close(ziel)
+        syscall(S_DUP2, target, 1, 0, 0, 0, 0)
+        syscall(S_DUP2, target, 2, 0, 0, 0, 0)
+        sys_close(target)
         // AB-003: mark the child. -EPERM (1) = it already carries a label
         // (jarvisd itself was started by an app) -- that one is at least
         // as narrow, so it is kept. Any other failure: do not run at all.
@@ -1800,10 +1800,10 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
         if og != 0 && og != -1 {
             rt.finish(126)
         }
-        syscall(S_EXECVE, zeiger[0] as i64, (&zeiger[0]) as i64, 0, 0, 0, 0)
+        syscall(S_EXECVE, cur_ptr[0] as i64, (&cur_ptr[0]) as i64, 0, 0, 0, 0)
         rt.finish(127)
     }
-    sys_close(ziel)
+    sys_close(target)
     var status: i32 = 0
     let killed: bool = wait_child(kind, &status)
     rt.buf_free(&worte)
@@ -1816,8 +1816,8 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     }
 
     rt.buf_clear(aus)
-    var kopf: [u8; 7] = "ende \0\0"
-    rt.buf_push_bytes(aus, (&kopf[0]) as u64, 5)
+    var head: [u8; 7] = "ende \0\0"
+    rt.buf_push_bytes(aus, (&head[0]) as u64, 5)
     rt.buf_push_dec_u64(aus, code)
     rt.buf_push(aus, 10 as u8)
     let fd: i64 = sys_open((&k_arbeit[0]) as u64, 0, 0)
@@ -1830,8 +1830,8 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
                 break
             }
             var k: usize = n as usize
-            if (*aus).len + k > k_max_ausgabe {
-                k = k_max_ausgabe - (*aus).len
+            if (*aus).len + k > k_max_output {
+                k = k_max_output - (*aus).len
                 gekuerzt = true
             }
             if k > 0 {
@@ -1854,7 +1854,7 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
 
 fn cert_check(aus: *mut rt.Buf) -> bool {
     var b: rt.Buf = rt.buf_new()
-    if !rt.read_file((&k_schein[0]) as u64, &b) {
+    if !rt.read_file((&k_cert[0]) as u64, &b) {
         rt.buf_free(&b)
         return ablehnen(aus, "no screenshot permit -- run `jarvisctl screenshot` on this device")
     }
@@ -1862,41 +1862,41 @@ fn cert_check(aus: *mut rt.Buf) -> bool {
     while ende < b.len && rt.ld8(b.ptr, ende) != 10 as u8 {
         ende = ende + 1
     }
-    let frist: u64 = num_from(b.ptr, ende)
+    let deadline: u64 = num_from(b.ptr, ende)
     rt.buf_free(&b)
     let nun: u64 = now_s()
-    if frist == 0 || nun > frist {
-        sys_unlink((&k_schein[0]) as u64)
+    if deadline == 0 || nun > deadline {
+        sys_unlink((&k_cert[0]) as u64)
         return ablehnen(aus, "the screenshot permit has expired")
     }
-    sys_unlink((&k_schein[0]) as u64)
+    sys_unlink((&k_cert[0]) as u64)
     return true
 }
 
-fn grab_image(roh: *mut rt.Buf, hoehe: usize, zeile: usize, zpc: i64) -> i32 {
+fn grab_image(roh: *mut rt.Buf, height: usize, line: usize, zpc: i64) -> i32 {
     let arm: i64 = syscall(S_SHOT, SH_ARM, 0, 0, 0, 0, 0)
     if arm < 0 {
         return GRAB_NO_PERMIT
     }
     let bandzeilen: usize = zpc as usize
     var band: rt.Buf = rt.buf_new()
-    rt.buf_reserve(&band, bandzeilen * zeile)
-    rt.buf_set_len(&band, bandzeilen * zeile)
+    rt.buf_reserve(&band, bandzeilen * line)
+    rt.buf_set_len(&band, bandzeilen * line)
     rt.buf_clear(roh)
     var y: usize = 0
     var schief: bool = false
-    while y < hoehe {
+    while y < height {
         var will: usize = bandzeilen
-        if y + will > hoehe {
-            will = hoehe - y
+        if y + will > height {
+            will = height - y
         }
         let n: i64 = syscall(S_SHOT, SH_GRAB, band.ptr as i64,
-            (will * zeile) as i64, 0, 0, 0)
+            (will * line) as i64, 0, 0, 0)
         if n <= 0 {
             schief = true
             break
         }
-        let kam: usize = (n as usize) / zeile
+        let kam: usize = (n as usize) / line
         if kam == 0 {
             schief = true
             break
@@ -1904,7 +1904,7 @@ fn grab_image(roh: *mut rt.Buf, hoehe: usize, zeile: usize, zpc: i64) -> i32 {
         var i: usize = 0
         while i < kam {
             rt.buf_push(roh, 0 as u8)
-            rt.buf_push_bytes(roh, band.ptr + (i * zeile) as u64, zeile)
+            rt.buf_push_bytes(roh, band.ptr + (i * line) as u64, line)
             i = i + 1
         }
         y = y + kam
@@ -1965,8 +1965,8 @@ fn do_input(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     if !k_tipp {
         return ablehnen(aus, "`input = no` in /etc/jarvis/permissions.conf")
     }
-    let schein: i64 = syscall(S_TIPP, TI_ARM, 0, 0, 0, 0, 0)
-    if schein < 0 {
+    let cert: i64 = syscall(S_TIPP, TI_ARM, 0, 0, 0, 0, 0)
+    if cert < 0 {
         if syscall(S_TIPP, TI_INFO, TQ_LOCKED, 0, 0, 0, 0) == 1 {
             return ablehnen(aus, "emergency stop engaged on the device (Win+Esc / jarvisctl input off)")
         }
@@ -2024,15 +2024,15 @@ fn do_input(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
 }
 
 fn do_screenshot(aus: *mut rt.Buf) -> bool {
-    if !k_foto {
+    if !k_photo {
         return ablehnen(aus, "`screenshot = no` in /etc/jarvis/permissions.conf")
     }
     if !cert_check(aus) {
         return false
     }
-    let bereit: i64 = syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0)
-    if bereit >= 0 {
-        if bereit == 0 {
+    let ready: i64 = syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0)
+    if ready >= 0 {
+        if ready == 0 {
             return ablehnen(aus, "the kernel has the screenshot call but no image (no framebuffer / no 32-bit mode)")
         }
         return photo_over_kernel(aus)
@@ -2055,24 +2055,24 @@ fn do_screenshot(aus: *mut rt.Buf) -> bool {
     if fd < 0 {
         return ablehnen(aus, "cannot open /dev/fb")
     }
-    let breite: usize = w as usize
-    let hoehe: usize = h as usize
-    let zeile: usize = pitch as usize
+    let width: usize = w as usize
+    let height: usize = h as usize
+    let line: usize = pitch as usize
     var roh: rt.Buf = rt.buf_new()
     var zpuf: rt.Buf = rt.buf_new()
-    if !rt.buf_reserve(&zpuf, zeile) {
+    if !rt.buf_reserve(&zpuf, line) {
         rt.buf_free(&zpuf)
         rt.buf_free(&roh)
         sys_close(fd)
         return ablehnen(aus, "out of memory for the line buffer")
     }
-    rt.buf_set_len(&zpuf, zeile)
+    rt.buf_set_len(&zpuf, line)
     var y: usize = 0
     var schief: bool = false
-    while y < hoehe {
+    while y < height {
         var da: usize = 0
-        while da < zeile {
-            let n: i64 = sys_read(fd, zpuf.ptr + da as u64, zeile - da)
+        while da < line {
+            let n: i64 = sys_read(fd, zpuf.ptr + da as u64, line - da)
             if n <= 0 {
                 schief = true
                 break
@@ -2084,7 +2084,7 @@ fn do_screenshot(aus: *mut rt.Buf) -> bool {
         }
         rt.buf_push(&roh, 0 as u8)
         var x: usize = 0
-        while x < breite {
+        while x < width {
             let off: usize = x * ((bpp / 8) as usize)
             rt.buf_push(&roh, rt.ld8(zpuf.ptr, off + 2))
             rt.buf_push(&roh, rt.ld8(zpuf.ptr, off + 1))
@@ -2099,7 +2099,7 @@ fn do_screenshot(aus: *mut rt.Buf) -> bool {
         rt.buf_free(&roh)
         return ablehnen(aus, "cannot read the whole framebuffer")
     }
-    let gut: bool = fit.encode_within(aus, breite, hoehe, &roh, RESULT_CAP)
+    let gut: bool = fit.encode_within(aus, width, height, &roh, RESULT_CAP)
     rt.buf_free(&roh)
     if !gut {
         return ablehnen(aus, "PNG encoding failed")
@@ -2108,14 +2108,14 @@ fn do_screenshot(aus: *mut rt.Buf) -> bool {
 }
 
 fn bildprobe() -> i32 {
-    let breite: usize = 64
-    let hoehe: usize = 48
+    let width: usize = 64
+    let height: usize = 48
     var roh: rt.Buf = rt.buf_new()
     var y: usize = 0
-    while y < hoehe {
+    while y < height {
         rt.buf_push(&roh, 0 as u8)
         var x: usize = 0
-        while x < breite {
+        while x < width {
             rt.buf_push(&roh, (x * 4) as u8)
             rt.buf_push(&roh, (y * 5) as u8)
             rt.buf_push(&roh, ((x + y) * 2) as u8)
@@ -2124,20 +2124,20 @@ fn bildprobe() -> i32 {
         y = y + 1
     }
     var aus: rt.Buf = rt.buf_new()
-    let gut: bool = png.encode(&aus, breite, hoehe, &roh)
+    let gut: bool = png.encode(&aus, width, height, &roh)
     rt.buf_free(&roh)
     if !gut {
-        sag("bild: gescheitert\n")
+        say("bild: gescheitert\n")
         return 1
     }
-    sag("bild ")
+    say("bild ")
     var hx: rt.Buf = rt.buf_new()
     hex_an(&hx, aus.ptr, aus.len)
-    sag_oktette(hx.ptr, hx.len)
-    sag("\n")
-    sag("bildlaenge ")
+    say_octets(hx.ptr, hx.len)
+    say("\n")
+    say("bildlaenge ")
     say_num(aus.len as u64)
-    sag("\n")
+    say("\n")
     rt.buf_free(&hx)
     rt.buf_free(&aus)
     return 0
@@ -2149,28 +2149,28 @@ fn bildprobe() -> i32 {
 
 fn jsig_rufen(a1: u64, a2: u64, aus: *mut rt.Buf) -> bool {
     var prog: [u8; 10] = "/bin/jsig\0"
-    var zeiger: [u64; 4] = [0; 4]
-    zeiger[0] = (&prog[0]) as u64
-    zeiger[1] = a1
-    zeiger[2] = a2
-    zeiger[3] = 0
-    let ziel: i64 = sys_open((&k_arbeit[0]) as u64,
+    var ptr: [u64; 4] = [0; 4]
+    ptr[0] = (&prog[0]) as u64
+    ptr[1] = a1
+    ptr[2] = a2
+    ptr[3] = 0
+    let target: i64 = sys_open((&k_arbeit[0]) as u64,
         O_WRONLY | O_CREAT | O_TRUNC, 384)
-    if ziel < 0 {
+    if target < 0 {
         return false
     }
     let kind: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
     if kind < 0 {
-        sys_close(ziel)
+        sys_close(target)
         return false
     }
     if kind == 0 {
-        syscall(S_DUP2, ziel, 1, 0, 0, 0, 0)
-        sys_close(ziel)
-        syscall(S_EXECVE, zeiger[0] as i64, (&zeiger[0]) as i64, 0, 0, 0, 0)
+        syscall(S_DUP2, target, 1, 0, 0, 0, 0)
+        sys_close(target)
+        syscall(S_EXECVE, ptr[0] as i64, (&ptr[0]) as i64, 0, 0, 0, 0)
         rt.finish(127)
     }
-    sys_close(ziel)
+    sys_close(target)
     var status: i32 = 0
     if wait_child(kind, &status) {
         return false
@@ -2223,10 +2223,10 @@ fn printable_text(p: u64, n: usize) -> bool {
 }
 
 fn kopplung_dateien(codep: u64, coden: usize, jap: u64) -> bool {
-    var pfad_code: [u8; 20] = "/var/jarvis/pairing\0"
-    var pfad_ja: [u8; 23] = "/var/jarvis/pairing-ok\0"
-    hinein(jap, MAXPFAD, (&pfad_ja[0]) as u64, 22)
-    rt.write_file((&pfad_code[0]) as u64, codep, coden)
+    var path_code: [u8; 20] = "/var/jarvis/pairing\0"
+    var path_yes: [u8; 23] = "/var/jarvis/pairing-ok\0"
+    hinein(jap, MAXPFAD, (&path_yes[0]) as u64, 22)
+    rt.write_file((&path_code[0]) as u64, codep, coden)
     return true
 }
 
@@ -2252,19 +2252,19 @@ fn kopplung_bestaetigt(codep: u64, coden: usize) -> bool {
 // ====================================================================
 
 fn word_send(d: *mut Wire, w: str, arg: u64, argn: usize) -> bool {
-    var kopf: rt.Buf = rt.buf_new()
-    rt.buf_push_bytes(&kopf, w.p as u64, w.n)
+    var head: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&head, w.p as u64, w.n)
     if argn > 0 {
-        rt.buf_push(&kopf, 32 as u8)
-        rt.buf_push_bytes(&kopf, arg, argn)
+        rt.buf_push(&head, 32 as u8)
+        rt.buf_push_bytes(&head, arg, argn)
     }
-    let ok: bool = sende(d, &kopf, 0, 0 as usize)
-    rt.buf_free(&kopf)
+    let ok: bool = sende(d, &head, 0, 0 as usize)
+    rt.buf_free(&head)
     return ok
 }
 
 // 0 = angemeldet, 1 = abgelehnt, 2 = Verbindung weg.
-fn anmelden(d: *mut Wire) -> u64 {
+fn sign_in(d: *mut Wire) -> u64 {
     var hallo: rt.Buf = rt.buf_new()
     var h: [u8; 16] = "osum-bridge 1\0\0\0"  // DRAHT: bridge greeting
     rt.buf_push_bytes(&hallo, (&h[0]) as u64, 13)
@@ -2278,7 +2278,7 @@ fn anmelden(d: *mut Wire) -> u64 {
     var w_aus: [u8; 5] = "init\0"
     if !jsig_rufen((&w_aus[0]) as u64, 0, &id) {
         rt.buf_free(&id)
-        sag("jarvisd: /bin/jsig returned no key (run `jsig init`)\n")
+        say("jarvisd: /bin/jsig returned no key (run `jsig init`)\n")
         return 1
     }
     var pv: usize = 0
@@ -2305,19 +2305,19 @@ fn anmelden(d: *mut Wire) -> u64 {
     var pair_last: [u8; 24] = [0; 24]
     var pair_last_n: usize = 0
 
-    var zeile: rt.Buf = rt.buf_new()
+    var line: rt.Buf = rt.buf_new()
     var f: Felder = Felder { off: [0; 10], len: [0; 10], n: 0 }
     var ergebnis: u64 = 2
     while true {
-        if !wire_line(d, &zeile) {
+        if !wire_line(d, &line) {
             ergebnis = 2
             break
         }
-        zerlege(zeile.ptr, zeile.len, &f)
+        zerlege(line.ptr, line.len, &f)
         if f.n == 0 {
             continue
         }
-        let wp: u64 = zeile.ptr + f.off[0] as u64
+        let wp: u64 = line.ptr + f.off[0] as u64
         let wn: usize = f.len[0]
         var w_challenge: [u8; 10] = "challenge\0"
         var w_welcome: [u8; 8] = "welcome\0"
@@ -2326,12 +2326,12 @@ fn anmelden(d: *mut Wire) -> u64 {
         if ist(wp, wn, (&w_challenge[0]) as u64) && f.n >= 2 {
             var nonce: [u8; 260] = [0; 260]
             let nn: usize = hinein((&nonce[0]) as u64, 260 as usize,
-                zeile.ptr + f.off[1] as u64, f.len[1])
+                line.ptr + f.off[1] as u64, f.len[1])
             var w_sig: [u8; 5] = "sign\0"
             var sigb: rt.Buf = rt.buf_new()
             if !jsig_rufen((&w_sig[0]) as u64, (&nonce[0]) as u64, &sigb) {
                 rt.buf_free(&sigb)
-                sag("jarvisd: /bin/jsig did not sign\n")
+                say("jarvisd: /bin/jsig did not sign\n")
                 ergebnis = 1
                 break
             }
@@ -2350,7 +2350,7 @@ fn anmelden(d: *mut Wire) -> u64 {
                 break
             }
         } else if ist(wp, wn, (&w_pairing[0]) as u64) && f.n >= 2 {
-            let cp: u64 = zeile.ptr + f.off[1] as u64
+            let cp: u64 = line.ptr + f.off[1] as u64
             let cn: usize = f.len[1]
             var shown: rt.Buf = rt.buf_new()
             var sp: u64 = cp
@@ -2373,16 +2373,16 @@ fn anmelden(d: *mut Wire) -> u64 {
                 }
                 if left == 0 {
                     pairstate.write_none()
-                    sag("jarvisd: pairing code expired -- nobody entered it in the web UI\n")
+                    say("jarvisd: pairing code expired -- nobody entered it in the web UI\n")
                     z_abgelehnt = z_abgelehnt + 1
                     rt.buf_free(&shown)
                     ergebnis = 1
                     break
                 }
                 if !eq((&pair_last[0]) as u64, pair_last_n, sp, sn) {
-                    sag("jarvisd: PAIRING CODE ")
-                    sag_oktette(sp, sn)
-                    sag("\n         Enter it in the JARVIS web UI (Devices)\n")
+                    say("jarvisd: PAIRING CODE ")
+                    say_octets(sp, sn)
+                    say("\n         Enter it in the JARVIS web UI (Devices)\n")
                     pair_last_n = hinein((&pair_last[0]) as u64, 24 as usize, sp, sn)
                     var p_code: [u8; 20] = "/var/jarvis/pairing\0"
                     rt.write_file((&p_code[0]) as u64, sp, sn)
@@ -2397,11 +2397,11 @@ fn anmelden(d: *mut Wire) -> u64 {
                 }
                 continue
             }
-            sag("jarvisd: PAIRING CODE ")
-            sag_oktette(sp, sn)
-            sag("\n         Confirm on THIS device with: jarvisctl pair ")
-            sag_oktette(sp, sn)
-            sag("\n")
+            say("jarvisd: PAIRING CODE ")
+            say_octets(sp, sn)
+            say("\n         Confirm on THIS device with: jarvisctl pair ")
+            say_octets(sp, sn)
+            say("\n")
             pairstate.write_confirm(sp, sn)
             let confirmed: bool = kopplung_bestaetigt(sp, sn)
             rt.buf_free(&shown)
@@ -2418,7 +2418,7 @@ fn anmelden(d: *mut Wire) -> u64 {
                 var g: [u8; 28] = "not confirmed on the device\0"
                 notiere((&a2[0]) as u64, 7, "rejected", (&g[0]) as u64, 27)
                 z_abgelehnt = z_abgelehnt + 1
-                sag("jarvisd: pairing REJECTED -- nobody confirmed it on this device\n")
+                say("jarvisd: pairing REJECTED -- nobody confirmed it on this device\n")
                 ergebnis = 1
                 break
             }
@@ -2431,12 +2431,12 @@ fn anmelden(d: *mut Wire) -> u64 {
             ergebnis = 0
             break
         } else if ist(wp, wn, (&w_drop[0]) as u64) {
-            sag("jarvisd: the server rejected the sign-in\n")
+            say("jarvisd: the server rejected the sign-in\n")
             ergebnis = 1
             break
         }
     }
-    rt.buf_free(&zeile)
+    rt.buf_free(&line)
     rt.buf_free(&pubhex)
     return ergebnis
 }
@@ -2446,12 +2446,12 @@ fn anmelden(d: *mut Wire) -> u64 {
 // ====================================================================
 
 fn bediene(d: *mut Wire) -> bool {
-    var zeile: rt.Buf = rt.buf_new()
+    var line: rt.Buf = rt.buf_new()
     var nutz: rt.Buf = rt.buf_new()
     var aus: rt.Buf = rt.buf_new()
     var arg1: rt.Buf = rt.buf_new()
     var f: Felder = Felder { off: [0; 10], len: [0; 10], n: 0 }
-    var sauber: bool = true
+    var clean: bool = true
     var ruhe: u64 = 0
     while true {
         // Over 443 nothing arrives on its own: every message is one
@@ -2474,7 +2474,7 @@ fn bediene(d: *mut Wire) -> bool {
                 versuche = versuche + 1
             }
             if !sent_ok {
-                sauber = false
+                clean = false
                 break
             }
             if (*d).at >= (*d).puf.len {
@@ -2490,15 +2490,15 @@ fn bediene(d: *mut Wire) -> bool {
             }
             ruhe = 0
         }
-        if !wire_line(d, &zeile) {
-            sauber = false
+        if !wire_line(d, &line) {
+            clean = false
             break
         }
-        zerlege(zeile.ptr, zeile.len, &f)
+        zerlege(line.ptr, line.len, &f)
         if f.n == 0 {
             continue
         }
-        let wp: u64 = zeile.ptr + f.off[0] as u64
+        let wp: u64 = line.ptr + f.off[0] as u64
         let wn: usize = f.len[0]
         var w_bye: [u8; 4] = "bye\0"
         var w_job: [u8; 4] = "job\0"
@@ -2509,8 +2509,8 @@ fn bediene(d: *mut Wire) -> bool {
         if ist(wp, wn, (&w_drop[0]) as u64) {
             // Server dropped the session (token expired, device
             // blocked). Sign in again in a fresh round.
-            sag("jarvisd: the server ended the session\n")
-            sauber = false
+            say("jarvisd: the server ended the session\n")
+            clean = false
             break
         }
         if !ist(wp, wn, (&w_job[0]) as u64) {
@@ -2520,31 +2520,31 @@ fn bediene(d: *mut Wire) -> bool {
         if f.n < 4 {
             continue
         }
-        let laenge: usize = num_from(zeile.ptr + f.off[f.n - 1] as u64,
+        let length: usize = num_from(line.ptr + f.off[f.n - 1] as u64,
             f.len[f.n - 1]) as usize
-        if laenge > MAXNUTZ {
-            sag("jarvisd: payload over the hard limit -- stopping\n")
+        if length > MAXNUTZ {
+            say("jarvisd: payload over the hard limit -- stopping\n")
             var a: [u8; 8] = "request\0"
             var g: [u8; 28] = "payload over the hard limit\0"
             notiere((&a[0]) as u64, 7, "REJECTED", (&g[0]) as u64, 27)
             z_abgelehnt = z_abgelehnt + 1
-            sauber = false
+            clean = false
             break
         }
-        if !wire_bytes(d, laenge, &nutz) {
-            sauber = false
+        if !wire_bytes(d, length, &nutz) {
+            clean = false
             break
         }
         conf_read()
         z_auftraege = z_auftraege + 1
 
-        let idp: u64 = zeile.ptr + f.off[1] as u64
+        let idp: u64 = line.ptr + f.off[1] as u64
         let idn: usize = f.len[1]
-        let artp: u64 = zeile.ptr + f.off[2] as u64
+        let artp: u64 = line.ptr + f.off[2] as u64
         let artn: usize = f.len[2]
         rt.buf_clear(&arg1)
         if f.n >= 5 {
-            hex_out(zeile.ptr + f.off[3] as u64, f.len[3], &arg1)
+            hex_out(line.ptr + f.off[3] as u64, f.len[3], &arg1)
         }
         var w_sys: [u8; 7] = "system\0"
         var e_read: [u8; 5] = "read\0"
@@ -2579,31 +2579,31 @@ fn bediene(d: *mut Wire) -> bool {
         } else {
             notiere(artp, artn, "REJECTED", aus.ptr, aus.len)
         }
-        var kopf: rt.Buf = rt.buf_new()
+        var head: rt.Buf = rt.buf_new()
         var w_done: [u8; 5] = "done\0"
-        rt.buf_push_bytes(&kopf, (&w_done[0]) as u64, 4)
-        rt.buf_push(&kopf, 32 as u8)
-        rt.buf_push_bytes(&kopf, idp, idn)
-        rt.buf_push(&kopf, 32 as u8)
+        rt.buf_push_bytes(&head, (&w_done[0]) as u64, 4)
+        rt.buf_push(&head, 32 as u8)
+        rt.buf_push_bytes(&head, idp, idn)
+        rt.buf_push(&head, 32 as u8)
         if gut {
             var s_ok: [u8; 3] = "ok\0"
-            rt.buf_push_bytes(&kopf, (&s_ok[0]) as u64, 2)
+            rt.buf_push_bytes(&head, (&s_ok[0]) as u64, 2)
         } else {
             var s_failed: [u8; 7] = "failed\0"
-            rt.buf_push_bytes(&kopf, (&s_failed[0]) as u64, 6)
+            rt.buf_push_bytes(&head, (&s_failed[0]) as u64, 6)
         }
-        let okk: bool = sende(d, &kopf, aus.ptr, aus.len)
-        rt.buf_free(&kopf)
+        let okk: bool = sende(d, &head, aus.ptr, aus.len)
+        rt.buf_free(&head)
         if !okk {
-            sauber = false
+            clean = false
             break
         }
     }
-    rt.buf_free(&zeile)
+    rt.buf_free(&line)
     rt.buf_free(&nutz)
     rt.buf_free(&aus)
     rt.buf_free(&arg1)
-    return sauber
+    return clean
 }
 
 // ====================================================================
@@ -2630,20 +2630,20 @@ fn eine_runde_https() -> u64 {
         let _rc: u64 = dns.conf_load()
         let a4: u64 = dns.resolve_a((&wirt[0]) as u64)
         if a4 == 0 {
-            sag("jarvisd: cannot resolve the name\n")
+            say("jarvisd: cannot resolve the name\n")
             return 2
         }
         k_ip = a4 as u32
         k_port = 443 as u32
-        sag("jarvisd: ")
-        zeig_ip("", k_ip as u64)
+        say("jarvisd: ")
+        show_ip("", k_ip as u64)
     }
 
     var d: Wire = wire_new_https()
     var erg: u64 = 2
-    let an: u64 = anmelden(&d)
+    let an: u64 = sign_in(&d)
     if an == 0 {
-        sag("jarvisd: signed in\n")
+        say("jarvisd: signed in\n")
         var a: [u8; 8] = "session\0"
         notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
         z_sitzungen = z_sitzungen + 1
@@ -2688,7 +2688,7 @@ fn eine_runde() -> u64 {
         wurzeln = x509.store_load_pem(&store, storebuf.ptr, storebuf.len)
     }
     if wurzeln == 0 {
-        sag("jarvisd: no root store -- nothing is trusted\n")
+        say("jarvisd: no root store -- nothing is trusted\n")
     }
     var t: tls.Tls = tls.tls_new()
     let oki: bool = tls.tls_init(&t, &c, &store, (&k_name[0]) as u64,
@@ -2696,9 +2696,9 @@ fn eine_runde() -> u64 {
     var hschief: bool = false
     let okh: bool = tls.tls_handshake(&t) catch | e | fail_bool(&hschief)
     if hschief || !tls.tls_established(&t) {
-        sag("jarvisd: TLS handshake failed, reason ")
+        say("jarvisd: TLS handshake failed, reason ")
         say_num(tls.tls_verify_reason(&t) as u64)
-        sag("\n")
+        say("\n")
         var a: [u8; 4] = "tls\0"
         var g: [u8; 27] = "certificate not accepted\0\0\0"
         notiere((&a[0]) as u64, 3, "REJECTED", (&g[0]) as u64, 24)
@@ -2709,17 +2709,17 @@ fn eine_runde() -> u64 {
         return 2
     }
     z_verbindungen = z_verbindungen + 1
-    sag("jarvisd: connected, cipher ")
+    say("jarvisd: connected, cipher ")
     say_num(tls.tls_suite(&t) as u64)
-    sag(", certificates ")
+    say(", certificates ")
     say_num(tls.tls_peer_cert_count(&t) as u64)
-    sag("\n")
+    say("\n")
 
     var d: Wire = wire_new(&t)
     var erg: u64 = 2
-    let an: u64 = anmelden(&d)
+    let an: u64 = sign_in(&d)
     if an == 0 {
-        sag("jarvisd: signed in\n")
+        say("jarvisd: signed in\n")
         var a: [u8; 8] = "session\0"
         notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
         z_sitzungen = z_sitzungen + 1
@@ -2762,7 +2762,7 @@ fn probe() -> i32 {
     var name: [u8; 32] = "/var/jarvis/probe.txt\0\0\0\0\0\0\0\0\0\0\0"
     let a: i64 = sys_open((&name[0]) as u64, O_WRONLY | O_CREAT | O_TRUNC, 420)
     if a < 0 {
-        sag("probe: die Datei laesst sich nicht anlegen\n")
+        say("probe: die Datei laesst sich nicht anlegen\n")
         return 1
     }
     var text: [u8; 6] = "hallo\0"
@@ -2771,120 +2771,120 @@ fn probe() -> i32 {
     // 2 = O_RDWR: beide Rechte im Handle.
     let fd: i64 = sys_open((&name[0]) as u64, 2, 0)
     if fd < 0 {
-        sag("probe: die Datei laesst sich nicht oeffnen\n")
+        say("probe: die Datei laesst sich nicht oeffnen\n")
         return 1
     }
-    sag("probe: rechte_offen ")
+    say("probe: rechte_offen ")
     say_num(hnd_rechte(fd) as u64)
-    sag("\n")
+    say("\n")
     let eng: i64 = hnd_dup(fd, R_READ | R_INSPECT | R_SEEK)
     if eng < 0 {
-        sag("probe: HND_DUP ging nicht\n")
+        say("probe: HND_DUP ging nicht\n")
         sys_close(fd)
         return 1
     }
     sys_close(fd)
     let rr: i64 = hnd_rechte(eng)
-    sag("probe: rechte_eng ")
+    say("probe: rechte_eng ")
     say_num(rr as u64)
-    sag("\n")
-    sag("probe: hat_schreibrecht ")
+    say("\n")
+    say("probe: hat_schreibrecht ")
     if (rr & R_WRITE) != 0 {
-        sag("ja")
+        say("ja")
     } else {
-        sag("nein")
+        say("nein")
     }
-    sag("\n")
-    var neu: [u8; 6] = "boese\0"
-    let w: i64 = sys_write(eng, (&neu[0]) as u64, 5 as usize)
-    sag("probe: schreibversuch ")
+    say("\n")
+    var fresh: [u8; 6] = "boese\0"
+    let w: i64 = sys_write(eng, (&fresh[0]) as u64, 5 as usize)
+    say("probe: schreibversuch ")
     if w < 0 {
-        sag("abgewiesen ")
+        say("abgewiesen ")
         say_num((0 - w) as u64)
     } else {
-        sag("DURCHGELASSEN ")
+        say("DURCHGELASSEN ")
         say_num(w as u64)
     }
-    sag("\n")
+    say("\n")
     var chunk: [u8; 16] = [0; 16]
     let r: i64 = sys_read(eng, (&chunk[0]) as u64, 16 as usize)
-    sag("probe: gelesen ")
+    say("probe: gelesen ")
     if r > 0 {
         say_num(r as u64)
-        sag(" ")
-        sag_oktette((&chunk[0]) as u64, r as usize)
+        say(" ")
+        say_octets((&chunk[0]) as u64, r as usize)
     } else {
         say_num(0)
     }
-    sag("\n")
+    say("\n")
     sys_close(eng)
     return 0
 }
 
 fn screen() -> i32 {
-    sag("schirm: shot ")
+    say("schirm: shot ")
     say_num(syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0) as u64)
-    sag(" shotw ")
+    say(" shotw ")
     say_num(syscall(S_SHOT, SH_INFO, SI_WIDTH, 0, 0, 0, 0) as u64)
-    sag(" shoth ")
+    say(" shoth ")
     say_num(syscall(S_SHOT, SH_INFO, SI_HEIGHT, 0, 0, 0, 0) as u64)
-    sag(" w ")
+    say(" w ")
     say_num(syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0) as u64)
-    sag(" h ")
+    say(" h ")
     say_num(syscall(S_WIGSCREEN, WS_H, 0, 0, 0, 0, 0) as u64)
-    sag(" pitch ")
+    say(" pitch ")
     say_num(syscall(S_DISPGET, DG_PITCH, 0, 0, 0, 0, 0) as u64)
-    sag(" bpp ")
+    say(" bpp ")
     say_num(syscall(S_DISPGET, DG_BPP, 0, 0, 0, 0, 0) as u64)
     var fbname: [u8; 8] = "/dev/fb\0"
     let fd: i64 = sys_open((&fbname[0]) as u64, 0, 0)
-    sag(" devfb ")
+    say(" devfb ")
     say_num(fd as u64)
     if fd >= 0 {
         sys_close(fd)
     }
-    sag("\n")
+    say("\n")
     return 0
 }
 
 //     jarvisd -f /var/jarvis/schirm.ppm
-fn ppm_over_kernel(pfad: u64, w: i64, h: i64) -> i32 {
+fn ppm_over_kernel(path: u64, w: i64, h: i64) -> i32 {
     let rb: i64 = syscall(S_SHOT, SH_INFO, SI_ROWBYTES, 0, 0, 0, 0)
     var zpc: i64 = syscall(S_SHOT, SH_INFO, SI_CHUNKROWS, 0, 0, 0, 0)
     if rb <= 0 {
-        sag("jarvisd: the kernel reports no line pitch\n")
+        say("jarvisd: the kernel reports no line pitch\n")
         return 2
     }
     if zpc <= 0 {
         zpc = 1
     }
-    let out: i64 = sys_open(pfad, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    let out: i64 = sys_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
     if out < 0 {
-        sag("jarvisd: cannot create the target file\n")
+        say("jarvisd: cannot create the target file\n")
         return 2
     }
     let arm: i64 = syscall(S_SHOT, SH_ARM, 0, 0, 0, 0, 0)
     if arm < 0 {
         sys_close(out)
-        sag("jarvisd: the kernel issues no permit (SH_ARM rejected)\n")
+        say("jarvisd: the kernel issues no permit (SH_ARM rejected)\n")
         return 2
     }
-    var kopf: rt.Buf = rt.buf_new()
+    var head: rt.Buf = rt.buf_new()
     var p6: [u8; 4] = "P6\n\0"
-    rt.buf_push_bytes(&kopf, (&p6[0]) as u64, 3)
-    rt.buf_push_dec_u64(&kopf, w as u64)
-    rt.buf_push(&kopf, 32 as u8)
-    rt.buf_push_dec_u64(&kopf, h as u64)
-    rt.buf_push(&kopf, 10 as u8)
+    rt.buf_push_bytes(&head, (&p6[0]) as u64, 3)
+    rt.buf_push_dec_u64(&head, w as u64)
+    rt.buf_push(&head, 32 as u8)
+    rt.buf_push_dec_u64(&head, h as u64)
+    rt.buf_push(&head, 10 as u8)
     var m255: [u8; 5] = "255\n\0"
-    rt.buf_push_bytes(&kopf, (&m255[0]) as u64, 4)
-    let _hk: i64 = sys_write(out, kopf.ptr, kopf.len)
-    rt.buf_free(&kopf)
-    let zeile: usize = rb as usize
+    rt.buf_push_bytes(&head, (&m255[0]) as u64, 4)
+    let _hk: i64 = sys_write(out, head.ptr, head.len)
+    rt.buf_free(&head)
+    let line: usize = rb as usize
     let bandzeilen: usize = zpc as usize
     var band: rt.Buf = rt.buf_new()
-    rt.buf_reserve(&band, bandzeilen * zeile)
-    rt.buf_set_len(&band, bandzeilen * zeile)
+    rt.buf_reserve(&band, bandzeilen * line)
+    rt.buf_set_len(&band, bandzeilen * line)
     var y: usize = 0
     var schief: bool = false
     while y < (h as usize) {
@@ -2893,7 +2893,7 @@ fn ppm_over_kernel(pfad: u64, w: i64, h: i64) -> i32 {
             will = (h as usize) - y
         }
         let n: i64 = syscall(S_SHOT, SH_GRAB, band.ptr as i64,
-            (will * zeile) as i64, 0, 0, 0)
+            (will * line) as i64, 0, 0, 0)
         if n <= 0 {
             schief = true
             break
@@ -2910,43 +2910,43 @@ fn ppm_over_kernel(pfad: u64, w: i64, h: i64) -> i32 {
         if schief {
             break
         }
-        y = y + ((n as usize) / zeile)
+        y = y + ((n as usize) / line)
     }
     rt.buf_free(&band)
     sys_close(out)
     if schief {
         syscall(S_SHOT, SH_DROP, 0, 0, 0, 0, 0)
-        sag("jarvisd: the kernel returned an incomplete image\n")
+        say("jarvisd: the kernel returned an incomplete image\n")
         return 2
     }
-    sag("jarvisd: screenshot written (kernel permit), ")
+    say("jarvisd: screenshot written (kernel permit), ")
     say_num(w as u64)
-    sag("x")
+    say("x")
     say_num(h as u64)
-    sag("\n")
+    say("\n")
     return 0
 }
 
-fn photo_file(pfad: u64) -> i32 {
+fn photo_file(path: u64) -> i32 {
     var w: i64 = 0
     var h: i64 = 0
-    let bereit: i64 = syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0)
-    var ueber_kern: bool = false
-    if bereit > 0 {
+    let ready: i64 = syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0)
+    var via_kernel: bool = false
+    if ready > 0 {
         w = syscall(S_SHOT, SH_INFO, SI_WIDTH, 0, 0, 0, 0)
         h = syscall(S_SHOT, SH_INFO, SI_HEIGHT, 0, 0, 0, 0)
-        ueber_kern = w > 0 && h > 0
+        via_kernel = w > 0 && h > 0
     }
-    if !ueber_kern {
+    if !via_kernel {
         w = syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0)
         h = syscall(S_WIGSCREEN, WS_H, 0, 0, 0, 0, 0)
     }
     if w <= 0 || h <= 0 {
-        sag("jarvisd: no screen size -- is the window server running?\n")
+        say("jarvisd: no screen size -- is the window server running?\n")
         return 2
     }
-    if ueber_kern {
-        return ppm_over_kernel(pfad, w, h)
+    if via_kernel {
+        return ppm_over_kernel(path, w, h)
     }
     var pitch: i64 = syscall(S_DISPGET, DG_PITCH, 0, 0, 0, 0, 0)
     var bpp: i64 = syscall(S_DISPGET, DG_BPP, 0, 0, 0, 0, 0)
@@ -2959,47 +2959,47 @@ fn photo_file(pfad: u64) -> i32 {
     var fbname: [u8; 8] = "/dev/fb\0"
     let fd: i64 = sys_open((&fbname[0]) as u64, 0, 0)
     if fd < 0 {
-        sag("jarvisd: cannot open /dev/fb\n")
+        say("jarvisd: cannot open /dev/fb\n")
         return 2
     }
-    let out: i64 = sys_open(pfad, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    let out: i64 = sys_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
     if out < 0 {
         sys_close(fd)
-        sag("jarvisd: cannot create the target file\n")
+        say("jarvisd: cannot create the target file\n")
         return 2
     }
     // Der Kopf.
-    var kopf: rt.Buf = rt.buf_new()
+    var head: rt.Buf = rt.buf_new()
     var p6: [u8; 4] = "P6\n\0"
-    rt.buf_push_bytes(&kopf, (&p6[0]) as u64, 3)
-    rt.buf_push_dec_u64(&kopf, w as u64)
-    rt.buf_push(&kopf, 32 as u8)
-    rt.buf_push_dec_u64(&kopf, h as u64)
-    rt.buf_push(&kopf, 10 as u8)
+    rt.buf_push_bytes(&head, (&p6[0]) as u64, 3)
+    rt.buf_push_dec_u64(&head, w as u64)
+    rt.buf_push(&head, 32 as u8)
+    rt.buf_push_dec_u64(&head, h as u64)
+    rt.buf_push(&head, 10 as u8)
     var m255: [u8; 5] = "255\n\0"
-    rt.buf_push_bytes(&kopf, (&m255[0]) as u64, 4)
-    let _hk: i64 = sys_write(out, kopf.ptr, kopf.len)
-    rt.buf_free(&kopf)
-    let breite: usize = w as usize
-    let zeile: usize = pitch as usize
+    rt.buf_push_bytes(&head, (&m255[0]) as u64, 4)
+    let _hk: i64 = sys_write(out, head.ptr, head.len)
+    rt.buf_free(&head)
+    let width: usize = w as usize
+    let line: usize = pitch as usize
     var zpuf: rt.Buf = rt.buf_new()
     var apuf: rt.Buf = rt.buf_new()
     // RUNDE HAERTUNG-2: beide Puffer, bevor irgendetwas hineingeht.
-    if !rt.buf_reserve(&zpuf, zeile) || !rt.buf_reserve(&apuf, breite * 3) {
+    if !rt.buf_reserve(&zpuf, line) || !rt.buf_reserve(&apuf, width * 3) {
         rt.buf_free(&zpuf)
         rt.buf_free(&apuf)
         sys_close(fd)
-        sag("jarvisd: out of memory for the line buffers\n")
+        say("jarvisd: out of memory for the line buffers\n")
         return 2
     }
-    rt.buf_set_len(&zpuf, zeile)
-    rt.buf_set_len(&apuf, breite * 3)
+    rt.buf_set_len(&zpuf, line)
+    rt.buf_set_len(&apuf, width * 3)
     var y: usize = 0
     var schief: bool = false
     while y < (h as usize) {
         var da: usize = 0
-        while da < zeile {
-            let n: i64 = sys_read(fd, zpuf.ptr + da as u64, zeile - da)
+        while da < line {
+            let n: i64 = sys_read(fd, zpuf.ptr + da as u64, line - da)
             if n <= 0 {
                 schief = true
                 break
@@ -3010,14 +3010,14 @@ fn photo_file(pfad: u64) -> i32 {
             break
         }
         var x: usize = 0
-        while x < breite {
+        while x < width {
             let off: usize = x * ((bpp / 8) as usize)
             rt.st8(apuf.ptr, x * 3, rt.ld8(zpuf.ptr, off + 2))
             rt.st8(apuf.ptr, x * 3 + 1, rt.ld8(zpuf.ptr, off + 1))
             rt.st8(apuf.ptr, x * 3 + 2, rt.ld8(zpuf.ptr, off))
             x = x + 1
         }
-        let _wz: i64 = sys_write(out, apuf.ptr, breite * 3)
+        let _wz: i64 = sys_write(out, apuf.ptr, width * 3)
         y = y + 1
     }
     rt.buf_free(&zpuf)
@@ -3025,142 +3025,142 @@ fn photo_file(pfad: u64) -> i32 {
     sys_close(fd)
     sys_close(out)
     if schief {
-        sag("jarvisd: /dev/fb ends in the middle of the image\n")
+        say("jarvisd: /dev/fb ends in the middle of the image\n")
         return 2
     }
-    sag("jarvisd: foto ")
+    say("jarvisd: foto ")
     say_num(w as u64)
-    sag("x")
+    say("x")
     say_num(h as u64)
-    sag(" ppm ")
-    say_num((15 + breite * 3 * (h as usize)) as u64)
-    sag(" oktette\n")
+    say(" ppm ")
+    say_num((15 + width * 3 * (h as usize)) as u64)
+    say(" oktette\n")
     return 0
 }
 
 //     jarvisd -d
-fn zeig_ip(name: str, v: u64) {
-    sag(name)
+fn show_ip(name: str, v: u64) {
+    say(name)
     say_num((v >> 24) & 255)
-    sag(".")
+    say(".")
     say_num((v >> 16) & 255)
-    sag(".")
+    say(".")
     say_num((v >> 8) & 255)
-    sag(".")
+    say(".")
     say_num(v & 255)
-    sag("\n")
+    say("\n")
 }
 
 fn diagnose() -> i32 {
-    sag("jarvisd: --- startup check ---\n")
+    say("jarvisd: --- startup check ---\n")
     // 1. Der Stapel.
-    let bereit: i64 = syscall(S_NETGET, NG_READY, 0, 0, 0, 0, 0)
-    sag("1 network stack   ")
-    if bereit == 1 {
-        sag("YES\n")
+    let ready: i64 = syscall(S_NETGET, NG_READY, 0, 0, 0, 0, 0)
+    say("1 network stack   ")
+    if ready == 1 {
+        say("YES\n")
     } else {
-        sag("NO -- kernel runs without `nic`, or there is no driver for the chip\n")
+        say("NO -- kernel runs without `nic`, or there is no driver for the chip\n")
     }
     // 2. Adresse, Maske, Tor.
     let ip: u64 = syscall(S_NETGET, NG_IP, 0, 0, 0, 0, 0) as u64
     let mask: u64 = syscall(S_NETGET, NG_MASK, 0, 0, 0, 0, 0) as u64
     let gw: u64 = syscall(S_NETGET, NG_GW, 0, 0, 0, 0, 0) as u64
-    zeig_ip("2 adresse        ", ip)
-    zeig_ip("  maske          ", mask)
-    zeig_ip("3 tor            ", gw)
+    show_ip("2 adresse        ", ip)
+    show_ip("  maske          ", mask)
+    show_ip("3 tor            ", gw)
     if ip == 0 {
-        sag("  -> no address. Run `dhcp` or set nip= on the kernel line.\n")
+        say("  -> no address. Run `dhcp` or set nip= on the kernel line.\n")
     } else if ((ip >> 24) & 255) == 169 && ((ip >> 16) & 255) == 254 {
-        sag("  -> this is the fixed link-local address from the kernel line.\n")
-        sag("     DHCP got nothing. Without a gateway there is no way out.\n")
+        say("  -> this is the fixed link-local address from the kernel line.\n")
+        say("     DHCP got nothing. Without a gateway there is no way out.\n")
     }
     if gw == 0 {
-        sag("  -> NO GATEWAY. Everything outside the local network is unreachable.\n")
+        say("  -> NO GATEWAY. Everything outside the local network is unreachable.\n")
     }
     // 4. Die Rechteliste.
-    sag("4 permissions     ")
+    say("4 permissions     ")
     if conf_read() {
-        sag("read: ")
-        sag_oktette((&konfpfad[0]) as u64, rt.c_length((&konfpfad[0]) as u64))
-        sag("\n")
-        sag("  server         ")
+        say("read: ")
+        say_octets((&konfpfad[0]) as u64, rt.c_length((&konfpfad[0]) as u64))
+        say("\n")
+        say("  server         ")
         if k_https {
-            sag("https://")
+            say("https://")
             rt.write_everything(1, (&k_name[0]) as u64, k_namelen)
-            rt.write_everything(1, (&k_pfad[0]) as u64, k_pfadlen)
-            sag("\n")
+            rt.write_everything(1, (&k_path[0]) as u64, k_pfadlen)
+            say("\n")
         } else if k_ip == 0 as u32 {
-            sag("MISSING -- without `server = a.b.c.d:port` the service does not start\n")
+            say("MISSING -- without `server = a.b.c.d:port` the service does not start\n")
         } else {
-            zeig_ip("", k_ip as u64)
+            show_ip("", k_ip as u64)
         }
-        sag("  commands       ")
+        say("  commands       ")
         if k_befehle {
-            sag("yes\n")
+            say("yes\n")
         } else {
-            sag("no\n")
+            say("no\n")
         }
-        sag("  screenshot     ")
-        if k_foto {
-            sag("yes\n")
+        say("  screenshot     ")
+        if k_photo {
+            say("yes\n")
         } else {
-            sag("no\n")
+            say("no\n")
         }
-        sag("  sysinfo        ")
+        say("  sysinfo        ")
         if k_system {
-            sag("yes\n")
+            say("yes\n")
         } else {
-            sag("no\n")
+            say("no\n")
         }
     } else {
-        sag("MISSING\n")
+        say("MISSING\n")
     }
     // 5. Der Ausweis.
     var kp: [u8; 24] = "/etc/jarvis/device.key\0\0"
     let kfd: i64 = sys_open((&kp[0]) as u64, 0, 0)
-    sag("5 device key      ")
+    say("5 device key      ")
     if kfd >= 0 {
-        sag("present\n")
+        say("present\n")
         sys_close(kfd)
     } else {
-        sag("MISSING -- created on first start (`jsig init`)\n")
+        say("MISSING -- created on first start (`jsig init`)\n")
     }
     // 6. Die Wurzelzertifikate.
     var wp: [u8; 20] = "/etc/ssl/roots.pem\0\0"
     let wfd: i64 = sys_open((&wp[0]) as u64, 0, 0)
-    sag("6 roots           ")
+    say("6 roots           ")
     if wfd >= 0 {
-        sag("present\n")
+        say("present\n")
         sys_close(wfd)
     } else {
-        sag("MISSING -- every TLS connection will be refused\n")
+        say("MISSING -- every TLS connection will be refused\n")
     }
     // 7. Der Bildschirm.
     let _s: i32 = screen()
-    sag("jarvisd: --- end ---\n")
+    say("jarvisd: --- end ---\n")
     return 0
 }
 
 fn bericht() {
-    sag("jarvisd: connections ")
+    say("jarvisd: connections ")
     say_num(z_verbindungen)
-    sag("\njarvisd: jobs ")
+    say("\njarvisd: jobs ")
     say_num(z_auftraege)
-    sag("\njarvisd: rejected ")
+    say("\njarvisd: rejected ")
     say_num(z_abgelehnt)
-    sag("\njarvisd: wait_ms ")
+    say("\njarvisd: wait_ms ")
     say_num(z_wartems)
-    sag("\njarvisd: calls_while_waiting ")
+    say("\njarvisd: calls_while_waiting ")
     say_num(z_warteaufrufe)
-    sag("\n")
+    say("\n")
 }
 
 fn main(start: u64) -> i32 {
-    var p_konf: [u8; 31] = "/etc/jarvis/permissions.conf\0\0\0"
-    hinein((&konfpfad[0]) as u64, MAXPFAD, (&p_konf[0]) as u64, 28)
+    var p_conf: [u8; 31] = "/etc/jarvis/permissions.conf\0\0\0"
+    hinein((&konfpfad[0]) as u64, MAXPFAD, (&p_conf[0]) as u64, 28)
     var einmal: bool = false
     var nurlesen: bool = false
-    var frist: u64 = 0
+    var deadline: u64 = 0
 
     let argc: usize = rt.arg_count(start)
     var i: usize = 1
@@ -3179,7 +3179,7 @@ fn main(start: u64) -> i32 {
                 i = i + 1
                 if i < argc {
                     let q: u64 = rt.arg_ptr(start, i)
-                    frist = num_from(q, rt.c_length(q))
+                    deadline = num_from(q, rt.c_length(q))
                 }
             } else if c == 49 as u8 { // -1
                 einmal = true
@@ -3199,7 +3199,7 @@ fn main(start: u64) -> i32 {
                 if i < argc {
                     return photo_file(rt.arg_ptr(start, i))
                 }
-                sag("jarvisd -f needs a file name\n")
+                say("jarvisd -f needs a file name\n")
                 return 2
             } else if c == 98 as u8 { // -b
                 return bildprobe()
@@ -3218,59 +3218,59 @@ fn main(start: u64) -> i32 {
     // again (the launcher got it) and the watch looked at the wrong task. Fixed in the watch (program name check),
     // tested by tools/svclog/respawn.sh section 2.
     if !conf_read() {
-        sag("jarvisd: /etc/jarvis/permissions.conf missing -- nothing is allowed\n")
+        say("jarvisd: /etc/jarvis/permissions.conf missing -- nothing is allowed\n")
         return 2
     }
-    sag("jarvisd: permissions read ")
-    say_num(n_lesen as u64)
-    sag(" write ")
-    say_num(n_schreiben as u64)
-    sag(" list ")
+    say("jarvisd: permissions read ")
+    say_num(n_read as u64)
+    say(" write ")
+    say_num(n_write as u64)
+    say(" list ")
     say_num(n_auflisten as u64)
-    sag(" commands ")
+    say(" commands ")
     if k_befehle {
-        say_num(n_befehl as u64)
+        say_num(n_command as u64)
     } else {
-        sag("no")
+        say("no")
     }
-    sag(" screenshot ")
-    if k_foto {
-        sag("yes")
+    say(" screenshot ")
+    if k_photo {
+        say("yes")
     } else {
-        sag("no")
+        say("no")
     }
-    sag(" sysinfo ")
+    say(" sysinfo ")
     if k_system {
-        sag("yes")
+        say("yes")
     } else {
-        sag("no")
+        say("no")
     }
-    sag("\n")
+    say("\n")
     if nurlesen {
         return 0
     }
     if k_https {
         if k_namelen == 0 {
-            sag("jarvisd: `transport = https` needs `servername = ...`\n")
+            say("jarvisd: `transport = https` needs `servername = ...`\n")
             return 2
         }
     } else if k_ip == 0 as u32 {
-        sag("jarvisd: no server set in /etc/jarvis/permissions.conf (factory list: everything off).\n")
-        sag("jarvisd: add `transport = https`, `servername = store.fleitec.com`, `path = /bruecke/draht`,\n")
-        sag("jarvisd: or build the image with HP_STICK=1 / JARVIS_CONF=<file>. See `jarvisctl status`.\n")
+        say("jarvisd: no server set in /etc/jarvis/permissions.conf (factory list: everything off).\n")
+        say("jarvisd: add `transport = https`, `servername = store.fleitec.com`, `path = /bruecke/draht`,\n")
+        say("jarvisd: or build the image with HP_STICK=1 / JARVIS_CONF=<file>. See `jarvisctl status`.\n")
         return 2
     }
 
     // r(jarvisd-single): NO SECOND SERVICE. The kernel starts the helper at boot (boot word `jarvis`);
     // somebody who types `jarvisd` afterwards used to get a second supervisor and a second sign-in on
     // the same key (the server saw two sessions fight). Only a start WITHOUT flags is a service start.
-    if argc == 1 && frist == 0 && other_service_running() {
-        sag("jarvisd: already running -- not starting a second one\n")
+    if argc == 1 && deadline == 0 && other_service_running() {
+        say("jarvisd: already running -- not starting a second one\n")
         return 0
     }
 
     // Normal service start (no flags) over 443: run as supervisor + worker.
-    if k_https && argc == 1 && frist == 0 {
+    if k_https && argc == 1 && deadline == 0 {
         if !supervise() {
             return 0
         }
@@ -3279,12 +3279,12 @@ fn main(start: u64) -> i32 {
     var a_start: [u8; 8] = "service\0"
     notiere((&a_start[0]) as u64, 7, "started", 0, 0 as usize)
     pairstate.write_none()
-    sag("jarvisd: ready\n")
+    say("jarvisd: ready\n")
 
     let t0: u64 = now_ms()
-    var warte: u64 = 250
+    var wait: u64 = 250
     while true {
-        if frist > 0 && now_ms() - t0 > frist {
+        if deadline > 0 && now_ms() - t0 > deadline {
             break
         }
         let sitz0: u64 = z_sitzungen
@@ -3294,38 +3294,38 @@ fn main(start: u64) -> i32 {
         // of the network: the first retry comes after 250 ms, not after the
         // 30 s that an old failure had left in `warte`.
         if z_sitzungen > sitz0 && now_ms() - k_session_ms >= GOOD_SESSION_MS {
-            warte = 250
+            wait = 250
         }
         if erg == 0 {
-            sag("jarvisd: the server said goodbye\n")
+            say("jarvisd: the server said goodbye\n")
             if einmal {
                 break
             }
-            warte = 250
+            wait = 250
         } else if erg == 1 {
             if einmal {
                 break
             }
-            warte = 30000
+            wait = 30000
         } else {
             if einmal && z_verbindungen > 0 {
                 break
             }
         }
-        if frist > 0 && now_ms() - t0 > frist {
+        if deadline > 0 && now_ms() - t0 > deadline {
             break
         }
         say_if_loud("jarvisd: waiting\n")
         let a0: i64 = sysinfo(I_SYSCALLS)
-        schlafe_ms(warte)
+        schlafe_ms(wait)
         let a1: i64 = sysinfo(I_SYSCALLS)
         if a1 > a0 {
             z_warteaufrufe = z_warteaufrufe + ((a1 - a0) as u64)
         }
-        z_wartems = z_wartems + warte
-        warte = warte * 2
-        if warte > 30000 {
-            warte = 30000
+        z_wartems = z_wartems + wait
+        wait = wait * 2
+        if wait > 30000 {
+            wait = 30000
         }
     }
     bericht()

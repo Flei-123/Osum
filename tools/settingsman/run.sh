@@ -137,12 +137,12 @@ if "manifest.page_find(" not in src: bad("page_accounts does not read the manife
 if '__include_str("settings.d/network.bind")' not in src: bad("the network binding names are not embedded in settings.fi")
 if "fuiscene.label(left, (&l_nzust" in src: bad("the Network page is built by hand again")
 if '__include_str("settings.d/display.bind")' not in src: bad("the display binding names are not embedded in settings.fi")
-if "fuiscene.label(left, (&l_schirm" in src: bad("the Display page is built by hand again")
+if "fuiscene.label(left, (&l_screen" in src: bad("the Display page is built by hand again")
 if '__include_str("settings.d/personal.bind")' not in src: bad("the personal binding names are not embedded in settings.fi")
 for fnname in ("page_taskbar", "page_effects", "page_usbnet", "page_proto", "page_update", "page_vorl"):
     m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
     if not m or "page_man(4," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
-for fnname in ("page_sync", "page_bruecke", "page_system", "page_rechte", "page_netv"):
+for fnname in ("page_sync", "page_bridge", "page_system", "page_rechte", "page_netv"):
     m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
     if not m or "page_man(5," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
 if '__include_str("settings.d/tools.bind")' not in src: bad("the tools binding names are not embedded in settings.fi")
