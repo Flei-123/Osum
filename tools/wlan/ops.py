@@ -71,12 +71,15 @@ def check_seq(hw):
     out = run(["seq" + mode])
     c = cmds(out)
     ids = [x[0] for x in c]
-    want = [0x08, 0x28, 0x2B, 0x0C, 0x18, 0x28, 0x0D, 0x08] + ([0x17, 0x17] if hw else []) + [0x1C]
+    want = [0x18, 0x08, 0x28, 0x2B, 0x0C, 0x18, 0x28, 0x0D, 0x08] + ([0x17, 0x17] if hw else []) + [0x1C]
     ok(ids == want, "command ids %s" % " ".join("%02x" % i for i in ids))
     ok([le(x, 2, 2) & 0xFF for x in c] == list(range(1, len(c) + 1)), "command slots count up")
     rc = [l for l in out if l.startswith("rc ")][0].split()
     ok(rc[1:7] == ["0"] * 6 and rc[7] == "30", "all operations returned 0, send returned 30")
     ok(rc[9] == ("2" if hw else "0") and rc[11] == ("1" if hw else "0"), "keys sent / ccmp flag as %s mode" % mode)
+    aux = c[0]
+    c = c[1:]
+    ok(aux[4 + 16] == 1 and le(aux, 4 + 4, 4) == 4 and le(aux, 4 + 2, 2) == 0xFFFF and le(aux, 4 + 40, 4) == 2, "ADD_STA aux station: id 1, MAC index 4, all TIDs off, queue 1")
     phy_add, mac_add, bind, scfg, sta, mac_mod, scan, phy_mod = c[:8]
     ok(le(phy_add, 4 + 4, 4) == 1 and phy_add[4 + 17] == 1 and phy_add[4 + 16] == 1 and len(phy_add) == 4 + 36, "PHY_CONTEXT add, v1 layout 36 octets, 2.4 GHz channel 1")
     ok(le(phy_mod, 4 + 4, 4) == 2 and phy_mod[4 + 17] == 6 and phy_mod[4 + 16] == 1, "PHY_CONTEXT modify channel 6 2.4 GHz")
@@ -89,6 +92,7 @@ def check_seq(hw):
     scan = scan[:4] + scan[8:]
     nchan = le(scfg, 4, 4) >> 26
     ok(nchan == 35 and scfg[4 + 36:4 + 36 + 4] == bytes([1, 2, 3, 4]), "SCAN_CFG lists 35 channels")
+    ok(le(scfg, 4, 4) & 0x3FFFFFF == 0x2EF09 and le(scfg, 4 + 12, 4) == 0x0FFF0FFF and scfg[4 + 24:4 + 28] == bytes([10, 110, 44, 90]) and scfg[4 + 34] == 1 and scfg[4 + 35] == 0xF, "SCAN_CFG flags/rates/dwell/aux id/channel flags as iwlwifi legacy config v1")
     ok(sta[4 + 8:4 + 14] == BSSID and sta[4] == 0, "ADD_STA peer = BSSID, mode add")
     ok(scan[4 + 33] == 35 and b"HPAP" in scan, "SCAN_REQ_UMAC: 35 channels, direct scan SSID")
     tx = c[-1]
