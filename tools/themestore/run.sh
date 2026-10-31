@@ -2204,11 +2204,11 @@ num "und es ist wirklich angehoben (Regler 40)" "${SIST:-0}" gt 40
 cp "$TMPD/dunkelsett/desktop.png" "$SHOTS/glas-dunkel-alpha-40.png" 2>/dev/null
 
 # ---- 11e. KEIN ZWEITER ORT FUER DIESELBE SACHE.
-RR=$(grep -ac '^fn fill_round(' kernel/ui/wm.fi)
-BL=$(grep -ac '^fn blend(' kernel/ui/wm.fi)
+RR=$(grep -ac '^fn fill_round(' kernel/ui/wm/wmdraw.fi)
+BL=$(grep -ac '^fn blend(' kernel/ui/wm/wmdraw.fi)
 num "genau eine Stelle im Fensterserver malt ein rundes Rechteck" "$RR" eq 1
 num "und genau eine mischt" "$BL" eq 1
-GM=$(grep -ac '^fn glass_mix(' kernel/ui/wm.fi)
+GM=$(grep -ac '^fn glass_mix(' kernel/ui/wm/wmglass.fi)
 num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
 # ---- (fix-r4-2) DIE MARKE DER TEXTPLATTE STEHT IN BEIDEN RINGEN AUF
 #      DERSELBEN ZAHL, UND DIE SCHRIFT WIRD AN EINER STELLE GEDECKT.
@@ -2220,7 +2220,7 @@ num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
 # hier gegeneinander gehalten. Und gesetzt wird sie an EINER Stelle:
 # `wlibc.text_at` ist der einzige Ort in Ring 3, an dem eine Glyphe auf
 # eine Flaeche kommt.
-PM0=$(grep -aoE '^const PLATTE_MARKE: u64 = 0x[0-9A-Fa-f]+' kernel/ui/wm.fi \
+PM0=$(grep -aoE '^const PLATE_MARK: u64 = 0x[0-9A-Fa-f]+' kernel/ui/wm/wmglass.fi \
       | grep -oE '0x[0-9A-Fa-f]+')
 PM3=$(grep -aoE '^const PLATTE: u64 = 0x[0-9A-Fa-f]+' kernel/user/wlibc.fi \
       | grep -oE '0x[0-9A-Fa-f]+')
@@ -2229,7 +2229,7 @@ same "die Marke der Textplatte ist in Ring 0 und Ring 3 dieselbe Zahl" \
 num "und genau eine Stelle in Ring 3 setzt sie" \
     "$(grep -ac '^fn platte(' kernel/user/wlibc.fi)" eq 1
 num "und genau eine in Ring 0 loest sie auf" \
-    "$({ grep -ac '== (PLATTE_MARKE >> 24)' kernel/ui/wm.fi || true; })" eq 1
+    "$({ grep -ac '== (PLATE_MARK >> 24)' kernel/ui/wm/wmglass.fi || true; })" eq 1
 # ---- (fix-r4-4) UND DER ECKENABTASTER STEHT NUR NOCH EINMAL IM BAUM.
 #
 # `corner_cov` stand wortgleich zweimal da -- `wm.fi:1571` fuer den

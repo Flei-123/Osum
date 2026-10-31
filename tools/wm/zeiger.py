@@ -240,7 +240,7 @@ def main():
         print('umriss = b"%s"' % firn(um))
         print('innen  = b"%s"' % firn(inn))
         return 0
-    pfad = sys.argv[1] if len(sys.argv) > 1 else "kernel/ui/wm.fi"
+    pfad = sys.argv[1] if len(sys.argv) > 1 else "kernel/ui/wm/wmcursor.fi"
     m = lies(pfad)
     if m is None:
         return 1

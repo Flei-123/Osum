@@ -589,14 +589,14 @@ def check():
         if bad:
             print('FORBIDDEN register in routine', n, sorted(set(bad))); return 1
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-    src = open(os.path.join(root, "kernel/ui/wm.fi"), encoding="utf-8").read()
+    src = open(os.path.join(root, "kernel/ui/wm/wmblur.fi"), encoding="utf-8").read()
     bad = 0
     if not re.search(r'const BLUR_W_MAX: u64 = 3440\b', src):
         print('MISMATCH: BLUR_W_MAX is not 3440 any more: the row distance 27520 / 55040 in block V must follow'); bad += 1
     for n in BODIES:
         want = embed(n)
         if ('asm("' + want + '"') not in src:
-            print("MISMATCH: routine", n, "in kernel/ui/wm.fi differs from tools/blur/blurasm.py"); bad += 1
+            print("MISMATCH: routine", n, "in kernel/ui/wm/wmblur.fi differs from tools/blur/blurasm.py"); bad += 1
         else:
             print("ok: routine", n)
     return bad
