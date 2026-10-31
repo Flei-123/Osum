@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+import actwire
+import actcli
+
+export { fetch, present, playing, can_prev, can_next, title, artist, app, owner, control }
+static mut L0: [u8; 19] = "call media.current\0"
+static mut L1: [u8; 6] = "state\0"
+static mut L2: [u8; 6] = "title\0"
+static mut L3: [u8; 7] = "artist\0"
+static mut L4: [u8; 4] = "app\0"
+static mut L5: [u8; 6] = "owner\0"
+static mut L6: [u8; 9] = "can_prev\0"
+static mut L7: [u8; 9] = "can_next\0"
+static mut L8: [u8; 8] = "playing\0"
+static mut L9: [u8; 7] = "paused\0"
+static mut L10: [u8; 19] = "call media.control\0"
+static mut L11: [u8; 4] = "cmd\0"
+
+static mut m_present: bool = false
+static mut m_state: u64 = 0
+static mut m_prev: u64 = 0
+static mut m_next: u64 = 0
+static mut m_title: [u8; 96] = [0 as u8; 96]
+static mut m_artist: [u8; 64] = [0 as u8; 64]
+static mut m_app: [u8; 32] = [0 as u8; 32]
+static mut m_owner: [u8; 32] = [0 as u8; 32]
+static mut m_sig: u64 = 0
+
+fn present() -> bool {
+    return m_present
+}
+
+fn playing() -> bool {
+    return m_state == 1
+}
+
+fn can_prev() -> bool {
+    return m_prev != 0
+}
+
+fn can_next() -> bool {
+    return m_next != 0
+}
+
+fn title() -> u64 {
+    return (&m_title[0 as usize]) as u64
+}
+
+fn artist() -> u64 {
+    return (&m_artist[0 as usize]) as u64
+}
+
+fn app() -> u64 {
+    return (&m_app[0 as usize]) as u64
+}
+
+fn owner() -> u64 {
+    return (&m_owner[0 as usize]) as u64
+}
+
+fn mix(h: u64, p: u64) -> u64 {
+    var x: u64 = h
+    var i: u64 = 0
+    while actwire.ld8(p, i) != 0 {
+        x = (x * 131 + actwire.ld8(p, i)) & 0xFFFFFFFFFFFF
+        i = i + 1
+    }
+    return x
+}
+
+fn clear() {
+    m_present = false
+    m_state = 0
+    actwire.st8(title(), 0, 0)
+    actwire.st8(artist(), 0, 0)
+    actwire.st8(app(), 0, 0)
+    actwire.st8(owner(), 0, 0)
+}
+
+fn fetch() -> bool {
+    actcli.req((&L0[0 as usize]) as u64)
+    var st: [u8; 16] = [0 as u8; 16]
+    var num: [u8; 8] = [0 as u8; 8]
+    let sp: u64 = (&st[0 as usize]) as u64
+    let np: u64 = (&num[0 as usize]) as u64
+    if actcli.send(20) == actcli.R_OK && actcli.field((&L1[0 as usize]) as u64, sp, 16) {
+        actcli.field((&L2[0 as usize]) as u64, title(), 96)
+        actcli.field((&L3[0 as usize]) as u64, artist(), 64)
+        actcli.field((&L4[0 as usize]) as u64, app(), 32)
+        actcli.field((&L5[0 as usize]) as u64, owner(), 32)
+        m_prev = 1
+        m_next = 1
+        if actcli.field((&L6[0 as usize]) as u64, np, 8) {
+            m_prev = ulib.to_num(np)
+        }
+        if actcli.field((&L7[0 as usize]) as u64, np, 8) {
+            m_next = ulib.to_num(np)
+        }
+        m_state = 0
+        if actwire.str_eq(sp, (&L8[0 as usize]) as u64) {
+            m_state = 1
+        }
+        if actwire.str_eq(sp, (&L9[0 as usize]) as u64) {
+            m_state = 2
+        }
+        m_present = m_state != 0 && actwire.ld8(title(), 0) != 0
+    } else {
+        clear()
+    }
+    var h: u64 = 7
+    if m_present {
+        h = mix(mix(mix(h, title()), artist()), app()) * 8 + m_state * 4 + m_prev * 2 + m_next + 1
+    }
+    let changed: bool = h != m_sig
+    m_sig = h
+    return changed
+}
+
+fn control(cmd: u64) -> bool {
+    actcli.req((&L10[0 as usize]) as u64)
+    actcli.arg((&L11[0 as usize]) as u64, cmd)
+    actcli.arg((&L5[0 as usize]) as u64, owner())
+    return actcli.send(20) == actcli.R_OK
+}
