@@ -150,5 +150,11 @@ else
     if grep -aqE 'qs: mplay +x=' "$S2"; then bad "the card appeared without mediad"; else ok "without mediad no media card appears"; fi
     if grep -aqE 'qs: media key=2[678] rc=1' "$S2"; then bad "a media click succeeded without mediad"; else ok "without mediad no media click succeeds"; fi
 fi
+echo "== 3. an app cannot steer a session it does not own =="
+OWN=$(bash tools/qsmedia/owner.sh 2>&1)
+echo "$OWN" | grep -a '^ *\(OK\|FAIL\)'
+op=$(echo "$OWN" | grep -ac '^ *OK'); of=$(echo "$OWN" | grep -ac '^ *FAIL')
+[ "$op" -gt 0 ] || of=$((of + 1))
+pass=$((pass + op)); fail=$((fail + of))
 echo; echo "QSMEDIA: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
