@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import diag.tpmio
+import diag.tpmprobe
+
+export { present, command, read_into, CMD_MAX }
+
+const CMD_MAX: u64 = 4096
+const HEADER: u64 = 10
+
+static mut d_cmd: [u8; 4096] = [0 as u8; 4096]
+static mut d_rsp: [u8; 4096] = [0 as u8; 4096]
+static mut d_rlen: u64 = 0
+
+fn present(state: u64) -> bool {
+    tpmprobe.ensure(state)
+    return tpmio.known_kind() != tpmio.KIND_NONE
+}
+
+fn command(state: u64, src: u64, len: u64) -> u64 {
+    d_rlen = 0
+    if len < HEADER || len > CMD_MAX {
+        return 0
+    }
+    var i: u64 = 0
+    while i < len {
+        d_cmd[i as usize] = kstate.get8(src + i) as u8
+        i = i + 1
+    }
+    let cmd: u64 = (&d_cmd[0]) as u64
+    if tpmio.be32(cmd + 2) != len {
+        return 0
+    }
+    if !present(state) || !tpmio.open_known(state) {
+        return 0
+    }
+    let n: u64 = tpmio.exec(state, cmd, len, (&d_rsp[0]) as u64, CMD_MAX)
+    tpmio.close(state)
+    if n < HEADER {
+        return 0
+    }
+    d_rlen = n
+    return len
+}
+
+fn read_into(off: u64, dst: u64, len: u64) -> u64 {
+    if off >= d_rlen {
+        return 0
+    }
+    var c: u64 = d_rlen - off
+    if c > len {
+        c = len
+    }
+    var i: u64 = 0
+    while i < c {
+        kstate.set8(dst + i, d_rsp[(off + i) as usize])
+        i = i + 1
+    }
+    return c
+}
