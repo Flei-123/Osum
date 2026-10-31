@@ -2749,9 +2749,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_OPEN {
         if (a1 & 64) != 0 && ev_in_any(state) {
-            return ev_open_create(state, me, a0, a1)
+            return ev_open_create(state, me, a0, a1, a2)
         }
-        let opened: u64 = cx_result(state, me, do_open(state, me, a0, a1), a1)
+        let opened: u64 = cx_result(state, me, do_open_mode(state, me, a0, a1, a2), a1)
         svcwatch.open_result(state, opened)
         return opened
     }
@@ -6311,6 +6311,10 @@ fn open_devtty(state: u64, me: u64, flags: u64) -> u64 {
 // abzueglich der Maske, und wer ein PROGRAMM schreibt, setzt das x-Bit
 // danach selbst mit `chmod` -- so macht es `kernel/user/fas.fi`.
 fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
+    return do_open_mode(state, me, name, flags, 0)
+}
+
+fn do_open_mode(state: u64, me: u64, name: u64, flags: u64, mode: u64) -> u64 {
     let buf: u64 = nameb(state)
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
     if errno.is_error(len) {
@@ -6319,7 +6323,7 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     if len == 0 {
         return neg(errno.E_NOENT)
     }
-    return open_named(state, me, buf, len, flags)
+    return open_named(state, me, buf, len, flags, mode)
 }
 
 // DER RUMPF VON `do_open`, ABER AUF EINEM NAMEN, DER SCHON IM KERN
@@ -6330,7 +6334,14 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
 // kopiert und hier uebergeben. Fuer den synchronen Weg aendert sich
 // nichts: `do_open` legt ihn wie immer nach `kstate.NAME_OFF` und ruft
 // diese Funktion.
-fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64) -> u64 {
+fn create_mode(mode: u64) -> u64 {
+    if (mode & 4095) == 0 {
+        return 438
+    }
+    return mode & 4095
+}
+
+fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) -> u64 {
     // ROUNDE K7: /dev/fb. Die Pruefung steht VOR der auf ein
     // eingehaengtes Dateisystem, und das ist Absicht: der Bildschirm
     // haengt an der Grafikkarte, nicht an einer Platte. Ein Lauf mit
@@ -6449,7 +6460,7 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64) -> u64 {
         }
         // Rechte und Eigentuemer der frischen Datei: 0o666 abzueglich
         // der Maske des Prozesses, und sie gehoert dem, der sie anlegt.
-        perm.on_create(state, me, ino, 438)
+        perm.on_create(state, me, ino, create_mode(mode))
     } else {
         if (flags & O_CREAT) != 0 {
             if (flags & O_EXCL) != 0 {
@@ -13937,7 +13948,7 @@ fn aio_exec(state: u64, i: u64) -> u64 {
         let name: u64 = nameb(state)
         let n: u64 = kcopy_word(name, state + kstate.APATH_OFF
             + i * kstate.APATH_STRIDE, kstate.APATH_STRIDE)
-        let r: u64 = open_named(state, task, name, n - 1, len)
+        let r: u64 = open_named(state, task, name, n - 1, len, 0)
         async.lock_give(state)
         return r
     }
@@ -21064,14 +21075,14 @@ fn ev_path_exists(state: u64, buf: u64) -> bool {
 }
 
 // open(path, O_CREAT ...): IN_CREATE only when the file was not there before.
-fn ev_open_create(state: u64, me: u64, name: u64, flags: u64) -> u64 {
+fn ev_open_create(state: u64, me: u64, name: u64, flags: u64, mode: u64) -> u64 {
     let buf: u64 = nameb(state)
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
     var existed: bool = true
     if !errno.is_error(len) && len != 0 {
         existed = ev_path_exists(state, buf)
     }
-    let r: u64 = do_open(state, me, name, flags)
+    let r: u64 = do_open_mode(state, me, name, flags, mode)
     if !existed && !errno.is_error(r) {
         ev_in_path(state, me, name, IN_CREATE, 0)
     }
@@ -21684,9 +21695,9 @@ fn lc_at_inner(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: 
     }
     if number == LC_OPENAT {
         if (a2 & 64) != 0 && ev_in_any(state) {
-            return ev_open_create(state, me, a1, a2)
+            return ev_open_create(state, me, a1, a2, a3)
         }
-        return cx_result(state, me, do_open(state, me, a1, a2), a2)
+        return cx_result(state, me, do_open_mode(state, me, a1, a2, a3), a2)
     }
     if number == LC_MKDIRAT {
         let r: u64 = do_mkdir(state, me, a1)

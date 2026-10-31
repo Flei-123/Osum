@@ -38,6 +38,7 @@ static void statx_calls(void)
     mode = sx[28] | (sx[29] << 8);
     unsigned long long size; memcpy(&size, sx + 40, 8);
     CHECK("statx_file_reg", r == 0 && S_ISREG(mode), "r %ld mode %o errno %d", r, mode, errno);
+    CHECK("statx_creat_mode_honoured", r == 0 && (mode & 0777) == 0640, "mode %o", mode & 0777);
     CHECK("statx_file_size", r == 0 && size == 5, "size %llu", size);
     errno = 0;
     int sr = stat("/tmp/statx_probe", &st);
