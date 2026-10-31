@@ -1,0 +1,278 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import arch.x86_64.apic
+import sync.atomic
+import diag.devwait
+
+export { KIND_NONE, KIND_TIS, KIND_CRB, open, exec, close, rd8, rd32, be32, be16, put_be32, put_be16, ram8 }
+
+const KIND_NONE: u64 = 0
+const KIND_TIS: u64 = 1
+const KIND_CRB: u64 = 2
+
+const TIS_ACCESS: u64 = 0x00
+const TIS_STS: u64 = 0x18
+const TIS_FIFO: u64 = 0x24
+const ACC_ACTIVE: u64 = 0x20
+const ACC_REQUEST: u64 = 0x02
+const STS_VALID: u64 = 0x80
+const STS_READY: u64 = 0x40
+const STS_GO: u64 = 0x20
+const STS_AVAIL: u64 = 0x10
+const STS_EXPECT: u64 = 0x08
+
+const CRB_LOC_STATE: u64 = 0x00
+const CRB_LOC_CTRL: u64 = 0x08
+const CRB_REQ: u64 = 0x40
+const CRB_START: u64 = 0x4C
+const CRB_CMD_SIZE: u64 = 0x58
+const CRB_CMD_LO: u64 = 0x5C
+const CRB_CMD_HI: u64 = 0x60
+const CRB_RSP_SIZE: u64 = 0x64
+const CRB_RSP_LO: u64 = 0x68
+const CRB_RSP_HI: u64 = 0x6C
+
+static mut t_v: u64 = 0
+static mut t_kind: u64 = 0
+static mut t_open: u64 = 0
+
+fn rd8(p: u64) -> u64 {
+    return kstate.get8(p)
+}
+
+fn rd32(p: u64) -> u64 {
+    return kstate.get32(p)
+}
+
+fn ram8(p: u64) -> u64 {
+    let b: u8 = *((p) as *mut u8)
+    return b as u64
+}
+
+fn wr32(p: u64, v: u64) {
+    __mmio_write32(p as *mut u32, v as u32)
+}
+
+fn be16(p: u64) -> u64 {
+    return (ram8(p) << 8) | ram8(p + 1)
+}
+
+fn be32(p: u64) -> u64 {
+    return (be16(p) << 16) | be16(p + 2)
+}
+
+fn put_be16(p: u64, v: u64) {
+    *((p) as *mut u8) = ((v >> 8) & 255) as u8
+    *((p + 1) as *mut u8) = (v & 255) as u8
+}
+
+fn put_be32(p: u64, v: u64) {
+    put_be16(p, v >> 16)
+    put_be16(p + 2, v & 0xFFFF)
+}
+
+fn pause_us(state: u64, us: u64) {
+    devwait.touch()
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        var i: u64 = 0
+        while i < us * 100 {
+            atomic.pause()
+            i = i + 1
+        }
+        return
+    }
+    let want: u64 = hz / 1000000 * us
+    let t0: u64 = apic.tsc()
+    while apic.tsc() - t0 < want {
+        atomic.pause()
+    }
+}
+
+fn wait8(state: u64, p: u64, mask: u64, want: u64, us: u64) -> bool {
+    var t: u64 = 0
+    while t < us {
+        if (rd8(p) & mask) == want {
+            return true
+        }
+        pause_us(state, 10)
+        t = t + 10
+    }
+    return (rd8(p) & mask) == want
+}
+
+fn wait32(state: u64, p: u64, mask: u64, want: u64, us: u64) -> bool {
+    var t: u64 = 0
+    while t < us {
+        if (rd32(p) & mask) == want {
+            return true
+        }
+        pause_us(state, 10)
+        t = t + 10
+    }
+    return (rd32(p) & mask) == want
+}
+
+fn open(state: u64, v: u64, kind: u64) {
+    t_v = v
+    t_kind = kind
+    t_open = 1
+}
+
+fn close(state: u64) {
+    if t_open == 0 {
+        return
+    }
+    if t_kind == KIND_CRB {
+        wr32(t_v + CRB_REQ, 2)
+        wr32(t_v + CRB_LOC_CTRL, 2)
+    } else if t_kind == KIND_TIS {
+        kstate.set8(t_v + TIS_STS, STS_READY as u8)
+        kstate.set8(t_v + TIS_ACCESS, ACC_ACTIVE as u8)
+    }
+    t_open = 0
+}
+
+fn map_phys(state: u64, pa: u64) -> u64 {
+    if pa == 0 {
+        return 0
+    }
+    return apic.map_device(state, pa)
+}
+
+fn crb_exec(state: u64, cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
+    let v: u64 = t_v
+    if (rd8(v + CRB_LOC_STATE) & 2) == 0 {
+        wr32(v + CRB_LOC_CTRL, 1)
+        if !wait8(state, v + CRB_LOC_STATE, 2, 2, 200000) {
+            return 0
+        }
+    }
+    wr32(v + CRB_REQ, 1)
+    if !wait32(state, v + CRB_REQ, 1, 0, 500000) {
+        return 0
+    }
+    let csize: u64 = rd32(v + CRB_CMD_SIZE)
+    let cpa: u64 = rd32(v + CRB_CMD_LO) | (rd32(v + CRB_CMD_HI) << 32)
+    let cv: u64 = map_phys(state, cpa)
+    if cv == 0 || csize < clen {
+        return 0
+    }
+    var i: u64 = 0
+    while i < clen {
+        kstate.set8(cv + i, ram8(cmd + i) as u8)
+        i = i + 1
+    }
+    wr32(v + CRB_START, 1)
+    if !wait32(state, v + CRB_START, 1, 0, 2000000) {
+        return 0
+    }
+    let rpa: u64 = rd32(v + CRB_RSP_LO) | (rd32(v + CRB_RSP_HI) << 32)
+    let rv: u64 = map_phys(state, rpa)
+    if rv == 0 {
+        return 0
+    }
+    let hi: u64 = (rd8(rv + 2) << 24) | (rd8(rv + 3) << 16) | (rd8(rv + 4) << 8) | rd8(rv + 5)
+    if hi < 10 || hi > rcap {
+        return 0
+    }
+    i = 0
+    while i < hi {
+        *((rsp + i) as *mut u8) = rd8(rv + i) as u8
+        i = i + 1
+    }
+    return hi
+}
+
+fn tis_burst(state: u64) -> u64 {
+    var t: u64 = 0
+    while t < 200000 {
+        let b: u64 = (rd32(t_v + TIS_STS) >> 8) & 0xFFFF
+        if b != 0 {
+            return b
+        }
+        pause_us(state, 10)
+        t = t + 10
+    }
+    return 0
+}
+
+fn tis_exec(state: u64, cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
+    let v: u64 = t_v
+    if (rd8(v + TIS_ACCESS) & ACC_ACTIVE) == 0 {
+        kstate.set8(v + TIS_ACCESS, ACC_REQUEST as u8)
+        if !wait8(state, v + TIS_ACCESS, ACC_ACTIVE, ACC_ACTIVE, 200000) {
+            return 0
+        }
+    }
+    if (rd8(v + TIS_STS) & STS_READY) == 0 {
+        kstate.set8(v + TIS_STS, STS_READY as u8)
+        if !wait8(state, v + TIS_STS, STS_READY, STS_READY, 500000) {
+            return 0
+        }
+    }
+    var sent: u64 = 0
+    while sent < clen {
+        var b: u64 = tis_burst(state)
+        if b == 0 {
+            return 0
+        }
+        while b > 0 && sent < clen {
+            kstate.set8(v + TIS_FIFO, ram8(cmd + sent) as u8)
+            sent = sent + 1
+            b = b - 1
+        }
+    }
+    if !wait8(state, v + TIS_STS, STS_VALID, STS_VALID, 200000) {
+        return 0
+    }
+    if (rd8(v + TIS_STS) & STS_EXPECT) != 0 {
+        return 0
+    }
+    kstate.set8(v + TIS_STS, STS_GO as u8)
+    if !wait8(state, v + TIS_STS, STS_AVAIL | STS_VALID, STS_AVAIL | STS_VALID, 2000000) {
+        return 0
+    }
+    var got: u64 = 0
+    var total: u64 = 10
+    var guard: u64 = 0
+    while got < total && guard < 4000 {
+        guard = guard + 1
+        if (rd8(v + TIS_STS) & STS_AVAIL) == 0 {
+            if !wait8(state, v + TIS_STS, STS_AVAIL, STS_AVAIL, 200000) {
+                return 0
+            }
+        }
+        if got < rcap {
+            *((rsp + got) as *mut u8) = rd8(v + TIS_FIFO) as u8
+        } else {
+            let drop: u64 = rd8(v + TIS_FIFO)
+        }
+        got = got + 1
+        if got == 10 {
+            total = be32(rsp + 2)
+            if total < 10 || total > rcap {
+                return 0
+            }
+        }
+    }
+    if got != total {
+        return 0
+    }
+    return got
+}
+
+fn exec(state: u64, cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
+    if t_open == 0 {
+        return 0
+    }
+    if t_kind == KIND_CRB {
+        return crb_exec(state, cmd, clen, rsp, rcap)
+    }
+    if t_kind == KIND_TIS {
+        return tis_exec(state, cmd, clen, rsp, rcap)
+    }
+    return 0
+}

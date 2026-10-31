@@ -1,0 +1,458 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import acpi.acpi
+import arch.x86_64.apic
+import diag.tpmio
+
+export { render }
+
+const TPM_BASE: u64 = 0xFED40000
+const CACHE_MAX: u64 = 3600
+const RSP_MAX: u64 = 1024
+const CC_GET_CAPABILITY: u64 = 0x17A
+const CAP_ALGS: u64 = 0
+const CAP_PCRS: u64 = 5
+const CAP_PROPS: u64 = 6
+const PT_FIXED: u64 = 0x100
+const PT_PERMANENT: u64 = 0x200
+
+static mut s_acpi_yes: [u8; 20] = "tpm: acpi=TPM2 len=\0"
+static mut s_acpi_no: [u8; 15] = "tpm: acpi=none\0"
+static mut s_rev: [u8; 6] = " rev=\0"
+static mut s_class: [u8; 8] = " class=\0"
+static mut s_method: [u8; 9] = " method=\0"
+static mut s_ctrl: [u8; 7] = " ctrl=\0"
+static mut s_laml: [u8; 7] = " laml=\0"
+static mut s_lasa: [u8; 7] = " lasa=\0"
+static mut s_mmio: [u8; 11] = "tpm: mmio=\0"
+static mut s_didvid: [u8; 10] = " did_vid=\0"
+static mut s_intfid: [u8; 10] = " intf_id=\0"
+static mut s_fifo: [u8; 18] = "tpm: fifo access=\0"
+static mut s_intfcap: [u8; 11] = " intf_cap=\0"
+static mut s_sts: [u8; 6] = " sts=\0"
+static mut s_crb: [u8; 20] = "tpm: crb loc_state=\0"
+static mut s_locsts: [u8; 10] = " loc_sts=\0"
+static mut s_ctrlsts: [u8; 11] = " ctrl_sts=\0"
+static mut s_cmdsz: [u8; 11] = " cmd_size=\0"
+static mut s_cmdpa: [u8; 9] = " cmd_pa=\0"
+static mut s_rspsz: [u8; 11] = " rsp_size=\0"
+static mut s_rsppa: [u8; 9] = " rsp_pa=\0"
+static mut s_if: [u8; 16] = "tpm: interface=\0"
+static mut s_k_none: [u8; 5] = "none\0"
+static mut s_k_tis: [u8; 4] = "tis\0"
+static mut s_k_crb: [u8; 4] = "crb\0"
+static mut s_absent: [u8; 7] = "absent\0"
+static mut s_cap_fixed: [u8; 15] = "tpm: fixed rc=\0"
+static mut s_family: [u8; 9] = " family=\0"
+static mut s_level: [u8; 8] = " level=\0"
+static mut s_revision: [u8; 11] = " revision=\0"
+static mut s_manu: [u8; 15] = " manufacturer=\0"
+static mut s_v1: [u8; 9] = " vendor=\0"
+static mut s_fw1: [u8; 6] = " fw1=\0"
+static mut s_fw2: [u8; 6] = " fw2=\0"
+static mut s_perm: [u8; 19] = "tpm: permanent rc=\0"
+static mut s_perm_v: [u8; 8] = " attrs=\0"
+static mut s_pcr: [u8; 13] = "tpm: pcr rc=\0"
+static mut s_pcr_h: [u8; 7] = " bank=\0"
+static mut s_pcr_s: [u8; 2] = ":\0"
+static mut s_algs: [u8; 14] = "tpm: algs rc=\0"
+static mut s_algs_n: [u8; 4] = " n=\0"
+static mut s_usable: [u8; 13] = "tpm: usable=\0"
+static mut s_yes: [u8; 4] = "yes\0"
+static mut s_no: [u8; 3] = "no\0"
+static mut s_why: [u8; 6] = " why=\0"
+static mut s_why_none: [u8; 10] = "no-device\0"
+static mut s_why_cmd: [u8; 15] = "command-failed\0"
+static mut s_why_rc: [u8; 10] = "tpm-error\0"
+static mut s_why_ok: [u8; 3] = "ok\0"
+static mut s_why_ver: [u8; 8] = "not-2.0\0"
+static mut s_methods_a: [u8; 14] = " (acpi-start)\0"
+static mut s_methods_m: [u8; 8] = " (mmio)\0"
+static mut s_methods_c: [u8; 7] = " (crb)\0"
+static mut s_methods_ca: [u8; 12] = " (crb+acpi)\0"
+static mut s_methods_s: [u8; 11] = " (crb+smc)\0"
+static mut s_methods_o: [u8; 9] = " (other)\0"
+static mut w_at: u64 = 0
+static mut w_cap: u64 = 0
+static mut w_out: u64 = 0
+static mut c_len: u64 = 0
+static mut c_done: u64 = 0
+static mut c_buf: [u8; 3600] = [0; 3600]
+static mut g_rc: u64 = 0
+
+fn put_c(c: u64) {
+    if w_at + 1 < w_cap {
+        kstate.set8(w_out + w_at, c as u8)
+        w_at = w_at + 1
+    }
+}
+
+fn put_s(p: u64) {
+    var i: u64 = 0
+    while tpmio.ram8(p + i) != 0 {
+        put_c(tpmio.ram8(p + i))
+        i = i + 1
+    }
+}
+
+fn put_hex(v: u64, digits: u64) {
+    put_c(48)
+    put_c(120)
+    put_bare(v, digits)
+}
+
+fn put_bare(v: u64, digits: u64) {
+    var i: u64 = digits
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            put_c(48 + d)
+        } else {
+            put_c(87 + d)
+        }
+    }
+}
+
+fn put_dec(v: u64) {
+    var tmp: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        put_c(tmp[n as usize] as u64)
+    }
+}
+
+fn put_ascii(v: u64) {
+    var i: u64 = 0
+    while i < 4 {
+        let c: u64 = (v >> (24 - i * 8)) & 255
+        if c >= 32 && c < 127 {
+            put_c(c)
+        }
+        i = i + 1
+    }
+}
+
+fn nl() {
+    put_c(10)
+}
+
+fn ld8(p: u64) -> u64 {
+    return tpmio.ram8(p)
+}
+
+fn ld16(p: u64) -> u64 {
+    return ld8(p) | (ld8(p + 1) << 8)
+}
+
+fn ld32(p: u64) -> u64 {
+    return ld16(p) | (ld16(p + 2) << 16)
+}
+
+fn ld64(p: u64) -> u64 {
+    return ld32(p) | (ld32(p + 4) << 32)
+}
+
+fn method_name(m: u64) -> u64 {
+    if m == 2 {
+        return (&s_methods_a[0]) as u64
+    }
+    if m == 6 {
+        return (&s_methods_m[0]) as u64
+    }
+    if m == 7 {
+        return (&s_methods_c[0]) as u64
+    }
+    if m == 8 {
+        return (&s_methods_ca[0]) as u64
+    }
+    if m == 11 {
+        return (&s_methods_s[0]) as u64
+    }
+    return (&s_methods_o[0]) as u64
+}
+
+fn kind_name(k: u64) -> u64 {
+    if k == tpmio.KIND_TIS {
+        return (&s_k_tis[0]) as u64
+    }
+    if k == tpmio.KIND_CRB {
+        return (&s_k_crb[0]) as u64
+    }
+    return (&s_k_none[0]) as u64
+}
+
+fn getcap(state: u64, cap: u64, prop: u64, count: u64, rsp: u64) -> u64 {
+    var cmd: [u8; 22] = [0 as u8; 22]
+    let c: u64 = (&cmd[0]) as u64
+    tpmio.put_be16(c, 0x8001)
+    tpmio.put_be32(c + 2, 22)
+    tpmio.put_be32(c + 6, CC_GET_CAPABILITY)
+    tpmio.put_be32(c + 10, cap)
+    tpmio.put_be32(c + 14, prop)
+    tpmio.put_be32(c + 18, count)
+    g_rc = 0xFFFFFFFF
+    let n: u64 = tpmio.exec(state, c, 22, rsp, RSP_MAX)
+    if n >= 10 {
+        g_rc = tpmio.be32(rsp + 6)
+    }
+    return n
+}
+
+fn rsp_ok(n: u64) -> bool {
+    return n >= 19 && g_rc == 0
+}
+
+fn report_fixed(state: u64, rsp: u64) -> bool {
+    let n: u64 = getcap(state, CAP_PROPS, PT_FIXED, 16, rsp)
+    put_s((&s_cap_fixed[0]) as u64)
+    put_hex(g_rc, 8)
+    if !rsp_ok(n) {
+        nl()
+        return false
+    }
+    var cnt: u64 = tpmio.be32(rsp + 15)
+    var fam: u64 = 0
+    var i: u64 = 0
+    while i < cnt && 19 + (i + 1) * 8 <= n {
+        let p: u64 = tpmio.be32(rsp + 19 + i * 8)
+        let v: u64 = tpmio.be32(rsp + 23 + i * 8)
+        if p == 0x100 {
+            fam = v
+            put_s((&s_family[0]) as u64)
+            put_ascii(v)
+        } else if p == 0x101 {
+            put_s((&s_level[0]) as u64)
+            put_hex(v, 8)
+        } else if p == 0x102 {
+            put_s((&s_revision[0]) as u64)
+            put_dec(v)
+        } else if p == 0x105 {
+            put_s((&s_manu[0]) as u64)
+            put_ascii(v)
+        } else if p == 0x106 || p == 0x107 {
+            if p == 0x106 {
+                put_s((&s_v1[0]) as u64)
+            }
+            put_ascii(v)
+        } else if p == 0x10B {
+            put_s((&s_fw1[0]) as u64)
+            put_hex(v, 8)
+        } else if p == 0x10C {
+            put_s((&s_fw2[0]) as u64)
+            put_hex(v, 8)
+        }
+        i = i + 1
+    }
+    nl()
+    return fam == 0x322E3000
+}
+
+fn report_permanent(state: u64, rsp: u64) {
+    let n: u64 = getcap(state, CAP_PROPS, PT_PERMANENT, 1, rsp)
+    put_s((&s_perm[0]) as u64)
+    put_hex(g_rc, 8)
+    if rsp_ok(n) && n >= 27 {
+        put_s((&s_perm_v[0]) as u64)
+        put_hex(tpmio.be32(rsp + 23), 8)
+    }
+    nl()
+}
+
+fn report_pcrs(state: u64, rsp: u64) {
+    let n: u64 = getcap(state, CAP_PCRS, 0, 8, rsp)
+    put_s((&s_pcr[0]) as u64)
+    put_hex(g_rc, 8)
+    if rsp_ok(n) {
+        let cnt: u64 = tpmio.be32(rsp + 15)
+        var at: u64 = 19
+        var i: u64 = 0
+        while i < cnt && at + 3 <= n {
+            let size: u64 = tpmio.ram8(rsp + at + 2)
+            put_s((&s_pcr_h[0]) as u64)
+            put_hex(tpmio.be16(rsp + at), 4)
+            put_s((&s_pcr_s[0]) as u64)
+            var j: u64 = 0
+            while j < size && at + 3 + j < n {
+                put_bare(tpmio.ram8(rsp + at + 3 + j), 2)
+                j = j + 1
+            }
+            at = at + 3 + size
+            i = i + 1
+        }
+    }
+    nl()
+}
+
+fn report_algs(state: u64, rsp: u64) {
+    let n: u64 = getcap(state, CAP_ALGS, 0, 64, rsp)
+    put_s((&s_algs[0]) as u64)
+    put_hex(g_rc, 8)
+    if rsp_ok(n) {
+        let cnt: u64 = tpmio.be32(rsp + 15)
+        put_s((&s_algs_n[0]) as u64)
+        put_dec(cnt)
+        var i: u64 = 0
+        while i < cnt && 19 + (i + 1) * 6 <= n {
+            put_c(32)
+            put_hex(tpmio.be16(rsp + 19 + i * 6), 4)
+            i = i + 1
+        }
+    }
+    nl()
+}
+
+fn build(state: u64) {
+    var sig: [u8; 5] = "TPM2\0"
+    let t: u64 = acpi.table(state, (&sig[0]) as u64)
+    var method: u64 = 0
+    var ctrl: u64 = 0
+    if t != 0 {
+        let len: u64 = ld32(t + 4)
+        put_s((&s_acpi_yes[0]) as u64)
+        put_dec(len)
+        put_s((&s_rev[0]) as u64)
+        put_dec(ld8(t + 8))
+        if len >= 52 {
+            ctrl = ld64(t + 40)
+            method = ld32(t + 48)
+            put_s((&s_class[0]) as u64)
+            put_dec(ld16(t + 36))
+            put_s((&s_method[0]) as u64)
+            put_dec(method)
+            put_s(method_name(method))
+            put_s((&s_ctrl[0]) as u64)
+            put_hex(ctrl, 8)
+        }
+        if len >= 76 {
+            put_s((&s_laml[0]) as u64)
+            put_hex(ld32(t + 64), 8)
+            put_s((&s_lasa[0]) as u64)
+            put_hex(ld64(t + 68), 8)
+        }
+    } else {
+        put_s((&s_acpi_no[0]) as u64)
+    }
+    nl()
+    var base: u64 = TPM_BASE
+    if ctrl != 0 && (method == 7 || method == 8 || method == 11) {
+        base = ctrl & (~0xFFF)
+    }
+    let v: u64 = apic.map_device(state, base)
+    var dv: u64 = 0xFFFFFFFF
+    var intf: u64 = 0
+    if v != 0 {
+        dv = tpmio.rd32(v + 0xF00)
+        intf = tpmio.rd32(v + 0x30)
+    }
+    put_s((&s_mmio[0]) as u64)
+    put_hex(base, 8)
+    put_s((&s_didvid[0]) as u64)
+    put_hex(dv, 8)
+    put_s((&s_intfid[0]) as u64)
+    put_hex(intf, 8)
+    nl()
+    var kind: u64 = tpmio.KIND_NONE
+    if v != 0 && ((dv != 0xFFFFFFFF && dv != 0) || (intf != 0xFFFFFFFF && intf != 0)) {
+        if method == 7 || method == 8 || method == 11 {
+            kind = tpmio.KIND_CRB
+        } else if method == 6 {
+            kind = tpmio.KIND_TIS
+        } else if (intf & 15) == 1 {
+            kind = tpmio.KIND_CRB
+        } else {
+            kind = tpmio.KIND_TIS
+        }
+    }
+    if kind == tpmio.KIND_TIS {
+        put_s((&s_fifo[0]) as u64)
+        put_hex(tpmio.rd8(v), 2)
+        put_s((&s_intfcap[0]) as u64)
+        put_hex(tpmio.rd32(v + 0x14), 8)
+        put_s((&s_sts[0]) as u64)
+        put_hex(tpmio.rd32(v + 0x18), 8)
+        nl()
+    } else if kind == tpmio.KIND_CRB {
+        put_s((&s_crb[0]) as u64)
+        put_hex(tpmio.rd8(v), 2)
+        put_s((&s_locsts[0]) as u64)
+        put_hex(tpmio.rd32(v + 0x0C), 8)
+        put_s((&s_ctrlsts[0]) as u64)
+        put_hex(tpmio.rd32(v + 0x44), 8)
+        put_s((&s_cmdsz[0]) as u64)
+        put_hex(tpmio.rd32(v + 0x58), 8)
+        put_s((&s_cmdpa[0]) as u64)
+        put_hex(tpmio.rd32(v + 0x5C) | (tpmio.rd32(v + 0x60) << 32), 16)
+        put_s((&s_rspsz[0]) as u64)
+        put_hex(tpmio.rd32(v + 0x64), 8)
+        put_s((&s_rsppa[0]) as u64)
+        put_hex(tpmio.rd32(v + 0x68) | (tpmio.rd32(v + 0x6C) << 32), 16)
+        nl()
+    }
+    put_s((&s_if[0]) as u64)
+    put_s(kind_name(kind))
+    nl()
+    var why: u64 = (&s_why_none[0]) as u64
+    var usable: bool = false
+    if kind != tpmio.KIND_NONE {
+        var rsp: [u8; 1024] = [0 as u8; 1024]
+        let r: u64 = (&rsp[0]) as u64
+        tpmio.open(state, v, kind)
+        let is20: bool = report_fixed(state, r)
+        if g_rc == 0xFFFFFFFF {
+            why = (&s_why_cmd[0]) as u64
+        } else if g_rc != 0 {
+            why = (&s_why_rc[0]) as u64
+        } else if !is20 {
+            why = (&s_why_ver[0]) as u64
+        } else {
+            why = (&s_why_ok[0]) as u64
+            usable = true
+        }
+        if g_rc == 0 {
+            report_permanent(state, r)
+            report_pcrs(state, r)
+            report_algs(state, r)
+        }
+        tpmio.close(state)
+    }
+    put_s((&s_usable[0]) as u64)
+    if usable {
+        put_s((&s_yes[0]) as u64)
+    } else {
+        put_s((&s_no[0]) as u64)
+    }
+    put_s((&s_why[0]) as u64)
+    put_s(why)
+    nl()
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    if c_done == 0 {
+        w_out = (&c_buf[0]) as u64
+        w_cap = CACHE_MAX
+        w_at = 0
+        build(state)
+        c_len = w_at
+        c_done = 1
+    }
+    var i: u64 = 0
+    while i < c_len && i + 1 < cap {
+        kstate.set8(out + i, tpmio.ram8((&c_buf[0]) as u64 + i) as u8)
+        i = i + 1
+    }
+    return i
+}
