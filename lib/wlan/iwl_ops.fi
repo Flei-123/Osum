@@ -7,6 +7,7 @@ import wlan.iwl_fwcaps
 import wlan.iwl_mvm
 import wlan.iwl_mvm_ctx
 import wlan.iwl_mvm_scan
+import wlan.iwl_mvm_sta
 import wlan.iwl_mvm_tx
 import wlan.iwl_mvm_txq
 
@@ -16,9 +17,9 @@ export {
     ops_keys_sent, ops_cmd_count, ops_set_hw_crypto, ops_set_queues, ops_set_address,
     ops_default_channels, ops_set_caps, ops_caps,
     ops_fail_step, ops_fail_rc, ops_fail_cmd, ops_ok_steps,
-    STEP_NONE, STEP_PHY_CTX, STEP_MAC_CTX, STEP_BINDING, STEP_SCAN_CFG, STEP_SCAN_REQ,
+    STEP_NONE, STEP_PHY_CTX, STEP_MAC_CTX, STEP_BINDING, STEP_SCAN_CFG, STEP_SCAN_REQ, STEP_AUX_STA,
     SCAN_IDLE, SCAN_RUNNING, SCAN_DONE, SCAN_ABORTED,
-    E_OPS_STATE, E_OPS_FW, E_OPS_ARGS, STA_AP, MAX_CHANNELS
+    E_OPS_STATE, E_OPS_FW, E_OPS_ARGS, STA_AP, STA_AUX, MAX_CHANNELS
 }
 
 const SCAN_IDLE: u64 = 0
@@ -32,13 +33,16 @@ const STEP_MAC_CTX: u64 = 2
 const STEP_BINDING: u64 = 3
 const STEP_SCAN_CFG: u64 = 4
 const STEP_SCAN_REQ: u64 = 5
+const STEP_AUX_STA: u64 = 6
 
 const E_OPS_STATE: i64 = -60
 const E_OPS_FW: i64 = -61
 const E_OPS_ARGS: i64 = -62
 
 const STA_AP: u64 = 0
-const STA_BCAST: u64 = 1
+const STA_AUX: u64 = 1
+const SCAN_CFG_RATES: u64 = 0x0FFF0FFF
+const SCAN_CFG_CHAN_FLAGS: u64 = 0xF
 const MAC_ID: u64 = 0
 const PHY_ID: u64 = 0
 const BIND_ID: u64 = 0
@@ -238,14 +242,32 @@ fn bind_cmd(o: *mut Mvm) -> i64 {
 fn scan_cfg_cmd(o: *mut Mvm) -> i64 {
     var chans: [u8; 40] = [0; 40]
     let n: u64 = ops_default_channels((&chans[0]) as u64)
-    let flags: u64 = iwl_mvm_scan.SCAN_CFG_ACTIVATE | iwl_mvm_scan.SCAN_CFG_SET_TX_CHAINS
+    let flags: u64 = iwl_mvm_scan.SCAN_CFG_ACTIVATE | iwl_mvm_scan.SCAN_CFG_ALLOW_CHUB_REQS
+        | iwl_mvm_scan.SCAN_CFG_SET_AUX_STA_ID | iwl_mvm_scan.SCAN_CFG_CLEAR_FRAGMENTED | iwl_mvm_scan.SCAN_CFG_SET_TX_CHAINS
         | iwl_mvm_scan.SCAN_CFG_SET_RX_CHAINS | iwl_mvm_scan.SCAN_CFG_SET_ALL_TIMES
         | iwl_mvm_scan.SCAN_CFG_SET_CHANNEL_FLAGS | iwl_mvm_scan.SCAN_CFG_SET_LEGACY_RATES
         | iwl_mvm_scan.SCAN_CFG_SET_MAC_ADDR
     let len: u64 = iwl_mvm_scan.mvm_scan_cfg(cmd_addr(o), (*o).cmd_queue, next_slot(o),
-        flags, 3, 3, 0xFF0F, 0, 0, 30, 110, 44, 0, mac_addr(o), STA_BCAST, 1,
+        flags, 3, 3, SCAN_CFG_RATES, 0, 0, 10, 110, 44, 90, mac_addr(o), STA_AUX, SCAN_CFG_CHAN_FLAGS,
         (&chans[0]) as u64, n)
     return submit_long(o, scan_cfg_pad(o, len, n))
+}
+
+fn sta_len(o: *mut Mvm, n: u64) -> u64 {
+    if iwl_fwcaps.caps_sta_v8(ops_caps(o)) { return iwl_mvm_sta.sta_v8(cmd_addr(o), n, iwl_mvm_sta.STA_TYPE_LINK) }
+    return n
+}
+
+fn aux_cmd(o: *mut Mvm) -> i64 {
+    if dqa_on(o) {
+        let q: u64 = iwl_mvm_txq.mvm_scd_cfg_fifo(cmd_addr(o), (*o).cmd_queue, next_slot(o), STA_AUX, iwl_mvm_txq.TID_ALL,
+            iwl_mvm_txq.AUX_QUEUE, iwl_mvm_txq.SCD_ACTION_ENABLE, 0, iwl_mvm_txq.TX_FIFO_MCAST)
+        let rq: i64 = submit(o, q)
+        if rq < 0 { return rq }
+    }
+    let n: u64 = iwl_mvm_sta.mvm_aux_sta(cmd_addr(o), (*o).cmd_queue, next_slot(o), STA_AUX,
+        iwl_mvm_txq.queue_msk_of(iwl_mvm_txq.AUX_QUEUE), iwl_fwcaps.caps_sta_v8(ops_caps(o)))
+    return submit(o, n)
 }
 
 fn step_done(o: *mut Mvm, step: u64) -> bool { return ((*o).ok_steps & (1 << step)) != 0 }
@@ -253,6 +275,10 @@ fn step_done(o: *mut Mvm, step: u64) -> bool { return ((*o).ok_steps & (1 << ste
 fn ops_setup(o: *mut Mvm) -> i64 {
     if (*o).ctx_ready { return 0 }
     var r: i64 = 0
+    if !step_done(o, STEP_AUX_STA) {
+        r = step_result(o, STEP_AUX_STA, aux_cmd(o))
+        if r < 0 { return r }
+    }
     if !step_done(o, STEP_PHY_CTX) {
         r = step_result(o, STEP_PHY_CTX, phy_cmd(o, 1, (*o).channel))
         if r < 0 { return r }
@@ -392,7 +418,7 @@ fn ops_peer_add(o: *mut Mvm, bssid: u64) -> i64 {
     (*o).queue_msk = msk
     let n: u64 = iwl_mvm.mvm_add_sta(cmd_addr(o), (*o).cmd_queue, next_slot(o), 0,
         iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, 0, msk)
-    let r: i64 = submit(o, n)
+    let r: i64 = submit(o, sta_len(o, n))
     if r < 0 { return r }
     (*o).peer_added = true
     return mac_cmd(o, iwl_mvm_ctx.CTXT_MODIFY, false, 0)
@@ -402,7 +428,7 @@ fn ops_associated(o: *mut Mvm, aid: u64) -> i64 {
     if !(*o).peer_added { return E_OPS_STATE }
     let n: u64 = iwl_mvm.mvm_add_sta(cmd_addr(o), (*o).cmd_queue, next_slot(o), 1,
         iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, aid, (*o).queue_msk)
-    let r: i64 = submit(o, n)
+    let r: i64 = submit(o, sta_len(o, n))
     if r < 0 { return r }
     return mac_cmd(o, iwl_mvm_ctx.CTXT_MODIFY, true, aid)
 }
