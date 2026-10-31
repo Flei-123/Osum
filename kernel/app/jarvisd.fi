@@ -1,123 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/app/jarvisd.fi -- RUNDE BRIDGE: DER JARVIS-HELFER FUER OSUM.
-//
 //     jarvisd [-c datei] [-1] [-t ms] [-v] [-n]
-//
-//     -c   die Rechteliste, voreingestellt /etc/jarvis/rechte.conf
-//     -1   nach EINER Verbindung aufhoeren (fuer den Pruefstand)
-//     -t   Gesamtlaufzeit in Millisekunden, dann Schluss (Pruefstand)
-//     -v   jeden Schritt auf die Konsole
-//     -n   nichts tun ausser die Rechteliste lesen und melden
-//
-// ====================================================================
-// WAS DAS IST
-// ====================================================================
-//
-// Auf Justins Windows-Rechnern laeuft ein "Helfer": ein Programm, das
-// sich beim JARVIS-Server meldet und dessen Auftraege ausfuehrt --
-// Befehle, Dateien, Bildschirmfotos. Dies ist das Gegenstueck fuer
-// Osum, damit `docs/REALHW.md` zu Ende gelesen werden kann: OrientOS
-// auf einem gewoehnlichen PC, und darauf der Helfer.
-//
-// DER HELFER VERBINDET SICH HERAUS. Es gibt KEINEN offenen Anschluss in
-// diesem Betriebssystem. Ein lauschender Dienst waere eine Tuer, die
-// jeder im selben Netz anfassen kann; eine ausgehende Verbindung ist
-// eine, die nur dieses Geraet oeffnet. Reisst sie ab, wird mit
-// WACHSENDER Wartezeit neu verbunden (250 ms, dann doppelt, bis 30 s),
-// und ohne Netz wird GEWARTET und nicht gedreht -- `tools/bridge/run.sh`
-// misst die Last dabei.
-//
-// ====================================================================
-// DER WICHTIGSTE TEIL: DIE RECHTE
-// ====================================================================
-//
-// Ein Fernhelfer, der als Wurzel alles darf, ist eine Hintertuer mit
-// Anleitung. Dieses Programm darf GENAU DAS, was in einer LESBAREN
-// Datei unter /etc steht (`/etc/jarvis/rechte.conf`), die der Mensch
-// aendern kann, und
-//
-//   * die Datei wird VOR JEDEM AUFTRAG neu gelesen. Nicht beim
-//     Verbinden. Wer sie aendert, waehrend der Helfer laeuft, hat sie
-//     mit dem naechsten Auftrag geaendert -- und ein Helfer, der seine
-//     Rechte nur einmal liest, ist ein Helfer, dem man beim Entziehen
-//     eines Rechts erst den Strom abdrehen muss.
-//   * ein Auftrag ausserhalb der Liste wird ABGELEHNT, mit einem Satz,
-//     der sagt warum, und er wird PROTOKOLLIERT (/var/log/jarvisd.log).
-//     Beides, denn eine stille Ablehnung ist von einem Fehler nicht zu
-//     unterscheiden.
-//
-// UND DANN NOCH EIN SCHLOSS, das nicht dieses Programm haelt. Runde
-// HANDLE hat jedem Deskriptor ein Rechtebitfeld gegeben und mit
-// `HND_DUP` (2208) einen Weg, einen Deskriptor mit WENIGER Rechten
-// herzustellen -- die Maske kann nur wegnehmen. Also:
-//
-//     Auftrag "lies"     -> open, dann HND_DUP auf R_READ|R_INSPECT|R_SEEK
-//     Auftrag "schreib"  -> open, dann HND_DUP auf R_WRITE|R_INSPECT|R_SEEK
-//
-// und ab da arbeitet dieses Programm NUR noch auf dem beschnittenen
-// Deskriptor; der urspruengliche wird geschlossen. Ein Fehler im
-// Pfadpruefer hier oben gibt damit trotzdem kein Schreibrecht: `write`
-// prueft in `kernel/sys.fi` (`file.fd_check(..., handle.R_WRITE)`) das
-// Bit, das dieser Deskriptor nicht mehr hat, und der Kern sagt nein.
-// Das ist der Unterschied zwischen "das Programm prueft" und "das
-// System prueft".
-//
 // ====================================================================
 // DIE ANMELDUNG
 // ====================================================================
-//
-// Das Geraet weist sich mit einem Ed25519-Schluesselpaar aus. Der
-// PRIVATE Teil liegt in /etc/jarvis/geraet.key mit 0600 und wird von
-// DIESEM Programm nie gelesen: es startet `/bin/jsig`, gibt ihm die
-// Zufallsforderung des Servers und bekommt die Unterschrift zurueck
-// (siehe kernel/user/jsig.fi, oben, fuer den Grund). Kein Passwort im
-// Klartext, kein geteiltes Geheimnis in einer Datei mit Weltleserecht.
-//
-// ERSTANMELDUNG NUR MIT BESTAETIGUNG DES MENSCHEN. Der Server schickt
-// `kopplung-noetig <code>`; der Helfer schreibt den Code sichtbar hin
-// (/var/jarvis/kopplung und auf die Konsole) und wartet. Erst wenn
-// jemand AN DIESEM GERAET `jarvisctl koppeln <code>` mit DEMSELBEN Code
-// eingegeben hat, geht die Kopplung weiter. Der Code steht im Cockpit
-// und auf dem Bildschirm; wer beide sieht, ist der Mensch. Ohne die
-// Bestaetigung wird abgelehnt und protokolliert.
-//
-// ====================================================================
-// DAS BILDSCHIRMFOTO -- UND WAS IN DIESEM ZWEIG DAFUER FEHLT
-// ====================================================================
-//
-// Runde FEEDBACK hat den richtigen Weg schon gebaut: `kernel/shot.fi`,
-// SYS_OSUM_SHOT (1840), mit Schein, Taskleisten-Recht und Super+P.
-// DIESER ZWEIG HAT IHN NICHT -- `feedback` ist in `mergeline2` noch
-// nicht gemergt (gemessen: `grep SYS_OSUM_SHOT kernel/sys.fi` findet
-// nichts). Also:
-//
-//   1. Dieses Programm RUFT 1840 ZUERST. Sobald FEEDBACK hereinkommt,
-//      laeuft das Bildschirmfoto ueber den Kern-Schein und ueber
-//      nichts sonst. Es wird hier KEIN zweiter Kernweg gebaut.
-//   2. Solange 1840 fehlt, geht es ueber /dev/fb (Runde K7) -- und NUR
-//      mit zwei Schloessern in Ring 3: `bildschirmfoto = ja` in der
-//      Rechteliste UND ein EINMALIGER Schein, den nur ein Mensch an
-//      diesem Geraet ausstellen kann (`jarvisctl fotoschein`), der
-//      befristet ist und beim Gebrauch verbraucht wird.
-//   3. Fehlt eines von beiden, kommt kein Bild heraus, und die
-//      Ablehnung steht im Protokoll.
-//
-// EHRLICH DAZU: Schloss 2 ist Ring 3. Ein Programm, das als Wurzel
-// laeuft, kann /dev/fb selbst aufmachen -- das ist die Luecke, die
-// FEEDBACK im KERN schliesst und die dieses Programm nicht schliessen
-// kann. Sie steht in docs/BRIDGE.md unter "was fehlt".
-//
-// ====================================================================
-// DAS PROTOKOLL AUF DEM DRAHT
-// ====================================================================
-//
-// Zeilenweise Text ueber TLS 1.3. Jede Nachricht ist EINE Zeile, deren
-// LETZTES Feld die Laenge der Nutzlast in Oktetten ist; danach kommen
-// genau so viele Oktette. Felder sind durch EIN Leerzeichen getrennt;
-// alles, was Leerzeichen oder Zeilenumbrueche enthalten kann (Pfade,
-// Befehle, Gruende), steht als Hexfolge. Damit gibt es keine Zeile, die
-// sich durch ihren Inhalt zerlegen laesst.
-//
 //   Helfer -> Server        Server -> Helfer
 //   -----------------       ----------------------------
 //   osum-bruecke 1 0        frage <noncehex> 0
@@ -127,26 +11,7 @@
 //   kopplung-abgelehnt 0    auftrag <id> <art> <a1hex> <a2hex> <laenge>
 //   fertig <id> <ok|nein> <laenge>
 //   puls 0                  tschuess 0
-//
-// Jeder Auftrag traegt eine KENNUNG, jede Antwort traegt dieselbe. Ohne
-// sie kann ein Server, der zwei Auftraege gleichzeitig schickt, die
-// Antworten nicht zuordnen.
-//
 // AUFTRAGSARTEN: befehl, lies, schreib, liste, foto, system.
-//
-// ====================================================================
-// WAS HIER NICHT GEBAUT WIRD, mit Absicht
-// ====================================================================
-//
-// KEINE SHELL. `befehl` startet ein PROGRAMM mit Argumenten und keine
-// Kommandozeile: Osums `/bin/sh` kennt kein `-c`, und selbst wenn es
-// das kaennte, waere eine Zeichenkette, die durch eine Shell laeuft,
-// die klassische Stelle, an der aus einem erlaubten Befehl ein
-// beliebiger wird. Die Rechteliste nennt die erlaubten Programme mit
-// vollem Pfad, und verglichen wird der Pfad, nicht ein Muster.
-//
-// DIESE KRYPTOGRAFIE IST NICHT GEPRUEFT WORDEN. Siehe docs/REALHW.md;
-// derselbe Satz gilt hier.
 
 import std.io
 import std.rt
@@ -155,7 +20,6 @@ import pngfit.png
 import pngfit.fit
 import tls.tls
 import tls.x509
-// RUNDE MERGE-11: der Weg ueber 443 braucht einen Namen, keine Zahl.
 import libc.dns
 import pairstate
 
@@ -165,26 +29,18 @@ import pairstate
 
 const PAIR_TTL_S: u64 = 600
 const PAIR_REASK_MS: u64 = 3000
-const MAXPFAD: usize = 128 // Oktette je Eintrag der Rechteliste
+const MAXPFAD: usize = 128
 const MAXLISTE: usize = 64 // entries per list (was 32: the 33rd command_allowed -- /bin/act -- was silently dropped; was 6 before)
 const MAXBEFEHLE: usize = 8
 const MAXZEILE: usize = 4096
 const MAXFELD: usize = 10
-// DIE HARTE OBERGRENZE einer Nutzlast, unabhaengig von der Rechteliste.
-// `max_datei` darf darunter liegen und tut es normalerweise; DIESE Zahl
-// ist die, ab der gar nicht erst Speicher besorgt wird. Ein Server, der
-// mehr ankuendigt, redet nicht mehr mit diesem Geraet.
 const MAXNUTZ: usize = 1048576
 
-// Die Rechtebits von Runde HANDLE (kernel/handle.fi). Absichtlich
-// dieselben Zahlen; eine zweite Liste waere eine, die auseinanderlaeuft.
 const R_READ: i64 = 1
 const R_WRITE: i64 = 2
 const R_INSPECT: i64 = 32
 const R_SEEK: i64 = 2048
 
-// Die Systemaufrufe, die dieses Programm braucht. Osum traegt Linux'
-// Nummern (Runde K4), also stehen hier Linux' Nummern.
 const S_READ: i64 = 0
 const S_WRITE: i64 = 1
 const S_OPEN: i64 = 2
@@ -216,14 +72,6 @@ const S_CHMOD: i64 = 90
 const S_SYSINFO: i64 = 1002
 const S_WIGSCREEN: i64 = 1805
 const S_DISPGET: i64 = 1810
-// RUNDE BRIDGE-2: 1841 UND NICHT 1840.
-//
-// Runde FEEDBACK hatte 1840. In `merge6` ist 1840 seit Runde WERKZEUGE
-// `SYS_OSUM_CPUSTAT`. Der alte Code hier fragte mit `syscall(1840,0,0)`,
-// OB der Kern das Bildschirmfoto kann, und nahm "Antwort >= 0" als ja --
-// `do_cpustat` beantwortet genau diesen Aufruf aber mit der KERNZAHL.
-// Der Helfer hat deshalb in merge6 JEDES Bildschirmfoto abgelehnt.
-// Gemessen, nicht vermutet.
 const S_SHOT: i64 = 1841
 
 // Die fuenf Handlungen (kernel/sys.fi, SH_*).
@@ -232,7 +80,6 @@ const SH_ARM: i64 = 1
 const SH_GRAB: i64 = 2
 const SH_DROP: i64 = 4
 
-// Die Felder von SH_INFO (kernel/sys.fi, SI_*).
 const SI_READY: i64 = 0
 const SI_WIDTH: i64 = 1
 const SI_HEIGHT: i64 = 2
@@ -246,11 +93,6 @@ const GRAB_INCOMPLETE: i32 = 2
 const SHOT_SETTLE_MS: u64 = 120
 const RESULT_CAP: usize = 2000000
 
-// RUNDE BRUECKE: die eingespeiste Eingabe (kernel/sys.fi, 1843).
-//
-// 1843 UND NICHT 1842, und das ist nachgeschlagen und nicht geraten:
-// `tools/kernel/syscalls.py --frei 1840 1844 --zweige` meldete
-// "frei: 1843 1844" -- 1842 ist in einem anderen Zweig vergeben.
 const S_TIPP: i64 = 1843
 
 const TI_ARM: i64 = 1
@@ -281,8 +123,6 @@ const I_SYSCALLS: i64 = 10
 const I_VERSION: i64 = 11
 const I_YEAR: i64 = 12
 
-// ==================================================== RUNDE LEISTE
-// DER NETZZUSTAND, DEN DIE STARTDIAGNOSE BRAUCHT.
 const S_NETGET: i64 = 1300
 const NG_READY: i64 = 0
 const NG_IP: i64 = 1
@@ -301,17 +141,10 @@ const DG_BPP: i64 = 31
 
 static mut k_ip: u32 = 0 as u32
 static mut k_port: u32 = 0 as u32
-// ================================================== RUNDE MERGE-11
-// DER WEG. `weg = https` schickt das Zeilenprotokoll durch POSTs an
-// store.fleitec.com, statt einen rohen TLS-Port zu waehlen. Der Grund
-// steht ausfuehrlich bei `draht_https_schritt`.
 static mut k_https: bool = false
 static mut k_pair_web: bool = false
 static mut k_pfad: [u8; 96] = [0; 96]
 static mut k_pfadlen: usize = 0
-// Die Drahtkennung: eine Zufallszahl je Lauf. Sie sagt dem Server nur,
-// welche POSTs zusammengehoeren -- sie ist KEIN Ausweis. Der Ausweis
-// ist und bleibt die Ed25519-Unterschrift aus `jsig`.
 static mut k_sid: [u8; 40] = [0; 40]
 static mut k_sidlen: usize = 0
 static mut k_name: [u8; 96] = [0; 96]
@@ -324,7 +157,6 @@ static mut k_schein: [u8; 128] = [0; 128]
 static mut k_befehle: bool = false
 static mut k_foto: bool = false
 static mut k_system: bool = false
-// RUNDE BRUECKE: darf von aussen getippt werden?
 static mut k_tipp: bool = false
 static mut k_max_ausgabe: usize = 65536
 // `command_timeout = <seconds>`: how long one `befehl` may run before it is
@@ -332,8 +164,6 @@ static mut k_max_ausgabe: usize = 65536
 static mut k_befehl_ms: u64 = 60000
 static mut k_max_datei: usize = 262144
 
-// Drei Praefixlisten und eine Programmliste. Eintrag i beginnt bei
-// i * MAXPFAD; die Laenge steht daneben.
 static mut l_lesen: [u8; 8192] = [0; 8192]
 static mut n_lesen: usize = 0
 static mut l_schreiben: [u8; 8192] = [0; 8192]
@@ -350,13 +180,9 @@ static mut n_sub: usize = 0
 static mut laut: bool = false
 static mut konfpfad: [u8; 128] = [0; 128]
 
-// Zaehler, die der Bericht nennt.
 static mut z_auftraege: u64 = 0
 static mut z_abgelehnt: u64 = 0
 static mut z_verbindungen: u64 = 0
-// Fuer die Zusage (f): wie viele Systemaufrufe waehrend des WARTENS
-// ueberhaupt stattgefunden haben. Eine Warteschleife macht Millionen,
-// ein `nanosleep` macht eine Handvoll -- die Zahl ist der Unterschied.
 static mut z_wartems: u64 = 0
 static mut z_warteaufrufe: u64 = 0
 
@@ -446,10 +272,6 @@ fn hnd_rechte(fd: i64) -> i64 {
     return syscall(S_HNDRIGHTS, fd, 0, 0, 0, 0, 0)
 }
 
-// Warten, ohne zu drehen. Osum weist mehr als sechzig Sekunden ab, also
-// wird zerlegt. DAS ist die Zeile, hinter der die Leerlauflast steht:
-// ein Prozess in `nanosleep` steht in der Warteliste des Kerns und
-// bekommt keinen Zeitschnitz.
 fn schlafe_ms(ms: u64) {
     var rest: u64 = ms
     while rest > 0 {
@@ -735,7 +557,6 @@ fn hex_an(b: *mut rt.Buf, p: u64, n: usize) {
     }
 }
 
-// Hexfolge -> Oktette in einen Puffer. false = keine Hexfolge.
 fn hex_out(p: u64, n: usize, out: *mut rt.Buf) -> bool {
     if (n & 1) != 0 {
         return false
@@ -767,7 +588,6 @@ fn eq(a: u64, an: usize, b: u64, bn: usize) -> bool {
     return true
 }
 
-// Ein Wort gegen eine Zeichenkette mit Null am Ende.
 fn ist(p: u64, n: usize, s: u64) -> bool {
     return eq(p, n, s, rt.c_length(s))
 }
@@ -786,7 +606,6 @@ fn num_from(p: u64, n: usize) -> u64 {
     return v
 }
 
-// Text mit Null am Ende in einen festen Platz. Gibt die Laenge zurueck.
 fn hinein(ziel: u64, max: usize, p: u64, n: usize) -> usize {
     var k: usize = n
     if k > max - 1 {
@@ -821,16 +640,6 @@ fn sag_oktette(p: u64, n: usize) {
 // ====================================================================
 // DIE RECHTELISTE
 // ====================================================================
-//
-// Eine Zeile ist entweder leer, ein Kommentar ab '#', oder
-// `schluessel = wert`. Leerzeichen um beides herum sind egal. Ein
-// Schluessel darf mehrfach vorkommen -- die Listen sammeln dann.
-//
-// DIE VOREINSTELLUNG IST NEIN. Fehlt die Datei, ist sie leer oder steht
-// eine Zeile falsch da, dann ist die entsprechende Liste LEER und damit
-// ist nichts erlaubt. Ein Rechtepruefer, dessen Voreinstellung "ja"
-// ist, prueft nichts -- er wartet nur darauf, dass jemand die Datei
-// loescht.
 
 fn list_add(feld: u64, n: *mut usize, p: u64, len: usize) {
     if *n >= MAXLISTE {
@@ -850,7 +659,6 @@ fn yes_is(p: u64, n: usize) -> bool {
     return ist(p, n, (&w[0]) as u64)
 }
 
-// Eine IPv4-Adresse mit Anschluss: a.b.c.d:p
 fn addr_read(p: u64, n: usize) -> bool {
     var teil: u64 = 0
     var wert: u64 = 0
@@ -891,8 +699,6 @@ fn addr_read(p: u64, n: usize) -> bool {
     return true
 }
 
-// Setzt alles auf "nichts erlaubt" zurueck. Wird vor JEDEM Lesen
-// gerufen, damit ein entfernter Eintrag wirklich weg ist.
 fn konf_leeren() {
     k_https = false
     k_pair_web = false
@@ -954,7 +760,6 @@ fn conf_read() -> bool {
 
     var at: usize = 0
     while at < b.len {
-        // Die Zeile abstecken.
         var ende: usize = at
         while ende < b.len && rt.ld8(b.ptr, ende) != 10 as u8 {
             ende = ende + 1
@@ -1074,13 +879,6 @@ fn conf_read() -> bool {
 // ====================================================================
 // PFADE
 // ====================================================================
-//
-// EIN PFAD MUSS ABSOLUT SEIN und darf `..` nicht enthalten. Das ist
-// keine Bequemlichkeit, sondern der Grund, aus dem eine Praefixpruefung
-// ueberhaupt etwas bedeutet: `/var/jarvis/../etc/schatten` faengt mit
-// `/var/jarvis/` an und liegt trotzdem woanders. Es wird hier NICHT
-// aufgeloest, sondern ABGELEHNT -- eine Aufloesung waere eine zweite
-// Fassung dessen, was der Kern tut, und die beiden liefen auseinander.
 
 fn path_clean(p: u64, n: usize) -> bool {
     if n == 0 || n >= MAXPFAD {
@@ -1098,13 +896,11 @@ fn path_clean(p: u64, n: usize) -> bool {
         if c < 32 as u8 {
             return false
         }
-        // "//" ist unnoetig und macht die Praefixpruefung mehrdeutig.
         if i + 1 < n && c == 47 as u8 && rt.ld8(p, i + 1) == 47 as u8 {
             return false
         }
         i = i + 1
     }
-    // Ein Abschnitt, der genau ".." ist.
     var von: usize = 0
     while von < n {
         var bis: usize = von
@@ -1120,8 +916,6 @@ fn path_clean(p: u64, n: usize) -> bool {
     return true
 }
 
-// Ein Eintrag, der auf '/' endet, ist ein Verzeichnisvorspann; alles
-// andere ist ein einzelner Name und muss GENAU stimmen.
 fn fits_entry(e: u64, p: u64, n: usize) -> bool {
     let el: usize = rt.c_length(e)
     if el == 0 {
@@ -1146,15 +940,6 @@ fn in_list(feld: u64, anzahl: usize, p: u64, n: usize) -> bool {
     }
     return false
 }
-
-// ====================================================================
-// DAS PROTOKOLL UNTER /var/log
-// ====================================================================
-//
-// Eine Zeile je Auftrag, angehaengt, mit Zeitstempel aus der Uhr des
-// Kerns. Sichtbarkeit ist eine Zusage dieser Runde und keine Zugabe:
-// wer nicht sehen kann, was der Helfer tut, hat keinen Helfer, sondern
-// einen Fremden auf seinem Rechner.
 
 fn two(b: *mut rt.Buf, v: u64) {
     if v < 10 {
@@ -1206,26 +991,11 @@ fn notiere(art: u64, artn: usize, erg: str, det: u64, detn: usize) {
     rt.buf_free(&b)
 }
 
-// ====================================================================
-// DER DRAHT: ZEILEN UEBER TLS
-// ====================================================================
-//
-// `tls_read` liefert, was gerade da ist, und nicht, was gebraucht wird.
-// Also liegt ein Puffer davor, aus dem Zeilen und Nutzlasten
-// herausgeschnitten werden. `tot` bedeutet: die Gegenseite ist weg --
-// und dann wird JEDER laufende Auftrag abgebrochen, statt auf Oktette
-// zu warten, die nicht mehr kommen.
-
 struct Wire {
-    t: u64, // *mut tls.Tls, als Zahl gehalten
+    t: u64,
     puf: rt.Buf,
     at: usize,
     tot: bool,
-    // ================================================ RUNDE MERGE-11
-    // `https` schaltet die Betriebsart um. Ist sie an, ist `t` KEINE
-    // offene Verbindung, sondern 0: jede Nachricht baut ihre eigene
-    // auf. `aus` sammelt, was gesendet werden soll, bis eine ganze
-    // Nachricht beisammen ist (Kopfzeile + Nutzlast).
     https: bool,
     aus: rt.Buf,
     // DELL STABILITY: the root store is read and parsed ONCE per session, not for
@@ -1240,49 +1010,11 @@ fn wire_new(t: *mut tls.Tls) -> Wire {
         https: false, aus: rt.buf_new(), store: x509.store_new(), store_ok: false }
 }
 
-// ==================================================== RUNDE MERGE-11
-// DER DRAHT UEBER 443.
-//
-// WARUM ES IHN GIBT. Der rohe TLS-Port setzt voraus, dass der Server
-// von Justins Netz aus erreichbar ist -- also eine Portfreigabe an
-// seinem Router. Die gibt es nicht, und deshalb hat sich sein Rechner
-// NIE gemeldet: im Koppelbuch standen nur zwei Pruefstaende aus dem
-// Hausnetz. Port 443 zu store.fleitec.com geht dagegen aus jedem
-// fremden Heimnetz hinaus, und dieser Weg ist gemessen:
-//     POST https://store.fleitec.com/bruecke/anmelden
-//         -> {"fehler": "keine Kennung"}
-// Das ist die Antwort des Brueckendienstes durch die Weiterreichung,
-// nicht ein 404 des Speicherdienstes.
-//
-// WAS SICH NICHT AENDERT, und das ist der ganze Witz dieser Loesung:
-// das Zeilenprotokoll. `anmelden`, `bediene`, `sende`, `zerlege` --
-// alles darueber bleibt Zeile fuer Zeile dasselbe. Nur `wire_write`
-// und `wire_fill` nehmen einen anderen Weg. Die 113 gemessenen
-// Zusagen aus Runde BRIDGE gelten damit weiter: derselbe
-// Zustandsautomat, derselbe Handschlag, dieselbe Unterschrift aus
-// `jsig` -- der private Schluessel bleibt, wo er ist.
-//
-// WAS BEWUSST WEGGELASSEN IST, damit dieses Programm klein bleibt
-// (der Einwand aus dem Kopf von anschluss.py, und er ist berechtigt):
-//   * KEIN JSON. Der Rumpf ist das rohe Zeilenprotokoll.
-//   * KEIN base64. Bilder gehen als Oktette, die Laenge steht im Kopf.
-//   * KEIN Chunked. Der Dienst antwortet mit `Content-Length`, und
-//     `Connection: close` macht das Stromende zum Antwortende.
-//   * KEINE Umleitungen, keine Kekse, kein Wiederverwenden der
-//     Verbindung. Jede Nachricht ist eine Verbindung. Das ist
-//     langsamer und dafuer sind es zwanzig Zeilen statt zweihundert.
-//
-// EINE NACHRICHT IST EIN POST. Rumpf = Kopfzeile + Nutzlast, also
-// genau die Oktette, die frueher in den TLS-Strom gingen. Die Antwort
-// ist dasselbe in der Gegenrichtung; eine LEERE Antwort heisst
-// "nichts zu tun".
 fn wire_new_https() -> Wire {
     return Wire { t: 0, puf: rt.buf_new(), at: 0, tot: false,
         https: true, aus: rt.buf_new(), store: x509.store_new(), store_ok: false }
 }
 
-// Der HTTP-Kopf. Mehr als das braucht ein POST nicht, und jede weitere
-// Zeile waere eine Zeile, die jemand falsch bauen kann.
 fn http_request(req: *mut rt.Buf, rumpfn: usize) {
     var m: [u8; 6] = "POST \0"
     rt.buf_push_bytes(req, (&m[0]) as u64, 5)
@@ -1302,7 +1034,6 @@ fn http_request(req: *mut rt.Buf, rumpfn: usize) {
     rt.buf_push_bytes(req, (&crlf[0]) as u64, 4)
 }
 
-// Die Nummer hinter `HTTP/1.x `.
 fn http_nummer(p: u64, n: usize) -> u64 {
     if n < 12 {
         return 0
@@ -1326,7 +1057,6 @@ fn http_nummer(p: u64, n: usize) -> u64 {
     return v
 }
 
-// Das Ende des Kopfes: die leere Zeile.
 fn http_body_from(p: u64, n: usize) -> usize {
     var i: usize = 0
     while i + 3 < n {
@@ -1339,8 +1069,6 @@ fn http_body_from(p: u64, n: usize) -> usize {
     return n
 }
 
-// EINE Nachricht hin, EINE Antwort zurueck. Das Ergebnis landet in
-// `(*d).puf`, also genau dort, wo `draht_zeile` es ohnehin sucht.
 fn https_wechsel(d: *mut Wire, rumpf: u64, rumpfn: usize) -> bool {
     var schief: bool = false
     var c: net.Conn = net.connect_tcp(k_ip, k_port as u16)
@@ -1364,8 +1092,6 @@ fn https_wechsel(d: *mut Wire, rumpf: u64, rumpfn: usize) -> bool {
         }
         rt.buf_free(&storebuf)
         if wurzeln == 0 {
-            // KEIN STILLES WEITER. Ohne Wurzeln ist jede Gegenstelle
-            // gleich glaubwuerdig, und das ist schlimmer als kein TLS.
             sag("jarvisd: no root store -- nothing is trusted\n")
             net.close(&c)
             return false
@@ -1441,8 +1167,6 @@ fn wire_gone(d: *mut Wire) {
     (*d).store_ok = false
 }
 
-// Aufraeumen: was schon gelesen wurde, faellt vorne weg. Ohne das
-// waechst der Puffer eine lange Sitzung lang und wird nie kleiner.
 fn wire_trim(d: *mut Wire) {
     if (*d).at == 0 {
         return
@@ -1459,13 +1183,6 @@ fn wire_fill(d: *mut Wire) -> bool {
     if (*d).tot {
         return false
     }
-    // ============================================== RUNDE MERGE-11
-    // UEBER 443 KOMMT NICHTS VON SELBST. Was der Server zu sagen
-    // hatte, stand in der Antwort auf den letzten POST und liegt
-    // damit schon im Puffer. Ist der leer, ist die Nachricht zu Ende
-    // -- der Aufrufer bekommt `false`, und `bediene` fragt mit dem
-    // naechsten `puls` wieder nach. Ein Nachfassen an DIESER Stelle
-    // waere eine zweite Schleife neben der, die es schon gibt.
     if (*d).https {
         return false
     }
@@ -1492,7 +1209,6 @@ fn fail_bool(schief: *mut bool) -> bool {
     return false
 }
 
-// Eine Zeile OHNE den Umbruch. false = die Verbindung ist weg.
 fn wire_line(d: *mut Wire, aus: *mut rt.Buf) -> bool {
     rt.buf_clear(aus)
     while true {
@@ -1512,8 +1228,6 @@ fn wire_line(d: *mut Wire, aus: *mut rt.Buf) -> bool {
             i = i + 1
         }
         if (*d).puf.len - (*d).at > MAXZEILE {
-            // Eine Zeile ohne Umbruch, laenger als erlaubt: das ist
-            // kein Gespraech mehr, das ist ein Speicherfresser.
             (*d).tot = true
             return false
         }
@@ -1551,11 +1265,6 @@ fn wire_write(d: *mut Wire, p: u64, n: usize) -> bool {
     if (*d).tot {
         return false
     }
-    // ============================================== RUNDE MERGE-11
-    // Ueber 443 ist eine NACHRICHT eine Anfrage, nicht ein Schreiben.
-    // `sende` baut die Nachricht in EINEM Stueck (Kopfzeile + Nutzlast)
-    // und ruft hier genau einmal -- also geht genau dieser Block als
-    // POST hinaus, und die Antwort landet im Lesepuffer.
     if (*d).https {
         rt.buf_clear(&(*d).puf)
         (*d).at = 0
@@ -1575,9 +1284,6 @@ fn wire_write(d: *mut Wire, p: u64, n: usize) -> bool {
     return true
 }
 
-// Eine Nachricht: Zeile, dann Nutzlast. Die Laenge steht immer als
-// letztes Feld der Zeile -- hier wird sie angehaengt, damit kein
-// Aufrufer sie vergessen kann.
 fn sende(d: *mut Wire, kopf: *mut rt.Buf, nutz: u64, nutzn: usize) -> bool {
     var b: rt.Buf = rt.buf_new()
     rt.buf_push_bytes(&b, (*kopf).ptr, (*kopf).len)
@@ -1623,10 +1329,6 @@ fn zerlege(p: u64, n: usize, f: *mut Felder) {
 // ====================================================================
 // DIE AUFTRAEGE
 // ====================================================================
-//
-// Jede Auftragsart hat GENAU EINEN Eingang, und der erste Satz jedes
-// Eingangs ist die Rechtefrage. Es gibt keinen Weg an ihr vorbei, weil
-// es keinen zweiten Eingang gibt.
 
 fn ablehnen(aus: *mut rt.Buf, grund: str) -> bool {
     rt.buf_clear(aus)
@@ -1660,8 +1362,6 @@ fn do_system(aus: *mut rt.Buf) -> bool {
     var n9: [u8; 6] = "kerne\0"
     line_num(aus, (&n1[0]) as u64, sysinfo(I_VERSION) as u64)
     line_num(aus, (&n2[0]) as u64, sysinfo(I_UPTIME) as u64)
-    // Ein Rahmen ist 4096 Oktette; die Zahl in Oktetten ist die, die
-    // ein Mensch erwartet.
     line_num(aus, (&n3[0]) as u64, (sysinfo(I_FRAMES_ALL) as u64) * 4096)
     line_num(aus, (&n4[0]) as u64, (sysinfo(I_FRAMES_FREE) as u64) * 4096)
     line_num(aus, (&n5[0]) as u64, sysinfo(I_BLOCKS) as u64)
@@ -1678,11 +1378,6 @@ fn do_system(aus: *mut rt.Buf) -> bool {
 }
 
 // -------------------------------------------------------------- lies
-//
-// DER SCHNITT MIT HND_DUP. Nach dem `open` wird ein Deskriptor mit
-// ausschliesslich Leserechten hergestellt und der urspruengliche
-// geschlossen. Ab hier kann dieses Programm auf diese Datei NICHT MEHR
-// schreiben, auch wenn es wollte -- das entscheidet der Kern.
 
 fn tight_make(fd: i64, maske: i64, aus: *mut rt.Buf) -> i64 {
     let enger: i64 = hnd_dup(fd, maske)
@@ -1838,18 +1533,6 @@ fn do_list(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
 }
 
 // ------------------------------------------------------------ befehl
-//
-// KEINE SHELL, KEINE ZEICHENKETTE. Das erste Wort ist der PFAD des
-// Programms und muss WOERTLICH in der Liste `befehl_erlaubt` stehen;
-// die uebrigen Worte sind Argumente. Ein Muster statt eines Pfades
-// waere eine Erlaubnis, die niemand mehr ueberblickt.
-//
-// DIE AUSGABE laeuft ueber eine Datei und nicht ueber ein Rohr: das
-// Kind schreibt, der Vater liest danach. Ein Rohr waere schoener und
-// haette einen zweiten Wartepunkt gebraucht (`poll`), und der gehoert
-// in die Runde, die den Helfer nebenlaeufig macht -- nicht in diese.
-// Die Grenze `max_ausgabe` greift beim Lesen: was darueber liegt, wird
-// abgeschnitten und die Kuerzung steht in der Antwort.
 
 fn arg_count(p: u64, n: usize) -> usize {
     var z: usize = 0
@@ -2031,7 +1714,6 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     if !k_befehle {
         return ablehnen(aus, "`commands = no` in /etc/jarvis/permissions.conf")
     }
-    // Das erste Wort abstecken.
     var i: usize = 0
     while i < zn && rt.ld8(zeile, i) == 32 as u8 {
         i = i + 1
@@ -2061,7 +1743,6 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     if anz > 6 {
         return ablehnen(aus, "at most six words per command")
     }
-    // Die Worte als Zeichenketten mit Null, dazu die Zeigerliste.
     var worte: rt.Buf = rt.buf_new()
     var zeiger: [u64; 8] = [0; 8]
     var wz: usize = 0
@@ -2089,7 +1770,6 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     }
     zeiger[wz] = 0
 
-    // Die Ausgabedatei anlegen und dem Kind auf 1 und 2 legen.
     let ziel: i64 = sys_open((&k_arbeit[0]) as u64,
         O_WRONLY | O_CREAT | O_TRUNC, 384)
     if ziel < 0 {
@@ -2135,7 +1815,6 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
         code = 124
     }
 
-    // Die Ausgabe zurueckholen, bis zur Grenze.
     rt.buf_clear(aus)
     var kopf: [u8; 7] = "ende \0\0"
     rt.buf_push_bytes(aus, (&kopf[0]) as u64, 5)
@@ -2172,9 +1851,6 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
 }
 
 // -------------------------------------------------------------- foto
-//
-// Die Reihenfolge ist Absicht: erst die Rechteliste, dann der Schein,
-// dann erst wird irgendetwas vom Bildschirm gelesen.
 
 fn cert_check(aus: *mut rt.Buf) -> bool {
     var b: rt.Buf = rt.buf_new()
@@ -2182,8 +1858,6 @@ fn cert_check(aus: *mut rt.Buf) -> bool {
         rt.buf_free(&b)
         return ablehnen(aus, "no screenshot permit -- run `jarvisctl screenshot` on this device")
     }
-    // Der Schein traegt eine Frist in Sekunden seit 1970 in der ersten
-    // Zeile. Abgelaufen ist so gut wie nicht da.
     var ende: usize = 0
     while ende < b.len && rt.ld8(b.ptr, ende) != 10 as u8 {
         ende = ende + 1
@@ -2195,28 +1869,10 @@ fn cert_check(aus: *mut rt.Buf) -> bool {
         sys_unlink((&k_schein[0]) as u64)
         return ablehnen(aus, "the screenshot permit has expired")
     }
-    // EINMALIG: der Schein wird beim Gebrauch verbraucht.
     sys_unlink((&k_schein[0]) as u64)
     return true
 }
 
-// DAS BILDSCHIRMFOTO UEBER DEN KERN (Runde FEEDBACK, Nummer 1841).
-//
-// Der Weg, den docs/BRIDGE.md als den richtigen bezeichnet und den
-// dieser Zweig endlich hat. Der Unterschied zum /dev/fb-Weg darunter
-// ist nicht die Bildqualitaet, sondern WER ENTSCHEIDET: hier sagt der
-// KERN nein, wenn kein Schein offen ist, und ein Fehler in diesem
-// Programm kann daran nichts aendern.
-//
-//   1. SH_ARM stellt den Einmal-Schein aus (nur Wurzel/Taskleiste),
-//   2. SH_GRAB holt das Bild in Baendern von hoechstens MAX_CHUNK,
-//   3. der Schein ist nach der letzten Zeile VERBRAUCHT -- der Kern
-//      zieht ihn selbst ein, dieses Programm muss nichts zurueckgeben.
-//
-// Die Bildpunkte kommen als R,G,B (drei Oktette, `shot.rgb_at` dreht
-// die Reihenfolge der Karte schon zurecht). PNG-Farbart 2 will genau
-// das, mit einem Filteroktett je Zeile -- das setzt diese Schleife
-// davor, ohne die Zeile noch einmal anzufassen.
 fn grab_image(roh: *mut rt.Buf, hoehe: usize, zeile: usize, zpc: i64) -> i32 {
     let arm: i64 = syscall(S_SHOT, SH_ARM, 0, 0, 0, 0, 0)
     if arm < 0 {
@@ -2305,27 +1961,10 @@ fn photo_over_kernel(aus: *mut rt.Buf) -> bool {
 // ====================================================================
 // RUNDE BRUECKE: EINGABE EINSPEISEN
 // ====================================================================
-//
-// Der Auftrag traegt eine Zeichenkette, weil das Zeilenprotokoll
-// Zeichenketten traegt. Sie sieht so aus:
-//
-//     taste <code> <mods>      eine Taste, Code und Modifikatoren
-//     maus <x> <y>             den Zeiger dorthin setzen
-//     knopf <maske> <ab>       1=links 2=rechts 4=mitte, ab: 1 oder 0
-//
-// DER SCHEIN WIRD HIER GEHOLT UND HIER ZURUECKGEGEBEN, je Auftrag.
-// Das ist enger als noetig -- der Kern gibt zwei Minuten -- und
-// trotzdem richtig: ein Schein, der laenger lebt als der Auftrag, der
-// ihn gebraucht hat, ist ein offenes Fenster. Der Kern deckelt
-// zusaetzlich die Zahl der Anschlaege je Schein (MAX_ANSCHLAEGE),
-// damit auch ein Fehler hier keinen Tippautomaten ergibt.
 fn do_input(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     if !k_tipp {
         return ablehnen(aus, "`input = no` in /etc/jarvis/permissions.conf")
     }
-    // Gibt es den Aufruf ueberhaupt? Ein Kern mit `--ohne-bruecke`
-    // hat ihn NICHT, und das ist keine Ablehnung, sondern eine
-    // Abwesenheit -- der Unterschied gehoert in die Antwort.
     let schein: i64 = syscall(S_TIPP, TI_ARM, 0, 0, 0, 0, 0)
     if schein < 0 {
         if syscall(S_TIPP, TI_INFO, TQ_LOCKED, 0, 0, 0, 0) == 1 {
@@ -2374,7 +2013,6 @@ fn do_input(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
         syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
         return ablehnen(aus, "unknown input kind -- key, mouse, click or scan")
     }
-    // DEN SCHEIN IMMER ZURUECKGEBEN, auch wenn es schiefging.
     syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
     if erg < 0 {
         return ablehnen(aus, "the kernel rejected the input")
@@ -2392,14 +2030,6 @@ fn do_screenshot(aus: *mut rt.Buf) -> bool {
     if !cert_check(aus) {
         return false
     }
-    // ZUERST der Weg von Runde FEEDBACK. Gibt es ihn, ist er der
-    // richtige, und dieses Programm baut keinen zweiten.
-    //
-    // GEFRAGT WIRD MIT SH_INFO/SI_READY -- also mit einer Handlung, die
-    // dieser Aufruf WIRKLICH hat. Ein blankes `syscall(S_SHOT,0,0)` als
-    // Ja/Nein-Frage war der Fehler, der in merge6 jedes Bild verhindert
-    // hat: die Nummer gehoerte dort einem anderen Aufruf, der bereitwillig
-    // eine Zahl >= 0 zurueckgab.
     let bereit: i64 = syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0)
     if bereit >= 0 {
         if bereit == 0 {
@@ -2430,8 +2060,6 @@ fn do_screenshot(aus: *mut rt.Buf) -> bool {
     let zeile: usize = pitch as usize
     var roh: rt.Buf = rt.buf_new()
     var zpuf: rt.Buf = rt.buf_new()
-    // RUNDE HAERTUNG-2: ohne den Platz wird hier NICHT gelesen. Vorher
-    // ging `sys_read` in einen Puffer, der kleiner war als `zeile`.
     if !rt.buf_reserve(&zpuf, zeile) {
         rt.buf_free(&zpuf)
         rt.buf_free(&roh)
@@ -2454,8 +2082,6 @@ fn do_screenshot(aus: *mut rt.Buf) -> bool {
         if schief {
             break
         }
-        // Filter 0 (None) je Zeile, dann R, G, B. Die Karte liegt als
-        // BGRX vor (Runde K7); die Reihenfolge wird hier gedreht.
         rt.buf_push(&roh, 0 as u8)
         var x: usize = 0
         while x < breite {
@@ -2481,10 +2107,6 @@ fn do_screenshot(aus: *mut rt.Buf) -> bool {
     return true
 }
 
-// -b: DERSELBE PNG-Weg mit einem gerechneten Bild statt mit dem
-// Bildschirm. Damit ist der Kodierer gemessen, auch auf einem Kern, der
-// Ring 3 keine Bildschirmmasse gibt. Das Muster ist absichtlich
-// berechenbar: der Pruefstand rechnet jeden Bildpunkt nach.
 fn bildprobe() -> i32 {
     let breite: usize = 64
     let hoehe: usize = 48
@@ -2524,10 +2146,6 @@ fn bildprobe() -> i32 {
 // ====================================================================
 // DER SCHLUESSELHALTER
 // ====================================================================
-//
-// `/bin/jsig` wird gestartet, seine Ausgabe geht in die Arbeitsdatei
-// und wird von dort gelesen. Der private Schluessel taucht in DIESEM
-// Adressraum nie auf.
 
 fn jsig_rufen(a1: u64, a2: u64, aus: *mut rt.Buf) -> bool {
     var prog: [u8; 10] = "/bin/jsig\0"
@@ -2567,7 +2185,6 @@ fn jsig_rufen(a1: u64, a2: u64, aus: *mut rt.Buf) -> bool {
     return true
 }
 
-// Aus "pub <hex>\n" oder "sig <hex>\n" die Hexfolge herausschneiden.
 fn after_space(b: *mut rt.Buf, von: *mut usize, bis: *mut usize) -> bool {
     var i: usize = 0
     while i < (*b).len && rt.ld8((*b).ptr, i) != 32 as u8 {
@@ -2592,11 +2209,6 @@ fn after_space(b: *mut rt.Buf, von: *mut usize, bis: *mut usize) -> bool {
 // ====================================================================
 // DIE KOPPLUNG
 // ====================================================================
-//
-// Der Code kommt vom Server. Er wird sichtbar hingelegt und auf die
-// Konsole geschrieben; dann muss GENAU DIESER Code in der
-// Bestaetigungsdatei stehen, die nur `jarvisctl koppeln` schreibt.
-// Steht dort nichts oder etwas anderes, wird abgelehnt.
 
 fn printable_text(p: u64, n: usize) -> bool {
     var i: usize = 0
@@ -2626,7 +2238,6 @@ fn kopplung_bestaetigt(codep: u64, coden: usize) -> bool {
         rt.buf_free(&b)
         return false
     }
-    // Zeilenumbrueche und Leerzeichen am Ende weg.
     var n: usize = b.len
     while n > 0 && rt.ld8(b.ptr, n - 1) <= 32 as u8 {
         n = n - 1
@@ -2679,18 +2290,6 @@ fn anmelden(d: *mut Wire) -> u64 {
     var pubhex: rt.Buf = rt.buf_new()
     rt.buf_push_bytes(&pubhex, id.ptr + pv as u64, pb - pv)
     rt.buf_free(&id)
-    // ============================================== RUNDE MERGE-11
-    // DIE DRAHTKENNUNG. Ueber 443 gibt es keine Verbindung, an der der
-    // Server erkennen koennte, welche POSTs zusammengehoeren. Also
-    // traegt jede Anfrage eine Kennung -- die ersten 24 Zeichen des
-    // OEFFENTLICHEN Schluessels.
-    //
-    // SIE IST KEIN AUSWEIS, und das ist wichtig: sie steht offen im
-    // Kopf, und wer sie errrät, bekommt damit gar nichts. Der Ausweis
-    // ist und bleibt die Ed25519-Unterschrift auf die Forderung, die
-    // `jsig` leistet -- der private Schluessel liegt weiter dort und
-    // nicht in diesem Programm. Die Kennung sagt nur: "das ist
-    // derselbe Wire wie eben".
     if (*d).https {
         var kl: usize = pubhex.len
         if kl > 24 {
@@ -2725,8 +2324,6 @@ fn anmelden(d: *mut Wire) -> u64 {
         var w_drop: [u8; 5] = "drop\0"
         var w_pairing: [u8; 15] = "pairing-needed\0"
         if ist(wp, wn, (&w_challenge[0]) as u64) && f.n >= 2 {
-            // Unterschreiben lassen. Das Argument ist schon Hex, genau
-            // die Form, die `jsig unterschreibe` erwartet.
             var nonce: [u8; 260] = [0; 260]
             let nn: usize = hinein((&nonce[0]) as u64, 260 as usize,
                 zeile.ptr + f.off[1] as u64, f.len[1])
@@ -2926,14 +2523,6 @@ fn bediene(d: *mut Wire) -> bool {
         let laenge: usize = num_from(zeile.ptr + f.off[f.n - 1] as u64,
             f.len[f.n - 1]) as usize
         if laenge > MAXNUTZ {
-            // UEBER DER HARTEN GRENZE wird gar nicht erst Speicher
-            // besorgt und auch nicht mehr geantwortet: wer eine
-            // Nutzlast dieser Groesse ankuendigt, haelt sich nicht an
-            // das Protokoll, und der Strom laesst sich danach nicht
-            // mehr sauber lesen. Was die RECHTELISTE erlaubt
-            // (`max_datei`), liegt darunter und wird in den
-            // Auftragsarten selbst geprueft -- dort kann noch
-            // geantwortet werden.
             sag("jarvisd: payload over the hard limit -- stopping\n")
             var a: [u8; 8] = "request\0"
             var g: [u8; 28] = "payload over the hard limit\0"
@@ -2946,7 +2535,6 @@ fn bediene(d: *mut Wire) -> bool {
             sauber = false
             break
         }
-        // Die Rechteliste FRISCH lesen -- vor jedem einzelnen Auftrag.
         conf_read()
         z_auftraege = z_auftraege + 1
 
@@ -3011,8 +2599,6 @@ fn bediene(d: *mut Wire) -> bool {
             break
         }
     }
-    // ABRAEUMEN, IMMER. Ein Abriss mitten im Auftrag darf nichts
-    // liegenlassen: die vier Puffer gehoeren diesem Aufruf.
     rt.buf_free(&zeile)
     rt.buf_free(&nutz)
     rt.buf_free(&aus)
@@ -3029,26 +2615,8 @@ fn fail_conn(schief: *mut bool) -> net.Conn {
     return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
 }
 
-// 0 = alles gut, 1 = abgewiesen (nicht sofort neu versuchen),
-// 2 = Netz/Handschlag ging nicht.
-// ==================================================== RUNDE MERGE-11
-// EINE RUNDE UEBER 443.
-//
-// Es gibt hier KEINE offene Verbindung, die aufgebaut und wieder
-// abgebaut wird -- jede Nachricht bringt ihre eigene mit. Diese
-// Funktion tut deshalb nur zwei Dinge: den Namen aufloesen (einmal je
-// Runde, nicht je Nachricht) und das Zeilenprotokoll fuehren, das ab
-// hier UNVERAENDERT ist.
-// k_wire points at the wire `d` for the keepalive and is cleared before return.
 #[allow_escape]
 fn eine_runde_https() -> u64 {
-    // Der Name wird HIER aufgeloest und nicht in der Rechteliste
-    // eingetragen. `rechte.conf` sagt bisher ausdruecklich, es stehe
-    // dort eine ZAHL, weil eine Namensaufloesung eine zweite Stelle
-    // sei, an der jemand umlenken kann. Fuer store.fleitec.com gilt
-    // das nicht mehr: die Adresse ist nicht fest, und umlenken nuetzt
-    // niemandem, weil das Zertifikat auf DIESEN Namen lauten muss --
-    // geprueft wird der Name, nicht die Zahl.
     if k_ip == 0 as u32 {
         var wirt: [u8; 100] = [0; 100]
         let wn: usize = hinein((&wirt[0]) as u64, 100 as usize,
@@ -3120,8 +2688,6 @@ fn eine_runde() -> u64 {
         wurzeln = x509.store_load_pem(&store, storebuf.ptr, storebuf.len)
     }
     if wurzeln == 0 {
-        // KEIN STILLES WEITER. Ohne Wurzeln ist jede Gegenstelle
-        // gleich glaubwuerdig, und das ist schlimmer als kein TLS.
         sag("jarvisd: no root store -- nothing is trusted\n")
     }
     var t: tls.Tls = tls.tls_new()
@@ -3192,14 +2758,6 @@ fn mach_verzeichnisse() {
     sys_mkdir((&v5[0]) as u64)
 }
 
-// ====================================================================
-// DIE PROBE (-p): DASS DER KERN UND NICHT DIESES PROGRAMM NEIN SAGT
-// ====================================================================
-//
-// Eine Datei wird zum LESEN UND SCHREIBEN geoeffnet, dann mit HND_DUP
-// auf Leserechte beschnitten, dann wird geschrieben. Geht das Schreiben
-// durch, ist die ganze Begruendung dieser Runde falsch -- also steht
-// hier eine Zahl und keine Behauptung.
 fn probe() -> i32 {
     var name: [u8; 32] = "/var/jarvis/probe.txt\0\0\0\0\0\0\0\0\0\0\0"
     let a: i64 = sys_open((&name[0]) as u64, O_WRONLY | O_CREAT | O_TRUNC, 420)
@@ -3263,8 +2821,6 @@ fn probe() -> i32 {
     return 0
 }
 
-// -s: was dieses Programm vom Bildschirm sieht. Eine Zeile Zahlen,
-// damit "kein Rahmenpuffer" nicht geraten werden muss.
 fn screen() -> i32 {
     sag("schirm: shot ")
     say_num(syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0) as u64)
@@ -3291,37 +2847,7 @@ fn screen() -> i32 {
     return 0
 }
 
-// ====================================================================
-// RUNDE LEISTE: DAS BILDSCHIRMFOTO, DAS OHNE NETZ AUSKOMMT
-// ====================================================================
-//
 //     jarvisd -f /var/jarvis/schirm.ppm
-//
-// WARUM PPM UND NICHT PNG. Der Auftragsweg (`do_screenshot`) liefert PNG
-// ueber die Leitung, weil dort jedes Oktett zaehlt. Diese Fassung hier
-// schreibt in eine DATEI auf DIESEM Geraet, und dafuer ist PPM die
-// richtige Wahl: kein zlib, kein CRC, kein Zwischenpuffer ueber dem
-// ganzen Bild -- eine Kopfzeile und dann Zeile fuer Zeile durch. Auf
-// 3440x1440 sind das 14,9 MiB, und sie gehen SOFORT auf die Platte
-// statt vorher in den Speicher. Ein Helfer, der zum Fotografieren 15
-// MiB Halde braucht, macht auf einem Geraet mit knappem Speicher kein
-// Foto.
-//
-// Vorlage ist `r_ppm` aus `lib/fenster/win32.fi` des Certus-Zweigs:
-// "P6\n<breite> <hoehe>\n255\n", dann drei Oktette je Bildpunkt, und
-// die Reihenfolge wird gedreht -- die Karte liegt als BGRX vor.
-//
-// UND WOZU DAS GUT IST, wenn niemand die Datei abholt: Justin kann sie
-// auf einen USB-Stick kopieren. Der Weg ueber den Server (`foto`)
-// benutzt denselben Leser; wenn dieser hier ein Bild liefert, liegt
-// ein Fehler dort NICHT mehr am Rahmenpuffer.
-// DAS PPM UEBER DEN KERN-SCHEIN (Runde FEEDBACK, Nummer 1841).
-//
-// Dasselbe wie `foto_datei` darunter, nur dass die Bildpunkte vom Kern
-// kommen und nicht aus `/dev/fb`: SH_ARM stellt den Einmal-Schein aus,
-// SH_GRAB holt Baender, und der Kern zieht den Schein nach der letzten
-// Zeile selbst ein. Die Oktette kommen schon als R,G,B -- PPM will
-// genau das, also geht jede Zeile ohne Umsortieren hinaus.
 fn ppm_over_kernel(pfad: u64, w: i64, h: i64) -> i32 {
     let rb: i64 = syscall(S_SHOT, SH_INFO, SI_ROWBYTES, 0, 0, 0, 0)
     var zpc: i64 = syscall(S_SHOT, SH_INFO, SI_CHUNKROWS, 0, 0, 0, 0)
@@ -3372,12 +2898,6 @@ fn ppm_over_kernel(pfad: u64, w: i64, h: i64) -> i32 {
             schief = true
             break
         }
-        // EIN `write` SCHREIBT NICHT ALLES, und das ist kein Fehler,
-        // sondern die Regel: Osums `write` geht ueber `fs.fi` und legt
-        // hoechstens EINEN Block (4096 Oktette) auf einmal ab.
-        // Gemessen: von 65280 geholten Oktetten kamen 4096 an, und das
-        // Bild brach nach drei Baendern ab. Wer den Rueckgabewert nicht
-        // ansieht, schreibt ein Bild mit Loechern.
         var ab: usize = 0
         while ab < (n as usize) {
             let gw: i64 = sys_write(out, band.ptr + ab as u64, (n as usize) - ab)
@@ -3408,13 +2928,6 @@ fn ppm_over_kernel(pfad: u64, w: i64, h: i64) -> i32 {
 }
 
 fn photo_file(pfad: u64) -> i32 {
-    // RUNDE BRIDGE-2: ZUERST DEN KERN FRAGEN, genau wie `do_screenshot` es
-    // tut. Vorher stand hier nur `WIG_SCREEN`, und das liegt hinter dem
-    // Fensterserver -- auf einem Kern mit Rahmenpuffer, aber ohne
-    // laufenden Fensterserver sagte dieses Programm "keine
-    // Bildschirmmasse", obwohl der Kern die Masse laengst kannte.
-    // Gemessen mit tools/bridge/fotoprobe.sh: `schirm: shot 1 shotw 1280
-    // shoth 800`, waehrend WIG_SCREEN mit -19 antwortete.
     var w: i64 = 0
     var h: i64 = 0
     let bereit: i64 = syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0)
@@ -3467,8 +2980,6 @@ fn photo_file(pfad: u64) -> i32 {
     rt.buf_push_bytes(&kopf, (&m255[0]) as u64, 4)
     let _hk: i64 = sys_write(out, kopf.ptr, kopf.len)
     rt.buf_free(&kopf)
-    // Und Zeile fuer Zeile. Ein Zeilenpuffer herein, ein Zeilenpuffer
-    // hinaus -- mehr Speicher braucht es nicht.
     let breite: usize = w as usize
     let zeile: usize = pitch as usize
     var zpuf: rt.Buf = rt.buf_new()
@@ -3527,22 +3038,7 @@ fn photo_file(pfad: u64) -> i32 {
     return 0
 }
 
-// ====================================================================
-// RUNDE LEISTE: DIE STARTDIAGNOSE
-// ====================================================================
-//
 //     jarvisd -d
-//
-// Justins Satz war: "jarvisd soll beim Start ehrlich sagen, woran es
-// hakt". Bis hierher sagte es zwei Dinge -- die Rechteliste und
-// "bereit" -- und wenn danach nichts geschah, war nicht zu
-// unterscheiden, ob das Kabel nicht steckt, die Adresse fehlt, der
-// Server nicht antwortet oder das Recht nicht da ist.
-//
-// Diese Liste geht die Kette der Reihe nach durch und schreibt je
-// Glied EIN Wort: JA, NEIN oder die Zahl. Sie ist so gebaut, dass ein
-// FOTO davon reicht -- Justins Brett hat keine serielle Leitung, also
-// muss die Antwort auf den Bildschirm passen.
 fn zeig_ip(name: str, v: u64) {
     sag(name)
     say_num((v >> 24) & 255)
@@ -3589,7 +3085,6 @@ fn diagnose() -> i32 {
         sag("\n")
         sag("  server         ")
         if k_https {
-            // Ueber 443 steht der NAME fuer den Weg, nicht die Zahl.
             sag("https://")
             rt.write_everything(1, (&k_name[0]) as u64, k_namelen)
             rt.write_everything(1, (&k_pfad[0]) as u64, k_pfadlen)
@@ -3754,11 +3249,6 @@ fn main(start: u64) -> i32 {
     if nurlesen {
         return 0
     }
-    // ============================================== RUNDE MERGE-11
-    // Ueber 443 gibt es KEINE Adresse in der Rechteliste, und das ist
-    // Absicht: der Name wird beim Verbinden aufgeloest. Verlangt wird
-    // dann der NAME -- ohne ihn kann kein Zertifikat geprueft werden,
-    // und ungeprueft faehrt dieser Dienst nicht los.
     if k_https {
         if k_namelen == 0 {
             sag("jarvisd: `transport = https` needs `servername = ...`\n")
@@ -3813,9 +3303,6 @@ fn main(start: u64) -> i32 {
             }
             warte = 250
         } else if erg == 1 {
-            // Abgewiesen. Nicht schneller wiederkommen, sondern lange
-            // warten -- eine abgelehnte Anmeldung im Sekundentakt ist
-            // aus Sicht des Servers ein Angriff.
             if einmal {
                 break
             }
@@ -3836,9 +3323,6 @@ fn main(start: u64) -> i32 {
             z_warteaufrufe = z_warteaufrufe + ((a1 - a0) as u64)
         }
         z_wartems = z_wartems + warte
-        // WACHSENDE WARTEZEIT, gedeckelt. Ohne Deckel waere das Geraet
-        // nach einem langen Ausfall stundenlang weg; ohne Wachstum
-        // haemmert es dem Server die Tuer ein.
         warte = warte * 2
         if warte > 30000 {
             warte = 30000

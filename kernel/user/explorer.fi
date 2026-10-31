@@ -1,80 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/explorer.fi -- Runde K15: /bin/explorer, der Dateimanager.
-//
-// ER HEISST NICHT NAUTILUS, NICHT FINDER UND NICHT SONST EIN KUNSTWORT.
-// Der Name IST die Beschreibung: fuer den Nutzer heisst er
-// "Datei-Explorer", die Datei dahinter `/bin/explorer`, und wer `files`
-// tippt, landet am selben Ort -- `/bin/files` ist ein ZWEITER NAME fuer
-// dieselbe Inode (`tools/osum/mkfs.py`, `<neu>@<vorhanden>`), kein
-// zweites Exemplar.
-//
-// UND DER ANZEIGENAME STEHT NICHT IN DIESER DATEI. Er kommt aus
-// `/apps/explorer.osp/INFO`, so wie alle austauschbaren
-// Zeichenketten dieses Projekts in Daten stehen und nicht in Code.
-// Findet sich die Datei nicht, nimmt das Fenster den Namen, unter dem
-// das Programm aufgerufen wurde -- und behauptet keinen schoeneren.
-//
-// DIE GRAFISCHE FASSUNG VON `ls`, und keine Zeile mehr Kernel als `ls`
-// braucht: `open` mit O_DIRECTORY, `getdents64`, `stat`, `mkdir`,
-// `unlink`, `spawn`. Alles davon hat Runde K4 gebaut und Runde K6
-// benutzt. Was diese Runde dazulegt, ist die Oberflaeche -- und die
-// liegt in `kernel/user/wlib.fi`, ebenfalls in Ring 3.
-//
 // WAS ER ZEIGT:
-//
-//   links   der Verzeichnisbaum -- die Unterverzeichnisse des
-//           aktuellen Ortes und der Weg nach oben.
-//   rechts  eine Tabelle mit Name, Groesse, Zeit und Rechten, nach
-//           jeder Spalte sortierbar (Kopfzeile anklicken; noch einmal
-//           dreht die Richtung um).
-//   oben    Zurueck, Vorwaerts, Hinauf und die Pfadleiste -- ein
-//           Textfeld, in das man einen Pfad tippen und mit der
-//           Eingabetaste hingehen kann.
-//   unten   was gerade gilt: wie viele Stuecke, wie viele Oktette.
-//
-// Doppelklick oeffnet ein Verzeichnis oder startet ein Programm. Die
-// rechte Maustaste gibt ein Kontextmenue mit Umbenennen, Loeschen und
-// Neues Verzeichnis.
-//
-// DREI EHRLICHE ANGABEN, und sie stehen hier und nicht im Kleingedruckten:
-//
-//   1. DIE SPALTE "ZEIT" ZEIGT SEIT RUNDE EXPLORER-2 DIE ECHTE ZEIT.
-//      Bis dahin stand hier, das Dateisystem habe keine Zeitstempel und
-//      die Spalte zeige darum "--". Das galt fuer das alte Format; OFS
-//      v3 legt mtime, ctime und atime im Inode ab, `stat` gibt sie
-//      heraus (`io.stat_mtime/ctime/atime`), und `expmodell` rechnet
-//      sie mit dem Versatz aus `/etc/time.conf` in Ortszeit um --
-//      derselben Quelle, aus der die Taskleiste ihre Uhr nimmt. Wo
-//      wirklich keine Zeit steht (0), steht weiterhin "--", denn eine
-//      erfundene Zeit waere schlimmer als eine leere.
-//   2. DIE SPALTE "RECHTE" ZEIGT, WAS `stat` WIRKLICH MELDET. Der
-//      Kernel gibt 0755 fuer ein Verzeichnis und 0644 fuer eine Datei
-//      (`kernel/sys.fi`, `fill_stat`) -- es gibt keinen Eigentuemer und
-//      keine Rechte auf der Platte. Die Zeichenkette wird aus den
-//      gemeldeten Bits gebaut und nicht als Text hingeschrieben; damit
-//      zeigt sie am Tag, an dem es echte Bits gibt, die echten.
-//   3. UMBENENNEN HAENGT DEN VERZEICHNISEINTRAG UM. Hier stand
-//      "Umbenennen ist Kopieren und Loeschen", weil dieser Kernel kein
-//      `rename` hatte. Er hat eins (`io.rename`, Runde EXPLORER-2), und
-//      das ist mehr als eine Feinheit: der alte Weg oeffnete die Datei,
-//      schrieb sie neu und loeschte das Original -- bei einem ORDNER
-//      kam dabei eine leere Datei heraus und der Ordner war weg.
-//      `expakt.umbenennen` ruft `io.rename`; nur wenn am Ziel schon
-//      etwas liegt, kommt der Konfliktdialog mit vier Antworten.
 
 // ================================================ RUNDE 31: profile app
-//
-// Die Wurzeldatei tragt das Profil (compiler/src/prof.rs), und die
-// Bedienelemente dieses Programms kommen ab dieser Runde aus fUi
-// (wlib -> fuib -> lib/fui). fUi rechnet Geometrie in `f64` und
-// benutzt `std.rt`; unter `profile kernel` ist beides gesperrt
-// (SPEC.md:125: "Floating point | kernel: only with #[allow_fp] |
-// app: free").
-//
-// Die Module darunter bleiben `kernel` -- gemessen: nur die WURZEL muss
-// wechseln. Gebunden wird dafuer OHNE crt.o, weil firnc unter `app`
-// seinen eigenen `_start` mitbringt (tools/look/shot.sh liest das
-// Profil und laesst crt.o dann weg).
 profile app
 
 import ulib
@@ -90,19 +18,12 @@ import fuiapp
 import fuiscene
 import fui.navnum
 import fui.cmdbar
-// RUNDE 32: nur fuer die zwei Zaehler beim Start.
 import fuib
 import icons
 import msg
 import ctxreg
 import appdir
 import trash
-// RUNDE EXPLORER-2: die vier neuen Bausteine. Sie stehen in eigenen
-// Dateien, weil vier Leute daran arbeiten koennen, ohne sich in die
-// Zeilen zu greifen -- das Modell (Liste, Zeiten, Sortierung), die
-// Taten (Ablage, Einfuegen, Umbenennen, Rueckgaengig), die Orte
-// (Seitenleiste, Brosamen) und die Auskuenfte (Eigenschaften,
-// Oeffnen mit, Miniaturen). Siehe PLAN.md.
 import expmodell
 import expsmb
 import expakt
@@ -116,18 +37,6 @@ import gif
 export { u_start }
 
 // ================================ RUNDE EXPLORER-2, ZWEITER DURCHGANG
-//
-// DIESE ZWEI GRENZEN GELTEN NUR NOCH FUER DEN SICHERUNGSMODUS, und der
-// Name sagt es jetzt auch. Das echte Verzeichnis liegt seit dieser
-// Runde in `expmodell` mit MAXENT 4096 und NAMEB 256 (Namensblob plus
-// Offsettafel, siehe dort); die kleinen Felder hier tragen nur noch
-// die beiden Ansichten, die KEIN Verzeichnis sind: die Liste der
-// Sicherungen eines Speichers (`vmodus 1`) und der Inhalt einer
-// Sicherung (`vmodus 2`). Beide kommen aus einer Textdatei, sind nach
-// Messung dieses Baums nie mehr als ein paar Dutzend Zeilen, und
-// `scan_speicher`/`scan_sicherung` pruefen die Grenze vor jedem
-// Schreiben. Wer 96 fuer die Grenze des Dateimanagers haelt, liest
-// hier die falsche Zahl -- deshalb heissen sie SIC_.
 const SIC_MAXENT: u64 = 96
 const SIC_NAMEB: u64 = 32
 
@@ -161,31 +70,7 @@ static mut dlgpuffer: [u8; 128] = [0 as u8; 128]
 static mut spalten: [u64; 4] = [0 as u64; 4]
 static mut lauf: [u8; 96] = [0 as u8; 96]
 
-
 // ====================================================== RUNDE ALLTAG
-//
-// REITER: MEHRERE ORDNER IM SELBEN FENSTER.
-//
-// Justin, nach einem Blick auf seinen Windows-Explorer: der hat Reiter,
-// dieser nicht. Das ist der ganze Grund -- und es ist ein guter: wer
-// Dateien von A nach B schiebt, hat beide Seiten offen.
-//
-// WAS EIN REITER IST, hier so knapp wie moeglich: EIN PFAD. Nicht ein
-// zweiter Dateimanager, nicht ein zweites Modell, nicht ein zweites
-// Fenster. Beim Wechsel wird `pfad` gegen den gemerkten getauscht und
-// neu gelesen -- derselbe Weg, den `place_walk` und `tree_walk` seit
-// jeher gehen. Ein zweites Modell nebenher waere der zweite Ort fuer
-// jeden Fehler, und bei acht Reitern der achte.
-//
-// WARUM DIE OBERGRENZE ACHT IST UND NICHT ZWOELF: `wlib.tab_sum` und
-// `tab_width` laufen ueber genau 12 Reiter (wlib.fi:4624) -- mehr
-// KANN die Bibliothek nicht malen. Acht laesst Luft und passt auch
-// dann noch ins Fenster, wenn die Namen lang sind.
-//
-// DER TEXT DER REITERLEISTE ist ein Block mit einem Namen je Zeile --
-// genau das Format, das `wlib.tabs` erwartet (netmon.fi:90 macht es
-// vor). Er wird neu gebaut, sooft sich etwas aendert, und mit
-// `wlib.set_text` nachgezogen.
 const REITER_MAX: u64 = 8
 const REITER_B: u64 = 128
 static mut reiter_pfad: [u8; 1024] = [0 as u8; 1024]
@@ -200,30 +85,19 @@ static mut k_items: [u8; 21] = "explorer.count.items\0"
 static mut k_folders: [u8; 23] = "explorer.count.folders\0"
 static mut k_octets: [u8; 21] = "explorer.count.bytes\0"
 static mut t_appdir: [u8; 8] = "/apps\0\0\0"
-// SEIT DEM ZWEITEN NACHTRAG SUCHT ER SICH IM BUENDEL. `exec` eines
-// Eintrags ist `<buendel>/start`, und das ist ein ZWEITER NAME auf
-// dieselbe Inode wie `/bin/explorer` -- der Vergleich geht deshalb
-// ueber den Buendelpfad und nicht ueber den unter `/bin`.
 static mut t_selbst: [u8; 27] = "/apps/explorer.osp/start\0\0\0"
 static mut k_menu: [u8; 14] = "explorer.menu\0"
 static mut k_cmd: [u8; 13] = "explorer.cmd\0"
 static mut k_mtit: [u8; 16] = "wlib.menu.title\0"
-// RUNDE EXPLORER-2, Pflichtpunkt 12: Aus "<" ">" "^" sind Symbole
-// geworden (`wlib.icon_button`). Was hier steht, ist nur noch der
-// NAME des Knopfes -- fuer den Vorleser und fuer `say_painted`.
 static mut k_gzurueck: [u8; 20] = "explorer.nav.back\0\0\0"
 static mut k_gvor: [u8; 24] = "explorer.nav.forward\0\0\0\0"
 static mut k_gauf: [u8; 20] = "explorer.nav.up\0\0\0\0\0"
 static mut k_gneu: [u8; 24] = "explorer.nav.refresh\0\0\0\0"
-// RUNDE HOTPLUG: der Auswurfknopf und seine vier Antworten.
 static mut k_gaus: [u8; 16] = "explorer.eject\0\0"
 static mut k_ausok: [u8; 19] = "explorer.eject.ok\0\0"
 static mut k_ausbusy: [u8; 21] = "explorer.eject.busy\0\0"
 static mut k_ausfail: [u8; 21] = "explorer.eject.fail\0\0"
 static mut k_ausnone: [u8; 21] = "explorer.eject.none\0\0"
-// Welche Zeile der Ortsliste zuletzt angefasst wurde. Der Auswurf
-// braucht ein Ziel, und ein Knopf, der "irgendeinen" Traeger wirft,
-// waere schlimmer als keiner.
 static mut ort_wahl: u64 = 0xFFFFFFFFFFFFFFFF
 static mut k_cols: [u8; 17] = "explorer.columns\0"
 // Item context menu rows (registry context CTX_EXPLORER_ITEM): catalogue key per row; the action id of a row is its index
@@ -251,8 +125,6 @@ static mut k_mshow: [u8; 19] = "explorer.menu.show\0"
 static mut k_rename: [u8; 16] = "explorer.rename\0"
 static mut k_massren: [u8; 17] = "explorer.massren\0"
 static mut t_massdef: [u8; 11] = "[N]_[C][E]\0"
-// RUNDE ROADMAP-3: der Titel der Loeschfrage. Beide Rufe von `dlg_ask`
-// nahmen `k_rename` -- die Frage "Wirklich löschen?" hiess "Umbenennen".
 static mut k_deltit: [u8; 16] = "explorer.delete\0"
 static mut k_newdir: [u8; 19] = "explorer.newfolder\0"
 static mut k_name: [u8; 14] = "explorer.name\0"
@@ -262,29 +134,8 @@ static mut k_del: [u8; 24] = "explorer.confirm_delete\0"
 // prints. A word that means the same thing must not have two spellings.
 static mut t_views: [u8; 25] = "real\nfiltered\nfaked\nnone\0"
 
-// ===================================================================
-// RUNDE TRESOR, ZWEITER NACHTRAG: SICHERN UND ZURUECKHOLEN.
-//
-// Der ganze Sinn ist ein Satz: Stick anstecken, hineingehen, "Backup
-// hierhin sichern" -- fertig. Was darunter liegt, ist KEINE grosse
-// Datei und kein ZIP, sondern ein VERZEICHNIS aus Bloecken, die sich
-// alle Sicherungen teilen (`kernel/user/bstore.fi` erklaert, warum).
-// Kluges Format unten, ein Menuepunkt oben.
-//
-// UND ES IST DIESELBE UMSETZUNG wie in `/bin/backup`. Der Dateimanager
-// hat KEINE eigene Fassung von "Baum durchgehen und hashen" -- er ruft
-// `bstore` auf. Zwei Fassungen driften, und der Tag, an dem sie sich
-// uneins sind, ist der Tag, an dem jemand eine Wiederherstellung
-// braucht.
-//
-// DREI ANSICHTEN, und `vmodus` sagt, welche gilt:
-//   0  ein ganz gewoehnliches Verzeichnis
-//   1  ein Sicherungsspeicher: die Liste der SICHERUNGEN, mit Datum,
-//      Anzahl Dateien und Groesse
-//   2  IN einer Sicherung: die Dateien darin, zum Hineingehen wie in
-//      einen Ordner und zum einzelnen Zurueckholen
 static mut vmodus: u64 = 0
-static mut vspeicher: [u8; 128] = [0 as u8; 128] // wo der Speicher liegt
+static mut vspeicher: [u8; 128] = [0 as u8; 128]
 static mut vsicher: [u8; 64] = [0 as u8; 64]     // welche Sicherung
 static mut vunter: [u8; 160] = [0 as u8; 160]    // wo darin
 static mut vctx: [u8; 528] = [0 as u8; 528]
@@ -312,45 +163,10 @@ static mut dlg_gemeldet: bool = false
 static mut sortby: u64 = 0
 static mut sortrev: u64 = 0
 
-// RUNDE EXPLORER-2, Pflichtpunkt 3: das Bitfeld der Mehrfachauswahl.
-// `wlib.sel_*` haelt keine eigene Wahrheit darueber, welche Zeile
-// markiert ist -- es rechnet auf DEM Feld, das hier angemeldet wird.
-// Ein Bit je Zeile, MAXENT 4096 Zeilen -> 4096/8 = 512 Oktette. Die
-// Adresse muss statisch sein, weil die Bibliothek sie beim naechsten
-// Malen erneut liest.
 static mut selbits: [u8; 512] = [0 as u8; 512]
 
-// ============================================ RUNDE BELEG: DER MESSAUSGANG
-// STEHT IM NORMALBETRIEB AUS.
-//
-// Justins Befund am Abbild vom 12.09.2026: im Terminalfenster standen
-// Zeilen wie `explorer: krumm n=2 fold=0` und `bg=...`. Gezaehlt hat er
-// auch: 160 `ulib.say` in taskbar.fi, 38 in explorer.fi.
-//
-// Die Regel dazu steht seit Runde LAUFZEIT in taskmgr.fi:
-//
-//   EIN MESSAUSGANG GEHOERT HINTER EINEN SCHALTER, UND DER SCHALTER
-//   STEHT IM NORMALBETRIEB AUS. Ein Programm, das im Auslieferungs-
-//   zustand misst, misst vor allem sich selbst.
-//
-// NICHT GELOESCHT, SONDERN GESCHALTET. Die Zaehler (`fui=`, `fuix=`,
-// `rect id=`, `text ... base=`) waren mehrfach der Schluessel zur
-// Fehlersuche -- sie muessen fuer die Abnahme da sein. Also EIN Schalter
-// statt zweihundert geloeschter Zeilen.
-//
-// ZWEI WEGE, IHN EINZUSCHALTEN, und beide gab es schon:
-//   /etc/uitrace   die Datei, mit der `wlib` seit Runde LOOK dasselbe
-//                  tut -- die Pruefstaende legen sie ohnehin an
-//   `debug`        als Wort auf der Programmzeile, fuer den Fall, dass
-//                  einer allein gestartet wird
-//
-// OHNE BEIDES AENDERT SICH KEIN OKTETT gegenueber vorher -- das ist die
-// Bedingung dafuer, dass kein bestehender Testlaeufer davon etwas merkt.
 static mut s_dbg: u64 = 0
 
-// Die drei Ausgaenge dieses Programms, an EINER Stelle geschaltet.
-// `sayn` und `nl` stehen hier, damit kein Aufrufer `ulib.` direkt
-// nimmt und damit am Schalter vorbeigeht.
 fn dbg_on() -> bool {
     return s_dbg != 0
 }
@@ -406,22 +222,6 @@ fn nptr(i: u64) -> u64 {
 }
 
 // ============================================ RUNDE EXPLORER-2: DAS MODELL
-//
-// ZWEI MODELLE, EIN ZUGRIFF. Der Dateimanager zeigt DREI Dinge in
-// derselben Tabelle: ein echtes Verzeichnis auf der Platte, die Liste
-// der Sicherungsspeicher (`vmodus 1`) und den Inhalt einer Sicherung
-// (`vmodus 2`). Die beiden letzten sind KEINE Verzeichnisse -- sie
-// stehen in einer Textdatei, und `scan_speicher`/`scan_sicherung`
-// fuellen dafuer die kleinen Felder hier in dieser Datei.
-//
-// Das echte Verzeichnis kommt seit dieser Runde aus `expmodell`: dort
-// stehen MAXENT 4096 statt 96, NAMEB 256 statt 32, die echten Zeiten
-// aus `stat` und die Sortierung nach vier Spalten. Beides
-// nebeneinanderzuhalten waere zwei Wahrheiten; darum geht JEDER Leser
-// durch die sechs Adapter hier, und nur sie wissen, welches Modell
-// gerade gilt. Wer `anzahl` oder `folge[]` direkt liest, liest im
-// Sicherungsmodus richtig und im Normalfall falsch -- deshalb tut es
-// unterhalb dieser Zeile niemand mehr.
 fn m_anzahl() -> u64 {
     if vmodus == 0 {
         return expmodell.anzahl()
@@ -429,8 +229,6 @@ fn m_anzahl() -> u64 {
     return anzahl
 }
 
-// Ansichtszeile -> Eintragsnummer. Die Sortierung steckt in dieser
-// Abbildung, nicht in den Daten.
 fn m_ord(zeile: u64) -> u64 {
     if vmodus == 0 {
         return expmodell.ord_at(zeile)
@@ -469,8 +267,6 @@ fn m_modus(e: u64) -> u64 {
     return modus[(e) as usize]
 }
 
-// -------------------------------------------------- das Verzeichnis lesen
-
 fn join(dir: u64, name: u64) -> u64 {
     let out: u64 = (&vollpfad[0 as usize]) as u64
     var n: u64 = 0
@@ -494,20 +290,10 @@ fn join(dir: u64, name: u64) -> u64 {
     return out
 }
 
-// Das echte Verzeichnis liest seit RUNDE EXPLORER-2 `expmodell.lade`
-// -- mit MAXENT 4096 statt 96, NAMEB 256 statt 32 und den Zeiten aus
-// `stat`. Das alte `scan` hier war danach unerreichbar und ist weg;
-// zwei Leser desselben Verzeichnisses waeren zwei Wahrheiten.
-
-// Wo das Datum der Zeile i liegt (wie `nptr`, nur fuer die Zeitspalte).
 fn zptr(i: u64) -> u64 {
     return (&zeiten[0 as usize]) as u64 + i * 20
 }
 
-// ANSICHT 1: die Sicherungen eines Speichers. Jede bekommt ihr Datum aus
-// dem Kopf des Schnappschusses und ihre Zahlen aus dessen `end`-Zeile --
-// eine Sicherung OHNE `end` ist unvollstaendig und wird gar nicht erst
-// angezeigt, denn sie ist keine.
 fn scan_mem() -> u64 {
     var namebuf: [u8; 64] = [0 as u8; 64]
     anzahl = 0
@@ -538,10 +324,6 @@ fn scan_mem() -> u64 {
     return anzahl
 }
 
-// ANSICHT 2: was IN einer Sicherung unter `vunter` liegt. Der
-// Schnappschuss ist eine Textdatei mit vollen Pfaden; angezeigt wird,
-// was genau eine Ebene tiefer liegt -- damit laesst er sich begehen wie
-// ein Ordner, ohne dass irgendwo ein Baum gebaut werden muss.
 fn scan_sicherung() -> u64 {
     anzahl = 0
     let pl: u64 = ulib.length((&vunter[0 as usize]) as u64)
@@ -556,7 +338,6 @@ fn scan_sicherung() -> u64 {
                 (&vpfad[0 as usize]) as u64, (&vinfo[0 as usize]) as u64) {
             weiter = false
         } else if anzahl < SIC_MAXENT {
-            // Passt der Anfang? Und ist danach GENAU EIN Namensteil?
             if pl == 0 || ulib.strneq((&vpfad[0 as usize]) as u64,
                     (&vunter[0 as usize]) as u64, pl) {
                 let rest: u64 = (&vpfad[0 as usize]) as u64 + pl
@@ -589,9 +370,6 @@ fn scan_sicherung() -> u64 {
     return anzahl
 }
 
-// DER VOLLE PFAD EINER ZEILE INNERHALB DER SICHERUNG -- `vunter` plus
-// der Name. Das ist genau der Schluessel, unter dem `bstore.get` die
-// Datei wiederfindet.
 fn in_sicherung(e: u64) -> u64 {
     var sl: [u8; 2] = "/\0"
     ulib.strncpy((&vpfad[0 as usize]) as u64,
@@ -617,19 +395,6 @@ fn point(name: u64) -> bool {
 }
 
 // ------------------------------------------------------------ sortieren
-//
-// Einfuegesortierung ueber eine Indexfolge -- bei hoechstens
-// sechsundneunzig Eintraegen ist alles andere Zierat. Verzeichnisse
-// kommen IMMER zuerst; das ist keine Sortierung nach einer Spalte,
-// sondern die Ordnung, in der ein Baum gelesen wird.
-// `ulib.cmp` GIBT 1 FUER "KLEINER", 2 FUER "GROESSER" UND 0 FUER
-// GLEICH -- nicht -1/0/1 wie `strcmp`. Die erste Fassung dieser Datei
-// verglich auf `== 0`, also auf GLEICHHEIT, und sortierte damit
-// ueberhaupt nicht: die Tabelle stand in der Reihenfolge, in der das
-// Verzeichnis auf der Platte liegt. Im Bild sah man Namen, und sie
-// waren sogar richtig -- nur an der falschen Stelle. Gefunden hat es
-// der Vergleich mit `tools/k15/tree.py`, der die Reihenfolge kennt,
-// und nicht das Auge.
 fn kleiner(a: u64, b: u64) -> bool {
     if art[(a) as usize] != art[(b) as usize] {
         return art[(a) as usize] > art[(b) as usize]
@@ -648,8 +413,6 @@ fn kleiner(a: u64, b: u64) -> bool {
             r = ulib.cmp(nptr(a), nptr(b)) == 1
         }
     } else {
-        // Spalte 0 (Name) und Spalte 2 (Zeit -- es gibt keine, also
-        // bleibt es beim Namen, und das steht im Kopf dieser Datei).
         r = ulib.cmp(nptr(a), nptr(b)) == 1
     }
     if sortrev != 0 {
@@ -658,8 +421,6 @@ fn kleiner(a: u64, b: u64) -> bool {
     return r
 }
 
-// Im Normalfall sortiert `expmodell` (vier Spalten, echte Zeit); hier
-// bleibt der Einfuegesortierer fuer die beiden Sicherungsansichten.
 fn sortiere() {
     if vmodus == 0 {
         expmodell.setz_sort(sortby, sortrev)
@@ -713,8 +474,6 @@ fn putn(v: u64) {
     }
 }
 
-// Die Rechte, GEBAUT AUS DEN BITS, die `stat` gemeldet hat -- nicht
-// hingeschrieben. Neun Bit, drei Gruppen, und das Artzeichen davor.
 fn putmode(m: u64, dir: u64) {
     if dir != 0 {
         put(100) // d
@@ -804,9 +563,6 @@ fn ends_with(p: u64) -> bool {
     return false
 }
 
-// Im Normalfall baut `expmodell` die Tabelle -- samt echter Ortszeit in
-// der Zeitspalte. Nur die beiden Sicherungsansichten bauen sie hier,
-// weil ihre Zeilen aus einer Textdatei und nicht aus `stat` kommen.
 static mut k_ty_dir2: [u8; 22] = "explorer.type.folder\0\0"
 static mut k_ty_file2: [u8; 20] = "explorer.type.file\0\0"
 static mut sizetmp: [u8; 24] = [0 as u8; 24]
@@ -977,9 +733,6 @@ fn build_table() {
     put(0)
 }
 
-// Wo der Text der Tabelle liegt und wo ihre Symbole liegen -- beides
-// haengt am Modus, und beide Adressen sind statisch, wie es
-// `wlib.set_text`/`row_icons` verlangen.
 fn tab_text() -> u64 {
     if vmodus == 0 {
         return expmodell.table_ptr()
@@ -1308,36 +1061,15 @@ fn anhaengen(lp0: u64, d: u64, v: u64, txt: u64) -> u64 {
 
 // ------------------------------------------------------------- gehen
 
-// EIN SCHRITT IN DIE HISTORIE. Voll heisst NICHT "ab jetzt nichts
-// mehr": bis zu dieser Runde stand hier `if hist_n >= 8 { return }` --
-// nach acht Ordnern merkte sich der Dateimanager stumm gar nichts mehr,
-// und "Zurueck" fuehrte an eine Stelle, an der man vor einer Stunde
-// war. Jetzt RUTSCHT die Reihe: der aelteste Eintrag faellt vorn
-// heraus, alle anderen ruecken einen Platz nach unten, und der neue
-// kommt hinten dazu -- das Verhalten jedes Browsers und jedes
-// Dateimanagers.
-// ====================================================== RUNDE ALLTAG
-//
-// DIE REITER. Fuenf kurze Funktionen, und alle fuenf arbeiten auf
-// EINEM Feld von Pfaden (`reiter_pfad`) plus der Nummer des sichtbaren
-// (`reiter_at`). Mehr Zustand gibt es nicht -- was ein Reiter ANZEIGT,
-// rechnet `new_read` aus `pfad` wie immer.
-
 fn reiter_p(i: u64) -> u64 {
     return (&reiter_pfad[(i * REITER_B) as usize]) as u64
 }
 
-// Den Namen eines Pfades fuer die Beschriftung: das letzte Stueck
-// hinter dem Schraegstrich. "/" selbst bleibt "/", denn ein leerer
-// Reiter waere nicht anklickbar.
 fn reiter_name(pf: u64, aus: u64, max: u64) -> u64 {
     let n: u64 = ulib.length(pf)
     if n == 0 {
         return 0
     }
-    // Die Wurzel heisst "/" und nicht "" -- ein Reiter ohne
-    // Beschriftung waere ein paar Bildpunkte breit und nicht
-    // anklickbar.
     if n == 1 {
         return ulib.strncpy(aus, pf, max)
     }
@@ -1352,14 +1084,6 @@ fn reiter_name(pf: u64, aus: u64, max: u64) -> u64 {
     return ulib.strncpy(aus, pf + ab, max)
 }
 
-// ZWEI REITER MIT DEMSELBEN NAMEN sind nicht auseinanderzuhalten, und
-// das passiert sofort: Strg+T oeffnet den neuen im SELBEN Ordner, also
-// heissen beide gleich. Deshalb bekommt jeder Reiter seine NUMMER
-// vorangestellt, sobald es mehr als einen gibt -- "1 data", "2 data".
-//
-// Gemessen und deshalb geaendert: im ersten Lauf dieser Runde standen
-// zwei Reiter "data" nebeneinander, und auf dem Bild war nicht zu
-// sehen, welcher welcher ist (pruef/shots/reiter/04-*.png).
 fn reiter_beschriftung(i: u64, aus: u64, max: u64) -> u64 {
     var at: u64 = 0
     if reiter_n > 1 {
@@ -1370,9 +1094,6 @@ fn reiter_beschriftung(i: u64, aus: u64, max: u64) -> u64 {
     return at + reiter_name(reiter_p(i), aus + at, max - at)
 }
 
-// Den sichtbaren Reiter auf den Pfad bringen, der gerade gilt. Wird
-// VOR jedem Wechsel gerufen -- sonst zeigt der alte Reiter nachher
-// dorthin, wo der neue steht.
 fn reiter_merken() {
     if reiter_at < REITER_MAX {
         ulib.strncpy(reiter_p(reiter_at), (&pfad[0 as usize]) as u64,
@@ -1380,9 +1101,6 @@ fn reiter_merken() {
     }
 }
 
-// EINEN NEUEN REITER: Strg+T. Er beginnt dort, wo der jetzige steht --
-// das ist die Erwartung aus jedem Browser, und es ist auch das
-// Nuetzliche: von hier aus weitergehen, ohne die Stelle zu verlieren.
 fn reiter_neu(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     if reiter_n >= REITER_MAX {
         var s_voll: [u8; 22] = "explorer: reiter voll\0"
@@ -1391,8 +1109,6 @@ fn reiter_neu(baum: u64, tab: u64, stat: u64, fpfad: u64) {
         return
     }
     reiter_merken()
-    // Hinter den sichtbaren einfuegen, nicht ans Ende: so steht der
-    // neue neben dem, aus dem er kommt.
     var i: u64 = reiter_n
     while i > reiter_at + 1 {
         ulib.strncpy(reiter_p(i), reiter_p(i - 1), REITER_B - 1)
@@ -1406,10 +1122,6 @@ fn reiter_neu(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     new_read(baum, tab, stat, fpfad)
 }
 
-// EINEN REITER SCHLIESSEN: Strg+W. Der letzte laesst sich NICHT
-// schliessen -- ein Dateimanager ohne Ordner waere ein leeres Fenster,
-// und das Fenster zu schliessen ist eine andere Tat mit einem anderen
-// Knopf.
 fn reiter_zu(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     if reiter_n <= 1 {
         var s_letzt: [u8; 23] = "explorer: reiter letzt\0"
@@ -1488,40 +1200,11 @@ fn eltern(p: u64) {
 }
 
 // ==================================================== DIE ANORDNUNG
-//
-// RUNDE EXPLORER-2, Beleg 18-maximiert.png: DAS LAYOUT WIRD BEI JEDER
-// GROESSENAENDERUNG NEU GERECHNET.
-//
-// Befund, gemessen: die vier Kaesten dieser Seite (Menueleiste,
-// Werkzeugleiste, Inhalt, Statuszeile) bekamen ihre Ecken und Masse
-// EINMAL beim Aufbau, aus `bh` = 430. `wlib.relayout` zieht bei einem
-// Groessenwechsel nur Kaesten mit, deren Breite 0 ist -- diese hier
-// haben eine gerechnete Breite. Nach dem Maximieren stand die
-// Statuszeile also weiter bei y 390, die Tabelle war 300 hoch, und
-// darunter lagen 400 Bildpunkte leere Flaeche: genau das leere Bild
-// aus 18-maximiert.png.
-//
-// Darum stehen die Masse jetzt in EINER Funktion (`masse`), die
-// Kastennummern und die zwei Bedienelemente, deren Groesse mitwaechst,
-// in Statiks -- und `anordnen` setzt beides mit `box_at` /
-// `setz_groesse` neu und laesst `wlib.neu_setzen` alles noch einmal
-// anordnen. Aufgerufen wird es beim Aufbau UND bei jedem Durchlauf der
-// Ereignisschleife, in dem sich `wlib.win_w/win_h` geaendert haben.
-// RUNDE EXPLORER-2, Pflichtpunkt 6: SEITENLEISTE UND BROSAMEN.
-//
-// Die Seite hat jetzt fuenf Reihen statt vier -- Menueleiste,
-// Werkzeugleiste, Brosamenleiste, Inhalt, Statuszeile -- und der
-// Inhalt zwei Spalten: links ein SENKRECHTER Kasten mit den Orten
-// (aus `exporte`, oben) und dem Baum (darunter), rechts die Tabelle.
-// Die Brosamenleiste traegt je ein GLIED als eigenen Knopf; Strg+L
-// blendet sie aus und das Textfeld ein, wie es Nautilus und der
-// Explorer tun.
 static mut c_krume: u64 = 0xFFFFFFFFFFFFFFFF
 static mut c_reiter: u64 = 0xFFFFFFFFFFFFFFFF
 static mut c_seite: u64 = 0xFFFFFFFFFFFFFFFF
 static mut a_orte: u64 = 0xFFFFFFFFFFFFFFFF
 static mut a_pfad: u64 = 0xFFFFFFFFFFFFFFFF
-// MAXKRUME aus `exporte` ist 12; mehr Glieder zeigt kein Weg an.
 static mut krumeb: [u64; 12] = [0xFFFFFFFFFFFFFFFF as u64; 12]
 static mut krume_n: u64 = 0
 static mut pfadfeld_an: bool = false
@@ -1533,38 +1216,9 @@ static mut a_baum: u64 = 0xFFFFFFFFFFFFFFFF
 static mut a_tab: u64 = 0xFFFFFFFFFFFFFFFF
 static mut letzte_w: u64 = 0
 static mut letzte_h: u64 = 0
-// ====================================== RUNDE HOTPLUG-2
-// DIE GLOCKE DES SYSTEMBUSSES, und warum der Dateimanager sie hoert.
-//
-// Der Kern meldet jedes Kommen und Gehen eines Wechseldatentraegers
-// auf den Bus (`wechsel.melden` -> `bus.noti_post`, Text "usb+ /medien/
-// usb0" bzw. "usb- ..."). Bis zu dieser Runde hat das NIEMAND
-// abonniert: die Seitenleiste wurde nur neu gebaut, wenn ein Mensch
-// "Aktualisieren" drueckte. Ein Stick, der im Betrieb kam, war also da
-// -- eingehaengt, lesbar, in `/medien/usb0` -- und stand trotzdem nicht
-// in der Leiste, bis jemand von selbst auf den Gedanken kam.
-//
-// Gemerkt wird nur EINE ZAHL: wie viele Meldungen es zuletzt gab
-// (`noti_new` zaehlt die ungelesenen). Bewegt sie sich, werden die Orte
-// neu gelesen. Das ist derselbe Griff wie bei `usb.msc_gen`/`msc_weg`
-// eine Schicht tiefer -- eine Zahl kennt niemanden, und der
-// Dateimanager muss den Kern nicht kennen, um auf ihn zu hoeren.
-//
-// WARUM NICHT DEN TEXT LESEN: `noti_take` naehme die Meldung WEG, und
-// dann fehlte sie der Leiste unten rechts, die sie anzeigen soll. Die
-// Zahl reicht: was sich geaendert hat, steht ohnehin in der
-// Einhaengetafel, und genau die liest `exporte.carrier_read`.
 static mut noti_stand: u64 = 0xFFFFFFFFFFFFFFFF
-// RUNDE HOTPLUG-2: DIE NUMMER DES AUSWURFKNOPFES, damit ein Laeufer
-// sie nicht aus der Reihenfolge der Knoepfe RATEN muss. Genau das
-// warnt der Kopf von `say_rects` an: "dann prueft er seinen Nachbau".
-// Die Tabulatorzahl eines Knopfes ist kein Vertrag -- seine gemeldete
-// Nummer schon.
 static mut b_aus: u64 = 0xFFFFFFFFFFFFFFFF
 static mut b_orte: u64 = 0xFFFFFFFFFFFFFFFF
-// Die gerechneten Masse. Sie stehen hier und nicht in `u_start`, weil
-// sie an ZWEI Stellen gebraucht werden: beim Aufbau und bei jeder
-// Groessenaenderung. Zwei Rechnungen waeren zwei Wahrheiten.
 static mut g_rand: u64 = 0
 static mut g_luft: u64 = 0
 static mut g_ch: u64 = 0
@@ -1577,29 +1231,14 @@ static mut g_hinh: u64 = 0
 static mut g_ystat: u64 = 0
 static mut g_bbaum: u64 = 0
 static mut g_ykrume: u64 = 0
-// RUNDE ALLTAG: die Reiterleiste hat eine eigene Zeile zwischen den
-// Brosamen und dem Inhalt.
 static mut g_yreiter: u64 = 0
 static mut g_horte: u64 = 0
 static mut g_hbaum: u64 = 0
 static mut g_binh: u64 = 0
 
-// RUNDE EXPLORER-2, Pflichtpunkt 5: DIE BREITE DER ZEIT-SPALTE WIRD
-// GEMESSEN UND NICHT GERATEN.
-//
-// Hier standen 186/80/76/108. 76 Bildpunkte reichen fuer "2026-09-"
-// und nicht fuer die volle Zeitangabe -- die Spalte war gefuellt, und
-// man konnte sie trotzdem nicht lesen (erste Aufnahme dieser Runde,
-// gemessen bei 1280x800). Gemessen wird jetzt mit derselben Schrift,
-// in der gemalt wird, und an einer Zeichenkette, die
-// `expmodell.zeit_text` selbst erzeugt -- so kann das Muster nicht von
-// dem abweichen, was in der Spalte steht. Die Probe wird nie gemalt;
-// sichtbarer Text kommt weiterhin nur aus dem Katalog.
 fn columns_set(tbreite: u64) {
     cm_follow()
     var probe: [u8; 32] = [0 as u8; 32]
-    // Ein fester Zeitpunkt (1893456000 Sekunden = 2030-01-01 UTC):
-    // die laengste Form der Ausgabe, vierstelliges Jahr und Uhrzeit.
     let pp: u64 = expmodell.time_text(1893456000,
         (&probe[0 as usize]) as u64)
     let wz: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), pp,
@@ -1755,17 +1394,6 @@ fn cm_store() {
 }
 static mut rs_seen: u64 = 0
 
-// ============================ RUNDE EXPLORER-2: DIE ZWEITE ANSICHT
-//
-// LISTE ODER SYMBOLE (Pflichtpunkt 10). Die Symbolansicht ist EIN
-// Bedienelement mehr und kein zweites Programm: dieselbe Ordnung,
-// dieselben Symbole wie in der Tabelle, nur ohne Spalten -- Name und
-// Sinnbild, gross genug zum Zeigen. Sie liegt im selben Kasten wie die
-// Tabelle; sichtbar ist immer genau eine von beiden.
-//
-// Gemessene Grenze: 512 Zeilen und 16 KiB Namen. Was darueber liegt,
-// wird GEZAEHLT und in der Meldung gesagt -- die Tabelle zeigt in dem
-// Fall ohnehin mehr, und sie ist einen Menuepunkt entfernt.
 const SYMMAX: u64 = 512
 static mut symansicht: u64 = 0
 static mut a_sym: u64 = 0xFFFFFFFFFFFFFFFF
@@ -1805,41 +1433,9 @@ fn symbolansicht_bauen() {
     symblob[(sp) as usize] = 0 as u8
 }
 
-// ============================ RUNDE EXPLORER-2: ORTE UND BROSAMEN
-//
-// Beide Listen kommen aus `exporte` und werden hier nur ANGEZEIGT:
-// die Orte als Zeilen einer `wlib`-Liste, der Weg als eine Reihe
-// Knoepfe. Die Rueckgabewerte von `orte_bauen`/`krume_bauen` wurden
-// bis hierher in `_no`/`_nk` weggeworfen -- gezeigt hat sie niemand.
-
-// Auf einen Ort springen. Kopfzeilen ("Orte", "Datentraeger") sind
-// keine Ziele -- sie haben keinen Pfad, und ein Sprung ins Leere waere
-// schlimmer als ein Klick, der nichts tut.
-// ====================================== RUNDE HOTPLUG
-// AUSWERFEN, UND WARUM DAS NICHT DASSELBE IST WIE AUSHAENGEN.
-//
-// `umount` nimmt eine Einhaengung aus der Tafel. Auswerfen heisst:
-// ERST alles Ausstehende auf das Geraet schreiben, DANN aushaengen,
-// und NEIN sagen, solange jemand eine Datei darauf offen hat. Der
-// Unterschied ist der zwischen einer Datei, die ankommt, und einer,
-// die halb ankommt -- und weil er unsichtbar ist, wenn alles gutgeht,
-// steht er hier ausgeschrieben.
-//
-// Die Arbeit macht der Kern (Aufruf 1704, WX_EJECT ->
-// `wechsel.auswerfen`). Dieses Programm sucht nur das Ziel und sagt,
-// was herauskam -- und zwar IN DER STATUSZEILE und nicht auf der
-// seriellen Leitung: der Mensch vor dem Schirm liest keine Logdatei.
-//
-// DREI ANTWORTEN, und jede hat ihren eigenen Satz:
-//   0   ausgeworfen, der Stick darf jetzt heraus
-//   16  E_BUSY -- es ist noch etwas offen. KEIN Fehler, sondern eine
-//       Bitte: Programm schliessen und noch einmal.
-//   *   sonst: fehlgeschlagen, mit der Zahl.
 fn auswerfen_klick(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     var s_a: [u8; 17] = "explorer: eject \0"
     var s_rc: [u8; 5] = " rc=\0"
-    // Kein Ziel: nichts tun und es sagen. Ein Knopf, der bei leerer
-    // Auswahl irgendeinen Traeger wirft, ist eine Falle.
     if ort_wahl >= exporte.places_num()
         || !exporte.place_is_carrier(ort_wahl) {
         stat_set(msg.get((&k_ausnone[0 as usize]) as u64))
@@ -1852,9 +1448,6 @@ fn auswerfen_klick(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     if ziel == 0 {
         return
     }
-    // WELCHER TRAEGER IST DAS? Die Tafel des Kerns kennt Pfade; die
-    // Seitenleiste kennt denselben Pfad. Also wird verglichen, statt
-    // eine Nummer zu raten.
     var i: u64 = 0
     var tr: u64 = ulib.WX_MAX
     while i < ulib.WX_MAX {
@@ -1888,14 +1481,8 @@ fn auswerfen_klick(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     nl()
     if rc == 0 {
         stat_set(msg.get((&k_ausok[0 as usize]) as u64))
-        // Der Traeger ist weg: die Seitenleiste MUSS das zeigen, und
-        // zwar jetzt und nicht beim naechsten Klick.
         ort_wahl = 0xFFFFFFFFFFFFFFFF
         orte_anzeigen()
-        // Stand der Mensch AUF dem ausgeworfenen Traeger, steht er
-        // jetzt auf einem Pfad, den es nicht mehr gibt. Also zurueck
-        // zur Wurzel -- ein Fenster, das ins Leere zeigt, ist
-        // schlimmer als eines, das umschaltet.
         if ulib.length((&pfad[0 as usize]) as u64) >= ulib.length(ziel)
             && vergleich_anfang((&pfad[0 as usize]) as u64, ziel) {
             pfad[0] = 47 as u8
@@ -1912,8 +1499,6 @@ fn auswerfen_klick(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     stat_set(msg.get((&k_ausfail[0 as usize]) as u64))
 }
 
-// Faengt `a` mit `b` an? Fuer die Frage, ob der aktuelle Ort auf dem
-// Traeger liegt, den es gleich nicht mehr gibt.
 fn vergleich_anfang(a: u64, b: u64) -> bool {
     var i: u64 = 0
     while true {
@@ -1973,18 +1558,6 @@ fn place_walk(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
 }
 
 // ================================== RUNDE EXPLORER-2: DIE KUERZEL
-//
-// WAS EINE TASTE HIER TUT, TUT SIE UEBER `expakt` -- nicht daneben.
-// Der Tastenblock ist die EINZIGE Stelle, an der aus einem Kuerzel
-// eine Tat wird; die Tat selbst (Ablage, Einfuegen, Umbenennen,
-// Rueckgaengig) steht in `expakt.fi` und wird von Menue, Kontextmenue
-// und Taste gleichermassen gerufen. Drei Wege, eine Umsetzung.
-//
-// DIE STEUEROKTETTE SIND GEMESSEN, nicht geraten: `kernel/kbd.fi`
-// bildet Strg+Buchstabe auf die unteren fuenf Bit ab (Strg+A = 1,
-// Strg+Z = 26). Die zwei Ausnahmen -- Strg+H und Strg+N -- kommen als
-// `ESC [ 30/31 ; 5 ~` und haben in `wlib` eigene Nummern, weil 8 der
-// Ruecklauf und 14 die Pfeiltaste hoch ist.
 const T_STRG_A: u64 = 1
 const T_STRG_C: u64 = 3
 const T_STRG_F: u64 = 6
@@ -1992,10 +1565,6 @@ const T_STRG_L: u64 = 12
 const T_STRG_V: u64 = 22
 const T_STRG_X: u64 = 24
 const T_STRG_Z: u64 = 26
-// RUNDE ALLTAG: Strg+T oeffnet einen Reiter, Strg+W schliesst ihn --
-// dieselben Tasten wie in jedem Browser und im Windows-Explorer. Die
-// Zahlen sind die Steuerzeichen: Strg+<Buchstabe> ist der Buchstabe
-// minus 64, also T=84-64=20 und W=87-64=23.
 const T_STRG_T: u64 = 20
 const T_STRG_W: u64 = 23
 
@@ -2013,13 +1582,9 @@ static mut k_owtit: [u8; 24] = "explorer.openwith.title\0"
 static mut k_delperm: [u8; 29] = "explorer.confirm_delete_perm\0"
 static mut k_mtitel: [u8; 16] = "wlib.menu.title\0"
 
-// Woher der Konflikt kam, damit die Antwort des Vierfachdialogs die
-// abgebrochene Tat WIEDERHOLEN kann: 1 = Einfuegen, 2 = Umbenennen.
 static mut kfl_op: u64 = 0
 static mut kfl_alt: [u8; 256] = [0 as u8; 256]
 static mut kfl_neu: [u8; 128] = [0 as u8; 128]
-// Der Filtertext (Strg+F) -- er muss statisch liegen, weil `expmodell`
-// den Zeiger behaelt und bei jedem Lesen erneut hineinschaut.
 static mut fbuf: [u8; 64] = [0 as u8; 64]
 
 fn eintraege(p: u64) -> u64 {
@@ -2044,8 +1609,6 @@ fn eintraege(p: u64) -> u64 {
     return n
 }
 
-// Der volle Pfad einer ANSICHTSZEILE. Ueber `m_ord`/`m_name`, denn die
-// Zeile ist nicht der Eintrag: dazwischen liegt die Sortierung.
 fn full_from(zeile: u64) -> u64 {
     if zeile >= m_anzahl() {
         return 0
@@ -2053,9 +1616,6 @@ fn full_from(zeile: u64) -> u64 {
     return join((&pfad[0 as usize]) as u64, m_name(m_ord(zeile)))
 }
 
-// DIE GANZE AUSWAHL, nicht die eine Zeile. `wlib.sel_hat` fragt das
-// Bitfeld ab, das `neu_lesen` angemeldet hat; ist nichts markiert,
-// gilt die Zeile unter dem Zeiger -- so wie in jedem Dateimanager.
 fn select_list(tab: u64) -> u64 {
     var s_sel: [u8; 15] = "explorer: sel \0"
     var s_n: [u8; 3] = "n=\0"
@@ -2087,9 +1647,6 @@ fn select_list(tab: u64) -> u64 {
     return n
 }
 
-// KEIN STUMMER FEHLSCHLAG (Pflichtpunkt 8). Jede Nummer ungleich null
-// wird zu einem Schluessel aus `explorer.err.*` und zu einem Fenster;
-// der Satz steht im Katalog und in beiden Sprachen.
 fn error_show(rc: u64) -> bool {
     var s_f: [u8; 21] = "explorer: fehler rc=\0"
     var s_k: [u8; 6] = " key=\0"
@@ -2102,31 +1659,17 @@ fn error_show(rc: u64) -> bool {
     say((&s_k[0 as usize]) as u64)
     say(schl)
     nl()
-    // EIN HINWEIS FRAGT NICHTS. Hier stand `dlg_ask` -- der Dialog mit
-    // "Ja" und "Nein"; auf die Mitteilung "Kein Platz mehr auf dem
-    // Datentraeger" ist keine der beiden Antworten eine. `dlg_hinweis`
-    // (Runde EXPLORER-2, wlib.fi) hat genau einen Knopf.
     let _d: u64 = dlg_hinweis(msg.get((&k_errtit[0 as usize]) as u64),
         msg.get(schl))
     return true
 }
 
-// DER KONFLIKTDIALOG MIT VIER WAHLMOEGLICHKEITEN. Ein `wlib`-Dialog
-// hat zwei Knoepfe, der Katalog verlangt vier Antworten -- also ein
-// Fenster mit vier Zeilen, und die Reihenfolge ist die des Katalogs
-// (Ersetzen, Umbenennen, Ueberspringen, Abbrechen = K_* 0..3).
 fn conflict_show(besitzer: u64) -> bool {
     var s_k: [u8; 20] = "explorer: konflikt \0"
     if !expakt.konflikt_da() {
         return false
     }
     let _b: u64 = besitzer
-    // VIER KNOEPFE IN DER ORDNUNG DES KATALOGS: Ersetzen, Umbenennen,
-    // Ueberspringen, Abbrechen -- genau `expakt.K_ERSETZEN` ..
-    // `K_ABBRUCH` (0..3). Bis hierher war das ein Aufklappmenue an der
-    // Mausstelle; eine FRAGE mit vier Antworten ist aber ein Dialog,
-    // und `wlib.dlg_wahl` (Runde EXPLORER-2) kann ihn seit dieser
-    // Runde stellen. Der Block kommt aus dem Katalog, wie er dasteht.
     let _d: u64 = dlg_wahl(msg.get((&k_konftit[0 as usize]) as u64),
         msg.get((&k_konfask[0 as usize]) as u64),
         msg.get((&k_konfbtn[0 as usize]) as u64), 4)
@@ -2137,9 +1680,6 @@ fn conflict_show(besitzer: u64) -> bool {
     return true
 }
 
-// EINFUEGEN, und zwar ueber `expakt`: im selben Datentraeger benennt
-// es um, sonst kopiert es Block fuer Block. Bei einem belegten Namen
-// kommt der Vierfachdialog, und die Antwort wiederholt die Tat.
 fn paste_do(besitzer: u64, baum: u64, tab: u64, stat: u64,
     fpfad: u64, fresh: bool) -> u64 {
     var s_p: [u8; 17] = "explorer: paste \0"
@@ -2162,9 +1702,6 @@ fn paste_do(besitzer: u64, baum: u64, tab: u64, stat: u64,
     return 0
 }
 
-// UMBENENNEN UEBER `io.rename` (Pflichtpunkt 2). Der alte Weg --
-// kopieren und loeschen -- hat einen Ordner nicht mitgenommen, sondern
-// verloren; er steht nicht mehr in dieser Datei.
 fn rename_do(besitzer: u64, alt: u64, neu: u64, baum: u64, tab: u64,
     stat: u64, fpfad: u64) -> u64 {
     ulib.strncpy((&kfl_alt[0 as usize]) as u64, alt, 250)
@@ -2180,8 +1717,6 @@ fn rename_do(besitzer: u64, alt: u64, neu: u64, baum: u64, tab: u64,
     return 0
 }
 
-// Die Antwort auf den Vierfachdialog: merken und die abgebrochene Tat
-// noch einmal versuchen -- `expakt` verbraucht die Wahl dabei.
 fn conflict_reply(wahl: u64, besitzer: u64, baum: u64, tab: u64,
     stat: u64, fpfad: u64) -> u64 {
     expakt.conflict_reply(wahl)
@@ -2196,10 +1731,6 @@ fn conflict_reply(wahl: u64, besitzer: u64, baum: u64, tab: u64,
 }
 
 // ====================================== DER TASTENBLOCK (Punkt 7)
-//
-// Rueckgabe: (offen << 8) | wartet -- `offen` sagt, welches Menue
-// aufgeklappt ist, `wartet` sagt, worauf ein Dialog wartet. Beides
-// gehoert der Ereignisschleife; hier wird es nur ausgerechnet.
 fn key_block(taste: u64, baum: u64, tab: u64, stat: u64,
     fpfad: u64) -> u64 {
     var s_t: [u8; 17] = "explorer: taste \0"
@@ -2276,12 +1807,6 @@ fn key_block(taste: u64, baum: u64, tab: u64, stat: u64,
         return props_show(tab, tab) << 8
     }
     if taste == wlib.KEY_F5 {
-        // RUNDE HOTPLUG-2: F5 liest auch die ORTE neu, nicht nur den
-        // Ordner. Der Knopf "Aktualisieren" tut beides (`orte_anzeigen`
-        // + `new_read`); dass dieselbe Taste weniger tat als der Knopf
-        // daneben, war ein Unterschied ohne Grund -- und er hat die
-        // Bildläufe der Vorrunde gekostet, die mit F5 auf einen Stick
-        // in der Leiste warteten.
         orte_anzeigen()
         new_read(baum, tab, stat, fpfad)
         say((&s_t[0 as usize]) as u64)
@@ -2388,7 +1913,6 @@ fn key_block(taste: u64, baum: u64, tab: u64, stat: u64,
 
 // ------------------------------------------------------------- Programm
 
-// Den Starter aufmachen -- ein eigenes Programm, ein eigenes Fenster.
 fn window_open() {
     var path: [u8; 14] = "/bin/explorer\0"
     var s_go: [u8; 24] = "explorer: new window=\0\0\0"
@@ -2401,8 +1925,6 @@ fn window_open() {
 fn launcher_open() {
     var pfad2: [u8; 17] = "/bin/launcher\0\0\0\0"
     var s_go: [u8; 25] = "explorer: launcher pid=\0\0"
-    // RUNDE TUERSCHLOSS: SYS_EXEC statt SYS_SPAWN -- Begruendung in
-    // launcher.fi an der gleichen Stelle. Ein Pfad ist keine Programmnummer.
     let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&pfad2[0 as usize]) as u64,
         0, 0)
     say((&s_go[0 as usize]) as u64)
@@ -2410,19 +1932,6 @@ fn launcher_open() {
     nl()
 }
 
-// RUNDE EXPLORER-2, Pflichtpunkt 5: DER BEFUND ZUR ZEIT-SPALTE.
-//
-// Die Spalte zeigte "--", und die Frage war, an welcher der drei
-// Stellen es haengt: an `expmodell.tabelle_bauen` (schreibt es die
-// Zeichenkette ueberhaupt in die dritte Spalte?), an `zeit_text`
-// (rechnet es die Ortszeit?) oder an `stat` selbst. Gemessen: die
-// ersten beiden sind in Ordnung -- `tabelle_bauen` setzt `zeit_text`
-// zwischen das zweite und dritte Tabulatorzeichen. Null kommt aus dem
-// ABBILD: `mkfs.py` legt ohne `--v3` eine Platte der Fassung 2 an, und
-// `fs.inode_mtime` gibt dort ausdruecklich 0 zurueck (kernel/fs.fi:707).
-// Darum sagt diese Zeile bei jedem Verzeichniswechsel, wie viele der
-// Eintraege eine echte Zeit haben und welche die erste ist -- damit die
-// Abnahme "--" nicht mit einem Fehler im Dateimanager verwechselt.
 fn report_time() {
     var s_z: [u8; 16] = "explorer: zeit \0"
     var s_m: [u8; 7] = "mtime=\0"
@@ -2454,19 +1963,11 @@ fn report_time() {
     nl()
 }
 
-// RUNDE SYSTEMBUS: den vollen Pfad der Zeile auf den Ziehplatz UND in
-// die Zwischenablage legen. Beides, weil es beides ist: ein Pfad, den
-// man ziehen kann, ist derselbe Pfad, den man einfuegen kann -- ein
-// Modell, drei Nutzer.
 fn ziehen(zeile: u64) {
     if zeile >= m_anzahl() {
         return
     }
     let e: u64 = m_ord(zeile)
-    // NICHT `nptr(e)`: das ist der Name aus dem KLEINEN Modell dieser
-    // Datei (Sicherungsansicht). Im Normalfall kommt der Eintrag aus
-    // `expmodell`, und `nptr` zeigt dann auf einen leeren Platz --
-    // gezogen und kopiert wurde bis hier ein Pfad ohne Dateinamen.
     let full: u64 = join((&pfad[0 as usize]) as u64, m_name(e))
     let n: u64 = ulib.length(full)
     let _d: u64 = wlib.drag_put(wlib.CT_PATH | wlib.CT_TEXT, full, n)
@@ -2477,50 +1978,14 @@ fn ziehen(zeile: u64) {
 }
 
 // ======================================================= RUNDE CLIP-2
-//
-// DAS ANDERE ENDE DER ZIEHBEWEGUNG: HIER WIRD ABGELEGT.
-//
-// Bis zu dieser Runde war der Dateimanager nur QUELLE -- `ziehen` legte
-// den Pfad auf den Bus, und der Editor nahm ihn (`edit.fi`). Ein Ziel
-// gab es nicht: wer eine Datei auf einen Ordner zog, bei dem geschah
-// nichts, und im Bild sah das aus wie ein Programm, das den Zug nicht
-// bemerkt. Bemerkt hat ihn niemand, weil `wlib` das Loslassen nicht
-// weitergab; das ist die Naht, die diese Runde zugemacht hat
-// (`wlib.K_DROP`).
-//
-// WOHIN ABGELEGT WIRD -- und das ist die eigentliche Entscheidung:
-//
-//   auf einen ORDNER in der Tabelle  ->  in diesen Ordner hinein
-//   auf eine Datei oder ins Leere    ->  in den ANGEZEIGTEN Ordner
-//
-// Auf eine Datei zu zielen und sie damit zu treffen, waere ein
-// Fehlgriff mit Folgen; jeder andere Dateimanager legt dann daneben,
-// also in den Ordner, der offen ist.
-//
-// VERSCHOBEN WIRD UND NICHT KOPIERT, und zwar durch `expakt.einfuegen`
-// -- dieselbe Funktion, die Strg+V benutzt. Sie haengt auf demselben
-// Datentraeger den Verzeichniseintrag mit `io.rename` um (P-018), statt
-// Oktette zu bewegen. Ein zweiter Weg, der dasselbe noch einmal tut,
-// waere ein zweiter Ort fuer denselben Fehler.
-//
-// WAS NICHT GESCHIEHT: eine Datei auf SICH SELBST oder in den Ordner
-// abzulegen, in dem sie schon liegt, tut nichts. Ohne diese Frage
-// laege gleicher Quell- und Zielpfad vor, und `einfuegen` traefe auf
-// einen belegten Namen -- der Konfliktdialog fuer eine Tat, die
-// niemand wollte.
 fn ablegen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
     var s_dr: [u8; 13] = "expl: drop \0\0"
     var s_z: [u8; 3] = "z=\0"
     var s_rc: [u8; 4] = "rc=\0"
     var s_q: [u8; 4] = " q=\0"
-    // In einer Sicherung liegt keine Datei, sondern ein Eintrag in
-    // einer Textdatei -- dorthin laesst sich nichts ablegen.
     if vmodus != 0 {
         return 0
     }
-    // DEN PFAD VOM ZIEHPLATZ, und nur wenn es wirklich ein PFAD ist.
-    // Ein Ziehen mit blossem Text ist keine Datei; wer ihn trotzdem
-    // einfuegte, legte eine Datei mit einem Satz als Namen an.
     var zp: [u8; 200] = [0 as u8; 200]
     if !ulib.drag_an() {
         return 0
@@ -2533,8 +1998,6 @@ fn ablegen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
         return 0
     }
     zp[(zn) as usize] = 0 as u8
-    // DAS ZIEL. Eine Zeile, die ein ORDNER ist, nimmt auf; alles
-    // andere legt in den angezeigten Ordner.
     var ziel: [u8; 200] = [0 as u8; 200]
     ulib.strncpy((&ziel[0 as usize]) as u64, (&pfad[0 as usize]) as u64,
         198)
@@ -2545,8 +2008,6 @@ fn ablegen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
                 join((&pfad[0 as usize]) as u64, m_name(e)), 198)
         }
     }
-    // LIEGT ES SCHON DA? Dann ist das Ablegen erledigt, bevor es
-    // anfaengt. Verglichen wird der Ordner der Quelle mit dem Ziel.
     var qdir: [u8; 200] = [0 as u8; 200]
     ulib.strncpy((&qdir[0 as usize]) as u64, (&zp[0 as usize]) as u64, 198)
     eltern((&qdir[0 as usize]) as u64)
@@ -2561,28 +2022,7 @@ fn ablegen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
         let _c: u64 = ulib.drag_drop()
         return 0
     }
-    // Die Ablage von `expakt` ist die Liste, die `einfuegen` abarbeitet
-    // -- ein Stueck, der gezogene Pfad. `list_add` fuellt die Auswahl,
-    // `copy_remember(false)` macht daraus die Ablage (kein Schnitt:
-    // beim Ablegen im selben Traeger haengt `einfuegen` ohnehin um).
     drag_liste((&zp[0 as usize]) as u64)
-    // ALS SCHNITT, NICHT ALS KOPIE -- und das ist nicht Geschmack,
-    // sondern der Unterschied zwischen `rename` und einer neuen Datei.
-    //
-    // GEMESSEN am 18.09.2026, und der erste Entwurf dieser Runde hatte
-    // es falsch: mit `copy_remember(false)` nimmt `expakt.einfuegen`
-    // den Zweig `fileop.kopiere` (expakt.fi:505) -- die Datei lag
-    // danach ZWEIMAL da, /data/alpha.txt mit Inode 105 und
-    // /data/bilder/alpha.txt mit Inode 116. Der Laeufer hat genau das
-    // gefunden ("inode anders 104 116"), und ohne die Messung waere es
-    // durchgegangen: von aussen sieht eine Kopie am Ziel wie ein
-    // gelungenes Verschieben aus.
-    //
-    // Ziehen und Ablegen VERSCHIEBT im selben Datentraeger -- so macht
-    // es jedes andere System, und `ist_schnitt` ist genau der Schalter,
-    // der `einfuegen` auf `fileop.verschiebe` und damit auf
-    // `io.rename` fuehrt (P-018: der Verzeichniseintrag wird umgehaengt,
-    // die Oktette werden nicht angefasst).
     nl()
     expakt.stage(true)
     kfl_op = 1
@@ -2592,9 +2032,6 @@ fn ablegen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
     kv((&s_rc[0 as usize]) as u64, rc)
     kv((&s_z[0 as usize]) as u64, zeile)
     nl()
-    // DER ZIEHPLATZ WIRD GELEERT. Eine Ziehbewegung, die angekommen
-    // ist, ist zu Ende -- bliebe sie stehen, naehme der naechste
-    // Loslasser sie ein zweites Mal an.
     let _c2: u64 = ulib.drag_drop()
     new_read(baum, tab, stat, fpfad)
     if conflict_show(tab) {
@@ -2607,31 +2044,9 @@ fn ablegen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
 // ====================================================== RUNDE ALLTAG
 //
 // SICHTBARE RUECKMELDUNG WAEHREND DES ZIEHENS.
-//
-// Justins Auftrag verlangt sie ausdruecklich: "was haengt am Zeiger,
-// welches Ziel ist gerade aktiv". RUNDE CLIP-2 hatte an dieser Stelle
-// ausdruecklich NICHTS ("Eine Ziehgrafik unter dem Zeiger gibt es
-// NICHT, und das ist hier gesagt statt hinterher entschuldigt").
-//
-// WARUM ES TROTZDEM KEINE ZIEHGRAFIK UNTER DEM ZEIGER GIBT, und das
-// ist eine Messung und keine Bequemlichkeit: ein Programm erfaehrt von
-// einer laufenden Ziehbewegung genau ZWEIMAL etwas -- `K_DRAG` beim
-// Verlassen der angefassten Zeile und `K_DROP` beim Loslassen. Die
-// Bewegung DAZWISCHEN bleibt in `wlib.on_move` und wird nicht
-// gemeldet. Ein Bild, das dem Zeiger folgt, braucht aber jede
-// Zwischenlage; es liesse sich nur in `wlib` selbst malen, und `wlib`
-// gehoert in dieser Runde einem anderen (Territorium, siehe Bericht).
-//
-// ALSO DIE RUECKMELDUNG DORT, WO SIE OHNE FREMDEN CODE HINGEHOERT:
-// in der Statuszeile des Dateimanagers steht, WAS gerade gezogen wird,
-// und die angefasste Zeile bleibt hervorgehoben. Das beantwortet die
-// erste Haelfte der Frage vollstaendig ("was haengt am Zeiger") und
-// die zweite ("welches Ziel") beim Loslassen -- nicht waehrend der
-// Fahrt. Was fehlt, steht so im Bericht und wird nicht schoengeredet.
 static mut zieh_laeuft: u64 = 0
 static mut ziehtext: [u8; 220] = [0 as u8; 220]
 
-// Den Namen des gezogenen Stuecks in die Statuszeile schreiben.
 fn zieh_ziel_an(zeile: u64, stat: u64) {
     if zeile >= m_anzahl() {
         return
@@ -2647,10 +2062,6 @@ fn zieh_ziel_an(zeile: u64, stat: u64) {
     stat_set((&ziehtext[0 as usize]) as u64)
 }
 
-// Die Hervorhebung wieder wegnehmen. Wird nach JEDEM Ablegen gerufen
-// -- auch nach einem, das nichts getan hat: eine Statuszeile, die
-// "Ziehe: x" stehen laesst, obwohl nichts mehr gezogen wird, ist eine
-// Luege auf dem Schirm.
 fn zieh_ziel_aus() {
     zieh_laeuft = 0
     stat_msg = 0
@@ -2658,32 +2069,6 @@ fn zieh_ziel_aus() {
 }
 
 // ====================================================== RUNDE ALLTAG
-//
-// ABLEGEN AUF DER ORTSLEISTE -- UND AUF DEM PAPIERKORB.
-//
-// RUNDE CLIP-2 hat die Ortsleiste ausdruecklich AUSGENOMMEN, mit der
-// Begruendung "ein Ort ist ein Sprungziel und kein Ordner, den dieser
-// Zweig kennt". Das stimmt fuer den Sprung, aber nicht fuer die Sache:
-// hinter jedem Ort steht ein PFAD (`exporte.place_path`), und ein Pfad
-// ist ein Ordner. Genau deshalb ist die Leiste das Ziel, das ein Mensch
-// zuerst sucht -- "nach Bilder schieben" heisst, auf Bilder zu ziehen.
-//
-// DER PAPIERKORB IST DER GRUND, WARUM DIESE FUNKTION EXISTIERT.
-// Justins Auftrag nennt ihn beim Namen ("auf den Papierkorb ziehen =
-// loeschen"). Er steht seit jeher in der Leiste (`exporte.orte_bauen`),
-// und `trash.hinein` kann ihn fuellen -- verbunden war beides nie.
-//
-// ZWEI WEGE, EINE ENTSCHEIDUNG, und sie faellt an genau einer Stelle:
-//
-//   Papierkorb  ->  expakt.in_korb   (verschiebt in <wurzel>/.papierkorb
-//                                     UND schreibt die .info dazu, damit
-//                                     "zurueck" spaeter weiss, woher)
-//   jeder Ort   ->  ablegen_pfad     (dieselbe Mechanik wie die Tabelle:
-//                                     copy_remember(true) -> einfuegen)
-//
-// Ein eigener Loeschweg neben `in_korb` waere die zweite Wahrheit --
-// dieselbe Falle, die Runde CLIP-2 bei `kopiere`/`verschiebe` gestellt
-// hat. Also wird hier NICHTS nachgebaut, sondern gerufen.
 fn ablegen_ort(ort: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
     if vmodus != 0 {
         return 0
@@ -2692,15 +2077,11 @@ fn ablegen_ort(ort: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
         return 0
     }
     if !exporte.place_droppable(ort) {
-        // Eine Ueberschrift oder ein Datentraeger. Der Ziehplatz bleibt
-        // stehen: wer daneben trifft, soll es noch einmal versuchen
-        // koennen, statt seine Auswahl zu verlieren.
         var s_no: [u8; 20] = "expl: ort nimmt nix\0"
         say((&s_no[0 as usize]) as u64)
         nl()
         return 0
     }
-    // DEN PFAD VOM ZIEHPLATZ -- und nur, wenn es wirklich ein Pfad ist.
     var zp: [u8; 200] = [0 as u8; 200]
     if !ulib.drag_an() {
         return 0
@@ -2738,17 +2119,8 @@ fn ablegen_ort(ort: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
         baum, tab, stat, fpfad)
 }
 
-// DER GEMEINSAME RUMPF: einen Pfad in einen Zielordner schieben.
-//
-// `ablegen` (Tabelle/Baum) und `ablegen_ort` (Ortsleiste) hatten sonst
-// zweimal dieselben zwanzig Zeilen -- und damit zwei Orte fuer jeden
-// Fehler darin. Das ist genau die Doppelung, gegen die `fuib.fi` im
-// Kopf argumentiert; hier wird sie gar nicht erst angelegt.
 fn ablegen_pfad(quelle: u64, ziel: u64, baum: u64, tab: u64, stat: u64,
     fpfad: u64) -> u64 {
-    // LIEGT ES SCHON DA? Dann ist nichts zu tun. Ohne diese Frage
-    // traefe `einfuegen` auf einen belegten Namen und stellte den
-    // Konfliktdialog fuer eine Tat, die niemand wollte.
     var qdir: [u8; 200] = [0 as u8; 200]
     ulib.strncpy((&qdir[0 as usize]) as u64, quelle, 198)
     eltern((&qdir[0 as usize]) as u64)
@@ -2760,8 +2132,6 @@ fn ablegen_pfad(quelle: u64, ziel: u64, baum: u64, tab: u64, stat: u64,
         return 0
     }
     drag_liste(quelle)
-    // ALS SCHNITT: verschieben, nicht kopieren -- derselbe Schalter und
-    // dieselbe Begruendung wie in `ablegen` (P-018, io.rename).
     expakt.stage(true)
     kfl_op = 1
     let rc: u64 = expakt.einfuegen(ziel)
@@ -2818,14 +2188,6 @@ fn open(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
     let e: u64 = m_ord(zeile)
     // RUNDE EXPLORER-2, Befund 15-unterordner.png: DER DOPPELKLICK
     // GING INS LEERE.
-    //
-    // Hier stand `nptr(e)` und weiter unten zweimal `art[e]` -- beides
-    // greift in die kleinen Felder DIESER Datei, die nur im
-    // Sicherungsmodus gefuellt sind. Ein echtes Verzeichnis kommt seit
-    // dieser Runde aus `expmodell`; dort war `art[e]` immer 0, der
-    // Zweig "ist ein Ordner" wurde nie genommen, und der Pfad blieb
-    // auf /data stehen. Beide Zugriffe gehen jetzt durch die Adapter
-    // `m_name`/`m_art`, die wissen, welches Modell gerade gilt.
     let name: u64 = m_name(e)
     // r458: IN THE OVERVIEW a row is a drive: go there
     if vmodus == 3 {
@@ -2835,8 +2197,6 @@ fn open(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
         new_read(baum, tab, stat, fpfad)
         return
     }
-    // IN EINER SICHERUNG: hineingehen heisst tiefer in den
-    // Schnappschuss, nicht auf die Platte.
     if vmodus == 2 {
         if m_art(e) != 0 {
             var sl2: [u8; 2] = "/\0"
@@ -2848,7 +2208,6 @@ fn open(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
         }
         return
     }
-    // IM SPEICHER: eine Zeile ist eine SICHERUNG.
     if vmodus == 1 {
         vmodus = 2
         ulib.strncpy((&vsicher[0 as usize]) as u64, name, 60)
@@ -2860,9 +2219,6 @@ fn open(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
     if m_art(e) != 0 {
         let full: u64 = join((&pfad[0 as usize]) as u64, name)
         ulib.strncpy((&pfad[0 as usize]) as u64, full, 126)
-        // EIN SICHERUNGSSPEICHER SIEHT AUS WIE EIN ORDNER UND IST
-        // KEINER. Wer hineingeht, will die Sicherungen sehen und nicht
-        // PACK, INDEX und ein paar S-Dateien.
         if bstore.is_store((&pfad[0 as usize]) as u64) {
             vmodus = 1
             ulib.strncpy((&vspeicher[0 as usize]) as u64,
@@ -2872,9 +2228,6 @@ fn open(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
         new_read(baum, tab, stat, fpfad)
         return
     }
-    // Eine Datei: sie starten. Ein Programm, das kein Programm ist,
-    // wird vom ELF-Lader abgelehnt -- und das ist die richtige Stelle
-    // dafuer, nicht eine Namensendung hier.
     var full: u64 = join((&pfad[0 as usize]) as u64, name)
     if expsmb.is_url((&pfad[0 as usize]) as u64) {
         let fetched: u64 = expsmb.fetch(full)
@@ -2917,8 +2270,6 @@ fn open(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
                 (&txtargv[0 as usize]) as u64, 2)
         }
     }
-    // RUNDE TUERSCHLOSS: SYS_EXEC statt SYS_SPAWN. Eine Datei aus dem
-    // Dateimanager zu starten ging bis hier IMMER mit -22 aus.
     var pid: u64 = pdfpid
     if ulib.bad(pdfpid) {
         pid = ulib.sys(ulib.SYS_EXEC, (&arg[0 as usize]) as u64, 0, 0)
@@ -2931,8 +2282,6 @@ fn open(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
     nl()
 }
 
-// Wie `eltern`, aber fuer den Weg INNERHALB einer Sicherung: der letzte
-// Namensteil faellt weg, und "" ist die Wurzel der Sicherung.
 fn eltern_v(p: u64) {
     var n: u64 = ulib.length(p)
     while n > 0 && (*((p + n - 1) as *mut u8)) != 47 as u8 {
@@ -2944,10 +2293,6 @@ fn eltern_v(p: u64) {
     __mmio_write8((p + n) as *mut u8, 0 as u8)
 }
 
-// Was in der Pfadleiste steht. In einer Sicherung ist das kein Pfad auf
-// der Platte, und deshalb steht das Datum mit drin -- sonst koennte man
-// eine Sicherung fuer einen Ordner halten und sich wundern, warum sich
-// nichts aendern laesst.
 fn show_place(fpfad: u64) {
     var sl: [u8; 2] = "/\0"
     if vmodus != 2 {
@@ -2961,8 +2306,6 @@ fn show_place(fpfad: u64) {
     ulib.strcat((&vpfad[0 as usize]) as u64, (&vunter[0 as usize]) as u64)
     pfad_set((&vpfad[0 as usize]) as u64)
 }
-
-// ------------------------------------------------- sichern, mit Anzeige
 
 fn baue_fortschritt() {
     var k_s_d: [u8; 24] = "explorer.progress.files\0"
@@ -2997,22 +2340,11 @@ fn pfeld(lp0: u64, txt: u64, d: u64, wert: u64) -> u64 {
     return lp
 }
 
-// EINE SICHERUNG ANLEGEN ODER DAZULEGEN. `ziel` ist das Verzeichnis, in
-// das der Benutzer gezeigt hat -- der Stick, die zweite Platte, irgendein
-// Ordner. Gesichert wird `/data`, und das steht hier und nicht im
-// Kleingedruckten.
-// SICH SELBST ZU SICHERN GEHT NICHT. Liegt das Ziel INNERHALB der
-// Quelle, waechst der Speicher, waehrend er durchgegangen wird -- der
-// Lauf frisst seine eigenen Bloecke und hoert nie auf. Das ist keine
-// theoretische Sorge: `/data` ist die Quelle, und das erste, worauf ein
-// Benutzer im Dateimanager zeigt, ist ein Ordner in `/data`.
 fn in_own_tree(ziel: u64) -> bool {
     let q: u64 = ulib.length((&t_bquelle[0 as usize]) as u64)
     if !ulib.strneq(ziel, (&t_bquelle[0 as usize]) as u64, q) {
         return false
     }
-    // Genau die Quelle selbst, oder etwas darunter -- aber NICHT
-    // `/datakram`, das nur so anfaengt.
     let c: u64 = (*((ziel + q) as *mut u8)) as u64
     return c == 0 || c == 47
 }
@@ -3029,9 +2361,6 @@ fn save(ziel: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
         sag_sicherung(ziel, (&t_snap[0 as usize]) as u64, 2)
         return
     }
-    // DER NAME DER SICHERUNG. Durchnummeriert, weil zwei Sicherungen im
-    // selben Speicher nicht denselben Namen haben duerfen -- die zweite
-    // wuerde die erste ueberschreiben.
     ulib.strcpy((&nam[0 as usize]) as u64, (&t_snap[0 as usize]) as u64)
     let k: u64 = ulib.digits(next_number(ziel), (&d[0 as usize]) as u64)
     var i: u64 = 0
@@ -3050,8 +2379,6 @@ fn save(ziel: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
         (&nam[0 as usize]) as u64, 0, (&t_bquelle[0 as usize]) as u64,
         fortschritt)
     plabel = 0xFFFFFFFFFFFFFFFF
-    // DIE ZUSAMMENFASSUNG steht in derselben Zeile, in der eben noch der
-    // Fortschritt stand.
     baue_fortschritt()
     var lp: u64 = ulib.length((&pbuf[0 as usize]) as u64)
     var q: u64 = 0
@@ -3071,8 +2398,6 @@ fn save(ziel: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
     new_read(baum, tab, stat, fpfad)
 }
 
-// Wieviele Sicherungen liegen schon da? Die naechste bekommt die
-// naechste Nummer.
 fn next_number(ziel: u64) -> u64 {
     var namebuf: [u8; 64] = [0 as u8; 64]
     let fd: u64 = bstore.snaps_open(ziel)
@@ -3092,8 +2417,6 @@ fn next_number(ziel: u64) -> u64 {
     return n + 1
 }
 
-// Auf die serielle Leitung, damit der Lauf MESSBAR ist und nicht nur
-// huebsch aussieht.
 fn sag_sicherung(ziel: u64, nam: u64, rc: u64) {
     var s1: [u8; 23] = "explorer: backup ziel=\0"
     var s2: [u8; 7] = " name=\0"
@@ -3116,10 +2439,6 @@ fn sag_sicherung(ziel: u64, nam: u64, rc: u64) {
     nl()
 }
 
-// EINE DATEI ODER EINE GANZE SICHERUNG ZURUECKHOLEN. Zurueck geht es
-// nach `/data` -- ein fester, genannter Ort ist ehrlicher als ein
-// geratener, und wo man gerade steht, ist in einer Sicherung kein Ort
-// auf der Platte.
 fn zurueckholen(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     var z1: [u8; 19] = "explorer: zurueck \0"
     var z2: [u8; 5] = " rc=\0"
@@ -3154,8 +2473,6 @@ fn zurueckholen(baum: u64, tab: u64, stat: u64, fpfad: u64) {
 
 fn tree_walk(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
     if zeile == 0 {
-        // HINAUF, und der Weg zurueck geht durch dieselben drei
-        // Ansichten, in denen man hineingegangen ist.
         if vmodus == 2 {
             if vunter[(0) as usize] != 0 as u8 {
                 eltern_v((&vunter[0 as usize]) as u64)
@@ -3183,15 +2500,6 @@ fn tree_walk(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
     if vmodus != 0 {
         return
     }
-    // Zeile n zeigt auf das n-te Verzeichnis in der Folge.
-    //
-    // DURCH DIE ADAPTER, NICHT AN IHNEN VORBEI. Hier stand `art[e]` und
-    // `nptr(e)` -- die Felder des KLEINEN Modells, das nur im
-    // Sicherungsmodus gefuellt ist. Im Normalfall (`vmodus 0`) sind sie
-    // leer: `art[e]` war immer 0, also fand die Schleife kein einziges
-    // Verzeichnis, und ein Klick auf "bilder" im Baum liess die Tabelle
-    // stehen (Befund 32-baum-navigation.png). `m_art`/`m_name` fragen
-    // das Modell, das gerade gilt.
     var gesehen: u64 = 0
     var i: u64 = 0
     while i < m_anzahl() {
@@ -3210,15 +2518,6 @@ fn tree_walk(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
     }
 }
 
-// Was ein Menuepunkt bedeutet. Gibt zurueck, worauf der Dialog danach
-// wartet: 1 umbenennen, 2 neuer Ordner, 3 loeschen, 0 nichts.
-// RUNDE ALLTAG: PACKEN UND ENTPACKEN AUS DEM KONTEXTMENUE.
-//
-// `zip` ist ein eigenes Programm und bleibt eines -- der Dateimanager
-// ruft es auf, statt einen zweiten Packer zu enthalten. Gestartet wird
-// mit SYS_EXEC (das ist der Aufruf mit Argumenten; SYS_SPAWN nimmt
-// keine), und danach wird der Ordner neu gelesen, damit das Ergebnis
-// dasteht.
 fn zip_starten(full: u64, packen: bool, baum: u64, tab: u64, stat: u64,
     fpfad: u64) {
     var werkzeug: [u8; 9] = "/bin/zip\0"
@@ -3253,58 +2552,6 @@ fn zip_starten(full: u64, packen: bool, baum: u64, tab: u64, stat: u64,
 }
 
 // ================================ RUNDE EXPLORER-2: DIE MENUEPUNKTE
-//
-// EINE NUMMER JE MENUE, und jede Nummer genau einmal vergeben. Vorher
-// stand `if welches == 4` ZWEIMAL in dieser Funktion: der zweite
-// Zweig -- der Netzzugriff -- war unerreichbar, weil der erste
-// (Sicherung zurueckholen) ihn abfing. Die Tafel steht hier, damit
-// eine neue Nummer nicht wieder eine alte trifft:
-//
-//    1  Kontextmenue der Tabelle   `explorer.context`      14 Zeilen
-//    2  Datei                      `explorer.menu.file`     6
-//    3  Ansicht                    `explorer.menu.view`     8
-//    4  Kontextmenue IN einer Sicherung `explorer.context.restore` 2
-//    5  Netzansichten              `t_views`                4
-//    6  Bearbeiten                 `explorer.menu.edit`     5
-//    7  Gehe zu                    `explorer.menu.go`       5
-//    8  Eigenschaften (nur lesen)  `expdlg.eig_ptr`
-//    9  Konflikt                   `explorer.conflict.buttons` 4
-//   10  Oeffnen mit                `expdlg.oeffnenmit_ptr`
-//   11  Kontextmenue der Baumseite `explorer.context.backup` 5
-//
-// Rueckgabe: (offen << 8) | wartet -- dasselbe Paar wie beim
-// Tastenblock, damit die Ereignisschleife nur EINE Form kennt.
-// ================================ RUNDE EXPLORER-2, ZWEITER DURCHGANG
-//
-// EIN MENUE, EINE NUMMER -- UND JEDE NUMMER GENAU EINMAL.
-//
-// Befund vor dieser Runde: `menue_wahl` pruefte ZWEIMAL `welches == 4`.
-// Der erste Zweig war das Sicherungs-Kontextmenue, der zweite die vier
-// Netzansichten -- und weil Firn den ersten passenden Zweig nimmt, war
-// der NETVIEW-Punkt "Netzzugriff" unerreichbar. Er stand im Katalog,
-// er war anklickbar, und er tat nichts. Jetzt hat jedes Menue seine
-// eigene Nummer, und hier steht die vollstaendige Liste:
-//
-//   0  keines offen
-//   1  Kontextmenue der Tabelle    `explorer.context`        14 Zeilen
-//   2  Menue "Datei"               `explorer.menu.file`       6
-//   3  Menue "Ansicht"             `explorer.menu.view`       8
-//   4  Kontextmenue IN einer Sicherung `explorer.context.restore` 2
-//   5  die vier Netzansichten      `t_views`                  4
-//   6  Menue "Bearbeiten"          `explorer.menu.edit`       5
-//   7  Menue "Gehe zu"             `explorer.menu.go`         5
-//   8  Eigenschaften (nur Anzeige) aus `expdlg.eig_ptr`
-//   9  Konfliktdialog              `explorer.conflict.buttons` 4
-//  10  "Oeffnen mit"               aus `expdlg.oeffnenmit_ptr`
-//  11  Kontextmenue der Seitenleiste `explorer.context.backup` 5
-//  14  D1: Aktionen aus dem Bus (Untermenue von `explorer.context` Zeile 14)
-//
-// DIE INDIZES SIND EIN VERTRAG mit dem Katalog (PLAN.md, Abschnitt 4):
-// die Reihenfolge der Zeilen dort ist die Reihenfolge der Zweige hier.
-// Wer eine Zeile einschiebt, verschiebt eine Tat -- deshalb steht die
-// Zeile als Kommentar neben jedem Zweig.
-//
-// Rueckgabe wie beim Tastenblock: (offen << 8) | wartet.
 fn menue_wahl(welches: u64, idx: u64, tab: u64, baum: u64, stat: u64,
     fpfad: u64) -> u64 {
     if welches == 1 {
@@ -3323,8 +2570,6 @@ fn menue_wahl(welches: u64, idx: u64, tab: u64, baum: u64, stat: u64,
         return menue_wahl(3, 10, tab, baum, stat, fpfad)
     }
     if welches == 2 {
-        // explorer.menu.file: 0 Neuer Ordner, 1 Neue Datei,
-        // 2 Oeffnen mit, 3 Eigenschaften, 4 Aktualisieren, 5 Beenden.
         if idx == 0 {
             let _d: u64 = dlg_entry(
                 msg.get((&k_newdir[0 as usize]) as u64),
@@ -3350,16 +2595,11 @@ fn menue_wahl(welches: u64, idx: u64, tab: u64, baum: u64, stat: u64,
         return 0
     }
     if welches == 3 {
-        // explorer.menu.view: 0 Liste, 1 Symbole, 2 Nach Name,
-        // 3 Nach Groesse, 4 Nach Zeit, 5 Nach Rechten, 6 Umgekehrt,
-        // 7 Versteckte Dateien, 8 Klein, 9 Mittel, 10 Gross.
         if idx >= 8 && idx <= 10 {
             view_size_set(idx - 8)
             return 0
         }
         if idx == 0 || idx == 1 {
-            // Liste oder Symbole -- `ansicht_setzen` blendet das eine
-            // Bedienelement ein und das andere aus.
             view_set(idx, tab, baum, stat, fpfad)
             return 0
         }
@@ -3505,8 +2745,6 @@ fn menue_wahl(welches: u64, idx: u64, tab: u64, baum: u64, stat: u64,
     return 0
 }
 
-// DAS KONTEXTMENUE DER TABELLE, Zeile fuer Zeile aus `explorer.context`
-// (die Ordnung dort ist Vertrag, siehe PLAN.md Abschnitt 4).
 fn ctx_wahl(idx: u64, tab: u64, baum: u64, stat: u64, fpfad: u64) -> u64 {
     if idx == 0 { // Oeffnen
         var empty: [u8; 4] = "\0\0\0\0"
@@ -3526,7 +2764,7 @@ fn ctx_wahl(idx: u64, tab: u64, baum: u64, stat: u64, fpfad: u64) -> u64 {
     if idx == 5 { // Umbenennen
         return umbenennen_fragen(tab)
     }
-    if idx == 6 { // Loeschen (in den Papierkorb)
+    if idx == 6 {
         return delete_ask(tab, false)
     }
     if idx == 7 { // Endgueltig loeschen
@@ -3547,7 +2785,7 @@ fn ctx_wahl(idx: u64, tab: u64, baum: u64, stat: u64, fpfad: u64) -> u64 {
         }
         return 0
     }
-    if idx == 12 { // Netzzugriff -- die vier Ansichten als eigenes Menue
+    if idx == 12 {
         let _m: u64 = popup_at(fuiscene.menu_x(), fuiscene.menu_y(),
             (&t_views[0 as usize]) as u64)
         return 5 << 8
@@ -3699,12 +2937,6 @@ fn actions_run(idx: u64) -> u64 {
     return 0
 }
 
-// ROUND NETVIEW: start the selected file with the chosen view. It goes
-// through `/bin/netview`, which is the SAME mechanism the shell and the
-// launcher use -- the file manager gets no privileged path of its own.
-// RUNDE EXPLORER-2: dieser Zweig war unerreichbar (zweimal
-// `welches == 4`); jetzt hat er die Nummer 5 und wird vom Punkt
-// "Netzzugriff" des Kontextmenues aufgerufen.
 fn netview_starten(idx: u64, tab: u64) {
     var v0: [u8; 5] = "real\0"
     var v1: [u8; 9] = "filtered\0"
@@ -3748,9 +2980,6 @@ fn netview_starten(idx: u64, tab: u64) {
     nl()
 }
 
-// KOPIEREN UND AUSSCHNEIDEN AUF DIE GANZE AUSWAHL (Pflichtpunkt 3).
-// `auswahl_liste` sammelt jede Zeile mit `wlib.sel_hat`; erst wenn
-// nichts markiert ist, gilt die Zeile unter dem Zeiger.
 fn clipboard_do(tab: u64, schnitt: bool) -> u64 {
     var s_c: [u8; 16] = "explorer: clip \0"
     var s_n: [u8; 3] = "n=\0"
@@ -3789,9 +3018,6 @@ fn undo_do(baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
     return 0
 }
 
-// Der Umbenennen-Dialog. Er nimmt die erste markierte Zeile -- bei
-// einer Mehrfachauswahl ist Umbenennen das eine, was sich NICHT auf
-// alle anwenden laesst, und ein Dialog je Datei waere eine Zumutung.
 fn umbenennen_fragen(tab: u64) -> u64 {
     // D3: two or more marked rows -> one rule for all of them (mass rename, code 13)
     if select_list(tab) >= 2 {
@@ -3813,8 +3039,6 @@ fn umbenennen_fragen(tab: u64) -> u64 {
     return 1
 }
 
-// Loeschen fragt IMMER nach, und die Frage nennt die Zahl der Stuecke,
-// die die Auswahl traegt (sie steht in `expakt.liste_zahl`).
 fn delete_ask(tab: u64, endgueltig: bool) -> u64 {
     let n: u64 = select_list(tab)
     if n == 0 {
@@ -3839,26 +3063,18 @@ fn new_file_ask() -> u64 {
     return 7
 }
 
-// "Backup hierhin sichern" -- wohin: in den Ordner, in dem man steht,
-// oder in den ausgewaehlten, wenn einer ausgewaehlt ist.
 fn save_ask(tab: u64, baum: u64, stat: u64, fpfad: u64) -> u64 {
     ulib.strncpy((&pziel[0 as usize]) as u64, (&pfad[0 as usize]) as u64,
         120)
     let z2: u64 = cur_row()
     if z2 < m_anzahl() {
         let e2: u64 = m_ord(z2)
-        // UEBER DIE ADAPTER: `art[]`/`nptr()` sind die Felder des
-        // kleinen Sicherungsmodells und im Normalfall leer.
         if m_art(e2) != 0 {
             ulib.strncpy((&pziel[0 as usize]) as u64,
                 join((&pfad[0 as usize]) as u64, m_name(e2)), 120)
         }
     }
     if bstore.is_store((&pziel[0 as usize]) as u64) {
-        // Liegt da schon ein Speicher, kommt ohne Rueckfrage eine
-        // WEITERE Sicherung hinein -- nur beim ersten Mal wird gefragt.
-        // Gesichert wird sofort: `vollziehen` laeuft nur nach einem
-        // bestaetigten Dialog, und hier wird keiner gestellt.
         save((&pziel[0 as usize]) as u64, baum, tab, stat, fpfad)
         return 0
     }
@@ -3867,7 +3083,6 @@ fn save_ask(tab: u64, baum: u64, stat: u64, fpfad: u64) -> u64 {
     return 4
 }
 
-// Die erste markierte Zeile; ohne Markierung die unter dem Zeiger.
 fn first_select(tab: u64) -> u64 {
     var z: u64 = 0
     let int: u64 = m_anzahl()
@@ -3880,9 +3095,6 @@ fn first_select(tab: u64) -> u64 {
     return cur_row()
 }
 
-// Das Menue "Gehe zu". Zuhause und Papierkorb sind ORTE und keine
-// Texte: der eine kommt aus dem Dateisystem, der andere aus
-// `korb.korb_von` -- derselbe Ort, den `papierkorb` benutzt.
 fn goto_to(idx: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
     var t_home: [u8; 8] = "/home\0\0\0"
     var t_data: [u8; 8] = "/data\0\0\0"
@@ -3932,18 +3144,6 @@ fn sag_sortierung() {
     nl()
 }
 
-// Der Dialog wurde bestaetigt. HIER steht die einzige Stelle, an der
-// dieser Dateimanager die Platte AENDERT -- und sie steht an einer
-// Stelle, nicht an fuenf. Jede Tat geht durch `expakt`, jede
-// Rueckmeldung ungleich null durch `fehler_zeigen`.
-// Rueckgabe: worauf danach gewartet wird (0 = auf nichts). Ein
-// Konflikt macht einen zweiten Dialog auf, und die Schleife muss davon
-// wissen -- sonst laege seine Antwort auf keinem Tisch.
-// ONE WRITE FOR THE WHOLE LINE. Written in six pieces, the WM's own
-// kernel line ("wm: rahmen ...") landed between them on the shared
-// serial port -- k15 read "explorer: tat wm: rahmen x=70 ..." and
-// "2 n=1 rc=0" on the next line, and the directory that WAS made
-// counted as not made.
 fn say_tat(was: u64, getan: u64, rc: u64) {
     if s_dbg == 0 {
         return
@@ -3984,9 +3184,6 @@ fn vollziehen(was: u64, tab: u64, baum: u64, stat: u64,
         return 0
     }
     if was == 9 {
-        // DIE ANTWORT AUF DEN KONFLIKTDIALOG. Welcher Knopf es war,
-        // sagt `wlib.dlg_wahl_at` -- 0..3 wie im Katalog. Die Tat, die
-        // stehengeblieben ist, wird damit wiederholt.
         return conflict_reply(s_pick, tab, baum, tab, stat,
             fpfad)
     }
@@ -4000,15 +3197,12 @@ fn vollziehen(was: u64, tab: u64, baum: u64, stat: u64,
             getan = 1
         }
     } else if was == 7 {
-        // NEUE DATEI (Pflichtpunkt 10) -- leer angelegt von `expdlg`.
         let full: u64 = join((&pfad[0 as usize]) as u64, fuiscene.dialog_entry_text())
         rc = expdlg.new_file(full, 0)
         if rc == 0 {
             getan = 1
         }
     } else if was == 6 {
-        // STRG+F: der Filter. Der Puffer liegt statisch, weil
-        // `expmodell` den Zeiger behaelt.
         ulib.strncpy((&fbuf[0 as usize]) as u64, fuiscene.dialog_entry_text(), 60)
         if (fbuf[(0) as usize]) == 0 as u8 {
             expmodell.setz_filter(0)
@@ -4016,9 +3210,6 @@ fn vollziehen(was: u64, tab: u64, baum: u64, stat: u64,
             expmodell.setz_filter((&fbuf[0 as usize]) as u64)
         }
     } else if was == 3 || was == 5 {
-        // LOESCHEN, UND ZWAR DIE GANZE AUSWAHL. Die Liste hat
-        // `auswahl_liste` gefuellt, als der Dialog aufging -- was
-        // danach angeklickt wird, aendert sie nicht mehr.
         var i: u64 = 0
         while i < expakt.list_num() {
             var r2: u64 = 0
@@ -4048,10 +3239,6 @@ fn vollziehen(was: u64, tab: u64, baum: u64, stat: u64,
             getan = expakt.mass_count()
         }
     } else if was == 1 {
-        // DIE ERSTE MARKIERTE Zeile, nicht die unter dem Zeiger:
-        // Umbenennen ist das eine, was sich nicht auf zwanzig Stuecke
-        // anwenden laesst -- aber es muss die Datei treffen, die der
-        // Benutzer markiert hat (Pflichtpunkt 3).
         let z: u64 = first_select(tab)
         if z < m_anzahl() {
             danach = rename_do(tab, full_from(z), fuiscene.dialog_entry_text(),
@@ -4070,41 +3257,9 @@ fn vollziehen(was: u64, tab: u64, baum: u64, stat: u64,
     return danach
 }
 
-// RUNDE ROTABSCHNITTE: DIESES `main` LAEUFT, UND ES MUSS DIE
-// ARGUMENTE WEITERGEBEN.
-//
-// Der Kommentar, der hier stand, sagte "das `main`, das nie laeuft --
-// `user.ld` springt nach `u_start`". Das stimmt fuer ein Programm, das
-// mit `kernel/user/crt.s` gebunden ist; dessen `_start` ruft
-// USER_ENTRY. Unter `profile app` stimmt es NICHT: dort bringt firnc
-// sein eigenes `_start` mit (darum darf crt.o nicht dazu, siehe
-// tools/look/shot.sh), und das endet in `call main` -- der Name steht
-// fest in lib/firnc1/codegen.fi, `--defsym=USER_ENTRY` erreicht ihn
-// nicht. Am gebauten ELF nachgesehen: Einsprung ist `_start`, sechs
-// Befehle weiter steht `call <main>`; `_F0.u_start` wird von dort nie
-// gerufen.
-//
-// `u_start(0)` warf damit den Argumentblock weg. Bei powermon waren
-// das 54 rote Zusagen (siehe ROTABSCHNITTE 11/n).
-//
-// Der Block liegt an einer FESTEN Adresse: Runde K16 legte den
-// Stapelzeiger darauf (kernel/elf.fi, `T_USTACK = proc.ARGS_BASE`),
-// und firnc's `_start` macht `mov rsp, rdi`. Jede `elf: start`-Zeile
-// dieses Systems druckt sie als `ustack=0x4007f000`.
 fn main() -> i32 {
     return u_start(ulib.ARGS_BASE) as i32
 }
-
-// ======================================================================
-// RUNDE FUI-ALL F-8: DER DATEIMANAGER AUF DEM SZENENBAUM
-//
-// Bis hier war jedes Bedienelement ein Eintrag in wlibs Widgetliste, und die
-// Funktionen oben reichten die Nummern `baum`, `tab`, `stat`, `fpfad` durch.
-// Jetzt beschreibt das Programm sein Fenster (`build`), und die Nummern sind
-// SCHLUESSEL (K_BAUM, K_TAB, K_STAT, K_PFAD): ein Knoten, der etwas melden
-// soll, traegt einen. Die Parameterlisten sind geblieben, damit die Taten
-// (Einfuegen, Umbenennen, Papierkorb ...) nicht angefasst werden mussten.
-// ======================================================================
 
 const K_TAB: u64 = 10
 const K_BAUM: u64 = 11
@@ -6349,7 +5504,6 @@ fn u_start(args: u64) -> u64 {
     }
     return 0
 }
-
 
 // A drag of one of several marked rows takes all of them.
 fn drag_liste(zp: u64) {
