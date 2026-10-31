@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import actwire
+import vaultd.vdask
+
+export { configure, set_requester, ask }
+
+const DEFAULT_SECS: u64 = 60
+const SLACK_TICKS: u64 = 500
+const POLL_MS: u64 = 50
+const TEXT_MAX: u64 = 100
+const ARGC: u64 = 6
+
+static mut default_path: [u8; 17] = "/bin/vaultprompt\0"
+static mut custom_path: [u8; 64] = [0 as u8; 64]
+static mut use_custom: bool = false
+static mut secs: u64 = 60
+static mut a_reveal: [u8; 7] = "reveal\0"
+static mut a_origin: [u8; 112] = [0 as u8; 112]
+static mut a_user: [u8; 112] = [0 as u8; 112]
+static mut a_from: [u8; 64] = [0 as u8; 64]
+static mut a_secs: [u8; 12] = [0 as u8; 12]
+static mut argv: [u64; 8] = [0 as u64; 8]
+static mut status: [u64; 1] = [0 as u64; 1]
+
+fn configure(path: u64, wait_secs: u64) {
+    ulib.strncpy((&custom_path[0 as usize]) as u64, path, 60)
+    use_custom = true
+    if wait_secs > 0 {
+        secs = wait_secs
+    }
+}
+
+fn copy_clean(dst: u64, p: u64, n: u64) {
+    var l: u64 = n
+    var cut: bool = false
+    if l > TEXT_MAX {
+        l = TEXT_MAX
+        cut = true
+    }
+    var i: u64 = 0
+    while i < l {
+        var c: u8 = *((p + i) as *mut u8)
+        if c < 32 as u8 || c == 127 as u8 {
+            c = 63 as u8
+        }
+        actwire.st8(dst, i, c as u64)
+        i = i + 1
+    }
+    if l == 0 {
+        actwire.st8(dst, 0, 45)
+        l = 1
+    }
+    if cut {
+        actwire.st8(dst, l, 46)
+        actwire.st8(dst, l + 1, 46)
+        actwire.st8(dst, l + 2, 46)
+        l = l + 3
+    }
+    actwire.st8(dst, l, 0)
+}
+
+fn set_requester(p: u64, n: u64) {
+    var l: u64 = n
+    if l > 60 {
+        l = 60
+    }
+    var i: u64 = 0
+    while i < l {
+        var c: u8 = *((p + i) as *mut u8)
+        if c < 32 as u8 || c == 127 as u8 {
+            c = 63 as u8
+        }
+        a_from[(i) as usize] = c
+        i = i + 1
+    }
+    if l == 0 {
+        a_from[0 as usize] = 45 as u8
+        l = 1
+    }
+    a_from[(l) as usize] = 0 as u8
+}
+
+fn put_secs() {
+    var digits: [u8; 12] = [0 as u8; 12]
+    var v: u64 = secs
+    var n: u64 = 0
+    if v == 0 {
+        digits[0 as usize] = 48 as u8
+        n = 1
+    }
+    while v > 0 && n < 10 {
+        digits[(n) as usize] = (48 + v % 10) as u8
+        v = v / 10
+        n = n + 1
+    }
+    var i: u64 = 0
+    while i < n {
+        a_secs[(i) as usize] = digits[(n - 1 - i) as usize]
+        i = i + 1
+    }
+    a_secs[(n) as usize] = 0 as u8
+}
+
+fn decode(st: u64) -> u64 {
+    if (st & 127) != 0 {
+        return vdask.ANSWER_DENY
+    }
+    let code: u64 = (st >> 8) & 255
+    if code == 0 {
+        return vdask.ANSWER_ALLOW
+    }
+    if code == 2 {
+        return vdask.ANSWER_TIMEOUT
+    }
+    if code == 3 {
+        return vdask.ANSWER_NO_UI
+    }
+    return vdask.ANSWER_DENY
+}
+
+fn ask(op: u64, ol: u64, up: u64, ul: u64) -> u64 {
+    if !use_custom && ulib.session_owner() == 0 {
+        return vdask.ANSWER_NO_UI
+    }
+    copy_clean((&a_origin[0 as usize]) as u64, op, ol)
+    copy_clean((&a_user[0 as usize]) as u64, up, ul)
+    put_secs()
+    var path: u64 = (&default_path[0 as usize]) as u64
+    if use_custom {
+        path = (&custom_path[0 as usize]) as u64
+    }
+    argv[0 as usize] = path
+    argv[1 as usize] = (&a_reveal[0 as usize]) as u64
+    argv[2 as usize] = (&a_origin[0 as usize]) as u64
+    argv[3 as usize] = (&a_user[0 as usize]) as u64
+    argv[4 as usize] = (&a_from[0 as usize]) as u64
+    argv[5 as usize] = (&a_secs[0 as usize]) as u64
+    let pid: u64 = ulib.spawn_priv(path, (&argv[0 as usize]) as u64, ARGC)
+    if ulib.bad(pid) {
+        return vdask.ANSWER_NO_UI
+    }
+    let sp: u64 = (&status[0 as usize]) as u64
+    let t0: u64 = actwire.ticks()
+    while true {
+        status[0 as usize] = 0
+        let r: u64 = ulib.sys4(61, pid, sp, 1, 0)
+        if r == pid {
+            return decode(status[0 as usize])
+        }
+        if ulib.bad(r) {
+            return vdask.ANSWER_NO_UI
+        }
+        if actwire.ticks() - t0 >= secs * 100 + SLACK_TICKS {
+            let _k: u64 = ulib.sys(ulib.SYS_KILL, pid, 137, 0)
+            let _w: u64 = ulib.sys4(61, pid, sp, 0, 0)
+            return vdask.ANSWER_TIMEOUT
+        }
+        let _s: u64 = ulib.sleep_ms(POLL_MS)
+    }
+    return vdask.ANSWER_DENY
+}

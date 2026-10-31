@@ -196,6 +196,9 @@ sys.path.insert(0, HERE)
 import welcome_pages
 
 welcome_pages.register(PAGES, icon, base_css)
+import vaultprompt
+
+vaultprompt.register(PAGES, icon, base_css)
 
 
 def main():
