@@ -84,13 +84,13 @@ def main():
         chunk = strip_comments(chunk)
         parts.append(prefix_deps(chunk, a.module, fn_deps, val_deps))
     body = "\n".join(p.strip("\n") + "\n" for p in parts)
-    with open(a.header, "r") as fh:
+    with open(a.header, "r", encoding="latin-1") as fh:
         head = fh.read()
     print("items=%d lines=%d deps=%d" % (len(sel), body.count("\n"), len(deps)))
     print("DEPS " + ",".join(sorted(deps)))
     if not a.apply:
         return
-    with open(a.out, "w") as fh:
+    with open(a.out, "w", encoding="latin-1", newline="\n") as fh:
         fh.write(head.rstrip("\n") + "\n\n" + body)
     keep = []
     drop = set()
