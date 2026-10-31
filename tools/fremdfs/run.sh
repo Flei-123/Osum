@@ -349,7 +349,7 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
     #         zwei symbolischen Verweise, die es nur hier gibt.
     #   NTFS: GENAU der Baum. Die Systemdateien ($MFT, $Boot, ...) sind
     #         echte Indexeintraege, werden aber uebergangen -- so wie
-    #         Windows und ntfs-3g es tun (siehe MFT_ERSTE_FREIE in
+    #         Windows und ntfs-3g es tun (siehe MFT_FIRST_FREE in
     #         kernel/ntfs.fi). Verweise legt `ntfsbaum.c` keine an.
     if [ "$art" = ext4 ]; then
         num "[$name] die Wurzel hat alle Eintraege" "${ist_wurzel:-0}" ge \

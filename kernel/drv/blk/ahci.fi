@@ -1,107 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/ahci.fi -- RUNDE AHCI: die Platte, die ein ECHTER PC hat.
-//
-// ==================================================================
-// WARUM ES DIESE DATEI GIBT
-// ==================================================================
-//
-// Bis zu dieser Runde kannte der Kern drei Wege zu einem Blockgeraet:
-//
-//   * ATA PIO ueber die Ports 0x1F0..0x1F7 (`blk.fi`, DEV_ATA). Er
-//     funktioniert und ist ehrlich darueber, was er kostet -- 256 mal
-//     `in ax, dx` je Block. Er funktioniert aber NUR, wenn der Rechner
-//     dem Betriebssystem ein IDE-Geraet vorspielt.
-//   * NVMe (`nvme.fi`, DEV_NVME). Das ist die Platte von 2015 aufwaerts,
-//     per M.2, und der Kern spricht sie ueber DMA an.
-//   * virtio-blk (`virtio.fi`). Das gibt es nur in einer Maschine, die
-//     virtio hat, also nur in QEMU.
-//
-// Was in dieser Liste FEHLT, ist der haeufigste Fall auf einem echten
-// PC von 2010 bis heute: eine SATA-SSD oder SATA-Platte an einem
-// Controller im NATIVEN AHCI-Modus. Kein PIO-Port, kein NVMe, kein
-// virtio. Osum haette auf so einem Rechner keine Platte gefunden --
-// kein Start, keine Installation. Das ist der Grund fuer diese Datei
-// und sie ist genau so gemessen worden, wie das Projekt misst: gegen
-// QEMU mit `-device ahci`, unter KVM, mit Gegenprobe.
-//
-// ==================================================================
-// WIE AHCI ARBEITET, UND WORIN ES SICH VON NVMe UNTERSCHEIDET
-// ==================================================================
-//
-// Beides sind DMA-Controller: der Kern legt einen Befehl in gewoehnlichen
-// Speicher, klingelt an einem Register, und der Controller holt sich den
-// Befehl und die Daten SELBST. Der Unterschied liegt darin, WAS in dem
-// Befehl steht.
-//
-//   NVMe hat eine EIGENE Befehlsmenge (opcode 0x02 = read) und EINE
-//   Warteschlange je Richtung.
-//
-//   AHCI ist ein TRANSPORT und keine Befehlsmenge. Was der Controller
-//   ausliefert, ist ein FIS -- ein "Frame Information Structure", also
-//   das, was frueher ueber das SATA-Kabel ging. Der Inhalt eines
-//   H2D-Register-FIS ist Wort fuer Wort dasselbe ATA-Kommando, das
-//   `blk.fi` seit Runde 62 ueber die Ports schreibt: 0x25 ist READ DMA
-//   EXT, 0x35 ist WRITE DMA EXT, das Laufwerksregister traegt 0x40 fuer
-//   LBA. Der Unterschied ist NUR, wer die Oktette bewegt.
-//
-// Deshalb ist dieser Treiber der zweite Beweis fuer dieselbe Zusage wie
-// Runde K2, nur andersherum: dort waren es zwei Protokolle ueber
-// denselben Bus, hier ist es DASSELBE Protokoll ueber zwei Buse.
-//
-// Die Strukturen im Speicher, die ein AHCI-Controller selbst liest:
-//
-//   BEFEHLSLISTE (command list), 32 Kopfsaetze zu 32 Oktetten, auf
-//   1024 ausgerichtet. Ein Kopfsatz sagt: wie lang das Befehls-FIS ist,
-//   ob geschrieben wird, wie viele PRDT-Eintraege folgen, und WO die
-//   Befehlstafel liegt.
-//   FIS-EMPFANGSBEREICH (FIS receive area), 256 Oktette, auf 256
-//   ausgerichtet. Dorthin legt der Controller, was das Laufwerk
-//   ZURUECKSCHICKT.
-//   BEFEHLSTAFEL (command table), auf 128 ausgerichtet: die ersten 64
-//   Oktette das H2D-FIS, ab Oktett 0x80 die PRDT -- die Liste der
-//   Speicherbereiche, in die der Controller die Daten legen soll.
-//
-// ==================================================================
-// WARUM DIESER TREIBER MIT ABFRAGE ARBEITET UND NICHT MIT UNTERBRECHUNG
-// ==================================================================
-//
-// `nvme.fi` hat beide Wege und misst den Unterschied, weil das der
-// Gegenstand von Runde K2 war. Hier ist der Gegenstand ein anderer: dass
-// auf einem echten PC ueberhaupt eine Platte gefunden wird. Der Treiber
-// wartet deshalb auf PxCI -- das Bit, das der Controller selbst
-// zurueckstellt, wenn er fertig ist.
-//
-// Das ist keine Notloesung, sondern die richtige Wahl an dieser Stelle,
-// und der Grund steht in `nvme.await`: `fs.fi` haelt ueber eine ganze
-// Blockoperation die Unterbrechungen AUS (`sched.irq_save`, sechs
-// Stellen). Ein Treiber, der darin auf eine Unterbrechung wartet,
-// wartet auf etwas, das nicht kommen kann. NVMe braucht deshalb ohnehin
-// einen Abfragepfad; AHCI hat hier nur diesen einen, und die Daten
-// bewegt der Controller in beiden Faellen selbst.
-//
-// Was dabei NICHT behauptet wird: dass dieser Treiber die volle
-// Leistung eines AHCI-Controllers holt. Er benutzt EINEN Befehlsplatz
-// von 32 und wartet nach jedem Befehl. Eine Warteschlange (NCQ) waere
-// der naechste Schritt und ist hier nicht gebaut.
-//
-// ==================================================================
-// DER FALL, IN DEM DAS ALLES NICHT GILT: IDE-KOMPATIBILITAET
-// ==================================================================
-//
-// Viele Firmware-Menues haben einen Punkt "SATA Mode" mit den Werten
-// AHCI, RAID und IDE/Legacy/Compatibility. Steht er auf IDE, MELDET SICH
-// DERSELBE CHIP MIT EINER ANDEREN PCI-KLASSE: 01:01 (IDE) statt 01:06:01
-// (SATA/AHCI), und die AHCI-Register sind gar nicht da.
-//
-// Ein Treiber, der dann einfach nichts findet, laesst den Benutzer im
-// Dunkeln. Dieser hier sucht in dem Fall NOCH EINMAL nach der IDE-Klasse
-// und meldet `mode=ide` -- eine Aussage, aus der hervorgeht, was zu tun
-// ist (Firmware auf AHCI stellen), statt stumm zu scheitern.
-//
-// UND IN GENAU DIESEM FALL IST OSUM NICHT VERLOREN: `blk.fi` spricht
-// seit Runde 62 ATA PIO ueber 0x1F0, und ein Controller im IDE-Modus
-// ist genau das. Der Rueckfallweg ist also vorhanden, ist langsam, und
-// steht in `docs/REALHW.md`.
 
 import serial
 import lib.kstate
@@ -120,35 +16,17 @@ export {
     MODE_NONE, MODE_AHCI, MODE_IDE
 }
 
-// ------------------------------------------------ der Platz in `kdata`
-//
-// 0x7B000 aufwaerts ist der Bereich, den `kstate.fi` als frei ausweist
-// (bis KDATA_SIZE 0x80000). Fuenf Seiten, und die Ausrichtungen, die der
-// Controller verlangt, fallen dabei von selbst ab: eine Seitengrenze ist
-// auf 1024, auf 256 und auf 128 ausgerichtet.
-//
-// RUNDE MERGE-2: hier stand 0x7A000. Diese Runde ist auf einem Zweig
-// entstanden, auf dem 0x7A000 frei WAR; auf dem Hauptzweig liegt dort
-// seit Runde HWNET die Netzkarten-Auswahl (`netdev.fi`, NETDEV_OFF).
-// `tools/kernel/memmap.py` hat die Ueberschneidung beim Verschmelzen
-// gemeldet -- genau dafuer gibt es das Programm. Der ganze Block ist um
-// eine Seite hochgerueckt; an den Ausrichtungen aendert das nichts, weil
-// jede der fuenf Adressen eine Seitengrenze bleibt.
-//
-//   AHCI_OFF + 0x000  die Befehlsliste, 32 * 32 = 1024 Oktette
-//   AHCI_OFF + 0x400  der FIS-Empfangsbereich, 256 Oktette
-//   AHCI_OFF + 0x800  die Befehlstafel: 128 Oktette Kopf, dann die PRDT
 const AHCI_OFF: u64 = 0x7B000
 const AHCI_ID_OFF: u64 = 0x7C000 // was IDENTIFY DEVICE liefert
 const AHCI_BUFA_OFF: u64 = 0x7D000 // Messpuffer A
 const AHCI_BUFB_OFF: u64 = 0x7E000 // Messpuffer B
-const AHCI_SC_OFF: u64 = 0x7F000 // die Zaehler dieser Runde
+const AHCI_SC_OFF: u64 = 0x7F000
 
 const CLB_AT: u64 = 0x000
 const FB_AT: u64 = 0x400
 const CT_AT: u64 = 0x800
-const CT_PRDT: u64 = 0x80 // die PRDT beginnt im Befehlstafelkopf bei 0x80
-const PRDT_MAX: u64 = 8 // 8 * 4 KiB = 32 KiB in einem Befehl
+const CT_PRDT: u64 = 0x80
+const PRDT_MAX: u64 = 8
 
 // Skalare, Versaetze in AHCI_SC_OFF.
 const S_ABAR: u64 = 0x00
@@ -167,9 +45,9 @@ const S_CMDS: u64 = 0x60
 const S_TFD: u64 = 0x68
 const S_S64A: u64 = 0x70
 const S_SIG: u64 = 0x78
-const S_WHY: u64 = 0x80 // an welcher Stelle die Inbetriebnahme aufgab
-const S_QUIET: u64 = 0x88 // wie viele fremde Ports wieder stillgelegt wurden
-const S_DEAD: u64 = 0x90 // wie oft ein Befehl in die Zeitschranke lief
+const S_WHY: u64 = 0x80
+const S_QUIET: u64 = 0x88
+const S_DEAD: u64 = 0x90
 
 // --------------------------------------------------- die HBA-Register
 
@@ -192,7 +70,6 @@ const BOHC_BOS: u64 = 1
 const BOHC_OOS: u64 = 2
 const BOHC_BB: u64 = 0x10
 
-// Ein Port liegt bei 0x100 + n * 0x80.
 const PORT_BASE: u64 = 0x100
 const PORT_SIZE: u64 = 0x80
 
@@ -223,17 +100,14 @@ const TFD_ERR: u64 = 0x01
 const TFD_DRQ: u64 = 0x08
 const TFD_BSY: u64 = 0x80
 
-// Was in PxSSTS steht: DET in den unteren vier Bit, IPM in Bit 8..11.
-const DET_PRESENT: u64 = 3 // Geraet da und Verbindung steht
+const DET_PRESENT: u64 = 3
 const IPM_ACTIVE: u64 = 1
 
-// Die Kennung, mit der sich ein Geraet meldet.
 const SIG_ATA: u64 = 0x00000101
 const SIG_ATAPI: u64 = 0xEB140101
 const SIG_SEMB: u64 = 0xC33C0101
 const SIG_PM: u64 = 0x96690101
 
-// ATA, dieselben Zahlen wie in `blk.fi` -- das ist der ganze Punkt.
 const ATA_IDENTIFY: u64 = 0xEC
 const ATA_READ_DMA_EXT: u64 = 0x25
 const ATA_WRITE_DMA_EXT: u64 = 0x35
@@ -244,72 +118,16 @@ const FIS_H2D: u64 = 0x27
 const SECTOR: u64 = 512
 const PAGE: u64 = 4096
 
-// Wie lange gewartet wird, bevor ein Geraet fuer tot erklaert wird.
-// Absichtlich begrenzt: ein Controller, der nie antwortet, darf den Kern
-// nicht anhalten. Genau dieselbe Regel wie in `nvme.fi`.
-// UNTER KVM IST JEDER DIESER SCHRITTE EIN VM-AUSTRITT. Ein Lesezugriff
-// auf ein Geraeteregister kostet dort ein bis zwei Mikrosekunden -- die
-// vier Millionen aus `nvme.fi` waeren also acht Sekunden JE BEFEHL. Bei
-// einem Dateisystem mit ein paar tausend Bloecken ist das kein Zeitlimit
-// mehr, sondern ein Stillstand; genau so ist die Gegenprobe `nobm` beim
-// ersten Versuch in die 180-Sekunden-Schranke des Laeufers gelaufen,
-// statt sauber zu scheitern. Eine Million ist immer noch etwa eine
-// Sekunde und damit weit mehr, als eine SATA-Platte je braucht.
 const SPIN_LIMIT: u64 = 1000000
 const RESET_LIMIT: u64 = 2000000
 
-// ==================================================================
-// WARUM EINE RUNDENZAHL ALLEIN KEINE ZEITSCHRANKE IST
-// ==================================================================
-//
-// Die beiden Zahlen darueber sind RUNDEN, keine Sekunden, und sie sind
-// -- wie der Absatz darueber sagt -- gegen die Kosten eines
-// VM-AUSTRITTS unter KVM geeicht: dort kostet ein Registerzugriff ein
-// bis zwei Mikrosekunden, eine Million Runden sind also etwa eine
-// Sekunde.
-//
-// UNTER TCG STIMMT GENAU DIESE EICHUNG NICHT MEHR. Dort gibt es keinen
-// VM-Austritt; QEMU beantwortet den Zugriff im selben Uebersetzungslauf,
-// und eine Runde kostet einen Bruchteil davon. Dieselbe Million Runden
-// ist damit nicht mehr eine Sekunde, sondern viel weniger -- waehrend
-// das emulierte Laufwerk fuer denselben Befehl LAENGER braucht als das
-// durchgereichte. Beide Enden laufen auseinander, und zwar gegenlaeufig.
-//
-// GEMESSEN, 23.09.2026, derselbe Kern, dieselbe Platte, nur der
-// Beschleuniger getauscht:
-//
 //   -accel kvm   ahci: cmds=197  errs=0  dead=0  alive=1
 //   -accel tcg   ahci: cmds=3    errs=1  dead=1  alive=0
-//
-// Der Treiber war nicht kaputt: die Schranke lief ab, bevor das
-// emulierte Laufwerk antworten konnte, `run` erklaerte das Geraet nach
-// der Regel oben fuer WEG, und jeder folgende Befehl sagte sofort nein.
-// Genau deshalb standen in `tools/ahci/run.sh` vier rote Zusagen
-// (8.2..8.5), und genau deshalb stand in der Roadmap `A-005` als
-// "vorbestehend, Umgebung" -- die Umgebung war es, aber die Ursache lag
-// hier.
-//
-// DIE ABHILFE IST EINE ECHTE UHR UND KEINE GROESSERE RUNDENZAHL. Eine
-// groessere Zahl waere wieder gegen einen Beschleuniger geeicht und
-// wuerde unter KVM genau den Stillstand zurueckholen, den der Absatz
-// oben beschreibt (`nobm` lief damit in die 180-Sekunden-Schranke des
-// Laeufers). Der TSC ist seit Runde K2 geeicht und liegt als
-// `apic.tsc_hz` bereit; damit ist die Schranke in MIKROSEKUNDEN
-// ausgedrueckt und gilt auf beiden Beschleunigern dieselbe.
-//
-// Die Rundenzahl bleibt als ZWEITE Schranke stehen. Ist der TSC nicht
-// geeicht (`tsc_hz` == 0, sehr frueh im Start oder auf einer Maschine
-// ohne brauchbaren Zaehler), gilt weiterhin nur sie -- ein Kern, dessen
-// Zeitschranke von einer Uhr abhaengt, die es noch nicht gibt, haette
-// gar keine.
-const CMD_US: u64 = 3000000 // 3 s fuer einen einzelnen Befehl
-const RESET_US: u64 = 6000000 // 6 s fuer Reset/Anlauf
-const PROBE_US: u64 = 300000 // 0,3 s fuer einen sichtbar leeren Port
+const CMD_US: u64 = 3000000
+const RESET_US: u64 = 6000000
+const PROBE_US: u64 = 300000
 
-// Der Zeitpunkt, an dem eine Schranke ablaeuft -- oder 0, wenn es keine
-// Uhr gibt. Alle Warteschleifen dieser Datei fragen `fristab`, und nur
-// dort steht die Fallunterscheidung.
-fn frist(state: u64, us: u64) -> u64 {
+fn timeout(state: u64, us: u64) -> u64 {
     let hz: u64 = apic.tsc_hz(state)
     if hz == 0 {
         return 0
@@ -317,8 +135,6 @@ fn frist(state: u64, us: u64) -> u64 {
     return apic.tsc() + (hz / 1000000) * us
 }
 
-// Ist die Frist abgelaufen? Ohne Uhr (`bis` == 0) niemals -- dann
-// zaehlt allein die Rundenzahl der jeweiligen Schleife.
 fn fristab(bis: u64) -> bool {
     if bis == 0 {
         return false
@@ -350,18 +166,6 @@ fn usec(state: u64) -> u64 {
     }
     return apic.tsc() / (hz / 1000000)
 }
-// WIE LANGE EIN LEERER PORT KOSTEN DARF. DET == 0 in PxSSTS heisst
-// "ueberhaupt kein Geraet erkannt" -- nicht "noch nicht ausgehandelt",
-// das waere 1. Ein Port, der nach dieser kurzen Spanne immer noch
-// nichts gesehen hat, hat nichts angesteckt, und weiter zu warten
-// kostet nur Zeit.
-//
-// DIE ZAHL IST GEMESSEN UND NICHT GERATEN: die Gegenprobe "Controller
-// ohne Platte" hat mit der vollen Schranke fuer alle sechs Ports des
-// q35-Controllers ueber zwei Minuten gebraucht -- unter KVM ist jeder
-// dieser Registerzugriffe ein VM-Austritt. Ein Rechner, der beim
-// Starten eine Minute auf leere SATA-Anschluesse wartet, sieht fuer den
-// Benutzer aus wie einer, der haengt.
 const PROBE_LIMIT: u64 = 100000 // old loop count, kept for the record (see `oldsata`)
 
 // r558: the link scan is TIME based (see `find_disk`). All values in
@@ -450,8 +254,6 @@ fn last_tfd(state: u64) -> u64 {
     return kstate.get(state, sc(S_TFD))
 }
 
-// Wie oft ein Befehl in die Zeitschranke gelaufen ist. Groesser als
-// null heisst: der Controller hat aufgehoert zu antworten.
 fn dead(state: u64) -> u64 {
     return kstate.get(state, sc(S_DEAD))
 }
@@ -587,10 +389,6 @@ fn hook_view(state: u64, p: u64, off: u64, v: u64) -> u64 {
     return v
 }
 
-// Speicher, den der Controller liest, wird durch die fluechtigen
-// Intrinsics geschrieben -- derselbe Grund wie in `nvme.fi`: er ist der
-// zweite Leser dieser Oktette, und der Uebersetzer darf einen Schreibzug
-// dorthin weder zusammenlegen noch verschieben noch weglassen.
 fn m8(p: u64, v: u64) {
     __mmio_write8(p as *mut u8, (v & 0xFF) as u8)
 }
@@ -613,10 +411,6 @@ fn zero(p: u64, n: u64) {
 
 // ----------------------------------------------------- ist ueberhaupt was da
 
-// Ein AHCI-Controller meldet sich als Klasse 01, Unterklasse 06,
-// Programmierschnittstelle 01. Genau die drei Zahlen fragt `pci.fi` ab --
-// und dass diese Suche nicht aus einer Tabelle im Kern kommt, sondern aus
-// dem Konfigurationsraum des Geraetes, ist seit Runde K2 gemessen.
 fn present(state: u64) -> bool {
     return pci.find_ahci(state) < pci.MAX_DEV
 }
@@ -633,11 +427,6 @@ fn raid_mode(state: u64) -> bool {
     return pci.is_raid_class(state, i)
 }
 
-// DER FALL, IN DEM DIE FIRMWARE AUF IDE STEHT. Dann ist der AHCI-Chip
-// nicht verschwunden -- er meldet sich mit Klasse 01, Unterklasse 01.
-// Diese Funktion sagt das, statt `present` einfach falsch zurueckgeben zu
-// lassen; die Meldung ist der Unterschied zwischen "keine Platte" und
-// "die Firmware steht falsch".
 fn ide_mode(state: u64) -> bool {
     if present(state) {
         return false
@@ -648,12 +437,6 @@ fn ide_mode(state: u64) -> bool {
 
 // ------------------------------------------------------------ Inbetriebnahme
 
-// RUNDE PROTOKOLL: die Quelle dieses Treibers im Ring. Siehe `nvme.lq`.
-// Der Name liegt als `static mut` im Modul und nicht als `var` in
-// dieser Funktion: eine lokale Zeichenkette stirbt mit dem Rahmen,
-// und firnc faengt genau das ab ("the address of the local escapes
-// through the return value"). Der Protokollring liest den Namen
-// erst im Aufruf danach.
 static mut q_ahci: [u8; 5] = "ahci\0"
 
 fn lq() -> u64 {
@@ -735,7 +518,7 @@ fn init(state: u64) -> bool {
 }
 
 fn init_inner(state: u64) -> bool {
-    var l_kein: [u8; 41] = "kein AHCI-Regler; IDE-Rückfall geprüft\0"
+    var l_kein: [u8; 41] = "no AHCI controller; IDE fallback checked\0"
     var l_los: [u8; 27] = "AHCI-Regler gefunden, idx \0"
     kstate.set(state, sc(S_READY), 0)
     kstate.set(state, sc(S_MODE), MODE_NONE)
@@ -760,11 +543,6 @@ fn init_inner(state: u64) -> bool {
         return false
     }
 
-    // ABAR IST BAR5, NICHT BAR0. Das ist der Unterschied, an dem ein aus
-    // `nvme.fi` abgeschriebener Treiber sofort scheitert: NVMe hat genau
-    // ein Speicherfenster und es ist das erste. AHCI traegt darunter noch
-    // die vier alten IDE-Portpaare und ein Busmaster-Portfenster; das
-    // Register, um das es geht, ist das sechste.
     let phys: u64 = pci.bar(state, idx, 5)
     if phys == 0 || pci.bar_is_io(state, idx, 5) {
         kstate.set(state, sc(S_WHY), 2)
@@ -792,9 +570,6 @@ fn init_inner(state: u64) -> bool {
     kstate.set(state, sc(S_SLOTS), ((cap >> 8) & 0x1F) + 1)
     kstate.set(state, sc(S_S64A), (cap & CAP_S64A) >> 31)
 
-    // OHNE DIESE ZEILE ANTWORTET DER CONTROLLER AUF REGISTER UND HOLT SICH
-    // TROTZDEM NICHTS AUS DEM SPEICHER. Dieselbe eine Zeile wie in
-    // `nvme.init`, und derselbe Fehler, wenn sie fehlt.
     pci.enable_master(bdf(state))
 
     if !handoff(state, b) {
@@ -802,9 +577,6 @@ fn init_inner(state: u64) -> bool {
         return false
     }
 
-    // AE ZUERST. Ein Controller, der noch im alten Modus laeuft, nimmt
-    // die AHCI-Register gar nicht an; die Norm verlangt AE = 1, bevor
-    // irgendein anderes Register dieser Datei geschrieben wird.
     wr32(b, R_GHC, rd32(b, R_GHC) | GHC_AE)
 
     // CAP and PI are write-once registers the BIOS programmed; some
@@ -855,23 +627,13 @@ fn init_inner(state: u64) -> bool {
     return true
 }
 
-// DIE UEBERGABE VON DER FIRMWARE. Ein UEFI, das den Controller selbst
-// benutzt hat (und jedes tut das, es hat von dort gebootet), haelt ihn
-// unter Umstaenden noch. CAP2.BOH sagt, ob dieser Controller die
-// Uebergabe ueberhaupt kennt; wo er sie nicht kennt, gibt es nichts zu
-// tun und die Funktion sagt ja.
-//
-// Unter QEMU ist CAP2.BOH null und dieser ganze Block ist ein
-// Durchlauf. Er steht hier fuer den 30.08., nicht fuer die Abnahme --
-// und das ist genau die Sorte Zeile, von der man erst auf echter
-// Hardware erfaehrt, dass sie gefehlt hat.
 fn handoff(state: u64, b: u64) -> bool {
     let cap2: u64 = rd32(b, R_CAP2)
     if (cap2 & CAP2_BOH) == 0 {
         return true
     }
     wr32(b, R_BOHC, rd32(b, R_BOHC) | BOHC_OOS)
-    let bis: u64 = frist(state, RESET_US)
+    let bis: u64 = timeout(state, RESET_US)
     var spin: u64 = 0
     while !expired(bis, spin, RESET_LIMIT) {
         let v: u64 = rd32(b, R_BOHC)
@@ -880,17 +642,12 @@ fn handoff(state: u64, b: u64) -> bool {
         }
         spin = spin + 1
     }
-    // Die Firmware gibt nicht her. Weitermachen waere ein Griff in
-    // fremden Besitz -- also nein, und der Aufrufer meldet es.
     return false
 }
 
 fn hba_reset(state: u64, b: u64) -> bool {
     wr32(b, R_GHC, rd32(b, R_GHC) | GHC_HR)
-    // HR ist das einzige Bit in diesem Kern, das die HARDWARE
-    // zurueckstellt und nicht der Kern. Solange es steht, laeuft der
-    // Reset; bleibt es stehen, ist der Controller hin.
-    let bis: u64 = frist(state, RESET_US)
+    let bis: u64 = timeout(state, RESET_US)
     var spin: u64 = 0
     while !expired(bis, spin, RESET_LIMIT) {
         if (rd32(b, R_GHC) & GHC_HR) == 0 {
@@ -903,39 +660,6 @@ fn hba_reset(state: u64, b: u64) -> bool {
     return false
 }
 
-// ==================================================================
-// WELCHER PORT TRAEGT EINE PLATTE -- UND WARUM DAS NICHT EINE ZEILE IST
-// ==================================================================
-//
-// PI sagt, welche Ports der Chip ueberhaupt HAT. Das ist auf echter
-// Hardware fast nie 1 und fast nie zusammenhaengend: eine Platte an
-// Port 2, waehrend 0 und 1 leer sind, ist der Normalfall. Wer
-// stattdessen Port 0 nimmt, findet auf so einem Rechner nichts.
-//
-// DIE ERSTE FASSUNG DIESER FUNKTION HAT GENAU DAS GETAN, WAS NAHELIEGT:
-// PxSSTS lesen, PxSIG lesen, fertig. Sie hat unter QEMU mit einer
-// angehaengten Platte NICHTS gefunden (`why=8`), und der Grund ist
-// lehrreich genug, um hier zu stehen:
-//
-//   1. NACH DEM HBA-RESET STEHT DIE VERBINDUNG NICHT SOFORT. DET in
-//      PxSSTS ist erst 1 ("Geraet da, Verbindung noch nicht") und wird
-//      3 ("Verbindung steht"), wenn die beiden Enden sich geeinigt
-//      haben. Das dauert. Ein Blick reicht nicht, es muss gewartet
-//      werden.
-//   2. PxSIG IST KEIN REGISTER, DAS DER CONTROLLER VON SICH AUS FUELLT.
-//      Dort steht, was das LAUFWERK in seinem ersten D2H-Register-FIS
-//      geschickt hat -- und ein FIS EMPFANGEN kann der Port erst, wenn
-//      der FIS-Empfangsbereich eingetragen und FRE gesetzt ist. Vorher
-//      liest PxSIG 0xFFFFFFFF oder eine Null, und beide sind keine
-//      Kennung.
-//
-// Deshalb richtet diese Funktion JEDEN in Frage kommenden Port so weit
-// ein, dass er antworten KANN, bevor sie ihn fragt. Erst danach ist die
-// Kennung eine Aussage.
-// ==================================================================
-// THE LINK SCAN (r558, Dell OptiPlex 9020, 11.10.2026)
-// ==================================================================
-//
 // WHAT WENT WRONG ON THE REAL DELL (class 01:04, SATA Operation = RAID On):
 // `AHCI init failed, why=8` only 0.49 s after the controller was found,
 // although a SATA disk hangs on it. Two things in the old search are
@@ -1297,39 +1021,20 @@ fn find_disk(state: u64, pi: u64) -> u64 {
     return found
 }
 
-// Einen Port so weit herrichten, dass er ein FIS empfangen kann: alles
-// anhalten, die beiden Speicheradressen eintragen, alte Fehler wegraeumen,
-// Strom und Anlauf anfordern, FIS-Empfang an. ST bleibt AUS -- es soll
-// noch kein Befehl laufen.
-//
-// DIE REIHENFOLGE IST NICHT GESCHMACKSSACHE: ein Port, der noch laeuft
-// (CR oder FR), ignoriert jede Adresse, die man in PxCLB oder PxFB
-// schreibt -- der Controller hat sie sich beim Anfahren gemerkt. Wer die
-// Adressen im Laufen schreibt, sieht keinen Fehler und der Controller
-// legt seine FIS weiter dorthin, wo der Vorbesitzer sie haben wollte.
 fn port_arm(state: u64, p: u64, cl: u64, fis: u64) -> bool {
     if !port_stop(state, p) {
         return false
     }
-    // Der Controller liest den BUS, nicht die Seitentabelle. In diesem
-    // Kern sind die beiden Zahlen dieselbe, weil `boot.s` das erste
-    // Gigabyte auf sich selbst abbildet; in einem Kern mit hoher Haelfte
-    // waeren sie es nicht, und das ist die Zeile, an der so ein Treiber
-    // bricht. Derselbe Satz steht in `nvme.command`.
     pwr(state, p, P_CLB, cl & 0xFFFFFFFF)
     pwr(state, p, P_CLBU, cl >> 32)
     pwr(state, p, P_FB, fis & 0xFFFFFFFF)
     pwr(state, p, P_FBU, fis >> 32)
-    // Alte Fehler wegraeumen: SERR wird durch ZURUECKSCHREIBEN geloescht,
-    // nicht durch eine Null. Wer eine Null hineinschreibt, loescht nichts
-    // und bekommt beim ersten Befehl den Fehler des Vorbesitzers.
     pwr(state, p, P_SERR, prd(state, p, P_SERR))
     pwr(state, p, P_IS, prd(state, p, P_IS))
-    // Keine Unterbrechungen: dieser Treiber fragt ab (siehe Kopf).
     pwr(state, p, P_IE, 0)
     pwr(state, p, P_CMD, prd(state, p, P_CMD) | CMD_SUD | CMD_POD)
     pwr(state, p, P_CMD, prd(state, p, P_CMD) | CMD_FRE)
-    let bis: u64 = frist(state, RESET_US)
+    let bis: u64 = timeout(state, RESET_US)
     var spin: u64 = 0
     while !expired(bis, spin, RESET_LIMIT) {
         if (prd(state, p, P_CMD) & CMD_FR) != 0 {
@@ -1340,21 +1045,7 @@ fn port_arm(state: u64, p: u64, cl: u64, fis: u64) -> bool {
     return false
 }
 
-// Den Port anhalten, die beiden Speicherbereiche eintragen, wieder
-// anfahren. DIE REIHENFOLGE IST NICHT GESCHMACKSSACHE: ein Port, der
-// noch laeuft (CR oder FR), ignoriert jede Adresse, die man in PxCLB
-// oder PxFB schreibt -- der Controller hat sie sich beim Anfahren
-// gemerkt. Ein Treiber, der die Adressen im Laufen schreibt, sieht
-// hinterher keinen Fehler und liest in fremden Speicher.
 fn port_setup(state: u64, p: u64) -> bool {
-    // ERST DIE ANDEREN WIEDER STILLLEGEN. `find_disk` hat jedem Port,
-    // den es gefragt hat, DENSELBEN FIS-Empfangsbereich eingetragen und
-    // FRE gesetzt -- anders war die Kennung nicht zu bekommen. Bliebe
-    // das so, legte ein zweites Laufwerk am selben Controller seine FIS
-    // in genau die 256 Oktette, aus denen dieser Treiber die Antworten
-    // des ersten liest. Das ist die Sorte Fehler, die unter QEMU mit
-    // einer Platte nie auftritt und auf einem PC mit zwei SATA-Geraeten
-    // sofort.
     let pi: u64 = kstate.get(state, sc(S_PI))
     var quiet: u64 = 0
     var i: u64 = 0
@@ -1374,15 +1065,13 @@ fn port_setup(state: u64, p: u64) -> bool {
     if !port_arm(state, p, cl, fis) {
         return false
     }
-    // ST ZULETZT. Der Controller darf erst Befehle abarbeiten, wenn er
-    // weiss, wo die Befehlsliste steht und wohin die Antwort soll.
     pwr(state, p, P_CMD, prd(state, p, P_CMD) | CMD_ST)
     return await_idle(state, p)
 }
 
 fn port_stop(state: u64, p: u64) -> bool {
     pwr(state, p, P_CMD, prd(state, p, P_CMD) & (~CMD_ST))
-    let bis: u64 = frist(state, RESET_US)
+    let bis: u64 = timeout(state, RESET_US)
     var spin: u64 = 0
     var raus: bool = false
     while !raus && !expired(bis, spin, RESET_LIMIT) {
@@ -1407,7 +1096,7 @@ fn port_stop(state: u64, p: u64) -> bool {
 }
 
 fn await_idle(state: u64, p: u64) -> bool {
-    let bis: u64 = frist(state, CMD_US)
+    let bis: u64 = timeout(state, CMD_US)
     var spin: u64 = 0
     while !expired(bis, spin, SPIN_LIMIT) {
         let tfd: u64 = prd(state, p, P_TFD)
@@ -1422,18 +1111,6 @@ fn await_idle(state: u64, p: u64) -> bool {
 
 // -------------------------------------------------------- ein Befehl
 
-// Das H2D-Register-FIS, Oktett fuer Oktett. Es ist DASSELBE, was
-// `blk.ata_select_on` in die Ports 0x1F2..0x1F6 schreibt -- nur dass es
-// hier im Speicher steht und der Controller es abholt.
-//
-//   0   0x27          Art: Host an Geraet
-//   1   0x80          das C-Bit: dies ist ein BEFEHL, keine Registerablage
-//   2   Befehl        0x25, 0x35, 0xEC, 0xEA
-//   3   Features
-//   4-6 LBA 0..2
-//   7   Laufwerk      0x40 = LBA statt CHS
-//   8-10 LBA 3..5     das, was LBA48 von LBA28 unterscheidet
-//   12-13 Zahl der Sektoren
 fn build_fis(ct: u64, cmd: u64, lba: u64, count: u64) {
     var i: u64 = 0
     while i < 64 {
@@ -1457,11 +1134,6 @@ fn build_fis(ct: u64, cmd: u64, lba: u64, count: u64) {
     m8(ct + 15, 0)
 }
 
-// Ein Kopfsatz der Befehlsliste, Platz 0. Vier Woerter:
-//   DW0  Laenge des FIS in DWORDs (5), W = schreiben, PRDTL oben
-//   DW1  wie viele Oktette der Controller wirklich bewegt hat -- er
-//        schreibt das selbst hinein, und `run` liest es zurueck
-//   DW2/3 wo die Befehlstafel liegt
 fn build_hdr(cl: u64, ct: u64, write: bool, prdtl: u64) {
     var dw0: u64 = 5 | (prdtl << 16)
     if write {
@@ -1477,17 +1149,6 @@ fn build_hdr(cl: u64, ct: u64, write: bool, prdtl: u64) {
     m32(cl + 28, 0)
 }
 
-// DIE PRDT. Ein Eintrag deckt einen zusammenhaengenden Bereich ab, und
-// die Laenge steht dort als LAENGE MINUS EINS -- eine Null bedeutet ein
-// Oktett, nicht keines. Das ist die Stelle, an der ein Treiber genau
-// einen Sektor zu wenig liest und es nicht merkt, solange er nur je
-// einen Sektor liest.
-//
-// Aufgeteilt wird an SEITENGRENZEN, obwohl ein PRD-Eintrag bis 4 MiB
-// darf: dieser Kern bildet das erste Gigabyte flach ab, aber ein Puffer
-// aus dem Rahmenverwalter ist nicht zwingend zusammenhaengend. Wer die
-// ganze Laenge in einen Eintrag schreibt, gewinnt nichts und verliert
-// diese Zusage.
 fn build_prdt(ct: u64, addr: u64, len: u64) -> u64 {
     var n: u64 = 0
     var a: u64 = addr
@@ -1501,7 +1162,7 @@ fn build_prdt(ct: u64, addr: u64, len: u64) -> u64 {
         m32(e + 0, a & 0xFFFFFFFF)
         m32(e + 4, a >> 32)
         m32(e + 8, 0)
-        m32(e + 12, chunk - 1) // Laenge minus eins, ohne Unterbrechungsbit
+        m32(e + 12, chunk - 1)
         a = a + chunk
         rest = rest - chunk
         n = n + 1
@@ -1542,18 +1203,13 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     build_hdr(cl, ct, write, prdtl)
     build_fis(ct, cmd, lba, count)
 
-    // Alte Meldungen weg, sonst liest die Schleife unten den Fehler des
-    // vorigen Befehls.
     pwr(state, p, P_IS, prd(state, p, P_IS))
     pwr(state, p, P_SERR, prd(state, p, P_SERR))
 
-    // Und das ist die Klingel: ein einziges gesetztes Bit in PxCI. Ab
-    // hier holt sich der Controller den Kopfsatz, die Befehlstafel und
-    // die Daten selbst -- der Prozessor bewegt kein Oktett mehr.
     pwr(state, p, P_CI, 1)
     kstate.add(state, sc(S_CMDS), 1)
 
-    let bis: u64 = frist(state, CMD_US)
+    let bis: u64 = timeout(state, CMD_US)
     var spin: u64 = 0
     while !expired(bis, spin, SPIN_LIMIT) {
         if (prd(state, p, P_CI) & 1) == 0 {
@@ -1565,10 +1221,6 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
             }
             return true
         }
-        // TFES: der Controller haengt das Bit hin, wenn das LAUFWERK
-        // einen Fehler gemeldet hat. PxCI bleibt dann unter Umstaenden
-        // stehen, und eine Schleife, die nur PxCI liest, wartet die
-        // vollen vier Millionen Runden auf etwas, das nicht mehr kommt.
         if (prd(state, p, P_IS) & IS_TFES) != 0 {
             kstate.set(state, sc(S_TFD), prd(state, p, P_TFD))
             kstate.add(state, sc(S_ERRS), 1)
@@ -1577,24 +1229,6 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
         }
         spin = spin + 1
     }
-    // DIE ZEITSCHRANKE IST ABGELAUFEN, UND DAS IST ETWAS ANDERES ALS EIN
-    // FEHLER DES LAUFWERKS.
-    //
-    // Ein Fehler (TFES) ist ein NEIN: das Laufwerk hat geantwortet und
-    // den Befehl abgelehnt. Der naechste Befehl kann trotzdem gehen, und
-    // `recover` richtet den Port dafuer wieder her.
-    //
-    // Eine abgelaufene Schranke ist gar keine Antwort. Der Controller
-    // holt sich nichts mehr aus dem Speicher -- weil ihm das
-    // Busmaster-Bit fehlt, weil das Kabel ab ist, weil er haengt. Wer
-    // danach WEITERMACHT, wartet die volle Schranke bei JEDEM folgenden
-    // Block, und ein Dateisystem mit ein paar tausend Bloecken laesst
-    // die Maschine damit stehen. Genau das ist bei der Gegenprobe `nobm`
-    // passiert, bevor diese vier Zeilen hier standen.
-    //
-    // Also gilt das Geraet ab hier als WEG. Jeder weitere Aufruf sagt
-    // sofort nein, und `blk.fi` bekommt ein ehrliches Nein statt eines
-    // Stillstands.
     kstate.set(state, sc(S_TFD), prd(state, p, P_TFD))
     kstate.add(state, sc(S_ERRS), 1)
     kstate.add(state, sc(S_DEAD), 1)
@@ -1603,11 +1237,6 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     return false
 }
 
-// Nach einem Fehler steht die Befehlsmaschine des Ports. Sie faehrt nur
-// wieder an, wenn ST einmal aus und wieder ein war -- dieselbe Regel wie
-// `blk.ata_recover` fuer die Portfassung, aus demselben Grund: ein
-// stehen gelassener Port laesst jeden folgenden Befehl in die
-// Zeitschranke laufen, und dann sieht es aus, als sei die Platte weg.
 const DL_BYPASS: u64 = 0
 const DL_TAKEN: u64 = 1
 const DL_REFUSE: u64 = 2
@@ -1675,7 +1304,7 @@ fn lock_out(t: u64) {
 
 fn recover(state: u64, p: u64) {
     pwr(state, p, P_CMD, prd(state, p, P_CMD) & (~CMD_ST))
-    let bis: u64 = frist(state, RESET_US)
+    let bis: u64 = timeout(state, RESET_US)
     var spin: u64 = 0
     while !expired(bis, spin, RESET_LIMIT) {
         if (prd(state, p, P_CMD) & CMD_CR) == 0 {
@@ -1698,16 +1327,6 @@ fn recover(state: u64, p: u64) {
 
 // ------------------------------------------------------------ IDENTIFY
 
-// Wie gross die Platte ist und wie gross ein Sektor. Beides kommt aus dem
-// GERAET; ein Treiber, der 512 annimmt, laeuft, bis er eine Platte mit
-// 4096 trifft. Die Antwort sind 512 Oktette, also 256 Woerter, und die
-// Zaehlung in der ATA-Norm ist in WOERTERN:
-//
-//   Wort 60/61    Sektoren in LBA28 (nur bis 128 GiB)
-//   Wort 83 Bit 10 ob das Laufwerk LBA48 kann
-//   Wort 100..103 Sektoren in LBA48
-//   Wort 106      ob Wort 117/118 gilt
-//   Wort 117/118  Oktette je logischem Sektor, in Woertern
 fn identify(state: u64) -> bool {
     let buf: u64 = state + AHCI_ID_OFF
     zero(buf, 512)
@@ -1730,8 +1349,6 @@ fn identify(state: u64) -> bool {
     let w106: u64 = w(buf, 106)
     if (w106 & 0x4000) != 0 && (w106 & 0x8000) == 0 && (w106 & 0x1000) != 0 {
         let words: u64 = w(buf, 117) | (w(buf, 118) << 16)
-        // Aus der Zahl der Woerter je Sektor die Verschiebung: 256
-        // Woerter sind 512 Oktette, also 9.
         var sz: u64 = words * 2
         var s: u64 = 0
         while sz > 1 {
@@ -1826,10 +1443,6 @@ fn write_block_locked(state: u64, lba: u64, src: u64) -> bool {
     return true
 }
 
-// MEHRERE SEKTOREN IN EINEM BEFEHL. Das Dateisystem braucht es nicht --
-// es ist die Zahl, die zeigt, was die Schnittstelle je Block kostet, und
-// es ist das, was ein wirklicher Treiber tut. Bis PRDT_MAX Seiten, also
-// 32 KiB; darueber gibt die Funktion nein statt still weniger zu lesen.
 fn read_many(state: u64, lba: u64, count: u64, dst: u64) -> bool {
     let t: u64 = lock_in(state)
     if t == DL_REFUSE {
@@ -1879,12 +1492,6 @@ fn write_many_locked(state: u64, lba: u64, count: u64, src: u64) -> bool {
     return true
 }
 
-// FLUSH CACHE EXT, und der ist hier nicht kosmetisch: eine SATA-Platte
-// bestaetigt einen Schreibbefehl, sobald sie ihn in ihrem eigenen
-// Zwischenspeicher hat. Ohne diesen Befehl steht nach einem
-// Stromausfall auf der Platte, was vor dem Schreiben dort stand -- und
-// `tools/ahci/run.sh` liest das Abbild HINTERHER auf dem Wirt, was
-// genau diesen Unterschied sichtbar machen wuerde.
 fn flush(state: u64) -> bool {
     let t: u64 = lock_in(state)
     if t == DL_REFUSE {

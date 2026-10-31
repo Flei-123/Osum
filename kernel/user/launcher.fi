@@ -1,38 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/launcher.fi -- Runde K15, Nachtrag: DER STARTER.
-//
-// Ein Fenster mit einem Suchfeld. Man tippt, und waehrend man tippt
-// wird die Liste kuerzer; man drueckt die Eingabetaste oder klickt
-// doppelt, und das Programm laeuft.
-//
-// GESUCHT WIRD IN DREI FELDERN: Anzeigename, Beschreibung UND
-// SCHLUESSELWOERTER (`kernel/user/appdir.fi`). Das dritte ist der Grund
-// fuer die ganze Sache. "Datei-Explorer" findet man mit "datei" und mit
-// "explorer" -- das kann jeder Namensvergleich. Mit "folder", "files",
-// "manager" oder "verzeichnis" findet man ihn NUR ueber die
-// Schluesselwoerter, denn keines dieser Woerter steht im Namen oder in
-// der Beschreibung. Genau das misst `tools/k15/run.sh`, und genau
-// deshalb gibt es das Argument `nokeys`: dieselbe Suche ohne das Feld,
-// und dann findet "folder" nichts. Eine Suche, die immer etwas findet,
-// ist keine Suche.
-//
-// WAS ER MELDET, damit man ihn von aussen nachrechnen kann: wie viele
-// Programme das Verzeichnis hat, welchen Suchbegriff er gerade hat, wie
-// viele Treffer, und je Treffer Name und Befehl.
 
 // ================================================ RUNDE 31: profile app
-//
-// Die Wurzeldatei tragt das Profil (compiler/src/prof.rs), und die
-// Bedienelemente dieses Programms kommen ab dieser Runde aus fUi
-// (wlib -> fuib -> lib/fui). fUi rechnet Geometrie in `f64` und
-// benutzt `std.rt`; unter `profile kernel` ist beides gesperrt
-// (SPEC.md:125: "Floating point | kernel: only with #[allow_fp] |
-// app: free").
-//
-// Die Module darunter bleiben `kernel` -- gemessen: nur die WURZEL muss
-// wechseln. Gebunden wird dafuer OHNE crt.o, weil firnc unter `app`
-// seinen eigenen `_start` mitbringt (tools/look/shot.sh liest das
-// Profil und laesst crt.o dann weg).
 profile app
 
 import ulib
@@ -53,60 +22,24 @@ import icons
 
 export { u_start }
 
-// RUNDE K16, Syscall 1901: eine Datei oeffnen heisst, das Programm zu
-// starten, das die Tabelle im Kern fuer ihre Art fuehrt.
 const SYS_FOPEN: u64 = 1901
 
-// ======================================== RUNDE ECHTHARDWARE-4
-// DIE EIGENE FENSTERNUMMER, damit `starten` zumachen kann.
-//
-// `starten` ist eine freie Funktion (sie wird aus drei Stellen der
-// Schleife gerufen) und kannte das Fenster nicht. Ein Startmenue,
-// das nach dem Start des Programms offen stehen bleibt, ist genau
-// das, was Justin auf jedem Belegbild gesehen hat.
 static mut g_win: u64 = 0
-static mut g_offen: bool = false
-// ======================================== RUNDE ECHTHARDWARE-4
-// EINE GNADENFRIST NACH DEM AUFGEHEN.
-//
-// GEMESSEN an menue-2560/serial.txt: nach `klickauf start` stand
-// `taskbar: startmenue auf` und `wm: fokus id=11` -- und rund
-// achtzig Zeilen spaeter war das Menue wieder zu, ohne dass jemand
-// daneben geklickt haette. Der Klick, der das Menue AUFMACHT, geht
-// durch die Leiste, und in dem Augenblick wandert der Fokus kurz
-// woandershin. Die Regel "Fokus weg heisst zu" hat das als Klick
-// daneben gelesen.
-//
-// Also zaehlt die Regel erst ein halbes Sekundenmass nach dem
-// Aufgehen. Ein Mensch, der daneben klickt, braucht laenger als
-// 300 Millisekunden dafuer; ein Klick, der das Menue gerade erst
-// geoeffnet hat, ist in dieser Zeit laengst vorbei.
+static mut g_open: bool = false
 static mut g_gnade: u64 = 0
-// Der Stand des Tastenzaehlers, den diese Schleife schon gesehen hat.
 static mut g_kseq: u64 = 0
 // Set when the menu closes; the main loop then empties the search field,
 // so the next open starts with the full list instead of the old query.
 static mut g_clear: bool = false
 const GNADE_TICKS: u64 = 30 // 300 ms bei 100 Hz
 static mut suchfeld: [u8; 64] = [0 as u8; 64]
-static mut liste: [u8; 4096] = [0 as u8; 4096]
-// EIN PLATZ JE ZEILE DER LISTE, und die Liste traegt Programme UND
-// Dateien: bis zu MAXAPP Programme und bis zu DMAX Dateien. Das Feld war
-// erst 16 lang und damit zu kurz -- das haette bei 16 Programmen und
-// einem Dateitreffer neben das Feld geschrieben.
+static mut items: [u8; 4096] = [0 as u8; 4096]
 static mut farben: [u64; 32] = [0 as u64; 32]
 static mut treffer: [u64; 24] = [0 as u64; 24]
 static mut ntreffer: u64 = 0
-// AUCH SEIN EIGENER NAME STEHT IN DEN DATEN. Er nimmt sich nicht aus:
-// der Titel kommt aus dem Eintrag, dessen `exec` auf dieses Programm
-// zeigt -- genauso wie beim Datei-Explorer. Ohne Eintrag steht der
-// Aufrufname da und nichts Schoeneres.
-static mut t_titel: [u8; 64] = [0 as u8; 64]
-static mut t_selbst: [u8; 25] = "/apps/launcher.osp/start\0"
+static mut t_title: [u8; 64] = [0 as u8; 64]
+static mut t_self: [u8; 25] = "/apps/launcher.osp/start\0"
 static mut k_prompt: [u8; 16] = "launcher.prompt\0"
-// Die Aufschrift des Knopfes, nicht der Name des Programms: der
-// steht in den Daten. "Ausfuehren" und nicht noch einmal
-// "Starten" -- das Fenster heisst schon so.
 static mut k_run: [u8; 13] = "launcher.run\0"
 // DELL ROUND: the task table is full -- say so instead of doing nothing.
 static mut k_full_t: [u8; 20] = "launcher.full.title\0"
@@ -118,12 +51,6 @@ static mut g_refresh: bool = true
 static mut g_fp: u64 = 0
 static mut g_nokeys: bool = false
 static mut s_reload: [u8; 25] = "launcher: apps reloaded \0"
-// WIE VIELE DATEITREFFER UNTER DIE PROGRAMME PASSEN. Der Index kann
-// Tausende liefern; ein Fenster kann sieben Zeilen zeigen, und wer nach
-// "e" sucht, will nicht 3000 Zeilen sehen, sondern die ersten paar und
-// die Zahl daneben.
-// RUNDE FUI-WIN11: wie viele TREFFER das Feld zeigt. Eine Zahl und
-// nicht zwei -- die Fensterhoehe und die Liste rechnen beide damit.
 const LIST_ROWS: u64 = 6
 const DMAX: u64 = 12
 static mut dtreffer: [u64; 12] = [0 as u64; 12]
@@ -132,7 +59,7 @@ static mut dgesamt: u64 = 0
 static mut napp: u64 = 0
 static mut idxn: u64 = 0
 static mut idxus: u64 = 0
-static mut ohne_index: bool = false
+static mut without_index: bool = false
 
 // ============================================================ r402: THE WINDOWS 11 START MENU
 //
@@ -141,15 +68,10 @@ static mut ohne_index: bool = false
 // the "search results" and the "All apps" view of the same window, so nothing the search could do
 // is lost; `liste` as an argument (or `startmenu=list` in /etc/taskbar.conf) keeps the old window
 // exactly (the acceptance runs that measure the list rows use it).
-//
-//   g_w11    the new window (default); false = the old list window
-//   g_alle   the "All apps" view (the list with an empty query)
-//   g_home   the home view: no query, not "All apps" -- pinned + recommended
-//
 // Sizes are DESIGN POINTS (x ui scale): 640 wide, 20 padding; the rows follow the work area
 // (3 + 3 where it fits, down to 1 + 1) and what there is to show.
 static mut g_w11: bool = true
-static mut g_alle: bool = false
+static mut g_all: bool = false
 static mut g_say: bool = false
 static mut g_home: bool = true
 static mut g_pr: u64 = 3 // pinned rows
@@ -204,39 +126,10 @@ const K_ALL: u64 = 5
 const K_BACK: u64 = 6
 const K_PIN: u64 = 100
 const K_REC: u64 = 130
-static mut pfad: [u8; 256] = [0 as u8; 256]
+static mut path: [u8; 256] = [0 as u8; 256]
 
-// ============================================ RUNDE BELEG: DER MESSAUSGANG
-// STEHT IM NORMALBETRIEB AUS.
-//
-// Justins Befund am Abbild vom 12.09.2026: im Terminalfenster standen
-// Zeilen wie `explorer: krumm n=2 fold=0` und `bg=...`. Gezaehlt hat er
-// auch: 160 `ulib.say` in taskbar.fi, 38 in explorer.fi.
-//
-// Die Regel dazu steht seit Runde LAUFZEIT in taskmgr.fi:
-//
-//   EIN MESSAUSGANG GEHOERT HINTER EINEN SCHALTER, UND DER SCHALTER
-//   STEHT IM NORMALBETRIEB AUS. Ein Programm, das im Auslieferungs-
-//   zustand misst, misst vor allem sich selbst.
-//
-// NICHT GELOESCHT, SONDERN GESCHALTET. Die Zaehler (`fui=`, `fuix=`,
-// `rect id=`, `text ... base=`) waren mehrfach der Schluessel zur
-// Fehlersuche -- sie muessen fuer die Abnahme da sein. Also EIN Schalter
-// statt zweihundert geloeschter Zeilen.
-//
-// ZWEI WEGE, IHN EINZUSCHALTEN, und beide gab es schon:
-//   /etc/uitrace   die Datei, mit der `wlib` seit Runde LOOK dasselbe
-//                  tut -- die Pruefstaende legen sie ohnehin an
-//   `debug`        als Wort auf der Programmzeile, fuer den Fall, dass
-//                  einer allein gestartet wird
-//
-// OHNE BEIDES AENDERT SICH KEIN OKTETT gegenueber vorher -- das ist die
-// Bedingung dafuer, dass kein bestehender Testlaeufer davon etwas merkt.
 static mut s_dbg: u64 = 0
 
-// Die drei Ausgaenge dieses Programms, an EINER Stelle geschaltet.
-// `sayn` und `nl` stehen hier, damit kein Aufrufer `ulib.` direkt
-// nimmt und damit am Schalter vorbeigeht.
 fn dbg_on() -> bool {
     return s_dbg != 0
 }
@@ -287,10 +180,6 @@ fn kv(name: u64, v: u64) {
     say((&sp[0 as usize]) as u64)
 }
 
-// Die Trefferliste neu bauen: ein Textblock fuer das Listen-Widget, ein
-// Feld aus Farben fuer die Symbole. Und dieselbe Auskunft auf die
-// serielle Leitung, damit der Laeufer draussen nachrechnen kann, was
-// drinnen ausgewaehlt wurde.
 fn new_find() {
     var s_s: [u8; 25] = "launcher: suche [\0\0\0\0\0\0\0\0"
     var s_t: [u8; 16] = "] treffer=\0\0\0\0\0\0"
@@ -303,7 +192,7 @@ fn new_find() {
         (&treffer[0 as usize]) as u64, 24)
     ntreffer = napp
     // r402: the home view of the Windows 11 window (no query, not "All apps")
-    g_home = g_w11 && ulib.length((&suchfeld[0 as usize]) as u64) == 0 && !g_alle
+    g_home = g_w11 && ulib.length((&suchfeld[0 as usize]) as u64) == 0 && !g_all
     if g_w11 {
         home_prepare()
         // the list's rectangle is reported after the pump that builds it
@@ -317,47 +206,30 @@ fn new_find() {
         let nm: u64 = appdir.name_of(a)
         var j: u64 = 0
         while (*((nm + j) as *mut u8)) != 0 as u8 && lp < 3900 {
-            liste[(lp) as usize] = *((nm + j) as *mut u8)
+            items[(lp) as usize] = *((nm + j) as *mut u8)
             lp = lp + 1
             j = j + 1
         }
         // ================================= RUNDE FUI-WIN11
         // EIN TABULATOR STATT ZWEIER STRICHE.
-        //
-        // Justins Kritik: "Beschreibung steht in DERSELBEN Zeile
-        // hinter --". Windows setzt den Namen in Zeile 1 und die
-        // Beschreibung gedaempft in Zeile 2. Die Liste kann das seit
-        // dieser Runde (`wlib.list_zwei`), und der Schnitt zwischen
-        // beiden Haelften ist der TABULATOR -- ein Zeichen, das in
-        // keinem Programmnamen und in keinem Dateinamen vorkommt.
-        //
-        // Der Zeilenumbruch bleibt der Trenner zwischen EINTRAEGEN:
-        // wuerde die zweite Haelfte eine eigene Zeile des Blocks,
-        // waere jeder Eintrag zwei Eintraege und Auswahl, Rollen und
-        // Doppelklick zaehlten doppelt.
         if lp < 3900 {
-            liste[(lp) as usize] = 9 as u8
+            items[(lp) as usize] = 9 as u8
             lp = lp + 1
         }
         let inf: u64 = appdir.info_of(a)
         j = 0
         while (*((inf + j) as *mut u8)) != 0 as u8 && lp < 3900 {
-            liste[(lp) as usize] = *((inf + j) as *mut u8)
+            items[(lp) as usize] = *((inf + j) as *mut u8)
             lp = lp + 1
             j = j + 1
         }
-        liste[(lp) as usize] = 10 as u8
+        items[(lp) as usize] = 10 as u8
         lp = lp + 1
         k = k + 1
     }
-    // UND DARUNTER DIE DATEIEN. Erst die Programme, dann die Treffer aus
-    // dem Namensindex -- das ist die Reihenfolge, die der Auftrag
-    // verlangt, und sie ist auch die richtige: wer "editor" tippt, meint
-    // in neun von zehn Faellen das Programm und nicht eine Datei, die so
-    // heisst.
     ndatei = 0
     dgesamt = 0
-    if !ohne_index && ulib.length((&suchfeld[0 as usize]) as u64) != 0 {
+    if !without_index && ulib.length((&suchfeld[0 as usize]) as u64) != 0 {
         dgesamt = nidx.find((&suchfeld[0 as usize]) as u64,
             (&dtreffer[0 as usize]) as u64, DMAX)
         ndatei = dgesamt
@@ -367,57 +239,25 @@ fn new_find() {
         var d: u64 = 0
         while d < ndatei && lp < 3800 {
             let t: u64 = dtreffer[(d) as usize]
-            nidx.path_of(t, (&pfad[0 as usize]) as u64, 250)
-            // Die Kachel eines Datei-Treffers traegt keine eigene
-            // Farbe. Vor Runde THEME stand hier ein grauer Wert, der in
-            // einem hellen Thema falsch war und in keinem Schema
-            // vorkam; jetzt ist es die Marke fuer gedaempften Text.
+            nidx.path_of(t, (&path[0 as usize]) as u64, 250)
             farben[((napp + d)) as usize] =
                 wlibc.theme(wlibc.C_TEXT_MUTED)
-            // ================================= RUNDE ECHTHARDWARE-4
-            // KLARNAME UND NICHT DER ROHE PFAD.
-            //
-            // Hier wurde der VOLLE Pfad in die Zeile geschrieben, und
-            // genau das steht auf Justins Bildern aus ECHTHARDWARE-3:
-            // wer "edi" tippt, sieht `/apps/editor.osp` statt
-            // "editor.osp". Ein Pfad ist eine Ortsangabe fuer die
-            // Maschine, kein Name fuer einen Menschen -- und in einer
-            // Liste, die daneben "Editor  --  Write and change text"
-            // zeigt, faellt er auf wie ein Fremdkoerper.
-            //
-            // Die Zeile hat jetzt DIESELBE FORM wie die eines
-            // Programms: Name, zwei Striche, Beschreibung. Der Name ist
-            // der Dateiname (`nidx.name_at`), die Beschreibung der
-            // Ordner, in dem die Datei liegt -- das ist die Auskunft,
-            // die man beim Suchen wirklich braucht ("welche der drei
-            // gleichnamigen ist es"), und sie ist kuerzer als der Pfad.
-            //
-            // DER VOLLE PFAD GEHT NICHT VERLOREN: er steht weiter auf
-            // der seriellen Leitung (`launcher: datei ... name=[...]`),
-            // wo der Laeufer ihn nachrechnet, und `starten()` oeffnet
-            // ohnehin ueber `nidx.path_of` und nicht ueber diesen Text.
             let dnm: u64 = nidx.name_at(t)
             var j2: u64 = 0
             while (*((dnm + j2) as *mut u8)) != 0 as u8 && lp < 3800 {
-                liste[(lp) as usize] = *((dnm + j2) as *mut u8)
+                items[(lp) as usize] = *((dnm + j2) as *mut u8)
                 lp = lp + 1
                 j2 = j2 + 1
             }
-            // RUNDE FUI-WIN11: derselbe Tabulator wie bei den
-            // Programmen -- eine Dateizeile hat dieselbe Form wie eine
-            // Programmzeile, Name oben, Ordner darunter.
             if lp < 3800 {
-                liste[(lp) as usize] = 9 as u8
+                items[(lp) as usize] = 9 as u8
                 lp = lp + 1
             }
-            // Der Ordner: der Pfad ohne den letzten Namensteil. Steht
-            // die Datei im Wurzelverzeichnis, bleibt der Schraegstrich
-            // allein stehen -- und das ist richtig so.
             var schnitt: u64 = 0
             var j3: u64 = 0
-            while (*(((&pfad[0 as usize]) as u64 + j3) as *mut u8))
+            while (*(((&path[0 as usize]) as u64 + j3) as *mut u8))
                 != 0 as u8 {
-                if (*(((&pfad[0 as usize]) as u64 + j3) as *mut u8))
+                if (*(((&path[0 as usize]) as u64 + j3) as *mut u8))
                     == 47 as u8 {
                     schnitt = j3
                 }
@@ -428,18 +268,18 @@ fn new_find() {
             }
             j3 = 0
             while j3 < schnitt && lp < 3880 {
-                liste[(lp) as usize] =
-                    *(((&pfad[0 as usize]) as u64 + j3) as *mut u8)
+                items[(lp) as usize] =
+                    *(((&path[0 as usize]) as u64 + j3) as *mut u8)
                 lp = lp + 1
                 j3 = j3 + 1
             }
-            liste[(lp) as usize] = 10 as u8
+            items[(lp) as usize] = 10 as u8
             lp = lp + 1
             d = d + 1
         }
         ntreffer = napp + ndatei
     }
-    liste[(lp) as usize] = 0 as u8
+    items[(lp) as usize] = 0 as u8
     // the list is a blob table on the scene tree: describe it again
     fuiscene.refresh()
     fuiscene.table_set_sel(K_LIST, 0)
@@ -455,38 +295,19 @@ fn new_find() {
     var d2: u64 = 0
     while d2 < ndatei {
         var s_df: [u8; 21] = "launcher: datei \0\0\0\0\0"
-        nidx.path_of(dtreffer[(d2) as usize], (&pfad[0 as usize]) as u64,
+        nidx.path_of(dtreffer[(d2) as usize], (&path[0 as usize]) as u64,
             250)
         say((&s_df[0 as usize]) as u64)
         kv((&si[0 as usize]) as u64, napp + d2)
         say((&sn[0 as usize]) as u64)
-        say((&pfad[0 as usize]) as u64)
+        say((&path[0 as usize]) as u64)
         say((&sz[0 as usize]) as u64)
         nl()
         d2 = d2 + 1
     }
     // ===================================================== RUNDE ECHTHARDWARE-1
-    //
-    // `napp` UND NICHT `ntreffer` -- SONST LIEST DIESE SCHLEIFE UEBER
-    // DAS FELD HINAUS.
-    //
-    // `treffer` hat 16 Plaetze und traegt nur die PROGRAMME
-    // (`appdir.search(..., 16)`). `ntreffer` ist aber `napp + ndatei`
-    // und darf bis 32 gehen -- die Dateitreffer stehen in `dtreffer`,
-    // einem ganz anderen Feld. Wer hier bis `ntreffer` zaehlt, greift
-    // ab dem 17. Eintrag ins Leere:
-    //
     //   panic: index out of bounds in '[u64; 16]'
     //          at kernel/user/launcher.fi:199
-    //
-    // Gemessen in dieser Runde, sobald zum ersten Mal wirklich getippt
-    // werden konnte: "edi" liefert Programme UND Dateien, und der
-    // Starter starb an seiner eigenen Meldeschleife. Vorher fiel es
-    // nicht auf, weil ohne Tastatureingabe die Dateisuche gar nicht
-    // lief (sie braucht ein nichtleeres Suchfeld).
-    //
-    // Die Dateien werden acht Zeilen weiter oben schon eigens gemeldet
-    // (`launcher: datei`), hier gehoeren nur die Programme hin.
     k = 0
     while k < napp && k < 24 {
         let a: u64 = treffer[(k) as usize]
@@ -502,44 +323,31 @@ fn new_find() {
     }
 }
 
-fn starten(zeile: u64) {
+fn starten(line: u64) {
     var s_go: [u8; 21] = "launcher: start \0\0\0\0\0"
     var s_p: [u8; 8] = " pid=\0\0\0"
     var arg: [u8; 160] = [0 as u8; 160]
-    if zeile >= ntreffer {
+    if line >= ntreffer {
         return
     }
-    if zeile >= napp {
-        // EINE DATEI IST KEIN PROGRAMM -- ABER SIE WEISS SEIT RUNDE K16,
-        // WOMIT MAN SIE OEFFNET. Bis dahin sagte der Starter nur, welche
-        // Datei gemeint ist; jetzt fragt er den Kern (`fopen`, 1901), und
-        // der schlaegt in der Tabelle "Dateiart -> womit oeffnen" nach,
-        // erkennt die Art am INHALT oder an der Endung und startet das
-        // eingetragene Programm mit dem Pfad als Argument. Der Starter
-        // kennt dabei keine einzige Endung; das ist der ganze Sinn der
-        // Tabelle im Kern.
-        //
-        // RUNDE MERGE-2: der Text von k-merge2, weil der Code darunter
-        // seiner ist (SYS_FOPEN). Nur der Name in der Meldung ist der
-        // dieses Zweiges -- das Programm heisst hier `launcher`, und die
-        // uebrigen Meldungen derselben Datei sagen ebenfalls "launcher:".
+    if line >= napp {
         var s_df: [u8; 25] = "launcher: oeffne datei [\0"
         var s_zu2: [u8; 4] = "]\0\0\0"
         var s_op: [u8; 8] = " pid=\0\0\0"
         var argv0: [u64; 4] = [0; 4]
-        nidx.path_of(dtreffer[((zeile - napp)) as usize],
-            (&pfad[0 as usize]) as u64, 250)
-        let fpid: u64 = ulib.sys(SYS_FOPEN, (&pfad[0 as usize]) as u64,
+        nidx.path_of(dtreffer[((line - napp)) as usize],
+            (&path[0 as usize]) as u64, 250)
+        let fpid: u64 = ulib.sys(SYS_FOPEN, (&path[0 as usize]) as u64,
             (&argv0[0 as usize]) as u64, 0)
         say((&s_df[0 as usize]) as u64)
-        say((&pfad[0 as usize]) as u64)
+        say((&path[0 as usize]) as u64)
         say((&s_zu2[0 as usize]) as u64)
         say((&s_op[0 as usize]) as u64)
         sayn(fpid)
         nl()
         return
     }
-    starten_app(treffer[(zeile) as usize])
+    starten_app(treffer[(line) as usize])
 }
 
 // r402: a PROGRAMME (index into the directory) is started -- from a hit row, a pinned tile or a
@@ -572,12 +380,6 @@ fn starten_app(a: u64) {
         appdir.name_of(a))
     var pid: u64 = 0
     if v == ulib.V_REAL {
-        // RUNDE TUERSCHLOSS: SYS_SPAWN (1000) nimmt eine NUMMER aus
-        // uprog.fi (`if prog == 0 || prog > 16 { return -EINVAL }`),
-        // KEINEN Pfad. Ein Zeiger ist immer > 16, also kam hier bei
-        // JEDEM App-Start -22 zurueck und nichts lief je an. Der Weg
-        // mit Pfad ist SYS_EXEC (1001) -- derselbe, auf den die Leiste
-        // in Runde BLECHKERN umgestellt wurde (taskbar.fi:3563 ff.).
         pid = appreg.launch((&arg[0 as usize]) as u64, 0, 0)
     } else {
         var word: u64 = (&v0[0 as usize]) as u64
@@ -625,13 +427,8 @@ fn starten_app(a: u64) {
     sayn(pid)
     nl()
     mru_push(a)
-    // ==================================== RUNDE ECHTHARDWARE-4
-    // NACH DEM START GEHT DAS MENUE ZU. So macht es jedes System,
-    // und ohne das steht die Trefferliste vor dem Programm, das
-    // gerade aufgeht.
     zumachen()
 }
-
 
 // ================================================== pinned tiles: the context menu of the Start menu
 //
@@ -899,7 +696,7 @@ fn ctx_register() {
 
 // The right button on a pinned tile: the menu opens at the pointer.
 fn ctx_open(idx: u64, x: u64, y: u64) {
-    if ctx_menu != 0 || pw_menue != 0 || idx >= pin_n {
+    if ctx_menu != 0 || pw_menu != 0 || idx >= pin_n {
         return
     }
     // rows come from the registry (kernel/user/ctxreg.fi): built-in rows below, plus the entries of /etc/ctxmenu.conf
@@ -1093,26 +890,18 @@ fn home_prepare() {
     }
 }
 
-// EINE STELLE, an der das Menue zugeht -- gerufen von Escape, vom
-// Fokusverlust und vom Programmstart. Drei Wege, ein Zustand.
 fn zumachen() {
     var s_zu: [u8; 21] = "launcher: zugemacht\0\0"
-    if !g_offen {
+    if !g_open {
         return
     }
     fuiscene.hide(true)
-    g_offen = false
+    g_open = false
     g_clear = true
     say((&s_zu[0 as usize]) as u64)
     nl()
 }
 
-// ============================================== RUNDE STARTKNOPF
-// WO DAS MENUE AUFGEHT.
-//
-// Gelesen wird dieselbe Datei, die die Leiste liest. Ohne sie (oder
-// ohne den Schluessel) bleibt es bei `left` -- das ist die Vorgabe der
-// Leiste, also ist es hier dieselbe.
 static mut lp_conf: [u8; 20] = "/etc/taskbar.conf\0\0\0"
 static mut lk_align: [u8; 6] = "align\0"
 static mut lw_center: [u8; 7] = "center\0"
@@ -1120,11 +909,11 @@ static mut lk_height: [u8; 7] = "height\0"
 static mut lp_style: [u8; 20] = "/etc/startmenu.conf\0"
 static mut lw_style: [u8; 11] = "style=list\0"
 static mut l_align: u64 = 0 // 0 = links, 1 = mittig
-static mut l_bar: u64 = 40 // Hoehe der Leiste
+static mut l_bar: u64 = 40
 
 fn conf_read() {
     var buf: [u8; 256] = [0 as u8; 256]
-    var wort: [u8; 24] = [0 as u8; 24]
+    var word: [u8; 24] = [0 as u8; 24]
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&lp_conf[0 as usize]) as u64, 0, 0)
     if ulib.bad(fd) {
         return
@@ -1150,7 +939,7 @@ fn conf_read() {
                 && __mmio_read8((b + ve) as *mut u8) != 13 as u8 {
                 ve = ve + 1
             }
-            let wp: u64 = (&wort[0 as usize]) as u64
+            let wp: u64 = (&word[0 as usize]) as u64
             var k: u64 = 0
             var v: u64 = 0
             var ziffern: u64 = 0
@@ -1164,11 +953,11 @@ fn conf_read() {
                 k = k + 1
             }
             __mmio_write8((wp + k) as *mut u8, 0 as u8)
-            if schluessel_ist(b + ks, ke - ks, (&lk_align[0 as usize]) as u64) {
+            if key_is(b + ks, ke - ks, (&lk_align[0 as usize]) as u64) {
                 if ulib.streq(wp, (&lw_center[0 as usize]) as u64) {
                     l_align = 1
                 }
-            } else if schluessel_ist(b + ks, ke - ks,
+            } else if key_is(b + ks, ke - ks,
                 (&lk_height[0 as usize]) as u64) {
                 if ziffern > 0 && v > 0 && v < 400 {
                     l_bar = v
@@ -1271,7 +1060,7 @@ fn apps_refresh() -> bool {
     return true
 }
 
-fn schluessel_ist(p: u64, n: u64, name: u64) -> bool {
+fn key_is(p: u64, n: u64, name: u64) -> bool {
     var i: u64 = 0
     while i < n {
         let c: u64 = __mmio_read8((p + i) as *mut u8) as u64
@@ -1284,10 +1073,6 @@ fn schluessel_ist(p: u64, n: u64, name: u64) -> bool {
     return __mmio_read8((name + n) as *mut u8) == 0 as u8
 }
 
-// Waagerecht: an der Kante des Startknopfes (links) oder mittig ueber
-// ihm. Der Startknopf steht bei `pad()+1` bzw. mittig im freien Lauf --
-// die Leiste rechnet dasselbe, und wenn beide dieselbe Datei lesen,
-// stehen sie an derselben Stelle.
 fn anker_x(bw: u64) -> u64 {
     // r831: relative to the output the menu opens on (head_bx/head_bw are 0 / the whole screen on one output)
     let sw: u64 = wlibc.head_bw()
@@ -1360,70 +1145,20 @@ fn head_follow(hd: u64) {
     }
 }
 
-// Senkrecht: unmittelbar ueber der Leiste, und nie ueber den oberen
-// Rand der Arbeitsflaeche hinaus (dort liegt das reservierte Band).
-// ================================================ RUNDE MERGE-11: R5
-// DIE LEISTENHOEHE AUS DER DATEI IST NICHT DIE LEISTENHOEHE AUF DEM
-// SCHIRM.
-//
-// Justin: "search programs overlapped mit der taskbar und das soll
-// nicht sein, sondern wie bei windows drueber sein."
-//
-// GEMESSEN auf dem Abbild d832136 bei 3440x1440:
-//   taskbar: conf edge=0 ename=bottom height=80   <- auf dem Schirm
-//   /etc/taskbar.conf                height=40    <- in der Datei
-//   launcher: geom x=8 y=792 w=880 h=600
-//   Unterkante 792 + 600 = 1392
-//   Leisten-Oberkante   1440 - 80 = 1360
-//   -> das Menue ragt 32 Bildpunkte IN die Leiste
-//
-// DIE LEISTE VERVIELFACHT ihre Masse mit `wlibc.ui_scale()` (siehe
-// taskbar.fi, `btn_h`, `gl_w`): aus `height=40` in der Datei werden
-// bei Vervielfachung 2 achtzig Bildpunkte. Dieses Feld hat die 40 roh
-// genommen -- und lag damit um genau eine Vervielfachung daneben.
-//
-// Der alte Kommentar hier sagte, die Arbeitsflaeche brauche ein
-// Fenster. Das stimmt so nicht: `wm.work_y` liest einen GLOBALEN Wert
-// (wm.fi:3176), und `sysgui.fi:874` gibt ihn heraus, ohne das
-// Fensterfeld anzusehen. Die Angabe ist also schon vor dem ersten
-// eigenen Fenster zu haben -- und sie ist die RICHTIGE Quelle, weil
-// der Fensterserver dort JEDE Reservierung abzieht, nicht nur die der
-// Leiste.
-//
-// DESHALB: zuerst die Arbeitsflaeche fragen. Antwortet sie (Hoehe > 0
-// und kleiner als der Schirm), endet das Menue acht Bildpunkte ueber
-// ihrer Unterkante -- das ist der sichtbare Abstand, den Justin aus
-// Windows kennt. Antwortet sie nicht, bleibt der alte Weg, aber MIT
-// Vervielfachung.
 const AIR: u64 = 8
 
 fn anker_y(bh: u64) -> u64 {
-    // NACHGEMESSEN: `work_y(0)` geht NICHT. `sysgui.fi:790` weist
-    // jedes Fensterfeld >= MAX_WIN ab, BEVOR es den Zweig fuer die
-    // Arbeitsflaeche erreicht -- ein Handle 0 also auch. Der alte
-    // Kommentar an dieser Stelle hatte recht, und mein erster Versuch
-    // lieferte weiter y=792 (32 Bildpunkte in der Leiste).
-    //
-    // Also zweistufig: HIER die vervielfachte Leistenhoehe, damit das
-    // Fenster gleich an der richtigen Stelle ANGELEGT wird, und nach
-    // dem Anlegen rueckt `an_arbeitsflaeche()` es auf den Wert, den
-    // der Fensterserver wirklich fuehrt.
-    // r831: the bottom of the output the menu opens on
     let sh2: u64 = wlibc.head_by() + wlibc.head_bh()
     let bar: u64 = l_bar * wlibc.ui_scale()
     if sh2 > bar {
-        let unten: u64 = sh2 - bar
-        if unten > bh + AIR {
-            return unten - bh - AIR
+        let bottom: u64 = sh2 - bar
+        if bottom > bh + AIR {
+            return bottom - bh - AIR
         }
     }
     return 0
 }
 
-// Das Fenster auf die Arbeitsflaeche ruecken -- acht Bildpunkte ueber
-// deren Unterkante, so wie es Justin aus Windows kennt. Antwortet der
-// Server nicht (Hoehe 0 oder groesser als der Schirm), bleibt das
-// Fenster stehen, wo es angelegt wurde.
 fn an_arbeitsflaeche(w: u64, bw: u64, bh: u64) {
     let hh: u64 = fuiscene.handle()
     if hh == 0 {
@@ -1435,75 +1170,21 @@ fn an_arbeitsflaeche(w: u64, bw: u64, bh: u64) {
     if wh2 == 0 || wy + wh2 > sh2 {
         return
     }
-    let unten: u64 = wy + wh2
+    let bottom: u64 = wy + wh2
     var y: u64 = wy
-    if unten > bh + AIR {
-        y = unten - bh - AIR
+    if bottom > bh + AIR {
+        y = bottom - bh - AIR
     }
     let _m: u64 = wlibc.win_move(hh, anker_x(bw), y)
 }
 
 // ==================================================== RUNDE ENERGIE
-//
-// AUSSCHALTEN, NEUSTART UND ABMELDEN AUS DER OBERFLAECHE.
-//
-// Punkt P-003 der Offenliste: bis zu dieser Runde ging das Ausschalten
-// dieses Systems NUR ueber `/bin/shutdown` auf der Befehlszeile. Ein
-// Rechner, den man nur mit einem getippten Befehl ausmachen kann, ist
-// kein Alltagssystem -- und das Startmenue ist die Stelle, an der jedes
-// andere System diesen Knopf hat.
-//
-// WAS HIER NEU IST UND WAS NICHT. Neu ist AUSSCHLIESSLICH die
-// Oberflaeche: ein Knopf, ein Menue, eine Rueckfrage. Das SAUBERE
-// HERUNTERFAHREN gab es schon vollstaendig und es wird hier nicht
-// nachgebaut -- eine zweite Abschaltroutine neben `init.shutdown` waere
-// genau die zweite Wahrheit, gegen die der Kopf von check-ui.sh
-// argumentiert. Der Weg ist derselbe, den `/bin/shutdown` seit Runde
-// INIT geht:
-//
-//     eine Zeile nach /run/svc.cmd  ->  init (Prozess 1) liest sie
-//       -> SIGTERM an jeden Dienst, zwei Sekunden Frist
-//       -> SIGKILL an die Reste
-//       -> sync
-//       -> umount_all
-//       -> ACPI S5 (kernel/power.fi: acpi_off / acpi_reset)
-//
-// DIESE REIHENFOLGE IST DER GANZE PUNKT. Ein Ausschalten, das die
-// Platte im Flug abschneidet, ist schlimmer als keines; `sync` und
-// `umount` stehen deshalb VOR dem S5 und nicht daneben. Belegt wird
-// das nicht durch diese Erklaerung, sondern durch die serielle
-// Ausgabe eines echten Laufs (docs/RUNDE-ENERGIE.md).
-//
-// WARUM NICHT `SYS_EXEC /bin/shutdown`? Das waere ein Prozess mehr fuer
-// eine Zeile Text, und er koennte fehlschlagen (kein /bin, kein
-// Speicher), ohne dass dieses Programm erfaehrt, warum. Die Zeile
-// selbst zu schreiben ist ein `open`/`write`/`close` -- und der
-// Rueckgabewert sagt sofort, ob es gegriffen hat.
-//
-// ABMELDEN, EHRLICH GESAGT: dieses System hat noch keine Anmeldung (der
-// Schreibtisch laeuft als `root`, P-002). Ein Punkt "Abmelden", der eine
-// Sitzung beendet, die es nicht gibt, waere eine Behauptung. Was er
-// WIRKLICH tut, steht deshalb in seiner eigenen Funktion und in
-// docs/RUNDE-ENERGIE.md: er startet den SCHREIBTISCH neu. Sobald es
-// eine Anmeldung gibt, ist hier eine Zeile zu aendern.
 
-// Die Zeilen, die init versteht. `/bin/shutdown` schreibt exakt diese
-// (kernel/user/shutdown.fi) -- dieselben Woerter, damit es genau einen
-// Satz Befehle gibt und nicht zwei.
-// Die Zahlen des Systemaufrufs 169, identisch mit shutdown.fi und mit
-// `kernel/sys.fi` (RB_POWEROFF/RB_RESTART). Der Kern fuehrt ihn nur
-// fuer root aus (`do_reboot` -> `perm.is_root`); der Schreibtisch
-// laeuft als root, solange es keine Anmeldung gibt.
 const SYS_REBOOT: u64 = 169
 const RB_POWEROFF: u64 = 0x4321FEDC
 const RB_RESTART: u64 = 0x01234567
 
 // ==================================================== RUNDE ACPI-EREIGNISSE
-//
-// Die Einschalttaste. `osum_pwrget` ist derselbe Systemaufruf, aus dem
-// die Leiste ihren Akkustand holt; die Feldnummern stehen genauso in
-// `kernel/sys.fi`. `PG_BTN` gibt 1, WENN die Taste gedrueckt wurde --
-// und HOLT SIE DABEI AB, damit sie sich genau einmal meldet.
 const SYS_PWRGET: u64 = 1750
 const PG_BTN: u64 = 54
 
@@ -1514,8 +1195,6 @@ static mut s_pwoff: [u8; 29] = "launcher: einschalttaste aus\0"
 static mut pw_btnoff: [u8; 16] = "/etc/pwrbtn.off\0"
 static mut pw_boot: [u8; 8] = "reboot\n\0"
 
-// Die Schluessel des Katalogs. Der Menuetext ist EINE ZEILE JE EINTRAG
-// (`\n` im Katalog); `wlib.menu_open` schneidet daran.
 static mut k_pmenu: [u8; 11] = "power.menu\0"
 static mut k_ptitel: [u8; 12] = "power.title\0"
 static mut k_pitem: [u8; 11] = "power.item\0"
@@ -1527,19 +1206,14 @@ static mut k_boff: [u8; 15] = "power.btn.off\0\0"
 static mut k_breb: [u8; 18] = "power.btn.reboot\0\0"
 static mut k_bcan: [u8; 18] = "power.btn.cancel\0\0"
 
-// WIE VIELE EINTRAEGE DAS MENUE HAT. Diese Zahl und der Katalog muessen
-// zusammenpassen: `menu_open` bekommt sie von aussen, und wer hier eine
-// Zeile ergaenzt, ohne die Zahl zu erhoehen, bekommt ein Menue, das
-// seinen letzten Eintrag verschweigt (genau der Fehler, der in Runde
-// LOOK an 11-menue-gehezu.png gemessen wurde: drei von sechs).
 const POWER_N: u64 = 4
 const PW_AUS: u64 = 0
-const PW_NEU: u64 = 1
+const PW_FRESH: u64 = 1
 const PW_AB: u64 = 2
 // DAILY-DRIVER (r143): the fourth entry, "Energie sparen" -- standby (S3). The
 // kernel does it (sperre op 11 is the wish, op 12 the answer).
 const PW_SB: u64 = 3
-const SYS_SPERRE_SB: u64 = 1870
+const SYS_LOCK_SB: u64 = 1870
 static mut pw_sb_wait: u64 = 0
 static mut k_sbt: [u8; 20] = "power.standby.title\0"
 static mut k_sb2: [u8; 18] = "power.standby.smp\0"
@@ -1547,13 +1221,9 @@ static mut k_sb3: [u8; 19] = "power.standby.nos3\0"
 static mut k_sb4: [u8; 19] = "power.standby.fail\0"
 static mut k_sbok: [u8; 13] = "power.btn.ok\0"
 
-// Was die Rueckfrage gerade fragt: 0 keine, 1 ausschalten, 2 neustart.
 static mut pw_block: [u8; 64] = [0 as u8; 64]
-static mut pw_frage: u64 = 0
-// Ist das Energiemenue offen? (Das Menue gehoert `wlib`, aber nur
-// dieses Programm weiss, dass ES das aufgemacht hat -- das Startmenue
-// hat auch ein Kontextmenue-freies Leben.)
-static mut pw_menue: u64 = 0
+static mut pw_ask: u64 = 0
+static mut pw_menu: u64 = 0
 
 static mut s_pmauf: [u8; 24] = "launcher: energie auf\0\0\0"
 static mut s_pmwahl: [u8; 25] = "launcher: energie wahl=\0\0"
@@ -1562,16 +1232,7 @@ static mut s_pmtat: [u8; 24] = "launcher: energie tat \0\0"
 static mut s_pmab: [u8; 26] = "launcher: energie abbruch\0"
 static mut s_pmerr: [u8; 30] = "launcher: energie FEHLER cmd\0\0"
 
-// DIE ZEILE AN init. `577` ist O_WRONLY|O_CREAT|O_TRUNC -- dieselben
-// Zahlen wie in shutdown.fi; was vorher in der Datei stand, ist
-// erledigt oder verworfen.
-//
-// Kehrt `false` zurueck, wenn die Datei nicht schreibbar ist. Das ist
-// KEIN theoretischer Fall: laeuft kein init (der Notweg `initsh`
-// startet die Shell unmittelbar), gibt es /run/svc.cmd gar nicht.
-// Dann sagt es der Aufrufer dem Menschen, statt stumm nichts zu tun --
-// Pflichtpunkt 8.
-fn pw_sag(was: u64) -> bool {
+fn pw_say(was: u64) -> bool {
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pw_cmd[0 as usize]) as u64,
         577, 0)
     if ulib.bad(fd) {
@@ -1582,65 +1243,17 @@ fn pw_sag(was: u64) -> bool {
     return true
 }
 
-// ABMELDEN, SOLANGE ES KEINE ANMELDUNG GIBT.
-//
-// Der Schreibtisch wird neu gestartet: alles, was der Mensch offen
-// hatte, ist danach zu, und er steht wieder vor einem frischen
-// Schreibtisch. Das ist das, was von "abmelden" ohne Sitzungsverwaltung
-// uebrig bleibt, und es wird hier auch so GENANNT statt als
-// Sitzungsende ausgegeben.
-//
-// Zweig `anmeldung` (Lauf 2 dieser Umsteige-Runde) baut die echte
-// Anmeldung. Sobald sie da ist, gehoert hier der Weg ueber sie hinein
-// und nicht dieser Neustart -- eine Zeile, und die Stelle ist diese.
 static mut pw_desk: [u8; 13] = "/bin/desktop\0"
 
-// ==================================================== RUNDE ENERGIE
-// DER NOTWEG, WENN KEIN init LAEUFT -- UND WARUM ER HIER GEBRAUCHT WIRD.
-//
-// GEMESSEN AN EINEM ECHTEN LAUF DIESES ABBILDS (docs/RUNDE-ENERGIE.md,
-// Abschnitt "Was der Mitschnitt sagt"): im GRAFISCHEN Betrieb startet
-// `kgui.desk_start` den Schreibtisch, die Leiste und den Starter
-// DIREKT -- im Mitschnitt steht `desk: start /bin/desktop pid=2`, aber
-// NIE `osum: pid1 init`. Prozess 1 ist in diesem Lauf nicht init.
-//
-// Damit hat die Zeile nach `/run/svc.cmd` im Desktop-Betrieb KEINEN
-// LESER. Sie wird trotzdem ZUERST geschrieben, und das ist kein
-// Aberglaube: derselbe Starter laeuft auch auf einem System MIT init
-// (Serverbetrieb, `/etc/ziel = konsole`), und dort ist der Weg ueber
-// Prozess 1 der einzig richtige -- nur er kennt die Dienste und ihre
-// Kennungen.
-//
-// WAS DIESER NOTWEG TUT UND WAS NICHT. Er ist ehrlich weniger als
-// init:
-//   * KEIN Dienst bekommt SIGTERM. Dieses Programm ist nicht ihr
-//     Elternteil und hat ihre Kennungen nie gesehen.
-//   * `sync` schreibt, was noch im Speicher steht. DAS ist der Teil,
-//     der Datenverlust verhindert, und er geht auch ohne init.
-//   * danach der Systemaufruf 169, den der Kern fuer root ausfuehrt
-//     (kernel/sys.fi `do_reboot`): `power.acpi_off` bzw.
-//     `power.acpi_reset`.
-//
-// Es ist derselbe Notweg, den `/bin/shutdown -f` seit Runde INIT geht
-// (kernel/user/shutdown.fi, `self()`) -- dieselben zwei Aufrufe in
-// derselben Reihenfolge. Eine dritte Fassung daneben gibt es nicht.
-//
-// WIE LANGE GEWARTET WIRD: eine halbe Sekunde. `/bin/shutdown` wartet
-// drei, und das ist dort richtig -- es ist ein Befehl auf einer
-// Konsole, und niemand sieht ihm zu. Hier steht ein Mensch vor einem
-// Knopf, den er gerade gedrueckt hat; drei Sekunden ohne jede Regung
-// sind die Zeitspanne, nach der er ein zweites Mal drueckt. Laeuft
-// init, ist die Maschine lange vor Ablauf weg.
-const PW_FRIST: u64 = 10 // 10 x 50 ms = 500 ms
+const PW_TIMEOUT: u64 = 10 // 10 x 50 ms = 500 ms
 
-static mut s_pwself: [u8; 31] = "launcher: energie selbst aus   "
+static mut s_pwself: [u8; 27] = "launcher: power self off   "
 
-fn pw_selbst(neu: bool) {
+fn pw_self(fresh: bool) {
     say((&s_pwself[0 as usize]) as u64)
     nl()
-    // ERST DIE PUFFER. Ohne das ist ein Abschalten ein Ausstecken.
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
-    if neu {
+    if fresh {
         ulib.sys(SYS_REBOOT, RB_RESTART, 0, 0)
     } else {
         ulib.sys(SYS_REBOOT, RB_POWEROFF, 0, 0)
@@ -1649,57 +1262,22 @@ fn pw_selbst(neu: bool) {
 
 // ============================================== RUNDE LOGIND (P-002)
 // ABMELDEN HEISST JETZT ABMELDEN.
-//
-// WAS HIER VORHER STAND und warum es weg ist: ein `exec` auf
-// `/bin/desktop`. Das startete den Schreibtisch neu -- UNTER DERSELBEN
-// KENNUNG. Solange es keine Anmeldung gab, war das die ehrlichste
-// Antwort auf den Wunsch "abmelden", und der Kommentar darueber hat es
-// auch so genannt.
-//
-// Seit der Runde ANMELDUNG gibt es eine Anmeldung, und damit ist
-// dieselbe Zeile FALSCH: die Sitzung blieb offen, der Mensch blieb
-// angemeldet, und wer sich danach vor den Rechner setzte, sass in der
-// Sitzung seines Vorgaengers. Ein Knopf, der "Abmelden" heisst und die
-// Sitzung nicht beendet, ist schlimmer als kein Knopf -- man verlaesst
-// den Rechner im Vertrauen darauf.
-//
-// DER WEG JETZT: op 9 an den Kern. Dieses Programm laeuft als uid 1000
-// und KANN das nicht selbst tun -- `glogin` muss als root laufen (es
-// liest /etc/shadow, 0600 root), und wer `setuid` gemacht hat, bekommt
-// die Wurzel nicht zurueck. Der Kern beendet die Sitzung und holt den
-// Anmeldeschirm; die Einzelheiten stehen in `kgui.abmelde_wache`.
-//
-// DIESER PROZESS IST EINER DER BEENDETEN. Er gehoert der Sitzung, also
-// trifft ihn Schritt 2 der Wache. Deshalb steht hinter dem Aufruf
-// nichts mehr, was noch laufen muesste, und deshalb ist der
-// Rueckgabewert auch nicht "es hat geklappt", sondern nur "der Wunsch
-// ist angekommen".
-const SYS_SPERRE: u64 = 1870
-const OP_ABMELDEN: u64 = 9
+const SYS_LOCK: u64 = 1870
+const OP_SIGN_OUT: u64 = 9
 
-fn pw_abmelden() -> bool {
-    let rc: u64 = ulib.sys(SYS_SPERRE, OP_ABMELDEN, 0, 0)
+fn pw_sign_out() -> bool {
+    let rc: u64 = ulib.sys(SYS_LOCK, OP_SIGN_OUT, 0, 0)
     return !ulib.bad(rc)
 }
 
-
-// DAS MENUE AUFKLAPPEN. Es geht am Energieknopf auf und klappt nach
-// OBEN -- unter dem Knopf ist die Leiste, und dort ist nie Platz;
-// `wlib.menu_open` dreht von selbst um, sobald es unten nicht passt.
-//
-// Der TITEL kommt aus dem Katalog: `wlib` traegt seinen eigenen
-// englischen Ersatztext ("Menu"), weil die Bibliothek in dreizehn
-// Programmen steckt und keinen Katalog laden darf (siehe den Kopf von
-// `menu_open`). Ein Programm, das einen hat, reicht ihn mit
-// `set_menu_title` hinunter -- genau dafuer gibt es die Funktion.
 static mut pw_items: [u8; 200] = [0 as u8; 200]
 
 // The power menu: a popup of the scene tree over the window, standing on the
 // button (`mx`, `my` = the top left of the button, window coordinates) and
 // opening upwards. The catalogue text has the entries separated by '\n'; the
 // popup wants them separated by NUL.
-fn pw_menue_auf(mx: u64, my: u64) {
-    if pw_menue != 0 {
+fn pw_menu_open(mx: u64, my: u64) {
+    if pw_menu != 0 {
         return
     }
     let src: u64 = msg.get((&k_pmenu[0 as usize]) as u64)
@@ -1722,107 +1300,58 @@ fn pw_menue_auf(mx: u64, my: u64) {
         y = my - hh - 4
     }
     fuiscene.menu_open(mx, y, 220, (&pw_items[0 as usize]) as u64, POWER_N)
-    pw_menue = 1
+    pw_menu = 1
     say((&s_pmauf[0 as usize]) as u64)
     nl()
 }
 
-
-// DIE RUECKFRAGE. Ausschalten und Neustart sind nicht umkehrbar -- wer
-// sie aus Versehen trifft, verliert, was offen war. Also fragt das
-// System nach, und zwar mit dem GEFAEHRLICHEN Wort auf dem Knopf
-// ("Ausschalten") statt mit "OK": ein Knopf soll sagen, was er tut.
-//
-// TASTATUR: `wlib` fuehrt in einem Dialog Tabulator, Eingabe und
-// Flucht (wlib.fi, `on_key` -> `dlg_*`). Eingabe loest den Knopf aus,
-// auf dem der Fokus steht, Flucht bricht ab (EV_CLOSE -> dl_state 3).
-// Diese Runde musste dafuer nichts bauen; sie musste es nur BENUTZEN
-// und danach messen, dass es wirklich so ist.
-fn pw_frage_auf(was: u64) {
-    if pw_frage != 0 {
+fn pw_ask_open(was: u64) {
+    if pw_ask != 0 {
         return
     }
-    var titel: u64 = msg.get((&k_offt[0 as usize]) as u64)
+    var title: u64 = msg.get((&k_offt[0 as usize]) as u64)
     var text: u64 = msg.get((&k_offq[0 as usize]) as u64)
     var ja: u64 = msg.get((&k_boff[0 as usize]) as u64)
     if was == 2 {
-        titel = msg.get((&k_rebt[0 as usize]) as u64)
+        title = msg.get((&k_rebt[0 as usize]) as u64)
         text = msg.get((&k_rebq[0 as usize]) as u64)
         ja = msg.get((&k_breb[0 as usize]) as u64)
     }
-    // DIE REIHENFOLGE DER KNOEPFE IST HIER EINE SICHERHEITSFRAGE, und
-    // sie ist GEMESSEN und nicht geraten.
-    //
-    // `wlib.on_key` legt die Fluchttaste eines Dialogs auf `dl_no`
-    // (wlib.fi: `if k == KEY_ESC { fire(dl_no, ...) }`), und `dl_no`
-    // ist bei einem Dialog mit mehreren Knoepfen der LETZTE:
-    //
     //     dl_no = dl_btn[0]
     //     if nk > 1 { dl_no = dl_btn[nk - 1] }
-    //
-    // Stuende die Tat rechts (also zuletzt), wuerde FLUCHT SIE
-    // AUSLOESEN. Genau das ist in dieser Runde passiert und steht im
-    // Mitschnitt des Laufs `one-nein`: Escape gedrueckt, und der
-    // Mitschnitt sagte `energie tat 1`, `power: acpi pm1a=0x604` --
-    // die Maschine ging aus, obwohl abgebrochen werden sollte. Eine
-    // Rueckfrage, deren Abbruch ausschaltet, ist schlimmer als keine.
-    //
-    // ALSO STEHT DIE TAT LINKS UND DER ABBRUCH RECHTS. Das ist nicht
-    // die Anordnung, die Windows waehlt -- aber es ist die einzige, die
-    // mit dieser Bibliothek BEIDE Tastenwege richtig macht: Flucht
-    // trifft den letzten Knopf (Abbrechen), und der Fokus liegt nach
-    // `dlg_wahl` auf dem ersten. Damit die Eingabetaste nicht
-    // umgekehrt die Tat ausloest, wird der Fokus gleich darauf auf den
-    // ABBRUCH gelegt (siehe unten, `wlib.set_focus`).
-    //
-    // Wer das umdreht, muss `dl_no` in wlib umdrehen -- und das
-    // betrifft dreizehn Programme.
     let cancel: u64 = msg.get((&k_bcan[0 as usize]) as u64)
-    fuiscene.dialog_open(titel, text, ja, cancel)
+    fuiscene.dialog_open(title, text, ja, cancel)
     // the focus lies on CANCEL: Enter must never shut the machine down
     fuiscene.dialog_default(1)
-    pw_frage = was
+    pw_ask = was
     say((&s_pmfrage[0 as usize]) as u64)
     sayn(was)
     nl()
 }
 
-// DIE TAT. Erst hier verlaesst etwas dieses Programm.
-fn pw_tun(was: u64) {
-    let neu: bool = was == 2
-    // 1. DER RICHTIGE WEG ZUERST: init sagen, dass es aufraeumen soll.
-    //    Nur Prozess 1 kennt die Dienste; was er tut, kann dieses
-    //    Programm nicht nachbauen.
+fn pw_do(was: u64) {
+    let fresh: bool = was == 2
     var ok: bool = false
-    if neu {
-        ok = pw_sag((&pw_boot[0 as usize]) as u64)
+    if fresh {
+        ok = pw_say((&pw_boot[0 as usize]) as u64)
     } else {
-        ok = pw_sag((&pw_down[0 as usize]) as u64)
+        ok = pw_say((&pw_down[0 as usize]) as u64)
     }
     say((&s_pmtat[0 as usize]) as u64)
     sayn(was)
     nl()
     if !ok {
-        // /run/svc.cmd liess sich nicht einmal anlegen. Das ist keine
-        // Ueberraschung, sondern der gemessene Normalfall im
-        // Desktop-Betrieb dieses Abbilds -- also wird es gesagt und
-        // danach der Notweg genommen, statt einen Fehler zu zeigen.
         say((&s_pmerr[0 as usize]) as u64)
         nl()
-        pw_selbst(neu)
+        pw_self(fresh)
         return
     }
-    // 2. UND JETZT WARTEN, ob wirklich jemand gelesen hat. Laeuft init,
-    //    ist die Maschine vor Ablauf dieser Schleife weg und keine
-    //    weitere Zeile dieses Programms wird je ausgefuehrt. Kommt der
-    //    Starter hier heraus, hat niemand gelesen -- dann raeumt er
-    //    selbst auf, so gut es ohne init geht.
     var k: u64 = 0
-    while k < PW_FRIST {
+    while k < PW_TIMEOUT {
         ulib.sleep_ms(50)
         k = k + 1
     }
-    pw_selbst(neu)
+    pw_self(fresh)
 }
 
 // The footer's user. Z9 finding: the menu footer showed "root" after signing in as justin.
@@ -1864,16 +1393,11 @@ fn u_start(args: u64) -> u64 {
     var s_ni: [u8; 8] = "noidx\0\0\0"
     var s_li: [u8; 6] = "liste\0"
     var s_hd: [u8; 7] = "--head\0"
-    // RUNDE ECHTHARDWARE-4: `versteckt` -- der Starter legt sein
-    // Fenster an, malt es einmal und MINIMIERT es sofort.
     var s_vs: [u8; 11] = "versteckt\0\0"
     var versteckt: bool = false
-    var s_bad: [u8; 25] = "launcher: keine Flaeche\0\0"
+    var s_bad: [u8; 25] = "launcher: no surface\0\0\0\0\0"
     var s_n: [u8; 21] = "launcher: apps=\0\0\0\0\0\0"
     var s_go: [u8; 21] = "launcher: ready\0\0\0\0\0\0"
-    // Die Zeile, an der die Abnahme sieht, dass der Starter WIRKLICH
-    // unsichtbar hochgekommen ist -- ein Bild allein koennte auch
-    // heissen, dass er gar nicht erst startete.
     var s_vers: [u8; 21] = "launcher: versteckt\0\0"
     var s_hd_mv: [u8; 19] = "launcher: head to=\0"
     var s_geo: [u8; 21] = "launcher: geom \0\0\0\0\0\0"
@@ -1884,10 +1408,6 @@ fn u_start(args: u64) -> u64 {
     var s_vor: [u8; 25] = "launcher: vorgabe [\0\0\0\0\0\0"
     var s_zu: [u8; 4] = "]\0\0\0"
 
-    // RUNDE I18N: DER KATALOG ZUERST. Er muss stehen, bevor das erste
-    // Bedienelement angelegt wird -- `wlib` BEHAELT den Zeiger auf
-    // seinen Text, und ein Zeiger auf einen Platz, den es noch nicht
-    // gibt, ist ein Zeiger auf nichts.
     let _mk: u64 = msg.init()
     var nohit: bool = false
     var noclip: bool = false
@@ -1904,9 +1424,6 @@ fn u_start(args: u64) -> u64 {
         } else if ulib.streq(p, (&s_nk[0 as usize]) as u64) {
             nokeys = true
         } else if ulib.streq(p, (&s_vs[0 as usize]) as u64) {
-            // RUNDE ECHTHARDWARE-4: MIT DIESEM WORT KOMMT DER STARTER
-            // UNSICHTBAR HOCH. Siehe der Block bei `wlib.win_hide`
-            // weiter unten -- das ist der Normalfall beim Systemstart.
             versteckt = true
         } else if ulib.streq(p, (&s_li[0 as usize]) as u64) {
             // r402: the old list window (see the block at `g_w11`)
@@ -1920,13 +1437,8 @@ fn u_start(args: u64) -> u64 {
             }
             a = a + 1
         } else if ulib.streq(p, (&s_ni[0 as usize]) as u64) {
-            // GEGENPROBE: derselbe Starter ohne Namensindex. Dann findet
-            // "blau" das Programm nicht (es heisst nicht so) und die
-            // Datei auch nicht (es gibt keinen Index), also nichts.
-            ohne_index = true
+            without_index = true
         } else {
-            // Alles andere ist ein Suchbegriff. So laesst sich die Suche
-            // auch OHNE Tastatur messen -- und mit Tastatur sowieso.
             vorgabe = p
         }
         a = a + 1
@@ -1949,12 +1461,9 @@ fn u_start(args: u64) -> u64 {
     say((&s_n[0 as usize]) as u64)
     sayn(n)
     nl()
-    // DER NAMENSINDEX. Einmal gebaut, danach im Speicher -- und die Zeit
-    // dafuer steht auf der seriellen Leitung, damit sie niemand raten
-    // muss.
     var s_ix: [u8; 21] = "launcher: index n=\0\0\0"
     var s_us: [u8; 8] = "  us=\0\0\0"
-    if !ohne_index {
+    if !without_index {
         let t0: u64 = nidx.mono_us()
         idxn = nidx.build()
         idxus = nidx.mono_us() -% t0
@@ -1964,30 +1473,30 @@ fn u_start(args: u64) -> u64 {
     say((&s_us[0 as usize]) as u64)
     sayn(idxus)
     nl()
-    var s_titel: [u8; 25] = "launcher: name [\0\0\0\0\0\0\0\0\0"
+    var s_title: [u8; 25] = "launcher: name [\0\0\0\0\0\0\0\0\0"
     var s_end: [u8; 4] = "]\0\0\0"
     var k3: u64 = 0
     while k3 < n {
-        if ulib.streq(appdir.exec_of(k3), (&t_selbst[0 as usize]) as u64) {
-            ulib.strncpy((&t_titel[0 as usize]) as u64,
+        if ulib.streq(appdir.exec_of(k3), (&t_self[0 as usize]) as u64) {
+            ulib.strncpy((&t_title[0 as usize]) as u64,
                 appdir.name_of(k3), 62)
             k3 = n
         } else {
             k3 = k3 + 1
         }
     }
-    if (t_titel[0 as usize]) == 0 as u8 {
+    if (t_title[0 as usize]) == 0 as u8 {
         // r206/r210 (Dell crash report, 13.10.2026): with no app-list match AND no
         // argv[0] (argc 0) arg_at is NULL and strncpy read page 0 -> #PF, twice in a row.
         let a0: u64 = ulib.arg_at(args, 0)
         if a0 != 0 {
-            ulib.strncpy((&t_titel[0 as usize]) as u64, a0, 62)
+            ulib.strncpy((&t_title[0 as usize]) as u64, a0, 62)
         } else {
-            ulib.strncpy((&t_titel[0 as usize]) as u64, (&t_selbst[0 as usize]) as u64, 62)
+            ulib.strncpy((&t_title[0 as usize]) as u64, (&t_self[0 as usize]) as u64, 62)
         }
     }
-    say((&s_titel[0 as usize]) as u64)
-    say((&t_titel[0 as usize]) as u64)
+    say((&s_title[0 as usize]) as u64)
+    say((&t_title[0 as usize]) as u64)
     say((&s_end[0 as usize]) as u64)
     nl()
     if vorgabe != 0 {
@@ -1999,39 +1508,8 @@ fn u_start(args: u64) -> u64 {
     }
 
     // ===================================================== RUNDE ECHTHARDWARE-1
-    //
-    // 440 MAL 300 WAREN BILDPUNKTE UND SIND JETZT EIN VERHAELTNIS.
-    //
-    // Justins Foto vom 09.09. zeigt den Knopf unten rechts als
-    // "Ausfuehre" -- rechts abgeschnitten. Die Ursache ist dieselbe wie
-    // beim Kontrollzentrum: sein Monitor laeuft mit
-    // `wlibc.ui_scale() == 2`, die Schrift ist damit 30 statt 15
-    // Bildpunkte hoch, und dieses Fenster war 440 Bildpunkte breit --
-    // eine Zahl, die bei Schrifthoehe 15 gewaehlt wurde. Der Kasten
-    // fuer den Knopf war zusaetzlich mit `118 x 30` und `size(110, 28)`
-    // festgenagelt; "Ausfuehren" braucht bei 30er Schrift deutlich mehr
-    // als 110 Bildpunkte, und `wlib` schneidet, was nicht passt.
-    //
-    // Ab hier haengt jedes Mass an der Vervielfachung, und der Knopf
-    // bekommt gar keine feste Breite mehr: `wlib.button` rechnet sich
-    // aus Textbreite plus Polsterung selbst aus, wie breit er sein
-    // muss. Ein Knopf, dem man seine Breite vorschreibt, ist ein Knopf,
-    // der in der naechsten Sprache wieder abgeschnitten ist.
     let sk: u64 = wlibc.ui_scale()
     let bw: u64 = 440 * sk
-    // ================================================ RUNDE FUI-WIN11
-    // DIE HOEHE FOLGT DER LISTE UND IST KEINE FESTE ZAHL MEHR.
-    //
-    // Die Treffer stehen ab dieser Runde ZWEIZEILIG (Name oben,
-    // Beschreibung darunter) -- eine Zeile ist damit rund doppelt so
-    // hoch wie vorher. Bliebe `bh` bei 300, passten statt sieben
-    // Treffern nur noch drei ins selbe Feld, und der Rest waere stumm
-    // abgeschnitten.
-    //
-    // Also wird gerechnet, was wirklich hineinmuss: das Suchfeld
-    // (82), die Liste, und die Knopfzeile darunter (56). Die
-    // Zeilenhoehe ist dieselbe Rechnung wie in `wlib.row_h_of` --
-    // zwei Textzeilen plus die Luft, die eine einzeilige Zeile hat.
     let zh1: u64 = wlibc.metric(wlibc.M_ROW)
     let th1: u64 = wlibc.text_h(wlibc.px_ui())
     var zh2: u64 = 2 * zh1
@@ -2040,27 +1518,6 @@ fn u_start(args: u64) -> u64 {
     }
     let lh: u64 = LIST_ROWS * zh2 + 4
     let bh: u64 = 82 * sk + lh + 56 * sk
-    // ============================================== RUNDE STARTKNOPF
-    // KEIN FENSTER MIT TITELLEISTE, SONDERN EIN FELD AN DER LEISTE.
-    //
-    // Justins Hauptkritik am Starter: er ist ein Fenster mit Rahmen und
-    // rotem Kreuz, taucht in der Fensterliste auf und steht irgendwo im
-    // Bild. Ein Startmenue ist nichts davon -- es geht ueber dem
-    // Schreibtisch auf, unten an der Leiste verankert, und ist wieder
-    // weg, wenn man daneben klickt.
-    //
-    // STUFE 1 dieser Runde: kein Schmuck, oberste Ebene, VERANKERT AN
-    // DER ECHTEN LAGE DES STARTKNOPFES -- und die kommt nicht aus einer
-    // festen Zahl, sondern aus der Ausrichtung der Leiste
-    // (`/etc/taskbar.conf`, `align=`). Steht die Leiste links, geht das
-    // Menue unten links bündig auf; steht sie mittig, waagerecht
-    // mittig ueber dem Startknopf. Dieselbe Datei, dieselbe Regel --
-    // eine zweite Stelle, die entscheidet, wo der Startknopf ist, waere
-    // die zweite Wahrheit darueber.
-    //
-    // Die Arbeitsflaeche (`work_*`) und nicht der Schirm ist der
-    // Rahmen: unter der Leiste (und unter dem reservierten Band der
-    // Messtafel) hat das Menue nichts verloren.
     conf_read()
     start_style_read()
     // FUI-ALL F-6: the window is described to fUi's scene tree. Its size is
@@ -2089,12 +1546,8 @@ fn u_start(args: u64) -> u64 {
     g_scr = (wlibc.screen_w() << 16) | wlibc.screen_h()
     let anker: u64 = anker_x(sbw)
     let ay: u64 = anker_y(sbh)
-    // RUNDE ECHTHARDWARE-3: das Startmenue liegt auf SEINER eigenen
-    // Ebene -- ueber der Taskleiste (sonst deckt die Leiste es zu),
-    // aber UNTER Klappmenues und Blasen.
-    // FLICKER FIX (17.10.2026): paint into a private picture, so frame_end damages only what changed (a hover is a tile, not the menu)
     fuiapp.set_atomic(true)
-    if !fuiscene.open_plain(anker, ay, sbw, sbh, (&t_titel[0 as usize]) as u64,
+    if !fuiscene.open_plain(anker, ay, sbw, sbh, (&t_title[0 as usize]) as u64,
         wlibc.L_MENU, build) {
         say((&s_bad[0 as usize]) as u64)
         nl()
@@ -2126,11 +1579,11 @@ fn u_start(args: u64) -> u64 {
     say_rects()
     if versteckt {
         fuiscene.hide(true)
-        g_offen = false
+        g_open = false
         say((&s_vers[0 as usize]) as u64)
         nl()
     } else {
-        g_offen = true
+        g_open = true
     }
     // 04.10.2026: the pid on the trace line, so a test can kill THIS process
     // (the task numbers `desk: start` prints are slots, not pids).
@@ -2146,7 +1599,7 @@ fn u_start(args: u64) -> u64 {
     while fuiscene.alive() && runden < 1000000000000 {
         runden = runden + 1
         if pw_sb_wait != 0 {
-            let rcs: u64 = ulib.sys(SYS_SPERRE_SB, 12, 0, 0)
+            let rcs: u64 = ulib.sys(SYS_LOCK_SB, 12, 0, 0)
             if !ulib.bad(rcs) && rcs != 0 {
                 pw_sb_wait = 0
                 if rcs >= 2 {
@@ -2171,14 +1624,14 @@ fn u_start(args: u64) -> u64 {
                 ulib.sys(ulib.SYS_CLOSE, bfd, 0, 0)
                 say((&s_pwoff[0 as usize]) as u64)
                 nl()
-                pw_tun(1)
+                pw_do(1)
             }
-            if !versteckt || g_offen {
-                pw_menue_auf(pmx, ky)
+            if !versteckt || g_open {
+                pw_menu_open(pmx, ky)
             } else {
                 fuiscene.hide(false)
-                g_offen = true
-                pw_menue_auf(pmx, ky)
+                g_open = true
+                pw_menu_open(pmx, ky)
             }
         }
         let key: u64 = fuiscene.pump()
@@ -2201,11 +1654,11 @@ fn u_start(args: u64) -> u64 {
                 starten_app(rec_app[(key - K_REC) as usize])
             }
         } else if g_w11 && key == K_ALL {
-            g_alle = true
+            g_all = true
             new_find()
             fuiscene.focus(K_ENTRY)
         } else if g_w11 && key == K_BACK {
-            g_alle = false
+            g_all = false
             new_find()
             fuiscene.focus(K_ENTRY)
         } else if key == K_LIST {
@@ -2213,7 +1666,7 @@ fn u_start(args: u64) -> u64 {
         } else if key == K_RUN {
             starten(fuiscene.table_sel(K_LIST))
         } else if key == K_POWER {
-            pw_menue_auf(pmx, ky)
+            pw_menu_open(pmx, ky)
         } else if g_w11 && key == fuiscene.KEY_RCLICK {
             // a right click on a pinned tile opens its menu
             let rk: u64 = fuiscene.key_at(fuiscene.right_x(), fuiscene.right_y())
@@ -2222,30 +1675,30 @@ fn u_start(args: u64) -> u64 {
             }
         } else if key == fuiscene.KEY_POPUP && ctx_menu != 0 {
             ctx_pick(fuiscene.menu_pick())
-        } else if key == fuiscene.KEY_POPUP && pw_menue != 0 {
+        } else if key == fuiscene.KEY_POPUP && pw_menu != 0 {
             let idx: u64 = fuiscene.menu_pick() - 1
-            pw_menue = 0
+            pw_menu = 0
             say((&s_pmwahl[0 as usize]) as u64)
             sayn(idx)
             nl()
             if idx == PW_SB {
-                let _sb: u64 = ulib.sys(SYS_SPERRE_SB, 11, 0, 0)
+                let _sb: u64 = ulib.sys(SYS_LOCK_SB, 11, 0, 0)
                 pw_sb_wait = 1
             } else if idx == PW_AUS {
-                pw_frage_auf(1)
-            } else if idx == PW_NEU {
-                pw_frage_auf(2)
+                pw_ask_open(1)
+            } else if idx == PW_FRESH {
+                pw_ask_open(2)
             } else if idx == PW_AB {
-                let _ab: bool = pw_abmelden()
+                let _ab: bool = pw_sign_out()
                 zumachen()
             }
         } else if key == fuiscene.KEY_DIALOG {
             let res: u64 = fuiscene.dialog_result()
-            if pw_frage != 0 {
-                let was: u64 = pw_frage
-                pw_frage = 0
+            if pw_ask != 0 {
+                let was: u64 = pw_ask
+                pw_ask = 0
                 if res == 1 {
-                    pw_tun(was)
+                    pw_do(was)
                 } else {
                     say((&s_pmab[0 as usize]) as u64)
                     nl()
@@ -2253,9 +1706,9 @@ fn u_start(args: u64) -> u64 {
             }
         }
         // the menu closed without a choice (Esc, a click beside it)
-        if pw_menue != 0 && !fuiscene.menu_is_open()
+        if pw_menu != 0 && !fuiscene.menu_is_open()
             && key != fuiscene.KEY_POPUP {
-            pw_menue = 0
+            pw_menu = 0
         }
         if ctx_menu != 0 && !fuiscene.menu_is_open()
             && key != fuiscene.KEY_POPUP {
@@ -2263,7 +1716,7 @@ fn u_start(args: u64) -> u64 {
         }
         let ks: u64 = fuiscene.key_seq()
         if ks != g_kseq && fuiscene.key_any() == wlib.KEY_ESC
-            && pw_frage == 0 && pw_menue == 0 && ctx_menu == 0 {
+            && pw_ask == 0 && pw_menu == 0 && ctx_menu == 0 {
             g_kseq = ks
             zumachen()
             suchfeld[0 as usize] = 0 as u8
@@ -2273,7 +1726,7 @@ fn u_start(args: u64) -> u64 {
         }
         // Up and Down move the choice in the list while the keyboard is in
         // the search field (in the list the list itself takes them)
-        if ks != g_kseq && pw_frage == 0 && pw_menue == 0 && ctx_menu == 0 && ntreffer > 0
+        if ks != g_kseq && pw_ask == 0 && pw_menu == 0 && ctx_menu == 0 && ntreffer > 0
             && !g_home && fuiscene.focus_key() != K_LIST {
             let kl: u64 = fuiscene.key_any()
             if kl == wlib.KEY_DOWN || kl == wlib.KEY_UP {
@@ -2290,7 +1743,7 @@ fn u_start(args: u64) -> u64 {
         }
         if g_clear {
             g_clear = false
-            g_alle = false
+            g_all = false
             suchfeld[0 as usize] = 0 as u8
             fuiscene.entry_set(K_ENTRY, (&suchfeld[0 as usize]) as u64)
             vorher = 0
@@ -2299,7 +1752,7 @@ fn u_start(args: u64) -> u64 {
         }
         g_kseq = ks
         let nun: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
-        if g_offen && !fuiscene.has_focus() {
+        if g_open && !fuiscene.has_focus() {
             var s_bl: [u8; 23] = "launcher: fokus weg t=\0"
             var s_bg: [u8; 9] = " gnade=\0\0"
             say((&s_bl[0 as usize]) as u64)
@@ -2308,8 +1761,8 @@ fn u_start(args: u64) -> u64 {
             sayn(g_gnade)
             nl()
         }
-        if g_offen && nun >= g_gnade && !fuiscene.has_focus()
-            && pw_frage == 0 && pw_menue == 0 && ctx_menu == 0 {
+        if g_open && nun >= g_gnade && !fuiscene.has_focus()
+            && pw_ask == 0 && pw_menu == 0 && ctx_menu == 0 {
             zumachen()
         }
         // r1010: follow a size change of the screen AT ONCE, also while the menu is hidden OR open (a menu left open while the screen changes
@@ -2319,7 +1772,7 @@ fn u_start(args: u64) -> u64 {
         // r1010 trace: one line per change of the screen size or of the shown state seen by this loop
         let tr_scr: u64 = (wlibc.screen_w() << 16) | wlibc.screen_h()
         var tr_off: u64 = 0
-        if g_offen {
+        if g_open {
             tr_off = 1
         }
         if tr_scr != g_tr_scr || tr_off != g_tr_off {
@@ -2368,7 +1821,7 @@ fn u_start(args: u64) -> u64 {
                 nl()
             }
         }
-        if !g_offen && fuiscene.has_focus() {
+        if !g_open && fuiscene.has_focus() {
             // r831: shown again -> stand on the output of the taskbar that was clicked
             let hd_now: u64 = wlibc.start_head_get()
             // r1007: the screen may have another size than at the last placement (host hint, Settings): place again
@@ -2392,7 +1845,7 @@ fn u_start(args: u64) -> u64 {
                 sayn(hd_now)
                 nl()
             }
-            g_offen = true
+            g_open = true
             user_refresh()
             g_gnade = nun + GNADE_TICKS
             let _tn: bool = wlib.theme_now()
@@ -2405,9 +1858,9 @@ fn u_start(args: u64) -> u64 {
         // what the search field holds now
         let _cp: u64 = ulib.strncpy((&suchfeld[0 as usize]) as u64,
             fuiscene.entry_text(K_ENTRY), 62)
-        let jetzt: u64 = ulib.length((&suchfeld[0 as usize]) as u64)
-        if jetzt != vorher {
-            vorher = jetzt
+        let now: u64 = ulib.length((&suchfeld[0 as usize]) as u64)
+        if now != vorher {
+            vorher = now
             new_find()
         }
     }
@@ -2497,7 +1950,7 @@ fn w11_rec_none(x: u64, y: u64, w: u64, h: u64) {
 
 fn w11_hdr_res(x: u64, y: u64, w: u64, h: u64) {
     var k: u64 = (&k_resl[0 as usize]) as u64
-    if g_alle {
+    if g_all {
         k = (&k_allapps[0 as usize]) as u64
     }
     fuiscene.text_role(x + fuiscene.sp(4), y + h / 2 + fuiscene.sp(5), w, msg.get(k),
@@ -2587,13 +2040,13 @@ fn build_w11() {
         let _h3: usize = fuiscene.canvas(hr2, 0, 400, 32, w11_hdr_res)
         let sp2: usize = fuiscene.row(hr2)
         fuiscene.set_grow(sp2, 1)
-        if g_alle {
+        if g_all {
             let bb: usize = fuiscene.button(hr2, msg.get((&k_backb[0 as usize]) as u64), K_BACK)
             fuiscene.set_size(bb, 90, 28)
         }
         let lh: u64 = 36 + w11_mid(g_pr, g_rr)
         let _ls: usize = fuiscene.table_list(col, K_LIST, W11_IN, lh, 2,
-            (&liste[0 as usize]) as u64)
+            (&items[0 as usize]) as u64)
         fuiscene.table_two(K_LIST, true)
         fuiscene.table_icons(K_LIST, (&farben[0 as usize]) as u64)
         fuiscene.table_click_only(K_LIST, true)
@@ -2616,7 +2069,7 @@ fn build_classic() {
     let _lb: usize = fuiscene.label(col, msg.get((&k_prompt[0 as usize]) as u64))
     let _fe: usize = fuiscene.entry(col, K_ENTRY, 424, (&suchfeld[0 as usize]) as u64)
     let _ls: usize = fuiscene.table_list(col, K_LIST, 424, LIST_ROWS * 52 + 4, 2,
-        (&liste[0 as usize]) as u64)
+        (&items[0 as usize]) as u64)
     fuiscene.table_two(K_LIST, true)
     fuiscene.table_icons(K_LIST, (&farben[0 as usize]) as u64)
     // ONE click starts the program; the arrow keys only choose
@@ -2698,7 +2151,7 @@ fn say_rects_w11() {
         say_node(5, K_ALL)
     } else {
         say_node(2, K_LIST)
-        if g_alle {
+        if g_all {
             say_node(6, K_BACK)
         }
     }

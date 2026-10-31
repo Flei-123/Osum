@@ -2,52 +2,11 @@
 // kernel/app/wasm.fi -- RUNDE SCHLEUSE: die Schleuse.
 //
 //     wasm <datei.wasm> [argumente...]
-//
-// WAS DAS IST. Ein Deuter fuer WebAssembly, in Firn, in RING 3. Er laedt
-// ein `.wasm`-Modul, das NIEMAND fuer Osum geschrieben hat, und fuehrt es
-// aus. Die Verbindung zur Aussenwelt ist WASI preview1: das Modul ruft
-// `wasi_snapshot_preview1::fd_write` und landet in Osums `write`.
-//
-// WARUM DAS DER KUERZESTE WEG ZU FREMDER SOFTWARE IST -- eine Zahl:
-//
-//     POSIX hat rund 1200 Funktionen. WASI preview1 hat 46.
-//     Fuer Hallo-Welt mit Dateizugriff reichen davon 8-10.
-//
-// Gemessen an einem echten Rust-Programm (`rustc --target wasm32-wasip1`)
-// waren es sogar VIER: environ_get, environ_sizes_get, fd_write, proc_exit.
-// Das ist der ganze Preis fuer Zugang zu allem, was nach WASM uebersetzt
-// wurde -- CPython, SQLite, ffmpeg, Doom, Ruby, PHP.
-//
-// WARUM EIN DEUTER UND NICHT wasm2c. wasm2c (aus wabt) uebersetzt WASM
-// nach C, und C uebersetzt hier niemand: Osum baut mit `firnc`. Der Weg
-// haette einen C-Compiler im System gebraucht (groesseres Projekt als
-// dieser Deuter) oder C-nach-Firn-Uebersetzung (laut CRUST-Bench 22 %
-// Erfolgsquote, bei generiertem Pointer-C effektiv null). Und er haette
-// pro fremdem Programm einen Bauserver-Lauf gebraucht -- das Gegenteil
-// einer Schleuse. Der Preis des Deuters ist Tempo: ~11x langsamer als
-// nativ (wasm3-Messung). Dieser Faktor wird in dieser Runde GEMESSEN.
-//
-// WAS DIESER DEUTER IST UND WAS NICHT. Er ist eine Stapelmaschine, die
-// den Bytecode direkt liest -- kein JIT, keine Vorcodierung in Threads
-// wie bei wasm3. Er prueft die Form des Moduls, aber er ist KEIN
-// Validierer im Sinne der Spezifikation: ein boesartig gebautes Modul
-// kann ihn zum Anhalten bringen, nicht aber aus seinem linearen Speicher
-// heraus. Alle Speicherzugriffe des Gastes werden gegen die Groesse des
-// linearen Speichers geprueft (`mem_bound`), und das ist die Grenze, die
-// zaehlt: der Gast sieht nur seine eigenen Seiten.
-//
-// RING 3, NICHT DER KERN. Diese Datei liegt in `kernel/app/`, wird mit
-// `--profile=app` gebaut und laeuft als gewoehnliches Programm. Ein
-// fremdes Modul, das sich verrechnet, nimmt nichts mit als sich selbst.
 
 import std.io
 import std.rt
 
 // ------------------------------------------------------------ Grenzen
-//
-// Feste Obergrenzen statt wachsender Felder: dieser Deuter soll ein
-// Modul ausfuehren und dabei nicht selbst zur Fehlerquelle werden. Wer
-// eine Grenze reisst, bekommt einen Satz und keinen stillen Schaden.
 const MAX_TYPES: usize = 512
 const MAX_FUNCS: usize = 4096
 const MAX_IMPORTS: usize = 256
@@ -73,24 +32,20 @@ const T_FUNCREF: u8 = 112            // 0x70
 const T_EMPTY: u8 = 64               // 0x40
 
 // --------------------------------------------------------- Der Leser
-//
-// Ein Zeiger in die Moduldatei mit einer Grenze. JEDES Lesen geht hier
-// durch, und jedes prueft. Eine abgeschnittene Datei ist der
-// Normalfall, nicht die Ausnahme -- ein Modul kommt von aussen.
 struct Leser {
     p: u64,
     len: usize,
     at: usize,
-    fehler: bool,
+    failure: bool,
 }
 
 fn leser_new(p: u64, len: usize) -> Leser {
-    return Leser { p: p, len: len, at: 0, fehler: false }
+    return Leser { p: p, len: len, at: 0, failure: false }
 }
 
 fn u8_read(l: *mut Leser) -> u8 {
     if (*l).at >= (*l).len {
-        (*l).fehler = true
+        (*l).failure = true
         return 0 as u8
     }
     let v: u8 = rt.ld8((*l).p, (*l).at)
@@ -98,16 +53,13 @@ fn u8_read(l: *mut Leser) -> u8 {
     return v
 }
 
-// LEB128 ohne Vorzeichen. Die Zahlform von WASM: sieben Bit je Oktett,
-// das achte sagt "es kommt noch was". Bei mehr als zehn Oktetten ist
-// etwas faul -- 10 * 7 = 70 Bit, und mehr als 64 gibt es nicht.
 fn uleb(l: *mut Leser) -> u64 {
     var r: u64 = 0
     var s: u32 = 0
     var n: usize = 0
     while n < 10 {
         let b: u8 = u8_read(l)
-        if (*l).fehler {
+        if (*l).failure {
             return 0
         }
         r = r | ((b & 127 as u8) as u64 << s)
@@ -117,40 +69,30 @@ fn uleb(l: *mut Leser) -> u64 {
         s = s + 7 as u32
         n = n + 1
     }
-    (*l).fehler = true
+    (*l).failure = true
     return 0
 }
 
-// LEB128 mit Vorzeichen. Der Unterschied ist das letzte Oktett: steht
-// dort das Vorzeichenbit, wird der Rest mit Einsen aufgefuellt. Wer das
-// vergisst, liest -1 als 4294967295 und merkt es erst, wenn eine
-// Schleife nicht endet.
 fn sleb(l: *mut Leser) -> i64 {
     var r: u64 = 0
     var s: u32 = 0
     var n: usize = 0
     while n < 10 {
         let b: u8 = u8_read(l)
-        if (*l).fehler {
+        if (*l).failure {
             return 0
         }
         r = r | ((b & 127 as u8) as u64 << s)
         s = s + 7 as u32
         if b & 128 as u8 == 0 as u8 {
             if s < 64 as u32 && b & 64 as u8 != 0 as u8 {
-                // Vorzeichen ausdehnen
-                // ALLE EINSEN, als Literal. `0 as u64 - 1 as u64` waere
-                // die naheliegende Schreibweise und ist FALSCH: Firn
-                // rechnet u64 geprueft und bricht bei Unterlauf ab
-                // ("integer overflow in 'u64 - u64'"). Genau daran ist
-                // das erste Rust-Modul dieser Runde gescheitert.
                 r = r | 18446744073709551615 << s
             }
             return r as i64
         }
         n = n + 1
     }
-    (*l).fehler = true
+    (*l).failure = true
     return 0
 }
 
@@ -170,7 +112,7 @@ fn u64_roh(l: *mut Leser) -> u64 {
 
 fn ueberspringen(l: *mut Leser, n: usize) {
     if (*l).at + n > (*l).len {
-        (*l).fehler = true
+        (*l).failure = true
         (*l).at = (*l).len
         return
     }
@@ -178,9 +120,6 @@ fn ueberspringen(l: *mut Leser, n: usize) {
 }
 
 // ------------------------------------------------------- Die Tabellen
-//
-// Ein Funktionstyp: Parameter und Ergebnisse. Flach gehalten, weil ein
-// Typ in WASM selten mehr als eine Handvoll von beidem hat.
 struct Ftyp {
     npar: usize,
     nres: usize,
@@ -188,19 +127,17 @@ struct Ftyp {
     res: [u8; 8],
 }
 
-// Eine Funktion: entweder importiert (dann `wasi` >= 0 und der Rumpf
-// leer) oder eigen (dann Rumpf zwischen `code_at` und `code_end`).
 struct Funk {
     typ: usize,
     importiert: bool,
-    wasi: i32,           // Nummer der WASI-Funktion, -1 wenn keine
+    wasi: i32,
     code_at: usize,
     code_end: usize,
-    nloc: usize,         // Anzahl der Lokalen OHNE Parameter
-    loctyp_at: usize,    // wo die Lokalendeklaration steht
+    nloc: usize,
+    loctyp_at: usize,
 }
 
-struct Modul {
+struct Module {
     // Datei
     p: u64,
     len: usize,
@@ -219,7 +156,6 @@ struct Modul {
     glob: [u64; 512],
     glob_typ: [u8; 512],
 
-    // Tabelle (nur eine, funcref -- mehr braucht preview1 nicht)
     ntab: usize,
     tab: [u32; 8192],
 
@@ -229,8 +165,8 @@ struct Modul {
     mem_max: usize,
 
     // Einsprung
-    start_funk: i32,     // `start`-Sektion, -1 wenn keine
-    haupt_funk: i32,     // Export `_start`, -1 wenn keiner
+    start_funk: i32,
+    main_func: i32,
 
     ok: bool,
 }
@@ -251,11 +187,6 @@ fn name_eq(p: u64, at: usize, n: usize, s: u64, sn: usize) -> bool {
 }
 
 // ---------------------------------------------------- WASI-Nummern
-//
-// DIE LISTE, DIE ZAEHLT. WASI preview1 hat 46 Funktionen; hier stehen
-// die, die dieser Deuter kennt. Die Reihenfolge ist die der
-// Wichtigkeit, nicht die der Spezifikation: was oben steht, braucht
-// fast jedes Programm beim Start.
 const W_UNBEKANNT: i32 = -1
 const W_ARGS_GET: i32 = 0
 const W_ARGS_SIZES_GET: i32 = 1
@@ -297,7 +228,7 @@ const W_PATH_LINK: i32 = 35
 const W_PATH_FILESTAT_SET_TIMES: i32 = 36
 const W_FD_FILESTAT_SET_TIMES: i32 = 37
 
-fn wasi_nummer(p: u64, at: usize, n: usize) -> i32 {
+fn wasi_number(p: u64, at: usize, n: usize) -> i32 {
     var s_args_get: [u8; 9] = "args_get\0"
     if name_eq(p, at, n, (&s_args_get[0]) as u64, 8) { return W_ARGS_GET }
     var s_args_sizes: [u8; 15] = "args_sizes_get\0"
@@ -378,14 +309,8 @@ fn wasi_nummer(p: u64, at: usize, n: usize) -> i32 {
 }
 
 // ------------------------------------------------------ Modul laden
-//
-// Die Sektionen in der Reihenfolge, in der sie in der Datei stehen
-// muessen: 1 type, 2 import, 3 function, 4 table, 5 memory, 6 global,
-// 7 export, 8 start, 9 element, 10 code, 11 data. 0 ist custom und wird
-// uebersprungen -- dort steckt bei einem Rust-Modul die Debug-Info, und
-// das sind schnell zwei Megaoktette, die niemanden interessieren.
 
-fn type_read(m: *mut Modul, l: *mut Leser) {
+fn type_read(m: *mut Module, l: *mut Leser) {
     let n: usize = uleb(l) as usize
     if n > MAX_TYPES {
         (*m).ok = false
@@ -425,8 +350,6 @@ fn type_read(m: *mut Modul, l: *mut Leser) {
     }
 }
 
-// Ein Grenzenpaar (limits): ein Flag, dann das Minimum, bei Flag 1 auch
-// ein Maximum.
 fn limits_read(l: *mut Leser, min: *mut usize, max: *mut usize) {
     let f: u8 = u8_read(l)
     *min = uleb(l) as usize
@@ -437,7 +360,7 @@ fn limits_read(l: *mut Leser, min: *mut usize, max: *mut usize) {
     }
 }
 
-fn import_read(m: *mut Modul, l: *mut Leser) {
+fn import_read(m: *mut Module, l: *mut Leser) {
     let n: usize = uleb(l) as usize
     var i: usize = 0
     var s_wasi: [u8; 23] = "wasi_snapshot_preview1\0"
@@ -446,9 +369,9 @@ fn import_read(m: *mut Modul, l: *mut Leser) {
         let mod_at: usize = (*l).at
         ueberspringen(l, modl)
         let feldl: usize = uleb(l) as usize
-        let feld_at: usize = (*l).at
+        let field_at: usize = (*l).at
         ueberspringen(l, feldl)
-        if (*l).fehler {
+        if (*l).failure {
             (*m).ok = false
             return
         }
@@ -462,14 +385,14 @@ fn import_read(m: *mut Modul, l: *mut Leser) {
             }
             var w: i32 = W_UNBEKANNT
             if name_eq((*m).p, mod_at, modl, (&s_wasi[0]) as u64, 22) {
-                w = wasi_nummer((*m).p, feld_at, feldl)
+                w = wasi_number((*m).p, field_at, feldl)
             }
             let f: usize = (*m).nfunk
             (*m).funk[f].typ = t
             (*m).funk[f].importiert = true
             (*m).funk[f].wasi = w
-            (*m).funk[f].code_at = feld_at    // fuer die Fehlermeldung
-            (*m).funk[f].code_end = feld_at + feldl
+            (*m).funk[f].code_at = field_at
+            (*m).funk[f].code_end = field_at + feldl
             (*m).nfunk = f + 1
             (*m).nimport_funk = (*m).nimport_funk + 1
         } else if art == 1 as u8 {
@@ -492,7 +415,7 @@ fn import_read(m: *mut Modul, l: *mut Leser) {
     }
 }
 
-fn func_read(m: *mut Modul, l: *mut Leser) {
+fn func_read(m: *mut Module, l: *mut Leser) {
     let n: usize = uleb(l) as usize
     var i: usize = 0
     while i < n {
@@ -510,9 +433,7 @@ fn func_read(m: *mut Modul, l: *mut Leser) {
     }
 }
 
-// Ein konstanter Ausdruck, wie er in `global`, `data` und `element`
-// steht: i32.const/i64.const/f-const oder global.get, dann `end`.
-fn konst_ausdruck(m: *mut Modul, l: *mut Leser) -> u64 {
+fn konst_ausdruck(m: *mut Module, l: *mut Leser) -> u64 {
     var v: u64 = 0
     let op: u8 = u8_read(l)
     if op == 65 as u8 {              // i32.const
@@ -545,7 +466,7 @@ fn konst_ausdruck(m: *mut Modul, l: *mut Leser) -> u64 {
     return v
 }
 
-fn global_read(m: *mut Modul, l: *mut Leser) {
+fn global_read(m: *mut Module, l: *mut Leser) {
     let n: usize = uleb(l) as usize
     if n > MAX_GLOBALS {
         (*m).ok = false
@@ -562,7 +483,7 @@ fn global_read(m: *mut Modul, l: *mut Leser) {
     }
 }
 
-fn export_read(m: *mut Modul, l: *mut Leser) {
+fn export_read(m: *mut Module, l: *mut Leser) {
     let n: usize = uleb(l) as usize
     var i: usize = 0
     var s_start: [u8; 7] = "_start\0"
@@ -574,20 +495,19 @@ fn export_read(m: *mut Modul, l: *mut Leser) {
         let idx: usize = uleb(l) as usize
         if art == 0 as u8 {
             if name_eq((*m).p, n_at, nl, (&s_start[0]) as u64, 6) {
-                (*m).haupt_funk = idx as i32
+                (*m).main_func = idx as i32
             }
         }
         i = i + 1
     }
 }
 
-fn elem_read(m: *mut Modul, l: *mut Leser) {
+fn elem_read(m: *mut Module, l: *mut Leser) {
     let n: usize = uleb(l) as usize
     var i: usize = 0
     while i < n {
         let art: u64 = uleb(l)
         if art == 0 {
-            // aktiv, Tabelle 0, Offset als konstanter Ausdruck
             let off: usize = konst_ausdruck(m, l) as usize
             let cnt: usize = uleb(l) as usize
             var k: usize = 0
@@ -626,9 +546,6 @@ fn elem_read(m: *mut Modul, l: *mut Leser) {
                 k3 = k3 + 1
             }
         } else {
-            // die uebrigen Formen (passive/deklarative) ueberspringen wir
-            // nicht sauber -- ein Modul, das sie benutzt, wird abgelehnt,
-            // statt still falsch zu laufen.
             (*m).ok = false
             return
         }
@@ -636,7 +553,7 @@ fn elem_read(m: *mut Modul, l: *mut Leser) {
     }
 }
 
-fn code_read(m: *mut Modul, l: *mut Leser) {
+fn code_read(m: *mut Module, l: *mut Leser) {
     let n: usize = uleb(l) as usize
     var fi: usize = (*m).nimport_funk
     var i: usize = 0
@@ -647,7 +564,6 @@ fn code_read(m: *mut Modul, l: *mut Leser) {
             (*m).ok = false
             return
         }
-        // die Lokalendeklaration: Gruppen aus Anzahl und Typ
         (*m).funk[fi].loctyp_at = (*l).at
         let grp: usize = uleb(l) as usize
         var nloc: usize = 0
@@ -667,7 +583,7 @@ fn code_read(m: *mut Modul, l: *mut Leser) {
     }
 }
 
-fn data_read(m: *mut Modul, l: *mut Leser) {
+fn data_read(m: *mut Module, l: *mut Leser) {
     let n: usize = uleb(l) as usize
     var i: usize = 0
     while i < n {
@@ -679,8 +595,6 @@ fn data_read(m: *mut Modul, l: *mut Leser) {
             uleb(l)
             off = konst_ausdruck(m, l) as usize
         } else {
-            // passiv: kein Offset, wird von memory.init benutzt. Wir
-            // ueberspringen den Inhalt und merken uns nichts.
             let sz0: usize = uleb(l) as usize
             ueberspringen(l, sz0)
             i = i + 1
@@ -691,12 +605,6 @@ fn data_read(m: *mut Modul, l: *mut Leser) {
             (*m).ok = false
             return
         }
-        // in den linearen Speicher schreiben -- ABER NUR, wenn er schon
-        // steht. Beim ERSTEN Durchgang (in `modul_laden`) ist er es
-        // nicht: die memory-Sektion kann hinter der data-Sektion stehen,
-        // und `mem` ist dann noch 0. Ein `mem_copy` nach 0 ist genau der
-        // Absturz, den diese Zeile verhindert -- gefunden mit gdb im
-        // Wirtsbau, Rahmen data_lesen -> mem_copy -> st64.
         if (*m).mem != 0 {
             if off + sz > (*m).mem_pages * PAGE_SIZE {
                 (*m).ok = false
@@ -709,7 +617,7 @@ fn data_read(m: *mut Modul, l: *mut Leser) {
     }
 }
 
-fn module_load(m: *mut Modul, p: u64, len: usize) -> bool {
+fn module_load(m: *mut Module, p: u64, len: usize) -> bool {
     (*m).p = p
     (*m).len = len
     (*m).ntyp = 0
@@ -721,19 +629,18 @@ fn module_load(m: *mut Modul, p: u64, len: usize) -> bool {
     (*m).mem_pages = 0
     (*m).mem_max = MAX_PAGES
     (*m).start_funk = -1
-    (*m).haupt_funk = -1
+    (*m).main_func = -1
     (*m).ok = true
 
     var l: Leser = leser_new(p, len)
-    // 0x00 0x61 0x73 0x6d = "\0asm", dann die Version 1.
     if len < 8 {
-        io.print("wasm: die Datei ist zu kurz für ein Modul\n")
+        io.print("wasm: the file is too short for a module\n")
         return false
     }
     let magic: u32 = u32_roh(&l)
     let ver: u32 = u32_roh(&l)
     if magic != 1836278016 as u32 {   // 0x6d736100
-        io.print("wasm: das ist kein WASM-Modul (die Kennung stimmt nicht)\n")
+        io.print("wasm: not a WASM module (bad magic)\n")
         return false
     }
     if ver != 1 as u32 {
@@ -741,13 +648,11 @@ fn module_load(m: *mut Modul, p: u64, len: usize) -> bool {
         return false
     }
 
-    // Der Speicher wird angelegt, sobald die memory-Sektion gelesen ist;
-    // data kommt spaeter, also passt die Reihenfolge.
     while l.at < len && (*m).ok {
         let sid: u8 = u8_read(&l)
         let sz: usize = uleb(&l) as usize
-        if l.fehler || l.at + sz > len {
-            io.print("wasm: eine Sektion reicht über das Dateiende hinaus\n")
+        if l.failure || l.at + sz > len {
+            io.print("wasm: a section extends past the end of the file\n")
             return false
         }
         let sende: usize = l.at + sz
@@ -780,7 +685,7 @@ fn module_load(m: *mut Modul, p: u64, len: usize) -> bool {
                 var ma2: usize = 0
                 limits_read(&l, &mi2, &ma2)
                 if mi2 > MAX_PAGES {
-                    io.print("wasm: das Modul will mehr Speicher als erlaubt\n")
+                    io.print("wasm: the module wants more memory than allowed\n")
                     return false
                 }
                 (*m).mem_pages = mi2
@@ -801,21 +706,16 @@ fn module_load(m: *mut Modul, p: u64, len: usize) -> bool {
         } else if sid == 11 as u8 {
             data_read(m, &l)
         }
-        // Sektion 0 (custom) und alles Unbekannte: ueberspringen. Bei
-        // einem Rust-Modul sind das ueber zwei Megaoktette Debug-Info.
         l.at = sende
     }
-    if l.fehler || !(*m).ok {
-        io.print("wasm: das Modul ließ sich nicht lesen\n")
+    if l.failure || !(*m).ok {
+        io.print("wasm: the module could not be read\n")
         return false
     }
     return true
 }
 
-// Den linearen Speicher anlegen. Getrennt vom Laden, weil `data` ihn
-// schon braucht -- er wird angelegt, sobald die memory-Sektion durch
-// ist. Hier ist der Fall "gar keine memory-Sektion" abgedeckt.
-fn mem_create(m: *mut Modul) -> bool {
+fn mem_create(m: *mut Module) -> bool {
     if (*m).mem != 0 {
         return true
     }
@@ -826,7 +726,7 @@ fn mem_create(m: *mut Modul) -> bool {
     let n: usize = seiten * PAGE_SIZE
     let p: u64 = rt.heap_alloc(n)
     if p == 0 {
-        io.print("wasm: kein Speicher für den linearen Speicher des Moduls\n")
+        io.print("wasm: no memory for the module's linear memory\n")
         return false
     }
     rt.mem_set(p, 0 as u8, n)
@@ -838,29 +738,11 @@ fn mem_create(m: *mut Modul) -> bool {
 // ====================================================================
 //                        DIE AUSFUEHRUNG
 // ====================================================================
-//
-// Eine Stapelmaschine. WASM-Werte sind hier durchweg `u64` -- i32 liegt
-// in den unteren 32 Bit, f32 als Bitmuster in den unteren 32, f64 als
-// Bitmuster in allen 64. Das ist die Darstellung, die wasm3 auch waehlt:
-// ein Slot pro Wert, der Typ steckt im Befehl und nicht im Wert.
-//
-// WARUM KEINE TYPPRUEFUNG ZUR LAUFZEIT. Ein gueltiges WASM-Modul ist
-// statisch typisiert -- der Uebersetzer, der es erzeugt hat, hat das
-// schon garantiert. Dieser Deuter prueft die FORM (Sektionen, Grenzen,
-// Speicherzugriffe), nicht die Typen. Ein von Hand verbogenes Modul kann
-// ihn damit zu Unsinn bringen; es kann ihn NICHT aus dem linearen
-// Speicher herausbringen, und das ist die Grenze, die zaehlt.
 
 struct Label {
-    // Wohin `br` springt: bei block/if hinter das `end`, bei loop
-    // zurueck zum Anfang.
-    ziel: usize,
-    // Die Stapelhoehe, auf die beim Sprung zurueckgeschnitten wird.
+    target: usize,
     sp: usize,
-    // Wie viele Werte der Block liefert (0 oder 1 -- Mehrfachergebnisse
-    // braucht preview1 nicht).
     nres: usize,
-    // true = loop (Sprung geht an den Anfang, liefert nichts)
     schleife: bool,
 }
 
@@ -877,34 +759,17 @@ struct Frame {
 }
 
 // ------------------------------------------------- Der Sprungspeicher
-//
-// WARUM ES IHN GIBT -- eine Messung. Ohne ihn hat der Deuter fuer
-// `prim.wasm` (Primzahlen unter 200000) folgendes getan:
-//
 //     befehle=67284765  blockscans=900585  scanoktette=51472015
-//
-// 900 585 Mal wurde nach dem `end` eines Blocks gesucht, und dabei
-// wurden 51,5 MILLIONEN Oktette Bytecode ueberflogen -- fuer eine
-// Schleife, deren Rumpf immer derselbe ist und immer an derselben
-// Stelle endet. Das war der Grund, warum der Deuter 212x langsamer war
-// als nativ statt der ~11x, die wasm3 misst: nicht die Deutung der
-// Befehle war teuer, sondern das wiederholte SUCHEN.
-//
-// Die Abhilfe ist ein direkt adressierter Zwischenspeicher: die
-// Position des Blockbefehls ist der Schluessel, Ende und else-Zweig
-// sind der Wert. Ein Block hat in einem gegebenen Modul immer dasselbe
-// Ende -- der Eintrag altert also nie und braucht keine Verdraengung
-// ausser der Kollision.
 const SPRUNG_N: usize = 8192
 
 struct Sprung {
-    schluessel: usize,   // Position + 1, damit 0 "leer" heisst
+    key: usize,
     ende: usize,
     sonst: usize,
 }
 
 struct VM {
-    m: *mut Modul,
+    m: *mut Module,
     stack: [u64; 8192],
     sp: usize,
     locals: [u64; 2048],
@@ -912,7 +777,6 @@ struct VM {
     label: [Label; 1024],
     frames: [Frame; 512],
     nframe: usize,
-    // Argumente des Programms, fuer args_get/args_sizes_get
     argc: usize,
     argv_von: usize,
     argv0: u64,
@@ -921,9 +785,8 @@ struct VM {
     falle: bool,
     beendet: bool,
     code: i32,
-    // Zaehler, damit eine Endlosschleife nicht ewig laeuft
     schritte: u64,
-    spur: bool,
+    trace: bool,
     scans: u64,
     scan_oktette: u64,
     sprung: [Sprung; 8192],
@@ -948,18 +811,14 @@ fn pop(v: *mut VM) -> u64 {
 }
 
 // ------------------------------------------------- Speicherzugriffe
-//
-// HIER LIEGT DIE SICHERHEITSGRENZE DES GANZEN DEUTERS. Jeder Zugriff des
-// Gastes geht durch `mem_bound`. Wer hier eine Pruefung vergisst, gibt
-// einem fremden Modul den Adressraum des Deuters.
 fn mem_bound(v: *mut VM, at: u64, n: usize) -> bool {
-    let m: *mut Modul = (*v).m
-    let groesse: u64 = ((*m).mem_pages * PAGE_SIZE) as u64
-    if at > groesse {
+    let m: *mut Module = (*v).m
+    let size: u64 = ((*m).mem_pages * PAGE_SIZE) as u64
+    if at > size {
         (*v).falle = true
         return false
     }
-    if at + n as u64 > groesse {
+    if at + n as u64 > size {
         (*v).falle = true
         return false
     }
@@ -1027,22 +886,6 @@ fn g_st64(v: *mut VM, at: u64, x: u64) {
 // ====================================================================
 //                    WASI preview1 -- die Schleuse
 // ====================================================================
-//
-// HIER TRIFFT FREMDE SOFTWARE AUF OSUM. Ein WASM-Modul ruft
-// `wasi_snapshot_preview1::fd_write`, und was unten passiert, ist Osums
-// `write` mit der Nummer 1.
-//
-// DAS GEHT SO GLATT AUS EINEM GRUND, und der steht in Abschnitt 0 der
-// FREMDSOFTWARE.md: OSUMS SYSTEMAUFRUFE TRAGEN LINUX' NUMMERN (Runde
-// K4). `open` ist 2, `read` ist 0, `write` ist 1, `lseek` ist 8,
-// `close` ist 3. WASI ist nach POSIX modelliert, POSIX-Nummern sind
-// hier Linux-Nummern, also ist die Abbildung fast durchweg eins zu eins.
-// Der Teil, der Arbeit macht, ist nicht die Semantik -- es sind die
-// STRUKTUREN: WASI reicht Zeiger IN DEN LINEAREN SPEICHER DES GASTES,
-// und die muessen ent- und wieder eingepackt werden.
-//
-// FEHLERNUMMERN: WASI hat eigene (errno), sie stimmen NICHT mit Linux'
-// ueberein. 0 = Erfolg, 8 = EBADF, 28 = EINVAL, 44 = ENOENT, 76 = ENOTCAPABLE.
 const E_OK: u64 = 0
 const E_BADF: u64 = 8
 const E_INVAL: u64 = 28
@@ -1058,10 +901,6 @@ const SYS_LSEEK: i64 = 8
 const SYS_GETRANDOM: i64 = 318
 const SYS_CLOCK_GETTIME: i64 = 228
 
-// Ein iovec des Gastes: zwei u32 (Zeiger, Laenge) -- WASM ist 32-bittig,
-// also ist ein iovec acht Oktette und nicht sechzehn wie auf x86-64.
-// DAS IST DER ERSTE FALLSTRICK DIESER RUNDE: wer hier `ld64` nimmt, weil
-// iovec auf dem Wirt so aussieht, liest Muell.
 fn iov_ptr(v: *mut VM, iov: u64, i: usize) -> u64 {
     return g_ld32(v, iov + (i * 8) as u64)
 }
@@ -1081,9 +920,6 @@ fn w_fd_write(v: *mut VM, fd: u64, iov: u64, n: usize, ret: u64) -> u64 {
             if !mem_bound(v, p, l) {
                 return E_INVAL
             }
-            // Osums `write`, Nummer 1, auf die Adresse IM GAST -- die
-            // liegt im Adressraum dieses Prozesses, also darf der Kern
-            // sie lesen.
             let w: i64 = syscall(SYS_WRITE, fd as i64,
                 ((*(*v).m).mem + p) as i64, l as i64, 0, 0, 0)
             if w < 0 {
@@ -1115,7 +951,6 @@ fn w_fd_read(v: *mut VM, fd: u64, iov: u64, n: usize, ret: u64) -> u64 {
             }
             int = int + r as usize
             if r as usize < l {
-                // kurz gelesen: Dateiende oder Zeilenende
                 i = n
             }
         }
@@ -1125,9 +960,6 @@ fn w_fd_read(v: *mut VM, fd: u64, iov: u64, n: usize, ret: u64) -> u64 {
     return E_OK
 }
 
-// fd_seek(fd, offset:i64, whence:u8, newoffset_ptr) -> errno
-// WASI' whence: 0 = SET, 1 = CUR, 2 = END. Linux' lseek: 0, 1, 2.
-// Gleiche Zahlen, kein Umrechnen -- aber geprueft, nicht angenommen.
 fn w_fd_seek(v: *mut VM, fd: u64, off: u64, whence: u64, ret: u64) -> u64 {
     if whence > 2 {
         return E_INVAL
@@ -1141,13 +973,6 @@ fn w_fd_seek(v: *mut VM, fd: u64, off: u64, whence: u64, ret: u64) -> u64 {
     return E_OK
 }
 
-// fd_fdstat_get(fd, buf) -> errno
-// Die Struktur ist 24 Oktette: fs_filetype u8, 3 Fuellung, fs_flags u16,
-// 2 Fuellung, fs_rights_base u64, fs_rights_inheriting u64.
-//
-// WARUM DAS NOETIG IST, obwohl es nichts tut: Rusts Standardbibliothek
-// fragt beim ERSTEN `println!` danach, ob fd 1 ein Terminal ist. Ohne
-// eine Antwort bricht sie ab, bevor irgendetwas erscheint.
 const FT_UNKNOWN: u64 = 0
 const FT_CHARACTER_DEVICE: u64 = 2
 const FT_DIRECTORY: u64 = 3
@@ -1169,24 +994,12 @@ fn w_fd_fdstat_get(v: *mut VM, fd: u64, buf: u64) -> u64 {
     g_st16(v, buf + 2, 0)
     g_st16(v, buf + 4, 0)          // fs_flags
     g_st16(v, buf + 6, 0)
-    // alle Rechte -- der Deuter macht keine Rechteverwaltung, die
-    // Grenze zieht Osums Dateisystem darunter.
     g_st64(v, buf + 8, 18446744073709551615)
     g_st64(v, buf + 16, 18446744073709551615)
     return E_OK
 }
 
 // fd_prestat_get(fd, buf) -> errno
-//
-// DIE FUNKTION, OHNE DIE FAST NICHTS STARTET. Ein WASI-Programm fragt
-// beim Start der Reihe nach die Deskriptoren ab 3 ab: "bist du ein
-// vorgeoeffnetes Verzeichnis, und wie heisst du?". Erst damit weiss es,
-// unter welchem Namen es sein Wurzelverzeichnis ansprechen darf.
-// Antwortet niemand, findet das Programm keinen Pfad -- und Rusts
-// `File::open` gibt dann NotFound zurueck, egal was da ist.
-//
-// Wir melden GENAU EINEN: fd 3 ist "/". Danach EBADF, was das Signal
-// "keine weiteren" ist.
 const PRESTAT_DIR: u64 = 0
 const ROOT_FD: u64 = 3
 const ROOT_LEN: usize = 1
@@ -1216,12 +1029,6 @@ fn w_fd_prestat_dir_name(v: *mut VM, fd: u64, p: u64, n: usize) -> u64 {
 
 // path_open(dirfd, dirflags, path, path_len, oflags, rights_base,
 //           rights_inheriting, fdflags, opened_fd_ptr) -> errno
-//
-// WASIs oflags: 1 = CREAT, 2 = DIRECTORY, 4 = EXCL, 8 = TRUNC.
-// Die Schreibrichtung steckt NICHT in oflags, sondern in den Rechten:
-// RIGHT_FD_WRITE ist Bit 6 (64). Das ist der zweite Fallstrick -- wer
-// nach O_WRONLY in oflags sucht, findet es nie und oeffnet alles
-// lesend.
 const O_RDONLY: i64 = 0
 const O_WRONLY: i64 = 1
 const O_RDWR: i64 = 2
@@ -1236,36 +1043,32 @@ fn w_path_open(v: *mut VM, path: u64, plen: usize, oflags: u64,
     if plen == 0 || plen > 1024 || !mem_bound(v, path, plen) {
         return E_INVAL
     }
-    // Der Pfad des Gastes ist NICHT nullterminiert -- WASI reicht
-    // Zeiger und Laenge. Osums `open` will eine C-Zeichenkette.
-    var puffer: [u8; 1088] = [0; 1088]
+    var buffer: [u8; 1088] = [0; 1088]
     var at: usize = 0
-    // relative Pfade an die Wurzel haengen, damit "datei.txt" unter
-    // "/datei.txt" landet und nicht ins Leere zeigt.
     if g_ld8(v, path) != 47 {
-        puffer[0] = 47 as u8
+        buffer[0] = 47 as u8
         at = 1
     }
     var i: usize = 0
     while i < plen {
-        puffer[at + i] = g_ld8(v, path + i as u64) as u8
+        buffer[at + i] = g_ld8(v, path + i as u64) as u8
         i = i + 1
     }
-    puffer[at + plen] = 0 as u8
+    buffer[at + plen] = 0 as u8
 
     var fl: i64 = O_RDONLY
-    let kann_schreiben: bool = rechte & RIGHT_FD_WRITE != 0
-    let kann_lesen: bool = rechte & RIGHT_FD_READ != 0
-    if kann_schreiben && kann_lesen {
+    let can_write: bool = rechte & RIGHT_FD_WRITE != 0
+    let can_read: bool = rechte & RIGHT_FD_READ != 0
+    if can_write && can_read {
         fl = O_RDWR
-    } else if kann_schreiben {
+    } else if can_write {
         fl = O_WRONLY
     }
     if oflags & 1 != 0 { fl = fl | O_CREAT }
     if oflags & 4 != 0 { fl = fl | O_EXCL }
     if oflags & 8 != 0 { fl = fl | O_TRUNC }
 
-    let fd: i64 = syscall(SYS_OPEN, (&puffer[0]) as i64, fl, 420, 0, 0, 0)
+    let fd: i64 = syscall(SYS_OPEN, (&buffer[0]) as i64, fl, 420, 0, 0, 0)
     if fd < 0 {
         return E_NOENT
     }
@@ -1275,8 +1078,6 @@ fn w_path_open(v: *mut VM, path: u64, plen: usize, oflags: u64,
 
 fn w_fd_close(v: *mut VM, fd: u64) -> u64 {
     if fd < 3 {
-        // die drei Standarddeskriptoren bleiben offen -- ein Gast, der
-        // sie schliesst, wuerde dem Deuter die Ausgabe wegnehmen.
         return E_OK
     }
     let r: i64 = syscall(SYS_CLOSE, fd as i64, 0, 0, 0, 0, 0)
@@ -1286,9 +1087,6 @@ fn w_fd_close(v: *mut VM, fd: u64) -> u64 {
     return E_OK
 }
 
-// clock_time_get(id, precision:u64, time_ptr) -> errno
-// WASI zaehlt in NANOSEKUNDEN seit der Epoche; Osums clock_gettime
-// liefert Sekunden und Nanosekunden getrennt.
 fn w_clock_time_get(v: *mut VM, id: u64, ret: u64) -> u64 {
     var ts: [i64; 2] = [0; 2]
     var welche: i64 = 0            // CLOCK_REALTIME
@@ -1308,9 +1106,7 @@ fn w_random_get(v: *mut VM, p: u64, n: usize) -> u64 {
     let r: i64 = syscall(SYS_GETRANDOM, ((*(*v).m).mem + p) as i64,
         n as i64, 0, 0, 0, 0)
     if r < 0 {
-        // Kein getrandom: lieber etwas Schwaches als ein Abbruch, aber
-        // die Zeile sagt es, damit niemand das fuer Zufall haelt.
-        io.print("wasm: WARNUNG random_get ohne Kern-Zufall\n")
+        io.print("wasm: WARNING random_get without kernel entropy\n")
         var i: usize = 0
         while i < n {
             g_st8(v, p + i as u64, (i * 37 + 11) as u64 & 255)
@@ -1320,9 +1116,6 @@ fn w_random_get(v: *mut VM, p: u64, n: usize) -> u64 {
     return E_OK
 }
 
-// args_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno
-// Die Argumente des Gastes sind die des Deuters ab Position 2:
-// `wasm datei.wasm a b c` heisst fuer das Modul `datei.wasm a b c`.
 fn w_args_sizes_get(v: *mut VM, c: u64, s: u64) -> u64 {
     var n: usize = 0
     var int: usize = 0
@@ -1338,59 +1131,46 @@ fn w_args_sizes_get(v: *mut VM, c: u64, s: u64) -> u64 {
     return E_OK
 }
 
-fn w_args_get(v: *mut VM, zeiger: u64, puffer: u64) -> u64 {
-    var schreib: u64 = puffer
+fn w_args_get(v: *mut VM, pointer: u64, buffer: u64) -> u64 {
+    var write_op: u64 = buffer
     var k: usize = 0
     var i: usize = (*v).argv_von
     while i < (*v).argc {
         let a: u64 = rt.arg_ptr((*v).start, i)
         let l: usize = rt.c_length(a)
-        g_st32(v, zeiger + (k * 4) as u64, schreib)
+        g_st32(v, pointer + (k * 4) as u64, write_op)
         var j: usize = 0
         while j < l {
-            g_st8(v, schreib + j as u64, rt.ld8(a, j) as u64)
+            g_st8(v, write_op + j as u64, rt.ld8(a, j) as u64)
             j = j + 1
         }
-        g_st8(v, schreib + l as u64, 0)
-        schreib = schreib + (l + 1) as u64
+        g_st8(v, write_op + l as u64, 0)
+        write_op = write_op + (l + 1) as u64
         k = k + 1
         i = i + 1
     }
     return E_OK
 }
 
-// environ: leer. Ein Programm, das eine Variable braucht, bekommt keine
-// -- das ist ehrlicher als eine erfundene.
 fn w_environ_sizes_get(v: *mut VM, c: u64, s: u64) -> u64 {
     g_st32(v, c, 0)
     g_st32(v, s, 0)
     return E_OK
 }
 
-// fd_filestat_get(fd, buf) -> errno
-// Die filestat-Struktur ist 64 Oktette: dev u64, ino u64, filetype u8
-// (+7 Fuellung), nlink u64, size u64, atim u64, mtim u64, ctim u64.
-// Rusts `read_to_string` fragt damit die GROESSE ab, um den Puffer in
-// einem Zug richtig zu waehlen -- ohne Antwort liest es in Stuecken
-// weiter, mit falscher Antwort schneidet es ab.
-//
-// Die Groesse holen wir ehrlich: mit `lseek` ans Ende und zurueck.
-// Osum hat `fstat` (Nummer 5), aber seine Strukturform muesste hier
-// nachgebaut werden -- zwei `lseek` sind kuerzer und benutzen nur, was
-// schon gemessen ist.
 fn w_fd_filestat_get(v: *mut VM, fd: u64, buf: u64) -> u64 {
     if !mem_bound(v, buf, 64) {
         return E_INVAL
     }
-    let jetzt: i64 = syscall(SYS_LSEEK, fd as i64, 0, 1, 0, 0, 0)
-    if jetzt < 0 {
+    let now: i64 = syscall(SYS_LSEEK, fd as i64, 0, 1, 0, 0, 0)
+    if now < 0 {
         return E_BADF
     }
     let ende: i64 = syscall(SYS_LSEEK, fd as i64, 0, 2, 0, 0, 0)
-    syscall(SYS_LSEEK, fd as i64, jetzt, 0, 0, 0, 0)
-    var groesse: u64 = 0
+    syscall(SYS_LSEEK, fd as i64, now, 0, 0, 0, 0)
+    var size: u64 = 0
     if ende > 0 {
-        groesse = ende as u64
+        size = ende as u64
     }
     var i: usize = 0
     while i < 64 {
@@ -1403,53 +1183,38 @@ fn w_fd_filestat_get(v: *mut VM, fd: u64, buf: u64) -> u64 {
     }
     g_st8(v, buf + 16, art)
     g_st64(v, buf + 24, 1)         // nlink
-    g_st64(v, buf + 32, groesse)
+    g_st64(v, buf + 32, size)
     return E_OK
 }
 
-// Einen Gastpfad in eine C-Zeichenkette holen. WASI reicht Zeiger UND
-// Laenge, Osums Syscalls wollen eine Null am Ende -- diese Umpackung
-// braucht jede Pfadfunktion, also steht sie einmal hier.
-// Liefert die Laenge oder 0, wenn der Pfad nicht taugt.
-fn path_get(v: *mut VM, path: u64, plen: usize, ziel: u64) -> usize {
+fn path_get(v: *mut VM, path: u64, plen: usize, target: u64) -> usize {
     if plen == 0 || plen > 1024 || !mem_bound(v, path, plen) {
         return 0
     }
     var at: usize = 0
     if g_ld8(v, path) != 47 {
-        rt.st8(ziel, 0, 47 as u8)
+        rt.st8(target, 0, 47 as u8)
         at = 1
     }
     var i: usize = 0
     while i < plen {
-        rt.st8(ziel, at + i, g_ld8(v, path + i as u64) as u8)
+        rt.st8(target, at + i, g_ld8(v, path + i as u64) as u8)
         i = i + 1
     }
-    rt.st8(ziel, at + plen, 0 as u8)
+    rt.st8(target, at + plen, 0 as u8)
     return at + plen
 }
 
 // path_filestat_get(dirfd, flags, path, path_len, buf) -> errno
-//
-// DIE FUNKTION, AN DER SQLITE HING. Vor dem Oeffnen fragt SQLites
-// VFS, ob die Datei existiert und wie gross sie ist; ohne Antwort
-// endet das in "unable to open database file" -- eine Meldung, die
-// nicht verraet, dass ein STAT und nicht das OPEN gefehlt hat.
-// Gefunden mit der Spur (`wasm -s`), die genau darum eingebaut wurde.
-//
-// Umgesetzt ueber `open` + `lseek` statt `stat`: Osum hat `stat`
-// (Nummer 4), aber dessen Strukturform muesste hier nachgebaut werden;
-// oeffnen, ans Ende springen, schliessen benutzt nur, was schon
-// gemessen ist. Der Preis sind drei Syscalls statt einem.
 fn w_path_filestat_get(v: *mut VM, path: u64, plen: usize, buf: u64) -> u64 {
     if !mem_bound(v, buf, 64) {
         return E_INVAL
     }
-    var puffer: [u8; 1088] = [0; 1088]
-    if path_get(v, path, plen, (&puffer[0]) as u64) == 0 {
+    var buffer: [u8; 1088] = [0; 1088]
+    if path_get(v, path, plen, (&buffer[0]) as u64) == 0 {
         return E_INVAL
     }
-    let fd: i64 = syscall(SYS_OPEN, (&puffer[0]) as i64, O_RDONLY, 0, 0, 0, 0)
+    let fd: i64 = syscall(SYS_OPEN, (&buffer[0]) as i64, O_RDONLY, 0, 0, 0, 0)
     if fd < 0 {
         return E_NOENT
     }
@@ -1474,11 +1239,11 @@ fn w_path_filestat_get(v: *mut VM, path: u64, plen: usize, buf: u64) -> u64 {
 const SYS_UNLINK: i64 = 87
 
 fn w_path_unlink(v: *mut VM, path: u64, plen: usize) -> u64 {
-    var puffer: [u8; 1088] = [0; 1088]
-    if path_get(v, path, plen, (&puffer[0]) as u64) == 0 {
+    var buffer: [u8; 1088] = [0; 1088]
+    if path_get(v, path, plen, (&buffer[0]) as u64) == 0 {
         return E_INVAL
     }
-    let r: i64 = syscall(SYS_UNLINK, (&puffer[0]) as i64, 0, 0, 0, 0, 0)
+    let r: i64 = syscall(SYS_UNLINK, (&buffer[0]) as i64, 0, 0, 0, 0, 0)
     if r < 0 {
         return E_NOENT
     }
@@ -1486,19 +1251,14 @@ fn w_path_unlink(v: *mut VM, path: u64, plen: usize) -> u64 {
 }
 
 // path_remove_directory(dirfd, path, path_len) -> errno
-//
-// Die Gegenseite zu `path_create_directory`: SQLite gibt die Sperre
-// frei, indem es das `.lock`-Verzeichnis wieder entfernt. Fehlt diese
-// Funktion, bleibt die Sperre nach dem ERSTEN Lauf liegen und jeder
-// weitere endet mit "database is locked" -- gemessen, genau so.
 const SYS_RMDIR: i64 = 84
 
 fn w_path_rmdir(v: *mut VM, path: u64, plen: usize) -> u64 {
-    var puffer: [u8; 1088] = [0; 1088]
-    if path_get(v, path, plen, (&puffer[0]) as u64) == 0 {
+    var buffer: [u8; 1088] = [0; 1088]
+    if path_get(v, path, plen, (&buffer[0]) as u64) == 0 {
         return E_INVAL
     }
-    let r: i64 = syscall(SYS_RMDIR, (&puffer[0]) as i64, 0, 0, 0, 0, 0)
+    let r: i64 = syscall(SYS_RMDIR, (&buffer[0]) as i64, 0, 0, 0, 0, 0)
     if r < 0 {
         return E_NOENT
     }
@@ -1512,21 +1272,12 @@ const E_EXIST: u64 = 20
 const LINUX_EEXIST: i64 = 17
 
 fn w_path_mkdir(v: *mut VM, path: u64, plen: usize) -> u64 {
-    var puffer: [u8; 1088] = [0; 1088]
-    if path_get(v, path, plen, (&puffer[0]) as u64) == 0 {
+    var buffer: [u8; 1088] = [0; 1088]
+    if path_get(v, path, plen, (&buffer[0]) as u64) == 0 {
         return E_INVAL
     }
-    let r: i64 = syscall(SYS_MKDIR, (&puffer[0]) as i64, 493, 0, 0, 0, 0)
+    let r: i64 = syscall(SYS_MKDIR, (&buffer[0]) as i64, 493, 0, 0, 0, 0)
     if r < 0 {
-        // "GIBT ES SCHON" IST KEIN FEHLER WIE JEDER ANDERE, und das ist
-        // hier keine Feinheit, sondern der Unterschied zwischen einer
-        // laufenden und einer toten Datenbank: SQLites Standard-VFS
-        // sperrt eine Datei, indem es ein VERZEICHNIS `<datei>.lock`
-        // anlegt. Bleibt so ein Verzeichnis von einem abgebrochenen
-        // Lauf liegen, kommt beim naechsten Mal EEXIST -- und wer das
-        // pauschal als EINVAL zurueckgibt, bekommt von SQLite ein
-        // "disk I/O error" und findet nie heraus, warum.
-        // Osum meldet Linux' EEXIST = 17, WASI nennt es 20.
         if r == 0 - LINUX_EEXIST {
             return E_EXIST
         }
@@ -1538,23 +1289,6 @@ fn w_path_mkdir(v: *mut VM, path: u64, plen: usize) -> u64 {
 // ==================================================================
 //        RUNDE SCHLEUSE-2: die nachgezogenen WASI-Funktionen
 // ==================================================================
-//
-// SCHLEUSE hatte 28 von 46. Von den 18 fehlenden haben SIEBEN einen
-// echten Osum-Syscall hinter sich -- die werden hier nachgezogen. Der
-// Rest bleibt ehrlich bei ENOSYS: `fd_pread`/`fd_pwrite`,
-// `fd_allocate` und `fd_filestat_set_size` (kein ftruncate) und die
-// vier `sock_*` (die brauchen einen Deskriptorweg fuer Netz, den der
-// Deuter nicht hat).
-//
-// RUNDE WASM-MERGE, NACHTRAG: die Begruendung fuer `fd_pread`/
-// `fd_pwrite` war "Osum hat kein pread/pwrite". DAS STIMMT NICHT MEHR.
-// Seit der Runde LAUFZEIT stehen sie in kernel/sys.fi als
-// SYS_PREAD64 = 17 und SYS_PWRITE64 = 18 (dort Zeile 385 f., behandelt
-// ab Zeile 2216). Es fehlt also nur noch die Verdrahtung hier -- und
-// genau diese beiden braucht SQLite, sobald die Datenbank groesser
-// wird als der Seitenpuffer. Das ist der naechste sinnvolle Schritt
-// des WASM-Pfades, und er ist klein.
-//
 // Belegt in kernel/sys.fi: SYS_RENAME 82, SYS_LINK 86, SYS_SYMLINK 88,
 // SYS_READLINK 89, SYS_UTIMENSAT 280, SYS_GETDENTS64 217, SYS_DUP2 33.
 const SYS_RENAME2: i64 = 82
@@ -1645,9 +1379,6 @@ fn w_path_readlink(v: *mut VM, pp: u64, plen: usize, buf: u64,
     return E_OK
 }
 
-// path_filestat_set_times / fd_filestat_set_times ueber utimensat.
-// Beide reichen die Zeiten nur durch; WASI zaehlt in Nanosekunden,
-// utimensat nimmt zwei timespec (Sekunden, Nanosekunden).
 fn w_path_utimes(v: *mut VM, pp: u64, plen: usize, atim: u64, mtim: u64) -> u64 {
     var a: [u8; 1088] = [0; 1088]
     if path_get(v, pp, plen, (&a[0]) as u64) == 0 {
@@ -1666,7 +1397,6 @@ fn w_path_utimes(v: *mut VM, pp: u64, plen: usize, atim: u64, mtim: u64) -> u64 
     return E_OK
 }
 
-// fd_renumber(von, nach) -- dup2.
 fn w_fd_renumber(v: *mut VM, von: u64, move_to: u64) -> u64 {
     let r: i64 = syscall(SYS_DUP22, von as i64, move_to as i64, 0, 0, 0, 0)
     if r < 0 {
@@ -1676,10 +1406,6 @@ fn w_fd_renumber(v: *mut VM, von: u64, move_to: u64) -> u64 {
 }
 
 // fd_readdir(fd, puffer, puffer_len, cookie, gelesen_ptr)
-//
-// WASI will je Eintrag einen Kopf aus 24 Oktetten (next-cookie 8,
-// inode 8, Namenslaenge 4, Typ 1, Fuellung 3) und dahinter den Namen.
-// Linux' getdents64 liefert einen anderen Satz -- hier wird umgesetzt.
 fn w_fd_readdir(v: *mut VM, fd: u64, buf: u64, blen: usize,
                 cookie: u64, ret: u64) -> u64 {
     var roh: [u8; 4096] = [0; 4096]
@@ -1738,12 +1464,7 @@ fn w_fd_readdir(v: *mut VM, fd: u64, buf: u64, blen: usize,
 }
 
 // ---------------------------------------------------- der Verteiler
-//
-// Eine WASI-Funktion nimmt ihre Argumente vom Stapel (in umgekehrter
-// Reihenfolge) und legt genau einen Wert zurueck: die Fehlernummer.
-// `proc_exit` ist die Ausnahme -- sie legt nichts zurueck und beendet.
 fn wasi_rufen(v: *mut VM, nr: i32, npar: usize, nres: usize) {
-    // Argumente einsammeln: der letzte Parameter liegt oben.
     var a: [u64; 16] = [0; 16]
     var i: usize = npar
     while i > 0 {
@@ -1809,10 +1530,6 @@ fn wasi_rufen(v: *mut VM, nr: i32, npar: usize, nres: usize) {
     } else if nr == W_PATH_REMOVE_DIRECTORY {
         r = w_path_rmdir(v, a[1], a[2] as usize)
     } else if nr == W_FD_FILESTAT_SET_SIZE {
-        // SQLite kuerzt die Datei beim Aufraeumen. Ohne ftruncate im
-        // System ist das ein stilles Ja -- die Datei bleibt dann laenger
-        // als noetig, was SQLite vertraegt (es liest nach Kopfdaten,
-        // nicht nach Dateilaenge).
         r = E_OK
     } else if nr == W_POLL_ONEOFF {
         r = E_OK
@@ -1836,15 +1553,9 @@ fn wasi_rufen(v: *mut VM, nr: i32, npar: usize, nres: usize) {
     } else if nr == W_FD_READDIR {
         r = w_fd_readdir(v, a[0], a[1], a[2] as usize, a[3], a[4])
     } else if nr == W_UNBEKANNT {
-        // Ein Import, den wir nicht kennen. Das Programm bekommt eine
-        // ehrliche Absage statt eines stillen Nulls.
         r = E_NOSYS
     }
-    // SPUR: wer eine Absage bekommt, wird genannt. Ohne das sucht man
-    // bei einem Programm wie SQLite, das zwanzig Funktionen ruft, im
-    // Dunkeln -- "unable to open database file" sagt nicht, WELCHER
-    // Ruf gefehlt hat.
-    if (*v).spur && r != E_OK {
+    if (*v).trace && r != E_OK {
         io.print("wasm: WASI nr=")
         num_out(nr as u64)
         io.print(" -> errno=")
@@ -1856,39 +1567,18 @@ fn wasi_rufen(v: *mut VM, nr: i32, npar: usize, nres: usize) {
     }
 }
 
-// ====================================================================
-//                   Der Befehlszaehler und die Bloecke
-// ====================================================================
-//
-// WASM hat keine Sprungziele als Zahlen, sondern GESCHACHTELTE BLOECKE.
-// `br 0` heisst "verlasse den innersten Block", `br 2` heisst "zwei
-// Ebenen hinaus". Damit ein Sprung weiss, WOHIN, muss der Deuter das
-// passende `end` finden -- und dazu muss er ueber den Bytecode
-// hinweglesen koennen, ohne ihn auszufuehren.
-//
-// `block_ende` ist genau das: es zaehlt Bloecke auf und ab und liefert
-// die Stelle hinter dem zugehoerigen `end`. DAS IST DER TEUERSTE TEIL
-// EINES EINFACHEN DEUTERS -- wasm3 loest es, indem es den Code einmal
-// vorcodiert. Wir zahlen den Preis bei jedem Sprung; dafuer ist der
-// Deuter halb so gross. Der gemessene Faktor am Ende sagt, was das
-// gekostet hat.
-
-// Wie viele unmittelbare Oktette hinter einem Befehl stehen, damit
-// `block_ende` sie ueberspringen kann, ohne sie zu deuten.
 fn immediate_ueberspringen(l: *mut Leser, op: u8) {
     if op == 2 as u8 || op == 3 as u8 || op == 4 as u8 {
         // block/loop/if: ein Blocktyp
         let b: u8 = u8_read(l)
         if b != T_EMPTY && b != T_I32 && b != T_I64 && b != T_F32
             && b != T_F64 && b != T_FUNCREF {
-            // ein Typindex als sleb -- das Oktett gehoert schon dazu
             (*l).at = (*l).at - 1
             sleb(l)
         }
     } else if op == 12 as u8 || op == 13 as u8 {
         uleb(l)                    // br, br_if
     } else if op == 14 as u8 {
-        // br_table: eine Liste und der Auffangwert
         let n: usize = uleb(l) as usize
         var i: usize = 0
         while i <= n {
@@ -1936,10 +1626,7 @@ fn immediate_ueberspringen(l: *mut Leser, op: u8) {
     }
 }
 
-// Die Stelle HINTER dem `end`, das zu dem Block bei `von` gehoert.
-// `von` zeigt hinter das block/loop/if-Opcode und seinen Blocktyp.
-// Liefert zusaetzlich, wo ein `else` steht (0 wenn keins).
-fn block_end(m: *mut Modul, von: usize, bis: usize, else_out: *mut usize)
+fn block_end(m: *mut Module, von: usize, bis: usize, else_out: *mut usize)
     -> usize {
     var l: Leser = leser_new((*m).p, bis)
     l.at = von
@@ -1947,7 +1634,7 @@ fn block_end(m: *mut Modul, von: usize, bis: usize, else_out: *mut usize)
     *else_out = 0
     while l.at < bis {
         let op: u8 = u8_read(&l)
-        if l.fehler {
+        if l.failure {
             return bis
         }
         if op == 2 as u8 || op == 3 as u8 || op == 4 as u8 {
@@ -1969,25 +1656,23 @@ fn block_end(m: *mut Modul, von: usize, bis: usize, else_out: *mut usize)
     return bis
 }
 
-// Das Ende eines Blocks, aus dem Zwischenspeicher oder frisch gesucht.
-fn block_end_fast(v: *mut VM, m: *mut Modul, von: usize, bis: usize,
+fn block_end_fast(v: *mut VM, m: *mut Module, von: usize, bis: usize,
     else_out: *mut usize) -> usize {
     let idx: usize = von % SPRUNG_N
-    if (*v).sprung[idx].schluessel == von + 1 {
+    if (*v).sprung[idx].key == von + 1 {
         *else_out = (*v).sprung[idx].sonst
         return (*v).sprung[idx].ende
     }
     (*v).scans = (*v).scans + 1
     let e: usize = block_end(m, von, bis, else_out)
     (*v).scan_oktette = (*v).scan_oktette + (e - von) as u64
-    (*v).sprung[idx].schluessel = von + 1
+    (*v).sprung[idx].key = von + 1
     (*v).sprung[idx].ende = e
     (*v).sprung[idx].sonst = *else_out
     return e
 }
 
-// Wie viele Ergebnisse ein Blocktyp liefert.
-fn blocktyp_nres(m: *mut Modul, b: u8) -> usize {
+fn blocktyp_nres(m: *mut Module, b: u8) -> usize {
     if b == T_EMPTY {
         return 0
     }
@@ -2002,9 +1687,6 @@ fn blocktyp_nres(m: *mut Modul, b: u8) -> usize {
 //                        Die Hauptschleife
 // ====================================================================
 
-// Vorzeichen ausdehnen: i32 -> i64, damit Vergleiche und Division
-// stimmen. Ein i32 liegt in den unteren 32 Bit; ist Bit 31 gesetzt,
-// muessen die oberen 32 Einsen werden.
 fn s32(x: u64) -> i64 {
     let v: u64 = x & 4294967295
     if v & 2147483648 != 0 {
@@ -2017,16 +1699,13 @@ fn u32v(x: u64) -> u64 {
     return x & 4294967295
 }
 
-// Ein Sprung um `tiefe` Ebenen hinaus.
 fn springen(v: *mut VM, f: *mut Frame, tiefe: usize) {
     if tiefe >= (*f).nlabel {
-        // ueber die Funktion hinaus = return
         (*f).ip = (*f).ende
         return
     }
     let li: usize = (*f).label_at + (*f).nlabel - 1 - tiefe
     let lab: Label = (*v).label[li]
-    // die Ergebnisse des Blocks retten
     var res: [u64; 8] = [0; 8]
     var i: usize = 0
     if !lab.schleife {
@@ -2035,7 +1714,6 @@ fn springen(v: *mut VM, f: *mut Frame, tiefe: usize) {
             i = i + 1
         }
     }
-    // den Stapel zurueckschneiden
     if (*v).sp > lab.sp {
         (*v).sp = lab.sp
     }
@@ -2046,22 +1724,15 @@ fn springen(v: *mut VM, f: *mut Frame, tiefe: usize) {
             i = i + 1
         }
     }
-    // Die Label OBERHALB des Sprungziels verwerfen. (Hier standen zwei
-    // Zuweisungen; die erste war falsch und wurde von der zweiten
-    // sofort ueberschrieben -- sie ist ersatzlos weg.)
     (*f).nlabel = li - (*f).label_at
     if lab.schleife {
-        // eine Schleife: der Sprung geht an ihren Anfang, und das Label
-        // BLEIBT stehen -- sonst endet die zweite Runde im Nichts.
         (*f).nlabel = (*f).nlabel + 1
     }
-    (*f).ip = lab.ziel
+    (*f).ip = lab.target
 }
 
-// Eine Funktion betreten: Rahmen anlegen, Parameter vom Stapel in die
-// Lokalen, Lokale auf null.
 fn eintreten(v: *mut VM, fi: usize) -> bool {
-    let m: *mut Modul = (*v).m
+    let m: *mut Module = (*v).m
     if fi >= (*m).nfunk {
         (*v).falle = true
         return false
@@ -2084,7 +1755,6 @@ fn eintreten(v: *mut VM, fi: usize) -> bool {
         return false
     }
     let basis: usize = (*v).nloc
-    // Parameter: der letzte liegt oben auf dem Stapel
     var i: usize = npar
     while i > 0 {
         i = i - 1
@@ -2109,13 +1779,7 @@ fn eintreten(v: *mut VM, fi: usize) -> bool {
         lab_at = (*v).frames[fr - 1].label_at + (*v).frames[fr - 1].nlabel
     }
     if lab_at >= 1024 {
-        // DIE GRENZE, DIE FEHLTE. Ohne sie schreibt eine tief
-        // geschachtelte Funktion hinter das Labelfeld -- und weil
-        // `frames` unmittelbar dahinter liegt, wird der Rahmenzeiger
-        // ueberschrieben statt ein Fehler gemeldet. Genau so ist
-        // SQLite abgestuerzt (Segmentation fault in `ausfuehren`),
-        // nicht an einem fehlenden Befehl.
-        io.print("wasm: zu viele Blöcke im Aufrufkeller\n")
+        io.print("wasm: too many blocks in the call stack\n")
         (*v).falle = true
         return false
     }
@@ -2127,8 +1791,6 @@ fn eintreten(v: *mut VM, fi: usize) -> bool {
     return true
 }
 
-// Eine Funktion verlassen: Ergebnisse retten, Stapel und Lokale
-// zurueckgeben.
 fn verlassen(v: *mut VM) {
     if (*v).nframe == 0 {
         return
@@ -2151,44 +1813,28 @@ fn verlassen(v: *mut VM) {
     }
 }
 
-const SCHRITT_GRENZE: u64 = 4000000000
+const STEP_LIMIT: u64 = 4000000000
 
 fn ausfuehren(v: *mut VM) -> i32 {
-    let m: *mut Modul = (*v).m
-    // DER LESER STEHT AUSSERHALB DER SCHLEIFE, und das ist keine
-    // Kosmetik, sondern die groesste einzelne Tempoquelle dieses
-    // Deuters. Bis hierher wurde er JE BEFEHL neu gebaut
-    // (`leser_new(...)` legt vier Felder an, die Schleife lief 67
-    // Millionen Mal) und danach weggeworfen -- gemessen 82 ns bzw. rund
-    // 245 Takte pro Befehl, wo ein einfacher Deuter bei 10-30 liegt.
-    // Jetzt wird nur noch fortgeschrieben, was sich wirklich aendert:
-    // `at` und `len`.
+    let m: *mut Module = (*v).m
     var l: Leser = leser_new((*m).p, 0)
     while (*v).nframe > 0 && !(*v).falle && !(*v).beendet {
         (*v).schritte = (*v).schritte + 1
-        if (*v).schritte > SCHRITT_GRENZE {
-            io.print("wasm: das Modul läuft zu lange, Abbruch\n")
+        if (*v).schritte > STEP_LIMIT {
+            io.print("wasm: the module runs too long, aborting\n")
             return 1
         }
         let fr: usize = (*v).nframe - 1
         l.len = (*v).frames[fr].ende
         l.at = (*v).frames[fr].ip
-        l.fehler = false
+        l.failure = false
         if l.at >= (*v).frames[fr].ende {
-            // das Ende der Funktion ist ein stilles `return`
             verlassen(v)
             continue
         }
         let op: u8 = u8_read(&l)
 
         // ------------------------------------ DIE HAEUFIGSTEN ZUERST
-        //
-        // Firn uebersetzt diese Kette in eine Folge von Vergleichen,
-        // nicht in eine Sprungtabelle -- ein Befehl, der weit hinten
-        // steht, kostet also alle Vergleiche davor. `local.get` und
-        // `i32.add` sind in echtem Code mit Abstand am haeufigsten und
-        // standen bei 32 bzw. weit hinten in der Zahlenwerkstatt.
-        // Diese fuenf Zeilen sind reine Reihenfolge, keine neue Logik.
         if op == 32 as u8 {                      // local.get
             let i0: usize = uleb(&l) as usize
             if i0 >= (*v).frames[fr].nlocals {
@@ -2215,7 +1861,7 @@ fn ausfuehren(v: *mut VM) -> i32 {
 
         // ---------------------------------------------- Kontrollfluss
         } else if op == 0 as u8 {                // unreachable
-            io.print("wasm: das Modul hat `unreachable` erreicht\n")
+            io.print("wasm: the module reached `unreachable`\n")
             (*v).falle = true
         } else if op == 1 as u8 {                // nop
             // nichts
@@ -2224,17 +1870,16 @@ fn ausfuehren(v: *mut VM) -> i32 {
             let nres: usize = blocktyp_nres(m, bt)
             let li: usize = (*v).frames[fr].label_at + (*v).frames[fr].nlabel
             if li >= 1024 {
-                io.print("wasm: zu viele verschachtelte Blöcke\n")
+                io.print("wasm: too many nested blocks\n")
                 (*v).falle = true
             } else {
                 var elsepos: usize = 0
                 if op == 3 as u8 {
-                    // loop: das Ziel ist der Anfang des Rumpfes
-                    (*v).label[li].ziel = l.at
+                    (*v).label[li].target = l.at
                     (*v).label[li].schleife = true
                     (*v).label[li].nres = 0
                 } else {
-                    (*v).label[li].ziel = block_end_fast(v, m, l.at,
+                    (*v).label[li].target = block_end_fast(v, m, l.at,
                         (*v).frames[fr].ende, &elsepos)
                     (*v).label[li].schleife = false
                     (*v).label[li].nres = nres
@@ -2252,16 +1897,15 @@ fn ausfuehren(v: *mut VM) -> i32 {
             let li2: usize = (*v).frames[fr].label_at
                 + (*v).frames[fr].nlabel
             if li2 >= 1024 {
-                io.print("wasm: zu viele verschachtelte Blöcke\n")
+                io.print("wasm: too many nested blocks\n")
                 (*v).falle = true
             } else {
-                (*v).label[li2].ziel = ende
+                (*v).label[li2].target = ende
                 (*v).label[li2].sp = (*v).sp
                 (*v).label[li2].nres = nres2
                 (*v).label[li2].schleife = false
                 (*v).frames[fr].nlabel = (*v).frames[fr].nlabel + 1
                 if u32v(c) == 0 {
-                    // falsch: in den else-Zweig oder hinter das end
                     if elsepos2 != 0 {
                         l.at = elsepos2
                     } else {
@@ -2274,12 +1918,10 @@ fn ausfuehren(v: *mut VM) -> i32 {
                 }
             }
         } else if op == 5 as u8 {                // else
-            // Wer hier ankommt, hat den then-Zweig zu Ende gelaufen und
-            // muss ueber den else-Zweig hinweg.
             if (*v).frames[fr].nlabel > 0 {
                 let li3: usize = (*v).frames[fr].label_at
                     + (*v).frames[fr].nlabel - 1
-                l.at = (*v).label[li3].ziel
+                l.at = (*v).label[li3].target
                 (*v).frames[fr].nlabel = (*v).frames[fr].nlabel - 1
             }
         } else if op == 11 as u8 {               // end
@@ -2306,23 +1948,23 @@ fn ausfuehren(v: *mut VM) -> i32 {
         } else if op == 14 as u8 {               // br_table
             let n: usize = uleb(&l) as usize
             let idx: u64 = u32v(pop(v))
-            var ziel: usize = 0
+            var target: usize = 0
             var i: usize = 0
             var gefunden: bool = false
             while i < n {
                 let d3: usize = uleb(&l) as usize
                 if i as u64 == idx {
-                    ziel = d3
+                    target = d3
                     gefunden = true
                 }
                 i = i + 1
             }
             let dflt: usize = uleb(&l) as usize
             if !gefunden {
-                ziel = dflt
+                target = dflt
             }
             (*v).frames[fr].ip = l.at
-            springen(v, &(*v).frames[fr], ziel)
+            springen(v, &(*v).frames[fr], target)
             continue
         } else if op == 15 as u8 {               // return
             (*v).frames[fr].ip = l.at
@@ -2332,7 +1974,7 @@ fn ausfuehren(v: *mut VM) -> i32 {
             let fi: usize = uleb(&l) as usize
             (*v).frames[fr].ip = l.at
             if fi >= (*m).nfunk {
-                io.print("wasm: Aufruf einer Funktion, die es nicht gibt\n")
+                io.print("wasm: call to a function that does not exist\n")
                 (*v).falle = true
             } else if (*m).funk[fi].importiert {
                 let t2: usize = (*m).funk[fi].typ
@@ -2348,12 +1990,12 @@ fn ausfuehren(v: *mut VM) -> i32 {
             let e: u64 = u32v(pop(v))
             (*v).frames[fr].ip = l.at
             if e as usize >= (*m).ntab {
-                io.print("wasm: indirekter Aufruf ausserhalb der Tabelle\n")
+                io.print("wasm: indirect call outside the table\n")
                 (*v).falle = true
             } else {
                 let fi2: usize = (*m).tab[e as usize] as usize
                 if fi2 >= (*m).nfunk {
-                    io.print("wasm: die Tabelle zeigt auf keine Funktion\n")
+                    io.print("wasm: the table entry points to no function\n")
                     (*v).falle = true
                 } else if (*m).funk[fi2].typ != ti {
                     io.print("wasm: indirekter Aufruf mit falschem Typ\n")
@@ -2428,8 +2070,6 @@ fn ausfuehren(v: *mut VM) -> i32 {
         // ------------------------------------------------- Speicher
         } else if op >= 40 as u8 && op <= 62 as u8 {
             uleb(&l)                             // Ausrichtung: uns egal,
-            // weil wir ohnehin oktettweise lesen. Genau deshalb ist
-            // dieser Deuter gegen unausgerichtete Zugriffe unempfindlich.
             let off: u64 = uleb(&l)
             if op <= 53 as u8 {
                 // Laden
@@ -2479,7 +2119,6 @@ fn ausfuehren(v: *mut VM) -> i32 {
                     push(v, g_ld32(v, adr))
                 }
             } else {
-                // Speichern: der Wert liegt oben, die Adresse darunter
                 let x4: u64 = pop(v)
                 let adr2: u64 = wadd(u32v(pop(v)), off)
                 if op == 54 as u8 {              // i32.store
@@ -2507,24 +2146,23 @@ fn ausfuehren(v: *mut VM) -> i32 {
             push(v, (*m).mem_pages as u64)
         } else if op == 64 as u8 {               // memory.grow
             uleb(&l)
-            let dazu: usize = u32v(pop(v)) as usize
+            let extra: usize = u32v(pop(v)) as usize
             let alt: usize = (*m).mem_pages
-            if dazu == 0 {
+            if extra == 0 {
                 push(v, alt as u64)
-            } else if alt + dazu > (*m).mem_max || alt + dazu > MAX_PAGES {
+            } else if alt + extra > (*m).mem_max || alt + extra > MAX_PAGES {
                 push(v, 4294967295)              // -1: geht nicht
             } else {
-                // Ein groesserer Block, umkopieren, den alten zurueck.
-                let neu: usize = alt + dazu
-                let p2: u64 = rt.heap_alloc(neu * PAGE_SIZE)
+                let fresh: usize = alt + extra
+                let p2: u64 = rt.heap_alloc(fresh * PAGE_SIZE)
                 if p2 == 0 {
                     push(v, 4294967295)
                 } else {
-                    rt.mem_set(p2, 0 as u8, neu * PAGE_SIZE)
+                    rt.mem_set(p2, 0 as u8, fresh * PAGE_SIZE)
                     rt.mem_copy(p2, (*m).mem, alt * PAGE_SIZE)
                     rt.heap_free((*m).mem, alt * PAGE_SIZE)
                     (*m).mem = p2
-                    (*m).mem_pages = neu
+                    (*m).mem_pages = fresh
                     push(v, alt as u64)
                 }
             }
@@ -2539,7 +2177,6 @@ fn ausfuehren(v: *mut VM) -> i32 {
         } else if op == 68 as u8 {               // f64.const
             push(v, u64_roh(&l))
         } else {
-            // alles Weitere in der Zahlenwerkstatt
             if !num_op(v, op, &l) {
                 io.print("wasm: unbekannter Befehl ")
                 num_out(op as u64)
@@ -2560,14 +2197,6 @@ fn ausfuehren(v: *mut VM) -> i32 {
 // ====================================================================
 //                        Die Zahlenwerkstatt
 // ====================================================================
-//
-// Alles ab 0x45: Vergleiche, Arithmetik, Umwandlungen. Ausgelagert,
-// damit die Hauptschleife lesbar bleibt.
-//
-// ZU DEN GLEITKOMMAZAHLEN. Firn hat `f32`/`f64`, und die Werte liegen
-// hier als BITMUSTER in einem u64. Umgerechnet wird mit
-// `__bitcast`-artigen Umwegen ueber den Speicher, weil das die einzige
-// Form ist, die der Uebersetzer in beide Richtungen sicher macht.
 
 fn num_out(x: u64) {
     var b: rt.Buf = rt.buf_new()
@@ -2576,7 +2205,6 @@ fn num_out(x: u64) {
     rt.buf_free(&b)
 }
 
-// Bitmuster <-> Gleitkomma, ueber den Speicher.
 fn bits_to_f64(x: u64) -> f64 {
     var s: [u64; 1] = [0; 1]
     s[0] = x
@@ -2607,7 +2235,6 @@ fn b2i(b: bool) -> u64 {
     return 0
 }
 
-// i32 rotieren -- WASM hat rotl/rotr, Firn nicht.
 fn rotl32(x: u64, n: u64) -> u64 {
     let k: u64 = n & 31
     if k == 0 { return x & 4294967295 }
@@ -2689,30 +2316,12 @@ fn ctz64(x: u64) -> u64 {
 }
 
 // ------------------------------------------------- UMLAUFENDES RECHNEN
-//
-// DER GROESSTE EINZELNE FALLSTRICK DIESER RUNDE, und er ist eine
-// Grundsatzfrage zwischen den beiden Sprachen:
-//
 //     WASM RECHNET UMLAUFEND. FIRN RECHNET GEPRUEFT.
-//
-// `i32.sub` von 0 und 1 ist in WASM 0xFFFFFFFF und voellig regulaer --
-// so zaehlt jede Schleife rueckwaerts, so rechnet jeder Hashwert. In
-// Firn ist dasselbe `0 - 1` ein ABBRUCH: "integer overflow in
-// 'u64 - u64'". Das ist in Firn richtig so und hier toedlich: das erste
-// echte Rust-Modul starb daran nach wenigen tausend Befehlen.
-//
-// Diese drei Funktionen sind die Uebersetzung zwischen beiden Welten.
-// Sie rechnen dasselbe wie WASM, ohne Firns Pruefung auszuloesen: die
-// Subtraktion wird zur Addition des Zweierkomplements, und das
-// Zweierkomplement ist eine Negation plus eins -- beides Operationen,
-// die nicht unterlaufen koennen.
-const ALLE_EINSEN: u64 = 18446744073709551615
+const ALL_ONES: u64 = 18446744073709551615
 
 fn wadd(a: u64, b: u64) -> u64 {
-    // a + b, umlaufend. Passt die Summe nicht, ist das Ergebnis genau
-    // das, was nach dem Abschneiden des 65. Bits uebrig bleibt.
-    if a > ALLE_EINSEN - b {
-        return a - (ALLE_EINSEN - b) - 1
+    if a > ALL_ONES - b {
+        return a - (ALL_ONES - b) - 1
     }
     return a + b
 }
@@ -2722,13 +2331,10 @@ fn wsub(a: u64, b: u64) -> u64 {
     if a >= b {
         return a - b
     }
-    return ALLE_EINSEN - (b - a) + 1
+    return ALL_ONES - (b - a) + 1
 }
 
 fn wmul(a: u64, b: u64) -> u64 {
-    // a * b, umlaufend. Ueber die vier 32-Bit-Haelften, damit kein
-    // Zwischenergebnis ueberlaeuft: die oberen Teilprodukte fallen
-    // ohnehin aus den unteren 64 Bit heraus.
     let a0: u64 = a & 4294967295
     let a1: u64 = a >> 32 as u32
     let b0: u64 = b & 4294967295
@@ -2883,7 +2489,7 @@ fn num_op(v: *mut VM, op: u8, l: *mut Leser) -> bool {
         let b: i64 = s32(pop(v))
         let a: i64 = s32(pop(v))
         if b == 0 {
-            io.print("wasm: Rest bei Division durch null\n")
+            io.print("wasm: remainder by zero\n")
             (*v).falle = true
         } else {
             push(v, (a % b) as u64 & 4294967295)
@@ -2892,7 +2498,7 @@ fn num_op(v: *mut VM, op: u8, l: *mut Leser) -> bool {
         let b: u64 = u32v(pop(v))
         let a: u64 = u32v(pop(v))
         if b == 0 {
-            io.print("wasm: Rest bei Division durch null\n")
+            io.print("wasm: remainder by zero\n")
             (*v).falle = true
         } else {
             push(v, a % b)
@@ -2960,7 +2566,7 @@ fn num_op(v: *mut VM, op: u8, l: *mut Leser) -> bool {
         let b: i64 = pop(v) as i64
         let a: i64 = pop(v) as i64
         if b == 0 {
-            io.print("wasm: Rest bei Division durch null\n")
+            io.print("wasm: remainder by zero\n")
             (*v).falle = true
         } else {
             push(v, (a % b) as u64)
@@ -2969,7 +2575,7 @@ fn num_op(v: *mut VM, op: u8, l: *mut Leser) -> bool {
         let b: u64 = pop(v)
         let a: u64 = pop(v)
         if b == 0 {
-            io.print("wasm: Rest bei Division durch null\n")
+            io.print("wasm: remainder by zero\n")
             (*v).falle = true
         } else {
             push(v, a % b)
@@ -3007,7 +2613,7 @@ fn num_op(v: *mut VM, op: u8, l: *mut Leser) -> bool {
     } else if op == 140 as u8 {                  // f32.neg
         push(v, f32_to_bits(0.0 as f32 - bits_to_f32(pop(v))))
     } else if op == 145 as u8 {                  // f32.sqrt
-        push(v, f32_to_bits(wurzel32(bits_to_f32(pop(v)))))
+        push(v, f32_to_bits(sqrt32(bits_to_f32(pop(v)))))
     } else if op == 146 as u8 {                  // f32.add
         let b: f32 = bits_to_f32(pop(v))
         push(v, f32_to_bits(bits_to_f32(pop(v)) + b))
@@ -3037,7 +2643,7 @@ fn num_op(v: *mut VM, op: u8, l: *mut Leser) -> bool {
     } else if op == 154 as u8 {                  // f64.neg
         push(v, f64_to_bits(0.0 - bits_to_f64(pop(v))))
     } else if op == 159 as u8 {                  // f64.sqrt
-        push(v, f64_to_bits(wurzel64(bits_to_f64(pop(v)))))
+        push(v, f64_to_bits(sqrt64(bits_to_f64(pop(v)))))
     } else if op == 160 as u8 {                  // f64.add
         let b: f64 = bits_to_f64(pop(v))
         push(v, f64_to_bits(bits_to_f64(pop(v)) + b))
@@ -3130,7 +2736,6 @@ fn num_op(v: *mut VM, op: u8, l: *mut Leser) -> bool {
             let q: u64 = u32v(pop(v))
             let z: u64 = u32v(pop(v))
             if mem_bound(v, z, n as usize) && mem_bound(v, q, n as usize) {
-                // ueberlappend richtig: von hinten, wenn das Ziel hoeher liegt
                 if z > q {
                     var i: u64 = n
                     while i > 0 {
@@ -3148,12 +2753,12 @@ fn num_op(v: *mut VM, op: u8, l: *mut Leser) -> bool {
         } else if sub == 11 {                    // memory.fill
             ueberspringen(l, 1)
             let n2: u64 = u32v(pop(v))
-            let wert: u64 = pop(v) & 255
+            let value: u64 = pop(v) & 255
             let z2: u64 = u32v(pop(v))
             if mem_bound(v, z2, n2 as usize) {
                 var i3: u64 = 0
                 while i3 < n2 {
-                    g_st8(v, z2 + i3, wert)
+                    g_st8(v, z2 + i3, value)
                     i3 = i3 + 1
                 }
             }
@@ -3175,10 +2780,7 @@ fn num_op(v: *mut VM, op: u8, l: *mut Leser) -> bool {
     return true
 }
 
-// Quadratwurzel nach Newton. Firn hat kein `sqrt` in `std`, und WASM
-// hat `f64.sqrt` als Kernbefehl -- also hier, mit zwanzig Schritten,
-// die fuer doppelte Genauigkeit reichen.
-fn wurzel64(x: f64) -> f64 {
+fn sqrt64(x: f64) -> f64 {
     if x <= 0.0 {
         return 0.0
     }
@@ -3191,18 +2793,15 @@ fn wurzel64(x: f64) -> f64 {
     return r
 }
 
-fn wurzel32(x: f32) -> f32 {
-    return wurzel64(x as f64) as f32
+fn sqrt32(x: f32) -> f32 {
+    return sqrt64(x as f64) as f32
 }
 
 // ====================================================================
 //                            Das Programm
 // ====================================================================
 
-// Der Schalter `WASMSPUR=1` als erstes Argument: `wasm -s modul.wasm`.
-// Ein Umgebungsvariablen-Weg waere schoener, aber Osums `exec` reicht
-// keine Umgebung durch -- ein Argument ist das, was sicher ankommt.
-fn spur_an(start: u64, argc: usize) -> bool {
+fn trace_on(start: u64, argc: usize) -> bool {
     var i: usize = 1
     while i < argc {
         let a: u64 = rt.arg_ptr(start, i)
@@ -3219,59 +2818,54 @@ fn main(start: u64) -> i32 {
     let argc: usize = rt.arg_count(start)
     if argc < 2 {
         io.print("Aufruf: wasm <datei.wasm> [argumente...]\n")
-        io.print("  führt ein WebAssembly-Modul aus (WASI preview1).\n")
+        io.print("  runs a WebAssembly module (WASI preview1).\n")
         return 2
     }
-    var pfad: u64 = 0
-    var pfad_i: usize = 0
+    var path: u64 = 0
+    var path_i: usize = 0
     var pi: usize = 1
     while pi < argc {
         let a0: u64 = rt.arg_ptr(start, pi)
         if !(rt.c_length(a0) == 2 && rt.ld8(a0, 0) == 45 as u8
             && rt.ld8(a0, 1) == 115 as u8) {
-            pfad = a0
-            pfad_i = pi
+            path = a0
+            path_i = pi
             pi = argc
         }
         pi = pi + 1
     }
-    if pfad == 0 {
+    if path == 0 {
         io.print("wasm: keine Moduldatei genannt\n")
         return 2
     }
 
-    var datei: rt.Buf = rt.buf_new()
-    if !rt.read_file(pfad, &datei) {
-        io.print("wasm: die Datei ließ sich nicht lesen\n")
+    var file: rt.Buf = rt.buf_new()
+    if !rt.read_file(path, &file) {
+        io.print("wasm: the file could not be read\n")
         return 1
     }
 
-    // Das Modul ist gross und liegt besser auf der Halde als auf dem
-    // Stapel -- ein Rust-Modul bringt viertausend Funktionen mit.
     let mp: u64 = rt.heap_alloc(4194304)
     if mp == 0 {
-        io.print("wasm: kein Speicher für die Modultabellen\n")
+        io.print("wasm: no memory for the module tables\n")
         return 1
     }
     rt.mem_set(mp, 0 as u8, 4194304)
-    let m: *mut Modul = mp as *mut Modul
+    let m: *mut Module = mp as *mut Module
 
-    if !module_load(m, datei.ptr, datei.len) {
+    if !module_load(m, file.ptr, file.len) {
         return 1
     }
     if !mem_create(m) {
         return 1
     }
-    // `data` konnte erst laufen, als der Speicher stand -- die
-    // Sektionen werden deshalb ein zweites Mal ueberflogen, nur fuer
-    // data. Das kostet einen Durchgang und spart eine Zwischenablage.
-    var l2: Leser = leser_new(datei.ptr, datei.len)
+    var l2: Leser = leser_new(file.ptr, file.len)
     l2.at = 8
-    while l2.at < datei.len {
+    while l2.at < file.len {
         let sid: u8 = u8_read(&l2)
         let sz: usize = uleb(&l2) as usize
         let sende: usize = l2.at + sz
-        if sende > datei.len {
+        if sende > file.len {
             break
         }
         if sid == 11 as u8 {
@@ -3280,25 +2874,13 @@ fn main(start: u64) -> i32 {
         l2.at = sende
     }
     if !(*m).ok {
-        io.print("wasm: die Datenabschnitte passen nicht in den Speicher\n")
+        io.print("wasm: the data segments do not fit in memory\n")
         return 1
     }
 
-    // Die Maschine. Auch sie auf die Halde: Stapel, Lokale und Label
-    // sind zusammen ueber achtzig Kilooktette, und der Stapel eines
-    // Osum-Prozesses ist kleiner.
-    // 512 KiB, und die Zahl ist NICHT gegriffen. Die Maschine besteht
-    // aus vier festen Feldern: Stapel 8192*8 = 64 KiB, Lokale 2048*8 =
-    // 16 KiB, Label 1024*32 = 32 KiB, Rahmen 512*64 = 32 KiB, zusammen
-    // rund 144 KiB. Hier standen 128 KiB, und das ist der Grund, warum
-    // SQLite mit "Segmentation fault" endete statt mit einer Meldung:
-    // die Rahmen liegen im Bauplan HINTER den Labeln, also schrieb
-    // jeder tiefere Aufruf hinter die Halde. Gefunden, indem die
-    // Feldgroessen einmal zusammengezaehlt wurden -- gdb zeigte nur die
-    // Stelle, nicht die Ursache.
     let vp: u64 = rt.heap_alloc(524288)
     if vp == 0 {
-        io.print("wasm: kein Speicher für die Maschine\n")
+        io.print("wasm: no memory for the machine\n")
         return 1
     }
     rt.mem_set(vp, 0 as u8, 524288)
@@ -3308,23 +2890,16 @@ fn main(start: u64) -> i32 {
     (*v).nloc = 0
     (*v).nframe = 0
     (*v).argc = argc
-    // DIE ARGUMENTE DES GASTES FANGEN BEIM MODULPFAD AN, nicht bei 1:
-    // sonst sieht das Modul ein `-s`, das dem Deuter gilt, haelt es fuer
-    // sein eigenes Argument und rechnet mit seinem Standardwert weiter.
-    // Genau das hat die Tempomessung verfaelscht -- jede Grenze ergab
-    // dieselbe Befehlszahl.
-    (*v).argv_von = pfad_i
+    (*v).argv_von = path_i
     (*v).start = start
     (*v).falle = false
     (*v).beendet = false
     (*v).code = 0
     (*v).schritte = 0
-    (*v).spur = spur_an(start, argc)
+    (*v).trace = trace_on(start, argc)
     (*v).scans = 0
     (*v).scan_oktette = 0
 
-    // Die `start`-Sektion zuerst, wenn es eine gibt: sie richtet das
-    // Modul ein, bevor irgendetwas anderes laeuft.
     if (*m).start_funk >= 0 {
         if eintreten(v, (*m).start_funk as usize) {
             ausfuehren(v)
@@ -3333,18 +2908,18 @@ fn main(start: u64) -> i32 {
 
     var ergebnis: i32 = 0
     if !(*v).beendet {
-        if (*m).haupt_funk < 0 {
-            io.print("wasm: das Modul hat kein `_start` -- es ist keine Anwendung\n")
+        if (*m).main_func < 0 {
+            io.print("wasm: the module has no `_start` -- it is not an application\n")
             return 1
         }
-        if !eintreten(v, (*m).haupt_funk as usize) {
-            io.print("wasm: `_start` ließ sich nicht betreten\n")
+        if !eintreten(v, (*m).main_func as usize) {
+            io.print("wasm: `_start` could not be entered\n")
             return 1
         }
         ergebnis = ausfuehren(v)
     }
 
-    if (*v).spur {
+    if (*v).trace {
         io.print("wasm: befehle=")
         num_out((*v).schritte)
         io.print(" blockscans=")
@@ -3354,7 +2929,7 @@ fn main(start: u64) -> i32 {
         io.print("\n")
     }
     if (*v).falle {
-        io.print("wasm: das Modul ist abgebrochen\n")
+        io.print("wasm: the module aborted\n")
         return 1
     }
     if (*v).beendet {

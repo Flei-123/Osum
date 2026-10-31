@@ -1,37 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/nedit.fi -- RUNDE GUI-EDITOR: /bin/nedit, DER EDITOR MIT
-// FENSTER.
-//
 // ====================================================== WAS ER IST
-//
-// Justins Auftrag, woertlich: der Editor soll "ein moderner notepad++
-// editor oder so" werden. Das ist dieser hier: Reiter fuer mehrere
-// Dateien, eine Spalte mit Zeilennummern, eine Statuszeile, die sagt,
-// wo man steht, Syntaxfarben, Suchen und Ersetzen.
-//
-// ============================================ WAS ER AUSDRUECKLICH NICHT IST
-//
-// Er ist NICHT der Ersatz fuer `/bin/edit`. Der bleibt, wo er ist, und
-// er bleibt der Editor fuer die Konsole -- er kommt ohne Fenster aus,
-// und auf einem System, das gerade seine Oberflaeche nicht startet,
-// ist das der Unterschied zwischen "ich kann die Konfigurationsdatei
-// reparieren" und "ich kann es nicht". Zwei Editoren sind hier kein
-// Doppel, sondern zwei Arbeitsplaetze.
-//
-// ================================================== WO DIE ARBEIT LIEGT
-//
-// FAST NICHTS DAVON STEHT IN DIESER DATEI. Das mehrzeilige Textfeld --
-// Zeilentafel, Marke, Auswahl, Rueckgaengig, Bildlauf, Zeichner,
-// Syntaxfarben -- ist `K_TEXTAREA` in `kernel/user/wlib.fi`, und das
-// ist Absicht und keine Bequemlichkeit: die Regel dieses Baums lautet,
-// dass ein Bedienelement in die Bibliothek gehoert und nicht in ein
-// Programm (`tools/check-ui.sh` misst es). Ein Editor, der sich sein
-// Textfeld selbst malt, waere genau die zweite Umsetzung, die dieser
-// Baum nirgends haben will.
-//
-// Diese Datei ist deshalb das, was ein Programm wirklich ausmacht: die
-// Reiter und welche Datei in welchem steckt, das Lesen und Schreiben,
-// die Frage vor dem Schliessen, Suchen und Ersetzen, das Menue.
 profile app
 
 import ulib
@@ -47,55 +14,35 @@ import msg
 export { u_start }
 
 // ----------------------------------------------------------- die Texte
-//
-// Sie stehen hier als deutscher Text und nicht als Katalogschluessel.
-// GRUND, und er ist gemessen: `msg` zieht den Katalog in jedes
-// Programm, in dem es steckt, und die Platte dieser Runde hat 128
-// Inodes und wenig Luft (tools/alltag/build.sh sagt es ausdruecklich).
-// Der Dateimanager hat einen Katalog, weil er einen braucht -- dieses
-// Programm bekommt ihn in der Runde, in der jemand es uebersetzt.
-static mut W_TITEL: [u8; 7] = "Editor\0"
+static mut W_TITLE: [u8; 7] = "Editor\0"
 static mut W_APP: [u8; 6] = "nedit\0"
 static mut M_BAR: [u8; 15] = "nedit.menu.bar\0"
-static mut M_DATEI: [u8; 16] = "nedit.menu.file\0"
+static mut M_FILE: [u8; 16] = "nedit.menu.file\0"
 static mut M_BEARB: [u8; 16] = "nedit.menu.edit\0"
-static mut M_SUCHEN: [u8; 18] = "nedit.menu.search\0"
+static mut M_FIND: [u8; 18] = "nedit.menu.search\0"
 
-static mut T_NEU: [u8; 15] = "nedit.untitled\0"
-static mut T_OEFFNEN: [u8; 15] = "nedit.ask.open\0"
-static mut T_SICHERN: [u8; 15] = "nedit.ask.save\0"
-static mut T_SUCHEN: [u8; 15] = "nedit.ask.find\0"
-static mut T_ERSETZEN: [u8; 22] = "Ersetzen durch was?\0\0\0"
-static mut T_GEHE: [u8; 18] = "Gehe zu Zeile:\0\0\0\0"
-static mut T_FRAGE: [u8; 18] = "nedit.ask.discard\0"
-static mut T_WEG: [u8; 15] = "nedit.err.read\0"
-static mut T_SCHREIB: [u8; 16] = "nedit.err.write\0"
+static mut T_NEW: [u8; 15] = "nedit.untitled\0"
+static mut T_OPEN: [u8; 15] = "nedit.ask.open\0"
+static mut T_SAVE: [u8; 15] = "nedit.ask.save\0"
+static mut T_FIND: [u8; 15] = "nedit.ask.find\0"
+static mut T_REPLACE: [u8; 22] = "Ersetzen durch was?\0\0\0"
+static mut T_GOTO: [u8; 18] = "Gehe zu Zeile:\0\0\0\0"
+static mut T_ASK: [u8; 18] = "nedit.ask.discard\0"
+static mut T_DROP: [u8; 15] = "nedit.err.read\0"
+static mut T_WRITE: [u8; 16] = "nedit.err.write\0"
 static mut T_NICHTDA: [u8; 15] = "nedit.notfound\0"
 
-// Die Statuszeile wird zusammengesetzt und liegt hier.
 static mut s_stat: [u8; 160] = [0 as u8; 160]
-static mut s_titel: [u8; 96] = [0 as u8; 96]
+static mut s_title: [u8; 96] = [0 as u8; 96]
 
-// ============================================== DIE REITER UND IHRE DATEIEN
-//
-// EIN REITER IST EINE DATEI. Mehr haelt dieses Programm nicht: den
-// Namen, den Pfad und den Text. Der Text liegt NICHT hier -- er liegt
-// im Textfeld der Bibliothek, und beim Reiterwechsel wird er
-// getauscht.
-//
-// WARUM GETAUSCHT UND NICHT JE REITER EIN FELD: die Zeilentafel in
-// wlib ist die grosse Tafel dieses Systems (TA_MAXL Zeilen), und je
-// Reiter eine waere dieselbe Tafel mal acht. Ein Reiter, der nicht
-// vorne liegt, braucht seinen Text nur als Oktette -- und genau so
-// liegt er hier, in einem Puffer, den `map_surface` geholt hat.
 const MAXTAB: u64 = 8
-const TB_PFAD: u64 = 0 // Zeiger auf den Pfad (oder 0 = neu)
-const TB_PUF: u64 = 1 // Zeiger auf die Oktette, wenn der Reiter ruht
+const TB_PATH: u64 = 0
+const TB_PUF: u64 = 1
 const TB_N: u64 = 2 // wie viele Oktette
-const TB_CAP: u64 = 3 // wie viele Platz haben
+const TB_CAP: u64 = 3
 const TB_DIRTY: u64 = 4 // veraendert
 const TB_LANG: u64 = 5 // welche Sprache
-const TB_CY: u64 = 6 // wo die Marke stand
+const TB_CY: u64 = 6
 const TB_CX: u64 = 7
 const TB_EOL: u64 = 8
 const TB_W: u64 = 9
@@ -104,13 +51,9 @@ static mut tb: [u64; 72] = [0 as u64; 72] // MAXTAB * TB_W
 static mut ntab: u64 = 0
 static mut cur: u64 = 0
 
-// Die Namen der Reiter, als EIN Block mit Zeilenumbruch -- das ist das
-// Format, das `wlib.tabs` liest.
 static mut tabtext: [u8; 640] = [0 as u8; 640]
-// Die Pfade. Je Reiter 128 Oktette, damit ein Pfad nicht wandert.
 static mut pfade: [u8; 1024] = [0 as u8; 1024]
 
-// Der Puffer, in dem eine Datei gelesen und geschrieben wird.
 const IOMAX: u64 = 1048576
 static mut iobuf: u64 = 0
 
@@ -118,7 +61,6 @@ static mut iobuf: u64 = 0
 static mut dlgbuf: [u8; 256] = [0 as u8; 256]
 static mut suchtext: [u8; 128] = [0 as u8; 128]
 static mut ersetztext: [u8; 128] = [0 as u8; 128]
-// Wonach das Drehbuch sucht und wodurch es ersetzt.
 static mut Z_SUCH: [u8; 6] = "summe\0"
 static mut Z_ERS: [u8; 7] = "TOTAL\0\0"
 static mut Z_GESICHERT: [u8; 17] = "nedit: gesichert\0"
@@ -129,14 +71,12 @@ static mut w_bar: u64 = 0
 static mut w_tabs: u64 = 0
 static mut w_text: u64 = 0
 static mut w_stat: u64 = 0
-static mut w_pfad: u64 = 0
+static mut w_path: u64 = 0
 static mut bw: u64 = 980
 static mut bh: u64 = 700
 static mut c_top: u64 = 0
 static mut c_text: u64 = 0
-static mut c_unten: u64 = 0
-// Was der Dialog gerade will: 1 oeffnen, 2 sichern unter, 3 suchen,
-// 4 ersetzen, 5 gehe zu, 6 schliessen-Frage, 7 beenden-Frage.
+static mut c_bottom: u64 = 0
 static mut dlgart: u64 = 0
 
 fn tget(t: u64, f: u64) -> u64 {
@@ -153,24 +93,21 @@ fn tset(t: u64, f: u64, v: u64) {
     tb[(t * TB_W + f) as usize] = v
 }
 
-fn pfad_von(t: u64) -> u64 {
+fn path_of(t: u64) -> u64 {
     return ((&pfade[0 as usize]) as u64) + t * 128
 }
 
 // ======================================================= DIE DATEIEN
-//
-// LESEN. Die Groesse kommt aus `stat`, nicht aus dem Lesen bis zum
-// Ende -- so steht vor dem ersten Oktett fest, ob es ueberhaupt passt.
-fn datei_lesen(pfad: u64) -> u64 {
+fn file_read(path: u64) -> u64 {
     var st: [u8; 144] = [0 as u8; 144]
-    if ulib.bad(io.stat_into(pfad, (&st[0 as usize]) as u64)) {
+    if ulib.bad(io.stat_into(path, (&st[0 as usize]) as u64)) {
         return 0xFFFFFFFFFFFFFFFF
     }
     let gr: u64 = io.stat_size((&st[0 as usize]) as u64)
     if gr >= IOMAX {
         return 0xFFFFFFFFFFFFFFFF
     }
-    let fd: u64 = io.open(pfad, 0)
+    let fd: u64 = io.open(path, 0)
     if ulib.bad(fd) {
         return 0xFFFFFFFFFFFFFFFF
     }
@@ -182,8 +119,8 @@ fn datei_lesen(pfad: u64) -> u64 {
     return n
 }
 
-fn datei_schreiben(pfad: u64, n: u64) -> bool {
-    let fd: u64 = io.create(pfad)
+fn file_write(path: u64, n: u64) -> bool {
+    let fd: u64 = io.create(path)
     if ulib.bad(fd) {
         return false
     }
@@ -192,19 +129,17 @@ fn datei_schreiben(pfad: u64, n: u64) -> bool {
     return !ulib.bad(g) && g == n
 }
 
-// Die Sprache aus der Endung. Eine fuenfte Sprache ist hier eine Zeile
-// und in wlib eine -- mehr nicht.
-fn lang_von(pfad: u64) -> u64 {
-    if pfad == 0 {
+fn lang_von(path: u64) -> u64 {
+    if path == 0 {
         return fuied.LANG_NONE
     }
-    let n: u64 = ulib.length(pfad)
+    let n: u64 = ulib.length(path)
     if n < 3 {
         return fuied.LANG_NONE
     }
-    let a: u64 = __mmio_read8((pfad + n - 3) as *mut u8) as u64
-    let b: u64 = __mmio_read8((pfad + n - 2) as *mut u8) as u64
-    let c: u64 = __mmio_read8((pfad + n - 1) as *mut u8) as u64
+    let a: u64 = __mmio_read8((path + n - 3) as *mut u8) as u64
+    let b: u64 = __mmio_read8((path + n - 2) as *mut u8) as u64
+    let c: u64 = __mmio_read8((path + n - 1) as *mut u8) as u64
     if a == 46 && (b | 32) == 102 && (c | 32) == 105 {
         return fuied.LANG_FIRN // .fi
     }
@@ -215,12 +150,7 @@ fn lang_von(pfad: u64) -> u64 {
 }
 
 // ======================================================== DIE REITER
-//
-// DIE BESCHRIFTUNGEN NEU SETZEN. `wlib.tabs` liest EINEN Block mit
-// einem Namen je Zeile -- also wird er hier gebaut. Ein Stern vor dem
-// Namen heisst "nicht gesichert"; das ist die Art, in der jeder Editor
-// es sagt, und sie kostet ein Zeichen statt eines zweiten Bedienteils.
-fn tabs_setzen() {
+fn tabs_set() {
     let p: u64 = (&tabtext[0 as usize]) as u64
     var at: u64 = 0
     var t: u64 = 0
@@ -247,28 +177,22 @@ fn tabs_setzen() {
     rfr()
 }
 
-// Der NAME eines Reiters ist der letzte Teil seines Pfades -- ein
-// Reiter, auf dem "/users/root/schriften/lesen.fi" steht, ist so breit
-// wie das Fenster.
 fn name_von(t: u64) -> u64 {
-    let p: u64 = tget(t, TB_PFAD)
+    let p: u64 = tget(t, TB_PATH)
     if p == 0 {
-        return msg.get((&T_NEU[0 as usize]) as u64)
+        return msg.get((&T_NEW[0 as usize]) as u64)
     }
     return ulib.base_name(p)
 }
 
-// DEN TEXT DES REITERS IN DAS FELD HOLEN. Vorher wird der Text des
-// alten Reiters herausgeholt -- sonst steht er nach dem Wechsel im
-// falschen.
-fn reiter_zeigen(neu: u64) {
-    if neu >= ntab {
+fn tab_show(fresh: u64) {
+    if fresh >= ntab {
         return
     }
-    if neu != cur {
-        reiter_sichern_in_puffer(cur)
+    if fresh != cur {
+        tab_save_to_buffer(cur)
     }
-    cur = neu
+    cur = fresh
     let puf: u64 = tget(cur, TB_PUF)
     if puf != 0 {
         fuied.ta_text_set(w_text, puf, tget(cur, TB_N))
@@ -278,19 +202,16 @@ fn reiter_zeigen(neu: u64) {
     fuied.ta_lang(w_text, tget(cur, TB_LANG))
     fuied.ta_eol_set(w_text, tget(cur, TB_EOL))
     if tget(cur, TB_DIRTY) != 0 {
-        // Das Feld ist nach `ta_text_set` sauber -- der Reiter war es
-        // nicht, und der Reiter hat recht.
         fuied.ta_gehe(w_text, tget(cur, TB_CY), tget(cur, TB_CX))
     } else {
         fuied.ta_gehe(w_text, tget(cur, TB_CY), tget(cur, TB_CX))
     }
-    tabs_setzen()
-    stat_setzen()
-    titel_setzen()
+    tabs_set()
+    status_set()
+    title_set()
 }
 
-// Den Text aus dem Feld in den Puffer des Reiters retten.
-fn reiter_sichern_in_puffer(t: u64) {
+fn tab_save_to_buffer(t: u64) {
     if t >= ntab {
         return
     }
@@ -318,8 +239,7 @@ fn reiter_sichern_in_puffer(t: u64) {
     }
 }
 
-// EINEN NEUEN REITER. Ohne Pfad ist er "Unbenannt".
-fn reiter_neu(pfad: u64) -> u64 {
+fn tab_new(path: u64) -> u64 {
     if ntab >= MAXTAB {
         return 0xFFFFFFFFFFFFFFFF
     }
@@ -332,43 +252,37 @@ fn reiter_neu(pfad: u64) -> u64 {
     tset(t, TB_CY, 0)
     tset(t, TB_CX, 0)
     tset(t, TB_EOL, 0)
-    if pfad == 0 {
-        tset(t, TB_PFAD, 0)
+    if path == 0 {
+        tset(t, TB_PATH, 0)
         tset(t, TB_LANG, fuied.LANG_NONE)
     } else {
-        ulib.strncpy(pfad_von(t), pfad, 127)
-        tset(t, TB_PFAD, pfad_von(t))
-        tset(t, TB_LANG, lang_von(pfad_von(t)))
+        ulib.strncpy(path_of(t), path, 127)
+        tset(t, TB_PATH, path_of(t))
+        tset(t, TB_LANG, lang_von(path_of(t)))
     }
     return t
 }
 
-// EINE DATEI OEFFNEN -- in einen neuen Reiter.
-fn oeffnen(pfad: u64) -> bool {
-    let n: u64 = datei_lesen(pfad)
+fn open_file(path: u64) -> bool {
+    let n: u64 = file_read(path)
     if n == 0xFFFFFFFFFFFFFFFF {
-        let _h: u64 = dlg_hinweis((&W_TITEL[0 as usize]) as u64,
-            msg.get((&T_WEG[0 as usize]) as u64))
+        let _h: u64 = dlg_hinweis((&W_TITLE[0 as usize]) as u64,
+            msg.get((&T_DROP[0 as usize]) as u64))
         return false
     }
-    // Ein leerer, unberuehrter Reiter wird BENUTZT statt einen zweiten
-    // danebenzustellen -- sonst steht nach dem Start immer ein leeres
-    // "Unbenannt" vor der Datei, die man aufmachen wollte.
     var t: u64 = 0xFFFFFFFFFFFFFFFF
-    if ntab == 1 && tget(0, TB_PFAD) == 0 && tget(0, TB_DIRTY) == 0
+    if ntab == 1 && tget(0, TB_PATH) == 0 && tget(0, TB_DIRTY) == 0
         && tget(0, TB_N) == 0 {
         t = 0
-        ulib.strncpy(pfad_von(0), pfad, 127)
-        tset(0, TB_PFAD, pfad_von(0))
-        tset(0, TB_LANG, lang_von(pfad_von(0)))
+        ulib.strncpy(path_of(0), path, 127)
+        tset(0, TB_PATH, path_of(0))
+        tset(0, TB_LANG, lang_von(path_of(0)))
     } else {
-        t = reiter_neu(pfad)
+        t = tab_new(path)
         if t == 0xFFFFFFFFFFFFFFFF {
             return false
         }
     }
-    // Der Text geht zuerst in den Puffer des Reiters, dann zeigt ihn
-    // `reiter_zeigen` -- ein Weg statt zwei.
     if tget(t, TB_CAP) < n + 1 {
         let cap: u64 = (n + 4096) & 0xFFFFFFFFFFFFF000
         let p: u64 = wlibc.map_surface(cap)
@@ -389,55 +303,44 @@ fn oeffnen(pfad: u64) -> bool {
     tset(t, TB_CY, 0)
     tset(t, TB_CX, 0)
     cur = t
-    reiter_zeigen(t)
+    tab_show(t)
     return true
 }
 
-// SICHERN. Ohne Pfad wird gefragt.
-fn sichern(t: u64) -> bool {
+fn save(t: u64) -> bool {
     if t >= ntab {
         return false
     }
-    if tget(t, TB_PFAD) == 0 {
+    if tget(t, TB_PATH) == 0 {
         dlgart = 2
         __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
-        let _d: u64 = dlg_entry((&W_TITEL[0 as usize]) as u64,
-            msg.get((&T_SICHERN[0 as usize]) as u64), (&dlgbuf[0 as usize]) as u64)
+        let _d: u64 = dlg_entry((&W_TITLE[0 as usize]) as u64,
+            msg.get((&T_SAVE[0 as usize]) as u64), (&dlgbuf[0 as usize]) as u64)
         return false
     }
     let n: u64 = fuied.ta_text_get(w_text, iobuf, IOMAX - 1)
-    if !datei_schreiben(tget(t, TB_PFAD), n) {
-        let _h: u64 = dlg_hinweis((&W_TITEL[0 as usize]) as u64,
-            msg.get((&T_SCHREIB[0 as usize]) as u64))
+    if !file_write(tget(t, TB_PATH), n) {
+        let _h: u64 = dlg_hinweis((&W_TITLE[0 as usize]) as u64,
+            msg.get((&T_WRITE[0 as usize]) as u64))
         return false
     }
     tset(t, TB_DIRTY, 0)
     fuied.ta_sauber(w_text)
-    tabs_setzen()
-    titel_setzen()
+    tabs_set()
+    title_set()
     return true
 }
 
 // ===================================================== DIE STATUSZEILE
-//
-// "Zeile 12, Spalte 4   UTF-8   LF   geaendert" -- die vier Angaben,
-// die ein Editor unten stehen hat, und jede davon ist eine Antwort auf
-// eine Frage, die man sonst nicht stellen kann: wo stehe ich, wie wird
-// die Datei gelesen, womit enden die Zeilen, und ist etwas offen.
-//
-// KODIERUNG IST UTF-8 UND WIRD NICHT GERATEN. Dieses System hat genau
-// eine (`utf8.fi`, `wlibc.text_at` setzt danach); eine Anzeige, die
-// zwischen mehreren waehlen liesse, waere eine Behauptung ueber einen
-// Umsetzer, den es nicht gibt.
 static mut ST_Z: [u8; 8] = "Zeile \0\0"
 static mut ST_S: [u8; 10] = ", Spalte \0"
 static mut ST_UTF: [u8; 12] = "   UTF-8   \0"
 static mut ST_LF: [u8; 3] = "LF\0"
 static mut ST_CRLF: [u8; 5] = "CRLF\0"
 static mut ST_MOD: [u8; 15] = "nedit.modified\0"
-static mut ST_ZEILEN: [u8; 11] = "   Zeilen \0"
+static mut ST_LINES: [u8; 11] = "   Zeilen \0"
 
-fn zahl_an(p: u64, at: u64, v: u64) -> u64 {
+fn number_at(p: u64, at: u64, v: u64) -> u64 {
     var ziffern: [u8; 20] = [0 as u8; 20]
     var n: u64 = 0
     var q: u64 = v
@@ -469,15 +372,15 @@ fn text_an(p: u64, at: u64, q: u64) -> u64 {
     return a
 }
 
-fn stat_setzen() {
+fn status_set() {
     let p: u64 = (&s_stat[0 as usize]) as u64
     var at: u64 = 0
     at = text_an(p, at, (&ST_Z[0 as usize]) as u64)
-    at = zahl_an(p, at, fuied.ta_zeile(w_text))
+    at = number_at(p, at, fuied.ta_zeile(w_text))
     at = text_an(p, at, (&ST_S[0 as usize]) as u64)
-    at = zahl_an(p, at, fuied.ta_spalte(w_text))
-    at = text_an(p, at, (&ST_ZEILEN[0 as usize]) as u64)
-    at = zahl_an(p, at, fuied.ta_zeilen(w_text))
+    at = number_at(p, at, fuied.ta_spalte(w_text))
+    at = text_an(p, at, (&ST_LINES[0 as usize]) as u64)
+    at = number_at(p, at, fuied.ta_zeilen(w_text))
     at = text_an(p, at, (&ST_UTF[0 as usize]) as u64)
     if fuied.ta_eol(w_text) == 1 {
         at = text_an(p, at, (&ST_CRLF[0 as usize]) as u64)
@@ -491,52 +394,28 @@ fn stat_setzen() {
     rfr()
 }
 
-// DER PFAD STEHT IM FENSTER UND NICHT IM FENSTERTITEL.
-//
-// Er sollte in den Titel -- dort erwartet ihn jeder. Er steht dort
-// NICHT, und das ist keine Nachlaessigkeit, sondern eine Grenze dieser
-// Bibliothek, die hier benannt und nicht umgangen wird: `wlib.window`
-// nimmt den Titel beim ANLEGEN des Fensters, und es gibt keinen Weg,
-// ihn danach zu aendern (kein `set_window_title` in wlib.fi, und der
-// Fensterserver bekommt ihn nur ueber `WIG_NEW`). Ein Titel, der beim
-// Reiterwechsel stehenbliebe, waere schlechter als keiner -- er wuerde
-// die falsche Datei nennen.
-//
-// Also steht der ganze Pfad in der Zeile UNTER den Reitern, wo er sich
-// bei jedem Wechsel mitaendert. Wer den Titel will, baut ihn in der
-// Runde, die `set_window_title` in die Bibliothek legt.
-fn titel_setzen() {
-    let p: u64 = (&s_titel[0 as usize]) as u64
+fn title_set() {
+    let p: u64 = (&s_title[0 as usize]) as u64
     var at: u64 = 0
-    if cur < ntab && tget(cur, TB_PFAD) != 0 {
-        at = text_an(p, at, tget(cur, TB_PFAD))
+    if cur < ntab && tget(cur, TB_PATH) != 0 {
+        at = text_an(p, at, tget(cur, TB_PATH))
     } else {
-        at = text_an(p, at, msg.get((&T_NEU[0 as usize]) as u64))
+        at = text_an(p, at, msg.get((&T_NEW[0 as usize]) as u64))
     }
     __mmio_write8((p + at) as *mut u8, 0 as u8)
     rfr()
 }
 
-// ==================================================== SUCHEN UND ERSETZEN
-//
-// SIE GEHT ZEILE FUER ZEILE DURCH DAS FELD und holt sich den Text
-// nicht erst in einen Puffer: `fuied.ta_zeile_p/ta_zeile_n` geben den
-// Zeiger auf die Zeile, wie sie im Widget liegt. Bei einer Datei von
-// 5 000 Zeilen ist das der Unterschied zwischen einer Suche und einer
-// Kopie der ganzen Datei je Suche.
-//
-// GESUCHT WIRD AB DER MARKE, nicht ab dem Anfang -- sonst findet
-// "Weitersuchen" immer denselben Treffer.
-fn suchen_ab(vony: u64, vonx: u64) -> bool {
+fn find_from(vony: u64, vonx: u64) -> bool {
     let nadel: u64 = (&suchtext[0 as usize]) as u64
     let m: u64 = ulib.length(nadel)
     if m == 0 {
         return false
     }
-    let zeilen: u64 = fuied.ta_zeilen(w_text)
+    let lines: u64 = fuied.ta_zeilen(w_text)
     var y: u64 = vony
     var x: u64 = vonx
-    while y < zeilen {
+    while y < lines {
         let p: u64 = fuied.ta_zeile_p(w_text, y)
         let n: u64 = fuied.ta_zeile_n(w_text, y)
         if p != 0 && n >= m {
@@ -549,7 +428,7 @@ fn suchen_ab(vony: u64, vonx: u64) -> bool {
                 }
                 if k == m {
                     fuied.ta_waehle(w_text, y, i, y, i + m)
-                    stat_setzen()
+                    status_set()
                     return true
                 }
                 i = i + 1
@@ -561,29 +440,23 @@ fn suchen_ab(vony: u64, vonx: u64) -> bool {
     return false
 }
 
-fn suchen_jetzt() -> bool {
-    // Ab der Marke, und wenn nichts kommt, noch einmal von vorn --
-    // das ist, was jeder Editor tut, und ohne den zweiten Lauf findet
-    // man den Treffer ueber der Marke nie.
+fn find_now() -> bool {
     let y: u64 = fuied.ta_zeile(w_text) - 1
     let x: u64 = fuied.ta_spalte(w_text)
-    if suchen_ab(y, x) {
+    if find_from(y, x) {
         return true
     }
-    if suchen_ab(0, 0) {
+    if find_from(0, 0) {
         return true
     }
-    let _h: u64 = dlg_hinweis((&W_TITEL[0 as usize]) as u64,
+    let _h: u64 = dlg_hinweis((&W_TITLE[0 as usize]) as u64,
         msg.get((&T_NICHTDA[0 as usize]) as u64))
     return false
 }
 
-// ERSETZEN: den gefundenen Treffer durch den neuen Text tauschen. Das
-// Textfeld kann "einfuegen", und eine Auswahl wird beim Einfuegen
-// ersetzt -- also ist Ersetzen genau ein Einfuegen.
-fn ersetzen_jetzt() {
+fn replace_now() {
     if !fuied.ta_hat_auswahl(w_text) {
-        if !suchen_jetzt() {
+        if !find_now() {
             return
         }
     }
@@ -592,65 +465,57 @@ fn ersetzen_jetzt() {
     if cur < ntab {
         tset(cur, TB_DIRTY, 1)
     }
-    tabs_setzen()
-    stat_setzen()
-    let _w: bool = suchen_jetzt()
+    tabs_set()
+    status_set()
+    let _w: bool = find_now()
 }
 
 // ====================================================== DIE MENUEPUNKTE
-//
-// Die Nummern sind die Reihenfolge in `M_DATEI` und den beiden
-// anderen. Sie stehen an EINER Stelle, damit der Klick und das, was
-// geschieht, nicht auseinanderlaufen koennen.
-fn menue_datei(n: u64) {
+fn menu_file(n: u64) {
     if n == 0 {
         // Neu
-        let t: u64 = reiter_neu(0)
+        let t: u64 = tab_new(0)
         if t != 0xFFFFFFFFFFFFFFFF {
-            reiter_sichern_in_puffer(cur)
+            tab_save_to_buffer(cur)
             cur = t
-            reiter_zeigen(t)
+            tab_show(t)
         }
     } else if n == 1 {
         // Oeffnen
         dlgart = 1
         __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
-        let _d: u64 = dlg_entry((&W_TITEL[0 as usize]) as u64,
-            msg.get((&T_OEFFNEN[0 as usize]) as u64), (&dlgbuf[0 as usize]) as u64)
+        let _d: u64 = dlg_entry((&W_TITLE[0 as usize]) as u64,
+            msg.get((&T_OPEN[0 as usize]) as u64), (&dlgbuf[0 as usize]) as u64)
     } else if n == 2 {
-        let _s: bool = sichern(cur)
+        let _s: bool = save(cur)
     } else if n == 3 {
         dlgart = 2
         __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
-        let _d: u64 = dlg_entry((&W_TITEL[0 as usize]) as u64,
-            msg.get((&T_SICHERN[0 as usize]) as u64), (&dlgbuf[0 as usize]) as u64)
+        let _d: u64 = dlg_entry((&W_TITLE[0 as usize]) as u64,
+            msg.get((&T_SAVE[0 as usize]) as u64), (&dlgbuf[0 as usize]) as u64)
     } else if n == 4 {
-        schliessen()
+        close_tab()
     } else if n == 5 {
         beenden()
     }
 }
 
-// EINEN REITER SCHLIESSEN. Ist etwas offen, wird GEFRAGT -- das ist
-// der Pflichtpunkt, an dem ein Editor Arbeit vernichtet oder nicht.
-fn schliessen() {
+fn close_tab() {
     if cur >= ntab {
         return
     }
     if tget(cur, TB_DIRTY) != 0 || fuied.ta_geaendert(w_text) {
         dlgart = 6
-        let _d: u64 = dlg_ask((&W_TITEL[0 as usize]) as u64,
-            msg.get((&T_FRAGE[0 as usize]) as u64))
+        let _d: u64 = dlg_ask((&W_TITLE[0 as usize]) as u64,
+            msg.get((&T_ASK[0 as usize]) as u64))
         return
     }
-    schliessen_wirklich()
+    close_confirmed()
 }
 
-fn schliessen_wirklich() {
+fn close_confirmed() {
     if ntab <= 1 {
-        // Der letzte Reiter wird nicht weggenommen, sondern geleert --
-        // ein Editor ohne Reiter haette kein Textfeld mehr.
-        tset(0, TB_PFAD, 0)
+        tset(0, TB_PATH, 0)
         tset(0, TB_PUF, 0)
         tset(0, TB_N, 0)
         tset(0, TB_DIRTY, 0)
@@ -658,14 +523,14 @@ fn schliessen_wirklich() {
         cur = 0
         fuied.ta_leeren(w_text)
         fuied.ta_lang(w_text, fuied.LANG_NONE)
-        tabs_setzen()
-        stat_setzen()
-        titel_setzen()
+        tabs_set()
+        status_set()
+        title_set()
         return
     }
     var t: u64 = cur
     while t + 1 < ntab {
-        tb[(t * TB_W + TB_PFAD) as usize] = tb[((t + 1) * TB_W + TB_PFAD) as usize]
+        tb[(t * TB_W + TB_PATH) as usize] = tb[((t + 1) * TB_W + TB_PATH) as usize]
         tb[(t * TB_W + TB_PUF) as usize] = tb[((t + 1) * TB_W + TB_PUF) as usize]
         tb[(t * TB_W + TB_N) as usize] = tb[((t + 1) * TB_W + TB_N) as usize]
         tb[(t * TB_W + TB_CAP) as usize] = tb[((t + 1) * TB_W + TB_CAP) as usize]
@@ -674,10 +539,9 @@ fn schliessen_wirklich() {
         tb[(t * TB_W + TB_CY) as usize] = tb[((t + 1) * TB_W + TB_CY) as usize]
         tb[(t * TB_W + TB_CX) as usize] = tb[((t + 1) * TB_W + TB_CX) as usize]
         tb[(t * TB_W + TB_EOL) as usize] = tb[((t + 1) * TB_W + TB_EOL) as usize]
-        // Der Pfad wandert mit: er liegt in einem festen Platz je Reiter.
-        ulib.strncpy(pfad_von(t), pfad_von(t + 1), 127)
-        if tb[(t * TB_W + TB_PFAD) as usize] != 0 {
-            tb[(t * TB_W + TB_PFAD) as usize] = pfad_von(t)
+        ulib.strncpy(path_of(t), path_of(t + 1), 127)
+        if tb[(t * TB_W + TB_PATH) as usize] != 0 {
+            tb[(t * TB_W + TB_PATH) as usize] = path_of(t)
         }
         t = t + 1
     }
@@ -685,35 +549,31 @@ fn schliessen_wirklich() {
     if cur >= ntab {
         cur = ntab - 1
     }
-    reiter_zeigen(cur)
+    tab_show(cur)
 }
 
 fn beenden() {
-    // Ist irgendwo etwas offen, wird gefragt -- einmal fuer alle.
-    var offen: bool = false
+    var open: bool = false
     if fuied.ta_geaendert(w_text) {
-        offen = true
+        open = true
     }
     var t: u64 = 0
     while t < ntab {
         if tget(t, TB_DIRTY) != 0 {
-            offen = true
+            open = true
         }
         t = t + 1
     }
-    if offen {
+    if open {
         dlgart = 7
-        let _d: u64 = dlg_ask((&W_TITEL[0 as usize]) as u64,
-            msg.get((&T_FRAGE[0 as usize]) as u64))
+        let _d: u64 = dlg_ask((&W_TITLE[0 as usize]) as u64,
+            msg.get((&T_ASK[0 as usize]) as u64))
         return
     }
     fuiscene.quit()
 }
 
-fn menue_bearb(n: u64) {
-    // Rueckgaengig/Wiederholen/Ausschneiden/Kopieren/Einfuegen gehen
-    // ALLE ueber die Taste, die das Textfeld ohnehin kennt -- so gibt
-    // es eine Umsetzung und nicht zwei.
+fn menu_edit(n: u64) {
     fuiscene.focus(K_ED)
     if n == 0 {
         fuied.ed_key(w_text, 26) // Strg+Z
@@ -729,37 +589,35 @@ fn menue_bearb(n: u64) {
     if cur < ntab && fuied.ta_geaendert(w_text) {
         tset(cur, TB_DIRTY, 1)
     }
-    tabs_setzen()
-    stat_setzen()
+    tabs_set()
+    status_set()
 }
 
-fn menue_suchen(n: u64) {
+fn menu_find(n: u64) {
     if n == 0 {
         dlgart = 3
         __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
-        let _d: u64 = dlg_entry((&W_TITEL[0 as usize]) as u64,
-            msg.get((&T_SUCHEN[0 as usize]) as u64), (&dlgbuf[0 as usize]) as u64)
+        let _d: u64 = dlg_entry((&W_TITLE[0 as usize]) as u64,
+            msg.get((&T_FIND[0 as usize]) as u64), (&dlgbuf[0 as usize]) as u64)
     } else if n == 1 {
         dlgart = 4
         __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
-        let _d: u64 = dlg_entry((&W_TITEL[0 as usize]) as u64,
-            msg.get((&T_SUCHEN[0 as usize]) as u64), (&dlgbuf[0 as usize]) as u64)
+        let _d: u64 = dlg_entry((&W_TITLE[0 as usize]) as u64,
+            msg.get((&T_FIND[0 as usize]) as u64), (&dlgbuf[0 as usize]) as u64)
     } else if n == 2 {
         dlgart = 5
         __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
-        let _d: u64 = dlg_entry((&W_TITEL[0 as usize]) as u64,
-            (&T_GEHE[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
+        let _d: u64 = dlg_entry((&W_TITLE[0 as usize]) as u64,
+            (&T_GOTO[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
     }
 }
 
-// Was ein geschlossener Dialog bedeutet -- die Antwort haengt daran,
-// wonach gefragt wurde (`dlgart`).
 fn dialog_fertig(ok: bool) {
     let art: u64 = dlgart
     dlgart = 0
     if art == 6 {
         if ok {
-            schliessen_wirklich()
+            close_confirmed()
         }
         return
     }
@@ -777,80 +635,49 @@ fn dialog_fertig(ok: bool) {
         return
     }
     if art == 1 {
-        let _o: bool = oeffnen(p)
+        let _o: bool = open_file(p)
     } else if art == 2 {
         if cur < ntab {
-            ulib.strncpy(pfad_von(cur), p, 127)
-            tset(cur, TB_PFAD, pfad_von(cur))
-            tset(cur, TB_LANG, lang_von(pfad_von(cur)))
+            ulib.strncpy(path_of(cur), p, 127)
+            tset(cur, TB_PATH, path_of(cur))
+            tset(cur, TB_LANG, lang_von(path_of(cur)))
             fuied.ta_lang(w_text, tget(cur, TB_LANG))
-            let _s: bool = sichern(cur)
-            tabs_setzen()
-            titel_setzen()
+            let _s: bool = save(cur)
+            tabs_set()
+            title_set()
         }
     } else if art == 3 {
         ulib.strncpy((&suchtext[0 as usize]) as u64, p, 126)
-        let _f: bool = suchen_jetzt()
+        let _f: bool = find_now()
     } else if art == 4 {
-        // Erst wonach, dann wodurch -- zwei Fragen nacheinander, weil
-        // ein Dialog dieser Bibliothek EIN Feld hat.
         ulib.strncpy((&suchtext[0 as usize]) as u64, p, 126)
         dlgart = 8
         __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
-        let _d: u64 = dlg_entry((&W_TITEL[0 as usize]) as u64,
-            (&T_ERSETZEN[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
+        let _d: u64 = dlg_entry((&W_TITLE[0 as usize]) as u64,
+            (&T_REPLACE[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
     } else if art == 8 {
         ulib.strncpy((&ersetztext[0 as usize]) as u64, p, 126)
-        ersetzen_jetzt()
+        replace_now()
     } else if art == 5 {
         let z: u64 = ulib.to_num(p)
         if z > 0 {
             fuied.ta_gehe(w_text, z - 1, 0)
-            stat_setzen()
+            status_set()
         }
     }
 }
 
-// ============================================== DIE MESSUNG DES TIPPENS
-//
-// WARUM SIE IM PROGRAMM STEHT UND NICHT IM TESTLAEUFER.
-//
-// Die Messlatte dieser Runde sagt: "Tippen fuehlt sich nicht traege
-// an (miss die Zeit je Tastendruck)". Von aussen ist das nicht zu
-// messen -- ein Tastendruck ueber den QEMU-Monitor laeuft durch den
-// PS/2-Baustein, den Kern, den Fensterserver und die Ereignisschlange,
-// und was davon auf das TEXTFELD entfaellt, sieht man in der
-// Gesamtzeit nicht.
-//
-// Also misst das Programm selbst: `messen=N` auf der Befehlszeile
-// speist N Zeichen durch GENAU DENSELBEN Weg ein, den eine echte
-// Taste nimmt (`wlib.feed_key` -> `on_key` -> `ta_key`), und nimmt
-// davor und danach die Uhr.
-//
-// DIE UHR HAT 100 Hz (kernel/sched/time.fi, TICK_HZ), ein Tick ist
-// also 10 ms. Ein einzelner Tastendruck liegt weit darunter -- deshalb
-// wird ein BUENDEL gemessen und geteilt. Herauskommen Mikrosekunden je
-// Taste, und die sind ehrlich, weil sie aus einer Zeit stammen, die
-// gross genug ist, um sie abzulesen.
-//
-// GEMESSEN WIRD IN DER DATEI, DIE GERADE OFFEN IST -- bei der grossen
-// ist das der Fall, auf den es ankommt: wenn das Einfuegen die ganze
-// Datei umkopierte, stuende es hier.
 static mut MS_A: [u8; 16] = "nedit: tippen n "
 static mut MS_B: [u8; 9] = " ticks   "
 static mut MS_C: [u8; 10] = " us_je    "
 static mut MS_D: [u8; 10] = " zeilen   "
 
 fn messen(n: u64) {
-    // In die MITTE der Datei, nicht an den Anfang: dort steht der
-    // Einfuegepunkt, bei dem ein Puffer, der die ganze Datei
-    // umkopiert, am meisten zu tun haette.
     let mitte: u64 = fuied.ta_zeilen(w_text) / 2
     fuied.ta_gehe(w_text, mitte, 0)
     let t0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
     var k: u64 = 0
     while k < n {
-        // 'a' bis 'z', damit nicht immer dasselbe Zeichen kommt.
         fuied.ed_key(w_text, 97 + (k % 26))
         k = k + 1
     }
@@ -861,7 +688,6 @@ fn messen(n: u64) {
     lineout.add_text((&MS_B[0 as usize]) as u64)
     lineout.add_num(dt)
     lineout.add_text((&MS_C[0 as usize]) as u64)
-    // Ein Tick ist 10 000 us. us je Taste = dt * 10000 / n.
     if n != 0 {
         lineout.add_num(dt * 10000 / n)
     }
@@ -870,22 +696,11 @@ fn messen(n: u64) {
     lineout.end_line()
 }
 
-// Dasselbe fuer das ROLLEN: Bild ab, N mal. Es ist die zweite Zusage
-// der Messlatte ("fluessig scrollen") und die Stelle, an der ein
-// Zeichner, der die ganze Datei malt statt des Ausschnitts, auffiele.
 static mut MR_A: [u8; 17] = "nedit: rollen n  "
 
 fn messen_rollen(n: u64, mit_anstrich: bool) {
     fuied.ta_gehe(w_text, 0, 0)
     let t0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
-    // ZWEI ZAHLEN, WEIL ES ZWEI KOSTEN SIND.
-    //
-    // `rollen=` misst BEIDES zusammen (Taste + Anstrich); `rollnur=`
-    // misst nur die Taste, also die Arbeit, die dieses Widget wirklich
-    // leistet. Der Unterschied ist der Anstrich des ganzen Fensters,
-    // und der gehoert dem Fensterserver und nicht dem Textfeld -- er
-    // kostet bei einer Datei mit zwoelf Zeilen dasselbe wie bei einer
-    // mit fuenftausend, und genau das weist die Messung nach.
     var k: u64 = 0
     while k < n {
         fuied.ed_key(w_text, 0x108) // KEY_PGDN
@@ -914,7 +729,7 @@ fn messen_rollen(n: u64, mit_anstrich: bool) {
 fn u_start(args: u64) -> u64 {
     let _mi: u64 = msg.init()
     var s_go: [u8; 13] = "nedit: ready\0"
-    var s_bad2: [u8; 21] = "nedit: kein Speicher\0"
+    var s_bad2: [u8; 21] = "nedit: out of memory\0"
     iobuf = wlibc.map_surface(IOMAX)
     if ulib.bad(iobuf) || iobuf == 0 {
         lineout.add_text((&s_bad2[0 as usize]) as u64)
@@ -924,27 +739,14 @@ fn u_start(args: u64) -> u64 {
     if !aufbauen() {
         return 1
     }
-    // Was auf der Befehlszeile steht, wird geoeffnet -- ein Editor,
-    // den der Dateimanager mit einem Pfad startet, soll die Datei
-    // zeigen und nicht ein leeres Blatt.
-    //
-    // ZUERST DER LEERE REITER, DANN DIE DATEIEN. `oeffnen` benutzt
-    // einen leeren, unberuehrten Reiter, statt einen zweiten
-    // danebenzustellen (siehe dort) -- der erste Pfad landet also in
-    // diesem, jeder weitere bekommt einen eigenen.
-    //
-    // HIER STAND EIN `reiter_neu(p)` VOR DEM `oeffnen(p)`, und damit
-    // gab es die Datei ZWEIMAL: einmal den angelegten Reiter und
-    // einmal den, den `oeffnen` sich selbst nahm. Im Bild standen
-    // zwei Reiter "probe.fi" nebeneinander.
-    let _t0: u64 = reiter_neu(0)
+    let _t0: u64 = tab_new(0)
     cur = 0
     let argc: u64 = ulib.arg_count(args)
     var a: u64 = 1
-    var mess: u64 = 0
+    var measure: u64 = 0
     var messr: u64 = 0
     var messrn: u64 = 0
-    var zeig: u64 = 0
+    var show: u64 = 0
     var s_m: [u8; 8] = "messen=\0"
     var s_r: [u8; 8] = "rollen=\0"
     var s_rn: [u8; 9] = "rollnur=\0"
@@ -952,99 +754,77 @@ fn u_start(args: u64) -> u64 {
     while a < argc && ntab < MAXTAB {
         let p: u64 = ulib.arg_at(args, a)
         if p != 0 && ulib.length(p) != 0 {
-            // `messen=N` und `rollen=N` sind MESSBEFEHLE und keine
-            // Dateinamen -- sie stehen hier und nicht in einem eigenen
-            // Programm, weil nur dieses Programm den Weg kennt, den
-            // eine Taste wirklich nimmt.
             if ulib.strneq(p, (&s_m[0 as usize]) as u64, 7) {
-                mess = ulib.to_num(p + 7)
+                measure = ulib.to_num(p + 7)
             } else if ulib.strneq(p, (&s_r[0 as usize]) as u64, 7) {
                 messr = ulib.to_num(p + 7)
             } else if ulib.strneq(p, (&s_rn[0 as usize]) as u64, 8) {
                 messrn = ulib.to_num(p + 8)
             } else if ulib.strneq(p, (&s_z[0 as usize]) as u64, 5) {
-                zeig = ulib.to_num(p + 5)
+                show = ulib.to_num(p + 5)
             } else {
-                let _o: bool = oeffnen(p)
+                let _o: bool = open_file(p)
             }
         }
         a = a + 1
     }
-    reiter_zeigen(cur)
-    tabs_setzen()
-    stat_setzen()
-    titel_setzen()
+    tab_show(cur)
+    tabs_set()
+    status_set()
+    title_set()
     lineout.add_text((&s_go[0 as usize]) as u64)
     lineout.end_line()
-    sag_stand()
+    say_state()
     if messr != 0 {
         messen_rollen(messr, true)
     }
     if messrn != 0 {
         messen_rollen(messrn, false)
     }
-    if mess != 0 {
-        messen(mess)
-        sag_stand()
+    if measure != 0 {
+        messen(measure)
+        say_state()
     }
-    // ================================ EIN DREHBUCH FUER DIE ABNAHME
-    //
-    // `zeig=N` stellt EINEN Zustand her, den ein Bild belegen soll,
-    // und zwar ohne Maus und ohne Menue -- ein Drehbuch, das sich
-    // durch die Oberflaeche klickt, misst auch die Klickerei mit; hier
-    // soll das BILD gemessen werden und sonst nichts.
-    //
-    //   1 = eine Auswahl mit Umschalt+Pfeil (die Taste, die es vor
-    //       dieser Runde nicht gab)
-    //   2 = ein Treffer der Suche, ausgewaehlt
-    //   3 = nach dem Ersetzen
-    //   4 = der zweite Reiter, weit unten gerollt
-    if zeig == 1 {
+    if show == 1 {
         fuied.ta_gehe(w_text, 3, 0)
-        // Umschalt+Ende waehlt die Zeile bis zum Ende aus. Genau der
-        // Weg, den die Tastatur jetzt liefert: KEY_END mit dem
-        // Modifikator 2.
         var z: u64 = 0
         while z < 18 {
             fuied.ed_key_mod(w_text, 0x104, 2) // Umschalt + Pfeil rechts
             z = z + 1
         }
         fuied.ed_key_mod(w_text, 0x102, 2) // Umschalt + Pfeil runter
-    } else if zeig == 2 {
+    } else if show == 2 {
         ulib.strncpy((&suchtext[0 as usize]) as u64,
             (&Z_SUCH[0 as usize]) as u64, 126)
-        let _f: bool = suchen_jetzt()
-    } else if zeig == 3 {
-        ulib.strncpy((&suchtext[0 as usize]) as u64,
-            (&Z_SUCH[0 as usize]) as u64, 126)
-        ulib.strncpy((&ersetztext[0 as usize]) as u64,
-            (&Z_ERS[0 as usize]) as u64, 126)
-        ersetzen_jetzt()
-    } else if zeig == 5 {
-        // ERSETZEN UND SICHERN -- der Weg, der wirklich auf die
-        // Platte schreibt. Ohne ihn waere "Sichern" die einzige Zusage
-        // dieser Runde, die man nur im Quelltext sieht.
+        let _f: bool = find_now()
+    } else if show == 3 {
         ulib.strncpy((&suchtext[0 as usize]) as u64,
             (&Z_SUCH[0 as usize]) as u64, 126)
         ulib.strncpy((&ersetztext[0 as usize]) as u64,
             (&Z_ERS[0 as usize]) as u64, 126)
-        ersetzen_jetzt()
-        if sichern(cur) {
+        replace_now()
+    } else if show == 5 {
+        ulib.strncpy((&suchtext[0 as usize]) as u64,
+            (&Z_SUCH[0 as usize]) as u64, 126)
+        ulib.strncpy((&ersetztext[0 as usize]) as u64,
+            (&Z_ERS[0 as usize]) as u64, 126)
+        replace_now()
+        if save(cur) {
             lineout.add_text((&Z_GESICHERT[0 as usize]) as u64)
         } else {
             lineout.add_text((&Z_NICHT[0 as usize]) as u64)
         }
         lineout.end_line()
-    } else if zeig == 4 {
+    } else if show == 4 {
         if ntab > 1 {
-            reiter_zeigen(1)
+            tab_show(1)
         }
         fuied.ta_gehe(w_text, 2600, 0)
     }
-    if zeig != 0 {
-        stat_setzen()
-        tabs_setzen()
-        sag_stand()
+    if show != 0 {
+        status_set()
+        tabs_set()
+        say_state()
     }
 
     while fuiscene.alive() {
@@ -1052,46 +832,40 @@ fn u_start(args: u64) -> u64 {
         if key != 0 {
             behandeln(key)
         }
-        if s_offen != 0 && !fuiscene.menu_is_open() && key != fuiscene.KEY_POPUP {
-            s_offen = 0
+        if s_open != 0 && !fuiscene.menu_is_open() && key != fuiscene.KEY_POPUP {
+            s_open = 0
         }
         let z: u64 = fuied.ta_zeile(w_text)
         let sp: u64 = fuied.ta_spalte(w_text)
-        if z != letzte_z || sp != letzte_s
-            || fuied.ta_geaendert(w_text) != letzte_d {
-            letzte_z = z
-            letzte_s = sp
-            letzte_d = fuied.ta_geaendert(w_text)
-            if letzte_d && cur < ntab && tget(cur, TB_DIRTY) == 0 {
+        if z != last_z || sp != last_s
+            || fuied.ta_geaendert(w_text) != last_d {
+            last_z = z
+            last_s = sp
+            last_d = fuied.ta_geaendert(w_text)
+            if last_d && cur < ntab && tget(cur, TB_DIRTY) == 0 {
                 tset(cur, TB_DIRTY, 1)
-                tabs_setzen()
+                tabs_set()
             }
-            stat_setzen()
+            status_set()
         }
     }
-    sag_stand()
+    say_state()
     return 0
 }
 
-static mut letzte_z: u64 = 0
-static mut letzte_s: u64 = 0
-static mut letzte_d: bool = false
-static mut letzte_r: u64 = 0
+static mut last_z: u64 = 0
+static mut last_s: u64 = 0
+static mut last_d: bool = false
+static mut last_r: u64 = 0
 
 // ================================================ WAS DER PRUEFSTAND LIEST
-//
-// Eine Zeile auf der seriellen Leitung, aus der ein Testlaeufer die
-// Zahlen nimmt, statt sie aus einem Bild zu raten. Dieselbe Art Zeile,
-// die `settings` und `taskbar` schreiben (`sayn`), und aus demselben
-// Grund: ein Bild zeigt, dass etwas dasteht, aber nicht, dass die
-// richtige Zahl dahintersteht.
 static mut SG_A: [u8; 15] = "nedit: reiter \0"
 static mut SG_B: [u8; 9] = " zeilen \0"
 static mut SG_C: [u8; 9] = " zeile \0\0"
 static mut SG_D: [u8; 9] = " spalte \0"
 static mut SG_E: [u8; 8] = " modif \0"
 
-fn sag_stand() {
+fn say_state() {
     lineout.add_text((&SG_A[0 as usize]) as u64)
     lineout.add_num(ntab)
     lineout.add_text((&SG_B[0 as usize]) as u64)
@@ -1110,33 +884,16 @@ fn sag_stand() {
 }
 
 // ==================================================== RUNDE 31: profile app
-//
-// Unter `profile app` bringt firnc seinen eigenen `_start` mit und
-// ruft `main`. `u_start` bleibt die Wurzel dieses Programms (und der
-// Name, unter dem der Binder es mit `--defsym=USER_ENTRY` findet);
-// `main` ist die eine Zeile dazwischen. Die Argumente stehen bei
-// `ulib.ARGS_BASE` -- der Kern legt sie dorthin, und firnc's `_start`
-// macht `mov rsp, rdi`.
 fn main() -> i32 {
     return u_start(ulib.ARGS_BASE) as i32
 }
-
-// ======================================================================
-// RUNDE FUI-ALL F-9: DER EDITOR AUF DEM SZENENBAUM
-//
-// Das Fenster ist jetzt beschrieben (`build`): Menueleiste, Reiter, Pfad,
-// das Textfeld (`fuied`, ein Knoten des Szenenbaums), Statuszeile. Die
-// Fragen (Oeffnen, Sichern, Suchen ...) sind Dialoge im selben Fenster.
-// Was nicht davon abhaengt -- Reiter, Lesen und Schreiben, Suchen und
-// Ersetzen -- ist unveraendert.
-// ======================================================================
 
 const K_ED: u64 = 10
 const K_MB: u64 = 20
 const K_TB: u64 = 30
 
 static mut s_up: bool = false
-static mut s_offen: u64 = 0
+static mut s_open: u64 = 0
 static mut s_mit: [u8; 160] = [0 as u8; 160]
 static mut s_pm: [u8; 400] = [0 as u8; 400]
 static mut s_tl: [u8; 640] = [0 as u8; 640]
@@ -1206,7 +963,7 @@ fn text_w(p: u64) -> u64 {
 }
 
 // The height of the text area for a window of height `h`.
-fn ed_hoehe(h: u64) -> u64 {
+fn ed_height(h: u64) -> u64 {
     // r442: padding 16, three gaps of 8, tabs 36, the command bar 32, status 24 -- two rows above the text
     let fix: u64 = 16 + 24 + 36 + 32 + 24
     if h > fix + 100 {
@@ -1233,9 +990,9 @@ fn bar_room() -> u64 {
 }
 
 fn cmd_room() {
-    let _f: u64 = split_items((msg.get((&M_DATEI[0 as usize]) as u64)), ((&cb_f[0 as usize]) as u64), 390)
+    let _f: u64 = split_items((msg.get((&M_FILE[0 as usize]) as u64)), ((&cb_f[0 as usize]) as u64), 390)
     let _e: u64 = split_items((msg.get((&M_BEARB[0 as usize]) as u64)), ((&cb_e[0 as usize]) as u64), 390)
-    let _s: u64 = split_items((msg.get((&M_SUCHEN[0 as usize]) as u64)), ((&cb_s[0 as usize]) as u64), 390)
+    let _s: u64 = split_items((msg.get((&M_FIND[0 as usize]) as u64)), ((&cb_s[0 as usize]) as u64), 390)
     fuiscene.cmd_begin()
     fuiscene.cmd_item(icons.CMD_NEW_FILE, K_CB, item_at(((&cb_f[0 as usize]) as u64), 0), 0, 0)
     fuiscene.cmd_item(icons.CMD_OPEN, K_CB + 1, item_at(((&cb_f[0 as usize]) as u64), 1), 0, 0)
@@ -1259,9 +1016,9 @@ fn build() {
     let nt: u64 = split_items(((&tabtext[0 as usize]) as u64), ((&s_tl[0 as usize]) as u64), 630)
     var tw: u64 = 200
     if nt > 0 && bw > 16 {
-        let teil: u64 = (bw - 16) / nt
-        if teil < tw {
-            tw = teil
+        let part: u64 = (bw - 16) / nt
+        if part < tw {
+            tw = part
         }
     }
     tw = tw / 4 * 4
@@ -1276,15 +1033,15 @@ fn build() {
     fuiscene.set_gap(br, 4)
     cmd_room()
     let _vis: u64 = fuiscene.cmd_end(br, bar_room(), K_OVF)
-    let _pf: usize = fuiscene.label(br, ((&s_titel[0 as usize]) as u64))
+    let _pf: usize = fuiscene.label(br, ((&s_title[0 as usize]) as u64))
     // ---- the text
-    let _ed: usize = fuiscene.editor(col, K_ED, bw - 16, ed_hoehe(bh))
+    let _ed: usize = fuiscene.editor(col, K_ED, bw - 16, ed_height(bh))
     // ---- the status line
     let _st: usize = fuiscene.label(col, ((&s_stat[0 as usize]) as u64))
 }
 
 fn aufbauen() -> bool {
-    var s_bad: [u8; 22] = "nedit: keine Flaeche\0\0"
+    var s_bad: [u8; 22] = "nedit: no surface\0\0\0\0\0"
     if !fuiscene.begin() {
         lineout.add_text((&s_bad[0 as usize]) as u64)
         lineout.end_line()
@@ -1296,8 +1053,8 @@ fn aufbauen() -> bool {
         lineout.end_line()
         return false
     }
-    fuied.ed_size(w_text, bw - 16, ed_hoehe(bh))
-    if !fuiscene.open(60, 40, bw, bh, ((&W_TITEL[0 as usize]) as u64), build) {
+    fuied.ed_size(w_text, bw - 16, ed_height(bh))
+    if !fuiscene.open(60, 40, bw, bh, ((&W_TITLE[0 as usize]) as u64), build) {
         lineout.add_text((&s_bad[0 as usize]) as u64)
         lineout.end_line()
         return false
@@ -1321,10 +1078,10 @@ fn behandeln(key: u64) {
                 var s_dd: [u8; 12] = "nedit: drop\0"
                 lineout.add_text((&s_dd[0 as usize]) as u64)
                 lineout.end_line()
-                let _o: bool = oeffnen((&zp[0 as usize]) as u64)
-                tabs_setzen()
-                stat_setzen()
-                titel_setzen()
+                let _o: bool = open_file((&zp[0 as usize]) as u64)
+                tabs_set()
+                status_set()
+                title_set()
             }
             let _c: u64 = ulib.drag_drop()
         }
@@ -1335,9 +1092,9 @@ fn behandeln(key: u64) {
         let res: u64 = fuiscene.dialog_result()
         if dlgart != 0 {
             dialog_fertig(res == 1)
-            tabs_setzen()
-            stat_setzen()
-            titel_setzen()
+            tabs_set()
+            status_set()
+            title_set()
         }
         fuiscene.focus(K_ED)
         return
@@ -1346,39 +1103,39 @@ fn behandeln(key: u64) {
         let pick: u64 = fuiscene.menu_pick()
         if pick >= 1 {
             let idx: u64 = pick - 1
-            if s_offen == 1 {
-                menue_datei(idx)
-            } else if s_offen == 2 {
-                menue_bearb(idx)
-            } else if s_offen == 3 {
-                menue_suchen(idx)
-            } else if s_offen == 9 {
+            if s_open == 1 {
+                menu_file(idx)
+            } else if s_open == 2 {
+                menu_edit(idx)
+            } else if s_open == 3 {
+                menu_find(idx)
+            } else if s_open == 9 {
                 // the overflow menu of the command bar: the same action as the button of that line
                 let hk: u64 = fuiscene.cmd_hidden_key(idx)
-                s_offen = 0
+                s_open = 0
                 if hk != 0 {
                     behandeln(hk)
                 }
             }
-            tabs_setzen()
-            stat_setzen()
-            titel_setzen()
+            tabs_set()
+            status_set()
+            title_set()
         }
-        s_offen = 0
+        s_open = 0
         return
     }
     if key >= K_CB && key < K_CB + 9 {
         let ci: u64 = key - K_CB
         if ci < 3 {
-            menue_datei(ci)
+            menu_file(ci)
         } else if ci < 8 {
-            menue_bearb(ci - 3)
+            menu_edit(ci - 3)
         } else {
-            menue_suchen(0)
+            menu_find(0)
         }
-        tabs_setzen()
-        stat_setzen()
-        titel_setzen()
+        tabs_set()
+        status_set()
+        title_set()
         return
     }
     if key == K_OVF {
@@ -1400,17 +1157,17 @@ fn behandeln(key: u64) {
             }
             hj = hj + 1
         }
-        s_offen = 9
+        s_open = 9
         fuiscene.menu_open(ox, oy, (hw + 3) / 4 * 4, ((&s_pm[0 as usize]) as u64), hn)
         return
     }
     if key >= K_MB && key < K_MB + 3 {
         let m: u64 = key - K_MB
-        var items: u64 = (msg.get((&M_DATEI[0 as usize]) as u64))
+        var items: u64 = (msg.get((&M_FILE[0 as usize]) as u64))
         if m == 1 {
             items = (msg.get((&M_BEARB[0 as usize]) as u64))
         } else if m == 2 {
-            items = (msg.get((&M_SUCHEN[0 as usize]) as u64))
+            items = (msg.get((&M_FIND[0 as usize]) as u64))
         }
         let n: usize = fuiscene.node_of_key(key)
         var x: u64 = 8
@@ -1429,13 +1186,12 @@ fn behandeln(key: u64) {
             }
             j = j + 1
         }
-        s_offen = m + 1
+        s_open = m + 1
         fuiscene.menu_open(x, y, (wm + 3) / 4 * 4, ((&s_pm[0 as usize]) as u64), cnt)
         return
     }
     if key >= K_TB && key < K_TB + MAXTAB {
-        reiter_zeigen(key - K_TB)
+        tab_show(key - K_TB)
         return
     }
 }
-

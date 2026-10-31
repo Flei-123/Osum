@@ -1,126 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/r8169.fi -- Runde RTL: der Chip, der auf fast jedem Brett sitzt.
-//
-// Runde HWNET hat `e1000.fi` gebaut und im eigenen Bericht aufgeschrieben,
-// warum sie den Realtek NICHT gebaut hat: QEMU kennt `-device rtl8139`,
-// und der RTL8139C sei "nicht derselbe Chip" wie der RTL8168/8169 -- vier
-// feste Sendepuffer statt Deskriptorringen. Ein Treiber ohne eine einzige
-// Messung sei eine Behauptung.
-//
-// Der erste Teil dieser Begruendung ist richtig und der zweite auch. Der
-// SCHLUSS daraus war falsch, und diese Runde sagt, warum:
-//
-//   Der RTL8139**C+** ist eine dritte Sache zwischen beiden. Ab Revision
-//   0x20 hat der 8139 einen ZWEITEN Betriebszustand, den C+-Modus, und in
-//   dem hat er genau das, was der 8169 hat: zwei Deskriptorringe im
-//   Hauptspeicher, 16 Oktett je Deskriptor, ein OWN-Bit, ein EOR-Bit,
-//   64-Bit-Pufferadressen. Der RTL8169 IST der herausgeloeste C+-Teil des
-//   8139C+, um Gigabit erweitert -- deshalb hiess Linux' Treiber dafuer
-//   `8139cp.c`, bevor `r8169.c` daraus wurde.
-//
-//   Und QEMU emuliert diesen C+-Modus. Die Zeichenketten `currCPlusTxDesc`,
-//   `currCPlusRxDesc` und `cplus_enabled` stehen im Binaerprogramm von
-//   qemu-system-x86_64 7.2. Das heisst: die Ringmechanik, die DMA, das
-//   OWN-Protokoll, die Unterbrechungen, der Ringueberlauf -- also die
-//   achtzig Prozent eines Netzkartentreibers, in denen die Fehler sitzen --
-//   sind hier WIRKLICH MESSBAR, auf demselben Rechner, ohne ein Brett.
-//
-// DESHALB IST DAS EIN TREIBER MIT ZWEI SPIELARTEN und nicht zwei Treiber:
-//
-//   VAR_CP    RTL8139C+ (10EC:8139, Revision >= 0x20). Gemessen in QEMU.
-//   VAR_8169  RTL8169/8168/8111/8101 (10EC:8169, 8168, 8161, 8167, 8136).
-//             Aus dem Datenblatt. KEIN Brett hat je geantwortet.
-//   VAR_8125  RTL8125/8125B/8126 (10EC:8125, 8126, 3000) -- 2,5 bzw. 5
-//             Gbit, RUNDE BLECH. Aus Linux' `r8169.c` und dem, was
-//             Realtek oeffentlich beschreibt. WEDER GEMESSEN NOCH
-//             MESSBAR: QEMU 7.2 hat kein Modell dieses Chips, und in
-//             diesem Verzeichnis liegt keine solche Karte. Was daran
-//             steht, steht mit seiner Quelle daneben.
-//
-// WARUM DER 8125 TROTZDEM HIER STEHT UND NICHT IN EINER EIGENEN DATEI:
-// er teilt mit dem 8169 den DESKRIPTOR (16 Oktett, OWN, EOR, FS, LS,
-// 64-Bit-Pufferadresse), die zwei Ringe, das Ruecksetzen, den
-// Empfangsfilter, den Adressweg ueber IDR0/IDR4 und die
-// C+-Betriebsart. Das sind die achtzig Prozent, in denen die Fehler
-// sitzen -- und die sind ueber VAR_CP in QEMU GEMESSEN. Was der 8125
-// anders macht, sind SECHS Stellen, und die stehen unten einzeln.
-//
-// DIE SECHS UNTERSCHIEDE, jeder mit seiner Quelle:
-//
-//   1. IMR und ISR sind 32 Bit breit und liegen auf 0x38 und 0x3C
-//      statt 16 Bit auf 0x3C und 0x3E.
-//      (Linux r8169.c: `IntrMask_8125 = 0x38, IntrStatus_8125 = 0x3c`)
-//   2. Der Sendeanstoss liegt auf 0x90 statt auf 0x38 -- UND er wird
-//      anders geschrieben: 16 Bit mit Bit 0, nicht 8 Bit mit Bit 6.
-//      (Linux r8169_main.c, `rtl8169_doorbell`:
-//       `RTL_W16(tp, TxPoll_8125, BIT(0))` gegen `RTL_W8(tp, TxPoll,
-//       NPQ)`.) Der zweite Halbsatz hat in der ersten Fassung dieser
-//      Datei GEFEHLT, und darum stand im Code die richtige Adresse mit
-//      dem falschen Wert. Siehe `tx_kick`.
-//   3. Der Unterbrechungsblock muss ueber INT_CFG0 (0x34) Bit 0 erst
-//      eingeschaltet werden.
-//      (Linux r8169.c: `INT_CFG0_8125 = 0x34`, `INT_CFG0_ENABLE_8125`)
-//   4. Der Chip startet im NEUEN Deskriptorformat (32 Oktett). Es wird
-//      ueber das MAC-OCP-Wort 0xEB58, Bit 0, auf das ALTE (16 Oktett)
-//      zurueckgestellt -- ohne das liest er die Ringe falsch.
-//      (Linux r8169.c, `rtl_hw_start_8125_common`:
-//       `r8168_mac_ocp_modify(tp, 0xeb58, 0x0001, 0x0000)`)
-//   5. RSS und die Mehrfach-Warteschlangen muessen aus: RSS_CTRL
-//      (0x4500) und Q_NUM_CTRL (0x4800) auf null.
-//      (Linux r8169.c: `RSS_CTRL_8125 0x4500`, `Q_NUM_CTRL_8125 0x4800`)
-//   6. Der PHY haengt hinter OCP, nicht hinter dem einfachen MDIO auf
-//      0x60. Dieser Treiber geht den OCP-Weg NICHT -- er liest die
-//      Verbindung nur aus PHYstatus (0x6C) und laesst den Chip selbst
-//      aushandeln. Das ist eine BEWUSSTE Luecke und keine Vergessenheit:
-//      ein PHY-Weg, den niemand ausprobieren kann, ist schlimmer als
-//      keiner, weil er beim ersten Fehler die Suche in die falsche
-//      Richtung schickt.
-//
-// WAS SICH DIE BEIDEN TEILEN, Register fuer Register -- und das ist der
-// Grund, warum die Messung etwas ueber den 8168 aussagt:
-//
-//   IDR0..5   0x00   die Ethernet-Adresse          gleich
-//   MAR0..7   0x08   der Mehrfachadressfilter      gleich
-//   TNPDS     0x20   Anfang des Senderings (64 Bit) gleich
-//   CR        0x37   Ruecksetzen, RE, TE           gleich
-//   IMR/ISR   0x3C   Maske und Ursache (16 Bit)    gleich
-//   TCR       0x40   Sendeeinstellung              gleich
-//   RCR       0x44   Empfangsfilter                gleich
-//   CR9346    0x50   Schreibschutz der Config      gleich
-//   RMS       0xDA   groesster Empfangsrahmen      gleich
-//   CpCmd     0xE0   C+-Betriebszustand            gleich (andere Bits)
-//   RDSAR     0xE4   Anfang des Empfangsrings      gleich
-//
-// WAS SICH UNTERSCHEIDET, vollstaendig aufgezaehlt -- mehr ist es nicht:
-//
-//   Sendeanstoss   8139C+: TPPoll auf 0xD9.  8169: TPPoll auf 0x38.
-//   Verbindung     8139C+: MSR 0x58 (Bit 0x04 = Verbindung SCHLECHT).
-//                  8169:   PHYstatus 0x6C (Bit 0x02 = Verbindung da).
-//   PHY            8139C+: der PHY sitzt fest im Chip, keine Wahl.
-//                  8169:   MDIO ueber PHYAR 0x60, Warten auf Bit 31.
-//   MTPS 0xEC      nur 8169: groesster Senderahmen in 128-Oktett-Schritten.
-//
-// Der Deskriptor ist bei beiden derselbe, und das ist der Kern:
-//
 //   +0  dw0   OWN(31) EOR(30) FS(29) LS(28) ... Laenge(13..0)
 //   +4  dw1   VLAN -- hier immer 0
 //   +8  dw2   Pufferadresse, untere 32 Bit
 //   +12 dw3   Pufferadresse, obere 32 Bit
-//
-// WAS DIESER TREIBER NICHT TUT, klar gesagt: keine Pruefsummenauslagerung
-// (der Stapel rechnet jede Pruefsumme selbst, wie bei virtio und e1000),
-// keine Segmentierung, keine Jumborahmen (2048-Oktett-Puffer), kein VLAN,
-// kein MSI/MSI-X, keine Unterbrechungsdaempfung, keine Warteschlange hoher
-// Prioritaet (THPDS bleibt leer), keine Statistikregister (DTCCR), kein
-// Aufwecken ueber das Netz, keine Energiezustaende.
-//
-// WAS AM 8168 AUF ECHTEM BLECH TROTZDEM SCHIEFGEHEN KANN, steht in
-// docs/REALHW.md Abschnitt "TEIL C" und ist NICHT beschoenigt: der 8168
-// hat je nach Ausfuehrung (es gibt ueber vierzig) eine eigene
-// PHY-Firmware, die Linux als Tabelle von Registerschreibvorgaengen
-// mitbringt. Dieser Treiber laedt KEINE PHY-Firmware. Er verlaesst sich
-// darauf, dass die Karte nach dem Ruecksetzen selbst aushandelt -- was
-// die meisten tun und manche nicht.
 
 import lib.kstate
 import serial
@@ -144,29 +25,19 @@ export {
 }
 
 // ------------------------------------------------------ der Datenbereich
-//
-// Dieselbe Seite wie netdev.fi und e1000.fi (kstate.NETDEV_OFF, 0x7A000),
-// und ein Stueck, das noch niemand benutzt. Die Aufteilung der Seite:
-//
-//   +0x000  netdev.fi, die Verteilerschicht      (2 * 0x40 + Liste)
-//   +0x400  e1000.fi, Einheit 0 und 1            (2 * 0x200)
-//   +0x800  DIESE DATEI, Einheit 0 und 1         (2 * 0x200)
-//   +0xC00  frei
-//
-// Eingetragen in tools/kernel/memmap.py ueber NETDEV_OFF/NETDEV_MAX.
 const UNIT_BASE: u64 = 0x800
 const UNIT_SPAN: u64 = 0x200
 const MAX_UNITS: u64 = 2
 
 const S_MMIO: u64 = 0x00 // BAR, erreichbar im ersten Gigabyte
 const S_BDF: u64 = 0x08
-const S_IDX: u64 = 0x10 // Platz in der Geraetetabelle von pci.fi
+const S_IDX: u64 = 0x10
 const S_READY: u64 = 0x18
-const S_MAC: u64 = 0x20 // sechs Oktett in einem Wort, niedrigstes zuerst
-const S_RING: u64 = 0x28 // der Lauf Rahmen, in dem beide Ringe liegen
-const S_RX_CUR: u64 = 0x30 // der Deskriptor, den dieser Treiber ansieht
-const S_TX_CUR: u64 = 0x38 // wohin der naechste Rahmen geschrieben wird
-const S_TX_CLEAN: u64 = 0x40 // der aelteste noch nicht eingesammelte
+const S_MAC: u64 = 0x20
+const S_RING: u64 = 0x28
+const S_RX_CUR: u64 = 0x30
+const S_TX_CUR: u64 = 0x38
+const S_TX_CLEAN: u64 = 0x40
 const S_IRQS: u64 = 0x48
 const S_RXP: u64 = 0x50
 const S_TXP: u64 = 0x58
@@ -177,16 +48,12 @@ const S_LINK: u64 = 0x78
 const S_DEVID: u64 = 0x80
 const S_VAR: u64 = 0x88 // VAR_CP oder VAR_8169
 const S_LASTISR: u64 = 0x90
-const S_RXERR: u64 = 0x98 // Rahmen, die der Chip als fehlerhaft meldete
-const S_OVERLEN: u64 = 0xA0 // Rahmen, die groesser als der Puffer waren
-const S_REV: u64 = 0xA8 // die PCI-Revision, die den C+-Modus verspricht
-const S_BARN: u64 = 0xB0 // welcher BAR der Speicher-BAR war
-const S_LINKCH: u64 = 0xB8 // wie oft die Verbindung gewechselt hat
-const S_RXOVW: u64 = 0xC0 // wie oft der Chip einen Rahmen mangels Platz verwarf
-// RUNDE O-NETZUI: die ausgehandelte Rate in Megabit je Sekunde, aus
-// demselben Lauf, der auch das Traegerbit holt (`read_link`). 0 heisst
-// UNBEKANNT -- auf der 8139er-Spielart gibt es kein Ratenbit, das
-// eine Aussage traegt, und dort bleibt es bei 0.
+const S_RXERR: u64 = 0x98
+const S_OVERLEN: u64 = 0xA0
+const S_REV: u64 = 0xA8
+const S_BARN: u64 = 0xB0
+const S_LINKCH: u64 = 0xB8
+const S_RXOVW: u64 = 0xC0
 const S_SPEED: u64 = 0xC8 // 0 = unbekannt, sonst 10/100/1000
 
 fn sc(u: u64, off: u64) -> u64 {
@@ -201,23 +68,16 @@ const SUB_ETHERNET: u64 = 0x00
 
 const VAR_NONE: u64 = 0
 const VAR_CP: u64 = 1 // RTL8139C+, der in QEMU gemessene
-const VAR_8169: u64 = 2 // RTL8169/8168/8111/8101, aus dem Datenblatt
+const VAR_8169: u64 = 2
 const VAR_8125: u64 = 3 // RTL8125/8126, Runde BLECH -- NICHT gemessen
 
-// Ab dieser PCI-Revision hat ein 8139 den C+-Modus. Ein RTL8139A oder
-// 8139B (Revision 0x00 bzw. 0x10) hat ihn NICHT -- er hat vier feste
-// Sendepuffer und einen einzigen Empfangsringpuffer, und dieser Treiber
-// weigert sich dann, statt eine Karte anzunehmen, die er nie zum Reden
-// bringt. Das ist die Ehrlichkeit, die HWNET zu Recht verlangt hat.
 const CPLUS_REV: u64 = 0x20
 
-// Die Register, mit ihren Namen aus dem RTL8169-Datenblatt (Realtek,
-// "RTL8169S/SB/SC Programming Guide") und dem 8139C+-Datenblatt.
 const R_IDR0: u64 = 0x00
 const R_IDR4: u64 = 0x04
 const R_MAR0: u64 = 0x08
 const R_TNPDS: u64 = 0x20 // Sendering, normale Prioritaet
-const R_THPDS: u64 = 0x28 // Sendering, hohe Prioritaet -- bleibt leer
+const R_THPDS: u64 = 0x28
 const R_CR: u64 = 0x37
 const R_TPPOLL69: u64 = 0x38 // nur 8169
 const R_IMR: u64 = 0x3C
@@ -226,8 +86,8 @@ const R_TCR: u64 = 0x40
 const R_RCR: u64 = 0x44
 const R_CR9346: u64 = 0x50
 const R_CONFIG1: u64 = 0x52
-const R_MSR: u64 = 0x58 // nur 8139: Media Status
-const R_BMSR39: u64 = 0x64 // nur 8139: das Statusregister des internen PHY
+const R_MSR: u64 = 0x58
+const R_BMSR39: u64 = 0x64
 const R_PHYAR: u64 = 0x60 // nur 8169: MDIO
 const R_PHYSTAT: u64 = 0x6C // nur 8169
 const R_RMS: u64 = 0xDA
@@ -236,18 +96,12 @@ const R_CPCMD: u64 = 0xE0
 const R_RDSAR: u64 = 0xE4
 const R_MTPS: u64 = 0xEC // nur 8169
 
-// ---- nur 8125, alle sechs Stellen aus dem Kopf dieser Datei
 const R_INTCFG0_25: u64 = 0x34 // Unterbrechungsblock einschalten
 const R_IMR25: u64 = 0x38 // 32 Bit
-const R_ISR25: u64 = 0x3C // 32 Bit, wird durch Zurueckschreiben geloescht
+const R_ISR25: u64 = 0x3C
 const R_TPPOLL25: u64 = 0x90
-// UND SEIN WERT, und der ist NICHT derselbe wie beim alten Chip.
-// Linux r8169_main.c, `rtl8169_doorbell`:
-//     if (rtl_is_8125(tp))  RTL_W16(tp, TxPoll_8125, BIT(0));
-//     else                  RTL_W8 (tp, TxPoll,      NPQ);
-// Also: SECHZEHN Bit und Bit 0 -- nicht acht Bit und Bit 6.
 const TPPOLL25_GO: u64 = 1
-const R_OCPDR: u64 = 0xB0 // MAC-OCP, ein 32-Bit-Fenster
+const R_OCPDR: u64 = 0xB0
 const R_RSSCTRL25: u64 = 0x4500
 const R_QNUMCTRL25: u64 = 0x4800
 const INTCFG0_EN: u64 = 1
@@ -259,8 +113,6 @@ const CR_RST: u64 = 16 // 1 << 4
 const CR_RE: u64 = 8 // 1 << 3
 const CR_TE: u64 = 4 // 1 << 2
 
-// ISR/IMR (0x3C/0x3E), sechzehn Bit. Das ISR wird geloescht, indem man
-// die gesetzten Bits ZURUECKSCHREIBT -- nicht durch Lesen wie beim e1000.
 const I_ROK: u64 = 1
 const I_RER: u64 = 2
 const I_TOK: u64 = 4
@@ -271,87 +123,37 @@ const I_FOVW: u64 = 64
 const I_TDU: u64 = 128
 const I_SERR: u64 = 32768
 
-// RCR (0x44). APM nimmt Rahmen an die eigene Adresse, AB den Rundruf.
-// AAP (alle Adressen) bleibt AUS -- ein Treiber, der alles annimmt, macht
-// die Fehlersuche in einem geteilten Netz unmoeglich.
 const RCR_AAP: u64 = 1
 const RCR_APM: u64 = 2
 const RCR_AM: u64 = 4
 const RCR_AB: u64 = 8
-// MXDMA (Bit 8..10) = 7: unbegrenzter DMA-Schub. RXFTH (Bit 13..15) = 7:
-// keine Schwelle, der Chip beginnt erst, wenn der Rahmen vollstaendig da
-// ist -- was ein Treiber ohne Frueh-Empfang braucht.
 const RCR_BASE: u64 = 59146 // 0xE70A = APM | AB | (7<<8) | (7<<13)
 
-// TCR (0x40): MXDMA 7 und die normale Zwischenrahmenluecke (IFG = 3).
 const TCR_BASE: u64 = 50333952 // 0x03000700
 
-// CpCmd (0xE0). Beim 8139C+ schalten die zwei untersten Bits den
-// C+-Modus ueberhaupt erst ein; beim 8169 sind sie belegt und werden
-// deshalb NICHT geschrieben.
 const CP_TXENB: u64 = 1
 const CP_RXENB: u64 = 2
-const CP_RXCHKSUM: u64 = 32 // aus: der Stapel rechnet selbst
-const CP_RXVLAN: u64 = 64 // aus: ein Etikett mitten im Rahmen
+const CP_RXCHKSUM: u64 = 32
+const CP_RXVLAN: u64 = 64
 
 const CR9346_UNLOCK: u64 = 192 // 0xC0
 const CR9346_LOCK: u64 = 0
 
-// MSR (0x58), nur 8139: das Bit meldet die Verbindung als SCHLECHT.
 const MSR_LINKB: u64 = 4
-// PHYstatus (0x6C), nur 8169.
 const PHYS_LINKOK: u64 = 2
-// RUNDE O-NETZUI: die drei Ratenbits desselben Registers. Realteks
-// Datenblatt zum RTL8169S (PHYstatus, 0x6C): Bit 3 = 1000MF,
-// Bit 2 = 100M, Bit 1 = 10M. Sie schliessen einander aus, und sie
-// gelten nur zusammen mit LinkOK -- ohne Traeger ist nichts
-// ausgehandelt.
 const PHYS_1000M: u64 = 16
 const PHYS_100M: u64 = 8
 const PHYS_10M: u64 = 4
 
-// PHYAR (0x60), nur 8169.
 const PHYAR_FLAG: u64 = 2147483648 // 1 << 31
 
-// Die Deskriptorbits. Bei BEIDEN Spielarten dieselben.
-const D_OWN: u64 = 2147483648 // 1 << 31 -- der Chip ist zustaendig
-const D_EOR: u64 = 1073741824 // 1 << 30 -- letzter Deskriptor des Rings
-const D_FS: u64 = 536870912 // 1 << 29 -- erstes Stueck des Rahmens
+const D_OWN: u64 = 2147483648
+const D_EOR: u64 = 1073741824
+const D_FS: u64 = 536870912
 const D_LS: u64 = 268435456 // 1 << 28 -- letztes Stueck
 const D_RES: u64 = 2097152 // 1 << 21 -- Empfangsfehler, Sammelbit
 const D_LEN: u64 = 16383 // Bit 13..0
 
-// DIE RINGE, und warum 128 und nicht 32 wie beim e1000. Das ist die
-// einzige Zahl dieser Runde, die GEMESSEN und dann geaendert wurde, und
-// der Vorgang gehoert in den Quelltext:
-//
-//   Mit 32 Plaetzen -- derselben Zahl, die `e1000.fi` benutzt -- lieferte
-//   dieser Treiber 64 KiB TCP mit 6589 KiB/s und `ooo=0`, aber 256 KiB
-//   nur mit 286 KiB/s und `ooo=41`. Kein Ringueberlauf beim Senden
-//   (`drops=0`), keine fehlerhaften Rahmen (`rerr=0`), alle Oktette
-//   angekommen -- nur eben elfmal langsamer als derselbe Stapel auf einem
-//   e1000.
-//
-//   Der Grund ist ein Unterschied zwischen den beiden EMULIERTEN Chips,
-//   nicht zwischen den Treibern: waechst Linux' Sendefenster auf 64 KiB,
-//   schiebt es ueber vierzig Rahmen ohne Pause hinaus. Findet QEMUs
-//   e1000 keinen freien Deskriptor, LEGT ER DEN RAHMEN BEISEITE und
-//   versucht es eine Sekunde spaeter noch einmal (`flush_queue_timer`,
-//   Runde HWNET hat genau das aufgeschrieben). QEMUs rtl8139 im C+-Modus
-//   WIRFT IHN WEG und setzt RxOverflow (`hw/net/rtl8139.c`,
-//   "descriptor %d is owned by host"). Der Verlust kostet eine
-//   Wiederholung von Linux, und die kostet einen Umlauf.
-//
-//   Ein echter 8168 verhaelt sich wie der rtl8139 und nicht wie QEMUs
-//   e1000 -- er hat einen kleinen FIFO und wirft danach weg. Die richtige
-//   Antwort ist also nicht, den Verlust hinzunehmen, sondern den Ring so
-//   gross zu machen, dass ein volles Sendefenster hineinpasst. Linux'
-//   r8169 nimmt aus demselben Grund 256 Plaetze; 128 sind hier gemessen
-//   genug und kosten 520 KiB.
-//
-// Das Datenblatt verlangt fuer TNPDS und RDSAR eine Ausrichtung auf 256
-// Oktett; ein Rahmen aus `mem.frame_run` ist auf 4096 ausgerichtet und
-// erfuellt das mit Abstand.
 const RING_SLOTS: u64 = 128
 const BUFSZ: u64 = 2048
 
@@ -361,27 +163,9 @@ const RXB_OFF: u64 = 0x02000 // 128 * 2048 = 0x40000
 const TXB_OFF: u64 = 0x42000 // 0x40000
 const RING_BYTES: u64 = 0x82000 // 532480 Oktett = 130 Rahmen
 
-// Dieselbe Regel wie in nvme.fi, virtio.fi und e1000.fi: ein Chip, der
-// nie antwortet, darf den Kern nicht anhalten.
 const SPIN_LIMIT: u64 = 2000000
 
 // ---------------------------------------------------- WELCHE CHIPS
-//
-// Die Geraetenummern, an die sich dieser Treiber HAENGT. Kurz gehalten:
-// ein Treiber, der sich an eine Nummer haengt, die er nie gesehen hat,
-// und dann fuer immer Nullen liest, ist schlimmer als einer, der
-// "unbekannt" sagt.
-//
-//   0x8139  RTL8139C+   -- QEMUs `-device rtl8139`. DER EINZIGE, DER HIER
-//                          WIRKLICH GEMESSEN IST. Nur ab Revision 0x20.
-//   0x8169  RTL8169/8110 -- die Gigabit-Karte im Steckplatz
-//   0x8168  RTL8168/8111 -- der haeufigste Chip auf Consumer-Brettern
-//   0x8161  RTL8168 in einer neueren Ausfuehrung
-//   0x8167  RTL8110SC
-//   0x8136  RTL8101E/8102E -- Fast Ethernet, dieselbe C+-Maschinerie
-//   0x8125  RTL8125/8125B -- 2,5 Gbit, Runde BLECH, NICHT gemessen
-//   0x8126  RTL8126       -- 5 Gbit, dieselbe Maschinerie
-//   0x3000  Killer E3100  -- ein 8125 unter anderem Namen
 fn supports(devid: u64) -> bool {
     if devid == 0x8139 { return true }
     if devid == 0x8169 { return true }
@@ -409,8 +193,6 @@ fn variant_of(devid: u64) -> u64 {
     return VAR_NONE
 }
 
-// Nur der 8139 braucht die Revisionspruefung -- die anderen Nummern gibt
-// es ohne C+-Maschinerie gar nicht.
 fn needs_cplus_rev(devid: u64) -> bool {
     return devid == 0x8139
 }
@@ -473,18 +255,10 @@ fn oversize_on(state: u64, u: u64) -> u64 {
     return kstate.get(state, sc(u, S_OVERLEN))
 }
 
-// WIE OFT DER CHIP EINEN RAHMEN MANGELS PLATZ WEGGEWORFEN HAT. Der
-// Verlust passiert IM CHIP und nicht im Treiber, also sieht ihn kein
-// Zaehler des Stapels -- er zeigt sich nur als Wiederholung auf der
-// Gegenseite. Genau deshalb wird er hier gezaehlt: ein Ring, der zu
-// klein ist, soll eine Zahl haben und keine Vermutung.
 fn rx_overflow_on(state: u64, u: u64) -> u64 {
     return kstate.get(state, sc(u, S_RXOVW))
 }
 
-// Was netsvc.fi als "features" ausgibt, ist bei virtio eine ausgehandelte
-// Bitkarte. Dieser Chip handelt nichts aus; die Zahl, die sagt, was er
-// IST, ist seine Geraetenummer -- also kommt die zurueck, wie beim e1000.
 fn features_on(state: u64, u: u64) -> u64 {
     return kstate.get(state, sc(u, S_DEVID))
 }
@@ -496,10 +270,6 @@ fn queue_size_on(state: u64, u: u64) -> u64 {
     return RING_SLOTS
 }
 
-// Der 8168 KANN MSI und MSI-X. Dieser Treiber nimmt den Pin, weil der
-// Kern fuer die Netzkarten genau zwei Vektoren hat (45 und 46, Runde
-// NETMON) und weil ein Pin auf jedem Brett funktioniert. Behauptet wird
-// nichts anderes.
 fn msix_on(state: u64, u: u64) -> bool {
     return false
 }
@@ -512,8 +282,6 @@ fn link_up_on(state: u64, u: u64) -> bool {
     return kstate.get(state, sc(u, S_LINK)) != 0
 }
 
-// RUNDE O-NETZUI: die ausgehandelte Rate, oder 0 fuer unbekannt.
-// Ohne Traeger gibt es nichts auszuhandeln -- dann ebenfalls 0.
 fn link_speed_on(state: u64, u: u64) -> u64 {
     if kstate.get(state, sc(u, S_LINK)) == 0 {
         return 0
@@ -569,10 +337,6 @@ fn var_of(state: u64, u: u64) -> u64 {
     return kstate.get(state, sc(u, S_VAR))
 }
 
-// Die Deskriptoren sind gewoehnlicher Speicher, den der CHIP liest und
-// schreibt. Jeder Zugriff geht durch die fluechtigen Urfunktionen, aus
-// demselben Grund wie in virtio.fi und e1000.fi: der Uebersetzer darf sie
-// weder verschieben noch zusammenfassen.
 fn d_dw0(t: u64, i: u64) -> u64 {
     return __mmio_read32((t + i * 16) as *mut u32) as u64
 }
@@ -592,9 +356,6 @@ fn d_set_addr(t: u64, i: u64, a: u64) {
 
 // --------------------------------------------------------- das Finden
 
-// DIE u-TE UNTERSTUETZTE REALTEK-KARTE AUF DEM BUS, in Busreihenfolge --
-// dieselbe Regel, die `virtio.find` und `e1000.find` benutzen, aus
-// demselben Grund: zwei Einheiten duerfen nicht dieselben Register nehmen.
 fn find(state: u64, u: u64) -> u64 {
     let n: u64 = pci.count(state)
     var i: u64 = 0
@@ -617,9 +378,6 @@ fn find(state: u64, u: u64) -> u64 {
     return pci.MAX_DEV
 }
 
-// Eine Karte ist brauchbar, wenn die Nummer in der Liste steht UND -- beim
-// 8139 -- die Revision den C+-Modus verspricht. Ein RTL8139B faellt hier
-// durch und wird von netdev.fi mit seinen Nummern genannt.
 fn usable(state: u64, i: u64) -> bool {
     let dev: u64 = pci.get(state, i, pci.E_DEVICE)
     if !supports(dev) {
@@ -634,12 +392,6 @@ fn usable(state: u64, i: u64) -> bool {
     return true
 }
 
-// DER SPEICHER-BAR, und warum gesucht und nicht festgeschrieben. Ein
-// RTL8139 legt seine Register auf BAR0 als PORTBEREICH und auf BAR1 als
-// Speicher. Ein RTL8169 macht es genauso. Ein RTL8168 ist PCIe und legt
-// den Speicher auf BAR2, weil BAR1 die obere Haelfte einer 64-Bit-Adresse
-// ist. Drei Chips, drei Nummern -- also wird der ERSTE Speicher-BAR
-// genommen und nicht geraten. Genau das tut Linux' r8169 auch.
 fn find_bar(state: u64, i: u64) -> u64 {
     var b: u64 = 0
     while b < 6 {
@@ -655,10 +407,6 @@ fn find_bar(state: u64, i: u64) -> u64 {
 }
 
 // ------------------------------------------------------ das Ruecksetzen
-//
-// Der Chip kommt aus der Firmware in einem unbekannten Zustand -- auf
-// einem echten Brett hat das BIOS ihn vielleicht fuer PXE benutzt. Das
-// Ruecksetzbit in CR setzt sich selbst zurueck, wenn der Chip fertig ist.
 fn chip_reset(state: u64, u: u64) -> bool {
     w8(state, u, R_CR, CR_RST)
     var spin: u64 = 0
@@ -674,13 +422,6 @@ fn chip_reset(state: u64, u: u64) -> bool {
 
 // ------------------------------------------------------------ die Adresse
 
-// DIE ETHERNET-ADRESSE, aus IDR0..5. Anders als beim e1000 gibt es hier
-// keinen zweiten Weg: der Chip laedt diese sechs Oktett beim Einschalten
-// selbst aus seinem EEPROM, und wenn dort nichts steht, steht auch in
-// keinem anderen Register etwas. Alles Nullen oder alles Einsen heisst
-// "keine Karte" -- und dann weigert sich der Treiber, statt eine Adresse
-// zu erfinden. Eine erfundene Adresse auf einem Draht, an dem jemand
-// anderes horcht, ist ein Fehler, der wie Paketverlust aussieht.
 fn read_mac(state: u64, u: u64) -> bool {
     let lo: u64 = r32(state, u, R_IDR0)
     let hi: u64 = r32(state, u, R_IDR4) & 0xFFFF
@@ -691,7 +432,6 @@ fn read_mac(state: u64, u: u64) -> bool {
     if v == 0xFFFFFFFFFFFF {
         return false
     }
-    // Ein Gruppenbit in der ersten Adresse waere keine Stationsadresse.
     if (lo & 1) != 0 {
         return false
     }
@@ -700,13 +440,6 @@ fn read_mac(state: u64, u: u64) -> bool {
 }
 
 // ---------------------------------------------------------- der PHY
-//
-// NUR BEIM 8169. Ein Lesevorgang setzt die Registernummer und wartet, bis
-// der Chip Bit 31 SETZT; ein Schreibvorgang setzt Bit 31 selbst und
-// wartet, bis der Chip es LOESCHT. Die beiden Richtungen warten auf
-// verschiedene Flanken -- das ist keine Nachlaessigkeit im Datenblatt,
-// sondern steht so darin, und Linux' `r8169_mdio_read`/`_write` machen es
-// genauso.
 fn mdio_read(state: u64, u: u64, reg: u64) -> u64 {
     if var_of(state, u) != VAR_8169 {
         return 0xFFFFFFFF
@@ -740,22 +473,9 @@ fn mdio_write(state: u64, u: u64, reg: u64, val: u64) -> bool {
     return false
 }
 
-// DIE VERBINDUNG, und die beiden Spielarten lesen sie an verschiedenen
-// Stellen. Beim 8139 meldet MSR Bit 2 die Verbindung als SCHLECHT -- das
-// Bit ist also invertiert; beim 8169 meldet PHYstatus Bit 1 sie als gut.
-// Faellt beim 8169 die Verbindung weg, sagt zusaetzlich das
-// Statusregister des PHY (MII-Register 1, Bit 2) dasselbe; gefragt wird
-// das aber nur, wenn PHYstatus nichts meldet, weil ein MDIO-Zugriff
-// hunderte Male teurer ist als ein Registerlesevorgang.
 fn read_link(state: u64, u: u64) {
     var v: u64 = 0
     if var_of(state, u) == VAR_CP {
-        // Der 8139 hat seinen PHY fest im Chip; sein Statusregister liegt
-        // direkt im Registerfenster auf 0x64, ohne MDIO. Bit 2 meldet die
-        // Verbindung -- und ZUSAETZLICH meldet MSR Bit 2 sie als schlecht.
-        // Gefragt werden beide, weil die zwei Register auf verschiedenen
-        // Wegen nachgefuehrt werden und ein Chip, bei dem sie sich
-        // widersprechen, keine Verbindung hat.
         if (r16(state, u, R_BMSR39) & 4) != 0 {
             if (r8(state, u, R_MSR) & MSR_LINKB) == 0 {
                 v = 1
@@ -777,9 +497,6 @@ fn read_link(state: u64, u: u64) {
         kstate.add(state, sc(u, S_LINKCH), 1)
     }
     kstate.set(state, sc(u, S_LINK), v)
-    // RUNDE O-NETZUI: die Rate daneben. NUR die 8169er-Spielart meldet
-    // sie (PHYstatus); auf der 8139er bleibt es bei 0 = unbekannt, und
-    // das ist die ehrliche Antwort statt einer geratenen 100.
     var mbit: u64 = 0
     if v != 0 && var_of(state, u) != VAR_CP {
         let ph: u64 = r8(state, u, R_PHYSTAT)
@@ -796,11 +513,6 @@ fn read_link(state: u64, u: u64) {
 
 // ------------------------------------------------------------- das Aufsetzen
 
-// RUNDE BLECH: `vec` ist der Meldevektor, den `netdev.fi` fuer DIESE
-// KARTE vergeben hat -- nicht `45 + u` aus der eigenen Einheitennummer.
-// Zwei Treiber mit je einer Karte haetten sonst beide Vektor 45, und
-// `trap.fi` gibt 45 an Karte 0. `vec == 0` heisst: keine Unterbrechung,
-// diese Karte wird abgefragt.
 fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     vec: u64) -> bool {
     if u >= MAX_UNITS {
@@ -834,8 +546,6 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     }
     kstate.set(state, sc(u, S_MMIO), base)
 
-    // Ohne dieses Bit darf der Chip Register beantworten, aber keinen
-    // Deskriptor holen -- die Gegenprobe `nicnobm` nimmt es ihm wieder weg.
     pci.enable_master(d)
 
     if !chip_reset(state, u) {
@@ -843,31 +553,16 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
         return false
     }
 
-    // Die Adresse wird NACH dem Ruecksetzen gelesen: der Chip laedt IDR
-    // aus seinem EEPROM neu, und vorher gelesene Werte waeren die der
-    // Firmware.
     if !read_mac(state, u) {
         kstate.set(state, sc(u, S_MMIO), 0)
         return false
     }
 
-    // Der Schreibschutz der Konfigurationsregister auf. Das Datenblatt
-    // verlangt das fuer Config1..5; TCR und RCR gehen auch ohne, aber
-    // Linux macht die Klammer um den ganzen Aufsetzvorgang, und ein
-    // halber Aufsetzvorgang ist schwerer zu lesen als ein ganzer.
     w8(state, u, R_CR9346, CR9346_UNLOCK)
 
-    // Der Mehrfachadressfilter auf null: keine Gruppe wird angenommen,
-    // was fuer diesen Stapel die Wahrheit ist.
     w32(state, u, R_MAR0, 0)
     w32(state, u, R_MAR0 + 4, 0)
 
-    // Der C+-Betriebszustand. Beim 8139 schalten ihn die zwei untersten
-    // Bits ueberhaupt erst ein -- ohne sie bleibt der Chip in seinem alten
-    // Zustand mit vier festen Sendepuffern, und kein Deskriptor wird je
-    // gelesen. Beim 8169 sind diese zwei Bits belegt und werden deshalb
-    // nicht angefasst; dort wird nur abgeschaltet, was der Stapel selbst
-    // macht (Pruefsumme) oder nicht versteht (VLAN).
     var cp: u64 = r16(state, u, R_CPCMD)
     cp = cp & (~CP_RXCHKSUM)
     cp = cp & (~CP_RXVLAN)
@@ -876,35 +571,14 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     }
     w16(state, u, R_CPCMD, cp & 0xFFFF)
 
-    // ============================================ NUR 8125, RUNDE BLECH
-    //
-    // Drei Schreibvorgaenge, ohne die dieser Chip die Ringe entweder gar
-    // nicht liest oder falsch liest. Alle drei stehen mit ihrer Quelle
-    // im Kopf dieser Datei; KEINER von ihnen ist gemessen, weil QEMU 7.2
-    // kein Modell dieses Chips hat.
     if var_of(state, u) == VAR_8125 {
-        // (a) DAS DESKRIPTORFORMAT. Der 8125 startet im NEUEN Format mit
-        //     32 Oktett je Deskriptor. Bit 0 im MAC-OCP-Wort 0xEB58
-        //     schaltet auf das ALTE mit 16 Oktett zurueck -- also auf
-        //     genau das, das dieser Treiber baut und das ueber VAR_CP in
-        //     QEMU gemessen ist. Ohne diese Zeile liest der Chip jeden
-        //     zweiten Deskriptor als Puffer.
         let eb58: u64 = ocp_read(state, u, OCP_DESCOLD)
         ocp_write(state, u, OCP_DESCOLD, eb58 & 0xFFFE)
-        // (b) EINE WARTESCHLANGE, KEIN RSS. Der Chip kann den Empfang auf
-        //     mehrere Ringe streuen; dieser Treiber hat einen. Beide
-        //     Register auf null heisst "Ring 0 bekommt alles".
         w32(state, u, R_RSSCTRL25, 0)
         w32(state, u, R_QNUMCTRL25, 0)
-        // (c) DER UNTERBRECHUNGSBLOCK. Beim 8125 liegt vor IMR/ISR noch
-        //     ein Schalter; ohne ihn bleibt das Maskenregister ohne
-        //     Wirkung und keine Meldung kommt an.
         w8(state, u, R_INTCFG0_25, INTCFG0_EN)
     }
 
-    // Der Speicher fuer beide Ringe und alle Puffer, in EINEM Lauf
-    // Rahmen: ein Deskriptor traegt eine PHYSISCHE Adresse, und die Halde
-    // verspricht nichts ueber Zusammenhang.
     let r: u64 = mem.frame_run(state, RING_BYTES / mem.FRAME_SIZE)
     if r == 0 {
         kstate.set(state, sc(u, S_MMIO), 0)
@@ -917,41 +591,25 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     }
     kstate.set(state, sc(u, S_RING), r)
 
-    // Der groesste Rahmen, den der Chip annehmen darf. Alles darueber
-    // wirft er weg, statt in den naechsten Puffer weiterzuschreiben --
-    // das ist die Zusage, auf der der Fall "Rahmen groesser als MTU"
-    // beruht.
     w16(state, u, R_RMS, BUFSZ)
     if var_of(state, u) != VAR_CP {
-        // Groesster Senderahmen, in Schritten von 128 Oktett. Den 8139C+
-        // gibt es ohne dieses Register; 8169 und 8125 haben es beide.
         w8(state, u, R_MTPS, 0x3B)
     }
 
     rx_setup(state, u)
     tx_setup(state, u)
 
-    // Die Warteschlange hoher Prioritaet wird nicht benutzt, aber ihr
-    // Zeiger darf nicht auf Zufall zeigen: ein Chip, der sie anstoesst,
-    // wuerde sonst irgendwo im Speicher lesen.
     w32(state, u, R_THPDS, 0)
     w32(state, u, R_THPDS + 4, 0)
 
-    // DIE UNTERBRECHUNG WIRD SCHARFGEMACHT, BEVOR DIE RINGE LAUFEN --
-    // dieselbe Reihenfolge, die virtio und e1000 benutzen.
     intx_arm(state, u, i, armed, vec)
 
-    // Erst jetzt Senden und Empfangen einschalten. Das Datenblatt
-    // verlangt, dass RCR NACH dem Setzen von RE geschrieben wird; Linux
-    // haelt sich daran, und ein Chip, der den Filter vor dem Einschalten
-    // bekommt, nimmt auf manchen Ausfuehrungen gar nichts an.
     w8(state, u, R_CR, CR_TE | CR_RE)
     w32(state, u, R_TCR, TCR_BASE)
     w32(state, u, R_RCR, RCR_BASE)
 
     w8(state, u, R_CR9346, CR9346_LOCK)
 
-    // Das ISR wird geloescht, indem man zurueckschreibt, was darin steht.
     ack_all(state, u)
     if armed {
         set_imr(state, u, I_ROK | I_RER | I_TOK | I_TER | I_RXOVW
@@ -974,10 +632,6 @@ fn rx_setup(state: u64, u: u64) {
     while i < RING_SLOTS {
         d_set_addr(t, i, r + RXB_OFF + i * BUFSZ)
         d_set_dw1(t, i, 0)
-        // Die Puffergroesse steht im selben Feld, in dem spaeter die
-        // empfangene Laenge steht. EOR auf dem letzten Deskriptor ist
-        // das, was den Ring zu einem Ring macht: es gibt kein
-        // Laengenregister wie beim e1000.
         var f: u64 = D_OWN | BUFSZ
         if i == RING_SLOTS - 1 {
             f = f | D_EOR
@@ -985,18 +639,12 @@ fn rx_setup(state: u64, u: u64) {
         d_set_dw0(t, i, f)
         i = i + 1
     }
-    // Die Deskriptoren stehen VOLLSTAENDIG im Speicher, bevor der Chip
-    // erfaehrt, wo sie liegen.
     arch.barrier_write()
     w32(state, u, R_RDSAR, t & 0xFFFFFFFF)
     w32(state, u, R_RDSAR + 4, (t >> 32) & 0xFFFFFFFF)
     kstate.set(state, sc(u, S_RX_CUR), 0)
 }
 
-// Ein Rahmen, oder 0 -- dieselbe Form, die `virtio.rx_take_on` und
-// `e1000.rx_take_on` haben, damit `inet.pump` nicht weiss, mit welchem
-// Chip es redet. `slot` kommt zurueck, damit der Aufrufer den Puffer
-// wieder hergeben kann, sobald er die Oktette herauskopiert hat.
 fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     if !ready_on(state, u) {
         return 0
@@ -1006,20 +654,11 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     let cur: u64 = kstate.get(state, sc(u, S_RX_CUR))
     let dw0: u64 = d_dw0(t, cur)
     if (dw0 & D_OWN) != 0 {
-        // Der Chip ist noch zustaendig: hier liegt nichts.
         return 0
     }
-    // Der Chip hat die Oktette geschrieben, BEVOR er OWN geloescht hat;
-    // diese Seite muss sie in derselben Reihenfolge LESEN.
     arch.barrier_read()
     kstate.set(state, sc(u, S_RX_CUR), (cur + 1) % RING_SLOTS)
 
-    // Die gemeldete Laenge SCHLIESST DIE VIER OKTETT DER PRUEFSUMME EIN.
-    // Das ist bei diesem Chip so und nicht anders, auf echtem Blech wie in
-    // QEMU (`rxdw0 |= size + 4` in hw/net/rtl8139.c), und Linux' r8169
-    // zieht an derselben Stelle dieselben vier Oktett ab. Wer das
-    // vergisst, hat vier Oktett Muell am Ende jedes Rahmens und einen
-    // Stapel, der jede Pruefsumme verwirft.
     let raw: u64 = dw0 & D_LEN
     if (dw0 & D_RES) != 0 || (dw0 & D_FS) == 0 || (dw0 & D_LS) == 0 {
         kstate.add(state, sc(u, S_RXERR), 1)
@@ -1039,9 +678,6 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     return len
 }
 
-// Der Puffer ist wieder frei: OWN zurueckgeben. DAS ist die Klingel --
-// anders als beim e1000 gibt es kein Endregister, das man schreiben
-// muesste, der Chip sieht das Bit beim naechsten Umlauf.
 fn rx_recycle_on(state: u64, u: u64, id: u64) {
     if id >= RING_SLOTS {
         return
@@ -1054,7 +690,6 @@ fn rx_recycle_on(state: u64, u: u64, id: u64) {
     if id == RING_SLOTS - 1 {
         f = f | D_EOR
     }
-    // Adresse und Laenge stehen, BEVOR OWN gesetzt wird.
     arch.barrier_write()
     d_set_dw0(t, id, f)
 }
@@ -1082,11 +717,6 @@ fn tx_setup(state: u64, u: u64) {
     kstate.set(state, sc(u, S_TX_CLEAN), 0)
 }
 
-// DAS EINSAMMELN. Der e1000 hat ein Kopfregister, das der Chip fortsetzt;
-// dieser Chip hat keines. Was ein fertiger Deskriptor ist, steht nur in
-// ihm selbst: der Chip loescht OWN, wenn er den Rahmen abgegeben hat. Also
-// laeuft dieser Treiber vom aeltesten noch offenen Deskriptor nach vorn,
-// solange OWN geloescht ist -- und genau das macht Linux' r8169 auch.
 fn tx_reclaim(state: u64, u: u64) {
     let t: u64 = ring(state, u) + TXD_OFF
     var clean: u64 = kstate.get(state, sc(u, S_TX_CLEAN))
@@ -1103,9 +733,6 @@ fn tx_reclaim(state: u64, u: u64) {
     kstate.set(state, sc(u, S_TX_CLEAN), clean)
 }
 
-// Wieviele Deskriptoren frei sind. Einer bleibt immer leer: voll und leer
-// waeren sonst derselbe Zustand, und ein Ring, der beides nicht
-// unterscheiden kann, verliert bei jedem Umlauf einen Rahmen.
 fn tx_room_on(state: u64, u: u64) -> u64 {
     if !ready_on(state, u) {
         return 0
@@ -1126,15 +753,6 @@ fn tx_room_on(state: u64, u: u64) -> u64 {
 }
 
 // ---------------------------------------- das Unterbrechungsregister
-//
-// Beim 8139C+ und beim 8169 sind IMR und ISR SECHZEHN Bit breit und
-// liegen auf 0x3C und 0x3E. Beim 8125 sind sie ZWEIUNDDREISSIG Bit
-// breit und liegen auf 0x38 und 0x3C -- also ueberlappt das ISR des
-// einen genau mit dem IMR des anderen. Wer das verwechselt, schaltet
-// beim Quittieren die Maske ab.
-//
-// Drei Funktionen statt drei `if` an neun Stellen: der Unterschied
-// steht damit AN EINER Stelle, so wie `tx_kick` es fuer den Anstoss tut.
 fn set_imr(state: u64, u: u64, mask: u64) {
     if var_of(state, u) == VAR_8125 {
         w32(state, u, R_IMR25, mask)
@@ -1166,10 +784,6 @@ fn ack_all(state: u64, u: u64) {
     w16(state, u, R_ISR, 0xFFFF)
 }
 
-// MAC-OCP: ein Fenster von 32 Bit auf 0xB0. Lesen heisst, die Adresse
-// hineinzuschreiben und dasselbe Register zurueckzulesen; Schreiben
-// heisst, Adresse und Wert mit gesetztem Bit 31 hineinzuschreiben.
-// (Linux r8169.c, `r8168_mac_ocp_read`/`_write`.) NUR 8125.
 fn ocp_read(state: u64, u: u64, reg: u64) -> u64 {
     w32(state, u, R_OCPDR, (reg << 15) & 0xFFFFFFFF)
     return r32(state, u, R_OCPDR) & 0xFFFF
@@ -1180,8 +794,6 @@ fn ocp_write(state: u64, u: u64, reg: u64, val: u64) {
         (OCP_FLAG | ((reg << 15) & 0x7FFF0000) | (val & 0xFFFF)) & 0xFFFFFFFF)
 }
 
-// Der Anstoss. Die drei Spielarten haben ihn an verschiedenen Stellen,
-// und das ist der einzige Unterschied im gesamten Sendeweg.
 fn tx_kick(state: u64, u: u64) {
     let v: u64 = var_of(state, u)
     if v == VAR_CP {
@@ -1189,40 +801,12 @@ fn tx_kick(state: u64, u: u64) {
         return
     }
     if v == VAR_8125 {
-        // HIER STAND EIN FEHLER, und er ist ein Musterbeispiel dafuer,
-        // warum der Eigner den igc-Treiber abbestellt hat.
-        //
-        // Es stand `w8(..., R_TPPOLL25, 64)` da: die ADRESSE vom 8125
-        // (0x90, richtig aus Linux uebernommen), aber Breite und Bit
-        // vom ALTEN Chip (8 Bit, NPQ = Bit 6). Linux macht an dieser
-        // Stelle ausdruecklich zweierlei: `RTL_W16(TxPoll_8125,
-        // BIT(0))` fuer den 8125 und `RTL_W8(TxPoll, NPQ)` fuer alles
-        // aeltere. Mein Kopf hat die Adresse ersetzt und den Wert
-        // stehen lassen.
-        //
-        // WAS DAS AUF ECHTEM BLECH GEHEISSEN HAETTE: Der Chip laeuft
-        // an, der Verbindungsstatus stimmt, Empfang funktioniert -- und
-        // es geht kein einziges Paket hinaus, weil der Sendeanstoss nie
-        // ankommt. Das ist die unangenehmste Sorte Fehler: kein
-        // Absturz, keine Meldung, nur ein halb totes Geraet.
-        //
-        // UND ES IST HIER NICHT AUFGEFALLEN, weil dieser Zweig in QEMU
-        // 7.2 nicht laufen KANN. Kein Modell des Chips, keine Karte im
-        // Haus. Gefunden hat ihn erst der Abgleich Zeile fuer Zeile
-        // gegen Linux -- also genau das Verfahren, das ein ungemessener
-        // Treiber IMMER braucht und das bei 800 Zeilen igc niemand
-        // durchhaelt.
         w16(state, u, R_TPPOLL25, TPPOLL25_GO)
         return
     }
     w8(state, u, R_TPPOLL69, 64)
 }
 
-// Ein Rahmen hinaus. `false` heisst: der Ring war voll oder der Rahmen war
-// zu gross -- der Aufrufer entscheidet, ob er ihn wegwirft oder es noch
-// einmal versucht, genau wie bei virtio und e1000. Die beiden Faelle
-// werden GETRENNT gezaehlt, weil sie verschiedene Fehler sind: ein voller
-// Ring ist Last, ein zu grosser Rahmen ist ein Fehler im Stapel darueber.
 fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
     if !ready_on(state, u) || n == 0 {
         return false
@@ -1244,10 +828,6 @@ fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
         __mmio_write8((buf + k) as *mut u8, __mmio_read8((src + k) as *mut u8))
         k = k + 1
     }
-    // Ein Rahmen unter 60 Oktett muss aufgefuellt werden. Der Chip tut das
-    // selbst (TCR sorgt dafuer), aber der Puffer darf dahinter nichts
-    // stehen haben, was aus einem frueheren Rahmen stammt -- sonst
-    // wandern fremde Oktette auf den Draht.
     var pad: u64 = n
     while pad < 60 {
         __mmio_write8((buf + pad) as *mut u8, 0 as u8)
@@ -1263,10 +843,6 @@ fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
     if id == RING_SLOTS - 1 {
         f = f | D_EOR
     }
-    // Der Deskriptor ist vollstaendig, BEVOR OWN gesetzt wird, und OWN
-    // steht, BEVOR angestossen wird. Auf x86 behalten Schreibvorgaenge
-    // ihre Reihenfolge; die fluechtigen Urfunktionen sind das, was den
-    // Uebersetzer daran hindert, sie zu vertauschen.
     arch.barrier_write()
     d_set_dw0(t, id, f)
     arch.barrier_write()
@@ -1279,9 +855,6 @@ fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
 
 // ------------------------------------------------------- die Unterbrechung
 
-// Das ISR wird geloescht, indem man ZURUECKSCHREIBT, was darin stand --
-// nicht durch Lesen wie beim e1000. Wer das verwechselt, bekommt eine
-// Unterbrechung, die nie aufhoert, und eine Maschine, die steht.
 fn irq_on(state: u64, u: u64) {
     if !present_on(state, u) {
         return
@@ -1295,16 +868,11 @@ fn irq_on(state: u64, u: u64) {
     if (cause & I_LINKCHG) != 0 {
         read_link(state, u)
     }
-    // RxOverflow und RxFIFOOver heissen beide: der Chip hatte einen Rahmen
-    // und keinen Platz dafuer. Auf diesem Chip ist danach nichts zu
-    // reparieren -- der Ring laeuft weiter, sobald der Treiber Puffer
-    // zurueckgibt -- aber die Zahl gehoert festgehalten.
     if (cause & I_RXOVW) != 0 || (cause & I_FOVW) != 0 {
         kstate.add(state, sc(u, S_RXOVW), 1)
     }
 }
 
-// Liegt etwas bereit? Ein Lesevorgang auf gewoehnlichem Speicher.
 fn poll_on(state: u64, u: u64) -> bool {
     if !ready_on(state, u) {
         return false
@@ -1316,17 +884,10 @@ fn poll_on(state: u64, u: u64) -> bool {
 
 // ---------------------------------------------------- den Vektor scharfmachen
 
-// Der Unterbrechungsstift durch den I/O-APIC. PCI-Leitungen sind
-// pegelgesteuert und aktiv niedrig -- dieselben sechs Zeilen, die
-// `virtio.intx_arm` und `e1000.intx_arm` haben, und aus demselben Grund
-// nicht teilbar: der Vektor gehoert zur Karte.
 fn intx_arm(state: u64, u: u64, i: u64, armed: bool, vec: u64) {
     let d: u64 = pci.get(state, i, pci.E_BDF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
     if vec == 0 {
-        // Diese Karte hat keinen Vektor bekommen. Die Leitung wird gar
-        // nicht erst geroutet -- eine Umleitung auf einen Vektor, den
-        // niemand behandelt, waere schlimmer als keine.
         return
     }
     let gsi: u64 = pci.get(state, i, pci.E_IRQLINE)
@@ -1339,8 +900,6 @@ fn intx_arm(state: u64, u: u64, i: u64, armed: bool, vec: u64) {
     }
 }
 
-// Die Gegenprobe braucht einen Weg, einem sonst gleichen Kern die Karte
-// wegzunehmen.
 fn shut_down_on(state: u64, u: u64) {
     if !present_on(state, u) {
         return
@@ -1353,17 +912,6 @@ fn shut_down_on(state: u64, u: u64) {
 }
 
 // ==================================================== DIE SELBSTPRUEFUNG
-//
-// Zwei Zusagen dieses Treibers lassen sich mit einem Ping nicht pruefen,
-// weil sie erst eintreten, wenn etwas SCHIEFGEHT: der volle Sendering und
-// der zu grosse Rahmen. Beide werden hier ABSICHTLICH herbeigefuehrt und
-// gezaehlt, damit eine Zahl dasteht und keine Behauptung.
-//
-// Der Ring wird voll gemacht, indem dem Chip das Senden abgeschaltet wird
-// (CR ohne TE). Dann raeumt niemand mehr ab, der Ring laeuft nach genau
-// RING_SLOTS-1 Rahmen ueber, und jeder weitere Versuch muss `false`
-// liefern und den Zaehler erhoehen. Danach wird der Sendeteil neu
-// aufgesetzt, damit die Maschine anschliessend wieder reden kann.
 fn selftest_on(state: u64, u: u64) {
     var s_head: [u8; 13] = "r8169: self \0"
     var s_fit: [u8; 6] = "fit=\0\0"
@@ -1379,8 +927,6 @@ fn selftest_on(state: u64, u: u64) {
     if !ready_on(state, u) {
         return
     }
-    // Ein Rahmen, der nirgendwo ankommen soll: Zieladresse ist die eigene,
-    // Typfeld 0x88B5 (von der IEEE fuer eigene Versuche freigehalten).
     var q: u64 = 0
     while q < 6 {
         payload[q as usize] = mac_at_on(state, u, q) as u8
@@ -1393,7 +939,6 @@ fn selftest_on(state: u64, u: u64) {
     let drop0: u64 = kstate.get(state, sc(u, S_TXDROP))
     let over0: u64 = kstate.get(state, sc(u, S_OVERLEN))
 
-    // Das Senden abschalten: ab hier raeumt der Chip nichts mehr ab.
     w8(state, u, R_CR, CR_RE)
     var fit: u64 = 0
     var tries: u64 = 0
@@ -1403,8 +948,6 @@ fn selftest_on(state: u64, u: u64) {
         }
         tries = tries + 1
     }
-    // Ein Rahmen, der groesser ist als der Puffer. Er darf den Ring nicht
-    // einmal anfassen.
     let big: bool = tx_frame_on(state, u, (&payload[0]) as u64, BUFSZ + 1)
 
     serial.puts((&s_head[0]) as u64)
@@ -1426,18 +969,12 @@ fn selftest_on(state: u64, u: u64) {
     serial.dec(RING_SLOTS)
     serial.nl()
 
-    // Und wieder aufbauen, damit der Rest des Laufs eine brauchbare Karte
-    // vorfindet: die Zaehler der Selbstpruefung bleiben stehen, der Ring
-    // faengt von vorn an.
     kstate.set(state, sc(u, S_TXP), 0)
     kstate.set(state, sc(u, S_TXB), 0)
     tx_setup(state, u)
     w8(state, u, R_CR, CR_TE | CR_RE)
 }
 
-// Was der Chip ueber sich selbst sagt, roh. Auf einem echten Brett ist
-// das die Zeile, an der man sieht, ob ueberhaupt jemand antwortet: ein
-// Chip, der nicht da ist, liefert 0xFFFFFFFF auf jedes Register.
 fn print_regs_on(state: u64, u: u64) {
     var s_h: [u8; 13] = "r8169: reg \0\0"
     var s_var: [u8; 5] = "var=\0"
@@ -1474,10 +1011,8 @@ fn print_regs_on(state: u64, u: u64) {
         serial.puts((&s_phy[0]) as u64)
         serial.hex(r8(state, u, R_PHYSTAT))
     }
-    // RUNDE BLECH: die Spielart, die NICHT gemessen ist, sagt es selbst
-    // -- auf einem fremden Brett ist das die erste Zeile, die zaehlt.
     if var_of(state, u) == VAR_8125 {
-        var s_ung: [u8; 39] = "  8125: aus der Quelle, NICHT gemessen\0"
+        var s_ung: [u8; 38] = "  8125: from the source, NOT measured\0"
         serial.puts((&s_ung[0]) as u64)
     }
     serial.nl()

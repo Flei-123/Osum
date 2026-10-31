@@ -1,60 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/fat.fi -- Runde K14: FAT32, lesend UND schreibend.
-//
-// DAS IST DAS ERSTE DATEISYSTEM DIESES KERNELS, DAS ER NICHT SELBST
-// ERFUNDEN HAT. OFS (`kernel/fs.fi`) ist Osums eigenes: der Kernel
-// schreibt es, der Kernel liest es, und wenn beide Seiten denselben
-// Fehler machen, faellt es nie auf. FAT32 ist das Gegenteil davon --
-// das Format steht seit 1996 fest, `mkfs.vfat` legt es an, `mcopy`
-// schreibt hinein, und wenn Osum ein Oktett anders versteht, ist Osum
-// im Unrecht. Genau deshalb ist es die ehrlichste Pruefung, die dieses
-// Projekt bisher hatte: `tools/k14/run.sh` laesst die echten
-// Linux-Werkzeuge das Abbild bauen und haelt Osums Lesung Oktett fuer
-// Oktett dagegen -- und umgekehrt liest `mdir`/`mcopy` das, was Osum
-// geschrieben hat.
-//
-// DAS FORMAT, so weit dieser Treiber es braucht:
-//
-//   Sektor 0     DER BPB. Oktettzahl je Sektor (11), Sektoren je
-//                Verband (13), reservierte Sektoren (14), Zahl der
-//                Zuordnungstafeln (16), Sektoren je Tafel (36),
-//                Wurzelverband (44), und 0x55 0xAA am Ende.
-//   dahinter     DIE ZUORDNUNGSTAFEL, ein- oder zweimal. Je Verband
-//                vier Oktette: die Nummer des naechsten Verbands, oder
-//                >= 0x0FFFFFF8 fuer "hier hoert die Kette auf", oder 0
-//                fuer "frei". Die obersten vier Bits gehoeren nicht
-//                dazu und werden weder gelesen noch geschrieben -- das
-//                ist die Stelle, an der ein Treiber ein fremdes
-//                Dateisystem still kaputtmacht.
-//   dahinter     DIE DATEN, in Verbaenden. Verband 2 ist der erste.
-//
-//   Ein VERZEICHNIS ist eine Datei aus Eintraegen zu 32 Oktetten:
-//   Name 8+3, Merkmale (11), Verband hoch (20) und niedrig (26),
-//   Groesse (28). Ein Eintrag mit dem Merkmal 0x0F ist KEIN Eintrag,
-//   sondern ein Stueck eines LANGEN NAMENS -- dreizehn Zeichen in
-//   UTF-16, rueckwaerts vor dem eigentlichen Eintrag stehend, mit
-//   einer Pruefsumme des kurzen Namens darin. Wer die nicht liest,
-//   sieht auf jeder heutigen Platte nur "HELLO~1.TXT".
-//
-// WAS DIESER TREIBER KANN UND WAS NICHT -- die Liste steht auch in
-// docs/ROUNDK14.md, und keine Zeile davon ist geschoent:
-//
-//   KANN:  Lesen (kurze und lange Namen, Unterverzeichnisse, Ketten
-//          ueber beliebig viele Verbaende), Schreiben in eine
-//          bestehende Datei, Verlaengern mit neuen Verbaenden, Anlegen
-//          einer Datei, Anlegen eines Verzeichnisses, Loeschen,
-//          Umbenennen im selben Verzeichnis, Kuerzen.
-//   KANN NICHT: Sektoren, die nicht 512 Oktette gross sind (der
-//          Treiber lehnt sie beim Einhaengen ab, statt zu raten);
-//          FAT12 und FAT16; Namen laenger als 63 Zeichen; Zeichen
-//          ausserhalb von US-ASCII in einem NEUEN Namen (gelesen
-//          werden sie, geschrieben nicht -- eine halbe UTF-16-Wandlung
-//          waere schlimmer als keine).
-//
-// WO DER ZUSTAND LIEGT: `kstate.FAT_OFF`, eine Seite. Darin die
-// Kennzahlen je Einhaengung, eine kleine Knotentafel und vier
-// Arbeitssektoren. Ein Kernelstapel ist 8 KiB; vier Sektoren darauf
-// waeren die Haelfte davon.
 
 profile kernel
 
@@ -72,18 +17,16 @@ export { ops, mount_probe, release, sync, MAX_NODES }
 
 const BS: u64 = 512
 
-// ------------------------------------------------- die Seite, aufgeteilt
-
 const SB_OFF: u64 = 0x000 // 8 Einhaengungen zu 128 Oktetten
 const SB_BYTES: u64 = 128
-const NODE_OFF: u64 = 0x400 // 16 Knoten zu 48 Oktetten
+const NODE_OFF: u64 = 0x400
 const NODE_BYTES: u64 = 48
 const MAX_NODES: u64 = 16
-const FATBUF: u64 = 0x700 // ein Sektor der Zuordnungstafel
+const FATBUF: u64 = 0x700
 const DIRBUF: u64 = 0x900 // ein Verzeichnissektor
 const DATBUF: u64 = 0xB00 // ein Datensektor
 const LFNBUF: u64 = 0xD00 // der Zusammenbau eines langen Namens
-const CMPBUF: u64 = 0xE00 // der Name, gegen den verglichen wird
+const CMPBUF: u64 = 0xE00
 // r208: the chain cache, shared by all mounts: 4 slots x 32 bytes
 // (mount+1, first cluster, index, cluster) and a round-robin counter.
 const CACHE_OFF: u64 = 0xF00
@@ -93,89 +36,27 @@ const CACHE_SLOTS: u64 = 4
 // die Felder je Einhaengung
 const S_VALID: u64 = 0
 const S_SPC: u64 = 8 // Sektoren je Verband
-const S_FATLBA: u64 = 16 // erster Sektor der Zuordnungstafel (absolut)
+const S_FATLBA: u64 = 16
 const S_DATALBA: u64 = 24 // erster Datensektor (absolut)
 const S_ROOT: u64 = 32 // Wurzelverband
-const S_CLUSTERS: u64 = 40 // wie viele Verbaende es gibt
+const S_CLUSTERS: u64 = 40
 const S_FATSEC: u64 = 48 // Sektoren je Tafel
 const S_NFATS: u64 = 56 // wie viele Tafeln
-// ROUNDE K14, ZWEITER ANLAUF: die Zahl der FREIEN VERBAENDE, laufend
-// mitgefuehrt. Der erste Anlauf hat sie beim Aushaengen EINMAL
-// gerechnet -- und dafuer die ganze Zuordnungstafel gelesen: bei
-// 129022 Verbaenden sind das 1008 Sektoren, und zwar mit
-// ABGESCHALTETEN UNTERBRECHUNGEN, weil die Sperre der Platte gehalten
-// wird. In der Vollabnahme hat unter Last genau darin ein Lesevorgang
-// die Zeitgrenze gerissen, und danach war die Platte fuer den Rest
-// des Laufs unlesbar.
-//
-// Jetzt wird die Zahl beim Einhaengen EINMAL aus der FSInfo-Seite
-// gelesen (`mkfs.vfat` schreibt sie hinein) und danach bei jeder
-// Zuteilung und jeder Freigabe um eins veraendert. Das ist O(1) statt
-// O(Platte) -- und es ist genau das, was Linux' vfat tut.
-//
-// S_KNOWN sagt, ob die Zahl ueberhaupt etwas bedeutet: eine Platte,
-// die unsauber ausgehaengt wurde, traegt dort 0xFFFFFFFF, und dann
-// wird beim Aushaengen doch gerechnet -- der seltene Fall, fuer den
-// die teure Schleife gedacht war.
 const S_FREE: u64 = 64 // freie Verbaende
-const S_KNOWN: u64 = 72 // 1 = die Zahl oben stimmt
-const S_FSINFO: u64 = 80 // Sektor der FSInfo-Seite, relativ zur Partition
-// 1 = an dieser Platte wurde geschrieben, seit sie eingehaengt ist.
-// Die FSInfo-Seite traegt dann "unbekannt" -- und zwar EINMAL
-// geschrieben und nicht bei jedem `write`. Ein `cp` von fuenftausend
-// Oktetten sind zehn Sektoren; zehnmal denselben Sektor zu lesen und
-// zurueckzuschreiben, nur um dieselbe Null hineinzusetzen, waere
-// doppelt so viel Plattenverkehr wie die Datei selbst.
+const S_KNOWN: u64 = 72
+const S_FSINFO: u64 = 80
 const S_DIRTY: u64 = 88
-// RUNDE INSTALL: WO DIE SUCHE NACH EINEM FREIEN VERBAND ANFAENGT.
-//
-// `clus_alloc` hat bis heute IMMER bei Verband 2 angefangen. Bei einer
-// Handvoll Dateien faellt das nicht auf; eine Datei von 1,7 Megaoktett
-// auf eine frische Partition mit 512-Oktett-Verbaenden zu schreiben,
-// braucht 3400 Zuteilungen, und die n-te davon liest n Eintraege der
-// Zuordnungstafel -- also 5,8 Millionen Leseoperationen fuer EINE Datei.
-// Gemessen: der Lauf stand nach sechs Minuten immer noch bei derselben
-// Datei.
-//
-// Der Hinweis ist genau das, was die FSInfo-Seite dafuer vorsieht
-// ("next free cluster"), und was Linux' vfat und Windows benutzen: die
-// Suche faengt dort an, wo die letzte aufgehoert hat, und laeuft
-// hoechstens EINMAL um. Damit ist die Zuteilung im Mittel konstant statt
-// linear -- und sie findet immer noch jeden freien Verband, weil das
-// Umlaufen die zweite Haelfte abdeckt.
 const S_NEXT: u64 = 96
-// RUNDE INSTALL, ZWEITER FUND: DER ZEIGER AUF DEN ZULETZT BESUCHTEN
-// VERBAND.
-//
-// `chain_at` ist bis heute fuer JEDEN Sektor vom ANFANG der Kette
-// gelaufen. Eine Datei von 1,7 Megaoktett auf 512-Oktett-Verbaende
-// geschrieben sind 3400 Sektoren, und der 3400. Sektor liest 3400
-// Kettenglieder -- zusammen 5,8 Millionen Leseoperationen auf der
-// Zuordnungstafel FUER EINE DATEI. Genau daran stand der erste
-// Installationslauf dieser Runde nach zehn Minuten immer noch.
-//
-// Drei Woerter beheben es: die Kette, der Platz darin und der Verband.
-// Ist der naechste Zugriff auf DIESELBE Kette und NICHT weiter vorn,
-// faengt der Lauf dort an, wo der letzte aufgehoert hat. Sequentielles
-// Schreiben -- also der Normalfall -- wird damit linear statt
-// quadratisch. Jedes FAT-Dateisystem hat diesen Zeiger; Linux' vfat
-// nennt ihn `fat_cache`.
-//
-// ES IST EIN ZWISCHENSPEICHER UND KEINE ZWEITE WAHRHEIT: er wird
-// verworfen, sobald etwas an der Kette haengt, das er nicht gesehen hat
-// (`chain_free`), und wer ihn nicht trifft, laeuft von vorn und bekommt
-// dasselbe Ergebnis.
 const S_CFIRST: u64 = 104
 const S_CIDX: u64 = 112
 const S_CCLUS: u64 = 120
 
-// die Felder je Knoten
 const N_MNT: u64 = 0 // Einhaengung + 1, 0 = frei
 const N_CLUS: u64 = 8
 const N_SIZE: u64 = 16
 const N_ATTR: u64 = 24
-const N_DLBA: u64 = 32 // wo der 32-Oktett-Eintrag liegt (absolut)
-const N_DOFF: u64 = 40 // und an welcher Stelle darin
+const N_DLBA: u64 = 32
+const N_DOFF: u64 = 40
 
 const A_RDONLY: u64 = 0x01
 const A_HIDDEN: u64 = 0x02
@@ -227,21 +108,6 @@ fn tick(state: u64) {
 }
 
 // ------------------------------------------------------------ die Sperre
-//
-// DIESELBE SPERRE WIE OFS, UND ZWAR MIT ABSICHT. `atomic.L_FS` schuetzt
-// in `fs.fi` die Arbeitsbloecke des Dateisystems -- und darunter die
-// ATA-REGISTER, die `blk.fi` benutzt und die keine eigene Sperre haben.
-// Ein FAT32, das an dieser Sperre vorbei auf die Platte griffe, wuerde
-// einem OFS auf einem anderen Kern mitten im Sektor die Tore
-// umschreiben. Zwei Dateisysteme, EINE Platte, EINE Sperre.
-//
-// Sie ist RE-ENTRANT auf demselben Kern, aus demselben Grund wie in
-// `fs.fi`: `f_create` ruft `parent_of`, das `f_lookup` ruft, und das
-// ist wieder ein Einstiegspunkt. Ohne die Wiedereintrittsfaehigkeit
-// saesse der Kern auf einer Sperre, die er selbst haelt, mit
-// abgeschalteten Unterbrechungen -- und die Maschine waere still.
-// Bit 63 der geretteten Flaggen traegt die Notiz; der Prozessor setzt
-// es nie, und `sched.irq_restore` sieht nur auf Bit 9.
 const NESTED: u64 = 0x8000000000000000
 
 fn enter(state: u64) -> u64 {
@@ -317,15 +183,6 @@ fn clus_lba(state: u64, m: u64, c: u64) -> u64 {
     return sget(state, m, S_DATALBA) + (c - 2) * sget(state, m, S_SPC)
 }
 
-// Der Eintrag eines Verbands in der Zuordnungstafel. Vier Oktette,
-// kleinendig, und die obersten vier Bit gehoeren nicht dazu.
-// r548: the FAT sector in FATBUF is remembered (mount + sector). A cluster
-// allocation used to read and write the same FAT sector about ten times
-// over the PIO disk (one port exit per word); on a 512-byte-cluster ESP
-// that made `install` copy the 8 MB kernel at ~17 KB/s and ran into the
-// kernel wait bound. Writes stay write-through, so the disk is never behind.
-// The tag is dropped wherever FATBUF is used for something else or the
-// mount changes.
 static mut fat_tag_m: u64 = 0
 static mut fat_tag_lba: u64 = 0
 // 1 = the next fresh cluster is overwritten in full by the caller (spc 1,
@@ -386,10 +243,6 @@ fn fat_get(state: u64, m: u64, c: u64) -> u64 {
     return le32(buf(state, FATBUF) + (off % BS)) & MASK28
 }
 
-// Schreiben heisst: in JEDE Tafel schreiben. Ein Dateisystem, dessen
-// zweite Tafel nicht mitgeht, faellt bei `fsck.fat` durch -- und der
-// naechste Treiber, der die zweite nimmt, sieht eine andere Platte.
-// r548: the sector is read once (first table) and written to every table.
 fn fat_set(state: u64, m: u64, c: u64, v: u64) -> bool {
     let off: u64 = c * 4
     let secs: u64 = sget(state, m, S_FATSEC)
@@ -420,18 +273,12 @@ fn is_eoc(v: u64) -> bool {
     return v >= EOC
 }
 
-// Einen freien Verband suchen und ihn als Kettenende eintragen.
-// Rueckgabe: seine Nummer, oder 0.
 fn clus_alloc(state: u64, m: u64) -> u64 {
     let total: u64 = sget(state, m, S_CLUSTERS)
     var start: u64 = sget(state, m, S_NEXT)
     if start < 2 || start >= total + 2 {
         start = 2
     }
-    // Zwei Durchgaenge und keiner mehr: vom Hinweis bis zum Ende, dann
-    // von vorn bis zum Hinweis. Zusammen ist das genau EINMAL die ganze
-    // Tafel -- ein Verband, den es gibt, wird also gefunden, und ein
-    // voller Datentraeger wird nicht endlos abgesucht.
     var c: u64 = start
     var gefunden: u64 = 0
     var runde: u64 = 0
@@ -498,12 +345,7 @@ fn cache_drop(state: u64) {
     }
 }
 
-// Die ganze Kette ab `c` freigeben.
 fn chain_free(state: u64, m: u64, c: u64) {
-    // Was hier verschwindet, darf der Zwischenspeicher nicht mehr
-    // kennen. Er wird verworfen und nicht nachgefuehrt -- eine
-    // Nachfuehrung waere eine zweite Stelle, an der dieselbe Kette
-    // beschrieben ist.
     cache_drop(state)
     var cur: u64 = c
     var guard: u64 = 0
@@ -522,7 +364,6 @@ fn chain_free(state: u64, m: u64, c: u64) {
     }
 }
 
-// Der `n`-te Verband einer Kette. `grow` haengt fehlende an.
 fn chain_at(state: u64, m: u64, first: u64, n: u64, grow: bool) -> u64 {
     if first < 2 {
         return 0
@@ -594,10 +435,6 @@ fn node_find(state: u64, m: u64, dlba: u64, doff: u64, clus: u64) -> u64 {
     return 0
 }
 
-// EIN KNOTEN JE DATEI, NICHT JE NACHSCHLAGEN. Wer denselben Namen
-// zweimal oeffnet, bekommt denselben Knoten -- sonst waere die kleine
-// Tafel nach vierundzwanzig `open` voll, und `st_ino` waere jedes Mal
-// eine andere Zahl fuer dieselbe Datei.
 fn node_get(state: u64, m: u64, clus: u64, size: u64, attr: u64,
     dlba: u64, doff: u64) -> u64 {
     let have: u64 = node_find(state, m, dlba, doff, clus)
@@ -622,14 +459,6 @@ fn node_get(state: u64, m: u64, clus: u64, size: u64, attr: u64,
     return 0
 }
 
-// AUSHAENGEN HEISST AUFRAEUMEN. Beim Einhaengen wurde die Zahl der
-// freien Verbaende in der FSInfo-Seite auf "unbekannt" gesetzt, weil
-// sie bei jeder Zuteilung mitzufuehren hiesse, die ganze Tafel zu
-// durchsuchen. Beim AUSHAENGEN wird sie einmal wirklich gerechnet --
-// 129022 Eintraege, gut tausend Sektoren, ein Mal. Danach ist das
-// Dateisystem fuer `fsck.fat` ohne Anmerkung, und genau das misst
-// `tools/k14/run.sh`: OHNE `umount` sagt fsck "Free cluster summary
-// uninitialized", MIT `umount` sagt es gar nichts.
 fn sync(state: u64, m: u64) -> u64 {
     let __f: u64 = enter(state)
     let __r: u64 = sync__inner(state, m)
@@ -641,8 +470,6 @@ fn sync__inner(state: u64, m: u64) -> u64 {
     if sget(state, m, S_VALID) == 0 {
         return 0
     }
-    // DER REGELFALL: die Zahl wurde die ganze Zeit mitgefuehrt. Dann
-    // ist Aushaengen ein einziger Sektor und keine tausend.
     if sget(state, m, S_KNOWN) != 0 {
         fsinfo_store(state, m, true)
         sset(state, m, S_DIRTY, 0)
@@ -692,9 +519,6 @@ fn release(state: u64, m: u64) {
 
 // ------------------------------------------------------------ einhaengen
 
-// Rueckgabe: der Wurzelknoten, oder 0. Das ist die Stelle, an der ein
-// FAT32 erkannt wird -- und sie ist streng: was hier nicht durchkommt,
-// wird nicht eingehaengt, statt als etwas anderes gelesen zu werden.
 fn mount_probe(state: u64, m: u64) -> u64 {
     let __f: u64 = enter(state)
     let __r: u64 = mount_probe__inner(state, m)
@@ -744,9 +568,6 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
         serial.nl()
         return 0
     }
-    // FAT32 und nichts anderes: die 16-Bit-Felder MUESSEN null sein.
-    // Ein FAT16 hier durchzulassen hiesse, seine Wurzel als Verband 2
-    // zu lesen -- dort steht bei FAT16 die erste Datei.
     if rootent != 0 || fatsz16 != 0 || fatsz32 == 0 {
         serial.puts((&s_no[0]) as u64)
         serial.dec(4)
@@ -767,10 +588,6 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
         return 0
     }
     let clusters: u64 = (total - data) / spc
-    // Die Zahl, die FAT32 von FAT16 unterscheidet, steht in keinem
-    // Feld: es sind die Verbaende. Unter 65525 ist es kein FAT32,
-    // egal was der Kopf behauptet -- so steht es in Microsofts eigener
-    // Beschreibung, und `mkfs.vfat` haelt sich daran.
     sset(state, m, S_SPC, spc)
     sset(state, m, S_FATLBA, base + reserved)
     sset(state, m, S_DATALBA, base + data)
@@ -796,13 +613,6 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
     return node_get(state, m, root, 0, A_DIR, 0, 0)
 }
 
-// ------------------------------------------------------- Namen im Eintrag
-
-// Der kurze Name eines Eintrags als Text. Die beiden Bits im Oktett 12
-// ("NT reserved") sagen, ob Grundname und Erweiterung klein zu
-// schreiben sind -- so legt `mcopy` eine Datei "hello.txt" an, OHNE
-// einen langen Namen dafuer zu brauchen, und ein Treiber, der die Bits
-// uebersieht, zeigt "HELLO.TXT".
 fn short_name(state: u64, e: u64, out: u64) -> u64 {
     let nt: u64 = kstate.get8(e + 12)
     var n: u64 = 0
@@ -848,25 +658,16 @@ fn short_name(state: u64, e: u64, out: u64) -> u64 {
     return n
 }
 
-// Die Pruefsumme des kurzen Namens, die in jedem Stueck eines langen
-// Namens steht. Ohne sie waere ein langer Name nicht an seinen Eintrag
-// gebunden -- und ein Werkzeug, das nur kurze Namen kennt, koennte den
-// Eintrag verschieben, ohne dass es auffiele.
 fn lfn_sum(e: u64) -> u64 {
     var sum: u64 = 0
     var i: u64 = 0
     while i < 11 {
-        // rechts rotieren um eins, dann addieren -- alles in acht Bit
         sum = (((sum & 1) << 7) + (sum >> 1) + kstate.get8(e + i)) & 0xFF
         i = i + 1
     }
     return sum
 }
 
-// Ein Stueck eines langen Namens auswerten. Die dreizehn Zeichen
-// liegen an drei Stellen im Eintrag; das ist keine Schoenheit, das ist
-// der Preis dafuer, dass Microsoft 1996 die Felder eines normalen
-// Eintrags nicht anfassen wollte.
 fn lfn_chars(state: u64, e: u64, out: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
@@ -893,10 +694,6 @@ fn lfn_chars(state: u64, e: u64, out: u64) -> u64 {
     return n
 }
 
-// UTF-16 zu einem Oktett. Alles ueber 127 wird zu '?' -- und das steht
-// so in docs/ROUNDK14.md. Ein halbes UTF-8 zu bauen waere schlimmer
-// als eine ehrliche Ersatzmarke: der Name waere lesbar falsch statt
-// sichtbar unbekannt.
 fn byte_of(c: u64) -> u64 {
     if c == 0 || c == 0xFFFF {
         return 0
@@ -909,9 +706,6 @@ fn byte_of(c: u64) -> u64 {
 
 // ------------------------------------------------------- Verzeichnisse
 
-// Die Zahl der 32-Oktett-Eintraege in einem Verzeichnis, das an
-// `first` haengt. Bei einer Kette ohne Ende waere das eine
-// Endlosschleife, also gibt es eine Schranke.
 fn dir_sectors(state: u64, m: u64, first: u64) -> u64 {
     let spc: u64 = sget(state, m, S_SPC)
     var count: u64 = 0
@@ -935,18 +729,6 @@ fn dir_sector(state: u64, m: u64, first: u64, i: u64) -> u64 {
     return clus_lba(state, m, c) + (i % spc)
 }
 
-// EIN DURCHGANG DURCH EIN VERZEICHNIS.
-//
-// `want` = 0: den Eintrag mit dem Namen in CMPBUF suchen.
-// `want` > 0: den `want`-ten sichtbaren Eintrag liefern (1-basiert).
-//
-// Rueckgabe: der KNOTEN, oder 0. `out_name` bekommt den Namen (lang,
-// wenn es einen gibt), `out_seq` die Zahl der Namensstuecke davor --
-// die braucht `dir_remove`, um sie mit zu loeschen.
-//
-// Beide Faelle in EINER Schleife, und das ist Absicht: ein zweiter
-// Durchlauf waere eine zweite Stelle, an der die Regeln fuer lange
-// Namen stehen, und die zweite waere irgendwann die falsche.
 fn dir_walk(state: u64, m: u64, first: u64, want: u64, out_name: u64,
     out_lba: u64, out_off: u64) -> u64 {
     let secs: u64 = dir_sectors(state, m, first)
@@ -969,7 +751,7 @@ fn dir_walk(state: u64, m: u64, first: u64, want: u64, out_name: u64,
             let c0: u64 = kstate.get8(e)
             let attr: u64 = kstate.get8(e + 11)
             if c0 == 0 {
-                return 0 // hier hoert das Verzeichnis wirklich auf
+                return 0
             }
             if c0 == 0xE5 {
                 have_lfn = false
@@ -988,8 +770,6 @@ fn dir_walk(state: u64, m: u64, first: u64, want: u64, out_name: u64,
                         i = i + 1
                     }
                     if (c0 & 0x40) != 0 {
-                        // Das LETZTE Stueck kommt ZUERST; es sagt, wie
-                        // lang der Name hoechstens wird.
                         var n: u64 = at
                         var going: bool = true
                         while going {
@@ -1051,11 +831,6 @@ fn dir_walk(state: u64, m: u64, first: u64, want: u64, out_name: u64,
     return 0
 }
 
-// FAT UNTERSCHEIDET KEINE GROSS- UND KLEINSCHREIBUNG. Das ist keine
-// Nachlaessigkeit dieses Treibers, sondern die Eigenschaft des
-// Formats: "Hello.TXT" und "hello.txt" sind auf einer FAT-Platte
-// derselbe Name, und ein Treiber, der sie unterscheidet, legt eine
-// zweite Datei an, die Windows nie wieder findet.
 fn name_eq(a: u64, b: u64) -> bool {
     var i: u64 = 0
     while kstate.get8(a + i) != 0 && kstate.get8(b + i) != 0 {
@@ -1077,7 +852,6 @@ fn copy_name(dst: u64, src: u64, max: u64) -> u64 {
     return i
 }
 
-// Einen Namen in einem Verzeichnis suchen.
 fn dir_find(state: u64, m: u64, dir_clus: u64, name: u64) -> u64 {
     var junk: [u8; 72] = [0 as u8; 72]
     var lba: u64 = 0
@@ -1141,7 +915,6 @@ fn f_lookup__inner(state: u64, m: u64, path: u64) -> u64 {
     return node
 }
 
-// Das Verzeichnis, in dem ein Pfad liegt, und der letzte Namensteil.
 fn parent_of(state: u64, m: u64, path: u64, out_name: u64) -> u64 {
     var buffer: [u8; 128] = [0 as u8; 128]
     var n: u64 = 0
@@ -1248,14 +1021,10 @@ fn f_read__inner(state: u64, m: u64, node: u64, off: u64, dst: u64,
 
 // -------------------------------------------------------- schreiben
 
-// Den Eintrag einer Datei nachfuehren: Groesse und erster Verband. Ohne
-// diese zwei Zeilen waere jedes `write` fuer jedes andere System
-// unsichtbar -- die Oktette laegen da, und das Verzeichnis wuesste
-// nichts davon.
 fn entry_update(state: u64, m: u64, node: u64) -> bool {
     let lba: u64 = nget(state, node, N_DLBA)
     if lba == 0 {
-        return true // die Wurzel hat keinen Eintrag
+        return true
     }
     if !rd(state, m, lba, buf(state, DIRBUF)) {
         return false
@@ -1319,7 +1088,7 @@ fn f_write__body(state: u64, m: u64, node: u64, off: u64, src: u64,
         let c: u64 = chain_at(state, m, first, pos / csize, true)
         fat_skip_zero = 0
         if c == 0 {
-            done = len // kein Platz mehr -- was geschrieben ist, zaehlt
+            done = len
         } else {
             let inc: u64 = pos % csize
             let lba: u64 = clus_lba(state, m, c) + inc / BS
@@ -1328,8 +1097,6 @@ fn f_write__body(state: u64, m: u64, node: u64, off: u64, src: u64,
             if chunk > len - done {
                 chunk = len - done
             }
-            // Ein Teilsektor wird erst GELESEN. Sonst nimmt ein
-            // `write` von einem Oktett die anderen 511 mit.
             if chunk != BS {
                 if !rd(state, m, lba, buf(state, DATBUF)) {
                     return done
@@ -1356,27 +1123,11 @@ fn f_write__body(state: u64, m: u64, node: u64, off: u64, src: u64,
     return wrote
 }
 
-// ------------------------------------------------- Zeit und FSInfo
-
-// DIE ZEIT IM EINTRAG. FAT speichert sie in zwei 16-Bit-Woertern, und
-// die Aufteilung ist die von 1980: das Datum als ((Jahr-1980) << 9) |
-// (Monat << 5) | Tag, die Uhrzeit als (Stunde << 11) | (Minute << 5) |
-// (Sekunde / 2). Die eine Sekunde Aufloesung, die dabei verlorengeht,
-// ist der Grund fuer das Feld "crt_time_tenth" -- das schreibt dieser
-// Treiber nicht.
-//
-// WARUM DAS NICHT NULL BLEIBEN DARF: eine Null bedeutet Monat 0 und
-// Tag 0, und die gibt es nicht. `fsck.fat` meldet das, und jedes
-// Werkzeug, das Dateien nach Datum ordnet, bekommt Muell. Die erste
-// Fassung dieser Datei liess die Felder null, und `mdir` zeigte
-// "1980-00-00" -- sichtbar falsch.
 fn fat_date(state: u64) -> u64 {
     var y: u64 = time.rtc_field(time.R_YEAR)
     let mo: u64 = time.rtc_field(time.R_MONTH)
     let d: u64 = time.rtc_field(time.R_DAY)
     if y < 1980 || mo < 1 || mo > 12 || d < 1 || d > 31 {
-        // Eine Uhr, die Unsinn sagt, darf keinen Unsinn auf die Platte
-        // schreiben: dann lieber der erste Tag, den FAT kennt.
         return (0 << 9) | (1 << 5) | 1
     }
     return ((y - 1980) << 9) | (mo << 5) | d
@@ -1402,20 +1153,6 @@ fn stamp(state: u64, e: u64) {
     put16(e + 24, d)
 }
 
-// DIE FSINFO-SEITE. FAT32 fuehrt darin die Zahl der freien Verbaende
-// mit -- als BEQUEMLICHKEIT, nicht als Wahrheit: die Wahrheit steht in
-// der Zuordnungstafel. Wer Verbaende nimmt und die Zahl stehen laesst,
-// hinterlaesst ein Dateisystem, ueber das `fsck.fat` sagt "Free
-// cluster summary wrong".
-//
-// Dieser Treiber schreibt 0xFFFFFFFF hinein, und das heisst in der
-// Beschreibung von Microsoft ausdruecklich "unbekannt, bitte
-// nachrechnen". Das ist die ehrliche Antwort: die Zahl wirklich zu
-// fuehren hiesse, bei jedem Verband die ganze Tafel zu durchsuchen
-// (129022 Eintraege, 504 KiB), und eine GERATENE Zahl waere schlimmer
-// als keine.
-// Die Zahl der freien Verbaende AUS der FSInfo-Seite holen. 0xFFFFFFFF
-// heisst dort ausdruecklich "unbekannt"; dann wird nichts geglaubt.
 fn fsinfo_load(state: u64, m: u64) {
     let sec: u64 = sget(state, m, S_FSINFO)
     if sec == 0 || sec == 0xFFFF {
@@ -1438,9 +1175,6 @@ fn fsinfo_load(state: u64, m: u64) {
     }
     sset(state, m, S_FREE, v)
     sset(state, m, S_KNOWN, 1)
-    // Der Hinweis aus derselben Seite. Er ist nur ein Hinweis: steht
-    // dort Unsinn, faengt die Suche bei 2 an und findet dasselbe, nur
-    // langsamer. Deshalb wird er geprueft und nicht geglaubt.
     let nf: u64 = le32(b + 492)
     if nf >= 2 && nf < sget(state, m, S_CLUSTERS) + 2 {
         sset(state, m, S_NEXT, nf)
@@ -1449,9 +1183,6 @@ fn fsinfo_load(state: u64, m: u64) {
     }
 }
 
-// Und zurueckschreiben. `known` = 0 schreibt das "unbekannt" hinein --
-// das ist der ehrliche Zustand einer Platte, an der gearbeitet wurde
-// und die nicht ausgehaengt wurde.
 fn fsinfo_store(state: u64, m: u64, known: bool) {
     let sec: u64 = sget(state, m, S_FSINFO)
     if sec == 0 || sec == 0xFFFF {
@@ -1475,9 +1206,6 @@ fn fsinfo_store(state: u64, m: u64, known: bool) {
     wr(state, m, base + sec, b)
 }
 
-// EINMAL "unbekannt" auf die Platte, beim ersten Schreiben. Wer die
-// Maschine danach ausschaltet, hinterlaesst genau diesen Zustand --
-// und `fsck.fat` sagt es dann auch.
 fn mark_dirty(state: u64, m: u64) {
     if sget(state, m, S_DIRTY) != 0 {
         return
@@ -1486,7 +1214,6 @@ fn mark_dirty(state: u64, m: u64) {
     fsinfo_store(state, m, false)
 }
 
-// Die laufende Buchfuehrung. Sie wird nur gefuehrt, solange sie stimmt.
 fn free_add(state: u64, m: u64, n: u64) {
     if sget(state, m, S_KNOWN) == 0 {
         return
@@ -1500,8 +1227,6 @@ fn free_sub(state: u64, m: u64, n: u64) {
     }
     let have: u64 = sget(state, m, S_FREE)
     if have < n {
-        // Wenn die Zahl nicht mehr aufgeht, war sie falsch. Dann sagt
-        // dieser Treiber "unbekannt" statt eine kleinere Luege.
         sset(state, m, S_KNOWN, 0)
         return
     }
@@ -1510,9 +1235,6 @@ fn free_sub(state: u64, m: u64, n: u64) {
 
 // ------------------------------------------------- Eintraege anlegen
 
-// Aus "hello.txt" wird "HELLO   TXT". Passt der Name nicht in 8+3, wird
-// die Tilde-Form gebaut, die jedes FAT seit 1996 benutzt: die ersten
-// sechs Zeichen, '~' und eine Zahl.
 fn make_short(state: u64, name: u64, out: u64, nr: u64) -> bool {
     var i: u64 = 0
     while i < 11 {
@@ -1571,13 +1293,8 @@ fn make_short(state: u64, name: u64, out: u64, nr: u64) -> bool {
     return true
 }
 
-// Braucht dieser Name ein langes Namensstueck? Genau dann, wenn er sich
-// nicht Zeichen fuer Zeichen aus seinem kurzen Namen zurueckgewinnen
-// laesst.
 fn needs_lfn(state: u64, name: u64, short: u64) -> bool {
     var back: [u8; 16] = [0 as u8; 16]
-    // Der kurze Name, zurueckgelesen -- ohne die Kleinschreibbits, denn
-    // die werden hier nicht gesetzt.
     var n: u64 = 0
     var i: u64 = 0
     while i < 8 {
@@ -1621,8 +1338,6 @@ fn needs_lfn(state: u64, name: u64, short: u64) -> bool {
     return k != n
 }
 
-// `count` freie Eintraege hintereinander suchen; das Verzeichnis waechst,
-// wenn keine da sind. Rueckgabe: der Sektor, `out_off` die Stelle.
 fn dir_space(state: u64, m: u64, dir_clus: u64, count: u64,
     out_lba: u64, out_off: u64) -> bool {
     let secs: u64 = dir_sectors(state, m, dir_clus)
@@ -1660,14 +1375,6 @@ fn dir_space(state: u64, m: u64, dir_clus: u64, count: u64,
             s = s + 1
         }
     }
-    // Nichts frei: einen Verband anhaengen. Der neue ist genullt, also
-    // sind alle seine Eintraege frei -- und `count` ist hoechstens 20,
-    // passt also in einen Sektor von sechzehn... nein: in zwei. Der
-    // neue Verband hat mindestens einen Sektor, meist mehr; bei genau
-    // einem Sektor je Verband und mehr als 16 noetigen Eintraegen
-    // wuerde die Suche oben beim naechsten Anlauf ueber die
-    // Verbandsgrenze hinweg fuendig, weil `dir_sector` die Kette
-    // abgeht. Deshalb: anhaengen und noch einmal suchen.
     let last: u64 = chain_at(state, m, dir_clus,
         dir_sectors(state, m, dir_clus) / sget(state, m, S_SPC), true)
     if last == 0 {
@@ -1710,7 +1417,6 @@ fn dir_space(state: u64, m: u64, dir_clus: u64, count: u64,
     return false
 }
 
-// Ein Stueck eines langen Namens schreiben.
 fn lfn_put(state: u64, e: u64, name: u64, len: u64, seq: u64, last: bool,
     sum: u64) {
     zero(e, 32)
@@ -1743,7 +1449,6 @@ fn lfn_put(state: u64, e: u64, name: u64, len: u64, seq: u64, last: bool,
     }
 }
 
-// Einen Eintrag anlegen. Rueckgabe: der Knoten, oder 0.
 fn dir_add(state: u64, m: u64, dir_clus: u64, name: u64, clus: u64,
     attr: u64, size: u64) -> u64 {
     var short: [u8; 12] = [0 as u8; 12]
@@ -1751,7 +1456,6 @@ fn dir_add(state: u64, m: u64, dir_clus: u64, name: u64, clus: u64,
     var out_off: u64 = 0
     var nr: u64 = 0
     var okay: bool = false
-    // Einen kurzen Namen finden, den es noch nicht gibt.
     while nr < 10 && !okay {
         if !make_short(state, name, (&short[0]) as u64, nr) {
             return 0
@@ -1783,9 +1487,6 @@ fn dir_add(state: u64, m: u64, dir_clus: u64, name: u64, clus: u64,
         return 0
     }
     let sum: u64 = lfn_sum((&short[0]) as u64)
-    // Die Stuecke stehen RUECKWAERTS vor dem Eintrag: das letzte
-    // Stueck zuerst. Wer sie vorwaerts schreibt, baut einen Namen, den
-    // Windows als Muell liest.
     var idx: u64 = 0
     while idx < pieces {
         let seq: u64 = pieces - idx
@@ -1830,9 +1531,6 @@ fn dir_add(state: u64, m: u64, dir_clus: u64, name: u64, clus: u64,
     return node_get(state, m, clus, size, attr, lba, off)
 }
 
-// Der `n`-te Eintragsplatz ab (lba, off). Die Plaetze aus `dir_space`
-// liegen hintereinander -- aber ueber eine Sektorgrenze hinweg ist der
-// naechste Sektor nicht lba+1, sondern der naechste Sektor DER KETTE.
 fn step_lba(state: u64, m: u64, dir_clus: u64, lba: u64, off: u64,
     n: u64) -> u64 {
     let per: u64 = BS / 32
@@ -1840,7 +1538,6 @@ fn step_lba(state: u64, m: u64, dir_clus: u64, lba: u64, off: u64,
     if total < per {
         return lba
     }
-    // Den Sektorindex des Anfangs suchen und `total / per` weiter gehen.
     let secs: u64 = dir_sectors(state, m, dir_clus)
     var s: u64 = 0
     while s < secs {
@@ -1881,11 +1578,6 @@ fn f_readdir__inner(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
     var lba: u64 = 0
     var off: u64 = 0
     let clus: u64 = nget(state, dir, N_CLUS)
-    // DIE WURZEL VON FAT32 HAT KEIN `.` UND KEIN `..`. Jedes andere
-    // Verzeichnis hat sie als echte Eintraege; die Wurzel nicht, weil
-    // sie kein Elternteil hat. Damit `ls /mnt` trotzdem aussieht wie
-    // `ls` auf jedem anderen Verzeichnis, werden die beiden hier
-    // erzeugt -- und das steht so in docs/ROUNDK14.md.
     if clus == sget(state, m, S_ROOT) {
         if index == 0 {
             kstate.set8(out, 46 as u8)
@@ -1937,23 +1629,6 @@ fn f_attr__inner(state: u64, m: u64, node: u64, what: u64) -> u64 {
         return 420 // 0o644
     }
     // ======================================== RUNDE MULTIUSER
-    //
-    // FAT32 HAT KEINEN EIGENTUEMER, und diese vier Zeilen sind die
-    // ehrliche Fassung davon. Das Format kennt ein Attributoktett mit
-    // fuenf Bits (nur-lesen, versteckt, System, Datentraeger,
-    // Verzeichnis) und kein Feld fuer eine Kennung -- weil das
-    // Dateisystem aus einer Welt kommt, in der ein Rechner einem
-    // Menschen gehoerte.
-    //
-    // WAS HIER NICHT GEMACHT WIRD: die Kennung des EINHAENGENDEN
-    // eintragen (Linux tut das mit `-o uid=`, und es ist dort eine
-    // Einhaengeoption und kein Dateiattribut). Eine erfundene Zahl
-    // waere hier schlimmer als eine ehrliche Null: sie saehe aus wie
-    // eine Rechteverwaltung, und die Datei kann trotzdem jeder lesen,
-    // der das Dateisystem eingehaengt bekommt. Null heisst root, die
-    // Rechte oben sind 0o755/0o644, und daraus folgt genau das, was
-    // wirklich gilt: auf FAT32 darf jeder alles lesen, und schreiben
-    // darf nur root. Wer Rechte braucht, nimmt OFS.
     if what == vfsops.A_UID {
         return 0
     }
@@ -1998,10 +1673,6 @@ fn f_create__inner(state: u64, m: u64, path: u64, art: u64) -> u64 {
         if !clus_zero(state, m, fresh) {
             return 0
         }
-        // `.` und `..` -- ohne sie ist es kein Verzeichnis. `..` zeigt
-        // bei einem Kind der Wurzel auf NULL und nicht auf die Nummer
-        // des Wurzelverbands; so steht es in der Beschreibung, und
-        // Windows verlaesst sich darauf.
         if !rd(state, m, clus_lba(state, m, fresh), buf(state, DIRBUF)) {
             return 0
         }
@@ -2039,10 +1710,6 @@ fn f_create__inner(state: u64, m: u64, path: u64, art: u64) -> u64 {
     return dir_add(state, m, dir_clus, (&name[0]) as u64, 0, 0x20, 0)
 }
 
-// Einen Eintrag loeschen: das erste Oktett wird 0xE5, und die
-// Namensstuecke davor gehen mit. Wer sie stehen laesst, hinterlaesst
-// einen Namen ohne Datei -- `fsck.fat` nennt das "orphaned long
-// filename".
 fn dir_remove(state: u64, m: u64, dir_clus: u64, name: u64) -> bool {
     var found: [u8; 72] = [0 as u8; 72]
     var lba: u64 = 0
@@ -2060,7 +1727,6 @@ fn dir_remove(state: u64, m: u64, dir_clus: u64, name: u64) -> bool {
     if !wr(state, m, lba, buf(state, DIRBUF)) {
         return false
     }
-    // Rueckwaerts durch die Namensstuecke davor.
     var back: u64 = 1
     var going: bool = true
     while going && back <= 20 {
@@ -2151,7 +1817,6 @@ fn f_unlink__inner(state: u64, m: u64, path: u64) -> u64 {
     let attr: u64 = nget(state, node, N_ATTR)
     let clus: u64 = nget(state, node, N_CLUS)
     if (attr & A_DIR) != 0 {
-        // Ein Verzeichnis geht nur leer. `.` und `..` zaehlen nicht.
         var junk: [u8; 72] = [0 as u8; 72]
         var l: u64 = 0
         var o: u64 = 0

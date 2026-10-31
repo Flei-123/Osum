@@ -1,65 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/desktop.fi -- Runde DESKTOP: /bin/desktop.
-//
-// DAS FENSTER, DAS GANZ HINTEN LIEGT. Es ist so gross wie der
-// Bildschirm, es hat keinen Rahmen und keine Titelleiste, und es kommt
-// NIE nach vorn -- auch dann nicht, wenn man daraufklickt.
-//
-// WARUM DAS BIS ZU DIESER RUNDE NICHT GING, und es steht so im Logbuch
-// K15: der Fensterserver konnte ein Fenster HEBEN und sonst nichts. Es
-// gab keine Moeglichkeit, eines nach hinten zu stellen; ein
-// Hintergrundbild waere ein Fenster gewesen, das beim ersten Klick vor
-// allen anderen liegt. Die Loesung steht im SERVER (`kernel/wm.fi`,
-// L_DESK/L_NORMAL/L_TOP) und nicht hier als Trick -- ein Programm, das
-// sich alle 100 Millisekunden selbst nach hinten sortiert, ist keine
-// Loesung, sondern ein Flackern.
-//
-// WAS ER MALT, und in dieser Reihenfolge:
-//
-//   1. EIN BILD, wenn `/etc/wallpaper` da ist und mit "OSYM" anfaengt
-//      -- dasselbe Format wie die Programmsymbole (`tools/k15/icon.py`,
-//      zwoelf Oktette Kopf, danach B,G,R,A je Bildpunkt). Es wird auf
-//      den Bildschirm GESTRECKT, mit dem naechsten Nachbarn.
-//   2. SONST EINEN VERLAUF zwischen zwei Farben des Schemas. Die beiden
-//      Farben und die Rechnung stehen unten; `tools/desktop/run.sh`
-//      rechnet einzelne Bildpunkte damit nach, statt "sieht dunkel aus"
-//      zu messen.
-//
-// WARUM DAS BILD KLEIN SEIN MUSS. Ein Prozess hat in diesem System
-// 832 Kilooktett fuer Halde und Abbildungen (`kernel/sys.fi`), und
-// 253 davon liegen schon in der Zeichenflaeche der Widget-Bibliothek.
-// 800 x 600 x 4 sind 1 875 Kilooktett und passen nicht -- nicht
-// annaehernd. Also ist die Quelle hoechstens BILD_MAX_W x BILD_MAX_H
-// gross und wird gestreckt. Das ist eine ehrliche Grenze und keine
-// Ausrede: sie steht als Konstante da, und wer sie hebt, hebt sie an
-// einer Stelle.
 
 // ================================================ RUNDE 31: profile app
-//
-// Der Schreibtisch ist eine Wurzeldatei, und seine Bedienelemente
-// kommen ab dieser Runde aus fUi (wlib -> fuib -> lib/fui). fUi rechnet
-// in `f64` und benutzt `std.rt`; beides ist unter `profile kernel`
-// gesperrt (SPEC.md:125). Die Module darunter -- wlib, wlibc, msg --
-// bleiben `kernel`; nur die Wurzel wechselt.
 profile app
 
 import ulib
 import lineout
 import libc.io
-// RUNDE 31: `import libc.mem` IST HIER WEG, UND ZWAR NICHT AUS LAUNE.
-//
-// Firn benennt ein Modul nach dem LETZTEN Teil seines Pfades. `libc.mem`
-// heisst also `mem` -- und `paint/canvas.fi`, das fUi zum Malen braucht,
-// importiert `html.mem`, das AUCH `mem` heisst. Beide gleichzeitig, und
-// der Name ist doppelt belegt:
-//
 //   error: module 'mem' has no element 'heap_alloc'
 //          --> paint/canvas.fi:121
-//
-// Der einzige Aufruf war `mem.alloc(bytes)` fuer den Bildpuffer des
-// Hintergrundbildes. `wlibc.map_surface` tut genau dasselbe -- ein
-// anonymes `mmap` -- und wlibc ist hier ohnehin importiert. Also ein
-// Aufruf weniger statt eines Modulkonflikts.
 import wlibc
 import fuiglyph
 import wlib
@@ -70,64 +19,28 @@ import modul
 
 export { u_start }
 
-// RUNDE I18N: DER EINZIGE ANZEIGETEXT DIESES PROGRAMMS.
-//
-// Er stand hier bis heute als "Schreibtisch" im Quelltext. Jetzt steht
-// hier nur noch sein SCHLUESSEL -- englisch, wie jeder Name in diesem
-// System --, und der Text kommt aus /usr/share/locale/<code>/messages.
 static mut k_title: [u8; 14] = "desktop.title\0"
 
-
-// Die Grenze der Quelle. 480 x 300 x 4 = 576 000 Oktette (r383: das Meerbild ist 480 x 270).
 const IMAGE_MAX_W: u64 = 480
 const IMAGE_MAX_H: u64 = 300
 
-static mut w_h: u64 = 0 // das Handle des Fensters
+static mut w_h: u64 = 0
 static mut w_shared: u64 = 0 // COMPOSITOR r486: 1 = the window paints from a shared buffer (no WIG_BLIT)
 static mut w_shp: u64 = 0 // r1004: the shared buffer of the window (kept to remake it after a resolution change)
 static mut w_shb: u64 = 0
 static mut sw: u64 = 0
 static mut sh: u64 = 0
-static mut image: u64 = 0 // die Bildpunkte, oder 0
+static mut image: u64 = 0
 static mut image_bytes: u64 = 0 // size of the mapping behind `image`
 static mut bw: u64 = 0
 static mut bh: u64 = 0
-static mut c_oben: u64 = 0
-static mut c_unten: u64 = 0
-static mut kopf: [u8; 16] = [0 as u8; 16]
+static mut c_top: u64 = 0
+static mut c_bottom: u64 = 0
+static mut head: [u8; 16] = [0 as u8; 16]
 static mut ev: [u8; 16] = [0 as u8; 16]
 
-// ============================================ RUNDE BELEG: DER MESSAUSGANG
-// STEHT IM NORMALBETRIEB AUS.
-//
-// Justins Befund am Abbild vom 12.09.2026: im Terminalfenster standen
-// Zeilen wie `explorer: krumm n=2 fold=0` und `bg=...`. Gezaehlt hat er
-// auch: 160 `ulib.say` in taskbar.fi, 38 in explorer.fi.
-//
-// Die Regel dazu steht seit Runde LAUFZEIT in taskmgr.fi:
-//
-//   EIN MESSAUSGANG GEHOERT HINTER EINEN SCHALTER, UND DER SCHALTER
-//   STEHT IM NORMALBETRIEB AUS. Ein Programm, das im Auslieferungs-
-//   zustand misst, misst vor allem sich selbst.
-//
-// NICHT GELOESCHT, SONDERN GESCHALTET. Die Zaehler (`fui=`, `fuix=`,
-// `rect id=`, `text ... base=`) waren mehrfach der Schluessel zur
-// Fehlersuche -- sie muessen fuer die Abnahme da sein. Also EIN Schalter
-// statt zweihundert geloeschter Zeilen.
-//
-// ZWEI WEGE, IHN EINZUSCHALTEN, und beide gab es schon:
-//   /etc/uitrace   die Datei, mit der `wlib` seit Runde LOOK dasselbe
-//                  tut -- die Pruefstaende legen sie ohnehin an
-//   `debug`        als Wort auf der Programmzeile, fuer den Fall, dass
-//                  einer allein gestartet wird
-//
-// OHNE BEIDES AENDERT SICH KEIN OKTETT gegenueber vorher -- das ist die
-// Bedingung dafuer, dass kein bestehender Testlaeufer davon etwas merkt.
 static mut s_dbg: u64 = 0
 
-// Die drei Ausgaenge dieses Programms, an EINER Stelle geschaltet.
-// `sayn` und `nl` stehen hier, damit kein Aufrufer `ulib.` direkt
-// nimmt und damit am Schalter vorbeigeht.
 fn dbg_on() -> bool {
     return s_dbg != 0
 }
@@ -178,17 +91,6 @@ fn u32_at(p: u64) -> u64 {
         | ((__mmio_read8((p + 3) as *mut u8) as u64) << 24)
 }
 
-// DIE FARBE AN EINER STELLE -- und sie ist EINE Funktion, weil der
-// Laeufer draussen genau diese Rechnung nachrechnet. Waere sie an zwei
-// Stellen im Quelltext (einmal beim Malen, einmal beim Melden), waere
-// die Messung eine Tautologie.
-// r399 (design audit): the wallpaper is scaled like the lock screen's one
-// (kernel/user/backdrop.fi): COVER (the larger scale factor, centred, the
-// overhang is cropped, the picture is not distorted) with a BILINEAR filter.
-// Before, the desktop stretched the source to the screen with the nearest
-// neighbour: every source pixel of the 480x270 file became a 3x3 block
-// (stair-stepped edges in the tree line, a 6 per cent distortion on 16:10), while the
-// lock screen showed the same file smooth. Fixed point 16.16, integers only.
 const SMOOTH_MIN_W: u64 = 200
 static mut cv_step: u64 = 0
 static mut cv_ox: u64 = 0
@@ -294,37 +196,34 @@ fn color_at(x: u64, y: u64) -> u64 {
         }
         return out
     }
-    // Der Verlauf: linear von oben nach unten, je Kanal, mit
-    // Abrundung -- dieselbe ganzzahlige Division wie im Laeufer.
     if sh < 2 {
-        return c_oben
+        return c_top
     }
     let t: u64 = y * 255 / (sh - 1)
-    let r: u64 = (((c_oben >> 16) & 255) * (255 - t)
-        + ((c_unten >> 16) & 255) * t) / 255
-    let g: u64 = (((c_oben >> 8) & 255) * (255 - t)
-        + ((c_unten >> 8) & 255) * t) / 255
-    let b: u64 = ((c_oben & 255) * (255 - t) + (c_unten & 255) * t) / 255
+    let r: u64 = (((c_top >> 16) & 255) * (255 - t)
+        + ((c_bottom >> 16) & 255) * t) / 255
+    let g: u64 = (((c_top >> 8) & 255) * (255 - t)
+        + ((c_bottom >> 8) & 255) * t) / 255
+    let b: u64 = ((c_top & 255) * (255 - t) + (c_bottom & 255) * t) / 255
     return (r << 16) | (g << 8) | b
 }
 
-// Das Bild laden. Gibt true, wenn wirklich Bildpunkte da sind.
-fn image_load(pfad: u64) -> bool {
-    let fd: u64 = io.open(pfad, 0)
+fn image_load(path: u64) -> bool {
+    let fd: u64 = io.open(path, 0)
     if ulib.bad(fd) {
         return false
     }
-    let k: u64 = (&kopf[0 as usize]) as u64
+    let k: u64 = (&head[0 as usize]) as u64
     let n: u64 = io.read_full(fd, k, 12)
     if ulib.bad(n) || n < 12 {
         io.close(fd)
         return false
     }
-    if kopf[(0) as usize] != 79 as u8 || kopf[(1) as usize] != 83 as u8 {
+    if head[(0) as usize] != 79 as u8 || head[(1) as usize] != 83 as u8 {
         io.close(fd)
         return false
     }
-    if kopf[(2) as usize] != 89 as u8 || kopf[(3) as usize] != 77 as u8 {
+    if head[(2) as usize] != 89 as u8 || head[(3) as usize] != 77 as u8 {
         io.close(fd)
         return false
     }
@@ -369,15 +268,11 @@ fn flush(x: u64, y: u64, w: u64, h: u64) {
     let _n: u64 = wlibc.push(w_h, x, y, w, h)
 }
 
-// EINEN STREIFEN MALEN UND HINUEBERSCHIEBEN. Genau der Weg, den die
-// Widget-Bibliothek geht (`kernel/user/wlibc.fi`): die Flaeche ist 800
-// mal 81 Bildpunkte gross, ein Fenster von 800 mal 600 passt nicht in
-// den Speicher eines Prozesses, also wird es in Streifen gemalt.
-fn streifen(y0: u64, hoehe: u64) {
+fn streifen(y0: u64, height: u64) {
     wlibc.set_band(y0)
-    wlibc.clip_set(0, y0, sw, y0 + hoehe)
+    wlibc.clip_set(0, y0, sw, y0 + height)
     var y: u64 = y0
-    while y < y0 + hoehe {
+    while y < y0 + height {
         var x: u64 = 0
         while x < sw {
             wlib.draw_point(x, y, color_at(x, y))
@@ -385,48 +280,22 @@ fn streifen(y0: u64, hoehe: u64) {
         }
         y = y + 1
     }
-    flush(0, y0, sw, hoehe)
+    flush(0, y0, sw, height)
 }
 
 fn all_paint() {
     var y: u64 = 0
     while y < sh {
-        var hoehe: u64 = wlibc.surf_rows()
-        if y + hoehe > sh {
-            hoehe = sh - y
+        var height: u64 = wlibc.surf_rows()
+        if y + height > sh {
+            height = sh - y
         }
-        streifen(y, hoehe)
-        y = y + hoehe
+        streifen(y, height)
+        y = y + height
     }
 }
 
 // ====================================== RUNDE MODULE: DIE KAESTCHEN
-//
-// Justins Auftrag, 22.09.2026: "man soll das alles einstellen koennen
-// also so wie in einem minecraft client die ganzen module hin und
-// herschieben etc".
-//
-// Die Tafel, das Ziehen, das Einrasten und die Datei stehen in
-// `kernel/user/modul.fi`; hier steht nur, WANN gemalt wird -- und das
-// ist der Teil, an dem die Bilder je Sekunde haengen.
-//
-// DER FLECK IST DER GANZE TRICK. `all_paint` malt 800x600 Bildpunkte
-// einzeln (480 000 Aufrufe von `color_at`); das je Modul und Bild zu
-// tun, waere der sichere Weg, eine Uhr teurer zu machen als den
-// ganzen Schreibtisch. `fleck` malt GENAU das Rechteck eines Moduls
-// neu -- bei 120x32 sind das 3 840 Punkte, ein Hundertstel davon --
-// und schiebt auch nur dieses Rechteck hinaus.
-//
-// GEMALT WIRD MIT `color_at`, also mit derselben Rechnung wie das
-// grosse Bild. Ein zweiter Weg waere eine zweite Umsetzung desselben
-// Hintergrunds -- und man saehe nach dem naechsten Hintergrundbild,
-// dass unter den Modulen ein Rechteck in der falschen Farbe steht.
-//
-// DIE STREIFEN. Die Malflaeche des Servers traegt nicht den ganzen
-// Schirm, sondern `wlibc.surf_rows()` Zeilen (kernel/user/desktop.fi,
-// `all_paint` geht deshalb in Streifen). Ein Fleck, der ueber eine
-// Streifengrenze laeuft, muss in BEIDEN Streifen gemalt und zweimal
-// hinausgeschoben werden; genau das tut die aeussere Schleife.
 fn fleck(x: u64, y: u64, w: u64, h: u64) {
     if w == 0 || h == 0 {
         return
@@ -472,14 +341,9 @@ fn fleck(x: u64, y: u64, w: u64, h: u64) {
     }
 }
 
-// WELCHES MODUL GERADE EINEN RAHMEN TRAEGT (die Hand liegt darauf oder
-// es wird gezogen). 99 = keines.
-static mut modul_zeigt: u64 = 99
+static mut widget_shown: u64 = 99
 
-// Ein Modul malen: erst den Hintergrund an seiner Stelle, dann das
-// Kaestchen darueber, und beides streifenweise -- aus demselben
-// Grund wie in `fleck`.
-fn modul_malen(i: u64) {
+fn widget_paint(i: u64) {
     if !modul.an(i) {
         return
     }
@@ -508,7 +372,7 @@ fn modul_malen(i: u64) {
         }
         wlibc.clip_set(x, yy, x + w, bis)
         modul.malen(i)
-        if modul_zeigt == i {
+        if widget_shown == i {
             modul.rahmen_malen(i)
         }
         flush(x, yy, w, bis - yy)
@@ -516,21 +380,15 @@ fn modul_malen(i: u64) {
     }
 }
 
-fn module_malen() {
+fn widgets_paint() {
     var i: u64 = 0
     while i < modul.ANZ {
-        modul_malen(i)
+        widget_paint(i)
         i = i + 1
     }
 }
 
 // ============================================ DIE BELEGZEILEN
-//
-// Ein Testlaeufer soll die Lage eines Moduls NACHLESEN koennen und
-// nicht im Bild raten muessen -- dieselbe Regel, nach der der
-// Schreibtisch seine fuenf Stuetzstellen meldet und die Taskleiste
-// ihren Startknopf. Gemeldet wird, was die Tafel WIRKLICH haelt:
-// Anker und Abstand, und daneben die daraus gerechneten Bildpunkte.
 static mut m_s1: [u8; 16] = "desktop: modul \0"
 static mut m_s2: [u8; 7] = " name=\0"
 static mut m_s3: [u8; 5] = " an=\0"
@@ -543,7 +401,7 @@ static mut m_s9: [u8; 4] = " w=\0"
 static mut m_s10: [u8; 4] = " h=\0"
 static mut m_s11: [u8; 7] = " text=\0"
 
-fn modul_say(i: u64) {
+fn widget_say(i: u64) {
     say((&m_s1[0 as usize]) as u64)
     sayn(i)
     say((&m_s2[0 as usize]) as u64)
@@ -576,39 +434,12 @@ fn modul_say(i: u64) {
 fn module_say() {
     var i: u64 = 0
     while i < modul.ANZ {
-        modul_say(i)
+        widget_say(i)
         i = i + 1
     }
 }
 
 // ====================================== RUNDE WMPLUGIN: DER AUTOSTART
-//
-// WAS HIER GELOEST WIRD. Fenstererweiterungen sind in diesem System
-// Ring-3-Prozesse (kernel/wmplug.fi). Zwei Schritte gehoeren zu jedem:
-// die Rechte gewaehren (`wmplug enable <name>`, das ist WM_PLUG_GRANT
-// und geht nur als root) und das Programm starten. Bis zu dieser Runde
-// erledigte das ein eigenes Hilfsprogramm (/bin/uhrstart), das nichts
-// anderes tat -- eine benannte Abkuerzung, die hier ihr Ende findet:
-// jetzt steht die Liste in einer DATEI, und der Schreibtisch liest sie.
-//
-// DAS FORMAT IST EINE ZEILE JE ERWEITERUNG:
-//
-//     uhr runden=30          # Name, dahinter Woerter FUER DAS PLUGIN
-//     regel demo
-//
-// Der Name geht an `wmplug enable`, das die Rechte und die Frist aus
-// /etc/wmplug.conf holt und das Programm aus `prog=` startet; die
-// restlichen Woerter reicht es an das Plugin durch. Alles hinter `#`
-// ist Bemerkung.
-//
-// WARUM DER SCHREIBTISCH UND NICHT DER KERN: der Kern liest keine
-// Dateien und macht keine Namenspolitik (dieselbe Regel wie bei der
-// Gewaehrungstafel). Und warum nicht die Leiste: der Schreibtisch ist
-// das erste Programm der Sitzung, das sicher als Wurzel laeuft.
-//
-// FEHLT DIE DATEI, PASSIERT NICHTS -- ein Schreibtisch ohne
-// Erweiterungen ist der Normalfall und keine Stoerung.
-// r921: is the first word of this autostart line "hotkey"?
 fn is_hotkey_line(zp: u64) -> bool {
     var w: [u8; 7] = "hotkey\0"
     var i: u64 = 0
@@ -623,54 +454,43 @@ fn is_hotkey_line(zp: u64) -> bool {
 }
 
 fn autostart() {
-    var pfad: [u8; 24] = "/etc/wmplug.autostart\0\0\0"
+    var path: [u8; 24] = "/etc/wmplug.autostart\0\0\0"
     var p_wm: [u8; 13] = "/bin/wmplug\0\0"
     var a_wm: [u8; 7] = "wmplug\0"
     var a_en: [u8; 7] = "enable\0"
     var p_hk: [u8; 18] = "/etc/hotkeys.conf\0"
-    var s_kl: [u8; 34] = "desktop: autostart keine Liste\0\0\0\0"
+    var s_kl: [u8; 34] = "desktop: autostart has no list\0\0\0\0"
     var s_st: [u8; 21] = "desktop: autostart [\0"
     var s_rc: [u8; 8] = "] pid=\0\0"
-    var puffer: [u8; 1024] = [0 as u8; 1024]
-    var zeile: [u8; 128] = [0 as u8; 128]
-    var wort: [u8; 4096] = [0 as u8; 4096]
+    var buffer: [u8; 1024] = [0 as u8; 1024]
+    var line: [u8; 128] = [0 as u8; 128]
+    var cur_word: [u8; 4096] = [0 as u8; 4096]
     var argv: [u64; 8] = [0 as u64; 8]
 
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, 0, 0)
     if ulib.bad(fd) {
         lineout.add_text((&s_kl[0 as usize]) as u64)
         lineout.end_line()
         return
     }
-    // ERST DIE SITZUNG, DANN DIE ERWEITERUNGEN. Zwei Sekunden, und die
-    // Zahl ist gemessen: `desk` startet nach dem Schreibtisch noch
-    // Leiste und Starter, und ein SYS_EXEC laedt das ganze Abbild IM
-    // Systemaufruf (1,4 Megaoktett, `elf: start ... pages=432`).
-    // Waehrenddessen kommt kein anderer Prozess dran -- ein Plugin, das
-    // sich vorher angemeldet hat, holt in dieser Zeit NICHTS ab, und
-    // der Kehrbesen des Kerns hat recht, wenn er es hinauswirft
-    // (gemessen: `wmplug: unreg uhr grund=2 holte=1`). Das ist keine
-    // Schwaeche der Frist, sondern der Preis eines synchronen
-    // Programmstarts; die Erweiterung wartet, bis er vorbei ist.
     ulib.sleep_ms(2000)
-    let buf: u64 = (&puffer[0 as usize]) as u64
+    let buf: u64 = (&buffer[0 as usize]) as u64
     var len: u64 = 0
-    var weiter: bool = true
-    while weiter && len < 1000 {
+    var keep_going: bool = true
+    while keep_going && len < 1000 {
         let got: u64 = ulib.sys(ulib.SYS_READ, fd, buf + len, 1000 - len)
         if ulib.bad(got) || got == 0 {
-            weiter = false
+            keep_going = false
         } else {
             len = len + got
         }
     }
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
 
-    let zp: u64 = (&zeile[0 as usize]) as u64
-    let wp: u64 = (&wort[0 as usize]) as u64
+    let zp: u64 = (&line[0 as usize]) as u64
+    let wp: u64 = (&cur_word[0 as usize]) as u64
     var i: u64 = 0
     while i < len {
-        // Eine Zeile herausschneiden, Bemerkungen fallen dabei weg.
         var n: u64 = 0
         var kommentar: bool = false
         while i < len && (__mmio_read8((buf + i) as *mut u8)) as u64 != 10 {
@@ -687,11 +507,6 @@ fn autostart() {
         i = i + 1
         __mmio_write8((zp + n) as *mut u8, 0 as u8)
         if n != 0 {
-            // DIE WOERTER LIEGEN EINZELN UND HINTEREINANDER im Puffer:
-            // `SYS_EXEC` bekommt Zeiger, und ein Zeiger auf einen
-            // Puffer, den das naechste Wort gleich wieder ueberschreibt,
-            // zeigt beim Aufruf auf das falsche Wort. Ein Fehler, den
-            // man erst am Plugin sieht.
             var argc: u64 = 2
             argv[(0) as usize] = (&a_wm[0 as usize]) as u64
             argv[(1) as usize] = (&a_en[0 as usize]) as u64
@@ -730,11 +545,6 @@ fn autostart() {
                 lineout.add_text((&s_rc[0 as usize]) as u64)
                 lineout.add_num(rc)
                 lineout.end_line()
-                // DEM AUFGERUFENEN ZEIT LASSEN. `wmplug enable` gewaehrt
-                // die Rechte und startet danach das Plugin; zwei Zeilen
-                // der Liste gleichzeitig zu starten hiesse, zwei
-                // SYS_EXEC ineinanderzuschieben. Gewartet wird in
-                // RING 3 -- der Kern kennt diese Liste nicht.
                 ulib.sleep_ms(400)
             }
         }
@@ -807,7 +617,7 @@ fn wallpaper_reload() {
     }
     cv_step = 0
     all_paint()
-    module_malen()
+    widgets_paint()
 }
 
 fn ctx_show() {
@@ -915,7 +725,7 @@ fn desk_rebuild() -> bool {
     all_paint()
     modul.schirm_setzen(sw, sh)
     modul.messen()
-    module_malen()
+    widgets_paint()
     say((&s_rb[0 as usize]) as u64)
     sayn(sw)
     say((&s_rh[0 as usize]) as u64)
@@ -929,8 +739,8 @@ fn u_start(args: u64) -> u64 {
     let _kbd_applied: u64 = kbdconf.apply()
     var s_nb: [u8; 7] = "nobild\0"
     var s_as: [u8; 10] = "autostart\0"
-    var s_bad: [u8; 23] = "desktop: keine Flaeche\0"
-    var s_nol: [u8; 44] = "desktop: keine Ebene 0 -- nicht die Wurzel?\0"
+    var s_bad: [u8; 20] = "desktop: no surface\0"
+    var s_nol: [u8; 37] = "desktop: no layer 0 -- not the root?\0"
     var s_rd: [u8; 16] = "desktop: ready \0"
     var s_w: [u8; 3] = "w=\0"
     var s_h: [u8; 4] = " h=\0"
@@ -940,7 +750,7 @@ fn u_start(args: u64) -> u64 {
     var s_bh: [u8; 4] = " h=\0"
     var s_bq: [u8; 10] = " quelle=[\0"
     var s_zu: [u8; 2] = "]\0"
-    var s_vl: [u8; 23] = "desktop: verlauf oben=\0"
+    var s_vl: [u8; 23] = "desktop: gradient top=\0"
     var s_un: [u8; 8] = " unten=\0"
     var s_pt: [u8; 18] = "desktop: punkt x=\0"
     var s_py: [u8; 4] = " y=\0"
@@ -952,12 +762,12 @@ fn u_start(args: u64) -> u64 {
     var s_bm: [u8; 26] = "desktop: module bearbeit=\0"
 
     let _mk: u64 = msg.init()
-    var ohne_bild: bool = false
+    var without_image: bool = false
     let argc: u64 = ulib.arg_count(args)
     var a: u64 = 1
     while a < argc {
         if ulib.streq(ulib.arg_at(args, a), (&s_nb[0 as usize]) as u64) {
-            ohne_bild = true
+            without_image = true
         }
         a = a + 1
     }
@@ -978,10 +788,6 @@ fn u_start(args: u64) -> u64 {
     let _s0: u64 = schema
     sw = wlibc.screen_w()
     sh = wlibc.screen_h()
-    // DAS FENSTER IST DER GANZE BILDSCHIRM. Ohne Schmuck heisst: das
-    // aeussere Rechteck IST die Malflaeche, es geht kein Rahmen ab.
-    // COMPOSITOR r486: the screen-sized window gets a shared buffer (the wallpaper is most of what the compositor judges). No buffer to
-    // be had (noshare, no contiguous memory): the window is made as before and paints in bands.
     let shb: u64 = sw * sh * 4
     let shp: u64 = wlibc.shm_buffer(shb)
     var shfd1: u64 = 0
@@ -1014,34 +820,17 @@ fn u_start(args: u64) -> u64 {
         nl()
         return 1
     }
-    // UND JETZT NACH GANZ HINTEN. Schlaegt das fehl, hoert dieses
-    // Programm auf -- ein Schreibtisch, der vor den Fenstern liegt,
-    // ist schlimmer als keiner.
     if ulib.bad(wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_DESK)) {
-        // RUNDE ANMELDUNG: DIESE ZEILE STEHT IMMER AUF DER LEITUNG,
-        // auch ohne /etc/uitrace.
-        //
-        // Sie hat eine ganze Abnahme gekostet: der Schreibtisch starb
-        // hier (E_RIGHTS, weil Ebene 0 der Wurzel vorbehalten war),
-        // und weil `say` hinter dem Messschalter steht, stand im
-        // Bericht KEIN Wort davon -- nur ein leerer Schirm und eine
-        // wiederverwendete Prozessnummer. Ein Abbruchgrund ist keine
-        // Messung, sondern die Auskunft, warum nichts da ist; er
-        // gehoert nicht hinter einen Schalter.
         lineout.add_text((&s_nol[0 as usize]) as u64)
         lineout.end_line()
         let _c: u64 = wlibc.sys3w(wlibc.WM_CLOSE, h, 0, 0)
         return 1
     }
-    // RUNDE THEME: der Verlauf hat jetzt EIGENE Marken. Vorher lieh
-    // sich der Schreibtisch die Farbe der Werkzeugleiste und die des
-    // Fensterhintergrunds -- und aenderte sich mit, sobald eine von
-    // beiden sich aus einem anderen Grund aenderte.
-    c_oben = wlibc.theme(wlibc.C_DESKTOP_TOP)
-    c_unten = wlibc.theme(wlibc.C_DESKTOP_BOTTOM)
-    var mit_bild: bool = false
-    if !ohne_bild {
-        mit_bild = image_load((&s_wall[0 as usize]) as u64)
+    c_top = wlibc.theme(wlibc.C_DESKTOP_TOP)
+    c_bottom = wlibc.theme(wlibc.C_DESKTOP_BOTTOM)
+    var with_image: bool = false
+    if !without_image {
+        with_image = image_load((&s_wall[0 as usize]) as u64)
     }
     // r399: what the smooth wallpaper costs -- one full repaint, in ticks of 10 ms (a
     // repaint happens at start and when the theme or the picture changes, never per frame)
@@ -1066,7 +855,7 @@ fn u_start(args: u64) -> u64 {
     say((&s_sh[0 as usize]) as u64)
     sayn(w_shared)
     nl()
-    if mit_bild {
+    if with_image {
         say((&s_bi[0 as usize]) as u64)
         sayn(bw)
         say((&s_bh[0 as usize]) as u64)
@@ -1077,9 +866,9 @@ fn u_start(args: u64) -> u64 {
         nl()
     } else {
         say((&s_vl[0 as usize]) as u64)
-        sayn(c_oben)
+        sayn(c_top)
         say((&s_un[0 as usize]) as u64)
-        sayn(c_unten)
+        sayn(c_bottom)
         nl()
     }
     // root desktop (no sign-in, tests): run the list here; a signed-in person's desktop cannot grant, glogin ran the list as root before
@@ -1088,38 +877,22 @@ fn u_start(args: u64) -> u64 {
     }
     welcome_start()
 
-    // ==================================================== RUNDE MODULE
-    // DIE REIHENFOLGE IST HIER WICHTIG UND NICHT BELIEBIG.
-    //
-    //   1. `schirm_setzen` -- ohne Breite und Hoehe laesst sich kein
-    //      Anker in Bildpunkte rechnen (x_von/y_von teilen durch sie).
-    //   2. `vorgabe` -- die Lage, die gilt, wenn es keine Datei gibt.
-    //   3. `laden` -- was der Nutzer beim letzten Mal gezogen hat.
-    //      Fehlt die Datei, bleibt die Vorgabe stehen; das ist der
-    //      erste Start und keine Stoerung.
-    //   4. `messen` NACH dem Laden -- die Groesse kommt aus der
-    //      Schrift und nicht aus der Datei. Eine gespeicherte Breite
-    //      waere nach einem Schriftwechsel falsch, und der Text stuende
-    //      ueber den Rand.
     modul.schirm_setzen(sw, sh)
     modul.vorgabe()
-    let m_datei: bool = modul.laden()
+    let m_file: bool = modul.laden()
     modul.messen()
     let _mw: bool = modul.werte_holen()
     modul.texte_bauen()
-    module_malen()
+    widgets_paint()
     say((&s_mod[0 as usize]) as u64)
     var m_d: u64 = 0
-    if m_datei {
+    if m_file {
         m_d = 1
     }
     sayn(m_d)
     nl()
     module_say()
 
-    // FUENF STUETZSTELLEN, und der Laeufer haelt sie gegen das Bild.
-    // Sie stehen bewusst NICHT alle in einer Zeile: eine Stuetzstelle,
-    // die zufaellig stimmt, faellt neben vier anderen auf.
     var k: u64 = 0
     while k < 5 {
         let px_: u64 = sw * (2 * k + 1) / 10
@@ -1134,10 +907,6 @@ fn u_start(args: u64) -> u64 {
         k = k + 1
     }
 
-    // DIE SCHLEIFE. Sie holt Ereignisse ab (sonst laeuft der Ring des
-    // Servers ueber) und sieht ab und zu nach, ob sich das Farbschema
-    // geaendert hat -- die Einstellungen schreiben `/etc/theme`, und
-    // ein Schreibtisch, der dafuer einen Neustart braucht, ist keiner.
     var sum: u64 = wlibc.theme_sum()
     var runde: u64 = 0
     var lebt: bool = true
@@ -1155,49 +924,19 @@ fn u_start(args: u64) -> u64 {
                 lebt = false
             } else if typ == wlibc.EV_DOWN {
                 // ======================================== RUNDE MODULE
-                //
-                // DER RECHTE KNOPF AUF EINEM MODUL SCHALTET DEN
-                // BEARBEITUNGSMODUS -- UND ZWAR AUS EINEM GEMESSENEN
-                // GRUND UND NICHT AUS GESCHMACK.
-                //
-                // Geplant war F9. F9 kommt hier NIE an: der
-                // Schreibtisch liegt auf `L_DESK`, und der
-                // Fensterserver gibt einem Fenster dieser Ebene den
-                // Fokus mit Absicht nicht (kernel/ui/wm.fi, `on_down`:
-                // "ein Schreibtisch, der den Fokus an sich zieht, macht
-                // jeden Tastendruck danach wirkungslos"). GEMESSEN:
-                // `sendkey f9` ueber den QEMU-Monitor, 54 Befehle
-                // angekommen, und in der seriellen Ausgabe steht keine
-                // einzige `module bearbeit=`-Zeile.
-                //
-                // Die sauberen Wege dahin waeren zwei, und beide
-                // gehoeren NICHT in diese Runde: `F_KEYS` setzen hiesse
-                // den Fokus dauerhaft zu nehmen (genau das, was der
-                // Server verhindert), und ein globales Kuerzel gibt es
-                // schon -- `WM_PLUG_KEY` im Plugin-Register --, aber
-                // dafuer muesste sich der Schreibtisch als Erweiterung
-                // anmelden und das Recht R_ACT_KEY bekommen. Das ist
-                // eine eigene Runde wert und nicht ein Seitenhieb in
-                // dieser.
-                //
-                // Die Maus reicht vollkommen: ein Minecraft-Client
-                // macht sein Modulfenster auch mit einem Klick auf.
-                // Die TASTE bleibt in /etc/module.conf stehen (`taste=`)
-                // -- sie ist schon gelesen, geschrieben und einstellbar,
-                // sie wartet nur auf den Weg, auf dem sie ankommt.
-                let knopf: u64 = dd & 0xFFFF
-                if (knopf & 2) != 0 {
+                let button: u64 = dd & 0xFFFF
+                if (button & 2) != 0 {
                     let tr0: u64 = modul.treffer(e_x, e_y)
                     if tr0 < modul.ANZ {
                         let war0: bool = modul.bearbeiten()
                         modul.bearbeiten_setzen(!war0)
                         if war0 {
-                            modul_zeigt = 99
+                            widget_shown = 99
                             if modul.schmutzig() {
                                 let _s3: bool = modul.sichern()
                             }
                         } else {
-                            modul_zeigt = tr0
+                            widget_shown = tr0
                         }
                         say((&s_bm[0 as usize]) as u64)
                         var b0: u64 = 0
@@ -1206,30 +945,22 @@ fn u_start(args: u64) -> u64 {
                         }
                         sayn(b0)
                         nl()
-                        module_malen()
+                        widgets_paint()
                     } else {
                         ctx_show()
                     }
                 } else if modul.bearbeiten() {
-                    // ANFASSEN. Nur im Bearbeitungsmodus -- sonst
-                    // faengt der Schreibtisch Klicks ab, die dem
-                    // Nutzer gehoeren.
                     let tr: u64 = modul.treffer(e_x, e_y)
                     if tr < modul.ANZ {
                         if modul.ziehen_start(tr, e_x, e_y) {
-                            modul_zeigt = tr
-                            modul_malen(tr)
+                            widget_shown = tr
+                            widget_paint(tr)
                         }
                     }
                 }
             } else if typ == wlibc.EV_MOVE {
                 if modul.bearbeiten() {
                     if modul.zieht() {
-                        // DIE ALTE STELLE MERKEN, BEVOR SIE SICH
-                        // AENDERT. Ohne das bleibt beim Ziehen eine
-                        // Spur des Kaestchens stehen -- der Fleck
-                        // wuerde an der NEUEN Stelle gewischt und die
-                        // alte nie.
                         let gz: u64 = modul.gezogen()
                         let ox: u64 = modul.x_von(gz)
                         let oy: u64 = modul.y_von(gz)
@@ -1237,24 +968,22 @@ fn u_start(args: u64) -> u64 {
                         let oh: u64 = modul.hoehe(gz)
                         if modul.ziehen_zu(e_x, e_y) {
                             fleck(ox, oy, ow, oh)
-                            modul_malen(gz)
+                            widget_paint(gz)
                         }
                     } else {
-                        // Die Hand liegt auf einem Modul: Rahmen an,
-                        // und den alten Rahmen weg.
                         let tr2: u64 = modul.treffer(e_x, e_y)
                         var nz: u64 = 99
                         if tr2 < modul.ANZ {
                             nz = tr2
                         }
-                        if nz != modul_zeigt {
-                            let vorher: u64 = modul_zeigt
-                            modul_zeigt = nz
+                        if nz != widget_shown {
+                            let vorher: u64 = widget_shown
+                            widget_shown = nz
                             if vorher < modul.ANZ {
-                                modul_malen(vorher)
+                                widget_paint(vorher)
                             }
                             if nz < modul.ANZ {
-                                modul_malen(nz)
+                                widget_paint(nz)
                             }
                         }
                     }
@@ -1263,40 +992,20 @@ fn u_start(args: u64) -> u64 {
                 if modul.zieht() {
                     let fertig: u64 = modul.ziehen_ende()
                     if fertig < modul.ANZ {
-                        modul_malen(fertig)
-                        modul_say(fertig)
+                        widget_paint(fertig)
+                        widget_say(fertig)
                     }
-                    // SOFORT SICHERN. Ein Nutzer, der ein Kaestchen
-                    // hinzieht und den Rechner ausschaltet, hat es
-                    // verschoben -- nicht "vielleicht".
                     let _sv: bool = modul.sichern()
                 }
             } else if typ == wlibc.EV_KEY {
-                // ========================== RUNDE ECHTHARDWARE-3
-                // AUCH HIER FIELEN TASTEN AUF DEN BODEN.
-                //
-                // Dieselbe Stelle wie in `taskbar.fi`: die Schleife
-                // holt jedes Ereignis ab (und nimmt es damit aus dem
-                // Ring des Servers) und sah nur nach `EV_CLOSE`. Der
-                // Schreibtisch bekommt den Fokus zwar nicht von
-                // selbst (wm.fi: nur L_NORMAL oder F_KEYS), aber
-                // `wm.on_key` schickt bei `nofocus` an JEDES Fenster
-                // -- und dann war die Taste hier zu Ende.
-                let taste: u64 = (dd >> 32) & 0xFFFF
+                let key: u64 = (dd >> 32) & 0xFFFF
                 // ======================================== RUNDE MODULE
                 // F9 SCHALTET DEN BEARBEITUNGSMODUS.
-                //
-                // Die Taste steht in /etc/module.conf als `taste=`, ist
-                // also aenderbar (Justins Wunsch: "man sollte die
-                // keybinds auch in den settings aendern koennen").
-                // Vorgabe ist F9.
-                if taste == modul.taste() && taste != 0 {
+                if key == modul.taste() && key != 0 {
                     let war: bool = modul.bearbeiten()
                     modul.bearbeiten_setzen(!war)
                     if war {
-                        modul_zeigt = 99
-                        // Beim Verlassen sichern, falls noch etwas
-                        // offen war.
+                        widget_shown = 99
                         if modul.schmutzig() {
                             let _s2: bool = modul.sichern()
                         }
@@ -1308,9 +1017,9 @@ fn u_start(args: u64) -> u64 {
                     }
                     sayn(bb)
                     nl()
-                    module_malen()
+                    widgets_paint()
                 } else {
-                    wlib.feed_key(taste)
+                    wlib.feed_key(key)
                 }
             }
             n = n + 1
@@ -1319,18 +1028,10 @@ fn u_start(args: u64) -> u64 {
             ctx_step()
         }
         runde = runde + 1
-        // ==================================================== RUNDE MODULE
-        // EINMAL JE SEKUNDE, UND NUR WENN SICH EINE ZAHL GEAENDERT HAT.
-        //
-        // Die Schleife dreht alle 25 ms; 40 Runden sind eine Sekunde.
-        // `werte_holen` gibt nur dann true, wenn sich Minute, Speicher
-        // oder Last WIRKLICH bewegt haben -- ein Modul, das sich jede
-        // Sekunde neu malt, um dieselbe Minute zu zeigen, kostet
-        // Bilder je Sekunde fuer nichts.
         if (runde % 40) == 0 && !modul.zieht() {
             if modul.werte_holen() {
                 modul.texte_bauen()
-                module_malen()
+                widgets_paint()
             }
         }
         if (runde % 10) == 5 && !modul.zieht() {
@@ -1343,13 +1044,11 @@ fn u_start(args: u64) -> u64 {
             if wlibc.theme_poll() {
                 sum = wlibc.theme_sum()
                 schema = wlibc.theme_scheme_keys()
-                c_oben = wlibc.theme(wlibc.C_DESKTOP_TOP)
-                c_unten = wlibc.theme(wlibc.C_DESKTOP_BOTTOM)
+                c_top = wlibc.theme(wlibc.C_DESKTOP_TOP)
+                c_bottom = wlibc.theme(wlibc.C_DESKTOP_BOTTOM)
                 all_paint()
-                // Das Schema hat gewechselt: die Module tragen seine
-                // Farben, und `all_paint` hat sie gerade uebermalt.
                 modul.messen()
-                module_malen()
+                widgets_paint()
                 say((&s_ne[0 as usize]) as u64)
                 sayn(schema)
                 nl()
@@ -1360,27 +1059,6 @@ fn u_start(args: u64) -> u64 {
     return 0
 }
 
-// RUNDE ROTABSCHNITTE: DIESES `main` LAEUFT, UND ES MUSS DIE
-// ARGUMENTE WEITERGEBEN.
-//
-// Der Kommentar, der hier stand, sagte "das `main`, das nie laeuft --
-// `user.ld` springt nach `u_start`". Das stimmt fuer ein Programm, das
-// mit `kernel/user/crt.s` gebunden ist; dessen `_start` ruft
-// USER_ENTRY. Unter `profile app` stimmt es NICHT: dort bringt firnc
-// sein eigenes `_start` mit (darum darf crt.o nicht dazu, siehe
-// tools/look/shot.sh), und das endet in `call main` -- der Name steht
-// fest in lib/firnc1/codegen.fi, `--defsym=USER_ENTRY` erreicht ihn
-// nicht. Am gebauten ELF nachgesehen: Einsprung ist `_start`, sechs
-// Befehle weiter steht `call <main>`; `_F0.u_start` wird von dort nie
-// gerufen.
-//
-// `u_start(0)` warf damit den Argumentblock weg. Bei powermon waren
-// das 54 rote Zusagen (siehe ROTABSCHNITTE 11/n).
-//
-// Der Block liegt an einer FESTEN Adresse: Runde K16 legte den
-// Stapelzeiger darauf (kernel/elf.fi, `T_USTACK = proc.ARGS_BASE`),
-// und firnc's `_start` macht `mov rsp, rdi`. Jede `elf: start`-Zeile
-// dieses Systems druckt sie als `ustack=0x4007f000`.
 fn main() -> i32 {
     return u_start(ulib.ARGS_BASE) as i32
 }
