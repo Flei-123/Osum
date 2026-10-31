@@ -1,0 +1,72 @@
+# kernel/ui/wm.fi split plan
+
+State: wm.fi had 23996 lines, 851 fns, 573 consts, 166 statics (1590 items). Cut 1 (terminal self-tests) is done: wm.fi 23263, `kernel/ui/wm/vtest.fi` 699.
+
+## Facts (measured with tools/structure)
+- Item call graph is a DAG. Only cycle: `backlum` <-> `bl_measure`. So every cut is solvable by moving items, no redesign needed.
+- Firn imports must form a tree. A new module may import `ui.wm`, but then `wm.fi` cannot import it. Top-of-DAG clusters (nothing in wm calls them) can be cut first with `import ui.wm`. Everything else needs its dependencies cut below first.
+- Module of a state-heavy cluster reaches window state only via `gs/ss` + `S_*`/`W_*` offsets (state lives in `kstate`, not in wm statics). So the base layer is mostly constants and 6 accessors.
+- Exports: `wm.fi` has a 120-line export block; callers outside: kgui (489 uses), sysgui (267), gfx (39), wig (20). sysgui stays untouched, so every name it uses (`wm.<name>`) must stay exported by `wm.fi` until sysgui may change.
+- A cut that moves items out must add the items it needs from wm to the export block (cut 1: 23 names).
+
+## Clusters (rule-based, tools/structure/clusters.py)
+`in` = names of other clusters that call into it. Order = fewest incoming first.
+
+| cluster | lines | in | outside users |
+|---|---:|---:|---|
+| measure (mess*, measure_*) | 341 | 0 | kgui |
+| pixelguard (pg_*) | 136 | 2 | - |
+| shadow | 439 | 3 | kgui |
+| overlay (fo_*, fps, cadence) | 545 | 3 | kgui |
+| magnifier | 209 | 4 | sysgui |
+| present (vsync, leser, sig, ph_*) | 464 | 6 | kgui, sysgui |
+| trust (td_*, trust_*) | 601 | 7 | sysgui |
+| switcher (sw_*) | 439 | 9 | gfx |
+| cursor | 528 | 11 | kgui, wig |
+| anim | 932 | 11 | kgui, sysgui |
+| tabs (tt_*) | 554 | 11 | gfx, kgui, sysgui |
+| blur | 1336 | 12 | gfx, kgui, sysgui, wig |
+| term (emulator, scrollback, parser) | 2531 | 12 | gfx, kgui, sysgui |
+| workarea (work_*, struts, maximize) | 506 | 14 | gfx, kgui, sysgui |
+| glass | 1085 | 14 | kgui, sysgui |
+| input (ev_*, on_mouse*, on_key, dnd_*) | 1563 | 23 | gfx, kgui, sysgui |
+| lifecycle (create, destroy, init) | 461 | 25 | all |
+| tiling (tile_*, snap_*, drag_*) | 2249 | 31 | gfx, kgui, sysgui |
+| compositor (compose*, flush_*, cp_*, pl_*, lj_*) | 2330 | 31 | kgui, sysgui |
+| heads (hd_*, hw_*) | 815 | 33 | gfx, kgui, sysgui |
+| chrome (caption, title, paint_win) | 1645 | 41 | kgui, sysgui |
+| focus / stack | 606 | 48 | all |
+| shape (fill, blend, text, form) | 632 | 51 | kgui, sysgui, wig |
+| base (consts, gs/ss, accessors, metrics) | 2088 | 987 | all |
+
+## Target layout (kernel/ui/wm/*.fi, tree of imports, lowest first)
+1. `layout.fi` - all `S_*`, `W_*`, `K_*`, `F_*`, `E_*`, `L_*`, `DK_*`, `FM_*`, `CAP_*` constants, `gs/ss`, window table accessors (`wat`, `wg`, `wsv`, `win_*`). Mirror in `tools/arch/memmap.py` (reads offsets).
+2. `geom.fi` - `uisc`, `title_h`, `border`, `grip`, `outer_*`, `work_*` getters, `hd_*` getters.
+3. `draw.fi`, `shadow.fi`, `blur.fi`, `glass.fi` - pixel primitives and effects (no window logic).
+4. `cursor.fi`, `anim.fi`, `measure.fi`, `overlay.fi`, `pguard.fi`, `mag.fi`.
+5. `core.fi` - damage, regions, `valid`, `create/destroy`, focus and z-order, `raise_win` (what features need from the server).
+6. Features importing core: `term/` (`emu.fi`, `parser.fi`, `scroll.fi`, `select.fi`, `vtest.fi`), `tabs.fi`, `trust.fi`, `switcher.fi`, `tiling/` (`tree.fi`, `snap.fi`, `drag.fi`, `hotkeys.fi`), `heads.fi`, `workarea.fi`, `chrome.fi`.
+7. Top: `compose.fi` (`compose_rect`, `compose_one`, `flush_*`), `present.fi`, `present_cp.fi` (cp_/pl_/lj_), `input.fi` (`on_mouse*`, `on_key`, `poll`), and a thin `wm.fi` that re-exports nothing but keeps the public names for sysgui until it may change.
+
+## Registries instead of special cases
+- Lifecycle hooks: `destroy` calls `tt_forget`, `set_focus` calls `popups_dismiss_on_focus` and `tl_sel`. Replace with one hook table in `wm/hooks.fi` (`on_create`, `on_destroy`, `on_focus` slots holding function addresses), features register from `init`. This lets features sit above core without core importing them.
+- Paint layers: `paint_win` calls `tt_paint`, `tt_paint_plus`, chrome pieces. Replace with a layer table (`order, painter`) filled at init.
+- Mouse routing: `on_mouse_btn` (574 lines) calls `tt_press`, `trust`, `cap_*`, tiling hit tests. Replace with an ordered list of `(hit_test, handler)` entries.
+- Key routing: `on_key`/`hotkeys` -> table of `(mask, key, action)` rows instead of if-chains.
+- Serial reports (`*_say`, `*_say_reset`, `bild_say_reset`): each cluster owns its `say` function; `report.fi` iterates a table of them.
+
+## Order of cuts (each: pure move, no behaviour, own gate run)
+1. DONE `wm/vtest.fi` (terminal self-tests, top of DAG, only kgui calls them, 13 fns, 23 exports added).
+2. `wm/layout.fi` + `geom.fi` (unlocks all others; touches every const reference; needs `memmap.py` + `wm.<const>` users in kgui/gfx/wig/sysgui checked, tools greps).
+3. `measure`, `pguard`, `shadow`, `overlay`, `mag` (few incoming).
+4. `draw`, `blur`, `glass`, `cursor`, `anim`.
+5. `core` + hook table, then `tabs`, `trust`, `switcher`.
+6. `term/*` (2531 lines), then `tiling/*`.
+7. `chrome`, `heads`, `workarea`, then `compose`, `present`, `input`; `wm.fi` left as facade < 1500 lines.
+8. Each cut: English comments only where the Boss asks (default none), identifiers English with tools/english (rn.py, scoped_rename.py).
+
+## Proof method (used for cut 1)
+- `tools/structure/extract.py --names a,b,c --out kernel/ui/wm/x.fi --header h --apply` moves items, strips comments, qualifies dependencies with `wm.`; export block is extended by hand from `--deps`.
+- Build kernel before and after (`tools/build-kernel.sh`, 15 s), `objdump -d -M intel --no-show-raw-insn`, then `tools/structure/disdiff.py before.dis after.dis old=new...`: per function normalised bodies must be equal.
+- Known noise: `mov esi,<file id>` shifts by one when a source file is added (all functions with a panic site), and `_boot` (multiboot header bytes read as code). Cut 1 result: 13573 functions on both sides, 0 missing, 0 body diff after those two normalisations.
+- Gates: k15, desktop quick, lockscene, alttab, tabstrip, fourbugs, comp/chrome.sh.
