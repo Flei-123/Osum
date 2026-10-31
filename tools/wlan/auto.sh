@@ -223,5 +223,32 @@ HD="$T/hd.klar"
 has "$HD" 'fakefw: umac hdr bad short cmd=' "iwloldhdr: the fake firmware drops the short-header SCAN_CFG silently"
 has "$HD" 'diag: step=scan_cfg err=-70' "iwloldhdr: same signature as the HP (scan_cfg err=-70)"
 hasnot "$HD" 'net OrientFake ' "iwloldhdr: no network found"
+echo "-- ap: airplane mode (wlanctl radio off/on): link drops, no rejoin while off, back up when on; control without the switch"
+bash tools/sync/build.sh "$T/bin" 0 wlanctl > "$T/b2.txt" 2>&1 && ok "wlanctl builds" || { bad "wlanctl build"; tail "$T/b2.txt"; }
+air_image() { # name script
+    printf '%s' "$2" > "$T/$1.sh"
+    python3 tools/osum/mkfs.py build "$T/$1.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+        /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/wlanctl="$T/bin/wlanctl.elf" \
+        "/t/s.sh=$T/$1.sh" "$FWPATH=$T/blobs/v7.bin" "/etc/wlan.conf=$T/good.conf" > "$T/$1.mkfs" 2>&1
+}
+AIR_SWITCH=$'echo ==START==\nsleep 14\necho ==UP==\ncat /proc/wlan\nwlanctl radio off\nsleep 6\necho ==OFF==\ncat /proc/wlan\nwlanctl radio\nsleep 6\necho ==OFF2==\ncat /proc/wlan\nwlanctl radio on\nsleep 14\necho ==ON==\ncat /proc/wlan\nwlanctl radio\necho ==END==\n'
+AIR_CONTROL=$'echo ==START==\nsleep 14\necho ==UP==\ncat /proc/wlan\nsleep 6\necho ==OFF==\ncat /proc/wlan\nsleep 6\necho ==OFF2==\ncat /proc/wlan\nsleep 14\necho ==ON==\ncat /proc/wlan\necho ==END==\n'
+section() { awk -v a="==$2==" -v b="==$3==" '$0 ~ a {f=1; next} $0 ~ b {f=0} f' "$1"; }
+air_image ap "$AIR_SWITCH" || bad "image ap"
+run ap "iwlfhtest iwlfhbind"
+AP="$T/ap.klar"
+section "$AP" UP OFF | grep -aq 'auto=up rc=0' && ok "airplane: the link is up before the switch" || bad "airplane: no link before the switch"
+section "$AP" UP OFF | grep -aq 'radio=off' && bad "airplane: radio=off before the switch" || ok "airplane: radio reported on before the switch"
+section "$AP" OFF OFF2 | grep -aq 'radio=off' && ok "airplane: /proc/wlan reports radio=off" || bad "airplane: no radio=off in /proc/wlan"
+section "$AP" OFF OFF2 | grep -aq 'auto=up rc=0' && bad "airplane: the link is still up with the radio off" || ok "airplane: the link is down with the radio off"
+section "$AP" OFF2 ON | grep -aq 'auto=up rc=0' && bad "airplane: the link came back by itself" || ok "airplane: no rejoin while the radio is off"
+has "$AP" 'radio off' "airplane: wlanctl reports radio off"
+section "$AP" ON END | grep -aq 'auto=up rc=0' && ok "airplane: the link is up again after radio on" || bad "airplane: no link after radio on"
+section "$AP" ON END | grep -aq 'radio=off' && bad "airplane: radio=off after radio on" || ok "airplane: radio=off is gone after radio on"
+air_image apc "$AIR_CONTROL" || bad "image apc"
+run apc "iwlfhtest iwlfhbind"
+APC="$T/apc.klar"
+section "$APC" OFF OFF2 | grep -aq 'auto=up rc=0' && ok "airplane control: without the switch the link stays up" || bad "airplane control: link lost without the switch"
+hasnot "$APC" 'radio=off' "airplane control: no radio=off without the switch"
 echo "WLANAUTO: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]
