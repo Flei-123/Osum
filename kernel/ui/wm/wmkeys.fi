@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import drv.hid.kbd
+import lib.kstate
+import drv.hid.ps2m
+import serial
+import bus.slots
+import ui.wm.tiling
+import sched.time
+import ui.wm.wmbase
+import ui.wm.wmcore
+import ui.wm.wmcpath
+import ui.wm.wmevent
+import ui.wm.wmgate
+import ui.wm.wminput
+import ui.wm.wmlatency
+import ui.wm.wmlayout
+import ui.wmplug
+import ui.wm.wmswitch
+import ui.wm.wmswitchctl
+import ui.wm.wmtermio
+import ui.wm.wmtrust
+
+static mut dh_nraise: u64 = 0
+
+static mut dh_ncancel: u64 = 0
+
+const DH_DELAY_NS: u64 = 600000000
+
+fn dnd_tick(state: u64) {
+    if wmgate.dh_live == 0 || wminput.dh_win == 0 || wminput.dh_raised == wminput.dh_win {
+        return
+    }
+    if time.mono_ns(state) - wminput.dh_t < DH_DELAY_NS {
+        return
+    }
+    let i: u64 = wminput.dh_win - 1
+    wminput.dh_raised = wminput.dh_win
+    if i >= wmbase.MAX_WIN || !wmbase.valid(state, i) || wmbase.focus(state) == i {
+        return
+    }
+    wmcore.raise_win(state, i)
+    wmcore.set_focus(state, i)
+    dh_nraise = dh_nraise + 1
+    wminput.dnd_say(state, 0, wmlayout.wg(state, i, wmlayout.W_ID))
+}
+
+fn dnd_cancel(state: u64) -> bool {
+    if wminput.dh_prev == 0 || slots.drag_active(state) == 0 {
+        return false
+    }
+    let _c: u64 = slots.drag_clear(state)
+    wmgate.dh_live = 0
+    wminput.dh_win = 0
+    wminput.dh_raised = 0
+    dh_ncancel = dh_ncancel + 1
+    wminput.dnd_say(state, 1, 0)
+    return true
+}
+
+fn dnd_take_paste(state: u64, out: u64, max: u64) -> u64 {
+    if wminput.dh_tty == 0 {
+        return 0
+    }
+    let t: u64 = wminput.dh_tty - 1
+    wminput.dh_tty = 0
+    if max < 4 {
+        return 0
+    }
+    var n: u64 = slots.drag_get(state, out, max - 2, 0)
+    let _c: u64 = slots.drag_clear(state)
+    if n == 0 || n >= max - 2 {
+        return 0
+    }
+    kstate.set8(out + n, 32)
+    n = n + 1
+    return (t << 32) | n
+}
+
+fn on_key(state: u64, c: u64) {
+    if !wmbase.ready(state) || c == 0 {
+        return
+    }
+    wminput.input_seen(state)
+    wmlatency.lj_input(state)
+
+    if c == 27 && dnd_cancel(state) {
+        wmlayout.ss(state, wmlayout.S_KSWAL, 1)
+        return
+    }
+
+    if wmswitch.sw_open != 0 {
+        if c == 27 {
+            wmswitch.sw_cancel(state)
+        }
+        wmlayout.ss(state, wmlayout.S_KSWAL, 1)
+        return
+    }
+
+    if wmtrust.trust_key(state, c) {
+        wmlayout.ss(state, wmlayout.S_KSWAL, 1)
+        return
+    }
+
+    wmlayout.ss(state, wmlayout.S_KEYIN, wmlayout.gs(state, wmlayout.S_KEYIN) + 1)
+
+    if wmcpath.cp_shortcut(state) != 0 {
+        wminput.cp_event(state, wmtermio.CP_EV_KEY, 1, 0, 0, 0, c)
+    } else {
+        wminput.cp_event(state, wmtermio.CP_EV_KEY, 0, 0, 0, 0, 0)
+    }
+
+    var mods: u64 = 0
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+        mods = mods | 2
+    }
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
+        mods = mods | 4
+    }
+
+    if !wmgate.lock_active(state) && wmplug.key_owner(state, c, mods) < wmplug.MAX_PLUG {
+        wmplug.notify(state, wmplug.E_KEY, c, mods, 0)
+        wmlayout.ss(state, wmlayout.S_KPLUG, wmlayout.gs(state, wmlayout.S_KPLUG) + 1)
+
+        wmlayout.ss(state, wmlayout.S_KSWAL, 1)
+        var s_pk: [u8; 16] = "wm: plugkey c=\0\0"
+        var s_pm: [u8; 6] = " mod=\0"
+        serial.puts((&s_pk[0]) as u64)
+        serial.dec(c)
+        serial.puts((&s_pm[0]) as u64)
+        serial.dec(mods)
+        serial.nl()
+        return
+    }
+    if wmlayout.gs(state, wmlayout.S_NOFOCUS) != 0 {
+        var i: u64 = 0
+        while i < wmbase.MAX_WIN {
+            if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmgate.input_allowed(state, i) {
+                wmevent.ev_push(state, i, wmlayout.E_KEY, c, 0, 0)
+            }
+            i = i + 1
+        }
+        return
+    }
+
+    if wmgate.lock_active(state) {
+        var k: u64 = 0
+        while k < wmbase.MAX_WIN {
+            if wmlayout.wg(state, k, wmlayout.W_USED) != 0 && wmgate.input_allowed(state, k) {
+                wmevent.ev_push(state, k, wmlayout.E_KEY, c, 0, 0)
+                k = wmbase.MAX_WIN
+            } else {
+                k = k + 1
+            }
+        }
+        return
+    }
+    let f: u64 = wmbase.focus(state)
+    if f < wmbase.MAX_WIN && wmgate.input_allowed(state, f) {
+        wmevent.ev_push(state, f, wmlayout.E_KEY, c, 0, 0)
+    }
+}
+
+const PS2_WD_TICKS: u64 = 10
+
+const PS2_FALL_TICKS: u64 = 200
+
+static mut ps2_wd_at: u64 = 0
+
+static mut ps2_fall_until: u64 = 0
+
+fn ps2_poll_due(now: u64) -> bool {
+    if now < ps2_fall_until {
+        return true
+    }
+    if now - ps2_wd_at >= PS2_WD_TICKS || now < ps2_wd_at {
+        ps2_wd_at = now
+        return true
+    }
+    return false
+}
+
+fn poll(state: u64) -> bool {
+    if !wmbase.ready(state) {
+        return false
+    }
+
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    var tick_new: bool = false
+    if jetzt != wmlayout.gs(state, wmlayout.S_SWTICK) {
+        tick_new = true
+        wmlayout.ss(state, wmlayout.S_SWTICK, jetzt)
+        wmplug.sweep(state)
+        wmtermio.tcur_tick(state)
+    }
+
+    tiling.hotkeys(state)
+    wmswitchctl.sw_tick(state)
+    dnd_tick(state)
+
+    let wd_due: bool = tick_new && ps2_poll_due(jetzt)
+    if wd_due && !kstate.mode_on(state, kstate.M_NOKBDPOLL) {
+        var kn: u64 = 0
+        while kn < 16 && kbd.rescue(state) {
+            kn = kn + 1
+        }
+        if kn != 0 {
+            ps2_fall_until = jetzt + PS2_FALL_TICKS
+        }
+    }
+    if wd_due && ps2m.present(state) && ps2m.polling(state) {
+        let polls0: u64 = ps2m.polls(state)
+        var n: u64 = 0
+        while n < 64 && ps2m.poll_one(state) {
+
+            if ps2m.changed(state) {
+                ps2m.take_change(state)
+                wminput.on_mouse(state)
+                wmlatency.lj_input(state)
+            }
+            n = n + 1
+        }
+        if ps2m.polls(state) != polls0 {
+            ps2_fall_until = jetzt + PS2_FALL_TICKS
+        }
+    }
+    if !ps2m.changed(state) {
+        return false
+    }
+    ps2m.take_change(state)
+    wminput.on_mouse(state)
+    wmlatency.lj_input(state)
+    return true
+}

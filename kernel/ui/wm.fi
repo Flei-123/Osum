@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmkeys
 import ui.wm.wmtermio
 import ui.wm.wmsay
 import ui.wm.wmcpath
@@ -178,14 +179,14 @@ export {
     anims,
     minimize_anim, open_anim,
     set_min_rect,
-    dnd_take_paste, dnd_live_pub, dnd_nraise_pub, dnd_ncancel_pub,
+    dnd_live_pub, dnd_nraise_pub, dnd_ncancel_pub,
     win_x_pub, win_y_pub,
     frame_no,
     set_before_t0, set_before_step, set_before_win,
     fill, text, flush_win,
     ev_push, ev_pop, ev_waiting,
-    on_key, term_write, term_cols, term_rows,
-    poll, blits, pixels, last_us,
+    term_write, term_cols, term_rows,
+    blits, pixels, last_us,
     frame_us_sum, frame_us_n,
     set_keys,
     downs, moves_seen, hits_seen, win_keys,
@@ -441,6 +442,7 @@ fn flush_win(state: u64, i: u64) {
 fn term_write(state: u64, i: u64, p: u64, n: u64) -> u64 {
     return wmtermio.term_write(state, i, p, n)
 }
+
 
 fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     wmbase.damage(state, x0, y0, x1, y1)
@@ -1401,284 +1403,17 @@ fn ev_pop(state: u64, i: u64, out: u64) -> bool {
     wmlayout.ss(state, wmlayout.S_EVPOP, wmlayout.gs(state, wmlayout.S_EVPOP) + 1)
     return true
 }
-static mut dh_nraise: u64 = 0
-static mut dh_ncancel: u64 = 0
-const DH_DELAY_NS: u64 = 600000000
-
-// Every tick: has the pointer rested long enough on a background window?
-fn dnd_tick(state: u64) {
-    if wmgate.dh_live == 0 || wminput.dh_win == 0 || wminput.dh_raised == wminput.dh_win {
-        return
-    }
-    if time.mono_ns(state) - wminput.dh_t < DH_DELAY_NS {
-        return
-    }
-    let i: u64 = wminput.dh_win - 1
-    wminput.dh_raised = wminput.dh_win
-    if i >= wmbase.MAX_WIN || !wmbase.valid(state, i) || wmbase.focus(state) == i {
-        return
-    }
-    wmcore.raise_win(state, i)
-    wmcore.set_focus(state, i)
-    dh_nraise = dh_nraise + 1
-    wminput.dnd_say(state, 0, wmlayout.wg(state, i, wmlayout.W_ID))
-}
-
-// Esc while a drag runs: the payload goes, the release drops nothing. True = the key is consumed.
-fn dnd_cancel(state: u64) -> bool {
-    if wminput.dh_prev == 0 || slots.drag_active(state) == 0 {
-        return false
-    }
-    let _c: u64 = slots.drag_clear(state)
-    wmgate.dh_live = 0
-    wminput.dh_win = 0
-    wminput.dh_raised = 0
-    dh_ncancel = dh_ncancel + 1
-    wminput.dnd_say(state, 1, 0)
-    return true
-}
-
-// kgui pumps this: a path dropped on a terminal window. Copies "<path> " to `out` (max bytes), returns
-// (tty << 32) | length, 0 = nothing waits. The slot is emptied.
-fn dnd_take_paste(state: u64, out: u64, max: u64) -> u64 {
-    if wminput.dh_tty == 0 {
-        return 0
-    }
-    let t: u64 = wminput.dh_tty - 1
-    wminput.dh_tty = 0
-    if max < 4 {
-        return 0
-    }
-    var n: u64 = slots.drag_get(state, out, max - 2, 0)
-    let _c: u64 = slots.drag_clear(state)
-    if n == 0 || n >= max - 2 {
-        return 0
-    }
-    kstate.set8(out + n, 32)
-    n = n + 1
-    return (t << 32) | n
-}
 
 fn dnd_live_pub() -> u64 {
     return wmgate.dh_live
 }
 
 fn dnd_nraise_pub() -> u64 {
-    return dh_nraise
+    return wmkeys.dh_nraise
 }
 
 fn dnd_ncancel_pub() -> u64 {
-    return dh_ncancel
-}
-
-fn on_key(state: u64, c: u64) {
-    if !wmbase.ready(state) || c == 0 {
-        return
-    }
-    wminput.input_seen(state)
-    wmlatency.lj_input(state) // r1049: a key starts the active stretch too (only the pointer did)
-    // W-DND: Esc cancels a running drag
-    if c == 27 && dnd_cancel(state) {
-        wmlayout.ss(state, wmlayout.S_KSWAL, 1)
-        return
-    }
-    // W1d: while the Alt+Tab panel is open, Esc closes it and no key reaches a window
-    if wmswitch.sw_open != 0 {
-        if c == 27 {
-            wmswitch.sw_cancel(state)
-        }
-        wmlayout.ss(state, wmlayout.S_KSWAL, 1)
-        return
-    }
-    // ROUND ACTION-BUS-5 (AB-004): the trusted dialog takes the key
-    // FIRST -- before a plugin, before the focus, and not for the
-    // terminal either
-    if wmtrust.trust_key(state, c) {
-        wmlayout.ss(state, wmlayout.S_KSWAL, 1)
-        return
-    }
-    // RUNDE MESSTAFEL, Stufe 3 fuer die Tastatur.
-    wmlayout.ss(state, wmlayout.S_KEYIN, wmlayout.gs(state, wmlayout.S_KEYIN) + 1)
-    // COMPOSITOR S5: the compositor sees THAT a key came, and its code only while Alt or the Windows key is held (a shortcut)
-    if wmcpath.cp_shortcut(state) != 0 {
-        wminput.cp_event(state, wmtermio.CP_EV_KEY, 1, 0, 0, 0, c)
-    } else {
-        wminput.cp_event(state, wmtermio.CP_EV_KEY, 0, 0, 0, 0, 0)
-    }
-    // ================================================ RUNDE WMPLUGIN
-    // ERST DAS PLUGIN, DANN DAS FENSTER -- und zwar in dieser Reihe.
-    //
-    // Ein Kuerzel, das ein Plugin belegt hat, darf das Fenster NICHT
-    // mehr sehen: sonst tippt der Zoom-Effekt sein `z` zusaetzlich in
-    // den Texteditor darunter. Der Kern fragt dafuer eine Tafel ab
-    // (acht Vergleiche), legt bei einem Treffer ein Ereignis ab und
-    // kehrt zurueck. ER RUFT DABEI KEIN PLUGIN UND WARTET AUF KEINES;
-    // ob das Plugin sein Ereignis je abholt, aendert an diesem Pfad
-    // nichts -- holt es nicht ab, wirft es die Frist hinaus.
-    var mods: u64 = 0
-    if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
-        mods = mods | 2
-    }
-    if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
-        mods = mods | 4
-    }
-    // r382 LOCK SEAL: while locked no plugin gets the key (its shortcut
-    // could act on windows behind the lock); it goes to the locker only.
-    if !wmgate.lock_active(state) && wmplug.key_owner(state, c, mods) < wmplug.MAX_PLUG {
-        wmplug.notify(state, wmplug.E_KEY, c, mods, 0)
-        wmlayout.ss(state, wmlayout.S_KPLUG, wmlayout.gs(state, wmlayout.S_KPLUG) + 1)
-        // Und AUCH nicht an das Terminal des Fokusfensters: `key_tty`
-        // liest diesen Merker unmittelbar nach uns.
-        wmlayout.ss(state, wmlayout.S_KSWAL, 1)
-        var s_pk: [u8; 16] = "wm: plugkey c=\0\0"
-        var s_pm: [u8; 6] = " mod=\0"
-        serial.puts((&s_pk[0]) as u64)
-        serial.dec(c)
-        serial.puts((&s_pm[0]) as u64)
-        serial.dec(mods)
-        serial.nl()
-        return
-    }
-    if wmlayout.gs(state, wmlayout.S_NOFOCUS) != 0 {
-        var i: u64 = 0
-        while i < wmbase.MAX_WIN {
-            if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmgate.input_allowed(state, i) {
-                wmevent.ev_push(state, i, wmlayout.E_KEY, c, 0, 0)
-            }
-            i = i + 1
-        }
-        return
-    }
-    // RUNDE ALLTAG: WAEHREND DER SPERRE GEHT DIE TASTE AN DEN SPERRER,
-    // ohne nach dem Fokus zu fragen.
-    //
-    // Sein Fenster liegt auf der obersten Ebene, und Fenster dieser
-    // Ebene bekommen den Fokus mit Absicht NICHT (das ist die Regel,
-    // die die Taskleiste braucht). Der erste Anlauf hat deshalb jede
-    // Taste weggeworfen: der Sperrbildschirm stand da und nahm kein
-    // Kennwort an. Gemessen mit `sendkey`.
-    if wmgate.lock_active(state) {
-        var k: u64 = 0
-        while k < wmbase.MAX_WIN {
-            if wmlayout.wg(state, k, wmlayout.W_USED) != 0 && wmgate.input_allowed(state, k) {
-                wmevent.ev_push(state, k, wmlayout.E_KEY, c, 0, 0)
-                k = wmbase.MAX_WIN
-            } else {
-                k = k + 1
-            }
-        }
-        return
-    }
-    let f: u64 = wmbase.focus(state)
-    if f < wmbase.MAX_WIN && wmgate.input_allowed(state, f) {
-        wmevent.ev_push(state, f, wmlayout.E_KEY, c, 0, 0)
-    }
-}
-
-// r1129b: when may the PS/2 fallback look at the controller? (see the comment in `poll`)
-const PS2_WD_TICKS: u64 = 10 // watchdog period while IRQ 12 works: 100 ms
-const PS2_FALL_TICKS: u64 = 200 // after a rescued byte: poll every tick for 2 s
-static mut ps2_wd_at: u64 = 0
-static mut ps2_fall_until: u64 = 0
-fn ps2_poll_due(now: u64) -> bool {
-    if now < ps2_fall_until {
-        return true
-    }
-    if now - ps2_wd_at >= PS2_WD_TICKS || now < ps2_wd_at {
-        ps2_wd_at = now
-        return true
-    }
-    return false
-}
-
-// Wird aus der Hauptschleife gerufen: hat sich am Zeiger etwas getan?
-fn poll(state: u64) -> bool {
-    if !wmbase.ready(state) {
-        return false
-    }
-    // ================================================ RUNDE WMPLUGIN
-    // DER KEHRBESEN HAENGT NICHT AM BILD, SONDERN AN DER UHR.
-    //
-    // Gemessen: ein Plugin, das nach dem Anmelden in eine Endlosschleife
-    // lief, blieb auf seinem Platz stehen -- weil auf einem RUHIGEN
-    // Schreibtisch gar nicht zusammengesetzt wird und `compose` seinen
-    // Kehrbesen deshalb nie erreichte. Eine Frist, die nur greift,
-    // solange sich etwas bewegt, ist keine.
-    //
-    // Also einmal je TICK, aus dem Abfragepfad heraus. Der Preis ist
-    // EIN Vergleich je Durchlauf (der Tick hat sich fast nie geaendert)
-    // und acht Vergleiche je Hundertstelsekunde. Gewartet wird auch
-    // hier auf niemanden.
-    let jetzt: u64 = kstate.get(state, kstate.TICKS)
-    var tick_new: bool = false
-    if jetzt != wmlayout.gs(state, wmlayout.S_SWTICK) {
-        tick_new = true
-        wmlayout.ss(state, wmlayout.S_SWTICK, jetzt)
-        wmplug.sweep(state)
-        wmtermio.tcur_tick(state) // r1014: terminal cursor blink
-    }
-    // RUNDE TILING: erst die Tastenkuerzel. Sie liegen im Ring, den
-    // `kbd.irq` fuellt, wenn Alt gehalten wird -- der Fensterserver
-    // HOLT sie ab, statt dass die Tastatur ihn kennt.
-    tiling.hotkeys(state)
-    wmswitchctl.sw_tick(state) // W1d: Alt released -> the Alt+Tab switcher commits
-    dnd_tick(state) // W-DND: hover-raise after the delay
-    // DER RUECKFALL AUF ABFRAGE, und er steht hier mit Begruendung.
-    //
-    // Der Baustein meldet ueber IRQ 12, und das ist der Weg, den dieser
-    // Treiber geht. Es gibt aber einen Zustand, in dem die Unterbrechung
-    // AUSBLEIBT und trotzdem ein Oktett bereitliegt: das Zustandstor
-    // sagt dann "Ausgabepuffer voll" (Bit 0) und "vom zweiten Anschluss"
-    // (Bit 5). Wer nur auf die Unterbrechung wartet, hat dann einen
-    // Zeiger, der stehenbleibt, und keinen Hinweis darauf, warum.
-    //
-    // Also wird hier NACHGESEHEN. Wie viele Oktette auf welchem der
-    // beiden Wege kamen, steht in `irqs` und `polls` und wird gemeldet
-    // -- eine Abfrage, die als Unterbrechung ausgegeben wird, waere eine
-    // Luege ueber den Treiber.
-    // r1122: ONCE PER TICK. The fallback looks at port 0x64 (a trapped port read, one VM exit in VirtualBox) and the
-    // loop above runs more often than the clock ticks; IRQ 12 brings packets in time, the poll only rescues a lost one.
-    // r1129b: WATCHDOG, NOT A POLL. Every look at port 0x64 is a trapped port read (one VM exit in VirtualBox, ~34-100 per second
-    // before). While IRQ 12 delivers (the poll finds nothing) the controller is only looked at every PS2_WD_TICKS ticks. A look
-    // that FINDS a byte means the IRQ was lost: from then on every tick polls again for PS2_FALL_TICKS ticks, then back to the watchdog.
-    // W-INPUTHANG: the same watchdog look also covers the KEYBOARD byte (kbd.rescue; `nokbdpoll` = counter-proof without it) and no longer
-    // needs a PS/2 mouse to be present: a machine with only a keyboard on the i8042 has the same lost-edge failure.
-    let wd_due: bool = tick_new && ps2_poll_due(jetzt)
-    if wd_due && !kstate.mode_on(state, kstate.M_NOKBDPOLL) {
-        var kn: u64 = 0
-        while kn < 16 && kbd.rescue(state) {
-            kn = kn + 1
-        }
-        if kn != 0 {
-            ps2_fall_until = jetzt + PS2_FALL_TICKS
-        }
-    }
-    if wd_due && ps2m.present(state) && ps2m.polling(state) {
-        let polls0: u64 = ps2m.polls(state)
-        var n: u64 = 0
-        while n < 64 && ps2m.poll_one(state) {
-            // NACH JEDEM VOLLSTAENDIGEN PAKET, nicht am Ende des
-            // Stapels: ein Druck und das Loslassen danach sind zwei
-            // Pakete, und wer beide zusammen abholt und DANN nachsieht,
-            // findet die Taste wieder oben und hat den Klick verloren.
-            if ps2m.changed(state) {
-                ps2m.take_change(state)
-                wminput.on_mouse(state)
-                wmlatency.lj_input(state)
-            }
-            n = n + 1
-        }
-        if ps2m.polls(state) != polls0 {
-            ps2_fall_until = jetzt + PS2_FALL_TICKS
-        }
-    }
-    if !ps2m.changed(state) {
-        return false
-    }
-    ps2m.take_change(state)
-    wminput.on_mouse(state)
-    wmlatency.lj_input(state)
-    return true
+    return wmkeys.dh_ncancel
 }
 
 // `ax: mag ...` on the serial line: where the panel and the cut-out are,
