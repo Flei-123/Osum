@@ -36,7 +36,7 @@ H_ORI=$(hx "$ORIGIN"); H_USR=$(hx "$USER1"); H_LPW=$(hx "$LPW"); H_TTL=$(hx "Exa
 echo "== 1. build =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 [ -x vendor/firn/bin/firnc ] || { echo "VAULTD-QEMU: firnc missing"; exit 1; }
-PROGS="sh ls cat echo sleep mkdir grep su vaultd vaultctl"
+PROGS="sh ls cat echo sleep mkdir grep su chmod vaultd vaultctl"
 mkdir -p "$TMPD/bin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS init > "$TMPD/b.txt" 2>&1; then
     ok "firnc builds $(echo $PROGS init | wc -w) programs"
@@ -160,12 +160,24 @@ ls /secrets/justin
 echo ==J-READ-ROOT-FILE==
 su justin /bin/cat /secrets/root/vault.vlt
 echo rc=\$?
+echo ==SEALED==
+su justin /bin/ls /secrets/root
+echo rc=\$?
+su justin /bin/ls /secrets/justin
+echo rc=\$?
+echo ==FILEMODE==
+chmod 755 /secrets
+chmod 755 /secrets/root
+chmod 755 /secrets/justin
+su justin /bin/ls /secrets/root
+su justin /bin/cat /secrets/root/vault.vlt
+echo rc=\$?
+su justin /bin/cat /secrets/justin/vault.vlt
+echo rc=\$?
+chmod 700 /secrets
+chmod 700 /secrets/root
+chmod 700 /secrets/justin
 echo ==MODES==
-ls -ld /secrets
-ls -ld /secrets/root
-ls -ld /secrets/justin
-ls -l /secrets/root
-ls -l /secrets/justin
 echo ==ROOT-STILL==
 vaultctl find origin=$ORIGIN
 sleep 12
@@ -268,11 +280,13 @@ hasnot "$TMPD/p.txt" "u1000" "no uid-named folder for justin"
 part "$A" J-READ-ROOT-FILE MODES > "$TMPD/p.txt"
 hasnot "$TMPD/p.txt" "VAULT2" "justin cannot read root's vault file as bytes (mode enforced by the kernel)"
 hasnot "$TMPD/p.txt" "rc=0" "... the read fails with a non-zero exit"
-part "$A" MODES ROOT-STILL > "$TMPD/p.txt"
-grep -a "rwx------" "$TMPD/p.txt" | grep -a " /secrets/root$" > /dev/null && ok "/secrets/root is drwx------" || bad "/secrets/root is not drwx------"
-grep -a "rwx------" "$TMPD/p.txt" | grep -a " /secrets/justin$" > /dev/null && ok "/secrets/justin is drwx------" || bad "/secrets/justin is not drwx------"
-grep -a "rwx------" "$TMPD/p.txt" | grep -a " /secrets$" > /dev/null && ok "/secrets is drwx------" || bad "/secrets is not drwx------"
-grep -a -- "-rw-------" "$TMPD/p.txt" | grep -a "vault.vlt" > /dev/null && ok "vault.vlt is -rw-------" || bad "vault.vlt is not -rw-------"
+part "$A" SEALED FILEMODE > "$TMPD/p.txt"
+hasnot "$TMPD/p.txt" "vault.vlt" "justin cannot list the sealed folders of root or himself (0700 root)"
+hasnot "$TMPD/p.txt" "rc=0" "... both listings fail"
+part "$A" FILEMODE MODES > "$TMPD/p.txt"
+has "$TMPD/p.txt" "vault.vlt" "control: with the folders opened to 0755 the file name is visible"
+hasnot "$TMPD/p.txt" "VAULT2" "vault file is 0600: justin cannot read the bytes even in an open folder"
+hasnot "$TMPD/p.txt" "rc=0" "... neither root's nor his own vault file"
 part "$A" ROOT-STILL ROOT-PASSWD > "$TMPD/p.txt"
 has "$TMPD/p.txt" "$H_LPW" "root's login is still there after justin's work"
 part "$A" ROOT-PASSWD FERTIG > "$TMPD/p.txt"
