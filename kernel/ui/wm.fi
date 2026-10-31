@@ -87,6 +87,8 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.headsync
+import ui.wm.wmworkcalc
 import ui.wm.wmchrome
 import ui.wm.tiling
 import ui.wm.wmworkarea
@@ -154,9 +156,9 @@ export {
     strip_h, cap_strip_w, set_cap_client, set_strip_drag,
     set_nolayer, set_nomin, nolayer, nomin,
     set_strut, win_strut_size, work_x, work_y, work_w,
-    work_h, recalc_work, maximize, is_max,
+    work_h, maximize, is_max,
     hd_multi, hd_present, hd_scale, hd_count, hd_x, hd_y, hd_w, hd_h, win_head, head_work, hw_x, hw_y, hw_w, hw_h,
-    heads_sync, head_syncs, hd_say, hd_demo, display_mode, set_display_mode,
+    display_mode, set_display_mode,
     set_deco_colour, deco_writes,
     set_app, win_app, APP_LEN,
     set_form,
@@ -341,6 +343,23 @@ fn win_layer(state: u64, i: u64) -> u64 {
 
 fn cap_strip_w(state: u64) -> u64 {
     return wmchrome.cap_strip_w(state)
+}
+
+
+fn display_mode(state: u64) -> u64 {
+    return headsync.display_mode(state)
+}
+
+fn hd_count(state: u64) -> u64 {
+    return headsync.hd_count(state)
+}
+
+fn hd_scale(state: u64, hd: u64) -> u64 {
+    return headsync.hd_scale(state, hd)
+}
+
+fn set_display_mode(state: u64, mirror: bool) -> bool {
+    return headsync.set_display_mode(state, mirror)
 }
 
 fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
@@ -1223,7 +1242,7 @@ fn hook_layer_leave(state: u64, i: u64) {
 }
 
 fn hook_workarea(state: u64) {
-    recalc_work(state)
+    wmworkcalc.recalc_work(state)
 }
 
 fn hook_say_windows(state: u64) {
@@ -1292,7 +1311,7 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     wmlayout.ss(state, wmlayout.S_STRUTS, 0)
     wmlayout.ss(state, wmlayout.S_WORKCALC, 0)
     install_hooks()
-    recalc_work(state)
+    wmworkcalc.recalc_work(state)
     wmlayout.ss(state, wmlayout.S_DESK, wmbase.deco(state, wmlayout.DK_DESK))
     wmlayout.ss(state, wmlayout.S_FONT_UI, ttf.MAX_FONTS)
     wmlayout.ss(state, wmlayout.S_FONT_MONO, ttf.MAX_FONTS)
@@ -1438,226 +1457,6 @@ fn cross_point(state: u64, i: u64) -> u64 {
     return ((bx as u64) << 32) | (by as u64)
 }
 
-// Number of heads that exist (1 on a plain screen).
-fn hd_count(state: u64) -> u64 {
-    if !wmhead.hd_multi(state) {
-        return 1
-    }
-    var n: u64 = 0
-    var hd: u64 = 0
-    while hd < wmhead.HD_MAX {
-        if ps2m.head_w(state, hd) != 0 {
-            n = n + 1
-        }
-        hd = hd + 1
-    }
-    return n
-}
-
-// r815: suggested UI scale of a head in percent (100..300) from its EDID (vgpu output table); 100 when unknown.
-fn hd_scale(state: u64, hd: u64) -> u64 {
-    if !wmhead.hd_multi(state) {
-        return vgpu.head_scale(state, 0)
-    }
-    return vgpu.head_scale(state, hd)
-}
-
-
-// r826: show one head line on the serial port (the gate parses these): `wm: head N rect=X,Y WxH work=X,Y WxH`.
-fn hd_say(state: u64, hd: u64) {
-    var s_h: [u8; 10] = "wm: head \0"
-    var s_r: [u8; 7] = " rect=\0"
-    var s_c: [u8; 2] = ",\0"
-    var s_x: [u8; 2] = "x\0"
-    var s_w: [u8; 7] = " work=\0"
-    var s_s: [u8; 2] = " \0"
-    let p: u64 = wmhead.head_work(state, hd)
-    serial.puts((&s_h[0]) as u64)
-    serial.dec(hd)
-    serial.puts((&s_r[0]) as u64)
-    serial.dec(wmhead.hd_x(state, hd))
-    serial.puts((&s_c[0]) as u64)
-    serial.dec(wmhead.hd_y(state, hd))
-    serial.puts((&s_s[0]) as u64)
-    serial.dec(wmhead.hd_w(state, hd))
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(wmhead.hd_h(state, hd))
-    serial.puts((&s_w[0]) as u64)
-    serial.dec(wmhead.hw_x(p))
-    serial.puts((&s_c[0]) as u64)
-    serial.dec(wmhead.hw_y(p))
-    serial.puts((&s_s[0]) as u64)
-    serial.dec(wmhead.hw_w(p))
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(wmhead.hw_h(p))
-    serial.nl()
-}
-
-// r815: "wm: hscale N=P" -- the EDID scale suggestion (percent) of head N next to the UI scale the desktop really uses.
-fn hd_say_scale(state: u64, hd: u64) {
-    var s_h: [u8; 12] = "wm: hscale \0"
-    var s_e: [u8; 2] = "=\0"
-    var s_u: [u8; 4] = " u=\0"
-    serial.puts((&s_h[0]) as u64)
-    serial.dec(hd)
-    serial.puts((&s_e[0]) as u64)
-    serial.dec(hd_scale(state, hd))
-    serial.puts((&s_u[0]) as u64)
-    serial.dec(fb.uiscale(state))
-    serial.nl()
-}
-
-// THE HEAD TABLE FOLLOWS THE OUTPUTS. Called after the window server is up and from `gfx.gpu_ereignis` after every
-// successful re-layout (hot-plug): copy the extend rects of the vgpu driver into the pointer driver's table, bring
-// windows that sit on no head any more to the primary head, keep the others in sight (title bar reachable), refit
-// fullscreen windows to their home head, recompute the work areas (this refits maximized windows and the tile
-// tree) and put the pointer back onto a head. With extend off the table is empty and the model is off.
-fn heads_sync(state: u64) {
-    if !wmbase.ready(state) {
-        return
-    }
-    let act: bool = vgpu.ext_active(state)
-    var n: u64 = 0
-    var hd: u64 = 0
-    while hd < wmhead.HD_MAX {
-        var w: u64 = 0
-        if act {
-            w = vgpu.ext_w(state, hd)
-        }
-        ps2m.set_head(state, hd, vgpu.ext_x(state, hd), vgpu.ext_y(state, hd), w, vgpu.ext_h(state, hd))
-        if w != 0 {
-            n = hd + 1
-        }
-        hd = hd + 1
-    }
-    if act && n < 2 {
-        n = 2
-    }
-    if !act {
-        n = 0
-    }
-    ps2m.set_heads(state, n)
-    if n >= 2 {
-        let p0: u64 = wmhead.head_work(state, wmhead.hd_primary(state))
-        var i: u64 = 0
-        while i < wmbase.MAX_WIN {
-            let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
-            if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && (f & wmlayout.F_HIDDEN) == 0 {
-                if (f & wmlayout.F_FULL) != 0 {
-                    let fh: u64 = wmhead.win_head(state, i)
-                    if wmcore.resize_win(state, i, wmhead.hd_w(state, fh), wmhead.hd_h(state, fh)) {
-                        wmcore.move_win(state, i, wmhead.hd_x(state, fh) as i64, wmhead.hd_y(state, fh) as i64)
-                    }
-                } else if wmbase.deko(state, i) && (f & wmlayout.F_MAXIMIZED) == 0 {
-                    var ov: u64 = 0
-                    let ox: i64 = wmbase.win_x(state, i)
-                    let oy: i64 = wmbase.win_y(state, i)
-                    var h2: u64 = 0
-                    while h2 < wmhead.HD_MAX {
-                        ov = ov + wmhead.hd_overlap(state, h2, ox, oy, ox + wmbase.outer_w(state, i) as i64,
-                            oy + wmbase.outer_h(state, i) as i64)
-                        h2 = h2 + 1
-                    }
-                    if ov == 0 {
-                        wmcore.move_win(state, i, (wmhead.hw_x(p0) + 24) as i64, (wmhead.hw_y(p0) + 24) as i64)
-                    }
-                    tiling.drag_klemmen(state, i)
-                }
-            }
-            i = i + 1
-        }
-        ps2m.set_pos(state, ps2m.x(state), ps2m.y(state))
-    }
-    tiling.tl_heads_changed(state)
-    recalc_work(state)
-    wmlayout.ss(state, wmlayout.S_HD_SYNCS, wmlayout.gs(state, wmlayout.S_HD_SYNCS) + 1)
-    wmlayout.ss(state, wmlayout.S_HD_GEN, vgpu.hot_gen(state))
-    var s_n: [u8; 13] = "wm: heads n=\0"
-    var s_p: [u8; 10] = " present=\0"
-    var s_g: [u8; 6] = " gen=\0"
-    var s_y: [u8; 8] = " syncs=\0"
-    serial.puts((&s_n[0]) as u64)
-    serial.dec(n)
-    serial.puts((&s_p[0]) as u64)
-    serial.dec(hd_count(state))
-    serial.puts((&s_g[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_HD_GEN))
-    serial.puts((&s_y[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_HD_SYNCS))
-    serial.nl()
-    hd = 0
-    while hd < wmhead.HD_MAX {
-        if wmhead.hd_present(state, hd) {
-            hd_say(state, hd)
-            hd_say_scale(state, hd)
-        }
-        hd = hd + 1
-    }
-}
-
-fn hd_say_mode(state: u64, tag: u64) {
-    var s_a: [u8; 5] = "hd: \0"
-    var s_m: [u8; 9] = " mirror=\0"
-    var s_c: [u8; 12] = " connected=\0"
-    var s_p: [u8; 10] = " present=\0"
-    let mode: u64 = display_mode(state)
-    serial.puts((&s_a[0]) as u64)
-    serial.puts(tag)
-    serial.puts((&s_m[0]) as u64)
-    serial.dec((mode >> 8) & 1)
-    serial.puts((&s_c[0]) as u64)
-    serial.dec(mode & 255)
-    serial.puts((&s_p[0]) as u64)
-    serial.dec(hd_count(state))
-    serial.nl()
-}
-
-fn display_mode(state: u64) -> u64 {
-    var mirrored: u64 = 0
-    if vgpu.mirror_active(state) {
-        mirrored = 1
-    }
-    return (mirrored << 8) | vgpu.head_count(state)
-}
-
-fn set_display_mode(state: u64, mirror: bool) -> bool {
-    if !vgpu.set_mirror(state, mirror) {
-        return false
-    }
-    heads_sync(state)
-    return true
-}
-
-fn head_syncs(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_HD_SYNCS)
-}
-
-// One `hd:` line: a window's outer rect.
-fn hd_say_win(state: u64, i: u64, tag: u64) {
-    var s_a: [u8; 5] = "hd: \0"
-    var s_x: [u8; 4] = " x=\0"
-    var s_y: [u8; 4] = " y=\0"
-    var s_w: [u8; 4] = " w=\0"
-    var s_h: [u8; 4] = " h=\0"
-    var s_k: [u8; 7] = " head=\0"
-    var s_f: [u8; 5] = " fl=\0"
-    serial.puts((&s_a[0]) as u64)
-    serial.puts(tag)
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(wmbase.win_x(state, i) as u64)
-    serial.puts((&s_y[0]) as u64)
-    serial.dec(wmbase.win_y(state, i) as u64)
-    serial.puts((&s_w[0]) as u64)
-    serial.dec(wmbase.outer_w(state, i))
-    serial.puts((&s_h[0]) as u64)
-    serial.dec(wmbase.outer_h(state, i))
-    serial.puts((&s_k[0]) as u64)
-    serial.dec(wmhead.win_head(state, i))
-    serial.puts((&s_f[0]) as u64)
-    serial.dec(wmlayout.wg(state, i, wmlayout.W_FLAGS))
-    serial.nl()
-}
-
 // TEST BED for `hdtest` / `hdhot` (tools/wmheads): windows and struts on two heads, printed as `hd:` lines.
 // Needs an extended desktop (vgpuextend with two heads). With `hot` it also unplugs head 1 and plugs it back.
 // r828: edge docking on head 1 (floating halves): right/top/bottom of head 1, a seam edge (no docking), a drop
@@ -1769,324 +1568,6 @@ fn hw_demo(state: u64) {
     hw_say_sw(state, (&g_s3[0]) as u64, m3, wmbase.focus(state), wa, wb)
     let m4: bool = wmswitchctl.swipe_do(state, 3, 3)
     hw_say_sw(state, (&g_s4[0]) as u64, m4, wmbase.focus(state), wa, wb)
-}
-
-fn hd_say_tree(state: u64, i: u64, tag: u64) {
-    var s_a: [u8; 10] = "hd: tree \0"
-    var s_t: [u8; 7] = " tree=\0"
-    var s_n: [u8; 8] = " tiled=\0"
-    serial.puts((&s_a[0]) as u64)
-    serial.puts(tag)
-    serial.puts((&s_t[0]) as u64)
-    serial.dec(tiling.tile_tree_tag(state, i))
-    serial.puts((&s_n[0]) as u64)
-    if tiling.tiled(state, i) {
-        serial.dec(1)
-    } else {
-        serial.dec(0)
-    }
-    serial.nl()
-}
-
-fn hd_say_drop(state: u64, pos: u64) {
-    var s_e: [u8; 11] = "hd: drope=\0"
-    var s_p: [u8; 6] = " pos=\0"
-    serial.puts((&s_e[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_DROPE))
-    serial.puts((&s_p[0]) as u64)
-    serial.puts(pos)
-    serial.nl()
-}
-
-fn hd_say_trees(state: u64, tag: u64) {
-    var s_a: [u8; 11] = "hd: trees \0"
-    var s_n: [u8; 8] = " nodes=\0"
-    var s_l: [u8; 9] = " leaves=\0"
-    serial.puts((&s_a[0]) as u64)
-    serial.puts(tag)
-    serial.puts((&s_n[0]) as u64)
-    serial.dec(tiling.tile_nodes_all(state))
-    serial.puts((&s_l[0]) as u64)
-    serial.dec(tiling.tile_leaves_all(state))
-    serial.nl()
-}
-
-// r839: tile tree per head. Tiling is switched on WITHOUT taking the windows that exist (ss, not set_tile_on).
-fn hd_demo_tile(state: u64, hot: bool, wa: u64, wb: u64, bar: u64) {
-    var t_c1: [u8; 8] = "tile-c1\0"
-    var t_c0: [u8; 8] = "tile-c0\0"
-    var t_c2: [u8; 8] = "tile-c2\0"
-    var t_c1b: [u8; 9] = "split-c1\0"
-    var t_c2b: [u8; 9] = "split-c2\0"
-    var t_c0t: [u8; 7] = "top-c0\0"
-    var t_c1t: [u8; 7] = "top-c1\0"
-    var t_c2t: [u8; 7] = "top-c2\0"
-    var t_top: [u8; 5] = "top1\0"
-    var t_sm: [u8; 5] = "seam\0"
-    var t_mid: [u8; 7] = "middle\0"
-    var t_off: [u8; 4] = "off\0"
-    var t_u0: [u8; 10] = "unplug-c0\0"
-    var t_u1: [u8; 10] = "unplug-c1\0"
-    var t_u2: [u8; 10] = "unplug-c2\0"
-    var t_c3: [u8; 10] = "replug-c3\0"
-    var t_n0: [u8; 6] = "start\0"
-    var t_n1: [u8; 5] = "full\0"
-    var t_n2: [u8; 7] = "unplug\0"
-    var t_n3: [u8; 7] = "replug\0"
-    var t_n4: [u8; 4] = "end\0"
-    var t_f: [u8; 5] = "tile\0"
-    if !wmhead.hd_multi(state) {
-        return
-    }
-    // a clean slate: nothing tiled, no strut, the full head rects are the work areas
-    tiling.set_tile_on(state, false)
-    let _d1: bool = wmcore.destroy(state, wa)
-    let _d2: bool = wmcore.destroy(state, wb)
-    let _d3: bool = wmcore.destroy(state, bar)
-    let h1x: i64 = wmhead.hd_x(state, 1) as i64
-    let hw: i64 = wmhead.hd_w(state, 1) as i64
-    wmlayout.ss(state, wmlayout.S_TILE, 1)
-    hd_say_trees(state, (&t_n0[0]) as u64)
-    // a new window lands on the head it is on: its own tree, filling that head's work area
-    let c1: u64 = wmcore.create(state, 0, h1x + 60, 60, 300, 200, wmlayout.K_RAW, (&t_f[0]) as u64)
-    hd_say_win(state, c1, (&t_c1[0]) as u64)
-    hd_say_tree(state, c1, (&t_c1[0]) as u64)
-    let c0: u64 = wmcore.create(state, 0, 60, 60, 300, 200, wmlayout.K_RAW, (&t_f[0]) as u64)
-    hd_say_win(state, c0, (&t_c0[0]) as u64)
-    hd_say_tree(state, c0, (&t_c0[0]) as u64)
-    hd_say_trees(state, (&t_n1[0]) as u64)
-    // the second window on head 1 splits ONLY head 1's tree
-    let c2: u64 = wmcore.create(state, 0, h1x + 100, 100, 300, 200, wmlayout.K_RAW, (&t_f[0]) as u64)
-    hd_say_win(state, c1, (&t_c1b[0]) as u64)
-    hd_say_win(state, c2, (&t_c2b[0]) as u64)
-    hd_say_win(state, c0, (&t_c0[0]) as u64)
-    hd_say_tree(state, c2, (&t_c2[0]) as u64)
-    // drag c0 over to the top edge of head 1: tiled as the upper half of head 1's tree
-    tiling.drag_begin(state, c0)
-    hd_say_tree(state, c0, (&t_c0t[0]) as u64)
-    tiling.drag_hover(state, c0, h1x + hw / 2, 0)
-    hd_say_drop(state, (&t_top[0]) as u64)
-    tiling.drag_end(state, c0, h1x + hw / 2, 0)
-    hd_say_win(state, c0, (&t_c0t[0]) as u64)
-    hd_say_win(state, c1, (&t_c1t[0]) as u64)
-    hd_say_win(state, c2, (&t_c2t[0]) as u64)
-    hd_say_tree(state, c0, (&t_c0t[0]) as u64)
-    hd_say_trees(state, (&t_n2[0]) as u64)
-    // the seam between the heads is no docking edge; the middle of a tile: no edge either; switch off: nothing
-    tiling.drag_hover(state, c0, h1x, 100)
-    hd_say_drop(state, (&t_sm[0]) as u64)
-    tiling.drag_hover(state, c0, h1x + hw / 2, 300)
-    hd_say_drop(state, (&t_mid[0]) as u64)
-    wmlayout.ss(state, wmlayout.S_DROPN, 0)
-    wmlayout.ss(state, wmlayout.S_DROPE, 0)
-    wmlayout.ss(state, wmlayout.S_PVON, 0)
-    wmlayout.ss(state, wmlayout.S_TILE, 0)
-    tiling.drag_hover(state, c0, h1x + hw - 1, 100)
-    hd_say_drop(state, (&t_off[0]) as u64)
-    wmlayout.ss(state, wmlayout.S_TILE, 1)
-    if hot {
-        let _t1: bool = vgpu.hot_toggle(state, 1)
-        heads_sync(state)
-        hd_say_win(state, c0, (&t_u0[0]) as u64)
-        hd_say_win(state, c1, (&t_u1[0]) as u64)
-        hd_say_win(state, c2, (&t_u2[0]) as u64)
-        hd_say_tree(state, c0, (&t_u0[0]) as u64)
-        hd_say_tree(state, c1, (&t_u1[0]) as u64)
-        hd_say_tree(state, c2, (&t_u2[0]) as u64)
-        hd_say_trees(state, (&t_n2[0]) as u64)
-        let _t2: bool = vgpu.hot_toggle(state, 1)
-        heads_sync(state)
-        let c3: u64 = wmcore.create(state, 0, h1x + 80, 80, 300, 200, wmlayout.K_RAW, (&t_f[0]) as u64)
-        hd_say_win(state, c3, (&t_c3[0]) as u64)
-        hd_say_tree(state, c3, (&t_c3[0]) as u64)
-        hd_say_trees(state, (&t_n3[0]) as u64)
-    }
-    tiling.set_tile_on(state, false)
-    hd_say_trees(state, (&t_n4[0]) as u64)
-    if hot {
-        var t_mp: [u8; 11] = "mirror-pre\0"
-        var t_mo: [u8; 10] = "mirror-on\0"
-        var t_mf: [u8; 11] = "mirror-off\0"
-        var t_gn: [u8; 8] = "mode-on\0"
-        var t_gf: [u8; 9] = "mode-off\0"
-        let c4: u64 = wmcore.create(state, 0, h1x + 120, 120, 200, 150, wmlayout.K_RAW, (&t_mp[0]) as u64)
-        hd_say_win(state, c4, (&t_mp[0]) as u64)
-        let _s1: bool = set_display_mode(state, true)
-        hd_say_mode(state, (&t_gn[0]) as u64)
-        hd_say_win(state, c4, (&t_mo[0]) as u64)
-        let _s2: bool = set_display_mode(state, false)
-        hd_say_mode(state, (&t_gf[0]) as u64)
-        hd_say_win(state, c4, (&t_mf[0]) as u64)
-    }
-}
-
-fn hd_demo(state: u64, hot: bool) {
-    var t_bar: [u8; 4] = "bar\0"
-    var t_a: [u8; 6] = "win-a\0"
-    var t_b: [u8; 6] = "win-b\0"
-    var t_m1: [u8; 5] = "max1\0"
-    var t_m0: [u8; 5] = "max0\0"
-    var t_f1: [u8; 6] = "full1\0"
-    var t_un: [u8; 7] = "unmax1\0"
-    var t_u1: [u8; 9] = "unplug-a\0"
-    var t_u2: [u8; 11] = "unplug-bar\0"
-    var t_pl: [u8; 9] = "replug-a\0"
-    var t_pb: [u8; 11] = "replug-bar\0"
-    var s_no: [u8; 14] = "hd: no extend\0"
-    var s_cl: [u8; 13] = "hd: clamp x=\0"
-    var s_cy: [u8; 4] = " y=\0"
-    var s_wk: [u8; 24] = "hd: after unplug work0 \0"
-    if !wmhead.hd_multi(state) {
-        serial.puts((&s_no[0]) as u64)
-        serial.nl()
-        return
-    }
-    let sw: u64 = wmlayout.gs(state, wmlayout.S_SW)
-    let sh: u64 = wmlayout.gs(state, wmlayout.S_SH)
-    // 1. a 28 px bar over the bottom edge of the whole desktop: one strut per head it touches
-    var s_sc: [u8; 12] = "hd: screen \0"
-    serial.puts((&s_sc[0]) as u64)
-    serial.dec(sw)
-    serial.put(120 as u8)
-    serial.dec(sh)
-    serial.nl()
-    let bar: u64 = wmcore.create(state, 0, 0, (sh - 28) as i64, sw, 28, wmlayout.K_RAW, (&t_bar[0]) as u64)
-    if bar >= wmbase.MAX_WIN {
-        return
-    }
-    wmcore.set_deco(state, bar, false)
-    let _s: bool = wmworkarea.set_strut(state, bar, wmhead.EDGE_BOTTOM, 28)
-    hd_say(state, 0)
-    hd_say(state, 1)
-    // 2. a window on head 1, maximized: fills the work area of head 1
-    let wa: u64 = wmcore.create(state, 0, (wmhead.hd_x(state, 1) + 60) as i64, 60, 300, 200, wmlayout.K_RAW, (&t_a[0]) as u64)
-    let _m1: bool = wmworkarea.maximize(state, wa, true)
-    hd_say_win(state, wa, (&t_m1[0]) as u64)
-    // 3. a window on head 0, maximized: fills the work area of head 0
-    let wb: u64 = wmcore.create(state, 0, 40, 50, 300, 200, wmlayout.K_RAW, (&t_b[0]) as u64)
-    let _m0: bool = wmworkarea.maximize(state, wb, true)
-    hd_say_win(state, wb, (&t_m0[0]) as u64)
-    // 4. back to normal: the saved rect is restored on the head it came from
-    let _u: bool = wmworkarea.maximize(state, wa, false)
-    hd_say_win(state, wa, (&t_un[0]) as u64)
-    // 5. fullscreen of the window on head 1: exactly head 1, not the desktop
-    let _f: bool = wmworkarea.fullscreen(state, wa, true)
-    hd_say_win(state, wa, (&t_f1[0]) as u64)
-    let _f2: bool = wmworkarea.fullscreen(state, wa, false)
-    // 6. pointer clamp with heads of different height: head 1 only 240 high -> a point below it goes back onto it
-    let h1x: u64 = ps2m.head_x(state, 1)
-    let h1y: u64 = ps2m.head_y(state, 1)
-    let h1w: u64 = ps2m.head_w(state, 1)
-    let h1h: u64 = ps2m.head_h(state, 1)
-    ps2m.set_head(state, 1, h1x, h1y, h1w, 240)
-    ps2m.set_pos(state, h1x + 60, 250)
-    serial.puts((&s_cl[0]) as u64)
-    serial.dec(ps2m.x(state))
-    serial.puts((&s_cy[0]) as u64)
-    serial.dec(ps2m.y(state))
-    serial.nl()
-    ps2m.set_head(state, 1, h1x, h1y, h1w, h1h)
-    if !hot {
-        hd_demo_tile(state, hot, wa, wb, bar)
-        return
-    }
-    let _m2: bool = wmworkarea.maximize(state, wa, true)
-    // 7. unplug head 1: the window on it comes to head 0 (and is maximized there if it was), head 1's strut is gone
-    let _t1: bool = vgpu.hot_toggle(state, 1)
-    heads_sync(state)
-    hd_say_win(state, wa, (&t_u1[0]) as u64)
-    hd_say_win(state, bar, (&t_u2[0]) as u64)
-    // 8. plug it back: head 1 is there again with its work area
-    let _t2: bool = vgpu.hot_toggle(state, 1)
-    heads_sync(state)
-    hd_say_win(state, wa, (&t_pl[0]) as u64)
-    hd_say_win(state, bar, (&t_pb[0]) as u64)
-    hd_demo_tile(state, hot, wa, wb, bar)
-}
-
-// THE WORK AREA, recomputed from scratch. Not incrementally: an
-// incremental work area is a cache, and a cache of four numbers that
-// three modules write is the kind of thing that is right in every test
-// and wrong on the machine.
-fn recalc_work(state: u64) {
-    if wmhead.hd_multi(state) {
-        // r826: several heads -- the work_* scalars (and with them the tile tree) belong to the primary head.
-        let p: u64 = wmhead.head_work(state, wmhead.hd_primary(state))
-        wmlayout.ss(state, wmlayout.S_WORK_X, wmhead.hw_x(p))
-        wmlayout.ss(state, wmlayout.S_WORK_Y, wmhead.hw_y(p))
-        wmlayout.ss(state, wmlayout.S_WORK_W, wmhead.hw_w(p))
-        wmlayout.ss(state, wmlayout.S_WORK_H, wmhead.hw_h(p))
-        wmlayout.ss(state, wmlayout.S_WORKCALC, wmlayout.gs(state, wmlayout.S_WORKCALC) + 1)
-        wmworkarea.refit_max(state)
-        tiling.tile_area_work(state)
-        tiling.tile_apply(state)
-        return
-    }
-    let sw: u64 = wmlayout.gs(state, wmlayout.S_SW)
-    let sh: u64 = wmlayout.gs(state, wmlayout.S_SH)
-    var x0: u64 = 0
-    var y0: u64 = 0
-    var x1: u64 = sw
-    var y1: u64 = sh
-    if wmlayout.gs(state, wmlayout.S_NOSTRUT) == 0 {
-        // RUNDE BLECHDREI: das reservierte Band der Messtafel ist ein
-        // Strut wie jeder andere -- nur einer, den kein Fenster haelt.
-        // Ohne diese Zeile legte der Schreibtisch seine Fenster unter
-        // die Tafel, und `fb` schnitte sie dort ab.
-        y0 = fb.band(state)
-        var i: u64 = 0
-        while i < wmbase.MAX_WIN {
-            if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmlayout.wg(state, i, wmlayout.W_STRUT) != 0 {
-                if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) == 0 {
-                    let e: u64 = (wmlayout.wg(state, i, wmlayout.W_STRUT) & 0xFF) - 1
-                    let n: u64 = wmlayout.wg(state, i, wmlayout.W_STRUT) >> 8
-                    if e == wmhead.EDGE_TOP {
-                        if n > y0 {
-                            y0 = n
-                        }
-                    } else if e == wmhead.EDGE_BOTTOM {
-                        if n < sh && sh - n < y1 {
-                            y1 = sh - n
-                        }
-                    } else if e == wmhead.EDGE_LEFT {
-                        if n > x0 {
-                            x0 = n
-                        }
-                    } else {
-                        if n < sw && sw - n < x1 {
-                            x1 = sw - n
-                        }
-                    }
-                }
-            }
-            i = i + 1
-        }
-    }
-    // A STRUT THAT EATS THE SCREEN IS NOT A STRUT. The smallest window
-    // this server will make is 32 x 16 (see `resize_win`), plus the
-    // decoration; below 64 x 64 of work area nothing can be laid out at
-    // all, and the honest answer is to refuse the reservation rather
-    // than to hand out a rectangle nobody can use.
-    if x1 < x0 + 64 || y1 < y0 + 64 {
-        x0 = 0
-        y0 = 0
-        x1 = sw
-        y1 = sh
-    }
-    wmlayout.ss(state, wmlayout.S_WORK_X, x0)
-    wmlayout.ss(state, wmlayout.S_WORK_Y, y0)
-    wmlayout.ss(state, wmlayout.S_WORK_W, x1 - x0)
-    wmlayout.ss(state, wmlayout.S_WORK_H, y1 - y0)
-    wmlayout.ss(state, wmlayout.S_WORKCALC, wmlayout.gs(state, wmlayout.S_WORKCALC) + 1)
-    wmworkarea.refit_max(state)
-    // RUNDE VOLLBILD: UND DER KACHELBAUM FOLGT MIT. `refit_max` zieht
-    // die maximierten Fenster nach, der Baum blieb bisher stehen -- ein
-    // gekacheltes Fenster behielt die Flaeche von vor dem Strut und lag
-    // damit unter der Leiste. Dieselbe Begruendung wie bei `refit_max`
-    // eine Zeile darueber: ein Strut, den nur die Haelfte beachtet, ist
-    // keiner.
-    tiling.tile_area_work(state)
-    tiling.tile_apply(state)
 }
 
 // RUNDE ECHTHARDWARE-1: das Fenster sagt, ob es die Tastatur will.
