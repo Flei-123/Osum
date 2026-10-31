@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmswitch
 import ui.wm.wmtabs
 import ui.wm.wmtrust
 import ui.wm.wmanim
@@ -184,7 +185,7 @@ export {
     title_clipped, title_missing,
     evpush, evpop, keyin, evdrops, evkoal, evterm, title_old,
     win_paints, win_px, win_flags, top_layer_win, wins_say,
-    E_KEY, E_DOWN, E_UP, E_CLOSE, E_AXPRESS, swipe_do, swipes_done, hw_demo,
+    E_KEY, E_DOWN, E_UP, E_CLOSE, E_AXPRESS, swipe_do, hw_demo,
     say_mag,
     L_DESK, L_NORMAL, L_TOAST, L_FLOAT, L_MAX, layer_rank,
     F_HIDDEN, F_NODECO,
@@ -333,6 +334,7 @@ fn trust_poll(state: u64, no: u64) -> u64 {
 fn tt_is_bg(state: u64, i: u64) -> bool {
     return wmtabs.tt_is_bg(state, i)
 }
+
 
 const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
 const EV_SLOTS: u64 = 32
@@ -9180,9 +9182,9 @@ fn on_key(state: u64, c: u64) {
         return
     }
     // W1d: while the Alt+Tab panel is open, Esc closes it and no key reaches a window
-    if sw_open != 0 {
+    if wmswitch.sw_open != 0 {
         if c == 27 {
-            sw_cancel(state)
+            wmswitch.sw_cancel(state)
         }
         wmlayout.ss(state, wmlayout.S_KSWAL, 1)
         return
@@ -13622,8 +13624,8 @@ fn hotkeys(state: u64) -> u64 {
                 serial.dec((v >> 8) & 0xFF)
                 serial.nl()
             } else
-            if sw_open != 0 && (v & 0xFF) == 27 {
-                sw_cancel(state)
+            if wmswitch.sw_open != 0 && (v & 0xFF) == 27 {
+                wmswitch.sw_cancel(state)
             } else
             // FPS-OV: Ctrl+Alt+F (mods 5 = Alt + Ctrl, 7 with Shift) switches the frame-rate overlay
             if ((v & 0xFF) == 102 || (v & 0xFF) == 70) && ((v >> 8) & 0xFD) == 5 {
@@ -13714,37 +13716,11 @@ fn hotkeys(state: u64) -> u64 {
     return n
 }
 
-// RUNDE TUERSCHLOSS: DAS NAECHSTE FENSTER, das ein Mensch meint.
-//
-// WELCHE FENSTER MITZAEHLEN. Nicht jedes Fenster ist eines, zu dem man
-// wechseln will: der Schreibtisch (`L_DESK`) ist der Hintergrund, die
-// Taskleiste (`L_TOP`) ist Bedienung, und ein verborgenes (`F_HIDDEN`)
-// steht nicht auf dem Schirm. Es bleiben die gewoehnlichen Anwendungen
-// auf `L_NORMAL` -- genau die, die auch eine Titelleiste tragen.
-//
-// WARUM IM KREIS AB DEM FOKUS und nicht immer von vorn: sonst wechselt
-// Alt+Tab bei drei Fenstern ewig zwischen den ersten beiden. Der Ring
-// laeuft `von+1 .. von+MAX_WIN` und rechnet modulo -- damit kommt jedes
-// Fenster genau einmal vorbei, und das eigene zuletzt.
-//
-// Der Rueckgabewert sagt, ob sich WIRKLICH etwas geaendert hat: bei
-// einem einzigen Fenster ist Alt+Tab folgenlos, und das ist kein
-// Fehler, sondern die Wahrheit.
-fn wechselbar(state: u64, i: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) != 0 {
-        return false
-    }
-    return wmlayout.wg(state, i, wmlayout.W_LAYER) == wmlayout.L_NORMAL
-}
-
 fn next_window(state: u64, von: u64) -> bool {
     var k: u64 = 1
     while k <= wmbase.MAX_WIN {
         let j: u64 = (von + k) % wmbase.MAX_WIN
-        if wechselbar(state, j) && j != von {
+        if wmswitch.wechselbar(state, j) && j != von {
             raise_win(state, j)
             set_focus(state, j)
             wmdamage.damage_win(state, j)
@@ -13759,7 +13735,7 @@ fn prev_window(state: u64, von: u64) -> bool {
     var k: u64 = 1
     while k <= wmbase.MAX_WIN {
         let j: u64 = (von + wmbase.MAX_WIN - (k % wmbase.MAX_WIN)) % wmbase.MAX_WIN
-        if wechselbar(state, j) && j != von {
+        if wmswitch.wechselbar(state, j) && j != von {
             raise_win(state, j)
             set_focus(state, j)
             wmdamage.damage_win(state, j)
@@ -13769,284 +13745,101 @@ fn prev_window(state: u64, von: u64) -> bool {
     }
     return false
 }
-
-
-// ===================================================================================================================
-// W1d: THE ALT+TAB SWITCHER (Windows 11 style). One overlay panel with a tile per switchable window (a scaled picture of
-// the window + its title). Alt+Tab opens it with the SECOND window (most recently used) selected, every further Tab moves
-// right, Shift+Tab moves left, releasing Alt switches to the selected window, Esc closes it without a change.
-// The list is the z-order from the top (= most recently used: raising a window is what focusing does), the focused window
-// first. While the panel is open nothing is raised or focused -- the switch happens on release, like on Windows.
-// Alt release is read from the keyboard state (kbd KB_OLD) once per tick; if Alt is already up when the first Tab is
-// handled (a quick tap, e.g. a test harness) the panel opens and commits in the same call.
-// ===================================================================================================================
-static mut sw_open: u64 = 0
-static mut sw_n: u64 = 0
-static mut sw_sel: u64 = 0
-static mut sw_list: [u64; 32] = [0 as u64; 32]
-static mut sw_commits: u64 = 0
 const ACT_PREV_WIN: u64 = 64
 
-fn sw_alt_held(state: u64) -> bool {
-    return kstate.get(state, kstate.K11_OFF + kstate.KB_OLD) == 1
-}
-
-fn sw_say(state: u64, ev: u64) {
-    var s_o: [u8; 21] = "wm: switcher open n=\0"
-    var s_s: [u8; 21] = "wm: switcher step n=\0"
-    var s_c: [u8; 23] = "wm: switcher commit n=\0"
-    var s_x: [u8; 23] = "wm: switcher cancel n=\0"
-    var s_l: [u8; 6] = " sel=\0"
-    var s_w: [u8; 6] = " win=\0"
-    var s_h: [u8; 6] = " hid=\0"
-    var s_m: [u8; 7] = " mins=\0"
-    if ev == 0 {
-        serial.puts((&s_o[0]) as u64)
-    } else if ev == 1 {
-        serial.puts((&s_s[0]) as u64)
-    } else if ev == 2 {
-        serial.puts((&s_c[0]) as u64)
-    } else {
-        serial.puts((&s_x[0]) as u64)
-    }
-    serial.dec(sw_n)
-    serial.puts((&s_l[0]) as u64)
-    serial.dec(sw_sel)
-    serial.puts((&s_w[0]) as u64)
-    var wid: u64 = 99
-    if sw_sel < sw_n {
-        wid = sw_list[sw_sel as usize]
-    }
-    serial.dec(wid)
-    // X1: hid = the selected tile is a minimized window, mins = how many minimized windows the panel lists
-    serial.puts((&s_h[0]) as u64)
-    if wid < wmbase.MAX_WIN && sw_minimized(state, wid) {
-        serial.dec(1)
-    } else {
-        serial.dec(0)
-    }
-    serial.puts((&s_m[0]) as u64)
-    var mc: u64 = 0
-    var t: u64 = 0
-    while t < sw_n {
-        if sw_minimized(state, sw_list[t as usize]) {
-            mc = mc + 1
-        }
-        t = t + 1
-    }
-    serial.dec(mc)
-    serial.nl()
-}
-
-// the panel geometry: out[0..9] = x, y, w, h, cell w, cell h, gap, pad, cols, scale percent
-static mut sw_g: [i64; 10] = [0 as i64; 10]
-
-fn sw_dim(state: u64, v: i64, k: i64) -> i64 {
-    return v * (wmgeom.uisc(state) as i64) * k / 100
-}
-
-fn sw_geom(state: u64) {
-    let wx: i64 = wmlayout.gs(state, wmlayout.S_WORK_X) as i64
-    let wy: i64 = wmlayout.gs(state, wmlayout.S_WORK_Y) as i64
-    let ww: i64 = wmlayout.gs(state, wmlayout.S_WORK_W) as i64
-    let wh: i64 = wmlayout.gs(state, wmlayout.S_WORK_H) as i64
-    let n: i64 = sw_n as i64
-    var k: i64 = 100
-    var cw: i64 = 0
-    var ch: i64 = 0
-    var gap: i64 = 0
-    var pad: i64 = 0
-    var cols: i64 = 1
-    var rows: i64 = 1
-    var pw: i64 = 0
-    var ph: i64 = 0
-    var go: bool = true
-    while go {
-        cw = sw_dim(state, 208, k)
-        ch = sw_dim(state, 164, k)
-        gap = sw_dim(state, 8, k)
-        pad = sw_dim(state, 20, k)
-        cols = (ww - sw_dim(state, 64, k) - 2 * pad + gap) / (cw + gap)
-        if cols < 1 {
-            cols = 1
-        }
-        if cols > n {
-            cols = n
-        }
-        if cols < 1 {
-            cols = 1
-        }
-        rows = (n + cols - 1) / cols
-        pw = cols * cw + (cols - 1) * gap + 2 * pad
-        ph = rows * ch + (rows - 1) * gap + 2 * pad
-        if (ph <= wh - sw_dim(state, 64, k) && pw <= ww) || k <= 40 {
-            go = false
-        } else {
-            k = k - 10
-        }
-    }
-    sw_g[0 as usize] = wx + (ww - pw) / 2
-    sw_g[1 as usize] = wy + (wh - ph) / 2
-    sw_g[2 as usize] = pw
-    sw_g[3 as usize] = ph
-    sw_g[4 as usize] = cw
-    sw_g[5 as usize] = ch
-    sw_g[6 as usize] = gap
-    sw_g[7 as usize] = pad
-    sw_g[8 as usize] = cols
-    sw_g[9 as usize] = k
-}
-
-fn sw_damage(state: u64) {
-    sw_geom(state)
-    let x: i64 = sw_g[0 as usize]
-    let y: i64 = sw_g[1 as usize]
-    wmbase.damage(state, x - 2, y - 2, x + sw_g[2 as usize] + 2, y + sw_g[3 as usize] + 2)
-}
-
-// X1: a minimized window (F_HIDDEN, normal layer, with a frame, not behind a tab) is listed too; committing it restores it.
-fn sw_minimized(state: u64, i: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
-    if (f & wmlayout.F_HIDDEN) == 0 || (f & wmlayout.F_TABBED) != 0 || (f & wmlayout.F_NODECO) != 0 || wmtabs.tt_is_bg(state, i) {
-        return false
-    }
-    return wmlayout.wg(state, i, wmlayout.W_LAYER) == wmlayout.L_NORMAL
-}
-
-fn sw_listable(state: u64, i: u64) -> bool {
-    return wechselbar(state, i) || sw_minimized(state, i)
-}
-
-fn sw_build(state: u64) {
-    sw_n = 0
-    let fo: u64 = wmbase.focus(state)
-    if fo < wmbase.MAX_WIN && sw_listable(state, fo) {
-        sw_list[0 as usize] = fo
-        sw_n = 1
-    }
-    var z: u64 = wmlayout.gs(state, wmlayout.S_COUNT)
-    while z > 0 && sw_n < 32 {
-        z = z - 1
-        let w: u64 = wmbase.at_z(state, z)
-        if w < wmbase.MAX_WIN && sw_listable(state, w) && w != fo {
-            sw_list[sw_n as usize] = w
-            sw_n = sw_n + 1
-        }
-    }
-}
-
-fn sw_close(state: u64) {
-    if sw_open == 0 {
-        return
-    }
-    sw_damage(state)
-    sw_open = 0
-}
-
 fn sw_commit(state: u64) {
-    if sw_open == 0 {
+    if wmswitch.sw_open == 0 {
         return
     }
-    sw_say(state, 2)
+    wmswitch.sw_say(state, 2)
     var j: u64 = wmbase.MAX_WIN
-    if sw_sel < sw_n {
-        j = sw_list[sw_sel as usize]
+    if wmswitch.sw_sel < wmswitch.sw_n {
+        j = wmswitch.sw_list[wmswitch.sw_sel as usize]
     }
-    sw_close(state)
-    if j < wmbase.MAX_WIN && sw_minimized(state, j) {
+    wmswitch.sw_close(state)
+    if j < wmbase.MAX_WIN && wmswitch.sw_minimized(state, j) {
         set_hidden(state, j, false) // X1: a minimized tile restores the window
     }
-    if j < wmbase.MAX_WIN && wechselbar(state, j) {
+    if j < wmbase.MAX_WIN && wmswitch.wechselbar(state, j) {
         raise_win(state, j)
         set_focus(state, j)
         wmdamage.damage_win(state, j)
-        sw_commits = sw_commits + 1
+        wmswitch.sw_commits = wmswitch.sw_commits + 1
     }
-}
-
-fn sw_cancel(state: u64) {
-    if sw_open == 0 {
-        return
-    }
-    sw_say(state, 3)
-    sw_close(state)
 }
 
 // one Alt+Tab (back = false) or Alt+Shift+Tab (back = true). Returns true if the panel is (or was just) open.
 fn sw_step(state: u64, back: bool) -> bool {
-    if sw_open == 0 {
-        sw_build(state)
-        if sw_n < 2 {
+    if wmswitch.sw_open == 0 {
+        wmswitch.sw_build(state)
+        if wmswitch.sw_n < 2 {
             return false
         }
         if back {
-            sw_sel = sw_n - 1
+            wmswitch.sw_sel = wmswitch.sw_n - 1
         } else {
-            sw_sel = 1
+            wmswitch.sw_sel = 1
         }
-        sw_open = 1
-        sw_say(state, 0)
-        sw_damage(state)
-        if !sw_alt_held(state) {
+        wmswitch.sw_open = 1
+        wmswitch.sw_say(state, 0)
+        wmswitch.sw_damage(state)
+        if !wmswitch.sw_alt_held(state) {
             sw_commit(state)
         }
         return true
     }
     if back {
-        sw_sel = (sw_sel + sw_n - 1) % sw_n
+        wmswitch.sw_sel = (wmswitch.sw_sel + wmswitch.sw_n - 1) % wmswitch.sw_n
     } else {
-        sw_sel = (sw_sel + 1) % sw_n
+        wmswitch.sw_sel = (wmswitch.sw_sel + 1) % wmswitch.sw_n
     }
-    sw_say(state, 1)
-    sw_damage(state)
+    wmswitch.sw_say(state, 1)
+    wmswitch.sw_damage(state)
     return true
 }
 
 // once per tick: Alt released -> switch; screen locked -> close; the list lost windows -> drop them
 fn sw_tick(state: u64) {
-    if sw_open == 0 {
+    if wmswitch.sw_open == 0 {
         return
     }
     if wmgate.lock_active(state) {
-        sw_cancel(state)
+        wmswitch.sw_cancel(state)
         return
     }
-    if !sw_alt_held(state) {
+    if !wmswitch.sw_alt_held(state) {
         sw_commit(state)
     }
 }
 
 fn paint_switcher(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    if sw_open == 0 || sw_n == 0 {
+    if wmswitch.sw_open == 0 || wmswitch.sw_n == 0 {
         return
     }
-    sw_geom(state)
+    wmswitch.sw_geom(state)
     let c0: i64 = cx0 as i64
     let r0: i64 = cy0 as i64
     let c1: i64 = cx1 as i64
     let r1: i64 = cy1 as i64
-    let k: i64 = sw_g[9 as usize]
-    let px: i64 = sw_g[0 as usize]
-    let py: i64 = sw_g[1 as usize]
-    let cw: i64 = sw_g[4 as usize]
-    let ch: i64 = sw_g[5 as usize]
-    let gap: i64 = sw_g[6 as usize]
-    let pad: i64 = sw_g[7 as usize]
-    let cols: i64 = sw_g[8 as usize]
-    if px + sw_g[2 as usize] <= c0 || py + sw_g[3 as usize] <= r0 || px >= c1 || py >= r1 {
+    let k: i64 = wmswitch.sw_g[9 as usize]
+    let px: i64 = wmswitch.sw_g[0 as usize]
+    let py: i64 = wmswitch.sw_g[1 as usize]
+    let cw: i64 = wmswitch.sw_g[4 as usize]
+    let ch: i64 = wmswitch.sw_g[5 as usize]
+    let gap: i64 = wmswitch.sw_g[6 as usize]
+    let pad: i64 = wmswitch.sw_g[7 as usize]
+    let cols: i64 = wmswitch.sw_g[8 as usize]
+    if px + wmswitch.sw_g[2 as usize] <= c0 || py + wmswitch.sw_g[3 as usize] <= r0 || px >= c1 || py >= r1 {
         return
     }
-    wmdraw.fill_round(state, px, py, sw_g[2 as usize], sw_g[3 as usize], sw_dim(state, 12, k) as u64, 0x202020, 240, c0, r0, c1, r1)
+    wmdraw.fill_round(state, px, py, wmswitch.sw_g[2 as usize], wmswitch.sw_g[3 as usize], wmswitch.sw_dim(state, 12, k) as u64, 0x202020, 240, c0, r0, c1, r1)
     let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_UI)
     let pxui: u64 = wmlayout.gs(state, wmlayout.S_PX_UI)
     let accent: u64 = wmbase.deco(state, wmlayout.DK_FRAME_ON)
-    let n: i64 = sw_n as i64
+    let n: i64 = wmswitch.sw_n as i64
     var t: i64 = 0
     while t < n {
-        let w: u64 = sw_list[t as usize]
+        let w: u64 = wmswitch.sw_list[t as usize]
         let row: i64 = t / cols
         var inrow: i64 = n - row * cols
         if inrow > cols {
@@ -14056,16 +13849,16 @@ fn paint_switcher(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         let tx: i64 = px + pad + off + (t % cols) * (cw + gap)
         let ty: i64 = py + pad + row * (ch + gap)
         if wmbase.valid(state, w) && tx < c1 && ty < r1 && tx + cw > c0 && ty + ch > r0 {
-            if (t as u64) == sw_sel {
-                wmdraw.fill_round(state, tx, ty, cw, ch, sw_dim(state, 8, k) as u64, accent, 255, c0, r0, c1, r1)
-                let b: i64 = sw_dim(state, 3, k)
-                wmdraw.fill_round(state, tx + b, ty + b, cw - 2 * b, ch - 2 * b, sw_dim(state, 6, k) as u64, 0x2E2E2E, 255, c0, r0, c1, r1)
+            if (t as u64) == wmswitch.sw_sel {
+                wmdraw.fill_round(state, tx, ty, cw, ch, wmswitch.sw_dim(state, 8, k) as u64, accent, 255, c0, r0, c1, r1)
+                let b: i64 = wmswitch.sw_dim(state, 3, k)
+                wmdraw.fill_round(state, tx + b, ty + b, cw - 2 * b, ch - 2 * b, wmswitch.sw_dim(state, 6, k) as u64, 0x2E2E2E, 255, c0, r0, c1, r1)
             }
-            let m: i64 = sw_dim(state, 10, k)
+            let m: i64 = wmswitch.sw_dim(state, 10, k)
             let thx: i64 = tx + m
             let thy: i64 = ty + m
             let thw: i64 = cw - 2 * m
-            let thh: i64 = ch - 2 * m - sw_dim(state, 26, k)
+            let thh: i64 = ch - 2 * m - wmswitch.sw_dim(state, 26, k)
             let bw: i64 = wmlayout.wg(state, w, wmlayout.W_W) as i64
             let bh: i64 = wmlayout.wg(state, w, wmlayout.W_H) as i64
             let buf: u64 = wmlayout.wg(state, w, wmlayout.W_BUF)
@@ -14104,9 +13897,9 @@ fn paint_switcher(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
             if an != 0 && f < ttf.MAX_FONTS && (__mmio_read8((an) as *mut u8)) != 0 as u8 {
                 // ROUND W-ICON: the program's tile in front of the title -- same colour and letter as the bar,
                 // the start menu and the task manager (lib/appicon.fi)
-                let ts: i64 = sw_dim(state, 16, k)
-                let ty2: i64 = thy + thh + sw_dim(state, 4, k)
-                wmdraw.fill_round(state, thx, ty2, ts, ts, sw_dim(state, 4, k) as u64, appicon.color_of(an), 255, c0, r0, c1, r1)
+                let ts: i64 = wmswitch.sw_dim(state, 16, k)
+                let ty2: i64 = thy + thh + wmswitch.sw_dim(state, 4, k)
+                wmdraw.fill_round(state, thx, ty2, ts, ts, wmswitch.sw_dim(state, 4, k) as u64, appicon.color_of(an), 255, c0, r0, c1, r1)
                 let cp: u64 = appicon.letter_cp(an, 0)
                 if cp != 0 {
                     let gs_: u64 = ttf.glyph(state, f, cp, pxui)
@@ -14118,21 +13911,16 @@ fn paint_switcher(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
                             wmbase.imax(thx, c0), wmbase.imax(ty, r0), wmbase.imin(tx + cw, c1), wmbase.imin(ty + ch, r1))
                     }
                 }
-                lead_x = thx + ts + sw_dim(state, 4, k)
+                lead_x = thx + ts + wmswitch.sw_dim(state, 4, k)
             }
             if f < ttf.MAX_FONTS {
-                title_text(state, w, f, lead_x, thy + thh + sw_dim(state, 4, k) + ttf.ascent(state, f, pxui), 0xFFFFFF,
+                title_text(state, w, f, lead_x, thy + thh + wmswitch.sw_dim(state, 4, k) + ttf.ascent(state, f, pxui), 0xFFFFFF,
                     wmbase.imax(thx, c0), wmbase.imax(ty, r0), wmbase.imin(tx + cw, c1), wmbase.imin(ty + ch, r1), tx + cw - m)
             }
         }
         t = t + 1
     }
 }
-
-// r804: the touchpad swipe (lib/touchgest, via hidin -> gfx.mouse_swipe) as a window switch. dir: 1 left, 2 right,
-// 3 up, 4 down; n = fingers (>= 3). Left = next window, right = previous (like Alt+Tab / Alt+Shift+Tab). Up/down
-// have no consumer yet. Never while the screen is locked or the trusted dialog is up. Returns true if the focus moved.
-static mut sw_done: u64 = 0 // swipes that moved the focus
 fn swipe_do(state: u64, dir: u64, n: u64) -> bool {
     if n < 3 || !wmbase.ready(state) || wmgate.lock_active(state) || wmtrust.td_live(state) {
         return false
@@ -14145,13 +13933,9 @@ fn swipe_do(state: u64, dir: u64, n: u64) -> bool {
         moved = prev_window(state, i)
     }
     if moved {
-        sw_done = sw_done + 1
+        wmswitch.sw_done = wmswitch.sw_done + 1
     }
     return moved
-}
-
-fn swipes_done() -> u64 {
-    return sw_done
 }
 
 // W-TPSET2: a touchpad gesture action (lib/touchgest A_*, already resolved from the swipe mode in hidin) that

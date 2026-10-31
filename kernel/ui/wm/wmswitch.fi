@@ -1,0 +1,200 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import serial
+import ui.wm.wmbase
+import ui.wm.wmgeom
+import ui.wm.wmlayout
+import ui.wm.wmtabs
+
+fn wechselbar(state: u64, i: u64) -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+    if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) != 0 {
+        return false
+    }
+    return wmlayout.wg(state, i, wmlayout.W_LAYER) == wmlayout.L_NORMAL
+}
+
+static mut sw_open: u64 = 0
+
+static mut sw_n: u64 = 0
+
+static mut sw_sel: u64 = 0
+
+static mut sw_list: [u64; 32] = [0 as u64; 32]
+
+static mut sw_commits: u64 = 0
+
+fn sw_alt_held(state: u64) -> bool {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_OLD) == 1
+}
+
+fn sw_say(state: u64, ev: u64) {
+    var s_o: [u8; 21] = "wm: switcher open n=\0"
+    var s_s: [u8; 21] = "wm: switcher step n=\0"
+    var s_c: [u8; 23] = "wm: switcher commit n=\0"
+    var s_x: [u8; 23] = "wm: switcher cancel n=\0"
+    var s_l: [u8; 6] = " sel=\0"
+    var s_w: [u8; 6] = " win=\0"
+    var s_h: [u8; 6] = " hid=\0"
+    var s_m: [u8; 7] = " mins=\0"
+    if ev == 0 {
+        serial.puts((&s_o[0]) as u64)
+    } else if ev == 1 {
+        serial.puts((&s_s[0]) as u64)
+    } else if ev == 2 {
+        serial.puts((&s_c[0]) as u64)
+    } else {
+        serial.puts((&s_x[0]) as u64)
+    }
+    serial.dec(sw_n)
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(sw_sel)
+    serial.puts((&s_w[0]) as u64)
+    var wid: u64 = 99
+    if sw_sel < sw_n {
+        wid = sw_list[sw_sel as usize]
+    }
+    serial.dec(wid)
+
+    serial.puts((&s_h[0]) as u64)
+    if wid < wmbase.MAX_WIN && sw_minimized(state, wid) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_m[0]) as u64)
+    var mc: u64 = 0
+    var t: u64 = 0
+    while t < sw_n {
+        if sw_minimized(state, sw_list[t as usize]) {
+            mc = mc + 1
+        }
+        t = t + 1
+    }
+    serial.dec(mc)
+    serial.nl()
+}
+
+static mut sw_g: [i64; 10] = [0 as i64; 10]
+
+fn sw_dim(state: u64, v: i64, k: i64) -> i64 {
+    return v * (wmgeom.uisc(state) as i64) * k / 100
+}
+
+fn sw_geom(state: u64) {
+    let wx: i64 = wmlayout.gs(state, wmlayout.S_WORK_X) as i64
+    let wy: i64 = wmlayout.gs(state, wmlayout.S_WORK_Y) as i64
+    let ww: i64 = wmlayout.gs(state, wmlayout.S_WORK_W) as i64
+    let wh: i64 = wmlayout.gs(state, wmlayout.S_WORK_H) as i64
+    let n: i64 = sw_n as i64
+    var k: i64 = 100
+    var cw: i64 = 0
+    var ch: i64 = 0
+    var gap: i64 = 0
+    var pad: i64 = 0
+    var cols: i64 = 1
+    var rows: i64 = 1
+    var pw: i64 = 0
+    var ph: i64 = 0
+    var go: bool = true
+    while go {
+        cw = sw_dim(state, 208, k)
+        ch = sw_dim(state, 164, k)
+        gap = sw_dim(state, 8, k)
+        pad = sw_dim(state, 20, k)
+        cols = (ww - sw_dim(state, 64, k) - 2 * pad + gap) / (cw + gap)
+        if cols < 1 {
+            cols = 1
+        }
+        if cols > n {
+            cols = n
+        }
+        if cols < 1 {
+            cols = 1
+        }
+        rows = (n + cols - 1) / cols
+        pw = cols * cw + (cols - 1) * gap + 2 * pad
+        ph = rows * ch + (rows - 1) * gap + 2 * pad
+        if (ph <= wh - sw_dim(state, 64, k) && pw <= ww) || k <= 40 {
+            go = false
+        } else {
+            k = k - 10
+        }
+    }
+    sw_g[0 as usize] = wx + (ww - pw) / 2
+    sw_g[1 as usize] = wy + (wh - ph) / 2
+    sw_g[2 as usize] = pw
+    sw_g[3 as usize] = ph
+    sw_g[4 as usize] = cw
+    sw_g[5 as usize] = ch
+    sw_g[6 as usize] = gap
+    sw_g[7 as usize] = pad
+    sw_g[8 as usize] = cols
+    sw_g[9 as usize] = k
+}
+
+fn sw_damage(state: u64) {
+    sw_geom(state)
+    let x: i64 = sw_g[0 as usize]
+    let y: i64 = sw_g[1 as usize]
+    wmbase.damage(state, x - 2, y - 2, x + sw_g[2 as usize] + 2, y + sw_g[3 as usize] + 2)
+}
+
+fn sw_minimized(state: u64, i: u64) -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+    let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
+    if (f & wmlayout.F_HIDDEN) == 0 || (f & wmlayout.F_TABBED) != 0 || (f & wmlayout.F_NODECO) != 0 || wmtabs.tt_is_bg(state, i) {
+        return false
+    }
+    return wmlayout.wg(state, i, wmlayout.W_LAYER) == wmlayout.L_NORMAL
+}
+
+fn sw_listable(state: u64, i: u64) -> bool {
+    return wechselbar(state, i) || sw_minimized(state, i)
+}
+
+fn sw_build(state: u64) {
+    sw_n = 0
+    let fo: u64 = wmbase.focus(state)
+    if fo < wmbase.MAX_WIN && sw_listable(state, fo) {
+        sw_list[0 as usize] = fo
+        sw_n = 1
+    }
+    var z: u64 = wmlayout.gs(state, wmlayout.S_COUNT)
+    while z > 0 && sw_n < 32 {
+        z = z - 1
+        let w: u64 = wmbase.at_z(state, z)
+        if w < wmbase.MAX_WIN && sw_listable(state, w) && w != fo {
+            sw_list[sw_n as usize] = w
+            sw_n = sw_n + 1
+        }
+    }
+}
+
+fn sw_close(state: u64) {
+    if sw_open == 0 {
+        return
+    }
+    sw_damage(state)
+    sw_open = 0
+}
+
+fn sw_cancel(state: u64) {
+    if sw_open == 0 {
+        return
+    }
+    sw_say(state, 3)
+    sw_close(state)
+}
+
+static mut sw_done: u64 = 0
+
+fn swipes_done() -> u64 {
+    return sw_done
+}
