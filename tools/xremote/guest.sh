@@ -7,6 +7,9 @@ echo "XR1 rc=$?"
 /opt/xr/xrprobe grab
 echo "XR2 rc=$?"
 /opt/xr/xrprobe input
+/opt/xr/xrprobe wheel
+/opt/xr/xrprobe clipget
+/opt/xr/xrprobe input
 export FV_RELAY=ws://10.0.2.2:@RELAYPORT@/fv/ws FV_ALLOW_INSECURE_RELAY=1 FV_NOP2P=1 FV_PASSWORD=xrpass
 /opt/xr/xrprobe env
 /opt/xr/freeviewer-host --headless > /tmp/host.log 2>&1 &
@@ -27,7 +30,9 @@ while [ $i -lt @HOSTSECS@ ]; do
     sleep 1
     i=$((i + 1))
 done
-sleep @SESSIONSECS@
+/opt/xr/xrprobe clipwait FV-CLIP- @CLIPSECS@
+/opt/xr/xrprobe clipbig 5000
+sleep @TAILSECS@
 echo "XR-HOSTLOG-BEGIN"
 cat /tmp/host.log
 echo "XR-HOSTLOG-END"

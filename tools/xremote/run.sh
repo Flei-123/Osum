@@ -20,6 +20,8 @@ RELAYDIR=${XR_RELAY:-/root/projects/freeviewer/relay}
 NODEPATH=${XR_LIBS:-/root/jarvis/node_modules}
 LIBGCC=${XR_LIBGCC:-$WD/fx-root/usr/lib/libgcc_s.so.1}
 SESSIONSECS=${XR_SESSION:-60}
+CLIPSECS=$((SESSIONSECS * 2))
+TAILSECS=${XR_TAIL:-30}
 HOSTSECS=${XR_HOSTSECS:-240}
 RELAYPORT=$((17000 + $$ % 1000))
 pass=0; fail=0
@@ -42,7 +44,7 @@ trap cleanup EXIT
 OUT=${XR_OUT:-$T/out}
 mkdir -p "$OUT" "$T/relay" "$T/home" "$T/fx"
 musl-gcc -O2 -fPIE -pie -o "$T/xrprobe" tools/xremote/probe.c || { echo "XREMOTE: probe build failed"; exit 1; }
-sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@SESSIONSECS@/$SESSIONSECS/g" "${XR_GUEST:-tools/xremote/guest.sh}" > "$T/guest.sh"
+sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@SESSIONSECS@/$SESSIONSECS/g" -e "s/@CLIPSECS@/$CLIPSECS/g" -e "s/@TAILSECS@/$TAILSECS/g" "${XR_GUEST:-tools/xremote/guest.sh}" > "$T/guest.sh"
 grep -E '/@755$|^/(bin|sbin)/|^/usr/(bin|sbin)/[a-z0-9_.-]*->/bin/busybox|^/lib/(ld-musl|libc\.musl)' "$WD/fxrun/spec.txt" > "$T/fx/spec.txt"
 {
     echo "/opt/@755"; echo "/opt/xr/@755"; echo "/usr/@755"; echo "/usr/lib/@755"
@@ -92,8 +94,28 @@ grep -aq "monitor 0: osum ${SW}x${SH}" "$T/viewer.txt" 2>/dev/null && ok "viewer
 FR=$(grep -ac '^frame ' "$T/viewer.txt" 2>/dev/null)
 [ "${FR:-0}" -ge 2 ] && ok "viewer received $FR frames of the guest screen" || bad "viewer received ${FR:-0} frames"
 grep -aq "frame [0-9]* ${SW}x${SH}" "$T/viewer.txt" 2>/dev/null && ok "frame size equals the kernel screen size" || bad "frame size differs from the kernel screen size"
-IT=$(grep -a '^XR-INPUT' "$S" | tail -1 | grep -o 'total=[0-9]*' | cut -d= -f2)
-[ "${IT:-0}" -gt 0 ] && ok "viewer input arrived as $IT osum_tipp strokes" || bad "no osum_tipp strokes after the input test"
+IN_BASE=$(grep -a '^XR-INPUT' "$S" | sed -n 2p | grep -o 'total=[0-9]*' | cut -d= -f2); IN_LAST=$(grep -a '^XR-INPUT' "$S" | tail -1 | grep -o 'total=[0-9]*' | cut -d= -f2)
+[ "${IN_LAST:-0}" -gt "${IN_BASE:-0}" ] && ok "viewer input arrived as $((IN_LAST - IN_BASE)) osum_tipp strokes after the baseline $IN_BASE" || bad "no osum_tipp strokes after the input test"
+WL=$(grep -a '^XR-WHEEL' "$S" | head -1)
+echo "$WL" | grep -q 'deny=-[0-9]* after_deny=0 ' && ok "wheel without a permit is refused and changes nothing" || bad "wheel without a permit: $WL"
+echo "$WL" | grep -q 'arm=0 too_big=-[0-9]* bad_axis=-[0-9]* after_bad=0 ' && ok "wheel rejects 100 notches and axis 2" || bad "wheel argument checks: $WL"
+echo "$WL" | grep -q 'down=0 up=0 sum=2 right=0 hsum=2 ' && ok "wheel +5/-3 vertical sums to 2, horizontal +2 adds to hwheel" || bad "wheel sums: $WL"
+echo "$WL" | grep -q 'final=0 hfinal=0$' && ok "wheel counters restored to zero before the session" || bad "wheel counters not zero: $WL"
+P0=$(grep -a '^XR-INPUT' "$S" | sed -n 2p)
+P1=$(grep -a '^XR-INPUT' "$S" | tail -1)
+echo "$P0" | grep -q 'wheel=0 hwheel=0 buttons=0$' && ok "control: wheel and buttons zero before the session" || bad "control: wheel/buttons not zero before the session: $P0"
+echo "$P1" | grep -q 'wheel=2 hwheel=0 buttons=0$' && ok "viewer wheel (-3 then +1 lines) reached the kernel as a net 2 notches down" || bad "wheel after the session: $P1"
+echo "$P1" | grep -q 'px=620 py=440 ' && ok "pointer at 620,440 after abs 2500/2500 plus relative +300/+240 read from the kernel" || bad "pointer after the session: $P1"
+echo "$P0" | grep -q 'px=620 py=440 ' && bad "control: pointer already at the final position before the session" || ok "control: pointer not at the final position before the session"
+grep -aq '^XR-CLIP get len=0 ' "$S" && ok "control: guest clipboard empty before the session" || bad "control: guest clipboard not empty before the session"
+CW=$(grep -a '^XR-CLIP wait' "$S" | head -1)
+echo "$CW" | grep -q 'head=FV-CLIP-' && ok "viewer clipboard text arrived in the guest clipboard ($CW)" || bad "viewer clipboard text missing in the guest: $CW"
+grep -aq 'clip: from viewer [0-9]* bytes applied=true' "$S" && ok "host wrote the viewer text through the bus" || bad "host did not apply the viewer clipboard text"
+CB=$(grep -a '^XR-CLIP putbig' "$S" | head -1)
+CBS=$(echo "$CB" | grep -o 'sum=[0-9a-f]*' | cut -d= -f2)
+[ -n "$CBS" ] && grep -aq "clip: to viewer 5000 bytes sum=$CBS" "$S" && ok "5000-byte guest clipboard text read by the host through a segment, checksum $CBS equal" || bad "host did not read the 5000-byte guest text intact ($CB)"
+grep -aq 'Zwischenablage-Update(s) vom Host empfangen' "$T/inputtest.txt" 2>/dev/null && ok "viewer received the guest clipboard from the host" || bad "viewer received no clipboard from the host"
+grep -aq 'FEHLER' "$T/inputtest.txt" 2>/dev/null && bad "inputtest reports FEHLER: $(grep -a FEHLER "$T/inputtest.txt" | head -1)" || ok "inputtest reports no FEHLER"
 echo "== $pass ok, $fail fail"
 if [ -n "${KEEP:-}" ]; then
     mkdir -p "${KEEP_DIR:-/tmp/xremote-keep}"; cp -r "$OUT" "$T/viewer.txt" "$T/inputtest.txt" "$T/relay.log" "${KEEP_DIR:-/tmp/xremote-keep}/" 2>/dev/null
