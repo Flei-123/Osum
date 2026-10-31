@@ -22,6 +22,8 @@ def load(path, rename):
             m = INSN.match(ln)
             if m and cur is not None:
                 t = m.group(1)
+                if re.match(r"^(nop|data16|cs nop|xchg\s+ax,ax)\b", t):
+                    continue
                 t = re.sub(r"<([^>+]+)(\+0x[0-9a-f]+)?>", lambda x: "<" + rename(x.group(1)) + ("+N" if x.group(2) else "") + ">", t)
                 t = re.sub(r"^(mov\s+esi,)0x[0-9a-f]+$", r"\1FILE", t)
                 t = re.sub(r"0x[0-9a-f]{3,}", "N", t)

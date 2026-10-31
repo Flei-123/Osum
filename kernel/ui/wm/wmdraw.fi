@@ -1,0 +1,440 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.arch
+import fui.comp
+import ecke
+import gfx.fb
+import gfx.ttf
+import utf8
+import ui.wm.wmbase
+import ui.wm.wmgeom
+import ui.wm.wmlayout
+import ui.wm.wmshadow
+
+const MOTION_MAX: u64 = 500
+
+const RIM_MAX: u64 = 60
+
+const RADIUS_MAX: u64 = 24
+
+const LIFT_MAX: u64 = 120
+
+const TILT_MAX: u64 = 100
+
+const SWING_MAX: u64 = 100
+
+const BLUR_MAX: u64 = 16
+
+const TINT_MAX: u64 = 100
+
+const NOISE_MAX: u64 = 16
+
+const ALPHA_MIN: u64 = 20
+
+const GRAD_MAX: u64 = 24
+
+const RGB24: u64 = 0x00FFFFFF
+
+fn set_form(state: u64, i: u64, v: u64) -> bool {
+    if i >= wmgeom.FORM_SLOTS {
+        return false
+    }
+    var w: u64 = v
+    if i == wmlayout.FM_RADIUS && w > RADIUS_MAX {
+        w = RADIUS_MAX
+    }
+    if i == wmlayout.FM_SHADOW && w > 100 {
+        w = 100
+    }
+    if i == wmlayout.FM_SHADOW_R && w > wmshadow.SHADOW_MAX {
+        w = wmshadow.SHADOW_MAX
+    }
+    if i == wmlayout.FM_SHADOW_C {
+        w = w & RGB24
+    }
+
+    if i == wmlayout.FM_SHADOW2 && w > 100 {
+        w = 100
+    }
+    if i == wmlayout.FM_SHADOW_R2 && w > wmshadow.SHADOW_MAX {
+        w = wmshadow.SHADOW_MAX
+    }
+    if i == wmlayout.FM_GRAD && w > GRAD_MAX {
+        w = GRAD_MAX
+    }
+    if i == wmlayout.FM_CAPTION && w > 1 {
+        w = 1
+    }
+    if i == wmlayout.FM_TITLE_BAR && w > 64 {
+        w = 64
+    }
+    if i == wmlayout.FM_CAP_W && w > 120 {
+        w = 120
+    }
+    if i == wmlayout.FM_FRAME && w > 4 {
+        w = 4
+    }
+
+    if i == wmlayout.FM_MOTION && w > MOTION_MAX {
+        w = MOTION_MAX
+    }
+
+    if i == wmlayout.FM_LIFT && w > LIFT_MAX {
+        w = LIFT_MAX
+    }
+    if i == wmlayout.FM_TILT && w > TILT_MAX {
+        w = TILT_MAX
+    }
+    if i == wmlayout.FM_SWING && w > SWING_MAX {
+        w = SWING_MAX
+    }
+
+    if i == wmlayout.FM_BLUR && w > BLUR_MAX {
+        w = BLUR_MAX
+    }
+    if i == wmlayout.FM_BLURTINT && w > TINT_MAX {
+        w = TINT_MAX
+    }
+    if i == wmlayout.FM_BLURNOISE && w > NOISE_MAX {
+        w = NOISE_MAX
+    }
+    if i == wmlayout.FM_BLURRIM && w > RIM_MAX {
+        w = RIM_MAX
+    }
+
+    if (i == wmlayout.FM_TB_ALPHA || i == wmlayout.FM_WIN_ALPHA) && w > 100 {
+        w = 100
+    }
+    if (i == wmlayout.FM_TB_ALPHA || i == wmlayout.FM_WIN_ALPHA) && w < ALPHA_MIN {
+        w = ALPHA_MIN
+    }
+    if i == wmlayout.FM_GLASS_KEY {
+        w = w & RGB24
+    }
+
+    if (i == wmlayout.FM_TB_ALPHA || i == wmlayout.FM_WIN_ALPHA || i == wmlayout.FM_GLASS_KEY
+        || i == wmlayout.FM_BLUR) && wmlayout.gs(state, wmlayout.S_FORM + i * 8) != w + 1 {
+        wmlayout.ss(state, wmlayout.S_GLVALID, 0)
+    }
+    wmlayout.ss(state, wmlayout.S_FORM + i * 8, w + 1)
+    wmlayout.ss(state, wmlayout.S_FORMN, wmlayout.gs(state, wmlayout.S_FORMN) + 1)
+    return true
+}
+
+fn form_writes(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_FORMN)
+}
+
+fn aa_px(state: u64) -> u64 {
+    return ecke.aa_px()
+}
+
+fn paint_reset(state: u64) {
+    wmlayout.ss(state, wmlayout.S_SHADOWPX, 0)
+    ecke.aa_reset()
+}
+
+fn fill_clip(state: u64, x: i64, y: i64, w: i64, h: i64, farbe: u64,
+    a: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    let ax0: i64 = wmbase.imax(x, cx0)
+    let ay0: i64 = wmbase.imax(y, cy0)
+    let ax1: i64 = wmbase.imin(x + w, cx1)
+    let ay1: i64 = wmbase.imin(y + h, cy1)
+    if ax1 <= ax0 || ay1 <= ay0 || ax1 <= 0 || ay1 <= 0 {
+        return
+    }
+    if a >= 255 {
+        fb.fill(state, wmbase.imax(ax0, 0) as u64, wmbase.imax(ay0, 0) as u64,
+            (ax1 - wmbase.imax(ax0, 0)) as u64, (ay1 - wmbase.imax(ay0, 0)) as u64, farbe)
+        return
+    }
+    if a == 0 {
+        return
+    }
+    fb.fill_a(state, wmbase.imax(ax0, 0) as u64, wmbase.imax(ay0, 0) as u64,
+        (ax1 - wmbase.imax(ax0, 0)) as u64, (ay1 - wmbase.imax(ay0, 0)) as u64, farbe, a)
+}
+
+fn px_clip(state: u64, x: i64, y: i64, farbe: u64, a: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if x < cx0 || y < cy0 || x >= cx1 || y >= cy1 || x < 0 || y < 0 {
+        return
+    }
+    fb.pixel_a(state, x as u64, y as u64, farbe, a)
+}
+
+fn fill_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
+    farbe: u64, a: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if w <= 0 || h <= 0 || a == 0 {
+        return
+    }
+    var r: u64 = r0
+    if r * 2 > w as u64 {
+        r = (w / 2) as u64
+    }
+    if r * 2 > h as u64 {
+        r = (h / 2) as u64
+    }
+    if r == 0 {
+        fill_clip(state, x, y, w, h, farbe, a, cx0, cy0, cx1, cy1)
+        return
+    }
+    let ri: i64 = r as i64
+    fill_clip(state, x, y + ri, w, h - 2 * ri, farbe, a, cx0, cy0, cx1, cy1)
+    fill_clip(state, x + ri, y, w - 2 * ri, ri, farbe, a, cx0, cy0, cx1, cy1)
+    fill_clip(state, x + ri, y + h - ri, w - 2 * ri, ri, farbe, a,
+        cx0, cy0, cx1, cy1)
+    var dy: u64 = 0
+    while dy < r {
+        var dx: u64 = 0
+        while dx < r {
+            var cov: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
+
+            if a < 255 {
+                cov = cov * a / 255
+            }
+            if cov != 0 {
+                let x0: i64 = x + dx as i64
+                let y0: i64 = y + dy as i64
+                let x1: i64 = x + w - 1 - dx as i64
+                let y1: i64 = y + h - 1 - dy as i64
+                px_clip(state, x0, y0, farbe, cov, cx0, cy0, cx1, cy1)
+                px_clip(state, x1, y0, farbe, cov, cx0, cy0, cx1, cy1)
+                px_clip(state, x0, y1, farbe, cov, cx0, cy0, cx1, cy1)
+                px_clip(state, x1, y1, farbe, cov, cx0, cy0, cx1, cy1)
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
+
+fn wpixel(state: u64, i: u64, x: u64, y: u64, color: u64) {
+    let w: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+    if x >= w || y >= wmlayout.wg(state, i, wmlayout.W_H) {
+        return
+    }
+    __mmio_write32((wmlayout.wg(state, i, wmlayout.W_BUF) +% y *% w *% 4 +% x *% 4)
+        as *mut u32, color as u32)
+}
+
+fn wget(state: u64, i: u64, x: u64, y: u64) -> u64 {
+    let w: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+    if x >= w || y >= wmlayout.wg(state, i, wmlayout.W_H) {
+        return 0
+    }
+    return __mmio_read32((wmlayout.wg(state, i, wmlayout.W_BUF) +% y *% w *% 4 +% x *% 4)
+        as *mut u32) as u64
+}
+
+fn fill(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64, color: u64) {
+
+    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_BUF) == 0 {
+        return
+    }
+    let ww: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+    let wh: u64 = wmlayout.wg(state, i, wmlayout.W_H)
+    if x >= ww || y >= wh {
+        return
+    }
+    var bw: u64 = w
+    var bh: u64 = h
+    if x + bw > ww {
+        bw = ww - x
+    }
+    if y + bh > wh {
+        bh = wh - y
+    }
+    var r: u64 = 0
+    while r < bh {
+        let p: u64 = wmlayout.wg(state, i, wmlayout.W_BUF) +% (y + r) *% ww *% 4 +% x *% 4
+        fill_words(p, (color & 0xFFFFFFFF) | ((color & 0xFFFFFFFF) << 32),
+            bw / 2)
+        if (bw & 1) != 0 {
+            __mmio_write32((p +% (bw - 1) *% 4) as *mut u32, color as u32)
+        }
+        r = r + 1
+    }
+}
+
+fn fill_words(p: u64, value: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    arch.fill_words(p, value, words)
+}
+
+fn copy_words(dst: u64, src: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    arch.copy_words(dst, src, words)
+}
+
+fn blend(alt: u64, neu: u64, a: u64) -> u64 {
+    return comp.blend(alt, neu, a)
+}
+
+fn mix8(dst: u64, src: u64, a: u64, ia: u64) -> u64 {
+    return comp.mix8(dst, src, a, ia)
+}
+
+fn text(state: u64, i: u64, f: u64, px: u64, x: i64, y: i64, p: u64,
+    n: u64, color: u64) -> i64 {
+    if !wmbase.valid(state, i) || f >= ttf.MAX_FONTS {
+        return x
+    }
+
+    var cx: i64 = x * 64
+    var vorher: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let v: u64 = utf8.next(p, n, k)
+        let l: u64 = utf8.len_of(v)
+        let c: u64 = utf8.cp_of(v)
+        if l == 0 || c == 0 {
+            k = n
+        } else {
+            let gid: u64 = ttf.glyph_of(state, f, c)
+            if vorher != 0 {
+                cx = cx + ttf.kern26(state, f, vorher, gid, px)
+            }
+            let slot: u64 = ttf.glyph(state, f, c, px)
+            if slot < ttf.SLOTS {
+                draw_glyph(state, i, slot, cx >> 6, y, color)
+                cx = cx + ttf.g_adv(state, slot)
+            } else {
+                cx = cx + ttf.advance26(state, f, gid, px)
+            }
+            vorher = gid
+            k = k + l
+        }
+    }
+    return cx >> 6
+}
+
+fn draw_glyph(state: u64, i: u64, slot: u64, x: i64, y: i64, color: u64) {
+    draw_glyph_clip(state, i, slot, x, y, color, 0,
+        wmlayout.wg(state, i, wmlayout.W_W) as i64)
+}
+
+fn draw_glyph_clip(state: u64, i: u64, slot: u64, x: i64, y: i64,
+    color: u64, cx0: i64, cx1: i64) {
+    let gw: u64 = ttf.g_w(state, slot)
+    let gh: u64 = ttf.g_h(state, slot)
+    if gw == 0 || gh == 0 {
+        return
+    }
+    let x0: i64 = x + ttf.g_left(state, slot)
+    let y0: i64 = y - ttf.g_top(state, slot)
+    var ww: i64 = wmlayout.wg(state, i, wmlayout.W_W) as i64
+    let wh: i64 = wmlayout.wg(state, i, wmlayout.W_H) as i64
+    var lo: i64 = cx0
+    if lo < 0 {
+        lo = 0
+    }
+    if cx1 < ww {
+        ww = cx1
+    }
+    var r: u64 = 0
+    while r < gh {
+        let py: i64 = y0 + r as i64
+        if py >= 0 && py < wh {
+            var c: u64 = 0
+            while c < gw {
+                let pxx: i64 = x0 + c as i64
+                if pxx >= lo && pxx < ww {
+                    let a: u64 = ttf.g_pixel(state, slot, c, r)
+                    if a != 0 {
+                        wpixel(state, i, pxx as u64, py as u64,
+                            blend(wget(state, i, pxx as u64, py as u64),
+                                color, a))
+                    }
+                }
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+}
+
+fn blit_in(state: u64, i: u64, src: u64, x: u64, y: u64, w: u64,
+    h: u64) -> u64 {
+    if !wmbase.valid(state, i) {
+        return 0
+    }
+    let ww: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+    if x >= ww || y >= wmlayout.wg(state, i, wmlayout.W_H) {
+        return 0
+    }
+    var bw: u64 = w
+    var bh: u64 = h
+    if x + bw > ww {
+        bw = ww - x
+    }
+    if y + bh > wmlayout.wg(state, i, wmlayout.W_H) {
+        bh = wmlayout.wg(state, i, wmlayout.W_H) - y
+    }
+    wmlayout.ss(state, wmlayout.S_BL_N, wmlayout.gs(state, wmlayout.S_BL_N) + bh)
+    wmlayout.ss(state, wmlayout.S_BL_PX, wmlayout.gs(state, wmlayout.S_BL_PX) + bw * bh)
+    var r: u64 = 0
+    while r < bh {
+        copy_words(wmlayout.wg(state, i, wmlayout.W_BUF) +% (y + r) *% ww *% 4 +% x *% 4,
+            src +% r *% w *% 4, bw *% 4 / 8)
+        if (bw & 1) != 0 {
+            __mmio_write32((wmlayout.wg(state, i, wmlayout.W_BUF) +% (y + r) *% ww *% 4
+                +% (x + bw - 1) *% 4) as *mut u32,
+                __mmio_read32((src +% r *% w *% 4 +% (bw - 1) *% 4)
+                    as *mut u32))
+        }
+        r = r + 1
+    }
+    return bw * bh
+}
+
+fn mix24(a: u64, b: u64, per: u64) -> u64 {
+    let r: u64 = (((a >> 16) & 255) * (100 - per) + ((b >> 16) & 255) * per)
+        / 100
+    let g: u64 = (((a >> 8) & 255) * (100 - per) + ((b >> 8) & 255) * per)
+        / 100
+    let bl: u64 = ((a & 255) * (100 - per) + (b & 255) * per) / 100
+    return (r << 16) | (g << 8) | bl
+}
+
+fn fb_row(state: u64, x: u64, y: u64, src: u64, n: u64) {
+
+    if y < fb.band_lo(state) {
+        return
+    }
+    let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
+    comp.copy_row(ziel, src, n)
+}
+
+fn fb_glyph(state: u64, slot: u64, x: i64, y: i64, color: u64,
+    ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    let gw: u64 = ttf.g_w(state, slot)
+    let gh: u64 = ttf.g_h(state, slot)
+    let x0: i64 = x + ttf.g_left(state, slot)
+    let y0: i64 = y - ttf.g_top(state, slot)
+    var r: u64 = 0
+    while r < gh {
+        let py: i64 = y0 + r as i64
+        if py >= ay0 && py < ay1 {
+            var c: u64 = 0
+            while c < gw {
+                let pxx: i64 = x0 + c as i64
+                if pxx >= ax0 && pxx < ax1 {
+                    let a: u64 = ttf.g_pixel(state, slot, c, r)
+                    if a != 0 {
+                        fb.pixel(state, pxx as u64, py as u64,
+                            blend(fb.get_pixel(state, pxx as u64,
+                                py as u64), color, a))
+                    }
+                }
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+}
