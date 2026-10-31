@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ui.frameprof
+import lib.kstate
+import serial
+import ui.wm.wmbase
+import ui.wm.wmlayout
+
+const EV_SLOTS: u64 = 32
+
+const EV_BYTES: u64 = 16
+
+const EV_RING: u64 = 512
+
+const VERL_SAY: u64 = 32
+
+fn ev_at(state: u64, i: u64, k: u64) -> u64 {
+    return state + kstate.EVR_OFF + i * EV_RING
+        + (k % EV_SLOTS) * EV_BYTES
+}
+
+static mut mv_wid: u64 = 0
+
+fn ev_push(state: u64, i: u64, typ: u64, a: u64, b: u64, c: u64) {
+    if !wmbase.valid(state, i) {
+        return
+    }
+    if typ != wmlayout.E_MOVE && wmlayout.wg(state, i, wmlayout.W_ID) == mv_wid {
+        mv_wid = 0
+    }
+    if typ == wmlayout.E_KEY {
+        wmlayout.wsv(state, i, wmlayout.W_KEYS, wmlayout.wg(state, i, wmlayout.W_KEYS) + 1)
+    }
+
+    if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && wmlayout.wg(state, i, wmlayout.W_TTY) != 0 {
+        wmlayout.ss(state, wmlayout.S_EVTERM, wmlayout.gs(state, wmlayout.S_EVTERM) + 1)
+        if typ == wmlayout.E_MOVE {
+            frameprof.hover_term()
+        }
+        return
+    }
+    let kopf: u64 = wmlayout.wg(state, i, wmlayout.W_EHEAD)
+    let schwanz: u64 = wmlayout.wg(state, i, wmlayout.W_ETAIL)
+    let daten: u64 = ((a & 0xFFFF) << 32) | ((b & 0xFFFF) << 16)
+        | (c & 0xFFFF)
+
+    if typ == wmlayout.E_MOVE {
+        frameprof.hover_push(i, a, b)
+    }
+    if typ == wmlayout.E_MOVE && kopf > schwanz {
+        let letzt: u64 = ev_at(state, i, kopf - 1)
+        if kstate.get(letzt, 0) == wmlayout.E_MOVE {
+            kstate.set(letzt, 8, daten)
+            wmlayout.ss(state, wmlayout.S_EVKOAL, wmlayout.gs(state, wmlayout.S_EVKOAL) + 1)
+            frameprof.hover_coal()
+            return
+        }
+    }
+    if kopf - schwanz >= EV_SLOTS {
+
+        var op: u64 = schwanz
+        var weg: u64 = kopf
+        while op < kopf {
+            if kstate.get(ev_at(state, i, op), 0) == wmlayout.E_MOVE {
+                weg = op
+                op = kopf
+            } else {
+                op = op + 1
+            }
+        }
+        if weg < kopf {
+
+            var q: u64 = weg
+            while q + 1 < kopf {
+                let a1: u64 = ev_at(state, i, q)
+                let b1: u64 = ev_at(state, i, q + 1)
+                kstate.set(a1, 0, kstate.get(b1, 0))
+                kstate.set(a1, 8, kstate.get(b1, 8))
+                q = q + 1
+            }
+            wmlayout.wsv(state, i, wmlayout.W_EHEAD, kopf - 1)
+            wmlayout.ss(state, wmlayout.S_EVKOAL, wmlayout.gs(state, wmlayout.S_EVKOAL) + 1)
+        } else {
+
+            if wmlayout.gs(state, wmlayout.S_EVDROP) < VERL_SAY {
+            var s_vl: [u8; 19] = "wm: RINGVERLUST i=\0"
+            var s_vid: [u8; 5] = " id=\0"
+            var s_vt: [u8; 6] = " typ=\0"
+            var s_vk: [u8; 7] = " kind=\0"
+            var s_vn: [u8; 5] = " an=\0"
+            serial.puts((&s_vl[0]) as u64)
+            serial.dec(i)
+            serial.puts((&s_vid[0]) as u64)
+            serial.dec(wmlayout.wg(state, i, wmlayout.W_ID))
+            serial.puts((&s_vt[0]) as u64)
+            serial.dec(typ)
+            serial.puts((&s_vk[0]) as u64)
+            serial.dec(wmlayout.wg(state, i, wmlayout.W_KIND))
+            serial.puts((&s_vn[0]) as u64)
+            serial.dec(kopf - schwanz)
+            serial.nl()
+            }
+            wmlayout.wsv(state, i, wmlayout.W_ETAIL, schwanz + 1)
+            wmlayout.ss(state, wmlayout.S_EVDROP, wmlayout.gs(state, wmlayout.S_EVDROP) + 1)
+        }
+    }
+    let kopf2: u64 = wmlayout.wg(state, i, wmlayout.W_EHEAD)
+    let p: u64 = ev_at(state, i, kopf2)
+    kstate.set(p, 0, typ)
+    kstate.set(p, 8, daten)
+    wmlayout.wsv(state, i, wmlayout.W_EHEAD, kopf2 + 1)
+
+    wmlayout.ss(state, wmlayout.S_EVPUSH, wmlayout.gs(state, wmlayout.S_EVPUSH) + 1)
+}
