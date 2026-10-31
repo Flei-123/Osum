@@ -102,6 +102,7 @@ import ui.wm.wmdraw
 import ui.wm.wmmag
 import ui.wm.wmoverlay
 import ui.wm.wmshadow
+import ui.wm.wmhooks
 import ui.wmplug
 import ui.ax
 import ui.frameprof
@@ -1170,6 +1171,42 @@ fn set_nomin(state: u64, on: bool) {
 
 // ------------------------------------------------------------- Start
 
+fn hook_create(state: u64, i: u64) {
+    if wmlayout.gs(state, wmlayout.S_TILE) != 0 {
+        save_geom(state, i)
+        tile_take(state, i)
+    }
+}
+
+fn hook_destroy(state: u64, i: u64) {
+    tt_forget(state, i)
+    tile_release(state, i)
+}
+
+fn hook_focus(state: u64, i: u64) {
+    if wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
+        tl_sel(state, nd_tag(wmlayout.wg(state, i, wmlayout.W_NODE)))
+        tile.set_focus(tt(state), nd_node(wmlayout.wg(state, i, wmlayout.W_NODE)))
+    }
+}
+
+fn hook_layer_leave(state: u64, i: u64) {
+    tile_release(state, i)
+    restore_geom(state, i)
+}
+
+fn hook_workarea(state: u64) {
+    recalc_work(state)
+}
+
+fn install_hooks() {
+    wmhooks.register(wmhooks.H_CREATE, hook_create as u64)
+    wmhooks.register(wmhooks.H_DESTROY, hook_destroy as u64)
+    wmhooks.register(wmhooks.H_FOCUS, hook_focus as u64)
+    wmhooks.register(wmhooks.H_LAYER_LEAVE, hook_layer_leave as u64)
+    wmhooks.register(wmhooks.H_WORKAREA, hook_workarea as u64)
+}
+
 fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     if w == 0 || h == 0 {
         return false
@@ -1222,6 +1259,7 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     wmlayout.ss(state, wmlayout.S_NOSTRUT, 0)
     wmlayout.ss(state, wmlayout.S_STRUTS, 0)
     wmlayout.ss(state, wmlayout.S_WORKCALC, 0)
+    install_hooks()
     recalc_work(state)
     wmlayout.ss(state, wmlayout.S_DESK, wmbase.deco(state, wmlayout.DK_DESK))
     wmlayout.ss(state, wmlayout.S_FONT_UI, ttf.MAX_FONTS)
@@ -1487,10 +1525,7 @@ fn create_ex(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             }
             set_focus(state, i)
             wmdamage.damage_win(state, i)
-            if wmlayout.gs(state, wmlayout.S_TILE) != 0 {
-                save_geom(state, i)
-                tile_take(state, i)
-            }
+            wmhooks.fire_create(state, i)
             // RUNDE WMPLUGIN: ABLEGEN UND WEITERGEHEN. `notify` schreibt
             // in hoechstens acht Ringe und kehrt zurueck -- hier wird
             // auf kein Ring-3-Programm gewartet, auch nicht kurz.
@@ -1556,8 +1591,7 @@ fn destroy(state: u64, i: u64) -> bool {
         return false
     }
     frameprof.reset(i)
-    tt_forget(state, i)
-    tile_release(state, i)
+    wmhooks.fire_destroy(state, i)
     wmdamage.damage_win(state, i)
     wmplug.notify(state, wmplug.E_WIN_CLOSE, wmlayout.wg(state, i, wmlayout.W_ID), 0, 0)
     // Stirbt der Prozess EINES PLUGINS, faellt sein Fenster hier durch.
@@ -1650,7 +1684,7 @@ fn destroy(state: u64, i: u64) -> bool {
     wmlayout.wsv(state, i, wmlayout.W_EHEAD, 0)
     wmlayout.wsv(state, i, wmlayout.W_ETAIL, 0)
     if hatte_strut {
-        recalc_work(state)
+        wmhooks.fire_workarea(state)
     }
     return true
 }
@@ -1848,8 +1882,7 @@ fn set_layer(state: u64, i: u64, l: u64) {
     }
     wmlayout.wsv(state, i, wmlayout.W_LAYER, l)
     if l != wmlayout.L_NORMAL && l != wmlayout.L_FULL && l != wmlayout.L_FLOAT && wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-        tile_release(state, i)
-        restore_geom(state, i)
+        wmhooks.fire_layer_leave(state, i)
     }
     layer_guard = i + 1
     // Ein Fenster, das aus der normalen Ebene verschwindet, darf den
@@ -1934,7 +1967,7 @@ fn set_hidden(state: u64, i: u64, h: bool) {
         wmlayout.ss(state, wmlayout.S_HIDES, wmlayout.gs(state, wmlayout.S_HIDES) + 1)
         // ADDENDUM TASKBAR: a window nobody can see reserves nothing.
         if wmlayout.wg(state, i, wmlayout.W_STRUT) != 0 {
-            recalc_work(state)
+            wmhooks.fire_workarea(state)
         }
         wmdamage.damage_win(state, i)
         if wmbase.focus(state) == i {
@@ -1961,7 +1994,7 @@ fn set_hidden(state: u64, i: u64, h: bool) {
         wmlayout.wsv(state, i, wmlayout.W_ANP, 1000)
         wmlayout.ss(state, wmlayout.S_SHOWS, wmlayout.gs(state, wmlayout.S_SHOWS) + 1)
         if wmlayout.wg(state, i, wmlayout.W_STRUT) != 0 {
-            recalc_work(state)
+            wmhooks.fire_workarea(state)
         }
         wmdamage.damage_win(state, i)
     }
@@ -3310,10 +3343,7 @@ fn set_focus(state: u64, i: u64) {
     // muessen derselbe sein. Ohne diese zwei Zeilen teilt ein neues
     // Fenster nicht das ANGEKLICKTE, sondern das zuletzt angelegte -- ein
     // Fehler, der aussieht wie ein kaputter Baum und keiner ist.
-    if wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
-        tl_sel(state, nd_tag(wmlayout.wg(state, i, wmlayout.W_NODE)))
-        tile.set_focus(tt(state), nd_node(wmlayout.wg(state, i, wmlayout.W_NODE)))
-    }
+    wmhooks.fire_focus(state, i)
     wmdamage.damage_win(state, i)
 }
 
