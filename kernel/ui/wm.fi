@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmcpath
 import ui.wm.wmpageobj
 import ui.wm.wmlatency
 import ui.wm.wminput
@@ -152,7 +153,7 @@ export {
     dirty_x1, dirty_y1,
     create_ex, attach_buf, win_shm, damage_rect, tab_object, chrome_object, shared_ok,
     frames_total, input_hot,
-    cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_log, cp_stat, cp_say_reset, CP_NOT, CP_BUSY, destroy, set_focus, raise_win,
+    cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_log, cp_stat, CP_NOT, CP_BUSY, destroy, set_focus, raise_win,
     cross_point,
     move_win, resize_win, win_w, win_h, win_buf,
     win_kind, win_id,
@@ -393,6 +394,46 @@ fn cp_page_object(state: u64) -> u64 {
 
 fn tab_object(state: u64) -> u64 {
     return wmpageobj.tab_object(state)
+}
+
+const CP_BUSY: u64 = wmcpath.CP_BUSY
+
+const CP_NOT: u64 = wmcpath.CP_NOT
+
+fn attach_buf(state: u64, i: u64, sbase: u64, sbytes: u64, sidx: u64) -> bool {
+    return wmcpath.attach_buf(state, i, sbase, sbytes, sidx)
+}
+
+fn cp_attach(state: u64, me: u64) -> u64 {
+    return wmcpath.cp_attach(state, me)
+}
+
+fn cp_detach(state: u64, me: u64) -> u64 {
+    return wmcpath.cp_detach(state, me)
+}
+
+fn cp_log(state: u64, me: u64, stride: u64) -> u64 {
+    return wmcpath.cp_log(state, me, stride)
+}
+
+fn cp_present(state: u64, me: u64) -> u64 {
+    return wmcpath.cp_present(state, me)
+}
+
+fn cp_stat(state: u64, k: u64) -> u64 {
+    return wmcpath.cp_stat(state, k)
+}
+
+fn cp_wait(state: u64, me: u64, seen: u64, ms: u64) -> u64 {
+    return wmcpath.cp_wait(state, me, seen, ms)
+}
+
+fn damage_rect(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64) -> u64 {
+    return wmcpath.damage_rect(state, i, x, y, w, h)
+}
+
+fn flush_win(state: u64, i: u64) {
+    wmcpath.flush_win(state, i)
 }
 
 fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
@@ -863,7 +904,7 @@ fn bild_say_reset(state: u64) {
         serial.dec(wmlayout.gs(state, wmlayout.S_BLURUS))
         serial.nl()
     }
-    cp_say_reset(state)
+    wmcpath.cp_say_reset(state)
     // COMPOSITOR S3: what the clients' pixels cost since the last F12. `blitpx` are the pixels the kernel copied out of a client (WIG_BLIT),
     // `shpx` the pixels of shared windows that were named dirty WITHOUT a copy. Printed only once a shared window or a blit happened.
     if wmlayout.gs(state, wmlayout.S_BL_PX) != 0 || wmlayout.gs(state, wmlayout.S_SH_DMG) != 0 {
@@ -1553,352 +1594,10 @@ fn set_keys(state: u64, i: u64, an: bool) {
         wmlayout.wsv(state, i, wmlayout.W_FLAGS, wmlayout.wg(state, i, wmlayout.W_FLAGS) & ~wmlayout.F_KEYS)
     }
 }
-
-// Window `i` now paints from the run of frames of shared object `sidx` (WM_SETBUF). The old buffer (own frames or an older shared
-// object) is given back. false when the run is smaller than the window or the window is a terminal (the server paints those).
-fn attach_buf(state: u64, i: u64, sbase: u64, sbytes: u64, sidx: u64) -> bool {
-    if !wmbase.valid(state, i) || sbase == 0 {
-        return false
-    }
-    if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM || sbytes < wmlayout.wg(state, i, wmlayout.W_W) * wmlayout.wg(state, i, wmlayout.W_H) * 4 {
-        return false
-    }
-    if wmlayout.wg(state, i, wmlayout.W_BUF) == sbase {
-        return true
-    }
-    // W-FLICKER (resize): the new shared buffer starts out empty; the window keeps showing the picture it had (kept by `keep_resized`)
-    // until the client paints into the new buffer. Copy it over BEFORE the old frames go (a client that painted first is not asked: WM_SETBUF
-    // comes right after the buffer is made, in `win_reshare`).
-    if wmlayout.wg(state, i, wmlayout.W_SHM) == 0 && wmlayout.wg(state, i, wmlayout.W_BUF) != 0 && !wmcore.resize_clear_an(state) {
-        let cb: u64 = wmlayout.wg(state, i, wmlayout.W_W) * wmlayout.wg(state, i, wmlayout.W_H) * 4
-        if cb <= wmlayout.wg(state, i, wmlayout.W_BUFBYTES) {
-            wmdraw.copy_words(sbase, wmlayout.wg(state, i, wmlayout.W_BUF), cb / 8)
-            var ci: u64 = (cb / 8) * 8
-            while ci < cb {
-                __mmio_write32((sbase +% ci) as *mut u32, __mmio_read32((wmlayout.wg(state, i, wmlayout.W_BUF) +% ci) as *mut u32))
-                ci = ci + 4
-            }
-        }
-    }
-    if wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
-        unixsock.shm_unref(state, wmlayout.wg(state, i, wmlayout.W_SHM) - 1)
-    } else if wmlayout.wg(state, i, wmlayout.W_BUF) != 0 {
-        mem.frame_free_run(state, wmlayout.wg(state, i, wmlayout.W_BUF), wmlayout.wg(state, i, wmlayout.W_BUFBYTES) / mem.FRAME_SIZE)
-    }
-    unixsock.shm_ref(state, sidx)
-    wmshared.wm_note(state, 2, i, sbytes)
-    wmlayout.wsv(state, i, wmlayout.W_SHM, sidx + 1)
-    wmlayout.wsv(state, i, wmlayout.W_BUF, sbase)
-    wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, sbytes)
-    wmlayout.ss(state, wmlayout.S_SH_ATT, wmlayout.gs(state, wmlayout.S_SH_ATT) + 1)
-    wmdamage.damage_win(state, i)
-    return true
-}
-
-// The client painted a rectangle of its shared buffer (window coordinates): only that rectangle is dirty (the same rectangle
-// `wig.blit` names after its copy). Returns the pixels named.
-fn damage_rect(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64) -> u64 {
-    if !wmbase.valid(state, i) || w == 0 || h == 0 {
-        return 0
-    }
-    let ww: u64 = wmlayout.wg(state, i, wmlayout.W_W)
-    let wh: u64 = wmlayout.wg(state, i, wmlayout.W_H)
-    if x >= ww || y >= wh {
-        return 0
-    }
-    var bw: u64 = w
-    var bh: u64 = h
-    if x + bw > ww {
-        bw = ww - x
-    }
-    if y + bh > wh {
-        bh = wh - y
-    }
-    let sx: i64 = wmbase.win_x(state, i) + wmbase.inx(state, i) as i64 + x as i64
-    let sy: i64 = wmbase.win_y(state, i) + wmbase.iny(state, i) as i64 + y as i64
-    if wmlayout.gs(state, wmlayout.S_PL_ON) != 0 {
-        pl_damage(state)
-    }
-    if wmcompose.win_hidden(state, i) && !fb.nohidskip_an(state) {
-        return bw * bh
-    }
-    wmbase.damage_ex(state, sx, sy, sx + bw as i64, sy + bh as i64, i + 1)
-    wmlayout.ss(state, wmlayout.S_SH_DMG, wmlayout.gs(state, wmlayout.S_SH_DMG) + 1)
-    wmlayout.ss(state, wmlayout.S_SH_PX, wmlayout.gs(state, wmlayout.S_SH_PX) + bw * bh)
-    return bw * bh
-}
-const CP_NOT: u64 = 0xFFFFFFFFFFFFFFFF // the caller is not the attached compositor
-const CP_BUSY: u64 = 0xFFFFFFFFFFFFFFFE // the compose lock did not come free in time: try again
 const CP_EV_KEY: u64 = 3
 
 fn pl_on(state: u64) -> bool {
     return wmlayout.gs(state, wmlayout.S_PL_ON) != 0
-}
-
-// WM_DAMAGE hook: who finished a picture, on which core, when.
-fn pl_damage(state: u64) {
-    wmlayout.ss(state, wmlayout.S_PL_DSEQ, wmlayout.gs(state, wmlayout.S_PL_DSEQ) + 1)
-    wmlayout.ss(state, wmlayout.S_PL_DCORE, wmcompose.pl_core())
-    wmlayout.ss(state, wmlayout.S_PL_DTSC, time.tsc())
-}
-
-fn pl_env_bits(state: u64) -> u64 {
-    var e: u64 = 0
-    if fb.double_buffered(state) {
-        e = e | 1
-    }
-    if fb.uncached(state) {
-        e = e | 2
-    }
-    if fb.flip_on(state) {
-        e = e | 4
-    }
-    if wmlayout.gs(state, wmlayout.S_VSYNC) != 0 {
-        e = e | 8
-    }
-    if wmcompose.cp_on(state) {
-        e = e | 16
-    }
-    return e
-}
-
-// WM_COMP / CP_LOG: root (`presentlog`) switches the log on (stride > 0) or off (0) and gets the page. CP_BUSY (0 for the caller) = switched off.
-fn cp_log(state: u64, me: u64, stride: u64) -> u64 {
-    // root only (WM_COMP is root only in sysgui); no compositor needed: the Dell shown the kernel path, `wmd present` is not running there
-    if stride == 0 {
-        wmlayout.ss(state, wmlayout.S_PL_ON, 0)
-        let f0: u64 = wmlayout.gs(state, wmlayout.S_PL_PAGEF)
-        if f0 != 0 {
-            wmanim.tw(f0, 1, 0)
-        }
-        return CP_BUSY
-    }
-    let k: u64 = wmpageobj.pl_page_object(state)
-    if k >= unixsock.USHM_MAX {
-        return k
-    }
-    let f: u64 = wmlayout.gs(state, wmlayout.S_PL_PAGEF)
-    wmanim.tw(f, 1, stride)
-    wmanim.tw(f, 5, pl_env_bits(state))
-    wmlayout.ss(state, wmlayout.S_PL_FLAGS, 0)
-    wmlayout.ss(state, wmlayout.S_PL_NCOMP, 0)
-    wmlayout.ss(state, wmlayout.S_PL_CDUR, 0)
-    wmlayout.ss(state, wmlayout.S_PL_TPREV, time.tsc())
-    wmlayout.ss(state, wmlayout.S_PL_ON, stride)
-    return k
-}
-
-// WM_COMP / CP_ATTACH. 0 = attached, 1 = refused (`nocomp`), 2 = another live compositor is attached, 3 = busy.
-fn cp_attach(state: u64, me: u64) -> u64 {
-    if fb.nocomp_an(state) {
-        return 1
-    }
-    if !wmframe.cp_lock(state) {
-        return 3
-    }
-    let cur: u64 = wmlayout.gs(state, wmlayout.S_CP_TASK)
-    if cur != 0 && cur != me + 1 {
-        let idx: u64 = cur - 1
-        let st: u64 = sched.tget(state, idx, sched.T_STATE)
-        if st != sched.S_ZOMBIE && st != sched.S_FREE && sched.tget(state, idx, sched.T_PID) == wmlayout.gs(state, wmlayout.S_CP_PID) {
-            wmframe.cp_unlock(state)
-            return 2
-        }
-        wmcompose.cp_detach_locked(state, 1)
-    }
-    wmlayout.ss(state, wmlayout.S_CP_TASK, me + 1)
-    wmlayout.ss(state, wmlayout.S_CP_PID, sched.tget(state, me, sched.T_PID))
-    wmlayout.ss(state, wmlayout.S_CP_MISS, 0)
-    wmlayout.ss(state, wmlayout.S_CP_NATT, wmlayout.gs(state, wmlayout.S_CP_NATT) + 1)
-    wmcompose.cp_sync(state)
-    wmframe.cp_unlock(state)
-    // a first complete frame for the new compositor to show
-    wmbase.damage_all(state)
-    return 0
-}
-
-fn cp_detach(state: u64, me: u64) -> u64 {
-    if wmlayout.gs(state, wmlayout.S_CP_TASK) != me + 1 {
-        return CP_NOT
-    }
-    if !wmframe.cp_lock(state) {
-        return CP_BUSY
-    }
-    wmcompose.cp_detach_locked(state, 3)
-    wmframe.cp_unlock(state)
-    return 0
-}
-
-// WM_COMP / CP_PRESENT: show what waits. Returns the pixels (0 = nothing waited).
-fn cp_present(state: u64, me: u64) -> u64 {
-    if wmlayout.gs(state, wmlayout.S_CP_TASK) != me + 1 {
-        return CP_NOT
-    }
-    if !wmframe.cp_lock(state) {
-        return CP_BUSY
-    }
-    var px: u64 = 0
-    if wmlayout.gs(state, wmlayout.S_CP_TASK) == me + 1 {
-        px = wmcompose.cp_flush_locked(state, true)
-        if px != 0 {
-            wmlayout.ss(state, wmlayout.S_CP_MISS, 0)
-        }
-    }
-    wmframe.cp_unlock(state)
-    return px
-}
-
-// WM_COMP / CP_WAIT: sleep until a frame newer than `seen` was handed over, for at most `ms`. Returns the number of the newest frame.
-// The wake-up is the one `poll` uses: the sequence is read BEFORE the look, `poll_sleep` sleeps only if it has not moved.
-fn cp_wait(state: u64, me: u64, seen: u64, ms: u64) -> u64 {
-    if wmlayout.gs(state, wmlayout.S_CP_TASK) != me + 1 {
-        return CP_NOT
-    }
-    let ps: u64 = sched.poll_seq(state)
-    if wmlayout.gs(state, wmlayout.S_CP_FSEQ) != seen {
-        return wmlayout.gs(state, wmlayout.S_CP_FSEQ)
-    }
-    sched.poll_sleep(state, ps, kstate.get(state, kstate.TICKS) + ms / 10 + 1)
-    return wmlayout.gs(state, wmlayout.S_CP_FSEQ)
-}
-
-// the modifiers that make a key a shortcut (Alt or the Windows key): 1 = shortcut
-fn cp_shortcut(state: u64) -> u64 {
-    if kstate.get(state, kstate.K11_OFF + kstate.KB_OLD) != 0 || kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) != 0 {
-        return 1
-    }
-    return 0
-}
-
-fn cp_stat(state: u64, k: u64) -> u64 {
-    if k == 0 {
-        return wmlayout.gs(state, wmlayout.S_CP_NATT)
-    }
-    if k == 1 {
-        return wmlayout.gs(state, wmlayout.S_CP_NDET)
-    }
-    if k == 2 {
-        return wmlayout.gs(state, wmlayout.S_CP_NMISS)
-    }
-    if k == 3 {
-        return wmlayout.gs(state, wmlayout.S_CP_NPRES)
-    }
-    if k == 4 {
-        return wmlayout.gs(state, wmlayout.S_CP_NKP)
-    }
-    if k == 5 {
-        return wmlayout.gs(state, wmlayout.S_CP_NHAND)
-    }
-    if k == 6 {
-        return wmlayout.gs(state, wmlayout.S_CP_HEAD)
-    }
-    if k == 7 {
-        return wmlayout.gs(state, wmlayout.S_CP_EVREF)
-    }
-    return 0
-}
-
-// F12: one line, only when a compositor ever attached or the word `phases` is on (the input-to-picture clock of the kernel path is wanted there).
-fn cp_say_reset(state: u64) {
-    if wmlayout.gs(state, wmlayout.S_CP_NATT) == 0 && !fb.phases_an(state) {
-        return
-    }
-    var s_c0: [u8; 13] = "wm: comp on=\0"
-    var s_c1: [u8; 6] = " att=\0"
-    var s_c2: [u8; 6] = " det=\0"
-    var s_c3: [u8; 7] = " miss=\0"
-    var s_c4: [u8; 7] = " hand=\0"
-    var s_c5: [u8; 7] = " pres=\0"
-    var s_c6: [u8; 8] = " kpres=\0"
-    var s_c7: [u8; 5] = " ev=\0"
-    var s_c8: [u8; 8] = " evref=\0"
-    var s_h0: [u8; 7] = " hopn=\0"
-    var s_h1: [u8; 9] = " hopavg=\0"
-    var s_h2: [u8; 9] = " hopmax=\0"
-    var s_w0: [u8; 8] = " wlatn=\0"
-    var s_w1: [u8; 10] = " wlatavg=\0"
-    var s_w2: [u8; 10] = " wlatmax=\0"
-    var s_k0: [u8; 8] = " klatn=\0"
-    var s_k1: [u8; 10] = " klatavg=\0"
-    var s_k2: [u8; 10] = " klatmax=\0"
-    serial.puts((&s_c0[0]) as u64)
-    if wmcompose.cp_on(state) {
-        serial.dec(1)
-    } else {
-        serial.dec(0)
-    }
-    serial.puts((&s_c1[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NATT))
-    serial.puts((&s_c2[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NDET))
-    serial.puts((&s_c3[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NMISS))
-    serial.puts((&s_c4[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NHAND))
-    serial.puts((&s_c5[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NPRES))
-    serial.puts((&s_c6[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NKP))
-    serial.puts((&s_c7[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_HEAD))
-    serial.puts((&s_c8[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_EVREF))
-    var n: u64 = wmlayout.gs(state, wmlayout.S_CP_HOP)
-    serial.puts((&s_h0[0]) as u64)
-    serial.dec(n)
-    serial.puts((&s_h1[0]) as u64)
-    if n != 0 {
-        serial.dec(wmlayout.gs(state, wmlayout.S_CP_HOP + 8) / n)
-    } else {
-        serial.dec(0)
-    }
-    serial.puts((&s_h2[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_HOP + 16))
-    n = wmlayout.gs(state, wmlayout.S_CP_WLAT)
-    serial.puts((&s_w0[0]) as u64)
-    serial.dec(n)
-    serial.puts((&s_w1[0]) as u64)
-    if n != 0 {
-        serial.dec(wmlayout.gs(state, wmlayout.S_CP_WLAT + 8) / n)
-    } else {
-        serial.dec(0)
-    }
-    serial.puts((&s_w2[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_WLAT + 16))
-    n = wmlayout.gs(state, wmlayout.S_CP_KLAT)
-    serial.puts((&s_k0[0]) as u64)
-    serial.dec(n)
-    serial.puts((&s_k1[0]) as u64)
-    if n != 0 {
-        serial.dec(wmlayout.gs(state, wmlayout.S_CP_KLAT + 8) / n)
-    } else {
-        serial.dec(0)
-    }
-    serial.puts((&s_k2[0]) as u64)
-    serial.dec(wmlayout.gs(state, wmlayout.S_CP_KLAT + 16))
-    serial.nl()
-    // the clocks start again for the next phase; the totals above (att, det, miss, hand, pres, kpres, ev) are running
-    var z: u64 = 0
-    while z < 3 {
-        wmlayout.ss(state, wmlayout.S_CP_HOP + z * 8, 0)
-        wmlayout.ss(state, wmlayout.S_CP_WLAT + z * 8, 0)
-        wmlayout.ss(state, wmlayout.S_CP_KLAT + z * 8, 0)
-        z = z + 1
-    }
-}
-
-fn flush_win(state: u64, i: u64) {
-    if !wmbase.valid(state, i) {
-        return
-    }
-    // vboxlag: a HIDDEN (minimized / popup-not-shown) window is not composed, so its repaint changes nothing on the screen. Before this,
-    // the hidden tray / calendar / mini windows made the whole window rectangle dirty about five times a second at idle
-    // (1.3 MB per frame to the card). Showing a window damages it anyway (`show_win`), so nothing is lost; `nohidskip` is the counter-proof.
-    if wmcompose.win_hidden(state, i) && !fb.nohidskip_an(state) {
-        return
-    }
-    // the client painted new contents: its own blur (made from what is under it) is still good
-    wmdamage.damage_win_ex(state, i, i + 1)
 }
 
 // ------------------------------------------------- das Zusammensetzen
@@ -2105,7 +1804,7 @@ fn on_key(state: u64, c: u64) {
     // RUNDE MESSTAFEL, Stufe 3 fuer die Tastatur.
     wmlayout.ss(state, wmlayout.S_KEYIN, wmlayout.gs(state, wmlayout.S_KEYIN) + 1)
     // COMPOSITOR S5: the compositor sees THAT a key came, and its code only while Alt or the Windows key is held (a shortcut)
-    if cp_shortcut(state) != 0 {
+    if wmcpath.cp_shortcut(state) != 0 {
         wminput.cp_event(state, CP_EV_KEY, 1, 0, 0, 0, c)
     } else {
         wminput.cp_event(state, CP_EV_KEY, 0, 0, 0, 0, 0)
@@ -2289,7 +1988,7 @@ fn poll(state: u64) -> bool {
 fn tcur_dmg(state: u64, i: u64, c: u64, r: u64) {
     let cw: u64 = wmlayout.wg(state, i, wmlayout.W_CELLW)
     let ch: u64 = wmlayout.wg(state, i, wmlayout.W_CELLH)
-    let _d: u64 = damage_rect(state, i, c * cw, r * ch, cw, ch)
+    let _d: u64 = wmcpath.damage_rect(state, i, c * cw, r * ch, cw, ch)
 }
 
 // take the cursor off the grid (before output moves things under it)

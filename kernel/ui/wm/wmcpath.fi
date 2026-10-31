@@ -1,0 +1,348 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.fb
+import lib.kstate
+import mm.mem
+import sched.sched
+import serial
+import sched.time
+import fs.unixsock
+import ui.wm.wmanim
+import ui.wm.wmbase
+import ui.wm.wmcompose
+import ui.wm.wmcore
+import ui.wm.wmdamage
+import ui.wm.wmdraw
+import ui.wm.wmframe
+import ui.wm.wmlayout
+import ui.wm.wmpageobj
+import ui.wm.wmshared
+
+fn attach_buf(state: u64, i: u64, sbase: u64, sbytes: u64, sidx: u64) -> bool {
+    if !wmbase.valid(state, i) || sbase == 0 {
+        return false
+    }
+    if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM || sbytes < wmlayout.wg(state, i, wmlayout.W_W) * wmlayout.wg(state, i, wmlayout.W_H) * 4 {
+        return false
+    }
+    if wmlayout.wg(state, i, wmlayout.W_BUF) == sbase {
+        return true
+    }
+
+    if wmlayout.wg(state, i, wmlayout.W_SHM) == 0 && wmlayout.wg(state, i, wmlayout.W_BUF) != 0 && !wmcore.resize_clear_an(state) {
+        let cb: u64 = wmlayout.wg(state, i, wmlayout.W_W) * wmlayout.wg(state, i, wmlayout.W_H) * 4
+        if cb <= wmlayout.wg(state, i, wmlayout.W_BUFBYTES) {
+            wmdraw.copy_words(sbase, wmlayout.wg(state, i, wmlayout.W_BUF), cb / 8)
+            var ci: u64 = (cb / 8) * 8
+            while ci < cb {
+                __mmio_write32((sbase +% ci) as *mut u32, __mmio_read32((wmlayout.wg(state, i, wmlayout.W_BUF) +% ci) as *mut u32))
+                ci = ci + 4
+            }
+        }
+    }
+    if wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
+        unixsock.shm_unref(state, wmlayout.wg(state, i, wmlayout.W_SHM) - 1)
+    } else if wmlayout.wg(state, i, wmlayout.W_BUF) != 0 {
+        mem.frame_free_run(state, wmlayout.wg(state, i, wmlayout.W_BUF), wmlayout.wg(state, i, wmlayout.W_BUFBYTES) / mem.FRAME_SIZE)
+    }
+    unixsock.shm_ref(state, sidx)
+    wmshared.wm_note(state, 2, i, sbytes)
+    wmlayout.wsv(state, i, wmlayout.W_SHM, sidx + 1)
+    wmlayout.wsv(state, i, wmlayout.W_BUF, sbase)
+    wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, sbytes)
+    wmlayout.ss(state, wmlayout.S_SH_ATT, wmlayout.gs(state, wmlayout.S_SH_ATT) + 1)
+    wmdamage.damage_win(state, i)
+    return true
+}
+
+fn damage_rect(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64) -> u64 {
+    if !wmbase.valid(state, i) || w == 0 || h == 0 {
+        return 0
+    }
+    let ww: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+    let wh: u64 = wmlayout.wg(state, i, wmlayout.W_H)
+    if x >= ww || y >= wh {
+        return 0
+    }
+    var bw: u64 = w
+    var bh: u64 = h
+    if x + bw > ww {
+        bw = ww - x
+    }
+    if y + bh > wh {
+        bh = wh - y
+    }
+    let sx: i64 = wmbase.win_x(state, i) + wmbase.inx(state, i) as i64 + x as i64
+    let sy: i64 = wmbase.win_y(state, i) + wmbase.iny(state, i) as i64 + y as i64
+    if wmlayout.gs(state, wmlayout.S_PL_ON) != 0 {
+        pl_damage(state)
+    }
+    if wmcompose.win_hidden(state, i) && !fb.nohidskip_an(state) {
+        return bw * bh
+    }
+    wmbase.damage_ex(state, sx, sy, sx + bw as i64, sy + bh as i64, i + 1)
+    wmlayout.ss(state, wmlayout.S_SH_DMG, wmlayout.gs(state, wmlayout.S_SH_DMG) + 1)
+    wmlayout.ss(state, wmlayout.S_SH_PX, wmlayout.gs(state, wmlayout.S_SH_PX) + bw * bh)
+    return bw * bh
+}
+
+const CP_NOT: u64 = 0xFFFFFFFFFFFFFFFF
+
+const CP_BUSY: u64 = 0xFFFFFFFFFFFFFFFE
+
+fn pl_damage(state: u64) {
+    wmlayout.ss(state, wmlayout.S_PL_DSEQ, wmlayout.gs(state, wmlayout.S_PL_DSEQ) + 1)
+    wmlayout.ss(state, wmlayout.S_PL_DCORE, wmcompose.pl_core())
+    wmlayout.ss(state, wmlayout.S_PL_DTSC, time.tsc())
+}
+
+fn pl_env_bits(state: u64) -> u64 {
+    var e: u64 = 0
+    if fb.double_buffered(state) {
+        e = e | 1
+    }
+    if fb.uncached(state) {
+        e = e | 2
+    }
+    if fb.flip_on(state) {
+        e = e | 4
+    }
+    if wmlayout.gs(state, wmlayout.S_VSYNC) != 0 {
+        e = e | 8
+    }
+    if wmcompose.cp_on(state) {
+        e = e | 16
+    }
+    return e
+}
+
+fn cp_log(state: u64, me: u64, stride: u64) -> u64 {
+
+    if stride == 0 {
+        wmlayout.ss(state, wmlayout.S_PL_ON, 0)
+        let f0: u64 = wmlayout.gs(state, wmlayout.S_PL_PAGEF)
+        if f0 != 0 {
+            wmanim.tw(f0, 1, 0)
+        }
+        return CP_BUSY
+    }
+    let k: u64 = wmpageobj.pl_page_object(state)
+    if k >= unixsock.USHM_MAX {
+        return k
+    }
+    let f: u64 = wmlayout.gs(state, wmlayout.S_PL_PAGEF)
+    wmanim.tw(f, 1, stride)
+    wmanim.tw(f, 5, pl_env_bits(state))
+    wmlayout.ss(state, wmlayout.S_PL_FLAGS, 0)
+    wmlayout.ss(state, wmlayout.S_PL_NCOMP, 0)
+    wmlayout.ss(state, wmlayout.S_PL_CDUR, 0)
+    wmlayout.ss(state, wmlayout.S_PL_TPREV, time.tsc())
+    wmlayout.ss(state, wmlayout.S_PL_ON, stride)
+    return k
+}
+
+fn cp_attach(state: u64, me: u64) -> u64 {
+    if fb.nocomp_an(state) {
+        return 1
+    }
+    if !wmframe.cp_lock(state) {
+        return 3
+    }
+    let cur: u64 = wmlayout.gs(state, wmlayout.S_CP_TASK)
+    if cur != 0 && cur != me + 1 {
+        let idx: u64 = cur - 1
+        let st: u64 = sched.tget(state, idx, sched.T_STATE)
+        if st != sched.S_ZOMBIE && st != sched.S_FREE && sched.tget(state, idx, sched.T_PID) == wmlayout.gs(state, wmlayout.S_CP_PID) {
+            wmframe.cp_unlock(state)
+            return 2
+        }
+        wmcompose.cp_detach_locked(state, 1)
+    }
+    wmlayout.ss(state, wmlayout.S_CP_TASK, me + 1)
+    wmlayout.ss(state, wmlayout.S_CP_PID, sched.tget(state, me, sched.T_PID))
+    wmlayout.ss(state, wmlayout.S_CP_MISS, 0)
+    wmlayout.ss(state, wmlayout.S_CP_NATT, wmlayout.gs(state, wmlayout.S_CP_NATT) + 1)
+    wmcompose.cp_sync(state)
+    wmframe.cp_unlock(state)
+
+    wmbase.damage_all(state)
+    return 0
+}
+
+fn cp_detach(state: u64, me: u64) -> u64 {
+    if wmlayout.gs(state, wmlayout.S_CP_TASK) != me + 1 {
+        return CP_NOT
+    }
+    if !wmframe.cp_lock(state) {
+        return CP_BUSY
+    }
+    wmcompose.cp_detach_locked(state, 3)
+    wmframe.cp_unlock(state)
+    return 0
+}
+
+fn cp_present(state: u64, me: u64) -> u64 {
+    if wmlayout.gs(state, wmlayout.S_CP_TASK) != me + 1 {
+        return CP_NOT
+    }
+    if !wmframe.cp_lock(state) {
+        return CP_BUSY
+    }
+    var px: u64 = 0
+    if wmlayout.gs(state, wmlayout.S_CP_TASK) == me + 1 {
+        px = wmcompose.cp_flush_locked(state, true)
+        if px != 0 {
+            wmlayout.ss(state, wmlayout.S_CP_MISS, 0)
+        }
+    }
+    wmframe.cp_unlock(state)
+    return px
+}
+
+fn cp_wait(state: u64, me: u64, seen: u64, ms: u64) -> u64 {
+    if wmlayout.gs(state, wmlayout.S_CP_TASK) != me + 1 {
+        return CP_NOT
+    }
+    let ps: u64 = sched.poll_seq(state)
+    if wmlayout.gs(state, wmlayout.S_CP_FSEQ) != seen {
+        return wmlayout.gs(state, wmlayout.S_CP_FSEQ)
+    }
+    sched.poll_sleep(state, ps, kstate.get(state, kstate.TICKS) + ms / 10 + 1)
+    return wmlayout.gs(state, wmlayout.S_CP_FSEQ)
+}
+
+fn cp_shortcut(state: u64) -> u64 {
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_OLD) != 0 || kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) != 0 {
+        return 1
+    }
+    return 0
+}
+
+fn cp_stat(state: u64, k: u64) -> u64 {
+    if k == 0 {
+        return wmlayout.gs(state, wmlayout.S_CP_NATT)
+    }
+    if k == 1 {
+        return wmlayout.gs(state, wmlayout.S_CP_NDET)
+    }
+    if k == 2 {
+        return wmlayout.gs(state, wmlayout.S_CP_NMISS)
+    }
+    if k == 3 {
+        return wmlayout.gs(state, wmlayout.S_CP_NPRES)
+    }
+    if k == 4 {
+        return wmlayout.gs(state, wmlayout.S_CP_NKP)
+    }
+    if k == 5 {
+        return wmlayout.gs(state, wmlayout.S_CP_NHAND)
+    }
+    if k == 6 {
+        return wmlayout.gs(state, wmlayout.S_CP_HEAD)
+    }
+    if k == 7 {
+        return wmlayout.gs(state, wmlayout.S_CP_EVREF)
+    }
+    return 0
+}
+
+fn cp_say_reset(state: u64) {
+    if wmlayout.gs(state, wmlayout.S_CP_NATT) == 0 && !fb.phases_an(state) {
+        return
+    }
+    var s_c0: [u8; 13] = "wm: comp on=\0"
+    var s_c1: [u8; 6] = " att=\0"
+    var s_c2: [u8; 6] = " det=\0"
+    var s_c3: [u8; 7] = " miss=\0"
+    var s_c4: [u8; 7] = " hand=\0"
+    var s_c5: [u8; 7] = " pres=\0"
+    var s_c6: [u8; 8] = " kpres=\0"
+    var s_c7: [u8; 5] = " ev=\0"
+    var s_c8: [u8; 8] = " evref=\0"
+    var s_h0: [u8; 7] = " hopn=\0"
+    var s_h1: [u8; 9] = " hopavg=\0"
+    var s_h2: [u8; 9] = " hopmax=\0"
+    var s_w0: [u8; 8] = " wlatn=\0"
+    var s_w1: [u8; 10] = " wlatavg=\0"
+    var s_w2: [u8; 10] = " wlatmax=\0"
+    var s_k0: [u8; 8] = " klatn=\0"
+    var s_k1: [u8; 10] = " klatavg=\0"
+    var s_k2: [u8; 10] = " klatmax=\0"
+    serial.puts((&s_c0[0]) as u64)
+    if wmcompose.cp_on(state) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_c1[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NATT))
+    serial.puts((&s_c2[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NDET))
+    serial.puts((&s_c3[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NMISS))
+    serial.puts((&s_c4[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NHAND))
+    serial.puts((&s_c5[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NPRES))
+    serial.puts((&s_c6[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_NKP))
+    serial.puts((&s_c7[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_HEAD))
+    serial.puts((&s_c8[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_EVREF))
+    var n: u64 = wmlayout.gs(state, wmlayout.S_CP_HOP)
+    serial.puts((&s_h0[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_h1[0]) as u64)
+    if n != 0 {
+        serial.dec(wmlayout.gs(state, wmlayout.S_CP_HOP + 8) / n)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_h2[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_HOP + 16))
+    n = wmlayout.gs(state, wmlayout.S_CP_WLAT)
+    serial.puts((&s_w0[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_w1[0]) as u64)
+    if n != 0 {
+        serial.dec(wmlayout.gs(state, wmlayout.S_CP_WLAT + 8) / n)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_w2[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_WLAT + 16))
+    n = wmlayout.gs(state, wmlayout.S_CP_KLAT)
+    serial.puts((&s_k0[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_k1[0]) as u64)
+    if n != 0 {
+        serial.dec(wmlayout.gs(state, wmlayout.S_CP_KLAT + 8) / n)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_k2[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_CP_KLAT + 16))
+    serial.nl()
+
+    var z: u64 = 0
+    while z < 3 {
+        wmlayout.ss(state, wmlayout.S_CP_HOP + z * 8, 0)
+        wmlayout.ss(state, wmlayout.S_CP_WLAT + z * 8, 0)
+        wmlayout.ss(state, wmlayout.S_CP_KLAT + z * 8, 0)
+        z = z + 1
+    }
+}
+
+fn flush_win(state: u64, i: u64) {
+    if !wmbase.valid(state, i) {
+        return
+    }
+
+    if wmcompose.win_hidden(state, i) && !fb.nohidskip_an(state) {
+        return
+    }
+
+    wmdamage.damage_win_ex(state, i, i + 1)
+}
