@@ -1,0 +1,293 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import ui.wm.wmbase
+import ui.wm.wmcore
+import ui.wm.wmgeom
+import ui.wm.wmhead
+import ui.wm.wmhooks
+import ui.wm.wmlayout
+
+const EDGE_RIGHT: u64 = 3
+
+const STRUT_MAX: u64 = 0x00FFFFFF
+
+fn work_x(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_WORK_X)
+}
+
+fn work_y(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_WORK_Y)
+}
+
+fn work_w(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_WORK_W)
+}
+
+fn work_h(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_WORK_H)
+}
+
+fn work_say(state: u64) {
+    var s_h: [u8; 12] = "wm: work x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_hh: [u8; 4] = " h=\0"
+    var s_s: [u8; 10] = "  schirm=\0"
+    var s_x2: [u8; 2] = "x\0"
+    var s_st: [u8; 9] = " struts=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_WORK_X))
+    serial.puts((&s_y[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_WORK_Y))
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_WORK_W))
+    serial.puts((&s_hh[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_WORK_H))
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_SW))
+    serial.puts((&s_x2[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_SH))
+    serial.puts((&s_st[0]) as u64)
+    serial.dec(wmlayout.gs(state, wmlayout.S_STRUTS))
+    serial.nl()
+}
+
+fn struts(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_STRUTS)
+}
+
+fn workcalcs(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_WORKCALC)
+}
+
+fn nostrut(state: u64) -> bool {
+    return wmlayout.gs(state, wmlayout.S_NOSTRUT) != 0
+}
+
+fn win_strut_edge(state: u64, i: u64) -> u64 {
+    if i >= wmbase.MAX_WIN {
+        return wmhead.EDGE_BOTTOM
+    }
+    let v: u64 = wmlayout.wg(state, i, wmlayout.W_STRUT)
+    if v == 0 {
+        return wmhead.EDGE_BOTTOM
+    }
+    return (v & 0xFF) - 1
+}
+
+fn win_strut_size(state: u64, i: u64) -> u64 {
+    if i >= wmbase.MAX_WIN {
+        return 0
+    }
+    return wmlayout.wg(state, i, wmlayout.W_STRUT) >> 8
+}
+
+fn set_nostrut(state: u64, on: bool) {
+    if on {
+        wmlayout.ss(state, wmlayout.S_NOSTRUT, 1)
+    } else {
+        wmlayout.ss(state, wmlayout.S_NOSTRUT, 0)
+    }
+    wmhooks.fire_workarea(state)
+}
+
+fn set_strut(state: u64, i: u64, edge: u64, size: u64) -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+    if edge > EDGE_RIGHT {
+        return false
+    }
+    if size > STRUT_MAX {
+        return false
+    }
+    if size == 0 {
+        wmlayout.wsv(state, i, wmlayout.W_STRUT, 0)
+    } else {
+        wmlayout.wsv(state, i, wmlayout.W_STRUT, (edge + 1) | (size << 8))
+    }
+    wmlayout.ss(state, wmlayout.S_STRUTS, wmlayout.gs(state, wmlayout.S_STRUTS) + 1)
+    wmhooks.fire_workarea(state)
+    return true
+}
+
+fn is_max(state: u64, i: u64) -> bool {
+    if i >= wmbase.MAX_WIN {
+        return false
+    }
+    return (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) != 0
+}
+
+fn fit_work(state: u64, i: u64) -> bool {
+    let hwk: u64 = wmhead.win_work(state, i)
+    var iw: u64 = wmhead.hw_w(hwk)
+    var ih: u64 = wmhead.hw_h(hwk)
+    if wmbase.deko(state, i) {
+        if iw <= wmgeom.border(state) * 2 || ih <= wmbase.iny(state, i) + wmgeom.border(state) {
+            return false
+        }
+        iw = iw - wmgeom.border(state) * 2
+        ih = ih - wmbase.iny(state, i) - wmgeom.border(state)
+    }
+    if !wmcore.resize_win(state, i, iw, ih) {
+        return false
+    }
+    wmcore.move_win(state, i, wmhead.hw_x(hwk) as i64, wmhead.hw_y(hwk) as i64)
+    return true
+}
+
+fn refit_max(state: u64) {
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 {
+            if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) != 0 {
+                let _r: bool = fit_work(state, i)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn maximize(state: u64, i: u64, on: bool) -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+    let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
+    if on {
+        if (f & wmlayout.F_MAXIMIZED) != 0 {
+            return true
+        }
+
+        let sx: u64 = ((wmbase.win_x(state, i) + 4096) as u64) & 0xFFFF
+        let sy: u64 = ((wmbase.win_y(state, i) + 4096) as u64) & 0xFFFF
+        wmlayout.wsv(state, i, wmlayout.W_SAVE, (sx << 48) | (sy << 32)
+            | ((wmlayout.wg(state, i, wmlayout.W_W) & 0xFFFF) << 16)
+            | (wmlayout.wg(state, i, wmlayout.W_H) & 0xFFFF))
+        wmlayout.wsv(state, i, wmlayout.W_FLAGS, f | wmlayout.F_MAXIMIZED)
+        if !fit_work(state, i) {
+
+            wmlayout.wsv(state, i, wmlayout.W_FLAGS, f)
+            return false
+        }
+        return true
+    }
+    if (f & wmlayout.F_MAXIMIZED) == 0 {
+        return true
+    }
+    let v: u64 = wmlayout.wg(state, i, wmlayout.W_SAVE)
+    wmlayout.wsv(state, i, wmlayout.W_FLAGS, f & ~wmlayout.F_MAXIMIZED)
+    let _r: bool = wmcore.resize_win(state, i, (v >> 16) & 0xFFFF, v & 0xFFFF)
+    let bx: i64 = ((v >> 48) & 0xFFFF) as i64 - 4096
+    let by: i64 = ((v >> 32) & 0xFFFF) as i64 - 4096
+    wmcore.move_win(state, i, bx, by)
+    return true
+}
+
+fn fullscreen(state: u64, i: u64, on: bool) -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+    let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
+    if on {
+        if (f & wmlayout.F_FULL) != 0 {
+            return true
+        }
+
+        let sx: u64 = ((wmbase.win_x(state, i) + 4096) as u64) & 0xFFFF
+        let sy: u64 = ((wmbase.win_y(state, i) + 4096) as u64) & 0xFFFF
+        wmlayout.wsv(state, i, wmlayout.W_FSXY, (sx << 32) | sy)
+        wmlayout.wsv(state, i, wmlayout.W_FSWH, ((wmlayout.wg(state, i, wmlayout.W_W) & 0xFFFF) << 32)
+            | (wmlayout.wg(state, i, wmlayout.W_H) & 0xFFFF))
+
+        let hatte_deko: bool = wmbase.deko(state, i)
+        wmlayout.wsv(state, i, wmlayout.W_FLAGS, f | wmlayout.F_FULL | wmlayout.F_NODECO)
+
+        let fh: u64 = wmhead.win_head(state, i)
+        let sw: u64 = wmhead.hd_w(state, fh)
+        let sh: u64 = wmhead.hd_h(state, fh)
+        if !wmcore.resize_win(state, i, sw, sh) {
+
+            var back: u64 = f
+            if !hatte_deko {
+                back = back | wmlayout.F_NODECO
+            }
+            wmlayout.wsv(state, i, wmlayout.W_FLAGS, back)
+            return false
+        }
+        wmcore.move_win(state, i, wmhead.hd_x(state, fh) as i64, wmhead.hd_y(state, fh) as i64)
+
+        wmcore.set_layer(state, i, wmlayout.L_FULL)
+        wmcore.raise_win(state, i)
+        return true
+    }
+    if (f & wmlayout.F_FULL) == 0 {
+        return true
+    }
+
+    wmcore.set_layer(state, i, wmlayout.L_NORMAL)
+    let xy: u64 = wmlayout.wg(state, i, wmlayout.W_FSXY)
+    let wh: u64 = wmlayout.wg(state, i, wmlayout.W_FSWH)
+
+    var nf: u64 = f & ~wmlayout.F_FULL & ~wmlayout.F_NODECO
+    wmlayout.wsv(state, i, wmlayout.W_FLAGS, nf)
+
+    if (nf & wmlayout.F_MAXIMIZED) != 0 {
+        if fit_work(state, i) {
+            return true
+        }
+        wmlayout.wsv(state, i, wmlayout.W_FLAGS, nf & ~wmlayout.F_MAXIMIZED)
+    }
+    let _r: bool = wmcore.resize_win(state, i, (wh >> 32) & 0xFFFF, wh & 0xFFFF)
+    let bx: i64 = ((xy >> 32) & 0xFFFF) as i64 - 4096
+    let by: i64 = (xy & 0xFFFF) as i64 - 4096
+    wmcore.move_win(state, i, bx, by)
+    return true
+}
+
+fn full_say(state: u64, i: u64) {
+    if !wmbase.valid(state, i) {
+        return
+    }
+    var s_h: [u8; 13] = "wm: voll id=\0"
+    var s_a: [u8; 5] = " an=\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_hh: [u8; 4] = " h=\0"
+    var s_f: [u8; 5] = " fl=\0"
+    var s_l: [u8; 6] = " lay=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_ID))
+    serial.puts((&s_a[0]) as u64)
+    if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_FULL) != 0 {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(wmbase.win_x(state, i) as u64)
+    serial.puts((&s_y[0]) as u64)
+    serial.dec(wmbase.win_y(state, i) as u64)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_W))
+    serial.puts((&s_hh[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_H))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_FLAGS))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_LAYER))
+    serial.nl()
+}
+
+fn is_full(state: u64, i: u64) -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+    return (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_FULL) != 0
+}
+
+fn unter_leiste_px(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_UNTERPX)
+}
