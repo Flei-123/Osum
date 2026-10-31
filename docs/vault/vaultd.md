@@ -231,6 +231,13 @@ State machine per vault: `LOCKED → UNLOCKED(until)`. VK lives only in vaultd m
 
 ---
 
+## 8a. TPM probe (r2417, read-only)
+
+- `/proc/tpm` (`kernel/diag/tpmprobe.fi`, transport `kernel/diag/tpmio.fi`): ACPI `TPM2` table (start method, control area, LAML/LASA), MMIO at `0xFED40000` (DID_VID, INTERFACE_ID, FIFO or CRB registers), then four read-only `TPM2_GetCapability` calls (fixed properties, permanent attributes, PCR banks, algorithms) over CRB or FIFO. Result is cached after the first read; no Clear, no TakeOwnership, no state-changing command.
+- Start methods: 6 = MMIO (FIFO), 7 = CRB, 8 = CRB plus ACPI start (start is written to the CRB register only; the ACPI call is not made), 2 = ACPI start.
+- Gate: `tools/tpm/run.sh` (QEMU + swtpm, `tpm-crb`, `tpm-tis`, counter-case without TPM = `interface=none usable=no`): 21/0.
+- HP (HP-ORIENTOS): **not measured yet**. Needs a kernel feed with `/proc/tpm` and one `cat /proc/tpm`. Until then the design must work without a TPM (section 6).
+
 ## 9. Build orders (small, ordered)
 
 Existing roadmap points keep their numbers; new ones are added (see the report). Order and dependencies:
