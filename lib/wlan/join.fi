@@ -33,6 +33,8 @@ const J_KEYS: i64 = -114
 
 const AKM_PSK: u64 = 2
 const MAX_WAIT: u64 = 400
+const AUTH_WAIT: u64 = 130
+const AUTH_TRIES: u64 = 3
 const SCAN_WAIT: u64 = 2000
 const RX_ROOM: usize = 2400
 const MAX_SSID: usize = 32
@@ -191,8 +193,12 @@ fn matches_kind(j: *mut Join, kind: u64, n: usize, bssid: u64) -> bool {
 }
 
 fn wait_frame(j: *mut Join, g: *mut device.Device, kind: u64, bssid: u64) -> i64 {
+    return wait_frame_for(j, g, kind, bssid, MAX_WAIT)
+}
+
+fn wait_frame_for(j: *mut Join, g: *mut device.Device, kind: u64, bssid: u64, limit: u64) -> i64 {
     var tries: u64 = 0
-    while tries < MAX_WAIT {
+    while tries < limit {
         let n: i64 = device.receive(g, rx_addr(j), RX_ROOM)
         if n > 0 {
             if matches_kind(j, kind, n as usize, bssid) { return n }
@@ -221,9 +227,15 @@ fn join_connect(j: *mut Join, s: *mut connect.Session, g: *mut device.Device,
     if !connect.net_choose(s, g, k) { return J_CHOOSE }
     if iwl_ops.ops_peer_add(o, bssid) < 0 { return J_PEER }
 
-    let al: usize = mgmt.auth_build(tx_addr(j), (&mac[0]) as u64, bssid)
-    if device.send(g, tx_addr(j), al) < 0 { return J_SEND }
-    if wait_frame(j, g, KIND_AUTH, bssid) < 0 { return J_AUTH_TIMEOUT }
+    var attempt: u64 = 0
+    var answered: bool = false
+    while attempt < AUTH_TRIES && !answered {
+        let al: usize = mgmt.auth_build(tx_addr(j), (&mac[0]) as u64, bssid)
+        if device.send(g, tx_addr(j), al) < 0 { return J_SEND }
+        if wait_frame_for(j, g, KIND_AUTH, bssid, AUTH_WAIT) >= 0 { answered = true }
+        attempt = attempt + 1
+    }
+    if !answered { return J_AUTH_TIMEOUT }
     if (*j).last_status != 0 {
         connect.auth_angenommen(s, false)
         return J_AUTH_DENIED
