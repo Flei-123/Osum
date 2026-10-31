@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmterm
 import ui.wm.wmswitch
 import ui.wm.wmtabs
 import ui.wm.wmtrust
@@ -128,7 +129,7 @@ export {
     create, create_ex, attach_buf, win_shm, damage_rect, tab_object, chrome_object, tab_publish, shared_ok, sh_stat,
     lj_fast, frames_total, input_hot, lj_round, lj_may_compose, lj_done,
     cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_log, cp_stat, cp_say_reset, cp_on, CP_NOT, CP_BUSY, destroy, count, set_focus, raise_win,
-    close_top, gest_action, close_term, top_visible, cross_point, term_win,
+    close_top, gest_action, close_term, top_visible, cross_point,
     move_win, resize_win, win_w, win_h, win_buf,
     win_kind, win_id,
     win_layer, set_layer, win_hidden, set_hidden, win_deco, set_deco,
@@ -164,10 +165,7 @@ export {
     SIG_H,
     fill, text, flush_win,
     ev_push, ev_pop, ev_waiting,
-    on_mouse, on_key, term_write, term_out, term_hold, term_release, term_cols, term_rows, term_cx, term_cy,
-    term_cellw, term_cellh, term_asc, term_px,
-    bind_tty, key_tty, tty_of, NO_TTY, term_outs, term_puts_n,
-    term_dump, term_dump_all, term_size,
+    on_mouse, on_key, term_write, term_out, term_cols, term_rows,
     poll, blits, pixels, last_us,
     frame_us_sum, frame_us_n, frame_us_max, frame_us_last, frame_ueber16,
     frame_fach, frame_us_maxw, frame_ueber16w,
@@ -179,7 +177,7 @@ export {
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
     kachelbar,
     tt_is_bg, tt_join,
-    term_page, term_key, term_paste_done, term_primary_take, term_paste_sel, tkicks_pub, term_copy_take, term_paste_take, tcur_toggles_pub, tcur_shown_pub, tcopies_pub, tpastes_pub, on_screen_resize, win_tabbed, tiled, tile_focus_state, tile_nodes_all, tile_leaves_all, tile_tree_tag,
+    term_key, term_paste_done, on_screen_resize, win_tabbed, tiled, tile_focus_state, tile_nodes_all, tile_leaves_all, tile_tree_tag,
     MAX_WIN, K_TERM,
     damage, damage_all, focus, inx, iny, ready, valid, win_owner, win_x, win_y,
     title_clipped, title_missing,
@@ -191,7 +189,7 @@ export {
     F_HIDDEN, F_NODECO,
     EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT,
     PROBE_IN, PROBE_OUT,
-    cell_attr, cell_col, cell_get, fokus_still, term_putc,
+    fokus_still, term_putc,
     tt,
 }
 
@@ -336,6 +334,14 @@ fn tt_is_bg(state: u64, i: u64) -> bool {
 }
 
 
+fn term_cols(state: u64, i: u64) -> u64 {
+    return wmterm.term_cols(state, i)
+}
+
+fn term_rows(state: u64, i: u64) -> u64 {
+    return wmterm.term_rows(state, i)
+}
+
 const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
 const EV_SLOTS: u64 = 32
 const EV_BYTES: u64 = 16
@@ -425,20 +431,8 @@ const STRUT_MAX: u64 = 0x00FFFFFF
 // Mensch sieht: sie werden geschrieben und wieder gelesen.
 const PROBE_IN: u64 = 0x0000FF00
 const PROBE_OUT: u64 = 0x00FF0000
-// Terminal grid: six planes (characters, attributes, colours, and the same three for the saved main screen), each one holds
-// TG cells. 16384 cells = 192 x 85, enough for a 1920 x 1080 window with a 10 x 19 cell (r468: the old 4096 cut the screen
-// of a maximised terminal after 21 rows).
-const TG: u64 = 16384
 const TG_FRAMES: u64 = 24
-const TG_ALT_WORDS: u64 = 6144
 const APP_LEN: u64 = 24
-
-// "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
-// dieses Modul darf `tty` NICHT einbinden, weil `tty` es einbindet
-// (SINK_WINDOW). Der Abhaengigkeitsgraph bleibt ein Baum, und die
-// Richtung ist die richtige -- der Fensterserver weiss nichts von
-// Zeilendisziplinen, das Terminal weiss, wohin es schreibt.
-const NO_TTY: u64 = 255
 
 fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
     if i >= wmbase.DECO_SLOTS {
@@ -486,7 +480,7 @@ fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
                     // NACH dem ersten Fenster.
                     wmdraw.fill(state, k, 0, 0, wmlayout.wg(state, k, wmlayout.W_W),
                         wmlayout.wg(state, k, wmlayout.W_H), wmbase.deco(state, wmlayout.DK_TERM_BG))
-                    term_redraw(state, k)
+                    wmterm.term_redraw(state, k)
                     wmdamage.damage_win(state, k)
                 }
             }
@@ -1168,55 +1162,6 @@ fn set_nomin(state: u64, on: bool) {
     }
 }
 
-fn term_cols(state: u64, i: u64) -> u64 {
-    return wmlayout.wg(state, i, wmlayout.W_COLS)
-}
-
-fn term_rows(state: u64, i: u64) -> u64 {
-    return wmlayout.wg(state, i, wmlayout.W_ROWS)
-}
-
-fn term_cx(state: u64, i: u64) -> u64 {
-    return wmlayout.wg(state, i, wmlayout.W_CX)
-}
-
-fn term_cy(state: u64, i: u64) -> u64 {
-    return wmlayout.wg(state, i, wmlayout.W_CY)
-}
-
-// ====================================== RUNDE GLAS (nachtrag)
-// WO EINE ZELLE WIRKLICH LIEGT -- gefragt von aussen.
-//
-// `wm: term win=0 cols= rows= cell=` hat die Zellengroesse bis zu
-// dieser Runde aus zwei festen Zahlen GETEILT (560/cols, 380/rows),
-// und das stimmte genau fuer den einen Aufbau, in dem es geschrieben
-// wurde. Wer eine Zeile des Terminals bildpunktgenau nachrastern will
-// -- tools/look/umlaut.py tut das seit dem Nachtrag --, braucht die
-// echten Zahlen: Zellenbreite, Zellenhoehe und den Aufsteiger der
-// Festbreitenschrift, denn die Grundlinie der Zeile r liegt bei
-// y + r * Zellenhoehe + Aufsteiger. Geraten wird hier nichts mehr.
-fn term_cellw(state: u64, i: u64) -> u64 {
-    return wmlayout.wg(state, i, wmlayout.W_CELLW)
-}
-
-fn term_cellh(state: u64, i: u64) -> u64 {
-    return wmlayout.wg(state, i, wmlayout.W_CELLH)
-}
-
-fn term_asc(state: u64) -> u64 {
-    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_MONO)
-    if f >= ttf.MAX_FONTS {
-        return 0
-    }
-    // `ttf.ascent` rechnet in i64 (ein Aufsteiger kann rechnerisch
-    // negativ werden); hier ist er eine Hoehe in Bildpunkten.
-    return ttf.ascent(state, f, wmlayout.gs(state, wmlayout.S_PX_MONO)) as u64
-}
-
-fn term_px(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_PX_MONO)
-}
-
 // ------------------------------------------------------------- Start
 
 fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
@@ -1638,7 +1583,7 @@ fn destroy(state: u64, i: u64) -> bool {
         mem.frame_free_run(state, wmlayout.wg(state, i, wmlayout.W_GRID), TG_FRAMES)
         wmlayout.wsv(state, i, wmlayout.W_GRID, 0)
     }
-    sb_free(state, i)
+    wmterm.sb_free(state, i)
     // Die Stapelreihenfolge schliesst sich: wer ueber dem geschlossenen
     // Fenster lag, rutscht eine Stufe herunter. Ohne das entstehen
     // Luecken, und `compose` findet auf einer Stufe kein Fenster mehr.
@@ -1726,17 +1671,6 @@ fn cross_point(state: u64, i: u64) -> u64 {
         return 0
     }
     return ((bx as u64) << 32) | (by as u64)
-}
-
-fn term_win(state: u64) -> u64 {
-    var i: u64 = 0
-    while i < wmbase.MAX_WIN {
-        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-            return i
-        }
-        i = i + 1
-    }
-    return wmbase.MAX_WIN
 }
 
 // Schliessen ueber die Bewegung. Das Fenster verschwindet erst, wenn
@@ -8337,7 +8271,7 @@ fn wheel_out(state: u64, x: u64, y: u64) {
     }
     input_seen(state)
     if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-        sb_wheel(state, i, d)
+        wmterm.sb_wheel(state, i, d)
         return
     }
     ev_push(state, i, wmlayout.E_WHEEL, lx as u64, ly as u64, (d as u64) & 0xFFFF)
@@ -8449,8 +8383,8 @@ fn dnd_hover(state: u64, i: u64, btn: u64) {
         if was != 0 && wmgate.dh_live != 0 && i < wmbase.MAX_WIN && wmbase.valid(state, i) && wmgate.input_allowed(state, i)
             && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && slots.drag_active(state) != 0
             && (slots.drag_types(state) & bus.T_PATH) != 0 {
-            let t: u64 = tty_of(state, i)
-            if t != NO_TTY {
+            let t: u64 = wmterm.tty_of(state, i)
+            if t != wmterm.NO_TTY {
                 dh_tty = t + 1
                 dnd_say(state, 2, t)
             }
@@ -9082,7 +9016,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
                 // Das ist die Bedienung, die jedes andere System hat.
             }
             if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && lokal_x >= 0 && lokal_y >= 0 {
-                term_mouse(state, i, 0, lokal_x as u64, lokal_y as u64, btn)
+                wmterm.term_mouse(state, i, 0, lokal_x as u64, lokal_y as u64, btn)
             }
             wmlayout.ss(state, wmlayout.S_DOWNS, wmlayout.gs(state, wmlayout.S_DOWNS) + 1)
             // RUNDE TON: der Klickton. HIER, im Fensterserver, weil
@@ -9096,7 +9030,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
         }
         if (btn & ps2m.B_LEFT) == 0 && (alt & ps2m.B_LEFT) != 0 {
             if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && lokal_x >= 0 && lokal_y >= 0 {
-                term_mouse(state, i, 1, lokal_x as u64, lokal_y as u64, btn)
+                wmterm.term_mouse(state, i, 1, lokal_x as u64, lokal_y as u64, btn)
             }
             ev_push(state, i, wmlayout.E_UP, lokal_x as u64, lokal_y as u64, alt)
             return
@@ -9112,7 +9046,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
         if (btn & ps2m.B_RIGHT) != 0 && (alt & ps2m.B_RIGHT) == 0 {
             if lokal_x >= 0 && lokal_y >= 0 {
                 if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-                    term_mouse(state, i, 3, lokal_x as u64, lokal_y as u64, btn)
+                    wmterm.term_mouse(state, i, 3, lokal_x as u64, lokal_y as u64, btn)
                 }
                 wmlayout.ss(state, wmlayout.S_DOWNS, wmlayout.gs(state, wmlayout.S_DOWNS) + 1)
                 ev_push(state, i, wmlayout.E_DOWN, lokal_x as u64, lokal_y as u64,
@@ -9135,7 +9069,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
         if (btn & ps2m.B_MIDDLE) != 0 && (alt & ps2m.B_MIDDLE) == 0 {
             if lokal_x >= 0 && lokal_y >= 0 {
                 if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-                    term_mouse(state, i, 4, lokal_x as u64, lokal_y as u64, btn)
+                    wmterm.term_mouse(state, i, 4, lokal_x as u64, lokal_y as u64, btn)
                 }
                 wmlayout.ss(state, wmlayout.S_DOWNS, wmlayout.gs(state, wmlayout.S_DOWNS) + 1)
                 ev_push(state, i, wmlayout.E_DOWN, lokal_x as u64, lokal_y as u64,
@@ -9153,7 +9087,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
     }
     if lokal_x >= 0 && lokal_y >= 0 {
         if (btn & ps2m.B_LEFT) != 0 && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-            term_mouse(state, i, 2, lokal_x as u64, lokal_y as u64, btn)
+            wmterm.term_mouse(state, i, 2, lokal_x as u64, lokal_y as u64, btn)
         }
         let wid: u64 = wmlayout.wg(state, i, wmlayout.W_ID)
         if wid != mv_wid || lokal_x != mv_lx || lokal_y != mv_ly || btn != mv_btn {
@@ -9389,7 +9323,7 @@ fn poll(state: u64) -> bool {
 // ohne von Schriften etwas zu wissen.
 
 fn term_setup(state: u64, i: u64) {
-    tc_reset(i)
+    wmterm.tc_reset(i)
     let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_MONO)
     var cw: u64 = 8
     var ch: u64 = 16
@@ -9406,7 +9340,7 @@ fn term_setup(state: u64, i: u64) {
         ch = 16
     }
     if i < 32 {
-        tp_sbv[(i) as usize] = 0
+        wmterm.tp_sbv[(i) as usize] = 0
     }
     let alt_cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
     let alt_rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
@@ -9426,8 +9360,8 @@ fn term_setup(state: u64, i: u64) {
         // screen is up (frames 3 .. 5)
         let g0: u64 = mem.frame_run(state, TG_FRAMES)
         wmlayout.wsv(state, i, wmlayout.W_GRID, g0)
-        tp_reset(i)
-        sb_free(state, i)
+        wmterm.tp_reset(i)
+        wmterm.sb_free(state, i)
     }
     let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
     // ================================================== RUNDE ECHT
@@ -9455,20 +9389,20 @@ fn term_setup(state: u64, i: u64) {
     if g != 0 {
         if neu_gitter || alt_cols == 0 || alt_rows == 0 {
             var k: u64 = 0
-            while k < cols * rows && k < TG {
+            while k < cols * rows && k < wmterm.TG {
                 kstate.set8(g + k, 32 as u8)
                 k = k + 1
             }
-            attr_clear(g)
+            wmterm.attr_clear(g)
             wmlayout.wsv(state, i, wmlayout.W_CX, 0)
             wmlayout.wsv(state, i, wmlayout.W_CY, 0)
         } else if cols != alt_cols || rows != alt_rows {
-            attr_clear(g)
+            wmterm.attr_clear(g)
             // r462: the saved main screen and the scroll region belong to the old grid
-            tp_alt[(i) as usize] = 0
-            tp_top[(i) as usize] = 0
-            tp_bot1[(i) as usize] = 0
-            tp_wrap[(i) as usize] = 0
+            wmterm.tp_alt[(i) as usize] = 0
+            wmterm.tp_top[(i) as usize] = 0
+            wmterm.tp_bot1[(i) as usize] = 0
+            wmterm.tp_wrap[(i) as usize] = 0
             // UMKOPIEREN, VON UNTEN NACH OBEN ODER VON OBEN NACH
             // UNTEN -- je nachdem, wohin geschoben wird, damit sich
             // Quelle und Ziel im selben Rahmen nicht ueberholen.
@@ -9492,7 +9426,7 @@ fn term_setup(state: u64, i: u64) {
                         c = c - 1
                         let src: u64 = r * alt_cols + c
                         let dst: u64 = r * cols + c
-                        if src < TG && dst < TG {
+                        if src < wmterm.TG && dst < wmterm.TG {
                             kstate.set8(g + dst, kstate.get8(g + src) as u8)
                         }
                     }
@@ -9500,7 +9434,7 @@ fn term_setup(state: u64, i: u64) {
                     var c2: u64 = wide
                     while c2 < cols {
                         let d2: u64 = r * cols + c2
-                        if d2 < TG {
+                        if d2 < wmterm.TG {
                             kstate.set8(g + d2, 32 as u8)
                         }
                         c2 = c2 + 1
@@ -9513,7 +9447,7 @@ fn term_setup(state: u64, i: u64) {
                     while c3 < wide {
                         let s3: u64 = r2 * alt_cols + c3
                         let d3: u64 = r2 * cols + c3
-                        if s3 < TG && d3 < TG {
+                        if s3 < wmterm.TG && d3 < wmterm.TG {
                             kstate.set8(g + d3, kstate.get8(g + s3) as u8)
                         }
                         c3 = c3 + 1
@@ -9521,7 +9455,7 @@ fn term_setup(state: u64, i: u64) {
                     var c4: u64 = wide
                     while c4 < cols {
                         let d4: u64 = r2 * cols + c4
-                        if d4 < TG {
+                        if d4 < wmterm.TG {
                             kstate.set8(g + d4, 32 as u8)
                         }
                         c4 = c4 + 1
@@ -9535,7 +9469,7 @@ fn term_setup(state: u64, i: u64) {
                 var c5: u64 = 0
                 while c5 < cols {
                     let d5: u64 = r5 * cols + c5
-                    if d5 < TG {
+                    if d5 < wmterm.TG {
                         kstate.set8(g + d5, 32 as u8)
                     }
                     c5 = c5 + 1
@@ -9565,391 +9499,7 @@ fn term_setup(state: u64, i: u64) {
     // aber nicht zu sehen, und der Fehler saehe genauso aus wie
     // vorher. Bei einem frischen Gitter malt sie lauter Leerzeichen,
     // kostet also nichts.
-    term_redraw(state, i)
-}
-
-fn cell_set(state: u64, i: u64, c: u64, r: u64, ch: u64) {
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    if g == 0 {
-        return
-    }
-    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
-    if k >= TG {
-        return
-    }
-    kstate.set8(g + k, ch as u8)
-}
-
-// r400: the attribute octet of a cell (bit 0 = reverse video), in the second frame of the grid.
-fn attr_clear(g: u64) {
-    var k: u64 = 0
-    while k < TG {
-        kstate.set8(g + TG + k, 0 as u8)
-        kstate.set8(g + 2 * TG + k, 0 as u8)
-        k = k + 1
-    }
-}
-
-fn cell_attr(state: u64, i: u64, c: u64, r: u64) -> u64 {
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    if g == 0 {
-        return 0
-    }
-    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
-    if k >= TG {
-        return 0
-    }
-    return kstate.get8(g + TG + k)
-}
-
-fn cell_attr_set(state: u64, i: u64, c: u64, r: u64, a: u64) {
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    if g == 0 {
-        return
-    }
-    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
-    if k >= TG {
-        return
-    }
-    kstate.set8(g + TG + k, a as u8)
-}
-
-// r462: the colour octet of a cell (low nibble foreground, high nibble background; 0 = the window's own colour), third frame
-fn cell_col(state: u64, i: u64, c: u64, r: u64) -> u64 {
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    if g == 0 {
-        return 0
-    }
-    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
-    if k >= TG {
-        return 0
-    }
-    return kstate.get8(g + 2 * TG + k)
-}
-
-fn cell_col_set(state: u64, i: u64, c: u64, r: u64, v: u64) {
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    if g == 0 {
-        return
-    }
-    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
-    if k >= TG {
-        return
-    }
-    kstate.set8(g + 2 * TG + k, v as u8)
-}
-
-fn cell_get(state: u64, i: u64, c: u64, r: u64) -> u64 {
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    if g == 0 {
-        return 32
-    }
-    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
-    if k >= TG {
-        return 32
-    }
-    return kstate.get8(g + k)
-}
-
-// ==================================================== RUNDE ECHTHARDWARE-5
-// DEN INHALT EINES TERMINALFENSTERS AUF DIE SERIELLE LEITUNG.
-//
-// Der Beleg fuer Justins Befund B ist ein BILD, und ein Bild von
-// Text ist mit einem Programm schlecht zu lesen -- ich habe in dieser
-// Runde zweimal versucht, aus Bildpunkten Buchstaben zu raten, und
-// beide Male stand am Ende ein Muster, das man so oder so lesen kann.
-//
-// Das Fenster weiss selbst, was in ihm steht: sein Zellenraster. Diese
-// Funktion schreibt es Zeile fuer Zeile hinaus, und damit ist "im
-// Terminal steht eine Eingabeaufforderung" eine ABLESUNG und keine
-// Deutung eines Rasters. Leerzeilen am Ende faellt sie weg.
-// r462: the size of the window's grid, rows << 16 | columns -- what `TIOCGWINSZ` of the tty bound to this window answers
-fn term_size(state: u64, i: u64) -> u64 {
-    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
-        return 0
-    }
-    return (wmlayout.wg(state, i, wmlayout.W_ROWS) << 16) | wmlayout.wg(state, i, wmlayout.W_COLS)
-}
-
-fn term_dump(state: u64, i: u64) {
-    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
-        return
-    }
-    var s_k: [u8; 15] = "wm: termzeile \0"
-    var s_g: [u8; 4] = " [\0\0"
-    var s_z: [u8; 2] = "]\0"
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    // r486: where the grid stands on the screen and what colours it has, for the pictures of tools/comp/termshare.sh (the cells below are
-    // the kernel's own state, a witness that does not go through the window buffer)
-    var s_geo: [u8; 17] = "wm: termgeo cx=\0\0"
-    var s_cy: [u8; 5] = " cy=\0"
-    var s_cw: [u8; 5] = " cw=\0"
-    var s_ch: [u8; 5] = " ch=\0"
-    var s_co: [u8; 7] = " cols=\0"
-    var s_ro: [u8; 7] = " rows=\0"
-    var s_bg: [u8; 5] = " bg=\0"
-    var s_fg: [u8; 5] = " fg=\0"
-    var s_sh: [u8; 9] = " shared=\0"
-    serial.puts((&s_geo[0]) as u64)
-    serial.dec((wmbase.win_x(state, i) + wmbase.inx(state, i) as i64) as u64)
-    serial.puts((&s_cy[0]) as u64)
-    serial.dec((wmbase.win_y(state, i) + wmbase.iny(state, i) as i64) as u64)
-    serial.puts((&s_cw[0]) as u64)
-    serial.dec(wmlayout.wg(state, i, wmlayout.W_CELLW))
-    serial.puts((&s_ch[0]) as u64)
-    serial.dec(wmlayout.wg(state, i, wmlayout.W_CELLH))
-    serial.puts((&s_co[0]) as u64)
-    serial.dec(cols)
-    serial.puts((&s_ro[0]) as u64)
-    serial.dec(rows)
-    serial.puts((&s_bg[0]) as u64)
-    serial.dec(wmlayout.wg(state, i, wmlayout.W_BG) & wmdraw.RGB24)
-    serial.puts((&s_fg[0]) as u64)
-    serial.dec(wmlayout.wg(state, i, wmlayout.W_FG) & wmdraw.RGB24)
-    serial.puts((&s_sh[0]) as u64)
-    serial.dec(wmlayout.wg(state, i, wmlayout.W_SHM))
-    serial.nl()
-    var r: u64 = 0
-    while r < rows {
-        // Wie weit steht in dieser Zeile ueberhaupt etwas?
-        var letzte: u64 = 0
-        var c0: u64 = 0
-        while c0 < cols {
-            if cell_get(state, i, c0, r) > 32 {
-                letzte = c0 + 1
-            }
-            c0 = c0 + 1
-        }
-        if letzte != 0 {
-            serial.puts((&s_k[0]) as u64)
-            serial.dec(r)
-            serial.puts((&s_g[0]) as u64)
-            var c: u64 = 0
-            while c < letzte {
-                let z: u64 = cell_get(state, i, c, r)
-                if z >= 32 && z < 127 {
-                    serial.put(z as u8)
-                } else {
-                    serial.put(32 as u8)
-                }
-                c = c + 1
-            }
-            serial.puts((&s_z[0]) as u64)
-            serial.nl()
-        }
-        r = r + 1
-    }
-    // r1014 witness: the cursor / selection / clipboard state of this window
-    if i < 32 {
-        var s_tc: [u8; 14] = "wm: tcur win=\0"
-        var s_on: [u8; 5] = " on=\0"
-        var s_tg: [u8; 9] = " toggle=\0"
-        var s_hd: [u8; 7] = " hide=\0"
-        var s_se: [u8; 6] = " sel=\0"
-        var s_cp: [u8; 9] = " copies=\0"
-        var s_ps: [u8; 9] = " pastes=\0"
-        serial.puts((&s_tc[0]) as u64)
-        serial.dec(i)
-        serial.puts((&s_on[0]) as u64)
-        serial.dec(tc_on[(i) as usize])
-        serial.puts((&s_tg[0]) as u64)
-        serial.dec(tc_toggles[0])
-        serial.puts((&s_hd[0]) as u64)
-        serial.dec(tc_hide[(i) as usize])
-        serial.puts((&s_se[0]) as u64)
-        if tsel_shown(i) {
-            serial.dec(1)
-        } else {
-            serial.dec(0)
-        }
-        serial.puts((&s_cp[0]) as u64)
-        serial.dec(tc_copies[0])
-        serial.puts((&s_ps[0]) as u64)
-        serial.dec(tc_pastes[0])
-        serial.nl()
-    }
-    sb_dump(state, i)
-}
-
-// r5xx: ONE LINE PER TERMINAL WINDOW plus the text of its cells, for the multi-terminal check (tools/term/multi.sh).
-// `term_dump` only reports the FIRST terminal window; with several windows open the check has to see each of them:
-//   wm: termwin win=<slot> tty=<n> focus=<0|1> cols=<c> rows=<r>
-//   wm: tw<slot> <row> [text]
-fn term_dump_all(state: u64) {
-    var s_h: [u8; 17] = "wm: termwin win=\0"
-    var s_t: [u8; 6] = " tty=\0"
-    var s_f: [u8; 8] = " focus=\0"
-    var s_c: [u8; 7] = " cols=\0"
-    var s_r: [u8; 7] = " rows=\0"
-    var s_x: [u8; 4] = " x=\0"
-    var s_y: [u8; 4] = " y=\0"
-    var s_p: [u8; 7] = "wm: tw\0"
-    var s_g: [u8; 3] = " [\0"
-    var s_z: [u8; 2] = "]\0"
-    var i: u64 = 0
-    while i < wmbase.MAX_WIN {
-        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
-            let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-            let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-            serial.puts((&s_h[0]) as u64)
-            serial.dec(i)
-            serial.puts((&s_t[0]) as u64)
-            serial.dec(tty_of(state, i))
-            serial.puts((&s_f[0]) as u64)
-            if wmlayout.gs(state, wmlayout.S_FOCUS) == i + 1 {
-                serial.dec(1)
-            } else {
-                serial.dec(0)
-            }
-            serial.puts((&s_c[0]) as u64)
-            serial.dec(cols)
-            serial.puts((&s_r[0]) as u64)
-            serial.dec(rows)
-            serial.puts((&s_x[0]) as u64)
-            serial.dec(wmbase.win_x(state, i) as u64)
-            serial.puts((&s_y[0]) as u64)
-            serial.dec(wmbase.win_y(state, i) as u64)
-            serial.nl()
-            var r: u64 = 0
-            while r < rows {
-                var last: u64 = 0
-                var c0: u64 = 0
-                while c0 < cols {
-                    if cell_get(state, i, c0, r) > 32 {
-                        last = c0 + 1
-                    }
-                    c0 = c0 + 1
-                }
-                if last != 0 {
-                    serial.puts((&s_p[0]) as u64)
-                    serial.dec(i)
-                    serial.put(32 as u8)
-                    serial.dec(r)
-                    serial.puts((&s_g[0]) as u64)
-                    var c: u64 = 0
-                    while c < last {
-                        let z: u64 = cell_get(state, i, c, r)
-                        if z >= 32 && z < 127 {
-                            serial.put(z as u8)
-                        } else {
-                            serial.put(32 as u8)
-                        }
-                        c = c + 1
-                    }
-                    serial.puts((&s_z[0]) as u64)
-                    serial.nl()
-                }
-                r = r + 1
-            }
-        }
-        i = i + 1
-    }
-}
-
-// the 16 colours of the terminal (0xRRGGBB): the eight of the standard and their bright forms
-fn term_palette(k: u64) -> u64 {
-    if k == 0 { return 0x000000 }
-    if k == 1 { return 0xCD3131 }
-    if k == 2 { return 0x0DBC79 }
-    if k == 3 { return 0xE5E510 }
-    if k == 4 { return 0x2472C8 }
-    if k == 5 { return 0xBC3FBC }
-    if k == 6 { return 0x11A8CD }
-    if k == 7 { return 0xE5E5E5 }
-    if k == 8 { return 0x666666 }
-    if k == 9 { return 0xF14C4C }
-    if k == 10 { return 0x23D18B }
-    if k == 11 { return 0xF5F543 }
-    if k == 12 { return 0x3B8EEA }
-    if k == 13 { return 0xD670D6 }
-    if k == 14 { return 0x29B8DB }
-    return 0xFFFFFF
-}
-
-fn term_color(state: u64, k: u64) -> u64 {
-    let v: u64 = term_palette(k)
-    return fb.rgb(state, (v >> 16) & 255, (v >> 8) & 255, v & 255)
-}
-
-// ==================================================== r1014: TERMINAL CURSOR, SELECTION, COPY, PASTE
-// The cursor is a block (the cell with reverse video). It is drawn only in the focused terminal window and blinks with
-// BLINK_TICKS (the timer runs in `poll`, once per tick; an idle desktop costs one compare per tick and one cell repaint per
-// half second). `tc_on` says which cell shows the cursor right now, `cell_paint` reads it, so every repaint path agrees.
-// Selection: left press + drag in the live grid marks a stream of cells (tc_sa .. tc_sb, row-major); Ctrl+Shift+C (or
-// Ctrl+C while a selection stands) copies it, Ctrl+Shift+V / right click without selection / middle click paste. The
-// system clipboard itself lives in kgui (`termclip_pump`: this module cannot see wig).
-const BLINK_TICKS: u64 = 53
-const TC_BUF: u64 = 4096
-static mut tc_on: [u64; 32] = [0 as u64; 32]    // 1 = the cursor is painted at (tc_cc, tc_cr)
-static mut tc_cc: [u64; 32] = [0 as u64; 32]
-static mut tc_cr: [u64; 32] = [0 as u64; 32]
-static mut tc_hide: [u64; 32] = [0 as u64; 32]  // 1 = the program hid the cursor (CSI ? 25 l)
-static mut tc_sel: [u64; 32] = [0 as u64; 32]   // 0 none, 1 dragging, 2 set
-static mut tc_sa: [u64; 32] = [0 as u64; 32]    // anchor cell (row * cols + col)
-static mut tc_sb: [u64; 32] = [0 as u64; 32]    // moving end
-static mut tc_phase: [u64; 1] = [1 as u64; 1]   // 1 = visible half of the blink
-static mut tc_next: [u64; 1] = [0 as u64; 1]    // tick of the next toggle
-static mut tc_toggles: [u64; 1] = [0 as u64; 1]
-static mut tc_buf: [u8; 4104] = [0 as u8; 4104] // the copied text, waiting for kgui
-static mut tc_cn: [u64; 1] = [0 as u64; 1]      // its length (0 = nothing waits)
-static mut tc_paste: [u64; 1] = [0 as u64; 1]   // tty + 1 that waits for a paste, 0 = none
-static mut tc_copies: [u64; 1] = [0 as u64; 1]
-static mut tc_pastes: [u64; 1] = [0 as u64; 1]
-
-fn tc_reset(i: u64) {
-    if i >= 32 {
-        return
-    }
-    tc_on[(i) as usize] = 0
-    tc_hide[(i) as usize] = 0
-    tc_sel[(i) as usize] = 0
-}
-
-fn tsel_lo(i: u64) -> u64 {
-    if tc_sa[(i) as usize] < tc_sb[(i) as usize] {
-        return tc_sa[(i) as usize]
-    }
-    return tc_sb[(i) as usize]
-}
-
-fn tsel_hi(i: u64) -> u64 {
-    if tc_sa[(i) as usize] < tc_sb[(i) as usize] {
-        return tc_sb[(i) as usize]
-    }
-    return tc_sa[(i) as usize]
-}
-
-// a selection that is visible: set, or dragged over at least two cells
-fn tsel_shown(i: u64) -> bool {
-    if i >= 32 || tc_sel[(i) as usize] == 0 {
-        return false
-    }
-    if tc_sel[(i) as usize] == 2 {
-        return true
-    }
-    return tc_sa[(i) as usize] != tc_sb[(i) as usize]
-}
-
-fn tsel_has(state: u64, i: u64, c: u64, r: u64) -> bool {
-    if !tsel_shown(i) {
-        return false
-    }
-    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
-    return k >= tsel_lo(i) && k <= tsel_hi(i)
-}
-
-fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
-    var at: u64 = cell_attr(state, i, c, r)
-    if i < 32 {
-        if tsel_has(state, i, c, r) {
-            at = at ^ 1
-        }
-        if tc_on[(i) as usize] != 0 && tc_cc[(i) as usize] == c && tc_cr[(i) as usize] == r {
-            at = at ^ 1
-        }
-    }
-    cell_paint_v(state, i, c, r, cell_get(state, i, c, r), at, cell_col(state, i, c, r))
+    wmterm.term_redraw(state, i)
 }
 
 fn tcur_dmg(state: u64, i: u64, c: u64, r: u64) {
@@ -9960,22 +9510,12 @@ fn tcur_dmg(state: u64, i: u64, c: u64, r: u64) {
 
 // take the cursor off the grid (before output moves things under it)
 fn tcur_off(state: u64, i: u64) {
-    if i >= 32 || tc_on[(i) as usize] == 0 {
+    if i >= 32 || wmterm.tc_on[(i) as usize] == 0 {
         return
     }
-    tc_on[(i) as usize] = 0
-    cell_paint(state, i, tc_cc[(i) as usize], tc_cr[(i) as usize])
-    tcur_dmg(state, i, tc_cc[(i) as usize], tc_cr[(i) as usize])
-}
-
-fn tcur_want(state: u64, i: u64) -> bool {
-    if tc_hide[(i) as usize] != 0 || tc_phase[0] == 0 || wmlayout.gs(state, wmlayout.S_FOCUS) != i + 1 {
-        return false
-    }
-    if tp_sbv[(i) as usize] != 0 || wmlayout.wg(state, i, wmlayout.W_GRID) == 0 {
-        return false
-    }
-    return wmlayout.wg(state, i, wmlayout.W_CX) < wmlayout.wg(state, i, wmlayout.W_COLS) && wmlayout.wg(state, i, wmlayout.W_CY) < wmlayout.wg(state, i, wmlayout.W_ROWS)
+    wmterm.tc_on[(i) as usize] = 0
+    wmterm.cell_paint(state, i, wmterm.tc_cc[(i) as usize], wmterm.tc_cr[(i) as usize])
+    tcur_dmg(state, i, wmterm.tc_cc[(i) as usize], wmterm.tc_cr[(i) as usize])
 }
 
 // bring the painted cursor in line with the wanted one
@@ -9983,17 +9523,17 @@ fn tcur_sync(state: u64, i: u64) {
     if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
         return
     }
-    let want: bool = tcur_want(state, i)
+    let want: bool = wmterm.tcur_want(state, i)
     let cx: u64 = wmlayout.wg(state, i, wmlayout.W_CX)
     let cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
-    if tc_on[(i) as usize] != 0 && (!want || tc_cc[(i) as usize] != cx || tc_cr[(i) as usize] != cy) {
+    if wmterm.tc_on[(i) as usize] != 0 && (!want || wmterm.tc_cc[(i) as usize] != cx || wmterm.tc_cr[(i) as usize] != cy) {
         tcur_off(state, i)
     }
-    if want && tc_on[(i) as usize] == 0 {
-        tc_on[(i) as usize] = 1
-        tc_cc[(i) as usize] = cx
-        tc_cr[(i) as usize] = cy
-        cell_paint(state, i, cx, cy)
+    if want && wmterm.tc_on[(i) as usize] == 0 {
+        wmterm.tc_on[(i) as usize] = 1
+        wmterm.tc_cc[(i) as usize] = cx
+        wmterm.tc_cr[(i) as usize] = cy
+        wmterm.cell_paint(state, i, cx, cy)
         tcur_dmg(state, i, cx, cy)
     }
 }
@@ -10001,228 +9541,22 @@ fn tcur_sync(state: u64, i: u64) {
 // once per tick from `poll`
 fn tcur_tick(state: u64) {
     let now: u64 = kstate.get(state, kstate.TICKS)
-    if now < tc_next[0] {
+    if now < wmterm.tc_next[0] {
         return
     }
-    tc_next[0] = now + BLINK_TICKS
-    if tc_phase[0] == 0 {
-        tc_phase[0] = 1
+    wmterm.tc_next[0] = now + wmterm.BLINK_TICKS
+    if wmterm.tc_phase[0] == 0 {
+        wmterm.tc_phase[0] = 1
     } else {
-        tc_phase[0] = 0
+        wmterm.tc_phase[0] = 0
     }
-    tc_toggles[0] = tc_toggles[0] + 1
+    wmterm.tc_toggles[0] = wmterm.tc_toggles[0] + 1
     var i: u64 = 0
     while i < 32 && i < wmbase.MAX_WIN {
         tcur_sync(state, i)
         i = i + 1
     }
 }
-
-// output or a key: the cursor shows solid again for a whole period
-fn tcur_solid(state: u64) {
-    tc_phase[0] = 1
-    tc_next[0] = kstate.get(state, kstate.TICKS) + BLINK_TICKS
-}
-
-fn tcur_toggles_pub() -> u64 {
-    return tc_toggles[0]
-}
-
-fn tcur_shown_pub(i: u64) -> u64 {
-    if i >= 32 {
-        return 0
-    }
-    return tc_on[(i) as usize]
-}
-
-// repaint the cells k0 .. k1 (row-major indices)
-fn tsel_paint(state: u64, i: u64, k0: u64, k1: u64) {
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    if cols == 0 {
-        return
-    }
-    var k: u64 = k0
-    while k <= k1 && k < cols * rows {
-        cell_paint(state, i, k % cols, k / cols)
-        k = k + 1
-    }
-    wmdamage.damage_win(state, i)
-}
-
-fn tsel_clear(state: u64, i: u64) {
-    if i >= 32 || tc_sel[(i) as usize] == 0 {
-        return
-    }
-    let lo: u64 = tsel_lo(i)
-    let hi: u64 = tsel_hi(i)
-    let was: bool = tsel_shown(i)
-    tc_sel[(i) as usize] = 0
-    if was {
-        tsel_paint(state, i, lo, hi)
-    }
-}
-
-// the selected text -> tc_buf (UTF-8, trailing blanks of a row cut, rows joined by LF). Returns the length.
-fn tsel_text(state: u64, i: u64) -> u64 {
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    if cols == 0 || !tsel_shown(i) {
-        return 0
-    }
-    let lo: u64 = tsel_lo(i)
-    let hi: u64 = tsel_hi(i)
-    let r0: u64 = lo / cols
-    let r1: u64 = hi / cols
-    var n: u64 = 0
-    var r: u64 = r0
-    while r <= r1 {
-        var c0: u64 = 0
-        var c1: u64 = cols - 1
-        if r == r0 {
-            c0 = lo % cols
-        }
-        if r == r1 {
-            c1 = hi % cols
-        }
-        // cut the trailing blanks
-        var e: u64 = c1 + 1
-        while e > c0 && cell_get(state, i, e - 1, r) <= 32 {
-            e = e - 1
-        }
-        var c: u64 = c0
-        while c < e && n + 3 < TC_BUF {
-            var z: u64 = cell_get(state, i, c, r)
-            if z < 32 {
-                z = 32
-            }
-            if z < 128 {
-                tc_buf[(n) as usize] = z as u8
-                n = n + 1
-            } else if z < 256 {
-                tc_buf[(n) as usize] = (0xC0 | (z >> 6)) as u8
-                tc_buf[(n + 1) as usize] = (0x80 | (z & 63)) as u8
-                n = n + 2
-            } else {
-                tc_buf[(n) as usize] = 63
-                n = n + 1
-            }
-            c = c + 1
-        }
-        if r < r1 && n + 1 < TC_BUF {
-            tc_buf[(n) as usize] = 10
-            n = n + 1
-        }
-        r = r + 1
-    }
-    return n
-}
-
-fn tsel_copy(state: u64, i: u64) {
-    let n: u64 = tsel_text(state, i)
-    if n == 0 {
-        return
-    }
-    tc_cn[0] = n
-    tc_copies[0] = tc_copies[0] + 1
-    var s_c: [u8; 14] = "wm: tcopy n=\0\0"
-    serial.puts((&s_c[0]) as u64)
-    serial.dec(n)
-    serial.put(32 as u8)
-    serial.put(91 as u8)
-    var q: u64 = 0
-    while q < n && q < 80 {
-        let ch: u64 = tc_buf[(q) as usize] as u64
-        if ch == 10 {
-            serial.put(124 as u8)
-        } else if ch >= 32 && ch < 127 {
-            serial.put(ch as u8)
-        } else {
-            serial.put(63 as u8)
-        }
-        q = q + 1
-    }
-    serial.put(93 as u8)
-    serial.nl()
-}
-
-// kgui pumps: the copied text waits here. Copies it to `out`, returns the length (0 = nothing), empties the slot.
-fn term_copy_take(state: u64, out: u64, max: u64) -> u64 {
-    var n: u64 = tc_cn[0]
-    if n == 0 {
-        return 0
-    }
-    tc_cn[0] = 0
-    if n > max {
-        n = max
-    }
-    var k: u64 = 0
-    while k < n {
-        kstate.set8(out + k, tc_buf[(k) as usize])
-        k = k + 1
-    }
-    return n
-}
-
-// kgui pumps: a paste waits for tty T (returns T + 1, 0 = none)
-fn term_paste_take(state: u64) -> u64 {
-    let t: u64 = tc_paste[0]
-    tc_paste[0] = 0
-    return t
-}
-
-static mut tp_buf: [u8; 4096] = [0 as u8; 4096]
-static mut tp_cn: [u64; 1] = [0 as u64; 1]
-static mut tc_psel: [u64; 1] = [0 as u64; 1]
-
-fn tsel_primary(state: u64, i: u64) {
-    let n: u64 = tsel_text(state, i)
-    if n == 0 {
-        return
-    }
-    var k: u64 = 0
-    while k < n {
-        tp_buf[(k) as usize] = tc_buf[(k) as usize]
-        k = k + 1
-    }
-    tp_cn[0] = n
-}
-
-fn term_primary_take(state: u64, out: u64, max: u64) -> u64 {
-    var n: u64 = tp_cn[0]
-    if n == 0 {
-        return 0
-    }
-    tp_cn[0] = 0
-    if n > max {
-        n = max
-    }
-    var k: u64 = 0
-    while k < n {
-        kstate.set8(out + k, tp_buf[(k) as usize])
-        k = k + 1
-    }
-    return n
-}
-
-fn term_paste_sel(state: u64) -> u64 {
-    let v: u64 = tc_psel[0]
-    tc_psel[0] = 0
-    return v
-}
-
-fn tcopies_pub() -> u64 {
-    return tc_copies[0]
-}
-
-fn tpastes_pub() -> u64 {
-    return tc_pastes[0]
-}
-
-// Z9 finding: Ctrl+Shift+V typed the text into the tty, but the window showed it only after the NEXT mouse click. A paste
-// comes out of the poll, not out of a key event, so nothing told the compositor ring or the idle timer that the user did
-// something (`on_key` does both for every real key). `kgui.termclip_pump` calls this once after the text went into the tty:
-// the focused terminal window is damaged and the same two notices a key makes are given.
-static mut tc_kicks: [u64; 1] = [0 as u64; 1]
 
 fn term_paste_done(state: u64) {
     if !wmbase.ready(state) {
@@ -10234,119 +9568,10 @@ fn term_paste_done(state: u64) {
     if f < wmbase.MAX_WIN && wmbase.valid(state, f) && wmlayout.wg(state, f, wmlayout.W_KIND) == wmlayout.K_TERM {
         wmdamage.damage_win(state, f)
     }
-    tc_kicks[0] = tc_kicks[0] + 1
+    wmterm.tc_kicks[0] = wmterm.tc_kicks[0] + 1
     var s_k: [u8; 17] = "wm: tpaste kick=\0"
     serial.puts((&s_k[0]) as u64)
-    serial.dec(tc_kicks[0])
-    serial.nl()
-}
-
-fn tkicks_pub() -> u64 {
-    return tc_kicks[0]
-}
-
-fn tpaste_ask(state: u64, i: u64) {
-    let t: u64 = tty_of(state, i)
-    if t == NO_TTY {
-        return
-    }
-    tc_paste[0] = t + 1
-    tc_pastes[0] = tc_pastes[0] + 1
-    var s_p: [u8; 14] = "wm: tpaste t=\0"
-    serial.puts((&s_p[0]) as u64)
-    serial.dec(t)
-    serial.nl()
-}
-
-// the mouse over a terminal window. kind: 0 left press, 1 left release, 2 move, 3 right press, 4 middle press.
-// lx / ly are window-local pixels (>= 0).
-fn term_mouse(state: u64, i: u64, kind: u64, lx: u64, ly: u64, btn: u64) {
-    if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
-        return
-    }
-    let cw: u64 = wmlayout.wg(state, i, wmlayout.W_CELLW)
-    let ch: u64 = wmlayout.wg(state, i, wmlayout.W_CELLH)
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    if cw == 0 || ch == 0 || cols == 0 || rows == 0 {
-        return
-    }
-    var c: u64 = lx / cw
-    var r: u64 = ly / ch
-    if c >= cols {
-        c = cols - 1
-    }
-    if r >= rows {
-        r = rows - 1
-    }
-    let k: u64 = r * cols + c
-    if kind == 0 {
-        if tp_sbv[(i) as usize] != 0 {
-            return
-        }
-        tsel_clear(state, i)
-        tc_sel[(i) as usize] = 1
-        tc_sa[(i) as usize] = k
-        tc_sb[(i) as usize] = k
-        return
-    }
-    if kind == 2 {
-        if tc_sel[(i) as usize] != 1 || (btn & ps2m.B_LEFT) == 0 {
-            return
-        }
-        let old: u64 = tc_sb[(i) as usize]
-        if old == k {
-            return
-        }
-        tc_sb[(i) as usize] = k
-        var a: u64 = old
-        var b: u64 = k
-        if k < old {
-            a = k
-            b = old
-        }
-        tsel_paint(state, i, a, b)
-        return
-    }
-    if kind == 1 {
-        if tc_sel[(i) as usize] != 1 {
-            return
-        }
-        if tc_sa[(i) as usize] == tc_sb[(i) as usize] {
-            tc_sel[(i) as usize] = 0
-        } else {
-            tc_sel[(i) as usize] = 2
-            tsel_primary(state, i)
-        }
-        return
-    }
-    if kind == 3 {
-        if tsel_shown(i) {
-            tsel_copy(state, i)
-            tsel_clear(state, i)
-        } else {
-            tpaste_ask(state, i)
-        }
-        return
-    }
-    if kind == 4 {
-        tpaste_ask(state, i)
-        tc_psel[0] = 1
-    }
-}
-
-// a key with Ctrl held, from the keyboard layer. True = consumed (the shell does not see it).
-//   Ctrl+Shift+C  copy the selection        Ctrl+Shift+V  paste        Ctrl+C with a selection standing: copy
-// MON-3: Ctrl+Shift+F flips the developer overlay (the bar draws it; it reads the switch from /proc/frames)
-fn mon_hotkey(state: u64) {
-    let on: bool = frameprof.mon_toggle()
-    var s_on: [u8; 13] = "wm: monov on\0"
-    var s_off: [u8; 14] = "wm: monov off\0"
-    if on {
-        serial.puts((&s_on[0]) as u64)
-    } else {
-        serial.puts((&s_off[0]) as u64)
-    }
+    serial.dec(wmterm.tc_kicks[0])
     serial.nl()
 }
 
@@ -10355,7 +9580,7 @@ fn term_key(state: u64, c: u64, shift: bool) -> bool {
         return false
     }
     if shift && (c == 70 || c == 102) && !wmgate.lock_active(state) {
-        mon_hotkey(state)
+        wmterm.mon_hotkey(state)
         return true
     }
     let f: u64 = wmbase.focus(state)
@@ -10388,980 +9613,33 @@ fn term_key(state: u64, c: u64, shift: bool) -> bool {
     }
     if shift {
         if is_c {
-            if tsel_shown(f) {
-                tsel_copy(state, f)
+            if wmterm.tsel_shown(f) {
+                wmterm.tsel_copy(state, f)
             }
             return true
         }
         if is_v {
-            tpaste_ask(state, f)
+            wmterm.tpaste_ask(state, f)
             return true
         }
         return false
     }
-    if is_c && tsel_shown(f) {
-        tsel_copy(state, f)
-        tsel_clear(state, f)
+    if is_c && wmterm.tsel_shown(f) {
+        wmterm.tsel_copy(state, f)
+        wmterm.tsel_clear(state, f)
         return true
     }
     return false
 }
 
-
-// r838: paint the cell at screen position (c, r) with the given character / attribute / colour octets (the scrollback view
-// paints history cells here, the live grid goes through `cell_paint`)
-fn cell_paint_v(state: u64, i: u64, c: u64, r: u64, z: u64, at: u64, co: u64) {
-    let cw: u64 = wmlayout.wg(state, i, wmlayout.W_CELLW)
-    let ch: u64 = wmlayout.wg(state, i, wmlayout.W_CELLH)
-    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_MONO)
-    // r400: reverse video swaps the two colours of the cell
-    var cbg: u64 = wmlayout.wg(state, i, wmlayout.W_BG)
-    var cfg: u64 = wmlayout.wg(state, i, wmlayout.W_FG)
-    // r462: colours (the nibbles of the colour octet), bright forms by bold / the 9x and 10x codes, underline
-    if (co & 15) != 0 {
-        var kf: u64 = (co & 15) - 1
-        if (at & 10) != 0 {
-            kf = kf + 8
-        }
-        cfg = term_color(state, kf)
-    }
-    if (co >> 4) != 0 {
-        var kb: u64 = (co >> 4) - 1
-        if (at & 16) != 0 {
-            kb = kb + 8
-        }
-        cbg = term_color(state, kb)
-    }
-    if (at & 1) != 0 {
-        let sw: u64 = cbg
-        cbg = cfg
-        cfg = sw
-    }
-    wmdraw.fill(state, i, c * cw, r * ch, cw, ch, cbg)
-    if (at & 4) != 0 && ch > 2 {
-        wmdraw.fill(state, i, c * cw, r * ch + ch - 2, cw, 1, cfg)
-    }
-    if z <= 32 || f >= ttf.MAX_FONTS {
-        return
-    }
-    let px: u64 = wmlayout.gs(state, wmlayout.S_PX_MONO)
-    let slot: u64 = ttf.glyph(state, f, z, px)
-    if slot < ttf.SLOTS {
-        wmdraw.draw_glyph_clip(state, i, slot, (c * cw) as i64,
-            (r * ch) as i64 + ttf.ascent(state, f, px), cfg,
-            (c * cw) as i64, ((c + 1) * cw) as i64)
-    }
-}
-
-// ==================================================== RUNDE FARBE
-// DAS GANZE RASTER NOCH EINMAL MALEN.
-//
-// Gebraucht wird das genau einmal: wenn die Taskleiste die beiden
-// Terminalfarben setzt, NACHDEM das Fenster schon steht (siehe
-// `set_deco_colour`). `cell_paint` fuellt je Zelle erst den Grund in
-// `W_BG` und setzt dann das Zeichen in `W_FG` -- beides sind die
-// NEUEN Farben, sobald sie im Fenster stehen. Also ist "alles neu
-// malen" genau "jede Zelle neu malen", und es braucht keinen zweiten
-// Zeichenweg, der mit dem ersten auseinanderlaufen koennte.
-fn term_redraw(state: u64, i: u64) {
-    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
-        return
-    }
-    if i < 32 && tp_sbv[(i) as usize] != 0 {
-        sb_redraw(state, i)
-        return
-    }
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    var r: u64 = 0
-    while r < rows {
-        var c: u64 = 0
-        while c < cols {
-            cell_paint(state, i, c, r)
-            c = c + 1
-        }
-        r = r + 1
-    }
-}
-
-// ============================================ r838: TERMINAL SCROLLBACK
-// Lines that scroll off the top of a full-screen scroll (main screen, region = whole screen) go into a ring of SB_LINES lines
-// per terminal window (kernel frames, taken on the first scrolled line, given back when the window closes). Each line holds
-// the three planes (character, attribute, colour) for SB_W columns. The mouse wheel over the window moves the view
-// (`tp_sbv` = lines scrolled back, SB_STEP per notch); any output or key snaps back to the live screen.
-const SB_LINES: u64 = 256
-const SB_W: u64 = 256
-const SB_STRIDE: u64 = 768 // 3 planes x SB_W
-const SB_FRAMES: u64 = 48  // SB_LINES * SB_STRIDE / 4096
-const SB_STEP: u64 = 3
-static mut tp_sb: [u64; 32] = [0 as u64; 32]  // base of the ring (0 = none yet)
-static mut tp_sbn: [u64; 32] = [0 as u64; 32] // lines stored
-static mut tp_sbh: [u64; 32] = [0 as u64; 32] // next slot to write
-static mut tp_sbv: [u64; 32] = [0 as u64; 32] // lines the view is scrolled back (0 = live)
-
-fn sb_free(state: u64, i: u64) {
-    if i >= 32 {
-        return
-    }
-    if tp_sb[(i) as usize] != 0 {
-        mem.frame_free_run(state, tp_sb[(i) as usize], SB_FRAMES)
-    }
-    tp_sb[(i) as usize] = 0
-    tp_sbn[(i) as usize] = 0
-    tp_sbh[(i) as usize] = 0
-    tp_sbv[(i) as usize] = 0
-}
-
-// push grid row r (about to scroll off the top) into the ring
-fn sb_push(state: u64, i: u64, r: u64) {
-    if i >= 32 {
-        return
-    }
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    if g == 0 {
-        return
-    }
-    var b: u64 = tp_sb[(i) as usize]
-    if b == 0 {
-        b = mem.frame_run(state, SB_FRAMES)
-        if b == 0 {
-            return
-        }
-        tp_sb[(i) as usize] = b
-        tp_sbn[(i) as usize] = 0
-        tp_sbh[(i) as usize] = 0
-    }
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    let dst: u64 = b + tp_sbh[(i) as usize] * SB_STRIDE
-    var c: u64 = 0
-    while c < SB_W {
-        var z: u64 = 32
-        var at: u64 = 0
-        var co: u64 = 0
-        if c < cols && r * cols + c < TG {
-            let k: u64 = r * cols + c
-            z = kstate.get8(g + k)
-            at = kstate.get8(g + TG + k)
-            co = kstate.get8(g + 2 * TG + k)
-        }
-        kstate.set8(dst + c, z as u8)
-        kstate.set8(dst + SB_W + c, at as u8)
-        kstate.set8(dst + 2 * SB_W + c, co as u8)
-        c = c + 1
-    }
-    tp_sbh[(i) as usize] = (tp_sbh[(i) as usize] + 1) % SB_LINES
-    if tp_sbn[(i) as usize] < SB_LINES {
-        tp_sbn[(i) as usize] = tp_sbn[(i) as usize] + 1
-    }
-}
-
-// address of history line h (0 = oldest stored)
-fn sb_line(i: u64, h: u64) -> u64 {
-    let slot: u64 = (tp_sbh[(i) as usize] + SB_LINES - tp_sbn[(i) as usize] + h) % SB_LINES
-    return tp_sb[(i) as usize] + slot * SB_STRIDE
-}
-
-// the character shown at screen cell (c, r) while the view is scrolled back
-fn sb_view_char(state: u64, i: u64, c: u64, r: u64) -> u64 {
-    let v: u64 = tp_sbv[(i) as usize]
-    if r >= v {
-        return cell_get(state, i, c, r - v)
-    }
-    if c >= SB_W {
-        return 32
-    }
-    return kstate.get8(sb_line(i, tp_sbn[(i) as usize] - v + r) + c)
-}
-
-fn sb_redraw(state: u64, i: u64) {
-    let v: u64 = tp_sbv[(i) as usize]
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    var r: u64 = 0
-    while r < rows {
-        var c: u64 = 0
-        while c < cols {
-            if r >= v {
-                cell_paint_v(state, i, c, r, cell_get(state, i, c, r - v), cell_attr(state, i, c, r - v), cell_col(state, i, c, r - v))
-            } else if c >= SB_W {
-                cell_paint_v(state, i, c, r, 32, 0, 0)
-            } else {
-                let ln: u64 = sb_line(i, tp_sbn[(i) as usize] - v + r)
-                cell_paint_v(state, i, c, r, kstate.get8(ln + c), kstate.get8(ln + SB_W + c), kstate.get8(ln + 2 * SB_W + c))
-            }
-            c = c + 1
-        }
-        r = r + 1
-    }
-}
-
-// back to the live screen (called before any output, on a key, on a resize)
-fn sb_snap(state: u64, i: u64) {
-    if i >= 32 || tp_sbv[(i) as usize] == 0 {
-        return
-    }
-    tp_sbv[(i) as usize] = 0
-    term_redraw(state, i)
-}
-
-// wheel notches over a terminal window: d > 0 = wheel up = older lines
-fn sb_wheel(state: u64, i: u64, d: i64) {
-    if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
-        return
-    }
-    sb_move(state, i, d * (SB_STEP as i64))
-}
-
-// Move the view by `dl` lines (+ = back into the history), clamped to what is stored.
-fn sb_move(state: u64, i: u64, dl: i64) {
-    if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
-        return
-    }
-    let n: u64 = tp_sbn[(i) as usize]
-    var v: i64 = (tp_sbv[(i) as usize] as i64) + dl
-    if v < 0 {
-        v = 0
-    }
-    if v > (n as i64) {
-        v = n as i64
-    }
-    if (v as u64) == tp_sbv[(i) as usize] {
-        return
-    }
-    tp_sbv[(i) as usize] = v as u64
-    term_redraw(state, i)
-    wmdamage.damage_win(state, i)
-}
-
-// serial witness for tools/term/scroll.sh
-fn sb_dump(state: u64, i: u64) {
-    var s_a: [u8; 18] = "wm: termsb lines=\0"
-    var s_b: [u8; 7] = " view=\0"
-    var s_c: [u8; 14] = "wm: termview \0"
-    var s_g: [u8; 4] = " [\0\0"
-    var s_z: [u8; 2] = "]\0"
-    if i >= 32 {
-        return
-    }
-    serial.puts((&s_a[0]) as u64)
-    serial.dec(tp_sbn[(i) as usize])
-    serial.puts((&s_b[0]) as u64)
-    serial.dec(tp_sbv[(i) as usize])
-    serial.nl()
-    if tp_sbv[(i) as usize] == 0 {
-        return
-    }
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    var r: u64 = 0
-    while r < rows {
-        var last: u64 = 0
-        var c0: u64 = 0
-        while c0 < cols {
-            if sb_view_char(state, i, c0, r) > 32 {
-                last = c0 + 1
-            }
-            c0 = c0 + 1
-        }
-        if last != 0 {
-            serial.puts((&s_c[0]) as u64)
-            serial.dec(r)
-            serial.puts((&s_g[0]) as u64)
-            var c: u64 = 0
-            while c < last {
-                let z: u64 = sb_view_char(state, i, c, r)
-                if z >= 32 && z < 127 {
-                    serial.put(z as u8)
-                } else {
-                    serial.put(32 as u8)
-                }
-                c = c + 1
-            }
-            serial.puts((&s_z[0]) as u64)
-            serial.nl()
-        }
-        r = r + 1
-    }
-}
-
-// ============================================ RUNDE GLAS (nachtrag)
-// DAS TERMINAL SPRACH KEIN UTF-8 -- UND HAT DIE UMLAUTE STILL
-// WEGGEWORFEN.
-//
-// Justins Befund am Bild 04 dieser Runde: im Terminalfenster stand
-// "KEIN EINZIGES GERT!". Die Quelle (kernel/ui/kgui.fi, `usb_bericht`)
-// schreibt "GERAET" mit einem richtigen UTF-8-Ä, also die zwei Oktette
-// 0xC3 0x84 -- und die Zeile `if ch < 32 || ch > 126 { return }`
-// darunter hat beide verschluckt. Nicht als Kaestchen, nicht als
-// Fragezeichen: spurlos. Genau dieselbe Klasse Fehler, die Runde
-// UMLAUT2 fuer die Bedienoberflaeche abgestellt hat; der Weg ins
-// Terminalfenster war der letzte, der sie noch hatte.
-//
-// EIN Oktett Zustand reicht, weil genau EIN Fall zu behandeln ist: die
-// zweioktettige Folge C2..DF / 80..BF traegt U+0080..U+07FF, und alles
-// davon, was eine Zelle (ein Oktett) fassen kann, ist Latin-1, also
-// U+00A0..U+00FF -- Ä, ö, ß, °, µ. Die Zelle bleibt damit ein Oktett
-// breit und `cell_paint` gibt ihre Zahl unveraendert als Zeichennummer
-// an `ttf.glyph` weiter, das seit Runde GLYPHE nach Zeichennummer und
-// nicht nach Oktett sucht. Drei- und vieroktettige Folgen (CJK,
-// Emoji) passen NICHT in ein Oktett; sie werden als ein Fragezeichen
-// gesetzt, weil ein sichtbarer Platzhalter der einzige Befund ist, der
-// sich spaeter noch melden laesst.
-// r462: THE TERMINAL EXECUTES THE CONTROL SEQUENCES OF FULL-SCREEN PROGRAMS (Justin, Dell photo 07.10.2026 19:05: the editor showed
-// `~[19;1H[K`, `[7m`, `[24;1H[K^O Write`, `[?25h[?25l` as text). Two causes, both fixed: (1) an image from before the VT subset of
-// r400 printed the sequences; (2) with the subset, `/bin/edit` still drew an 80 x 24 screen into a 72 x 19 window, because nobody ever
-// told the tty the size of its window (`TIOCGWINSZ` answered the default): see `term_size`, `tty.do_ioctl`, `kgui.winch_wache`.
-//
-// WHAT THE MACHINE UNDERSTANDS (a subset of VT100 / xterm, enough for editors, pagers and `top`-like programs):
-//   cursor        CSI n A B C D E F G d ` H f, save / restore (ESC 7, ESC 8, CSI s, CSI u), ESC D / E / M, CR LF BS
-//   erase         CSI J (0 1 2 3), CSI K (0 1 2), CSI n X (erase characters)
-//   edit          CSI n @ (insert characters), P (delete characters), L (insert lines), M (delete lines), S / T (scroll up / down)
-//   region        CSI t ; b r (scroll region); line feed at its bottom scrolls only the region
-//   attributes    CSI m: 0 reset, 1 bold (bright colour), 4 underline, 7 reverse, 22 24 27 off, 30-37 40-47 colours,
-//                 38 / 48 ; 5 ; n (the 16 first) , 39 49 default, 90-97 100-107 bright
-//   modes         CSI ? 1049 h / l (alternate screen: the main screen is saved and comes back), ?47 ?1047 the same without
-//                 the cursor, ?7 wrap on / off; ?25 (cursor), ?1 ?12 ?2004 and every other mode are accepted and dropped
-//   strings       OSC / DCS / APC / PM up to BEL or ESC \ are swallowed (window titles must not become text)
-// EVERYTHING ELSE after ESC, ESC [ is swallowed up to its final octet: an unknown sequence never shows up as characters.
-// The automatic wrap is DEFERRED like on a real terminal: the 80th character of a row does not scroll the screen yet.
-//
-// The state is per window (a second terminal window must not inherit half a sequence of the first).
-static mut tp_esc: [u64; 32] = [0 as u64; 32]   // 0 plain, 1 after ESC, 2 inside CSI, 3 inside a string, 4 one octet to drop, 5 ESC inside a string
-static mut tp_np: [u64; 32] = [0 as u64; 32]    // index of the parameter being read
-static mut tp_priv: [u64; 32] = [0 as u64; 32]  // 1 = `?` marker, 2 = another marker (< = >)
-static mut tp_par: [u64; 256] = [0 as u64; 256] // TP_NP (8) parameters of each window
-static mut tp_has: [u64; 256] = [0 as u64; 256]
-static mut tp_attr: [u64; 32] = [0 as u64; 32]  // 1 reverse, 2 bold, 4 underline, 8 bright foreground, 16 bright background
-static mut tp_col: [u64; 32] = [0 as u64; 32]   // low nibble foreground, high nibble background: 0 default, 1 .. 8 = colour 0 .. 7
-static mut tp_utf: [u64; 32] = [0 as u64; 32]   // the UTF-8 lead octet that waits for its follower
-static mut tp_wrap: [u64; 32] = [0 as u64; 32]  // 1 = the cursor stands behind the last column (the wrap is pending)
-static mut tp_nowrap: [u64; 32] = [0 as u64; 32] // 1 = ?7 l: no wrap
-static mut tp_scx: [u64; 32] = [0 as u64; 32]   // the saved cursor
-static mut tp_scy: [u64; 32] = [0 as u64; 32]
-static mut tp_sat: [u64; 32] = [0 as u64; 32]
-static mut tp_sco: [u64; 32] = [0 as u64; 32]
-static mut tp_top: [u64; 32] = [0 as u64; 32]   // the scroll region: first row, and last row + 1 (0 = to the end of the screen)
-static mut tp_bot1: [u64; 32] = [0 as u64; 32]
-static mut tp_alt: [u64; 32] = [0 as u64; 32]   // 1 = the alternate screen is up (the main one lies in frames 3 .. 5 of the grid)
-const TP_NP: u64 = 8
-
-fn tp_reset(i: u64) {
-    if i >= 32 {
-        return
-    }
-    tp_esc[(i) as usize] = 0
-    tp_np[(i) as usize] = 0
-    tp_priv[(i) as usize] = 0
-    tp_attr[(i) as usize] = 0
-    tp_col[(i) as usize] = 0
-    tp_utf[(i) as usize] = 0
-    tp_wrap[(i) as usize] = 0
-    tp_nowrap[(i) as usize] = 0
-    tp_scx[(i) as usize] = 0
-    tp_scy[(i) as usize] = 0
-    tp_sat[(i) as usize] = 0
-    tp_sco[(i) as usize] = 0
-    tp_top[(i) as usize] = 0
-    tp_bot1[(i) as usize] = 0
-    tp_alt[(i) as usize] = 0
-}
-
-// the last row of the scroll region (a region that does not fit the screen is the whole screen)
-fn tp_bot(state: u64, i: u64) -> u64 {
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    let b1: u64 = tp_bot1[(i) as usize]
-    if b1 == 0 || b1 > rows || tp_top[(i) as usize] + 1 >= b1 {
-        return rows - 1
-    }
-    return b1 - 1
-}
-
-fn tp_first(state: u64, i: u64) -> u64 {
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    let b1: u64 = tp_bot1[(i) as usize]
-    if b1 == 0 || b1 > rows || tp_top[(i) as usize] + 1 >= b1 {
-        return 0
-    }
-    return tp_top[(i) as usize]
-}
-
-// the parameter k of the sequence (dflt when it was not given)
-fn tp_p(i: u64, k: u64, dflt: u64) -> u64 {
-    if k < TP_NP && tp_has[(i * TP_NP + k) as usize] != 0 {
-        return tp_par[(i * TP_NP + k) as usize]
-    }
-    return dflt
-}
-
-// a count parameter: missing or 0 means 1
-fn tp_n(i: u64) -> u64 {
-    let v: u64 = tp_p(i, 0, 1)
-    if v == 0 {
-        return 1
-    }
-    return v
-}
-
-// the cells of one row and nothing else: character, attribute, colour
-fn grid_row_copy(state: u64, i: u64, rdst: u64, rsrc: u64) {
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    if g == 0 {
-        return
-    }
-    var c: u64 = 0
-    while c < cols {
-        let d: u64 = rdst * cols + c
-        let s: u64 = rsrc * cols + c
-        if d < TG && s < TG {
-            kstate.set8(g + d, kstate.get8(g + s) as u8)
-            kstate.set8(g + TG + d, kstate.get8(g + TG + s) as u8)
-            kstate.set8(g + 2 * TG + d, kstate.get8(g + 2 * TG + s) as u8)
-        }
-        c = c + 1
-    }
-}
-
-fn grid_row_clear(state: u64, i: u64, r: u64) {
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    if g == 0 {
-        return
-    }
-    var c: u64 = 0
-    while c < cols {
-        let d: u64 = r * cols + c
-        if d < TG {
-            kstate.set8(g + d, 32 as u8)
-            kstate.set8(g + TG + d, 0 as u8)
-            kstate.set8(g + 2 * TG + d, 0 as u8)
-        }
-        c = c + 1
-    }
-}
-
-fn term_repaint_row(state: u64, i: u64, r: u64) {
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    var c: u64 = 0
-    while c < cols {
-        cell_paint(state, i, c, r)
-        c = c + 1
-    }
-}
-
-// Scroll the rows `top ..= bot` up (up = true) or down by n rows: the cells and the picture move, the rows that come free are blank.
-fn term_scroll_region(state: u64, i: u64, top: u64, bot: u64, n: u64, up: bool) {
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    if rows == 0 || top >= rows || bot >= rows || bot < top || n == 0 {
-        return
-    }
-    var k: u64 = n
-    if k > bot - top + 1 {
-        k = bot - top + 1
-    }
-    // r838: lines that leave the top of the whole screen go to the scrollback (not on the alternate screen)
-    if up && top == 0 && bot + 1 == rows && i < 32 && tp_alt[(i) as usize] == 0 {
-        var q: u64 = 0
-        while q < k {
-            sb_push(state, i, q)
-            q = q + 1
-        }
-    }
-    // the cells
-    if up {
-        var r: u64 = top
-        while r + k <= bot {
-            grid_row_copy(state, i, r, r + k)
-            r = r + 1
-        }
-        var rc: u64 = bot + 1 - k
-        while rc <= bot {
-            grid_row_clear(state, i, rc)
-            rc = rc + 1
-        }
-    } else {
-        var r2: u64 = bot + 1
-        while r2 > top + k {
-            r2 = r2 - 1
-            grid_row_copy(state, i, r2, r2 - k)
-        }
-        var rc2: u64 = top
-        while rc2 < top + k {
-            grid_row_clear(state, i, rc2)
-            rc2 = rc2 + 1
-        }
-    }
-    // the picture: copy whole pixel rows (the window is as wide as its buffer), then blank the rows that came free
-    let ch: u64 = wmlayout.wg(state, i, wmlayout.W_CELLH)
-    let ww: u64 = wmlayout.wg(state, i, wmlayout.W_W)
-    let buf: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
-    if buf == 0 || ww == 0 || ch == 0 {
-        return
-    }
-    let y0: u64 = top * ch
-    let y1: u64 = (bot + 1) * ch
-    let shift: u64 = k * ch
-    if up {
-        var y: u64 = y0
-        while y + shift < y1 {
-            wmdraw.copy_words(buf +% y *% ww *% 4, buf +% (y + shift) *% ww *% 4, ww *% 4 / 8)
-            y = y + 1
-        }
-        wmdraw.fill(state, i, 0, y1 - shift, ww, shift, wmlayout.wg(state, i, wmlayout.W_BG))
-    } else {
-        var y2: u64 = y1 - shift
-        while y2 > y0 {
-            y2 = y2 - 1
-            wmdraw.copy_words(buf +% (y2 + shift) *% ww *% 4, buf +% y2 *% ww *% 4, ww *% 4 / 8)
-        }
-        wmdraw.fill(state, i, 0, y0, ww, shift, wmlayout.wg(state, i, wmlayout.W_BG))
-    }
-}
-
-// the scroll at the end of the screen (the old `term_scroll`): the region up by one row
-fn term_scroll(state: u64, i: u64) {
-    term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), 1, true)
-}
-
-// a line feed: down one row, or the region scrolls when the cursor stands on its last row
-fn term_lf(state: u64, i: u64) {
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    let cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
-    if cy == tp_bot(state, i) {
-        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), 1, true)
-    } else if cy + 1 < rows {
-        wmlayout.wsv(state, i, wmlayout.W_CY, cy + 1)
-    }
-}
-
-// the reverse index: up one row, or the region scrolls down when the cursor stands on its first row
-fn term_ri(state: u64, i: u64) {
-    let cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
-    if cy == tp_first(state, i) {
-        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), 1, false)
-    } else if cy > 0 {
-        wmlayout.wsv(state, i, wmlayout.W_CY, cy - 1)
-    }
-}
-
-fn term_clear_rect(state: u64, i: u64, c0: u64, r0: u64, c1: u64, r1: u64) {
-    // blank the cells from (c0, r0) up to but excluding (c1, r1), row-major
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    var r: u64 = r0
-    var c: u64 = c0
-    while r < r1 || (r == r1 && c < c1) {
-        cell_set(state, i, c, r, 32)
-        cell_attr_set(state, i, c, r, 0)
-        cell_col_set(state, i, c, r, 0)
-        cell_paint(state, i, c, r)
-        c = c + 1
-        if c >= cols {
-            c = 0
-            r = r + 1
-        }
-    }
-}
-
-fn term_set_cursor(state: u64, i: u64, c: u64, r: u64) {
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    var cc: u64 = c
-    var rr: u64 = r
-    if cc >= cols {
-        cc = cols - 1
-    }
-    if rr >= rows {
-        rr = rows - 1
-    }
-    wmlayout.wsv(state, i, wmlayout.W_CX, cc)
-    wmlayout.wsv(state, i, wmlayout.W_CY, rr)
-    tp_wrap[(i) as usize] = 0
-}
-
-fn term_save_cursor(state: u64, i: u64) {
-    tp_scx[(i) as usize] = wmlayout.wg(state, i, wmlayout.W_CX)
-    tp_scy[(i) as usize] = wmlayout.wg(state, i, wmlayout.W_CY)
-    tp_sat[(i) as usize] = tp_attr[(i) as usize]
-    tp_sco[(i) as usize] = tp_col[(i) as usize]
-}
-
-fn term_restore_cursor(state: u64, i: u64) {
-    term_set_cursor(state, i, tp_scx[(i) as usize], tp_scy[(i) as usize])
-    tp_attr[(i) as usize] = tp_sat[(i) as usize]
-    tp_col[(i) as usize] = tp_sco[(i) as usize]
-}
-
-// the whole screen blank, the cursor home
-fn term_blank_screen(state: u64, i: u64) {
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    var r: u64 = 0
-    while r < rows {
-        grid_row_clear(state, i, r)
-        r = r + 1
-    }
-    wmdraw.fill(state, i, 0, 0, wmlayout.wg(state, i, wmlayout.W_W), wmlayout.wg(state, i, wmlayout.W_H), wmlayout.wg(state, i, wmlayout.W_BG))
-}
-
 // ESC c: back to the state of a new window
 fn term_full_reset(state: u64, i: u64) {
     tcur_off(state, i)
-    tc_hide[(i) as usize] = 0
-    term_blank_screen(state, i)
-    tp_reset(i)
+    wmterm.tc_hide[(i) as usize] = 0
+    wmterm.term_blank_screen(state, i)
+    wmterm.tp_reset(i)
     wmlayout.wsv(state, i, wmlayout.W_CX, 0)
     wmlayout.wsv(state, i, wmlayout.W_CY, 0)
-}
-
-// The alternate screen: the main screen (cells, attributes, colours) is copied to frames 3 .. 5 of the grid and comes back
-// when the program leaves. `save_cursor` is the ?1049 form that also keeps the cursor.
-fn term_alt_enter(state: u64, i: u64, save_cursor: bool) {
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    if g == 0 || tp_alt[(i) as usize] != 0 {
-        return
-    }
-    if save_cursor {
-        term_save_cursor(state, i)
-    }
-    wmdraw.copy_words(g + 3 * TG, g, TG_ALT_WORDS)
-    tp_alt[(i) as usize] = 1
-    term_blank_screen(state, i)
-    tp_top[(i) as usize] = 0
-    tp_bot1[(i) as usize] = 0
-    term_set_cursor(state, i, 0, 0)
-}
-
-fn term_alt_leave(state: u64, i: u64, restore_cursor: bool) {
-    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
-    if g == 0 || tp_alt[(i) as usize] == 0 {
-        return
-    }
-    wmdraw.copy_words(g, g + 3 * TG, TG_ALT_WORDS)
-    tp_alt[(i) as usize] = 0
-    tp_top[(i) as usize] = 0
-    tp_bot1[(i) as usize] = 0
-    wmdraw.fill(state, i, 0, 0, wmlayout.wg(state, i, wmlayout.W_W), wmlayout.wg(state, i, wmlayout.W_H), wmlayout.wg(state, i, wmlayout.W_BG))
-    term_redraw(state, i)
-    if restore_cursor {
-        term_restore_cursor(state, i)
-    }
-}
-
-// CSI ? n h / l: the modes
-fn term_mode(state: u64, i: u64, on: bool) {
-    var k: u64 = 0
-    var cnt: u64 = tp_np[(i) as usize]
-    if cnt == 0 {
-        cnt = 1
-    }
-    while k < cnt && k < TP_NP {
-        let m: u64 = tp_p(i, k, 0)
-        if m == 1049 {
-            if on {
-                term_alt_enter(state, i, true)
-            } else {
-                term_alt_leave(state, i, true)
-            }
-        } else if m == 47 || m == 1047 {
-            if on {
-                term_alt_enter(state, i, false)
-            } else {
-                term_alt_leave(state, i, false)
-            }
-        } else if m == 7 {
-            if on {
-                tp_nowrap[(i) as usize] = 0
-            } else {
-                tp_nowrap[(i) as usize] = 1
-            }
-        } else if m == 25 {
-            // r1014: the text cursor (DECTCEM)
-            if on {
-                tc_hide[(i) as usize] = 0
-            } else {
-                tc_hide[(i) as usize] = 1
-            }
-        }
-        // 1, 12, 2004 ...: accepted and dropped
-        k = k + 1
-    }
-}
-
-// CSI m: the attributes and colours
-fn term_sgr(i: u64) {
-    var q: u64 = 0
-    var cnt: u64 = tp_np[(i) as usize]
-    if cnt == 0 {
-        cnt = 1
-    }
-    while q < cnt && q < TP_NP {
-        let v: u64 = tp_p(i, q, 0)
-        if v == 0 {
-            tp_attr[(i) as usize] = 0
-            tp_col[(i) as usize] = 0
-        } else if v == 1 {
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 2
-        } else if v == 4 {
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 4
-        } else if v == 7 {
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 1
-        } else if v == 22 {
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xFD
-        } else if v == 24 {
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xFB
-        } else if v == 27 {
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xFE
-        } else if v >= 30 && v <= 37 {
-            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0xF0) | (v - 30 + 1)
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xF7
-        } else if v == 39 {
-            tp_col[(i) as usize] = tp_col[(i) as usize] & 0xF0
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xF7
-        } else if v >= 40 && v <= 47 {
-            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0x0F) | ((v - 40 + 1) << 4)
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xEF
-        } else if v == 49 {
-            tp_col[(i) as usize] = tp_col[(i) as usize] & 0x0F
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xEF
-        } else if v >= 90 && v <= 97 {
-            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0xF0) | (v - 90 + 1)
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 8
-        } else if v >= 100 && v <= 107 {
-            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0x0F) | ((v - 100 + 1) << 4)
-            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 16
-        } else if v == 38 || v == 48 {
-            // 38 ; 5 ; n  (the 16 first colours of the 256 are used, the rest is dropped)  and  38 ; 2 ; r ; g ; b (dropped)
-            let mode: u64 = tp_p(i, q + 1, 0)
-            if mode == 5 {
-                let nn: u64 = tp_p(i, q + 2, 0)
-                if nn < 16 {
-                    var idx: u64 = nn
-                    var br: u64 = 0
-                    if nn >= 8 {
-                        idx = nn - 8
-                        br = 1
-                    }
-                    if v == 38 {
-                        tp_col[(i) as usize] = (tp_col[(i) as usize] & 0xF0) | (idx + 1)
-                        if br != 0 {
-                            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 8
-                        } else {
-                            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xF7
-                        }
-                    } else {
-                        tp_col[(i) as usize] = (tp_col[(i) as usize] & 0x0F) | ((idx + 1) << 4)
-                        if br != 0 {
-                            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 16
-                        } else {
-                            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xEF
-                        }
-                    }
-                }
-                q = q + 2
-            } else if mode == 2 {
-                q = q + 4
-            }
-        }
-        q = q + 1
-    }
-}
-
-// the final octet of a CSI: do it
-fn term_csi(state: u64, i: u64, fin: u64) {
-    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
-    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
-    let cx: u64 = wmlayout.wg(state, i, wmlayout.W_CX)
-    let cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
-    let pv: u64 = tp_priv[(i) as usize]
-    if pv != 0 {
-        // CSI ? ... h / l: the modes; every other private sequence is dropped
-        if pv == 1 && (fin == 104 || fin == 108) {
-            term_mode(state, i, fin == 104)
-        }
-        return
-    }
-    if fin == 72 || fin == 102 {
-        // H / f: row ; column, one based
-        var r: u64 = tp_p(i, 0, 1)
-        var c: u64 = tp_p(i, 1, 1)
-        if r == 0 {
-            r = 1
-        }
-        if c == 0 {
-            c = 1
-        }
-        term_set_cursor(state, i, c - 1, r - 1)
-    } else if fin == 65 {
-        let n: u64 = tp_n(i)
-        var top: u64 = 0
-        if cy >= tp_first(state, i) {
-            top = tp_first(state, i)
-        }
-        var to: u64 = 0
-        if cy > top + n {
-            to = cy - n
-        } else {
-            to = top
-        }
-        term_set_cursor(state, i, cx, to)
-    } else if fin == 66 || fin == 101 {
-        let n2: u64 = tp_n(i)
-        var lim: u64 = rows - 1
-        if cy <= tp_bot(state, i) {
-            lim = tp_bot(state, i)
-        }
-        var to2: u64 = cy + n2
-        if to2 > lim {
-            to2 = lim
-        }
-        term_set_cursor(state, i, cx, to2)
-    } else if fin == 67 || fin == 97 {
-        let n3: u64 = tp_n(i)
-        term_set_cursor(state, i, cx + n3, cy)
-    } else if fin == 68 {
-        let n4: u64 = tp_n(i)
-        var to4: u64 = 0
-        if cx > n4 {
-            to4 = cx - n4
-        }
-        term_set_cursor(state, i, to4, cy)
-    } else if fin == 69 {
-        // E: next line, column 1
-        let n5: u64 = tp_n(i)
-        term_set_cursor(state, i, 0, cy + n5)
-    } else if fin == 70 {
-        // F: previous line, column 1
-        let n6: u64 = tp_n(i)
-        var to6: u64 = 0
-        if cy > n6 {
-            to6 = cy - n6
-        }
-        term_set_cursor(state, i, 0, to6)
-    } else if fin == 71 || fin == 96 {
-        var c7: u64 = tp_p(i, 0, 1)
-        if c7 == 0 {
-            c7 = 1
-        }
-        term_set_cursor(state, i, c7 - 1, cy)
-    } else if fin == 100 {
-        var r8: u64 = tp_p(i, 0, 1)
-        if r8 == 0 {
-            r8 = 1
-        }
-        term_set_cursor(state, i, cx, r8 - 1)
-    } else if fin == 75 {
-        // K: erase in line (0 = cursor to end, 1 = start to cursor, 2 = all)
-        let m: u64 = tp_p(i, 0, 0)
-        if m == 0 {
-            term_clear_rect(state, i, cx, cy, 0, cy + 1)
-        } else if m == 1 {
-            term_clear_rect(state, i, 0, cy, cx + 1, cy)
-        } else if m == 2 {
-            term_clear_rect(state, i, 0, cy, 0, cy + 1)
-        }
-    } else if fin == 74 {
-        // J: erase in display
-        let m2: u64 = tp_p(i, 0, 0)
-        if m2 == 0 {
-            term_clear_rect(state, i, cx, cy, 0, rows)
-        } else if m2 == 1 {
-            term_clear_rect(state, i, 0, 0, cx + 1, cy)
-        } else if m2 == 2 || m2 == 3 {
-            term_clear_rect(state, i, 0, 0, 0, rows)
-        }
-    } else if fin == 88 {
-        // X: erase n characters from the cursor
-        var n9: u64 = tp_n(i)
-        if cx + n9 > cols {
-            n9 = cols - cx
-        }
-        term_clear_rect(state, i, cx, cy, cx + n9, cy)
-    } else if fin == 64 {
-        // @: insert n blank characters, the rest of the row moves right
-        var n10: u64 = tp_n(i)
-        if n10 > cols - cx {
-            n10 = cols - cx
-        }
-        var c10: u64 = cols
-        while c10 > cx + n10 {
-            c10 = c10 - 1
-            cell_set(state, i, c10, cy, cell_get(state, i, c10 - n10, cy))
-            cell_attr_set(state, i, c10, cy, cell_attr(state, i, c10 - n10, cy))
-            cell_col_set(state, i, c10, cy, cell_col(state, i, c10 - n10, cy))
-        }
-        var b10: u64 = cx
-        while b10 < cx + n10 {
-            cell_set(state, i, b10, cy, 32)
-            cell_attr_set(state, i, b10, cy, 0)
-            cell_col_set(state, i, b10, cy, 0)
-            b10 = b10 + 1
-        }
-        term_repaint_row(state, i, cy)
-    } else if fin == 80 {
-        // P: delete n characters, the rest of the row moves left
-        var n11: u64 = tp_n(i)
-        if n11 > cols - cx {
-            n11 = cols - cx
-        }
-        var c11: u64 = cx
-        while c11 + n11 < cols {
-            cell_set(state, i, c11, cy, cell_get(state, i, c11 + n11, cy))
-            cell_attr_set(state, i, c11, cy, cell_attr(state, i, c11 + n11, cy))
-            cell_col_set(state, i, c11, cy, cell_col(state, i, c11 + n11, cy))
-            c11 = c11 + 1
-        }
-        while c11 < cols {
-            cell_set(state, i, c11, cy, 32)
-            cell_attr_set(state, i, c11, cy, 0)
-            cell_col_set(state, i, c11, cy, 0)
-            c11 = c11 + 1
-        }
-        term_repaint_row(state, i, cy)
-    } else if fin == 76 {
-        // L: insert n blank rows at the cursor row (inside the region), the rows below move down
-        if cy >= tp_first(state, i) && cy <= tp_bot(state, i) {
-            term_scroll_region(state, i, cy, tp_bot(state, i), tp_n(i), false)
-            term_set_cursor(state, i, 0, cy)
-        }
-    } else if fin == 77 {
-        // M: delete n rows at the cursor row, the rows below move up
-        if cy >= tp_first(state, i) && cy <= tp_bot(state, i) {
-            term_scroll_region(state, i, cy, tp_bot(state, i), tp_n(i), true)
-            term_set_cursor(state, i, 0, cy)
-        }
-    } else if fin == 83 {
-        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), tp_n(i), true)
-    } else if fin == 84 {
-        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), tp_n(i), false)
-    } else if fin == 114 {
-        // r: the scroll region, top ; bottom (one based); a bad pair resets it. The cursor goes home.
-        var t: u64 = tp_p(i, 0, 1)
-        var b: u64 = tp_p(i, 1, rows)
-        if t == 0 {
-            t = 1
-        }
-        if b == 0 || b > rows {
-            b = rows
-        }
-        if t < b {
-            tp_top[(i) as usize] = t - 1
-            if b == rows && t == 1 {
-                tp_bot1[(i) as usize] = 0
-            } else {
-                tp_bot1[(i) as usize] = b
-            }
-        } else {
-            tp_top[(i) as usize] = 0
-            tp_bot1[(i) as usize] = 0
-        }
-        term_set_cursor(state, i, 0, 0)
-    } else if fin == 115 {
-        term_save_cursor(state, i)
-    } else if fin == 117 {
-        term_restore_cursor(state, i)
-    } else if fin == 109 {
-        term_sgr(i)
-    }
-    // h / l without `?` (the ANSI modes), n (status request), c (attributes request), t, ... : accepted and dropped
 }
 
 // The escape machine in front of `term_putc`. Answers true when it took the octet.
@@ -11369,10 +9647,10 @@ fn term_esc_take(state: u64, i: u64, ch: u64) -> bool {
     if i >= 32 {
         return false
     }
-    let st: u64 = tp_esc[(i) as usize]
+    let st: u64 = wmterm.tp_esc[(i) as usize]
     if st == 0 {
         if ch == 27 {
-            tp_esc[(i) as usize] = 1
+            wmterm.tp_esc[(i) as usize] = 1
             return true
         }
         return false
@@ -11380,42 +9658,42 @@ fn term_esc_take(state: u64, i: u64, ch: u64) -> bool {
     if st == 3 {
         // inside OSC / DCS / PM / APC: up to BEL, or ESC \
         if ch == 7 {
-            tp_esc[(i) as usize] = 0
+            wmterm.tp_esc[(i) as usize] = 0
         } else if ch == 27 {
-            tp_esc[(i) as usize] = 5
+            wmterm.tp_esc[(i) as usize] = 5
         }
         return true
     }
     if st == 5 {
-        tp_esc[(i) as usize] = 0
+        wmterm.tp_esc[(i) as usize] = 0
         return true
     }
     if st == 4 {
-        tp_esc[(i) as usize] = 0
+        wmterm.tp_esc[(i) as usize] = 0
         return true
     }
     if st == 1 {
-        tp_esc[(i) as usize] = 0
+        wmterm.tp_esc[(i) as usize] = 0
         if ch == 91 {
-            tp_esc[(i) as usize] = 2
-            tp_np[(i) as usize] = 0
-            tp_priv[(i) as usize] = 0
+            wmterm.tp_esc[(i) as usize] = 2
+            wmterm.tp_np[(i) as usize] = 0
+            wmterm.tp_priv[(i) as usize] = 0
             var k: u64 = 0
-            while k < TP_NP {
-                tp_par[(i * TP_NP + k) as usize] = 0
-                tp_has[(i * TP_NP + k) as usize] = 0
+            while k < wmterm.TP_NP {
+                wmterm.tp_par[(i * wmterm.TP_NP + k) as usize] = 0
+                wmterm.tp_has[(i * wmterm.TP_NP + k) as usize] = 0
                 k = k + 1
             }
             return true
         }
         if ch == 93 || ch == 80 || ch == 94 || ch == 95 || ch == 88 {
             // ] P ^ _ X: the string sequences
-            tp_esc[(i) as usize] = 3
+            wmterm.tp_esc[(i) as usize] = 3
             return true
         }
         if ch == 40 || ch == 41 || ch == 42 || ch == 43 || ch == 35 || ch == 37 {
             // ESC ( B, ESC # 8 ...: one more octet belongs to it
-            tp_esc[(i) as usize] = 4
+            wmterm.tp_esc[(i) as usize] = 4
             return true
         }
         if ch == 99 {
@@ -11423,29 +9701,29 @@ fn term_esc_take(state: u64, i: u64, ch: u64) -> bool {
             return true
         }
         if ch == 55 {
-            term_save_cursor(state, i)
+            wmterm.term_save_cursor(state, i)
             return true
         }
         if ch == 56 {
-            term_restore_cursor(state, i)
+            wmterm.term_restore_cursor(state, i)
             return true
         }
         if ch == 68 {
-            term_lf(state, i)
+            wmterm.term_lf(state, i)
             return true
         }
         if ch == 69 {
             wmlayout.wsv(state, i, wmlayout.W_CX, 0)
-            tp_wrap[(i) as usize] = 0
-            term_lf(state, i)
+            wmterm.tp_wrap[(i) as usize] = 0
+            wmterm.term_lf(state, i)
             return true
         }
         if ch == 77 {
-            term_ri(state, i)
+            wmterm.term_ri(state, i)
             return true
         }
         if ch == 27 {
-            tp_esc[(i) as usize] = 1
+            wmterm.tp_esc[(i) as usize] = 1
             return true
         }
         if ch >= 48 && ch <= 126 {
@@ -11460,49 +9738,49 @@ fn term_esc_take(state: u64, i: u64, ch: u64) -> bool {
     }
     // inside ESC [
     if ch >= 48 && ch <= 57 {
-        let np: u64 = tp_np[(i) as usize]
-        if np < TP_NP {
-            let at: u64 = i * TP_NP + np
-            tp_par[(at) as usize] = tp_par[(at) as usize] * 10 + (ch - 48)
-            if tp_par[(at) as usize] > 9999 {
-                tp_par[(at) as usize] = 9999
+        let np: u64 = wmterm.tp_np[(i) as usize]
+        if np < wmterm.TP_NP {
+            let at: u64 = i * wmterm.TP_NP + np
+            wmterm.tp_par[(at) as usize] = wmterm.tp_par[(at) as usize] * 10 + (ch - 48)
+            if wmterm.tp_par[(at) as usize] > 9999 {
+                wmterm.tp_par[(at) as usize] = 9999
             }
-            tp_has[(at) as usize] = 1
+            wmterm.tp_has[(at) as usize] = 1
         }
         return true
     }
     if ch == 59 || ch == 58 {
         // ; and the sub-parameter colon
-        if tp_np[(i) as usize] + 1 < TP_NP {
-            tp_np[(i) as usize] = tp_np[(i) as usize] + 1
+        if wmterm.tp_np[(i) as usize] + 1 < wmterm.TP_NP {
+            wmterm.tp_np[(i) as usize] = wmterm.tp_np[(i) as usize] + 1
         }
         return true
     }
     if ch == 63 {
-        tp_priv[(i) as usize] = 1
+        wmterm.tp_priv[(i) as usize] = 1
         return true
     }
     if ch == 60 || ch == 61 || ch == 62 {
-        tp_priv[(i) as usize] = 2
+        wmterm.tp_priv[(i) as usize] = 2
         return true
     }
     if ch >= 64 && ch <= 126 {
         // the final octet: the number of parameters is the one after the last `;`
-        let np2: u64 = tp_np[(i) as usize]
-        if tp_has[(i * TP_NP + np2) as usize] != 0 || np2 > 0 {
-            tp_np[(i) as usize] = np2 + 1
+        let np2: u64 = wmterm.tp_np[(i) as usize]
+        if wmterm.tp_has[(i * wmterm.TP_NP + np2) as usize] != 0 || np2 > 0 {
+            wmterm.tp_np[(i) as usize] = np2 + 1
         }
-        tp_esc[(i) as usize] = 0
-        term_csi(state, i, ch)
+        wmterm.tp_esc[(i) as usize] = 0
+        wmterm.term_csi(state, i, ch)
         return true
     }
     if ch == 27 {
-        tp_esc[(i) as usize] = 1
+        wmterm.tp_esc[(i) as usize] = 1
         return true
     }
     if ch == 24 || ch == 26 {
         // CAN, SUB: the sequence is cancelled
-        tp_esc[(i) as usize] = 0
+        wmterm.tp_esc[(i) as usize] = 0
         return true
     }
     if ch < 32 {
@@ -11527,30 +9805,30 @@ fn term_putc(state: u64, i: u64, ch: u64) {
     // nicht, und ein haengengebliebenes Fuehrungsoktett wuerde das
     // NAECHSTE Zeichen verschlucken.
     if ch < 32 {
-        tp_utf[(i) as usize] = 0
+        wmterm.tp_utf[(i) as usize] = 0
     }
     var cx: u64 = wmlayout.wg(state, i, wmlayout.W_CX)
     var cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
     if ch == 13 {
         wmlayout.wsv(state, i, wmlayout.W_CX, 0)
-        tp_wrap[(i) as usize] = 0
+        wmterm.tp_wrap[(i) as usize] = 0
         return
     }
     if ch == 10 {
         wmlayout.wsv(state, i, wmlayout.W_CX, 0)
-        tp_wrap[(i) as usize] = 0
-        term_lf(state, i)
+        wmterm.tp_wrap[(i) as usize] = 0
+        wmterm.term_lf(state, i)
         return
     }
     if ch == 8 {
-        tp_wrap[(i) as usize] = 0
+        wmterm.tp_wrap[(i) as usize] = 0
         if cx > 0 {
             cx = cx - 1
             wmlayout.wsv(state, i, wmlayout.W_CX, cx)
-            cell_set(state, i, cx, cy, 32)
-            cell_attr_set(state, i, cx, cy, 0)
-            cell_col_set(state, i, cx, cy, 0)
-            cell_paint(state, i, cx, cy)
+            wmterm.cell_set(state, i, cx, cy, 32)
+            wmterm.cell_attr_set(state, i, cx, cy, 0)
+            wmterm.cell_col_set(state, i, cx, cy, 0)
+            wmterm.cell_paint(state, i, cx, cy)
         }
         return
     }
@@ -11558,7 +9836,7 @@ fn term_putc(state: u64, i: u64, ch: u64) {
     // A plain 8 stops at the left edge; a line typed past the right edge
     // has to be wiped back into the row above.
     if ch == 0x108 {
-        tp_wrap[(i) as usize] = 0
+        wmterm.tp_wrap[(i) as usize] = 0
         if cx > 0 {
             cx = cx - 1
         } else if cy > 0 {
@@ -11569,10 +9847,10 @@ fn term_putc(state: u64, i: u64, ch: u64) {
         }
         wmlayout.wsv(state, i, wmlayout.W_CX, cx)
         wmlayout.wsv(state, i, wmlayout.W_CY, cy)
-        cell_set(state, i, cx, cy, 32)
-        cell_attr_set(state, i, cx, cy, 0)
-        cell_col_set(state, i, cx, cy, 0)
-        cell_paint(state, i, cx, cy)
+        wmterm.cell_set(state, i, cx, cy, 32)
+        wmterm.cell_attr_set(state, i, cx, cy, 0)
+        wmterm.cell_col_set(state, i, cx, cy, 0)
+        wmterm.cell_paint(state, i, cx, cy)
         return
     }
     if ch == 9 {
@@ -11585,9 +9863,9 @@ fn term_putc(state: u64, i: u64, ch: u64) {
     }
     // DER UTF-8-WEG. `z` ist die Zeichennummer, die in die Zelle geht.
     var z: u64 = ch
-    if tp_utf[(i) as usize] != 0 {
-        let lead: u64 = tp_utf[(i) as usize]
-        tp_utf[(i) as usize] = 0
+    if wmterm.tp_utf[(i) as usize] != 0 {
+        let lead: u64 = wmterm.tp_utf[(i) as usize]
+        wmterm.tp_utf[(i) as usize] = 0
         if ch < 128 || ch > 191 {
             // Kein Folgeoktett: die angefangene Folge war Schrott.
             // Das Oktett hier wird trotzdem noch als sich selbst
@@ -11600,7 +9878,7 @@ fn term_putc(state: u64, i: u64, ch: u64) {
             }
         }
     } else if ch >= 194 && ch <= 223 {
-        tp_utf[(i) as usize] = ch
+        wmterm.tp_utf[(i) as usize] = ch
         return
     } else if ch >= 224 && ch <= 244 {
         // Drei oder vier Oktette: der Rest der Folge sind Folge-
@@ -11616,20 +9894,20 @@ fn term_putc(state: u64, i: u64, ch: u64) {
     // r462: THE WRAP IS DEFERRED. The character that fills the last column leaves the cursor there and only the NEXT printable
     // character moves to the next row (and scrolls when that row is below the region). Before, the 80th character of a row
     // scrolled the screen at once, and an editor that fills its last row (the help line) pushed its whole screen up by one row.
-    if tp_wrap[(i) as usize] != 0 {
-        tp_wrap[(i) as usize] = 0
+    if wmterm.tp_wrap[(i) as usize] != 0 {
+        wmterm.tp_wrap[(i) as usize] = 0
         wmlayout.wsv(state, i, wmlayout.W_CX, 0)
-        term_lf(state, i)
+        wmterm.term_lf(state, i)
         cx = 0
         cy = wmlayout.wg(state, i, wmlayout.W_CY)
     }
-    cell_set(state, i, cx, cy, z)
-    cell_attr_set(state, i, cx, cy, tp_attr[(i) as usize])
-    cell_col_set(state, i, cx, cy, tp_col[(i) as usize])
-    cell_paint(state, i, cx, cy)
+    wmterm.cell_set(state, i, cx, cy, z)
+    wmterm.cell_attr_set(state, i, cx, cy, wmterm.tp_attr[(i) as usize])
+    wmterm.cell_col_set(state, i, cx, cy, wmterm.tp_col[(i) as usize])
+    wmterm.cell_paint(state, i, cx, cy)
     if cx + 1 >= cols {
-        if tp_nowrap[(i) as usize] == 0 {
-            tp_wrap[(i) as usize] = 1
+        if wmterm.tp_nowrap[(i) as usize] == 0 {
+            wmterm.tp_wrap[(i) as usize] = 1
         }
         wmlayout.wsv(state, i, wmlayout.W_CX, cols - 1)
     } else {
@@ -11641,94 +9919,18 @@ fn term_write(state: u64, i: u64, p: u64, n: u64) -> u64 {
     if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
         return 0
     }
-    sb_snap(state, i)
-    tsel_clear(state, i)
+    wmterm.sb_snap(state, i)
+    wmterm.tsel_clear(state, i)
     tcur_off(state, i)
     var k: u64 = 0
     while k < n {
         term_putc(state, i, kstate.get8(p + k))
         k = k + 1
     }
-    tcur_solid(state)
+    wmterm.tcur_solid(state)
     tcur_sync(state, i)
     wmdamage.damage_win(state, i)
     return n
-}
-
-// ------------------------------------------------------------ Zusagen
-
-// Ein Terminalfenster an ein Terminal binden. Von da an geht `tty.emit`
-// mit SINK_WINDOW hierher.
-fn bind_tty(state: u64, i: u64, t: u64) {
-    if !wmbase.valid(state, i) {
-        return
-    }
-    wmlayout.wsv(state, i, wmlayout.W_TTY, t + 1)
-}
-
-fn tty_of(state: u64, i: u64) -> u64 {
-    if !wmbase.valid(state, i) {
-        return NO_TTY
-    }
-    let t: u64 = wmlayout.wg(state, i, wmlayout.W_TTY)
-    if t == 0 {
-        return NO_TTY
-    }
-    return t - 1
-}
-
-// An WELCHES Terminal eine Taste geht: an das des Fensters mit dem
-// Eingabefokus, wenn das ein Terminalfenster ist -- sonst an gar keines.
-// Das ist die eine Zeile, die aus einem Bildschirm eine BEDIENBARE
-// Oberflaeche macht.
-// Shift+PageUp / Shift+PageDown on a focused terminal window: one page (rows - 1 lines) through the history. True: the
-// key was consumed (kbd.fi then does not send it to the shell).
-fn term_page(state: u64, up: bool) -> bool {
-    if !wmbase.ready(state) {
-        return false
-    }
-    let f: u64 = wmbase.focus(state)
-    if f >= wmbase.MAX_WIN || wmlayout.wg(state, f, wmlayout.W_KIND) != wmlayout.K_TERM || !wmgate.input_allowed(state, f) {
-        return false
-    }
-    var page: i64 = (wmlayout.wg(state, f, wmlayout.W_ROWS) as i64) - 1
-    if page < 1 {
-        page = 1
-    }
-    if up {
-        sb_move(state, f, page)
-    } else {
-        sb_move(state, f, 0 - page)
-    }
-    return true
-}
-
-fn key_tty(state: u64) -> u64 {
-    if !wmbase.ready(state) {
-        return NO_TTY
-    }
-    // RUNDE WMPLUGIN: hat gerade ein Plugin diese Taste bekommen, geht
-    // sie an KEIN Terminal. Der Merker gilt fuer genau eine Taste und
-    // wird hier geloescht -- er darf nicht die naechste mitnehmen.
-    if wmlayout.gs(state, wmlayout.S_KSWAL) != 0 {
-        wmlayout.ss(state, wmlayout.S_KSWAL, 0)
-        return NO_TTY
-    }
-    let f: u64 = wmbase.focus(state)
-    if f >= wmbase.MAX_WIN || wmlayout.wg(state, f, wmlayout.W_KIND) != wmlayout.K_TERM {
-        return NO_TTY
-    }
-    // WHILE THE SCREEN IS LOCKED (sign-in screen included) THE KEY
-    // BELONGS TO THE LOCKER ONLY. `on_key` already sends it there and
-    // nowhere else -- but this path asked only for the focus, so the
-    // terminal that had the focus before the lock got every key too:
-    // on the Dell (27.09.2026) the password typed at sign-in showed up
-    // as `sh: cannot run startkennwort` in the terminal behind it.
-    if !wmgate.input_allowed(state, f) {
-        return NO_TTY
-    }
-    sb_snap(state, f)
-    return tty_of(state, f)
 }
 
 // EIN Oktett in ein Terminalfenster. Der Weg von `tty.emit`.
@@ -11738,52 +9940,17 @@ fn term_out(state: u64, i: u64, c: u64) {
         return
     }
     wmlayout.ss(state, wmlayout.S_TPUT, wmlayout.gs(state, wmlayout.S_TPUT) + 1)
-    sb_snap(state, i)
-    tsel_clear(state, i)
+    wmterm.sb_snap(state, i)
+    wmterm.tsel_clear(state, i)
     tcur_off(state, i)
     term_putc(state, i, c)
-    tcur_solid(state)
+    wmterm.tcur_solid(state)
     tcur_sync(state, i)
-    if term_hold_n != 0 {
-        term_hold_mask = term_hold_mask | (1 << i)
+    if wmterm.term_hold_n != 0 {
+        wmterm.term_hold_mask = wmterm.term_hold_mask | (1 << i)
         return
     }
     wmdamage.damage_win(state, i)
-}
-
-static mut term_hold_n: u64 = 0
-static mut term_hold_mask: u64 = 0
-
-fn term_hold(state: u64) {
-    __atomic_add((&term_hold_n) as *mut u64, 1 as u64)
-}
-
-fn term_release(state: u64) {
-    if term_hold_n == 0 {
-        return
-    }
-    __atomic_add((&term_hold_n) as *mut u64, 0 -% 1)
-    if term_hold_n != 0 {
-        return
-    }
-    let m: u64 = term_hold_mask
-    term_hold_mask = 0
-    var i: u64 = 0
-    while i < wmbase.MAX_WIN {
-        if ((m >> i) & 1) != 0 && wmbase.valid(state, i) {
-            wmdamage.damage_win(state, i)
-        }
-        i = i + 1
-    }
-}
-
-// Die zwei Zaehler nach aussen, fuer die Tafel und die Abnahme.
-fn term_outs(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_TOUT)
-}
-
-fn term_puts_n(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_TPUT)
 }
 
 // ===================================================== RUNDE TILING

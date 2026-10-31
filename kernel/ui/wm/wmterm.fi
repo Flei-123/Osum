@@ -1,0 +1,1738 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.fb
+import ui.frameprof
+import lib.kstate
+import mm.mem
+import drv.hid.ps2m
+import serial
+import gfx.ttf
+import ui.wm.wmbase
+import ui.wm.wmdamage
+import ui.wm.wmdraw
+import ui.wm.wmgate
+import ui.wm.wmlayout
+
+const TG: u64 = 16384
+
+const TG_ALT_WORDS: u64 = 6144
+
+const NO_TTY: u64 = 255
+
+fn term_cols(state: u64, i: u64) -> u64 {
+    return wmlayout.wg(state, i, wmlayout.W_COLS)
+}
+
+fn term_rows(state: u64, i: u64) -> u64 {
+    return wmlayout.wg(state, i, wmlayout.W_ROWS)
+}
+
+fn term_cx(state: u64, i: u64) -> u64 {
+    return wmlayout.wg(state, i, wmlayout.W_CX)
+}
+
+fn term_cy(state: u64, i: u64) -> u64 {
+    return wmlayout.wg(state, i, wmlayout.W_CY)
+}
+
+fn term_cellw(state: u64, i: u64) -> u64 {
+    return wmlayout.wg(state, i, wmlayout.W_CELLW)
+}
+
+fn term_cellh(state: u64, i: u64) -> u64 {
+    return wmlayout.wg(state, i, wmlayout.W_CELLH)
+}
+
+fn term_asc(state: u64) -> u64 {
+    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_MONO)
+    if f >= ttf.MAX_FONTS {
+        return 0
+    }
+
+    return ttf.ascent(state, f, wmlayout.gs(state, wmlayout.S_PX_MONO)) as u64
+}
+
+fn term_px(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_PX_MONO)
+}
+
+fn term_win(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
+            return i
+        }
+        i = i + 1
+    }
+    return wmbase.MAX_WIN
+}
+
+fn cell_set(state: u64, i: u64, c: u64, r: u64, ch: u64) {
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    if g == 0 {
+        return
+    }
+    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
+    if k >= TG {
+        return
+    }
+    kstate.set8(g + k, ch as u8)
+}
+
+fn attr_clear(g: u64) {
+    var k: u64 = 0
+    while k < TG {
+        kstate.set8(g + TG + k, 0 as u8)
+        kstate.set8(g + 2 * TG + k, 0 as u8)
+        k = k + 1
+    }
+}
+
+fn cell_attr(state: u64, i: u64, c: u64, r: u64) -> u64 {
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    if g == 0 {
+        return 0
+    }
+    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
+    if k >= TG {
+        return 0
+    }
+    return kstate.get8(g + TG + k)
+}
+
+fn cell_attr_set(state: u64, i: u64, c: u64, r: u64, a: u64) {
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    if g == 0 {
+        return
+    }
+    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
+    if k >= TG {
+        return
+    }
+    kstate.set8(g + TG + k, a as u8)
+}
+
+fn cell_col(state: u64, i: u64, c: u64, r: u64) -> u64 {
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    if g == 0 {
+        return 0
+    }
+    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
+    if k >= TG {
+        return 0
+    }
+    return kstate.get8(g + 2 * TG + k)
+}
+
+fn cell_col_set(state: u64, i: u64, c: u64, r: u64, v: u64) {
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    if g == 0 {
+        return
+    }
+    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
+    if k >= TG {
+        return
+    }
+    kstate.set8(g + 2 * TG + k, v as u8)
+}
+
+fn cell_get(state: u64, i: u64, c: u64, r: u64) -> u64 {
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    if g == 0 {
+        return 32
+    }
+    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
+    if k >= TG {
+        return 32
+    }
+    return kstate.get8(g + k)
+}
+
+fn term_size(state: u64, i: u64) -> u64 {
+    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return 0
+    }
+    return (wmlayout.wg(state, i, wmlayout.W_ROWS) << 16) | wmlayout.wg(state, i, wmlayout.W_COLS)
+}
+
+fn term_dump(state: u64, i: u64) {
+    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return
+    }
+    var s_k: [u8; 15] = "wm: termzeile \0"
+    var s_g: [u8; 4] = " [\0\0"
+    var s_z: [u8; 2] = "]\0"
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+
+    var s_geo: [u8; 17] = "wm: termgeo cx=\0\0"
+    var s_cy: [u8; 5] = " cy=\0"
+    var s_cw: [u8; 5] = " cw=\0"
+    var s_ch: [u8; 5] = " ch=\0"
+    var s_co: [u8; 7] = " cols=\0"
+    var s_ro: [u8; 7] = " rows=\0"
+    var s_bg: [u8; 5] = " bg=\0"
+    var s_fg: [u8; 5] = " fg=\0"
+    var s_sh: [u8; 9] = " shared=\0"
+    serial.puts((&s_geo[0]) as u64)
+    serial.dec((wmbase.win_x(state, i) + wmbase.inx(state, i) as i64) as u64)
+    serial.puts((&s_cy[0]) as u64)
+    serial.dec((wmbase.win_y(state, i) + wmbase.iny(state, i) as i64) as u64)
+    serial.puts((&s_cw[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_CELLW))
+    serial.puts((&s_ch[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_CELLH))
+    serial.puts((&s_co[0]) as u64)
+    serial.dec(cols)
+    serial.puts((&s_ro[0]) as u64)
+    serial.dec(rows)
+    serial.puts((&s_bg[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_BG) & wmdraw.RGB24)
+    serial.puts((&s_fg[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_FG) & wmdraw.RGB24)
+    serial.puts((&s_sh[0]) as u64)
+    serial.dec(wmlayout.wg(state, i, wmlayout.W_SHM))
+    serial.nl()
+    var r: u64 = 0
+    while r < rows {
+
+        var letzte: u64 = 0
+        var c0: u64 = 0
+        while c0 < cols {
+            if cell_get(state, i, c0, r) > 32 {
+                letzte = c0 + 1
+            }
+            c0 = c0 + 1
+        }
+        if letzte != 0 {
+            serial.puts((&s_k[0]) as u64)
+            serial.dec(r)
+            serial.puts((&s_g[0]) as u64)
+            var c: u64 = 0
+            while c < letzte {
+                let z: u64 = cell_get(state, i, c, r)
+                if z >= 32 && z < 127 {
+                    serial.put(z as u8)
+                } else {
+                    serial.put(32 as u8)
+                }
+                c = c + 1
+            }
+            serial.puts((&s_z[0]) as u64)
+            serial.nl()
+        }
+        r = r + 1
+    }
+
+    if i < 32 {
+        var s_tc: [u8; 14] = "wm: tcur win=\0"
+        var s_on: [u8; 5] = " on=\0"
+        var s_tg: [u8; 9] = " toggle=\0"
+        var s_hd: [u8; 7] = " hide=\0"
+        var s_se: [u8; 6] = " sel=\0"
+        var s_cp: [u8; 9] = " copies=\0"
+        var s_ps: [u8; 9] = " pastes=\0"
+        serial.puts((&s_tc[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_on[0]) as u64)
+        serial.dec(tc_on[(i) as usize])
+        serial.puts((&s_tg[0]) as u64)
+        serial.dec(tc_toggles[0])
+        serial.puts((&s_hd[0]) as u64)
+        serial.dec(tc_hide[(i) as usize])
+        serial.puts((&s_se[0]) as u64)
+        if tsel_shown(i) {
+            serial.dec(1)
+        } else {
+            serial.dec(0)
+        }
+        serial.puts((&s_cp[0]) as u64)
+        serial.dec(tc_copies[0])
+        serial.puts((&s_ps[0]) as u64)
+        serial.dec(tc_pastes[0])
+        serial.nl()
+    }
+    sb_dump(state, i)
+}
+
+fn term_dump_all(state: u64) {
+    var s_h: [u8; 17] = "wm: termwin win=\0"
+    var s_t: [u8; 6] = " tty=\0"
+    var s_f: [u8; 8] = " focus=\0"
+    var s_c: [u8; 7] = " cols=\0"
+    var s_r: [u8; 7] = " rows=\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_p: [u8; 7] = "wm: tw\0"
+    var s_g: [u8; 3] = " [\0"
+    var s_z: [u8; 2] = "]\0"
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
+            let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+            let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+            serial.puts((&s_h[0]) as u64)
+            serial.dec(i)
+            serial.puts((&s_t[0]) as u64)
+            serial.dec(tty_of(state, i))
+            serial.puts((&s_f[0]) as u64)
+            if wmlayout.gs(state, wmlayout.S_FOCUS) == i + 1 {
+                serial.dec(1)
+            } else {
+                serial.dec(0)
+            }
+            serial.puts((&s_c[0]) as u64)
+            serial.dec(cols)
+            serial.puts((&s_r[0]) as u64)
+            serial.dec(rows)
+            serial.puts((&s_x[0]) as u64)
+            serial.dec(wmbase.win_x(state, i) as u64)
+            serial.puts((&s_y[0]) as u64)
+            serial.dec(wmbase.win_y(state, i) as u64)
+            serial.nl()
+            var r: u64 = 0
+            while r < rows {
+                var last: u64 = 0
+                var c0: u64 = 0
+                while c0 < cols {
+                    if cell_get(state, i, c0, r) > 32 {
+                        last = c0 + 1
+                    }
+                    c0 = c0 + 1
+                }
+                if last != 0 {
+                    serial.puts((&s_p[0]) as u64)
+                    serial.dec(i)
+                    serial.put(32 as u8)
+                    serial.dec(r)
+                    serial.puts((&s_g[0]) as u64)
+                    var c: u64 = 0
+                    while c < last {
+                        let z: u64 = cell_get(state, i, c, r)
+                        if z >= 32 && z < 127 {
+                            serial.put(z as u8)
+                        } else {
+                            serial.put(32 as u8)
+                        }
+                        c = c + 1
+                    }
+                    serial.puts((&s_z[0]) as u64)
+                    serial.nl()
+                }
+                r = r + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn term_palette(k: u64) -> u64 {
+    if k == 0 { return 0x000000 }
+    if k == 1 { return 0xCD3131 }
+    if k == 2 { return 0x0DBC79 }
+    if k == 3 { return 0xE5E510 }
+    if k == 4 { return 0x2472C8 }
+    if k == 5 { return 0xBC3FBC }
+    if k == 6 { return 0x11A8CD }
+    if k == 7 { return 0xE5E5E5 }
+    if k == 8 { return 0x666666 }
+    if k == 9 { return 0xF14C4C }
+    if k == 10 { return 0x23D18B }
+    if k == 11 { return 0xF5F543 }
+    if k == 12 { return 0x3B8EEA }
+    if k == 13 { return 0xD670D6 }
+    if k == 14 { return 0x29B8DB }
+    return 0xFFFFFF
+}
+
+fn term_color(state: u64, k: u64) -> u64 {
+    let v: u64 = term_palette(k)
+    return fb.rgb(state, (v >> 16) & 255, (v >> 8) & 255, v & 255)
+}
+
+const BLINK_TICKS: u64 = 53
+
+const TC_BUF: u64 = 4096
+
+static mut tc_on: [u64; 32] = [0 as u64; 32]
+
+static mut tc_cc: [u64; 32] = [0 as u64; 32]
+
+static mut tc_cr: [u64; 32] = [0 as u64; 32]
+
+static mut tc_hide: [u64; 32] = [0 as u64; 32]
+
+static mut tc_sel: [u64; 32] = [0 as u64; 32]
+
+static mut tc_sa: [u64; 32] = [0 as u64; 32]
+
+static mut tc_sb: [u64; 32] = [0 as u64; 32]
+
+static mut tc_phase: [u64; 1] = [1 as u64; 1]
+
+static mut tc_next: [u64; 1] = [0 as u64; 1]
+
+static mut tc_toggles: [u64; 1] = [0 as u64; 1]
+
+static mut tc_buf: [u8; 4104] = [0 as u8; 4104]
+
+static mut tc_cn: [u64; 1] = [0 as u64; 1]
+
+static mut tc_paste: [u64; 1] = [0 as u64; 1]
+
+static mut tc_copies: [u64; 1] = [0 as u64; 1]
+
+static mut tc_pastes: [u64; 1] = [0 as u64; 1]
+
+fn tc_reset(i: u64) {
+    if i >= 32 {
+        return
+    }
+    tc_on[(i) as usize] = 0
+    tc_hide[(i) as usize] = 0
+    tc_sel[(i) as usize] = 0
+}
+
+fn tsel_lo(i: u64) -> u64 {
+    if tc_sa[(i) as usize] < tc_sb[(i) as usize] {
+        return tc_sa[(i) as usize]
+    }
+    return tc_sb[(i) as usize]
+}
+
+fn tsel_hi(i: u64) -> u64 {
+    if tc_sa[(i) as usize] < tc_sb[(i) as usize] {
+        return tc_sb[(i) as usize]
+    }
+    return tc_sa[(i) as usize]
+}
+
+fn tsel_shown(i: u64) -> bool {
+    if i >= 32 || tc_sel[(i) as usize] == 0 {
+        return false
+    }
+    if tc_sel[(i) as usize] == 2 {
+        return true
+    }
+    return tc_sa[(i) as usize] != tc_sb[(i) as usize]
+}
+
+fn tsel_has(state: u64, i: u64, c: u64, r: u64) -> bool {
+    if !tsel_shown(i) {
+        return false
+    }
+    let k: u64 = r * wmlayout.wg(state, i, wmlayout.W_COLS) + c
+    return k >= tsel_lo(i) && k <= tsel_hi(i)
+}
+
+fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
+    var at: u64 = cell_attr(state, i, c, r)
+    if i < 32 {
+        if tsel_has(state, i, c, r) {
+            at = at ^ 1
+        }
+        if tc_on[(i) as usize] != 0 && tc_cc[(i) as usize] == c && tc_cr[(i) as usize] == r {
+            at = at ^ 1
+        }
+    }
+    cell_paint_v(state, i, c, r, cell_get(state, i, c, r), at, cell_col(state, i, c, r))
+}
+
+fn tcur_want(state: u64, i: u64) -> bool {
+    if tc_hide[(i) as usize] != 0 || tc_phase[0] == 0 || wmlayout.gs(state, wmlayout.S_FOCUS) != i + 1 {
+        return false
+    }
+    if tp_sbv[(i) as usize] != 0 || wmlayout.wg(state, i, wmlayout.W_GRID) == 0 {
+        return false
+    }
+    return wmlayout.wg(state, i, wmlayout.W_CX) < wmlayout.wg(state, i, wmlayout.W_COLS) && wmlayout.wg(state, i, wmlayout.W_CY) < wmlayout.wg(state, i, wmlayout.W_ROWS)
+}
+
+fn tcur_solid(state: u64) {
+    tc_phase[0] = 1
+    tc_next[0] = kstate.get(state, kstate.TICKS) + BLINK_TICKS
+}
+
+fn tcur_toggles_pub() -> u64 {
+    return tc_toggles[0]
+}
+
+fn tcur_shown_pub(i: u64) -> u64 {
+    if i >= 32 {
+        return 0
+    }
+    return tc_on[(i) as usize]
+}
+
+fn tsel_paint(state: u64, i: u64, k0: u64, k1: u64) {
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    if cols == 0 {
+        return
+    }
+    var k: u64 = k0
+    while k <= k1 && k < cols * rows {
+        cell_paint(state, i, k % cols, k / cols)
+        k = k + 1
+    }
+    wmdamage.damage_win(state, i)
+}
+
+fn tsel_clear(state: u64, i: u64) {
+    if i >= 32 || tc_sel[(i) as usize] == 0 {
+        return
+    }
+    let lo: u64 = tsel_lo(i)
+    let hi: u64 = tsel_hi(i)
+    let was: bool = tsel_shown(i)
+    tc_sel[(i) as usize] = 0
+    if was {
+        tsel_paint(state, i, lo, hi)
+    }
+}
+
+fn tsel_text(state: u64, i: u64) -> u64 {
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    if cols == 0 || !tsel_shown(i) {
+        return 0
+    }
+    let lo: u64 = tsel_lo(i)
+    let hi: u64 = tsel_hi(i)
+    let r0: u64 = lo / cols
+    let r1: u64 = hi / cols
+    var n: u64 = 0
+    var r: u64 = r0
+    while r <= r1 {
+        var c0: u64 = 0
+        var c1: u64 = cols - 1
+        if r == r0 {
+            c0 = lo % cols
+        }
+        if r == r1 {
+            c1 = hi % cols
+        }
+
+        var e: u64 = c1 + 1
+        while e > c0 && cell_get(state, i, e - 1, r) <= 32 {
+            e = e - 1
+        }
+        var c: u64 = c0
+        while c < e && n + 3 < TC_BUF {
+            var z: u64 = cell_get(state, i, c, r)
+            if z < 32 {
+                z = 32
+            }
+            if z < 128 {
+                tc_buf[(n) as usize] = z as u8
+                n = n + 1
+            } else if z < 256 {
+                tc_buf[(n) as usize] = (0xC0 | (z >> 6)) as u8
+                tc_buf[(n + 1) as usize] = (0x80 | (z & 63)) as u8
+                n = n + 2
+            } else {
+                tc_buf[(n) as usize] = 63
+                n = n + 1
+            }
+            c = c + 1
+        }
+        if r < r1 && n + 1 < TC_BUF {
+            tc_buf[(n) as usize] = 10
+            n = n + 1
+        }
+        r = r + 1
+    }
+    return n
+}
+
+fn tsel_copy(state: u64, i: u64) {
+    let n: u64 = tsel_text(state, i)
+    if n == 0 {
+        return
+    }
+    tc_cn[0] = n
+    tc_copies[0] = tc_copies[0] + 1
+    var s_c: [u8; 14] = "wm: tcopy n=\0\0"
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(n)
+    serial.put(32 as u8)
+    serial.put(91 as u8)
+    var q: u64 = 0
+    while q < n && q < 80 {
+        let ch: u64 = tc_buf[(q) as usize] as u64
+        if ch == 10 {
+            serial.put(124 as u8)
+        } else if ch >= 32 && ch < 127 {
+            serial.put(ch as u8)
+        } else {
+            serial.put(63 as u8)
+        }
+        q = q + 1
+    }
+    serial.put(93 as u8)
+    serial.nl()
+}
+
+fn term_copy_take(state: u64, out: u64, max: u64) -> u64 {
+    var n: u64 = tc_cn[0]
+    if n == 0 {
+        return 0
+    }
+    tc_cn[0] = 0
+    if n > max {
+        n = max
+    }
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(out + k, tc_buf[(k) as usize])
+        k = k + 1
+    }
+    return n
+}
+
+fn term_paste_take(state: u64) -> u64 {
+    let t: u64 = tc_paste[0]
+    tc_paste[0] = 0
+    return t
+}
+
+static mut tp_buf: [u8; 4096] = [0 as u8; 4096]
+
+static mut tp_cn: [u64; 1] = [0 as u64; 1]
+
+static mut tc_psel: [u64; 1] = [0 as u64; 1]
+
+fn tsel_primary(state: u64, i: u64) {
+    let n: u64 = tsel_text(state, i)
+    if n == 0 {
+        return
+    }
+    var k: u64 = 0
+    while k < n {
+        tp_buf[(k) as usize] = tc_buf[(k) as usize]
+        k = k + 1
+    }
+    tp_cn[0] = n
+}
+
+fn term_primary_take(state: u64, out: u64, max: u64) -> u64 {
+    var n: u64 = tp_cn[0]
+    if n == 0 {
+        return 0
+    }
+    tp_cn[0] = 0
+    if n > max {
+        n = max
+    }
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(out + k, tp_buf[(k) as usize])
+        k = k + 1
+    }
+    return n
+}
+
+fn term_paste_sel(state: u64) -> u64 {
+    let v: u64 = tc_psel[0]
+    tc_psel[0] = 0
+    return v
+}
+
+fn tcopies_pub() -> u64 {
+    return tc_copies[0]
+}
+
+fn tpastes_pub() -> u64 {
+    return tc_pastes[0]
+}
+
+static mut tc_kicks: [u64; 1] = [0 as u64; 1]
+
+fn tkicks_pub() -> u64 {
+    return tc_kicks[0]
+}
+
+fn tpaste_ask(state: u64, i: u64) {
+    let t: u64 = tty_of(state, i)
+    if t == NO_TTY {
+        return
+    }
+    tc_paste[0] = t + 1
+    tc_pastes[0] = tc_pastes[0] + 1
+    var s_p: [u8; 14] = "wm: tpaste t=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(t)
+    serial.nl()
+}
+
+fn term_mouse(state: u64, i: u64, kind: u64, lx: u64, ly: u64, btn: u64) {
+    if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return
+    }
+    let cw: u64 = wmlayout.wg(state, i, wmlayout.W_CELLW)
+    let ch: u64 = wmlayout.wg(state, i, wmlayout.W_CELLH)
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    if cw == 0 || ch == 0 || cols == 0 || rows == 0 {
+        return
+    }
+    var c: u64 = lx / cw
+    var r: u64 = ly / ch
+    if c >= cols {
+        c = cols - 1
+    }
+    if r >= rows {
+        r = rows - 1
+    }
+    let k: u64 = r * cols + c
+    if kind == 0 {
+        if tp_sbv[(i) as usize] != 0 {
+            return
+        }
+        tsel_clear(state, i)
+        tc_sel[(i) as usize] = 1
+        tc_sa[(i) as usize] = k
+        tc_sb[(i) as usize] = k
+        return
+    }
+    if kind == 2 {
+        if tc_sel[(i) as usize] != 1 || (btn & ps2m.B_LEFT) == 0 {
+            return
+        }
+        let old: u64 = tc_sb[(i) as usize]
+        if old == k {
+            return
+        }
+        tc_sb[(i) as usize] = k
+        var a: u64 = old
+        var b: u64 = k
+        if k < old {
+            a = k
+            b = old
+        }
+        tsel_paint(state, i, a, b)
+        return
+    }
+    if kind == 1 {
+        if tc_sel[(i) as usize] != 1 {
+            return
+        }
+        if tc_sa[(i) as usize] == tc_sb[(i) as usize] {
+            tc_sel[(i) as usize] = 0
+        } else {
+            tc_sel[(i) as usize] = 2
+            tsel_primary(state, i)
+        }
+        return
+    }
+    if kind == 3 {
+        if tsel_shown(i) {
+            tsel_copy(state, i)
+            tsel_clear(state, i)
+        } else {
+            tpaste_ask(state, i)
+        }
+        return
+    }
+    if kind == 4 {
+        tpaste_ask(state, i)
+        tc_psel[0] = 1
+    }
+}
+
+fn mon_hotkey(state: u64) {
+    let on: bool = frameprof.mon_toggle()
+    var s_on: [u8; 13] = "wm: monov on\0"
+    var s_off: [u8; 14] = "wm: monov off\0"
+    if on {
+        serial.puts((&s_on[0]) as u64)
+    } else {
+        serial.puts((&s_off[0]) as u64)
+    }
+    serial.nl()
+}
+
+fn cell_paint_v(state: u64, i: u64, c: u64, r: u64, z: u64, at: u64, co: u64) {
+    let cw: u64 = wmlayout.wg(state, i, wmlayout.W_CELLW)
+    let ch: u64 = wmlayout.wg(state, i, wmlayout.W_CELLH)
+    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_MONO)
+
+    var cbg: u64 = wmlayout.wg(state, i, wmlayout.W_BG)
+    var cfg: u64 = wmlayout.wg(state, i, wmlayout.W_FG)
+
+    if (co & 15) != 0 {
+        var kf: u64 = (co & 15) - 1
+        if (at & 10) != 0 {
+            kf = kf + 8
+        }
+        cfg = term_color(state, kf)
+    }
+    if (co >> 4) != 0 {
+        var kb: u64 = (co >> 4) - 1
+        if (at & 16) != 0 {
+            kb = kb + 8
+        }
+        cbg = term_color(state, kb)
+    }
+    if (at & 1) != 0 {
+        let sw: u64 = cbg
+        cbg = cfg
+        cfg = sw
+    }
+    wmdraw.fill(state, i, c * cw, r * ch, cw, ch, cbg)
+    if (at & 4) != 0 && ch > 2 {
+        wmdraw.fill(state, i, c * cw, r * ch + ch - 2, cw, 1, cfg)
+    }
+    if z <= 32 || f >= ttf.MAX_FONTS {
+        return
+    }
+    let px: u64 = wmlayout.gs(state, wmlayout.S_PX_MONO)
+    let slot: u64 = ttf.glyph(state, f, z, px)
+    if slot < ttf.SLOTS {
+        wmdraw.draw_glyph_clip(state, i, slot, (c * cw) as i64,
+            (r * ch) as i64 + ttf.ascent(state, f, px), cfg,
+            (c * cw) as i64, ((c + 1) * cw) as i64)
+    }
+}
+
+fn term_redraw(state: u64, i: u64) {
+    if !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return
+    }
+    if i < 32 && tp_sbv[(i) as usize] != 0 {
+        sb_redraw(state, i)
+        return
+    }
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        var c: u64 = 0
+        while c < cols {
+            cell_paint(state, i, c, r)
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+const SB_LINES: u64 = 256
+
+const SB_W: u64 = 256
+
+const SB_STRIDE: u64 = 768
+
+const SB_FRAMES: u64 = 48
+
+const SB_STEP: u64 = 3
+
+static mut tp_sb: [u64; 32] = [0 as u64; 32]
+
+static mut tp_sbn: [u64; 32] = [0 as u64; 32]
+
+static mut tp_sbh: [u64; 32] = [0 as u64; 32]
+
+static mut tp_sbv: [u64; 32] = [0 as u64; 32]
+
+fn sb_free(state: u64, i: u64) {
+    if i >= 32 {
+        return
+    }
+    if tp_sb[(i) as usize] != 0 {
+        mem.frame_free_run(state, tp_sb[(i) as usize], SB_FRAMES)
+    }
+    tp_sb[(i) as usize] = 0
+    tp_sbn[(i) as usize] = 0
+    tp_sbh[(i) as usize] = 0
+    tp_sbv[(i) as usize] = 0
+}
+
+fn sb_push(state: u64, i: u64, r: u64) {
+    if i >= 32 {
+        return
+    }
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    if g == 0 {
+        return
+    }
+    var b: u64 = tp_sb[(i) as usize]
+    if b == 0 {
+        b = mem.frame_run(state, SB_FRAMES)
+        if b == 0 {
+            return
+        }
+        tp_sb[(i) as usize] = b
+        tp_sbn[(i) as usize] = 0
+        tp_sbh[(i) as usize] = 0
+    }
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let dst: u64 = b + tp_sbh[(i) as usize] * SB_STRIDE
+    var c: u64 = 0
+    while c < SB_W {
+        var z: u64 = 32
+        var at: u64 = 0
+        var co: u64 = 0
+        if c < cols && r * cols + c < TG {
+            let k: u64 = r * cols + c
+            z = kstate.get8(g + k)
+            at = kstate.get8(g + TG + k)
+            co = kstate.get8(g + 2 * TG + k)
+        }
+        kstate.set8(dst + c, z as u8)
+        kstate.set8(dst + SB_W + c, at as u8)
+        kstate.set8(dst + 2 * SB_W + c, co as u8)
+        c = c + 1
+    }
+    tp_sbh[(i) as usize] = (tp_sbh[(i) as usize] + 1) % SB_LINES
+    if tp_sbn[(i) as usize] < SB_LINES {
+        tp_sbn[(i) as usize] = tp_sbn[(i) as usize] + 1
+    }
+}
+
+fn sb_line(i: u64, h: u64) -> u64 {
+    let slot: u64 = (tp_sbh[(i) as usize] + SB_LINES - tp_sbn[(i) as usize] + h) % SB_LINES
+    return tp_sb[(i) as usize] + slot * SB_STRIDE
+}
+
+fn sb_view_char(state: u64, i: u64, c: u64, r: u64) -> u64 {
+    let v: u64 = tp_sbv[(i) as usize]
+    if r >= v {
+        return cell_get(state, i, c, r - v)
+    }
+    if c >= SB_W {
+        return 32
+    }
+    return kstate.get8(sb_line(i, tp_sbn[(i) as usize] - v + r) + c)
+}
+
+fn sb_redraw(state: u64, i: u64) {
+    let v: u64 = tp_sbv[(i) as usize]
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        var c: u64 = 0
+        while c < cols {
+            if r >= v {
+                cell_paint_v(state, i, c, r, cell_get(state, i, c, r - v), cell_attr(state, i, c, r - v), cell_col(state, i, c, r - v))
+            } else if c >= SB_W {
+                cell_paint_v(state, i, c, r, 32, 0, 0)
+            } else {
+                let ln: u64 = sb_line(i, tp_sbn[(i) as usize] - v + r)
+                cell_paint_v(state, i, c, r, kstate.get8(ln + c), kstate.get8(ln + SB_W + c), kstate.get8(ln + 2 * SB_W + c))
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+fn sb_snap(state: u64, i: u64) {
+    if i >= 32 || tp_sbv[(i) as usize] == 0 {
+        return
+    }
+    tp_sbv[(i) as usize] = 0
+    term_redraw(state, i)
+}
+
+fn sb_wheel(state: u64, i: u64, d: i64) {
+    if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return
+    }
+    sb_move(state, i, d * (SB_STEP as i64))
+}
+
+fn sb_move(state: u64, i: u64, dl: i64) {
+    if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return
+    }
+    let n: u64 = tp_sbn[(i) as usize]
+    var v: i64 = (tp_sbv[(i) as usize] as i64) + dl
+    if v < 0 {
+        v = 0
+    }
+    if v > (n as i64) {
+        v = n as i64
+    }
+    if (v as u64) == tp_sbv[(i) as usize] {
+        return
+    }
+    tp_sbv[(i) as usize] = v as u64
+    term_redraw(state, i)
+    wmdamage.damage_win(state, i)
+}
+
+fn sb_dump(state: u64, i: u64) {
+    var s_a: [u8; 18] = "wm: termsb lines=\0"
+    var s_b: [u8; 7] = " view=\0"
+    var s_c: [u8; 14] = "wm: termview \0"
+    var s_g: [u8; 4] = " [\0\0"
+    var s_z: [u8; 2] = "]\0"
+    if i >= 32 {
+        return
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(tp_sbn[(i) as usize])
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(tp_sbv[(i) as usize])
+    serial.nl()
+    if tp_sbv[(i) as usize] == 0 {
+        return
+    }
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        var last: u64 = 0
+        var c0: u64 = 0
+        while c0 < cols {
+            if sb_view_char(state, i, c0, r) > 32 {
+                last = c0 + 1
+            }
+            c0 = c0 + 1
+        }
+        if last != 0 {
+            serial.puts((&s_c[0]) as u64)
+            serial.dec(r)
+            serial.puts((&s_g[0]) as u64)
+            var c: u64 = 0
+            while c < last {
+                let z: u64 = sb_view_char(state, i, c, r)
+                if z >= 32 && z < 127 {
+                    serial.put(z as u8)
+                } else {
+                    serial.put(32 as u8)
+                }
+                c = c + 1
+            }
+            serial.puts((&s_z[0]) as u64)
+            serial.nl()
+        }
+        r = r + 1
+    }
+}
+
+static mut tp_esc: [u64; 32] = [0 as u64; 32]
+
+static mut tp_np: [u64; 32] = [0 as u64; 32]
+
+static mut tp_priv: [u64; 32] = [0 as u64; 32]
+
+static mut tp_par: [u64; 256] = [0 as u64; 256]
+
+static mut tp_has: [u64; 256] = [0 as u64; 256]
+
+static mut tp_attr: [u64; 32] = [0 as u64; 32]
+
+static mut tp_col: [u64; 32] = [0 as u64; 32]
+
+static mut tp_utf: [u64; 32] = [0 as u64; 32]
+
+static mut tp_wrap: [u64; 32] = [0 as u64; 32]
+
+static mut tp_nowrap: [u64; 32] = [0 as u64; 32]
+
+static mut tp_scx: [u64; 32] = [0 as u64; 32]
+
+static mut tp_scy: [u64; 32] = [0 as u64; 32]
+
+static mut tp_sat: [u64; 32] = [0 as u64; 32]
+
+static mut tp_sco: [u64; 32] = [0 as u64; 32]
+
+static mut tp_top: [u64; 32] = [0 as u64; 32]
+
+static mut tp_bot1: [u64; 32] = [0 as u64; 32]
+
+static mut tp_alt: [u64; 32] = [0 as u64; 32]
+
+const TP_NP: u64 = 8
+
+fn tp_reset(i: u64) {
+    if i >= 32 {
+        return
+    }
+    tp_esc[(i) as usize] = 0
+    tp_np[(i) as usize] = 0
+    tp_priv[(i) as usize] = 0
+    tp_attr[(i) as usize] = 0
+    tp_col[(i) as usize] = 0
+    tp_utf[(i) as usize] = 0
+    tp_wrap[(i) as usize] = 0
+    tp_nowrap[(i) as usize] = 0
+    tp_scx[(i) as usize] = 0
+    tp_scy[(i) as usize] = 0
+    tp_sat[(i) as usize] = 0
+    tp_sco[(i) as usize] = 0
+    tp_top[(i) as usize] = 0
+    tp_bot1[(i) as usize] = 0
+    tp_alt[(i) as usize] = 0
+}
+
+fn tp_bot(state: u64, i: u64) -> u64 {
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    let b1: u64 = tp_bot1[(i) as usize]
+    if b1 == 0 || b1 > rows || tp_top[(i) as usize] + 1 >= b1 {
+        return rows - 1
+    }
+    return b1 - 1
+}
+
+fn tp_first(state: u64, i: u64) -> u64 {
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    let b1: u64 = tp_bot1[(i) as usize]
+    if b1 == 0 || b1 > rows || tp_top[(i) as usize] + 1 >= b1 {
+        return 0
+    }
+    return tp_top[(i) as usize]
+}
+
+fn tp_p(i: u64, k: u64, dflt: u64) -> u64 {
+    if k < TP_NP && tp_has[(i * TP_NP + k) as usize] != 0 {
+        return tp_par[(i * TP_NP + k) as usize]
+    }
+    return dflt
+}
+
+fn tp_n(i: u64) -> u64 {
+    let v: u64 = tp_p(i, 0, 1)
+    if v == 0 {
+        return 1
+    }
+    return v
+}
+
+fn grid_row_copy(state: u64, i: u64, rdst: u64, rsrc: u64) {
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    if g == 0 {
+        return
+    }
+    var c: u64 = 0
+    while c < cols {
+        let d: u64 = rdst * cols + c
+        let s: u64 = rsrc * cols + c
+        if d < TG && s < TG {
+            kstate.set8(g + d, kstate.get8(g + s) as u8)
+            kstate.set8(g + TG + d, kstate.get8(g + TG + s) as u8)
+            kstate.set8(g + 2 * TG + d, kstate.get8(g + 2 * TG + s) as u8)
+        }
+        c = c + 1
+    }
+}
+
+fn grid_row_clear(state: u64, i: u64, r: u64) {
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    if g == 0 {
+        return
+    }
+    var c: u64 = 0
+    while c < cols {
+        let d: u64 = r * cols + c
+        if d < TG {
+            kstate.set8(g + d, 32 as u8)
+            kstate.set8(g + TG + d, 0 as u8)
+            kstate.set8(g + 2 * TG + d, 0 as u8)
+        }
+        c = c + 1
+    }
+}
+
+fn term_repaint_row(state: u64, i: u64, r: u64) {
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    var c: u64 = 0
+    while c < cols {
+        cell_paint(state, i, c, r)
+        c = c + 1
+    }
+}
+
+fn term_scroll_region(state: u64, i: u64, top: u64, bot: u64, n: u64, up: bool) {
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    if rows == 0 || top >= rows || bot >= rows || bot < top || n == 0 {
+        return
+    }
+    var k: u64 = n
+    if k > bot - top + 1 {
+        k = bot - top + 1
+    }
+
+    if up && top == 0 && bot + 1 == rows && i < 32 && tp_alt[(i) as usize] == 0 {
+        var q: u64 = 0
+        while q < k {
+            sb_push(state, i, q)
+            q = q + 1
+        }
+    }
+
+    if up {
+        var r: u64 = top
+        while r + k <= bot {
+            grid_row_copy(state, i, r, r + k)
+            r = r + 1
+        }
+        var rc: u64 = bot + 1 - k
+        while rc <= bot {
+            grid_row_clear(state, i, rc)
+            rc = rc + 1
+        }
+    } else {
+        var r2: u64 = bot + 1
+        while r2 > top + k {
+            r2 = r2 - 1
+            grid_row_copy(state, i, r2, r2 - k)
+        }
+        var rc2: u64 = top
+        while rc2 < top + k {
+            grid_row_clear(state, i, rc2)
+            rc2 = rc2 + 1
+        }
+    }
+
+    let ch: u64 = wmlayout.wg(state, i, wmlayout.W_CELLH)
+    let ww: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+    let buf: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
+    if buf == 0 || ww == 0 || ch == 0 {
+        return
+    }
+    let y0: u64 = top * ch
+    let y1: u64 = (bot + 1) * ch
+    let shift: u64 = k * ch
+    if up {
+        var y: u64 = y0
+        while y + shift < y1 {
+            wmdraw.copy_words(buf +% y *% ww *% 4, buf +% (y + shift) *% ww *% 4, ww *% 4 / 8)
+            y = y + 1
+        }
+        wmdraw.fill(state, i, 0, y1 - shift, ww, shift, wmlayout.wg(state, i, wmlayout.W_BG))
+    } else {
+        var y2: u64 = y1 - shift
+        while y2 > y0 {
+            y2 = y2 - 1
+            wmdraw.copy_words(buf +% (y2 + shift) *% ww *% 4, buf +% y2 *% ww *% 4, ww *% 4 / 8)
+        }
+        wmdraw.fill(state, i, 0, y0, ww, shift, wmlayout.wg(state, i, wmlayout.W_BG))
+    }
+}
+
+fn term_scroll(state: u64, i: u64) {
+    term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), 1, true)
+}
+
+fn term_lf(state: u64, i: u64) {
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    let cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
+    if cy == tp_bot(state, i) {
+        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), 1, true)
+    } else if cy + 1 < rows {
+        wmlayout.wsv(state, i, wmlayout.W_CY, cy + 1)
+    }
+}
+
+fn term_ri(state: u64, i: u64) {
+    let cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
+    if cy == tp_first(state, i) {
+        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), 1, false)
+    } else if cy > 0 {
+        wmlayout.wsv(state, i, wmlayout.W_CY, cy - 1)
+    }
+}
+
+fn term_clear_rect(state: u64, i: u64, c0: u64, r0: u64, c1: u64, r1: u64) {
+
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    var r: u64 = r0
+    var c: u64 = c0
+    while r < r1 || (r == r1 && c < c1) {
+        cell_set(state, i, c, r, 32)
+        cell_attr_set(state, i, c, r, 0)
+        cell_col_set(state, i, c, r, 0)
+        cell_paint(state, i, c, r)
+        c = c + 1
+        if c >= cols {
+            c = 0
+            r = r + 1
+        }
+    }
+}
+
+fn term_set_cursor(state: u64, i: u64, c: u64, r: u64) {
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    var cc: u64 = c
+    var rr: u64 = r
+    if cc >= cols {
+        cc = cols - 1
+    }
+    if rr >= rows {
+        rr = rows - 1
+    }
+    wmlayout.wsv(state, i, wmlayout.W_CX, cc)
+    wmlayout.wsv(state, i, wmlayout.W_CY, rr)
+    tp_wrap[(i) as usize] = 0
+}
+
+fn term_save_cursor(state: u64, i: u64) {
+    tp_scx[(i) as usize] = wmlayout.wg(state, i, wmlayout.W_CX)
+    tp_scy[(i) as usize] = wmlayout.wg(state, i, wmlayout.W_CY)
+    tp_sat[(i) as usize] = tp_attr[(i) as usize]
+    tp_sco[(i) as usize] = tp_col[(i) as usize]
+}
+
+fn term_restore_cursor(state: u64, i: u64) {
+    term_set_cursor(state, i, tp_scx[(i) as usize], tp_scy[(i) as usize])
+    tp_attr[(i) as usize] = tp_sat[(i) as usize]
+    tp_col[(i) as usize] = tp_sco[(i) as usize]
+}
+
+fn term_blank_screen(state: u64, i: u64) {
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        grid_row_clear(state, i, r)
+        r = r + 1
+    }
+    wmdraw.fill(state, i, 0, 0, wmlayout.wg(state, i, wmlayout.W_W), wmlayout.wg(state, i, wmlayout.W_H), wmlayout.wg(state, i, wmlayout.W_BG))
+}
+
+fn term_alt_enter(state: u64, i: u64, save_cursor: bool) {
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    if g == 0 || tp_alt[(i) as usize] != 0 {
+        return
+    }
+    if save_cursor {
+        term_save_cursor(state, i)
+    }
+    wmdraw.copy_words(g + 3 * TG, g, TG_ALT_WORDS)
+    tp_alt[(i) as usize] = 1
+    term_blank_screen(state, i)
+    tp_top[(i) as usize] = 0
+    tp_bot1[(i) as usize] = 0
+    term_set_cursor(state, i, 0, 0)
+}
+
+fn term_alt_leave(state: u64, i: u64, restore_cursor: bool) {
+    let g: u64 = wmlayout.wg(state, i, wmlayout.W_GRID)
+    if g == 0 || tp_alt[(i) as usize] == 0 {
+        return
+    }
+    wmdraw.copy_words(g, g + 3 * TG, TG_ALT_WORDS)
+    tp_alt[(i) as usize] = 0
+    tp_top[(i) as usize] = 0
+    tp_bot1[(i) as usize] = 0
+    wmdraw.fill(state, i, 0, 0, wmlayout.wg(state, i, wmlayout.W_W), wmlayout.wg(state, i, wmlayout.W_H), wmlayout.wg(state, i, wmlayout.W_BG))
+    term_redraw(state, i)
+    if restore_cursor {
+        term_restore_cursor(state, i)
+    }
+}
+
+fn term_mode(state: u64, i: u64, on: bool) {
+    var k: u64 = 0
+    var cnt: u64 = tp_np[(i) as usize]
+    if cnt == 0 {
+        cnt = 1
+    }
+    while k < cnt && k < TP_NP {
+        let m: u64 = tp_p(i, k, 0)
+        if m == 1049 {
+            if on {
+                term_alt_enter(state, i, true)
+            } else {
+                term_alt_leave(state, i, true)
+            }
+        } else if m == 47 || m == 1047 {
+            if on {
+                term_alt_enter(state, i, false)
+            } else {
+                term_alt_leave(state, i, false)
+            }
+        } else if m == 7 {
+            if on {
+                tp_nowrap[(i) as usize] = 0
+            } else {
+                tp_nowrap[(i) as usize] = 1
+            }
+        } else if m == 25 {
+
+            if on {
+                tc_hide[(i) as usize] = 0
+            } else {
+                tc_hide[(i) as usize] = 1
+            }
+        }
+
+        k = k + 1
+    }
+}
+
+fn term_sgr(i: u64) {
+    var q: u64 = 0
+    var cnt: u64 = tp_np[(i) as usize]
+    if cnt == 0 {
+        cnt = 1
+    }
+    while q < cnt && q < TP_NP {
+        let v: u64 = tp_p(i, q, 0)
+        if v == 0 {
+            tp_attr[(i) as usize] = 0
+            tp_col[(i) as usize] = 0
+        } else if v == 1 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 2
+        } else if v == 4 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 4
+        } else if v == 7 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 1
+        } else if v == 22 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xFD
+        } else if v == 24 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xFB
+        } else if v == 27 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xFE
+        } else if v >= 30 && v <= 37 {
+            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0xF0) | (v - 30 + 1)
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xF7
+        } else if v == 39 {
+            tp_col[(i) as usize] = tp_col[(i) as usize] & 0xF0
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xF7
+        } else if v >= 40 && v <= 47 {
+            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0x0F) | ((v - 40 + 1) << 4)
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xEF
+        } else if v == 49 {
+            tp_col[(i) as usize] = tp_col[(i) as usize] & 0x0F
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xEF
+        } else if v >= 90 && v <= 97 {
+            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0xF0) | (v - 90 + 1)
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 8
+        } else if v >= 100 && v <= 107 {
+            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0x0F) | ((v - 100 + 1) << 4)
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 16
+        } else if v == 38 || v == 48 {
+
+            let mode: u64 = tp_p(i, q + 1, 0)
+            if mode == 5 {
+                let nn: u64 = tp_p(i, q + 2, 0)
+                if nn < 16 {
+                    var idx: u64 = nn
+                    var br: u64 = 0
+                    if nn >= 8 {
+                        idx = nn - 8
+                        br = 1
+                    }
+                    if v == 38 {
+                        tp_col[(i) as usize] = (tp_col[(i) as usize] & 0xF0) | (idx + 1)
+                        if br != 0 {
+                            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 8
+                        } else {
+                            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xF7
+                        }
+                    } else {
+                        tp_col[(i) as usize] = (tp_col[(i) as usize] & 0x0F) | ((idx + 1) << 4)
+                        if br != 0 {
+                            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 16
+                        } else {
+                            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xEF
+                        }
+                    }
+                }
+                q = q + 2
+            } else if mode == 2 {
+                q = q + 4
+            }
+        }
+        q = q + 1
+    }
+}
+
+fn term_csi(state: u64, i: u64, fin: u64) {
+    let cols: u64 = wmlayout.wg(state, i, wmlayout.W_COLS)
+    let rows: u64 = wmlayout.wg(state, i, wmlayout.W_ROWS)
+    let cx: u64 = wmlayout.wg(state, i, wmlayout.W_CX)
+    let cy: u64 = wmlayout.wg(state, i, wmlayout.W_CY)
+    let pv: u64 = tp_priv[(i) as usize]
+    if pv != 0 {
+
+        if pv == 1 && (fin == 104 || fin == 108) {
+            term_mode(state, i, fin == 104)
+        }
+        return
+    }
+    if fin == 72 || fin == 102 {
+
+        var r: u64 = tp_p(i, 0, 1)
+        var c: u64 = tp_p(i, 1, 1)
+        if r == 0 {
+            r = 1
+        }
+        if c == 0 {
+            c = 1
+        }
+        term_set_cursor(state, i, c - 1, r - 1)
+    } else if fin == 65 {
+        let n: u64 = tp_n(i)
+        var top: u64 = 0
+        if cy >= tp_first(state, i) {
+            top = tp_first(state, i)
+        }
+        var to: u64 = 0
+        if cy > top + n {
+            to = cy - n
+        } else {
+            to = top
+        }
+        term_set_cursor(state, i, cx, to)
+    } else if fin == 66 || fin == 101 {
+        let n2: u64 = tp_n(i)
+        var lim: u64 = rows - 1
+        if cy <= tp_bot(state, i) {
+            lim = tp_bot(state, i)
+        }
+        var to2: u64 = cy + n2
+        if to2 > lim {
+            to2 = lim
+        }
+        term_set_cursor(state, i, cx, to2)
+    } else if fin == 67 || fin == 97 {
+        let n3: u64 = tp_n(i)
+        term_set_cursor(state, i, cx + n3, cy)
+    } else if fin == 68 {
+        let n4: u64 = tp_n(i)
+        var to4: u64 = 0
+        if cx > n4 {
+            to4 = cx - n4
+        }
+        term_set_cursor(state, i, to4, cy)
+    } else if fin == 69 {
+
+        let n5: u64 = tp_n(i)
+        term_set_cursor(state, i, 0, cy + n5)
+    } else if fin == 70 {
+
+        let n6: u64 = tp_n(i)
+        var to6: u64 = 0
+        if cy > n6 {
+            to6 = cy - n6
+        }
+        term_set_cursor(state, i, 0, to6)
+    } else if fin == 71 || fin == 96 {
+        var c7: u64 = tp_p(i, 0, 1)
+        if c7 == 0 {
+            c7 = 1
+        }
+        term_set_cursor(state, i, c7 - 1, cy)
+    } else if fin == 100 {
+        var r8: u64 = tp_p(i, 0, 1)
+        if r8 == 0 {
+            r8 = 1
+        }
+        term_set_cursor(state, i, cx, r8 - 1)
+    } else if fin == 75 {
+
+        let m: u64 = tp_p(i, 0, 0)
+        if m == 0 {
+            term_clear_rect(state, i, cx, cy, 0, cy + 1)
+        } else if m == 1 {
+            term_clear_rect(state, i, 0, cy, cx + 1, cy)
+        } else if m == 2 {
+            term_clear_rect(state, i, 0, cy, 0, cy + 1)
+        }
+    } else if fin == 74 {
+
+        let m2: u64 = tp_p(i, 0, 0)
+        if m2 == 0 {
+            term_clear_rect(state, i, cx, cy, 0, rows)
+        } else if m2 == 1 {
+            term_clear_rect(state, i, 0, 0, cx + 1, cy)
+        } else if m2 == 2 || m2 == 3 {
+            term_clear_rect(state, i, 0, 0, 0, rows)
+        }
+    } else if fin == 88 {
+
+        var n9: u64 = tp_n(i)
+        if cx + n9 > cols {
+            n9 = cols - cx
+        }
+        term_clear_rect(state, i, cx, cy, cx + n9, cy)
+    } else if fin == 64 {
+
+        var n10: u64 = tp_n(i)
+        if n10 > cols - cx {
+            n10 = cols - cx
+        }
+        var c10: u64 = cols
+        while c10 > cx + n10 {
+            c10 = c10 - 1
+            cell_set(state, i, c10, cy, cell_get(state, i, c10 - n10, cy))
+            cell_attr_set(state, i, c10, cy, cell_attr(state, i, c10 - n10, cy))
+            cell_col_set(state, i, c10, cy, cell_col(state, i, c10 - n10, cy))
+        }
+        var b10: u64 = cx
+        while b10 < cx + n10 {
+            cell_set(state, i, b10, cy, 32)
+            cell_attr_set(state, i, b10, cy, 0)
+            cell_col_set(state, i, b10, cy, 0)
+            b10 = b10 + 1
+        }
+        term_repaint_row(state, i, cy)
+    } else if fin == 80 {
+
+        var n11: u64 = tp_n(i)
+        if n11 > cols - cx {
+            n11 = cols - cx
+        }
+        var c11: u64 = cx
+        while c11 + n11 < cols {
+            cell_set(state, i, c11, cy, cell_get(state, i, c11 + n11, cy))
+            cell_attr_set(state, i, c11, cy, cell_attr(state, i, c11 + n11, cy))
+            cell_col_set(state, i, c11, cy, cell_col(state, i, c11 + n11, cy))
+            c11 = c11 + 1
+        }
+        while c11 < cols {
+            cell_set(state, i, c11, cy, 32)
+            cell_attr_set(state, i, c11, cy, 0)
+            cell_col_set(state, i, c11, cy, 0)
+            c11 = c11 + 1
+        }
+        term_repaint_row(state, i, cy)
+    } else if fin == 76 {
+
+        if cy >= tp_first(state, i) && cy <= tp_bot(state, i) {
+            term_scroll_region(state, i, cy, tp_bot(state, i), tp_n(i), false)
+            term_set_cursor(state, i, 0, cy)
+        }
+    } else if fin == 77 {
+
+        if cy >= tp_first(state, i) && cy <= tp_bot(state, i) {
+            term_scroll_region(state, i, cy, tp_bot(state, i), tp_n(i), true)
+            term_set_cursor(state, i, 0, cy)
+        }
+    } else if fin == 83 {
+        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), tp_n(i), true)
+    } else if fin == 84 {
+        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), tp_n(i), false)
+    } else if fin == 114 {
+
+        var t: u64 = tp_p(i, 0, 1)
+        var b: u64 = tp_p(i, 1, rows)
+        if t == 0 {
+            t = 1
+        }
+        if b == 0 || b > rows {
+            b = rows
+        }
+        if t < b {
+            tp_top[(i) as usize] = t - 1
+            if b == rows && t == 1 {
+                tp_bot1[(i) as usize] = 0
+            } else {
+                tp_bot1[(i) as usize] = b
+            }
+        } else {
+            tp_top[(i) as usize] = 0
+            tp_bot1[(i) as usize] = 0
+        }
+        term_set_cursor(state, i, 0, 0)
+    } else if fin == 115 {
+        term_save_cursor(state, i)
+    } else if fin == 117 {
+        term_restore_cursor(state, i)
+    } else if fin == 109 {
+        term_sgr(i)
+    }
+
+}
+
+fn bind_tty(state: u64, i: u64, t: u64) {
+    if !wmbase.valid(state, i) {
+        return
+    }
+    wmlayout.wsv(state, i, wmlayout.W_TTY, t + 1)
+}
+
+fn tty_of(state: u64, i: u64) -> u64 {
+    if !wmbase.valid(state, i) {
+        return NO_TTY
+    }
+    let t: u64 = wmlayout.wg(state, i, wmlayout.W_TTY)
+    if t == 0 {
+        return NO_TTY
+    }
+    return t - 1
+}
+
+fn term_page(state: u64, up: bool) -> bool {
+    if !wmbase.ready(state) {
+        return false
+    }
+    let f: u64 = wmbase.focus(state)
+    if f >= wmbase.MAX_WIN || wmlayout.wg(state, f, wmlayout.W_KIND) != wmlayout.K_TERM || !wmgate.input_allowed(state, f) {
+        return false
+    }
+    var page: i64 = (wmlayout.wg(state, f, wmlayout.W_ROWS) as i64) - 1
+    if page < 1 {
+        page = 1
+    }
+    if up {
+        sb_move(state, f, page)
+    } else {
+        sb_move(state, f, 0 - page)
+    }
+    return true
+}
+
+fn key_tty(state: u64) -> u64 {
+    if !wmbase.ready(state) {
+        return NO_TTY
+    }
+
+    if wmlayout.gs(state, wmlayout.S_KSWAL) != 0 {
+        wmlayout.ss(state, wmlayout.S_KSWAL, 0)
+        return NO_TTY
+    }
+    let f: u64 = wmbase.focus(state)
+    if f >= wmbase.MAX_WIN || wmlayout.wg(state, f, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return NO_TTY
+    }
+
+    if !wmgate.input_allowed(state, f) {
+        return NO_TTY
+    }
+    sb_snap(state, f)
+    return tty_of(state, f)
+}
+
+static mut term_hold_n: u64 = 0
+
+static mut term_hold_mask: u64 = 0
+
+fn term_hold(state: u64) {
+    __atomic_add((&term_hold_n) as *mut u64, 1 as u64)
+}
+
+fn term_release(state: u64) {
+    if term_hold_n == 0 {
+        return
+    }
+    __atomic_add((&term_hold_n) as *mut u64, 0 -% 1)
+    if term_hold_n != 0 {
+        return
+    }
+    let m: u64 = term_hold_mask
+    term_hold_mask = 0
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if ((m >> i) & 1) != 0 && wmbase.valid(state, i) {
+            wmdamage.damage_win(state, i)
+        }
+        i = i + 1
+    }
+}
+
+fn term_outs(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_TOUT)
+}
+
+fn term_puts_n(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_TPUT)
+}
