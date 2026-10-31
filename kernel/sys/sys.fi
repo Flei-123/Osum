@@ -15019,11 +15019,70 @@ fn do_shutdown(state: u64, me: u64, fd: u64, how: u64) -> u64 {
     return inet.sock_shutdown(state, si, how)
 }
 
+fn usock_sockname(state: u64, me: u64, si: u64, addr: u64, lenp: u64,
+    peer: bool) -> u64 {
+    var target: u64 = si
+    if peer {
+        target = unixsock.sock_peer(state, si)
+        if target >= unixsock.USOCK_MAX
+            || unixsock.sock_state(state, si) != unixsock.S_CONNECTED {
+            return neg(errno.E_NOTCONN)
+        }
+    }
+    let nmi: u64 = unixsock.name_of(state, target)
+    let nlen: u64 = unixsock.name_len(state, nmi)
+    var total: u64 = 2 + nlen
+    if nlen > 0 && unixsock.name_byte(state, nmi, 0) != 0 {
+        total = total + 1
+    }
+    if addr == 0 {
+        return 0
+    }
+    if lenp == 0 || !proc.user_ok(state, me, lenp, 4) {
+        return neg(errno.E_FAULT)
+    }
+    var room: u64 = 0
+    var k: u64 = 0
+    while k < 4 {
+        room = room | (peek(state, me, lenp + k) << (k * 8))
+        k = k + 1
+    }
+    var n: u64 = total
+    if room < n {
+        n = room
+    }
+    var o: u64 = 0
+    while o < n {
+        var b: u64 = 0
+        if o == 0 {
+            b = AF_UNIX & 0xFF
+        } else if o >= 2 && o - 2 < nlen {
+            b = unixsock.name_byte(state, nmi, o - 2)
+        }
+        if !poke(state, me, addr + o, b) {
+            return neg(errno.E_FAULT)
+        }
+        o = o + 1
+    }
+    k = 0
+    while k < 4 {
+        if !poke(state, me, lenp + k, (total >> (k * 8)) & 0xFF) {
+            return neg(errno.E_FAULT)
+        }
+        k = k + 1
+    }
+    return 0
+}
+
 fn do_sockname(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
     peer: bool) -> u64 {
     let nlof: u64 = nl_of(state, me, fd)
     if nlof < file.MAX_OPEN {
         return nl_sockname(state, me, nlof, addr, lenp, peer)
+    }
+    let usi: u64 = usock_of(state, me, fd)
+    if usi < unixsock.USOCK_MAX {
+        return usock_sockname(state, me, usi, addr, lenp, peer)
     }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
@@ -18709,10 +18768,9 @@ fn sa_un(state: u64, me: u64, addr: u64, len: u64, lenp: *mut u64) -> u64 {
     if family != AF_UNIX {
         return neg(errno.E_AFNOSUPPORT)
     }
-    // Der abstrakte Namensraum (fuehrende Null) ist Linux-eigen und
-    // wird hier NICHT unterstuetzt -- libwayland benutzt ihn nicht.
     if kstate.get8(state + WL_PATH + 2) == 0 {
-        return neg(errno.E_INVAL)
+        *lenp = len - 2
+        return 0
     }
     // Bis zur Null zaehlen, hoechstens aber so weit, wie der Aufrufer
     // Oktette mitgebracht hat. `len` schliesst die zwei Oktette der

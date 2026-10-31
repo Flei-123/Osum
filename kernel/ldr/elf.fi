@@ -919,16 +919,19 @@ const AT_UID: u64 = 11
 const AT_EUID: u64 = 12
 const AT_GID: u64 = 13
 const AT_EGID: u64 = 14
+const AT_PLATFORM: u64 = 15
 const AT_HWCAP: u64 = 16
 const AT_CLKTCK: u64 = 17
 const AT_SECURE: u64 = 23
 const AT_RANDOM: u64 = 25
+const AT_HWCAP2: u64 = 26
+const AT_EXECFN: u64 = 31
 
 // Die Stapelseite liegt unmittelbar unter dem Argumentblock.
 const SP_PAGE: u64 = 0x535FE000 // RUNDE LIMITS3: ARGS_BASE - 4096 (was 0x4CFFE000)
 
 // Wie viele Woerter der Vektor hoechstens belegt: 15 Paare plus AT_NULL.
-const AUXN: u64 = 32
+const AUXN: u64 = 40
 
 fn sv_put(frame: u64, at: u64, v: u64) {
     put64(frame + at, v)
@@ -942,7 +945,7 @@ fn sv_put(frame: u64, at: u64, v: u64) {
 // die untere, und `rsp` zeigt auf `argc`. So braucht keine Zahl dieser
 // Funktion eine Subtraktion, die unter null gehen koennte.
 fn build_stack(state: u64, t: u64, args: u64, argc: u64,
-    phdr: u64, phnum: u64, entry: u64, ibase: u64) -> u64 {
+    phdr: u64, phnum: u64, entry: u64, ibase: u64, path: u64) -> u64 {
     if argc > proc.MAX_ARGS {
         return 0
     }
@@ -1056,6 +1059,42 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     }
     sp_str = sp_str + 16
 
+    let plat: u64 = sp_str
+    if sp_str + 8 >= PAGE {
+        return 0
+    }
+    kstate.set8(frame + plat, 120)
+    kstate.set8(frame + plat + 1, 56)
+    kstate.set8(frame + plat + 2, 54)
+    kstate.set8(frame + plat + 3, 95)
+    kstate.set8(frame + plat + 4, 54)
+    kstate.set8(frame + plat + 5, 52)
+    kstate.set8(frame + plat + 6, 0)
+    sp_str = sp_str + 8
+
+    let execfn: u64 = sp_str
+    var xi: u64 = 0
+    var xgoing: bool = path != 0
+    while xgoing {
+        if sp_str >= PAGE - 8 || xi >= 255 {
+            kstate.set8(frame + sp_str, 0)
+            sp_str = sp_str + 1
+            xgoing = false
+        } else {
+            let xc: u64 = kstate.get8(path + xi)
+            kstate.set8(frame + sp_str, xc as u8)
+            sp_str = sp_str + 1
+            xi = xi + 1
+            if xc == 0 {
+                xgoing = false
+            }
+        }
+    }
+    if path == 0 {
+        kstate.set8(frame + sp_str, 0)
+        sp_str = sp_str + 1
+    }
+
     // Und der Vektor selbst.
     sv_put(frame, at, AT_PHDR)
     at = at + 8
@@ -1118,7 +1157,19 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     // schnellerer Fassungen einzelner Funktionen und kommt mit 0 aus.
     sv_put(frame, at, AT_HWCAP)
     at = at + 8
+    sv_put(frame, at, kstate.get(state, kstate.FPU_FEAT) & 0xFFFFFFFF)
+    at = at + 8
+    sv_put(frame, at, AT_HWCAP2)
+    at = at + 8
     sv_put(frame, at, 0)
+    at = at + 8
+    sv_put(frame, at, AT_PLATFORM)
+    at = at + 8
+    sv_put(frame, at, SP_PAGE + plat)
+    at = at + 8
+    sv_put(frame, at, AT_EXECFN)
+    at = at + 8
+    sv_put(frame, at, SP_PAGE + execfn)
     at = at + 8
     sv_put(frame, at, AT_RANDOM)
     at = at + 8
@@ -1872,7 +1923,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     var ustack: u64 = proc.ARGS_BASE
     if braucht_lader || ist_dyn {
         let sp: u64 = build_stack(state, t, a, n, at_phdr, at_phnum,
-            at_entry, at_base)
+            at_entry, at_base, path)
         if sp == 0 {
             proc.discard(state, t)
             sched.irq_restore(flags)

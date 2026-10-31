@@ -77,3 +77,18 @@ Recommended route: musl-dynamic build with a host-only Cargo feature plus an Osu
 - X3 (r2460) Osum kernel, optional glibc target: execve ENOEXEC for glibc PIE interp (kernel/ldr/elf.fi), ld.so crash at rip 0x4011dca0 (auxv/TLS), clone3/rseq/statx/restart_syscall stubs, FUTEX_UNLOCK_PI, abstract AF_UNIX names, cgroup cpu.max fallback.
 - X4 (r2461) Capture/input bridge: helper over AF_UNIX using the permit from the taskbar, `osum_shot` grab and `SYS_TIPP`, with Super+Esc / `input off` stop; or screencopy + virtual-pointer/keyboard in wayd.
 - X5 (r2462) Packaging: Store/OTA package pulling the newest signed release from the FreeViewer feed (Ed25519, `version-xoffi.json`), install under `/apps`, Settings switch, gate `tools/xremote/run.sh` (Rust client `--connect` against the Osum host with a local node relay).
+
+## 6. Re-measurement X3 (31.10.2026, tools/unterbau/t_x3.c, QEMU KVM, kernel of main d0e7a932)
+
+| Need | Measured | Status |
+|---|---|---|
+| FUTEX_LOCK_PI / UNLOCK_PI / TRYLOCK_PI | implemented in kernel/sched/futex.fi, t_futex pi_* PASS | ok (table row in section 3 is stale) |
+| statx | implemented, t_misc statx_* PASS | ok (stale) |
+| clone3 (435), rseq (334) | ENOSYS, glibc falls back to clone / runs without rseq | ok, tolerated |
+| restart_syscall (219) | EINTR | ok |
+| abstract AF_UNIX (stream + dgram) | before: bind/connect EINVAL; fix in sa_un keeps the leading NUL and the exact length | fixed on branch |
+| getsockname / getpeername on AF_UNIX | before: EBADF; fix returns bound name, accepted sockets borrow the listener name | fixed on branch |
+| auxv AT_PLATFORM / AT_HWCAP / AT_EXECFN | before: missing (0); fix adds them plus AT_HWCAP2 (0) | fixed on branch |
+| cgroup cpu.max, /proc/self/mountinfo, /sys/fs/cgroup | ENOENT, clean | ok |
+| cpuid, xgetbv, ymm state across switches, TLS (fs base, per-thread) | PASS | ok |
+| name table size | UNAME_MAX 16 abstract + path names together | open |
