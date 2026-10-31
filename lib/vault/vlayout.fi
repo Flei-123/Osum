@@ -1,0 +1,230 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+
+export { Info, SlotRef, info_zero, slotref_zero, parse_header, slot_at,
+    get_be16, get_be32, get_be64, put_be16, put_be32, put_be64, wipe,
+    VC_OK, VC_E_SHORT, VC_E_MAGIC, VC_E_LENGTH, VC_E_SLOTS, VC_E_KDF,
+    VC_E_CRED, VC_E_TAG, VC_E_RANDOM, VC_E_NOSLOT, VC_E_LIMIT, VC_E_PARAM,
+    VC_E_MEMORY, SLOT_PW, SLOT_LOGIN, SLOT_TPM, SLOT_RECOVERY, SLOT_DEVICE,
+    KDF_ARGON2ID, FIXED_HEADER, SLOT_HEADER, PW_SLOT_LEN, KEY_SLOT_LEN,
+    TPM_SLOT_MAX, MAX_SLOTS, MAX_BODY, BODY_SALT_LEN, TAG_LEN, KEY_LEN,
+    NONCE_LEN, ID_LEN, WRAPPED_LEN, ARGON_MAX_KIB, ARGON_MAX_PASSES,
+    ARGON_MAX_LANES, ARGON_DEFAULT_KIB, ARGON_DEFAULT_PASSES,
+    ARGON_DEFAULT_LANES, MIN_PASSWORD_LEN, FLAG_PASSKEYS }
+
+const VC_OK: i32 = 0
+const VC_E_SHORT: i32 = 1
+const VC_E_MAGIC: i32 = 2
+const VC_E_LENGTH: i32 = 3
+const VC_E_SLOTS: i32 = 4
+const VC_E_KDF: i32 = 5
+const VC_E_CRED: i32 = 6
+const VC_E_TAG: i32 = 7
+const VC_E_RANDOM: i32 = 8
+const VC_E_NOSLOT: i32 = 9
+const VC_E_LIMIT: i32 = 10
+const VC_E_PARAM: i32 = 11
+const VC_E_MEMORY: i32 = 12
+
+const SLOT_PW: u8 = 1
+const SLOT_LOGIN: u8 = 2
+const SLOT_TPM: u8 = 3
+const SLOT_RECOVERY: u8 = 4
+const SLOT_DEVICE: u8 = 5
+
+const KDF_ARGON2ID: u8 = 2
+
+const FIXED_HEADER: usize = 40
+const SLOT_HEADER: usize = 4
+const PW_SLOT_LEN: usize = 88
+const KEY_SLOT_LEN: usize = 64
+const TPM_SLOT_MAX: usize = 4100
+const MAX_SLOTS: usize = 8
+const MAX_BODY: usize = 67108864
+const BODY_SALT_LEN: usize = 16
+const TAG_LEN: usize = 16
+const KEY_LEN: usize = 32
+const NONCE_LEN: usize = 12
+const ID_LEN: usize = 16
+const WRAPPED_LEN: usize = 48
+
+const ARGON_MAX_KIB: usize = 1048576
+const ARGON_MAX_PASSES: usize = 16
+const ARGON_MAX_LANES: usize = 64
+const ARGON_DEFAULT_KIB: usize = 65536
+const ARGON_DEFAULT_PASSES: usize = 3
+const ARGON_DEFAULT_LANES: usize = 1
+const MIN_PASSWORD_LEN: usize = 8
+const FLAG_PASSKEYS: u8 = 1
+
+struct Info {
+    slot_count: usize,
+    flags: u8,
+    body_len: usize,
+    header_len: usize,
+    revision: u64,
+    body_off: usize,
+    total: usize,
+}
+
+struct SlotRef {
+    index: usize,
+    off: usize,
+    len: usize,
+    kind: u8,
+}
+
+fn info_zero() -> Info {
+    return Info { slot_count: 0, flags: 0 as u8, body_len: 0, header_len: 0,
+        revision: 0, body_off: 0, total: 0 }
+}
+
+fn slotref_zero() -> SlotRef {
+    return SlotRef { index: 0, off: 0, len: 0, kind: 0 as u8 }
+}
+
+fn get_be16(p: u64, off: usize) -> u64 {
+    return ((rt.ld8(p, off) as u64) << 8) | (rt.ld8(p, off + 1) as u64)
+}
+
+fn get_be32(p: u64, off: usize) -> u64 {
+    return (get_be16(p, off) << 16) | get_be16(p, off + 2)
+}
+
+fn get_be64(p: u64, off: usize) -> u64 {
+    return (get_be32(p, off) << 32) | get_be32(p, off + 4)
+}
+
+fn put_be16(b: *mut rt.Buf, v: u64) {
+    rt.buf_push(b, ((v >> 8) & 255) as u8)
+    rt.buf_push(b, (v & 255) as u8)
+}
+
+fn put_be32(b: *mut rt.Buf, v: u64) {
+    put_be16(b, (v >> 16) & 65535)
+    put_be16(b, v & 65535)
+}
+
+fn put_be64(b: *mut rt.Buf, v: u64) {
+    put_be32(b, v >> 32)
+    put_be32(b, v & 4294967295)
+}
+
+fn wipe(p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        rt.st8(p, i, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn magic_ok(p: u64) -> bool {
+    var m: [u8; 8] = [86, 65, 85, 76, 84, 50, 0, 0]
+    return rt.mem_eq(p, (&m[0]) as u64, 8)
+}
+
+fn slot_check(p: u64, off: usize, len: usize) -> i32 {
+    let kind: u8 = rt.ld8(p, off)
+    if rt.ld8(p, off + 1) != 0 as u8 {
+        return VC_E_SLOTS
+    }
+    if kind == SLOT_PW || kind == SLOT_LOGIN {
+        if len != PW_SLOT_LEN {
+            return VC_E_SLOTS
+        }
+        let kdf: u8 = rt.ld8(p, off + 4)
+        let passes: usize = rt.ld8(p, off + 5) as usize
+        let lanes: usize = rt.ld8(p, off + 6) as usize
+        let kib: usize = get_be32(p, off + 8) as usize
+        if kdf != KDF_ARGON2ID || rt.ld8(p, off + 7) != 0 as u8 {
+            return VC_E_KDF
+        }
+        if passes == 0 || passes > ARGON_MAX_PASSES || lanes == 0
+        || lanes > ARGON_MAX_LANES || kib < 8 * lanes || kib > ARGON_MAX_KIB {
+            return VC_E_KDF
+        }
+        return VC_OK
+    }
+    if kind == SLOT_RECOVERY || kind == SLOT_DEVICE {
+        if len != KEY_SLOT_LEN {
+            return VC_E_SLOTS
+        }
+        return VC_OK
+    }
+    if kind == SLOT_TPM {
+        if len <= SLOT_HEADER || len > TPM_SLOT_MAX {
+            return VC_E_SLOTS
+        }
+        return VC_OK
+    }
+    return VC_E_SLOTS
+}
+
+fn parse_header(p: u64, n: usize, info: *mut Info) -> i32 {
+    if n < FIXED_HEADER + SLOT_HEADER + BODY_SALT_LEN + TAG_LEN {
+        return VC_E_SHORT
+    }
+    if !magic_ok(p) {
+        return VC_E_MAGIC
+    }
+    let header_len: usize = get_be16(p, 8) as usize
+    let count: usize = rt.ld8(p, 10) as usize
+    let body_len: usize = get_be32(p, 12) as usize
+    if count == 0 || count > MAX_SLOTS {
+        return VC_E_SLOTS
+    }
+    if body_len > MAX_BODY {
+        return VC_E_LIMIT
+    }
+    if header_len < FIXED_HEADER + count * SLOT_HEADER || header_len > n {
+        return VC_E_LENGTH
+    }
+    if header_len + BODY_SALT_LEN + body_len + TAG_LEN != n {
+        return VC_E_LENGTH
+    }
+    var off: usize = FIXED_HEADER
+    var i: usize = 0
+    while i < count {
+        if off + SLOT_HEADER > header_len {
+            return VC_E_SLOTS
+        }
+        let len: usize = get_be16(p, off + 2) as usize
+        if len < SLOT_HEADER || off + len > header_len {
+            return VC_E_SLOTS
+        }
+        let rc: i32 = slot_check(p, off, len)
+        if rc != VC_OK {
+            return rc
+        }
+        off = off + len
+        i = i + 1
+    }
+    if off != header_len {
+        return VC_E_SLOTS
+    }
+    (*info).slot_count = count
+    (*info).flags = rt.ld8(p, 11)
+    (*info).body_len = body_len
+    (*info).header_len = header_len
+    (*info).revision = get_be64(p, 32)
+    (*info).body_off = header_len + BODY_SALT_LEN
+    (*info).total = n
+    return VC_OK
+}
+
+fn slot_at(p: u64, info: *mut Info, index: usize, out: *mut SlotRef) -> bool {
+    if index >= (*info).slot_count {
+        return false
+    }
+    var off: usize = FIXED_HEADER
+    var i: usize = 0
+    while i < index {
+        off = off + (get_be16(p, off + 2) as usize)
+        i = i + 1
+    }
+    (*out).index = index
+    (*out).off = off
+    (*out).len = get_be16(p, off + 2) as usize
+    (*out).kind = rt.ld8(p, off)
+    return true
+}
