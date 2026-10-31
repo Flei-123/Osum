@@ -304,8 +304,8 @@ boese_lauf() { # <was> <erwarteter text> <name> [extra]
 boese_lauf aendern      "fehler"      aendern
 boese_lauf fremd        "fehler"      fremd
 boese_lauf gross        "fehler"      gross
-boese_lauf wurzelluege  "gefaelscht"  luege
-boese_lauf halbe        "gefaelscht"  halbe
+boese_lauf wurzelluege  "forged"  luege
+boese_lauf halbe        "forged"  halbe
 
 rm -rf "$TMPD/kontoR"; cp -r "$TMPD/kontoA" "$TMPD/kontoR"
 printf '9\n' > "$TMPD/kontoR/ZAEHLER"
@@ -313,7 +313,7 @@ rm -rf "$TMPD/sb-rueck"; cp -r "$TMPD/store1" "$TMPD/sb-rueck"
 geraet "$TMPD/E-rueck.img" "$TMPD/sE.sh" "$TMPD/kontoR" "$TMPD/sb-rueck" "$TMPD/leer" -
 lauf "$TMPD/E-rueck.img" E-rueck > /dev/null
 klar E-rueck > "$TMPD/E-rueck.log"
-if grep -qa 'RUECKSCHRITT' "$TMPD/E-rueck.log"; then
+if grep -qa 'ROLLBACK' "$TMPD/E-rueck.log"; then
     ok "(e) DER RUECKSCHRITT wird erkannt (Zaehler 9, Speicher bietet 1)"
 else
     bad "(e) DER RUECKSCHRITT wird NICHT erkannt -- ein Server kann alte Daten unterschieben"
@@ -664,7 +664,7 @@ python3 tools/osum/mkfs.py build "$TMPD/I.img" $BLOCKS \
 rc=$(lauf "$TMPD/I.img" I)
 klar I > "$TMPD/I.log"
 is "(i) der Lauf ohne Konto endet ordentlich" "$rc" "21"
-sed -n '/^==KEINKONTO==/,/^==ARBEIT==/p' "$TMPD/I.log" | grep -qa 'gibt es nicht' \
+sed -n '/^==KEINKONTO==/,/^==ARBEIT==/p' "$TMPD/I.log" | grep -qa 'no such account' \
     && ok "(i) ohne Konto sagt sync das klar und tut sonst nichts" \
     || bad "(i) ohne Konto passiert etwas Unerwartetes"
 sed -n '/^==ARBEIT==/,/^==BACKUP==/p' "$TMPD/I.log" | grep -qa 'hallo' \
@@ -794,7 +794,7 @@ if ! cmp -s "$TMPD/kaputt/sync-ohneschutz.fi" kernel/user/sync.fi; then
         geraet "$TMPD/J3.img" "$TMPD/sE.sh" "$TMPD/kontoR" "$TMPD/sb-rueck" "$TMPD/leer" -
         lauf "$TMPD/J3.img" J3 > /dev/null
         klar J3 > "$TMPD/J3.log"
-        if grep -qa 'RUECKSCHRITT' "$TMPD/J3.log"; then
+        if grep -qa 'ROLLBACK' "$TMPD/J3.log"; then
             bad "(j3) auch ohne Schutz wird der Rueckschritt gemeldet -- der Test misst ihn nicht"
         else
             ok "(j3) GEGENPROBE: ohne den Zaehlervergleich geht der Rueckschritt durch"
