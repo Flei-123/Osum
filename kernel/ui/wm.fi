@@ -87,6 +87,7 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmpageobj
 import ui.wm.wmlatency
 import ui.wm.wminput
 import ui.wm.wmframe
@@ -149,7 +150,7 @@ export {
     trust_ask, trust_poll, trust_cancel,
     init, compose, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
-    create_ex, attach_buf, win_shm, damage_rect, tab_object, chrome_object, shared_ok, sh_stat,
+    create_ex, attach_buf, win_shm, damage_rect, tab_object, chrome_object, shared_ok,
     frames_total, input_hot,
     cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_log, cp_stat, cp_say_reset, CP_NOT, CP_BUSY, destroy, set_focus, raise_win,
     cross_point,
@@ -381,6 +382,18 @@ fn strip_h(state: u64) -> u64 {
     return wminput.strip_h(state)
 }
 
+
+fn chrome_object(state: u64) -> u64 {
+    return wmpageobj.chrome_object(state)
+}
+
+fn cp_page_object(state: u64) -> u64 {
+    return wmpageobj.cp_page_object(state)
+}
+
+fn tab_object(state: u64) -> u64 {
+    return wmpageobj.tab_object(state)
+}
 
 fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     wmbase.damage(state, x0, y0, x1, y1)
@@ -1614,167 +1627,9 @@ fn damage_rect(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64) -> u64 {
     wmlayout.ss(state, wmlayout.S_SH_PX, wmlayout.gs(state, wmlayout.S_SH_PX) + bw * bh)
     return bw * bh
 }
-
-fn tab_object(state: u64) -> u64 {
-    if wmlayout.gs(state, wmlayout.S_TABI) != 0 {
-        return wmlayout.gs(state, wmlayout.S_TABI) - 1
-    }
-    let f: u64 = mem.frame_alloc(state)
-    if f == 0 {
-        return unixsock.USHM_MAX
-    }
-    var o: u64 = 0
-    while o < mem.FRAME_SIZE / 8 {
-        __mmio_write64((f + o * 8) as *mut u64, 0)
-        o = o + 1
-    }
-    let k: u64 = unixsock.shm_wrap(state, f, 1, unixsock.SMF_RO)
-    if k >= unixsock.USHM_MAX {
-        mem.frame_free(state, f)
-        return unixsock.USHM_MAX
-    }
-    wmlayout.ss(state, wmlayout.S_TABF, f)
-    wmlayout.ss(state, wmlayout.S_TABI, k + 1)
-    wmcompose.tab_publish(state)
-    return k
-}
-
-fn chrome_object(state: u64) -> u64 {
-    // the table first: the chrome page is written by `tab_publish`, which runs only once the table exists
-    let kt: u64 = tab_object(state)
-    if kt >= unixsock.USHM_MAX {
-        return kt
-    }
-    if wmlayout.gs(state, wmlayout.S_CHRI) != 0 {
-        return wmlayout.gs(state, wmlayout.S_CHRI) - 1
-    }
-    let f: u64 = mem.frame_alloc(state)
-    if f == 0 {
-        return unixsock.USHM_MAX
-    }
-    var o: u64 = 0
-    while o < mem.FRAME_SIZE / 8 {
-        __mmio_write64((f + o * 8) as *mut u64, 0)
-        o = o + 1
-    }
-    let k: u64 = unixsock.shm_wrap(state, f, 1, unixsock.SMF_RO)
-    if k >= unixsock.USHM_MAX {
-        mem.frame_free(state, f)
-        return unixsock.USHM_MAX
-    }
-    wmlayout.ss(state, wmlayout.S_CHRF, f)
-    wmlayout.ss(state, wmlayout.S_CHRI, k + 1)
-    wmcompose.tab_publish(state)
-    return k
-}
-
-// numbers for the F12 line and the tests: 0 attached, 1 damage calls, 2 pixels named, 3 rows blitted, 4 pixels blitted, 5 detached, 6 table pages
-fn sh_stat(state: u64, k: u64) -> u64 {
-    if k == 0 {
-        return wmlayout.gs(state, wmlayout.S_SH_ATT)
-    }
-    if k == 1 {
-        return wmlayout.gs(state, wmlayout.S_SH_DMG)
-    }
-    if k == 2 {
-        return wmlayout.gs(state, wmlayout.S_SH_PX)
-    }
-    if k == 3 {
-        return wmlayout.gs(state, wmlayout.S_BL_N)
-    }
-    if k == 4 {
-        return wmlayout.gs(state, wmlayout.S_BL_PX)
-    }
-    if k == 5 {
-        return wmlayout.gs(state, wmlayout.S_SH_DET)
-    }
-    return wmlayout.gs(state, wmlayout.S_TAB_N)
-}
-
-// ===========================================================================================================================
-// COMPOSITOR S5 (docs/COMPOSITOR.md section 4): THE COMPOSITOR IN RING 3 TAKES THE SCAN-OUT, THE KERNEL KEEPS A WATCHDOG
-//
-// `wmd` (kernel/user/wmd.fi) attaches with WM_COMP. From then on `compose` still paints the whole picture into the draw target,
-// but it does NOT push it to the card: the finished rectangle is HANDED OVER (cp_hand) and the compositor is woken (cp_kick).
-// The compositor calls WM_COMP / CP_PRESENT, and only then does the card get the rectangle (cp_flush_locked) -- the card belongs to the
-// kernel, the decision WHEN a frame is shown belongs to ring 3. What stays in the kernel on purpose: the framebuffer and the flip, the
-// lock (while it stands the compositor gets no input and no key), the trusted dialog, and THE WATCHDOG:
-//
-//   * a rectangle that waits longer than CP_LIMIT_MS for the compositor is pushed to the card by the kernel (a MISS);
-//   * CP_MAXMISS misses in a row, or the death of the task, detach the compositor: the kernel presents every frame itself again,
-//     exactly as before S5 (that is the fall-back path, it is the old code);
-//   * the word `nowatch` switches the watchdog off (the counter-proof: a compositor that hangs then freezes the screen);
-//   * the word `nocomp` refuses the attach (the counter-proof: the kernel presents, the compositor's presents stay at 0).
-//
-// The INPUT COPY RING: the compositor needs pointer and key events for chrome (move, hover, Alt+Tab). The kernel keeps routing input
-// itself (`darf`, the lock) and writes a COPY into a read-only page (WM_COMP / CP_PAGE): pointer moves, button changes, and keys ONLY
-// while Alt or the Windows key is held (a shortcut) -- the code of an ordinary key is never copied, so a password typed into a window is
-// not seen. While the screen is locked or the trusted dialog is up NOTHING is copied.
-//
-// The compositor page (u64 words): 0 magic | version << 32, 1 attached (0 / 1), 2 events written (head), 3 events refused (lock / dialog),
-// 4 frames handed over, 5 frames presented, 6 a rectangle waits, 7..10 its x0 y0 x1 y1, 11 screen locked, 12 cycles per millisecond.
-// From word 16 a ring of CP_RING entries of 4 words: 0 type | mods << 8 | buttons << 16 | (index + 1) << 32, 1 x | y << 32, 2 key code,
-// 3 time stamp counter at the interrupt. A reader keeps its own tail; an entry is good when word 0 >> 32 == its index + 1 before and after.
-const CP_MAGIC: u64 = 0x504D4357
 const CP_NOT: u64 = 0xFFFFFFFFFFFFFFFF // the caller is not the attached compositor
 const CP_BUSY: u64 = 0xFFFFFFFFFFFFFFFE // the compose lock did not come free in time: try again
 const CP_EV_KEY: u64 = 3
-
-// the compositor page: made at the first WM_COMP / CP_PAGE, read-only for everybody (SMF_RO)
-fn cp_page_object(state: u64) -> u64 {
-    if wmlayout.gs(state, wmlayout.S_CP_PAGEI) != 0 {
-        return wmlayout.gs(state, wmlayout.S_CP_PAGEI) - 1
-    }
-    let f: u64 = mem.frame_alloc(state)
-    if f == 0 {
-        return unixsock.USHM_MAX
-    }
-    var o: u64 = 0
-    while o < mem.FRAME_SIZE / 8 {
-        __mmio_write64((f + o * 8) as *mut u64, 0)
-        o = o + 1
-    }
-    let k: u64 = unixsock.shm_wrap(state, f, 1, unixsock.SMF_RO)
-    if k >= unixsock.USHM_MAX {
-        mem.frame_free(state, f)
-        return unixsock.USHM_MAX
-    }
-    wmlayout.ss(state, wmlayout.S_CP_PAGEF, f)
-    wmlayout.ss(state, wmlayout.S_CP_PAGEI, k + 1)
-    wmanim.tw(f, 0, CP_MAGIC | (1 << 32))
-    wmanim.tw(f, 12, time.khz(state))
-    wmcompose.cp_sync(state)
-    return k
-}
-
-
-// ===========================================================================================================================
-// PRESENT LOG (W-DELLFLICK, 14.10.2026): ONE RECORD PER PRESENT, OFF BY DEFAULT, ONE WORD COMPARED WHEN OFF.
-//
-// Why: on the real Dell (Intel I219, real GPU framebuffer, real timing) the sign-in screen flickered (middle area pale for 1-3 frames every
-// 1-2 s) and no VM reproduces it. This log records, for every rectangle that reaches the card, what the VM cannot show us:
-// which core composed it, which core presented it, which core made the last WM_DAMAGE call (= the core the client painted on), how long the
-// hand-over waited, whether the compositor or the watchdog presented, and whether a CLIENT BUFFER CHANGED WHILE THE FRAME WAS COMPOSED.
-//
-// Switch: WM_COMP / CP_LOG (stride), root only: the program `presentlog` (kernel/user/presentlog.fi) does it and writes the records to
-// /var/log/presentlog.txt. stride 0 = off. With the switch off, every hook is `if gs(state, S_PL_ON) != 0` -- one load, no store.
-//
-// The torn-buffer test: before the desktop is filled and after the last window was copied, a hash of every shared client buffer is taken
-// (every stride-th 64-bit word). When the two hashes differ a client wrote into its buffer WHILE the frame was composed -- the frame holds a mix
-// of two client pictures: flag TORN. Flag DMGMID: a WM_DAMAGE arrived during the compose (the client finished a picture mid-frame).
-//
-// The page (SMF_RO, one frame, u64 words): 0 magic | version << 32, 1 stride (0 = off), 2 head (records written), 3 ring size | words per record << 32,
-// 4 cycles per ms, 5 environment bits (0 double buffered, 1 uncached, 2 page flip, 3 vsync, 4 compositor attached), 6 suspected torn presents (total),
-// 7 presents logged (total). From word 16 a ring of PL_RING records of 8 words (a record is good when word 0 >> 32 == its index + 1 before AND after
-// the read):
-//   0 (index + 1) << 32 | flags   (bit 0 compositor presented, bit 1 watchdog presented, bit 2 TORN, bit 3 DMGMID, bit 4 several composes merged,
-//                                  bit 5 painted straight on the card (no back buffer))
-//   1 time stamp counter when the present began     2 x0 | y0 << 16 | x1 << 32 | y1 << 48
-//   3 compose core | present core << 8 | damage core << 16 | composes << 24 | hand-over to present, microseconds << 32
-//   4 compose duration (us, the longest) | present (copy) duration us << 32
-//   5 hash before | hash after << 32 (of the last compose; 32 bits each)
-//   6 damage calls (total, low 32 bits) | damage-to-present us << 32      7 microseconds since the previous present
-const PL_MAGIC: u64 = 0x474C5250
 
 fn pl_on(state: u64) -> bool {
     return wmlayout.gs(state, wmlayout.S_PL_ON) != 0
@@ -1785,33 +1640,6 @@ fn pl_damage(state: u64) {
     wmlayout.ss(state, wmlayout.S_PL_DSEQ, wmlayout.gs(state, wmlayout.S_PL_DSEQ) + 1)
     wmlayout.ss(state, wmlayout.S_PL_DCORE, wmcompose.pl_core())
     wmlayout.ss(state, wmlayout.S_PL_DTSC, time.tsc())
-}
-
-// the log page: made at the first CP_LOG, read-only for everybody
-fn pl_page_object(state: u64) -> u64 {
-    if wmlayout.gs(state, wmlayout.S_PL_PAGEI) != 0 {
-        return wmlayout.gs(state, wmlayout.S_PL_PAGEI) - 1
-    }
-    let f: u64 = mem.frame_alloc(state)
-    if f == 0 {
-        return unixsock.USHM_MAX
-    }
-    var o: u64 = 0
-    while o < mem.FRAME_SIZE / 8 {
-        __mmio_write64((f + o * 8) as *mut u64, 0)
-        o = o + 1
-    }
-    let k: u64 = unixsock.shm_wrap(state, f, 1, unixsock.SMF_RO)
-    if k >= unixsock.USHM_MAX {
-        mem.frame_free(state, f)
-        return unixsock.USHM_MAX
-    }
-    wmlayout.ss(state, wmlayout.S_PL_PAGEF, f)
-    wmlayout.ss(state, wmlayout.S_PL_PAGEI, k + 1)
-    wmanim.tw(f, 0, PL_MAGIC | (1 << 32))
-    wmanim.tw(f, 3, wmcompose.PL_RING | (wmcompose.PL_ENT << 32))
-    wmanim.tw(f, 4, time.khz(state))
-    return k
 }
 
 fn pl_env_bits(state: u64) -> u64 {
@@ -1845,7 +1673,7 @@ fn cp_log(state: u64, me: u64, stride: u64) -> u64 {
         }
         return CP_BUSY
     }
-    let k: u64 = pl_page_object(state)
+    let k: u64 = wmpageobj.pl_page_object(state)
     if k >= unixsock.USHM_MAX {
         return k
     }
