@@ -1,0 +1,185 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ui.wm.wmbase
+import ui.wm.wmcore
+import ui.wm.wmevent
+import ui.wm.wmgeom
+import ui.wm.wmlayout
+import ui.wm.wmtabs
+
+fn tt_sync(state: u64, from: u64, to: u64) {
+    if !wmbase.valid(state, from) || !wmbase.valid(state, to) {
+        return
+    }
+    let mx: u64 = wmlayout.wg(state, from, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED
+    wmlayout.wsv(state, to, wmlayout.W_FLAGS, (wmlayout.wg(state, to, wmlayout.W_FLAGS) & ~wmlayout.F_MAXIMIZED) | mx)
+    wmlayout.wsv(state, to, wmlayout.W_SAVXY, wmlayout.wg(state, from, wmlayout.W_SAVXY))
+    wmlayout.wsv(state, to, wmlayout.W_SAVWH, wmlayout.wg(state, from, wmlayout.W_SAVWH))
+
+    wmlayout.wsv(state, to, wmlayout.W_SAVE, wmlayout.wg(state, from, wmlayout.W_SAVE))
+    let w: u64 = wmlayout.wg(state, from, wmlayout.W_W)
+    let h: u64 = wmlayout.wg(state, from, wmlayout.W_H)
+    if wmlayout.wg(state, to, wmlayout.W_W) != w || wmlayout.wg(state, to, wmlayout.W_H) != h {
+        let _r: bool = wmcore.resize_win(state, to, w, h)
+    }
+    wmcore.move_win(state, to, wmbase.win_x(state, from), wmbase.win_y(state, from))
+}
+
+fn tt_switch(state: u64, to: u64) {
+    let g: u64 = wmtabs.tt_grp_of(state, to)
+    if g == 0 {
+        return
+    }
+    let from: u64 = wmtabs.tt_active(state, g)
+    if from == to {
+        return
+    }
+    tt_sync(state, from, to)
+    wmtabs.tt_bg[(to) as usize] = 0
+    wmcore.set_hidden(state, to, false)
+    wmcore.raise_win(state, to)
+    if from < wmbase.MAX_WIN {
+        wmtabs.tt_bg[(from) as usize] = 1
+        wmcore.set_hidden(state, from, true)
+    }
+    wmcore.set_focus(state, to)
+    wmtabs.tt_cnt[6] = wmtabs.tt_cnt[6] + 1
+    wmtabs.tt_say(state, 1, to, g)
+    wmbase.damage_all(state)
+}
+
+fn tt_step(state: u64, i: u64, fwd: bool) {
+    let g: u64 = wmtabs.tt_grp_of(state, i)
+    let n: u64 = wmtabs.tt_count(state, g)
+    if g == 0 || n < 2 {
+        return
+    }
+    let p: u64 = wmtabs.tt_pos(state, g, i)
+    var q: u64 = 0
+    if fwd {
+        q = (p + 1) % n
+    } else {
+        q = (p + n - 1) % n
+    }
+    let t: u64 = wmtabs.tt_nth(state, g, q)
+    if t < wmbase.MAX_WIN {
+        tt_switch(state, t)
+    }
+}
+
+fn tt_close_tab(state: u64, i: u64) {
+    if !wmbase.valid(state, i) {
+        return
+    }
+    wmtabs.tt_cnt[7] = wmtabs.tt_cnt[7] + 1
+    wmtabs.tt_say(state, 2, i, wmtabs.tt_grp_of(state, i))
+    wmevent.ev_push(state, i, wmlayout.E_CLOSE, 0, 0, 0)
+    wmcore.destroy(state, i)
+}
+
+fn tt_forget(state: u64, i: u64) {
+    if i >= 32 {
+        return
+    }
+    let g: u64 = wmtabs.tt_grp[(i) as usize]
+    if g == 0 {
+        return
+    }
+    if wmtabs.tt_bg[(i) as usize] == 0 && wmtabs.tt_count(state, g) >= 2 {
+        let p: u64 = wmtabs.tt_pos(state, g, i)
+        var q: u64 = 1
+        if p > 0 {
+            q = p - 1
+        }
+        let s: u64 = wmtabs.tt_nth(state, g, q)
+        if s < wmbase.MAX_WIN && s != i {
+            tt_sync(state, i, s)
+            wmtabs.tt_bg[(s) as usize] = 0
+            wmcore.set_hidden(state, s, false)
+            wmcore.raise_win(state, s)
+        }
+    }
+    wmtabs.tt_grp[(i) as usize] = 0
+    wmtabs.tt_ord[(i) as usize] = 0
+    wmtabs.tt_bg[(i) as usize] = 0
+}
+
+fn tt_join(state: u64, n: u64, src: u64) {
+    if n >= 32 || src >= 32 || n == src || !wmbase.valid(state, n) || !wmbase.valid(state, src) {
+        return
+    }
+    var g: u64 = wmtabs.tt_grp[(src) as usize]
+    if g == 0 {
+        wmtabs.tt_cnt[0] = wmtabs.tt_cnt[0] + 1
+        g = wmtabs.tt_cnt[0]
+        wmtabs.tt_grp[(src) as usize] = g
+        wmtabs.tt_cnt[1] = wmtabs.tt_cnt[1] + 1
+        wmtabs.tt_ord[(src) as usize] = wmtabs.tt_cnt[1]
+    }
+    wmtabs.tt_cnt[1] = wmtabs.tt_cnt[1] + 1
+    wmtabs.tt_grp[(n) as usize] = g
+    wmtabs.tt_ord[(n) as usize] = wmtabs.tt_cnt[1]
+    wmtabs.tt_bg[(n) as usize] = 0
+    wmlayout.wsv(state, n, wmlayout.W_FLAGS, (wmlayout.wg(state, n, wmlayout.W_FLAGS) & ~wmlayout.F_MAXIMIZED) | (wmlayout.wg(state, src, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED))
+    wmlayout.wsv(state, n, wmlayout.W_SAVXY, wmlayout.wg(state, src, wmlayout.W_SAVXY))
+    wmlayout.wsv(state, n, wmlayout.W_SAVWH, wmlayout.wg(state, src, wmlayout.W_SAVWH))
+    wmlayout.wsv(state, n, wmlayout.W_SAVE, wmlayout.wg(state, src, wmlayout.W_SAVE))
+    wmtabs.tt_bg[(src) as usize] = 1
+    wmcore.set_hidden(state, src, true)
+    wmtabs.tt_cnt[5] = wmtabs.tt_cnt[5] + 1
+    wmtabs.tt_cnt[2] = 0
+    wmtabs.tt_cnt[4] = 0
+    wmtabs.tt_say(state, 0, n, g)
+    wmbase.damage_all(state)
+}
+
+fn tt_press(state: u64, i: u64, x: i64, y: i64) -> bool {
+    if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return false
+    }
+    let ry: i64 = y - wmbase.win_y(state, i)
+    if ry < wmgeom.border(state) as i64 || ry >= wmgeom.title_h(state) as i64 - 1 {
+        return false
+    }
+    let lx: i64 = x - wmbase.win_x(state, i)
+    let g: u64 = wmtabs.tt_grp_of(state, i)
+    let n: u64 = wmtabs.tt_count(state, g)
+    let lo: i64 = wmtabs.tt_lo(state)
+    let sq: i64 = wmtabs.tt_sq(state)
+    if n >= 2 {
+        let tw: i64 = wmtabs.tt_tabw(state, i, n)
+        let uk: i64 = wmgeom.uisc(state) as i64
+        var k: u64 = 0
+        while k < n {
+            let x0: i64 = lo + (k as i64) * tw
+            let x1: i64 = x0 + tw - 2 * uk
+            if lx >= x0 && lx < x1 {
+                let wi: u64 = wmtabs.tt_nth(state, g, k)
+                if lx >= x1 - sq {
+                    tt_close_tab(state, wi)
+                    return true
+                }
+                if wi != i {
+                    tt_switch(state, wi)
+                    return true
+                }
+                return false
+            }
+            k = k + 1
+        }
+        let px0: i64 = lo + (n as i64) * tw
+        if lx >= px0 && lx < px0 + sq {
+            wmtabs.tt_request(state, i)
+            return true
+        }
+        return false
+    }
+
+    let hi: i64 = wmtabs.tt_hi(state, i)
+    if lx >= hi - sq && lx < hi {
+        wmtabs.tt_request(state, i)
+        return true
+    }
+    return false
+}

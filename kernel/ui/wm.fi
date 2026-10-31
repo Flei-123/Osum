@@ -87,6 +87,9 @@ import ui.tile
 import ui.wm.wmlayout
 import ui.wm.wmgeom
 import ui.wm.wmbase
+import ui.wm.wmswitchctl
+import ui.wm.wmanimctl
+import ui.wm.wmtabctl
 import ui.wm.wmcore
 import ui.wm.wmtermwin
 import ui.wm.wmshared
@@ -157,8 +160,8 @@ export {
     set_blur_cache,
     tb_alpha_ist, unter_leiste_px,
     present,
-    anim_tick, anims,
-    close_anim, minimize_anim, open_anim,
+    anims,
+    minimize_anim, open_anim,
     set_min_rect,
     drag_begin_pub, drag_end_pub,
     dnd_take_paste, dnd_live_pub, dnd_nraise_pub, dnd_ncancel_pub,
@@ -178,14 +181,14 @@ export {
     tile_on, set_tile_on, tile_take, tile_release, tile_apply,
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
     kachelbar,
-    tt_is_bg, tt_join,
+    tt_is_bg,
     term_key, term_paste_done, on_screen_resize, win_tabbed, tiled, tile_focus_state, tile_nodes_all, tile_leaves_all, tile_tree_tag,
     MAX_WIN, K_TERM,
     damage, damage_all, focus, inx, iny, ready, valid, win_owner, win_x, win_y,
     title_clipped, title_missing,
     evpush, evpop, keyin, evdrops, evkoal, evterm, title_old,
     win_paints, win_px, win_flags, top_layer_win, wins_say,
-    E_KEY, E_DOWN, E_UP, E_CLOSE, E_AXPRESS, swipe_do, hw_demo,
+    E_KEY, E_DOWN, E_UP, E_CLOSE, E_AXPRESS, hw_demo,
     say_mag,
     L_DESK, L_NORMAL, L_TOAST, L_FLOAT, L_MAX,
     F_HIDDEN, F_NODECO,
@@ -209,6 +212,12 @@ const L_MAX: u64 = wmlayout.L_MAX
 const L_NORMAL: u64 = wmlayout.L_NORMAL
 const L_TOAST: u64 = wmlayout.L_TOAST
 const MAX_WIN: u64 = wmbase.MAX_WIN
+
+
+fn minimize_anim(state: u64, i: u64) -> bool {
+    return wmanimctl.minimize_anim(state, i)
+}
+
 
 fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     wmbase.damage(state, x0, y0, x1, y1)
@@ -1216,7 +1225,7 @@ fn hook_create(state: u64, i: u64) {
 }
 
 fn hook_destroy(state: u64, i: u64) {
-    tt_forget(state, i)
+    wmtabctl.tt_forget(state, i)
     tile_release(state, i)
 }
 
@@ -1441,34 +1450,6 @@ fn cross_point(state: u64, i: u64) -> u64 {
         return 0
     }
     return ((bx as u64) << 32) | (by as u64)
-}
-
-// Schliessen ueber die Bewegung. Das Fenster verschwindet erst, wenn
-// sie durch ist -- `anim_tick` ruft dann `destroy`. Ohne Bewegung
-// geschieht genau das sofort.
-fn close_anim(state: u64, i: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    wmevent.ev_push(state, i, wmlayout.E_CLOSE, 0, 0, 0)
-    if !wmanim.anim_start(state, i, wmanim.AN_CLOSE) {
-        wmcore.destroy(state, i)
-        return false
-    }
-    return true
-}
-
-// Minimieren ueber die Bewegung. Dasselbe Bild wie beim Schliessen,
-// aber am Ende steht `set_hidden` und nicht `destroy`.
-fn minimize_anim(state: u64, i: u64) -> bool {
-    if !wmbase.valid(state, i) {
-        return false
-    }
-    if !wmanim.anim_start(state, i, wmanim.AN_MIN) {
-        wmcore.set_hidden(state, i, true)
-        return false
-    }
-    return true
 }
 
 fn work_x(state: u64) -> u64 {
@@ -2098,13 +2079,13 @@ fn hw_demo(state: u64) {
     // swipes: with two windows left = the other window, right = back, 2 fingers and up = nothing
     wmcore.raise_win(state, wa)
     wmcore.set_focus(state, wa)
-    let m1: bool = swipe_do(state, 1, 3)
+    let m1: bool = wmswitchctl.swipe_do(state, 1, 3)
     hw_say_sw(state, (&g_s1[0]) as u64, m1, wmbase.focus(state), wa, wb)
-    let m2: bool = swipe_do(state, 2, 3)
+    let m2: bool = wmswitchctl.swipe_do(state, 2, 3)
     hw_say_sw(state, (&g_s2[0]) as u64, m2, wmbase.focus(state), wa, wb)
-    let m3: bool = swipe_do(state, 1, 2)
+    let m3: bool = wmswitchctl.swipe_do(state, 1, 2)
     hw_say_sw(state, (&g_s3[0]) as u64, m3, wmbase.focus(state), wa, wb)
-    let m4: bool = swipe_do(state, 3, 3)
+    let m4: bool = wmswitchctl.swipe_do(state, 3, 3)
     hw_say_sw(state, (&g_s4[0]) as u64, m4, wmbase.focus(state), wa, wb)
 }
 
@@ -4045,52 +4026,6 @@ const CUR_W: u64 = 12
 
 fn anims(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_ANIMS)
-}
-
-// EIN TICK DER BEWEGUNGEN, und er gehoert in den Zeitgeber und nicht
-// ins Zeichnen. Er macht drei Dinge: abgelaufene Bewegungen beenden,
-// laufende schmutzig machen (sonst zeichnet `compose` sie nicht), und
-// beim Ende einer Schliessbewegung das Fenster WIRKLICH wegnehmen.
-// Gibt zurueck, wie viele Bewegungen noch laufen.
-fn anim_tick(state: u64) -> u64 {
-    if !wmbase.ready(state) {
-        return 0
-    }
-    wmlayout.ss(state, wmlayout.S_TICKS, wmlayout.gs(state, wmlayout.S_TICKS) + 1)
-    var offen: u64 = 0
-    var i: u64 = 0
-    while i < wmbase.MAX_WIN {
-        if wmbase.valid(state, i) && wmlayout.wg(state, i, wmlayout.W_ANK) != 0 {
-            let p: u64 = wmanim.anim_p(state, i)
-            let art: u64 = wmlayout.wg(state, i, wmlayout.W_ANK)
-            // Der Bereich wird IMMER schmutzig, auch wenn der
-            // Fortschritt gleich blieb -- am Ende der Bewegung steht
-            // sonst das letzte Zwischenbild auf dem Schirm.
-            // r461: a window that opens or closes cannot spoil the blur of the windows below it
-            wmdamage.damage_win_ex(state, i, i + 1)
-            if p >= 1000 {
-                wmlayout.wsv(state, i, wmlayout.W_ANK, 0)
-                wmlayout.wsv(state, i, wmlayout.W_ANP, 1000)
-                // DAS FENSTER GEHT ERST JETZT. Waere es beim Klick
-                // verschwunden, haette die Bewegung nichts mehr zu
-                // zeigen gehabt -- das ist der ganze Grund, warum
-                // Schliessen ueber diesen Umweg laeuft.
-                if art == wmanim.AN_CLOSE {
-                    wmcore.destroy(state, i)
-                } else {
-                    if art == wmanim.AN_MIN {
-                        wmcore.set_hidden(state, i, true)
-                    }
-                }
-            } else {
-                wmlayout.wsv(state, i, wmlayout.W_ANP, p)
-                wmlayout.ss(state, wmlayout.S_ANFRAMES, wmlayout.gs(state, wmlayout.S_ANFRAMES) + 1)
-                offen = offen + 1
-            }
-        }
-        i = i + 1
-    }
-    return offen
 }
 
 // DAS BILD ZEIGEN. Eine Uebertragung, ein Rechteck -- und der Zaehler
@@ -6470,12 +6405,12 @@ fn cap_act(state: u64, i: u64, cn: u64) {
     if cn == wmlayout.CAP_CLOSE {
         // RUNDE OBERFLAECHE: UEBER DIE BEWEGUNG. `close_anim` pusht E_CLOSE selbst und ruft
         // `destroy` erst, wenn die Bewegung durch ist -- ist sie abgeschaltet, sofort.
-        let _ca: bool = close_anim(state, i)
+        let _ca: bool = wmanimctl.close_anim(state, i)
         return
     }
     if cn == wmlayout.CAP_MIN {
         // Dasselbe fuer das Minimieren: am Ende steht `set_hidden`, aber erst nach der Bewegung.
-        let _ma: bool = minimize_anim(state, i)
+        let _ma: bool = wmanimctl.minimize_anim(state, i)
         return
     }
     let auf: bool = (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) == 0
@@ -7559,7 +7494,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
                     return
                 }
                 // r1014: terminal tabs: a press on an inactive tab, a tab's 'x' or the '+' is the strip's, not the title bar's
-                if lokal_y < 0 && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && tt_press(state, i, x, y) {
+                if lokal_y < 0 && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && wmtabctl.tt_press(state, i, x, y) {
                     return
                 }
                 // r454: the strip of a window that paints its own title bar. The empty part (the drag region the program
@@ -7847,7 +7782,7 @@ fn poll(state: u64) -> bool {
     // `kbd.irq` fuellt, wenn Alt gehalten wird -- der Fensterserver
     // HOLT sie ab, statt dass die Tastatur ihn kennt.
     hotkeys(state)
-    sw_tick(state) // W1d: Alt released -> the Alt+Tab switcher commits
+    wmswitchctl.sw_tick(state) // W1d: Alt released -> the Alt+Tab switcher commits
     dnd_tick(state) // W-DND: hover-raise after the delay
     // DER RUECKFALL AUF ABFRAGE, und er steht hier mit Begruendung.
     //
@@ -8003,7 +7938,7 @@ fn term_key(state: u64, c: u64, shift: bool) -> bool {
     // r1014 tabs: Ctrl+Shift+T new tab, Ctrl+Shift+W close, Ctrl+Tab / Ctrl+Shift+Tab next / previous
     if c == 9 {
         if wmtabs.tt_grouped(state, f) {
-            tt_step(state, f, !shift)
+            wmtabctl.tt_step(state, f, !shift)
             return true
         }
         return false
@@ -8013,7 +7948,7 @@ fn term_key(state: u64, c: u64, shift: bool) -> bool {
         return true
     }
     if shift && (c == 87 || c == 119) {
-        tt_close_tab(state, f)
+        wmtabctl.tt_close_tab(state, f)
         return true
     }
     if shift {
@@ -10165,7 +10100,7 @@ fn win_arrow(state: u64, key: u64) -> bool {
         if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) != 0 {
             return maximize(state, i, false)
         }
-        return minimize_anim(state, i)
+        return wmanimctl.minimize_anim(state, i)
     }
     return false
 }
@@ -10287,102 +10222,7 @@ fn hotkeys(state: u64) -> u64 {
     }
     return n
 }
-
-fn next_window(state: u64, von: u64) -> bool {
-    var k: u64 = 1
-    while k <= wmbase.MAX_WIN {
-        let j: u64 = (von + k) % wmbase.MAX_WIN
-        if wmswitch.wechselbar(state, j) && j != von {
-            wmcore.raise_win(state, j)
-            wmcore.set_focus(state, j)
-            wmdamage.damage_win(state, j)
-            return true
-        }
-        k = k + 1
-    }
-    return false
-}
-
-fn prev_window(state: u64, von: u64) -> bool {
-    var k: u64 = 1
-    while k <= wmbase.MAX_WIN {
-        let j: u64 = (von + wmbase.MAX_WIN - (k % wmbase.MAX_WIN)) % wmbase.MAX_WIN
-        if wmswitch.wechselbar(state, j) && j != von {
-            wmcore.raise_win(state, j)
-            wmcore.set_focus(state, j)
-            wmdamage.damage_win(state, j)
-            return true
-        }
-        k = k + 1
-    }
-    return false
-}
 const ACT_PREV_WIN: u64 = 64
-
-fn sw_commit(state: u64) {
-    if wmswitch.sw_open == 0 {
-        return
-    }
-    wmswitch.sw_say(state, 2)
-    var j: u64 = wmbase.MAX_WIN
-    if wmswitch.sw_sel < wmswitch.sw_n {
-        j = wmswitch.sw_list[wmswitch.sw_sel as usize]
-    }
-    wmswitch.sw_close(state)
-    if j < wmbase.MAX_WIN && wmswitch.sw_minimized(state, j) {
-        wmcore.set_hidden(state, j, false) // X1: a minimized tile restores the window
-    }
-    if j < wmbase.MAX_WIN && wmswitch.wechselbar(state, j) {
-        wmcore.raise_win(state, j)
-        wmcore.set_focus(state, j)
-        wmdamage.damage_win(state, j)
-        wmswitch.sw_commits = wmswitch.sw_commits + 1
-    }
-}
-
-// one Alt+Tab (back = false) or Alt+Shift+Tab (back = true). Returns true if the panel is (or was just) open.
-fn sw_step(state: u64, back: bool) -> bool {
-    if wmswitch.sw_open == 0 {
-        wmswitch.sw_build(state)
-        if wmswitch.sw_n < 2 {
-            return false
-        }
-        if back {
-            wmswitch.sw_sel = wmswitch.sw_n - 1
-        } else {
-            wmswitch.sw_sel = 1
-        }
-        wmswitch.sw_open = 1
-        wmswitch.sw_say(state, 0)
-        wmswitch.sw_damage(state)
-        if !wmswitch.sw_alt_held(state) {
-            sw_commit(state)
-        }
-        return true
-    }
-    if back {
-        wmswitch.sw_sel = (wmswitch.sw_sel + wmswitch.sw_n - 1) % wmswitch.sw_n
-    } else {
-        wmswitch.sw_sel = (wmswitch.sw_sel + 1) % wmswitch.sw_n
-    }
-    wmswitch.sw_say(state, 1)
-    wmswitch.sw_damage(state)
-    return true
-}
-
-// once per tick: Alt released -> switch; screen locked -> close; the list lost windows -> drop them
-fn sw_tick(state: u64) {
-    if wmswitch.sw_open == 0 {
-        return
-    }
-    if wmgate.lock_active(state) {
-        wmswitch.sw_cancel(state)
-        return
-    }
-    if !wmswitch.sw_alt_held(state) {
-        sw_commit(state)
-    }
-}
 
 fn paint_switcher(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     if wmswitch.sw_open == 0 || wmswitch.sw_n == 0 {
@@ -10493,22 +10333,6 @@ fn paint_switcher(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         t = t + 1
     }
 }
-fn swipe_do(state: u64, dir: u64, n: u64) -> bool {
-    if n < 3 || !wmbase.ready(state) || wmgate.lock_active(state) || wmtrust.td_live(state) {
-        return false
-    }
-    let i: u64 = wmbase.focus(state)
-    var moved: bool = false
-    if dir == 1 {
-        moved = next_window(state, i)
-    } else if dir == 2 {
-        moved = prev_window(state, i)
-    }
-    if moved {
-        wmswitch.sw_done = wmswitch.sw_done + 1
-    }
-    return moved
-}
 
 // W-TPSET2: a touchpad gesture action (lib/touchgest A_*, already resolved from the swipe mode in hidin) that
 // the window server owns: 1 = next window, 2 = previous window (same focus walk as Alt+Tab / Alt+Shift+Tab).
@@ -10516,10 +10340,10 @@ fn swipe_do(state: u64, dir: u64, n: u64) -> bool {
 // exist yet, so those codes (3, 6, 7) do nothing. Never while the screen is locked or the trusted dialog is up.
 fn gest_action(state: u64, act: u64, n: u64) -> bool {
     if act == 1 {
-        return swipe_do(state, 1, n)
+        return wmswitchctl.swipe_do(state, 1, n)
     }
     if act == 2 {
-        return swipe_do(state, 2, n)
+        return wmswitchctl.swipe_do(state, 2, n)
     }
     return false
 }
@@ -10565,7 +10389,7 @@ fn tile_action(state: u64, act: u64) -> bool {
         if !wmbase.deko(state, i) || wmlayout.wg(state, i, wmlayout.W_LAYER) != wmlayout.L_NORMAL || !wmgate.input_allowed(state, i) {
             return false
         }
-        return close_anim(state, i)
+        return wmanimctl.close_anim(state, i)
     }
     if act == tile.A_FLOAT {
         return tile_float(state, i)
@@ -10590,10 +10414,10 @@ fn tile_action(state: u64, act: u64) -> bool {
     // durch den Baum: ab dem Fenster mit dem Fokus aufwaerts, im Kreis,
     // und nimmt das erste, das ein Mensch auch anklicken koennte.
     if act == tile.A_NEXT_WIN {
-        return sw_step(state, false)
+        return wmswitchctl.sw_step(state, false)
     }
     if act == ACT_PREV_WIN {
-        return sw_step(state, true)
+        return wmswitchctl.sw_step(state, true)
     }
     // ================================================== RUNDE VOLLBILD
     // F11 UMSCHALTEN. Steht aus demselben Grund hier oben wie Alt+Tab:
@@ -10721,185 +10545,3 @@ fn say_mag(state: u64) {
 }
 const CV_DRAWN: u64 = 12 // key of the text the overlay drew last
 const CV_DRAWS: u64 = 15 // overlay paints since boot
-
-// the tab that comes forward takes over place, size and maximised state of the one that goes back
-fn tt_sync(state: u64, from: u64, to: u64) {
-    if !wmbase.valid(state, from) || !wmbase.valid(state, to) {
-        return
-    }
-    let mx: u64 = wmlayout.wg(state, from, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED
-    wmlayout.wsv(state, to, wmlayout.W_FLAGS, (wmlayout.wg(state, to, wmlayout.W_FLAGS) & ~wmlayout.F_MAXIMIZED) | mx)
-    wmlayout.wsv(state, to, wmlayout.W_SAVXY, wmlayout.wg(state, from, wmlayout.W_SAVXY))
-    wmlayout.wsv(state, to, wmlayout.W_SAVWH, wmlayout.wg(state, from, wmlayout.W_SAVWH))
-    // W-X2: the way back of a maximised window lives in W_SAVE; without it the tab that comes forward restored to 0x0 at -4096,-4096 (gone)
-    wmlayout.wsv(state, to, wmlayout.W_SAVE, wmlayout.wg(state, from, wmlayout.W_SAVE))
-    let w: u64 = wmlayout.wg(state, from, wmlayout.W_W)
-    let h: u64 = wmlayout.wg(state, from, wmlayout.W_H)
-    if wmlayout.wg(state, to, wmlayout.W_W) != w || wmlayout.wg(state, to, wmlayout.W_H) != h {
-        let _r: bool = wmcore.resize_win(state, to, w, h)
-    }
-    wmcore.move_win(state, to, wmbase.win_x(state, from), wmbase.win_y(state, from))
-}
-
-// bring tab `to` forward (and put the shown one of its group back)
-fn tt_switch(state: u64, to: u64) {
-    let g: u64 = wmtabs.tt_grp_of(state, to)
-    if g == 0 {
-        return
-    }
-    let from: u64 = wmtabs.tt_active(state, g)
-    if from == to {
-        return
-    }
-    tt_sync(state, from, to)
-    wmtabs.tt_bg[(to) as usize] = 0
-    wmcore.set_hidden(state, to, false)
-    wmcore.raise_win(state, to)
-    if from < wmbase.MAX_WIN {
-        wmtabs.tt_bg[(from) as usize] = 1
-        wmcore.set_hidden(state, from, true)
-    }
-    wmcore.set_focus(state, to)
-    wmtabs.tt_cnt[6] = wmtabs.tt_cnt[6] + 1
-    wmtabs.tt_say(state, 1, to, g)
-    wmbase.damage_all(state)
-}
-
-fn tt_step(state: u64, i: u64, fwd: bool) {
-    let g: u64 = wmtabs.tt_grp_of(state, i)
-    let n: u64 = wmtabs.tt_count(state, g)
-    if g == 0 || n < 2 {
-        return
-    }
-    let p: u64 = wmtabs.tt_pos(state, g, i)
-    var q: u64 = 0
-    if fwd {
-        q = (p + 1) % n
-    } else {
-        q = (p + n - 1) % n
-    }
-    let t: u64 = wmtabs.tt_nth(state, g, q)
-    if t < wmbase.MAX_WIN {
-        tt_switch(state, t)
-    }
-}
-
-fn tt_close_tab(state: u64, i: u64) {
-    if !wmbase.valid(state, i) {
-        return
-    }
-    wmtabs.tt_cnt[7] = wmtabs.tt_cnt[7] + 1
-    wmtabs.tt_say(state, 2, i, wmtabs.tt_grp_of(state, i))
-    wmevent.ev_push(state, i, wmlayout.E_CLOSE, 0, 0, 0)
-    wmcore.destroy(state, i)
-}
-
-// called by `destroy` before the window goes: a shown tab leaves, the one before it (or the next) comes forward
-fn tt_forget(state: u64, i: u64) {
-    if i >= 32 {
-        return
-    }
-    let g: u64 = wmtabs.tt_grp[(i) as usize]
-    if g == 0 {
-        return
-    }
-    if wmtabs.tt_bg[(i) as usize] == 0 && wmtabs.tt_count(state, g) >= 2 {
-        let p: u64 = wmtabs.tt_pos(state, g, i)
-        var q: u64 = 1
-        if p > 0 {
-            q = p - 1
-        }
-        let s: u64 = wmtabs.tt_nth(state, g, q)
-        if s < wmbase.MAX_WIN && s != i {
-            tt_sync(state, i, s)
-            wmtabs.tt_bg[(s) as usize] = 0
-            wmcore.set_hidden(state, s, false)
-            wmcore.raise_win(state, s)
-        }
-    }
-    wmtabs.tt_grp[(i) as usize] = 0
-    wmtabs.tt_ord[(i) as usize] = 0
-    wmtabs.tt_bg[(i) as usize] = 0
-}
-
-// window `n` (just made) becomes the shown tab of the group of `src`
-fn tt_join(state: u64, n: u64, src: u64) {
-    if n >= 32 || src >= 32 || n == src || !wmbase.valid(state, n) || !wmbase.valid(state, src) {
-        return
-    }
-    var g: u64 = wmtabs.tt_grp[(src) as usize]
-    if g == 0 {
-        wmtabs.tt_cnt[0] = wmtabs.tt_cnt[0] + 1
-        g = wmtabs.tt_cnt[0]
-        wmtabs.tt_grp[(src) as usize] = g
-        wmtabs.tt_cnt[1] = wmtabs.tt_cnt[1] + 1
-        wmtabs.tt_ord[(src) as usize] = wmtabs.tt_cnt[1]
-    }
-    wmtabs.tt_cnt[1] = wmtabs.tt_cnt[1] + 1
-    wmtabs.tt_grp[(n) as usize] = g
-    wmtabs.tt_ord[(n) as usize] = wmtabs.tt_cnt[1]
-    wmtabs.tt_bg[(n) as usize] = 0
-    wmlayout.wsv(state, n, wmlayout.W_FLAGS, (wmlayout.wg(state, n, wmlayout.W_FLAGS) & ~wmlayout.F_MAXIMIZED) | (wmlayout.wg(state, src, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED))
-    wmlayout.wsv(state, n, wmlayout.W_SAVXY, wmlayout.wg(state, src, wmlayout.W_SAVXY))
-    wmlayout.wsv(state, n, wmlayout.W_SAVWH, wmlayout.wg(state, src, wmlayout.W_SAVWH))
-    wmlayout.wsv(state, n, wmlayout.W_SAVE, wmlayout.wg(state, src, wmlayout.W_SAVE))
-    wmtabs.tt_bg[(src) as usize] = 1
-    wmcore.set_hidden(state, src, true)
-    wmtabs.tt_cnt[5] = wmtabs.tt_cnt[5] + 1
-    wmtabs.tt_cnt[2] = 0
-    wmtabs.tt_cnt[4] = 0
-    wmtabs.tt_say(state, 0, n, g)
-    wmbase.damage_all(state)
-}
-
-// a left press on the title bar of terminal window `i` at screen (x, y). True = consumed (a tab, its 'x', the '+').
-// The shown tab itself and the empty bar are NOT consumed: they stay the window's title bar (drag, double click).
-fn tt_press(state: u64, i: u64, x: i64, y: i64) -> bool {
-    if i >= 32 || !wmbase.valid(state, i) || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
-        return false
-    }
-    let ry: i64 = y - wmbase.win_y(state, i)
-    if ry < wmgeom.border(state) as i64 || ry >= wmgeom.title_h(state) as i64 - 1 {
-        return false
-    }
-    let lx: i64 = x - wmbase.win_x(state, i)
-    let g: u64 = wmtabs.tt_grp_of(state, i)
-    let n: u64 = wmtabs.tt_count(state, g)
-    let lo: i64 = wmtabs.tt_lo(state)
-    let sq: i64 = wmtabs.tt_sq(state)
-    if n >= 2 {
-        let tw: i64 = wmtabs.tt_tabw(state, i, n)
-        let uk: i64 = wmgeom.uisc(state) as i64
-        var k: u64 = 0
-        while k < n {
-            let x0: i64 = lo + (k as i64) * tw
-            let x1: i64 = x0 + tw - 2 * uk
-            if lx >= x0 && lx < x1 {
-                let wi: u64 = wmtabs.tt_nth(state, g, k)
-                if lx >= x1 - sq {
-                    tt_close_tab(state, wi)
-                    return true
-                }
-                if wi != i {
-                    tt_switch(state, wi)
-                    return true
-                }
-                return false
-            }
-            k = k + 1
-        }
-        let px0: i64 = lo + (n as i64) * tw
-        if lx >= px0 && lx < px0 + sq {
-            wmtabs.tt_request(state, i)
-            return true
-        }
-        return false
-    }
-    // a lone terminal: only the '+' at the right end of the bar
-    let hi: i64 = wmtabs.tt_hi(state, i)
-    if lx >= hi - sq && lx < hi {
-        wmtabs.tt_request(state, i)
-        return true
-    }
-    return false
-}
