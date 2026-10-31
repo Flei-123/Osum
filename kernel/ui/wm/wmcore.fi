@@ -1,0 +1,722 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ui.frameprof
+import lib.kstate
+import mm.mem
+import serial
+import fs.unixsock
+import ui.wm.wmanim
+import ui.wm.wmbase
+import ui.wm.wmdamage
+import ui.wm.wmdraw
+import ui.wm.wmevent
+import ui.wm.wmgeom
+import ui.wm.wmhooks
+import ui.wm.wmlayout
+import ui.wmplug
+import ui.wm.wmshared
+import ui.wm.wmterm
+import ui.wm.wmtermwin
+
+fn layer_rank(l: u64) -> u64 {
+    if l == wmlayout.L_FLOAT {
+        return 3
+    }
+    return l * 2
+}
+
+const APP_LEN: u64 = 24
+
+fn count(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_COUNT)
+}
+
+fn win_deco(state: u64, i: u64) -> bool {
+    if i >= wmbase.MAX_WIN {
+        return false
+    }
+    return wmbase.deko(state, i)
+}
+
+fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
+    kind: u64, title: u64) -> u64 {
+    return create_ex(state, owner, x, y, w, h, kind, title, 0, 0, 0)
+}
+
+fn create_ex(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
+    kind: u64, title: u64, sbase: u64, sbytes: u64, sidx: u64) -> u64 {
+    if !wmbase.ready(state) || w < 32 || h < 16 || w > wmgeom.MAX_W_HARD
+        || h > wmgeom.MAX_H_HARD {
+        return wmbase.MAX_WIN
+    }
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if wmlayout.wg(state, i, wmlayout.W_USED) == 0 {
+            let bytes: u64 = w * h * 4
+            var rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+            var buf: u64 = 0
+            var kshm: u64 = 0
+            if sbase != 0 {
+                if sbytes < bytes || kind == wmlayout.K_TERM {
+                    return wmbase.MAX_WIN
+                }
+                buf = sbase
+                rahmen = sbytes / mem.FRAME_SIZE
+            } else {
+
+                if kind == wmlayout.K_TERM {
+                    kshm = wmshared.kern_shared(state, bytes)
+                    if kshm != 0 {
+                        buf = unixsock.shm_frame(state, kshm - 1, 0)
+                        rahmen = unixsock.shm_pages(state, kshm - 1)
+                    }
+                }
+                if buf == 0 {
+                    buf = mem.frame_run(state, rahmen)
+                }
+            }
+            if buf == 0 {
+                return wmbase.MAX_WIN
+            }
+            wmlayout.wsv(state, i, wmlayout.W_USED, 1)
+            wmlayout.wsv(state, i, wmlayout.W_ANK, 0)
+            wmlayout.wsv(state, i, wmlayout.W_ANMS, 0)
+            wmlayout.wsv(state, i, wmlayout.W_ID, wmlayout.gs(state, wmlayout.S_NEXTID))
+            wmlayout.ss(state, wmlayout.S_NEXTID, wmlayout.gs(state, wmlayout.S_NEXTID) + 1)
+            wmlayout.wsv(state, i, wmlayout.W_OWNER, owner)
+
+            var wy: i64 = y
+            let oben: i64 = wmlayout.gs(state, wmlayout.S_WORK_Y) as i64
+            if wy < oben {
+                wy = oben
+            }
+            wmlayout.wsv(state, i, wmlayout.W_X, x as u64)
+            wmlayout.wsv(state, i, wmlayout.W_Y, wy as u64)
+            wmlayout.wsv(state, i, wmlayout.W_W, w)
+            wmlayout.wsv(state, i, wmlayout.W_H, h)
+            wmlayout.wsv(state, i, wmlayout.W_BUF, buf)
+            wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, rahmen * mem.FRAME_SIZE)
+            wmlayout.wsv(state, i, wmlayout.W_SHM, 0)
+            wmlayout.wsv(state, i, wmlayout.W_CURSOR, 0)
+            wmlayout.wsv(state, i, wmlayout.W_BL_MEAN, 0)
+            wmlayout.wsv(state, i, wmlayout.W_BL_RUNS, 0)
+            wmlayout.wsv(state, i, wmlayout.W_BL_HITS, 0)
+            if sbase != 0 {
+                unixsock.shm_ref(state, sidx)
+                wmlayout.wsv(state, i, wmlayout.W_SHM, sidx + 1)
+                wmlayout.ss(state, wmlayout.S_SH_ATT, wmlayout.gs(state, wmlayout.S_SH_ATT) + 1)
+            } else if kshm != 0 {
+
+                wmlayout.wsv(state, i, wmlayout.W_SHM, kshm)
+                wmlayout.ss(state, wmlayout.S_TM_SH, wmlayout.gs(state, wmlayout.S_TM_SH) + 1)
+            }
+            wmlayout.wsv(state, i, wmlayout.W_KIND, kind)
+            wmlayout.wsv(state, i, wmlayout.W_EHEAD, 0)
+            wmlayout.wsv(state, i, wmlayout.W_ETAIL, 0)
+            wmlayout.wsv(state, i, wmlayout.W_FG, wmbase.deco(state, wmlayout.DK_TERM_FG))
+            wmlayout.wsv(state, i, wmlayout.W_BG, wmbase.deco(state, wmlayout.DK_TERM_BG))
+            wmlayout.wsv(state, i, wmlayout.W_GRID, 0)
+            wmlayout.wsv(state, i, wmlayout.W_KEYS, 0)
+            wmlayout.wsv(state, i, wmlayout.W_LAYER, wmlayout.L_NORMAL)
+            wmlayout.wsv(state, i, wmlayout.W_FLAGS, 0)
+            wmlayout.wsv(state, i, wmlayout.W_STRUT, 0)
+            wmlayout.wsv(state, i, wmlayout.W_SAVE, 0)
+
+            let _cl: bool = set_app(state, i, 0)
+
+            wmlayout.wsv(state, i, wmlayout.W_SWX, 0)
+            wmlayout.wsv(state, i, wmlayout.W_SWY, 0)
+            wmlayout.wsv(state, i, wmlayout.W_SWOFF, 0)
+
+            wmlayout.wsv(state, i, wmlayout.W_OPAC, 0)
+            wmlayout.wsv(state, i, wmlayout.W_DRAGX, 0)
+            wmlayout.wsv(state, i, wmlayout.W_DXLAST, 0)
+            wmlayout.wsv(state, i, wmlayout.W_DYLAST, 0)
+            wmlayout.wsv(state, i, wmlayout.W_Z, wmlayout.gs(state, wmlayout.S_COUNT))
+            wmlayout.ss(state, wmlayout.S_COUNT, wmlayout.gs(state, wmlayout.S_COUNT) + 1)
+
+            raise_win(state, i)
+            set_title(state, i, title)
+            wmdraw.fill(state, i, 0, 0, w, h, wmlayout.wg(state, i, wmlayout.W_BG))
+            if kind == wmlayout.K_TERM {
+                wmtermwin.term_setup(state, i)
+            }
+            set_focus(state, i)
+            wmdamage.damage_win(state, i)
+            wmhooks.fire_create(state, i)
+
+            wmplug.notify(state, wmplug.E_WIN_OPEN, wmlayout.wg(state, i, wmlayout.W_ID),
+                wmlayout.wg(state, i, wmlayout.W_LAYER), 0)
+            return i
+        }
+        i = i + 1
+    }
+    return wmbase.MAX_WIN
+}
+
+fn set_app(state: u64, i: u64, p: u64) -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+    var k: u64 = 0
+    while k < APP_LEN - 1 {
+        var c: u64 = 0
+        if p != 0 {
+            c = kstate.get8(p + k)
+        }
+        kstate.set8(state + wmlayout.wat(i) + wmlayout.W_APP + k, c as u8)
+        if c == 0 {
+            k = APP_LEN - 1
+        } else {
+            k = k + 1
+        }
+    }
+    kstate.set8(state + wmlayout.wat(i) + wmlayout.W_APP + APP_LEN - 1, 0 as u8)
+    return true
+}
+
+fn win_app(state: u64, i: u64) -> u64 {
+    if i >= wmbase.MAX_WIN {
+        return 0
+    }
+    return state + wmlayout.wat(i) + wmlayout.W_APP
+}
+
+fn set_title(state: u64, i: u64, p: u64) {
+    var k: u64 = 0
+    while k < 31 {
+        var c: u64 = 0
+        if p != 0 {
+            c = kstate.get8(p + k)
+        }
+        kstate.set8(state + wmlayout.wat(i) + wmlayout.W_TITLE + k, c as u8)
+        if c == 0 {
+            k = 31
+        } else {
+            k = k + 1
+        }
+    }
+    kstate.set8(state + wmlayout.wat(i) + wmlayout.W_TITLE + 31, 0 as u8)
+}
+
+fn destroy(state: u64, i: u64) -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+    frameprof.reset(i)
+    wmhooks.fire_destroy(state, i)
+    wmdamage.damage_win(state, i)
+    wmplug.notify(state, wmplug.E_WIN_CLOSE, wmlayout.wg(state, i, wmlayout.W_ID), 0, 0)
+
+    let z: u64 = wmlayout.wg(state, i, wmlayout.W_Z)
+
+    let hatte_strut: bool = wmlayout.wg(state, i, wmlayout.W_STRUT) != 0
+    wmlayout.wsv(state, i, wmlayout.W_STRUT, 0)
+    wmlayout.wsv(state, i, wmlayout.W_USED, 0)
+    wmlayout.wsv(state, i, wmlayout.W_ANK, 0)
+    wmlayout.wsv(state, i, wmlayout.W_ANMS, 0)
+    if wmlayout.wg(state, i, wmlayout.W_BUF) != 0 {
+        if wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
+
+            unixsock.shm_unref(state, wmlayout.wg(state, i, wmlayout.W_SHM) - 1)
+            wmlayout.wsv(state, i, wmlayout.W_SHM, 0)
+        } else {
+            mem.frame_free_run(state, wmlayout.wg(state, i, wmlayout.W_BUF),
+                wmlayout.wg(state, i, wmlayout.W_BUFBYTES) / mem.FRAME_SIZE)
+        }
+        wmlayout.wsv(state, i, wmlayout.W_BUF, 0)
+    }
+    if wmlayout.wg(state, i, wmlayout.W_GRID) != 0 {
+        mem.frame_free_run(state, wmlayout.wg(state, i, wmlayout.W_GRID), wmtermwin.TG_FRAMES)
+        wmlayout.wsv(state, i, wmlayout.W_GRID, 0)
+    }
+    wmterm.sb_free(state, i)
+
+    var k: u64 = 0
+    while k < wmbase.MAX_WIN {
+        if wmlayout.wg(state, k, wmlayout.W_USED) != 0 && wmlayout.wg(state, k, wmlayout.W_Z) > z {
+            wmlayout.wsv(state, k, wmlayout.W_Z, wmlayout.wg(state, k, wmlayout.W_Z) - 1)
+        }
+        k = k + 1
+    }
+    wmlayout.ss(state, wmlayout.S_COUNT, wmlayout.gs(state, wmlayout.S_COUNT) - 1)
+    if wmbase.focus(state) == i {
+        wmlayout.ss(state, wmlayout.S_FOCUS, 0)
+
+        let o: u64 = top_visible(state)
+        if o < wmbase.MAX_WIN {
+            set_focus(state, o)
+        }
+    }
+    if wmlayout.gs(state, wmlayout.S_DRAG) == i + 1 {
+        wmlayout.ss(state, wmlayout.S_DRAG, 0)
+    }
+    if wmlayout.gs(state, wmlayout.S_SIZING) == i + 1 {
+        wmlayout.ss(state, wmlayout.S_SIZING, 0)
+    }
+
+    if wmlayout.gs(state, wmlayout.S_CAPHOV) != 0 && (wmlayout.gs(state, wmlayout.S_CAPHOV) - 1) / 4 == i {
+        wmlayout.ss(state, wmlayout.S_CAPHOV, 0)
+    }
+
+    wmlayout.wsv(state, i, wmlayout.W_W, 0)
+    wmlayout.wsv(state, i, wmlayout.W_H, 0)
+    wmlayout.wsv(state, i, wmlayout.W_COLS, 0)
+    wmlayout.wsv(state, i, wmlayout.W_ROWS, 0)
+    wmlayout.wsv(state, i, wmlayout.W_CX, 0)
+    wmlayout.wsv(state, i, wmlayout.W_CY, 0)
+    wmlayout.wsv(state, i, wmlayout.W_KIND, 0)
+    wmlayout.wsv(state, i, wmlayout.W_CURSOR, 0)
+    wmlayout.wsv(state, i, wmlayout.W_BL_MEAN, 0)
+    wmlayout.wsv(state, i, wmlayout.W_BL_RUNS, 0)
+    wmlayout.wsv(state, i, wmlayout.W_BL_HITS, 0)
+    wmlayout.wsv(state, i, wmlayout.W_EHEAD, 0)
+    wmlayout.wsv(state, i, wmlayout.W_ETAIL, 0)
+    if hatte_strut {
+        wmhooks.fire_workarea(state)
+    }
+    return true
+}
+
+fn close_top(state: u64) -> u64 {
+    let i: u64 = top_visible(state)
+    if i >= wmbase.MAX_WIN {
+        return wmbase.MAX_WIN
+    }
+    wmevent.ev_push(state, i, wmlayout.E_CLOSE, 0, 0, 0)
+    destroy(state, i)
+    return i
+}
+
+fn close_term(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
+            wmevent.ev_push(state, i, wmlayout.E_CLOSE, 0, 0, 0)
+            destroy(state, i)
+            return i
+        }
+        i = i + 1
+    }
+    return wmbase.MAX_WIN
+}
+
+fn topmost(state: u64) -> u64 {
+    var beste: u64 = wmbase.MAX_WIN
+    var bz: u64 = 0
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 {
+            if beste == wmbase.MAX_WIN || wmlayout.wg(state, i, wmlayout.W_Z) >= bz {
+                beste = i
+                bz = wmlayout.wg(state, i, wmlayout.W_Z)
+            }
+        }
+        i = i + 1
+    }
+    return beste
+}
+
+fn top_visible(state: u64) -> u64 {
+    var beste: u64 = wmbase.MAX_WIN
+    var bz: u64 = 0
+    var i: u64 = 0
+    while i < wmbase.MAX_WIN {
+        if wmlayout.wg(state, i, wmlayout.W_USED) != 0 && wmlayout.wg(state, i, wmlayout.W_LAYER) == wmlayout.L_NORMAL {
+            if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) == 0 {
+                if beste == wmbase.MAX_WIN || wmlayout.wg(state, i, wmlayout.W_Z) >= bz {
+                    beste = i
+                    bz = wmlayout.wg(state, i, wmlayout.W_Z)
+                }
+            }
+        }
+        i = i + 1
+    }
+    return beste
+}
+
+fn zslot(state: u64, l: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < wmbase.MAX_WIN {
+        if wmlayout.wg(state, k, wmlayout.W_USED) != 0 && layer_rank(wmlayout.wg(state, k, wmlayout.W_LAYER)) <= layer_rank(l) {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn move_to_z(state: u64, i: u64, ziel: u64) {
+    let z: u64 = wmlayout.wg(state, i, wmlayout.W_Z)
+    if ziel == z || ziel >= wmlayout.gs(state, wmlayout.S_COUNT) {
+        return
+    }
+    var k: u64 = 0
+    while k < wmbase.MAX_WIN {
+        if wmlayout.wg(state, k, wmlayout.W_USED) != 0 && k != i {
+            let kz: u64 = wmlayout.wg(state, k, wmlayout.W_Z)
+            if z < ziel {
+                if kz > z && kz <= ziel {
+                    wmlayout.wsv(state, k, wmlayout.W_Z, kz - 1)
+                }
+            } else {
+                if kz >= ziel && kz < z {
+                    wmlayout.wsv(state, k, wmlayout.W_Z, kz + 1)
+                }
+            }
+        }
+        k = k + 1
+    }
+    wmlayout.wsv(state, i, wmlayout.W_Z, ziel)
+    wmdamage.damage_win(state, i)
+}
+
+fn raise_win(state: u64, i: u64) {
+    if !wmbase.valid(state, i) {
+        return
+    }
+    var ziel: u64 = wmlayout.gs(state, wmlayout.S_COUNT) - 1
+    if wmlayout.gs(state, wmlayout.S_NOLAYER) == 0 {
+        ziel = zslot(state, wmlayout.wg(state, i, wmlayout.W_LAYER)) - 1
+    }
+    move_to_z(state, i, ziel)
+}
+
+static mut layer_guard: u64 = 0
+
+fn set_layer(state: u64, i: u64, l: u64) {
+    if !wmbase.valid(state, i) || l > wmlayout.L_MAX {
+        return
+    }
+    if wmlayout.wg(state, i, wmlayout.W_LAYER) == l {
+        return
+    }
+    wmlayout.wsv(state, i, wmlayout.W_LAYER, l)
+    if l != wmlayout.L_NORMAL && l != wmlayout.L_FULL && l != wmlayout.L_FLOAT && wmlayout.wg(state, i, wmlayout.W_NODE) != 0 {
+        wmhooks.fire_layer_leave(state, i)
+    }
+    layer_guard = i + 1
+
+    if l != wmlayout.L_NORMAL && l != wmlayout.L_FULL && wmbase.focus(state) == i
+        && (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_KEYS) == 0 {
+        wmlayout.ss(state, wmlayout.S_FOCUS, 0)
+
+        let before: u64 = wmlayout.gs(state, wmlayout.S_FOCUS_PREV)
+        if before != 0 && before - 1 != i && wmbase.valid(state, before - 1)
+            && (wmlayout.wg(state, before - 1, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) == 0 {
+            set_focus(state, before - 1)
+        } else {
+            let o: u64 = top_visible(state)
+            if o < wmbase.MAX_WIN {
+                set_focus(state, o)
+            }
+        }
+    }
+    layer_guard = 0
+    raise_win(state, i)
+    wmbase.damage_all(state)
+}
+
+fn set_hidden(state: u64, i: u64, h: bool) {
+    if !wmbase.valid(state, i) {
+        return
+    }
+    if wmlayout.gs(state, wmlayout.S_NOMIN) != 0 {
+        return
+    }
+    let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
+    if h {
+        if (f & wmlayout.F_HIDDEN) != 0 {
+            return
+        }
+        wmlayout.wsv(state, i, wmlayout.W_FLAGS, f | wmlayout.F_HIDDEN)
+
+        wmlayout.wsv(state, i, wmlayout.W_ANK, 0)
+        wmlayout.wsv(state, i, wmlayout.W_ANP, 1000)
+
+        wmlayout.wsv(state, i, wmlayout.W_SWX, 0)
+        wmlayout.wsv(state, i, wmlayout.W_SWY, 0)
+        wmlayout.wsv(state, i, wmlayout.W_SWOFF, 0)
+        wmlayout.ss(state, wmlayout.S_HIDES, wmlayout.gs(state, wmlayout.S_HIDES) + 1)
+
+        if wmlayout.wg(state, i, wmlayout.W_STRUT) != 0 {
+            wmhooks.fire_workarea(state)
+        }
+        wmdamage.damage_win(state, i)
+        if wmbase.focus(state) == i {
+            wmlayout.ss(state, wmlayout.S_FOCUS, 0)
+            let o: u64 = top_visible(state)
+            if o < wmbase.MAX_WIN {
+                set_focus(state, o)
+            }
+        }
+        if wmlayout.gs(state, wmlayout.S_DRAG) == i + 1 {
+            wmlayout.ss(state, wmlayout.S_DRAG, 0)
+        }
+        if wmlayout.gs(state, wmlayout.S_SIZING) == i + 1 {
+            wmlayout.ss(state, wmlayout.S_SIZING, 0)
+        }
+    } else {
+        if (f & wmlayout.F_HIDDEN) == 0 {
+            return
+        }
+        wmlayout.wsv(state, i, wmlayout.W_FLAGS, f & ~wmlayout.F_HIDDEN)
+
+        wmlayout.wsv(state, i, wmlayout.W_ANK, 0)
+        wmlayout.wsv(state, i, wmlayout.W_ANP, 1000)
+        wmlayout.ss(state, wmlayout.S_SHOWS, wmlayout.gs(state, wmlayout.S_SHOWS) + 1)
+        if wmlayout.wg(state, i, wmlayout.W_STRUT) != 0 {
+            wmhooks.fire_workarea(state)
+        }
+        wmdamage.damage_win(state, i)
+    }
+}
+
+fn set_deco(state: u64, i: u64, on: bool) {
+    if !wmbase.valid(state, i) {
+        return
+    }
+    let f: u64 = wmlayout.wg(state, i, wmlayout.W_FLAGS)
+    wmdamage.damage_win(state, i)
+    if on {
+        wmlayout.wsv(state, i, wmlayout.W_FLAGS, f & ~wmlayout.F_NODECO)
+    } else {
+        wmlayout.wsv(state, i, wmlayout.W_FLAGS, f | wmlayout.F_NODECO)
+    }
+    wmdamage.damage_win(state, i)
+}
+
+static mut fokus_still: u64 = 0
+
+fn popups_dismiss_on_focus(state: u64, target: u64) {
+    let layer: u64 = wmlayout.wg(state, target, wmlayout.W_LAYER)
+    if layer == wmlayout.L_POPUP || layer == wmlayout.L_TIP || layer == wmlayout.L_TOAST {
+        return
+    }
+    var j: u64 = 0
+    while j < wmbase.MAX_WIN {
+        if j != target && j + 1 != layer_guard && wmbase.valid(state, j) && wmlayout.wg(state, j, wmlayout.W_LAYER) == wmlayout.L_POPUP && (wmlayout.wg(state, j, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) == 0 {
+            wmevent.ev_push(state, j, wmlayout.E_CLOSE, 0, 0, 0)
+        }
+        j = j + 1
+    }
+}
+
+fn set_focus(state: u64, i: u64) {
+    if !wmbase.valid(state, i) {
+        return
+    }
+
+    if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_HIDDEN) != 0 {
+        return
+    }
+    let alt: u64 = wmbase.focus(state)
+    if alt == i {
+        return
+    }
+    popups_dismiss_on_focus(state, i)
+    if alt < wmbase.MAX_WIN {
+        wmdamage.damage_win(state, alt)
+        wmevent.ev_push(state, alt, wmlayout.E_FOCUS, 0, 0, 0)
+    }
+    if alt < wmbase.MAX_WIN {
+        wmlayout.ss(state, wmlayout.S_FOCUS_PREV, alt + 1)
+    }
+    wmlayout.ss(state, wmlayout.S_FOCUS, i + 1)
+    wmplug.notify(state, wmplug.E_FOCUS, wmlayout.wg(state, i, wmlayout.W_ID), 0, 0)
+
+    if fokus_still == 0 {
+        var s_fk: [u8; 14] = "wm: fokus id=\0"
+        var s_fv: [u8; 7] = " vor=\0\0"
+        serial.puts((&s_fk[0]) as u64)
+        serial.dec(wmlayout.wg(state, i, wmlayout.W_ID))
+        serial.puts((&s_fv[0]) as u64)
+        if alt < wmbase.MAX_WIN {
+            serial.dec(wmlayout.wg(state, alt, wmlayout.W_ID))
+        } else {
+            serial.dec(0)
+        }
+        serial.nl()
+    }
+    wmevent.ev_push(state, i, wmlayout.E_FOCUS, 0, 0, 1)
+
+    wmhooks.fire_focus(state, i)
+    wmdamage.damage_win(state, i)
+}
+
+fn move_win(state: u64, i: u64, x: i64, y: i64) {
+    if !wmbase.valid(state, i) {
+        return
+    }
+
+    let hebt: bool = wmanim.drag_paint_on(state, i)
+    if hebt {
+        wmanim.damage_win_lift(state, i)
+    } else {
+        wmdamage.damage_win(state, i)
+    }
+    wmlayout.wsv(state, i, wmlayout.W_X, x as u64)
+    wmlayout.wsv(state, i, wmlayout.W_Y, y as u64)
+    if hebt {
+        wmanim.damage_win_lift(state, i)
+    } else {
+        wmdamage.damage_win(state, i)
+    }
+    unter_leiste_messen(state, i)
+}
+
+fn unter_leiste_messen(state: u64, i: u64) {
+    let pw: u64 = wmbase.panel_win(state)
+    if pw >= wmbase.MAX_WIN || i == pw || !wmbase.valid(state, i) {
+        return
+    }
+    let px0: i64 = wmbase.win_x(state, pw)
+    let py0: i64 = wmbase.win_y(state, pw)
+    let px1: i64 = px0 + wmbase.outer_w(state, pw) as i64
+    let py1: i64 = py0 + wmbase.outer_h(state, pw) as i64
+    var a: i64 = wmbase.win_x(state, i)
+    var b: i64 = wmbase.win_y(state, i)
+    var c: i64 = a + wmbase.outer_w(state, i) as i64
+    var d: i64 = b + wmbase.outer_h(state, i) as i64
+    if a < px0 {
+        a = px0
+    }
+    if b < py0 {
+        b = py0
+    }
+    if c > px1 {
+        c = px1
+    }
+    if d > py1 {
+        d = py1
+    }
+    if c <= a || d <= b {
+        return
+    }
+    let f: u64 = ((c - a) * (d - b)) as u64
+    if f > wmlayout.gs(state, wmlayout.S_UNTERPX) {
+        wmlayout.ss(state, wmlayout.S_UNTERPX, f)
+
+        wmbase.schlieren_say(state)
+    }
+}
+
+fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
+    if !wmbase.valid(state, i) {
+        return false
+    }
+
+    var keep_buf: u64 = 0
+    var keep_w: u64 = 0
+    var keep_h: u64 = 0
+    var keep_free: u64 = 0
+    var min_w: u64 = 32
+    var min_h: u64 = 16
+    if !win_deco(state, i) {
+        min_w = 1
+        min_h = 1
+    }
+    if w < min_w || h < min_h || w > wmgeom.MAX_W_HARD || h > wmgeom.MAX_H_HARD {
+        return false
+    }
+
+    if wmlayout.wg(state, i, wmlayout.W_SHM) != 0 && wmlayout.wg(state, i, wmlayout.W_W) == w && wmlayout.wg(state, i, wmlayout.W_H) == h && wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM {
+        return true
+    }
+    if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM && wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
+
+        if !wmtermwin.term_fit(state, i, w * h * 4) {
+            return false
+        }
+    } else if wmlayout.wg(state, i, wmlayout.W_SHM) != 0 {
+
+        keep_buf = wmlayout.wg(state, i, wmlayout.W_BUF)
+        keep_w = wmlayout.wg(state, i, wmlayout.W_W)
+        keep_h = wmlayout.wg(state, i, wmlayout.W_H)
+        if !wmshared.detach_buf(state, i, w * h * 4) {
+            return false
+        }
+    } else if wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM && wmlayout.wg(state, i, wmlayout.W_BUF) != 0 && !resize_clear_an(state) {
+
+        let bytes: u64 = w * h * 4
+        let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+        let neu: u64 = mem.frame_run(state, rahmen)
+        if neu == 0 {
+            return false
+        }
+        keep_buf = wmlayout.wg(state, i, wmlayout.W_BUF)
+        keep_w = wmlayout.wg(state, i, wmlayout.W_W)
+        keep_h = wmlayout.wg(state, i, wmlayout.W_H)
+        keep_free = wmlayout.wg(state, i, wmlayout.W_BUFBYTES) / mem.FRAME_SIZE
+        wmlayout.wsv(state, i, wmlayout.W_BUF, neu)
+        wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, rahmen * mem.FRAME_SIZE)
+    } else if w * h * 4 > wmlayout.wg(state, i, wmlayout.W_BUFBYTES) {
+        let bytes: u64 = w * h * 4
+        let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+        let neu: u64 = mem.frame_run(state, rahmen)
+        if neu == 0 {
+            return false
+        }
+        wmlayout.wsv(state, i, wmlayout.W_BUF, neu)
+        wmlayout.wsv(state, i, wmlayout.W_BUFBYTES, rahmen * mem.FRAME_SIZE)
+    }
+    wmdamage.damage_win(state, i)
+    wmlayout.wsv(state, i, wmlayout.W_W, w)
+    wmlayout.wsv(state, i, wmlayout.W_H, h)
+
+    if (wmlayout.wg(state, i, wmlayout.W_SAVWH) >> 63) != 0 {
+        wmlayout.wsv(state, i, wmlayout.W_SAVWH, 0)
+    }
+    if wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM {
+        wmtermwin.term_setup(state, i)
+    } else if keep_buf != 0 && !resize_clear_an(state) {
+        keep_resized(state, i, keep_buf, keep_w, keep_h)
+        if keep_free != 0 {
+            mem.frame_free_run(state, keep_buf, keep_free)
+        }
+    } else {
+        wmdraw.fill(state, i, 0, 0, w, h, wmlayout.wg(state, i, wmlayout.W_BG))
+    }
+    wmevent.ev_push(state, i, wmlayout.E_RESIZE, w, h, 0)
+    wmdamage.damage_win(state, i)
+    return true
+}
+
+fn resize_clear_an(state: u64) -> bool {
+    return kstate.mode_on(state, kstate.M_RESCLEAR)
+}
+
+fn keep_resized(state: u64, i: u64, old: u64, ow: u64, oh: u64) {
+    let nw: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+    let nh: u64 = wmlayout.wg(state, i, wmlayout.W_H)
+    let nb: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
+    if nb == 0 || old == 0 {
+        wmdraw.fill(state, i, 0, 0, nw, nh, wmlayout.wg(state, i, wmlayout.W_BG))
+        return
+    }
+    var cw: u64 = ow
+    if nw < cw {
+        cw = nw
+    }
+    var ch: u64 = oh
+    if nh < ch {
+        ch = nh
+    }
+    var y: u64 = 0
+    while y < ch {
+        wmdraw.copy_words(nb +% y *% nw *% 4, old +% y *% ow *% 4, cw / 2)
+        if (cw & 1) != 0 {
+            __mmio_write32((nb +% y *% nw *% 4 +% (cw - 1) *% 4) as *mut u32,
+                __mmio_read32((old +% y *% ow *% 4 +% (cw - 1) *% 4) as *mut u32))
+        }
+        y = y + 1
+    }
+    if nw > cw {
+        wmdraw.fill(state, i, cw, 0, nw - cw, ch, wmlayout.wg(state, i, wmlayout.W_BG))
+    }
+    if nh > ch {
+        wmdraw.fill(state, i, 0, ch, nw, nh - ch, wmlayout.wg(state, i, wmlayout.W_BG))
+    }
+}
