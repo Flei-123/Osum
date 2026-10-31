@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import actwire
+import std.rt
+import std.fs
+import std.time
+import vaultd.vdctx
+import vaultd.vdreq
+import vaultd.vdsess
+
+export { u_start }
+
+const SVC_NAME: str = "orient.vault"
+const DEFAULT_ROOT: str = "/secrets"
+const LABEL_MAX: u64 = 32
+
+static mut FR: [u8; 64] = [0 as u8; 64]
+static mut META: [u64; 6] = [0 as u64; 6]
+
+fn wipe(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        actwire.st8(p, i, 0)
+        i = i + 1
+    }
+}
+
+fn reply_to(pid: u64, id: u64, out: *mut rt.Buf) {
+    var nm: [u8; 24] = [0 as u8; 24]
+    var pre: [u8; 3] = "r.\0"
+    let np: u64 = (&nm[0 as usize]) as u64
+    actwire.name_of((&pre[0 as usize]) as u64, pid, np)
+    let svc: u64 = actwire.bus_find(np)
+    if !ulib.bad(svc) {
+        actwire.send_msg(svc, actwire.K_REP, id, rt.buf_ptr(out), rt.buf_len(out) as u64)
+    }
+}
+
+fn serve_one(d: *mut vdctx.Daemon, s: u64, out: *mut rt.Buf) {
+    let pid: u64 = actwire.asm_pid(s)
+    let uid: u64 = actwire.asm_uid(s)
+    let id: u64 = actwire.asm_id(s)
+    var label: [u8; 32] = [0 as u8; 32]
+    let lp: u64 = (&label[0 as usize]) as u64
+    let ln: u64 = actwire.origin_of(pid, lp)
+    let now_ms: u64 = time.now_unix_ms() as u64
+    var c: vdctx.Ctx = vdctx.Ctx { now_s: now_ms / 1000, now_ms: now_ms, ticks: actwire.ticks() }
+    if ln == actwire.NONE || actwire.asm_over(s) {
+        rt.buf_clear(out)
+        rt.buf_push_bytes(out, "ok=0\nerr=denied\n".p as u64, 16)
+    } else {
+        let lbl: str = str { p: lp as *u8, n: ln as usize }
+        let req: str = str { p: actwire.asm_buf(s) as *u8, n: actwire.asm_len(s) as usize }
+        vdreq.handle(d, &c, uid, lbl, req, out)
+    }
+    reply_to(pid, id, out)
+    wipe(actwire.asm_buf(s), actwire.asm_len(s))
+    if rt.buf_len(out) > 0 {
+        wipe(rt.buf_ptr(out), rt.buf_len(out) as u64)
+    }
+}
+
+fn serve(root: str, limit: u64) -> u64 {
+    fs.mkdir_all(root) catch false
+    var d: vdctx.Daemon = vdctx.daemon_new(root, vdsess.kdf_default())
+    var name: [u8; 13] = "orient.vault\0"
+    if ulib.bad(actwire.bus_reg((&name[0 as usize]) as u64, actwire.A_ANY)) {
+        return 1
+    }
+    var out: rt.Buf = rt.buf_new()
+    let fp: u64 = (&FR[0 as usize]) as u64
+    let mp: u64 = (&META[0 as usize]) as u64
+    let t0: u64 = actwire.ticks()
+    while limit == 0 || actwire.ticks() - t0 < limit {
+        let n: u64 = actwire.bus_wait(fp, mp, 1000)
+        if !ulib.bad(n) && n > 0 {
+            let s: u64 = actwire.asm_feed(fp, mp)
+            if s != actwire.NONE {
+                if actwire.asm_kind(s) == actwire.K_REQ {
+                    serve_one(&d, s, &out)
+                }
+                actwire.asm_free(s)
+            }
+        }
+        vdctx.idle_lock(&d, (time.now_unix_ms() as u64) / 1000)
+    }
+    vdctx.lock_all(&d)
+    return 0
+}
+
+fn num_arg(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while actwire.ld8(p, i) >= 48 && actwire.ld8(p, i) <= 57 && v < 100000000 {
+        v = v * 10 + (actwire.ld8(p, i) - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn u_start(args: u64) -> u64 {
+    var root: str = DEFAULT_ROOT
+    var limit: u64 = 0
+    if ulib.arg_count(args) > 1 {
+        let p: u64 = ulib.arg_at(args, 1)
+        root = str { p: p as *u8, n: actwire.slen(p) as usize }
+    }
+    if ulib.arg_count(args) > 2 {
+        limit = num_arg(ulib.arg_at(args, 2))
+    }
+    return serve(root, limit)
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

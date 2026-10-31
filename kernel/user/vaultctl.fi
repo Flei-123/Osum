@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import actwire
+
+export { u_start }
+
+const R_OK: u64 = 0
+const R_FAIL: u64 = 1
+const R_NOBUS: u64 = 2
+
+static mut rep: [u8; 4096] = [0 as u8; 4096]
+static mut line: [u8; 512] = [0 as u8; 512]
+
+fn hex_push(src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let b: u64 = actwire.ld8(src, i)
+        let hi: u64 = b >> 4
+        let lo: u64 = b & 15
+        actwire.ob_ch(if hi < 10 { 48 + hi } else { 87 + hi })
+        actwire.ob_ch(if lo < 10 { 48 + lo } else { 87 + lo })
+        i = i + 1
+    }
+}
+
+fn is_hex_key(k: u64, kn: u64) -> bool {
+    var names: [u8; 52] = "pw\0new\0title\0origins\0username\0password\0notes\0origin\0"
+    var at: u64 = 0
+    while at < 51 {
+        let l: u64 = actwire.slen((&names[0 as usize]) as u64 + at)
+        if l == kn {
+            var same: bool = true
+            var i: u64 = 0
+            while i < kn {
+                if actwire.ld8(k, i) != actwire.ld8((&names[0 as usize]) as u64 + at, i) {
+                    same = false
+                }
+                i = i + 1
+            }
+            if same {
+                return true
+            }
+        }
+        at = at + l + 1
+    }
+    return false
+}
+
+fn read_secret() -> u64 {
+    let lp: u64 = (&line[0 as usize]) as u64
+    let n: u64 = io.read(0, lp, 511)
+    if ulib.bad(n) {
+        return 0
+    }
+    var m: u64 = n
+    while m > 0 && (actwire.ld8(lp, m - 1) == 10 || actwire.ld8(lp, m - 1) == 13) {
+        m = m - 1
+    }
+    return m
+}
+
+fn add_arg(a: u64) {
+    var kn: u64 = 0
+    while actwire.ld8(a, kn) != 0 && actwire.ld8(a, kn) != 61 {
+        kn = kn + 1
+    }
+    if actwire.ld8(a, kn) != 61 {
+        return
+    }
+    var i: u64 = 0
+    while i < kn {
+        actwire.ob_ch(actwire.ld8(a, i))
+        i = i + 1
+    }
+    actwire.ob_ch(61)
+    let v: u64 = a + kn + 1
+    let hexed: bool = is_hex_key(a, kn)
+    if hexed && actwire.ld8(v, 0) == 45 && actwire.ld8(v, 1) == 0 {
+        let n: u64 = read_secret()
+        hex_push((&line[0 as usize]) as u64, n)
+    } else {
+        if hexed {
+            hex_push(v, actwire.slen(v))
+        } else {
+            actwire.ob_str(v)
+        }
+    }
+    actwire.ob_ch(10)
+}
+
+fn call() -> u64 {
+    var pre: [u8; 3] = "r.\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    var n_svc: [u8; 13] = "orient.vault\0"
+    let np: u64 = (&nm[0 as usize]) as u64
+    actwire.name_of((&pre[0 as usize]) as u64, ulib.sys(ulib.SYS_GETPID, 0, 0, 0), np)
+    if ulib.bad(actwire.bus_reg(np, actwire.A_SAMEUID)) {
+        return R_NOBUS
+    }
+    let svc: u64 = actwire.bus_find((&n_svc[0 as usize]) as u64)
+    if ulib.bad(svc) {
+        return R_NOBUS
+    }
+    let id: u64 = actwire.rnd() & 0xFFFFFFFF
+    if ulib.bad(actwire.send_msg(svc, actwire.K_REQ, id, actwire.ob_ptr(), actwire.ob_len())) {
+        return R_NOBUS
+    }
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let rp: u64 = (&rep[0 as usize]) as u64
+    var rlen: u64 = 0
+    var done: bool = false
+    let t0: u64 = actwire.ticks()
+    while !done && actwire.ticks() - t0 < 6000 {
+        let n: u64 = actwire.bus_wait(fp, mp, 100)
+        if !ulib.bad(n) && n > 0 && actwire.ld8(fp, 0) == 0xA7 && actwire.ld8(fp, 1) == actwire.K_REP
+            && actwire.ld32(fp, 4) == id {
+            if (actwire.ld8(fp, 2) & 1) != 0 {
+                rlen = 0
+            }
+            var i: u64 = 0
+            while i < actwire.ld8(fp, 3) && rlen < 4095 {
+                actwire.st8(rp, rlen, actwire.ld8(fp, 8 + i))
+                rlen = rlen + 1
+                i = i + 1
+            }
+            if (actwire.ld8(fp, 2) & 2) != 0 {
+                done = true
+            }
+        }
+    }
+    actwire.st8(rp, rlen, 0)
+    if !done {
+        return R_NOBUS
+    }
+    actwire.out(rp)
+    if actwire.ld8(rp, 3) == 49 {
+        return R_OK
+    }
+    return R_FAIL
+}
+
+fn u_start(args: u64) -> u64 {
+    if ulib.arg_count(args) < 2 {
+        var usage: [u8; 64] = "usage: vaultctl <op> [key=value ...]  (secrets: key=- = stdin)\n\0"
+        actwire.eout((&usage[0 as usize]) as u64)
+        return 2
+    }
+    actwire.ob_reset()
+    var k_op: [u8; 4] = "op=\0"
+    actwire.ob_str((&k_op[0 as usize]) as u64)
+    actwire.ob_str(ulib.arg_at(args, 1))
+    actwire.ob_ch(10)
+    var i: u64 = 2
+    while i < ulib.arg_count(args) {
+        add_arg(ulib.arg_at(args, i))
+        i = i + 1
+    }
+    return call()
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
