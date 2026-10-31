@@ -26,7 +26,7 @@ mut 's/flags = flags | iwl_mvm_tx.TX_FLG_SEQ_CTL/flags = flags/' "management fra
 mut 's/const KEY_INFO_M2: u64 = 0x010A/const KEY_INFO_M2: u64 = 0x010B/' "message 2 key info" mgmt.fi
 mut 's/iwl_le.st8(out, 81 + i, mic\[i as usize\] as u64)/iwl_le.st8(out, 82 + i, mic[i as usize] as u64)/' "MIC position" mgmt.fi
 mut 's/iwl_le.st16(out, 26, 1)/iwl_le.st16(out, 26, 2)/' "auth sequence number" mgmt.fi
-mut 's/RATE_6M_OFDM, STA_AP, sec,/RATE_6M_OFDM, STA_BCAST, sec,/' "TX station id" iwl_ops.fi
+mut 's/RATE_6M_OFDM, STA_AP, sec,/RATE_6M_OFDM, STA_AUX, sec,/' "TX station id" iwl_ops.fi
 mut 's/(\*o).rssi = 0 - (best as i64)/(*o).rssi = (best as i64)/' "RSSI sign" iwl_ops.fi
 mut 's/    (\*o).fail_step = step/    (*o).fail_step = 0/' "failed setup step not recorded" iwl_ops.fi
 mut 's/    if !step_done(o, STEP_PHY_CTX) {/    if true {/' "setup retry resends finished steps" iwl_ops.fi
