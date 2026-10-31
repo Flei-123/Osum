@@ -145,7 +145,7 @@ if [ "$sa" = 1 ] && [ "$sb" = 1 ]; then
 else
     bad "WL_BYTES laeuft zwischen Kern und Bibliothek auseinander"
 fi
-ka=$(grep -c 'const APP_LEN: u64 = 24' kernel/ui/wm.fi)
+ka=$(grep -c 'const APP_LEN: u64 = 24' kernel/ui/wm/wmcore.fi)
 kb=$(grep -c 'const APP_LEN: u64 = 24' kernel/user/wlibc.fi)
 if [ "$ka" = 1 ] && [ "$kb" = 1 ]; then
     ok "und der Buendelname ist auf beiden Seiten 24 Oktette lang"
