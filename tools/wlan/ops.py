@@ -108,7 +108,9 @@ def check_seq(hw):
     ok(rx[1] == "30" and rx[3] == "-60" and rx[5] == "1", "RX: frame 30 octets, rssi -60, scan still running")
     ok(bytes.fromhex(rx[6]) == frame, "RX frame handed over unchanged")
     rx2 = [l for l in out if l.startswith("rx2 ")][0].split()
-    ok(rx2[1] == "0" and rx2[3] == "2", "SCAN_COMPLETE notification ends the scan")
+    ok(rx2[1] == "0" and rx2[3] == "1", "SCAN_COMPLETE with a foreign uid is ignored")
+    rx3 = [l for l in out if l.startswith("rx3 ")][0].split()
+    ok(rx3[1] == "0" and rx3[3] == "2", "SCAN_COMPLETE with the firmware's uid (ours minus one) ends the scan")
 
 
 def key_frames(wrong_kck=False):
