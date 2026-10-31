@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.cbor
+import vault.vcodes
+import vault.vrecord
+import vault.vstore
+
+export { merge }
+
+fn push_rec(body: *mut rt.Buf, p: u64, it: *mut vstore.It) {
+    rt.buf_push_bytes(body, p + (*it).start as u64, (*it).end - (*it).start)
+}
+
+fn merge(pa: u64, na: usize, pb: u64, nb: usize, out: *mut rt.Buf) -> i32 {
+    var rc: i32 = vstore.store_validate(pa, na)
+    if rc != vcodes.VR_OK {
+        return rc
+    }
+    rc = vstore.store_validate(pb, nb)
+    if rc != vcodes.VR_OK {
+        return rc
+    }
+    if !vstore.writable(pa, na) || !vstore.writable(pb, nb) {
+        return vcodes.VR_E_NEWER
+    }
+    var a: vstore.It = vstore.it_zero()
+    var b: vstore.It = vstore.it_zero()
+    vstore.it_open(pa, na, &a)
+    vstore.it_open(pb, nb, &b)
+    var body: rt.Buf = rt.buf_new()
+    var count: usize = 0
+    var have_a: bool = vstore.it_next(&a)
+    var have_b: bool = vstore.it_next(&b)
+    while have_a || have_b {
+        var take_a: bool = false
+        var take_b: bool = false
+        if have_a && have_b {
+            let c: i32 = vstore.id_cmp(vrecord.id_ptr(pa, na, a.start), vrecord.id_ptr(pb, nb, b.start))
+            if c < 0 {
+                take_a = true
+            }
+            if c > 0 {
+                take_b = true
+            }
+            if c == 0 {
+                if vstore.version_cmp(pa, na, a.start, a.end, pb, nb, b.start, b.end) >= 0 {
+                    take_a = true
+                } else {
+                    take_b = true
+                }
+                push_winner(&body, pa, &a, pb, &b, take_a)
+                have_a = vstore.it_next(&a)
+                have_b = vstore.it_next(&b)
+                count = count + 1
+                continue
+            }
+        } else {
+            take_a = have_a
+            take_b = have_b
+        }
+        if take_a {
+            push_rec(&body, pa, &a)
+            have_a = vstore.it_next(&a)
+        } else {
+            push_rec(&body, pb, &b)
+            have_b = vstore.it_next(&b)
+        }
+        count = count + 1
+        if count > vstore.MAX_RECORDS {
+            rt.buf_free(&body)
+            return vcodes.VR_E_LIMIT
+        }
+    }
+    cbor.put_array(out, count)
+    rt.buf_push_bytes(out, rt.buf_ptr(&body), rt.buf_len(&body))
+    rt.buf_free(&body)
+    return vcodes.VR_OK
+}
+
+fn push_winner(body: *mut rt.Buf, pa: u64, a: *mut vstore.It, pb: u64,
+    b: *mut vstore.It, take_a: bool) {
+    if take_a {
+        push_rec(body, pa, a)
+    } else {
+        push_rec(body, pb, b)
+    }
+}

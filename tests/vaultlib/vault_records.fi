@@ -1,0 +1,235 @@
+import std.rt
+import std.testkit
+import std.cborread
+import vault.vcodes
+import vault.vrecord
+import vault.vbuild
+import vault.vstore
+import vault.rwriter
+import rec_helper
+
+fn vrc(b: *mut rt.Buf) -> i32 {
+    return vrecord.validate(rt.buf_ptr(b), rt.buf_len(b), 0)
+}
+
+#[test]
+fn builders_are_canonical_and_valid() {
+    var b: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(rec_helper.login(&b, 1, 5, "Mail", "https://a.example\nhttps://b.example", "pw") as i64, 0)
+    testkit.assert_eq_i64(vrc(&b) as i64, 0)
+    testkit.assert_eq_i64(cborread.validate(rt.buf_ptr(&b), rt.buf_len(&b), 0) as i64, 0)
+    var it: cborread.Item = cborread.item_zero()
+    testkit.assert_true(vrecord.field(rt.buf_ptr(&b), rt.buf_len(&b), 0, vrecord.K_ORIGINS, &it), "origins")
+    testkit.assert_eq_i64(it.val as i64, 2)
+    testkit.assert_eq_i64(rec_helper.note(&b, 2, 5, "t", "body text") as i64, 0)
+    testkit.assert_eq_i64(vrc(&b) as i64, 0)
+    testkit.assert_eq_i64(rec_helper.passkey(&b, 3, 5, "example.com", 1, 2, 1) as i64, 0)
+    testkit.assert_eq_i64(vrc(&b) as i64, 0)
+    testkit.assert_eq_i64(cborread.validate(rt.buf_ptr(&b), rt.buf_len(&b), 0) as i64, 0)
+    testkit.assert_eq_i64(vrecord.rec_type(rt.buf_ptr(&b), rt.buf_len(&b), 0) as i64, 2)
+    var m: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vbuild.meta_new(&m, 7, 0, 0, 0) as i64, 0)
+    testkit.assert_eq_i64(vrc(&m) as i64, 0)
+}
+
+#[test]
+fn builder_is_deterministic() {
+    var a: rt.Buf = rt.buf_new()
+    var b: rt.Buf = rt.buf_new()
+    rec_helper.passkey(&a, 9, 40, "example.com", 3, 4, 3)
+    rec_helper.passkey(&b, 9, 40, "example.com", 3, 4, 3)
+    testkit.assert_true(rec_helper.store_eq(&a, &b), "same input same bytes")
+    rec_helper.passkey(&b, 9, 41, "example.com", 3, 4, 3)
+    testkit.assert_true(!rec_helper.store_eq(&a, &b), "different input different bytes")
+}
+
+fn mutant(n: usize, out: *mut rt.Buf) -> i32 {
+    var w: rwriter.RW = rwriter.rw_new()
+    var id15: [u8; 15] = [1; 15]
+    var k32: [u8; 32] = [5; 32]
+    var z32: [u8; 32] = [0; 32]
+    var k31: [u8; 31] = [5; 31]
+    var uh: [u8; 8] = [3; 8]
+    if n == 0 {
+        rwriter.rw_bytes(&w, 0, (&id15[0]) as u64, 15)
+        rwriter.rw_uint(&w, 1, 3)
+        rwriter.rw_uint(&w, 2, 1)
+        rwriter.rw_uint(&w, 3, 1)
+        return rec_helper.finish(&w, out)
+    }
+    rec_helper.add_common(&w, 1, 3, 1)
+    if n == 1 {
+        rwriter.rw_text(&w, 10, "t".p as u64, 1)
+        rwriter.rw_uint(&w, 10, 1)
+        return rec_helper.finish(&w, out)
+    }
+    if n == 2 {
+        rwriter.rw_uint(&w, 10, 5)
+        return rec_helper.finish(&w, out)
+    }
+    if n == 3 {
+        rwriter.rw_bool(&w, 4, false)
+        return rec_helper.finish(&w, out)
+    }
+    if n == 4 {
+        rwriter.rw_bool(&w, 4, true)
+        rwriter.rw_text(&w, 14, "secret".p as u64, 6)
+        return rec_helper.finish(&w, out)
+    }
+    if n == 5 {
+        var big: rt.Buf = rt.buf_new()
+        rt.buf_reserve(&big, 70000)
+        rt.mem_set(rt.buf_ptr(&big), 120 as u8, 70000)
+        rwriter.rw_text(&w, 14, rt.buf_ptr(&big), 70000)
+        return rec_helper.finish(&w, out)
+    }
+    rwriter.rw_free(&w)
+    var w2: rwriter.RW = rwriter.rw_new()
+    rec_helper.add_common(&w2, 1, 2, 1)
+    if n == 6 {
+        return rec_helper.finish(&w2, out)
+    }
+    rwriter.rw_text(&w2, 20, "example.com".p as u64, 11)
+    rwriter.rw_bytes(&w2, 25, (&k32[0]) as u64, 32)
+    rwriter.rw_int(&w2, 26, -7)
+    if n == 7 {
+        return rec_helper.finish(&w2, out)
+    }
+    if n == 8 {
+        rwriter.rw_bytes(&w2, 27, (&z32[0]) as u64, 32)
+        return rec_helper.finish(&w2, out)
+    }
+    if n == 9 {
+        rwriter.rw_bytes(&w2, 27, (&k31[0]) as u64, 31)
+        return rec_helper.finish(&w2, out)
+    }
+    rwriter.rw_bytes(&w2, 27, (&k32[0]) as u64, 32)
+    if n == 10 {
+        rwriter.rw_uint(&w2, 30, 1)
+        return rec_helper.finish(&w2, out)
+    }
+    if n == 11 {
+        rwriter.rw_uint(&w2, 30, 8)
+        rwriter.rw_bytes(&w2, 22, (&uh[0]) as u64, 8)
+        return rec_helper.finish(&w2, out)
+    }
+    if n == 12 {
+        rwriter.rw_uint(&w2, 29, 4294967296)
+        return rec_helper.finish(&w2, out)
+    }
+    if n == 13 {
+        rwriter.rw_uint(&w2, 31, 3)
+        return rec_helper.finish(&w2, out)
+    }
+    if n == 14 {
+        rwriter.rw_uint(&w2, 32, 4)
+        return rec_helper.finish(&w2, out)
+    }
+    rwriter.rw_free(&w2)
+    var w3: rwriter.RW = rwriter.rw_new()
+    var id1: [u8; 16] = [1; 16]
+    rwriter.rw_bytes(&w3, 0, (&id1[0]) as u64, 16)
+    rwriter.rw_uint(&w3, 1, 9)
+    rwriter.rw_uint(&w3, 2, 1)
+    rwriter.rw_uint(&w3, 3, 1)
+    rwriter.rw_uint(&w3, 40, 1)
+    return rec_helper.finish(&w3, out)
+}
+
+#[test]
+fn schema_rejections_table() {
+    var b: rt.Buf = rt.buf_new()
+    var n: usize = 0
+    while n < 16 {
+        let rrc: i32 = mutant(n, &b)
+        var want: i64 = vcodes.VR_E_SCHEMA as i64
+        if n == 1 {
+            want = vcodes.VR_E_DUP as i64
+            testkit.assert_eq_i64(rrc as i64, want)
+        } else {
+            testkit.assert_eq_i64(rrc as i64, 0)
+            testkit.assert_eq_i64(vrc(&b) as i64, want)
+        }
+        n = n + 1
+    }
+}
+
+#[test]
+fn login_value_limits() {
+    var b: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(rec_helper.login(&b, 1, 1, "t", "", "pw") as i64, 0)
+    testkit.assert_eq_i64(vrc(&b) as i64, vcodes.VR_E_SCHEMA as i64)
+    testkit.assert_eq_i64(rec_helper.login(&b, 1, 1, "t", "https://a\n\nhttps://b", "pw") as i64, 0)
+    testkit.assert_eq_i64(vrc(&b) as i64, 0)
+    var many: rt.Buf = rt.buf_new()
+    var i: usize = 0
+    while i < 33 {
+        rt.buf_push_bytes(&many, "https://x.example\n".p as u64, 18)
+        i = i + 1
+    }
+    testkit.assert_eq_i64(rec_helper.login(&b, 1, 1, "t", rt.buf_str(&many), "pw") as i64, 0)
+    testkit.assert_eq_i64(vrc(&b) as i64, vcodes.VR_E_SCHEMA as i64)
+}
+
+#[test]
+fn entry_limit_and_duplicate_keys() {
+    var w: rwriter.RW = rwriter.rw_new()
+    var i: u64 = 0
+    while i < 65 {
+        rwriter.rw_uint(&w, 100 + i, i)
+        i = i + 1
+    }
+    var out: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(rwriter.rw_finish(&w, &out) as i64, vcodes.VR_E_LIMIT as i64)
+    rwriter.rw_free(&w)
+    var d: rwriter.RW = rwriter.rw_new()
+    rwriter.rw_uint(&d, 5, 1)
+    rwriter.rw_uint(&d, 5, 2)
+    testkit.assert_eq_i64(rwriter.rw_finish(&d, &out) as i64, vcodes.VR_E_DUP as i64)
+    rwriter.rw_free(&d)
+}
+
+#[test]
+fn unknown_keys_survive_store_and_tombstone() {
+    var w: rwriter.RW = rwriter.rw_new()
+    rec_helper.add_common(&w, 4, 1, 10)
+    var org: rt.Buf = rt.buf_new()
+    rwriter.rw_list_begin(&w, 11, 1)
+    rwriter.rw_list_text(&w, "https://a.example".p as u64, 17)
+    rwriter.rw_text(&w, 13, "hunter2hunter2".p as u64, 14)
+    rwriter.rw_uint(&w, 7, 77)
+    rwriter.rw_text(&w, 99, "future".p as u64, 6)
+    var rec: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(rec_helper.finish(&w, &rec) as i64, 0)
+    testkit.assert_eq_i64(vrc(&rec) as i64, 0)
+    var store: rt.Buf = rt.buf_new()
+    vstore.store_empty(&store)
+    testkit.assert_eq_i64(rec_helper.put_rc(&store, &rec) as i64, 0)
+    var s: usize = 0
+    var e: usize = 0
+    testkit.assert_true(rec_helper.rec_at(&store, 4, &s, &e), "stored")
+    testkit.assert_eq_i64((e - s) as i64, rt.buf_len(&rec) as i64)
+    var out: rt.Buf = rt.buf_new()
+    var id: [u8; 16] = [0; 16]
+    rec_helper.set_id((&id[0]) as u64, 4)
+    testkit.assert_eq_i64(vstore.store_delete(rt.buf_ptr(&store), rt.buf_len(&store), (&id[0]) as u64, 20, &out) as i64, 0)
+    testkit.assert_eq_i64(vstore.store_validate(rt.buf_ptr(&out), rt.buf_len(&out)) as i64, 0)
+    testkit.assert_true(rec_helper.rec_at(&out, 4, &s, &e), "tombstone present")
+    let p: u64 = rt.buf_ptr(&out)
+    testkit.assert_true(vrecord.is_deleted(p, rt.buf_len(&out), s), "deleted flag")
+    testkit.assert_true(!vrecord.has_key(p, rt.buf_len(&out), s, 13), "password dropped")
+    testkit.assert_true(!vrecord.has_key(p, rt.buf_len(&out), s, 11), "origins dropped")
+    testkit.assert_true(vrecord.has_key(p, rt.buf_len(&out), s, 99), "unknown key kept")
+    testkit.assert_true(vrecord.has_key(p, rt.buf_len(&out), s, 7), "unknown low key kept")
+    testkit.assert_eq_i64(vrecord.rec_modified(p, rt.buf_len(&out), s) as i64, 20)
+    testkit.assert_eq_i64(vrecord.rec_created(p, rt.buf_len(&out), s) as i64, 1000)
+    var leak: bool = false
+    var i: usize = 0
+    while i + 14 <= rt.buf_len(&out) {
+        if rt.mem_eq(p + i as u64, "hunter2hunter2".p as u64, 14) {
+            leak = true
+        }
+        i = i + 1
+    }
+    testkit.assert_true(!leak, "no password bytes left in the sealed body")
+}

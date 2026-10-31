@@ -1,0 +1,197 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.cborread
+import vault.rwriter
+import vault.vrecord
+import vault.vcodes
+
+export { Passkey, passkey_zero, login_new, passkey_new, note_new, meta_new,
+    tombstone_new, copy_unknown, META_ID_LEN }
+
+const META_ID_LEN: usize = 16
+
+struct Passkey {
+    id: u64,
+    created: u64,
+    modified: u64,
+    rp_id: str,
+    rp_name: str,
+    user_handle: u64,
+    user_handle_len: usize,
+    user_name: str,
+    display_name: str,
+    cred_id: u64,
+    alg: i64,
+    priv_key: u64,
+    pub_key: u64,
+    pub_key_len: usize,
+    sign_count: u64,
+    flags: u64,
+    uv_policy: u64,
+    cred_protect: u64,
+    last_used: u64,
+    origin: str,
+}
+
+fn passkey_zero() -> Passkey {
+    return Passkey { id: 0, created: 0, modified: 0, rp_id: "", rp_name: "",
+        user_handle: 0, user_handle_len: 0, user_name: "", display_name: "",
+        cred_id: 0, alg: vrecord.ALG_ES256, priv_key: 0, pub_key: 0,
+        pub_key_len: 0, sign_count: 0, flags: 0, uv_policy: 0, cred_protect: 0,
+        last_used: 0, origin: "" }
+}
+
+fn common(w: *mut rwriter.RW, id: u64, t: u64, created: u64, modified: u64) {
+    rwriter.rw_bytes(w, vrecord.K_ID, id, vrecord.ID_LEN)
+    rwriter.rw_uint(w, vrecord.K_TYPE, t)
+    rwriter.rw_uint(w, vrecord.K_CREATED, created)
+    rwriter.rw_uint(w, vrecord.K_MODIFIED, modified)
+}
+
+fn opt_text(w: *mut rwriter.RW, key: u64, s: str) {
+    if s.n > 0 {
+        rwriter.rw_text(w, key, s.p as u64, s.n)
+    }
+}
+
+fn opt_uint(w: *mut rwriter.RW, key: u64, v: u64) {
+    if v != 0 {
+        rwriter.rw_uint(w, key, v)
+    }
+}
+
+fn count_lines(s: str) -> usize {
+    var c: usize = 0
+    var start: usize = 0
+    var i: usize = 0
+    while i <= s.n {
+        if i == s.n || rt.ld8(s.p as u64, i) == 10 as u8 {
+            if i > start {
+                c = c + 1
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+fn put_lines(w: *mut rwriter.RW, s: str) {
+    var start: usize = 0
+    var i: usize = 0
+    while i <= s.n {
+        if i == s.n || rt.ld8(s.p as u64, i) == 10 as u8 {
+            if i > start {
+                rwriter.rw_list_text(w, s.p as u64 + start as u64, i - start)
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+}
+
+fn login_new(out: *mut rt.Buf, id: u64, created: u64, modified: u64, title: str,
+    origins: str, username: str, password: str, notes: str, pw_changed: u64) -> i32 {
+    var w: rwriter.RW = rwriter.rw_new()
+    common(&w, id, vrecord.T_LOGIN, created, modified)
+    opt_text(&w, vrecord.K_TITLE, title)
+    rwriter.rw_list_begin(&w, vrecord.K_ORIGINS, count_lines(origins))
+    put_lines(&w, origins)
+    opt_text(&w, vrecord.K_USERNAME, username)
+    opt_text(&w, vrecord.K_PASSWORD, password)
+    opt_text(&w, vrecord.K_NOTES, notes)
+    opt_uint(&w, vrecord.K_PW_CHANGED, pw_changed)
+    let rc: i32 = rwriter.rw_finish(&w, out)
+    rwriter.rw_free(&w)
+    return rc
+}
+
+fn passkey_new(out: *mut rt.Buf, k: *mut Passkey) -> i32 {
+    var w: rwriter.RW = rwriter.rw_new()
+    common(&w, (*k).id, vrecord.T_PASSKEY, (*k).created, (*k).modified)
+    rwriter.rw_text(&w, vrecord.K_RP_ID, (*k).rp_id.p as u64, (*k).rp_id.n)
+    opt_text(&w, vrecord.K_RP_NAME, (*k).rp_name)
+    if (*k).user_handle_len > 0 {
+        rwriter.rw_bytes(&w, vrecord.K_USER_HANDLE, (*k).user_handle, (*k).user_handle_len)
+    }
+    opt_text(&w, vrecord.K_USER_NAME, (*k).user_name)
+    opt_text(&w, vrecord.K_DISPLAY_NAME, (*k).display_name)
+    rwriter.rw_bytes(&w, vrecord.K_CRED_ID, (*k).cred_id, 32)
+    rwriter.rw_int(&w, vrecord.K_ALG, (*k).alg)
+    rwriter.rw_bytes(&w, vrecord.K_PRIV, (*k).priv_key, 32)
+    if (*k).pub_key_len > 0 {
+        rwriter.rw_bytes(&w, vrecord.K_PUB, (*k).pub_key, (*k).pub_key_len)
+    }
+    opt_uint(&w, vrecord.K_SIGN_COUNT, (*k).sign_count)
+    opt_uint(&w, vrecord.K_FLAGS, (*k).flags)
+    opt_uint(&w, vrecord.K_UV_POLICY, (*k).uv_policy)
+    opt_uint(&w, vrecord.K_CRED_PROTECT, (*k).cred_protect)
+    opt_uint(&w, vrecord.K_LAST_USED, (*k).last_used)
+    opt_text(&w, vrecord.K_ORIGIN, (*k).origin)
+    let rc: i32 = rwriter.rw_finish(&w, out)
+    rwriter.rw_free(&w)
+    return rc
+}
+
+fn note_new(out: *mut rt.Buf, id: u64, created: u64, modified: u64, title: str,
+    text: str) -> i32 {
+    var w: rwriter.RW = rwriter.rw_new()
+    common(&w, id, vrecord.T_NOTE, created, modified)
+    opt_text(&w, vrecord.K_TITLE, title)
+    opt_text(&w, vrecord.K_NOTES, text)
+    let rc: i32 = rwriter.rw_finish(&w, out)
+    rwriter.rw_free(&w)
+    return rc
+}
+
+fn meta_new(out: *mut rt.Buf, modified: u64, device: u64, device_len: usize,
+    last_export: u64) -> i32 {
+    var zero: [u8; 16] = [0; 16]
+    var w: rwriter.RW = rwriter.rw_new()
+    common(&w, (&zero[0]) as u64, vrecord.T_META, modified, modified)
+    rwriter.rw_uint(&w, vrecord.K_SCHEMA, vrecord.SCHEMA_VERSION)
+    if device_len > 0 {
+        rwriter.rw_bytes(&w, vrecord.K_DEVICE, device, device_len)
+    }
+    opt_uint(&w, vrecord.K_LAST_EXPORT, last_export)
+    let rc: i32 = rwriter.rw_finish(&w, out)
+    rwriter.rw_free(&w)
+    return rc
+}
+
+fn tombstone_new(out: *mut rt.Buf, p: u64, n: usize, pos: usize, modified: u64) -> i32 {
+    var w: rwriter.RW = rwriter.rw_new()
+    common(&w, vrecord.id_ptr(p, n, pos), vrecord.rec_type(p, n, pos),
+        vrecord.rec_created(p, n, pos), modified)
+    rwriter.rw_bool(&w, vrecord.K_DELETED, true)
+    copy_unknown(&w, p, n, pos, true)
+    let rc: i32 = rwriter.rw_finish(&w, out)
+    rwriter.rw_free(&w)
+    return rc
+}
+
+fn copy_unknown(w: *mut rwriter.RW, p: u64, n: usize, pos: usize, tomb: bool) {
+    var m: cborread.Item = cborread.item_zero()
+    if cborread.read_head(p, n, pos, 0, &m) != cborread.CB_OK {
+        return
+    }
+    let t: u64 = vrecord.rec_type(p, n, pos)
+    var cur: usize = m.end
+    var i: u64 = 0
+    while i < m.val {
+        var k: cborread.Item = cborread.item_zero()
+        if cborread.read_head(p, n, cur, 0, &k) != cborread.CB_OK {
+            return
+        }
+        var e: usize = 0
+        if cborread.item_end(p, n, k.end, &e) != cborread.CB_OK {
+            return
+        }
+        let in_payload: bool = k.val >= vrecord.PAYLOAD_FIRST && k.val <= vrecord.PAYLOAD_LAST
+        if !vrecord.is_known(t, k.val) && !(tomb && in_payload) {
+            rwriter.rw_pair(w, p + cur as u64, k.end - cur, p + k.end as u64, e - k.end)
+        }
+        cur = e
+        i = i + 1
+    }
+}

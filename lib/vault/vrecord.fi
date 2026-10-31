@@ -1,0 +1,374 @@
+// SPDX-License-Identifier: MPL-2.0
+import std.rt
+import std.cborread
+import vault.vcodes
+
+export { validate, is_known, field, get_uint, has_key, record_end, id_ptr, rec_type,
+    rec_modified, rec_created, is_deleted, is_live, text_eq, bytes_eq_at,
+    ID_LEN, K_ID, K_TYPE, K_CREATED, K_MODIFIED, K_DELETED, T_LOGIN, T_PASSKEY,
+    T_NOTE, T_META, K_TITLE, K_ORIGINS, K_USERNAME, K_PASSWORD, K_NOTES,
+    K_TOTP, K_PW_CHANGED, K_RP_ID, K_RP_NAME, K_USER_HANDLE, K_USER_NAME,
+    K_DISPLAY_NAME, K_CRED_ID, K_ALG, K_PRIV, K_PUB, K_SIGN_COUNT, K_FLAGS,
+    K_UV_POLICY, K_CRED_PROTECT, K_LAST_USED, K_ORIGIN, K_SCHEMA, K_DEVICE,
+    K_LAST_EXPORT, PK_RESIDENT, PK_BACKUP_ELIGIBLE, PK_BACKUP_STATE,
+    ALG_ES256, ALG_EDDSA, SCHEMA_VERSION, PAYLOAD_FIRST, PAYLOAD_LAST,
+    MAX_RECORD_KEYS }
+
+const ID_LEN: usize = 16
+const K_ID: u64 = 0
+const K_TYPE: u64 = 1
+const K_CREATED: u64 = 2
+const K_MODIFIED: u64 = 3
+const K_DELETED: u64 = 4
+
+const T_LOGIN: u64 = 1
+const T_PASSKEY: u64 = 2
+const T_NOTE: u64 = 3
+const T_META: u64 = 9
+
+const K_TITLE: u64 = 10
+const K_ORIGINS: u64 = 11
+const K_USERNAME: u64 = 12
+const K_PASSWORD: u64 = 13
+const K_NOTES: u64 = 14
+const K_TOTP: u64 = 15
+const K_PW_CHANGED: u64 = 16
+
+const K_RP_ID: u64 = 20
+const K_RP_NAME: u64 = 21
+const K_USER_HANDLE: u64 = 22
+const K_USER_NAME: u64 = 23
+const K_DISPLAY_NAME: u64 = 24
+const K_CRED_ID: u64 = 25
+const K_ALG: u64 = 26
+const K_PRIV: u64 = 27
+const K_PUB: u64 = 28
+const K_SIGN_COUNT: u64 = 29
+const K_FLAGS: u64 = 30
+const K_UV_POLICY: u64 = 31
+const K_CRED_PROTECT: u64 = 32
+const K_LAST_USED: u64 = 33
+const K_ORIGIN: u64 = 34
+
+const K_SCHEMA: u64 = 40
+const K_DEVICE: u64 = 41
+const K_LAST_EXPORT: u64 = 42
+
+const PAYLOAD_FIRST: u64 = 10
+const PAYLOAD_LAST: u64 = 39
+
+const PK_RESIDENT: u64 = 1
+const PK_BACKUP_ELIGIBLE: u64 = 2
+const PK_BACKUP_STATE: u64 = 4
+
+const ALG_ES256: i64 = -7
+const ALG_EDDSA: i64 = -8
+
+const SCHEMA_VERSION: u64 = 1
+const MAX_RECORD_KEYS: usize = 64
+const MAX_TIME: u64 = 4503599627370496
+const ELEM_MAX: usize = 512
+
+const F_UINT: u64 = 1
+const F_INT: u64 = 2
+const F_BYTES: u64 = 3
+const F_TEXT: u64 = 4
+const F_BOOL: u64 = 5
+const F_TEXTS: u64 = 6
+
+const COLS: usize = 6
+const MAX_ROWS: usize = 48
+
+static mut tbl: [u64; 288] = [0 as u64; 288]
+static mut tn: usize = 0
+
+fn add_row(t: u64, key: u64, kind: u64, lo: u64, hi: u64, req: u64) {
+    let b: usize = tn * COLS
+    tbl[b] = t
+    tbl[b + 1] = key
+    tbl[b + 2] = kind
+    tbl[b + 3] = lo
+    tbl[b + 4] = hi
+    tbl[b + 5] = req
+    tn = tn + 1
+}
+
+fn init_table() {
+    if tn != 0 {
+        return
+    }
+    add_row(0, K_ID, F_BYTES, 16, 16, 1)
+    add_row(0, K_TYPE, F_UINT, 1, 255, 1)
+    add_row(0, K_CREATED, F_UINT, 0, MAX_TIME, 1)
+    add_row(0, K_MODIFIED, F_UINT, 0, MAX_TIME, 1)
+    add_row(0, K_DELETED, F_BOOL, 0, 0, 0)
+    add_row(T_LOGIN, K_TITLE, F_TEXT, 0, 1024, 0)
+    add_row(T_LOGIN, K_ORIGINS, F_TEXTS, 1, 32, 1)
+    add_row(T_LOGIN, K_USERNAME, F_TEXT, 0, 1024, 0)
+    add_row(T_LOGIN, K_PASSWORD, F_TEXT, 0, 4096, 0)
+    add_row(T_LOGIN, K_NOTES, F_TEXT, 0, 65536, 0)
+    add_row(T_LOGIN, K_TOTP, F_BYTES, 1, 64, 0)
+    add_row(T_LOGIN, K_PW_CHANGED, F_UINT, 0, MAX_TIME, 0)
+    add_row(T_PASSKEY, K_RP_ID, F_TEXT, 1, 253, 1)
+    add_row(T_PASSKEY, K_RP_NAME, F_TEXT, 0, 256, 0)
+    add_row(T_PASSKEY, K_USER_HANDLE, F_BYTES, 1, 64, 0)
+    add_row(T_PASSKEY, K_USER_NAME, F_TEXT, 0, 256, 0)
+    add_row(T_PASSKEY, K_DISPLAY_NAME, F_TEXT, 0, 256, 0)
+    add_row(T_PASSKEY, K_CRED_ID, F_BYTES, 32, 32, 1)
+    add_row(T_PASSKEY, K_ALG, F_INT, (-8) as u64, (-7) as u64, 1)
+    add_row(T_PASSKEY, K_PRIV, F_BYTES, 32, 32, 1)
+    add_row(T_PASSKEY, K_PUB, F_BYTES, 1, 128, 0)
+    add_row(T_PASSKEY, K_SIGN_COUNT, F_UINT, 0, 4294967295, 0)
+    add_row(T_PASSKEY, K_FLAGS, F_UINT, 0, 7, 0)
+    add_row(T_PASSKEY, K_UV_POLICY, F_UINT, 0, 2, 0)
+    add_row(T_PASSKEY, K_CRED_PROTECT, F_UINT, 1, 3, 0)
+    add_row(T_PASSKEY, K_LAST_USED, F_UINT, 0, MAX_TIME, 0)
+    add_row(T_PASSKEY, K_ORIGIN, F_TEXT, 0, 512, 0)
+    add_row(T_NOTE, K_TITLE, F_TEXT, 0, 1024, 0)
+    add_row(T_NOTE, K_NOTES, F_TEXT, 0, 65536, 0)
+    add_row(T_META, K_SCHEMA, F_UINT, 1, 65535, 1)
+    add_row(T_META, K_DEVICE, F_BYTES, 1, 32, 0)
+    add_row(T_META, K_LAST_EXPORT, F_UINT, 0, MAX_TIME, 0)
+}
+
+fn find_row(t: u64, key: u64) -> usize {
+    var i: usize = 0
+    while i < tn {
+        if tbl[i * COLS] == t && tbl[i * COLS + 1] == key {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn is_known(t: u64, key: u64) -> bool {
+    init_table()
+    return find_row(0, key) != 0 || find_row(t, key) != 0
+}
+
+fn required_count(t: u64, deleted: bool) -> usize {
+    var c: usize = 0
+    var i: usize = 0
+    while i < tn {
+        let rt_: u64 = tbl[i * COLS]
+        if tbl[i * COLS + 5] == 1 && (rt_ == 0 || (rt_ == t && !deleted)) {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+fn field(p: u64, n: usize, pos: usize, key: u64, it: *mut cborread.Item) -> bool {
+    return cborread.map_find_int(p, n, pos, key as i64, it) == cborread.CB_OK
+}
+
+fn has_key(p: u64, n: usize, pos: usize, key: u64) -> bool {
+    var it: cborread.Item = cborread.item_zero()
+    return field(p, n, pos, key, &it)
+}
+
+fn get_uint(p: u64, n: usize, pos: usize, key: u64, dflt: u64) -> u64 {
+    var it: cborread.Item = cborread.item_zero()
+    if field(p, n, pos, key, &it) && it.kind == cborread.K_UINT {
+        return it.val
+    }
+    return dflt
+}
+
+fn record_end(p: u64, n: usize, pos: usize) -> usize {
+    var e: usize = 0
+    if cborread.item_end(p, n, pos, &e) != cborread.CB_OK {
+        return pos
+    }
+    return e
+}
+
+fn id_ptr(p: u64, n: usize, pos: usize) -> u64 {
+    var it: cborread.Item = cborread.item_zero()
+    if field(p, n, pos, K_ID, &it) && it.kind == cborread.K_BYTES && it.len == ID_LEN {
+        return it.ptr
+    }
+    return 0
+}
+
+fn rec_type(p: u64, n: usize, pos: usize) -> u64 {
+    return get_uint(p, n, pos, K_TYPE, 0)
+}
+
+fn rec_modified(p: u64, n: usize, pos: usize) -> u64 {
+    return get_uint(p, n, pos, K_MODIFIED, 0)
+}
+
+fn rec_created(p: u64, n: usize, pos: usize) -> u64 {
+    return get_uint(p, n, pos, K_CREATED, 0)
+}
+
+fn is_deleted(p: u64, n: usize, pos: usize) -> bool {
+    return has_key(p, n, pos, K_DELETED)
+}
+
+fn is_live(p: u64, n: usize, pos: usize) -> bool {
+    return !has_key(p, n, pos, K_DELETED)
+}
+
+fn text_eq(it: *mut cborread.Item, s: str) -> bool {
+    return cborread.item_text_eq(it, s)
+}
+
+fn bytes_eq_at(it: *mut cborread.Item, q: u64, qn: usize) -> bool {
+    return (*it).kind == cborread.K_BYTES && (*it).len == qn && rt.mem_eq((*it).ptr, q, qn)
+}
+
+fn check_texts(p: u64, n: usize, it: *mut cborread.Item, lo: u64, hi: u64) -> bool {
+    if (*it).kind != cborread.K_ARRAY || (*it).val < lo || (*it).val > hi {
+        return false
+    }
+    var cur: usize = (*it).end
+    var i: u64 = 0
+    while i < (*it).val {
+        var e: cborread.Item = cborread.item_zero()
+        if cborread.read_head(p, n, cur, 0, &e) != cborread.CB_OK {
+            return false
+        }
+        if e.kind != cborread.K_TEXT || e.len == 0 || e.len > ELEM_MAX {
+            return false
+        }
+        cur = e.end
+        i = i + 1
+    }
+    return true
+}
+
+fn check_value(p: u64, n: usize, it: *mut cborread.Item, row: usize) -> bool {
+    let b: usize = (row - 1) * COLS
+    let kind: u64 = tbl[b + 2]
+    let lo: u64 = tbl[b + 3]
+    let hi: u64 = tbl[b + 4]
+    if kind == F_UINT {
+        return (*it).kind == cborread.K_UINT && (*it).val >= lo && (*it).val <= hi
+    }
+    if kind == F_INT {
+        if !cborread.item_fits_i64(it) {
+            return false
+        }
+        let v: i64 = cborread.item_i64(it)
+        return v >= (lo as i64) && v <= (hi as i64)
+    }
+    if kind == F_BYTES {
+        return (*it).kind == cborread.K_BYTES && (*it).len as u64 >= lo && (*it).len as u64 <= hi
+    }
+    if kind == F_TEXT {
+        return (*it).kind == cborread.K_TEXT && (*it).len as u64 >= lo && (*it).len as u64 <= hi
+    }
+    if kind == F_BOOL {
+        return (*it).kind == cborread.K_TRUE
+    }
+    if kind == F_TEXTS {
+        return check_texts(p, n, it, lo, hi)
+    }
+    return false
+}
+
+fn nonzero(p: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < n {
+        if rt.ld8(p, i) != 0 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn check_passkey(p: u64, n: usize, pos: usize) -> bool {
+    var it: cborread.Item = cborread.item_zero()
+    if !field(p, n, pos, K_PRIV, &it) || !nonzero(it.ptr, it.len) {
+        return false
+    }
+    if get_uint(p, n, pos, K_FLAGS, 0) & PK_RESIDENT != 0 {
+        return has_key(p, n, pos, K_USER_HANDLE)
+    }
+    return true
+}
+
+fn check_meta(p: u64, n: usize, pos: usize) -> bool {
+    var it: cborread.Item = cborread.item_zero()
+    if !field(p, n, pos, K_ID, &it) {
+        return false
+    }
+    return !nonzero(it.ptr, it.len)
+}
+
+fn validate(p: u64, n: usize, pos: usize) -> i32 {
+    init_table()
+    var m: cborread.Item = cborread.item_zero()
+    if cborread.read_head(p, n, pos, 0, &m) != cborread.CB_OK || m.kind != cborread.K_MAP {
+        return vcodes.VR_E_SCHEMA
+    }
+    if m.val > MAX_RECORD_KEYS as u64 {
+        return vcodes.VR_E_LIMIT
+    }
+    var tv: cborread.Item = cborread.item_zero()
+    if !field(p, n, pos, K_TYPE, &tv) || tv.kind != cborread.K_UINT {
+        return vcodes.VR_E_SCHEMA
+    }
+    let t: u64 = tv.val
+    var dv: cborread.Item = cborread.item_zero()
+    let deleted: bool = field(p, n, pos, K_DELETED, &dv)
+    var cur: usize = m.end
+    var seen_req: usize = 0
+    var i: u64 = 0
+    var last_key: u64 = 0
+    while i < m.val {
+        var k: cborread.Item = cborread.item_zero()
+        if cborread.read_head(p, n, cur, 0, &k) != cborread.CB_OK {
+            return vcodes.VR_E_CBOR
+        }
+        if k.kind != cborread.K_UINT || k.val > 65535 {
+            return vcodes.VR_E_SCHEMA
+        }
+        if i > 0 && k.val <= last_key {
+            return vcodes.VR_E_ORDER
+        }
+        last_key = k.val
+        var v: cborread.Item = cborread.item_zero()
+        if cborread.read_head(p, n, k.end, 0, &v) != cborread.CB_OK {
+            return vcodes.VR_E_CBOR
+        }
+        if deleted && k.val >= PAYLOAD_FIRST && k.val <= PAYLOAD_LAST {
+            return vcodes.VR_E_SCHEMA
+        }
+        var row: usize = find_row(0, k.val)
+        if row == 0 {
+            row = find_row(t, k.val)
+        }
+        if row != 0 {
+            if !check_value(p, n, &v, row) {
+                return vcodes.VR_E_SCHEMA
+            }
+            if tbl[(row - 1) * COLS + 5] == 1 {
+                seen_req = seen_req + 1
+            }
+        }
+        var e: usize = 0
+        if cborread.item_end(p, n, k.end, &e) != cborread.CB_OK {
+            return vcodes.VR_E_CBOR
+        }
+        cur = e
+        i = i + 1
+    }
+    if seen_req != required_count(t, deleted) {
+        return vcodes.VR_E_SCHEMA
+    }
+    if !deleted {
+        if t == T_PASSKEY && !check_passkey(p, n, pos) {
+            return vcodes.VR_E_SCHEMA
+        }
+        if t == T_META && !check_meta(p, n, pos) {
+            return vcodes.VR_E_SCHEMA
+        }
+    }
+    return vcodes.VR_OK
+}

@@ -1,0 +1,168 @@
+import std.rt
+import std.testkit
+import vault.vcodes
+import vault.vrecord
+import vault.vstore
+import vault.vmerge
+import vault.vbuild
+import rec_helper
+
+fn mg(a: *mut rt.Buf, b: *mut rt.Buf, out: *mut rt.Buf) -> i32 {
+    rt.buf_clear(out)
+    return vmerge.merge(rt.buf_ptr(a), rt.buf_len(a), rt.buf_ptr(b), rt.buf_len(b), out)
+}
+
+fn rnd(s: *mut u64) -> u64 {
+    var x: u64 = *s
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    *s = x
+    return x >> 20
+}
+
+fn random_store(out: *mut rt.Buf, seed: *mut u64) {
+    vstore.store_empty(out)
+    var rec: rt.Buf = rt.buf_new()
+    var id: u64 = 1
+    while id <= 10 {
+        if rnd(seed) % 3 != 0 {
+            let m: u64 = 1 + rnd(seed) % 4
+            let kind: u64 = rnd(seed) % 3
+            if kind == 0 {
+                rec_helper.login(&rec, id, m, "t", "https://a.example", "pw")
+            }
+            if kind == 1 {
+                rec_helper.login(&rec, id, m, "u", "https://b.example", "other")
+            }
+            if kind == 2 {
+                rec_helper.login(&rec, id, m, "t", "https://a.example", "pw")
+                var s: usize = 0
+                var e: usize = 0
+                var one: rt.Buf = rt.buf_new()
+                one = rec
+                var t: rt.Buf = rt.buf_new()
+                vbuild.tombstone_new(&t, rt.buf_ptr(&one), rt.buf_len(&one), 0, m)
+                rec = t
+            }
+            if rec_helper.put_rc(out, &rec) != 0 {
+                rec_helper.put_rc(out, &rec)
+            }
+        }
+        id = id + 1
+    }
+}
+
+#[test]
+fn merge_tables() {
+    var a: rt.Buf = rt.buf_new()
+    var b: rt.Buf = rt.buf_new()
+    var r: rt.Buf = rt.buf_new()
+    var r2: rt.Buf = rt.buf_new()
+    var rec: rt.Buf = rt.buf_new()
+    vstore.store_empty(&a)
+    vstore.store_empty(&b)
+    rec_helper.login(&rec, 1, 5, "old", "https://a.example", "p1")
+    rec_helper.put(&a, &rec)
+    rec_helper.login(&rec, 1, 9, "new", "https://a.example", "p2")
+    rec_helper.put(&b, &rec)
+    rec_helper.login(&rec, 2, 3, "only b", "https://b.example", "p3")
+    rec_helper.put(&b, &rec)
+    testkit.assert_eq_i64(mg(&a, &b, &r) as i64, 0)
+    testkit.assert_eq_i64(mg(&b, &a, &r2) as i64, 0)
+    testkit.assert_true(rec_helper.store_eq(&r, &r2), "commutative")
+    testkit.assert_eq_i64(rec_helper.count_records(&r) as i64, 2)
+    var s: usize = 0
+    var e: usize = 0
+    testkit.assert_true(rec_helper.rec_at(&r, 1, &s, &e), "id 1")
+    testkit.assert_eq_i64(vrecord.rec_modified(rt.buf_ptr(&r), rt.buf_len(&r), s) as i64, 9)
+    testkit.assert_eq_i64(vstore.store_validate(rt.buf_ptr(&r), rt.buf_len(&r)) as i64, 0)
+    var id: [u8; 16] = [0; 16]
+    rec_helper.set_id((&id[0]) as u64, 1)
+    var del: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vstore.store_delete(rt.buf_ptr(&b), rt.buf_len(&b), (&id[0]) as u64, 9, &del) as i64, 0)
+    testkit.assert_eq_i64(mg(&b, &del, &r) as i64, 0)
+    testkit.assert_true(rec_helper.rec_at(&r, 1, &s, &e), "id 1 after delete")
+    testkit.assert_true(vrecord.is_deleted(rt.buf_ptr(&r), rt.buf_len(&r), s), "tombstone wins the tie")
+    testkit.assert_eq_i64(mg(&del, &b, &r2) as i64, 0)
+    testkit.assert_true(rec_helper.store_eq(&r, &r2), "tie commutative")
+}
+
+#[test]
+fn merge_rejects_bad_input() {
+    var a: rt.Buf = rt.buf_new()
+    var r: rt.Buf = rt.buf_new()
+    vstore.store_empty(&a)
+    var junk: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&junk, "garbage".p as u64, 7)
+    testkit.assert_true(mg(&a, &junk, &r) != 0, "garbage refused")
+    testkit.assert_eq_i64(rt.buf_len(&r) as i64, 0)
+    var rec: rt.Buf = rt.buf_new()
+    rec_helper.login(&rec, 1, 1, "t", "https://a.example", "pw")
+    var uns: rt.Buf = rt.buf_new()
+    rt.buf_push(&uns, 130 as u8)
+    var r2: rt.Buf = rt.buf_new()
+    rec_helper.login(&r2, 2, 1, "t", "https://a.example", "pw")
+    rt.buf_push_bytes(&uns, rt.buf_ptr(&r2), rt.buf_len(&r2))
+    rt.buf_push_bytes(&uns, rt.buf_ptr(&rec), rt.buf_len(&rec))
+    testkit.assert_eq_i64(mg(&a, &uns, &r) as i64, vcodes.VR_E_ORDER as i64)
+}
+
+#[test]
+fn merge_laws_random() {
+    var seed: u64 = 88172645463325252
+    var t: usize = 0
+    while t < 150 {
+        var a: rt.Buf = rt.buf_new()
+        var b: rt.Buf = rt.buf_new()
+        var c: rt.Buf = rt.buf_new()
+        random_store(&a, &seed)
+        random_store(&b, &seed)
+        random_store(&c, &seed)
+        var ab: rt.Buf = rt.buf_new()
+        var ba: rt.Buf = rt.buf_new()
+        var l: rt.Buf = rt.buf_new()
+        var r: rt.Buf = rt.buf_new()
+        var bc: rt.Buf = rt.buf_new()
+        var aa: rt.Buf = rt.buf_new()
+        testkit.assert_eq_i64(mg(&a, &b, &ab) as i64, 0)
+        testkit.assert_eq_i64(mg(&b, &a, &ba) as i64, 0)
+        testkit.assert_true(rec_helper.store_eq(&ab, &ba), "commutative")
+        testkit.assert_eq_i64(mg(&ab, &c, &l) as i64, 0)
+        testkit.assert_eq_i64(mg(&b, &c, &bc) as i64, 0)
+        testkit.assert_eq_i64(mg(&a, &bc, &r) as i64, 0)
+        testkit.assert_true(rec_helper.store_eq(&l, &r), "associative")
+        testkit.assert_eq_i64(mg(&a, &a, &aa) as i64, 0)
+        testkit.assert_true(rec_helper.store_eq(&a, &aa), "idempotent")
+        testkit.assert_eq_i64(vstore.store_validate(rt.buf_ptr(&l), rt.buf_len(&l)) as i64, 0)
+        t = t + 1
+    }
+}
+
+#[test]
+fn resident_conflict_resolves_locally() {
+    var a: rt.Buf = rt.buf_new()
+    var b: rt.Buf = rt.buf_new()
+    var rec: rt.Buf = rt.buf_new()
+    vstore.store_empty(&a)
+    vstore.store_empty(&b)
+    rec_helper.passkey(&rec, 1, 5, "example.com", 1, 10, 1)
+    rec_helper.put(&a, &rec)
+    rec_helper.passkey(&rec, 2, 8, "example.com", 1, 11, 1)
+    rec_helper.put(&b, &rec)
+    var m: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(mg(&a, &b, &m) as i64, 0)
+    testkit.assert_eq_i64(vstore.count_live(rt.buf_ptr(&m), rt.buf_len(&m), 2) as i64, 2)
+    var uh: [u8; 8] = [0; 8]
+    rec_helper.fill((&uh[0]) as u64, 8, 1)
+    var s: usize = 0
+    var e: usize = 0
+    testkit.assert_true(vstore.find_resident(rt.buf_ptr(&m), rt.buf_len(&m), "example.com", (&uh[0]) as u64, 8, &s, &e), "winner")
+    testkit.assert_eq_i64(vrecord.rec_modified(rt.buf_ptr(&m), rt.buf_len(&m), s) as i64, 8)
+    var res: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vstore.store_resolve(rt.buf_ptr(&m), rt.buf_len(&m), 100, &res) as i64, 0)
+    testkit.assert_eq_i64(vstore.count_live(rt.buf_ptr(&res), rt.buf_len(&res), 2) as i64, 1)
+    var res2: rt.Buf = rt.buf_new()
+    testkit.assert_eq_i64(vstore.store_resolve(rt.buf_ptr(&res), rt.buf_len(&res), 200, &res2) as i64, 0)
+    testkit.assert_true(rec_helper.store_eq(&res, &res2), "resolve idempotent")
+}
