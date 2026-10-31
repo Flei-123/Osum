@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import wlan.iwl_probe
+import wlan.regtrace
+
+static mut regs: [u64; 1024] = [0; 1024]
+static mut ring: [u8; 1024] = [0; 1024]
+static mut pkt: [u8; 64] = [0; 64]
+static mut outb: [u8; 4096] = [0; 4096]
+
+fn m_rd(ctx: u64, off: u64) -> u64 { return regs[(off / 4) as usize] }
+fn m_wr(ctx: u64, off: u64, v: u64) { regs[(off / 4) as usize] = v }
+fn clock(ctx: u64) -> u64 { return ctx }
+
+fn dump(chunk: u64) {
+    let total: u64 = regtrace.size()
+    var got: u64 = 0
+    while got < total {
+        let n: u64 = regtrace.read(got, (&outb[0]) as u64 + got, chunk)
+        if n == 0 { break }
+        got = got + n
+    }
+    io.print_bytes((&outb[0]) as u64, got as usize)
+}
+
+fn accesses(p: *mut iwl_probe.Probe, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        iwl_probe.wr32(p, 0x24, i)
+        let _v: u64 = iwl_probe.rd32(p, 0x24)
+        i = i + 1
+    }
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    rt.read_stdin(&inp)
+    let mode: u64 = rt.ld8(rt.buf_ptr(&inp), 0) as u64
+    var p: iwl_probe.Probe = iwl_probe.probe_new()
+    iwl_probe.mmio_set(&p, 0, m_rd, m_wr)
+    regtrace.set_clock(clock, 7)
+    if mode == 48 {
+        accesses(&p, 4)
+        io.print_bytes((&outb[0]) as u64, 0)
+        let s: u64 = regtrace.size()
+        if s == 0 { io.print_line("OFF size=0") } else { io.print_line("OFF size!=0") }
+        return 0
+    }
+    if mode == 49 || mode == 50 || mode == 51 {
+        var bytes: u64 = 1024
+        if mode == 50 { bytes = 256 }
+        let _e: bool = regtrace.enable((&ring[0]) as u64, bytes)
+        if mode == 49 || mode == 51 {
+            iwl_probe.wr32(&p, 0x24, 8)
+            let _a: u64 = iwl_probe.rd32(&p, 0x24)
+            var i: usize = 0
+            while i < 12 {
+                pkt[i] = (i + 1) as u8
+                i = i + 1
+            }
+            pkt[0] = 0x0c
+            pkt[1] = 0x01
+            regtrace.rec_host(regtrace.K_HCMD, (&pkt[0]) as u64, 12)
+            regtrace.rec_host(regtrace.K_RX, (&pkt[0]) as u64, 12)
+            regtrace.rec_dma(3, 0x123456789, 12, 4)
+            regtrace.rec_irq(0x80000000)
+        } else {
+            accesses(&p, 20)
+        }
+        if mode == 51 { dump(4000) } else { dump(61) }
+        return 0
+    }
+    return 1
+}

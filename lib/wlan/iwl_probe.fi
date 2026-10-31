@@ -15,8 +15,10 @@
 // NOT measured on the machine: nobody has read these registers on HOLO-LAPTOP-3
 // from OrientOS yet (no kernel glue in M1; see docs).
 
+import wlan.regtrace
+
 export {
-    Mmio, Probe, mmio_set, probe_new, probe_run,
+    Mmio, Probe, mmio_set, mmio_rd, mmio_wr, rd32, wr32, probe_new, probe_run,
     family_of, family_name_get, rev_type, rev_dash, rev_step, rev_name_get,
     rf_type, rf_name_get, is_target, fw_digest_pinned, fw_header_ok, fw_ver_get,
     fw_tlv_count, fw_tlv_find, fw_name_quz,
@@ -99,6 +101,30 @@ fn mmio_set(p: *mut Probe, ctx: u64, rd: fn(u64, u64) -> u64, wr: fn(u64, u64, u
     (*p).m.rd32 = rd
     (*p).m.wr32 = wr
     (*p).ctx = ctx
+}
+
+fn mmio_rd(p: *mut Probe, off: u64) -> u64 {
+    let m: Mmio = (*p).m
+    let v: u64 = m.rd32((*p).ctx, off) & 0xFFFFFFFF
+    if regtrace.is_on() { regtrace.rec_reg(regtrace.K_R32, off, v) }
+    return v
+}
+
+fn mmio_wr(p: *mut Probe, off: u64, v: u64) {
+    let m: Mmio = (*p).m
+    let w: u64 = v & 0xFFFFFFFF
+    if regtrace.is_on() { regtrace.rec_reg(regtrace.K_W32, off, w) }
+    m.wr32((*p).ctx, off, w)
+}
+
+fn rd32(p: *mut Probe, off: u64) -> u64 {
+    (*p).reads = (*p).reads + 1
+    return mmio_rd(p, off)
+}
+
+fn wr32(p: *mut Probe, off: u64, v: u64) {
+    (*p).writes = (*p).writes + 1
+    mmio_wr(p, off, v)
 }
 
 // ---- PCI id table (pcie/drv.c iwl_dev_info / pci_device_id, Qu block + AX200/AX210) ----
@@ -194,14 +220,13 @@ fn probe_run(p: *mut Probe, vid: u64, dev: u64, bar_size: u64, bar_is_io: bool) 
     if bar_is_io || bar_size < CSR_MIN_BAR { return E_BAR }
     (*p).dev = dev
     (*p).fam = fam
-    let m: Mmio = (*p).m
-    let rev: u64 = m.rd32((*p).ctx, CSR_HW_REV) & 0xFFFFFFFF
+    let rev: u64 = mmio_rd(p, CSR_HW_REV)
     (*p).reads = (*p).reads + 1
     if rev == 0xFFFFFFFF { return E_DEAD }
     (*p).hw_rev = rev
-    (*p).rf_id = m.rd32((*p).ctx, CSR_HW_RF_ID) & 0xFFFFFFFF
-    (*p).gp_cntrl = m.rd32((*p).ctx, CSR_GP_CNTRL) & 0xFFFFFFFF
-    (*p).if_config = m.rd32((*p).ctx, CSR_HW_IF_CONFIG) & 0xFFFFFFFF
+    (*p).rf_id = mmio_rd(p, CSR_HW_RF_ID)
+    (*p).gp_cntrl = mmio_rd(p, CSR_GP_CNTRL)
+    (*p).if_config = mmio_rd(p, CSR_HW_IF_CONFIG)
     (*p).reads = (*p).reads + 3
     return 0
 }

@@ -4,6 +4,7 @@ import wlan.iwl_pwr
 import wlan.iwl_g1
 import wlan.iwl_le
 import wlan.iwl_mvm_txq
+import wlan.regtrace
 
 export {
     Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_dq_inflight, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset, rx_closed, rx_raw_valid, rb_addr, cq_set_raw,
@@ -263,6 +264,7 @@ fn reclaim_data(c: *mut Cq, idx: u64) {
 }
 
 fn handle_pkt(c: *mut Cq, pkt: u64, len: u64, want_cmd: u64, want_idx: u64, resp: u64, cap: u64) -> bool {
+    if regtrace.is_on() { regtrace.rec_host(regtrace.K_RX, pkt, len) }
     let seq: u64 = iwl_le.ld16(pkt, 2)
     if (seq & SEQ_RX_FRAME) == 0 && ((seq >> 8) & 0x1F) == iwl_mvm_txq.DATA_QUEUE && iwl_le.ld8(pkt, 0) == CMD_TX_DATA && (*c).dq_on != 0 {
         reclaim_data(c, seq & 0xFF)
@@ -336,6 +338,10 @@ fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, c
     iwl_le.st16(slot, 2, (CMD_QUEUE << 8) | idx)
     let cmd: u64 = iwl_le.ld8(slot, 0)
     put_tfd((*c).tfd + idx * CQ_TFD_SIZE, slot, len)
+    if regtrace.is_on() {
+        regtrace.rec_host(regtrace.K_HCMD, slot, len)
+        regtrace.rec_dma(idx, slot, len, CMD_QUEUE)
+    }
     (*c).matched = 0
     (*c).wr = (*c).wr + 1
     if iwl_pwr.mac_access_get(p) != 0 {
@@ -348,7 +354,8 @@ fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, c
     while i < CQ_WAIT_CMD && !done {
         if drain(c, p, true, cmd, idx, resp, cap) { done = true }
         if !done {
-            let _d: u64 = iwl_pwr.rd(p, iwl_probe.CSR_INT)
+            let d: u64 = iwl_pwr.rd(p, iwl_probe.CSR_INT)
+            if d != 0 && regtrace.is_on() { regtrace.rec_irq(d) }
         }
         i = i + 1
     }
