@@ -97,7 +97,7 @@ export {
     cv_text_rgb, memo, memo_text, memo_set, focus, table_click_only, open_plain, set_flags, begin, win_id, caret_on, ax_name, keys_always, has_focus,
     key_seq, key_any, width, height, resized, say_radii, say_knoepfe, rb_px,
     // F-8: what the file manager needed
-    table_multi, table_drag, table_own, table_exact, table_sel_has, table_sel_num, table_sel_all,
+    table_multi, table_drag, table_own, table_exact, focus_clear, table_trail, table_font, table_sel_has, table_sel_num, table_sel_all,
     table_sel_none, table_sel_set, table_anchor, table_frames,
     table_drop_filter, table_top, table_set_top, table_visible,
     KEY_DRAG, KEY_DROP, drag_key, drag_row, drag_shield, drop_accept,
@@ -495,6 +495,10 @@ fn root() -> usize {
 // DRAG REGION: the program marks a node of the row with `strip_drag_node`, and `pump` tells the server its x-range after every
 // layout (a press there moves the window, a double click maximises). The three caption buttons are the server's and lie over
 // the right end of the strip: `strip_caps_w` is the room to keep free.
+static mut ct_trail: [u64; 8] = [0 as u64; 8]
+static mut ct_font: [u64; 8] = [0 as u64; 8]
+static mut row_tile_px: u64 = 0
+static mut focus_drop: bool = false
 static mut st_on: bool = false
 static mut st_h: u64 = 0 // the strip height in points
 static mut st_caps: u64 = 0 // the width of the caption buttons in points
@@ -1648,7 +1652,10 @@ fn rebuild() {
     let f: fn() = *buildf_slot()
     f()
     fuiwirt.host_bind(wirt())
-    if fk != 0 {
+    if focus_drop {
+        focus_drop = false
+        control.panel_set_focus(fuiwirt.host_panel(wirt()), control.NOBODY)
+    } else if fk != 0 {
         let n: usize = scene.scene_find_id(sc(), fk as u32)
         if n != scene.SCENE_NONE {
             // W-CARET: `panel_attach` (host_bind) keeps the panel's focus INDEX, and `panel_set_focus` returns at once when the
@@ -2522,6 +2529,14 @@ fn focus(key: u64) {
     let n: usize = scene.scene_find_id(sc(), key as u32)
     if n != scene.SCENE_NONE {
         control.panel_set_focus(fuiwirt.host_panel(wirt()), n)
+        touch()
+    }
+}
+
+fn focus_clear() {
+    focus_drop = true
+    let r: u32 = control.panel_set_focus(fuiwirt.host_panel(wirt()), control.NOBODY)
+    if r != 0 as u32 {
         touch()
     }
 }
@@ -4793,7 +4808,9 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
         if S.s_ct_icons[(k) as usize] != 0 {
             let word: u64 = __mmio_read64((S.s_ct_icons[(k) as usize] + ri * 8) as *mut u64)
             let lvx: u64 = row_level(k, ri) * sp(16)
+            row_tile_px = ct_font[(k) as usize] >> 32
             row_icon(word, x + sp(8) + lvx, ry, rh, ct_text(k, ri, 0), on)
+            row_tile_px = 0
             ix = icon_col(k) + lvx
         }
         if S.s_ct_two[(k) as usize] {
@@ -4828,31 +4845,43 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
                     off = ix
                 }
                 if S.s_ct_exact[(k) as usize] {
-                    // the ink of the system's text, glyph by glyph on whole
-                    // pixels; the columns after the name are the quiet ones
                     var cc: u32 = (*t).text
                     if on {
                         cc = (*t).selection_text
                     } else if col2 > 0 {
                         cc = (*t).text_muted
                     }
-                    var avail: u64 = 1
-                    if cw > sp(12) + off {
-                        avail = cw - sp(12) - off
+                    var fs: u64 = sp(15)
+                    if ct_font[(k) as usize] != 0 {
+                        fs = sp(ct_font[(k) as usize] & 65535)
+                        if col2 > 0 {
+                            fs = sp((ct_font[(k) as usize] >> 16) & 65535)
+                        }
                     }
-                    let cp: u64 = fit_cell(ct_text(k, ri, col2), avail, sp(15))
+                    var shift: u64 = 0
+                    if ct_trail[(k) as usize] != 0 && col2 == S.s_ct_cols[(k) as usize] - 1 {
+                        let tw: u64 = __mmio_read64((ct_trail[(k) as usize] + ri * 8) as *mut u64)
+                        if tw != 0 {
+                            shift = sp(26)
+                            fuiapp.glyph(tw & 65535, x + w - sp(28), ry + (rh - sp(14)) / 2, sp(14), (*t).text | 4278190080 as u32)
+                        }
+                    }
+                    var avail: u64 = 1
+                    if cw > sp(12) + off + shift {
+                        avail = cw - sp(12) - off - shift
+                    }
+                    let cp: u64 = fit_cell(ct_text(k, ri, col2), avail, fs)
                     var tx: u64 = cx2 + sp(10) + off
                     var clipw: u64 = avail
                     if ((S.s_ct_ral[(k) as usize] >> col2) & 1) != 0 {
-                        // a right-aligned column: the text ends 14 points before the column's edge
-                        let tw2: u64 = wlibc.text_w(wlibc.F_UI, sp(15), cp, ulib.length(cp))
-                        if cw > sp(14) + tw2 + off {
-                            tx = cx2 + cw - sp(14) - tw2
+                        let tw2: u64 = wlibc.text_w(wlibc.F_UI, fs, cp, ulib.length(cp))
+                        if cw > sp(14) + shift + tw2 + off {
+                            tx = cx2 + cw - sp(14) - shift - tw2
                             clipw = tw2 + sp(14)
                         }
                     }
-                    two_text(tx, mid_base(ry, rh, sp(15)), clipw,
-                        cp, sp(15), false,
+                    two_text(tx, mid_base(ry, rh, fs), clipw,
+                        cp, fs, false,
                         cc | 4278190080 as u32)
                 } else {
                     var plain_w: u64 = 1
@@ -4903,6 +4932,9 @@ fn row_icon(word: u64, x: u64, y: u64, rh: u64, txt: u64, on: bool) {
     }
     // QA walk (3440x1440, uiscale 2): a caller may pass a row height in unscaled pixels (32) while the
     // tile is scaled (44); `rh - tile` then overflowed and the Explorer panicked on open. Clamp the tile.
+    if row_tile_px != 0 {
+        tile = sp(row_tile_px)
+    }
     if tile > rh {
         tile = rh
     }
@@ -6386,6 +6418,24 @@ fn table_exact(key: u64, on: bool) {
     let k: u64 = ct_slot(key)
     if k != NO_SLOT {
         S.s_ct_exact[(k) as usize] = on
+    }
+}
+
+fn table_trail(key: u64, arr: u64) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != NO_SLOT {
+        ct_trail[(k) as usize] = arr
+        touch()
+    }
+}
+
+fn table_font(key: u64, name_px: u64, quiet_px: u64, icon_px: u64) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != NO_SLOT {
+        ct_font[(k) as usize] = name_px | (quiet_px << 16) | (icon_px << 32)
+        touch()
     }
 }
 

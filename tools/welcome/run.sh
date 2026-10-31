@@ -138,10 +138,14 @@ warte 3
 klickauf wlnth7x2
 warteauf "welcome: page 1 of 3" || 60
 warte 2
+fahre 1270,790
+warte 1
 foto 01-net
 klickauf wlnth7x3
 warteauf "welcome: page 2 of 3" || 60
 warte 2
+fahre 1270,790
+warte 1
 foto 02-done
 klickauf wlnth6x0
 warteauf "settings: ready" || 120
