@@ -8,7 +8,7 @@ Source: /root/linux-v510 (mvm/fw.c iwl_mvm_up, scan.c iwl_mvm_legacy_config_scan
 | CAPA 2 UMAC_SCAN | set | UMAC scan: SCAN_CFG_CMD 0x0C + SCAN_REQ_UMAC 0x0D |
 | CAPA 12 DQA_SUPPORT | set | DQA_ENABLE (group 5 cmd 0x00, cmd_queue 0); aux queue 1, data queues >= 4 |
 | CAPA 1 LAR_SUPPORT | set | MCC_UPDATE_CMD 0xC8 before scan config (if NVM LAR enabled) |
-| API 30 STA_TYPE | set | ADD_STA is 52 octets (iwl_mvm_add_sta_cmd), station_type at offset 33 |
+| API 30 STA_TYPE | set | ADD_STA is 48 octets (iwl_mvm_add_sta_cmd v10), station_type at offset 35 |
 | API 32 ADAPTIVE_DWELL / API 42 / API 56 / API 58 | set / no / no / no | SCAN_REQ_UMAC v7, legacy SCAN_CFG v1 (not reduced), tail v1 |
 | N_SCAN_CHANNELS | 52 | SCAN_CFG length = 36 + 52 |
 | PHY_SKU | 0x330018 | valid tx/rx ant 3/3 |
@@ -23,9 +23,9 @@ Source: /root/linux-v510 (mvm/fw.c iwl_mvm_up, scan.c iwl_mvm_legacy_config_scan
 | 4 | TX_ANT_CONFIG | 0x98/0 | sent | sent |
 | 5 | PHY_DB x n, PHY_CONFIGURATION | 0x6C, 0x6A | sent | sent |
 | 6 | BT_CONFIG | 0x9B/0 | sent | sent |
-| 7 | DQA_ENABLE | 0x00/5 | missing | missing |
+| 7 | DQA_ENABLE | 0x00/5 | missing | sent (before aux station) |
 | 8 | SCD_QUEUE_CFG aux queue 1, fifo MCAST 5, tid 8, window 64 | 0x1D/0 | missing | sent (when DQA known) |
-| 9 | ADD_STA aux: mac_id 4, tid_disable 0xFFFF, type AUX 4, queue msk 0x2, 52 octets | 0x18/0 | missing | sent |
+| 9 | ADD_STA aux: mac_id 4, tid_disable 0xFFFF, type AUX 4, queue msk 0x2, 48 octets | 0x18/0 | missing | sent |
 | 10 | PHY_CONTEXT add x NUM_PHY_CTX | 0x08/0 | 1 sent | 1 sent |
 | 11 | THERMAL backoff 0 | 0x7E/0 | missing | missing |
 | 12 | POWER_TABLE | 0x77/0 | missing | missing |
