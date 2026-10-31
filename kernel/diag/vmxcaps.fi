@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import arch.msr
+
+export { render }
+
+const MSR_FEATURE_CONTROL: u64 = 0x3A
+const MSR_VMX_BASIC: u64 = 0x480
+const MSR_VMX_PINBASED: u64 = 0x481
+const MSR_VMX_PROCBASED: u64 = 0x482
+const MSR_VMX_EXIT: u64 = 0x483
+const MSR_VMX_ENTRY: u64 = 0x484
+const MSR_VMX_MISC: u64 = 0x485
+const MSR_VMX_CR0_FIXED0: u64 = 0x486
+const MSR_VMX_CR4_FIXED0: u64 = 0x488
+const MSR_VMX_PROCBASED2: u64 = 0x48B
+const MSR_VMX_EPT_VPID: u64 = 0x48C
+const MSR_VMX_TRUE_PINBASED: u64 = 0x48D
+const MSR_VMX_TRUE_PROCBASED: u64 = 0x48E
+const MSR_VMX_TRUE_EXIT: u64 = 0x48F
+const MSR_VMX_TRUE_ENTRY: u64 = 0x490
+const MSR_VMX_VMFUNC: u64 = 0x491
+
+static mut s_eax_: [u8; 6] = " eax=\0"
+static mut s_ebx_: [u8; 6] = " ebx=\0"
+static mut s_ecx_: [u8; 6] = " ecx=\0"
+static mut s_edx_: [u8; 6] = " edx=\0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_gp: [u8; 3] = "gp\0"
+static mut s_cpuid_0: [u8; 8] = "cpuid.0\0"
+static mut s_cpuid_1: [u8; 8] = "cpuid.1\0"
+static mut s_cpuid_7: [u8; 8] = "cpuid.7\0"
+static mut s_cpuid_80000001: [u8; 15] = "cpuid.80000001\0"
+static mut s_cpuid_8000000a: [u8; 15] = "cpuid.8000000a\0"
+static mut s_msr: [u8; 4] = "msr\0"
+
+static mut w_at: u64 = 0
+static mut w_cap: u64 = 0
+static mut w_out: u64 = 0
+
+fn put_c(c: u64) {
+    if w_at + 1 < w_cap {
+        kstate.set8(w_out + w_at, c as u8)
+        w_at = w_at + 1
+    }
+}
+
+fn put_s(s: u64) {
+    var i: u64 = 0
+    while kstate.get8(s + i) != 0 {
+        put_c(kstate.get8(s + i))
+        i = i + 1
+    }
+}
+
+fn put_hex(v: u64, digits: u64) {
+    var i: u64 = digits
+    put_c(48)
+    put_c(120)
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            put_c(48 + d)
+        } else {
+            put_c(87 + d)
+        }
+    }
+}
+
+fn cpuid_a(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rcx"), clobber("rdx"))
+}
+
+fn cpuid_b(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\nmov eax, ebx\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rcx"), clobber("rdx"))
+}
+
+fn cpuid_c(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\nmov eax, ecx\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rdx"))
+}
+
+fn cpuid_d(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\nmov eax, edx\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rcx"))
+}
+
+fn line_cpuid(name: u64, leaf: u64, sub: u64) {
+    put_s(name)
+    put_s((&s_eax_[0]) as u64)
+    put_hex(cpuid_a(leaf, sub) & 0xFFFFFFFF, 8)
+    put_s((&s_ebx_[0]) as u64)
+    put_hex(cpuid_b(leaf, sub) & 0xFFFFFFFF, 8)
+    put_s((&s_ecx_[0]) as u64)
+    put_hex(cpuid_c(leaf, sub) & 0xFFFFFFFF, 8)
+    put_s((&s_edx_[0]) as u64)
+    put_hex(cpuid_d(leaf, sub) & 0xFFFFFFFF, 8)
+    put_c(10)
+}
+
+fn line_msr(state: u64, name: u64, index: u64) {
+    var v: u64 = 0
+    put_s(name)
+    put_s((&s_sp[0]) as u64)
+    put_hex(index, 3)
+    put_c(32)
+    if msr.rd(state, index, (&v) as u64) {
+        put_hex(v, 16)
+    } else {
+        put_s((&s_gp[0]) as u64)
+    }
+    put_c(10)
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    w_out = out
+    w_cap = cap
+    w_at = 0
+    line_cpuid((&s_cpuid_0[0]) as u64, 0, 0)
+    line_cpuid((&s_cpuid_1[0]) as u64, 1, 0)
+    line_cpuid((&s_cpuid_7[0]) as u64, 7, 0)
+    line_cpuid((&s_cpuid_80000001[0]) as u64, 0x80000001, 0)
+    line_cpuid((&s_cpuid_8000000a[0]) as u64, 0x8000000A, 0)
+    line_msr(state, (&s_msr[0]) as u64, MSR_FEATURE_CONTROL)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_BASIC)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_PINBASED)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_PROCBASED)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_EXIT)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_ENTRY)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_MISC)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_CR0_FIXED0)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_CR0_FIXED0 + 1)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_CR4_FIXED0)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_CR4_FIXED0 + 1)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_PROCBASED2)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_EPT_VPID)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_TRUE_PINBASED)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_TRUE_PROCBASED)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_TRUE_EXIT)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_TRUE_ENTRY)
+    line_msr(state, (&s_msr[0]) as u64, MSR_VMX_VMFUNC)
+    return w_at
+}
