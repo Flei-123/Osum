@@ -19,7 +19,7 @@ export {
     ops_peer_add, ops_peer_remove, ops_associated, ops_poll_one, ops_rssi, ops_rx_channel,
     ops_keys_sent, ops_cmd_count, ops_set_hw_crypto, ops_sync_board, ops_set_queues, ops_set_address,
     ops_default_channels, ops_set_caps, ops_caps,
-    ops_fail_step, ops_fail_rc, ops_fail_cmd, ops_ok_steps,
+    ops_fail_step, ops_fail_rc, ops_fail_cmd, ops_ok_steps, ops_rx_stat, RXS_COUNT,
     STEP_NONE, STEP_PHY_CTX, STEP_MAC_CTX, STEP_BINDING, STEP_SCAN_CFG, STEP_SCAN_REQ, STEP_AUX_STA,
     SCAN_IDLE, SCAN_RUNNING, SCAN_DONE, SCAN_ABORTED,
     E_OPS_STATE, E_OPS_FW, E_OPS_ARGS, STA_AP, STA_AUX, MAX_CHANNELS
@@ -52,6 +52,22 @@ const MAC_ID: u64 = 0
 const PHY_ID: u64 = 0
 const BIND_ID: u64 = 0
 const MAX_CHANNELS: u64 = 40
+const RXS_COUNT: u64 = 16
+const RXS_MPDU: u64 = 0
+const RXS_DATA: u64 = 1
+const RXS_PROT: u64 = 2
+const RXS_DEC_OK: u64 = 3
+const RXS_DROP_MIC: u64 = 4
+const RXS_DROP_RAW: u64 = 5
+const RXS_GROUP: u64 = 6
+const RXS_DELIVERED: u64 = 7
+const RXS_DROP_SHORT: u64 = 8
+const RXS_BAD_CRC: u64 = 9
+const RXS_LAST_STATUS: u64 = 10
+const RXS_LAST_LEN: u64 = 11
+const RXS_LAST_FC: u64 = 12
+const RXS_MGMT: u64 = 13
+const MAC_FILTER_ACCEPT_GRP: u64 = 4
 
 const CMD_REMOVE_STA: u64 = 0x19
 const CMD_PHY_CTX: u64 = 0x08
@@ -96,6 +112,9 @@ struct Mvm {
     fail_cmd: u64,
     ok_steps: u64,
     caps: [u64; 16],
+    rxs: [u64; 16],
+    aid: u64,
+    grp_pass: bool,
     cmd: [u8; 2600],
     rx: [u8; 2600]
 }
@@ -112,7 +131,7 @@ fn mvm_new() -> Mvm {
         scan_state: 0, scan_uid: 0, scan_status: 0,
         rssi: 0, rx_channel: 0, cmds: 0, keys_sent: 0,
         fail_step: 0, fail_rc: 0, fail_cmd: 0, ok_steps: 0,
-        caps: [0; 16], cmd: [0; 2600], rx: [0; 2600]
+        caps: [0; 16], rxs: [0; 16], aid: 0, grp_pass: false, cmd: [0; 2600], rx: [0; 2600]
     }
     iwl_fwcaps.caps_default((&o.caps[0]) as *mut u64)
     return o
@@ -126,6 +145,12 @@ fn ops_set_caps(o: *mut Mvm, w: *mut u64) {
     }
 }
 fn ops_caps(o: *mut Mvm) -> *mut u64 { return (&(*o).caps[0]) as *mut u64 }
+
+fn ops_rx_stat(o: *mut Mvm, i: u64) -> u64 {
+    if i >= RXS_COUNT { return 0 }
+    return (*o).rxs[i as usize]
+}
+fn rxs_add(o: *mut Mvm, i: u64) { (*o).rxs[i as usize] = (*o).rxs[i as usize] + 1 }
 
 fn ops_set_hw_crypto(o: *mut Mvm, on: bool) { (*o).hw_crypto = on }
 fn quirk_on(o: *mut Mvm, q: u64) -> bool { return iwl_fwcaps.caps_quirk(ops_caps(o), q) }
@@ -229,11 +254,16 @@ fn scan_cfg_pad(o: *mut Mvm, len: u64, nchan: u64) -> u64 {
     return len + (slots - nchan)
 }
 
+fn mac_filter(o: *mut Mvm) -> u64 {
+    if (*o).grp_pass { return MAC_FILTER_ACCEPT_GRP }
+    return 0
+}
+
 fn mac_cmd(o: *mut Mvm, action: u64, assoc: bool, aid: u64) -> i64 {
     let a: u64 = cmd_addr(o)
     let n: u64 = iwl_mvm_ctx.mvm_mac_ctx(a, (*o).cmd_queue, next_slot(o),
         iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), action, iwl_mvm_ctx.MAC_TYPE_BSS_STA, 0,
-        mac_addr(o), bssid_addr(o), 0xF, 0xFF, 0, 0, 0, 0, 1)
+        mac_addr(o), bssid_addr(o), 0xF, 0xFF, 0, 0, 0, mac_filter(o), 1)
     iwl_mvm_ctx.mvm_mac_ac(a, 0, 15, 1023, 3, 2, 0)
     iwl_mvm_ctx.mvm_mac_ac(a, 1, 15, 1023, 7, 3, 0)
     iwl_mvm_ctx.mvm_mac_ac(a, 2, 7, 15, 2, 1, 3008)
@@ -464,6 +494,7 @@ fn ops_peer_add(o: *mut Mvm, bssid: u64) -> i64 {
 
 fn ops_associated(o: *mut Mvm, aid: u64) -> i64 {
     if !(*o).peer_added { return E_OPS_STATE }
+    (*o).aid = aid
     let n: u64 = iwl_mvm.mvm_add_sta(cmd_addr(o), (*o).cmd_queue, next_slot(o), 1,
         iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, aid, (*o).queue_msk)
     sta_tune(o)
@@ -521,6 +552,7 @@ fn o_key(ctx: u64, art: u64, id: u64, key: u64, len: usize) -> i64 {
     if art == device.KEY_OFF {
         (*o).ptk_set = false
         (*o).tx_pn = 0
+        (*o).grp_pass = false
         if hwc_on(o) { return ops_peer_remove(o) }
         return 0
     }
@@ -545,8 +577,11 @@ fn o_key(ctx: u64, art: u64, id: u64, key: u64, len: usize) -> i64 {
     let n: u64 = iwl_mvm.mvm_sta_key_ccmp(cmd_addr(o), (*o).cmd_queue, next_slot(o), STA_AP,
         offset, id, multicast, key, (&pn[0]) as u64)
     (*o).keys_sent = (*o).keys_sent + 1
-    if !iwl_fwcaps.caps_tkip_mic(ops_caps(o)) { return submit(o, iwl_buf.HDR + 64) }
-    return submit(o, n)
+    var kr: i64 = 0
+    if !iwl_fwcaps.caps_tkip_mic(ops_caps(o)) { kr = submit(o, iwl_buf.HDR + 64) } else { kr = submit(o, n) }
+    if kr < 0 || art != device.KEY_GTK { return kr }
+    (*o).grp_pass = true
+    return mac_cmd(o, iwl_mvm_ctx.CTXT_MODIFY, true, (*o).aid)
 }
 
 fn o_send(ctx: u64, frame_ptr: u64, len: usize) -> i64 {
@@ -646,6 +681,48 @@ fn parse_scan_done(o: *mut Mvm, n: usize) {
     }
 }
 
+fn rx_mpdu(o: *mut Mvm, out: u64, bytes: u64, a: u64, h: u64, n: u64) -> i64 {
+    rxs_add(o, RXS_MPDU)
+    var status: u64 = 0
+    if h + 4 + bytes + 4 <= n { status = iwl_le.ld32(a, h + 4 + bytes) }
+    (*o).rxs[RXS_LAST_STATUS as usize] = status
+    (*o).rxs[RXS_LAST_LEN as usize] = bytes
+    if bytes < 10 {
+        rxs_add(o, RXS_DROP_SHORT)
+        return bytes as i64
+    }
+    let fcv: u64 = frame.fc(out, bytes as usize)
+    (*o).rxs[RXS_LAST_FC as usize] = fcv
+    if (status & 1) == 0 { rxs_add(o, RXS_BAD_CRC) }
+    if frame.art(fcv) != frame.KIND_DATA {
+        rxs_add(o, RXS_MGMT)
+        return bytes as i64
+    }
+    rxs_add(o, RXS_DATA)
+    if (iwl_le.ld8(out, 4) & 1) != 0 { rxs_add(o, RXS_GROUP) }
+    if !frame.geschuetzt(fcv) {
+        rxs_add(o, RXS_DELIVERED)
+        return bytes as i64
+    }
+    rxs_add(o, RXS_PROT)
+    if !(quirk_on(o, iwl_fwcaps.Q_HWC) && (*o).ptk_set) {
+        rxs_add(o, RXS_DELIVERED)
+        return bytes as i64
+    }
+    let v: u64 = iwl_mvm_crypt.rx_verdict(out, bytes, status)
+    if v == iwl_mvm_crypt.RX_DROP_MIC {
+        rxs_add(o, RXS_DROP_MIC)
+        return -2
+    }
+    if v == iwl_mvm_crypt.RX_DROP_RAW {
+        rxs_add(o, RXS_DROP_RAW)
+        return -2
+    }
+    rxs_add(o, RXS_DEC_OK)
+    rxs_add(o, RXS_DELIVERED)
+    return iwl_mvm_crypt.rx_unprotect(out, bytes) as i64
+}
+
 fn ops_poll_one(o: *mut Mvm, out: u64, room: usize) -> i64 {
     let t: Transport = (*o).tr
     let n: i64 = t.poll((*o).tctx, rx_addr(o), RX_BUF)
@@ -666,8 +743,7 @@ fn ops_poll_one(o: *mut Mvm, out: u64, room: usize) -> i64 {
         let bytes: u64 = iwl_le.ld16(a, h)
         if bytes == 0 || h + 4 + bytes > (n as u64) || (bytes as usize) > room { return -2 }
         iwl_le.copy(out, a + h + 4, bytes)
-        if quirk_on(o, iwl_fwcaps.Q_HWC) && (*o).ptk_set { return iwl_mvm_crypt.rx_unprotect(out, bytes) as i64 }
-        return bytes as i64
+        return rx_mpdu(o, out, bytes, a, h, n as u64)
     }
     return -2
 }

@@ -17,6 +17,7 @@ static mut rxq: [u8; 1200] = [0; 1200]
 static mut rxq_len: [usize; 4] = [0; 4]
 static mut rxq_n: usize = 0
 static mut rxq_at: usize = 0
+static mut rx_status: u64 = 0
 static mut fail_at: i64 = -1
 static mut f0: [u8; 2048] = [0; 2048]
 static mut f1: [u8; 2048] = [0; 2048]
@@ -171,6 +172,8 @@ fn rx_mpdu(frame: u64, n: usize) {
         p[8 + i] = rt.ld8(frame, i)
         i = i + 1
     }
+    p[8 + n] = (rx_status & 255) as u8
+    p[9 + n] = ((rx_status >> 8) & 255) as u8
     rx_put((&p[0]) as u64, n + 8 + 8)
 }
 
@@ -291,6 +294,83 @@ fn seq_var(q: u64) {
     temit()
 }
 
+fn stat_line(o: *mut iwl_ops.Mvm) {
+    tlit("rxs")
+    var k: u64 = 0
+    while k < 14 {
+        tch(32)
+        tnum(iwl_ops.ops_rx_stat(o, k))
+        k = k + 1
+    }
+    temit()
+}
+
+fn seq_rx() {
+    var g: device.Device = device.device_new()
+    var o: iwl_ops.Mvm = iwl_ops.mvm_new()
+    var mac: [u8; 6] = [2, 0, 0, 0, 1, 0]
+    var bssid: [u8; 6] = [2, 0, 0, 0, 0, 0]
+    var key: [u8; 16] = [0x55; 16]
+    iwl_ops.ops_set_address(&o, (&mac[0]) as u64)
+    iwl_ops.ops_set_hw_crypto(&o, false)
+    iwl_fwcaps.caps_set_quirks(iwl_ops.ops_caps(&o), iwl_fwcaps.Q_HWC | iwl_fwcaps.Q_TX_OFF)
+    log_n = 0
+    rxq_n = 0
+    rxq_at = 0
+    if !iwl_ops.ops_attach(&g, &o, 0, t_submit, t_poll) { tlit("attach fail"); temit(); return }
+    let r0: i64 = iwl_ops.ops_setup(&o)
+    let r1: i64 = iwl_ops.ops_peer_add(&o, (&bssid[0]) as u64)
+    let r2: i64 = iwl_ops.ops_associated(&o, 5)
+    let r3: i64 = device.key_set(&g, device.KEY_PTK, 0, (&key[0]) as u64, 16)
+    var fr: [u8; 48] = [0; 48]
+    fr[0] = 0x08 as u8
+    fr[1] = 0x42 as u8
+    fr[4] = 2 as u8
+    fr[24] = 1 as u8
+    fr[27] = 0x20 as u8
+    fr[32] = 0xAA as u8
+    fr[33] = 0xAA as u8
+    fr[34] = 0x03 as u8
+    fr[38] = 0x08 as u8
+    fr[39] = 0x00 as u8
+    fr[40] = 0xEE as u8
+    var un: [u8; 32] = [0; 32]
+    un[0] = 0x08 as u8
+    un[1] = 0x02 as u8
+    un[4] = 0xFF as u8
+    un[5] = 0xFF as u8
+    un[6] = 0xFF as u8
+    un[24] = 0xAA as u8
+    un[25] = 0xAA as u8
+    un[26] = 0x03 as u8
+    un[30] = 0x08 as u8
+    rx_status = 0x0241
+    rx_mpdu((&fr[0]) as u64, 48)
+    rx_status = 0x0201
+    rx_mpdu((&fr[0]) as u64, 48)
+    rx_status = 0x0001
+    rx_mpdu((&fr[0]) as u64, 48)
+    rx_status = 0x0001
+    rx_mpdu((&un[0]) as u64, 32)
+    rx_status = 0
+    tlit("rc ")
+    tsigned(r0); tch(32); tsigned(r1); tch(32); tsigned(r2); tch(32); tsigned(r3)
+    temit()
+    let n: i64 = device.receive(&g, (&outb[0]) as u64, 2048)
+    tlit("rx1 ")
+    tsigned(n)
+    tch(32)
+    if n > 0 { thex((&outb[0]) as u64, n as usize) }
+    temit()
+    let n2: i64 = device.receive(&g, (&outb[0]) as u64, 2048)
+    tlit("rx2 ")
+    tsigned(n2)
+    tch(32)
+    if n2 > 0 { thex((&outb[0]) as u64, n2 as usize) }
+    temit()
+    stat_line(&o)
+}
+
 fn seq_lq(on: bool) {
     var g: device.Device = device.device_new()
     var o: iwl_ops.Mvm = iwl_ops.mvm_new()
@@ -369,6 +449,7 @@ fn run_line(line: u64, len: usize) {
     }
     if word_is(line, len, &at, "seqsw") { seq_cmd(false); return }
     if word_is(line, len, &at, "seqhw") { seq_cmd(true); return }
+    if word_is(line, len, &at, "rxhwc") { seq_rx(); return }
     if word_is(line, len, &at, "lqon") { seq_lq(true); return }
     if word_is(line, len, &at, "hwc") { seq_var(iwl_fwcaps.Q_HWC | iwl_fwcaps.Q_TX_OFF); return }
     if word_is(line, len, &at, "plain") { seq_var(iwl_fwcaps.Q_PLAIN | iwl_fwcaps.Q_TX_OFF); return }

@@ -71,7 +71,7 @@ def check_seq(hw):
     out = run(["seq" + mode])
     c = cmds(out)
     ids = [x[0] for x in c]
-    want = [0x18, 0x08, 0x28, 0x2B, 0x0C, 0x18, 0x28, 0x29, 0x0D, 0x08] + ([0x17, 0x17] if hw else []) + [0x1C]
+    want = [0x18, 0x08, 0x28, 0x2B, 0x0C, 0x18, 0x28, 0x29, 0x0D, 0x08] + ([0x17, 0x17, 0x28] if hw else []) + [0x1C]
     ok(ids == want, "command ids %s" % " ".join("%02x" % i for i in ids))
     ok([le(x, 2, 2) & 0xFF for x in c] == list(range(1, len(c) + 1)), "command slots count up")
     rc = [l for l in out if l.startswith("rc ")][0].split()
@@ -250,6 +250,8 @@ def check_variants():
             ok(ln == 48 and fc1 == 0x41, "hwc: frame grew by the 8-octet CCMP header, protected bit set")
             ok(t[4 + 56 + 24:4 + 56 + 32] == bytes([1, 0, 0, 0x20, 0, 0, 0, 0]), "hwc: CCMP header carries PN 1 and the ExtIV bit")
             ok(t[4 + 56 + 32:4 + 56 + 40] == bytes([0xAA, 0xAA, 3, 0, 0, 0, 8, 0]) and t[4 + 56 + 40] == 0x11 and t[4 + 56 + 47] == 0x22, "hwc: payload moved behind the CCMP header unchanged")
+            macs = [x for x in c if x[0] == 0x28]
+            ok([le(x, 4 + 52, 4) for x in macs] == [0, 0, 4], "hwc: MAC_CONTEXT filter accepts group frames only after the group key")
             k1 = [x for x in c if x[0] == 0x17]
             ok(le(k1[0], 4 + 2, 2) == 0x000A and le(k1[1], 4 + 2, 2) == 0x410A, "hwc: key flags carry CCM, WEP_KEY_MAP, key id, multicast")
         else:
@@ -261,7 +263,20 @@ def check_variants():
         ok(all((le(x, 4 + 2, 2), le(x, 4 + 24, 4)) == want for x in sta), "%s: ADD_STA tid_disable_tx / station_flags_msk %s" % (name, str(want)))
 
 
+def check_rx_status():
+    print("== hardware-decrypted receive path ==")
+    out = run(["rxhwc"])
+    rx1 = [l for l in out if l.startswith("rx1 ")][0].split()
+    rx2 = [l for l in out if l.startswith("rx2 ")][0].split()
+    rxs = [l for l in out if l.startswith("rxs")][0].split()[1:]
+    ok(rx1[1] == "32" and bytes.fromhex(rx1[2])[0:2] == bytes([0x08, 0x02]), "decrypted CCMP frame: header and MIC removed, protected bit cleared: %s" % " ".join(rx1[:2]))
+    ok(bytes.fromhex(rx1[2])[24:] == bytes([0xAA, 0xAA, 3, 0, 0, 0, 8, 0]), "payload is the original LLC/SNAP body")
+    ok(rx2[1] == "32" and bytes.fromhex(rx2[2])[4:7] == bytes([0xFF] * 3), "frames failing MIC and left undecrypted are dropped, the group frame passes")
+    ok(rxs[:12] == ["4", "4", "3", "1", "1", "1", "1", "2", "0", "0", "1", "32"], "receive counters: %s" % " ".join(rxs))
+
+
 check_variants()
+check_rx_status()
 
 print("RESULT pass=%d fail=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)
