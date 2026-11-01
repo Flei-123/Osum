@@ -27,7 +27,7 @@ def kopf_lesen(f, lba, b: Befund, name):
         b.bad(f"{name}: Sektor {lba} nicht lesbar")
         return None
     if h[0:8] != b"EFI PART":
-        b.bad(f"{name}: keine Signatur 'EFI PART' in Sektor {lba}")
+        b.bad(f"{name}: no signature 'EFI PART' in Sektor {lba}")
         return None
     hsize = le(h, 12, 4)
     if hsize < 92 or hsize > BS:
@@ -38,7 +38,7 @@ def kopf_lesen(f, lba, b: Befund, name):
     roh[16:20] = b"\0\0\0\0"
     got = zlib.crc32(bytes(roh)) & 0xFFFFFFFF
     if got != want:
-        b.bad(f"{name}: KOPF-CRC32 falsch -- steht {want:#010x}, gerechnet {got:#010x}")
+        b.bad(f"{name}: HEADER-CRC32 wrong -- stored {want:#010x}, computed {got:#010x}")
     return {
         "lba": lba,
         "meine": le(h, 24, 8),
@@ -63,7 +63,7 @@ def tafel_pruefen(f, k, b: Befund, name):
         return []
     got = zlib.crc32(roh) & 0xFFFFFFFF
     if got != k["tcrc"]:
-        b.bad(f"{name}: TAFEL-CRC32 falsch -- steht {k['tcrc']:#010x}, gerechnet {got:#010x}")
+        b.bad(f"{name}: TABLE-CRC32 wrong -- stored {k['tcrc']:#010x}, gerechnet {got:#010x}")
     parts = []
     for i in range(k["anzahl"]):
         e = roh[i * k["esize"]:(i + 1) * k["esize"]]
@@ -102,10 +102,10 @@ def main():
         f.seek(0)
         mbr = f.read(BS)
         if mbr[510:512] != b"\x55\xaa":
-            b.bad("Schutz-MBR: die Signatur 0x55AA fehlt")
+            b.bad("protective MBR: the signature 0x55AA is missing")
         typen = [mbr[446 + i * 16 + 4] for i in range(4)]
         if 0xEE not in typen:
-            b.bad("Schutz-MBR: kein Eintrag vom Typ 0xEE")
+            b.bad("protective MBR: no entry of type 0xEE")
 
         # ---- beide Koepfe
         prim = kopf_lesen(f, 1, b, "primaer")
@@ -121,9 +121,9 @@ def main():
         # ---- zeigen sie aufeinander?
         if prim and sich:
             if prim["andere"] != sich["meine"]:
-                b.bad("die Koepfe zeigen nicht aufeinander (primaer -> sicherung)")
+                b.bad("the headers do not point at each other (primary -> backup)")
             if sich["andere"] != prim["meine"]:
-                b.bad("die Koepfe zeigen nicht aufeinander (sicherung -> primaer)")
+                b.bad("the headers do not point at each other (backup -> primary)")
             if prim["tcrc"] != sich["tcrc"]:
                 b.bad("die beiden Koepfe nennen verschiedene Tafelsummen")
 
@@ -156,7 +156,7 @@ def main():
             for e in b.fehler:
                 print(f"     - {e}")
         else:
-            print("   beide Koepfe und beide Tafelsummen sind in Ordnung")
+            print("   both headers and both table sums are fine")
 
     return 1 if b.fehler else 0
 

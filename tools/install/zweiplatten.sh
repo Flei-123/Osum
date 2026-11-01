@@ -27,7 +27,7 @@ echo "   hda  eine fertige Installation, sha256 ${VORHER:0:16}…"
 
 rm -f "$OUT/hdb.img"
 head -c $((320 * 1024 * 1024)) /dev/zero > "$OUT/hdb.img"
-echo "   hdb  leer, 320 MiB -- das Ziel"
+echo "   hdb  empty, 320 MiB -- the target"
 
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs"
 APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,now,second"
@@ -50,44 +50,44 @@ kill "$QP" 2>/dev/null
 wait "$QP" 2>/dev/null
 
 echo
-echo "== was das Programm gesehen und getan hat"
+echo "== what the program saw and did"
 grep -aE '^installer: (disk|ready|gewaehlt|esp=|fertig|FEHLER|bei=)' "$OUT/ser.txt" \
     | head -12 | sed 's/^/        /'
 echo
 
 n=$(grep -aoE 'installer: ready n=[0-9]+' "$OUT/ser.txt" | head -1 | sed 's/.*=//')
-[ "${n:-0}" -ge 2 ] && ok "beide Platten in der Liste (n=$n)" \
-    || bad "nur ${n:-0} Platte(n) gefunden -- der Versuch misst nichts"
+[ "${n:-0}" -ge 2 ] && ok "both disks in the list (n=$n)" \
+    || bad "only ${n:-0} disk(s) found -- the attempt measures nothing"
 
 esp=$(grep -aoE 'installer: esp=/dev/[a-z0-9]+' "$OUT/ser.txt" | head -1 | sed 's/.*esp=//')
 if [ "$esp" = "/dev/hdb1" ]; then
-    ok "es hat die EFI-Partition des ZIELS eingehaengt: $esp"
+    ok "it mounted the EFI partition of the TARGET: $esp"
 elif [ "$esp" = "/dev/hda1" ]; then
-    bad "es hat /dev/hda1 eingehaengt -- also die FREMDE Platte"
+    bad "it mounted /dev/hda1 -- i.e. the FOREIGN disk"
 else
-    bad "keine oder unbekannte EFI-Partition: '${esp:-keine}'"
+    bad "no or unknown EFI partition: '${esp:-keine}'"
 fi
 
 grep -qa 'installer: done' "$OUT/ser.txt" \
-    && ok "die Installation meldet sich fertig" \
-    || bad "die Installation ist nicht fertig geworden"
+    && ok "the installation reports done" \
+    || bad "the installation did not finish"
 
 NACHHER=$(sha256sum < "$OUT/hda.img" | cut -d' ' -f1)
 if [ "$VORHER" = "$NACHHER" ]; then
-    ok "DIE ERSTE PLATTE IST OKTETT FUER OKTETT UNVERAENDERT"
+    ok "THE FIRST DISK IS UNCHANGED OCTET FOR OCTET"
 else
-    bad "die erste Platte wurde beschrieben -- ${VORHER:0:16}… -> ${NACHHER:0:16}…"
+    bad "the first disk was written -- ${VORHER:0:16}… -> ${NACHHER:0:16}…"
 fi
 
 sgdisk -p "$OUT/hdb.img" > "$OUT/hdb-gpt.txt" 2>&1
-grep -q 'EF00' "$OUT/hdb-gpt.txt" && ok "die zweite Platte hat eine EFI-Partition" \
-    || bad "auf der zweiten Platte steht keine EFI-Partition"
-grep -qE 'OSUM' "$OUT/hdb-gpt.txt" && ok "die zweite Platte hat eine Wurzelpartition" \
-    || bad "auf der zweiten Platte steht keine Wurzelpartition"
+grep -q 'EF00' "$OUT/hdb-gpt.txt" && ok "the second disk has an EFI partition" \
+    || bad "there is no EFI partition on the second disk"
+grep -qE 'OSUM' "$OUT/hdb-gpt.txt" && ok "the second disk has a root partition" \
+    || bad "there is no root partition on the second disk"
 if mdir -i "$OUT/hdb.img@@1048576" ::/EFI/BOOT 2>/dev/null | grep -qi 'BOOTX64'; then
-    ok "der Bootlader liegt auf der EFI-Partition der ZWEITEN Platte"
+    ok "the boot loader is on the EFI partition of the SECOND disk"
 else
-    bad "kein Bootlader auf der zweiten Platte"
+    bad "no boot loader on the second disk"
 fi
 
 printf '\n=======================================================\n'

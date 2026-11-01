@@ -15,11 +15,11 @@ command -v qemu-system-x86_64 >/dev/null || { echo "kein qemu"; exit 0; }
 [ -s "$BUILDD/k0.mb" ] || { echo "kein Kern in $BUILDD"; exit 1; }
 
 ./tools/build-kernel.sh "$W/k0.mb" > "$W/k.log" 2>&1 || {
-    echo "der Kern baut nicht"; tail -20 "$W/k.log"; exit 1; }
+    echo "the kernel does not build"; tail -20 "$W/k.log"; exit 1; }
 note "kernel $(stat -c%s "$W/k0.mb") Oktette"
 
 [ -s "${STICK_ROOT:-/tmp/m11-img2/root.img}" ] && cp "${STICK_ROOT:-/tmp/m11-img2/root.img}" "$W/disk.img"
-[ -s "$W/disk.img" ] || { echo "keine Platte -- erst tools/design/eh5.sh laufen lassen"; exit 1; }
+[ -s "$W/disk.img" ] || { echo "no disk -- run tools/design/eh5.sh first"; exit 1; }
 
 APPEND="osum gfx fbres=1280x800 wm wig desk wmshell wmdauer tafel herz"
 APPEND="$APPEND absturzhalt nopuls tz=120 lang=en"
@@ -44,20 +44,20 @@ done
 sleep 5
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
 
-echo "== was auf der Leitung stand =="
+echo "== what was on the wire =="
 grep -aE 'dhcp:|jarvisd:|desk: start' "$W/serial.txt" | head -20 | sed 's/^/        /'
 
 grep -qa 'desk: start /bin/jarvisd\|jarvisd: ready' "$W/serial.txt" \
-    && ok "der Kern startet /bin/jarvisd VON SELBST" \
-    || bad "jarvisd wird nicht gestartet"
+    && ok "the kernel starts /bin/jarvisd BY ITSELF" \
+    || bad "jarvisd is not started"
 grep -qa 'resolv.conf geschrieben' "$W/serial.txt" \
     && ok "dhcp hat /etc/resolv.conf geschrieben" \
-    || bad "kein resolv.conf -- dann gibt es keine Namensaufloesung"
+    || bad "no resolv.conf -- then there is no name resolution"
 grep -qa 'jarvisd: der Name laesst sich nicht aufloesen' "$W/serial.txt" \
-    && bad "der Name loest nicht auf" \
+    && bad "the name does not resolve" \
     || ok "store.fleitec.com loest auf"
 grep -qa 'PAIRING CODE' "$W/serial.txt" \
-    && ok "das Geraet zeigt einen PAIRING CODE" \
+    && ok "the device shows a PAIRING CODE" \
     || bad "kein Kopplungscode"
 
 HEX=$(grep -a 'PAIRING CODE' "$W/serial.txt" | tail -1 | awk '{print $NF}')
@@ -65,13 +65,13 @@ if [ -n "$HEX" ]; then
     note "Code, den Justin vorliest: $(python3 -c "import sys;print(bytes.fromhex(sys.argv[1]).decode())" "$HEX" 2>/dev/null)"
 fi
 
-echo "== und was der Dienst dazu sagt =="
+echo "== and what the service says about it =="
 journalctl -u bruecke --since '-4 min' --no-pager 2>/dev/null \
     | grep -iE 'KOPPLUNG NOETIG|ANGEMELDET' | tail -3 | sed 's/^/        /'
 journalctl -u bruecke --since '-4 min' --no-pager 2>/dev/null \
     | grep -qi 'KOPPLUNG NOETIG' \
-    && ok "der Dienst hat den Code ausgestellt" \
-    || bad "im Protokoll des Dienstes steht nichts"
+    && ok "the service issued the code" \
+    || bad "nothing in the log of the service"
 
 echo
 echo "STICKSTART: $pass bestanden, $fail durchgefallen"

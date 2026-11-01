@@ -55,8 +55,8 @@ while [[ $# -gt 0 ]]; do
         *) echo "unbekannte Option: $1" >&2; exit 1 ;;
     esac
 done
-case "$GUI" in on|off) ;; *) echo "--gui nimmt on oder off, nicht '$GUI'" >&2; exit 1 ;; esac
-case "$TUNNEL" in on|off) ;; *) echo "tunnel nimmt on oder off, nicht '$TUNNEL'" >&2; exit 1 ;; esac
+case "$GUI" in on|off) ;; *) echo "--gui takes on or off, not '$GUI'" >&2; exit 1 ;; esac
+case "$TUNNEL" in on|off) ;; *) echo "tunnel takes on or off, not '$TUNNEL'" >&2; exit 1 ;; esac
 OHNE_TUNNEL=0
 [[ $TUNNEL == off ]] && OHNE_TUNNEL=1
 
@@ -87,20 +87,20 @@ fi
 #
 python3 "$(dirname "$0")/brand-apply.py" "$TMP" \
     "$(dirname "$0")/../marke.conf" "$FASSUNG_HASH" "${IMAGE_ID:-dev}" || {
-    echo "die Marke wurde NICHT eingesetzt -- Bau abgebrochen" >&2
+    echo "the brand was NOT inserted -- build aborted" >&2
     exit 1; }
 VERSIONDATEI=$(find "$TMP/kernel" -path "$TMP/kernel/user" -prune -o \
     -path "$TMP/kernel/app" -prune -o -name version.fi -type f -print | head -1)
 [[ -n $VERSIONDATEI ]] || { echo "version.fi nicht gefunden" >&2; exit 1; }
 grep -q " $FASSUNG_HASH" "$VERSIONDATEI" || {
-    echo "die Fassungsnummer wurde NICHT eingesetzt -- Bau abgebrochen" >&2
+    echo "the version number was NOT inserted -- build aborted" >&2
     exit 1; }
 BRANDDATEI=$(find "$TMP/kernel" -path "$TMP/kernel/user" -prune -o \
     -path "$TMP/kernel/app" -prune -o -name brand.fi -type f -print | head -1)
 [[ -n $BRANDDATEI ]] || { echo "brand.fi nicht gefunden" >&2; exit 1; }
 if grep -qE 'static mut s_[a-z]+: \[u8; [0-9]+\] = "[^"]*\?' \
         "$BRANDDATEI"; then
-    echo "in brand.fi steht noch ein Platzhalter -- abgebrochen" >&2
+    echo "in brand.fi a placeholder is still left -- aborted" >&2
     exit 1
 fi
 #
@@ -159,7 +159,7 @@ weg gfx-aus
 
 if [[ $OHNE_PS2M == 1 ]]; then
     if [[ $GUI == off ]]; then
-        echo "--ohne-ps2m und --gui off zusammen ergeben nichts: ohne GUI ist ps2m.fi ohnehin nicht im Baum" >&2
+        echo "--without-ps2m and --gui off together make no sense: without GUI ps2m.fi is not in the tree anyway" >&2
         exit 1
     fi
     ersetze ps2m-aus ps2m || exit 1
@@ -224,7 +224,7 @@ if [[ $SYMBOLE == on ]]; then
     binde "$TMP/osym2.o" "$TMP/osum2.elf" || exit 1
     nm -n "$TMP/osum2.elf" | awk '$2=="T"||$2=="t"' > "$TMP/sym2.txt"
     if ! cmp -s "$TMP/sym1.txt" "$TMP/sym2.txt"; then
-        echo "PROTOKOLL: der zweite Bindedurchgang hat Funktionsadressen" \
+        echo "PROTOCOL: the second link pass has function addresses" \
              "verschoben -- die Symboltabelle waere falsch. Bau abgebrochen." >&2
         diff "$TMP/sym1.txt" "$TMP/sym2.txt" | head -5 >&2
         exit 1

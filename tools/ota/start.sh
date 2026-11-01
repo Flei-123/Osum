@@ -8,4 +8,4 @@ setsid bash -c "cd '$(pwd)'; OUT='$ZIEL' bash tools/ota/run.sh $MODUS \
     > '$ZIEL/lauf.log' 2>&1; echo \"EXIT=\$?\" >> '$ZIEL/lauf.log'" \
     < /dev/null > /dev/null 2>&1 &
 sleep 1
-echo "gestartet, das Protokoll waechst in $ZIEL/lauf.log"
+echo "started, the log grows in $ZIEL/lauf.log"

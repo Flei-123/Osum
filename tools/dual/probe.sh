@@ -36,7 +36,7 @@ from PIL import Image
 im = Image.open('$OUT/s.ppm'); im.save('$OUT/fenster.png'); print('Bild', im.size)
 " 2>&1
 fi
-echo "== was der Installer gesagt hat =="
+echo "== what the installer said =="
 tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -a '^installer:' | head -30
-echo "== letzte Zeilen der Leitung =="
+echo "== last lines of the line =="
 tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | tail -6

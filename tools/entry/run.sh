@@ -37,17 +37,17 @@ MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
 BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
 
-echo "== 1. Kern und Programme bauen =="
+echo "== 1. build kernel and programs =="
 bash tools/build-kernel.sh "$TMPD/k0.mb" --stufe 0 > "$TMPD/b0.log" 2>&1 \
     && ok "Kern gebaut ($(stat -c%s "$TMPD/k0.mb") Oktette)" \
-    || { bad "Der Kern baut nicht"; sed 's/^/        /' "$TMPD/b0.log" | head -12; }
+    || { bad "The kernel does not build"; sed 's/^/        /' "$TMPD/b0.log" | head -12; }
 [ -f "$TMPD/k0.mb" ] || { echo "EINSPRUNG: $pass bestanden, $((fail+1)) gescheitert"; exit 1; }
 
-echo "== 2. DER BEWEIS AM ABBILD: das sysretq in enter_user_task =="
+echo "== 2. THE PROOF ON THE IMAGE: the sysretq in enter_user_task =="
 SYSRET_ADDR=$(objdump -d "$TMPD/k0.mb.elf" 2>/dev/null \
     | awk '/<enter_user_task>:/{f=1} f && /sysretq/{gsub(":","",$1); print "0x"$1; exit}')
 if [ -n "$SYSRET_ADDR" ]; then
-    ok "enter_user_task endet auf sysretq bei $SYSRET_ADDR (Justins RIP war 0x10049c)"
+    ok "enter_user_task ends in sysretq at $SYSRET_ADDR (Justin's RIP was 0x10049c)"
 else
     bad "kein sysretq in enter_user_task gefunden"
 fi
@@ -84,7 +84,7 @@ else
     bad "mkfs.py fehlgeschlagen"
     sed 's/^/        /' "$TMPD/mkfs.txt" | head -5
     echo
-    echo "EINSPRUNG: $pass bestanden, $fail gescheitert (ohne Abbild abgebrochen)"
+    echo "ENTRY: $pass passed, $fail failed (aborted without image)"
     exit 1
 fi
 
@@ -109,7 +109,7 @@ lauf() { # name extra
     wait "$pid" 2>/dev/null
 }
 
-echo "== 3. Der Regellauf: der Schreibtisch startet =="
+echo "== 3. The rule run: the desktop starts =="
 lauf regel ""
 has "$TMPD/regel.txt" "wm: hold" "Regellauf: der Fensterserver kommt bis 'wm: hold'"
 hasnot "$TMPD/regel.txt" "elf: entry abgelehnt" "Regellauf: kein Einsprung wird abgelehnt"
@@ -127,7 +127,7 @@ n=$(grep -ac 'elf: entry abgelehnt' "$TMPD/knall.txt" 2>/dev/null || echo 0)
 if [ "${n:-0}" -ge 1 ]; then
     ok "abgelehnte Einspruenge: $n"
 else
-    bad "kein einziger Einsprung abgelehnt -- der Schalter greift nicht"
+    bad "not a single entry rejected -- the switch does not take effect"
 fi
 
 echo

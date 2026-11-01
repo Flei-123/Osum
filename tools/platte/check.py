@@ -41,7 +41,7 @@ def main(low, serial, full):
     asc, desc = (int(f[-1][1]), int(f[-1][2]) - int(f[-1][1])) if f else (16, 6)
     zeilen = [m for m in (gc.FENSTERTEXT.search(ln) for ln in schwanz.splitlines()) if m]
     if not zeilen:
-        print("platte KEINE Beschriftung im Mitschnitt")
+        print("disk NO caption in the recording")
         return 1
     win = Counter(int(m.group(1)) for m in zeilen).most_common(1)[0][0]
     letzte = {}

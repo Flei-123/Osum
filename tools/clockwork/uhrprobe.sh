@@ -68,7 +68,7 @@ print("Bildgroesse: %dx%d, %d Bilder" % (W, H, len(ims)))
 box = (W // 2, H - 90, W, H)
 def cut(im): return im.crop(box)
 
-print("\n== DER UHRSTREIFEN (rechte Haelfte der Leiste) ==")
+print("\n== THE CLOCK STRIP (right half of the bar) ==")
 vor = None; wechsel = 0
 for k, im in ims:
     c = cut(im)
@@ -82,21 +82,21 @@ for k, im in ims:
     vor = c
     c.save(os.path.join(erg, "uhr-b%d.png" % k))
 
-print("\n== DER GANZE SCHIRM (Gegenprobe gegen Vollbild-Malerei) ==")
+print("\n== THE WHOLE SCREEN (control against full-screen painting) ==")
 vor = None
 for k, im in ims:
     if vor is not None:
         pa, pb = vor.load(), im.load()
         d = sum(1 for y in range(0, H, 4) for x in range(0, W, 4)
                 if pa[x, y] != pb[x, y]) * 16
-        print("  Bild %d -> %d: ~%d Bildpunkte anders (%.2f%% des Schirms)"
+        print("  image %d -> %d: ~%d pixels different (%.2f%% of the screen)"
               % (k - 1, k, d, 100.0 * d / (W * H)))
     vor = im
 
-print("\nERGEBNIS: der Uhrstreifen hat sich in %d von %d Abstaenden geaendert."
+print("\nRESULT: the clock strip changed in %d of %d intervals."
       % (wechsel, len(ims) - 1))
 if wechsel == 0:
-    print("  >>> DIE UHR STEHT. Genau Justins Befund.")
+    print("  >>> THE CLOCK STANDS STILL. Exactly Justin's finding.")
 else:
-    print("  >>> DIE UHR LAEUFT OHNE EINGABE.")
+    print("  >>> THE CLOCK RUNS WITHOUT INPUT.")
 PY

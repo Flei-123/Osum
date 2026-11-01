@@ -22,7 +22,7 @@ DATEN_START=$((ESP_ENDE + 1))
 DATEN_SEK=$((DATEN_MIB * 2048))
 DATEN_ENDE=$((DATEN_START + DATEN_SEK - 1))
 
-echo "== eine Platte, auf der schon jemand wohnt: $IMG ($MIB MiB)"
+echo "== a disk where someone already lives: $IMG ($MIB MiB)"
 
 rm -f "$IMG"
 dd if=/dev/zero of="$IMG" bs=1M count=0 seek="$MIB" status=none
@@ -88,7 +88,7 @@ FREI_MIB=$(( (FREI_ENDE - FREI_START + 1) / 2048 ))
 
 echo "   ESP       Sektor $ESP_START..$ESP_ENDE   ($ESP_MIB MiB)"
 echo "   Daten     Sektor $DATEN_START..$DATEN_ENDE   ($DATEN_MIB MiB)"
-echo "   FREI      Sektor $FREI_START..$FREI_ENDE   ($FREI_MIB MiB)  <- hier soll ${MARKE_PRODUKT} hin"
+echo "   FREE      sector $FREI_START..$FREI_ENDE   ($FREI_MIB MiB)  <- ${MARKE_PRODUKT} is to go here"
 echo "   Summen    $SUMMEN"
 sed 's/^/     /' "$SUMMEN"
 exit 0

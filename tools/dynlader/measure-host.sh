@@ -11,7 +11,7 @@ echo "== Typ =="
 file hello_dyn
 echo "== PT_INTERP =="
 readelf -lW hello_dyn | grep -A1 INTERP
-echo "== Syscalls zwischen execve und Ausgabe =="
+echo "== syscalls between execve and output =="
 strace -o tr.txt ./hello_dyn >/dev/null 2>&1
 grep -vE '^\+\+\+|^---' tr.txt
 echo "== verschiedene Nummern =="

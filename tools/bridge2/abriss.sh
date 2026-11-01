@@ -43,7 +43,7 @@ done
 echo "== 1. bauen =="
 if [ ! -f "$W/k.mb" ] || [ -n "${ABRISS_BAU:-}" ]; then
     bash tools/bridge/build.sh "$W" 0 >"$W/bau.txt" 2>&1 || {
-        echo "der Bau ist gescheitert"; tail -5 "$W/bau.txt"; exit 1; }
+        echo "the build failed"; tail -5 "$W/bau.txt"; exit 1; }
 fi
 mkdir -p "$W/certs"
 if [ ! -f "$W/certs/good.pem" ]; then
@@ -96,9 +96,9 @@ ethtool -K "$V0" tx off rx off tso off gso off gro off >/dev/null 2>&1
 ip netns exec "$NS" ethtool -K "$V1" tx off rx off tso off gso off gro off >/dev/null 2>&1
 "$W/bridge" "$V0" "$BPORT" "$QPORT" 2>"$W/br.log" & BRPID=$!
 sleep 0.5
-ok "Netzraum und Draht stehen"
+ok "network namespace and wire are up"
 
-echo "== 3. KEINE Gegenstelle: das Geraet darf nicht haemmern =="
+echo "== 3. NO peer: the device must not hammer =="
 cp "$W/probe.img" "$W/live.img"
 timeout 200 qemu-system-x86_64 -kernel "$W/k.mb" -m 256 \
     -append "osum nokbd nosched noproc nofs noring3 gfx nocursor nic nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=0 script=jarvisd -v -t 70000;exit" \
@@ -113,26 +113,26 @@ WARTEMS=$(grep -aoE 'jarvisd: wait_ms [0-9]+' "$W/s-ohne.txt" | tail -1 | awk '{
 AUFRUFE=$(grep -aoE 'jarvisd: calls_while_waiting [0-9]+' "$W/s-ohne.txt" | tail -1 | awk '{print $3}')
 
 if [ "${VERSUCHE:-0}" -ge 3 ]; then
-    ok "das Geraet versucht es wieder -- $VERSUCHE Versuche in 70 s"
+    ok "the device tries again -- $VERSUCHE attempts in 70 s"
 else
-    bad "zu wenige Versuche ($VERSUCHE) -- gibt es die Wiederverbindung?"
+    bad "too few attempts ($VERSUCHE) -- is there reconnection?"
 fi
 
 if [ "${VERSUCHE:-0}" -gt 0 ] && [ "${VERSUCHE:-0}" -le 12 ]; then
-    ok "und der Abstand WAECHST: $VERSUCHE Versuche statt ~280 bei festen 250 ms"
+    ok "and the interval GROWS: $VERSUCHE attempts instead of ~280 at a fixed 250 ms"
     note "250, 500, 1000, 2000, 4000, 8000, 16000, 30000 ms -- gedeckelt bei 30 s"
 else
-    bad "der Abstand waechst nicht -- $VERSUCHE Versuche in 70 s"
+    bad "the interval does not grow -- $VERSUCHE attempts in 70 s"
 fi
 
 if [ -n "${AUFRUFE:-}" ] && [ "${AUFRUFE:-9999}" -lt 100 ]; then
-    ok "und dabei wird GEWARTET, nicht gedreht: $AUFRUFE Systemaufrufe in ${WARTEMS} ms"
+    ok "and it WAITS instead of spinning: $AUFRUFE syscalls in ${WARTEMS} ms"
     note "eine Warteschleife machte Millionen -- das ist ein nanosleep"
 else
     bad "beim Warten laeuft etwas heiss ($AUFRUFE Aufrufe)"
 fi
 
-echo "== 4. Gegenstelle da, dann WEG, dann wieder da =="
+echo "== 4. peer there, then GONE, then there again =="
 cat > "$W/auftraege.txt" <<'AUF'
 system||
 AUF
@@ -158,9 +158,9 @@ for i in $(seq 1 60); do
     sleep 0.5
 done
 if grep -aq 'jarvisd: signed in' "$W/s-abriss.txt" 2>/dev/null; then
-    ok "erste Verbindung steht"
+    ok "first connection is up"
 else
-    bad "die erste Verbindung kam nicht zustande"
+    bad "the first connection was not established"
 fi
 
 kill -9 "$GPID" 2>/dev/null; GPID=""
@@ -175,11 +175,11 @@ ip netns exec "$NS" python3 tools/bridge/peer.py \
 wait $QPID 2>/dev/null
 VERB=$(grep -ac 'jarvisd: connected' "$W/s-abriss.txt" 2>/dev/null || echo 0)
 if [ "${VERB:-0}" -ge 2 ]; then
-    ok "das Geraet hat sich NACH dem Abriss von selbst wieder gemeldet ($VERB Verbindungen)"
+    ok "the device reported back by itself AFTER the teardown ($VERB connections)"
     grep -aE 'jarvisd: (connected|signed in|waiting|no connection)' "$W/s-abriss.txt" \
         | head -12 | sed 's/^/        /'
 else
-    bad "nach dem Abriss kam keine neue Verbindung ($VERB)"
+    bad "no new connection came after the teardown ($VERB)"
     grep -aE 'jarvisd:' "$W/s-abriss.txt" | tail -10 | sed 's/^/        /'
 fi
 

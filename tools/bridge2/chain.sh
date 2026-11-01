@@ -54,7 +54,7 @@ done
 echo "== 1. bauen =="
 if [ ! -f "$W/k.mb" ] || [ -n "${KETTE_BAU:-}" ]; then
     bash tools/bridge/build.sh "$W" 0 >"$W/bau.txt" 2>&1 || {
-        echo "der Bau ist gescheitert"; tail -6 "$W/bau.txt"; exit 1; }
+        echo "the build failed"; tail -6 "$W/bau.txt"; exit 1; }
 fi
 ok "Kern und Programme gebaut"
 
@@ -100,11 +100,11 @@ bauen_img() {
 bauen_img || { echo "mkfs gescheitert"; tail -4 "$W/mkfs.txt"; exit 1; }
 rm -f "$W/live.img"        # ein neuer Lauf, ein neues Geraet
 
-echo "== 2. der Draht und der Anschluss =="
+echo "== 2. the wire and the port =="
 gcc -O2 -o "$W/bridge" tools/net/bridge.c 2>"$W/gcc.txt" || {
     echo "tools/net/bridge.c baut nicht"; head -4 "$W/gcc.txt"; exit 1; }
 ip netns del "$NS" 2>/dev/null
-ip netns add "$NS" 2>/dev/null || { echo "KETTE: uebersprungen, keine Netzraeume"; exit 0; }
+ip netns add "$NS" 2>/dev/null || { echo "CHAIN: skipped, no network namespaces"; exit 0; }
 ip link add "$V0" type veth peer name "$V1"
 ip link set "$V1" netns "$NS"
 ip netns exec "$NS" ip addr add $HOST_IP/24 dev "$V1"
@@ -115,7 +115,7 @@ ethtool -K "$V0" tx off rx off tso off gso off gro off >/dev/null 2>&1
 ip netns exec "$NS" ethtool -K "$V1" tx off rx off tso off gso off gro off >/dev/null 2>&1
 "$W/bridge" "$V0" "$BPORT" "$QPORT" 2>"$W/br.log" & BRPID=$!
 sleep 0.5
-ok "Netzraum und Draht stehen (Osum $OSUM_IP, Wirt $HOST_IP)"
+ok "network namespace and wire are up (Osum $OSUM_IP, host $HOST_IP)"
 
 VA=ka-$$
 VB=kb-$$
@@ -149,10 +149,10 @@ G=$(ip netns exec "$NS" curl -s --max-time 5 "$DIENST/bruecke/gesund" 2>/dev/nul
 GUT=0
 case "$G" in *'"gesund"'*) GUT=1 ;; esac
 if [ -n "$VK" ] && [ "$GUT" = 1 ]; then
-    ok "der Netzraum erreicht den Brueckendienst unter $DIENST"
+    ok "the network namespace reaches the bridge service at $DIENST"
     note "eigene Wurzel $PW -- das Koppelbuch des Betriebs bleibt unberuehrt"
 else
-    bad "der Netzraum erreicht den Brueckendienst NICHT"
+    bad "the network namespace does NOT reach the bridge service"
     tail -4 "$W/dienst.log" | sed 's/^/        /'
 fi
 
@@ -161,9 +161,9 @@ ip netns exec "$NS" python3 "$BRUECKE/anschluss.py" --port "$TLSPORT" \
     --dienst "$DIENST" > "$W/anschluss.log" 2>&1 & ANPID=$!
 sleep 1
 if kill -0 "$ANPID" 2>/dev/null; then
-    ok "der Anschluss horcht im Netzraum auf $HOST_IP:$TLSPORT"
+    ok "the port listens in the network namespace on $HOST_IP:$TLSPORT"
 else
-    bad "der Anschluss ist nicht gestartet"
+    bad "the port is not started"
     tail -5 "$W/anschluss.log" | sed 's/^/        /'
     echo "KETTE: $pass bestanden, $fail durchgefallen"; exit 1
 fi
@@ -183,14 +183,14 @@ starte_osum() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$W/q-$1.log" 2>&1
 }
 
-echo "== 3. die Kopplung, in der richtigen Reihenfolge =="
+echo "== 3. the pairing, in the right order =="
 starte_osum kopplung "jarvisd -1 -t 25000;exit"
 CODE=$(grep -aoE 'PAIRING CODE [0-9]+' "$W/s-kopplung.txt" | head -1 | awk '{print $3}')
 if [ -n "$CODE" ]; then
-    ok "Osum verbindet sich und zeigt den PAIRING CODE auf dem Schirm"
+    ok "Osum connects and shows the PAIRING CODE on the screen"
     note "Code $CODE"
 else
-    bad "kein Kopplungscode -- Osum kam nicht durch"
+    bad "no pairing code -- Osum did not get through"
     grep -aE 'jarvisd:' "$W/s-kopplung.txt" | tail -6 | sed 's/^/        /'
     tail -6 "$W/anschluss.log" | sed 's/^/        /'
     echo "KETTE: $pass bestanden, $fail durchgefallen"; exit 1
@@ -205,9 +205,9 @@ try:
 except Exception:
     print("")' 2>/dev/null)
 if [ -n "$KENN" ]; then
-    ok "der Dienst fuehrt das Geraet als $KENN"
+    ok "the service lists the device as $KENN"
 else
-    bad "der Dienst kennt kein Geraet -- die Anmeldung kam nicht an"
+    bad "the service knows no device -- the login did not arrive"
     tail -8 "$W/anschluss.log" | sed 's/^/        /'
 fi
 
@@ -215,12 +215,12 @@ A=$(curl -s -X POST "http://10.9.1.1:$DIENST_PORT/bruecke/koppeln" \
     -H "X-Bruecke-Verwalter: $VK" -H 'Content-Type: application/json' \
     -d "{\"geraet\":\"$KENN\",\"code\":\"$CODE\",\"was\":\"frei\"}")
 if echo "$A" | grep -q '"gekoppelt": *true'; then
-    ok "JARVIS gibt die Kopplung frei"
+    ok "JARVIS approves the pairing"
 else
-    bad "die Freigabe ging nicht -- $A"
+    bad "the approval failed -- $A"
 fi
 
-echo "== 4. DAS BILDSCHIRMFOTO, ueber die ganze Kette =="
+echo "== 4. THE SCREENSHOT, over the whole chain =="
 A=$(curl -s -X POST "http://10.9.1.1:$DIENST_PORT/bruecke/auftrag" \
     -H "X-Bruecke-Verwalter: $VK" -H 'Content-Type: application/json' \
     -d "{\"geraet\":\"$KENN\",\"art\":\"foto\"}")
@@ -264,10 +264,10 @@ w, h = struct.unpack(">II", d[16:24])
 print("%dx%d, %d Oktette" % (w, h, len(d)))
 PYEOF
 )
-    ok "DAS BILD IST DA -- $MASS"
+    ok "THE IMAGE IS THERE -- $MASS"
     note "liegt in $W/schuss.png und unter $PW/geraete/$KENN/"
 else
-    bad "kein Bildschirmfoto ueber die Kette"
+    bad "no screenshot over the chain"
     grep -aE 'jarvisd:|foto' "$W/s-foto.txt" 2>/dev/null | tail -8 | sed 's/^/        /'
     tail -10 "$W/anschluss.log" | sed 's/^/        /'
 fi

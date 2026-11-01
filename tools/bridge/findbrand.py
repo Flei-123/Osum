@@ -55,7 +55,7 @@ def main():
     verschieden = [y for y in range(h)
                    if a[y * zeile:(y + 1) * zeile] != b[y * zeile:(y + 1) * zeile]]
     if not verschieden:
-        print("KEINE ZEILE VERSCHIEDEN -- die Marke ist nirgends")
+        print("NO LINE DIFFERENT -- the brand is nowhere")
         return 1
 
     # Zusammenhaengende Baender.
@@ -70,7 +70,7 @@ def main():
     baender.append((s0, pv))
     print("verschiedene Baender: %s" % baender)
     hoch = max(e - s + 1 for s, e in baender)
-    print("hoechstes Band: %d Zeilen (eine Textzeile ist 16)" % hoch)
+    print("highest band: %d lines (one text line is 16)" % hoch)
 
     def hell(bild, von, bis):
         n = 0
@@ -83,12 +83,12 @@ def main():
 
     ha = sum(hell(a, s, e) for s, e in baender)
     hb = sum(hell(b, s, e) for s, e in baender)
-    print("helle Bildpunkte in diesen Baendern: eins=%d zwei=%d" % (ha, hb))
+    print("bright pixels in these bands: one=%d two=%d" % (ha, hb))
 
     if hoch <= 40 and hb > ha:
         print("MARKE-GEFUNDEN")
         return 0
-    print("MARKE-NICHT-GEFUNDEN")
+    print("BRAND-NOT-FOUND")
     return 1
 
 

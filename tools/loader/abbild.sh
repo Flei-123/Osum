@@ -18,7 +18,7 @@ if [ -z "${LADEN_PUB:-}" ] && [ ! -s "$PUB" ] \
 fi
 
 [ -d "$OUT/bin" ] || { echo "== $OUT/bin fehlt -- erst tools/loader/build.sh"; exit 1; }
-[ -s "$PUB" ] || { echo "== $PUB fehlt (der oeffentliche Schluessel der Auslieferung)"; exit 1; }
+[ -s "$PUB" ] || { echo "== $PUB is missing (the public key of the delivery)"; exit 1; }
 
 mkdir -p "$OUT/platte"
 P="$OUT/platte"

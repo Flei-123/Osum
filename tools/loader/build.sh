@@ -47,7 +47,7 @@ printf '%s\n' $GUI $CLI | sort -u > "$OUT/proglist"
 xargs -a "$OUT/proglist" -P "$JOBS" -I{} bash -c 'eins {}' \
     >> "$OUT/bau.log" 2>&1
 if grep -q FEHLER "$OUT/bau.log"; then
-    echo "== diese Programme lassen sich nicht bauen:"
+    echo "== these programs cannot be built:"
     grep FEHLER "$OUT/bau.log"
     for p in $(grep FEHLER "$OUT/bau.log" | awk '{print $2}'); do
         echo "--- $p"; head -12 "$OUT/$p.err" "$OUT/$p.lderr" 2>/dev/null
@@ -77,6 +77,6 @@ if [ -d "${CERTUS_REPO:-/root/certus-sammeln}/lib/browser" ]; then
         tail -12 "$OUT/certus.log"
     fi
 else
-    echo "   browser   uebersprungen (kein Certus-Baum in ${CERTUS_REPO:-/root/certus-sammeln})"
+    echo "   browser   skipped (no Certus tree in ${CERTUS_REPO:-/root/certus-sammeln})"
 fi
 exit 0

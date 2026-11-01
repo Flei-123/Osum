@@ -89,20 +89,20 @@ def main(argv):
         hp = os.path.join(holdir, name)
         qp = os.path.join(quelldir, quelle)
         if not os.path.exists(hp) or os.path.getsize(hp) == 0:
-            print("FAIL  %-12s die Datei kam nicht vom Abbild" % name)
+            print("FAIL  %-12s the file did not come from the image" % name)
             schlecht += 1
             continue
         try:
             mein = Image.open(hp)
             mein.load()
         except Exception as e:
-            print("FAIL  %-12s Pillow macht sie nicht auf: %s" % (name, e))
+            print("FAIL  %-12s Pillow cannot open it: %s" % (name, e))
             schlecht += 1
             continue
         orig = Image.open(qp)
         orig.seek(0)
         if mein.size != orig.size:
-            print("FAIL  %-12s Maße %s statt %s"
+            print("FAIL  %-12s dimensions %s instead of %s"
                   % (name, mein.size, orig.size))
             schlecht += 1
             continue
@@ -120,7 +120,7 @@ def main(argv):
                       "(%d Bildpunkte)" % (name, mein.size[0],
                                            mein.size[1], n))
             else:
-                print("FAIL  %-12s PNG ist NICHT verlustfrei: maxdiff=%d, "
+                print("FAIL  %-12s PNG is NOT lossless: maxdiff=%d, "
                       "%d von %d Bildpunkten weichen ab"
                       % (name, worst, nz, n))
                 schlecht += 1

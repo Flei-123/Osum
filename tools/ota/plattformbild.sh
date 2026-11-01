@@ -15,13 +15,13 @@ done
 if [ -z "$PORT" ]; then
     PORT=$(sed -n 's#^quelle=https://10\.0\.2\.2:\([0-9]*\).*#\1#p' "$OUT/ota.conf")
 fi
-[ -n "$PORT" ] || { echo "BILD: kein Port in $OUT/ota.conf"; exit 1; }
+[ -n "$PORT" ] || { echo "IMAGE: no port in $OUT/ota.conf"; exit 1; }
 
 VERZ="$OUT/netzmix"
 [ -d "$VERZ" ] || VERZ="$OUT/netz"
-[ -d "$VERZ" ] || { echo "BILD: kein Verzeichnis unter $OUT/netzmix"; exit 1; }
+[ -d "$VERZ" ] || { echo "IMAGE: no directory under $OUT/netzmix"; exit 1; }
 
-echo "== die Gegenstelle (127.0.0.1:$PORT, Wurzel $VERZ)"
+echo "== the peer (127.0.0.1:$PORT, root $VERZ)"
 pkill -f "tools/ota/server.py .* $PORT" >/dev/null 2>&1
 ( setsid nohup python3 tools/ota/server.py --wurzel "$VERZ" --port "$PORT" \
     --cert "$OUT/certs/srv.pem" --key "$OUT/certs/srv.key" --log "$OUT/srv-bild.log" > "$OUT/srv-bild.out" 2>&1 & )
@@ -65,7 +65,7 @@ if [ -s "$PPM" ]; then
     python3 tools/gfx/ppm2png.py "$PPM" "$PNG" >/dev/null 2>&1
     echo "  Bild: $PNG ($(stat -c%s "$PNG" 2>/dev/null) Oktett)"
 else
-    echo "  KEIN Bild -- $OUT/$NAME.shot sagt warum"
+    echo "  NO image -- $OUT/$NAME.shot says why"
 fi
 echo "  Serielle Leitung:"
 sed -n 's/^/    /p' <(grep -a '^ota:' "$AUS" | head -12)

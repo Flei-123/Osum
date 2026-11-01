@@ -56,19 +56,19 @@ echo "== 0. Werkzeuge =="
 for w in qemu-system-x86_64 gcc python3; do
     command -v "$w" >/dev/null 2>&1 || { echo "EBPF: uebersprungen, $w fehlt"; exit 0; }
 done
-ok "die Werkzeuge sind da (accel=$OSUM_QEMU_ACCEL)"
+ok "the tools are there (accel=$OSUM_QEMU_ACCEL)"
 
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
     [ -x "$FIRNC" ] || { echo "EBPF: kein firnc"; exit 1; }; }
 
 # =====================================================================
 echo
-echo "== 1. bauen und gegenlesen =="
+echo "== 1. build and read back =="
 # =====================================================================
 
 KERN="$TMPD/k.mb"
 ./tools/build-kernel.sh "$KERN" > "$TMPD/build.log" 2>&1 \
-    && ok "der Kern steht ($(stat -c%s "$KERN") Oktette)" \
+    && ok "the kernel is there ($(stat -c%s "$KERN") Oktette)" \
     || { bad "the kernel cannot be built"; tail -8 "$TMPD/build.log"; exit 1; }
 
 MM=$(python3 tools/kernel/memmap.py 2>&1 | tail -1)
@@ -81,16 +81,16 @@ esac
 python3 tools/kernel/memmap.py kernel -v > "$TMPD/karte.txt" 2>/dev/null
 for B in EBPF EBPFMAP EBPFVER EBPFHOOK; do
     if grep -q "kstate.fi:${B}_OFF" "$TMPD/karte.txt"; then
-        ok "der Bereich $B steht in der Karte"
+        ok "the range $B is in the map"
     else
-        bad "der Bereich $B fehlt in tools/kernel/memmap.py"
+        bad "the range $B is missing in tools/kernel/memmap.py"
     fi
 done
 
 SC=$(python3 tools/kernel/syscalls.py 2>&1 | tail -1)
 note "$SC"
 case "$SC" in
-    *"keine Nummer doppelt"*) ok "tools/kernel/syscalls.py: keine Nummer doppelt" ;;
+    *"keine Nummer doppelt"*) ok "tools/kernel/syscalls.py: no number twice" ;;
     *) bad "syscalls.py beanstandet die Nummern" ;;
 esac
 
@@ -103,7 +103,7 @@ num "kernel/net/inet.fi ruft den Haken am Eingang des Geraets" "$n" ge 1
 
 # =====================================================================
 echo
-echo "== 2. die Maschine und der Pruefer, im Kern =="
+echo "== 2. the machine and the checker, in the kernel =="
 # =====================================================================
 #
 
@@ -125,7 +125,7 @@ note "die Maschine rechnet:"
 for T in alu.add64 alu.sub32 alu.mul alu.arsh alu.umlauf alu.div0 \
          jmp.jeq jmp.nichtge jmp.jsgt jmp.ja \
          mem.stapel mem.oktett mem.paket mem.daneben ld.imm64; do
-    grep -qaE "OK +$T=" "$R" && ok "  $T" || bad "  $T ist nicht gruen"
+    grep -qaE "OK +$T=" "$R" && ok "  $T" || bad "  $T is not green"
 done
 note "  alu.umlauf ist die Zeile, wegen der in kernel/net/ebpf.fi ueberall '+%'"
 note "  steht: 0 - 1 muss umlaufen und darf den Kern NICHT anhalten."
@@ -135,20 +135,20 @@ note "der Pruefer weist ab, was er abweisen muss:"
 for T in ver.rueckwae ver.kein_exit ver.uninit ver.r10 ver.fremdruf \
          ver.sprungziel ver.halber_ld ver.stapel_ob ver.paket_roh \
          ver.unbekannt; do
-    grep -qaE "OK +$T=" "$R" && ok "  $T" || bad "  $T ist nicht gruen"
+    grep -qaE "OK +$T=" "$R" && ok "  $T" || bad "  $T is not green"
 done
 note "  ver.halber_ld ist der Sprung in die zweite Haelfte eines LD_IMM64 --"
 note "  dort steht ein Sofortwert, den die Maschine sonst als Befehl liest."
 grep -qaE "OK +ver.gut=" "$R" \
-    && ok "  ver.gut -- ein GUELTIGES Programm kommt durch" \
-    || bad "  ver.gut -- ein gueltiges Programm wird abgewiesen"
+    && ok "  ver.gut -- a VALID program gets through" \
+    || bad "  ver.gut -- a valid program is rejected"
 note "  ohne diese Zeile waere ein Pruefer, der ALLES abweist, in den zehn"
 note "  Zeilen darueber gruen. Das ist der Grund, aus dem sie dasteht."
 echo
 note "die Tafeln:"
 for T in map.feld map.streu map.loeschen map.fehlt map.kette map.voll \
          map.ausprog; do
-    grep -qaE "OK +$T=" "$R" && ok "  $T" || bad "  $T ist nicht gruen"
+    grep -qaE "OK +$T=" "$R" && ok "  $T" || bad "  $T is not green"
 done
 note "  map.ausprog ist die eigentliche Zusage der Stufe 3: ein LAUFENDES"
 note "  Programm ruft map_update, und hinterher steht die Zahl in der Tafel."
@@ -157,7 +157,7 @@ note "  den lineare Sondierung sonst erst Monate spaeter zeigt."
 echo
 note "die Haken:"
 for T in hook.leer hook.durch hook.verwerf hook.zaehler; do
-    grep -qaE "OK +$T=" "$R" && ok "  $T" || bad "  $T ist nicht gruen"
+    grep -qaE "OK +$T=" "$R" && ok "  $T" || bad "  $T is not green"
 done
 note "  hook.leer: OHNE geladenes Programm laesst der Haken alles durch."
 note "  Ein leerer Haken, der verwirft, haette das Netz abgeschaltet."
@@ -190,7 +190,7 @@ fi
 
 # =====================================================================
 echo
-echo "== 4a. der fertige Filter, an Rahmen aus dem Kern =="
+echo "== 4a. the finished filter, on frames from the kernel =="
 # =====================================================================
 #
 
@@ -226,7 +226,7 @@ num "ohne 'noebpf' ist er scharf" "${ON1:-9}" eq 1
 
 # =====================================================================
 echo
-echo "== 5. auf einer echten Leitung: der Filter verwirft wirklich =="
+echo "== 5. on a real wire: the filter really discards =="
 # =====================================================================
 #
 
@@ -249,8 +249,8 @@ BODY=4096
 NETOK=1
 command -v ip >/dev/null 2>&1 || NETOK=0
 gcc -O2 -o "$TMPD/bruecke" tools/net/bridge.c 2>"$TMPD/gcc.err" \
-    && ok "tools/net/bridge.c: die Leitung ist gebaut" \
-    || { bad "bridge.c laesst sich nicht uebersetzen"; NETOK=0; }
+    && ok "tools/net/bridge.c: the wire is built" \
+    || { bad "bridge.c cannot be compiled"; NETOK=0; }
 
 if [ "$NETOK" = 1 ]; then
     if ! wire_up; then
@@ -279,7 +279,7 @@ if [ "$NETOK" = 1 ]; then
     SPEC="$SPEC /var/ /etc/"
     python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
         > "$TMPD/mkfs.txt" 2>&1 \
-        && ok "mkfs.py: ein Abbild mit /bin/ping und /bin/wget" \
+        && ok "mkfs.py: an image with /bin/ping and /bin/wget" \
         || { bad "mkfs.py ist gescheitert"
              sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; NETOK=0; }
 fi
@@ -316,16 +316,16 @@ if [ "$NETOK" = 1 ]; then
     RO="$TMPD/netz-ohne.txt"
     GRUND=1
     if grep -qaE '0% packet loss' "$RO"; then
-        ok "5a OHNE Filter: /bin/ping bekommt seine Antworten"
+        ok "5a WITHOUT filter: /bin/ping gets its replies"
     else
-        bad "5a OHNE Filter: ping kommt schon OHNE Filter nicht durch"
+        bad "5a WITHOUT filter: ping does not get through even WITHOUT filter"
         note "    dann misst 5b nichts -- die Leitung selbst ist das Problem"
         GRUND=0
     fi
     if grep -qaF "wget: status 200" "$RO"; then
-        ok "5a OHNE Filter: /bin/wget holt die Datei"
+        ok "5a WITHOUT filter: /bin/wget fetches the file"
     else
-        bad "5a OHNE Filter: wget holt die Datei nicht"
+        bad "5a WITHOUT filter: wget does not fetch the file"
         GRUND=0
     fi
     DR0=$(grep -aoE 'verwerf=[0-9]+' "$RO" | tail -1 | grep -oE '[0-9]+$')
@@ -366,7 +366,7 @@ fi
 # =====================================================================
 if [ "$NETOK" = 1 ] && [ "${GRUND:-0}" = 1 ]; then
 echo
-echo "== 6. Stufe 5: der Weg aus Ring 3 =="
+echo "== 6. stage 5: the path from ring 3 =="
 # =====================================================================
 #
 

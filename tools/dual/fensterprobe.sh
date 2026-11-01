@@ -52,8 +52,8 @@ print('Bild', im.size, 'Tinte', round(100 * t / ((h // 3) * (w // 3)), 1), '%')
 "
   rm -f "$O/fenster.ppm"
 fi
-echo "== was der Installer gesagt hat =="
+echo "== what the installer said =="
 tr -d '\000' < "$O/ser.txt" | grep -a '^installer:' | head -30
-echo "== im Fenster steht =="
+echo "== in the window it says =="
 tesseract "$O/nur-fenster.png" - 2>/dev/null | grep -v '^\s*$' | head -16
 echo FERTIG

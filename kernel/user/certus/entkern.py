@@ -99,7 +99,7 @@ def kcall(s):
     return osum_map_anon(len, prot, flags)
 }''', s, count=1, flags=re.S)
     if 'asm(' in s:
-        print('kcall: es steht noch asm( darin', file=sys.stderr)
+        print('kcall: asm( still present', file=sys.stderr)
         sys.exit(1)
     return s + EXT
 
@@ -125,7 +125,7 @@ def wlibc(s):
     s = re.sub(r'let p: u64 = asm\("syscall", out\("rax"\), in\("rax"\) SYS_MMAP, in\("rdi"\) 0,\n.*?clobber\("memory"\)\)',
                'let p: u64 = osum_map_fd(bytes, PROT_RW, MAP_SHARED_FLAG, fd, 0)', s, count=1, flags=re.S)
     if 'asm(' in s:
-        print('wlibc: es steht noch asm( darin', file=sys.stderr)
+        print('wlibc: asm( still present', file=sys.stderr)
         sys.exit(1)
     return s + EXT
 

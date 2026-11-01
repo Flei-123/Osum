@@ -20,14 +20,14 @@ trap cleanup EXIT
 echo "== 1. das Abbild =="
 if [ ! -f "$OUT/disk.img" ]; then
     bash tools/look/shot.sh "$OUT" keep=yes >"$OUT/bau.log" 2>&1 || {
-        echo "der Bau ist gescheitert"; tail -6 "$OUT/bau.log"; exit 1; }
+        echo "the build failed"; tail -6 "$OUT/bau.log"; exit 1; }
 fi
 [ -f "$OUT/disk.img" ] || { echo "kein disk.img"; exit 1; }
 BUILDD=${LOOKBUILD:-/tmp/osum-lookbuild-$(pwd | md5sum | cut -c1-12)}
 [ -f "$BUILDD/k0.mb" ] || { echo "kein Kern in $BUILDD"; exit 1; }
 ok "Abbild und Kern stehen"
 
-echo "== 2. Osum starten und settings oeffnen =="
+echo "== 2. start Osum and open settings =="
 rm -f "$OUT/serial.txt" "$SOCK"
 cp "$OUT/disk.img" "$OUT/lauf.img"
 timeout 420 qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 512 \
@@ -45,9 +45,9 @@ while [ $i -lt 2400 ]; do
     sleep 0.15; i=$((i+1))
 done
 if grep -qaE '^wm: hold' "$OUT/serial.txt" 2>/dev/null; then
-    ok "der Schreibtisch steht"
+    ok "the desktop is up"
 else
-    bad "der Schreibtisch kam nicht hoch"
+    bad "the desktop did not come up"
     tail -8 "$OUT/serial.txt" 2>/dev/null | sed 's/^/        /'
     echo "REITER: $pass bestanden, $fail durchgefallen"; exit 1
 fi
@@ -73,11 +73,11 @@ if grep -qa 'settings: stand' "$OUT/serial.txt" 2>/dev/null; then
     ok "settings laeuft"
     note "$(grep -a 'settings: elemente' "$OUT/serial.txt" | tail -1)"
 else
-    bad "settings ist nicht aufgegangen"
+    bad "settings did not open"
     grep -aE 'launcher:|settings:' "$OUT/serial.txt" | tail -6 | sed 's/^/        /'
 fi
 
-echo "== 3. auf den Brueckenreiter klicken =="
+echo "== 3. click the bridge tab =="
 STAND_VOR=$(grep -a 'settings: stand' "$OUT/serial.txt" | tail -1)
 klick 700,150 2
 STAND_NACH=$(grep -a 'settings: stand' "$OUT/serial.txt" | tail -1)

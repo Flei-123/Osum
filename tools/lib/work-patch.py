@@ -17,13 +17,13 @@ NEU = ('# Where the logs of each section go. Overridable so two\n'
 def main():
     t = TEST.read_text()
     if "OSUM_WORK" in t:
-        print("test.sh kennt OSUM_WORK schon")
+        print("test.sh already knows OSUM_WORK")
         return 0
     if ALT not in t:
-        print("FEHLER: die WORK-Zeile sehe ich nicht", file=sys.stderr)
+        print("ERROR: I do not see the WORK line", file=sys.stderr)
         return 1
     TEST.write_text(t.replace(ALT, NEU, 1))
-    print("test.sh: WORK laesst sich jetzt mit $OSUM_WORK umlenken")
+    print("test.sh: WORK can now be redirected with $OSUM_WORK")
     return 0
 
 

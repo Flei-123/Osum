@@ -31,7 +31,7 @@ def main():
     for n in range(1, nmax + 1):
         rec = ((1 << SHIFT) + n - 1) // n
         if rec >> 32:
-            print(f"  n={n}: Kehrwert passt nicht in 32 Bit"); return 1
+            print(f"  n={n}: reciprocal does not fit in 32 bits"); return 1
         for summe in range(0, n * 255 + 1):
             exakt = (summe + n // 2) // n
             got = (summe * rec + rund) >> SHIFT
@@ -41,7 +41,7 @@ def main():
                 schlimm = d
     print(f"BLUR-KEHRWERT: shift={SHIFT}, n=1..{nmax}, {faelle} Faelle geprueft")
     if schlimm == 0:
-        print("  OK    jeder Fall EXAKT wie die Division")
+        print("  OK    every case EXACTLY like the division")
         return 0
     print(f"  FEHL  groesster Fehler {schlimm}")
     return 1

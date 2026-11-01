@@ -71,7 +71,7 @@ def main():
             else:
                 ruhig = 0
                 letzte = jetzt
-        print("das Bildschirmfoto wurde nicht fertig")
+        print("the screenshot was not finished")
         return 1
     finally:
         try:

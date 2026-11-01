@@ -21,7 +21,7 @@ PROGS="desktop taskbar settings launcher explorer sh echo ls cat"
 newer=$(find "$WURZEL/kernel" "$WURZEL/tools/build-kernel.sh" -newer "$BUILDD/k0.mb" -print -quit 2>/dev/null || true)
 if [ ! -s "$BUILDD/k0.mb" ] || [ -n "$newer" ]; then
     "$WURZEL/tools/build-kernel.sh" "$BUILDD/k0.mb" > "$BUILDD/k.log" 2>&1 \
-        || { tail -20 "$BUILDD/k.log"; echo "der Kern baut nicht"; exit 1; }
+        || { tail -20 "$BUILDD/k.log"; echo "the kernel does not build"; exit 1; }
 fi
 USERNEW=$(ls -t "$WURZEL"/kernel/user/*.fi 2>/dev/null | head -1)
 for p in $PROGS; do
@@ -124,7 +124,7 @@ zahl() {
     grep -ao "$2=[0-9]*" "$OUT/s-$1.txt" 2>/dev/null | tail -1 | cut -d= -f2
 }
 
-echo "== die drei Laeufe =="
+echo "== the three runs =="
 messen 0-aus     'uhr=0,1,16,16
 speicher=0,1,16,60
 cpu=0,1,16,104

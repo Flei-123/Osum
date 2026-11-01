@@ -141,10 +141,10 @@ anzahl=$(printf '%s\n' "$werte" | grep -c . || true)
 fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 183[0-9]' kernel/ \
     | grep -v 'PMON' || true)
 if [ "$anzahl" = "1" ] && [ -z "$fremd" ]; then
-    ok "1830..1839 gehoert genau einem Aufruf: SYS_PMON = $werte (Benutzer: $(grep -ral --include='*.fi' -E '^const SYS_[A-Za-z0-9_]*PMON[A-Za-z0-9_]*: u64 = ' kernel/ | tr '\n' ' '))"
+    ok "1830..1839 belongs to exactly one call: SYS_PMON = $werte (users: $(grep -ral --include='*.fi' -E '^const SYS_[A-Za-z0-9_]*PMON[A-Za-z0-9_]*: u64 = ' kernel/ | tr '\n' ' '))"
 else
-    [ "$anzahl" = "1" ] || bad "SYS_PMON steht mit VERSCHIEDENEN Werten im Baum: $(echo $werte | tr '\n' ' ')"
-    [ -z "$fremd" ] || bad "ein fremder Aufruf liegt in 1830..1839: $(echo $fremd | tr '\n' ' ')"
+    [ "$anzahl" = "1" ] || bad "SYS_PMON appears with DIFFERENT values in the tree: $(echo $werte | tr '\n' ' ')"
+    [ -z "$fremd" ] || bad "a foreign call lies in 1830..1839: $(echo $fremd | tr '\n' ' ')"
 fi
 
 pmoff=$(grep -aE '^const PMON_OFF' kernel/lib/kstate.fi | sed 's/.*= //')

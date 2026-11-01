@@ -152,7 +152,7 @@ def main():
                 print("   gesehen: %s" % muster)
                 n_ok += 1
             else:
-                print("   NICHT GESEHEN (60 s): %s" % muster)
+                print("   NOT SEEN (60 s): %s" % muster)
                 n_bad += 1
         elif cmd == "foto":
             ziel = teile[1]
@@ -187,7 +187,7 @@ def main():
         else:
             print("   unbekannter Befehl: %s" % z)
             n_bad += 1
-    print("monitor: %d erwartete Zeilen gesehen, %d nicht" % (n_ok, n_bad))
+    print("monitor: %d expected lines seen, %d not" % (n_ok, n_bad))
     return 1 if n_bad else 0
 
 

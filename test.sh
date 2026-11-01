@@ -98,7 +98,7 @@ abschnitt_ausgeben() { # index
 lauf() { # titel skript logname muster
     if [ "${ABGEARBEITET:-0}" = "1" ]; then
         echo "FEHLER: '$3' wird NACH abschnitte_abarbeiten angemeldet und" >&2
-        echo "        wuerde damit nie laufen. Den lauf-Aufruf VOR die" >&2
+        echo "        would never run. Put the run call BEFORE the" >&2
         echo "        Zeile 'abschnitte_abarbeiten' stellen." >&2
         exit 2
     fi
@@ -194,7 +194,7 @@ done < vendor/net/BLOBS
 ZUSAGEN=$((ZUSAGEN + 9))
 if [ -z "$S1" ]; then
     echo "   Firn ${COMMIT:0:8}, firnc0 + firnc1 gebaut, lib/std daneben,"
-    echo "   lib/net/ mit den drei Blob-Hashes aus vendor/net/BLOBS (9 Zusagen)"
+    echo "   lib/net/ with the three blob hashes from vendor/net/BLOBS (9 commitments)"
     ok
 else
     bad "der festgenagelte Uebersetzer:$S1"
@@ -539,12 +539,12 @@ echo
 echo "=================================================================="
 echo "gelaufen mit OSUM_JOBS=$JOBS, accel=${OSUM_ACCEL:-auto}"
 if [ "$UEBERSPRUNGEN" -gt 0 ]; then
-    echo "ACHTUNG: DIESER LAUF IST UNVOLLSTAENDIG -- OSUM_NUR='$NUR' hat"
-    echo "         $UEBERSPRUNGEN Abschnitte gar nicht erst angemeldet. Die Zahlen"
-    echo "         unten gelten NICHT als Abnahme."
+    echo "NOTE: THIS RUN IS INCOMPLETE -- OSUM_ONLY='$NUR' hat"
+    echo "         $UEBERSPRUNGEN sections were not registered at all. The numbers"
+    echo "         below do NOT count as acceptance."
 fi
 if [ "$FAIL" -eq 0 ]; then
-    echo "ALLE $PASS ABSCHNITTE BESTANDEN, $ZUSAGEN Zusagen, 0 Fehler"
+    echo "ALL $PASS SECTIONS PASSED, $ZUSAGEN commitments, 0 failures"
     exit 0
 else
     echo "$PASS Abschnitte bestanden, $FAIL FEHLGESCHLAGEN ($ZUSAGEN Zusagen)"

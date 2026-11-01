@@ -38,7 +38,7 @@ cp -f "$QUELLE" "$TMP/k/" || exit 1
 
 such() {
     local t; t=$(find kernel -name "$1" -type f -not -path '*/user/*' | head -1)
-    [[ -n $t ]] || { echo "module/build.sh: $1 nicht im Kern" >&2; return 1; }
+    [[ -n $t ]] || { echo "module/build.sh: $1 not in the kernel" >&2; return 1; }
     echo "$t"
 }
 mkdir -p "$TMP/k/lib" "$TMP/k/gfx" "$TMP/k/arch"

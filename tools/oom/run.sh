@@ -23,7 +23,7 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { local name=$1 wert=$2 op=$3 want=$4
-    if [ -z "$wert" ]; then bad "$name: keine Zahl gefunden (wollte $op $want)"; return; fi
+    if [ -z "$wert" ]; then bad "$name: no number found (wanted $op $want)"; return; fi
     if [ "$wert" -"$op" "$want" ] 2>/dev/null; then ok "$name: $wert"
     else bad "$name: $wert, wollte $op $want"; fi
 }

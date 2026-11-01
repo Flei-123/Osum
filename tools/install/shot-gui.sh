@@ -61,7 +61,7 @@ Image.open('$W/s.ppm').save('$OUT')
 print('  $OUT')
 "
 else
-    echo "== kein Bild entstanden" >&2
+    echo "== no image was produced" >&2
     tail -5 "$W/qemu.log" >&2
     exit 1
 fi

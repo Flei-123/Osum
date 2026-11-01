@@ -83,9 +83,9 @@ def main():
             print("  MEHRDEUTIG %-28s %3d Codes, %d Kollisionen, Kraft %.6f"
                   % (name, n, schlecht, kraft))
     if fehler:
-        print("%d von %d Tafeln sind mehrdeutig" % (fehler, len(tafeln)))
+        print("%d of %d tables are ambiguous" % (fehler, len(tafeln)))
         return 1
-    print("%d Tafeln, %d Codes, 0 Praefixkollisionen, alle Kraft-Summen <= 1"
+    print("%d tables, %d codes, 0 prefix collisions, all Kraft sums <= 1"
           % (len(tafeln), ncodes))
     return 0
 

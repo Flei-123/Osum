@@ -20,7 +20,7 @@ TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
 bash tools/build-kernel.sh "$TMPD/k.mb" --stufe 0 >/dev/null 2>&1 \
-    || { echo "FB: der Kernel liess sich nicht bauen"; exit 1; }
+    || { echo "FB: the kernel could not be built"; exit 1; }
 
 echo "== 0. der Wirt =="
 hin "QEMU: $(qemu-system-x86_64 --version | head -1)"
@@ -36,7 +36,7 @@ pruefe() { # $1 = Protokoll, $2 = Name des Falles, $3 = erwartete Breite (oder "
             OHNE=$((OHNE+1))
             return 0
         fi
-        bad "$name: keine fb-Zeile im Bericht"
+        bad "$name: no fb line in the report"
         return 1
     fi
     local w h bpp pitch src phys cols rows
@@ -58,9 +58,9 @@ pruefe() { # $1 = Protokoll, $2 = Name des Falles, $3 = erwartete Breite (oder "
         gut=0; hin "    Breite $w statt $wollw"
     fi
     if [ "$gut" -eq 1 ]; then
-        ok "$name: ${w}x${h} bpp=$bpp pitch=$pitch src=$src -- die vier Zahlen sind schluessig"
+        ok "$name: ${w}x${h} bpp=$bpp pitch=$pitch src=$src -- the four numbers are consistent"
     else
-        bad "$name: ${w}x${h} bpp=$bpp pitch=$pitch src=$src -- die Zahlen passen nicht zusammen"
+        bad "$name: ${w}x${h} bpp=$bpp pitch=$pitch src=$src -- the numbers do not fit together"
     fi
 }
 
@@ -84,14 +84,14 @@ done
 
 lauf "$TMPD/knone.txt" "gfx hwdiag nokbd nosched noproc nofs noring3" -vga none
 if grep -qa 'ENDE DER DIAGNOSE' "$TMPD/knone.txt"; then
-    ok "-vga none: der Bericht kommt trotzdem vollstaendig -- kein Haenger"
+    ok "-vga none: the report still arrives complete -- no hang"
 else
     bad "-vga none: der Bericht bricht ab"
 fi
 pruefe "$TMPD/knone.txt" "-vga none" ""
 
 # =====================================================================
-echo "== 2. zwei Aufloesungen, die der Kern selbst anfordert =="
+echo "== 2. two resolutions the kernel requests itself =="
 # =====================================================================
 lauf "$TMPD/r1.txt" "gfx hwdiag nokbd nosched noproc nofs noring3" -vga std
 pruefe "$TMPD/r1.txt" "Vorgabe" "800"
@@ -99,10 +99,10 @@ lauf "$TMPD/r2.txt" "gfx fbbig hwdiag nokbd nosched noproc nofs noring3" -vga st
 pruefe "$TMPD/r2.txt" "fbbig" "1024"
 
 # =====================================================================
-echo "== 3. was die Zahlen ueber die Herkunft sagen =="
+echo "== 3. what the numbers say about the origin =="
 z=$(grep -a 'hwdiag: fb ' "$TMPD/r1.txt" | tail -1)
 if grep -q 'src=vbe' <<<"$z"; then
-    ok "mit -kernel kommt der Puffer aus den Bochs-Registern (src=vbe)"
+    ok "with -kernel the buffer comes from the Bochs registers (src=vbe)"
 else
     hin "mit -kernel: src ist nicht vbe -- $z"
 fi
@@ -114,6 +114,6 @@ if [ -n "$AUS" ]; then
 fi
 
 echo
-echo "FB: $pass bestanden, $fail gefallen, $OHNE Karten ohne Bochs-Erweiterung"
+echo "FB: $pass passed, $fail failed, $OHNE cards without Bochs extension"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

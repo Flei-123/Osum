@@ -17,7 +17,7 @@ echo "== 0. der Uebersetzer"
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
     tail -5 "$OUT/firnc.log"; exit 1; }
 
-echo "== 1. Pakete (Fassung 1, 2, 3) und Zertifikate auf $NAME"
+echo "== 1. packages (version 1, 2, 3) and certificates on $NAME"
 bash tools/install/pakete.sh "$OUT" > "$OUT/pak1.log" 2>&1 || {
     tail -5 "$OUT/pak1.log"; exit 1; }
 bash tools/update/pakete.sh "$OUT" > "$OUT/pak2.log" 2>&1 || {
@@ -34,7 +34,7 @@ OSUM_SIGN_PASS=fremd1 OSUM_ERSATZ_PASS=fremd2 \
 python3 tools/ota/schluesselbund.py "$OUT/bund.json" oeffentlich ersatz \
     -o "$OUT/ersatz.pub" || exit 1
 
-echo "== 3. vier Auslieferungen (1..4) aus dem Register"
+echo "== 3. four deliveries (1..4) from the registry"
 rm -rf "$OUT/aus" "$OUT/stand"
 mkdir -p "$OUT/stand"
 for f in 1 2 3 2; do
@@ -44,7 +44,7 @@ for f in 1 2 3 2; do
         --bund "$OUT/bund.json" --notiz "hallo-$f" 2>&1 | grep -v signiert
 done
 
-echo "== 4. das Abbild (mit Ersatzschluessel)"
+echo "== 4. the image (with substitute key)"
 cat > "$OUT/ota.conf" <<EOF
 quelle=https://$NAME:$PORT
 abstand=3600
@@ -65,14 +65,14 @@ OTA_ROOTS="$OUT/certs/ca.pem" OTA_CONF="$OUT/ota.conf" EXTRA="$EX" \
     || { tail -25 "$OUT/build.log"; exit 1; }
 grep -a 'ersatz\|apps \|programme' "$OUT/build.log"
 
-echo "== 5. die leere Platte und die Installation"
+echo "== 5. the empty disk and the installation"
 rm -f "$OUT/ziel.img"
 head -c $((96 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
 OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --ja;exit" 900 \
     > /dev/null 2>&1
 echo "   installer rc=$(cat "$OUT/inst.rc" 2>/dev/null) $(grep -ac 'install: done' "$OUT/inst.txt")"
 
-echo "== 6. ein Startlauf -- kommt die Maschine hoch, steht das Netz"
+echo "== 6. a start run -- does the machine come up, is the network up"
 OTA_NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0" OUT="$OUT" \
     bash tools/install/oneshot.sh basis0 platte \
     "ota show;cat /etc/resolv.conf;exit" 600 \
@@ -86,4 +86,4 @@ rm -rf "$OUT/rein"
 mkdir -p "$OUT/rein"
 cp -a "$OUT/aus" "$OUT/rein/aus"
 cp -a "$OUT/bund.json" "$OUT/rein/bund.json"
-echo "== fertig: $OUT/basis.img (Schnappschuss unter $OUT/rein)"
+echo "== done: $OUT/basis.img (snapshot under $OUT/rein)"

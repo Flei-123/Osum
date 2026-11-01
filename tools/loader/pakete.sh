@@ -21,10 +21,10 @@ while IFS='|' read -r paket programm fassung titel info keys art; do
         echo "   certus    uebersprungen (kein /bin/certus gebaut)"
         continue
     fi
-    [ -x "$prog" ] || { echo "== $prog fehlt -- tools/loader/build.sh baut es"; exit 1; }
+    [ -x "$prog" ] || { echo "== $prog is missing -- tools/loader/build.sh builds it"; exit 1; }
 
     {
-        echo "# /apps/$paket.osp/INFO -- aus tools/loader/apps.tab gebaut."
+        echo "# /apps/$paket.osp/INFO -- built from tools/loader/apps.tab."
         echo "name=$titel"
         echo "info=$info"
         echo "keys=$keys"
@@ -35,7 +35,7 @@ while IFS='|' read -r paket programm fassung titel info keys art; do
         echo "== no registry symbol for $paket"; exit 1; }
 
     {
-        echo "# Runde LADEN, aus tools/loader/apps.tab erzeugt -- nicht von Hand aendern."
+        echo "# Round LOADER, generated from tools/loader/apps.tab -- do not edit by hand."
         echo "name=$paket"
         echo "fassung=$fassung"
         echo "titel=$titel"

@@ -80,12 +80,12 @@ def main(argv):
             if d > tol:
                 falsch += 1
     if deckend == 0:
-        print("das Symbol hat keinen deckenden Bildpunkt")
+        print("the symbol has no opaque pixel")
         return 1
     if falsch:
-        print("falsch %d von %d deckenden" % (falsch, deckend))
+        print("wrong %d of %d opaque" % (falsch, deckend))
         return 1
-    print("%d deckende Bildpunkte, alle gleich" % deckend)
+    print("%d opaque pixels, all equal" % deckend)
     return 0
 
 

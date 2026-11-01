@@ -58,10 +58,10 @@ python3 tools/osum/mkfs.py build "$TMPD/j.img" 65536 --v3 --inodes=512 \
     || bad "mkfs mit Journal"
 sed 's/^/        /' "$TMPD/mkj.txt"
 grep -qa 'jstart=273 jblocks=522' "$TMPD/mkj.txt" \
-    && ok "der Journalbereich liegt zwischen Inodetabelle und Daten (522 Bloecke)" \
-    || bad "der Journalbereich sitzt nicht, wo er soll"
+    && ok "the journal area lies between inode table and data (522 blocks)" \
+    || bad "the journal area is not where it should be"
 python3 tools/osum/mkfs.py build "$TMPD/nj.img" 65536 --v3 --inodes=512 \
-    --time=1780000000 $SPEC >/dev/null 2>&1 || bad "mkfs ohne Journal"
+    --time=1780000000 $SPEC >/dev/null 2>&1 || bad "mkfs without journal"
 
 lauf() { # abbild anhang ausgabe [zeitlimit]
     local img=$1 app=$2 out=$3 t=${4:-600}
@@ -80,7 +80,7 @@ python3 tools/osum/mkfs.py build "$TMPD/lim.img" 262144 --v3 --inodes=256 \
 cp --sparse=always "$TMPD/lim.img" "$TMPD/lim-live.img"
 lauf "$TMPD/lim-live.img" "script=fsrlim datei;exit" "$TMPD/lim.txt" 900
 rc=$?
-[ "$rc" -eq 21 ] && ok "der Kern hat selbst abgeschaltet (exit 21)" \
+[ "$rc" -eq 21 ] && ok "the kernel shut itself down (exit 21)" \
                  || bad "QEMU exit $rc, erwartet 21"
 num "groesster Blockindex einer Datei" "$(val "$TMPD/lim.txt" fsrlim maxidx)" eq 17043527
 num "groesste Datei in Oktetten" "$(val "$TMPD/lim.txt" fsrlim maxfile)" eq 8726286336
@@ -119,10 +119,10 @@ num "und der LETZTE Name liess sich oeffnen" \
     "$(val "$TMPD/grossl.txt" fsrlim dlast)" eq 1
 
 echo
-echo "== 3. der Stromausfall: $LAEUFE Abschuesse mit SIGKILL =="
-echo "        (QEMU wird mitten im Schreiben mit -9 abgeschossen; die"
-echo "         Platte haengt mit cache=directsync, sonst ueberlebte der"
-echo "         Seitenpuffer des Wirts den Abschuss und nichts waere"
+echo "== 3. the power failure: $LAEUFE kills with SIGKILL =="
+echo "        (QEMU is killed with -9 in the middle of writing; the"
+echo "         disk runs with cache=directsync, otherwise the host's"
+echo "         page cache would survive the kill and nothing would be"
 echo "         gemessen.)"
 mkdir -p "$TMPD/runs"
 seq 1 "$LAEUFE" | xargs -P "$PAR" -I{} sh -c \
@@ -141,7 +141,7 @@ num "BESCHAEDIGTE FAELLE (fsck)" "$n_f" eq 0
 num "BESCHAEDIGTE FAELLE (Wirt)" "$n_w" eq 0
 
 echo
-echo "== 4. die Gegenprobe: dieselben Abschuesse mit 'nojournal' =="
+echo "== 4. the control run: the same kills with 'nojournal' =="
 echo "        (hier MUESSEN Schaeden auftreten -- sonst misst"
 echo "         Abschnitt 3 nichts)"
 seq 101 $((100 + LAEUFE)) | xargs -P "$PAR" -I{} sh -c \
@@ -151,16 +151,16 @@ sort -t= -k2 -n "$TMPD/gegen.log" | grep '^lauf=' | sed 's/^/        /'
 g_b=$(grep '^lauf=' "$TMPD/gegen.log" \
       | grep -c 'schaeden=[1-9]\|fsck=[1-9]\|wirt=[1-9]')
 if [ "$g_b" -gt 0 ]; then
-    ok "ohne Journal treten Schaeden auf: $g_b von $LAEUFE Laeufen"
+    ok "without journal damage occurs: $g_b of $LAEUFE runs"
 else
-    bad "ohne Journal trat in $LAEUFE Laeufen KEIN Schaden auf -- damit"
-    echo "        misst Abschnitt 3 nichts. Mehr Laeufe (FSR_LAEUFE) oder"
+    bad "without journal NO damage occurred in $LAEUFE runs -- so"
+    echo "        section 3 measures nothing. More runs (FSR_LAEUFE) or"
     echo "        laengere Schreibzeit (FSR_MINMS/FSR_SPANMS) noetig;"
     echo "        gemessen wurden 26 % bei 60 Laeufen."
 fi
 
 echo
-echo "== 5. eine halb geschriebene Bestaetigung wird NICHT nachgetragen =="
+echo "== 5. a half-written commit is NOT replayed =="
 python3 tools/fsrobust/corrupt.py "$TMPD/j.img" "$TMPD/kaputt" jmuell \
     >/dev/null 2>&1 || bad "corrupt.py jmuell"
 cp --sparse=always "$TMPD/kaputt/kaputt-jmuell.img" "$TMPD/jm.img"
@@ -236,12 +236,12 @@ python3 tools/osum/mkfs.py build "$TMPD/v2a.img" 4096 /bin/ \
 python3 tools/osum/mkfs.py build "$TMPD/v2b.img" 4096 /bin/ \
     "/bin/sh=$TMPD/sh.elf" >/dev/null 2>&1
 cmp -s "$TMPD/v2a.img" "$TMPD/v2b.img" \
-    && ok "zweimal gebaut gibt Oktett fuer Oktett dasselbe Abbild (Fassung 2)" \
-    || bad "zwei Laeufe von mkfs geben verschiedene Abbilder"
+    && ok "built twice gives the same image octet for octet (version 2)" \
+    || bad "two runs of mkfs give different images"
 python3 tools/osum/mkfs.py meta "$TMPD/v2a.img" 2>/dev/null | head -1 \
     | grep -qa 'version=2 bmblocks=1 isize=128 dirent=32 namelen=24' \
-    && ok "die Vorgabe ist weiter die Fassung 2, unveraendert" \
-    || bad "die Vorgabe von mkfs hat sich verschoben"
+    && ok "the default is still version 2, unchanged" \
+    || bad "the default of mkfs has shifted"
 
 echo
 echo "FSROBUST: $pass bestanden, $fail gescheitert"

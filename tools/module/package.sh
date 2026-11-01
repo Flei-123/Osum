@@ -18,11 +18,11 @@ OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-
 STORE=${STORE:-/root/orientstore/werkzeug/store}
 
 mkdir -p "$OUT"
-echo "== 1. das Modul bauen und signieren =="
+echo "== 1. build and sign the module =="
 bash tools/module/build.sh "$OUT/ps2maus.omod" --name ps2maus --abi 1 \
     | sed 's/^/   /' || exit 1
 
-echo "== 2. daraus ein Paket =="
+echo "== 2. make a package from it =="
 cat > "$OUT/ps2maus.rezept" <<REZEPT
 name=ps2maus
 fassung=$FASSUNG
@@ -32,16 +32,16 @@ keys=maus,zeiger,ps2,8042,treiber,modul
 datei=lib/ps2maus.omod $OUT/ps2maus.omod
 REZEPT
 if [ ! -x "$OPK" ] && [ ! -f "$OPK" ]; then
-    echo "   opk.py fehlt ($OPK) -- Schritt 2 und 3 werden uebersprungen"
+    echo "   opk.py missing ($OPK) -- steps 2 and 3 are skipped"
     exit 0
 fi
 python3 "$OPK" bauen "$OUT/ps2maus.rezept" -o "$OUT/ps2maus-$FASSUNG.opk" \
     | sed 's/^/   /' || exit 1
 python3 "$OPK" zeigen "$OUT/ps2maus-$FASSUNG.opk" | sed 's/^/   /'
 
-echo "== 3. in den Speicher legen =="
+echo "== 3. put it into the store =="
 if [ ! -f "$STORE" ]; then
-    echo "   werkzeug/store fehlt ($STORE) -- Schritt 3 wird uebersprungen"
+    echo "   tool/store missing ($STORE) -- step 3 is skipped"
     exit 0
 fi
 REPO="$OUT/speicher"
@@ -51,9 +51,9 @@ python3 "$STORE" --repo "$REPO" init --name "Justins Speicher" \
 python3 "$STORE" --repo "$REPO" add "$OUT/ps2maus-$FASSUNG.opk" 2>&1 | sed 's/^/   /'
 echo "-- der Katalog --"
 python3 "$STORE" --repo "$REPO" list 2>&1 | sed 's/^/   /'
-echo "-- die Pruefung des ganzen Katalogs gegen sich selbst --"
+echo "-- the check of the whole catalog against itself --"
 python3 "$STORE" --repo "$REPO" verify --tief 2>&1 | sed 's/^/   /'
-echo "-- der Eintrag, wie er im index.json steht --"
+echo "-- the entry as it appears in index.json --"
 python3 - "$REPO/index.json" <<'PY' | sed 's/^/   /'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -64,9 +64,9 @@ for k, v in d["pakete"].items():
                                       sort_keys=True)))
 PY
 echo
-echo "So sieht es auf dem Geraet aus:"
+echo "This is what it looks like on the device:"
 echo "    osum\$ opk install /store/ps2maus-$FASSUNG.opk"
 echo "    opk: installed ps2maus $FASSUNG"
 echo "    osum\$ ls /lib"
 echo "    ps2maus.omod"
-echo "    (Neustart -- und der Kern findet den Treiber.)"
+echo "    (restart -- and the kernel finds the driver.)"

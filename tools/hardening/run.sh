@@ -23,7 +23,7 @@ cp tools/hardening/proof.fi "$TMPD/nachweis.fi"
 
 export FIRNLIB="$(pwd)/vendor/firn/lib"
 if ! "$FIRNC" "$TMPD/nachweis.fi" -o "$TMPD/nachweis" 2>"$TMPD/bau.log"; then
-    echo "  der Nachweis liess sich nicht uebersetzen:" >&2
+    echo "  the proof could not be compiled:" >&2
     sed 's/^/    /' "$TMPD/bau.log" >&2
     exit 1
 fi
@@ -43,13 +43,13 @@ for f in 1 2 3 4; do
         nok "satt, Fall $f: Kanarienvogel ueberschrieben (kanarie=$kan)"
     fi
     if [[ $cn == 256 ]]; then
-        ok "satt, Fall $f: der Puffer ist gewachsen (cap 128 -> 256)"
+        ok "full, case $f: the buffer has grown (cap 128 -> 256)"
     else
-        nok "satt, Fall $f: der Puffer waere gewachsen, capnach=$cn"
+        nok "full, case $f: the buffer would have grown, capafter=$cn"
     fi
 done
 
-echo "  -- hungrig (die Arena ist wirklich erschoepft)"
+echo "  -- hungry (the arena is really exhausted)"
 for f in 1 2 3; do
     zeile=$(ulimit -v 32768; timeout 120 "$TMPD/nachweis" "$f" hunger 2>&1)
     echo "     $zeile"
@@ -57,9 +57,9 @@ for f in 1 2 3; do
     cn=$(feld "$zeile" capnach)
     ln=$(feld "$zeile" len)
     if [[ $cn == 128 ]]; then
-        ok "hungrig, Fall $f: buf_grow ist gescheitert (cap bleibt 128)"
+        ok "hungry, case $f: buf_grow failed (cap stays 128)"
     else
-        nok "hungrig, Fall $f: die Arena war nicht leer (capnach=$cn)"
+        nok "hungry, case $f: the arena was not empty (capafter=$cn)"
     fi
     if [[ $kan == 1 ]]; then
         ok "hungrig, Fall $f: Kanarienvogel heil"
@@ -67,21 +67,21 @@ for f in 1 2 3; do
         nok "hungrig, Fall $f: STILLER UEBERLAUF (kanarie=$kan, len=$ln)"
     fi
     if [[ $ln == 128 ]]; then
-        ok "hungrig, Fall $f: nichts wurde geschrieben (len bleibt 128)"
+        ok "hungry, case $f: nothing was written (len stays 128)"
     else
-        nok "hungrig, Fall $f: es wurde ueber das Ende geschrieben (len=$ln)"
+        nok "hungry, case $f: it was written past the end (len=$ln)"
     fi
 done
 
-echo "  -- die Gegenprobe (Fall 4: der ungepruefte Aufrufer)"
+echo "  -- the control run (case 4: the unchecked caller)"
 zeile=$(ulimit -v 32768; timeout 120 "$TMPD/nachweis" 4 hunger 2>&1)
 echo "     $zeile"
 kan=$(feld "$zeile" kanarie)
 ln=$(feld "$zeile" len)
 if [[ $kan == 0 && $ln == 192 ]]; then
-    ok "die Gegenprobe FAELLT (kanarie=0, len=192) -- der Nachweis misst wirklich"
+    ok "the control run FAILS (canary=0, len=192) -- the proof really measures"
 else
-    nok "die Gegenprobe faellt NICHT (kanarie=$kan, len=$ln) -- dieser Laeufer misst nichts"
+    nok "the control run does NOT fail (canary=$kan, len=$ln) -- this runner measures nothing"
 fi
 
 echo

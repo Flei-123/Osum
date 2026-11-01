@@ -11,9 +11,9 @@ trap 'rm -rf "$W"' EXIT
 
 if [ -z "$BILD" ]; then
     BILD="$W/bild"
-    echo ">> die Pruefbilder bauen ..."
+    echo ">> building the check images ..."
     bash tools/fremdfs/image.sh "$BILD" >"$W/bild.log" 2>&1 || {
-        echo "die Abbilder lassen sich nicht bauen:"; tail -10 "$W/bild.log"
+        echo "the images cannot be built:"; tail -10 "$W/bild.log"
         exit 1; }
 fi
 
@@ -79,12 +79,12 @@ bash tools/design/capture.sh "$W/lauf" res=1280x800 \
 
 S="$W/lauf/serial.txt"
 if [ ! -s "$S" ]; then
-    echo "FEHLGESCHLAGEN: keine serielle Ausgabe"
+    echo "FAILED: no serial output"
     tail -20 "$W/lauf.log"
     exit 1
 fi
 
-echo ">> was die Maschine gemeldet hat:"
+echo ">> what the machine reported:"
 grep -aE "^(ext4|ntfs):" "$S" | head -4 | sed 's/^/    /'
 grep -aE '^explorer: cd ' "$S" | head -5 | sed 's/^/    /'
 
@@ -103,4 +103,4 @@ for p in sorted(glob.glob(os.path.join(quelle, "*.ppm"))):
 print(f">> {n} Bilder")
 PY
 
-echo ">> Protokoll: $W/lauf.log (wird gleich aufgeraeumt)"
+echo ">> log: $W/lauf.log (cleaned up shortly)"

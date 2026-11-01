@@ -28,21 +28,21 @@ num() {
 }
 
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
-    echo "BILD: uebersprungen, kein qemu"; exit 0; }
+    echo "IMAGE: skipped, no qemu"; exit 0; }
 python3 -c 'import PIL' 2>/dev/null || {
-    echo "BILD: uebersprungen, kein Pillow auf dem Wirt"; exit 0; }
+    echo "IMAGE: skipped, no Pillow on the host"; exit 0; }
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || true
 
 B=tools/alltag/build.sh
 
 # ============================================== 1. die Testbilder
 
-echo "== 1. die Testbilder, auf dem Wirt mit Pillow gebaut =="
+echo "== 1. the test images, built on the host with Pillow =="
 
 BILDER="$ARB/bilder"
 python3 tools/bild/mkbilder.py "$BILDER" > "$ARB/mk.log" 2>&1 \
     && ok "mkbilder: $(grep -c . "$BILDER/liste.txt") Dateien" \
-    || { bad "die Testbilder entstehen nicht"; tail -5 "$ARB/mk.log"; exit 1; }
+    || { bad "the test images are not created"; tail -5 "$ARB/mk.log"; exit 1; }
 
 XF="xdir=/b"
 for f in "$BILDER"/g-*.gif "$BILDER"/b-*; do
@@ -66,7 +66,7 @@ done
 ok "drei kaputte Dateien dazugelegt"
 
 echo
-echo "== 2. GIF, PNG, BMP und JPEG lesen -- gegen Pillow =="
+echo "== 2. read GIF, PNG, BMP and JPEG -- against Pillow =="
 
 LESEN="g-einfarb.gif g-tafel.gif g-transp.gif g-lace.gif g-gerade.gif
        g-anim.gif g-gross.gif g-87a.gif b-probe.png b-pal.png
@@ -84,7 +84,7 @@ timeout 560 bash "$B" "$ARB/r1" script='sh /vt.sh;exit' \
 RC=$?
 S="$ARB/r1/serial.txt"
 if [ ! -s "$S" ]; then
-    bad "der Lauf hat nichts gesagt (rc=$RC)"; tail -10 "$ARB/r1.log"
+    bad "the run said nothing (rc=$RC)"; tail -10 "$ARB/r1.log"
     echo; echo "BILD: $pass passed, $fail failed"; exit 1
 fi
 num "der Lauf beendet sich sauber" \
@@ -110,7 +110,7 @@ hat "$S" "geht nicht" "und abgelehnt, mit einem Grund"
 hat_nicht "$S" "art=gif w=4000" "die erlogene Groesse wird nicht geglaubt"
 
 echo
-echo "== 3. sichern: als PNG (verlustfrei) und als JPEG (neu) =="
+echo "== 3. save: as PNG (lossless) and as JPEG (new) =="
 
 cat > "$ARB/vt2.sh" <<'EOF'
 viewer -s /s-gif.png /b/g-tafel.gif
@@ -147,30 +147,30 @@ num "Dateien vom Abbild geholt" "$geholt" eq 6
 if command -v file >/dev/null 2>&1; then
     file "$HOL/s-png.jpg" | grep -qa 'JPEG image data' \
         && ok "file(1) nennt es JPEG: $(file -b "$HOL/s-png.jpg" | cut -c1-58)" \
-        || bad "file(1) erkennt die geschriebene Datei nicht als JPEG"
+        || bad "file(1) does not recognize the written file as JPEG"
     file "$HOL/s-gif.png" | grep -qa 'PNG image data' \
         && ok "file(1) nennt es PNG" \
-        || bad "file(1) erkennt die geschriebene Datei nicht als PNG"
+        || bad "file(1) does not recognize the written file as PNG"
 fi
 
 # ============================================== 4. der Umlauf, gemessen
 
 echo
-echo "== 4. der Umlauf: was wir geschrieben haben, mit Pillow nachgelesen =="
+echo "== 4. the round trip: what we wrote, read back with Pillow =="
 
 python3 tools/bild/check.py "$BILDER" "$HOL" > "$ARB/umlauf.txt" 2>&1
 RCU=$?
 sed 's/^/    /' "$ARB/umlauf.txt"
 if [ "$RCU" -eq 0 ]; then
-    ok "der Umlauf haelt die Schranken ein"
+    ok "the round trip stays within the limits"
 else
-    bad "der Umlauf reisst eine Schranke"
+    bad "the round trip breaks a limit"
 fi
 
 # ============================================== 5. das Fenster
 
 echo
-echo "== 5. das Fenster: die GIF-Datei kommt an, und die Leiste passt =="
+echo "== 5. the window: the GIF file arrives, and the bar fits =="
 
 timeout 560 bash "$B" "$ARB/r3" progs="viewer sh echo ls cat theme" \
     desk=no shot=no themes=no bloecke=8192 \
@@ -186,7 +186,7 @@ if [ -s "$S3" ]; then
         | tail -1 | grep -oE 'w=[0-9]+$' | cut -d= -f2)
     num "der Schieberegler behaelt seine Breite" "${SW:-0}" ge 120
 else
-    bad "der Fensterlauf hat nichts gesagt"
+    bad "the window run said nothing"
 fi
 
 # ============================================== Schluss

@@ -81,7 +81,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         "$TMPD/smp.o" "$TMPD/hv.o" "$TMPD/k$s.o" "$TMPD/uprog$s.o" 2>"$TMPD/ld$s.err" \
         || { bad "firnc$s: ld am Kernel gescheitert"; return 1; }
     objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
-    ok "firnc$s: Kernel gebunden und zu einem Multiboot-Abbild gemacht"
+    ok "firnc$s: kernel linked and made into a Multiboot image"
     local p
     for p in $PROGS; do
         "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/ep$s" 2>&1 || { bad "firnc$s: $p.fi"; return 1; }
@@ -100,16 +100,16 @@ UT=$((16#${UTHEX:-0}))
 num ".utext traegt den Ring-3-Code (Oktette)" "$UT" ge 4096
 
 if python3 tools/kernel/memmap.py > "$TMPD/map.txt" 2>&1; then
-    ok "die Speicherkarte von kdata geht auf: $(sed -n 's/.*, \([0-9]*\) collisions/\1/p' "$TMPD/map.txt") Kollisionen"
+    ok "the memory map of kdata opens up: $(sed -n 's/.*, \([0-9]*\) collisions/\1/p' "$TMPD/map.txt") Kollisionen"
 else
     bad "tools/kernel/memmap.py meldet eine Kollision"; sed 's/^/        /' "$TMPD/map.txt" | head -6
 fi
 
-echo "== 2. der Hauptlauf: fuenfunddreissig Zusagen aus Ring 3 =="
+echo "== 2. the main run: thirty-five commitments from ring 3 =="
 run_kernel "$TMPD/k0.mb" "handle hbench" "$TMPD/main.txt"
 rc=$?
 M="$TMPD/main.txt"
-[ "$rc" -eq 21 ] && ok "der Kernel hat sich selbst beendet (exit 21)" \
+[ "$rc" -eq 21 ] && ok "the kernel shut itself down (exit 21)" \
                  || { bad "QEMU-Rueckgabe $rc, erwartet 21"; tail -8 "$M" | sed 's/^/        /'; }
 
 ZUSAGEN=(
@@ -158,15 +158,15 @@ hasnot "$M" "[FAIL]" "keine einzige gefallene Zusage im Hauptlauf"
 has "$M" "handle: 35/35 Zusagen" "das Programm zaehlt selbst 35 von 35"
 has "$M" "handle: ring 3 exit=0" "sein Beendigungscode ist die Zahl der gefallenen: 0"
 
-echo "== 3. was ein Programm nicht zeigen kann: der Kernel misst selbst =="
+echo "== 3. what a program cannot show: the kernel measures itself =="
 grep -qa 'handle: ha=.* differ=1  cross=1  nonce-differ=1' "$M" \
-    && ok "(d) zwei Prozesse, DERSELBE Platz: verschiedene Handles, und der fremde trifft nichts" \
-    || { bad "(d) der Vergleich zweier Tafeln stimmt nicht"; grep -a 'handle: ha=' "$M" | sed 's/^/        /'; }
+    && ok "(d) two processes, SAME slot: different handles, and the foreign one hits nothing" \
+    || { bad "(d) the comparison of two tables is wrong"; grep -a 'handle: ha=' "$M" | sed 's/^/        /'; }
 grep -qa 'handle: pass=1  shrink=1  notransfer=1  refs=2' "$M" \
-    && ok "die ausdrueckliche Uebergabe: sie gelingt, sie SCHNEIDET die Rechte, ohne R_TRANSFER geht sie nicht, und das Objekt haelt danach zwei Verweise" \
-    || { bad "die Uebergabe an ein Kind stimmt nicht"; grep -a 'handle: pass=' "$M" | sed 's/^/        /'; }
+    && ok "the explicit handover: it succeeds, it CUTS the rights, without R_TRANSFER it fails, and the object then holds two references" \
+    || { bad "the handover to a child is wrong"; grep -a 'handle: pass=' "$M" | sed 's/^/        /'; }
 
-echo "== 4. die Zaehler: hat ueberhaupt jemand gefragt? =="
+echo "== 4. the counters: did anyone ask at all? =="
 num "Aufloesungen ueber den kalten Weg" "$(zahl "$M" checks)" ge 20
 num "abgelehnt, weil ein Recht fehlte"          "$(zahl "$M" denied)" ge 1
 num "abgelehnt, weil etwas veraltet war"        "$(zahl "$M" stale)" ge 3
@@ -176,7 +176,7 @@ num "versuchte Rechteerweiterungen (gezaehlt, nicht gewaehrt)" "$(zahl "$M" esca
 num "angelegte Objekte"                         "$(zahl "$M" opened)" ge 10
 OPENED=$(zahl "$M" opened); CLOSED=$(zahl "$M" closed)
 [ "$OPENED" = "$CLOSED" ] \
-    && ok "kein Leck: angelegt $OPENED, abgeraeumt $CLOSED -- gleich viele" \
+    && ok "no leak: created $OPENED, cleaned up $CLOSED -- same number" \
     || bad "LECK: angelegt $OPENED, abgeraeumt $CLOSED"
 num "Objekte am Ende"           "$(zahl "$M" objects)" le 3
 num "Auftraege am Ende (keiner)" "$(zahl "$M" inflight)" eq 0
@@ -214,7 +214,7 @@ has "$R" "[FAIL] kopie-darf-nicht" "ohne Rechtepruefung darf die beschnittene Ko
 has "$R" "[ ok ] keine-eskalation" "die Rechte STEHEN dabei trotzdem richtig in der Tafel -- nur gefragt wird nicht mehr"
 hasnot "$R" "handle: 35/35 Zusagen" "der Lauf ist nicht mehr vollstaendig gruen"
 
-echo "== 8. Gegenprobe: ohne das Wort passiert nichts davon =="
+echo "== 8. control run: without the word none of this happens =="
 run_kernel "$TMPD/k0.mb" "nokbd" "$TMPD/off.txt"
 O="$TMPD/off.txt"
 has "$O" "handle: skipped" "ohne 'handle' meldet der Abschnitt sich ab"
@@ -227,7 +227,7 @@ SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
 if python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
        /readme.txt="$TMPD/readme.txt" >"$TMPD/mkfs.txt" 2>&1; then
-    ok "mkfs.py hat ein OFS-Abbild mit /bin/sh gebaut"
+    ok "mkfs.py built an OFS image with /bin/sh"
     QUIET="nokbd nosched noproc nofs noring3"
     run_disk "$TMPD/k0.mb" "osum $QUIET script=ls;exit" "$TMPD/erbt.txt" "$TMPD/disk.img"
     run_disk "$TMPD/k0.mb" "osum hstrict $QUIET script=ls;exit" "$TMPD/streng.txt" "$TMPD/disk.img"
@@ -244,7 +244,7 @@ echo "== 10. der zweite Uebersetzer =="
 if build_stage 1; then
     run_kernel "$TMPD/k1.mb" "handle" "$TMPD/s1.txt"
     rc1=$?
-    [ "$rc1" -eq 21 ] && ok "firnc1: der Kernel beendet sich selbst" \
+    [ "$rc1" -eq 21 ] && ok "firnc1: the kernel shuts itself down" \
                       || bad "firnc1: QEMU-Rueckgabe $rc1, erwartet 21"
     has "$TMPD/s1.txt" "handle: 35/35 Zusagen" "firnc1 sagt dasselbe wie firnc0"
     hasnot "$TMPD/s1.txt" "[FAIL]" "firnc1: keine gefallene Zusage"

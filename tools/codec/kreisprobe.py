@@ -116,5 +116,5 @@ for _ in range(60000):
     if got!=co:
         bad+=1
         if bad<=3:
-            print("UNGLEICH nC=%d maxc=%d\n  soll %s\n  ist  %s"%(nC,maxc,co,got))
+            print("UNEQUAL nC=%d maxc=%d\n  expected %s\n  actual   %s"%(nC,maxc,co,got))
 print("geprueft %d Bloecke (%d uebersprungen), %d falsch"%(n,skipped,bad))

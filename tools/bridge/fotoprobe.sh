@@ -46,6 +46,6 @@ timeout 180 qemu-system-x86_64 -kernel "$K" -m 256 \
     -vga std \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 
-echo "---- die Zeilen, auf die es ankommt ----"
+echo "---- the lines that matter ----"
 grep -aE 'schirm:|shot:|fb:|jarvisd:|foto|schuss' "$W/seriell.txt" | head -40
 echo "---- (voll in $W/seriell.txt) ----"

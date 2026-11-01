@@ -41,13 +41,13 @@ lauf() {
 
 # ------------------------------------------------------------ 1. bauen
 
-echo "== 1. der Kern und ein Userland, aus beiden Uebersetzern =="
+echo "== 1. the kernel and a userland, from both compilers =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 \
     || { echo "GUARD: vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 
 for s in 0 1; do
     if bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/b$s.log" 2>&1; then
-        ok "firnc$s: der Kern ist gebaut ($(stat -c%s "$TMPD/k$s.mb") Oktette)"
+        ok "firnc$s: the kernel is built ($(stat -c%s "$TMPD/k$s.mb") Oktette)"
     else
         bad "firnc$s: the kernel cannot be built"
         sed 's/^/        /' "$TMPD/b$s.log" | head -12
@@ -73,12 +73,12 @@ SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 $SPEC \
         /d/ "/d/d.txt=$TMPD/d.txt" > "$TMPD/mkfs.log" 2>&1 \
-    && ok "mkfs.py hat ein OFS-Abbild von 4096 Bloecken gebaut" \
+    && ok "mkfs.py built an OFS image of 4096 blocks" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
 CRC=$(python3 -c "import zlib,sys;print('%08x'%zlib.crc32(open(sys.argv[1],'rb').read()))" \
         "$TMPD/disk.img")
 CRCK=$(printf '%x' "0x$CRC")
-ok "die CRC32 des Abbilds auf dem Wirt: 0x$CRC (der Kernel schreibt 0x$CRCK)"
+ok "the CRC32 of the image on the host: 0x$CRC (the kernel writes 0x$CRCK)"
 
 # ------------------------------------------------- 2. die Bits in CR4
 
@@ -115,7 +115,7 @@ has "$TMPD/nosmep.log" "smep=0  smap=1" "nosmep laesst SMAP stehen und nimmt SME
 rc=0; lauf "$TMPD/k0.mb" "$BASIS nosmap" "$TMPD/nosmap.log" -cpu max || rc=$?
 has "$TMPD/nosmap.log" "smep=1  smap=0" "nosmap laesst SMEP stehen und nimmt SMAP"
 
-echo "== 3. die Gegenproben: ein Zugriff, der scheitern MUSS =="
+echo "== 3. the control runs: an access that MUST fail =="
 rc=0; lauf "$TMPD/k0.mb" "$BASIS smapraw" "$TMPD/rawr.log" -cpu max || rc=$?
 gleich "smapraw mit SMAP: der Kernel bleibt stehen" "$rc" 63
 has "$TMPD/rawr.log" "smap: raw read @" "der Lesezugriff wurde wirklich versucht"
@@ -139,7 +139,7 @@ gleich "derselbe Aufruf ohne SMEP: der Lauf endet regulaer" "$rc" 21
 has "$TMPD/rawx-off.log" "smep: came back (!)" \
     "und das ret in der Nutzerseite wurde wirklich ausgefuehrt"
 
-echo "== 4. das Fenster: der Kernel fasst Ring-3-Speicher an =="
+echo "== 4. the window: the kernel touches ring-3 memory =="
 rc=0; lauf "$TMPD/k0.mb" "osum nokbd nosched nofs noring3 caps" \
      "$TMPD/caps.log" -cpu max || rc=$?
 gleich "die Capability-Runde mit SMEP und SMAP" "$rc" 21
@@ -147,9 +147,9 @@ n=$(grep -acF 'caps: 18/18 proofs' "$TMPD/caps.log")
 gleich "Laeufe mit 18 von 18 Zusagen aus Ring 3" "$n" 2
 w=$(grep -aoE 'windows=[0-9]+' "$TMPD/caps.log" | tail -1 | grep -oE '[0-9]+')
 if [ "${w:-0}" -gt 0 ]; then
-    ok "das SMAP-Fenster wurde ${w}x geoeffnet -- der Kernel liest wirklich Nutzerspeicher"
+    ok "the SMAP window was opened ${w}x -- the kernel really reads user memory"
 else
-    bad "das Fenster wurde nie geoeffnet (windows=${w:-?}) -- die Zusage misst nichts"
+    bad "the window was never opened (windows=${w:-?}) -- the commitment measures nothing"
 fi
 rc=0; lauf "$TMPD/k0.mb" "osum nokbd nosched nofs noring3 caps nosmap" \
      "$TMPD/caps-nosmap.log" -cpu max || rc=$?
@@ -169,7 +169,7 @@ has "$TMPD/smp4.log" "guard: aps=3" \
 rc=0; lauf "$TMPD/k0.mb" "$BASIS" "$TMPD/smp1.log" -cpu max -smp 1 || rc=$?
 has "$TMPD/smp1.log" "guard: aps=0" "Gegenprobe: mit einem Prozessor zaehlt niemand mit"
 
-echo "== 6. ein Boot-Modul ist eine Platte =="
+echo "== 6. a boot module is a disk =="
 MOD="osum nokbd nosched noproc nofs noring3 modfs modcrc=$CRC"
 rc=0
 lauf "$TMPD/k0.mb" "$MOD script=ls /bin;uname;cat /d/d.txt;exit" \
@@ -186,7 +186,7 @@ has "$TMPD/mod.log" "eins" "'cat /d/d.txt' liest eine Datei aus dem Modul"
 has "$TMPD/mod.log" "osum: sh exit=0" "und die Shell endet sauber"
 has "$TMPD/mod.log" "smep=1  smap=1" "das ganze Userland lief mit SMEP und SMAP"
 
-echo "== 7. die Pruefsumme ist eine Bedingung =="
+echo "== 7. the checksum is a condition =="
 rc=0
 lauf "$TMPD/k0.mb" "osum nokbd nosched noproc nofs noring3 modfs modcrc=deadbeef script=exit" \
      "$TMPD/modbad.log" -cpu max -initrd "$TMPD/disk.img" || rc=$?
@@ -204,7 +204,7 @@ hasnot "$TMPD/modoff.log" "osum: from module" "aber nicht benutzt"
 rc=0; lauf "$TMPD/k0.mb" "$BASIS" "$TMPD/modnone.log" -cpu max || rc=$?
 has "$TMPD/modnone.log" "mod: none" "ohne Modul sagt der Kernel das, statt zu raten"
 
-echo "== 8. der Bereich des Moduls gehoert dem Modul =="
+echo "== 8. the module's range belongs to the module =="
 has "$TMPD/mod.log" "mod: recheck crc=0x$CRCK  same=1" \
     "nach einem Lauf mit Prozessen, Seiten und Halde ist das Abbild unveraendert"
 f=$(grep -aoE 'frames_free=[0-9]+ of [0-9]+' "$TMPD/mod.log" | tail -1)

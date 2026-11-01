@@ -633,7 +633,7 @@ def parse_tables(paths):
         try:
             collect_methods(body, methods)
         except Exception as e:
-            print("WARNUNG: erster Durchgang ueber %s: %s" % (sig, e),
+            print("WARNING: first pass over %s: %s" % (sig, e),
                   file=sys.stderr)
     names = []
     count = {}
@@ -723,7 +723,7 @@ def main(argv):
                         else int(line, 16))
         da = set(count)
         fehlt = sorted(da - koennen)
-        print("in der Tabelle vorkommend: %d verschiedene Opcodes" % len(da))
+        print("occurring in the table: %d different opcodes" % len(da))
         print("davon unterstuetzt:        %d" % len(da & koennen))
         print("Abdeckung:                 %d%%"
               % (100 * len(da & koennen) // max(1, len(da))))

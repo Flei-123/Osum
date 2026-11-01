@@ -16,7 +16,7 @@ done
 
 if [ ! -f "$W/k.mb" ] || [ -n "${VERGLEICH_BAU:-}" ]; then
     bash tools/bridge/build.sh "$W" 0 >"$W/bau.txt" 2>&1 || {
-        echo "VERGLEICH: der Bau ist gescheitert"; tail -5 "$W/bau.txt"; exit 1; }
+        echo "COMPARE: the build failed"; tail -5 "$W/bau.txt"; exit 1; }
 fi
 K="$W/k.mb"
 
@@ -57,22 +57,22 @@ QPID=""
 
 N=$(grep -ac "Bildschirmfoto geschrieben" "$W/seriell.txt" 2>/dev/null); N=${N:-0}
 if [ "$N" -ge 2 ]; then
-    ok "Osum hat sich ZWEIMAL selbst fotografiert (ueber den Kern-Schein)"
+    ok "Osum photographed itself TWICE (via the kernel shim)"
 else
-    bad "Osum hat nicht zwei Bilder gemacht (nur $N)"
+    bad "Osum did not take two images (only $N)"
     grep -aE 'jarvisd:|schirm:|shot:' "$W/seriell.txt" 2>/dev/null | tail -6 | sed 's/^/        /'
 fi
 grep -qa "shot: pid=" "$W/seriell.txt" \
-    && ok "und der KERN hat es protokolliert (shot: pid=...) -- heimlich geht es nicht" \
-    || bad "der Kern hat kein Bildschirmfoto protokolliert"
+    && ok "and the KERNEL logged it (shot: pid=...) -- it cannot happen secretly" \
+    || bad "the kernel did not log a screenshot"
 
 for n in eins zwei; do
     python3 tools/osum/mkfs.py cat "$W/live.img" "/var/jarvis/$n.ppm" \
         > "$W/$n.ppm" 2>"$W/cat-$n.txt" || true
     if [ -s "$W/$n.ppm" ]; then
-        ok "Bild $n liegt auf Osums eigener Platte ($(stat -c%s "$W/$n.ppm") Oktette)"
+        ok "Image $n is on Osum's own disk ($(stat -c%s "$W/$n.ppm") Oktette)"
     else
-        bad "Bild $n liess sich nicht aus dem Abbild holen"
+        bad "Image $n could not be fetched from the image"
         head -3 "$W/cat-$n.txt" 2>/dev/null | sed 's/^/        /'
     fi
 done
@@ -83,37 +83,37 @@ if [ -s "$W/eins.ppm" ] && [ -s "$W/zwei.ppm" ]; then
     cat "$W/vergleich.txt" | sed 's/^/        /'
 
     grep -qac "ist VOLLSTAENDIG" "$W/vergleich.txt" >/dev/null \
-        && ok "beide Bilder sind VOLLSTAENDIG (jede Zeile, 3 072 000 Oktette)" \
-        || bad "mindestens ein Bild ist unvollstaendig"
+        && ok "both images are COMPLETE (every line, 3 072 000 octets)" \
+        || bad "at least one image is incomplete"
 
     VZ=$(grep -a "^Zeilen verschieden:" "$W/vergleich.txt" | awk "{print \$3}")
     GZ=$(grep -a "^Zeilen gleich:" "$W/vergleich.txt" | awk "{print \$3}")
     if [ "${VZ:-0}" -gt 0 ] 2>/dev/null; then
-        ok "die zwei Bilder sind VERSCHIEDEN ($VZ Zeilen) -- der Aufruf liefert den JEWEILIGEN Schirm"
+        ok "the two images are DIFFERENT ($VZ lines) -- the call delivers the CURRENT screen"
     else
-        bad "die zwei Bilder sind gleich, obwohl der Schirm sich geaendert hat"
+        bad "the two images are equal although the screen changed"
     fi
 
     AB=$(grep -a "^abweichende Oktette in den gleichen Zeilen:" "$W/vergleich.txt" | awk "{print \$7}")
     if [ "${AB:-1}" = 0 ] && [ "${GZ:-0}" -gt 50 ] 2>/dev/null; then
-        ok "in den $GZ unveraenderten Zeilen: 0 abweichende Oktette -- kein Zufallsspeicher"
+        ok "in the $GZ unchanged lines: 0 deviating octets -- no random memory"
     else
-        bad "auch unveraenderte Zeilen weichen ab ($AB Oktette in $GZ Zeilen)"
+        bad "even unchanged lines deviate ($AB octets in $GZ lines)"
     fi
 
     NZ=$(grep -a "nicht-schwarze Bildpunkte innen" "$W/vergleich.txt" | awk "{print \$4}")
     if [ "${NZ:-0}" -gt 1000 ] 2>/dev/null; then
-        ok "und es ist nicht einfach schwarz ($NZ nicht-schwarze Bildpunkte)"
+        ok "and it is not simply black ($NZ non-black pixels)"
     else
-        bad "das Bild ist (fast) ganz schwarz -- ein gleiches Nichts ist kein Beweis"
+        bad "the image is (almost) entirely black -- an equal nothing is no proof"
     fi
 
     python3 tools/bridge/findbrand.py "$W/eins.ppm" "$W/zwei.ppm" \
         > "$W/marke.txt" 2>&1
     cat "$W/marke.txt" | sed 's/^/        /'
     grep -qa "^MARKE-GEFUNDEN" "$W/marke.txt" \
-        && ok "die neue Textzeile steht im ZWEITEN Bild und fehlt im ersten" \
-        || bad "die neue Textzeile ist im zweiten Bild nicht zu finden"
+        && ok "the new text line is in the SECOND image and missing in the first" \
+        || bad "the new text line cannot be found in the second image"
 fi
 
 echo "VERGLEICH: $pass bestanden, $fail durchgefallen"

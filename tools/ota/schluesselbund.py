@@ -173,7 +173,7 @@ def zeigen(bund):
     print("haupt  gen %d  %s" % (d["haupt"]["gen"], d["haupt"]["pub"]))
     print("ersatz        %s" % d["ersatz"]["pub"])
     for k in d["kette"]:
-        print("kette  gen %d  %s  sig %s...  (von %s)"
+        print("chain  gen %d  %s  sig %s...  (from %s)"
               % (k["gen"], k["pub"], k["sig"][:16], k["von"]))
     return 0
 

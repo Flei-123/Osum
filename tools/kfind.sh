@@ -3,7 +3,7 @@ set -uo pipefail
 
 NAME=${1:-}
 if [[ -z $NAME ]]; then
-    echo "Aufruf: tools/kfind.sh <modulname ohne .fi>" >&2
+    echo "Usage: tools/kfind.sh <module name without .fi>" >&2
     exit 1
 fi
 
@@ -19,6 +19,6 @@ case ${#TREFFER[@]} in
     0) echo "kfind: '$NAME.fi' liegt nirgends unter kernel/" >&2; exit 1 ;;
     *) { echo "kfind: '$NAME.fi' liegt MEHRFACH unter kernel/:"
          printf '  %s\n' "${TREFFER[@]}"
-         echo "  Zwei Module gleichen Namens sind in Firn eine Kollision."
+         echo "  Two modules with the same name are a collision in Firn."
        } >&2; exit 1 ;;
 esac

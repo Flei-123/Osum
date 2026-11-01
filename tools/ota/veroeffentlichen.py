@@ -337,9 +337,9 @@ def zuruecknehmen(aus, fassung):
     n = aktuell_setzen(aus, reg, gesperrt_lesen(aus))
     journal(aus, "zuruecknahme\t%d\tletzte bleibt %d\taktuell %d"
             % (fassung, reg["letzte"], n))
-    print("   fassung %d zurueckgenommen; gefuehrt bleibt %d, aktuell ist %d"
+    print("   version %d withdrawn; led remains %d, current is %d"
           % (fassung, reg["letzte"], n))
-    print("   ACHTUNG: die Sperrliste wirkt erst, wenn eine NEUE "
+    print("   NOTE: the revocation list only takes effect when a NEW "
           "Auslieferung sie traegt -- sie steht im signierten VERZEICHNIS.")
     return 0
 

@@ -14,7 +14,7 @@ is()  { if [ "${2:-}" = "$3" ]; then ok "$1: $2"; else bad "$1: '${2:-}', erwart
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 num() { local n=$1 v=${2:-} o=$3 w=$4
-    if [ -z "$v" ]; then bad "$n: keine Zahl (erwartet $o $w)"; return; fi
+    if [ -z "$v" ]; then bad "$n: no number (expected $o $w)"; return; fi
     if [ "$v" -"$o" "$w" ] 2>/dev/null; then ok "$n: $v"; else bad "$n: $v, erwartet $o $w"; fi
 }
 
@@ -33,7 +33,7 @@ mkdir -p "$TMPD/bin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
     ok "firnc0 baut $(echo $PROGS | wc -w) Programme in Ring 3"
 else
-    bad "firnc0 baut die Programme nicht"; sed 's/^/        /' "$TMPD/b.txt" | head -12
+    bad "firnc0 does not build the programs"; sed 's/^/        /' "$TMPD/b.txt" | head -12
 fi
 [ -f "$TMPD/bin/presence.elf" ] && ok "/bin/presence ist da" || bad "/bin/presence fehlt"
 [ -f "$TMPD/bin/freunde.elf" ] && ok "/bin/freunde ist da" || bad "/bin/freunde fehlt"
@@ -42,7 +42,7 @@ note "/bin/presence: $(stat -c%s "$TMPD/bin/presence.elf" 2>/dev/null) Oktette, 
 if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then
     ok "der Kern baut"
 else
-    bad "der Kern baut nicht"; tail -5 "$TMPD/k.txt" | sed 's/^/        /'
+    bad "the kernel does not build"; tail -5 "$TMPD/k.txt" | sed 's/^/        /'
 fi
 
 # ---------------------------------------------------------------- QEMU
@@ -83,7 +83,7 @@ lauf() { # <abbild> <ausgabename> [ms]
 }
 
 # =====================================================================
-echo "== 2. der Dienst am Bus =="
+echo "== 2. the service on the bus =="
 cat > "$TMPD/s2.sh" <<'EOS'
 presence service 4000 &
 presence set certus "liest xoffi.ai"
@@ -142,7 +142,7 @@ lauf "$TMPD/C2.img" o4b
 hasnot "$TMPD/o4b.klar" "VERBOTENERTEXT" "eine App ausserhalb der Liste bekommt keinen Text"
 
 # =====================================================================
-echo "== 5..7. der Kontodienst: Freunde, Praesenz, Chat =="
+echo "== 5..7. the account service: friends, presence, chat =="
 if command -v node >/dev/null 2>&1 && [ -f /root/jarvis/test/praesenzd.test.mjs ]; then
     if node /root/jarvis/test/praesenzd.test.mjs > "$TMPD/nd.txt" 2>&1; then
         NPP=$(grep -a 'PRAESENZD:' "$TMPD/nd.txt" | sed 's/.*: \([0-9]*\) passed.*/\1/')
@@ -159,7 +159,7 @@ if command -v node >/dev/null 2>&1 && [ -f /root/jarvis/test/praesenzd.test.mjs 
         MS=$(grep -a 'binnen 2 s' "$TMPD/nd.txt" | sed 's/.*gemessen: \([0-9]*\) ms.*/\1/')
         num "Praesenz beim Freund (ms)" "${MS:-9999}" lt 2000
     else
-        bad "der Laeufer des Kontodienstes ist rot"
+        bad "the runner of the account service is red"
         tail -20 "$TMPD/nd.txt" | sed 's/^/        /'
     fi
 else
@@ -167,7 +167,7 @@ else
 fi
 
 # =====================================================================
-echo "== 8. Justins Regel: nur wlib, keine festen Farben =="
+echo "== 8. Justin's rule: only wlib, no fixed colors =="
 # =====================================================================
 # 0 direkte Zeichenaufrufe ausserhalb wlib, 0 feste Farbwerte.
 UI=kernel/user/freunde.fi
@@ -183,9 +183,9 @@ printf 'fn x() { wlibc.rect(1,2,3,4, 0xff00ff) }\n' > "$TMPD/gegen.fi"
 GZ=$(grep -cE 'wlibc\.(rect|fill|text|blit|line|pixel|rring|glyph)' "$TMPD/gegen.fi" || true)
 GF=$(grep -cE '0x[0-9a-fA-F]{6}' "$TMPD/gegen.fi" || true)
 if [ "$GZ" -ge 1 ] && [ "$GF" -ge 1 ]; then
-    ok "Gegenprobe: der Waechter erkennt einen echten Verstoss"
+    ok "control run: the guard detects a real violation"
 else
-    bad "Gegenprobe: der Waechter erkennt nicht einmal einen echten Verstoss"
+    bad "control run: the guard does not even detect a real violation"
 fi
 MSGN=$(grep -c 'msg.get' "$UI" || true)
 num "Texte aus dem Sprachkatalog (msg.get)" "$MSGN" ge 5
@@ -199,7 +199,7 @@ DEU=$(grep -a '^freunde\.' locale/de/messages | grep -c 'ä\|ö\|ü\|ß' || true
 num "deutsche freunde-Texte mit echten Umlauten" "$DEU" ge 1
 
 # =====================================================================
-echo "== 9. kdata und die Schirmbilder =="
+echo "== 9. kdata and the screenshots =="
 # =====================================================================
 MM=$(python3 tools/kernel/memmap.py 2>&1 | tail -1)
 note "$MM"
@@ -238,7 +238,7 @@ if [ -f docs/shots/praesenz/leiste.ppm ]; then
         python3 -c "from PIL import Image; Image.open('docs/shots/praesenz/leiste.ppm').save('docs/shots/praesenz/leiste.png')" 2>/dev/null \
             && rm -f docs/shots/praesenz/leiste.ppm
     fi
-    ok "ein Schirmbild der Freundesleiste entstand"
+    ok "a screenshot of the friends bar was produced"
 else
     hin "kein Schirmbild (socat/monitor fehlt) -- kein Fehler dieser Runde"
 fi
@@ -265,7 +265,7 @@ E0=$(grep -a 'freunde: eintraege=' "$TMPD/o9b.klar" | head -1 | sed 's/.*eintrae
 is "und zeigt keine erfundenen Freunde" "${E0:-x}" "0"
 
 # =====================================================================
-echo "== 10. zwanzig Laeufe ohne Panik =="
+echo "== 10. twenty runs without panic =="
 # =====================================================================
 PANIK=0; LEER=0
 for n in $(seq 1 20); do

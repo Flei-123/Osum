@@ -56,7 +56,7 @@ for stufe in 0 1; do
     echo "== Stufe $stufe: firnc$stufe =="
     IMG="$TMPD/osum$stufe.mb"
     if ! bash tools/build-kernel.sh "$IMG" --stufe "$stufe" > "$TMPD/build$stufe.log" 2>&1; then
-        bad "firnc$stufe: der Kernel cannot be built"
+        bad "firnc$stufe: the kernel cannot be built"
         sed 's/^/        /' "$TMPD/build$stufe.log" | head -10
         continue
     fi
@@ -66,7 +66,7 @@ for stufe in 0 1; do
     rc=0
     run_kernel "$IMG" "$APPEND" "$OUT" || rc=$?
     if [ "$rc" -eq 21 ]; then
-        ok "firnc$stufe: der Kernel beendet sich selbst (21), keine Ausnahme"
+        ok "firnc$stufe: the kernel exits by itself (21), no exception"
     else
         bad "firnc$stufe: Beendigungscode $rc, erwartet 21"
         tail -20 "$OUT" | sed 's/^/        /'
@@ -91,15 +91,15 @@ for stufe in 0 1; do
 
     n=$(grep -acF "caps: 18/18 proofs" "$OUT")
     if [ "$n" -eq 2 ]; then
-        ok "firnc$stufe: beide Laeufe melden 18 von 18 Zusagen"
+        ok "firnc$stufe: both runs report 18 of 18 commitments"
     else
-        bad "firnc$stufe: $n Laeufe mit 18/18, erwartet 2"
+        bad "firnc$stufe: $n runs with 18/18, expected 2"
     fi
     n=$(grep -acF "cap: ring 3 exit=0" "$OUT")
     if [ "$n" -eq 2 ]; then
-        ok "firnc$stufe: beide Laeufe verlassen Ring 3 mit 0 gefallenen Zusagen"
+        ok "firnc$stufe: both runs leave ring 3 with 0 failed commitments"
     else
-        bad "firnc$stufe: $n Laeufe mit exit=0, erwartet 2"
+        bad "firnc$stufe: $n runs with exit=0, expected 2"
         grep -a 'cap: ring 3 exit=' "$OUT" | sed 's/^/        /'
     fi
 
@@ -108,14 +108,14 @@ for stufe in 0 1; do
     t2=$(echo "$zeile" | sed -n 's/.*t2=\([0-9]*\).*/\1/p')
     left=$(echo "$zeile" | sed -n 's/.*left=\([0-9]*\).*/\1/p')
     if [ "${t1:-x}" = "${t2:-y}" ]; then
-        ok "firnc$stufe: der zweite Prozess bekam denselben Platz ($t1)"
+        ok "firnc$stufe: the second process got the same slot ($t1)"
     else
-        bad "firnc$stufe: verschiedene Plaetze ($t1 / $t2) -- die Zusage misst nichts"
+        bad "firnc$stufe: different slots ($t1 / $t2) -- the commitment measures nothing"
     fi
     if [ "${left:-0}" -eq 16 ]; then
-        ok "firnc$stufe: der Vorgaenger liess 16 von 16 Handles stehen"
+        ok "firnc$stufe: the predecessor left 16 of 16 handles behind"
     else
-        bad "firnc$stufe: der Vorgaenger liess $left Handles stehen, erwartet 16"
+        bad "firnc$stufe: the predecessor left $left handles behind, expected 16"
     fi
 
     seiten=$(readelf -S "$IMG.elf" 2>/dev/null | grep -A1 '\.utext' | tail -1 \
@@ -124,26 +124,26 @@ for stufe in 0 1; do
         soll=$(( 0x$seiten / 4096 ))
         ist=$(grep -a '^proc: pages=' "$OUT" | head -1 | sed 's/.*=//')
         if [ "${ist:-0}" -eq "$soll" ]; then
-            ok "firnc$stufe: alle $soll Seiten von .utext sind abgebildet"
+            ok "firnc$stufe: all $soll pages of .utext are mapped"
         else
-            bad "firnc$stufe: $ist Seiten abgebildet, .utext hat $soll"
+            bad "firnc$stufe: $ist pages mapped, .utext has $soll"
         fi
         kacheln=$(( (soll * 4096 + 0x1FFFFF) / 0x200000 ))
         echo "        (.utext: $soll Seiten, $kacheln 2-MiB-Kachel(n))"
     fi
 
     if grep -qa 'cap: first .*differ=1' "$OUT"; then
-        ok "firnc$stufe: zwei Prozesse, derselbe Platz, verschiedene Handles"
+        ok "firnc$stufe: two processes, same slot, different handles"
     else
-        bad "firnc$stufe: die Handles zweier Prozesse sind gleich"
+        bad "firnc$stufe: the handles of two processes are equal"
         grep -a 'cap: first' "$OUT" | sed 's/^/        /'
     fi
 
     OHNE="$TMPD/ohne$stufe.txt"
     rc=0
     run_kernel "$IMG" "$APPEND_OHNE" "$OHNE" || rc=$?
-    [ "$rc" -eq 21 ] && ok "firnc$stufe: Gegenprobe ohne caps endet ebenfalls mit 21" \
-                     || bad "firnc$stufe: Gegenprobe ohne caps endet mit $rc"
+    [ "$rc" -eq 21 ] && ok "firnc$stufe: control run without caps also ends with 21" \
+                     || bad "firnc$stufe: control run without caps ends with $rc"
     has "$OHNE" "cap: skipped" "firnc$stufe: ohne das Wort caps wird der Abschnitt uebersprungen"
     hasnot "$OHNE" "caps: " "firnc$stufe: ohne caps meldet niemand Zusagen"
     hasnot "$OHNE" "cap: ring 3" "firnc$stufe: ohne caps laeuft kein Handle-Programm"
@@ -154,9 +154,9 @@ for stufe in 0 1; do
     saeubern "$OUT"  | sort > "$TMPD/a$stufe"
     saeubern "$OHNE" | sort > "$TMPD/b$stufe"
     if diff -q "$TMPD/a$stufe" "$TMPD/b$stufe" >/dev/null; then
-        ok "firnc$stufe: der uebrige Kernel verhaelt sich unveraendert"
+        ok "firnc$stufe: the rest of the kernel behaves unchanged"
     else
-        bad "firnc$stufe: der uebrige Kernel hat sich geaendert"
+        bad "firnc$stufe: the rest of the kernel changed"
         diff "$TMPD/a$stufe" "$TMPD/b$stufe" | head -10 | sed 's/^/        /'
     fi
 done
@@ -167,9 +167,9 @@ if [ -f "$TMPD/caps0.txt" ] && [ -f "$TMPD/caps1.txt" ]; then
         grep -aE '^  \[|^caps: ' "$TMPD/caps$f.txt" > "$TMPD/z$f"
     done
     if diff -q "$TMPD/z0" "$TMPD/z1" >/dev/null; then
-        ok "firnc0 und firnc1: Zeile fuer Zeile derselbe Bericht aus Ring 3"
+        ok "firnc0 and firnc1: the same report from ring 3, line for line"
     else
-        bad "firnc0 und firnc1 melden Verschiedenes"
+        bad "firnc0 and firnc1 report different things"
         diff "$TMPD/z0" "$TMPD/z1" | head -10 | sed 's/^/        /'
     fi
 fi

@@ -76,22 +76,22 @@ for smp in 1 4; do
     done
     [ "$pan" -eq 0 ] && ok "-smp $smp: 0 Panics in $LAEUFE Laeufen" \
                      || bad "-smp $smp: $pan Panics"
-    [ "$nullsum" -eq 0 ] && ok "-smp $smp: kein einziger Push ging verloren (null=0)" \
+    [ "$nullsum" -eq 0 ] && ok "-smp $smp: not a single push was lost (null=0)" \
                          || bad "-smp $smp: $nullsum Pushs brachten nichts hinueber"
     [ "$okpx" -eq "$LAEUFE" ] && ok "-smp $smp: px == soll in allen $LAEUFE Laeufen" \
-                              || bad "-smp $smp: px == soll nur in $okpx von $LAEUFE"
+                              || bad "-smp $smp: px == soll only in $okpx of $LAEUFE"
 done
 
-echo "== Gegenprobe: die Eingabe lebt noch =="
+echo "== control run: the input is still alive =="
 lauf 4 eing ja
 f="$ERG/s4-eing.txt"
 kl=$(pfl "$f" kl); bew=$(pfl "$f" bew); ta=$(pfl "$f" ta)
 echo "   Eingabepuls: kl=${kl:-?} bew=${bew:-?} ta=${ta:-?}"
-[ "${bew:-0}" -gt 0 ] 2>/dev/null && ok "die Maus bewegt noch etwas (bew=$bew)" \
+[ "${bew:-0}" -gt 0 ] 2>/dev/null && ok "the mouse still moves something (bew=$bew)" \
                                   || bad "keine Mausbewegung angekommen (bew=${bew:-?})"
 nl=$(fld "$f" null)
-[ "${nl:-99}" -eq 0 ] 2>/dev/null && ok "auch MIT Eingabe geht kein Push verloren" \
-                                  || bad "mit Eingabe gingen $nl Pushs verloren"
+[ "${nl:-99}" -eq 0 ] 2>/dev/null && ok "even WITH input no push is lost" \
+                                  || bad "WITH input $nl pushes were lost"
 
 echo
 echo "Abnahme: $pass ok, $fail NEIN"

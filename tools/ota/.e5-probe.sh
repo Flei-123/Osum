@@ -29,7 +29,7 @@ gleich() { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', erwartet '$
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hatnicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 zahl() { local n=$1 v=$2 o=$3 w=$4
-    if [ -z "${v:-}" ]; then bad "$n: keine Zahl (erwartet $o $w)"; return; fi
+    if [ -z "${v:-}" ]; then bad "$n: no number (expected $o $w)"; return; fi
     if [ "$v" -"$o" "$w" ] 2>/dev/null; then ok "$n: $v"; else bad "$n: $v, erwartet $o $w"; fi
 }
 
@@ -130,14 +130,14 @@ while [ "$i" -lt "$SCHUESSE" ]; do
     rc=$(lauf "en$i" "opk rebuild;/apps/hallo.osp/start;opk list;exit" 400)
     if [ "$rc" != 21 ]; then
         tot_n=$((tot_n+1))
-        bad "(e) Schuss $i bei ${MS} ms: die Maschine kommt NICHT mehr hoch (rc=$rc)"
+        bad "(e) shot $i at ${MS} ms: the machine does NOT come up again (rc=$rc)"
     elif grep -qa "paket-hallo fassung 2" "$OUT/en$i.txt"; then
         neu_n=$((neu_n+1))
     elif grep -qa "paket-hallo fassung 1" "$OUT/en$i.txt"; then
         alt_n=$((alt_n+1))
     else
         tot_n=$((tot_n+1))
-        bad "(e) Schuss $i bei ${MS} ms: WEDER die alte NOCH die neue Fassung laeuft"
+        bad "(e) shot $i at ${MS} ms: NEITHER the old NOR the new version runs"
     fi
 done
 zahl "(e) Schuesse, nach denen die Maschine ENTWEDER alt ODER neu ist" \
@@ -146,7 +146,7 @@ zahl "(e) davon: nichts dazwischen und kein Ziegelstein" "$tot_n" eq 0
 zahl "(e) Schuesse, die WIRKLICH nach dem Umschalten lagen (sonst misst das nichts)" \
      "$neu_n" gt 0
 zahl "(e) und Schuesse, die davor lagen" "$alt_n" gt 0
-echo "        alt=$alt_n  neu=$neu_n  kaputt=$tot_n  (Schuesse zwischen 500 und $E_MAX ms, verdichtet auf $E_S0..$E_S1 ms und $E_S1..$E_S2 ms)"
+echo "        old=$alt_n  new=$neu_n  broken=$tot_n  (shots between 500 and $E_MAX ms, condensed to $E_S0..$E_S1 ms and $E_S1..$E_S2 ms)"
 
 echo "  $pass gruen, $fail rot"
 [ "$fail" = 0 ] || exit 1

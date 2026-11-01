@@ -165,13 +165,13 @@ def main(argv):
         if open(argv[2], "rb").read() == want:
             print("symbol.osym, %d Oktette, gleich" % len(want))
             return 0
-        print("symbol: das Abbild traegt nicht die Oktette von %s (mit den Reihenbildern)" % argv[3])
+        print("symbol: the image does not carry the octets of %s (with the row images)" % argv[3])
         return 1
     if len(argv) >= 4 and argv[1] == "--pruefe":
         w, h, bild = zurueck(argv[2])
         palette, zeilen = lies(argv[3])
         if h != len(zeilen) or w != len(zeilen[0]):
-            print("symbol: %dx%d im Bild, %dx%d in der Zeichnung"
+            print("symbol: %dx%d in the image, %dx%d in the drawing"
                   % (w, h, len(zeilen[0]), len(zeilen)))
             return 1
         falsch = 0
@@ -180,9 +180,9 @@ def main(argv):
                 if bild[y][x] != palette[zeilen[y][x]]:
                     falsch += 1
         if falsch:
-            print("symbol: %d von %d Bildpunkten anders" % (falsch, w * h))
+            print("symbol: %d of %d pixels different" % (falsch, w * h))
             return 1
-        print("symbol: %dx%d, %d Bildpunkte, alle gleich" % (w, h, w * h))
+        print("symbol: %dx%d, %d pixels, all equal" % (w, h, w * h))
         return 0
     if len(argv) != 3:
         print(__doc__)

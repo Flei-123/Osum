@@ -10,7 +10,7 @@ FIRNC=${CERTUS_FIRNC:-/root/firnc-gc/compiler/target/release/firnc}
 BAU=${CERTUS_BAU:-$ROOT/.certus-bau}
 
 [ -d "$CERTUS_REPO/lib/browser" ] || {
-    echo "kein Certus-Baum in $CERTUS_REPO (CERTUS_REPO setzen)" >&2; exit 2; }
+    echo "no Certus tree in $CERTUS_REPO (set CERTUS_REPO)" >&2; exit 2; }
 [ -x "$FIRNC" ] || {
     echo "kein Uebersetzer: $FIRNC" >&2
     echo "  (cd $CERTUS_REPO/compiler && cargo build --release)" >&2; exit 2; }

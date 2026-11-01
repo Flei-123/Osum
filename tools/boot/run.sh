@@ -18,7 +18,7 @@ gleich() { # name gemessen erwartet
 for stufe in 0 1; do
     IMG="$TMPD/osum$stufe.mb"
     if ! bash tools/build-kernel.sh "$IMG" --stufe "$stufe" > "$TMPD/b$stufe.log" 2>&1; then
-        bad "firnc$stufe: der Kernel cannot be built"
+        bad "firnc$stufe: the kernel cannot be built"
         sed 's/^/        /' "$TMPD/b$stufe.log" | head -10
         continue
     fi
@@ -40,22 +40,22 @@ PY
 )
     set -- $KOPF
     if [ "$1" = "-1" ]; then
-        bad "firnc$stufe: kein Multiboot-Kopf in den ersten 8 KiB"
+        bad "firnc$stufe: no Multiboot header in the first 8 KiB"
         continue
     fi
     OFF=$1; MAGIE=$2; FLAGS=$3; SUMME=$4; MODUS=$5; TIEFE=$8
     if [ "$OFF" -lt 8192 ]; then
-        ok "firnc$stufe: Multiboot-Kopf bei Oktett $OFF (Grenze 8192)"
+        ok "firnc$stufe: Multiboot header at octet $OFF (limit 8192)"
     else
-        bad "firnc$stufe: Multiboot-Kopf bei Oktett $OFF -- zu weit hinten"
+        bad "firnc$stufe: Multiboot header at octet $OFF -- too far back"
     fi
     gleich "firnc$stufe: Magie" "$MAGIE" "0x1badb002"
     gleich "firnc$stufe: Pruefsumme geht auf" "$SUMME" "0"
     gleich "firnc$stufe: Flags" "$FLAGS" "0x7"
     if [ $(( $(printf '%d' "$FLAGS") & 4 )) -ne 0 ]; then
-        ok "firnc$stufe: Bit 2 gesetzt -- der Kern verlangt einen Bildschirm"
+        ok "firnc$stufe: bit 2 set -- the kernel requires a screen"
     else
-        bad "firnc$stufe: Bit 2 fehlt -- ein UEFI-Lader nimmt Textmodus an"
+        bad "firnc$stufe: bit 2 missing -- a UEFI loader assumes text mode"
     fi
     gleich "firnc$stufe: mode_type = linearer Rahmenpuffer" "$MODUS" "0"
     gleich "firnc$stufe: 32 Bit je Bildpunkt" "$TIEFE" "32"
@@ -68,15 +68,15 @@ PY
             -serial "file:$OUT" -display none -no-reboot \
             -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 || rc=$?
         [ "$rc" -eq 21 ] && ok "firnc$stufe: -kernel bootet weiterhin (21)" \
-                         || bad "firnc$stufe: -kernel endet mit $rc, erwartet 21"
+                         || bad "firnc$stufe: -kernel ends with $rc, expected 21"
         grep -qa '^mb: flags=' "$OUT" \
-            && ok "firnc$stufe: der Kern meldet die Flags des Laders" \
-            || bad "firnc$stufe: keine Flagmeldung des Laders"
+            && ok "firnc$stufe: the kernel reports the loader flags" \
+            || bad "firnc$stufe: no flag report from the loader"
         grep -qa '^mmap: ' "$OUT" \
-            && ok "firnc$stufe: die Speicherkarte kommt an" \
-            || bad "firnc$stufe: keine Speicherkarte"
+            && ok "firnc$stufe: the memory map arrives" \
+            || bad "firnc$stufe: no memory map"
     else
-        echo "  (qemu fehlt -- der Startversuch wird uebersprungen)"
+        echo "  (qemu missing -- the start attempt is skipped)"
     fi
 done
 

@@ -10,17 +10,17 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
 OUT=${1:?"Aufruf: cputab.sh <OUT eines ota/run.sh-Laufes>"}
-[ -d "$OUT" ] || { echo "$OUT gibt es nicht"; exit 1; }
+[ -d "$OUT" ] || { echo "$OUT does not exist"; exit 1; }
 [ -f "$OUT/basis.img" ] || {
     echo "$OUT/basis.img fehlt -- erst tools/ota/run.sh laufen lassen"; exit 1; }
 [ -f "$OUT/certs/srv.pem" ] || { echo "$OUT/certs fehlt"; exit 1; }
 [ -d "$OUT/netz2" ] || { echo "$OUT/netz2 fehlt"; exit 1; }
 [ -f tools/ota/server.py ] || {
-    echo "tools/ota/ fehlt -- dieses Skript braucht den Zweig 'ota'"; exit 1; }
+    echo "tools/ota/ missing -- this script needs the branch 'ota'"; exit 1; }
 
 PORT=${OTA_PORT:-$(grep -hao '10\.0\.2\.2:[0-9]*' "$OUT"/*.txt 2>/dev/null \
      | head -1 | cut -d: -f2)}
-[ -n "${PORT:-}" ] || { echo "Port nicht gefunden -- \$OTA_PORT setzen"; exit 1; }
+[ -n "${PORT:-}" ] || { echo "port not found -- set \$OTA_PORT"; exit 1; }
 NETZ=${OTA_NETZ:-"nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0"}
 
 SRVPID=""

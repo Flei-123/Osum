@@ -16,7 +16,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 gleich() { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', erwartet '$3'"; fi; }
 num() {
     local name=$1 wert=$2 op=$3 want=$4
-    if [ -z "$wert" ]; then bad "$name: keine Zahl (erwartet $op $want)"; return; fi
+    if [ -z "$wert" ]; then bad "$name: not a number (expected $op $want)"; return; fi
     if [ "$wert" -"$op" "$want" ] 2>/dev/null; then ok "$name: $wert"
     else bad "$name: $wert, erwartet $op $want"; fi
 }
@@ -34,11 +34,11 @@ neue_platte() {
     head -c $((${ZIEL_MIB:-256} * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
 }
 
-echo "== 1. die Karte, und das Format, das sich NICHT geaendert haben darf =="
+echo "== 1. the map, and the format that must NOT have changed =="
 
 k=$(python3 tools/kernel/memmap.py kernel 2>&1 | tail -1)
 echo "        $k"
-case "$k" in *"0 collisions"*) ok "kdata ohne Kollision" ;; *) bad "kdata: $k" ;; esac
+case "$k" in *"0 collisions"*) ok "kdata without collision" ;; *) bad "kdata: $k" ;; esac
 
 mkdir -p "$OUT/fmt"
 echo "hallo" > "$OUT/fmt/a.txt"
@@ -49,19 +49,19 @@ if [ -s "$OUT/fmt/mkfs-main.py" ]; then
     python3 tools/osum/mkfs.py build "$OUT/fmt/neu.img" 4096 /x/ \
         "/x/a=$OUT/fmt/a.txt" > /dev/null 2>&1
     if cmp -s "$OUT/fmt/alt.img" "$OUT/fmt/neu.img"; then
-        ok "ein Abbild ohne --karten ist Oktett fuer Oktett das von main ($(stat -c%s "$OUT/fmt/neu.img") Oktette)"
+        ok "an image without --maps is octet for octet that of main ($(stat -c%s "$OUT/fmt/neu.img") Oktette)"
     else
-        bad "das Abbild hat sich geaendert -- die Blockkarte ist keine Erweiterung, sondern ein neues Format"
+        bad "the image changed -- the block map is not an extension but a new format"
     fi
 else
-    bad "mkfs.py aus main nicht lesbar (kein git-Baum?)"
+    bad "mkfs.py from main not readable (no git tree?)"
 fi
 python3 tools/osum/mkfs.py build "$OUT/fmt/gross.img" 4096 --karten=8 /x/ \
     "/x/a=$OUT/fmt/a.txt" > /dev/null 2>&1
 if cmp -s "$OUT/fmt/neu.img" "$OUT/fmt/gross.img"; then
-    bad "--karten=8 aendert nichts -- der Vorrat wird nicht angelegt"
+    bad "--maps=8 changes nothing -- the reserve is not created"
 else
-    ok "--karten=8 legt einen anderen Baum an (Tabelle wandert)"
+    ok "--maps=8 creates a different tree (table moves)"
 fi
 kar=$(python3 - "$OUT/fmt/gross.img" <<'EOF'
 import struct, sys
@@ -73,7 +73,7 @@ EOF
 gleich "Superblock mit Vorrat (karten itab data)" "$kar" "8 9 41"
 
 echo
-echo "== 2. die Installation, und was der WIRT auf der Platte findet =="
+echo "== 2. the installation, and what the HOST finds on the disk =="
 
 bash tools/install/build.sh "$OUT" > "$OUT/bauen.log" 2>&1 || {
     echo "== bauen.sh fehlgeschlagen"; tail -20 "$OUT/bauen.log"; exit 1; }
@@ -85,9 +85,9 @@ rc=$(lauf trocken iso "install /dev/hda;exit" 600)
 gleich "Probelauf: Beendigungscode" "$rc" "21"
 hat "$OUT/trocken.txt" "install: dry run" "der Probelauf sagt, dass er nichts schreibt"
 if cmp -s "$OUT/ziel.img" "$OUT/leer.img"; then
-    ok "GEGENPROBE: ohne --ja ist die Platte Oktett fuer Oktett unberuehrt"
+    ok "CONTROL RUN: without --ja the disk is untouched octet for octet"
 else
-    bad "ohne --ja wurde geschrieben"
+    bad "without --ja something was written"
 fi
 
 rc=$(lauf inst iso "install /dev/hda --ja;exit" 900)
@@ -156,11 +156,11 @@ hat "$OUT/mdir.txt" "BOOTX64  EFI" "der Bootlader liegt unter /EFI/BOOT"
 mcopy -n -o -i "$OUT/ziel.img@@1048576" ::/osum.mb "$OUT/rueck-k.mb" 2>/dev/null
 mcopy -n -o -i "$OUT/ziel.img@@1048576" ::/EFI/BOOT/BOOTX64.EFI "$OUT/rueck-l.efi" 2>/dev/null
 if cmp -s "$OUT/k.mb" "$OUT/rueck-k.mb"; then
-    ok "der Kern auf der EFI-Partition ist Oktett fuer Oktett der gebaute ($(stat -c%s "$OUT/k.mb"))"
-else bad "der Kern auf der EFI-Partition weicht ab"; fi
+    ok "the kernel on the EFI partition is octet for octet the built one ($(stat -c%s "$OUT/k.mb"))"
+else bad "the kernel on the EFI partition differs"; fi
 LIM=${LIMINE_DIR:-/root/jarvis/projects/u_DiS4in7esMF1/orientos/vendor/limine}
 if cmp -s "$LIM/BOOTX64.EFI" "$OUT/rueck-l.efi"; then
-    ok "der Bootlader ist Oktett fuer Oktett der gebaute ($(stat -c%s "$LIM/BOOTX64.EFI"))"
+    ok "the boot loader is octet for octet the built one ($(stat -c%s "$LIM/BOOTX64.EFI"))"
 else bad "der Bootlader weicht ab"; fi
 
 python3 - "$OUT/ziel.img" 72048 "$OUT/wurzel.img" <<'EOF'
@@ -181,7 +181,7 @@ wb=$(grep -aoE 'blocks=[0-9]+' "$OUT/wurzel.txt" | head -1 | sed 's/.*=//')
 gleich "der Superblock der Partition nennt die gewachsene Groesse" "$wb" "$gro"
 
 echo
-echo "== 3. der Start VON DER PLATTE, ohne ISO und ohne Modul =="
+echo "== 3. the start FROM THE DISK, without ISO and without module =="
 
 rc=$(lauf boot platte "" 600)
 gleich "Start ueber OVMF von der Platte: Beendigungscode" "$rc" "21"
@@ -215,23 +215,23 @@ hatnicht "$OUT/roh.txt" "osum: from module" "und auch hier ohne Boot-Modul"
 mv -f "$OUT/kaputt.img" "$OUT/ziel.img"
 rc=$(lauf kaputt roh "" 600)
 if grep -qaF "osum: rootpart=" "$OUT/kaputt.txt"; then
-    bad "GEGENPROBE: mit falscher CRC32 wurde die Wurzel trotzdem gefunden"
+    bad "CONTROL RUN: with wrong CRC32 the root was found anyway"
 else
-    ok "GEGENPROBE: ein gekipptes Oktett im GPT-Kopf, und die Wurzel wird NICHT gefunden"
+    ok "CONTROL RUN: a flipped octet in the GPT header, and the root is NOT found"
 fi
 hat "$OUT/kaputt.txt" "part: gpt crc mismatch" "der Kern sagt, warum er die Tafel ablehnt"
 hat "$OUT/kaputt.txt" "osum: no ofs partition" "und dass er keine Wurzelpartition findet"
 cp -f "$OUT/ziel.img" "$OUT/kaputt-uefi.img"
 rc=$(lauf reparatur platte "" 600)
 if grep -qaF "osum: rootpart=" "$OUT/reparatur.txt"; then
-    ok "BEFUND: ueber OVMF startet dieselbe kaputte Platte -- die Firmware repariert den GPT aus der Sicherung"
+    ok "FINDING: via OVMF the same broken disk starts -- the firmware repairs the GPT from the backup"
 else
-    ok "ueber OVMF startet die kaputte Platte ebenfalls nicht"
+    ok "via OVMF the broken disk does not start either"
 fi
 mv -f "$OUT/gut.img" "$OUT/ziel.img"
 
 echo
-echo "== 4. dass Schreiben den Lauf ueberlebt =="
+echo "== 4. that writing survives the run =="
 
 rc=$(lauf schreib platte "echo diese-zeile-ueberlebt > /etc/beweis.txt;cat /etc/beweis.txt;exit" 600)
 gleich "Schreiben: Beendigungscode" "$rc" "21"
@@ -252,7 +252,7 @@ python3 tools/osum/mkfs.py cat "$OUT/wurzel2.img" /etc/beweis.txt > "$OUT/beweis
 hat "$OUT/beweis.txt" "diese-zeile-ueberlebt" "und der WIRT liest sie aus der Abbilddatei"
 
 echo
-echo "== 5. der Paketweg auf dem Geraet =="
+echo "== 5. the package path on the device =="
 
 h1=$(python3 -c "
 import sys
@@ -339,9 +339,9 @@ for ms in 300 700 1200 1800 2600 3600; do
     ver=$(grep -aoE 'paket-hallo fassung [0-9]' "$OUT/nach-$ms.txt" | head -1)
     if [ "$gestartet" = 1 ] && [ -n "$hh" ]; then
         heil=$((heil + 1))
-        ok "Stromausfall nach ${ms} ms: startet, Liste=$hh, laeuft: ${ver:-(nichts)}"
+        ok "power failure after ${ms} ms: starts, list=$hh, runs: ${ver:-(nothing)}"
     else
-        bad "Stromausfall nach ${ms} ms: gestartet=$gestartet Liste='${hh:-keiner}'"
+        bad "power failure after ${ms} ms: started=$gestartet list='${hh:-keiner}'"
     fi
 done
 num "Stromausfaelle, die das System ueberlebt hat" "$heil" eq "$ausfaelle"

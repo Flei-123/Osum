@@ -15,7 +15,7 @@ trap 'rm -rf "$W"' EXIT
 if [ -z "$BILD" ]; then
     BILD="$W/bild"
     bash tools/fremdfs/image.sh "$BILD" >/dev/null 2>&1 || {
-        echo "tempo: die Abbilder lassen sich nicht bauen"; exit 1; }
+        echo "tempo: the images cannot be built"; exit 1; }
 fi
 
 echo ">> bauen ..."
@@ -92,7 +92,7 @@ xs=[x for x in ['$a','$b','$c'] if x.isdigit()]
 print(min(int(x) for x in xs) if xs else 0)"
 }
 
-echo ">> messen (je drei Laeufe, der schnellste zaehlt) ..."
+echo ">> measure (three runs each, the fastest counts) ..."
 ms_ofs=$(best ofs "" "fftempo /gross.bin 2000000")
 ms_ext4=$(best ext4 "$W/e.img" "mount /dev/hdb1 /mnt ext4 -r;fftempo /mnt/gross.bin 2000000")
 ms_ntfs=$(best ntfs "$W/n.img" "mount /dev/hdb1 /mnt ntfs -r;fftempo /mnt/gross.bin 2000000")
@@ -103,4 +103,4 @@ printf '%-8s %8s %10s\n' "ofs"  "$ms_ofs"  "$(mbs "$ms_ofs")"
 printf '%-8s %8s %10s\n' "ext4" "$ms_ext4" "$(mbs "$ms_ext4")"
 printf '%-8s %8s %10s\n' "ntfs" "$ms_ntfs" "$(mbs "$ms_ntfs")"
 echo
-echo "2000000 Oktette am Stueck, Puffer 4096 Oktette, accel=$OSUM_QEMU_ACCEL"
+echo "2000000 octets in one go, buffer 4096 octets, accel=$OSUM_QEMU_ACCEL"

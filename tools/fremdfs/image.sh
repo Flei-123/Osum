@@ -30,14 +30,14 @@ HILF=$(mktemp -d)
 trap 'rm -rf "$BAUM" "$HILF"' EXIT
 
 if ! gcc -O2 -o "$HILF/ntfsbaum" tools/fremdfs/ntfsbaum.c -lntfs-3g 2>"$HILF/gcc.log"; then
-    echo "image.sh: ntfsbaum.c laesst sich nicht uebersetzen (ntfs-3g-dev fehlt?)"
+    echo "image.sh: ntfsbaum.c cannot be compiled (ntfs-3g-dev missing?)"
     sed 's/^/    /' "$HILF/gcc.log" | head -10
     exit 2
 fi
 
 # ------------------------------------------------------------ der Baum
 #
-echo "bild: den Baum bauen ..."
+echo "image: building the tree ..."
 printf 'hallo aus dem Gast\n' > "$BAUM/hallo.txt"
 : > "$BAUM/leer.bin"
 python3 - "$BAUM/mittel.bin" 204800 <<'PYEOF'
@@ -133,7 +133,7 @@ ext4_bauen() { # datei blockgroesse mibs journal(0/1)
     e2fsck -fyD "$img" >"$HILF/fsck.log" 2>&1
     local rc=$?
     if [ $rc -gt 1 ]; then
-        echo "bild: e2fsck meldet $rc auf $img"
+        echo "image: e2fsck reports $rc on $img"
         sed 's/^/    /' "$HILF/fsck.log" | tail -8
         return 1
     fi
@@ -147,13 +147,13 @@ echo "bild: ext4 (4096er Bloecke) ..."
 ext4_bauen "$AUS/ext4-4k.img" 4096 48 0 || exit 3
 
 tiefe=$(python3 tools/fremdfs/ext4info.py tiefe "$AUS/ext4.img" gross.bin 2>/dev/null)
-echo "bild: Extent-Baumtiefe von gross.bin (1024er): ${tiefe:-?}"
+echo "image: extent tree depth of gross.bin (1024 blocks): ${tiefe:-?}"
 printf '%s\n' "${tiefe:-0}" > "$AUS/ext4-tiefe.txt"
 extents=$(python3 tools/fremdfs/ext4info.py extents "$AUS/ext4.img" gross.bin 2>/dev/null)
 printf '%s\n' "${extents:-0}" > "$AUS/ext4-extents.txt"
 htree=$(python3 tools/fremdfs/ext4info.py htree "$AUS/ext4.img" viele 2>/dev/null)
 printf '%s\n' "${htree:-0}" > "$AUS/ext4-htree.txt"
-echo "bild: gross.bin hat ${extents:-?} Extents; /viele ist htree=${htree:-?}"
+echo "image: gross.bin has ${extents:-?} extents; /viele is htree=${htree:-?}"
 
 echo "bild: ext4 unsauber (Journal, needs_recovery) ..."
 ext4_bauen "$AUS/ext4-schmutzig.img" 1024 48 1 || exit 3
@@ -170,7 +170,7 @@ with open(sys.argv[1], 'r+b') as f:
 PY
 
 # ---------------------------------------------------------- Gegenproben
-echo "bild: die Gegenproben ..."
+echo "image: the control runs ..."
 # 1. kaputte Magie: 0xEF53 bei 1024+0x38 zerstoert.
 cp --sparse=always "$AUS/ext4.img" "$AUS/kaputt-ext4.img"
 printf '\x00\x00' | dd of="$AUS/kaputt-ext4.img" bs=1 seek=$((1024 + 0x38)) \
@@ -214,12 +214,12 @@ if command -v ntfscat >/dev/null 2>&1; then
         ist=$(ntfscat "$AUS/ntfs.img" "/$pfad" 2>/dev/null | sha256sum | cut -d' ' -f1)
         [ "$ist" = "$summe" ] || { nfehl=$((nfehl+1)); echo "    ntfs abweichung: $pfad"; }
     done < <(head -20 "$AUS/baum.sha")
-    echo "bild: NTFS-Gegenlesung mit ntfscat: $nfehl Abweichungen (von 20)"
+    echo "image: NTFS cross-read with ntfscat: $nfehl deviations (of 20)"
 fi
 
 # NTFS-Gegenprobe: zerstoerte Kennung "NTFS    " bei +3.
 cp --sparse=always "$AUS/ntfs.img" "$AUS/kaputt-ntfs.img"
 printf 'XXXX' | dd of="$AUS/kaputt-ntfs.img" bs=1 seek=3 conv=notrunc status=none
 
-echo "bild: fertig in $AUS"
+echo "image: done in $AUS"
 ls -la "$AUS" | sed 's/^/  /'

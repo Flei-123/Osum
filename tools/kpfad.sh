@@ -7,7 +7,7 @@ declare -A _KPFAD_CACHE 2>/dev/null || true
 kfi() {
     local name=${1:-}
     if [[ -z $name ]]; then
-        echo "kfi: ohne Modulnamen aufgerufen" >&2
+        echo "kfi: called without a module name" >&2
         return 1
     fi
     if [[ -n ${_KPFAD_CACHE[$name]:-} ]]; then

@@ -48,7 +48,7 @@ echo "== 1. bauen: Kern, Programme, Wurzelplatte =="
 
 KERN="$TMPD/k.mb"
 ./tools/build-kernel.sh "$KERN" > "$TMPD/build.log" 2>&1 \
-    && ok "der Kern steht ($(stat -c%s "$KERN") Oktette)" \
+    && ok "the kernel is there ($(stat -c%s "$KERN") Oktette)" \
     || { bad "the kernel cannot be built"; tail -20 "$TMPD/build.log"; exit 1; }
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null
@@ -68,10 +68,10 @@ for p in $PROGS; do
     fi
 done
 num "Programme gebaut" "$gebaut" ge 13
-[ -f "$TMPD/ctr" ] && ok "das Werkzeug /bin/ctr ist dabei" \
-    || bad "/bin/ctr fehlt -- ohne das Werkzeug misst diese Runde nichts"
-[ -f "$TMPD/stress" ] && ok "die Messsonde /bin/stress ist dabei" \
-    || bad "/bin/stress fehlt -- ohne sie ist die Speichergrenze nicht messbar"
+[ -f "$TMPD/ctr" ] && ok "the tool /bin/ctr is included" \
+    || bad "/bin/ctr is missing -- without the tool this round measures nothing"
+[ -f "$TMPD/stress" ] && ok "the probe /bin/stress is included" \
+    || bad "/bin/stress is missing -- without it the memory limit cannot be measured"
 
 echo 'WIRT-GEHEIM-7731' > "$TMPD/wirt-geheim"
 echo 'CONTAINER-EIGEN-4242' > "$TMPD/eigen"
@@ -116,7 +116,7 @@ BASE="osum vfs gfx nosched noproc"
 #
 
 echo
-echo "== 2. GEGENPROBE VORAB: im WIRT ist alles sichtbar =="
+echo "== 2. CONTROL RUN FIRST: in the HOST everything is visible =="
 
 lauf wirt "$BASE script=cat /etc/wirt-geheim;cat /etc/wirt2;ctr list"
 S="$TMPD/wirt.txt"
@@ -127,7 +127,7 @@ hat_nicht "$S" "panic" "kein Absturz"
 hat_nicht "$S" "EXCEPTION" "keine Ausnahme"
 
 echo
-echo "== 3. STUFE 1: EIGENE WURZEL -- die vier Ausbruchswege =="
+echo "== 3. STAGE 1: OWN ROOT -- the four breakout paths =="
 
 CMD='ctr create eins /c/eins'
 CMD="$CMD;ctr list"
@@ -155,7 +155,7 @@ hat_nicht "$S" "panic" "kein Absturz durch die Ausbruchsversuche"
 hat_nicht "$S" "EXCEPTION" "keine Ausnahme"
 
 echo
-echo "== 4. STUFE 2: DIE SPEICHERGRENZE -- sie greift, und der Wirt lebt =="
+echo "== 4. STAGE 2: THE MEMORY LIMIT -- it bites, and the host lives =="
 #
 
 CMD='ctr create eins /c/eins'
@@ -242,7 +242,7 @@ hat "$S" "ctr-drin-gezaehlt" "die Zaehlung im Container lief"
 # ============================================== 6. die Einbahnstrassen
 
 echo
-echo "== 6. DIE EINBAHNSTRASSEN: Grenzen werden nur kleiner =="
+echo "== 6. THE ONE-WAY STREETS: limits only get smaller =="
 #
 
 CMD='ctr create eins /c/eins'
@@ -271,7 +271,7 @@ hat "$S" "/c/eins" "die Wurzel steht weiter auf /c/eins"
 hat_nicht "$S" "panic" "kein Absturz"
 
 echo
-echo "== 7. die Zahlen, die der KERN selbst meldet =="
+echo "== 7. the numbers the KERNEL reports itself =="
 
 cr=$(zahl "$TMPD/einbahn.txt" 'ctr: count ')
 num "der Kern zaehlt die angelegten Container" "${cr:-0}" ge 1

@@ -41,18 +41,18 @@ for w in mkfs.vfat mcopy mdir mtype sfdisk qemu-system-x86_64; do
     command -v "$w" >/dev/null 2>&1 || { echo "HOTPLUG: uebersprungen, $w fehlt"; exit 0; }
 done
 qemu-system-x86_64 -device help 2>&1 | grep -q 'qemu-xhci' || {
-    echo "HOTPLUG: uebersprungen, dieses QEMU kennt qemu-xhci nicht"; exit 0; }
+    echo "HOTPLUG: skipped, this QEMU does not know qemu-xhci"; exit 0; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
     [ -x "$FIRNC" ] || { echo "HOTPLUG: kein firnc"; exit 1; }; }
 
 # ============================================== 1. bauen
 
-echo "== 1. bauen: Kern, Programme, Wurzelplatte, zwei Sticks =="
+echo "== 1. build: kernel, programs, root disk, two sticks =="
 
 KERN="$ARB/k.mb"
 ./tools/build-kernel.sh "$KERN" > "$ARB/build.log" 2>&1 \
-    && ok "der Kern steht ($(stat -c%s "$KERN") Oktette)" \
+    && ok "the kernel is up ($(stat -c%s "$KERN") Oktette)" \
     || { bad "the kernel cannot be built"; tail -5 "$ARB/build.log"; exit 1; }
 
 as --64 -o "$ARB/crt.o" kernel/user/crt.s 2>/dev/null
@@ -96,7 +96,7 @@ SF
 stick_bauen "$ARB/stick1.img" STICK1 "von linux auf den ersten stick"
 stick_bauen "$ARB/stick2.img" STICK2 "und dies ist der zweite"
 [ -s "$ARB/stick1.img" ] && [ -s "$ARB/stick2.img" ] \
-    && ok "zwei FAT32-Sticks mit MBR-Tafel und je einer Datei des Wirts" \
+    && ok "two FAT32 sticks with MBR table and one host file each" \
     || bad "die Stickabbilder fehlen"
 
 rm -f "$ARB/fremd.img" "$ARB/fremd.part"
@@ -109,7 +109,7 @@ dd if=/dev/zero of="$ARB/fremd.part" bs=1M count=30 status=none
 mkfs.vfat -F16 -n FREMD "$ARB/fremd.part" >/dev/null 2>&1
 dd if="$ARB/fremd.part" of="$ARB/fremd.img" bs=512 seek=2048 conv=notrunc status=none
 rm -f "$ARB/fremd.part"
-ok "dazu ein Stick mit FAT16 -- das Dateisystem, das dieser Kern NICHT kann"
+ok "plus a stick with FAT16 -- the file system this kernel can NOT handle"
 
 # ============================================== der Laeufer
 
@@ -127,7 +127,7 @@ lauf() { # <name> <kommandozeile> <drehbuch> [qemu-args...]
 # ============================================== 2. anstecken im Betrieb
 
 echo
-echo "== 2. der Stick kommt, WAEHREND die Maschine laeuft =="
+echo "== 2. the stick arrives WHILE the machine runs =="
 
 cat > "$ARB/dreh-an.txt" <<EOF
 aufzeile k17: hold
@@ -149,7 +149,7 @@ num "Anstecken im Betrieb gezaehlt" "${hp:-0}" ge 1
 # ============================================== 3. lesen, schreiben, auswerfen
 
 echo
-echo "== 3. die Datei des Wirts lesen, eine eigene schreiben, auswerfen =="
+echo "== 3. read the host's file, write one of its own, eject =="
 
 cat > "$ARB/dreh-rw.txt" <<EOF
 aufzeile k17: hold
@@ -171,28 +171,28 @@ hat "$S" "ejected: " "und wirft ihn aus"
 OFF=$((2048*512))
 STK="$ARB/stick1.img"
 if mdir -i "$STK@@$OFF" ::osum.txt > "$ARB/mdir1.txt" 2>&1; then
-    ok "DER WIRT findet die Datei, die Osum geschrieben hat"
+    ok "THE HOST finds the file Osum wrote"
     mtype -i "$STK@@$OFF" ::osum.txt > "$ARB/osum.txt" 2>/dev/null
     if grep -qa 'osum-war-hier' "$ARB/osum.txt"; then
-        ok "und ihr Inhalt ist vollstaendig ($(tr -d '\r\n' < "$ARB/osum.txt"))"
+        ok "and its content is complete ($(tr -d '\r\n' < "$ARB/osum.txt"))"
     else
-        bad "die Datei ist da, aber ihr Inhalt stimmt nicht: $(head -c 80 "$ARB/osum.txt")"
+        bad "the file is there, but its content is wrong: $(head -c 80 "$ARB/osum.txt")"
     fi
 else
-    bad "DER WIRT findet die geschriebene Datei NICHT"
+    bad "THE HOST does NOT find the written file"
     sed 's/^/        /' "$ARB/mdir1.txt" | head -3
 fi
 if command -v fsck.fat >/dev/null 2>&1; then
     if fsck.fat -n "$STK@@$OFF" > "$ARB/fsck1.txt" 2>&1 \
        || ! grep -qai 'dirty\|corrupt\|error' "$ARB/fsck1.txt"; then
-        ok "fsck.fat findet nach dem Auswerfen keinen Schaden"
+        ok "fsck.fat finds no damage after ejecting"
     else
         bad "fsck.fat meldet Schaden"; sed 's/^/        /' "$ARB/fsck1.txt" | head -5
     fi
 fi
 
 echo
-echo "== 4. GEGENPROBE: abziehen, ohne auszuwerfen =="
+echo "== 4. CONTROL RUN: pull out without ejecting =="
 
 cat > "$ARB/dreh-weg.txt" <<EOF
 aufzeile k17: hold
@@ -216,7 +216,7 @@ num "Abziehen im Betrieb gezaehlt" "${up:-0}" ge 1
 # ============================================== 5. zwei Sticks
 
 echo
-echo "== 5. ZWEI STICKS GLEICHZEITIG -- beide eingehaengt, beide beschrieben =="
+echo "== 5. TWO STICKS AT THE SAME TIME -- both mounted, both written =="
 #
 
 cat > "$ARB/dreh-zwei.txt" <<EOF
@@ -256,12 +256,12 @@ zwei_pruef() { # <abbild> <datei> <inhalt> <wie>
     if mdir -i "$img@@$OFF" "::$datei" > "$ARB/mdir-$wie.txt" 2>&1; then
         mtype -i "$img@@$OFF" "::$datei" > "$ARB/inh-$wie.txt" 2>/dev/null
         if grep -qa "$inhalt" "$ARB/inh-$wie.txt"; then
-            ok "DER WIRT findet $datei auf $wie, Inhalt vollstaendig ($inhalt)"
+            ok "THE HOST finds $datei on $wie, content complete ($inhalt)"
         else
-            bad "$datei liegt auf $wie, aber der Inhalt stimmt nicht: $(head -c 80 "$ARB/inh-$wie.txt")"
+            bad "$datei is on $wie, but the content is wrong: $(head -c 80 "$ARB/inh-$wie.txt")"
         fi
     else
-        bad "DER WIRT findet $datei NICHT auf $wie"
+        bad "THE HOST does NOT find $datei on $wie"
         sed 's/^/        /' "$ARB/mdir-$wie.txt" | head -3
     fi
 }
@@ -269,14 +269,14 @@ zwei_pruef "$ARB/stick1.img" a.txt eins-auf-usb0 stick1
 zwei_pruef "$ARB/stick2.img" b.txt zwei-auf-usb1 stick2
 
 if mdir -i "$ARB/stick2.img@@$OFF" ::a.txt >/dev/null 2>&1; then
-    bad "a.txt liegt AUCH auf stick2 -- die Traeger zeigen auf dieselben Bloecke"
+    bad "a.txt is ALSO on stick2 -- the carriers point to the same blocks"
 else
-    ok "a.txt liegt NICHT auf stick2 (keine Verwechslung)"
+    ok "a.txt is NOT on stick2 (no mix-up)"
 fi
 if mdir -i "$ARB/stick1.img@@$OFF" ::b.txt >/dev/null 2>&1; then
-    bad "b.txt liegt AUCH auf stick1 -- die Traeger zeigen auf dieselben Bloecke"
+    bad "b.txt is ALSO on stick1 -- the carriers point to the same blocks"
 else
-    ok "b.txt liegt NICHT auf stick1 (keine Verwechslung)"
+    ok "b.txt is NOT on stick1 (no mix-up)"
 fi
 
 if command -v fsck.fat >/dev/null 2>&1; then
@@ -294,7 +294,7 @@ fi
 # ============================================== 6. fremdes Dateisystem
 
 echo
-echo "== 6. GEGENPROBE: ein Dateisystem, das dieser Kern nicht kann =="
+echo "== 6. CONTROL RUN: a file system this kernel cannot handle =="
 
 cat > "$ARB/dreh-fremd.txt" <<EOF
 aufzeile k17: hold

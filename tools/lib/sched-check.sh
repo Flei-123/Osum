@@ -69,7 +69,7 @@ LEOF
     )
 }
 
-echo "== Stub-Pruefung der Parallelmaschinerie =="
+echo "== stub check of the parallel machinery =="
 echo
 
 s=$(date +%s%N); A=$(lauf_einen 1); e=$(date +%s%N); MS1=$(( (e-s)/1000000 ))
@@ -81,7 +81,7 @@ melde() { if [ "$1" = ok ]; then echo "  OK    $2"; else echo "  FAIL  $2"; FEHL
 # 1. schneller
 echo "  seriell (OSUM_JOBS=1): $MS1 ms"
 echo "  parallel (OSUM_JOBS=4): $MS4 ms"
-[ "$MS4" -lt "$MS1" ] && melde ok "parallel ist schneller als seriell" \
+[ "$MS4" -lt "$MS1" ] && melde ok "parallel is faster than serial" \
                       || melde no "parallel ist NICHT schneller ($MS4 >= $MS1)"
 
 # 2. gleiche Bilanz
@@ -92,13 +92,13 @@ echo "  parallel: $b4"
 [ "$b1" = "$b4" ] && melde ok "beide Wege liefern dieselbe Bilanz" \
                   || melde no "die Bilanzen weichen ab"
 [ "$b1" = "BILANZ PASS=6 FAIL=1 ZUSAGEN=45" ] \
-    && melde ok "und es ist die erwartete Bilanz (6/1/45)" \
+    && melde ok "and it is the expected tally (6/1/45)" \
     || melde no "die serielle Bilanz ist nicht 6/1/45: $b1"
 
 # 3. Reihenfolge
 o1=$(printf '%s\n' "$A" | grep -oE '^== s[0-9]' | tr -d '\n')
 o4=$(printf '%s\n' "$B" | grep -oE '^== s[0-9]' | tr -d '\n')
-[ "$o1" = "$o4" ] && melde ok "die Ausgabereihenfolge ist identisch" \
+[ "$o1" = "$o4" ] && melde ok "the output order is identical" \
                   || melde no "die Reihenfolge weicht ab"
 
 python3 - "$STUB/.w4" <<'PYEOF'
@@ -112,16 +112,16 @@ for n in ('s3', 's4'):
     sp[n] = (a, e)
 (a1, e1), (a2, e2) = sp['s3'], sp['s4']
 if e1 <= a2 or e2 <= a1:
-    print("  OK    die zwei Netz-Abschnitte ueberschnitten sich nie "
+    print("  OK    the two network sections never overlapped "
           "(Zeitspur nachgerechnet)")
 else:
-    print("  FAIL  die zwei Netz-Abschnitte liefen GLEICHZEITIG")
+    print("  FAIL  the two network sections ran AT THE SAME TIME")
     sys.exit(1)
 PYEOF
 [ $? -eq 0 ] || FEHLER=$((FEHLER+1))
 
 if printf '%s\n' "$B" | grep -q 'Warten auf die Netzsperre'; then
-    melde ok "die Wartezeit an der Netzsperre steht getrennt in der Zeile"
+    melde ok "the wait at the network lock is listed separately in the line"
     printf '%s\n' "$B" | grep 'Warten auf die Netzsperre' | sed 's/^/        /'
 else
     melde no "die Wartezeit an der Netzsperre wird NICHT ausgewiesen"
@@ -130,7 +130,7 @@ fi
 for x in "$A" "$B"; do
     printf '%s\n' "$x" | grep -q 'FEHLER  tools/s5/run.sh' || FEHLER=$((FEHLER+1))
 done
-[ "$FEHLER" -eq 0 ] && melde ok "der absichtlich rote Stub ist in beiden rot"
+[ "$FEHLER" -eq 0 ] && melde ok "the deliberately red stub is red in both"
 
 echo
 if [ "$FEHLER" -eq 0 ]; then

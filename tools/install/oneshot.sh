@@ -98,7 +98,7 @@ else
             fi
         } > "$OUT/$NAME.conf"
         mcopy -o -i "$OUT/ziel.img@@1048576" "$OUT/$NAME.conf" ::/limine.conf \
-            || { echo "mcopy auf die EFI-Partition fehlgeschlagen" >&2; exit 2; }
+            || { echo "mcopy onto the EFI partition failed" >&2; exit 2; }
     fi
     OVMF=$(ls /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -1)
     VARS="$OUT/$NAME.vars.fd"

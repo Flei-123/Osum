@@ -46,7 +46,7 @@ fi
 echo "== 1. bauen =="
 if [ -z "$KERN" ]; then
     if bash tools/usbimg/build.sh "$TMPD/bau" > "$TMPD/build.txt" 2>&1; then
-        ok "tools/usbimg/build.sh laeuft durch (Kern, Wurzel, limine.conf)"
+        ok "tools/usbimg/build.sh runs through (kernel, root, limine.conf)"
     else
         bad "das Abbild cannot be built"
         tail -20 "$TMPD/build.txt"
@@ -64,7 +64,7 @@ if [ -z "$KERN" ]; then
     fi
     grep -E '^/' "$TMPD/bau/limine.conf" | sed 's|^/*||' | sed 's/^/       /'
 else
-    ok "Kern und Wurzel uebergeben: $KERN, $ROOT"
+    ok "kernel and root handed over: $KERN, $ROOT"
 fi
 
 echo
@@ -78,7 +78,7 @@ bash tools/metal2/lauf.sh "$TMPD/C" "$KERN" "$ROOT" "$SEK" 1 "mausflut=4000" \
 wait
 
 echo
-echo "== 3. A: die QMP-Maus =="
+echo "== 3. A: the QMP mouse =="
 A="$TMPD/A"
 sed 's/^/       /' "$A/maus.txt"
 grep -a '^[247] \|^16 \|^23 ' "$A/tafel.txt" | sed 's/^/       /'
@@ -114,10 +114,10 @@ if [ -n "$tx" ] && [ -f "$A/shot.ppm" ]; then
     if [ $? -eq 0 ]; then
         ok "der Titel 'Terminal -- sh' steht vollstaendig im Bild bei $tx,$tb -- $aus"
     else
-        bad "der Titel stimmt im Bild nicht: $aus"
+        bad "the title in the image is wrong: $aus"
     fi
 else
-    bad "kein Titelort (wm: fen tx=) oder kein Bild"
+    bad "no title location (wm: fen tx=) or no image"
 fi
 
 W=$(grep -a '^wm: fen i=0 ' "$A/serial.txt" | tail -1)
@@ -142,12 +142,12 @@ print(n)
 PY
 )
     if [ "${tinte:-999}" -le 200 ]; then
-        ok "keine Messzeilen rechts von Spalte 22 im Terminal (Tinte $tinte, nur der Zeiger)"
+        ok "no measurement lines right of column 22 in the terminal (ink $tinte, only the pointer)"
     else
-        bad "Tinte rechts von Spalte 22 im Terminal (Messzeilen): $tinte (erwartet <= 200)"
+        bad "ink right of column 22 in the terminal (measurement lines): $tinte (expected <= 200)"
     fi
 else
-    bad "keine Fenstergeometrie fuer das Terminal"
+    bad "no window geometry for the terminal"
 fi
 
 for lauf in B C; do
@@ -166,13 +166,13 @@ for lauf in B C; do
 done
 
 echo
-echo "== 5. der Zeitgeber (Zeile 16), zur Einordnung =="
+echo "== 5. the timer (line 16), for classification =="
 for lauf in A B C; do
     printf '       %s: %s\n' "$lauf" "$(grep -a '^16 ' "$TMPD/$lauf/tafel.txt" | tail -1)"
 done
-echo "       VERL sind Marken, die der Zyklenzaehler nachtragen musste; LM sagt, in welcher"
-echo "       Sekunde zuletzt. Unter KVM kommt das vom Wirt (der Kern traegt LAPIC-Marken nicht"
-echo "       nach, wenn der vCPU steht); die Uhr bleibt richtig (Zeile 19 RTC == KRN)."
+echo "       VERL are marks that the cycle counter had to catch up; LM says in which"
+echo "       second last. Under KVM this comes from the host (the kernel does not catch up"
+echo "       LAPIC marks when the vCPU is stopped); the clock stays right (line 19 RTC == KRN)."
 
 echo
 echo "Bilder: $TMPD/A/shot.png  $TMPD/B/shot.png  $TMPD/C/shot.png"

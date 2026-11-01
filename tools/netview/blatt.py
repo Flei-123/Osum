@@ -62,7 +62,7 @@ def main(argv):
     try:
         from PIL import Image
     except ImportError:
-        print("blatt: Pillow ist nicht da")
+        print("sheet: Pillow is not there")
         return 1
     namen = iconmod.ZUSTAENDE + iconmod.MERKMALE + iconmod.SYSTEM
     bloecke = []
@@ -99,7 +99,7 @@ def main(argv):
         blatt.paste(b, (0, y))
         y += b.height
     blatt.save(argv[1])
-    print("blatt: %s  %dx%d, %d Zeichen, hell und dunkel"
+    print("sheet: %s  %dx%d, %d characters, light and dark"
           % (argv[1], breite, hoehe, len(namen)))
     return 0
 

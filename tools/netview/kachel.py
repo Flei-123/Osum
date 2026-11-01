@@ -162,7 +162,7 @@ def main(argv):
             for f in fehler:
                 print("FALSCH " + f)
             return 1
-        print("ok %d Kacheln, nichts laeuft ueber und nichts klebt" % len(rects))
+        print("ok %d tiles, nothing overflows and nothing sticks" % len(rects))
         return 0
     if len(argv) < 12:
         print(__doc__)
@@ -178,7 +178,7 @@ def main(argv):
         return (roh[at], roh[at + 1], roh[at + 2])
 
     if px + pw > w or py + ph > h:
-        print("das Panel bei %d,%d %dx%d liegt nicht auf einem %dx%d-Schirm"
+        print("the panel at %d,%d %dx%d does not lie on a %dx%d screen"
               % (px, py, pw, ph, w, h))
         return 1
     kacheln = []
@@ -193,7 +193,7 @@ def main(argv):
         for f in fehler:
             print("FALSCH " + f)
         return 1
-    print("ok %d Kacheln, nichts laeuft ueber und nichts klebt" % n)
+    print("ok %d tiles, nothing overflows and nothing sticks" % n)
     return 0
 
 

@@ -17,7 +17,7 @@ for t in qemu-system-x86_64 ip node python3 gcc openssl; do
     command -v "$t" >/dev/null 2>&1 || { echo "ECHT: uebersprungen, $t fehlt"; exit 0; }
 done
 [ -f "$JARVIS/server.js" ] || { echo "ECHT: uebersprungen, $JARVIS/server.js fehlt"; exit 0; }
-[ -f "$JARVIS/lib/osumbridge.js" ] || { echo "ECHT: uebersprungen, der Adapter fehlt"; exit 0; }
+[ -f "$JARVIS/lib/osumbridge.js" ] || { echo "REAL: skipped, the adapter is missing"; exit 0; }
 
 NS=echt-$$
 V0=e0-$$
@@ -52,13 +52,13 @@ if [ ! -f "$W/certs/good.pem" ]; then
 fi
 cp "$W/certs/good.pem" "$W/certs/srv.pem"
 cp "$W/certs/good.key" "$W/certs/srv.key"
-ok "die Zertifikatskette kommt aus tools/hwnet/mkcerts.py (Name jarvis.test, SAN 10.9.0.1)"
+ok "the certificate chain comes from tools/hwnet/mkcerts.py (name jarvis.test, SAN 10.9.0.1)"
 
 # ------------------------------------------------- 2. Osums Abbild
 if [ ! -f "$W/k.mb" ] || [ -n "${ECHT_BAU:-}" ]; then
     BRIDGE_PROGS="sh ls cat echo chmod sleep jsig jarvisctl" \
         bash tools/bridge/build.sh "$W" 0 >"$W/bau.txt" 2>&1 || {
-        echo "ECHT: der Bau ist gescheitert"; tail -6 "$W/bau.txt"; exit 1; }
+        echo "REAL: the build failed"; tail -6 "$W/bau.txt"; exit 1; }
 fi
 K="$W/k.mb"
 ok "$(tail -1 "$W/bau.txt")"
@@ -124,7 +124,7 @@ fs.writeFileSync('$D/data/users.json', JSON.stringify({users:{u_pruef:{
   id:'u_pruef', username:'osumpruef', passHash:hashPassword('Pr8fst4nd!xy'),
   email:'osum@test.invalid', deviceToken:'pruef', createdAt:Date.now(),
   settings:{}, admin:true}}}, null, 2))
-" || { echo "ECHT: das Pruefkonto liess sich nicht anlegen"; exit 1; }
+" || { echo "REAL: the test account could not be created"; exit 1; }
 
 ip netns exec "$NS" env -C "$JARVIS" JARVIS_ROOT="$D" JARVIS_PORT="$HTTPPORT" \
     JARVIS_OSUM_PORT="$TLSPORT" JARVIS_OSUM_DIR="$D/data" \
@@ -137,9 +137,9 @@ for i in $(seq 1 120); do
     sleep 0.5
 done
 if grep -qa "Osum-Brücke lauscht" "$W/server.log" 2>/dev/null; then
-    ok "der ECHTE JARVIS-Server laeuft und lauscht auf dem Osum-Port"
+    ok "the REAL JARVIS server is running and listening on the Osum port"
 else
-    bad "der echte Server ist nicht hochgekommen"
+    bad "the real server did not come up"
     tail -8 "$W/server.log" 2>/dev/null | sed 's/^/        /'
     echo "ECHT: $pass bestanden, $fail durchgefallen"; exit 1
 fi
@@ -148,12 +148,12 @@ KEKS=$(ip netns exec "$NS" curl -s -i -X POST "http://127.0.0.1:$HTTPPORT/api/lo
     -H 'content-type: application/json' \
     -d '{"username":"osumpruef","password":"Pr8fst4nd!xy"}' \
     | grep -i '^set-cookie:' | head -1 | sed 's/^[Ss]et-[Cc]ookie: //' | cut -d';' -f1)
-[ -n "$KEKS" ] && ok "am Cockpit angemeldet" || bad "die Anmeldung am Cockpit ist gescheitert"
+[ -n "$KEKS" ] && ok "am Cockpit angemeldet" || bad "the cockpit login failed"
 CODE=$(ip netns exec "$NS" curl -s -X POST "http://127.0.0.1:$HTTPPORT/api/osum/pair" \
     -H 'content-type: application/json' -H "cookie: $KEKS" \
     -d '{"name":"Osum-QEMU"}' | python3 -c 'import json,sys; print(json.load(sys.stdin).get("code",""))')
 if [ -n "$CODE" ]; then
-    ok "das Cockpit gibt einen Kopplungscode heraus: $CODE"
+    ok "the cockpit hands out a pairing code: $CODE"
 else
     bad "kein Kopplungscode"
     echo "ECHT: $pass bestanden, $fail durchgefallen"; exit 1
@@ -182,9 +182,9 @@ except Exception: print("")' 2>/dev/null)
     sleep 0.5
 done
 if [ "$VERB" = ja ]; then
-    ok "OSUM STEHT ALS GERAET AM ECHTEN SERVER -- gekoppelt und verbunden"
+    ok "OSUM IS LISTED AS A DEVICE AT THE REAL SERVER -- paired and connected"
 else
-    bad "Osum ist am echten Server nicht als verbunden aufgetaucht"
+    bad "Osum did not show up as connected at the real server"
     grep -aE 'jarvisd:|Osum' "$W/seriell.txt" "$W/server.log" 2>/dev/null | tail -8 | sed 's/^/        /'
 fi
 

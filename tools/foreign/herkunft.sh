@@ -4,7 +4,7 @@ Q=/root/fremdquellen
 W=/root/fremdland-tmp
 V=$W/verify
 rm -rf "$V"; mkdir -p "$V"
-echo "=== SHA-256 der Archive (wie heruntergeladen) ==="
+echo "=== SHA-256 of the archives (as downloaded) ==="
 cd "$Q" && sha256sum *.tar.gz *.tar.bz2 *.tar.xz *.zip 2>/dev/null
 echo
 echo "=== diff -r Original gegen Baubaum ==="
@@ -34,7 +34,7 @@ do
   fi
 done
 echo
-echo "=== Zeilenzahlen (wc -l, nur .c/.h des Originals) ==="
+echo "=== line counts (wc -l, only .c/.h of the original) ==="
 for o in lua-5.4.7 quickjs-2024-01-13 sqlite-amalgamation-3460000 busybox-1.36.1; do
   c=$(find "$V/$o" -name '*.c' | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
   a=$(find "$V/$o" \( -name '*.c' -o -name '*.h' \) | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')

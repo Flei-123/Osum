@@ -31,17 +31,17 @@ hat() { grep -qa -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hatnicht() { grep -qa -- "$2" "$1" && bad "$3 -- '$2' steht da und darf nicht" || ok "$3"; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "HIDWEG: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
+    echo "HIDWAY: skipped, qemu-system-x86_64 is not there"; exit 0
 fi
 if ! qemu-system-x86_64 -device help 2>&1 | grep -q 'qemu-xhci'; then
-    echo "HIDWEG: uebersprungen, dieses QEMU kennt qemu-xhci nicht"; exit 0
+    echo "HIDWAY: skipped, this QEMU does not know qemu-xhci"; exit 0
 fi
 
 echo "== 1. bauen =="
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh faellt"; exit 1; }
 bash tools/build-kernel.sh "$TMPD/k0.mb" --stufe 0 > "$TMPD/b0.log" 2>&1 \
     && ok "der Kern baut ($(stat -c%s "$TMPD/k0.mb") Oktette)" \
-    || { bad "der Kern baut nicht"; sed 's/^/        /' "$TMPD/b0.log" | head -12; exit 1; }
+    || { bad "the kernel does not build"; sed 's/^/        /' "$TMPD/b0.log" | head -12; exit 1; }
 
 PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s assembliert nicht"
@@ -55,9 +55,9 @@ for p in $PROGS; do
         -o "$TMPD/$p.elf" $UCRT "$TMPD/$p.o" 2>/dev/null || { bad "ld faellt bei $p"; rc=1; continue; }
     strip --strip-all "$TMPD/$p.elf"
 done
-[ $rc -eq 0 ] && ok "$(echo $PROGS | wc -w) Programme fuer Ring 3 gebaut"
+[ $rc -eq 0 ] && ok "$(echo $PROGS | wc -w) programs for ring 3 built"
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
-    && ok "der Verzeichnisbaum steht" || bad "tools/k15/tree.py faellt"
+    && ok "the directory tree is up" || bad "tools/k15/tree.py faellt"
 printf '# taskbar.conf\nedge=0\nheight=28\nwidth=100\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
 ARGS=(build "$TMPD/root.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
@@ -66,7 +66,7 @@ ARGS+=("/bin/files@/bin/explorer" /etc/ "/etc/theme=$TMPD/baum/theme" "/etc/task
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "das Wurzelabbild steht ($(stat -c%s "$TMPD/root.img") Oktette)" \
+    && ok "the root image is up ($(stat -c%s "$TMPD/root.img") Oktette)" \
     || { bad "mkfs.py faellt"; tail -3 "$TMPD/mkfs.txt"; }
 
 ZWEI="-device qemu-xhci,id=x0 -device nec-usb-xhci,id=x1 -device usb-kbd,bus=x1.0 -device usb-mouse,bus=x1.0"
@@ -122,7 +122,7 @@ feld1() { # datei name -- aus der ersten VOLLSTAENDIGEN Pulszeile
 BASE="modfs osum gfx wm wig desk wmshell usb hidgen nosched noproc nofs"
 
 echo
-echo "== 2. DIE GEGENPROBE: ohne wmdauer hoert der Schreibtisch auf =="
+echo "== 2. THE CONTROL RUN: without wmdauer the desktop gives up =="
 t0=$(date +%s%N)
 lauf alt "$BASE" '^wm: sh exit' 150 nein
 t1=$(date +%s%N)
@@ -130,10 +130,10 @@ hat "$TMPD/alt.txt" 'wm: sh exit=' \
     "ohne wmdauer HOERT der Schreibtisch auf (wm: sh exit=)"
 is "und der Kern laeuft danach durch bis zum Ende" "$RC" 21
 hat "$TMPD/alt.txt" 'kernel: done' "der Kern ist wirklich fertig -- das Bild ist ein Standbild"
-echo "       (Lebensdauer bis zum Aufgeben: $(( (t1-t0)/1000000000 )) s)"
+echo "       (lifetime until giving up: $(( (t1-t0)/1000000000 )) s)"
 
 echo
-echo "== 3. MIT wmdauer laeuft er weiter, und die Meldungen kommen an =="
+echo "== 3. WITH wmdauer it keeps running, and the reports arrive =="
 #
 lauf neu "$BASE wmdauer" '^eingabe:' 45
 hatnicht "$TMPD/neu.txt" 'wm: sh exit' "mit wmdauer gibt der Schreibtisch NICHT auf"
@@ -146,7 +146,7 @@ gt "der Zeitgeber schlaegt (mk)" "$(feld "$TMPD/neu.txt" mk)" "$(feld1 "$TMPD/ne
 gt "die xHCI-Meldung kommt an (irq)" "$(feld "$TMPD/neu.txt" irq)" "$(feld1 "$TMPD/neu.txt" irq)"
 
 echo
-echo "== 4. und die Eingabe kommt oben an =="
+echo "== 4. and the input arrives at the top =="
 gt "HID-Berichte (ber)" "$(feld "$TMPD/neu.txt" ber)" "$(feld1 "$TMPD/neu.txt" ber)"
 gt "Mausbewegungen aus den Berichten (bew)" "$(feld "$TMPD/neu.txt" bew)" 0
 gt "Pakete beim Zeiger (pk)" "$(feld "$TMPD/neu.txt" pk)" 0
@@ -154,11 +154,11 @@ gt "vom Fensterserver abgeholt (wm)" "$(feld "$TMPD/neu.txt" wm)" 1
 gt "Klicks im Fensterserver (kl)" "$(feld "$TMPD/neu.txt" kl)" 0
 A=$(grep -a '^eingabe:' "$TMPD/neu.txt" | head -1 | sed -n 's/.* xy=\([0-9,]*\).*/\1/p')
 B=$(grep -a '^eingabe:' "$TMPD/neu.txt" | tail -1 | sed -n 's/.* xy=\([0-9,]*\).*/\1/p')
-if [ -n "$A" ] && [ "$A" != "$B" ]; then ok "der Zeiger ist gewandert: $A -> $B"
-else bad "der Zeiger steht still: $A -> $B"; fi
+if [ -n "$A" ] && [ "$A" != "$B" ]; then ok "the pointer moved: $A -> $B"
+else bad "the pointer stands still: $A -> $B"; fi
 
 echo
-echo "== 5. GEGENPROBE zur Meldung: mit usbnoirq traegt die Abfrage =="
+echo "== 5. CONTROL RUN for the report: with usbnoirq the poll carries =="
 lauf poll "$BASE wmdauer usbnoirq" '^wm: term win=' 45
 is "der Vektor bleibt maskiert -- irq steht still" \
     "$(feld "$TMPD/poll.txt" irq)" "$(feld1 "$TMPD/poll.txt" irq)"
@@ -166,7 +166,7 @@ gt "und die Maus kommt TROTZDEM an (bew)" "$(feld "$TMPD/poll.txt" bew)" 0
 gt "und der Klick auch (kl)" "$(feld "$TMPD/poll.txt" kl)" 0
 
 echo
-echo "== 6. zwei Regler, HID am zweiten -- wie auf Justins Brett =="
+echo "== 6. two controllers, HID on the second -- as on Justin's board =="
 D=$(grep -a '^usb: devices=' "$TMPD/neu.txt" | tail -1)
 is "Geraete am behaltenen Regler" "$(echo "$D" | sed -n 's/usb: devices=\([0-9]*\).*/\1/p')" 2
 is "Tastatur"                      "$(echo "$D" | sed -n 's/.*kbd=\([0-9]*\).*/\1/p')" 1
@@ -177,7 +177,7 @@ is "beide Regler melden ihre Meldeart" \
     "$(grep -ac 'usb: hc[0-9] melde=' "$TMPD/neu.txt")" 2
 
 echo
-echo "== 7. die Rangfolge der Schnittstellen (gebauter Deskriptor) =="
+echo "== 7. the priority order of the interfaces (built descriptor) =="
 R=$(grep -a 'usb: rang ok=' "$TMPD/neu.txt" | tail -1)
 is "Zusagen der Rangfolge" "$(echo "$R" | sed -n 's/.*ok=\([0-9]*\).*/\1/p')" 6
 hat "$TMPD/neu.txt" 'usb: rang ok=6 / 6' \

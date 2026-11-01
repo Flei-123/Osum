@@ -18,7 +18,7 @@ SOCK="$ERG/mon.sock"
 OUT="$ERG/seriell.txt"
 rm -f "$OUT" "$SOCK" "$ERG/rc"
 
-echo "== Lauf: ${SEK}s, -smp $SMP, ${BREITE}x${HOEHE}, KEINE EINGABE =="
+echo "== run: ${SEK}s, -smp $SMP, ${BREITE}x${HOEHE}, NO INPUT =="
 ( timeout $((SEK + 20)) $QEMU_X86 -cpu host -smp "$SMP" -m 2048 \
     -kernel "$BAU/kern.mb" -initrd "$BAU/root.img" -append "$APP" \
     -serial "file:$OUT" -display none -no-reboot \
@@ -84,7 +84,7 @@ d() { local a=${1:-0} b=${2:-0}; echo $(( ${b:-0} - ${a:-0} )); }
 
 {
 echo "=================================================="
-echo "UHRWERK-MESSUNG  ${SEK}s ohne jede Eingabe, -smp $SMP"
+echo "CLOCKWORK MEASUREMENT  ${SEK}s without any input, -smp $SMP"
 echo "=================================================="
 echo "PREEMPT (Soll 1) .................. ${PRE:-?}"
 echo "HZ      (Soll 100) ................ ${HZ:-?}"
@@ -92,7 +92,7 @@ echo "TICKS   ${T_TA:-?} -> ${T_TE:-?}   (+$(d "$T_TA" "$T_TE"))"
 echo "IRQ     ${I_A:-?} -> ${I_E:-?}   (+$(d "$I_A" "$I_E"))"
 echo "LOOP    ${L_A:-?} -> ${L_E:-?}   (+$(d "$L_A" "$L_E"))"
 echo "--------------------------------------------------"
-echo "COMPOSES OHNE EINGABE (die Kernzahl)"
+echo "COMPOSES WITHOUT INPUT (the core number)"
 echo "  wm.composites  ${B_A:-?} -> ${B_E:-?}   (+$(d "$B_A" "$B_E"))"
 echo "--------------------------------------------------"
 echo "TASKLEISTE (Ring 3)"
@@ -105,9 +105,9 @@ echo "=================================================="
 
 if [ -f "$ERG/anfang.ppm" ] && [ -f "$ERG/ende.ppm" ]; then
     if cmp -s "$ERG/anfang.ppm" "$ERG/ende.ppm"; then
-        echo "BILD: IDENTISCH -- der Schirm steht still." | tee -a "$ERG/bericht.txt"
+        echo "IMAGE: IDENTICAL -- the screen stands still." | tee -a "$ERG/bericht.txt"
     else
-        echo "BILD: unterschiedlich -- etwas hat sich bewegt." | tee -a "$ERG/bericht.txt"
+        echo "IMAGE: different -- something moved." | tee -a "$ERG/bericht.txt"
     fi
     for f in anfang ende; do
         python3 -c "

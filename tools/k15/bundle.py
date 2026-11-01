@@ -141,7 +141,7 @@ def main(argv):
             continue
         ende, grenze = angaben_stehen_vorn(os.path.join(pfad, "INFO"))
         if ende >= grenze:
-            print("buendel: %s/INFO -- die Angaben enden erst bei Oktett %d,"
+            print("bundle: %s/INFO -- the entries end only at octet %d,"
                   " appdir.eine_datei liest nur %d. Der Starter wuerde dieses"
                   " Buendel stumm uebergehen. Kommentar hinter die Angaben."
                   % (pfad, ende, grenze), file=sys.stderr)

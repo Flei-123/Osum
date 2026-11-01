@@ -20,7 +20,7 @@ mkdir -p "$TMPD"
 echo "== bauen =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/build.txt" 2>&1 \
-    || { echo "der Kern baut nicht:"; tail -30 "$TMPD/build.txt"; exit 1; }
+    || { echo "the kernel does not build:"; tail -30 "$TMPD/build.txt"; exit 1; }
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null
 for p in $PROGS; do
     "$FIRNC" -o "$TMPD/$p.o" "kernel/user/$p.fi" > "$TMPD/$p.log" 2>&1 || {
@@ -46,7 +46,7 @@ DISKARG="-drive file=$TMPD/disk.img,format=raw,if=ide,index=0"
 [ "$QUELLE" = ram ] && DISKARG="-initrd $TMPD/disk.img"
 EXTRA=""
 [ "$QUELLE" = ram ] && EXTRA="modfs"
-echo "== messen: /bin/play $PLAYOPT $MEDIA bei -smp $SMP, Quelle $QUELLE =="
+echo "== measure: /bin/play $PLAYOPT $MEDIA at -smp $SMP, source $QUELLE =="
 timeout 600 $QEMU_X86 -kernel "$TMPD/k.mb" -m 512 -smp "$SMP" \
     -append "osum nokbd audio nosounds $EXTRA script=/bin/play $PLAYOPT $MEDIA;exit" \
     -serial "file:$TMPD/out.txt" -display none -no-reboot $aud $HDADEV \
@@ -55,11 +55,11 @@ timeout 600 $QEMU_X86 -kernel "$TMPD/k.mb" -m 512 -smp "$SMP" \
 echo "  Rueckgabe: $?"
 echo "-- was /bin/play sagt ------------------------------------------"
 sed -n '/art:/,$p' "$TMPD/out.txt" | sed 's/^/  /' | head -40
-echo "-- was aus dem Geraet kam --------------------------------------"
+echo "-- what came out of the device --------------------------------------"
 if [ -s "$TMPD/out.wav" ]; then
     python3 tools/hda/wavcheck.py "$TMPD/out.wav" --hz 440 --rate 48000 2>&1 | sed 's/^/  /'
 else
-    echo "  KEINE Ausgabe -- out.wav ist leer"
+    echo "  NO output -- out.wav is empty"
 fi
 [ "$KEEP" = 1 ] && echo "(Arbeitsstand bleibt in $TMPD)"
 exit 0

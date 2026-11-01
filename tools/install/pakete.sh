@@ -30,7 +30,7 @@ if [ ! -s "$OUT/geheim.key" ]; then
     python3 "$OPK" schluessel "$OUT" > "$OUT/schluessel.log" 2>&1 || {
         cat "$OUT/schluessel.log"; exit 1; }
 else
-    echo "   schluessel liegt schon da ($OUT/geheim.key), wird NICHT neu gewuerfelt"
+    echo "   key is already there ($OUT/geheim.key), will NOT be re-rolled"
 fi
 for q in quelle1 quelle2; do
     python3 "$OPK" quelle "$OUT/$q" --schluessel "$OUT/geheim.key" \

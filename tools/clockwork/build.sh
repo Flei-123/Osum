@@ -9,7 +9,7 @@ mkdir -p "$OUT"
 
 echo "== Kern bauen =="
 bash tools/build-kernel.sh "$OUT/kern.mb" --stufe 0 > "$OUT/kern.log" 2>&1 \
-    || { echo "NEIN: der Kern baut nicht"; tail -20 "$OUT/kern.log"; exit 1; }
+    || { echo "NO: the kernel does not build"; tail -20 "$OUT/kern.log"; exit 1; }
 echo "  ok  kern.mb ($(stat -c%s "$OUT/kern.mb") Oktette)"
 
 PROGS="desktop taskbar settings launcher explorer widgetdemo locate dhcp sh echo ls cat edit"

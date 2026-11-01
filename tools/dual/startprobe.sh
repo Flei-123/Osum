@@ -44,46 +44,46 @@ Image.open('$OUT/$n.ppm').save('$OUT/$n.png')
 " 2>/dev/null && rm -f "$OUT/$n.ppm"
 done
 
-echo "== das Bootmenue, wie es auf dem Schirm steht"
+echo "== the boot menu as it appears on the screen"
 if [ -s "$OUT/menue.png" ]; then
     tesseract "$OUT/menue.png" - 2>/dev/null | grep -v '^\s*$' | head -12 | sed 's/^/        /'
     TXT=$(tesseract "$OUT/menue.png" - 2>/dev/null)
     echo "$TXT" | grep -qi "$MARKE_PRODUKT" \
-        && ok "${MARKE_PRODUKT} steht im Bootmenue AUF DEM SCHIRM" \
-        || bad "${MARKE_PRODUKT} steht nicht im Menue"
+        && ok "${MARKE_PRODUKT} is in the boot menu ON THE SCREEN" \
+        || bad "${MARKE_PRODUKT} is not in the menu"
     echo "$TXT" | grep -qi 'windows' \
-        && ok "DAS FREMDE SYSTEM STEHT IM BOOTMENUE AUF DEM SCHIRM" \
-        || bad "das fremde System steht nicht im Menue"
+        && ok "THE FOREIGN SYSTEM IS IN THE BOOT MENU ON THE SCREEN" \
+        || bad "the foreign system is not in the menu"
     echo "$TXT" | grep -qi 'limine' \
-        && ok "der Bootlader laeuft VON DER PLATTE (kein Medium im Spiel)" \
-        || bad "kein Bootlader auf dem Schirm"
+        && ok "the boot loader runs FROM THE DISK (no medium involved)" \
+        || bad "no boot loader on the screen"
 else
-    bad "kein Foto vom Bootmenue"
+    bad "no photo of the boot menu"
 fi
 
 echo
-echo "== was danach auf der seriellen Leitung steht"
+echo "== what is on the serial line afterwards"
 tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -aE '^(osum|wm|init|desk):' | head -12 | sed 's/^/        /'
 if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qaE '^(osum|wm|desk):'; then
-    ok "${MARKE_PRODUKT^^} STARTET VON DER PLATTE"
+    ok "${MARKE_PRODUKT^^} STARTS FROM THE DISK"
 else
-    bad "${MARKE_PRODUKT} ist nicht gestartet"
+    bad "${MARKE_PRODUKT} did not start"
 fi
 RP=$(tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -aoE 'rootpart=[0-9]+  first=[0-9]+' | head -1)
 if [ -n "$RP" ]; then
-    ok "es findet seine Wurzel in der neuen Partition ($RP)"
+    ok "it finds its root in the new partition ($RP)"
 else
-    bad "die Wurzel der neuen Partition wurde nicht gefunden"
+    bad "the root of the new partition was not found"
 fi
 if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qa 'desk: start /bin/desktop'; then
     ok "der Schreibtisch startet"
 else
-    bad "der Schreibtisch startet nicht"
+    bad "the desktop does not start"
 fi
 if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qa 'from module'; then
-    bad "die Wurzel kam als Boot-Modul -- das war kein Start von der Platte"
+    bad "the root came as a boot module -- that was no start from the disk"
 else
-    ok "die Wurzel kam NICHT als Boot-Modul (kein Installationsmedium)"
+    ok "the root did NOT come as a boot module (no installation medium)"
 fi
 
 printf '\n=======================================================\n'

@@ -14,7 +14,7 @@ pfad, w, h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 gross = w * h * 3 // 2
 d = open(pfad, 'rb').read()
 if len(d) % gross:
-    print("WARNUNG: %d Oktette sind kein Vielfaches von %d" % (len(d), gross),
+    print("WARNING: %d octets are not a multiple of %d" % (len(d), gross),
           file=sys.stderr)
 n = len(d) // gross
 for i in range(n):

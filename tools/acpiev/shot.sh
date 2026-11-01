@@ -12,7 +12,7 @@ SEK=${4:-45}
 TAB=tools/acpiev/asl/laptop.aml
 if [ ! -f "$TAB" ]; then
     command -v iasl >/dev/null 2>&1 || {
-        echo "== iasl fehlt und $TAB ist nicht gebaut" >&2; exit 1; }
+        echo "== iasl missing and $TAB is not built" >&2; exit 1; }
     ( cd tools/acpiev/asl && iasl laptop.asl >/dev/null 2>&1 )
 fi
 

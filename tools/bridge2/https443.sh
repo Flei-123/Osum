@@ -16,7 +16,7 @@ echo "== 1. bauen =="
 bash vendor/firn/fetch-firnc.sh > "$W/fetch.log" 2>&1 || {
     echo "fetch-firnc.sh gescheitert"; exit 1; }
 ./tools/build-kernel.sh "$W/k0.mb" > "$W/k.log" 2>&1 || {
-    echo "der Kern baut nicht"; tail -20 "$W/k.log"; exit 1; }
+    echo "the kernel does not build"; tail -20 "$W/k.log"; exit 1; }
 note "kernel $(stat -c%s "$W/k0.mb") Oktette"
 
 as --64 -o "$W/crt.o" kernel/user/crt.s 2>"$W/as.err" || {
@@ -57,7 +57,7 @@ for c in /etc/ssl/certs/ca-certificates.crt \
          /etc/pki/tls/certs/ca-bundle.crt; do
     [ -r "$c" ] && { cp "$c" "$W/roots.pem"; break; }
 done
-[ -s "$W/roots.pem" ] || { echo "kein Wurzelspeicher auf dem Wirt"; exit 1; }
+[ -s "$W/roots.pem" ] || { echo "no root storage on the host"; exit 1; }
 note "wurzeln $(stat -c%s "$W/roots.pem") Oktette"
 
 printf 'nameserver 10.0.2.3\n' > "$W/resolv.conf"
@@ -73,7 +73,7 @@ python3 tools/osum/mkfs.py build "$W/probe.img" 32768 $SPEC \
     > "$W/mkfs.txt" 2>&1 || { echo "mkfs"; tail -5 "$W/mkfs.txt"; exit 1; }
 ok "Platte gebaut"
 
-echo "== 2. Osum faehrt und spricht mit store.fleitec.com =="
+echo "== 2. Osum boots and talks to store.fleitec.com =="
 timeout 300 qemu-system-x86_64 -kernel "$W/k0.mb" -m 512 \
     -append "osum nokbd nosched noproc nofs modfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp script=dhcp;jarvisd -1 -t 50000" \
     -serial "file:$W/serial.txt" -display none -no-reboot \
@@ -90,33 +90,33 @@ done
 sleep 60
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
 
-echo "== 3. was auf der Leitung stand =="
+echo "== 3. what was on the wire =="
 grep -a 'jarvisd:' "$W/serial.txt" | head -20 | sed 's/^/        /'
 
 grep -qa 'jarvisd:.*[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+' "$W/serial.txt" \
-    && ok "der Name store.fleitec.com ist aufgeloest" \
-    || bad "der Name loest nicht auf"
+    && ok "the name store.fleitec.com is resolved" \
+    || bad "the name does not resolve"
 grep -qa 'Handschlag ist gescheitert' "$W/serial.txt" \
-    && bad "der TLS-Handschlag ist gescheitert" \
-    || ok "der Handschlag mit dem ECHTEN Zertifikat steht"
+    && bad "the TLS handshake failed" \
+    || ok "the handshake with the REAL certificate is up"
 grep -qa 'der Server antwortet' "$W/serial.txt" \
-    && bad "der Server hat nicht 200 geantwortet" \
+    && bad "the server did not answer 200" \
     || ok "der Server antwortet 200"
 grep -qa 'PAIRING CODE' "$W/serial.txt" \
-    && ok "das Geraet ist beim Dienst angekommen und zeigt einen Code" \
-    || bad "das Geraet ist NICHT angekommen"
+    && ok "the device arrived at the service and shows a code" \
+    || bad "the device did NOT arrive"
 HEX=$(grep -a 'PAIRING CODE' "$W/serial.txt" | tail -1 | awk '{print $NF}')
 if [ -n "$HEX" ]; then
     note "Code auf dem Bildschirm: $(python3 -c "import sys;print(bytes.fromhex(sys.argv[1]).decode())" "$HEX" 2>/dev/null)"
 fi
 
-echo "== 4. und was der Dienst dazu sagt =="
+echo "== 4. and what the service says about it =="
 journalctl -u bruecke --since '-3 min' --no-pager 2>/dev/null \
     | grep -iE 'KOPPLUNG NOETIG|ANGEMELDET|ABGELEHNT' | tail -5 | sed 's/^/        /'
 journalctl -u bruecke --since '-3 min' --no-pager 2>/dev/null \
     | grep -qi 'KOPPLUNG NOETIG' \
-    && ok "der Dienst hat einen PAIRING CODE ausgestellt" \
-    || bad "im Protokoll des Dienstes steht nichts"
+    && ok "the service issued a PAIRING CODE" \
+    || bad "nothing in the log of the service"
 
 echo "== 5. pair, then jobs over 443 (puls loop) =="
 CODE=""

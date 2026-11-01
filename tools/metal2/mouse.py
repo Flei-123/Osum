@@ -143,7 +143,7 @@ def main():
 
     s = verbinden(sock)
     if s is None:
-        print("maus: kein QMP an %s" % sock)
+        print("mouse: no QMP at %s" % sock)
         return 1
     q = Qmp(s)
 

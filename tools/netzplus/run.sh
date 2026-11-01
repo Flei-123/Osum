@@ -41,7 +41,7 @@ for t in qemu-system-x86_64 ip tc gcc nc python3 ethtool; do
 done
 
 # =====================================================================
-echo "== 1. bauen: Kernel mit dem geflickten Stack =="
+echo "== 1. build: kernel with the patched stack =="
 # =====================================================================
 if nzp_build; then
     ok "firnc0: Kernel + Netzdienst gebaut ($(stat -c%s "$TMPD/k0.mb") Oktette)"
@@ -52,9 +52,9 @@ else
 fi
 
 if grep -q "RUNDE NETZPLUS" vendor/firn/lib/net/tcp.fi 2>/dev/null; then
-    ok "vendor/firn/lib/net/tcp.fi traegt die Aenderung dieser Runde"
+    ok "vendor/firn/lib/net/tcp.fi carries the change of this round"
 else
-    bad "der Flicken 0006 ist NICHT aufgelegt -- ./vendor/firn/fetch-firnc.sh"
+    bad "patch 0006 is NOT applied -- ./vendor/firn/fetch-firnc.sh"
 fi
 s1=""
 while read -r want name; do
@@ -64,16 +64,16 @@ while read -r want name; do
     got=$(git hash-object "$roh" 2>/dev/null)
     [ "$got" = "$want" ] || s1="$s1 $name;"
 done < vendor/net/BLOBS
-[ -z "$s1" ] && ok "vendor/net/BLOBS: der Stand unter den Flicken ist der des Pins" \
-             || bad "BLOBS stimmt nicht mehr:$s1"
+[ -z "$s1" ] && ok "vendor/net/BLOBS: the state under the patches is that of the pin" \
+             || bad "BLOBS no longer matches:$s1"
 
 # =====================================================================
-echo "== 2. die Aushandlung: was steht nach dem Handschlag im TCB? =="
+echo "== 2. the negotiation: what is in the TCB after the handshake? =="
 # =====================================================================
 durchsatz "$TMPD/a.txt" 1048576 "" "" "" ""
 A="$TMPD/a.txt"
 if [ -z "$(val "$A" octets)" ]; then
-    bad "der erste Lauf lieferte keine Zahlen -- Draht oder Wirt, nicht der Stack"
+    bad "the first run delivered no numbers -- wire or host, not the stack"
     echo "     (Gegenprobe: bash tools/net/run.sh faellt dann genauso)"
     tail -3 "$A" 2>/dev/null | sed 's/^/     /'
     echo "NETZPLUS: $pass passed, $fail failed"
@@ -90,10 +90,10 @@ num "PAWS hat auf gesunder Strecke NICHTS verworfen" "$(val "$A" paws)" eq 0
 num "jedes Oktett kam an" "$(val "$A" octets)" eq 1048576
 num "Pruefsummenfehler" "$(val "$A" csum)" eq 0
 KIB0=$(val "$A" kib_per_s)
-ok "Durchsatz ohne Verzoegerung: $KIB0 KiB/s"
+ok "throughput without delay: $KIB0 KiB/s"
 
 # =====================================================================
-echo "== 3. die Gegenprobe: DERSELBE Kernel ohne Fensterskalierung =="
+echo "== 3. the control run: the SAME kernel without window scaling =="
 durchsatz "$TMPD/w0.txt" 1048576 50ms "" "" "nzws=0"
 durchsatz "$TMPD/w1.txt" 1048576 50ms "" "" ""
 W0="$TMPD/w0.txt"; W1="$TMPD/w1.txt"
@@ -104,15 +104,15 @@ num "mit Skalierung: ws_ok ist 1" "$(val "$W1" ws_ok)" eq 1
 num "mit Skalierung kamen alle Oktette an" "$(val "$W1" octets)" eq 1048576
 K0=$(val "$W0" kib_per_s); K1=$(val "$W1" kib_per_s)
 if [ -n "$K0" ] && [ -n "$K1" ] && [ "$K0" -gt 0 ]; then
-    ok "bei 100 ms Umlaufzeit: ohne Skalierung $K0 KiB/s, mit $K1 KiB/s"
+    ok "at 100 ms round trip: without scaling $K0 KiB/s, with $K1 KiB/s"
     num "ohne Skalierung bleibt es unter dem Deckel Fenster/RTT (640 KiB/s)" "$K0" le 900
     num "mit Skalierung wird dieser Deckel ueberschritten" "$K1" gt 900
 else
-    bad "eine der beiden Messungen lieferte keine Zahl"
+    bad "one of the two measurements delivered no number"
 fi
 
 # =====================================================================
-echo "== 4. Durchsatz ueber eine Strecke mit Laufzeit =="
+echo "== 4. throughput over a link with latency =="
 # =====================================================================
 for d in 10ms 25ms; do
     durchsatz "$TMPD/d$d.txt" 1048576 "$d" "" "" ""
@@ -122,7 +122,7 @@ for d in 10ms 25ms; do
 done
 
 # =====================================================================
-echo "== 5. Verlust: SACK und die Wiederholung =="
+echo "== 5. loss: SACK and the retransmission =="
 durchsatz "$TMPD/l5.txt" 262144 5ms "5%" "" ""
 L="$TMPD/l5.txt"
 num "durch 5 % Verlust: jedes Oktett, in Ordnung" "$(val "$L" octets)" eq 262144

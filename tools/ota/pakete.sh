@@ -13,7 +13,7 @@ export OPK
     echo "== $OUT/geheim.key fehlt -- erst tools/install/pakete.sh"; exit 1; }
 for q in quelle1 quelle2 quelle3; do
     [ -d "$OUT/$q" ] || {
-        echo "== $OUT/$q fehlt -- erst tools/install/pakete.sh und tools/update/pakete.sh"
+        echo "== $OUT/$q is missing -- first tools/install/pakete.sh and tools/update/pakete.sh"
         exit 1; }
 done
 

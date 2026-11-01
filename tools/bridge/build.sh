@@ -14,7 +14,7 @@ PROGS=${BRIDGE_PROGS:-"sh ls cat echo chmod jsig jarvisctl"}
 BLOCKS=${BRIDGE_BLOCKS:-16384}
 
 if [ "$S" = 0 ]; then CC="$FIRNC"; else CC="$FC1"; fi
-[ -x "$CC" ] || { echo "der Uebersetzer $CC fehlt"; exit 1; }
+[ -x "$CC" ] || { echo "the compiler $CC is missing"; exit 1; }
 
 for f in boot isr switch smp hv; do
     as --64 -o "$W/$f.o" "kernel/arch/x86_64/$f.s" || exit 1
@@ -36,7 +36,7 @@ ld -n -T "$LDSCRIPT" \
     --defsym=USER_MAIN="_F$S.u_enter" \
     -o "$W/k.elf" "$W/boot.o" "$W/isr.o" "$W/switch.o" "$W/smp.o" \
     "$W/hv.o" "$W/k.o" "$W/u.o" 2>"$W/ld.err" || {
-    echo "ld ist am Kern gescheitert"; head -10 "$W/ld.err"; exit 1; }
+    echo "ld failed on the kernel"; head -10 "$W/ld.err"; exit 1; }
 objcopy -O elf32-i386 "$W/k.elf" "$W/k.mb" || exit 1
 
 SPEC="/bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"

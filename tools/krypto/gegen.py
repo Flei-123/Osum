@@ -164,7 +164,7 @@ def cmd_lies(pfad, pw):
     if mk is None:
         print("auf: 0")
         return 1
-    print("auf: 1 platz=%d" % wo)
+    print("up: 1 slot=%d" % wo)
     print("schluessel: haelften_ungleich=%d"
           % (1 if mk[:32] != mk[32:] else 0))
     erst = k["first"]
@@ -258,7 +258,7 @@ def cmd_roh(pfad):
         ents.append(-sum(v / ln * math.log2(v / ln) for v in c.values()))
     print("roh: leer=%d beschrieben=%d" % (leer, len(ents)))
     if ents:
-        print("roh: entropie_min=%.3f mittel=%.3f unter7=%d"
+        print("raw: entropy_min=%.3f mean=%.3f below7=%d"
               % (min(ents), sum(ents) / len(ents),
                  sum(1 for e in ents if e < 7.0)))
     lang = [r for r in re.findall(rb"[ -~]{16,}", daten)]
@@ -470,7 +470,7 @@ def cmd_baum(pfad, pw):
     wurzel, datei = _ofs_leser(blk)
     laengen = [100, 700, 5000, 40000]
     eintraege = sorted(wurzel(), key=lambda x: x[1])
-    print("baum: auf=1 platz=%d dateien=%d" % (wo, len(eintraege)))
+    print("tree: up=1 slot=%d files=%d" % (wo, len(eintraege)))
     gut = 0
     for n, nm in eintraege:
         if len(nm) != 2 or nm[0] != "k" or not nm[1].isdigit():
@@ -486,7 +486,7 @@ def cmd_baum(pfad, pw):
             gut += 1
         print("baum: sha %s = %s %s" % (nm, ist, "OK" if soll == ist else
                                         "FALSCH(soll %s)" % soll))
-    print("baum: gut=%d von=%d" % (gut, len(laengen)))
+    print("tree: good=%d of=%d" % (gut, len(laengen)))
     return 0 if gut == len(laengen) else 1
 
 
@@ -496,7 +496,7 @@ def main():
         return 2
     was = fehlt()
     if was:
-        print("gegen.py: es fehlt: %s" % ", ".join(was))
+        print("gegen.py: missing: %s" % ", ".join(was))
         return 3
     b = sys.argv[1]
     if b == "lies":

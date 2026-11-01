@@ -277,8 +277,8 @@ def main():
     print("=" * 66)
     print("Behauptungen im Quelltext : %d" % len(cl))
     print("von pci.ids BESTAETIGT    : %d" % ok)
-    print("nur aus Linux belegt [L]  : %d" % len(only_linux))
-    print("von pci.ids nach CHIPSATZ")
+    print("only documented in Linux [L]  : %d" % len(only_linux))
+    print("from pci.ids to CHIPSET")
     print("  benannt, LM/V geprueft   : %d" % len(chipset_named))
     print("igc-Nummern fehlend       : %d von %d" % (len(miss_igc), len(IGC_IDS)))
     print("igb-Nummern fehlend       : %d von %d" % (len(miss_igb), len(IGB_IDS)))
@@ -289,13 +289,13 @@ def main():
     bad = False
     if wrong:
         bad = True
-        print("WIDERSPRUCH (%d) -- das ist ein FEHLER:" % len(wrong))
+        print("CONTRADICTION (%d) -- this is an ERROR:" % len(wrong))
         for v, d, n, r in wrong:
             print("   %04x:%04x  wir='%s'  pci.ids='%s'" % (v, d, n, r))
         print()
     if unsourced:
         bad = True
-        print("OHNE QUELLE (%d) -- weder pci.ids noch [L]:" % len(unsourced))
+        print("WITHOUT SOURCE (%d) -- neither pci.ids nor [L]:" % len(unsourced))
         for v, d, n, m in unsourced:
             print("   %04x:%04x  '%s'  marke=%s" % (v, d, n, m))
         print()
@@ -324,8 +324,8 @@ def main():
             print("   %04x:%04x  %s" % (v, d, why))
         print()
     print("ERGEBNIS: nichts widerlegt.")
-    print("  Jede Nummer steht in pci.ids oder traegt eine Linux-Quelle,")
-    print("  und die drei Intel-Familien sind vollstaendig benannt.")
+    print("  Every number is in pci.ids or carries a Linux source,")
+    print("  and the three Intel families are fully named.")
     return 0
 
 

@@ -10,8 +10,8 @@ osum_sperre() {
     local fd
     exec {fd}>"$voll.sperre"
     if ! flock -n "$fd"; then
-        echo "SPERRE: $voll wird gerade von einem anderen Lauf benutzt." >&2
-        echo "        Eigenen Ordner als Argument angeben, oder warten." >&2
+        echo "LOCK: $voll is currently used by another run." >&2
+        echo "        Pass your own directory as an argument, or wait." >&2
         echo "        (Halter: $(cat "$voll.sperre.wer" 2>/dev/null || echo unbekannt))" >&2
         exit 75
     fi

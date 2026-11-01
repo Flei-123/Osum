@@ -169,16 +169,16 @@ def main(argv):
                     offen.append(eintrag)
 
     if liste:
-        print("== GESPERRT: der Puffer wird unter einer Sperre benutzt ==")
+        print("== LOCKED: the buffer is used under a lock ==")
         for k, f, p in gesperrt:
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
         print()
-        print("== OFFEN: kein Sperrwort im Rumpf ==")
+        print("== OPEN: no lock word in the body ==")
         for k, f, p in offen:
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
         print()
     if liste and mitwissen:
-        print("== MITWISSEN: mit Absicht am geteilten Puffer ==")
+        print("== KNOWN: deliberately on the shared buffer ==")
         for k, f, p in mitwissen:
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
             print("      %s" % MITWISSEN[(k, f)])

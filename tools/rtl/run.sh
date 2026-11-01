@@ -50,13 +50,13 @@ for t in qemu-system-x86_64 ip gcc nc python3 busybox; do
 done
 ip netns del "$NS" 2>/dev/null
 if ! ip netns add "$NS" 2>/dev/null; then
-    echo "RTL: uebersprungen, Netzraeume gibt es hier nicht"
+    echo "RTL: skipped, no network namespaces here"
     exit 0
 fi
 ip netns del "$NS" 2>/dev/null
 cplus=$(strings "$(command -v qemu-system-x86_64)" 2>/dev/null | grep -c currCPlusTxDesc)
 if [ "${cplus:-0}" -eq 0 ]; then
-    echo "RTL: uebersprungen, dieses QEMU emuliert den C+-Modus des rtl8139 nicht"
+    echo "RTL: skipped, this QEMU does not emulate the C+ mode of the rtl8139"
     exit 0
 fi
 
@@ -79,31 +79,31 @@ PYEOF
 }
 
 # =====================================================================
-echo "== 1. der Bau, mit beiden Uebersetzern =="
+echo "== 1. the build, with both compilers =="
 # =====================================================================
 if bash tools/hwnet/build.sh "$TMPD/s0" 0 > "$TMPD/b0.txt" 2>&1; then
-    ok "firnc0: Kernel mit r8169.fi + e1000.fi + netdev.fi, und sieben Programme"
+    ok "firnc0: kernel with r8169.fi + e1000.fi + netdev.fi, and seven programs"
 else
-    bad "firnc0 baut es nicht"; sed 's/^/        /' "$TMPD/b0.txt" | head -10
+    bad "firnc0 does not build it"; sed 's/^/        /' "$TMPD/b0.txt" | head -10
     echo "RTL: $pass bestanden, $fail gefallen"; exit 1
 fi
 if bash tools/hwnet/build.sh "$TMPD/s1" 1 > "$TMPD/b1.txt" 2>&1; then
-    ok "firnc1: dasselbe, aus dem in Firn geschriebenen Uebersetzer"
+    ok "firnc1: the same, from the compiler written in Firn"
 else
-    bad "firnc1 baut es nicht"; sed 's/^/        /' "$TMPD/b1.txt" | head -10
+    bad "firnc1 does not build it"; sed 's/^/        /' "$TMPD/b1.txt" | head -10
 fi
 K="$TMPD/s0/k.mb"
 D="$TMPD/s0/disk.img"
 
 undef=$(nm -u "$TMPD/s0/k.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' \
         | grep -vE '^(osum_panic|kdata|osym_tab)$')
-[ -z "$undef" ] && ok "k.o: kein undefinierter Name ausser osum_panic und kdata" \
+[ -z "$undef" ] && ok "k.o: no undefined name other than osum_panic and kdata" \
                 || bad "k.o: undefinierte Symbole: $undef"
 n=$(nm "$TMPD/s0/k.o" 2>/dev/null | grep -cE 'r8169__init_on|netdev__driver_for')
 num "r8169.fi und die Tabelle stecken wirklich im Abbild (Symbole)" "$n" ge 2
 
 gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>"$TMPD/gcc.err" \
-    && ok "tools/net/bridge.c: der UDP/AF_PACKET-Draht ist gebaut" \
+    && ok "tools/net/bridge.c: the UDP/AF_PACKET wire is built" \
     || { bad "bridge.c uebersetzt nicht"; head -5 "$TMPD/gcc.err"; }
 
 # =====================================================================
@@ -187,7 +187,7 @@ BASE="nokbd nosched noproc nofs noring3"
 NETARGS="nic nip=$OSUM_IP/24 ngw=$HOST_IP"
 
 # =====================================================================
-echo "== 3. der Bus entscheidet, und sagt es =="
+echo "== 3. the bus decides, and says so =="
 # =====================================================================
 wire_up; bridge_up
 qemu_bg "rtl8139" "osum $BASE $NETARGS nsvc=0 nwait=60" "$TMPD/bus-rtl.txt"
@@ -201,7 +201,7 @@ has "$F" "mac=52:54:00:aa:bb:cc" \
 n=$(grep -aoE 'nic: netd=[0-9]+' "$F" | cut -d= -f2)
 num "die Netzaufgabe gibt es" "${n:-0}" ge 1
 
-echo "   Gegenprobe: derselbe Hersteller, ein Chip ohne Treiber"
+echo "   control run: the same vendor, a chip without a driver"
 wire_up; bridge_up
 qemu_bg "ne2k_pci" "osum $BASE $NETARGS nsvc=0 nwait=60" "$TMPD/bus-ne2k.txt"
 qemu_wait
@@ -213,7 +213,7 @@ has "$R" "nic: no device" "und der Kern sagt, dass unter dem Stapel nichts liegt
 hasnot "$R" "netdev: c0=" "kein Treiber hat eine Karte beansprucht, die er nicht fahren kann"
 
 # =====================================================================
-echo "== 4. dieselbe Abnahme wie in Runde HWNET, auf dem Realtek =="
+echo "== 4. the same acceptance as in round HWNET, on the Realtek =="
 # =====================================================================
 dd if=/dev/urandom of="$TMPD/quarter.bin" bs=1024 count=256 2>/dev/null
 
@@ -228,7 +228,7 @@ got=$(grep -oE '[0-9]+ received' "$TMPD/pingout.txt" | grep -oE '^[0-9]+')
 num "rtl8139: ping -c 20 aus dem Linux-Kern, Antworten" "${got:-0}" ge 19
 rtt=$(grep -oE 'min/avg/max/mdev = [0-9.]+/[0-9.]+' "$TMPD/pingout.txt" \
       | awk -F'= ' '{print $2}' | cut -d/ -f2)
-[ -n "$rtt" ] && ok "rtl8139: Umlaufzeit, Mittel $rtt ms (QEMU/TCG, ohne KVM)" \
+[ -n "$rtt" ] && ok "rtl8139: round trip time, mean $rtt ms (QEMU/TCG, without KVM)" \
               || bad "rtl8139: keine Umlaufzeit"
 num "rtl8139: Unterbrechungen, die der Chip wirklich ausgeloest hat" \
     "$(val "$TMPD/ping-rtl.txt" irqs)" ge 5
@@ -281,16 +281,16 @@ kill "$DHPID" 2>/dev/null; DHPID=""
 bridge_down; wire_down
 H="$TMPD/dhcp-rtl.txt"
 grep -qaE 'dhcp: offer ip=10\.9\.0\.(5[0-9]|60)' "$H" \
-    && ok "rtl8139: ein OFFER aus busybox udhcpd -- ein Server, den dieses Verzeichnis nicht schrieb" \
+    && ok "rtl8139: an OFFER from busybox udhcpd -- a server this directory did not write" \
     || bad "rtl8139: kein DHCP-Angebot ($(grep -a 'dhcp:' "$H" | head -2 | tr '\n' ' '))"
-grep -qaE 'dhcp: ack ip=10\.9\.0\.(5[0-9]|60)' "$H" && ok "rtl8139: und ein ACK dafuer" \
+grep -qaE 'dhcp: ack ip=10\.9\.0\.(5[0-9]|60)' "$H" && ok "rtl8139: and an ACK for it" \
     || bad "rtl8139: kein DHCP-ACK"
 grep -qaE '^2 (transmitted|packets transmitted), 2 received' "$H" \
-    && ok "rtl8139: und mit dieser Adresse erreicht er das Gateway (ICMP)" \
-    || bad "rtl8139: er erreicht das Gateway mit der bezogenen Adresse nicht"
+    && ok "rtl8139: and with this address it reaches the gateway (ICMP)" \
+    || bad "rtl8139: it does not reach the gateway with the obtained address"
 
 # =====================================================================
-echo "== 5. die Gegenproben, in denen die Messung zusammenbrechen muss =="
+echo "== 5. the control runs in which the measurement must collapse =="
 # =====================================================================
 wire_up; bridge_up
 qemu_bg "rtl8139" "osum $BASE nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=400" "$TMPD/no.txt"
@@ -311,7 +311,7 @@ has "$TMPD/nobm.txt" "master=0" "das Busmasterbit ist wirklich aus"
 num "GEGENPROBE ohne Busmaster, verlorene Pakete" "$(loss "$TMPD/nobmping.txt")" eq 100
 
 # =====================================================================
-echo "== 6. der volle Ring und der zu grosse Rahmen =="
+echo "== 6. the full ring and the oversized frame =="
 wire_up; bridge_up
 qemu_bg "rtl8139" "osum $BASE $NETARGS nicself nsvc=0 nwait=1800" "$TMPD/self.txt"
 await_line "$TMPD/self.txt" "nic: netd=" 25
@@ -321,8 +321,8 @@ qemu_wait
 bridge_down; wire_down
 SF="$TMPD/self.txt"
 line=$(grep -aoE 'r8169: self fit=[0-9]+ drop=[0-9]+ over=[0-9]+ link=[0-9]+ lchg=[0-9]+ rerr=[0-9]+ ovw=[0-9]+ slots=[0-9]+' "$SF" | tail -1)
-[ -n "$line" ] && ok "die Selbstpruefung hat gemeldet: $line" \
-               || bad "die Selbstpruefung hat nichts gemeldet"
+[ -n "$line" ] && ok "the self-check reported: $line" \
+               || bad "the self-check reported nothing"
 fit=$(echo "$line" | grep -oE 'fit=[0-9]+' | cut -d= -f2)
 drp=$(echo "$line" | grep -oE 'drop=[0-9]+' | cut -d= -f2)
 ovr=$(echo "$line" | grep -oE 'over=[0-9]+' | cut -d= -f2)
@@ -341,7 +341,7 @@ num "und danach redet die Karte weiter: Pakete verloren" \
     "$(loss "$TMPD/selfping.txt")" eq 0
 
 # =====================================================================
-echo "== 7. die Verbindung weg und wieder da =="
+echo "== 7. the connection gone and back =="
 # =====================================================================
 wire_up; bridge_up
 qemu_bg "rtl8139" "osum $BASE $NETARGS nsvc=0 nwait=2600" "$TMPD/link.txt"
@@ -364,7 +364,7 @@ num "und der Treiber meldet die Verbindung am Ende als stehend" \
     "$(val "$TMPD/link.txt" link)" eq 1
 
 # =====================================================================
-echo "== 8. die drei Spalten, nebeneinander =="
+echo "== 8. the three columns, side by side =="
 for dev in virtio-net-pci e1000; do
     wire_up; bridge_up
     qemu_bg "$dev" "osum $BASE $NETARGS nsvc=1 nport=7 nbytes=262144" "$TMPD/sink-$dev.txt"

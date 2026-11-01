@@ -57,17 +57,17 @@ def main():
         print("MASSE VERSCHIEDEN")
         return 1
     if len(ib) != iw * ih * 3:
-        print("DAS BILD VON INNEN IST UNVOLLSTAENDIG: %d statt %d"
+        print("THE IMAGE FROM INSIDE IS INCOMPLETE: %d instead of %d"
               % (len(ib), iw * ih * 3))
         return 1
-    print("das Bild von innen ist VOLLSTAENDIG: %d Oktette" % len(ib))
+    print("the image from inside is COMPLETE: %d octets" % len(ib))
 
     zeile = iw * 3
     verschieden = [y for y in range(ih)
                    if ib[y * zeile:(y + 1) * zeile] != ab[y * zeile:(y + 1) * zeile]]
     vs = set(verschieden)
     gleich = ih - len(verschieden)
-    print("Zeilen gleich: %d von %d" % (gleich, ih))
+    print("lines equal: %d of %d" % (gleich, ih))
     print("Zeilen verschieden: %d" % len(verschieden))
 
     anders = 0
@@ -79,11 +79,11 @@ def main():
             for i in range(o, o + zeile):
                 if ib[i] != ab[i]:
                     anders += 1
-    print("abweichende Oktette in den gleichen Zeilen: %d" % anders)
+    print("deviating octets in the same lines: %d" % anders)
 
     nichtschwarz = sum(1 for i in range(0, len(ib), 3)
                        if ib[i] or ib[i + 1] or ib[i + 2])
-    print("nicht-schwarze Bildpunkte innen: %d von %d" % (nichtschwarz, iw * ih))
+    print("non-black pixels inside: %d of %d" % (nichtschwarz, iw * ih))
 
     if verschieden:
         baender = []

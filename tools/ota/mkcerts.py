@@ -114,7 +114,7 @@ def main():
     schreiben(os.path.join(d, "fremd.pem"), fc)
     schreiben(os.path.join(d, "fremd.key"), fk, privat=True)
 
-    print("   ca.pem, srv.pem (%s / %s) und die fremde Wurzel" % (cn, ip))
+    print("   ca.pem, srv.pem (%s / %s) and the foreign root" % (cn, ip))
     return 0
 
 

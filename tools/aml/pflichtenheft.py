@@ -81,7 +81,7 @@ def uebersetzen():
     if not os.path.isdir(asl):
         return []
     if not shutil_which("iasl"):
-        print("HINWEIS: iasl fehlt -- die nachgebauten Tabellen werden")
+        print("NOTE: iasl missing -- the rebuilt tables will")
         print("         uebersprungen. `apt-get install acpica-tools`.")
         return []
     out = []
@@ -110,11 +110,11 @@ def main(argv):
         tabellen += sorted(glob.glob(os.path.join(HIER, "brett", "*.bin")))
         tabellen += sorted(glob.glob(os.path.join(HIER, "brett", "*.aml")))
     if not tabellen:
-        print("keine Tabellen -- nichts zu messen")
+        print("no tables -- nothing to measure")
         return 1
 
     can = kannliste()
-    print("DIE KANN-LISTE DES INTERPRETERS (kernel/acpi/aml.fi, report_can)")
+    print("THE CAN-LIST OF THE INTERPRETER (kernel/acpi/aml.fi, report_can)")
     print("  %d Opcodes: %d einfache, %d erweiterte (0x5b), %d Paare (0x92)"
           % (len(can),
              len([x for x in can if x < 0x5B00]),
@@ -147,21 +147,21 @@ def main(argv):
                 set(w.split(".")[-1] for w in wichtig))))
 
     print()
-    print("ZUSAMMEN ueber alle Tabellen: %d verschiedene Opcodes, %d Stueck"
+    print("TOGETHER over all tables: %d different opcodes, %d pieces"
           % (len(gesamt), sum(gesamt.values())))
     if schlimm:
         print("NICHT ABGEDECKT (%d):" % len(schlimm))
         for op in sorted(schlimm):
             print("  %-34s %6d mal" % (disasm.op_text(op), gesamt.get(op, 0)))
         return 2
-    print("NICHT ABGEDECKT: keine.")
+    print("NOT COVERED: none.")
     print()
-    print("BEFUND: fuer Einschalttaste, Deckel und Akku braucht es KEINEN")
-    print("weiteren Opcode. Was fehlt, liegt nicht in der Sprache, sondern")
+    print("FINDING: for power button, lid and battery NO further opcode")
+    print("is needed. What is missing is not in the language, but")
     print("in der Umgebung -- siehe docs/RUNDE-ACPI-EREIGNISSE.md:")
     print("  * der Adressraum EmbeddedControl (OperationRegion),")
     print("  * `_OSI` als aufrufbare Methode,")
-    print("  * und vor allem der ganze Weg SCI -> GPE -> `_Lxx` -> Notify.")
+    print("  * and above all the whole path SCI -> GPE -> `_Lxx` -> Notify.")
     return 0
 
 

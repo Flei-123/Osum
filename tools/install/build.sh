@@ -139,7 +139,7 @@ if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
     SPEC+=("/etc/ssl/roots.pem=$ROOTS")
     echo "   wurzeln   $(stat -c%s "$ROOTS") Oktette"
 else
-    echo "   wurzeln   KEINE -- fetch wird nichts vertrauen"
+    echo "   roots   NONE -- fetch will trust nothing"
 fi
 
 if [ -n "${OTA_CONF:-}" ]; then

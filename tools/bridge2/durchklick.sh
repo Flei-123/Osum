@@ -15,14 +15,14 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || {
 echo "== 1. bauen =="
 if [ ! -f "$W/k.mb" ] || [ -n "${DURCHKLICK_BAU:-}" ]; then
     bash tools/bridge/build.sh "$W" 0 >"$W/bau.log" 2>&1 || {
-        echo "der Bau ist gescheitert"; tail -5 "$W/bau.log"; exit 1; }
+        echo "the build failed"; tail -5 "$W/bau.log"; exit 1; }
 fi
 ok "Kern und Programme gebaut ($(stat -c%s "$W/k.mb") Oktette)"
 
 if [ ! -f "$W/k-ohne.mb" ] || [ -n "${DURCHKLICK_BAU:-}" ]; then
     bash tools/build-kernel.sh "$W/k-ohne.mb" --ohne-bruecke \
         >"$W/bau-ohne.log" 2>&1 || {
-        echo "der Bau ohne Bruecke ist gescheitert"; tail -5 "$W/bau-ohne.log"; exit 1; }
+        echo "the build without bridge failed"; tail -5 "$W/bau-ohne.log"; exit 1; }
 fi
 A=$(stat -c%s "$W/k.mb"); B=$(stat -c%s "$W/k-ohne.mb")
 note "mit Bruecke $A Oktette, ohne $B -- Unterschied $((A-B))"
@@ -70,17 +70,17 @@ CONF
 sed 's/^eingabe        = nein/eingabe        = ja/' \
     "$W/rechte-aus.conf" > "$W/rechte-an.conf"
 
-echo "== 2. ohne Recht wird abgelehnt =="
+echo "== 2. without permission it is rejected =="
 lauf aus "$W/k.mb" "$W/rechte-aus.conf" \
     "jarvisd -n;exit" || { echo "mkfs gescheitert"; exit 1; }
 if grep -qa 'eingabe' "$W/aus.txt"; then
-    ok "der Helfer liest das neue Recht aus der Rechteliste"
+    ok "the helper reads the new permission from the permission list"
     note "$(grep -a 'eingabe' "$W/aus.txt" | head -1)"
 else
     note "(das Recht taucht in -n nicht auf; das ist kein Fehler)"
 fi
 
-echo "== 3. der Aufruf gibt es / gibt es nicht =="
+echo "== 3. the call exists / does not exist =="
 lauf hat "$W/k.mb" "$W/rechte-an.conf" \
     "jarvisctl tippprobe;exit" || true
 lauf hatnicht "$W/k-ohne.mb" "$W/rechte-an.conf" \

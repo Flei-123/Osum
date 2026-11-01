@@ -163,7 +163,7 @@ def main():
         l = lo.get(lname)
         if u is None:
             fehler.append("%s steht nicht in r8169.fi" % unser)
-            print("   %-16s FEHLT im Quelltext" % unser)
+            print("   %-16s MISSING in the source" % unser)
             continue
         if l is None:
             fehler.append("%s (%s) nicht in Linux gefunden" % (unser, lname))
@@ -177,11 +177,11 @@ def main():
               % (unser, u, lname, l, "ok" if gut else "WIDERSPRUCH"))
 
     print()
-    print("BREITE UND WERT -- hier sass der Fehler")
+    print("WIDTH AND VALUE -- this is where the error was")
     for fn, konst, breite, wert, beleg in ZUGRIFFE:
         zs = unsere_zugriffe(our, fn, konst)
         if not zs:
-            print("   %-14s %-14s kein Zugriff gefunden (Funktion "
+            print("   %-14s %-14s no access found (function "
                   "umbenannt?)" % (fn, konst))
             continue
         for b, w in zs:
@@ -199,7 +199,7 @@ def main():
             print("        Beleg: %s" % beleg)
 
     print()
-    print("BEWUSST OFFEN (kein Fehler, aber ungeprueft)")
+    print("DELIBERATELY OPEN (not an error, but unchecked)")
     for name, text in OFFEN.items():
         print("   %s = %s" % (name, ok_.get(name)))
         for zeile in re.findall(r".{1,64}(?:\s|$)", text):
@@ -213,10 +213,10 @@ def main():
             print("   " + f)
         return 1
     print("ERGEBNIS: nichts widerlegt.")
-    print("  Sechs Adressen, drei Zugriffsbreiten und ein Wert stimmen")
-    print("  mit dem Treiber ueberein, der auf echter Hardware laeuft.")
-    print("  Das ist KEINE Messung -- es ist der beste Ersatz, den es")
-    print("  ohne die Karte gibt.")
+    print("  Six addresses, three access widths and one value agree")
+    print("  with the driver that runs on real hardware.")
+    print("  This is NOT a measurement -- it is the best substitute there is")
+    print("  without the card.")
     return 0
 
 

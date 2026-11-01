@@ -7,38 +7,38 @@ BBDYN=${BBDYN:-/root/bbdyn/busybox}
 BBQUELLE=${BBQUELLE:-/root/fremdquellen/busybox-1.36.1.tar.bz2}
 
 echo "=================================================================="
-echo " FREMDCODE DER RUNDE DYNLADER -- Herkunft, Fassung, Lizenz"
+echo " FOREIGN CODE OF THE DYNLOADER ROUND -- origin, version, license"
 echo "=================================================================="
 echo
-echo "1. DER INTERPRETER  (Pflicht -- ohne ihn laeuft kein PT_INTERP-Bild)"
-echo "   Paket:     linux-abi        Ziel auf dem System: /lib/ld-musl-x86_64.so.1"
-echo "   Ring:      3                (wie jedes Programm; NICHT im Kern)"
+echo "1. THE INTERPRETER  (required -- without it no PT_INTERP image runs)"
+echo "   Package:   linux-abi        Target on the system: /lib/ld-musl-x86_64.so.1"
+echo "   Ring:      3                (like every program; NOT in the kernel)"
 echo "   Herkunft:  musl libc, https://musl.libc.org/"
 if command -v dpkg >/dev/null 2>&1 && dpkg -s musl >/dev/null 2>&1; then
     echo "   Fassung:   $(dpkg -s musl | sed -n 's/^Version: //p')  (Debian-Paket musl:amd64)"
 fi
-echo "   Lizenz:    MIT -- Copyright 2005-2020 Rich Felker und Mitwirkende"
+echo "   License:   MIT -- Copyright 2005-2020 Rich Felker and contributors"
 echo "   Form:      FERTIGE BINAERDATEI, unveraendert uebernommen."
 if [ -r "$LDSO" ]; then
     R=$(readlink -f "$LDSO")
     echo "   Datei:     $R"
     echo "   Groesse:   $(stat -c%s "$R") Oktette"
     echo "   SHA-256:   $(sha256sum "$R" | cut -d' ' -f1)"
-    echo "   Hinweis:   dieselbe Datei IST libc.so -- deshalb bringt sie"
-    echo "              dlopen/dlsym mit, ohne dass etwas hinzukommt."
+    echo "   Note:      the same file IS libc.so -- so it brings"
+    echo "              dlopen/dlsym along without anything being added."
 else
-    echo "   Datei:     NICHT VORHANDEN ($LDSO)"
+    echo "   File:      NOT PRESENT ($LDSO)"
 fi
 echo
-echo "2. DIE ZIELSOFTWARE  (optional -- nur zum Messen der Runde noetig)"
-echo "   Paket:     busybox          Ziel auf dem System: /bin/busybox"
+echo "2. THE TARGET SOFTWARE  (optional -- only needed to measure the round)"
+echo "   Package:   busybox          Target on the system: /bin/busybox"
 echo "   Ring:      3"
 echo "   Herkunft:  BusyBox, https://busybox.net/"
 echo "   Fassung:   1.36.1"
 echo "   Lizenz:    GPL-2.0-only"
 echo "   Form:      QUELLTEXT unveraendert, HIER gebaut (musl-gcc,"
-echo "              CONFIG_STATIC aus). Das Binaergebilde ist unseres,"
-echo "              der Quelltext ist fremd."
+echo "              CONFIG_STATIC off). The binary artifact is ours,"
+echo "              the source is foreign."
 if [ -r "$BBQUELLE" ]; then
     echo "   Quelle:    $BBQUELLE"
     echo "   SHA-256:   $(sha256sum "$BBQUELLE" | cut -d' ' -f1)"
@@ -55,8 +55,8 @@ if [ -r "$BBDYN" ]; then
     echo "   SHA-256:   $(sha256sum "$BBDYN" | cut -d' ' -f1)"
 fi
 echo
-echo "3. WAS VON UNS IST"
-echo "   kernel/ldr/elf.fi -- die einzige Kerndatei, die diese Runde anfasst."
+echo "3. WHAT IS OURS"
+echo "   kernel/ldr/elf.fi -- the only kernel file this round touches."
 BASE=$(git merge-base main dynlader 2>/dev/null || echo "")
 if [ -n "$BASE" ]; then
     git diff --numstat "$BASE"..dynlader -- kernel/ 2>/dev/null \
@@ -66,20 +66,20 @@ if [ -n "$BASE" ]; then
           | sed 's/^+//' | grep -cE '^\s*//')
     LEER=$(git diff "$BASE"..dynlader -- kernel/ldr/elf.fi | grep '^+' | grep -v '^+++' \
           | sed 's/^+//' | grep -cE '^\s*$')
-    echo "   davon Kommentar: $KOM, leer: $LEER, echter CODE: $((ZU - KOM - LEER))"
+    echo "   of which comment: $KOM, empty: $LEER, real CODE: $((ZU - KOM - LEER))"
 fi
-echo "   Keine Zeile fremden Codes im Kern. Kein uebernommenes ld.so,"
-echo "   kein abgeschriebener Relokationscode -- der fremde Lader wird"
+echo "   Not one line of foreign code in the kernel. No adopted ld.so,"
+echo "   no copied relocation code -- the foreign loader is"
 echo "   BENUTZT, nicht nachgebaut."
 echo
-echo "4. WAS IM GRUNDABBILD LIEGT"
+echo "4. WHAT IS IN THE BASE IMAGE"
 if grep -q 'ld-musl' tools/usbimg/build.sh 2>/dev/null; then
     echo "   ACHTUNG: tools/usbimg/build.sh nennt ld-musl -- der Interpreter"
-    echo "   waere damit im Standardabbild. Das widerspricht Regel 3."
+    echo "   would then be in the standard image. That contradicts rule 3."
 else
     echo "   NICHTS davon. tools/usbimg/build.sh nennt weder ld-musl noch"
-    echo "   ein dynamisches busybox; beide kommen als Paket (.opk)."
-    echo "   Geprueft mit: grep ld-musl tools/usbimg/build.sh -> kein Treffer."
+    echo "   a dynamic busybox; both come as a package (.opk)."
+    echo "   Checked with: grep ld-musl tools/usbimg/build.sh -> no hit."
 fi
 echo
 echo "=================================================================="

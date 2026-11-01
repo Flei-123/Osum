@@ -78,7 +78,7 @@ def main():
         return 1
 
     if (wh, hh) != (ws, hs):
-        print("FEHL: die Fotos sind verschieden gross (%dx%d gegen %dx%d)"
+        print("FAIL: the photos have different sizes (%dx%d versus %dx%d)"
               % (wh, hh, ws, hs))
         return 1
     w, h = wh, hh
@@ -93,8 +93,8 @@ def main():
                 diff.append((x, y))
 
     if not diff:
-        print("FEHL: die Fotos sind IDENTISCH -- dann hat der neue Weg")
-        print("      nichts geaendert, und die Messung misst nichts.")
+        print("FAIL: the photos are IDENTICAL -- then the new path")
+        print("      changed nothing, and the measurement measures nothing.")
         return 1
 
     xs = [p[0] for p in diff]
@@ -106,10 +106,10 @@ def main():
           % (len(diff), x0, x1, y0, y1, bw, bh))
 
     if bw > MAXPX or bh > MAXPX:
-        print("FEHL: der Unterschied ist groesser als ein Zeiger")
-        print("      (%dx%d, hoechstens %dx%d erwartet) -- dann ist"
+        print("FAIL: the difference is larger than a pointer")
+        print("      (%dx%d, at most %dx%d expected) -- then more"
               % (bw, bh, MAXPX, MAXPX))
-        print("      mehr verschieden als nur er.")
+        print("      differs than just it.")
         return 1
 
     def punkte(buf):
@@ -125,27 +125,27 @@ def main():
 
     dunkel = sum(1 for p in psw if sum(p) < 120)
     hell = sum(1 for p in psw if sum(p) > 600)
-    print("im Softwarebild an dieser Stelle: %d dunkle, %d helle Bildpunkte"
+    print("in the software image at this spot: %d dark, %d bright pixels"
           % (dunkel, hell))
     if dunkel < MIN_DUNKEL or hell < MIN_HELL:
-        print("FEHL: dort steht kein gemalter Zeiger (erwartet mindestens")
+        print("FAIL: no painted pointer there (expected at least")
         print("      %d dunkle und %d helle)." % (MIN_DUNKEL, MIN_HELL))
         return 1
 
     farben = set(phw)
-    print("im Hardwarebild an derselben Stelle: %d verschiedene Farben"
+    print("in the hardware image at the same spot: %d different colors"
           % len(farben))
     if len(farben) != 1:
-        print("FEHL: dort ist etwas gemalt -- mit Hardware-Zeiger muss die")
-        print("      Stelle glatter Grund sein, sonst steht er DOPPELT.")
+        print("FAIL: something is painted there -- with a hardware pointer the")
+        print("      spot must be plain background, otherwise it appears TWICE.")
         for f in sorted(farben)[:6]:
             print("      %r" % (f,))
         return 1
-    print("       und zwar einfarbig %r -- glatter Grund." % (phw[0],))
+    print("       and indeed uniform %r -- plain background." % (phw[0],))
 
     print()
-    print("BELEG: der Zeiger steht NUR im Softwarebild. Mit dem neuen Weg")
-    print("       traegt ihn das Geraet, das Bild bleibt unberuehrt.")
+    print("PROOF: the pointer is ONLY in the software image. With the new path")
+    print("       the device carries it, the image stays untouched.")
     return 0
 
 

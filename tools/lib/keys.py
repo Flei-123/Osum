@@ -119,7 +119,7 @@ def main(argv):
         i += 1
 
     if bereit and not warte_auf(seriell, bereit, ZEIT_BEREIT):
-        print("tasten: der Kern hat '%s' nicht gemeldet" % bereit)
+        print("keys: the kernel has '%s' nicht gemeldet" % bereit)
         return 1
 
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -140,19 +140,19 @@ def main(argv):
             time.sleep(0.02)
         dauer = time.time() - anfang
         if angekommen:
-            print("tasten: %2d/%d  %-10s angekommen nach %.2fs"
+            print("keys: %2d/%d  %-10s arrived after %.2fs"
                   % (nr, len(tasten), taste, dauer))
         else:
-            print("tasten: %2d/%d  %-10s NICHT angekommen (%.1fs gewartet)"
+            print("keys: %2d/%d  %-10s NOT arrived (waited %.1fs)"
                   % (nr, len(tasten), taste, dauer))
             fehlend.append(taste)
     s.close()
 
     if fehlend:
-        print("tasten: %d von %d Tasten kamen nicht an: %s"
+        print("keys: %d of %d keys did not arrive: %s"
               % (len(fehlend), len(tasten), " ".join(fehlend)))
         return 1
-    print("tasten: alle %d Tasten sind ueber IRQ1 angekommen" % len(tasten))
+    print("keys: all %d keys arrived via IRQ1" % len(tasten))
     return 0
 
 

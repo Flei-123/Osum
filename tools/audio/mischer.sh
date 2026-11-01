@@ -26,7 +26,7 @@ num() { local n=$1 v=$2 op=$3 s=$4
 
 echo "== bauen =="
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/build.txt" 2>&1 \
-    || { echo "der Kern baut nicht:"; tail -20 "$OUT/build.txt"; exit 1; }
+    || { echo "the kernel does not build:"; tail -20 "$OUT/build.txt"; exit 1; }
 as --64 -o "$OUT/crt.o" kernel/user/crt.s 2>/dev/null
 for p in $PROGS; do
     "$FIRNC" -o "$OUT/$p.o" "kernel/user/$p.fi" > "$OUT/$p.log" 2>&1 \
@@ -63,7 +63,7 @@ pruef() { local n=$1; shift
     --rate 48000 "$@" > "$OUT/$n.chk" 2>&1; sed 's/^/    /' "$OUT/$n.chk"; }
 
 echo
-echo "== 1. ZWEI PROGRAMME GLEICHZEITIG =="
+echo "== 1. TWO PROGRAMS AT THE SAME TIME =="
 lauf zwei "/bin/play /a4.wav &;/bin/play /b6.wav"
 pruef zwei
 num "440 Hz ist da"            "$(w zwei p1)"      ge 2000
@@ -90,10 +90,10 @@ num "voller Strom steuert wie die Quelle aus" "$mv" ge 11000
 num "auf 25 % gestellt ist die Amplitude ein Viertel" "$ml" le 3600
 num "und sie ist nicht null"                          "$ml" ge 2400
 num "keine Luecke"  "$(w leise gaps)" eq 0
-echo "    (voll max=$mv, auf 25 % max=$ml -- erwartet ist ein Viertel)"
+echo "    (full max=$mv, at 25 % max=$ml -- a quarter is expected)"
 
 echo
-echo "== 3. EIN STROM AUF NULL, DER ANDERE SPIELT WEITER =="
+echo "== 3. ONE STREAM TO ZERO, THE OTHER KEEPS PLAYING =="
 lauf stumm "/bin/play -v 0 /a4.wav &;/bin/play /b6.wav"
 pruef stumm --bis-ms 4800
 num "der stummgestellte Ton ist WEG" "$(w stumm p1)" le 300
@@ -111,7 +111,7 @@ num "aber er macht nicht still"                  "$mm" ge 4000
 num "beide Toene sind weiter da (440)" "$(w master p1)" ge 400
 num "beide Toene sind weiter da (660)" "$(w master p2)" ge 400
 num "keine Luecke"                     "$(w master gaps)" eq 0
-echo "    (ohne Master max=$mz, mit Master 50 % max=$mm)"
+echo "    (without master max=$mz, with master 50 % max=$mm)"
 
 echo
 echo "== 5. SAETTIGUNG STATT UMLAUF =="

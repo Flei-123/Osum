@@ -350,10 +350,10 @@ def main(argv):
             print("== %s fehlt ==" % kdatei)
             fehler += 1
         elif ist != soll:
-            print("== %s weicht von der Zeichnung ab ==" % kdatei)
+            print("== %s deviates from the drawing ==" % kdatei)
             fehler += 1
         else:
-            print("== %s stimmt Oktett fuer Oktett mit der Zeichnung ==" % kdatei)
+            print("== %s matches the drawing octet for octet ==" % kdatei)
         print("icons: %d Beanstandungen" % fehler)
         return 1 if fehler else 0
     print(__doc__)

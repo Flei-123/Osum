@@ -95,14 +95,14 @@ def main(argv):
                 falsch += 1
     if nicht:
         if falsch * 4 >= deckend:
-            print("ok nicht da: %d von %d anders" % (falsch, deckend))
+            print("ok not there: %d of %d different" % (falsch, deckend))
             return 0
-        print("da, sollte aber nicht: nur %d von %d anders" % (falsch, deckend))
+        print("there, but should not be: only %d of %d different" % (falsch, deckend))
         return 1
     if falsch:
-        print("falsch %d von %d" % (falsch, deckend))
+        print("wrong %d of %d" % (falsch, deckend))
         return 1
-    print("ok %d von %d gleich" % (deckend, deckend))
+    print("ok %d of %d equal" % (deckend, deckend))
     return 0
 
 

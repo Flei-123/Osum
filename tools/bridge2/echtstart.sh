@@ -11,7 +11,7 @@ ok(){ pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad(){ fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 hm(){ offen=$((offen+1)); printf '  OFFEN %s\n' "$1"; }
 
-echo "== 0. Kern und Wurzel =="
+echo "== 0. kernel and root =="
 KERN=${KERN:-/tmp/usbimg/osum.mb}
 WURZEL=${WURZEL:-/tmp/usbimg/root.img}
 [ -s "$KERN" ]   || { echo "FEHLT: $KERN (tools/usbimg/build.sh laufen lassen)"; exit 1; }
@@ -20,7 +20,7 @@ echo "   Kern   $KERN ($(stat -c%s "$KERN") Oktette)"
 echo "   Wurzel $WURZEL ($(stat -c%s "$WURZEL") Oktette)"
 echo
 
-echo "== A. KEIN DHCP-SERVER IM NETZ =="
+echo "== A. NO DHCP SERVER ON THE NETWORK =="
 cp "$WURZEL" "$W/a.img"
 timeout 120 qemu-system-x86_64 -kernel "$KERN" -m 1024 \
     -append "osum nokbd nosched noproc nofs gfx nocursor nic dhcp nsvc=0 nwait=0 script=jarvisd --diagnose;exit" \
@@ -32,21 +32,21 @@ timeout 120 qemu-system-x86_64 -kernel "$KERN" -m 1024 \
 echo "   --- was jarvisd sagt ---"
 grep -a 'jarvisd:' "$W/a.txt" 2>/dev/null | sed 's/^/   /'
 if grep -qa 'jarvisd:' "$W/a.txt"; then
-    ok "jarvisd startet und laeuft an, auch ohne DHCP-Server"
+    ok "jarvisd starts and runs, even without a DHCP server"
 else
-    bad "jarvisd kommt gar nicht erst hoch"
+    bad "jarvisd does not come up at all"
 fi
 if grep -qa 'kein .server = ' "$W/a.txt"; then
-    ok "es haelt AB WERK an und sagt warum (keine Serveradresse) -- Absicht"
-    echo "        -> auf Justins Rechner muss EINMAL `jarvisctl` die Adresse setzen"
+    ok "it STOPS BY DEFAULT and says why (no server address) -- intended"
+    echo "        -> on Justin's machine `jarvisctl` must set the address ONCE"
 elif grep -qa 'keine Adresse\|DHCP hat nichts gebracht\|KEIN TOR' "$W/a.txt"; then
-    ok "es SAGT, dass keine Adresse/kein Tor da ist -- statt stumm zu haengen"
+    ok "it SAYS that there is no address/no gateway -- instead of hanging silently"
 else
     hm "keine Klartextmeldung gefunden"
 fi
 echo
 
-echo "== A2. MIT Serveradresse, weiterhin KEIN DHCP =="
+echo "== A2. WITH server address, still NO DHCP =="
 cat > "$W/rechte.conf" <<CONF
 server         = 10.0.2.99:8090
 servername     = store.fleitec.com
@@ -67,7 +67,7 @@ timeout 120 qemu-system-x86_64 -kernel "$KERN" -m 1024 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$W/a2.qemu" 2>&1
 grep -a 'jarvisd:\|dhcp:' "$W/a2.txt" 2>/dev/null | head -12 | sed 's/^/   /'
 if grep -qa 'jarvisd: no connection\|jarvisd: waiting' "$W/a2.txt"; then
-    ok "ohne DHCP/ohne Gegenstelle: es WARTET und haemmert nicht"
+    ok "without DHCP/without peer: it WAITS and does not hammer"
 else
     hm "kein Warte-/Wiederholverhalten in der Ausgabe erkennbar"
 fi
@@ -78,7 +78,7 @@ echo
 # ------------------------------------------------------------------
 # C. DER PAIRING CODE
 # ------------------------------------------------------------------
-echo "== C. PAIRING CODE: wird er angezeigt, und wie lange? =="
+echo "== C. PAIRING CODE: is it shown, and for how long? =="
 grep -na --text -n 'kopplung' kernel/app/jarvisd.fi | head -3 | sed 's/^/   /'
 echo "   (Anzeige: /var/jarvis/pairing + Konsole, siehe jarvisd.fi Kopf)"
 echo

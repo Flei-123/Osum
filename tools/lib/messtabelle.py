@@ -99,7 +99,7 @@ def main():
         if ea and eb and ea["ok"] and not eb["ok"]:
             rot.append(n)
 
-    print(f"| **Summe der Abschnitte** | **{sum_a/1000:.0f} s** | **{sum_b/1000:.0f} s** "
+    print(f"| **Sum of the sections** | **{sum_a/1000:.0f} s** | **{sum_b/1000:.0f} s** "
           f"| **{sum_a/sum_b:.1f}x** | | |" if sum_b else "")
     if a_s and b_s:
         print(f"| **Wanduhr, ganze Abnahme** | **{a_s} s** | **{b_s} s** "
@@ -112,7 +112,7 @@ def main():
     if rot:
         print(f"\nUNTER KVM ROT GEWORDEN ({len(rot)}): " + ", ".join(rot))
     else:
-        print("\nKein Abschnitt ist unter KVM rot geworden.")
+        print("\nNo section turned red under KVM.")
     return 0
 
 

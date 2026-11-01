@@ -255,7 +255,7 @@ has "$EF" "taskbar: text net" "die Taskleiste meldet ihr Netzfeld"
 grep -a 'taskbar: text net' "$EF" | tail -1 | grep -q 'no network' \
     && ok "auf Englisch: no network" || bad "the taskbar is not English"
 grep -a 'taskbar: text net' "$DF" | tail -1 | grep -q 'kein Netz' \
-    && ok "in German: kein Netz" || bad "the taskbar is not German"
+    && ok "in German: no network" || bad "the taskbar is not German"
 
 d=$(python3 tools/i18n/diff.py "$TMPD/en/en.ppm" "$TMPD/de/de.ppm" 2>&1)
 case "$d" in

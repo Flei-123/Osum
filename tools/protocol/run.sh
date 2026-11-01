@@ -74,7 +74,7 @@ num "Quellzeilen-Eintraege im Abbild" "$n" gt 20000
 
 bash tools/build-kernel.sh "$TMPD/knosym.mb" --ohne-symbole \
     > "$TMPD/build2.log" 2>&1 \
-    && ok "--ohne-symbole builds as well" || bad "--ohne-symbole does not build"
+    && ok "--without-symbols builds as well" || bad "--without-symbols does not build"
 if [ -f "$TMPD/knosym.mb" ]; then
     a=$(stat -c%s "$K0"); b=$(stat -c%s "$TMPD/knosym.mb")
     echo "        price of the tables: $((a - b)) octets ($a against $b)"

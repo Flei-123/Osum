@@ -63,7 +63,7 @@ def main():
     for rel in laeufer():
         p = ROOT / rel
         if not p.exists():
-            print(f"  ??  {rel}: gibt es nicht")
+            print(f"  ??  {rel}: does not exist")
             continue
         n, wie = umstellen(p, pruefen)
         if n > 0:
@@ -86,11 +86,11 @@ def main():
                    if "timeout" in z and "-accel" not in z
                    and not any(s in z for s in SPERRE)]
         if schlimm:
-            print("\nWARNUNG -- diese Zeilen starten noch ohne -accel:")
+            print("\nWARNING -- these lines still start without -accel:")
             for z in schlimm:
                 print("   " + z)
         else:
-            print("Gegenprobe: kein Start ohne -accel mehr uebrig "
+            print("control run: no start without -accel left "
                   "(ausser den drei gesperrten Dateien).")
     return 0
 

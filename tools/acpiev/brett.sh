@@ -45,11 +45,11 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-echo "Diese Datei ist eine ANLEITUNG und kein Testlauf."
-echo "Sie beschreibt, was auf echter Hardware nachzumessen ist."
+echo "This file is a GUIDE and not a test run."
+echo "It describes what has to be measured on real hardware."
 echo
 echo "Kernelzeile:   acpiev evdump evself"
-echo "Bei Verdacht:  acpiev amldump   (Tabellen auf die Leitung)"
+echo "If in doubt:  acpiev amldump   (tables onto the wire)"
 echo
-echo "Die Schritte stehen im Kopf dieser Datei:"
+echo "The steps are in the header of this file:"
 sed -n '/^# *5\. JETZT DIE HARDWARE/,/^# *6\./p' "$0" | sed 's/^# \{0,1\}//'

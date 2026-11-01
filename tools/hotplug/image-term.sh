@@ -53,7 +53,7 @@ printf 'from linux to stick\n' > "$ARB/host.txt"
 mcopy -i "$ARB/stick.part" "$ARB/host.txt" ::host.txt
 dd if="$ARB/stick.part" of="$ARB/stick.img" bs=512 seek=2048 conv=notrunc status=none
 rm -f "$ARB/stick.part"
-echo "  Stick: FAT32, MBR, eine Datei des Wirts"
+echo "  stick: FAT32, MBR, one file from the host"
 
 SKRIPT='eject;sleep 12;ls /medien/usb0;eject;sleep 12;cat /medien/usb0/host.txt;eject 0;eject;sleep 8'
 
@@ -90,14 +90,14 @@ while [ $i -lt 200 ]; do kill -0 "$QP" 2>/dev/null || break; sleep 0.5; i=$((i+1
 kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
 
 echo
-echo "== was die Maschine gemeldet hat =="
+echo "== what the machine reported =="
 grep -aE 'wechsel:|usb: msc|ejected|/medien/usb0|host.txt' "$ARB/seriell.txt" \
     | sed 's/^/  /' | head -14
 
 echo
 echo "== die Bilder =="
 for n in 10-vorher 20-steckt 30-danach; do
-    [ -s "$ARB/$n.ppm" ] || { echo "  $n: kein Bild"; continue; }
+    [ -s "$ARB/$n.ppm" ] || { echo "  $n: no image"; continue; }
     python3 -c "
 from PIL import Image
 Image.open('$ARB/$n.ppm').save('$AUS/$n.png')

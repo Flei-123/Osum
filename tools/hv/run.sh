@@ -53,7 +53,7 @@ APPEND="$BASIS hv gastlauf gastmess gastcr gastlang gastgeraet"
 
 # ------------------------------------------------------------ Abschnitt 0
 #
-echo "== 0. was diese Umgebung ueberhaupt kann =="
+echo "== 0. what this environment can do at all =="
 
 probe_feature() { # feature datei
     ( qemu-system-x86_64 -accel tcg -machine q35 -cpu "qemu64,+$1" \
@@ -66,27 +66,27 @@ probe_feature() { # feature datei
 
 probe_feature vmx "$TMPD/vmx.txt"
 if grep -qa "TCG doesn't support requested feature: CPUID.01H:ECX.vmx" "$TMPD/vmx.txt"; then
-    ok "TCG kann VT-x NICHT -- das ist der Grund, warum diese Runde AMD-V ist"
+    ok "TCG cannot do VT-x -- that is why this round is AMD-V"
 else
-    bad "TCG meldet vmx nicht mehr als fehlend -- die Begruendung dieser Runde pruefen"
+    bad "TCG no longer reports vmx as missing -- check the reasoning of this round"
     head -3 "$TMPD/vmx.txt" | sed 's/^/        /'
 fi
 
 probe_feature svm "$TMPD/svm.txt"
 if grep -qa "doesn't support requested feature" "$TMPD/svm.txt"; then
-    bad "TCG kann SVM nicht mehr -- dann ist diese Runde nicht messbar"
+    bad "TCG can no longer do SVM -- then this round is not measurable"
 else
-    ok "TCG kann SVM -- die Grundlage dieser Runde"
+    ok "TCG can do SVM -- the basis of this round"
 fi
 
 KB=$(grep -oE 'KDATA_SIZE, 0x[0-9A-Fa-f]+' kernel/arch/x86_64/boot.s | grep -oE '0x[0-9A-Fa-f]+')
 KS=$(grep -oE 'KDATA_SIZE: u64 = 0x[0-9A-Fa-f]+' kernel/lib/kstate.fi | grep -oE '0x[0-9A-Fa-f]+$')
-[ "$KB" = "$KS" ] && ok "kdata ist in boot.s und kstate.fi dieselbe Zahl ($KB)" \
+[ "$KB" = "$KS" ] && ok "kdata is the same number in boot.s and kstate.fi ($KB)" \
     || bad "kdata: boot.s sagt $KB, kstate.fi sagt $KS"
 
 python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1 \
-    && ok "die Karte von kdata ist ueberschneidungsfrei ($(tail -1 "$TMPD/karte.txt"))" \
-    || { bad "die Karte von kdata kollidiert"; sed 's/^/        /' "$TMPD/karte.txt" | head -6; }
+    && ok "the map of kdata is overlap-free ($(tail -1 "$TMPD/karte.txt"))" \
+    || { bad "the map of kdata collides"; sed 's/^/        /' "$TMPD/karte.txt" | head -6; }
 
 ZUSAGEN=(
  "the processor can do svm"
@@ -134,7 +134,7 @@ for stufe in 0 1; do
     echo "== Stufe $stufe: firnc$stufe =="
     IMG="$TMPD/osum$stufe.mb"
     if ! bash tools/build-kernel.sh "$IMG" --stufe "$stufe" > "$TMPD/build$stufe.log" 2>&1; then
-        bad "firnc$stufe: der Kernel cannot be built"
+        bad "firnc$stufe: the kernel cannot be built"
         sed 's/^/        /' "$TMPD/build$stufe.log" | head -10
         continue
     fi
@@ -144,7 +144,7 @@ for stufe in 0 1; do
     rc=0
     run_kernel "$IMG" "$APPEND" "$OUT" 200 || rc=$?
     if [ "$rc" -eq 21 ]; then
-        ok "firnc$stufe: der Kernel beendet sich selbst (21), keine Ausnahme"
+        ok "firnc$stufe: the kernel exits by itself (21), no exception"
     else
         bad "firnc$stufe: Beendigungscode $rc, erwartet 21"
         tail -20 "$OUT" | sed 's/^/        /'
@@ -207,9 +207,9 @@ NPT="$TMPD/nonpt.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv nonpt" "$NPT" 25 || rc=$?
 if [ "$rc" -eq 124 ]; then
-    ok "GEGENPROBE nonpt: ohne NPT kommt der erste Gast nie zurueck (Zeitlimit)"
+    ok "CONTROL RUN nonpt: without NPT the first guest never returns (time limit)"
 else
-    bad "GEGENPROBE nonpt: Beendigungscode $rc -- erwartet war der Zusammenbruch (124)"
+    bad "CONTROL RUN nonpt: exit code $rc -- the collapse (124) was expected"
 fi
 has    "$NPT" "hv: OK  it can do nested page tables" "nonpt: bis dahin lief alles"
 hasnot "$NPT" "guest 1 signed off" "nonpt: aber KEIN Gast meldet sich mehr ab"
@@ -218,7 +218,7 @@ FREI="$TMPD/gastfrei.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv gastlauf gastfrei" "$FREI" 25 || rc=$?
 if [ "$rc" -eq 124 ]; then
-    ok "GEGENPROBE gastfrei: ohne V_INTR_MASKING behaelt der Laeufer den Prozessor"
+    ok "CONTROL RUN guestfree: without V_INTR_MASKING the runner keeps the processor"
 else
     bad "GEGENPROBE gastfrei: Beendigungscode $rc -- erwartet war 124"
 fi
@@ -227,7 +227,7 @@ hasnot "$FREI" "the host took the runaway guest" "gastfrei: der Wirt holt ihn NI
 NOS="$TMPD/nosvm.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv nosvm" "$NOS" 150 || rc=$?
-[ "$rc" -eq 21 ] && ok "GEGENPROBE nosvm: der Kernel lebt auch ohne SVM (21)" \
+[ "$rc" -eq 21 ] && ok "CONTROL RUN nosvm: the kernel lives even without SVM (21)" \
     || bad "GEGENPROBE nosvm: Beendigungscode $rc statt 21"
 has    "$NOS" "counter-check nosvm: SVM stays off" "nosvm: der Kernel sagt es selbst"
 hasnot "$NOS" "hv: guest" "nosvm: keine einzige Gastmaschine"
@@ -254,11 +254,11 @@ rc=0
 timeout 150 qemu-system-x86_64 -kernel "$WORTDIR/k.mb" -cpu "$CPU" -m 256 \
     -append "$BASIS" -serial "file:$WORT" -display none -no-reboot \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 || rc=$?
-[ "$rc" -eq 21 ] && ok "das Wort ist ein WORT: der Kernel lebt (21)" \
-    || bad "das Wort ist ein WORT: Beendigungscode $rc statt 21"
+[ "$rc" -eq 21 ] && ok "the word is a WORD: the kernel lives (21)" \
+    || bad "the word is a WORD: exit code $rc instead of 21"
 grep -qa "cmd=$WORTDIR" "$WORT" \
-    && ok "der Pfad mit 'hv' darin steht wirklich in der Kommandozeile" \
-    || bad "der Pfad steht nicht in der Kommandozeile -- die Probe misst nichts"
+    && ok "the path with 'hv' darin steht wirklich in der Kommandozeile" \
+    || bad "the path is not in the command line -- the probe measures nothing"
 has    "$WORT" "hv: skipped" "und der Kernel schweigt trotzdem"
 hasnot "$WORT" "hv: OK" "kein Wort im Pfad hat die Runde eingeschaltet"
 
@@ -267,12 +267,12 @@ rc=0
 timeout 200 qemu-system-x86_64 -kernel "$WORTDIR/k.mb" -cpu "$CPU" -m 256 \
     -append "$BASIS hv" -serial "file:$WORT2" -display none -no-reboot \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 || rc=$?
-[ "$rc" -eq 21 ] && ok "mit dem Wort laeuft aus demselben Pfad alles (21)" \
-    || bad "mit dem Wort: Beendigungscode $rc statt 21"
+[ "$rc" -eq 21 ] && ok "with the word everything runs from the same path (21)" \
+    || bad "with the word: exit code $rc instead of 21"
 has "$WORT2" "hv: OK  every frame of every guest came back" \
     "und zwar vollstaendig"
 
-echo "== die Gegenproben der Runde HV2 =="
+echo "== the control runs of round HV2 =="
 
 LME="$TMPD/ohnelme.txt"
 rc=0
@@ -294,7 +294,7 @@ has "$LME2" "hv: OK  guest 7 reached LONG MODE" \
 DEV="$TMPD/geraet.txt"
 rc=0
 run_kernel "$TMPD/osum0.mb" "$BASIS hv gastgeraet" "$DEV" 150 || rc=$?
-[ "$rc" -eq 21 ] && ok "GEGENPROBE Geraete: der Kernel lebt (21)" \
+[ "$rc" -eq 21 ] && ok "CONTROL RUN devices: the kernel lives (21)" \
     || bad "GEGENPROBE Geraete: Beendigungscode $rc statt 21"
 has "$DEV" "hv: OK  the uart scratch register really holds 0x5A" \
     "Geraete: das Kratzregister gibt zurueck, was hineingeschrieben wurde"

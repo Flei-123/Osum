@@ -53,27 +53,27 @@ Image.open('$OUT/$n.ppm').save('$OUT/$n.png')
 " 2>/dev/null && rm -f "$OUT/$n.ppm"
 done
 
-echo "== was nach dem Kettenstart auf dem Schirm steht"
+echo "== what is on the screen after the chain start"
 if [ -s "$OUT/kette.png" ]; then
     tesseract "$OUT/kette.png" - 2>/dev/null | grep -v '^\s*$' | head -8 | sed 's/^/        /'
 fi
-echo "== und auf der seriellen Leitung"
+echo "== and on the serial line"
 tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -a 'BEWEIS' | head -3 | sed 's/^/        /'
 
 if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qa 'KETTENSTART HAT FUNKTIONIERT'; then
-    ok "DER KETTENSTART LAEUFT -- der fremde Bootmanager meldet sich"
+    ok "THE CHAIN START RUNS -- the foreign boot manager reports"
 else
-    bad "der fremde Bootmanager hat sich nicht gemeldet"
+    bad "the foreign boot manager did not report"
 fi
 if [ -s "$OUT/kette.png" ] && tesseract "$OUT/kette.png" - 2>/dev/null | grep -qi 'KETTENSTART'; then
-    ok "und er steht auch AUF DEM SCHIRM"
+    ok "and it is also ON THE SCREEN"
 else
-    bad "auf dem Schirm steht er nicht"
+    bad "it is not on the screen"
 fi
 if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qa 'desk: start'; then
-    bad "es hat ${MARKE_PRODUKT} gestartet statt des fremden Systems"
+    bad "it started ${MARKE_PRODUKT} instead of the foreign system"
 else
-    ok "${MARKE_PRODUKT} wurde NICHT gestartet -- es war wirklich der zweite Eintrag"
+    ok "${MARKE_PRODUKT} was NOT started -- it really was the second entry"
 fi
 
 printf '\n=======================================================\n'

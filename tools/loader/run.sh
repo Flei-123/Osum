@@ -24,7 +24,7 @@ for t in qemu-system-x86_64 python3 curl; do
     command -v "$t" >/dev/null 2>&1 || { echo "LADEN: uebersprungen, $t fehlt"; exit 0; }
 done
 curl -sS -o /dev/null --max-time 20 "$BASIS/VERZEICHNIS" \
-    || { echo "LADEN: uebersprungen, $BASIS ist nicht erreichbar"; exit 0; }
+    || { echo "LOADER: skipped, $BASIS is not reachable"; exit 0; }
 
 echo "== 1. die Pakete =="
 bash tools/loader/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
@@ -42,7 +42,7 @@ for p in "$OUT"/stand/*.opk; do
 done
 gleich "jedes Paket traegt start, INFO und symbol (fehlende)" "$fehlt" "0"
 
-echo "== 2. die Auslieferung, von aussen geholt =="
+echo "== 2. the delivery, fetched from outside =="
 for f in VERZEICHNIS VERZEICHNIS.sig INDEX INDEX.sig; do
     code=$(curl -sS -o "$OUT/netz-$f" -w '%{http_code}' --max-time 30 "$BASIS/$f")
     gleich "curl holt $f" "$code" "200"
@@ -50,12 +50,12 @@ done
 N=$(grep -c '^paket' "$OUT/netz-VERZEICHNIS" 2>/dev/null)
 FASS=$(awk -F'\t' '$1=="fassung"{print $2}' "$OUT/netz-VERZEICHNIS")
 NAMEN=$(awk -F'\t' '$1=="paket"{print $2}' "$OUT/netz-VERZEICHNIS")
-[ "${N:-0}" -ge 8 ] && ok "das signierte VERZEICHNIS nennt $N Pakete (Fassung $FASS)" \
-    || bad "das signierte VERZEICHNIS nennt nur ${N:-0} Pakete"
+[ "${N:-0}" -ge 8 ] && ok "the signed DIRECTORY lists $N packages (version $FASS)" \
+    || bad "the signed DIRECTORY lists only ${N:-0} packages"
 OHNE=$(awk -F'\t' '$1=="paket" && ($7=="" || ($7!="osum-x86_64" && $7!="osum-any")){n++} END{print n+0}' "$OUT/netz-VERZEICHNIS")
 gleich "jede Paketzeile traegt eine Plattform fuer x86_64 (ohne/fremd)" "$OHNE" "0"
 
-echo "== 3./4. Liste und Installation, in QEMU, ueber den NAMEN =="
+echo "== 3./4. list and installation, in QEMU, via the NAME =="
 bash tools/loader/abbild.sh "$OUT" > "$OUT/abbild.log" 2>&1 \
     && ok "Abbild gebaut" || { bad "abbild.sh"; tail -10 "$OUT/abbild.log"; exit 1; }
 cp -f "$OUT/platte/disk.img" "$OUT/text.img"
@@ -83,7 +83,7 @@ for p in $NAMEN; do
         || bad "opk list kennt $p nicht"
 done
 
-echo "== 5. der Schreibtisch, und ein Programm aus dem Laden laeuft =="
+echo "== 5. the desktop, and a program from the store runs =="
 cp -f "$OUT/text.img" "$OUT/lauf.img"
 python3 tools/themestore/click.py 300,250 > "$OUT/k-start.txt"
 echo "warte 2" >> "$OUT/k-start.txt"
@@ -91,7 +91,7 @@ python3 tools/loader/tippen.py "explorer" --warte 25 >> "$OUT/k-start.txt"
 LADEN_WARTE=15 LADEN_KILL=ja bash tools/loader/lauf.sh a3 \
     "$GUI" 900 "wm: dauer" "$OUT/k-start.txt" > /dev/null 2>&1
 [ -s "$OUT/a3.png" ] && ok "Bild a3.png ($(stat -c%s "$OUT/a3.png") Oktette)" \
-    || bad "kein Bild a3.png"
+    || bad "no image a3.png"
 
 echo "== 6. die Gegenprobe: beschaedigte Pakete =="
 cp -f "$OUT/platte/disk.img" "$OUT/boese.img"
@@ -107,7 +107,7 @@ hat "$OUT/a4.txt" "opk: SIGNATURE WRONG -- the package is REJECTED: /boese/hallo
 hat "$OUT/a4.txt" "(no packages)" \
     "und danach ist NICHTS installiert -- kein halbes Paket"
 
-echo "== 7. die Bilder werden gelesen, nicht angeschaut =="
+echo "== 7. the images are read, not looked at =="
 if command -v tesseract >/dev/null 2>&1; then
     for b in a3; do
         [ -s "$OUT/$b.png" ] || continue
@@ -119,10 +119,10 @@ Image.open(b + ".png").convert("RGB").resize((2560, 2048)).save(b + "-ocr.png")
 PY
         tesseract "$OUT/$b-ocr.png" "$OUT/$b-ocr" --psm 6 > /dev/null 2>&1
         [ -s "$OUT/$b-ocr.txt" ] && ok "$b: $(wc -w < "$OUT/$b-ocr.txt") Woerter aus dem Bild gelesen" \
-            || bad "$b: aus dem Bild ist kein Text zu holen"
+            || bad "$b: no text can be extracted from the image"
     done
 else
-    ok "uebersprungen: tesseract ist auf diesem Wirt nicht da"
+    ok "skipped: tesseract is not on this host"
 fi
 
 echo

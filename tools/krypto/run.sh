@@ -57,16 +57,16 @@ for kandidat in "${OSUM_KRYPTO_PY:-}" /root/.krypto-venv/bin/python python3; do
     fi
 done
 if ! "$PY" -c 'import argon2.low_level, cryptography' 2>/dev/null; then
-    echo "KRYPTO: uebersprungen -- argon2-cffi und/oder cryptography fehlen."
-    echo "  Ohne eine UNABHAENGIGE Umsetzung waere diese Abnahme ein"
+    echo "CRYPTO: skipped -- argon2-cffi and/or cryptography are missing."
+    echo "  Without an INDEPENDENT implementation this acceptance would be a"
     echo "  Selbstgespraech. Abhilfe:"
     echo "    python3 -m venv /root/.krypto-venv"
     echo "    /root/.krypto-venv/bin/pip install argon2-cffi cryptography"
     exit 0
 fi
-ok "das fremde Werkzeug ist da ($PY: argon2-cffi, cryptography)"
+ok "the foreign tool is there ($PY: argon2-cffi, cryptography)"
 if command -v argon2 >/dev/null 2>&1; then
-    ok "dazu der argon2-Befehl der Distribution (zweite fremde Umsetzung)"
+    ok "plus the argon2 command of the distribution (second foreign implementation)"
 fi
 
 # ---------------------------------------------------- 1. die Speicherkarte
@@ -83,16 +83,16 @@ hat "$TMPD/karte.txt" "0 collisions" "keine zwei Bereiche ueberschneiden sich"
 v=$(grep -aE "^const CRYPT_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 if [ "$(( v ))" = "$(( 0x113000 ))" ]; then
-    ok "CRYPT_OFF = $v -- genau die zugeteilte Adresse"
+    ok "CRYPT_OFF = $v -- exactly the assigned address"
 else
-    bad "CRYPT_OFF = ${v:-fehlt}, zugeteilt war 0x113000"
+    bad "CRYPT_OFF = ${v:-missing}, assigned was 0x113000"
 fi
 m=$(grep -aE "^const CRYPT_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 if [ "$(( v + m ))" -le "$(( 0x118000 ))" ]; then
-    ok "und endet bei $(printf '0x%X' $(( v + m ))), also nicht hinter 0x118000"
+    ok "and ends at $(printf '0x%X' $(( v + m ))), also nicht hinter 0x118000"
 else
-    bad "der Bereich ragt ueber 0x118000 hinaus"
+    bad "the range extends beyond 0x118000"
 fi
 
 mkdir -p "$TMPD/koll"
@@ -100,9 +100,9 @@ mkdir -p "$TMPD/koll"
 sed -i 's/^const CRYPT_OFF: u64 = 0x113000$/const CRYPT_OFF: u64 = 0x108000/' \
     "$TMPD/koll/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/koll" > "$TMPD/karte2.txt" 2>&1; then
-    bad "GEGENPROBE: CRYPT_OFF auf WMP_OFF gelegt und der Pruefer schweigt"
+    bad "CONTROL RUN: CRYPT_OFF placed on WMP_OFF and the checker stays silent"
 else
-    ok "GEGENPROBE: CRYPT_OFF auf WMP_OFF gelegt -- der Kartenpruefer schlaegt an"
+    ok "CONTROL RUN: CRYPT_OFF placed on WMP_OFF -- the map checker raises the alarm"
 fi
 
 # --------------------------------------------------------------- 2. bauen
@@ -118,7 +118,7 @@ fi
 
 mkdir -p .probe
 if $FIRNC tools/krypto/orakel.fi -o .probe/korakel 2> "$TMPD/orakel.err"; then
-    ok "tools/krypto/orakel.fi baut gegen lib/crypto/ (dieselben Dateien wie der Kern)"
+    ok "tools/krypto/orakel.fi builds against lib/crypto/ (the same files as the kernel)"
 else
     bad "tools/krypto/orakel.fi cannot be built"
     sed 's/^/        /' "$TMPD/orakel.err" | head -20
@@ -127,10 +127,10 @@ fi
 if [ "$(echo 'quatsch' | ./.probe/korakel)" = "FAIL" ]; then
     ok "das Orakel lehnt Unsinn ab (sagt FAIL)"
 else
-    bad "das Orakel sagt zu 'quatsch' nicht FAIL"
+    bad "the oracle says about 'quatsch' nicht FAIL"
 fi
 
-echo "== 3. die Rechnung gegen die Normen und gegen OpenSSL =="
+echo "== 3. the computation against the standards and against OpenSSL =="
 if [ "${OSUM_KRYPTO_SCHNELL:-0}" = 1 ]; then
     echo "  (uebersprungen, OSUM_KRYPTO_SCHNELL=1)"
 else
@@ -141,7 +141,7 @@ else
         g=$(echo "$z" | grep -oE '[0-9]+/[0-9]+' | cut -d/ -f1)
         n=$(echo "$z" | grep -oE '[0-9]+/[0-9]+' | cut -d/ -f2)
         if [ -n "$g" ] && [ "$g" = "$n" ]; then
-            ok "$gruppe: $g/$n gegen die fremde Umsetzung"
+            ok "$gruppe: $g/$n against the foreign implementation"
         else
             bad "$gruppe: ${g:-?}/${n:-?}"
             grep -a "$gruppe" "$TMPD/vekt.txt" | head -3 | sed 's/^/        /'
@@ -161,7 +161,7 @@ echo "== 4. anlegen, schreiben, NEUSTART, entsperren, nachrechnen =="
 BLOCKS=8192
 python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ > "$TMPD/mkfs.log" 2>&1 \
-    && ok "die Wurzelplatte steht" \
+    && ok "the root disk is up" \
     || bad "mkfs.py scheitert"
 
 KP="kryptot=1 kryptom=64 kryptop=1"
@@ -236,7 +236,7 @@ ksagt "$TMPD/d1.txt" "mount" 0 "aber ohne Passphrase haengt nichts ein"
 
 # --------------------------------------------------- 6. das Rohgeraet
 
-echo "== 6. das Rohgeraet: was sieht man ohne Passphrase? =="
+echo "== 6. the raw device: what can be seen without a passphrase? =="
 "$PY" tools/krypto/gegen.py roh "$TMPD/a.img" > "$TMPD/roh.txt" 2>&1
 sed 's/^/        /' "$TMPD/roh.txt"
 for s in "OFS-Superblock" "OFS-Kennung gedreht" "NTFS" "FAT"; do
@@ -250,7 +250,7 @@ num "keine lesbare Zeichenkette ab 16 Zeichen" "${txt:-99}" eq 0
 
 # ------------------------------------------ 7. der Schluesselplatz-Wechsel
 
-echo "== 7. die Passphrase wechseln, ohne die Daten anzufassen =="
+echo "== 7. change the passphrase without touching the data =="
 cp --sparse=always "$TMPD/root.img" "$TMPD/e.img"
 lauf e1 "$TMPD/e.img" "osum nopwr kryptoneu kryptobaum kryptopw=alt $KP"
 ksagt "$TMPD/e1.txt" "baum" 4 "der Baum steht (Passphrase 'alt')"
@@ -280,7 +280,7 @@ print("null=%d" % (1 if sl == b"\0" * 256 else 0))
 PYEOF
 ksagt "$TMPD/platz0.txt" "null" 1 "der geloeschte Platz ist genullt, nicht nur leer gemeldet"
 
-echo "== 8. die Gegenprobe mit fremden Augen, BEIDE Richtungen =="
+echo "== 8. the control run with foreign eyes, BOTH directions =="
 
 "$PY" tools/krypto/gegen.py lies "$TMPD/a.img" geheim > "$TMPD/g1.txt" 2>&1
 sed 's/^/        /' "$TMPD/g1.txt"
@@ -310,9 +310,9 @@ num "der Wirt liest zurueck, was ${MARKE_PRODUKT} auf SEINEN Traeger schrieb" \
 
 if "$PY" tools/krypto/gegen.py lies "$TMPD/a.img" falschefalsche \
         > "$TMPD/g5.txt" 2>&1; then
-    bad "GEGENPROBE: der Wirt macht mit der falschen Passphrase auf"
+    bad "CONTROL RUN: the host opens with the wrong passphrase"
 else
-    ok "GEGENPROBE: auch der Wirt macht mit der falschen Passphrase nicht auf"
+    ok "CONTROL RUN: the host does not open with the wrong passphrase either"
 fi
 
 # ------------------------------------------------------- 9. die Oberflaeche

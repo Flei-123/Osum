@@ -189,7 +189,7 @@ def main():
         if err:
             print(err)
             return 2
-        print("Nummern >= 1000, ueber ALLE Zweige gesehen:")
+        print("numbers >= 1000, seen across ALL branches:")
         for v in sorted(x for x in tab if x >= 1000):
             print("  %5d  %s" % (v, " ".join(sorted(tab[v]))))
         frei = [v for v in range(1000, 2200) if v not in tab]
@@ -236,10 +236,10 @@ def main():
     if fehler:
         for f in fehler:
             print("KOLLISION: %s" % f)
-        print("syscalls: %d im Kernel, %d in der libc, %d FEHLER"
+        print("syscalls: %d in the kernel, %d in libc, %d ERRORS"
               % (n_kern, n_libc, len(fehler)))
         return 1
-    print("syscalls: %d im Kernel, %d in der libc, %d gemeinsam, "
+    print("syscalls: %d in the kernel, %d in libc, %d common, "
           "keine Nummer doppelt, kein Name mit zwei Nummern"
           % (n_kern, n_libc,
              len(set(ohne_ausnahmen(kern)) & set(ohne_ausnahmen(libc)))))

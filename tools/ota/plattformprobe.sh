@@ -47,9 +47,9 @@ lauf() { # name skript [limit]
     sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/$1.txt" 2>/dev/null
 }
 
-echo "== 1. die drei Pakete: x86-64, AArch64 und reine Daten =="
+echo "== 1. the three packages: x86-64, AArch64 and pure data =="
 bash tools/install/pakete.sh "$OUT" > "$OUT/pak1.log" 2>&1 \
-    && ok "die beiden Fassungen von hallo (Wirt, signiert)" \
+    && ok "the two versions of hallo (host, signed)" \
     || { cat "$OUT/pak1.log"; bad "install/pakete.sh"; exit 1; }
 
 python3 - "$OUT" <<'PY' || exit 1
@@ -89,16 +89,16 @@ python3 "$OPK" quelle "$OUT/netzmix" --schluessel "$OUT/geheim.key" \
 python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/netzmix"/*.opk \
     > "$OUT/mixsig.log" 2>&1 || { cat "$OUT/mixsig.log"; bad "signpak"; exit 1; }
 
-echo "== 2. das VERZEICHNIS und seine sechste Spalte =="
+echo "== 2. the DIRECTORY and its sixth column =="
 python3 tools/ota/listing.py "$OUT/netzmix" --fassung 2 \
     --schluessel "$OUT/geheim.key" > "$OUT/vz.log" 2>&1 \
     && ok "$(grep -a VERZEICHNIS "$OUT/vz.log" | tr -s ' ')" \
     || { cat "$OUT/vz.log"; bad "listing.py"; exit 1; }
 V="$OUT/netzmix/VERZEICHNIS"
-grep -qa "^paket	hallo	.*	osum-x86_64$"    "$V" && ok "hallo traegt osum-x86_64 (aus dem ELF-Kopf)"    || bad "hallo: falsche Spalte -- $(grep -a '^paket	hallo	' "$V")"
+grep -qa "^paket	hallo	.*	osum-x86_64$"    "$V" && ok "hallo carries osum-x86_64 (from the ELF header)"    || bad "hallo: falsche Spalte -- $(grep -a '^paket	hallo	' "$V")"
 grep -qa "^paket	hallo-arm	.*	osum-aarch64$" "$V" && ok "hallo-arm traegt osum-aarch64"                  || bad "hallo-arm: falsche Spalte"
-grep -qa "^paket	daten	.*	osum-any$"        "$V" && ok "daten traegt osum-any (kein ELF)"                 || bad "daten: falsche Spalte"
-[ "$(head -1 "$V")" = OTA2 ] && ok "die Kennung bleibt OTA2 -- ein altes Geraet liest weiter" || bad "Kennung nicht OTA2"
+grep -qa "^paket	daten	.*	osum-any$"        "$V" && ok "daten carries osum-any (no ELF)"                 || bad "daten: falsche Spalte"
+[ "$(head -1 "$V")" = OTA2 ] && ok "the tag stays OTA2 -- an old device keeps reading" || bad "Kennung nicht OTA2"
 
 rm -rf "$OUT/netzalt"; cp -a "$OUT/netzmix" "$OUT/netzalt"
 python3 - "$OUT" "$OPK" <<'PY' || exit 1
@@ -118,9 +118,9 @@ assert m.ed25519_verify(m.ed25519_public(sk), roh, sig)
 open(p, "wb").write(roh)
 open(p + ".sig", "wb").write(sig)
 PY
-ok "eine zweite Quelle: bei 'daten' fehlt die Spalte, die Signatur stimmt"
+ok "a second source: at 'daten' fehlt die Spalte, die Signatur stimmt"
 
-echo "== 3. das Abbild (mit /bin/ota, /bin/fetch und der Wurzel) =="
+echo "== 3. the image (with /bin/ota, /bin/fetch and the root) =="
 cat > "$OUT/ota.conf" <<EOF
 quelle=https://10.0.2.2:$PORT
 name=ota.test
@@ -129,7 +129,7 @@ auto=nein
 frist=15
 EOF
 python3 tools/ota/mkcerts.py "$OUT/certs" ota.test 10.0.2.2 > "$OUT/certs.log" 2>&1 \
-    && ok "Zertifikate (Pythons cryptography, nicht dieses Repo)" \
+    && ok "certificates (Python's cryptography, not this repo)" \
     || { cat "$OUT/certs.log"; bad "mkcerts"; exit 1; }
 [ -s "$OUT/ziel.img" ] || head -c $((64 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
 OTA_ROOTS="$OUT/certs/ca.pem" OTA_CONF="$OUT/ota.conf" ZIEL_MIB=64 \
@@ -137,7 +137,7 @@ OTA_ROOTS="$OUT/certs/ca.pem" OTA_CONF="$OUT/ota.conf" ZIEL_MIB=64 \
     && ok "das Abbild ($(grep -a 'apps ' "$OUT/build.log" | tr -s ' '))" \
     || { tail -20 "$OUT/build.log"; bad "build.sh"; exit 1; }
 
-echo "== 4. der Lauf: die gemischte Quelle =="
+echo "== 4. the run: the mixed source =="
 dienst "$OUT/netzmix" && ok "die Gegenstelle laeuft (127.0.0.1:$PORT)" || bad "Gegenstelle"
 lauf mix "ota search;exit"
 cat "$OUT/mix.txt" | sed -n '/ota:/p' | head -20
@@ -148,8 +148,8 @@ hatnicht "$OUT/mix.txt" "hallo-arm" "hallo-arm wird NICHT angeboten"
 hat    "$OUT/mix.txt" "ota: hidden, for other platforms: 1" \
        "das Ausgeblendete wird gezaehlt und genannt"
 
-echo "== 5. der Lauf: ein VERZEICHNIS ohne die Spalte =="
-dienst "$OUT/netzalt" && ok "die Gegenstelle zeigt jetzt auf netzalt" || bad "Gegenstelle"
+echo "== 5. the run: a DIRECTORY without the column =="
+dienst "$OUT/netzalt" && ok "the peer now points to netzalt" || bad "Gegenstelle"
 lauf alt "ota search;exit"
 cat "$OUT/alt.txt" | sed -n '/ota:/p' | head -20
 hat "$OUT/alt.txt" "ota: hidden, no platform given: 1" \

@@ -18,17 +18,17 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 if [ -f tools/lib/qemu.sh ]; then . tools/lib/qemu.sh; fi
 QEMU=${QEMU_X86:-qemu-system-x86_64}
 
-echo "== 0. bauen: Kern und die Programme, aus DEMSELBEN Baum =="
+echo "== 0. build: kernel and programs, from the SAME tree =="
 export BRIDGE_PROGS="sh ls cat echo chmod rm jsig jarvisctl"
 if bash tools/bridge/build.sh "$TMPD/w0" 0 > "$TMPD/build.txt" 2>&1; then
     ok "Kern und Ring-3-Programme gebaut"
 else
-    bad "der Bau ist fehlgeschlagen"
+    bad "the build failed"
     tail -15 "$TMPD/build.txt" | sed 's/^/        /'
     echo "GERAETEKEY: $pass bestanden, $fail gescheitert"; exit 1
 fi
 K="$TMPD/w0/k.mb"
-[ -f "$TMPD/w0/jsig.elf" ] && ok "/bin/jsig liegt vor ($(stat -c%s "$TMPD/w0/jsig.elf") Oktette)" \
+[ -f "$TMPD/w0/jsig.elf" ] && ok "/bin/jsig is present ($(stat -c%s "$TMPD/w0/jsig.elf") Oktette)" \
     || bad "jsig.elf fehlt"
 
 cat > "$TMPD/rechte.conf" <<'CONF'
@@ -48,7 +48,7 @@ python3 tools/osum/mkfs.py build "$TMPD/platte.img" 16384 \
     "/bin/jarvisctl=$TMPD/w0/jarvisctl.elf" \
     "/etc/jarvis/permissions.conf=$TMPD/rechte.conf" \
     > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "die Wurzel steht auf der Platte ($(stat -c%s "$TMPD/platte.img") Oktette)" \
+    && ok "the root is on the disk ($(stat -c%s "$TMPD/platte.img") Oktette)" \
     || { bad "mkfs"; tail -6 "$TMPD/mkfs.txt" | sed 's/^/        /'; }
 
 start() { # <name> <skript>
@@ -64,18 +64,18 @@ start() { # <name> <skript>
 cp -f "$TMPD/platte.img" "$TMPD/frisch.img"
 NACHRICHT=4f2d303039   # "O-009" in Hex
 
-echo "== 1. Lauf 1: den Geraeteschluessel anlegen und unterschreiben =="
+echo "== 1. run 1: create and sign the device key =="
 start lauf1 "jsig init;jsig sign $NACHRICHT;exit"
 PUB1=$(grep -aoE '^pub [0-9a-f]{64}' "$TMPD/lauf1.txt" | head -1 | awk '{print $2}')
 SIG1=$(grep -aoE '^sig [0-9a-f]{128}' "$TMPD/lauf1.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB1" ]; then
-    ok "das Ed25519-Paar ist angelegt (pub ${PUB1:0:16}...)"
+    ok "the Ed25519 pair is created (pub ${PUB1:0:16}...)"
 else
-    bad "jsig hat keinen Schluessel geliefert"
+    bad "jsig delivered no key"
     tail -8 "$TMPD/lauf1.txt" | sed 's/^/        /'
 fi
 if [ -n "$SIG1" ]; then
-    ok "und eine Unterschrift darauf (${#SIG1} Hexziffern)"
+    ok "and a signature on it (${#SIG1} hex digits)"
 else
     bad "keine Unterschrift"
     tail -8 "$TMPD/lauf1.txt" | sed 's/^/        /'
@@ -85,19 +85,19 @@ echo "== 2. NEUSTART -- dieselbe Platte, neuer Kern =="
 start lauf2 "jsig init;jsig verify $PUB1 $NACHRICHT $SIG1;exit"
 PUB2=$(grep -aoE '^pub [0-9a-f]{64}' "$TMPD/lauf2.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB1" ] && [ "$PUB2" = "$PUB1" ]; then
-    ok "O-009: NACH DEM NEUSTART DERSELBE oeffentliche Teil -- kein zweites Koppeln noetig"
+    ok "O-009: AFTER THE RESTART THE SAME public part -- no second pairing needed"
 else
-    bad "O-009: der Schluessel hat den Neustart nicht ueberlebt (vorher ${PUB1:-?}, nachher ${PUB2:-?})"
+    bad "O-009: the key did not survive the restart (before ${PUB1:-?}, after ${PUB2:-?})"
     tail -8 "$TMPD/lauf2.txt" | sed 's/^/        /'
 fi
 if grep -qa '^yes$' "$TMPD/lauf2.txt"; then
-    ok "O-009: eine Unterschrift VON VOR dem Neustart verifiziert weiterhin"
+    ok "O-009: a signature FROM BEFORE the restart still verifies"
 else
-    bad "O-009: die alte Unterschrift verifiziert nach dem Neustart nicht"
+    bad "O-009: the old signature does not verify after the restart"
     tail -8 "$TMPD/lauf2.txt" | sed 's/^/        /'
 fi
 
-echo "== 3. mit fremden Augen: python-cryptography rechnet nach =="
+echo "== 3. with foreign eyes: python-cryptography recomputes =="
 if [ -n "$PUB1" ] && [ -n "$SIG1" ] && python3 -c 'import cryptography' 2>/dev/null; then
     python3 - "$PUB1" "$SIG1" "$NACHRICHT" > "$TMPD/fremd.txt" 2>&1 <<'PYFREMD'
 import sys
@@ -116,40 +116,40 @@ except InvalidSignature:
     print("GEGENPROBE-GUT")
 PYFREMD
     grep -qa '^GUT$' "$TMPD/fremd.txt" \
-        && ok "fremdes Werkzeug rechnet die ueberlebende Unterschrift nach" \
+        && ok "a foreign tool recomputes the surviving signature" \
         || { bad "python-cryptography verwirft die Unterschrift"; sed 's/^/        /' "$TMPD/fremd.txt"|head -4; }
     grep -qa '^GEGENPROBE-GUT$' "$TMPD/fremd.txt" \
-        && ok "GEGENPROBE: ueber eine andere Nachricht faellt sie durch" \
-        || bad "die Unterschrift passt auch auf eine andere Nachricht"
+        && ok "CONTROL RUN: over a different message it fails" \
+        || bad "the signature also fits a different message"
 else
-    echo "  [ -- ] python-cryptography fehlt: die fremde Gegenrechnung entfaellt"
+    echo "  [ -- ] python-cryptography missing: the foreign recomputation is skipped"
 fi
 
-echo "== 4. GEGENPROBE: zuruecksetzen -- und er MUSS weg sein =="
+echo "== 4. CONTROL RUN: reset -- and it MUST be gone =="
 start lauf3 "rm /etc/jarvis/device.key;jsig init;exit"
 PUB3=$(grep -aoE '^pub [0-9a-f]{64}' "$TMPD/lauf3.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB3" ] && [ -n "$PUB1" ] && [ "$PUB3" != "$PUB1" ]; then
-    ok "nach dem Zuruecksetzen entsteht ein ANDERER Schluessel (pub ${PUB3:0:16}...)"
+    ok "after the reset a DIFFERENT key appears (pub ${PUB3:0:16}...)"
 else
-    bad "nach dem Loeschen kam derselbe Schluessel wieder (${PUB3:-?}) -- dann liest jsig ihn nicht aus der Datei"
+    bad "after the deletion the same key came back (${PUB3:-?}) -- then jsig does not read it from the file"
     tail -8 "$TMPD/lauf3.txt" | sed 's/^/        /'
 fi
 start lauf4 "jsig verify $PUB3 $NACHRICHT $SIG1;exit"
 if grep -qa '^no$' "$TMPD/lauf4.txt"; then
-    ok "GEGENPROBE: die alte Unterschrift passt NICHT zum neuen Schluessel"
+    ok "CONTROL RUN: the old signature does NOT fit the new key"
 else
-    bad "die alte Unterschrift passt auch zum neuen Schluessel -- dann prueft jsig nicht"
+    bad "the old signature also fits the new key -- then jsig does not check"
     tail -6 "$TMPD/lauf4.txt" | sed 's/^/        /'
 fi
 
-echo "== 5. GEGENPROBE: eine Wurzel, die NICHT ueberlebt =="
+echo "== 5. CONTROL RUN: a root that does NOT survive =="
 if [ -z "${GK_WEGWERF:-}" ]; then
     GK_WEGWERF=1 OSUM_GK_TMP="$TMPD/gegen" OSUM_GK_KEEP=1 \
         bash "$0" > "$TMPD/gegen.txt" 2>&1
     if grep -qa 'der Schluessel hat den Neustart nicht ueberlebt' "$TMPD/gegen.txt"; then
-        ok "mit einer Wegwerfwurzel faellt O-009 durch -- die Abnahme misst wirklich das Ueberleben"
+        ok "with a throwaway root O-009 fails -- the acceptance really measures survival"
     else
-        bad "auch mit Wegwerfwurzel bleibt alles gruen -- dann misst diese Abnahme nichts"
+        bad "even with a throwaway root everything stays green -- then this acceptance measures nothing"
         grep -a 'FAIL\|OK    O-009' "$TMPD/gegen.txt" | head -5 | sed 's/^/        /'
     fi
     rm -rf "$TMPD/gegen"

@@ -38,7 +38,7 @@ num() { # name wert op erwartet
 
 between() { # name wert unten oben
     local name=$1 v=$2 lo=$3 hi=$4
-    if [ -z "$v" ]; then bad "$name: keine Zahl gefunden"; return; fi
+    if [ -z "$v" ]; then bad "$name: no number found"; return; fi
     if [ "$v" -ge "$lo" ] && [ "$v" -le "$hi" ]; then ok "$name: $v (erlaubt $lo..$hi)"
     else bad "$name: $v, erlaubt $lo..$hi"; fi
 }

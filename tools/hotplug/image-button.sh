@@ -74,7 +74,7 @@ printf 'from linux to stick\n' > "$ARB/host.txt"
 mcopy -i "$ARB/stick.part" "$ARB/host.txt" ::host.txt
 dd if="$ARB/stick.part" of="$ARB/stick.img" bs=512 seek=2048 conv=notrunc status=none
 rm -f "$ARB/stick.part"
-echo "  Stick: FAT32, MBR, eine Datei des Wirts"
+echo "  stick: FAT32, MBR, one file from the host"
 
 cp "$ARB/disk.img" "$ARB/live-knopf.img"
 
@@ -84,7 +84,7 @@ python3 tools/hotplug/button.py "$ARB" "$AUS"
 RC=$?
 
 echo
-echo "== was die Maschine gemeldet hat =="
+echo "== what the machine reported =="
 grep -aE 'wechsel:|explorer: orte |explorer: eject|explorer: ausknopf' \
     "$ARB/knopf-seriell.txt" 2>/dev/null | sed 's/^/  /' | head -14
 echo "  (Arbeitsverzeichnis: $ARB)"
