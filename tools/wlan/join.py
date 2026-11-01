@@ -8,6 +8,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from gegenstelle import Authenticator, Zugangspunkt, ptk_ableiten, pmk_aus_psk, ip2i
+from gegenstelle import dhcp_ack_bauen, udp_bauen, ipv4_bauen
 from weg import beacon_bauen
 
 BIN = sys.argv[1]
@@ -23,6 +24,21 @@ SNONCE = b"\x44" * 32
 GTK = b"\x11" * 16
 XID = 0x12345678
 SNAP = bytes([0xAA, 0xAA, 3, 0, 0, 0, 0x88, 0x8E])
+ROUTERS = ["192.168.0.1", "192.168.0.254"]
+SERVERS = ["192.168.0.53", "9.9.9.9"]
+
+
+def addr_list(names):
+    return b"".join(struct.pack(">I", ip2i(n)) for n in names)
+
+
+def multi_addr_reply(zp, xid, kind, seq):
+    d = dhcp_ack_bauen(xid, zp.klient, zp.klient_ip, zp.server, zp.maske, zp.server, zp.server, art=kind)
+    one = struct.pack(">I", zp.server)
+    d = d.replace(bytes([3, 4]) + one, bytes([3, 4 * len(ROUTERS)]) + addr_list(ROUTERS), 1)
+    d = d.replace(bytes([6, 4]) + one, bytes([6, 4 * len(SERVERS)]) + addr_list(SERVERS), 1)
+    u = udp_bauen(zp.server, zp.klient_ip, 67, 68, d)
+    return zp._rahmen(ipv4_bauen(zp.server, zp.klient_ip, 17, u, 2), seq)
 
 
 def ok(cond, text):
@@ -71,7 +87,8 @@ def ref_assoc(ch, ssid=SSID):
 
 
 def scenario(pw=PW, ap_pw=PW, beacon="ok", auth=0, assoc=0, skip=(), tamper_m3=False,
-             ack_art=5, dhcp_key=None, ssid_beacon=SSID, offer_xid=XID, offer_art=2, stale_offer=False):
+             ack_art=5, dhcp_key=None, ssid_beacon=SSID, offer_xid=XID, offer_art=2, stale_offer=False,
+             multi_addr=False):
     pmk_ap = pmk_aus_psk(ap_pw, SSID)
     pmk_dev = pmk_aus_psk(pw, SSID)
     ap = Authenticator(SSID, ap_pw, BSSID, MAC, anonce=ANONCE, gtk=GTK,
@@ -84,6 +101,9 @@ def scenario(pw=PW, ap_pw=PW, beacon="ok", auth=0, assoc=0, skip=(), tamper_m3=F
     zp = Zugangspunkt(dhcp_key or tk, BSSID, MAC)
     offer = zp.dhcp_antwort(offer_xid, art=offer_art, seq=1)
     ack = zp.dhcp_antwort(XID, art=ack_art, seq=2)
+    if multi_addr:
+        offer = multi_addr_reply(zp, offer_xid, offer_art, 1)
+        ack = multi_addr_reply(zp, XID, ack_art, 2)
     if beacon == "ok":
         b = beacon_bauen(ssid_beacon, kanal=6, rsn=True, bssid=BSSID)
     elif beacon == "open":
@@ -152,7 +172,8 @@ def eapol_of(frame):
 
 def check_all():
     names = ["good", "wrong_pw", "auth_denied", "assoc_denied", "no_beacon", "other_ssid", "no_assoc",
-             "no_m1", "no_m3", "bad_m3_mic", "open_net", "no_offer", "nak", "foreign_dhcp", "wrong_xid", "ack_as_offer", "stale_offer"]
+             "no_m1", "no_m3", "bad_m3_mic", "open_net", "no_offer", "nak", "foreign_dhcp", "wrong_xid", "ack_as_offer", "stale_offer",
+             "multi_addr"]
     scs = {
         "good": scenario(),
         "wrong_pw": scenario(pw=b"falschespasswort"),
@@ -171,6 +192,7 @@ def check_all():
         "wrong_xid": scenario(offer_xid=XID + 1),
         "ack_as_offer": scenario(offer_art=5),
         "stale_offer": scenario(stale_offer=True),
+        "multi_addr": scenario(multi_addr=True),
     }
     out = run([scs[n][0] for n in names])
     runs = split_runs(out)
@@ -259,6 +281,10 @@ def check_all():
     ok(r["wrong_xid"].dhcp["rc"] == -201, "DHCP offer with a foreign xid is ignored")
     ok(r["ack_as_offer"].dhcp["rc"] == -201, "DHCP ACK where an offer belongs is refused")
     ok(r["stale_offer"].dhcp is not None and r["stale_offer"].dhcp["rc"] == 0 and r["stale_offer"].dhcp["kind"] == 5, "DHCP stale Offer before the ACK is skipped")
+    m = r["multi_addr"].dhcp
+    ok(m is not None and m["rc"] == 0 and m["gw"] == ip2i(ROUTERS[0]) and m["mask"] == ip2i("255.255.255.0"),
+       "DHCP router option with two addresses: gateway is the first one")
+    ok(m is not None and m["dns"] == ip2i(SERVERS[0]), "DHCP DNS option with two addresses: first server kept")
     ok(r["foreign_dhcp"].dhcp is not None and r["foreign_dhcp"].dhcp["rc"] == -201, "DHCP reply under a foreign key is dropped")
 
 

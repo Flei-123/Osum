@@ -26,5 +26,12 @@ mut 's/request_frame(o, sa, bssid, xid, (\*lease).ip, (\*lease).server)/request_
 mut 's/if dh.xid != xid { return false }/if false { return false }/' "DHCP xid ignored" dhcp_link.fi
 mut 's/if want_offer { return kind == llc.D_OFFER }/if want_offer { return true }/' "DHCP offer kind unchecked while selecting" dhcp_link.fi
 mut 's/return kind == llc.D_ACK || kind == llc.D_NAK/return true/' "DHCP stale Offer accepted while requesting" dhcp_link.fi
+mutl() {
+    rm -rf "$D/m"; mkdir -p "$D/m"; cp -r lib/. "$D/m/"
+    sed -i "$1" "$D/m/wlan/llc.fi"
+    if cmp -s lib/wlan/llc.fi "$D/m/wlan/llc.fi"; then bad "mutant did not change source: $2"; return; fi
+    if FIRNLIB="$D/m" $FIRNC tools/wlan/join.fi -o "$D/mm" 2> /dev/null && ! python3 -I tools/wlan/join.py "$D/mm" > /dev/null 2>&1; then ok "mutant caught: $2"; else bad "mutant NOT caught: $2"; fi
+}
+mutl 's/if l < 4 || (l % 4) != 0 { return 0 }/if l != 4 { return 0 }/' "DHCP address option with two addresses dropped"
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
