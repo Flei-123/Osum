@@ -5,18 +5,23 @@ export {
     exists, registered, mark_registered, set_link, link_is_up, set_mac,
     present_on, ready_on, up_on, mac_at_on, rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
     rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
-    rx_offer, rx_free, tx_take, tx_pending, FRAME_CAP
+    rx_offer, rx_free, tx_take, tx_pending, rx_drops, rx_queued, set_rx_depth, FRAME_CAP, RX_SLOTS
 }
 
 const FRAME_CAP: u64 = 1536
 const TX_SLOTS: u64 = 8
+const RX_SLOTS: u64 = 8
 
 static mut wn_avail: u64 = 0
 static mut wn_up: u64 = 0
 static mut wn_reg: u64 = 0
 static mut wn_mac: [u8; 6] = [0 as u8; 6]
-static mut wn_rx: [u8; 1536] = [0 as u8; 1536]
-static mut wn_rx_len: u64 = 0
+static mut wn_rx: [u8; 12288] = [0 as u8; 12288]
+static mut wn_rx_len: [u64; 8] = [0 as u64; 8]
+static mut wn_rx_head: u64 = 0
+static mut wn_rx_tail: u64 = 0
+static mut wn_rx_depth: u64 = 8
+static mut wn_rx_drop: u64 = 0
 static mut wn_tx: [u8; 12288] = [0 as u8; 12288]
 static mut wn_tx_len: [u64; 8] = [0 as u64; 8]
 static mut wn_head: u64 = 0
@@ -46,7 +51,7 @@ fn set_link(on: bool) {
         wn_up = 1
     } else {
         wn_up = 0
-        wn_rx_len = 0
+        wn_rx_tail = wn_rx_head
         wn_head = wn_tail
     }
 }
@@ -60,16 +65,28 @@ fn tx_frames_on(state: u64, u: u64) -> u64 { return wn_txp }
 fn tx_drops_on(state: u64, u: u64) -> u64 { return wn_drop }
 fn rx_octets_on(state: u64, u: u64) -> u64 { return wn_rxb }
 fn tx_octets_on(state: u64, u: u64) -> u64 { return wn_txb }
-fn poll_on(state: u64, u: u64) -> bool { return wn_up != 0 && wn_rx_len != 0 }
+fn poll_on(state: u64, u: u64) -> bool { return wn_up != 0 && rx_queued() != 0 }
 
-fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
-    if wn_up == 0 || wn_rx_len == 0 { return 0 }
-    *frame = (&wn_rx[0]) as u64
-    *slot = 0
-    return wn_rx_len
+fn rx_queued() -> u64 { return wn_rx_head - wn_rx_tail }
+
+fn rx_drops() -> u64 { return wn_rx_drop }
+
+fn set_rx_depth(n: u64) {
+    if n == 0 || n > RX_SLOTS { return }
+    wn_rx_depth = n
 }
 
-fn rx_recycle_on(state: u64, u: u64, id: u64) { wn_rx_len = 0 }
+fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    if wn_up == 0 || rx_queued() == 0 { return 0 }
+    let k: u64 = wn_rx_tail % RX_SLOTS
+    *frame = (&wn_rx[0]) as u64 + k * FRAME_CAP
+    *slot = k
+    return wn_rx_len[k as usize]
+}
+
+fn rx_recycle_on(state: u64, u: u64, id: u64) {
+    if rx_queued() != 0 { wn_rx_tail = wn_rx_tail + 1 }
+}
 
 fn tx_room_on(state: u64, u: u64) -> u64 {
     if wn_up == 0 { return 0 }
@@ -112,16 +129,23 @@ fn tx_take(dst: u64, cap: u64) -> u64 {
     return n
 }
 
-fn rx_free() -> bool { return wn_up != 0 && wn_rx_len == 0 }
+fn rx_free() -> bool { return wn_up != 0 && rx_queued() < wn_rx_depth }
 
 fn rx_offer(src: u64, n: u64) -> bool {
-    if wn_up == 0 || wn_rx_len != 0 || n == 0 || n > FRAME_CAP { return false }
+    if wn_up == 0 || n == 0 || n > FRAME_CAP { return false }
+    if rx_queued() >= wn_rx_depth {
+        wn_rx_drop = wn_rx_drop + 1
+        return false
+    }
+    let k: u64 = wn_rx_head % RX_SLOTS
+    let base: u64 = (&wn_rx[0]) as u64 + k * FRAME_CAP
     var i: u64 = 0
     while i < n {
-        wn_rx[i as usize] = *((src + i) as *mut u8)
+        *((base + i) as *mut u8) = *((src + i) as *mut u8)
         i = i + 1
     }
-    wn_rx_len = n
+    wn_rx_len[k as usize] = n
+    wn_rx_head = wn_rx_head + 1
     wn_rxp = wn_rxp + 1
     wn_rxb = wn_rxb + n
     return true
