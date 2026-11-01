@@ -361,7 +361,7 @@ def check_tx_response():
     l = [x for x in out if x.startswith("txr ")][0].split()
     ok(l[1] == "0" and l[2:5] == ["2", "1", "1"], "two responses counted, one ok, one failed (%s)" % " ".join(l[1:5]))
     ok(l[5] == "130" and l[6] == "130" and l[7] == "3", "last status 0x82, first bad status 0x82, failure_frame 3 (%s)" % " ".join(l[5:8]))
-    ok(l[8] == "16397" and l[9] == "296" and l[10] == "2", "rate 0x400d, media time 296, queue 2 (%s)" % " ".join(l[8:11]))
+    ok(l[8] == "16397" and l[9] == "296" and l[10] == "7", "rate 0x400d, media time 296, ssn 7 (%s)" % " ".join(l[8:11]))
 
 
 check_variants()
