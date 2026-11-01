@@ -41,7 +41,7 @@ def qualify(text, own, defmod, localset, violations, item):
         out.append(TOKEN.sub(sub, seg))
     return "".join(out)
 
-EXPORT = re.compile(r"^export \{(.*?)\n\}\n", re.S | re.M)
+EXPORT = re.compile(r"^export \{(.*?)\}", re.S | re.M)
 
 
 def split_top(s):
@@ -49,9 +49,9 @@ def split_top(s):
     depth = 0
     cur = ""
     for ch in s:
-        if ch in "([<":
+        if ch in "([":
             depth += 1
-        elif ch in ")]>":
+        elif ch in ")]":
             depth -= 1
         if ch == "," and depth == 0:
             out.append(cur.strip())
@@ -65,17 +65,29 @@ def split_top(s):
 
 def make_wrapper(item_lines, mod):
     text = "\n".join(item_lines).lstrip()
-    m = re.match(r"fn (\w+)\((.*?)\)\s*(?:->\s*(.*?))?\s*\{", text, re.S)
+    m = re.match(r"fn (\w+)\(", text)
     if not m:
         return None
-    name, params, ret = m.group(1), m.group(2), m.group(3)
+    name = m.group(1)
+    i = m.end()
+    depth = 1
+    j = i
+    while j < len(text) and depth:
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+        j += 1
+    params = text[i:j - 1]
+    rest = text[j:text.index("{", j)].strip()
+    ret = rest[2:].strip() if rest.startswith("->") else ""
     names = []
     for prm in split_top(re.sub(r"\s+", " ", params)):
         names.append(prm.split(":")[0].strip())
     call = "%s.%s(%s)" % (mod, name, ", ".join(names))
     head = "fn %s(%s)" % (name, re.sub(r"\s+", " ", params))
     if ret:
-        return "%s -> %s {\n    return %s\n}" % (head, ret.strip(), call)
+        return "%s -> %s {\n    return %s\n}" % (head, ret, call)
     return "%s {\n    %s\n}" % (head, call)
 
 
