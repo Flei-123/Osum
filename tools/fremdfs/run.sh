@@ -166,7 +166,7 @@ else
 fi
 hat "$TMPD/bild.log" "ntfsfix -n sagt: in Ordnung" \
     "ntfs-3g haelt das NTFS-Abbild fuer gesund"
-abw=$(grep -a 'NTFS-Gegenlesung' "$TMPD/bild.log" | grep -oE '[0-9]+ Abweichungen' | grep -oE '^[0-9]+')
+abw=$(grep -a 'NTFS cross-read' "$TMPD/bild.log" | grep -oE '[0-9]+ deviations' | grep -oE '^[0-9]+')
 num "ntfscat liest das NTFS-Abbild ohne Abweichung" "${abw:-99}" eq 0
 
 tiefe=$(cat "$BILD/ext4-tiefe.txt" 2>/dev/null)

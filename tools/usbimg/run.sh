@@ -140,6 +140,12 @@ lauf_direkt() { # name kommandozeile zusatzargumente...
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.2; i=$((i + 1))
     done
+    i=0
+    while [ $i -lt 25 ]; do
+        grep -qa 'ANGEHALTEN' "$out" 2>/dev/null && break
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2; i=$((i + 1))
+    done
     sleep 0.5
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     return 0

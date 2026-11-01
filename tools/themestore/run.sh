@@ -1509,7 +1509,7 @@ same "GEGENPROBE: mit noglasgrow steht die Regel still" "1" \
 same "und sie hat dort kein einziges Rechteck aufgezogen" "0" \
     "$(printf '%s' "$NG" | grep -oE 'grow=[0-9]+' | cut -d= -f2)"
 
-bash tools/themestore/build.sh "$TMPD/zug1" extra='einst' tbalpha=70 blur=0 \
+bash tools/themestore/build.sh "$TMPD/zug1" extra='einst wighalt=60' tbalpha=70 blur=0 \
     wallpaper=hell uitrace=yes keep=yes click="400,10>400,210" \
     > "$TMPD/zug1.log" 2>&1
 num "ein Griff in die Titelleiste ZIEHT das Fenster (Zahl der Groessenaenderungen)" \
@@ -1589,7 +1589,7 @@ cp "$TMPD/zug1/desktop.png" \
 #
 echo
 echo "== 11f3. the end position keeps a handle (the window may overhang) =="
-bash tools/themestore/build.sh "$TMPD/zug2" extra='einst' tbalpha=70 blur=0 \
+bash tools/themestore/build.sh "$TMPD/zug2" extra='einst wighalt=60' tbalpha=70 blur=0 \
     wallpaper=hell uitrace=yes keep=yes click="400,10>600,600" \
     > "$TMPD/zug2.log" 2>&1
 cp "$TMPD/zug2/desktop.png" \
