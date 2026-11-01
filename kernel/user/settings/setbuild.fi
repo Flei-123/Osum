@@ -1,0 +1,922 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import actcli
+import fuiscene
+import icons
+import lineout
+import msg
+import navview
+import nv
+import setroute
+import setside
+import ulib
+import wlib
+import wlibc
+import settings.setaccount
+import settings.setbase
+import settings.setcore
+import settings.setdevice
+import settings.setpages
+import settings.setsystem
+
+const KB_GET: u64 = 0
+
+static mut br_aus_id: u64 = 0
+
+static mut p_tbconf: [u8; 18] = "/etc/taskbar.conf\0"
+
+static mut tb_height: u64 = 28
+
+static mut tb_width: u64 = 104
+
+static mut tb_buf: [u8; 1024] = [0 as u8; 1024]
+
+static mut tb_old: [u8; 1024] = [0 as u8; 1024]
+
+static mut tk_edge: [u8; 5] = "edge\0"
+
+static mut tk_height: [u8; 7] = "height\0"
+
+static mut tk_width: [u8; 6] = "width\0"
+
+static mut tk_ah: [u8; 9] = "autohide\0"
+
+static mut tk_ot: [u8; 6] = "ontop\0"
+
+static mut tk_al: [u8; 6] = "align\0"
+
+static mut tv_left: [u8; 5] = "left\0"
+
+static mut tv_center: [u8; 7] = "center\0"
+
+static mut tb_head: [u8; 60] = "# taskbar.conf -- written by /bin/taskbar and /bin/settings\0"
+
+fn tb_key_is(p: u64, n: u64, k: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if __mmio_read8((k + i) as *mut u8) == 0 as u8 {
+            return false
+        }
+        if __mmio_read8((p + i) as *mut u8)
+            != __mmio_read8((k + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return __mmio_read8((k + n) as *mut u8) == 0 as u8
+}
+
+fn tb_clamp(v: u64, lo: u64, hi: u64) -> u64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+fn tb_vertical() -> bool {
+    return setbase.tb_edge >= 2
+}
+
+fn tb_read() {
+    var word: [u8; 24] = [0 as u8; 24]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_tbconf[0 as usize]) as u64,
+        0, 0)
+    if ulib.bad(fd) {
+        tb_show_size()
+        return
+    }
+    let b: u64 = (&tb_buf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 255)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        tb_show_size()
+        return
+    }
+    var i: u64 = 0
+    while i < n {
+        let ks: u64 = i
+        var ke: u64 = i
+        while ke < n && __mmio_read8((b + ke) as *mut u8) != 61 as u8
+            && __mmio_read8((b + ke) as *mut u8) != 10 as u8 {
+            ke = ke + 1
+        }
+        if ke < n && __mmio_read8((b + ke) as *mut u8) == 61 as u8 {
+            let vs: u64 = ke + 1
+            var ve: u64 = vs
+            while ve < n && __mmio_read8((b + ve) as *mut u8) != 10 as u8
+                && __mmio_read8((b + ve) as *mut u8) != 13 as u8 {
+                ve = ve + 1
+            }
+            let wp: u64 = (&word[0 as usize]) as u64
+            var k: u64 = 0
+            var v: u64 = 0
+            var digits: u64 = 0
+            while vs + k < ve && k < 23 {
+                let c: u64 = __mmio_read8((b + vs + k) as *mut u8) as u64
+                __mmio_write8((wp + k) as *mut u8, c as u8)
+                if c >= 48 && c <= 57 {
+                    v = v * 10 + (c - 48)
+                    digits = digits + 1
+                }
+                k = k + 1
+            }
+            __mmio_write8((wp + k) as *mut u8, 0 as u8)
+            let kl: u64 = ke - ks
+            if tb_key_is(b + ks, kl, (&tk_edge[0 as usize]) as u64) {
+                let e: u64 = wlibc.edge_by_name(wp)
+                if e < 4 {
+                    setbase.tb_edge = e
+                }
+            } else if tb_key_is(b + ks, kl, (&tk_height[0 as usize]) as u64) {
+                if digits > 0 {
+                    tb_height = tb_clamp(v, 20, 40)
+                }
+            } else if tb_key_is(b + ks, kl, (&tk_width[0 as usize]) as u64) {
+                if digits > 0 {
+                    tb_width = tb_clamp(v, 56, 128)
+                }
+            } else if tb_key_is(b + ks, kl, (&tk_ah[0 as usize]) as u64) {
+                if digits > 0 {
+                    setbase.tb_autohide = v & 1
+                }
+            } else if tb_key_is(b + ks, kl, (&tk_ot[0 as usize]) as u64) {
+                if digits > 0 {
+                    setbase.tb_ontop = v & 1
+                }
+            } else if tb_key_is(b + ks, kl, (&tk_al[0 as usize]) as u64) {
+                setbase.tb_align = 0
+                if __mmio_read8((wp) as *mut u8) == 99 as u8 {
+                    setbase.tb_align = 1
+                }
+            }
+            i = ve + 1
+        } else {
+            i = ke + 1
+        }
+    }
+    tb_show_size()
+}
+
+fn tb_show_size() {
+    let p: u64 = (&setbase.e_tbs[0 as usize]) as u64
+    if tb_vertical() {
+        let _a: u64 = setcore.num_at(p, 0, tb_width)
+    } else {
+        let _a: u64 = setcore.num_at(p, 0, tb_height)
+    }
+}
+
+fn tb_set_size(p: u64) {
+    var v: u64 = 0
+    var digits: u64 = 0
+    var i: u64 = 0
+    while __mmio_read8((p + i) as *mut u8) != 0 as u8 && i < 8 {
+        let c: u64 = __mmio_read8((p + i) as *mut u8) as u64
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48)
+            digits = digits + 1
+        }
+        i = i + 1
+    }
+    if digits == 0 {
+        return
+    }
+    if tb_vertical() {
+        tb_width = tb_clamp(v, 56, 128)
+    } else {
+        tb_height = tb_clamp(v, 20, 40)
+    }
+}
+
+fn tb_write() -> bool {
+    let b: u64 = (&tb_buf[0 as usize]) as u64
+    var at: u64 = setcore.text_an(b, 0, (&tb_head[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = setcore.text_an(b, at + 1, (&tk_edge[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = setcore.text_an(b, at + 1, wlibc.edge_name(setbase.tb_edge))
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = setcore.text_an(b, at + 1, (&tk_height[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = setcore.num_at(b, at + 1, tb_height)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = setcore.text_an(b, at + 1, (&tk_width[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = setcore.num_at(b, at + 1, tb_width)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = setcore.text_an(b, at + 1, (&tk_ah[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = setcore.num_at(b, at + 1, setbase.tb_autohide)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = setcore.text_an(b, at + 1, (&tk_ot[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = setcore.num_at(b, at + 1, setbase.tb_ontop)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = setcore.text_an(b, at + 1, (&tk_al[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    var alp: u64 = (&tv_left[0 as usize]) as u64
+    if setbase.tb_align == 1 {
+        alp = (&tv_center[0 as usize]) as u64
+    }
+    at = setcore.text_an(b, at + 1, alp)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = at + 1
+    at = tb_keep(b, at)
+    return setcore.file_write((&p_tbconf[0 as usize]) as u64, b, at)
+}
+
+fn tb_keep(b: u64, at0: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_tbconf[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return at0
+    }
+    let o: u64 = (&tb_old[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, o, 1023)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return at0
+    }
+    var at: u64 = at0
+    var i: u64 = 0
+    while i < n {
+        var le: u64 = i
+        while le < n && __mmio_read8((o + le) as *mut u8) != 10 as u8 {
+            le = le + 1
+        }
+        var ke: u64 = i
+        while ke < le && __mmio_read8((o + ke) as *mut u8) != 61 as u8 {
+            ke = ke + 1
+        }
+        if ke < le && __mmio_read8((o + i) as *mut u8) != 35 as u8 {
+            let kl: u64 = ke - i
+            let own: bool = tb_key_is(o + i, kl, (&tk_edge[0 as usize]) as u64)
+                || tb_key_is(o + i, kl, (&tk_height[0 as usize]) as u64)
+                || tb_key_is(o + i, kl, (&tk_width[0 as usize]) as u64)
+                || tb_key_is(o + i, kl, (&tk_ah[0 as usize]) as u64)
+                || tb_key_is(o + i, kl, (&tk_ot[0 as usize]) as u64)
+                || tb_key_is(o + i, kl, (&tk_al[0 as usize]) as u64)
+            if !own && at + (le - i) + 2 < 1000 {
+                var k: u64 = i
+                while k < le {
+                    __mmio_write8((b + at) as *mut u8,
+                        __mmio_read8((o + k) as *mut u8))
+                    at = at + 1
+                    k = k + 1
+                }
+                __mmio_write8((b + at) as *mut u8, 10 as u8)
+                at = at + 1
+            }
+        }
+        i = le + 1
+    }
+    return at
+}
+
+static mut ts_a: [u8; 24] = "settings: taskbar edge=\0"
+
+static mut ts_b: [u8; 9] = " height=\0"
+
+static mut ts_c: [u8; 8] = " width=\0"
+
+static mut ts_d: [u8; 11] = " autohide=\0"
+
+static mut ts_e: [u8; 8] = " ontop=\0"
+
+static mut ts_f: [u8; 8] = " wrote=\0"
+
+static mut ts_g: [u8; 8] = " align=\0"
+
+fn tb_say() {
+    setcore.say((&ts_a[0 as usize]) as u64)
+    setcore.say(wlibc.edge_name(setbase.tb_edge))
+    setcore.say((&ts_b[0 as usize]) as u64)
+    setcore.sayn(tb_height)
+    setcore.say((&ts_c[0 as usize]) as u64)
+    setcore.sayn(tb_width)
+    setcore.say((&ts_d[0 as usize]) as u64)
+    setcore.sayn(setbase.tb_autohide)
+    setcore.say((&ts_g[0 as usize]) as u64)
+    setcore.sayn(setbase.tb_align)
+    setcore.say((&ts_e[0 as usize]) as u64)
+    setcore.sayn(setbase.tb_ontop)
+    setcore.say((&ts_f[0 as usize]) as u64)
+    setcore.sayn(setbase.geschrieben)
+    setcore.nl()
+}
+
+fn tb_apply_live() {
+    setbase.tb_edge = setbase.kval[(setbase.K_CE) as usize]
+    if (fuiscene.value_of(setbase.K_KA) as u64) != 0 {
+        setbase.tb_autohide = 1
+    } else {
+        setbase.tb_autohide = 0
+    }
+    if (fuiscene.value_of(setbase.K_KO) as u64) != 0 {
+        setbase.tb_ontop = 1
+    } else {
+        setbase.tb_ontop = 0
+    }
+    setbase.tb_align = setbase.kval[(setbase.K_CAL) as usize]
+    tb_set_size((&setbase.e_tbs[0 as usize]) as u64)
+    let _tw: bool = tb_write()
+    tb_say()
+    setpages.report_state()
+}
+
+fn effects_apply_live() {
+    wlibc.set_shadow_on((fuiscene.value_of(setbase.K_KSH) as u64) != 0)
+    if fuiscene.table_sel(setbase.K_LS) < setbase.nschema {
+        let _tw: bool = setcore.theme_conf_write(
+            (&setbase.snamen[0 as usize]) as u64 + fuiscene.table_sel(setbase.K_LS) * 32,
+            setbase.kval[(setbase.K_CM) as usize],
+            (&setbase.e_akzent[0 as usize]) as u64,
+            setbase.kval[(setbase.K_CSH) as usize],
+            setcore.drag_value_of(setbase.kval[(setbase.K_ZS1) as usize], 40, 50),
+            setcore.drag_value_of(setbase.kval[(setbase.K_ZS2) as usize], 50, 80),
+            setcore.drag_value_of(setbase.kval[(setbase.K_ZS3) as usize], 25, 45),
+            setcore.drag_value_of(setbase.kval[(setbase.K_BS1) as usize], 6, 12),
+            setcore.drag_value_of(setbase.kval[(setbase.K_BS2) as usize], 18, 32),
+            setcore.blur_noise_von(setbase.kval[(setbase.K_BS1) as usize]))
+    }
+    let _r: u64 = wlibc.theme_reload()
+    setcore.shape_say()
+    setcore.contrast_show()
+    setpages.report_state()
+}
+
+static mut ly_a: [u8; 22] = "settings: layout nav=\0"
+
+static mut ly_b: [u8; 9] = " detail=\0"
+
+static mut ly_c: [u8; 9] = " scroll=\0"
+
+static mut ly_d: [u8; 10] = " content=\0"
+
+static mut ly_e: [u8; 7] = " view=\0"
+
+static mut ly_f: [u8; 6] = " off=\0"
+
+fn layout_say() {
+    if setbase.s_dbg == 0 {
+        return
+    }
+    var slot: u64 = 0
+    if setpages.nav_list_only() {
+        slot = 1
+    }
+    var at: u64 = setcore.rs_put(0, (&ly_a[0 as usize]) as u64)
+    at = setcore.rs_num(at, setsystem.b2n(setpages.nav_mode()))
+    at = setcore.rs_put(at, (&ly_b[0 as usize]) as u64)
+    at = setcore.rs_num(at, setsystem.b2n(setbase.nav_detail))
+    at = setcore.rs_put(at, (&ly_c[0 as usize]) as u64)
+    at = setcore.rs_num(at, setsystem.b2n(setpages.page_scrolls()))
+    at = setcore.rs_put(at, (&ly_d[0 as usize]) as u64)
+    at = setcore.rs_num(at, fuiscene.pane_content(slot))
+    at = setcore.rs_put(at, (&ly_e[0 as usize]) as u64)
+    at = setcore.rs_num(at, fuiscene.pane_view(slot))
+    at = setcore.rs_put(at, (&ly_f[0 as usize]) as u64)
+    at = setcore.rs_num(at, fuiscene.pane_offset(slot))
+    let b: u64 = (&setbase.rs_buf[0 as usize]) as u64
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = at + 1
+    let _w: u64 = lineout.add_bytes(b, at)
+}
+
+fn tabs_say() {
+    var pre: [u8; 13] = "wlib: tab i=\0"
+    var s_nq: [u8; 6] = " nq=\0\0"
+    var s_nv: [u8; 6] = " nv=\0\0"
+    var s_tt: [u8; 4] = " t=\0"
+    var i: u64 = 0
+    while i < setbase.R_ANZ {
+        let n: usize = fuiscene.node_of_key(setbase.K_TAB0 + i)
+        if n != fuiscene.NONE && !setcore.neg_pos(fuiscene.node_x(n)) && !setcore.neg_pos(fuiscene.node_y(n)) && !setpages.side_tab_hidden(n) {
+            let name: u64 = ((&setbase.tab_buf[0 as usize]) as u64) + i * 40
+            let nv: u64 = ulib.length(name)
+            var nq: u64 = nv
+            let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), name, nv)
+            if tw + 16 > fuiscene.node_w(n) && tw > 0 {
+                nq = nv * fuiscene.sat_sub(fuiscene.node_w(n), 16) / tw
+            }
+            var at: u64 = setcore.rs_put(0, (&pre[0 as usize]) as u64)
+            at = setcore.rs_num(at, i)
+            at = setcore.rs_put(at, (&setbase.ms_b[0 as usize]) as u64)
+            at = setcore.rs_num(at, fuiscene.node_x(n))
+            at = setcore.rs_put(at, (&setbase.ms_c[0 as usize]) as u64)
+            at = setcore.rs_num(at, fuiscene.node_y(n))
+            at = setcore.rs_put(at, (&setbase.mr_w[0 as usize]) as u64)
+            at = setcore.rs_num(at, fuiscene.node_w(n))
+            at = setcore.rs_put(at, (&setbase.mr_h[0 as usize]) as u64)
+            at = setcore.rs_num(at, fuiscene.node_h(n))
+            at = setcore.rs_put(at, (&setbase.mr_ax[0 as usize]) as u64)
+            at = setcore.rs_num(at, wlib.win_cx(setbase.w) + fuiscene.node_x(n))
+            at = setcore.rs_put(at, (&setbase.mr_ay[0 as usize]) as u64)
+            at = setcore.rs_num(at, wlib.win_cy(setbase.w) + fuiscene.node_y(n))
+            at = setcore.rs_put(at, (&s_nq[0 as usize]) as u64)
+            at = setcore.rs_num(at, nq)
+            at = setcore.rs_put(at, (&s_nv[0 as usize]) as u64)
+            at = setcore.rs_num(at, nv)
+            at = setcore.rs_put(at, (&s_tt[0 as usize]) as u64)
+            at = setcore.rs_put(at, name)
+            let bb: u64 = (&setbase.rs_buf[0 as usize]) as u64
+            __mmio_write8((bb + at) as *mut u8, 10 as u8)
+            at = at + 1
+            let _w: u64 = lineout.add_bytes(bb, at)
+        }
+        i = i + 1
+    }
+}
+
+fn rects_all() {
+    var nm: [u8; 8] = [0 as u8; 8]
+    nm[(0) as usize] = 119 as u8
+    nm[(3) as usize] = 0 as u8
+
+    var n_waa: [u8; 4] = "waa\0"
+    let sk: u64 = fuiscene.scale()
+    setcore.rect_say_at((&n_waa[0 as usize]) as u64, 8 * sk, 8 * sk,
+        (fuiscene.width() - 16) * sk, 28 * sk)
+    var k: u64 = 1
+    while k < K_COUNT {
+
+        let side_tab: bool = k >= setbase.K_TAB0 && k < setbase.K_TAB0 + setbase.R_ANZ
+        if !side_tab && fuiscene.node_of_key(k) != fuiscene.NONE {
+            nm[(1) as usize] = (97 + (k / 26)) as u8
+            nm[(2) as usize] = (97 + (k % 26)) as u8
+            setcore.rect_say((&nm[0 as usize]) as u64, k)
+        }
+        k = k + 1
+    }
+
+    layout_say()
+    setcore.karten_say()
+    tabs_say()
+    fuiscene.say_knoepfe()
+    fuiscene.say_radii()
+    fuiscene.say_texts()
+    setcore.glas_say()
+}
+
+static mut pr_tab: u64 = 0
+
+static mut pr_bref: u64 = 0
+
+fn lang_write(code: u64) -> bool {
+    var k_lg: [u8; 16] = "locale.language\0"
+    let rc: u64 = setpages.bus_set((&k_lg[0 as usize]) as u64, code)
+    if rc == actcli.R_NOBUS {
+        return msg.save_lang(code)
+    }
+    if rc != actcli.R_OK {
+        return false
+    }
+    var now: [u8; 16] = [0 as u8; 16]
+    let src: u64 = msg.read_lang((&now[0 as usize]) as u64)
+    if src == 1 && ulib.streq((&now[0 as usize]) as u64, code) {
+        var s1: [u8; 33] = "settings: language via bus, own\n\0"
+        setcore.say((&s1[0 as usize]) as u64)
+        return true
+    }
+    var s2: [u8; 40] = "settings: language via bus + own file\n\0\0"
+    setcore.say((&s2[0 as usize]) as u64)
+    return msg.save_lang(code)
+}
+
+const K_COUNT: u64 = 200
+
+const K_HDR: u64 = 199
+
+static mut k_settings_search: [u8; 16] = "settings.search\0"
+
+static mut k_settings_search_short: [u8; 22] = "settings.search.short\0"
+
+static mut k_settings_back: [u8; 14] = "settings.back\0"
+
+static mut k_settings_nohit: [u8; 15] = "settings.nohit\0"
+
+static mut k_settings_nohit2: [u8; 16] = "settings.nohit2\0"
+
+static mut k_nav_empty: [u8; 17] = "nav.search.empty\0"
+
+fn hdr_cb(x: u64, y: u64, w: u64, h: u64) {
+    let s: u64 = fuiscene.sp(1)
+    let rm: u64 = setdevice.room_of(w, 40 * s)
+    setdevice.glass_plate(x, y, w, h, 10 * s)
+    fuiscene.cv_round(x + 10 * s, y + h / 2 - 12 * s, 4 * s, 24 * s, 2 * s, fuiscene.R_ACCENT)
+    if setbase.nav_n == 0 {
+        fuiscene.text_role(x + 24 * s, y + h / 2 + 7 * s, rm, msg.get((&k_settings_nohit[0 as usize]) as u64), 20 * s, true, fuiscene.R_TEXT)
+        return
+    }
+    fuiscene.text_role(x + 24 * s, y + 20 * s, rm, setpages.page_name(setbase.active_tab), 18 * s, true, fuiscene.R_TEXT)
+    fuiscene.text_role(x + 24 * s, y + 38 * s, rm, setsystem.cat_name(setsystem.cat_of(setbase.active_tab)), 12 * s, false, fuiscene.R_MUTED)
+}
+
+fn goto_page(idx: u64) {
+    if setpages.nav_mode() {
+        setbase.nav_detail = true
+    }
+    setpages.bus_page(idx)
+    setsystem.show_tab(idx)
+    setpages.report_state()
+}
+
+fn pane_h(used: u64) -> u64 {
+    let h: u64 = fuiscene.height()
+    if h < used + 60 {
+        return 0
+    }
+    return h - used
+}
+
+const SEARCH_ROW: u64 = 38
+
+fn search_bar(col: usize) {
+    let tr: usize = fuiscene.row(col)
+    fuiscene.set_gap(tr, 8)
+    fuiscene.set_size(tr, 0, 30)
+    var ew: u64 = 420
+    if fuiscene.width() < 500 {
+        ew = setdevice.sat_sub_u(fuiscene.width(), 40)
+    }
+    let sp1: usize = fuiscene.space(tr, 0, 0)
+    fuiscene.set_grow(sp1, 1)
+    let n_sr: usize = fuiscene.entry(tr, setbase.K_SRCH, ew, (&setbase.e_srch[0 as usize]) as u64)
+    fuiscene.set_size(n_sr, ew, 30)
+    let sp2: usize = fuiscene.space(tr, 0, 0)
+    fuiscene.set_grow(sp2, 1)
+    if ew < 300 {
+        fuiscene.entry_hint(setbase.K_SRCH, msg.get((&k_settings_search_short[0 as usize]) as u64))
+    } else {
+        fuiscene.entry_hint(setbase.K_SRCH, msg.get((&k_settings_search[0 as usize]) as u64))
+    }
+}
+
+fn build() {
+    let col: usize = fuiscene.root()
+    fuiscene.set_card_radius(8)
+    setsystem.tab_names()
+    setdevice.shell_texts()
+    setpages.nav_compute()
+    var top_h: u64 = 0
+    if !setpages.nav_page_only() {
+        search_bar(col)
+        top_h = SEARCH_ROW
+    }
+    let shell: usize = fuiscene.row_stretch(col)
+    fuiscene.set_grow(shell, 1)
+    fuiscene.set_gap(shell, 8)
+    if setpages.page_scrolls() || setpages.nav_mode() {
+
+        var sh_h: u64 = 0
+        if fuiscene.height() > 48 + top_h + 100 {
+            sh_h = fuiscene.height() - 48 - top_h
+        }
+        fuiscene.set_size(shell, 0, sh_h)
+    }
+    if !setpages.nav_page_only() {
+    let side: usize = fuiscene.column(shell)
+    fuiscene.set_size(side, setpages.side_w(), 0)
+    fuiscene.plate_node(side)
+
+    let compact: bool = fuiscene.height() < 810
+    var item_h: u64 = 38
+    if compact {
+        item_h = 25
+        if setside.tree_on() {
+            item_h = 30
+        }
+        if setdevice.short_win() {
+
+            item_h = 23
+        }
+        fuiscene.set_gap(side, 0)
+    } else {
+        fuiscene.set_gap(side, 2)
+    }
+
+    if setpages.nav_list_only() {
+
+        item_h = 32
+        setbase.side_scroll = false
+    } else {
+        item_h = setpages.side_fit(item_h, compact)
+    }
+    var lst: usize = side
+    if setpages.nav_list_only() || setbase.side_scroll {
+        let pl: usize = fuiscene.pane_open(side, 1, 0, pane_h(108))
+        if pl != fuiscene.NONE {
+            lst = pl
+            fuiscene.set_gap(lst, 2)
+        }
+    }
+    if setbase.res_n > 0 {
+        setpages.side_results(lst, item_h)
+    } else {
+        setpages.side_routes(lst, item_h)
+    }
+    if setbase.nav_n == 0 && setaccount.rb((&setbase.e_srch[0 as usize]) as u64, 0) != 0 {
+        let _ne: usize = fuiscene.label_muted(lst, msg.get((&k_nav_empty[0 as usize]) as u64))
+    }
+    var c: u64 = 0
+    while c < setbase.NCAT + 1 {
+        var any: bool = false
+        var p0: u64 = 0
+        while p0 < setdevice.pages_all() {
+            if setsystem.cat_of(p0) == c && setbase.nav_vis[(p0) as usize] != 0 && (p0 >= setbase.R_ANZ || !setroute.ready()) {
+                any = true
+            }
+            p0 = p0 + 1
+        }
+        if any {
+            let _ch: usize = fuiscene.label_muted(lst, setsystem.cat_name(c))
+            var p: u64 = 0
+            while p < setdevice.pages_all() {
+                if setsystem.cat_of(p) == c && setbase.nav_vis[(p) as usize] != 0 && (p >= setbase.R_ANZ || !setroute.ready()) {
+                    let _t: usize = navview.side_item(lst, setsystem.tab_key(p), setpages.page_name(p), item_h, 256 + p, setpages.tile_cb)
+                }
+                p = p + 1
+            }
+        }
+        c = c + 1
+    }
+    }
+    if !setpages.nav_list_only() {
+    let main: usize = fuiscene.column_w(shell, 1)
+    fuiscene.set_gap(main, 8)
+    if setpages.nav_page_only() {
+
+        let hr: usize = fuiscene.row(main)
+        fuiscene.set_gap(hr, 8)
+        fuiscene.set_size(hr, 0, 52)
+        let _bk: usize = fuiscene.icon_link(hr, icons.NAV_BACK, msg.get((&k_settings_back[0 as usize]) as u64), setbase.K_BACK, 40, 40)
+        let hv: usize = fuiscene.canvas(hr, K_HDR, 0, 52, hdr_cb)
+        fuiscene.set_grow(hv, 1)
+    } else if setroute.ready() && setbase.nav_n > 0 && !setpages.nav_mode() {
+        setpages.nav_header(main)
+    } else {
+        let _hd: usize = fuiscene.canvas(main, K_HDR, 0, 52, hdr_cb)
+    }
+
+    var host: usize = main
+    if setpages.page_scrolls() {
+        var pw: u64 = fuiscene.width() - 16
+        if !setpages.nav_page_only() {
+            pw = setdevice.sat_sub_u(pw, setpages.side_w() + 8)
+        }
+        let pn: usize = fuiscene.pane_open(main, 0, pw, pane_h(112 + top_h))
+        if pn != fuiscene.NONE {
+            host = pn
+        }
+    }
+    var body: usize = host
+    if setpages.nav_mode() {
+
+        body = fuiscene.column(host)
+    } else {
+        body = fuiscene.row_stretch(host)
+        if host == main {
+            fuiscene.set_grow(body, 1)
+        }
+    }
+    fuiscene.set_gap(body, 8)
+    var tw: u64 = fuiscene.width() - 16
+    if !setpages.nav_page_only() {
+        tw = tw - setpages.side_w() - 8
+    }
+    if host != main {
+
+        tw = tw - 8
+    }
+    setbase.cw_in = 0
+    fuiscene.set_toggle_room(0)
+    let ctl_first: usize = fuiscene.node_count()
+    let cl: usize = fuiscene.card(body)
+    var cr: usize = cl
+    setbase.card_l = (cl as u64) + 1
+    setbase.card_r = 0
+    if setbase.nav_n == 0 {
+        fuiscene.set_size(cl, tw, 0)
+        let _n1: usize = fuiscene.label(cl, msg.get((&k_settings_nohit[0 as usize]) as u64))
+        let _n2: usize = fuiscene.label_muted(cl, msg.get((&k_settings_nohit2[0 as usize]) as u64))
+    } else {
+        if setsystem.two_cols(setbase.active_tab) {
+            var lw: u64 = (tw - 8) * 9 / 20
+            var rw: u64 = tw - 8 - lw
+            if setpages.nav_mode() {
+
+                lw = tw
+                rw = tw
+                setbase.cw_in = tw - 20
+            } else if fuiscene.width() < 900 {
+
+                lw = (tw - 8) / 2
+                rw = tw - 8 - lw
+                setbase.cw_in = lw - 20
+            }
+            fuiscene.set_size(cl, lw, 0)
+            cr = fuiscene.card(body)
+            setbase.card_r = (cr as u64) + 1
+            fuiscene.set_size(cr, rw, 0)
+        } else {
+            fuiscene.set_size(cl, tw, 0)
+            if fuiscene.width() < 900 {
+                setbase.cw_in = tw - 20
+            }
+        }
+        if setbase.cw_in != 0 {
+            fuiscene.set_toggle_room(setbase.cw_in)
+        }
+        if setbase.active_tab == setbase.R_DARST {
+            setpages.page_darst(cl, cr)
+        } else if setbase.active_tab == setbase.R_SCREEN {
+            setpages.page_screen(cl, cr)
+        } else if setbase.active_tab == setbase.R_SCREEN2 {
+            setpages.page_screen2(cl, cr)
+        } else if setbase.active_tab == setbase.R_SCREEN3 {
+            setpages.page_screen3(cl, cr)
+        } else if setbase.active_tab == setbase.R_SCHEME {
+            setpages.page_scheme(cl, cr)
+        } else if setbase.active_tab == setbase.R_ACCENT {
+            setpages.page_accent(cl, cr)
+        } else if setbase.active_tab == setbase.R_TASKBAR {
+            setpages.page_taskbar(cl, cr)
+        } else if setbase.active_tab == setbase.R_EFFECTS {
+            setpages.page_effects(cl, cr)
+        } else if setbase.active_tab == setbase.R_WIFI {
+            setpages.page_wifi(cl, cr)
+        } else if setbase.active_tab == setbase.R_USBNET {
+            setpages.page_usbnet(cl, cr)
+        } else if setbase.active_tab == setbase.R_TIME {
+            setpages.page_time(cl, cr)
+        } else if setbase.active_tab == setbase.R_NET {
+            setpages.page_network(cl, cr)
+        } else if setbase.active_tab == setbase.R_BENUT {
+            setpages.page_benut(cl, cr)
+        } else if setbase.active_tab == setbase.R_PASSW {
+            setpages.page_passw(cl, cr)
+        } else if setbase.active_tab == setbase.R_PIN {
+            setpages.page_pin(cl, cr)
+        } else if setbase.active_tab == setbase.R_VTRANS {
+            setpages.page_vtrans(cl, cr)
+        } else if setbase.active_tab == setbase.R_SOUND {
+            setpages.page_sound(cl, cr)
+        } else if setbase.active_tab == setbase.R_TOUCHPAD {
+            setpages.page_touchpad(cl, cr)
+        } else if setbase.active_tab == setbase.R_BLUETOOTH {
+            setpages.page_bluetooth(cl, cr)
+        } else if setbase.active_tab == setbase.R_NETV {
+            setpages.page_netv(cl, cr)
+        } else if setbase.active_tab == setbase.R_SPRACHE {
+            setpages.page_sprache(cl, cr)
+        } else if setbase.active_tab == setbase.R_VORL {
+            setpages.page_vorl(cl, cr)
+        } else if setbase.active_tab == setbase.R_ACCOUNT {
+            setpages.page_accounts(cl, cr)
+        } else if setbase.active_tab == setbase.R_SYNC {
+            setpages.page_sync(cl, cr)
+        } else if setbase.active_tab == setbase.R_BRIDGE {
+            setpages.page_bridge(cl, cr)
+        } else if setbase.active_tab == setbase.R_SYSTEM {
+            setpages.page_system(cl, cr)
+        } else if setbase.active_tab == setbase.R_RECHTE {
+            setpages.page_rechte(cl, cr)
+        } else if setbase.active_tab == setbase.R_MOUSE {
+            setpages.page_mouse(cl, cr)
+        } else if setbase.active_tab == setbase.R_ENERGIE {
+            setpages.page_energie(cl, cr)
+        } else if setbase.active_tab == setbase.R_APPS {
+            setpages.page_apps(cl, cr)
+        } else if setbase.active_tab == setbase.R_INFO {
+            setpages.page_info(cl, cr)
+        } else if setbase.active_tab == setbase.R_PROTO {
+            setpages.page_proto(cl, cr)
+        } else if setbase.active_tab >= setbase.R_ANZ {
+            setpages.page_pkg(cl, cr, setbase.active_tab - setbase.R_ANZ)
+        } else {
+            setpages.page_update(cl, cr)
+        }
+        if setroute.ready() {
+            var rel_ok: u64 = 0
+            if fuiscene.widgets_since(ctl_first) <= 8 {
+                rel_ok = 1
+            }
+            navview.set_related_short_ok(rel_ok)
+            let _rl: u64 = navview.related_rows(cr, setroute.current_uri(), setroute.current_uri_len())
+        }
+        setbase.ctl_n = fuiscene.widgets_since(ctl_first)
+        setbase.ctl_pg = setbase.active_tab
+    }
+    }
+    let _st: usize = fuiscene.label(col, (&setbase.l_stat[0 as usize]) as u64)
+}
+
+fn init_values() {
+    setsystem.pkg_init()
+    setdevice.wifi_status(0)
+    setdevice.usbnet_refresh()
+    var lidx: u64 = 0
+    if __mmio_read8((msg.lang()) as *mut u8) == 100 as u8 {
+        lidx = 1
+    }
+    var kidx: u64 = ulib.sys(setbase.SYS_KBD, KB_GET, 0, 0)
+    if ulib.bad(kidx) {
+        kidx = 0
+    }
+    setcore.sync_read()
+    setaccount.bridge_read()
+    nv_read()
+    setaccount.provider_read()
+    setaccount.accounts_read()
+    setaccount.book_state()
+    setbase.kval[(setbase.K_CM) as usize] = 2
+    setbase.kval[(setbase.K_CSH) as usize] = wlibc.shape_id()
+    setbase.kval[(setbase.K_TRN) as usize] = wlibc.transparency()
+    setbase.kval[(setbase.K_ZS1) as usize] = setcore.drag_level(wlibc.zieh_lift(), 40, 50)
+    setbase.kval[(setbase.K_ZS2) as usize] = setcore.drag_level(wlibc.zieh_tilt(), 50, 80)
+    setbase.kval[(setbase.K_ZS3) as usize] = setcore.drag_level(wlibc.zieh_swing(), 25, 45)
+    setbase.kval[(setbase.K_BS1) as usize] = setcore.drag_level(wlibc.blur_staerke(), 6, 12)
+    setbase.kval[(setbase.K_BS2) as usize] = setcore.drag_level(wlibc.blur_tint(), 18, 32)
+    setbase.kval[(setbase.K_CE) as usize] = setbase.tb_edge
+    setbase.kval[(setbase.K_CAL) as usize] = setbase.tb_align
+    setbase.kval[(setbase.K_CK) as usize] = 0
+    setbase.kval[(setbase.K_CD) as usize] = 0
+    setbase.kval[(setbase.K_CH) as usize] = 2
+    setbase.kval[(setbase.K_CC) as usize] = 2
+    setbase.kval[(setbase.K_CG) as usize] = 2
+    setbase.kval[(setbase.K_CQ) as usize] = 2
+    setbase.kval[(setbase.K_CHM) as usize] = 0
+    setbase.kval[(setbase.K_SRON) as usize] = 0
+    setbase.kval[(setbase.K_SRAU) as usize] = 0
+    setaccount.zone_init()
+    setbase.kval[(setbase.K_CN) as usize] = 1
+    setbase.kval[(setbase.K_CSP) as usize] = setaccount.lock_level()
+    setbase.kval[(setbase.K_CV) as usize] = 0
+    setbase.kval[(setbase.K_CF) as usize] = nv.fallback()
+    setbase.kval[(setbase.K_CL) as usize] = lidx
+    setbase.kval[(setbase.K_CK2) as usize] = kidx
+    setbase.kval[(setbase.K_CKANB) as usize] = 0
+    setpages.pw_load()
+    setaccount.entries_init()
+
+    setbase.sy_tab = setbase.K_SY_TAB
+    setbase.sy_ent = setbase.K_SY_ENT
+    setbase.sy_bset = setbase.K_SY_BSET
+    setbase.sy_bconf = setbase.K_SY_BCONF
+    setbase.sy_bundo = setbase.K_SY_BUNDO
+    setbase.ri_tab = setbase.K_RI_TAB
+    setbase.ri_ctab = setbase.K_RI_CTAB
+    setbase.ri_brev = setbase.K_RI_BREV
+    setbase.ri_bjar = setbase.K_RI_BJAR
+    setbase.ri_bblock = setbase.K_RI_BBLOCK
+    pr_tab = setbase.K_PR_TAB
+    pr_bref = setbase.K_PR_BREF
+    setbase.up_bchk = setbase.K_UP_BCHK
+    setbase.up_binst = setbase.K_UP_BINST
+    setbase.up_bchan = setbase.K_UP_BCHAN
+    setbase.up_bauto = setbase.K_UP_BAUTO
+    setbase.up_brb = setbase.K_UP_BRB
+    setbase.up_bconf = setbase.K_UP_BCONF
+    setbase.su_bchk = setbase.K_SU_BCHK
+    setbase.su_binst = setbase.K_SU_BINST
+    setbase.ds_ch = setbase.K_CH
+    setbase.ds_b2 = setbase.K_B2
+    setbase.nz_cn = setbase.K_CN
+    setbase.nz_b4 = setbase.K_B4
+    setbase.nz_b4j = setbase.K_B4J
+    br_aus_id = setbase.K_BR_AUS_ID
+    setbase.tba_ready = 1
+    setcore.tba_label_set()
+}
+
+fn nv_read() {
+    var sp: [u8; 2] = " \0"
+    var nl: [u8; 2] = "\n\0"
+    var nm: [u8; 16] = [0 as u8; 16]
+    var at: u64 = 0
+    setbase.nv_n = 0
+    var i: u64 = 0
+    while i < 32 && at < 900 {
+        let close_path: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(close_path) && close_path != 0 {
+            if ulib.sys(ulib.SYS_PSTAT, i, ulib.P_KIND, 0) == 3 {
+                let pid: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0)
+                setbase.nv_pids[(setbase.nv_n) as usize] = pid
+                at = setcore.num_at((&setbase.nv_list[0 as usize]) as u64, at, pid)
+                at = setcore.text_an((&setbase.nv_list[0 as usize]) as u64, at,
+                    (&sp[0 as usize]) as u64)
+                let _n: u64 = nv.view_name(nv.view_of(pid),
+                    (&nm[0 as usize]) as u64)
+                at = setcore.text_an((&setbase.nv_list[0 as usize]) as u64, at,
+                    (&nm[0 as usize]) as u64)
+                at = setcore.text_an((&setbase.nv_list[0 as usize]) as u64, at,
+                    (&nl[0 as usize]) as u64)
+                setbase.nv_n = setbase.nv_n + 1
+            }
+        }
+        i = i + 1
+    }
+}

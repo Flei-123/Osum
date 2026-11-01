@@ -1,0 +1,1804 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import actcli
+import fuiscene
+import libc.io
+import fui.lockidle
+import msg
+import template
+import tz.tz
+import ulib
+import wlib
+import wlibc
+import settings.setbase
+import settings.setcore
+
+const TI_INFO: u64 = 0
+
+const TQ_ARMED: u64 = 0
+
+const TQ_TOTAL: u64 = 3
+
+const TQ_DENIED: u64 = 4
+
+static mut k_n_kprog: [u8; 24] = "settings.net.cols.prog\0\0"
+
+static mut k_anb_n: u64 = 0
+
+static mut k_aus: [u8; 4096] = [0 as u8; 4096]
+
+static mut k_ausn: u64 = 0
+
+const SYS_PIPE: u64 = 22
+
+static mut k_v_acc: [u8; 26] = "settings.presets.account\0\0"
+
+static mut k_v_noacc: [u8; 25] = "settings.presets.noacct\0\0"
+
+static mut k_k_bstat: [u8; 20] = "konto.ui.book.state\0"
+
+static mut k_k_bon: [u8; 17] = "konto.ui.book.on\0"
+
+static mut k_k_boff: [u8; 18] = "konto.ui.book.off\0"
+
+static mut k_m_bok: [u8; 17] = "konto.ui.book.ok\0"
+
+static mut k_m_bnet: [u8; 22] = "konto.ui.book.offline\0"
+
+static mut k_m_bref: [u8; 22] = "konto.ui.book.refused\0"
+
+static mut k_m_bscope: [u8; 22] = "konto.ui.book.noscope\0"
+
+static mut k_m_bfail: [u8; 21] = "konto.ui.book.failed\0"
+
+static mut k_m_nscope: [u8; 19] = "konto.hint.noscope\0"
+
+static mut sp_conf: [u8; 17] = "/etc/sperre.conf\0"
+
+static mut sp_buf: [u8; 128] = [0 as u8; 128]
+
+fn dbg_on() -> bool {
+    return setbase.s_dbg != 0
+}
+
+fn dbg_setup(args: u64) {
+    var p_tr: [u8; 14] = "/etc/uitrace\0\0"
+    let fdt: u64 = io.open((&p_tr[0 as usize]) as u64, 0)
+    if !ulib.bad(fdt) {
+        io.close(fdt)
+        setbase.s_dbg = 1
+    }
+    var a_dbg: [u8; 6] = "debug\0"
+    let argc: u64 = ulib.arg_count(args)
+    var ai: u64 = 1
+    while ai < argc {
+        let a: u64 = ulib.arg_at(args, ai)
+        if ulib.streq(a, (&a_dbg[0 as usize]) as u64) {
+            setbase.s_dbg = 1
+        }
+
+        if rb(a, 0) == 112 && rb(a, 1) == 97 && rb(a, 2) == 103
+            && rb(a, 3) == 101 && rb(a, 4) == 61 {
+            let pg: u64 = ulib.to_num(a + 5)
+            if pg < setbase.R_ANZ {
+                setbase.start_page = pg
+            }
+        }
+        ai = ai + 1
+    }
+}
+
+const NPROGZ: u64 = 24
+
+static mut np_idx: [u64; 24] = [0 as u64; 24]
+
+static mut np_sum: [u64; 24] = [0 as u64; 24]
+
+fn prog_sort() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < NPROGZ {
+        if setcore.nmq(ulib.NK_PROG, i, ulib.NP_USED) != 0 {
+            let sum: u64 = setcore.nmq(ulib.NK_PROG, i, ulib.NT_TXWIRE)
+                + setcore.nmq(ulib.NK_PROG, i, ulib.NT_RXWIRE)
+            if sum != 0 {
+                np_idx[(n) as usize] = i
+                np_sum[(n) as usize] = sum
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    var a: u64 = 0
+    while a < n {
+        var best: u64 = a
+        var b: u64 = a + 1
+        while b < n {
+            if np_sum[(b) as usize] > np_sum[(best) as usize] {
+                best = b
+            }
+            b = b + 1
+        }
+        if best != a {
+            let ti: u64 = np_idx[(a) as usize]
+            let ts: u64 = np_sum[(a) as usize]
+            np_idx[(a) as usize] = np_idx[(best) as usize]
+            np_sum[(a) as usize] = np_sum[(best) as usize]
+            np_idx[(best) as usize] = ti
+            np_sum[(best) as usize] = ts
+        }
+        a = a + 1
+    }
+    return n
+}
+
+fn prog_board() {
+    let d: u64 = (&setbase.b_nprog[0 as usize]) as u64
+    var nm: [u8; 24] = [0 as u8; 24]
+    var tab: [u8; 2] = "\t\0"
+    var nl2: [u8; 2] = "\n\0"
+    var a: u64 = setcore.text_an(d, 0, msg.get((&k_n_kprog[0 as usize]) as u64))
+    a = setcore.text_an(d, a, (&nl2[0 as usize]) as u64)
+    let n: u64 = prog_sort()
+    if n == 0 {
+        a = setcore.text_an(d, a, msg.get((&setbase.k_n_empty[0 as usize]) as u64))
+        let _e: u64 = setcore.text_an(d, a, (&nl2[0 as usize]) as u64)
+        return
+    }
+    var i: u64 = 0
+    while i < n && i < 8 {
+        let k: u64 = np_idx[(i) as usize]
+        setcore.np_name(k, (&nm[0 as usize]) as u64)
+        a = setcore.text_an(d, a, (&nm[0 as usize]) as u64)
+        a = setcore.text_an(d, a, (&tab[0 as usize]) as u64)
+        a = setcore.append_amount(d, a, setcore.nmq(ulib.NK_PROG, k, ulib.NT_RXWIRE))
+        a = setcore.text_an(d, a, (&tab[0 as usize]) as u64)
+        a = setcore.append_amount(d, a, setcore.nmq(ulib.NK_PROG, k, ulib.NT_TXWIRE))
+        a = setcore.text_an(d, a, (&tab[0 as usize]) as u64)
+        a = setcore.append_amount(d, a, np_sum[(i) as usize])
+        a = setcore.text_an(d, a, (&nl2[0 as usize]) as u64)
+        i = i + 1
+    }
+}
+
+fn conf_yes(text: u64, name: u64) -> bool {
+    var i: u64 = 0
+    var zeilenanfang: bool = true
+    while __mmio_read8((text + i) as *mut u8) != 0 as u8 {
+        if zeilenanfang {
+            var k: u64 = 0
+            var fits: bool = true
+            while __mmio_read8((name + k) as *mut u8) != 0 as u8 {
+                if __mmio_read8((text + i + k) as *mut u8)
+                    != __mmio_read8((name + k) as *mut u8) {
+                    fits = false
+                }
+                k = k + 1
+            }
+            if fits {
+                var q: u64 = i + k
+                while __mmio_read8((text + q) as *mut u8) == 32 as u8 {
+                    q = q + 1
+                }
+                if __mmio_read8((text + q) as *mut u8) == 61 as u8 {
+                    q = q + 1
+                    while __mmio_read8((text + q) as *mut u8) == 32 as u8 {
+                        q = q + 1
+                    }
+                    if __mmio_read8((text + q) as *mut u8) == 121 as u8
+                        && __mmio_read8((text + q + 1) as *mut u8) == 101 as u8
+                        && __mmio_read8((text + q + 2) as *mut u8) == 115 as u8 {
+                        return true
+                    }
+                }
+            }
+        }
+        zeilenanfang = __mmio_read8((text + i) as *mut u8) == 10 as u8
+        i = i + 1
+    }
+    return false
+}
+
+static mut k_br_keine: [u8; 23] = "settings.bridge.nolist\0"
+
+static mut k_br_da: [u8; 21] = "settings.bridge.list\0"
+
+static mut k_br_photo_y: [u8; 26] = "settings.bridge.photo_yes\0"
+
+static mut k_br_photo_n: [u8; 25] = "settings.bridge.photo_no\0"
+
+static mut k_br_eing_j: [u8; 26] = "settings.bridge.input_yes\0"
+
+static mut k_br_eing_n: [u8; 25] = "settings.bridge.input_no\0"
+
+static mut k_br_tippt_j: [u8; 27] = "settings.bridge.typing_yes\0"
+
+static mut k_br_tippt_n: [u8; 26] = "settings.bridge.typing_no\0"
+
+static mut k_br_kein_k: [u8; 25] = "settings.bridge.nokernel\0"
+
+static mut k_br_num1: [u8; 23] = "settings.bridge.count1\0"
+
+static mut k_br_num2: [u8; 23] = "settings.bridge.count2\0"
+
+static mut t_sp1: [u8; 2] = " \0"
+
+static mut t_sp2: [u8; 3] = "  \0"
+
+fn bridge_read() {
+    var p_r: [u8; 29] = "/etc/jarvis/permissions.conf\0"
+    var n_photo: [u8; 11] = "screenshot\0"
+    var n_eing: [u8; 6] = "input\0"
+    var buffer: [u8; 2048] = [0 as u8; 2048]
+    let pp: u64 = (&buffer[0 as usize]) as u64
+    let ld: u64 = (&setbase.l_br_file[0 as usize]) as u64
+    let lst: u64 = (&setbase.l_br_stand[0 as usize]) as u64
+    let lti: u64 = (&setbase.l_br_tippt[0 as usize]) as u64
+    let lz: u64 = (&setbase.l_br_nums[0 as usize]) as u64
+
+    __mmio_write8((ld) as *mut u8, 0 as u8)
+    __mmio_write8((lst) as *mut u8, 0 as u8)
+    if setcore.file_read((&p_r[0 as usize]) as u64, pp, 2040) > 0 {
+        let _d1: u64 = setcore.text_an(ld, 0, msg.get((&k_br_da[0 as usize]) as u64))
+        var a: u64 = 0
+        if conf_yes(pp, (&n_photo[0 as usize]) as u64) {
+            a = setcore.text_an(lst, 0, msg.get((&k_br_photo_y[0 as usize]) as u64))
+        } else {
+            a = setcore.text_an(lst, 0, msg.get((&k_br_photo_n[0 as usize]) as u64))
+        }
+        if conf_yes(pp, (&n_eing[0 as usize]) as u64) {
+            let a2: u64 = setcore.text_an(lst, a, (&t_sp2[0 as usize]) as u64)
+            let _d2: u64 = setcore.text_an(lst, a2, msg.get((&k_br_eing_j[0 as usize]) as u64))
+        } else {
+            let a2: u64 = setcore.text_an(lst, a, (&t_sp2[0 as usize]) as u64)
+            let _d3: u64 = setcore.text_an(lst, a2, msg.get((&k_br_eing_n[0 as usize]) as u64))
+        }
+    } else {
+        let _d4: u64 = setcore.text_an(ld, 0, msg.get((&k_br_keine[0 as usize]) as u64))
+    }
+
+    let da: u64 = ulib.sys(setbase.SYS_TIPP, TI_INFO, TQ_ARMED, 0)
+    __mmio_write8((lti) as *mut u8, 0 as u8)
+    __mmio_write8((lz) as *mut u8, 0 as u8)
+    if ulib.failed(da) {
+        let _k1: u64 = setcore.text_an(lti, 0, msg.get((&k_br_kein_k[0 as usize]) as u64))
+    } else {
+        if da != 0 {
+            let _k2: u64 = setcore.text_an(lti, 0, msg.get((&k_br_tippt_j[0 as usize]) as u64))
+        } else {
+            let _k3: u64 = setcore.text_an(lti, 0, msg.get((&k_br_tippt_n[0 as usize]) as u64))
+        }
+        var b: u64 = setcore.text_an(lz, 0, msg.get((&k_br_num1[0 as usize]) as u64))
+        b = setcore.text_an(lz, b, (&t_sp1[0 as usize]) as u64)
+        b = setcore.num_at(lz, b, ulib.sys(setbase.SYS_TIPP, TI_INFO, TQ_TOTAL, 0))
+        b = setcore.text_an(lz, b, (&t_sp2[0 as usize]) as u64)
+        b = setcore.text_an(lz, b, msg.get((&k_br_num2[0 as usize]) as u64))
+        b = setcore.text_an(lz, b, (&t_sp1[0 as usize]) as u64)
+        let _k4: u64 = setcore.num_at(lz, b, ulib.sys(setbase.SYS_TIPP, TI_INFO, TQ_DENIED, 0))
+    }
+}
+
+fn bridge_off() -> bool {
+    var p_r: [u8; 29] = "/etc/jarvis/permissions.conf\0"
+    var n_photo: [u8; 11] = "screenshot\0"
+    var n_eing: [u8; 6] = "input\0"
+    var alt: [u8; 2048] = [0 as u8; 2048]
+    var fresh: [u8; 2304] = [0 as u8; 2304]
+    let ap: u64 = (&alt[0 as usize]) as u64
+    let np: u64 = (&fresh[0 as usize]) as u64
+    if setcore.file_read((&p_r[0 as usize]) as u64, ap, 2040) == 0 {
+        return false
+    }
+    var i: u64 = 0
+    var o: u64 = 0
+    var zeilenanfang: bool = true
+    var has_photo: bool = false
+    var hat_eing: bool = false
+    while __mmio_read8((ap + i) as *mut u8) != 0 as u8 && o < 2200 {
+        if zeilenanfang && (setcore.line_begins(ap, i, (&n_photo[0 as usize]) as u64)
+            || setcore.line_begins(ap, i, (&n_eing[0 as usize]) as u64)) {
+            if setcore.line_begins(ap, i, (&n_photo[0 as usize]) as u64) {
+                has_photo = true
+            } else {
+                hat_eing = true
+            }
+            while __mmio_read8((ap + i) as *mut u8) != 0 as u8
+                && __mmio_read8((ap + i) as *mut u8) != 61 as u8 {
+                __mmio_write8((np + o) as *mut u8,
+                    __mmio_read8((ap + i) as *mut u8))
+                o = o + 1
+                i = i + 1
+            }
+            var s_nein: [u8; 5] = "= no\0"
+            var k: u64 = 0
+            while __mmio_read8(((&s_nein[0 as usize]) as u64 + k) as *mut u8) != 0 as u8 {
+                __mmio_write8((np + o) as *mut u8,
+                    __mmio_read8(((&s_nein[0 as usize]) as u64 + k) as *mut u8))
+                o = o + 1
+                k = k + 1
+            }
+            while __mmio_read8((ap + i) as *mut u8) != 0 as u8
+                && __mmio_read8((ap + i) as *mut u8) != 10 as u8 {
+                i = i + 1
+            }
+            zeilenanfang = false
+            continue
+        }
+        __mmio_write8((np + o) as *mut u8, __mmio_read8((ap + i) as *mut u8))
+        zeilenanfang = __mmio_read8((ap + i) as *mut u8) == 10 as u8
+        o = o + 1
+        i = i + 1
+    }
+    if !has_photo {
+        var z1: [u8; 17] = "\nscreenshot = no\0"
+        o = o + setcore.copy_until_null((&z1[0 as usize]) as u64, np + o)
+    }
+    if !hat_eing {
+        var z2: [u8; 12] = "\ninput = no\0"
+        o = o + setcore.copy_until_null((&z2[0 as usize]) as u64, np + o)
+    }
+    __mmio_write8((np + o) as *mut u8, 0 as u8)
+    return setcore.file_write((&p_r[0 as usize]) as u64, np, o)
+}
+
+fn account_show() {
+    let k: u64 = (&setbase.l_vkonto[0 as usize]) as u64
+    if template.account_have() {
+        let a: u64 = setcore.text_an(k, 0, msg.get((&k_v_acc[0 as usize]) as u64))
+        let _b: u64 = setcore.text_an(k, a, template.account_dir())
+    } else {
+        let _c: u64 = setcore.text_an(k, 0, msg.get((&k_v_noacc[0 as usize]) as u64))
+    }
+}
+
+fn conf_remember(provider: u64, target: u64, zname: u64) -> bool {
+    if *((target) as *mut u8) == 0 as u8 {
+        return false
+    }
+    var alt: [u8; 1024] = [0 as u8; 1024]
+    var fresh: [u8; 1280] = [0 as u8; 1280]
+    var path: [u8; 18] = "/etc/konten.conf\0\0"
+    let n: u64 = setcore.file_read((&path[0 as usize]) as u64,
+        (&alt[0 as usize]) as u64, 1024)
+    var aus: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && alt[(e) as usize] != 10 as u8 {
+            e = e + 1
+        }
+        var same: bool = true
+        var k: u64 = 0
+        while *((provider + k) as *mut u8) != 0 as u8 {
+            if i + k >= e || alt[((i + k)) as usize]
+                != *((provider + k) as *mut u8) {
+                same = false
+            }
+            k = k + 1
+        }
+        if same {
+            if i + k >= e {
+                same = false
+            } else if alt[((i + k)) as usize] != 32 as u8
+                && alt[((i + k)) as usize] != 9 as u8 {
+                same = false
+            }
+        }
+        if !same && e > i {
+            var c: u64 = i
+            while c < e && aus + 1 < 1280 {
+                fresh[(aus) as usize] = alt[(c) as usize]
+                aus = aus + 1
+                c = c + 1
+            }
+            fresh[(aus) as usize] = 10 as u8
+            aus = aus + 1
+        }
+        i = e + 1
+    }
+    var f_zi: [u8; 7] = " ziel=\0"
+    var f_na: [u8; 7] = " name=\0"
+    aus = setcore.anhaengen_c((&fresh[0 as usize]) as u64, aus, 1280, provider)
+    aus = setcore.anhaengen_c((&fresh[0 as usize]) as u64, aus, 1280,
+        (&f_zi[0 as usize]) as u64)
+    aus = setcore.anhaengen_c((&fresh[0 as usize]) as u64, aus, 1280, target)
+    if *((zname) as *mut u8) != 0 as u8 {
+        aus = setcore.anhaengen_c((&fresh[0 as usize]) as u64, aus, 1280,
+            (&f_na[0 as usize]) as u64)
+        aus = setcore.anhaengen_c((&fresh[0 as usize]) as u64, aus, 1280, zname)
+    }
+    if aus + 1 < 1280 {
+        fresh[(aus) as usize] = 10 as u8
+        aus = aus + 1
+    }
+    return setcore.file_write((&path[0 as usize]) as u64,
+        (&fresh[0 as usize]) as u64, aus)
+}
+
+fn opt_word(target: u64, max: u64, vorsatz: u64, value: u64) -> bool {
+    if *((value) as *mut u8) == 0 as u8 {
+        return false
+    }
+    var i: u64 = 0
+    while *((vorsatz + i) as *mut u8) != 0 as u8 && i + 1 < max {
+        *((target + i) as *mut u8) = *((vorsatz + i) as *mut u8)
+        i = i + 1
+    }
+    var j: u64 = 0
+    while *((value + j) as *mut u8) != 0 as u8 && i + 1 < max {
+        *((target + i) as *mut u8) = *((value + j) as *mut u8)
+        i = i + 1
+        j = j + 1
+    }
+    *((target + i) as *mut u8) = 0 as u8
+    return true
+}
+
+fn account_run(argv: u64, argc: u64, secret: u64) -> u64 {
+    var t_bin: [u8; 11] = "/bin/konto\0"
+    return prog_run((&t_bin[0 as usize]) as u64, argv, argc, secret)
+}
+
+fn bin_missing(path: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return true
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return false
+}
+
+fn prog_run(bin: u64, argv: u64, argc: u64, secret: u64) -> u64 {
+    if bin_missing(bin) {
+        k_ausn = 0
+        k_aus[(0) as usize] = 0 as u8
+        return 255
+    }
+    var t_tmp: [u8; 5] = "/tmp\0"
+    var t_aus: [u8; 16] = "/tmp/konto.aus\0\0"
+    var nlz: [u8; 2] = "\n\0"
+    k_ausn = 0
+    k_aus[(0) as usize] = 0 as u8
+    let _md: u64 = ulib.sys(ulib.SYS_MKDIR, (&t_tmp[0 as usize]) as u64,
+        448, 0)
+    let s0: u64 = ulib.sys(ulib.SYS_DUP, 0, 0, 0)
+    let s1: u64 = ulib.sys(ulib.SYS_DUP, 1, 0, 0)
+    var fds: [u32; 2] = [0 as u32; 2]
+    var haben_rohr: bool = false
+    if secret != 0 {
+        if !ulib.bad(ulib.sys(SYS_PIPE, (&fds[0 as usize]) as u64, 0, 0)) {
+            haben_rohr = true
+            let wfd: u64 = fds[(1) as usize] as u64
+            let n: u64 = ulib.length(secret)
+            if n > 0 {
+                let _w1: u64 = ulib.sys(ulib.SYS_WRITE, wfd, secret, n)
+            }
+            let _w2: u64 = ulib.sys(ulib.SYS_WRITE, wfd,
+                (&nlz[0 as usize]) as u64, 1)
+            ulib.sys(ulib.SYS_CLOSE, wfd, 0, 0)
+            ulib.sys(ulib.SYS_DUP2, fds[(0) as usize] as u64, 0, 0)
+        }
+    }
+    let afd: u64 = ulib.sys(ulib.SYS_OPEN, (&t_aus[0 as usize]) as u64,
+        ulib.O_MAKE, 384)
+    if !ulib.bad(afd) {
+        ulib.sys(ulib.SYS_DUP2, afd, 1, 0)
+        ulib.sys(ulib.SYS_CLOSE, afd, 0, 0)
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, bin,
+        argv, argc)
+    if !ulib.bad(s0) {
+        ulib.sys(ulib.SYS_DUP2, s0, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, s0, 0, 0)
+    }
+    if !ulib.bad(s1) {
+        ulib.sys(ulib.SYS_DUP2, s1, 1, 0)
+        ulib.sys(ulib.SYS_CLOSE, s1, 0, 0)
+    }
+    if haben_rohr {
+        ulib.sys(ulib.SYS_CLOSE, fds[(0) as usize] as u64, 0, 0)
+    }
+    if ulib.bad(pid) {
+        return 255
+    }
+    let code: u64 = ulib.wait_code(pid)
+    let rfd: u64 = ulib.sys(ulib.SYS_OPEN, (&t_aus[0 as usize]) as u64,
+        0, 0)
+    if !ulib.bad(rfd) {
+        let n: u64 = ulib.sys(ulib.SYS_READ, rfd,
+            (&k_aus[0 as usize]) as u64, 4095)
+        ulib.sys(ulib.SYS_CLOSE, rfd, 0, 0)
+        if !ulib.bad(n) {
+            k_ausn = n
+            k_aus[(n) as usize] = 0 as u8
+        }
+    }
+    return code
+}
+
+fn account_field(name: u64, aus: u64, max: u64) -> bool {
+    var head: [u8; 8] = "konto: \0"
+    __mmio_write8((aus) as *mut u8, 0 as u8)
+    var i: u64 = 0
+    while i < k_ausn {
+        var e: u64 = i
+        while e < k_ausn && k_aus[(e) as usize] != 10 as u8 {
+            e = e + 1
+        }
+        var p: u64 = i
+        var fits: bool = true
+        var q: u64 = 0
+        while q < 7 {
+            if p + q >= e || k_aus[((p + q)) as usize]
+                != __mmio_read8(((&head[0 as usize]) as u64 + q) as *mut u8) {
+                fits = false
+                q = 7
+            } else {
+                q = q + 1
+            }
+        }
+        if fits {
+            p = p + 7
+            var m: u64 = 0
+            var same: bool = true
+            while __mmio_read8((name + m) as *mut u8) != 0 as u8 {
+                if p + m >= e || k_aus[((p + m)) as usize]
+                    != __mmio_read8((name + m) as *mut u8) {
+                    same = false
+                }
+                m = m + 1
+            }
+            if same && p + m + 3 <= e && k_aus[((p + m)) as usize] == 32 as u8
+                && k_aus[((p + m + 1)) as usize] == 61 as u8 {
+                var v: u64 = p + m + 3
+                var k: u64 = 0
+                while v < e && k + 1 < max {
+                    __mmio_write8((aus + k) as *mut u8,
+                        k_aus[(v) as usize])
+                    k = k + 1
+                    v = v + 1
+                }
+                __mmio_write8((aus + k) as *mut u8, 0 as u8)
+                return true
+            }
+        }
+        i = e + 1
+    }
+    return false
+}
+
+fn provider_read() {
+    var argv: [u64; 2] = [0 as u64; 2]
+    var a0: [u8; 11] = "/bin/konto\0"
+    var a1: [u8; 9] = "anbieter\0"
+    argv[(0) as usize] = (&a0[0 as usize]) as u64
+    argv[(1) as usize] = (&a1[0 as usize]) as u64
+    let _c: u64 = account_run((&argv[0 as usize]) as u64, 2, 0)
+    var name: [u8; 14] = "anbieter_name\0"
+    var head: [u8; 8] = "konto: \0"
+    k_anb_n = 0
+    var bp: u64 = 0
+    var i: u64 = 0
+    while i < k_ausn {
+        var e: u64 = i
+        while e < k_ausn && k_aus[(e) as usize] != 10 as u8 {
+            e = e + 1
+        }
+        var fits: bool = true
+        var q: u64 = 0
+        while q < 7 {
+            if i + q >= e || k_aus[((i + q)) as usize]
+                != __mmio_read8(((&head[0 as usize]) as u64 + q) as *mut u8) {
+                fits = false
+                q = 7
+            } else {
+                q = q + 1
+            }
+        }
+        if fits {
+            var m: u64 = 0
+            var same: bool = true
+            while __mmio_read8(((&name[0 as usize]) as u64 + m) as *mut u8)
+                != 0 as u8 {
+                if i + 7 + m >= e || k_aus[((i + 7 + m)) as usize]
+                    != __mmio_read8(((&name[0 as usize]) as u64 + m)
+                        as *mut u8) {
+                    same = false
+                }
+                m = m + 1
+            }
+            if same {
+                var v: u64 = i + 7 + m + 3
+                if k_anb_n > 0 && bp + 1 < 255 {
+                    setbase.k_anbn[(bp) as usize] = 10 as u8
+                    bp = bp + 1
+                }
+                while v < e && bp + 1 < 255 {
+                    setbase.k_anbn[(bp) as usize] = k_aus[(v) as usize]
+                    bp = bp + 1
+                    v = v + 1
+                }
+                k_anb_n = k_anb_n + 1
+            }
+        }
+        i = e + 1
+    }
+    setbase.k_anbn[(bp) as usize] = 0 as u8
+}
+
+fn book_same(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while __mmio_read8((a + i) as *mut u8) != 0 as u8 {
+        if __mmio_read8((a + i) as *mut u8) != __mmio_read8((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return __mmio_read8((b + i) as *mut u8) == 0 as u8
+}
+
+fn book_key(word: u64, hint: u64) -> u64 {
+    var w_ok: [u8; 3] = "ok\0"
+    var w_net: [u8; 8] = "offline\0"
+    var w_ab: [u8; 7] = "denied\0"
+
+    var w_net_old: [u8; 9] = "keinnetz\0"
+    var w_ab_old: [u8; 10] = "abgelehnt\0"
+    if book_same(word, (&w_ok[0 as usize]) as u64) {
+        return (&k_m_bok[0 as usize]) as u64
+    }
+    if book_same(word, (&w_net[0 as usize]) as u64)
+        || book_same(word, (&w_net_old[0 as usize]) as u64) {
+        return (&k_m_bnet[0 as usize]) as u64
+    }
+    if book_same(word, (&w_ab[0 as usize]) as u64)
+        || book_same(word, (&w_ab_old[0 as usize]) as u64) {
+        if hint != 0 && book_same(hint, msg.get((&k_m_nscope[0 as usize]) as u64)) {
+            return (&k_m_bscope[0 as usize]) as u64
+        }
+        return (&k_m_bref[0 as usize]) as u64
+    }
+    return (&k_m_bfail[0 as usize]) as u64
+}
+
+fn book_state() {
+    var b_bin: [u8; 16] = "/bin/socfleitec\0"
+    var b_v1: [u8; 3] = "v1\0"
+    var b_he: [u8; 6] = "hello\0"
+    var bargv: [u64; 4] = [0 as u64; 4]
+    bargv[0] = (&b_bin[0 as usize]) as u64
+    bargv[1] = (&b_v1[0 as usize]) as u64
+    bargv[2] = (&b_he[0 as usize]) as u64
+    let rc: u64 = prog_run((&b_bin[0 as usize]) as u64, (&bargv[0 as usize]) as u64, 3, 0)
+    var da: bool = false
+    if rc == 0 {
+        var i: u64 = 0
+        while i + 8 <= k_ausn {
+            if (i == 0 || k_aus[((i - 1)) as usize] == 10 as u8)
+                && k_aus[(i) as usize] == 97 as u8 && k_aus[((i + 1)) as usize] == 99 as u8
+                && k_aus[((i + 2)) as usize] == 99 as u8 && k_aus[((i + 3)) as usize] == 111 as u8
+                && k_aus[((i + 4)) as usize] == 117 as u8 && k_aus[((i + 5)) as usize] == 110 as u8
+                && k_aus[((i + 6)) as usize] == 116 as u8 && k_aus[((i + 7)) as usize] == 9 as u8 {
+                da = true
+            }
+            i = i + 1
+        }
+    }
+    var at: u64 = setcore.text_an((&setbase.l_kbook[0 as usize]) as u64, 0, msg.get((&k_k_bstat[0 as usize]) as u64))
+    if da {
+        let _x: u64 = setcore.text_an((&setbase.l_kbook[0 as usize]) as u64, at, msg.get((&k_k_bon[0 as usize]) as u64))
+    } else {
+        let _x: u64 = setcore.text_an((&setbase.l_kbook[0 as usize]) as u64, at, msg.get((&k_k_boff[0 as usize]) as u64))
+    }
+}
+
+fn accounts_read() {
+    var path: [u8; 12] = "/etc/konten\0"
+    var roh: [u8; 1024] = [0 as u8; 1024]
+    setbase.k_n = 0
+    setbase.k_list[(0) as usize] = 0 as u8
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&roh[0 as usize]) as u64,
+        1023)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    var bp: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && roh[(e) as usize] != 10 as u8 {
+            e = e + 1
+        }
+        if e > i {
+            var f: u64 = 0
+            var a: u64 = i
+            var von1: u64 = i
+            var bis1: u64 = i
+            var von4: u64 = i
+            var bis4: u64 = i
+            var k: u64 = i
+            while k <= e {
+                if k == e || roh[(k) as usize] == 9 as u8 {
+                    if f == 1 {
+                        von1 = a
+                        bis1 = k
+                    }
+                    if f == 4 {
+                        von4 = a
+                        bis4 = k
+                    }
+                    f = f + 1
+                    a = k + 1
+                }
+                k = k + 1
+            }
+            if setbase.k_n > 0 && bp + 1 < 1023 {
+                setbase.k_list[(bp) as usize] = 10 as u8
+                bp = bp + 1
+            }
+            var v: u64 = von1
+            while v < bis1 && bp + 1 < 1023 {
+                setbase.k_list[(bp) as usize] = roh[(v) as usize]
+                bp = bp + 1
+                v = v + 1
+            }
+            if bp + 2 < 1023 {
+                setbase.k_list[(bp) as usize] = 32 as u8
+                setbase.k_list[((bp + 1)) as usize] = 32 as u8
+                bp = bp + 2
+            }
+            v = von4
+            while v < bis4 && bp + 1 < 1023 {
+                setbase.k_list[(bp) as usize] = roh[(v) as usize]
+                bp = bp + 1
+                v = v + 1
+            }
+            setbase.k_n = setbase.k_n + 1
+        }
+        i = e + 1
+    }
+    setbase.k_list[(bp) as usize] = 0 as u8
+}
+
+fn account_id(k: u64, aus: u64, max: u64) -> bool {
+    var path: [u8; 12] = "/etc/konten\0"
+    var roh: [u8; 1024] = [0 as u8; 1024]
+    __mmio_write8((aus) as *mut u8, 0 as u8)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&roh[0 as usize]) as u64,
+        1023)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    var nr: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && roh[(e) as usize] != 10 as u8 {
+            e = e + 1
+        }
+        if e > i {
+            if nr == k {
+                var v: u64 = i
+                var o: u64 = 0
+                while v < e && roh[(v) as usize] != 9 as u8 && o + 1 < max {
+                    __mmio_write8((aus + o) as *mut u8, roh[(v) as usize])
+                    o = o + 1
+                    v = v + 1
+                }
+                __mmio_write8((aus + o) as *mut u8, 0 as u8)
+                return o > 0
+            }
+            nr = nr + 1
+        }
+        i = e + 1
+    }
+    return false
+}
+
+fn lock_seconds(level: u64) -> u64 {
+    return lockidle.secs_of(level)
+}
+
+fn lock_level() -> u64 {
+    var v_get: [u8; 18] = "call settings.get\0"
+    var k_key: [u8; 4] = "key\0"
+    var k_li: [u8; 10] = "lock.idle\0"
+    var k_val: [u8; 6] = "value\0"
+    var s_bus: [u8; 30] = "settings: lock via bus value=\0"
+    if actcli.open() {
+        actcli.req((&v_get[0 as usize]) as u64)
+        actcli.arg((&k_key[0 as usize]) as u64, (&k_li[0 as usize]) as u64)
+        if actcli.send(300) == actcli.R_OK {
+            var v: [u8; 24] = [0 as u8; 24]
+            if actcli.field((&k_val[0 as usize]) as u64, (&v[0 as usize]) as u64, 24) {
+                setcore.say((&s_bus[0 as usize]) as u64)
+                setcore.say((&v[0 as usize]) as u64)
+                setcore.nl()
+                return setcore.level_of_secs(ulib.to_num((&v[0 as usize]) as u64))
+            }
+        }
+    }
+    var s_file: [u8; 34] = "settings: lock via file (no bus)\n\0"
+    setcore.say((&s_file[0 as usize]) as u64)
+    return lock_level_file()
+}
+
+fn lock_level_file() -> u64 {
+    var k: [u8; 10] = "leerlauf=\0"
+    let fd: u64 = io.open((&sp_conf[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let b: u64 = (&sp_buf[0 as usize]) as u64
+    let n: u64 = io.read(fd, b, 120)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return 0
+    }
+    __mmio_write8((b + n) as *mut u8, 0 as u8)
+    let at: u64 = ulib.find(b, (&k[0 as usize]) as u64)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    return setcore.level_of_secs(ulib.to_num(b + at + 9))
+}
+
+fn lock_write(secs: u64) -> bool {
+    if actcli.open() {
+        var v_set: [u8; 18] = "call settings.set\0"
+        var k_key: [u8; 4] = "key\0"
+        var k_li: [u8; 10] = "lock.idle\0"
+        var k_val: [u8; 6] = "value\0"
+        var z: [u8; 24] = [0 as u8; 24]
+        let n: u64 = ulib.digits(secs, (&z[0 as usize]) as u64)
+        z[(n) as usize] = 0 as u8
+        actcli.req((&v_set[0 as usize]) as u64)
+        actcli.arg((&k_key[0 as usize]) as u64, (&k_li[0 as usize]) as u64)
+        actcli.arg((&k_val[0 as usize]) as u64, (&z[0 as usize]) as u64)
+        let rc: u64 = actcli.send(300)
+        var s1: [u8; 31] = "settings: lock set via bus rc=\0"
+        setcore.say((&s1[0 as usize]) as u64)
+        setcore.sayn(rc)
+        setcore.nl()
+        if rc != actcli.R_NOBUS {
+            return rc == actcli.R_OK
+        }
+    }
+    return lock_write_file(secs)
+}
+
+fn lock_write_file(secs: u64) -> bool {
+    var head: [u8; 64] = "# /etc/sperre.conf -- written by the settings program\nleerlauf=\0"
+    var nl2: [u8; 2] = "\n\0"
+    var z: [u8; 24] = [0 as u8; 24]
+    let b: u64 = (&sp_buf[0 as usize]) as u64
+    ulib.strcpy(b, (&head[0 as usize]) as u64)
+    let n: u64 = ulib.digits(secs, (&z[0 as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcat(b, (&z[0 as usize]) as u64)
+    ulib.strcat(b, (&nl2[0 as usize]) as u64)
+    let fd: u64 = io.create((&sp_conf[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return false
+    }
+    let len: u64 = ulib.length(b)
+    let g: u64 = io.write_all(fd, b, len)
+    io.close(fd)
+    return !ulib.bad(g) && g >= len
+}
+
+static mut k_ri_note: [u8; 21] = "settings.rights.note\0"
+
+static mut k_ri_head: [u8; 21] = "settings.rights.head\0"
+
+static mut k_ri_chead: [u8; 22] = "settings.rights.chead\0"
+
+static mut k_ri_perm: [u8; 26] = "settings.rights.permanent\0"
+
+static mut k_ri_sess: [u8; 24] = "settings.rights.session\0"
+
+static mut k_ri_left: [u8; 21] = "settings.rights.left\0"
+
+static mut k_ri_none: [u8; 21] = "settings.rights.none\0"
+
+static mut k_ri_dfirst: [u8; 25] = "settings.rights.dryfirst\0"
+
+static mut k_ri_done: [u8; 21] = "settings.rights.done\0"
+
+static mut ri_nums: [u64; 32] = [0 as u64; 32]
+
+static mut ri_rows: u64 = 0
+
+static mut k_pr_head: [u8; 19] = "settings.log.head\0\0"
+
+static mut k_pr_none: [u8; 19] = "settings.log.none\0\0"
+
+static mut k_pr_rot: [u8; 22] = "settings.log.rotated\0\0"
+
+fn widths_init() {
+    setbase.c_nprog[0 as usize] = 122
+    setbase.c_nprog[1 as usize] = 80
+    setbase.c_nprog[2 as usize] = 80
+    setbase.c_nprog[3 as usize] = 80
+    setbase.c_nconn[0 as usize] = 34
+    setbase.c_nconn[1 as usize] = 124
+    setbase.c_nconn[2 as usize] = 124
+    setbase.c_nconn[3 as usize] = 76
+    setbase.c_sys[0 as usize] = 180
+    setbase.c_sys[1 as usize] = 90
+    setbase.c_sys[2 as usize] = 80
+    setbase.c_sys[3 as usize] = 370
+    setbase.c_rules[0 as usize] = 40
+    setbase.c_rules[1 as usize] = 60
+    setbase.c_rules[2 as usize] = 130
+    setbase.c_rules[3 as usize] = 230
+    setbase.c_rules[4 as usize] = 80
+    setbase.c_rules[5 as usize] = 180
+    setbase.c_cls[0 as usize] = 170
+    var k: u64 = 1
+    while k < 6 {
+        setbase.c_cls[k as usize] = 90
+        k = k + 1
+    }
+    setbase.c_proto[0 as usize] = 70
+    setbase.c_proto[1 as usize] = 120
+    setbase.c_proto[2 as usize] = 70
+    setbase.c_proto[3 as usize] = 205
+    setbase.c_proto[4 as usize] = 110
+    setbase.c_proto[5 as usize] = 135
+}
+
+static mut cl_names: [u8; 768] = [0 as u8; 768]
+
+static mut cl_rows: u64 = 0
+
+fn bx_put(buf: u64, at: u64, max: u64, p: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = at
+    while rb(p, i) != 0 && o + 1 < max {
+        __mmio_write8((buf + o) as *mut u8, __mmio_read8((p + i) as *mut u8))
+        o = o + 1
+        i = i + 1
+    }
+    __mmio_write8((buf + o) as *mut u8, 0 as u8)
+    return o
+}
+
+fn bx_putn(buf: u64, at: u64, max: u64, p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = at
+    while i < n && o + 1 < max {
+        __mmio_write8((buf + o) as *mut u8, __mmio_read8((p + i) as *mut u8))
+        o = o + 1
+        i = i + 1
+    }
+    __mmio_write8((buf + o) as *mut u8, 0 as u8)
+    return o
+}
+
+fn bx_ch(buf: u64, at: u64, max: u64, c: u64) -> u64 {
+    if at + 1 >= max {
+        return at
+    }
+    __mmio_write8((buf + at) as *mut u8, c as u8)
+    __mmio_write8((buf + at + 1) as *mut u8, 0 as u8)
+    return at + 1
+}
+
+fn bx_num(buf: u64, at: u64, max: u64, v: u64) -> u64 {
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&z[0 as usize]) as u64)
+    return bx_putn(buf, at, max, (&z[0 as usize]) as u64, n)
+}
+
+fn rb(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn stat_set(buf: u64, key: u64, detail: u64) {
+    var o: u64 = bx_put(buf, 0, 200, msg.get(key))
+    if detail != 0 {
+        o = bx_ch(buf, o, 200, 32)
+        o = bx_put(buf, o, 200, detail)
+    }
+}
+
+fn ri_rule(lp: u64, at0: u64) -> u64 {
+    let bp: u64 = (&setbase.b_rules[0 as usize]) as u64
+    var at: u64 = at0
+    var w: [u8; 48] = [0 as u8; 48]
+    let wp: u64 = (&w[0 as usize]) as u64
+    var i: u64 = 5
+    var col: u64 = 0
+    var num: u64 = 0
+    var deny: bool = false
+    while col < 6 {
+        var n: u64 = 0
+        while rb(lp, i) != 0 && rb(lp, i) != 32 && n < 46 {
+            __mmio_write8((wp + n) as *mut u8, rb(lp, i) as u8)
+            n = n + 1
+            i = i + 1
+        }
+        __mmio_write8((wp + n) as *mut u8, 0 as u8)
+        if rb(lp, i) == 32 {
+            i = i + 1
+        }
+        if col == 0 {
+            num = ulib.to_num(wp)
+            at = bx_put(bp, at, 2048, wp)
+        } else if col == 1 {
+            deny = rb(wp, 0) == 100
+            at = bx_put(bp, at, 2048, wp)
+        } else if col == 4 && deny {
+
+            at = bx_ch(bp, at, 2048, 45)
+            at = bx_ch(bp, at, 2048, 9)
+            col = 5
+        }
+        if col == 2 || col == 3 || (col == 4 && !deny) {
+            at = bx_put(bp, at, 2048, wp)
+        }
+        if col == 5 {
+
+            if rb(wp, 0) == 112 {
+                at = bx_put(bp, at, 2048, msg.get((&k_ri_perm[0 as usize]) as u64))
+            } else if rb(wp, 0) == 108 {
+                at = bx_put(bp, at, 2048, wp + 5)
+                at = bx_put(bp, at, 2048, msg.get((&k_ri_left[0 as usize]) as u64))
+            } else {
+                at = bx_put(bp, at, 2048, msg.get((&k_ri_sess[0 as usize]) as u64))
+            }
+        } else {
+            at = bx_ch(bp, at, 2048, 9)
+        }
+        col = col + 1
+    }
+    at = bx_ch(bp, at, 2048, 10)
+    if ri_rows < 32 {
+        ri_nums[(ri_rows) as usize] = num
+        ri_rows = ri_rows + 1
+    }
+    return at
+}
+
+fn ri_client(lp: u64, at0: u64) -> u64 {
+    let bp: u64 = (&setbase.b_cls[0 as usize]) as u64
+    var at: u64 = at0
+    var i: u64 = 7
+    var n: u64 = 0
+    let np: u64 = (&cl_names[0 as usize]) as u64 + cl_rows * 24
+    while rb(lp, i) != 0 && rb(lp, i) != 32 {
+        if n < 23 && cl_rows < 32 {
+            __mmio_write8((np + n) as *mut u8, rb(lp, i) as u8)
+            __mmio_write8((np + n + 1) as *mut u8, 0 as u8)
+        }
+        n = n + 1
+        i = i + 1
+    }
+    at = bx_putn(bp, at, 2048, lp + 7, n)
+
+    while rb(lp, i) != 0 {
+        if rb(lp, i) == 61 {
+            at = bx_ch(bp, at, 2048, 9)
+            i = i + 1
+            while rb(lp, i) >= 48 && rb(lp, i) <= 57 {
+                at = bx_ch(bp, at, 2048, rb(lp, i))
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    at = bx_ch(bp, at, 2048, 10)
+    if cl_rows < 32 {
+        cl_rows = cl_rows + 1
+    }
+    return at
+}
+
+fn pr_field(lp: u64, key: u64, out: u64, max: u64) -> bool {
+    let at: u64 = ulib.find(lp, key)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        __mmio_write8(out as *mut u8, 0 as u8)
+        return false
+    }
+    let kl: u64 = ulib.length(key)
+    var i: u64 = 0
+    while rb(lp, at + kl + i) != 0 && rb(lp, at + kl + i) != 32 && i + 1 < max {
+        __mmio_write8((out + i) as *mut u8, rb(lp, at + kl + i) as u8)
+        i = i + 1
+    }
+    __mmio_write8((out + i) as *mut u8, 0 as u8)
+    return true
+}
+
+fn pr_word(bp: u64, at: u64, wp: u64) -> u64 {
+    var ck: [u8; 64] = [0 as u8; 64]
+    let cp: u64 = (&ck[0 as usize]) as u64
+    var s_pre: [u8; 16] = "settings.log.w.\0"
+    let o: u64 = bx_put(cp, 0, 64, (&s_pre[0 as usize]) as u64)
+    let _o2: u64 = bx_put(cp, o, 64, wp)
+    let tr: u64 = msg.get(cp)
+    if tr != cp {
+        return bx_put(bp, at, 6144, tr)
+    }
+    return bx_put(bp, at, 6144, wp)
+}
+
+fn proto_row(lp: u64, at0: u64) -> u64 {
+    let bp: u64 = (&setbase.b_proto[0 as usize]) as u64
+    var at: u64 = at0
+    var w: [u8; 48] = [0 as u8; 48]
+    let wp: u64 = (&w[0 as usize]) as u64
+    var f_t: [u8; 3] = "t=\0"
+    var f_c: [u8; 8] = "client=\0"
+    var f_v: [u8; 6] = "verb=\0"
+    var f_a: [u8; 8] = "action=\0"
+    var f_d: [u8; 10] = "decision=\0"
+    var f_r: [u8; 8] = "result=\0"
+    var f_n: [u8; 7] = "count=\0"
+    var s_s: [u8; 3] = " s\0"
+    var s_x: [u8; 3] = " x\0"
+
+    if pr_field(lp, (&f_t[0 as usize]) as u64, wp, 24) {
+        at = bx_num(bp, at, 6144, ulib.to_num(wp) / 100)
+        at = bx_put(bp, at, 6144, (&s_s[0 as usize]) as u64)
+    }
+    at = bx_ch(bp, at, 6144, 9)
+    let _c: bool = pr_field(lp, (&f_c[0 as usize]) as u64, wp, 48)
+    at = bx_put(bp, at, 6144, wp)
+    at = bx_ch(bp, at, 6144, 9)
+    let _v: bool = pr_field(lp, (&f_v[0 as usize]) as u64, wp, 48)
+    at = bx_put(bp, at, 6144, wp)
+    at = bx_ch(bp, at, 6144, 9)
+    let _a: bool = pr_field(lp, (&f_a[0 as usize]) as u64, wp, 48)
+    at = bx_put(bp, at, 6144, wp)
+    at = bx_ch(bp, at, 6144, 9)
+    let _d: bool = pr_field(lp, (&f_d[0 as usize]) as u64, wp, 48)
+    at = pr_word(bp, at, wp)
+    at = bx_ch(bp, at, 6144, 9)
+    let _r: bool = pr_field(lp, (&f_r[0 as usize]) as u64, wp, 48)
+    at = pr_word(bp, at, wp)
+    if pr_field(lp, (&f_n[0 as usize]) as u64, wp, 24) {
+        at = bx_put(bp, at, 6144, (&s_x[0 as usize]) as u64)
+        at = bx_put(bp, at, 6144, wp)
+    }
+    return bx_ch(bp, at, 6144, 10)
+}
+
+fn proto_load() {
+    let bp: u64 = (&setbase.b_proto[0 as usize]) as u64
+    let sp: u64 = (&setbase.l_prostat[0 as usize]) as u64
+    var at: u64 = bx_put(bp, 0, 6144, msg.get((&k_pr_head[0 as usize]) as u64))
+    at = bx_ch(bp, at, 6144, 10)
+    var s_a: [u8; 9] = "audit 40\0"
+    actcli.req((&s_a[0 as usize]) as u64)
+    let rc: u64 = actcli.send(300)
+    var rows: u64 = 0
+    var rot: u64 = 0
+    if rc != actcli.R_OK {
+        at = bx_put(bp, at, 6144, msg.get((&setbase.k_sy_nobus[0 as usize]) as u64))
+        at = bx_ch(bp, at, 6144, 10)
+    } else {
+        var ln: [u8; 320] = [0 as u8; 320]
+        let lp: u64 = (&ln[0 as usize]) as u64
+
+        var n: u64 = 1
+        while actcli.line(n, lp, 320) {
+            n = n + 1
+        }
+
+        var k: u64 = n
+        while k > 1 {
+            k = k - 1
+            if actcli.line(k, lp, 320) {
+                if rb(lp, 0) == 116 && rb(lp, 1) == 61 {
+                    at = proto_row(lp, at)
+                    rows = rows + 1
+                } else if rb(lp, 0) == 114 && rb(lp, 1) == 111 {
+                    rot = ulib.to_num(lp + 10)
+                }
+            }
+        }
+        if rows == 0 {
+            at = bx_put(bp, at, 6144, msg.get((&k_pr_none[0 as usize]) as u64))
+            at = bx_ch(bp, at, 6144, 10)
+        }
+    }
+    var a2: u64 = bx_num(sp, 0, 120, rows)
+    a2 = bx_ch(sp, a2, 120, 32)
+    a2 = bx_put(sp, a2, 120, msg.get((&k_pr_rot[0 as usize]) as u64))
+    a2 = bx_num(sp, a2, 120, rot)
+    var s1: [u8; 25] = "settings: protocol rows=\0"
+    var s2: [u8; 5] = " rc=\0"
+    setcore.say((&s1[0 as usize]) as u64)
+    setcore.sayn(rows)
+    setcore.say((&s2[0 as usize]) as u64)
+    setcore.sayn(rc)
+    setcore.nl()
+}
+
+fn rights_load() {
+    let bp: u64 = (&setbase.b_rules[0 as usize]) as u64
+    let cp: u64 = (&setbase.b_cls[0 as usize]) as u64
+    let np: u64 = (&setbase.l_rinote[0 as usize]) as u64
+    var at: u64 = bx_put(bp, 0, 2048, msg.get((&k_ri_head[0 as usize]) as u64))
+    at = bx_ch(bp, at, 2048, 10)
+    var ac: u64 = bx_put(cp, 0, 2048, msg.get((&k_ri_chead[0 as usize]) as u64))
+    ac = bx_ch(cp, ac, 2048, 10)
+    var an: u64 = bx_put(np, 0, 200, msg.get((&k_ri_note[0 as usize]) as u64))
+    ri_rows = 0
+    cl_rows = 0
+    var ndf: u64 = 0
+    var s_r: [u8; 7] = "rights\0"
+    actcli.req((&s_r[0 as usize]) as u64)
+    let rc: u64 = actcli.send(300)
+    if rc != actcli.R_OK {
+        at = bx_put(bp, at, 2048, msg.get((&setbase.k_sy_nobus[0 as usize]) as u64))
+        at = bx_ch(bp, at, 2048, 10)
+    } else {
+        var ln: [u8; 200] = [0 as u8; 200]
+        let lp: u64 = (&ln[0 as usize]) as u64
+        var k: u64 = 1
+        while actcli.line(k, lp, 200) {
+            if rb(lp, 0) == 114 && rb(lp, 1) == 117 {
+                at = ri_rule(lp, at)
+            } else if rb(lp, 0) == 99 && rb(lp, 1) == 108 {
+                ac = ri_client(lp, ac)
+            } else if rb(lp, 0) == 100 && rb(lp, 1) == 114 {
+                if ndf == 0 {
+                    an = bx_ch(np, an, 200, 32)
+                    an = bx_put(np, an, 200, msg.get((&k_ri_dfirst[0 as usize]) as u64))
+                } else {
+                    an = bx_ch(np, an, 200, 44)
+                }
+                an = bx_ch(np, an, 200, 32)
+                an = bx_put(np, an, 200, lp + 9)
+                ndf = ndf + 1
+            }
+            k = k + 1
+        }
+        if ri_rows == 0 {
+            at = bx_put(bp, at, 2048, msg.get((&k_ri_none[0 as usize]) as u64))
+            at = bx_ch(bp, at, 2048, 10)
+        }
+    }
+    var s1: [u8; 24] = "settings: rights rules=\0"
+    var s2: [u8; 10] = " clients=\0"
+    var s3: [u8; 11] = " dryfirst=\0"
+    var s4: [u8; 5] = " rc=\0"
+    setcore.say((&s1[0 as usize]) as u64)
+    setcore.sayn(ri_rows)
+    setcore.say((&s2[0 as usize]) as u64)
+    setcore.sayn(cl_rows)
+    setcore.say((&s3[0 as usize]) as u64)
+    setcore.sayn(ndf)
+    setcore.say((&s4[0 as usize]) as u64)
+    setcore.sayn(rc)
+    setcore.nl()
+}
+
+fn ri_answer(rc: u64) {
+    let sp: u64 = (&setbase.l_ristat[0 as usize]) as u64
+    var ln: [u8; 160] = [0 as u8; 160]
+    let lp: u64 = (&ln[0 as usize]) as u64
+    let _l: bool = actcli.line(0, lp, 160)
+    if rc == actcli.R_OK {
+        var l2: [u8; 160] = [0 as u8; 160]
+        let _l2: bool = actcli.line(1, (&l2[0 as usize]) as u64, 160)
+        stat_set(sp, (&k_ri_done[0 as usize]) as u64, (&l2[0 as usize]) as u64)
+    } else if rc == actcli.R_NOBUS {
+        stat_set(sp, (&setbase.k_sy_nobus[0 as usize]) as u64, 0)
+    } else {
+        stat_set(sp, (&setbase.k_sy_err[0 as usize]) as u64, lp)
+    }
+    var s1: [u8; 28] = "settings: rights answer rc=\0"
+    var s2: [u8; 8] = " line=[\0"
+    var s3: [u8; 2] = "]\0"
+    setcore.say((&s1[0 as usize]) as u64)
+    setcore.sayn(rc)
+    setcore.say((&s2[0 as usize]) as u64)
+    setcore.say(lp)
+    setcore.say((&s3[0 as usize]) as u64)
+    setcore.nl()
+}
+
+fn ri_revoke() {
+    let r: u64 = fuiscene.table_sel(setbase.ri_tab)
+    if r >= ri_rows {
+        stat_set((&setbase.l_ristat[0 as usize]) as u64, (&setbase.k_sy_pick[0 as usize]) as u64, 0)
+        return
+    }
+    var cmd: [u8; 32] = [0 as u8; 32]
+    let cp: u64 = (&cmd[0 as usize]) as u64
+    var s_r: [u8; 8] = "revoke \0"
+    var o: u64 = bx_put(cp, 0, 32, (&s_r[0 as usize]) as u64)
+    o = bx_num(cp, o, 32, ri_nums[(r) as usize])
+    actcli.req(cp)
+    ri_answer(actcli.send(300))
+}
+
+fn ri_block() {
+    let r: u64 = fuiscene.table_sel(setbase.ri_ctab)
+    if r >= cl_rows {
+        stat_set((&setbase.l_ristat[0 as usize]) as u64, (&setbase.k_sy_pick[0 as usize]) as u64, 0)
+        return
+    }
+    var cmd: [u8; 48] = [0 as u8; 48]
+    let cp: u64 = (&cmd[0 as usize]) as u64
+    var s_b: [u8; 7] = "block \0"
+    var s_st: [u8; 3] = " *\0"
+    var o: u64 = bx_put(cp, 0, 48, (&s_b[0 as usize]) as u64)
+    o = bx_put(cp, o, 48, (&cl_names[0 as usize]) as u64 + r * 24)
+    o = bx_put(cp, o, 48, (&s_st[0 as usize]) as u64)
+    actcli.req(cp)
+    ri_answer(actcli.send(300))
+}
+
+fn ri_jarvis() {
+    var s_g: [u8; 43] = "grant jarvis settings.display.* write 3600\0"
+    actcli.req((&s_g[0 as usize]) as u64)
+    ri_answer(actcli.send(300))
+}
+
+static mut zc_items: [u8; 480] = [0 as u8; 480]
+
+static mut zc_letters: [u8; 9] = "UEGALSFP\0"
+
+static mut zc_conf: [u8; 15] = "/etc/time.conf\0"
+
+static mut zc_zbuf: [u8; 200] = [0 as u8; 200]
+
+fn zc_letter(r: u64) -> u64 {
+    if r >= 8 {
+        return 85
+    }
+    return (zc_letters[(r) as usize]) as u64
+}
+
+fn zc_region_index(letter: u64) -> u64 {
+    var r: u64 = 0
+    while r < 8 {
+        if zc_letter(r) == letter {
+            return r
+        }
+        r = r + 1
+    }
+    return 0
+}
+
+fn zc_list(r: u64) -> u64 {
+    let reg: u64 = zc_letter(r)
+    let n: u64 = tz.zone_count()
+    var nm: [u8; 32] = [0 as u8; 32]
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < n && at < 440 {
+        if tz.zone_region(i) == reg {
+            let l: u64 = tz.zone_name(i, (&nm[0 as usize]) as u64)
+            if at > 0 {
+                zc_items[(at) as usize] = 10 as u8
+                at = at + 1
+            }
+            var k: u64 = 0
+            while k < l {
+                zc_items[(at) as usize] = nm[(k) as usize]
+                at = at + 1
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+    zc_items[(at) as usize] = 0 as u8
+    return (&zc_items[0 as usize]) as u64
+}
+
+static mut zc_rtc_utc: [u8; 8] = "rtc=utc\0"
+
+static mut zc_rtc_local: [u8; 10] = "rtc=local\0"
+
+static mut zc_rtc_utc_line: [u8; 9] = "rtc=utc\n\0"
+
+static mut zc_rtc_local_line: [u8; 11] = "rtc=local\n\0"
+
+fn zc_has_line(n: u64, text: u64) -> bool {
+    let l: u64 = ulib.length(text)
+    var i: u64 = 0
+    while i + l <= n {
+        if (i == 0 || zc_zbuf[((i - 1)) as usize] == 10 as u8)
+            && ulib.strneq((&zc_zbuf[0 as usize]) as u64 + i, text, l)
+            && (i + l == n || zc_zbuf[((i + l)) as usize] == 10 as u8 || zc_zbuf[((i + l)) as usize] == 13 as u8) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn zc_rtc_keep(dst: u64, at: u64) -> u64 {
+    let n: u64 = setcore.file_read((&zc_conf[0 as usize]) as u64, (&zc_zbuf[0 as usize]) as u64, 199)
+    if ulib.bad(n) {
+        return at
+    }
+    if zc_has_line(n, (&zc_rtc_utc[0 as usize]) as u64) {
+        return setcore.text_an(dst, at, (&zc_rtc_utc_line[0 as usize]) as u64)
+    }
+    if zc_has_line(n, (&zc_rtc_local[0 as usize]) as u64) {
+        return setcore.text_an(dst, at, (&zc_rtc_local_line[0 as usize]) as u64)
+    }
+    return at
+}
+
+fn zc_zone() -> u64 {
+    return tz.zone_in_region(zc_letter(setbase.kval[(setbase.K_CZ) as usize]), setbase.kval[(setbase.K_CZC) as usize])
+}
+
+fn zone_init() {
+    setbase.kval[(setbase.K_CZ) as usize] = 0
+    setbase.kval[(setbase.K_CZC) as usize] = 0
+    let base: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZBASE, 0, 0)
+    let rule: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZRULE, 0, 0)
+    if ulib.bad(base) || ulib.bad(rule) {
+        return
+    }
+    let bw: u64 = tz.to_wrapped(base, tz.west_bit(rule))
+    let rl: u64 = tz.rule_of_arg(rule)
+    var z: u64 = tz.NONE_ZONE
+    let n: u64 = setcore.file_read((&zc_conf[0 as usize]) as u64, (&zc_zbuf[0 as usize]) as u64, 200)
+    var i: u64 = 0
+    while i + 5 < n {
+
+        if zc_zbuf[(i) as usize] == 122 as u8 && zc_zbuf[((i + 1)) as usize] == 111 as u8
+            && zc_zbuf[((i + 2)) as usize] == 110 as u8 && zc_zbuf[((i + 3)) as usize] == 101 as u8
+            && zc_zbuf[((i + 4)) as usize] == 61 as u8 && (i == 0 || zc_zbuf[((i - 1)) as usize] == 10 as u8) {
+            var nm: [u8; 32] = [0 as u8; 32]
+            var k: u64 = 0
+            while k < 31 && i + 5 + k < n && zc_zbuf[((i + 5 + k)) as usize] != 10 as u8 {
+                nm[(k) as usize] = zc_zbuf[((i + 5 + k)) as usize]
+                k = k + 1
+            }
+            z = tz.zone_by_name((&nm[0 as usize]) as u64)
+            break
+        }
+        i = i + 1
+    }
+    if z == tz.NONE_ZONE || tz.zone_base(z) != bw || tz.zone_rule(z) != rl {
+        z = tz.zone_find(bw, rl)
+    }
+    if z == tz.NONE_ZONE {
+        return
+    }
+    let r: u64 = zc_region_index(tz.zone_region(z))
+    setbase.kval[(setbase.K_CZ) as usize] = r
+    var c: u64 = 0
+    while tz.zone_in_region(zc_letter(r), c) != z && c < 40 {
+        c = c + 1
+    }
+    setbase.kval[(setbase.K_CZC) as usize] = c
+}
+
+const K_EA: u64 = 7
+
+static mut ch_items: [u64; 200] = [0 as u64; 200]
+
+static mut ch_buf: [u8; 4400] = [0 as u8; 4400]
+
+static mut it_buf: [u8; 480] = [0 as u8; 480]
+
+static mut en_key: [u64; 28] = [0 as u64; 28]
+
+static mut en_buf: [u64; 28] = [0 as u64; 28]
+
+static mut en_max: [u64; 28] = [0 as u64; 28]
+
+static mut en_n: u64 = 0
+
+fn is_choice(k: u64) -> bool {
+    return k == setbase.K_VSEL || k == setbase.K_TRN || k == setbase.K_CM || k == setbase.K_CSH || k == setbase.K_ZS1 || k == setbase.K_ZS2 || k == setbase.K_ZS3 || k == setbase.K_BS1 || k == setbase.K_BS2 || k == setbase.K_CE || k == setbase.K_CAL || k == setbase.K_CK || k == setbase.K_CD || k == setbase.K_CHM || k == setbase.K_SRON || k == setbase.K_SRAU || k == setbase.K_CH || k == setbase.K_CC || k == setbase.K_CG || k == setbase.K_CQ || k == setbase.K_CZ || k == setbase.K_CZC || k == setbase.K_CN || k == setbase.K_CSP || k == setbase.K_CV || k == setbase.K_CF || k == setbase.K_CL || k == setbase.K_CK2 || k == setbase.K_CKANB
+        || k == setbase.K_PW_LB || k == setbase.K_PW_LA || k == setbase.K_PW_PB || k == setbase.K_PW_PA
+}
+
+fn is_slider(k: u64) -> bool {
+    return k == setbase.K_SL_RAD || k == setbase.K_SL_TBA || k == setbase.K_SL_WA || k == setbase.K_SL_BLUR
+        || k == setbase.K_HUE || k == setbase.K_SATU || k == setbase.K_VALU
+        || k == setbase.K_MS_SPD || k == setbase.K_MS_ACC || k == setbase.K_SND_VOL || k == setbase.K_TP_SPD
+        || k == setbase.K_PW_SB || k == setbase.K_PW_SA || k == setbase.K_PW_YB || k == setbase.K_PW_YA
+}
+
+fn chtext(k: u64, items: u64) -> u64 {
+    ch_items[(k) as usize] = items
+    let slot: u64 = ((&ch_buf[0 as usize]) as u64) + (k % 110) * 40
+    var p: u64 = items
+    var i: u64 = 0
+    while i < setbase.kval[(k) as usize] {
+        while __mmio_read8(p as *mut u8) != 10 as u8
+            && __mmio_read8(p as *mut u8) != 0 as u8 {
+            p = p + 1
+        }
+        if __mmio_read8(p as *mut u8) == 10 as u8 {
+            p = p + 1
+        }
+        i = i + 1
+    }
+    var n: u64 = 0
+    while n < 38 {
+        let c: u8 = __mmio_read8((p + n) as *mut u8)
+        if c == 10 as u8 || c == 0 as u8 {
+            break
+        }
+        __mmio_write8((slot + n) as *mut u8, c)
+        n = n + 1
+    }
+    __mmio_write8((slot + n) as *mut u8, 0 as u8)
+    return slot
+}
+
+fn items_nul(items: u64) -> u64 {
+    var n: u64 = 1
+    var q: u64 = 0
+    while q < 470 {
+        let c: u8 = __mmio_read8((items + q) as *mut u8)
+        if c == 0 as u8 {
+            break
+        }
+        if c == 10 as u8 {
+            it_buf[(q) as usize] = 0 as u8
+            n = n + 1
+        } else {
+            it_buf[(q) as usize] = c
+        }
+        q = q + 1
+    }
+    it_buf[(q) as usize] = 0 as u8
+    it_buf[((q + 1)) as usize] = 0 as u8
+    return n
+}
+
+fn ch_open(k: u64) {
+    let i: usize = fuiscene.node_of_key(k)
+    if i == fuiscene.NONE {
+        return
+    }
+    let n: u64 = items_nul(ch_items[(k) as usize])
+    var pw: u64 = fuiscene.node_w(i)
+    if pw < 160 {
+        pw = 160
+    }
+    let mx: u64 = fuiscene.node_x(i)
+    let my: u64 = fuiscene.node_y(i) + fuiscene.node_h(i) + 2
+    fuiscene.menu_open(mx, my, pw, (&it_buf[0 as usize]) as u64, n)
+    setbase.ch_pend = k
+    setcore.menu_say(k, wlib.win_cx(setbase.w) + mx, wlib.win_cy(setbase.w) + my, n)
+}
+
+fn colw_set(key: u64, arr: u64, n: u64) {
+    var c: u64 = 0
+    while c < n {
+        fuiscene.table_colw(key, c, __mmio_read64((arr + c * 8) as *mut u64))
+        c = c + 1
+    }
+}
+
+fn slv_init(k: u64, lo: u64, hi: u64, v: u64) -> i64 {
+    var x: u64 = v
+    if x < lo {
+        x = lo
+    }
+    if x > hi {
+        x = hi
+    }
+    return (((x - lo) * 1000) / (hi - lo)) as i64
+}
+
+fn slv(k: u64, lo: u64, hi: u64) -> u64 {
+    let v: u64 = fuiscene.value_of(k) as u64
+    return lo + (v * (hi - lo) + 500) / 1000
+}
+
+fn sl_set(k: u64, lo: u64, hi: u64, v: u64) {
+    fuiscene.set_value(k, slv_init(k, lo, hi, v))
+}
+
+fn en_add(key: u64, buf: u64, max: u64) {
+    if en_n < 28 {
+        en_key[(en_n) as usize] = key
+        en_buf[(en_n) as usize] = buf
+        en_max[(en_n) as usize] = max
+        en_n = en_n + 1
+    }
+}
+
+fn entries_init() {
+    en_add(setbase.K_SRCH, (&setbase.e_srch[0 as usize]) as u64, 44)
+    en_add(K_EA, (&setbase.e_akzent[0 as usize]) as u64, 12)
+    en_add(setbase.K_EB, (&setbase.e_image[0 as usize]) as u64, 90)
+    en_add(setbase.K_ET, (&setbase.e_tbs[0 as usize]) as u64, 8)
+    en_add(setbase.K_EVN, (&setbase.e_vid[0 as usize]) as u64, 24)
+    en_add(setbase.K_EVF, (&setbase.e_vfile[0 as usize]) as u64, 90)
+    en_add(setbase.K_SY_ENT, (&setbase.e_sval[0 as usize]) as u64, 64)
+    en_add(setbase.K_ECW, (&setbase.e_cw[0 as usize]) as u64, 8)
+    en_add(setbase.K_ECH, (&setbase.e_ch[0 as usize]) as u64, 8)
+    en_add(setbase.K_ECT, (&setbase.e_ct[0 as usize]) as u64, 4)
+    en_add(setbase.K_EN1, (&setbase.e_ip[0 as usize]) as u64, 20)
+    en_add(setbase.K_EN2, (&setbase.e_maske[0 as usize]) as u64, 20)
+    en_add(setbase.K_EN3, (&setbase.e_gw[0 as usize]) as u64, 20)
+    en_add(setbase.K_EP1, (&setbase.e_pw1[0 as usize]) as u64, 60)
+    en_add(setbase.K_WSS, (&setbase.e_wssid[0 as usize]) as u64, 33)
+    en_add(setbase.K_WPW, (&setbase.e_wpw[0 as usize]) as u64, 64)
+    en_add(setbase.K_EP2, (&setbase.e_pw2[0 as usize]) as u64, 60)
+    en_add(setbase.K_EPIN, (&setbase.e_pin[0 as usize]) as u64, 14)
+    en_add(setbase.K_EPINO, (&setbase.e_pinold[0 as usize]) as u64, 14)
+    en_add(setbase.K_EKZIEL, (&setbase.e_kziel[0 as usize]) as u64, 90)
+    en_add(setbase.K_EKNAME, (&setbase.e_kname[0 as usize]) as u64, 60)
+    en_add(setbase.K_EKKEN, (&setbase.e_kken[0 as usize]) as u64, 60)
+    en_add(setbase.K_EKCODE, (&setbase.e_kcode[0 as usize]) as u64, 20)
+    en_add(setbase.K_EKGEH, (&setbase.e_kgeh[0 as usize]) as u64, 60)
+    en_add(setbase.K_EKBER, (&setbase.e_kber[0 as usize]) as u64, 60)
+
+    var i: u64 = 0
+    while i < en_n {
+        fuiscene.entry_set(en_key[(i) as usize], en_buf[(i) as usize])
+        i = i + 1
+    }
+}
+
+fn pull_entries() {
+    var i: u64 = 0
+    while i < en_n {
+        let t: u64 = fuiscene.entry_text(en_key[(i) as usize])
+        if t != 0 {
+            let n: u64 = ulib.strncpy(en_buf[(i) as usize], t, en_max[(i) as usize])
+            __mmio_write8((en_buf[(i) as usize] + n) as *mut u8, 0 as u8)
+        }
+        i = i + 1
+    }
+}
+
+fn push_entries() {
+    var i: u64 = 0
+    while i < en_n {
+        let t: u64 = fuiscene.entry_text(en_key[(i) as usize])
+        if t == 0 || !ulib.streq(t, en_buf[(i) as usize]) {
+            fuiscene.entry_set(en_key[(i) as usize], en_buf[(i) as usize])
+        }
+        i = i + 1
+    }
+}
+
+fn tspv(t: u64, f: u64) -> u64 {
+    return setbase.tsp[((t * wlib.TILE_FIELDS + f)) as usize]
+}
+
+fn corner_in(r: u64) -> u64 {
+    if r <= 4 {
+        return r
+    }
+    var d: u64 = r - 4
+    var s: u64 = 0
+    while (s + 1) * (s + 1) <= r * r - d * d {
+        s = s + 1
+    }
+    return r - s + 1
+}
+
+fn draw_tile(key: u64, x: u64, y: u64, w2: u64, h2: u64) {
+    let t: u64 = setbase.v_sel
+    if t >= setbase.v_n || w2 < 80 || h2 < 20 {
+        return
+    }
+
+    let tr: u64 = fuiscene.rb_px()
+    var ri: u64 = 3
+    var rj: u64 = 2
+    if tr == 0 {
+        ri = 0
+        rj = 0
+    }
+    fuiscene.cv_round_rgb(x, y, w2, h2, tr, tspv(t, wlib.TL_SURFACE))
+    if setbase.v_sel == t {
+        fuiscene.cv_ring_rgb(x, y, w2, h2, tr, 3, wlibc.theme(wlibc.T_FOCUS))
+    } else {
+        fuiscene.cv_ring_rgb(x, y, w2, h2, tr, 1, tspv(t, wlib.TL_FRAME))
+    }
+    let pw: u64 = 92
+    let px: u64 = x + w2 - pw - 8
+    let py: u64 = y + 4
+    let ph: u64 = h2 - 8
+    fuiscene.cv_round_rgb(px, py, pw, ph, ri, tspv(t, wlib.TL_SURFACE))
+    let e: u64 = tspv(t, wlib.TL_EDGE)
+    let bar: u64 = 5
+    var bx: u64 = px
+    var by: u64 = py + ph - bar
+    var bw2: u64 = pw
+    var bh2: u64 = bar
+    if e == 1 {
+        by = py
+    } else if e == 2 {
+        by = py
+        bw2 = bar
+        bh2 = ph
+    } else if e == 3 {
+        bx = px + pw - bar
+        by = py
+        bw2 = bar
+        bh2 = ph
+    }
+    fuiscene.cv_round_rgb(bx, by, bw2, bh2, 0, tspv(t, wlib.TL_TASKBAR))
+    setcore.say_bar(bx, by, bw2, bh2, x, y, w2, h2, corner_in(tr))
+    if e == 2 || e == 3 {
+        fuiscene.cv_round_rgb(bx + 1, by + 3, bar - 2, 14, 0, tspv(t, wlib.TL_ACCENT))
+        setcore.say_bar(bx + 1, by + 3, bar - 2, 14, x, y, w2, h2, corner_in(tr))
+    } else {
+        fuiscene.cv_round_rgb(bx + 3, by + 1, 14, bar - 2, 0, tspv(t, wlib.TL_ACCENT))
+        setcore.say_bar(bx + 3, by + 1, 14, bar - 2, x, y, w2, h2, corner_in(tr))
+    }
+    var wx: u64 = px + 8
+    var wy: u64 = py + 6
+    if e == 1 {
+        wy = py + 9
+    }
+    if e == 2 {
+        wx = px + 12
+    }
+    let ww: u64 = 60
+    let wh: u64 = ph - 12
+    if wh >= 10 {
+        fuiscene.cv_round_rgb(wx, wy, ww, wh, ri, tspv(t, wlib.TL_RAISED))
+        fuiscene.cv_ring_rgb(wx, wy, ww, wh, ri, 1, tspv(t, wlib.TL_FRAME))
+        fuiscene.cv_round_rgb(wx + 1, wy + 1, ww - 2, 7, rj, tspv(t, wlib.TL_ACCENT))
+        fuiscene.cv_round_rgb(wx + 4, wy + 3, 22, 2, 0, tspv(t, wlib.TL_ONACCENT))
+        fuiscene.cv_round_rgb(wx + 4, wy + 11, ww - 14, 2, 0, tspv(t, wlib.TL_TEXT))
+    }
+    var col: u64 = tspv(t, wlib.TL_TEXT)
+    if tspv(t, wlib.TL_LOW) != 0 {
+        col = tspv(t, wlib.TL_DANGER)
+    }
+    let tpx: u64 = wlibc.px_ui()
+    fuiscene.cv_text_rgb(x + 10, y + h2 / 2 + 5, w2 - pw - 28, tspv(t, wlib.TL_NAME),
+        tpx, false, col)
+    setcore.say_kachel_text(x + 10, y + h2 / 2 + 5, tspv(t, wlib.TL_NAME), col,
+        tspv(t, wlib.TL_SURFACE))
+}
+
+fn wf_token(key: u64, klen: u64, dst: u64, max: u64) -> bool {
+    let n: u64 = setcore.file_read((&setbase.p_proc_wlan[0 as usize]) as u64, (&setbase.wf_proc[0 as usize]) as u64, 2048)
+    var i: u64 = 0
+    while i + klen < n {
+        var same: bool = true
+        var k: u64 = 0
+        while k < klen {
+            if setbase.wf_proc[(i + k) as usize] != __mmio_read8((key + k) as *mut u8) {
+                same = false
+            }
+            k = k + 1
+        }
+        if same && (i == 0 || setbase.wf_proc[(i - 1) as usize] == 10 as u8 || setbase.wf_proc[(i - 1) as usize] == 32 as u8) {
+            var o: u64 = 0
+            var q: u64 = i + klen
+            while q < n && o + 1 < max && setbase.wf_proc[q as usize] != 32 as u8 && setbase.wf_proc[q as usize] != 10 as u8 {
+                __mmio_write8((dst + o) as *mut u8, setbase.wf_proc[q as usize])
+                o = o + 1
+                q = q + 1
+            }
+            __mmio_write8((dst + o) as *mut u8, 0 as u8)
+            return o > 0
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn wf_add(at: u64, q: u64) -> u64 {
+    return setcore.text_an((&setbase.l_wstat[0 as usize]) as u64, at, q)
+}
