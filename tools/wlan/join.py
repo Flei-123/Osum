@@ -71,7 +71,7 @@ def ref_assoc(ch, ssid=SSID):
 
 
 def scenario(pw=PW, ap_pw=PW, beacon="ok", auth=0, assoc=0, skip=(), tamper_m3=False,
-             ack_art=5, dhcp_key=None, ssid_beacon=SSID, offer_xid=XID, offer_art=2):
+             ack_art=5, dhcp_key=None, ssid_beacon=SSID, offer_xid=XID, offer_art=2, stale_offer=False):
     pmk_ap = pmk_aus_psk(ap_pw, SSID)
     pmk_dev = pmk_aus_psk(pw, SSID)
     ap = Authenticator(SSID, ap_pw, BSSID, MAC, anonce=ANONCE, gtk=GTK,
@@ -104,7 +104,7 @@ def scenario(pw=PW, ap_pw=PW, beacon="ok", auth=0, assoc=0, skip=(), tamper_m3=F
         parts["m1"] = b""
     line = "join %s %s %s %s %s %s %s %s %s %s %s" % (
         SSID.hex(), pmk_dev.hex(), SNONCE.hex(), hx(b), hx(parts["auth"]), hx(parts["assoc"]),
-        hx(parts["m1"]), hx(parts["m3"]), hx(parts["offer"]), hx(parts["ack"]), "")
+        hx(parts["m1"]), hx(parts["m3"]), hx(parts["offer"]), hx(parts["ack"]), "01" if stale_offer else "00")
     return line.strip(), zp, tk
 
 
@@ -152,7 +152,7 @@ def eapol_of(frame):
 
 def check_all():
     names = ["good", "wrong_pw", "auth_denied", "assoc_denied", "no_beacon", "other_ssid", "no_assoc",
-             "no_m1", "no_m3", "bad_m3_mic", "open_net", "no_offer", "nak", "foreign_dhcp", "wrong_xid", "ack_as_offer"]
+             "no_m1", "no_m3", "bad_m3_mic", "open_net", "no_offer", "nak", "foreign_dhcp", "wrong_xid", "ack_as_offer", "stale_offer"]
     scs = {
         "good": scenario(),
         "wrong_pw": scenario(pw=b"falschespasswort"),
@@ -170,6 +170,7 @@ def check_all():
         "foreign_dhcp": scenario(dhcp_key=bytes(16)),
         "wrong_xid": scenario(offer_xid=XID + 1),
         "ack_as_offer": scenario(offer_art=5),
+        "stale_offer": scenario(stale_offer=True),
     }
     out = run([scs[n][0] for n in names])
     runs = split_runs(out)
@@ -257,6 +258,7 @@ def check_all():
     ok(r["nak"].dhcp is not None and r["nak"].dhcp["rc"] == -203, "DHCP NAK: error -203")
     ok(r["wrong_xid"].dhcp["rc"] == -201, "DHCP offer with a foreign xid is ignored")
     ok(r["ack_as_offer"].dhcp["rc"] == -201, "DHCP ACK where an offer belongs is refused")
+    ok(r["stale_offer"].dhcp is not None and r["stale_offer"].dhcp["rc"] == 0 and r["stale_offer"].dhcp["kind"] == 5, "DHCP stale Offer before the ACK is skipped")
     ok(r["foreign_dhcp"].dhcp is not None and r["foreign_dhcp"].dhcp["rc"] == -201, "DHCP reply under a foreign key is dropped")
 
 

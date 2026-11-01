@@ -24,6 +24,8 @@ mut 's/const AKM_PSK: u64 = 2/const AKM_PSK: u64 = 6/' "wrong AKM" join.fi
 mut 's/mgmt.auth_build(tx_addr(j), (&mac\[0\]) as u64, bssid)/mgmt.auth_build(tx_addr(j), bssid, (\&mac[0]) as u64)/' "auth addresses swapped" join.fi
 mut 's/request_frame(o, sa, bssid, xid, (\*lease).ip, (\*lease).server)/request_frame(o, sa, bssid, xid, 0, (*lease).server)/' "DHCP request without offered address" dhcp_link.fi
 mut 's/if dh.xid != xid { return false }/if false { return false }/' "DHCP xid ignored" dhcp_link.fi
-mut 's/er > 0 || (\*lease).kind != llc.D_OFFER/er > 0/' "DHCP offer kind unchecked" dhcp_link.fi
+mut 's/er > 0 || (\*lease).kind != llc.D_OFFER/er > 0/' "DHCP offer kind unchecked in acquire" dhcp_link.fi
+mut 's/if want_offer { return kind == llc.D_OFFER }/if want_offer { return true }/' "DHCP offer kind unchecked while selecting" dhcp_link.fi
+mut 's/return kind == llc.D_ACK || kind == llc.D_NAK/return true/' "DHCP stale Offer accepted while requesting" dhcp_link.fi
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
