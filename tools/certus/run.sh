@@ -146,15 +146,15 @@ grep -q 'fpu.switch' kernel/sched/sched.fi \
 
 echo
 echo "== 3. the canvas and the single-core rule =="
-grep -q 'const K_CANVAS' kernel/user/wlib.fi \
+grep -q 'const K_CANVAS' <(bash tools/structure/catprog.sh kernel/user/wlib.fi) \
     && ok "kernel/user/wlib.fi has the widget K_CANVAS" || bad "K_CANVAS fehlt"
-grep -q 'fn canvas_event' kernel/user/wlib.fi \
+grep -q 'fn canvas_event' <(bash tools/structure/catprog.sh kernel/user/wlib.fi) \
     && ok "the canvas has an event ring (canvas_event)" \
     || bad "canvas_event fehlt"
-grep -q 'import libc.mem' kernel/user/wlibc.fi \
+grep -q 'import libc.mem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
     && bad 'wlibc binds libc.mem -- two modules mem in one program (single-core rule)' \
     || ok 'wlibc gets by without libc.mem (no second module mem next to html.mem)'
-grep -q 'fn gmem' kernel/user/wlibc.fi \
+grep -q 'fn gmem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
     && ok "the glyph memory comes from its own 64 KiB pieces (gmem)" \
     || bad "gmem fehlt"
 grep -q 'wlib.leinwand(' "$CERTUS_REPO/lib/fenster/osum.fi" \

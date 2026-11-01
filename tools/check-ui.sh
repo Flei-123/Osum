@@ -68,7 +68,7 @@ zweite=$(awk '
 /wlibc\.(rect|hline|vline|frame|frame3|px|rrect|rframe|rring|vrect|vkreis|divider|drop_shadow)\(/ { roh++ }
 /fuib\./ { br++ }
 END      { if (name != "" && roh > 0 && br == 0) print "  " name }
-' kernel/user/wlib.fi)
+' <(bash tools/structure/catprog.sh kernel/user/wlib.fi))
 
 #
 #

@@ -8,7 +8,7 @@ HEAD = re.compile(r"^[0-9a-f]+ <([^>]+)>:$")
 INSN = re.compile(r"^\s+[0-9a-f]+:\s+(.*)$")
 
 
-def load(path, rename):
+def load(path, rename, skip=()):
     funcs = {}
     cur = None
     with open(path) as fh:
@@ -16,6 +16,9 @@ def load(path, rename):
             ln = ln.rstrip("\n")
             m = HEAD.match(ln)
             if m:
+                if m.group(1) in skip:
+                    cur = None
+                    continue
                 cur = rename(m.group(1))
                 funcs[cur] = []
                 continue
@@ -33,9 +36,14 @@ def load(path, rename):
 
 
 def main():
-    before, after = sys.argv[1], sys.argv[2]
+    args = sys.argv[1:]
+    wrap = False
+    if args and args[0] == "--wrap":
+        wrap = True
+        args = args[1:]
+    before, after = args[0], args[1]
     mapping = {}
-    for a in sys.argv[3:]:
+    for a in args[2:]:
         old, new = a.split("=")
         mapping[old] = new
 
@@ -46,7 +54,10 @@ def main():
         return n
 
     b = load(before, rename_old)
-    a = load(after, ident)
+    if wrap:
+        a = load(after, rename_old, skip=set(mapping))
+    else:
+        a = load(after, ident)
     only_b = sorted(set(b) - set(a))
     only_a = sorted(set(a) - set(b))
     diff = [n for n in b if n in a and b[n] != a[n]]

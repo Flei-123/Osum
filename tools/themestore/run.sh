@@ -1428,12 +1428,12 @@ num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
 #
 PM0=$(grep -aoE '^const PLATE_MARK: u64 = 0x[0-9A-Fa-f]+' kernel/ui/wm/wmglass.fi \
       | grep -oE '0x[0-9A-Fa-f]+')
-PM3=$(grep -aoE '^const PLATTE: u64 = 0x[0-9A-Fa-f]+' kernel/user/wlibc.fi \
+PM3=$(grep -aoE '^const PLATTE: u64 = 0x[0-9A-Fa-f]+' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
       | grep -oE '0x[0-9A-Fa-f]+')
 same "die Marke der Textplatte ist in Ring 0 und Ring 3 dieselbe Zahl" \
     "${PM0:-0}" "${PM3:-1}"
 num "und genau eine Stelle in Ring 3 setzt sie" \
-    "$(grep -ac '^fn platte(' kernel/user/wlibc.fi)" eq 1
+    "$(grep -ac '^fn platte(' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi))" eq 1
 num "und genau eine in Ring 0 loest sie auf" \
     "$({ grep -ac '== (PLATE_MARK >> 24)' kernel/ui/wm/wmglass.fi || true; })" eq 1
 #
@@ -1654,7 +1654,7 @@ same "und die Datei auch" "4" \
     "$(python3 tools/osum/mkfs.py cat "$TMPD/rvor/disk.img" /etc/theme.conf \
        2>/dev/null | grep -aE '^radius=' | tail -1 | cut -d= -f2)"
 num "Schmuck-Widgets sind von der Trefferpruefung ausgenommen" \
-    "$(grep -ac 'fn only_decoration(' kernel/user/wlib.fi)" eq 1
+    "$(grep -ac 'fn only_decoration(' <(bash tools/structure/catprog.sh kernel/user/wlib.fi))" eq 1
 
 GSHOT=0
 for s in glas-radius-0 glas-radius-12 glas-radius-24 glas-alpha-100 \

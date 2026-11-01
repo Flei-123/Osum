@@ -14,12 +14,15 @@ the AX_INFO fields and the call numbers are written in four files:
 A number written in two places drifts; this program is the third place
 that does nothing but compare. Exit 0 = all agree.
 """
-import re, sys, os
+import re, sys, os, subprocess
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+
+def source(path):
+    return subprocess.run(["bash", "tools/structure/srcview.sh", path], capture_output=True, check=True).stdout.decode("latin-1")
 
 def consts(path):
     out = {}
-    for m in re.finditer(r'^const ([A-Z0-9_]+): u64 = (0x[0-9A-Fa-f]+|\d+)', open(path, encoding='latin-1').read(), re.M):
+    for m in re.finditer(r'^const ([A-Z0-9_]+): u64 = (0x[0-9A-Fa-f]+|\d+)', source(path), re.M):
         out[m.group(1)] = int(m.group(2), 0)
     return out
 

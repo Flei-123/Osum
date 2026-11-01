@@ -115,6 +115,11 @@ def quellen_pruefen():
             continue
         text = fh.read().decode("utf-8", "replace")
         fh.close()
+        moddir = p[:-3]
+        if p.endswith(".fi") and os.path.isdir(moddir):
+            for mod in sorted(os.listdir(moddir)):
+                with open(os.path.join(moddir, mod), "rb") as mh:
+                    text += mh.read().decode("utf-8", "replace")
         if nadel not in text:
             fehlt.append("%s: %r steht nicht darin" % (datei, nadel))
     return fehlt

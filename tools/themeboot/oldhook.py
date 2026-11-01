@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/themeboot/oldhook.py <new wlibc.fi> <old wlibc.fi> -- put the r1123 test hook (conf_flaky) into the OLD wlibc, so the
 # counter-probe tree reads /etc/theme.conf the old way (keys from one read, the copy from a second, good read) and fails the key reads.
+import os
+import subprocess
 import sys
-new = open(sys.argv[1], encoding="latin1").read()
-a = new.index("// TEST HOOK (tools/themeboot)")
+root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+new = subprocess.run(["bash", os.path.join(root, "tools/structure/srcview.sh"), os.path.abspath(sys.argv[1])], capture_output=True, check=True).stdout.decode("latin1")
+a = new.index("static mut flaky_left")
 b = new.index("fn conf_read_into")
 hook = new[a:b]
 path = sys.argv[2]
