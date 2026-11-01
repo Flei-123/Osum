@@ -563,7 +563,7 @@ fi
 if [ "${WMPLUG_SCHNELL:-0}" = 1 ]; then
     echo "== 10. the two module runners -- SKIPPED (WMPLUG_SCHNELL=1) =="
 else
-    for m in regel widget; do
+    for m in rule widget; do
         echo "== 10.$m: tools/wmplug/$m.sh =="
         bash "tools/wmplug/$m.sh" > "$TMPD/$m.log" 2>&1
         z=$(grep -aiE '^[A-Z]+: [0-9]+ bestanden, [0-9]+ gescheitert' "$TMPD/$m.log" | tail -1)

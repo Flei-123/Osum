@@ -37,7 +37,7 @@ echo "== 1. bauen =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
     && ok "Kernel gebaut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
     || { bad "the kernel does not build"; tail -12 "$TMPD/k.log" | sed 's/^/        /'; }
-[ -f "$TMPD/k.mb" ] || { echo "REGEL: $pass bestanden, $((fail+1)) gescheitert"; exit 1; }
+[ -f "$TMPD/k.mb" ] || { echo "RULE: $pass bestanden, $((fail+1)) gescheitert"; exit 1; }
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s assembliert nicht"
 PROGS="desktop taskbar launcher calc plugregel sh"
@@ -49,7 +49,7 @@ for p in $PROGS; do
         sed 's/^/        /' "$TMPD/$p.err" | head -6; gebaut=0; }
 done
 [ "$gebaut" = 1 ] && ok "$(echo $PROGS | wc -w) Programme gebaut, /bin/plugregel ist $(stat -c%s "$TMPD/plugregel.elf") Oktette" \
-    || { echo "REGEL: $pass bestanden, $fail gescheitert"; exit 1; }
+    || { echo "RULE: $pass bestanden, $fail gescheitert"; exit 1; }
 
 for sym in plugregel__anwenden plugregel__u_start plugregel__conf_lesen; do
     if nm -a "$TMPD/k.mb.elf" 2>/dev/null | grep -q "$sym"; then
@@ -181,6 +181,6 @@ ls "$SHOTS" | grep -q regel- && ok "die Bilder liegen in $SHOTS" \
     || bad "the images were not stored"
 
 echo
-echo "REGEL: $pass bestanden, $fail gescheitert"
+echo "RULE: $pass bestanden, $fail gescheitert"
 [ "$fail" = 0 ] || exit 1
 exit 0
