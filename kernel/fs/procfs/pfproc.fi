@@ -1,0 +1,1518 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import acpi.acpi
+import block.blk
+import lib.brand
+import drv.usb.chdiag
+import arch.cpu
+import fs.file
+import arch.x86_64.guard
+import diag.hwid
+import net.inet
+import klog
+import lib.kstate
+import fs.mnt
+import sched.origin
+import bus.pci
+import sched.proc
+import sched.sched
+import sched.time
+import ipc.uio
+import usb.usb
+import fs.vfsops
+import fs.procfs.pfbase
+
+const ART: u64 = 0x1000000
+
+const SLOT: u64 = 0x100
+
+fn node(art: u64, slot: u64, sub: u64) -> u64 {
+    return art * ART + slot * SLOT + sub
+}
+
+fn n_art(n: u64) -> u64 {
+    return n / ART
+}
+
+fn n_slot(n: u64) -> u64 {
+    return (n / SLOT) % SLOT
+}
+
+fn n_sub(n: u64) -> u64 {
+    return n % SLOT
+}
+
+fn node_root(state: u64) -> u64 {
+    return node(pfbase.K_ROOT, 0, 0)
+}
+
+fn sfs_root(state: u64) -> u64 {
+    return node(pfbase.K_SFS, 0, pfbase.SF_ROOT)
+}
+
+fn tick(state: u64) {
+    kstate.add(state, kstate.VFS_INDIRECT, 1)
+}
+
+fn buf(state: u64) -> u64 {
+    return state + kstate.PROCFS_OFF
+}
+
+fn w_ch(state: u64, at: u64, c: u64) -> u64 {
+    if at >= pfbase.BUF_MAX {
+        return at
+    }
+    kstate.set8(buf(state) + at, c as u8)
+    return at + 1
+}
+
+fn w_str(state: u64, at: u64, s: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 0
+    while kstate.get8(s + i) != 0 {
+        p = w_ch(state, p, kstate.get8(s + i))
+        i = i + 1
+    }
+    return p
+}
+
+fn w_num(state: u64, at: u64, v: u64) -> u64 {
+    var digits: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        return w_ch(state, at, 48)
+    }
+    while x > 0 {
+        digits[n as usize] = ((x % 10) + 48) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var p: u64 = at
+    while n > 0 {
+        n = n - 1
+        p = w_ch(state, p, digits[n as usize] as u64)
+    }
+    return p
+}
+
+fn w_hex16(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 16
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            p = w_ch(state, p, d + 48)
+        } else {
+            p = w_ch(state, p, d + 87)
+        }
+    }
+    return p
+}
+
+fn w_nl(state: u64, at: u64) -> u64 {
+    return w_ch(state, at, 10)
+}
+
+fn slot_of_pid(state: u64, pid: u64) -> u64 {
+    var i: u64 = 0
+    while i < kstate.get(state, kstate.TASKS) {
+        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE {
+            if sched.tget(state, i, sched.T_PID) == pid {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return kstate.MAX_TASKS
+}
+
+fn alive(state: u64, i: u64) -> bool {
+    if i >= kstate.get(state, kstate.TASKS) {
+        return false
+    }
+    return sched.tget(state, i, sched.T_STATE) != sched.S_FREE
+}
+
+fn state_letter(s: u64) -> u64 {
+    if s == sched.S_RUN {
+        return 82
+    }
+    if s == sched.S_READY {
+        return 82
+    }
+    if s == sched.S_SLEEP {
+        return 83
+    }
+    if s == sched.S_WAIT {
+        return 83
+    }
+    if s == sched.S_ZOMBIE {
+        return 90
+    }
+    if s == sched.S_STOP {
+        return 84
+    }
+    return 78
+}
+
+fn kind_name(k: u64, out: u64) {
+    var boot: [u8; 5] = "boot\0"
+    var idle: [u8; 5] = "idle\0"
+    var work: [u8; 7] = "worker\0"
+    var user: [u8; 5] = "user\0"
+    var netd: [u8; 5] = "netd\0"
+    var grind: [u8; 6] = "grind\0"
+    var src: u64 = (&user[0]) as u64
+    if k == sched.K_BOOT {
+        src = (&boot[0]) as u64
+    } else if k == sched.K_IDLE {
+        src = (&idle[0]) as u64
+    } else if k == sched.K_WORKER {
+        src = (&work[0]) as u64
+    } else if k == sched.K_GRIND {
+        src = (&grind[0]) as u64
+    } else if k == sched.K_NETD {
+        src = (&netd[0]) as u64
+    }
+    var i: u64 = 0
+    while kstate.get8(src + i) != 0 {
+        kstate.set8(out + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+}
+
+fn make_meminfo(state: u64) -> u64 {
+    var t1: [u8; 17] = "MemTotal:      \0\0"
+    var t2: [u8; 17] = "MemFree:       \0\0"
+    var t3: [u8; 17] = "Frames:        \0\0"
+    var t4: [u8; 17] = "FramesFree:    \0\0"
+    var t5: [u8; 17] = "FrameSize:     \0\0"
+    var kb: [u8; 4] = " kB\0"
+    var p: u64 = 0
+    p = w_str(state, p, (&t1[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.MEM_USABLE) / 1024)
+    p = w_str(state, p, (&kb[0]) as u64)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&t2[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.FRAMES_FREE) * 4)
+    p = w_str(state, p, (&kb[0]) as u64)
+    p = w_nl(state, p)
+    var t2b: [u8; 17] = "MemAvailable:  \0\0"
+    p = w_str(state, p, (&t2b[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.FRAMES_FREE) * 4)
+    p = w_str(state, p, (&kb[0]) as u64)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&t3[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.BITMAP_FRAMES))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&t4[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.FRAMES_FREE))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&t5[0]) as u64)
+    p = w_num(state, p, 4096)
+    p = w_nl(state, p)
+    return p
+}
+
+fn make_cpuinfo(state: u64) -> u64 {
+    var c1: [u8; 14] = "processor : \0\0"
+    var c2: [u8; 14] = "apicid    : \0\0"
+    var c3: [u8; 14] = "online    : \0\0"
+    var c4: [u8; 14] = "switches  : \0\0"
+    var c5: [u8; 14] = "ticks     : \0\0"
+    var c6: [u8; 30] = "model name : x86-64 processor\0"
+    var c7: [u8; 54] = "flags      : fpu tsc msr pae cx8 mmx fxsr sse sse2 lm\0"
+    var p: u64 = 0
+    var n: u64 = cpu.count(state)
+    if n == 0 {
+        n = 1
+    }
+    var i: u64 = 0
+    while i < n {
+        p = w_str(state, p, (&c1[0]) as u64)
+        p = w_num(state, p, i)
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c6[0]) as u64)
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c7[0]) as u64)
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c2[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_APICID))
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c3[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_ONLINE))
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c4[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_SWITCHES))
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c5[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_TICKS))
+        p = w_nl(state, p)
+        p = w_nl(state, p)
+        i = i + 1
+    }
+    return p
+}
+
+fn w_why(state: u64, at: u64, code: u64) -> u64 {
+    var p: u64 = at
+    var v: u64 = cpu.why_word(code)
+    var i: u64 = 0
+    while v != 0 && i < 8 {
+        p = w_ch(state, p, v & 0xFF)
+        v = v >> 8
+        i = i + 1
+    }
+    return p
+}
+
+fn make_cpus(state: u64) -> u64 {
+    var h1: [u8; 13] = "cpus_online=\0"
+    var h2: [u8; 12] = " cpus_madt=\0"
+    var h3: [u8; 9] = " failed=\0"
+    var h4: [u8; 7] = " kick=\0"
+    var h5: [u8; 8] = " kicks=\0"
+    var on: [u8; 3] = "on\0"
+    var off: [u8; 4] = "off\0"
+    var l1: [u8; 4] = "cpu\0"
+    var l2: [u8; 7] = " apic=\0"
+    var l3: [u8; 9] = " online=\0"
+    var l4: [u8; 6] = " why=\0"
+    var l5: [u8; 8] = " esr=0x\0"
+    var l6: [u8; 8] = " ticks=\0"
+    var l7: [u8; 7] = " idle=\0"
+    var l8: [u8; 7] = " busy=\0"
+    var l9: [u8; 11] = " switches=\0"
+    var l10: [u8; 8] = " picks=\0"
+    var l11: [u8; 10] = " cur_pid=\0"
+    var l12: [u8; 6] = " cyc=\0"
+    var l13: [u8; 10] = " idlecyc=\0"
+    var l14: [u8; 9] = " halted=\0"
+    var l15: [u8; 9] = " kicktx=\0"
+    var l16: [u8; 9] = " kickrx=\0"
+    var pc: [u8; 3] = "%\0\0"
+    var p: u64 = 0
+    var n: u64 = cpu.count(state)
+    if n > kstate.MAX_CPUS {
+        n = kstate.MAX_CPUS
+    }
+    var bsp_only: bool = false
+    if n == 0 {
+        n = 1
+        bsp_only = true
+    }
+    var madt: u64 = acpi.total(state)
+    if madt == 0 {
+        madt = n
+    }
+    var failed: u64 = 0
+    var tx: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if cpu.get(state, i, cpu.C_ONLINE) == 0 && !bsp_only {
+            failed = failed + 1
+        }
+        tx = tx + cpu.x_get(state, i, cpu.X_KICKTX)
+        i = i + 1
+    }
+    if madt > n {
+        failed = failed + (madt - n)
+    }
+    p = w_str(state, p, (&h1[0]) as u64)
+    var onl: u64 = cpu.online_count(state)
+    if bsp_only {
+        onl = 1
+    }
+    p = w_num(state, p, onl)
+    p = w_str(state, p, (&h2[0]) as u64)
+    p = w_num(state, p, madt)
+    p = w_str(state, p, (&h3[0]) as u64)
+    p = w_num(state, p, failed)
+    p = w_str(state, p, (&h4[0]) as u64)
+    if kstate.mode_on(state, kstate.M_NOKICK) {
+        p = w_str(state, p, (&off[0]) as u64)
+    } else {
+        p = w_str(state, p, (&on[0]) as u64)
+    }
+    p = w_str(state, p, (&h5[0]) as u64)
+    p = w_num(state, p, tx)
+    p = w_nl(state, p)
+    i = 0
+    while i < n {
+        let ticks: u64 = cpu.get(state, i, cpu.C_TICKS)
+        let idle: u64 = cpu.get(state, i, cpu.C_IDLETICKS)
+        let cyc: u64 = cpu.x_get(state, i, cpu.X_TOTCYC)
+        let icyc: u64 = cpu.x_get(state, i, cpu.X_IDLECYC)
+        var busy: u64 = 0
+        if cyc > 0 {
+            busy = (cyc - icyc) * 100 / cyc
+        } else if ticks > 0 && idle <= ticks {
+            busy = (ticks - idle) * 100 / ticks
+        }
+        var cur_pid: u64 = 0
+        let ct: u64 = cpu.get(state, i, cpu.C_CUR)
+        if ct < kstate.MAX_TASKS {
+            cur_pid = sched.tget(state, ct, sched.T_PID)
+        }
+        p = w_str(state, p, (&l1[0]) as u64)
+        p = w_num(state, p, i)
+        p = w_str(state, p, (&l2[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_APICID))
+        p = w_str(state, p, (&l3[0]) as u64)
+        var on_i: u64 = cpu.get(state, i, cpu.C_ONLINE)
+        if bsp_only {
+            on_i = 1
+        }
+        p = w_num(state, p, on_i)
+        p = w_str(state, p, (&l4[0]) as u64)
+        p = w_why(state, p, cpu.get(state, i, cpu.C_WHY))
+        p = w_str(state, p, (&l5[0]) as u64)
+        p = w_hexn(state, p, cpu.get(state, i, cpu.C_ESR), 8)
+        p = w_str(state, p, (&l6[0]) as u64)
+        p = w_num(state, p, ticks)
+        p = w_str(state, p, (&l7[0]) as u64)
+        p = w_num(state, p, idle)
+        p = w_str(state, p, (&l8[0]) as u64)
+        p = w_num(state, p, busy)
+        p = w_str(state, p, (&pc[0]) as u64)
+        p = w_str(state, p, (&l9[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_SWITCHES))
+        p = w_str(state, p, (&l10[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_PICKS))
+        p = w_str(state, p, (&l11[0]) as u64)
+        p = w_num(state, p, cur_pid)
+        p = w_str(state, p, (&l12[0]) as u64)
+        p = w_num(state, p, cyc)
+        p = w_str(state, p, (&l13[0]) as u64)
+        p = w_num(state, p, icyc)
+        p = w_str(state, p, (&l14[0]) as u64)
+        p = w_num(state, p, cpu.x_get(state, i, cpu.X_HALTED))
+        p = w_str(state, p, (&l15[0]) as u64)
+        p = w_num(state, p, cpu.x_get(state, i, cpu.X_KICKTX))
+        p = w_str(state, p, (&l16[0]) as u64)
+        p = w_num(state, p, cpu.x_get(state, i, cpu.X_KICKRX))
+        p = w_nl(state, p)
+        i = i + 1
+    }
+    return p
+}
+
+fn make_uptime(state: u64) -> u64 {
+    let ticks: u64 = kstate.get(state, kstate.TICKS)
+    var p: u64 = 0
+    p = w_num(state, p, ticks / 100)
+    p = w_ch(state, p, 46)
+    if (ticks % 100) < 10 {
+        p = w_ch(state, p, 48)
+    }
+    p = w_num(state, p, ticks % 100)
+    p = w_ch(state, p, 32)
+    let idle: u64 = kstate.get(state, kstate.IDLE)
+    var iticks: u64 = 0
+    if idle < kstate.MAX_TASKS {
+        iticks = sched.tget(state, idle, sched.T_TICKS)
+    }
+    p = w_num(state, p, iticks / 100)
+    p = w_ch(state, p, 46)
+    if (iticks % 100) < 10 {
+        p = w_ch(state, p, 48)
+    }
+    p = w_num(state, p, iticks % 100)
+    p = w_nl(state, p)
+    return p
+}
+
+fn source_text(state: u64, at: u64, m: u64) -> u64 {
+    var t_proc: [u8; 6] = "proc \0"
+    var t_dev: [u8; 7] = "devfs \0"
+    let t: u64 = mnt.fstype(state, m)
+    if t == vfsops.FS_PROC {
+        return w_str(state, at, (&t_proc[0]) as u64)
+    }
+    if t == vfsops.FS_DEV {
+        return w_str(state, at, (&t_dev[0]) as u64)
+    }
+    return dev_text(state, at, mnt.dev(state, m))
+}
+
+fn dev_text(state: u64, at: u64, dev: u64) -> u64 {
+    var d_ram: [u8; 10] = "/dev/ram0\0"
+    var d_ata: [u8; 9] = "/dev/hda\0"
+    var d_atb: [u8; 9] = "/dev/hdb\0"
+    var d_nvme: [u8; 11] = "/dev/nvme0\0"
+    var d_none: [u8; 5] = "none\0"
+    if dev == blk.DEV_RAM {
+        return w_str(state, at, (&d_ram[0]) as u64)
+    }
+    if dev == blk.DEV_ATA {
+        return w_str(state, at, (&d_ata[0]) as u64)
+    }
+    if dev == blk.DEV_ATA1 {
+        return w_str(state, at, (&d_atb[0]) as u64)
+    }
+    if dev == blk.DEV_NVME {
+        return w_str(state, at, (&d_nvme[0]) as u64)
+    }
+    return w_str(state, at, (&d_none[0]) as u64)
+}
+
+fn type_text(state: u64, at: u64, t: u64) -> u64 {
+    var t_ofs: [u8; 4] = "ofs\0"
+    var t_proc: [u8; 6] = "proc \0"
+    var t_dev: [u8; 7] = "devfs \0"
+    var t_fat: [u8; 6] = "vfat\0\0"
+    var t_none: [u8; 5] = "none\0"
+    if t == vfsops.FS_OFS {
+        return w_str(state, at, (&t_ofs[0]) as u64)
+    }
+    if t == vfsops.FS_PROC {
+        return w_str(state, at, (&t_proc[0]) as u64)
+    }
+    if t == vfsops.FS_DEV {
+        return w_str(state, at, (&t_dev[0]) as u64)
+    }
+    if t == vfsops.FS_FAT {
+        return w_str(state, at, (&t_fat[0]) as u64)
+    }
+    return w_str(state, at, (&t_none[0]) as u64)
+}
+
+fn make_mounts(state: u64) -> u64 {
+    var rw: [u8; 3] = "rw\0"
+    var ro: [u8; 3] = "ro\0"
+    var tail: [u8; 5] = " 0 0\0"
+    var p: u64 = 0
+    var m: u64 = 0
+    while m < mnt.MAX_MNT {
+        if mnt.used(state, m) {
+            p = source_text(state, p, m)
+            p = w_ch(state, p, 32)
+            p = w_str(state, p, mnt.path_at(state, m))
+            p = w_ch(state, p, 32)
+            p = type_text(state, p, mnt.fstype(state, m))
+            p = w_ch(state, p, 32)
+            if (mnt.flags(state, m) & mnt.F_RDONLY) != 0 {
+                p = w_str(state, p, (&ro[0]) as u64)
+            } else {
+                p = w_str(state, p, (&rw[0]) as u64)
+            }
+            p = w_str(state, p, (&tail[0]) as u64)
+            p = w_nl(state, p)
+        }
+        m = m + 1
+    }
+    return p
+}
+
+fn make_stat(state: u64) -> u64 {
+    var s1: [u8; 12] = "ticks     \0\0"
+    var s2: [u8; 12] = "ctxt      \0\0"
+    var s3: [u8; 12] = "syscalls  \0\0"
+    var s4: [u8; 12] = "processes \0\0"
+    var s5: [u8; 12] = "forks     \0\0"
+    var s6: [u8; 12] = "execs     \0\0"
+    var s7: [u8; 12] = "traps     \0\0"
+    var s8: [u8; 12] = "opens     \0\0"
+    var sb: [u8; 7] = "btime \0"
+    var sc: [u8; 6] = "cpu  \0"
+    var scc: [u8; 4] = "cpu\0"
+    var sc0: [u8; 6] = " 0 0 \0"
+    var sc1: [u8; 13] = " 0 0 0 0 0 0\0"
+    var p: u64 = 0
+    let total: u64 = kstate.get(state, kstate.TICKS)
+    let idle_slot: u64 = kstate.get(state, kstate.IDLE)
+    var idle_ticks: u64 = 0
+    if idle_slot < kstate.MAX_TASKS {
+        idle_ticks = sched.tget(state, idle_slot, sched.T_TICKS)
+    }
+    if idle_ticks > total {
+        idle_ticks = total
+    }
+    p = w_str(state, p, (&sc[0]) as u64)
+    p = w_num(state, p, total - idle_ticks)
+    p = w_ch(state, p, 32)
+    p = w_ch(state, p, 48)
+    p = w_ch(state, p, 32)
+    p = w_ch(state, p, 48)
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, idle_ticks)
+    var z: u64 = 0
+    while z < 6 {
+        p = w_ch(state, p, 32)
+        p = w_ch(state, p, 48)
+        z = z + 1
+    }
+    p = w_nl(state, p)
+    var sn: u64 = cpu.count(state)
+    if sn > kstate.MAX_CPUS {
+        sn = kstate.MAX_CPUS
+    }
+    var sci: u64 = 0
+    while sn > 1 && sci < sn {
+        let ct: u64 = cpu.get(state, sci, cpu.C_TICKS)
+        var ci: u64 = cpu.get(state, sci, cpu.C_IDLETICKS)
+        if ci > ct {
+            ci = ct
+        }
+        p = w_str(state, p, (&scc[0]) as u64)
+        p = w_num(state, p, sci)
+        p = w_ch(state, p, 32)
+        p = w_num(state, p, ct - ci)
+        p = w_str(state, p, (&sc0[0]) as u64)
+        p = w_num(state, p, ci)
+        p = w_str(state, p, (&sc1[0]) as u64)
+        p = w_nl(state, p)
+        sci = sci + 1
+    }
+    p = w_str(state, p, (&s1[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.TICKS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s2[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.SWITCHES))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s3[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.SYSCALLS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s4[0]) as u64)
+    p = w_num(state, p, sched.alive_count(state))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s5[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.FORKS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s6[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.EXECS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s7[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.TRAPS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s8[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.OPENS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&sb[0]) as u64)
+    p = w_num(state, p, time.boot_sec(state))
+    p = w_nl(state, p)
+    return p
+}
+
+fn w_tail(state: u64, at: u64, s: u64, n: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 0
+    while i < n && kstate.get8(s + i) != 32 {
+        i = i + 1
+    }
+    if i < n {
+        i = i + 1
+    } else {
+        i = 0
+    }
+    while i < n {
+        p = w_ch(state, p, kstate.get8(s + i))
+        i = i + 1
+    }
+    return p
+}
+
+fn make_version(state: u64) -> u64 {
+    var v: [u8; 64] = [0 as u8; 64]
+    var vr: [u8; 22] = " (Firn) version \0\0\0\0\0\0"
+    var l_build: [u8; 8] = " build \0"
+    var l_image: [u8; 8] = " image \0"
+    var vn: u64 = brand.append((&v[0]) as u64, 0, brand.product(), 63)
+    vn = brand.append((&v[0]) as u64, vn, (&vr[0]) as u64, 63)
+    kstate.set8((&v[0]) as u64 + vn, 0)
+    var p: u64 = 0
+    p = w_str(state, p, (&v[0]) as u64)
+    p = w_num(state, p, uio.sysinfo(state, uio.I_VERSION))
+    p = w_str(state, p, (&l_build[0]) as u64)
+    p = w_tail(state, p, brand.version_text(), brand.version_n())
+    p = w_str(state, p, (&l_image[0]) as u64)
+    p = w_str(state, p, brand.image_text())
+    p = w_nl(state, p)
+    return p
+}
+
+fn w_field(state: u64, at: u64, label: u64, which: u64) -> u64 {
+    var p: u64 = at
+    p = w_str(state, p, label)
+    let src: u64 = hwid.field(state, which)
+    let n: u64 = hwid.field_len(state, which)
+    var i: u64 = 0
+    while i < n {
+        p = w_ch(state, p, kstate.get8(src + i))
+        i = i + 1
+    }
+    return w_nl(state, p)
+}
+
+fn w_hexb(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = at
+    let hi: u64 = (v >> 4) & 15
+    let lo: u64 = v & 15
+    if hi < 10 {
+        p = w_ch(state, p, hi + 48)
+    } else {
+        p = w_ch(state, p, hi + 87)
+    }
+    if lo < 10 {
+        p = w_ch(state, p, lo + 48)
+    } else {
+        p = w_ch(state, p, lo + 87)
+    }
+    return p
+}
+
+fn w_uuid(state: u64, at: u64) -> u64 {
+    let src: u64 = hwid.field(state, hwid.F_UUID)
+    var p: u64 = at
+    var order: [u8; 16] = [3 as u8, 2 as u8, 1 as u8, 0 as u8,
+        5 as u8, 4 as u8, 7 as u8, 6 as u8,
+        8 as u8, 9 as u8, 10 as u8, 11 as u8,
+        12 as u8, 13 as u8, 14 as u8, 15 as u8]
+    var i: u64 = 0
+    while i < 16 {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            p = w_ch(state, p, 45)
+        }
+        p = w_hexb(state, p, kstate.get8(src + kstate.get8((&order[0]) as u64 + i)))
+        i = i + 1
+    }
+    return p
+}
+
+fn make_hwid(state: u64) -> u64 {
+    var l_sm: [u8; 22] = "system_manufacturer: \0"
+    var l_sp: [u8; 17] = "system_product: \0"
+    var l_sv: [u8; 17] = "system_version: \0"
+    var l_ss: [u8; 16] = "system_serial: \0"
+    var l_bm: [u8; 21] = "board_manufacturer: \0"
+    var l_bp: [u8; 16] = "board_product: \0"
+    var l_bs: [u8; 15] = "board_serial: \0"
+    var l_uu: [u8; 7] = "uuid: \0"
+    var l_uv: [u8; 13] = "uuid_valid: \0"
+    var l_ns: [u8; 14] = "nvme_serial: \0"
+    var l_nm: [u8; 13] = "nvme_model: \0"
+    var l_am: [u8; 13] = "ahci_model: \0"
+    var l_nv: [u8; 13] = "nvme_valid: \0"
+    var l_ma: [u8; 6] = "mac: \0"
+    var l_mv: [u8; 12] = "mac_valid: \0"
+    var l_sb: [u8; 10] = "smbios: \0\0"
+    var l_sc: [u8; 20] = "smbios_structures: \0"
+    var l_ok: [u8; 12] = "smbios_ok: \0"
+    var dot: [u8; 2] = ".\0"
+
+    hwid.refresh(state)
+
+    var p: u64 = 0
+    p = w_field(state, p, (&l_sm[0]) as u64, hwid.F_SYS_MANUF)
+    p = w_field(state, p, (&l_sp[0]) as u64, hwid.F_SYS_PRODUCT)
+    p = w_field(state, p, (&l_sv[0]) as u64, hwid.F_SYS_VERSION)
+    p = w_field(state, p, (&l_ss[0]) as u64, hwid.F_SYS_SERIAL)
+    p = w_field(state, p, (&l_bm[0]) as u64, hwid.F_BOARD_MANUF)
+    p = w_field(state, p, (&l_bp[0]) as u64, hwid.F_BOARD_PRODUCT)
+    p = w_field(state, p, (&l_bs[0]) as u64, hwid.F_BOARD_SERIAL)
+    p = w_str(state, p, (&l_uu[0]) as u64)
+    p = w_uuid(state, p)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_uv[0]) as u64)
+    if hwid.have_uuid(state) {
+        p = w_num(state, p, 1)
+    } else {
+        p = w_num(state, p, 0)
+    }
+    p = w_nl(state, p)
+    p = w_field(state, p, (&l_ns[0]) as u64, hwid.F_NVME_SERIAL)
+    p = w_field(state, p, (&l_nm[0]) as u64, hwid.F_NVME_MODEL)
+    p = w_field(state, p, (&l_am[0]) as u64, hwid.F_AHCI_MODEL)
+    p = w_str(state, p, (&l_nv[0]) as u64)
+    if hwid.have_nvme(state) {
+        p = w_num(state, p, 1)
+    } else {
+        p = w_num(state, p, 0)
+    }
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_ma[0]) as u64)
+    let m: u64 = hwid.field(state, hwid.F_MAC)
+    var i: u64 = 0
+    while i < 6 {
+        if i > 0 {
+            p = w_ch(state, p, 58)
+        }
+        p = w_hexb(state, p, kstate.get8(m + i))
+        i = i + 1
+    }
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_mv[0]) as u64)
+    if hwid.have_mac(state) {
+        p = w_num(state, p, 1)
+    } else {
+        p = w_num(state, p, 0)
+    }
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_sb[0]) as u64)
+    p = w_num(state, p, hwid.version_major(state))
+    p = w_str(state, p, (&dot[0]) as u64)
+    p = w_num(state, p, hwid.version_minor(state))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_sc[0]) as u64)
+    p = w_num(state, p, hwid.structures(state))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_ok[0]) as u64)
+    if hwid.ok(state) {
+        p = w_num(state, p, 1)
+    } else {
+        p = w_num(state, p, 0)
+    }
+    p = w_nl(state, p)
+    return p
+}
+
+fn make_klog(state: u64) -> u64 {
+    var s_head: [u8; 8] = "# klog \0"
+    var s_von: [u8; 6] = " von \0"
+    var s_z: [u8; 9] = " Zeilen\0\0"
+    var s_l: [u8; 9] = ", Ring \0\0"
+    let last: u64 = klog.seq(state)
+    let first: u64 = klog.first_seq(state)
+    let raum: u64 = kstate.PROCFS_MAX - 256
+    var fits: u64 = raum / 144
+    if fits == 0 {
+        fits = 1
+    }
+    var von: u64 = first
+    if last > fits && last - fits + 1 > first {
+        von = last - fits + 1
+    }
+    var p: u64 = 0
+    p = w_str(state, p, (&s_head[0]) as u64)
+    p = w_num(state, p, last)
+    p = w_str(state, p, (&s_z[0]) as u64)
+    p = w_str(state, p, (&s_l[0]) as u64)
+    p = w_num(state, p, klog.N_ENT)
+    p = w_str(state, p, (&s_von[0]) as u64)
+    p = w_num(state, p, von)
+    p = w_ch(state, p, 10)
+    var sq: u64 = von
+    while sq <= last {
+        if p + 160 >= raum {
+            return p
+        }
+        p = p + klog.line_at(state, sq, buf(state) + p, raum - p)
+        sq = sq + 1
+    }
+    return p
+}
+
+fn make_status(state: u64, t: u64) -> u64 {
+    var l1: [u8; 10] = "Name:   \0\0"
+    var l2: [u8; 10] = "Pid:    \0\0"
+    var l3: [u8; 10] = "PPid:   \0\0"
+    var l4: [u8; 10] = "State:  \0\0"
+    var l5: [u8; 10] = "Prio:   \0\0"
+    var l6: [u8; 10] = "Ticks:  \0\0"
+    var l7: [u8; 10] = "Runs:   \0\0"
+    var l8: [u8; 10] = "Faults: \0\0"
+    var l9: [u8; 10] = "Brk:    \0\0"
+    var l10: [u8; 10] = "Cwd:    \0\0"
+    var name: [u8; 12] = [0 as u8; 12]
+    var cm: [u8; 17] = [0 as u8; 17]
+    var p: u64 = 0
+    kind_name(sched.tget(state, t, sched.T_KIND), (&name[0]) as u64)
+    let ca: u64 = sched.tget(state, t, sched.T_COMMA)
+    let cb: u64 = sched.tget(state, t, sched.T_COMMB)
+    var ci: u64 = 0
+    while ci < 8 {
+        kstate.set8(((&cm[0]) as u64) + ci, ((ca >> (ci * 8)) & 255) as u8)
+        ci = ci + 1
+    }
+    ci = 0
+    while ci < 7 {
+        kstate.set8(((&cm[0]) as u64) + 8 + ci, ((cb >> (ci * 8)) & 255) as u8)
+        ci = ci + 1
+    }
+    p = w_str(state, p, (&l1[0]) as u64)
+    if ca != 0 {
+        p = w_str(state, p, (&cm[0]) as u64)
+    } else {
+        p = w_str(state, p, (&name[0]) as u64)
+    }
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l2[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_PID))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l3[0]) as u64)
+    let par: u64 = sched.tget(state, t, sched.T_PARENT)
+    var ppid: u64 = 0
+    if par < kstate.MAX_TASKS {
+        ppid = sched.tget(state, par, sched.T_PID)
+    }
+    p = w_num(state, p, ppid)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l4[0]) as u64)
+    p = w_ch(state, p, state_letter(sched.tget(state, t, sched.T_STATE)))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l5[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_PRIO))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l6[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_TICKS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l7[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_RUNS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l8[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_FAULTS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l9[0]) as u64)
+    p = w_hex16(state, p, sched.tget(state, t, sched.T_BRK))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l10[0]) as u64)
+    var k: u64 = 0
+    let n: u64 = uio.cwd_len(state, t)
+    while k < n {
+        p = w_ch(state, p, uio.cwd_at(state, t, k))
+        k = k + 1
+    }
+    p = w_nl(state, p)
+    var l12: [u8; 10] = "Threads:\0\0"
+    var l13: [u8; 10] = "VmRSS:  \0\0"
+    var l14: [u8; 10] = "VmSize: \0\0"
+    var l15: [u8; 5] = " kB\0\0"
+    var grp: u64 = sched.tget(state, t, sched.T_TGID)
+    if grp == 0 {
+        grp = sched.tget(state, t, sched.T_PID)
+    }
+    var nth: u64 = 0
+    var ti: u64 = 0
+    while ti < kstate.MAX_TASKS {
+        if sched.tget(state, ti, sched.T_STATE) != sched.S_FREE && sched.tget(state, ti, sched.T_STATE) != sched.S_ZOMBIE {
+            var tg: u64 = sched.tget(state, ti, sched.T_TGID)
+            if tg == 0 {
+                tg = sched.tget(state, ti, sched.T_PID)
+            }
+            if tg == grp {
+                nth = nth + 1
+            }
+        }
+        ti = ti + 1
+    }
+    p = w_str(state, p, (&l12[0]) as u64)
+    p = w_num(state, p, nth)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l13[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4)
+    p = w_str(state, p, (&l15[0]) as u64)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l14[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4)
+    p = w_str(state, p, (&l15[0]) as u64)
+    p = w_nl(state, p)
+    var l11: [u8; 10] = "Origin: \0\0"
+    p = w_str(state, p, (&l11[0]) as u64)
+    if origin.is_empty(state, t) {
+        p = w_ch(state, p, 45)
+    } else {
+        var j: u64 = 0
+        while j < origin.LEN && origin.byte_at(state, t, j) != 0 {
+            p = w_ch(state, p, origin.byte_at(state, t, j))
+            j = j + 1
+        }
+    }
+    p = w_nl(state, p)
+    return p
+}
+
+fn st_num(state: u64, at: u64, v: u64) -> u64 {
+    let p: u64 = w_ch(state, at, 32)
+    return w_num(state, p, v)
+}
+
+fn make_pstat(state: u64, t: u64) -> u64 {
+    var name: [u8; 12] = [0 as u8; 12]
+    var cm: [u8; 17] = [0 as u8; 17]
+    var p: u64 = 0
+    kind_name(sched.tget(state, t, sched.T_KIND), (&name[0]) as u64)
+    let ca: u64 = sched.tget(state, t, sched.T_COMMA)
+    let cb: u64 = sched.tget(state, t, sched.T_COMMB)
+    var ci: u64 = 0
+    while ci < 8 {
+        kstate.set8(((&cm[0]) as u64) + ci, ((ca >> (ci * 8)) & 255) as u8)
+        ci = ci + 1
+    }
+    ci = 0
+    while ci < 7 {
+        kstate.set8(((&cm[0]) as u64) + 8 + ci, ((cb >> (ci * 8)) & 255) as u8)
+        ci = ci + 1
+    }
+    p = w_num(state, p, sched.tget(state, t, sched.T_PID))
+    p = w_ch(state, p, 32)
+    p = w_ch(state, p, 40)
+    if ca != 0 {
+        p = w_str(state, p, (&cm[0]) as u64)
+    } else {
+        p = w_str(state, p, (&name[0]) as u64)
+    }
+    p = w_ch(state, p, 41)
+    p = w_ch(state, p, 32)
+    p = w_ch(state, p, state_letter(sched.tget(state, t, sched.T_STATE)))
+    let par: u64 = sched.tget(state, t, sched.T_PARENT)
+    var ppid: u64 = 0
+    if par < kstate.MAX_TASKS {
+        ppid = sched.tget(state, par, sched.T_PID)
+    }
+    p = st_num(state, p, ppid)
+    p = st_num(state, p, sched.tget(state, t, sched.T_PGID))
+    p = st_num(state, p, sched.tget(state, t, sched.T_SID))
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, sched.tget(state, t, sched.T_FAULTS))
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, sched.tget(state, t, sched.T_TICKS))
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, sched.tget(state, t, sched.T_PRIO))
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 1)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4096)
+    p = st_num(state, p, sched.tget(state, t, sched.T_UPAGES))
+    p = st_num(state, p, 0 -% 1)
+    var f: u64 = 26
+    while f <= 52 {
+        if f == 38 {
+            p = st_num(state, p, 17)
+        } else {
+            p = st_num(state, p, 0)
+        }
+        f = f + 1
+    }
+    p = w_nl(state, p)
+    return p
+}
+
+fn make_cmdline(state: u64, t: u64) -> u64 {
+    var p: u64 = 0
+    let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
+    if frame == 0 {
+        return 0
+    }
+    guard.stac(state)
+    let argc: u64 = __mmio_read64(frame as *mut u64)
+    if argc == 0 || argc > proc.MAX_ARGS {
+        guard.clac(state)
+        return 0
+    }
+    var k: u64 = 0
+    while k < argc {
+        let ptr: u64 = __mmio_read64((frame + 8 + k * 8) as *mut u64)
+        if ptr < proc.ARGS_BASE || ptr >= proc.ARGS_BASE + 4096 {
+            k = argc
+        } else {
+            var at: u64 = frame + (ptr - proc.ARGS_BASE)
+            var going: bool = true
+            while going {
+                let c: u64 = kstate.get8(at)
+                if c == 0 || at >= frame + 4096 {
+                    going = false
+                } else {
+                    p = w_ch(state, p, c)
+                    at = at + 1
+                }
+            }
+            p = w_ch(state, p, 0)
+            k = k + 1
+        }
+    }
+    guard.clac(state)
+    return p
+}
+
+fn make_maps(state: u64, t: u64) -> u64 {
+    var p: u64 = 0
+    let low: u64 = proc.USER_DATA
+    let high: u64 = proc.LAZY_ATOP
+    var addr: u64 = low
+    var run_start: u64 = 0
+    var run_r: u64 = 0
+    var in_run: bool = false
+    while addr < high {
+        var r: u64 = 0
+        let k: u64 = proc.pd_slot(addr)
+        if k != 0 && proc.pt_for(state, t, addr, false) == 0 {
+            if in_run {
+                p = map_line(state, t, p, run_start, addr, run_r)
+                in_run = false
+            }
+            addr = (addr & 0xFFFFFFFFFFE00000) + 0x200000
+        } else {
+            r = proc.page_rights(state, t, addr)
+            if r != 0 && !in_run {
+                in_run = true
+                run_start = addr
+                run_r = r
+            } else if in_run {
+                if r != run_r {
+                    p = map_line(state, t, p, run_start, addr, run_r)
+                    in_run = r != 0
+                    run_start = addr
+                    run_r = r
+                }
+            }
+            addr = addr + 4096
+        }
+        if p > pfbase.BUF_MAX - 300 {
+            return p
+        }
+    }
+    if in_run {
+        p = map_line(state, t, p, run_start, high, run_r)
+    }
+    return p
+}
+
+fn map_line(state: u64, t: u64, at: u64, a: u64, b: u64, r: u64) -> u64 {
+    var p: u64 = at
+    p = w_hex16(state, p, a)
+    p = w_ch(state, p, 45)
+    p = w_hex16(state, p, b)
+    p = w_ch(state, p, 32)
+    if (r & 2) != 0 {
+        p = w_ch(state, p, 114)
+    } else {
+        p = w_ch(state, p, 45)
+    }
+    if (r & 4) != 0 {
+        p = w_ch(state, p, 119)
+    } else {
+        p = w_ch(state, p, 45)
+    }
+    if (r & 8) != 0 {
+        p = w_ch(state, p, 120)
+    } else {
+        p = w_ch(state, p, 45)
+    }
+    p = w_ch(state, p, 112)
+    var tail: [u8; 26] = " 00000000 00:00 0      \0\0\0"
+    p = w_str(state, p, (&tail[0]) as u64)
+    if a <= proc.USER_TOP - 4096 && b >= proc.USER_TOP {
+        var nm: [u8; 8] = "[stack]\0"
+        p = w_str(state, p, (&nm[0]) as u64)
+    } else if a == 0x40080000 {
+        var nh: [u8; 8] = "[heap]\0\0"
+        p = w_str(state, p, (&nh[0]) as u64)
+    } else if a >= MAPS_INTERP && a < proc.IMAGE_END {
+        p = w_interp_name(state, t, p)
+    } else if a >= proc.IMAGE_BASE && a < MAPS_INTERP {
+        p = w_exe_name(state, t, p)
+    }
+    p = w_nl(state, p)
+    return p
+}
+
+const MAPS_INTERP: u64 = 0x40A00000
+
+fn w_exe_name(state: u64, t: u64, at: u64) -> u64 {
+    var p: u64 = at
+    let n: u64 = uio.exe_len(state, t)
+    var i: u64 = 0
+    while i < n {
+        p = w_ch(state, p, uio.exe_at(state, t, i))
+        i = i + 1
+    }
+    return p
+}
+
+fn w_interp_name(state: u64, t: u64, at: u64) -> u64 {
+    var p: u64 = at
+    let n: u64 = uio.interp_len(state, t)
+    var i: u64 = 0
+    while i < n {
+        p = w_ch(state, p, uio.interp_at(state, t, i))
+        i = i + 1
+    }
+    return p
+}
+
+fn make_exe(state: u64, t: u64) -> u64 {
+    let n: u64 = uio.exe_len(state, t)
+    var i: u64 = 0
+    while i < n && i < pfbase.BUF_MAX {
+        w_ch(state, i, uio.exe_at(state, t, i))
+        i = i + 1
+    }
+    return i
+}
+
+fn make_cwd(state: u64, t: u64) -> u64 {
+    let n: u64 = uio.cwd_len(state, t)
+    var i: u64 = 0
+    while i < n && i < pfbase.BUF_MAX {
+        w_ch(state, i, uio.cwd_at(state, t, i))
+        i = i + 1
+    }
+    return i
+}
+
+fn make_fdfile(state: u64, t: u64, fd: u64) -> u64 {
+    var k_file: [u8; 6] = "file \0"
+    var k_dir: [u8; 5] = "dir \0"
+    var k_pipe: [u8; 6] = "pipe\0\0"
+    var k_tty: [u8; 5] = "tty \0"
+    var k_con: [u8; 8] = "console\0"
+    var k_sock: [u8; 8] = "socket\0\0"
+    var k_fb: [u8; 4] = "fb\0\0"
+    var k_vfs: [u8; 5] = "vfs \0"
+    var p: u64 = 0
+    let e: u64 = file.fd_of(state, t, fd)
+    if e >= file.MAX_OPEN {
+        return 0
+    }
+    let kind: u64 = file.open_kind(state, e)
+    if kind == file.K_FILE {
+        p = w_str(state, p, (&k_file[0]) as u64)
+        p = w_num(state, p, file.open_ino(state, e))
+    } else if kind == file.K_DIR {
+        p = w_str(state, p, (&k_dir[0]) as u64)
+        p = w_num(state, p, file.open_ino(state, e))
+    } else if kind == file.K_PIPER || kind == file.K_PIPEW {
+        p = w_str(state, p, (&k_pipe[0]) as u64)
+    } else if kind == file.K_TTY {
+        p = w_str(state, p, (&k_tty[0]) as u64)
+        p = w_num(state, p, file.open_ino(state, e))
+    } else if kind == file.K_CONIN || kind == file.K_CONOUT {
+        p = w_str(state, p, (&k_con[0]) as u64)
+    } else if kind == file.K_SOCK {
+        p = w_str(state, p, (&k_sock[0]) as u64)
+    } else if kind == file.K_FB {
+        p = w_str(state, p, (&k_fb[0]) as u64)
+    } else {
+        p = w_str(state, p, (&k_vfs[0]) as u64)
+        p = w_num(state, p, file.open_ino(state, e))
+    }
+    p = w_nl(state, p)
+    return p
+}
+
+fn make_loadavg(state: u64) -> u64 {
+    var z: [u8; 18] = "0.00 0.00 0.00 1/\0"
+    var p: u64 = w_str(state, 0, (&z[0]) as u64)
+    var live: u64 = 0
+    var t: u64 = 0
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    while t < n {
+        if alive(state, t) {
+            live = live + 1
+        }
+        t = t + 1
+    }
+    p = w_num(state, p, live)
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, kstate.get(state, kstate.NEXT_PID) - 1)
+    return w_nl(state, p)
+}
+
+fn w_hexn(state: u64, at: u64, v: u64, n: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = n
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            p = w_ch(state, p, d + 48)
+        } else {
+            p = w_ch(state, p, d + 87)
+        }
+    }
+    return p
+}
+
+fn make_pci(state: u64) -> u64 {
+    var l_irq: [u8; 6] = " irq=\0"
+    var p: u64 = 0
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        let bdf: u64 = pci.get(state, i, pci.E_BDF)
+        p = w_hexn(state, p, pci.bdf_bus(bdf), 2)
+        p = w_ch(state, p, 58)
+        p = w_hexn(state, p, pci.bdf_dev(bdf), 2)
+        p = w_ch(state, p, 46)
+        p = w_hexn(state, p, pci.bdf_fn(bdf), 1)
+        p = w_ch(state, p, 32)
+        p = w_hexn(state, p, pci.get(state, i, pci.E_CLASS), 2)
+        p = w_hexn(state, p, pci.get(state, i, pci.E_SUBCLASS), 2)
+        p = w_ch(state, p, 32)
+        p = w_hexn(state, p, pci.get(state, i, pci.E_VENDOR), 4)
+        p = w_ch(state, p, 58)
+        p = w_hexn(state, p, pci.get(state, i, pci.E_DEVICE), 4)
+        p = w_str(state, p, (&l_irq[0]) as u64)
+        p = w_num(state, p, pci.get(state, i, pci.E_IRQLINE))
+        p = w_nl(state, p)
+        i = i + 1
+    }
+    return p
+}
+
+fn w_speed(state: u64, at: u64, sp: u64) -> u64 {
+    var s_lo: [u8; 4] = "low\0"
+    var s_fu: [u8; 5] = "full\0"
+    var s_hi: [u8; 5] = "high\0"
+    var s_su: [u8; 6] = "super\0"
+    var s_un: [u8; 8] = "unknown\0"
+    if sp == 1 {
+        return w_str(state, at, (&s_fu[0]) as u64)
+    }
+    if sp == 2 {
+        return w_str(state, at, (&s_lo[0]) as u64)
+    }
+    if sp == 3 {
+        return w_str(state, at, (&s_hi[0]) as u64)
+    }
+    if sp >= 4 {
+        return w_str(state, at, (&s_su[0]) as u64)
+    }
+    return w_str(state, at, (&s_un[0]) as u64)
+}
+
+fn w_driver(state: u64, at: u64, k: u64) -> u64 {
+    var d0: [u8; 5] = "none\0"
+    var d1: [u8; 9] = "keyboard\0"
+    var d2: [u8; 6] = "mouse\0"
+    var d3: [u8; 8] = "storage\0"
+    var d4: [u8; 7] = "hidgen\0"
+    var d5: [u8; 4] = "hub\0"
+    var d6: [u8; 4] = "ecm\0"
+    var d7: [u8; 6] = "rndis\0"
+    var d8: [u8; 5] = "isoc\0"
+    var d9: [u8; 4] = "ncm\0"
+    var d10: [u8; 6] = "ch336\0"
+    var d11: [u8; 8] = "ax88772\0"
+    if k == usb.DRV_CH336 {
+        return w_str(state, at, (&d10[0]) as u64)
+    }
+    if k == usb.DRV_AX88772 {
+        return w_str(state, at, (&d11[0]) as u64)
+    }
+    if k == usb.DRV_KBD {
+        return w_str(state, at, (&d1[0]) as u64)
+    }
+    if k == usb.DRV_MOUSE {
+        return w_str(state, at, (&d2[0]) as u64)
+    }
+    if k == usb.DRV_MSC {
+        return w_str(state, at, (&d3[0]) as u64)
+    }
+    if k == usb.DRV_HIDGEN {
+        return w_str(state, at, (&d4[0]) as u64)
+    }
+    if k == usb.DRV_HUB {
+        return w_str(state, at, (&d5[0]) as u64)
+    }
+    if k == usb.DRV_ECM {
+        return w_str(state, at, (&d6[0]) as u64)
+    }
+    if k == usb.DRV_RNDIS {
+        return w_str(state, at, (&d7[0]) as u64)
+    }
+    if k == 8 {
+        return w_str(state, at, (&d8[0]) as u64)
+    }
+    if k == usb.DRV_NCM {
+        return w_str(state, at, (&d9[0]) as u64)
+    }
+    return w_str(state, at, (&d0[0]) as u64)
+}
+
+fn w_kind(state: u64, at: u64, icls: u64, ipro: u64, dcls: u64) -> u64 {
+    var k_kb: [u8; 13] = "hid-keyboard\0"
+    var k_ms: [u8; 10] = "hid-mouse\0"
+    var k_hid: [u8; 4] = "hid\0"
+    var k_st: [u8; 8] = "storage\0"
+    var k_hub: [u8; 4] = "hub\0"
+    var k_net: [u8; 4] = "net\0"
+    var k_au: [u8; 6] = "audio\0"
+    var k_ot: [u8; 6] = "other\0"
+    var c: u64 = icls
+    if c == 0 {
+        c = dcls
+    }
+    if c == 3 {
+        if ipro == 1 {
+            return w_str(state, at, (&k_kb[0]) as u64)
+        }
+        if ipro == 2 {
+            return w_str(state, at, (&k_ms[0]) as u64)
+        }
+        return w_str(state, at, (&k_hid[0]) as u64)
+    }
+    if c == 8 {
+        return w_str(state, at, (&k_st[0]) as u64)
+    }
+    if c == 9 {
+        return w_str(state, at, (&k_hub[0]) as u64)
+    }
+    if c == 2 || c == 10 || c == 0xE0 {
+        return w_str(state, at, (&k_net[0]) as u64)
+    }
+    if c == 1 {
+        return w_str(state, at, (&k_au[0]) as u64)
+    }
+    return w_str(state, at, (&k_ot[0]) as u64)
+}
+
+fn w_ip4(state: u64, at: u64, a: u64) -> u64 {
+    var p: u64 = w_num(state, at, (a >> 24) & 0xFF)
+    p = w_ch(state, p, 46)
+    p = w_num(state, p, (a >> 16) & 0xFF)
+    p = w_ch(state, p, 46)
+    p = w_num(state, p, (a >> 8) & 0xFF)
+    p = w_ch(state, p, 46)
+    return w_num(state, p, a & 0xFF)
+}
+
+fn w_mac_packed(state: u64, at: u64, mac: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 0
+    while i < 6 {
+        if i > 0 {
+            p = w_ch(state, p, 58)
+        }
+        p = w_hexn(state, p, (mac >> (i * 8)) & 255, 2)
+        i = i + 1
+    }
+    return p
+}
+
+fn w_route_probe(state: u64, at: u64, dst: u64) -> u64 {
+    var l_rt: [u8; 8] = "route: \0"
+    var l_nx: [u8; 7] = " next=\0"
+    var l_gw: [u8; 3] = "gw\0"
+    var l_dr: [u8; 7] = "direct\0"
+    var l_hp: [u8; 6] = " hop=\0"
+    var l_hw: [u8; 6] = " mac=\0"
+    var l_no: [u8; 8] = "pending\0"
+    var p: u64 = w_str(state, at, (&l_rt[0]) as u64)
+    p = w_ip4(state, p, dst)
+    p = w_str(state, p, (&l_nx[0]) as u64)
+    if inet.route_via_gw(state, dst) {
+        p = w_str(state, p, (&l_gw[0]) as u64)
+    } else {
+        p = w_str(state, p, (&l_dr[0]) as u64)
+    }
+    p = w_str(state, p, (&l_hp[0]) as u64)
+    p = w_ip4(state, p, inet.next_hop(state, dst))
+    p = w_str(state, p, (&l_hw[0]) as u64)
+    let hw: u64 = inet.hop_mac(state, dst)
+    if hw == 0 {
+        p = w_str(state, p, (&l_no[0]) as u64)
+    } else {
+        p = w_mac_packed(state, p, hw)
+    }
+    return w_nl(state, p)
+}
+
+fn w_net_route_lines(state: u64, at: u64) -> u64 {
+    var l_mk: [u8; 11] = "net: mask=\0"
+    var l_gm: [u8; 8] = " gwmac=\0"
+    var l_no: [u8; 8] = "pending\0"
+    var l_ar: [u8; 6] = "arp: \0"
+    var l_ar2: [u8; 2] = " \0"
+    var p: u64 = w_str(state, at, (&l_mk[0]) as u64)
+    p = w_ip4(state, p, inet.mask(state))
+    p = w_str(state, p, (&l_gm[0]) as u64)
+    let gm: u64 = inet.hop_mac(state, inet.gw(state))
+    if gm == 0 {
+        p = w_str(state, p, (&l_no[0]) as u64)
+    } else {
+        p = w_mac_packed(state, p, gm)
+    }
+    p = w_nl(state, p)
+    p = w_route_probe(state, p, inet.gw(state))
+    p = w_route_probe(state, p, 0x01010101)
+    p = w_route_probe(state, p, 0x08080808)
+    var i: u64 = 0
+    while i < inet.arp_slots() {
+        let a: u64 = inet.arp_ip_at(state, i)
+        if a != 0 {
+            p = w_str(state, p, (&l_ar[0]) as u64)
+            p = w_ip4(state, p, a)
+            p = w_str(state, p, (&l_ar2[0]) as u64)
+            p = w_mac_packed(state, p, inet.arp_mac_slot(state, i))
+            p = w_nl(state, p)
+        }
+        i = i + 1
+    }
+    return p
+}
+
+fn w_txk_line(state: u64, at: u64) -> u64 {
+    var l_h: [u8; 6] = "txk: \0"
+    var l_a: [u8; 5] = "arp=\0"
+    var l_i: [u8; 7] = " icmp=\0"
+    var l_u: [u8; 6] = " udp=\0"
+    var l_t: [u8; 6] = " tcp=\0"
+    var l_o: [u8; 8] = " other=\0"
+    var l_s: [u8; 11] = " arpgated=\0"
+    var p: u64 = w_str(state, at, (&l_h[0]) as u64)
+    p = w_str(state, p, (&l_a[0]) as u64)
+    p = w_num(state, p, inet.tx_kind_count(state, inet.TXK_ARP))
+    p = w_str(state, p, (&l_i[0]) as u64)
+    p = w_num(state, p, inet.tx_kind_count(state, inet.TXK_ICMP))
+    p = w_str(state, p, (&l_u[0]) as u64)
+    p = w_num(state, p, inet.tx_kind_count(state, inet.TXK_UDP))
+    p = w_str(state, p, (&l_t[0]) as u64)
+    p = w_num(state, p, inet.tx_kind_count(state, inet.TXK_TCP))
+    p = w_str(state, p, (&l_o[0]) as u64)
+    p = w_num(state, p, inet.tx_kind_count(state, inet.TXK_OTHER))
+    p = w_str(state, p, (&l_s[0]) as u64)
+    p = w_num(state, p, inet.tx_kind_count(state, inet.TXK_ARP_SUPPRESSED))
+    return w_nl(state, p)
+}
+
+fn w_sdec(state: u64, at: u64, v: u64) -> u64 {
+    if (v >> 63) != 0 {
+        let q: u64 = w_ch(state, at, 45)
+        return w_num(state, q, 0xFFFFFFFFFFFFFFFF - v + 1)
+    }
+    return w_num(state, at, v)
+}
+
+fn w_dns_line(state: u64, at: u64) -> u64 {
+    var l_dn: [u8; 6] = "dns: \0"
+    var l_sp: [u8; 2] = " \0"
+    var p: u64 = at
+    if inet.dhcp_get(4) == 0 {
+        return p
+    }
+    p = w_str(state, p, (&l_dn[0]) as u64)
+    var i: u64 = 4
+    while i < 7 {
+        let d: u64 = inet.dhcp_get(i)
+        if d != 0 {
+            if i > 4 {
+                p = w_str(state, p, (&l_sp[0]) as u64)
+            }
+            p = w_ip4(state, p, d)
+        }
+        i = i + 1
+    }
+    return w_nl(state, p)
+}
+
+fn w_hexbytes(state: u64, at: u64, kind: u64, from: u64, n: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 0
+    while i < n {
+        p = w_hexn(state, p, chdiag.raw(state, kind, from + i), 2)
+        i = i + 1
+    }
+    return p
+}

@@ -73,7 +73,7 @@ SPALTEN = [
      [("summary", n) for n in
       ["s_lk", "s_hi", "s_st", "s_sr", "s_ct", "s_cr"]], 20,
      "netstat setzt seine Bilanzzeilen untereinander"),
-    ("kernel/fs/procfs.fi",
+    ("kernel/fs/procfs/pfproc.fi",
      [("make_status", n) for n in
       ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10"]], 8,
      "/proc/<pid>/status setzt seine zehn Felder untereinander"),

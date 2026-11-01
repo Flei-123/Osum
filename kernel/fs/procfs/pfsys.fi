@@ -1,0 +1,1858 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import acpi.acpiev
+import ntp.bounds
+import lib.brand
+import drv.usb.chdiag
+import sched.clockstate
+import gfx.fbmtrr
+import fs.file
+import ui.frameprof
+import gfx.gfx
+import diag.hwdiag
+import net.inet
+import drv.net.iwl
+import wlan.iwl_probe
+import lib.kstate
+import mm.mem
+import diag.mmaptrace
+import drv.con.odbuart
+import bus.pci
+import apprights.policy
+import sched.rand
+import tz.rules
+import diag.safe
+import ui.sysmon
+import sched.time
+import usb.usb
+import drv.net.usbnet
+import net.wlan_auto
+import net.wlan_rfkill
+import drv.usb.xhci
+import fs.procfs.pfbase
+import fs.procfs.pfproc
+
+const S_KERNEL: u64 = 2
+
+const S_VM: u64 = 3
+
+const S_RANDOM: u64 = 4
+
+const S_PIDMAX: u64 = 5
+
+const S_OVERCOMMIT: u64 = 6
+
+const S_UUID: u64 = 7
+
+const S_NETDEV: u64 = 9
+
+const GPU_NA: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn make_usb(state: u64) -> u64 {
+    var l_ctl: [u8; 17] = "controller xhci \0"
+    var l_none: [u8; 17] = "controller none\n\0"
+    var l_ports: [u8; 8] = " ports=\0"
+    var l_up: [u8; 10] = " state=up\0"
+    var l_down: [u8; 12] = " state=down\0"
+    var l_idle: [u8; 12] = " state=idle\0"
+    var l_sel: [u8; 10] = " selected\0"
+    var l_hc: [u8; 9] = " hc=xhci\0"
+    var l_kind: [u8; 7] = " kind=\0"
+    var p: u64 = 0
+    let hcn: u64 = xhci.count_hc(state)
+    if hcn == 0 {
+        p = pfproc.w_str(state, p, (&l_none[0]) as u64)
+    }
+    var h: u64 = 0
+    while h < hcn {
+        let idx: u64 = xhci.nth_hc(state, h)
+        if idx < pci.MAX_DEV {
+            let bdf: u64 = pci.get(state, idx, pci.E_BDF)
+            p = pfproc.w_str(state, p, (&l_ctl[0]) as u64)
+            p = pfproc.w_hexn(state, p, pci.bdf_bus(bdf), 2)
+            p = pfproc.w_ch(state, p, 58)
+            p = pfproc.w_hexn(state, p, pci.bdf_dev(bdf), 2)
+            p = pfproc.w_ch(state, p, 46)
+            p = pfproc.w_hexn(state, p, pci.bdf_fn(bdf), 1)
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_hexn(state, p, pci.get(state, idx, pci.E_VENDOR), 4)
+            p = pfproc.w_ch(state, p, 58)
+            p = pfproc.w_hexn(state, p, pci.get(state, idx, pci.E_DEVICE), 4)
+            if h == usb.choice(state) {
+                p = pfproc.w_str(state, p, (&l_ports[0]) as u64)
+                p = pfproc.w_num(state, p, xhci.ports(state))
+                if xhci.ready(state) {
+                    p = pfproc.w_str(state, p, (&l_up[0]) as u64)
+                } else {
+                    p = pfproc.w_str(state, p, (&l_down[0]) as u64)
+                }
+                p = pfproc.w_str(state, p, (&l_sel[0]) as u64)
+            } else {
+                p = pfproc.w_str(state, p, (&l_idle[0]) as u64)
+            }
+            p = pfproc.w_nl(state, p)
+        }
+        h = h + 1
+    }
+
+    var l_port: [u8; 7] = " port=\0"
+    var l_hub: [u8; 6] = " hub=\0"
+    var l_sp: [u8; 8] = " speed=\0"
+    var l_cl: [u8; 8] = " class=\0"
+    var l_if: [u8; 5] = " if=\0"
+    var l_dr: [u8; 9] = " driver=\0"
+    let n: u64 = usb.fund_count(state)
+    var i: u64 = 0
+    while i < n {
+        p = pfproc.w_hexn(state, p, usb.fund_vid(state, i), 4)
+        p = pfproc.w_ch(state, p, 58)
+        p = pfproc.w_hexn(state, p, usb.fund_pid(state, i), 4)
+        p = pfproc.w_str(state, p, (&l_port[0]) as u64)
+        p = pfproc.w_num(state, p, usb.fund_port(state, i))
+        if usb.fund_hub(state, i) != 0 {
+            p = pfproc.w_str(state, p, (&l_hub[0]) as u64)
+            p = pfproc.w_num(state, p, usb.fund_hub(state, i))
+        }
+        p = pfproc.w_str(state, p, (&l_sp[0]) as u64)
+        p = pfproc.w_speed(state, p, usb.fund_speed(state, i))
+        p = pfproc.w_str(state, p, (&l_cl[0]) as u64)
+        p = pfproc.w_hexn(state, p, usb.fund_dcls(state, i), 2)
+        p = pfproc.w_ch(state, p, 47)
+        p = pfproc.w_hexn(state, p, usb.fund_dsub(state, i), 2)
+        p = pfproc.w_ch(state, p, 47)
+        p = pfproc.w_hexn(state, p, usb.fund_dpro(state, i), 2)
+        p = pfproc.w_str(state, p, (&l_if[0]) as u64)
+        p = pfproc.w_hexn(state, p, usb.fund_icls(state, i), 2)
+        p = pfproc.w_ch(state, p, 47)
+        p = pfproc.w_hexn(state, p, usb.fund_isub(state, i), 2)
+        p = pfproc.w_ch(state, p, 47)
+        p = pfproc.w_hexn(state, p, usb.fund_ipro(state, i), 2)
+        p = pfproc.w_str(state, p, (&l_dr[0]) as u64)
+        p = pfproc.w_driver(state, p, usb.fund_driver(state, i))
+        p = pfproc.w_str(state, p, (&l_hc[0]) as u64)
+        p = pfproc.w_str(state, p, (&l_kind[0]) as u64)
+        p = pfproc.w_kind(state, p, usb.fund_icls(state, i), usb.fund_ipro(state, i),
+            usb.fund_dcls(state, i))
+        p = pfproc.w_nl(state, p)
+        i = i + 1
+    }
+    return w_usbnet_lines(state, p)
+}
+
+fn w_usbnet_lines(state: u64, at: u64) -> u64 {
+    var l_un: [u8; 20] = "usbnet: ready mode=\0"
+    var l_lk: [u8; 7] = " link=\0"
+    var l_bm: [u8; 7] = " bmsr=\0"
+    var l_cf: [u8; 6] = " cfg=\0"
+    var l_fw: [u8; 5] = " fw=\0"
+    var l_ch: [u8; 6] = " chg=\0"
+    var l_rx: [u8; 5] = " rx=\0"
+    var l_tx: [u8; 5] = " tx=\0"
+    var l_er: [u8; 6] = " err=\0"
+    var l_dr: [u8; 7] = " drop=\0"
+    var l_tq: [u8; 12] = "txdiag: rc=\0"
+    var l_tf: [u8; 7] = " fail=\0"
+    var l_th: [u8; 7] = " halt=\0"
+    var l_te: [u8; 5] = " ep=\0"
+    var l_ip: [u8; 9] = "net: ip=\0"
+    var l_gw: [u8; 5] = " gw=\0"
+    var l_up: [u8; 3] = "up\0"
+    var l_dn: [u8; 5] = "down\0"
+    var l_uk: [u8; 8] = "unknown\0"
+    var p: u64 = at
+    if usbnet.ready_on(state, 0) {
+        p = pfproc.w_str(state, p, (&l_un[0]) as u64)
+        p = pfproc.w_num(state, p, usbnet.mode_get(state))
+        p = pfproc.w_str(state, p, (&l_lk[0]) as u64)
+        let lk: u64 = usbnet.link_on(state, 0)
+        if lk == 1 {
+            p = pfproc.w_str(state, p, (&l_up[0]) as u64)
+        } else if lk == 2 {
+            p = pfproc.w_str(state, p, (&l_dn[0]) as u64)
+        } else {
+            p = pfproc.w_str(state, p, (&l_uk[0]) as u64)
+        }
+        if usbnet.mode_get(state) == 3 {
+            p = pfproc.w_str(state, p, (&l_bm[0]) as u64)
+            p = pfproc.w_hexn(state, p, usbnet.ch_bmsr(state), 4)
+            p = pfproc.w_str(state, p, (&l_cf[0]) as u64)
+            p = pfproc.w_hexn(state, p, usbnet.ch_cfg(state), 8)
+            p = pfproc.w_str(state, p, (&l_fw[0]) as u64)
+            p = pfproc.w_hexn(state, p, usbnet.ch_fw(state), 2)
+            p = pfproc.w_str(state, p, (&l_ch[0]) as u64)
+            p = pfproc.w_num(state, p, usbnet.ch_changes(state))
+        }
+        p = pfproc.w_str(state, p, (&l_rx[0]) as u64)
+        p = pfproc.w_num(state, p, usbnet.rx_frames_on(state, 0))
+        p = pfproc.w_str(state, p, (&l_tx[0]) as u64)
+        p = pfproc.w_num(state, p, usbnet.tx_frames_on(state, 0))
+        p = pfproc.w_str(state, p, (&l_er[0]) as u64)
+        p = pfproc.w_num(state, p, usbnet.errors(state))
+        p = pfproc.w_str(state, p, (&l_dr[0]) as u64)
+        p = pfproc.w_num(state, p, usbnet.tx_drops_on(state, 0))
+        p = pfproc.w_nl(state, p)
+        if usbnet.errors(state) != 0 {
+            p = w_usbnet_errk(state, p)
+        }
+        if usbnet.mode_get(state) == 3 {
+            p = pfproc.w_str(state, p, (&l_tq[0]) as u64)
+            p = pfproc.w_sdec(state, p, usbnet.tx_diag(state, 0))
+            p = pfproc.w_str(state, p, (&l_tf[0]) as u64)
+            p = pfproc.w_num(state, p, usbnet.tx_diag(state, 1))
+            p = pfproc.w_str(state, p, (&l_th[0]) as u64)
+            p = pfproc.w_num(state, p, usbnet.tx_diag(state, 2))
+            p = pfproc.w_str(state, p, (&l_te[0]) as u64)
+            p = pfproc.w_num(state, p, usbnet.tx_diag(state, 3))
+            p = pfproc.w_nl(state, p)
+        }
+    }
+    if inet.ready(state) {
+        p = pfproc.w_str(state, p, (&l_ip[0]) as u64)
+        p = pfproc.w_ip4(state, p, inet.ip(state))
+        p = pfproc.w_str(state, p, (&l_gw[0]) as u64)
+        p = pfproc.w_ip4(state, p, inet.gw(state))
+        p = pfproc.w_nl(state, p)
+        p = pfproc.w_txk_line(state, p)
+        p = pfproc.w_net_route_lines(state, p)
+    }
+    return p
+}
+
+fn w_usbnet_errk(state: u64, at: u64) -> u64 {
+    var l_ek: [u8; 13] = "usbnet: errk\0"
+    var l_n0: [u8; 7] = " xfer=\0"
+    var l_n1: [u8; 6] = " ntb=\0"
+    var l_n2: [u8; 6] = " len=\0"
+    var l_n3: [u8; 7] = " rpkt=\0"
+    var l_n4: [u8; 7] = " rlen=\0"
+    var l_n5: [u8; 6] = " ndg=\0"
+    var l_n6: [u8; 8] = " chbad=\0"
+    var l_n7: [u8; 8] = " axlen=\0"
+    var l_cc: [u8; 5] = " cc=\0"
+    var p: u64 = pfproc.w_str(state, at, (&l_ek[0]) as u64)
+    p = pfproc.w_str(state, p, (&l_n0[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.err_kind(state, 0))
+    p = pfproc.w_str(state, p, (&l_n1[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.err_kind(state, 1))
+    p = pfproc.w_str(state, p, (&l_n2[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.err_kind(state, 2))
+    p = pfproc.w_str(state, p, (&l_n3[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.err_kind(state, 3))
+    p = pfproc.w_str(state, p, (&l_n4[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.err_kind(state, 4))
+    p = pfproc.w_str(state, p, (&l_n5[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.err_kind(state, 5))
+    p = pfproc.w_str(state, p, (&l_n6[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.err_kind(state, 6))
+    p = pfproc.w_str(state, p, (&l_n7[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.err_kind(state, 7))
+    p = pfproc.w_str(state, p, (&l_cc[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.err_cc(state))
+    return pfproc.w_nl(state, p)
+}
+
+fn w_usbnet_usb(state: u64, at: u64) -> u64 {
+    var l_ab: [u8; 19] = "usb: ch336 absent\n\0"
+    var l_id: [u8; 15] = "usb: ch336 id=\0"
+    var l_sp: [u8; 8] = " speed=\0"
+    var l_rt: [u8; 8] = " route=\0"
+    var l_nc: [u8; 11] = "usb: ncfg=\0"
+    var l_cf: [u8; 6] = " cfg=\0"
+    var l_st: [u8; 9] = " setcfg=\0"
+    var l_rc: [u8; 5] = " rc=\0"
+    var l_if: [u8; 12] = "usb: iface=\0"
+    var l_n: [u8; 6] = " num=\0"
+    var l_ep: [u8; 12] = "usb: ep in=\0"
+    var l_ou: [u8; 6] = " out=\0"
+    var l_it: [u8; 6] = " int=\0"
+    var l_im: [u8; 9] = " intmps=\0"
+    var l_iv: [u8; 6] = " ivl=\0"
+    var l_bm: [u8; 10] = " bulkmps=\0"
+    var l_sp2: [u8; 11] = "usb: step=\0"
+    var l_ok: [u8; 4] = " ok\0"
+    var l_fl: [u8; 8] = " failed\0"
+    var l_al: [u8; 10] = "usb: alt=\0"
+    var l_sc: [u8; 7] = " scan=\0"
+    var l_si: [u8; 8] = " setif=\0"
+    var p: u64 = at
+    if usb.ch_diag(state, usb.CK_PRESENT) == 0 {
+        return pfproc.w_str(state, p, (&l_ab[0]) as u64)
+    }
+    p = pfproc.w_str(state, p, (&l_id[0]) as u64)
+    p = pfproc.w_hexn(state, p, usb.ch_diag(state, usb.CK_VID), 4)
+    p = pfproc.w_ch(state, p, 58)
+    p = pfproc.w_hexn(state, p, usb.ch_diag(state, usb.CK_PID), 4)
+    p = pfproc.w_str(state, p, (&l_sp[0]) as u64)
+    p = pfproc.w_speed(state, p, usb.ch_diag(state, usb.CK_SPEED))
+    p = pfproc.w_str(state, p, (&l_rt[0]) as u64)
+    p = pfproc.w_hexn(state, p, usb.ch_diag(state, usb.CK_ROUTE), 5)
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_nc[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_NCFG))
+    p = pfproc.w_str(state, p, (&l_cf[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_CFG))
+    p = pfproc.w_str(state, p, (&l_st[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_SET))
+    p = pfproc.w_str(state, p, (&l_rc[0]) as u64)
+    p = pfproc.w_sdec(state, p, usb.ch_diag(state, usb.CK_RC))
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_if[0]) as u64)
+    p = pfproc.w_hexn(state, p, usb.ch_diag(state, usb.CK_CLASS), 2)
+    p = pfproc.w_ch(state, p, 47)
+    p = pfproc.w_hexn(state, p, usb.ch_diag(state, usb.CK_SUB), 2)
+    p = pfproc.w_ch(state, p, 47)
+    p = pfproc.w_hexn(state, p, usb.ch_diag(state, usb.CK_PROTO), 2)
+    p = pfproc.w_str(state, p, (&l_n[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_IFACE))
+    p = pfproc.w_nl(state, p)
+    let it: u64 = usb.ch_diag(state, usb.CK_INT)
+    p = pfproc.w_str(state, p, (&l_ep[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_INDCI))
+    p = pfproc.w_str(state, p, (&l_ou[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_OUTDCI))
+    p = pfproc.w_str(state, p, (&l_it[0]) as u64)
+    p = pfproc.w_num(state, p, it & 255)
+    p = pfproc.w_str(state, p, (&l_im[0]) as u64)
+    p = pfproc.w_num(state, p, (it >> 8) & 0xFFFF)
+    p = pfproc.w_str(state, p, (&l_iv[0]) as u64)
+    p = pfproc.w_num(state, p, (it >> 24) & 255)
+    p = pfproc.w_str(state, p, (&l_bm[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_BULKMPS))
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_sp2[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_STEP))
+    let res: u64 = usb.ch_diag(state, usb.CK_RESULT)
+    if res == 1 {
+        p = pfproc.w_str(state, p, (&l_ok[0]) as u64)
+    } else if res == 2 {
+        p = pfproc.w_str(state, p, (&l_fl[0]) as u64)
+    }
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_al[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_ALT))
+    p = pfproc.w_str(state, p, (&l_sc[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_ALTSCAN))
+    p = pfproc.w_str(state, p, (&l_si[0]) as u64)
+    p = pfproc.w_num(state, p, usb.ch_diag(state, usb.CK_SETIF))
+    return pfproc.w_nl(state, p)
+}
+
+fn w_usbnet_phy(state: u64, at: u64) -> u64 {
+    var l_ph: [u8; 11] = "phy: bmcr=\0"
+    var l_bs: [u8; 7] = " bmsr=\0"
+    var l_id: [u8; 5] = " id=\0"
+    var l_an: [u8; 7] = " anar=\0"
+    var l_lp: [u8; 6] = " lpa=\0"
+    var l_ae: [u8; 7] = " aner=\0"
+    var l_ks: [u8; 8] = " kicks=\0"
+    var l_kr: [u8; 9] = " kickrc=\0"
+    var l_lk: [u8; 13] = "link: state=\0"
+    var l_up: [u8; 3] = "up\0"
+    var l_dn: [u8; 5] = "down\0"
+    var l_uk: [u8; 8] = "unknown\0"
+    var l_cg: [u8; 6] = " chg=\0"
+    var l_md: [u8; 7] = " mode=\0"
+    var l_fw: [u8; 5] = " fw=\0"
+    var l_cu: [u8; 6] = " cfg=\0"
+    var p: u64 = at
+    if !usbnet.present_on(state, 0) || usbnet.mode_get(state) != 3 {
+        return p
+    }
+    p = pfproc.w_str(state, p, (&l_ph[0]) as u64)
+    p = pfproc.w_hexn(state, p, usbnet.ch_phy(state, 0), 4)
+    p = pfproc.w_str(state, p, (&l_bs[0]) as u64)
+    p = pfproc.w_hexn(state, p, usbnet.ch_bmsr(state), 4)
+    p = pfproc.w_str(state, p, (&l_id[0]) as u64)
+    p = pfproc.w_hexn(state, p, usbnet.ch_phy(state, 1), 8)
+    p = pfproc.w_str(state, p, (&l_an[0]) as u64)
+    p = pfproc.w_hexn(state, p, usbnet.ch_phy(state, 3), 4)
+    p = pfproc.w_str(state, p, (&l_lp[0]) as u64)
+    p = pfproc.w_hexn(state, p, usbnet.ch_phy(state, 4), 4)
+    p = pfproc.w_str(state, p, (&l_ae[0]) as u64)
+    p = pfproc.w_hexn(state, p, usbnet.ch_phy(state, 2), 4)
+    p = pfproc.w_str(state, p, (&l_ks[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.ch_phy(state, 5))
+    p = pfproc.w_str(state, p, (&l_kr[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.ch_phy(state, 6))
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_lk[0]) as u64)
+    let lk: u64 = usbnet.link_on(state, 0)
+    if lk == 1 {
+        p = pfproc.w_str(state, p, (&l_up[0]) as u64)
+    } else if lk == 2 {
+        p = pfproc.w_str(state, p, (&l_dn[0]) as u64)
+    } else {
+        p = pfproc.w_str(state, p, (&l_uk[0]) as u64)
+    }
+    p = pfproc.w_str(state, p, (&l_cg[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.ch_changes(state))
+    p = pfproc.w_str(state, p, (&l_md[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.mode_get(state))
+    p = pfproc.w_str(state, p, (&l_fw[0]) as u64)
+    p = pfproc.w_hexn(state, p, usbnet.ch_fw(state), 2)
+    p = pfproc.w_str(state, p, (&l_cu[0]) as u64)
+    p = pfproc.w_hexn(state, p, usbnet.ch_cfg(state), 8)
+    return pfproc.w_nl(state, p)
+}
+
+fn w_usbnet_intr(state: u64, at: u64) -> u64 {
+    var l_in: [u8; 12] = "intr: open=\0"
+    var l_ep: [u8; 5] = " ep=\0"
+    var l_n: [u8; 4] = " n=\0"
+    var l_ls: [u8; 9] = " last=0x\0"
+    var l_lk: [u8; 7] = " link=\0"
+    var l_up: [u8; 3] = "up\0"
+    var l_dn: [u8; 5] = "down\0"
+    var l_no: [u8; 5] = "none\0"
+    var l_er: [u8; 6] = " err=\0"
+    var l_ar: [u8; 7] = " arms=\0"
+    var p: u64 = at
+    if !usbnet.present_on(state, 0) || usbnet.mode_get(state) != 3 {
+        return p
+    }
+    var open: u64 = 0
+    if usbnet.ch_intr(state, 0) != 0 {
+        open = 1
+    }
+    p = pfproc.w_str(state, p, (&l_in[0]) as u64)
+    p = pfproc.w_num(state, p, open)
+    p = pfproc.w_str(state, p, (&l_ep[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.ch_intr(state, 0))
+    p = pfproc.w_str(state, p, (&l_n[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.ch_intr(state, 1))
+    p = pfproc.w_str(state, p, (&l_ls[0]) as u64)
+    p = pfproc.w_hexn(state, p, usbnet.ch_intr(state, 2), 2)
+    p = pfproc.w_str(state, p, (&l_lk[0]) as u64)
+    let il: u64 = usbnet.ch_intr(state, 3)
+    if il == 1 {
+        p = pfproc.w_str(state, p, (&l_up[0]) as u64)
+    } else if il == 2 {
+        p = pfproc.w_str(state, p, (&l_dn[0]) as u64)
+    } else {
+        p = pfproc.w_str(state, p, (&l_no[0]) as u64)
+    }
+    p = pfproc.w_str(state, p, (&l_er[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.ch_intr(state, 4))
+    p = pfproc.w_str(state, p, (&l_ar[0]) as u64)
+    p = pfproc.w_num(state, p, usbnet.ch_intr(state, 5))
+    return pfproc.w_nl(state, p)
+}
+
+fn w_usbnet_dhcp(state: u64, at: u64) -> u64 {
+    var l_dh: [u8; 13] = "dhcp: state=\0"
+    var l_tx: [u8; 5] = " tx=\0"
+    var l_rx: [u8; 5] = " rx=\0"
+    var l_tr: [u8; 6] = " try=\0"
+    var p: u64 = at
+    p = pfproc.w_str(state, p, (&l_dh[0]) as u64)
+    p = pfproc.w_num(state, p, inet.dhcp_get(0))
+    p = pfproc.w_str(state, p, (&l_tx[0]) as u64)
+    p = pfproc.w_num(state, p, inet.dhcp_get(1))
+    p = pfproc.w_str(state, p, (&l_rx[0]) as u64)
+    p = pfproc.w_num(state, p, inet.dhcp_get(2))
+    p = pfproc.w_str(state, p, (&l_tr[0]) as u64)
+    p = pfproc.w_num(state, p, inet.dhcp_get(3))
+    p = pfproc.w_nl(state, p)
+    return pfproc.w_dns_line(state, p)
+}
+
+fn w_usbnet_desc(state: u64, at: u64) -> u64 {
+    var l_db: [u8; 17] = "usb: dbg starts=\0"
+    var l_ps: [u8; 9] = " passes=\0"
+    var l_un: [u8; 7] = " unit=\0"
+    var l_ds: [u8; 8] = " descs=\0"
+    var l_rl: [u8; 11] = " rec=live\0\0"
+    var l_rs: [u8; 12] = " rec=stale\0\0"
+    var l_at: [u8; 18] = "usb: attach slot=\0"
+    var l_sp: [u8; 8] = " speed=\0"
+    var l_rt: [u8; 8] = " route=\0"
+    var l_po: [u8; 7] = " port=\0"
+    var l_hp: [u8; 10] = " hubport=\0"
+    var l_st: [u8; 15] = "usb: start in=\0"
+    var l_ou: [u8; 6] = " out=\0"
+    var l_in: [u8; 6] = " int=\0"
+    var l_mp: [u8; 6] = " mps=\0"
+    var l_if: [u8; 5] = " if=\0"
+    var l_al: [u8; 6] = " alt=\0"
+    var l_cf: [u8; 6] = " cfg=\0"
+    var l_rc: [u8; 6] = " rec=\0"
+    var l_d18: [u8; 12] = "usb: dev18=\0"
+    var l_ch: [u8; 14] = "usb: cfghdr c\0"
+    var l_tt: [u8; 8] = " total=\0"
+    var l_go: [u8; 6] = " got=\0"
+    var l_ni: [u8; 6] = " nif=\0"
+    var l_cv: [u8; 6] = " val=\0"
+    var l_nc: [u8; 7] = " ncfg=\0"
+    var l_r0: [u8; 11] = "usb: cfg0=\0"
+    var l_r1: [u8; 11] = "usb: cfg1=\0"
+    var l_ci: [u8; 8] = "usb: c\0\0"
+    var l_ii: [u8; 4] = " i\0\0"
+    var l_aa: [u8; 4] = " a\0\0"
+    var l_ne: [u8; 4] = " n\0\0"
+    var l_bb: [u8; 3] = "+b\0"
+    var p: u64 = at
+    if chdiag.get64(state, chdiag.F_STARTS) + chdiag.get64(state, chdiag.F_DESCS) + chdiag.get64(state, chdiag.F_PASSES) == 0 {
+        return p
+    }
+    p = pfproc.w_str(state, p, (&l_db[0]) as u64)
+    p = pfproc.w_num(state, p, chdiag.get64(state, chdiag.F_STARTS))
+    p = pfproc.w_str(state, p, (&l_ps[0]) as u64)
+    p = pfproc.w_num(state, p, chdiag.get64(state, chdiag.F_PASSES))
+    p = pfproc.w_str(state, p, (&l_un[0]) as u64)
+    p = pfproc.w_num(state, p, chdiag.get64(state, chdiag.F_UNIT))
+    p = pfproc.w_str(state, p, (&l_ds[0]) as u64)
+    p = pfproc.w_num(state, p, chdiag.get64(state, chdiag.F_DESCS))
+    if usb.ch_diag(state, usb.CK_LIVE) == 1 {
+        p = pfproc.w_str(state, p, (&l_rl[0]) as u64)
+    } else {
+        p = pfproc.w_str(state, p, (&l_rs[0]) as u64)
+    }
+    p = pfproc.w_nl(state, p)
+    let di: u64 = chdiag.get64(state, chdiag.F_DEVINFO)
+    p = pfproc.w_str(state, p, (&l_at[0]) as u64)
+    p = pfproc.w_num(state, p, di & 255)
+    p = pfproc.w_str(state, p, (&l_sp[0]) as u64)
+    p = pfproc.w_num(state, p, (di >> 8) & 255)
+    p = pfproc.w_str(state, p, (&l_rt[0]) as u64)
+    p = pfproc.w_hexn(state, p, (di >> 16) & 0xFFFFF, 5)
+    p = pfproc.w_str(state, p, (&l_po[0]) as u64)
+    p = pfproc.w_num(state, p, (di >> 40) & 255)
+    p = pfproc.w_str(state, p, (&l_hp[0]) as u64)
+    p = pfproc.w_num(state, p, (di >> 48) & 255)
+    p = pfproc.w_nl(state, p)
+    let sv: u64 = chdiag.get64(state, chdiag.F_START)
+    let rv: u64 = chdiag.get64(state, chdiag.F_REC)
+    p = pfproc.w_str(state, p, (&l_st[0]) as u64)
+    p = pfproc.w_num(state, p, sv & 255)
+    p = pfproc.w_str(state, p, (&l_ou[0]) as u64)
+    p = pfproc.w_num(state, p, (sv >> 8) & 255)
+    p = pfproc.w_str(state, p, (&l_in[0]) as u64)
+    p = pfproc.w_num(state, p, (sv >> 16) & 255)
+    p = pfproc.w_str(state, p, (&l_mp[0]) as u64)
+    p = pfproc.w_num(state, p, (sv >> 24) & 0xFFFF)
+    p = pfproc.w_str(state, p, (&l_if[0]) as u64)
+    p = pfproc.w_num(state, p, (sv >> 40) & 255)
+    p = pfproc.w_str(state, p, (&l_al[0]) as u64)
+    p = pfproc.w_num(state, p, (sv >> 48) & 255)
+    p = pfproc.w_str(state, p, (&l_cf[0]) as u64)
+    p = pfproc.w_num(state, p, (sv >> 56) & 255)
+    p = pfproc.w_str(state, p, (&l_rc[0]) as u64)
+    p = pfproc.w_num(state, p, rv & 255)
+    p = pfproc.w_ch(state, p, 47)
+    p = pfproc.w_num(state, p, (rv >> 8) & 255)
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_d18[0]) as u64)
+    p = pfproc.w_hexbytes(state, p, 0, 0, 18)
+    p = pfproc.w_nl(state, p)
+    let ci: u64 = chdiag.get64(state, chdiag.F_CFGINFO)
+    p = pfproc.w_str(state, p, (&l_ch[0]) as u64)
+    p = pfproc.w_num(state, p, ci & 255)
+    p = pfproc.w_str(state, p, (&l_tt[0]) as u64)
+    p = pfproc.w_num(state, p, (ci >> 8) & 0xFFFF)
+    p = pfproc.w_str(state, p, (&l_go[0]) as u64)
+    p = pfproc.w_hexn(state, p, (ci >> 24) & 0xFFFF, 4)
+    p = pfproc.w_str(state, p, (&l_ni[0]) as u64)
+    p = pfproc.w_num(state, p, (ci >> 40) & 255)
+    p = pfproc.w_str(state, p, (&l_cv[0]) as u64)
+    p = pfproc.w_num(state, p, (ci >> 48) & 255)
+    p = pfproc.w_str(state, p, (&l_nc[0]) as u64)
+    p = pfproc.w_num(state, p, chdiag.get64(state, chdiag.F_NCFG))
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_r0[0]) as u64)
+    p = pfproc.w_hexbytes(state, p, 1, 0, 32)
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_r1[0]) as u64)
+    p = pfproc.w_hexbytes(state, p, 1, 32, 32)
+    p = pfproc.w_nl(state, p)
+    let n: u64 = chdiag.entry_count(state)
+    var open: bool = false
+    var e: u64 = 0
+    while e < n {
+        if chdiag.entry_byte(state, e, 0) == 1 {
+            if open {
+                p = pfproc.w_nl(state, p)
+            }
+            p = pfproc.w_str(state, p, (&l_ci[0]) as u64)
+            p = pfproc.w_num(state, p, chdiag.entry_byte(state, e, 1))
+            p = pfproc.w_str(state, p, (&l_ii[0]) as u64)
+            p = pfproc.w_num(state, p, chdiag.entry_byte(state, e, 2))
+            p = pfproc.w_str(state, p, (&l_aa[0]) as u64)
+            p = pfproc.w_num(state, p, chdiag.entry_byte(state, e, 3))
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_hexn(state, p, chdiag.entry_byte(state, e, 4), 2)
+            p = pfproc.w_ch(state, p, 47)
+            p = pfproc.w_hexn(state, p, chdiag.entry_byte(state, e, 5), 2)
+            p = pfproc.w_ch(state, p, 47)
+            p = pfproc.w_hexn(state, p, chdiag.entry_byte(state, e, 6), 2)
+            p = pfproc.w_str(state, p, (&l_ne[0]) as u64)
+            p = pfproc.w_num(state, p, chdiag.entry_byte(state, e, 7))
+            p = pfproc.w_ch(state, p, 58)
+            open = true
+        } else {
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_hexn(state, p, chdiag.entry_byte(state, e, 4), 2)
+            p = pfproc.w_ch(state, p, 47)
+            p = pfproc.w_hexn(state, p, chdiag.entry_byte(state, e, 5), 2)
+            p = pfproc.w_ch(state, p, 47)
+            p = pfproc.w_hexn(state, p, chdiag.entry_byte(state, e, 6) | (chdiag.entry_byte(state, e, 7) << 8), 4)
+            p = pfproc.w_ch(state, p, 47)
+            p = pfproc.w_num(state, p, chdiag.entry_byte(state, e, 8))
+            if chdiag.entry_byte(state, e, 9) != 255 {
+                p = pfproc.w_str(state, p, (&l_bb[0]) as u64)
+                p = pfproc.w_num(state, p, chdiag.entry_byte(state, e, 9))
+            }
+        }
+        e = e + 1
+    }
+    if open {
+        p = pfproc.w_nl(state, p)
+    }
+    return p
+}
+
+fn make_usbnet(state: u64) -> u64 {
+    var p: u64 = w_usbnet_usb(state, 0)
+    p = w_usbnet_desc(state, p)
+    p = w_usbnet_phy(state, p)
+    p = w_usbnet_intr(state, p)
+    p = w_usbnet_lines(state, p)
+    return w_usbnet_dhcp(state, p)
+}
+
+fn w_rfkill(state: u64, at: u64, gp: u64) -> u64 {
+    var l_rk: [u8; 13] = "rfkill: hw=\0\0"
+    var l_on: [u8; 3] = "on\0"
+    var l_off: [u8; 4] = "off\0"
+    var l_gp: [u8; 5] = " gp=\0"
+    var p: u64 = pfproc.w_str(state, at, (&l_rk[0]) as u64)
+    if (gp & 0x08000000) == 0 { p = pfproc.w_str(state, p, (&l_on[0]) as u64) } else { p = pfproc.w_str(state, p, (&l_off[0]) as u64) }
+    p = pfproc.w_str(state, p, (&l_gp[0]) as u64)
+    p = pfproc.w_hexn(state, p, gp, 8)
+    var l_rd: [u8; 8] = " radio=\0"
+    var l_en: [u8; 8] = "enabled\0"
+    var l_bl: [u8; 8] = "blocked\0"
+    var l_ch: [u8; 10] = " changes=\0"
+    var l_rt: [u8; 10] = " retries=\0"
+    p = pfproc.w_str(state, p, (&l_rd[0]) as u64)
+    if (gp & 0x08000000) == 0 { p = pfproc.w_str(state, p, (&l_bl[0]) as u64) } else { p = pfproc.w_str(state, p, (&l_en[0]) as u64) }
+    p = pfproc.w_str(state, p, (&l_ch[0]) as u64)
+    p = pfproc.w_num(state, p, wlan_rfkill.changes())
+    p = pfproc.w_str(state, p, (&l_rt[0]) as u64)
+    p = pfproc.w_num(state, p, wlan_rfkill.retries())
+    return pfproc.w_nl(state, p)
+}
+
+fn make_wlan_devices(state: u64) -> u64 {
+    var l_none: [u8; 5] = "none\0"
+    var l_hw: [u8; 12] = " hw_rev=0x\0\0"
+    var l_rf: [u8; 10] = " rf_id=0x\0"
+    var l_mac: [u8; 6] = " mac=\0"
+    var l_rfn: [u8; 5] = " rf=\0"
+    var l_err: [u8; 6] = " err=\0"
+    var l_dead: [u8; 5] = "dead\0"
+    var l_bar: [u8; 4] = "bar\0"
+    var l_oth: [u8; 6] = "other\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    var p: u64 = 0
+    let n: u64 = iwl.count_targets(state)
+    if n == 0 {
+        p = pfproc.w_str(state, p, (&l_none[0]) as u64)
+        p = pfproc.w_nl(state, p)
+        if iwl.bed_gp_known() { p = w_rfkill(state, p, iwl.bed_gp()) }
+        if !iwl.diag_active() { return p }
+    }
+    var k: u64 = 0
+    while k < n {
+        let i: u64 = iwl.target_at(state, k)
+        let bdf: u64 = pci.get(state, i, pci.E_BDF)
+        p = pfproc.w_hexn(state, p, pci.bdf_bus(bdf), 2)
+        p = pfproc.w_ch(state, p, 58)
+        p = pfproc.w_hexn(state, p, pci.bdf_dev(bdf), 2)
+        p = pfproc.w_ch(state, p, 46)
+        p = pfproc.w_hexn(state, p, pci.bdf_fn(bdf), 1)
+        p = pfproc.w_ch(state, p, 32)
+        p = pfproc.w_hexn(state, p, pci.get(state, i, pci.E_VENDOR), 4)
+        p = pfproc.w_ch(state, p, 58)
+        p = pfproc.w_hexn(state, p, pci.get(state, i, pci.E_DEVICE), 4)
+        var pr: iwl_probe.Probe = iwl_probe.probe_new()
+        let r: i64 = iwl.probe_at(state, i, &pr, false)
+        if r != 0 {
+            p = pfproc.w_str(state, p, (&l_err[0]) as u64)
+            if r == iwl_probe.E_DEAD {
+                p = pfproc.w_str(state, p, (&l_dead[0]) as u64)
+            } else if r == iwl_probe.E_BAR {
+                p = pfproc.w_str(state, p, (&l_bar[0]) as u64)
+            } else {
+                p = pfproc.w_str(state, p, (&l_oth[0]) as u64)
+            }
+        } else {
+            p = pfproc.w_str(state, p, (&l_hw[0]) as u64)
+            p = pfproc.w_hexn(state, p, pr.hw_rev, 8)
+            p = pfproc.w_str(state, p, (&l_rf[0]) as u64)
+            p = pfproc.w_hexn(state, p, pr.rf_id, 8)
+            p = pfproc.w_str(state, p, (&l_mac[0]) as u64)
+            let _a: usize = iwl_probe.rev_name_get(pr.hw_rev, (&nm[0]) as u64)
+            p = pfproc.w_str(state, p, (&nm[0]) as u64)
+            p = pfproc.w_str(state, p, (&l_rfn[0]) as u64)
+            let _b: usize = iwl_probe.rf_name_get(pr.rf_id, (&nm[0]) as u64)
+            p = pfproc.w_str(state, p, (&nm[0]) as u64)
+        }
+        p = pfproc.w_nl(state, p)
+        if r == 0 { p = w_rfkill(state, p, pr.gp_cntrl) }
+        k = k + 1
+    }
+    var dg: [u8; 3400] = [0 as u8; 3400]
+    let dn: u64 = iwl.diag_text((&dg[0]) as u64, 3400)
+    var di: u64 = 0
+    while di < dn {
+        p = pfproc.w_ch(state, p, dg[di as usize] as u64)
+        di = di + 1
+    }
+    return p
+}
+
+fn make_wlanpoll(state: u64) -> u64 {
+    var dg: [u8; 3400] = [0 as u8; 3400]
+    let dn: u64 = iwl.diag_more_text((&dg[0]) as u64, 3400)
+    var p: u64 = 0
+    var di: u64 = 0
+    while di < dn {
+        p = pfproc.w_ch(state, p, dg[di as usize] as u64)
+        di = di + 1
+    }
+    return p
+}
+
+fn w_d2(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = pfproc.w_ch(state, at, 48 + ((v / 10) % 10))
+    return pfproc.w_ch(state, p, 48 + (v % 10))
+}
+
+fn w_stamp(state: u64, at: u64, secs: u64) -> u64 {
+    var f: [u64; 6] = [0 as u64; 6]
+    time.split(secs, (&f[0 as usize]) as u64)
+    var p: u64 = pfproc.w_num(state, at, f[0 as usize])
+    p = pfproc.w_ch(state, p, 45)
+    p = w_d2(state, p, f[1 as usize])
+    p = pfproc.w_ch(state, p, 45)
+    p = w_d2(state, p, f[2 as usize])
+    p = pfproc.w_ch(state, p, 32)
+    p = w_d2(state, p, f[3 as usize])
+    p = pfproc.w_ch(state, p, 58)
+    p = w_d2(state, p, f[4 as usize])
+    p = pfproc.w_ch(state, p, 58)
+    return w_d2(state, p, f[5 as usize])
+}
+
+fn make_brand_line(state: u64, at: u64, key: u64, value: u64) -> u64 {
+    var p: u64 = pfproc.w_str(state, at, key)
+    p = pfproc.w_str(state, p, value)
+    return pfproc.w_nl(state, p)
+}
+
+fn make_brand(state: u64) -> u64 {
+    var k_product: [u8; 9] = "product=\0"
+    var k_slug: [u8; 6] = "slug=\0"
+    var k_vendor: [u8; 8] = "vendor=\0"
+    var k_web: [u8; 5] = "web=\0"
+    var k_core: [u8; 6] = "core=\0"
+    var k_feed: [u8; 6] = "feed=\0"
+    var p: u64 = make_brand_line(state, 0, (&k_product[0]) as u64, brand.product())
+    p = make_brand_line(state, p, (&k_slug[0]) as u64, brand.slug())
+    p = make_brand_line(state, p, (&k_vendor[0]) as u64, brand.vendor())
+    p = make_brand_line(state, p, (&k_web[0]) as u64, brand.web())
+    p = make_brand_line(state, p, (&k_core[0]) as u64, brand.core())
+    return make_brand_line(state, p, (&k_feed[0]) as u64, brand.feed())
+}
+
+fn make_battery(state: u64) -> u64 {
+    var l_pres: [u8; 9] = "present=\0"
+    var l_valid: [u8; 8] = " valid=\0"
+    var l_pct: [u8; 10] = " percent=\0"
+    var l_st: [u8; 8] = " state=\0"
+    var l_full: [u8; 7] = " full=\0"
+    var l_rem: [u8; 6] = " rem=\0"
+    var l_bif: [u8; 6] = " bif=\0"
+    var l_bst: [u8; 6] = " bst=\0"
+    var p: u64 = pfproc.w_str(state, 0, (&l_pres[0]) as u64)
+    var have: u64 = 0
+    if acpiev.batt_present(state) {
+        have = 1
+    }
+    p = pfproc.w_num(state, p, have)
+    p = pfproc.w_str(state, p, (&l_valid[0]) as u64)
+    var ok: u64 = 0
+    if acpiev.batt_valid(state) {
+        ok = 1
+    }
+    p = pfproc.w_num(state, p, ok)
+    p = pfproc.w_str(state, p, (&l_pct[0]) as u64)
+    p = pfproc.w_num(state, p, acpiev.batt_percent(state))
+    p = pfproc.w_str(state, p, (&l_st[0]) as u64)
+    p = pfproc.w_num(state, p, acpiev.batt_state(state))
+    p = pfproc.w_str(state, p, (&l_full[0]) as u64)
+    p = pfproc.w_num(state, p, acpiev.batt_raw_full(state))
+    p = pfproc.w_str(state, p, (&l_rem[0]) as u64)
+    p = pfproc.w_num(state, p, acpiev.batt_raw_rem(state))
+    p = pfproc.w_str(state, p, (&l_bif[0]) as u64)
+    p = pfproc.w_num(state, p, acpiev.batt_bif_status(state))
+    p = pfproc.w_str(state, p, (&l_bst[0]) as u64)
+    p = pfproc.w_num(state, p, acpiev.batt_bst_status(state))
+    p = pfproc.w_nl(state, p)
+    return p
+}
+
+fn clock_state_lines(state: u64, at: u64) -> u64 {
+    var l_state: [u8; 13] = "clock state=\0"
+    var l_floor: [u8; 8] = " floor=\0"
+    var l_slew: [u8; 10] = " slew_ns=\0"
+    var n_unset: [u8; 6] = "unset\0"
+    var n_rtc: [u8; 4] = "rtc\0"
+    var n_set: [u8; 4] = "set\0"
+    var p: u64 = pfproc.w_str(state, at, (&l_state[0]) as u64)
+    let cs: u64 = clockstate.state_of(state)
+    if cs == clockstate.CS_SET {
+        p = pfproc.w_str(state, p, (&n_set[0]) as u64)
+    } else if cs == clockstate.CS_FROM_RTC {
+        p = pfproc.w_str(state, p, (&n_rtc[0]) as u64)
+    } else {
+        p = pfproc.w_str(state, p, (&n_unset[0]) as u64)
+    }
+    p = pfproc.w_str(state, p, (&l_floor[0]) as u64)
+    p = w_stamp(state, p, bounds.FLOOR_UTC)
+    p = pfproc.w_str(state, p, (&l_slew[0]) as u64)
+    let left: u64 = time.slew_remaining(state)
+    if left > 0x7FFFFFFFFFFFFFFF {
+        p = pfproc.w_ch(state, p, 45)
+        p = pfproc.w_num(state, p, 0 -% left)
+    } else {
+        p = pfproc.w_num(state, p, left)
+    }
+    return pfproc.w_ch(state, p, 10)
+}
+
+fn make_clock(state: u64) -> u64 {
+    var m_loc: [u8; 6] = "local\0"
+    var m_utc: [u8; 4] = "utc\0"
+    var f_non: [u8; 5] = "none\0"
+    var f_std: [u8; 4] = "std\0"
+    var f_sum: [u8; 7] = "summer\0"
+    var f_utc: [u8; 4] = "utc\0"
+    var l_rtc: [u8; 5] = "rtc \0"
+    var l_mode: [u8; 7] = " mode=\0"
+    var l_frame: [u8; 8] = " frame=\0"
+    var l_rule: [u8; 7] = " rule=\0"
+    var l_base: [u8; 7] = " base=\0"
+    var l_dst: [u8; 6] = " dst=\0"
+    var l_utc: [u8; 5] = "utc \0"
+    var l_local: [u8; 8] = " local \0"
+    var l_off: [u8; 6] = " off=\0"
+    var l_conv: [u8; 7] = " conv=\0"
+    var l_moved: [u8; 8] = " moved=\0"
+    var l_alt: [u8; 24] = "alt-summer-frame local \0"
+    var p: u64 = pfproc.w_str(state, 0, (&l_rtc[0]) as u64)
+    let raw: u64 = time.rtc_raw(state)
+    p = w_stamp(state, p, raw)
+    p = pfproc.w_str(state, p, (&l_mode[0]) as u64)
+    var is_utc: bool = time.rtc_utc(state) != 0
+    if is_utc {
+        p = pfproc.w_str(state, p, (&m_utc[0]) as u64)
+    } else {
+        p = pfproc.w_str(state, p, (&m_loc[0]) as u64)
+    }
+    p = pfproc.w_str(state, p, (&l_frame[0]) as u64)
+    let fr: u64 = time.rtc_frame_get(state)
+    if fr == 1 {
+        p = pfproc.w_str(state, p, (&f_std[0]) as u64)
+    } else if fr == 2 {
+        p = pfproc.w_str(state, p, (&f_sum[0]) as u64)
+    } else if fr == 3 {
+        p = pfproc.w_str(state, p, (&f_utc[0]) as u64)
+    } else {
+        p = pfproc.w_str(state, p, (&f_non[0]) as u64)
+    }
+    p = pfproc.w_str(state, p, (&l_rule[0]) as u64)
+    let rw: u64 = time.tz_rule_get(state)
+    let rule: u64 = rw & 0xFF
+    p = pfproc.w_str(state, p, rules.rule_name(rule))
+    p = pfproc.w_ch(state, p, 40)
+    p = pfproc.w_num(state, p, rule)
+    p = pfproc.w_ch(state, p, 41)
+    p = pfproc.w_str(state, p, (&l_base[0]) as u64)
+    if (rw >> 8) != 0 {
+        p = pfproc.w_ch(state, p, 45)
+    } else {
+        p = pfproc.w_ch(state, p, 43)
+    }
+    p = pfproc.w_num(state, p, time.tz_base(state))
+    let utc: u64 = time.now_sec(state)
+    p = pfproc.w_str(state, p, (&l_dst[0]) as u64)
+    if time.eu_dst(utc) {
+        p = pfproc.w_ch(state, p, 49)
+    } else {
+        p = pfproc.w_ch(state, p, 48)
+    }
+    p = pfproc.w_ch(state, p, 10)
+    p = pfproc.w_str(state, p, (&l_utc[0]) as u64)
+    p = w_stamp(state, p, utc)
+    p = pfproc.w_str(state, p, (&l_local[0]) as u64)
+    p = w_stamp(state, p, time.now_local(state))
+    p = pfproc.w_str(state, p, (&l_off[0]) as u64)
+    if (rw >> 8) != 0 {
+        p = pfproc.w_ch(state, p, 45)
+    } else {
+        p = pfproc.w_ch(state, p, 43)
+    }
+    p = pfproc.w_num(state, p, time.tz_min(state))
+    p = pfproc.w_str(state, p, (&l_conv[0]) as u64)
+    p = pfproc.w_num(state, p, time.tz_done_get(state))
+    p = pfproc.w_str(state, p, (&l_moved[0]) as u64)
+    p = pfproc.w_num(state, p, time.clock_moved_get(state))
+    p = pfproc.w_ch(state, p, 10)
+    if !is_utc && rule != 0 && fr == 1 && time.eu_dst(utc -% 2592000) {
+        p = pfproc.w_str(state, p, (&l_alt[0]) as u64)
+        p = w_stamp(state, p, time.now_local(state) -% 3600)
+        p = pfproc.w_ch(state, p, 10)
+    }
+    p = clock_state_lines(state, p)
+    var l_sync: [u8; 8] = "sync n=\0"
+    var l_last: [u8; 11] = " last utc \0"
+    var l_delta: [u8; 8] = " delta=\0"
+    var l_rtcw: [u8; 10] = " rtc_set=\0"
+    var l_none: [u8; 10] = "sync none\0"
+    let sn: u64 = time.sync_get(state, 0)
+    if sn == 0 {
+        p = pfproc.w_str(state, p, (&l_none[0]) as u64)
+        return pfproc.w_ch(state, p, 10)
+    }
+    p = pfproc.w_str(state, p, (&l_sync[0]) as u64)
+    p = pfproc.w_num(state, p, sn)
+    p = pfproc.w_str(state, p, (&l_last[0]) as u64)
+    p = w_stamp(state, p, time.sync_get(state, 1))
+    p = pfproc.w_str(state, p, (&l_delta[0]) as u64)
+    let dl: u64 = time.sync_get(state, 2)
+    if dl >= 0x8000000000000000 {
+        p = pfproc.w_ch(state, p, 45)
+        p = pfproc.w_num(state, p, 0 -% dl)
+    } else {
+        p = pfproc.w_ch(state, p, 43)
+        p = pfproc.w_num(state, p, dl)
+    }
+    p = pfproc.w_str(state, p, (&l_rtcw[0]) as u64)
+    p = pfproc.w_num(state, p, time.sync_get(state, 3))
+    return pfproc.w_ch(state, p, 10)
+}
+
+fn make_wlanirq(state: u64) -> u64 {
+    var dg: [u8; 3400] = [0 as u8; 3400]
+    let dn: u64 = iwl.diag_irq_text((&dg[0]) as u64, 3400)
+    var p: u64 = 0
+    var di: u64 = 0
+    while di < dn {
+        p = pfproc.w_ch(state, p, dg[di as usize] as u64)
+        di = di + 1
+    }
+    return p
+}
+
+fn w_ip(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = pfproc.w_num(state, at, (v >> 24) & 255)
+    p = pfproc.w_ch(state, p, 46)
+    p = pfproc.w_num(state, p, (v >> 16) & 255)
+    p = pfproc.w_ch(state, p, 46)
+    p = pfproc.w_num(state, p, (v >> 8) & 255)
+    p = pfproc.w_ch(state, p, 46)
+    return pfproc.w_num(state, p, v & 255)
+}
+
+fn make_wlan(state: u64) -> u64 {
+    var l_wait: [u8; 25] = "wlan: waiting for driver\0"
+    var l_auto: [u8; 6] = "auto=\0"
+    var l_rc: [u8; 5] = " rc=\0"
+    var l_tr: [u8; 8] = " tries=\0"
+    var l_drv: [u8; 9] = " driver=\0"
+    var l_bound: [u8; 6] = "bound\0"
+    var l_waiting: [u8; 8] = "waiting\0"
+    var l_radio: [u8; 11] = " radio=off\0"
+    var l_link: [u8; 13] = "link losses=\0"
+    var l_recon: [u8; 13] = " reconnects=\0"
+    var l_ip: [u8; 4] = "ip=\0"
+    var l_mask: [u8; 7] = " mask=\0"
+    var l_gw: [u8; 5] = " gw=\0"
+    var l_scan: [u8; 11] = "scan: seq=\0"
+    var l_nets: [u8; 7] = " nets=\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    var p: u64 = make_wlan_devices(state)
+    if !wlan_auto.driver_ready() {
+        p = pfproc.w_str(state, p, (&l_wait[0]) as u64)
+        p = pfproc.w_nl(state, p)
+    }
+    let _n: usize = wlan_auto.name_copy((&nm[0]) as u64)
+    p = pfproc.w_str(state, p, (&l_auto[0]) as u64)
+    p = pfproc.w_str(state, p, (&nm[0]) as u64)
+    p = pfproc.w_str(state, p, (&l_rc[0]) as u64)
+    let rc: i64 = wlan_auto.rc_get()
+    if rc < 0 {
+        p = pfproc.w_ch(state, p, 45)
+        p = pfproc.w_num(state, p, (0 - rc) as u64)
+    } else {
+        p = pfproc.w_num(state, p, rc as u64)
+    }
+    p = pfproc.w_str(state, p, (&l_tr[0]) as u64)
+    p = pfproc.w_num(state, p, wlan_auto.tries_get())
+    p = pfproc.w_str(state, p, (&l_drv[0]) as u64)
+    if wlan_auto.driver_ready() {
+        p = pfproc.w_str(state, p, (&l_bound[0]) as u64)
+    } else {
+        p = pfproc.w_str(state, p, (&l_waiting[0]) as u64)
+    }
+    if wlan_auto.radio_off() {
+        p = pfproc.w_str(state, p, (&l_radio[0]) as u64)
+    }
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_link[0]) as u64)
+    p = pfproc.w_num(state, p, wlan_auto.losses_get())
+    p = pfproc.w_str(state, p, (&l_recon[0]) as u64)
+    p = pfproc.w_num(state, p, wlan_auto.reconnects_get())
+    p = pfproc.w_nl(state, p)
+    if wlan_auto.driver_ready() {
+        p = pfproc.w_str(state, p, (&l_scan[0]) as u64)
+        p = pfproc.w_num(state, p, wlan_auto.scan_seq_get())
+        p = pfproc.w_str(state, p, (&l_rc[0]) as u64)
+        let src: i64 = wlan_auto.scan_rc_get()
+        if src < 0 {
+            p = pfproc.w_ch(state, p, 45)
+            p = pfproc.w_num(state, p, (0 - src) as u64)
+        } else {
+            p = pfproc.w_num(state, p, src as u64)
+        }
+        p = pfproc.w_str(state, p, (&l_nets[0]) as u64)
+        p = pfproc.w_num(state, p, wlan_auto.scan_count())
+        p = pfproc.w_nl(state, p)
+        var db: [u8; 620] = [0 as u8; 620]
+        let dn: u64 = wlan_auto.diag_text((&db[0]) as u64, 610)
+        var di: u64 = 0
+        while di < dn {
+            p = pfproc.w_ch(state, p, db[di as usize] as u64)
+            di = di + 1
+        }
+    }
+    if wlan_auto.scan_count() != 0 {
+        var sb: [u8; 1100] = [0 as u8; 1100]
+        let sn: u64 = wlan_auto.scan_text((&sb[0]) as u64, 1080)
+        var si: u64 = 0
+        while si < sn {
+            p = pfproc.w_ch(state, p, sb[si as usize] as u64)
+            si = si + 1
+        }
+    }
+    if wlan_auto.lease_ip() != 0 {
+        p = pfproc.w_str(state, p, (&l_ip[0]) as u64)
+        p = w_ip(state, p, wlan_auto.lease_ip())
+        p = pfproc.w_str(state, p, (&l_mask[0]) as u64)
+        p = w_ip(state, p, wlan_auto.lease_mask())
+        p = pfproc.w_str(state, p, (&l_gw[0]) as u64)
+        p = w_ip(state, p, wlan_auto.lease_gateway())
+        p = pfproc.w_nl(state, p)
+    }
+    return p
+}
+
+fn make_safe(state: u64) -> u64 {
+    var l_s: [u8; 6] = "safe=\0"
+    var l_f: [u8; 7] = "fails=\0"
+    var l_p: [u8; 7] = "phase=\0"
+    var l_b: [u8; 10] = "fallback=\0"
+    var p: u64 = pfproc.w_str(state, 0, (&l_s[0]) as u64)
+    if safe.is_safe() {
+        p = pfproc.w_num(state, p, 1)
+    } else {
+        p = pfproc.w_num(state, p, 0)
+    }
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_f[0]) as u64)
+    p = pfproc.w_num(state, p, safe.fails())
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_p[0]) as u64)
+    p = pfproc.w_num(state, p, safe.phase_now())
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_b[0]) as u64)
+    if safe.fell_back() {
+        p = pfproc.w_num(state, p, 1)
+    } else {
+        p = pfproc.w_num(state, p, 0)
+    }
+    p = pfproc.w_nl(state, p)
+    return p
+}
+
+fn make_odb(state: u64) -> u64 {
+    var l_en: [u8; 5] = "odb=\0"
+    var l_ov: [u8; 13] = "rx_overruns=\0"
+    var p: u64 = pfproc.w_str(state, 0, (&l_en[0]) as u64)
+    if kstate.mode_on(state, kstate.M_ODB) {
+        p = pfproc.w_num(state, p, 1)
+    } else {
+        p = pfproc.w_num(state, p, 0)
+    }
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_ov[0]) as u64)
+    p = pfproc.w_num(state, p, odbuart.overruns())
+    p = pfproc.w_nl(state, p)
+    return p
+}
+
+fn bench_phase(state: u64, p0: u64, name: u64, i: u64, at: u64) -> u64 {
+    let khz: u64 = kstate.get(state, kstate.TIME_KHZ)
+    let t: u64 = kstate.get(state, kstate.BM_BASE + i * 8)
+    if t == 0 || khz == 0 || t < p0 {
+        return at
+    }
+    var l_boot: [u8; 6] = "boot.\0"
+    var p: u64 = pfproc.w_str(state, at, (&l_boot[0]) as u64)
+    p = pfproc.w_str(state, p, name)
+    p = pfproc.w_ch(state, p, 32)
+    p = pfproc.w_num(state, p, (t - p0) / khz)
+    return pfproc.w_nl(state, p)
+}
+
+fn make_bench(state: u64) -> u64 {
+    var n_clock: [u8; 6] = "clock\0"
+    var n_irq: [u8; 4] = "irq\0"
+    var n_gfx: [u8; 4] = "gfx\0"
+    var n_sched: [u8; 6] = "sched\0"
+    var n_progs: [u8; 6] = "progs\0"
+    var n_init: [u8; 5] = "init\0"
+    var l_kend: [u8; 12] = "kernel.end \0"
+    var l_hb: [u8; 12] = "heap.bytes \0"
+    var l_hn: [u8; 13] = "heap.blocks \0"
+    var l_hu: [u8; 18] = "heap.used_blocks \0"
+    var l_tr: [u8; 11] = "irq.traps \0"
+    var l_khz: [u8; 9] = "tsc.khz \0"
+    let p0: u64 = kstate.get(state, kstate.BM_BASE)
+    var p: u64 = 0
+    p = bench_phase(state, p0, (&n_clock[0]) as u64, 1, p)
+    p = bench_phase(state, p0, (&n_irq[0]) as u64, 2, p)
+    p = bench_phase(state, p0, (&n_gfx[0]) as u64, 3, p)
+    p = bench_phase(state, p0, (&n_sched[0]) as u64, 4, p)
+    p = bench_phase(state, p0, (&n_progs[0]) as u64, 5, p)
+    p = bench_phase(state, p0, (&n_init[0]) as u64, 6, p)
+    p = pfproc.w_str(state, p, (&l_kend[0]) as u64)
+    p = pfproc.w_num(state, p, kstate.get(state, kstate.KERNEL_END))
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_hb[0]) as u64)
+    p = pfproc.w_num(state, p, kstate.get(state, kstate.HEAP_END) - kstate.get(state, kstate.HEAP_BASE))
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_hn[0]) as u64)
+    p = pfproc.w_num(state, p, mem.heap_blocks(state, false))
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_hu[0]) as u64)
+    p = pfproc.w_num(state, p, mem.heap_blocks(state, true))
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_tr[0]) as u64)
+    p = pfproc.w_num(state, p, kstate.get(state, kstate.TRAPS))
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_khz[0]) as u64)
+    p = pfproc.w_num(state, p, kstate.get(state, kstate.TIME_KHZ))
+    p = pfproc.w_nl(state, p)
+    return p
+}
+
+const PG_CHECKS: u64 = 0
+
+const PG_BAD: u64 = 1
+
+const PG_UNSTABLE: u64 = 2
+
+const PG_PENDING: u64 = 3
+
+const PG_SKIPPED: u64 = 4
+
+const PG_PX: u64 = 5
+
+const PG_CARD_CHECKS: u64 = 6
+
+const PG_CARD_BAD: u64 = 7
+
+const PG_X0: u64 = 8
+
+const PG_Y0: u64 = 9
+
+const PG_X1: u64 = 10
+
+const PG_Y1: u64 = 11
+
+const PG_WIN: u64 = 12
+
+const PG_US: u64 = 13
+
+const PG_MODE: u64 = 14
+
+const PG_RENDERS: u64 = 15
+
+fn frames_line(state: u64, p0: u64, i: u64, suffix: u64, v: u64) -> u64 {
+    var l_win: [u8; 5] = "win.\0"
+    var p: u64 = pfproc.w_str(state, p0, (&l_win[0]) as u64)
+    p = pfproc.w_num(state, p, i)
+    p = pfproc.w_str(state, p, suffix)
+    p = pfproc.w_num(state, p, v)
+    return pfproc.w_nl(state, p)
+}
+
+fn kvn(state: u64, p0: u64, label: u64, v: u64) -> u64 {
+    var p: u64 = pfproc.w_str(state, p0, label)
+    p = pfproc.w_num(state, p, v)
+    return pfproc.w_nl(state, p)
+}
+
+fn fbperf_lines(state: u64, p0: u64) -> u64 {
+    var k_cm: [u8; 15] = "fb_cache_mode \0"
+    var k_pw: [u8; 8] = "pat_wc \0"
+    var k_pm: [u8; 9] = "pat_msr \0"
+    var k_pde: [u8; 8] = "fb_pde \0"
+    var k_mt: [u8; 14] = "fb_mtrr_type \0"
+    var k_mh: [u8; 14] = "fb_mtrr_hits \0"
+    var k_mv: [u8; 14] = "mtrr_var_cnt \0"
+    var k_me: [u8; 14] = "mtrr_enabled \0"
+    var k_md: [u8; 15] = "mtrr_def_type \0"
+    var k_fw: [u8; 14] = "fb_write_mbs \0"
+    var k_f0: [u8; 16] = "fb_write0_mbs \0\0"
+    var k_ws: [u8; 16] = "fb_mtrr_wc_st \0\0"
+    var k_wr: [u8; 16] = "fb_mtrr_wc_rs \0\0"
+    var k_wd: [u8; 17] = "fb_mtrr_wc_done \0"
+    var k_wn: [u8; 14] = "fb_mtrr_wc_n \0"
+    var k_fc: [u8; 13] = "fb_copy_mbs \0"
+    var k_rw: [u8; 15] = "ram_write_mbs \0"
+    var k_fs: [u8; 11] = "fb_stripe \0"
+    var k_fx: [u8; 10] = "fb_width \0"
+    var k_fh: [u8; 11] = "fb_height \0"
+    var k_fp: [u8; 10] = "fb_pitch \0"
+    var k_fn: [u8; 12] = "fb_flush_n \0"
+    var k_fu: [u8; 13] = "fb_flush_us \0"
+    var k_fm: [u8; 17] = "fb_flush_max_us \0"
+    var k_fo: [u8; 14] = "fb_flush_okt \0"
+    var k_pn: [u8; 9] = "phase_n \0"
+    var k_pb: [u8; 13] = "phase_bg_us \0"
+    var k_pwn: [u8; 14] = "phase_win_us \0"
+    var k_ptp: [u8; 14] = "phase_top_us \0"
+    var k_ppe: [u8; 15] = "phase_blit_us \0"
+    var k_ppx: [u8; 10] = "phase_px \0"
+    var k_pbl: [u8; 15] = "phase_blur_us \0"
+    var k_pgl: [u8; 16] = "phase_glass_us \0"
+    var k_psh: [u8; 17] = "phase_shadow_us \0"
+    var v_wc: [u8; 3] = "wc\0"
+    var v_wb: [u8; 3] = "wb\0"
+    var v_uc: [u8; 3] = "uc\0"
+    var v_un: [u8; 8] = "unknown\0"
+    var p: u64 = p0
+    p = pfproc.w_str(state, p, (&k_cm[0]) as u64)
+    let cm: u64 = gfx.fbperf(state, 0)
+    if cm == 0 {
+        p = pfproc.w_str(state, p, (&v_uc[0]) as u64)
+    } else if cm == 1 {
+        p = pfproc.w_str(state, p, (&v_wc[0]) as u64)
+    } else if cm == 2 {
+        p = pfproc.w_str(state, p, (&v_wb[0]) as u64)
+    } else {
+        p = pfproc.w_str(state, p, (&v_un[0]) as u64)
+    }
+    p = pfproc.w_nl(state, p)
+    var pw: u64 = 0
+    if ((gfx.fbperf(state, 1) >> 32) & 255) == 1 {
+        pw = 1
+    }
+    p = kvn(state, p, (&k_pw[0]) as u64, pw)
+    p = kvn(state, p, (&k_pm[0]) as u64, gfx.fbperf(state, 1))
+    p = kvn(state, p, (&k_pde[0]) as u64, gfx.fbperf(state, 2))
+    let mt: u64 = gfx.fbperf(state, 3)
+    p = kvn(state, p, (&k_mt[0]) as u64, mt & 255)
+    p = kvn(state, p, (&k_mh[0]) as u64, (mt >> 8) & 255)
+    p = kvn(state, p, (&k_mv[0]) as u64, (mt >> 16) & 255)
+    p = kvn(state, p, (&k_md[0]) as u64, (mt >> 24) & 255)
+    p = kvn(state, p, (&k_me[0]) as u64, (mt >> 32) & 1)
+    p = kvn(state, p, (&k_fw[0]) as u64, gfx.fbperf(state, 4))
+    p = kvn(state, p, (&k_f0[0]) as u64, gfx.fbperf(state, 5))
+    p = kvn(state, p, (&k_ws[0]) as u64, fbmtrr.state_of(state))
+    p = kvn(state, p, (&k_wr[0]) as u64, fbmtrr.reason_of(state))
+    p = kvn(state, p, (&k_wn[0]) as u64, fbmtrr.count_of(state))
+    p = kvn(state, p, (&k_wd[0]) as u64, fbmtrr.done_of(state))
+    p = kvn(state, p, (&k_fc[0]) as u64, gfx.fbperf(state, 6))
+    p = kvn(state, p, (&k_rw[0]) as u64, gfx.fbperf(state, 7))
+    var st: u64 = 0
+    if gfx.fb_stripe(state) {
+        st = 1
+    }
+    p = kvn(state, p, (&k_fs[0]) as u64, st)
+    p = kvn(state, p, (&k_fx[0]) as u64, gfx.width(state))
+    p = kvn(state, p, (&k_fh[0]) as u64, gfx.height(state))
+    p = kvn(state, p, (&k_fp[0]) as u64, gfx.fb_pitch(state))
+    p = kvn(state, p, (&k_fn[0]) as u64, gfx.fbperf(state, 8))
+    p = kvn(state, p, (&k_fu[0]) as u64, gfx.fbperf(state, 9))
+    p = kvn(state, p, (&k_fm[0]) as u64, gfx.fbperf(state, 10))
+    p = kvn(state, p, (&k_fo[0]) as u64, gfx.fbperf(state, 11))
+    let wm: u64 = state + kstate.WM_OFF
+    p = kvn(state, p, (&k_pn[0]) as u64, kstate.get(wm, 0x1630))
+    p = kvn(state, p, (&k_pb[0]) as u64, kstate.get(wm, 0x1600))
+    p = kvn(state, p, (&k_pwn[0]) as u64, kstate.get(wm, 0x1608))
+    p = kvn(state, p, (&k_ptp[0]) as u64, kstate.get(wm, 0x1618))
+    p = kvn(state, p, (&k_ppe[0]) as u64, kstate.get(wm, 0x1620))
+    p = kvn(state, p, (&k_ppx[0]) as u64, kstate.get(wm, 0x1628))
+    p = kvn(state, p, (&k_pbl[0]) as u64, kstate.get(wm, 0x1638))
+    p = kvn(state, p, (&k_pgl[0]) as u64, kstate.get(wm, 0x1640))
+    p = kvn(state, p, (&k_psh[0]) as u64, kstate.get(wm, 0x1648))
+    return p
+}
+
+fn hover_lines(state: u64, p0: u64) -> u64 {
+    var l_in: [u8; 17] = "frames.hover.in \0"
+    var l_push: [u8; 21] = "frames.hover.pushed \0"
+    var l_coal: [u8; 19] = "frames.hover.coal \0"
+    var l_term: [u8; 19] = "frames.hover.term \0"
+    var l_pop: [u8; 21] = "frames.hover.popped \0"
+    var l_win: [u8; 18] = "frames.hover.win \0"
+    var l_x: [u8; 16] = "frames.hover.x \0"
+    var l_y: [u8; 16] = "frames.hover.y \0"
+    var p: u64 = hover_kv(state, p0, (&l_in[0]) as u64, frameprof.H_IN)
+    p = hover_kv(state, p, (&l_push[0]) as u64, frameprof.H_PUSH)
+    p = hover_kv(state, p, (&l_coal[0]) as u64, frameprof.H_COAL)
+    p = hover_kv(state, p, (&l_term[0]) as u64, frameprof.H_TERM)
+    p = hover_kv(state, p, (&l_pop[0]) as u64, frameprof.H_POP)
+    p = hover_kv(state, p, (&l_win[0]) as u64, frameprof.H_WIN)
+    p = hover_kv(state, p, (&l_x[0]) as u64, frameprof.H_X)
+    return hover_kv(state, p, (&l_y[0]) as u64, frameprof.H_Y)
+}
+
+fn hover_kv(state: u64, p0: u64, label: u64, k: u64) -> u64 {
+    var p: u64 = pfproc.w_str(state, p0, label)
+    p = pfproc.w_num(state, p, frameprof.hover_get(k))
+    return pfproc.w_nl(state, p)
+}
+
+fn pg_kv(state: u64, p0: u64, label: u64, k: u64) -> u64 {
+    var p: u64 = pfproc.w_str(state, p0, label)
+    p = pfproc.w_num(state, p, gfx.pg_stat(k))
+    return pfproc.w_nl(state, p)
+}
+
+fn pg_lines(state: u64, p0: u64) -> u64 {
+    var l_mode: [u8; 24] = "frames.pixelguard.mode \0"
+    var l_checks: [u8; 26] = "frames.pixelguard.checks \0"
+    var l_bad: [u8; 23] = "frames.pixelguard.bad \0"
+    var l_unst: [u8; 28] = "frames.pixelguard.unstable \0"
+    var l_pend: [u8; 27] = "frames.pixelguard.pending \0"
+    var l_skip: [u8; 27] = "frames.pixelguard.skipped \0"
+    var l_px: [u8; 22] = "frames.pixelguard.px \0"
+    var l_cc: [u8; 31] = "frames.pixelguard.card_checks \0"
+    var l_cb: [u8; 28] = "frames.pixelguard.card_bad \0"
+    var l_x0: [u8; 22] = "frames.pixelguard.x0 \0"
+    var l_y0: [u8; 22] = "frames.pixelguard.y0 \0"
+    var l_x1: [u8; 22] = "frames.pixelguard.x1 \0"
+    var l_y1: [u8; 22] = "frames.pixelguard.y1 \0"
+    var l_win: [u8; 23] = "frames.pixelguard.win \0"
+    var l_us: [u8; 22] = "frames.pixelguard.us \0"
+    var l_ren: [u8; 27] = "frames.pixelguard.renders \0"
+    var p: u64 = pg_kv(state, p0, (&l_mode[0]) as u64, PG_MODE)
+    p = pg_kv(state, p, (&l_checks[0]) as u64, PG_CHECKS)
+    p = pg_kv(state, p, (&l_bad[0]) as u64, PG_BAD)
+    p = pg_kv(state, p, (&l_unst[0]) as u64, PG_UNSTABLE)
+    p = pg_kv(state, p, (&l_pend[0]) as u64, PG_PENDING)
+    p = pg_kv(state, p, (&l_skip[0]) as u64, PG_SKIPPED)
+    p = pg_kv(state, p, (&l_px[0]) as u64, PG_PX)
+    p = pg_kv(state, p, (&l_cc[0]) as u64, PG_CARD_CHECKS)
+    p = pg_kv(state, p, (&l_cb[0]) as u64, PG_CARD_BAD)
+    p = pg_kv(state, p, (&l_x0[0]) as u64, PG_X0)
+    p = pg_kv(state, p, (&l_y0[0]) as u64, PG_Y0)
+    p = pg_kv(state, p, (&l_x1[0]) as u64, PG_X1)
+    p = pg_kv(state, p, (&l_y1[0]) as u64, PG_Y1)
+    p = pg_kv(state, p, (&l_win[0]) as u64, PG_WIN)
+    p = pg_kv(state, p, (&l_us[0]) as u64, PG_US)
+    return pg_kv(state, p, (&l_ren[0]) as u64, PG_RENDERS)
+}
+
+fn make_frames(state: u64) -> u64 {
+    var l_slots: [u8; 14] = "frames.slots \0"
+    var l_total: [u8; 17] = "frames.presents \0"
+    var l_cost: [u8; 17] = "frames.note_cyc \0"
+    var l_mon: [u8; 16] = "frames.overlay \0"
+    var s_pres: [u8; 11] = ".presents \0"
+    var s_avg: [u8; 13] = ".gap_avg_us \0"
+    var s_max: [u8; 13] = ".gap_max_us \0"
+    var s_last: [u8; 14] = ".gap_last_us \0"
+    var s_pid: [u8; 6] = ".pid \0"
+    var p: u64 = pfproc.w_str(state, 0, (&l_slots[0]) as u64)
+    p = pfproc.w_num(state, p, frameprof.SLOTS)
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_total[0]) as u64)
+    p = pfproc.w_num(state, p, frameprof.total())
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_cost[0]) as u64)
+    var per: u64 = 0
+    if frameprof.total() != 0 {
+        per = frameprof.cost() / frameprof.total()
+    }
+    p = pfproc.w_num(state, p, per)
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_mon[0]) as u64)
+    p = pfproc.w_num(state, p, frameprof.mon_on())
+    p = pfproc.w_nl(state, p)
+    p = fbperf_lines(state, p)
+    p = hover_lines(state, p)
+    p = pg_lines(state, p)
+    var i: u64 = 0
+    while i < frameprof.SLOTS {
+        let r: u64 = frameprof.rec(i)
+        if r != 0 && frameprof.field(r, frameprof.F_COUNT) != 0 {
+            let gaps: u64 = frameprof.field(r, frameprof.F_GAPS)
+            var avg: u64 = 0
+            if gaps != 0 {
+                avg = frameprof.field(r, frameprof.F_SUM) / gaps
+            }
+            p = frames_line(state, p, i, (&s_pres[0]) as u64, frameprof.field(r, frameprof.F_COUNT))
+            p = frames_line(state, p, i, (&s_avg[0]) as u64, avg)
+            p = frames_line(state, p, i, (&s_max[0]) as u64, frameprof.field(r, frameprof.F_MAX))
+            p = frames_line(state, p, i, (&s_last[0]) as u64, frameprof.field(r, frameprof.F_GAP))
+            p = frames_line(state, p, i, (&s_pid[0]) as u64, frameprof.pid_of(state, r))
+        }
+        i = i + 1
+    }
+    return p
+}
+
+fn gpu_kv(state: u64, p0: u64, label: u64, v: u64) -> u64 {
+    var l_na: [u8; 3] = "-1\0"
+    var p: u64 = pfproc.w_str(state, p0, label)
+    if v == GPU_NA {
+        p = pfproc.w_str(state, p, (&l_na[0]) as u64)
+    } else {
+        p = pfproc.w_num(state, p, v)
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn make_gpu(state: u64) -> u64 {
+    var l_count: [u8; 11] = "gpu.count \0"
+    var l_kind: [u8; 11] = "gpu0.kind \0"
+    var l_name: [u8; 11] = "gpu0.name \0"
+    var l_util: [u8; 16] = "gpu0.util_pm -1\0"
+    var l_src: [u8; 15] = "gpu0.util_src \0"
+    var l_vt: [u8; 23] = "gpu0.vram_total_bytes \0"
+    var l_vu: [u8; 22] = "gpu0.vram_used_bytes \0"
+    var l_fr: [u8; 13] = "gpu0.frames \0"
+    var l_pb: [u8; 20] = "gpu0.present_bytes \0"
+    var l_hc: [u8; 16] = "gpu0.hw_cursor \0"
+    var n_fb: [u8; 3] = "fb\0"
+    var n_vio: [u8; 7] = "virtio\0"
+    var n_vmw: [u8; 7] = "vmsvga\0"
+    let b: u64 = gfx.gpu_backend(state)
+    var p: u64 = pfproc.w_str(state, 0, (&l_count[0]) as u64)
+    if b == 0 {
+        p = pfproc.w_num(state, p, 0)
+        return pfproc.w_nl(state, p)
+    }
+    p = pfproc.w_num(state, p, 1)
+    p = pfproc.w_nl(state, p)
+    var kind: u64 = 0
+    var nm: u64 = (&n_fb[0]) as u64
+    if b == 2 {
+        kind = 1
+        nm = (&n_vio[0]) as u64
+    } else if b == 3 {
+        kind = 1
+        nm = (&n_vmw[0]) as u64
+    }
+    p = gpu_kv(state, p, (&l_kind[0]) as u64, kind)
+    p = pfproc.w_str(state, p, (&l_name[0]) as u64)
+    p = pfproc.w_str(state, p, nm)
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_util[0]) as u64)
+    p = pfproc.w_nl(state, p)
+    p = gpu_kv(state, p, (&l_src[0]) as u64, 0)
+    p = gpu_kv(state, p, (&l_vt[0]) as u64, gfx.gpu_vram_total(state))
+    p = gpu_kv(state, p, (&l_vu[0]) as u64, gfx.gpu_vram_used(state))
+    p = gpu_kv(state, p, (&l_fr[0]) as u64, gfx.gpu_frames(state))
+    p = gpu_kv(state, p, (&l_pb[0]) as u64, gfx.gpu_present_bytes(state))
+    p = gpu_kv(state, p, (&l_hc[0]) as u64, gfx.gpu_hw_cursor(state))
+    return p
+}
+
+fn make_sysmon(state: u64) -> u64 {
+    var l_cap: [u8; 12] = "sysmon.cap \0"
+    var l_n: [u8; 14] = "sysmon.count \0"
+    var l_cost: [u8; 17] = "sysmon.cost_cyc \0"
+    var l_head: [u8; 67] = "# tick cpu_pct frames_free rd_blocks wr_blocks rx_octets tx_octets\0"
+    var p: u64 = pfproc.w_str(state, 0, (&l_cap[0]) as u64)
+    p = pfproc.w_num(state, p, sysmon.CAP)
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_n[0]) as u64)
+    p = pfproc.w_num(state, p, sysmon.count())
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_cost[0]) as u64)
+    p = pfproc.w_num(state, p, sysmon.cost())
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_head[0]) as u64)
+    p = pfproc.w_nl(state, p)
+    var a: u64 = 0
+    while a + 1 < sysmon.count() {
+        p = pfproc.w_num(state, p, sysmon.raw(a, sysmon.F_TICK))
+        p = pfproc.w_ch(state, p, 32)
+        p = pfproc.w_num(state, p, sysmon.busy_pct(a))
+        p = pfproc.w_ch(state, p, 32)
+        p = pfproc.w_num(state, p, sysmon.raw(a, sysmon.F_FREE))
+        p = pfproc.w_ch(state, p, 32)
+        p = pfproc.w_num(state, p, sysmon.delta(a, sysmon.F_RD))
+        p = pfproc.w_ch(state, p, 32)
+        p = pfproc.w_num(state, p, sysmon.delta(a, sysmon.F_WR))
+        p = pfproc.w_ch(state, p, 32)
+        p = pfproc.w_num(state, p, sysmon.delta(a, sysmon.F_RX))
+        p = pfproc.w_ch(state, p, 32)
+        p = pfproc.w_num(state, p, sysmon.delta(a, sysmon.F_TX))
+        p = pfproc.w_nl(state, p)
+        a = a + 1
+    }
+    return p
+}
+
+fn make_apps(state: u64) -> u64 {
+    var l_head: [u8; 42] = "# app cpu_ticks wakeups tx_bytes rx_bytes\0"
+    var p: u64 = pfproc.w_str(state, 0, (&l_head[0]) as u64)
+    p = pfproc.w_nl(state, p)
+    var s: u64 = 0
+    while s < policy.MAX_APPS {
+        if policy.slot_used(s) {
+            p = pfproc.w_str(state, p, policy.slot_name(s))
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_num(state, p, policy.acct_get(s, policy.A_CPU))
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_num(state, p, policy.acct_get(s, policy.A_WAKE))
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_num(state, p, policy.acct_get(s, policy.A_TX))
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_num(state, p, policy.acct_get(s, policy.A_RX))
+            p = pfproc.w_nl(state, p)
+        }
+        s = s + 1
+    }
+    return p
+}
+
+fn make_firmware(state: u64) -> u64 {
+    var l_bm: [u8; 12] = "boot_mode: \0"
+    var v_bios: [u8; 5] = "BIOS\0"
+    var v_uefi: [u8; 5] = "UEFI\0"
+    var l_sb: [u8; 14] = "secure_boot: \0"
+    var v_unk: [u8; 8] = "unknown\0"
+    var l_fb: [u8; 14] = "framebuffer: \0"
+    var l_bpp: [u8; 6] = " bpp=\0"
+    var p: u64 = pfproc.w_str(state, 0, (&l_bm[0]) as u64)
+    if hwdiag.firmware_bios() {
+        p = pfproc.w_str(state, p, (&v_bios[0]) as u64)
+    } else {
+        p = pfproc.w_str(state, p, (&v_uefi[0]) as u64)
+    }
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_sb[0]) as u64)
+    p = pfproc.w_str(state, p, (&v_unk[0]) as u64)
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_str(state, p, (&l_fb[0]) as u64)
+    p = pfproc.w_num(state, p, gfx.fb_cols(state))
+    p = pfproc.w_ch(state, p, 120)
+    p = pfproc.w_num(state, p, gfx.fb_rows(state))
+    p = pfproc.w_str(state, p, (&l_bpp[0]) as u64)
+    p = pfproc.w_num(state, p, gfx.fb_bpp(state))
+    return pfproc.w_nl(state, p)
+}
+
+fn make_cgroup(state: u64) -> u64 {
+    var z: [u8; 5] = "0::/\0"
+    let p: u64 = pfproc.w_str(state, 0, (&z[0]) as u64)
+    return pfproc.w_nl(state, p)
+}
+
+fn limit_line(state: u64, at: u64, label: u64, soft: u64, unit: u64) -> u64 {
+    var p: u64 = pfproc.w_str(state, at, label)
+    p = pfproc.w_num(state, p, soft)
+    p = pfproc.w_ch(state, p, 32)
+    p = pfproc.w_num(state, p, soft)
+    p = pfproc.w_ch(state, p, 32)
+    p = pfproc.w_str(state, p, unit)
+    return pfproc.w_nl(state, p)
+}
+
+fn make_mmaplog(state: u64, t: u64) -> u64 {
+    var h: [u8; 40] = "kind len rip caller1 caller2 count\0\0\0\0\0\0"
+    var lost: [u8; 7] = "lost: \0"
+    var p: u64 = pfproc.w_str(state, 0, (&h[0]) as u64)
+    p = pfproc.w_nl(state, p)
+    var taken: [u8; 256] = [0 as u8; 256]
+    var guard: u64 = 0
+    while guard < 24 && p < pfbase.BUF_MAX - 90 {
+        guard = guard + 1
+        var best: u64 = 0xFFFFFFFFFFFFFFFF
+        var best_count: u64 = 0
+        var i: u64 = 0
+        let n: u64 = mmaptrace.size()
+        while i < n {
+            if mmaptrace.field(i, mmaptrace.F_SLOT) == t {
+                let c: u64 = mmaptrace.field(i, mmaptrace.F_COUNT)
+                if c > best_count && taken[(i) as usize] == 0 as u8 {
+                    best = i
+                    best_count = c
+                }
+            }
+            i = i + 1
+        }
+        if best == 0xFFFFFFFFFFFFFFFF {
+            guard = 24
+        } else {
+            if mmaptrace.field(best, mmaptrace.F_KIND) == mmaptrace.KIND_MAP {
+                p = pfproc.w_ch(state, p, 109)
+            } else {
+                p = pfproc.w_ch(state, p, 117)
+            }
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_num(state, p, mmaptrace.field(best, mmaptrace.F_LEN))
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_hexn(state, p, mmaptrace.field(best, mmaptrace.F_RIP), 8)
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_hexn(state, p, mmaptrace.field(best, mmaptrace.F_CALLER1), 8)
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_hexn(state, p, mmaptrace.field(best, mmaptrace.F_CALLER2), 8)
+            p = pfproc.w_ch(state, p, 32)
+            p = pfproc.w_num(state, p, best_count)
+            p = pfproc.w_nl(state, p)
+            taken[(best) as usize] = 1 as u8
+        }
+    }
+    p = pfproc.w_str(state, p, (&lost[0]) as u64)
+    p = pfproc.w_num(state, p, mmaptrace.overflow())
+    p = pfproc.w_nl(state, p)
+    return p
+}
+
+fn make_limits(state: u64, t: u64) -> u64 {
+    var h: [u8; 74] = "Limit                     Soft Limit           Hard Limit           Units\0"
+    var l1: [u8; 27] = "Max open files            \0"
+    var l2: [u8; 27] = "Max processes             \0"
+    var l3: [u8; 27] = "Max stack size            \0"
+    var u1: [u8; 6] = "files\0"
+    var u2: [u8; 10] = "processes\0"
+    var u3: [u8; 6] = "bytes\0"
+    var p: u64 = pfproc.w_str(state, 0, (&h[0]) as u64)
+    p = pfproc.w_nl(state, p)
+    p = limit_line(state, p, (&l1[0]) as u64, file.MAX_FD, (&u1[0]) as u64)
+    p = limit_line(state, p, (&l2[0]) as u64, kstate.MAX_TASKS, (&u2[0]) as u64)
+    p = limit_line(state, p, (&l3[0]) as u64, 524288, (&u3[0]) as u64)
+    return p
+}
+
+fn make_uuid_random(state: u64) -> u64 {
+    let scratch: u64 = pfproc.buf(state) + 4064
+    if rand.bytes(state, scratch, 16) != 16 {
+        var z: u64 = 0
+        while z < 16 {
+            kstate.set8(scratch + z, 0 as u8)
+            z = z + 1
+        }
+    }
+    kstate.set8(scratch + 6, ((kstate.get8(scratch + 6) & 15) | 64) as u8)
+    kstate.set8(scratch + 8, ((kstate.get8(scratch + 8) & 63) | 128) as u8)
+    var p: u64 = 0
+    var i: u64 = 0
+    while i < 16 {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            p = pfproc.w_ch(state, p, 45)
+        }
+        p = pfproc.w_hexb(state, p, kstate.get8(scratch + i))
+        i = i + 1
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn make_sys(state: u64, sub: u64) -> u64 {
+    var p: u64 = 0
+    if sub == S_PIDMAX {
+        p = pfproc.w_num(state, p, 4194304)
+        return pfproc.w_nl(state, p)
+    }
+    if sub == S_OVERCOMMIT {
+        p = pfproc.w_num(state, p, 1)
+        return pfproc.w_nl(state, p)
+    }
+    if sub == S_UUID {
+        return make_uuid_random(state)
+    }
+    if sub == S_NETDEV {
+        return make_netdev(state)
+    }
+    return 0
+}
+
+fn w_col(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = pfproc.w_ch(state, at, 32)
+    return pfproc.w_num(state, p, v)
+}
+
+fn make_netdev(state: u64) -> u64 {
+    var h1: [u8; 58] = "Inter-|   Receive                            |  Transmit\n\0"
+    var h2: [u8; 118] = " face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n\0"
+    var nm: [u8; 8] = "  eth0:\0"
+    var p: u64 = pfproc.w_str(state, 0, (&h1[0]) as u64)
+    p = pfproc.w_str(state, p, (&h2[0]) as u64)
+    if !inet.ready(state) {
+        return p
+    }
+    p = pfproc.w_str(state, p, (&nm[0]) as u64)
+    p = w_col(state, p, inet.card_octets(state, 1))
+    p = w_col(state, p, inet.frames_in(state))
+    var z: u64 = 0
+    while z < 6 {
+        p = w_col(state, p, 0)
+        z = z + 1
+    }
+    p = w_col(state, p, inet.card_octets(state, 0))
+    p = w_col(state, p, inet.frames_out(state))
+    z = 0
+    while z < 6 {
+        p = w_col(state, p, 0)
+        z = z + 1
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn sys_is_dir(sub: u64) -> bool {
+    return (sub >= pfbase.S_SYS && sub <= S_RANDOM) || sub == pfbase.S_NET
+}
+
+fn copy_z(out: u64, src: u64) {
+    var i: u64 = 0
+    while kstate.get8(src + i) != 0 {
+        kstate.set8(out + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+}
+
+fn sys_name(sub: u64, out: u64) {
+    var n1: [u8; 4] = "sys\0"
+    var n2: [u8; 7] = "kernel\0"
+    var n3: [u8; 3] = "vm\0"
+    var n4: [u8; 7] = "random\0"
+    var n5: [u8; 8] = "pid_max\0"
+    var n6: [u8; 18] = "overcommit_memory\0"
+    var n7: [u8; 5] = "uuid\0"
+    var n8: [u8; 4] = "net\0"
+    var n9: [u8; 4] = "dev\0"
+    if sub == S_KERNEL {
+        copy_z(out, (&n2[0]) as u64)
+    } else if sub == S_VM {
+        copy_z(out, (&n3[0]) as u64)
+    } else if sub == S_RANDOM {
+        copy_z(out, (&n4[0]) as u64)
+    } else if sub == S_PIDMAX {
+        copy_z(out, (&n5[0]) as u64)
+    } else if sub == S_OVERCOMMIT {
+        copy_z(out, (&n6[0]) as u64)
+    } else if sub == S_UUID {
+        copy_z(out, (&n7[0]) as u64)
+    } else if sub == pfbase.S_NET {
+        copy_z(out, (&n8[0]) as u64)
+    } else if sub == S_NETDEV {
+        copy_z(out, (&n9[0]) as u64)
+    } else {
+        copy_z(out, (&n1[0]) as u64)
+    }
+}
+
+fn sys_nth(parent: u64, i: u64) -> u64 {
+    if parent == pfbase.S_SYS {
+        if i == 0 {
+            return S_KERNEL
+        }
+        if i == 1 {
+            return S_VM
+        }
+        return 0
+    }
+    if parent == S_KERNEL {
+        if i == 0 {
+            return S_PIDMAX
+        }
+        if i == 1 {
+            return S_RANDOM
+        }
+        return 0
+    }
+    if parent == S_VM && i == 0 {
+        return S_OVERCOMMIT
+    }
+    if parent == S_RANDOM && i == 0 {
+        return S_UUID
+    }
+    if parent == pfbase.S_NET && i == 0 {
+        return S_NETDEV
+    }
+    return 0
+}
+
+fn sys_child(parent: u64, name: u64) -> u64 {
+    var buf2: [u8; 24] = [0 as u8; 24]
+    var i: u64 = 0
+    while i < 4 {
+        let c: u64 = sys_nth(parent, i)
+        if c == 0 {
+            return 0
+        }
+        sys_name(c, (&buf2[0]) as u64)
+        if streq(name, (&buf2[0]) as u64) {
+            return c
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn streq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(a + i) != 0 && kstate.get8(b + i) != 0 {
+        if kstate.get8(a + i) != kstate.get8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return kstate.get8(a + i) == kstate.get8(b + i)
+}
+
+fn segment(path: u64, at: u64, out: u64, max: u64) -> u64 {
+    var i: u64 = at
+    while kstate.get8(path + i) == 47 {
+        i = i + 1
+    }
+    var n: u64 = 0
+    while kstate.get8(path + i) != 0 && kstate.get8(path + i) != 47 {
+        if n + 1 < max {
+            kstate.set8(out + n, kstate.get8(path + i) as u8)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    kstate.set8(out + n, 0 as u8)
+    return i
+}
+
+fn to_num(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    if kstate.get8(p) == 0 {
+        return 0xFFFFFFFF
+    }
+    while kstate.get8(p + i) != 0 {
+        let c: u64 = kstate.get8(p + i)
+        if c < 48 || c > 57 {
+            return 0xFFFFFFFF
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}

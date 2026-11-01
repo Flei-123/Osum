@@ -131,7 +131,7 @@ span = int(re.search(r"^const USER_SPAN: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group
 base = int(re.search(r"^const USER_DATA: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group(1), 16)
 sys.exit(0 if base + span * slots <= 0x7C000000 else 1)
 PY
-grep -q 'w_self' kernel/fs/procfs.fi \
+grep -q 'w_self' kernel/fs/procfs/pfnode.fi \
     && ok "kernel/fs/procfs.fi kennt /proc/self (der Sammler fragt danach)" \
     || bad "/proc/self fehlt"
 grep -q 'CR4_OSFXSR' kernel/arch/x86_64/fpu.fi \
